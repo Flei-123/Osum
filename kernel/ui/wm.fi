@@ -110,7 +110,9 @@ export {
     CAP_MIN, CAP_MAX, CAP_CLOSE,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
     FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
-    RADIUS_MAX, SHADOW_MAX,
+    // RUNDE ZIEH: die drei Wirkungen des Aufhebens, einzeln.
+    FM_LIFT, FM_TILT, FM_SWING,
+    RADIUS_MAX, SHADOW_MAX, LIFT_MAX, TILT_MAX, SWING_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
     // RUNDE VSYNC: die Bildgrenze, die Bewegung und die Zerreissprobe.
@@ -119,6 +121,15 @@ export {
     pxsum,
     anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
     set_noanim, close_anim, minimize_anim, open_anim,
+    set_min_rect, min_rect_w,
+    // RUNDE ZIEH: das Aufheben beim Verschieben.
+    drag_lift_on, drag_tilt_on, drag_swing_on, drag_scale,
+    lift_px, swing_dx, swing_dy,
+    swing_tick, swings, drag_px,
+    zieh_frn, zieh_frus, zieh_frmax, zieh_frueber,
+    ohne_frn, ohne_frus, ohne_frmax,
+    drag_begin_pub, drag_end_pub,
+    win_x_pub, win_y_pub,
     set_sig, sig_on, frame_no, sig_colour, plugkeys,
     set_leser, leser_tick, liest, risse, tear_top, tear_bottom, without_sig,
     riss_y0, riss_y1, riss_frame, verworfen,
@@ -720,6 +731,43 @@ const S_ANIMS: u64 = 0x1110 // begonnene Bewegungen
 const S_ANFRAMES: u64 = 0x1118 // gezeichnete Zwischenbilder
 const S_NOANIM: u64 = 0x1120 // GEGENPROBE: keine Bewegung
 const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
+// RUNDE ZIEH: DIE MESSWERTE DES AUFHEBENS. `S_SWINGS` zaehlt die
+// Ticks, in denen sich ein Nachzug geaendert hat, `S_DRAGPX` die
+// Bildpunkte, die dabei skaliert uebertragen wurden. Die zweite Zahl
+// ist die, auf die es ankommt: sie sagt, was das Ziehen KOSTET, und
+// sie ist im Server gezaehlt und nicht im Bild geraten.
+// 0x1208 und 0x1210: der freie Platz hinter S_SZAH (0x1200) und vor
+// S_FRUS (0x1300). Die erste Fassung legte sie auf 0x1130/0x1138 --
+// dort liegen S_LESER und S_LIEST der Runde VSYNC, und
+// tools/paint/scalars.py hat genau das gemeldet, bevor irgendetwas
+// gebaut war. Dafuer gibt es das Werkzeug.
+const S_SWINGS: u64 = 0x1208
+const S_DRAGPX: u64 = 0x1210
+// RUNDE ZIEH: DIE BILDZEIT WAEHREND DES ZUGES, GETRENNT GEZAEHLT.
+//
+// `bildzeit:` mittelt ueber ALLE Bilder eines Laufs -- auch ueber das
+// Hochfahren, in dem Schreibtisch, Taskleiste und drei Fenster
+// entstehen. GEMESSEN: das Maximum liegt dort bei 51 ms, und zwar
+// AUCH mit allen drei Marken auf 0 (ziehpx=0). Diese Zahl kann die
+// Ruckelfrage also gar nicht beantworten, weil sie nicht vom Ziehen
+// kommt.
+//
+// Diese vier zaehlen deshalb NUR die Bilder, in denen wirklich ein
+// Fenster aufgehoben gemalt wurde -- das ist die Frage, die Justins
+// Bedingung stellt ("das Ziehen darf nicht ruckeln").
+const S_ZFRN: u64 = 0x1218   // Bilder mit aufgehobenem Fenster
+const S_ZFRUS: u64 = 0x1220  // ihre Summe in Mikrosekunden
+const S_ZFRMAX: u64 = 0x1228 // die laengste davon
+const S_ZFRUE: u64 = 0x1230  // wie viele ueber 16,7 ms lagen
+// Wurde in DIESEM Bild ein Fenster aufgehoben gemalt?
+const S_ZFLAG: u64 = 0x1238
+// UND DAS GEGENSTUECK: die Bilder desselben Laufs OHNE aufgehobenes
+// Fenster. Erst der Vergleich BEIDER Zahlen aus DEMSELBEN Lauf sagt,
+// was das Ziehen kostet -- eine Bildzeit allein sagt nur, was die
+// Maschine gerade kostet.
+const S_OFRN: u64 = 0x1240
+const S_OFRUS: u64 = 0x1248
+const S_OFRMAX: u64 = 0x1250
 // RUNDE SCHNELLBILD: die SUMME der uebertragenen Bildpunkte, ueber
 // alle Bilder. Zusammen mit S_PRESENTS ergibt das den Anteil, den ein
 // Bild wirklich anfasst -- die Zahl, die FREMDSOFTWARE.md 4a mit
@@ -905,7 +953,7 @@ const SIG_H: u64 = 4
 // Sprung, den man sieht, ohne dass es zappelt.
 const AN_SCALE0: u64 = 850
 const SHMASK_SIDE: u64 = 40
-const FORM_SLOTS: u64 = 9
+const FORM_SLOTS: u64 = 12
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -931,11 +979,72 @@ const FM_CAPTION: u64 = 7
 // uebersprungen: der Endzustand wird in beiden Faellen erreicht.
 // Vorgabe ist MO_FAST aus wlibc (120 ms), siehe DESIGN-2.
 const FM_MOTION: u64 = 8
+// ======================================================= RUNDE ZIEH
+// DAS AUFHEBEN BEIM VERSCHIEBEN -- DREI WIRKUNGEN, DREI MARKEN.
+//
+// Justins Wunsch war ausdruecklich, dass er damit SPIELEN kann: "jede
+// der drei Wirkungen einzeln schaltbar plus Staerke regelbar". Deshalb
+// ist es NICHT eine Marke "Ziehanimation an/aus" mit drei fest
+// verdrahteten Wirkungen, sondern drei Zahlen, und jede ist zugleich
+// der Schalter UND der Regler: 0 heisst aus, sonst ist die Zahl die
+// Staerke. Eine Marke weniger, ein Zustand weniger, der auseinander
+// laufen kann -- dieselbe Regel wie bei FM_SHADOW (0 = kein Schatten).
+//
+// FM_LIFT  wie viel groesser das Fenster am Zeiger wird, in
+//          Tausendsteln ueber 1000. 50 sind also 105 Prozent -- genau
+//          die Zahl, auf der die Kostenmessung der Auftragsliste
+//          steht (1,04 ms fuer 900x650).
+// FM_TILT  wie stark der Pivot an der ANGEFASSTEN Stelle liegt statt
+//          in der Mitte, 0..100 Prozent. 100 heisst: die Stelle unter
+//          dem Zeiger bleibt exakt unter dem Zeiger, das Fenster
+//          waechst ausschliesslich von ihr weg. Das ist die
+//          Naeherung an eine Kippung, die dieser Server leisten kann
+//          -- eine echte Drehmatrix kann er nicht, und eine halbe
+//          waere ein Bild, das niemand bestellt hat.
+// FM_SWING wie stark die Traegheit nachzieht, 0..100. Sie wirkt auf
+//          den VERSATZ des Bildes gegen die wahre Fensterlage, nicht
+//          auf die Lage selbst: das Fenster steht, wo der Zeiger es
+//          hinzieht, und nur sein Bild haengt hinterher. Alles andere
+//          waere ein Fenster, das man nicht mehr zielgenau ablegen
+//          kann.
+const FM_LIFT: u64 = 9
+const FM_TILT: u64 = 10
+const FM_SWING: u64 = 11
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
 const RADIUS_MAX: u64 = 24
 const SHADOW_MAX: u64 = 16
+// ======================================================= RUNDE ZIEH
+// DIE OBERGRENZEN, UND WARUM SIE SO NIEDRIG SIND.
+//
+// LIFT_MAX = 120, also hoechstens 112 Prozent. Die Kostenmessung der
+// Auftragsliste sagt: 900x650 unskaliert kopieren kostet 0,18 ms,
+// dasselbe auf 105 Prozent skaliert 1,04 ms von 16,7 ms Budget. Die
+// Kosten wachsen mit der FLAECHE, und 112 Prozent sind 1,25 mal die
+// Flaeche von 100. Wer mehr will, bezahlt es mit dem Bild.
+//
+// TILT_MAX und SWING_MAX sind 100, weil beide Prozente sind. Bei
+// TILT = 100 bleibt der angefasste Punkt exakt stehen; mehr hat
+// keine Bedeutung. Bei SWING = 100 ist der Nachzug so gross, wie
+// diese Runde ihn ohne sichtbares Zappeln gemessen hat.
+const LIFT_MAX: u64 = 120
+const TILT_MAX: u64 = 100
+const SWING_MAX: u64 = 100
+// Wie weit das Bild beim Nachziehen HOECHSTENS hinter dem Fenster
+// zurueckbleiben darf, in Bildpunkten. Ohne diesen Deckel wird aus
+// einer schnellen Zeigerbewegung ein Fenster, dessen Bild quer ueber
+// den Schirm nachsegelt -- und aus einem Schmuck ein Fehler.
+const SWING_MAX_PX: i64 = 48
+// Die Federkonstante des Auspendelns, in Tausendsteln je Tick. Bei
+// TICK_HZ = 100 zieht sich der Versatz damit je Tick um ein Viertel
+// zusammen: nach zehn Ticks (100 ms) ist er auf 5,6 Prozent. Das ist
+// das Auspendeln, das Justin bestellt hat -- kein Schwingen um den
+// Nullpunkt, sondern ein Nachlassen. Ein echter Federschwinger
+// braeuchte eine zweite Zustandsgroesse (die Geschwindigkeit) je
+// Fenster und wuerde bei der Zeigerabtastrate dieses Servers
+// ueberschwingen, was wie ein Wackelkontakt aussieht.
+const SWING_DECAY: u64 = 250
 // RUNDE SOFTUI: die Obergrenze des Titelverlaufs, in Helligkeitsstufen.
 const GRAD_MAX: u64 = 24
 // Die drei Schaltflaechen rechts oben, in der Reihenfolge, in der sie
@@ -1126,6 +1235,48 @@ const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
 // Sicherungen.
 const W_FSXY: u64 = 0x160
 const W_FSWH: u64 = 0x168
+// ===================================================== RUNDE OBERFLAECHE
+// WOHIN DAS FENSTER BEIM MINIMIEREN FLIEGT.
+//
+// Justins Wunsch war ausdruecklich "zum EIGENEN Taskleistenknopf und
+// nicht in eine beliebige Ecke". Der Knopf gehoert der Taskleiste, also
+// dem Userland -- der Server kennt ihn nicht und soll ihn auch nicht
+// erraten. Sie sagt ihn deshalb SELBST (WM_MINRECT), und zwar fuer ein
+// FREMDES Fenster, genau wie WM_ACT.
+//
+// Steht hier nichts (W_MINW == 0), bleibt es beim bisherigen Verhalten:
+// mittig schrumpfen. Ein Ziel, das nie gesetzt wurde, darf keine
+// Bewegung in die linke obere Ecke werden.
+const W_MINXY: u64 = 0x170 // x in den unteren 32 Bit, y in den oberen
+const W_MINWH: u64 = 0x178 // Breite unten, Hoehe oben; 0 = kein Ziel
+// ======================================================= RUNDE ZIEH
+// DER NACHZUG DES BILDES BEIM VERSCHIEBEN.
+//
+// Zwei VORZEICHENBEHAFTETE Zahlen, als u64 abgelegt und beim Lesen
+// nach i64 zurueckgeholt -- `wsv`/`wg` kennen nur u64, und ein
+// eigener Speicherweg fuer zwei Zahlen waere ein zweiter Weg, der
+// falsch sein kann.
+//
+// Sie sagen, wie weit das BILD des Fensters hinter seiner wahren Lage
+// zurueckhaengt. Die wahre Lage (W_X/W_Y) folgt dem Zeiger ohne jede
+// Verzoegerung -- das ist die Bedingung, unter der man ein Fenster
+// noch zielgenau ablegen kann. Nur was man SIEHT, laeuft hinterher
+// und pendelt aus.
+//
+// W_DXLAST/W_DYLAST ist die Fensterlage beim letzten Tick. Aus der
+// Differenz zur jetzigen faellt die Geschwindigkeit, und aus ihr der
+// Nachzug -- ohne dass der Zeigerweg selbst gespeichert werden muss.
+const W_SWX: u64 = 0x180 // Nachzug x, als i64 gelesen
+const W_SWY: u64 = 0x188 // Nachzug y
+const W_DXLAST: u64 = 0x190 // Fensterlage beim letzten Tick
+const W_DYLAST: u64 = 0x198
+// Der Tick, an dem das Fenster losgelassen wurde, und 0, solange es
+// haengt. Daran erkennt `anim_tick`, dass ein Fenster zwar nicht mehr
+// gezogen wird, sein Bild aber noch auspendelt -- ohne dafuer eine
+// zweite Bewegungsart neben AN_OPEN/AN_CLOSE/AN_MIN zu erfinden. Die
+// drei sind ZUSTAENDE des Fensters (es geht auf, es geht zu, es geht
+// weg); das Auspendeln ist keiner davon, es ist ein Nachklang.
+const W_SWOFF: u64 = 0x1A0
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -1318,6 +1469,17 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     // keine Rueckmeldung mehr, sondern Warten.
     if i == FM_MOTION && w > MOTION_MAX {
         w = MOTION_MAX
+    }
+    // RUNDE ZIEH: die drei Wirkungen des Aufhebens. Jede Zahl ist
+    // Schalter und Regler zugleich, 0 = aus.
+    if i == FM_LIFT && w > LIFT_MAX {
+        w = LIFT_MAX
+    }
+    if i == FM_TILT && w > TILT_MAX {
+        w = TILT_MAX
+    }
+    if i == FM_SWING && w > SWING_MAX {
+        w = SWING_MAX
     }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
@@ -2688,6 +2850,21 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             // Symbol. Genau die Sorte Fehler, die man erst sieht, wenn
             // das sechzehnte Fenster aufgeht.
             let _cl: bool = set_app(state, i, 0)
+            // ====================================== RUNDE ZIEH
+            // UND DER NACHZUG DES VORIGEN FENSTERS AUCH NICHT.
+            //
+            // Derselbe Grund wie beim Buendelnamen eine Zeile
+            // darueber: ein wiederverwendeter Platz erbt sonst den
+            // Bildversatz des Fensters, das hier vorher lag -- und
+            // das neue Fenster erschiene beim ersten Bild um bis zu
+            // 48 Bildpunkte verschoben, ohne dass es je jemand
+            // gezogen haette. Die Sorte Fehler, die man erst beim
+            // sechzehnten Fenster sieht.
+            wsv(state, i, W_SWX, 0)
+            wsv(state, i, W_SWY, 0)
+            wsv(state, i, W_SWOFF, 0)
+            wsv(state, i, W_DXLAST, 0)
+            wsv(state, i, W_DYLAST, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
             ss(state, S_COUNT, gs(state, S_COUNT) + 1)
             // RUNDE DESKTOP: ein neues Fenster kommt an die Oberkante
@@ -2932,6 +3109,37 @@ fn minimize_anim(state: u64, i: u64) -> bool {
     return true
 }
 
+// DAS ZIEL DES MINIMIERENS SETZEN. Die Taskleiste ruft das fuer ein
+// FREMDES Fenster; die Rechtepruefung sitzt in `sysgui.fi` und ist
+// dieselbe wie bei WM_ACT (der Rufende muss selbst ein Fenster auf der
+// Leistenebene haben).
+//
+// Ein Rechteck mit Breite oder Hoehe 0 LOESCHT das Ziel -- ein Knopf,
+// der verschwindet, weil das Fenster nicht mehr in die Leiste passt,
+// soll wieder mittig schrumpfen und nicht auf einen Punkt zielen, den
+// es nicht mehr gibt.
+fn set_min_rect(state: u64, i: u64, x: i64, y: i64, w: u64, h: u64)
+    -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if w == 0 || h == 0 {
+        wsv(state, i, W_MINWH, 0)
+        return true
+    }
+    wsv(state, i, W_MINXY,
+        ((x as u64) & 0xFFFFFFFF) | (((y as u64) & 0xFFFFFFFF) << 32))
+    wsv(state, i, W_MINWH, (w & 0xFFFFFFFF) | ((h & 0xFFFFFFFF) << 32))
+    return true
+}
+
+fn min_rect_w(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_MINWH) & 0xFFFFFFFF
+}
+
 fn close_top(state: u64) -> u64 {
     let i: u64 = top_visible(state)
     if i >= MAX_WIN {
@@ -3133,6 +3341,33 @@ fn set_hidden(state: u64, i: u64, h: bool) {
             return
         }
         wsv(state, i, W_FLAGS, f | F_HIDDEN)
+        // RUNDE OBERFLAECHE: EINE LAUFENDE BEWEGUNG ENDET HIER.
+        //
+        // Das Startmenue legt sein Fenster an und verbirgt es sofort
+        // wieder. Mit der Oeffnungsbewegung aus WM_CREATE lief danach
+        // eine Bewegung auf einem Fenster, das niemand sieht -- und
+        // beim naechsten Aufklappen stand `W_ANK` noch, also malte
+        // `paint_win_anim` das Menue geschrumpft und durchscheinend
+        // statt fertig. Gemessen als `fl=19` dort, wo `fl=18` stehen
+        // muss (tools/logind, Abschnitt 5).
+        //
+        // `W_ANP` bleibt auf 1000: wer nicht mehr in Bewegung ist,
+        // ist FERTIG und nicht auf halbem Weg.
+        wsv(state, i, W_ANK, 0)
+        wsv(state, i, W_ANP, 1000)
+        // ====================================== RUNDE ZIEH
+        // UND DER NACHZUG ENDET HIER EBENSO.
+        //
+        // Genau dieselbe Lehre, die der Kommentar darueber aus der
+        // vorigen Runde zieht: was ein Fenster aus dem Bild nimmt,
+        // muss JEDE laufende Bewegung daran beenden -- nicht nur die,
+        // die es gestartet hat. Bliebe der Versatz stehen, kaeme das
+        // Fenster beim naechsten Zeigen um bis zu 48 Bildpunkte
+        // verschoben zurueck, und `swing_tick` wuerde ihn erst ueber
+        // mehrere Bilder wieder einfangen.
+        wsv(state, i, W_SWX, 0)
+        wsv(state, i, W_SWY, 0)
+        wsv(state, i, W_SWOFF, 0)
         ss(state, S_HIDES, gs(state, S_HIDES) + 1)
         // ADDENDUM TASKBAR: a window nobody can see reserves nothing.
         if wg(state, i, W_STRUT) != 0 {
@@ -3157,6 +3392,10 @@ fn set_hidden(state: u64, i: u64, h: bool) {
             return
         }
         wsv(state, i, W_FLAGS, f & ~F_HIDDEN)
+        // Und dasselbe beim Zeigen: ein Fenster, das aus der Leiste
+        // zurueckkommt, steht sofort ganz da.
+        wsv(state, i, W_ANK, 0)
+        wsv(state, i, W_ANP, 1000)
         ss(state, S_SHOWS, gs(state, S_SHOWS) + 1)
         if wg(state, i, W_STRUT) != 0 {
             recalc_work(state)
@@ -3807,10 +4046,26 @@ fn move_win(state: u64, i: u64, x: i64, y: i64) {
     if !valid(state, i) {
         return
     }
-    damage_win(state, i) // die alte Stelle wird wiederhergestellt
+    // RUNDE ZIEH: WER GROESSER MALT, MUSS GROESSER SCHMUTZIG MELDEN.
+    //
+    // Ein aufgehobenes Fenster deckt mehr Flaeche als seine
+    // Fenstertafel angibt (Skalierung plus Nachzug). Meldete diese
+    // Stelle weiter nur `damage_win`, bliebe beim Ziehen ein Rand des
+    // vorigen Bildes stehen -- ein Schmierstreifen, der aussieht wie
+    // ein Fehler im Zeichnen und keiner ist.
+    let hebt: bool = drag_paint_on(state, i)
+    if hebt {
+        damage_win_lift(state, i)
+    } else {
+        damage_win(state, i) // die alte Stelle wird wiederhergestellt
+    }
     wsv(state, i, W_X, x as u64)
     wsv(state, i, W_Y, y as u64)
-    damage_win(state, i) // und die neue gemalt
+    if hebt {
+        damage_win_lift(state, i)
+    } else {
+        damage_win(state, i) // und die neue gemalt
+    }
 }
 
 fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
@@ -4450,6 +4705,45 @@ fn anim_ticks(state: u64) -> u64 {
     return gs(state, S_TICKS)
 }
 
+// RUNDE ZIEH: die beiden Zahlen des Aufhebens.
+fn swings(state: u64) -> u64 {
+    return gs(state, S_SWINGS)
+}
+
+fn drag_px(state: u64) -> u64 {
+    return gs(state, S_DRAGPX)
+}
+
+// RUNDE ZIEH: die Bildzeit, NUR fuer Bilder mit aufgehobenem Fenster.
+fn zieh_frn(state: u64) -> u64 {
+    return gs(state, S_ZFRN)
+}
+
+fn zieh_frus(state: u64) -> u64 {
+    return gs(state, S_ZFRUS)
+}
+
+fn zieh_frmax(state: u64) -> u64 {
+    return gs(state, S_ZFRMAX)
+}
+
+fn zieh_frueber(state: u64) -> u64 {
+    return gs(state, S_ZFRUE)
+}
+
+// Die Grundlast: Bilder desselben Laufs OHNE aufgehobenes Fenster.
+fn ohne_frn(state: u64) -> u64 {
+    return gs(state, S_OFRN)
+}
+
+fn ohne_frus(state: u64) -> u64 {
+    return gs(state, S_OFRUS)
+}
+
+fn ohne_frmax(state: u64) -> u64 {
+    return gs(state, S_OFRMAX)
+}
+
 fn set_noanim(state: u64, on: bool) {
     ss(state, S_NOANIM, 0)
     if on {
@@ -5031,6 +5325,31 @@ fn compose(state: u64) -> u64 {
             if us > 16000 {
                 ss(state, S_FRUEBER, gs(state, S_FRUEBER) + 1)
             }
+            // RUNDE ZIEH: dasselbe Bild noch einmal, aber nur,
+            // wenn in ihm ein Fenster AUFGEHOBEN gemalt wurde.
+            // `zieh_frame` wird von `compose` gesetzt und hier
+            // wieder geloescht -- so zaehlt genau das Bild, das den
+            // teuren Weg gegangen ist, und keines daneben.
+            if gs(state, S_ZFLAG) == 0 {
+                // Ein Bild ohne aufgehobenes Fenster -- die
+                // Grundlast derselben Maschine im selben Lauf.
+                ss(state, S_OFRN, gs(state, S_OFRN) + 1)
+                ss(state, S_OFRUS, gs(state, S_OFRUS) + us)
+                if us > gs(state, S_OFRMAX) {
+                    ss(state, S_OFRMAX, us)
+                }
+            }
+            if gs(state, S_ZFLAG) != 0 {
+                ss(state, S_ZFLAG, 0)
+                ss(state, S_ZFRN, gs(state, S_ZFRN) + 1)
+                ss(state, S_ZFRUS, gs(state, S_ZFRUS) + us)
+                if us > gs(state, S_ZFRMAX) {
+                    ss(state, S_ZFRMAX, us)
+                }
+                if us > 16700 {
+                    ss(state, S_ZFRUE, gs(state, S_ZFRUE) + 1)
+                }
+            }
             // Das Fach: die Verdoppelung, in der diese Zeit liegt.
             var fach: u64 = 0
             var g: u64 = 1000
@@ -5150,6 +5469,404 @@ fn imin(a: i64, b: i64) -> i64 {
 // hat an jeder Kante eine andere Strichstaerke und sieht nach Fehler
 // aus. Gemalt wird die Flaeche, mittig um denselben Punkt, um den auch
 // das fertige Fenster steht.
+// ====================================================== RUNDE ZIEH
+//
+// DAS AUFHEBEN BEIM VERSCHIEBEN -- DREI WIRKUNGEN, EINZELN SCHALTBAR.
+//
+// Justins Wunsch, woertlich: beim Ziehen eines Fensters wird es leicht
+// groesser ("als wuerde man es aufheben"), der Pivot liegt an der
+// angefassten Stelle statt in der Mitte, und es schwingt mit Traegheit
+// um diesen Punkt und pendelt beim Absetzen aus -- nur beim
+// Verschieben, nicht sonst.
+//
+// WAS DIESER SERVER NICHT KANN, UND WARUM DAS HIER SO STEHT. Eine
+// echte Kipp-Transformation braucht je Zielbildpunkt eine Ruecktrans-
+// formation mit Sinus und Kosinus. Dieser Kernel rettet in `syscall`
+// kein SSE (siehe `ease_out`), rechnet also ganzzahlig, und die
+// Abtastung in `paint_win_anim` ist eine Nachbarabtastung ueber
+// Zeilen. Eine gedrehte Flaeche waere damit eine Treppe aus
+// Rechtecken. Die Vorrunde hat das schon festgestellt, und die
+// Naeherung, die stattdessen hier steht, ist:
+//
+//   VERSATZ + SKALIERUNG UM EINEN VERSCHOBENEN PIVOT.
+//
+// Das Fenster waechst um FM_LIFT, und der Punkt, der dabei STEHEN
+// BLEIBT, ist nicht die Mitte, sondern (bei FM_TILT = 100) die Stelle
+// unter dem Zeiger. Genau das ist die Wahrnehmung "ich habe es an
+// dieser Ecke angefasst": fasst man unten rechts an, waechst das
+// Fenster nach oben links weg. Der Nachzug (FM_SWING) legt einen
+// Versatz gegen die Bewegungsrichtung darueber, und beim Loslassen
+// laeuft dieser Versatz gegen null -- das ist das Auspendeln.
+//
+// DIE WAHRE LAGE DES FENSTERS BLEIBT UNBERUEHRT. W_X/W_Y folgen dem
+// Zeiger ohne Verzoegerung; nur das BILD haengt hinterher. Ein
+// Fenster, dessen Ablegepunkt von einer Feder abhaengt, ist ein
+// Fenster, das man nicht mehr trifft -- und `drag_hover` (die
+// Andockvorschau) rechnet ohnehin mit der wahren Lage.
+
+// Ist das Fenster gerade dasjenige, das am Zeiger haengt?
+fn is_dragged(state: u64, i: u64) -> bool {
+    return gs(state, S_DRAG) == i + 1
+}
+
+// DIE VORFUEHRUNG FASST AN UND LAESST LOS -- ueber dieselben zwei
+// Wege wie der Zeiger.
+//
+// Sie stehen hier und nicht in `kgui.fi`, weil `S_DRAG`, `S_DRAGX`
+// und `S_DRAGY` diesem Modul gehoeren. Ein zweiter Ort, der sie
+// setzt, waere ein zweiter Ort, an dem der Zustand des Ziehens
+// falsch sein kann -- und genau daran ist die Oeffnungsbewegung des
+// Startmenues in der vorigen Runde gescheitert.
+// Die wahre Lage, oeffentlich -- fuer die Vorfuehrung, die sie in
+// die serielle Leitung schreibt. `win_x`/`win_y` sind modulintern.
+fn win_x_pub(state: u64, i: u64) -> i64 {
+    return win_x(state, i)
+}
+
+fn win_y_pub(state: u64, i: u64) -> i64 {
+    return win_y(state, i)
+}
+
+fn drag_begin_pub(state: u64, i: u64, gx: u64, gy: u64) {
+    if !valid(state, i) {
+        return
+    }
+    drag_begin(state, i)
+    ss(state, S_DRAG, i + 1)
+    ss(state, S_DRAGX, gx)
+    ss(state, S_DRAGY, gy)
+}
+
+fn drag_end_pub(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    ss(state, S_DRAG, 0)
+    drag_end(state, i, win_x(state, i), win_y(state, i))
+}
+
+// Die drei Schalter. Jeder ist zugleich seine Staerke; 0 heisst aus.
+// Sie fragen ZUERST `anim_off`: wer "Animationen reduzieren" gesetzt
+// hat, hat damit auch das hier gemeint, und zwei Stellen, an denen man
+// Bewegung abschaltet, sind eine zu viel.
+fn drag_lift_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return form(state, FM_LIFT)
+}
+
+fn drag_tilt_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return form(state, FM_TILT)
+}
+
+fn drag_swing_on(state: u64) -> u64 {
+    if anim_off(state) {
+        return 0
+    }
+    return form(state, FM_SWING)
+}
+
+// Die Skalierung, mit der ein gezogenes Fenster gemalt wird, in
+// Tausendsteln. 1000 heisst unveraendert -- und dann malt der
+// gewoehnliche Weg, ohne einen Bildpunkt Mehrkosten.
+fn drag_scale(state: u64, i: u64) -> u64 {
+    if !is_dragged(state, i) {
+        return 1000
+    }
+    return 1000 + drag_lift_on(state)
+}
+
+// Wie viele Bildpunkte das Fenster durch das Aufheben breiter wird.
+// Nur fuer die Messung und fuer `damage`: wer groesser malt, muss auch
+// groesser schmutzig melden, sonst bleibt ein Rand stehen.
+fn lift_px(state: u64, i: u64) -> i64 {
+    let sk: u64 = drag_scale(state, i)
+    if sk <= 1000 {
+        return 0
+    }
+    let w: i64 = outer_w(state, i) as i64
+    let h: i64 = outer_h(state, i) as i64
+    let dw: i64 = w * (sk - 1000) as i64 / 1000
+    let dh: i64 = h * (sk - 1000) as i64 / 1000
+    return imax(dw, dh) + 1
+}
+
+// Der Nachzug, vorzeichenbehaftet gelesen.
+fn swing_dx(state: u64, i: u64) -> i64 {
+    return wg(state, i, W_SWX) as i64
+}
+
+fn swing_dy(state: u64, i: u64) -> i64 {
+    return wg(state, i, W_SWY) as i64
+}
+
+// EIN TICK DES NACHZUGS, und er gehoert in denselben Zeitgeber wie
+// `anim_tick` -- aus dem Grund, den Runde VSYNC schon aufgeschrieben
+// hat: eine Bewegung, die im Zeichnen tickt, laeuft auf einer
+// langsamen Maschine langsamer.
+//
+// Er macht zwei Dinge. Haengt das Fenster am Zeiger, waechst der
+// Versatz mit der Geschwindigkeit (die Differenz der Lage seit dem
+// letzten Tick) -- das ist die Traegheit. Haengt es nicht mehr, faellt
+// der Versatz je Tick um SWING_DECAY Tausendstel gegen null -- das ist
+// das Auspendeln. Beides ist am Deckel SWING_MAX_PX abgeschnitten.
+// DAS ABKLINGEN, UND WARUM ES MINDESTENS EINEN BILDPUNKT NIMMT.
+//
+// `v - v * 250 / 1000` ist ganzzahlig und rundet zur Null: bei v = -3
+// ist -3 * 250 / 1000 = 0, und dann bleibt -3 stehen, Tick fuer Tick.
+// GEMESSEN an einem Fenster, das am Haken stillstand: von t=105 bis
+// t=190 durchgehend sx=-3. Das Bild stand dauerhaft drei Bildpunkte
+// neben dem Fenster -- das ist keine Traegheit mehr, sondern ein
+// Versatz, der nie zurueckkommt.
+//
+// Also: ist der Abzug null, aber der Wert nicht, wird EIN Bildpunkt
+// abgezogen. Damit erreicht jeder Wert die Null in endlich vielen
+// Ticks, und das Auspendeln hat ein Ende statt eines Restes.
+fn abklingen(v: i64) -> i64 {
+    if v == 0 {
+        return 0
+    }
+    let ab: i64 = v * SWING_DECAY as i64 / 1000
+    if ab == 0 {
+        if v > 0 {
+            return v - 1
+        }
+        return v + 1
+    }
+    return v - ab
+}
+
+fn swing_tick_win(state: u64, i: u64) -> bool {
+    let st: u64 = drag_swing_on(state)
+    let x: i64 = win_x(state, i)
+    let y: i64 = win_y(state, i)
+    var sx: i64 = swing_dx(state, i)
+    var sy: i64 = swing_dy(state, i)
+    if st == 0 {
+        // Abgeschaltet: ein etwa stehengebliebener Versatz wird EINMAL
+        // geraeumt, damit kein Fenster mit schiefem Bild zurueckbleibt.
+        wsv(state, i, W_DXLAST, x as u64)
+        wsv(state, i, W_DYLAST, y as u64)
+        if sx == 0 && sy == 0 {
+            return false
+        }
+        wsv(state, i, W_SWX, 0)
+        wsv(state, i, W_SWY, 0)
+        wsv(state, i, W_SWOFF, 0)
+        damage_win_lift(state, i)
+        return true
+    }
+    if is_dragged(state, i) {
+        // DIE GESCHWINDIGKEIT FAELLT AUS DER LAGE, nicht aus dem
+        // Zeigerweg: `move_win` kann zwischen zwei Ticks mehrmals
+        // gelaufen sein, und was das Bild nachziehen soll, ist die
+        // Strecke, die das Fenster in DIESER Zeit zurueckgelegt hat.
+        let vx: i64 = x - wg(state, i, W_DXLAST) as i64
+        let vy: i64 = y - wg(state, i, W_DYLAST) as i64
+        // Der Versatz zeigt GEGEN die Bewegung -- das Bild bleibt
+        // zurueck. `st` ist die Staerke in Prozent.
+        sx = sx - vx * st as i64 / 100
+        sy = sy - vy * st as i64 / 100
+        // und er laesst zugleich nach, sonst summiert sich ein langer
+        // Zug zu einem Bild, das gar nicht mehr zurueckfindet.
+        sx = abklingen(sx)
+        sy = abklingen(sy)
+        // ================================== GEMESSEN UND BEHOBEN
+        // DER VERSATZ BLIEB BEI -3 STEHEN, SOLANGE DAS FENSTER HING.
+        //
+        // Ganzzahlig ist -3 * 250 / 1000 = 0 (Firn rundet zur Null),
+        // also sx = -3 - 0 = -3, Tick fuer Tick. Gemessen an einem
+        // Fenster, das am Haken STILLSTAND: t=105 bis t=190 alle
+        // sx=-3. Das Bild stand damit dauerhaft drei Bildpunkte
+        // neben dem Fenster -- keine Traegheit mehr, nur noch ein
+        // Versatz, der nie zurueckkommt.
+        //
+        // Dieselbe Wache wie im Zweig "losgelassen", und aus
+        // demselben Grund: unter zwei Bildpunkten ist es kein
+        // Nachzug mehr, sondern eine Zahl, die nie null wird.
+        // Sie steht HIER und nicht nur dort, weil ein Fenster auch
+        // am Haken stillstehen kann -- und dann ist der Nachzug
+        // fertig, obwohl noch niemand losgelassen hat.
+        if vx == 0 && sx < 2 && sx > -2 {
+            sx = 0
+        }
+        if vy == 0 && sy < 2 && sy > -2 {
+            sy = 0
+        }
+    } else {
+        if wg(state, i, W_SWOFF) == 0 && sx == 0 && sy == 0 {
+            wsv(state, i, W_DXLAST, x as u64)
+            wsv(state, i, W_DYLAST, y as u64)
+            return false
+        }
+        sx = abklingen(sx)
+        sy = abklingen(sy)
+        // Unter einem Bildpunkt ist es kein Nachzug mehr, sondern eine
+        // Zahl, die nie null wird: ganzzahlig geteilt bleibt 1 bei 1.
+        if sx < 2 && sx > -2 {
+            sx = 0
+        }
+        if sy < 2 && sy > -2 {
+            sy = 0
+        }
+        if sx == 0 && sy == 0 {
+            wsv(state, i, W_SWOFF, 0)
+        }
+    }
+    sx = imin(imax(sx, 0 - SWING_MAX_PX), SWING_MAX_PX)
+    sy = imin(imax(sy, 0 - SWING_MAX_PX), SWING_MAX_PX)
+    let alt_x: i64 = swing_dx(state, i)
+    let alt_y: i64 = swing_dy(state, i)
+    wsv(state, i, W_SWX, sx as u64)
+    wsv(state, i, W_SWY, sy as u64)
+    wsv(state, i, W_DXLAST, x as u64)
+    wsv(state, i, W_DYLAST, y as u64)
+    if sx != alt_x || sy != alt_y {
+        damage_win_lift(state, i)
+        return true
+    }
+    return false
+}
+
+// Der Nachzug aller Fenster. Gibt zurueck, wie viele noch pendeln --
+// dieselbe Auskunft wie `anim_tick`, damit der Ring weiss, ob er
+// weiterzeichnen muss.
+fn swing_tick(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var offen: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if valid(state, i) {
+            if swing_tick_win(state, i) {
+                offen = offen + 1
+                ss(state, S_SWINGS, gs(state, S_SWINGS) + 1)
+            }
+        }
+        i = i + 1
+    }
+    return offen
+}
+
+// Ein gezogenes Fenster ist GROESSER als seine Fenstertafel sagt und
+// steht um den Nachzug versetzt. Wer es schmutzig meldet, muss beides
+// mitmelden -- sonst bleibt beim naechsten Bild ein Rand des alten
+// Bildes stehen.
+fn damage_win_lift(state: u64, i: u64) {
+    let extra: i64 = lift_px(state, i) + SWING_MAX_PX
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    damage(state, wx - extra, wy - extra, wx + ow + extra, wy + oh + extra)
+}
+
+// Wird dieses Fenster gerade AUFGEHOBEN gemalt? Nur dann laeuft der
+// teure Weg. Die Frage ist absichtlich eine einzige Funktion: sie
+// steht in `paint_win` (welcher Weg) und in der Messung (was hat es
+// gekostet), und zwei Fassungen davon waeren zwei Antworten.
+fn drag_paint_on(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if is_dragged(state, i) {
+        return drag_lift_on(state) != 0 || drag_swing_on(state) != 0
+    }
+    // Losgelassen, aber noch am Auspendeln.
+    return swing_dx(state, i) != 0 || swing_dy(state, i) != 0
+}
+
+// DAS GEZOGENE FENSTER MALEN -- Versatz und Skalierung um einen
+// verschobenen Pivot.
+//
+// Der Pivot: bei FM_TILT = 0 die Mitte (das Fenster waechst
+// gleichmaessig nach allen Seiten), bei 100 die angefasste Stelle. Sie
+// steht in S_DRAGX/S_DRAGY, gesetzt beim Anfassen, relativ zur
+// AUSSENecke des Fensters -- genau die Zahl, die dieser Rechenweg
+// braucht, und sie liegt schon da.
+fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let bw: i64 = wg(state, i, W_W) as i64
+    let bh: i64 = wg(state, i, W_H) as i64
+    if bw <= 0 || bh <= 0 {
+        return
+    }
+    let sk: u64 = drag_scale(state, i)
+    var nw: i64 = bw * sk as i64 / 1000
+    var nh: i64 = bh * sk as i64 / 1000
+    if nw <= 0 || nh <= 0 {
+        return
+    }
+    // Die Malflaeche, wie sie ohne alles laege.
+    let ix: i64 = win_x(state, i) + border(state) as i64
+    let iy: i64 = win_y(state, i) + title_h(state) as i64
+    // DER PIVOT. `ax`/`ay` ist die angefasste Stelle INNERHALB der
+    // Malflaeche; `tl` mischt zwischen Mitte (0) und ihr (100).
+    let tl: i64 = drag_tilt_on(state) as i64
+    var ax: i64 = bw / 2
+    var ay: i64 = bh / 2
+    if is_dragged(state, i) {
+        let gx: i64 = gs(state, S_DRAGX) as i64 - border(state) as i64
+        let gy: i64 = gs(state, S_DRAGY) as i64 - title_h(state) as i64
+        // Ausserhalb der Flaeche angefasst (Titelleiste, Rahmen) wird
+        // auf sie geklemmt: ein Pivot ausserhalb des Bildes laesst die
+        // Flaeche wegdriften statt wachsen.
+        let px: i64 = imin(imax(gx, 0), bw)
+        let py: i64 = imin(imax(gy, 0), bh)
+        ax = bw / 2 + (px - bw / 2) * tl / 100
+        ay = bh / 2 + (py - bh / 2) * tl / 100
+    }
+    // Um den Pivot skalieren heisst: der Punkt `a` liegt nachher dort,
+    // wo er vorher lag. Alles andere waechst von ihm weg.
+    var ox: i64 = ix + ax - ax * nw / bw
+    var oy: i64 = iy + ay - ay * nh / bh
+    // und der Nachzug legt sich darueber.
+    ox = ox + swing_dx(state, i)
+    oy = oy + swing_dy(state, i)
+    let ax0: i64 = imax(ox, cx0)
+    let ay0: i64 = imax(oy, cy0)
+    let ax1: i64 = imin(ox + nw, cx1)
+    let ay1: i64 = imin(oy + nh, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let buf: u64 = wg(state, i, W_BUF)
+    let stride: u64 = wg(state, i, W_W)
+    // KEINE DECKUNGSMISCHUNG. Ein gezogenes Fenster ist undurchsichtig
+    // -- es wird aufgehoben, nicht eingeblendet --, und `pixel` ohne
+    // Mischung ist der Weg, auf dem die 0,18 ms der Kostenmessung
+    // gemessen sind.
+    var y: i64 = ay0
+    while y < ay1 {
+        let sy: i64 = (y - oy) * bh / nh
+        if sy >= 0 && sy < bh {
+            var x: i64 = ax0
+            while x < ax1 {
+                let sx: i64 = (x - ox) * bw / nw
+                if sx >= 0 && sx < bw {
+                    let zeile: u64 = (sy as u64) *% stride *% 4
+                    let q: u64 = buf +% zeile +% (sx as u64) *% 4
+                    let c: u64 = __mmio_read32(q as *mut u32) as u64
+                    fb.pixel(state, x as u64, y as u64, c & RGB24)
+                }
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+    wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
+    wsv(state, i, W_PX,
+        wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+    ss(state, S_DRAGPX,
+        gs(state, S_DRAGPX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+    ss(state, S_ZFLAG, 1)
+}
+
 fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     cy1: i64) {
     let p: u64 = anim_mix(state, i)
@@ -5167,15 +5884,51 @@ fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         return
     }
     // Die verkleinerte Flaeche, mittig zur gewachsenen.
-    let nw: i64 = bw * sk as i64 / 1000
-    let nh: i64 = bh * sk as i64 / 1000
+    var nw: i64 = bw * sk as i64 / 1000
+    var nh: i64 = bh * sk as i64 / 1000
     if nw <= 0 || nh <= 0 {
         return
     }
     let ix: i64 = win_x(state, i) + border(state) as i64
     let iy: i64 = win_y(state, i) + title_h(state) as i64
-    let ox: i64 = ix + (bw - nw) / 2
-    let oy: i64 = iy + (bh - nh) / 2
+    var ox: i64 = ix + (bw - nw) / 2
+    var oy: i64 = iy + (bh - nh) / 2
+    // ================================================ RUNDE OBERFLAECHE
+    // BEIM MINIMIEREN FLIEGT ES ZUM EIGENEN LEISTENKNOPF.
+    //
+    // Nur beim Minimieren, nur wenn die Taskleiste ein Ziel gesagt hat
+    // (`set_min_rect`), und aus DEMSELBEN `p` wie Groesse und Deckung.
+    // `p` laeuft beim Minimieren von 1000 nach 0 (anim_mix spiegelt die
+    // Kurve), also ist 1000-p der zurueckgelegte Weg: bei p=1000 steht
+    // das Fenster noch an seinem Platz, bei p=0 deckt es den Knopf.
+    //
+    // Die Flaeche wird dabei bis auf die Knopfgroesse gestaucht statt
+    // nur auf AN_SCALE0 -- ein Fenster, das in Originalgroesse hinter
+    // die Leiste faehrt, sieht aus wie ein Fehler und nicht wie ein
+    // Ablegen.
+    if wg(state, i, W_ANK) == AN_MIN && min_rect_w(state, i) != 0 {
+        let mxy: u64 = wg(state, i, W_MINXY)
+        let mwh: u64 = wg(state, i, W_MINWH)
+        let tx: i64 = (mxy & 0xFFFFFFFF) as i64
+        let ty: i64 = ((mxy >> 32) & 0xFFFFFFFF) as i64
+        let tw: i64 = (mwh & 0xFFFFFFFF) as i64
+        let th: i64 = ((mwh >> 32) & 0xFFFFFFFF) as i64
+        let weg: i64 = (1000 - p) as i64
+        // Groesse: von der vollen Flaeche auf die des Knopfes.
+        nw = bw + (tw - bw) * weg / 1000
+        nh = bh + (th - bh) * weg / 1000
+        if nw <= 0 || nh <= 0 {
+            return
+        }
+        // Lage: von der Fensterecke auf die Knopfecke, beide mittig
+        // zur jeweiligen Flaeche gerechnet.
+        let vx: i64 = ix + (bw - nw) / 2
+        let vy: i64 = iy + (bh - nh) / 2
+        let zx: i64 = tx + (tw - nw) / 2
+        let zy: i64 = ty + (th - nh) / 2
+        ox = vx + (zx - vx) * weg / 1000
+        oy = vy + (zy - vy) * weg / 1000
+    }
     let ax0: i64 = imax(ox, cx0)
     let ay0: i64 = imax(oy, cy0)
     let ax1: i64 = imin(ox + nw, cx1)
@@ -5228,6 +5981,16 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // der gewoehnliche Weg entfaellt vollstaendig.
     if wg(state, i, W_ANK) != 0 {
         paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
+        return
+    }
+    // RUNDE ZIEH: wird es gerade aufgehoben (oder pendelt es noch
+    // aus), gilt derselbe Vorrang -- skaliert, versetzt, ohne Schmuck.
+    // Der Schmuck faellt weg, weil ein mitskalierter Rahmen bei 105
+    // Prozent eine unscharfe Kante ist; das Fenster haengt am Zeiger,
+    // seine Titelleiste braucht in dieser halben Sekunde niemand.
+    if drag_paint_on(state, i) {
+        paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
         return
     }
@@ -7220,12 +7983,20 @@ fn on_mouse(state: u64) {
                 if cn < CAP_N {
                     ss(state, S_CAPHITS, gs(state, S_CAPHITS) + 1)
                     if cn == CAP_CLOSE {
-                        ev_push(state, i, E_CLOSE, 0, 0, 0)
-                        destroy(state, i)
+                        // RUNDE OBERFLAECHE: UEBER DIE BEWEGUNG.
+                        // `close_anim` pusht E_CLOSE selbst und ruft
+                        // `destroy` erst, wenn die Bewegung durch ist
+                        // -- ist sie abgeschaltet, sofort. Hier stand
+                        // `destroy` direkt, und genau deshalb war
+                        // AN_WIN_CLOSE seit jeher erklaert und nie
+                        // gesehen.
+                        let _ca: bool = close_anim(state, i)
                         return
                     }
                     if cn == CAP_MIN {
-                        set_hidden(state, i, true)
+                        // Dasselbe fuer das Minimieren: am Ende steht
+                        // `set_hidden`, aber erst nach der Bewegung.
+                        let _ma: bool = minimize_anim(state, i)
                         return
                     }
                     let auf: bool =
@@ -8996,6 +9767,18 @@ fn leaf_at(state: u64, x: i64, y: i64) -> u64 {
 }
 
 fn drag_begin(state: u64, i: u64) {
+    // RUNDE ZIEH: das Fenster wird von jetzt an GROESSER gemalt. Der
+    // Nachzug faengt bei null an -- er soll aus der Bewegung
+    // entstehen und nicht aus dem Anfassen --, und die Lage des
+    // letzten Ticks ist die jetzige, sonst liest der erste Tick eine
+    // Geschwindigkeit, die es nie gab (das Fenster stand vorher
+    // irgendwo, und die Differenz waere der ganze Weg dorthin).
+    wsv(state, i, W_SWX, 0)
+    wsv(state, i, W_SWY, 0)
+    wsv(state, i, W_DXLAST, win_x(state, i) as u64)
+    wsv(state, i, W_DYLAST, win_y(state, i) as u64)
+    wsv(state, i, W_SWOFF, 0)
+    damage_win_lift(state, i)
     ss(state, S_DRAGT, 0)
     ss(state, S_DROPN, 0)
     ss(state, S_DROPE, 0)
@@ -9116,6 +9899,13 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
 }
 
 fn drag_end(state: u64, i: u64, x: i64, y: i64) {
+    // RUNDE ZIEH: LOSGELASSEN. Das Fenster steht ab sofort wieder in
+    // seiner wahren Groesse; was noch laeuft, ist der Nachzug, der
+    // gegen null pendelt (`swing_tick`, Zweig "nicht mehr gezogen").
+    // `W_SWOFF` haelt fest, dass da noch etwas auszupendeln ist --
+    // auch wenn der Versatz in diesem Augenblick zufaellig 0 ist.
+    wsv(state, i, W_SWOFF, kstate.get(state, kstate.TICKS) + 1)
+    damage_win_lift(state, i)
     preview_damage(state)
     ss(state, S_PVON, 0)
     if gs(state, S_TILE) == 0 {

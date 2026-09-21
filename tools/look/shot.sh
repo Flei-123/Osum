@@ -39,6 +39,8 @@
 #                       WINDOW SERVER path (`wig wigspeicher`), which
 #                       the desktop path (`desk`) does not run. Empty
 #                       by default -- nothing changes for anyone else.
+#     shots="a b c"    take several pictures during the hold, in
+#                       these second-gaps (round ZIEH). Empty = one.
 #     accel=tcg|kvm     which QEMU accelerator (default tcg -- KVM is
 #                       faster, and round UMLAUT2 takes its pictures
 #                       with it, but a host without /dev/kvm must still
@@ -66,6 +68,16 @@ icons=yes
 nvicons=yes
 keep=no
 extra=""
+# RUNDE ZIEH: MEHRERE BILDER WAEHREND DES HALTENS.
+#
+# `shots="0.35 0.35 0.25 0.45"` schiesst vier Bilder in diesen
+# Abstaenden (Sekunden, jeweils NACH dem vorigen) und legt sie als
+# schuss-1.png ... ab. Leer = das bisherige Verhalten, EIN Bild.
+#
+# Warum es das braucht: ein Foto vom Ende einer Bewegung sieht aus wie
+# eines ohne Bewegung. Die Wirkung, um die Runde ZIEH geht, ist mitten
+# im Zug -- das Fenster ist groesser und steht versetzt.
+shots=""
 # ROUND SOFTUI: HARDWARE VIRTUALISATION, AND WHY IT IS A SWITCH AND NOT
 # A CONSTANT.  Round PAINT wrote "the measuring machine has no /dev/kvm"
 # and measured everything under TCG.  This machine HAS one, and the
@@ -99,6 +111,7 @@ for a in "$@"; do
         keep=*) keep=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        shots=*) shots=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
@@ -366,12 +379,33 @@ if [ -n "$hover" ]; then
     python3 tools/wm/monitor.py "$SOCK" "$OUT/hover.txt" > "$OUT/hover.log" 2>&1
     sleep 2
 fi
+if [ -n "$shots" ]; then
+    # RUNDE ZIEH: die Reihe. Jede Zahl ist eine Pause VOR ihrem Bild.
+    n=0
+    for g in $shots; do
+        n=$((n+1))
+        sleep "$g"
+        python3 tools/gfx/screenshot.py "$SOCK" "$OUT/schuss-$n.ppm" 25 \
+            > "$OUT/shot-$n.log" 2>&1
+    done
+fi
 python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 > "$OUT/shot.log" 2>&1
 wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
 echo "accel ${ACC[*]:-tcg}"
 
+for q in "$OUT"/schuss-*.ppm; do
+    [ -s "$q" ] || continue
+    python3 - "$q" <<'PY'
+import sys
+from PIL import Image
+q = sys.argv[1]
+Image.open(q).convert("RGB").save(q[:-4] + ".png")
+print("schuss %s" % (q[:-4] + ".png"))
+PY
+    rm -f "$q"
+done
 if [ -s "$OUT/desktop.ppm" ]; then
     python3 - "$OUT" <<'PY'
 import sys, os
