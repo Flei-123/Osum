@@ -131,8 +131,23 @@ ist der Zwischenspeicher noch leer, und das ist die ehrliche Zahl fuer
 und aus zwei Farben sind 13 geworden, also ein Verlauf und keine zwei
 Kacheln mehr.
 
-Bilder: `07-milchglas-blur16-grobes-muster.png` (die Aufnahme, auf der
+Bilder: `07-milchglas-unter-durchsichtigem-fenster.png` (die Aufnahme, auf der
 man es SIEHT -- siehe Abschnitt 9c), `14-milchglas-mit-reglerstand.png`.
+
+**Und seit fix-r4-4 liegt das Glas nicht mehr nur unter der Leiste.** Die
+Leiste ist 28 Bildpunkte hoch; auf 28 Bildpunkten *misst* man einen
+Weichzeichner, man *sieht* ihn nicht. Ein Fenster mit `window_alpha < 100`
+bekommt deshalb denselben Streifen unter seine Flaeche gelegt
+(`wm.paint_win`, Suchwort `fix-r4-4`) — 760 × 566 statt 1280 × 28
+Bildpunkte, und damit ein Verlauf, auf den man zeigen kann. Gerechnet wird
+nur, wenn das Fenster wirklich durchsichtig ist UND ein Weichzeichner
+eingestellt ist; bei `window_alpha=100` wird die Zeile nicht betreten. Die
+Obergrenze des Streifenpuffers ist seither eine FLAECHE (`GLASS_PX`,
+460 800 Bildpunkte) und keine Hoehe — was nicht hineinpasst, bekommt gar
+kein Glas statt eines halben. Gemessen im Abnahmelauf (Abschnitt 11c3):
+`var 655` mit 22 Farben gegen `var 717` mit 14 bei sonst gleichem Lauf mit
+`taskbar_blur=2`, und `wm: glas r=16 px=430160` als Beleg, dass wirklich
+die Fensterflaeche und nicht der Leistenstreifen weichgezeichnet wurde.
 
 **Abkuerzung, ausdruecklich benannt:** 46 ms je Vollbild sind unter
 TCG gemessen. Auf Blech mit KVM ist dieselbe Rechnung um ein Vielfaches
