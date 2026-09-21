@@ -1062,12 +1062,30 @@ echo "== 11. Runde GLAS: Rundung, Durchsicht, Milchglas =="
 # Rechtecke derselben Seite muessen bei 0 und bei 24 ZEICHEN FUER
 # ZEICHEN dieselben sein -- eine Rundung, die den Inhalt verschiebt,
 # faellt genau hier auf.
+# EIN ZWEITER VERSUCH, WENN DIE LEITUNG VERSCHRAENKT HAT.
+#
+# Die serielle Leitung nimmt mehrere Schreiber an, und zweimal in
+# diesem Baum ist eine Zeile mitten im Wort von einer anderen
+# unterbrochen worden ("settings: glas radius=wlib: knopf x=320 ..."):
+# die Zahl, die dahinter stand, ist dann weg, und ALLE Messungen, die
+# an ihr haengen, fallen als Folgefehler um -- an einem Lauf gesehen,
+# in dem dieselbe Sache eine Stunde vorher gruen war. Ein Fehlschlag,
+# der beim Wiederholen verschwindet, ist keine Aussage ueber die
+# Rundung, also wird EINMAL wiederholt und erst der zweite Fehlschlag
+# gezaehlt.
 for r in 0 12 24; do
     bash tools/themestore/build.sh "$TMPD/rad$r" extra='einst' uitrace=yes \
         keep=yes radius="$r" > "$TMPD/rad$r.log" 2>&1
     f="$TMPD/rad$r/serial.txt"
     g=$(grep -a 'settings: glas radius=' "$f" | tail -1 \
         | grep -oE 'radius=[0-9]+' | cut -d= -f2)
+    if [ -z "${g:-}" ]; then
+        echo "        (Leitung verschraenkt, rad$r wird einmal wiederholt)"
+        bash tools/themestore/build.sh "$TMPD/rad$r" extra='einst' \
+            uitrace=yes keep=yes radius="$r" > "$TMPD/rad$r.log" 2>&1
+        g=$(grep -a 'settings: glas radius=' "$f" | tail -1 \
+            | grep -oE 'radius=[0-9]+' | cut -d= -f2)
+    fi
     same "Radius $r kommt in der laufenden Darstellung an" "$r" "${g:-}"
     # ROLLE 4 IST DER GRIFF DES REGLERS, und der ist ein KREIS. Er
     # sagt "so rund wie moeglich" und meint damit seinen halben
@@ -1170,6 +1188,14 @@ num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" 
 # also genau die Zahlen, die diese Runde verstellbar gemacht hat.
 RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
      "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
+# Auch hier: eine verschraenkte Leitung ist kein Befund ueber die Ecken.
+if [ -z "${RH:-}" ]; then
+    echo "        (keine Rahmenzeile, rad24 wird einmal wiederholt)"
+    bash tools/themestore/build.sh "$TMPD/rad24" extra='einst' uitrace=yes \
+        keep=yes radius=24 > "$TMPD/rad24.log" 2>&1
+    RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
+         "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
+fi
 echo "        ${RH:-KEINE Rahmenzeile}"
 RHX=$(printf '%s' "$RH" | grep -oE ' x=[0-9]+' | cut -d= -f2)
 RHY=$(printf '%s' "$RH" | grep -oE ' y=[0-9]+' | cut -d= -f2)
@@ -2011,8 +2037,17 @@ for pair in "dblur:dunkel mit Milchglas 12" "dunkel2:zweites dunkles Muster"; do
     FG=$(grep -a 'taskbar: text clock ' "$TMPD/$d/serial.txt" | tail -1 \
          | grep -oE 'fg=[0-9]+' | cut -d= -f2)
     FGH=$(printf '%06x' "${FG:-0}")
+    # WIE OBEN: gemessen wird auf den Feldern, die die Leiste meldet.
+    FELDER=$(grep -aE 'taskbar: text (start|clock) ' "$TMPD/$d/serial.txt" \
+        | sed -nE 's/.* x=([0-9]+) base=([0-9]+) fg=([0-9]+) .* tw=([0-9]+) .*/\1,\2,\4,\3/p' \
+        | sort -u \
+        | while IFS=, read -r fx fb ft ff; do printf '%s,%s,%s,%06x;' \
+            "$fx" "$fb" "$ft" "$ff"; done)
+    ASC=$(grep -a 'taskbar: ready ascent=' "$TMPD/$d/serial.txt" | tail -1 \
+        | grep -oE 'ascent=[0-9]+' | cut -d= -f2)
     KZ=$(python3 tools/themestore/glascheck.py kontrast \
-         "$TMPD/$d/desktop.png" "$FGH")
+         "$TMPD/$d/desktop.png" "$FGH" \
+         --felder="$FELDER" --ascent="${ASC:-12}")
     echo "        $nm: $KZ"
     num "Leistenschrift gegen den SCHLECHTESTEN Grund ($nm), x100" \
         "$(printf '%s' "$KZ" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" \

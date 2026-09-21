@@ -692,8 +692,12 @@ def main(argv):
             # macht mindestens ein Fuenftel des Feldes aus. Alles
             # Seltenere ist Rand oder Glaettung.
 
+            # Auf den Bildrand geklemmt: ein Feld, das die Leiste an
+            # den rechten Rand setzt, reicht mit seinem Platz ueber das
+            # Bild hinaus, und ein Absturz ist keine Messung.
             fpx = [im.getpixel((i, j))
-                   for i in range(a, cc + 1) for j in range(b, d + 1)]
+                   for i in range(max(a, 0), min(cc, im.size[0] - 1) + 1)
+                   for j in range(max(b, 0), min(d, im.size[1] - 1) + 1)]
             if not fpx:
                 continue
             cnt = Counter(fpx)
