@@ -488,7 +488,12 @@ num "Widgets, die aus ihrem Fenster ragen (Runde LOOK: 132 Bildpunkte fehlten)" 
 # das im Fenster bleibt und trotzdem neben seiner Flaeche schwebt. Die
 # Karten melden ihr Rechteck selbst (`settings: rect name=kartel/karter`),
 # damit hier nichts nachgerechnet wird, was das Programm schon weiss.
-IWIN=$(( ${WW:-760} - 4 ))
+# Die Breite kommt aus derselben Zeile wie die Hoehe oben, und sie wird
+# HIER geholt: `$WW` entsteht erst in Abschnitt 10, und eine Zahl, die
+# aus ihrer Vorgabe kommt statt aus dem Lauf, misst nichts.
+WBR=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]*' "$SE" | tail -1 \
+      | grep -oE 'w=[0-9]+' | cut -d= -f2)
+IWIN=$(( ${WBR:-760} - 4 ))
 HOVER=$(python3 - "$IWIN" "$SE" "$SEV" <<'PYX'
 import re, sys
 innen = int(sys.argv[1])
@@ -824,10 +829,18 @@ num "Reiter, deren gemeldeter Name nicht der der Sprachdatei ist" "${TABNAM:-99}
 # 0 -- elf deutsche Reiter passen in 728 Bildpunkte nur gekuerzt --,
 # sondern die Zahl, die der naechste Umbau der Reiterleiste senken
 # muss. Sie steht hier, damit sie nicht wieder unbemerkt steigt.
-TABKURZ=$(grep -ao 'wlib: tab i=[0-9]* .*nq=[0-9]* nv=[0-9]*' "$SE" \
-    | awk '{ for (i=1;i<=NF;i++) { if ($i ~ /^nq=/) { split($i,a,"="); q=a[2] }
-             if ($i ~ /^nv=/) { split($i,b,"="); v=b[2] } } if (q != v) k++ }
-           END { print k+0 }')
+TABKURZ=$(python3 - "$SE" <<'PY'
+import re, sys
+# DER LETZTE BERICHT JE REITER GILT. Die Leiste malt sich mehrfach neu
+# (Themenwechsel, erster Aufbau); die Zeilen zu zaehlen statt der
+# Reiter haengt die Zahl an die Zahl der Neuzeichnungen.
+ist = {}
+txt = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
+for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=', txt):
+    ist[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
+print(sum(1 for (nq, nv) in ist.values() if nq != nv))
+PY
+)
 echo "        gekuerzt gemalte Reiterbeschriftungen: ${TABKURZ:-?} von $TABS"
 num "und hoechstens neun der elf Reiter muessen gekuerzt werden" \
     "${TABKURZ:-99}" le 9
@@ -1273,14 +1286,23 @@ num "und es ist ueberhaupt Tinte gemessen worden" "${UT:-0}" ge 500
 # GEGENPROBE: die Zeichenkette, die VOR dem Nachtrag auf dem Schirm
 # stand, darf jetzt NICHT mehr passen -- sonst misst die Zusage oben
 # nichts.
-if python3 tools/look/umlaut.py "$TLOG" "$TPPM" --gitter=1,1 \
-    'KEIN EINZIGES GERÄT!' 0 >/dev/null 2>&1 \
-    && ! python3 tools/gfx/checkshot.py tgrid "$TPPM" \
-        assets/osum-mono.ttf 16 26 62 10 19 1 1 15 23 42 241 245 249 \
-        'KEIN EINZIGES GERT!' 0 >/dev/null 2>&1; then
-    ok "GEGENPROBE: die alte, verstuemmelte Zeile passt NICHT mehr"
-else
+#
+# Gerechnet wird mit GENAU DEN Zahlen, die `umlaut.py` oben benutzt
+# hat: das Zellenraster aus der Zeile des Kerns und die zwei Farben,
+# die das Programm aus dem Bild gelesen und mitgedruckt hat.
+TG=$(grep -a 'wm: termgitter win=' "$TLOG" | tail -1)
+tgv() { printf '%s' "$TG" | grep -oE " $1=[0-9]+" | grep -oE '[0-9]+'; }
+TGX=$(tgv x); TGY=$(tgv y); TGW=$(tgv cellw); TGH=$(tgv cellh)
+TGP=$(tgv px)
+hexrgb() { printf '%d %d %d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}"; }
+UFG=$(hexrgb "$(printf '%s' "$UM" | grep -oE 'fg=[0-9a-f]{6}' | cut -d= -f2)")
+UBG=$(hexrgb "$(printf '%s' "$UM" | grep -oE 'bg=[0-9a-f]{6}' | cut -d= -f2)")
+if python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
+        "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 1 \
+        $UFG $UBG 'KEIN EINZIGES GERT!' 0 >/dev/null 2>&1; then
     bad "GEGENPROBE: 'GERT!' und 'GERÄT!' sind fuer den Rasterer dasselbe"
+else
+    ok "GEGENPROBE: die alte, verstuemmelte Zeile passt NICHT mehr"
 fi
 
 # UND DIE LEISTE WIRD GEMESSEN WIE JEDES FENSTER. Bis zu diesem
