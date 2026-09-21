@@ -112,6 +112,15 @@ export {
     FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
     // RUNDE ZIEH: die drei Wirkungen des Aufhebens, einzeln.
     FM_LIFT, FM_TILT, FM_SWING,
+    // RUNDE BLUR: die Weichzeichnung hinter Leiste, Startmenue und
+    // Menues -- Staerke, Toenung, Rauschen.
+    FM_BLUR, FM_BLURTINT, FM_BLURNOISE,
+    BLUR_MAX, TINT_MAX, NOISE_MAX,
+    blur_an, blur_radius, blurs, blur_cached, blur_px, blur_us,
+    win_opac, set_opac, win_durch,
+    set_blur_cache, blur_cache_on,
+    blur_treffer, blur_fehl, blur_quote, blur_reset,
+    blur_frn, blur_frus, blur_frmax,
     RADIUS_MAX, SHADOW_MAX, LIFT_MAX, TILT_MAX, SWING_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
@@ -768,6 +777,91 @@ const S_ZFLAG: u64 = 0x1238
 const S_OFRN: u64 = 0x1240
 const S_OFRUS: u64 = 0x1248
 const S_OFRMAX: u64 = 0x1250
+
+// ======================================================= RUNDE BLUR
+// DIE ZAHLEN DER WEICHZEICHNUNG.
+//
+// 0x1258..0x12C8 -- der Bereich zwischen S_OFRMAX (0x1250) und S_FRUS
+// (0x1300) war frei; `tools/paint/scalars.py` prueft das mechanisch,
+// und genau dieses Werkzeug hat in Runde ZIEH eine echte Kollision
+// gemeldet, bevor etwas gebaut war.
+const S_BLURS: u64 = 0x1258    // wie oft eine Flaeche GERECHNET wurde
+const S_BLURCACHE: u64 = 0x1260 // wie oft sie KOPIERT wurde
+const S_BLURPX: u64 = 0x1268   // wie viele Bildpunkte gerechnet wurden
+const S_BLURUS: u64 = 0x1270   // und wie lange das zusammen dauerte
+// ---- der Zwischenspeicher selbst, EINE Flaeche.
+//
+// WARUM NUR EINE. Gleichzeitig sichtbar sind in der Regel Leiste UND
+// Startmenue; zwei Flaechen waeren also der ehrliche Fall. Der Speicher
+// dafuer kommt aber aus `mem.frame_run`, und ein zweiter Puffer von
+// Schirmbreite mal Menuehoehe ist ein halbes Megabyte, das auf einer
+// kleinen Maschine fehlt. Gemessen (siehe BEFUND) traegt EIN Platz die
+// Trefferquote schon ueber 90 Prozent, weil die Leiste in fast jedem
+// Bild schmutzig ist und das Menue nur, wenn sich darunter etwas regt.
+const S_BC_BUF: u64 = 0x1278   // der Puffer, 0 = keiner
+const S_BC_BYTES: u64 = 0x1280 // wie gross er ist (ALLE Plaetze zusammen)
+// ---- VIER PLAETZE, und das ist eine MESSUNG und keine Meinung.
+//
+// Die erste Fassung hatte EINEN Platz, mit der Begruendung, die Leiste
+// sei ohnehin in fast jedem Bild schmutzig. Auf dem einfachen
+// Schreibtisch stimmte das auch: n=2, cache=83, Quote 97 Prozent.
+//
+// Dann lief die Vorfuehrung mit DREI durchscheinenden Flaechen
+// gleichzeitig (Leiste, Startmenue, zweite Leiste), und die Quote fiel
+// auf NULL: n=273, cache=0. Der Grund ist nicht der Filter, sondern der
+// eine Platz -- jede Flaeche warf die vorige hinaus, und in jedem Bild
+// wurden alle drei neu gerechnet. Das ist genau die Sorte Fehler, die
+// auf dem Prueftisch nicht auffaellt und auf dem Schreibtisch des
+// Menschen jeden Tag zuschlaegt: Leiste UND offenes Menue sind der
+// NORMALFALL und nicht der Ausnahmefall.
+//
+// VIER Plaetze, weil vier die Zahl der Flaechen ist, die ueberhaupt
+// gleichzeitig durchscheinen koennen: Leiste, Startmenue, ein
+// Klappmenue und eine Blase. Je Platz ein eigener Satz Angaben.
+const BC_N: u64 = 4
+const S_BC_WIN: u64 = 0x13A0   // je Platz: Fenster + 1, 0 = leer
+const S_BC_X: u64 = 0x13C0     // je Platz: das Rechteck
+const S_BC_Y: u64 = 0x13E0
+const S_BC_W: u64 = 0x1400
+const S_BC_H: u64 = 0x1420
+// ---- DIE UNGUELTIGKEITSERKLAERUNG, und das ist die schwierige Frage
+// dieser Runde.
+//
+// Woran erkennt der Server, dass sich UNTER der weichgezeichneten
+// Flaeche etwas geaendert hat? Nicht daran, dass das Fenster selbst
+// schmutzig ist -- die Leiste ist in fast jedem Bild schmutzig, ohne
+// dass sich der Schreibtisch darunter geruehrt haette.
+//
+// Die Antwort ist ein ZAEHLER JE FLAECHE, und er steht auf demselben
+// Papier wie die Schmutzrechtecke, die dieser Server ohnehin fuehrt:
+//
+//   `S_BC_STAMP` ist die Bildnummer, bei der die Flaeche gerechnet
+//   wurde. `S_BC_HIT` ist der Zaehler, den `blur_touch` hochzaehlt --
+//   und `blur_touch` ruft genau die Stelle, die ein SCHMUTZRECHTECK
+//   anmeldet, das die Flaeche SCHNEIDET. Ein Schmutzrechteck, das die
+//   Flaeche nicht beruehrt, laesst sie gueltig.
+//
+// Damit ist die Regel vollstaendig und ohne Raten: kopiert wird, wenn
+// Fenster, Rechteck UND Zaehler unveraendert sind. Sonst gerechnet.
+const S_BC_STAMP: u64 = 0x1440 // je Platz: Bildnummer der Rechnung
+const S_BC_HIT: u64 = 0x1460   // je Platz: Schmutzzaehler beim Rechnen
+// Je Platz EIN Zaehler -- vier Woerter, 0x1480..0x14A0.
+const S_BC_GEN: u64 = 0x1480
+// Welcher Platz als naechstes geraeumt wird, wenn alle belegt sind.
+const S_BC_NEXT: u64 = 0x14A0
+// Wie gross EIN Platz ist, in Oktetten.
+const S_BC_EIN: u64 = 0x14B0
+// GEGENPROBE: 1 = der Zwischenspeicher wird NICHT benutzt.
+//
+// Die Auftragsliste verlangt DREI Zahlen und nicht eine: ohne Blur,
+// mit Blur ohne Speicher, mit Blur mit Speicher. Ohne diesen Schalter
+// waere die mittlere nicht zu messen, ohne den Speicher auszubauen --
+// und eine Zahl aus einem anderen Kern ist keine Gegenprobe.
+const S_BC_AUS: u64 = 0x14B8
+// Die gleitende Summenzeile des senkrechten Durchgangs. Sie liegt NICHT
+// in kdata -- drei Kanaele mal BLUR_W_MAX mal 8 Oktette waeren 82 KiB
+// --, sondern kommt aus `mem.frame_run`, neben dem Puffer.
+const S_BC_SUM: u64 = 0x14A8   // 3 * BLUR_W_MAX Woerter, 0 = keine
 // RUNDE SCHNELLBILD: die SUMME der uebertragenen Bildpunkte, ueber
 // alle Bilder. Zusammen mit S_PRESENTS ergibt das den Anteil, den ein
 // Bild wirklich anfasst -- die Zahl, die FREMDSOFTWARE.md 4a mit
@@ -953,7 +1047,10 @@ const SIG_H: u64 = 4
 // Sprung, den man sieht, ohne dass es zappelt.
 const AN_SCALE0: u64 = 850
 const SHMASK_SIDE: u64 = 40
-const FORM_SLOTS: u64 = 12
+// RUNDE BLUR: 12 -> 15. Drei Marken mehr (FM_BLUR, FM_BLURTINT,
+// FM_BLURNOISE). Wer hier etwas aendert, aendert `wlibc.FORM_SLOTS`
+// mit -- die beiden Listen halten `tools/paint/run.sh` gegeneinander.
+const FORM_SLOTS: u64 = 15
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -1010,6 +1107,34 @@ const FM_MOTION: u64 = 8
 const FM_LIFT: u64 = 9
 const FM_TILT: u64 = 10
 const FM_SWING: u64 = 11
+
+// ======================================================= RUNDE BLUR
+// DIE WEICHZEICHNUNG HINTER DER FLAECHE -- UND WARUM SIE DREI MARKEN
+// HAT UND NICHT EINE.
+//
+// Justin, mehrfach: "der Blur wie in Windows ist nicht drin". Was
+// Windows Acryl nennt, sind DREI Dinge uebereinander, und man sieht
+// sofort, wenn eines fehlt:
+//
+//   1. die WEICHZEICHNUNG dessen, was dahinter liegt,
+//   2. eine TOENUNG darueber (sonst liest sich keine Schrift darauf),
+//   3. ein feines RAUSCHEN (sonst wirkt es wie Milchglas und nicht
+//      wie Acryl -- das ist der Unterschied, den man sieht, ohne ihn
+//      benennen zu koennen).
+//
+// Drei Marken also, und jede ist wieder Schalter UND Regler -- 0 heisst
+// aus. Dieselbe Regel wie FM_SHADOW und wie die drei der Runde ZIEH.
+//
+// FM_BLUR       der RADIUS des Kastenfilters, 0..16. 0 = kein Blur,
+//               und dann kostet diese ganze Runde nichts: `blur_flaeche`
+//               kehrt auf der ersten Zeile um.
+// FM_BLURTINT   wie stark die Flaeche danach in Richtung ihrer eigenen
+//               Farbe gezogen wird, 0..100 Prozent.
+// FM_BLURNOISE  die Amplitude des Rauschens in Helligkeitsstufen,
+//               0..16.
+const FM_BLUR: u64 = 12
+const FM_BLURTINT: u64 = 13
+const FM_BLURNOISE: u64 = 14
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
@@ -1031,6 +1156,34 @@ const SHADOW_MAX: u64 = 16
 const LIFT_MAX: u64 = 120
 const TILT_MAX: u64 = 100
 const SWING_MAX: u64 = 100
+
+// ======================================================= RUNDE BLUR
+// DIE DECKEL, UND WARUM SIE GENAU HIER LIEGEN.
+//
+// BLUR_MAX = 16. Die Kosten des Kastenfilters haengen NICHT am Radius
+// (die gleitende Summe kostet je Bildpunkt eine Addition und eine
+// Subtraktion, gleich ob der Radius 2 oder 200 ist) -- der Deckel steht
+// aus einem anderen Grund da: `n` = 2r+1 geht in die Kehrwerttafel
+// `RECIP`, und die ist fuer n <= 33 als EXAKT nachgewiesen
+// (tools/blur/kehrwert.py, alle n, alle Summen). 16 ist der groesste
+// Radius, der diese Zusage haelt.
+//
+// TINT_MAX = 100, weil es Prozente sind. NOISE_MAX = 16: darueber ist
+// es kein feines Korn mehr, sondern Griesel.
+const BLUR_MAX: u64 = 16
+const TINT_MAX: u64 = 100
+const NOISE_MAX: u64 = 16
+// Wie viele Summen die gleitende Zeile fasst -- die groesste Breite,
+// die dieser Server je weichzeichnet. Eine Taskleiste ist so breit wie
+// der Schirm; 3440 deckt auch Justins breiten Schirm ab.
+const BLUR_W_MAX: u64 = 3440
+// Der Nenner der Kehrwerttafel. 19 ist die Zahl, die `probe2` ueber
+// ALLE n (1..33) und ALLE Summen (0..n*255) als fehlerfrei gemessen
+// hat -- mit 16, 20 und 24 blieb ein Fehler von einer Stufe stehen,
+// und eine Stufe ist auf einer weichgezeichneten Flaeche genau das,
+// was man als Streifen sieht.
+const RECIP_SHIFT: u64 = 19
+const RECIP_RUND: u64 = 262144 // 1 << 18
 // Wie weit das Bild beim Nachziehen HOECHSTENS hinter dem Fenster
 // zurueckbleiben darf, in Bildpunkten. Ohne diesen Deckel wird aus
 // einer schnellen Zeigerbewegung ein Fenster, dessen Bild quer ueber
@@ -1277,6 +1430,22 @@ const W_DYLAST: u64 = 0x198
 // drei sind ZUSTAENDE des Fensters (es geht auf, es geht zu, es geht
 // weg); das Auspendeln ist keiner davon, es ist ein Nachklang.
 const W_SWOFF: u64 = 0x1A0
+// ======================================================= RUNDE BLUR
+// WIE DECKEND DIESES FENSTER IST, 0..255. 0 heisst "wie immer",
+// also vollstaendig deckend -- der Wert wird als "Deckung + 1"
+// gespeichert, damit ein wiederverwendeter Platz (alles null) das
+// alte Verhalten hat.
+//
+// WARUM ES DAS GEBEN MUSS. Die erste Fassung dieser Runde hat den
+// Blur unter der Leiste sauber gerechnet -- und dann hat die Leiste
+// ihren eigenen, DECKENDEN Puffer darueber kopiert. Im Bild war von
+// der Weichzeichnung nichts zu sehen, obwohl die Zaehler sie belegten
+// (n=26, cache=247). Ein Blur, den man nicht sieht, ist keiner.
+//
+// Acryl ist genau dieses Paar: WEICHZEICHNEN und dann DURCHSCHEINEN
+// LASSEN. Fehlt das zweite, hat man Arbeit geleistet und sie danach
+// zugedeckt.
+const W_OPAC: u64 = 0x1A8
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -1480,6 +1649,18 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     }
     if i == FM_SWING && w > SWING_MAX {
         w = SWING_MAX
+    }
+    // RUNDE BLUR: die drei Marken des Acryls. Der Server glaubt auch
+    // hier keiner Zahl aus Ring 3 -- ein Radius von 400 wuerde die
+    // Kehrwerttafel verlassen, fuer die die Exaktheit nachgewiesen ist.
+    if i == FM_BLUR && w > BLUR_MAX {
+        w = BLUR_MAX
+    }
+    if i == FM_BLURTINT && w > TINT_MAX {
+        w = TINT_MAX
+    }
+    if i == FM_BLURNOISE && w > NOISE_MAX {
+        w = NOISE_MAX
     }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
@@ -2694,6 +2875,13 @@ fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     if c <= a || d <= b {
         return
     }
+    // RUNDE BLUR: DIE UNGUELTIGKEITSERKLAERUNG, an der EINEN Stelle,
+    // durch die jede Aenderung dieses Servers geht. Schneidet das
+    // gemeldete Rechteck die weichgezeichnete Flaeche, ist ihr
+    // Zwischenspeicher hin; liegt es daneben, bleibt er gueltig.
+    // Deshalb steht der Ruf HIER und nicht in `compose` -- in `compose`
+    // waere schon zusammengefasst, was hier noch einzeln ankommt.
+    blur_touch(state, a, b, c, d)
     if gs(state, S_DON) == 0 {
         ss(state, S_DX0, a as u64)
         ss(state, S_DY0, b as u64)
@@ -2863,6 +3051,10 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_SWX, 0)
             wsv(state, i, W_SWY, 0)
             wsv(state, i, W_SWOFF, 0)
+            // RUNDE BLUR: und die Deckung auch nicht -- ein
+            // wiederverwendeter Platz waere sonst durchsichtig, ohne
+            // dass es jemand bestellt hat.
+            wsv(state, i, W_OPAC, 0)
             wsv(state, i, W_DXLAST, 0)
             wsv(state, i, W_DYLAST, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
@@ -5964,6 +6156,746 @@ fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
 }
 
+// =====================================================================
+// RUNDE BLUR: DAS ACRYL
+// =====================================================================
+//
+// WAS HIER WIRKLICH DAS PROBLEM WAR -- und es war nicht der Filter.
+//
+// Der Auftrag nennt als ersten und eigentlichen Umbau "den Hintergrund
+// durchreichen": ein Fenster, das durchscheinen will, braucht Lesezugriff
+// auf das, was hinter ihm liegt. Beim Nachsehen stellte sich heraus, dass
+// dieser Server das SCHON KANN, ohne es zu wissen:
+//
+//   `compose` malt den Schreibtisch, dann die Fenster VON UNTEN NACH
+//   OBEN, alle in den Zweitpuffer (fb, S_DRAW). Wenn ein Fenster an der
+//   Reihe ist, steht alles, was unter ihm liegt, dort bereits fertig.
+//   `fb.get_pixel` liest genau aus S_DRAW.
+//
+// Es braucht also KEINEN Mitschnitt des Hintergrunds, keine zweite
+// Flaeche und keinen zusaetzlichen Puffer je Fenster -- der Blur liest
+// an Ort und Stelle aus dem Zweitpuffer, bevor das Fenster sich darueber
+// malt. Das ist der Grund, warum diese Runde am Ende so wenig Speicher
+// braucht. Ein Mitschnitt waere die teurere und die falsche Loesung
+// gewesen; die billige war schon da.
+//
+// WAS GEBLURRT WIRD UND WAS NICHT. Die Kostenmessung ist eindeutig
+// (BEFUND-BLUR.md, auf dieser Maschine nachgemessen):
+//
+//     Benachrichtigung  360x120     0,87 ms     5,2 %
+//     Taskleiste       1920x48      1,64 ms     9,8 %
+//     Startmenue        320x520     3,16 ms    18,9 %
+//     ein Fenster       900x650    10,96 ms    65,6 %
+//     Vollbild FHD     1920x1080   37,90 ms   227,0 %
+//
+// Leiste, Startmenue, Menues, Blasen -- ja. GANZE FENSTER NICHT, und
+// zwar gar nicht, auch nicht als Wahlmoeglichkeit: ein einziges Fenster
+// frisst zwei Drittel des Bildbudgets, und zwei davon reissen es. Die
+// Auswahl trifft deshalb nicht der Geschmack, sondern die EBENE des
+// Fensters -- `blur_will` unten laesst L_NORMAL strukturell nicht durch.
+
+// Der zweifache Kastenfilter, und warum nicht Gauss.
+//
+// Zweimal Kasten hintereinander ist eine Dreiecksfunktion, dreimal waere
+// schon fast eine Glocke; optisch ist der Unterschied zu einem echten
+// Gauss bei diesen Radien nicht zu sehen. Der Preis ist es umso mehr:
+// ein Gauss mit Radius r kostet je Bildpunkt 2r+1 Multiplikationen, der
+// Kasten mit gleitender Summe kostet EINE Addition und EINE Subtraktion
+// -- unabhaengig vom Radius.
+//
+// Der Kehrwert statt der Division: je Bildpunkt und Durchgang stand eine
+// ganzzahlige Division je Kanal, also zwoelf im ganzen Filter. Gemessen
+// hat das den Filter um mehr als das Fuenffache verlangsamt (Startmenue
+// 15,32 ms gegen 3,16 ms). `RECIP` haelt 1/n als Festkommazahl, und
+// `bdiv` rundet im ZAEHLER -- die erste Fassung rundete im Kehrwert und
+// lag dadurch um bis zu 16 Helligkeitsstufen daneben, was man als
+// Farbstich sah.
+fn recip_of(n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    return (((1 as u64) << RECIP_SHIFT) + n - 1) / n
+}
+
+// Eine Summe durch ihre Anzahl, exakt. Siehe RECIP_SHIFT.
+fn bdiv(summe: u64, rec: u64) -> u64 {
+    return (summe *% rec +% RECIP_RUND) >> RECIP_SHIFT
+}
+
+// ------------------------------------------------- die beiden Durchgaenge
+//
+// WAAGRECHT. Eine Zeile, gleitende Summe ueber 2r+1 Bildpunkte. `n`
+// waechst am linken Rand und schrumpft am rechten -- deshalb wird der
+// Kehrwert je Bildpunkt aus der Tafel geholt und nicht einmal vorab
+// gerechnet.
+fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
+    var y: u64 = 0
+    while y < h {
+        let qz: u64 = quelle +% y *% w *% 4
+        let zz: u64 = ziel +% y *% w *% 4
+        var sr: u64 = 0
+        var sg: u64 = 0
+        var sb: u64 = 0
+        var n: u64 = 0
+        var k: u64 = 0
+        while k <= r && k < w {
+            let px: u64 = __mmio_read32((qz +% k *% 4) as *mut u32) as u64
+            sr = sr + ((px >> 16) & 255)
+            sg = sg + ((px >> 8) & 255)
+            sb = sb + (px & 255)
+            n = n + 1
+            k = k + 1
+        }
+        var x: u64 = 0
+        while x < w {
+            let rec: u64 = recip_of(n)
+            __mmio_write32((zz +% x *% 4) as *mut u32,
+                ((bdiv(sr, rec) << 16) | (bdiv(sg, rec) << 8)
+                    | bdiv(sb, rec)) as u32)
+            // rechts einer dazu ...
+            let add: u64 = x + r + 1
+            if add < w {
+                let px: u64 = __mmio_read32((qz +% add *% 4)
+                    as *mut u32) as u64
+                sr = sr + ((px >> 16) & 255)
+                sg = sg + ((px >> 8) & 255)
+                sb = sb + (px & 255)
+                n = n + 1
+            }
+            // ... und links einer weg.
+            if x >= r {
+                let sub: u64 = x - r
+                let px: u64 = __mmio_read32((qz +% sub *% 4)
+                    as *mut u32) as u64
+                sr = sr - ((px >> 16) & 255)
+                sg = sg - ((px >> 8) & 255)
+                sb = sb - (px & 255)
+                n = n - 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// SENKRECHT -- ABER ZEILENWEISE GELESEN, und das ist der Unterschied
+// zwischen tragbar und untragbar.
+//
+// Die naheliegende Fassung laeuft Spalte fuer Spalte. Zwei Bildpunkte
+// untereinander liegen aber w*4 Oktette auseinander, also faellt je
+// Bildpunkt eine eigene Cachezeile an. GEMESSEN: das Startmenue kostete
+// so 27,88 ms statt 15,32 ms -- 167 Prozent des Bildbudgets statt 92.
+// Der Auftrag nannte 11,9 ms; die spaltenweise Fassung haette die Zahl
+// also um mehr als das Doppelte verfehlt, ohne dass am Filter etwas
+// falsch gewesen waere.
+//
+// Also: EINE Zeile gleitender Summen (drei Kanaele mal Breite) im
+// Speicher halten und das Bild von oben nach unten durchlaufen. Jeder
+// Zugriff ist dann fortlaufend.
+fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
+    let sum: u64 = gs(state, S_BC_SUM)
+    if sum == 0 {
+        return
+    }
+    let gr: u64 = sum
+    let gg: u64 = sum +% BLUR_W_MAX *% 8
+    let gb: u64 = sum +% BLUR_W_MAX *% 16
+    // Die Summenzeile leeren.
+    fill_words(gr, 0, w)
+    fill_words(gg, 0, w)
+    fill_words(gb, 0, w)
+    var n: u64 = 0
+    var k: u64 = 0
+    while k <= r && k < h {
+        let qz: u64 = quelle +% k *% w *% 4
+        var x: u64 = 0
+        while x < w {
+            let px: u64 = __mmio_read32((qz +% x *% 4) as *mut u32) as u64
+            __mmio_write64((gr +% x *% 8) as *mut u64,
+                __mmio_read64((gr +% x *% 8) as *mut u64) + ((px >> 16) & 255))
+            __mmio_write64((gg +% x *% 8) as *mut u64,
+                __mmio_read64((gg +% x *% 8) as *mut u64) + ((px >> 8) & 255))
+            __mmio_write64((gb +% x *% 8) as *mut u64,
+                __mmio_read64((gb +% x *% 8) as *mut u64) + (px & 255))
+            x = x + 1
+        }
+        n = n + 1
+        k = k + 1
+    }
+    var y: u64 = 0
+    while y < h {
+        let zz: u64 = ziel +% y *% w *% 4
+        let rec: u64 = recip_of(n)
+        var x: u64 = 0
+        while x < w {
+            let vr: u64 = __mmio_read64((gr +% x *% 8) as *mut u64)
+            let vg: u64 = __mmio_read64((gg +% x *% 8) as *mut u64)
+            let vb: u64 = __mmio_read64((gb +% x *% 8) as *mut u64)
+            __mmio_write32((zz +% x *% 4) as *mut u32,
+                ((bdiv(vr, rec) << 16) | (bdiv(vg, rec) << 8)
+                    | bdiv(vb, rec)) as u32)
+            x = x + 1
+        }
+        let add: u64 = y + r + 1
+        if add < h {
+            let qz: u64 = quelle +% add *% w *% 4
+            var xa: u64 = 0
+            while xa < w {
+                let px: u64 = __mmio_read32((qz +% xa *% 4) as *mut u32) as u64
+                __mmio_write64((gr +% xa *% 8) as *mut u64,
+                    __mmio_read64((gr +% xa *% 8) as *mut u64) + ((px >> 16) & 255))
+                __mmio_write64((gg +% xa *% 8) as *mut u64,
+                    __mmio_read64((gg +% xa *% 8) as *mut u64) + ((px >> 8) & 255))
+                __mmio_write64((gb +% xa *% 8) as *mut u64,
+                    __mmio_read64((gb +% xa *% 8) as *mut u64) + (px & 255))
+                xa = xa + 1
+            }
+            n = n + 1
+        }
+        if y >= r {
+            let sub: u64 = y - r
+            let qz: u64 = quelle +% sub *% w *% 4
+            var xs: u64 = 0
+            while xs < w {
+                let px: u64 = __mmio_read32((qz +% xs *% 4) as *mut u32) as u64
+                __mmio_write64((gr +% xs *% 8) as *mut u64,
+                    __mmio_read64((gr +% xs *% 8) as *mut u64) - ((px >> 16) & 255))
+                __mmio_write64((gg +% xs *% 8) as *mut u64,
+                    __mmio_read64((gg +% xs *% 8) as *mut u64) - ((px >> 8) & 255))
+                __mmio_write64((gb +% xs *% 8) as *mut u64,
+                    __mmio_read64((gb +% xs *% 8) as *mut u64) - (px & 255))
+                xs = xs + 1
+            }
+            n = n - 1
+        }
+        y = y + 1
+    }
+}
+
+// ------------------------------------------------ Toenung und Rauschen
+//
+// DAS RAUSCHEN IST NICHT DIE ZIERDE, SONDERN DER UNTERSCHIED.
+//
+// Ohne es sieht eine weichgezeichnete Flaeche aus wie Milchglas: zu
+// sauber, zu glatt, sie wirkt wie ein Filter und nicht wie ein Material.
+// Windows legt deshalb ein feines Korn darueber, und genau das ist der
+// Punkt, an dem Acryl anfaengt, nach Acryl auszusehen.
+//
+// Der Zufall muss dabei ORTSFEST sein -- er haengt an x und y und nicht
+// an einem laufenden Zaehler. Sonst flimmert die Flaeche bei jedem Bild
+// neu, und aus dem Korn wird Fernsehschnee. Das ist auch der Grund,
+// warum der Zwischenspeicher das Rauschen mitkopieren darf: es ist fuer
+// dieselbe Stelle immer dasselbe.
+fn blur_noise(x: u64, y: u64, amp: u64) -> u64 {
+    if amp == 0 {
+        return 0
+    }
+    // Ein billiger, ortsfester Streuwert. Zwei ungerade Primzahlen,
+    // gemischt und gefaltet -- kein Zufallsgenerator mit Zustand, denn
+    // ein Zustand waere genau das Flimmern, das hier nicht sein darf.
+    var v: u64 = x *% 73856093
+    v = v ^ (y *% 19349663)
+    v = v ^ (v >> 13)
+    v = v *% 2654435761
+    v = v ^ (v >> 15)
+    return v % (amp *% 2 + 1)
+}
+
+// Eine Farbe toenen und koernen. `tint` zieht sie in Richtung `ton`,
+// `amp` streut sie um bis zu amp Stufen nach oben oder unten.
+fn blur_mix(farbe: u64, ton: u64, tint: u64, amp: u64, x: u64,
+    y: u64) -> u64 {
+    var c: u64 = farbe
+    if tint != 0 {
+        c = mix24(c, ton, tint)
+    }
+    if amp == 0 {
+        return c
+    }
+    let d: u64 = blur_noise(x, y, amp)
+    // Der Streuwert liegt in 0..2*amp; die Mitte ist amp, und von dort
+    // aus geht es nach beiden Seiten. Ohne diese Verschiebung waere das
+    // Rauschen eine reine AUFHELLUNG und die Flaeche wuerde milchig.
+    var r: u64 = (c >> 16) & 255
+    var g: u64 = (c >> 8) & 255
+    var b: u64 = c & 255
+    if d >= amp {
+        let auf: u64 = d - amp
+        r = r + auf
+        g = g + auf
+        b = b + auf
+        if r > 255 {
+            r = 255
+        }
+        if g > 255 {
+            g = 255
+        }
+        if b > 255 {
+            b = 255
+        }
+    } else {
+        let ab: u64 = amp - d
+        if r > ab {
+            r = r - ab
+        } else {
+            r = 0
+        }
+        if g > ab {
+            g = g - ab
+        } else {
+            g = 0
+        }
+        if b > ab {
+            b = b - ab
+        } else {
+            b = 0
+        }
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+// =====================================================================
+// RUNDE BLUR: DER ZWISCHENSPEICHER -- UND DIE UNGUELTIGKEITSERKLAERUNG
+// =====================================================================
+//
+// WARUM ER PFLICHT IST UND NICHT KUER. Ein Startmenue ueber einem
+// STEHENDEN Schreibtisch liefert Bild fuer Bild dasselbe Ergebnis. Ohne
+// Zwischenspeicher wuerde es sechzig Mal in der Sekunde neu gerechnet:
+// 3,16 ms je Bild, dauerhaft, fuer ein Bild, das sich nicht aendert.
+// Mit Zwischenspeicher kostet dasselbe 0,02 ms -- gemessen ein Faktor
+// von 157. Genau das macht Windows auch, und ohne diesen Teil ist die
+// Sache nicht auslieferbar.
+//
+// DIE SCHWIERIGE FRAGE IST NICHT DAS KOPIEREN, SONDERN DAS VERWERFEN:
+// woran erkennt der Server, dass sich UNTER der Flaeche etwas geaendert
+// hat? Die naheliegende Antwort -- "wenn das Fenster schmutzig ist" --
+// ist FALSCH, und zwar auf beide Seiten:
+//
+//   Zu oft: die Taskleiste meldet sich bei jedem Uhrenwechsel
+//   schmutzig. Der Schreibtisch darunter hat sich dabei nicht geruehrt.
+//   Neu zu rechnen waere Verschwendung.
+//
+//   Zu selten: ein Fenster, das UNTER dem Startmenue verschoben wird,
+//   macht das Menue selbst gar nicht schmutzig -- und trotzdem ist der
+//   Blur darunter veraltet. Genau das ist der Fall, der flackert bzw.
+//   ein eingefrorenes Bild stehen laesst.
+//
+// Also wird die Frage dort beantwortet, wo sie hingehoert: AM
+// SCHMUTZRECHTECK. `damage` ist die eine Stelle, durch die in diesem
+// Server jede Aenderung geht. Sie ruft `blur_touch`, und das zaehlt
+// `S_BC_GEN` genau dann hoch, wenn das gemeldete Rechteck die
+// zwischengespeicherte Flaeche SCHNEIDET. Ein Schmutzrechteck daneben
+// laesst sie gueltig.
+//
+// Gueltig ist der Speicher damit, wenn DREI Dinge stimmen: dasselbe
+// Fenster, dasselbe Rechteck, derselbe Zaehler. Sonst wird gerechnet.
+// Das ist die ganze Regel, sie hat keinen Sonderfall, und sie kann
+// nicht "manchmal" falsch liegen -- sie haengt an derselben Buchfuehrung
+// wie das Zeichnen selbst.
+
+// Schneidet das Schmutzrechteck die gespeicherte Flaeche? Dann ist sie
+// hin. Aufgerufen aus `damage`, also aus JEDER Aenderungsmeldung.
+fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+    // EIN ZAEHLER JE PLATZ, und nicht einer fuer alle.
+    //
+    // Ein gemeinsamer Zaehler waere wieder der Fehler, den die vier
+    // Plaetze gerade beheben: eine Aenderung unter dem Startmenue
+    // haette auch den Speicher der Leiste am anderen Ende des Schirms
+    // fuer ungueltig erklaert. Jeder Platz fuehrt deshalb seinen
+    // eigenen Stand, und `blur_touch` hebt NUR die Plaetze an, deren
+    // Rechteck das gemeldete wirklich schneidet.
+    var k: u64 = 0
+    while k < BC_N {
+        if gs(state, S_BC_WIN + k * 8) != 0 {
+            let bx0: i64 = gs(state, S_BC_X + k * 8) as i64
+            let by0: i64 = gs(state, S_BC_Y + k * 8) as i64
+            let bx1: i64 = bx0 + gs(state, S_BC_W + k * 8) as i64
+            let by1: i64 = by0 + gs(state, S_BC_H + k * 8) as i64
+            if x1 > bx0 && x0 < bx1 && y1 > by0 && y0 < by1 {
+                ss(state, S_BC_GEN + k * 8, gs(state, S_BC_GEN + k * 8) + 1)
+            }
+        }
+        k = k + 1
+    }
+}
+
+// Der Platz, auf dem dieses Fenster mit diesem Rechteck liegt -- oder
+// BC_N, wenn es ihn nicht gibt.
+fn blur_slot(state: u64, i: u64, x0: u64, y0: u64, w: u64,
+    h: u64) -> u64 {
+    var k: u64 = 0
+    while k < BC_N {
+        if gs(state, S_BC_WIN + k * 8) == i + 1
+            && gs(state, S_BC_X + k * 8) == x0
+            && gs(state, S_BC_Y + k * 8) == y0
+            && gs(state, S_BC_W + k * 8) == w
+            && gs(state, S_BC_H + k * 8) == h {
+            return k
+        }
+        k = k + 1
+    }
+    return BC_N
+}
+
+// Ein freier Platz, sonst der naechste im Ring. Reihum und nicht "der
+// aelteste": eine Nutzungszaehlung je Platz waere ein zweiter Zustand,
+// der auseinander laufen kann, und bei vier Plaetzen fuer hoechstens
+// vier gleichzeitig sichtbare Flaechen trifft der Ring ohnehin fast
+// immer einen, der gerade nicht gebraucht wird.
+fn blur_freier(state: u64) -> u64 {
+    var k: u64 = 0
+    while k < BC_N {
+        if gs(state, S_BC_WIN + k * 8) == 0 {
+            return k
+        }
+        k = k + 1
+    }
+    let n: u64 = gs(state, S_BC_NEXT) % BC_N
+    ss(state, S_BC_NEXT, n + 1)
+    return n
+}
+
+// Darf dieses Fenster durchscheinen?
+//
+// DIE EBENE ENTSCHEIDET, NICHT DER GESCHMACK. Leiste (L_TOP),
+// Startmenue (L_MENUE), Klapp- und Kontextmenues (L_POPUP) und Blasen
+// (L_TIP) -- ja. L_NORMAL und L_DESK NEIN, und das ist keine
+// Voreinstellung, sondern eine Struktur: ein Fenster von 900x650 kostet
+// 65,6 Prozent des Bildbudgets, zwei davon reissen es, Vollbild liegt
+// bei 227 Prozent. Es gibt deshalb auch keinen Schalter dafuer -- was
+// man nicht bezahlen kann, bietet man nicht an.
+fn blur_will(state: u64, i: u64) -> bool {
+    if form(state, FM_BLUR) == 0 {
+        return false
+    }
+    if !valid(state, i) {
+        return false
+    }
+    if (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) != 0 {
+        return false
+    }
+    let l: u64 = wg(state, i, W_LAYER)
+    if l == L_TOP || l == L_MENUE || l == L_POPUP || l == L_TIP {
+        return true
+    }
+    return false
+}
+
+// Die Deckung dieses Fensters, 0..255. 255 = vollstaendig deckend.
+fn win_opac(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 255
+    }
+    let v: u64 = wg(state, i, W_OPAC)
+    if v == 0 {
+        return 255
+    }
+    return v - 1
+}
+
+fn set_opac(state: u64, i: u64, v: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    var w: u64 = v
+    if w > 255 {
+        w = 255
+    }
+    wsv(state, i, W_OPAC, w + 1)
+    damage_win(state, i)
+    return true
+}
+
+// Scheint dieses Fenster durch? Nur dann muss die teurere Zeile her.
+fn win_durch(state: u64, i: u64) -> bool {
+    return win_opac(state, i) < 255
+}
+
+// EINE ZEILE, GEMISCHT statt kopiert.
+//
+// `fb_row` schiebt die Zeile wortweise in den Zweitpuffer und ist
+// damit die schnellste Zeile, die dieser Server hat -- aber sie DECKT.
+// Diese hier liest, was schon dasteht (und das ist nach `blur_flaeche`
+// genau die weichgezeichnete Flaeche), und mischt die Fensterzeile mit
+// `a` darueber. Sie wird NUR gerufen, wenn ein Fenster wirklich
+// durchscheinen will; alle anderen gehen weiter den billigen Weg.
+fn fb_row_mix(state: u64, x: u64, y: u64, src: u64, n: u64, a: u64) {
+    if y < fb.band_lo(state) {
+        return
+    }
+    if a >= 255 {
+        fb_row(state, x, y, src, n)
+        return
+    }
+    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
+    var k: u64 = 0
+    while k < n {
+        let neu: u64 = __mmio_read32((src +% k *% 4) as *mut u32) as u64
+        let alt: u64 = __mmio_read32((ziel +% k *% 4) as *mut u32) as u64
+        __mmio_write32((ziel +% k *% 4) as *mut u32,
+            blend(alt, neu, a) as u32)
+        k = k + 1
+    }
+}
+
+fn set_blur_cache(state: u64, on: bool) {
+    if on {
+        ss(state, S_BC_AUS, 0)
+    } else {
+        ss(state, S_BC_AUS, 1)
+    }
+}
+
+fn blur_cache_on(state: u64) -> bool {
+    return gs(state, S_BC_AUS) == 0
+}
+
+fn blur_an(state: u64) -> bool {
+    return form(state, FM_BLUR) != 0
+}
+
+fn blur_radius(state: u64) -> u64 {
+    return form(state, FM_BLUR)
+}
+
+// Die Puffer besorgen. Sie kommen aus `mem.frame_run`, genau wie die
+// Fensterpuffer -- und EINMAL, nicht je Bild.
+fn blur_buffers(state: u64, bytes: u64) -> bool {
+    if gs(state, S_BC_SUM) == 0 {
+        let sb: u64 = 3 *% BLUR_W_MAX *% 8
+        let sr: u64 = (sb + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let sp: u64 = mem.frame_run(state, sr)
+        if sp == 0 {
+            return false
+        }
+        ss(state, S_BC_SUM, sp)
+    }
+    // Die Einheit, mit der gerechnet wird: so gross muss EIN Platz
+    // sein. Der Puffer fasst BC_N Plaetze PLUS eine Ablage, die sich
+    // alle teilen -- die Ablage lebt nur waehrend eines Filterlaufs.
+    if gs(state, S_BC_EIN) >= bytes && gs(state, S_BC_BUF) != 0 {
+        return true
+    }
+    if gs(state, S_BC_BUF) != 0 {
+        mem.frame_free_run(state, gs(state, S_BC_BUF),
+            gs(state, S_BC_BYTES) / mem.FRAME_SIZE)
+        ss(state, S_BC_BUF, 0)
+        ss(state, S_BC_BYTES, 0)
+        blur_leeren(state)
+    }
+    let seiten: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let ein: u64 = seiten *% mem.FRAME_SIZE
+    let rahmen: u64 = ein *% (BC_N + 1) / mem.FRAME_SIZE
+    let bp: u64 = mem.frame_run(state, rahmen)
+    if bp == 0 {
+        return false
+    }
+    ss(state, S_BC_BUF, bp)
+    ss(state, S_BC_BYTES, rahmen *% mem.FRAME_SIZE)
+    ss(state, S_BC_EIN, ein)
+    blur_leeren(state)
+    return true
+}
+
+// Alle Plaetze fuer ungueltig erklaeren. Nach einem Wechsel der
+// Puffergroesse zeigen die alten Angaben auf Speicher, der so nicht
+// mehr eingeteilt ist -- ein Treffer darauf waere ein Bild aus fremdem
+// Speicher.
+fn blur_leeren(state: u64) {
+    var k: u64 = 0
+    while k < BC_N {
+        ss(state, S_BC_WIN + k * 8, 0)
+        k = k + 1
+    }
+    ss(state, S_BC_NEXT, 0)
+}
+
+// ---------------------------------------------------------------------
+// DIE FLAECHE. Das ist die Stelle, an der alles zusammenkommt.
+//
+// Ablauf: pruefen, ob der Zwischenspeicher passt -> wenn ja, NUR
+// kopieren. Sonst: den Hintergrund aus dem Zweitpuffer holen, zweimal
+// Kasten darueber, toenen, koernen, ablegen und ausgeben.
+fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
+    by1: i64, ton: u64) {
+    let r: u64 = form(state, FM_BLUR)
+    if r == 0 {
+        return
+    }
+    var x0: i64 = bx0
+    var y0: i64 = by0
+    var x1: i64 = bx1
+    var y1: i64 = by1
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < fb.band_lo(state) as i64 {
+        y0 = fb.band_lo(state) as i64
+    }
+    if x1 > gs(state, S_SW) as i64 {
+        x1 = gs(state, S_SW) as i64
+    }
+    if y1 > gs(state, S_SH) as i64 {
+        y1 = gs(state, S_SH) as i64
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return
+    }
+    let w: u64 = (x1 - x0) as u64
+    let h: u64 = (y1 - y0) as u64
+    if w > BLUR_W_MAX {
+        return
+    }
+    let bytes: u64 = w *% h *% 4
+    if !blur_buffers(state, bytes) {
+        return
+    }
+    // Die Ablage liegt HINTER den vier Plaetzen und gehoert keinem --
+    // sie lebt nur waehrend dieses einen Filterlaufs.
+    let ein: u64 = gs(state, S_BC_EIN)
+    let a: u64 = gs(state, S_BC_BUF) +% BC_N *% ein
+    // ------------------------------------------------ der Treffer
+    //
+    // Dasselbe Fenster, dasselbe Rechteck, derselbe Schmutzzaehler --
+    // dann steht auf dem Platz noch genau das Bild, das hier hingehoert.
+    let tr: u64 = blur_slot(state, i, x0 as u64, y0 as u64, w, h)
+    if tr < BC_N && gs(state, S_BC_AUS) == 0
+        && gs(state, S_BC_HIT + tr * 8) == gs(state, S_BC_GEN + tr * 8) {
+        let bq: u64 = gs(state, S_BC_BUF) +% tr *% ein
+        var yy: u64 = 0
+        while yy < h {
+            fb_row(state, x0 as u64, y0 as u64 + yy,
+                bq +% yy *% w *% 4, w)
+            yy = yy + 1
+        }
+        ss(state, S_BLURCACHE, gs(state, S_BLURCACHE) + 1)
+        return
+    }
+    // Kein Treffer: entweder gibt es den Platz schon (dann wird er
+    // ueberschrieben) oder es braucht einen neuen.
+    var sl: u64 = tr
+    if sl >= BC_N {
+        sl = blur_freier(state)
+    }
+    let b: u64 = gs(state, S_BC_BUF) +% sl *% ein
+    // ------------------------------------------------ gerechnet
+    let t0: u64 = time.tsc()
+    // 1. den Hintergrund aus dem ZWEITPUFFER holen. Hier steht schon
+    //    alles, was unter diesem Fenster liegt -- der Schreibtisch und
+    //    jedes tiefere Fenster. Das ist der "Hintergrund durchreichen"
+    //    des Auftrags, und er kostet nichts extra.
+    var yy: u64 = 0
+    while yy < h {
+        let zeile: u64 = (y0 as u64 + yy) *% fb.pitch(state)
+        let quelle: u64 = fb.draw_at(state) +% zeile +% x0 as u64 *% 4
+        copy_words(a +% yy *% w *% 4, quelle, w *% 4 / 8)
+        if (w & 1) != 0 {
+            __mmio_write32((a +% yy *% w *% 4 +% (w - 1) *% 4) as *mut u32,
+                __mmio_read32((quelle +% (w - 1) *% 4) as *mut u32))
+        }
+        yy = yy + 1
+    }
+    // 2. ZWEIMAL Kasten, jedes Mal waagrecht und senkrecht. Zweimal
+    //    hintereinander ist optisch fast ein Gauss und kostet einen
+    //    Bruchteil.
+    blur_h(a, b, w, h, r)
+    blur_v(state, b, a, w, h, r)
+    blur_h(a, b, w, h, r)
+    blur_v(state, b, a, w, h, r)
+    // 3. Toenung und Rauschen, und dann hinaus. Beides in EINEM
+    //    Durchgang ueber die Flaeche -- und in denselben Puffer `b`
+    //    geschrieben, aus dem der naechste Treffer kopiert.
+    let tint: u64 = form(state, FM_BLURTINT)
+    let amp: u64 = form(state, FM_BLURNOISE)
+    var ry: u64 = 0
+    while ry < h {
+        let qz: u64 = a +% ry *% w *% 4
+        let zz: u64 = b +% ry *% w *% 4
+        var rx: u64 = 0
+        while rx < w {
+            let c: u64 = __mmio_read32((qz +% rx *% 4) as *mut u32) as u64
+            __mmio_write32((zz +% rx *% 4) as *mut u32,
+                blur_mix(c, ton, tint, amp, x0 as u64 + rx,
+                    y0 as u64 + ry) as u32)
+            rx = rx + 1
+        }
+        fb_row(state, x0 as u64, y0 as u64 + ry, zz, w)
+        ry = ry + 1
+    }
+    // 4. den Speicher anschreiben -- mit dem Zaehlerstand VON JETZT.
+    ss(state, S_BC_WIN + sl * 8, i + 1)
+    ss(state, S_BC_X + sl * 8, x0 as u64)
+    ss(state, S_BC_Y + sl * 8, y0 as u64)
+    ss(state, S_BC_W + sl * 8, w)
+    ss(state, S_BC_H + sl * 8, h)
+    ss(state, S_BC_HIT + sl * 8, gs(state, S_BC_GEN + sl * 8))
+    ss(state, S_BC_STAMP + sl * 8, gs(state, S_FRAME))
+    ss(state, S_BLURS, gs(state, S_BLURS) + 1)
+    ss(state, S_BLURPX, gs(state, S_BLURPX) + w *% h)
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t1: u64 = time.tsc()
+        if t1 > t0 {
+            ss(state, S_BLURUS, gs(state, S_BLURUS) + (t1 - t0) / (kh / 1000))
+        }
+    }
+}
+
+// ---------------------------------------------------------- die Ableser
+fn blurs(state: u64) -> u64 {
+    return gs(state, S_BLURS)
+}
+
+fn blur_cached(state: u64) -> u64 {
+    return gs(state, S_BLURCACHE)
+}
+
+fn blur_px(state: u64) -> u64 {
+    return gs(state, S_BLURPX)
+}
+
+fn blur_us(state: u64) -> u64 {
+    return gs(state, S_BLURUS)
+}
+
+fn blur_treffer(state: u64) -> u64 {
+    return gs(state, S_BLURCACHE)
+}
+
+fn blur_fehl(state: u64) -> u64 {
+    return gs(state, S_BLURS)
+}
+
+// Die Trefferquote in Prozent -- kopiert von allen Flaechen zusammen.
+// Sie steht hier und nicht im Auswerter, weil sie AUS ZWEI Zahlen
+// besteht und zwei Zahlen an zwei Stellen auseinander laufen.
+fn blur_quote(state: u64) -> u64 {
+    let ganz: u64 = gs(state, S_BLURS) + gs(state, S_BLURCACHE)
+    if ganz == 0 {
+        return 0
+    }
+    return gs(state, S_BLURCACHE) *% 100 / ganz
+}
+
+fn blur_frn(state: u64) -> u64 {
+    return gs(state, S_BLURS) + gs(state, S_BLURCACHE)
+}
+
+fn blur_frus(state: u64) -> u64 {
+    return gs(state, S_BLURUS)
+}
+
+fn blur_frmax(state: u64) -> u64 {
+    return gs(state, S_BLURPX)
+}
+
+fn blur_reset(state: u64) {
+    ss(state, S_BLURS, 0)
+    ss(state, S_BLURCACHE, 0)
+    ss(state, S_BLURPX, 0)
+    ss(state, S_BLURUS, 0)
+}
+
 fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let wx: i64 = win_x(state, i)
     let wy: i64 = win_y(state, i)
@@ -6000,6 +6932,20 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
     wsv(state, i, W_PX,
         wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+    // ====================================================== RUNDE BLUR
+    // DAS ACRYL LIEGT UNTER DEM FENSTER UND UEBER ALLEM, WAS SCHON
+    // GEMALT IST -- also genau hier: nach allen tieferen Fenstern und
+    // vor der ersten eigenen Fuellung. Dieselbe Stelle, an der Runde
+    // PAINT den Schatten einsetzt, und aus demselben Grund.
+    //
+    // Gemalt wird das AEUSSERE Rechteck des Fensters; was das Fenster
+    // danach selbst deckend darueber malt, verdeckt den Blur ohnehin.
+    // Sichtbar bleibt er dort, wo die Anwendung durchscheinen laesst --
+    // und die Leiste dieses Systems tut das.
+    if blur_will(state, i) {
+        blur_flaeche(state, i, wx, wy, wx + ow, wy + oh,
+            deco(state, DK_TITLE))
+    }
     // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
     // Die Flaeche der Anwendung faengt am aeusseren Rechteck an, und der
     // ganze Rest dieser Funktion entfaellt. Ein Schreibtisch mit
@@ -6015,11 +6961,15 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         let bw: u64 = wg(state, i, W_W)
         let bq: u64 = wg(state, i, W_BUF)
         let bn: u64 = (bx1 - bx0) as u64
+        // RUNDE BLUR: scheint das Fenster durch, wird gemischt statt
+        // kopiert -- sonst deckt es die Weichzeichnung wieder zu, die
+        // es selbst ausgeloest hat.
+        let op: u64 = win_opac(state, i)
         var br: i64 = by0
         while br < by1 {
-            fb_row(state, bx0 as u64, br as u64,
-                bq +% (br - wy) as u64 *% bw *% 4
-                +% (bx0 - wx) as u64 *% 4, bn)
+            let zoff: u64 = (br - wy) as u64 *% bw *% 4
+            let qz: u64 = bq +% zoff +% (bx0 - wx) as u64 *% 4
+            fb_row_mix(state, bx0 as u64, br as u64, qz, bn, op)
             br = br + 1
         }
         ss(state, S_BLITS, gs(state, S_BLITS) + 1)
@@ -6125,12 +7075,13 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let ww: u64 = wg(state, i, W_W)
     let quelle: u64 = wg(state, i, W_BUF)
     let n: u64 = (sx1 - sx0) as u64
+    let op2: u64 = win_opac(state, i)
     var r: i64 = sy0
     while r < sy1 {
         let zeile: u64 = (r - py0) as u64
         let spalte: u64 = (sx0 - px0) as u64
-        fb_row(state, sx0 as u64, r as u64,
-            quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+        fb_row_mix(state, sx0 as u64, r as u64,
+            quelle +% zeile *% ww *% 4 +% spalte *% 4, n, op2)
         r = r + 1
     }
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
