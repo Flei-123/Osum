@@ -1386,6 +1386,54 @@ fn shape_say() {
     nl()
 }
 
+// ==================================================== RUNDE GLAS
+// WAS DIE LEISTE VOM GLAS WEISS -- als eine Zeile, nach jeder
+// Aenderung.
+//
+// `shape_say` oben sagt, welche Formdatei gelesen wurde und welche
+// Radien darin stehen. Das genuegt ab dieser Runde nicht mehr: der
+// freie Radius aus `/etc/theme.conf` STICHT die Formdatei, und die
+// beiden Deckkraefte und das Milchglas stehen ueberhaupt nicht in ihr.
+// Eine Abnahme, die den Regler schiebt, braucht eine Stelle, an der
+// die vier Zahlen so stehen, wie die Leiste sie WIRKLICH benutzt --
+// nicht so, wie sie in einer Datei stehen.
+//
+// `key=` ist die Grundfarbe der Leistenflaeche als rrggbb. Sie ist die
+// Schluesselfarbe, gegen die der Kern das Abstandsalpha rechnet; steht
+// hier eine andere Zahl als in `wm: glas ... key=`, mischt der Kern
+// gegen etwas, das die Leiste nie gemalt hat, und die Schrift wuerde
+// durchsichtig. Deshalb hexadezimal und nicht dezimal: so ist sie ohne
+// Umrechnen mit der Farbe im Bild vergleichbar.
+static mut g_ga: [u8; 21] = "taskbar: glas alpha=\0"
+static mut g_gb: [u8; 7] = " blur=\0"
+static mut g_gc: [u8; 9] = " radius=\0"
+static mut g_gd: [u8; 6] = " key=\0"
+static mut g_hd: [u8; 17] = "0123456789abcdef\0"
+static mut g_hx: [u8; 7] = "000000\0"
+
+fn say_hex6(v: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        let d: u64 = (v >> ((5 - i) * 4)) & 15
+        g_hx[(i) as usize] = g_hd[(d) as usize]
+        i = i + 1
+    }
+    g_hx[(6) as usize] = 0
+    say((&g_hx[0 as usize]) as u64)
+}
+
+fn glas_say() {
+    say((&g_ga[0 as usize]) as u64)
+    sayn(wlibc.tb_alpha())
+    say((&g_gb[0 as usize]) as u64)
+    sayn(wlibc.tb_blur())
+    say((&g_gc[0 as usize]) as u64)
+    sayn(wlibc.radius())
+    say((&g_gd[0 as usize]) as u64)
+    say_hex6(wlibc.theme(wlibc.C_TASKBAR_BG) & 0xFFFFFF)
+    nl()
+}
+
 fn conf_say() {
     say((&s_cf[0 as usize]) as u64)
     say((&s_ed[0 as usize]) as u64)
@@ -3720,7 +3768,13 @@ fn sym_scale(sym: u64, h: u64) -> u64 {
 
 fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool, mark: u64, sym: u64) -> u64 {
-    let weich: bool = wlibc.metric(wlibc.M_RADIUS_BUTTON) != 0
+    // RUNDE GLAS: die Rundung kommt aus `wlibc.radius()` und nicht mehr
+    // aus der Formentabelle. Beides ist bei `radius=` in der Vorlage
+    // dieselbe Zahl -- `wlibc` schreibt den freien Radius in
+    // `M_RADIUS_*` hinein --, aber nur der Leser sagt AUSDRUECKLICH,
+    // welchen Wert dieser Knopf meint, und nur so faellt auf, wenn der
+    // Regler einmal nicht ankommt.
+    let weich: bool = wlibc.radius() != 0
         || wlibc.metric(wlibc.M_DIVIDER) < 50
     var fg: u64 = wlibc.theme(wlibc.T_FG)
     // ============================================== RUNDE VEKTOR
@@ -3744,8 +3798,12 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         && zy >= oy + y && zy < oy + y + h
     let gedrueckt: bool = drauf && (wlibc.mouse_btn() & 1) != 0
     if weich {
-        // die Kachel
-        let r: u64 = wlibc.metric(wlibc.M_RADIUS_BUTTON)
+        // die Kachel -- ihren Eckradius holt sich `wlib.draw_board`
+        // selbst aus `draw_radius(MR_BUTTON)`, und das ist ab dieser
+        // Runde derselbe Wert wie `wlibc.radius()`. Hier stand bis
+        // eben noch eine zweite Abfrage der Formentabelle, deren
+        // Ergebnis niemand benutzt hat; zwei Quellen fuer dieselbe
+        // Zahl sind genau der Fehler, den diese Runde abstellt.
         if on {
             var af: u64 = wlibc.theme(wlibc.C_BUTTON_HOVER)
             if gedrueckt {
@@ -3921,7 +3979,10 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // und die alten Bildpunktzusagen der Leiste bleiben Zahl fuer Zahl
 // gueltig.
 fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
-    let weich: bool = wlibc.metric(wlibc.M_RADIUS_BUTTON) != 0
+    // RUNDE GLAS: dieselbe Quelle wie beim Knopf darueber
+    // (`wlibc.radius()`), damit Pille und Kachel nicht bei zwei
+    // verschiedenen Zahlen anfangen, rund zu werden.
+    let weich: bool = wlibc.radius() != 0
         || wlibc.metric(wlibc.M_DIVIDER) < 50
     if !weich || w < 12 || h < 6 {
         return
@@ -3995,25 +4056,34 @@ fn put_n(p: u64, n: u64) {
 fn paint_band(y0: u64, hh: u64, report: bool) {
     wlibc.set_band(y0)
     wlibc.clip_set(0, y0, win_w, y0 + hh)
-    // RUNDE SOFTUI: DER VERLAUF DER LEISTE. Dieselbe Regel wie in der
-    // Titelleiste (kernel/wm.fi, `paint_title`): die oberste Zeile ist
-    // die dunkelste, die unterste traegt die Themafarbe unveraendert,
-    // und die Staerke ist auf den Spielraum der Farbe begrenzt, damit
-    // kein Kanal anschlaegt. `grad = 0` -- also `classic` -- ist EIN
-    // `rect`, genau wie vorher.
+    // ================================================== RUNDE GLAS
+    // DER GRUND DER LEISTE IST EINE EINZIGE FARBE, UND ZWAR GENAU DIE,
+    // DIE DER KERN ALS SCHLUESSELFARBE BEKOMMT.
+    //
+    // Bis zu dieser Runde lag hier der Verlauf der Runde SOFTUI: die
+    // oberste Zeile um `grad_room` abgedunkelt, die unterste in der
+    // Themafarbe, Zeile fuer Zeile dazwischen. Das war richtig, solange
+    // die Leiste deckend auf den Schirm kopiert wurde.
+    //
+    // Mit der Transparenz ist es ein Fehler. Der Kern mischt die Leiste
+    // nach dem ABSTANDSALPHA (PLAN.md, Abschnitt 3): ein Bildpunkt
+    // bekommt `taskbar_alpha`, wenn er der Schluesselfarbe gleicht, und
+    // umso mehr Deckung, je weiter er von ihr abweicht -- so bleibt die
+    // Schrift voll deckend und ihr Kontrast der von heute. Eine
+    // abgedunkelte Verlaufszeile ist fuer diese Rechnung nicht von einem
+    // Buchstaben zu unterscheiden: der Verlauf wuerde oben deckend und
+    // unten durchsichtig, also als harter Balken stehenbleiben, und der
+    // gemessene Kontrast der Schrift waere nicht mehr gegen den Grund
+    // gerechnet, den sie wirklich hat.
+    //
+    // Also: EINE Farbe, `C_TASKBAR_BG`. Sie ist Oktett fuer Oktett
+    // dieselbe wie `C_PANEL_BG` -- beide loesen ueber `comp_role` nach
+    // `S_SURFACE_RAISED` auf (kernel/user/wlibc.fi:3238 und :3258) --
+    // und `C_PANEL_BG` ist genau der Wert, den `wlibc.form_push` als
+    // `GLASS_KEY` an den Kern gibt. Die Zeile `taskbar: glas ... key=`
+    // unten druckt ihn, damit das niemand glauben muss.
     let gbase: u64 = wlibc.theme(wlibc.C_TASKBAR_BG)
-    let gd: u64 = wlibc.grad_room(gbase, wlibc.metric(wlibc.M_GRAD))
-    if gd == 0 || hh < 2 {
-        wlib.draw_area(0, y0, win_w, hh, gbase)
-    } else {
-        var gy: u64 = 0
-        while gy < hh {
-            let rest: u64 = gd * (hh - 1 - gy) / (hh - 1)
-            wlib.draw_area(0, y0 + gy, win_w, 1,
-                wlibc.shade(gbase, rest))
-            gy = gy + 1
-        }
-    }
+    wlib.draw_area(0, y0, win_w, hh, gbase)
     // the hairline on the side that faces the desktop
     if cf_edge == wlibc.WE_BOTTOM {
         wlib.draw_line(0, 0, win_w, wlibc.theme(wlibc.C_BORDER))
@@ -6209,6 +6279,10 @@ fn u_start(args: u64) -> u64 {
     say((&s_fm[0 as usize]) as u64)
     sayn(wlibc.form_push())
     nl()
+    // RUNDE GLAS: und was gerade gepusht wurde, gleich im Klartext --
+    // ein Lauf, der die Leiste nur bootet und ein Bild nimmt, hat damit
+    // ebenfalls die vier Zahlen und muss sie nicht aus dem Bild raten.
+    glas_say()
     if once {
         return 0
     }
@@ -6404,7 +6478,24 @@ fn u_start(args: u64) -> u64 {
                 say((&s_dk2[0 as usize]) as u64)
                 sayn(wlibc.deco_push())
                 nl()
+                // ==================================== RUNDE GLAS
+                // DIESER `form_push` IST DER GANZE UNTERSCHIED
+                // ZWISCHEN "SOFORT" UND "NACH DEM NEUSTART".
+                //
+                // Die vier neuen Zahlen (Radius, die beiden
+                // Deckkraefte, das Milchglas) leben im Kern in den
+                // Formplaetzen; `wlibc` kennt sie nach einem
+                // `theme_poll` sofort, der Kern aber erst, wenn sie
+                // ihm jemand schickt. Nur die Leiste darf das
+                // (WM_FORM haengt wie WM_DECO am Leistenrecht) --
+                // laeuft diese Zeile nicht nach JEDER erkannten
+                // Aenderung, schiebt Justin den Regler und nichts
+                // geschieht, bis die Maschine neu startet.
                 let _fk: u64 = wlibc.form_push()
+                // Und danach die Zahlen auf die Leitung, damit die
+                // Abnahme "der Regler ist angekommen" nicht aus dem
+                // Bild raten muss.
+                glas_say()
                 fresh = true
                 // ================================ RUNDE ECHTHARDWARE-5
                 // UND DAS KONTROLLZENTRUM GLEICH MIT.
