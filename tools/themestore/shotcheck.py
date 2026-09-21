@@ -10,7 +10,14 @@ had. So this asks a picture the three questions a person asks, in
 numbers:
 
     shotcheck.py <shot.ppm|png> <serial.txt> --window=x,y,w,h [--win=N]
-                 [--leiste]
+                 [--leiste] [--linien] [--knoepfe]
+
+`--knoepfe` fragt jeden gemeldeten Knopf (`wlib: knopf ...`), ob er im
+Bild ueberhaupt einen Umriss hat -- eine Flaeche in Weiss auf einer
+Karte in fast Weiss ist von einer Beschriftung nicht zu unterscheiden,
+und genau so sah der Knopf "Uebernehmen" der Seite Darstellung aus. Die
+Zahlen `knopf` und `ohnekante` stehen immer in der Ausgabezeile; in den
+Rueckgabewert gehen sie nur mit diesem Schalter ein.
 
 `--leiste` stellt dieselben drei Fragen zusaetzlich an die Taskleiste
 (RUNDE GLAS, Nachtrag -- bis dahin hat dieses Werkzeug GENAU EIN

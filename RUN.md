@@ -145,6 +145,34 @@ dem vorderen Leistenknopf gegen die gemessene Breite seiner
 Beschriftung: Anfang und Laenge kommen jetzt aus derselben Messung wie
 der Text (`taskbar: pille x= w= tx= tw=`).
 
+**Und drei, die seit fix-r3-2 dazugekommen sind.**
+`shotcheck.py --knoepfe` fragt fuer JEDEN gemeldeten Knopf
+(`wlib: knopf x= y= w= h= r= ax= ay=`), ob im Bild an seinen vier
+Kanten ueberhaupt ein Umriss steht — eine Linie oder wenigstens eine
+Farbstufe zwischen Flaeche und Umgebung. Der Knopf „Uebernehmen" der
+Seite Darstellung hatte keinen: fUi malt flach, Weiss auf `#f8fafc`,
+und niemand konnte ihn von einer Beschriftung unterscheiden. Die Zahlen
+stehen als `knopf N  ohnekante M` in der Zeile des Pruefers, und der
+Lauf haelt eine Gegenprobe dagegen (ein auf dem Wirt flach uebermalter
+Knopf MUSS gefunden werden).
+`glascheck.py fenster <bild> <serial>` stellt der Fensterschrift
+dieselbe Frage, die Abschnitt 11d der Leistenschrift stellt: Kontrast
+gegen den Grund, der WIRKLICH unter ihr liegt. Abschnitt 11j faehrt
+dafuer `window_alpha=55` ueber einem gemusterten Bild; gemessen wird
+das schlechteste Paar (5,16:1), und eine Gegenprobe gegen
+`window_alpha=100` belegt, dass dabei wirklich gemischt wurde (39 120
+abweichende Bildpunkte). Damit unter einem durchsichtigen Fenster kein
+fremder Text durch die Reiterzeile laeuft, ist die Lesbarkeitsschranke
+fuer gewoehnliche Fenster halb so weit wie fuer die Leiste
+(`SCHLEIER_WIN = 20` gegen `SCHLEIER = 40`, kernel/ui/wm.fi) — der
+Selbsttest `wm: glastest 8 / 8` rechnet beide Faelle von Hand nach.
+Und Abschnitt 8 misst seit fix-r3-2 **jedes** gemeldete Rechteck ausser
+`win` gegen Innenhoehe und Innenbreite: der Namensfilter `^w[a-z][a-z]$`
+hat die zwei Karten und die fuenf Bedienelemente mit Sachnamen (`edge`,
+`size`, `autohide`, `ontop`, `apply`) still uebersprungen. Die Zahl der
+gemessenen Rechtecke (100) steht jetzt als eigene Zusage daneben, damit
+ein neuer Filter auffaellt.
+
 ## 4. Einstellen im laufenden System
 
 Einstellungen → Reiter **Darstellung**, rechte Spalte unten: vier

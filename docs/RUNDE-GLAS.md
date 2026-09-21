@@ -671,6 +671,69 @@ gueltig.
 
 ---
 
+## 9e. Nachtrag nach der Jury: der Knopf, das durchsichtige Fenster und der stille Filter
+
+Vier Befunde, vier Zahlen (fix-r3-2).
+
+**Der Knopf "Uebernehmen" sah aus wie eine Beschriftung.** Er IST seit
+jeher ein `wlib.button` — die Rolle war nie falsch. Gemalt hat ihn
+aber fUi (`fuib.draw(S_BUTTON)`), und das malt flach: Flaeche
+`#ffffff` auf einer Karte `#f8fafc`, neun Helligkeitsstufen
+Unterschied, kein Rand. Der Rueckweg in `wlib` rahmt selbst; der
+fUi-Zweig tat es nicht, und damit hing das Aussehen eines
+Bedienelements davon ab, welcher von zwei Malern gerade lief.
+`paint_button` merkt sich jetzt, ob der malende Zweig gerahmt hat
+(`gerahmt`), und legt sonst mit `fuib.ring` eine Kante in `T_LINE` mit
+demselben Radius nach — eine Stelle, ein Ring, kein zweiter Maler.
+Gemessen wird es im Bild und nicht im Quelltext: `wlib.say_knopf`
+meldet Rechteck, Radius und Ecke auf dem Schirm, `shotcheck.py
+--knoepfe` sieht an den vier Kanten nach (Linie 227,233,240 zwischen
+zweimal 246,247,247) und zaehlt `knopf`/`ohnekante`. Abschnitt 11j2:
+zwei Seiten, `ohnekante 0`, und die Gegenprobe (derselbe Knopf auf dem
+Wirt flach uebermalt) wird gefunden.
+
+**Unter einem durchsichtigen Fenster lief fremder Text durch die
+Reiterzeile.** Die Lesbarkeitsschranke `glass_mix` gilt seit der Runde
+fuer Leiste UND Fenster, aber mit derselben Zahl: 40 Helligkeitsstufen
+Abstand von der Fensterfarbe. Das ist fuer eine Leiste mit drei kurzen
+Beschriftungen ein Hauch und in einer Zeile Schrift ein zweiter Text —
+auf Bild 13 (`window_alpha=55`) stand die USB-Zeile des Terminals
+lesbar zwischen "Sprache" und "Vorlagen". `SCHLEIER_WIN = 20` ist die
+Zahl fuer gewoehnliche Fenster; sie steht als ARGUMENT von `glass_mix`
+und nicht als stille Statische, damit nicht der letzte Aufrufer ueber
+das Bild des naechsten entscheidet. Selbsttest 8 rechnet den Fall von
+Hand nach (`0xED` gegen `0xD8` der Leiste, `wm: glastest 8 / 8`).
+Gemessen (Abschnitt 11j, `glascheck.py fenster`): 31 Beschriftungen,
+schlechtestes Paar **5,16:1** (das ist die ausgewaehlte Listenzeile auf
+der Akzentfarbe, also kein Fall von Transparenz); die Reiter selbst
+steigen von 5,26:1 auf **6,34:1**. Gegenprobe gegen `window_alpha=100`:
+39 120 abweichende Bildpunkte — es wird wirklich gemischt, "lesbar"
+heisst hier nicht "deckend".
+
+**Abschnitt 8 hatte einen stillen Filter.** Das Muster
+`^w[a-z][a-z]$` liess genau die Rechtecke aus, die einen SACHnamen
+tragen: die zwei Karten (`kartel`, `karter`) und die fuenf Elemente,
+auf die ein Laeufer klickt (`edge`, `size`, `autohide`, `ontop`,
+`apply`). Gemessen wird jetzt jedes gemeldete Rechteck ausser `win`,
+gegen Innenhoehe UND Innenbreite, und die ZAHL der gemessenen
+Rechtecke (**100**, gefordert >= 88) steht als eigene Zusage daneben:
+faellt sie, hat wieder jemand gefiltert.
+
+**Und die Platte der Abnahme war zu klein geworden.** Zehn Programme
+(7,6 MiB) plus drei Schriften plus ein Hintergrundbild passen nicht in
+16 384 Bloecke; `mkfs: the disk is full` traf ausgerechnet die Laeufe
+mit `wallpaper=`, also die, die Durchsicht ueberhaupt belegen koennen.
+32 768 Bloecke, die Zahl, mit der `tools/look/shot.sh` und
+`tools/wmplug/*.sh` seit Runden bauen.
+
+Bild 11 heisst jetzt `11-dunkles-bild-leiste-soll40-wirkt82-
+kontrast.png` — der Name sagt, dass dort 82 wirkt und nicht 40 —, und
+der Lauf `dunkelmod` ist als **Bild 21** dazugekommen: dunkles Schema
+auf dunklem Bild, `var 4218`, Schrift 13,09:1. Das ist die Aufnahme,
+auf der Reglerstellung 40 und Durchsicht zugleich gelten.
+
+---
+
 ## 10. Wo was steht
 
 | Datei | Was dieser Runde gehoert |
@@ -682,8 +745,8 @@ gueltig.
 | `kernel/user/taskbar.fi` | die Leiste mischt; Beschriftung, `tw=` (Nachtrag) |
 | `kernel/user/settings.fi` | die vier Regler auf "Darstellung" |
 | `tools/themestore/run.sh` | Abschnitt 11, 55 neue Zusagen |
-| `tools/themestore/glascheck.py` | die zweite Rechnung auf dem Wirt |
-| `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag), `--linien` (Bildpunktprobe auf Rahmenlinien) |
+| `tools/themestore/glascheck.py` | die zweite Rechnung auf dem Wirt; `fenster` misst jede Fensterbeschriftung gegen den gemischten Grund |
+| `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag), `--linien` (Bildpunktprobe auf Rahmenlinien), `--knoepfe` (jeder Knopf zeigt einen Umriss) |
 | `tools/themestore/leistenvergleich.py` | Bild 12, beschriftet und mit gemessener `var` |
 | `tools/themestore/namecheck.py` | der Kachelname gegen `name=` der Vorlage, Glyphe fuer Glyphe gegen `tools/ttf/raster.py` |
 | `docs/shots/glas/` | die 15 Aufnahmen und ihre Tabelle |
