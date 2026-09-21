@@ -401,7 +401,38 @@ if [ -n "$clicks" ]; then
     # what it costs to get it wrong.
     python3 tools/themestore/click.py $clicks > "$OUT/mon.txt" 2>"$OUT/click.err"
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" > "$OUT/click.log" 2>&1
-    sleep 2
+    # ... AND THEN WAIT UNTIL THE GUEST HAS STOPPED TALKING (fix-r3-4).
+    #
+    # Here stood `sleep 2`, and two seconds is a GUESS about a machine
+    # under TCG: it held on an idle host and did not hold when four
+    # runs shared it. MEASURED on this host, same disk, same click:
+    # idle the settings page reported 34 texts and 6 buttons, under a
+    # load of eleven it reported 11 and 0 -- the click had switched the
+    # page (`settings: stand reiter=7` is in the log) and the picture
+    # was taken before it was painted. Four green assertions went red
+    # without a single line of the system changing.
+    #
+    # So the wait asks the GUEST instead of the clock: as long as the
+    # serial log is still growing, it is still working. Two quiet
+    # halves of a second in a row mean the repaint is over; after
+    # twelve seconds it goes on anyway, because a runner that hangs
+    # forever is worse than a runner that measures a half-painted
+    # window and says so.
+    LAST=-1
+    QUIET=0
+    j=0
+    while [ $j -lt 24 ]; do
+        sleep 0.5
+        NOW=$(stat -c %s "$OUT/serial.txt" 2>/dev/null || echo 0)
+        if [ "$NOW" = "$LAST" ]; then
+            QUIET=$((QUIET+1))
+            [ "$QUIET" -ge 2 ] && break
+        else
+            QUIET=0
+        fi
+        LAST=$NOW
+        j=$((j+1))
+    done
 fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
