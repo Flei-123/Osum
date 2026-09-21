@@ -1159,15 +1159,26 @@ for d in dunkel dblur dunkel2; do
     AL=$(grep -a 'wm: glas alpha_soll=' "$TMPD/$d/serial.txt" | tail -1)
     SOLL=$(printf '%s' "$AL" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
     IST=$(printf '%s' "$AL" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
-    FAB=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png" \
-          | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
-    echo "        $d: soll=${SOLL:-?} ist=${IST:-?} farben=${FAB:-?}"
+    VZ=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png")
+    FAB=$(printf '%s' "$VZ" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
+    VAR=$(printf '%s' "$VZ" | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+    echo "        $d: soll=${SOLL:-?} ist=${IST:-?} $VZ"
     same "$d: der Lauf meldet die Reglerstellung, die er bekommen hat" \
         "40" "${SOLL:-}"
-    if [ "${FAB:-0}" -ge 2 ] 2>/dev/null; then
-        ok "$d: das Bild scheint unter der Leiste durch (Gruende: $FAB)"
+    # ENTWEDER MAN SIEHT ES, ODER ES STEHT DA.
+    #
+    # "Mehr als eine Farbe unter der Leiste" ist als Beleg fuer
+    # Durchsicht zu wenig: ueber dem dunklen Schachbrett sind es zwei,
+    # und die beiden unterscheiden sich um eine Helligkeitsstufe
+    # (`var 24`). Das sieht kein Mensch. Die Schwelle ist deshalb die
+    # Streuung: ueber 100 ist das Muster im Bild zu erkennen (hell bei
+    # 40 %: var 6389), darunter ist die Leiste praktisch deckend -- und
+    # dann MUSS die Anhebung gemeldet sein, sonst faehrt hier ein Lauf
+    # unter dem Namen "40 %" und malt etwas anderes.
+    if [ "${VAR:-0}" -gt 100 ] 2>/dev/null; then
+        ok "$d: das Bild scheint unter der Leiste durch (var $VAR, $FAB Gruende)"
     else
-        num "$d: dann ist die Anhebung gemeldet (ist > soll)" \
+        num "$d: die Leiste ist praktisch deckend, also ist die Anhebung gemeldet" \
             "${IST:-0}" gt "${SOLL:-100}"
     fi
     # UND DIE WIRKSAME ZAHL IST NIE KLEINER ALS DIE GEWUENSCHTE. Waere
