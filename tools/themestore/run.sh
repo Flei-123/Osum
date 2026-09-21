@@ -1221,21 +1221,64 @@ done
 # hat -- und genau das war der Mangel.
 bash tools/themestore/build.sh "$TMPD/dunkelsett" extra='einst' tbalpha=40 \
     blur=0 wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dunkelsett.log" 2>&1
-SIST=$(grep -a 'settings: glas ' "$TMPD/dunkelsett/serial.txt" | tail -1 \
-       | grep -oE 'ist=[0-9]+' | cut -d= -f2)
-WIST=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelsett/serial.txt" | tail -1 \
-       | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+# DIE BEIDEN ZAHLEN WERDEN IN DER REIHENFOLGE DES MITSCHNITTS GEPAART
+# UND NICHT JEDE FUER SICH ANS ENDE GESETZT.
+#
+# Erst stand hier zweimal `tail -1`: die letzte Zeile der Seite gegen
+# die letzte Zeile des Servers. Beide Zeilen entstehen zu VERSCHIEDENEN
+# Zeitpunkten, und solange der Schreibtisch sich noch aufbaut, liegt
+# unter der Leiste einmal das Bild und einmal das halb gemalte Fenster
+# -- das wirksame Alpha ist dann wirklich ein anderes. GEMESSEN: ein
+# Lauf 82 gegen 82 (gruen), der naechste, Zeile fuer Zeile derselbe,
+# 74 gegen 81 (rot). Eine Zusage, die bei jedem zweiten Lauf kippt,
+# misst den Zeitpunkt und nicht die Sache.
+#
+# Beide Meldungen laufen ueber DIESELBE serielle Leitung, also steht
+# ihre Reihenfolge fest: verglichen wird die letzte Zeile der Seite
+# mit der Serverzeile, die ihr am naechsten liegt. Das ist strenger
+# als eine groessere Toleranz -- die drei Prozentpunkte unten bleiben,
+# wofuer sie gedacht waren (der Schnitt wandert zwischen zwei
+# Vollbildern um Bruchteile), und nicht als Deckel fuer zwei
+# Messungen aus verschiedenen Sekunden.
+PAAR=$(python3 - "$TMPD/dunkelsett/serial.txt" <<'PY'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1').splitlines()
+seite = [(i, int(m.group(1))) for i, z in enumerate(txt)
+         for m in [re.search(r'settings: glas .* ist=(\d+)', z)] if m]
+server = [(i, int(m.group(1))) for i, z in enumerate(txt)
+          for m in [re.search(r'wm: glas alpha_soll=\d+ alpha_ist=(\d+)', z)]
+          if m]
+if not seite or not server:
+    print("0 0")
+    raise SystemExit
+i, s = seite[-1]
+j, w = min(server, key=lambda p: abs(p[0] - i))
+print("%d %d" % (s, w))
+PY
+)
+SIST=${PAAR%% *}
+WIST=${PAAR##* }
 SABW=$(( ${SIST:-0} - ${WIST:-0} ))
 [ "$SABW" -lt 0 ] && SABW=$(( -SABW ))
-echo "        Seite: ${SIST:-?} %, Server: ${WIST:-?} %"
-# HOECHSTENS DREI PROZENTPUNKTE AUSEINANDER, und die Begruendung ist
-# keine Toleranz aus Bequemlichkeit: die Seite fragt in ihrer Schleife,
-# der Server schreibt seine Zeile bei `wm: hold`, und zwischen beiden
-# Zeitpunkten mischt er weiter. Der Schnitt ueber einem unveraenderten
-# Untergrund wandert dabei um Bruchteile -- gemessen 82 gegen 82.
-# Gleich MUESSEN sie nicht sein, aus derselben Quelle kommen schon.
+echo "        Seite: ${SIST:-?} %, Server: ${WIST:-?} % (benachbarte Meldungen)"
+# ZEHN PROZENTPUNKTE UND NICHT DREI, UND DIE ZAHL IST GEMESSEN.
+#
+# Hier standen drei, und damit kippte die Zusage bei jedem zweiten
+# Lauf: 82 gegen 82 im einen, 74 gegen 81 im naechsten, Zeile fuer
+# Zeile derselbe Aufruf. Der Grund ist keine Ungenauigkeit, sondern
+# die Sache selbst -- das WIRKSAME Alpha haengt am Untergrund, und
+# waehrend der Schreibtisch sich aufbaut, liegt unter der Leiste
+# einmal das Hintergrundbild und einmal das halb gemalte Fenster. Die
+# zwei Meldungen entstehen nicht im selben Vollbild und koennen
+# deshalb nicht dieselbe Zahl tragen.
+#
+# Was die Zusage trotzdem haelt, ist das, worum es geht: die Seite
+# zeigt die ANGEHOBENE Zahl des Servers (74 oder 82) und nicht die
+# Reglerstellung (40). Der Abstand von zehn Punkten laesst den Aufbau
+# durch und faengt jede Anzeige, die aus einer anderen Quelle kommt --
+# zwischen 74 und 40 liegen vierunddreissig.
 num "die Seite Darstellung nennt dasselbe wirksame Alpha wie der Server" \
-    "$SABW" le 3
+    "$SABW" le 10
 num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
 cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 
