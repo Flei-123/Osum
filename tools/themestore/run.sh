@@ -474,6 +474,65 @@ print(n)
 PYX
 )
 num "Widgets, die aus ihrem Fenster ragen (Runde LOOK: 132 Bildpunkte fehlten)" "$OVER" eq 0
+# ---------------------------------------- RUNDE GLAS (nachtrag): DIE WAAGERECHTE
+#
+# Abschnitt 8 hat bis hierher NUR die Hoehe gemessen. Die Breite war
+# damit unbeobachtet -- und genau dort sass der Fehler dieser Runde:
+# die vier Regler standen bei x=316..744, ihre Karte endete bei x=696,
+# also lagen Regler und Zahlenanzeige neben ihrem eigenen Untergrund.
+# Ein Bild zeigt das sofort, eine Hoehenpruefung nie.
+#
+# Zwei Massstaebe, weil es zwei Fehler sind: `x+w` gegen die
+# INNENBREITE des Fensters faengt das Widget, das aus dem Fenster
+# laeuft; `x+w` gegen die Karte, auf der es liegt, faengt das Widget,
+# das im Fenster bleibt und trotzdem neben seiner Flaeche schwebt. Die
+# Karten melden ihr Rechteck selbst (`settings: rect name=kartel/karter`),
+# damit hier nichts nachgerechnet wird, was das Programm schon weiss.
+IWIN=$(( ${WW:-760} - 4 ))
+HOVER=$(python3 - "$IWIN" "$SE" "$SEV" <<'PYX'
+import re, sys
+innen = int(sys.argv[1])
+RE = re.compile(r'settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)')
+n = 0
+for path in sys.argv[2:]:
+    txt = open(path, 'rb').read().decode('latin1')
+    karten = {}
+    rects = []
+    for m in RE.finditer(txt):
+        r = (m.group(1), int(m.group(2)), int(m.group(3)),
+             int(m.group(4)), int(m.group(5)))
+        if r[0] in ('kartel', 'karter'):
+            karten[r[0]] = r
+        elif r[0] != 'win' and re.match(r'^w[a-z][a-z]$', r[0]):
+            rects.append(r)
+    for (nm, x, y, w, h) in rects:
+        if x + w > innen:
+            print("        breit: %s in %s endet bei %d, das Fenster ist %d "
+                  "breit" % (nm, path.split('/')[-2], x + w, innen),
+                  file=sys.stderr)
+            n += 1
+        # Auf welcher Karte liegt es? Die, deren Rechteck seine Mitte
+        # enthaelt. Widgets ueber beiden Spalten (Reiterleiste,
+        # Statuszeile) liegen auf keiner und werden nur gegen das
+        # Fenster gemessen.
+        mx, my = x + w // 2, y + h // 2
+        for k in karten.values():
+            if k[1] == x and k[2] == y and k[3] == w and k[4] == h:
+                continue
+            if not (k[1] <= mx < k[1] + k[3] and k[2] <= my < k[2] + k[4]):
+                continue
+            if x < k[1] or x + w > k[1] + k[3]:
+                print("        karte: %s in %s liegt bei %d..%d, die Karte %s "
+                      "bei %d..%d" % (nm, path.split('/')[-2], x, x + w, k[0],
+                                      k[1], k[1] + k[3]), file=sys.stderr)
+                n += 1
+print(n)
+PYX
+)
+num "Widgets, die ueber die Fensterbreite oder ueber ihre Karte hinausragen" \
+    "$HOVER" eq 0
+KARTEN=$({ grep -ac 'settings: rect name=kart' "$SE" || true; })
+num "und die Karten melden ihr Rechteck selbst" "${KARTEN:-0}" ge 2
 TABS=$(grep -aoc 'wlib: tab i=' "$SE" || true)
 num "die Reiterleiste meldet ihre Reiter" "$TABS" ge 8
 TABOUT=$(python3 - "$SE" <<'PY'
