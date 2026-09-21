@@ -30,11 +30,13 @@ Ausgabezeile `shotcheck: leiste ...` und geht in den Rueckgabewert ein.
   3. OVERLAPPING. Two reported texts must not have ink in the same
      pixel.
 
-  4. CUT SHORT. Every line says how many octets were painted (`nq=`)
-     and how many the label really has (`nv=`). Fewer painted than
-     meant is a shortening: it is counted as `gekuerzt`, and if it
-     happened WITHOUT the three dots that tell a reader something is
-     missing, it is a silent cut and counts as `cut`.
+  4. CUT SHORT. Every line says how many octets OF THE LABEL are on
+     the screen (`nq=`) and how many the label really has (`nv=`); the
+     three dots of an elision are not part of the label and do not
+     count. Fewer on the screen than meant is a shortening: it counts
+     as `gekuerzt`, and if it happened WITHOUT the three dots that tell
+     a reader something is missing, it is a silent cut and counts as
+     `cut`.
 
 THREE THINGS THAT HAD TO BE GOT RIGHT BEFORE THE NUMBERS MEANT ANYTHING,
 and every one of them produced a false failure first:
@@ -161,6 +163,15 @@ BARTEXT = re.compile(
     r" tw=(\d+) t=(.*)")
 BARWIN = re.compile(
     r"taskbar: STEHT x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+# Die Rechtecke, in denen die Beschriftungen der Leiste stehen: der
+# Startknopf, jeder Fensterknopf, jedes Statusfeld. Ein Text, der ueber
+# das Rechteck hinausreicht, in dem er gemalt wird, wird vom Nachbarn
+# ueberdeckt -- so ist aus "Start" das "Sta" auf der ersten Aufnahme des
+# Nachtrags geworden. Das ist dieselbe Frage wie "verlaesst die Tinte
+# ihr Fenster", eine Ebene tiefer gestellt.
+BARRECT = re.compile(
+    r"taskbar: (?:(start)|btn i=\d+ id=\d+|field (\w+)|pin \S+) "
+    r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 
 
 def parse_bar(path):
@@ -175,13 +186,32 @@ def parse_bar(path):
     for m in BARWIN.finditer(body):
         bar = dict(x=int(m.group(1)), y=int(m.group(2)),
                    w=int(m.group(3)), h=int(m.group(4)))
+    # NUR DER LETZTE MALDURCHGANG. Die Leiste malt bei jedem
+    # Uhrenwechsel neu, und ihr Durchgang endet mit dem Startknopf.
+    # Ohne diesen Schnitt stehen zwei Uhrzeiten an derselben Stelle im
+    # Mitschnitt -- die von 10:27 und die von 10:28 --, und dieses
+    # Werkzeug meldete eine Ueberlappung einer Zeile mit sich selbst zu
+    # einem frueheren Zeitpunkt. Genau derselbe Fehler, den `parse`
+    # weiter oben mit `--cut=` fuer die Fenster loest.
+    stellen = [m.start() for m in
+               re.finditer(r"taskbar: text start ", body)]
+    if len(stellen) > 1:
+        body = body[stellen[-2] + 1:]
+    # Und dann gilt je STELLE der letzte Bericht: zwei Knoepfe tragen
+    # dieselbe Marke `button` und unterscheiden sich nur in ihrem x.
     last = {}
     for m in BARTEXT.finditer(body):
-        last[(m.group(1), m.group(7))] = dict(
+        last[(m.group(1), int(m.group(2)))] = dict(
             kind=m.group(1), x=int(m.group(2)), base=int(m.group(3)),
             fg=int(m.group(4)), bg=int(m.group(5)), tw=int(m.group(6)),
             t=m.group(7))
-    return [t for t in last.values() if t["t"].strip()], bar
+    rechtecke = {}
+    for m in BARRECT.finditer(body):
+        rechtecke[(m.group(1) or m.group(2) or "btn", int(m.group(3)))] = (
+            int(m.group(3)), int(m.group(4)),
+            int(m.group(5)), int(m.group(6)))
+    return ([t for t in last.values() if t["t"].strip()], bar,
+            list(rechtecke.values()))
 
 
 def parse(path, marke="settings: rect name=waa "):
@@ -206,8 +236,9 @@ def parse(path, marke="settings: rect name=waa "):
         if not m:
             continue
         # RUNDE GLAS (nachtrag): WIE VIEL VON DEM TEXT UEBRIG BLIEB.
-        # `nq` sind die wirklich gemalten Oktette, `nv` die des
-        # ungekuerzten Textes; wer nicht kuerzt, meldet beide gleich.
+        # `nq` sind die Oktette des Namens, die auf dem Schirm stehen
+        # (die drei Punkte einer Kuerzung zaehlen nicht mit), `nv` die
+        # des ungekuerzten Textes; wer nicht kuerzt, meldet beide gleich.
         # Aeltere Mitschnitte haben die zwei Felder nicht -- dann gilt
         # "nicht gekuerzt", und diese Datei misst wie vorher.
         k = KURZ.search(raw)
@@ -298,7 +329,7 @@ def leiste_messen(pic, serial, asc, desc):
     Rueckgabe: (Zahl der Texte, gemessen, leer, abgeschnitten,
     ueberlappend, Liste der Befunde).
     """
-    texts, bar = parse_bar(serial)
+    texts, bar, rechtecke = parse_bar(serial)
     if bar is None:
         return 0, 0, 0, 0, 0, ["LEISTE keine `taskbar: STEHT`-Zeile "
                                "im Mitschnitt -- uitrace aus?"]
@@ -337,23 +368,29 @@ def leiste_messen(pic, serial, asc, desc):
     # Der Fall, der diese Zeilen gekostet hat: der Startknopf war 40
     # Bildpunkte breit, "Start" braucht mit seinem Zeichen 61, und der
     # Fensterknopf daneben hat die letzten zwei Buchstaben einfach
-    # ueberdeckt -- auf dem Bild stand "Sta". Die TINTE ueberlappt
-    # dabei nicht, weil der Nachbar zuerst gemalt hat und danach
-    # niemand mehr; nur die gemeldeten Kaesten tun es. Zwei
-    # Beschriftungen derselben Zeile, deren gemeldete Breiten
-    # ineinanderragen, sind deshalb ein Mangel und werden bei `cut`
-    # gezaehlt -- abgeschnitten ist genau das, was dort passiert.
-    reihe = sorted(texts, key=lambda t: t["x"])
-    for i in range(len(reihe) - 1):
-        a, b = reihe[i], reihe[i + 1]
-        if a["base"] != b["base"]:
+    # ueberdeckt -- auf dem Bild stand "Sta". Die TINTE ueberlappt dabei
+    # NICHT: der Nachbar hat zuerst gemalt und danach niemand mehr, also
+    # ist dort, wo das "rt" stehen sollte, sauberer Knopfgrund. Nur die
+    # gemeldeten Kaesten zeigen es -- und zwar gegen das Rechteck des
+    # Bedienelements, in dem der Text sitzt. Das ist dieselbe Frage wie
+    # "verlaesst die Tinte ihr Fenster", eine Ebene tiefer gestellt.
+    for t in texts:
+        eigen = None
+        for rx, ry, rw, rh in rechtecke:
+            if (rw > 0 and t["x"] >= rx and t["x"] < rx + rw
+                    and t["base"] > ry and t["base"] <= ry + rh):
+                if eigen is None or rw < eigen[2]:
+                    eigen = (rx, ry, rw, rh)
+        if eigen is None:
             continue
-        if a["x"] + a["tw"] > b["x"]:
+        if t["x"] + t["tw"] > eigen[0] + eigen[2]:
             ab += 1
             schlecht.append(
-                "LEISTE CUT    '%s' meldet x=%d tw=%d und reicht damit in "
-                "'%s' bei x=%d hinein"
-                % (a["t"][:24], a["x"], a["tw"], b["t"][:24], b["x"]))
+                "LEISTE CUT    '%s' meldet x=%d tw=%d und reicht damit "
+                "%d Bildpunkte ueber sein Bedienelement %d,%d %dx%d hinaus"
+                % (t["t"][:24], t["x"], t["tw"],
+                   t["x"] + t["tw"] - eigen[0] - eigen[2],
+                   eigen[0], eigen[1], eigen[2], eigen[3]))
     ueber = 0
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
