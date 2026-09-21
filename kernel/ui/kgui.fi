@@ -2393,6 +2393,13 @@ fn surface(state: u64) {
                 zieh_marken(state)
                 zieh_vorfuehrung(state)
             }
+            // RUNDE BLUR: das Acryl vorfuehren. Eigener Schalter und
+            // eigener Ablauf, weil diese Vorfuehrung etwas braucht,
+            // das keine andere braucht: einen GEMUSTERTEN Grund.
+            if kstate.mode_on(state, kstate.M_WMBLUR) {
+                zieh_marken(state)
+                blur_vorfuehrung(state)
+            }
             // RUNDE VSYNC: `wmruhe` -- das Fenster steht, das Bild
             // wechselt trotzdem. So misst die Zerreissprobe das
             // Uebertragen und nicht die Bewegung.
@@ -2564,12 +2571,152 @@ fn zieh_marken(state: u64) {
     if vs != 9999 {
         let _fs: bool = wm.set_form(state, wm.FM_SWING, vs)
     }
+    // RUNDE BLUR: und die drei des Acryls, im selben einen Durchlauf.
+    let vb: u64 = kstate.get(state, kstate.BLUR_R)
+    let vbt: u64 = kstate.get(state, kstate.BLUR_TINT)
+    let vbn: u64 = kstate.get(state, kstate.BLUR_NOISE)
+    // GEGENPROBE: der Zwischenspeicher, einmal je Lauf.
+    if kstate.mode_on(state, kstate.M_BLURNOCACHE) {
+        wm.set_blur_cache(state, false)
+    }
+    if vb != 9999 {
+        let _fb: bool = wm.set_form(state, wm.FM_BLUR, vb)
+    }
+    if vbt != 9999 {
+        let _fbt: bool = wm.set_form(state, wm.FM_BLURTINT, vbt)
+    }
+    if vbn != 9999 {
+        let _fbn: bool = wm.set_form(state, wm.FM_BLURNOISE, vbn)
+    }
 }
 
 static mut zieh_marken_gesetzt: u64 = 0
 static mut zieh_t0: u64 = 0
 static mut zieh_schritt: u64 = 0
 static mut zieh_win: u64 = 0
+
+// ===================================================== RUNDE BLUR
+// DIE VORFUEHRUNG DES ACRYLS -- UND WARUM SIE EINEN GEMUSTERTEN GRUND
+// MALT.
+//
+// Der Auftrag verlangt den Bildbeweis ausdruecklich UEBER GEMUSTERTEM
+// HINTERGRUND, und das ist keine Schikane, sondern der einzige Weg,
+// auf dem man eine Weichzeichnung ueberhaupt sehen kann: ueber einer
+// einfarbigen Flaeche ist der Mittelwert der Umgebung wieder genau
+// dieselbe Farbe. Ein Blur ueber Einfarbigem ist bildpunktgenau ein
+// Nichtstun -- der erste Beleg dieser Runde sah deshalb aus wie ein
+// Schreibtisch ohne Blur, obwohl der Filter nachweislich lief (n=2,
+// cache=83).
+//
+// Gemalt wird ein Schachbrett aus kraeftigen, UNTERSCHIEDLICHEN Farben
+// mit harten Kanten. Harte Kanten sind der Pruefstein: eine Kante, die
+// hinter der Flaeche weich wird und daneben scharf bleibt, ist der
+// Beweis, und sie ist auch maschinell zu messen (tools/blur/kante.py).
+static mut blur_t0: u64 = 0
+static mut blur_schritt: u64 = 0
+
+fn blur_vorfuehrung(state: u64) {
+    let t: u64 = kstate.get(state, kstate.TICKS)
+    let ab: u64 = blur_t0
+    if ab == 0 {
+        blur_t0 = t
+        return
+    }
+    let seit: u64 = t - ab
+    if seit >= 50 && blur_schritt == 0 {
+        blur_schritt = 1
+        // 1. DER GEMUSTERTE GRUND. Ein Fenster auf der Ebene des
+        //    Schreibtischs, bildschirmfuellend, ohne Schmuck -- also
+        //    genau das, was der Schreibtisch selbst ist.
+        var s_g: [u8; 7] = "Muster\0"
+        let sw: u64 = wm.max_w(state)
+        let sh: u64 = wm.max_h(state)
+        let g: u64 = wm.create(state, 0, 0, 0, sw, sh, wm.K_RAW,
+            (&s_g[0]) as u64)
+        if g < wm.MAX_WIN {
+            wm.set_deco(state, g, false)
+            wm.set_layer(state, g, wm.L_DESK)
+            // Ein Schachbrett mit harten Kanten. 64 Bildpunkte sind
+            // gross genug, dass ein Radius von 8 die Kante WEICH
+            // macht, ohne das Feld ganz zu verwischen -- genau der
+            // Bereich, in dem man den Unterschied sieht.
+            var y: u64 = 0
+            while y < sh {
+                var x: u64 = 0
+                while x < sw {
+                    let fx: u64 = x / 64
+                    let fy: u64 = y / 64
+                    var c: u64 = 0x1E3A8A
+                    if ((fx + fy) & 1) == 0 {
+                        c = 0xF59E0B
+                    }
+                    if ((fx + fy) & 3) == 2 {
+                        c = 0x10B981
+                    }
+                    var bw: u64 = 64
+                    if x + bw > sw {
+                        bw = sw - x
+                    }
+                    var bh: u64 = 64
+                    if y + bh > sh {
+                        bh = sh - y
+                    }
+                    wm.fill(state, g, x, y, bw, bh, c)
+                    x = x + 64
+                }
+                y = y + 64
+            }
+            wm.flush_win(state, g)
+        }
+        // 2. EINE FLAECHE AUF DER MENUE-EBENE, wie das Startmenue --
+        //    also genau die Ebene, die `blur_will` durchlaesst. Sie
+        //    laesst ihre Mitte FREI (sie malt nur einen Rand), damit
+        //    man den weichgezeichneten Grund durch sie hindurch sieht.
+        //    Ein deckend gefuelltes Fenster wuerde den Blur, den es
+        //    selbst ausgeloest hat, wieder zudecken.
+        var s_m: [u8; 11] = "Startmenue\0"
+        let m: u64 = wm.create(state, 0, 80, 120, 320, 520, wm.K_RAW,
+            (&s_m[0]) as u64)
+        if m < wm.MAX_WIN {
+            wm.set_deco(state, m, false)
+            wm.set_layer(state, m, wm.L_MENUE)
+            // DURCHSCHEINEND, und DAS ist der Punkt der ganzen Runde:
+            // die Flaeche wird deckend gefuellt UND mit 150 von 255
+            // gemischt, also liegt am Ende die weichgezeichnete
+            // Flaeche zu 105/255 sichtbar darunter. Ein Rahmen allein
+            // haette nur bewiesen, dass die Mitte leer ist.
+            wm.fill(state, m, 0, 0, 320, 520, 0xF8FAFC)
+            blur_rahmen(state, m, 320, 520)
+            let _o1: bool = wm.set_opac(state, m, 150)
+            wm.flush_win(state, m)
+        }
+        // 3. UND EINE AUF DER LEISTEN-EBENE, quer ueber den Schirm.
+        var s_l: [u8; 11] = "Leiste2   \0"
+        let l: u64 = wm.create(state, 0, 0, (sh - 96) as i64, sw, 48,
+            wm.K_RAW, (&s_l[0]) as u64)
+        if l < wm.MAX_WIN {
+            wm.set_deco(state, l, false)
+            wm.set_layer(state, l, wm.L_TOP)
+            wm.fill(state, l, 0, 0, sw, 48, 0xF8FAFC)
+            blur_rahmen(state, l, sw, 48)
+            let _o2: bool = wm.set_opac(state, l, 150)
+            wm.flush_win(state, l)
+        }
+        var s_s: [u8; 18] = "blur: vorgefuehrt\0"
+        serial.puts((&s_s[0]) as u64)
+        serial.nl()
+    }
+}
+
+// Ein Rahmen von vier Bildpunkten, Mitte frei. Die Mitte MUSS frei
+// bleiben: dort steht der weichgezeichnete Grund, und genau der ist
+// der Beleg. Der Rahmen sagt nur, wo die Flaeche aufhoert.
+fn blur_rahmen(state: u64, i: u64, w: u64, h: u64) {
+    wm.fill(state, i, 0, 0, w, 4, 0xFFFFFF)
+    wm.fill(state, i, 0, h - 4, w, 4, 0xFFFFFF)
+    wm.fill(state, i, 0, 0, 4, h, 0xFFFFFF)
+    wm.fill(state, i, w - 4, 0, 4, h, 0xFFFFFF)
+}
 
 fn zieh_vorfuehrung(state: u64) {
     let t: u64 = kstate.get(state, kstate.TICKS)
@@ -2832,6 +2979,40 @@ fn say_vsync(state: u64) {
     serial.dec(wm.drag_px(state))
     serial.puts((&s_zn[0]) as u64)
     serial.dec(wm.swings(state))
+    serial.nl()
+    // ================================================== RUNDE BLUR
+    // DIE ZAHLEN DES ACRYLS, und die wichtigste davon ist `quote`.
+    //
+    // `n` ist, wie oft eine Flaeche wirklich GERECHNET wurde, `cache`,
+    // wie oft sie nur KOPIERT wurde. Die Trefferquote entscheidet, ob
+    // diese Runde traegt: ohne Zwischenspeicher kostete das Startmenue
+    // 3,16 ms in JEDEM Bild, mit ihm 0,02 ms in fast jedem. Steht die
+    // Quote niedrig, greift die Ungueltigkeitserklaerung zu oft -- und
+    // das waere der Fehler, den man im Bild als Ruckeln saehe.
+    var s_bh: [u8; 11] = "blur: rad=\0"
+    var s_bt: [u8; 8] = "  tint=\0"
+    var s_bn: [u8; 9] = "  noise=\0"
+    var s_bg: [u8; 6] = "  n=\0\0"
+    var s_bc: [u8; 10] = "  cache=\0\0"
+    var s_bq: [u8; 10] = "  quote=\0\0"
+    var s_bp: [u8; 7] = "%  px=\0"
+    var s_bu: [u8; 7] = "  us=\0\0"
+    serial.puts((&s_bh[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_BLUR))
+    serial.puts((&s_bt[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_BLURTINT))
+    serial.puts((&s_bn[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_BLURNOISE))
+    serial.puts((&s_bg[0]) as u64)
+    serial.dec(wm.blurs(state))
+    serial.puts((&s_bc[0]) as u64)
+    serial.dec(wm.blur_cached(state))
+    serial.puts((&s_bq[0]) as u64)
+    serial.dec(wm.blur_quote(state))
+    serial.puts((&s_bp[0]) as u64)
+    serial.dec(wm.blur_px(state))
+    serial.puts((&s_bu[0]) as u64)
+    serial.dec(wm.blur_us(state))
     serial.nl()
     // ================================================== RUNDE ZIEH
     // DIE ZAHL, DIE JUSTINS BEDINGUNG BEANTWORTET.
