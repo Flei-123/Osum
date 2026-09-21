@@ -1,38 +1,39 @@
-# Bilder der Runde WMPLUGIN
+# Aufnahmen der Runde GLAS
 
-Alle Bilder stammen aus WIRKLICH gebooteten Kernen (QEMU, `-vga std`,
-Foto ueber den QEMU-Monitor mit `tools/gfx/screenshot.py`, PPM nach PNG
-mit `tools/gfx/ppm2png.py`). Erzeugt von `tools/wmplug/shots.sh`; die
-Bilder 09/10 kommen aus dem Abnahmelauf `tools/wmplug/run.sh`
-(139 bestanden, 0 gescheitert).
+Alle Bilder sind ECHTE Aufnahmen des laufenden Systems: Osum startet in QEMU,
+der Bildspeicher wird ueber den QEMU-Monitor als PPM abgezogen
+(`tools/gfx/screenshot.py`) und nach PNG gewandelt. Aufloesung 1280x800.
+Erzeugt am 21.09.2026 aus dem Zweig `glas`.
+
+Herkunft:
+* 01-11 stammen aus dem Abnahmelauf `bash tools/themestore/run.sh`
+  (Ergebnis dieses Laufs: **136 Zusagen, 0 rot**), Beweisstuecke unter
+  `/tmp/ts-shot`.
+* 13-15 sind drei zusaetzliche Laeufe mit demselben Verfahren
+  (`tools/themestore/build.sh` mit anderen Reglerstellungen).
+* 12 ist kein eigener Lauf, sondern ein 2-fach vergroesserter Ausschnitt
+  der Leiste aus 04/05/06/07 nebeneinander, damit der Unterschied ohne
+  Zoom sichtbar ist.
 
 | Bild | Was es zeigt |
 |---|---|
-| 01-start-ohne-plugin.png | Schreibtisch mit Leiste, Kommandozeile `... plugaus` -- die Plugintafel ist ZU. Rechts in der Leiste steht NUR die Uhr des Systems. |
-| 02-uhr-widget-an.png | Dasselbe Bild mit angemeldetem Ring-3-Plugin `/bin/pluguhr`: rechts in der Leiste steht sein Text `18:33 cpu 100%`. Im Terminal die Anmeldung, die Frist (`frist ticks=50`) und die VERWEIGERUNG `barget verweigert r=-2`. |
-| 03-uhr-widget-aus-zur-laufzeit.png | Derselbe Lauf, spaeter: das Plugin hat sich abgemeldet (`ende runden=12`), der Widget-Text in der Leiste ist WEG -- ohne Neustart des Fensterservers. Bildpaar 02/03 ist der Sichtbeweis fuer "an und aus zur Laufzeit". |
-| 04-fensterregel-mit-recht.png | Regel-Plugin `/bin/plugregel` MIT Recht: liest `/etc/wmregeln.conf` (2 Regeln), meldet sich an (`rechte=259`), greift auf ein fremdes Fenster zu (`lesefenster id=11`). |
-| 05-fensterregel-ohne-recht.png | Derselbe Lauf OHNE Recht -- zum Vergleich daneben legen. |
-| 06-breit-1440x900.png | Breiter Schirm (`fbres=1440x900`): Leiste ueber die volle Breite, Widget-Text rechts, Fenster oben links. |
-| 07-eng-800x600.png | Vorgabe-Schirm 800x600 mit Widget. |
-| 08-sehr-eng-640x480.png | Enger Schirm 640x480 -- hier zeigt sich, ob Leiste und Fenster einander ins Gehege kommen. |
-| 09-wmplug-verwaltung.png | `/bin/wmplug list` + `info uhr` im Terminal, mit ZWEI gleichzeitig angemeldeten Plugins (`uhr` 0x807, `regel` 0x301): Fassung `abi=1`, Statuszeile auf zwei Zeilen umgebrochen, Tabellenkopf ueber seinen Werten. Neu aufgenommen von `tools/wmplug/spalten.sh` (24 bestanden, 0 gescheitert); dasselbe Bild liegt als `docs/shots/wmplug/spalten-zwei-plugins.png`. |
-| 10-nach-plugin-absturz.png | Nach einem absichtlichen SIGSEGV eines Plugins: der Schreibtisch malt weiter (479819 von 480000 Bildpunkten nicht schwarz, gemessen im Abnahmelauf). |
+| 01-radius-0-scharfe-ecken.png | Einstellungen mit `radius=0`: rechte Winkel ueberall, wie frueher `shape=classic`. |
+| 02-radius-12-mittel.png | Derselbe Stand mit `radius=12`. |
+| 03-radius-24-weiche-kacheln.png | Derselbe Stand mit `radius=24`, Regler zeigt "24". Inhalt sitzt an derselben Stelle wie bei 0. |
+| 04-taskleiste-100-deckend.png | Gemusterter Hintergrund, Leiste voll deckend -- der Leistengrund ist EINE Farbe. |
+| 05-taskleiste-70-prozent.png | Leiste bei 70 % Deckung, das Muster schlaegt durch. |
+| 06-taskleiste-40-prozent.png | Leiste bei 40 %, deutlich staerker durchscheinend. |
+| 07-milchglas-blur12.png | Milchglas (`taskbar_blur=12`, 70 %): der Untergrund unter der Leiste ist weichgezeichnet, keine harten Kachelkanten mehr. |
+| 08-settings-darstellung-regler.png | Reiter "Darstellung" mit den vier neuen Reglern (Eckenrundung 0-24, Taskleiste %, Fenster %, Milchglas) samt Zahlenanzeige; alles im Fenster. |
+| 09-settings-vorlagen.png | Reiter "Vorlage" (Vorlagenliste), zum Vergleich unveraendert. |
+| 10-fenster-unter-leiste-gezogen-keine-schlieren.png | Nach einem Zug des Fensters unter die Leiste und zurueck -- der Leistengrund ist Bildpunkt fuer Bildpunkt der des ungezogenen Laufs (Abnahme: diff 0). |
+| 11-dunkles-bild-leiste-40-kontrast.png | Dunkles Hintergrundbild, Leiste bei 40 % -- der Fall, gegen den der Kontrast der Leistenschrift gerechnet wird. |
+| 12-leiste-vergleich-ausschnitt-2x.png | Ausschnitt der Leiste aus 04/05/06/07 uebereinander, 2-fach vergroessert: deckend / 70 % / 40 % / Milchglas. |
+| 13-fenster-transparenz-55-prozent.png | `window_alpha=55`: das Einstellungsfenster selbst ist durchsichtig, Muster und das Terminal darunter scheinen durch. |
+| 14-milchglas-mit-reglerstand.png | Leiste 60 %, Fenster 80 %, Milchglas 12 -- die Reglerstellungen im Bild stimmen mit der Wirkung ueberein. |
+| 15-fenster-unter-die-leiste-gezogen.png | Endlage nach einem Zug nach unten (ohne Rueckweg): das Fenster steht halb unter der Leiste. BEFUND: der Rumpf ist an der neuen Stelle leer gezeichnet, `shotcheck.py` meldet hier 8 leere Beschriftungen (die anderen Bilder: 0). |
 
-## Was auf den Bildern AUFFAELLT (nicht behauptet, sondern sichtbar)
-
-- In allen Bildern steht im Terminal `KEIN EINZIGES GERT!` -- das `AE`
-  faellt beim Malen weg (Umlaut im Text der USB-Meldung).
-- Bild 09 ZEIGTE, dass `wmplug list` die Zeilen am Fensterrand statt am
-  Wort brach (`... Frist 50 Ticks  Flaeche` / `0` auf der naechsten
-  Zeile) und dass `Leistentext14` Beschriftung und Zahl zusammenklebte.
-  BEHOBEN und neu fotografiert: die Statuszeile sind jetzt zwei Zeilen
-  von 30 und 27 Zeichen, die Beschriftungen von `info` stehen alle auf
-  Spalte 14, und der Tabellenkopf kommt aus denselben Breitenkonstanten
-  wie die Datenzeile. Nachgerechnet wird das am BILD, nicht am Quelltext:
-  `checkshot.py tgrid` findet `Rechte` ab Spalte 13 und `0x807` ab
-  Spalte 14 -- dieselbe Endspalte 18 (tools/wmplug/spalten.sh).
-- Bild 03: zwei Schreiber teilen sich eine Zeile
-  (`uhrstart: wmplug enable=wmplug: uhr rechte=0x807`).
-- Bild 08 (640x480): das Fenster reicht bis an den rechten Schirmrand;
-  eng wird es, aber es ueberlappt die Leiste nicht.
+Mechanische Pruefung (`tools/themestore/shotcheck.py`, gegen die Rechtecke,
+die die Programme selbst gemeldet haben):
+01-11 sowie 13/14: `empty 0  cut 0  overlapping 0`.
+15: `empty 8  cut 0  overlapping 0` -- siehe Befund in der Tabelle.
