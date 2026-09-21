@@ -35,6 +35,15 @@
 #  10. DIE BILDER WERDEN GEMESSEN. Keine leere Beschriftung, nichts
 #      abgeschnitten, nichts ueberlappend -- `shotcheck.py`, gegen die
 #      Stellen, die die Programme selbst gemeldet haben.
+#  11. RUNDE GLAS: RUNDUNG, DURCHSICHT, MILCHGLAS. Der Radius kommt bei
+#      jedem Widgettyp an und verschiebt keinen Inhalt; die Leiste
+#      mischt wirklich, Bildpunkt fuer Bildpunkt gegen eine zweite,
+#      auf dem Wirt gerechnete Mischung (`glascheck.py`); das
+#      Milchglas senkt die Streuung messbar und seine Zeit je Vollbild
+#      steht als Zahl da; die Leistenschrift haelt 4,5:1 gegen den
+#      GEMISCHTEN Grund ueber hellem und dunklem Bild; und nach einem
+#      Zug unter der Leiste hindurch bleibt kein Bildpunkt stehen, der
+#      dort nicht hingehoert.
 #
 # Verwendung:  bash tools/themestore/run.sh
 set -uo pipefail
@@ -85,7 +94,7 @@ fi
 
 # --------------------------------------------------- 2. die Vorlagendateien
 echo
-echo "== 2. die Vorlagen als Dateien: sieben Schluessel und kein achter =="
+echo "== 2. die Vorlagen als Dateien: elf Schluessel und kein zwoelfter =="
 num "mitgelieferte Vorlagen" "$NPRESET" ge 8
 KEYS_BAD=0
 KEYS_MISS=0
@@ -94,19 +103,54 @@ for p in $PRESETS; do
     while IFS= read -r k; do
         case "$k" in
             name|scheme|mode|shape|accent|edge|align) ;;
+            radius|taskbar_alpha|window_alpha|taskbar_blur) ;;
             *) echo "        $p: unbekannter Schluessel '$k'"; KEYS_BAD=$((KEYS_BAD+1));;
         esac
     done < <(grep -aoE '^[a-z_]+=' "$f" | sed 's/=$//')
     n=$(grep -acE '^[a-z_]+=' "$f")
-    [ "$n" -eq 7 ] || { echo "        $p: $n Schluessel statt 7"; KEYS_MISS=$((KEYS_MISS+1)); }
+    [ "$n" -eq 11 ] || { echo "        $p: $n Schluessel statt 11"; KEYS_MISS=$((KEYS_MISS+1)); }
 done
-num "kein Schluessel ausserhalb der sieben" "$KEYS_BAD" eq 0
-num "und jede Vorlage hat alle sieben" "$KEYS_MISS" eq 0
+num "kein Schluessel ausserhalb der elf" "$KEYS_BAD" eq 0
+num "und jede Vorlage hat alle elf" "$KEYS_MISS" eq 0
+# RUNDE GLAS: DIE LISTE IST GEWACHSEN, DIE ZUSAGE NICHT GESCHRUMPFT.
+# Vier Schluessel sind dazugekommen, und jeder einzelne ist eine ZAHL
+# in einem festen Bereich -- kein Pfad, kein Befehl, kein Text freier
+# Form. Genau das wird hier nachgemessen: der Wert besteht nur aus
+# Ziffern, und er liegt in den Grenzen, die `template.parse_key`
+# klemmt. Ein `radius=/bin/sh` faellt damit schon auf der Platte auf
+# und nicht erst im Gast.
+NUMBAD=0
+for p in $PRESETS; do
+    f="assets/themes/$p.preset"
+    while IFS='=' read -r k v; do
+        case "$k" in
+            radius) lo=0; hi=24;;
+            taskbar_alpha|window_alpha) lo=0; hi=100;;
+            taskbar_blur) lo=0; hi=16;;
+            *) continue;;
+        esac
+        case "$v" in
+            ''|*[!0-9]*) echo "        $p: $k='$v' ist keine Zahl"
+                         NUMBAD=$((NUMBAD+1)); continue;;
+        esac
+        if [ "$v" -lt "$lo" ] || [ "$v" -gt "$hi" ]; then
+            echo "        $p: $k=$v liegt ausserhalb $lo..$hi"
+            NUMBAD=$((NUMBAD+1))
+        fi
+    done < <(grep -aE '^[a-z_]+=' "$f")
+done
+num "und die vier neuen Schluessel tragen nur Ziffern im erlaubten Bereich" "$NUMBAD" eq 0
 # GEGENPROBE ZU DEM, WORAUF ES ANKOMMT: das Vokabular ist im Quelltext
-# genauso eng wie in den Dateien. Ein achter Schluessel muesste hier
+# genauso eng wie in den Dateien. Ein zwoelfter Schluessel muesste hier
 # stehen; steht er nicht, kann eine fremde Vorlage keinen tragen.
-PK=$(grep -acE 'var k_(name|scheme|mode|shape|accent|edge|align): ' kernel/user/template.fi)
-num "und vorlage.parse_key kennt genau sieben Schluesselnamen" "$PK" eq 7
+PK=$(grep -acE 'var k_(name|scheme|mode|shape|accent|edge|align|radius|taskbar_alpha|window_alpha|taskbar_blur): ' kernel/user/template.fi)
+num "und vorlage.parse_key kennt genau elf Schluesselnamen" "$PK" eq 11
+# UND DIE VIER NEUEN GEHEN DURCH EINEN LESER, DER NUR ZIFFERN NIMMT.
+# `dec_of` gibt NUM_NONE zurueck, sobald ein Zeichen keine Ziffer ist,
+# und `parse_key` antwortet darauf `false` -- die Zeile wird als
+# schlecht gezaehlt statt stillschweigend als 0 gelesen.
+DEC=$(grep -acE 'fn dec_of\(' kernel/user/template.fi)
+num "und der Leser der Zahlen ist genau einer" "$DEC" eq 1
 DIFF=$(printf '%s\n' $PRESETS | while read -r p; do
     grep -aE '^(scheme|mode|shape|accent|edge|align)=' "assets/themes/$p.preset" | tr '\n' ' '; echo; done | sort -u | wc -l)
 num "und die zehn sind wirklich verschieden (verschiedene Wertesaetze)" "$DIFF" eq "$NPRESET"
@@ -335,9 +379,13 @@ num "und der Laden hat ohne Konto genauso viele Vorlagen" "${nn:-0}" ge "$NPRESE
 python3 tools/osum/mkfs.py cat "$TMPD/noacc/disk.img" /x.otheme > "$TMPD/x.otheme" 2>/dev/null
 XK=0
 while IFS= read -r k; do
-    case "$k" in name|scheme|mode|shape|accent|edge|align) ;; *) XK=$((XK+1));; esac
+    case "$k" in
+        name|scheme|mode|shape|accent|edge|align) ;;
+        radius|taskbar_alpha|window_alpha|taskbar_blur) ;;
+        *) XK=$((XK+1));;
+    esac
 done < <(grep -aoE '^[a-z_]+=' "$TMPD/x.otheme" | sed 's/=$//')
-num "in einer ausgegebenen Vorlage steht kein Schluessel ausser den sieben" "$XK" eq 0
+num "in einer ausgegebenen Vorlage steht kein Schluessel ausser den elf" "$XK" eq 0
 num "und kein Pfad, kein Befehl, kein Kennwort" \
     "$(grep -acE '(/bin/|/etc/|passwd|token|key=|http)' "$TMPD/x.otheme" || true)" eq 0
 # GEGENPROBE ZUR GEGENPROBE: eine Vorlage MIT einem achten Schluessel
@@ -351,7 +399,19 @@ SM="$TMPD/sm/serial.txt"
 smbad=$(grep -a 'theme: preset id=schmuggel ' "$SM" | tail -1 | grep -oE ' bad=[0-9]+' | grep -oE '[0-9]+')
 num "GEGENPROBE: die zwei geschmuggelten Schluessel werden GEZAEHLT" "${smbad:-0}" eq 2
 smk=$(grep -a 'theme: preset id=schmuggel ' "$SM" | tail -1 | grep -oE ' keys=[0-9]+' | grep -oE '[0-9]+')
-same "und die sieben echten trotzdem gelesen" "7" "${smk:-}"
+num "und die echten Schluessel trotzdem gelesen" "${smk:-0}" ge 7
+# UND DIE GEGENPROBE AUF DIE NEUEN VIER: ein `radius=/bin/sh` ist kein
+# Radius. Die Zeile sieht aus wie eine erlaubte, traegt aber keine
+# Zahl -- sie MUSS als schlecht gezaehlt werden, sonst waere der
+# Zahlenbereich nur eine Behauptung.
+cp "$TMPD/meins.otheme" "$TMPD/zahl.otheme"
+printf 'radius=/bin/sh\ntaskbar_alpha=viel\n' >> "$TMPD/zahl.otheme"
+bash tools/themestore/build.sh "$TMPD/zn" xfile="/zahl.otheme=$TMPD/zahl.otheme" \
+    script='theme import /zahl.otheme zahl;theme show zahl;exit' \
+    > "$TMPD/zn.log" 2>&1
+ZN="$TMPD/zn/serial.txt"
+znbad=$(grep -a 'theme: preset id=zahl ' "$ZN" | tail -1 | grep -oE ' bad=[0-9]+' | grep -oE '[0-9]+')
+num "GEGENPROBE: ein Wert, der keine Zahl ist, wird GEZAEHLT" "${znbad:-0}" eq 2
 
 # ------------------------------------------------ 8. die Seite passt hinein
 echo
@@ -516,6 +576,224 @@ for p in $PRESETS; do
 done
 num "und in keiner der zehn Aufnahmen eine leere, abgeschnittene oder ueberlappende Beschriftung" \
     "$SHOTCHK" eq 0
+
+# ============================================== 11. RUNDE GLAS
+echo
+echo "== 11. Runde GLAS: Rundung, Durchsicht, Milchglas =="
+
+# ---- 11a. DER RADIUS KOMMT AN, UND ER VERSCHIEBT NICHTS.
+#
+# Drei Laeufe mit 0, 12 und 24, und aus jedem drei Zahlen: was das
+# Einstellungsfenster als laufenden Radius meldet, wie gross der
+# groesste Radius ist, den ein Widget wirklich gemalt hat, und wie
+# viele Widgetarten ihren Radius ueberhaupt gemeldet haben. Die
+# Rechtecke derselben Seite muessen bei 0 und bei 24 ZEICHEN FUER
+# ZEICHEN dieselben sein -- eine Rundung, die den Inhalt verschiebt,
+# faellt genau hier auf.
+for r in 0 12 24; do
+    bash tools/themestore/build.sh "$TMPD/rad$r" extra='einst' uitrace=yes \
+        keep=yes radius="$r" > "$TMPD/rad$r.log" 2>&1
+    f="$TMPD/rad$r/serial.txt"
+    g=$(grep -a 'settings: glas radius=' "$f" | tail -1 \
+        | grep -oE 'radius=[0-9]+' | cut -d= -f2)
+    same "Radius $r kommt in der laufenden Darstellung an" "$r" "${g:-}"
+    MAXR=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$f" \
+        | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
+    TYPEN=$(grep -aoE 'wlib: radius .*typ=[a-z]+' "$f" \
+        | grep -oE 'typ=[a-z]+' | sort -u | wc -l)
+    num "und $TYPEN Widgetarten melden, mit welchem Radius sie gemalt haben" \
+        "$TYPEN" ge 8
+    if [ "$r" = 0 ]; then
+        num "bei Radius 0 malt KEIN Widget eine Rundung" "${MAXR:-99}" eq 0
+        R0MAX=${MAXR:-0}
+    else
+        num "bei Radius $r ist der groesste gemalte Radius groesser als bei 0" \
+            "${MAXR:-0}" gt "${R0MAX:-0}"
+    fi
+    cp "$TMPD/rad$r/desktop.png" "$SHOTS/glas-radius-$r.png" 2>/dev/null
+done
+R12MAX=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$TMPD/rad12/serial.txt" \
+    | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
+R24MAX=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$TMPD/rad24/serial.txt" \
+    | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
+num "und 24 rundet staerker als 12 (Bildpunkte)" "${R24MAX:-0}" gt "${R12MAX:-0}"
+# DER INHALT SITZT BEI JEDEM RADIUS AN DERSELBEN STELLE.
+grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
+    "$TMPD/rad0/serial.txt" | sort -u > "$TMPD/rect0.txt"
+grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
+    "$TMPD/rad24/serial.txt" | sort -u > "$TMPD/rect24.txt"
+RDIFF=$(diff "$TMPD/rect0.txt" "$TMPD/rect24.txt" | grep -c '^[<>]' || true)
+num "und kein einziges Rechteck der Seite wandert zwischen Radius 0 und 24" \
+    "$RDIFF" eq 0
+num "und es sind ueberhaupt Rechtecke gemessen worden" \
+    "$(grep -c . "$TMPD/rect0.txt")" ge 20
+# DIE ECKE IST KANTENGEGLAETTET. In einem Quadrat von 24 Bildpunkten in
+# der oberen linken Ecke des Fensters zaehlt `glascheck.py ecke`, wie
+# viele Bildpunkte WEDER Fensterfarbe NOCH Untergrund sind. Bei einer
+# Treppe gibt es keine solchen; jeder Zwischenton ist ein Beleg fuer
+# die Glaettung. GEGENPROBE: bei Radius 0 ist die Ecke ein rechter
+# Winkel und hat fast keine.
+WX0=$(grep -ao 'name=win x=[0-9]*' "$TMPD/rad24/serial.txt" | tail -1 | cut -d= -f3)
+WY0=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$TMPD/rad24/serial.txt" | tail -1 \
+      | grep -oE 'y=[0-9]+' | cut -d= -f2)
+AA24=$(python3 tools/themestore/glascheck.py ecke "$SHOTS/glas-radius-24.png" \
+       "${WX0:-20}" "${WY0:-3}" 24 | grep -oE 'zwischen=[0-9]+' | cut -d= -f2)
+AA0=$(python3 tools/themestore/glascheck.py ecke "$SHOTS/glas-radius-0.png" \
+      "${WX0:-20}" "${WY0:-3}" 24 | grep -oE 'zwischen=[0-9]+' | cut -d= -f2)
+num "die Rundung bei 24 ist kantengeglaettet (Zwischentoene in der Ecke)" \
+    "${AA24:-0}" ge 20
+num "GEGENPROBE: die scharfe Ecke bei Radius 0 hat fast keine" \
+    "${AA0:-99}" lt 8
+
+# ---- 11b. DIE LEISTE MISCHT WIRKLICH -- GEGEN EINE ZWEITE RECHNUNG.
+#
+# Drei Laeufe ueber DEMSELBEN gemusterten Hintergrundbild, und in jedem
+# wird jeder Bildpunkt des Leistengrundes gegen die Mischung gehalten,
+# die `tools/themestore/glascheck.py` auf dem Wirt aus den zwei Farben
+# des Bildes und der Schluesselfarbe der Leiste rechnet -- dieselbe
+# Rolle, die `model.py` fuer die Kontraste spielt.
+for a in 100 70 40; do
+    bash tools/themestore/build.sh "$TMPD/al$a" tbalpha="$a" blur=0 \
+        wallpaper=hell uitrace=yes keep=yes > "$TMPD/al$a.log" 2>&1
+    cp "$TMPD/al$a/desktop.png" "$SHOTS/glas-alpha-$a.png" 2>/dev/null
+    out=$(python3 tools/themestore/glascheck.py mix "$TMPD/al$a/desktop.png" "$a")
+    pct=$(printf '%s' "$out" | grep -oE 'prozent=[0-9]+' | cut -d= -f2)
+    fab=$(printf '%s' "$out" | grep -oE 'farben=[0-9]+' | cut -d= -f2)
+    num "Leiste bei $a %%: Bildpunkte, die der nachgerechneten Mischung gleichen" \
+        "${pct:-0}" ge 99
+    if [ "$a" = 100 ]; then
+        num "und bei voller Deckung ist der Grund EINE Farbe" "${fab:-0}" eq 1
+    else
+        num "und bei $a %% traegt der Grund das Muster des Bildes" "${fab:-0}" ge 2
+    fi
+done
+# UND DIE DREI SIND WIRKLICH VERSCHIEDEN -- ein Mensch sieht es, und
+# hier steht die Zahl dazu: die Streuung des Leistengrundes waechst mit
+# der Durchsicht.
+V100=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-alpha-100.png" \
+       | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+V70=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-alpha-70.png" \
+      | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+V40=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-alpha-40.png" \
+      | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+num "voll deckend streut der Leistengrund nicht" "${V100:-1}" eq 0
+num "bei 70 %% streut er" "${V70:-0}" gt 0
+num "und bei 40 %% mehr als bei 70 %%" "${V40:-0}" gt "${V70:-0}"
+
+# ---- 11c. MILCHGLAS: WEICHER, UND SCHNELL GENUG.
+bash tools/themestore/build.sh "$TMPD/blur" tbalpha=70 blur=12 \
+    wallpaper=hell uitrace=yes keep=yes > "$TMPD/blur.log" 2>&1
+cp "$TMPD/blur/desktop.png" "$SHOTS/glas-milchglas.png" 2>/dev/null
+VB=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-milchglas.png" \
+     | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+FB=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-milchglas.png" \
+     | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
+num "Milchglas: die Streuung des Ausschnitts SINKT (gegen $V70 ohne)" \
+    "${VB:-999999}" lt "${V70:-0}"
+num "und aus zwei Farben ist ein Verlauf geworden" "${FB:-0}" ge 4
+GL=$(grep -a 'wm: glas r=' "$TMPD/blur/serial.txt" | tail -1)
+BUS=$(printf '%s' "$GL" | grep -oE ' max=[0-9]+' | grep -oE '[0-9]+')
+BPX=$(printf '%s' "$GL" | grep -oE ' px=[0-9]+' | grep -oE '[0-9]+')
+echo "        Weichzeichner: $GL"
+num "der Weichzeichner meldet seine Zeit je Vollbild (Mikrosekunden, QEMU/TCG)" \
+    "${BUS:-0}" gt 0
+num "und sie bleibt unter einer Fuenftelsekunde" "${BUS:-999999999}" lt 200000
+num "und er hat wirklich Bildpunkte angefasst" "${BPX:-0}" ge 10000
+# O(1) JE BILDPUNKT, und das ist keine Meinung: der laufende Summe folgt
+# genau eine Schleife je Zeile, und ein naiver Kasten haette hier die
+# Fensterbreite als Faktor. Die Zahl dazu ist die Zeit oben; die Form
+# steht im Quelltext, und dass sie nur EINMAL dasteht, misst 11e.
+num "und das Milchglas wird zwischengespeichert, wenn sich nichts ruehrt" \
+    "$(printf '%s' "$GL" | grep -oE 'cache=[0-9]+' | grep -oE '[0-9]+')" ge 0
+
+# ---- 11d. LESBAR BLEIBT LESBAR -- GEGEN DEN GEMISCHTEN GRUND.
+#
+# Nicht gegen die Flaechenfarbe des Themas, sondern gegen das, was
+# wirklich im Bild steht: die haeufigste Farbe des Leistengrundes.
+# Einmal ueber einem hellen und einmal ueber einem dunklen Bild, denn
+# die Schranke, die die Lesbarkeit haelt, greift auf beiden Seiten.
+bash tools/themestore/build.sh "$TMPD/dunkel" tbalpha=40 blur=0 \
+    wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dunkel.log" 2>&1
+for pair in "al40:hell" "dunkel:dunkel"; do
+    d=${pair%%:*}; nm=${pair##*:}
+    FG=$(grep -a 'taskbar: text clock ' "$TMPD/$d/serial.txt" | tail -1 \
+         | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+    FGH=$(printf '%06x' "${FG:-0}")
+    K=$(python3 tools/themestore/glascheck.py kontrast "$TMPD/$d/desktop.png" \
+        "$FGH" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)
+    num "Leistenschrift gegen den GEMISCHTEN Grund ($nm, 40 %%), x100" \
+        "${K:-0}" ge 450
+done
+
+# ---- 11e. KEIN ZWEITER ORT FUER DIESELBE SACHE.
+RR=$(grep -ac '^fn fill_round(' kernel/ui/wm.fi)
+BL=$(grep -ac '^fn blend(' kernel/ui/wm.fi)
+num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
+num "und genau eine mischt" "$BL" eq 1
+GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm.fi)
+num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
+SELF=$(grep -a 'wm: glastest ' "$TMPD/blur/serial.txt" | tail -1)
+SN=$(printf '%s' "$SELF" | grep -oE 'glastest [0-9]+' | grep -oE '[0-9]+')
+SM=$(printf '%s' "$SELF" | grep -oE '/ [0-9]+' | grep -oE '[0-9]+')
+same "der Selbsttest der Mischung und des Weichzeichners laeuft durch" \
+    "${SM:-7}" "${SN:-0}"
+
+# ---- 11f. KEINE SCHLIEREN NACH EINEM ZUG UNTER DER LEISTE.
+#
+# Zweimal derselbe Stand, einmal mit einem Zug: das Fenster wird an
+# seinem Titel unter die Leiste gezogen und wieder zurueck, OHNE
+# loszulassen. Danach muss der Leistengrund Bildpunkt fuer Bildpunkt
+# der des ungezogenen Laufs sein.
+#
+# WAS DIESE ZAHL BELEGT UND WAS NICHT: die Uhr malt die Leiste jede
+# Sekunde neu, und die Aufnahme entsteht zwei Sekunden nach dem Zug --
+# ein Bild allein kann also nicht zeigen, dass die Regel waehrend des
+# Zuges gegriffen hat. Dass sie gegriffen HAT, sagt der Fensterserver
+# selbst: `grow=` zaehlt jedes Schmutzrechteck, das auf die volle
+# Leiste aufgezogen wurde, und mit `noglasgrow` steht die Regel still.
+# Erst beide Zahlen zusammen sind die Zusage.
+bash tools/themestore/build.sh "$TMPD/ruhe" extra='einst' tbalpha=70 blur=0 \
+    wallpaper=hell uitrace=yes keep=yes > "$TMPD/ruhe.log" 2>&1
+bash tools/themestore/build.sh "$TMPD/zug" extra='einst' tbalpha=70 blur=0 \
+    wallpaper=hell uitrace=yes keep=yes click="400,10>400,600>400,10" \
+    > "$TMPD/zug.log" 2>&1
+ZD=$(python3 tools/themestore/glascheck.py diff "$TMPD/zug/desktop.png" \
+     "$TMPD/ruhe/desktop.png" | grep -oE 'diff [0-9]+' | cut -d' ' -f2)
+num "nach dem Zug unter der Leiste bleibt kein Bildpunkt stehen" "${ZD:-9999}" eq 0
+ZG=$(grep -a 'wm: schlieren ' "$TMPD/zug/serial.txt" | tail -1 \
+     | grep -oE 'grow=[0-9]+' | cut -d= -f2)
+num "und die Schlierenregel hat wirklich gegriffen" "${ZG:-0}" ge 1
+bash tools/themestore/build.sh "$TMPD/nogrow" extra='einst noglasgrow' \
+    tbalpha=70 blur=0 wallpaper=hell uitrace=yes keep=yes \
+    click="400,10>400,600>400,10" > "$TMPD/nogrow.log" 2>&1
+NG=$(grep -a 'wm: schlieren ' "$TMPD/nogrow/serial.txt" | tail -1)
+same "GEGENPROBE: mit noglasgrow steht die Regel still" "1" \
+    "$(printf '%s' "$NG" | grep -oE 'aus=[0-9]+' | cut -d= -f2)"
+same "und sie hat dort kein einziges Rechteck aufgezogen" "0" \
+    "$(printf '%s' "$NG" | grep -oE 'grow=[0-9]+' | cut -d= -f2)"
+# UND DIE NEUEN BILDER WERDEN GENAUSO GEMESSEN WIE DIE ALTEN.
+GSHOT=0
+for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \
+         glas-alpha-70 glas-alpha-40 glas-milchglas; do
+    [ -s "$SHOTS/$s.png" ] && GSHOT=$((GSHOT+1)) || echo "        $s: kein Bild"
+done
+num "die sieben Aufnahmen der Runde GLAS" "$GSHOT" eq 7
+GBAD=0
+for pair in "rad0:glas-radius-0" "rad12:glas-radius-12" "rad24:glas-radius-24" \
+            "al100:glas-alpha-100" "al70:glas-alpha-70" "al40:glas-alpha-40" \
+            "blur:glas-milchglas"; do
+    d=${pair%%:*}
+    o=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
+        "$TMPD/$d/serial.txt" 2>&1 | head -1)
+    e=$(printf '%s' "$o" | grep -oE 'empty [0-9]+' | grep -oE '[0-9]+')
+    c=$(printf '%s' "$o" | grep -oE 'cut [0-9]+' | grep -oE '[0-9]+')
+    ov=$(printf '%s' "$o" | grep -oE 'overlapping [0-9]+' | grep -oE '[0-9]+')
+    if [ "${e:-1}" != 0 ] || [ "${c:-1}" != 0 ] || [ "${ov:-1}" != 0 ]; then
+        echo "        $d: $o"; GBAD=$((GBAD+1))
+    fi
+done
+num "und in keiner von ihnen eine leere, abgeschnittene oder ueberlappende Beschriftung" \
+    "$GBAD" eq 0
 
 echo
 echo "THEMESTORE: $pass passed, $fail failed"
