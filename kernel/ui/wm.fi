@@ -71,6 +71,9 @@ import net.netview
 import net.netmark
 import gfx.ttf
 import utf8
+// RUNDE GLAS: die Eckendeckung kommt aus lib/ecke.fi -- derselben
+// Quelle, aus der Ring 3 sie uebersetzt.
+import ecke
 import drv.hid.ps2m
 import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
@@ -1058,7 +1061,37 @@ const SCHLEIER: u64 = 40
 // Ueber einem Hintergrundbild, das der Fensterfarbe nahe ist, greift
 // die Schranke wie bisher GAR NICHT -- das Fenster ist dann so
 // durchsichtig, wie der Regler sagt.
-const SCHLEIER_WIN: u64 = 20
+//
+// ============================================== RUNDE GLAS (fix-r4-2)
+// UND JETZT IST SIE NULL, WEIL DIE DECKUNG DORTHIN GEWANDERT IST, WO
+// SIE HINGEHOERT: UNTER DIE SCHRIFT.
+//
+// Die zwanzig Stufen darueber waren die richtige Antwort auf die
+// falsche Frage. Sie haben das GANZE Fenster deckender gemacht, um
+// eine Handvoll Zeilen Schrift zu retten -- ein Fenster bei 55 Prozent
+// sah aus wie eines bei 80, und der Regler log um dieselbe Zahl, um
+// die der Leistenregler log (Befund 8.2 in docs/RUNDE-GLAS.md).
+//
+// Ring 3 setzt seit fix-r4-2 die Marke `PLATTE_MARKE` in jeden
+// Bildpunkt, auf dem Schrift steht (kernel/user/wlibc.fi, `platte`,
+// gerufen aus der einen Stelle, die Glyphen malt), und die Reiterzeile
+// als Ganzes dazu. `glass_mix` nimmt einen markierten Bildpunkt
+// unveraendert. Damit ist die Zeile deckend und die Flaeche zwischen
+// den Zeilen so durchsichtig, wie der Regler sagt -- und der Schleier
+// fuer gewoehnliche Fenster hat nichts mehr zu tun.
+//
+// Die Konstante bleibt stehen (statt an den Aufrufstellen zu
+// verschwinden), weil `tools/themestore/glascheck.py` dieselbe Zahl
+// fuehrt und die Abnahme beide gegeneinander haelt: wer hier eine Zahl
+// einsetzt, muss sie dort auch einsetzen, sonst wird der Lauf rot.
+// Fuer die LEISTE bleibt `SCHLEIER` bei 40 -- sie hat keine Textplatte
+// (ihre Schrift ist ihr eigener Schild, siehe kernel/user/taskbar.fi).
+const SCHLEIER_WIN: u64 = 0
+// Die Marke der Textplatte, in den oberen acht Bit eines Bildpunktes
+// des Fensterpuffers. Sie steht wortgleich in kernel/user/wlibc.fi
+// (`const PLATTE`) -- Ring 3 setzt sie, Ring 0 liest und entfernt sie,
+// und `tools/themestore/run.sh` haelt die beiden Zahlen gegeneinander.
+const PLATTE_MARKE: u64 = 0xFF000000
 // RUNDE SOFTUI: die Obergrenze des Titelverlaufs, in Helligkeitsstufen.
 const GRAD_MAX: u64 = 24
 // Die drei Schaltflaechen rechts oben, in der Reihenfolge, in der sie
@@ -1516,13 +1549,17 @@ fn shadow_px(state: u64) -> u64 {
     return gs(state, S_SHADOWPX)
 }
 
+// Der Zaehler des Abtasters. Er sitzt seit dieser Runde im Rasterer
+// selbst (`lib/ecke.fi`) und nicht mehr im Zustandsblock: es gibt
+// einen Schirm, einen Zustand und einen Abtaster, und der Zaehler
+// gehoert dem, der zaehlt.
 fn aa_px(state: u64) -> u64 {
-    return gs(state, S_AAPX)
+    return ecke.aa_px()
 }
 
 fn paint_reset(state: u64) {
     ss(state, S_SHADOWPX, 0)
-    ss(state, S_AAPX, 0)
+    ecke.aa_reset()
 }
 
 fn shadow_builds(state: u64) -> u64 {
@@ -1553,48 +1590,52 @@ fn cap_hits(state: u64) -> u64 {
     return gs(state, S_CAPHITS)
 }
 
-// DIE DECKUNG EINES ECKPUNKTES, sechzehnfach abgetastet.
+// DIE DECKUNG EINES ECKPUNKTES steht nicht mehr hier, sondern in
+// `lib/ecke.fi`, und zwar als einzige Fassung im Baum.
 //
-// DIESELBE RECHNUNG WIE `wlibc.corner_cov` IN RING 3, und das ist keine
-// Bequemlichkeit: die Widget-Bibliothek malt die runde Ecke eines
-// Knopfes, der Server die runde Ecke des Fensters, und wenn die beiden
-// verschieden runden, sieht man in einem Dialog zwei verschiedene
-// Kruemmungen nebeneinander. `tools/paint/corners.py` haelt beide
-// Fassungen Bildpunkt fuer Bildpunkt gegeneinander.
+// Sie stand an dieser Stelle Zeile fuer Zeile so, wie sie auch in
+// `wlibc.corner_cov` stand, und beide trugen den Kommentar, sie
+// seien dieselbe Rechnung. Das war eine Zusage, die ein Mensch beim
+// Bearbeiten einhalten musste -- und die Widget-Bibliothek malt die
+// runde Ecke eines Knopfes, waehrend dieser Server die runde Ecke
+// des Fensters darum malt. Weichen sie ab, sieht man zwei
+// Kruemmungen nebeneinander. `lib/` ist das eine Verzeichnis, das
+// der Kernbau und jedes Ring-3-Programm schon durchsuchen, also
+// liegt sie dort; `aa_px` unten liest den Zaehler des Abtasters.
+
+// WIE VIELE SPALTEN EINER ZEILE DIE RUNDUNG FRISST.
 //
-// (dx, dy) ist der Abstand der OBEREN LINKEN Ecke des Bildpunktes vom
-// Mittelpunkt des Eckkreises, in ganzen Bildpunkten. Zwei billige
-// Abkuerzungen tragen die grosse Mehrheit der Punkte: liegt die FERNE
-// Ecke des Bildpunktes noch im Kreis, ist er ganz drin; liegt die NAHE
-// schon draussen, ist er ganz draussen. Nur der schmale Ring dazwischen
-// wird wirklich abgetastet, und nur der zaehlt in `aa_px`.
-fn corner_cov(state: u64, dx: u64, dy: u64, r: u64) -> u64 {
-    if r == 0 {
-        return 255
-    }
-    let rr: u64 = r *% r
-    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
-        return 255
-    }
-    if dx * dx + dy * dy >= rr {
+// Dieselbe Kreisgleichung wie in `corner_cov`, nur andersherum
+// gefragt: `corner_cov` sagt, WIE DECKEND ein Bildpunkt ist, und diese
+// Funktion sagt, ab welcher Spalte er VOLL deckend ist. Sie ist die
+// Antwort auf die Frage, die eine zeilenweise Kopie stellt -- die
+// Anwendungsflaeche wird wortweise kopiert und kann kein Alpha tragen,
+// also muss sie dort AUFHOEREN, wo die Rundung anfaengt, statt sie zu
+// uebermalen (siehe `paint_win`).
+//
+// `dyv` ist der Abstand der Zeile von der AEUSSEREN Kante, 0 fuer die
+// letzte. Voll gedeckt ist ein Bildpunkt, wenn seine vom Kreismittel
+// am weitesten entfernte Ecke noch im Kreis liegt -- dieselbe erste
+// Abkuerzung, die `corner_cov` oben nimmt, und deshalb sind die
+// beiden Zahlen nicht nur aehnlich, sondern dieselbe Grenze.
+fn corner_skip(r: u64, dyv: u64) -> u64 {
+    if r == 0 || dyv >= r {
         return 0
     }
-    var hits: u64 = 0
-    var sy: u64 = 0
-    while sy < 4 {
-        var sx: u64 = 0
-        while sx < 4 {
-            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
-            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
-            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
-                hits = hits + 1
-            }
-            sx = sx + 1
-        }
-        sy = sy + 1
+    let rr: u64 = r *% r
+    let b: u64 = (r - dyv) *% (r - dyv)
+    if b >= rr {
+        return r
     }
-    ss(state, S_AAPX, gs(state, S_AAPX) + 1)
-    return hits * 255 / 16
+    var dx: u64 = 0
+    while dx < r {
+        let a: u64 = r - dx
+        if a *% a + b <= rr {
+            return dx
+        }
+        dx = dx + 1
+    }
+    return r
 }
 
 // Ein Rechteck, auf den schmutzigen Bereich beschnitten. Der Beschnitt
@@ -1672,7 +1713,7 @@ fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            var cov: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            var cov: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             // RUNDE GLAS: die Eckendeckung UND die Fensterdeckkraft in
             // EINER Zahl. Zweimal mischen -- erst die Ecke, dann das
             // Fenster -- haette den Rand der Rundung zweimal gegen den
@@ -1737,10 +1778,10 @@ fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let aussen: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            let aussen: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             var i2: u64 = 0
             if innen > 0 {
-                i2 = corner_cov(state, r - 1 - dx, r - 1 - dy, innen)
+                i2 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, innen)
             }
             var cov: u64 = 0
             if aussen > i2 {
@@ -5784,6 +5825,12 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // weiter, und tools/look/run.sh misst das.
     fill_round(state, wx, wy, ow, oh, form(state, FM_RADIUS), rahmen,
         deco_alpha(state), cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+    // RUNDE GLAS (fix-r4-3): und das eben gemalte Rechteck wird
+    // GEMELDET, damit die Abnahme alle vier Ecken findet und nicht nur
+    // die, deren Koordinaten zufaellig auch das Programm kennt.
+    if aktiv {
+        rahmen_say(wx, wy, ow, oh, form(state, FM_RADIUS))
+    }
     // die Titelleiste
     //
     // RUNDE SOFTUI: SIE IST NICHT MEHR EIN RECHTECK IN EINER FARBE.
@@ -5860,7 +5907,6 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     }
     let ww: u64 = wg(state, i, W_W)
     let quelle: u64 = wg(state, i, W_BUF)
-    let n: u64 = (sx1 - sx0) as u64
     // RUNDE GLAS: die Flaeche der Anwendung mit `window_alpha`.
     //
     // Die Schluesselfarbe ist dieselbe, die die Leiste geschickt hat
@@ -5873,17 +5919,85 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // zu wenig Glas, nie zu wenig Kontrast.
     let wa: u64 = form_or(state, FM_WIN_ALPHA, 100)
     let wkey: u64 = form(state, FM_GLASS_KEY)
+    // ======================================== RUNDE GLAS (fix-r4-3)
+    //
+    // DER UMRISS IST AN ALLEN VIER ECKEN GESCHLOSSEN, und bis hierher
+    // war er es an zweien nicht.
+    //
+    // `fill_round` hat den ganzen Fensterrumpf in Rahmenfarbe MIT
+    // Rundung gefuellt -- oben legt die Titelleiste ihre eigene runde
+    // Kante darueber, unten aber kopierte die Schleife hier die
+    // Anwendungsflaeche ZEILENWEISE UND RECHTECKIG darueber und hat
+    // die gerade gemalten Boegen wieder zugeschmiert. Gemessen im Bild
+    // 03 (Radius 24): oben links ein sauberer Bogen, unten links ein
+    // rechter Winkel -- ein Fenster mit zwei verschiedenen Formen.
+    //
+    // Die Abhilfe rechnet KEINE zweite Rundung, sie laesst nur die
+    // Bildpunkte stehen, die schon rund sind: `corner_skip` sagt fuer
+    // jede der untersten `radius` Zeilen, wie viele Spalten am Rand
+    // NICHT vollstaendig innerhalb des Eckkreises liegen; genau die
+    // ueberspringt die Kopie, und dort bleibt die kantengeglaettete
+    // Fuellung von `fill_round` sichtbar. Ein Bildpunkt weniger
+    // Anwendungsflaeche in der Ecke einer Karte ist das, was eine
+    // Rundung IST -- und der Innenraum verschiebt sich dabei nicht,
+    // denn `sx0` und die Zeilennummer bleiben unveraendert.
+    let rad: u64 = form(state, FM_RADIUS)
+    let bo: i64 = border(state) as i64
+    let cw: i64 = wg(state, i, W_W) as i64
+    // ======================================== RUNDE GLAS (fix-r4-4)
+    //
+    // DAS MILCHGLAS GIBT ES AUCH UNTER EINEM DURCHSICHTIGEN FENSTER.
+    //
+    // Bis hierher lag es nur unter der Leiste, und der Grund stand als
+    // Kommentar daneben: "unter einem gewoehnlichen Fenster waere es
+    // dasselbe Rechnen fuer jedes Fenster in jedem Bild". Das ist
+    // richtig fuer zehn Fenster und falsch fuer die Sache selbst --
+    // die Leiste ist 28 Bildpunkte hoch, und auf einem Streifen von 28
+    // Bildpunkten SIEHT ein Mensch keinen Weichzeichner, er misst ihn
+    // nur. Erst unter einer Flaeche von mehreren hundert Zeilen wird
+    // aus "var sinkt" ein Bild, auf das man zeigen kann.
+    //
+    // Was es kostet und warum es tragbar ist: gerechnet wird NUR, wenn
+    // dieses Fenster wirklich durchsichtig ist (`wa < 100`) UND ein
+    // Weichzeichner eingestellt ist. Bei `window_alpha=100` -- dem
+    // Zustand jedes Laufs, der nicht ausdruecklich Glas bestellt --
+    // wird diese Zeile nicht einmal betreten. Der Streifenpuffer ist
+    // einer und wird zwischen Leiste und Fenster hin- und
+    // hergeschoben; die Trefferquote faellt in einem solchen Lauf, die
+    // Zahl dazu steht in `wm: glas ... cache=`.
+    var wgrund: u64 = 0
+    if wa < 100 && form(state, FM_BLUR) > 0 {
+        wgrund = glass_prepare(state, px0, py0, ww, wg(state, i, W_H),
+            form(state, FM_BLUR))
+    }
     var r: i64 = sy0
     while r < sy1 {
         let zeile: u64 = (r - py0) as u64
-        let spalte: u64 = (sx0 - px0) as u64
-        if wa >= 100 {
-            fb_row(state, sx0 as u64, r as u64,
-                quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
-        } else {
-            fb_row_a(state, sx0 as u64, r as u64,
-                quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, 0,
-                SCHLEIER_WIN)
+        var rx0: i64 = sx0
+        var rx1: i64 = sx1
+        let dyb: i64 = wy + oh - 1 - r
+        if rad > 0 && dyb >= 0 && dyb < rad as i64 {
+            let sk: i64 = corner_skip(rad, dyb as u64) as i64 - bo
+            if sk > 0 {
+                rx0 = imax(rx0, px0 + sk)
+                rx1 = imin(rx1, px0 + cw - sk)
+            }
+        }
+        if rx1 > rx0 {
+            let spalte: u64 = (rx0 - px0) as u64
+            let n: u64 = (rx1 - rx0) as u64
+            if wa >= 100 {
+                fb_row(state, rx0 as u64, r as u64,
+                    quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+            } else {
+                var gz: u64 = 0
+                if wgrund != 0 {
+                    gz = wgrund +% (zeile *% ww +% spalte) *% 4
+                }
+                fb_row_a(state, rx0 as u64, r as u64,
+                    quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, gz,
+                    SCHLEIER_WIN)
+            }
         }
         r = r + 1
     }
@@ -6623,6 +6737,23 @@ fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64,
     if alpha >= 100 {
         return neu
     }
+    // ============================================ RUNDE GLAS (fix-r4-2)
+    // DIE TEXTPLATTE STICHT JEDES ALPHA.
+    //
+    // Ring 3 setzt die Marke `PLATTE_MARKE` in die oberen acht Bit
+    // jedes Bildpunktes, auf dem Schrift steht (kernel/user/wlibc.fi,
+    // `platte`). Ein markierter Bildpunkt wird nicht gemischt, sondern
+    // genommen, wie er ist -- OHNE die Marke, denn in den Bildspeicher
+    // gehoert eine Farbe und kein Merkzettel.
+    //
+    // Das ist die Stelle, an der die Lesbarkeit einer Fensterschrift
+    // ab jetzt haengt, und sie kostet einen Vergleich je Bildpunkt.
+    // Vorher hing sie am Schleier `SCHLEIER_WIN`, der die GANZE
+    // Fensterflaeche deckender machte -- also auch jeden Bildpunkt, auf
+    // dem gar nichts steht.
+    if (neu & PLATTE_MARKE) != 0 {
+        return neu & 0xFFFFFF
+    }
     let nr: u64 = (neu >> 16) & 0xFF
     let ng: u64 = (neu >> 8) & 0xFF
     let nb: u64 = neu & 0xFF
@@ -6825,6 +6956,20 @@ fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
 // als gar keiner.
 const GLASS_W: u64 = 3840
 const GLASS_H: u64 = 64
+// RUNDE GLAS (fix-r4-4): DIE OBERGRENZE IST EINE FLAECHE, NICHT EINE
+// HOEHE.
+//
+// Solange nur die Leiste Glas bekam, war "3840 mal 64" beides in einem:
+// die Breite eines 4K-Schirms und anderthalb Leistenhoehen. Unter einem
+// durchsichtigen FENSTER ist die Hoehe eine andere -- das
+// Einstellungsfenster dieser Abnahme ist 760 x 566 --, und die Frage
+// ist nicht mehr "wie hoch", sondern "passt es in den Puffer". Gezaehlt
+// wird deshalb die Flaeche: 460 800 Bildpunkte sind 1,8 MiB je Streifen
+// und decken jedes Fenster ab, das auf einen Schirm von 1280 x 800
+// passt. Was nicht hineinpasst, bekommt KEIN Glas -- ein halb
+// weichgezeichnetes Fenster mit einer Kante in der Mitte waere
+// schlimmer als gar keines, und das war schon die Regel der Leiste.
+const GLASS_PX: u64 = 460800
 // Um wie viele Stufen der weichgezeichnete Untergrund gegen die
 // Grundfarbe verschoben wird: heller unter einem hellen Satz, dunkler
 // unter einem dunklen. Ohne diesen Schritt bleibt das Glas genau so
@@ -6832,7 +6977,7 @@ const GLASS_H: u64 = 64
 // einem mittelhellen Hintergrundbild ganz. 24 Stufen sind sichtbar und
 // kippen keinen Farbton.
 const GLASS_TINT: u64 = 24
-static mut gl_puf: [u32; 245760] = [0 as u32; 245760]
+static mut gl_puf: [u32; 460800] = [0 as u32; 460800]
 // DER ZWEITE STREIFEN, UND WARUM ER SICH LOHNT.
 //
 // Ein Kastendurchgang kann nicht in denselben Puffer schreiben, aus dem
@@ -6845,7 +6990,7 @@ static mut gl_puf: [u32; 245760] = [0 as u32; 245760]
 // Einfaerbung am Ende ist dann der eine Durchlauf, der ohnehin sein
 // musste. Gemessen im Gast (TCG, 896 x 40, r = 8): 52 435 gegen
 // 30 000 Mikrosekunden.
-static mut gl_alt: [u32; 245760] = [0 as u32; 245760]
+static mut gl_alt: [u32; 460800] = [0 as u32; 460800]
 
 // EINE LINIE KASTENWEICHZEICHNER MIT LAUFENDER SUMME -- DIE EINE
 // STELLE, an der ueberhaupt weichgezeichnet wird. Waagerecht und
@@ -6982,7 +7127,7 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
     if r == 0 || w == 0 || h == 0 {
         return 0
     }
-    if w > GLASS_W || h > GLASS_H {
+    if w > GLASS_W || w *% h > GLASS_PX {
         return 0
     }
     if x < 0 || y < 0 {
@@ -7189,6 +7334,59 @@ fn schlieren_say(state: u64) {
     serial.dec(gs(state, S_NOGROW))
     serial.puts((&sl_e[0]) as u64)
     serial.dec(gs(state, S_UNTERPX))
+    serial.nl()
+}
+
+// ================================================ RUNDE GLAS (fix-r4-3)
+// DAS AEUSSERE RECHTECK DES FENSTERS UND SEIN RADIUS.
+//
+//     wm: rahmen x=20 y=3 w=764 h=590 r=24
+//
+// Ohne diese Zeile kennt die Abnahme nur die OBERE LINKE Ecke: sie
+// nimmt `settings: rect name=win`, und das ist die Flaeche, die das
+// Programm bekommen hat -- nicht die, die der Server malt. Wer die
+// unteren Ecken messen will, braucht die untere Kante, und die weiss
+// nur der Server (Rahmenbreite und Titelhoehe sind Formmarken und
+// aendern sich mit dem Aussehen). Gemeldet wird nur bei AENDERUNG, und
+// nur fuer das Fenster mit dem Fokus: ein Malvorgang je Bildrunde mal
+// zwanzig Sekunden waere eine Meldung, die niemand liest.
+static mut rh_x: u64 = 0xFFFFFFFFFFFFFFFF
+static mut rh_y: u64 = 0
+static mut rh_w: u64 = 0
+static mut rh_h: u64 = 0
+static mut rh_r: u64 = 0
+static mut rh_a: [u8; 14] = "wm: rahmen x=\0"
+static mut rh_b: [u8; 4] = " y=\0"
+static mut rh_c: [u8; 4] = " w=\0"
+static mut rh_d: [u8; 4] = " h=\0"
+static mut rh_e: [u8; 4] = " r=\0"
+
+fn rahmen_say(x: i64, y: i64, w: i64, h: i64, r: u64) {
+    if x < 0 || y < 0 || w <= 0 || h <= 0 {
+        return
+    }
+    let xu: u64 = x as u64
+    let yu: u64 = y as u64
+    let wu: u64 = w as u64
+    let hu: u64 = h as u64
+    if rh_x == xu && rh_y == yu && rh_w == wu && rh_h == hu && rh_r == r {
+        return
+    }
+    rh_x = xu
+    rh_y = yu
+    rh_w = wu
+    rh_h = hu
+    rh_r = r
+    serial.puts((&rh_a[0]) as u64)
+    serial.dec(xu)
+    serial.puts((&rh_b[0]) as u64)
+    serial.dec(yu)
+    serial.puts((&rh_c[0]) as u64)
+    serial.dec(wu)
+    serial.puts((&rh_d[0]) as u64)
+    serial.dec(hu)
+    serial.puts((&rh_e[0]) as u64)
+    serial.dec(r)
     serial.nl()
 }
 
@@ -10568,9 +10766,106 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     preview_damage(state)
 }
 
+// ============================================== RUNDE GLAS (fix-r4-2)
+// DIE ENDLAGE LIEGT AUF DER ARBEITSFLAECHE -- GEZOGEN WIRD UEBERALL.
+//
+// Beim ZIEHEN darf ein Fenster unter die Leiste wandern; genau daran
+// misst die Abnahme, dass die Leiste ihren Untergrund neu mischt
+// (`unter_leiste_messen`, Abschnitt 11f). Beim LOSLASSEN darf es dort
+// nicht liegen bleiben: was unter der Leiste endet, ist nicht mehr
+// anzufassen, und was unter der unteren Schirmkante endet, ist gar
+// nicht mehr da. Auf der Aufnahme 15 der Runde hing das untere Drittel
+// des Fensters ausserhalb des Schirms -- `shotcheck.py` zaehlte dreizehn
+// Beschriftungen als `ausserhalb`, und der Reglerblock der Seite
+// "Darstellung" war nicht mehr zu sehen.
+//
+// Geklemmt wird die AEUSSERE Huelle (Rahmen und Titelzeile mitgezaehlt)
+// auf die Arbeitsflaeche, und zwar nur nach unten und rechts bzw. oben
+// und links -- die Groesse des Fensters bleibt unangetastet. Ist das
+// Fenster groesser als die Arbeitsflaeche, gewinnt die obere linke
+// Ecke: lieber unten abgeschnitten als oben, denn oben sitzt die
+// Titelzeile, an der man es wieder anfassen kann.
+fn drag_klemmen(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    let wx0: i64 = win_x(state, i)
+    let wy0: i64 = win_y(state, i)
+    let aw: i64 = outer_w(state, i) as i64
+    let ah: i64 = outer_h(state, i) as i64
+    let ax0: i64 = work_x(state) as i64
+    let ay0: i64 = work_y(state) as i64
+    let ax1: i64 = ax0 + work_w(state) as i64
+    let ay1: i64 = ay0 + work_h(state) as i64
+    var nx: i64 = wx0
+    var ny: i64 = wy0
+    if nx + aw > ax1 {
+        nx = ax1 - aw
+    }
+    if ny + ah > ay1 {
+        ny = ay1 - ah
+    }
+    if nx < ax0 {
+        nx = ax0
+    }
+    if ny < ay0 {
+        ny = ay0
+    }
+    if nx == wx0 && ny == wy0 {
+        return
+    }
+    move_win(state, i, nx, ny)
+    // UND ES WIRD GESAGT. Eine Endlage, die der Server selbst gesetzt
+    // hat, ist fuer jeden Laeufer sonst ein Raetsel: er hat nach
+    // `400,600` gezogen und findet das Fenster bei `400,512`.
+    var s_k: [u8; 17] = "wm: geklemmt id=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wg(state, i, W_ID))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(nx as u64)
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(ny as u64)
+    serial.nl()
+}
+
+// UND DER RUMPF WIRD SCHMUTZIG -- BEIM LOSLASSEN, NICHT BEI JEDEM
+// MILLIMETER.
+//
+// Ein verschobenes Fenster behaelt seinen Puffer, der Server malt ihn
+// an der neuen Stelle, und bis hierher erfuhr das PROGRAMM davon
+// nichts. Es meldete seine Beschriftungen deshalb weiter zu dem
+// Ursprung, an dem es zuletzt gemalt hatte -- auf der Aufnahme 15 der
+// Runde lagen sie 590 Bildpunkte ueber ihrer wirklichen Stelle, und
+// `shotcheck.py` zaehlte acht leere Beschriftungen, wo in Wahrheit
+// keine fehlte. Der Nachtrag zu 8.1 hat den Ursprung in
+// `wlib.flush_win` nachfragen lassen; gerufen wird `flush_win` aber
+// nur, wenn das Programm ueberhaupt malt.
+//
+// Also bekommt es nach dem Zug einen Grund dazu: dasselbe Ereignis,
+// mit dem eine Groessenaenderung ankommt, mit der UNVERAENDERTEN
+// Groesse. `wlib` macht daraufhin den ganzen Rumpf schmutzig, malt ihn
+// und meldet dabei jedes Rechteck zu der Stelle, an der das Fenster
+// jetzt wirklich steht.
+//
+// HIER und nicht in `move_win`: `move_win` laeuft bei jeder
+// Zeigerbewegung des Zuges, das waeren dreissig Vollanstriche je
+// Sekunde fuer eine Stelle, die sich im naechsten Millimeter wieder
+// aendert.
+fn rumpf_neu(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    ev_push(state, i, E_RESIZE, wg(state, i, W_W), wg(state, i, W_H), 0)
+    damage_win(state, i)
+}
+
 fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     preview_damage(state)
     ss(state, S_PVON, 0)
+    drag_klemmen(state, i)
+    rumpf_neu(state, i)
     if gs(state, S_TILE) == 0 {
         ss(state, S_DRAGT, 0)
         return

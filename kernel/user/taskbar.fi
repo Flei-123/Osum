@@ -1470,6 +1470,153 @@ fn glas_say() {
     nl()
 }
 
+// ========================================== RUNDE GLAS (fix-r4-1)
+//
+// DER TEXTSCHILD: DIE SCHRIFT HOLT IHRE 4,5:1 AUS EINER EIGENEN
+// PLATTE UND NICHT MEHR AUS DER DECKKRAFT DER FLAECHE.
+//
+// Bis hierher hing die Lesbarkeit der Leistenschrift an EINER Zahl:
+// der Deckkraft der Flaeche. Der Kern hebt sie an, sobald der
+// Untergrund zu weit von der Leistenfarbe entfernt ist
+// (kernel/ui/wm.fi, `glass_mix`, `SCHLEIER`) -- ueber einem dunklen
+// Bild wurden aus den 40 Prozent des Reglers gemessene 82, und die
+// Aufnahme "Leiste bei 40 %" zeigte etwas, das es nicht gab.
+//
+// Die Anhebung ist nicht falsch, sie ist nur das falsche WERKZEUG:
+// der Kontrast einer Schrift misst sich gegen den Grund DANEBEN, und
+// "daneben" sind zwoelf Bildpunkte und nicht die ganze Leiste. Also
+// bekommt jede Beschriftung ihre eigene, voll deckende Platte, und
+// die Flaeche um sie herum darf so durchsichtig sein, wie der Regler
+// sagt.
+//
+// WARUM DIE PLATTE VOLL DECKEND IST, OHNE DASS DER KERN ETWAS DAVON
+// WISSEN MUSS: das Abstandsalpha in `glass_mix` gibt einem Bildpunkt
+// volle Deckung, sobald die Summe seiner drei Kanalabstaende zur
+// Schluesselfarbe 96 erreicht. `schild_farbe` verschiebt jeden der
+// drei Kanaele um genau 32 -- Summe 96, also Deckung 100, Bildpunkt
+// fuer Bildpunkt und ohne eine einzige neue Zahl im Kern. Die
+// Richtung ist egal (der Abstand ist ein Betrag), also darf jeder
+// Kanal ausweichen, wenn er sonst ueber 255 liefe oder unter 0.
+//
+// 32 ist die kleinste Stufe, die das leistet, und sie ist klein genug,
+// dass die Platte wie ein Hauch unter dem Wort aussieht und nicht wie
+// ein Kasten: aus #ffffff wird #dfdfdf, und der Kontrast der
+// Leistenschrift #0f172a dagegen ist 13,1:1 statt 17,8:1 -- beides
+// weit ueber der Latte, und das ist der Punkt: die Latte haengt ab
+// jetzt an der Platte und nicht mehr am Regler.
+const SCHILD_STUFE: u64 = 32
+
+fn schild_kanal(c: u64, dunkler: bool) -> u64 {
+    if dunkler {
+        if c >= SCHILD_STUFE {
+            return c - SCHILD_STUFE
+        }
+        return c + SCHILD_STUFE
+    }
+    if c + SCHILD_STUFE <= 255 {
+        return c + SCHILD_STUFE
+    }
+    return c - SCHILD_STUFE
+}
+
+// DIE EINE STELLE, DIE DIE SCHILDFARBE RECHNET. Sie geht von der
+// Schrift weg: auf einer hellen Flaeche wird die Platte dunkler, auf
+// einer dunklen heller -- so verliert die Schrift keinen Kontrast,
+// sondern gewinnt welchen.
+fn schild_farbe(grund: u64) -> u64 {
+    let r: u64 = (grund >> 16) & 0xFF
+    let g: u64 = (grund >> 8) & 0xFF
+    let b: u64 = grund & 0xFF
+    let dunkler: bool = (r * 299 + g * 587 + b * 114) / 1000 >= 128
+    return (schild_kanal(r, dunkler) << 16)
+        | (schild_kanal(g, dunkler) << 8)
+        | schild_kanal(b, dunkler)
+}
+
+// Der Schild gilt nur im Glasmodus. Bei voller Deckung ist die Flaeche
+// selbst die Platte, und eine zweite darunter waere ein Kasten, den
+// niemand bestellt hat -- Aufnahme 04 (100 %) sieht deshalb Bildpunkt
+// fuer Bildpunkt aus wie vor dieser Runde.
+fn schild_an() -> bool {
+    return wlibc.tb_alpha() < 100
+}
+
+// Eine Flaeche, die im Glasmodus deckend sein MUSS (die Kaesten der
+// Erweiterungen und die Verweilzeile), bekommt dieselbe Farbe --
+// nicht eine zweite Rechnung, sondern dieselbe Funktion.
+fn schild_grund(grund: u64) -> u64 {
+    if schild_an() {
+        return schild_farbe(grund)
+    }
+    return grund
+}
+
+// Wie viele Platten in diesem Durchgang gemalt wurden. Die Zahl steht
+// in `taskbar: schild ...`; ohne sie kann eine Abnahme nicht
+// unterscheiden, ob der Schild AUS war oder ob er nur nichts zu tun
+// hatte.
+static mut schild_n: u64 = 0
+
+// DIE PLATTE UNTER EINER BESCHRIFTUNG, und zwar durch dasselbe
+// `wlib.draw_board`, das auch die Knoepfe malt: damit traegt sie den
+// laufenden Radius und wird in derselben einen Stelle gerundet.
+fn text_schild(x: u64, base: u64, p: u64, n: u64, ty: u64) {
+    if !schild_an() {
+        return
+    }
+    if n == 0 {
+        return
+    }
+    let tw: u64 = wlib.draw_text_w(p, n, ty)
+    if tw == 0 {
+        return
+    }
+    let asc: u64 = wlib.draw_ascent(ty)
+    let luft: u64 = 3 * wlibc.ui_scale()
+    var py: u64 = 0
+    if base > asc + 1 {
+        py = base - asc - 1
+    }
+    var px: u64 = 0
+    if x > luft {
+        px = x - luft
+    }
+    wlib.draw_board(px, py, tw + 2 * luft, line_h() + 2,
+        wlib.MR_BUTTON, wlibc.EL_FLAT,
+        schild_farbe(wlibc.theme(wlibc.C_TASKBAR_BG)), 0)
+    schild_n = schild_n + 1
+}
+
+// Schild UND Schrift, in dieser Reihenfolge und an einer Stelle: wer
+// nur eines von beidem malt, malt einen Kasten ohne Wort oder ein Wort
+// ohne Grund.
+fn text_mit_schild(x: u64, base: u64, p: u64, n: u64, fg: u64,
+    ty: u64) -> u64 {
+    text_schild(x, base, p, n, ty)
+    return wlib.draw_text(x, base, p, n, fg, ty)
+}
+
+static mut g_sa: [u8; 21] = "taskbar: schild an=\0\0"
+static mut g_sf: [u8; 8] = " farbe=\0"
+static mut g_sg: [u8; 8] = " grund=\0"
+static mut g_sn: [u8; 4] = " n=\0"
+
+fn schild_say() {
+    say((&g_sa[0 as usize]) as u64)
+    if schild_an() {
+        sayn(1)
+    } else {
+        sayn(0)
+    }
+    say((&g_sf[0 as usize]) as u64)
+    say_hex6(schild_farbe(wlibc.theme(wlibc.C_TASKBAR_BG)) & 0xFFFFFF)
+    say((&g_sg[0 as usize]) as u64)
+    say_hex6(wlibc.theme(wlibc.C_TASKBAR_BG) & 0xFFFFFF)
+    say((&g_sn[0 as usize]) as u64)
+    sayn(schild_n)
+    nl()
+}
+
 fn conf_say() {
     say((&s_cf[0 as usize]) as u64)
     say((&s_ed[0 as usize]) as u64)
@@ -4037,7 +4184,9 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         // same place.
         let _m: bool = wlibc.icon_draw(mark, mx, y + (h - mk_w()) / 2)
     }
-    let _e: u64 = wlib.draw_text(tx, base, txt, n, fg, wlibc.TY_BODY)
+    // RUNDE GLAS (fix-r4-1): die Beschriftung des Knopfes bekommt im
+    // Glasmodus ihre eigene deckende Platte -- siehe `text_schild`.
+    let _e: u64 = text_mit_schild(tx, base, txt, n, fg, wlibc.TY_BODY)
     return (tx << 32) | base
 }
 
@@ -4756,7 +4905,13 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 }
                 base = f_y[(f) as usize] + voben + asc + l * line_h()
             }
-            let _e: u64 = wlib.draw_text(tx, base, p, n,
+            // RUNDE GLAS (fix-r4-1): DIE UHR IST DER SCHWERSTE FALL.
+            //
+            // Sie steht rechts aussen auf der blanken Flaeche, und
+            // ueber einem hellen Hintergrundbild war sie es, die den
+            // Kern zwang, die ganze Leiste deckender zu machen. Mit
+            // ihrer eigenen Platte braucht das niemand mehr.
+            let _e: u64 = text_mit_schild(tx, base, p, n,
                 wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
             if report {
                 var mark: u64 = (&m_net[0 as usize]) as u64
@@ -4828,9 +4983,13 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         } else {
         let pp: u64 = plug_text(pb)
         var pn: u64 = tlen(pp)
+        // RUNDE GLAS (fix-r4-1): der Kasten IST die Platte. Im
+        // Glasmodus bekommt er die Schildfarbe und wird damit voll
+        // deckend -- eine zweite Platte unter dem Text waere ein
+        // Kasten im Kasten.
         wlib.draw_board(pb_x[(pb) as usize], pb_y[(pb) as usize],
             pb_w[(pb) as usize], pb_h[(pb) as usize], wlib.MR_BUTTON,
-            wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
+            wlibc.EL_FLAT, schild_grund(wlibc.theme(wlibc.T_PANEL)), 0)
         // Abgeschnitten wird HIER und nicht beim Plugin: was nicht in
         // den Kasten passt, geht sonst in das Feld daneben -- die
         // Lehre der Runde NETVIEW, angewandt auf fremden Text.
@@ -4873,7 +5032,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             wlibc.clip_set(hb, y0, he, y0 + hh)
             wlib.draw_board(hb, st_y, he - hb, btn_h(),
                 wlib.MR_BUTTON, wlibc.EL_FLAT,
-                wlibc.theme(wlibc.T_PANEL), 0)
+                schild_grund(wlibc.theme(wlibc.T_PANEL)), 0)
             let hp: u64 = (&hover_txt[0 as usize]) as u64
             var hn: u64 = tlen(hp)
             while hn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), hp, hn)
@@ -4977,6 +5136,15 @@ fn paint(report: bool) {
         y = y + hh
     }
     paints = paints + 1
+    // RUNDE GLAS (fix-r4-1): wie viele Textschilde dieser Durchgang
+    // gemalt hat. Die Zahl wird hier gemeldet und danach wieder auf
+    // null gesetzt -- sie gilt einem Bild und nicht dem Leben des
+    // Programms, sonst waechst sie mit jedem Uhrenwechsel und sagt
+    // nichts mehr ueber die Aufnahme, die gerade entstanden ist.
+    if report {
+        schild_say()
+    }
+    schild_n = 0
 }
 
 // ============================================================ the drag

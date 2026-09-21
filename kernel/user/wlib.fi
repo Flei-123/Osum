@@ -2823,6 +2823,11 @@ const TP_WW: u64 = 60 // the miniature window
 const TP_TITLE: u64 = 7 // its title bar
 const TP_LINE: u64 = 2 // a line of body text
 const TP_MARK: u64 = 22 // the mark on the title bar
+// RUNDE GLAS (fix-r4-2): der Mindestabstand zwischen dem Bild in der
+// Kachel und dem Rahmen der Kachel. Er gilt ZUSAETZLICH zur Rundung:
+// bei `radius=0` gibt es keine Rundung, und ohne diese vier Bildpunkte
+// laege der Balken der Miniaturleiste dann auf der Rahmenlinie.
+const TP_EIN: u64 = 4
 const TILE_FIELDS: u64 = 17
 const TL_SURFACE: u64 = 0
 const TL_RAISED: u64 = 1
@@ -2929,10 +2934,37 @@ fn paint_tile(i: u64) {
     // JEDE Flaeche der Kachel -- Fuellung, Leiste, Knopf, Fenster --
     // innerhalb desselben Umrisses, ohne dass ein zweiter Rasterizer
     // dafuer noetig waere.
+    //
+    // RUNDE GLAS (fix-r4-2): UND ZWAR GEGEN DAS INNENRECHTECK, NICHT
+    // GEGEN DIE ECKENDECKUNG EINER EINZIGEN ZEILE.
+    //
+    // `ecke_ein(rk, 4)` sagt, wie weit die Rundung GENAU VIER
+    // Bildpunkte unter der Kante nach innen greift -- bei rk=12 sind
+    // das vier. Die Vorschau begann damit genau auf der Bogenlinie:
+    // ihre oberste Zeile lag auf dem Rahmen, und weil der senkrechte
+    // Balken der Miniaturleiste bei `edge=rechts` ("Tafel") bzw.
+    // `edge=links` ("Studio") an dieser Kante klebt, blieb dort ein
+    // Splitter Akzentfarbe AUF dem Rahmen stehen. Im Bild 09 waren das
+    // zwei bis drei Bildpunkte -- zu wenig fuer die Eckenprobe, die
+    // Viertel zaehlt, und genug, um wie ein Fehler auszusehen.
+    //
+    // Das Innenrechteck einer runden Flaeche ist `x + r .. x + w - r`:
+    // darin liegt JEDE Zeile der Flaeche vollstaendig, unabhaengig
+    // davon, wie weit oben sie sitzt. Vier Bildpunkte kommen als
+    // Mindestabstand dazu, damit auch bei `radius=0` (Innenrechteck
+    // gleich Kachel) ein sichtbarer Saum zwischen Balken und Rahmen
+    // bleibt. `ein` ist diese Einrueckung, und sie gilt auf BEIDEN
+    // Seiten -- "Studio" links ist derselbe Fall wie "Tafel" rechts.
     let rk: u64 = typ_radius(RT_KACHEL, MR_TAFEL, w, h)
-    let rkant: u64 = ecke_ein(rk, 4)
+    var ein: u64 = rk
+    if ein < TP_EIN {
+        ein = TP_EIN
+    }
     let pw: u64 = TP_W
-    let px: u64 = sub(x + sub(w, pw), rkant)
+    var px: u64 = sub(x + sub(w, pw), ein)
+    if px < x + ein {
+        px = x + ein
+    }
     let ph: u64 = sub(h, 8)
     let py: u64 = y + 4
     let sel: bool = g(i, D_VAL) != 0
@@ -3011,6 +3043,7 @@ fn paint_tile(i: u64) {
     // the desktop under it
     wlibc.rect(px, py, pw, ph, tspec(i, TL_SURFACE))
     wlibc.rect(bx, by, bw2, bh2, tspec(i, TL_TASKBAR))
+    say_balken(g(i, D_WIN), bx, by, bw2, bh2, x, y, w, h, ein)
     // one button on the bar, where the alignment puts it
     let blen: u64 = TP_BTN
     if e == 2 || e == 3 {
@@ -3019,12 +3052,16 @@ fn paint_tile(i: u64) {
             byy = by + sub(bh2, blen) / 2
         }
         wlibc.rect(bx + 1, byy, sub(bar, TP_LINE), blen, tspec(i, TL_ACCENT))
+        say_balken(g(i, D_WIN), bx + 1, byy, sub(bar, TP_LINE), blen,
+            x, y, w, h, ein)
     } else {
         var bxx: u64 = bx + 3
         if tspec(i, TL_ALIGN) == 1 {
             bxx = bx + sub(bw2, blen) / 2
         }
         wlibc.rect(bxx, by + 1, blen, sub(bar, TP_LINE), tspec(i, TL_ACCENT))
+        say_balken(g(i, D_WIN), bxx, by + 1, blen, sub(bar, TP_LINE),
+            x, y, w, h, ein)
     }
     // ---- the miniature window, with ITS OWN radius and shadow
     var wx: u64 = px + TP_WX
@@ -5435,6 +5472,59 @@ fn say_knopf(w: u64, x: u64, y: u64, bw: u64, bh: u64, r: u64) {
     let _p: u64 = ulib.put(b, at)
 }
 
+// RUNDE GLAS (fix-r4-2): WO EIN BALKEN DER VORSCHAUKACHEL SITZT.
+//
+// Eine Kachel malt ihren Umriss RUND und ihren Inhalt aus Rechtecken.
+// Die Eckenprobe (`glascheck.py kachel`) zaehlt Bildpunkte in den vier
+// Eckvierteln und findet damit einen Balken, der zwei Bildpunkte weit
+// auf der Rahmenlinie sitzt, NICHT -- genau so stand der Akzentbalken
+// in "Tafel" (rechte Kante) und in "Studio" (linke) im Bild 09.
+//
+// Also meldet die Kachel jedes Balkenrechteck zusammen mit dem
+// Rechteck, in dem es liegen muss: `kx/ky/kw/kh` ist die Kachel,
+// `ein` die Einrueckung, die sie ihrem Bild gibt (Rundung, mindestens
+// `TP_EIN`). Der Abnahmelauf rechnet damit ohne einen einzigen
+// Bildpunkt nach, dass kein Balken den Rahmen schneidet -- eine
+// Rechnung, die nicht davon abhaengt, ob die Farben der Vorlage sich
+// im Bild ueberhaupt unterscheiden.
+fn say_balken(w: u64, x: u64, y: u64, bw: u64, bh: u64, kx: u64, ky: u64,
+    kw: u64, kh: u64, ein: u64) {
+    var a: [u8; 22] = "wlib: kachelbalken x=\0"
+    var by: [u8; 4] = " y=\0"
+    var bw2: [u8; 4] = " w=\0"
+    var bh2: [u8; 4] = " h=\0"
+    var bkx: [u8; 5] = " kx=\0"
+    var bky: [u8; 5] = " ky=\0"
+    var bkw: [u8; 5] = " kw=\0"
+    var bkh: [u8; 5] = " kh=\0"
+    var bei: [u8; 6] = " ein=\0"
+    var nl2: [u8; 2] = "\n\0"
+    if s_trace == 0 {
+        return
+    }
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&a[0 as usize]) as u64)
+    at = tr_num(b, at, x)
+    at = tr_put(b, at, (&by[0 as usize]) as u64)
+    at = tr_num(b, at, y)
+    at = tr_put(b, at, (&bw2[0 as usize]) as u64)
+    at = tr_num(b, at, bw)
+    at = tr_put(b, at, (&bh2[0 as usize]) as u64)
+    at = tr_num(b, at, bh)
+    at = tr_put(b, at, (&bkx[0 as usize]) as u64)
+    at = tr_num(b, at, kx)
+    at = tr_put(b, at, (&bky[0 as usize]) as u64)
+    at = tr_num(b, at, ky)
+    at = tr_put(b, at, (&bkw[0 as usize]) as u64)
+    at = tr_num(b, at, kw)
+    at = tr_put(b, at, (&bkh[0 as usize]) as u64)
+    at = tr_num(b, at, kh)
+    at = tr_put(b, at, (&bei[0 as usize]) as u64)
+    at = tr_num(b, at, ein)
+    at = tr_put(b, at, (&nl2[0 as usize]) as u64)
+    let _p: u64 = ulib.put(b, at)
+}
+
 fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64, q: u64,
     nq: u64, nv: u64) {
     var a: [u8; 13] = "wlib: tab i=\0"
@@ -5625,6 +5715,22 @@ fn paint_tabs(i: u64) {
     // meldet, und genau daran misst es der Abnahmelauf.
     let sel: u64 = g(i, D_VAL)
     focus_ring_at(i, tab_x(i, sel), tab_y(i, sel), tab_width(i, sel), zh)
+    // RUNDE GLAS (fix-r4-2): UND DIE GANZE REITERZEILE WIRD DECKEND.
+    //
+    // Die Textplatte von `wlibc.text_at` deckt die BESCHRIFTUNGEN. Die
+    // Reiterzeile hat aber auch Flaeche zwischen und neben den
+    // Reitern, und genau dort stand auf der Aufnahme 13 die Ausgabe
+    // des Terminals darunter: zwischen "Sprache" und "Vorlagen" war
+    // Fenstergrund, und Fenstergrund war bei 55 Prozent halb
+    // durchsichtig. Ein Fremdbuchstabe, der einen halben Bildpunkt
+    // neben einem Reiternamen steht, liest sich wie Teil davon.
+    //
+    // Die Zeile ist der Kopf des Fensters, nicht seine Flaeche -- sie
+    // deckend zu machen kostet 24 von 542 Zeilen Durchsicht und
+    // erspart das Fehlerbild ganz. `tools/themestore/glascheck.py
+    // reiter` misst es: die Kantendichte in diesem Band muss bei
+    // `window_alpha=55` dieselbe sein wie bei 100.
+    wlibc.platte(x, y, g(i, D_W), bh)
 }
 
 fn paint_menubar(i: u64) {

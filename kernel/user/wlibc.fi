@@ -45,6 +45,10 @@ import ulib
 import libc.io
 import icons
 import utf8
+// RUNDE GLAS: die Eckendeckung steht einmal im Baum, in lib/ecke.fi,
+// und wird vom Kern und von dieser Bibliothek aus DERSELBEN Quelle
+// uebersetzt -- siehe den Kopf jener Datei.
+import ecke
 
 export {
     start, ready, screen_w, screen_h, mouse_x, mouse_y, mouse_btn,
@@ -91,6 +95,10 @@ export {
     M_TB_ALPHA, M_WIN_ALPHA, M_TB_BLUR, ALPHA_MIN, BLUR_MAX,
     radius, tb_alpha, win_alpha, tb_blur,
     set_radius, set_tb_alpha, set_win_alpha, set_tb_blur,
+    // RUNDE GLAS (fix-r4-2): die Textplatte. `text_at` ruft sie selbst
+    // -- nach aussen gereicht wird sie nur fuer FLAECHEN, die als
+    // Ganzes deckend sein muessen (die Reiterzeile).
+    platte, PLATTE,
     // RUNDE ECHTHARDWARE-6: `mix` mischt zwei Farben in Prozent. Das
     // Kontrollzentrum hellt damit eine EINGESCHALTETE Kachel auf,
     // statt sie beim Ueberfahren auf die graue Knopffarbe springen zu
@@ -670,6 +678,60 @@ fn px(x: u64, y: u64, color: u64) {
         color as u32)
 }
 
+// ================================================ RUNDE GLAS (fix-r4-2)
+// DIE TEXTPLATTE -- DECKUNG DORT, WO SCHRIFT STEHT, UND NUR DORT.
+//
+// Ein durchsichtiges Fenster (`window_alpha < 100`) mischt seine
+// Flaeche mit dem, was darunter liegt -- und darunter liegt Schrift.
+// Auf der Aufnahme 13 lief die Ausgabe des Terminals quer durch die
+// Reiterzeile der Einstellungen. Die Antwort davor war ein GLOBALER
+// Schleier (`wm.SCHLEIER_WIN = 20`): die ganze Fensterflaeche durfte
+// sich nur zwanzig Helligkeitsstufen von der Fensterfarbe entfernen.
+// Das hat zwei Fehler auf einmal -- es macht auch die leeren Flaechen
+// deckend (ein Fenster bei 55 Prozent sah aus wie eines bei 80), und
+// es hilft genau dort am wenigsten, wo der fremde Buchstabe zufaellig
+// dieselbe Helligkeit hat wie der Fenstergrund.
+//
+// Die Platte macht es umgekehrt: sie setzt die Marke `PLATTE` in die
+// oberen acht Bit JEDES Bildpunktes, auf dem Schrift steht -- und der
+// Fensterserver nimmt einen markierten Bildpunkt unveraendert
+// (`wm.glass_mix`). Deckend ist damit die ZEILE, nicht die Flaeche;
+// zwischen den Zeilen bleibt das Fenster so durchsichtig, wie der
+// Regler sagt.
+//
+// Die Marke steht in den oberen acht Bit, weil der Fensterpuffer 32
+// Bit je Bildpunkt fuehrt und die Farbe nur 24 davon braucht. Sie
+// verlaesst Ring 3 nie: `glass_mix` gibt den Bildpunkt ohne sie
+// zurueck. Gemalt wird hier nichts Neues -- was unter der Platte
+// steht, ist schon da; sie sagt nur, dass es nicht gemischt werden
+// soll.
+const PLATTE: u64 = 0xFF000000
+// Ob dieser Prozess eine Schirmkante reserviert hat, also die Leiste
+// ist. Siehe `win_strut`.
+static mut s_panel: u64 = 0
+
+fn platte(x: u64, y: u64, w: u64, h: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    // Ein deckendes Fenster hat nichts zu decken, und die Leiste malt
+    // ihren Schild selbst. In beiden Faellen kostet die Platte hier
+    // keinen einzigen Bildpunkt.
+    if win_alpha() >= 100 || s_panel != 0 {
+        return
+    }
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let a: u64 = get(x + c, y + r)
+            px(x + c, y + r, a | PLATTE)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
 fn get(x: u64, y: u64) -> u64 {
     if x >= s_sw || y < s_band {
         return 0
@@ -804,40 +866,15 @@ fn frame3(x: u64, y: u64, w: u64, h: u64, hell: u64, dunkel: u64,
 // line (`if cov >= 128`), and it is written here so that whoever needs
 // it does not have to redesign anything.
 
-// Is (dx, dy) -- the distance from the centre of the corner circle, in
-// whole pixels, of the pixel's TOP LEFT -- inside the circle? Answered
-// as a coverage 0..255 by sampling the pixel sixteen times.
-fn corner_cov(dx: u64, dy: u64, r: u64) -> u64 {
-    if r == 0 {
-        return 255
-    }
-    // The far corner of the pixel is inside: fully covered.
-    // Cheap early exits, and they carry most of the pixels.
-    let rr: u64 = r *% r
-    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
-        return 255
-    }
-    if dx * dx + dy * dy >= rr {
-        return 0
-    }
-    var hits: u64 = 0
-    var sy: u64 = 0
-    while sy < 4 {
-        var sx: u64 = 0
-        while sx < 4 {
-            // the centre of sub-sample (sx, sy), in eighths of a pixel
-            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
-            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
-            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
-                hits = hits + 1
-            }
-            sx = sx + 1
-        }
-        sy = sy + 1
-    }
-    aa_px = aa_px + 1
-    return hits * 255 / 16
-}
+// WHERE THE SAMPLER LIVES NOW: `lib/ecke.fi`, and it is the only
+// copy in the tree. It used to stand here AND in `wm.corner_cov`,
+// word for word, each carrying a comment promising it was the same
+// arithmetic as the other -- a promise a human had to keep by hand.
+// Round GLAS moved it into the one directory both rings already
+// search (FIRNLIB = lib/), so the button of a dialog and the frame
+// of its window cannot curve differently any more.
+// `aa_pixels()` below still reports the cost; the counter moved
+// with the sampler.
 
 // ====================================================== RUNDE VEKTOR
 //
@@ -1276,7 +1313,7 @@ fn rrect(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64) {
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let cov: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let cov: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             if cov != 0 {
                 let x0: u64 = x + dx
                 let y0: u64 = y + dy
@@ -1387,10 +1424,10 @@ fn rring(x: u64, y: u64, w: u64, h: u64, r0: u64, bw: u64, color: u64) {
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let a: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let a: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             var b: u64 = 0
             if ri > 0 {
-                b = corner_cov(r - 1 - dx, r - 1 - dy, ri)
+                b = ecke.corner_cov(r - 1 - dx, r - 1 - dy, ri)
             }
             var cov: u64 = 0
             if a > b {
@@ -1573,10 +1610,10 @@ fn shadow_edge(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64,
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let aussen: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let aussen: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             var i2: u64 = 0
             if innen > 0 {
-                i2 = corner_cov(r - 1 - dx, r - 1 - dy, innen)
+                i2 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, innen)
             }
             var cov: u64 = 0
             if aussen > i2 {
@@ -1874,7 +1911,28 @@ fn text_at(f: u64, px_: u64, x: u64, y: u64, p: u64, n: u64,
             k = k + l
         }
     }
-    return (cx >> 6) as u64
+    let ende: u64 = (cx >> 6) as u64
+    // RUNDE GLAS (fix-r4-2): UND DIE ZEILE WIRD DECKEND.
+    //
+    // HIER und nicht in `wlib`: das ist die EINE Stelle, an der in
+    // Ring 3 ueberhaupt Schrift auf eine Flaeche kommt. Jede
+    // Beschriftung, jede Listenzeile, jeder Reitername und jede Zeile
+    // des Terminals geht durch sie -- eine Platte je Aufrufer waere
+    // ein Dutzend Orte fuer dieselbe Sache gewesen, und der erste
+    // vergessene waere genau der, an dem es auffaellt.
+    //
+    // Die Platte ist einen Bildpunkt groesser als das Feld der Zeile,
+    // damit die Kantenglaettung der Ober- und Unterlaengen mit
+    // daruntersteht und die Platte keinen sichtbaren Rand bekommt.
+    if ende > x {
+        let asc: u64 = ascent_of(f, px_)
+        var py0: u64 = 0
+        if y > asc + 1 {
+            py0 = y - asc - 1
+        }
+        platte(x, py0, ende - x + 1, text_h(px_) + 2)
+    }
+    return ende
 }
 
 // Dieselbe Rechnung OHNE zu malen -- fuer die Anordnung, fuer das
@@ -2687,7 +2745,6 @@ static mut shp_name: [u8; 32] = [0 as u8; 32]
 static mut shp_file: [u8; 32] = [0 as u8; 32]
 static mut shp_keys: u64 = 0
 static mut shp_id: u64 = 0
-static mut aa_px: u64 = 0
 
 static mut sch_mode: u64 = 1
 static mut sch_high: u64 = 0
@@ -4756,7 +4813,7 @@ fn shape_id() -> u64 {
 }
 
 fn aa_pixels() -> u64 {
-    return aa_px
+    return ecke.aa_px()
 }
 
 // One line of a shape file. Unknown keys are counted as bad, exactly
@@ -5051,7 +5108,7 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     metrics_classic()
     __mmio_write8(((&shp_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&shp_name[0 as usize]) as u64) as *mut u8, 0 as u8)
-    aa_px = 0
+    ecke.aa_reset()
     set_mode = MODE_AUTO
     set_accent = 0
     // RUNDE GLAS: die vier Werte auf "keine Zeile" zurueck, VOR dem
@@ -5722,7 +5779,19 @@ fn deco_push() -> u64 {
 // window on layer 0 or 2 may; everyone else gets a negative result.
 // `size == 0` gives the edge back.
 fn win_strut(h: u64, edge: u64, size: u64) -> u64 {
-    return sys3w(WM_STRUT, h, edge, size)
+    // RUNDE GLAS (fix-r4-2): UND WER EINE KANTE RESERVIERT, IST DIE
+    // LEISTE. Dasselbe Merkmal, an dem `wm.panel_win` sie erkennt --
+    // hier gemerkt, damit `platte` weiss, dass es die Textplatte NICHT
+    // malen darf: die Leiste hat ihre eigene Deckkraft
+    // (`taskbar_alpha`) und ihren eigenen Schild hinter der Schrift
+    // (kernel/user/taskbar.fi). Zwei Schilde hinter derselben Schrift
+    // waeren ein zweiter Ort fuer dieselbe Sache, und ihre Flaeche
+    // waere dann nicht mehr so durchsichtig, wie der Regler sagt.
+    let rc: u64 = sys3w(WM_STRUT, h, edge, size)
+    if !ulib.bad(rc) {
+        s_panel = 1
+    }
+    return rc
 }
 
 // ================================================ RUNDE MERGE-11: R5
