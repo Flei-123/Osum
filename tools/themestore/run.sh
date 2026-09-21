@@ -474,8 +474,16 @@ print('548,41')
 PYV
 )
 echo "        Reiter 'Vorlagen' wird bei $VKLICK angeklickt"
+# ZWEIMAL DERSELBE PUNKT, aus demselben Grund wie in 11g: der erste
+# Klick holt das Fenster nach vorn, der zweite trifft den Reiter.
+# GEMESSEN (fix-r3-3): mit EINEM Klick traegt der Reiter danach zwar
+# den Fokusring, die Seite wird aber erst NACH der Aufnahme gemalt --
+# die zehn Kachelzeilen standen im Mitschnitt in den letzten
+# vierundzwanzig Zeilen, das Bild zeigte noch "Darstellung". Jede
+# Bildpunktprobe dieses Laufs haette dann die falsche Seite gemessen
+# und trotzdem eine Zahl gemeldet.
 bash tools/themestore/build.sh "$TMPD/setv" extra='einst' uitrace=yes keep=yes \
-    click=$VKLICK > "$TMPD/setv.log" 2>&1
+    click=$VKLICK click=$VKLICK > "$TMPD/setv.log" 2>&1
 SEV="$TMPD/setv/serial.txt"
 NR=$({ grep -ac 'settings: rect name=w[a-z][a-z] ' "$SE" "$SEV" || true; } \
      | cut -d: -f2 | awk '{n=n+$1} END {print n+0}')
@@ -1999,7 +2007,13 @@ done
 # nach.
 echo
 echo "== 11j2. jeder gemeldete Knopf zeigt einen Umriss =="
-for pair in "set:Darstellung" "setv:Vorlagen" "winal:durchsichtig"; do
+# ZWEI LAEUFE OHNE KLICK, und das ist Absicht: der Lauf `setv` klickt
+# einen Reiter an, und die Aufnahme entsteht zwei Sekunden danach --
+# welche Seite darauf steht, entscheidet der Fensterserver und nicht
+# dieser Pruefer. Eine Bildpunktprobe gegen gemeldete Rechtecke einer
+# ANDEREN Seite misst nichts. `set` (Darstellung) und `winal` (dasselbe
+# mit window_alpha=55) tragen zusammen jeden Knopf, um den es geht.
+for pair in "set:Darstellung" "winal:durchsichtig"; do
     d=${pair%%:*}; nm=${pair##*:}
     KO=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
          "$TMPD/$d/serial.txt" --knoepfe 2>&1)
@@ -2047,6 +2061,99 @@ KG=$(python3 tools/themestore/shotcheck.py "$TMPD/flach.ppm" \
      "$TMPD/set/serial.txt" --knoepfe 2>&1 \
      | grep -oE 'ohnekante [0-9]+' | cut -d' ' -f2)
 num "GEGENPROBE: ein flach uebermalter Knopf wird gefunden" "${KG:-0}" ge 1
+
+# ---- 11k. (fix-r3-3) DIE VORSCHAUKACHEL: EINE FORM FUER FLAECHE UND
+#           RAHMEN, UND DER NAME STEHT ZEICHEN FUER ZEICHEN DA.
+#
+# Auf Bild 09 stand auf der vierten Kachel "Mittemacht" statt
+# "Mitternacht", und links daneben, am Rand der Kachel, ein heller Keil
+# von acht Bildpunkten (x=331..338, Zeilen 229..233), der wie ein
+# abgerutschtes Zeichen aussah. Gemessen wurde beides, und es waren
+# ZWEI Sachen, von denen die eine gar keine war:
+#
+#  1. DER KEIL WAR EIN LOCH IN DER FLAECHE, und er kam daher, dass die
+#     Kachel ihre Flaeche aus einem anderen Rasterer holte als ihren
+#     Rahmen: `fuib.tafel` beschneidet ein Rechteck, das oben aus dem
+#     Malband herausragt, auf die Bandkante und rundet danach die Ecken
+#     des BESCHNITTENEN Rechtecks -- liegt die Bandkante mitten in
+#     einer Kachel, malt die Bruecke eine runde Ecke mitten in die
+#     Flaeche. Flaeche und Rahmen kommen jetzt beide aus `wlibc.rrect`
+#     bzw. `wlibc.rring`, mit demselben `r` und denselben Kanten
+#     (kernel/user/wlib.fi, `paint_tile`). `glascheck.py kachel` sagt
+#     das mit einer Zahl: `innen` ist die Zahl der Bildpunkte am linken
+#     Rand und in den zwei waagerechten Streifen der Kachel, die nicht
+#     ihre Flaechenfarbe tragen. Vorher 7 (und 6 auf einer zweiten
+#     Kachel), jetzt 0.
+#  2. DER NAME WAR NIE VERSTUEMMELT. Alle elf Zeichen liegen auf genau
+#     den Stellen, die der zweite Rasterer (`tools/ttf/raster.py`) fuer
+#     diese Schrift und Groesse ausrechnet -- `namecheck.py` sieht an
+#     jeder gerechneten Glyphenstelle nach, ob dort Tinte steht. Dass
+#     ein Mensch "Mittemacht" liest, ist das Schriftbild selbst: der
+#     Arm des 'r' reicht bei 15 Bildpunkten in die Schulter des 'n'
+#     (Unterschneidung des Paares -36/64 Bildpunkte), und 'rn' sieht
+#     dann aus wie 'm'. Das steht hier als Befund und nicht als
+#     Reparatur, denn reparieren liesse es sich nur in der Schrift.
+echo
+echo "== 11k. die Vorschaukachel: eine Form, und der Name ist ganz da =="
+KINNEN=0
+KZAHL=0
+while read -r kx ky kw kh; do
+    [ -n "$kx" ] || continue
+    [ -s "$TMPD/setv/desktop.png" ] || continue
+    O=$(python3 tools/themestore/glascheck.py kachel \
+        "$TMPD/setv/desktop.png" "$kx" "$ky" "$kw" "$kh" \
+        "${KACHR:-12}" 2>&1 | tail -1)
+    ki=$(printf '%s' "$O" | grep -oE 'innen=[0-9]+' | cut -d= -f2)
+    KINNEN=$((KINNEN + ${ki:-99}))
+    KZAHL=$((KZAHL + 1))
+    [ "${ki:-9}" = 0 ] || echo "        $ky: $O"
+done <<EOF
+$KACHELN
+EOF
+num "gemessene Kacheln" "$KZAHL" ge 10
+num "Bildpunkte, die in der Flaeche einer Kachel fehlen (Loecher)" \
+    "$KINNEN" eq 0
+# GEGENPROBE, und ohne sie waere die 0 oben geschenkt: dasselbe Bild
+# mit einem von Hand gestanzten Loch -- acht mal fuenf Bildpunkte in
+# der Farbe des Seitengrunds am linken Rand der ersten Kachel, also
+# genau die Form des Keils, um den es ging. Die Probe MUSS ihn finden.
+KL1=$(printf '%s\n' "$KACHELN" | head -1)
+set -- $KL1
+python3 - "$TMPD/setv/desktop.png" "$TMPD/kachelloch.png" "$1" "$2" <<'PYL'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB")
+x, y = int(sys.argv[3]), int(sys.argv[4])
+grund = im.getpixel((x - 6, y + 16))
+for j in range(14, 19):
+    for i in range(1, 9):
+        im.putpixel((x + i, y + j), grund)
+im.save(sys.argv[2])
+PYL
+KLO=$(python3 tools/themestore/glascheck.py kachel "$TMPD/kachelloch.png" \
+      "$1" "$2" "$3" "$4" "${KACHR:-12}" 2>&1 | tail -1)
+echo "        GEGENPROBE: $KLO"
+num "GEGENPROBE: ein gestanztes Loch wird gefunden" \
+    "$(printf '%s' "$KLO" | grep -oE 'innen=[0-9]+' | cut -d= -f2)" ge 1
+# UND JEDER GEMALTE NAME GEGEN DIE VORLAGE, AUS DER ER STAMMT.
+NC=$(python3 tools/themestore/namecheck.py "$TMPD/setv/desktop.png" \
+     "$TMPD/setv/serial.txt" assets/themes "$TMPD/namenloch.png" 2>&1)
+printf '%s\n' "$NC" | sed 's/^/        /'
+num "gemalte Kachelnamen" \
+    "$(printf '%s' "$NC" | grep -oE 'gemalt=[0-9]+' | cut -d= -f2)" \
+    eq "$NPRESET"
+for z in fehlt gekuerzt ohnetinte; do
+    num "Kachelnamen, die $z sind" \
+        "$(printf '%s' "$NC" | grep -oE "$z=[0-9]+" | cut -d= -f2)" eq 0
+done
+# GEGENPROBE: dasselbe Bild, in dem ein 'r' mit der Flaechenfarbe
+# seiner Kachel uebermalt ist -- genau der Fall "der Zeichensatz
+# verschluckt ein Zeichen", den die Probe oben ausschliessen soll.
+NL=$(python3 tools/themestore/namecheck.py "$TMPD/namenloch.png" \
+     "$TMPD/setv/serial.txt" assets/themes 2>&1)
+echo "        GEGENPROBE: $(printf '%s' "$NL" | head -1)"
+num "GEGENPROBE: ein uebermaltes 'r' wird gefunden" \
+    "$(printf '%s' "$NL" | grep -oE 'ohnetinte=[0-9]+' | cut -d= -f2)" ge 1
 
 echo
 echo "THEMESTORE: $pass passed, $fail failed"
