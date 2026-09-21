@@ -727,11 +727,13 @@ PY
 KN=$(printf '%s\n' "$KACHELN" | grep -c .)
 num "die zehn Vorschaukacheln melden ihr Rechteck" "$KN" ge 10
 KBAD=0; KTIEF=0
+[ -s "$SHOTS/settings-vorlagen.png" ] || { KBAD=99; KTIEF=99; }
 while read -r kx ky kw kh; do
     [ -n "$kx" ] || continue
+    [ -s "$SHOTS/settings-vorlagen.png" ] || continue
     O=$(python3 tools/themestore/glascheck.py kachel \
         "$SHOTS/settings-vorlagen.png" "$kx" "$ky" "$kw" "$kh" \
-        "${KACHR:-12}")
+        "${KACHR:-12}" 2>&1 | tail -1)
     f=$(printf '%s' "$O" | grep -oE 'fremd=[0-9]+' | cut -d= -f2)
     t=$(printf '%s' "$O" | grep -oE 'tiefe=[0-9]+' | cut -d= -f2)
     [ "${f:-9}" = 0 ] || { KBAD=$((KBAD+1)); echo "        $ky: $O"; }
