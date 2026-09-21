@@ -63,11 +63,30 @@ bash tools/themestore/build.sh /tmp/glas tbalpha=70 blur=12 \
 bash tools/themestore/run.sh
 ```
 
-Elf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
+Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
 Rechner:
 
 ```
-THEMESTORE: 136 passed, 0 failed
+THEMESTORE: 188 passed, 0 failed
+```
+
+Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt,
+damit niemand sie erhoffen muss:
+
+| Sache | gemessen |
+|---|---|
+| Weichzeichner je Vollbild | `us=45511`, Spitze `max=56721` bei `px=35840` |
+| und wie oft der Streifen aus dem Zwischenspeicher kam | `cache=2/26` |
+| Kontrast der Leistenschrift, helles Muster | 14,43:1 |
+| dieselbe Schrift, dunkles Muster | 12,33:1 |
+| dunkles Muster mit Milchglas 12 | 12,33:1 aus 13 Kandidaten |
+| Schlieren nach dem Zug unter die Leiste | 0 Bildpunkte |
+
+Ein zweiter, kuerzerer Lauf prueft, dass jedes Bedienelement aus der
+Bibliothek kommt:
+
+```bash
+bash tools/check-ui.sh     # -> CHECK-UI PASSED
 ```
 
 Mit `TS_OUT=/pfad` bleiben alle Mitschnitte, Bilder und Abbilder
@@ -79,7 +98,10 @@ TS_OUT=/tmp/ts bash tools/themestore/run.sh
 
 Die Bilder landen in `docs/shots/themestore/` — je eine Aufnahme je
 Vorlage plus die sieben der Runde GLAS (`glas-radius-0/12/24`,
-`glas-alpha-100/70/40`, `glas-milchglas`).
+`glas-alpha-100/70/40`, `glas-milchglas`). Die durchnummerierten
+Aufnahmen der Runde liegen daneben in `docs/shots/glas/`; welche
+welche ist, sagt `docs/shots/glas/README.md`, und was die Runde
+gebaut und was sie NICHT erreicht hat, steht in `docs/RUNDE-GLAS.md`.
 
 ## 4. Einstellen im laufenden System
 
@@ -96,6 +118,16 @@ taskbar_alpha=60
 window_alpha=90
 taskbar_blur=12
 ```
+
+**Was einen beim Schieben ueberrascht:** die Lesbarkeit geht vor. Ist
+der Untergrund so unruhig, dass die Schrift der Leiste unter 4,5:1
+fiele, hebt der Fensterserver das Alpha an, bis sie wieder darueber
+liegt — aus `taskbar_alpha=40` kann so ein wirksames 82 werden. Der
+Regler verschweigt das nicht, er schreibt die wirksame Zahl daneben
+(„Taskleiste deckend % (wirkt 82)"), und der Lauf misst beides
+getrennt (`alpha_soll` gegen `alpha_ist`). Wer wirklich durchsehen
+will, nimmt ein ruhigeres Hintergrundbild oder Milchglas: der
+Weichzeichner beruhigt den Grund und laesst darum mehr Durchsicht zu.
 
 ## 5. Voraussetzungen
 
