@@ -119,6 +119,7 @@ export {
     pxsum,
     anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
     set_noanim, close_anim, minimize_anim, open_anim,
+    set_min_rect, min_rect_w,
     set_sig, sig_on, frame_no, sig_colour, plugkeys,
     set_leser, leser_tick, liest, risse, tear_top, tear_bottom, without_sig,
     riss_y0, riss_y1, riss_frame, verworfen,
@@ -1126,6 +1127,20 @@ const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
 // Sicherungen.
 const W_FSXY: u64 = 0x160
 const W_FSWH: u64 = 0x168
+// ===================================================== RUNDE OBERFLAECHE
+// WOHIN DAS FENSTER BEIM MINIMIEREN FLIEGT.
+//
+// Justins Wunsch war ausdruecklich "zum EIGENEN Taskleistenknopf und
+// nicht in eine beliebige Ecke". Der Knopf gehoert der Taskleiste, also
+// dem Userland -- der Server kennt ihn nicht und soll ihn auch nicht
+// erraten. Sie sagt ihn deshalb SELBST (WM_MINRECT), und zwar fuer ein
+// FREMDES Fenster, genau wie WM_ACT.
+//
+// Steht hier nichts (W_MINW == 0), bleibt es beim bisherigen Verhalten:
+// mittig schrumpfen. Ein Ziel, das nie gesetzt wurde, darf keine
+// Bewegung in die linke obere Ecke werden.
+const W_MINXY: u64 = 0x170 // x in den unteren 32 Bit, y in den oberen
+const W_MINWH: u64 = 0x178 // Breite unten, Hoehe oben; 0 = kein Ziel
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -2930,6 +2945,37 @@ fn minimize_anim(state: u64, i: u64) -> bool {
         return false
     }
     return true
+}
+
+// DAS ZIEL DES MINIMIERENS SETZEN. Die Taskleiste ruft das fuer ein
+// FREMDES Fenster; die Rechtepruefung sitzt in `sysgui.fi` und ist
+// dieselbe wie bei WM_ACT (der Rufende muss selbst ein Fenster auf der
+// Leistenebene haben).
+//
+// Ein Rechteck mit Breite oder Hoehe 0 LOESCHT das Ziel -- ein Knopf,
+// der verschwindet, weil das Fenster nicht mehr in die Leiste passt,
+// soll wieder mittig schrumpfen und nicht auf einen Punkt zielen, den
+// es nicht mehr gibt.
+fn set_min_rect(state: u64, i: u64, x: i64, y: i64, w: u64, h: u64)
+    -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if w == 0 || h == 0 {
+        wsv(state, i, W_MINWH, 0)
+        return true
+    }
+    wsv(state, i, W_MINXY,
+        ((x as u64) & 0xFFFFFFFF) | (((y as u64) & 0xFFFFFFFF) << 32))
+    wsv(state, i, W_MINWH, (w & 0xFFFFFFFF) | ((h & 0xFFFFFFFF) << 32))
+    return true
+}
+
+fn min_rect_w(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_MINWH) & 0xFFFFFFFF
 }
 
 fn close_top(state: u64) -> u64 {
@@ -5167,15 +5213,51 @@ fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         return
     }
     // Die verkleinerte Flaeche, mittig zur gewachsenen.
-    let nw: i64 = bw * sk as i64 / 1000
-    let nh: i64 = bh * sk as i64 / 1000
+    var nw: i64 = bw * sk as i64 / 1000
+    var nh: i64 = bh * sk as i64 / 1000
     if nw <= 0 || nh <= 0 {
         return
     }
     let ix: i64 = win_x(state, i) + border(state) as i64
     let iy: i64 = win_y(state, i) + title_h(state) as i64
-    let ox: i64 = ix + (bw - nw) / 2
-    let oy: i64 = iy + (bh - nh) / 2
+    var ox: i64 = ix + (bw - nw) / 2
+    var oy: i64 = iy + (bh - nh) / 2
+    // ================================================ RUNDE OBERFLAECHE
+    // BEIM MINIMIEREN FLIEGT ES ZUM EIGENEN LEISTENKNOPF.
+    //
+    // Nur beim Minimieren, nur wenn die Taskleiste ein Ziel gesagt hat
+    // (`set_min_rect`), und aus DEMSELBEN `p` wie Groesse und Deckung.
+    // `p` laeuft beim Minimieren von 1000 nach 0 (anim_mix spiegelt die
+    // Kurve), also ist 1000-p der zurueckgelegte Weg: bei p=1000 steht
+    // das Fenster noch an seinem Platz, bei p=0 deckt es den Knopf.
+    //
+    // Die Flaeche wird dabei bis auf die Knopfgroesse gestaucht statt
+    // nur auf AN_SCALE0 -- ein Fenster, das in Originalgroesse hinter
+    // die Leiste faehrt, sieht aus wie ein Fehler und nicht wie ein
+    // Ablegen.
+    if wg(state, i, W_ANK) == AN_MIN && min_rect_w(state, i) != 0 {
+        let mxy: u64 = wg(state, i, W_MINXY)
+        let mwh: u64 = wg(state, i, W_MINWH)
+        let tx: i64 = (mxy & 0xFFFFFFFF) as i64
+        let ty: i64 = ((mxy >> 32) & 0xFFFFFFFF) as i64
+        let tw: i64 = (mwh & 0xFFFFFFFF) as i64
+        let th: i64 = ((mwh >> 32) & 0xFFFFFFFF) as i64
+        let weg: i64 = (1000 - p) as i64
+        // Groesse: von der vollen Flaeche auf die des Knopfes.
+        nw = bw + (tw - bw) * weg / 1000
+        nh = bh + (th - bh) * weg / 1000
+        if nw <= 0 || nh <= 0 {
+            return
+        }
+        // Lage: von der Fensterecke auf die Knopfecke, beide mittig
+        // zur jeweiligen Flaeche gerechnet.
+        let vx: i64 = ix + (bw - nw) / 2
+        let vy: i64 = iy + (bh - nh) / 2
+        let zx: i64 = tx + (tw - nw) / 2
+        let zy: i64 = ty + (th - nh) / 2
+        ox = vx + (zx - vx) * weg / 1000
+        oy = vy + (zy - vy) * weg / 1000
+    }
     let ax0: i64 = imax(ox, cx0)
     let ay0: i64 = imax(oy, cy0)
     let ax1: i64 = imin(ox + nw, cx1)
@@ -7220,12 +7302,20 @@ fn on_mouse(state: u64) {
                 if cn < CAP_N {
                     ss(state, S_CAPHITS, gs(state, S_CAPHITS) + 1)
                     if cn == CAP_CLOSE {
-                        ev_push(state, i, E_CLOSE, 0, 0, 0)
-                        destroy(state, i)
+                        // RUNDE OBERFLAECHE: UEBER DIE BEWEGUNG.
+                        // `close_anim` pusht E_CLOSE selbst und ruft
+                        // `destroy` erst, wenn die Bewegung durch ist
+                        // -- ist sie abgeschaltet, sofort. Hier stand
+                        // `destroy` direkt, und genau deshalb war
+                        // AN_WIN_CLOSE seit jeher erklaert und nie
+                        // gesehen.
+                        let _ca: bool = close_anim(state, i)
                         return
                     }
                     if cn == CAP_MIN {
-                        set_hidden(state, i, true)
+                        // Dasselbe fuer das Minimieren: am Ende steht
+                        // `set_hidden`, aber erst nach der Bewegung.
+                        let _ma: bool = minimize_anim(state, i)
                         return
                     }
                     let auf: bool =
