@@ -258,6 +258,18 @@ class Maschine:
               # Scancode-Nummer geht es: `sendkey 0x56`. Der Kern legt
               # sie deutsch aus (kernel/drv/hid/kbd.fi:1051 und :1129):
               # ohne Umschalt `<`, mit Umschalt `>`.
+              # Z UND Y SIND VERTAUSCHT, und das ist keine Feinheit.
+              # `sendkey` nennt die US-POSITION der Taste, der Kern legt
+              # sie DEUTSCH aus -- also gibt `sendkey z` ein `y` und
+              # `sendkey y` ein `z`. GEMESSEN am 21.09.2026 im Lauf
+              # `korb3`: aus `papierkorb zurueck 1` wurde auf dem Schirm
+              # `papierkorb yurueck 1`, das Programm kannte den Befehl
+              # nicht (rc=2) und schrieb seine Nutzungszeile -- und die
+              # Abnahme meldete daraufhin "nach 'zurueck' kam der Inhalt
+              # der Datei nicht", also einen Fehler des SYSTEMS, wo ein
+              # Fehler des PRUEFSTANDS vorlag. Dieselbe Sorte Fund wie
+              # `>` und `/` in den Zeilen darueber.
+              "z": "y", "y": "z", "Z": "shift-y", "Y": "shift-z",
               "<": "0x56", ">": "shift-0x56",
               "/": "shift-7", "-": "slash", "ß": "minus",
               "?": "shift-minus", "_": "shift-slash",

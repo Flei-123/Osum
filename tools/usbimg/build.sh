@@ -204,7 +204,7 @@ widgetdemo taskmgr installer dualcli locate edit nedit sh echo ls cat ps uname d
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache init svc"}
+glogin lock login passwd su chown sperrwache init svc papierkorb"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -845,6 +845,21 @@ ARGS+=("/bin/files@/bin/explorer")
 # dasselbe sagen.
 printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=de\n' \
     > "$OUT/locale.conf"
+# ===================================================== D-016, PAPIERKORB
+# /etc/papierkorb.conf -- WIE GROSS DER KORB WERDEN DARF.
+#
+# `trash.grenze()` (kernel/user/trash.fi:372) liest genau diese Datei
+# und faellt ohne sie auf 64 MiB zurueck. Die Vorgabe war also da, nur
+# nicht EINSTELLBAR: ohne die Datei im Abbild gibt es nichts zu aendern.
+# `trash.aufraeumen()` wirft beim Ueberschreiten das AELTESTE hinaus und
+# haengt an `trash.hinein()`, laeuft also bei jedem Loeschen von selbst.
+#
+# 64 MiB und nicht mehr: der Korb liegt auf DERSELBEN Partition wie die
+# Daten (`<wurzel>/.papierkorb`), und ein Korb, der die Platte fuellt,
+# ist schlimmer als eine geloeschte Datei.
+printf '# /etc/papierkorb.conf -- der Papierkorb.\n# grenze: wie viele MiB er hoechstens haelt. Wird sie ueberschritten,\n#   faellt das AELTESTE endgueltig heraus (das ist die einzige Stelle,\n#   die ohne Auftrag endgueltig loescht -- sie sagt es auf der Leitung).\ngrenze=%s\n' \
+    "${PAPIERKORB_MIB:-64}" > "$OUT/papierkorb.conf"
+
 ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/shadow=$OUT/shadow"
        "/etc/group=$OUT/group"
@@ -853,6 +868,7 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
+       "/etc/papierkorb.conf=$OUT/papierkorb.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
 # ===================================================== RUNDE HOVERSTIL
 # /etc/uitrace -- DER SCHALTER, OHNE DEN DIE OBERFLAECHE STUMM IST.
@@ -1070,6 +1086,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
 /apps/installer.osp/symbol \
 /bin/init /etc/inittab /etc/ziel \
+/bin/papierkorb /etc/papierkorb.conf \
 /users/justin/ /users/justin/config/"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
