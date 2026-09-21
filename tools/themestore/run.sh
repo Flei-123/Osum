@@ -1100,52 +1100,6 @@ FB=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-milchglas.png" \
 num "Milchglas: die Streuung des Ausschnitts SINKT (gegen $V70 ohne)" \
     "${VB:-999999}" lt "${V70:-0}"
 num "und aus zwei Farben ist ein Verlauf geworden" "${FB:-0}" ge 4
-# ---- (fix-r3-4) UND DIE VIER STREIFEN IN EIN BILD, BESCHRIFTET.
-#
-# Bild 12 der Mappe war ein von Hand zusammengesetzter Ausschnitt, und
-# wer wissen wollte, welcher der vier Streifen welche Reglerstellung
-# ist, brauchte die README daneben. `leistenvergleich.py` baut es aus
-# den vier Aufnahmen, die dieser Abschnitt GERADE gemacht hat, und
-# schreibt in jede Zeile die Stellung UND die Zahl, die hier oben
-# gemessen wurde -- gerechnet mit derselben Funktion aus
-# `glascheck.py`, damit Bild und Lauf nicht zwei Quellen sind.
-mkdir -p "$GSHOTS"
-LV=$(python3 tools/themestore/leistenvergleich.py \
-     "$GSHOTS/12-leiste-vergleich-ausschnitt-2x.png" \
-     "$SHOTS/glas-alpha-100.png=Taskleiste 100 % deckend" \
-     "$SHOTS/glas-alpha-70.png=Taskleiste 70 %" \
-     "$SHOTS/glas-alpha-40.png=Taskleiste 40 %" \
-     "$SHOTS/glas-milchglas.png=Milchglas (blur=12, 70 %)" 2>&1)
-echo "        $LV"
-num "der beschriftete Leistenvergleich (Bild 12) ist aus vier Aufnahmen gebaut" \
-    "$(printf '%s' "$LV" | grep -oE 'aus [0-9]+ Aufnahmen' | grep -oE '[0-9]+')" \
-    eq 4
-# UND DIE ZAHLEN IM BILD SIND DIE DES LAUFS. `leistenvergleich.py`
-# rechnet `var` selbst, mit `glascheck.leiste`/`glascheck.hell`; hier
-# steht die Gegenprobe, dass dabei dieselben vier Zahlen herauskommen,
-# die oben schon gemessen wurden. Weichen sie ab, traegt das Bild eine
-# Beschriftung, die der Lauf nicht deckt.
-LVV=$(python3 - "$SHOTS/glas-alpha-100.png" "$SHOTS/glas-alpha-70.png" \
-      "$SHOTS/glas-alpha-40.png" "$SHOTS/glas-milchglas.png" <<'PYV'
-import sys
-sys.path.insert(0, 'tools/themestore')
-from PIL import Image
-import leistenvergleich as L
-for p in sys.argv[1:]:
-    var, farben = L.var_von(Image.open(p).convert('RGB'), 28, 300, 1100)
-    print(var)
-PYV
-)
-LVW=$(printf '%s\n' "$LVV" | tr '\n' ' ')
-echo "        var im Bild 12: $LVW"
-same "und die erste Zahl im Bild ist die gemessene Streuung bei 100 %" \
-    "${V100:-x}" "$(printf '%s\n' "$LVV" | sed -n 1p)"
-same "und die zweite die bei 70 %" \
-    "${V70:-x}" "$(printf '%s\n' "$LVV" | sed -n 2p)"
-same "und die dritte die bei 40 %" \
-    "${V40:-x}" "$(printf '%s\n' "$LVV" | sed -n 3p)"
-same "und die vierte die des Milchglases" \
-    "${VB:-x}" "$(printf '%s\n' "$LVV" | sed -n 4p)"
 # ---- 11c2. UND EINMAL SO, DASS MAN ES AUCH SIEHT.
 #
 # DER BEFUND, DER DIESEN ABSCHNITT AUSGELOEST HAT: die Zahlen darueber
@@ -1205,21 +1159,64 @@ GK=$(python3 tools/themestore/glascheck.py kontrast \
 echo "        $GK"
 num "und die Leistenschrift haelt auf dem Milchglas ihre 4,5:1 (x100)" \
     "$(printf '%s' "$GK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
-# DER VERGLEICHSSTREIFEN (Bild 12) WIRD HIER ERZEUGT UND NICHT VON
-# HAND: jede Reihe traegt ihre Beschriftung und die Zahl, die sie
-# belegt, IM BILD. Ein Bildvergleich, der ein README braucht,
-# vergleicht nichts.
-python3 tools/themestore/streifen.py \
-    "$SHOTS/glas-vergleich-streifen.png" \
-    "$SHOTS/glas-alpha-100.png=100 % deckend, helles Muster" \
-    "$SHOTS/glas-alpha-70.png=70 % deckend, helles Muster" \
-    "$SHOTS/glas-alpha-40.png=40 % (wirksam 71), helles Muster" \
-    "$TMPD/grob0/desktop.png=40 %, dunkles Schema, grobes Muster, ohne Milchglas" \
-    "$SHOTS/glas-milchglas-grob.png=40 %, dunkles Schema, grobes Muster, Milchglas 16" \
-    > "$TMPD/streifen.log" 2>&1
-sed 's/^/        /' "$TMPD/streifen.log"
-num "der Vergleichsstreifen ist erzeugt worden" \
-    "$( [ -s "$SHOTS/glas-vergleich-streifen.png" ] && echo 1 || echo 0)" eq 1
+# ---- (fix-r3-4) UND DIE VIER STREIFEN IN EIN BILD, BESCHRIFTET.
+#
+# Bild 12 der Mappe war ein von Hand zusammengesetzter Ausschnitt, und
+# wer wissen wollte, welcher der vier Streifen welche Reglerstellung
+# ist, brauchte die README daneben. `leistenvergleich.py` baut es aus
+# den vier Aufnahmen, die dieser Abschnitt GERADE gemacht hat, und
+# schreibt in jede Zeile die Stellung UND die Zahl, die hier oben
+# gemessen wurde -- gerechnet mit derselben Funktion aus
+# `glascheck.py`, damit Bild und Lauf nicht zwei Quellen sind.
+mkdir -p "$GSHOTS"
+LV=$(python3 tools/themestore/leistenvergleich.py \
+     "$GSHOTS/12-leiste-vergleich-ausschnitt-2x.png" \
+     "$SHOTS/glas-alpha-100.png=Taskleiste 100 % deckend" \
+     "$SHOTS/glas-alpha-70.png=Taskleiste 70 %" \
+     "$SHOTS/glas-alpha-40.png=Taskleiste 40 %" \
+     "$SHOTS/glas-milchglas.png=Milchglas (blur=12, 70 %)" \
+     "$TMPD/grob0/desktop.png=dunkles Schema, 40 %, grobes Muster, ohne Milchglas" \
+     "$SHOTS/glas-milchglas-grob.png=dunkles Schema, 40 %, grobes Muster, Milchglas 16" 2>&1)
+echo "        $LV"
+# SECHS REIHEN UND NICHT VIER (fix-r3-1): die vierte Reihe -- Milchglas
+# ueber dem FEINEN Muster -- ist gemessen richtig und angeschaut kaum
+# von der dritten zu unterscheiden (siehe 11c2). Die zwei Reihen
+# darunter zeigen denselben Weichzeichner ueber dem groben Muster, mit
+# und ohne, und erst dieses Paar traegt den Bildvergleich.
+num "der beschriftete Leistenvergleich (Bild 12) ist aus sechs Aufnahmen gebaut" \
+    "$(printf '%s' "$LV" | grep -oE 'aus [0-9]+ Aufnahmen' | grep -oE '[0-9]+')" \
+    eq 6
+# UND DIE ZAHLEN IM BILD SIND DIE DES LAUFS. `leistenvergleich.py`
+# rechnet `var` selbst, mit `glascheck.leiste`/`glascheck.hell`; hier
+# steht die Gegenprobe, dass dabei dieselben vier Zahlen herauskommen,
+# die oben schon gemessen wurden. Weichen sie ab, traegt das Bild eine
+# Beschriftung, die der Lauf nicht deckt.
+LVV=$(python3 - "$SHOTS/glas-alpha-100.png" "$SHOTS/glas-alpha-70.png" \
+      "$SHOTS/glas-alpha-40.png" "$SHOTS/glas-milchglas.png" \
+      "$TMPD/grob0/desktop.png" "$SHOTS/glas-milchglas-grob.png" <<'PYV'
+import sys
+sys.path.insert(0, 'tools/themestore')
+from PIL import Image
+import leistenvergleich as L
+for p in sys.argv[1:]:
+    var, farben = L.var_von(Image.open(p).convert('RGB'), 28, 300, 1100)
+    print(var)
+PYV
+)
+LVW=$(printf '%s\n' "$LVV" | tr '\n' ' ')
+echo "        var im Bild 12: $LVW"
+same "und die erste Zahl im Bild ist die gemessene Streuung bei 100 %" \
+    "${V100:-x}" "$(printf '%s\n' "$LVV" | sed -n 1p)"
+same "und die zweite die bei 70 %" \
+    "${V70:-x}" "$(printf '%s\n' "$LVV" | sed -n 2p)"
+same "und die dritte die bei 40 %" \
+    "${V40:-x}" "$(printf '%s\n' "$LVV" | sed -n 3p)"
+same "und die vierte die des Milchglases" \
+    "${VB:-x}" "$(printf '%s\n' "$LVV" | sed -n 4p)"
+same "und die fuenfte die des groben Musters ohne Milchglas" \
+    "${VG0:-x}" "$(printf '%s\n' "$LVV" | sed -n 5p)"
+same "und die sechste die desselben Musters mit Milchglas 16" \
+    "${VG16:-x}" "$(printf '%s\n' "$LVV" | sed -n 6p)"
 GL=$(grep -a 'wm: glas r=' "$TMPD/blur/serial.txt" | tail -1)
 BUS=$(printf '%s' "$GL" | grep -oE ' max=[0-9]+' | grep -oE '[0-9]+')
 BPX=$(printf '%s' "$GL" | grep -oE ' px=[0-9]+' | grep -oE '[0-9]+')
@@ -1741,15 +1738,15 @@ num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
 
 # UND DIE NEUEN BILDER WERDEN GENAUSO GEMESSEN WIE DIE ALTEN.
 GSHOT=0
-# RUNDE GLAS (fix-r3-1): NEUN STATT SIEBEN. Dazugekommen sind die
-# Aufnahme des Milchglases ueber dem GROBEN Muster (auf der man es
-# sieht und nicht nur misst) und der beschriftete Vergleichsstreifen.
+# RUNDE GLAS (fix-r3-1): ACHT STATT SIEBEN. Dazugekommen ist die
+# Aufnahme des Milchglases ueber dem GROBEN Muster -- die, auf der man
+# es sieht und nicht nur misst.
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \
          glas-alpha-70 glas-alpha-40 glas-milchglas \
-         glas-milchglas-grob glas-vergleich-streifen; do
+         glas-milchglas-grob; do
     [ -s "$SHOTS/$s.png" ] && GSHOT=$((GSHOT+1)) || echo "        $s: kein Bild"
 done
-num "die neun Aufnahmen der Runde GLAS" "$GSHOT" eq 9
+num "die acht Aufnahmen der Runde GLAS" "$GSHOT" eq 8
 GBAD=0
 for pair in "rad0:glas-radius-0" "rad12:glas-radius-12" "rad24:glas-radius-24" \
             "al100:glas-alpha-100" "al70:glas-alpha-70" "al40:glas-alpha-40" \
