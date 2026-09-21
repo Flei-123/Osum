@@ -63,8 +63,15 @@ bash tools/themestore/build.sh /tmp/glas tbalpha=70 blur=12 \
 bash tools/themestore/run.sh
 ```
 
-Elf Abschnitte, rund 25 Minuten (QEMU/TCG). Mit `TS_OUT=/pfad` bleiben
-alle Mitschnitte, Bilder und Abbilder liegen:
+Elf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
+Rechner:
+
+```
+THEMESTORE: 136 passed, 0 failed
+```
+
+Mit `TS_OUT=/pfad` bleiben alle Mitschnitte, Bilder und Abbilder
+liegen:
 
 ```bash
 TS_OUT=/tmp/ts bash tools/themestore/run.sh
