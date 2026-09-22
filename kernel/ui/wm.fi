@@ -193,7 +193,7 @@ export {
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     M_SHIFT, M_CTRL,
-    L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_MAX,
+    L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_TOAST, L_MAX,
     F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
     // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
@@ -328,7 +328,43 @@ const L_FULL: u64 = 3 // Vollbild: ueber der Leiste, unter den Menues
 const L_MENUE: u64 = 4 // Startmenue: ueber der Leiste, unter den Menues
 const L_POPUP: u64 = 5 // Klapp- und Kontextmenue
 const L_TIP: u64 = 6 // die Blase, ueber allem
-const L_MAX: u64 = 6
+// ==================================================== RUNDE DREI (S-006)
+// L_TOAST -- DIE EINBLENDUNG, UEBER DER BLASE UND OHNE BLUR.
+//
+// SIE BEKOMMT EINE EIGENE EBENE, UND DER GRUND IST EINE HARTE ZAHL:
+// der Blur-Zwischenspeicher hat VIER Plaetze (`BC_N`), und das ist
+// keine weiche Konstante. Die Angaben je Platz liegen als Felder in
+// kdata, und ihr Abstand ist 0x20 = 32 Oktette = GENAU VIER Woerter
+// (S_BC_WIN 0x13A0, S_BC_X 0x13C0, ...). Ein fuenfter Platz wuerde
+// S_BC_X ueberschreiben -- zwei Groessen auf einer Adresse, derselbe
+// Fehler, den MERGE-9 schon einmal hatte.
+//
+// Die vier waren GEZAEHLT und nicht geraten: Leiste, Startmenue, ein
+// Klappmenue, eine Blase. Diese Runde bringt eine FUENFTE
+// durchscheinende Flaeche, und damit lief der Ring ueber: ein Platz
+// wurde mitten im Malen neu vergeben, die gleitende Summe in `blur_v`
+// zog Zeilen ab, die nie addiert worden waren, und der Fensterserver
+// starb mit
+//
+//     panic: integer overflow in 'u64 - u64' at wm.fi:6832
+//
+// GEMESSEN: mit der Einblendung auf L_TIP fiel `pruef/abmelden.py` von
+// 13/0 auf 7/6 -- und zwar NICHT, weil am Abmelden etwas falsch war,
+// sondern weil der Server beim Malen der Leiste starb. Der Panic stand
+// mitten in einer Leistenzeile und war nur auf der seriellen Leitung
+// zu sehen; im Bild sah es aus wie ein Menue, das seine Wahl verschluckt.
+//
+// ALSO KEIN BLUR FUER DIE EINBLENDUNG. Das ist die richtige Antwort und
+// nicht nur die billige: eine Benachrichtigung steht wenige Sekunden
+// da, sie ist eine KARTE mit eigener deckender Flaeche (`draw_board`),
+// und ein Weichzeichner darunter waere ohnehin fast unsichtbar. Den
+// Zwischenspeicher auf fuenf zu heben hiesse, das Speicherbild des
+// Kerns umzulegen -- fuer einen Effekt, den niemand sieht.
+//
+// Wer ihn doch will, hebt `BC_N` UND die Abstaende der S_BC_*-Felder
+// gemeinsam an. Beides, oder keines.
+const L_TOAST: u64 = 7 // die Benachrichtigung, ueber allem, ohne Blur
+const L_MAX: u64 = 7
 
 // Die Merkmale eines Fensters.
 //   F_HIDDEN  minimiert: es wird nicht zusammengesetzt und nimmt keinen
@@ -7045,6 +7081,8 @@ fn blur_will(state: u64, i: u64) -> bool {
         return false
     }
     let l: u64 = wg(state, i, W_LAYER)
+    // L_TOAST steht hier ABSICHTLICH NICHT: die Einblendung bekommt
+    // keinen Blur, und die lange Begruendung dazu steht bei `L_TOAST`.
     if l == L_TOP || l == L_MENUE || l == L_POPUP || l == L_TIP {
         return true
     }
@@ -7461,12 +7499,49 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 alpha = opp
             }
         }
+        // ============================================ RUNDE DREI (G-006)
+        // DER RADIUS GILT AUCH HIER -- und hier war er nie.
+        //
+        // `nodeco_radius` gibt 0 zurueck, solange die Form eckig ist
+        // oder das Fenster den ganzen Schirm bedeckt; dann laeuft diese
+        // Schleife Zeile fuer Zeile weiter wie vorher, und
+        // `tools/look/run.sh` misst bildpunktgleich dasselbe.
+        let rr: u64 = nodeco_radius(state, i)
+        let wh: u64 = wg(state, i, W_H)
         if alpha >= 100 {
             var br: i64 = by0
             while br < by1 {
-                fb_row(state, bx0 as u64, br as u64,
-                    bq +% (br - wy) as u64 *% bw *% 4
-                    +% (bx0 - wx) as u64 *% 4, bn)
+                // Wie weit ist diese Zeile von der naechsten waagrechten
+                // Kante entfernt? Nur in den obersten und untersten `r`
+                // Zeilen wird ueberhaupt gerundet.
+                var dy: u64 = 0xFFFFFFFFFFFFFFFF
+                if rr != 0 {
+                    let o: u64 = (br - wy) as u64
+                    dy = o
+                    if wh > o && wh - 1 - o < dy {
+                        dy = wh - 1 - o
+                    }
+                }
+                var ein: u64 = 0
+                if rr != 0 && dy < rr {
+                    ein = rund_einzug(dy, rr)
+                }
+                let zr: u64 = bq +% (br - wy) as u64 *% bw *% 4
+                let zq: u64 = zr +% (bx0 - wx) as u64 *% 4
+                if ein == 0 {
+                    fb_row(state, bx0 as u64, br as u64, zq, bn)
+                } else if bn > ein * 2 {
+                    // Die volle Mitte am Stueck ...
+                    fb_row(state, bx0 as u64 + ein, br as u64,
+                        zq +% ein *% 4, bn - ein * 2)
+                }
+                // ... und die zwei Saeume Bildpunkt fuer Bildpunkt.
+                if ein != 0 {
+                    rund_saum(state, bx0 as u64, br as u64, zq, bn, dy,
+                        rr, true)
+                    rund_saum(state, bx0 as u64, br as u64, zq, bn, dy,
+                        rr, false)
+                }
                 br = br + 1
             }
             ss(state, S_BLITS, gs(state, S_BLITS) + 1)
@@ -8401,6 +8476,127 @@ fn damage_caption(state: u64, i: u64) {
 // Eine Bildzeile aus einem Fensterpuffer in den Zweitpuffer des
 // Bildschirms. Ueber `rep movsq`, wie alles andere in `fb.fi` -- eine
 // Schleife aus Einzelzugriffen kostete dort gemessen den Faktor acht.
+// ==================================================== RUNDE DREI (G-006)
+// WELCHES FENSTER OHNE SCHMUCK EINEN RADIUS BEKOMMT -- UND WELCHES NICHT.
+//
+// Die Frage ist nicht "kann man runden", sondern "gehoert es sich".
+// Drei Faelle, und alle drei haben einen Grund:
+//
+//   * EIN FENSTER, DAS DEN GANZEN SCHIRM BEDECKT, BLEIBT ECKIG.
+//     Der Schreibtisch ist der Schirm; eine runde Ecke dort zeigt vier
+//     schwarze Zipfel auf nichts. Dasselbe gilt fuer ein Vollbild.
+//     Geprueft wird an der GROESSE gegen den Schirm und nicht an einem
+//     Merkerbit -- ein Fenster, das zufaellig genau so gross ist,
+//     sieht genauso aus.
+//
+//   * EIN FENSTER, DAS EINEN SCHIRMRAND RESERVIERT (`W_STRUT`, also
+//     die Taskleiste), wird nur an den INNEREN Ecken gerundet. Eine
+//     Leiste, die unten klebt, hat unten keine sichtbaren Ecken; sie
+//     oben UND unten zu runden hiesse, zwei Zipfel an den Bildschirm-
+//     rand zu malen. Diese Runde macht dafuer noch keinen Sonderfall
+//     und laesst die Leiste deshalb ganz aussen vor -- die Leiste malt
+//     ihre eigene Pille bereits selbst (`wlibc.radius`), und zwei
+//     Rundungen uebereinander sind eine zuviel.
+//
+//   * ALLES ANDERE (wmshell, Kontrollzentrum, ein rahmenloser Dialog)
+//     bekommt `FM_RADIUS`, also dieselbe Zahl wie jedes gewoehnliche
+//     Fenster. Genau das verlangt G-006.
+fn nodeco_radius(state: u64, i: u64) -> u64 {
+    let r: u64 = form(state, FM_RADIUS)
+    if r == 0 {
+        return 0
+    }
+    // Die Leiste rundet sich selbst.
+    if wg(state, i, W_STRUT) != 0 {
+        return 0
+    }
+    // So gross wie der Schirm: kein Radius.
+    if wg(state, i, W_W) >= gs(state, S_SW)
+        && wg(state, i, W_H) >= gs(state, S_SH) {
+        return 0
+    }
+    // Und nie mehr als die halbe Kante -- sonst treffen sich zwei
+    // Ecken in der Mitte und die Zeile verschwindet.
+    var rr: u64 = r
+    if rr * 2 > wg(state, i, W_W) {
+        rr = wg(state, i, W_W) / 2
+    }
+    if rr * 2 > wg(state, i, W_H) {
+        rr = wg(state, i, W_H) / 2
+    }
+    return rr
+}
+
+// ==================================================== RUNDE DREI (G-006)
+// DER RADIUS FUER FENSTER OHNE SCHMUCK.
+//
+// Schreibtisch, Taskleiste, wmshell und Kontrollzentrum laufen durch
+// den Blit-Pfad in `paint_win` und bekamen NIE einen Radius --
+// `fill_round` steht im anderen Zweig, dem mit Rahmen und Titelleiste.
+// Die Tokens waren laengst da (`FM_RADIUS`, die Formdatei,
+// `RADIUS_MAX`); sie erreichten diese Fenster nur nicht.
+//
+// WAS GERECHNET WIRD. Eine Zeile des Fensters geht am Stueck in den
+// Zweitpuffer (`fb_row`, wortweise). Eine runde Ecke heisst: in den
+// obersten und untersten `r` Zeilen faengt die Zeile spaeter an und
+// hoert frueher auf, und der schmale Saum dazwischen wird GEMISCHT
+// statt gesetzt. Die Deckung dafuer kommt aus `ecke.corner_cov` --
+// derselben Funktion, die `fill_round` im dekorierten Zweig benutzt.
+// Eine Rundung, zwei Aufrufer, keine zweite Formel.
+//
+// DER UNTERGRUND WIRD NICHT FLAECHIG GELESEN. `fb.pixel_a` mischt
+// genau den einen Bildpunkt, den es gerade schreibt. Das ist dieselbe
+// Auflage, unter der die Runde BLUR ihre Maske gebaut hat.
+//
+// WAS EINE ECKE KOSTET: hoechstens 4 * r * r Bildpunkte je Fenster und
+// Bild, unabhaengig von der Fenstergroesse. Bei r = 8 sind das 256 --
+// der Schreibtisch allein misst 1 024 000.
+//
+// DER EINZUG EINER ZEILE. `dy` ist der Abstand vom oberen bzw. unteren
+// Fensterrand (0 = die aeusserste Zeile). Der Mittelpunkt des
+// Eckkreises liegt `r` Bildpunkte innen; fuer diese Zeile ist der
+// senkrechte Abstand dorthin `r - dy`, der waagrechte Halbmesser also
+// die Wurzel aus `r^2 - (r-dy)^2`. Soviel Bildpunkte fehlen am Rand:
+//
+//     dy=0 -> 8     dy=3 -> 2     dy=6 -> 1
+//     dy=1 -> 5     dy=4 -> 2     dy=7 -> 1
+//     dy=2 -> 3     dy=5 -> 1     dy>=8 -> 0        (bei r = 8)
+fn rund_einzug(dy: u64, r: u64) -> u64 {
+    if r == 0 || dy >= r {
+        return 0
+    }
+    let v: u64 = r - dy
+    let w: u64 = isqrt(r * r - v * v)
+    if w >= r {
+        return 0
+    }
+    return r - w
+}
+
+// Den Saum einer Eckzeile malen: die `r` aeussersten Bildpunkte an
+// EINEM Ende, jeder mit seiner eigenen Deckung. Was ganz drinnen liegt
+// (Deckung 255), hat `fb_row` schon gesetzt; was ganz draussen liegt
+// (Deckung 0), bleibt unberuehrt.
+fn rund_saum(state: u64, x: u64, y: u64, src: u64, n: u64, dy: u64,
+    r: u64, links: bool) {
+    if r == 0 || dy >= r || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < r && i < n {
+        var sx: u64 = i
+        if !links {
+            sx = n - 1 - i
+        }
+        let cov: u64 = ecke.corner_cov(r - 1 - i, r - 1 - dy, r)
+        if cov != 0 && cov < 255 {
+            let c: u64 = __mmio_read32((src +% sx *% 4) as *mut u32) as u64
+            fb.pixel_a(state, x + sx, y, c, cov)
+        }
+        i = i + 1
+    }
+}
+
 fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
     // RUNDE BLECHDREI: DIESER WEG GEHT AN `fb.hline` VORBEI -- er
     // kopiert die Fensterflaeche wortweise direkt in den Zweitpuffer.
@@ -10326,7 +10522,13 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
         // man sie SIEHT -- wer dorthin klickt, meint das, was darunter
         // liegt. Ohne diese Bedingung faengt die Blase den Klick weg,
         // und der Knopf darunter tut nichts.
+        // RUNDE DREI (S-006): DIE EINBLENDUNG AUCH NICHT. Sie steht
+        // vier Sekunden rechts oben; wer in dieser Zeit dorthin klickt,
+        // meint das Fenster darunter. Waere sie hier nicht genannt,
+        // fraesse sie in genau diesen vier Sekunden jeden Klick in
+        // ihrer Ecke -- und zwar unsichtbar, weil sie danach weg ist.
         if i < MAX_WIN && wg(state, i, W_LAYER) != L_TIP
+            && wg(state, i, W_LAYER) != L_TOAST
             && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
             let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
             let ry: i64 = win_y(state, i) + outer_h(state, i) as i64

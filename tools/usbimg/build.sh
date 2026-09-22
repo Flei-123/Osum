@@ -196,11 +196,27 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # Genau so sieht ein Programm aus, das "fertig" ist und trotzdem bei
 # niemandem ankommt.
 #
+# ============ RUNDE DREI 22.09.2026: `papierkorb` HAT HIER GEFEHLT --
+# ZUM DRITTEN MAL DERSELBE FEHLER (nach `nedit` und `bold.ttf`).
+#
+# `kernel/user/papierkorb.fi` ist seit Runde ALLTAG fertig: ein Fenster
+# mit Tabelle und vier Knoepfen (Zurueckholen, Entfernen, Leeren, Neu
+# lesen), und `tools/alltag/run.sh` misst es mit `progs="... papierkorb
+# ..."` in SEINER eigenen Liste. In DIESER Zeile stand es nie.
+#
+# WAS DAS BEDEUTET HAT: der Dateimanager loescht mit Entf in den Korb
+# (`expakt.in_korb` -> `trash.hinein`) und bietet ihn in der
+# Seitenleiste und unter "Gehe zu" als Ort an -- aber das Programm, mit
+# dem man etwas WIEDERHERSTELLT, lag auf dem Stick nicht. Gelegtes kam
+# hinein und nicht wieder heraus, ausser von Hand auf der
+# Kommandozeile. Genau der Rest, den OFFEN.md unter D-016
+# "Wiederherstellen aus der Oberflaeche" fuehrt.
+#
 # `edit` BLEIBT: es ist das Terminalprogramm (kein wlib), und die
 # Abnahme der Runde GUI-EDITOR prueft ausdruecklich, dass es
 # unveraendert eines ist.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo taskmgr installer dualcli locate edit nedit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
@@ -515,6 +531,23 @@ printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\n
 # Seite "Darstellung" es aendern kann.
 printf '# /etc/module.conf -- name=an,anker,dx,dy\nuhr=1,1,16,16\nspeicher=1,1,16,56\ncpu=1,1,16,96\ntaste=280\n' \
     > "$OUT/module.conf"
+
+# ================================================= RUNDE DREI (D-016)
+# /etc/papierkorb.conf -- DIE GRENZE DES PAPIERKORBS.
+#
+# `kernel/user/trash.fi::grenze()` liest hier `grenze=<MiB>` und faellt
+# ohne die Datei auf 64 MiB zurueck. Die Vorgabe ist also nicht neu --
+# neu ist, dass sie im Abbild STEHT und damit aenderbar ist, ohne den
+# Quelltext anzufassen. Vorher gab es keinen Weg, sie zu verstellen:
+# die Datei wurde nie ausgeliefert.
+#
+# WARUM 512 UND NICHT 64. Ein Korb, der bei 64 MiB das Aelteste
+# endgueltig wegwirft, verliert bei einem einzigen geloeschten Video
+# alles, was vorher darin lag -- und das ist genau der Fall, in dem man
+# den Korb braucht. 512 MiB sind auf jedem Traeger, auf den dieses
+# System passt, verschmerzbar.
+printf '# /etc/papierkorb.conf -- die Grenze des Papierkorbs.\n# grenze=<MiB>: wird sie ueberschritten, fliegt das AELTESTE heraus,\n# bis es wieder passt. trash.fi sagt jedes endgueltige Loeschen auf\n# der seriellen Leitung an.\ngrenze=512\n' \
+    > "$OUT/papierkorb.conf"
 
 # ============================================ RUNDE ECHTHARDWARE-1
 # DAS ABBILD BEKOMMT DAS AUSSEHEN, DAS DIE DEMO HATTE.
@@ -866,6 +899,7 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/sperre.conf=$OUT/sperre.conf"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
        "/etc/module.conf=$OUT/module.conf"
+       "/etc/papierkorb.conf=$OUT/papierkorb.conf"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
@@ -1080,6 +1114,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /bin/nedit /apps/nedit.osp/start /apps/nedit.osp/INFO \
+/bin/papierkorb /apps/papierkorb.osp/start /apps/papierkorb.osp/INFO \
+/apps/papierkorb.osp/symbol /etc/papierkorb.conf \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \

@@ -83,8 +83,11 @@
 //   0x5900..0x6100  64 Segmente zu 32 Oktetten
 //   0x6100..0x7500  20 Verlaufsplaetze zu 256 Oktetten
 //   0x7500..0x7600  der Angebotsplatz (verzoegerte Uebergabe) + Ziehen
-//   0x7600..0x7A00  16 Benachrichtigungen zu 64 Oktetten
-//   0x7A00..0x8000  frei
+//   0x7600..0x7E00  16 Benachrichtigungen zu 128 Oktetten
+//                   (RUNDE DREI: 64 waren der Kopf und NICHTS sonst --
+//                    NOTI_BYTES - I_DATA war null, jeder Text ging
+//                    verloren. Die Begruendung steht bei NOTI_BYTES.)
+//   0x7E00..0x8000  frei
 //
 // WAS NICHT HIER IST, damit niemand danach sucht: keine Umleitung ueber
 // einen Dienst pid 1 (der Bus IST der Kernel -- ein Ruf kostet einen
@@ -107,7 +110,9 @@ export {
     clip_set, clip_get, clip_types, clip_count, clip_len, clip_owner,
     offer, fill, offer_types, offer_state,
     drag_set, drag_get, drag_types, drag_clear, drag_active,
-    noti_post, noti_get, noti_count, noti_len, noti_prio, noti_seen,
+    noti_post, noti_get, noti_peek, noti_count, noti_total, noti_len,
+    noti_prio,
+    noti_seen,
     stat,
     T_TEXT, T_PATH, T_HTML, T_IMAGE, T_FILES, T_ANY,
     A_ANY, A_SAMEUID, A_ROOT,
@@ -142,7 +147,35 @@ const HIST_MAX: u64 = 20
 const OFFER: u64 = 0x7500
 const DRAG: u64 = 0x7560
 const NOTIS: u64 = 0x7600
-const NOTI_BYTES: u64 = 64
+// ==================================================== RUNDE DREI (S-006)
+// 128 STATT 64 -- WEIL BEI 64 KEIN EINZIGES ZEICHEN TEXT HINEINPASSTE.
+//
+// Der Kopf eines Eintrags ist 64 Oktette lang (`I_DATA = 64`, und davor
+// liegen SEQ, PID, UID, TYPES, LEN, SEG, FLAGS, PRIO zu je acht). Der
+// Platz war aber auch nur 64 gross. Damit ist
+//
+//     NOTI_BYTES - I_DATA  =  64 - 64  =  0
+//
+// und genau diese Zahl begrenzt in `noti_post` die Schleife, die den
+// Text kopiert. Jede Benachrichtigung dieses Systems wurde also mit
+// LAENGE NULL abgelegt, seit es den Ring gibt.
+//
+// WARUM DAS NIE AUFGEFALLEN IST: der einzige Leser war bisher die
+// GLOCKE in der Taskleiste, und die zaehlt nur (`noti_seen`) -- sie
+// liest keinen Text. `tools/alltag` und die Bus-Abnahmen messen
+// Zwischenablage, Ziehen und Nachrichten, die alle in anderen, richtig
+// bemessenen Bereichen liegen. Ein Fehler, den erst der erste echte
+// Leser findet.
+//
+// GEMESSEN in dieser Runde: ein USB-Stick wird gesteckt, der Kern
+// postet "usb+ /medien/usb0" (18 Oktette), und die Leiste liest
+// zurueck: `cnt=1 len=0` -- die Meldung ist da, ihr Text ist weg.
+//
+// DER PLATZ IST VORHANDEN. Der Ring liegt bei 0x7600, dahinter steht
+// im Plan oben ausdruecklich "0x7A00..0x8000 frei". 16 Plaetze zu 128
+// enden bei 0x7E00 und bleiben damit unter BUS_MAX (0x8000); die
+// Zeilen des Plans sind mitgezogen.
+const NOTI_BYTES: u64 = 128
 const NOTI_MAX: u64 = 16
 
 // Wieviel am Ort liegt, bevor ein Segment gebraucht wird. 192 Oktette
@@ -1263,8 +1296,70 @@ fn noti_get(state: u64, back: u64, out: u64, max: u64) -> u64 {
     return n
 }
 
+// ==================================================== RUNDE DREI (S-006)
+// DENSELBEN TEXT LESEN, OHNE IHN ALS GELESEN ZU MARKIEREN.
+//
+// `noti_get` setzt `F_SEEN` -- und das ist dort richtig: wer eine
+// Meldung ABHOLT, hat sie gelesen, und die Glocke soll danach eins
+// weniger zeigen. Die EINBLENDUNG holt sie aber nicht ab, sie zeigt
+// nur, DASS etwas da ist. Nimmt sie `noti_get`, stellt das blosse
+// Erscheinen der Karte die Glocke zurueck, und wer weggesehen hat,
+// findet die Meldung nirgends mehr.
+//
+// Denselben Schluss hat der Dateimanager schon gezogen und dort
+// ausdruecklich aufgeschrieben (explorer.fi:1232: "noti_take naehme
+// die Meldung WEG"). Also dieselbe Schleife wie `noti_get`, nur ohne
+// die eine Zeile, die `F_SEEN` setzt.
+//
+// WARUM NICHT EIN SCHALTER AN `noti_get`. Weil ein Vorgabewert, der
+// "und nebenbei als gelesen markieren" heisst, genau der Sorte Fehler
+// Vorschub leistet, die hier vermieden werden soll: wer den Schalter
+// vergisst, loescht die Glocke. Zwei Namen sind zwei Absichten.
+fn noti_peek(state: u64, back: u64, out: u64, max: u64) -> u64 {
+    take(state)
+    let i: u64 = noti_idx(state, back)
+    if i >= NOTI_MAX {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let a: u64 = noti_addr(state, i)
+    var n: u64 = item_get(a, I_LEN)
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
+        k = k + 1
+    }
+    give(state)
+    return n
+}
+
 fn noti_count(state: u64) -> u64 {
     return b(state, S_NOTILEN)
+}
+
+// ==================================================== RUNDE DREI (S-006)
+// WIEVIELE JE GEPOSTET WURDEN -- und warum `noti_count` das NICHT ist.
+//
+// `noti_count` gibt `S_NOTILEN`, also den FUELLSTAND des Rings, und der
+// bleibt bei NOTI_MAX (16) stehen: die siebzehnte Meldung ueberschreibt
+// die erste, und die Zahl aendert sich nicht mehr. Wer daran erkennen
+// will, ob etwas NEUES dazugekommen ist, sieht ab der sechzehnten
+// Meldung nie wieder etwas -- und vorher auch nur, solange niemand
+// etwas abholt.
+//
+// GEMESSEN in dieser Runde: die Glocke stand auf "Meldg 1", die
+// Meldung lag nachweislich im Bus -- und die Einblendung ging nicht
+// auf, weil `noti_count` beim Start der Leiste schon denselben Wert
+// hatte wie danach.
+//
+// `S_NOTIS` zaehlt dagegen JEDES Posten und laeuft nie zurueck; genau
+// das braucht ein "ist etwas dazugekommen?". Der Zaehler steht schon
+// da (bump in `noti_post`), er war nur nach aussen nicht zu sehen.
+fn noti_total(state: u64) -> u64 {
+    return b(state, S_NOTIS)
 }
 
 fn noti_len(state: u64, back: u64) -> u64 {

@@ -27,6 +27,20 @@ Programme selbst auf die serielle Leitung schreiben
 (`launcher: rect id=4 ...`, `wlib: win id=...`), und geklickt wird
 dorthin. Keine festen Koordinaten, keine geratenen Tastenzahlen.
 """
+# ================================================== RUNDE DREI, 22.09.2026
+# JEDER ABBRUCH BEENDET MIT RC=1 UND NICHT MIT RC=0.
+#
+# Hier stand fuenfmal `raise SystemExit` ohne Argument -- und das ist
+# RC=0, also "bestanden". `tools/logind/run.sh` prueft ausschliesslich
+# den Rueckgabewert (`if python3 pruef/abmelden.py ...`) und zaehlt
+# danach die OK-Zeilen des Laeufers. Ein Abbruch NACH einem `bad()` kam
+# damit als gruen durch.
+#
+# GEMESSEN: die Anmeldung fiel in einem Lauf aus ("Versuch 3: nur 12 von
+# 13 Tasten angekommen"), abmelden.py brach an Zeile 183 ab -- und
+# run.sh meldete `LOGIND: 36 bestanden, 0 gescheitert`, RC=0, mit einer
+# einzigen OK-Zeile aus Abschnitt 5. Eine Abnahme, die beim Abbruch
+# gruen meldet, verdeckt genau das, was sie messen soll.
 import os, re, subprocess, sys, time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
@@ -110,13 +124,13 @@ try:
             break
         if p.poll() is not None:
             bad("QEMU ist vorzeitig weg, rc=%s" % p.returncode)
-            raise SystemExit
+            raise SystemExit(1)
         time.sleep(0.5)
     if "glogin: bereit" in lies():
         ok("der Anmeldeschirm ist bereit (nach %.0fs)" % (time.time() - t0))
     else:
         bad("der Anmeldeschirm kam nicht")
-        raise SystemExit
+        raise SystemExit(1)
     time.sleep(3)
     m = Maschine(SOCK, 1280, 800)
     m.foto(os.path.join(AUS, "k-10-anmeldeschirm.png"))
@@ -180,7 +194,7 @@ try:
     else:
         bad("die Anmeldung hat nicht geklappt")
         sag("       " + " / ".join(re.findall(r"glogin: [^\n]{0,60}", lies())[-4:]))
-        raise SystemExit
+        raise SystemExit(1)
     # Dem Schreibtisch und der Leiste Zeit geben.
     time.sleep(12)
     m.foto(os.path.join(AUS, "k-20-schreibtisch.png"))
@@ -250,7 +264,7 @@ try:
                     lies())
     if not w11:
         bad("das Startmenuefenster steht nicht im Bericht")
-        raise SystemExit
+        raise SystemExit(1)
     gx, gy = int(w11[-1][0]), int(w11[-1][1])
     if r4:
         rx, ry, rw, rh = (int(v) for v in r4[-1])
@@ -271,7 +285,7 @@ try:
     neu = [x for x in wins() if x not in vor]
     if not neu:
         bad("kein neues Fenster -- ohne Menue ist nichts zu waehlen")
-        raise SystemExit
+        raise SystemExit(1)
     mx, my, mw, mh = (int(v) for v in neu[-1])
     sag("== Menue %d,%d %dx%d" % (mx, my, mw, mh))
 
@@ -361,6 +375,25 @@ try:
     # der Anfang der eigenen Zeile ODER die Startzeile des Kerns
     # (`desk: start /bin/glogin`), die dasselbe sagt und aus einer
     # anderen Quelle kommt.
+    # RUNDE DREI, 22.09.2026: DER VORSPANN WAR IMMER NOCH ZU LANG.
+    #
+    # Die Ausweichpruefung verlangte `abmelden: Anmeldu` -- siebzehn
+    # Zeichen am Stueck. Gemessen wurde in dieser Runde aber
+    #
+    #     abmelden: Anwmleilbd
+    #
+    # also "abmelden: Anmeldung" und "wlib" ab dem DREIZEHNTEN Zeichen
+    # buchstabenweise ineinander. Der fremde Prozess schneidet nicht an
+    # einer festen Stelle hinein, sondern an einer beliebigen; jede
+    # Mindestlaenge, die man hier hinschreibt, ist deshalb geraten.
+    #
+    # Also wird auf den Teil geprueft, der VOR jeder gemessenen
+    # Einschnittstelle liegt (`abmelden: An`), UND zusaetzlich auf zwei
+    # unabhaengige Belege aus ANDEREN Quellen: der Kern hat glogin
+    # zweimal gestartet, und glogin hat seine Bedienelemente zweimal
+    # aufgebaut. Drei Zeugen, von denen keiner auf derselben Zeile
+    # steht -- das ist staerker als eine lange Zeichenkette, die ein
+    # beliebiger Mitschreiber zerteilen kann.
     a = re.findall(r"abmelden: Anmeldung neu pid=(\d+)", txt)
     st = len(re.findall(r"start /bin/glogin", txt))
     # DRITTE QUELLE, gemessen am 21.09.2026 (Lauf L7 von sieben): unter
@@ -378,7 +411,7 @@ try:
     r6_neu = len(re.findall(r"glogin: rect id=6", txt))
     if a:
         ok("der Anmeldeschirm wurde neu gestartet (pid=%s)" % a[-1])
-    elif "abmelden: Anmeldu" in txt and st >= 2:
+    elif "abmelden: An" in txt and st >= 2:
         ok("der Anmeldeschirm wurde neu gestartet "
            "('abmelden: Anmeldu…' + 'start /bin/glogin' %dx)" % st)
     elif r6_neu >= 2:

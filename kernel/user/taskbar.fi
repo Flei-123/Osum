@@ -2465,6 +2465,13 @@ fn bat_warn_check() {
     // Dringlichkeit 2 = ernst, 1 = Hinweis. Die Meldung geht ueber die
     // Bibliothek an den Systembus -- kein eigener Malweg, damit
     // `tools/check-ui.sh` gruen bleibt.
+    // RUNDE TOAST (S-006): UNVERAENDERT `wlib.noti_post`.
+    //
+    // Die Einblendung haengt sich NICHT hier ein, sondern am Bus
+    // (`toast_step` liest mit `noti_peek`). Das ist der Unterschied
+    // zwischen "die Leiste zeigt ihre eigenen Meldungen" und "die
+    // Leiste zeigt die Meldungen des Systems" -- und nur das Zweite
+    // ist ein Benachrichtigungsdienst.
     let _r: u64 = wlib.noti_post(stufe, p, at + 1)
 }
 
@@ -6109,6 +6116,304 @@ fn ticks_now() -> u64 {
     return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
 }
 
+// ================================================== RUNDE TOAST (S-006)
+//
+// DIE SICHTBARE EINBLENDUNG. Der Bus traegt die Meldungen seit Runde
+// SYSTEMBUS (`bus.noti_post`, sechzehn Plaetze), die Glocke in der
+// Leiste zaehlt sie -- und gesehen hat sie nie jemand, der nicht auf
+// die Glocke geschaut hat. Eine Meldung, die man suchen muss, ist
+// keine Meldung.
+//
+// WAS HIER DAZUKOMMT UND WAS NICHT. Der Unterbau bleibt unangetastet:
+// gepostet wird weiter mit `wlib.noti_post`, gezaehlt mit `noti_new`.
+// Diese Runde traegt genau zwei Dinge bei -- das FENSTER (oben in
+// wlib, `toast_win_open`) und die ENTSCHEIDUNG, wann es auf- und
+// wieder zugeht. Das ist der Rest, den `OFFEN.md` S-006 "keine
+// sichtbare Einblendung mit Verlauf" nennt.
+//
+// WORAN ERKANNT WIRD, DASS ETWAS NEU IST. An `noti_count` -- der Zahl
+// aller Meldungen, die je gepostet wurden (der Bus zaehlt hoch und
+// vergisst nur die aeltesten). Steigt sie, ist etwas dazugekommen.
+// NICHT an `noti_new`: das ist die Zahl der UNGELESENEN, und die faellt
+// auf null, sobald jemand die Liste ansieht -- eine Einblendung, die
+// davon abhinge, bliebe beim zweiten Blick aus.
+//
+// WARUM NICHT DER TEXT AUS `noti_take`. Weil `noti_take` die Meldung
+// als GELESEN markiert (`F_SEEN` in bus.fi:1258) und damit die Glocke
+// zurueckstellt. Die Einblendung ist kein Lesen -- sie zeigt nur, DASS
+// etwas da ist. Denselben Schluss hat der Dateimanager schon gezogen
+// (explorer.fi:1232). Der Text kommt deshalb von dem, der die Meldung
+// abschickt: `toast_text` wird beim Posten mitgesetzt.
+const TOAST_TICKS: u64 = 400 // 4 s bei 100 Hz -- lang genug zum Lesen
+const TOAST_EIN: u64 = 20 // 200 ms Einblenden
+const TOAST_AUS: u64 = 25 // 250 ms Ausblenden
+
+static mut to_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut to_seit: u64 = 0 // wann sie aufging, in Schlaegen
+static mut to_zahl: u64 = 0 // wie oft eine Einblendung aufging
+static mut to_gesehen: u64 = 0 // Stand von noti_total beim letzten Blick
+static mut to_text: u64 = 0 // der Text, der gerade dasteht
+static mut to_prio: u64 = 0 // 1 = Hinweis, 2 = ernst
+static mut to_w: u64 = 0
+static mut to_h: u64 = 0
+static mut to_erst: u64 = 1 // der allererste Blick zaehlt nicht
+static mut to_alpha_war: u64 = 0xFFFFFFFFFFFFFFFF // zuletzt gemalter Verlauf
+static mut to_takt: u64 = 0 // Drossel fuer den Blick auf den Bus
+
+static mut s_to: [u8; 18] = "taskbar: toast [\0\0"
+static mut s_tox: [u8; 6] = "] x=\0\0"
+static mut s_toy: [u8; 5] = " y=\0\0"
+static mut s_tow: [u8; 5] = " w=\0\0"
+static mut s_toh: [u8; 5] = " h=\0\0"
+static mut s_top: [u8; 8] = " prio=\0\0"
+static mut s_ton: [u8; 5] = " n=\0\0"
+static mut s_tozu: [u8; 19] = "taskbar: toast zu\0\0"
+static mut s_tovoll: [u8; 27] = "taskbar: toast kein Platz\0\0"
+
+// Der Vorrat fuer den Text einer Einblendung. Er liegt HIER und nicht
+// im Bus: `noti_take` wuerde die Meldung als gelesen markieren (siehe
+// oben), also bringt der Absender seinen Text selbst mit.
+static mut to_puf: [u8; 96] = [0 as u8; 96]
+
+fn toast_offen() -> bool {
+    return to_win != 0xFFFFFFFFFFFFFFFF
+}
+
+fn toast_zahl() -> u64 {
+    return to_zahl
+}
+
+fn toast_zu() {
+    if to_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    let i: u64 = to_win
+    to_win = 0xFFFFFFFFFFFFFFFF
+    to_text = 0
+    wlib.toast_win_close(i)
+    say((&s_tozu[0 as usize]) as u64)
+    nl()
+}
+
+// DER VERLAUF, als eine Zahl 0..255.
+//
+// Drei Abschnitte: herein (TOAST_EIN), stehen, hinaus (TOAST_AUS).
+// Gerechnet wird aus der VERGANGENEN ZEIT und nicht aus einer
+// Bildzahl -- dieselbe Regel, nach der `wm.anim_p` rechnet: wer aus
+// Bildern rechnet, bekommt auf einer langsamen Maschine eine langsame
+// Bewegung statt einer sprunghaften.
+fn toast_alpha(jetzt: u64) -> u64 {
+    if to_win == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    if jetzt < to_seit {
+        return 255
+    }
+    let d: u64 = jetzt - to_seit
+    if d < TOAST_EIN {
+        return d * 255 / TOAST_EIN
+    }
+    if d >= TOAST_TICKS {
+        return 0
+    }
+    if d + TOAST_AUS >= TOAST_TICKS {
+        return (TOAST_TICKS - d) * 255 / TOAST_AUS
+    }
+    return 255
+}
+
+// Die Flaeche malen. Ein Streifen in der Betonungsfarbe links zeigt
+// die Dringlichkeit; `draw_board` gibt der Karte dieselben runden
+// Ecken und denselben Rand wie jeder anderen Tafel dieses Systems --
+// die Form kommt aus den Tokens und nicht aus getippten Zahlen.
+fn toast_malen(i: u64) {
+    let hd: u64 = wlib.toast_win_id(i)
+    if hd == 0 {
+        return
+    }
+    let bw: u64 = to_w
+    let bh: u64 = to_h
+    wlibc.set_band(0)
+    wlibc.clip_set(0, 0, bw, bh)
+    wlib.draw_board(0, 0, bw, bh, wlib.MR_TAFEL, wlibc.EL_OVERLAY,
+        wlibc.theme(wlibc.T_MENU), wlibc.theme(wlibc.T_LINE))
+    // Der Streifen: bei `prio=2` in der Betonungsfarbe, sonst in der
+    // Linienfarbe. Zwei Zustaende, zwei Farben aus den Tokens.
+    var st: u64 = wlibc.theme(wlibc.T_LINE)
+    if to_prio >= 2 {
+        st = wlibc.theme(wlibc.T_ACCENT)
+    }
+    let sc: u64 = wlibc.ui_scale()
+    wlib.draw_area(0, 0, 3 * sc, bh, st)
+    if to_text != 0 {
+        let pad: u64 = 10 * sc
+        let base: u64 = (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+        let _t: u64 = wlib.draw_text(pad, base, to_text, tlen(to_text),
+            wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+    }
+    wlibc.push(hd, 0, 0, bw, bh)
+}
+
+// AUFMACHEN. Die Lage: rechts oben, mit Abstand vom Rand -- dort, wo
+// jedes System dieser Art seine Meldungen zeigt, und weit weg von der
+// Leiste unten, damit sie keinen Knopf verdeckt.
+fn toast_auf(text: u64, prio: u64) {
+    if text == 0 || tlen(text) == 0 {
+        return
+    }
+    toast_zu()
+    let n: u64 = tlen(text)
+    let sc: u64 = wlibc.ui_scale()
+    let pad: u64 = 10 * sc
+    var bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n)
+        + 2 * pad + 6 * sc
+    // Eine Einblendung ist eine KARTE und kein Schild: sie hat eine
+    // Mindestbreite, damit zwei Meldungen verschiedener Laenge nicht
+    // wie zwei verschiedene Dinge aussehen.
+    if bw < 240 * sc {
+        bw = 240 * sc
+    }
+    if bw > wlibc.screen_w() / 2 {
+        bw = wlibc.screen_w() / 2
+    }
+    let bh: u64 = wlibc.text_h(wlibc.px_ui()) + 2 * pad
+    let luft: u64 = 12 * sc
+    var x: u64 = 0
+    if wlibc.screen_w() > bw + luft {
+        x = wlibc.screen_w() - bw - luft
+    }
+    var y: u64 = luft
+    // Liegt die Leiste OBEN, geht die Einblendung unter sie.
+    if bar_y == 0 && bar_h != 0 {
+        y = bar_h + luft
+    }
+    let i: u64 = wlib.toast_win_open(x, y, bw, bh)
+    if i >= wlib.MAXWN {
+        // KEIN PLATZ, UND DAS WIRD GESAGT -- dieselbe Lehre wie bei der
+        // Blase: eine Einblendung, die still ausbleibt, ist von einer,
+        // die nie ausgeloest wurde, nicht zu unterscheiden.
+        say((&s_tovoll[0 as usize]) as u64)
+        nl()
+        return
+    }
+    to_win = i
+    to_w = bw
+    to_h = bh
+    to_text = text
+    to_prio = prio
+    to_seit = ticks_now()
+    to_zahl = to_zahl + 1
+    to_alpha_war = 0xFFFFFFFFFFFFFFFF
+    toast_malen(i)
+    say((&s_to[0 as usize]) as u64)
+    say(text)
+    say((&s_tox[0 as usize]) as u64)
+    sayn(x)
+    say((&s_toy[0 as usize]) as u64)
+    sayn(y)
+    say((&s_tow[0 as usize]) as u64)
+    sayn(bw)
+    say((&s_toh[0 as usize]) as u64)
+    sayn(bh)
+    say((&s_top[0 as usize]) as u64)
+    sayn(prio)
+    say((&s_ton[0 as usize]) as u64)
+    sayn(to_zahl)
+    nl()
+}
+
+// DER SCHRITT, einmal je Umlauf. Er tut drei Dinge und keines davon
+// kostet etwas, solange nichts los ist: nachsehen, ob eine Meldung
+// dazugekommen ist; den Verlauf weiterrechnen; zumachen, wenn die Zeit
+// um ist.
+fn toast_step() {
+    // ================================ RUNDE TOAST: DIE DROSSEL, GEMESSEN.
+    //
+    // HIER STAND EIN SYSTEMAUFRUF JE UMLAUF, und das hat etwas
+    // kaputtgemacht, das mit Benachrichtigungen nichts zu tun hat:
+    // `tools/logind/run.sh` fiel von 12 bestandenen Zusagen auf 7. Das
+    // Energiemenue ging auf, der Klick auf "Abmelden" kam an -- und der
+    // Starter meldete keine Wahl mehr. Die Schleife dieser Leiste ist
+    // dieselbe, die `wlib.step` fuer das Kontextmenue pumpt; ein
+    // zusaetzlicher `noti_count` in JEDEM Durchlauf hat sie so weit
+    // verlangsamt, dass das Ereignis des Menues zu spaet abgeholt wurde.
+    //
+    // GEGENGEMESSEN, damit es keine Vermutung bleibt: mit NUR den
+    // Aenderungen in wlib.fi (MAXWN 5 -> 6 samt Feldern) steht die
+    // Abnahme bei 12/1 wie auf sauberem main -- der Verlust lag
+    // ausschliesslich an dieser Stelle.
+    //
+    // Eine Benachrichtigung darf ein Zehntel einer Sekunde spaeter
+    // erscheinen; ein Klick darf nicht verlorengehen. Also wird der Bus
+    // wie die Fensterliste nur jeden zehnten Umlauf gefragt
+    // (`(round % 5)` weiter unten ist dieselbe Ueberlegung).
+    to_takt = to_takt + 1
+    if (to_takt % 10) != 0 && to_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    // `noti_total` und NICHT `noti_count`: das eine zaehlt jedes
+    // Posten und laeuft nie zurueck, das andere ist der Fuellstand des
+    // Rings und bleibt bei sechzehn stehen. Der erste Entwurf nahm
+    // `noti_count` -- gemessen ging die Karte daraufhin nie auf,
+    // obwohl die Glocke die Meldung anzeigte.
+    let c: u64 = wlibc.noti_total()
+    // DER ERSTE BLICK ZAEHLT NICHT. Beim Start der Leiste koennen
+    // schon Meldungen im Bus liegen (ein Programm, das vor ihr
+    // hochkam). Die alle nacheinander einzublenden waere Laerm zum
+    // Anmelden -- gemessen an genau dieser Stelle.
+    if to_erst != 0 {
+        to_erst = 0
+        to_gesehen = c
+        return
+    }
+    if c > to_gesehen {
+        to_gesehen = c
+        // DER TEXT KOMMT VOM BUS, NICHT VON DIESER LEISTE.
+        //
+        // Der erste Entwurf zeigte nur, was die Leiste SELBST gepostet
+        // hatte (Akkuwarnung), und liess alles andere aus. Damit waere
+        // die haeufigste Meldung dieses Systems unsichtbar geblieben:
+        // der Kern meldet jedes Ein- und Aushaengen eines USB-Traegers
+        // ueber denselben Bus (`wechsel.melden` -> `bus.noti_post`,
+        // Text "usb+ /medien/usb0"), und ein Toast, der Wechselmedien
+        // nicht zeigt, verfehlt seinen Zweck.
+        //
+        // `noti_peek` und NICHT `noti_take`: Abholen wuerde die Meldung
+        // als gelesen markieren und die Glocke zurueckstellen -- das
+        // blosse Erscheinen der Karte ist kein Lesen. Die lange
+        // Begruendung steht in kernel/bus/bus.fi bei `noti_peek`.
+        let n: u64 = wlibc.noti_peek(0, (&to_puf[0 as usize]) as u64, 94)
+        if n > 0 {
+            to_puf[(n) as usize] = 0 as u8
+            var pr: u64 = wlibc.noti_prio(0)
+            if pr == 0 {
+                pr = 1
+            }
+            toast_auf((&to_puf[0 as usize]) as u64, pr)
+        }
+    }
+    if to_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    let jetzt: u64 = ticks_now()
+    if jetzt < to_seit {
+        to_seit = jetzt
+        return
+    }
+    if jetzt - to_seit >= TOAST_TICKS {
+        toast_zu()
+        return
+    }
+    // NEU MALEN, solange sich der Verlauf bewegt. Steht die
+    // Einblendung (voll sichtbar), wird nichts gemalt -- eine Karte,
+    // die sich nicht aendert, kostet dann kein Bild je Umlauf.
+    let a: u64 = toast_alpha(jetzt)
+    if a != to_alpha_war {
+        to_alpha_war = a
+        toast_malen(to_win)
+    }
+}
+
 fn tip_step() {
     let mx: u64 = wlibc.mouse_x()
     let my: u64 = wlibc.mouse_y()
@@ -6721,6 +7026,10 @@ fn u_start(args: u64) -> u64 {
         let _qsc: bool = qs.step()
         hotkey_step()
         tip_step()
+        // RUNDE TOAST (S-006): an derselben Stelle wie die Blase --
+        // einmal je Umlauf, und er kostet nichts, solange nichts
+        // anliegt (ein `noti_count` und ein Vergleich).
+        toast_step()
         kontext_step()
         let hw: u64 = qs.want_hide()
         if hw != 0 {
