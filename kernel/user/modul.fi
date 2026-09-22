@@ -1,0 +1,1168 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/modul.fi -- RUNDE MODULE: DIE ANZEIGEMODULE DES
+// SCHREIBTISCHS.
+//
+// Justins Auftrag, 22.09.2026, woertlich: "und man soll das alles
+// einstellen koennen also so wie in einem minecraft client die ganzen
+// module hin und herschieben etc".
+//
+// Gemeint sind die Anzeigen, die Lunar, Badlion und Feather ueber das
+// Bild legen: Uhr, Bilder je Sekunde, Speicher, CPU-Last. Der Nutzer
+// druekt eine Taste, faesst jedes Kaestchen mit der Maus an, zieht es
+// an seinen Platz -- und nach dem Neustart liegt es wieder dort.
+//
+// ================================================== WAS ES SCHON GAB
+//
+// Bevor hier eine Zeile entstand, wurde der Baum abgesucht. Das Ergebnis
+// steht hier, weil in diesem Projekt zehn von zehn gemeldeten "Luecken"
+// schon gebaut im Baum lagen und eine elfte Umsetzung das Gegenteil von
+// Fortschritt waere:
+//
+//   `kernel/user/pluguhr.fi` + `kernel/ui/wmplug.fi` (Runde WMPLUGIN)
+//       Erweiterungen sind Ring-3-Prozesse. Sie duerfen AUSDRUECKLICH
+//       NICHT MALEN: ein Plugin schickt 31 Oktette Text (WM_PLUG_BAR),
+//       und die TASKLEISTE malt sie an ihrem festen Platz. Das ist eine
+//       bewusste Entscheidung jener Runde ("Kein Fremdcode im Kern"),
+//       und sie bleibt unangetastet. Fuer frei auf dem Schirm liegende
+//       Kaestchen reicht sie nicht -- ein Leistenfeld hat keine x/y.
+//
+//   `kstate.MODUL_OFF` (0xA9000)
+//       Heisst so, ist aber der ELF-MODULLADER (kernel/ldr/module.fi).
+//       Mit dieser Datei hat er NICHTS zu tun. Der Name war schon
+//       vergeben; deshalb steht dieser Satz hier.
+//
+//   `wlib.drag_take/drag_an/drag_drop` + `zug_bilder/zug_laeuft`
+//       Das Ziehen ist geloest und wird hier NICHT neu erfunden -- aber
+//       es ist das Ziehen von DATEN zwischen Fenstern (der Explorer legt
+//       einen Pfad hinein). Ein Modul zieht keine Daten, es bewegt sich
+//       selbst; siehe `ziehen` weiter unten.
+//
+//   `wlibc.snap/grid`  das Viererraster. Wird hier BENUTZT und nicht
+//       nachgebaut (tools/design/messen.py misst es, zuletzt 92 %).
+//
+// ================================================== DIE ENTSCHEIDUNGEN
+//
+// 1. DIE MODULE GEHOEREN DEM SCHREIBTISCH.
+//
+//    Sie liegen im Fenster von /bin/desktop (L_DESK, so gross wie der
+//    Schirm) und werden von ihm gemalt. Weder `kernel/ui/wm.fi` noch
+//    `kernel/user/taskbar.fi` wird dafuer angefasst -- in beiden sitzen
+//    gerade zwei andere Runden (Toasts/Papierkorb/Radius und der
+//    Roadmap-Abgleich), und in genau solchen Dateien sind bei Certus
+//    schon Errungenschaften still verschwunden, ohne dass Git etwas
+//    gemeldet haette.
+//
+// 2. DIE LAGE WIRD RELATIV ZU EINER ECKE GESPEICHERT.
+//
+//    Das ist der Fehler, an dem solche Systeme reihenweise scheitern:
+//    wer x=1700 speichert und den Schirm auf 1280 stellt, hat das Modul
+//    verloren. Gespeichert wird deshalb ANKER + ABSTAND (dx/dy vom
+//    Anker aus); `x_von`/`y_von` rechnen daraus die Bildpunkte. Ein
+//    Modul am rechten Rand bleibt am rechten Rand.
+//
+// 3. GEMALT WIRD NUR DAS KAESTCHEN, NICHT DER SCHIRM.
+//
+//    Der Schreibtisch malt sein Bild Punkt fuer Punkt (`all_paint`,
+//    800x600 = 480 000 Aufrufe). Das je Modulbild zu wiederholen waere
+//    sinnlos teuer. `hintergrund_fleck` malt deshalb GENAU das Rechteck
+//    des Moduls neu (mit `color_at`, derselben Rechnung wie das grosse
+//    Bild) und schiebt nur dieses Rechteck hinaus (`push`).
+//
+// 4. KEIN WEICHZEICHNER HINTER EINEM MODUL.
+//
+//    Gemessen liegt eine Blur-Blase 360x120 bei 3,1 ms -- 18 % des
+//    60-Hz-Budgets, und das je Modul und Bild. Ein Modul bekommt
+//    stattdessen eine Tafel aus dem Schema (`draw_board`), die ein
+//    Bruchteil davon kostet. Wer Acryl will, holt es sich spaeter ueber
+//    WF_BLUR am Fenster -- nicht hier.
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+
+export {
+    // die Tafel
+    MAX, ANZ, M_UHR, M_SPEICHER, M_CPU,
+    an, an_setzen, x_von, y_von, breite, hoehe, name_von,
+    anker_von, anker_setzen, dx_von, dy_von, lage_setzen,
+    // der Zustand
+    laden, sichern, vorgabe, zuruecksetzen, geaendert, schmutzig,
+    sauber_setzen,
+    // Bearbeiten und Ziehen
+    bearbeiten, bearbeiten_setzen, treffer, ziehen_start, ziehen_zu,
+    ziehen_ende, zieht, gezogen,
+    // Inhalt und Malen
+    werte_holen, text_von, text_laenge, messen, malen, rahmen_malen,
+    // Belege
+    zuege, schreibvorgaenge, A_LO, A_RO, A_LU, A_RU,
+    schirm_setzen, texte_bauen,
+    taste, taste_setzen, TASTE_VORGABE
+}
+
+// ------------------------------------------------------- die Zahlen
+
+// Drei Module in dieser Runde. Justins Entscheidung: "Drei Module
+// sauber (Uhr, Speicher, CPU) -- verschiebbar, einrastend, dauerhaft,
+// voll belegt" statt sechs halbe. Die Tafel ist auf acht ausgelegt,
+// damit die naechste Runde nur Zeilen anhaengt und keine Struktur
+// anfasst.
+const MAX: u64 = 8
+const ANZ: u64 = 3
+
+const M_UHR: u64 = 0
+const M_SPEICHER: u64 = 1
+const M_CPU: u64 = 2
+
+// DIE VIER ANKER. Eine Ecke, und dx/dy zaehlen von IHR aus nach innen.
+// Nicht "Prozent des Schirms": ein Kaestchen, das bei 1920 zwoelf
+// Bildpunkte vom Rand liegt, soll bei 1280 auch zwoelf liegen und nicht
+// acht -- der Rand ist ein Rand und kein Anteil.
+const A_LO: u64 = 0 // links oben
+const A_RO: u64 = 1 // rechts oben
+const A_LU: u64 = 2 // links unten
+const A_RU: u64 = 3 // rechts unten
+
+// Die Felder je Modul in der Tafel.
+const F_AN: u64 = 0
+const F_ANKER: u64 = 1
+const F_DX: u64 = 2
+const F_DY: u64 = 3
+const F_W: u64 = 4
+const F_H: u64 = 5
+const F_SPAN: u64 = 6
+
+static mut tafel: [u64; 48] = [0 as u64; 48] // MAX * F_SPAN
+
+// Der Schirm, wie ihn der Schreibtisch kennt. Ohne diese zwei Zahlen
+// laesst sich ein Anker nicht in Bildpunkte rechnen.
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+
+// Bearbeitungsmodus, Ziehzustand.
+static mut bearb: u64 = 0
+static mut zieht_i: u64 = MAX // MAX = keiner
+static mut griff_dx: u64 = 0
+static mut griff_dy: u64 = 0
+static mut n_zuege: u64 = 0
+static mut n_schreib: u64 = 0
+static mut dreckig: u64 = 0
+
+// ============================================ DIE TASTE
+//
+// Justin: "man sollte die keybinds auch in den settings aendern
+// koennen". Also ist der Bearbeitungsmodus NICHT auf F9 festgenagelt,
+// sondern steht als Zahl in /etc/module.conf (`taste=`) -- dieselbe
+// Nummer, die `wlib.KEY_F9` traegt (0x118). Wer eine andere Taste will,
+// schreibt eine andere Zahl; die Seite "Darstellung" kann dasselbe
+// tun, ohne dass hier eine Zeile geaendert werden muss.
+//
+// 0 schaltet das Kuerzel AB -- fuer den Fall, dass jemand F9 fuer
+// etwas anderes braucht.
+const TASTE_VORGABE: u64 = 0x118 // wlib.KEY_F9
+static mut m_taste: u64 = TASTE_VORGABE
+
+fn taste() -> u64 {
+    return m_taste
+}
+
+fn taste_setzen(t: u64) {
+    if m_taste != t {
+        m_taste = t
+        dreckig = 1
+    }
+}
+
+// ------------------------------------------------------- die Tafel
+
+fn at(i: u64, f: u64) -> u64 {
+    return tafel[(i * F_SPAN + f) as usize]
+}
+
+fn setz(i: u64, f: u64, v: u64) {
+    tafel[(i * F_SPAN + f) as usize] = v
+}
+
+fn an(i: u64) -> bool {
+    if i >= MAX {
+        return false
+    }
+    return at(i, F_AN) != 0
+}
+
+fn an_setzen(i: u64, v: bool) {
+    if i >= MAX {
+        return
+    }
+    var n: u64 = 0
+    if v {
+        n = 1
+    }
+    if at(i, F_AN) != n {
+        setz(i, F_AN, n)
+        dreckig = 1
+    }
+}
+
+fn anker_von(i: u64) -> u64 {
+    if i >= MAX {
+        return A_LO
+    }
+    return at(i, F_ANKER)
+}
+
+fn anker_setzen(i: u64, a: u64) {
+    if i >= MAX || a > A_RU {
+        return
+    }
+    setz(i, F_ANKER, a)
+    dreckig = 1
+}
+
+fn dx_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_DX)
+}
+
+fn dy_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_DY)
+}
+
+fn breite(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_W)
+}
+
+fn hoehe(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return at(i, F_H)
+}
+
+// ============================================ DIE LAGE, UND IHR KERN
+//
+// `x_von`/`y_von` sind die EINZIGE Stelle, die aus Anker und Abstand
+// Bildpunkte macht. Ein Testlaeufer rechnet genau diese Formel nach;
+// stuende sie zweimal im Quelltext (einmal beim Malen, einmal beim
+// Melden), waere die Messung eine Tautologie -- dieselbe Regel, nach
+// der `color_at` im Schreibtisch eine einzige Funktion ist.
+fn x_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    let a: u64 = at(i, F_ANKER)
+    let dx: u64 = at(i, F_DX)
+    let w: u64 = at(i, F_W)
+    if a == A_RO || a == A_RU {
+        // Von rechts gezaehlt. Der Vergleich davor ist kein Schmuck:
+        // wird der Schirm schmaler als Abstand + Breite, rutschte das
+        // Kaestchen sonst unter Null -- und das ist bei `u64` keine
+        // negative Zahl, sondern 18 Trillionen.
+        if s_w < dx + w {
+            return 0
+        }
+        return s_w - dx - w
+    }
+    if dx + w > s_w && s_w > w {
+        return s_w - w
+    }
+    return dx
+}
+
+fn y_von(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    let a: u64 = at(i, F_ANKER)
+    let dy: u64 = at(i, F_DY)
+    let h: u64 = at(i, F_H)
+    if a == A_LU || a == A_RU {
+        if s_h < dy + h {
+            return 0
+        }
+        return s_h - dy - h
+    }
+    if dy + h > s_h && s_h > h {
+        return s_h - h
+    }
+    return dy
+}
+
+// Eine Lage IN BILDPUNKTEN setzen -- die Umkehrung von x_von/y_von.
+// Sie waehlt den Anker NICHT selbst: welcher Anker gilt, entscheidet
+// `ziehen_ende` an der Ecke, in der das Modul losgelassen wurde.
+fn lage_setzen(i: u64, x: u64, y: u64) {
+    if i >= MAX {
+        return
+    }
+    let a: u64 = at(i, F_ANKER)
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    var nx: u64 = x
+    var ny: u64 = y
+    if a == A_RO || a == A_RU {
+        if s_w > x + w {
+            nx = s_w - x - w
+        } else {
+            nx = 0
+        }
+    }
+    if a == A_LU || a == A_RU {
+        if s_h > y + h {
+            ny = s_h - y - h
+        } else {
+            ny = 0
+        }
+    }
+    if at(i, F_DX) != nx || at(i, F_DY) != ny {
+        setz(i, F_DX, nx)
+        setz(i, F_DY, ny)
+        dreckig = 1
+    }
+}
+
+fn geaendert() -> u64 {
+    return dreckig
+}
+
+fn schmutzig() -> bool {
+    return dreckig != 0
+}
+
+fn sauber_setzen() {
+    dreckig = 0
+}
+
+fn zuege() -> u64 {
+    return n_zuege
+}
+
+fn schreibvorgaenge() -> u64 {
+    return n_schreib
+}
+
+// ------------------------------------------------- die Namen
+
+static mut n_uhr: [u8; 8] = "uhr\0\0\0\0\0"
+static mut n_spe: [u8; 12] = "speicher\0\0\0\0"
+static mut n_cpu: [u8; 8] = "cpu\0\0\0\0\0"
+
+fn name_von(i: u64) -> u64 {
+    if i == M_UHR {
+        return (&n_uhr[0 as usize]) as u64
+    }
+    if i == M_SPEICHER {
+        return (&n_spe[0 as usize]) as u64
+    }
+    return (&n_cpu[0 as usize]) as u64
+}
+
+// ============================================ DIE VORGABE
+//
+// Alle drei AN und in der rechten oberen Ecke untereinander -- dort,
+// wo ein Minecraft-Client sie auch hinlegt, und dort, wo sie weder die
+// Symbole (links oben) noch die Taskleiste (unten) verdecken.
+//
+// Die Abstaende sind Vielfache von vier (das Raster dieses Projekts).
+// Die Hoehe kommt NICHT als getippte Zahl, sondern aus der
+// Schriftstufe -- `messen` rechnet sie, sobald das Schema steht.
+fn vorgabe() {
+    var i: u64 = 0
+    while i < MAX {
+        setz(i, F_AN, 0)
+        setz(i, F_ANKER, A_RO)
+        setz(i, F_DX, 0)
+        setz(i, F_DY, 0)
+        setz(i, F_W, 0)
+        setz(i, F_H, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < ANZ {
+        setz(i, F_AN, 1)
+        setz(i, F_ANKER, A_RO)
+        setz(i, F_DX, 16)
+        i = i + 1
+    }
+    // Untereinander: 16, dann je 36 tiefer. Die 36 wird in `messen`
+    // durch die wirkliche Zeilenhoehe ersetzt, sobald sie bekannt ist.
+    setz(M_UHR, F_DY, 16)
+    setz(M_SPEICHER, F_DY, 56)
+    setz(M_CPU, F_DY, 96)
+    m_taste = TASTE_VORGABE
+    dreckig = 0
+}
+
+fn zuruecksetzen() {
+    vorgabe()
+    messen()
+    dreckig = 1
+}
+
+// ============================================ DIE WERTE
+//
+// Alle drei kommen aus Quellen, die dieses System schon hat. Kein
+// Modul erfindet eine Zahl, und keines liest eine Datei.
+static mut w_std: u64 = 0
+static mut w_min: u64 = 0
+static mut w_mb_frei: u64 = 0
+static mut w_mb_alle: u64 = 0
+static mut w_cpu: u64 = 0
+
+// Die CPU-Last aus ZWEI Messungen -- eine einzelne Zahl aus CS_IDLE
+// waere die Last seit dem Hochlauf und stuende nach einer Minute
+// still. Dieselbe Rechnung wie in `pluguhr.fi`; sie steht hier ein
+// zweites Mal, weil dieses Programm jenes nicht einbindet (ein
+// Ring-3-Prozess bindet keinen anderen ein).
+static mut cs_t: u64 = 0
+static mut cs_i: u64 = 0
+static mut cs_da: u64 = 0
+
+fn cpu_last() -> u64 {
+    let t: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_TICKS, 0)
+    let i: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_IDLE, 0)
+    if ulib.bad(t) || ulib.bad(i) {
+        return 0
+    }
+    var last: u64 = 0
+    if cs_da != 0 && t > cs_t {
+        let dt: u64 = t - cs_t
+        var di: u64 = 0
+        if i > cs_i {
+            di = i - cs_i
+        }
+        if di > dt {
+            di = dt
+        }
+        last = ((dt - di) * 100) / dt
+    }
+    cs_t = t
+    cs_i = i
+    cs_da = 1
+    return last
+}
+
+// ============================================ DER ZEITVERSATZ
+//
+// ZWEI UHREN AUF EINEM SCHIRM MUESSEN DIESELBE ZEIT ZEIGEN.
+//
+// Gemessen am ersten Bild dieser Runde: das Uhrmodul zeigte 06:32, die
+// Taskleiste 08:32. Beide hatten recht -- der Kern kann die
+// Echtzeituhr LESEN und nicht STELLEN (`SYS_TIME` gibt es nicht), also
+// liefert `I_HOUR` die Zeit der Hardware-Uhr (UTC), und der VERSATZ auf
+// die Ortszeit steht in /etc/time.conf. Die Taskleiste liest ihn seit
+// Runde ECHTHARDWARE-3 (`offset_read`), dieses Modul las ihn nicht.
+//
+// Die Bedingung ist dieselbe wie dort: der Versatz aus der Datei gilt
+// NUR, wenn der Kern selbst keinen kennt (`I_TZMIN == 0`) -- sonst
+// wuerde er ein zweites Mal addiert, und das war genau der Fehler, den
+// jene Runde an Justins Foto vom 09.09. gefunden hat.
+static mut p_time: [u8; 16] = "/etc/time.conf\0\0"
+static mut versatz: u64 = 0
+
+fn versatz_lesen() {
+    var buf: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_time[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 63)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    var v: u64 = 0
+    var d: u64 = 0
+    var im_wert: bool = false
+    while i < n {
+        let c: u64 = __mmio_read8((b + i) as *mut u8) as u64
+        if c == 61 {
+            im_wert = true
+        } else if im_wert && c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            d = d + 1
+        } else if d > 0 {
+            i = n
+        }
+        i = i + 1
+    }
+    if d > 0 && v <= 1440 {
+        versatz = v
+    }
+}
+
+// Holt alle Werte. Gibt true, wenn sich etwas GEAENDERT hat -- nur
+// dann muss gemalt werden. Ein Modul, das sich jede Runde neu malt,
+// obwohl dieselbe Minute dasteht, kostet Bilder je Sekunde fuer nichts.
+fn werte_holen() -> bool {
+    let h_roh: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let m_roh: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    var std: u64 = h_roh
+    var min: u64 = m_roh
+    if !ulib.bad(h_roh) && !ulib.bad(m_roh) {
+        var vs: u64 = 0
+        if ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZMIN, 0, 0) == 0 {
+            vs = versatz
+        }
+        let ges: u64 = (h_roh * 60 + m_roh + vs) % 1440
+        std = ges / 60
+        min = ges % 60
+    }
+    // Rahmen zu 4 KiB -> Mebioktett.
+    let fr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0)
+    let al: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_ALL, 0, 0)
+    var mb_f: u64 = 0
+    var mb_a: u64 = 0
+    if !ulib.bad(fr) {
+        mb_f = fr / 256
+    }
+    if !ulib.bad(al) {
+        mb_a = al / 256
+    }
+    let cp: u64 = cpu_last()
+    var neu: bool = false
+    if !ulib.bad(std) && std != w_std {
+        w_std = std
+        neu = true
+    }
+    if !ulib.bad(min) && min != w_min {
+        w_min = min
+        neu = true
+    }
+    if mb_f != w_mb_frei {
+        w_mb_frei = mb_f
+        neu = true
+    }
+    if mb_a != w_mb_alle {
+        w_mb_alle = mb_a
+        neu = true
+    }
+    if cp != w_cpu {
+        w_cpu = cp
+        neu = true
+    }
+    return neu
+}
+
+// ------------------------------------------------- der Text
+
+static mut txt: [u8; 256] = [0 as u8; 256]
+static mut txt_n: [u64; 8] = [0 as u64; 8]
+
+fn t_at(i: u64) -> u64 {
+    return (&txt[0 as usize]) as u64 + i * 32
+}
+
+fn schreib(p: u64, at2: u64, c: u64) -> u64 {
+    __mmio_write8((p + at2) as *mut u8, c as u8)
+    return at2 + 1
+}
+
+fn zwei_stellen(p: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = schreib(p, at2, 48 + (v / 10) % 10)
+    return schreib(p, a, 48 + v % 10)
+}
+
+// Eine Zahl bis 9999. Ohne fuehrende Null -- `zwei_stellen` schreibt
+// immer zwei Ziffern und machte in `pluguhr` aus 100 einmal "0100".
+fn zahl(p: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = at2
+    if v >= 1000 {
+        a = schreib(p, a, 48 + (v / 1000) % 10)
+    }
+    if v >= 100 {
+        a = schreib(p, a, 48 + (v / 100) % 10)
+    }
+    if v >= 10 {
+        a = schreib(p, a, 48 + (v / 10) % 10)
+    }
+    return schreib(p, a, 48 + v % 10)
+}
+
+// Die drei Texte bauen. Sie stehen NEBENEINANDER in einem Puffer,
+// 32 Oktette je Modul -- kein Modul kann in den Text eines anderen
+// schreiben, und der laengste ("Speicher 8192/8192 MB") misst 21.
+fn texte_bauen() {
+    // uhr: "HH:MM"
+    var p: u64 = t_at(M_UHR)
+    var a: u64 = zwei_stellen(p, 0, w_std)
+    a = schreib(p, a, 58) // :
+    a = zwei_stellen(p, a, w_min)
+    let _z: u64 = schreib(p, a, 0)
+    txt_n[(M_UHR) as usize] = a
+
+    // speicher: "RAM <frei>/<alle> MB"
+    p = t_at(M_SPEICHER)
+    a = schreib(p, 0, 82)  // R
+    a = schreib(p, a, 65)  // A
+    a = schreib(p, a, 77)  // M
+    a = schreib(p, a, 32)
+    a = zahl(p, a, w_mb_alle - w_mb_frei)
+    a = schreib(p, a, 47)  // /
+    a = zahl(p, a, w_mb_alle)
+    a = schreib(p, a, 32)
+    a = schreib(p, a, 77)  // M
+    a = schreib(p, a, 66)  // B
+    let _z2: u64 = schreib(p, a, 0)
+    txt_n[(M_SPEICHER) as usize] = a
+
+    // cpu: "CPU NN%"
+    p = t_at(M_CPU)
+    a = schreib(p, 0, 67)  // C
+    a = schreib(p, a, 80)  // P
+    a = schreib(p, a, 85)  // U
+    a = schreib(p, a, 32)
+    a = zahl(p, a, w_cpu)
+    a = schreib(p, a, 37)  // %
+    let _z3: u64 = schreib(p, a, 0)
+    txt_n[(M_CPU) as usize] = a
+}
+
+fn text_von(i: u64) -> u64 {
+    if i >= MAX {
+        return t_at(0)
+    }
+    return t_at(i)
+}
+
+fn text_laenge(i: u64) -> u64 {
+    if i >= MAX {
+        return 0
+    }
+    return txt_n[(i) as usize]
+}
+
+// ============================================ DIE GROESSE
+//
+// Sie wird GEMESSEN und nicht getippt: die Breite aus dem laengsten
+// Text, den dieses Modul zeigen kann, die Hoehe aus der Zeilenhoehe der
+// Schriftstufe. Beides auf das Viererraster aufgerundet
+// (`wlibc.snap_up`) -- aufgerundet und nicht kaufmaennisch, weil eine
+// abgerundete Breite den Text abschneidet.
+//
+// WARUM DER LAENGSTE TEXT UND NICHT DER AKTUELLE: "RAM 7/8192 MB" ist
+// schmaler als "RAM 1024/8192 MB". Wuchse das Kaestchen mit dem Text,
+// zappelte es bei jeder Messung -- und am rechten Anker wanderte seine
+// linke Kante im Sekundentakt.
+fn mess_breite(i: u64) -> u64 {
+    var mus: [u8; 24] = [0 as u8; 24]
+    let p: u64 = (&mus[0 as usize]) as u64
+    var n: u64 = 0
+    if i == M_UHR {
+        // "00:00"
+        n = 5
+        var k: u64 = 0
+        while k < 5 {
+            __mmio_write8((p + k) as *mut u8, 48 as u8)
+            k = k + 1
+        }
+    } else if i == M_SPEICHER {
+        // "RAM 8888/8888 MB" -- die breitesten Ziffern in der Form,
+        // die dieses Modul wirklich malt.
+        n = 16
+        var k2: u64 = 0
+        while k2 < 16 {
+            __mmio_write8((p + k2) as *mut u8, 56 as u8)
+            k2 = k2 + 1
+        }
+    } else {
+        // "CPU 100%"
+        n = 8
+        var k3: u64 = 0
+        while k3 < 8 {
+            __mmio_write8((p + k3) as *mut u8, 56 as u8)
+            k3 = k3 + 1
+        }
+    }
+    return wlib.draw_text_w(p, n, wlibc.TY_BODY)
+}
+
+// Die Innenabstaende des Kaestchens, aus der Formentabelle und nicht
+// aus der Luft: dieselben Zahlen, mit denen jedes andere Element
+// dieses Systems seinen Rand haelt.
+fn pad_x() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_X)
+}
+
+fn pad_y() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_Y)
+}
+
+fn messen() {
+    let lh: u64 = wlibc.type_lh(wlibc.TY_BODY)
+    // ======================================== ALLE GLEICH BREIT
+    //
+    // Am ersten Bild dieser Runde gemessen: die drei Kaestchen hingen
+    // am rechten Anker und waren 74, 178 und 100 Bildpunkte breit --
+    // also standen ihre LINKEN Kanten an drei verschiedenen Stellen,
+    // eine Treppe. Ein Stapel am selben Anker ist eine Gruppe, und
+    // eine Gruppe hat eine Kante.
+    //
+    // Deshalb: die Breite ist die des BREITESTEN Moduls, und alle
+    // nehmen sie. Die Hoehe ist ohnehin fuer alle dieselbe (eine
+    // Zeile). Das ist genau die Regel, nach der die Taskleiste ihre
+    // Statusfelder ausrichtet, und sie kostet nichts.
+    var groesste: u64 = 0
+    var i: u64 = 0
+    while i < ANZ {
+        let b: u64 = wlibc.snap_up(mess_breite(i) + 2 * pad_x())
+        if b > groesste {
+            groesste = b
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < ANZ {
+        let h: u64 = wlibc.snap_up(lh + 2 * pad_y())
+        setz(i, F_W, groesste)
+        setz(i, F_H, h)
+        i = i + 1
+    }
+    // Die Vorgabe-Abstaende stapeln sich mit der WIRKLICHEN Hoehe,
+    // solange der Nutzer noch nichts verschoben hat (dy = 16/56/96 ist
+    // genau die Vorgabe aus `vorgabe`).
+    let h0: u64 = at(M_UHR, F_H)
+    if at(M_UHR, F_DY) == 16 && at(M_SPEICHER, F_DY) == 56
+        && at(M_CPU, F_DY) == 96 {
+        setz(M_SPEICHER, F_DY, 16 + h0 + 8)
+        setz(M_CPU, F_DY, 16 + 2 * (h0 + 8))
+    }
+}
+
+// ============================================ TREFFER UND ZIEHEN
+//
+// `treffer` sagt, welches Modul unter einem Punkt liegt -- von OBEN
+// nach unten gesucht, also das zuletzt gemalte zuerst. Bei
+// uebereinanderliegenden Kaestchen faesst der Nutzer sonst das an, das
+// er nicht sieht.
+fn treffer(mx: u64, my: u64) -> u64 {
+    var k: u64 = ANZ
+    while k > 0 {
+        let i: u64 = k - 1
+        if an(i) {
+            let x: u64 = x_von(i)
+            let y: u64 = y_von(i)
+            if mx >= x && my >= y && mx < x + at(i, F_W)
+                && my < y + at(i, F_H) {
+                return i
+            }
+        }
+        k = k - 1
+    }
+    return MAX
+}
+
+fn bearbeiten() -> bool {
+    return bearb != 0
+}
+
+fn bearbeiten_setzen(v: bool) {
+    if v {
+        bearb = 1
+    } else {
+        bearb = 0
+        // Ein Zug, der beim Ausschalten noch laeuft, endet hier --
+        // sonst haengt `zieht_i` an einem Modul, das niemand mehr
+        // bewegen kann.
+        zieht_i = MAX
+    }
+}
+
+fn zieht() -> bool {
+    return zieht_i < MAX
+}
+
+fn gezogen() -> u64 {
+    return zieht_i
+}
+
+// Der Griff merkt sich den ABSTAND vom Mauszeiger zur linken oberen
+// Ecke. Ohne ihn springt das Kaestchen beim Anfassen mit seiner Ecke
+// unter den Zeiger -- der Fehler, den Justin an der Zieh-Aufhebung
+// ausdruecklich vermieden sehen wollte ("Pivot an der angefassten
+// Stelle").
+fn ziehen_start(i: u64, mx: u64, my: u64) -> bool {
+    if bearb == 0 || i >= ANZ || !an(i) {
+        return false
+    }
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    griff_dx = 0
+    griff_dy = 0
+    if mx > x {
+        griff_dx = mx - x
+    }
+    if my > y {
+        griff_dy = my - y
+    }
+    zieht_i = i
+    n_zuege = n_zuege + 1
+    return true
+}
+
+// Waehrend des Zuges. Rastet auf dem Viererraster ein und faengt an den
+// vier Schirmkanten -- innerhalb von FANG Bildpunkten zieht es die
+// Kante an sich. Beides ist das, was Lunar/Badlion "snap" nennen.
+const FANG: u64 = 12
+
+fn ziehen_zu(mx: u64, my: u64) -> bool {
+    if zieht_i >= ANZ {
+        return false
+    }
+    let i: u64 = zieht_i
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    var nx: u64 = 0
+    var ny: u64 = 0
+    if mx > griff_dx {
+        nx = mx - griff_dx
+    }
+    if my > griff_dy {
+        ny = my - griff_dy
+    }
+    // im Schirm halten
+    if nx + w > s_w {
+        if s_w > w {
+            nx = s_w - w
+        } else {
+            nx = 0
+        }
+    }
+    if ny + h > s_h {
+        if s_h > h {
+            ny = s_h - h
+        } else {
+            ny = 0
+        }
+    }
+    // aufs Raster
+    nx = wlibc.snap(nx)
+    ny = wlibc.snap(ny)
+    // an die Kanten
+    if nx < FANG {
+        nx = 0
+    }
+    if ny < FANG {
+        ny = 0
+    }
+    if s_w > w && nx + w + FANG > s_w {
+        nx = s_w - w
+    }
+    if s_h > h && ny + h + FANG > s_h {
+        ny = s_h - h
+    }
+    let ax: u64 = x_von(i)
+    let ay: u64 = y_von(i)
+    if ax == nx && ay == ny {
+        return false
+    }
+    lage_setzen(i, nx, ny)
+    return true
+}
+
+// ============================================ DAS LOSLASSEN
+//
+// HIER WIRD DER ANKER NEU GEWAEHLT, und das ist der Kern von Punkt 2
+// des Auftrags. Massgeblich ist, in welcher HAELFTE des Schirms die
+// MITTE des Kaestchens liegt -- nicht, wo der Zeiger war. Wer ein Modul
+// in die rechte untere Ecke zieht, bekommt A_RU, und danach bleibt es
+// bei jeder Aufloesung in der rechten unteren Ecke.
+fn ziehen_ende() -> u64 {
+    if zieht_i >= ANZ {
+        return MAX
+    }
+    let i: u64 = zieht_i
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    let mx: u64 = x + at(i, F_W) / 2
+    let my: u64 = y + at(i, F_H) / 2
+    var a: u64 = A_LO
+    if mx * 2 >= s_w && my * 2 >= s_h {
+        a = A_RU
+    } else if mx * 2 >= s_w {
+        a = A_RO
+    } else if my * 2 >= s_h {
+        a = A_LU
+    }
+    setz(i, F_ANKER, a)
+    // Die Bildpunkte bleiben, wo sie sind -- nur ihre AUSDRUECKSWEISE
+    // wechselt. `lage_setzen` rechnet sie in den neuen Anker um.
+    lage_setzen(i, x, y)
+    dreckig = 1
+    zieht_i = MAX
+    return i
+}
+
+// ============================================ DAS MALEN
+//
+// Ein Modul ist eine Tafel mit einem Text. Die Farben kommen aus dem
+// Schema (kein `0x...` in dieser Datei), die Form aus der
+// Formentabelle, gemalt wird ueber `wlib` -- also durch dasselbe
+// Rahmenwerk wie jedes andere Element (tools/check-ui.sh).
+fn malen(i: u64) {
+    if i >= ANZ || !an(i) {
+        return
+    }
+    let x: u64 = x_von(i)
+    let y: u64 = y_von(i)
+    let w: u64 = at(i, F_W)
+    let h: u64 = at(i, F_H)
+    // Die Tafel. EL_FLAT: kein Schatten. Ein Schatten je Modul und Bild
+    // kostet `drop_shadow` ueber die ganze Flaeche, und ein Modul liegt
+    // auf dem Schreibtisch und nicht ueber einem Fenster.
+    var rand: u64 = 0
+    if bearb != 0 {
+        rand = wlibc.theme(wlibc.C_ACCENT)
+    }
+    wlib.draw_board(x, y, w, h, wlib.MR_TAFEL, wlibc.EL_FLAT,
+        wlibc.theme(wlibc.C_PANEL_BG), rand)
+    // Der Text, an der Grundlinie der Stufe.
+    let bas: u64 = y + pad_y() + wlib.draw_ascent(wlibc.TY_BODY)
+    let _b: u64 = wlib.draw_text(x + pad_x(), bas, t_at(i), txt_n[(i) as usize],
+        wlibc.theme(wlibc.C_WINDOW_TEXT), wlibc.TY_BODY)
+}
+
+// Der Rahmen des gezogenen Moduls -- im Bearbeitungsmodus bekommt das
+// Modul unter der Hand einen Akzentrahmen, damit sichtbar ist, WAS
+// gleich bewegt wird.
+fn rahmen_malen(i: u64) {
+    if i >= ANZ || !an(i) {
+        return
+    }
+    wlib.draw_frame(x_von(i), y_von(i), at(i, F_W), at(i, F_H),
+        wlib.MR_TAFEL, wlibc.theme(wlibc.C_FOCUS_RING))
+}
+
+// ============================================ DIE DATEI
+//
+// /etc/module.conf, eine Zeile je Modul:
+//
+//     uhr=1,1,16,16
+//        an, anker, dx, dy
+//
+// EIGENE DATEI UND NICHT /etc/theme.conf, und dafuer gibt es einen
+// Grund: theme.conf ist die ERSCHEINUNG (Schema, Modus, Akzent, Form)
+// und wird von `theme_reload` im Kern der Bibliothek verteilt. Die Lage
+// von Kaestchen auf dem Schreibtisch ist keine Erscheinung, und sie
+// aendert sich beim Ziehen im Sekundentakt -- sie in dieselbe Datei zu
+// schreiben hiesse, bei jedem Zug das Farbschema neu zu verteilen.
+// Dieselbe Trennung haelt schon /etc/taskbar.conf ein.
+static mut p_conf: [u8; 20] = "/etc/module.conf\0\0\0\0"
+static mut puf: [u8; 512] = [0 as u8; 512]
+
+static mut k_taste: [u8; 8] = "taste\0\0\0"
+
+static mut c_kopf: [u8; 64] =
+    "# /etc/module.conf -- name=an,anker,dx,dy\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+
+fn p_text(b: u64, at2: u64, p: u64) -> u64 {
+    var a: u64 = at2
+    var k: u64 = 0
+    while k < 64 {
+        let c: u64 = __mmio_read8((p + k) as *mut u8) as u64
+        if c == 0 {
+            return a
+        }
+        __mmio_write8((b + a) as *mut u8, c as u8)
+        a = a + 1
+        k = k + 1
+    }
+    return a
+}
+
+fn p_zahl(b: u64, at2: u64, v: u64) -> u64 {
+    var a: u64 = at2
+    if v >= 10000 {
+        a = p_zahl(b, a, v / 10000)
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 1000) % 10) as u8)
+        a = a + 1
+    } else if v >= 1000 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 1000) % 10) as u8)
+        a = a + 1
+    }
+    if v >= 100 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 100) % 10) as u8)
+        a = a + 1
+    }
+    if v >= 10 {
+        __mmio_write8((b + a) as *mut u8, (48 + (v / 10) % 10) as u8)
+        a = a + 1
+    }
+    __mmio_write8((b + a) as *mut u8, (48 + v % 10) as u8)
+    return a + 1
+}
+
+// Schreibt die Datei NEU. Sie ist klein und vollstaendig -- es gibt
+// keinen Schluessel darin, den dieses Programm nicht kennt, also kann
+// auch keiner verlorengehen (anders als in taskbar.conf, wo die
+// Anhefter mit hinausgeschrieben werden muessen).
+fn sichern() -> bool {
+    let b: u64 = (&puf[0 as usize]) as u64
+    var a: u64 = p_text(b, 0, (&c_kopf[0 as usize]) as u64)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    a = a + 1
+    var i: u64 = 0
+    while i < ANZ {
+        a = p_text(b, a, name_von(i))
+        __mmio_write8((b + a) as *mut u8, 61 as u8) // =
+        a = a + 1
+        a = p_zahl(b, a, at(i, F_AN))
+        __mmio_write8((b + a) as *mut u8, 44 as u8) // ,
+        a = a + 1
+        a = p_zahl(b, a, at(i, F_ANKER))
+        __mmio_write8((b + a) as *mut u8, 44 as u8)
+        a = a + 1
+        a = p_zahl(b, a, at(i, F_DX))
+        __mmio_write8((b + a) as *mut u8, 44 as u8)
+        a = a + 1
+        a = p_zahl(b, a, at(i, F_DY))
+        __mmio_write8((b + a) as *mut u8, 10 as u8)
+        a = a + 1
+        i = i + 1
+    }
+    // Die Taste des Bearbeitungsmodus. Sie steht in DERSELBEN Datei
+    // wie die Lage -- wer die Module einstellt, stellt auch ein, womit
+    // er sie anfasst.
+    a = p_text(b, a, (&k_taste[0 as usize]) as u64)
+    __mmio_write8((b + a) as *mut u8, 61 as u8)
+    a = a + 1
+    a = p_zahl(b, a, m_taste)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    a = a + 1
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64,
+        ulib.O_MAKE, 0x1A4)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = ulib.sys(ulib.SYS_WRITE, fd, b, a)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(g) || g < a {
+        return false
+    }
+    n_schreib = n_schreib + 1
+    dreckig = 0
+    return true
+}
+
+fn gleich(a: u64, b: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if __mmio_read8((a + k) as *mut u8) != __mmio_read8((b + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return __mmio_read8((b + n) as *mut u8) == 0 as u8
+}
+
+// Liest die Datei. Gibt false, wenn es sie nicht gibt -- dann bleibt
+// die Vorgabe stehen, und das ist der Normalfall beim ersten Start.
+fn laden() -> bool {
+    // Der Zeitversatz gehoert zum Zustand dieses Moduls und wird
+    // zusammen mit ihm geholt -- eine Stelle, ein Zeitpunkt.
+    versatz_lesen()
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let b: u64 = (&puf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 511)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        // Kommentar und Leerzeile ueberspringen
+        if __mmio_read8((b + i) as *mut u8) == 35 as u8 {
+            while i < n && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            i = i + 1
+        } else if __mmio_read8((b + i) as *mut u8) == 10 as u8
+            || __mmio_read8((b + i) as *mut u8) == 13 as u8 {
+            i = i + 1
+        } else {
+            let ks: u64 = i
+            while i < n && __mmio_read8((b + i) as *mut u8) != 61 as u8
+                && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            if i < n && __mmio_read8((b + i) as *mut u8) == 61 as u8 {
+                let kl: u64 = i - ks
+                i = i + 1
+                // vier Zahlen, durch Komma getrennt
+                var f: [u64; 4] = [0 as u64; 4]
+                var fi: u64 = 0
+                while fi < 4 {
+                    var v: u64 = 0
+                    var d: u64 = 0
+                    while i < n {
+                        let c: u64 = __mmio_read8((b + i) as *mut u8) as u64
+                        if c >= 48 && c <= 57 {
+                            v = v * 10 + (c - 48)
+                            d = d + 1
+                            i = i + 1
+                        } else {
+                            break
+                        }
+                    }
+                    if d > 0 {
+                        f[(fi) as usize] = v
+                    }
+                    if i < n && __mmio_read8((b + i) as *mut u8) == 44 as u8 {
+                        i = i + 1
+                    }
+                    fi = fi + 1
+                }
+                // `taste=` ist kein Modul, sondern das Kuerzel.
+                if gleich(b + ks, (&k_taste[0 as usize]) as u64, kl) {
+                    m_taste = f[(0) as usize]
+                }
+                // welches Modul?
+                var m: u64 = 0
+                while m < ANZ {
+                    if gleich(b + ks, name_von(m), kl) {
+                        var av: u64 = f[(0) as usize]
+                        if av > 1 {
+                            av = 1
+                        }
+                        var an2: u64 = f[(1) as usize]
+                        if an2 > A_RU {
+                            an2 = A_RO
+                        }
+                        setz(m, F_AN, av)
+                        setz(m, F_ANKER, an2)
+                        setz(m, F_DX, f[(2) as usize])
+                        setz(m, F_DY, f[(3) as usize])
+                    }
+                    m = m + 1
+                }
+            }
+            while i < n && __mmio_read8((b + i) as *mut u8) != 10 as u8 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+    }
+    dreckig = 0
+    return true
+}
+
+// Der Schirm. Muss VOR jeder Lagerechnung stehen -- deshalb nimmt ihn
+// der Schreibtisch gleich nach `screen_w`/`screen_h` entgegen.
+fn schirm_setzen(w: u64, h: u64) {
+    s_w = w
+    s_h = h
+}

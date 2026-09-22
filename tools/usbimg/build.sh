@@ -501,6 +501,20 @@ sagen "            Anfangskennwort justin='$PW_JUSTIN' root='$PW_ROOT' -- mit pa
 #   height=40       28 war auf 3440x1440 ein Strich.
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
+# ====================================================== RUNDE MODULE
+# /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE, AUSGELIEFERT.
+#
+# Eine Zeile je Modul: name=an,anker,dx,dy. Der Anker ist die ECKE
+# (0 links oben, 1 rechts oben, 2 links unten, 3 rechts unten), dx/dy
+# zaehlen von ihr aus nach innen -- deshalb liegt ein Modul auf jedem
+# Schirm an derselben Ecke und nicht bei 1700 Bildpunkten, die es auf
+# einem 1280er nicht gibt.
+#
+# `taste=280` ist F9 (0x118): das Kuerzel, das den Bearbeitungsmodus
+# aufmacht. Es steht in der Datei und nicht im Quelltext, damit die
+# Seite "Darstellung" es aendern kann.
+printf '# /etc/module.conf -- name=an,anker,dx,dy\nuhr=1,1,16,16\nspeicher=1,1,16,56\ncpu=1,1,16,96\ntaste=280\n' \
+    > "$OUT/module.conf"
 
 # ============================================ RUNDE ECHTHARDWARE-1
 # DAS ABBILD BEKOMMT DAS AUSSEHEN, DAS DIE DEMO HATTE.
@@ -851,6 +865,7 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/login.conf=$OUT/login.conf"
        "/etc/sperre.conf=$OUT/sperre.conf"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
+       "/etc/module.conf=$OUT/module.conf"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
@@ -1056,6 +1071,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/netview/sys-faking /etc/netview/tile-fake /etc/netview/tile-net \
 /etc/netview/tile-hide /etc/netview/tile-dark \
 /etc/netview/tile-power /etc/netview/tile-tile /etc/taskbar.conf /etc/netlauf.sh \
+/etc/module.conf \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \

@@ -96,6 +96,8 @@ uitrace=no
 autohide=0
 accel=tcg
 append=""
+# RUNDE MODULE: eine fertige /etc/module.conf aufs Abbild legen.
+modulconf=""
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
@@ -116,6 +118,7 @@ for a in "$@"; do
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         append=*) append=${a#*=} ;;
+        modul=*) modulconf=${a#*=} ;;
         hover=*) hover=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
@@ -267,6 +270,17 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# ====================================================== RUNDE MODULE
+# /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE.
+#
+# `modul=` nimmt eine fertige Datei auf die Platte. OHNE das Wort wird
+# KEINE angelegt, und das ist Absicht: der Schreibtisch soll beweisen
+# koennen, dass er ohne Datei seine VORGABE nimmt (drei Kaestchen
+# rechts oben). Genau dieser Fall ist Bild 1 der Abnahme.
+if [ -n "$modulconf" ]; then
+    cp "$modulconf" "$OUT/module.conf"
+    ARGS+=("/etc/module.conf=$OUT/module.conf@0644")
+fi
 if [ "$uitrace" = yes ]; then
     printf 'on\n' > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
