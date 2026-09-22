@@ -1118,6 +1118,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/papierkorb.osp/symbol /etc/papierkorb.conf \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
+/bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \
+/apps/taskmgr.osp/symbol \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
 /apps/installer.osp/symbol \
