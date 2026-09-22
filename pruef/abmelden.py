@@ -187,17 +187,57 @@ try:
     vor_sitzung = lies()
 
     # ------------------------------------------- 3. DAS STARTMENUE AUF
-    def fl():
-        w = re.findall(r"id=11 [^\n]*fl=(\d+)", lies())
-        return w[-1] if w else "?"
+    #
+    # AUF DAS EREIGNIS WARTEN, NICHT AUF EINE FRIST. Diese Stelle hat
+    # die Abnahme LOGIND monatelang auf 35/1 gehalten, und die Erklaerung
+    # "die Maschine ist belastet" war FALSCH. Gemessen am 21.09.2026 auf
+    # einer voellig ruhigen Maschine (0 andere QEMU), zweimal
+    # hintereinander, mit demselben Ergebnis:
+    #
+    #   Der Fensterserver meldet `wlib: win id=11 ... fl=` auf einem
+    #   TAKT VON FUENF SEKUNDEN -- gemessen 17:13, 17:18, 17:23, 17:28.
+    #   Der Laeufer drueckte meta_l und wartete FEST VIER Sekunden.
+    #   Vier Sekunden gegen einen Fuenf-Sekunden-Takt heisst: die
+    #   naechste Meldung steht noch aus, und gelesen wird die davor --
+    #   also der Zustand VOR dem Tastendruck. Das scheitert
+    #   DETERMINISTISCH und nicht gelegentlich.
+    #
+    #   Das Menue GEHT AUF, und zwar jedesmal: `fl=18` steht in beiden
+    #   Laeufen im Mitschnitt (Offset 39321 bzw. 36884), und das
+    #   `launcher: energie auf` danach beweist, dass es benutzbar war.
+    #
+    # ZWEITER FEHLER AN DERSELBEN STELLE: `fl()` nahm `w[-1]`, also den
+    # LETZTEN Wert im GANZEN Mitschnitt. Nach dem Menueschluss steht da
+    # wieder 19 -- die Zusage haette selbst dann rot gemeldet, wenn sie
+    # erst spaeter ausgewertet wuerde. Gezaehlt wird deshalb nur, was
+    # NACH dem Tastendruck auf die Leitung kam.
+    #
+    # fl=18 ist F_KEYS|F_NODECO (16+2), fl=19 dasselbe plus F_HIDDEN(1).
+    TAKT = 5.0          # gemessener Meldetakt des Fensterservers
+    FENSTER = 3 * TAKT  # drei Takte: nie knapp, auch unter Last nicht
 
-    if fl() != "18":
+    def fl_ab(pos):
+        """Der letzte fl-Wert, den der Server NACH `pos` gemeldet hat."""
+        w = re.findall(r"id=11 [^\n]*fl=(\d+)", lies()[pos:])
+        return w[-1] if w else None
+
+    def menue_offen(pos, frist):
+        """Bis `frist` warten, dass NACH `pos` ein fl=18 gemeldet wird."""
+        t = time.time()
+        while time.time() - t < frist:
+            if "18" in re.findall(r"id=11 [^\n]*fl=(\d+)", lies()[pos:]):
+                return True
+            time.sleep(0.5)
+        return False
+
+    pos = len(lies())
+    if fl_ab(max(0, pos - 4000)) != "18":
         m.taste("meta_l")
-        time.sleep(4)
-    if fl() == "18":
+    if menue_offen(pos, FENSTER):
         ok("das Startmenue ist offen (Fenster 11, fl=18)")
     else:
-        bad("das Startmenue ging nicht auf (fl=%s)" % fl())
+        bad("das Startmenue ging nicht auf (fl=%s nach %.0fs, Takt %.0fs)"
+            % (fl_ab(pos), FENSTER, TAKT))
     m.foto(os.path.join(AUS, "k-30-startmenue.png"))
 
     # ------------------------------------- 4. DER ENERGIEKNOPF, GEKLICKT
@@ -323,13 +363,31 @@ try:
     # anderen Quelle kommt.
     a = re.findall(r"abmelden: Anmeldung neu pid=(\d+)", txt)
     st = len(re.findall(r"start /bin/glogin", txt))
+    # DRITTE QUELLE, gemessen am 21.09.2026 (Lauf L7 von sieben): unter
+    # Last verlor die serielle Leitung BEIDE oberen Belege -- `a` war
+    # leer und `st` stand auf 1 statt 2 -- waehrend IM SELBEN LAUF
+    # `glogin: rect id=6` zweimal dastand. Die Zusage meldete also
+    # "der Anmeldeschirm wurde nicht neu gestartet", obwohl die Zusage
+    # zwei Zeilen weiter unten aus einer anderen Quelle das Gegenteil
+    # bewies. Eine Abnahme, die sich im selben Bericht selbst
+    # widerspricht, misst die Leitung und nicht das System.
+    #
+    # `rect id=6` ist der bessere Beleg: er kommt aus `glogin` selbst,
+    # steht sieben Zeilen hintereinander (rect id=0..6) und ist damit
+    # viel schwerer vollstaendig zu verdraengen als eine einzelne Zeile.
+    r6_neu = len(re.findall(r"glogin: rect id=6", txt))
     if a:
         ok("der Anmeldeschirm wurde neu gestartet (pid=%s)" % a[-1])
     elif "abmelden: Anmeldu" in txt and st >= 2:
         ok("der Anmeldeschirm wurde neu gestartet "
            "('abmelden: Anmeldu…' + 'start /bin/glogin' %dx)" % st)
+    elif r6_neu >= 2:
+        ok("der Anmeldeschirm wurde neu gestartet "
+           "('glogin: rect id=6' %dx -- die Startzeile hat die Leitung "
+           "verloren, 'start /bin/glogin' %dx)" % (r6_neu, st))
     else:
-        bad("'abmelden: Anmeldung neu' fehlt ('start /bin/glogin' %dx)" % st)
+        bad("'abmelden: Anmeldung neu' fehlt ('start /bin/glogin' %dx, "
+            "'rect id=6' %dx)" % (st, r6_neu))
     # DIE ZUSAGE, DIE ZAEHLT: er ist WIRKLICH WIEDER DA. `glogin: bereit`
     # muss zweimal stehen -- einmal beim Start, einmal jetzt. Eine
     # einzelne Zeile sagt nur, dass er einmal lief.
@@ -401,9 +459,40 @@ try:
                         if p0[x, y] != p1[x, y]:
                             gl += 1
                 proz = 100.0 * gl / ges
-                if proz <= 2.0:
-                    ok("BILD: es ist WIEDER DER ANMELDESCHIRM -- nur %d von %d "
-                       "Stichproben anders (%.2f %%, das ist die Uhr)"
+                # DIE SCHRANKE MISST SONST DEN MAUSZEIGER. Gemessen am
+                # 21.09.2026 ueber vier Laeufe: auf voellig ruhiger
+                # Maschine sind es 23 von 64000 Stichproben (0,04 %);
+                # laeuft daneben ein Bau, werden daraus 312 und 1375
+                # (0,49 % und 2,15 %) -- und die alte Schranke von
+                # 2,0 % meldete daraufhin "der Schirm ist nicht der
+                # Anmeldeschirm", obwohl er es auf dem Bild
+                # unverkennbar IST.
+                #
+                # Die Unterschiede liegen NICHT bei der Uhr (die steht
+                # bei x=1128), sondern bei x 72..872 / y 176..696 --
+                # also am Anmeldefenster selbst. Zwei Ursachen, beide
+                # ohne Aussage ueber das Abmelden:
+                #   1. DER ZEIGER. Beim ersten Bild steht er ueber dem
+                #      Kennwortfeld, beim letzten dort, wo zuletzt auf
+                #      "Abmelden" geklickt wurde (77,687). Ein Zeiger,
+                #      der woanders steht, ist kein fremder Schirm.
+                #   2. EIN VERSATZ VON EINER STICHPROBENZEILE (~6 px):
+                #      das neu aufgebaute Fenster sitzt unter Last um
+                #      eine Zeile tiefer. Nachgerechnet: der beste
+                #      vertikale Versatz war dy=+1, und er nimmt den
+                #      Unterschied von 1375 auf 1190 zurueck.
+                #
+                # Die Schranke steht deshalb bei 10 % und nicht bei 2 %.
+                # Sie soll "ein ANDERER Schirm" von "derselbe Schirm"
+                # trennen -- und ein anderer Schirm ist es erst, wenn
+                # sich das BILD aendert: der Schreibtisch gegen den
+                # Anmeldeschirm sind 60675 von 64000 Stichproben, also
+                # 94 %. Zwischen 2 % und 94 % ist reichlich Luft; eine
+                # Schranke bei 10 % trennt die beiden Faelle sicher und
+                # misst nicht mehr die Last der Wirtsmaschine.
+                if proz <= 10.0:
+                    ok("BILD: es ist WIEDER DER ANMELDESCHIRM -- %d von %d "
+                       "Stichproben anders (%.2f %%, Zeiger und Uhr)"
                        % (gl, ges, proz))
                 else:
                     bad("BILD: der Schirm ist nicht der Anmeldeschirm "
