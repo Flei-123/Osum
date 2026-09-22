@@ -48,8 +48,19 @@ ERSATZ = [
     # Signaturen JEDER Hilfsfunktion dieser Schicht, nicht nur der w_*
     (r'fn ([a-z_0-9]+)\(v: \*mut VM, ', r'fn \1('),
     (r'fn ([a-z_0-9]+)\(v: \*mut VM\)', r'fn \1()'),
-    # und die Rufe darauf
-    (r'pfad_holen\(v, ', 'pfad_holen('),
+    # und die Rufe darauf.
+    #
+    # NICHT MEHR EIN NAME JE HILFSFUNKTION. Hier stand
+    # `pfad_holen\(v, ` -- ein getippter Name. Die Runde ENGLISCH hat
+    # die Funktion in `path_get` umbenannt, diese Zeile blieb stehen,
+    # und damit verlor die SIGNATUR ihr `v` (die Regel darueber greift
+    # ueber den Namen hinweg), die RUFE aber nicht:
+    #     error: function 'path_get' expects 3 argument(s), found 4
+    # Die Pruefung stand danach auf 0 bestanden / 10 fehlgeschlagen.
+    # Deshalb steht hier jetzt die BAUART und kein Name: jeder Ruf
+    # `name(v, ` dieser Schicht verliert sein erstes Argument, genau
+    # wie jede Signatur `fn name(v: *mut VM, `.
+    (r'(?<![\w.])([a-z_][a-z_0-9]*)\(v, ', r'\1('),
 ]
 
 
@@ -63,6 +74,15 @@ def ziehen(quelle):
     if '(*v)' in txt or '*mut VM' in txt:
         rest = [l for l in txt.split('\n') if '(*v)' in l or '*mut VM' in l]
         raise SystemExit('nicht ersetzte VM-Zugriffe:\n  ' + '\n  '.join(rest))
+    # DER WAECHTER, DER GEFEHLT HAT. Oben wurde nur nach `(*v)` und
+    # `*mut VM` gesehen -- ein uebrig gebliebener RUF `name(v, ...)`
+    # enthaelt beides nicht und kam still durch. Er faellt dann erst
+    # dem Uebersetzer auf, und zwar in einer erzeugten Datei unter
+    # /tmp, wo niemand die Ursache sucht. Also hier.
+    uebrig = sorted(set(re.findall(r'(?<![\w.])([a-z_][a-z_0-9]*)\(v[,)]', txt)))
+    if uebrig:
+        raise SystemExit('Rufe mit VM-Argument nicht ersetzt: '
+                         + ', '.join(uebrig))
     return txt
 
 
