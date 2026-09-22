@@ -154,7 +154,7 @@ export {
     BUS_CLIPSET, BUS_CLIPGET, BUS_CLIPINFO,
     BUS_OFFER, BUS_FILL,
     BUS_DRAGSET, BUS_DRAGGET, BUS_DRAGCLEAR, BUS_DRAGINFO,
-    BUS_NOTIPOST, BUS_NOTIGET, BUS_NOTIINFO, BUS_STAT,
+    BUS_NOTIPOST, BUS_NOTIGET, BUS_NOTIINFO, BUS_STAT, BUS_NOTIPEEK,
     // ---- RUNDE PROTOKOLL ----
     SYS_OSUM_KLOG, SYS_OSUM_KRACH,
     KL_SEQ, KL_FIRST, KL_LOST, KL_FILT, KL_MIN, KL_SER, KL_NENT,
@@ -2053,6 +2053,14 @@ const BUS_NOTIPOST: u64 = 19 // (dringlichkeit, puffer, n) -> 0
 const BUS_NOTIGET: u64 = 20 // (zurueck, puffer, max) -> n
 const BUS_NOTIINFO: u64 = 21 // (was, zurueck) -> Zahl
 const BUS_STAT: u64 = 22 // (welcher) -> Zaehler
+// RUNDE DREI (S-006): denselben Text lesen, OHNE ihn als gelesen zu
+// markieren -- fuer die Einblendung. Eine eigene Nummer und kein
+// Unterfall von BUS_NOTIINFO: wer Oktette HOLT, muss durch den
+// Kernpuffer weiter unten, und BUS_NOTIINFO gibt nur Zahlen zurueck.
+// Der erste Entwurf dieser Runde haengte es als `a1 == 4` an
+// BUS_NOTIINFO und schrieb damit direkt auf einen Nutzerzeiger --
+// gemessen kam dort nichts an, und die Karte ging nie auf.
+const BUS_NOTIPEEK: u64 = 23 // (zurueck, puffer, max) -> n
 
 const SYS_OSUM_WGSET: u64 = 1951 // (feld, zeiger, anzahl) -> 0 oder -E
 
@@ -13694,7 +13702,7 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
     }
     // ---- alles, was Oktette HOLT: Puffer und ein Kopf von sechs Woertern.
     if op == BUS_RECV || op == BUS_CLIPGET || op == BUS_DRAGGET
-        || op == BUS_NOTIGET {
+        || op == BUS_NOTIGET || op == BUS_NOTIPEEK {
         var buf: [u8; 192] = [0 as u8; 192]
         var meta: [u8; 48] = [0 as u8; 48]
         var max: u64 = 0
@@ -13720,6 +13728,11 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
             uout = a2
             max = a3
         }
+        // RUNDE DREI (S-006): dieselben Argumente wie BUS_NOTIGET.
+        if op == BUS_NOTIPEEK {
+            uout = a2
+            max = a3
+        }
         if max > 192 {
             max = 192
         }
@@ -13736,6 +13749,9 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
         }
         if op == BUS_NOTIGET {
             got = bus.noti_get(state, a1, bp, max)
+        }
+        if op == BUS_NOTIPEEK {
+            got = bus.noti_peek(state, a1, bp, max)
         }
         if got > 0x8000000000000000 {
             return got as i64 as u64 // ein Fehler des Busses, unveraendert
@@ -13802,6 +13818,19 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
         }
         if a1 == 2 {
             return bus.noti_len(state, a2)
+        }
+        if a1 == 3 {
+            return bus.noti_prio(state, a2)
+        }
+        // RUNDE DREI (S-006): a1 == 4 liest den TEXT, ohne ihn als
+        // gelesen zu markieren -- fuer die Einblendung. a2 ist der
+        // Abstand nach hinten, a3 der Puffer, a4 seine Groesse.
+        // RUNDE DREI (S-006): a1 == 5 gibt die Zahl ALLER je geposteten
+        // Meldungen. `noti_count` (a1 == 0) ist der Fuellstand des Rings
+        // und bleibt bei 16 stehen -- daran ist "etwas Neues da?" nicht
+        // zu erkennen.
+        if a1 == 5 {
+            return bus.noti_total(state)
         }
         return bus.noti_prio(state, a2)
     }

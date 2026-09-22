@@ -168,8 +168,9 @@ export {
     K_DROP, K_DRAG, drop_an, drop_count, drag_starts,
     // RUNDE DESIGN-3: das Zugbild am Zeiger.
     zug_bilder, zug_laeuft,
-    NK_MAIN, NK_MENU, NK_DLG, NK_TIP,
+    NK_MAIN, NK_MENU, NK_DLG, NK_TIP, NK_TOAST,
     tip_win_open, tip_win_close, tip_win_id, feed_key,
+    toast_win_open, toast_win_close, toast_win_id,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
     KEY_SDEL,
@@ -192,7 +193,7 @@ export {
     clip_put, clip_put_typ, clip_take, clip_hist_take, clip_hist_count,
     clip_hist_typ, clip_hist_owner,
     drag_put, drag_take, drag_an, drag_drop,
-    noti_post, noti_count, noti_new, noti_take,
+    noti_post, noti_count, noti_new, noti_take, noti_peek,
     CT_TEXT, CT_PATH, CT_HTML, CT_IMAGE, CT_FILES
 , win_keys}
 
@@ -256,7 +257,15 @@ const MAXWD: u64 = 224 // Widgets insgesamt
 // gedruckt, weil sie VOR dem Anlegen steht.
 //
 // Genau die Sorte Fehler, die man nur im Bild sieht und nie im Log.
-const MAXWN: u64 = 5 // Hauptfenster, Menue, Dialog, Vorschau, Infoblase
+// RUNDE TOAST (S-006): EIN PLATZ MEHR, UND ZWAR EIN SECHSTER.
+//
+// Die Benachrichtigung ist ein eigenes Fenster und darf der Blase
+// ihren Platz nicht wegnehmen. Genau das waere passiert: die Leiste
+// haelt Hauptfenster und Vorschaurahmen, `tip_win_open` nahm den
+// fuenften -- und eine Einblendung, die danach kommt, haette bei
+// `nwn >= MAXWN` still nichts gemalt. Das ist derselbe stille Fehler,
+// der oben schon einmal beschrieben steht, und er kostet ein Wort.
+const MAXWN: u64 = 6 // Hauptfenster, Menue, Dialog, Vorschau, Blase, Toast
 const MAXCT: u64 = 24 // Kaesten
 
 const K_LABEL: u64 = 1
@@ -453,6 +462,15 @@ const NK_DLG: u64 = 2
 // davon. Die Blase braucht GENAU EIN Programm -- die Taskleiste --,
 // also liegt sie dort (kernel/user/taskbar.fi, Abschnitt INFOBLASE).
 const NK_TIP: u64 = 3
+
+// RUNDE TOAST (S-006): DIE EINBLENDUNG IST EINE EIGENE ART.
+//
+// Sie koennte NK_TIP sein -- randlos, oberste Ebene, dieselbe Farbe.
+// Sie ist es nicht, weil beide gleichzeitig dastehen koennen: wer mit
+// dem Zeiger auf der Uhr steht, waehrend der Akku warnt, saehe sonst
+// eine von beiden verschwinden. Eine eigene Art heisst ein eigener
+// Platz in der Fenstertafel und ein eigener Malweg.
+const NK_TOAST: u64 = 4
 
 // Die Felder eines Widgets. Sechzehn Woerter, ein Feld je Wort -- Firn
 // hat keine Verbunde, und eine Tabelle aus Woertern ist ehrlicher als
@@ -757,7 +775,18 @@ const KEY_CTRL_Z: u64 = 26
 // `feld_passt()` weiter unten rechnet beides nach und meldet sich.
 //   wd = MAXWD * D_FIELDS = 224 * 30 = 6720
 static mut wd: [u64; 6720] = [0 as u64; 6720] // MAXWD * D_FIELDS (224 * 30)
-static mut wn: [u64; 70] = [0 as u64; 70] // MAXWN * N_FIELDS (5 * 14)
+// RUNDE TOAST (S-006): 84 STATT 70, WEIL MAXWN VON 5 AUF 6 GING.
+//
+// Genau die Falle, vor der der Absatz oben warnt, und sie hat in
+// dieser Runde EINMAL zugeschlagen: MAXWN erhoeht, diese Zeile
+// stehengelassen -- und danach schrieb das sechste Fenster
+// (`wn[84..]`) hinter das Feld. Gemessen hat es kein Absturz,
+// sondern tools/logind/run.sh: das Abmelden fiel von 12 auf 7
+// bestandene Zusagen, weil das Energiemenue seine Wahl nicht mehr
+// meldete. Kein Fehler im Menue -- ein Schreibzugriff daneben.
+//   wn = MAXWN * N_FIELDS = 6 * 14 = 84
+const WN_LEN: u64 = 84
+static mut wn: [u64; 84] = [0 as u64; 84] // MAXWN * N_FIELDS (6 * 14)
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
 static mut nwn: u64 = 0
@@ -1033,6 +1062,15 @@ static mut ev: [u8; 16] = [0 as u8; 16]
 const WD_LEN: u64 = 6720
 
 fn feld_passt() -> bool {
+    // RUNDE TOAST (S-006): die Fenstertafel und die Schmutztafel
+    // gehoeren mit hinein. Sie waren der Grund, warum eine
+    // Erhoehung von MAXWN in dieser Runde still danebenschrieb.
+    if MAXWN * N_FIELDS > WN_LEN {
+        return false
+    }
+    if MAXWN * DIRT_MAX * 4 > DR_LEN {
+        return false
+    }
     return MAXWD * D_FIELDS <= WD_LEN
 }
 
@@ -1061,8 +1099,19 @@ fn s(i: u64, f: u64, v: u64) {
     wd[(i * D_FIELDS + f) as usize] = v
 }
 
+// RUNDE TOAST (S-006): DERSELBE RIEGEL WIE IN `g`/`s`.
+//
+// Die Fenstertafel hatte ihn nicht -- sie prueft `w >= MAXWN` und
+// vertraute darauf, dass das Feld dazu passt. Als MAXWN in dieser
+// Runde von 5 auf 6 ging und `wn` bei 70 blieb, war genau das
+// nicht mehr wahr, und der Schreibzugriff ging still daneben.
+// Ein Riegel, der auf die LAENGE sieht statt auf die Konstante,
+// haette es sofort gesagt.
 fn ng(w: u64, f: u64) -> u64 {
     if w >= MAXWN {
+        return 0
+    }
+    if w * N_FIELDS + f >= WN_LEN {
         return 0
     }
     return wn[(w * N_FIELDS + f) as usize]
@@ -1070,6 +1119,9 @@ fn ng(w: u64, f: u64) -> u64 {
 
 fn ns(w: u64, f: u64, v: u64) {
     if w >= MAXWN {
+        return
+    }
+    if w * N_FIELDS + f >= WN_LEN {
         return
     }
     wn[(w * N_FIELDS + f) as usize] = v
@@ -1610,15 +1662,22 @@ fn close(w: u64) {
 const DIRT_MAX: u64 = 4
 
 // RUNDE ECHTHARDWARE-2: 80 statt 64 -- dieselbe Rechnung wie bei `wn`
-// eine Seite weiter oben, und derselbe Grund: MAXWN ist 5.
-// 5 * DIRT_MAX(4) * 4 = 80.
-static mut dr: [u64; 80] = [0 as u64; 80] // MAXWN * DIRT_MAX * 4
+// eine Seite weiter oben, und derselbe Grund: MAXWN war 5.
+// RUNDE TOAST (S-006): MAXWN ist 6, also 6 * DIRT_MAX(4) * 4 = 96.
+const DR_LEN: u64 = 96
+static mut dr: [u64; 96] = [0 as u64; 96] // MAXWN * DIRT_MAX * 4
 
 fn dg(w: u64, k: u64, f: u64) -> u64 {
+    if (w * DIRT_MAX + k) * 4 + f >= DR_LEN {
+        return 0
+    }
     return dr[((w * DIRT_MAX + k) * 4 + f) as usize]
 }
 
 fn ds(w: u64, k: u64, f: u64, v: u64) {
+    if (w * DIRT_MAX + k) * 4 + f >= DR_LEN {
+        return
+    }
     dr[((w * DIRT_MAX + k) * 4 + f) as usize] = v
 }
 
@@ -3491,7 +3550,7 @@ fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
     }
     // Die Blase nimmt die Menuefarbe: sie schwebt ueber allem, wie ein
     // Menue, und muss sich vom Fenster darunter abheben.
-    if ng(w, N_KIND) == NK_TIP {
+    if ng(w, N_KIND) == NK_TIP || ng(w, N_KIND) == NK_TOAST {
         c = wlibc.theme(wlibc.T_MENU)
     }
     wlibc.rect(x, y, bw, bh, c)
@@ -3998,7 +4057,8 @@ fn bg_of(w: u64) -> u64 {
     if ng(w, N_KIND) == NK_DLG {
         return wlibc.theme(wlibc.T_DLG)
     }
-    if ng(w, N_KIND) == NK_MENU || ng(w, N_KIND) == NK_TIP {
+    if ng(w, N_KIND) == NK_MENU || ng(w, N_KIND) == NK_TIP
+        || ng(w, N_KIND) == NK_TOAST {
         return wlibc.theme(wlibc.T_MENU)
     }
     return wlibc.theme(wlibc.T_BG)
@@ -6290,6 +6350,99 @@ fn tip_win_close(i: u64) {
 // Die Kennung beim Fensterserver -- die braucht der Eigentuemer, um
 // seine Blase zu bemalen und auf den Schirm zu schieben.
 fn tip_win_id(i: u64) -> u64 {
+    return ng(i, N_H)
+}
+
+// ====================================================== RUNDE TOAST (S-006)
+//
+// DAS FENSTER DER EINBLENDUNG -- UND NUR DAS FENSTER.
+//
+// Dieselbe Teilung wie bei der Blase, und aus demselben Grund
+// (`firnc1` bricht ab, wenn zuviel in dieser Datei steht; die
+// Begruendung steht bei NK_TIP): hier liegt, was ohne die Fenstertafel
+// nicht ginge -- anlegen, Schmuck abschalten, auf die oberste Ebene
+// heben. Gemalt wird die Einblendung von dem Programm, dem sie gehoert
+// (der Taskleiste), mit denselben `draw_*`-Aufrufen wie jede Flaeche.
+//
+// WARUM L_TIP UND NICHT L_POPUP. Eine Benachrichtigung, die hinter der
+// Taskleiste verschwindet, ist keine; genau das war Justins Befund zur
+// Blase (RUNDE ECHTHARDWARE-3). L_TIP liegt ueber allem, und `wm.hit`
+// gibt dieser Ebene keinen Klick -- die Einblendung nimmt also keinem
+// Fenster den Fokus weg, waehrend sie dasteht.
+//
+// UND SIE BEKOMMT BLUR GESCHENKT. `wm.blur_will` sagt fuer L_TIP ja
+// (wm.fi:7048), also liegt unter dieser Flaeche dieselbe
+// Weichzeichnung wie unter Menue und Blase -- ohne eine Zeile dafuer.
+fn toast_win_open(x: u64, y: u64, w: u64, h: u64) -> u64 {
+    let i: u64 = new_win(x, y, w, h, 0, NK_TOAST)
+    if i >= MAXWN {
+        return MAXWN
+    }
+    // Ohne Titelleiste: eine Benachrichtigung mit Fensterschmuck waere
+    // ein Dialog, und ein Dialog will beantwortet werden.
+    //
+    // ================================ RUNDE DREI: EINE OFFENE KANTE
+    // DIE KARTE WIRD UM `title_h` ZU TIEF UND ENTSPRECHEND KURZ
+    // GEZEIGT, und das ist gemessen und nicht vermutet:
+    //
+    //   bestellt   240 x 38 bei 1028,12
+    //   im Bild    240 x 16 ab Schirmzeile 34   (34 - 12 = 22 = TITLE_H0)
+    //   `push`     gibt 9120 = 240 * 38 zurueck -- die Oktette sind
+    //              also VOLLSTAENDIG im Fensterpuffer angekommen.
+    //
+    // Der Verlust liegt damit NICHT im Programm und nicht in `wig.blit`
+    // (das schreibt ab Zeile `y` in `W_BUF`, ohne Versatz), sondern
+    // zwischen Puffer und Schirm: der Server rechnet fuer dieses
+    // Fenster weiter mit dem Versatz des Schmucks, obwohl `WS_DECO`
+    // unmittelbar nach dem Anlegen auf 0 steht.
+    //
+    // WAS AUSPROBIERT UND GEMESSEN VERWORFEN WURDE, damit es niemand
+    // zweimal macht:
+    //   * das Fenster groesser bestellen (h + title_h + border) --
+    //     unveraendert 16 Zeilen;
+    //   * `win_size` nach dem Abschalten -- wirkungslos, der Puffer
+    //     wird in `wm.create` fest vergeben und waechst nie;
+    //   * `WI_INX`/`WI_INY` erfragen -- beim schmucklosen Fenster sind
+    //     beide 0 (wm.fi:2942), die Zahl taugt hier also nicht.
+    //
+    // DIE BLASE HAT DENSELBEN FEHLER und faellt nur nicht auf, weil sie
+    // eine Zeile hoch ist; ihr Kommentar nennt die Zahl ("gemessen:
+    // tp=30"). Die Einblendung ist die erste Flaeche dieses Systems,
+    // die hoch genug ist, dass man es sieht.
+    //
+    // SIE IST TROTZDEM LESBAR UND MESSBAR: Rahmen, Streifen und Text
+    // stehen im sichtbaren Teil, `pruef/toast.py` misst 952 von 2280
+    // Bildpunkten geaendert. Die Behebung gehoert in den Fensterserver
+    // (ein `compose` nach `set_deco`, oder `set_deco` zieht die
+    // Geometrie nach) und damit in eine eigene Runde -- sie fasst
+    // `paint_win` an, und das ist die Datei, an der diese Runde
+    // ausdruecklich nichts Unnoetiges aendern soll.
+    let _d: u64 = wlibc.win_state(ng(i, N_H), wlibc.WS_DECO, 0)
+    // L_TOAST und nicht L_TIP: die Einblendung liegt ueber der Blase
+    // und bekommt KEINEN Blur. Warum, steht in kernel/ui/wm.fi bei
+    // `L_TOAST` -- kurz: der Blur-Zwischenspeicher hat vier Plaetze,
+    // eine fuenfte durchscheinende Flaeche laesst ihn ueberlaufen, und
+    // der Fensterserver stirbt dabei.
+    let _l: u64 = wlibc.win_state(ng(i, N_H), wlibc.WS_LAYER,
+        wlibc.L_TOAST)
+    dirty_all(i)
+    return i
+}
+
+fn toast_win_close(i: u64) {
+    if i >= MAXWN {
+        return
+    }
+    close(i)
+    // Den Platz wieder freigeben -- wie `tip_win_close`. Eine Leiste,
+    // die jede Akkuwarnung einblendet, darf die Fenstertafel nicht
+    // volllaufen lassen.
+    if i + 1 == nwn {
+        nwn = nwn - 1
+    }
+}
+
+fn toast_win_id(i: u64) -> u64 {
     return ng(i, N_H)
 }
 
@@ -11588,4 +11741,9 @@ fn noti_new() -> u64 {
 
 fn noti_take(back: u64, p: u64, max: u64) -> u64 {
     return wlibc.noti_take(back, p, max)
+}
+
+// RUNDE DREI (S-006): lesen, ohne die Glocke zurueckzustellen.
+fn noti_peek(back: u64, p: u64, max: u64) -> u64 {
+    return wlibc.noti_peek(back, p, max)
 }
