@@ -62,6 +62,7 @@ import libc.io
 import wlibc
 import wlib
 import msg
+import modul
 
 export { u_start }
 
@@ -283,6 +284,187 @@ fn all_paint() {
     }
 }
 
+// ====================================== RUNDE MODULE: DIE KAESTCHEN
+//
+// Justins Auftrag, 22.09.2026: "man soll das alles einstellen koennen
+// also so wie in einem minecraft client die ganzen module hin und
+// herschieben etc".
+//
+// Die Tafel, das Ziehen, das Einrasten und die Datei stehen in
+// `kernel/user/modul.fi`; hier steht nur, WANN gemalt wird -- und das
+// ist der Teil, an dem die Bilder je Sekunde haengen.
+//
+// DER FLECK IST DER GANZE TRICK. `all_paint` malt 800x600 Bildpunkte
+// einzeln (480 000 Aufrufe von `color_at`); das je Modul und Bild zu
+// tun, waere der sichere Weg, eine Uhr teurer zu machen als den
+// ganzen Schreibtisch. `fleck` malt GENAU das Rechteck eines Moduls
+// neu -- bei 120x32 sind das 3 840 Punkte, ein Hundertstel davon --
+// und schiebt auch nur dieses Rechteck hinaus.
+//
+// GEMALT WIRD MIT `color_at`, also mit derselben Rechnung wie das
+// grosse Bild. Ein zweiter Weg waere eine zweite Umsetzung desselben
+// Hintergrunds -- und man saehe nach dem naechsten Hintergrundbild,
+// dass unter den Modulen ein Rechteck in der falschen Farbe steht.
+//
+// DIE STREIFEN. Die Malflaeche des Servers traegt nicht den ganzen
+// Schirm, sondern `wlibc.surf_rows()` Zeilen (kernel/user/desktop.fi,
+// `all_paint` geht deshalb in Streifen). Ein Fleck, der ueber eine
+// Streifengrenze laeuft, muss in BEIDEN Streifen gemalt und zweimal
+// hinausgeschoben werden; genau das tut die aeussere Schleife.
+fn fleck(x: u64, y: u64, w: u64, h: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    let x0: u64 = x
+    var x1: u64 = x + w
+    var y1: u64 = y + h
+    if x1 > sw {
+        x1 = sw
+    }
+    if y1 > sh {
+        y1 = sh
+    }
+    if x0 >= x1 || y >= y1 {
+        return
+    }
+    var yy: u64 = y
+    while yy < y1 {
+        wlibc.set_band(yy)
+        let rows: u64 = wlibc.surf_rows()
+        var bis: u64 = y1
+        if rows > 0 {
+            let bandende: u64 = (yy / rows) * rows + rows
+            if bis > bandende {
+                bis = bandende
+            }
+        }
+        if bis <= yy {
+            return
+        }
+        wlibc.clip_set(x0, yy, x1, bis)
+        var py: u64 = yy
+        while py < bis {
+            var px: u64 = x0
+            while px < x1 {
+                wlib.draw_point(px, py, color_at(px, py))
+                px = px + 1
+            }
+            py = py + 1
+        }
+        let _n: u64 = wlibc.push(w_h, x0, yy, x1 - x0, bis - yy)
+        yy = bis
+    }
+}
+
+// WELCHES MODUL GERADE EINEN RAHMEN TRAEGT (die Hand liegt darauf oder
+// es wird gezogen). 99 = keines.
+static mut modul_zeigt: u64 = 99
+
+// Ein Modul malen: erst den Hintergrund an seiner Stelle, dann das
+// Kaestchen darueber, und beides streifenweise -- aus demselben
+// Grund wie in `fleck`.
+fn modul_malen(i: u64) {
+    if !modul.an(i) {
+        return
+    }
+    let x: u64 = modul.x_von(i)
+    let y: u64 = modul.y_von(i)
+    let w: u64 = modul.breite(i)
+    let h: u64 = modul.hoehe(i)
+    fleck(x, y, w, h)
+    var yy: u64 = y
+    var y1: u64 = y + h
+    if y1 > sh {
+        y1 = sh
+    }
+    while yy < y1 {
+        wlibc.set_band(yy)
+        let rows: u64 = wlibc.surf_rows()
+        var bis: u64 = y1
+        if rows > 0 {
+            let bandende: u64 = (yy / rows) * rows + rows
+            if bis > bandende {
+                bis = bandende
+            }
+        }
+        if bis <= yy {
+            return
+        }
+        wlibc.clip_set(x, yy, x + w, bis)
+        modul.malen(i)
+        if modul_zeigt == i {
+            modul.rahmen_malen(i)
+        }
+        let _n: u64 = wlibc.push(w_h, x, yy, w, bis - yy)
+        yy = bis
+    }
+}
+
+fn module_malen() {
+    var i: u64 = 0
+    while i < modul.ANZ {
+        modul_malen(i)
+        i = i + 1
+    }
+}
+
+// ============================================ DIE BELEGZEILEN
+//
+// Ein Testlaeufer soll die Lage eines Moduls NACHLESEN koennen und
+// nicht im Bild raten muessen -- dieselbe Regel, nach der der
+// Schreibtisch seine fuenf Stuetzstellen meldet und die Taskleiste
+// ihren Startknopf. Gemeldet wird, was die Tafel WIRKLICH haelt:
+// Anker und Abstand, und daneben die daraus gerechneten Bildpunkte.
+static mut m_s1: [u8; 16] = "desktop: modul \0"
+static mut m_s2: [u8; 7] = " name=\0"
+static mut m_s3: [u8; 5] = " an=\0"
+static mut m_s4: [u8; 8] = " anker=\0"
+static mut m_s5: [u8; 5] = " dx=\0"
+static mut m_s6: [u8; 5] = " dy=\0"
+static mut m_s7: [u8; 4] = " x=\0"
+static mut m_s8: [u8; 4] = " y=\0"
+static mut m_s9: [u8; 4] = " w=\0"
+static mut m_s10: [u8; 4] = " h=\0"
+static mut m_s11: [u8; 7] = " text=\0"
+
+fn modul_say(i: u64) {
+    say((&m_s1[0 as usize]) as u64)
+    sayn(i)
+    say((&m_s2[0 as usize]) as u64)
+    say(modul.name_von(i))
+    say((&m_s3[0 as usize]) as u64)
+    var a: u64 = 0
+    if modul.an(i) {
+        a = 1
+    }
+    sayn(a)
+    say((&m_s4[0 as usize]) as u64)
+    sayn(modul.anker_von(i))
+    say((&m_s5[0 as usize]) as u64)
+    sayn(modul.dx_von(i))
+    say((&m_s6[0 as usize]) as u64)
+    sayn(modul.dy_von(i))
+    say((&m_s7[0 as usize]) as u64)
+    sayn(modul.x_von(i))
+    say((&m_s8[0 as usize]) as u64)
+    sayn(modul.y_von(i))
+    say((&m_s9[0 as usize]) as u64)
+    sayn(modul.breite(i))
+    say((&m_s10[0 as usize]) as u64)
+    sayn(modul.hoehe(i))
+    say((&m_s11[0 as usize]) as u64)
+    say(modul.text_von(i))
+    nl()
+}
+
+fn module_say() {
+    var i: u64 = 0
+    while i < modul.ANZ {
+        modul_say(i)
+        i = i + 1
+    }
+}
+
 // ====================================== RUNDE WMPLUGIN: DER AUTOSTART
 //
 // WAS HIER GELOEST WIRD. Fenstererweiterungen sind in diesem System
@@ -440,6 +622,8 @@ fn u_start(args: u64) -> u64 {
     var s_wall: [u8; 15] = "/etc/wallpaper\0"
     var s_th: [u8; 11] = "/etc/theme\0"
     var s_ne: [u8; 21] = "desktop: neu schema=\0"
+    var s_mod: [u8; 24] = "desktop: module datei=\0\0"
+    var s_bm: [u8; 26] = "desktop: module bearbeit=\0"
 
     let _mk: u64 = msg.init()
     var ohne_bild: bool = false
@@ -534,6 +718,35 @@ fn u_start(args: u64) -> u64 {
     }
     autostart()
 
+    // ==================================================== RUNDE MODULE
+    // DIE REIHENFOLGE IST HIER WICHTIG UND NICHT BELIEBIG.
+    //
+    //   1. `schirm_setzen` -- ohne Breite und Hoehe laesst sich kein
+    //      Anker in Bildpunkte rechnen (x_von/y_von teilen durch sie).
+    //   2. `vorgabe` -- die Lage, die gilt, wenn es keine Datei gibt.
+    //   3. `laden` -- was der Nutzer beim letzten Mal gezogen hat.
+    //      Fehlt die Datei, bleibt die Vorgabe stehen; das ist der
+    //      erste Start und keine Stoerung.
+    //   4. `messen` NACH dem Laden -- die Groesse kommt aus der
+    //      Schrift und nicht aus der Datei. Eine gespeicherte Breite
+    //      waere nach einem Schriftwechsel falsch, und der Text stuende
+    //      ueber den Rand.
+    modul.schirm_setzen(sw, sh)
+    modul.vorgabe()
+    let m_datei: bool = modul.laden()
+    modul.messen()
+    let _mw: bool = modul.werte_holen()
+    modul.texte_bauen()
+    module_malen()
+    say((&s_mod[0 as usize]) as u64)
+    var m_d: u64 = 0
+    if m_datei {
+        m_d = 1
+    }
+    sayn(m_d)
+    nl()
+    module_say()
+
     // FUENF STUETZSTELLEN, und der Laeufer haelt sie gegen das Bild.
     // Sie stehen bewusst NICHT alle in einer Zeile: eine Stuetzstelle,
     // die zufaellig stimmt, faellt neben vier anderen auf.
@@ -566,8 +779,126 @@ fn u_start(args: u64) -> u64 {
                 as *mut u64)
             let dd: u64 = __mmio_read64((((&ev[0 as usize]) as u64) + 8)
                 as *mut u64)
+            let e_x: u64 = (dd >> 32) & 0xFFFF
+            let e_y: u64 = (dd >> 16) & 0xFFFF
             if typ == wlibc.EV_CLOSE {
                 lebt = false
+            } else if typ == wlibc.EV_DOWN {
+                // ======================================== RUNDE MODULE
+                //
+                // DER RECHTE KNOPF AUF EINEM MODUL SCHALTET DEN
+                // BEARBEITUNGSMODUS -- UND ZWAR AUS EINEM GEMESSENEN
+                // GRUND UND NICHT AUS GESCHMACK.
+                //
+                // Geplant war F9. F9 kommt hier NIE an: der
+                // Schreibtisch liegt auf `L_DESK`, und der
+                // Fensterserver gibt einem Fenster dieser Ebene den
+                // Fokus mit Absicht nicht (kernel/ui/wm.fi, `on_down`:
+                // "ein Schreibtisch, der den Fokus an sich zieht, macht
+                // jeden Tastendruck danach wirkungslos"). GEMESSEN:
+                // `sendkey f9` ueber den QEMU-Monitor, 54 Befehle
+                // angekommen, und in der seriellen Ausgabe steht keine
+                // einzige `module bearbeit=`-Zeile.
+                //
+                // Die sauberen Wege dahin waeren zwei, und beide
+                // gehoeren NICHT in diese Runde: `F_KEYS` setzen hiesse
+                // den Fokus dauerhaft zu nehmen (genau das, was der
+                // Server verhindert), und ein globales Kuerzel gibt es
+                // schon -- `WM_PLUG_KEY` im Plugin-Register --, aber
+                // dafuer muesste sich der Schreibtisch als Erweiterung
+                // anmelden und das Recht R_ACT_KEY bekommen. Das ist
+                // eine eigene Runde wert und nicht ein Seitenhieb in
+                // dieser.
+                //
+                // Die Maus reicht vollkommen: ein Minecraft-Client
+                // macht sein Modulfenster auch mit einem Klick auf.
+                // Die TASTE bleibt in /etc/module.conf stehen (`taste=`)
+                // -- sie ist schon gelesen, geschrieben und einstellbar,
+                // sie wartet nur auf den Weg, auf dem sie ankommt.
+                let knopf: u64 = dd & 0xFFFF
+                if (knopf & 2) != 0 {
+                    let tr0: u64 = modul.treffer(e_x, e_y)
+                    if tr0 < modul.ANZ {
+                        let war0: bool = modul.bearbeiten()
+                        modul.bearbeiten_setzen(!war0)
+                        if war0 {
+                            modul_zeigt = 99
+                            if modul.schmutzig() {
+                                let _s3: bool = modul.sichern()
+                            }
+                        } else {
+                            modul_zeigt = tr0
+                        }
+                        say((&s_bm[0 as usize]) as u64)
+                        var b0: u64 = 0
+                        if modul.bearbeiten() {
+                            b0 = 1
+                        }
+                        sayn(b0)
+                        nl()
+                        module_malen()
+                    }
+                } else if modul.bearbeiten() {
+                    // ANFASSEN. Nur im Bearbeitungsmodus -- sonst
+                    // faengt der Schreibtisch Klicks ab, die dem
+                    // Nutzer gehoeren.
+                    let tr: u64 = modul.treffer(e_x, e_y)
+                    if tr < modul.ANZ {
+                        if modul.ziehen_start(tr, e_x, e_y) {
+                            modul_zeigt = tr
+                            modul_malen(tr)
+                        }
+                    }
+                }
+            } else if typ == wlibc.EV_MOVE {
+                if modul.bearbeiten() {
+                    if modul.zieht() {
+                        // DIE ALTE STELLE MERKEN, BEVOR SIE SICH
+                        // AENDERT. Ohne das bleibt beim Ziehen eine
+                        // Spur des Kaestchens stehen -- der Fleck
+                        // wuerde an der NEUEN Stelle gewischt und die
+                        // alte nie.
+                        let gz: u64 = modul.gezogen()
+                        let ox: u64 = modul.x_von(gz)
+                        let oy: u64 = modul.y_von(gz)
+                        let ow: u64 = modul.breite(gz)
+                        let oh: u64 = modul.hoehe(gz)
+                        if modul.ziehen_zu(e_x, e_y) {
+                            fleck(ox, oy, ow, oh)
+                            modul_malen(gz)
+                        }
+                    } else {
+                        // Die Hand liegt auf einem Modul: Rahmen an,
+                        // und den alten Rahmen weg.
+                        let tr2: u64 = modul.treffer(e_x, e_y)
+                        var nz: u64 = 99
+                        if tr2 < modul.ANZ {
+                            nz = tr2
+                        }
+                        if nz != modul_zeigt {
+                            let vorher: u64 = modul_zeigt
+                            modul_zeigt = nz
+                            if vorher < modul.ANZ {
+                                modul_malen(vorher)
+                            }
+                            if nz < modul.ANZ {
+                                modul_malen(nz)
+                            }
+                        }
+                    }
+                }
+            } else if typ == wlibc.EV_UP {
+                if modul.zieht() {
+                    let fertig: u64 = modul.ziehen_ende()
+                    if fertig < modul.ANZ {
+                        modul_malen(fertig)
+                        modul_say(fertig)
+                    }
+                    // SOFORT SICHERN. Ein Nutzer, der ein Kaestchen
+                    // hinzieht und den Rechner ausschaltet, hat es
+                    // verschoben -- nicht "vielleicht".
+                    let _sv: bool = modul.sichern()
+                }
             } else if typ == wlibc.EV_KEY {
                 // ========================== RUNDE ECHTHARDWARE-3
                 // AUCH HIER FIELEN TASTEN AUF DEN BODEN.
@@ -579,11 +910,54 @@ fn u_start(args: u64) -> u64 {
                 // selbst (wm.fi: nur L_NORMAL oder F_KEYS), aber
                 // `wm.on_key` schickt bei `nofocus` an JEDES Fenster
                 // -- und dann war die Taste hier zu Ende.
-                wlib.feed_key((dd >> 32) & 0xFFFF)
+                let taste: u64 = (dd >> 32) & 0xFFFF
+                // ======================================== RUNDE MODULE
+                // F9 SCHALTET DEN BEARBEITUNGSMODUS.
+                //
+                // Die Taste steht in /etc/module.conf als `taste=`, ist
+                // also aenderbar (Justins Wunsch: "man sollte die
+                // keybinds auch in den settings aendern koennen").
+                // Vorgabe ist F9.
+                if taste == modul.taste() && taste != 0 {
+                    let war: bool = modul.bearbeiten()
+                    modul.bearbeiten_setzen(!war)
+                    if war {
+                        modul_zeigt = 99
+                        // Beim Verlassen sichern, falls noch etwas
+                        // offen war.
+                        if modul.schmutzig() {
+                            let _s2: bool = modul.sichern()
+                        }
+                    }
+                    say((&s_bm[0 as usize]) as u64)
+                    var bb: u64 = 0
+                    if modul.bearbeiten() {
+                        bb = 1
+                    }
+                    sayn(bb)
+                    nl()
+                    module_malen()
+                } else {
+                    wlib.feed_key(taste)
+                }
             }
             n = n + 1
         }
         runde = runde + 1
+        // ==================================================== RUNDE MODULE
+        // EINMAL JE SEKUNDE, UND NUR WENN SICH EINE ZAHL GEAENDERT HAT.
+        //
+        // Die Schleife dreht alle 25 ms; 40 Runden sind eine Sekunde.
+        // `werte_holen` gibt nur dann true, wenn sich Minute, Speicher
+        // oder Last WIRKLICH bewegt haben -- ein Modul, das sich jede
+        // Sekunde neu malt, um dieselbe Minute zu zeigen, kostet
+        // Bilder je Sekunde fuer nichts.
+        if (runde % 40) == 0 && !modul.zieht() {
+            if modul.werte_holen() {
+                modul.texte_bauen()
+                module_malen()
+            }
+        }
         if (runde % 10) == 0 {
             if wlibc.theme_poll() {
                 sum = wlibc.theme_sum()
@@ -591,6 +965,10 @@ fn u_start(args: u64) -> u64 {
                 c_oben = wlibc.theme(wlibc.C_DESKTOP_TOP)
                 c_unten = wlibc.theme(wlibc.C_DESKTOP_BOTTOM)
                 all_paint()
+                // Das Schema hat gewechselt: die Module tragen seine
+                // Farben, und `all_paint` hat sie gerade uebermalt.
+                modul.messen()
+                module_malen()
                 say((&s_ne[0 as usize]) as u64)
                 sayn(schema)
                 nl()
