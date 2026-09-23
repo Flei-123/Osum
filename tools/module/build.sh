@@ -75,12 +75,27 @@ cp -f "$QUELLE" "$TMP/k/" || exit 1
 #   errno.fi    gfx-aus.fi braucht es
 #   arch/       `machine.fi` holt `kdata`, `arch.fi` waehlt den Bogen
 #   modidx.fi   die Platznummern der Treibertafel
-for f in ps2m.fi kstate.fi serial.fi errno.fi modidx.fi; do
-    cp -f "kernel/$f" "$TMP/k/$f" || exit 1
+# RUNDE ROADMAP-3: O-STRUKTUR hat den Kern in Ordner sortiert und die
+# Importe auf `lib.kstate`, `gfx.gfx`, `arch.arch` umgestellt. Die flache
+# Kopie von frueher ("kernel/ps2m.fi") fand deshalb gar nichts mehr --
+# "cp: cannot stat 'kernel/ps2m.fi'", jeder Modulbau rot. Jetzt: jede Datei
+# per NAMEN gesucht und an den Platz gelegt, den ihr Import verlangt. Das
+# Modul selbst importiert weiter flach (`import ps2m`, `import modidx`).
+such() {
+    local t; t=$(find kernel -name "$1" -type f -not -path '*/user/*' | head -1)
+    [[ -n $t ]] || { echo "module/build.sh: $1 nicht im Kern" >&2; return 1; }
+    echo "$t"
+}
+mkdir -p "$TMP/k/lib" "$TMP/k/gfx" "$TMP/k/arch"
+for f in ps2m.fi serial.fi modidx.fi; do
+    cp -f "$(such $f)" "$TMP/k/$f" || exit 1
 done
-cp -f kernel/arch/arch.fi kernel/arch/machine.fi "$TMP/k/arch/" || exit 1
+for f in kstate.fi errno.fi; do
+    cp -f "$(such $f)" "$TMP/k/lib/$f" || exit 1
+done
+cp -f "$(such arch.fi)" "$(such machine.fi)" "$TMP/k/arch/" || exit 1
 # Und die Naht als Leerfassung -- siehe oben.
-cp -f kernel/gfx-aus.fi "$TMP/k/gfx.fi" || exit 1
+cp -f "$(such gfx-aus.fi)" "$TMP/k/gfx/gfx.fi" || exit 1
 
 export FIRNLIB="$ROOT/lib"
 BASENAME=$(basename "$QUELLE")

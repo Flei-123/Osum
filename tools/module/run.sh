@@ -191,7 +191,7 @@ for line in nm.splitlines():
 paar = {'k_puts': 'serial__puts', 'k_dec': 'serial__dec', 'k_hex': 'serial__hex',
         'k_nl': 'serial__nl', 'k_text': 'serial__text', 'k_get': 'kstate__get',
         'k_set': 'kstate__set', 'k_get8': 'kstate__get8', 'k_bind': 'modtab__bind',
-        'k_abi': 'ksym__abi_wert', 'k_putc': 'ksym__putc_u64',
+        'k_abi': 'ksym__abi_value', 'k_putc': 'ksym__putc_u64',
         'k_set8': 'ksym__set8_u64'}
 gut = 0
 for k, v in paar.items():
@@ -343,7 +343,10 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
     if python3 "$OPK" installieren --wurzel "$W" \
             "$TMPD/pak/ps2maus-1.0.0.opk" > "$TMPD/inst.txt" 2>&1; then
         ok "opk installiert das Paket in einen Wurzelbaum"
-        if cmp -s "$W/apps/ps2maus.prog/lib/ps2maus.omod" "$TMPD/pak/ps2maus.omod"; then
+        # opk legt Pakete unter /apps/<name>.osp ab; `.prog` war der Name
+        # der Runde INSTALL. Gemessen wird, was wirklich da liegt.
+        INST=$(ls "$W"/apps/ps2maus.*/lib/ps2maus.omod 2>/dev/null | head -1)
+        if [ -n "$INST" ] && cmp -s "$INST" "$TMPD/pak/ps2maus.omod"; then
             ok "die installierte Datei ist OKTETT FUER OKTETT das gebaute .omod"
         else
             bad "die installierte Datei weicht ab"

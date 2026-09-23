@@ -131,6 +131,38 @@ def text_bereich(elf: bytes):
     sys.exit("mkomod: kein .text in der Objektdatei")
 
 
+def funktion_in_text(elf: bytes, endung: str):
+    """(Wert, Groesse) der Funktion, deren Name auf `endung` endet, oder None."""
+    shoff = struct.unpack_from("<Q", elf, 0x28)[0]
+    shent = struct.unpack_from("<H", elf, 0x3A)[0]
+    shnum = struct.unpack_from("<H", elf, 0x3C)[0]
+    shstrndx = struct.unpack_from("<H", elf, 0x3E)[0]
+    stroff_sh = struct.unpack_from("<Q", elf, shoff + shstrndx * shent + 24)[0]
+    def sname(i):
+        o = struct.unpack_from("<I", elf, shoff + i * shent)[0]
+        return elf[stroff_sh + o:elf.index(b"\0", stroff_sh + o)].decode()
+    text_i = next((i for i in range(shnum) if sname(i) == ".text"), None)
+    for i in range(shnum):
+        sh = shoff + i * shent
+        if struct.unpack_from("<I", elf, sh + 4)[0] != 2:      # SHT_SYMTAB
+            continue
+        so = struct.unpack_from("<Q", elf, sh + 24)[0]
+        sz = struct.unpack_from("<Q", elf, sh + 32)[0]
+        link = struct.unpack_from("<I", elf, sh + 40)[0]
+        stro = struct.unpack_from("<Q", elf, shoff + link * shent + 24)[0]
+        for e in range(so, so + sz, 24):
+            nm, info, _o, shndx, wert, groesse = struct.unpack_from(
+                "<IBBHQQ", elf, e)
+            # firnc schreibt Funktionen als NOTYPE mit Groesse 0 (readelf:
+            # "NOTYPE GLOBAL ... modul_init") -- beides zaehlt.
+            if (info & 0xF) not in (0, 2) or shndx != text_i:
+                continue
+            name = elf[stro + nm:elf.index(b"\0", stro + nm)].decode()
+            if name.endswith(endung):
+                return wert, groesse
+    return None
+
+
 def bauen(argv):
     ein = argv[0]
     aus = argv[1]
@@ -177,6 +209,18 @@ def bauen(argv):
         # vorne liegt) noch anspringbar ist und der Absturz WAEHREND des
         # Laufs kommt und nicht schon beim Sprung.
         anfang = off + laenge // 2
+        # RUNDE ROADMAP-3: seit das Modul ueber den geordneten Kernbaum
+        # gebaut wird (O-STRUKTUR), liegen in `.text` auch serial.fi und die
+        # Leerfassung von gfx -- die Mitte traf toten Code, rc=21, die
+        # Gegenprobe mass nichts. Jetzt in den Treiber selbst (`ps2m.init`
+        # -> `init_inner`), den der Kern ERST NACH dem Laden ruft
+        # ("modul: laden=ok" steht dann schon da), hinter dem Vorspann.
+        # `modul_init` waere zu frueh: es laeuft INNERHALB des Ladens.
+        ziel = (funktion_in_text(bytes(nutz), "ps2m__init_inner")
+                or funktion_in_text(bytes(nutz), "ps2m__init"))
+        if ziel is not None:
+            fwert, fgroesse = ziel
+            anfang = off + fwert + (min(16, max(fgroesse // 2, 1)) if fgroesse else 16)
         for k in range(text_dreh):
             nutz[anfang + k] = 0xCC
 
