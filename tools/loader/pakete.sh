@@ -31,6 +31,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 OUT=${1:-/tmp/laden}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 OPK=${OPK:-/root/orientos-install/pkg/opk.py}
 TAB=tools/loader/apps.tab
 

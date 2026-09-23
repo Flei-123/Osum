@@ -10,6 +10,7 @@ cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/k15}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 
 PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"

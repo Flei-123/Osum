@@ -49,6 +49,7 @@ cd "$(dirname "$0")/../.."
 
 BAU=${1:-/tmp/dual-img}
 OUT=${2:-/tmp/dual-abnahme}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 
 ok=0; bad=0

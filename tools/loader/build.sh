@@ -19,6 +19,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/laden}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 JOBS=${JOBS:-$(nproc)}
 mkdir -p "$OUT/bin"
 

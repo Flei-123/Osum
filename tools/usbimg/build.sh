@@ -80,6 +80,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
 OUT=${1:-/tmp/usbimg}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 STUFE=${STUFE:-0}
 CC=${FIRNC:-vendor/firn/bin/firnc}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}

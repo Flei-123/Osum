@@ -45,6 +45,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-/tmp/laden}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 export OUT
 NAME=${STORE_NAME:-store.fleitec.com}
 BASIS=${STORE_URL:-https://$NAME/osum/aktuell}

@@ -45,6 +45,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 OUT=${1:-/tmp/modulpaket}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 shift || true
 FASSUNG=1.0.0
 while [[ $# -gt 0 ]]; do

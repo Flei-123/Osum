@@ -6,6 +6,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ARGS=${1:-zeig}
 OUT=${2:-/tmp/dual-probe}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 BAU=${BAU:-/tmp/dual-img}
 rm -rf "$OUT"; mkdir -p "$OUT"
 

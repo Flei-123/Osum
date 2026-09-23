@@ -12,6 +12,7 @@ export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 P=${1:?programm}
 OUT=${2:-/tmp/betrieb-wirt}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 as --64 -o "$OUT/crt-wirt.o" tools/operation/crt-wirt.s || exit 1
 "$CC" "kernel/user/$P.fi" -o "$OUT/$P.o" || exit 1

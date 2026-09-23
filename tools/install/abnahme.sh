@@ -63,6 +63,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 
 OUT=${1:-/tmp/abnahme}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 SHOTS="$OUT/bilder"
 mkdir -p "$SHOTS"

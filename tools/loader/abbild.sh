@@ -43,6 +43,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-/tmp/laden}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 BLOCKS=${LADEN_BLOCKS:-262144}          # 512-Oktett-Bloecke -> 128 MiB
 BOESE=${BOESE:-/root/ota-avx-nach/boese}
 QUELLE=${LADEN_QUELLE:-https://store.fleitec.com/osum/aktuell}

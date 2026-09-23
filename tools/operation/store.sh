@@ -55,6 +55,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-/tmp/m5-store}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 export OUT
 export OSUM_CPU=${OSUM_CPU:-max}

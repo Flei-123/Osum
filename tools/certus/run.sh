@@ -67,6 +67,7 @@ ROOT=$(pwd)
 SCHNELL=0
 if [ "${1:-}" = "--schnell" ]; then SCHNELL=1; shift; fi
 OUT=${1:-/tmp/certus}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 export OUT
 mkdir -p "$OUT"
 SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
