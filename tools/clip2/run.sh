@@ -246,31 +246,31 @@ fi
 echo "== 7. die Gegenprobe: ohne drop_an meldet wlib nichts =="
 GEG=$OUT/gegen
 mkdir -p "$GEG"
-cp kernel/user/explorer.fi "$GEG/explorer.fi.orig"
-# DIE WIEDERHERSTELLUNG HAENGT NICHT AM GUTEN ENDE.
+# IN EINER KOPIE DES BAUMS (gleiche Lehre wie A-028 bei tools/sync).
 #
-# Gelernt am 18.09.2026, zweimal: wird der Laeufer waehrend der
-# Gegenprobe abgebrochen (Strg+C, Zeitlimit, ein `pkill` von aussen),
-# bleibt `wlib.drop_an(false)` im Quelltext stehen -- der Zweig traegt
-# dann die ABGESCHALTETE Fassung, und der naechste Lauf misst die
-# Gegenprobe statt der Sache. Ein `trap` stellt die Datei auch dann
-# zurueck.
-wiederher() {
-    if [ -s "$GEG/explorer.fi.orig" ]; then
-        cp "$GEG/explorer.fi.orig" kernel/user/explorer.fi
-    fi
-}
-trap wiederher EXIT INT TERM
-if ! grep -qE '^\s*wlib\.drop_an\(true\)' kernel/user/explorer.fi; then
+# Bis hierher wurde kernel/user/explorer.fi IM BAUM auf
+# `drop_an(false)` gestellt und per trap zurueckgelegt. Das hielt beim
+# Abbruch -- aber nicht fuer PARALLELE Laeufe: jeder andere Laeufer, der
+# waehrenddessen (mehrere Minuten, zwei QEMU-Laeufe) Programme baute,
+# baute den abgeschalteten Dateimanager mit. Gemessen am 24.09.: waehrend
+# clip2 lief, zeigte `git status` den Baum veraendert. Jetzt wird eine
+# Kopie verbogen und von DORT gebaut; der Baum bleibt, wie er ist.
+GBAUM="$GEG/baum"
+EXPL_SHA0=$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)
+rm -rf "$GBAUM"; mkdir -p "$GBAUM"
+tar -C "$ROOT" --exclude=./.git --exclude=./docs --exclude=./pruef \
+    --exclude=./.gauntlet-shots --exclude=./.clip2-shots -cf - . \
+    | tar -C "$GBAUM" -xf -
+if ! grep -qE '^\s*wlib\.drop_an\(true\)' "$GBAUM/kernel/user/explorer.fi"; then
     bad "GEGENPROBE GREIFT NICHT: 'wlib.drop_an(true)' steht gar nicht da"
 else
     ok "Gegenprobe greift: die Zeile 'wlib.drop_an(true)' ist da"
     sed -i 's/^\(\s*\)wlib\.drop_an(true)/\1wlib.drop_an(false)/' \
-        kernel/user/explorer.fi
-    if grep -qE '^\s*wlib\.drop_an\(false\)' kernel/user/explorer.fi; then
+        "$GBAUM/kernel/user/explorer.fi"
+    if grep -qE '^\s*wlib\.drop_an\(false\)' "$GBAUM/kernel/user/explorer.fi"; then
         ok "Gegenprobe: die Anmeldung ist auf false gesetzt"
         export DESIGNBUILD=/tmp/osum-clip2-gegen
-        bash tools/design/capture.sh "$GEG/bau" nurbau=ja res="$RES" \
+        bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \
             > "$GEG/bau.log" 2>&1
         if [ $? -ne 0 ]; then
             bad "GEGENPROBE MISST NICHTS: der Bau ohne drop_an lief nicht durch"
@@ -278,7 +278,7 @@ else
         else
             ok "Gegenprobe: der Bau ohne drop_an laeuft durch"
             cp "$OUT/dreh.txt" "$GEG/dreh.txt"
-            bash tools/design/capture.sh "$GEG/lauf" res="$RES" \
+            bash "$GBAUM/tools/design/capture.sh" "$GEG/lauf" res="$RES" \
                 extra='nostart wigapp=/bin/explorer' uitrace=yes \
                 drehbuch="$GEG/dreh.txt" > "$GEG/lauf.log" 2>&1
             GS="$GEG/lauf/serial.txt"
@@ -309,11 +309,11 @@ else
     else
         bad "GEGENPROBE GREIFT NICHT: der sed hat nichts geaendert"
     fi
-    cp "$GEG/explorer.fi.orig" kernel/user/explorer.fi
-    grep -qE '^\s*wlib\.drop_an\(true\)' kernel/user/explorer.fi \
-        && ok "der Quelltext ist wiederhergestellt" \
-        || bad "ACHTUNG: der Quelltext ist NICHT wiederhergestellt"
 fi
+rm -rf "$GBAUM"
+[ "$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)" = "$EXPL_SHA0" ] \
+    && ok "kernel/user/explorer.fi im Baum ist unangetastet" \
+    || bad "ACHTUNG: kernel/user/explorer.fi im Baum wurde veraendert"
 
 # ============================================================ 8. Bilder
 echo "== 8. die Bilder =="
