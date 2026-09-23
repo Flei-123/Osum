@@ -183,21 +183,27 @@ hat "$K" "papierkorb: nummer 1  /w/wichtig.txt" "die Liste kennt den Originalpfa
 hat "$K" "DIFF-ZURUECK 0" "zurueckgeholt und byte-gleich"
 hat "$K" "papierkorb: leer" "nach dem Leeren ist er leer"
 printf 'eine Notiz\n' > "$OUT/n1.txt"
-bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w" \
-    mon="sendkey delete" progs="explorer papierkorb theme sh echo ls cat" \
+# RUNDE ROADMAP-3: `debug` schaltet den Mitschnitt des Explorers an (ohne
+# /etc/uitrace schweigt er, dbg_setup), und `/w` ist jetzt wirklich der
+# Startordner (vorher fing er immer in /data an).
+bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
+    mon="sendkey delete" mon="sendkey ret" \
+    progs="explorer papierkorb theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex1.log" 2>&1
-hat "$OUT/ex1/serial.txt" "explorer: tat 3 rc=0" "Entf im Dateimanager: in den Korb"
+# RUNDE ROADMAP-3: Loeschen fragt seit EXPLORER-2 IMMER nach ("Wirklich
+# löschen?") -- also Entf UND Eingabe, wie in ex2 unten.
+hat "$OUT/ex1/serial.txt" "explorer: tat 3 n=1 rc=0" "Entf im Dateimanager: in den Korb"
 if python3 tools/osum/mkfs.py list "$OUT/ex1/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb/1.info'; then
     ok "und im Korb liegt Eintrag 1 mit seiner Infodatei"
 else
     bad "im Korb liegt nichts"
 fi
-bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w" \
+bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
     mon="sendkey shift-delete" mon="sendkey ret" \
     progs="explorer papierkorb theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex2.log" 2>&1
-hat "$OUT/ex2/serial.txt" "explorer: tat 5 rc=0" "Umschalt+Entf: endgueltig"
+hat "$OUT/ex2/serial.txt" "explorer: tat 5 n=1 rc=0" "Umschalt+Entf: endgueltig"
 if python3 tools/osum/mkfs.py list "$OUT/ex2/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb'; then
     bad "Gegenprobe: Umschalt+Entf hat trotzdem in den Korb gelegt"
