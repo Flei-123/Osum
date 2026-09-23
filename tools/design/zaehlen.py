@@ -96,7 +96,12 @@ RE_MAL_CALL = re.compile(
          "text_at", "icon_at", "icon_draw", "get",
          "mal_flaeche", "mal_tafel", "mal_trenner", "mal_text",
          "mal_balken", "mal_punkt", "mal_rahmen", "mal_linie",
-         "mal_kante3"]) + r")\s*\(")
+         "mal_kante3",
+         # Runde ENGLISCH hat die mal_*-Helfer umbenannt; ohne die neuen
+         # Namen zaehlte diese Tafel 38 Aufrufe (wlib.draw_*) nicht mit.
+         "draw_area", "draw_board", "draw_separator", "draw_text",
+         "draw_bar", "draw_point", "draw_frame", "draw_line",
+         "draw_edge3"]) + r")\s*\(")
 RE_ZAHL = re.compile(r"\b(0x[0-9a-fA-F]{6,8}|\d{5,8})\b")
 # Eine Bitmaske ist keine Farbe: `x & 0xFFFFFF`.
 RE_MASKE = re.compile(r"[&|^]\s*(0x[0-9a-fA-F]+|\d+)\s*$")

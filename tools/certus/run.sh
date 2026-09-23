@@ -74,7 +74,7 @@ SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-sammeln}
 SOAK=${CERTUS_SOAK:-20}
 [ "$SCHNELL" = 1 ] && SOAK=3
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"
 WM="osum vfs gfx wm wig wmhold wiglong nokbd nosched noproc nofs noring3"
 
@@ -221,11 +221,11 @@ grep -q 'fpu.switch' kernel/sched/sched.fi \
 
 echo
 echo "== 3. die Leinwand und die Ein-Kern-Regel =="
-grep -q 'const K_LEINWAND' kernel/user/wlib.fi \
-    && ok "kernel/user/wlib.fi hat das Widget K_LEINWAND" || bad "K_LEINWAND fehlt"
-grep -q 'fn leinwand_ereignis' kernel/user/wlib.fi \
-    && ok "die Leinwand hat einen Ereignisring (leinwand_ereignis)" \
-    || bad "leinwand_ereignis fehlt"
+grep -q 'const K_CANVAS' kernel/user/wlib.fi \
+    && ok "kernel/user/wlib.fi hat das Widget K_CANVAS" || bad "K_CANVAS fehlt"
+grep -q 'fn canvas_event' kernel/user/wlib.fi \
+    && ok "die Leinwand hat einen Ereignisring (canvas_event)" \
+    || bad "canvas_event fehlt"
 grep -q 'import libc.mem' kernel/user/wlibc.fi \
     && bad 'wlibc bindet libc.mem -- zwei Module mem in einem Programm (Ein-Kern-Regel)' \
     || ok 'wlibc kommt ohne libc.mem aus (kein zweites Modul mem neben html.mem)'

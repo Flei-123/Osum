@@ -219,7 +219,9 @@ CODE="$TMPD/ui-ohne-kommentar.fi"
 sed 's|//.*$||' "$UI" > "$CODE"
 ZEICH=$(grep -cE 'wlibc\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$CODE" || true)
 is "direkte Zeichenaufrufe in freunde.fi" "$ZEICH" "0"
-MAL=$(grep -cE 'mal_flaeche|mal_text|mal_balken|mal_punkt|mal_linie' "$CODE" || true)
+# Runde ENGLISCH: mal_* heisst jetzt draw_* -- beide Namen suchen, sonst
+# ist "0 Treffer" nur das Ergebnis eines veralteten Musters.
+MAL=$(grep -cE 'mal_flaeche|mal_text|mal_balken|mal_punkt|mal_linie|draw_area|draw_text|draw_bar|draw_point|draw_line' "$CODE" || true)
 is "direkte mal_*-Aufrufe in freunde.fi" "$MAL" "0"
 # Ein Farbwert sieht aus wie 0xRRGGBB.
 FARB=$(grep -cE '0x[0-9a-fA-F]{6}' "$CODE" || true)

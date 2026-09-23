@@ -120,8 +120,8 @@ python3 - "$TMPD/kaputt/kernel/app/account.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-s = s.replace("fn befehl_liste() -> i32 {",
-              'fn befehl_liste() -> i32 {\n    var wo: [u8; 6] = "xoffi\\0"\n    if gleich(wo, wo) { }\n')
+s = s.replace("fn cmd_list() -> i32 {",
+              'fn cmd_list() -> i32 {\n    var wo: [u8; 6] = "xoffi\\0"\n    if gleich(wo, wo) { }\n')
 open(p, "w", encoding="utf-8").write(s)
 PY
 python3 tools/account/split.py "$TMPD/kaputt" > "$TMPD/tr2.txt" 2>&1
@@ -215,7 +215,9 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '
 # behaelt 8, SYNC rueckt auf 9). Die Zahl steht hier weiterhin fest und
 # wird nicht aus der Datei abgeleitet -- eine Zusage, die sich selbst
 # nachrechnet, faellt nie auf.
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 10
+# RUNDE ROADMAP-3: ELF. BRUECKE 4/n (1960756c) hat "Bruecke" als elften
+# Reiter angehaengt; die Zahl stand hier seitdem auf dem alten Stand.
+num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 11
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="

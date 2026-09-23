@@ -121,7 +121,7 @@ grep -qa '^fn darf_ring3' kernel/sched/sched.fi \
 grep -qa 'darf_ring3(state, i, me)' kernel/sched/sched.fi \
     && ok "die Auswahl des Ablaufplaners ruft ihn wirklich" \
     || bad "darf_ring3 wird in der Auswahl NICHT gerufen -- genau der Fehler von BLECHKERN"
-grep -qa 'gs_bereit(state, me)' kernel/sched/sched.fi \
+grep -qa 'gs_ready(state, me)' kernel/sched/sched.fi \
     && ok "und er fragt die GEPRUEFTE GS-Basis ab" \
     || bad "darf_ring3 fragt die GS-Basis nicht ab"
 # `gs_gut` ist ein festes Feld von acht. Waechst MAX_CPUS, ohne dass es

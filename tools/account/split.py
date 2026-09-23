@@ -42,7 +42,7 @@ WOERTER = ["xoffi", "jarvis", "fleitec", "nexus"]
 
 # Die EINE Liste, in der die Ruecken angemeldet werden. Zeilen zwischen
 # diesen beiden Marken duerfen Anbieternamen tragen; sonst keine.
-MARKE_AUF = "fn ruecken_anmelden"
+MARKE_AUF = "fn push_login"   # vor Runde ENGLISCH: ruecken_anmelden
 MARKE_ZU = "^}"
 
 
@@ -81,7 +81,7 @@ def pruefe(wurzel):
             verstoesse.append((rel, 0, "die Datei fehlt"))
             continue
         text = open(pfad, encoding="utf-8").read()
-        erlaubt = zeilen_der_anmeldung(text) if rel.endswith("konto.fi") \
+        erlaubt = zeilen_der_anmeldung(text) if rel.endswith(("konto.fi", "account.fi")) \
             else set()
         for nr, zeile in enumerate(text.split("\n"), 1):
             geprueft += 1

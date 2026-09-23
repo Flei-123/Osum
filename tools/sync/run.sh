@@ -839,7 +839,7 @@ PY
 # geht, bis der Lauf dazwischen abbricht. Dann steht die KAPUTTE Fassung
 # im Arbeitsbaum, und der naechste Lauf misst Unsinn.
 cp -a lib "$TMPD/lib-naiv"
-cp "$TMPD/kaputt/kette-naiv.fi" "$TMPD/lib-naiv/sync/kette.fi"
+cp "$TMPD/kaputt/kette-naiv.fi" "$TMPD/lib-naiv/sync/chain.fi"   # vor Runde ENGLISCH: kette.fi
 if FIRNLIB="$TMPD/lib-naiv" $FIRNC tools/sync/oracle.fi \
         -o "$TMPD/naivoracle" 2>/dev/null; then
     # Mit dem naiven Namen muss der Angriff aufgehen: der Name eines
@@ -914,9 +914,9 @@ else
     # "fremd" aus (e). Also wird das GEMESSEN: mit AAD scheitert das
     # Oeffnen unter falschem Namen, ohne AAD gelingt es.
     cp -a lib "$TMPD/lib-ohneaad"
-    cp "$TMPD/kaputt/kette-ohneaad.fi" "$TMPD/lib-ohneaad/sync/kette.fi"
+    cp "$TMPD/kaputt/kette-ohneaad.fi" "$TMPD/lib-ohneaad/sync/chain.fi"
     cp -a lib "$TMPD/lib-los"
-    cp "$TMPD/kaputt/kette-losgeloest.fi" "$TMPD/lib-los/sync/kette.fi"
+    cp "$TMPD/kaputt/kette-losgeloest.fi" "$TMPD/lib-los/sync/chain.fi"
     b1=nein; b2=nein
     FIRNLIB="$TMPD/lib-ohneaad" $FIRNC tools/sync/oracle.fi \
         -o "$TMPD/aadoracle" 2>/dev/null && b1=ja
@@ -995,7 +995,7 @@ python3 - kernel/user/sync.fi "$TMPD/kaputt/sync-still.fi" <<'PYS'
 import sys
 s = open(sys.argv[1], encoding='utf-8').read()
 s = s.replace("if nat + NAMEHEX + 2 >= NAMBUF {", "if nat + NAMEHEX + 2 >= NAMINLINE {")
-s = s.replace("""                    merk_pfad((&relp[0]) as u64)
+s = s.replace("""                    remember_path((&relp[0]) as u64)
                     io.close(dfd[depth as usize])
                     return false""",
               """                    relp[keep as usize] = 0 as u8
