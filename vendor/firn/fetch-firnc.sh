@@ -42,6 +42,13 @@ KURZ=${COMMIT:0:8}
 PSUM=$( { cat "$HIER"/patches/*.patch 2>/dev/null || true; } | sha256sum | cut -c1-16)
 MARKE="$COMMIT $PSUM"
 
+# EIN HOLER JE BAUM ZUGLEICH. Starten mehrere Laeufer in einem frischen
+# Baum gleichzeitig, raeumten sie sich gegenseitig lib/ weg ("rm: cannot
+# remove vendor/firn/lib: Directory not empty", gemessen 23.09.2026 mit
+# bridge+posix+hda). Der zweite wartet hier und findet danach "aktuell".
+exec 9>"$HIER/.holen.lock"
+flock 9
+
 FORCE=0
 [[ ${1:-} == --force ]] && FORCE=1
 
