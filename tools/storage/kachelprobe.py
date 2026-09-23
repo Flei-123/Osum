@@ -103,16 +103,27 @@ def main(argv):
     schlecht = 0
     breiten = []
     for _i, x, y, w, h, f, n in kacheln:
-        yy = y + h // 2 + oy
-        # Von der Mitte nach links und rechts, solange die Farbe haelt.
+        # A-029: NICHT NUR EINE BILDZEILE. Der Mauszeiger steht beim
+        # Foto in der Bildmitte (639,399) und damit mitten in einer
+        # Kachel; auf genau der mittleren Zeile gemessen, war "chrom"
+        # 54 statt 62 breit -- der Zeiger, nicht das Programm. Gemessen
+        # wird deshalb auf fuenf Zeilen der unteren Haelfte (oben steht
+        # der Name) und die BREITESTE zaehlt: ein Zeiger oder eine
+        # Beschriftung kann einen Lauf nur verkuerzen, nie verlaengern,
+        # also verdeckt das Maximum keinen echten Fehler.
         mitte = x + w // 2 + ox
-        li = mitte
-        while farbe(li - 1, yy) == f:
-            li -= 1
-        re_ = mitte
-        while farbe(re_ + 1, yy) == f:
-            re_ += 1
-        gemessen = re_ - li + 1
+        gemessen = 0
+        for k in (4, 5, 6, 7):
+            yy = y + h * k // 9 + oy
+            if farbe(mitte, yy) != f:
+                continue
+            li = mitte
+            while farbe(li - 1, yy) == f:
+                li -= 1
+            re_ = mitte
+            while farbe(re_ + 1, yy) == f:
+                re_ += 1
+            gemessen = max(gemessen, re_ - li + 1)
         breiten.append((n, w, gemessen))
         # Ein Rahmen um die Kachel darf ein paar Punkte kosten.
         gut = abs(gemessen - w) <= 4

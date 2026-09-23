@@ -99,7 +99,16 @@ open(sys.argv[1], "wb").write(open(
     "tools/k15/tree.py").read().split('THEME = b"""')[1]
     .split('"""')[0].encode())
 EOF
-ARGS=(build "$OUT/inhalt.img" 4096 /lib/
+# A-029: DAS INHALTSABBILD HAT 8192 BLOECKE (4 MiB), NICHT 4096. Seit
+# `profile app` ist /bin/speicher 1,26 MB gross; zusammen mit den zwei
+# Schriften, den uebrigen Programmen und dem Messbaum (BUDGET) passte
+# es nicht mehr auf 2 MiB, und mkfs.py brach mit "the disk is full" ab
+# -- der ganze Laeufer mass danach nichts. Die Blockkarte darf seit
+# Runde INSTALL mehrblockig sein (mkfs.py, `bmblocks`), 8192 benutzen
+# k16, metal und hotplug schon. gross.img bleibt bei 4096: es braucht
+# nur `du`, und /bin/speicher steht dort gar nicht.
+INHALT_BLOCKS=${INHALT_BLOCKS:-8192}
+ARGS=(build "$OUT/inhalt.img" "$INHALT_BLOCKS" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf"
       "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
@@ -110,5 +119,7 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-inhalt.log" 2>&1 || {
     echo "== mkfs.py (inhalt) fehlgeschlagen"; tail -5 "$OUT/mkfs-inhalt.log"
     echo "   -> BUDGET kleiner setzen (jetzt $BUDGET)"; exit 1; }
 echo "   inhalt.img $(stat -c%s "$OUT/inhalt.img") Oktette  ($(tail -1 "$OUT/baum.log"))"
-python3 tools/osum/mkfs.py stat "$OUT/inhalt.img" | sed 's/^/   /'
+# mkfs.py kennt kein `stat` (stand hier und meldete nur "unknown
+# command"); die Zahl der Namen im Abbild sagt dasselbe.
+echo "   inhalt.img: $(python3 tools/osum/mkfs.py list "$OUT/inhalt.img" | wc -l) Namen"
 exit 0

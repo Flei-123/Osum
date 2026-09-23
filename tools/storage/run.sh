@@ -211,7 +211,13 @@ GRUND="nokbd nosched noproc nofs"
 # mit aufgezeichnet werden. Die Kacheln stehen laengst im Bild; wer nur
 # ein Foto will, nimmt `speicher: kachel` als Marke und ist in Sekunden
 # fertig.
-foto ruhe "gfx wm wig wigspeicher wmhold wiglong $GRUND" '^speicher: ready'
+# A-029: `wighalt=240`. `wiglong` haelt zwanzig Sekunden, und in denen
+# kommt /bin/speicher auf dem 4000-Dateien-Abbild nicht bis `ready`:
+# vorher laeuft seine Gegenprobe, ein echter Durchlauf mit `stat` je
+# Datei (Abschnitt 1 misst dafuer rund 60 s). Danach war der Kern schon
+# durch, QEMU weg, und es gab weder `speicher: probe` noch ein Foto.
+# Der Halt ist nur die Obergrenze -- `foto` wartet auf die Marke.
+foto ruhe "gfx wm wig wigspeicher wmhold wiglong wighalt=240 $GRUND" '^speicher: ready'
 has "$TMPD/ruhe.txt" "k15: start /bin/speicher" "/bin/speicher kommt VON DER PLATTE"
 has "$TMPD/ruhe.txt" "speicher: kachel" "es hat seine Kacheln gerechnet"
 SOKT=$(feld "$TMPD/ruhe.txt" "speicher: cd /data" okt)
