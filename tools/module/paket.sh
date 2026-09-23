@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 STORE=${STORE:-/root/orientstore/werkzeug/store}
 
 mkdir -p "$OUT"

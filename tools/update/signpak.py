@@ -23,7 +23,9 @@ import importlib.util
 import os
 import sys
 
-OPK = os.environ.get("OPK", "/root/orientos-install/pkg/opk.py")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import opkpfad  # noqa: E402  -- A-025
+OPK = opkpfad.pfad()
 
 
 def load_opk():

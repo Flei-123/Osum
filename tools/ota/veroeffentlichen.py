@@ -108,7 +108,9 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 import plattform as PLT   # noqa: E402
-OPK = os.environ.get("OPK", "/root/orientos-install/pkg/opk.py")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import opkpfad  # noqa: E402  -- A-025: der alte Standardpfad war ein Arbeitsbaum
+OPK = opkpfad.pfad()
 BUND_PY = os.path.join(HIER, "schluesselbund.py")
 
 

@@ -35,7 +35,7 @@ export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/upd}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 
 [ -f "$OUT/geheim.key" ] || { echo "== $OUT/geheim.key fehlt -- erst tools/install/pakete.sh"; exit 1; }
 

@@ -30,7 +30,7 @@ export OSUM_CPU=${OSUM_CPU:-Haswell}
 OUT=${OUT:-/tmp/ota-plattform}
 export OUT
 mkdir -p "$OUT"
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 export OPK
 PORT=${OTA_PORT:-$(( 19000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"

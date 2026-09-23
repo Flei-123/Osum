@@ -32,7 +32,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 OUT=${1:-/tmp/laden}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 TAB=tools/loader/apps.tab
 
 [ -d "$OUT/bin" ] || { echo "== $OUT/bin fehlt -- erst tools/loader/build.sh"; exit 1; }

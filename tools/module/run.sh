@@ -324,7 +324,7 @@ fi
 
 # ------------------------------------------------- 10. die Auslieferung
 echo "== 10. der ganze Weg: .omod -> .opk -> Speicher -> Platte -> Kern =="
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 STORE=${STORE:-/root/orientstore/werkzeug/store}
 if [ -f "$OPK" ] && [ -f "$STORE" ]; then
     bash tools/module/paket.sh "$TMPD/pak" > "$TMPD/pak.txt" 2>&1

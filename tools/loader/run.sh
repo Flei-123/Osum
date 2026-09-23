@@ -76,7 +76,7 @@ bash tools/loader/pakete.sh "$OUT" > "$OUT/pakete.log" 2>&1 \
     || { bad "pakete.sh"; tail -20 "$OUT/pakete.log"; exit 1; }
 fehlt=0
 for p in "$OUT"/stand/*.opk; do
-    t=$(python3 /root/orientos-install/pkg/opk.py zeigen "$p")
+    t=$(python3 "$(python3 tools/lib/opkpfad.py)" zeigen "$p")
     for f in " start " " INFO " " symbol "; do
         printf '%s' "$t" | grep -q "$f" || fehlt=$((fehlt+1))
     done

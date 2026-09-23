@@ -339,7 +339,10 @@ hat "$OUT/sp3/serial.txt" "sperre: Leerlauf abgelaufen, sperre" \
 # ------------------------------------------------------------- 8. Laden
 echo
 echo "== 8. der Laden: sechs Pakete, signiert, eingespielt =="
-if [ -x /root/orientos-install/pkg/opk.py ] || [ -f /root/orientos-install/pkg/opk.py ]; then
+# A-025: seit dem Aufraeumen vom 21.09. gab es den alten Pfad nicht mehr --
+# der Abschnitt wurde STILL uebersprungen. Der Pfad kommt jetzt von opkpfad.py.
+OPK_ALLTAG=$(python3 tools/lib/opkpfad.py)
+if [ -f "$OPK_ALLTAG" ]; then
     bash tools/loader/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
     bash tools/loader/pakete.sh "$OUT/laden" > "$OUT/laden-pak.log" 2>&1
     export OSUM_SIGN_PASS=alltag OSUM_ERSATZ_PASS=alltag
@@ -407,7 +410,7 @@ Image.open(sys.argv[1] + "/storeg/desktop.ppm").convert("RGB").save(
 PY
     ok "Bild: .alltag-shots/store-installiert.png"
 else
-    echo "  -- opk.py fehlt (/root/orientos-install/pkg/opk.py), Abschnitt uebersprungen"
+    bad "opk.py fehlt ($OPK_ALLTAG) -- der Laden laesst sich nicht messen"
 fi
 
 # ------------------------------------------------- 9. die Bilder, gemessen

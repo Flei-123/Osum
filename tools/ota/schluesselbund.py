@@ -74,7 +74,9 @@ import json
 import os
 import sys
 
-OPK = os.environ.get("OPK", "/root/orientos-install/pkg/opk.py")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import opkpfad  # noqa: E402  -- A-025: der alte Standardpfad war ein Arbeitsbaum
+OPK = opkpfad.pfad()
 SCRYPT_N = 1 << 15
 SCRYPT_R = 8
 SCRYPT_P = 1

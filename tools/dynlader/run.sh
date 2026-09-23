@@ -463,7 +463,7 @@ else
 fi
 
 # b) Die Pakete lassen sich WIRKLICH bauen -- nicht nur beschreiben.
-OPKPY=${OPKPY:-/root/orientos-install/pkg/opk.py}
+OPKPY=${OPKPY:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 if [ -r "$OPKPY" ]; then
     mkdir -p "$TMPD/opk"
     LDR=$(readlink -f "$LDSO")
