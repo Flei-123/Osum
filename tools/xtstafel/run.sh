@@ -76,16 +76,23 @@ else
 fi
 
 # ==================================================================
-# DIE GEGENPROBEN. Beide aendern lib/crypto/xts.fi, messen und legen
-# die Datei DANACH WIEDER HIN. Ohne sie waere jede Zahl oben eine
-# Behauptung: eine Abnahme, die auch am kaputten Zustand gruen wird,
-# misst nichts.
+# DIE GEGENPROBEN. Beide aendern lib/crypto/xts.fi und messen. Ohne sie
+# waere jede Zahl oben eine Behauptung: eine Abnahme, die auch am
+# kaputten Zustand gruen wird, misst nichts.
+#
+# IN EINER KOPIE DES BIBLIOTHEKSBAUMS (dieselbe Lehre wie A-028 bei
+# tools/sync): bis hierher wurde lib/crypto/xts.fi IM BAUM verbogen und
+# danach zurueckgelegt -- ohne trap. Ein abgebrochener Lauf liess die
+# kaputte Fassung stehen, und jeder parallele Bau las sie mit.
 # ==================================================================
-cp -f lib/crypto/xts.fi "$TMPD.xts"
+GLIB="$TMPD/lib-gegen"
+XTS_SHA0=$(sha256sum lib/crypto/xts.fi | cut -d' ' -f1)
+rm -rf "$GLIB"; cp -a lib "$GLIB"
 
 echo "== 3. GEGENPROBE: ein Platz (der Zustand VOR dieser Runde) =="
-sed -i 's/^const SLOTS: usize = 4$/const SLOTS: usize = 1/' lib/crypto/xts.fi
-if $FIRNC tools/xtstafel/tafel.fi -o "$TMPD/g1" 2>/dev/null; then
+sed -i 's/^const SLOTS: usize = 4$/const SLOTS: usize = 1/' "$GLIB/crypto/xts.fi"
+if grep -q '^const SLOTS: usize = 1$' "$GLIB/crypto/xts.fi" && \
+   FIRNLIB="$GLIB" $FIRNC tools/xtstafel/tafel.fi -o "$TMPD/g1" 2>/dev/null; then
     "$TMPD/g1" > "$TMPD/g1.txt" 2>&1
     G=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/g1.txt" | grep -oE '[0-9]+$')
     if [ "${G:-0}" -gt 0 ]; then
@@ -96,11 +103,12 @@ if $FIRNC tools/xtstafel/tafel.fi -o "$TMPD/g1" 2>/dev/null; then
 else
     bad "die Gegenprobe laesst sich nicht uebersetzen"
 fi
-cp -f "$TMPD.xts" lib/crypto/xts.fi
+cp -f lib/crypto/xts.fi "$GLIB/crypto/xts.fi"
 
 echo "== 4. GEGENPROBE: forget() raeumt nur EINEN Platz =="
-python3 - <<'PYEOF'
-p="lib/crypto/xts.fi"
+GLIB="$GLIB" python3 - <<'PYEOF'
+import os
+p=os.environ["GLIB"] + "/crypto/xts.fi"
 s=open(p,encoding="utf-8").read()
 s=s.replace("""fn forget() {
     var s: usize = 0
@@ -109,7 +117,7 @@ s=s.replace("""fn forget() {
     while s < 1 {""",1)
 open(p,"w",encoding="utf-8").write(s)
 PYEOF
-if $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/g2" 2>/dev/null; then
+if FIRNLIB="$GLIB" $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/g2" 2>/dev/null; then
     "$TMPD/g2" > "$TMPD/g2.txt" 2>&1
     if [ $? != 0 ]; then
         R=$(grep -oE 'Oktette ungleich 0 nach forget\(\): [0-9]+' "$TMPD/g2.txt" | grep -oE '[0-9]+$')
@@ -120,7 +128,12 @@ if $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/g2" 2>/dev/null; then
 else
     bad "die Gegenprobe laesst sich nicht uebersetzen"
 fi
-cp -f "$TMPD.xts" lib/crypto/xts.fi
+rm -rf "$GLIB"
+if [ "$(sha256sum lib/crypto/xts.fi | cut -d' ' -f1)" = "$XTS_SHA0" ]; then
+    ok "lib/crypto/xts.fi im Baum ist nach beiden Gegenproben unangetastet"
+else
+    bad "lib/crypto/xts.fi im Baum wurde veraendert"
+fi
 
 echo "XTSTAFEL: $pass bestanden, $fail gescheitert"
 [ "$fail" = 0 ] || exit 1
