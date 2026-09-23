@@ -63,8 +63,9 @@ SPALTEN = [
       ("zeig_akku", "s_mod"), ("zeig_waerme", "s_t")], 9,
      "/bin/power setzt Profil/Akku/Netz/Modell/Wärme untereinander"),
     ("kernel/user/vpn.fi",
-     [("zeigen", "s_peer"), ("zeigen", "s_hs"), ("zeigen", "s_port"),
-      ("zeigen", "s_kill"), ("zeigen", "s_koct")], 15,
+     # Runde ENGLISCH hat `zeigen` in `show` umbenannt.
+     [("show", "s_peer"), ("show", "s_hs"), ("show", "s_port"),
+      ("show", "s_kill"), ("show", "s_koct")], 15,
      "/bin/vpn setzt Gegenstellen/Handschläge/Port/Notaus/verworfen "
      "untereinander"),
     ("kernel/user/tiling.fi",

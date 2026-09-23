@@ -166,7 +166,12 @@ def gemalt(roh, text):
     if not treffer:
         return None
     m = treffer[-1]
-    return tuple(int(m.group(i)) for i in range(1, 6))
+    # A-031: `px=` steht nur an der zweiten Zeile einer zweizeiligen
+    # Listenzeile (`wlib: text2`, kleinere Schrift). Ohne das Feld ist
+    # es die UI-Groesse 15 wie bisher.
+    px = re.search(rb" px=(\d+) t=", m.group(0))
+    return tuple(int(m.group(i)) for i in range(1, 6)) + (
+        int(px.group(1)) if px else 15,)
 
 
 def rgb(v):
@@ -313,7 +318,7 @@ def main(argv):
     if t is None:
         print("umlaut: [%s] '%s' wurde nicht gemalt" % (zeichen, text[:40]))
         return 1
-    kind, tx, tb, fg, bg = t
+    kind, tx, tb, fg, bg, px = t
 
     ix = wx + (BORDER if deco else 0)
     iy = wy + (TITLE if deco else 0)
@@ -331,7 +336,7 @@ def main(argv):
     # hinausragt.
     sys.path.insert(0, os.path.join("tools", "ttf"))
     import raster
-    schrift = raster.Schrift("assets/osum-sans.ttf", 15)
+    schrift = raster.Schrift("assets/osum-sans.ttf", px)
     stellen = list(schrift.stellen(text))
     breite = ((stellen[-1][1] >> 6) if stellen else 0) + 12
     if tx + breite > ww:
@@ -362,7 +367,7 @@ def main(argv):
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
          "tkette" if kette else "ttext", ppm,
-         "assets/osum-sans.ttf", "15", str(ax), str(ay)]
+         "assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
     kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()

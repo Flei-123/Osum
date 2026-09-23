@@ -838,7 +838,7 @@ g_dev_start:
 3:  jmp 3b
 
 g_dev_txt:
-    .asciz "geraete geprueft\n"
+    .asciz "geraete geprueft\n"  # // DRAHT: Mitschnitt, tools/hv/run.sh
     .align 4
 g_dev_end:
 

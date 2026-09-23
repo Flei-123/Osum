@@ -135,7 +135,7 @@ lang=$(grep -aoE 'wmplug: abi=[0-9]+  Plugins [0-9]+ von [0-9]+' "$P" | tail -1)
 [ -n "$lang" ] && [ "${#lang}" -le 40 ] \
     && ok "erste Statuszeile '$lang' ist ${#lang} Zeichen lang (<= 40)" \
     || bad "erste Statuszeile passt nicht in 40 Zeichen ('$lang')"
-zwei=$(grep -aoE '  Frist [0-9]+ Ticks  Flaeche [0-9]+' "$P" | tail -1)
+zwei=$(grep -aoE '  Frist [0-9]+ Ticks  Fläche [0-9]+' "$P" | tail -1)
 [ -n "$zwei" ] && [ "${#zwei}" -le 40 ] \
     && ok "zweite Statuszeile '$zwei' ist ${#zwei} Zeichen lang (<= 40)" \
     || bad "die Statuszeile ist nicht umgebrochen ('$zwei')"

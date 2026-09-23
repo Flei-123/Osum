@@ -395,13 +395,20 @@ glyphen() {
 }
 
 echo "-- 8. der Starter, und die Zeile, die diese Runde ausgeloest hat"
-if foto starter "extra=wigstart"; then
+# A-031: DER STARTER IM FENSTERSERVER-PFAD, wie der Speicher-Dialog in
+# 10. Mit `desk` (der Vorgabe von tools/look/shot.sh) startet der
+# Schreibtisch den Starter seit ECHTHARDWARE-4 VERSTECKT, und `wigstart`
+# wirkt dort gar nicht (kgui: `desk_start` statt `k15_start`) -- das Bild
+# zeigte keinen Starter, und 8. mass "kein sichtbares Fenster 'Suchen'".
+# Und seit FUI-WIN11 steht die Beschreibung in einer ZWEITEN Zeile statt
+# hinter "  --  "; sie wird als `wlib: text2 ... px=` gemeldet.
+if foto starter "append=gfx wm wig wigstart wmhold wiglong nokbd nosched noproc nofs"; then
     hat "$TMPD/starter/serial.txt" \
-        "t=Editor  --  Text schreiben und ändern" \
+        "t=Text schreiben und ändern" \
         "die Zeile steht mit echtem 'ä' auf dem Schirm"
     hatnicht "$TMPD/starter/serial.txt" "schreiben und aendern" \
         "GEGENPROBE: die Umschrift kommt im ganzen Lauf nicht mehr vor"
-    glyphen starter "Suchen" "Editor  --  Text schreiben und ändern"
+    glyphen starter "Suchen" "Text schreiben und ändern"
     glyphen starter "Suchen" "Ausführen"
 fi
 
@@ -419,7 +426,10 @@ if foto einstellungen "extra=einst nostart"; then
     glyphen einstellungen "Einstellungen" "Akzent unverändert übernommen"
     glyphen einstellungen "Einstellungen" \
         "Text/Akzent 5,16  Akzent/Fläche 4,93"
-    glyphen einstellungen "Einstellungen" "  -- WCAG erfüllt"
+    # A-031: seit der ZUSAMMENFUEHRUNG in settings.fi (ein Etikett mit
+    # `wlib.umbruch()` statt zwei) bricht die Zeile am Wort um: die
+    # zweite Zeile ist "WCAG erfüllt", die zwei Striche bleiben oben.
+    glyphen einstellungen "Einstellungen" "WCAG erfüllt"
 fi
 
 echo

@@ -519,9 +519,9 @@ echo "== 6. Stufe 5: der Weg aus Ring 3 =="
     num "6 der Befund ist V_BACKJUMP (1), also der Rueckwaertssprung" \
         "${BEF:-0}" eq 1
     # (b) UND JA ZU EINEM GUELTIGEN.
-    has "$RC3" "ebpfctl: der Pruefer nimmt es an" \
+    has "$RC3" "ebpfctl: der Prüfer nimmt es an" \
         "6 ein gueltiges Programm wird angenommen"
-    has "$RC3" "ebpfctl: haengt am Eingang an" \
+    has "$RC3" "ebpfctl: hängt am Eingang an" \
         "6 und Ring 3 haengt es an den Haken"
     # (c) Die Zaehler kommen aus dem Kern zurueck nach Ring 3.
     LD=$(grep -aoE 'geladen +=[0-9 ]+' "$RC3" | tail -1 | grep -oE '[0-9]+$')
