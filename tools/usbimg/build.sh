@@ -1572,7 +1572,7 @@ verbose: yes
 # WAS AUF DEM SCHREIBTISCH-EINTRAG ZU FOTOGRAFIEREN IST -- Tafelzeile 23,
 # unten rechts:
 #
-#     23 SICHER WA 0 KS <n> R3W 0 R3K <n> LG 0
+#     23 SAFETY WA 0 KS <n> R3W 0 R3K <n> LG 0
 #
 #   R3K   auf WIE VIELEN Kernen Ring 3 wirklich gelaufen ist. Auf
 #         Justins Brett muss dort etwas GROESSER ALS 1 stehen; steht

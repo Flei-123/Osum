@@ -230,7 +230,9 @@ for lauf in B C; do
     gt "zusammengefasst (Zeile 4 KOAL)" "$(zahl "$D/tafel.txt" 4 KOAL)" 10000
     is "Titel im Band (Zeile 7 TK)" "$(zahl "$D/tafel.txt" 7 TK)" 0
     is "keine Tafelzeile zu lang (Zeile 23 LG)" "$(zahl "$D/tafel.txt" 23 LG)" 0
-    hat "$D/serial.txt" '^tafel: 23 SICHER WA 0 ' "kein Stapelueberlauf (WA 0)"
+    # RUNDE ROADMAP-2: Zeilennummer statt uebersetzbarem Wort -- der
+    # Kern schreibt seit Runde ENGLISCH "23 SAFETY", nicht "23 SICHER".
+    hat "$D/serial.txt" '^tafel: 23 [A-Z]* WA 0 ' "kein Stapelueberlauf (WA 0)"
 done
 
 echo

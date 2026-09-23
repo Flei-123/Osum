@@ -267,7 +267,7 @@ lauf() { # name smp extra [limit]
     # `wm: hold` taugt als Marke NICHT: unter `gsluege` laeuft alles auf
     # Kern 0 und die Zeile kommt in der Zeit gar nicht.
     while [ $i -lt 800 ]; do
-        [ "$(grep -ac '^tafel: 23 SICHER' "$out" 2>/dev/null)" -ge 5 ] && break
+        [ "$(grep -ac '^tafel: 23 [A-Z]' "$out" 2>/dev/null)" -ge 5 ] && break
         grep -qa '^absturz:  0\|^\*\*\* EXCEPTION' "$out" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
@@ -279,8 +279,25 @@ lauf() { # name smp extra [limit]
 # ACHTUNG BEIM AUSLESEN: in "R3K" steckt eine 3. `grep -oE '[0-9]+'`
 # liefert darauf ZWEI Zahlen ("3" und den Wert), und die Zusage misst
 # dann die 3 aus dem Namen. Deshalb ueberall das zweite Feld.
-w_r3k()  { grep -a '^tafel: 23 SICHER' "$1" | tail -1 | grep -oE 'R3K [0-9]+' | awk '{print $2}'; }
-w_r3w()  { grep -a '^tafel: 23 SICHER' "$1" | tail -1 | grep -oE 'R3W [0-9]+' | awk '{print $2}'; }
+#
+# ================================================== RUNDE ROADMAP-2
+# GESUCHT WIRD DIE ZEILENNUMMER, NICHT DAS WORT DAHINTER.
+#
+# Hier stand '^tafel: 23 SICHER'. Die Tafelzeile heisst im Kern aber
+# seit Runde ENGLISCH "23 SAFETY" (`kernel/ui/kgui.fi`, `var t23`) --
+# wie alle ihre Nachbarn (10 BEAT, 11 USB, 12 STAGE, ...). Das Wort
+# wurde uebersetzt, die Laeufer nicht, und seitdem fand dieser grep
+# NICHTS: sechs Zusagen meldeten "keine Zahl gefunden", und die
+# Warteschleife in `lauf` lief bei JEDEM Lauf in ihre volle Schranke,
+# weil sie auf fuenf Tafeln wartete, die unter diesem Namen nie kamen.
+# Gemessen: VIELKERN 30/10 -- und keiner der zehn war ein Kernfehler.
+#
+# Dieselbe Bauart wie `A-004`/`A-021`/`F-003`: die Marke ist die
+# ZEILENNUMMER (die ist Teil der Schnittstelle und wird nicht
+# uebersetzt), das Wort dahinter darf sich aendern.
+TAFEL23='^tafel: 23 [A-Z]'
+w_r3k()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3K [0-9]+' | awk '{print $2}'; }
+w_r3w()  { grep -a "$TAFEL23" "$1" | tail -1 | grep -oE 'R3W [0-9]+' | awk '{print $2}'; }
 w_abw()  { grep -a '^r3: syscalls' "$1" | tail -1 | sed -n 's/.*abw=\([0-9]*\).*/\1/p'; }
 w_kerne(){ grep -a '^r3: prozesse' "$1" | tail -1 | sed -n 's/.* n=\([0-9]*\).*/\1/p'; }
 w_scpu() { grep -a '^r3: syscalls' "$1" | tail -1 \
@@ -338,7 +355,7 @@ zahl "R3W muss GROESSER null werden (die Luege wird gesehen)" "$(w_r3w $L)" ge 1
 zahl "R3K faellt auf 1 zurueck (Ring 3 bleibt auf Kern 0)" "$(w_r3k $L)" eq 1
 zahl "Ausnahmen -- die Maschine lebt" "$(w_exc $L)" eq 0
 zahl "nur Kern 0 bekommt Systemaufrufe" "$(w_scpu $L)" eq 1
-grep -a '^tafel: 23 SICHER' $L | tail -1 | sed 's/^/        /'
+grep -a "$TAFEL23" $L | tail -1 | sed 's/^/        /'
 
 echo
 echo "== 9. GEGENPROBE zum Riegel, Haelfte 2: gsluege r3blind -- er MUSS brechen =="
