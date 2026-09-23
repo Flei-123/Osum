@@ -381,12 +381,16 @@ PY
         echo "ls /apps"
         echo "echo STORE-FERTIG"
     } > "$OUT/inst.sh"
+    # RUNDE ROADMAP-3: /etc/uitrace schaltet den Mitschnitt des Starters an
+    # (launcher.fi dbg_setup) -- ohne ihn kam "launcher: apps=" nie.
+    : > "$OUT/uitrace"
     eval bash "$B" "$OUT/store" bloecke=262144 inodes=512 mager=yes \
         script=\"sh /inst.sh\;exit\" \
         progs=\"opk sh echo ls cat desktop taskbar launcher theme\" \
         xdir=/pakete xdir=/system \
         xfile=/system/schluessel.pub="$OUT/schluessel.pub" \
         xfile=/inst.sh="$OUT/inst.sh" \
+        xfile=/etc/uitrace="$OUT/uitrace" \
         xfile=/pakete/boese.opk="$OUT/boese.opk" \
         xfile=/pakete/boese.opk.sig="$OUT/boese.opk.sig" \
         $X > "$OUT/store.log" 2>&1
