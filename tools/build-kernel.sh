@@ -277,7 +277,9 @@ weg ntfs-aus
 # Liste nicht mitgezogen. `rm -f` schweigt dazu. Der Eintrag bleibt
 # hier UNVERAENDERT stehen, weil diese Runde ordnet und nicht
 # repariert; die Pruefung unten MELDET ihn, statt ihn zu verschlucken.
-GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave zeiger"
+# RUNDE ROADMAP-3: `zeiger` -> `cursor` nachgezogen (die Warnung unten
+# hat es jeden Serverbau gemeldet).
+GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave cursor"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         # RUNDE O-STRUKTUR: `rm -f` SCHWEIGT, wenn die Datei woanders
@@ -290,7 +292,9 @@ if [[ $GUI == off ]]; then
         # Datei gar nicht da war. Die Suche findet sie auch in einem
         # Unterordner -- damit bleibt der GUI-lose Bau richtig, wenn
         # eine spaetere Runde die Grafik einsortiert.
-        TREFFER=$(find "$TMP/kernel" -name "$f.fi" -type f)
+        # `-path */user/*` bleibt draussen: `kernel/user/wmplug.fi` ist ein
+        # Programm und kein Teil der Kern-Grafik (gleicher Name, anderer Ort).
+        TREFFER=$(find "$TMP/kernel" -name "$f.fi" -type f -not -path "*/user/*")
         if [[ -z $TREFFER ]]; then
             echo "SERVERBUILD-WARNUNG: '$f.fi' steht in GFX_DATEIEN," \
                  "liegt aber nicht im Kernbaum -- hier wird NICHTS" \
