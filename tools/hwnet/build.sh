@@ -48,13 +48,16 @@ ld -n -T "$LDSCRIPT" \
 objcopy -O elf32-i386 "$W/k.elf" "$W/k.mb" || exit 1
 
 SPEC="/bin/"
+# RUNDE ROADMAP-3 (A-016-Rest): ueber `up_build`, das das Profil aus der
+# Wurzeldatei LIEST. Hier stand ein nackter Aufruf ohne `--profile` und
+# ohne `-c`; fuer sh/ls/cat faellt das nicht auf, fuer `settings`
+# (profile app) kam "input file is the same as output file" -- und
+# `tools/account/run.sh` meldete deshalb "der Kern baut nicht".
+. tools/lib/userprog.sh
 for p in $PROGS; do
-    "$CC" "kernel/user/$p.fi" -o "$W/$p.o" >> "$W/build.log" 2>&1 || {
-        echo "$p.fi does not compile"; tail -10 "$W/build.log"; exit 1; }
-    ld -T "$ULD" --defsym=USER_ENTRY="_F$S.u_start" \
-        -o "$W/$p.elf" "$W/crt.o" "$W/$p.o" 2>/dev/null || {
-        echo "ld failed on $p"; exit 1; }
-    strip --strip-all "$W/$p.elf"
+    up_build "$CC" "$p" "$W/$p.o" "$W/$p.elf" "$W/crt.o" "$ULD" "$S" \
+        "$W/$p.err" || {
+        echo "$p.fi does not compile"; tail -10 "$W/$p.err"; exit 1; }
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
 python3 tools/osum/mkfs.py build "$W/disk.img" $BLOCKS $SPEC > "$W/mkfs.txt" 2>&1 \
