@@ -163,6 +163,13 @@ def phrasen(satz):
         p = ruecklauf(" ".join(teil))
         if p != " ".join(teil) and len(p) >= 10:
             aus.add(p)
+            # RUNDE ROADMAP-3: auch ohne Satzzeichen am Ende. "ota: das
+            # ist kein Schlüssel: quelle ..." ergab nur die Phrase mit
+            # Doppelpunkt, und `tools/ota/run.sh` suchte sie ohne --
+            # 0 Funde, obwohl der Laeufer veraltet war.
+            q = p.rstrip(":;,.!?")
+            if q != p and len(q) >= 10:
+                aus.add(q)
     return aus
 
 

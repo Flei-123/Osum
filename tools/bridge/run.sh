@@ -528,7 +528,7 @@ draht_zu
 G="$TMPD/g6.log"
 [ "$(status_von 1)" = nein ] && ok "lies: eine Datei ueber max_datei wird abgelehnt statt eingelesen" \
                              || bad "lies gross: $(grep -a '^ANTWORT 1 ' "$G")"
-hat "$G.1.bin" "groesser als max_datei" "und der Grund nennt die Grenze"
+hat "$G.1.bin" "größer als max_datei" "und der Grund nennt die Grenze"
 [ "$(status_von 2)" = nein ] && ok "schreib: eine Nutzlast ueber max_datei wird abgelehnt" \
                              || bad "schreib gross: $(grep -a '^ANTWORT 2 ' "$G")"
 L3=$(grep -a "^ANTWORT 3 " "$G" | awk '{print $5}')

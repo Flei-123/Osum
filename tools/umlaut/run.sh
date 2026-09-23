@@ -189,21 +189,39 @@ python3 - "$k2/kernel/user/storage.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
-alt = 'fn zeilen_melden() {\n'
-neu = ('fn zeilen_melden() {\n'
+alt = 'fn lines_report() {\n'   # vor Runde ENGLISCH: zeilen_melden
+neu = ('fn lines_report() {\n'
        '    var s_pr: [u8; 28] = "speicher: hat geloescht n=\\0\\0"\n'
        '    say((&s_pr[0 as usize]) as u64)\n')
 assert alt in s, "der Anker fehlt"
 open(p, 'w', encoding='utf-8').write(s.replace(alt, neu, 1))
 PY
-( cd "$k2" && OSUM_ROOT=. python3 tools/i18n/quellen.py --streng ) \
+# Gemessen wird die ZAHL der sichtbaren Umschriften vorher/nachher, nicht
+# der Rueckgabewert: solange der Baum selbst noch sichtbare Umschrift hat
+# (Abschnitt 3), ist `--streng` ohnehin rot, und diese Probe waere es mit.
+sichtbar() { sed -n 's/.*SICHTBAR=\([0-9]*\).*/\1/p' "$1" | head -1; }
+python3 tools/i18n/quellen.py > "$TMPD/gegen2-vor.txt" 2>&1
+( cd "$k2" && OSUM_ROOT=. python3 tools/i18n/quellen.py ) \
     > "$TMPD/gegen2.txt" 2>&1
-if [ $? -eq 0 ]; then
-    ok "GEGEN-GEGENPROBE: eine neue MITSCHNITT-Zeile bleibt gruen -- die Ausnahme wirkt"
+SV=$(sichtbar "$TMPD/gegen2-vor.txt"); SN=$(sichtbar "$TMPD/gegen2.txt")
+if [ -n "$SV" ] && [ "$SV" = "$SN" ] \
+   && ! grep -qE 'SICHTBAR +kernel/user/storage.fi .*s_pr' "$TMPD/gegen2.txt"; then
+    ok "GEGEN-GEGENPROBE: eine neue MITSCHNITT-Zeile macht nichts sichtbar ($SV -> $SN) -- die Ausnahme wirkt"
 else
-    bad "GEGEN-GEGENPROBE: der Pruefer meckert den Mitschnitt an"
+    bad "GEGEN-GEGENPROBE: der Pruefer meckert den Mitschnitt an (sichtbar $SV -> $SN)"
     sed 's/^/        /' "$TMPD/gegen2.txt" | head -4
 fi
+
+# DRAHT-Ketten: Woerter eines Formats/Protokolls, die ein anderes
+# Programm Oktett fuer Oktett erwartet (Bruecken-Gruss, OTA-Signaturtext,
+# Feldnamen). Runde ROTABSCHNITTE 5 hatte zehn davon "entschriftet".
+drahtumlaut() { grep -rnE --include='*.fi' '"[^"]*[äöüÄÖÜß][^"]*".*//[[:space:]]*DRAHT' "$1" | wc -l; }
+is "DRAHT-Ketten mit Umlaut (Formatwoerter muessen ASCII bleiben)" "$(drahtumlaut kernel)" "0"
+k3="$TMPD/kopie3"; mkdir -p "$k3"
+sed 's|"osum-bruecke 1|"osum-brücke 1|' kernel/app/jarvisd.fi > "$k3/jarvisd.fi"
+is "GEGENPROBE der Bruecken-Gruss mit Umlaut wird gefunden" "$(drahtumlaut "$k3")" "1"
+DN=$(grep -rcE --include='*.fi' '//[[:space:]]*DRAHT' kernel | awk -F: '{s+=$2} END{print s+0}')
+if [ "$DN" -ge 13 ]; then ok "DRAHT-Marken im Kern: $DN"; else bad "DRAHT-Marken im Kern: $DN, erwartet >= 13"; fi
 
 echo
 echo "-- 4. jede getippte Marke nimmt beide Schreibungen"

@@ -526,7 +526,7 @@ hat "$OUT/ein1.txt" "ota: gesetzt abstand ist jetzt 900" "und sie laesst sich um
 hat "$OUT/ein1.txt" "abstand  900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 rc=$(lauf ein2 "ota einstellen unsinn 5;ota dienst;exit" 200)
-hat "$OUT/ein2.txt" "ota: das ist kein Schluessel" "ein unbekannter Schluessel wird abgelehnt"
+hat "$OUT/ein2.txt" "ota: das ist kein Schlüssel" "ein unbekannter Schluessel wird abgelehnt"
 hat "$OUT/ein2.txt" "ota: dienst, abstand 900" "und der Dienst nimmt den eingestellten Abstand"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein3 "ota dienst;exit")

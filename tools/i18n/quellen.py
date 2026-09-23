@@ -136,7 +136,18 @@ def funde(wurzel):
                     continue
                 kl = klasse(name, inhalt, zeilen, nr, code, fenster, kern,
                             fest)
+                # `// DRAHT: <wer liest es>` am Ende der Zeile: die Kette
+                # ist ein Wort eines Formats oder Protokolls (Feldname,
+                # Gruss, signierter Text), das ein ANDERES Programm Oktett
+                # fuer Oktett erwartet. Runde ROTABSCHNITTE 5 hat zehn
+                # solche Ketten "entschriftet" und damit die Bruecke, die
+                # OTA-Schluesselkette und die Papierkorb-Infodatei
+                # gebrochen. Eine DRAHT-Kette ist keine Umschrift.
+                draht = DRAHT.search(z) is not None
+                if draht:
+                    kl = 'MARKE'
                 aus.append(dict(datei=rel, zeile=nr, klasse=kl, name=name,
+                                draht=draht,
                                 breite=breite, inhalt=inhalt, roh=roh,
                                 stamm=[s for s, _ in
                                        translit.finde(inhalt)],
@@ -145,6 +156,7 @@ def funde(wurzel):
     return aus
 
 
+DRAHT = re.compile(r'//\s*DRAHT\b')
 FNKOPF = re.compile(r'^(?:pub\s+)?fn\s')
 
 
@@ -242,8 +254,8 @@ def marken(wurzel):
     klagen = []
     n = 0
     for r in funde(wurzel):
-        if r['klasse'] != 'MARKE' or r['name'] == '-':
-            continue
+        if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
+            continue                      # DRAHT: niemand tippt das
         pfad = os.path.join(wurzel, r['datei'])
         txt = open(pfad, encoding='utf-8').read()
         zeilen = txt.split('\n')

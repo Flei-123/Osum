@@ -488,7 +488,7 @@ echo "== 10. ZWEI PROGRAMME GLEICHZEITIG, aus Ring 3 =="
 rc=$(pl zwei "/bin/play /ton.wav & /bin/play /ton44.wav")
 n2=$(grep -ca 'strom:' "$TMPD/zwei.txt" || true)
 num "zwei Abspieler haben je einen Strom bekommen" "${n2:-0}" ge 1
-hasnot "$TMPD/zwei.txt" "Geraet ist belegt" "keiner der beiden wurde abgewiesen"
+hasnot "$TMPD/zwei.txt" "Gerät ist belegt" "keiner der beiden wurde abgewiesen"
 
 echo "== 11. die Zahlen der Runde =="
 echo "    Zeilen je Datei:"
