@@ -47,7 +47,12 @@ export FIRNLIB="$ROOT/lib"
 
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 BLOCKS=6144
-PROGS="sh ls cat echo mkdir rm cp sync tresor backup key bsect"
+# `sleep` GEHOERT DAZU: (h) wartet mit `sleep 3` auf das Ende einer Frist
+# von einer Sekunde. Ohne /bin/sleep (die Schale hat es nicht eingebaut)
+# kam nur "nicht gefunden", die Frist lief nicht ab, und "(h) die Frist
+# wirkt nicht" war rot -- bis auf Laeufe unter Last, in denen der
+# Systemstart selbst laenger als eine Sekunde brauchte.
+PROGS="sh ls cat echo mkdir rm cp sync tresor backup key bsect sleep"
 
 TMPD=$(mktemp -d)
 # WAS BEIM ABBRUCH ZURUECKBLEIBEN DARF: nichts. Die Gegenproben (j3, j4)
