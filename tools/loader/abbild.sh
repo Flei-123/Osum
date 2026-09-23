@@ -48,6 +48,13 @@ BLOCKS=${LADEN_BLOCKS:-262144}          # 512-Oktett-Bloecke -> 128 MiB
 BOESE=${BOESE:-/root/ota-avx-nach/boese}
 QUELLE=${LADEN_QUELLE:-https://store.fleitec.com/osum/aktuell}
 PUB=${LADEN_PUB:-$OUT/schluessel.pub}
+# RUNDE ROADMAP-3: niemand legte $OUT/schluessel.pub an -- run.sh brach bei
+# Abschnitt 3 ab. Derselbe Rueckgriff wie tools/usbimg/build.sh:783: der
+# Schluessel der Auslieferung, die dieser Wirt selbst bedient.
+if [ -z "${LADEN_PUB:-}" ] && [ ! -s "$PUB" ] \
+   && [ -s "${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub" ]; then
+    PUB="${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub"
+fi
 
 [ -d "$OUT/bin" ] || { echo "== $OUT/bin fehlt -- erst tools/loader/build.sh"; exit 1; }
 [ -s "$PUB" ] || { echo "== $PUB fehlt (der oeffentliche Schluessel der Auslieferung)"; exit 1; }

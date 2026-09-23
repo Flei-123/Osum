@@ -38,7 +38,10 @@ mkdir -p "$OUT"
 # `speicher` ist die Anwendung der Runde, `du` das Gegenstueck auf der
 # Kommandozeile -- die beiden MUESSEN dieselbe Zahl liefern, und dass sie
 # aus derselben Quelle (kernel/user/nidx.fi) kommen, ist der Grund.
-PROGS="speicher du sh echo ls cat locate"
+# Seit ENGLISCH ETAPPE 9 heisst die QUELLE storage.fi; das Programm heisst
+# weiter /bin/speicher (run.sh sucht "k15: start /bin/speicher").
+PROGS="storage du sh echo ls cat locate"
+binname() { if [[ $1 == storage ]]; then echo speicher; else echo "$1"; fi; }
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -30 "$OUT/k.log"; exit 1; }
@@ -70,7 +73,13 @@ done
 # --------------------------------------------------------- gross.img (Zeit)
 python3 tools/k15/bigfs.py "$OUT/gross" 4000 > "$OUT/gross.log" 2>&1 || exit 1
 ARGS=(build "$OUT/gross.img" 4096 /bin/)
-for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
+# Auf gross.img laeuft nur `du -m /data` (run.sh: lauf zeit). /bin/speicher
+# ist seit profile app 1,26 MB und passt neben 4000 Inodes nicht mehr in
+# die zwei Megaoktett einer OFS-Blockkarte ("mkfs: the disk is full").
+for p in $PROGS; do
+    [[ $p == storage ]] && continue
+    ARGS+=("/bin/$(binname $p)=$OUT/$p.elf")
+done
 while read -r zeile; do ARGS+=("$zeile"); done < "$OUT/gross/angaben"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-gross.log" 2>&1 || {
     echo "== mkfs.py (gross) fehlgeschlagen"; tail -5 "$OUT/mkfs-gross.log"
@@ -94,7 +103,7 @@ ARGS=(build "$OUT/inhalt.img" 4096 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf"
       "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
-for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
+for p in $PROGS; do ARGS+=("/bin/$(binname $p)=$OUT/$p.elf"); done
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme")
 while read -r zeile; do ARGS+=("$zeile"); done < "$OUT/baum/angaben"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-inhalt.log" 2>&1 || {

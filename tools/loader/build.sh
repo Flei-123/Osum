@@ -49,9 +49,13 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 
 eins() { # <name>
     local p=$1
+    # Seit ENGLISCH ETAPPE 9 heisst die QUELLE von /bin/rechner calc.fi;
+    # Paket und Laden kennen das Programm weiter als `rechner`.
+    local q=$p
+    [[ $p == rechner ]] && q=calc
     UPROF=""; UCRT="$OUT/crt.o"
-    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
+    grep -qa '^profile app' "kernel/user/$q.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$CC" $UPROF -c "kernel/user/$q.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
         echo "FEHLER-UEBERSETZER $p"; return 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
        -o "$OUT/bin/$p" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr" || {
