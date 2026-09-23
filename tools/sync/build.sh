@@ -13,6 +13,12 @@ ROOT=$(pwd)
 # im Arbeitsbaum anfasst -- ein abgebrochener Lauf soll nichts kaputt
 # zuruecklassen.
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
+# USRC ebenso (A-028): das Verzeichnis, aus dem die Programme kommen.
+# Ein Programm findet `import ulib`, `import kbund` nur neben sich selbst,
+# FIRNLIB hilft da nicht. Die Gegenproben (j3, j4) legen deshalb eine
+# KOPIE von kernel/user/ an, flicken DORT und bauen mit USRC=<kopie>.
+# Der Quelltext im Baum wird von keinem Laeufer mehr angefasst.
+USRC="${USRC:-kernel/user}"
 
 OUT=${1:?zielverzeichnis fehlt}
 STUFE=${2:-0}
@@ -28,8 +34,8 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 rc=0
 for p in $PROGS; do
     UPROF=""; UCRT="$OUT/crt.o"
-    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    if ! "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    grep -qa '^profile app' "$USRC/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    if ! "$CC" $UPROF -c "$USRC/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "FEHLER: firnc$STUFE uebersetzt $p.fi nicht"
         sed 's/^/    /' "$OUT/$p.err" | head -12
         rc=1

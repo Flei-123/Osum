@@ -50,15 +50,15 @@ BLOCKS=6144
 PROGS="sh ls cat echo mkdir rm cp sync tresor backup key bsect"
 
 TMPD=$(mktemp -d)
-# WAS BEIM ABBRUCH ZURUECKBLEIBEN DARF: nichts. (j3) muss kernel/user/sync.fi
-# kurz durch eine kaputte Fassung ersetzen -- ein Programm baut nur aus
-# seinem eigenen Pfad, da hilft kein FIRNLIB. Also legt es vorher eine
-# Kopie unter $TMPD/sync.sicher, und dieser Trap spielt sie auch dann
-# zurueck, wenn der Lauf mit Strg-C oder einem Signal endet.
+# WAS BEIM ABBRUCH ZURUECKBLEIBEN DARF: nichts. Die Gegenproben (j3, j4)
+# brauchen eine kaputte Fassung von kernel/user/sync.fi. Bis A-028 wurde
+# die Datei dafuer IM BAUM ueberschrieben und danach zurueckgespielt --
+# ein abgebrochener Lauf oder eine Aenderung waehrenddessen hat so echten
+# Quelltext zurueckgedreht, und parallele Laeufer bauten die kaputte
+# Fassung mit. Jetzt flicken sie eine Kopie ($TMPD/usrc-*), und der
+# Laeufer prueft am Ende, dass der Baum unangetastet ist.
+SYNC_SHA0=$(sha256sum kernel/user/sync.fi | cut -d' ' -f1)
 aufraeumen() {
-    if [ -s "$TMPD/sync.sicher" ]; then
-        cp "$TMPD/sync.sicher" kernel/user/sync.fi
-    fi
     rm -rf "$TMPD"
 }
 trap aufraeumen EXIT INT TERM
@@ -576,6 +576,13 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
         i=$((i+1))
     done
     is "(f) und alle 12 Dateien kommen danach heil beim naechsten Geraet an" "$g" "12"
+    if [ "$g" != 12 ]; then
+        # Was das dritte Geraet dazu sagt -- ohne das ist die Zahl stumm.
+        klar F3 | grep -a 'sync\|fehler\|fertig\|heruntergel\|dateien\|^d[0-9]' \
+            | head -12 | sed 's/^/        F3: /'
+        note "F3 /daten: $(ls "$TMPD/datenF3" 2>/dev/null | tr '\n' ' ')"
+        note "F2: $(klar F2 | grep -a 'dateien\|hochgel\|neubloecke\|generation' | tr '\n' ' ')"
+    fi
     # Und die sechs Kopien, die der abgeschossene ZWEITE Abgleich
     # hochladen wollte: entweder ganz da oder gar nicht da -- niemals
     # halb. Wieviele es sind, haengt davon ab, wann der Schuss fiel;
@@ -959,11 +966,11 @@ fi
 
 # (j3) Der Rueckschrittschutz wird ausgebaut: ein Zaehler, der nie
 #      steigt, muss den Rueckschrittfall aus (e) durchgehen lassen.
-cp kernel/user/sync.fi "$TMPD/sync.sicher"
+rm -rf "$TMPD/usrc-j3"; cp -a kernel/user "$TMPD/usrc-j3"
 sed 's/^    if g < zaehler {$/    if false {/' kernel/user/sync.fi > "$TMPD/kaputt/sync-ohneschutz.fi"
 if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
-    cp "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi
-    if bash tools/sync/build.sh "$TMPD/binj" 0 sync >/dev/null 2>&1; then
+    cp "$TMPD/kaputt/sync-ohneschutz.fi" "$TMPD/usrc-j3/sync.fi"
+    if USRC="$TMPD/usrc-j3" bash tools/sync/build.sh "$TMPD/binj" 0 sync >/dev/null 2>&1; then
         cp "$TMPD/bin/sync.elf" "$TMPD/bin/sync.elf.sicher"
         cp "$TMPD/binj/sync.elf" "$TMPD/bin/sync.elf"
         geraet "$TMPD/J3.img" "$TMPD/sE.sh" "$TMPD/kontoR" "$TMPD/sb-rueck" "$TMPD/leer" -
@@ -978,7 +985,7 @@ if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
     else
         bad "(j3) die kaputte Fassung baut nicht"
     fi
-    cp "$TMPD/sync.sicher" kernel/user/sync.fi
+    rm -rf "$TMPD/usrc-j3"
 else
     bad "(j3) der Schnitt hat nichts geaendert -- die Gegenprobe misst nichts"
 fi
@@ -990,7 +997,7 @@ fi
 #      trotzdem "fertig" melden. Genau das war der Zustand, den kein
 #      Test der Runde gesehen hat, weil die groesste Pruefdatei 9000
 #      Oktette hatte.
-cp kernel/user/sync.fi "$TMPD/sync.sicher"
+rm -rf "$TMPD/usrc-j4"; cp -a kernel/user "$TMPD/usrc-j4"
 python3 - kernel/user/sync.fi "$TMPD/kaputt/sync-still.fi" <<'PYS'
 import sys
 s = open(sys.argv[1], encoding='utf-8').read()
@@ -1003,8 +1010,8 @@ s = s.replace("""                    remember_path((&relp[0]) as u64)
 open(sys.argv[2], 'w', encoding='utf-8').write(s)
 PYS
 if ! cmp -s "$TMPD/kaputt/sync-still.fi" kernel/user/sync.fi; then
-    cp "$TMPD/kaputt/sync-still.fi" kernel/user/sync.fi
-    if bash tools/sync/build.sh "$TMPD/binj4" 0 sync >/dev/null 2>&1; then
+    cp "$TMPD/kaputt/sync-still.fi" "$TMPD/usrc-j4/sync.fi"
+    if USRC="$TMPD/usrc-j4" bash tools/sync/build.sh "$TMPD/binj4" 0 sync >/dev/null 2>&1; then
         cp "$TMPD/bin/sync.elf" "$TMPD/bin/sync.elf.sicher"
         cp "$TMPD/binj4/sync.elf" "$TMPD/bin/sync.elf"
         mkdir -p "$TMPD/j4store" "$TMPD/j4leer"
@@ -1026,7 +1033,7 @@ EOS
     else
         bad "(j4) die kaputte Fassung baut nicht"
     fi
-    cp "$TMPD/sync.sicher" kernel/user/sync.fi
+    rm -rf "$TMPD/usrc-j4"
 else
     bad "(j4) der Rueckbau hat nichts geaendert -- die Gegenprobe misst nichts"
 fi
@@ -1253,6 +1260,10 @@ print("  im Speicher (32 Oktette Name + 2 x 8 Zahl je Block): %d KiB"
       % (n * 48 // 1024))
 PY
 note "gerechnet aus dem Format, dessen Zeilen oben gemessen wurden"
+
+# A-028: kein Abschnitt darf den Quelltext im Baum veraendert haben.
+is "kernel/user/sync.fi im Baum ist nach allen Gegenproben unangetastet" \
+   "$(sha256sum kernel/user/sync.fi | cut -d' ' -f1)" "$SYNC_SHA0"
 
 echo
 echo "SYNC: $pass passed, $fail failed"
