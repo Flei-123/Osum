@@ -254,6 +254,74 @@ const PAGE: u64 = 4096
 // Sekunde und damit weit mehr, als eine SATA-Platte je braucht.
 const SPIN_LIMIT: u64 = 1000000
 const RESET_LIMIT: u64 = 2000000
+
+// ==================================================================
+// WARUM EINE RUNDENZAHL ALLEIN KEINE ZEITSCHRANKE IST
+// ==================================================================
+//
+// Die beiden Zahlen darueber sind RUNDEN, keine Sekunden, und sie sind
+// -- wie der Absatz darueber sagt -- gegen die Kosten eines
+// VM-AUSTRITTS unter KVM geeicht: dort kostet ein Registerzugriff ein
+// bis zwei Mikrosekunden, eine Million Runden sind also etwa eine
+// Sekunde.
+//
+// UNTER TCG STIMMT GENAU DIESE EICHUNG NICHT MEHR. Dort gibt es keinen
+// VM-Austritt; QEMU beantwortet den Zugriff im selben Uebersetzungslauf,
+// und eine Runde kostet einen Bruchteil davon. Dieselbe Million Runden
+// ist damit nicht mehr eine Sekunde, sondern viel weniger -- waehrend
+// das emulierte Laufwerk fuer denselben Befehl LAENGER braucht als das
+// durchgereichte. Beide Enden laufen auseinander, und zwar gegenlaeufig.
+//
+// GEMESSEN, 23.09.2026, derselbe Kern, dieselbe Platte, nur der
+// Beschleuniger getauscht:
+//
+//   -accel kvm   ahci: cmds=197  errs=0  dead=0  alive=1
+//   -accel tcg   ahci: cmds=3    errs=1  dead=1  alive=0
+//
+// Der Treiber war nicht kaputt: die Schranke lief ab, bevor das
+// emulierte Laufwerk antworten konnte, `run` erklaerte das Geraet nach
+// der Regel oben fuer WEG, und jeder folgende Befehl sagte sofort nein.
+// Genau deshalb standen in `tools/ahci/run.sh` vier rote Zusagen
+// (8.2..8.5), und genau deshalb stand in der Roadmap `A-005` als
+// "vorbestehend, Umgebung" -- die Umgebung war es, aber die Ursache lag
+// hier.
+//
+// DIE ABHILFE IST EINE ECHTE UHR UND KEINE GROESSERE RUNDENZAHL. Eine
+// groessere Zahl waere wieder gegen einen Beschleuniger geeicht und
+// wuerde unter KVM genau den Stillstand zurueckholen, den der Absatz
+// oben beschreibt (`nobm` lief damit in die 180-Sekunden-Schranke des
+// Laeufers). Der TSC ist seit Runde K2 geeicht und liegt als
+// `apic.tsc_hz` bereit; damit ist die Schranke in MIKROSEKUNDEN
+// ausgedrueckt und gilt auf beiden Beschleunigern dieselbe.
+//
+// Die Rundenzahl bleibt als ZWEITE Schranke stehen. Ist der TSC nicht
+// geeicht (`tsc_hz` == 0, sehr frueh im Start oder auf einer Maschine
+// ohne brauchbaren Zaehler), gilt weiterhin nur sie -- ein Kern, dessen
+// Zeitschranke von einer Uhr abhaengt, die es noch nicht gibt, haette
+// gar keine.
+const CMD_US: u64 = 3000000 // 3 s fuer einen einzelnen Befehl
+const RESET_US: u64 = 6000000 // 6 s fuer Reset/Anlauf
+const PROBE_US: u64 = 300000 // 0,3 s fuer einen sichtbar leeren Port
+
+// Der Zeitpunkt, an dem eine Schranke ablaeuft -- oder 0, wenn es keine
+// Uhr gibt. Alle Warteschleifen dieser Datei fragen `fristab`, und nur
+// dort steht die Fallunterscheidung.
+fn frist(state: u64, us: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    return apic.tsc() + (hz / 1000000) * us
+}
+
+// Ist die Frist abgelaufen? Ohne Uhr (`bis` == 0) niemals -- dann
+// zaehlt allein die Rundenzahl der jeweiligen Schleife.
+fn fristab(bis: u64) -> bool {
+    if bis == 0 {
+        return false
+    }
+    return apic.tsc() >= bis
+}
 // WIE LANGE EIN LEERER PORT KOSTEN DARF. DET == 0 in PxSSTS heisst
 // "ueberhaupt kein Geraet erkannt" -- nicht "noch nicht ausgehandelt",
 // das waere 1. Ein Port, der nach dieser kurzen Spanne immer noch
@@ -549,8 +617,9 @@ fn handoff(state: u64, b: u64) -> bool {
         return true
     }
     wr32(b, R_BOHC, rd32(b, R_BOHC) | BOHC_OOS)
+    let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         let v: u64 = rd32(b, R_BOHC)
         if (v & BOHC_BOS) == 0 && (v & BOHC_BB) == 0 {
             return true
@@ -567,8 +636,9 @@ fn hba_reset(state: u64, b: u64) -> bool {
     // HR ist das einzige Bit in diesem Kern, das die HARDWARE
     // zurueckstellt und nicht der Kern. Solange es steht, laeuft der
     // Reset; bleibt es stehen, ist der Controller hin.
+    let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         if (rd32(b, R_GHC) & GHC_HR) == 0 {
             wr32(b, R_GHC, rd32(b, R_GHC) | GHC_AE)
             return true
@@ -671,8 +741,9 @@ fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
     pwr(state, p, P_IE, 0)
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_SUD | CMD_POD)
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_FRE)
+    let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         if (prd(state, p, P_CMD) & CMD_FR) != 0 {
             return true
         }
@@ -688,9 +759,11 @@ fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
 // erreicht keine von beiden und faellt nach der Schranke durch, statt
 // den Kern anzuhalten.
 fn link_up(state: u64, p: u64) -> bool {
+    let bis: u64 = frist(state, RESET_US)
+    let bisprobe: u64 = frist(state, PROBE_US)
     var spin: u64 = 0
     var linked: bool = false
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         let ssts: u64 = prd(state, p, P_SSTS)
         let det: u64 = ssts & 0xF
         if det == DET_PRESENT && ((ssts >> 8) & 0xF) == IPM_ACTIVE {
@@ -701,7 +774,7 @@ fn link_up(state: u64, p: u64) -> bool {
             // immer noch auf 0, es ist also nicht einmal etwas erkannt
             // worden. Ein Port, an dem ausgehandelt WIRD, meldet
             // laengst 1 und laeuft die volle Schranke weiter.
-            if det == 0 && spin > PROBE_LIMIT {
+            if det == 0 && (spin > PROBE_LIMIT || fristab(bisprobe)) {
                 spin = RESET_LIMIT
             } else {
                 spin = spin + 1
@@ -712,7 +785,7 @@ fn link_up(state: u64, p: u64) -> bool {
         return false
     }
     spin = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         let s: u64 = prd(state, p, P_SIG)
         if s != 0 && s != 0xFFFFFFFF {
             // Und nicht mehr beschaeftigt: solange BSY oder DRQ steht,
@@ -767,20 +840,25 @@ fn port_setup(state: u64, p: u64) -> bool {
 
 fn port_stop(state: u64, p: u64) -> bool {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
+    let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT {
+    var raus: bool = false
+    while spin < RESET_LIMIT && !raus {
         if (prd(state, p, P_CMD) & CMD_CR) == 0 {
-            spin = RESET_LIMIT + 1
+            raus = true
         } else {
+            if fristab(bis) {
+                return false
+            }
             spin = spin + 1
         }
     }
-    if spin == RESET_LIMIT {
+    if !raus {
         return false
     }
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_FRE))
     spin = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         if (prd(state, p, P_CMD) & CMD_FR) == 0 {
             return true
         }
@@ -790,8 +868,9 @@ fn port_stop(state: u64, p: u64) -> bool {
 }
 
 fn await_idle(state: u64, p: u64) -> bool {
+    let bis: u64 = frist(state, CMD_US)
     var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+    while spin < SPIN_LIMIT && !fristab(bis) {
         let tfd: u64 = prd(state, p, P_TFD)
         if (tfd & (TFD_BSY | TFD_DRQ)) == 0 {
             return true
@@ -932,8 +1011,9 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     pwr(state, p, P_CI, 1)
     kstate.add(state, sc(S_CMDS), 1)
 
+    let bis: u64 = frist(state, CMD_US)
     var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+    while spin < SPIN_LIMIT && !fristab(bis) {
         if (prd(state, p, P_CI) & 1) == 0 {
             let tfd: u64 = prd(state, p, P_TFD)
             kstate.set(state, sc(S_TFD), tfd)
@@ -988,8 +1068,9 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
 // Zeitschranke laufen, und dann sieht es aus, als sei die Platte weg.
 fn recover(state: u64, p: u64) {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
+    let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT {
+    while spin < RESET_LIMIT && !fristab(bis) {
         if (prd(state, p, P_CMD) & CMD_CR) == 0 {
             spin = RESET_LIMIT
         } else {
