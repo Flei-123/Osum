@@ -99,7 +99,21 @@ grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/ui/wig.fi \
 if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'tafel_an('; then
     ok "ttf.glyph nimmt die Tafelsperre"
 else bad "ttf.glyph nimmt die Tafelsperre nicht"; fi
-if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_aus()'; then
+# ================================================== RUNDE ROADMAP-2
+# HIER STAND `irq_aus()`. Die Funktion heisst seit Runde ENGLISCH
+# (`d3b925ba`, "der Kern -- 209 Namen, 1324 Stellen in 93 Dateien")
+# `irq_ack` -- der Kern kennt `irq_aus` an KEINER Stelle mehr. Der
+# grep fand also nie etwas, und die Zusage war dauerhaft rot, obwohl
+# `ttf.glyph` die Unterbrechungen sehr wohl anhaelt:
+#     let fl: u64 = irq_ack()      // pushfq; pop rax; cli
+#     ...
+#     irq_an(fl)                   // sti, wenn IF vorher stand
+# Gesucht wird jetzt das PAAR aus Abschalten und Wiederherstellen und
+# nicht ein einzelner Name -- und `irq_aus` bleibt als alter Name
+# zugelassen, damit die Zusage auch auf aelteren Staenden misst.
+if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi \
+   | grep -qE 'irq_(ack|aus)\(\)' \
+   && awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_an('; then
     ok "und haelt dabei die Unterbrechungen an (die Kennung ist eine Kernnummer)"
 else bad "ttf.glyph haelt die Unterbrechungen nicht an"; fi
 if awk '/^fn gload\(/,/^}/' kernel/user/wlibc.fi | grep -q 'gw > GMAX'; then
