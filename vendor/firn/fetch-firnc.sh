@@ -51,6 +51,39 @@ if [[ $FORCE -eq 0 && -x $HIER/bin/firnc && -x $HIER/bin/firnc1 \
     exit 0
 fi
 
+# --- A-023: ERST IN DEN GESCHWISTER-ARBEITSBAEUMEN NACHSEHEN.
+#
+# bin/ und lib/ sind nicht eingecheckt und liegen in JEDEM Arbeitsbaum
+# einzeln. Ein frischer `git worktree add` hat sie also nicht -- und der
+# Pin in COMMIT zeigt auf die ALTE Firn-Historie, die es in /root/firn
+# nicht mehr gibt (siehe HERKUNFT.md). Gemessen 23.09.2026: jeder Laeufer
+# in einem neuen Baum meldete "der Kern baut nicht", obwohl am Baum
+# nichts fehlte ausser dieser Kette.
+#
+# Ein anderer Arbeitsbaum DESSELBEN Repos, dessen `.gebaut` genau
+# dieselbe MARKE traegt (Commit UND Flickenstand), hat eine Kette, die
+# aus demselben Quelltext mit denselben Flicken entstanden ist. Die wird
+# uebernommen -- und nur die: eine andere Marke heisst anderer
+# Uebersetzer, und dann wird weiter unten wie bisher gebaut.
+# `--force` ueberspringt das bewusst.
+if [[ $FORCE -eq 0 ]]; then
+    while read -r baum; do
+        [[ -n $baum ]] || continue
+        quelle="$baum/vendor/firn"
+        [[ $(cd "$quelle" 2>/dev/null && pwd) == "$HIER" ]] && continue
+        [[ -x $quelle/bin/firnc && -x $quelle/bin/firnc1 && -d $quelle/lib \
+           && -f $quelle/.gebaut ]] || continue
+        [[ $(cat "$quelle/.gebaut") == "$MARKE" ]] || continue
+        echo ">> Firn $KURZ (Flicken $PSUM) aus dem Arbeitsbaum $baum uebernommen"
+        rm -rf "$HIER/bin" "$HIER/lib"
+        cp -a "$quelle/bin" "$HIER/bin"
+        cp -a "$quelle/lib" "$HIER/lib"
+        printf '%s\n' "$MARKE" > "$HIER/.gebaut"
+        exit 0
+    done < <(git -C "$HIER" worktree list --porcelain 2>/dev/null \
+             | sed -n 's/^worktree //p')
+fi
+
 # --- Wo liegt das Firn-Repo? Es wird NUR zum Bauen gebraucht; sobald
 # bin/firnc, bin/firnc1 und lib/ stehen, laeuft dieses Repo ohne es.
 kandidaten=()
