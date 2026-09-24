@@ -78,7 +78,7 @@ python3 tools/i18n/coverage.py "$SANS" "$MONO" > "$TMPD/deckung.txt" 2>&1
 cov() { grep -a "i18n-coverage: file=assets/osum-$1.ttf" "$TMPD/deckung.txt" \
         | tail -1 | grep -oE " $2=[0-9]+" | sed 's/.*=//'; }
 for f in sans mono; do
-    is "osum-$f.ttf bildet Codepunkte ab" "$(cov $f mapped)" "338"
+    is "osum-$f.ttf bildet Codepunkte ab" "$(cov $f mapped)" "339"
     is "osum-$f.ttf: Latin-1-Ergaenzung vollstaendig (Umlaute, ss)" \
         "$(cov $f latin1)" "96"
     is "osum-$f.ttf: Latin Extended-A vollstaendig" "$(cov $f latin_a)" "128"

@@ -3119,6 +3119,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     ss(state, S_EVDROP, 0)
     ss(state, S_LASTUS, 0)
     ss(state, S_DON, 0)
+    ss(state, S_CLOCK, 0)
     ss(state, S_NODIRTY, 0)
     if nodirty {
         ss(state, S_NODIRTY, 1)
@@ -5894,9 +5895,32 @@ fn paint_sig(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         cx0, cy0, cx1, cy1)
 }
 
+// 24.09.2026: ONE COMPOSITION AT A TIME. `compose` is called from the
+// kernel's desktop loop AND out of a dozen window system calls, and a
+// system call can be preempted by the loop (or run on another core). Two
+// compositions at once share one scratch area -- the column sums of the
+// glass blur (`S_BC_SUM`) -- and the second one pulled the sums of the
+// first below zero: `panic: integer overflow in 'u64 - u64'` in
+// `blur_v`, reproduced with a single core as soon as windows really
+// left their opening movement. A TRY-lock and not a spin: whoever finds
+// it taken returns, the damage stays pending (`S_DON` is only cleared by
+// the composition that runs), and the next turn of the loop paints it.
+const S_CLOCK: u64 = 0x1598
+
+fn compose(state: u64) -> u64 {
+    let lk: u64 = state + kstate.WM_OFF + S_CLOCK
+    let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
+    if alt != 0 {
+        return 0
+    }
+    let r: u64 = compose_one(state)
+    arch.atomic_store(lk, 0)
+    return r
+}
+
 // Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
 // von unten nach oben jedes Fenster, das diese Stelle beruehrt.
-fn compose(state: u64) -> u64 {
+fn compose_one(state: u64) -> u64 {
     if !ready(state) || !fb.ready(state) {
         return 0
     }
@@ -6587,8 +6611,15 @@ fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     if nw <= 0 || nh <= 0 {
         return
     }
-    let ix: i64 = win_x(state, i) + border(state) as i64
-    let iy: i64 = win_y(state, i) + title_h(state) as i64
+    // 24.09.2026: THE INNER OFFSET OF THIS WINDOW, not of a decorated
+    // one. `border`/`title_h` put every UNDECORATED window (the login
+    // screen, the lock screen, the taskbar) one title bar lower and one
+    // border further right while it was animating -- and the damage of a
+    // blit, which is in the window's real coordinates, then repainted the
+    // wrong rows: the text field showed its top eight rows new and the
+    // rest old (Dell 9020: "typing is slow, text appears much later").
+    let ix: i64 = win_x(state, i) + inx(state, i) as i64
+    let iy: i64 = win_y(state, i) + iny(state, i) as i64
     var ox: i64 = ix + (bw - nw) / 2
     var oy: i64 = iy + (bh - nh) / 2
     // ================================================ RUNDE OBERFLAECHE
@@ -6773,9 +6804,9 @@ fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
                 let sub: u64 = x - r
                 let px: u64 = __mmio_read32((qz +% sub *% 4)
                     as *mut u32) as u64
-                sr = sr - ((px >> 16) & 255)
-                sg = sg - ((px >> 8) & 255)
-                sb = sb - (px & 255)
+                sr = sr -% ((px >> 16) & 255)
+                sg = sg -% ((px >> 8) & 255)
+                sb = sb -% (px & 255)
                 n = n - 1
             }
             x = x + 1
@@ -6865,11 +6896,11 @@ fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
             while xs < w {
                 let px: u64 = __mmio_read32((qz +% xs *% 4) as *mut u32) as u64
                 __mmio_write64((gr +% xs *% 8) as *mut u64,
-                    __mmio_read64((gr +% xs *% 8) as *mut u64) - ((px >> 16) & 255))
+                    __mmio_read64((gr +% xs *% 8) as *mut u64) -% ((px >> 16) & 255))
                 __mmio_write64((gg +% xs *% 8) as *mut u64,
-                    __mmio_read64((gg +% xs *% 8) as *mut u64) - ((px >> 8) & 255))
+                    __mmio_read64((gg +% xs *% 8) as *mut u64) -% ((px >> 8) & 255))
                 __mmio_write64((gb +% xs *% 8) as *mut u64,
-                    __mmio_read64((gb +% xs *% 8) as *mut u64) - (px & 255))
+                    __mmio_read64((gb +% xs *% 8) as *mut u64) -% (px & 255))
                 xs = xs + 1
             }
             n = n - 1

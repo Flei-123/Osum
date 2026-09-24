@@ -65,6 +65,7 @@ SAETZE = {
         (0xA0, 0xFF),      # Latin-1 Supplement
         (0x100, 0x17F),    # Latin Extended-A
         (0x2010, 0x201F),  # Striche und Anfuehrungszeichen
+        (0x2022, 0x2022),  # BULLET -- the dots of a password field
         (0x2026, 0x2026),  # Auslassungspunkte
         (0x20AC, 0x20AC),  # Eurozeichen
         (0xFFFD, 0xFFFD),  # ERSATZZEICHEN -- das Fehlerbild des Dekodierers
@@ -75,8 +76,8 @@ SAETZE = {
     "europe": [
         (0x20, 0x7E), (0xA0, 0xFF), (0x100, 0x17F),
         (0x370, 0x3FF), (0x400, 0x4FF),
-        (0x2010, 0x201F), (0x2026, 0x2026), (0x20AC, 0x20AC),
-        (0xFFFD, 0xFFFD),
+        (0x2010, 0x201F), (0x2022, 0x2022), (0x2026, 0x2026),
+        (0x20AC, 0x20AC), (0xFFFD, 0xFFFD),
     ],
     # NUR zum MESSEN, wie teuer Ostasiatisch waere -- siehe
     # docs/I18N.md, Abschnitt "Was diese Runde NICHT kann".  Kein
