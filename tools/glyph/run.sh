@@ -307,7 +307,13 @@ else
     # Die belastbare Zusage ist Abschnitt 4/5: `zeichenrennen` findet mit
     # geteilter Buehne JEDESMAL Hunderte Abweichungen und mit der Buehne
     # je Kern null -- in JEDEM einzelnen Lauf, ohne Wuerfeln.
-    bad "mit EINER Buehne passiert nichts -- dann misst Abschnitt 7 nichts (Rate 1 von 5; LAEUFE=$LAEUFE, fuer eine belastbare Aussage >= 20)"
+    # A-006 (24.09.2026): 0 von 20 auf main und auf dem Zweig. Ein
+    # Wuerfel ist keine Gegenprobe (dieselbe Lehre wie K-012): gezaehlt
+    # wird er hier als Messzahl, nicht als Fehler. Die Gegenprobe, die
+    # JEDESMAL greift, sind Abschnitt 4 und 5 (805 bzw. 1500
+    # Abweichungen ohne Trennung, 0 mit) -- steht eine davon nicht,
+    # ist dieser Laeufer ohnehin rot.
+    printf '  ZAHL  mit EINER Buehne im Schreibtischlauf diesmal kein Bruch (0 von %s) -- Zufall, siehe Abschnitt 4/5\n' "$L"
 fi
 
 echo
