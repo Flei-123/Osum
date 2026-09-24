@@ -1,0 +1,538 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/pwr/s3.fi -- K-004: THE REAL S3 ("Standby", suspend to RAM).
+//
+// Justin, 24.09.2026: a real standby, not only the hibernation that
+// RUNDE SCHLAF built. The difference: in S4 the machine is OFF and the
+// kernel starts from the beginning and reads its state back from disk.
+// In S3 the RAM stays powered, everything else loses power, and the
+// firmware jumps back into the kernel at the address the kernel wrote
+// into the FACS. Seconds instead of a boot.
+//
+// WHAT THE PREVIOUS ROUNDS LEFT, AND WHY IT WAS NOT BUILT:
+// `schlaf.s3_befund` said "Trampolin unter 1 MiB fehlt" and feared that
+// the firmware touches memory below 1 MiB between sleep and wake-up.
+// Measured on 24.09.2026 with a 200-line stub (docs/RUNDE-ROADMAP-5.md,
+// K-004): under QEMU 7.2 / SeaBIOS 1.16.2 the page 0x8000 survives, the
+// firmware enters it at 0800:0000, and the only thing that broke the way
+// back was a LOAD segment of the TEST image at 0xFF000 that had
+// overwritten the BIOS shadow. The kernel links at 1 MiB.
+//
+// THE CYCLE, in the order this file runs it:
+//
+//   1. the values: \_S3 (susp.measure, AML), PM1a/b_CNT and the FACS.
+//   2. a pattern in a fresh frame and its checksum -- the RAM promise.
+//   3. what S3 erases and nobody else restores: the PCI command
+//      register and BARs of every device `pci.scan` found (and the MSI
+//      address/data), the local APIC and the I/O APIC table, the 8259
+//      masks, whether ACPI mode (SCI_EN) was on.
+//   4. the wake-up blob to 0x8000 (end of arch/x86_64/smp.s), its
+//      address into FIRMWARE_WAKING_VECTOR, X_FIRMWARE_WAKING_VECTOR 0.
+//   5. `s3_save` -- returns 0 now. Caches written back, WAK_STS cleared,
+//      SLP_TYP written, then SLP_TYP|SLP_EN. The machine is gone.
+//   6. `s3_save` returns a SECOND time, with 1: the blob brought the
+//      processor back into long mode with every register of step 5.
+//   7. serial line, 8259s, APICs, PCI, SCI_EN back; checksum compared.
+//
+// COUNTER-CHECK `s3kaputt`: the first byte of the blob becomes `hlt`.
+// The machine sleeps exactly the same way and must NOT come back -- if
+// it did, something other than this blob would be bringing it back.
+//
+// WHAT THIS DOES NOT DO (and says so on the line):
+//   * other processors: this kernel parks them; S3 kills them and they
+//     are not started again here (`smp` would have to be run again).
+//   * device state INSIDE devices: a network card, an xHCI controller
+//     or an NVMe queue loses its rings. Their drivers need a resume
+//     hook of their own. What is restored here is the bus side only.
+//   * only measured under QEMU/SeaBIOS and QEMU/OVMF is not measured;
+//     a real board is Justin's to test.
+
+import lib.kstate
+import serial
+import sched.susp
+import arch.arch
+import mm.mem
+import bus.pci
+import arch.x86_64.apic
+import arch.x86_64.idt
+
+export { stage }
+
+// isr.s vector table, index 75 -> s3_vectors in smp.s
+const V_S3: u64 = 75
+
+// context offsets, see smp.s
+const C_WOKE: u64 = 0xD8
+const C_STAGE: u64 = 0x120
+
+// FADT
+const F_SMI_CMD: u64 = 48
+const F_ACPI_ENABLE: u64 = 52
+const F_PM1A_EVT: u64 = 56
+const F_PM1B_EVT: u64 = 60
+// FACS
+const FACS_WAKE: u64 = 12
+const FACS_XWAKE: u64 = 24
+
+const SLP_EN: u64 = 0x2000
+const SLP_TYP_MASK: u64 = 0x1C00
+const SCI_EN: u64 = 1
+const WAK_STS: u64 = 0x8000
+
+// the save buffer: frame 0 the APICs (16 + 480 words, apic.s3_save),
+// frames 1..2 the PCI side (32 devices * 24 words = 6144 bytes)
+const PCI_WORDS: u64 = 24
+const BUF_FRAMES: u64 = 3
+
+fn vec(state: u64, i: u64) -> u64 {
+    let table: u64 = __mmio_read64((kstate.get(state, kstate.VECTORS) + V_S3 * 8) as *mut u64)
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn put(buf: u64, i: u64, v: u64) {
+    __mmio_write64((buf + i * 8) as *mut u64, v)
+}
+
+fn get(buf: u64, i: u64) -> u64 {
+    return __mmio_read64((buf + i * 8) as *mut u64)
+}
+
+fn say(t: u64) {
+    serial.puts(t)
+}
+
+fn kv(t: u64, v: u64) {
+    serial.puts(t)
+    serial.dec(v)
+}
+
+fn kx(t: u64, v: u64) {
+    serial.puts(t)
+    serial.hex(v)
+}
+
+// Wait until the UART has shifted out its last bit. Without this the
+// last line before the sleep is cut off -- the transmitter loses power
+// with bytes still in its FIFO.
+fn drain() {
+    let b: u64 = serial.port() as u64
+    var spin: u64 = 0
+    while spin < 2000000 {
+        if (arch.dev_in8((b + 5) as u16) as u64 & 0x40) != 0 {
+            return
+        }
+        spin = spin + 1
+    }
+}
+
+// ------------------------------------------------ the RAM promise
+
+fn rotl(x: u64, n: u64) -> u64 {
+    return (x << n) | (x >> (64 - n))
+}
+
+fn fill(frame: u64, seed: u64) {
+    var i: u64 = 0
+    var x: u64 = seed
+    while i < 512 {
+        x = rotl(x, 13) ^ (i << 17) ^ 0x5DEECE66D
+        put(frame, i, x)
+        i = i + 1
+    }
+}
+
+fn sum(frame: u64) -> u64 {
+    var i: u64 = 0
+    var h: u64 = 0
+    while i < 512 {
+        // an ADD in the chain: with xor and rotations only, this pattern
+        // sums to 0 for every seed (it is linear over GF(2) -- measured,
+        // the first run printed sum=0x0 before and after)
+        h = rotl(h, 5) +% (get(frame, i) ^ i)
+        i = i + 1
+    }
+    return h
+}
+
+// ------------------------------------------------ the PCI side
+
+// Per device: bdf, dwords 0x04..0x3C (15), MSI cap offset, MSI control,
+// addr lo, addr hi, data -- 22 of 24 words used.
+fn pci_save(state: u64, buf: u64) -> u64 {
+    var n: u64 = pci.count(state)
+    if n > pci.MAX_DEV {
+        n = pci.MAX_DEV
+    }
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = buf + i * PCI_WORDS * 8
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        put(e, 0, bdf)
+        var d: u64 = 1
+        while d < 16 {
+            put(e, d, pci.cfg_read32(bdf, d * 4))
+            d = d + 1
+        }
+        let msi: u64 = pci.cap_find(bdf, pci.CAP_MSI)
+        put(e, 16, msi)
+        if msi != 0 {
+            let ctl: u64 = pci.cfg_read16(bdf, msi + 2)
+            put(e, 17, ctl)
+            put(e, 18, pci.cfg_read32(bdf, msi + 4))
+            if (ctl & 0x80) != 0 {
+                put(e, 19, pci.cfg_read32(bdf, msi + 8))
+                put(e, 20, pci.cfg_read16(bdf, msi + 12))
+            } else {
+                put(e, 19, 0)
+                put(e, 20, pci.cfg_read16(bdf, msi + 8))
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// How many BAR/command dwords were NOT what they had been, right after
+// the wake-up and before anything was restored. This is the number that
+// says why the restore exists.
+fn pci_lost(state: u64, buf: u64, n: u64) -> u64 {
+    var lost: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = buf + i * PCI_WORDS * 8
+        let bdf: u64 = get(e, 0)
+        var d: u64 = 4
+        while d < 10 {
+            if pci.cfg_read32(bdf, d * 4) != get(e, d) {
+                lost = lost + 1
+            }
+            d = d + 1
+        }
+        if (pci.cfg_read16(bdf, 4) & 0x7) != (get(e, 1) & 0x7) {
+            lost = lost + 1
+        }
+        i = i + 1
+    }
+    return lost
+}
+
+// Restore, BARs and the rest of the header first, the command register
+// LAST: a device must not decode its old addresses before they are back.
+// Returns the number of dwords that read back different afterwards.
+fn pci_restore(state: u64, buf: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = buf + i * PCI_WORDS * 8
+        let bdf: u64 = get(e, 0)
+        var d: u64 = 15
+        while d >= 2 {
+            pci.cfg_write32(bdf, d * 4, get(e, d))
+            d = d - 1
+        }
+        let msi: u64 = get(e, 16)
+        if msi != 0 {
+            let ctl: u64 = get(e, 17)
+            pci.cfg_write32(bdf, msi + 4, get(e, 18))
+            if (ctl & 0x80) != 0 {
+                pci.cfg_write32(bdf, msi + 8, get(e, 19))
+                pci.cfg_write16(bdf, msi + 12, get(e, 20))
+            } else {
+                pci.cfg_write16(bdf, msi + 8, get(e, 20))
+            }
+            pci.cfg_write16(bdf, msi + 2, ctl)
+        }
+        pci.cfg_write16(bdf, 4, get(e, 1) & 0xFFFF)
+        i = i + 1
+    }
+    var bad: u64 = 0
+    i = 0
+    while i < n {
+        let e: u64 = buf + i * PCI_WORDS * 8
+        let bdf: u64 = get(e, 0)
+        var d: u64 = 4
+        while d < 10 {
+            if pci.cfg_read32(bdf, d * 4) != get(e, d) {
+                bad = bad + 1
+            }
+            d = d + 1
+        }
+        if (pci.cfg_read16(bdf, 4) & 0x7) != (get(e, 1) & 0x7) {
+            bad = bad + 1
+        }
+        i = i + 1
+    }
+    return bad
+}
+
+// ------------------------------------------------ the sleep itself
+
+fn write_slp(port: u64, typ: u64) {
+    if port == 0 {
+        return
+    }
+    let cur: u64 = arch.dev_in16((port & 0xFFFF) as u16) as u64
+    let v: u64 = (cur & (0xFFFF ^ (SLP_TYP_MASK | SLP_EN))) | ((typ & 7) << 10)
+    arch.dev_out16((port & 0xFFFF) as u16, (v & 0xFFFF) as u16)
+    arch.dev_out16((port & 0xFFFF) as u16, ((v | SLP_EN) & 0xFFFF) as u16)
+}
+
+fn clear_wak(port: u64) {
+    if port != 0 {
+        arch.dev_out16((port & 0xFFFF) as u16, WAK_STS as u16)
+    }
+}
+
+// One cycle. Returns true if the machine came back.
+fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
+    var s_sl: [u8; 21] = "s3: schlafe zyklus=\0\0"
+    var s_wa: [u8; 18] = "s3: wach zyklus=\0\0"
+    var s_wo: [u8; 7] = " woke=\0"
+    var s_st: [u8; 8] = " stufe=\0"
+    var s_ng: [u8; 34] = "s3: schlaf griff nicht (SLP_EN)\0\0\0"
+    var s_mem: [u8; 23] = "s3: speicher gleich=\0\0\0"
+    var s_su: [u8; 6] = " sum=\0"
+    var s_pci: [u8; 17] = "s3: pci geraete=\0"
+    var s_lo: [u8; 12] = " verloren=\0\0"
+    var s_ba: [u8; 17] = " danach-falsch=\0\0"
+    var s_ap: [u8; 20] = "s3: apic leitungen=\0"
+    var s_sci: [u8; 13] = "s3: sci vor=\0"
+    var s_na: [u8; 8] = " nach=\0\0"
+    var s_ta: [u8; 11] = "s3: dauer \0"
+    var s_vo: [u8; 7] = " vor=\0\0"
+    var s_ti: [u8; 22] = "s3: ticks in 200 ms=\0\0"
+    var s_aus: [u8; 4] = "aus\0"
+    var s_tv: [u8; 14] = " vorher-ges=\0\0"
+    var s_w5: [u8; 5] = " w5=\0"
+    var s_ms: [u8; 4] = " ms\0"
+
+    let fadt: u64 = susp.fadt(state)
+    let facs: u64 = susp.facs(state)
+    let pm1a: u64 = susp.pm1a(state)
+    let pm1b: u64 = susp.pm1b(state)
+    let evta: u64 = kstate.get32(fadt + F_PM1A_EVT)
+    let evtb: u64 = kstate.get32(fadt + F_PM1B_EVT)
+    let ctx: u64 = vec(state, 3)
+
+    fill(frame, 0xC0FFEE00 + nr)
+    let before: u64 = sum(frame)
+    let npci: u64 = pci_save(state, buf + 0x1000)
+    let napic: u64 = apic.s3_save(state, buf)
+    let sci_before: u64 = arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN
+    let imr1: u64 = arch.dev_in8(0x21 as u16) as u64
+    let imr2: u64 = arch.dev_in8(0xA1 as u16) as u64
+
+    // the blob
+    let blob: u64 = vec(state, 0)
+    let blob_end: u64 = vec(state, 1)
+    let base: u64 = vec(state, 2)
+    var i: u64 = 0
+    while i < blob_end - blob {
+        kstate.set8(base + i, kstate.get8(blob + i) as u8)
+        i = i + 1
+    }
+    if kaputt {
+        kstate.set8(base, 0xF4 as u8) // hlt, and nothing else
+    }
+    __mmio_write64((ctx + C_WOKE) as *mut u64, 0)
+    // the vector: 32-bit field; the 64-bit one must be 0 or the
+    // firmware takes that instead (ACPI 6.4, 5.2.10)
+    __mmio_write32((facs + FACS_WAKE) as *mut u32, base as u32)
+    if susp.facs_len(state) >= 32 {
+        __mmio_write64((facs + FACS_XWAKE) as *mut u64, 0)
+    }
+
+    serial.puts((&s_sl[0]) as u64)
+    serial.dec(nr)
+    serial.nl()
+    drain()
+    let t0: u64 = apic.tsc()
+
+    var fl: u64 = 0
+    asm("pushfq; pop rax", out("rax") & fl)
+    let if_on: bool = (fl & 0x200) != 0
+    let ticks_before: u64 = kstate.get(state, kstate.TICKS)
+    asm("cli")
+    var rc: u64 = 0
+    let save: u64 = vec(state, 4)
+    asm("call rax", in("rax") save, in("rdi") ctx, out("rax") & rc,
+        clobber("memory"))
+    if rc == 0 {
+        asm("wbinvd")
+        clear_wak(evta)
+        clear_wak(evtb)
+        write_slp(pm1a, susp.s3_a(state))
+        write_slp(pm1b, susp.s3_b(state))
+        var spin: u64 = 0
+        while spin < 50000000 {
+            asm("pause")
+            spin = spin + 1
+        }
+        serial.puts((&s_ng[0]) as u64)
+        serial.nl()
+        return false
+    }
+
+    // ---- BACK. Everything below runs on a machine that was asleep.
+    serial.init()
+    let t1: u64 = apic.tsc()
+    serial.puts((&s_wa[0]) as u64)
+    serial.dec(nr)
+    serial.puts((&s_wo[0]) as u64)
+    serial.dec(__mmio_read64((ctx + C_WOKE) as *mut u64))
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(__mmio_read64((ctx + C_STAGE) as *mut u64))
+    serial.nl()
+
+    // the interrupt controllers: legacy masks first (a reset 8259 is
+    // wide open), then the APIC side, which masks them again if it owns
+    // the interrupts
+    idt.pic_remap()
+    idt.pic_mask(imr1 as u8, imr2 as u8)
+    let apic_bad: u64 = apic.s3_restore(state, buf)
+    serial.puts((&s_ap[0]) as u64)
+    serial.dec(napic)
+    serial.puts((&s_ba[0]) as u64)
+    serial.dec(apic_bad)
+    serial.nl()
+
+    let lost: u64 = pci_lost(state, buf + 0x1000, npci)
+    let pci_bad: u64 = pci_restore(state, buf + 0x1000, npci)
+    serial.puts((&s_pci[0]) as u64)
+    serial.dec(npci)
+    serial.puts((&s_lo[0]) as u64)
+    serial.dec(lost)
+    serial.puts((&s_ba[0]) as u64)
+    serial.dec(pci_bad)
+    serial.nl()
+
+    // ACPI mode: the firmware may hand the machine back in legacy mode
+    let sci_after: u64 = arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN
+    if sci_before != 0 && sci_after == 0 {
+        let smi: u64 = kstate.get32(fadt + F_SMI_CMD)
+        let en: u64 = kstate.get8(fadt + F_ACPI_ENABLE)
+        if smi != 0 && en != 0 {
+            arch.dev_out8((smi & 0xFFFF) as u16, en as u8)
+            var w: u64 = 0
+            while w < 1000000 && (arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN) == 0 {
+                w = w + 1
+            }
+        }
+    }
+    serial.puts((&s_sci[0]) as u64)
+    serial.dec(sci_before)
+    serial.puts((&s_na[0]) as u64)
+    serial.dec(arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN)
+    serial.nl()
+
+    let after: u64 = sum(frame)
+    serial.puts((&s_mem[0]) as u64)
+    if after == before {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_su[0]) as u64)
+    serial.hex(after)
+    serial.puts((&s_vo[0]) as u64)
+    serial.hex(before)
+    serial.puts((&s_w5[0]) as u64)
+    serial.hex(get(frame, 5))
+    serial.nl()
+
+    let hz: u64 = apic.tsc_hz(state)
+    // The interrupt flag as it was before the sleep -- and if it was on,
+    // proof that the restored timer really delivers again: 200 ms with
+    // interrupts on must bring new ticks.
+    serial.puts((&s_ti[0]) as u64)
+    if if_on {
+        asm("sti")
+        let k0: u64 = kstate.get(state, kstate.TICKS)
+        let c0: u64 = apic.tsc()
+        var w2: u64 = 0
+        while w2 < 400000000 {
+            if hz != 0 && apic.tsc() - c0 > hz / 5 {
+                w2 = 400000000
+            }
+            asm("pause")
+            w2 = w2 + 1
+        }
+        serial.dec(kstate.get(state, kstate.TICKS) - k0)
+    } else {
+        serial.puts((&s_aus[0]) as u64)
+    }
+    serial.puts((&s_tv[0]) as u64)
+    serial.dec(ticks_before)
+    serial.nl()
+    if hz != 0 && t1 > t0 {
+        serial.puts((&s_ta[0]) as u64)
+        serial.dec((t1 - t0) / (hz / 1000))
+        serial.puts((&s_ms[0]) as u64)
+        serial.nl()
+    }
+    return true
+}
+
+fn stage(state: u64) {
+    let one: bool = kstate.mode_on(state, kstate.M_S3)
+    let two: bool = kstate.mode_on(state, kstate.M_S3ZWEI)
+    let kaputt: bool = kstate.mode_on(state, kstate.M_S3KAPUTT)
+    if !one && !two && !kaputt {
+        return
+    }
+    var s_hd: [u8; 12] = "s3: fadt=\0\0\0"
+    var s_fc: [u8; 7] = " facs=\0"
+    var s_pa: [u8; 7] = " pm1a=\0"
+    var s_pb: [u8; 7] = " pm1b=\0"
+    var s_ty: [u8; 7] = " slp3=\0"
+    var s_sl: [u8; 2] = "/\0"
+    var s_no: [u8; 21] = "s3: geht nicht why=\0\0"
+    var s_bl: [u8; 10] = " blob=\0\0\0\0"
+    var s_en: [u8; 12] = "s3: fertig\0\0"
+
+    if !susp.ready(state) {
+        susp.measure(state)
+    }
+    serial.puts((&s_hd[0]) as u64)
+    serial.hex(susp.fadt(state))
+    serial.puts((&s_fc[0]) as u64)
+    serial.hex(susp.facs(state))
+    serial.puts((&s_pa[0]) as u64)
+    serial.hex(susp.pm1a(state))
+    serial.puts((&s_pb[0]) as u64)
+    serial.hex(susp.pm1b(state))
+    serial.puts((&s_ty[0]) as u64)
+    serial.dec(susp.s3_a(state))
+    serial.puts((&s_sl[0]) as u64)
+    serial.dec(susp.s3_b(state))
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(vec(state, 1) - vec(state, 0))
+    serial.nl()
+    if !susp.s3_ok(state) || susp.facs(state) == 0 || susp.pm1a(state) == 0 {
+        serial.puts((&s_no[0]) as u64)
+        susp.why_name(susp.why(state))
+        serial.nl()
+        return
+    }
+    let buf: u64 = mem.frame_run(state, BUF_FRAMES)
+    let frame: u64 = mem.frame_run(state, 1)
+    if buf == 0 || frame == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(0)
+        serial.nl()
+        return
+    }
+    var n: u64 = 1
+    if two {
+        n = 2
+    }
+    var k: u64 = 1
+    while k <= n {
+        if !cycle(state, k, kaputt, buf, frame) {
+            k = n
+        }
+        k = k + 1
+    }
+    mem.frame_free_run(state, buf, BUF_FRAMES)
+    mem.frame_free_run(state, frame, 1)
+    serial.puts((&s_en[0]) as u64)
+    serial.nl()
+}

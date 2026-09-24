@@ -2206,11 +2206,17 @@ same "und zwar in lib/ecke.fi, wo beide Ringe ihn uebersetzen" "lib/ecke.fi" \
 # GEGENPROBE: ein zweiter Abtaster, auf dem Wirt danebengelegt, MUSS
 # gefunden werden -- sonst misst die Zeile darueber nur, dass `grep`
 # laeuft.
+#
+# A-033: der zweite Abtaster liegt NICHT im Baum, sondern in $TMPD und
+# wird demselben Zaehler als weitere Eingabe mitgegeben -- so misst die
+# Gegenprobe dasselbe `grep`, und der Quelltext bleibt unangetastet,
+# auch wenn der Lauf genau hier abbricht oder parallel ein Bau liest.
+mkdir -p "$TMPD/gegen/lib"
 printf 'fn corner_cov(dx: u64) -> u64 {\n    return 0\n}\n' \
-    > lib/.zweiter-abtaster-probe.fi
+    > "$TMPD/gegen/lib/.zweiter-abtaster-probe.fi"
 CC2=$(grep -rac '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
+      "$TMPD/gegen/lib/" \
       2>/dev/null | awk -F: '{ n += $2 } END { print n+0 }')
-rm -f lib/.zweiter-abtaster-probe.fi
 num "GEGENPROBE: ein zweiter Abtaster im Baum wird gefunden" "$CC2" eq 2
 # UND DIESELBE FRAGE AN DEN GANZEN BAUM, nicht an eine Datei.
 #
@@ -2266,12 +2272,19 @@ num "es sind wirklich Funde gemessen worden" \
 # darueber MUSS sie finden. Ohne sie misst "0 fehlen" nur, dass `comm`
 # laeuft. Der Name traegt absichtlich kein englisches Wort -- genau
 # der Fall, den das alte Muster durchgelassen haette.
+#
+# A-033: die untergeschobene Datei liegt in $TMPD, nicht in kernel/user/.
+# Ihre Treffer laufen durch dasselbe Muster und bekommen den Pfad
+# vorangestellt, den sie im Baum haetten -- die Zeile, die `comm` sieht,
+# ist Oktett fuer Oktett dieselbe wie frueher, nur der Baum bleibt heil.
+mkdir -p "$TMPD/gegen"
 printf 'fn zweimischer(a: u64, b: u64) -> u64 {\n    return (a + b) / 2\n}\n' \
-    > kernel/user/.zweimischer-probe.fi
-grep -rEona "$RASTERPAT" kernel/ \
-    --include=*.fi | sed 's/:[0-9]*:fn / /' | sed 's/($//' | sort -u \
+    > "$TMPD/gegen/zweimischer-probe.fi"
+{ grep -rEona "$RASTERPAT" kernel/ --include=*.fi
+  grep -Eona "$RASTERPAT" < "$TMPD/gegen/zweimischer-probe.fi" \
+      | sed 's|^|kernel/user/.zweimischer-probe.fi:|'
+} | sed 's/:[0-9]*:fn / /' | sed 's/($//' | sort -u \
     > "$TMPD/raster.gegenprobe"
-rm -f kernel/user/.zweimischer-probe.fi
 RGEG=$(comm -23 "$TMPD/raster.gegenprobe" "$TMPD/raster.erlaubt" | wc -l)
 num "GEGENPROBE: eine untergeschobene 'fn zweimischer(' faellt auf" \
     "$RGEG" eq 1

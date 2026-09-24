@@ -88,6 +88,8 @@ export {
 
 const P_FB: u64 = 13
 const P_WCLICK: u64 = 14
+// RUNDE SPEICHERDRUCK (K-002): der Fresser aus kernel/uprog.fi.
+const P_HOG: u64 = 66 // K-002: 64/65 sind P_SCHLAF/P_WACH
 const GFX_RUNDEN: u64 = 5 // Wiederholungen je Messwert
 const DISP_RUNDEN: u64 = 5
 const PX_X: u64 = 120
@@ -2204,6 +2206,17 @@ fn surface(state: u64) {
         st(22)
         t = desk_start(state)
         st(23)
+        // RUNDE SPEICHERDRUCK (K-002): DER FRESSER KOMMT NACH DEM
+        // SCHREIBTISCH, und das ist keine Kosmetik, sondern die Abnahme.
+        //
+        // Der Messlauf in `kmain.speicherdruck` laeuft frueh, ohne
+        // Oberflaeche, und misst den Zuteiler. Die eigentliche Zusage
+        // der Runde ist aber eine andere: DER SCHREIBTISCH UEBERLEBT.
+        // Dafuer muss er laufen, BEVOR der Speicher ausgeht -- sonst
+        // frisst der Fresser den Speicher leer, waehrend es noch gar
+        // keine Oberflaeche gibt, die man verschonen koennte, und die
+        // Messung belegt nichts.
+        speicherdruck_gui(state)
     } else {
         t = k15_start(state)
     }
@@ -3688,6 +3701,29 @@ fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
         k = k + 1
     }
     let pid: u64 = elf.spawn(state, pfad, abuf, argc, 2)
+    // ==================================== RUNDE SPEICHERDRUCK (K-002)
+    // WAS HIER STARTET, DARF DER SPEICHERNOTFALL NICHT TOETEN.
+    //
+    // Durch diese Funktion kommen Schreibtisch, Taskleiste, Starter,
+    // Einstellungen und die Anmeldung -- also genau das, was ein
+    // Benutzer als "das System" wahrnimmt. Sie sind gewoehnliche
+    // K_USER-Prozesse und waeren fuer `sys.oom_pick` sonst ganz
+    // normale Kandidaten; der Schreibtisch ist obendrein oft der
+    // groesste Verbraucher im Haus, weil ihm der Bildpuffer gehoert.
+    // Ohne diese Zeile waere die Auswahl also nicht bloss ungenau,
+    // sondern wuerde ZUERST die Oberflaeche erschiessen -- und die
+    // Abnahme dieser Runde verlangt das Gegenteil.
+    //
+    // Der Vermerk haengt am Prozess und nicht an einer Namensliste im
+    // Kern: wer hier startet, ist geschuetzt, und niemand muss beim
+    // Umbenennen eines Programms daran denken.
+    if pid != 0 {
+        // `find_pid` meldet den Fehlschlag mit MAX_TASKS, nicht mit -1.
+        let sl: u64 = sched.find_pid(state, pid)
+        if sl < kstate.MAX_TASKS {
+            sched.tset(state, sl, sched.T_OOMSAFE, 1)
+        }
+    }
     protokoll_binden(state, pid)
     let z: u64 = serial.line_at(sched.hier(state))
     var s_st: [u8; 13] = "desk: start \0"
@@ -9132,4 +9168,31 @@ fn panikbild(state: u64, vec: u64, err: u64, rip: u64, cr2: u64,
     pb_str(state, (&s_foto[0 as usize]) as u64)
     fb.nl(state)
     fb.flush(state)
+}
+
+// ==================================================== RUNDE SPEICHERDRUCK
+//
+// DER FRESSER NEBEN DER LAUFENDEN OBERFLAECHE (K-002).
+//
+// Anders als der fruehe Messlauf wartet dieser NICHT auf sein Ende:
+// `wait_for` wuerde den Bootfaden anhalten, und der Fensterserver
+// braucht ihn. Der Fresser wird gestartet und laeuft neben dem
+// Schreibtisch -- genau das ist der Fall, den die Abnahme verlangt.
+// Wer danach noch lebt, steht in der Serienausgabe und auf dem Bild.
+fn speicherdruck_gui(state: u64) {
+    if !kstate.mode_on(state, kstate.M_MEMHOG)
+        && !kstate.mode_on(state, kstate.M_MEMHOGN) {
+        return
+    }
+    var s_beg: [u8; 26] = "speicherdruck: gui start\n\0"
+    var s_free: [u8; 21] = "speicherdruck: frei=\0"
+    serial.puts((&s_beg[0]) as u64)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+    let a: u64 = proc.create(state, P_HOG, 1, 2)
+    if kstate.mode_on(state, kstate.M_MEMHOGN) {
+        let b: u64 = proc.create(state, P_HOG, 2, 2)
+        let c: u64 = proc.create(state, P_HOG, 3, 2)
+    }
 }

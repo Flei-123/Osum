@@ -279,7 +279,9 @@ glogin lock login passwd su chown sperrwache init svc"}
 # Uebersetzer fuehrt Module unter ihrem letzten Namen. Deshalb ZWEI
 # Uebersetzungslaeufe in EINEM Abbild -- der Weg ist woertlich der aus
 # `tools/install/build.sh` und `tools/bridge/build.sh`.
-APPS=${APPS:-"fetch jarvisd"}
+# ROUND ROADMAP-5 (K-008): `drucke` prints over IPP -- same build path
+# (profile app, TrueType reader from the library), see kernel/app/drucke.fi.
+APPS=${APPS:-"fetch jarvisd drucke"}
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s laesst sich nicht assemblieren"
 gebaut=""
@@ -1110,7 +1112,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
-/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
+/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig /bin/drucke \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \

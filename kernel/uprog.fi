@@ -52,6 +52,9 @@ const SYS_EXIT: u64 = 60
 const SYS_SPAWN: u64 = 1000
 // ROUNDE K7: die beiden, die /dev/fb braucht.
 const SYS_LSEEK: u64 = 8
+// RUNDE SPEICHERDRUCK: der Fresser nimmt Speicher ueber `brk`.
+const SYS_BRK: u64 = 12
+const SYS_FSYNC: u64 = 74
 // RUNDE K18: die Energieschicht (kernel/sys.fi, Vorrat 1750..1799).
 const SYS_OSUM_PWRGET: u64 = 1750
 const SYS_OSUM_PWRSET: u64 = 1751
@@ -139,6 +142,7 @@ const PROT_READ: u64 = 1
 const PROT_WRITE: u64 = 2
 const MAP_SHARED: u64 = 1
 const MAP_ANONYMOUS: u64 = 32
+const MAP_PRIVATE: u64 = 2
 const SEEK_SET: u64 = 0
 const SEEK_END: u64 = 2
 const E_BADF: u64 = 9
@@ -197,6 +201,14 @@ const P_ASYNCFS: u64 = 52
 // RUNDE AVX: der Vektorregister-Test. Mehrere davon laufen
 // GLEICHZEITIG und pruefen, dass jeder seine eigenen Werte behaelt.
 const P_VEC: u64 = 53
+// RUNDE SPEICHERDRUCK (K-002): die Nummern dieser Runde.
+// P_HOG frisst Speicher, bis nichts mehr kommt, und SAGT bei jedem
+// Schritt, wie weit er ist -- ohne diese Ausgabe liesse sich hinterher
+// nicht unterscheiden, ob er gestorben ist oder nur haengt.
+const P_HOG: u64 = 66 // K-002: 64/65 sind P_SCHLAF/P_WACH
+// Derselbe Fresser, aber er hat VORHER eine Datei geschrieben und
+// haelt sie offen: stirbt er mitten darin, muss sie trotzdem heil sein.
+const P_HOGWRITE: u64 = 67
 
 // ==================================================== RUNDE SYSTEMBUS
 //
@@ -670,6 +682,12 @@ fn u_enter(packed: u64) {
     }
     if prog == P_VEC {
         u_vec(arg)
+    }
+    if prog == P_HOG {
+        u_hog(arg)
+    }
+    if prog == P_HOGWRITE {
+        u_hogwrite(arg)
     }
     if prog == P_BUSA {
         u_busa(arg)
@@ -3892,5 +3910,116 @@ fn u_buss(arg: u64) {
     u_say_line((&s_us[0]) as u64, (t1 -% t0) / 1000)
     u_say_line((&s_sum[0]) as u64, sum)
     u_bus(BUS_SEGDROP, seg, 0, 0, 0)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// ================================================== RUNDE SPEICHERDRUCK
+//
+// DER FRESSER. Er ist die Messung dieser Runde und darum absichtlich
+// stumpf: `brk` um eine Seite weiter, in die neue Seite HINEINSCHREIBEN,
+// wiederholen. Das Schreiben ist der Punkt -- ohne es bleibt die Seite
+// eine Zusage, die der Kern erst im Seitenfehler einloest, und gemessen
+// waere dann die Buchhaltung statt des Speichers.
+//
+// WARUM ER BEI JEDEM SCHRITT REDET: hinterher muss aus der Serienausgabe
+// allein hervorgehen, ob er GESTORBEN ist oder nur HAENGT. Ein Fresser,
+// der schweigt, sieht in beiden Faellen gleich aus -- und genau diese
+// Unterscheidung ist der Befund, um den es geht. Alle 64 Seiten eine
+// Zeile: oft genug, um den letzten Schritt zu sehen, selten genug, dass
+// die Ausgabe nicht selbst zur Bremse wird.
+//
+// `arg` ist seine Nummer, damit bei mehreren Fressern zu lesen ist,
+// WELCHER weiterlebt und welcher es getroffen hat.
+fn u_hog(arg: u64) {
+    var s_start: [u8; 13] = "hog: start #\0"
+    var s_at: [u8; 11] = "hog: kib=\0\0"
+    var s_fail: [u8; 12] = "hog: fail=\0\0"
+    var s_ende: [u8; 11] = "hog: ende\n\0"
+    u_say_line((&s_start[0]) as u64, arg)
+
+    // NICHT `brk`, SONDERN `mmap`. Der Bruch endet bei MMAP_TOP, und
+    // das sind 448 KiB ueber BRK_BASE -- viel zu wenig, um 128 MiB
+    // Arbeitsspeicher zu leeren. Der erste Messlauf dieser Runde lief
+    // genau in diese Wand und sah aus wie ein sauberes "kein Speicher",
+    // war aber nur das Ende des ADRESSRAUMS. `mmap` geht danach in die
+    // grosse Arena weiter und kann den Rechner wirklich leerfressen.
+    //
+    // 64 Seiten je Stueck: gross genug, dass der Lauf Sekunden dauert
+    // und nicht Minuten, klein genug, dass der letzte Schritt vor dem
+    // Ende noch genau zu sehen ist.
+    let chunk: u64 = 64 * 4096
+    var pages: u64 = 0
+    var live: u64 = 1
+    while live == 1 {
+        let got: u64 = u_sys6(SYS_MMAP, 0, chunk, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, 0 -% 1, 0)
+        // EHRLICHE ABSAGE. Ein Fehlercode kommt als negative Zahl
+        // zurueck, und `0` waere ebenfalls keine brauchbare Adresse --
+        // beides heisst "kein Speicher", und beides muss der Fresser
+        // ueberleben, statt es als Erfolg zu lesen.
+        if got == 0 || (got >> 63) != 0 {
+            u_say_line((&s_fail[0]) as u64, pages * 4)
+            live = 0
+        }
+        if live == 1 {
+            // In JEDE Seite schreiben, sonst ist sie nur versprochen.
+            var off: u64 = 0
+            while off < chunk {
+                __mmio_write64((got + off) as *mut u64, arg + pages)
+                off = off + 4096
+            }
+            pages = pages + 64
+            if pages % 512 == 0 {
+                u_say_line((&s_at[0]) as u64, pages * 4)
+            }
+        }
+    }
+    u_say((&s_ende[0]) as u64)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// DERSELBE FRESSER, ABER MIT EINER OFFENEN DATEI. Das ist der Fall, der
+// Daten kostet: er schreibt ZUERST einen bekannten Inhalt, laesst die
+// Datei offen und frisst DANN. Wird er mitten darin beendet, muss die
+// Datei trotzdem vollstaendig sein -- der Kern hat vor dem Toeten zu
+// synchronisieren. Ohne das offene Handle waere der Fall harmlos und
+// die Abnahme eine Behauptung.
+fn u_hogwrite(arg: u64) {
+    var s_start: [u8; 18] = "hogwrite: start #\0"
+    var s_wrote: [u8; 19] = "hogwrite: wrote=\0\0\0"
+    var s_fail: [u8; 17] = "hogwrite: fail=\0\0"
+    var name: [u8; 16] = "/oom-datei.txt\0\0"
+    // 64 Zeichen mit bekannter Summe: jedes Zeichen ein 'A'. Was
+    // hinterher gelesen wird, muss genau das sein.
+    var payload: [u8; 65] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\0"
+    u_say_line((&s_start[0]) as u64, arg)
+
+    // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577
+    let fd: u64 = u_sys(SYS_OPEN, (&name[0]) as u64, 577, 0x1A4)
+    if (fd >> 63) == 0 {
+        let n: u64 = u_sys(SYS_WRITE, fd, (&payload[0]) as u64, 64)
+        u_say_line((&s_wrote[0]) as u64, n)
+    }
+
+    let chunk: u64 = 64 * 4096
+    var pages: u64 = 0
+    var live: u64 = 1
+    while live == 1 {
+        let got: u64 = u_sys6(SYS_MMAP, 0, chunk, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, 0 -% 1, 0)
+        if got == 0 || (got >> 63) != 0 {
+            u_say_line((&s_fail[0]) as u64, pages * 4)
+            live = 0
+        }
+        if live == 1 {
+            var off: u64 = 0
+            while off < chunk {
+                __mmio_write64((got + off) as *mut u64, arg + pages)
+                off = off + 4096
+            }
+            pages = pages + 64
+        }
+    }
+    u_sys(SYS_CLOSE, fd, 0, 0)
     u_sys(SYS_EXIT, 0, 0, 0)
 }

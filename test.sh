@@ -1396,7 +1396,7 @@ lauf "36. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/
 # bewegen, entladen -- und die Gegenprobe mit einem Symbol, das der Kern
 # nicht anbietet.
 lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools/module/run.sh, Runde MODUL)" \
-     tools/module/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet)'
+     tools/module/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet|die Sperrliste)'
 
 # RUNDE BLECH-ECHT: auf dem Zweig `bridge` hiess dieser Abschnitt 32 --
 # die Nummer gehoert in `main` seit Runde MERGE-2 dem Vorlagenladen.
@@ -1645,6 +1645,14 @@ lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Nor
 # ist. Sie bindet keinen Treiber; das waere eine Behauptung.
 lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhaengigen Authenticator, die Naht zum Blech, der USB-Stick beim Namen (tools/wlan/run2.sh, Runde WLAN-2)" \
      tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    (tools/wlan/orakel|die Gegenstelle|PMK aus|Pruefwert von|Schluesseldaten von|[0-9]+ vollstaendige|in jedem Lauf|Nachricht 3 mit|Schluesseldaten OHNE|Automat: |die Naht|ein Geraet OHNE|alle [0-9]+ USB|kernel/usb\.fi|SAE ist NICHT|kein USB-WLAN|die neuen Dateien)'
+
+# K-004: DER ECHTE STANDBY (ACPI S3). Die Maschine schlaeft mit Strom auf
+# dem Speicher, QEMU meldet "suspended", `system_wakeup` weckt sie, und
+# der Kern macht dort weiter, wo er eingeschlafen ist. Gebootet wird von
+# einer kleinen Limine-Platte, NICHT mit -kernel: QEMU schreibt ein
+# -kernel-ELF bei jedem Reset (auch beim Aufwachen) neu in den Speicher.
+lauf "51. der echte Standby: S3 schlafen und aufwachen, Geraete und Speicher danach (tools/s3/run.sh, K-004)" \
+     tools/s3/run.sh s3 '^S3: |^== |^  OK    (QEMU meldet|zurueck|APIC|PCI|ACPI-Modus|Arbeitsspeicher|Pruefsumme|zwei verschiedene|Zeitgeber|und kommt NICHT|Ladesegmente)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

@@ -51,7 +51,7 @@ import tls.x509
 export {
     Target, Antw,
     target_new, target_read, reply_new, reply_free, antw_leeren,
-    sende, header_find,
+    sende, send_raw, header_find,
     F_OK, F_KEINNETZ, F_TLS, F_FORM, F_ADRESSE, F_SENDEN, F_READ,
     last_check,
 }
@@ -544,6 +544,48 @@ fn sende(z: *mut Target, methode: u64, ml: usize, pfad: u64, pl: usize,
     return true
 }
 
+// ROUND ROADMAP-5 (K-008): a request the CALLER built completely --
+// request line, every header, the body. `sende` writes its own
+// `Content-Type: application/json`; IPP needs `application/ipp` and a
+// binary body, so `kernel/app/drucke.fi` builds the request itself and
+// hands it over here. Connection, TLS, reading and parsing are the same
+// code as in `sende` -- no second HTTP client.
+fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Antw) -> bool {
+    antw_leeren(a)
+    pruefung = 0
+    if (*z).adr == 0 as u32 {
+        (*a).fehler = F_ADRESSE
+        return false
+    }
+    var schlecht: bool = false
+    var c: net.Conn = net.connect_tcp((*z).adr, (*z).port)
+    catch | e | bad_conn(&schlecht)
+    if schlecht {
+        (*a).fehler = F_KEINNETZ
+        return false
+    }
+    let _z: bool = net.set_timeout(&c, 20000 as u64) catch false
+    var roh: rt.Buf = rt.buf_new()
+    var ok: bool = false
+    if (*z).sicher {
+        ok = over_tls(&c, z, req, &roh, a)
+    } else {
+        ok = open(&c, req, &roh, a)
+    }
+    net.close(&c)
+    if !ok {
+        rt.buf_free(&roh)
+        return false
+    }
+    if !zerlegen(&roh, a) {
+        (*a).fehler = F_FORM
+        rt.buf_free(&roh)
+        return false
+    }
+    rt.buf_free(&roh)
+    return true
+}
+
 fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     roh: *mut rt.Buf, a: *mut Antw) -> bool {
     var speicher: rt.Buf = rt.buf_new()
@@ -599,6 +641,9 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
             break
         }
         rt.buf_push_bytes(roh, (&happen[0]) as u64, n)
+        if complete(roh) {
+            break
+        }
     }
     tls.tls_close(&t)
     tls.tls_free(&t)
@@ -609,6 +654,51 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
         return false
     }
     return true
+}
+
+// ROUND ROADMAP-5 (K-008): IS THE ANSWER COMPLETE? Up to this round
+// both readers below read until the server closed the connection. A
+// server that keeps the connection open in spite of `Connection: close`
+// -- CUPS' `ippeveprinter` does exactly that -- then costs the full
+// 20-second timeout per request. HTTP/1.1 says when a message ends
+// (RFC 9112, 6.3): after `Content-Length` octets of body, or after the
+// last chunk. Without either, the end of the connection is the end, as
+// before.
+fn complete(roh: *mut rt.Buf) -> bool {
+    let p: u64 = (*roh).ptr
+    let n: usize = (*roh).len
+    var trenn: usize = 0
+    var da: bool = false
+    while trenn + 3 < n {
+        if rt.ld8(p, trenn) == 13 as u8 && rt.ld8(p, trenn + 1) == 10 as u8
+            && rt.ld8(p, trenn + 2) == 13 as u8
+            && rt.ld8(p, trenn + 3) == 10 as u8 {
+            da = true
+            break
+        }
+        trenn = trenn + 1
+    }
+    if !da {
+        return false
+    }
+    let kab: usize = trenn + 4
+    var w: [u8; 8] = "chunked\0"
+    if word_in(p, trenn, (&w[0]) as u64, 7) {
+        // the last chunk: "0\r\n\r\n" at the very end
+        return n >= kab + 5 && rt.ld8(p, n - 5) == 48 as u8
+            && rt.ld8(p, n - 4) == 13 as u8 && rt.ld8(p, n - 3) == 10 as u8
+            && rt.ld8(p, n - 2) == 13 as u8 && rt.ld8(p, n - 1) == 10 as u8
+    }
+    var kopf: rt.Buf = rt.Buf { ptr: p, len: trenn + 2, cap: trenn + 2 }
+    var cl: [u8; 15] = "content-length\0"
+    var v: rt.Buf = rt.buf_new()
+    if !header_find(&kopf, (&cl[0]) as u64, 14, &v) {
+        rt.buf_free(&v)
+        return false
+    }
+    let len: u32 = num(v.ptr, 0, v.len)
+    rt.buf_free(&v)
+    return n >= kab + len as usize
 }
 
 fn open(c: *mut net.Conn, req: *mut rt.Buf, roh: *mut rt.Buf,
@@ -629,6 +719,9 @@ fn open(c: *mut net.Conn, req: *mut rt.Buf, roh: *mut rt.Buf,
             break
         }
         rt.buf_push_bytes(roh, (&happen[0]) as u64, n)
+        if complete(roh) {
+            break
+        }
     }
     if (*roh).len == 0 {
         (*a).fehler = F_READ

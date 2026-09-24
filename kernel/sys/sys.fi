@@ -6910,6 +6910,30 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
                 // nach POSIX mit Nullen gefuellt -- und musls Halde
                 // legt genau hier ihre Verwaltung ab und prueft sie.
                 if proc.map_page_zero(state, me, p, true, false) == 0 {
+                    // RUNDE SPEICHERDRUCK (K-002): DIE STILLE LUEGE.
+                    //
+                    // Hier stand `return cur` -- der ALTE Bruch. Linux
+                    // antwortet auf eine Absage tatsaechlich so, und
+                    // darauf berief sich diese Zeile. Der Unterschied
+                    // ist, was davor passiert ist: die Seiten von `cur`
+                    // bis `p` sind da SCHON abgebildet und wurden
+                    // BEHALTEN. Der Aufrufer liest den alten Wert als
+                    // "nicht gewachsen", und die Rahmen dazwischen
+                    // gehoeren von da an niemandem mehr -- bei jedem
+                    // fehlgeschlagenen `brk` erneut.
+                    //
+                    // Richtig ist, den Bruch dorthin zu setzen, wo er
+                    // WIRKLICH steht. Dann ist die Absage ehrlich (der
+                    // Bruch ist nicht bis `want` gewachsen, die libc
+                    // liest das als Fehlschlag), und kein Rahmen ist
+                    // verloren, weil der Prozess besitzt, was er
+                    // bekommen hat. Beim naechsten Versuch oder beim
+                    // Abraeumen wird es korrekt freigegeben.
+                    oom_handle(state)
+                    if p > cur {
+                        sched.tset(state, me, sched.T_BRK, p)
+                        return p
+                    }
                     return cur
                 }
                 kstate.add(state, kstate.MAPS, 1)
@@ -6970,6 +6994,19 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
         // Nullen, und was der vorige Besitzer des Rahmens dort liegen
         // liess, geht den neuen nichts an.
         if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            // RUNDE SPEICHERDRUCK (K-002): HIER wird der Notfall
+            // behandelt, und zwar EINMAL. Gelingt es, jemanden zu
+            // beenden, ist danach Speicher da -- aber dieser Aufruf
+            // bekommt ihn absichtlich NICHT mehr: die schon
+            // abgebildeten Seiten stehen, der Rueckbau waere ein
+            // zweiter Weg mit eigenen Fehlern, und `mmap` darf
+            // fehlschlagen. Der Aufrufer versucht es wieder und
+            // bekommt dann den freigewordenen Speicher.
+            //
+            // Wichtiger als der Erfolg dieses einen Aufrufs ist, dass
+            // das SYSTEM weiterlaeuft -- und dafuer musste der Fresser
+            // weg, nicht diese Anfrage bedient werden.
+            oom_handle(state)
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -8623,6 +8660,155 @@ fn do_sync(state: u64, me: u64) -> u64 {
         return neg(errno.E_IO)
     }
     return 0
+}
+
+// ==================================================== RUNDE SPEICHERDRUCK
+//
+// DIE AUSWAHL (K-002). Wenn gar nichts mehr geht, muss EINER beendet
+// werden, und zwar der richtige. Die Regel ist absichtlich die
+// einfachste, die funktioniert -- DER GROESSTE BEENDBARE VERBRAUCHER.
+// Eine kluge Regel, die niemand nachrechnen kann, ist im Notfall
+// schlechter als eine stumpfe, die jeder aus der Serienausgabe
+// nachvollziehen kann.
+//
+// WER NICHT IN FRAGE KOMMT, und das ist der wichtigere Teil:
+//
+//   * Prozess 1. Stirbt er, ist das System aus.
+//   * Alles, was nicht K_USER ist -- Leerlauf, Arbeiter, Netzdienst.
+//     Das sind Teile des Kerns in Prozessgestalt.
+//   * Jeder mit T_OOMSAFE != 0. Dort tragen sich Fensterserver,
+//     Taskleiste und Anmeldung ein. Ein Notfall, der die Oberflaeche
+//     erschiesst, ist kein behandelter Notfall.
+//   * Der Kern selbst (K_BOOT).
+//
+// Findet sich niemand, wird NICHT ersatzweise irgendwer genommen. Dann
+// gibt es niemanden, dessen Tod hilft, und die ehrliche Absage an den
+// Anfragenden ist die richtige Antwort -- sie ist der Normalfall dieser
+// Runde und nicht der Ausnahmefall.
+fn oom_pick(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var best: u64 = 0
+    var best_pages: u64 = 0
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        let kind: u64 = sched.tget(state, i, sched.T_KIND)
+        let pid: u64 = sched.tget(state, i, sched.T_PID)
+        let safe: u64 = sched.tget(state, i, sched.T_OOMSAFE)
+        var ok: u64 = 1
+        if st == sched.S_FREE || st == sched.S_ZOMBIE {
+            ok = 0
+        }
+        if kind != sched.K_USER {
+            ok = 0
+        }
+        if pid <= 1 {
+            ok = 0
+        }
+        if safe != 0 {
+            ok = 0
+        }
+        if ok == 1 {
+            let pg: u64 = sched.tget(state, i, sched.T_UPAGES)
+            // GROESSER GEWINNT, und bei Gleichstand der erste. Das
+            // macht die Auswahl wiederholbar: derselbe Zustand trifft
+            // immer denselben Prozess, und eine Messung, die sich nicht
+            // wiederholen laesst, ist keine.
+            if found == 0 || pg > best_pages {
+                best = i
+                best_pages = pg
+                found = 1
+            }
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        return 0 -% 1
+    }
+    return best
+}
+
+// WAS IM NOTFALL PASSIERT, IN DIESER REIHENFOLGE:
+//
+//   1. Einen aussuchen. Gibt es keinen, ist hier Schluss.
+//   2. SYNCHRONISIEREN. Die Dateisystempuffer gehen auf die Platte,
+//      BEVOR irgendwer stirbt. Ein OOM, der Daten kostet, ist kaum
+//      besser als ein Freeze -- und seit OrientOS von der Platte
+//      laeuft, ist das keine Theorie mehr.
+//   3. Sagen, was passiert. Auf der Leitung, mit pid und Seitenzahl.
+//   4. Erst dann beenden.
+//
+// Die Reihenfolge ist der ganze Unterschied zwischen "der Speicher ist
+// wieder da" und "die Datei ist halb geschrieben".
+//
+// WARUM DER TOD EIN VERMERK IST UND KEIN SOFORTIGES ABRAEUMEN: einen
+// FREMDEN Prozess hier und jetzt abzubauen hiesse, seine Seitentabellen
+// unter einem womoeglich gerade laufenden Kontext wegzuziehen. Der
+// Prozess wird auf S_ZOMBIE gesetzt und sein Speicher vom Abraeumer
+// freigegeben, der dafuer da ist (`sched.reap`). Das ist derselbe Weg,
+// den ein regulaeres `exit` nimmt.
+fn oom_handle(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOOOM) {
+        return 0
+    }
+    // NUR WENN DIE MASCHINE LEER IST. `map_page` scheitert auch dann,
+    // wenn ein CONTAINER an seine eigene Grenze stoesst (O-CONTAINER,
+    // `ctr.mem_charge`) -- dann ist Speicher da, nur nicht fuer ihn, und
+    // die richtige Antwort ist die ehrliche Absage an ihn, nicht ein
+    // Toter. Gemessen: ohne diese Zeile erschoss die Auswahl den
+    // Container-Prozess an seiner Grenze (tools/container/run.sh 51/1,
+    // "stress: knapp" fehlte). Die Maschine ist leer, wenn der
+    // Benutzerweg an der Reserve abgewiesen wird.
+    if mem.frames_free(state) > kstate.get(state, kstate.RESERVE_FRAMES) {
+        return 0
+    }
+    let victim: u64 = oom_pick(state)
+    if victim == 0 -% 1 {
+        return 0
+    }
+
+    // 2. ZUERST AUF DIE PLATTE. Der Rueckgabewert wird bewusst nicht
+    // geprueft: schlaegt das Synchronisieren fehl, ist das ein Grund
+    // mehr, den Speicherdruck loszuwerden, und kein Grund, den Notfall
+    // unbehandelt zu lassen.
+    do_sync(state, victim)
+    kstate.set(state, kstate.OOM_SYNCS,
+        kstate.get(state, kstate.OOM_SYNCS) + 1)
+
+    // 3. SAGEN, WAS PASSIERT.
+    var s_oom: [u8; 11] = "oom: kill \0"
+    var s_pid: [u8; 5] = "pid=\0"
+    var s_pg: [u8; 9] = "  pages=\0"
+    var s_free: [u8; 8] = "  frei=\0"
+    let pid: u64 = sched.tget(state, victim, sched.T_PID)
+    let pages: u64 = sched.tget(state, victim, sched.T_UPAGES)
+    serial.puts((&s_oom[0]) as u64)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(pid)
+    serial.puts((&s_pg[0]) as u64)
+    serial.dec(pages)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+
+    kstate.set(state, kstate.OOM_KILLS,
+        kstate.get(state, kstate.OOM_KILLS) + 1)
+    kstate.set(state, kstate.OOM_VICTIM, pid)
+
+    // 4. BEENDEN. 137 ist, was ein System mit Signalen fuer SIGKILL
+    // meldet (128 + 9) -- wer die Zahl kennt, liest sie richtig.
+    // UEBER DEN GEWOEHNLICHEN WEG: SIGKILL. Der Zweig `speicherdruck`
+    // setzte das Opfer hier selbst auf S_ZOMBIE -- auch dann, wenn es
+    // der Prozess war, der gerade IM Aufruf steckt (der groesste
+    // Verbraucher ist meist der, der fragt). Gemessen auf dem neuen
+    // Baum: das "tote" Programm lief weiter, druckte, und endete mit
+    // Code 0 statt 137, waehrend es schon als Zombie abraeumbar war.
+    // `signal.send_task` ist derselbe Weg wie `kill -9`: fuer einen
+    // fremden Prozess sofort, fuer den eigenen beim Verlassen des
+    // Aufrufs -- nie ein Prozess, der als tot gilt und noch rechnet.
+    let _k: bool = signal.send_task(state, victim, signal.SIGKILL)
+    return 1
 }
 
 fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {

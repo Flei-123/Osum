@@ -47,8 +47,15 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 # A root next to kernel/ so that `import arch.arch` resolves the way the
-# kernel's own roots resolve it.
-cat > kernel/.order-probe.fi <<'EOF'
+# kernel's own roots resolve it. The root lives in a scratch directory,
+# NOT in kernel/ (A-033): `$TMP/root/arch` is a symlink to the real
+# kernel/arch, so the probe reads exactly the code under test while the
+# source tree is never written to -- a parallel run or an aborted run
+# cannot leave a stray `.order-probe.fi` behind.
+mkdir -p "$TMP/root"
+ln -s "$ROOT/kernel/arch" "$TMP/root/arch"
+PROBE="$TMP/root/order-probe.fi"
+cat > "$PROBE" <<'EOF'
 import arch.arch
 export { st, ld, cas, spin, sleep, plain_store }
 fn st(p: u64, v: u64) { arch.atomic_store(p, v) }
@@ -58,10 +65,9 @@ fn spin() { arch.pause() }
 fn sleep() { arch.idle() }
 fn plain_store(p: u64, v: u64) { __mmio_write64(p as *mut u64, v) }
 EOF
-trap 'rm -rf "$TMP"; rm -f kernel/.order-probe.fi' EXIT
 
 for t in x86_64-none aarch64-none; do
-    "$FIRNC" --target=$t --emit=asm -o "$TMP/$t.s" kernel/.order-probe.fi 2>"$TMP/$t.err" \
+    "$FIRNC" --target=$t --emit=asm -o "$TMP/$t.s" "$PROBE" 2>"$TMP/$t.err" \
         || { bad "$t: the probe does not compile"; sed 's/^/        /' "$TMP/$t.err" | head -5; continue; }
     ok "$t: the probe compiles ($(grep -c . "$TMP/$t.s") lines of assembler)"
 done

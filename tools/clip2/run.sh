@@ -40,7 +40,17 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-OUT=${1:-$(mktemp -d)}
+# A-034: OHNE Argument ist das Arbeitsverzeichnis ein Wegwerfordner und
+# wird am Ende geraeumt -- vorher blieben je Lauf rund 70 MB in /tmp
+# liegen (gemessen 24.09., zwei Laeufe = 138 MB auf einer vollen
+# Platte), dazu der Bau der Gegenprobe (/tmp/osum-clip2-gegen, 33 MB).
+# Wer einen Ordner uebergibt, behaelt ihn.
+if [ -n "${1:-}" ]; then
+    OUT=$1
+else
+    OUT=$(mktemp -d)
+    trap 'rm -rf "$OUT" /tmp/osum-clip2-gegen' EXIT
+fi
 mkdir -p "$OUT"
 SHOTS=${CLIP2_SHOTS:-$ROOT/.clip2-shots}
 mkdir -p "$SHOTS"

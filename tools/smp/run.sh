@@ -275,7 +275,16 @@ d=$(value "$TMPD/c4.txt" 'smp: frames got=[0-9]+  dups=[0-9]+')
 gotf=$(value "$TMPD/c4.txt" 'smp: frames got=[0-9]+')
 num "with the lock: frames handed out" "$gotf" eq 64
 num "with the lock: frames handed out TWICE" "$d" eq 0
+# K-012: the phase runs EIGHT rounds (kernel/arch/x86_64/smp.fi,
+# FR_ROUNDS). One round measured 5/0/6/0 doubles over four runs -- in half
+# of them the race simply did not happen. The rounds are the same real
+# race, just run more often; with the lock the SUM over all eight must
+# stay 0, which makes that promise stricter, not looser.
+rn=$(value "$TMPD/c4.txt" 'smp: frames .*rounds=[0-9]+')
+num "the frame race runs this many rounds" "$rn" eq 8
 d2=$(value "$TMPD/nolock.txt" 'smp: frames got=[0-9]+  dups=[0-9]+')
+h2=$(value "$TMPD/nolock.txt" 'smp: frames .*hits=[0-9]+')
+printf '        without the lock: %s doubles, in %s of 8 rounds\n' "${d2:-?}" "${h2:-?}"
 num "WITHOUT the lock: the same frame in two cores' hands" "$d2" ge 1
 
 echo "== 8. the scheduler across the cores =="
