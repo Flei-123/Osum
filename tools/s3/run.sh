@@ -31,6 +31,10 @@
 #      not on a screendump: QEMU's screendump kept showing the old surface
 #      after the wake-up, with AND without the restore (95.7 % equal both
 #      times), so a picture would have measured nothing.
+#   7. from ring 3: `/bin/standby` in a small root image (tools/install/
+#      build.sh with PROGS="sh echo sync standby"), the shell runs it via
+#      `script=`, the machine sleeps INSIDE reboot(RB_SUSPEND), wakes, the
+#      call returns 0 and the shell carries on with the next command.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -207,6 +211,56 @@ L="$TMPD/l-nobild.txt"
 DD=$(val "$L" 's3: bildmodus' danach)
 [ "$DD" = "0x0" ] && ok "Gegenprobe s3nobild: ohne Rueckstellung bleibt er aus (danach=$DD)" \
     || bad "Gegenprobe s3nobild: danach='$DD' (erwartet 0x0)"
+
+# ------------------------------------------------------------ 7. ring 3
+echo "== 7. aus Ring 3: /bin/standby, die Shell macht danach weiter =="
+INST="$TMPD/inst"
+mkdir -p "$INST"
+if OUT="$INST" PROGS="sh echo sync standby" APPS="" \
+        bash tools/install/build.sh "$INST" > "$TMPD/inst.txt" 2>&1; then
+    ok "Wurzelabbild mit /bin/standby gebaut"
+    CRC=$(cat "$INST/quelle.crc")
+    T="$TMPD/r-esp.img"
+    printf 'timeout: 0\ndefault_entry: 1\n/s3\n    protocol: multiboot1\n    path: boot():/osum.mb\n    module_path: boot():/quelle.img\n    cmdline: osum vfs modfs modcrc=%s nokbd nosched noproc nofs noring3 script=standby;echo nachher;exit\n' "$CRC" > "$TMPD/limine.conf"
+    dd if=/dev/zero of="$TMPD/r.img" bs=1M count=0 seek=64 status=none
+    sgdisk --clear --new=1:2048:+56M --typecode=1:EF00 "$TMPD/r.img" >/dev/null 2>&1
+    dd if=/dev/zero of="$T" bs=1M count=56 status=none
+    mkfs.vfat -F 32 "$T" >/dev/null 2>&1
+    mcopy -i "$T" "$LIMINE/limine-bios.sys" ::/limine-bios.sys
+    mcopy -i "$T" "$TMPD/limine.conf" ::/limine.conf
+    mcopy -i "$T" "$INST/k.mb" ::/osum.mb
+    mcopy -i "$T" "$INST/quelle.img" ::/quelle.img
+    dd if="$T" of="$TMPD/r.img" bs=512 seek=2048 conv=notrunc status=none
+    rm -f "$T"
+    "$LIMINE/limine" bios-install "$TMPD/r.img" >/dev/null 2>&1
+    L="$TMPD/l-ring3.txt"
+    rm -f "$L"
+    sock="$TMPD/mon.r3"
+    timeout 120 $QEMU_X86 -m 512 -drive "file=$TMPD/r.img,format=raw,if=ide,index=0" \
+        -drive "file=$INST/ziel.img,format=raw,if=ide,index=1" \
+        -serial "file:$L" -display none -no-reboot -vga std \
+        -monitor "unix:$sock,server,nowait" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+    pid=$!
+    for i in $(seq 1 450); do
+        grep -qa 's3: schlafe\|standby: kein' "$L" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    sleep 1
+    st=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
+    echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
+    wait "$pid"; RC=$?
+    has "$L" "standby: schlafe (S3)" "das Programm bittet um den Schlaf"
+    case $st in *suspended*) ok "die Maschine schlaeft INNERHALB des Systemaufrufs ($st)";;
+        *) bad "Zustand beim Standby aus Ring 3: '$st'";; esac
+    has "$L" "standby: zurueck, rc=0" "der Aufruf kehrt nach dem Wecken mit 0 zurueck"
+    has "$L" "nachher" "die Shell fuehrt danach den naechsten Befehl aus"
+    num "Rueckgabe" "$RC" eq 21
+else
+    bad "Wurzelabbild mit /bin/standby"
+    tail -8 "$TMPD/inst.txt" | sed 's/^/        /'
+fi
 
 echo
 echo "S3: $pass bestanden, $fail gefallen"
