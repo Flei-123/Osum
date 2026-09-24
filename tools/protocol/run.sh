@@ -66,6 +66,7 @@ num() { # name value op expected
     else bad "$name: $value, erwartet $op $want"; fi
 }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
+same() { [ "$2" = "$3" ] && ok "$1: $3" || bad "$1: '$3' statt '$2'"; }
 value() { grep -oaE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
@@ -361,9 +362,15 @@ if [ -s "$TMPD/panik.ppm" ]; then
             "$TMPD/schirm.txt" | sort -u | wc -l)
         num "(b) verschiedene Register auf dem Schirm" "$n" eq 16
         # DIE ZAHL, UM DIE ES GEHT: aufgeloeste Symbole MIT Datei:Zeile.
-        n=$(grep -oaE '[a-z_0-9]+\.[a-z_0-9]+\+0x[0-9a-f]+ \([a-z_0-9]+\.fi:[0-9]+\)' \
-            "$TMPD/schirm.txt" | wc -l)
-        num "(b) aufgeloeste Symbole mit Datei:Zeile auf dem Panik-Bildschirm" "$n" ge 5
+        #
+        # K-009: BIS HIER STAND "MINDESTENS FUENF", und die Zahl mass den
+        # Stapelscan: drei echte Rahmen und dahinter Altlast. Die
+        # Rahmenkette liefert genau die Aufrufe, die es gab -- und DIE
+        # werden jetzt verlangt, in ihrer Reihenfolge.
+        kette=$(grep -oaE '[a-z_0-9]+\.[a-z_0-9]+\+0x[0-9a-f]+ \([a-z_0-9]+\.fi:[0-9]+\)' \
+            "$TMPD/schirm.txt" | sed 's/+.*//' | head -3 | tr '\n' ' ')
+        same "(b) die Rueckverfolgung auf dem Schirm ist die echte Aufrufkette" \
+            "crash.knall_b crash.knall_a crash.knall " "$kette"
         n=$(grep -ac '?' "$TMPD/schirm.txt")
         num "(b) Zeilen mit unlesbaren Zellen (die Glyphen muessen exakt passen)" \
             "${n:-0}" le 1
@@ -377,9 +384,32 @@ else
 fi
 # UND DIE SERIELLE SEITE DERSELBEN PANIK.
 has "$TMPD/panik.txt" "*** EXCEPTION" "(b) dieselbe Panik steht auch auf der Leitung"
+# K-009: DIE RAHMENKETTE, Eintrag fuer Eintrag. `knall_c` ist die
+# Absturzstelle selbst (sie steht als rip da), darunter muessen ihre
+# drei Rufer kommen, dann `kernel_main` -- und dann ENDET die Kette,
+# weil boot.s `rbp` vor dem Sprung loescht. Nichts dahinter.
+spur() { # datei -> die Namen der kspur-Zeilen, eine je Zeile
+    awk '/^  kspur:/ { an = 1; next } an && /^      / { print $1; next } an { exit }' "$1" \
+        | sed 's/+0x.*//'
+}
+has "$TMPD/panik.txt" "kspur: rahmenkette" "(b) die Rueckverfolgung geht die Rahmenzeiger ab, nicht den Stapel"
+kette=$(spur "$TMPD/panik.txt" | tr '\n' ' ')
+same "(b) die serielle Rueckverfolgung ist genau die Aufrufkette bis zum Start" \
+    "crash.knall_b crash.knall_a crash.knall KERNEL_MAIN long_mode " "$kette"
 n=$(grep -acE '^ +[a-z_0-9]+\.[a-z_0-9]+\+0x[0-9a-f]+ \([a-z_0-9]+\.fi:[0-9]+\)$' \
     "$TMPD/panik.txt")
-num "(b) aufgeloeste Symbole in der seriellen Rueckverfolgung" "${n:-0}" ge 5
+num "(b) aufgeloeste Symbole mit Datei:Zeile in der seriellen Rueckverfolgung" "${n:-0}" ge 3
+# GEGENPROBE: DIESELBE Panik mit `stapelscan`, also dem alten Weg. Er
+# muss Eintraege liefern, die in keiner Aufrufkette dieser Panik stehen
+# -- sonst waere nicht gezeigt, dass die Kette etwas weglaesst, das
+# vorher falsch dastand.
+timeout 120 $QEMU_X86 $ACCEL -kernel "$K0" -m 256 \
+    -append "nokbd nosched noproc noring3 logall krach krachjetzt stapelscan" \
+    -serial "file:$TMPD/scan.txt" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+has "$TMPD/scan.txt" "kspur: stapelscan" "GEGENPROBE: mit 'stapelscan' wird wieder gescannt"
+alt=$(spur "$TMPD/scan.txt" | grep -cvE '^(crash\.knall(_a|_b)?|KERNEL_MAIN|long_mode)$')
+num "GEGENPROBE: der Scan meldet Eintraege, die keine Rufer sind (Altlast)" "${alt:-0}" ge 1
 has "$TMPD/panik.txt" "die letzten Protokollzeilen" \
     "(b) die letzten Protokollzeilen stehen auch auf der Leitung"
 

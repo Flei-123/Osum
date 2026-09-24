@@ -64,6 +64,8 @@ const F_RIP: u64 = 136
 const F_CS: u64 = 144
 const F_RFLAGS: u64 = 152
 const F_RSP: u64 = 160
+// rbp: Platz 10 der Tafel in `registers` (isr.s schiebt ihn als elftes)
+const F_RBP: u64 = 80
 const F_SS: u64 = 168
 
 const VEC_TIMER: u64 = 32
@@ -971,8 +973,56 @@ static mut kspur: [u64; 16] = [0 as u64; 16]
 static mut kspur_n: u64 = 0
 static mut halt_alle: u64 = 0
 
-fn kspur_bauen(state: u64, rsp: u64) {
+// ==================================================== K-009
+// ERST DIE RAHMENKETTE, DER STAPELSCAN NUR NOCH ALS RUECKFALL.
+//
+// Der Scan weiter unten nimmt JEDE Zahl auf dem Stapel, die im
+// Textbereich liegt -- echte Ruecksprungadressen UND die Reste frueherer
+// Aufrufe, die dort noch stehen. Auf dem Panik-Bildschirm waren die
+// ersten drei Eintraege die Wahrheit und der Rest Altlast, und niemand
+// konnte sagen, wo die Grenze lag.
+//
+// firnc legt JEDEN Rahmen mit `push rbp; mov rbp, rsp` an (gemessen am
+// erzeugten Assembler, beide Stufen). Also ist `rbp` eine verkettete
+// Liste: [rbp] ist der Rahmenzeiger des Rufers, [rbp+8] die
+// Ruecksprungadresse in ihn. `boot.s` loescht `rbp` vor `kernel_main`
+// -- die Kette endet dort mit einer 0.
+//
+// Jeder Schritt wird geprueft, bevor er gelesen wird: der Zeiger muss
+// ausgerichtet sein, ueber `rsp` und innerhalb des Kernstapels liegen
+// (256 KiB, boot.s) und STRENG STEIGEN -- ein kaputter oder
+// zirkulaerer Rahmen beendet die Kette, statt den Behandler selbst in
+// einen zweiten Fehler zu fuehren. Bleibt die Kette leer (Absturz im
+// Prolog, `rbp` zerschossen), wird wie bisher gescannt, und die
+// Leitung sagt, welcher der beiden Wege es war.
+const KSTACK_SPAN: u64 = 0x40000
+const ART_KETTE: u64 = 1
+const ART_SCAN: u64 = 2
+static mut kspur_art: u64 = 0
+
+fn kspur_kette(rsp: u64, rbp: u64, hi: u64) {
+    var fp: u64 = rbp
+    while kspur_n < SPUR_MAX {
+        if fp < rsp || fp >= rsp + KSTACK_SPAN || fp % 8 != 0 {
+            return
+        }
+        let ret: u64 = __mmio_read64((fp + 8) as *mut u64)
+        if ret < KERN_LO || ret >= hi {
+            return
+        }
+        kspur[kspur_n as usize] = ret
+        kspur_n = kspur_n + 1
+        let next: u64 = __mmio_read64(fp as *mut u64)
+        if next <= fp {
+            return
+        }
+        fp = next
+    }
+}
+
+fn kspur_bauen(state: u64, rsp: u64, rbp: u64) {
     kspur_n = 0
+    kspur_art = 0
     if rsp == 0 || rsp < KERN_LO {
         return
     }
@@ -990,6 +1040,17 @@ fn kspur_bauen(state: u64, rsp: u64) {
     if hi <= KERN_LO {
         return
     }
+    // `stapelscan` auf der Befehlszeile: die Kette wird uebersprungen --
+    // die Gegenprobe in tools/protocol/run.sh vergleicht beide Wege an
+    // DERSELBEN Panik.
+    if !kstate.mode_on(state, kstate.M_STAPELSCAN) {
+        kspur_kette(rsp, rbp, hi)
+        if kspur_n > 0 {
+            kspur_art = ART_KETTE
+            return
+        }
+    }
+    kspur_art = ART_SCAN
     var i: u64 = 0
     while i < 512 && kspur_n < SPUR_MAX {
         let v: u64 = __mmio_read64((rsp + i * 8) as *mut u64)
@@ -1005,7 +1066,15 @@ fn ktrace_say() {
     var s_a: [u8; 10] = "  kspur:\0\0"
     var s_k: [u8; 12] = "  (keine)   "
     var s_e: [u8; 7] = "      \0"
+    var s_ke: [u8; 14] = " rahmenkette\0\0"
+    var s_sc: [u8; 13] = " stapelscan\0\0"
     serial.puts((&s_a[0]) as u64)
+    if kspur_art == ART_KETTE {
+        serial.puts((&s_ke[0]) as u64)
+    }
+    if kspur_art == ART_SCAN {
+        serial.puts((&s_sc[0]) as u64)
+    }
     if kspur_n == 0 {
         serial.puts((&s_k[0]) as u64)
         serial.nl()
@@ -1101,7 +1170,7 @@ fn report(frame: u64, state: u64, vector: u64) {
     // RUNDE BLECHKERN: die Ruecksprungkette des KERNSTAPELS. Sie steht
     // vor "kernel halted", weil sie die einzige Zeile ist, aus der sich
     // die Absturzstelle zurueckrechnen laesst, wenn `rip` Muell ist.
-    kspur_bauen(state, word(frame, F_RSP))
+    kspur_bauen(state, word(frame, F_RSP), word(frame, F_RBP))
     ktrace_say()
     // ==================================================== RUNDE PROTOKOLL
     // DIE LETZTEN FUENFZIG ZEILEN DES KERNPROTOKOLLS.
