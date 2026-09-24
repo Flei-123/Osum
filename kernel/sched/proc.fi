@@ -1012,7 +1012,11 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
         return 0
     }
-    let frame: u64 = mem.frame_alloc(state)
+    // RUNDE SPEICHERDRUCK (K-002): DIE SEITE GEHOERT EINEM NUTZERPROZESS,
+    // also aus dem Vorrat OHNE die Reserve. `map_page` ist der einzige
+    // Weg, auf dem Benutzerspeicher entsteht (brk, mmap, der wachsende
+    // Stapel, fork), und darum reicht es, ihn hier abzubiegen.
+    let frame: u64 = mem.frame_alloc_user(state)
     if frame == 0 {
         // Der Speicher der MASCHINE ist alle, nicht der des Containers.
         // Die Buchung von eben wird zurueckgenommen, sonst zaehlt der
@@ -1028,6 +1032,11 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
         bits = bits | nx(state)
     }
     write_entry(pt, s, frame | bits)
+    // RUNDE SPEICHERDRUCK: MITZAEHLEN. Die Auswahl im Notfall braucht
+    // die Zahl sofort; sie hier zu fuehren kostet eine Addition an der
+    // einzigen Stelle, an der Benutzerseiten entstehen.
+    sched.tset(state, i, sched.T_UPAGES,
+        sched.tget(state, i, sched.T_UPAGES) + 1)
     // No `invlpg` and no cr3 reload: these tables are not loaded. The
     // process gets them at its first context switch, and THAT writes cr3
     // and flushes everything.
@@ -1549,6 +1558,13 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
     write_entry(pt, s, 0)
     if (e & PAGE_SHARED) == 0 {
         mem.frame_free(state, e & ADDR_MASK)
+    }
+    // RUNDE SPEICHERDRUCK: die Zahl wieder hinunter. Sie darf nie unter
+    // null laufen -- eine geliehene Seite (PAGE_SHARED) wurde beim
+    // Abbilden mitgezaehlt und wird hier genauso wieder abgezogen.
+    let had: u64 = sched.tget(state, i, sched.T_UPAGES)
+    if had > 0 {
+        sched.tset(state, i, sched.T_UPAGES, had - 1)
     }
     // The tables of the CURRENT process are the ones the processor has
     // cached. A page that is gone from the table but still in the TLB is a

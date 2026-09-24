@@ -164,6 +164,9 @@ const P_BUSA: u64 = 60
 const P_BUSB: u64 = 61
 const P_BUSD: u64 = 62
 const P_BUSS: u64 = 63
+// RUNDE SPEICHERDRUCK (K-002): die Fresser der Abnahme.
+const P_HOG: u64 = 66 // K-002: 64/65 sind P_SCHLAF/P_WACH
+const P_HOGWRITE: u64 = 67
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -658,6 +661,9 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     nicht spaeter, weil sie kein Dateisystem braucht -- vier
     //     Prozesse, ihre Vektorregister und sonst nichts.
     vectors(state)
+    // RUNDE SPEICHERDRUCK (K-002): der Messlauf. Tut ohne
+    // `memhog`/`memhogn`/`hogwrite` gar nichts.
+    speicherdruck(state)
     // RUNDE MERGE-5: HIER wird angehalten, wenn `hwdiagstop` auf der
     // Kommandozeile steht -- nicht mehr oben in `hwdiag.stage`. So
     // stehen auf dem Schirm eines Rechners OHNE serielles Kabel auch
@@ -1233,6 +1239,10 @@ fn memory(state: u64, mbi: u64, kernel_end: u64) {
     serial.nl()
 
     let entries: u64 = mem.scan(state, mbi, kernel_end)
+    // RUNDE SPEICHERDRUCK (K-002): die Reserve steht, sobald die Rahmen
+    // gezaehlt sind -- vor dem ersten Nutzerprozess, sonst waere sie
+    // genau dann nicht da, wenn sie gebraucht wird.
+    mem.reserve_init(state)
     serial.puts((&s_map[0]) as u64)
     serial.dec(entries)
     serial.puts((&s_entries[0]) as u64)
@@ -5589,6 +5599,40 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&pwnc[0]) as u64, 9) != 0 {
         kstate.mode_add(state, kstate.M_NOCSTATES)
     }
+    // RUNDE SPEICHERDRUCK (K-002). DIESELBE FALLE WIE BEI `nodhcp`:
+    // "memhog" steckt in "memhogn", und "oom" steckt in "nooom" --
+    // also IMMER das laengere Wort zuerst pruefen und das kuerzere nur
+    // setzen, wenn das laengere nicht schon gegriffen hat.
+    var hgn: [u8; 8] = "memhogn\0"
+    var hgw: [u8; 9] = "hogwrite\0"
+    var hog: [u8; 7] = "memhog\0"
+    var onn: [u8; 6] = "nooom\0"
+    var onr: [u8; 10] = "noreserve\0"
+    var osy: [u8; 7] = "oomsay\0"
+    var okn: [u8; 5] = "koom\0"
+    if find(cmd, (&hgn[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_MEMHOGN)
+    }
+    if find(cmd, (&hgw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_HOGWRITE)
+    }
+    if find(cmd, (&hog[0]) as u64, 6) != 0 {
+        if !kstate.mode_on(state, kstate.M_MEMHOGN) {
+            kstate.mode_add(state, kstate.M_MEMHOG)
+        }
+    }
+    if find(cmd, (&onn[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOOOM)
+    }
+    if find(cmd, (&onr[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_NORESERVE)
+    }
+    if find(cmd, (&osy[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_OOMSAY)
+    }
+    if find(cmd, (&okn[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_KOOM)
+    }
     if find(cmd, (&pwno[0]) as u64, 5) != 0 {
         kstate.mode_add(state, kstate.M_NOPWR)
     }
@@ -7925,4 +7969,117 @@ fn ebpfhook_report(state: u64) {
     serial.puts((&s_ab[0]) as u64)
     serial.dec(ebpfhook.aborts(state))
     serial.nl()
+}
+
+// ================================================== RUNDE SPEICHERDRUCK
+//
+// DER MESSLAUF ZU K-002. Er startet die Fresser aus `kernel/uprog.fi`
+// und schreibt VORHER UND NACHHER die Zahl der freien Rahmen auf die
+// Leitung. Diese beiden Zahlen sind der ganze Befund: steht hinterher
+// wieder ungefaehr dieselbe Zahl da, hat der Kern aufgeraeumt; steht
+// dort eine kleine Zahl oder kommt die Zeile gar nicht mehr, ist er im
+// Notfall steckengeblieben.
+//
+// WARUM DIE ZEILEN VOR DEM START KOMMEN: friert der Rechner ein, ist
+// alles, was danach haette gedruckt werden sollen, verloren. Was schon
+// auf der Leitung steht, bleibt lesbar -- also gehoert der Anfangswert
+// dorthin, bevor der erste Fresser laeuft.
+fn speicherdruck(state: u64) {
+    var s_beg: [u8; 22] = "speicherdruck: start\n\0"
+    var s_free: [u8; 21] = "speicherdruck: frei=\0"
+    var s_after: [u8; 22] = "speicherdruck: nach=\0\0"
+    var s_exit: [u8; 22] = "speicherdruck: code=\0\0"
+    var s_alive: [u8; 23] = "speicherdruck: lebt=1\n\0"
+    var s_sp: [u8; 2] = " \0"
+
+    // MIT OBERFLAECHE GEHOERT DER FRESSER NICHT HIERHER. Laeuft der
+    // Schreibtisch (`desk`), startet ihn `kgui.speicherdruck_gui` NACH
+    // dem Schreibtisch -- sonst waere der Speicher schon leer, bevor es
+    // eine Oberflaeche gibt, die man verschonen koennte.
+    if kstate.mode_on(state, kstate.M_DESK) {
+        return
+    }
+    var any: u64 = 0
+    if kstate.mode_on(state, kstate.M_MEMHOG) {
+        any = 1
+    }
+    if kstate.mode_on(state, kstate.M_MEMHOGN) {
+        any = 1
+    }
+    if kstate.mode_on(state, kstate.M_HOGWRITE) {
+        any = 1
+    }
+    if any == 0 {
+        return
+    }
+
+    serial.puts((&s_beg[0]) as u64)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+
+    // EIN Fresser -- der Grundfall der Abnahme.
+    if kstate.mode_on(state, kstate.M_MEMHOG) {
+        let a: u64 = proc.create(state, P_HOG, 1, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.nl()
+    }
+
+    // MEHRERE gleichzeitig: der haertere Fall. Sie treten sich beim
+    // Zuteilen gegenseitig auf die Fuesse, und die Auswahl muss
+    // trotzdem jedes Mal genau einen treffen.
+    if kstate.mode_on(state, kstate.M_MEMHOGN) {
+        let a: u64 = proc.create(state, P_HOG, 1, 2)
+        let b: u64 = proc.create(state, P_HOG, 2, 2)
+        let c: u64 = proc.create(state, P_HOG, 3, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        let eb: u64 = kutil.wait_for(state, b)
+        let ec: u64 = kutil.wait_for(state, c)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.puts((&s_sp[0]) as u64)
+        serial.dec(eb)
+        serial.puts((&s_sp[0]) as u64)
+        serial.dec(ec)
+        serial.nl()
+    }
+
+    // Der Fresser mit der offenen Datei: stirbt er, muss sie heil sein.
+    if kstate.mode_on(state, kstate.M_HOGWRITE) {
+        let a: u64 = proc.create(state, P_HOGWRITE, 1, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.nl()
+    }
+
+    // DIE BEIDEN ZEILEN, AUF DIE ES ANKOMMT. Dass sie ueberhaupt
+    // gedruckt werden, ist bereits die halbe Zusage: der Kern hat den
+    // Notfall ueberlebt und fuehrt seine Schleife weiter.
+    serial.puts((&s_after[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+    // DIE ZAHLEN DER RUNDE. `res` ist die Groesse der Reserve, `hits`
+    // wie oft sie eine Anfrage aus dem Benutzerraum abgewiesen hat --
+    // und `hits` groesser null ist der Beleg, dass sie gegriffen hat
+    // und nicht nur dasteht.
+    var s_res: [u8; 21] = "speicherdruck: res=\0\0"
+    var s_hit: [u8; 22] = "speicherdruck: hits=\0\0"
+    var s_kil: [u8; 23] = "speicherdruck: kills=\0\0"
+    serial.puts((&s_res[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RESERVE_FRAMES))
+    serial.nl()
+    serial.puts((&s_hit[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RESERVE_HITS))
+    serial.nl()
+    serial.puts((&s_kil[0]) as u64)
+    serial.dec(kstate.get(state, kstate.OOM_KILLS))
+    serial.nl()
+    var s_syn: [u8; 23] = "speicherdruck: syncs=\0\0"
+    serial.puts((&s_syn[0]) as u64)
+    serial.dec(kstate.get(state, kstate.OOM_SYNCS))
+    serial.nl()
+    serial.puts((&s_alive[0]) as u64)
 }
