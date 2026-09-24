@@ -322,6 +322,73 @@ lauf_platte "$K0" "osum $QUIET script=krach kern;echo LEBTNOCH;exit" \
 has "$TMPD/riegel.txt" "LEBTNOCH" \
     "ohne 'krach' auf der Kernel-Befehlszeile lehnt der Aufruf 1861 ab"
 
+echo "== 5b. K-011: der Bericht ueberlebt den warmen Neustart im Speicher =="
+# DER FALL, IN DEM DIE PLATTE NICHT DARF. `krach kernfs` greift mit der
+# Dateisystemsperre in der Hand ins Leere; der Riegel in
+# `absturz.kern_bericht` verbietet dann jedes Schreiben. Bis K-011 war
+# der Bericht damit verloren.
+#
+# ZUERST DIE GEGENPROBE, KALT: QEMU beendet sich nach der Panik, ein
+# NEUER QEMU startet -- frischer Speicher. Dann darf nichts gerettet
+# werden, und auf der Platte liegt kein Bericht dieser Panik: wenn
+# spaeter einer auftaucht, kann er nur aus dem Speicher kommen.
+lauf_platte "$K0" "osum $QUIET logall krach script=krach kernfs;exit" \
+    "$TMPD/kalt1.txt" "$TMPD/disk.img"
+has "$TMPD/kalt1.txt" "Bestellung, art 2" "K-011: die Panik mit gehaltener Sperre hat stattgefunden"
+has "$TMPD/kalt1.txt" "absturz: Dateisystem gesperrt, kein Bericht" \
+    "K-011: der Riegel verbietet die Platte (so soll es sein)"
+lauf_platte "$K0" "osum $QUIET logall script=absturz;exit" \
+    "$TMPD/kalt2.txt" "$TMPD/disk.img"
+n=$(grep -ac 'aus dem speicher gerettet' "$TMPD/kalt2.txt")
+num "GEGENPROBE kalt: nach einem Kaltstart wird nichts gerettet" "${n:-0}" eq 0
+n=$(grep -ac 'Bestellung, art 2' "$TMPD/kalt2.txt")
+num "GEGENPROBE kalt: kein Bericht der art-2-Panik auf der Platte" "${n:-0}" eq 0
+
+# UND JETZT WARM: dieselbe Panik, `absturzhalt` haelt die Maschine an,
+# und der Monitor drueckt Reset -- DERSELBE QEMU, derselbe Speicher.
+# Der zweite Start rettet den Bericht und zeigt ihn mit /bin/absturz.
+# (Danach knallt es noch einmal, weil die Befehlszeile dieselbe ist;
+# gezaehlt wird nur, was zwischen erstem und zweitem Halt steht.)
+wsock="$TMPD/warm.sock"
+rm -f "$wsock" "$TMPD/warm.txt"
+timeout 240 $QEMU_X86 $ACCEL -kernel "$K0" -m 256 \
+    -append "osum $QUIET logall krach absturzhalt script=absturz;krach kernfs;exit" \
+    -serial "file:$TMPD/warm.txt" -display none \
+    -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0" \
+    -monitor "unix:$wsock,server,nowait" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+wpid=$!
+warte_halt() { # wie viele 'kernel halted'
+    local i=0
+    while [ $i -lt 600 ]; do
+        [ "$(grep -ac 'kernel halted' "$TMPD/warm.txt" 2>/dev/null)" -ge "$1" ] && return 0
+        kill -0 "$wpid" 2>/dev/null || return 1
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+if warte_halt 1; then
+    ok "K-011 warm: erste Panik, Maschine steht"
+    python3 - "$wsock" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3)
+s.recv(4096); s.sendall(b"system_reset\n"); time.sleep(0.5); s.close()
+PY
+    warte_halt 2 && ok "K-011 warm: nach dem Reset gestartet und erneut angehalten" \
+        || bad "K-011 warm: nach dem Reset kein zweiter Lauf"
+else
+    bad "K-011 warm: die erste Panik kam nicht"
+fi
+kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; rm -f "$wsock"
+awk '/kernel halted/ { n++; next } n == 1' "$TMPD/warm.txt" > "$TMPD/warm2.txt"
+has "$TMPD/warm2.txt" "absturz: bericht aus dem speicher gerettet" \
+    "K-011 warm: der zweite Start findet den Bericht im Speicher"
+grep -qaE 'absturz: bericht +/var/crash/[0-9]+\.txt +geschrieben' "$TMPD/warm2.txt" \
+    && ok "K-011 warm: und legt ihn als Datei unter /var/crash ab" \
+    || bad "K-011 warm: der gerettete Bericht wurde nicht abgelegt"
+has "$TMPD/warm2.txt" "ABSTURZBERICHT (KERN)" "K-011 warm: /bin/absturz zeigt ihn als Kernbericht"
+has "$TMPD/warm2.txt" "Bestellung, art 2" "K-011 warm: und es ist der Bericht DIESER Panik (art 2 im Protokollteil)"
+
 echo "== 6. (b) der Panik-Bildschirm, wirklich gelesen =="
 sock="$TMPD/mon.sock"
 rm -f "$sock" "$TMPD/panik.ppm" "$TMPD/panik.txt"

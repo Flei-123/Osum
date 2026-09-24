@@ -74,7 +74,7 @@ import lib.version
 
 export {
     init, open, brand_delete, knall,
-    kern_bericht, prog_bericht, last_file,
+    kern_bericht, prog_bericht, last_file, ram_retten,
     A_KERN, A_PROG, geschrieben, versucht, gescheitert
 }
 
@@ -525,6 +525,110 @@ fn prog_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
 }
 
 // DER KERN IST GESTORBEN. Siehe den Kopf: es wird VERSUCHT.
+// ==================================================== K-011
+// DER BERICHT UEBERLEBT DEN NEUSTART IM SPEICHER.
+//
+// Bis hierher war der Bericht einer Kernel-Panik ein VERSUCH: hielt der
+// sterbende Kern die Dateisystemsperre, wurde nichts geschrieben, und
+// beim naechsten Start wusste niemand, dass es geknallt hatte -- genau
+// der Fall, in dem man den Bericht am dringendsten braucht (ein Fehler
+// IM Dateisystem).
+//
+// Jetzt geht der fertige Bericht ZUERST in ein festes Stueck Speicher,
+// und erst danach wird die Platte versucht -- das, was Linux `pstore`
+// / `ramoops` nennt. Ein warmer Neustart (Reset-Knopf, Wachhund,
+// Strg+Alt+Entf) loescht den Hauptspeicher nicht; der naechste Start
+// findet den Bericht dort und legt ihn als ganz gewoehnliche Datei nach
+// /var/crash, mit Marke. Gelang die Platte schon beim Absturz, wird das
+// Speicherstueck sofort wieder ungueltig gemacht -- ein Bericht landet
+// nie zweimal auf der Platte.
+//
+// WO: 0x96000..0x98FFF, 12 KiB im konventionellen Speicher. Unterhalb
+// von `kernel_end` gibt der Rahmenverwalter nichts heraus (mem.fi,
+// `reserve(0, kernel_end)`), und das Kernabbild selbst -- `kdata` und
+// `.bss` eingeschlossen -- wird bei jedem Start neu geladen und genullt,
+// taugt also nicht. Der Bereich liegt ueber dem Sprungbrett der Kerne
+// (0x8000) und unter dem EBDA (0x9FC00).
+//
+// WAS DARAN NUR EIN VERSPRECHEN BLEIBT, gehoert hierher und nicht in
+// eine Fussnote: ein KALTER Start (Strom weg) loescht den Speicher, und
+// eine Firmware darf den unteren Speicher beim Start fuer sich nehmen.
+// Gemessen ist QEMU/SeaBIOS mit `system_reset` (tools/protocol/run.sh);
+// auf echtem Blech mit UEFI ist es ungemessen. Der Kopf (Magie, Laenge,
+// FNV-1a ueber den Inhalt) sorgt dafuer, dass zerstoerter oder
+// zufaelliger Speicher NIE als Bericht ausgegeben wird.
+const RAM_BASE: u64 = 0x96000
+const RAM_HDR: u64 = 32
+const RAM_MAGIC: u64 = 0x314B494E4150534F // "OSPANIK1"
+const RAM_FNV_OFF: u64 = 0xCBF29CE484222325
+const RAM_FNV_PRIME: u64 = 0x100000001B3
+
+fn ram_sum(p: u64, n: u64) -> u64 {
+    var h: u64 = RAM_FNV_OFF
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ kstate.get8(p + i)) *% RAM_FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+// Inhalt zuerst, die Magie zuletzt: ein Absturz mitten im Sichern
+// hinterlaesst einen Kopf ohne Magie und damit nichts.
+fn ram_sichern() {
+    __mmio_write64(RAM_BASE as *mut u64, 0)
+    var i: u64 = 0
+    while i < buf_n {
+        kstate.set8(RAM_BASE + RAM_HDR + i, buf[i as usize])
+        i = i + 1
+    }
+    __mmio_write64((RAM_BASE + 8) as *mut u64, buf_n)
+    __mmio_write64((RAM_BASE + 16) as *mut u64,
+        ram_sum(RAM_BASE + RAM_HDR, buf_n))
+    __mmio_write64(RAM_BASE as *mut u64, RAM_MAGIC)
+}
+
+fn ram_loeschen() {
+    __mmio_write64(RAM_BASE as *mut u64, 0)
+}
+
+// Beim Start, NACH dem Einhaengen der richtigen Wurzel und VOR `init`
+// (das die Marke liest). 1 = ein Bericht wurde gerettet und liegt jetzt
+// auf der Platte.
+fn ram_retten(state: u64) -> u64 {
+    var s_ok: [u8; 45] = "absturz: bericht aus dem speicher gerettet\0\0\0"
+    var s_bad: [u8; 50] = "absturz: speicherbericht verworfen (pruefsumme)\0\0\0"
+    if __mmio_read64(RAM_BASE as *mut u64) != RAM_MAGIC {
+        return 0
+    }
+    let n: u64 = __mmio_read64((RAM_BASE + 8) as *mut u64)
+    if n == 0 || n > BUF_MAX {
+        ram_loeschen()
+        return 0
+    }
+    if ram_sum(RAM_BASE + RAM_HDR, n) != __mmio_read64((RAM_BASE + 16) as *mut u64) {
+        serial.puts((&s_bad[0 as usize]) as u64)
+        serial.nl()
+        ram_loeschen()
+        return 0
+    }
+    var i: u64 = 0
+    while i < n {
+        buf[i as usize] = kstate.get8(RAM_BASE + RAM_HDR + i) as u8
+        i = i + 1
+    }
+    buf_n = n
+    serial.puts((&s_ok[0 as usize]) as u64)
+    serial.nl()
+    if ablegen(state) {
+        ram_loeschen()
+        return 1
+    }
+    // Die Platte will auch jetzt nicht: der Bericht BLEIBT im Speicher
+    // und wird beim naechsten Start wieder angeboten.
+    return 0
+}
+
 fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
         rsp: u64, ss: u64, err: u64, cr2: u64, vec: u64,
         spurp: u64, spurn: u64) -> bool {
@@ -532,6 +636,8 @@ fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
     register(regs, rip, cs, flg, rsp, ss, err, cr2, vec)
     spur(spurp, spurn)
     protokoll(state, 50)
+    // K-011: ERST DER SPEICHER, DANN DIE PLATTE.
+    ram_sichern()
     // DER RIEGEL. Haelt dieser Kern die Dateisystemsperre bereits, ist
     // der Absturz IN dem Dateisystem passiert -- dann wird nicht
     // geschrieben, sondern gesagt, dass nicht geschrieben wurde.
@@ -542,7 +648,11 @@ fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
         fehl = fehl + 1
         return false
     }
-    return ablegen(state)
+    if ablegen(state) {
+        ram_loeschen()
+        return true
+    }
+    return false
 }
 
 // ------------------------------------------------------ der Testausloeser
@@ -556,11 +666,20 @@ fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
 //          gewoehnliche Funktionen und stehen damit als Namen in der
 //          Symboltabelle.
 //   art 1: ein ungueltiger Befehl (#UD). Derselbe Weg, anderer Vektor.
+//   art 2: art 0 mit gehaltener Dateisystemsperre (K-011).
 fn knall(state: u64, art: u64) {
     var s_src: [u8; 8] = "absturz\0"
     var s_msg: [u8; 41] = "erzwungener Absturz auf Bestellung, art \0"
     klog.sayn(state, klog.L_ERROR, (&s_src[0 as usize]) as u64,
         (&s_msg[0 as usize]) as u64, art)
+    // art 2 (K-011): derselbe Nullzeiger, aber MIT der
+    // Dateisystemsperre in der Hand -- der Fall, in dem der Bericht
+    // nicht auf die Platte darf und nur der Speicher ihn rettet.
+    if art == 2 {
+        let _f: u64 = fs.enter(state)
+        knall_a(0)
+        return
+    }
     knall_a(art)
 }
 
