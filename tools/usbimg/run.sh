@@ -221,7 +221,7 @@ import sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 start = None
 for i, l in enumerate(lines):
-    if l.startswith("/") and not l.startswith("//") and "Hardware-Diagnose" in l:
+    if l.startswith("/") and not l.startswith("//") and "Hardware diagnostics" in l:
         start = i
         break
 if start is None:

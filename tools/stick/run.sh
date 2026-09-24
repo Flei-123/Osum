@@ -218,7 +218,7 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     # seventh, and the boot ran the lamp diagnosis instead (22 red, none
     # of them a network fault). The copy's limine.conf holds exactly that
     # entry from the shipped file; the stick itself is untouched.
-    eintrag_conf "$d/stick.img" "Kommandozeile mit Netz" \
+    eintrag_conf "$d/stick.img" "Command line" \
         || bad "$name: Menueeintrag nicht in die Kopie geschrieben"
     cp -f "$TMPD/probe.img" "$d/probe.img"
     local srvpid=""
@@ -283,7 +283,7 @@ echo "== 4. BIOS: vom Stick, Menueeintrag 5, und dann getippt =="
 # =====================================================================
 stick_lauf sbios bios 0 "${NETZFOLGE[@]}"
 B="$TMPD/sbios/con.log"
-hat "$B" 'console=ttyS0' "der Menueeintrag 'Kommandozeile mit Netz' wurde gewaehlt"
+hat "$B" 'console=ttyS0' "der Menueeintrag 'Command line' wurde gewaehlt"
 hat "$B" 'sh: ready' "die Shell steht auf der seriellen Leitung"
 hat "$B" 'dhcp: gesetzt ip=' "DHCP hat eine Adresse gesetzt"
 hat "$B" 'nameserver' "und einen Nameserver nach /etc/resolv.conf geschrieben"
