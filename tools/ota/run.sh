@@ -84,6 +84,9 @@ export FIRNLIB="$ROOT/lib"
 export OSUM_CPU=${OSUM_CPU:-Haswell}
 OUT=${OUT:-/tmp/ota-run}
 mkdir -p "$OUT" .probe
+# A-041: two rounds ran this file at the same time on /tmp/ota-run on
+# 24.09.2026 and overwrote each other's k.mb/quelle.img mid-run.
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
 export OUT
 PORT=${OTA_PORT:-$(( 18000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"
