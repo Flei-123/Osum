@@ -569,6 +569,9 @@ vectors:
      * Kernstapel als Ruecksprungadresse ausweisen laesst. */
     .quad _etext                    /* 74: kernel/kernel.ld */
 
+    /* K-004: the way back from S3 (end of kernel/arch/x86_64/smp.s). */
+    .quad s3_vectors                /* 75: pwr/s3.fi */
+
     .section .bss, "aw", @nobits
     .align 8
 saved_rsp:

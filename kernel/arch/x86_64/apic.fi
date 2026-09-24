@@ -65,7 +65,9 @@ export {
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
     timer_running,
     spurious, spurious_hit, tsc, tsc_hz, VEC_SPURIOUS,
-    window, core_init, ipi
+    window, core_init, ipi,
+    // K-004: what S3 takes away and has to be put back.
+    s3_save, s3_restore
 }
 
 // ------------------------------------------------ the K2 scalar page
@@ -792,4 +794,108 @@ fn pic_off() {
     serial.io_wait()
     serial.out8(0x22 as u16, 0x70 as u8)
     serial.out8(0x23 as u16, 0x01 as u8)
+}
+
+// ============================================ K-004: across ACPI S3
+//
+// In S3 the local APIC and the I/O APIC lose every register; the
+// firmware's resume path does not program them again (measured under
+// QEMU/SeaBIOS: after the wake-up every redirection entry reads as
+// masked with vector 0). `pwr/s3.fi` hands a buffer of at least
+// 16 + 2 * 240 words; this stores the local registers the kernel set
+// and the whole redirection table, and puts them back in an order in
+// which no line fires half-programmed: high word before low word, the
+// timer count last.
+const S3_LREGS: u64 = 8
+
+fn s3_lreg(i: u64) -> u64 {
+    if i == 0 { return R_TPR }
+    if i == 1 { return R_LDR }
+    if i == 2 { return R_DFR }
+    if i == 3 { return R_LVT_LINT0 }
+    if i == 4 { return R_LVT_LINT1 }
+    if i == 5 { return R_LVT_ERROR }
+    if i == 6 { return R_TIMER_DIV }
+    return R_LVT_TIMER
+}
+
+fn s3_put(buf: u64, i: u64, v: u64) {
+    __mmio_write64((buf + i * 8) as *mut u64, v)
+}
+
+fn s3_get(buf: u64, i: u64) -> u64 {
+    return __mmio_read64((buf + i * 8) as *mut u64)
+}
+
+// Returns how many I/O APIC lines were stored.
+fn s3_save(state: u64, buf: u64) -> u64 {
+    s3_put(buf, 0, 0)
+    if !active(state) {
+        return 0
+    }
+    let base: u64 = lapic(state)
+    s3_put(buf, 1, rdmsr(MSR_APIC_BASE))
+    s3_put(buf, 2, lread(base, R_SVR))
+    s3_put(buf, 3, lread(base, R_TIMER_INIT))
+    var i: u64 = 0
+    while i < S3_LREGS {
+        s3_put(buf, 4 + i, lread(base, s3_lreg(i)))
+        i = i + 1
+    }
+    var n: u64 = ioapic_entries(state)
+    if n > 240 {
+        n = 240
+    }
+    let io: u64 = ioapic(state)
+    var g: u64 = 0
+    while g < n {
+        s3_put(buf, 16 + g * 2, ioread(io, 0x10 + g * 2))
+        s3_put(buf, 17 + g * 2, ioread(io, 0x11 + g * 2))
+        g = g + 1
+    }
+    s3_put(buf, 0, n)
+    return n
+}
+
+// Returns how many redirection entries read back different from what
+// was stored -- 0 is the promise.
+fn s3_restore(state: u64, buf: u64) -> u64 {
+    if !active(state) {
+        return 0
+    }
+    wrmsr(MSR_APIC_BASE, s3_get(buf, 1))
+    let base: u64 = lapic(state)
+    var i: u64 = 0
+    while i < S3_LREGS {
+        lwrite(base, s3_lreg(i), s3_get(buf, 4 + i))
+        i = i + 1
+    }
+    lwrite(base, R_ESR, 0)
+    lwrite(base, R_ESR, 0)
+    lwrite(base, R_SVR, s3_get(buf, 2))
+    let n: u64 = s3_get(buf, 0)
+    let io: u64 = ioapic(state)
+    var g: u64 = 0
+    while g < n {
+        iowrite(io, 0x11 + g * 2, s3_get(buf, 17 + g * 2))
+        iowrite(io, 0x10 + g * 2, s3_get(buf, 16 + g * 2))
+        g = g + 1
+    }
+    // the 8259s come back from the reset unmasked -- APIC mode wants
+    // them silent, exactly as `hw.stage` left them
+    pic_off()
+    lwrite(base, R_TIMER_INIT, s3_get(buf, 3))
+    var bad: u64 = 0
+    g = 0
+    while g < n {
+        // bit 12 (delivery status) and bit 14 (remote IRR) are the
+        // chip's own, not ours
+        let want: u64 = s3_get(buf, 16 + g * 2) & 0xFFFFAFFF
+        let have: u64 = ioread(io, 0x10 + g * 2) & 0xFFFFAFFF
+        if want != have {
+            bad = bad + 1
+        }
+        g = g + 1
+    }
+    return bad
 }
