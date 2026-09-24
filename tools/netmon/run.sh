@@ -653,8 +653,14 @@ n=$(stat -c%s "$TMPD/netmon0.elf" 2>/dev/null)
 num "/bin/netmon, octets" "${n:-}" gt 10000
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live5.img"
+# A-040: WITHOUT `wig`. Since P-001 (3686bf9d, 15.09.2026) `wig` means
+# "the window server owns the session and starts the first program
+# itself" (`kmain.wm_owns_shell`), so `osum` returned before the shell
+# and the script below never ran: no wget line, no netstat line, no
+# netmon line -- 73/3 on main as well. This section is about the SHELL
+# path, so the shell has to be the first program.
 qemu_bg "$TMPD/k0.mb" \
-    "gfx wm wig osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netstat -w;widgetdemo;netmon -n 2000;exit" \
+    "gfx wm osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netstat -w;widgetdemo;netmon -n 2000;exit" \
     "$TMPD/c5.txt" -vga std -drive "file=$TMPD/live5.img,format=raw,if=ide,index=0"
 qemu_wait
 srv_down; bridge_down; wire_down

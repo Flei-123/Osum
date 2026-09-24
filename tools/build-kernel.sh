@@ -279,7 +279,9 @@ weg ntfs-aus
 # repariert; die Pruefung unten MELDET ihn, statt ihn zu verschlucken.
 # RUNDE ROADMAP-3: `zeiger` -> `cursor` nachgezogen (die Warnung unten
 # hat es jeden Serverbau gemeldet).
-GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave cursor"
+# A-039: `vgpu` (drv/gpu/vgpu.fi) is graphics too -- only graphics files
+# import it, and the server image never had a single vgpu__ symbol.
+GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave cursor vgpu"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         # RUNDE O-STRUKTUR: `rm -f` SCHWEIGT, wenn die Datei woanders

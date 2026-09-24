@@ -36,6 +36,13 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # behandelt, muss auch hier eine sein, sonst zaehlt der Pruefer eine
     # Stelle, die es im Serverbau gar nicht gibt.
     "zeiger.fi",
+    # A-039 (24.09.2026): `drv/gpu/vgpu.fi`, der virtio-gpu-Treiber,
+    # rechnet auf dem Rahmenpuffer (`fb.back`, `fb.rect_take`, ...) und
+    # wird NUR aus Grafikdateien geholt (fb.fi, gfx.fi, wm.fi, kgui.fi).
+    # GEMESSEN: im Serverabbild 0 Symbole `vgpu__`, im GUI-Abbild 64.
+    # Die 6 "Stellen" waren also Grafik in einer Grafikdatei, und der
+    # Serverbau loescht sie seitdem ausdruecklich (GFX_DATEIEN).
+    "vgpu.fi",
     # RUNDE ROTABSCHNITTE: `shot.fi` (Runde FEEDBACK) ist das
     # Bildschirmfoto VON INNEN und liest dafuer den Rahmenpuffer -- 15
     # Stellen `fb.*`. Sie gehoert damit zur Grafik wie die zwoelf davor.
