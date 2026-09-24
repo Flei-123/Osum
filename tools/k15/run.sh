@@ -1210,10 +1210,13 @@ cmp -s "$TMPD/e1.bin" "$TMPD/e2.bin" \
     || bad "die beiden Namen geben verschiedene Oktette"
 # UND ES IST WIRKLICH EIN VERWEIS UND KEINE KOPIE, gemessen an den
 # freien Bloecken: dasselbe Abbild einmal so und einmal so.
-python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 4096 /bin/ \
+# A-003 (24.09.2026): 8192 and not 4096 blocks. /bin/explorer has grown to
+# 1.7 MB; two copies no longer fit into 2 MB, mkfs said "the disk is
+# full", and the comparison read "536 gegen ''" and "-3 inodes".
+python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 8192 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files=$TMPD/explorer0.elf" \
     > "$TMPD/kopie.txt" 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 4096 /bin/ \
+python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 8192 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files@/bin/explorer" \
     > "$TMPD/verweis.txt" 2>&1
 fk=$(grep -oE 'free=[0-9]+' "$TMPD/kopie.txt" | sed 's/.*=//')
