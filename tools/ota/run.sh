@@ -113,13 +113,19 @@ dienst_aus() {
 dienst() { # <wurzel> [weitere Schalter...]
     dienst_aus
     local w=$1; shift
+    # A-036: srv.log VORHER leeren und auf die START-Zeile MIT DIESEM PORT
+    # warten. Stand dort noch ein START von frueher (ein abgebrochener
+    # Lauf im selben $OUT, gemessen 24.09.: "START port=18103" in einem
+    # Lauf auf 18407), kam `dienst` sofort zurueck, bevor der neue Server
+    # lauschte -- curl bekam '000' und zwei Zusagen wurden rot.
+    : > "$OUT/srv.log"
     python3 tools/ota/server.py --wurzel "$w" --port "$PORT" \
         --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" \
         --log "$OUT/srv.log" "$@" > "$OUT/srv.out" 2>&1 &
     SRVPID=$!
     local i
     for i in $(seq 1 40); do
-        grep -qa "^START" "$OUT/srv.log" 2>/dev/null && return 0
+        grep -qa "^START port=$PORT " "$OUT/srv.log" 2>/dev/null && return 0
         sleep 0.2
     done
     return 1
