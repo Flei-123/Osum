@@ -211,6 +211,11 @@ rennen tf 4 "glyphrace glyphtafelfrei"
 TFF=$(r_fehl "$TMPD/r-tf.txt")
 if grep -qa '^panic:' "$TMPD/r-tf.txt"; then
     ok "ohne die Tafelsperre stirbt der KERN: $(grep -a '^panic:' "$TMPD/r-tf.txt" | head -1 | cut -c1-72)"
+elif grep -qaE '^kernel/gfx/ttf\.fi:[0-9]+:[0-9]+' "$TMPD/r-tf.txt"; then
+    # several cores panic at once and their letters interleave on the
+    # serial line ("ppanaicni:c ..."), so '^panic:' is not found -- the
+    # source position of the panic still stands on its own line
+    ok "ohne die Tafelsperre stirbt der KERN (Panik mehrerer Kerne, verschraenkt): $(grep -aE '^kernel/gfx/ttf\.fi:[0-9]+' "$TMPD/r-tf.txt" | head -1)"
 elif [ -n "$TFF" ] && [ "$TFF" -ge 1 ]; then
     ok "ohne die Tafelsperre: $TFF Abweichungen"
 else
