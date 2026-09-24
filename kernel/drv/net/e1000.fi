@@ -61,6 +61,7 @@
 
 import lib.kstate
 import klog
+import serial
 import mm.mem
 import bus.pci
 import acpi.aml
@@ -75,7 +76,9 @@ export {
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
     msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ,
     supports_8254x, supports_ich, family_of, FAM_8254X, FAM_ICH,
-    phy_id_on, swflag_on, link_speed_on
+    phy_id_on, swflag_on, link_speed_on,
+    set_flags, irq_mode_on, step_on, warn_on, storm_on,
+    IRQ_NONE, IRQ_INTX, IRQ_MSI
 }
 
 // ------------------------------------------------------ the data area
@@ -429,8 +432,11 @@ fn mmio(state: u64, u: u64) -> u64 {
     return kstate.get(state, sc(u, S_MMIO))
 }
 
+// ROUND NIC9020: "there is a supported card at this unit", independent
+// of whether it came up. Before, a failed bring-up zeroed the register
+// window and the stack reported "no device" for a card that was there.
 fn present_on(state: u64, u: u64) -> bool {
-    return mmio(state, u) != 0
+    return kstate.get(state, sc(u, S_FOUND)) != 0
 }
 
 fn ready_on(state: u64, u: u64) -> bool {
@@ -691,67 +697,331 @@ fn read_mac(state: u64, u: u64) -> bool {
     return true
 }
 
-// ================================================ RUNDE RTL: DER PCH-ZWEIG
-//
-// WIEVIEL VON DIESER DATEI DER I219 WIEDERVERWENDET, nachgezaehlt und
-// nicht geschaetzt. Alles unter dieser Ueberschrift ist NEU; alles
-// darueber und darunter benutzt er unveraendert mit:
-//
-//   WIEDERVERWENDET (unveraendert):
-//     rx_setup, rx_take_on, rx_recycle_on          der Empfangsring
-//     tx_setup, tx_room_on, tx_frame_on            der Sendering
-//     irq_on, poll_on, intx_arm, shut_down_on      Unterbrechung und Ende
-//     die Deskriptorhelfer, die Registerhelfer, die Zaehler
-//     RCTL/TCTL/TIPG/RDBAL/TDBAL/MTA/RAL/RAH       der ganze Datenweg
-//   NEU (nur hier):
-//     swflag_take/swflag_give   die Semaphore gegen die Verwaltungsfirmware
-//     mdic_read/mdic_write      der Weg zum PHY
-//     ulp_off                   den Ultra-Low-Power-Zustand verlassen
-//     phy_probe                 fragt den PHY, wer er ist
-//     read_mac / read_link      bekommen je einen zweiten Zweig
-//
-// DIE GRENZE, und sie steht auch in docs/REALHW.md: HIER IST NICHTS
-// GEMESSEN. QEMU hat kein Modell eines I219, und dieser Rechner hat kein
-// Brett. Was gemessen ist, ist der Datenweg -- weil es DERSELBE Quelltext
-// ist, den der 82540EM in QEMU zwanzigtausend Rahmen lang benutzt.
-// Was NICHT gemessen ist, ist alles unter dieser Ueberschrift.
-//
-// WAS HIER BEWUSST FEHLT, damit niemand es fuer erledigt haelt:
-//   * Das Leeren der Deskriptorringe vor dem Ruecksetzen
-//     (`e1000_flush_desc_rings` bei Linux). Auf Skylake und spaeter kann
-//     ein Ruecksetzen den Chip haengen lassen, wenn die
-//     Verwaltungsfirmware gerade Verkehr hat. Der Kunstgriff dagegen
-//     schickt einen Blindrahmen los und ist ohne echtes Brett nicht
-//     verantwortbar zu schreiben.
-//   * Der SMBus-Zustand. Haelt die Firmware den PHY, antwortet MDIC gar
-//     nicht -- dieser Treiber merkt das (er meldet phy=0xFFFF) und kommt
-//     dann eben nicht hoch, statt sich aufzuhaengen.
-//   * Das Laden der PHY-Firmware (`sw_flag` + NVM-Bloecke).
-//   * K1/LTR/PCIm, die Energiekunstgriffe.
+// ROUND NIC9020: the texts of the step lines. Module statics and not
+// `var`s, for the reason `q_e1000` gives below.
+static mut t_0: [u8; 9] = "e1000: s\0"
+static mut t_1: [u8; 2] = " \0"
+static mut t_2: [u8; 12] = "e1000:     \0"
+static mut t_3: [u8; 30] = "nic: init failed: e1000 step \0"
+static mut t_4: [u8; 5] = " -- \0"
+static mut t_5: [u8; 8] = " (warn=\0"
+static mut t_6: [u8; 2] = ")\0"
+static mut t_7: [u8; 35] = "ulp: not used on this part, devid=\0"
+static mut t_8: [u8; 27] = "ulp: me handshake, 10ms x \0"
+static mut t_9: [u8; 22] = "swflag (sw semaphore)\0"
+static mut t_10: [u8; 26] = "swflag: not ours, extcnf=\0"
+static mut t_11: [u8; 17] = "phy id over mdic\0"
+static mut t_12: [u8; 26] = "force smbus, phy id again\0"
+static mut t_13: [u8; 25] = "phy reset blocked by me?\0"
+static mut t_14: [u8; 16] = "lanphypc toggle\0"
+static mut t_15: [u8; 8] = "phy id=\0"
+static mut t_16: [u8; 19] = "gio master disable\0"
+static mut t_17: [u8; 26] = "irq mask, rx/tx off, 10ms\0"
+static mut t_18: [u8; 38] = "global reset, 20ms without any access\0"
+static mut t_19: [u8; 17] = "reset bit clear?\0"
+static mut t_20: [u8; 20] = "nvm auto-read done?\0"
+static mut t_21: [u8; 23] = "phy power up / autoneg\0"
+static mut t_22: [u8; 6] = "bmcr=\0"
+static mut t_23: [u8; 29] = "first register read (status)\0"
+static mut t_24: [u8; 48] = "registers read 0xffffffff, part does not answer\0"
+static mut t_25: [u8; 8] = "status=\0"
+static mut t_26: [u8; 6] = "ctrl=\0"
+static mut t_27: [u8; 10] = "ctrl_ext=\0"
+static mut t_28: [u8; 6] = "fwsm=\0"
+static mut t_29: [u8; 8] = "extcnf=\0"
+static mut t_30: [u8; 8] = "ulp off\0"
+static mut t_31: [u8; 31] = "chip did not come out of reset\0"
+static mut t_32: [u8; 7] = "pmcsr=\0"
+static mut t_33: [u8; 47] = "interrupt: msi, else intx from _prt, else poll\0"
+static mut t_34: [u8; 13] = "irq=msi vec=\0"
+static mut t_35: [u8; 50] = "irq=none (polled), no msi and no _prt line, 0x3c=\0"
+static mut t_36: [u8; 14] = "irq=intx gsi=\0"
+static mut t_37: [u8; 35] = "pci: d0, bar0, memory + bus master\0"
+static mut t_38: [u8; 27] = "bar0 missing or not memory\0"
+static mut t_39: [u8; 22] = "bar0 cannot be mapped\0"
+static mut t_40: [u8; 33] = "mac: link up (slu/asde), address\0"
+static mut t_41: [u8; 42] = "no mac address (ral/rah empty, no eeprom)\0"
+static mut t_42: [u8; 6] = "rings\0"
+static mut t_43: [u8; 24] = "no memory for the rings\0"
+static mut t_44: [u8; 11] = "link state\0"
+static mut t_45: [u8; 15] = "e1000: up phy=\0"
+static mut t_46: [u8; 7] = " link=\0"
+static mut t_47: [u8; 6] = " irq=\0"
+static mut t_48: [u8; 7] = " warn=\0"
 
-// DIE SEMAPHORE. Setzen, zuruecklesen, pruefen -- und wenn das Flag nicht
-// stehenbleibt, gehoert der Bus gerade der Firmware und dieser Treiber
-// laesst die Finger davon. Ein Kern, der hier stur weitermacht, bekommt
-// keine Fehlermeldung, sondern eine Maschine, die steht.
-fn swflag_take(state: u64, u: u64) -> bool {
-    var spin: u64 = 0
-    while spin < 200 {
-        let v: u64 = reg(state, u, R_EXTCNF_CTRL)
-        if (v & EXTCNF_SWFLAG) == 0 {
-            setreg(state, u, R_EXTCNF_CTRL, v | EXTCNF_SWFLAG)
-            if (reg(state, u, R_EXTCNF_CTRL) & EXTCNF_SWFLAG) != 0 {
-                kstate.set(state, sc(u, S_SWFLAG), 1)
-                return true
-            }
-        }
-        var d: u64 = 0
-        while d < 2000 {
+// ================================================ ROUND NIC9020: THE PCH LINE
+//
+// I217 / I218 / I219 -- the LAN part inside the Intel chipset (PCH), and
+// the one on Justin's Dell OptiPlex 9020 (00:19.0, 8086:153A, I217-LM,
+// Lynx Point). Until this round the kernel HUNG on that machine right
+// after `netdev: bestand 1 geraete` -- no further line, and the TICK and
+// BEAT counters of the measuring board stood still, i.e. the processor
+// itself was stuck and not a loop in this file.
+//
+// THE CAUSE, read in Linux' e1000e (ich8lan.c, e1000_reset_hw_ich8lan):
+//
+//     ew32(CTRL, (ctrl | E1000_CTRL_RST));
+//     /* cannot issue a flush here because it hangs the hardware */
+//     msleep(20);
+//
+// On the PCH line a register READ right after the global reset hangs the
+// part (and with it the processor that waits for the completion). The old
+// `chip_reset` did exactly that: write CTRL.RST, then read CTRL in a loop
+// at once. On the 8254x family that is the documented way; on the PCH
+// line it is the way to stop a machine. It did not hang EVERY time --
+// whether the read lands inside the window is a race -- which is why one
+// boot with an unrelated word on the command line got through.
+//
+// WHAT THIS BLOCK DOES, in the order of e1000e for pch_lpt (probe:
+// e1000_init_phy_workarounds_pchlan, then e1000_reset_hw_ich8lan):
+//
+//   s1  PCI: power state D0, memory decode, bus master
+//   s2  first register read -- 0xFFFFFFFF means the part does not answer,
+//       and the driver gives up before it touches anything else
+//   s3  ULP off (I218-LM/V and I219 only; e1000e skips it for I217)
+//   s4  software semaphore (EXTCNF_CTRL.SWFLAG), with Linux' timeouts
+//   s5  PHY accessible? (PHY ID over MDIC)
+//   s6  if not: force SMBus mode, try again
+//   s7  if not: is a PHY reset blocked by the ME (FWSM.RSPCIPHY)?
+//   s8  if not blocked: toggle LANPHYPC (power-cycles the PHY)
+//   s9  GIO master disable, wait for pending requests
+//   s10 interrupts masked, receive and send off, 10 ms
+//   s11 global reset -- and then 20 ms of NOTHING. No read, no flush.
+//   s12 reset bit clear?
+//   s13 NVM auto-read done?
+//   s14 PHY powered up, auto-negotiation on
+//   ...  the common path: address, rings, interrupt, link
+//
+// EVERY WAIT HAS A LIMIT IN TIME (not in loop turns), and every step
+// prints its number BEFORE it touches a register, so that a photo of the
+// screen says which step a machine stopped in. A failure prints
+// `nic: init failed: e1000 step N -- <reason>` and returns; the boot goes
+// on to the desktop without a network.
+//
+// THE INTERRUPT. The PCH parts have MSI and no MSI-X (e1000e: MSI-X only
+// with FLAG_HAS_MSIX, i.e. the 82574). This block asks for MSI. The pin
+// through the I/O APIC is taken only with `nicintx` or when there is no
+// MSI capability -- and then only with a line from `_PRT`; the old
+// fallback to config register 0x3C is a PIC number, not an I/O APIC
+// input, on a board in APIC mode. With neither, the card is polled: the
+// network task turns every tick anyway (`inet.netd_body`).
+//
+// WHAT IS STILL NOT HERE: the descriptor-ring flush of SPT and later
+// (I219, `e1000_flush_desc_rings`) -- only reported (s10, `flush=1`);
+// K1/LTR/EEE tuning; the PHY reset with LCD configuration from NVM.
+
+const R_EECD: u64 = 0x0010
+const EECD_AUTO_RD: u64 = 0x200
+const R_FEXTNVM3: u64 = 0x003C
+const FEXTNVM3_CFG_MASK: u64 = 0x0C000000
+const FEXTNVM3_CFG_50MS: u64 = 0x08000000
+const FEXTNVM7_DIS_SMB_PERST: u64 = 0x20
+const R_KABGTXD: u64 = 0x3004
+const KABGTXD_BGSQLBIAS: u64 = 0x50000
+const R_H2ME: u64 = 0x5B50
+const H2ME_ULP: u64 = 0x800
+const H2ME_ENFORCE: u64 = 0x1000
+const R_FWSM: u64 = 0x5B54
+const FWSM_RSPCIPHY: u64 = 0x40
+const FWSM_ULP_CFG_DONE: u64 = 0x400
+const FWSM_FW_VALID: u64 = 0x8000
+const CTRL_GIO_MASTER_DISABLE: u64 = 4
+const STATUS_GIO_MASTER_EN: u64 = 0x80000
+const CTRL_LANPHYPC_OVERRIDE: u64 = 0x10000
+const CTRL_LANPHYPC_VALUE: u64 = 0x20000
+const CTRL_EXT_LPCD: u64 = 4
+const CTRL_EXT_FORCE_SMBUS: u64 = 0x800
+
+// PHY registers of the HV/LV PHYs (82577 and later), as e1000e names
+// them. Pages >= 768 sit at MDIO address 1, everything below at 2; a
+// register above 15 needs the page written into register 31 first.
+const PHY_FAIL: u64 = 0xFFFFFFFF
+const PHY_PAGE_SELECT: u64 = 0x1F
+const PAGE_INTC: u64 = 768
+const CV_SMB_PAGE: u64 = 769
+const CV_SMB_REG: u64 = 23
+const CV_SMB_FORCE: u64 = 1
+const HV_PM_PAGE: u64 = 770
+const HV_PM_REG: u64 = 17
+const HV_PM_K1: u64 = 0x4000
+const ULP1_PAGE: u64 = 779
+const ULP1_REG: u64 = 16
+const ULP1_START: u64 = 1
+const ULP1_CLEAR: u64 = 0x1D74 // IND|STICKY|INBAND|WOL|RESET_TO_SMBUS|EN_LANPHYPC|DIS_CLR|DIS_SMB_PERST
+const MII_BMCR: u64 = 0
+const BMCR_ANRESTART: u64 = 0x200
+const BMCR_PDOWN: u64 = 0x800
+const BMCR_ANENABLE: u64 = 0x1000
+
+// Per unit, behind round O-NETZUI's S_SPEED.
+const S_STEP: u64 = 0xC0 // the step the bring-up is in (or stopped in)
+const S_WARN: u64 = 0xC8 // W_* bits: what did not work but was survivable
+const S_IRQMODE: u64 = 0xD0 // IRQ_* below
+const S_GSI: u64 = 0xD8 // the I/O APIC input, when INTx
+const S_SPUR: u64 = 0xE0 // interrupts in a row that were not ours
+const S_STORM: u64 = 0xE8 // 1 = the line was masked because of a storm
+const S_TFLAGS: u64 = 0xF0 // unit 0 only: the test words, see set_flags
+const S_FOUND: u64 = 0xF8 // 1 = a supported card sits at this unit
+const S_SPURT0: u64 = 0x100 // cycle counter at the start of the storm window
+
+const IRQ_NONE: u64 = 0 // polled by the network task
+const IRQ_INTX: u64 = 1
+const IRQ_MSI: u64 = 2
+
+const W_SWHELD: u64 = 1 // semaphore held by somebody else
+const W_SWFAIL: u64 = 2 // semaphore did not stick
+const W_PHY: u64 = 4 // PHY not accessible
+const W_BLOCKED: u64 = 8 // PHY reset blocked by the ME
+const W_ULPME: u64 = 16 // ME did not finish the ULP handshake
+const W_ULPPHY: u64 = 32 // ULP registers not reachable
+const W_GIO: u64 = 64 // master requests still pending
+const W_AUTORD: u64 = 128 // NVM auto-read did not finish
+const W_FLUSH: u64 = 256 // SPT+: descriptor flush would be required
+const W_STORM: u64 = 512 // interrupt storm, line masked
+
+const TF_ICH: u64 = 1 // `nicich`: drive an 82574 through the PCH path
+const TF_FAIL: u64 = 2 // `nicfail`: pretend the reset never finished
+const TF_INTX: u64 = 4 // `nicintx`: the pin, not MSI
+
+// How many interrupts in a row may find ICR empty before the line is
+// called a storm and masked. A level line that nobody drives low again
+// fires as fast as the processor can take it -- that is millions per
+// second, and the timer below never gets its turn.
+const STORM_LIMIT: u64 = 20000
+
+fn set_flags(state: u64, force_ich: bool, fail: bool, intx: bool) {
+    var f: u64 = 0
+    if force_ich { f = f | TF_ICH }
+    if fail { f = f | TF_FAIL }
+    if intx { f = f | TF_INTX }
+    kstate.set(state, sc(0, S_TFLAGS), f)
+}
+
+fn tflag(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, sc(0, S_TFLAGS)) & bit) != 0
+}
+
+fn warn(state: u64, u: u64, bit: u64) {
+    kstate.set(state, sc(u, S_WARN), kstate.get(state, sc(u, S_WARN)) | bit)
+}
+
+fn warn_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_WARN))
+}
+
+fn step_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_STEP))
+}
+
+fn irq_mode_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_IRQMODE))
+}
+
+fn storm_on(state: u64, u: u64) -> bool {
+    return kstate.get(state, sc(u, S_STORM)) != 0
+}
+
+// A pause in MICROSECONDS on the cycle counter `apic.calibrate` measured
+// against the PIT -- the same clock `smp.udelay` uses, and like it, it
+// needs no interrupt. Without a calibration it falls back to a count.
+fn udelay(state: u64, us: u64) {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        var i: u64 = 0
+        while i < us * 100 {
             arch.pause()
-            d = d + 1
+            i = i + 1
         }
-        spin = spin + 1
+        return
     }
-    kstate.set(state, sc(u, S_SWFLAG), 0)
+    let want: u64 = hz / 1000000 * us
+    let t0: u64 = apic.tsc()
+    while apic.tsc() - t0 < want {
+        arch.pause()
+    }
+}
+
+// THE STEP LINE. It is printed BEFORE the step touches the chip -- a line
+// printed afterwards would be missing exactly when it matters.
+fn step(state: u64, u: u64, n: u64, what: u64) {
+    kstate.set(state, sc(u, S_STEP), n)
+    if fam(state, u) != FAM_ICH {
+        return
+    }
+    serial.puts((&t_0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&t_1[0]) as u64)
+    serial.puts(what)
+    serial.nl()
+}
+
+fn note(state: u64, u: u64, what: u64, v: u64) {
+    if fam(state, u) != FAM_ICH {
+        return
+    }
+    serial.puts((&t_2[0]) as u64)
+    serial.puts(what)
+    serial.hex(v)
+    serial.nl()
+}
+
+// GIVE UP, SAY WHY, LEAVE THE CHIP QUIET. `dead` means the part does not
+// answer register reads -- then nothing is written to it any more.
+fn fail(state: u64, u: u64, why: u64, dead: bool) -> bool {
+    serial.puts((&t_3[0]) as u64)
+    serial.dec(step_on(state, u))
+    serial.puts((&t_4[0]) as u64)
+    serial.puts(why)
+    serial.puts((&t_5[0]) as u64)
+    serial.hex(warn_on(state, u))
+    serial.puts((&t_6[0]) as u64)
+    serial.nl()
+    if !dead && mmio(state, u) != 0 {
+        setreg(state, u, R_IMC, 0xFFFFFFFF)
+        setreg(state, u, R_RCTL, 0)
+        setreg(state, u, R_TCTL, 0)
+    }
+    pci.disable_master(bdf_on(state, u))
+    kstate.set(state, sc(u, S_READY), 0)
+    kstate.set(state, sc(u, S_MMIO), 0)
+    return false
+}
+
+// ------------------------------------------------ the semaphore
+//
+// e1000_acquire_swflag_ich8lan: wait up to PHY_CFG_TIMEOUT (100 ms) for
+// the flag to be free, set it, and wait up to SW_FLAG_TIMEOUT (1000 ms)
+// for it to stick. If it does not stick, the firmware owns the bus and
+// this driver keeps its hands off the PHY -- the data path may still
+// work, because the firmware negotiated a link on its own.
+fn swflag_take(state: u64, u: u64) -> bool {
+    if kstate.get(state, sc(u, S_SWFLAG)) != 0 {
+        return true
+    }
+    var t: u64 = 0
+    var v: u64 = reg(state, u, R_EXTCNF_CTRL)
+    while (v & EXTCNF_SWFLAG) != 0 && t < 100 {
+        udelay(state, 1000)
+        t = t + 1
+        v = reg(state, u, R_EXTCNF_CTRL)
+    }
+    if (v & EXTCNF_SWFLAG) != 0 {
+        warn(state, u, W_SWHELD)
+        return false
+    }
+    setreg(state, u, R_EXTCNF_CTRL, v | EXTCNF_SWFLAG)
+    t = 0
+    while t < 1000 {
+        if (reg(state, u, R_EXTCNF_CTRL) & EXTCNF_SWFLAG) != 0 {
+            kstate.set(state, sc(u, S_SWFLAG), 1)
+            return true
+        }
+        udelay(state, 1000)
+        t = t + 1
+    }
+    setreg(state, u, R_EXTCNF_CTRL,
+        reg(state, u, R_EXTCNF_CTRL) & (~EXTCNF_SWFLAG))
+    warn(state, u, W_SWFAIL)
     return false
 }
 
@@ -764,84 +1034,463 @@ fn swflag_give(state: u64, u: u64) {
     kstate.set(state, sc(u, S_SWFLAG), 0)
 }
 
-// EIN MII-REGISTER, ueber MDIC. Der Aufrufer muss die Semaphore halten.
-// 0xFFFFFFFF heisst "keine Antwort" und ist absichtlich KEIN gueltiger
-// Registerwert -- ein PHY antwortet mit sechzehn Bit.
-fn mdic_read(state: u64, u: u64, r: u64) -> u64 {
-    setreg(state, u, R_MDIC, MDIC_OP_READ | (ICH_PHY_ADDR << 21)
-        | ((r & 0x1F) << 16))
-    var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+// ------------------------------------------------ the wire to the PHY
+//
+// One MDIC transaction, e1000e_read/write_phy_reg_mdic: at most
+// 3 * E1000_GEN_POLL_TIMEOUT polls 50 us apart (96 ms), and the answer
+// counts only with READY set, ERROR clear and the SAME register number
+// echoed back. PHY_FAIL is not a register value -- a PHY answers 16 bits.
+fn mdic_op(state: u64, u: u64, addr: u64, r: u64, op: u64, val: u64) -> u64 {
+    setreg(state, u, R_MDIC, op | ((addr & 0x1F) << 21) | ((r & 0x1F) << 16)
+        | (val & 0xFFFF))
+    var i: u64 = 0
+    while i < 1920 {
+        udelay(state, 50)
         let v: u64 = reg(state, u, R_MDIC)
         if (v & MDIC_READY) != 0 {
             if (v & MDIC_ERROR) != 0 {
-                return 0xFFFFFFFF
+                return PHY_FAIL
+            }
+            if ((v >> 16) & 0x1F) != (r & 0x1F) {
+                return PHY_FAIL
             }
             return v & 0xFFFF
         }
-        arch.pause()
-        spin = spin + 1
+        i = i + 1
     }
-    return 0xFFFFFFFF
+    return PHY_FAIL
 }
 
-fn mdic_write(state: u64, u: u64, r: u64, val: u64) -> bool {
-    setreg(state, u, R_MDIC, MDIC_OP_WRITE | (ICH_PHY_ADDR << 21)
-        | ((r & 0x1F) << 16) | (val & 0xFFFF))
-    var spin: u64 = 0
-    while spin < SPIN_LIMIT {
-        let v: u64 = reg(state, u, R_MDIC)
-        if (v & MDIC_READY) != 0 {
-            return (v & MDIC_ERROR) == 0
-        }
-        arch.pause()
-        spin = spin + 1
+// e1000_read_phy_reg_hv: address 1 for the pages from 768 up, 2 below;
+// the page goes into register 31 (at address 1) when the register is
+// above 15. Page 0 falls back to address 1 when 2 says nothing -- that is
+// where the 82574's PHY sits, and it costs a real PCH nothing.
+fn phy_addr_for(page: u64) -> u64 {
+    if page >= PAGE_INTC {
+        return 1
+    }
+    return 2
+}
+
+fn phy_page(state: u64, u: u64, page: u64, r: u64) -> bool {
+    if r <= 15 {
+        return true
+    }
+    var p: u64 = page
+    if p == PAGE_INTC {
+        p = 0
+    }
+    return mdic_op(state, u, 1, PHY_PAGE_SELECT, MDIC_OP_WRITE, p << 5) != PHY_FAIL
+}
+
+fn phy_rd(state: u64, u: u64, page: u64, r: u64) -> u64 {
+    if !phy_page(state, u, page, r) {
+        return PHY_FAIL
+    }
+    let v: u64 = mdic_op(state, u, phy_addr_for(page), r, MDIC_OP_READ, 0)
+    if v == PHY_FAIL && page == 0 {
+        return mdic_op(state, u, 1, r, MDIC_OP_READ, 0)
+    }
+    return v
+}
+
+fn phy_wr(state: u64, u: u64, page: u64, r: u64, val: u64) -> bool {
+    if !phy_page(state, u, page, r) {
+        return false
+    }
+    if mdic_op(state, u, phy_addr_for(page), r, MDIC_OP_WRITE, val) != PHY_FAIL {
+        return true
+    }
+    if page == 0 {
+        return mdic_op(state, u, 1, r, MDIC_OP_WRITE, val) != PHY_FAIL
     }
     return false
 }
 
-// DEN ULTRA-LOW-POWER-ZUSTAND VERLASSEN. Ein I219, den die Firmware
-// schlafen gelegt hat, antwortet auf MDIC nicht. Das Bit steht in
-// FEXTNVM7; es zu loeschen ist die eine Haelfte, die Wartezeit danach die
-// andere. AUS DEM DATENBLATT -- nie ausgefuehrt.
+// The old names, for `read_link` and the selftest.
+fn mdic_read(state: u64, u: u64, r: u64) -> u64 {
+    return phy_rd(state, u, 0, r)
+}
+
+fn mdic_write(state: u64, u: u64, r: u64, val: u64) -> bool {
+    return phy_wr(state, u, 0, r, val)
+}
+
+// e1000_phy_is_accessible_pchlan: PHY ID 1 and 2, two tries. Stores the
+// ID when there is one. On LPT and later, with no ME firmware active,
+// SMBus mode is unforced on both sides afterwards.
+fn phy_accessible(state: u64, u: u64) -> bool {
+    var tries: u64 = 0
+    var id: u64 = 0
+    while tries < 2 && id == 0 {
+        let a: u64 = phy_rd(state, u, 0, 2)
+        if a != PHY_FAIL && a != 0xFFFF {
+            let b: u64 = phy_rd(state, u, 0, 3)
+            if b != PHY_FAIL && b != 0xFFFF {
+                id = (a << 16) | (b & 0xFFF0)
+            }
+        }
+        tries = tries + 1
+    }
+    if id == 0 {
+        kstate.set(state, sc(u, S_PHYID), 0xFFFFFFFF)
+        return false
+    }
+    kstate.set(state, sc(u, S_PHYID), id)
+    if (reg(state, u, R_FWSM) & FWSM_FW_VALID) == 0 {
+        let s: u64 = phy_rd(state, u, CV_SMB_PAGE, CV_SMB_REG)
+        if s != PHY_FAIL {
+            let w: bool = phy_wr(state, u, CV_SMB_PAGE, CV_SMB_REG,
+                s & (~CV_SMB_FORCE))
+        }
+        setreg(state, u, R_CTRL_EXT,
+            reg(state, u, R_CTRL_EXT) & (~CTRL_EXT_FORCE_SMBUS))
+    }
+    return true
+}
+
+// e1000_toggle_lanphypc_pch_lpt: PHY config counter to 50 ms, drive the
+// LANPHYPC pin low for 10 us under software control, let go, then wait
+// for LPCD (at most 20 x 5 ms) and 30 ms more.
+fn toggle_lanphypc(state: u64, u: u64) {
+    var v: u64 = reg(state, u, R_FEXTNVM3)
+    v = (v & (~FEXTNVM3_CFG_MASK)) | FEXTNVM3_CFG_50MS
+    setreg(state, u, R_FEXTNVM3, v)
+    var c: u64 = reg(state, u, R_CTRL)
+    c = (c | CTRL_LANPHYPC_OVERRIDE) & (~CTRL_LANPHYPC_VALUE)
+    setreg(state, u, R_CTRL, c)
+    let f1: u64 = reg(state, u, R_STATUS)
+    udelay(state, 20)
+    c = c & (~CTRL_LANPHYPC_OVERRIDE)
+    setreg(state, u, R_CTRL, c)
+    let f2: u64 = reg(state, u, R_STATUS)
+    var n: u64 = 0
+    while n < 20 {
+        udelay(state, 5000)
+        if (reg(state, u, R_CTRL_EXT) & CTRL_EXT_LPCD) != 0 {
+            n = 20
+        }
+        n = n + 1
+    }
+    udelay(state, 30000)
+}
+
+// e1000_check_reset_block_ich8lan: the ME may forbid resetting the PHY;
+// it says so by keeping FWSM.RSPCIPHY clear. Up to 30 x 10 ms.
+fn phy_reset_blocked(state: u64, u: u64) -> bool {
+    var i: u64 = 0
+    while i < 30 {
+        if (reg(state, u, R_FWSM) & FWSM_RSPCIPHY) != 0 {
+            return false
+        }
+        udelay(state, 10000)
+        i = i + 1
+    }
+    return (reg(state, u, R_FWSM) & FWSM_RSPCIPHY) == 0
+}
+
+// e1000_disable_ulp_lpt_lp with force. Not for I217-LM/V and I218-LM2/V2
+// -- e1000e leaves those alone, and so does this.
+fn ulp_applies(devid: u64) -> bool {
+    if devid == 0x153A || devid == 0x153B {
+        return false
+    }
+    if devid == 0x15A0 || devid == 0x15A1 {
+        return false
+    }
+    return true
+}
+
 fn ulp_off(state: u64, u: u64) {
-    let v: u64 = reg(state, u, R_FEXTNVM7)
-    if (v & FEXTNVM7_ULP) != 0 {
-        setreg(state, u, R_FEXTNVM7, v & (~FEXTNVM7_ULP))
-        var d: u64 = 0
-        while d < 200000 {
-            arch.pause()
-            d = d + 1
+    if !ulp_applies(kstate.get(state, sc(u, S_DEVID))) {
+        note(state, u, (&t_7[0]) as u64,
+            kstate.get(state, sc(u, S_DEVID)))
+        return
+    }
+    if (reg(state, u, R_FWSM) & FWSM_FW_VALID) != 0 {
+        // The ME owns ULP: ask it, and wait up to 2.5 s for its answer.
+        var h: u64 = reg(state, u, R_H2ME)
+        setreg(state, u, R_H2ME, (h & (~H2ME_ULP)) | H2ME_ENFORCE)
+        var i: u64 = 0
+        while (reg(state, u, R_FWSM) & FWSM_ULP_CFG_DONE) != 0 && i < 250 {
+            udelay(state, 10000)
+            i = i + 1
+        }
+        if i >= 250 {
+            warn(state, u, W_ULPME)
+        }
+        h = reg(state, u, R_H2ME)
+        setreg(state, u, R_H2ME, h & (~H2ME_ENFORCE))
+        note(state, u, (&t_8[0]) as u64, i)
+        return
+    }
+    if !swflag_take(state, u) {
+        return
+    }
+    toggle_lanphypc(state, u)
+    var s: u64 = phy_rd(state, u, CV_SMB_PAGE, CV_SMB_REG)
+    if s == PHY_FAIL {
+        setreg(state, u, R_CTRL_EXT,
+            reg(state, u, R_CTRL_EXT) | CTRL_EXT_FORCE_SMBUS)
+        udelay(state, 50000)
+        s = phy_rd(state, u, CV_SMB_PAGE, CV_SMB_REG)
+    }
+    if s == PHY_FAIL {
+        warn(state, u, W_ULPPHY)
+        swflag_give(state, u)
+        return
+    }
+    let w1: bool = phy_wr(state, u, CV_SMB_PAGE, CV_SMB_REG, s & (~CV_SMB_FORCE))
+    setreg(state, u, R_CTRL_EXT,
+        reg(state, u, R_CTRL_EXT) & (~CTRL_EXT_FORCE_SMBUS))
+    let pm: u64 = phy_rd(state, u, HV_PM_PAGE, HV_PM_REG)
+    if pm != PHY_FAIL {
+        let w2: bool = phy_wr(state, u, HV_PM_PAGE, HV_PM_REG, pm | HV_PM_K1)
+    }
+    let c: u64 = phy_rd(state, u, ULP1_PAGE, ULP1_REG)
+    if c != PHY_FAIL {
+        let c2: u64 = c & (~ULP1_CLEAR)
+        let w3: bool = phy_wr(state, u, ULP1_PAGE, ULP1_REG, c2)
+        let w4: bool = phy_wr(state, u, ULP1_PAGE, ULP1_REG, c2 | ULP1_START)
+    }
+    setreg(state, u, R_FEXTNVM7,
+        reg(state, u, R_FEXTNVM7) & (~FEXTNVM7_DIS_SMB_PERST))
+    swflag_give(state, u)
+    udelay(state, 50000)
+}
+
+// e1000_init_phy_workarounds_pchlan, the pch_lpt branch.
+fn phy_wake(state: u64, u: u64) {
+    step(state, u, 4, (&t_9[0]) as u64)
+    if !swflag_take(state, u) {
+        note(state, u, (&t_10[0]) as u64,
+            reg(state, u, R_EXTCNF_CTRL))
+        return
+    }
+    step(state, u, 5, (&t_11[0]) as u64)
+    if !phy_accessible(state, u) {
+        step(state, u, 6, (&t_12[0]) as u64)
+        setreg(state, u, R_CTRL_EXT,
+            reg(state, u, R_CTRL_EXT) | CTRL_EXT_FORCE_SMBUS)
+        udelay(state, 50000)
+        if !phy_accessible(state, u) {
+            step(state, u, 7, (&t_13[0]) as u64)
+            if phy_reset_blocked(state, u) {
+                warn(state, u, W_BLOCKED)
+                warn(state, u, W_PHY)
+            } else {
+                step(state, u, 8, (&t_14[0]) as u64)
+                toggle_lanphypc(state, u)
+                if !phy_accessible(state, u) {
+                    setreg(state, u, R_CTRL_EXT,
+                        reg(state, u, R_CTRL_EXT) & (~CTRL_EXT_FORCE_SMBUS))
+                    if !phy_accessible(state, u) {
+                        warn(state, u, W_PHY)
+                    }
+                }
+            }
         }
     }
-}
-
-// WER DER PHY IST, aus MII-Register 2 und 3. Das ist die eine Zeile, an
-// der man auf einem echten Brett sieht, ob ueberhaupt jemand am anderen
-// Ende haengt: 0xFFFFFFFF heisst, der Bus gehoert der Firmware oder der
-// PHY schlaeft noch.
-fn phy_probe(state: u64, u: u64) {
-    let a: u64 = mdic_read(state, u, 2)
-    let b: u64 = mdic_read(state, u, 3)
-    if a == 0xFFFFFFFF || b == 0xFFFFFFFF {
-        kstate.set(state, sc(u, S_PHYID), 0xFFFFFFFF)
-        return
-    }
-    kstate.set(state, sc(u, S_PHYID), (a << 16) | b)
-}
-
-// DER AUFSETZWEG DES PCH-ZWEIGS, zwischen Ruecksetzen und Ringen.
-fn ich_bringup(state: u64, u: u64) {
-    if !swflag_take(state, u) {
-        // Die Firmware haelt den Bus. Der Datenweg kann trotzdem laufen,
-        // wenn die Firmware die Verbindung schon ausgehandelt hat --
-        // deshalb kein Abbruch, sondern eine Zahl, die das sagt.
-        kstate.set(state, sc(u, S_PHYID), 0)
-        return
-    }
-    ulp_off(state, u)
-    phy_probe(state, u)
+    note(state, u, (&t_15[0]) as u64, kstate.get(state, sc(u, S_PHYID)))
     swflag_give(state, u)
+}
+
+// e1000_reset_hw_ich8lan without the PHY reset. The PHY reset would need
+// the LCD configuration out of the NVM afterwards (sw_lcd_config), and a
+// PHY that the firmware configured is better left as it is than
+// half-configured by a driver that cannot read the NVM.
+fn ich_reset(state: u64, u: u64) -> bool {
+    step(state, u, 9, (&t_16[0]) as u64)
+    setreg(state, u, R_CTRL, reg(state, u, R_CTRL) | CTRL_GIO_MASTER_DISABLE)
+    var t: u64 = 0
+    while (reg(state, u, R_STATUS) & STATUS_GIO_MASTER_EN) != 0 && t < 800 {
+        udelay(state, 100)
+        t = t + 1
+    }
+    if t >= 800 {
+        warn(state, u, W_GIO)
+    }
+    step(state, u, 10, (&t_17[0]) as u64)
+    // SPT and later: a ring the firmware left running needs a flush the
+    // driver cannot do yet. Said, not done (PCI config 0xE4, bit 8).
+    if (pci.cfg_read16(bdf_on(state, u), 0xE4) & 0x100) != 0 {
+        warn(state, u, W_FLUSH)
+    }
+    setreg(state, u, R_IMC, 0xFFFFFFFF)
+    setreg(state, u, R_RCTL, 0)
+    setreg(state, u, R_TCTL, TCTL_PSP)
+    let fl: u64 = reg(state, u, R_STATUS)
+    udelay(state, 10000)
+    let ctrl: u64 = reg(state, u, R_CTRL)
+    let sw: bool = swflag_take(state, u)
+    step(state, u, 11, (&t_18[0]) as u64)
+    setreg(state, u, R_CTRL, ctrl | CTRL_RST)
+    // NOTHING HERE. Not a read, not a flush -- see the head of this block.
+    udelay(state, 20000)
+    // The reset took the semaphore with it (EXTCNF_CTRL is reset).
+    kstate.set(state, sc(u, S_SWFLAG), 0)
+    step(state, u, 12, (&t_19[0]) as u64)
+    if tflag(state, TF_FAIL) {
+        return false
+    }
+    t = 0
+    while (reg(state, u, R_CTRL) & CTRL_RST) != 0 {
+        if t >= 100 {
+            return false
+        }
+        udelay(state, 1000)
+        t = t + 1
+    }
+    step(state, u, 13, (&t_20[0]) as u64)
+    t = 0
+    while (reg(state, u, R_EECD) & EECD_AUTO_RD) == 0 && t < 10 {
+        udelay(state, 1000)
+        t = t + 1
+    }
+    if t >= 10 {
+        warn(state, u, W_AUTORD)
+    }
+    setreg(state, u, R_IMC, 0xFFFFFFFF)
+    let icr: u64 = reg(state, u, R_ICR)
+    setreg(state, u, R_KABGTXD, reg(state, u, R_KABGTXD) | KABGTXD_BGSQLBIAS)
+    return true
+}
+
+// e1000_power_up_phy_copper plus a restart of auto-negotiation -- but
+// only if the PHY was powered down or had auto-negotiation off. A link
+// the firmware already brought up is not dropped for nothing.
+fn phy_power_up(state: u64, u: u64) {
+    step(state, u, 14, (&t_21[0]) as u64)
+    if (warn_on(state, u) & W_PHY) != 0 {
+        return
+    }
+    if !swflag_take(state, u) {
+        return
+    }
+    let b: u64 = phy_rd(state, u, 0, MII_BMCR)
+    if b != PHY_FAIL {
+        note(state, u, (&t_22[0]) as u64, b)
+        if (b & BMCR_PDOWN) != 0 || (b & BMCR_ANENABLE) == 0 {
+            let w: bool = phy_wr(state, u, 0, MII_BMCR,
+                (b & (~BMCR_PDOWN)) | BMCR_ANENABLE | BMCR_ANRESTART)
+        }
+    }
+    swflag_give(state, u)
+}
+
+// THE PCH BRING-UP, from the first register read to the end of the reset.
+// `false` = the part is not usable; `fail` has already said why.
+fn ich_bringup(state: u64, u: u64) -> bool {
+    step(state, u, 2, (&t_23[0]) as u64)
+    let st: u64 = reg(state, u, R_STATUS)
+    if st == 0xFFFFFFFF {
+        return fail(state, u, (&t_24[0]) as u64, true)
+    }
+    note(state, u, (&t_25[0]) as u64, st)
+    note(state, u, (&t_26[0]) as u64, reg(state, u, R_CTRL))
+    note(state, u, (&t_27[0]) as u64, reg(state, u, R_CTRL_EXT))
+    note(state, u, (&t_28[0]) as u64, reg(state, u, R_FWSM))
+    note(state, u, (&t_29[0]) as u64, reg(state, u, R_EXTCNF_CTRL))
+    // The address the firmware left in RAL/RAH, BEFORE the reset.
+    let prah: u64 = reg(state, u, R_RAH)
+    if (prah & RAH_AV) != 0 {
+        kstate.set(state, sc(u, S_PREMAC),
+            (reg(state, u, R_RAL) & 0xFFFFFFFF) | ((prah & 0xFFFF) << 32))
+    }
+    step(state, u, 3, (&t_30[0]) as u64)
+    ulp_off(state, u)
+    phy_wake(state, u)
+    if !ich_reset(state, u) {
+        return fail(state, u, (&t_31[0]) as u64, false)
+    }
+    phy_power_up(state, u)
+    return true
+}
+
+// PCI power state D0, before the first register access. A part left in
+// D3hot answers config space and nothing else.
+fn pci_d0(state: u64, u: u64) {
+    let d: u64 = bdf_on(state, u)
+    let pm: u64 = pci.cap_find(d, 0x01)
+    if pm == 0 {
+        return
+    }
+    let csr: u64 = pci.cfg_read16(d, pm + 4)
+    note(state, u, (&t_32[0]) as u64, csr)
+    if (csr & 3) != 0 {
+        pci.cfg_write16(d, pm + 4, csr & 0xFFFC)
+        udelay(state, 10000)
+    }
+}
+
+// ------------------------------------------------ the interrupt, PCH line
+
+fn msi_arm(state: u64, u: u64, i: u64, vec: u64, armed: bool) -> bool {
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    let cap: u64 = pci.get(state, i, pci.E_MSI)
+    if cap == 0 {
+        return false
+    }
+    let ctrl: u64 = pci.cfg_read16(d, cap + 2)
+    pci.cfg_write32(d, cap + 4,
+        apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    var datoff: u64 = cap + 8
+    if (ctrl & 0x80) != 0 {
+        pci.cfg_write32(d, cap + 8, 0)
+        datoff = cap + 12
+    }
+    pci.cfg_write16(d, datoff, vec & 0xFF)
+    var neu: u64 = ctrl & 0xFF8E
+    if armed {
+        neu = neu | 1
+    }
+    pci.cfg_write16(d, cap + 2, neu)
+    // The pin off, or the part reports twice.
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
+    return true
+}
+
+// MSI first, the pin only when asked for or when there is no MSI, and
+// then only with a line the firmware named. Otherwise: polled.
+fn ich_irq(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
+    step(state, u, 17, (&t_33[0]) as u64)
+    kstate.set(state, sc(u, S_IRQMODE), IRQ_NONE)
+    if vec == 0 {
+        return
+    }
+    let want_pin: bool = tflag(state, TF_INTX)
+    if !want_pin && pci.get(state, i, pci.E_MSI) != 0 {
+        if msi_arm(state, u, i, vec, armed) {
+            kstate.set(state, sc(u, S_IRQMODE), IRQ_MSI)
+            note(state, u, (&t_34[0]) as u64, vec)
+            return
+        }
+    }
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    let pin: u64 = pci.get(state, i, pci.E_IRQPIN)
+    var gsi: u64 = 0xFFFFFFFF
+    if pin >= 1 && pin <= 4 {
+        gsi = aml.gsi_for(state, pci.bdf_bus(d), pci.bdf_dev(d), pin - 1)
+    }
+    if gsi == 0xFFFFFFFF && want_pin {
+        // `nicintx` asked for the pin explicitly: the old way, 0x3C.
+        gsi = pci.get(state, i, pci.E_IRQLINE)
+    }
+    if gsi == 0 || gsi > 23 {
+        note(state, u, (&t_35[0]) as u64,
+            pci.get(state, i, pci.E_IRQLINE))
+        pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
+        return
+    }
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    kstate.set(state, sc(u, S_GSI), gsi)
+    kstate.set(state, sc(u, S_SPUR), 0)
+    apic.route(state, gsi, vec, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+    }
+    kstate.set(state, sc(u, S_IRQMODE), IRQ_INTX)
+    note(state, u, (&t_36[0]) as u64, gsi)
 }
 
 fn read_link(state: u64, u: u64) {
@@ -912,34 +1561,53 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     var l_kein: [u8; 33] = "keine Karte an dieser Einheit, u\0"
     var l_da: [u8; 26] = "Karte gefunden, devid \0\0\0\0"
     kstate.set(state, sc(u, S_READY), 0)
+    kstate.set(state, sc(u, S_FOUND), 0)
+    kstate.set(state, sc(u, S_STEP), 0)
+    kstate.set(state, sc(u, S_WARN), 0)
+    kstate.set(state, sc(u, S_IRQMODE), IRQ_NONE)
+    kstate.set(state, sc(u, S_GSI), 0)
+    kstate.set(state, sc(u, S_SPUR), 0)
+    kstate.set(state, sc(u, S_SPURT0), 0)
+    kstate.set(state, sc(u, S_STORM), 0)
     let i: u64 = find(state, u)
     if i >= pci.MAX_DEV {
         klog.sayn(state, klog.L_DEBUG, lq(), (&l_kein[0]) as u64, u)
         return false
     }
     let d: u64 = pci.get(state, i, pci.E_BDF)
+    let devid: u64 = pci.get(state, i, pci.E_DEVICE)
     kstate.set(state, sc(u, S_IDX), i)
     kstate.set(state, sc(u, S_BDF), d)
-    kstate.set(state, sc(u, S_DEVID), pci.get(state, i, pci.E_DEVICE))
-    klog.sayh(state, klog.L_INFO, lq(), (&l_da[0]) as u64,
-        pci.get(state, i, pci.E_DEVICE))
+    kstate.set(state, sc(u, S_DEVID), devid)
+    klog.sayh(state, klog.L_INFO, lq(), (&l_da[0]) as u64, devid)
     // RUNDE RTL: welche der beiden Familien. Alles, was danach anders
-    // laeuft, haengt an dieser einen Zahl.
-    kstate.set(state, sc(u, S_FAM), family_of(pci.get(state, i, pci.E_DEVICE)))
+    // laeuft, haengt an dieser einen Zahl. ROUND NIC9020: `nicich` sends
+    // QEMU's 82574 down the PCH path, so that path runs somewhere before
+    // it runs on a board.
+    var fm: u64 = family_of(devid)
+    if tflag(state, TF_ICH) {
+        fm = FAM_ICH
+    }
+    kstate.set(state, sc(u, S_FAM), fm)
     kstate.set(state, sc(u, S_PREMAC), 0)
     kstate.set(state, sc(u, S_PHYID), 0)
     kstate.set(state, sc(u, S_SWFLAG), 0)
+    kstate.set(state, sc(u, S_FOUND), 1)
 
     // BAR0, and it has to be MEMORY. An 8254x also offers an I/O BAR;
     // this driver does not use it, and a card whose BAR0 is I/O is not
     // one of these.
+    step(state, u, 1, (&t_37[0]) as u64)
     let phys: u64 = pci.bar(state, i, 0)
     if phys == 0 || pci.bar_is_io(state, i, 0) {
-        return false
+        return fail(state, u, (&t_38[0]) as u64, true)
+    }
+    if fm == FAM_ICH {
+        pci_d0(state, u)
     }
     let base: u64 = apic.map_device(state, phys)
     if base == 0 {
-        return false
+        return fail(state, u, (&t_39[0]) as u64, true)
     }
     kstate.set(state, sc(u, S_MMIO), base)
 
@@ -947,34 +1615,20 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     // descriptor -- the same counter-check `nicnobm` makes for virtio.
     pci.enable_master(d)
 
-    // RUNDE RTL, PCH-LINIE: die Adresse VOR dem Ruecksetzen aufheben.
-    // Auf der 8254x-Familie laedt der Chip RAL/RAH nach jedem Ruecksetzen
-    // selbst neu; auf der PCH-Linie hat die FIRMWARE sie hineingeschrieben,
-    // und ein Ruecksetzen kann sie mitnehmen. Wer erst danach liest, hat
-    // eine Karte ohne Adresse und weiss nicht, warum.
-    if fam(state, u) == FAM_ICH {
-        let prah: u64 = reg(state, u, R_RAH)
-        if (prah & RAH_AV) != 0 {
-            kstate.set(state, sc(u, S_PREMAC),
-                (reg(state, u, R_RAL) & 0xFFFFFFFF) | ((prah & 0xFFFF) << 32))
+    if fm == FAM_ICH {
+        if !ich_bringup(state, u) {
+            return false
         }
-    }
-
-    if !chip_reset(state, u) {
-        kstate.set(state, sc(u, S_MMIO), 0)
-        return false
-    }
-
-    // RUNDE RTL: der PHY der PCH-Linie haengt hinter einer Semaphore, die
-    // sich der MAC mit der Verwaltungsfirmware teilt. Vor den Ringen, weil
-    // ein PHY, der noch schlaeft, keine Verbindung meldet.
-    if fam(state, u) == FAM_ICH {
-        ich_bringup(state, u)
+    } else {
+        if !chip_reset(state, u) {
+            return fail(state, u, (&t_31[0]) as u64, false)
+        }
     }
 
     // The link: let the chip negotiate it. LRST and ILOS have to be off,
     // and VLAN mode too -- a tagged frame the stack does not expect is a
     // frame with four octets of rubbish in the middle.
+    step(state, u, 15, (&t_40[0]) as u64)
     var ctrl: u64 = reg(state, u, R_CTRL)
     ctrl = ctrl | CTRL_SLU | CTRL_ASDE
     ctrl = ctrl & 0xFFFFFFFF
@@ -984,13 +1638,13 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     setreg(state, u, R_CTRL, ctrl)
 
     if !read_mac(state, u) {
-        kstate.set(state, sc(u, S_MMIO), 0)
-        return false
+        return fail(state, u, (&t_41[0]) as u64, false)
     }
 
     // The multicast table comes out of reset with whatever was in it.
     // 128 registers of zero means: no multicast group is accepted, which
     // is the truth for this stack.
+    step(state, u, 16, (&t_42[0]) as u64)
     var m: u64 = 0
     while m < 128 {
         setreg(state, u, R_MTA + m * 4, 0)
@@ -1002,8 +1656,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     // no promise about contiguity.
     let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
     if r == 0 {
-        kstate.set(state, sc(u, S_MMIO), 0)
-        return false
+        return fail(state, u, (&t_43[0]) as u64, false)
     }
     var z: u64 = 0
     while z < RING_BYTES {
@@ -1016,10 +1669,13 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     tx_setup(state, u)
 
     // THE INTERRUPT IS ARMED BEFORE THE RINGS ARE ENABLED, the same
-    // order virtio uses. `use_msix` is accepted and ignored: this family
-    // has no MSI-X, and saying so through `msix_on` is better than
-    // failing to come up at all.
-    intx_arm(state, u, i, armed, vec)
+    // order virtio uses. The 8254x family takes the pin as before; the
+    // PCH line asks for MSI first (see `ich_irq`).
+    if fm == FAM_ICH {
+        ich_irq(state, u, i, armed, vec)
+    } else {
+        intx_arm(state, u, i, armed, vec)
+    }
     if armed {
         // EVERY delay register to zero, and the send side in the mask
         // too. Both because of a MEASUREMENT: with only the receive
@@ -1052,7 +1708,19 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     // what makes QEMU look at that queue again; it costs one register
     // write and it takes the second away.
     setreg(state, u, R_RDT, RING_SLOTS - 1)
+    step(state, u, 18, (&t_44[0]) as u64)
     read_link(state, u)
+    if fm == FAM_ICH {
+        serial.puts((&t_45[0]) as u64)
+        serial.hex(kstate.get(state, sc(u, S_PHYID)))
+        serial.puts((&t_46[0]) as u64)
+        serial.dec(kstate.get(state, sc(u, S_LINK)))
+        serial.puts((&t_47[0]) as u64)
+        serial.dec(kstate.get(state, sc(u, S_IRQMODE)))
+        serial.puts((&t_48[0]) as u64)
+        serial.hex(warn_on(state, u))
+        serial.nl()
+    }
     return true
 }
 
@@ -1212,7 +1880,7 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
 // `virtio.irq_on` gives: the frames are taken out of the ring by
 // `inet.pump`, in a task of its own.
 fn irq_on(state: u64, u: u64) {
-    if !present_on(state, u) {
+    if !present_on(state, u) || mmio(state, u) == 0 {
         return
     }
     kstate.add(state, sc(u, S_IRQS), 1)
@@ -1221,6 +1889,40 @@ fn irq_on(state: u64, u: u64) {
     kstate.add(state, sc(u, S_CAUSES), 1)
     if (cause & IM_LSC) != 0 {
         read_link(state, u)
+    }
+    // ROUND NIC9020: THE STORM GUARD, for the pin only. A level line that
+    // is asserted by somebody else (or by nobody, because the polarity is
+    // wrong) interrupts again the moment the EOI is written, ICR reads 0
+    // every time, and the processor does nothing else any more -- the
+    // Dell 9020 showed ISR MAX 575576 and a keyboard that lagged by
+    // seconds. More than STORM_LIMIT empty interrupts inside 100 ms is
+    // not a shared line under load, it is a storm: the input is masked
+    // and the card is polled from then on (the network task turns every
+    // tick anyway).
+    if kstate.get(state, sc(u, S_IRQMODE)) != IRQ_INTX {
+        return
+    }
+    if cause != 0 {
+        kstate.set(state, sc(u, S_SPUR), 0)
+        return
+    }
+    let now: u64 = apic.tsc()
+    let t0: u64 = kstate.get(state, sc(u, S_SPURT0))
+    var win: u64 = apic.tsc_hz(state) / 10
+    if win == 0 {
+        win = 300000000
+    }
+    if kstate.get(state, sc(u, S_SPUR)) == 0 || now - t0 > win {
+        kstate.set(state, sc(u, S_SPURT0), now)
+        kstate.set(state, sc(u, S_SPUR), 1)
+        return
+    }
+    kstate.add(state, sc(u, S_SPUR), 1)
+    if kstate.get(state, sc(u, S_SPUR)) >= STORM_LIMIT {
+        apic.mask_gsi(state, kstate.get(state, sc(u, S_GSI)))
+        kstate.set(state, sc(u, S_STORM), 1)
+        kstate.set(state, sc(u, S_IRQMODE), IRQ_NONE)
+        warn(state, u, W_STORM)
     }
 }
 
@@ -1260,16 +1962,19 @@ fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     if gsi == 0 || gsi > 23 {
         return
     }
+    kstate.set(state, sc(u, S_GSI), gsi)
+    kstate.set(state, sc(u, S_SPUR), 0)
     apic.route(state, gsi, vec, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
     }
+    kstate.set(state, sc(u, S_IRQMODE), IRQ_INTX)
 }
 
 // The counter-check needs a way to take the card away from a kernel that
 // is otherwise identical.
 fn shut_down_on(state: u64, u: u64) {
-    if !present_on(state, u) {
+    if !present_on(state, u) || mmio(state, u) == 0 {
         return
     }
     setreg(state, u, R_IMC, 0xFFFFFFFF)

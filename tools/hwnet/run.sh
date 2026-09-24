@@ -332,6 +332,42 @@ EOF
 done
 
 # =====================================================================
+echo "== 5. ROUND NIC9020: the PCH path (I217/I218/I219) on QEMU's 82574 =="
+# =====================================================================
+# QEMU has no I217. `nicich` sends its 82574 (-device e1000e) down the
+# PCH bring-up of kernel/drv/net/e1000.fi instead: step lines, semaphore,
+# PHY over MDIC, the reset WITHOUT a read in the 20 ms after it, MSI.
+# What this proves is that the path runs to the end and carries frames;
+# the registers only an I217 has (FWSM, H2ME, FEXTNVM3) read 0 here.
+for variant in "plain:" "ich:nicich" "ichintx:nicich nicintx"; do
+    name=${variant%%:*}; words=${variant#*:}
+    wire_up; bridge_up
+    qemu_bg e1000e "osum $BASE $NETARGS $words nsvc=0 nwait=1500" "$TMPD/pch-$name.txt"
+    await_line "$TMPD/pch-$name.txt" "nic: netd=" 25
+    sleep 3
+    ip netns exec "$NS" ping -c 20 -i 0.1 -W 2 "$OSUM_IP" > "$TMPD/pchping-$name.txt" 2>&1
+    qemu_wait
+    bridge_down; wire_down
+    P="$TMPD/pch-$name.txt"
+    got=$(grep -oE '[0-9]+ received' "$TMPD/pchping-$name.txt" | grep -oE '^[0-9]+')
+    num "e1000e/$name: ping -c 20, answers" "${got:-0}" ge 19
+    num "e1000e/$name: interrupts the chip really raised" "$(val "$P" irqs)" ge 5
+done
+has "$TMPD/pch-ich.txt" "e1000: s11 global reset, 20ms without any access" \
+    "nicich: the step lines are printed (s11 = the reset)"
+has "$TMPD/pch-ich.txt" "e1000: s17 interrupt" "nicich: and every step up to the interrupt"
+has "$TMPD/pch-ich.txt" "irq=msi" "nicich: the PCH path asks for MSI (the PCH parts have no MSI-X)"
+has "$TMPD/pch-ichintx.txt" "irq=intx" "nicich nicintx: the pin, when asked for"
+hasnot "$TMPD/pch-plain.txt" "e1000: s1 " "without nicich the 82574 keeps the 8254x path (no step lines)"
+
+echo "   counter-check: a PCH part that never comes out of reset"
+qemu_bg e1000e "osum $BASE $NETARGS nicich nicfail nsvc=0 nwait=50" "$TMPD/pch-fail.txt"
+qemu_wait
+has "$TMPD/pch-fail.txt" "nic: init failed: e1000 step 12 -- chip did not come out of reset" \
+    "nicfail: the failure is named with its step and its reason"
+has "$TMPD/pch-fail.txt" "kernel: done" "nicfail: and the boot goes on without the network"
+
+# =====================================================================
 echo "== 4. the two columns, side by side =="
 # =====================================================================
 printf '   %-14s %10s %10s %10s %10s\n' chip octets KiB/s rx_f irqs
