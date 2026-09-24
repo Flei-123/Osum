@@ -25,6 +25,12 @@
 #   4. with the scheduler: the timer delivers again after the wake-up.
 #   5. counter-check `s3kaputt`: the blob's first byte is `hlt`. The
 #      machine sleeps the same way and must NOT come back.
+#   6. with a screen: the wake-up leaves the display adapter in text mode
+#      (DISPI enable 0), the restore puts the mode back (0x41) -- and the
+#      counter-check `s3nobild` leaves it at 0. Measured on the register,
+#      not on a screendump: QEMU's screendump kept showing the old surface
+#      after the wake-up, with AND without the restore (95.7 % equal both
+#      times), so a picture would have measured nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -122,7 +128,9 @@ for m in eins:s3 zwei:s3zwei kaputt:s3kaputt; do
         && n=$((n+1))
 done
 mkimg "$TMPD/k" "$TMPD/sched.img" "s3 nokbd noproc nofs noring3" && n=$((n+1))
-num "Platten mit Limine (BIOS) und dem Kern" "$n" eq 4
+mkimg "$TMPD/k" "$TMPD/gfx.img" "gfx s3 nokbd nosched noproc nofs noring3" && n=$((n+1))
+mkimg "$TMPD/k" "$TMPD/nobild.img" "gfx s3nobild nokbd nosched noproc nofs noring3" && n=$((n+1))
+num "Platten mit Limine (BIOS) und dem Kern" "$n" eq 6
 
 # ------------------------------------------------------------ 2. one cycle
 echo "== 2. ein Zyklus: schlafen, geweckt werden, alles wieder da =="
@@ -180,6 +188,25 @@ hasnot "$L" "s3: wach" "und kommt NICHT zurueck -- der Rueckweg ist dieser Code 
 case $AFTER in *running*) ok "die Firmware hat geweckt, der Kern steht ($AFTER)";;
     *) bad "nach dem Wecken: '$AFTER'";; esac
 hasnot "$L" "kernel: done" "kein Ende des Kerns"
+
+# ------------------------------------------------------------ 6. screen
+echo "== 6. mit Bildschirm: der Grafikmodus kommt zurueck =="
+for g in gfx nobild; do
+    L="$TMPD/l-$g.txt"
+    lauf "$TMPD/$g.img" "$L" 1 1
+    has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "$g: zurueck"
+done
+L="$TMPD/l-gfx.txt"
+DV=$(val "$L" 's3: bildmodus' dispi-vorher); DN=$(val "$L" 's3: bildmodus' nach-wach); DD=$(val "$L" 's3: bildmodus' danach)
+[ "$DV" = "0x41" ] && ok "vor dem Schlaf: DISPI an mit Bildspeicher ($DV)" || bad "DISPI vorher: '$DV'"
+[ "$DN" = "0x0" ] && ok "das Aufwachen hat den Grafikmodus geloescht (nach-wach=$DN) -- deshalb gibt es die Rueckstellung" \
+    || bad "nach dem Aufwachen: '$DN' (erwartet 0x0)"
+[ "$DD" = "0x41" ] && ok "und die Rueckstellung setzt ihn wieder (danach=$DD)" || bad "danach: '$DD'"
+num "8042-Befehlsbyte zurueckgeschrieben" "$(val "$L" 's3: bildmodus' 8042)" eq 1
+L="$TMPD/l-nobild.txt"
+DD=$(val "$L" 's3: bildmodus' danach)
+[ "$DD" = "0x0" ] && ok "Gegenprobe s3nobild: ohne Rueckstellung bleibt er aus (danach=$DD)" \
+    || bad "Gegenprobe s3nobild: danach='$DD' (erwartet 0x0)"
 
 echo
 echo "S3: $pass bestanden, $fail gefallen"

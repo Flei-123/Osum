@@ -54,8 +54,10 @@ import mm.mem
 import bus.pci
 import arch.x86_64.apic
 import arch.x86_64.idt
+import gfx.gfx
+import arch.cpu
 
-export { stage }
+export { stage, suspend, R_OK_S3, R_NOS3, R_SMP, R_NOMEM_S3, R_NOWAKE }
 
 // isr.s vector table, index 75 -> s3_vectors in smp.s
 const V_S3: u64 = 75
@@ -281,6 +283,136 @@ fn clear_wak(port: u64) {
     }
 }
 
+// ------------------------------------------------ the screen and the 8042
+//
+// SeaBIOS runs the VGA option ROM on the way back (`vga_post`, seen on
+// the debug port), and that puts a Bochs/QEMU display adapter back into
+// 80x25 text mode. The mode lives in the DISPI registers; they are
+// stored here and written back, ENABLE last, and then the whole back
+// buffer is pushed to the screen again. Words 500..509 of frame 0.
+const DISPI_IDX: u64 = 0x1CE
+const DISPI_DAT: u64 = 0x1CF
+const W_VBE: u64 = 500
+const W_KBC: u64 = 510
+
+fn dispi_rd(i: u64) -> u64 {
+    arch.dev_out16(DISPI_IDX as u16, i as u16)
+    return arch.dev_in16(DISPI_DAT as u16) as u64
+}
+
+fn dispi_wr(i: u64, v: u64) {
+    arch.dev_out16(DISPI_IDX as u16, i as u16)
+    arch.dev_out16(DISPI_DAT as u16, (v & 0xFFFF) as u16)
+}
+
+fn vbe_save(buf: u64) {
+    let id: u64 = dispi_rd(0)
+    if id < 0xB0C0 || id > 0xB0CF || (dispi_rd(4) & 1) == 0 {
+        put(buf, W_VBE, 0)
+        return
+    }
+    put(buf, W_VBE, 1)
+    var i: u64 = 1
+    while i <= 9 {
+        put(buf, W_VBE + i, dispi_rd(i))
+        i = i + 1
+    }
+}
+
+// Returns 1 if a mode was put back, 0 if there was none to put back.
+fn vbe_restore(buf: u64) -> u64 {
+    if get(buf, W_VBE) == 0 {
+        return 0
+    }
+    dispi_wr(4, 0)
+    var i: u64 = 1
+    while i <= 9 {
+        if i != 4 {
+            dispi_wr(i, get(buf, W_VBE + i))
+        }
+        i = i + 1
+    }
+    // ENABLE with LFB and without clearing video memory (bit 7 NOCLEARMEM)
+    dispi_wr(4, get(buf, W_VBE + 4) | 0x80)
+    return 1
+}
+
+fn kbc_wait_in() -> bool {
+    var i: u64 = 0
+    while i < 1000000 {
+        if (arch.dev_in8(0x64 as u16) as u64 & 2) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn kbc_wait_out() -> bool {
+    var i: u64 = 0
+    while i < 1000000 {
+        if (arch.dev_in8(0x64 as u16) as u64 & 1) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The controller's command byte: which ports raise an interrupt, which
+// clocks run. The 8042 comes back from the reset with its default.
+fn kbc_save(buf: u64) {
+    put(buf, W_KBC, 0)
+    // anything still waiting in the output buffer is not ours to read,
+    // but it would be taken for the answer
+    var n: u64 = 0
+    while n < 16 && (arch.dev_in8(0x64 as u16) as u64 & 1) != 0 {
+        arch.dev_in8(0x60 as u16)
+        n = n + 1
+    }
+    if !kbc_wait_in() {
+        return
+    }
+    arch.dev_out8(0x64 as u16, 0x20 as u8)
+    if !kbc_wait_out() {
+        return
+    }
+    put(buf, W_KBC + 1, arch.dev_in8(0x60 as u16) as u64)
+    put(buf, W_KBC, 1)
+}
+
+fn kbc_restore(buf: u64) -> u64 {
+    if get(buf, W_KBC) == 0 {
+        return 0
+    }
+    let cb: u64 = get(buf, W_KBC + 1)
+    if !kbc_wait_in() {
+        return 0
+    }
+    arch.dev_out8(0x64 as u16, 0x60 as u8)
+    if !kbc_wait_in() {
+        return 0
+    }
+    arch.dev_out8(0x60 as u16, cb as u8)
+    // the aux port (mouse): its clock runs if bit 5 is clear. A reset
+    // mouse does not report until it is told to (0xF4).
+    if (cb & 0x20) == 0 {
+        if kbc_wait_in() {
+            arch.dev_out8(0x64 as u16, 0xA8 as u8)
+        }
+        if kbc_wait_in() {
+            arch.dev_out8(0x64 as u16, 0xD4 as u8)
+        }
+        if kbc_wait_in() {
+            arch.dev_out8(0x60 as u16, 0xF4 as u8)
+        }
+        if kbc_wait_out() {
+            arch.dev_in8(0x60 as u16) // the 0xFA
+        }
+    }
+    return 1
+}
+
 // One cycle. Returns true if the machine came back.
 fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     var s_sl: [u8; 21] = "s3: schlafe zyklus=\0\0"
@@ -297,6 +429,11 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     var s_sci: [u8; 13] = "s3: sci vor=\0"
     var s_na: [u8; 8] = " nach=\0\0"
     var s_ta: [u8; 11] = "s3: dauer \0"
+    var s_bi: [u8; 15] = "s3: bildmodus=\0"
+    var s_kb: [u8; 7] = " 8042=\0"
+    var s_dv: [u8; 15] = " dispi-vorher=\0"
+    var s_dn: [u8; 12] = " nach-wach=\0"
+    var s_dd: [u8; 9] = " danach=\0"
     var s_vo: [u8; 7] = " vor=\0\0"
     var s_ti: [u8; 22] = "s3: ticks in 200 ms=\0\0"
     var s_aus: [u8; 4] = "aus\0"
@@ -351,6 +488,8 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     let if_on: bool = (fl & 0x200) != 0
     let ticks_before: u64 = kstate.get(state, kstate.TICKS)
     asm("cli")
+    vbe_save(buf)
+    kbc_save(buf)
     var rc: u64 = 0
     let save: u64 = vec(state, 4)
     asm("call rax", in("rax") save, in("rdi") ctx, out("rax") & rc,
@@ -403,6 +542,35 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     serial.puts((&s_ba[0]) as u64)
     serial.dec(pci_bad)
     serial.nl()
+
+    // AFTER the PCI side: the frame buffer is a BAR of the display
+    // adapter, and until it is back the pixels go nowhere.
+    // the screen: mode back, then the back buffer in full -- unless the
+    // counter-check `s3nobild` wants to see what S3 leaves on the glass
+    var bild: u64 = 0
+    // what the wake-up left in the DISPI enable register, before anything
+    // is written: the number that says whether this restore is needed
+    let dispi_after: u64 = dispi_rd(4)
+    if !kstate.mode_on(state, kstate.M_S3NOBILD) {
+        bild = vbe_restore(buf)
+        if bild != 0 && gfx.ready(state) {
+            gfx.dirty_all(state)
+            gfx.flush(state)
+        }
+    }
+    let kbc: u64 = kbc_restore(buf)
+    serial.puts((&s_bi[0]) as u64)
+    serial.dec(bild)
+    serial.puts((&s_kb[0]) as u64)
+    serial.dec(kbc)
+    serial.puts((&s_dv[0]) as u64)
+    serial.hex(get(buf, W_VBE + 4))
+    serial.puts((&s_dn[0]) as u64)
+    serial.hex(dispi_after)
+    serial.puts((&s_dd[0]) as u64)
+    serial.hex(dispi_rd(4) & 0x7F)
+    serial.nl()
+
 
     // ACPI mode: the firmware may hand the machine back in legacy mode
     let sci_after: u64 = arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN
@@ -471,11 +639,53 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     return true
 }
 
+// ------------------------------------------------ the way in from ring 3
+//
+// `reboot(RB_SUSPEND)` lands here (sys.fi, do_reboot). One cycle, and the
+// answer tells the caller why not if it did not happen.
+const R_OK_S3: u64 = 0
+const R_NOS3: u64 = 1 // the machine offers no S3 (or it was not measured)
+const R_SMP: u64 = 2 // other processors are running; they would die in S3
+const R_NOMEM_S3: u64 = 3
+const R_NOWAKE: u64 = 4 // SLP_EN written, but the machine did not sleep
+
+fn suspend(state: u64) -> u64 {
+    if !susp.ready(state) {
+        susp.measure(state)
+    }
+    if !susp.s3_ok(state) || susp.facs(state) == 0 || susp.pm1a(state) == 0 {
+        return R_NOS3
+    }
+    // K-004c: the application processors are not started again after
+    // the wake-up. Until they are, S3 with more than one processor
+    // online is refused and not half done.
+    if cpu.online_count(state) > 1 {
+        return R_SMP
+    }
+    let buf: u64 = mem.frame_run(state, BUF_FRAMES)
+    if buf == 0 {
+        return R_NOMEM_S3
+    }
+    let frame: u64 = mem.frame_run(state, 1)
+    if frame == 0 {
+        mem.frame_free_run(state, buf, BUF_FRAMES)
+        return R_NOMEM_S3
+    }
+    let n: u64 = kstate.get(state, kstate.TICKS)
+    let back: bool = cycle(state, n, false, buf, frame)
+    mem.frame_free_run(state, buf, BUF_FRAMES)
+    mem.frame_free_run(state, frame, 1)
+    if back {
+        return R_OK_S3
+    }
+    return R_NOWAKE
+}
+
 fn stage(state: u64) {
     let one: bool = kstate.mode_on(state, kstate.M_S3)
     let two: bool = kstate.mode_on(state, kstate.M_S3ZWEI)
     let kaputt: bool = kstate.mode_on(state, kstate.M_S3KAPUTT)
-    if !one && !two && !kaputt {
+    if !one && !two && !kaputt && !kstate.mode_on(state, kstate.M_S3NOBILD) {
         return
     }
     var s_hd: [u8; 12] = "s3: fadt=\0\0\0"
@@ -487,6 +697,7 @@ fn stage(state: u64) {
     var s_no: [u8; 21] = "s3: geht nicht why=\0\0"
     var s_bl: [u8; 10] = " blob=\0\0\0\0"
     var s_en: [u8; 12] = "s3: fertig\0\0"
+    var s_bs: [u8; 16] = "s3: bild steht\0\0"
 
     if !susp.ready(state) {
         susp.measure(state)
@@ -533,6 +744,22 @@ fn stage(state: u64) {
     }
     mem.frame_free_run(state, buf, BUF_FRAMES)
     mem.frame_free_run(state, frame, 1)
+    // With a screen, hold still for three seconds so the runner can take
+    // its picture of what the wake-up left -- `s3: bild` is its marker.
+    if gfx.ready(state) {
+        serial.puts((&s_bs[0]) as u64)
+        serial.nl()
+        let hz: u64 = apic.tsc_hz(state)
+        let c0: u64 = apic.tsc()
+        var w: u64 = 0
+        while w < 3000000000 {
+            if hz != 0 && apic.tsc() - c0 > hz * 3 {
+                w = 3000000000
+            }
+            asm("pause")
+            w = w + 1
+        }
+    }
     serial.puts((&s_en[0]) as u64)
     serial.nl()
 }

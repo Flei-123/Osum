@@ -1652,7 +1652,7 @@ lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhae
 # einer kleinen Limine-Platte, NICHT mit -kernel: QEMU schreibt ein
 # -kernel-ELF bei jedem Reset (auch beim Aufwachen) neu in den Speicher.
 lauf "51. der echte Standby: S3 schlafen und aufwachen, Geraete und Speicher danach (tools/s3/run.sh, K-004)" \
-     tools/s3/run.sh s3 '^S3: |^== |^  OK    (QEMU meldet|zurueck|APIC|PCI|ACPI-Modus|Arbeitsspeicher|Pruefsumme|zwei verschiedene|Zeitgeber|und kommt NICHT|Ladesegmente)'
+     tools/s3/run.sh s3 '^S3: |^== |^  OK    (QEMU meldet|zurueck|APIC|PCI|ACPI-Modus|Arbeitsspeicher|Pruefsumme|zwei verschiedene|Zeitgeber|und kommt NICHT|Ladesegmente|Grafikmodus|die Rueckstellung|Gegenprobe s3nobild|8042)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
