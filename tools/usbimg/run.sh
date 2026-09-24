@@ -161,6 +161,14 @@ lauf() { # name zusatzargumente...
     local out="$TMPD/$name.txt"
     cp -f "$IMG" "$TMPD/$name.img"
     rm -f "$out"
+    # A-038 (24.09.2026): THE DIAGNOSIS ENTRY IS PUT INTO THE COPY, NOT
+    # TYPED. Seven `sendkey down` after "the serial file has been quiet
+    # for a second" went into nothing under load: the desktop entry ran,
+    # and the UEFI run reported "erkannte Firmware: ?" on main and on the
+    # branch alike. The copy of the stick gets a limine.conf with exactly
+    # the entry from the shipped file -- same kernel, same words -- as
+    # its only entry, timeout 0. The stick itself stays untouched.
+    diag_conf "$TMPD/$name.img" || bad "$name: Diagnose-Eintrag nicht in die Kopie geschrieben"
     local mon="$TMPD/$name.mon"
     rm -f "$mon"
     timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 2048 \
@@ -170,40 +178,6 @@ lauf() { # name zusatzargumente...
         -monitor "unix:$mon,server,nowait" \
         > "$TMPD/$name.qemu" 2>&1 &
     local pid=$!
-    # DEN ACHTEN EINTRAG WAEHLEN. Limine malt sein Menue erst, wenn die
-    # Firmware durch ist; vorher gehen die Tasten ins Leere. Also wird
-    # gewartet, bis der Anschluss da ist, und dann siebenmal nach unten.
-    ( local w=0
-      while [ $w -lt 100 ] && [ ! -S "$mon" ]; do sleep 0.1; w=$((w+1)); done
-      # AUF DAS MENUE WARTEN UND NICHT AUF EINE FRIST. Unter BIOS ist
-      # Limine nach gut einer Sekunde da; unter UEFI laeuft erst OVMF
-      # (`BdsDxe: loading Boot0001 ...`), und drei Sekunden reichen
-      # nicht -- gemessen: die Pfeiltasten gingen ins Leere, der
-      # Standardeintrag lief los, und der UEFI-Lauf meldete
-      # "erkannte Firmware: ?". Limine loescht beim Zeichnen seines
-      # Menues den Schirm; auf der SERIELLEN Leitung steht zu diesem
-      # Zeitpunkt noch nichts vom Kern. Also wird gewartet, bis der
-      # Kern NOCH NICHT da ist, aber die Firmware fertig -- messbar
-      # daran, dass die Datei seit einer Sekunde nicht mehr waechst.
-      local vor=-1 jetzt=0 ruhe=0 t=0
-      while [ $t -lt 300 ]; do
-          jetzt=$(stat -c%s "$out" 2>/dev/null || echo 0)
-          if [ "$jetzt" = "$vor" ]; then
-              ruhe=$((ruhe+1))
-              [ $ruhe -ge 5 ] && break
-          else
-              ruhe=0
-          fi
-          vor=$jetzt
-          sleep 0.2; t=$((t+1))
-      done
-      for _ in 1 2 3 4 5 6 7; do
-          printf 'sendkey down\n' | timeout 3 socat - "UNIX-CONNECT:$mon" \
-              >/dev/null 2>&1
-          sleep 0.2
-      done
-      printf 'sendkey ret\n' | timeout 3 socat - "UNIX-CONNECT:$mon" \
-          >/dev/null 2>&1 ) &
     local i=0
     while [ $i -lt 1000 ]; do
         grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
@@ -236,6 +210,35 @@ lauf_direkt() { # name kommandozeile zusatzargumente...
     sleep 0.5
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 0
+}
+
+# The ESP starts at sector 2048 (build.sh: sgdisk --new=1:2048:...).
+diag_conf() { # img
+    local img=$1 off=$((2048 * 512)) c="$TMPD/diag.conf"
+    mcopy -o -i "$img@@$off" ::/limine.conf "$c.orig" >/dev/null 2>&1 || return 1
+    python3 - "$c.orig" "$c" <<'PY' || return 1
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+start = None
+for i, l in enumerate(lines):
+    if l.startswith("/") and not l.startswith("//") and "Hardware-Diagnose" in l:
+        start = i
+        break
+if start is None:
+    sys.exit(1)
+end = len(lines)
+for j in range(start + 1, len(lines)):
+    if lines[j].startswith("/"):
+        end = j
+        break
+block = lines[start:end]
+if not any("hwdiag hwdiagstop" in l for l in block):
+    sys.exit(1)
+open(sys.argv[2], "w", encoding="utf-8").write(
+    "timeout: 0\ndefault_entry: 1\n\n" + "\n".join(block) + "\n")
+PY
+    mcopy -o -i "$img@@$off" "$c" ::/limine.conf >/dev/null 2>&1 || return 1
+    mcopy -o -i "$img@@$off" "$c" ::/boot/limine.conf >/dev/null 2>&1 || return 1
 }
 
 warte_auf() { # datei muster sekunden
@@ -481,7 +484,11 @@ echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
 # behaupten.
 DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs lang=de"
 rm -f "$TMPD/desk.txt" "$TMPD/desk.ppm" "$TMPD/desk.sock"
-printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive"
+# A-038: the SEARCH opens with the Windows key alone. `meta_l-a` has
+# opened the control centre since the quick-settings round (Windows 11
+# does the same), and this section photographed the wrong panel.
+printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l\nwarte 3\n' > "$TMPD/drive"
+printf 'sendkey meta_l\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive2"
 timeout 240 qemu-system-x86_64 "${KVM[@]}" -m 512 \
     -kernel "$IMGDIR/osum.mb" -initrd "$IMGDIR/root.img" \
     -append "$DESKARGS" \
@@ -495,6 +502,12 @@ python3 tools/wm/monitor.py "$TMPD/desk.sock" "$TMPD/drive" 0.12 \
 sleep 2
 python3 tools/gfx/screenshot.py "$TMPD/desk.sock" "$TMPD/desk.ppm" 30 \
     > "$TMPD/shot.txt" 2>&1
+# the second picture: search closed, control centre open
+python3 tools/wm/monitor.py "$TMPD/desk.sock" "$TMPD/drive2" 0.12 \
+    >> "$TMPD/mon.log" 2>&1
+sleep 2
+python3 tools/gfx/screenshot.py "$TMPD/desk.sock" "$TMPD/desk2.ppm" 30 \
+    >> "$TMPD/shot.txt" 2>&1
 kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
 
 if grep -qa 'osum: from module' "$TMPD/desk.txt"; then
@@ -510,10 +523,17 @@ else
 fi
 # DER MITSCHNITT SAGT ES SCHON: der Starter meldet seinen eigenen Namen,
 # und der kommt aus dem Katalog.
-if grep -qa 'launcher: name \[Suchen\]' "$TMPD/desk.txt"; then
-    ok "der Starter nennt sich 'Suchen' -- deutsch, aus /usr/share/locale/de"
-else
-    bad "der Starter ist nicht deutsch: $(grep -a 'launcher: name' "$TMPD/desk.txt" | tail -1)"
+# A-038: the launcher prints `launcher: name [...]` ONLY with
+# /etc/uitrace or `debug` (9bc8a551, RUNDE BELEG: the shipped system does
+# not measure itself). This is the shipped image, so the line cannot
+# come; the German launcher is proved on the picture below instead. If
+# the line IS there, it still has to be German.
+if grep -qa 'launcher: name' "$TMPD/desk.txt"; then
+    if grep -qa 'launcher: name \[Suchen\]' "$TMPD/desk.txt"; then
+        ok "der Starter nennt sich 'Suchen' -- deutsch, aus /usr/share/locale/de"
+    else
+        bad "der Starter ist nicht deutsch: $(grep -a 'launcher: name' "$TMPD/desk.txt" | tail -1)"
+    fi
 fi
 
 if [ -s "$TMPD/desk.ppm" ]; then
@@ -521,7 +541,7 @@ if [ -s "$TMPD/desk.ppm" ]; then
     finde() { # was text [--nicht]
         local was=$1 text=$2; shift 2
         local aus rc
-        aus=$(python3 tools/usbimg/searchtext.py "$TMPD/desk.ppm" \
+        aus=$(python3 tools/usbimg/searchtext.py "${BILD:-$TMPD/desk.ppm}" \
               assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
         rc=$?
         if [ $rc = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi
@@ -531,7 +551,11 @@ if [ -s "$TMPD/desk.ppm" ]; then
           "Ausfuehren" --nicht
     finde "GEGENPROBE: und der englische Text auch nicht" "Run" --nicht
     finde "der deutsche Aufforderungstext des Starters" "Programm suchen:"
-    finde "und die Taskleiste ist ebenfalls deutsch" "kein Netz"
+    # A-038: the taskbar shows the network as a SYMBOL now (no text), so
+    # 'kein Netz' could not be found on any build. The second German
+    # surface is the control centre (Windows+A).
+    BILD="$TMPD/desk2.ppm" finde "und das Kontrollzentrum ist ebenfalls deutsch" "Dunkelmodus"
+    BILD="$TMPD/desk2.ppm" finde "GEGENPROBE: dort steht nicht das englische Wort" "Dark mode" --nicht
     python3 -c "
 from PIL import Image
 Image.open('$TMPD/desk.ppm').save('$TMPD/desk.png')
