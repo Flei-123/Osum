@@ -1418,7 +1418,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs initsh
 
 # ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
 #
@@ -1501,7 +1501,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs initsh
 
 # RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
 #
@@ -1732,3 +1732,10 @@ sagen "            (alter Name als Verweis: $IMG_ALT)"
 sagen "            $(stat -c%s "$IMG") Oktette (${GES_MIB} MiB), GPT, EFI ${ESP_MIB} MiB + Wurzel ${FS_MIB} MiB"
 sagen "            auf den Stick:  sudo dd if=$IMG of=/dev/sdX bs=4M conv=fsync status=progress"
 exit 0
+# A-002 (24.09.2026): `initsh`. Since RUNDE K13 the kernel starts
+# /sbin/init when the image has one, and init reads `/etc/ziel` = grafik
+# from this image. Without `gfx` there is no graphics, init finds no
+# service, and shuts the machine down -- this entry gave NO command line
+# ("init: ziel=grafik", "init: herunterfahren", measured in
+# tools/stick/run.sh). `initsh` is the kernel's own word for "the shell is
+# the first process"; the same holds for the `netlauf` entry below.
