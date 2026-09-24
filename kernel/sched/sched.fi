@@ -1057,6 +1057,16 @@ fn ring3_bericht(state: u64) {
     var s_su: [u8; 10] = "  summe=\0\0"
     var s_ab: [u8; 8] = "  abw=\0\0"
     serial.puts((&s_s[0]) as u64)
+    // A-006 (24.09.2026): the global counter is read BEFORE and AFTER the
+    // per-core ones, not once afterwards. The other cores keep making
+    // system calls while this line is printed; one read at the end
+    // measured the time the printing took (abw=247 / 208 with -smp 4/8),
+    // not a lost count. isr.s counts per core on ENTRY, sys.dispatch
+    // globally a few instructions later, so at every instant
+    //     global <= per-core sum <= global + (calls between the two) .
+    // Read as  ks0 <= sum <= ks1 + cores  the promise is exact and the
+    // printing does not enter it; `abw` is the distance outside that window.
+    let ks0: u64 = kstate.get(state, kstate.SYSCALLS)
     var k: u64 = 0
     var sum: u64 = 0
     while k < cpu.count(state) {
@@ -1071,11 +1081,14 @@ fn ring3_bericht(state: u64) {
     serial.puts((&s_su[0]) as u64)
     serial.dec(sum)
     serial.puts((&s_ab[0]) as u64)
-    let ks: u64 = kstate.get(state, kstate.SYSCALLS)
-    if ks > sum {
-        serial.dec(ks - sum)
+    let ks1: u64 = kstate.get(state, kstate.SYSCALLS)
+    let hi: u64 = ks1 + cpu.count(state)
+    if sum < ks0 {
+        serial.dec(ks0 - sum)
+    } else if sum > hi {
+        serial.dec(sum - hi)
     } else {
-        serial.dec(sum - ks)
+        serial.dec(0)
     }
     serial.nl()
     serial.line_clear(z3)
