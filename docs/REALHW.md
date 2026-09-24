@@ -713,6 +713,24 @@ Verwaltungsfirmware (Intel ME/CSME) teilt:
    Der Treiber merkt das (`phy=0xFFFFFFFF`) und kommt dann nicht hoch,
    statt sich aufzuhaengen. Das ist gebaut.
 
+**Nachtrag 24.09.2026 (Runde NIC9020), der erste echte PCH-Teil: Dell
+OptiPlex 9020, I217-LM (8086:153A).** Der Start blieb nach `netdev:
+bestand 1 geraete` stehen, auch die Zaehler der Messtafel. Ursache:
+`chip_reset` las CTRL unmittelbar nach dem Setzen von CTRL.RST -- Linux'
+`e1000_reset_hw_ich8lan` sagt dazu woertlich *"cannot issue a flush here
+because it hangs the hardware"* und wartet 20 ms ohne jeden Zugriff.
+Punkt 5 oben war ausserdem falsch: FEXTNVM7 Bit 5 ist
+`DISABLE_SMB_PERST`, nicht ULP; ULP steht im PHY (Seite 779) bzw. geht
+ueber H2ME/FWSM an die ME, und e1000e laesst es beim I217 ganz weg.
+Seitdem folgt der PCH-Zweig dem Ablauf von e1000e fuer pch_lpt, jede
+Wartezeit ist in Zeit begrenzt, jeder Schritt steht VOR seinem ersten
+Registerzugriff als `e1000: sN ...` auf dem Schirm, und ein Fehlschlag
+heisst `nic: init failed: e1000 step N -- <grund>` -- der Start geht
+weiter. Unterbrechung: MSI (die PCH-Teile haben kein MSI-X); INTx nur mit
+`nicintx` oder einer Leitung aus `_PRT`, sonst wird abgefragt.
+`nicich` faehrt den 82574 aus QEMU durch diesen Pfad
+(tools/hwnet/run.sh, Abschnitt 5).
+
 **Beide**
 
 9. Die Schranken sind Zaehlschleifen und keine Uhren (`SPIN_LIMIT` =
