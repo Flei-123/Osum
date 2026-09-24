@@ -379,6 +379,44 @@ else
     echo "        opk.py oder werkzeug/store fehlt -- Abschnitt 10 uebersprungen"
 fi
 
+# ------------------------------------------ 11. K-014: die Sperrliste
+echo "== 11. K-014: die Sperrliste -- ein signierter Treiber laesst sich zuruecknehmen =="
+# Vier Platten, dasselbe gute Modul auf jeder; nur /lib/omod.sperre
+# unterscheidet sich:
+#   fremd  -- gueltige Liste, sperrt ein ANDERES Modul (m-abi) -> laedt
+#   drin   -- gueltige Liste, sperrt GENAU dieses Modul       -> gesperrt
+#   dreh   -- Liste ohne dieses Modul, aber Signatur gekippt  -> sperrliste
+#   zahl   -- richtig signiert, Anzahlfeld passt nicht zur Laenge -> sperrliste
+SP="tools/module/mksperre.py"
+python3 "$SP" "$TMPD/sp-fremd"  "$TMPD/m-abi.omod" >/dev/null 2>&1
+python3 "$SP" "$TMPD/sp-drin"   "$TMPD/m-abi.omod" "$TMPD/ps2maus.omod" >/dev/null 2>&1
+python3 "$SP" "$TMPD/sp-dreh"   --sig-dreh "$TMPD/m-abi.omod" >/dev/null 2>&1
+python3 "$SP" "$TMPD/sp-zahl"   --anzahl 3 "$TMPD/m-abi.omod" >/dev/null 2>&1
+n=0
+for f in fremd drin dreh zahl; do
+    [ -s "$TMPD/sp-$f" ] && python3 tools/osum/mkfs.py build "$TMPD/d-sp-$f.img" 2048 '/lib/' \
+        "/lib/ps2maus.omod=$TMPD/ps2maus.omod" "/lib/omod.sperre=$TMPD/sp-$f" \
+        >/dev/null 2>&1 && n=$((n+1))
+done
+num "Platten mit Sperrliste gebaut" "$n" eq 4
+lauf "$TMPD/k-modul" "$TMPD/d-sp-fremd.img" "modul $QUIET" "$TMPD/l-sp-fremd.txt"
+num "fremd: der Lauf endet sauber" "$RC" eq 21
+has "$TMPD/l-sp-fremd.txt" "modul: laden=ok" "die Sperrliste sperrt nur, was draufsteht: das gute Modul laedt"
+num "fremd: Eintraege in der gueltigen Liste" "$(zwert "$TMPD/l-sp-fremd.txt" 'sperre=[0-9]+')" eq 1
+has "$TMPD/l-sp-fremd.txt" "modul: nach init=1 present=1" "fremd: das Geraet ist da"
+for f in drin:gesperrt dreh:sperrliste zahl:sperrliste; do
+    n=${f%%:*}; g=${f#*:}
+    lauf "$TMPD/k-modul" "$TMPD/d-sp-$n.img" "modul $QUIET" "$TMPD/l-sp-$n.txt"
+    if [ "$RC" != 21 ]; then bad "sp-$n: rc=$RC statt 21"; continue; fi
+    has "$TMPD/l-sp-$n.txt" "modul: laden=$g" "die Sperrliste: $n -> Grund '$g'"
+    has "$TMPD/l-sp-$n.txt" "modul: nach init=0 present=0" "sp-$n: kein Geraet danach"
+    hasnot "$TMPD/l-sp-$n.txt" "ps2maus: eingetragen" "sp-$n: modul_init ist NICHT gelaufen"
+done
+# Die schaerfere Zusage bei `drin`: die Signatur des Moduls war GUELTIG
+# -- abgewiesen hat allein die Liste.
+num "drin: die Signatur des Moduls war gueltig" "$(zwert "$TMPD/l-sp-drin.txt" 'sigok=[0-9]+')" eq 1
+num "drin: die Liste hatte 2 Eintraege" "$(zwert "$TMPD/l-sp-drin.txt" 'sperre=[0-9]+')" eq 2
+
 echo
 echo "MODUL: $pass bestanden, $fail gefallen"
 [ "$fail" -eq 0 ]

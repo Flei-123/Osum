@@ -1396,7 +1396,7 @@ lauf "36. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/
 # bewegen, entladen -- und die Gegenprobe mit einem Symbol, das der Kern
 # nicht anbietet.
 lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools/module/run.sh, Runde MODUL)" \
-     tools/module/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet)'
+     tools/module/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet|die Sperrliste)'
 
 # RUNDE BLECH-ECHT: auf dem Zweig `bridge` hiess dieser Abschnitt 32 --
 # die Nummer gehoert in `main` seit Runde MERGE-2 dem Vorlagenladen.
