@@ -434,10 +434,12 @@ if [ -s "$TMPD/panik.ppm" ]; then
         # Stapelscan: drei echte Rahmen und dahinter Altlast. Die
         # Rahmenkette liefert genau die Aufrufe, die es gab -- und DIE
         # werden jetzt verlangt, in ihrer Reihenfolge.
-        kette=$(grep -oaE '[a-z_0-9]+\.[a-z_0-9]+\+0x[0-9a-f]+ \([a-z_0-9]+\.fi:[0-9]+\)' \
-            "$TMPD/schirm.txt" | sed 's/+.*//' | head -3 | tr '\n' ' ')
-        same "(b) die Rueckverfolgung auf dem Schirm ist die echte Aufrufkette" \
-            "crash.knall_b crash.knall_a crash.knall " "$kette"
+        # Gelesen wird NUR der Abschnitt RUECKSPUR -- die Zeile RIP
+        # darueber nennt die Absturzstelle selbst (`knall_c`).
+        kette=$(awk '/-- RUECKSPUR/ { an = 1; next } /^-- / { an = 0 } an { print $1 }' \
+            "$TMPD/schirm.txt" | sed 's/+.*//' | tr '\n' ' ')
+        same "(b) die Rueckverfolgung auf dem Schirm ist genau die Aufrufkette" \
+            "crash.knall_b crash.knall_a crash.knall KERNEL_MAIN long_mode " "$kette"
         n=$(grep -ac '?' "$TMPD/schirm.txt")
         num "(b) Zeilen mit unlesbaren Zellen (die Glyphen muessen exakt passen)" \
             "${n:-0}" le 1
