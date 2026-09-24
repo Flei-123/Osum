@@ -156,6 +156,11 @@ const PH_LOG: u64 = 6
 // zuletzt gesehenen und sieht dieselbe Zahl kein zweites Mal.
 // Es belegt damit PH_GRACE .. PH_GRACE+GRACE_KALT-1 (7..31).
 const PH_GRACE: u64 = 7
+// K-012: die acht Runden des Rahmen-Rennens, je eine EIGENE Nummer aus
+// demselben Grund wie oben -- dieselbe Zahl zweimal sieht ein Kern nicht.
+// 64.. liegt weit ueber dem Zeichen-Rennen (7..31); dessen `>=` ist
+// deshalb nach oben begrenzt.
+const PH_FRAMES_R: u64 = 64
 
 // The words of the command line this file reads.
 const M_NOSMP: u64 = 1 // do not start the other cores
@@ -585,8 +590,12 @@ fn phases(state: u64, index: u64) {
                 lograce_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
             }
-            if ph >= PH_GRACE {
+            if ph >= PH_GRACE && ph < PH_FRAMES_R {
                 grace_core(state, index)
+                atomic.fetch_add(sp(state, S_DONE), 1)
+            }
+            if ph >= PH_FRAMES_R {
+                frames_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
             }
             if ph == PH_FRAMES {
@@ -778,8 +787,11 @@ fn run_phase(state: u64, index: u64, ph: u64) {
     if ph == PH_LOG {
         lograce_core(state, index)
     }
-    if ph >= PH_GRACE {
+    if ph >= PH_GRACE && ph < PH_FRAMES_R {
         grace_core(state, index)
+    }
+    if ph >= PH_FRAMES_R {
+        frames_core(state, index)
     }
     atomic.fetch_add(sp(state, S_DONE), 1)
     var guard: u64 = 0
@@ -1451,31 +1463,86 @@ fn lograce(state: u64) {
 
 // --------------------------------------------------------- measurement 3
 
+// K-012: ACHT RUNDEN STATT EINER.
+//
+// Die Gegenprobe `nolock` hat ueber vier Laeufe 5/0/6/0 doppelte Rahmen
+// gemessen -- in der Haelfte der Laeufe hat sich das Rennen, das sie
+// zeigen soll, schlicht nicht ereignet. Sechzehn Rahmen je Kern sind
+// seit Runde MEM (Suchbeginn am Merker statt bei 0) nur ein paar
+// hundert Takte Arbeit, und ein Kern, der die Phase einen Augenblick
+// spaeter sieht, beginnt, wenn der erste schon fertig ist.
+//
+// Das Rennen wird NICHT verbreitert und nichts kuenstlich verzoegert --
+// es bleibt das des echten Verteilers. Es wird nur OEFTER gelaufen:
+// acht Runden, jede ein eigenes Nehmen, Zaehlen und Zurueckgeben. Mit
+// der Sperre muss die Summe ueber ALLE acht 0 sein (die Zusage wird
+// strenger, nicht weicher); ohne sie reicht eine Runde, in der sich
+// zwei Kerne treffen. `hits` sagt, in wie vielen Runden das geschah.
+const FR_ROUNDS: u64 = 8
+
+static mut fr_zero: u64 = 0
+static mut fr_freed: u64 = 0
+
 fn frames(state: u64) {
     var s_head: [u8; 13] = "smp: frames \0"
     var s_got: [u8; 5] = "got=\0"
     var s_dup: [u8; 8] = "  dups=\0"
     var s_zero: [u8; 8] = "  zero=\0"
     var s_free: [u8; 9] = "  freed=\0"
+    var s_rnd: [u8; 10] = "  rounds=\0"
+    var s_hit: [u8; 8] = "  hits=\0"
 
     let online: u64 = cpu.online_count(state)
     let total: u64 = online * FR_PER
+    fr_zero = 0
+    fr_freed = 0
+    var dups: u64 = 0
+    var hits: u64 = 0
+    var r: u64 = 0
+    while r < FR_ROUNDS {
+        let d: u64 = frames_round(state, total, r)
+        dups = dups + d
+        if d > 0 {
+            hits = hits + 1
+        }
+        r = r + 1
+    }
+    sset(state, S_DUPS, dups)
+
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_got[0]) as u64)
+    serial.dec(total)
+    serial.puts((&s_dup[0]) as u64)
+    serial.dec(dups)
+    serial.puts((&s_zero[0]) as u64)
+    serial.dec(fr_zero)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(fr_freed)
+    serial.puts((&s_rnd[0]) as u64)
+    serial.dec(FR_ROUNDS)
+    serial.puts((&s_hit[0]) as u64)
+    serial.dec(hits)
+    serial.nl()
+}
+
+// One round: every core takes FR_PER frames out of the one allocator,
+// the boot processor counts the doubles and gives everything back.
+fn frames_round(state: u64, total: u64, r: u64) -> u64 {
     var i: u64 = 0
     while i < kstate.MAX_CPUS * FR_PER {
         atomic.store(sp(state, S_FRAMES) + i * 8, 0)
         i = i + 1
     }
-    run_phase(state, 0, PH_FRAMES)
+    run_phase(state, 0, PH_FRAMES_R + r)
 
     // Every frame that was handed out twice is a frame two parts of the
     // kernel now believe is theirs alone.
     var dups: u64 = 0
-    var zero: u64 = 0
     i = 0
     while i < total {
         let a: u64 = atomic.load(sp(state, S_FRAMES) + i * 8)
         if a == 0 {
-            zero = zero + 1
+            fr_zero = fr_zero + 1
         } else {
             var k: u64 = 0
             while k < i {
@@ -1489,12 +1556,10 @@ fn frames(state: u64) {
         }
         i = i + 1
     }
-    sset(state, S_DUPS, dups)
 
     // Give them back. A frame that came twice is freed once -- the
     // allocator would otherwise count it free twice over, which is the
     // second half of the same bug.
-    var freed: u64 = 0
     i = 0
     while i < total {
         let a: u64 = atomic.load(sp(state, S_FRAMES) + i * 8)
@@ -1511,22 +1576,13 @@ fn frames(state: u64) {
             }
             if !seen {
                 mem.frame_free(state, a)
-                freed = freed + 1
+                fr_freed = fr_freed + 1
             }
         }
         i = i + 1
     }
 
-    serial.puts((&s_head[0]) as u64)
-    serial.puts((&s_got[0]) as u64)
-    serial.dec(total)
-    serial.puts((&s_dup[0]) as u64)
-    serial.dec(dups)
-    serial.puts((&s_zero[0]) as u64)
-    serial.dec(zero)
-    serial.puts((&s_free[0]) as u64)
-    serial.dec(freed)
-    serial.nl()
+    return dups
 }
 
 // --------------------------------------------------------- measurement 4
