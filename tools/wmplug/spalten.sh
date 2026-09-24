@@ -164,7 +164,28 @@ echo "== 4. der Spaltenstand, am Foto nachgerechnet =="
 # ist das Terminal des nackten Fensterservers. Der Schreibtisch nimmt
 # sein Thema aus /etc/theme und malt 248,250,252 auf 18,24,32 -- mit den
 # geborgten Zahlen war jede Glyphe "falsch", obwohl sie richtig stand.
-GRID=(assets/osum-mono.ttf 16 26 62 10 19)
+#
+# A-032: DER URSPRUNG DES RASTERS WIRD AUS DER FENSTERLAGE GERECHNET und
+# nicht mehr als 26,62 festgeschrieben. 26,62 war die Innenecke eines
+# Terminals, das bei 24,40 lag. Seit plugregel beim Start laeuft, greift
+# die Regel `titel=Terminal kacheln` aus /etc/wmregeln.conf, und das
+# Terminal liegt bei 0,0 -- der Kopf stand bildpunktgenau im Foto, nur
+# 24 Punkte links und 40 Punkte hoeher, als der Laeufer suchte. Die Lage
+# meldet der Fensterserver selbst (`wm: win ... t=[Terminal`), Rand und
+# Titelleiste kommen aus kernel/ui/wm.fi (BORDER0, TITLE_H0).
+WIN=$(grep -aE '^wm: win .* t=\[Terminal' "$P" | tail -1)
+WX=$(printf '%s' "$WIN" | grep -oE ' x=[0-9]+' | head -1 | grep -oE '[0-9]+')
+WY=$(printf '%s' "$WIN" | grep -oE ' y=[0-9]+' | head -1 | grep -oE '[0-9]+')
+RAND=$(grep -aoE '^const BORDER0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9]+$')
+TITEL=$(grep -aoE '^const TITLE_H0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9]+$')
+if [ -n "$WX" ] && [ -n "$WY" ] && [ -n "$RAND" ] && [ -n "$TITEL" ]; then
+    GX=$((WX + RAND)); GY=$((WY + TITEL))
+    ok "das Terminal liegt laut Fensterserver bei $WX,$WY -- Raster ab $GX,$GY"
+else
+    GX=26; GY=62
+    bad "keine Fensterlage des Terminals im Mitschnitt (x='$WX' y='$WY' Rand='$RAND' Titel='$TITEL')"
+fi
+GRID=(assets/osum-mono.ttf 16 "$GX" "$GY" 10 19)
 VG=(248 250 252); HG=(18 24 32)
 tgrid() { # ppm zeile spalte text
     python3 tools/gfx/checkshot.py tgrid "$1" "${GRID[@]}" "$2" "$3" \
@@ -180,6 +201,20 @@ for z in $(seq 0 23); do
 done
 if [ -n "$kopf" ]; then
     ok "der Tabellenkopf steht bildpunktgenau in Rasterzeile $kopf ($(cat "$TMPD/t.txt"))"
+    # GEGENPROBE: mit dem alten, festen Ursprung 26,62 darf der Kopf in
+    # KEINER Zeile stehen -- sonst saehe tgrid Text, wo keiner ist, und
+    # der gerechnete Ursprung oben bewiese nichts. (Liegt das Terminal
+    # zufaellig wieder bei 24,40, ist die Probe gegenstandslos.)
+    if [ "$GX,$GY" != "26,62" ]; then
+        alt=0
+        for z in $(seq 0 23); do
+            python3 tools/gfx/checkshot.py tgrid "$TMPD/paar.ppm" \
+                assets/osum-mono.ttf 16 26 62 10 19 "$z" 2 "${VG[@]}" "${HG[@]}" \
+                "Nr Name" >/dev/null 2>&1 && alt=$((alt + 1))
+        done
+        [ "$alt" = 0 ] && ok "GEGENPROBE: am alten Ursprung 26,62 steht der Kopf in keiner Zeile" \
+            || bad "GEGENPROBE: am alten Ursprung 26,62 'steht' der Kopf $alt mal"
+    fi
 else
     bad "im Foto ist kein Tabellenkopf zu finden"
 fi
