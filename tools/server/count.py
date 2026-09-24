@@ -65,7 +65,14 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # rasterises text with the TrueType reader (`ttf.*`, `raster.*`) --
     # that is its job, and none of it is linked into any kernel image:
     # nothing in kernel/ imports it, build-kernel.sh does not name it.
-    "drucke.fi"}
+    "drucke.fi",
+    # RUNDE FUI-TEXT (24.09.2026): `kernel/user/fuiglyph.fi` is RING-3
+    # code as well -- fUi's font engine (`lib/font/ttf.fi`, `raster.fi`)
+    # rasterising the glyphs for `wlibc`. Only ring-3 programs import it
+    # (wlib.fi, desktop.fi, taskbar.fi); nothing in the kernel image does,
+    # build-kernel.sh does not name it. Its 18 "places" are `ttf.*` calls
+    # into lib/, not the kernel's frame buffer. Same case as drucke.fi.
+    "fuiglyph.fi"}
 MUSTER = re.compile(
     r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.([A-Za-z_][A-Za-z0-9_]*)")
 
