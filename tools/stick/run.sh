@@ -180,11 +180,46 @@ AUF
 # EIN START VOM STICK, MIT MENUEWAHL UND EINER TASTATUR AM SERIELLEN
 # ANSCHLUSS.
 # =====================================================================
+# The ESP of the stick starts at sector 2048 (tools/usbimg/build.sh).
+eintrag_conf() { # <img> <title substring>
+    local img=$1 titel=$2 off=$((2048 * 512)) c="$TMPD/eintrag.conf"
+    mcopy -o -i "$img@@$off" ::/limine.conf "$c.orig" >/dev/null 2>&1 || return 1
+    python3 - "$c.orig" "$c" "$titel" <<'PY' || return 1
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+want = sys.argv[3]
+start = None
+for i, l in enumerate(lines):
+    if l.startswith("/") and not l.startswith("//") and want in l:
+        start = i
+        break
+if start is None:
+    sys.exit(1)
+end = len(lines)
+for j in range(start + 1, len(lines)):
+    if lines[j].startswith("/"):
+        end = j
+        break
+open(sys.argv[2], "w", encoding="utf-8").write(
+    "timeout: 0\ndefault_entry: 1\n\n" + "\n".join(lines[start:end]) + "\n")
+PY
+    mcopy -o -i "$img@@$off" "$c" ::/limine.conf >/dev/null 2>&1 || return 1
+    mcopy -o -i "$img@@$off" "$c" ::/boot/limine.conf >/dev/null 2>&1 || return 1
+}
+
 stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     local name=$1 art=$2 mitsrv=$3; shift 3
     local d="$TMPD/$name"
     rm -rf "$d"; mkdir -p "$d"
     cp -f "$IMG" "$d/stick.img"
+    # A-002 (24.09.2026): the entry is WRITTEN into the copy, not chosen
+    # with arrow keys. "four times down" landed on entry 5 -- since
+    # entries were added in front, "Kommandozeile mit Netz" is the
+    # seventh, and the boot ran the lamp diagnosis instead (22 red, none
+    # of them a network fault). The copy's limine.conf holds exactly that
+    # entry from the shipped file; the stick itself is untouched.
+    eintrag_conf "$d/stick.img" "Kommandozeile mit Netz" \
+        || bad "$name: Menueeintrag nicht in die Kopie geschrieben"
     cp -f "$TMPD/probe.img" "$d/probe.img"
     local srvpid=""
     if [ "$mitsrv" = 1 ]; then
@@ -218,8 +253,6 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     # Vorgabeeintrag).
     local warte=${MENUE_WARTE:-9}
     [ "$art" = uefi ] && warte=${MENUE_WARTE_UEFI:-15}
-    python3 tools/stick/menue.py "$d/mon.sock" 4 \
-        "$warte" > "$d/menue.log" 2>&1
     python3 tools/server/console.py "$d/ser.sock" "$d/con.log" "$@" \
         > "$d/con.out" 2>&1
     local rc=$?
