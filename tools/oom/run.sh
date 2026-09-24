@@ -276,7 +276,15 @@ if [ "$BUILT" = 1 ]; then
 
         has "$S" 'desk: start /bin/desktop' "der Schreibtisch ist gestartet"
         has "$S" 'desk: start /bin/taskbar' "die Taskleiste ist gestartet"
-        has "$S" 'hog: fail=' "der Fresser hat den Speicher leergeraeumt"
+        # LEERGERAEUMT heisst: der Kern hat bei der Auswahl hoechstens
+        # die Reserve frei gesehen (`oom: kill ... frei=N`). Ob ein
+        # Fresser danach noch `hog: fail=` drucken kann, haengt nur daran,
+        # ob die Auswahl ihn vorher trifft -- seit dem SIGKILL-Weg
+        # (K-002) ist das bei drei Fressern Zufall der Reihenfolge.
+        LEER=$(grep -aoE 'oom: kill pid=[0-9]+ +pages=[0-9]+ +frei=[0-9]+' "$S" \
+            | head -1 | grep -oE '[0-9]+$')
+        num "der Fresser hat den Speicher leergeraeumt (frei bei der Auswahl, hoechstens die Reserve)" \
+            "$LEER" le 512
         has "$S" 'oom: kill ' "eine Meldung sagt, was passiert ist"
 
         # WER ES GETROFFEN HAT. Der Fresser hat keinen Eintrag in
