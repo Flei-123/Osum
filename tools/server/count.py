@@ -52,7 +52,13 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # damit gar nicht erst mit. Die Zusage dieses Abschnitts -- "kein
     # Modul ausser der Naht greift noch auf die Grafik zu" -- gilt also
     # im ABBILD, und das ist die Ebene, auf der sie etwas heisst.
-    "shot.fi"}
+    "shot.fi",
+    # RUNDE ROADMAP-5 (K-008): `kernel/app/drucke.fi` is a ring-3 PROGRAM
+    # (--profile=app, its own ELF, /bin/drucke), not a kernel module. It
+    # rasterises text with the TrueType reader (`ttf.*`, `raster.*`) --
+    # that is its job, and none of it is linked into any kernel image:
+    # nothing in kernel/ imports it, build-kernel.sh does not name it.
+    "drucke.fi"}
 MUSTER = re.compile(
     r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.([A-Za-z_][A-Za-z0-9_]*)")
 

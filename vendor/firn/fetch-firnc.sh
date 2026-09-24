@@ -102,6 +102,21 @@ for k in "${kandidaten[@]}"; do
         FIRN=$(cd "$k" && pwd); break
     fi
 done
+# ROUND ROADMAP-5: since the history rewrite of 18.09.2026 the pinned
+# commit is in NO live Firn repository any more -- only in the bundle
+# taken before the rewrite. A new patch changes the mark, no sibling tree
+# has it, and without this fallback nothing could be built at all.
+if [[ -z $FIRN ]]; then
+    for b in ${FIRN_BUNDLE:-} "$HOME/repo-backup/firn-vor-rewrite.bundle"; do
+        [[ -f $b ]] || continue
+        klon=${TMPDIR:-/tmp}/firn-pin-repo
+        [[ -d $klon/.git ]] || git clone -q --no-checkout "$b" "$klon" || continue
+        if git -C "$klon" cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
+            echo ">> Firn $KURZ aus dem Buendel $b"
+            FIRN=$klon; break
+        fi
+    done
+fi
 if [[ -z $FIRN ]]; then
     echo "Das Firn-Repo mit dem Commit $KURZ wurde nicht gefunden." >&2
     echo "Gesucht in: ${kandidaten[*]}" >&2

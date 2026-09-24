@@ -1,0 +1,102 @@
+# vendor/firn/patches/0007-time-wait-slot-reuse.patch
+#
+# ROUND ROADMAP-5, K-008 (Osum, 24.09.2026) -- A FULL CONNECTION TABLE
+# HANDS OVER ITS OLDEST TIME_WAIT SLOT.
+#
+# WHY. The stack has MAXCONN = 8 slots, and the side that closes first
+# keeps its slot for TIME_WAIT_US = 60 s. `drucke` asks the printer
+# every half second whether the job is done, one `Connection: close`
+# request per question -- after eight connections the table was full,
+# every further connect failed at once, and a job the printer had
+# finished after 14 s was reported after 60 s (measured: CUPS'
+# ippeveprinter said `completed` at 14 s, drucke saw it at 60 s; the
+# serial log shows the connects failing from the 8th connection on
+# until the first TIME_WAIT ran out). The same wall stands in front of
+# every short-connection client: HTTP without keep-alive, DNS over TCP.
+#
+# WHAT. `tcp_free_slot` takes a free slot as before. Only when there is
+# none, it takes the TIME_WAIT slot closest to running out, clears it
+# and counts ST_TW_REUSE. A connection in TIME_WAIT has no owner any
+# more; the guard protects the SAME four-tuple against old segments
+# (RFC 9293 3.6.1), and the new connection gets a fresh ISS -- the
+# condition under which RFC 1122 4.2.2.13 / RFC 6191 let TIME_WAIT end
+# early. Linux does the same when tcp_max_tw_buckets overflows.
+#
+# WHY A PATCH AND NOT FIRN: see 0006 -- the pin stays the pin; the
+# change belongs to Firn in the long run (REMOVE-FROM-FIRN.md).
+#
+--- a/net/tcp.fi
++++ b/net/tcp.fi
+@@ -60,7 +60,7 @@
+     tcp_stat, tcp_dbg,
+     ST_RX, ST_TX, ST_REXMIT, ST_CSUM, ST_UNACCEPTABLE, ST_OOO, ST_RST_TX,
+     ST_BAD_ACK, ST_FAST_REXMIT, ST_PROBE, ST_DELACK, ST_DUPACK,
+-    ST_PAWS, ST_SACK_RX, ST_SACK_TX, ST_REXMIT_SACK, ST_MTU_DOWN,
++    ST_PAWS, ST_SACK_RX, ST_SACK_TX, ST_REXMIT_SACK, ST_MTU_DOWN, ST_TW_REUSE,
+ }
+ 
+ // ===================================================================
+@@ -186,7 +186,8 @@
+ const ST_SACK_TX: u32 = 14     // Segmente MIT SACK-Bloecken gesendet
+ const ST_REXMIT_SACK: u32 = 15 // Wiederholungen, die SACK ausgewaehlt hat
+ const ST_MTU_DOWN: u32 = 16    // "fragmentation needed" hat die MSS gesenkt
+-const ST_COUNT: usize = 17
++const ST_TW_REUSE: u32 = 17    // a TIME_WAIT slot handed to a new connection
++const ST_COUNT: usize = 18
+ 
+ // ===================================================================
+ // 2. the state of one connection
+@@ -335,7 +336,7 @@
+     // bounds in '[u64; 12]' at net/tcp.fi:384` -- der Kern blieb beim
+     // ersten `tcp_init` stehen. Die Sprachpruefung hat den Fehler
+     // gefunden, nicht der Mensch.
+-    stat: [u64; 17],
++    stat: [u64; 18],
+ 
+     // Every state any connection of this stack has ever ENTERED, one
+     // bit per state. A claim that a state machine has eleven states is
+@@ -506,6 +507,18 @@
+     (*c).recover = 0
+ }
+ 
++// A free slot. When all MAXCONN slots are taken, the TIME_WAIT slot
++// that is closest to running out is handed over instead (OSUM K-008).
++// Without this, eight short connections in a row -- an IPP client
++// polling a printer, `Connection: close` HTTP -- fill the table for the
++// full 60 seconds of TIME_WAIT and every further connect fails. The
++// slot belongs to nobody any more: `close` already went through, only
++// the 2*MSL guard is left. What that guard protects against is an old
++// segment of the SAME four-tuple (RFC 9293, 3.6.1); a connection that
++// takes the slot over gets a fresh ISS from `new_iss`, which is what
++// RFC 1122 4.2.2.13 and RFC 6191 rely on when they let a new
++// connection end TIME_WAIT early. Linux does the same when
++// tcp_max_tw_buckets overflows.
+ fn tcp_free_slot(t: *mut Tcp) -> i32 {
+     var i: usize = 0
+     while i < MAXCONN {
+@@ -514,7 +527,24 @@
+         }
+         i = i + 1
+     }
+-    return 0 - 1
++    var best: i32 = 0 - 1
++    var best_at: u64 = 0
++    i = 0
++    while i < MAXCONN {
++        let c: *mut Tcb = tcb(t, i)
++        if (*c).state == S_TIME_WAIT {
++            if best < 0 || (*c).tw_at < best_at {
++                best = i as i32
++                best_at = (*c).tw_at
++            }
++        }
++        i = i + 1
++    }
++    if best >= 0 {
++        clear(tcb(t, best as usize))
++        bump(t, ST_TW_REUSE)
++    }
++    return best
+ }
+ 
+ fn new_iss(t: *mut Tcp) -> u32 {

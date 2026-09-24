@@ -1,0 +1,1173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/drucke.fi -- ROUND ROADMAP-5 (K-008): printing to a network
+// printer over IPP.
+//
+//     drucke info  [ipp://<ipv4>[:port]/path]
+//     drucke       [ipp://<ipv4>[:port]/path] <file>
+//
+// Without an address the first line of /etc/drucker.conf is taken
+// (`ziel=ipp://...`). `ipps://` goes over TLS 1.3 with the roots in
+// /etc/ssl/roots.pem, exactly like `fetch` and `konto`.
+//
+// WHY IPP AND NOTHING ELSE. Every printer sold since about 2013 that
+// carries the "AirPrint", "Mopria" or "IPP Everywhere" label speaks IPP
+// over HTTP on port 631 and accepts at least one format that needs no
+// driver: `image/pwg-raster` (mandatory for IPP Everywhere) or
+// `image/urf` (AirPrint). That is the only printer path an OS without a
+// driver zoo can take honestly. USB printers (printer class 7) and the
+// manufacturers' own languages (PCL, ESC/P, the GDI printers) are NOT
+// here.
+//
+// WHAT IS SENT:
+//
+//   * a PDF or a JPEG goes out UNCHANGED when the printer lists that
+//     format in `document-format-supported`. Osum has no PDF renderer
+//     (roadmap P-008), so a PDF for a printer without PDF support is
+//     refused, not silently dropped.
+//   * TEXT is typeset here: the system font /lib/mono.ttf (fallback
+//     /lib/sans.ttf), 10 pt, 15 mm margins, the page size from the
+//     printer's `media-default` (A4 or US Letter), the resolution from
+//     `pwg-raster-document-resolution-supported` (300 dpi if offered).
+//     The glyphs are rasterised by the same TrueType reader and area
+//     rasteriser the browser and the window server use
+//     (vendor/firn/lib/font), 8-bit grey (`sgray_8`), and written as
+//     PWG raster (PWG 5102.4): the sync word `RaS2`, a 1796-octet
+//     header per page, rows in PackBits-like runs with a line repeat
+//     count.
+//
+// THE OUTPUT is one `drucke: <key> = <value>` line per fact, the same
+// shape as `konto`, so that a runner can read it without guessing.
+//
+// NOT DONE, and named: no USB printers, no PCL/URF, no name resolution
+// in the address (a number, like `fetch`), no duplex/copies/colour, no
+// print dialog in the window system. `tools/print/run.sh` measures what
+// is here against CUPS' own IPP Everywhere reference printer
+// (`ippeveprinter`) and reads the printed page back with OCR.
+
+import std.io
+import std.rt
+import font.raster
+import font.ttf
+import knetz
+
+const RC_OK: i32 = 0
+const RC_CALL: i32 = 2
+const RC_FILE: i32 = 3
+const RC_FONT: i32 = 4
+const RC_OFFLINE: i32 = 5
+const RC_REFUSED: i32 = 6
+const RC_FORMAT: i32 = 7
+const RC_ERROR: i32 = 8
+const RC_JOBFAILED: i32 = 9
+
+// IPP operation codes (RFC 8011, 5.4.15)
+const OP_PRINT_JOB: u32 = 0x0002
+const OP_GET_JOB_ATTRIBUTES: u32 = 0x0009
+const OP_GET_PRINTER_ATTRIBUTES: u32 = 0x000B
+
+// IPP tags (RFC 8010, 3.5)
+const T_OPERATION: u8 = 0x01
+const T_JOB: u8 = 0x02
+const T_END: u8 = 0x03
+const T_INTEGER: u8 = 0x21
+const T_ENUM: u8 = 0x23
+const T_RESOLUTION: u8 = 0x32
+const T_NAME: u8 = 0x42
+const T_KEYWORD: u8 = 0x44
+const T_URI: u8 = 0x45
+const T_CHARSET: u8 = 0x47
+const T_LANGUAGE: u8 = 0x48
+const T_MIME: u8 = 0x49
+
+// job-state (RFC 8011, 5.3.7)
+const JS_CANCELED: u32 = 7
+const JS_ABORTED: u32 = 8
+const JS_COMPLETED: u32 = 9
+
+const SCRATCH: usize = 1 << 16
+const WAIT_MS: u64 = 120000
+
+// What one printer offers -- filled from Get-Printer-Attributes.
+struct Printer {
+    pwg: bool,
+    pdf: bool,
+    jpeg: bool,
+    text: bool,
+    sgray: bool,
+    dpi: u32,
+    letter: bool,
+    state: u32,
+}
+
+// The address, split once.
+struct Dest {
+    tgt: knetz.Target,
+    uri: rt.Buf,     // the printer-uri as written (ipp://...)
+    path: rt.Buf,    // the resource, e.g. /ipp/print
+    host: rt.Buf,    // "a.b.c.d:port" for the Host header
+}
+
+// ------------------------------------------------------------- output
+
+fn say_s(key: str, v: str) {
+    io.print("drucke: ")
+    io.print(key)
+    io.print(" = ")
+    io.print(v)
+    io.print("\n")
+}
+
+fn say_b(key: str, p: u64, n: usize) {
+    io.print("drucke: ")
+    io.print(key)
+    io.print(" = ")
+    rt.write_everything(1, p, n)
+    io.print("\n")
+}
+
+fn say_n(key: str, v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    say_b(key, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn push_s(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn push_u16(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, (v & 255) as u8)
+}
+
+fn push_u32(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, ((v >> 24) & 255) as u8)
+    rt.buf_push(b, ((v >> 16) & 255) as u8)
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, (v & 255) as u8)
+}
+
+fn be16(p: u64, i: usize) -> u32 {
+    return ((rt.ld8(p, i) as u32) << 8) | (rt.ld8(p, i + 1) as u32)
+}
+
+fn be32(p: u64, i: usize) -> u32 {
+    return ((rt.ld8(p, i) as u32) << 24) | ((rt.ld8(p, i + 1) as u32) << 16)
+        | ((rt.ld8(p, i + 2) as u32) << 8) | (rt.ld8(p, i + 3) as u32)
+}
+
+// Is the C string `a` equal to `s`?
+fn arg_is(a: u64, s: str) -> bool {
+    let n: usize = rt.c_length(a)
+    if n != s.n {
+        return false
+    }
+    return rt.mem_eq(a, s.p as u64, n)
+}
+
+fn starts(p: u64, n: usize, s: str) -> bool {
+    if n < s.n {
+        return false
+    }
+    return rt.mem_eq(p, s.p as u64, s.n)
+}
+
+fn same(p: u64, n: usize, s: str) -> bool {
+    if n != s.n {
+        return false
+    }
+    return rt.mem_eq(p, s.p as u64, n)
+}
+
+// --------------------------------------------------------- the address
+
+// `ipp://10.9.0.1:8631/ipp/print` -> an HTTP target on 10.9.0.1:8631
+// plus the resource. The default port of IPP is 631, not 80 -- the
+// reason `ipp://` exists at all (RFC 3510).
+fn dest_read(url: u64, d: *mut Dest) -> bool {
+    let n: usize = rt.c_length(url)
+    var ab: usize = 0
+    var secure: bool = false
+    if starts(url, n, "ipps://") {
+        secure = true
+        ab = 7
+    } else if starts(url, n, "ipp://") {
+        ab = 6
+    } else {
+        return false
+    }
+    var e: usize = ab
+    while e < n && rt.ld8(url, e) != 47 as u8 {
+        e = e + 1
+    }
+    var colon: bool = false
+    var k: usize = ab
+    while k < e {
+        if rt.ld8(url, k) == 58 as u8 {
+            colon = true
+        }
+        k = k + 1
+    }
+    var http: rt.Buf = rt.buf_new()
+    if secure {
+        push_s(&http, "https://")
+    } else {
+        push_s(&http, "http://")
+    }
+    rt.buf_push_bytes(&http, url + ab as u64, e - ab)
+    rt.buf_push_bytes(&(*d).host, url + ab as u64, e - ab)
+    if !colon {
+        push_s(&http, ":631")
+        push_s(&(*d).host, ":631")
+    }
+    rt.buf_push(&http, 0 as u8)
+    if e < n {
+        rt.buf_push_bytes(&(*d).path, url + e as u64, n - e)
+    } else {
+        push_s(&(*d).path, "/ipp/print")
+    }
+    rt.buf_push_bytes(&(*d).uri, url, n)
+    // The name for the certificate is the address itself: there is no
+    // resolver here (see fetch.fi). A printer certificate for a number is
+    // rare -- ipps:// to a real printer will usually be refused, and that
+    // is the honest answer.
+    let ok: bool = knetz.target_read(http.ptr, http.len - 1, 0, 0, &(*d).tgt)
+    // target_read keeps a pointer INTO the text for the name; the text has
+    // to outlive the target, so this buffer is deliberately not freed.
+    return ok
+}
+
+fn conf_dest(d: *mut Dest) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    var path: [u8; 18] = "/etc/drucker.conf\0"
+    if !rt.read_file((&path[0]) as u64, &b) {
+        return false
+    }
+    var i: usize = 0
+    while i + 5 < b.len {
+        if starts(b.ptr + i as u64, b.len - i, "ziel=") {
+            var e: usize = i + 5
+            while e < b.len && rt.ld8(b.ptr, e) != 10 as u8
+                && rt.ld8(b.ptr, e) != 13 as u8 && rt.ld8(b.ptr, e) != 32 as u8 {
+                e = e + 1
+            }
+            var u: rt.Buf = rt.buf_new()
+            rt.buf_push_bytes(&u, b.ptr + (i + 5) as u64, e - i - 5)
+            rt.buf_push(&u, 0 as u8)
+            return dest_read(u.ptr, d)
+        }
+        while i < b.len && rt.ld8(b.ptr, i) != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------ IPP out
+
+fn attr(b: *mut rt.Buf, tag: u8, name: str, v: u64, vn: usize) {
+    rt.buf_push(b, tag)
+    push_u16(b, name.n as u32)
+    push_s(b, name)
+    push_u16(b, vn as u32)
+    rt.buf_push_bytes(b, v, vn)
+}
+
+fn attr_s(b: *mut rt.Buf, tag: u8, name: str, v: str) {
+    attr(b, tag, name, v.p as u64, v.n)
+}
+
+// An additional value of the attribute before it: the name is empty.
+fn more_s(b: *mut rt.Buf, tag: u8, v: str) {
+    rt.buf_push(b, tag)
+    push_u16(b, 0 as u32)
+    push_u16(b, v.n as u32)
+    push_s(b, v)
+}
+
+fn attr_int(b: *mut rt.Buf, tag: u8, name: str, v: u32) {
+    rt.buf_push(b, tag)
+    push_u16(b, name.n as u32)
+    push_s(b, name)
+    push_u16(b, 4 as u32)
+    push_u32(b, v)
+}
+
+static mut request_id: u32 = 0
+
+// Version 2.0, the operation, a fresh request id, and the three
+// attributes every request carries first (RFC 8011, 4.1.4 and 4.1.5).
+fn ipp_begin(b: *mut rt.Buf, op: u32, d: *mut Dest) {
+    request_id = request_id + 1
+    rt.buf_push(b, 2 as u8)
+    rt.buf_push(b, 0 as u8)
+    push_u16(b, op)
+    push_u32(b, request_id)
+    rt.buf_push(b, T_OPERATION)
+    attr_s(b, T_CHARSET, "attributes-charset", "utf-8")
+    attr_s(b, T_LANGUAGE, "attributes-natural-language", "de")
+    attr(b, T_URI, "printer-uri", (*d).uri.ptr, (*d).uri.len)
+}
+
+// One HTTP POST carrying the IPP message (RFC 8010, 3.4: Content-Type
+// application/ipp). Every header is written here.
+fn post(d: *mut Dest, body: *mut rt.Buf, doc: u64, docn: usize,
+    a: *mut knetz.Antw) -> bool {
+    var req: rt.Buf = rt.buf_new()
+    push_s(&req, "POST ")
+    rt.buf_push_bytes(&req, (*d).path.ptr, (*d).path.len)
+    push_s(&req, " HTTP/1.1\r\nHost: ")
+    rt.buf_push_bytes(&req, (*d).host.ptr, (*d).host.len)
+    push_s(&req, "\r\nUser-Agent: OrientOS-drucke\r\nContent-Type: application/ipp\r\n")
+    push_s(&req, "Connection: close\r\nContent-Length: ")
+    rt.buf_push_dec_u64(&req, ((*body).len + docn) as u64)
+    push_s(&req, "\r\n\r\n")
+    rt.buf_push_bytes(&req, (*body).ptr, (*body).len)
+    if docn > 0 {
+        rt.buf_push_bytes(&req, doc, docn)
+    }
+    let ok: bool = knetz.send_raw(&(*d).tgt, &req, a)
+    rt.buf_free(&req)
+    return ok
+}
+
+// ------------------------------------------------------------- IPP in
+
+// The status code of a response. 0xFFFF = no IPP message at all.
+fn ipp_status(b: *mut rt.Buf) -> u32 {
+    if (*b).len < 8 {
+        return 0xFFFF
+    }
+    return be16((*b).ptr, 2)
+}
+
+// The `idx`-th value of attribute `name`, anywhere in the response.
+// Returns false when there is no such value. The walk follows RFC 8010
+// 3.1: a delimiter tag (0x00..0x0F) opens a group, every other tag is a
+// value with a two-octet name length (0 = one more value of the previous
+// attribute) and a two-octet value length. Only the FIRST attribute of
+// that name counts: CUPS' `ippeveprinter` sends `document-format-supported`
+// twice when a `-a` file sets it too (ipptool: "Duplicate ... attribute"),
+// and mixing both sets gave a list neither of them was.
+fn ipp_find(b: *mut rt.Buf, name: str, idx: usize, vp: *mut u64,
+    vn: *mut usize, vt: *mut u8) -> bool {
+    let p: u64 = (*b).ptr
+    let n: usize = (*b).len
+    var i: usize = 8
+    var inside: bool = false
+    var seen: usize = 0
+    while i < n {
+        let tag: u8 = rt.ld8(p, i)
+        if tag == T_END {
+            return false
+        }
+        if tag < 0x10 as u8 {
+            if inside {
+                return false
+            }
+            i = i + 1
+            continue
+        }
+        if i + 3 > n {
+            return false
+        }
+        let nl: usize = be16(p, i + 1) as usize
+        if i + 3 + nl + 2 > n {
+            return false
+        }
+        if nl > 0 {
+            if inside {
+                return false
+            }
+            inside = same(p + (i + 3) as u64, nl, name)
+        }
+        let vl: usize = be16(p, i + 3 + nl) as usize
+        let v0: usize = i + 3 + nl + 2
+        if v0 + vl > n {
+            return false
+        }
+        if inside {
+            if seen == idx {
+                *vp = p + v0 as u64
+                *vn = vl
+                *vt = tag
+                return true
+            }
+            seen = seen + 1
+        }
+        i = v0 + vl
+    }
+    return false
+}
+
+fn ipp_int(b: *mut rt.Buf, name: str, out: *mut u32) -> bool {
+    var vp: u64 = 0
+    var vn: usize = 0
+    var vt: u8 = 0
+    if !ipp_find(b, name, 0, &vp, &vn, &vt) {
+        return false
+    }
+    if vn != 4 {
+        return false
+    }
+    *out = be32(vp, 0)
+    return true
+}
+
+// Does the multi-valued attribute `name` carry the value `v`?
+fn ipp_has(b: *mut rt.Buf, name: str, v: str) -> bool {
+    var k: usize = 0
+    while k < 256 {
+        var vp: u64 = 0
+        var vn: usize = 0
+        var vt: u8 = 0
+        if !ipp_find(b, name, k, &vp, &vn, &vt) {
+            return false
+        }
+        if same(vp, vn, v) {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn say_attr(b: *mut rt.Buf, key: str, name: str) {
+    var k: usize = 0
+    while k < 64 {
+        var vp: u64 = 0
+        var vn: usize = 0
+        var vt: u8 = 0
+        if !ipp_find(b, name, k, &vp, &vn, &vt) {
+            return
+        }
+        if vt == T_ENUM || vt == T_INTEGER {
+            if vn == 4 {
+                say_n(key, be32(vp, 0) as u64)
+            }
+        } else if vt == T_RESOLUTION {
+            if vn == 9 {
+                var r: rt.Buf = rt.buf_new()
+                rt.buf_push_dec_u64(&r, be32(vp, 0) as u64)
+                push_s(&r, "x")
+                rt.buf_push_dec_u64(&r, be32(vp, 4) as u64)
+                if rt.ld8(vp, 8) == 3 as u8 {
+                    push_s(&r, "dpi")
+                } else {
+                    push_s(&r, "dpcm")
+                }
+                say_b(key, r.ptr, r.len)
+                rt.buf_free(&r)
+            }
+        } else {
+            say_b(key, vp, vn)
+        }
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------ Get-Printer-Attributes
+
+fn ask_printer(d: *mut Dest, a: *mut knetz.Antw) -> i32 {
+    var body: rt.Buf = rt.buf_new()
+    ipp_begin(&body, OP_GET_PRINTER_ATTRIBUTES, d)
+    attr_s(&body, T_KEYWORD, "requested-attributes", "printer-name")
+    more_s(&body, T_KEYWORD, "printer-make-and-model")
+    more_s(&body, T_KEYWORD, "printer-state")
+    more_s(&body, T_KEYWORD, "printer-state-reasons")
+    more_s(&body, T_KEYWORD, "document-format-supported")
+    more_s(&body, T_KEYWORD, "pwg-raster-document-resolution-supported")
+    more_s(&body, T_KEYWORD, "pwg-raster-document-type-supported")
+    more_s(&body, T_KEYWORD, "media-default")
+    rt.buf_push(&body, T_END)
+    let ok: bool = post(d, &body, 0, 0, a)
+    rt.buf_free(&body)
+    if !ok {
+        if (*a).fehler == knetz.F_TLS {
+            say_s("stand", "tls")
+            return RC_OFFLINE
+        }
+        say_s("stand", "keinnetz")
+        return RC_OFFLINE
+    }
+    if (*a).code != 200 as u32 {
+        say_n("http", (*a).code as u64)
+        say_s("stand", "abgelehnt")
+        return RC_REFUSED
+    }
+    let st: u32 = ipp_status(&(*a).koerper)
+    if st > 0xFF as u32 {
+        say_n("ipp_status", st as u64)
+        say_s("stand", "abgelehnt")
+        return RC_REFUSED
+    }
+    return RC_OK
+}
+
+fn printer_read(b: *mut rt.Buf, pr: *mut Printer) {
+    (*pr).pwg = ipp_has(b, "document-format-supported", "image/pwg-raster")
+    (*pr).pdf = ipp_has(b, "document-format-supported", "application/pdf")
+    (*pr).jpeg = ipp_has(b, "document-format-supported", "image/jpeg")
+    (*pr).text = ipp_has(b, "document-format-supported", "text/plain")
+    (*pr).sgray = ipp_has(b, "pwg-raster-document-type-supported", "sgray_8")
+    var st: u32 = 0
+    if ipp_int(b, "printer-state", &st) {
+        (*pr).state = st
+    }
+    // The resolution: 300 dpi when offered, else the first square one in
+    // dots per inch, capped at 600 -- a page at 1200 dpi is 140 MB of grey.
+    var first: u32 = 0
+    var k: usize = 0
+    while k < 32 {
+        var vp: u64 = 0
+        var vn: usize = 0
+        var vt: u8 = 0
+        if !ipp_find(b, "pwg-raster-document-resolution-supported", k,
+            &vp, &vn, &vt) {
+            break
+        }
+        if vn == 9 && rt.ld8(vp, 8) == 3 as u8 && be32(vp, 0) == be32(vp, 4) {
+            let x: u32 = be32(vp, 0)
+            if x == 300 as u32 {
+                (*pr).dpi = 300
+            }
+            if first == 0 as u32 && x >= 150 as u32 && x <= 600 as u32 {
+                first = x
+            }
+        }
+        k = k + 1
+    }
+    if (*pr).dpi == 0 as u32 {
+        (*pr).dpi = first
+    }
+    var vp: u64 = 0
+    var vn: usize = 0
+    var vt: u8 = 0
+    if ipp_find(b, "media-default", 0, &vp, &vn, &vt) {
+        if starts(vp, vn, "na_letter") {
+            (*pr).letter = true
+        }
+    }
+}
+
+fn cmd_info(d: *mut Dest) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let rc: i32 = ask_printer(d, &a)
+    if rc != RC_OK {
+        knetz.reply_free(&a)
+        return rc
+    }
+    say_attr(&a.koerper, "name", "printer-name")
+    say_attr(&a.koerper, "modell", "printer-make-and-model")
+    say_attr(&a.koerper, "zustand", "printer-state")
+    say_attr(&a.koerper, "grund", "printer-state-reasons")
+    say_attr(&a.koerper, "format", "document-format-supported")
+    say_attr(&a.koerper, "aufloesung", "pwg-raster-document-resolution-supported")
+    say_attr(&a.koerper, "rastertyp", "pwg-raster-document-type-supported")
+    say_attr(&a.koerper, "papier", "media-default")
+    say_s("stand", "ok")
+    knetz.reply_free(&a)
+    return RC_OK
+}
+
+// --------------------------------------------------------- typesetting
+
+// One page of 8-bit grey, 255 = paper.
+struct Page {
+    px: u64,
+    w: usize,
+    h: usize,
+}
+
+struct Typeset {
+    font: ttf.Font,
+    r: raster.Raster,
+    scratch: u64,
+    scale: f64,
+    ascent: f64,
+    lineh: usize,
+    margin: usize,
+    advance: f64,
+    lines: usize,  // lines per page
+}
+
+// The next code point of UTF-8 text at `*i`; invalid octets become
+// U+FFFD, one octet at a time, so broken text still prints.
+fn next_cp(p: u64, n: usize, i: *mut usize) -> u32 {
+    let c: u32 = rt.ld8(p, *i) as u32
+    if c < 0x80 as u32 {
+        *i = *i + 1
+        return c
+    }
+    var need: usize = 0
+    var cp: u32 = 0
+    if c >= 0xC2 as u32 && c <= 0xDF as u32 {
+        need = 1
+        cp = c & 0x1F
+    } else if c >= 0xE0 as u32 && c <= 0xEF as u32 {
+        need = 2
+        cp = c & 0x0F
+    } else if c >= 0xF0 as u32 && c <= 0xF4 as u32 {
+        need = 3
+        cp = c & 0x07
+    } else {
+        *i = *i + 1
+        return 0xFFFD
+    }
+    if *i + need >= n {
+        *i = *i + 1
+        return 0xFFFD
+    }
+    var k: usize = 1
+    while k <= need {
+        let cc: u32 = rt.ld8(p, *i + k) as u32
+        if (cc & 0xC0) != 0x80 as u32 {
+            *i = *i + 1
+            return 0xFFFD
+        }
+        cp = (cp << 6) | (cc & 0x3F)
+        k = k + 1
+    }
+    *i = *i + need + 1
+    return cp
+}
+
+// Draw one line of code points at text row `row` of the page.
+fn draw_line(ts: *mut Typeset, pg: *mut Page, row: usize, cps: u64, ncp: usize) {
+    let top: usize = (*ts).margin + row * (*ts).lineh
+    if top + (*ts).lineh > (*pg).h {
+        return
+    }
+    let w: usize = (*pg).w
+    raster.raster_begin(&(*ts).r, 0.0, top as f64, w, (*ts).lineh)
+    var pen: f64 = (*ts).margin as f64
+    let base: f64 = (top as f64) + (*ts).ascent
+    var k: usize = 0
+    while k < ncp {
+        let cp: u32 = rt.ld32(cps, k)
+        let gid: u32 = ttf.font_glyph_for(&(*ts).font, cp)
+        ttf.font_outline(&(*ts).font, gid, &(*ts).r, pen, base, (*ts).scale,
+            rt.ptr_of((*ts).scratch), SCRATCH, 0)
+        pen = pen + (ttf.font_advance(&(*ts).font, gid) as f64) * (*ts).scale
+        k = k + 1
+    }
+    raster.raster_finish(&(*ts).r)
+    var y: usize = 0
+    while y < (*ts).lineh {
+        let dst: u64 = (*pg).px + ((top + y) * w) as u64
+        var x: usize = 0
+        while x < w {
+            var v: f64 = raster.raster_cov(&(*ts).r, x, y)
+            if v < 0.0 {
+                v = 0.0 - v
+            }
+            if v > 1.0 {
+                v = 1.0
+            }
+            if v > 0.0 {
+                let ink: u64 = (v * 255.0 + 0.5) as u64
+                rt.st8(dst, x, (255 - ink) as u8)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// PackBits-like row encoding of PWG 5102.4 (the same scheme as CUPS
+// raster v2): 0..127 = the next pixel (n+1) times, 129..255 = (257-n)
+// literal pixels follow. 128 is never written.
+fn encode_row(out: *mut rt.Buf, p: u64, w: usize) {
+    var i: usize = 0
+    while i < w {
+        var run: usize = 1
+        while i + run < w && run < 128 && rt.ld8(p, i + run) == rt.ld8(p, i) {
+            run = run + 1
+        }
+        if run >= 2 {
+            rt.buf_push(out, (run - 1) as u8)
+            rt.buf_push(out, rt.ld8(p, i))
+            i = i + run
+            continue
+        }
+        // literal: up to the next pair of equal pixels
+        var lit: usize = 1
+        while i + lit < w && lit < 128 {
+            if i + lit + 1 < w && rt.ld8(p, i + lit) == rt.ld8(p, i + lit + 1) {
+                break
+            }
+            lit = lit + 1
+        }
+        if lit == 1 {
+            rt.buf_push(out, 0 as u8)
+            rt.buf_push(out, rt.ld8(p, i))
+        } else {
+            rt.buf_push(out, (257 - lit) as u8)
+            rt.buf_push_bytes(out, p + i as u64, lit)
+        }
+        i = i + lit
+    }
+}
+
+fn put32_at(b: *mut rt.Buf, off: usize, v: u32) {
+    rt.st8((*b).ptr, off, ((v >> 24) & 255) as u8)
+    rt.st8((*b).ptr, off + 1, ((v >> 16) & 255) as u8)
+    rt.st8((*b).ptr, off + 2, ((v >> 8) & 255) as u8)
+    rt.st8((*b).ptr, off + 3, (v & 255) as u8)
+}
+
+fn put_s_at(b: *mut rt.Buf, off: usize, s: str) {
+    rt.mem_copy((*b).ptr + off as u64, s.p as u64, s.n)
+}
+
+// The 1796-octet page header. Offsets from PWG 5102.4, section 4.3;
+// every field not set here is zero, as the standard allows.
+fn page_header(out: *mut rt.Buf, pg: *mut Page, dpi: u32, letter: bool,
+    total: u32) {
+    var h: rt.Buf = rt.buf_new()
+    var k: usize = 0
+    while k < 1796 {
+        rt.buf_push(&h, 0 as u8)
+        k = k + 1
+    }
+    put_s_at(&h, 0, "PwgRaster")                // PwgRaster
+    put_s_at(&h, 192, "Normal")                  // PrintContentOptimize
+    put32_at(&h, 276, dpi)                       // HWResolution x
+    put32_at(&h, 280, dpi)                       // HWResolution y
+    put32_at(&h, 340, 1)                         // NumCopies
+    if letter {
+        put32_at(&h, 352, 612)                   // PageSize, points
+        put32_at(&h, 356, 792)
+    } else {
+        put32_at(&h, 352, 595)
+        put32_at(&h, 356, 842)
+    }
+    put32_at(&h, 372, (*pg).w as u32)            // Width
+    put32_at(&h, 376, (*pg).h as u32)            // Height
+    put32_at(&h, 384, 8)                         // BitsPerColor
+    put32_at(&h, 388, 8)                         // BitsPerPixel
+    put32_at(&h, 392, (*pg).w as u32)            // BytesPerLine
+    put32_at(&h, 396, 0)                         // ColorOrder chunky
+    put32_at(&h, 400, 18)                        // ColorSpace sgray
+    put32_at(&h, 420, 1)                         // NumColors
+    put32_at(&h, 452, total)                     // TotalPageCount
+    put32_at(&h, 456, 1)                         // CrossFeedTransform
+    put32_at(&h, 460, 1)                         // FeedTransform
+    put32_at(&h, 472, (*pg).w as u32)            // ImageBoxRight
+    put32_at(&h, 476, (*pg).h as u32)            // ImageBoxBottom
+    if letter {
+        put_s_at(&h, 1732, "na_letter_8.5x11in")
+    } else {
+        put_s_at(&h, 1732, "iso_a4_210x297mm")
+    }
+    rt.buf_push_bytes(out, h.ptr, 1796)
+    rt.buf_free(&h)
+}
+
+fn encode_page(out: *mut rt.Buf, pg: *mut Page, dpi: u32, letter: bool,
+    total: u32) {
+    page_header(out, pg, dpi, letter, total)
+    let w: usize = (*pg).w
+    var y: usize = 0
+    while y < (*pg).h {
+        let row: u64 = (*pg).px + (y * w) as u64
+        var rep: usize = 0
+        while y + rep + 1 < (*pg).h && rep < 255
+            && rt.mem_eq(row, row + ((rep + 1) * w) as u64, w) {
+            rep = rep + 1
+        }
+        rt.buf_push(out, rep as u8)
+        encode_row(out, row, w)
+        y = y + rep + 1
+    }
+}
+
+fn load_font(ts: *mut Typeset, data: *mut rt.Buf) -> bool {
+    var p1: [u8; 14] = "/lib/mono.ttf\0"
+    var p2: [u8; 14] = "/lib/sans.ttf\0"
+    if !rt.read_file((&p1[0]) as u64, data) {
+        rt.buf_clear(data)
+        if !rt.read_file((&p2[0]) as u64, data) {
+            return false
+        }
+        say_s("schrift", "/lib/sans.ttf")
+    } else {
+        say_s("schrift", "/lib/mono.ttf")
+    }
+    (*ts).font = ttf.font_new()
+    return ttf.font_init(&(*ts).font, rt.ptr_of((*data).ptr), (*data).len)
+}
+
+// Typeset `text` into PWG raster. Returns the number of pages, 0 = error.
+fn typeset(text: *mut rt.Buf, pr: *mut Printer, doc: *mut rt.Buf) -> u32 {
+    var ts: Typeset = Typeset {
+        font: ttf.font_new(), r: raster.raster_new(), scratch: 0,
+        scale: 0.0, ascent: 0.0, lineh: 0, margin: 0, advance: 0.0, lines: 0,
+    }
+    var fdata: rt.Buf = rt.buf_new()
+    if !load_font(&ts, &fdata) {
+        return 0
+    }
+    let dpi: u32 = (*pr).dpi
+    var pg: Page = Page { px: 0, w: 0, h: 0 }
+    if (*pr).letter {
+        pg.w = (85 * dpi / 10) as usize
+        pg.h = (11 * dpi) as usize
+    } else {
+        // 210 x 297 mm, rounded to the nearest dot
+        pg.w = ((2100 * dpi + 127) / 254) as usize
+        pg.h = ((2970 * dpi + 127) / 254) as usize
+    }
+    let size: f64 = 10.0 * (dpi as f64) / 72.0         // 10 pt
+    ts.scale = size / (ttf.font_upem(&ts.font) as f64)
+    ts.ascent = (ttf.font_ascent(&ts.font) as f64) * ts.scale
+    ts.lineh = (size * 1.25 + 0.5) as usize
+    ts.margin = ((150 * dpi + 127) / 254) as usize     // 15 mm
+    ts.lines = (pg.h - 2 * ts.margin) / ts.lineh
+    let gm: u32 = ttf.font_glyph_for(&ts.font, 77 as u32)  // 'M'
+    ts.advance = (ttf.font_advance(&ts.font, gm) as f64) * ts.scale
+    let usable: f64 = (pg.w - 2 * ts.margin) as f64
+    var cols: usize = (usable / ts.advance) as usize
+    if cols < 10 {
+        cols = 10
+    }
+    ts.scratch = rt.heap_alloc(SCRATCH)
+    let rcap: usize = raster.raster_bytes_needed(pg.w, ts.lineh)
+    let racc: u64 = rt.heap_alloc(rcap)
+    pg.px = rt.heap_alloc(pg.w * pg.h)
+    if ts.scratch == 0 || racc == 0 || pg.px == 0 {
+        say_s("fehler", "kein speicher")
+        return 0
+    }
+    raster.raster_attach(&ts.r, rt.ptr_of(racc), rcap)
+    say_n("aufloesung", dpi as u64)
+    say_n("breite", pg.w as u64)
+    say_n("hoehe", pg.h as u64)
+    say_n("spalten", cols as u64)
+    say_n("zeilen_je_seite", ts.lines as u64)
+
+    // First pass: how many pages. Second pass: draw. The total goes into
+    // every page header, so it has to be known before the first one.
+    var total: u32 = 0
+    var pass: u32 = 0
+    let cps: u64 = rt.heap_alloc(4 * (cols + 1))
+    while pass < 2 {
+        var pages: u32 = 1
+        var row: usize = 0
+        var ncp: usize = 0
+        var i: usize = 0
+        if pass == 1 {
+            rt.mem_set(pg.px, 255 as u8, pg.w * pg.h)
+            push_s(doc, "RaS2")
+        }
+        while i <= (*text).len {
+            var cp: u32 = 10
+            if i < (*text).len {
+                cp = next_cp((*text).ptr, (*text).len, &i)
+            } else {
+                i = i + 1
+                if ncp == 0 {
+                    break
+                }
+            }
+            if cp == 13 as u32 {
+                continue
+            }
+            var flush: bool = false
+            var newpage: bool = false
+            if cp == 10 as u32 {
+                flush = true
+            } else if cp == 12 as u32 {
+                flush = true
+                newpage = true
+            } else if cp == 9 as u32 {
+                var sp: usize = 8 - (ncp % 8)
+                while sp > 0 && ncp < cols {
+                    rt.st32(cps, ncp, 32 as u32)
+                    ncp = ncp + 1
+                    sp = sp - 1
+                }
+                if ncp >= cols {
+                    flush = true
+                }
+            } else {
+                var c: u32 = cp
+                if c < 32 as u32 {
+                    c = 0xFFFD
+                }
+                rt.st32(cps, ncp, c)
+                ncp = ncp + 1
+                if ncp >= cols {
+                    flush = true
+                }
+            }
+            if flush {
+                if pass == 1 {
+                    draw_line(&ts, &pg, row, cps, ncp)
+                }
+                ncp = 0
+                row = row + 1
+                if row >= ts.lines || newpage {
+                    if pass == 1 {
+                        encode_page(doc, &pg, dpi, (*pr).letter, total)
+                        rt.mem_set(pg.px, 255 as u8, pg.w * pg.h)
+                    }
+                    row = 0
+                    pages = pages + 1
+                }
+            }
+        }
+        if row == 0 && pages > 1 {
+            pages = pages - 1
+        } else if pass == 1 {
+            encode_page(doc, &pg, dpi, (*pr).letter, total)
+        }
+        if pass == 0 {
+            total = pages
+        }
+        pass = pass + 1
+    }
+    rt.heap_free(pg.px, pg.w * pg.h)
+    rt.heap_free(racc, rcap)
+    rt.heap_free(ts.scratch, SCRATCH)
+    rt.heap_free(cps, 4 * (cols + 1))
+    return total
+}
+
+// --------------------------------------------------------- Print-Job
+
+fn sleep_ms(ms: u64) {
+    var ts: [i64; 2] = [0; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(35, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+fn job_state_name(s: u32) -> str {
+    if s == 3 as u32 { return "wartet" }
+    if s == 4 as u32 { return "angehalten" }
+    if s == 5 as u32 { return "druckt" }
+    if s == 6 as u32 { return "gestoppt" }
+    if s == JS_CANCELED { return "storniert" }
+    if s == JS_ABORTED { return "abgebrochen" }
+    if s == JS_COMPLETED { return "fertig" }
+    return "unbekannt"
+}
+
+fn base_name(p: u64) -> u64 {
+    let n: usize = rt.c_length(p)
+    var i: usize = n
+    while i > 0 && rt.ld8(p, i - 1) != 47 as u8 {
+        i = i - 1
+    }
+    return p + i as u64
+}
+
+fn cmd_print(d: *mut Dest, file: u64) -> i32 {
+    var data: rt.Buf = rt.buf_new()
+    if !rt.read_file(file, &data) {
+        say_s("stand", "keinedatei")
+        io.eprint_line("drucke: die Datei lässt sich nicht lesen")
+        return RC_FILE
+    }
+    say_n("groesse", data.len as u64)
+    var a: knetz.Antw = knetz.reply_new()
+    let rc: i32 = ask_printer(d, &a)
+    if rc != RC_OK {
+        knetz.reply_free(&a)
+        return rc
+    }
+    var pr: Printer = Printer { pwg: false, pdf: false, jpeg: false,
+        text: false, sgray: false, dpi: 0, letter: false, state: 0 }
+    printer_read(&a.koerper, &pr)
+
+    // Which format, and whether it has to be typeset.
+    var fmt: str = ""
+    var render: bool = false
+    let p: u64 = data.ptr
+    let n: usize = data.len
+    if starts(p, n, "%PDF") {
+        if !pr.pdf {
+            say_s("stand", "keinformat")
+            io.eprint_line("drucke: der Drucker nimmt kein PDF, und OrientOS kann PDF noch nicht selbst rastern")
+            knetz.reply_free(&a)
+            return RC_FORMAT
+        }
+        fmt = "application/pdf"
+    } else if n >= 3 && rt.ld8(p, 0) == 0xFF as u8 && rt.ld8(p, 1) == 0xD8 as u8
+        && rt.ld8(p, 2) == 0xFF as u8 {
+        if !pr.jpeg {
+            say_s("stand", "keinformat")
+            io.eprint_line("drucke: der Drucker nimmt kein JPEG")
+            knetz.reply_free(&a)
+            return RC_FORMAT
+        }
+        fmt = "image/jpeg"
+    } else if starts(p, n, "RaS2") {
+        if !pr.pwg {
+            say_s("stand", "keinformat")
+            knetz.reply_free(&a)
+            return RC_FORMAT
+        }
+        fmt = "image/pwg-raster"
+    } else {
+        if pr.pwg && pr.sgray && pr.dpi != 0 as u32 {
+            fmt = "image/pwg-raster"
+            render = true
+        } else if pr.text {
+            fmt = "text/plain"
+        } else {
+            say_s("stand", "keinformat")
+            io.eprint_line("drucke: der Drucker nimmt weder PWG-Raster (sgray_8) noch reinen Text")
+            knetz.reply_free(&a)
+            return RC_FORMAT
+        }
+    }
+    say_s("format", fmt)
+
+    var doc: rt.Buf = rt.buf_new()
+    if render {
+        let pages: u32 = typeset(&data, &pr, &doc)
+        if pages == 0 as u32 {
+            say_s("stand", "keineschrift")
+            io.eprint_line("drucke: keine Schrift unter /lib/mono.ttf oder /lib/sans.ttf")
+            knetz.reply_free(&a)
+            return RC_FONT
+        }
+        say_n("seiten", pages as u64)
+    } else {
+        rt.buf_push_bytes(&doc, data.ptr, data.len)
+    }
+    say_n("oktette", doc.len as u64)
+
+    // Print-Job (RFC 8011, 4.2.1)
+    var body: rt.Buf = rt.buf_new()
+    ipp_begin(&body, OP_PRINT_JOB, d)
+    attr_s(&body, T_NAME, "requesting-user-name", "orientos")
+    let jn: u64 = base_name(file)
+    attr(&body, T_NAME, "job-name", jn, rt.c_length(jn))
+    attr_s(&body, T_MIME, "document-format", fmt)
+    rt.buf_push(&body, T_END)
+    let sent: bool = post(d, &body, doc.ptr, doc.len, &a)
+    rt.buf_free(&body)
+    rt.buf_free(&doc)
+    if !sent {
+        say_s("stand", "keinnetz")
+        knetz.reply_free(&a)
+        return RC_OFFLINE
+    }
+    let st: u32 = ipp_status(&a.koerper)
+    say_n("ipp_status", st as u64)
+    if a.code != 200 as u32 || st > 0xFF as u32 {
+        say_attr(&a.koerper, "meldung", "status-message")
+        say_s("stand", "abgelehnt")
+        knetz.reply_free(&a)
+        return RC_REFUSED
+    }
+    var job: u32 = 0
+    if !ipp_int(&a.koerper, "job-id", &job) {
+        say_s("stand", "fehler")
+        knetz.reply_free(&a)
+        return RC_ERROR
+    }
+    say_n("auftrag", job as u64)
+
+    // Wait for the job to end (Get-Job-Attributes, RFC 8011, 4.3.4).
+    var waited: u64 = 0
+    var state: u32 = 0
+    while waited <= WAIT_MS {
+        var q: rt.Buf = rt.buf_new()
+        ipp_begin(&q, OP_GET_JOB_ATTRIBUTES, d)
+        attr_int(&q, T_INTEGER, "job-id", job)
+        attr_s(&q, T_KEYWORD, "requested-attributes", "job-state")
+        more_s(&q, T_KEYWORD, "job-state-reasons")
+        rt.buf_push(&q, T_END)
+        let ok: bool = post(d, &q, 0, 0, &a)
+        rt.buf_free(&q)
+        if ok && ipp_int(&a.koerper, "job-state", &state) {
+            if state == JS_COMPLETED || state == JS_ABORTED || state == JS_CANCELED {
+                break
+            }
+        }
+        sleep_ms(500)
+        waited = waited + 500
+    }
+    say_s("auftrag_stand", job_state_name(state))
+    if state == JS_COMPLETED {
+        say_s("stand", "ok")
+        knetz.reply_free(&a)
+        return RC_OK
+    }
+    if state == JS_ABORTED || state == JS_CANCELED {
+        say_attr(&a.koerper, "grund", "job-state-reasons")
+        say_s("stand", "auftragfehler")
+        knetz.reply_free(&a)
+        return RC_JOBFAILED
+    }
+    // still running after two minutes: the job is at the printer, which
+    // is not a failure -- a printer out of paper waits for a human.
+    say_s("stand", "unterwegs")
+    knetz.reply_free(&a)
+    return RC_OK
+}
+
+fn help() {
+    io.print_line("drucke -- auf einem Netzwerkdrucker drucken (IPP)")
+    io.print_line("  drucke info  [ipp://<adresse>[:port]/pfad]")
+    io.print_line("  drucke       [ipp://<adresse>[:port]/pfad] <datei>")
+    io.print_line("Ohne Adresse gilt 'ziel=' aus /etc/drucker.conf.")
+    io.print_line("Text wird gesetzt und als PWG-Raster geschickt; PDF und JPEG gehen unverändert hinaus, wenn der Drucker sie nimmt.")
+}
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 2 {
+        help()
+        return RC_CALL
+    }
+    var d: Dest = Dest { tgt: knetz.target_new(), uri: rt.buf_new(),
+        path: rt.buf_new(), host: rt.buf_new() }
+    let a1: u64 = rt.arg_ptr(start, 1)
+    if arg_is(a1, "hilfe") || arg_is(a1, "--help") || arg_is(a1, "-h") {
+        help()
+        return RC_OK
+    }
+    var info: bool = false
+    var i: usize = 1
+    if arg_is(a1, "info") {
+        info = true
+        i = 2
+    }
+    var have: bool = false
+    if i < argc {
+        let w: u64 = rt.arg_ptr(start, i)
+        let wn: usize = rt.c_length(w)
+        if starts(w, wn, "ipp://") || starts(w, wn, "ipps://") {
+            if !dest_read(w, &d) {
+                say_s("stand", "adresse")
+                io.eprint_line("drucke: die Adresse ist keine ipp://<zahl>-Adresse")
+                return RC_CALL
+            }
+            have = true
+            i = i + 1
+        }
+    }
+    if !have {
+        if !conf_dest(&d) {
+            say_s("stand", "keinziel")
+            io.eprint_line("drucke: keine Adresse angegeben und kein 'ziel=' in /etc/drucker.conf")
+            return RC_CALL
+        }
+    }
+    say_b("ziel", d.uri.ptr, d.uri.len)
+    if info {
+        return cmd_info(&d)
+    }
+    if i >= argc {
+        help()
+        return RC_CALL
+    }
+    return cmd_print(&d, rt.arg_ptr(start, i))
+}
