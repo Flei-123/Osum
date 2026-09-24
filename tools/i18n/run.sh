@@ -63,6 +63,10 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "I18N: uebersprungen, qemu-system-x86_64 fehlt"; exit 0; }
 
 SANS=assets/osum-sans.ttf
+# ROUND FUI-TEXT: Ring 3 text is drawn by fUi (kernel/user/fuiglyph.fi),
+# so its ink is checked against fUi's second version
+# (tools/ttf/fuiraster.py). `fui:` selects it in tools/gfx/checkshot.py.
+SANS_INK="fui:$SANS"
 MONO=assets/osum-mono.ttf
 WX=140; WY=60; BORDER=2; TITLE=22
 CX=$((WX + BORDER)); CY=$((WY + TITLE))
@@ -280,17 +284,17 @@ hasnot "$DF" "/etc/schemata" "und kein Pfad wurde eingedeutscht"
 ex=$(feld "$EF" 5 x); eb=$(feld "$EF" 5 base)
 dx=$(feld "$DF" 5 x); db=$(feld "$DF" 5 base)
 schau "der englische Knopf steht bildpunktgenau da" \
-    ttext "$TMPD/en/en.ppm" "$SANS" 15 $((CX + ex)) $((CY + eb)) \
+    tkette "$TMPD/en/en.ppm" "$SANS_INK" 15 $((CX + ex)) $((CY + eb)) \
     230 230 230 57 64 74 "Apply" 8
 schau "DER DEUTSCHE KNOPF AUCH -- MIT ECHTEM UMLAUT" \
-    ttext "$TMPD/de/de.ppm" "$SANS" 15 $((CX + dx)) $((CY + db)) \
+    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
     230 230 230 57 64 74 "Übernehmen" 8
 schau_nicht "und die Ersatzschreibung 'Uebernehmen' steht dort NICHT" \
-    ttext "$TMPD/de/de.ppm" "$SANS" 15 $((CX + dx)) $((CY + db)) \
+    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
     230 230 230 57 64 74 "Uebernehmen" 8
 lx=$(feld "$DF" 1 x); lb=$(feld "$DF" 1 base)
 schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
-    ttext "$TMPD/de/de.ppm" "$SANS" 15 $((CX + lx)) $((CY + lb)) \
+    tkette "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + lx)) $((CY + lb)) \
     230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
 
 # Die Taskleiste -- ein ANDERER Prozess, dieselbe Sprache.
@@ -387,12 +391,12 @@ else
         wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         wb=$(zeile_von "$W" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "der umgestellte Knopf steht bildpunktgenau auf dem Schirm" \
-            ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 $((CX + wx)) $((CY + wb)) \
+            tkette "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 $((CX + wx)) $((CY + wb)) \
             230 230 230 57 64 74 "Übernehmen" 8
         nx=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         nb=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "und die umgestellte Taskleiste auch" \
-            ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 "$nx" $((572 + nb)) \
+            tkette "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 "$nx" $((572 + nb)) \
             230 230 230 42 47 55 "kein Netz" 8
         # DIE WAHL IST GESCHRIEBEN -- unter dem BENUTZER und nicht unter
         # /etc/. Nachgelesen aus dem Abbild, nicht aus einem Mitschnitt.

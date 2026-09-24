@@ -367,7 +367,8 @@ def main(argv):
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
          "tkette" if kette else "ttext", ppm,
-         "assets/osum-sans.ttf", str(px), str(ax), str(ay)]
+         # ROUND FUI-TEXT: window text is Ring 3 text, drawn by fUi.
+         "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
     kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()

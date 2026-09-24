@@ -521,7 +521,27 @@ def _raster_laden():
     hier = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(hier, "..", "ttf"))
     import raster
-    return raster
+    return _Zwei(raster)
+
+
+class _Zwei:
+    """ROUND FUI-TEXT: TWO INKS, CHOSEN BY THE CALLER, NEVER GUESSED.
+
+    Ring 3 text is drawn by fUi since this round (kernel/user/fuiglyph.fi),
+    the window server's own text still by the kernel.  The caller says
+    which one it expects by writing `fui:` in front of the font path
+    (`fui:assets/osum-sans.ttf`); without it the kernel's ink is
+    expected, as before.  Both comparisons stay exact -- a check that
+    accepted either ink would no longer prove who drew the picture."""
+
+    def __init__(self, raster):
+        self.r = raster
+
+    def Schrift(self, pfad, px):
+        if pfad.startswith("fui:"):
+            import fuiraster
+            return fuiraster.Schrift(pfad[4:], px)
+        return self.r.Schrift(pfad, px)
 
 
 def mische(alt, neu, a):

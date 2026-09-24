@@ -53,6 +53,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ttf"))
 import raster                                      # noqa: E402
+import fuiraster                                   # noqa: E402
 
 from PIL import Image                              # noqa: E402
 
@@ -108,7 +109,8 @@ def main(argv):
                 soll[ln[5:].strip()] = os.path.basename(p)
 
     im = Image.open(bild).convert("RGB")
-    s = raster.Schrift(SCHRIFT, PX_UI)
+    # ROUND FUI-TEXT: the tile names are Ring 3 text, drawn by fUi.
+    s = fuiraster.Schrift(SCHRIFT, PX_UI)
 
     if len(argv) > 4:
         # DAS LOCHBILD: die erste Glyphe 'r' der ersten Kachel, die eine
