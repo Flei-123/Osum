@@ -88,7 +88,13 @@ def ppm_lesen(pfad):
 
 def punkte(text, ttf, px, deckung):
     """(dx, dy, tinte?) -- dy ist relativ zur Grundlinie."""
-    s = raster.Schrift(ttf, px)
+    # ROUND FUI-TEXT: `fui:<ttf>` expects fUi's ink (Ring 3 text since
+    # kernel/user/fuiglyph.fi), a bare path the kernel's.
+    if ttf.startswith("fui:"):
+        import fuiraster
+        s = fuiraster.Schrift(ttf[4:], px)
+    else:
+        s = raster.Schrift(ttf, px)
     voll = []
     rand = []
     for (c, x26) in s.stellen(text):

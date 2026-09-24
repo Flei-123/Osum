@@ -102,7 +102,7 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
         [ -n "$AX" ] || AX=2
         [ -n "$AY" ] || AY=22
         R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
-            assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
+            fui:assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
             15 23 42 255 255 255 "Ausführen" 8 2>&1)
         echo "        $R"
         case "$R" in
@@ -264,7 +264,7 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
            "$((NW1 - NW2))" "18"
     fi
     R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/B2/desktop.ppm" \
-        assets/osum-sans.ttf 15 579 591 15 23 42 255 255 255 "kein Netz" 8 2>&1)
+        fui:assets/osum-sans.ttf 15 579 591 15 23 42 255 255 255 "kein Netz" 8 2>&1)
     case "$R" in
         *", 0 falsch"*) ok "and the text alone is still pixel-exact: $R" ;;
         *) bad "the fallback text is wrong: $R" ;;

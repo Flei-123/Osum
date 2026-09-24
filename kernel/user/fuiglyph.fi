@@ -1,0 +1,387 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/fuiglyph.fi -- ROUND FUI-TEXT: THE GLYPHS OF RING 3 COME
+// FROM fUi.
+//
+// Justin, 24.09.2026, on the question "who sets the type in OrientOS --
+// fUi or wlibc.text_at?": "fUi, einheitlich". One font engine, not two.
+//
+// ------------------------------------------------------ WHAT CHANGES
+//
+// Until this round every letter a Ring 3 program drew was rasterised by
+// the KERNEL (kernel/gfx/ttf.fi, reached through WIG_GLYPH / WIG_KERN):
+// a second TrueType reader and a second rasteriser next to fUi's
+// lib/font/ttf.fi + lib/font/raster.fi, which fUi already uses for every
+// text it draws on every other platform. Two engines for one job is
+// exactly the chaos Justin asked to remove ("wenns ein bug gibt brauchen
+// wir nur einmal die lib aendern").
+//
+// This module is the seam. It loads the system fonts (/lib/sans.ttf,
+// /lib/mono.ttf, /lib/icons.ttf, /lib/bold.ttf -- the same four files the
+// kernel loads in kgui.fi) into the process ONCE, and answers the two
+// questions `wlibc` used to ask the kernel:
+//
+//   glyph_into(role, px, cp, out, max)   the coverage image of one glyph
+//   kern26(role, px, c1, c2)             the pair kerning
+//
+// and `install()` hands both to `wlibc.glyph_source` -- right after
+// `wlibc.start`, in wlib.begin, desktop and taskbar. (wlibc cannot import
+// this file: it is also linked into kernel-profile programs, where f64
+// is refused, and fUi's engine computes in f64.) The answers come
+// in EXACTLY the envelope the kernel used (48-octet head: w, h, left,
+// top, advance in 26.6, w*h; then w*h coverage octets, top row first).
+// So `wlibc.gload` swaps its source and nothing above it notices: layout,
+// clipping, the glyph cache, the blend and the opaque line plate stay
+// where they were.
+//
+// ------------------------------------------ THE METRICS ARE THE SAME
+//
+// Advance and kerning are computed with the kernel's integer formula
+// (scale = (px << 16) / upm, value26 = (units * scale) >> 10). That is
+// deliberate: the advance decides where every following letter stands,
+// and a layout that moved by one pixel against the kernel's would turn
+// every pixel-exact UI test in this tree red for a reason that is not a
+// bug. What changes is only the INK: fUi's rasteriser computes the exact
+// covered area per pixel (signed area accumulation) instead of the
+// kernel's 4x4 samples, so an edge gets 256 grey levels instead of 17.
+//
+// --------------------------------------------------- THE FALLBACK
+//
+// A process that cannot read the font files (a minimal image without
+// /lib/*.ttf, or an out-of-memory mmap) gets `ready() == false`, and
+// `wlibc` keeps asking the kernel. Same for a glyph whose image would not
+// fit the raster window. Nothing disappears because a file is missing.
+profile app
+
+import ulib
+import libc.kcall
+import libc.io
+import libc.errno
+import wlibc
+import font.ttf
+import font.raster
+
+export {
+    install, ready, glyph_into, kern26, stats_loaded, stats_rastered,
+    ROLE_UI, ROLE_MONO, ROLE_ICON, ROLE_BOLD, HDR,
+}
+
+// The four roles, the same numbers as `wig.F_UI .. F_BOLD` and
+// `wlibc.F_UI .. F_BOLD`.
+const ROLE_UI: u64 = 0
+const ROLE_MONO: u64 = 1
+const ROLE_ICON: u64 = 2
+const ROLE_BOLD: u64 = 3
+const ROLES: u64 = 4
+
+// The envelope head, as `wig.glyph_build` writes it.
+const HDR: u64 = 48
+
+// The largest glyph image, the same bound as the kernel's (ttf.MAX_W/H).
+const GMAX: u64 = 256
+
+// The raster window: (w + 2) * h cells of 8 octets. 64 KiB hold a
+// 90 x 90 glyph -- a 15 px letter needs about 3 KiB, a 48 px icon 19 KiB.
+// A larger one falls back to the kernel instead of failing. Kept small on
+// purpose: every GUI process carries it (measured: RAM 43 -> 45 MB on the
+// desktop with 192 KiB here).
+const RASTER_BYTES: u64 = 65536
+// Points of one glyph: 12 octets per point, so 1300 points. A glyph
+// with more fails `font_outline` and comes from the kernel.
+const SCRATCH_BYTES: u64 = 16384
+// The largest font file accepted. The biggest of the four is 54 KB.
+const FONT_MAX: u64 = 4194304
+
+// 0 = not tried yet, 1 = ready, 2 = tried and failed
+static mut s_state: u64 = 0
+// One ttf.Font per slot; the struct lives in word arrays because a
+// `static` initialiser must be a literal (same pattern as fuib.fi).
+static mut s_fontm: [u64; 128] = [0; 128] // 4 slots x 32 words
+static mut s_slot_ok: [u64; 4] = [0; 4]
+// role -> slot (a missing bold falls back to sans, and so on)
+static mut s_role: [u64; 4] = [0; 4]
+static mut s_rasterm: [u64; 32] = [0; 32]
+static mut s_scratch: u64 = 0
+static mut s_n_loaded: u64 = 0
+static mut s_n_rastered: u64 = 0
+
+static mut p_sans: [u8; 15] = "/lib/sans.ttf\0\0"
+static mut p_mono: [u8; 15] = "/lib/mono.ttf\0\0"
+static mut p_icon: [u8; 16] = "/lib/icons.ttf\0\0"
+static mut p_bold: [u8; 15] = "/lib/bold.ttf\0\0"
+// One line on the serial log per process, so a test can tell which
+// engine drew the text -- "the text looks the same" proves nothing.
+static mut m_ok: [u8; 22] = "fuiglyph: fui fonts=\0\0"
+static mut m_no: [u8; 26] = "fuiglyph: kernel fallback\0"
+
+const FONT_WORDS: u64 = 32
+const NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn font_at(slot: u64) -> *mut ttf.Font {
+    return (&s_fontm[(slot * FONT_WORDS) as usize]) as u64 as *mut ttf.Font
+}
+
+fn ras() -> *mut raster.Raster {
+    return (&s_rasterm[0]) as u64 as *mut raster.Raster
+}
+
+fn map(n: u64) -> u64 {
+    let p: u64 = kcall.map_anon(n, kcall.PROT_READ | kcall.PROT_WRITE,
+        kcall.MAP_PRIVATE | kcall.MAP_ANONYMOUS)
+    // mmap returns -errno on failure (top bit set)
+    if p == 0 || p > 0xFFFFFFFFFFFF0000 {
+        return 0
+    }
+    return p
+}
+
+// One font file into memory and into slot `slot`. False if the file is
+// missing, too big, short, or not a TrueType font fUi can read.
+fn load(slot: u64, path: u64) -> bool {
+    s_slot_ok[slot as usize] = 0
+    let size: u64 = io.size_of(path)
+    if errno.failed(size) || size == 0 || size > FONT_MAX {
+        return false
+    }
+    let buf: u64 = map(size)
+    if buf == 0 {
+        return false
+    }
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return false
+    }
+    let got: u64 = io.read_full(fd, buf, size)
+    io.close(fd)
+    if errno.failed(got) || got != size {
+        return false
+    }
+    *font_at(slot) = ttf.font_new()
+    if !ttf.font_init(font_at(slot), buf as *mut u8, size as usize) {
+        return false
+    }
+    s_slot_ok[slot as usize] = 1
+    s_n_loaded = s_n_loaded + 1
+    return true
+}
+
+fn pick(a: u64, b: u64) -> u64 {
+    if s_slot_ok[a as usize] != 0 {
+        return a
+    }
+    if b != NO_SLOT && s_slot_ok[b as usize] != 0 {
+        return b
+    }
+    return NO_SLOT
+}
+
+// Loads everything ONCE. The struct size is checked against its word
+// array, measured and not assumed (the gap between two array elements IS
+// the size of the struct).
+fn ready() -> bool {
+    if s_state == 1 {
+        return true
+    }
+    if s_state == 2 {
+        return false
+    }
+    s_state = 2
+    var mf: [ttf.Font; 2] = [ttf.font_new(); 2]
+    let nf: u64 = (&mf[1]) as u64 - (&mf[0]) as u64
+    var mr: [raster.Raster; 2] = [raster.raster_new(); 2]
+    let nr: u64 = (&mr[1]) as u64 - (&mr[0]) as u64
+    if nf > FONT_WORDS * 8 || nr > 32 * 8 {
+        return false
+    }
+    load(ROLE_UI, (&p_sans[0]) as u64)
+    load(ROLE_MONO, (&p_mono[0]) as u64)
+    load(ROLE_ICON, (&p_icon[0]) as u64)
+    load(ROLE_BOLD, (&p_bold[0]) as u64)
+    // The same fallbacks as kgui.fi / wig.font_of: no sans -> mono for
+    // the UI, no mono -> sans for the terminal, no bold -> the UI font,
+    // no icon font -> no icons.
+    s_role[ROLE_UI as usize] = pick(ROLE_UI, ROLE_MONO)
+    s_role[ROLE_MONO as usize] = pick(ROLE_MONO, ROLE_UI)
+    s_role[ROLE_ICON as usize] = pick(ROLE_ICON, NO_SLOT)
+    s_role[ROLE_BOLD as usize] = pick(ROLE_BOLD, s_role[ROLE_UI as usize])
+    if s_role[ROLE_UI as usize] == NO_SLOT {
+        ulib.say((&m_no[0]) as u64)
+        ulib.nl()
+        return false
+    }
+    let rb: u64 = map(RASTER_BYTES)
+    s_scratch = map(SCRATCH_BYTES)
+    if rb == 0 || s_scratch == 0 {
+        return false
+    }
+    *ras() = raster.raster_new()
+    raster.raster_attach(ras(), rb as *mut u8, RASTER_BYTES as usize)
+    s_state = 1
+    ulib.say((&m_ok[0]) as u64)
+    ulib.sayu(s_n_loaded)
+    ulib.nl()
+    return true
+}
+
+fn slot_of(role: u64) -> u64 {
+    if role >= ROLES {
+        return NO_SLOT
+    }
+    return s_role[role as usize]
+}
+
+// The kernel's scale, bit for bit (ttf.scale_of / ttf.f26).
+fn scale16(f: *mut ttf.Font, px: u64) -> i64 {
+    let u: u64 = ttf.font_upem(f) as u64
+    if u == 0 {
+        return 0
+    }
+    return ((px << 16) / u) as i64
+}
+
+fn f26(v: i64, sc: i64) -> i64 {
+    return (v * sc) >> 10
+}
+
+#[allow_fp]
+fn ffloor(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) > v {
+        return t - 1
+    }
+    return t
+}
+
+#[allow_fp]
+fn fceil(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) < v {
+        return t + 1
+    }
+    return t
+}
+
+fn put64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+// Kerning in 26.6. Role, size and two CODEPOINTS -- the arguments of
+// WIG_KERN. Returns 0 when fUi is not ready (the caller then asks the
+// kernel; see `wlibc.kern26`).
+fn kern26(role: u64, px: u64, c1: u64, c2: u64) -> i64 {
+    if s_state != 1 {
+        return 0
+    }
+    let s: u64 = slot_of(role)
+    if s == NO_SLOT {
+        return 0
+    }
+    let f: *mut ttf.Font = font_at(s)
+    let g1: u32 = ttf.font_glyph_for(f, c1 as u32)
+    let g2: u32 = ttf.font_glyph_for(f, c2 as u32)
+    if g1 == 0 as u32 || g2 == 0 as u32 {
+        return 0
+    }
+    return f26(ttf.font_kern(f, g1, g2) as i64, scale16(f, px))
+}
+
+// One glyph into `out` in the kernel's envelope. Returns the number of
+// octets written (HDR + w*h), or 0 -- and 0 means "ask the kernel".
+#[allow_fp]
+fn glyph_into(role: u64, px: u64, c: u64, out: u64, max: u64) -> u64 {
+    if s_state != 1 || px == 0 || px > 200 || max < HDR {
+        return 0
+    }
+    let s: u64 = slot_of(role)
+    if s == NO_SLOT {
+        return 0
+    }
+    let f: *mut ttf.Font = font_at(s)
+    let gid: u32 = ttf.font_glyph_for(f, c as u32)
+    let sc16: i64 = scale16(f, px)
+    let adv: i64 = f26(ttf.font_advance(f, gid) as i64, sc16)
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = 0
+    var y1: i32 = 0
+    var w: i64 = 0
+    var h: i64 = 0
+    var bx0: i64 = 0
+    var by1: i64 = 0
+    let sc: f64 = (px as f64) / (ttf.font_upem(f) as f64)
+    if ttf.font_glyph_bbox(f, gid, &x0, &y0, &x1, &y1) && x1 > x0 && y1 > y0 {
+        bx0 = ffloor((x0 as f64) * sc)
+        let bx1: i64 = fceil((x1 as f64) * sc)
+        let by0: i64 = ffloor((y0 as f64) * sc)
+        by1 = fceil((y1 as f64) * sc)
+        w = bx1 - bx0
+        h = by1 - by0
+    }
+    if w < 0 || h < 0 || w > GMAX as i64 || h > GMAX as i64 {
+        return 0
+    }
+    let n: u64 = (w * h) as u64
+    if HDR + n > max {
+        return 0
+    }
+    if n > 0 {
+        // Window in device pixels, pen at (0, 0) on the baseline, y down:
+        // font y = by1 is device row 0.
+        if !raster.raster_begin(ras(), bx0 as f64, (0 - by1) as f64,
+            w as usize, h as usize) {
+            return 0
+        }
+        if !ttf.font_outline(f, gid, ras(), 0.0, 0.0, sc,
+            s_scratch as *mut u8, SCRATCH_BYTES as usize, 0) {
+            return 0
+        }
+        raster.raster_finish(ras())
+        if !raster.raster_ok(ras()) {
+            return 0
+        }
+        var r: u64 = 0
+        while r < h as u64 {
+            var k: u64 = 0
+            while k < w as u64 {
+                var cov: f64 = raster.raster_cov(ras(), k as usize,
+                    r as usize)
+                if cov < 0.0 {
+                    cov = 0.0
+                }
+                if cov > 1.0 {
+                    cov = 1.0
+                }
+                let a: u64 = (cov * 255.0 + 0.5) as u64
+                *((out + HDR + r * (w as u64) + k) as *mut u8) = a as u8
+                k = k + 1
+            }
+            r = r + 1
+        }
+    }
+    put64(out + 0, w as u64)
+    put64(out + 8, h as u64)
+    put64(out + 16, bx0 as u64)
+    put64(out + 24, by1 as u64)
+    put64(out + 32, adv as u64)
+    put64(out + 40, n)
+    s_n_rastered = s_n_rastered + 1
+    return HDR + n
+}
+
+// Makes this process draw its type with fUi. The fonts are loaded HERE,
+// once: if that fails the process keeps the kernel's glyphs, and glyph
+// and kerning never come from two different engines.
+fn install() -> bool {
+    if !ready() {
+        return false
+    }
+    wlibc.glyph_source(glyph_into, kern26)
+    return true
+}
+
+fn stats_loaded() -> u64 {
+    return s_n_loaded
+}
+
+fn stats_rastered() -> u64 {
+    return s_n_rastered
+}

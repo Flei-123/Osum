@@ -56,6 +56,8 @@ export {
     clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
     px, get, hline, vline, rect, frame, frame3, blend,
     text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
+    // ROUND FUI-TEXT: fUi hands in the glyph source (fuiglyph.install).
+    glyph_source, glyphs_fui,
     icon_at, icon_mid, icon_box, icon_have, icon_ink_w, icon_ink_h,
     icon_small, icon_menu, icon_taskbar, icon_large,
     fit, back, chars,
@@ -1751,6 +1753,50 @@ const GC_FIELDS: u64 = 8
 static mut gc: [u64; 4096] = [0 as u64; 4096]
 static mut gc_used: u64 = 0
 static mut gc_calls: u64 = 0
+// ROUND FUI-TEXT: how many of those glyphs fUi rasterised.
+static mut gc_fui: u64 = 0
+
+// ROUND FUI-TEXT: WHERE THE GLYPHS COME FROM.
+//
+// Justin, 24.09.2026: the type in OrientOS is set by fUi, uniformly.
+// fUi's font engine (lib/font/ttf.fi + lib/font/raster.fi) computes in
+// f64, and this file is also linked into programs in the kernel profile
+// (icont, praesenz, template, theme), where f64 is refused. So wlibc does
+// not IMPORT the engine; it is HANDED it: `kernel/user/fuiglyph.fi`
+// calls `glyph_source` right after `start`, and from then on every glyph
+// and every kerning pair of this process comes from fUi. A program that
+// never installs it keeps the kernel rasteriser -- the fallback, not a
+// second way of drawing (fuiglyph also returns 0 = "ask the kernel" for
+// a glyph it cannot make).
+struct GlyphSource {
+    glyph: fn(u64, u64, u64, u64, u64) -> u64,
+    kern: fn(u64, u64, u64, u64) -> i64,
+}
+static mut gs_on: u64 = 0
+static mut gs_mem: [u64; 4] = [0; 4]
+
+fn gsrc() -> *mut GlyphSource {
+    return (&gs_mem[0 as usize]) as u64 as *mut GlyphSource
+}
+
+// Hands wlibc a glyph source. The cache is emptied, so no glyph of the
+// old source stays next to one of the new.
+fn glyph_source(g: fn(u64, u64, u64, u64, u64) -> u64,
+    k: fn(u64, u64, u64, u64) -> i64) {
+    *gsrc() = GlyphSource { glyph: g, kern: k }
+    var i: u64 = 0
+    while i < GC_SLOTS * GC_FIELDS {
+        gc[i as usize] = 0
+        i = i + 1
+    }
+    gc_used = 0
+    gs_on = 1
+}
+
+// How many glyphs of this process fUi drew -- 0 means the kernel did.
+fn glyphs_fui() -> u64 {
+    return gc_fui
+}
 static mut gbuf: [u8; 2048] = [0 as u8; 2048]
 
 // RUNDE I18N: DER SCHLUESSEL WURDE BREITER. Er trug `c & 0xFFFF`, also
@@ -1845,8 +1891,19 @@ fn gmem(n: u64) -> u64 {
 }
 
 fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
-    let n: u64 = sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64,
-        2048)
+    // ROUND FUI-TEXT: fUi rasterises the glyph (kernel/user/fuiglyph.fi,
+    // same envelope). Only if it cannot -- no font files in this image,
+    // a glyph larger than its raster window -- the kernel is asked.
+    var n: u64 = 0
+    if gs_on != 0 {
+        let g: fn(u64, u64, u64, u64, u64) -> u64 = (*gsrc()).glyph
+        n = g(f, px_, c, (&gbuf[0 as usize]) as u64, 2048)
+    }
+    if n == 0 {
+        n = sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64, 2048)
+    } else {
+        gc_fui = gc_fui + 1
+    }
     if ulib.bad(n) || n < 48 {
         return 0xFFFFFFFFFFFFFFFF
     }
@@ -1902,6 +1959,11 @@ fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
 }
 
 fn kern26(f: u64, px_: u64, c1: u64, c2: u64) -> i64 {
+    // ROUND FUI-TEXT: kerning from the same engine that drew the glyphs.
+    if gs_on != 0 {
+        let k: fn(u64, u64, u64, u64) -> i64 = (*gsrc()).kern
+        return k(f, px_, c1, c2)
+    }
     return sys5(WIG_KERN, f, px_, c1, c2, 0) as i64
 }
 
