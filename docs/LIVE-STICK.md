@@ -75,3 +75,16 @@ the stick, a file survives a restart.
 * Two programs loaded at the same moment collide in the kernel
   (`elf: refused, reason 13  segment past the end`). The live sign-in waits
   3 s and retries; the kernel bug itself is open.
+
+## The watchman
+
+`release.sh` is the one way into `/srv/store/abbilder`, but a folder cannot
+refuse a `cp`. Half an hour after the first public live image went up, a
+personal test stick of another round was copied there by hand.
+`tools/usbimg/guard.sh` runs on every change of the folder (systemd
+`osum-abbilder-guard.path`) and every ten minutes (`.timer`): every stick
+image is unpacked and checked with `pubcheck.py`; one that is not fit is
+MOVED to `/root/abbilder` (not served), and `orientos-usb-neuestes` is
+pointed back at the newest fit `*-live` image. Log:
+`/var/log/osum-abbilder-guard.log`. Personal test sticks are handed to
+Justin directly (chat download), never through the store.

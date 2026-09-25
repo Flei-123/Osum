@@ -88,8 +88,18 @@ for f in VERZEICHNIS VERZEICHNIS.sig INDEX INDEX.sig; do
     code=$(curl -sS -o "$OUT/netz-$f" -w '%{http_code}' --max-time 30 "$BASIS/$f")
     gleich "curl holt $f" "$code" "200"
 done
+# RUNDE STORE (25.09.2026): Anzahl, Fassung und Namen kommen aus dem
+# geholten VERZEICHNIS und nicht aus dem Laeufer. Fassung 3 (acht Pakete)
+# hatte KEINE Plattform-Spalte -- jedes Geraet ab STORE-MOBIL blendete
+# alle acht aus ("ohne Plattformangabe ausgeblendet: 8"), der Laden war
+# leer, und dieser Laeufer zaehlte trotzdem "acht" als gruen.
 N=$(grep -c '^paket' "$OUT/netz-VERZEICHNIS" 2>/dev/null)
-gleich "das signierte VERZEICHNIS nennt acht Pakete" "$N" "8"
+FASS=$(awk -F'\t' '$1=="fassung"{print $2}' "$OUT/netz-VERZEICHNIS")
+NAMEN=$(awk -F'\t' '$1=="paket"{print $2}' "$OUT/netz-VERZEICHNIS")
+[ "${N:-0}" -ge 8 ] && ok "das signierte VERZEICHNIS nennt $N Pakete (Fassung $FASS)" \
+    || bad "das signierte VERZEICHNIS nennt nur ${N:-0} Pakete"
+OHNE=$(awk -F'\t' '$1=="paket" && ($7=="" || ($7!="osum-x86_64" && $7!="osum-any")){n++} END{print n+0}' "$OUT/netz-VERZEICHNIS")
+gleich "jede Paketzeile traegt eine Plattform fuer x86_64 (ohne/fremd)" "$OHNE" "0"
 
 echo "== 3./4. Liste und Installation, in QEMU, ueber den NAMEN =="
 bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
@@ -99,20 +109,22 @@ LADEN_PLATTE="$OUT/text.img" bash tools/loader/lauf.sh a1 \
     "$TEXT script=opk liste;ota suchen;exit" 900 > /dev/null 2>&1
 hat "$OUT/a1.txt" "(keine Pakete)"          "vorher ist kein Paket installiert"
 hat "$OUT/a1.txt" "fetch: verify OK"        "die Zertifikatskette wurde geprueft"
-hat "$OUT/a1.txt" "ota: fassung dort 3"     "das signierte VERZEICHNIS ist gelesen"
+hat "$OUT/a1.txt" "ota: fassung dort $FASS"  "das signierte VERZEICHNIS ist gelesen"
 hat "$OUT/a1.txt" "ota: NEUE FASSUNG"       "und es gibt etwas zu holen"
-gleich "der Laden zaehlt acht Programme auf" \
-       "$(grep -ac '^ota: paket ' "$OUT/a1.txt")" "8"
+gleich "der Laden zaehlt alle $N Programme auf" \
+       "$(grep -ac '^ota: paket ' "$OUT/a1.txt")" "$N"
+gleich "kein Paket wird ausgeblendet" \
+       "$(grep -ac 'ausgeblendet' "$OUT/a1.txt")" "0"
 
 LADEN_PLATTE="$OUT/text.img" bash tools/loader/lauf.sh a2 \
     "$TEXT script=ota einspielen;opk liste;ls /apps;exit" 3600 > /dev/null 2>&1
-gleich "acht Streuwerte stimmen" \
-       "$(grep -ac '^ota: streuwert stimmt' "$OUT/a2.txt")" "8"
-gleich "opk prueft acht Paketsignaturen ein zweites Mal" \
-       "$(grep -ac '^opk: Signatur geprüft /tmp/ota/.*opk' "$OUT/a2.txt")" "8"
-gleich "acht Pakete installiert" \
-       "$(grep -ac '^opk: installiert ' "$OUT/a2.txt")" "8"
-for p in explorer edit settings widgetdemo netview themetest top netmon; do
+gleich "$N Streuwerte stimmen" \
+       "$(grep -ac '^ota: streuwert stimmt' "$OUT/a2.txt")" "$N"
+gleich "opk prueft $N Paketsignaturen ein zweites Mal" \
+       "$(grep -ac '^opk: Signatur geprüft /tmp/ota/.*opk' "$OUT/a2.txt")" "$N"
+gleich "$N Pakete installiert" \
+       "$(grep -ac '^opk: installiert ' "$OUT/a2.txt")" "$N"
+for p in $NAMEN; do
     grep -qa "  $p -> " "$OUT/a2.txt" && ok "opk liste kennt $p" \
         || bad "opk liste kennt $p nicht"
 done
