@@ -498,6 +498,100 @@ fn versuchen() -> bool {
     return true
 }
 
+// ============================================ ROUND LIVE: SIGNING IN WITHOUT A SCREEN
+//
+// The PUBLIC stick boots as a live system: the root is a boot module in
+// RAM, nothing is written to a disk, and it carries NO personal account --
+// only the generic user `live`. Like Linux live media it signs that user
+// in on its own, so the desktop is there without a question.
+//
+// /etc/autologin names that user (first word). The file exists ONLY on the
+// public image (tools/usbimg/build.sh, IMAGE_PROFILE=public). A personal
+// image or an installed system has no such file, and this function does
+// nothing -- the normal sign-in screen comes.
+//
+// ONCE PER BOOT. After the automatic sign-in glogin leaves
+// /run/autologin.done. Signing out therefore brings the normal screen
+// (live / live) and not an endless loop back into the session. /run is in
+// the RAM root, so the marker is gone after a restart -- exactly like
+// everything else the live session wrote.
+//
+// ONLY A REAL, UNPRIVILEGED ACCOUNT: the name must be in /etc/passwd with
+// uid >= 1000 AND have an entry in /etc/shadow. root is never signed in
+// automatically, and a file naming an account that does not exist changes
+// nothing.
+fn auto_anmelden() -> bool {
+    var p_auto: [u8; 15] = "/etc/autologin\0"
+    var p_done: [u8; 20] = "/run/autologin.done\0"
+    var s_al: [u8; 19] = "glogin: autologin \0"
+    var s_uid: [u8; 14] = "glogin: uid=\0\0"
+    var eins: [u8; 2] = "1\0"
+    var buf: [u8; 64] = [0 as u8; 64]
+    let fd0: u64 = io.open((&p_done[(0) as usize]) as u64, 0)
+    if !ulib.bad(fd0) {
+        io.close(fd0)
+        return false
+    }
+    let n: u64 = pw.read_all((&p_auto[(0) as usize]) as u64,
+        (&buf[(0) as usize]) as u64, 63)
+    if n == ulib.EOF || n == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n && i < 60 {
+        let c: u8 = buf[(i) as usize]
+        if c == 10 as u8 || c == 13 as u8 || c == 32 as u8 || c == 9 as u8 || c == 0 as u8 {
+            break
+        }
+        nam[(i) as usize] = c
+        i = i + 1
+    }
+    nam[(i) as usize] = 0 as u8
+    if i == 0 {
+        return false
+    }
+    let uid: u64 = pw.uid_of_name((&nam[(0) as usize]) as u64)
+    if uid == ulib.EOF || uid < 1000 {
+        nam[(0) as usize] = 0 as u8
+        return false
+    }
+    if !pw.shadow_of((&nam[(0) as usize]) as u64, (&haben[(0) as usize]) as u64, 180) {
+        nam[(0) as usize] = 0 as u8
+        return false
+    }
+    // THE MARKER FIRST: should anything below fail, the next glogin shows
+    // the screen instead of trying again.
+    let _m: bool = pw.write_all((&p_done[(0) as usize]) as u64,
+        (&eins[(0) as usize]) as u64, 1)
+    sag((&s_al[(0) as usize]) as u64)
+    sag((&nam[(0) as usize]) as u64)
+    sagnl()
+    if !rechte_ablegen() {
+        return false
+    }
+    sag((&s_uid[(0) as usize]) as u64)
+    sagn(ulib.sys(SYS_GETUID, 0, 0, 0))
+    sagnl()
+    // NOT AT ONCE, AND AGAIN IF IT FAILS. Measured on the first live run:
+    // without a screen this program reaches this line while the kernel is
+    // still loading the taskbar and the launcher (kgui.desk_start spawns
+    // them right after glogin), and the two loads collided --
+    // `elf: refused, reason 13  segment past the end`,
+    // `glogin: desktop pid=-8`, and a live stick with no desktop. A person
+    // at the sign-in screen never gets here that fast. So: let the
+    // kernel's spawns finish first, and try again for up to ten seconds.
+    let _s0: u64 = ulib.sleep_ms(3000)
+    var versuch: u64 = 0
+    var pid: u64 = desktop_starten()
+    while ulib.bad(pid) && versuch < 10 {
+        let _s1: u64 = ulib.sleep_ms(1000)
+        pid = desktop_starten()
+        versuch = versuch + 1
+    }
+    let _w: u64 = wache_starten()
+    return !ulib.bad(pid)
+}
+
 fn dbg_setup(args: u64) {
     var t: [u8; 13] = "/etc/uitrace\0"
     var d: [u8; 6] = "debug\0"
@@ -657,6 +751,9 @@ fn u_start(args: u64) -> u64 {
         if ulib.streq(ulib.arg_at(args, 1), (&s_s[(0) as usize]) as u64) {
             return u_say()
         }
+    }
+    if auto_anmelden() {
+        return 0
     }
     return u_gui()
 }

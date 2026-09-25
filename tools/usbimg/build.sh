@@ -117,6 +117,45 @@ mkdir -p "$OUT"
 . tools/lib/marke.sh
 marke_laden . || fehler "marke.conf laesst sich nicht lesen"
 
+# ============================================ ROUND LIVE: TWO IMAGES
+#
+#   IMAGE_PROFILE=personal  (default) Justin's own test stick and every
+#                           acceptance run in this tree: the accounts
+#                           `root` and `justin` with the start passwords
+#                           below, the normal sign-in screen, and -- if
+#                           JARVIS_CONF is given -- his bridge settings.
+#   IMAGE_PROFILE=public    the DOWNLOAD image (store.fleitec.com/abbilder,
+#                           built ONLY through tools/usbimg/publish.sh).
+#                           A live system like a Linux live stick: no
+#                           personal account, the generic user `live`
+#                           (password `live`) is signed in automatically,
+#                           root is locked, the bridge is off and cannot
+#                           be switched on at build time, the screen does
+#                           not lock by itself, and the boot menu offers
+#                           "Install OrientOS" as its second entry.
+#
+# WHY THE DEFAULT STAYS `personal`: forty acceptance runs in this tree
+# build through this script and sign in as `justin`. The public image is
+# protected by the ONE way it is published -- publish.sh builds with
+# IMAGE_PROFILE=public and refuses to copy an image whose /etc/passwd,
+# /etc/shadow or /users/ name anyone but root and live.
+IMAGE_PROFILE=${IMAGE_PROFILE:-personal}
+case "$IMAGE_PROFILE" in
+    personal|public) ;;
+    *) fehler "IMAGE_PROFILE=$IMAGE_PROFILE (personal oder public)" ;;
+esac
+if [ "$IMAGE_PROFILE" = public ]; then
+    [ -z "${JARVIS_CONF:-}" ] \
+        || fehler "JARVIS_CONF gehoert nicht in das oeffentliche Abbild"
+    [ -z "${PW_JUSTIN:-}" ] \
+        || fehler "PW_JUSTIN gehoert nicht in das oeffentliche Abbild"
+    KONTO=${LIVE_USER:-live}
+    KONTO_NAME="Live user"
+else
+    KONTO=justin
+    KONTO_NAME=Justin
+fi
+
 IMG="$OUT/${MARKE_DATEI}-usb.img"
 # DER ALTE NAME BLEIBT ERREICHBAR. Er haengt am KURZnamen und nicht am
 # Produktnamen -- Justins Lesezeichen zeigt auf osum-usb.img, und ein
@@ -430,10 +469,8 @@ sagen "symbole     $(echo $SYMBOLE | wc -w) Stueck nach /etc/netview/"
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 \
     || fehler "tools/k15/tree.py fehlgeschlagen"
 
-cat > "$OUT/passwd" <<'EOF'
-root:x:0:0:root:/:/bin/sh
-justin:x:1000:1000:Justin:/users/justin:/bin/sh
-EOF
+printf 'root:x:0:0:root:/:/bin/sh\n%s:x:1000:1000:%s:/users/%s:/bin/sh\n' \
+    "$KONTO" "$KONTO_NAME" "$KONTO" > "$OUT/passwd"
 
 # ============================================== RUNDE ANMELDUNG
 # /etc/shadow, /etc/group, /etc/login.conf, /etc/sperre.conf
@@ -467,13 +504,24 @@ EOF
 # an dem sich niemand anmelden kann.
 PW_RUNDEN=$(sed -n 's/^const KOSTEN: u64 = \([0-9]*\).*/\1/p' kernel/user/pw.fi | head -1)
 [ -n "$PW_RUNDEN" ] || fehler "die Rundenzahl steht nicht in kernel/user/pw.fi"
-PW_ROOT=${PW_ROOT:-osumroot}
-PW_JUSTIN=${PW_JUSTIN:-startkennwort}
-python3 - "$OUT" "$PW_RUNDEN" "$PW_ROOT" "$PW_JUSTIN" <<'PYEOF'
+# ROUND LIVE: on the public image root is LOCKED (`!` is no hash, so
+# check_hash says no to every password) and the one account is `live` /
+# `live` -- the password is printed on the download page and is no secret;
+# it only exists so the lock screen and `su` have something to ask for.
+if [ "$IMAGE_PROFILE" = public ]; then
+    PW_ROOT='!'
+    PW_KONTO=${LIVE_PW:-live}
+else
+    PW_ROOT=${PW_ROOT:-osumroot}
+    PW_KONTO=${PW_JUSTIN:-startkennwort}
+fi
+python3 - "$OUT" "$PW_RUNDEN" "$PW_ROOT" "$PW_KONTO" "$KONTO" <<'PYEOF'
 import binascii, hashlib, os, sys
-d, it, pr, pj = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+d, it, pr, pj, konto = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
 
 def rec(pw):
+    if pw == '!':
+        return '!'
     # DAS SALZ IST ZUFAELLIG UND ACHT OKTETTE LANG -- so lang, wie
     # pw.fi es schreibt (`make_hash`: acht Oktette aus dem Kern).
     salt = os.urandom(8)
@@ -483,11 +531,11 @@ def rec(pw):
 
 with open(d + "/shadow", "w") as f:
     f.write("root:%s:0:0:99999:7:::\n" % rec(pr))
-    f.write("justin:%s:0:0:99999:7:::\n" % rec(pj))
+    f.write("%s:%s:0:0:99999:7:::\n" % (konto, rec(pj)))
 
 with open(d + "/group", "w") as f:
     f.write("root:x:0:\n")
-    f.write("justin:x:1000:\n")
+    f.write("%s:x:1000:\n" % konto)
 PYEOF
 chmod 600 "$OUT/shadow"
 
@@ -500,10 +548,22 @@ printf '# /etc/login.conf -- die Anmeldung.\n# verzoegerung_ms: die erste Wartez
 # /etc/sperre.conf -- der Leerlauf, nach dem von selbst gesperrt wird.
 # 300 Sekunden sind fuenf Minuten; 0 hiesse "nie von selbst".
 printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=%s\n' \
-    "${SPERRE_LEERLAUF:-300}" > "$OUT/sperre.conf"
+    "${SPERRE_LEERLAUF:-$([ "$IMAGE_PROFILE" = public ] && echo 0 || echo 300)}" > "$OUT/sperre.conf"
+# ROUND LIVE: /etc/autologin -- ONLY on the public image. glogin signs
+# the user named there in once per boot (kernel/user/glogin.fi,
+# auto_anmelden).
+if [ "$IMAGE_PROFILE" = public ]; then
+    printf '%s\n' "$KONTO" > "$OUT/autologin"
+fi
 
-sagen "konten      2 (root, justin), PBKDF2 $PW_RUNDEN Runden, Salz je Konto zufaellig"
-sagen "            Anfangskennwort justin='$PW_JUSTIN' root='$PW_ROOT' -- mit passwd aendern"
+sagen "profil      $IMAGE_PROFILE"
+if [ "$IMAGE_PROFILE" = public ]; then
+    sagen "konten      2 (root gesperrt, $KONTO), PBKDF2 $PW_RUNDEN Runden, automatisch angemeldet: $KONTO"
+    sagen "            Kennwort $KONTO='$PW_KONTO' (Live-System, steht auf der Downloadseite)"
+else
+    sagen "konten      2 (root, $KONTO), PBKDF2 $PW_RUNDEN Runden, Salz je Konto zufaellig"
+    sagen "            Anfangskennwort $KONTO='$PW_KONTO' root='$PW_ROOT' -- mit passwd aendern"
+fi
 # ============================================== RUNDE STARTKNOPF
 # Die Vorgaben der Leiste, nach Justins Vorlage (Windows 11):
 #   labels=never    Programmknoepfe nur als Symbol -- ein Symbol wird
@@ -520,6 +580,11 @@ sagen "            Anfangskennwort justin='$PW_JUSTIN' root='$PW_ROOT' -- mit pa
 #   height=40       28 war auf 3440x1440 ein Strich.
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
+# ROUND LIVE: on the public stick "Install OrientOS" is pinned first --
+# the one thing a live stick is for, visible without opening a menu.
+if [ "$IMAGE_PROFILE" = public ]; then
+    printf 'pins=installer,explorer,terminal,settings\n' >> "$OUT/taskbar.conf"
+fi
 # ====================================================== RUNDE MODULE
 # /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE, AUSGELIEFERT.
 #
@@ -983,8 +1048,11 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 # andere koennte hineinsehen. 0700 heisst: nur er, und niemand sonst.
 ARGS+=(/users/ /users/root/ /users/root/config/
        "/users/root/config/locale=$OUT/locale-de"
-       "/users/justin/@0700:1000:1000"
-       "/users/justin/config/@0700:1000:1000")
+       "/users/$KONTO/@0700:1000:1000"
+       "/users/$KONTO/config/@0700:1000:1000")
+if [ "$IMAGE_PROFILE" = public ]; then
+    ARGS+=("/etc/autologin=$OUT/autologin")
+fi
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
 # ==================================================== RUNDE ENERGIE
@@ -1127,7 +1195,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
 /apps/installer.osp/symbol \
 /bin/init /etc/inittab /etc/ziel \
-/users/justin/ /users/justin/config/"
+/users/$KONTO/ /users/$KONTO/config/"
+[ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
@@ -1137,6 +1206,15 @@ for f in $PFLICHT; do
 done
 [ "$fehlt" = 0 ] || fehler "$fehlt Pflichtdatei(en) fehlen im Abbild"
 sagen "geprueft    $(echo $PFLICHT | wc -w) Pflichtpfade im fertigen Dateisystem"
+# ROUND LIVE: THE PUBLIC IMAGE IS CHECKED, NOT TRUSTED. Read back from
+# the finished file system: /etc/passwd, /etc/shadow and /etc/group may
+# name root and the live user and nobody else, /users/ may hold nothing
+# else, and the bridge settings must be the factory ones (no server=).
+if [ "$IMAGE_PROFILE" = public ]; then
+    python3 tools/usbimg/pubcheck.py "$OUT/root.img" "$KONTO" \
+        || fehler "das oeffentliche Abbild enthaelt Persoenliches -- abgebrochen"
+    sagen "oeffentlich geprueft: nur root (gesperrt) und $KONTO, Bruecke aus"
+fi
 
 # DIE UMLAUTE. Sie stehen in locale/de/messages, sie muessen im ABBILD
 # stehen, und ein 'ü' sind ZWEI Oktette -- was jede Feldbreitenrechnung
@@ -1319,6 +1397,43 @@ sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
     || fehler "der Produktname liess sich nicht in limine.conf einsetzen"
 if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
     fehler "in limine.conf steht noch ein Platzhalter"
+fi
+# ROUND LIVE: THE PUBLIC MENU SAYS WHAT THE STICK IS. Entry 1 is the
+# live system ("try without installing" -- nothing is written to a disk),
+# entry 2 is the same live system with the installer already open
+# (`wigapp=`, kernel/ui/kgui.fi: started after taskbar and launcher). The
+# other entries keep their order; entry 2 is new, so "Advanced" moves down
+# by one on the public stick only.
+if [ "$IMAGE_PROFILE" = public ]; then
+    python3 - "$OUT/limine.conf" "$MARKE_PRODUKT" <<'PYLIVE' || fehler "das Live-Menue liess sich nicht schreiben"
+import sys
+path, prod = sys.argv[1], sys.argv[2]
+lines = open(path).read().split('\n')
+first = '/' + prod
+i = lines.index(first)
+j = i + 1
+while j < len(lines) and lines[j].startswith(' '):
+    j += 1
+# `vfs` IN BOTH: without it there is no /dev/, and the installer --
+# pinned in the taskbar of entry 1, open in entry 2 -- said "no writable
+# disk found" with an empty disk attached (measured, tools/usbimg/live.sh).
+# vfs only shows the devices; nothing is written until the installer's
+# two questions are answered.
+for k in range(i + 1, j):
+    if lines[k].strip().startswith('cmdline:') and ' vfs ' not in lines[k] + ' ':
+        lines[k] = lines[k].replace('modfs osum ', 'modfs osum vfs ', 1)
+body = lines[i + 1:j]
+lines[i] = '/%s Live (try without installing)' % prod
+inst = ['', '/Install %s' % prod]
+for l in body:
+    if l.strip().startswith('cmdline:'):
+        l = l + ' wigapp=/bin/installer'
+    inst.append(l)
+lines[j:j] = inst
+open(path, 'w').write('\n'.join(lines))
+PYLIVE
+    grep -q "^/Install $MARKE_PRODUKT\$" "$OUT/limine.conf" \
+        || fehler "der Menueeintrag 'Install $MARKE_PRODUKT' fehlt"
 fi
 # 24.09.2026: no comment lines on the stick (see section 6).
 if grep -qE '^[[:space:]]*#' "$OUT/limine.conf"; then
