@@ -2657,7 +2657,15 @@ fn u_start(args: u64) -> u64 {
         // der Tastenblock nur bei `offen == 0` greift, tat danach KEINE
         // Taste mehr etwas (im Lauf: nach Alt+Eingabe kein F2, kein
         // Strg+L). Ist kein Menuefenster mehr da, ist auch keines offen.
-        if offen != 0 && wlib.menu_win() >= wlib.MAXWN {
+        //
+        // RUNDE ROADMAP-6: BUT ONLY WHEN `step` BROUGHT NO EVENT. A click
+        // on a menu row closes the menu window AND returns the choice in
+        // the same `step` -- this check ran first, set `offen` to 0, and
+        // the choice then went to `menue_wahl(0, ...)`, which does
+        // nothing. Every row of every menu was dead: "New folder" closed
+        // the menu and nothing followed (k15 9b: 'explorer: tat 2'
+        // missing, /data/neu never on the disk).
+        if offen != 0 && id >= wlib.MAXWD && wlib.menu_win() >= wlib.MAXWN {
             offen = 0
         }
         // DER MAUSRAHMEN MELDET SICH (Pflichtpunkt 3). `wlib` zaehlt
@@ -4407,11 +4415,32 @@ fn sag_auswahl(tab: u64) {
 // Rueckgabe: worauf danach gewartet wird (0 = auf nichts). Ein
 // Konflikt macht einen zweiten Dialog auf, und die Schleife muss davon
 // wissen -- sonst laege seine Antwort auf keinem Tisch.
+// ONE WRITE FOR THE WHOLE LINE. Written in six pieces, the WM's own
+// kernel line ("wm: rahmen ...") landed between them on the shared
+// serial port -- k15 read "explorer: tat wm: rahmen x=70 ..." and
+// "2 n=1 rc=0" on the next line, and the directory that WAS made
+// counted as not made.
+fn say_tat(was: u64, getan: u64, rc: u64) {
+    if s_dbg == 0 {
+        return
+    }
+    var b: [u8; 96] = [0 as u8; 96]
+    var s_op: [u8; 16] = "explorer: tat \0\0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_rc: [u8; 8] = " rc=\0\0\0\0"
+    let p: u64 = (&b[0 as usize]) as u64
+    var at: u64 = ulib.strcpy(p, (&s_op[0 as usize]) as u64)
+    at = at + ulib.digits(was, p + at)
+    at = at + ulib.strcpy(p + at, (&s_n[0 as usize]) as u64)
+    at = at + ulib.digits(getan, p + at)
+    at = at + ulib.strcpy(p + at, (&s_rc[0 as usize]) as u64)
+    at = at + ulib.digits(rc, p + at)
+    b[(at) as usize] = 10 as u8
+    ulib.put(p, at + 1)
+}
+
 fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
     fpfad: u64) -> u64 {
-    var s_op: [u8; 16] = "explorer: tat \0\0"
-    var s_rc: [u8; 8] = " rc=\0\0\0\0"
-    var s_n: [u8; 4] = " n=\0"
     var danach: u64 = 0
     if was == 0 {
         return 0
@@ -4488,13 +4517,7 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
             }
         }
     }
-    say((&s_op[0 as usize]) as u64)
-    sayn(was)
-    say((&s_n[0 as usize]) as u64)
-    sayn(getan)
-    say((&s_rc[0 as usize]) as u64)
-    sayn(rc)
-    nl()
+    say_tat(was, getan, rc)
     new_read(baum, tab, stat, fpfad)
     if rc != 0 && danach == 0 {
         let _f: bool = error_show(rc)
@@ -4562,7 +4585,8 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
     kv((&sf[0 as usize]) as u64, wlibc.theme(wlibc.T_FG))
     kv((&sg[0 as usize]) as u64, wlibc.theme(wlibc.T_ENTRY))
     kv((&ss[0 as usize]) as u64, wlibc.theme(wlibc.T_SEL))
-    kv((&sc[0 as usize]) as u64, wlibc.theme(wlibc.T_SELFG))
+    // What the table really paints the selected row in (see widgetdemo).
+    kv((&sc[0 as usize]) as u64, wlibc.theme_selfg())
     kv((&sd[0 as usize]) as u64, wlibc.theme(wlibc.T_DIM))
     nl()
     var b: [u8; 20] = "explorer: spalten \0\0"
@@ -4628,6 +4652,14 @@ fn say_rect(i: u64) {
     var sy: [u8; 4] = "y=\0\0"
     var sw: [u8; 4] = "w=\0\0"
     var sh: [u8; 4] = "h=\0\0"
+    // A HIDDEN widget has no place on the screen, and the layout gives
+    // it none (the icon view sits at w=0 while the list is showing).
+    // Same rule as wlib.say_rects: only what is shown gets a rect line
+    // -- otherwise tools/k15/layout.py reads the hidden icon view as a
+    // size wish that never arrived ("id=24 has no area: 0x276").
+    if !wlib.shown(i) {
+        return
+    }
     say((&a[0 as usize]) as u64)
     kv((&si[0 as usize]) as u64, i)
     kv((&sk[0 as usize]) as u64, wlib.kind_of(i))
