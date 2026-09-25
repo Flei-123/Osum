@@ -300,8 +300,13 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # Die FASSUNG bleibt 2: die Blockkarte darf seit Runde INSTALL mehrere
 # Bloecke haben (bmblocks=4), und `fs.mount` liest die Zahl aus dem
 # Superblock.
+# /lib/bold.ttf as on every real image (tools/design/capture.sh): the
+# two-line lists (Start menu) set the NAME in the bold cut, and without
+# the file fUi quietly falls back to the regular one -- then this runner
+# would measure a picture no user ever sees.
 ARGS=(build "$TMPD/disk.img" 16384 /lib/
-      "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
+      "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS"
+      "/lib/bold.ttf=assets/osum-sans-bold.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 # RUNDE ROTABSCHNITTE: /etc/uitrace -- OHNE DIE DATEI SCHWEIGEN SIE.
@@ -478,9 +483,21 @@ schau "der Text der Bibliothek ist wirklich kantengeglaettet" \
 echo "== 5. die Widgets stehen da, wo die Anordnung sie hingelegt hat =="
 # Der Fokusring: ein Rahmen von einem Bildpunkt um GENAU das Widget mit
 # dem Eingabefokus -- und einen Bildpunkt daneben ist er nicht.
+# Since round GLAS the tab bar carries the ring around the ACTIVE tab,
+# not around the whole bar (wlib.fi, paint_tabs: "a ring around the
+# active tab says the right thing: the keyboard switches the tab, not
+# the bar"). The rectangle comes from `wlib: tab i=0`, which the library
+# reports for exactly that tab -- and a ring around the whole bar must
+# now NOT be there.
 FX=$(rect "$TMPD/ruhe.txt" widgetdemo 1 x); FY=$(rect "$TMPD/ruhe.txt" widgetdemo 1 y)
 FW=$(rect "$TMPD/ruhe.txt" widgetdemo 1 w); FH=$(rect "$TMPD/ruhe.txt" widgetdemo 1 h)
-schau "der Fokusring liegt bildpunktgenau um die Reiter" \
+TAX=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' ax=[0-9]+' | sed 's/.*=//')
+TAY=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' ay=[0-9]+' | sed 's/.*=//')
+TAW=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' w=[0-9]+' | sed 's/.*=//')
+TAH=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' h=[0-9]+' | sed 's/.*=//')
+schau "der Fokusring liegt bildpunktgenau um den aktiven Reiter" \
+    rechteck "$TMPD/ruhe.ppm" "${TAX:-0}" "${TAY:-0}" "${TAW:-0}" "${TAH:-0}" 255 192 32
+schau_nicht "und NICHT um die ganze Reiterleiste" \
     rechteck "$TMPD/ruhe.ppm" $((CX + FX)) $((CY + FY)) "$FW" "$FH" 255 192 32
 BX=$(rect "$TMPD/ruhe.txt" widgetdemo 5 x); BY=$(rect "$TMPD/ruhe.txt" widgetdemo 5 y)
 BBW=$(rect "$TMPD/ruhe.txt" widgetdemo 5 w); BBH=$(rect "$TMPD/ruhe.txt" widgetdemo 5 h)
@@ -724,20 +741,28 @@ for punkt in Öffnen Umbenennen Entfernen; do
     # betrifft vier Bildpunkte. Dass die Zusage damit trotzdem etwas
     # prueft, zeigt die Gegenprobe darunter: ein anderes Wort faellt
     # auch bei Toleranz 128 durch (146 falsch, zwei Zeichen ohne Tinte).
+    # THE MENU IS A BORDERLESS POPUP NOW (layer 5, deco=0): no title
+    # bar and no WM frame, so its text sits at the popup's own origin.
+    # wlib.paint_menu: row k starts at y = 2 + k*zh, text at x = 8, and
+    # the baseline is base_in_row -- 16 below the popup top for zh = 22.
+    # Measured on the shot of this round: 0 of 328/586/435 ink points
+    # off, already at tolerance 0; the 96 stays for the "ff" seam.
     schau "Menuepunkt $i steht bildpunktgenau im Menuefenster: '$punkt'" \
-        tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
-        $((MNY + TITLE + 15 + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
+        tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+        $((MNY + 16 + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
     i=$((i + 1))
 done
+# Its frame is one pixel in T_ACCENT (accent=5cc8ff in the /etc/theme
+# this runner writes, tools/k15/tree.py), drawn by paint_menu itself
+# around exactly the w x h the library reports.
 schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
-    rechteck "$TMPD/pop.ppm" "$MNX" "$MNY" $((MNW + 2 * BORDER)) \
-    $((MNH + TITLE + BORDER)) 76 154 232
+    rechteck "$TMPD/pop.ppm" "$MNX" "$MNY" "$MNW" "$MNH" 92 200 255
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
-    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
-    tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
+    tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
 # Und ein Klick darauf waehlt.
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
@@ -757,8 +782,8 @@ has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "ein Klick auf einen Menue
 mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
-    tkette "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
+    tkette "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + 8)) \
+    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
 DEL=$(mitte 9)
@@ -774,7 +799,11 @@ has "$TMPD/dlg.txt" "widgetdemo: dlgwin" "der Dialog ist ein eigenes Fenster"
 DW=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" w)
 DH=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" h)
 num "er ist so breit, wie die Bibliothek ihn baut" "$DW" eq 340
-DLX=$(( (800 - DW) / 2 )); DLY=$(( (600 - DH) / 2 ))
+# Centred on the REAL screen: the WM reports its size ("wm: 1280x800")
+# -- the first version of this line knew only 800x600.
+SCRW=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/wm: //; s/x.*//')
+SCRH=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/.*x//')
+DLX=$(( (${SCRW:-0} - DW) / 2 )); DLY=$(( (${SCRH:-0} - DH) / 2 ))
 schau "und er steht mittig auf dem Schirm, bildpunktgenau" \
     rechteck "$TMPD/dlg.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
 DTX=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" x)
@@ -965,6 +994,11 @@ schau_nicht "nach dem Namen sortiert stand dort etwas anderes" \
     $TFG $TBG "delta.txt"
 # Ein neues Verzeichnis ueber Kontextmenue und Dialog -- und danach wird
 # nicht das BILD geglaubt, sondern im PLATTENABBILD nachgesehen.
+# The table's context menu is a borderless popup with the fourteen rows
+# of `explorer.context` (22 high each, 2 padding); "New folder" is row 8
+# (ctx_wahl idx 8), so its middle lies 2 + 8*22 + 11 below the pointer.
+# In two steps: one PS/2 packet carries at most 127 (see `zeiger`), and
+# a single 189 never reached the row -- the menu closed unchosen.
 PX2=$((FCX + TX + 100)); PY2=$((FCY + TB + 2 * TZH - 6))
 M="$TMPD/fneu.mon"; : > "$M"
 zeiger "$M" "$PX2" "$PY2"
@@ -973,7 +1007,8 @@ mouse_button 2
 warte 0.3
 mouse_button 0
 warte 0.8
-mouse_move 40 $((22 + 2 + 3 * 22 + 11))
+mouse_move 40 120
+mouse_move 0 $((2 + 8 * 22 + 11 - 120))
 mouse_button 1
 mouse_button 0
 warte 1.0
@@ -982,7 +1017,10 @@ sendkey e
 sendkey u
 warte 0.5
 EOF
-zeiger "$M" $((230 + 2 + OKX + OKW / 2)) $((246 + 22 + OKY + OKH / 2))
+# The same dialog as widgetdemo's (wlib.dlg_open: 340 wide, question
+# plus field), centred on the same screen -- so the OK button is where
+# it was measured there, not at the 800x600 place written here before.
+zeiger "$M" $((DLX + 2 + OKX + OKW / 2)) $((DLY + 22 + OKY + OKH / 2))
 cat >> "$M" <<EOF
 mouse_button 1
 mouse_button 0
@@ -1133,10 +1171,20 @@ sh0=$(feld "$TMPD/ruhe.txt" "wig: blits" shape)
 num "sonst bleibt er der Pfeil" "$sh0" eq 0
 # Und das steht im Bild: der Balken ist zwei Bildpunkte breit und
 # achtzehn hoch, der Pfeil ist an derselben Stelle schwarz und breit.
-schau "die Mitte des Balkens ist weiss" \
-    punkt "$TMPD/beam.ppm" $((E1X + 6)) $((CY + E1Y + E1H / 2 + 9)) 255 255 255
+# ROUND ECHTHARDWARE-4 (kernel/ui/wm.fi, cur_ox/cur_oy): the pointer
+# position is the MIDDLE of the text mark, no longer its top left, and
+# the shapes come from zeiger.fi -- a two-pixel black stem with a white
+# rim. Measured on the shot of round ROADMAP-6 at the pointer
+# (E1X, y): x-1 and x black, x-2 and x+1 white, x+4 plain field.
+BY0=$((CY + E1Y + E1H / 2))
+schau "die Mitte des Balkens liegt am Zeiger und ist schwarz" \
+    punkt "$TMPD/beam.ppm" "$E1X" "$BY0" 0 0 0
+schau "und sein Rand ist weiss" \
+    punkt "$TMPD/beam.ppm" $((E1X + 1)) "$BY0" 255 255 255
 schau_nicht "und drei Bildpunkte weiter rechts ist nichts vom Zeiger" \
-    punkt "$TMPD/beam.ppm" $((E1X + 9)) $((CY + E1Y + E1H / 2 + 9)) 255 255 255
+    punkt "$TMPD/beam.ppm" $((E1X + 4)) "$BY0" 255 255 255
+schau_nicht "ohne Textfeld darunter steht dort kein Balken (der Pfeil)" \
+    punkt "$TMPD/ruhe.ppm" "$E1X" "$BY0" 0 0 0
 
 echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 # DER NAME IST DIE BESCHREIBUNG. Kein Nautilus, kein Finder, kein
@@ -1189,11 +1237,14 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
 # UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
 # Titelleiste, Bildpunkte.
+# The title text starts 12 pixels right of the frame now, not 7 (the
+# title bar got more padding in the design rounds). Measured on the
+# shot of round ROADMAP-6: 0 of 533 ink points off at x+12, 257 at x+7.
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 7)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 15)) \
     255 255 255 28 78 126 "File Explorer" 96
 schau_nicht "und ein anderer Name steht dort NICHT" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 7)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 15)) \
     255 255 255 28 78 126 "Dateimanager" 96
 
 # DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
@@ -1290,8 +1341,14 @@ gb=$(grep -c '^/apps/[a-z]*\.osp/$' "$TMPD/disk.ls")
 num "so viele Buendel liegen unter /apps" "$gb" eq "$soll"
 hasnot "$TMPD/disk.ls" "/usr/share/apps" \
     "und der alte Ort ist weg -- eine Beschreibung, zwei Orte, waeren einer zu viel"
-SBX=190; SBY=110
-SCX=$((SBX + BORDER)); SCY=$((SBY + TITLE))
+# THE START MENU IS A BORDERLESS PANEL NOW (round FUI-WIN11: layer 4,
+# deco=0, bottom left above the taskbar). Its place is READ from the WM
+# and not assumed -- the old 190,110 plus border and title bar belonged
+# to the window it used to be.
+SBX=$(grep -a 'wm: win .*t=\[Search\]' "$TMPD/start.txt" | tail -1 | grep -oE ' x=[0-9]+' | head -1 | tr -dc '0-9')
+SBY=$(grep -a 'wm: win .*t=\[Search\]' "$TMPD/start.txt" | tail -1 | grep -oE ' y=[0-9]+' | head -1 | tr -dc '0-9')
+SBX=${SBX:-0}; SBY=${SBY:-0}
+SCX=$SBX; SCY=$SBY
 SRX=$(feld "$TMPD/start.txt" "launcher: rows" x)
 SRB=$(feld "$TMPD/start.txt" "launcher: rows" base)
 SZH=$(feld "$TMPD/start.txt" "launcher: rows" zh)
@@ -1303,12 +1360,40 @@ SSEL=$(frgb "$TMPD/start.txt" "launcher: rows" sel)
 SSFG=$(frgb "$TMPD/start.txt" "launcher: rows" selfg)
 SFG=$(frgb "$TMPD/start.txt" "launcher: rows" fg)
 SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
-schau "die erste Zeile des Starters, je Zeichen" \
-    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "File Explorer  --  View files and folders" 96
-schau "und die zweite" \
-    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Write and change text" 96
+# TWO LINES PER HIT (round FUI-WIN11): the name in the BOLD cut on the
+# upper half of the row, the description in caption size (12) on the
+# lower half -- dim, or in the selection colour on the selected row.
+# The rows are sorted by name, so WHICH row a program has is read from
+# `launcher: treffer i=`, not assumed.
+BOLD_INK="fui:assets/osum-sans-bold.ttf"
+FEI=$(grep -a 'launcher: treffer i=[0-9]* name=\[File Explorer\]' "$TMPD/start.txt" | head -1 | grep -oE 'i=[0-9]+' | tr -dc '0-9')
+EDI=$(grep -a 'launcher: treffer i=[0-9]* name=\[Editor\]' "$TMPD/start.txt" | head -1 | grep -oE 'i=[0-9]+' | tr -dc '0-9')
+FEI=${FEI:-99}; EDI=${EDI:-99}
+SDIM=$(grep -a '^wlib: text2 .*t=View files and folders' "$TMPD/start.txt" | tail -1 | grep -oE ' fg=[0-9]+' | tr -dc '0-9')
+SDIM=$(rgb "${SDIM:-0}")
+zeile_farben() { # row -> "fg bg dim-or-selfg"
+    if [ "$1" = 0 ]; then echo "$SSFG $SSEL $SSFG"; else echo "$SFG $SBG $SDIM"; fi
+}
+set -- $(zeile_farben "$FEI")
+FEFG="$1 $2 $3"; FEBG="$4 $5 $6"; FEDF="$7 $8 $9"
+set -- $(zeile_farben "$EDI")
+EDFG="$1 $2 $3"; EDBG="$4 $5 $6"; EDDF="$7 $8 $9"
+set --
+schau "die Zeile des Dateimanagers: sein Name, fett, je Zeichen" \
+    tkette "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
+    $FEFG $FEBG "File Explorer" 96
+schau "und darunter seine Beschreibung, in Beschriftungsgroesse" \
+    tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + FEI * SZH + SZH / 2)) \
+    $FEDF $FEBG "View files and folders" 96
+schau "und die des Editors" \
+    tkette "$TMPD/start.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + EDI * SZH)) \
+    $EDFG $EDBG "Editor" 96
+schau "mit seiner Beschreibung" \
+    tkette "$TMPD/start.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + EDI * SZH + SZH / 2)) \
+    $EDDF $EDBG "Write and change text" 96
+schau_nicht "der Name steht NICHT im normalen Schnitt da (die Gegenprobe zum fetten)" \
+    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
+    $FEFG $FEBG "File Explorer" 96
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
 # konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
@@ -1334,12 +1419,14 @@ for a in explorer editor; do
         && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
 done
+# The bundle pictures are 16 x 16 now (tools/k15/icon.py), and they sit
+# where `launcher: rows ix= iy=` says, one row pitch (SZH) apart.
 pruef "das Symbol des Dateimanagers steht Punkt fuer Punkt im Bild" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym explorer)"
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) 16 16 "$(sym explorer)"
 pruef_nicht "und es ist NICHT das des Editors (die Gegenprobe)" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym editor)"
-pruef "in Zeile 1 steht dafuer das des Editors" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + SZH)) 14 14 "$(sym editor)"
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) 16 16 "$(sym editor)"
+pruef "in der Zeile des Editors steht dafuer das des Editors" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + EDI * SZH)) 16 16 "$(sym editor)"
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
@@ -1347,62 +1434,65 @@ echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # noch in der Beschreibung "View files and folders" steht. Es steht
 # nur in `keys=`. Zuerst wird das ueberhaupt nachgerechnet -- sonst
 # waere die Zusage eine ueber einen Zufall.
-for w in folder files manager verzeichnis; do
+# ROUND I18N made the descriptions English ("View files and folders"),
+# and "folder"/"files" stand in one now -- "Task Manager" carries
+# "manager". The words that prove the keywords are the two that are
+# still only keywords of the file manager.
+for w in ordner verzeichnis; do
     if grep -ihE '^(name|info)=' assets/apps/*.osp/INFO | grep -qi "$w"; then
         bad "'$w' steht in einem Anzeigenamen oder einer Beschreibung -- die Zusage waere wertlos"
     else
         ok "'$w' steht in KEINEM Anzeigenamen und in KEINER Beschreibung"
     fi
 done
-FX2=$((SCX + 12 + 100))
-FY2=$((SCY + 38 + 13))
-M="$TMPD/suche.mon"; : > "$M"
-zeiger "$M" "$FX2" "$FY2"
-cat >> "$M" <<EOF
-mouse_button 1
-mouse_button 0
-warte 0.4
-sendkey f
-sendkey o
-sendkey l
-sendkey d
-sendkey e
-sendkey r
-warte 1.0
-mouse_move 120 120
-mouse_move 60 60
-EOF
+# Into the search field the launcher reports (`launcher: rect id=1
+# kind=4`) -- a click anywhere else takes the focus away, and the Start
+# menu closes ("launcher: fokus weg", "launcher: zugemacht").
+lrect() { grep -aoE "^launcher: rect id=$1 .*" "$TMPD/start.txt" | tail -1 | grep -oE " $2=[0-9]+" | tr -dc '0-9'; }
+FX2=$((SCX + $(lrect 1 x) + $(lrect 1 w) / 2))
+FY2=$((SCY + $(lrect 1 y) + $(lrect 1 h) / 2))
+suchmon() { # file wait letters...
+    local f=$1 w=$2; shift 2; : > "$f"
+    zeiger "$f" "$FX2" "$FY2"
+    printf 'mouse_button 1\nmouse_button 0\nwarte 0.4\n' >> "$f"
+    local c; for c in "$@"; do echo "sendkey $c" >> "$f"; done
+    printf 'warte %s\nmouse_move 120 120\nmouse_move 60 60\n' "$w" >> "$f"
+}
+M="$TMPD/suche.mon"
+suchmon "$M" 1.0 o r d n e r
 foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/suche.txt" "launcher: suche [folder] treffer=1 apps=1" \
-    "getippt 'folder': GENAU EIN Treffer, und es ist ein Programm"
-has "$TMPD/start.txt" "launcher: name [Suchen]" \
+has "$TMPD/suche.txt" "launcher: suche [ordner] treffer=1 apps=1" \
+    "getippt 'ordner': GENAU EIN Treffer, und es ist ein Programm"
+has "$TMPD/start.txt" "launcher: name [Search]" \
     "auch der Starter holt seinen eigenen Namen aus den Daten"
-tf=$(grep -aA1 'launcher: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
+tf=$(grep -aA1 'launcher: suche \[ordner\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
 case "$tf" in
     *"name=[File Explorer]"*) ok "der Treffer ist der Dateimanager" ;;
     *) bad "der Treffer ist nicht der Dateimanager: $tf" ;;
 esac
 # UND ER STEHT IM BILD -- als einzige Zeile der Liste.
 schau "im Bild steht er in Zeile 0 der Trefferliste" \
-    tkette "$TMPD/suche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "File Explorer  --  View files and folders" 96
+    tkette "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "File Explorer" 96
+schau "mit seiner Beschreibung darunter" \
+    tkette "$TMPD/suche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
+    $SSFG $SSEL "View files and folders" 96
 schau_nicht "und in Zeile 1 steht nichts mehr" \
-    tkette "$TMPD/suche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Write and change text" 96
+    tkette "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    $SFG $SBG "Editor" 96
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
-has "$TMPD/nokeys.txt" "launcher: suche [folder] treffer=0 apps=0" \
-    "OHNE die Schluesselwoerter findet 'folder' NICHTS"
+has "$TMPD/nokeys.txt" "launcher: suche [ordner] treffer=0 apps=0" \
+    "OHNE die Schluesselwoerter findet 'ordner' NICHTS"
 has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
 schau_nicht "und im Bild steht dann auch keine Zeile" \
-    tkette "$TMPD/nokeys.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "File Explorer  --  View files and folders" 96
+    tkette "$TMPD/nokeys.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "File Explorer" 96
 # UND EIN WORT, DAS NIRGENDS STEHT, FINDET NICHTS. Eine Suche, die immer
 # etwas findet, ist keine Suche.
-sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a/; s/^sendkey d$/sendkey s/; s/^sendkey e$/sendkey t/; s/^sendkey r$/sendkey e/' \
-    "$M" > "$TMPD/unsinn.mon"
+suchmon "$TMPD/unsinn.mon" 1.0 q u a s t e
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
 has "$TMPD/unsinn.txt" "launcher: suche [quaste] treffer=0 apps=0   dateien=0" \
     "ein Wort, das nirgends steht, findet NICHTS -- kein Programm und keine Datei"
@@ -1581,20 +1671,8 @@ echo "== 15c. der Starter sucht Dateien, nicht nur Programme =="
 grep -qi 'blau' assets/apps/*.osp/INFO \
     && bad "'blau' steht in einer INFO -- die Zusage waere wertlos" \
     || ok "'blau' steht in KEINER INFO: was gefunden wird, kann nur eine Datei sein"
-M="$TMPD/dsuche.mon"; : > "$M"
-zeiger "$M" "$FX2" "$FY2"
-cat >> "$M" <<EOF
-mouse_button 1
-mouse_button 0
-warte 0.4
-sendkey b
-sendkey l
-sendkey a
-sendkey u
-warte 1.2
-mouse_move 120 120
-mouse_move 60 60
-EOF
+M="$TMPD/dsuche.mon"
+suchmon "$M" 1.2 b l a u
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
 has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
     "getippt 'blau': ein Treffer, und er ist KEIN Programm, sondern eine Datei"
@@ -1603,9 +1681,14 @@ has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/data/bilder/blau.ppm]" \
 grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "was das Abbild an dieser Stelle auch wirklich fuehrt" \
     || bad "/data/bilder/blau.ppm steht gar nicht im Abbild"
-schau "und im Bild steht der Pfad in Zeile 0 der Trefferliste, je Zeichen" \
-    tkette "$TMPD/dsuche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "/data/bilder/blau.ppm" 96
+# A file hit is two lines as well now: the NAME bold on top, the folder
+# it lies in underneath (caption size) -- together the whole path.
+schau "und im Bild steht ihr Name in Zeile 0 der Trefferliste, fett, je Zeichen" \
+    tkette "$TMPD/dsuche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "blau.ppm" 96
+schau "und darunter der Ordner, in dem sie liegt" \
+    tkette "$TMPD/dsuche.ppm" "$SANS_INK" 12 $((SCX + SRX)) $((SCY + SRB + SZH / 2)) \
+    $SSFG $SSEL "/data/bilder" 96
 DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "der Starter hat dafuer einen Index ueber so viele Namen gebaut" "$DIX" ge 40
 # DIE GEGENPROBE: derselbe Starter, dieselben Tastendruecke, nur OHNE den
@@ -1618,9 +1701,9 @@ has "$TMPD/noidx.txt" "launcher: index n=0" \
     "weil gar keiner gebaut wurde"
 has "$TMPD/noidx.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
-schau_nicht "und im Bild steht dann auch kein Pfad" \
-    tkette "$TMPD/noidx.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "/data/bilder/blau.ppm" 96
+schau_nicht "und im Bild steht dann auch keine Datei" \
+    tkette "$TMPD/noidx.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "blau.ppm" 96
 
 echo "== 15d. und die alten Abbilder sind Oktett fuer Oktett die alten =="
 # DIE BEDINGUNG, UNTER DER `fs.fi` UEBERHAUPT ANGEFASST WERDEN DURFTE.
