@@ -100,6 +100,15 @@ DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
+# ROUND FUI-TEXT: Ring 3 text is drawn by fUi (kernel/user/fuiglyph.fi),
+# so its ink is checked against fUi's second version
+# (tools/ttf/fuiraster.py). `fui:` selects it in tools/gfx/checkshot.py.
+# And `tkette` instead of `ttext`: fUi's exact area coverage gives the
+# edge pixel of a letter ink where the kernel's 4x4 samples gave none, so
+# neighbours overlap more often ("OSUM K15 WIDGETS": 4 of 898 points, all
+# on E/T and I/D seams). `tkette` builds the line letter on letter, as it
+# is painted -- tolerance still 0, and the check gets stricter, not looser.
+SANS_INK="fui:$SANS"
 GRUND="nokbd nosched noproc nofs"
 BORDER=2
 TITLE=22
@@ -423,7 +432,7 @@ pruef_text() { # marke erwarteter-text
     text=${zeile#*t=}
     gleich "die Anwendung meldet den Text '$marke'" "$soll" "$text"
     schau "'$soll' steht bildpunktgenau im Fenster ($marke)" \
-        ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + x)) $((CY + base)) \
+        tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + x)) $((CY + base)) \
         $(rgb "$fg") $(rgb "$bg") "$soll"
 }
 pruef_text kopf "OSUM K15 WIDGETS"
@@ -441,24 +450,24 @@ RSEL=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" sel)
 RSFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" selfg)
 num "die Zeilenhoehe der Liste" "$ZH" eq 20
 schau "Zeile 0 der Liste, in der AUSWAHLFARBE" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB)) \
     $RSFG $RSEL "alpha"
 i=1
 for wort in beta gamma delta epsilon; do
     schau "Zeile $i der Liste" \
-        ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB + i * ZH)) \
+        tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + i * ZH)) \
         $RFG $RBG "$wort"
     i=$((i + 1))
 done
 # DREI GEGENPROBEN ZUM PRUEFER SELBST.
 schau_nicht "derselbe Pruefer geht mit dem FALSCHEN Text NICHT auf" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB + ZH)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
     $RFG $RBG "gamma"
 schau_nicht "und an einer Stelle, an der kein Text steht, auch nicht" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB + 8 * ZH)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + 8 * ZH)) \
     $RFG $RBG "alpha"
 schau_nicht "und mit der falschen Hintergrundfarbe auch nicht" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB + ZH)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
     $RFG 0 0 0 "beta"
 # IST ES WIRKLICH KANTENGEGLAETTET? Eine Rasterung ohne Glaettung haette
 # keine einzige Zwischenstufe und ginge durch alles oben hindurch.
@@ -612,10 +621,10 @@ EFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" fg)
 EBASE=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" base)
 E1TX=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" x)
 schau "und es steht bildpunktgenau im zweiten Feld" \
-    ttext "$TMPD/tast.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tkette "$TMPD/tast.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 schau_nicht "im Lauf OHNE Tastendruecke steht dort NICHTS" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke mit abgeschalteter Zwischenablage.
@@ -623,7 +632,7 @@ foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
 e2n=$(python3 tools/k15/fields.py "$TMPD/noclip.txt" e2)
 gleich "mit 'noclip' kommt NUR das Getippte an" "-ab" "$e2n"
 schau_nicht "und im Bild steht der eingefuegte Text dann nicht" \
-    ttext "$TMPD/noclip.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
+    tkette "$TMPD/noclip.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
 # Die Weiterschaltung mit der Tabulatortaste.
 M="$TMPD/tab.mon"; : > "$M"
@@ -716,7 +725,7 @@ for punkt in Öffnen Umbenennen Entfernen; do
     # prueft, zeigt die Gegenprobe darunter: ein anderes Wort faellt
     # auch bei Toleranz 128 durch (146 falsch, zwei Zeichen ohne Tinte).
     schau "Menuepunkt $i steht bildpunktgenau im Menuefenster: '$punkt'" \
-        ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
+        tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
         $((MNY + TITLE + 15 + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
     i=$((i + 1))
 done
@@ -724,10 +733,10 @@ schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
     rechteck "$TMPD/pop.ppm" "$MNX" "$MNY" $((MNW + 2 * BORDER)) \
     $((MNH + TITLE + BORDER)) 76 154 232
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
-    ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
+    tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
     $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
-    ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
+    tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
     $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
 # Und ein Klick darauf waehlt.
 M="$TMPD/popw.mon"; : > "$M"
@@ -748,7 +757,7 @@ has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "ein Klick auf einen Menue
 mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
-    ttext "$TMPD/popw.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
+    tkette "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + BORDER + 8)) \
     $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
@@ -773,7 +782,7 @@ DTB=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" base)
 DTF=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" fg)
 DTG=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" bg)
 schau "seine Frage steht darin, je Zeichen" \
-    ttext "$TMPD/dlg.ppm" "$SANS" 15 $((DLX + BORDER + DTX)) \
+    tkette "$TMPD/dlg.ppm" "$SANS_INK" 15 $((DLX + BORDER + DTX)) \
     $((DLY + TITLE + DTB)) $DTF $DTG "Neuer Name"
 # Den Knopf anklicken, den die Bibliothek gemeldet hat.
 OKX=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
@@ -843,7 +852,7 @@ if [ "${#SP[@]}" -lt 4 ]; then
     SP=(0 0 0 0)
 fi
 schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TKOPF)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Name"
 # RUNDE I18N: SIE HEISST JETZT "Size" UND NICHT MEHR "Groesse".
 # Die Kopfzeile kommt aus dem Textkatalog, und die Quellsprache ist
@@ -851,7 +860,7 @@ schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
 # Deutsch stuende dort "Größe", mit einem echten Umlaut; genau das misst
 # tools/i18n/run.sh.
 schau "und die zweite 'Size'" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Size"
 # JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS baum.py ANGELEGT HAT -- und in
 # derselben Reihenfolge: Verzeichnisse zuerst, dann nach Namen.
@@ -860,10 +869,10 @@ while IFS=$'\t' read -r name gr kind; do
     y=$((FCY + TB + zeile * TZH))
     if [ "$zeile" = 0 ]; then vg="$TSFG"; hg="$TSEL"; else vg="$TFG"; hg="$TBG"; fi
     schau "Zeile $zeile der Tabelle: '$name'" \
-        ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) "$y" $vg $hg "$name"
+        tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name"
     if [ "$kind" != "d" ] && [ "$zeile" != 0 ]; then
         schau "und ihre Groesse in Spalte 2: $gr" \
-            ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[1]})) "$y" \
+            tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) "$y" \
             $TDIM $hg "$gr"
     fi
     zeile=$((zeile + 1))
@@ -881,19 +890,19 @@ done < "$TMPD/baum/soll.txt"
 # sie richtig -- und die Gegenprobe daneben zeigt, dass sie trotzdem
 # etwas prueft: eine ANDERE Rechtezeichenkette faellt durch.
 schau "die Rechte eines Verzeichnisses, aus den Bits von stat" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
     $TSFG $TSEL "drwxr-xr-x" 64
 schau_nicht "und eine ANDERE Rechtezeichenkette faellt bei derselben Toleranz durch" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
     $TSFG $TSEL "drwxrwxrwx" 64
 schau "und die einer Datei" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[3]})) $((FCY + TB + 2 * TZH)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "-rw-r--r--" 64
 # DIE SPALTE "ZEIT" IST LEER, UND DAS IST DIE EHRLICHE ZUSAGE: dieses
 # Dateisystem hat keinen Zeitstempel (`kernel/fs.fi`: der Inode ist 128
 # Oktette und voll). Eine erfundene Zeit waere schlimmer als keine.
 schau "die Spalte Zeit zeigt zwei Striche -- OFS hat keinen Zeitstempel" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "--"
 
 echo "== 9b. hineingehen, sortieren, anlegen =="
@@ -927,10 +936,10 @@ has "$TMPD/fdbl.txt" "explorer: cd /data/bilder" "der Doppelklick geht in das Ve
 n2=$(grep -a '^explorer: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
 num "und darin liegen zwei Dateien" "$n2" eq 2
 schau "die erste davon steht im Bild" \
-    ttext "$TMPD/fdbl.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TB)) \
+    tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
     $TSFG $TSEL "blau.ppm"
 schau_nicht "und der alte Inhalt steht NICHT mehr da" \
-    ttext "$TMPD/fdbl.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TB)) \
+    tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
     $TSFG $TSEL "bilder"
 # Nach der Spalte "Groesse" sortieren: Kopfzeile anklicken.
 SX=$((FCX + ${SP[1]} + 20)); SY=$((FCY + TKOPF - 6))
@@ -949,10 +958,10 @@ num "und zwar nach Spalte 1 (Groesse)" "$sb" eq 1
 # delta.txt ist leer (0 Oktette) und steht nach der Groesse ganz oben
 # unter den Dateien -- Verzeichnisse bleiben davor.
 schau "nach der Groesse sortiert steht die leere Datei zuerst unter den Dateien" \
-    ttext "$TMPD/fsort.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
+    tkette "$TMPD/fsort.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
     $TFG $TBG "delta.txt"
 schau_nicht "nach dem Namen sortiert stand dort etwas anderes" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
     $TFG $TBG "delta.txt"
 # Ein neues Verzeichnis ueber Kontextmenue und Dialog -- und danach wird
 # nicht das BILD geglaubt, sondern im PLATTENABBILD nachgesehen.
@@ -1106,7 +1115,7 @@ schau_nicht "und die vorige hat er dann NICHT mehr" \
 # Der Text steht trotzdem, und zwar auf dem NEUEN Grund -- also wird die
 # Farbe wirklich beim Mischen benutzt und nicht nur beim Fuellen.
 schau "und der Text darauf ist gegen den neuen Grund gemischt" \
-    ttext "$TMPD/theme2.ppm" "$SANS" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
+    tkette "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
     $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" base))) \
     $(rgb "$UIFG") 128 64 32 "Knopf"
 
@@ -1181,10 +1190,10 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
 # Titelleiste, Bildpunkte.
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 7)) $((FWY + 15)) \
     255 255 255 28 78 126 "File Explorer" 96
 schau_nicht "und ein anderer Name steht dort NICHT" \
-    ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 7)) $((FWY + 15)) \
     255 255 255 28 78 126 "Dateimanager" 96
 
 # DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
@@ -1292,10 +1301,10 @@ SSFG=$(frgb "$TMPD/start.txt" "launcher: rows" selfg)
 SFG=$(frgb "$TMPD/start.txt" "launcher: rows" fg)
 SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
 schau "die erste Zeile des Starters, je Zeichen" \
-    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer  --  View files and folders" 96
 schau "und die zweite" \
-    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    tkette "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
     $SFG $SBG "Editor  --  Write and change text" 96
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
@@ -1372,10 +1381,10 @@ case "$tf" in
 esac
 # UND ER STEHT IM BILD -- als einzige Zeile der Liste.
 schau "im Bild steht er in Zeile 0 der Trefferliste" \
-    ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tkette "$TMPD/suche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer  --  View files and folders" 96
 schau_nicht "und in Zeile 1 steht nichts mehr" \
-    ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    tkette "$TMPD/suche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
     $SFG $SBG "Editor  --  Write and change text" 96
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
@@ -1385,7 +1394,7 @@ has "$TMPD/nokeys.txt" "launcher: suche [folder] treffer=0 apps=0" \
 has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
 schau_nicht "und im Bild steht dann auch keine Zeile" \
-    ttext "$TMPD/nokeys.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tkette "$TMPD/nokeys.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "File Explorer  --  View files and folders" 96
 # UND EIN WORT, DAS NIRGENDS STEHT, FINDET NICHTS. Eine Suche, die immer
 # etwas findet, ist keine Suche.
@@ -1592,7 +1601,7 @@ grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "was das Abbild an dieser Stelle auch wirklich fuehrt" \
     || bad "/data/bilder/blau.ppm steht gar nicht im Abbild"
 schau "und im Bild steht der Pfad in Zeile 0 der Trefferliste, je Zeichen" \
-    ttext "$TMPD/dsuche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tkette "$TMPD/dsuche.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "/data/bilder/blau.ppm" 96
 DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "der Starter hat dafuer einen Index ueber so viele Namen gebaut" "$DIX" ge 40
@@ -1607,7 +1616,7 @@ has "$TMPD/noidx.txt" "launcher: index n=0" \
 has "$TMPD/noidx.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
 schau_nicht "und im Bild steht dann auch kein Pfad" \
-    ttext "$TMPD/noidx.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    tkette "$TMPD/noidx.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "/data/bilder/blau.ppm" 96
 
 echo "== 15d. und die alten Abbilder sind Oktett fuer Oktett die alten =="

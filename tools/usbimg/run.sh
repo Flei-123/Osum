@@ -542,7 +542,7 @@ if [ -s "$TMPD/desk.ppm" ]; then
         local was=$1 text=$2; shift 2
         local aus rc
         aus=$(python3 tools/usbimg/searchtext.py "${BILD:-$TMPD/desk.ppm}" \
-              assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
+              fui:assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
         rc=$?
         if [ $rc = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi
     }

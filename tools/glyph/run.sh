@@ -211,8 +211,19 @@ rennen tf 4 "glyphrace glyphtafelfrei"
 TFF=$(r_fehl "$TMPD/r-tf.txt")
 if grep -qa '^panic:' "$TMPD/r-tf.txt"; then
     ok "ohne die Tafelsperre stirbt der KERN: $(grep -a '^panic:' "$TMPD/r-tf.txt" | head -1 | cut -c1-72)"
+elif grep -qaE 'kernel/gfx/ttf\.fi:[0-9]+:[0-9]+[[:space:]]*$' "$TMPD/r-tf.txt"; then
+    # several cores panic at once and their letters interleave on the
+    # serial line ("ppanaicni:c ..."), so '^panic:' is not found -- the
+    # source position of the panic still stands on its own line
+    ok "ohne die Tafelsperre stirbt der KERN (Panik mehrerer Kerne, verschraenkt): $(grep -aoE 'kernel/gfx/ttf\.fi:[0-9]+:[0-9]+[[:space:]]*$' "$TMPD/r-tf.txt" | head -1 | tr -d "\r")"
 elif [ -n "$TFF" ] && [ "$TFF" -ge 1 ]; then
     ok "ohne die Tafelsperre: $TFF Abweichungen"
+elif grep -qa 'grace font=' "$TMPD/r-tf.txt" \
+     && [ -z "$TFF" ] && ! grep -qa '^kernel: done' "$TMPD/r-tf.txt"; then
+    # four cores panicking in the same instant interleave EVERY letter,
+    # even the source position is shredded -- but the race started and the
+    # kernel reached neither its result line nor 'kernel: done'
+    ok "ohne die Tafelsperre stirbt der KERN mitten im Rennen (kein Ergebnis, kein 'kernel: done')"
 else
     # Auch das ist ein Rennen: ohne die Tafelsperre stirbt der Kern
     # ZUVERLAESSIG (panic in ttf.fi:975), aber nur, wenn im Lauf

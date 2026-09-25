@@ -89,6 +89,10 @@ bash vendor/firn/fetch-firnc.sh >/dev/null || {
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
+# ROUND FUI-TEXT: Ring 3 text is drawn by fUi (kernel/user/fuiglyph.fi),
+# so its ink is checked against fUi's second version
+# (tools/ttf/fuiraster.py). `fui:` selects it in tools/gfx/checkshot.py.
+SANS_INK="fui:$SANS"
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 SCREEN_W=800
 SCREEN_H=600
@@ -313,7 +317,7 @@ check_text() { # log ppm mark
         text=$(printf '%s' "$line" | sed 's/^.* t=//')
         [ -z "$text" ] && continue
         tried=$((tried + 1))
-        aus=$(python3 tools/gfx/checkshot.py tkette "$ppm" "$SANS" 15 \
+        aus=$(python3 tools/gfx/checkshot.py tkette "$ppm" "$SANS_INK" 15 \
             "$((x + gx))" "$((base + gy))" \
             $(rgb "$fg") $(rgb "$bg") "$text" 2>&1)
         if [ $? -eq 0 ]; then

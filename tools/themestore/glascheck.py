@@ -236,7 +236,32 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
             continue
         c = Counter(grund)
         ges = len(grund)
-        kand = [(f0, k) for f0, k in c.items() if k * 100 >= ges]
+        # ROUND FUI-TEXT (24.09.2026): a stem that straddles two pixel
+        # columns is two partly covered columns. fUi computes that
+        # coverage exactly (e.g. 64 % + 72 %); the kernel's 4x4 sampling
+        # rounded the same stem to 75 % + 75 %, which happened to fall
+        # inside the 60-step ink window above. Exact coverage does not,
+        # and such a column then lies more than two points from any
+        # "ink" -- it was counted as GROUND and measured 1.5:1 (white on
+        # its own blend with the button blue, #c1d3f9). A colour that is
+        # an exact mix of the text colour and the dominant ground is
+        # antialiasing, not ground -- the same rule `auf_linie` applies
+        # to the bar below. A foreign ground (terminal text running
+        # through the window) is not on that line and still counts.
+        haeufig = c.most_common(1)[0][0]
+        dv = [haeufig[i] - fg[i] for i in range(3)]
+        ll = sum(v * v for v in dv)
+
+        def auf_linie(f):
+            if ll == 0 or f == haeufig:
+                return False
+            t = sum((f[i] - fg[i]) * dv[i] for i in range(3)) / ll
+            t = max(0.0, min(1.0, t))
+            ab = sum((f[i] - fg[i] - t * dv[i]) ** 2 for i in range(3))
+            return ab <= 12 * 12
+
+        kand = [(f0, k) for f0, k in c.items()
+                if k * 100 >= ges and not auf_linie(f0)]
         if not kand:
             kand = [c.most_common(1)[0]]
         kand.sort(key=lambda fk: kontrast(fg, fk[0]))
