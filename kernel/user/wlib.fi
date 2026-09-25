@@ -73,6 +73,7 @@ import utf8
 // acht Pruefstaende, die `wlib:`-Zeilen lesen), und zwei Schriftsetzer
 // auf einer Flaeche waeren zwei Ergebnisse.
 import fuib
+import icons
 
 export {
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
@@ -87,7 +88,9 @@ export {
     // misst aber zusaetzlich jede Hoehe neu; wer nur verschoben hat,
     // braucht das nicht.
     relayout,
-    label, button, icon_button, check, entry, list, table, tabs, menubar, choice,
+    label, button, icon_button, check, entry, list,
+    // ROUND LOGIN-2: the password field and the Tab chain.
+    password, password_shown, password_show, focusable, caret_on, set_icon, table, tabs, menubar, choice,
     tile, TILE_FIELDS, TL_SURFACE, TL_RAISED, TL_ACCENT, TL_ONACCENT,
     TL_TEXT, TL_FRAME, TL_TASKBAR, TL_TBTEXT, TL_BUTTON, TL_RADW,
     TL_RADB, TL_SHADOW, TL_EDGE, TL_ALIGN, TL_NAME, TL_LOW, TL_DANGER,
@@ -628,6 +631,12 @@ const F_GEHEIM: u64 = 64
 // ploetzlich doppelt so hoch wird, verschoebe jede Seite dieses
 // Systems auf einmal.
 const F_UMBRUCH: u64 = 128
+// ROUND LOGIN-2: A PASSWORD FIELD. An entry with this flag draws an eye
+// at its right end; a click there switches between dots and plain text
+// (F_GEHEIM on/off). The flag stays when the text is shown -- it is what
+// makes the field a password field (no copying out, the eye), while
+// F_GEHEIM is only the current look.
+const F_PASSWORT: u64 = 256
 
 // Ein Fenster
 const N_H: u64 = 0
@@ -807,6 +816,13 @@ static mut want_flags: u64 = 0
 static mut want_gap: u64 = 0
 
 static mut s_focus: u64 = 0 // Widgetnummer + 1
+// ROUND LOGIN-2: THE CARET BLINKS. `s_blink_vis` is the phase (1 = drawn),
+// `s_blink_t` the clock of the last change, `s_blink_ok` whether it
+// blinks at all -- see `blink_setup`.
+static mut s_blink_vis: u64 = 1
+static mut s_blink_t: u64 = 0
+static mut s_blink_ok: u64 = 0
+static mut s_blink_n: u64 = 0
 static mut s_nohit: u64 = 0
 static mut s_alive: u64 = 1
 static mut s_fired: u64 = 0
@@ -1209,7 +1225,141 @@ fn begin(nohit: bool, noclip: bool) -> bool {
         s_trace = 1
         say_font()
     }
+    blink_setup()
     return true
+}
+
+// ============================================== ROUND LOGIN-2: THE CARET
+// A CARET THAT DOES NOT BLINK IS HARD TO FIND -- Justin on the Dell 9020:
+// "no blinking cursor in the password field". Every other system blinks
+// it at roughly 530 ms (the Windows default), and so does this one now.
+//
+// WHY IT DOES NOT BLINK WHEN /etc/uitrace IS SET. That file is the switch
+// of the measuring runs, and they photograph fields with the focus in
+// them: a caret that is there in one picture and gone in the next would
+// make every such comparison a coin toss. /etc/uiblink turns the blinking
+// on even then -- that is how tools/loginui/run.sh measures it.
+const BLINK_MS: u64 = 530
+
+fn blink_now() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(228, 1, (&ts[(0) as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[(0) as usize] * 1000 + ts[(1) as usize] / 1000000
+}
+
+fn blink_setup() {
+    s_blink_ok = 0
+    if s_trace == 0 {
+        s_blink_ok = 1
+    }
+    var p_bl: [u8; 13] = "/etc/uiblink\0"
+    let fdb: u64 = io.open((&p_bl[0 as usize]) as u64, 0)
+    if !ulib.bad(fdb) {
+        io.close(fdb)
+        s_blink_ok = 1
+    }
+    s_blink_vis = 1
+    s_blink_t = blink_now()
+}
+
+// Something happened at the caret (a key, a click, a new focus): show it
+// NOW and start the period again -- a caret that vanishes the moment one
+// types is the one thing blinking must not do.
+fn blink_reset() {
+    if s_blink_vis == 0 && s_focus != 0 {
+        dirty_wd(s_focus - 1)
+    }
+    s_blink_vis = 1
+    s_blink_t = blink_now()
+}
+
+fn blink_tick() {
+    if s_blink_ok == 0 || s_focus == 0 {
+        return
+    }
+    let i: u64 = s_focus - 1
+    let k: u64 = g(i, D_KIND)
+    if k != K_ENTRY && k != K_TEXTAREA {
+        return
+    }
+    let t: u64 = blink_now()
+    if t < s_blink_t + BLINK_MS {
+        return
+    }
+    s_blink_t = t
+    // A HIDDEN window does not blink -- the Start menu waits hidden with
+    // the focus in its search field and would otherwise repaint twice a
+    // second for nobody. (Not "the window with the input focus": the
+    // login and lock screens get their keys through the kernel's lock,
+    // and the server's focus says nothing about them.)
+    let wh: u64 = g(i, D_WIN)
+    if wh < MAXWN && ng(wh, N_H) != 0
+        && wlibc.sys3w(wlibc.WM_INFO, ng(wh, N_H), wlibc.WI_HIDDEN, 0) == 1 {
+        if s_blink_vis == 0 {
+            s_blink_vis = 1
+            dirty_wd(i)
+        }
+        return
+    }
+    s_blink_vis = 1 - s_blink_vis
+    s_blink_n = s_blink_n + 1
+    dirty_wd(i)
+    if s_trace != 0 {
+        var s_c: [u8; 18] = "wlib: caret vis=\0\0"
+        var s_n: [u8; 4] = " n=\0"
+        tl_at = 0
+        tl_s((&s_c[0 as usize]) as u64)
+        tl_n(s_blink_vis)
+        tl_s((&s_n[0 as usize]) as u64)
+        tl_n(s_blink_n)
+        say_pid()
+        tl_end()
+    }
+}
+
+// ONE LINE, ONE WRITE. Every wlib program writes to the same serial line,
+// and a line printed in five pieces (text, number, text, number, newline)
+// came out torn by the lines of the others -- "wlib: foceme.co7 kind=2"
+// in the first run of tools/loginui/run.sh. The lines of this round are
+// assembled here and written with ONE call.
+static mut tl_b: [u8; 192] = [0 as u8; 192]
+static mut tl_at: u64 = 0
+
+fn tl_s(p: u64) {
+    var k: u64 = 0
+    while tl_at < 180 && __mmio_read8((p + k) as *mut u8) as u64 != 0 {
+        tl_b[(tl_at) as usize] = __mmio_read8((p + k) as *mut u8)
+        tl_at = tl_at + 1
+        k = k + 1
+    }
+}
+
+fn tl_n(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = ulib.digits(v, (&d[0 as usize]) as u64)
+    tl_s((&d[0 as usize]) as u64)
+}
+
+fn tl_end() {
+    tl_b[(tl_at) as usize] = 10 as u8
+    let _w: u64 = ulib.put((&tl_b[0 as usize]) as u64, tl_at + 1)
+    tl_at = 0
+}
+
+// The trace lines of this round carry the process: every wlib program
+// on the screen writes to the same serial line, and the login screen is
+// not the only one with a text field (the Start menu's search waits
+// behind it).
+fn say_pid() {
+    var s_p: [u8; 6] = " pid=\0"
+    tl_s((&s_p[0 as usize]) as u64)
+    tl_n(ulib.sys(ulib.SYS_GETPID, 0, 0, 0))
+}
+
+fn caret_on() -> bool {
+    return s_blink_vis != 0
 }
 
 // RUNDE THEMESTORE: WIE HOCH EINE ZEILE WIRKLICH IST.
@@ -2536,6 +2686,18 @@ fn icon_button(cp: u64, txt: u64) -> u64 {
     return i
 }
 
+// ROUND LOGIN-2: another symbol on an icon button (the network icon of
+// the login screen follows the cable).
+fn set_icon(i: u64, cp: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BUTTON {
+        return
+    }
+    if g(i, D_BICON) != cp {
+        s(i, D_BICON, cp)
+        dirty_wd(i)
+    }
+}
+
 // RUNDE TON-2: EIN SCHIEBEREGLER, 0..100.
 //
 // `txt` ist die Beschriftung LINKS davon (0 = keine). Der Wert steht
@@ -3346,6 +3508,42 @@ fn set_focus(i: u64) {
     }
     s_focus = i + 1
     dirty_wd(i)
+    blink_reset()
+    // ROUND LOGIN-2: WHERE THE FOCUS WENT, on the line -- the Tab chain
+    // of the login screen is measured from these lines.
+    if s_trace != 0 {
+        var s_f: [u8; 16] = "wlib: focus id=\0"
+        var s_k: [u8; 8] = " kind=\0\0"
+        tl_at = 0
+        tl_s((&s_f[0 as usize]) as u64)
+        tl_n(i)
+        tl_s((&s_k[0 as usize]) as u64)
+        tl_n(g(i, D_KIND))
+        say_pid()
+        tl_end()
+    }
+}
+
+// ROUND LOGIN-2: TAKE A WIDGET OUT OF THE TAB CHAIN, or put it back. A
+// display (the name on the login screen) that Tab stops at is a trap:
+// Enter does nothing there and the next Tab only leads back. A widget
+// that is taken out while it has the focus hands it on.
+fn focusable(i: u64, on: bool) {
+    if i >= nwd {
+        return
+    }
+    if on {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_FOCUSABLE)
+        return
+    }
+    s(i, D_FLAGS, g(i, D_FLAGS) & ~F_FOCUSABLE)
+    if s_focus == i + 1 {
+        next_focus(g(i, D_WIN), false)
+        if s_focus == i + 1 {
+            s_focus = 0
+        }
+        dirty_wd(i)
+    }
 }
 
 fn fired_kind() -> u64 {
@@ -4380,6 +4578,131 @@ fn entry_geheim(i: u64, an: bool) {
     }
 }
 
+// ============================================ ROUND LOGIN-2: PASSWORD FIELD
+// ONE PASSWORD FIELD FOR THE WHOLE SYSTEM. Justin: "fUi should get a real
+// password field with a built-in eye, which can be reused everywhere in
+// the OS instead of building it per screen." fUi paints (fuib.fi), wlib
+// owns the behaviour -- so the type lives here, where every program that
+// asks for a password (glogin, lock, su in the future, the network key in
+// the settings) already gets its fields from.
+//
+//     let f: u64 = wlib.password(buf, max)
+//
+// is an entry with dots, an eye at the right end that shows and hides
+// the text on a click, and no way to copy the password out. The program
+// still reads the plain text from its own buffer, exactly as with
+// `entry_geheim`.
+fn password(buf: u64, max: u64) -> u64 {
+    let i: u64 = entry(buf, max)
+    if i < MAXWD {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_GEHEIM | F_PASSWORT)
+    }
+    return i
+}
+
+fn password_shown(i: u64) -> bool {
+    if i >= nwd {
+        return false
+    }
+    return (g(i, D_FLAGS) & F_GEHEIM) == 0
+}
+
+fn password_show(i: u64, on: bool) {
+    if i >= nwd || (g(i, D_FLAGS) & F_PASSWORT) == 0 {
+        return
+    }
+    if on {
+        s(i, D_FLAGS, g(i, D_FLAGS) & ~F_GEHEIM)
+    } else {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_GEHEIM)
+    }
+    dirty_wd(i)
+    if s_trace != 0 {
+        var s_e: [u8; 14] = "wlib: eye id=\0"
+        var s_v: [u8; 8] = " shown=\0"
+        tl_at = 0
+        tl_s((&s_e[0 as usize]) as u64)
+        tl_n(i)
+        tl_s((&s_v[0 as usize]) as u64)
+        var v: u64 = 0
+        if on {
+            v = 1
+        }
+        tl_n(v)
+        var s_l: [u8; 6] = " len=\0"
+        tl_s((&s_l[0 as usize]) as u64)
+        tl_n(tlen(g(i, D_TEXT)))
+        say_pid()
+        tl_end()
+    }
+}
+
+// The eye is a square as high as the field, at its right end.
+fn eye_w(i: u64) -> u64 {
+    if (g(i, D_FLAGS) & F_PASSWORT) == 0 {
+        return 0
+    }
+    return g(i, D_H)
+}
+
+fn eye_hit(i: u64, x: u64) -> bool {
+    let ew: u64 = eye_w(i)
+    if ew == 0 {
+        return false
+    }
+    return x + ew >= g(i, D_X) + g(i, D_W)
+}
+
+static mut s_eye_last: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn paint_eye(i: u64) {
+    let ew: u64 = eye_w(i)
+    if ew == 0 {
+        return
+    }
+    let x: u64 = g(i, D_X) + g(i, D_W) - ew
+    let y: u64 = g(i, D_Y)
+    // Hidden text shows the open eye ("show it"), shown text the crossed
+    // one ("hide it") -- the action, as on every other system.
+    var id: u64 = icons.EYE
+    if password_shown(i) {
+        id = icons.EYE_OFF
+    }
+    let px_: u64 = wlibc.icon_small()
+    var ox: u64 = 0
+    let iw: u64 = wlibc.icon_ink_w(id, px_)
+    if ew > iw {
+        ox = (ew - iw) / 2
+    }
+    let _e: bool = wlibc.icon_mid(id, x + ox, y, g(i, D_H), px_,
+        wlibc.theme(wlibc.T_FG))
+    var sv: u64 = 0
+    if password_shown(i) {
+        sv = 1
+    }
+    // Reported when it CHANGES, not on every repaint: the caret repaints
+    // the field twice a second.
+    let key: u64 = (x << 32) | (y << 1) | sv
+    if s_trace != 0 && key != s_eye_last {
+        s_eye_last = key
+        var s_e: [u8; 17] = "wlib: eyerect x=\0"
+        var s_y: [u8; 4] = " y=\0"
+        var s_w: [u8; 4] = " w=\0"
+        var s_s: [u8; 8] = " shown=\0"
+        tl_at = 0
+        tl_s((&s_e[0 as usize]) as u64)
+        tl_n(x)
+        tl_s((&s_y[0 as usize]) as u64)
+        tl_n(y)
+        tl_s((&s_w[0 as usize]) as u64)
+        tl_n(ew)
+        tl_s((&s_s[0 as usize]) as u64)
+        tl_n(sv)
+        say_pid()
+        tl_end()
+    }
+}
+
 fn paint_entry(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
@@ -4427,6 +4750,15 @@ fn paint_entry(i: u64) {
         wlibc.rect(x_a, y + 3, sub(x_b, x_a), sub(bh, 6),
             wlibc.theme(wlibc.T_SEL))
     }
+    // ROUND LOGIN-2: the text of a password field stops before its eye.
+    let k_x0: u64 = wlibc.clip_x0()
+    let k_y0: u64 = wlibc.clip_y0()
+    let k_x1: u64 = wlibc.clip_x1()
+    let k_y1: u64 = wlibc.clip_y1()
+    let ew: u64 = eye_w(i)
+    if ew != 0 && x + bw - ew < k_x1 {
+        wlibc.clip_set(k_x0, k_y0, x + bw - ew, k_y1)
+    }
     // vor der Auswahl, die Auswahl, danach -- drei Laeufe, damit die
     // ausgewaehlten Zeichen ihre eigene Farbe bekommen.
     var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), x + inset_text(),
@@ -4441,7 +4773,7 @@ fn paint_entry(i: u64) {
     }
     // Die Einfuegemarke -- nur, wenn das Feld den Fokus hat. Ein Feld,
     // das immer eine Marke zeigt, sagt nicht mehr, wohin getippt wird.
-    if s_focus == i + 1 {
+    if s_focus == i + 1 && caret_on() {
         let mx: u64 = entry_x(i, g(i, D_B))
         // The caret is as wide as a border and never thinner than
         // one pixel -- it is a line, and lines are the one thing this
@@ -4449,6 +4781,8 @@ fn paint_entry(i: u64) {
         wlibc.rect(mx, y + 3, wlibc.metric(wlibc.M_BORDER) + 1,
             sub(bh, 6), wlibc.theme(wlibc.T_ACCENT))
     }
+    wlibc.clip_set(k_x0, k_y0, k_x1, k_y1)
+    paint_eye(i)
     focus_ring(i)
 }
 
@@ -7522,7 +7856,15 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
     // dort zurueck -- dieser Block war nach dem Zusammenfuehren nicht
     // mehr erreichbar (und rief slider_set_x, das mit TON-2s Regler
     // weggefallen ist).
+    if k == K_ENTRY && eye_hit(i, x) {
+        // ROUND LOGIN-2: the eye. It switches the look and leaves the
+        // caret where it was.
+        password_show(i, !password_shown(i))
+        blink_reset()
+        return
+    }
     if k == K_ENTRY {
+        blink_reset()
         // Die Einfuegemarke dorthin, wo geklickt wurde -- Zeichen fuer
         // Zeichen nachgerechnet und nicht durch die mittlere Breite
         // geteilt: bei einer Proportionalschrift waere das um bis zu
@@ -7859,7 +8201,10 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
     // anklicken" ist die erste Frage, die ein Mensch an eine
     // Oberflaeche hat. Die Formen liegen in `kernel/zeiger.fi`:
     // 0 Pfeil, 1 Textmarke, 2 Hand.
-    if i < MAXWD && g(i, D_KIND) == K_ENTRY {
+    // ROUND LOGIN-2: the eye of a password field is a button, not text.
+    if i < MAXWD && g(i, D_KIND) == K_ENTRY && eye_hit(i, x) {
+        wlibc.cursor_shape(2)
+    } else if i < MAXWD && g(i, D_KIND) == K_ENTRY {
         wlibc.cursor_shape(1)
     } else if i < MAXWD && anklickbar(i) {
         wlibc.cursor_shape(2)
@@ -9927,7 +10272,7 @@ fn paint_ta(i: u64) {
     // hat diese Bibliothek nicht. Ein stehender Strich ist ehrlicher
     // als einer, der manchmal da ist und manchmal nicht.
     wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
-    if s_focus == i + 1 && tag(t, TS_CY) >= top && tag(t, TS_CY) < top + rows {
+    if s_focus == i + 1 && caret_on() && tag(t, TS_CY) >= top && tag(t, TS_CY) < top + rows {
         let ccol: u64 = ta_cols(t, tag(t, TS_CY), tag(t, TS_CX))
         if ccol >= left {
             wlibc.rect(x + gut + 2 + (ccol - left) * cw,
@@ -10462,7 +10807,9 @@ fn entry_key(i: u64, k: u64) {
             a = b
             b = t
         }
-        if b > a {
+        // ROUND LOGIN-2: a password never leaves its field through the
+        // clipboard -- not even while the eye shows it.
+        if b > a && (g(i, D_FLAGS) & F_PASSWORT) == 0 {
             wlibc.clip_put(p + a, b - a)
             if k == 24 {
                 entry_erase(i)
@@ -10561,6 +10908,7 @@ fn esc_spuelen(w: u64) {
 fn key_handle(wein: u64, k: u64) {
     s_keylast = k
     s_keyseq = s_keyseq + 1
+    blink_reset()
     // RUNDE ALLTAG: EIN DIALOG IST MODAL, AUCH FUER DIE TASTATUR.
     //
     // Der Fensterserver schickt die Taste an das Fenster mit dem
@@ -11443,6 +11791,7 @@ fn step() -> u64 {
     // sie danach dreht, malt jedes Zwischenbild einen Durchlauf zu
     // spaet -- bei 150 ms sind das bei zehn Bildern zehn Prozent.
     let laufend: u64 = anim_tick()
+    blink_tick()
     let gemalt: u64 = paint_all()
     if gewechselt {
         s_thpx = s_thpx + gemalt

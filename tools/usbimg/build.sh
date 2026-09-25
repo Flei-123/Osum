@@ -934,6 +934,13 @@ if [ "${UITRACE:-0}" = "1" ]; then
     ARGS+=("/etc/uitrace=$OUT/uitrace")
     echo "   uitrace    AN -- die Oberflaeche meldet (qs:, taskbar:)"
 fi
+# ROUND LOGIN-2: /etc/uiblink -- the caret blinks even with /etc/uitrace
+# (without it a measuring run keeps the caret steady; see wlib.blink_setup).
+if [ "${UIBLINK:-0}" = "1" ]; then
+    : > "$OUT/uiblink"
+    ARGS+=("/etc/uiblink=$OUT/uiblink")
+    echo "   uiblink    AN -- die Einfuegemarke blinkt auch im Messlauf"
+fi
 # RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
 # `scheme=` ins Leere zeigen. Derselbe Weg wie in
 # tools/design/capture.sh -- dieselben Dateien, damit der Stick zeigt,

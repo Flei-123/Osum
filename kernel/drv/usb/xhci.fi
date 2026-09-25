@@ -193,6 +193,11 @@ const S_RESETFAIL: u64 = 0x138
 // freigeschaltet war. Das ist die Zahl der Geraete, die die Firmware
 // vor uns angefasst hatte.
 const S_RESETVOR: u64 = 0x140
+// ROUND LOGIN-2 (Dell 9020): Intel port routing, see `intel_route`.
+const S_IRDONE: u64 = 0x148 // 0 = not an Intel switchable part, 1 = switched, 2 = nothing to switch
+const S_IR2PRE: u64 = 0x150 // XUSB2PR as the firmware left it
+const S_IR2POST: u64 = 0x158 // ... and after the switch
+const S_IR3POST: u64 = 0x160 // USB3_PSSEN after the switch
 
 // -------------------------------------- die Felder eines Endpunktplatzes
 
@@ -1120,6 +1125,79 @@ fn xecp_find(b: u64, id: u64) -> u64 {
     return 0
 }
 
+// ============================================ ROUND LOGIN-2 (Dell 9020)
+// INTEL PORT ROUTING: ON LYNX POINT THE PORTS BELONG TO THE EHCI UNTIL
+// SOMEBODY SAYS OTHERWISE.
+//
+// Intel's 7-, 8- and 9-series chipsets (Panther Point, Lynx Point,
+// Wildcat Point) have ONE set of USB connectors and TWO controllers
+// behind it: the xHCI and an EHCI. Which one a connector is wired to is
+// a switch in the xHCI's PCI configuration space -- XUSB2PR (0xD0) for
+// the USB 2 pairs and USB3_PSSEN (0xD8) for the SuperSpeed pairs. The
+// firmware leaves them on the EHCI unless its setup says "USB 3.0:
+// enabled". On Justin's OptiPlex 9020 (Q87, Lynx Point) that meant:
+// keyboard and mouse sat on the EHCI, this kernel only drives the EHCI
+// with the word `ehci` (the stick does not set it), so NEITHER was
+// driven by us. The keyboard still "worked" -- through the BIOS's
+// PS/2 emulation in SMM, which is exactly what delivered every key
+// twice (see kbd.irq) -- and the mouse did not move at all.
+//
+// Linux does the same thing at the same point (drivers/usb/host/
+// pci-quirks.c, usb_enable_intel_xhci_ports): only on Intel, only if
+// an Intel EHCI exists on the bus (otherwise there is nothing to switch
+// away from), and with the masks the chipset itself reports as
+// switchable -- USB3PRM (0xDC) and USB2PRM (0xD4). Writing the mask and
+// not all ones keeps a bit that the board hard-wired to EHCI where it
+// is. After the write the devices disconnect from the EHCI and connect
+// here; the port scan that follows the controller reset sees them.
+const IR_XUSB2PR: u64 = 0xD0
+const IR_USB2PRM: u64 = 0xD4
+const IR_USB3PSSEN: u64 = 0xD8
+const IR_USB3PRM: u64 = 0xDC
+
+fn intel_ehci_present(state: u64) -> bool {
+    var i: u64 = 0
+    while i < pci.count(state) && i < pci.MAX_DEV {
+        if pci.get(state, i, pci.E_VENDOR) == 0x8086
+            && pci.get(state, i, pci.E_CLASS) == 0x0C
+            && pci.get(state, i, pci.E_SUBCLASS) == 0x03
+            && pci.get(state, i, pci.E_PROGIF) == 0x20 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn intel_route(state: u64, idx: u64) {
+    s(state, S_IRDONE, 0)
+    s(state, S_IR2PRE, 0)
+    s(state, S_IR2POST, 0)
+    s(state, S_IR3POST, 0)
+    if pci.get(state, idx, pci.E_VENDOR) != 0x8086 {
+        return
+    }
+    if !intel_ehci_present(state) {
+        return
+    }
+    let d: u64 = bdf(state)
+    let m2: u64 = pci.cfg_read32(d, IR_USB2PRM)
+    let m3: u64 = pci.cfg_read32(d, IR_USB3PRM)
+    s(state, S_IR2PRE, pci.cfg_read32(d, IR_XUSB2PR))
+    // A part without the switch reads its unimplemented registers as 0
+    // (or as all ones when nothing answers at all) -- then there is
+    // nothing to route and nothing is written.
+    if (m2 == 0 && m3 == 0) || m2 == 0xFFFFFFFF {
+        s(state, S_IRDONE, 2)
+        return
+    }
+    pci.cfg_write32(d, IR_USB3PSSEN, m3)
+    pci.cfg_write32(d, IR_XUSB2PR, m2)
+    s(state, S_IR2POST, pci.cfg_read32(d, IR_XUSB2PR))
+    s(state, S_IR3POST, pci.cfg_read32(d, IR_USB3PSSEN))
+    s(state, S_IRDONE, 1)
+}
+
 // Gehoert der Regler in diesem Augenblick der Firmware?
 fn owned_by_bios(state: u64) -> bool {
     let b: u64 = base_of(state)
@@ -1457,6 +1535,9 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     // hier unmittelbar `halt` -- ein Schreibzugriff auf USBCMD eines
     // Reglers, der noch dem BIOS gehoert.
     handover(state)
+    // ROUND LOGIN-2: and on an Intel 7/8/9-series chipset the ports
+    // themselves still belong to the EHCI -- see `intel_route`.
+    intel_route(state, idx)
 
     if !halt(state) {
         return false
@@ -1916,6 +1997,27 @@ fn leg_line(state: u64, einheit: u64) {
         serial.puts((&s_ms2[0]) as u64)
         if g(state, S_LEGFORCE) != 0 {
             serial.puts((&s_hart[0]) as u64)
+        }
+    }
+    // ROUND LOGIN-2: the Intel port switch -- the number that says
+    // whether keyboard and mouse can be ours at all on a Lynx Point.
+    if g(state, S_IRDONE) != 0 {
+        var s_ir: [u8; 14] = " intel-route=\0"
+        var s_ar: [u8; 3] = "->\0"
+        var s_ps: [u8; 8] = " pssen=\0"
+        var s_no: [u8; 11] = "unswitched\0"
+        serial.puts((&s_ir[0]) as u64)
+        if g(state, S_IRDONE) == 1 {
+            serial.put(120 as u8)
+            h(g(state, S_IR2PRE), 8)
+            serial.puts((&s_ar[0]) as u64)
+            serial.put(120 as u8)
+            h(g(state, S_IR2POST), 8)
+            serial.puts((&s_ps[0]) as u64)
+            serial.put(120 as u8)
+            h(g(state, S_IR3POST), 8)
+        } else {
+            serial.puts((&s_no[0]) as u64)
         }
     }
     serial.puts((&s_halt[0]) as u64)

@@ -1654,6 +1654,9 @@ lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhae
 lauf "51. der echte Standby: S3 schlafen und aufwachen, Geraete und Speicher danach (tools/s3/run.sh, K-004)" \
      tools/s3/run.sh s3 '^S3: |^== |^  OK    (QEMU meldet|zurueck|APIC|PCI|ACPI-Modus|Arbeitsspeicher|Pruefsumme|zwei verschiedene|Zeitgeber|und kommt NICHT|Ladesegmente|Grafikmodus|die Rueckstellung|Gegenprobe s3nobild|8042|das Programm bittet|INNERHALB des Systemaufrufs|kehrt nach dem Wecken|die Shell fuehrt)'
 
+lauf "52. der Anmeldeschirm, wie Justin ihn bedient: eine Taste ein Zeichen, Tab-Kette, blinkende Marke, das Auge, Maus auf USB und PS/2 (tools/loginui/run.sh, Runde LOGIN-2)" \
+     tools/loginui/run.sh loginui '^LOGINUI: |^== |^  OK    (xhci\.fi|XUSB2PR|kbd\.irq|the icon font|glogin\.fi|lock\.fi|the login screen|the USB mouse|one password|visible fields|the focus starts|caret phase|and it alternates|Tab chain|Tab: button|the password field has|a MOUSE click|a second click|BILD|the name field|name typed|GEGENPROBE|four PS/2|clock, network|a click on the|a second click closes)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

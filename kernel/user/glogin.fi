@@ -64,6 +64,7 @@ import wlibc
 import wlib
 import pw
 import grp
+import icons
 
 export { u_start }
 
@@ -99,6 +100,42 @@ static mut w_kopf: u64 = 0
 static mut w_an: u64 = 0
 static mut w_ls: u64 = 0
 static mut w_win: u64 = 0
+static mut w_wer: u64 = 0
+static mut w_lnam: u64 = 0
+static mut w_andere: u64 = 0
+
+// ============================================ ROUND LOGIN-2: QUICK ACCESS
+// Justin: "at the bottom right quick access icons like on Windows --
+// network, power, the time." The same corner Windows uses on its sign-in
+// screen. They are NOT Tab stops: the Tab chain of this screen is
+// Kennwort -> Anmelden -> Anderer Benutzer and nothing else.
+static mut w_uhr: u64 = 0
+static mut w_netz: u64 = 0
+static mut w_strom: u64 = 0
+static mut w_info: u64 = 0
+static mut w_aus: u64 = 0
+static mut w_neu: u64 = 0
+static mut qa_offen: u64 = 0 // 0 nothing, 1 network text, 2 power choice
+static mut uhr: [u8; 16] = [0 as u8; 16]
+static mut netzinfo: [u8; 64] = [0 as u8; 64]
+static mut netz_st: u64 = 99
+static mut uhr_min: u64 = 99999
+static mut qa_t: u64 = 0
+static mut T_AUS: [u8; 15] = "Herunterfahren\0"
+static mut T_NEU: [u8; 12] = "Neu starten\0"
+static mut T_NETZ: [u8; 9] = "Netzwerk\0"
+static mut T_STROM: [u8; 9] = "Ein/Aus\0\0"
+static mut T_N0: [u8; 22] = "Kein Kabel verbunden\0\0"
+static mut T_N1: [u8; 21] = "Verbunden, keine IP\0\0"
+static mut T_N2: [u8; 28] = "Keine Internetverbindung\0\0\0\0"
+static mut T_N3: [u8; 10] = "Verbunden\0"
+static mut T_NX: [u8; 16] = "Kein Netzwerk\0\0\0"
+const SYS_NETGET: u64 = 1300
+const NG_IP: u64 = 1
+const NG_STATE: u64 = 8
+const SYS_REBOOT: u64 = 169
+const RB_POWEROFF: u64 = 0x4321FEDC
+const RB_RESTART: u64 = 0x01234567
 static mut n_user: u64 = 0
 
 static mut fehler: u64 = 0
@@ -107,11 +144,13 @@ static mut basis: u64 = 1000
 static mut T_TITEL: [u8; 10] = "Anmeldung\0"
 static mut T_APP: [u8; 7] = "glogin\0"
 static mut T_FRAGE: [u8; 39] = "Benutzer wählen und Kennwort eingeben\0"
+static mut T_FRAGE1: [u8; 18] = "Kennwort eingeben\0"
 static mut T_FALSCH: [u8; 32] = "Name oder Kennwort stimmt nicht\0"
 static mut T_WARTE: [u8; 31] = "Zu viele Fehlversuche -- warte\0"
 static mut T_AN: [u8; 9] = "Anmelden\0"
 static mut T_NAME: [u8; 9] = "Benutzer\0"
 static mut T_KENN: [u8; 9] = "Kennwort\0"
+static mut T_ANDERE: [u8; 17] = "Anderer Benutzer\0"
 static mut P_DESK: [u8; 13] = "/bin/desktop\0"
 
 // Der Messausgang steht im Normalbetrieb AUS -- dieselbe Regel wie in
@@ -498,6 +537,225 @@ fn versuchen() -> bool {
     return true
 }
 
+// ------------------------------------------- the quick access, its parts
+fn zwei(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((p + 1) as *mut u8, (48 + v % 10) as u8)
+}
+
+// The time, local, as the taskbar gets it (`SYS_SYSINFO` is local time
+// since round ECHTHARDWARE-1). Only redrawn when the minute changes.
+fn uhr_setzen() -> bool {
+    let hr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    if ulib.bad(hr) || ulib.bad(mi) {
+        return false
+    }
+    let m: u64 = hr * 60 + mi
+    if m == uhr_min {
+        return false
+    }
+    uhr_min = m
+    let b: u64 = (&uhr[(0) as usize]) as u64
+    zwei(b, hr)
+    __mmio_write8((b + 2) as *mut u8, 58 as u8)
+    zwei(b + 3, mi)
+    __mmio_write8((b + 5) as *mut u8, 0 as u8)
+    wlib.set_text(w_uhr, b)
+    return true
+}
+
+fn netz_glyph(st: u64) -> u64 {
+    if st == 3 {
+        return icons.NETWORK_WIRED
+    }
+    if st == 2 {
+        return icons.NETWORK_NO_INTERNET
+    }
+    if st == 1 {
+        return icons.NETWORK_BLOCKED
+    }
+    return icons.NETWORK_OFFLINE
+}
+
+fn zahl_an(p: u64, v: u64) -> u64 {
+    return ulib.digits(v, p)
+}
+
+// The network: the kernel's own four states (`NG_STATE`, the ones the
+// taskbar shows), the icon follows them, and the text says it in words
+// and with the address.
+fn netz_setzen() -> bool {
+    var st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    if ulib.bad(st) {
+        st = 9
+    }
+    if st == netz_st {
+        return false
+    }
+    netz_st = st
+    wlib.set_icon(w_netz, netz_glyph(st))
+    let b: u64 = (&netzinfo[(0) as usize]) as u64
+    var t: u64 = (&T_NX[(0) as usize]) as u64
+    if st == 0 {
+        t = (&T_N0[(0) as usize]) as u64
+    } else if st == 1 {
+        t = (&T_N1[(0) as usize]) as u64
+    } else if st == 2 {
+        t = (&T_N2[(0) as usize]) as u64
+    } else if st == 3 {
+        t = (&T_N3[(0) as usize]) as u64
+    }
+    var at: u64 = ulib.strcpy(b, t)
+    if st == 2 || st == 3 {
+        let ip: u64 = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
+        if !ulib.bad(ip) && ip != 0 {
+            __mmio_write8((b + at) as *mut u8, 32 as u8)
+            __mmio_write8((b + at + 1) as *mut u8, 40 as u8)
+            at = at + 2
+            at = at + zahl_an(b + at, (ip >> 24) & 255)
+            __mmio_write8((b + at) as *mut u8, 46 as u8)
+            at = at + 1
+            at = at + zahl_an(b + at, (ip >> 16) & 255)
+            __mmio_write8((b + at) as *mut u8, 46 as u8)
+            at = at + 1
+            at = at + zahl_an(b + at, (ip >> 8) & 255)
+            __mmio_write8((b + at) as *mut u8, 46 as u8)
+            at = at + 1
+            at = at + zahl_an(b + at, ip & 255)
+            __mmio_write8((b + at) as *mut u8, 41 as u8)
+            __mmio_write8((b + at + 1) as *mut u8, 0 as u8)
+        }
+    }
+    wlib.set_text(w_info, b)
+    return true
+}
+
+// What is open above the icons: nothing, the network text, or the two
+// power buttons. A second click on the same icon closes it again.
+fn qa_zeigen(was: u64) {
+    var neu: u64 = was
+    if qa_offen == was {
+        neu = 0
+    }
+    qa_offen = neu
+    wlib.show(w_info, neu == 1)
+    wlib.show(w_aus, neu == 2)
+    wlib.show(w_neu, neu == 2)
+    wlib.new_set()
+    wlib.draw_all()
+    var s_q: [u8; 18] = "glogin: schnell=\0\0"
+    sag((&s_q[(0) as usize]) as u64)
+    sagn(neu)
+    sagnl()
+}
+
+// Power off or restart. This screen runs as root until the login, so it
+// may: first the polite way through init (/run/svc.cmd, as the Start
+// menu does it), and if nobody takes it, the kernel's own call.
+fn strom(neustart: bool) {
+    var p_cmd: [u8; 13] = "/run/svc.cmd\0"
+    var c_aus: [u8; 10] = "shutdown\n\0"
+    var c_neu: [u8; 8] = "reboot\n\0"
+    var s_s: [u8; 22] = "glogin: energie neu=\0\0"
+    sag((&s_s[(0) as usize]) as u64)
+    if neustart {
+        sagn(1)
+    } else {
+        sagn(0)
+    }
+    sagnl()
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_cmd[(0) as usize]) as u64, 577, 0)
+    if !ulib.bad(fd) {
+        if neustart {
+            ulib.sys(ulib.SYS_WRITE, fd, (&c_neu[(0) as usize]) as u64, 7)
+        } else {
+            ulib.sys(ulib.SYS_WRITE, fd, (&c_aus[(0) as usize]) as u64, 9)
+        }
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        let _w: u64 = ulib.sleep_ms(500)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if neustart {
+        ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    } else {
+        ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    }
+}
+
+// Twice a second is plenty for a clock with minutes and a cable.
+fn qa_tick() {
+    let t: u64 = now_ms()
+    if t < qa_t + 500 {
+        return
+    }
+    qa_t = t
+    let a: bool = uhr_setzen()
+    let b: bool = netz_setzen()
+    if a || b {
+        wlib.draw_all()
+    }
+}
+
+fn schnell_bauen(w: u64, bw: u64, bh: u64) {
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let knopf: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    // the bar: time, network, power -- at the bottom right
+    let bb: u64 = 80 + knopf * 2 + luft * 2 + rand * 2
+    let bhh: u64 = knopf + rand * 2
+    // NOT in the bottom 48 points: that strip belongs to the taskbar's
+    // window, which exists (unpainted) behind this screen and takes the
+    // clicks there -- measured: a click at y=760 reached nobody.
+    let unten: u64 = 56
+    wlib.box_h(w, bw - bb - 16, bh - bhh - unten, bb, bhh, rand, luft)
+    wlib.size(80, knopf)
+    w_uhr = wlib.label((&uhr[(0) as usize]) as u64)
+    w_netz = wlib.icon_button(icons.NETWORK_OFFLINE, (&T_NETZ[(0) as usize]) as u64)
+    w_strom = wlib.icon_button(icons.POWER, (&T_STROM[(0) as usize]) as u64)
+    wlib.box_end()
+    wlib.focusable(w_netz, false)
+    wlib.focusable(w_strom, false)
+    // above it: the network text or the two power buttons
+    let pb: u64 = 300
+    let ph: u64 = knopf * 2 + luft + rand * 2
+    wlib.box_v(w, bw - pb - 16, bh - bhh - unten - ph - 8, pb, ph, rand, luft)
+    wlib.size(pb - rand * 2, 0)
+    w_info = wlib.label((&netzinfo[(0) as usize]) as u64)
+    wlib.size(pb - rand * 2, 0)
+    w_aus = wlib.button((&T_AUS[(0) as usize]) as u64)
+    wlib.size(pb - rand * 2, 0)
+    w_neu = wlib.button((&T_NEU[(0) as usize]) as u64)
+    wlib.box_end()
+    wlib.show(w_info, false)
+    wlib.show(w_aus, false)
+    wlib.show(w_neu, false)
+    let _u: bool = uhr_setzen()
+    let _n: bool = netz_setzen()
+}
+
+// ROUND LOGIN-2: "Anderer Benutzer" -- the name field comes out, empty
+// and with the focus; the known name (label or list) steps aside.
+fn anderer_benutzer() {
+    nam[(0) as usize] = 0 as u8
+    wlib.set_text(w_nam, (&nam[(0) as usize]) as u64)
+    wlib.show(w_lnam, true)
+    wlib.show(w_nam, true)
+    if n_user == 1 {
+        wlib.show(w_wer, false)
+    }
+    wlib.show(w_andere, false)
+    wlib.new_set()
+    wlib.set_focus(w_nam)
+    // The widgets moved -- say where they are now.
+    var s_nm: [u8; 7] = "glogin\0"
+    wlib.say_rects((&s_nm[(0) as usize]) as u64)
+    wlib.draw_all()
+    var s_a: [u8; 25] = "glogin: anderer benutzer\0"
+    sag((&s_a[(0) as usize]) as u64)
+    sagnl()
+}
+
 fn dbg_setup(args: u64) {
     var t: [u8; 13] = "/etc/uitrace\0"
     var d: [u8; 6] = "debug\0"
@@ -553,37 +811,76 @@ fn u_gui() -> u64 {
     let oben: u64 = (bh - hoehe) / 3
 
     wlib.box_v(w, links, oben, breite, hoehe, rand, luft)
-    ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_FRAGE[(0) as usize]) as u64)
+    if n_user == 1 {
+        ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_FRAGE1[(0) as usize]) as u64)
+    } else {
+        ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_FRAGE[(0) as usize]) as u64)
+    }
     w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
-    if n_user > 0 {
+    // ROUND LOGIN-2 (Justin, Dell 9020): THE TAB CHAIN IS KENNWORT ->
+    // ANMELDEN. Before, Tab stopped at the name list at the top (a list
+    // with one row, a display and not a question) and at the name field
+    // below it -- both already filled in. Now:
+    //
+    //   * ONE person on this machine: the name is a LABEL. Nothing to
+    //     choose, nothing to focus.
+    //   * SEVERAL: the list stays as the way to choose with the mouse,
+    //     but it is not a Tab stop either -- the keyboard way to a
+    //     different name is the name field behind "Anderer Benutzer".
+    //   * The name field itself is HIDDEN while a name is known. It
+    //     appears (and takes the focus) with "Anderer Benutzer" -- that
+    //     is where root is typed; root is never offered in the list.
+    //
+    // So the chain is: Kennwort -> Anmelden -> Anderer Benutzer -> back.
+    if n_user == 1 {
+        // The label shows the buffer `nam`; `aus_liste` fills it below,
+        // once the name field exists (it also sets that field's text).
+        w_wer = wlib.label((&nam[(0) as usize]) as u64)
+    } else if n_user > 1 {
         wlib.size(breite - rand * 2, 0)
         w_ls = wlib.list((&liste[(0) as usize]) as u64, 3)
         wlib.list_einklick(w_ls, true)
+        wlib.focusable(w_ls, false)
     }
-    let _l1: u64 = wlib.label((&T_NAME[(0) as usize]) as u64)
+    w_lnam = wlib.label((&T_NAME[(0) as usize]) as u64)
     wlib.size(breite - rand * 2, 0)
     w_nam = wlib.entry((&nam[(0) as usize]) as u64, 60)
     let _l2: u64 = wlib.label((&T_KENN[(0) as usize]) as u64)
     wlib.size(breite - rand * 2, 0)
-    w_kenn = wlib.entry((&kenn[(0) as usize]) as u64, 120)
-    // DAS KENNWORT STEHT NICHT AUF DEM SCHIRM.
-    wlib.entry_geheim(w_kenn, true)
+    // The system's password field: dots, the eye, no copying out.
+    w_kenn = wlib.password((&kenn[(0) as usize]) as u64, 120)
     wlib.size(160, 0)
     w_an = wlib.button((&T_AN[(0) as usize]) as u64)
+    if n_user > 0 {
+        wlib.size(160, 0)
+        w_andere = wlib.button((&T_ANDERE[(0) as usize]) as u64)
+    }
     wlib.box_end()
 
-    // Steht genau ein Mensch in der Liste, ist sein Name schon da --
-    // dann fehlt nur noch das Kennwort, und der Fokus gehoert dorthin.
-    if n_user == 1 {
+    schnell_bauen(w, bw, bh)
+
+    if n_user > 0 {
         aus_liste(0)
+        wlib.show(w_lnam, false)
+        wlib.show(w_nam, false)
+        wlib.new_set()
         wlib.set_focus(w_kenn)
     } else {
         wlib.set_focus(w_nam)
     }
 
-    sag((&s_go[(0) as usize]) as u64)
-    sagn(n_user)
-    sagnl()
+    // ROUND LOGIN-2: the process, so that a test can tell this screen's
+    // `wlib:` lines from the ones of the Start menu behind it -- and in
+    // ONE write, so that no other program's line tears it apart.
+    var zl: [u8; 64] = [0 as u8; 64]
+    var s_pid: [u8; 6] = " pid=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    var at: u64 = ulib.strcpy((&zl[(0) as usize]) as u64, (&s_go[(0) as usize]) as u64)
+    at = at + ulib.digits(n_user, (&zl[(at) as usize]) as u64)
+    at = at + ulib.strcpy((&zl[(at) as usize]) as u64, (&s_pid[(0) as usize]) as u64)
+    at = at + ulib.digits(ulib.sys(ulib.SYS_GETPID, 0, 0, 0), (&zl[(at) as usize]) as u64)
+    at = at + ulib.strcpy((&zl[(at) as usize]) as u64, (&s_nl[(0) as usize]) as u64)
+    let _w: u64 = ulib.say((&zl[(0) as usize]) as u64)
     var s_nm: [u8; 7] = "glogin\0"
     wlib.say_rects((&s_nm[(0) as usize]) as u64)
     wlib.draw_all()
@@ -596,6 +893,7 @@ fn u_gui() -> u64 {
     // had been typed was gone ("everything refreshes", Dell 9020).
     while wlib.alive() && !fertig {
         runden = runden + 1
+        qa_tick()
         let id: u64 = wlib.step()
         if id < wlib.MAXWD {
             let kind: u64 = wlib.fired_kind()
@@ -609,6 +907,17 @@ fn u_gui() -> u64 {
             } else if kind == wlib.K_ENTRY && id == w_nam {
                 wlib.set_focus(w_kenn)
                 wlib.draw_all()
+            } else if kind == wlib.K_BUTTON && id == w_andere
+                && n_user > 0 {
+                anderer_benutzer()
+            } else if kind == wlib.K_BUTTON && id == w_netz {
+                qa_zeigen(1)
+            } else if kind == wlib.K_BUTTON && id == w_strom {
+                qa_zeigen(2)
+            } else if kind == wlib.K_BUTTON && id == w_aus {
+                strom(false)
+            } else if kind == wlib.K_BUTTON && id == w_neu {
+                strom(true)
             }
         }
     }
