@@ -259,7 +259,7 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
+dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
@@ -1187,7 +1187,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
-/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig /bin/drucke \
+/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/drucke \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \

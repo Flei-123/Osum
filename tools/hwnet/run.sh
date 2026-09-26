@@ -289,7 +289,7 @@ EOF
     # real gap for a real network and it is written down in
     # docs/ROADMAP-UPDATE.md with the three lines it would take.
     qemu_bg "$dev" \
-        "osum $BASE nic nip=10.9.0.9/24 ngw=$HOST_IP nsvc=0 nwait=0 script=dhcp;ping -c 2 $HOST_IP;exit" \
+        "osum $BASE nic nip=10.9.0.9/24 ngw=$HOST_IP nsvc=0 nwait=0 script=dhcp;ping -c 2 $HOST_IP;dhcp stand;exit" \
         "$TMPD/dhcp-$dev.txt" -drive "file=$TMPD/live-$dev.img,format=raw,if=ide,index=0"
     qemu_wait
     kill "$DHPID" 2>/dev/null; DHPID=""
@@ -304,6 +304,14 @@ EOF
         && ok "$dev: the client really took the address" \
         || bad "$dev: the client did not take the address"
     hasnot "$H" "dhcp: offer ip=10.9.0.9" "$dev: it was not handed back the address it booted with"
+    # ROUND DELL2: `dhcp stand` prints the background client's numbers in
+    # the terminal (the stick has no serial, no /proc, no /bin/log).
+    grep -qaE 'dhcp: zustand im Hintergrund 4 \(ack' "$H" \
+        && ok "$dev: dhcp stand reports state 4 (ack)" \
+        || bad "$dev: dhcp stand does not report the ack ($(grep -a 'zustand' "$H" | head -1))"
+    grep -qaE 'netz: kabel=1 .*karte rein=[1-9]' "$H" \
+        && ok "$dev: dhcp stand shows link and card counters" \
+        || bad "$dev: dhcp stand without link/card counters ($(grep -a 'netz: kabel' "$H" | head -1))"
     grep -qaE '^2 (transmitted|packets transmitted), 2 received' "$H" \
         && ok "$dev: and with that address it reaches the gateway (ICMP)" \
         || bad "$dev: it cannot reach the gateway with the address it was given"
