@@ -312,6 +312,27 @@ EOF
     grep -qaE 'net: link=1 .*card octets in=[1-9]' "$H" \
         && ok "$dev: dhcp status shows link and card counters" \
         || bad "$dev: dhcp status without link/card counters ($(grep -a 'net: link' "$H" | head -1))"
+
+    # ROUND DELL2: A NETWORK WITH NO DHCP SERVER. Justin's Dell 9020 sent
+    # ONE discover and then nothing, forever: the client's socket was
+    # blocking, and every `recvfrom` in its 60 x 50 ms poll slept up to
+    # 30 s. With a server that answers at once (above) that never shows.
+    # Here nothing is on the wire (no bridge, no udhcpd): six attempts
+    # must go out and the client must give up in well under a minute.
+    t0=$(date +%s)
+    qemu_bg "$dev" \
+        "osum $BASE nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=dhcp;dhcp status;exit" \
+        "$TMPD/nosrv-$dev.txt" -drive "file=$TMPD/live-$dev.img,format=raw,if=ide,index=0"
+    qemu_wait
+    t1=$(date +%s)
+    N="$TMPD/nosrv-$dev.txt"
+    grep -qaE 'dhcp: (keine Antwort nach|no answer after) 6' "$N" \
+        && ok "$dev: no server: the client gives up after 6 attempts" \
+        || bad "$dev: no server: the client did not finish its 6 attempts ($(grep -a 'dhcp:' "$N" | tail -1))"
+    grep -qaE 'state 5 .*sent=6 replies=0 attempt=6' "$N" \
+        && ok "$dev: no server: 6 discovers counted as sent, 0 replies" \
+        || bad "$dev: no server: wrong counters ($(grep -a 'client state' "$N" | head -1))"
+    num "$dev: no server: seconds until the client gave up" $(( t1 - t0 )) le 90
     grep -qaE '^2 (transmitted|packets transmitted), 2 received' "$H" \
         && ok "$dev: and with that address it reaches the gateway (ICMP)" \
         || bad "$dev: it cannot reach the gateway with the address it was given"
