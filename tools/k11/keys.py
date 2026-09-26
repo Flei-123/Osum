@@ -204,6 +204,17 @@ def main():
         # Datei tippt auch dort, wo gar kein `key: ` zu erwarten ist.
         # Entschaerft wird damit nichts -- wer die Zeilen zaehlt, zaehlt
         # sie weiterhin selbst.
+        # `nowait:<key>` -- a key that reports no `key: ` line (Num Lock,
+        # Ctrl+Alt+L): send it and go on after a short pause instead of
+        # ZEIT_JE_TASTE, which is longer than the console's idle limit.
+        if k.startswith('nowait:'):
+            s.sendall(("sendkey %s\n" % k[7:]).encode())
+            time.sleep(0.3)
+            try:
+                s.recv(65536)
+            except OSError:
+                pass
+            continue
         vorher = key_zeilen(warte)
         s.sendall(("sendkey %s\n" % k).encode())
         bis3 = time.time() + ZEIT_JE_TASTE

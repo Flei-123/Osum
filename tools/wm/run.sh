@@ -155,6 +155,7 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
     while [ $i -lt 900 ]; do
         grep -qa '^wm: hold' "$aus" 2>/dev/null && break
         grep -qa '^fb: hold' "$aus" 2>/dev/null && break
+        grep -qa 'wm: dauer' "$aus" 2>/dev/null && { sleep 2; break; }
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.15
         i=$((i + 1))
@@ -163,6 +164,11 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
         python3 tools/wm/monitor.py "$sock" "$mon" > "$TMPD/mon.txt" 2>&1
     fi
     python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/schuss.txt" 2>&1
+    # FOTO_QUIT=1: a run that never ends by itself (`wmdauer`, a shell
+    # waiting for keys) is ended through the monitor after the photo.
+    if [ -n "${FOTO_QUIT:-}" ]; then
+        python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"quit\n")' "$sock" 2>/dev/null
+    fi
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -653,6 +659,49 @@ if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
         bad "die Ausgabe der Shell steht in keiner Zeile des Fensters"
     fi
 fi
+
+echo "== 12b. the line being typed is visible BEFORE Enter (26.09.2026) =="
+# Justin on the Dell 9020: "I only see what I typed after pressing Enter".
+# The console has ECHO off (the serial record), and the shell printed the
+# line only after reading it. Now the shell sets ECHOWIN for its read and
+# the kernel draws the edit line into the WINDOW only. Typed here WITHOUT
+# Enter, then photographed: a row of the terminal must carry `xyzq`.
+cat > "$TMPD/live.mon" <<'EOF'
+warte 1.5
+# the demo window holds the focus -- click into the terminal first
+mouse_move -120 -120
+mouse_move -120 -120
+mouse_move -120 -120
+mouse_move -120 -120
+mouse_move 100 100
+mouse_button 1
+mouse_button 0
+warte 0.5
+sendkey x
+sendkey y
+sendkey z
+sendkey q
+warte 0.8
+EOF
+FOTO_QUIT=1 foto "$K0" "gfx wm wmhold wmshell wmdauer nosched noproc nofs" "$TMPD/le.txt" "$TMPD/le.ppm" \
+    "$TMPD/live.mon"
+gefunden=""
+for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+    if aus=$(python3 tools/gfx/checkshot.py tgrid "$TMPD/le.ppm" \
+        assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
+        224 230 236 16 20 26 "xyzq" 2>&1); then
+        gefunden="$z"; break
+    fi
+done
+if [ -n "$gefunden" ]; then
+    ok "the typed line stands in the window before Enter (row $gefunden: $aus)"
+else
+    bad "the typed line 'xyzq' is not in the window before Enter"
+    [ -n "${WM_KEEP:-}" ] && cp "$TMPD/le.ppm" "$TMPD/le.txt" "$WM_KEEP/" 2>/dev/null
+    grep -a -E 'sh:|key:' "$TMPD/le.txt" | tail -8 | sed 's/^/        /'
+fi
+# The serial record is untouched: the window echo never goes onto the line.
+hasnot "$TMPD/le.txt" "xyzq" "and the serial line carries no echo of it"
 
 echo "== 13. DIE GEGENPROBEN: ohne 'wm' aendert sich nichts =="
 lauf "$K0" "gfx $GRUND" "$TMPD/ohne.txt"

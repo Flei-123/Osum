@@ -79,7 +79,7 @@ BLOCKS=4096
 PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount k17"
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+trap '[ -n "${K17_KEEP:-}" ] && cp -a "$TMPD" "$K17_KEEP"; rm -rf "$TMPD"' EXIT
 
 pass=0
 fail=0
@@ -586,6 +586,28 @@ grep -qa '^hallo$' "$TMPD/kbdusb.sh" \
 grep -qa '^zwei drei$' "$TMPD/kbdusb.sh" \
     && ok "und die zweite Zeile, mit einem Leerzeichen darin" \
     || bad "'zwei drei' fehlt"
+
+# 26.09.2026 (Dell 9020): THE NUMERIC KEYPAD AND THE ISO KEY, over USB and
+# PS/2. Justin: "no pipe, and the keypad does nothing with Num Lock on".
+# The ISO key (USB usage 0x64, `less` in QEMU) was past the end of the USB
+# table; keypad digits fell through every table. Num Lock starts ON.
+# After `num_lock` (now OFF) KP 1 must NOT type a 1 (it is End).
+NUMPAD=(nowait:ctrl-alt-l kp_1 kp_2 kp_3 kp_add kp_subtract kp_multiply kp_divide kp_decimal less shift-less alt_r-less nowait:num_lock nowait:kp_1 ret warte:0.5 text:exit ret warte:0.8)
+tastenlauf kpusb "$TMPD/k0.mb" "osum usb nosched noproc" "osum: bin " \
+    -- "${NUMPAD[@]}" -- "${XHCI[@]}" "${KBD[@]}"
+tastenlauf kpps2 "$TMPD/k0.mb" "osum nosched noproc" "osum: bin " \
+    -- "${NUMPAD[@]}" --
+for kp in kpusb kpps2; do
+    got=$(grep -aoE '(^|[^a-z])key: .' "$TMPD/$kp.txt" | sed 's/^[^k]*key: //' | tr -d '\n\000')
+    case "$got" in
+        "123+-*/,<>|"*) ok "$kp: keypad and ISO key type 123+-*/,<>| ($got)" ;;
+        *) bad "$kp: keypad/ISO key typed '$got', expected 123+-*/,<>| first"
+           sed 's/^/        /' "$TMPD/$kp.tasten" | head -8
+           grep -a -E 'key|kbd|layout|sh:' "$TMPD/$kp.txt" | tail -15 | sed 's/^/        /' ;;
+    esac
+    ones=$(printf '%s' "$got" | tr -cd '1' | wc -c)
+    gleich "$kp: with Num Lock off KP 1 types no digit (exactly one '1')" "1" "$ones"
+done
 
 # GEGENPROBE: der Meldevektor bleibt maskiert. Der Regler bewegt die
 # Daten weiter -- aber niemand sagt es dem Kernel, und dann kommt keine
