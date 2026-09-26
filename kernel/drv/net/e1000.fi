@@ -567,9 +567,75 @@ fn link_speed_on(state: u64, u: u64) -> u64 {
 //   9 TPT total tx   10 RAL0   11 RAH0   12 RCTL   13 TCTL   14 CTRL
 //   15 ROC oversize  16 RUC undersize  17 TPR total rx
 static mut hw_sum: [u64; 18] = [0 as u64; 18]
+static mut pba_pre: u64 = 0
 
 fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
-    if u >= MAX_UNITS || !present_on(state, u) || which >= 18 {
+    if u >= MAX_UNITS || !present_on(state, u) || which >= 40 {
+        return 0xFFFFFFFF
+    }
+    // 18.. : the transmit side, read as it stands (no sums).
+    //   18 TDH 19 TDT 20 TXDCTL0 21 TDLEN 22 TDBAL 23 TDBAH 24 PBA
+    //   25 PBA before our reset 26 GCR 27 FWSM 28 TARC0 29 CTRL
+    //   30 CTRL_EXT 31 PBS 32 TX descriptor 0: cmd | status << 8
+    //   33 TX descriptor 0: length 34 TIPG 35 ICR-cause last seen
+    if which == 18 {
+        return reg(state, u, R_TDH)
+    }
+    if which == 19 {
+        return reg(state, u, R_TDT)
+    }
+    if which == 20 {
+        return reg(state, u, 0x3828)
+    }
+    if which == 21 {
+        return reg(state, u, 0x3808)
+    }
+    if which == 22 {
+        return reg(state, u, R_TDBAL)
+    }
+    if which == 23 {
+        return reg(state, u, 0x3804)
+    }
+    if which == 24 {
+        return reg(state, u, 0x1000)
+    }
+    if which == 25 {
+        return pba_pre
+    }
+    if which == 26 {
+        return reg(state, u, 0x5B00)
+    }
+    if which == 27 {
+        return reg(state, u, 0x5B54)
+    }
+    if which == 28 {
+        return reg(state, u, 0x3840)
+    }
+    if which == 29 {
+        return reg(state, u, 0x0000)
+    }
+    if which == 30 {
+        return reg(state, u, R_CTRL_EXT)
+    }
+    if which == 31 {
+        return reg(state, u, 0x1008)
+    }
+    if which == 32 {
+        let t: u64 = ring(state, u) + TXD_OFF
+        return dsc_u8(t, 0, TD_CMD) | (dsc_u8(t, 0, TD_STATUS) << 8)
+    }
+    if which == 33 {
+        let t2: u64 = ring(state, u) + TXD_OFF
+        return __mmio_read8((t2 + 8) as *mut u8) as u64
+            | ((__mmio_read8((t2 + 9) as *mut u8) as u64) << 8)
+    }
+    if which == 34 {
+        return reg(state, u, R_TIPG)
+    }
+    if which == 35 {
+        return kstate.get(state, sc(u, S_LASTICR))
+    }
+    if which >= 18 {
         return 0xFFFFFFFF
     }
     if which == 0 {
@@ -1432,6 +1498,17 @@ fn ich_reset(state: u64, u: u64) -> bool {
     udelay(state, 10000)
     let ctrl: u64 = reg(state, u, R_CTRL)
     let sw: bool = swflag_take(state, u)
+    // ROUND DELL2: THE PACKET BUFFER SPLIT, WRITTEN BEFORE THE RESET, AS
+    // e1000e_reset DOES (pba = E1000_PBA_26K for pch2lan/pch_lpt, then
+    // `ew32(PBA, pba)`, then mac.ops.reset_hw). The low half is the
+    // receive share in KB; transmit gets what is left. The Dell 9020
+    // received but its chip transmitted NOTHING (GPTC 0, TPT 0); a
+    // split the firmware left with no room for transmit looks exactly
+    // like that. The value found is kept for `dhcp status`.
+    if u == 0 {
+        pba_pre = reg(state, u, 0x1000)
+    }
+    setreg(state, u, 0x1000, 0x1A)
     step(state, u, 11, (&t_18[0]) as u64)
     setreg(state, u, R_CTRL, ctrl | CTRL_RST)
     // NOTHING HERE. Not a read, not a flush -- see the head of this block.
@@ -1951,10 +2028,22 @@ fn tx_setup(state: u64, u: u64) {
         // RFCTL: NFS write/read filtering off (descriptor corruption
         // work-around in the same Linux function).
         setreg(state, u, 0x5008, reg(state, u, 0x5008) | 0xC0)
+        // The rest of e1000_init_hw_ich8lan / _initialize_hw_bits for
+        // pch_lpt, verbatim in effect:
+        //   GCR: e1000e_set_pcie_no_snoop(hw, ~PCIE_NO_SNOOP_ALL) --
+        //        clears the six no-snoop bits and sets every other bit,
+        //        exactly as Linux writes it on every non-ICH8 part.
+        setreg(state, u, 0x5B00, (reg(state, u, 0x5B00) & (~0x3F)) | 0xFFFFFFC0)
+        //   CTRL_EXT: RO_DIS (no relaxed ordering), PHYPDEN.
+        setreg(state, u, R_CTRL_EXT, reg(state, u, R_CTRL_EXT) | 0x20000 | 0x100000)
+        //   PBECCSTS: packet buffer ECC on; CTRL: MEHE.
+        setreg(state, u, 0x100C, reg(state, u, 0x100C) | 0x10000)
+        setreg(state, u, R_CTRL, reg(state, u, R_CTRL) | 0x80000)
     }
     // CT (collision threshold) 15 and COLD (collision distance) 64, the
     // values the manual gives for full duplex.
-    setreg(state, u, R_TCTL, TCTL_EN | TCTL_PSP | (15 << 4) | (64 << 12))
+    // ROUND DELL2: RTLC (bit 24) as e1000_configure_tx sets it.
+    setreg(state, u, R_TCTL, TCTL_EN | TCTL_PSP | 0x1000000 | (15 << 4) | (64 << 12))
 }
 
 // How many descriptors are free. In flight is tail minus head, modulo

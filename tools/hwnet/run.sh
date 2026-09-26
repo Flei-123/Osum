@@ -319,6 +319,9 @@ EOF
         grep -qaE 'chip tx: good=[1-9]' "$H" \
             && ok "$dev: the chip's own tx counter (GPTC) is not zero" \
             || bad "$dev: no chip tx counter ($(grep -a 'chip tx' "$H" | head -1))"
+        grep -qaE 'chip txq: tdh=[0-9a-f]+ tdt=[0-9a-f]+' "$H" \
+            && ok "$dev: dhcp status shows the transmit queue (TDH/TDT)" \
+            || bad "$dev: no transmit queue line ($(grep -a 'chip txq' "$H" | head -1))"
     else
         grep -qaF 'chip: no counters for this card' "$H" \
             && ok "$dev: dhcp status says the card has no chip counters" \
