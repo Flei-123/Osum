@@ -312,6 +312,18 @@ EOF
     grep -qaE 'net: link=1 .*card octets in=[1-9]' "$H" \
         && ok "$dev: dhcp status shows link and card counters" \
         || bad "$dev: dhcp status without link/card counters ($(grep -a 'net: link' "$H" | head -1))"
+    if [ "$dev" = e1000 ]; then
+        grep -qaF 'chip: mac=52:54:00:aa:bb:cc' "$H" \
+            && ok "$dev: dhcp status reads the MAC out of the chip (RAL/RAH)" \
+            || bad "$dev: dhcp status without the chip MAC ($(grep -a 'chip:' "$H" | head -1))"
+        grep -qaE 'chip tx: good=[1-9]' "$H" \
+            && ok "$dev: the chip's own tx counter (GPTC) is not zero" \
+            || bad "$dev: no chip tx counter ($(grep -a 'chip tx' "$H" | head -1))"
+    else
+        grep -qaF 'chip: no counters for this card' "$H" \
+            && ok "$dev: dhcp status says the card has no chip counters" \
+            || bad "$dev: dhcp status invents chip counters for $dev"
+    fi
 
     # ROUND DELL2: A NETWORK WITH NO DHCP SERVER. Justin's Dell 9020 sent
     # ONE discover and then nothing, forever: the client's socket was
