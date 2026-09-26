@@ -169,6 +169,48 @@ journalctl -u bruecke --since '-3 min' --no-pager 2>/dev/null \
     && ok "der Dienst hat einen PAIRING CODE ausgestellt" \
     || bad "im Protokoll des Dienstes steht nichts"
 
+echo "== 5. pair, then jobs over 443 (puls loop) =="
+CODE=""
+[ -n "$HEX" ] && CODE=$(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)
+KENN=$(journalctl -u bruecke --since '-5 min' --no-pager 2>/dev/null | grep "Code $CODE" | tail -1 | grep -o 'osum-[0-9a-f]*')
+VKEY=$(cat /srv/bruecke/verwalter.key 2>/dev/null)
+if [ -n "$CODE" ] && [ -n "$KENN" ] && [ -n "$VKEY" ]; then
+    VH="X-Bruecke-Verwalter: $VKEY"
+    curl -s -H "$VH" -H 'Content-Type: application/json' \
+        -d "{\"geraet\":\"$KENN\",\"code\":\"$CODE\",\"was\":\"frei\"}" \
+        http://127.0.0.1:8090/bruecke/koppeln | grep -q '"gekoppelt": true' \
+        && ok "server approved the pairing" || bad "server did not approve the pairing"
+    timeout 200 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
+        -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;jarvisctl pair $HEX;jarvisd -v -t 120000" \
+        -serial "file:$W/serial2.txt" -display none -no-reboot \
+        -drive "file=$W/probe.img,format=raw,if=ide,index=0" \
+        -netdev user,id=n0 -device e1000,netdev=n0 > "$W/qemu2.log" 2>&1 &
+    Q2=$!
+    for i in $(seq 60); do
+        journalctl -u bruecke --since '-2 min' --no-pager | grep -q "ANGEMELDET.*$KENN" && break
+        sleep 2
+    done
+    for i in 1 2 3; do
+        curl -s -H "$VH" -H 'Content-Type: application/json' \
+            -d "{\"geraet\":\"$KENN\",\"art\":\"system\"}" \
+            http://127.0.0.1:8090/bruecke/auftrag > /dev/null
+    done
+    sleep 20
+    got=0
+    for i in 1 2 3; do
+        curl -s -m5 -H "$VH" "http://127.0.0.1:8090/bruecke/holen?geraet=$KENN&id=$i" \
+            | grep -q 'laufzeit_ms' && got=$((got+1))
+    done
+    [ "$got" -eq 3 ] && ok "3 of 3 jobs answered over 443" \
+        || bad "only $got of 3 jobs answered over 443"
+    kill "$Q2" 2>/dev/null; wait "$Q2" 2>/dev/null
+    curl -s -H "$VH" -H 'Content-Type: application/json' \
+        -d "{\"geraet\":\"$KENN\",\"was\":\"sperren\"}" \
+        http://127.0.0.1:8090/bruecke/koppeln > /dev/null
+else
+    bad "no code/device for the job test"
+fi
+
 echo
 echo "HTTPS443: $pass bestanden, $fail durchgefallen"
 [ "$fail" -eq 0 ]

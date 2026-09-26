@@ -290,7 +290,7 @@ echo "== 3. die Kopplung, in der richtigen Reihenfolge =="
 # Wie an einem echten Geraet: erst verbinden (Code kommt), dann
 # bestaetigt der Mensch AM GERAET, dann gibt der Mensch am SERVER frei.
 starte_osum kopplung "jarvisd -1 -t 25000;exit"
-CODE=$(grep -aoE 'PAIRING CODE [0-9]+' "$W/s-kopplung.txt" | head -1 | awk '{print $2}')
+CODE=$(grep -aoE 'PAIRING CODE [0-9]+' "$W/s-kopplung.txt" | head -1 | awk '{print $3}')
 if [ -n "$CODE" ]; then
     ok "Osum verbindet sich und zeigt den PAIRING CODE auf dem Schirm"
     note "Code $CODE"
