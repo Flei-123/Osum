@@ -132,6 +132,7 @@ const S_PREMAC: u64 = 0xB0 // RAL/RAH, gelesen VOR dem Ruecksetzen
 // eine Karte anfasst, die gerade sendet. Der Wert ist ohnehin genau so
 // frisch wie das Traegerbit daneben -- beide kommen aus demselben Lauf.
 const S_SPEED: u64 = 0xB8 // 0 = unbekannt, sonst 10/100/1000
+const S_LINKCHK: u64 = 0x108 // TSC of the last link re-read (link_recheck)
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -506,7 +507,37 @@ fn notified_on(state: u64, u: u64) -> u64 {
 }
 
 fn link_up_on(state: u64, u: u64) -> bool {
+    link_recheck(state, u)
     return kstate.get(state, sc(u, S_LINK)) != 0
+}
+
+// ROUND DELL2: THE LINK WAS ONLY EVER READ AT INIT AND ON AN LSC
+// INTERRUPT. On the Dell 9020 the cable was plugged in, the port LED was
+// lit, and the taskbar still said "no carrier" for good: the link came
+// up after init, and the LSC interrupt never reached us (MSI not
+// delivered, or the line masked by the storm guard). Linux's e1000e
+// does not trust the interrupt either -- its watchdog re-reads the link
+// every two seconds. Here: while the cached link is DOWN, whoever asks
+// (taskbar, dhcp, netsvc) re-reads it, at most once every 500 ms, so a
+// caller that asks in a loop costs one MDIC pair per half second.
+fn link_recheck(state: u64, u: u64) {
+    if !ready_on(state, u) || mmio(state, u) == 0 {
+        return
+    }
+    if kstate.get(state, sc(u, S_LINK)) != 0 {
+        return
+    }
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    let now: u64 = apic.tsc()
+    let last: u64 = kstate.get(state, sc(u, S_LINKCHK))
+    if last != 0 && now - last < hz / 2 {
+        return
+    }
+    kstate.set(state, sc(u, S_LINKCHK), now)
+    read_link(state, u)
 }
 
 // RUNDE O-NETZUI: die ausgehandelte Rate in Megabit je Sekunde, oder 0.
