@@ -8,7 +8,7 @@
 # ==================================================================
 #
 # `O-009` in OFFEN.md: `jarvisd` weist das Geraet mit einem
-# Ed25519-Paar aus; der private Teil liegt in /etc/jarvis/geraet.key,
+# Ed25519-Paar aus; der private Teil liegt in /etc/jarvis/device.key,
 # entsteht aber erst beim Koppeln und zwar in der RAM-Wurzel. Nach
 # jedem Neustart muss neu gekoppelt werden. In OFFEN.md steht dazu
 # "haengt an P-001" -- also an der Installation auf Platte.
@@ -37,17 +37,17 @@
 # WIE GEMESSEN WIRD
 # ==================================================================
 #
-#   Lauf 1   jsig aus                 -> legt das Paar an, nennt `pub`
-#            jsig unterschreibe <hex> -> `sig` auf eine feste Nachricht
+#   Lauf 1   jsig init                 -> legt das Paar an, nennt `pub`
+#            jsig sign <hex> -> `sig` auf eine feste Nachricht
 #   Lauf 2   DIESELBE PLATTE, neuer Start des Kerns
-#            jsig aus                 -> darf KEINEN neuen anlegen
-#            jsig pruefe <pub1> <msg> <sig1> -> die ALTE Unterschrift
-#   Lauf 3   GEGENPROBE (Zuruecksetzen): rm geraet.key, dann jsig aus
+#            jsig init                 -> darf KEINEN neuen anlegen
+#            jsig verify <pub1> <msg> <sig1> -> die ALTE Unterschrift
+#   Lauf 3   GEGENPROBE (Zuruecksetzen): rm geraet.key, dann jsig init
 #            -> jetzt MUSS ein ANDERER Schluessel herauskommen
 #
 # Und die Unterschrift aus Lauf 1 wird zusaetzlich von
 # `python-cryptography` nachgerechnet -- fremdes Werkzeug, damit ein
-# Fehler, der in `jsig aus` und `jsig pruefe` gleich steckt, auffliegt.
+# Fehler, der in `jsig init` und `jsig verify` gleich steckt, auffliegt.
 #
 # Aufruf:  bash tools/geraetekey/run.sh
 set -uo pipefail
@@ -91,9 +91,9 @@ K="$TMPD/w0/k.mb"
 # Punkt: eine Platte, die jeder Lauf frisch kopiert, kann gar nichts
 # ueberleben.
 cat > "$TMPD/rechte.conf" <<'CONF'
-befehle        = nein
-bildschirmfoto = nein
-systeminfo     = nein
+commands        = no
+screenshot = no
+sysinfo     = no
 CONF
 python3 tools/osum/mkfs.py build "$TMPD/platte.img" 16384 \
     /bin/ /etc/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
@@ -105,7 +105,7 @@ python3 tools/osum/mkfs.py build "$TMPD/platte.img" 16384 \
     "/bin/chmod=$TMPD/w0/chmod.elf" \
     "/bin/jsig=$TMPD/w0/jsig.elf" \
     "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" \
-    "/etc/jarvis/rechte.conf=$TMPD/rechte.conf" \
+    "/etc/jarvis/permissions.conf=$TMPD/rechte.conf" \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "die Wurzel steht auf der Platte ($(stat -c%s "$TMPD/platte.img") Oktette)" \
     || { bad "mkfs"; tail -6 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
@@ -130,7 +130,7 @@ cp -f "$TMPD/platte.img" "$TMPD/frisch.img"
 NACHRICHT=4f2d303039   # "O-009" in Hex
 
 echo "== 1. Lauf 1: den Geraeteschluessel anlegen und unterschreiben =="
-start lauf1 "jsig aus;jsig unterschreibe $NACHRICHT;exit"
+start lauf1 "jsig init;jsig sign $NACHRICHT;exit"
 PUB1=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf1.txt" | head -1 | awk '{print $2}')
 SIG1=$(grep -aoE '^sig [0-9a-f]{128}' "$TMPD/lauf1.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ]; then
@@ -147,7 +147,7 @@ else
 fi
 
 echo "== 2. NEUSTART -- dieselbe Platte, neuer Kern =="
-start lauf2 "jsig aus;jsig pruefe $PUB1 $NACHRICHT $SIG1;exit"
+start lauf2 "jsig init;jsig verify $PUB1 $NACHRICHT $SIG1;exit"
 PUB2=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf2.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ] && [ "$PUB2" = "$PUB1" ]; then
     ok "O-009: NACH DEM NEUSTART DERSELBE oeffentliche Teil -- kein zweites Koppeln noetig"
@@ -155,7 +155,7 @@ else
     bad "O-009: der Schluessel hat den Neustart nicht ueberlebt (vorher ${PUB1:-?}, nachher ${PUB2:-?})"
     tail -8 "$TMPD/lauf2.txt" | sed 's/^/        /'
 fi
-if grep -qa '^ja$' "$TMPD/lauf2.txt"; then
+if grep -qa '^yes$' "$TMPD/lauf2.txt"; then
     ok "O-009: eine Unterschrift VON VOR dem Neustart verifiziert weiterhin"
 else
     bad "O-009: die alte Unterschrift verifiziert nach dem Neustart nicht"
@@ -194,7 +194,7 @@ echo "== 4. GEGENPROBE: zuruecksetzen -- und er MUSS weg sein =="
 # Ohne diese Gegenprobe waere Abschnitt 2 auch dann gruen, wenn `jsig`
 # den Schluessel gar nicht aus der Datei liest, sondern etwa aus einer
 # festen Zahl ableitet.
-start lauf3 "rm /etc/jarvis/geraet.key;jsig aus;exit"
+start lauf3 "rm /etc/jarvis/device.key;jsig init;exit"
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$TMPD/lauf3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
     ok "nach dem Zuruecksetzen entsteht ein ANDERER Schluessel (pub ${PUB3:0:16}...)"
@@ -203,8 +203,8 @@ else
     tail -8 "$TMPD/lauf3.txt" | sed 's/^/        /'
 fi
 # Und die alte Unterschrift darf gegen den NEUEN Schluessel nicht mehr passen.
-start lauf4 "jsig pruefe $PUB3 $NACHRICHT $SIG1;exit"
-if grep -qa '^nein$' "$TMPD/lauf4.txt"; then
+start lauf4 "jsig verify $PUB3 $NACHRICHT $SIG1;exit"
+if grep -qa '^no$' "$TMPD/lauf4.txt"; then
     ok "GEGENPROBE: die alte Unterschrift passt NICHT zum neuen Schluessel"
 else
     bad "die alte Unterschrift passt auch zum neuen Schluessel -- dann prueft jsig nicht"

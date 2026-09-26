@@ -859,7 +859,7 @@ printf '%08d\n' "${OTA_FASSUNG:-0}" > "$OUT/FASSUNG"
 
 # ------------------------------------------- RUNDE STICK: DIE BRUECKE
 #
-# `/etc/jarvis/rechte.conf` MUSS da sein -- ohne Rechteliste sagt
+# `/etc/jarvis/permissions.conf` MUSS da sein -- ohne Rechteliste sagt
 # `jarvisd` "ohne Rechteliste ist nichts erlaubt" und hoert auf. Was
 # drinsteht, ist die Vorgabe eines Geraets, das noch niemandem gehoert:
 # KEIN Server, KEINE Befehle, KEIN Bildschirmfoto, KEINE Pfade. So
@@ -870,32 +870,29 @@ if [ -n "${JARVIS_CONF:-}" ] && [ -s "${JARVIS_CONF}" ]; then
     cp -f "$JARVIS_CONF" "$OUT/rechte.conf"
 else
     cat > "$OUT/rechte.conf" <<'EOFJ'
-# /etc/jarvis/rechte.conf -- was der JARVIS-Helfer auf DIESEM Geraet darf.
+# /etc/jarvis/permissions.conf -- what the JARVIS helper may do on THIS device.
 #
-# Diese Datei wird VOR JEDEM AUFTRAG neu gelesen. Was hier nicht steht,
-# ist nicht erlaubt; eine leere Liste heisst "nichts".
+# Re-read before EVERY request. Anything not listed is not allowed.
 #
-# server         = <adresse>:<port>   wo sich der Dienst MELDET (hinaus,
-#                                     er macht keinen Anschluss auf)
-# servername     = <name>             der Name, den das Zertifikat
-#                                     tragen muss
-# wurzeln        = /etc/ssl/roots.pem gegen welche Wurzeln geprueft wird
-# befehle        = ja|nein            duerfen Programme laufen
-# befehl_erlaubt = /bin/echo          und WELCHE (eine Zeile je Programm)
-# bildschirmfoto = ja|nein
-# systeminfo     = ja|nein
-# lesen          = /var/jarvis/       welche Pfade gelesen werden duerfen
-# schreiben      = /var/jarvis/
-# auflisten      = /var/jarvis/
-# max_ausgabe    = 4096
-# max_datei      = 8192
+# server          = <ip>:<port>        where the helper connects to (outbound only)
+# servername      = <name>             name the server certificate must carry
+# roots           = /etc/ssl/roots.pem trusted roots
+# commands        = yes|no             may programs run
+# command_allowed = /bin/echo          and WHICH (one line per program)
+# screenshot      = yes|no             (plus `jarvisctl screenshot` on the device)
+# input           = yes|no             remote keyboard/mouse
+# sysinfo         = yes|no
+# read            = /var/jarvis/       paths that may be read
+# write           = /var/jarvis/
+# list            = /var/jarvis/
+# max_output      = 4096
+# max_file        = 8192
 #
-# AB WERK IST ALLES AUS. Ein Stick, der sich beim ersten Start irgendwo
-# meldet, waere eine Entscheidung, die niemand getroffen hat.
-befehle        = nein
-bildschirmfoto = nein
-systeminfo     = nein
-wurzeln        = /etc/ssl/roots.pem
+# FACTORY DEFAULT: EVERYTHING OFF. No server, the helper stays silent.
+commands   = no
+screenshot = no
+sysinfo    = no
+roots      = /etc/ssl/roots.pem
 EOFJ
 fi
 
@@ -1156,7 +1153,7 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
     fi
 done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
-ARGS+=("/etc/jarvis/rechte.conf=$OUT/rechte.conf")
+ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
 ARGS+=("/system/FASSUNG=$OUT/FASSUNG")
 if [ -n "$KEY" ] && [ -s "$KEY" ]; then
@@ -1188,7 +1185,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/drucke \
-/bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
+/bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/permissions.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /bin/nedit /apps/nedit.osp/start /apps/nedit.osp/INFO \

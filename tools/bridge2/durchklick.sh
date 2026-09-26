@@ -62,7 +62,7 @@ lauf() {
         SPEC="$SPEC /bin/$p=$W/$p.elf"
     done
     SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
-    SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf"
+    SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
     SPEC="$SPEC /etc/ssl/roots.pem=$W/leer.pem"
     python3 tools/osum/mkfs.py build "$W/$name.img" 16384 $SPEC \
         > "$W/mkfs-$name.txt" 2>&1 || return 1
@@ -78,19 +78,19 @@ lauf() {
 cat > "$W/rechte-aus.conf" <<'CONF'
 server         = 10.9.0.1:8443
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = nein
-lesen          = /var/jarvis/
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-bildschirmfoto = ja
-systeminfo     = ja
-eingabe        = nein
-max_ausgabe    = 65536
-max_datei      = 4194304
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+roots        = /etc/ssl/roots.pem
+commands        = no
+read          = /var/jarvis/
+write      = /var/jarvis/
+list      = /var/jarvis/
+screenshot = yes
+sysinfo     = yes
+input        = no
+max_output    = 65536
+max_file      = 4194304
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 sed 's/^eingabe        = nein/eingabe        = ja/' \
     "$W/rechte-aus.conf" > "$W/rechte-an.conf"

@@ -78,7 +78,7 @@ async function fsReq(op, m) {
   else bad(`remote_read: unerwarteter Inhalt ${JSON.stringify((r.text || '').slice(0, 60))}`)
 }
 {
-  const r = await fsReq('read', { path: '/etc/jarvis/geraet.key' })
+  const r = await fsReq('read', { path: '/etc/jarvis/device.key' })
   if (r.error) ok('remote_read auf den privaten Schluessel wird abgelehnt')
   else bad('der private Schluessel liess sich lesen -- das darf nicht sein')
 }

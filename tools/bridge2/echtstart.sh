@@ -85,13 +85,13 @@ echo "== A2. MIT Serveradresse, weiterhin KEIN DHCP =="
 cat > "$W/rechte.conf" <<CONF
 server         = 10.0.2.99:8090
 servername     = store.fleitec.com
-wurzeln        = /etc/ssl/roots.pem
-befehle        = nein
-bildschirmfoto = nein
-systeminfo     = ja
+roots        = /etc/ssl/roots.pem
+commands        = no
+screenshot = no
+sysinfo     = yes
 CONF
 cp "$WURZEL" "$W/a2.img"
-python3 tools/osum/mkfs.py put "$W/a2.img" "/etc/jarvis/rechte.conf=$W/rechte.conf" \
+python3 tools/osum/mkfs.py put "$W/a2.img" "/etc/jarvis/permissions.conf=$W/rechte.conf" \
     > "$W/put.txt" 2>&1 || echo "   (put nicht moeglich: $(tail -1 "$W/put.txt"))"
 timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -append "osum nokbd nosched noproc nofs gfx nocursor nic dhcp nsvc=0 nwait=0 script=jarvisd -v -t 20000;exit" \
@@ -111,11 +111,11 @@ WMS=$(grep -aoE 'jarvisd: wartezeit_ms [0-9]+' "$W/a2.txt" | tail -1 | awk '{pri
 echo
 
 # ------------------------------------------------------------------
-# C. DER KOPPLUNGSCODE
+# C. DER PAIRING CODE
 # ------------------------------------------------------------------
-echo "== C. KOPPLUNGSCODE: wird er angezeigt, und wie lange? =="
+echo "== C. PAIRING CODE: wird er angezeigt, und wie lange? =="
 grep -na --text -n 'kopplung' kernel/app/jarvisd.fi | head -3 | sed 's/^/   /'
-echo "   (Anzeige: /var/jarvis/kopplung + Konsole, siehe jarvisd.fi Kopf)"
+echo "   (Anzeige: /var/jarvis/pairing + Konsole, siehe jarvisd.fi Kopf)"
 echo
 
 echo "== ZUSAMMENFASSUNG =="

@@ -77,19 +77,19 @@ ok "Kern, Programme und Zertifikate stehen"
 cat > "$W/rechte.conf" <<CONF
 server         = $HOST_IP:$TLSPORT
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = nein
-lesen          = /var/jarvis/
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-bildschirmfoto = nein
-systeminfo     = ja
-eingabe        = nein
-max_ausgabe    = 65536
-max_datei      = 262144
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+roots        = /etc/ssl/roots.pem
+commands        = no
+read          = /var/jarvis/
+write      = /var/jarvis/
+list      = /var/jarvis/
+screenshot = no
+sysinfo     = yes
+input        = no
+max_output    = 65536
+max_file      = 262144
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 
 SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
@@ -97,7 +97,7 @@ for p in sh ls cat echo chmod jsig jarvisctl; do
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
-SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf"
+SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem"
 python3 tools/osum/mkfs.py build "$W/probe.img" 16384 $SPEC >"$W/mkfs.txt" 2>&1 || {
     echo "mkfs gescheitert"; tail -4 "$W/mkfs.txt"; exit 1; }
@@ -185,10 +185,10 @@ QPID=$!
 
 # Warten, bis es EINMAL durch ist -- dann abreissen.
 for i in $(seq 1 60); do
-    if grep -aq 'jarvisd: angemeldet' "$W/s-abriss.txt" 2>/dev/null; then break; fi
+    if grep -aq 'jarvisd: signed in' "$W/s-abriss.txt" 2>/dev/null; then break; fi
     sleep 0.5
 done
-if grep -aq 'jarvisd: angemeldet' "$W/s-abriss.txt" 2>/dev/null; then
+if grep -aq 'jarvisd: signed in' "$W/s-abriss.txt" 2>/dev/null; then
     ok "erste Verbindung steht"
 else
     bad "die erste Verbindung kam nicht zustande"

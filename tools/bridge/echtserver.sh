@@ -106,30 +106,30 @@ cat > "$W/rechte.conf" <<CONF
 # Fuer diesen Pruefstand: der Server ist der echte JARVIS auf dem Wirt.
 server         = $HOST_IP:$TLSPORT
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = ja
-befehl_erlaubt = /bin/ls
-befehl_erlaubt = /bin/echo
-befehl_erlaubt = /bin/cat
-lesen          = /var/jarvis/
-lesen          = /etc/jarvis/rechte.conf
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-auflisten      = /
-bildschirmfoto = ja
-systeminfo     = ja
-max_ausgabe    = 65536
-max_datei      = 8388608
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+roots        = /etc/ssl/roots.pem
+commands        = yes
+command_allowed = /bin/ls
+command_allowed = /bin/echo
+command_allowed = /bin/cat
+read          = /var/jarvis/
+read          = /etc/jarvis/permissions.conf
+write      = /var/jarvis/
+list      = /var/jarvis/
+list      = /
+screenshot = yes
+sysinfo     = yes
+max_output    = 65536
+max_file      = 8388608
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 echo "hallo aus osum" > "$W/gruss.txt"
 
 SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo chmod sleep jsig jarvisctl; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
-SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf"
+SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/certs/ca.pem"
 SPEC="$SPEC /var/jarvis/gruss.txt=$W/gruss.txt"
 python3 tools/osum/mkfs.py build "$W/osum.img" 131072 $SPEC --v3 >"$W/mkfs.txt" 2>&1 || {
@@ -219,8 +219,8 @@ fi
 # ------------------------------------------------- 5. Osum meldet sich an
 # DIE REIHENFOLGE IST DER GANZE WITZ DER KOPPLUNG.
 #
-# `jarvisctl koppeln` bestaetigt einen Code, den DER HELFER SCHON
-# BEKOMMEN HAT: der Helfer legt ihn nach `/var/jarvis/kopplung`, und
+# `jarvisctl pair` bestaetigt einen Code, den DER HELFER SCHON
+# BEKOMMEN HAT: der Helfer legt ihn nach `/var/jarvis/pairing`, und
 # `jarvisctl` liest ihn dort und vergleicht. Wer zuerst bestaetigt,
 # bekommt zu Recht "Es liegt keine Kopplungsanfrage vor" -- gemessen,
 # `jarvisctl -> 1`, und der Server meldete "die Kopplung wurde am
@@ -229,11 +229,11 @@ fi
 #
 # ALSO IN DREI SCHRITTEN, wie an einem echten Geraet auch:
 #   1. `jarvisd -1` verbindet sich, bekommt `kopplung-noetig <code>`,
-#      schreibt ihn auf den Schirm und nach /var/jarvis/kopplung und
+#      schreibt ihn auf den Schirm und nach /var/jarvis/pairing und
 #      legt auf (niemand hat bestaetigt),
-#   2. der Mensch tippt `jarvisctl koppeln <code>`,
+#   2. der Mensch tippt `jarvisctl pair <code>`,
 #   3. `jarvisd` verbindet sich neu -- und jetzt geht es durch.
-SKRIPT="jarvisd -1 -t 20000;jarvisctl koppeln $CODE;jarvisctl fotoschein 900;jarvisd -t 120000"
+SKRIPT="jarvisd -1 -t 20000;jarvisctl pair $CODE;jarvisctl screenshot 900;jarvisd -t 120000"
 timeout 400 qemu-system-x86_64 -kernel "$K" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=$SKRIPT" \
     -serial "file:$W/seriell.txt" -display none -no-reboot \

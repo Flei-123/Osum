@@ -40,25 +40,25 @@ K="$W/k.mb"
 cat > "$W/rechte.conf" <<'CONF'
 server         = 10.9.0.1:8443
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = nein
-lesen          = /var/jarvis/
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-bildschirmfoto = ja
-systeminfo     = ja
-max_ausgabe    = 65536
-max_datei      = 8388608
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+roots        = /etc/ssl/roots.pem
+commands        = no
+read          = /var/jarvis/
+write      = /var/jarvis/
+list      = /var/jarvis/
+screenshot = yes
+sysinfo     = yes
+max_output    = 65536
+max_file      = 8388608
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 : > "$W/leer.pem"
 
 SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo chmod sleep jsig jarvisctl; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
-SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf /etc/ssl/roots.pem=$W/leer.pem"
+SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf /etc/ssl/roots.pem=$W/leer.pem"
 python3 tools/osum/mkfs.py build "$W/probe.img" 131072 $SPEC --v3 >"$W/mkfs.txt" 2>&1 || {
     echo "VERGLEICH: mkfs gescheitert"; tail -4 "$W/mkfs.txt"; exit 1; }
 cp "$W/probe.img" "$W/live.img"
@@ -103,7 +103,7 @@ cp "$W/probe.img" "$W/live.img"
 # Das schliesst beides aus, was ein kaputter Bildschirmfoto-Aufruf
 # liefern koennte: einen konstanten Puffer (dann waeren die Bilder
 # gleich) und Zufallsspeicher (dann waeren sie ueberall verschieden).
-SKRIPT="jarvisctl fotoschein 600;jarvisd -f /var/jarvis/eins.ppm;echo BRIDGE2-MARKE;jarvisctl fotoschein 600;jarvisd -f /var/jarvis/zwei.ppm"
+SKRIPT="jarvisctl screenshot 600;jarvisd -f /var/jarvis/eins.ppm;echo BRIDGE2-MARKE;jarvisctl screenshot 600;jarvisd -f /var/jarvis/zwei.ppm"
 timeout 240 qemu-system-x86_64 -kernel "$K" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx nocursor script=$SKRIPT" \
     -serial "file:$W/seriell.txt" -display none -no-reboot \

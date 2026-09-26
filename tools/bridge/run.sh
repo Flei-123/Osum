@@ -171,25 +171,25 @@ mach_conf() { # <datei> <befehle> <foto> <system> <extra...>
     cat > "$f" <<CONF
 server         = $HOST_IP:$SRVPORT
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = $1
-bildschirmfoto = $2
-systeminfo     = $3
+roots        = /etc/ssl/roots.pem
+commands        = $1
+screenshot = $2
+sysinfo     = $3
 CONF
     shift 3
     for z in "$@"; do echo "$z" >> "$f"; done
 }
 
-mach_conf "$TMPD/voll.conf" ja nein ja \
-    "befehl_erlaubt = /bin/echo" \
-    "lesen          = /var/jarvis/" \
-    "lesen          = /etc/jarvis/rechte.conf" \
-    "schreiben      = /var/jarvis/" \
-    "auflisten      = /var/jarvis/" \
-    "max_ausgabe    = 4096" \
-    "max_datei      = 8192"
+mach_conf "$TMPD/voll.conf" yes no yes \
+    "command_allowed = /bin/echo" \
+    "read          = /var/jarvis/" \
+    "read          = /etc/jarvis/permissions.conf" \
+    "write      = /var/jarvis/" \
+    "list      = /var/jarvis/" \
+    "max_output    = 4096" \
+    "max_file      = 8192"
 
-mach_conf "$TMPD/leer.conf" nein nein nein
+mach_conf "$TMPD/leer.conf" no no no
 
 abbild() { # <abbild> <conf> [zusatzspezifikationen...]
     local img=$1 conf=$2; shift 2
@@ -203,7 +203,7 @@ abbild() { # <abbild> <conf> [zusatzspezifikationen...]
         "/bin/jsig=$TMPD/w0/jsig.elf" \
         "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" \
         "/bin/jarvisd=$TMPD/w0/jarvisd.elf" \
-        "/etc/jarvis/rechte.conf=$conf" \
+        "/etc/jarvis/permissions.conf=$conf" \
         "/etc/ssl/roots.pem=$TMPD/certs/ca.pem" \
         "$@" > "$TMPD/mkfs.txt" 2>&1 \
         || { bad "mkfs fuer $img"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
@@ -228,10 +228,10 @@ lauf_ohne_netz() { # <abbild> <skript> <ausgabe>
 
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisd -n;exit" "$TMPD/s2a.txt"
 F="$TMPD/s2a.txt"
-hat "$F" "rechte lesen 2 schreiben 1 auflisten 1 befehle 1 foto nein system ja" \
+hat "$F" "permissions read 2 write 1 list 1 commands 1 screenshot no sysinfo yes" \
     "die Rechteliste wird gelesen und Punkt fuer Punkt gemeldet"
 lauf_ohne_netz "$TMPD/leer.img" "jarvisd -n;exit" "$TMPD/s2b.txt"
-hat "$TMPD/s2b.txt" "rechte lesen 0 schreiben 0 auflisten 0 befehle nein foto nein system nein" \
+hat "$TMPD/s2b.txt" "permissions read 0 write 0 list 0 commands no screenshot no sysinfo no" \
     "GEGENPROBE: eine Liste ohne Eintraege erlaubt NICHTS -- die Voreinstellung ist nein"
 
 # =====================================================================
@@ -291,7 +291,7 @@ cat > "$TMPD/auf-gut.txt" <<'AUF'
 system||
 schreib|/var/jarvis/neu.txt|48616c6c6f2c204a5553544954494e0a
 lies|/var/jarvis/neu.txt|
-lies|/etc/jarvis/rechte.conf|
+lies|/etc/jarvis/permissions.conf|
 liste|/var/jarvis/|
 befehl|/bin/echo eins zwei|
 foto||
@@ -299,7 +299,7 @@ AUF
 draht_auf
 gegenstelle_an good "$TMPD/auf-gut.txt" "$TMPD/g1.log"
 T0=$(date +%s%N)
-lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 60000;jarvisctl protokoll 40;exit" "$TMPD/r1.txt"
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 60000;jarvisctl log 40;exit" "$TMPD/r1.txt"
 T1=$(date +%s%N)
 gegenstelle_aus
 draht_zu
@@ -309,8 +309,8 @@ hat "$G" "TLSv1.3" "die Verbindung steht auf TLS 1.3 -- gesagt hat das Python, n
 hat "$G" "BEWEIS gut" "die Ed25519-Unterschrift des Geraets stimmt (nachgerechnet von python-cryptography)"
 hat "$G" "GEGENPROBE gut" "GEGENPROBE: dieselbe Unterschrift ueber andere Oktette faellt durch"
 hat "$G" "ANGEMELDET" "der Server hat die Anmeldung angenommen"
-hat "$F" "jarvisd: verbunden" "und Osum hat es auch so gesehen"
-hat "$F" "jarvisd: angemeldet" "der Helfer meldet sich angemeldet"
+hat "$F" "jarvisd: connected" "und Osum hat es auch so gesehen"
+hat "$F" "jarvisd: signed in" "der Helfer meldet sich angemeldet"
 
 PUB=$(grep -a '^PUB ' "$G" | awk '{print $2}')
 zahl "die Laenge des oeffentlichen Schluessels in Hexziffern" "${#PUB}" eq 64
@@ -346,10 +346,10 @@ hat "$F" "jarvisd: verbindungen 1" "genau eine Verbindung"
 hat "$F" "jarvisd: auftraege 7" "sieben Auftraege gezaehlt"
 
 echo "   -- das Protokoll unter /var/log/jarvisd.log"
-hat "$F" "dienst gestartet" "der Start steht im Protokoll"
-hat "$F" "sitzung angemeldet" "die Anmeldung steht im Protokoll"
+hat "$F" "service started" "der Start steht im Protokoll"
+hat "$F" "session signed-in" "die Anmeldung steht im Protokoll"
 hat "$F" "system ok" 'ein erledigter Auftrag steht mit ok im Protokoll'
-hat "$F" "foto ABGELEHNT" 'ein abgelehnter steht mit ABGELEHNT darin'
+hat "$F" "foto REJECTED" 'ein abgelehnter steht mit ABGELEHNT darin'
 
 VERB_MS=$(( (T1-T0)/1000000 ))
 note "vom QEMU-Start bis zum Ende dieses Laufs: $VERB_MS ms (mit Bau des Abbilds ausserhalb)"
@@ -360,7 +360,7 @@ echo "== 5. ZUSAGE (a): jede Auftragsart einzeln abgelehnt =="
 # Die Rechteliste erlaubt NICHTS. Alle sechs Arten muessen einzeln
 # scheitern, jede mit einem Grund, jede im Protokoll -- und danach darf
 # nichts geschehen sein.
-mach_conf "$TMPD/nix.conf" nein nein nein
+mach_conf "$TMPD/nix.conf" no no no
 abbild "$TMPD/nix.img" "$TMPD/nix.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
 cat > "$TMPD/auf-nix.txt" <<'AUF'
 system||
@@ -369,12 +369,12 @@ schreib|/var/jarvis/darfnicht.txt|4e4945
 liste|/var/jarvis/|
 befehl|/bin/echo hallo|
 foto||
-lies|/var/jarvis/../etc/jarvis/geraet.key|
-lies|/etc/jarvis/geraet.key|
+lies|/var/jarvis/../etc/jarvis/device.key|
+lies|/etc/jarvis/device.key|
 AUF
 draht_auf
 gegenstelle_an good "$TMPD/auf-nix.txt" "$TMPD/g2.log"
-lauf_mit_netz "$TMPD/nix.img" "jarvisd -1 -t 60000;cat /var/jarvis/darfnicht.txt;jarvisctl protokoll 40;exit" "$TMPD/r2.txt"
+lauf_mit_netz "$TMPD/nix.img" "jarvisd -1 -t 60000;cat /var/jarvis/darfnicht.txt;jarvisctl log 40;exit" "$TMPD/r2.txt"
 gegenstelle_aus
 draht_zu
 G="$TMPD/g2.log"; F="$TMPD/r2.txt"
@@ -392,18 +392,18 @@ pruefe_nein() { # <nr> <art> <stichwort>
         bad "$2: NICHT abgelehnt (Status '$(status_von "$1")')"
     fi
 }
-pruefe_nein 1 system     "systeminfo"
-pruefe_nein 2 lies       "lesen"
-pruefe_nein 3 schreib    "schreiben"
-pruefe_nein 4 liste      "auflisten"
-pruefe_nein 5 befehl     "befehle = nein"
-pruefe_nein 6 foto       "bildschirmfoto = nein"
-pruefe_nein 7 "lies mit .."  "kein sauberer absoluter Pfad"
-pruefe_nein 8 "lies auf den Schluessel" "lesen"
+pruefe_nein 1 system     "sysinfo"
+pruefe_nein 2 lies       '`read`'
+pruefe_nein 3 schreib    '`write`'
+pruefe_nein 4 liste      '`list`'
+pruefe_nein 5 befehl     "commands = no"
+pruefe_nein 6 foto       "screenshot = no"
+pruefe_nein 7 "lies mit .."  "not a clean absolute path"
+pruefe_nein 8 "lies auf den Schluessel" '`read`'
 
 hat_nicht "$F" "NIE" "und NICHTS ist passiert: /var/jarvis/darfnicht.txt gibt es nicht"
 for a in system lies schreib liste befehl foto; do
-    grep -qa "^[0-9-]* [0-9:]* $a ABGELEHNT" "$F" \
+    grep -qa "^[0-9-]* [0-9:]* $a REJECTED" "$F" \
         && ok "$a: die Ablehnung steht im Protokoll" \
         || bad "$a: keine Ablehnungszeile im Protokoll"
 done
@@ -418,17 +418,17 @@ echo "== 6. ZUSAGE (b): falsche Zertifikate =="
 for fall in expired wrong rogue; do
     draht_auf
     gegenstelle_an "$fall" "$TMPD/auf-gut.txt" "$TMPD/gz-$fall.log"
-    lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 12000;jarvisctl protokoll 10;exit" "$TMPD/rz-$fall.txt" 120
+    lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 12000;jarvisctl log 10;exit" "$TMPD/rz-$fall.txt" 120
     gegenstelle_aus
     draht_zu
     Z="$TMPD/rz-$fall.txt"
-    if grep -qa "jarvisd: der Handschlag ist gescheitert" "$Z"; then
+    if grep -qa "jarvisd: TLS handshake failed" "$Z"; then
         ok "$fall: der Handschlag wird abgelehnt, Grund $(grep -a 'Handschlag ist gescheitert' "$Z" | head -1 | sed 's/.*Grund //')"
     else
         bad "$fall: der Handschlag wurde NICHT abgelehnt"
     fi
-    hat_nicht "$Z" "jarvisd: angemeldet" "$fall: und es wurde sich NICHT angemeldet"
-    hat "$Z" "tls ABGELEHNT" "$fall: die Ablehnung steht im Protokoll"
+    hat_nicht "$Z" "jarvisd: signed in" "$fall: und es wurde sich NICHT angemeldet"
+    hat "$Z" "tls REJECTED" "$fall: die Ablehnung steht im Protokoll"
 done
 
 # Und ohne Wurzelspeicher ist nichts vertrauenswuerdig, auch nicht das
@@ -437,15 +437,15 @@ python3 tools/osum/mkfs.py build "$TMPD/leerca.img" 16384 \
     /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
     "/bin/sh=$TMPD/w0/sh.elf" "/bin/jsig=$TMPD/w0/jsig.elf" \
     "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" "/bin/jarvisd=$TMPD/w0/jarvisd.elf" \
-    "/etc/jarvis/rechte.conf=$TMPD/voll.conf" \
+    "/etc/jarvis/permissions.conf=$TMPD/voll.conf" \
     "/etc/ssl/roots.pem=$TMPD/leerspeicher.pem" > "$TMPD/mkfs2.txt" 2>&1
 draht_auf
 gegenstelle_an good "$TMPD/auf-gut.txt" "$TMPD/gz-leer.log"
 lauf_mit_netz "$TMPD/leerca.img" "jarvisd -1 -t 12000;exit" "$TMPD/rz-leer.txt" 120
 gegenstelle_aus
 draht_zu
-hat "$TMPD/rz-leer.txt" "kein Wurzelspeicher" "leerer Speicher: der Helfer sagt es laut"
-hat_nicht "$TMPD/rz-leer.txt" "jarvisd: angemeldet" "leerer Speicher: und meldet sich NICHT an"
+hat "$TMPD/rz-leer.txt" "no root store" "leerer Speicher: der Helfer sagt es laut"
+hat_nicht "$TMPD/rz-leer.txt" "jarvisd: signed in" "leerer Speicher: und meldet sich NICHT an"
 
 # =====================================================================
 echo "== 7. ZUSAGE (c): Kopplung ohne Bestaetigung am Geraet =="
@@ -456,28 +456,28 @@ system||
 AUF
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g3.log" --kopplung "$CODE"
-lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 30000;jarvisctl protokoll 10;exit" "$TMPD/r3.txt" 150
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r3.txt" 150
 gegenstelle_aus
 draht_zu
 hat "$TMPD/g3.log" "KOPPLUNG-ABGELEHNT" "ohne Bestaetigung: der Helfer lehnt die Kopplung ab"
-hat "$TMPD/r3.txt" "KOPPLUNGSCODE $CODE" "der Code wird dem Menschen am Geraet gezeigt"
-hat "$TMPD/r3.txt" "die Kopplung wurde ABGELEHNT" "und die Ablehnung steht auf der Konsole"
-hat "$TMPD/r3.txt" "kopplung abgelehnt" "sie steht auch im Protokoll"
+hat "$TMPD/r3.txt" "PAIRING CODE $CODE" "der Code wird dem Menschen am Geraet gezeigt"
+hat "$TMPD/r3.txt" "pairing REJECTED" "und die Ablehnung steht auf der Konsole"
+hat "$TMPD/r3.txt" "pairing rejected" "sie steht auch im Protokoll"
 hat_nicht "$TMPD/g3.log" "ANGEMELDET" "und der Server hat KEINE angemeldete Sitzung gesehen"
 
 echo "   -- und jetzt mit Bestaetigung, damit die Ablehnung etwas bedeutet"
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g4.log" --kopplung "$CODE" --verbindungen 2
-lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl koppeln $CODE;jarvisd -1 -t 30000;jarvisctl protokoll 10;exit" "$TMPD/r4.txt" 200
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair $CODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r4.txt" 200
 gegenstelle_aus
 draht_zu
-hat "$TMPD/r4.txt" "Die Kopplung ist bestaetigt" "jarvisctl koppeln nimmt den Code an, den der Helfer bekommen hat"
+hat "$TMPD/r4.txt" "Pairing confirmed" "jarvisctl pair nimmt den Code an, den der Helfer bekommen hat"
 hat "$TMPD/g4.log" "ANGEMELDET" "beim zweiten Anlauf ist die Kopplung durch"
-hat "$TMPD/r4.txt" "kopplung bestaetigt" "und sie steht im Protokoll"
+hat "$TMPD/r4.txt" "pairing confirmed" "und sie steht im Protokoll"
 
 echo "   -- GEGENPROBE: ein Code, den niemand angefragt hat"
-lauf_ohne_netz "$TMPD/nonet.img" "jarvisctl koppeln 424242;exit" "$TMPD/r4b.txt"
-hat "$TMPD/r4b.txt" "keine Kopplungsanfrage" "jarvisctl weigert sich, eine Kopplung zu bestaetigen, die es nicht gibt"
+lauf_ohne_netz "$TMPD/nonet.img" "jarvisctl pair 424242;exit" "$TMPD/r4b.txt"
+hat "$TMPD/r4b.txt" "No pairing request" "jarvisctl weigert sich, eine Kopplung zu bestaetigen, die es nicht gibt"
 
 # =====================================================================
 echo "== 8. ZUSAGE (d): Abriss mitten im Auftrag =="
@@ -486,16 +486,16 @@ draht_auf
 gegenstelle_an good "$TMPD/auf-gut.txt" "$TMPD/g5.log" --abriss
 # OHNE -1: der Helfer muss von selbst wiederkommen wollen. Die
 # Zeitgrenze beendet ihn, nicht der Abriss.
-lauf_mit_netz "$TMPD/nonet.img" "jarvisd -t 25000 -v;jarvisctl protokoll 10;exit" "$TMPD/r5.txt" 200
+lauf_mit_netz "$TMPD/nonet.img" "jarvisd -t 25000 -v;jarvisctl log 10;exit" "$TMPD/r5.txt" 200
 gegenstelle_aus
 draht_zu
 hat "$TMPD/g5.log" "ABRISS nach Auftrag 1" "die Gegenstelle hat mitten im Auftrag abgerissen"
-hat "$TMPD/r5.txt" "jarvisd: warten" "der Helfer stirbt nicht, sondern wartet auf den naechsten Versuch"
+hat "$TMPD/r5.txt" "jarvisd: waiting" "der Helfer stirbt nicht, sondern wartet auf den naechsten Versuch"
 hat "$TMPD/r5.txt" "jarvisd: verbindungen 1" "er zaehlt die eine Verbindung, die es gab"
 # Er versucht es WIRKLICH wieder -- ohne Gegenstelle scheitert der
 # Versuch, und genau das steht dann da.
-hat "$TMPD/r5.txt" "jarvisd: keine Verbindung" "und er versucht es danach wieder (die Gegenstelle ist weg)"
-hat "$TMPD/r5.txt" "dienst beendet" "er endet geordnet an seiner Zeitgrenze"
+hat "$TMPD/r5.txt" "jarvisd: no connection" "und er versucht es danach wieder (die Gegenstelle ist weg)"
+hat "$TMPD/r5.txt" "service stopped" "er endet geordnet an seiner Zeitgrenze"
 
 # =====================================================================
 echo "== 9. ZUSAGE (e): grosse Datei, grosse Ausgabe =="
@@ -515,7 +515,7 @@ abbild "$TMPD/gross.img" "$TMPD/voll.conf" \
     "/var/jarvis/gruss.txt=$TMPD/gruss.txt" \
     "/var/jarvis/gross.bin=$TMPD/gross.bin"
 # /bin/cat muss dafuer erlaubt sein.
-sed 's|befehl_erlaubt = /bin/echo|befehl_erlaubt = /bin/echo\nbefehl_erlaubt = /bin/cat|' \
+sed 's|command_allowed = /bin/echo|command_allowed = /bin/echo\ncommand_allowed = /bin/cat|' \
     "$TMPD/voll.conf" > "$TMPD/gross.conf"
 abbild "$TMPD/gross.img" "$TMPD/gross.conf" \
     "/var/jarvis/gruss.txt=$TMPD/gruss.txt" \
@@ -528,7 +528,7 @@ draht_zu
 G="$TMPD/g6.log"
 [ "$(status_von 1)" = nein ] && ok "lies: eine Datei ueber max_datei wird abgelehnt statt eingelesen" \
                              || bad "lies gross: $(grep -a '^ANTWORT 1 ' "$G")"
-hat "$G.1.bin" "größer als max_datei" "und der Grund nennt die Grenze"
+hat "$G.1.bin" "larger than max_file" "und der Grund nennt die Grenze"
 [ "$(status_von 2)" = nein ] && ok "schreib: eine Nutzlast ueber max_datei wird abgelehnt" \
                              || bad "schreib gross: $(grep -a '^ANTWORT 2 ' "$G")"
 L3=$(grep -a "^ANTWORT 3 " "$G" | awk '{print $5}')
@@ -537,7 +537,7 @@ if [ -n "$L3" ] && [ "$L3" -le 4200 ]; then
 else
     bad "befehl: die Ausgabe wurde nicht gekuerzt ($L3 Oktette)"
 fi
-hat "$G.3.bin" "gekuerzt, max_ausgabe erreicht" "und die Kuerzung steht in der Antwort statt sie zu verschweigen"
+hat "$G.3.bin" "truncated, max_output reached" "und die Kuerzung steht in der Antwort statt sie zu verschweigen"
 [ "$(status_von 4)" = ok ] && ok "und danach laeuft der Helfer weiter (die kleine Datei kommt)" \
                            || bad "nach den Grenzfaellen antwortet er nicht mehr"
 
@@ -580,10 +580,10 @@ lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>
 # es sagt und geordnet endet.
 lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7.txt" 60
 F="$TMPD/r7.txt"
-hat "$F" "jarvisd: bereit" "ohne Netz startet der Dienst trotzdem"
-hat "$F" "jarvisd: keine Verbindung" "er sagt, dass da nichts ist"
+hat "$F" "jarvisd: ready" "ohne Netz startet der Dienst trotzdem"
+hat "$F" "jarvisd: no connection" "er sagt, dass da nichts ist"
 hat "$F" "jarvisd: verbindungen 0" "keine einzige Verbindung"
-hat "$F" "dienst beendet" "und er endet geordnet an seiner Zeitgrenze"
+hat "$F" "service stopped" "und er endet geordnet an seiner Zeitgrenze"
 
 # LAUF B: der Draht steht, aber niemand lauscht. Dann kommt die
 # Absage sofort, und der Helfer durchlaeuft seine Wartezeiten oft
@@ -592,7 +592,7 @@ draht_auf
 lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7c.txt" 60
 draht_zu
 F="$TMPD/r7c.txt"
-hat "$F" "jarvisd: warten" "mit Draht, aber ohne Gegenstelle: er wartet zwischen den Versuchen"
+hat "$F" "jarvisd: waiting" "mit Draht, aber ohne Gegenstelle: er wartet zwischen den Versuchen"
 WMS=$(grep -a 'wartezeit_ms' "$F" | tail -1 | awk '{print $3}')
 WAUF=$(grep -a 'aufrufe_beim_warten' "$F" | tail -1 | awk '{print $3}')
 note "gewartet: ${WMS:-?} ms, Systemaufrufe des ganzen Systems dabei: ${WAUF:-?}"
@@ -619,12 +619,12 @@ ok "GEGENPROBE gelaufen: derselbe Kern mit Arbeit statt Warten"
 # =====================================================================
 echo "== 11. ZUSAGE (g): der private Schluessel, und wer ihn lesen darf =="
 # =====================================================================
-lauf_ohne_netz "$TMPD/nonet.img" "jsig aus;jarvisctl zustand;jsig unterschreibe 00112233;chmod 644 /etc/jarvis/geraet.key;jsig unterschreibe 00112233;exit" "$TMPD/r8.txt"
+lauf_ohne_netz "$TMPD/nonet.img" "jsig init;jarvisctl status;jsig sign 00112233;chmod 644 /etc/jarvis/device.key;jsig sign 00112233;exit" "$TMPD/r8.txt"
 F="$TMPD/r8.txt"
 hat "$F" "pub " "jsig legt einen Geraeteschluessel an und nennt den oeffentlichen Teil"
-hat "$F" "da, Rechte 600" "die Schluesseldatei hat 0600 -- niemand ausser dem Eigentuemer"
+hat "$F" "present, mode 600" "die Schluesseldatei hat 0600 -- niemand ausser dem Eigentuemer"
 hat "$F" "sig " "und sie laesst sich damit benutzen"
-hat "$F" "darf von anderen gelesen werden" "nach chmod 644 WEIGERT sich jsig, sie zu benutzen"
+hat "$F" "is readable by others" "nach chmod 644 WEIGERT sich jsig, sie zu benutzen"
 SIGZ=$(grep -a '^sig ' "$F" | head -1 | awk '{print $2}')
 zahl "die Laenge der Unterschrift in Hexziffern" "${#SIGZ}" eq 128
 # Die Gegenprobe: die Unterschrift wird von etwas geprueft, das dieses
@@ -663,10 +663,10 @@ zahl "die Rechte des beschnittenen Deskriptors" "${RENG:-0}" eq 2081
 # =====================================================================
 echo "== 12. das Bildschirmfoto: zwei Schloesser, und der Schein gilt einmal =="
 # =====================================================================
-mach_conf "$TMPD/foto.conf" nein ja ja \
-    "lesen          = /var/jarvis/" \
-    "max_ausgabe    = 65536" \
-    "max_datei      = 4194304"
+mach_conf "$TMPD/foto.conf" no yes yes \
+    "read          = /var/jarvis/" \
+    "max_output    = 65536" \
+    "max_file      = 4194304"
 abbild "$TMPD/foto.img" "$TMPD/foto.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt"
 cat > "$TMPD/auf-foto.txt" <<'AUF'
 foto||
@@ -684,16 +684,16 @@ draht_zu
 G="$TMPD/g7.log"
 [ "$(status_von 1)" = nein ] && ok "ohne Schein: abgelehnt, obwohl die Rechteliste es erlaubt" \
                              || bad "ohne Schein kam ein Bild: $(grep -a '^ANTWORT 1 ' "$G")"
-hat "$G.1.bin" "kein Fotoschein" "und der Grund nennt den fehlenden Schein"
+hat "$G.1.bin" "no screenshot permit" "und der Grund nennt den fehlenden Schein"
 
 # JETZT MIT SCHEIN.
 draht_auf
 gegenstelle_an good "$TMPD/auf-foto.txt" "$TMPD/g8.log"
-lauf_mit_netz "$TMPD/foto.img" "jarvisctl fotoschein 600;jarvisd -1 -t 60000;jarvisctl protokoll 10;exit" "$TMPD/r11.txt" 220
+lauf_mit_netz "$TMPD/foto.img" "jarvisctl screenshot 600;jarvisd -1 -t 60000;jarvisctl log 10;exit" "$TMPD/r11.txt" 220
 gegenstelle_aus
 draht_zu
 G="$TMPD/g8.log"; F="$TMPD/r11.txt"
-hat "$F" "Ein einziges Bildschirmfoto ist frei" "jarvisctl stellt einen befristeten Schein aus"
+hat "$F" "One screenshot allowed" "jarvisctl stellt einen befristeten Schein aus"
 S1=$(status_von 1)
 if [ "$S1" = ok ]; then
     PNGL=$(grep -a "^ANTWORT 1 " "$G" | awk '{print $5}')
@@ -729,7 +729,7 @@ PYEOF
     [ "$(status_von 2)" = nein ] \
         && ok "DER SCHEIN GILT EINMAL: das zweite Foto wird abgelehnt" \
         || bad "das zweite Foto kam auch noch -- der Schein wird nicht verbraucht"
-elif grep -qa "Bildschirmmasse\|Rahmenpuffer" "$G.1.bin" 2>/dev/null; then
+elif grep -qa "screen size\|framebuffer" "$G.1.bin" 2>/dev/null; then
     # KEIN BILD. Ring 3 bekommt in diesem Zweig die Bildschirmmasse nicht:
     # SYS_OSUM_SHOT (Runde FEEDBACK) fehlt, und WIG_SCREEN/DISPGET liegen
     # hinter dem Fensterserver. Der Helfer sagt genau das, statt zu raten --

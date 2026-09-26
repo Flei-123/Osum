@@ -99,7 +99,7 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\",\"info\":{\"rechner\":\"pruefstand\",\"aufloesung\":\"1280x800\"}}")
 CODE=$(echo "$A" | jget code)
 if echo "$A" | grep -q 'kopplung-noetig' && [ -n "$CODE" ]; then
-    ok "ein unbekanntes Geraet bekommt einen KOPPLUNGSCODE und sonst nichts"
+    ok "ein unbekanntes Geraet bekommt einen PAIRING CODE und sonst nichts"
     note "Code $CODE -- den zeigt das Geraet auf SEINEM Bildschirm"
 else
     bad "die Erstanmeldung hat keinen Kopplungscode gebracht -- $A"

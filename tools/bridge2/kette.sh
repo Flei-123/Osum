@@ -104,21 +104,21 @@ ok "Zertifikatskette aus tools/hwnet/mkcerts.py (jarvis.test, SAN 10.9.0.1)"
 cat > "$W/rechte.conf" <<CONF
 server         = $HOST_IP:$TLSPORT
 servername     = jarvis.test
-wurzeln        = /etc/ssl/roots.pem
-befehle        = ja
-befehl_erlaubt = /bin/echo
-befehl_erlaubt = /bin/ls
-lesen          = /var/jarvis/
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-bildschirmfoto = ja
-systeminfo     = ja
-eingabe        = ja
-max_ausgabe    = 65536
-max_datei      = 4194304
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+roots        = /etc/ssl/roots.pem
+commands        = yes
+command_allowed = /bin/echo
+command_allowed = /bin/ls
+read          = /var/jarvis/
+write      = /var/jarvis/
+list      = /var/jarvis/
+screenshot = yes
+sysinfo     = yes
+input        = yes
+max_output    = 65536
+max_file      = 4194304
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 
 bauen_img() {
@@ -127,7 +127,7 @@ bauen_img() {
         SPEC="$SPEC /bin/$p=$W/$p.elf"
     done
     SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
-    SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf"
+    SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
     SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem"
     python3 tools/osum/mkfs.py build "$W/probe.img" 16384 $SPEC \
         > "$W/mkfs.txt" 2>&1
@@ -265,7 +265,7 @@ starte_osum() {
     # zwischen einem Geraet und einem Wegwerfgeraet.
     #
     # Der erste Anlauf kopierte vor JEDEM Start `probe.img` frisch --
-    # damit war auch `/etc/jarvis/geraet.key` jedes Mal neu, `jsig`
+    # damit war auch `/etc/jarvis/device.key` jedes Mal neu, `jsig`
     # erzeugte einen neuen Ed25519-Schluessel, und der Server sagte
     # voellig zu Recht "Schluessel passt nicht zur Kopplung"
     # (gemessen: 15ae7b09f33f beim Koppeln, 72137258ee24 beim Foto).
@@ -290,9 +290,9 @@ echo "== 3. die Kopplung, in der richtigen Reihenfolge =="
 # Wie an einem echten Geraet: erst verbinden (Code kommt), dann
 # bestaetigt der Mensch AM GERAET, dann gibt der Mensch am SERVER frei.
 starte_osum kopplung "jarvisd -1 -t 25000;exit"
-CODE=$(grep -aoE 'KOPPLUNGSCODE [0-9]+' "$W/s-kopplung.txt" | head -1 | awk '{print $2}')
+CODE=$(grep -aoE 'PAIRING CODE [0-9]+' "$W/s-kopplung.txt" | head -1 | awk '{print $2}')
 if [ -n "$CODE" ]; then
-    ok "Osum verbindet sich und zeigt den KOPPLUNGSCODE auf dem Schirm"
+    ok "Osum verbindet sich und zeigt den PAIRING CODE auf dem Schirm"
     note "Code $CODE"
 else
     bad "kein Kopplungscode -- Osum kam nicht durch"
@@ -344,9 +344,9 @@ A=$(curl -s -X POST "http://10.9.1.1:$DIENST_PORT/bruecke/auftrag" \
 AID=$(echo "$A" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
 note "Auftrag id=$AID eingereiht"
 
-# `jarvisctl fotoschein` ist das zweite Schloss: die Rechteliste allein
+# `jarvisctl screenshot` ist das zweite Schloss: die Rechteliste allein
 # reicht nicht. Genau wie an einem echten Geraet.
-starte_osum foto "jarvisctl koppeln $CODE;jarvisctl fotoschein 900;jarvisd -t 90000;exit" &
+starte_osum foto "jarvisctl pair $CODE;jarvisctl screenshot 900;jarvisd -t 90000;exit" &
 QWAIT=$!
 
 # ZWEI WEGE, UND DER ZWEITE IST DER VERLAESSLICHE.

@@ -59,7 +59,7 @@ timeout 240 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
 QPID=$!
 i=0
 while [ $i -lt 700 ]; do
-    grep -qa 'KOPPLUNGSCODE\|jarvisd: angemeldet' "$W/serial.txt" 2>/dev/null && break
+    grep -qa 'PAIRING CODE\|jarvisd: signed in' "$W/serial.txt" 2>/dev/null && break
     kill -0 "$QPID" 2>/dev/null || break
     sleep 0.2; i=$((i+1))
 done
@@ -69,7 +69,7 @@ kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 echo "== was auf der Leitung stand =="
 grep -aE 'dhcp:|jarvisd:|desk: start' "$W/serial.txt" | head -20 | sed 's/^/        /'
 
-grep -qa 'desk: start /bin/jarvisd\|jarvisd: bereit' "$W/serial.txt" \
+grep -qa 'desk: start /bin/jarvisd\|jarvisd: ready' "$W/serial.txt" \
     && ok "der Kern startet /bin/jarvisd VON SELBST" \
     || bad "jarvisd wird nicht gestartet"
 grep -qa 'resolv.conf geschrieben' "$W/serial.txt" \
@@ -78,11 +78,11 @@ grep -qa 'resolv.conf geschrieben' "$W/serial.txt" \
 grep -qa 'jarvisd: der Name laesst sich nicht aufloesen' "$W/serial.txt" \
     && bad "der Name loest nicht auf" \
     || ok "store.fleitec.com loest auf"
-grep -qa 'KOPPLUNGSCODE' "$W/serial.txt" \
-    && ok "das Geraet zeigt einen KOPPLUNGSCODE" \
+grep -qa 'PAIRING CODE' "$W/serial.txt" \
+    && ok "das Geraet zeigt einen PAIRING CODE" \
     || bad "kein Kopplungscode"
 
-HEX=$(grep -a 'KOPPLUNGSCODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
+HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     note "Code, den Justin vorliest: $(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)"
 fi

@@ -561,21 +561,21 @@ titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 #
 # Deshalb der volle Lebenslauf, ueber `/bin/jsig`:
 #
-#   Lauf 1:  `jsig aus`                 legt das Ed25519-Paar an
-#            `jsig unterschreibe <hex>` unterschreibt eine Nachricht
+#   Lauf 1:  `jsig init`                 legt das Ed25519-Paar an
+#            `jsig sign <hex>` unterschreibt eine Nachricht
 #            -> der oeffentliche Teil UND die Unterschrift werden notiert
 #   NEUSTART (dieselbe Platte, kein Medium)
-#   Lauf 2:  `jsig aus`                 darf KEINEN neuen anlegen
+#   Lauf 2:  `jsig init`                 darf KEINEN neuen anlegen
 #            -> derselbe oeffentliche Teil
-#            `jsig pruefe <pub> <msg> <sig>` -> die ALTE Unterschrift
+#            `jsig verify <pub> <msg> <sig>` -> die ALTE Unterschrift
 #               verifiziert weiterhin
 #
-# DIE GEGENPROBE (Zuruecksetzen): `rm /etc/jarvis/geraet.key`, dann
-# `jsig aus` -- jetzt MUSS ein ANDERER oeffentlicher Teil herauskommen.
+# DIE GEGENPROBE (Zuruecksetzen): `rm /etc/jarvis/device.key`, dann
+# `jsig init` -- jetzt MUSS ein ANDERER oeffentlicher Teil herauskommen.
 # Ohne sie waere Lauf 2 auch dann gruen, wenn `jsig` den Schluessel
 # ueberhaupt nicht aus der Datei liest.
 NACHRICHT=4f2d303039
-platte_lauf jarvis1 "mkdir /etc/jarvis;jsig aus;jsig unterschreibe $NACHRICHT;exit" 300
+platte_lauf jarvis1 "mkdir /etc/jarvis;jsig init;jsig sign $NACHRICHT;exit" 300
 PUB1=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis1.txt" | head -1 | awk '{print $2}')
 SIG1=$(grep -aoE '^sig [0-9a-f]{128}' "$OUT/jarvis1.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
@@ -585,7 +585,7 @@ else
     tail -6 "$OUT/jarvis1.txt" | sed 's/^/        /'
 fi
 
-platte_lauf jarvis2 "jsig aus;jsig pruefe $PUB1 $NACHRICHT $SIG1;exit" 300
+platte_lauf jarvis2 "jsig init;jsig verify $PUB1 $NACHRICHT $SIG1;exit" 300
 PUB2=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis2.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ] && [ "$PUB2" = "$PUB1" ]; then
     ok "O-009: NACH DEM NEUSTART DERSELBE oeffentliche Teil -- kein zweites Koppeln"
@@ -593,7 +593,7 @@ else
     bad "O-009: der Schluessel hat den Neustart nicht ueberlebt (vorher ${PUB1:-?}, nachher ${PUB2:-?})"
     tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
 fi
-if grep -qa '^ja$' "$OUT/jarvis2.txt"; then
+if grep -qa '^yes$' "$OUT/jarvis2.txt"; then
     ok "O-009: eine Unterschrift VON VOR dem Neustart verifiziert weiterhin"
 else
     bad "O-009: die alte Unterschrift verifiziert nach dem Neustart nicht"
@@ -602,7 +602,7 @@ fi
 
 # UND MIT FREMDEN AUGEN. Dass OrientOS seine eigene Unterschrift
 # nachrechnet, ist die schwaechere Aussage -- ein Fehler, der in
-# `jsig aus` und in `jsig pruefe` gleich steckt, faellt dabei nicht auf.
+# `jsig init` und in `jsig verify` gleich steckt, faellt dabei nicht auf.
 # `python-cryptography` hat diesen Fehler nicht. Steht es nicht zur
 # Verfuegung, wird das GESAGT und nicht stillschweigend uebergangen.
 if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
@@ -640,7 +640,7 @@ PYFREMD
 fi
 
 # Die Gegenprobe: zuruecksetzen -- und es MUSS ein anderer werden.
-platte_lauf jarvis3 "rm /etc/jarvis/geraet.key;jsig aus;exit" 300
+platte_lauf jarvis3 "rm /etc/jarvis/device.key;jsig init;exit" 300
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
     ok "GEGENPROBE: nach dem Zuruecksetzen ist er WEG und ein neuer entsteht (pub ${PUB3:0:16}...)"

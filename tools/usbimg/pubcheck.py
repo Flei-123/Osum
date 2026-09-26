@@ -11,7 +11,7 @@ implementation of the format) and fails unless
   * root is locked in /etc/shadow (no hash, so no password opens it),
   * /users/ holds nothing but root/ and the live user's home,
   * /etc/autologin names the live user,
-  * /etc/jarvis/rechte.conf carries no server= and switches everything off,
+  * /etc/jarvis/permissions.conf carries no server= and switches everything off,
   * the name "justin" appears in none of those files.
 
 Given a whole USB image (.img) it takes the root.img from the EFI partition
@@ -88,18 +88,18 @@ def main(argv):
         al = (read(fs, '/etc/autologin') or '').split()
         if al[:1] != [live]:
             bad.append('/etc/autologin says %r, want %r' % (al[:1], live))
-        rc = read(fs, '/etc/jarvis/rechte.conf')
+        rc = read(fs, '/etc/jarvis/permissions.conf')
         if rc is None:
-            bad.append('/etc/jarvis/rechte.conf missing')
+            bad.append('/etc/jarvis/permissions.conf missing')
         else:
             act = [l.split('#')[0].strip() for l in rc.splitlines()]
             act = [l for l in act if l]
             for l in act:
                 k, _, v = (x.strip() for x in l.partition('='))
-                if k in ('server', 'servername', 'befehl_erlaubt', 'lesen', 'schreiben', 'auflisten'):
-                    bad.append('rechte.conf sets %s' % k)
-                if k in ('befehle', 'bildschirmfoto', 'systeminfo') and v != 'nein':
-                    bad.append('rechte.conf: %s = %s' % (k, v))
+                if k in ('server', 'servername', 'command_allowed', 'read', 'write', 'list'):
+                    bad.append('permissions.conf sets %s' % k)
+                if k in ('commands', 'screenshot', 'sysinfo', 'input') and v != 'no':
+                    bad.append('permissions.conf: %s = %s' % (k, v))
         for b in bad:
             print('pubcheck: NOT FIT --', b)
         if not bad:

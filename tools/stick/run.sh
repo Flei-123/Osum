@@ -109,7 +109,7 @@ python3 tools/osum/mkfs.py list "$IMGDIR/root.img" > "$TMPD/liste.txt" 2>&1 \
     || bad "das Wurzelabbild laesst sich nicht lesen"
 for f in /bin/ota /bin/fetch /bin/host /bin/jarvisd /bin/jsig \
          /bin/jarvisctl /bin/pollbr /bin/dhcp /bin/reboot \
-         /etc/ota.conf /etc/ssl/roots.pem /etc/jarvis/rechte.conf \
+         /etc/ota.conf /etc/ssl/roots.pem /etc/jarvis/permissions.conf \
          /system/schluessel.pub /system/FASSUNG /system/SCHLUESSELGEN; do
     grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$TMPD/liste.txt" \
         && ok "im Abbild: $f" || bad "im Abbild FEHLT: $f"
@@ -136,16 +136,16 @@ cat > "$TMPD/rechte.conf" <<EOFC
 # genommen. Das Abbild bleibt unangetastet.
 server         = 10.0.2.2:$SRVPORT
 servername     = jarvis.test
-wurzeln        = /mnt/ca.pem
-befehle        = ja
-befehl_erlaubt = /bin/echo
-lesen          = /var/jarvis/
-schreiben      = /var/jarvis/
-auflisten      = /var/jarvis/
-systeminfo     = ja
-bildschirmfoto = nein
-max_ausgabe    = 4096
-max_datei      = 8192
+roots        = /mnt/ca.pem
+commands        = yes
+command_allowed = /bin/echo
+read          = /var/jarvis/
+write      = /var/jarvis/
+list      = /var/jarvis/
+sysinfo     = yes
+screenshot = no
+max_output    = 4096
+max_file      = 8192
 EOFC
 # DIE ZWEITE PLATTE IST FAT32 UND NICHT OFS, und das ist kein
 # Geschmack: `tools/e2e/run.sh` hat es gemessen und aufgeschrieben --
@@ -332,7 +332,7 @@ stick_lauf sbr bios 1 \
     --sende 'dhcp\n'                     --frist 90  --erwarte 'dhcp: gesetzt ip=' \
     --sende 'jarvisd -c /mnt/rechte.conf -1 -t 90000\n' \
                                          --frist 240 --erwarte 'jarvisd -> ' \
-    --sende 'jarvisctl protokoll 20\n'   --frist 60  --erwarte 'jarvisctl -> '
+    --sende 'jarvisctl log 20\n'   --frist 60  --erwarte 'jarvisctl -> '
 R="$TMPD/sbr/con.log"
 G="$TMPD/sbr/g.log"
 # DIE ZWEITE PLATTE HAENGT SCHON. GEMESSEN, und es war eine
@@ -347,7 +347,7 @@ G="$TMPD/sbr/g.log"
 hat "$R" '/mnt type vfat' "die zweite Platte steht in der Einhaengetafel (/mnt, vfat)"
 hat "$R" 'servername' "und ihre Rechteliste ist lesbar"
 hat "$R" 'jarvisd: verbunden' "jarvisd hat die Verbindung aufgebaut"
-hat "$R" 'jarvisd: angemeldet' "und sich angemeldet"
+hat "$R" 'jarvisd: signed in' "und sich angemeldet"
 hat "$G" 'TLSv1.3' "die Verbindung steht auf TLS 1.3 -- gesagt hat das Python, nicht Osum"
 hat "$G" 'BEWEIS gut' "die Ed25519-Unterschrift des Geraets stimmt (nachgerechnet von python-cryptography)"
 hat "$G" 'ANGEMELDET' "die Gegenstelle hat die Anmeldung angenommen"

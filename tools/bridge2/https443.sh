@@ -29,7 +29,7 @@
 #   1. der Name loest auf                    (DNS aus lib/libc/dns.fi)
 #   2. der Handschlag steht                  (echtes Zertifikat)
 #   3. der Server antwortet 200
-#   4. ein unbekanntes Geraet bekommt einen KOPPLUNGSCODE
+#   4. ein unbekanntes Geraet bekommt einen PAIRING CODE
 #   5. der Code steht im Protokoll des Dienstes -- die Zeile, die
 #      Justin vorlesen wird
 set -uo pipefail
@@ -75,19 +75,19 @@ ok "jarvisd gebaut ($(stat -c%s "$W/jarvisd.elf") Oktette)"
 # GENAU DIE, DIE AUCH AUF JUSTINS STICK LIEGT -- `weg = https`, ein
 # NAME statt einer Zahl, und nichts von Hand einzutragen.
 cat > "$W/rechte.conf" <<'CONF'
-weg            = https
+transport            = https
 servername     = store.fleitec.com
-pfad           = /bruecke/draht
-wurzeln        = /etc/ssl/roots.pem
-befehle        = nein
-bildschirmfoto = ja
-systeminfo     = ja
-eingabe        = nein
-max_ausgabe    = 65536
-max_datei      = 4194304
-protokoll       = /var/log/jarvisd.log
-arbeitsdatei    = /var/jarvis/ausgabe.txt
-fotoscheindatei = /var/jarvis/fotoschein
+path           = /bruecke/draht
+roots        = /etc/ssl/roots.pem
+commands        = no
+screenshot = yes
+sysinfo     = yes
+input        = no
+max_output    = 65536
+max_file      = 4194304
+log       = /var/log/jarvisd.log
+work_file    = /var/jarvis/output.txt
+permit_file = /var/jarvis/screenshot-permit
 CONF
 
 # Der ECHTE Wurzelspeicher -- ohne ihn wird nichts vertraut.
@@ -114,7 +114,7 @@ SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo jsig jarvisctl dhcp host ping jarvisd; do
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
-SPEC="$SPEC /etc/jarvis/rechte.conf=$W/rechte.conf"
+SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem"
 SPEC="$SPEC /etc/resolv.conf=$W/resolv.conf"
 python3 tools/osum/mkfs.py build "$W/probe.img" 32768 $SPEC \
@@ -125,7 +125,7 @@ echo "== 2. Osum faehrt und spricht mit store.fleitec.com =="
 # QEMUs Benutzernetz ist NAT -- dieselbe Lage wie bei Justin: der Gast
 # kommt hinaus, von aussen kommt niemand herein.
 timeout 300 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
-    -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;sleep 8" \
+    -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;jarvisd -1 -t 50000" \
     -serial "file:$W/serial.txt" -display none -no-reboot \
     -drive "file=$W/probe.img,format=raw,if=ide,index=0" \
     -netdev user,id=n0 -device e1000,netdev=n0 \
@@ -152,11 +152,11 @@ grep -qa 'Handschlag ist gescheitert' "$W/serial.txt" \
 grep -qa 'der Server antwortet' "$W/serial.txt" \
     && bad "der Server hat nicht 200 geantwortet" \
     || ok "der Server antwortet 200"
-grep -qa 'KOPPLUNGSCODE' "$W/serial.txt" \
+grep -qa 'PAIRING CODE' "$W/serial.txt" \
     && ok "das Geraet ist beim Dienst angekommen und zeigt einen Code" \
     || bad "das Geraet ist NICHT angekommen"
 # Der Code, den Justin vorlesen wird -- als Klartext, nicht als Hex.
-HEX=$(grep -a 'KOPPLUNGSCODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
+HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     note "Code auf dem Bildschirm: $(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)"
 fi
@@ -166,7 +166,7 @@ journalctl -u bruecke --since '-3 min' --no-pager 2>/dev/null \
     | grep -iE 'KOPPLUNG NOETIG|ANGEMELDET|ABGELEHNT' | tail -5 | sed 's/^/        /'
 journalctl -u bruecke --since '-3 min' --no-pager 2>/dev/null \
     | grep -qi 'KOPPLUNG NOETIG' \
-    && ok "der Dienst hat einen KOPPLUNGSCODE ausgestellt" \
+    && ok "der Dienst hat einen PAIRING CODE ausgestellt" \
     || bad "im Protokoll des Dienstes steht nichts"
 
 echo

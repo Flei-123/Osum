@@ -48,7 +48,7 @@ qemu-system-x86_64 -kernel "$KERN" -m 2048 -append "$APPEND" \
 QP=$!
 i=0
 while [ $i -lt 700 ]; do
-    grep -qa 'KOPPLUNGSCODE' "$W/serial.txt" 2>/dev/null && break
+    grep -qa 'PAIRING CODE' "$W/serial.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 0.3; i=$((i+1))
 done
@@ -76,7 +76,7 @@ for p in desktop taskbar launcher; do
 done
 grep -qa 'desk: start /bin/jarvisd' "$W/serial.txt" \
     && ok "jarvisd startet VON SELBST" || bad "jarvisd startet nicht"
-HEX=$(grep -a 'KOPPLUNGSCODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
+HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     CODE=$(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)
     if [ "${#CODE}" -eq 6 ]; then

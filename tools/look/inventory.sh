@@ -54,7 +54,7 @@ STAND=tools/look/shot.sh
 # Bildschirmfoto. Wer hier etwas hinzufuegt, schreibt den Grund
 # daneben -- sonst ist die Pruefung nach drei Runden wieder weich.
 #
-#   jarvis   /etc/jarvis/rechte.conf ist die Rechteliste des Helfers.
+#   jarvis   /etc/jarvis/permissions.conf ist die Rechteliste des Helfers.
 #            Sie gehoert zu einem Geraet mit einem Besitzer, nicht zu
 #            einem Foto, und kein Programm im Foto liest sie.
 #   ssl      /etc/ssl/roots.pem ist der Wurzelspeicher fuer `fetch`.
