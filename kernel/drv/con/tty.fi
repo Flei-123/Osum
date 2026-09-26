@@ -123,6 +123,15 @@ const ECHOE: u64 = 16
 const ECHONL: u64 = 64
 const NOFLSH: u64 = 128
 const TOSTOP: u64 = 256
+// 26.09.2026 (Dell 9020): ECHOWIN -- not a Linux bit. A reader that
+// prints the finished line itself (the shell) sets it for the time of
+// ONE read. While it is set and the terminal hangs in a window, the
+// line being edited is drawn into the WINDOW ONLY -- the serial line,
+// which every measurement reads, sees exactly the octets it saw before.
+// On Enter the drawn cells are wiped again, and the shell prints the
+// line as it always did. Without it the console window showed nothing
+// while typing ("I only see what I typed after pressing Enter").
+const ECHOWIN: u64 = 0x20000000
 
 const IGNCR: u64 = 0x80
 const ICRNL: u64 = 0x100
@@ -539,6 +548,54 @@ fn echo(state: u64, t: u64, c: u64) {
     emit(state, t, c)
 }
 
+fn wecho_on(state: u64, t: u64) -> bool {
+    let lf: u64 = g(state, t, T_LFLAG)
+    if (lf & ECHOWIN) == 0 || (lf & ECHO) != 0 || (lf & ICANON) == 0 {
+        return false
+    }
+    return g(state, t, T_SINK) == SINK_WINDOW
+}
+
+// One octet into the window only (never onto the serial line).
+fn wecho(state: u64, t: u64, c: u64) {
+    if !wecho_on(state, t) {
+        return
+    }
+    if c < 32 && c != 10 {
+        return
+    }
+    gfx.wm_term_out(state, g(state, t, T_WIN), c)
+}
+
+// How many window cells the edit buffer occupies: every octet that is
+// printable and not a UTF-8 continuation octet.
+fn edit_cells(state: u64, t: u64) -> u64 {
+    let n: u64 = g(state, t, T_EDIT)
+    var k: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = kstate.get8(at(state, t) + EDITBUF + i)
+        if b >= 32 && b != 127 && (b < 128 || b > 191) {
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return k
+}
+
+// Wipe `k` cells behind the window cursor, across line wraps
+// (WM_BACKWRAP is the window server's wrapping backspace).
+fn wback(state: u64, t: u64, k: u64) {
+    if !wecho_on(state, t) {
+        return
+    }
+    var i: u64 = 0
+    while i < k {
+        gfx.wm_term_out(state, g(state, t, T_WIN), 0x108)
+        i = i + 1
+    }
+}
+
 fn edit_push(state: u64, t: u64, c: u64) {
     let n: u64 = g(state, t, T_EDIT)
     if n >= EDIT_MAX {
@@ -602,6 +659,11 @@ fn push(state: u64, t: u64, c0: u64) -> u64 {
         }
         if sig != 0 {
             echo(state, t, c)
+            if (lf & NOFLSH) == 0 && wecho_on(state, t) {
+                wecho(state, t, 94)
+                wecho(state, t, c + 64)
+                wecho(state, t, 10)
+            }
             if (lf & NOFLSH) == 0 {
                 edit_drop(state, t)
             }
@@ -626,7 +688,9 @@ fn push(state: u64, t: u64, c0: u64) -> u64 {
     if c == cc_get(state, t, VERASE) || c == 8 {
         let n: u64 = g(state, t, T_EDIT)
         if n > 0 {
+            let before: u64 = edit_cells(state, t)
             s(state, t, T_EDIT, n - 1)
+            wback(state, t, before - edit_cells(state, t))
             if (lf & ECHO) != 0 && (lf & ECHOE) != 0 {
                 // Rueckschritt, Leerzeichen, Rueckschritt -- das Zeichen
                 // verschwindet auch auf dem Schirm und nicht nur im
@@ -647,6 +711,7 @@ fn push(state: u64, t: u64, c0: u64) -> u64 {
             emit(state, t, 8)
             k = k + 1
         }
+        wback(state, t, edit_cells(state, t))
         s(state, t, T_EDIT, 0)
         return 0
     }
@@ -655,10 +720,17 @@ fn push(state: u64, t: u64, c0: u64) -> u64 {
         // getippt, ist es das ENDE DER EINGABE -- und ein `read`, das
         // null Oktette bekommt, ist genau das.
         echo(state, t, c)
+        wback(state, t, edit_cells(state, t))
         edit_commit(state, t)
         return 0
     }
     echo(state, t, c)
+    if c == 10 {
+        // The reader prints the line itself -- take the live copy away.
+        wback(state, t, edit_cells(state, t))
+    } else {
+        wecho(state, t, c)
+    }
     edit_push(state, t, c)
     if c == 10 {
         edit_commit(state, t)

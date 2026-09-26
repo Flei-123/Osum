@@ -167,7 +167,9 @@ const LK_NUM: u64 = 1
 const LK_CAPS: u64 = 2
 const LK_SCROLL: u64 = 4
 
-static mut lock_bits: u64 = 0
+// Num Lock starts ON (26.09.2026, Dell 9020): what every PC does after
+// its firmware, and the lamp is set to match on the first report.
+static mut lock_bits: u64 = 1
 // 1 = seit der letzten Uebertragung hat sich etwas geaendert. Beim Start
 // eine 1, damit die Lampen EINMAL auf einen bekannten Stand gebracht
 // werden -- was die Firmware hinterlassen hat, weiss niemand.
@@ -346,6 +348,39 @@ fn on_code(state: u64, code: u64) {
     }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
+        return
+    }
+    // 26.09.2026 (Dell 9020): THE NUMERIC KEYPAD. Its keys arrive as the
+    // plain (non-E0) codes 0x47..0x53 -- the same codes as the cursor
+    // block WITH E0. Nothing here looked at the Num Lock state: the
+    // digits fell into `code_of`, whose tables end at 57, and were
+    // dropped; KP 8 even acted as the up arrow. With Num Lock ON they
+    // are digits, with it OFF they are the cursor block (fed back in
+    // with the E0 they would have had). KP / (E0 35) and KP Enter
+    // (E0 1C) were dropped by `arrow` and are caught here as well.
+    if ext == 1 && code == 0x35 {
+        deliver(state, 47) // '/'
+        say_key(47)
+        return
+    }
+    if ext == 1 && code == 0x1C {
+        deliver(state, 10)
+        say_key(10)
+        return
+    }
+    if ext == 0 && code >= 0x47 && code <= 0x53
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 0
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 0 {
+        let kp: u64 = keypad(state, code)
+        if kp != 0 {
+            deliver(state, kp)
+            say_key(kp)
+            return
+        }
+        if code != 0x4C {
+            on_code(state, 0xE0)
+            on_code(state, code)
+        }
         return
     }
     // RUNDE I18N: STRG+ALT+L SCHALTET DIE BELEGUNG UM. Der Abtastcode
@@ -835,6 +870,32 @@ fn arrow(code: u64) -> u64 {
         return 0 // Eingabetaste des Ziffernblocks -- kommt schon durch
     }
     return 0
+}
+
+// The character of a keypad key, or 0 when it is a cursor key right
+// now (Num Lock off). - and + do not depend on Num Lock.
+fn keypad(state: u64, code: u64) -> u64 {
+    if code == 0x4A {
+        return 45 // '-'
+    }
+    if code == 0x4E {
+        return 43 // '+'
+    }
+    if (lock_bits & LK_NUM) == 0 {
+        return 0
+    }
+    if code == 0x53 {
+        if layout(state) == L_DE {
+            return 44 // ',' -- the German keypad has a comma
+        }
+        return 46 // '.'
+    }
+    var d: [u8; 13] = "789-456+1230\0"
+    let v: u64 = (d[(code - 0x47) as usize]) as u64
+    if v < 48 || v > 57 {
+        return 0
+    }
+    return v
 }
 
 // ------------------------------------------------------- die Belegung
