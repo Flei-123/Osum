@@ -63,6 +63,8 @@ import utf8
 // RUNDE GLYPHE: welcher Kern haelt die Tafel -- und `pause`.
 import arch.cpu
 import arch.arch
+// ROUND FUI-KERNTEXT: the ink comes from fUi (kernel/gfx/fuiink.fi).
+import gfx.fuiink
 
 export {
     init, ready, load_font, fonts, glyphs, arena, arena_bytes, used_bytes,
@@ -72,6 +74,7 @@ export {
     text_width26, text_width26_bytes,
     hits, misses, rastered, cache_slots, cache_used, tafel_verloren,
     cache_clear,
+    fui_attach, fui_rastered, FUI_FRAMES,
     selftest, selftest_max,
     MAX_FONTS, SLOTS, A_HEAP, ARENA_BYTES
 }
@@ -415,6 +418,9 @@ fn load_font(state: u64, p: u64, len: u64) -> u64 {
     }
     kern0_of(state, n, kern)
     ss(state, S_FONTS, n + 1)
+    // ROUND FUI-KERNTEXT: fUi reads the same file once. If it refuses
+    // it, this slot keeps the old ink (see `rasterize`).
+    fuiink.font(state, n, p, len)
     return n
 }
 
@@ -1176,6 +1182,15 @@ fn cross_add(ar: u64, n: u64, x: i64, dir: i64) -> u64 {
 // Die eigentliche Rasterung. Legt die Bitmaske im Glyphenspeicher ab und
 // traegt den Platz ein; gibt die Platznummer oder SLOTS.
 fn rasterize(state: u64, f: u64, gid: u64, px: u64, slot: u64) -> u64 {
+    // ROUND FUI-KERNTEXT: fUi's rasteriser first. What follows below is
+    // the fallback -- no vector unit (`nofpu`), no work area, a font or
+    // glyph fUi's reader refuses.
+    if fuiink.ready(state) {
+        let r: u64 = rasterize_fui(state, f, gid, px, slot)
+        if r != FUI_NO {
+            return r
+        }
+    }
     let ar: u64 = arena(state)
     edge_reset(ar)
     glyph_edges(state, f, gid, px, 0, 0, 0)
@@ -1277,6 +1292,62 @@ fn rasterize(state: u64, f: u64, gid: u64, px: u64, slot: u64) -> u64 {
     kstate.add(base(state), S_RASTERED, 1)
     return finish(state, slot, daten - ar, w as u64, h as u64,
         bx0 as u64, by1 as u64, adv)
+}
+
+// ======================================================== FUI-KERNTEXT
+//
+// THE KERNEL'S TEXT IN fUi INK. Window titles, the kernel terminal and
+// every glyph `WIG_GLYPH` hands out used to be the 4x4 samples above:
+// 17 grey levels. Ring 3 already drew with fUi's exact area coverage
+// (kernel/user/fuiglyph.fi), so the same word looked different in a
+// title bar and in the window below it. Now both come from the same
+// library (fuiink.fi imports lib/font/ttf.fi + lib/font/raster.fi).
+//
+// Only the INK changes. The advance is `advance26`, the kernel's integer
+// formula, as in fuiglyph.fi -- a layout that moved by a pixel would turn
+// every pixel-exact test red for a reason that is not a bug.
+//
+// The work area is a run of FUI_FRAMES frames that kgui.fi hands over
+// (`fui_attach`); without it fUi ink stays off.
+const FUI_FRAMES: u64 = 162 // fuiink.FRAMES
+const FUI_NO: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn fui_attach(state: u64, area: u64) -> bool {
+    return fuiink.attach(state, area)
+}
+
+fn fui_rastered() -> u64 {
+    return fuiink.rastered()
+}
+
+// Returns the slot, SLOTS (no memory for the bitmap) or FUI_NO (fUi
+// cannot draw this glyph -- rasterise it the old way).
+fn rasterize_fui(state: u64, f: u64, gid: u64, px: u64, slot: u64) -> u64 {
+    if !fuiink.glyph(state, f, gid, px) {
+        return FUI_NO
+    }
+    let adv: i64 = advance26(state, f, gid, px)
+    let w: u64 = fuiink.g_w()
+    let h: u64 = fuiink.g_h()
+    let n: u64 = w * h
+    if n == 0 {
+        return finish(state, slot, 0, w, h, fuiink.g_left(),
+            fuiink.g_top(), adv)
+    }
+    let daten: u64 = alloc(state, n)
+    if daten == 0 {
+        return SLOTS
+    }
+    let src: u64 = fuiink.g_ink()
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(daten + i, __mmio_read8((src + i) as *mut u8))
+        i = i + 1
+    }
+    let ar: u64 = arena(state)
+    kstate.add(base(state), S_RASTERED, 1)
+    return finish(state, slot, daten - ar, w, h, fuiink.g_left(),
+        fuiink.g_top(), adv)
 }
 
 // Ein waagerechter Abschnitt zwischen zwei Schnittpunkten: welche

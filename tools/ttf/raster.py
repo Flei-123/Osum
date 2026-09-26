@@ -49,9 +49,12 @@ Verwendung:
     raster.py summe   <ttf> <px> <zeichen>        -- die Pruefsumme
     raster.py vergleich <ttf> <mitschnitt>        -- gegen `ttfdump`
 """
+import os
 import re
 import struct
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 FIRST = 0x20
 LAST = 0x7E
@@ -371,7 +374,32 @@ class Glyphe:
         return sum(1 for v in self.a if v >= 128)
 
 
-def raster(f, gid, px):
+# ======================================================== FUI-KERNTEXT
+#
+# SINCE ROUND FUI-KERNTEXT (26.09.2026) THE KERNEL DRAWS fUi INK TOO.
+# kernel/gfx/ttf.fi hands every glyph to fUi's rasteriser
+# (kernel/gfx/fuiink.fi) and only falls back to the 4x4 samples below
+# when fUi cannot draw it (no vector unit: `nofpu`; a glyph larger than
+# 256 x 256). So `raster` -- what every test here compares a screenshot
+# with -- is fUi's ink, and the 4x4 rasteriser is `raster_kern`, the
+# second version of the FALLBACK.
+#
+# OSUM_TINTE=kern in the environment (or `kern:` in front of a font path
+# in tools/gfx/checkshot.py) selects the old ink, for a boot with
+# `nofpu`.
+TINTE = os.environ.get("OSUM_TINTE", "fui")
+
+
+def raster(f, gid, px, tinte=None):
+    if (tinte or TINTE) != "kern":
+        import fuiraster  # noqa: E402  (imports this file)
+        g = fuiraster.glyph(f, gid, px)
+        if g is not None:
+            return g
+    return raster_kern(f, gid, px)
+
+
+def raster_kern(f, gid, px):
     """Eine Glyphe rastern.  Das Ergebnis ist DIE Zusage dieser Runde."""
     scale = scale_of(px, f.upm)
     kanten = []
@@ -442,16 +470,22 @@ def raster(f, gid, px):
 class Schrift:
     """Ein geladener Zeichensatz samt Glyphenspeicher."""
 
-    def __init__(self, pfad, px):
+    def __init__(self, pfad, px, tinte=None):
+        # `kern:` / `fui:` in front of the path choose the ink.
+        if pfad.startswith("kern:"):
+            pfad, tinte = pfad[5:], "kern"
+        elif pfad.startswith("fui:"):
+            pfad, tinte = pfad[4:], "fui"
         self.f = Ttf(open(pfad, "rb").read())
         self.px = px
+        self.tinte = tinte
         self.scale = scale_of(px, self.f.upm)
         self.speicher = {}
 
     def glyphe(self, c):
         if c in self.speicher:
             return self.speicher[c]
-        g = raster(self.f, self.f.glyph_of(c), self.px)
+        g = raster(self.f, self.f.glyph_of(c), self.px, self.tinte)
         self.speicher[c] = g
         return g
 

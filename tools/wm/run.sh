@@ -399,11 +399,21 @@ schau "Zeile 1 des Terminalfensters" \
     224 230 236 16 20 26 "abcdefghijklm ABCDEFGHIJK +-*/"
 # Der Titel in der Antiqua, mit Laufweite und Unterschneidung -- eine
 # Festbreitenrechnung ginge hier NICHT auf.
+# ROUND FUI-KERNTEXT: the titles are fUi ink now (tools/ttf/raster.py
+# follows the kernel), `tkette` because fUi's exact coverage lets the
+# outlines of 'K'/'l' and their neighbours touch -- the line is built
+# letter on letter, tolerance stays 0. The titles sit 5 px further right
+# than this runner said (the title inset grew; red on main before this
+# round, measured on the screenshot: 0 wrong at x+5, 2 or more elsewhere).
 schau "der Titel des Fensters aus Ring 3, mit Unterschneidung" \
-    ttext "$TMPD/w.ppm" assets/osum-sans.ttf 15 427 345 255 255 255 \
+    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 345 255 255 255 \
     28 78 126 "Klick mich"
 schau "der Titel des Terminalfensters, unbeleuchtet" \
-    ttext "$TMPD/w.ppm" assets/osum-sans.ttf 15 31 55 144 156 168 \
+    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 55 144 156 168 \
+    44 56 72 "Terminal -- sh"
+# ... and it IS fUi's ink: the kernel's old 4x4 samples do NOT match.
+schau_nicht "GEGENPROBE: der Titel ist NICHT mehr die alte Kern-Tinte" \
+    tkette "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 36 55 144 156 168 \
     44 56 72 "Terminal -- sh"
 # IST ES WIRKLICH EINE KANTENGLAETTUNG?  Eine Rasterung ohne Glaettung
 # haette KEINE Zwischenstufe und ginge durch alles oben hindurch.
@@ -515,7 +525,7 @@ schau "das Fenster steht nach dem Ziehen an der neuen Stelle" \
 schau_nicht "und an der alten NICHT mehr" \
     rechteck "$TMPD/z.ppm" 420 330 264 174 76 154 232
 schau "der Titel ist mitgewandert, bildpunktgenau" \
-    ttext "$TMPD/z.ppm" assets/osum-sans.ttf 15 307 225 255 255 255 \
+    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 225 255 255 255 \
     28 78 126 "Klick mich"
 # Und das Schliessfeld: es sitzt rechts oben im Rahmen.  Nach dem
 # Verschieben liegt es bei (300 + 264 - 2 - 14 - 3, 210 + 4) = (545,214).

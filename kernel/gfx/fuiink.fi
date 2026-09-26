@@ -1,0 +1,359 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/gfx/fuiink.fi -- ROUND FUI-KERNTEXT: THE KERNEL'S OWN TEXT IS
+// fUi INK TOO.
+//
+// Round FUI-TEXT (24.09.2026, Justin: "fUi, einheitlich") moved every
+// letter a Ring 3 program draws onto fUi's font engine
+// (kernel/user/fuiglyph.fi). What was left was the text the KERNEL
+// draws itself: window titles, the kernel terminal, every glyph the
+// window server paints, and every glyph that `WIG_GLYPH` hands to a
+// Ring 3 process that could not load the fonts. That text still came
+// from the 4x4-sampling rasteriser in kernel/gfx/ttf.fi -- a second
+// engine with 17 grey levels next to fUi's exact area coverage.
+//
+// This module removes the second engine from the normal path. It is NOT
+// a port: it imports fUi's own `lib/font/raster.fi` and `lib/font/ttf.fi`
+// -- the very files every other platform draws its text with. One
+// rasteriser, one place to fix a bug. (`gfx.fuittf` IS lib/font/ttf.fi:
+// tools/build-kernel.sh copies it into the build tree under that name,
+// because the short name `ttf` belongs to kernel/gfx/ttf.fi and Firn
+// allows one module per short name.)
+//
+// ------------------------------------------------ FLOATING POINT HERE
+//
+// fUi computes in f64. In `profile kernel` that is allowed only with
+// `#[allow_fp]` (SPEC 2), because the vector registers belong to the
+// interrupted thread. So the rule of that attribute is kept literally:
+// every entry that runs f64 code SAVES the live vector state first
+// (`fpu.save`, the same FXSAVE/XSAVE the context switch uses), loads the
+// reset MXCSR (round to nearest, all exceptions masked -- a user's
+// rounding mode must not change a glyph), computes, and RESTORES. The
+// price is one save and one restore per glyph that is not in the cache;
+// a glyph is rasterised once per size and then comes from the glyph
+// cache of ttf.fi.
+//
+// It is safe against the scheduler because ttf.fi calls this only with
+// the glyph board held and interrupts OFF (ttf.glyph): nothing can switch
+// this core away between save and restore.
+//
+// ------------------------------------------------------ THE FALLBACK
+//
+// No vector unit (`nofpu`), no memory for the work area, a font fUi's
+// reader refuses, a glyph with more points than the scratch holds:
+// `glyph` returns false and ttf.fi rasterises the old way. Nothing
+// disappears.
+//
+// ------------------------------------------------- THE WORK AREA
+//
+// One contiguous run of frames, handed over by kgui.fi:
+//
+//   O_FPU      4 KiB   the save area (fpu.fi's AREA_MAX, 64-aligned)
+//   O_SCRATCH 64 KiB   outline points for font_outline (12 per point)
+//   O_INK     64 KiB   the coverage octets of one glyph, 256 x 256
+//   O_RASTER 516 KiB   fUi's accumulation cells, (256 + 2) x 256 f64
+//
+// The raster window is sized for the LARGEST glyph ttf.fi accepts
+// (MAX_W x MAX_H), so no glyph size falls back to the old ink.
+profile kernel
+
+import lib.kstate
+import arch.x86_64.fpu
+import gfx.fuittf
+import font.raster
+
+export {
+    attach, ready, font, glyph, g_w, g_h, g_left, g_top, g_ink,
+    rastered, FRAMES, BYTES
+}
+
+const O_FPU: u64 = 0x0
+const O_SCRATCH: u64 = 0x1000
+const SCRATCH_BYTES: u64 = 0x10000
+const O_INK: u64 = 0x11000
+const INK_BYTES: u64 = 0x10000
+const O_RASTER: u64 = 0x21000
+const RASTER_BYTES: u64 = 528384 // (256 + 2) * 256 * 8
+const BYTES: u64 = 663552 // O_RASTER + RASTER_BYTES
+const FRAMES: u64 = 162 // BYTES / 4096
+
+const GMAX: i64 = 256
+const MAX_FONTS: u64 = 4
+const FONT_WORDS: u64 = 32
+const RASTER_WORDS: u64 = 32
+
+// The reset MXCSR (fpu.fi INIT_MXCSR).
+const MXCSR_RESET: u64 = 0x1F80
+const CR0_TS: u64 = 8
+
+static mut s_area: [u64; 1] = [0 as u64; 1]
+static mut s_fontm: [u64; 128] = [0 as u64; 128] // 4 slots x 32 words
+static mut s_font_ok: [u64; 4] = [0 as u64; 4]
+static mut s_rasterm: [u64; 32] = [0 as u64; 32]
+static mut s_out: [u64; 4] = [0 as u64; 4] // w, h, left, top
+static mut s_count: [u64; 1] = [0 as u64; 1]
+static mut s_mxcsr: [u64; 1] = [0 as u64; 1]
+
+fn font_at(slot: u64) -> *mut fuittf.Font {
+    return (&s_fontm[(slot * FONT_WORDS) as usize]) as u64 as *mut fuittf.Font
+}
+
+fn ras() -> *mut raster.Raster {
+    return (&s_rasterm[0]) as u64 as *mut raster.Raster
+}
+
+// ------------------------------------------------ the vector registers
+
+fn cr0() -> u64 {
+    return asm("mov rax, cr0", out("rax"))
+}
+
+fn ldmxcsr_reset() {
+    s_mxcsr[0] = MXCSR_RESET
+    asm("ldmxcsr [rdi]", in("rdi") (&s_mxcsr[0]) as u64, clobber("memory"))
+}
+
+// Returns 0 (no vector unit: do not compute), 1 (saved), 3 (saved, and
+// CR0.TS was set -- `fpulazy` -- and has to be set again afterwards).
+fn fp_enter(state: u64) -> u64 {
+    if !fpu.enabled(state) || s_area[0] == 0 {
+        return 0
+    }
+    var r: u64 = 1
+    if (cr0() & CR0_TS) != 0 {
+        fpu.ts_clear()
+        r = 3
+    }
+    fpu.save(state, s_area[0] + O_FPU)
+    ldmxcsr_reset()
+    return r
+}
+
+fn fp_leave(state: u64, how: u64) {
+    if how == 0 {
+        return
+    }
+    fpu.restore(state, s_area[0] + O_FPU)
+    if (how & 2) != 0 {
+        fpu.ts_set()
+    }
+}
+
+// ---------------------------------------------------------- the area
+
+// `area` is BYTES octets of contiguous memory, or 0 (then fUi ink stays
+// off and ttf.fi keeps its own rasteriser).
+fn attach(state: u64, area: u64) -> bool {
+    s_area[0] = 0
+    var i: u64 = 0
+    while i < MAX_FONTS {
+        s_font_ok[i as usize] = 0
+        i = i + 1
+    }
+    if area == 0 {
+        return false
+    }
+    s_area[0] = area
+    let how: u64 = fp_enter(state)
+    if how == 0 {
+        s_area[0] = 0
+        return false
+    }
+    let ok: bool = attach_fp(area)
+    fp_leave(state, how)
+    if !ok {
+        s_area[0] = 0
+    }
+    return ok
+}
+
+// The struct sizes are measured against their word arrays, not assumed
+// (the gap between two array elements IS the size), like fuiglyph.fi.
+#[allow_fp]
+fn attach_fp(area: u64) -> bool {
+    var mf: [fuittf.Font; 2] = [fuittf.font_new(); 2]
+    let nf: u64 = (&mf[1]) as u64 - (&mf[0]) as u64
+    var mr: [raster.Raster; 2] = [raster.raster_new(); 2]
+    let nr: u64 = (&mr[1]) as u64 - (&mr[0]) as u64
+    if nf > FONT_WORDS * 8 || nr > RASTER_WORDS * 8 {
+        return false
+    }
+    *ras() = raster.raster_new()
+    raster.raster_attach(ras(), (area + O_RASTER) as *mut u8,
+        RASTER_BYTES as usize)
+    return true
+}
+
+fn ready(state: u64) -> bool {
+    return s_area[0] != 0 && fpu.enabled(state)
+}
+
+// Kernel font slot `slot` (ttf.fi's number) is the file at `p`, `len`
+// octets. fUi reads its tables once; a font fUi refuses keeps the old ink.
+fn font(state: u64, slot: u64, p: u64, len: u64) -> bool {
+    if slot >= MAX_FONTS {
+        return false
+    }
+    s_font_ok[slot as usize] = 0
+    if !ready(state) || p == 0 || len == 0 {
+        return false
+    }
+    let how: u64 = fp_enter(state)
+    if how == 0 {
+        return false
+    }
+    let ok: bool = font_fp(slot, p, len)
+    fp_leave(state, how)
+    if ok {
+        s_font_ok[slot as usize] = 1
+    }
+    return ok
+}
+
+#[allow_fp]
+fn font_fp(slot: u64, p: u64, len: u64) -> bool {
+    *font_at(slot) = fuittf.font_new()
+    return fuittf.font_init(font_at(slot), p as *mut u8, len as usize)
+}
+
+// --------------------------------------------------------- the glyph
+
+// Rasterises glyph `gid` of kernel font `slot` at `px` pixels with fUi.
+// True: g_w/g_h/g_left/g_top describe it and g_ink holds g_w * g_h
+// coverage octets, top row first -- the envelope of ttf.fi. False: the
+// caller rasterises the old way.
+fn glyph(state: u64, slot: u64, gid: u64, px: u64) -> bool {
+    if slot >= MAX_FONTS || s_font_ok[slot as usize] == 0 || px == 0 {
+        return false
+    }
+    if !ready(state) {
+        return false
+    }
+    let how: u64 = fp_enter(state)
+    if how == 0 {
+        return false
+    }
+    let ok: bool = glyph_fp(slot, gid, px)
+    fp_leave(state, how)
+    if ok {
+        s_count[0] = s_count[0] + 1
+    }
+    return ok
+}
+
+#[allow_fp]
+fn ffloor(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) > v {
+        return t - 1
+    }
+    return t
+}
+
+#[allow_fp]
+fn fceil(v: f64) -> i64 {
+    let t: i64 = v as i64
+    if (t as f64) < v {
+        return t + 1
+    }
+    return t
+}
+
+// Line for line kernel/user/fuiglyph.fi `glyph_into` -- the window from
+// the glyf bounding box times px/upem, floor/ceil, the pen at (0, 0) on
+// the baseline, coverage * 255 + 0.5. The same arithmetic in the same
+// order gives the same octets as Ring 3 and as tools/ttf/fuiraster.py.
+#[allow_fp]
+fn glyph_fp(slot: u64, gid: u64, px: u64) -> bool {
+    let f: *mut fuittf.Font = font_at(slot)
+    let upem: u64 = fuittf.font_upem(f) as u64
+    if upem == 0 {
+        return false
+    }
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = 0
+    var y1: i32 = 0
+    var w: i64 = 0
+    var h: i64 = 0
+    var bx0: i64 = 0
+    var by1: i64 = 0
+    let sc: f64 = (px as f64) / (upem as f64)
+    if fuittf.font_glyph_bbox(f, gid as u32, &x0, &y0, &x1, &y1)
+        && x1 > x0 && y1 > y0 {
+        bx0 = ffloor((x0 as f64) * sc)
+        let bx1: i64 = fceil((x1 as f64) * sc)
+        let by0: i64 = ffloor((y0 as f64) * sc)
+        by1 = fceil((y1 as f64) * sc)
+        w = bx1 - bx0
+        h = by1 - by0
+    }
+    if w < 0 || h < 0 || w > GMAX || h > GMAX {
+        return false
+    }
+    let n: u64 = (w * h) as u64
+    if n > INK_BYTES {
+        return false
+    }
+    if n > 0 {
+        if !raster.raster_begin(ras(), bx0 as f64, (0 - by1) as f64,
+            w as usize, h as usize) {
+            return false
+        }
+        if !fuittf.font_outline(f, gid as u32, ras(), 0.0, 0.0, sc,
+            (s_area[0] + O_SCRATCH) as *mut u8, SCRATCH_BYTES as usize, 0) {
+            return false
+        }
+        raster.raster_finish(ras())
+        if !raster.raster_ok(ras()) {
+            return false
+        }
+        let ink: u64 = s_area[0] + O_INK
+        var r: u64 = 0
+        while r < h as u64 {
+            var k: u64 = 0
+            while k < w as u64 {
+                var cov: f64 = raster.raster_cov(ras(), k as usize,
+                    r as usize)
+                if cov < 0.0 {
+                    cov = 0.0
+                }
+                if cov > 1.0 {
+                    cov = 1.0
+                }
+                let a: u64 = (cov * 255.0 + 0.5) as u64
+                *((ink + r * (w as u64) + k) as *mut u8) = a as u8
+                k = k + 1
+            }
+            r = r + 1
+        }
+    }
+    s_out[0] = w as u64
+    s_out[1] = h as u64
+    s_out[2] = bx0 as u64
+    s_out[3] = by1 as u64
+    return true
+}
+
+fn g_w() -> u64 {
+    return s_out[0]
+}
+
+fn g_h() -> u64 {
+    return s_out[1]
+}
+
+fn g_left() -> u64 {
+    return s_out[2]
+}
+
+fn g_top() -> u64 {
+    return s_out[3]
+}
+
+fn g_ink() -> u64 {
+    return s_area[0] + O_INK
+}
+
+fn rastered() -> u64 {
+    return s_count[0]
+}

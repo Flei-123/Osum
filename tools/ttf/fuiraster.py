@@ -476,7 +476,7 @@ class Schrift(kern.Schrift):
         gid = self.f.glyph_of(c)
         g = glyph(self.f, gid, self.px)
         if g is None:
-            g = kern.raster(self.f, gid, self.px)
+            g = kern.raster_kern(self.f, gid, self.px)
         self.speicher[c] = g
         return g
 
