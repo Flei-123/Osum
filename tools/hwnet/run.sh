@@ -306,7 +306,7 @@ EOF
     hasnot "$H" "dhcp: offer ip=10.9.0.9" "$dev: it was not handed back the address it booted with"
     # ROUND DELL2: `dhcp status` prints the background client's numbers in
     # the terminal (the stick has no serial, no /proc, no /bin/log).
-    grep -qaE 'dhcp: zustand im Hintergrund 4 \(ack' "$H" \
+    grep -qaE 'dhcp: background client state 4 \(ack' "$H" \
         && ok "$dev: dhcp status reports state 4 (ack)" \
         || bad "$dev: dhcp status does not report the ack ($(grep -a 'client state' "$H" | head -1))"
     grep -qaE 'net: link=1 .*card octets in=[1-9]' "$H" \
