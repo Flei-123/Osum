@@ -49,11 +49,25 @@ MARKE="$COMMIT $PSUM"
 exec 9>"$HIER/.holen.lock"
 flock 9
 
+
+# RUNDE FUI-KERNTEXT: fUis Schriftleser unter einem ZWEITEN NAMEN.
+# kernel/gfx/fuiink.fi rastert die Schrift des Kerns mit fUis
+# lib/font/ttf.fi. Der Kurzname `ttf` gehoert im Kern aber schon
+# kernel/gfx/ttf.fi, und Firn erlaubt je Uebersetzungseinheit EIN Modul je
+# Kurzname. Also bekommt dieselbe Datei hier einen Verweis `fuittf.fi`
+# daneben -- keine Kopie, keine zweite Fassung, und nichts davon liegt im
+# Kernbaum (Pruefer, die kernel/** ablaufen oder kopieren, sehen es nicht).
+zweitnamen() {
+    if [[ -f $HIER/lib/font/ttf.fi && ! -e $HIER/lib/font/fuittf.fi ]]; then
+        ln -s ttf.fi "$HIER/lib/font/fuittf.fi"
+    fi
+}
 FORCE=0
 [[ ${1:-} == --force ]] && FORCE=1
 
 if [[ $FORCE -eq 0 && -x $HIER/bin/firnc && -x $HIER/bin/firnc1 \
       && -f $HIER/.gebaut && $(cat "$HIER/.gebaut") == "$MARKE" ]]; then
+    zweitnamen
     echo "firnc ist aktuell ($KURZ, Flicken $PSUM)"
     exit 0
 fi
@@ -86,6 +100,7 @@ if [[ $FORCE -eq 0 ]]; then
         cp -a "$quelle/bin" "$HIER/bin"
         cp -a "$quelle/lib" "$HIER/lib"
         printf '%s\n' "$MARKE" > "$HIER/.gebaut"
+        zweitnamen
         exit 0
     done < <(git -C "$HIER" worktree list --porcelain 2>/dev/null \
              | sed -n 's/^worktree //p')
@@ -236,6 +251,7 @@ fi
 echo ">> firnc1 bauen (der Uebersetzer in Firn, von firnc0 uebersetzt)"
 FIRNLIB="$HIER/lib" "$HIER/bin/firnc" "$BAU/bin/firnc1.fi" -o "$HIER/bin/firnc1"
 
+zweitnamen
 echo "$MARKE" > "$HIER/.gebaut"
 rm -rf "$BAU"
 echo ">> fertig: vendor/firn/bin/firnc + bin/firnc1 + lib ($KURZ, Flicken $PSUM)"

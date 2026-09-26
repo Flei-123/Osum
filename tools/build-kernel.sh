@@ -142,22 +142,6 @@ done
 # einmal direkt und einmal aus /tmp uebersetzt, ergibt ein anderes
 # Abbild. Gleicher Weg fuer beide, dann ist die Differenz der Inhalt.
 cp -a kernel "$TMP/kernel" || exit 1
-# ROUND FUI-KERNTEXT: fUi's TrueType reader, UNDER A SECOND NAME.
-#
-# kernel/gfx/fuiink.fi draws the kernel's text with fUi's own
-# lib/font/ttf.fi + lib/font/raster.fi. Firn allows ONE module per short
-# name in a compilation unit, and `ttf` is taken by kernel/gfx/ttf.fi
-# (the kernel's reader, the cache and the fallback rasteriser). So
-# kernel/gfx/fuittf.fi is a SYMLINK to vendor/firn/lib/font/ttf.fi -- the
-# very same file under a second name, not a second version. `cp -a` above
-# copied the link as a link, and a relative link does not resolve in
-# $TMP: put the file itself there.
-FUITTF="$ROOT/vendor/firn/lib/font/ttf.fi"
-[[ -f $FUITTF ]] || { echo "fUi-Schriftleser fehlt: $FUITTF" >&2; exit 1; }
-if [[ -d "$TMP/kernel/gfx" ]]; then
-    rm -f "$TMP/kernel/gfx/fuittf.fi"
-    cp "$FUITTF" "$TMP/kernel/gfx/fuittf.fi" || exit 1
-fi
 
 # ================================ RUNDE FASSUNG: WELCHE FASSUNG IST DAS
 #
