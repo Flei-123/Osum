@@ -573,7 +573,7 @@ static mut hw_sum: [u64; 18] = [0 as u64; 18]
 static mut pba_pre: u64 = 0
 
 fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
-    if u >= MAX_UNITS || !present_on(state, u) || which >= 48 {
+    if u >= MAX_UNITS || !present_on(state, u) || which >= 49 {
         return 0xFFFFFFFF
     }
     // 18.. : the transmit side, read as it stands (no sums).
@@ -677,6 +677,10 @@ fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
     }
     if which == 47 {
         return reg(state, u, 0x0024)
+    }
+    // 48 PCI status register: bits 11-13 say whether a DMA ended in an abort.
+    if which == 48 {
+        return pci.cfg_read16(bdf_on(state, u), 0x06)
     }
     if which >= 18 {
         return 0xFFFFFFFF
@@ -1830,6 +1834,35 @@ fn lpt_link_up(state: u64, u: u64, mbit: u64) {
         setreg(state, u, 0x0034, (7 << 16) | 0x200000)
         udelay(state, 2)
         k1 = reg(state, u, 0x0034) & 0xFFFF
+        // ROUND DELL4: K1 OFF AT GIGABIT. With 8cf5a92 the Dell showed
+        // TDFT 0xd02 against TDFH 0xd00: the MAC took the descriptor and
+        // wrote the 16-octet packet header into its transmit FIFO, then
+        // the frame data never arrived (TDFPC 0, TDH 0, GPTC 0). That is
+        // e1000_k1_workaround_lpt_lp's own description -- "when K1 is
+        // enabled for 1Gbps, the MAC can miss 2 DMA completion
+        // indications" -- and K1 was on (K1_CONFIG bit 1, HV_PM_CTRL bit
+        // 14). Linux applies the fix to the I218 only; here it goes on
+        // every PCH part and goes further: FEXTNVM6.REQ_PLL_CLK as Linux,
+        // and K1 stays OFF on both sides instead of being switched back
+        // on. That costs idle power, nothing else.
+        if mbit == 1000 {
+            setreg(state, u, 0x0034, (7 << 16) | (k1 & (~2)))
+            udelay(state, 20)
+            setreg(state, u, 0x0010, reg(state, u, 0x0010) | 0x100)
+            let pk: u64 = phy_rd(state, u, HV_PM_PAGE, HV_PM_REG)
+            if pk != PHY_FAIL {
+                if phy_wr(state, u, HV_PM_PAGE, HV_PM_REG, pk & (~HV_PM_K1)) {
+                    res = res | 32
+                }
+            }
+            setreg(state, u, 0x0034, (7 << 16) | 0x200000)
+            udelay(state, 2)
+            k1 = reg(state, u, 0x0034) & 0xFFFF
+            let pm3: u64 = phy_rd(state, u, HV_PM_PAGE, HV_PM_REG)
+            if pm3 != PHY_FAIL {
+                res = (res & 0xFFFF) | ((pm3 & 0xFFFF) << 16)
+            }
+        }
         swflag_give(state, u)
         kstate.set(state, sc(u, S_LPTK1), k1 | ((gnew & 0xFFFF) << 16))
     } else {
