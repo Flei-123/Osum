@@ -404,6 +404,23 @@ has "$TMPD/pch-ich.txt" "irq=msi" "nicich: the PCH path asks for MSI (the PCH pa
 has "$TMPD/pch-ichintx.txt" "irq=intx" "nicich nicintx: the pin, when asked for"
 hasnot "$TMPD/pch-plain.txt" "e1000: s1 " "without nicich the 82574 keeps the 8254x path (no step lines)"
 
+# ROUND DELL5: `dhcp txprobe` resets the PCH part eight times, one
+# variant each, and posts one frame per variant. On QEMU's 82574 every
+# variant must finish the descriptor with the link up (nibble bits 0
+# and 3), or the probe itself is broken and says nothing on the Dell.
+wire_up; bridge_up
+cp "$D" "$TMPD/live-probe.img"
+qemu_bg e1000e "osum $BASE $NETARGS nicich nsvc=0 nwait=0 script=dhcp txprobe;exit" "$TMPD/pch-probe.txt" \
+    -drive "file=$TMPD/live-probe.img,format=raw,if=ide,index=0"
+qemu_wait
+cp "$TMPD/pch-probe.txt" /tmp/hwnet-pch-probe.txt 2>/dev/null
+bridge_down; wire_down
+if grep -qaE 'txprobe: v0=[9bdf]  1=[9bdf]  2=[9bdf]  3=[9bdf]  4=[9bdf]  5=[9bdf]  6=[9bdf]  7=[9bdf]' "$TMPD/pch-probe.txt"; then
+    ok "nicich: dhcp txprobe -- all eight variants sent their frame ($(grep -a 'txprobe: v0' "$TMPD/pch-probe.txt" | head -1))"
+else
+    bad "nicich: dhcp txprobe ($(grep -a 'txprobe' "$TMPD/pch-probe.txt" | tail -1))"
+fi
+
 echo "   counter-check: a PCH part that never comes out of reset"
 qemu_bg e1000e "osum $BASE $NETARGS nicich nicfail nsvc=0 nwait=50" "$TMPD/pch-fail.txt"
 qemu_wait

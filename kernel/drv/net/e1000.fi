@@ -135,6 +135,9 @@ const S_SPEED: u64 = 0xB8 // 0 = unbekannt, sonst 10/100/1000
 const S_LINKCHK: u64 = 0x108 // TSC of the last link re-read (link_recheck)
 const S_LPTUP: u64 = 0x110 // 1 = the PCH link-up settings are in for this link
 const S_LPTRES: u64 = 0x118 // what lpt_link_up did, see there
+const S_PRB_MSIX: u64 = 0x128 // init_on's arguments, kept for txprobe
+const S_PRB_ARMED: u64 = 0x130
+const S_PRB_VEC: u64 = 0x138
 const S_LPTK1: u64 = 0x120 // Kumeran K1_CONFIG | PLL gate << 16, as lpt_link_up left them
 
 fn sc(u: u64, off: u64) -> u64 {
@@ -573,7 +576,7 @@ static mut hw_sum: [u64; 18] = [0 as u64; 18]
 static mut pba_pre: u64 = 0
 
 fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
-    if u >= MAX_UNITS || !present_on(state, u) || which >= 49 {
+    if u >= MAX_UNITS || !present_on(state, u) || which >= 50 {
         return 0xFFFFFFFF
     }
     // 18.. : the transmit side, read as it stands (no sums).
@@ -679,6 +682,9 @@ fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
         return reg(state, u, 0x0024)
     }
     // 48 PCI status register: bits 11-13 say whether a DMA ended in an abort.
+    if which == 49 {
+        return txprobe_on(state, u)
+    }
     if which == 48 {
         return pci.cfg_read16(bdf_on(state, u), 0x06)
     }
@@ -1555,9 +1561,17 @@ fn ich_reset(state: u64, u: u64) -> bool {
     if u == 0 {
         pba_pre = reg(state, u, 0x1000)
     }
-    setreg(state, u, 0x1000, 0x1A)
+    if probe_var != 4 {
+        setreg(state, u, 0x1000, 0x1A)
+    }
     step(state, u, 11, (&t_18[0]) as u64)
-    setreg(state, u, R_CTRL, ctrl | CTRL_RST)
+    if probe_var == 6 && !phy_reset_blocked(state, u) {
+        // e1000_reset_hw_ich8lan resets the PHY with the MAC whenever
+        // the ME allows it; this driver normally does not.
+        setreg(state, u, R_CTRL, ctrl | CTRL_RST | 0x80000000)
+    } else {
+        setreg(state, u, R_CTRL, ctrl | CTRL_RST)
+    }
     // NOTHING HERE. Not a read, not a flush -- see the head of this block.
     udelay(state, 20000)
     // The reset took the semaphore with it (EXTCNF_CTRL is reset).
@@ -1951,6 +1965,13 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     kstate.set(state, sc(u, S_SPURT0), 0)
     kstate.set(state, sc(u, S_LPTUP), 0)
     kstate.set(state, sc(u, S_STORM), 0)
+    var pm_msix: u64 = 0
+    if use_msix { pm_msix = 1 }
+    var pm_armed: u64 = 0
+    if armed { pm_armed = 1 }
+    kstate.set(state, sc(u, S_PRB_MSIX), pm_msix)
+    kstate.set(state, sc(u, S_PRB_ARMED), pm_armed)
+    kstate.set(state, sc(u, S_PRB_VEC), vec)
     let i: u64 = find(state, u)
     if i >= pci.MAX_DEV {
         klog.sayn(state, klog.L_DEBUG, lq(), (&l_kein[0]) as u64, u)
@@ -2208,7 +2229,10 @@ fn tx_setup(state: u64, u: u64) {
     // frame on the wire. Whether that is what happened on the Dell the
     // chip counters (`dhcp status`, GPTC) will say; this is the
     // reference init, not a guess at a new one.
-    if fam(state, u) == FAM_ICH {
+    if fam(state, u) == FAM_ICH && probe_var == 3 {
+        setreg(state, u, R_CTRL_EXT, reg(state, u, R_CTRL_EXT) | 0x10000000)
+    }
+    if fam(state, u) == FAM_ICH && probe_var != 3 {
         // TXDCTL(0): bit 22, full descriptor write-back (GRAN=1,
         // WTHRESH=1), maximum prefetch (PTHRESH=31).
         var txd: u64 = reg(state, u, 0x3828)
@@ -2420,4 +2444,113 @@ fn shut_down_on(state: u64, u: u64) {
     setreg(state, u, R_TCTL, 0)
     kstate.set(state, sc(u, S_READY), 0)
     pci.disable_master(bdf_on(state, u))
+}
+
+// ------------------------------------------------ ROUND DELL5: txprobe
+//
+// Four images in a row on the Dell 9020 changed nothing on the one
+// thing that matters: the I217-LM takes the transmit descriptor, puts
+// the 16-octet packet header into its transmit FIFO (TDFT 0xd02 vs
+// TDFH 0xd00) and the frame data never follows. Not the firmware (AMT
+// off: same), not K1. One image per guess costs Justin a flash and a
+// photo each. This runs the guesses in ONE boot instead: for every
+// variant the chip is reset and brought up again the normal way (the
+// variant changes one thing on that path), one broadcast frame is
+// posted, and what the chip did with it is kept.
+//
+// One nibble per variant, variant 0 in the low nibble:
+//   bit 0 TDH moved (the chip finished the descriptor)
+//   bit 1 TDFT moved (the header went into the FIFO)
+//   bit 2 GPTC/TPT counted a frame (it left the MAC)
+//   bit 3 the link was up when the frame was posted
+// Variants: 0 as always (60 octets)  1 342 octets (the DHCP size)
+//   2 the frame data in the descriptor page (an address the chip
+//   provably reads)  3 none of the DELL2 PCH bits in tx_setup
+//   4 no PBA write before the reset  5 as 0 again (repeatable?)
+//   6 PHY reset together with the MAC reset  7 as 0 after that
+static mut probe_var: u64 = 0
+
+fn txprobe_on(state: u64, u: u64) -> u64 {
+    if u >= MAX_UNITS || !present_on(state, u) || fam(state, u) != FAM_ICH {
+        return 0xFFFFFFFF
+    }
+    let msix: bool = kstate.get(state, sc(u, S_PRB_MSIX)) != 0
+    let armed: bool = kstate.get(state, sc(u, S_PRB_ARMED)) != 0
+    let vec: u64 = kstate.get(state, sc(u, S_PRB_VEC))
+    var out: u64 = 0
+    var v: u64 = 0
+    while v < 8 {
+        probe_var = v
+        var nib: u64 = 0
+        if init_on(state, u, msix, armed, vec) {
+            var k: u64 = 0
+            while k < 60 && kstate.get(state, sc(u, S_LINK)) == 0 {
+                udelay(state, 100000)
+                read_link(state, u)
+                k = k + 1
+            }
+            if kstate.get(state, sc(u, S_LINK)) != 0 {
+                nib = nib | 8
+            }
+            // clear-on-read: start from zero
+            let g0: u64 = reg(state, u, 0x4080) + reg(state, u, 0x40D4)
+            let fh: u64 = reg(state, u, 0x3418)
+            var n: u64 = 60
+            if v == 1 {
+                n = 342
+            }
+            probe_send(state, u, n, v == 2)
+            udelay(state, 300000)
+            if (reg(state, u, R_TDH) % RING_SLOTS) != 0 {
+                nib = nib | 1
+            }
+            if reg(state, u, 0x3418) != fh {
+                nib = nib | 2
+            }
+            if reg(state, u, 0x4080) + reg(state, u, 0x40D4) != 0 {
+                nib = nib | 4
+            }
+        }
+        out = out | (nib << (v * 4))
+        v = v + 1
+    }
+    probe_var = 0
+    return out
+}
+
+// One broadcast frame of ethertype 0x88B5 (local experimental), posted
+// in descriptor 0 of a freshly set up ring.
+fn probe_send(state: u64, u: u64, n: u64, in_desc_page: bool) {
+    let r: u64 = ring(state, u)
+    let t: u64 = r + TXD_OFF
+    let id: u64 = kstate.get(state, sc(u, S_TX_CUR)) % RING_SLOTS
+    var buf: u64 = r + TXB_OFF + id * BUFSZ
+    if in_desc_page {
+        buf = t + 0x800
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((buf + k) as *mut u8, 0 as u8)
+        k = k + 1
+    }
+    k = 0
+    while k < 6 {
+        __mmio_write8((buf + k) as *mut u8, 0xFF as u8)
+        k = k + 1
+    }
+    let mac: u64 = kstate.get(state, sc(u, S_MAC))
+    k = 0
+    while k < 6 {
+        __mmio_write8((buf + 6 + k) as *mut u8, ((mac >> (k * 8)) & 0xFF) as u8)
+        k = k + 1
+    }
+    __mmio_write8((buf + 12) as *mut u8, 0x88 as u8)
+    __mmio_write8((buf + 13) as *mut u8, 0xB5 as u8)
+    dsc_addr(t, id, buf)
+    dsc_len(t, id, n)
+    dsc_set_u8(t, id, TD_STATUS, 0)
+    dsc_set_u8(t, id, TD_CMD, TDC_EOP | TDC_IFCS | TDC_RS)
+    let next: u64 = (id + 1) % RING_SLOTS
+    kstate.set(state, sc(u, S_TX_CUR), next)
+    setreg(state, u, R_TDT, next)
 }
