@@ -58,7 +58,39 @@ Und auf `main` umgekehrt: „Start“ 0 falsch gegen den Kern.
 - Zeit: eine Glyphe wird je Prozess einmal gerastert, danach kommt sie aus
   dem Glyphenspeicher von `wlibc` (unverändert).
 
-## Was NICHT über fUi läuft (ehrlich)
+## Nachtrag RUNDE FUI-KERNTEXT (26.09.2026): auch der Kern-Text ist fUi
+
+Was hier früher unter „Was NICHT über fUi läuft“ stand -- der Text, den
+der **Kern selbst** malt (Fenstertitel, Kern-Terminal, jede Glyphe, die
+`WIG_GLYPH` an einen Prozess ohne eigene Schriften gibt) --, läuft jetzt
+ebenfalls über fUis Schriftmaschine:
+
+- `kernel/gfx/fuiink.fi` (neu) importiert fUis `lib/font/raster.fi` und
+  `lib/font/ttf.fi` -- keine zweite Fassung. Weil `ttf` als Kurzname im
+  Kern schon vergeben ist, kopiert `tools/build-kernel.sh` dieselbe Datei
+  beim Bau als `gfx/fuittf.fi` in den Baum (Firn erlaubt je Kurzname ein
+  Modul).
+- f64 im Kern: fUis Funktionen tragen `#[allow_fp]`
+  (`vendor/firn/patches/0008-font-allow-fp-im-kern.patch`, dieselbe
+  Änderung im Firn-Repo). `fuiink` sichert je Glyphe die Vektorregister
+  (`fpu.save`), lädt das Rücksetz-MXCSR, rechnet, stellt zurück. Das geht
+  nur, weil `ttf.glyph` die Glyphentafel mit abgeschalteten
+  Unterbrechungen hält.
+- `ttf.rasterize` fragt zuerst fUi; die 4x4-Abtastung bleibt als
+  Rückfall (`nofpu`, kein Arbeitsbereich, Glyphe über 256x256).
+- Arbeitsbereich: 162 Rahmen (~648 KiB) aus `kgui.fi`, einmal je Boot.
+  Die serielle Zeile `ttf: ink=fui on` bzw. `ttf: ink=kernel` sagt, womit
+  der Kern malt.
+- Prüfstände: `tools/ttf/raster.py` liefert jetzt fUi-Tinte (über
+  `fuiraster.py`), `OSUM_TINTE=kern` oder `kern:` vor dem Schriftpfad
+  wählt die alte Tinte. Nachweis: der Terminaltitel im wm-Bild ist mit
+  fUi-Tinte 0 von 505 Punkten falsch, mit der alten 390 falsch; auf main
+  umgekehrt.
+
+Übrig ist nur die **Textkonsole** (8x16-Bitmaske aus `kernel/gfx/font.fi`)
+-- dort wird nichts gerastert, also gibt es auch keine Tinte zu tauschen.
+
+## Was NICHT über fUi läuft (Stand 24.09., überholt -- siehe oben)
 
 - **Text, den der Kern selbst malt** (Fenstertitel, Kern-Terminal,
   Textkonsole): der Kern hat kein `f64`, fUis Rasterer rechnet in `f64`.

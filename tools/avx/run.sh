@@ -191,6 +191,20 @@ fi
 #   Die Sperre gilt je BILDZEILE (bei 3440 Punkten rund 3 Mikrosekunden)
 #   -- `flush_stripe` sperrt fuer seine 2-MiB-Bloecke laenger.
 #
+# RUNDE FUI-KERNTEXT: DIE VIERTE FAMILIE -- fUis Schriftmaschine.
+# `kernel/gfx/fuiink.fi` rastert die Glyphen des Kerns (Fenstertitel,
+# Terminal, WIG_GLYPH) mit fUis `lib/font/raster.fi` + `lib/font/ttf.fi`
+# (im Kern `raster__*`, `fuittf__*`), und die rechnen in f64 -- SSE2
+# skalar. Derselbe Einwand, dieselbe Antwort, nur strenger als bei
+# `hline_a_simd`: `fuiink` SICHERT vor dem ersten Vektorbefehl den
+# lebenden Zustand mit `fpu.save` (FXSAVE/XSAVE wie der Wechsel selbst),
+# laedt das Ruecksetz-MXCSR und stellt danach mit `fpu.restore` wieder
+# her; und es wird nur gerufen, waehrend `ttf.glyph` die Glyphentafel mit
+# abgeschalteten Unterbrechungen haelt. Zwischen Sichern und Wiederher-
+# stellen kann also weder ein Planer noch ein Behandler den Kern
+# wechseln, und danach haelt niemand mehr einen Vektorzustand. Erlaubt
+# sind GENAU die drei Modulvorsilben, nicht "alles mit f64".
+#
 # Kaeme eine WEITERE Kernfunktion mit Vektoranweisungen dazu, faellt
 # diese Zeile wieder rot aus, und das soll sie: jede neue Familie
 # gehoert einzeln geprueft und einzeln hier begruendet.
@@ -200,7 +214,7 @@ if command -v objdump >/dev/null 2>&1; then
         /xmm|ymm|zmm/      { c[sym]++ }
         END { for (s in c) printf "%d %s\n", c[s], s }' \
         | sort -rn > "$TMPD/vecsym.txt"
-    ERLAUBT='<_F0\.(u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+|fb__hline_a_simd)>:'
+    ERLAUBT='<_F0\.(u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+|fb__hline_a_simd|(raster|fuittf|fuiink)__[a-z0-9_]+)>:'
     FREMD=$(grep -vE " $ERLAUBT\$" "$TMPD/vecsym.txt" | wc -l)
     GES=$(awk '{s += $1} END {print s + 0}' "$TMPD/vecsym.txt")
     ERL=$(grep -cE " $ERLAUBT\$" "$TMPD/vecsym.txt")

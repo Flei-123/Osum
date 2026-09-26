@@ -7,8 +7,10 @@ program draws comes from fUi's font engine (`kernel/user/fuiglyph.fi` ->
 vendor/firn/lib/font/ttf.fi + lib/font/raster.fi), not from the kernel's
 4x4-sampling rasteriser (`kernel/gfx/ttf.fi`, whose second version is
 `raster.py` next to this file). A screenshot of Ring 3 text is therefore
-checked against THIS file, text drawn by the kernel itself (the window
-server's titles and terminal) still against `raster.py`.
+checked against THIS file. Since round FUI-KERNTEXT (26.09.2026) the
+kernel's own text (titles, terminal, WIG_GLYPH) is fUi ink as well
+(kernel/gfx/fuiink.fi), and `raster.py` hands every glyph to `glyph`
+below; its 4x4 rasteriser is the second version of the FALLBACK only.
 
 Every computation below is written the way it stands in Firn, in the same
 order: Python floats are IEEE doubles like Firn's f64, so the same
