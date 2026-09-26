@@ -133,6 +133,9 @@ const S_PREMAC: u64 = 0xB0 // RAL/RAH, gelesen VOR dem Ruecksetzen
 // frisch wie das Traegerbit daneben -- beide kommen aus demselben Lauf.
 const S_SPEED: u64 = 0xB8 // 0 = unbekannt, sonst 10/100/1000
 const S_LINKCHK: u64 = 0x108 // TSC of the last link re-read (link_recheck)
+const S_LPTUP: u64 = 0x110 // 1 = the PCH link-up settings are in for this link
+const S_LPTRES: u64 = 0x118 // what lpt_link_up did, see there
+const S_LPTK1: u64 = 0x120 // Kumeran K1_CONFIG | PLL gate << 16, as lpt_link_up left them
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -570,7 +573,7 @@ static mut hw_sum: [u64; 18] = [0 as u64; 18]
 static mut pba_pre: u64 = 0
 
 fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
-    if u >= MAX_UNITS || !present_on(state, u) || which >= 40 {
+    if u >= MAX_UNITS || !present_on(state, u) || which >= 48 {
         return 0xFFFFFFFF
     }
     // 18.. : the transmit side, read as it stands (no sums).
@@ -644,6 +647,36 @@ fn hwstat_on(state: u64, u: u64, which: u64) -> u64 {
     }
     if which == 38 {
         return reg(state, u, 0x5B50)
+    }
+    // ROUND DELL3: 39 TDFH 40 TDFT 41 TDFPC (did frame data reach the
+    // transmit FIFO?) 42 XOFFRXC (pause frames) 43 lpt_link_up result
+    // 44 K1_CONFIG | PLL gate << 16 45 FEXTNVM6 46 LTRV 47 FEXTNVM4
+    if which == 39 {
+        return reg(state, u, 0x3410)
+    }
+    if which == 40 {
+        return reg(state, u, 0x3418)
+    }
+    if which == 41 {
+        return reg(state, u, 0x3430)
+    }
+    if which == 42 {
+        return reg(state, u, 0x4050)
+    }
+    if which == 43 {
+        return kstate.get(state, sc(u, S_LPTRES))
+    }
+    if which == 44 {
+        return kstate.get(state, sc(u, S_LPTK1))
+    }
+    if which == 45 {
+        return reg(state, u, 0x0010)
+    }
+    if which == 46 {
+        return reg(state, u, 0x00F8)
+    }
+    if which == 47 {
+        return reg(state, u, 0x0024)
     }
     if which >= 18 {
         return 0xFFFFFFFF
@@ -1728,6 +1761,125 @@ fn read_link(state: u64, u: u64) {
         }
     }
     kstate.set(state, sc(u, S_SPEED), mbit)
+    if v == 0 {
+        kstate.set(state, sc(u, S_LPTUP), 0)
+    } else if fam(state, u) == FAM_ICH && kstate.get(state, sc(u, S_LPTUP)) == 0 {
+        kstate.set(state, sc(u, S_LPTUP), 1)
+        lpt_link_up(state, u, mbit)
+    }
+}
+
+// ROUND DELL3: WHAT e1000e DOES EVERY TIME A PCH LINK COMES UP.
+//
+// e1000_check_for_copper_link_ich8lan, the pch_lpt-and-later branches
+// (every PCH part this driver takes is LPT or newer, the I217-LM in
+// Justin's Dell 9020 included). This driver never ran any of it. On the
+// Dell the MAC receives (GPRC 92, frames reach the stack) but transmits
+// nothing -- TDH stays 0, GPTC/TPT 0 -- with the MAC-PHY interconnect
+// allowed into K1 (ulp_off sets HV_PM_CTRL.K1_ENABLE, as Linux does).
+// Linux follows that with K1_CLK_REQ at gigabit, so the PHY keeps
+// requesting the clock while the interconnect idles in K1, plus the PLL
+// clock gate timing; without them the transmit side of the link may
+// never wake. Receive does not need either: the PHY is the side that
+// starts it. The rest is the same function verbatim: IPGT 8, the EMI
+// receive config, the FEXTNVM4 beacon duration (the "I217 packet loss"
+// fix) and Latency Tolerance Reporting.
+//
+// S_LPTRES bits: 1 PLL gate written, 2 K1_CLK_REQ written, 4 EMI
+// written, 8 LTR sent, 16 semaphore not taken; HV_PM_CTRL as read back
+// afterwards in bits 16..31.
+fn lpt_link_up(state: u64, u: u64, mbit: u64) {
+    var res: u64 = 0
+    setreg(state, u, R_TIPG, (reg(state, u, R_TIPG) & (~0x3FF)) | 8)
+    var k1: u64 = 0xFFFF
+    if swflag_take(state, u) {
+        // e1000_write_emi_reg_locked(I217_RX_CONFIG, 1): address, data.
+        if phy_wr(state, u, 0, 0x10, 0xB20C) {
+            if phy_wr(state, u, 0, 0x11, 1) {
+                res = res | 4
+            }
+        }
+        // I217_PLL_CLOCK_GATE_REG, PHY_REG(772, 28).
+        let g: u64 = phy_rd(state, u, 772, 28)
+        var gnew: u64 = 0xFFFF
+        if g != PHY_FAIL {
+            gnew = g & (~0x7FF)
+            if mbit == 1000 {
+                gnew = gnew | 0xFA
+            } else {
+                gnew = gnew | 0x3E8
+            }
+            if phy_wr(state, u, 772, 28, gnew) {
+                res = res | 1
+            }
+        }
+        // HV_PM_CTRL.K1_CLK_REQ at gigabit.
+        if mbit == 1000 {
+            let pm: u64 = phy_rd(state, u, HV_PM_PAGE, HV_PM_REG)
+            if pm != PHY_FAIL {
+                if phy_wr(state, u, HV_PM_PAGE, HV_PM_REG, pm | 0x200) {
+                    res = res | 2
+                }
+            }
+        }
+        let pm2: u64 = phy_rd(state, u, HV_PM_PAGE, HV_PM_REG)
+        if pm2 != PHY_FAIL {
+            res = res | ((pm2 & 0xFFFF) << 16)
+        }
+        // Kumeran K1_CONFIG (offset 7), read only, for `dhcp status`.
+        setreg(state, u, 0x0034, (7 << 16) | 0x200000)
+        udelay(state, 2)
+        k1 = reg(state, u, 0x0034) & 0xFFFF
+        swflag_give(state, u)
+        kstate.set(state, sc(u, S_LPTK1), k1 | ((gnew & 0xFFFF) << 16))
+    } else {
+        res = res | 16
+    }
+    // FEXTNVM4: beacon duration 8 us.
+    setreg(state, u, 0x0024, (reg(state, u, 0x0024) & (~7)) | 7)
+    // FEXTNVM6: written back as read (Linux does the same outside SPT).
+    setreg(state, u, 0x0010, reg(state, u, 0x0010))
+    if lpt_ltr(state, u, mbit) {
+        res = res | 8
+    }
+    kstate.set(state, sc(u, S_LPTRES), res)
+}
+
+// e1000_platform_pm_pch_lpt with link: the latency the receive buffer
+// can absorb, clamped to what the platform allows (PCI config 0xA8/0xAA).
+fn lpt_ltr(state: u64, u: u64, mbit: u64) -> bool {
+    if mbit == 0 {
+        return false
+    }
+    let rxa: u64 = (reg(state, u, 0x1000) & 0xFFFF) * 512
+    var value: u64 = 0
+    if rxa > 1522 {
+        value = (rxa - 1522) * (16000 / mbit)
+    }
+    var scale: u64 = 0
+    while value > 0x3FF {
+        scale = scale + 1
+        value = (value + 31) / 32
+    }
+    if scale > 5 {
+        return false
+    }
+    var lat: u64 = (scale << 10) | value
+    let d: u64 = bdf_on(state, u)
+    let ms: u64 = pci.cfg_read16(d, 0xA8)
+    let mn: u64 = pci.cfg_read16(d, 0xAA)
+    var mx: u64 = ms
+    if mn > mx {
+        mx = mn
+    }
+    let lat_d: u64 = (lat & 0x3FF) << (5 * ((lat >> 10) & 7))
+    let mx_d: u64 = (mx & 0x3FF) << (5 * ((mx >> 10) & 7))
+    if mx != 0 && mx != 0xFFFF && lat_d > mx_d {
+        lat = mx
+    }
+    let v: u64 = (1 << 31) | (1 << 15) | (1 << 30) | lat | (lat << 16)
+    setreg(state, u, 0x00F8, v)
+    return true
 }
 
 // ------------------------------------------------------------- the init
@@ -1764,6 +1916,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     kstate.set(state, sc(u, S_GSI), 0)
     kstate.set(state, sc(u, S_SPUR), 0)
     kstate.set(state, sc(u, S_SPURT0), 0)
+    kstate.set(state, sc(u, S_LPTUP), 0)
     kstate.set(state, sc(u, S_STORM), 0)
     let i: u64 = find(state, u)
     if i >= pci.MAX_DEV {
@@ -2009,6 +2162,9 @@ fn tx_setup(state: u64, u: u64) {
     setreg(state, u, R_TDT, 0)
     kstate.set(state, sc(u, S_TX_CUR), 0)
     setreg(state, u, R_TIPG, TIPG_DEFAULT)
+    if fam(state, u) == FAM_ICH {
+        setreg(state, u, R_TIPG, (TIPG_DEFAULT & (~0x3FF)) | 8)
+    }
     // ROUND DELL2: THE PCH BITS LINUX SETS BEFORE THE FIRST FRAME.
     //
     // e1000e (ich8lan.c, e1000_initialize_hw_bits_ich8lan and
