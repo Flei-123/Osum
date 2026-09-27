@@ -1414,6 +1414,25 @@ sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
 if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
     fehler "in limine.conf steht noch ein Platzhalter"
 fi
+# PERSONAL STICK: `vfs` IN THE FIRST ENTRY TOO (27.09.2026, Dell 9020).
+# Without it /dev/ is empty and the installer says "no writable disk
+# found" -- the same finding the public stick fixed in ROUND LIVE (see
+# below). vfs only shows the devices; nothing is written until the
+# installer's two questions are answered.
+if [ "$IMAGE_PROFILE" = personal ]; then
+    python3 - "$OUT/limine.conf" "$MARKE_PRODUKT" <<'PYVFS' || fehler "vfs liess sich nicht in den ersten Eintrag setzen"
+import sys
+path, prod = sys.argv[1], sys.argv[2]
+lines = open(path).read().split('\n')
+i = lines.index('/' + prod)
+j = i + 1
+while j < len(lines) and lines[j].startswith(' '):
+    if lines[j].strip().startswith('cmdline:') and ' vfs ' not in lines[j] + ' ':
+        lines[j] = lines[j].replace('modfs osum ', 'modfs osum vfs ', 1)
+    j += 1
+open(path, 'w').write('\n'.join(lines))
+PYVFS
+fi
 # ROUND LIVE: THE PUBLIC MENU SAYS WHAT THE STICK IS. Entry 1 is the
 # live system ("try without installing" -- nothing is written to a disk),
 # entry 2 is the same live system with the installer already open
