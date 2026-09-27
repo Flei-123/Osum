@@ -1140,18 +1140,44 @@ fn w(buf: u64, i: u64) -> u64 {
 // ------------------------------------------------------- die Uebertragungen
 
 // Genau das, was `blk.fi` verlangt: Block n, 512 Oktette, sonst nichts.
+//
+// THROUGH OUR OWN BUFFER, NOT THE CALLER'S. The PRDT takes the caller's
+// address as a physical one and splits it at page boundaries. That is
+// only right where virtual and physical memory coincide and the pages
+// are contiguous. The FAT writer's sector buffers are not always such
+// memory: installing onto a SATA disk (QEMU q35, 27.09.2026) left
+// BOOTX64.EFI and osum.mb on the ESP with the right size and hundreds
+// of wrong bytes in scattered sectors -- the machine then rebooted in a
+// loop. Buffer A lives in the driver's own area, page aligned, the same
+// memory the command list and table already live in; one 512-octet
+// copy per sector is nothing next to the command itself.
+fn bounce_copy(from: u64, to: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write64((to + i) as *mut u64, __mmio_read64((from + i) as *mut u64))
+        i = i + 8
+    }
+}
+
 fn read_block(state: u64, lba: u64, dst: u64) -> bool {
     if !ready(state) {
         return false
     }
-    return run(state, ATA_READ_DMA_EXT, lba, 1, dst, SECTOR, false)
+    let b: u64 = buffer(state, 0)
+    if !run(state, ATA_READ_DMA_EXT, lba, 1, b, SECTOR, false) {
+        return false
+    }
+    bounce_copy(b, dst, SECTOR)
+    return true
 }
 
 fn write_block(state: u64, lba: u64, src: u64) -> bool {
     if !ready(state) {
         return false
     }
-    if !run(state, ATA_WRITE_DMA_EXT, lba, 1, src, SECTOR, true) {
+    let b: u64 = buffer(state, 0)
+    bounce_copy(src, b, SECTOR)
+    if !run(state, ATA_WRITE_DMA_EXT, lba, 1, b, SECTOR, true) {
         return false
     }
     return flush(state)
