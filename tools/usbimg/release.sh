@@ -49,7 +49,7 @@ public)
     [ "${REV%-dirty}" = "$REV" ] || fehler "public images are built from a clean tree only ($REV)"
     BAU=${BAU:-/tmp/osum-release-public}
     rm -rf "$BAU"
-    env -u JARVIS_CONF -u PW_JUSTIN -u PW_ROOT IMAGE_PROFILE=public PARTTAB=mbr \
+    env -u JARVIS_CONF -u JARVIS_DEVICE_KEY -u PW_JUSTIN -u PW_ROOT IMAGE_PROFILE=public PARTTAB=mbr \
         bash tools/usbimg/build.sh "$BAU" > "$BAU.log" 2>&1 \
         || { tail -20 "$BAU.log" >&2; fehler "build failed"; }
     IMG="$BAU/orientos-usb.img"

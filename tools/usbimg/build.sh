@@ -147,6 +147,8 @@ esac
 if [ "$IMAGE_PROFILE" = public ]; then
     [ -z "${JARVIS_CONF:-}" ] \
         || fehler "JARVIS_CONF gehoert nicht in das oeffentliche Abbild"
+    [ -z "${JARVIS_DEVICE_KEY:-}" ] \
+        || fehler "JARVIS_DEVICE_KEY gehoert nicht in das oeffentliche Abbild"
     [ -z "${PW_JUSTIN:-}" ] \
         || fehler "PW_JUSTIN gehoert nicht in das oeffentliche Abbild"
     KONTO=${LIVE_USER:-live}
@@ -1154,6 +1156,16 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
 done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
+# PRE-PAIRED DEVICE KEY (personal image only). The seed was generated on
+# the JARVIS server and its public key is already registered there
+# (bruecke /bruecke/koppeln was=vorab), so the helper signs in right
+# after boot -- nobody has to type `jarvisctl pair <code>` at the
+# machine. Mode 600: jsig refuses a key others can read.
+if [ -n "${JARVIS_DEVICE_KEY:-}" ]; then
+    [ -s "$JARVIS_DEVICE_KEY" ] || fehler "JARVIS_DEVICE_KEY=$JARVIS_DEVICE_KEY fehlt"
+    ARGS+=("/etc/jarvis/device.key=$JARVIS_DEVICE_KEY@600")
+    sagen "device.key  vorab gekoppelt ($(cut -c1-8 "${JARVIS_DEVICE_KEY%.key}.pub" 2>/dev/null)...)"
+fi
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
 ARGS+=("/system/FASSUNG=$OUT/FASSUNG")
 if [ -n "$KEY" ] && [ -s "$KEY" ]; then
