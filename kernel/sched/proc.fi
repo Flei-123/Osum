@@ -823,13 +823,18 @@ fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
 
 // Corpse to memory: first the address space, then the kernel stack.
 fn reap(state: u64, i: u64) -> bool {
+    // Claim first: two reapers on two cores must not both free the address
+    // space (see sched.S_REAPING, 27.09.2026).
+    if !sched.claim_zombie(state, i) {
+        return false
+    }
     // RUNDE SYSTEMBUS: was diese Aufgabe am Bus hatte, geht mit ihr --
     // Dienste, Abos, Nachrichten, Segmente. Die pid muss VOR
     // `sched.reap` gelesen werden; danach ist der Platz frei und traegt
     // schon die naechste.
     bus.forget_task(state, i, sched.tget(state, i, sched.T_PID))
     free_space(state, i)
-    return sched.reap(state, i)
+    return sched.reap_claimed(state, i)
 }
 
 // ====================================== RUNDE SYSTEMBUS: EIN FREMDER RAHMEN
@@ -1476,9 +1481,11 @@ fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
 }
 
 fn discard(state: u64, i: u64) {
-    sched.tset(state, i, sched.T_STATE, sched.S_ZOMBIE)
+    // Straight to S_REAPING, never through S_ZOMBIE: a zombie is fair game
+    // for every reaper, and this task's space is being freed right here.
+    sched.tset(state, i, sched.T_STATE, sched.S_REAPING)
     free_space(state, i)
-    sched.reap(state, i)
+    sched.reap_claimed(state, i)
 }
 
 // A process: task plus address space. `kind_arg` is what the user program
