@@ -1801,6 +1801,20 @@ const PS_BLANK: u64 = 2
 // ------------------------------------------------------- RUNDE TUNNEL
 // Wie `pwr_call`: ein eigener Rahmen, der nur entsteht, wenn wirklich
 // eine dieser Nummern kommt.
+// The copy page of THIS system call: one page per core for ring 3 callers,
+// the shared BLOCK_OFF for kernel tasks (see kstate.BLOCKK_OFF).
+fn blockb(state: u64) -> u64 {
+    let cur: u64 = sched.current(state)
+    if sched.tget(state, cur, sched.T_KIND) != sched.K_USER {
+        return state + kstate.BLOCK_OFF
+    }
+    var k: u64 = sched.hier(state)
+    if k >= kstate.MAX_CPUS {
+        return state + kstate.BLOCK_OFF
+    }
+    return state + kstate.BLOCKK_OFF + k * 4096
+}
+
 fn wg_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     if number == SYS_OSUM_WGGET {
@@ -3466,7 +3480,7 @@ fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
         return len
     }
     let z: u64 = serial.line_at(cpu.here(state))
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     if !copy_in(state, me, bounce, buf, len) {
         serial.line_clear(z)
         return neg(errno.E_FAULT)
@@ -3521,7 +3535,7 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     // Through the data area: the file system never sees an address of a
     // process.
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     if !copy_in(state, me, bounce, buf, len) {
         return neg(errno.E_FAULT)
     }
@@ -3590,7 +3604,7 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !readable(state, of) {
         return neg(errno.E_BADF)
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     let ino: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
     let n: u64 = fs.read_at(state, ino, off, bounce, len)
@@ -4857,7 +4871,7 @@ fn fb_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     // Ueber den Datenbereich, wie bei einer Datei: die Karte sieht nie
     // eine Adresse eines Prozesses.
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     if !copy_in(state, me, bounce, buf, n) {
         return neg(errno.E_FAULT)
     }
@@ -4878,7 +4892,7 @@ fn fb_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return neg(errno.E_NODEV)
     }
     let off: u64 = file.open_off(state, of)
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     let k: u64 = gfx.fb_read_bytes(state, off, bounce, len)
     if !copy_out(state, me, buf, bounce, k) {
         return neg(errno.E_FAULT)
@@ -4976,7 +4990,7 @@ fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     let node: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     var want: u64 = len
     if want > kstate.BLOCK_MAX {
         want = kstate.BLOCK_MAX
@@ -5002,7 +5016,7 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if (file.open_flags(state, of) & O_APPEND) != 0 {
         off = vfs.v_attr(state, m, node, vfsops.A_SIZE)
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     var want: u64 = len
     if want > kstate.BLOCK_MAX {
         want = kstate.BLOCK_MAX
@@ -5705,7 +5719,7 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
 // `struct stat` as x86-64 Linux lays it out, filled in the data area and
 // copied over in one go.
 fn fill_stat(state: u64, ino: u64) -> bool {
-    let s: u64 = state + kstate.BLOCK_OFF + 2048
+    let s: u64 = blockb(state) + 2048
     var i: u64 = 0
     while i < STAT_BYTES {
         kstate.set8(s + i, 0 as u8)
@@ -5752,7 +5766,7 @@ fn fill_stat(state: u64, ino: u64) -> bool {
 }
 
 fn stat_out(state: u64, me: u64, out: u64) -> u64 {
-    if !copy_out(state, me, out, state + kstate.BLOCK_OFF + 2048,
+    if !copy_out(state, me, out, blockb(state) + 2048,
         STAT_BYTES) {
         return neg(errno.E_FAULT)
     }
@@ -5766,7 +5780,7 @@ fn stat_out(state: u64, me: u64, out: u64) -> u64 {
 // nicht dasselbe Paar (dev, ino) tragen. Genau das ist die Zusage, auf
 // die sich `find -xdev` und jedes `du` verlassen.
 fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
-    let s: u64 = state + kstate.BLOCK_OFF + 2048
+    let s: u64 = blockb(state) + 2048
     var i: u64 = 0
     while i < STAT_BYTES {
         kstate.set8(s + i, 0 as u8)
@@ -6150,7 +6164,7 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
     }
     // A pipe and the console have no inode. They still have a KIND, and a
     // program that asks what it is holding gets an answer.
-    let s: u64 = state + kstate.BLOCK_OFF + 2048
+    let s: u64 = blockb(state) + 2048
     var i: u64 = 0
     while i < STAT_BYTES {
         kstate.set8(s + i, 0 as u8)
@@ -6204,7 +6218,7 @@ fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
     let m: u64 = file.open_mnt(state, of)
     let dir: u64 = file.open_ino(state, of)
     let named: u64 = nameb(state) + NB_ENT
-    let build: u64 = state + kstate.BLOCK_OFF + 2048
+    let build: u64 = blockb(state) + 2048
     var written: u64 = 0
     var pos: u64 = file.open_off(state, of)
     var going: bool = true
@@ -6277,7 +6291,7 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
     }
     let dir: u64 = file.open_ino(state, of)
     let named: u64 = nameb(state) + NB_ENT
-    let build: u64 = state + kstate.BLOCK_OFF + 2048
+    let build: u64 = blockb(state) + 2048
     var written: u64 = 0
     var pos: u64 = file.open_off(state, of)
     var going: bool = true
@@ -7495,7 +7509,7 @@ fn do_getrandom(state: u64, me: u64, buf: u64, want: u64) -> u64 {
     if len == 0 {
         return 0
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     rand.bytes(state, bounce, len)
     if !copy_out(state, me, buf, bounce, len) {
         return neg(errno.E_FAULT)
@@ -7528,7 +7542,7 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
         // Ausgabe in eine Datei geht und nicht auf einen Schirm.
         return neg(errno.E_NOTTY)
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = blockb(state)
     var size: u64 = 36
     if req == tty.TIOCGWINSZ || req == tty.TIOCSWINSZ {
         size = 8
@@ -9996,7 +10010,7 @@ fn do_freg(state: u64, me: u64, satz: u64, len: u64) -> u64 {
     if len != kstate.FT_SLOT {
         return neg(errno.E_INVAL)
     }
-    let buf: u64 = state + kstate.BLOCK_OFF
+    let buf: u64 = blockb(state)
     if !copy_in(state, me, buf, satz, len) {
         return neg(errno.E_FAULT)
     }
@@ -11021,7 +11035,7 @@ fn aio_exec(state: u64, i: u64) -> u64 {
 }
 
 // Braucht dieser Eintrag die eine Kopierseite von `sys.fi`? Die Antwort
-// steht in `read_of`/`write_of`: dort, wo `state + kstate.BLOCK_OFF`
+// steht in `read_of`/`write_of`: dort, wo `blockb(state)`
 // vorkommt, ja -- sonst nein.
 fn aio_braucht_sperre(state: u64, of: u64) -> bool {
     let kind: u64 = file.open_kind(state, of)

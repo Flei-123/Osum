@@ -187,6 +187,7 @@ BEREICHE = [
     ("WIGST",      "kstate.fi", "WIGST_OFF",      "WIGST_MAX"),
     ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
     ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
+    ("BLOCKK",     "kstate.fi", "BLOCKK_OFF",     "BLOCKK_MAX"),
     # RUNDE FREMDLAND: die Tafel der Dateisperren.  Eine Seite, 64
     # Eintraege zu 48 Oktetten -- (Inode, Einhaengung, Bereich, Art,
     # Halter).  Sie liegt HINTER NAMEK, in den 0x1000 Oktetten, die
