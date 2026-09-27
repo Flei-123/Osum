@@ -2072,6 +2072,20 @@ fn schedule_locked(state: u64) {
         atomic.lock_give(state, atomic.L_SCHED)
         return
     }
+    // GUARD (27.09.2026): the VM showed a #DF with rsp near 0 on core 3 --
+    // a core had loaded a task whose saved stack pointer was 0, i.e. a
+    // task that was never switched out (running on another core, or an
+    // adopted idle task). Stop right here with the evidence in the
+    // registers instead of running on page 0 until something faults:
+    // rdi = next, rsi = its T_RSP, rdx = its state, rcx = its kind,
+    // r8 = this core, r9 = cur, r10 = the core it last ran on.
+    let next_rsp: u64 = tget(state, next, T_RSP)
+    if next_rsp < 0x1000 || tget(state, next, T_STATE) == S_RUN {
+        asm("ud2", in("rdi") next, in("rsi") next_rsp,
+            in("rdx") tget(state, next, T_STATE), in("rcx") tget(state, next, T_KIND),
+            in("r8") cpu.here(state), in("r9") cur,
+            in("r10") tc_get(state, next, TC_CPU), clobber("memory"))
+    }
     if tget(state, cur, T_STATE) == S_RUN {
         tset(state, cur, T_STATE, S_READY)
     }
