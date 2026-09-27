@@ -40,8 +40,8 @@ import arch.x86_64.apic
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks,
     tote_schlaefe,
-    exit_task, reap,
-    kill_current, wake_pid, find_pid, current, tget, tset, task_at,
+    exit_task, reap, claim_zombie, reap_claimed, S_REAPING,
+    kill_current, wake_pid, wait_sleep, find_pid, current, tget, tset, task_at,
     stack_high, STACK_PAINT,
     // RUNDE LEISTE: die Waechterseite unter jedem Kernstapel.
     guard_faults, guard_last_pid, guard_last_depth, guard_broken,
@@ -390,6 +390,15 @@ const S_STOP: u64 = 7
 // weil `wake_pid` mit einer 0 als Kennung alles weckt, was auf
 // irgendein Kind wartet -- ein `poll` waere darunter gewesen.
 const S_POLL: u64 = 8
+// BEING REAPED (27.09.2026). Exactly one reaper has claimed the zombie with
+// `claim_zombie` and is giving its address space back. Before this state
+// existed, "is it a zombie? then proc.reap" was a check and an act without a
+// lock in between: the parent's wait4, the desktop's launcher loop and the
+// kernel's wait loops could all reap the SAME task at once on different
+// cores. Every frame of its address space went back to the free list twice,
+// was handed out twice, and a page table ended up holding a new program's
+// code (#GP in proc.free_space, VM with 4 cores, and the Dell crashes).
+const S_REAPING: u64 = 9
 // Ein Zeitpunkt, den der Zeitgeber nie erreicht: das ist `timeout < 0`,
 // also "warte, bis wirklich etwas geschieht".
 const POLL_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
@@ -2248,6 +2257,36 @@ fn sleep_ticks(state: u64, ticks: u64) {
     irq_restore(flags)
 }
 
+// Go to sleep until a child `want` (0 = any) changes. State and the
+// switch happen under ONE hold of L_SCHED (27.09.2026). wait4 used to write
+// S_WAIT without the lock and call `schedule` afterwards: a child exiting on
+// another core in that gap woke the parent (S_READY) while it was still
+// running here, a third core picked it up with the stack pointer of its LAST
+// switch, and two cores ran on one kernel stack -- #GP/#DF at garbage return
+// addresses right after a script started a program (VM, 4 cores: every time).
+fn wait_sleep(state: u64, want: u64) {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    let cur: u64 = current(state)
+    // A child that died between the caller's look and this lock has
+    // already called wake_pid -- nobody would wake us again.
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if tget(state, i, T_STATE) == S_ZOMBIE && tget(state, i, T_PARENT) == cur
+            && (want == 0 || tget(state, i, T_PID) == want) {
+            atomic.lock_give(state, atomic.L_SCHED)
+            irq_restore(flags)
+            return
+        }
+        i = i + 1
+    }
+    tset(state, cur, T_WAITPID, want)
+    tset(state, cur, T_STATE, S_WAIT)
+    schedule_locked(state)
+    irq_restore(flags)
+}
+
 // Whoever waits for this pid becomes ready again.
 fn wake_pid(state: u64, pid: u64) {
     let n: u64 = kstate.get(state, kstate.TASKS)
@@ -2437,10 +2476,35 @@ fn reparent(state: u64, dying: u64) {
 // ROUND K5: the slot is released under the run queue lock, the FRAMES
 // are given back afterwards, outside it. Same rule as in `create` and for
 // the same reason -- the two locks of this kernel are never nested.
-fn reap(state: u64, i: u64) -> bool {
+// Claim a zombie for reaping. Only the caller that gets `true` may free
+// anything of it; everyone else must leave it alone.
+fn claim_zombie(state: u64, i: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     if tget(state, i, T_STATE) != S_ZOMBIE || i == current(state) {
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return false
+    }
+    tset(state, i, T_STATE, S_REAPING)
+    atomic.lock_give(state, atomic.L_SCHED)
+    irq_restore(flags)
+    return true
+}
+
+fn reap(state: u64, i: u64) -> bool {
+    return reap_in(state, i, S_ZOMBIE)
+}
+
+// The second half after `claim_zombie`: kernel stack, vector area, slot.
+fn reap_claimed(state: u64, i: u64) -> bool {
+    return reap_in(state, i, S_REAPING)
+}
+
+fn reap_in(state: u64, i: u64, want: u64) -> bool {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    if tget(state, i, T_STATE) != want || i == current(state) {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         return false
