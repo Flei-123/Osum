@@ -7010,17 +7010,26 @@ fn big_bottom(state: u64, me: u64) -> u64 {
     return b
 }
 
+// The big region is used up: reuse what munmap freed there (see `hole`).
+fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
+    let h: u64 = hole(state, me, top, proc.BIG_TOP, pages)
+    if h != 0 && map_run(state, me, h, pages, prot) {
+        return h
+    }
+    return neg(errno.E_NOMEM)
+}
+
 fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     if kstate.mode_on(state, kstate.M_NOBIG) {
         return neg(errno.E_NOMEM)
     }
     let top: u64 = big_bottom(state, me)
     if pages * PAGE > top - proc.BIG_FLOOR {
-        return neg(errno.E_NOMEM)
+        return big_hole(state, me, top, pages, prot)
     }
     let base: u64 = top - pages * PAGE
     if base < proc.BIG_FLOOR {
-        return neg(errno.E_NOMEM)
+        return big_hole(state, me, top, pages, prot)
     }
     var p: u64 = base
     while p < top {
@@ -7087,6 +7096,15 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     // additiv, und es ist der einzige Grund, warum ein Uebersetzer auf
     // diesem System laufen kann.
     if base < page_up(brk_of(state, me)) + PAGE {
+        // The bump region is used up. Before going to the big region, take
+        // a hole that munmap left behind (see `hole`).
+        let h: u64 = hole(state, me, top, MMAP_TOP, pages)
+        if h != 0 {
+            if !map_run(state, me, h, pages, prot) {
+                return neg(errno.E_NOMEM)
+            }
+            return h
+        }
         return big_map(state, me, pages, prot)
     }
     var p: u64 = base
@@ -7140,6 +7158,46 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
 // DESKRIPTOR geschlossen wird -- und der Client schliesst ihn
 // gewohnheitsmaessig direkt nach `wl_shm_create_pool`, waehrend seine
 // Abbildung noch steht.
+// A run of `pages` unmapped pages inside [lo, hi), lowest first; 0 if none.
+//
+// 27.09.2026: mmap handed out addresses by moving a bottom mark down and
+// never looked back -- munmap gave the FRAMES back, but not the addresses.
+// A process that allocates and frees for a long time (jarvisd: a TLS
+// session and a root store per bridge request) walked through the whole
+// region; after ~120 requests in the VM every mmap failed, reading the root
+// file failed ("no root store"), and the helper was gone for good -- the
+// Dell's "clock runs, mouse moves, but offline". Only asked once the bump
+// region is exhausted, so the normal path costs nothing.
+fn hole(state: u64, me: u64, lo: u64, hi: u64, pages: u64) -> u64 {
+    var run: u64 = 0
+    var p: u64 = lo
+    while p < hi {
+        if proc.translate(state, me, p) == 0 {
+            run = run + 1
+            if run == pages {
+                return p - (pages - 1) * PAGE
+            }
+        } else {
+            run = 0
+        }
+        p = p + PAGE
+    }
+    return 0
+}
+
+fn map_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+    var i: u64 = 0
+    while i < pages {
+        if proc.map_page_zero(state, me, base + i * PAGE, true,
+            (prot & PROT_EXEC) != 0) == 0 {
+            return false
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        i = i + 1
+    }
+    return true
+}
+
 fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     off: u64) -> u64 {
     if off != 0 {
