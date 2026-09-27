@@ -353,7 +353,10 @@ mon "sendkey ctrl-a" "sleep 0.3" "sendkey ctrl-c" "sleep 0.5"
 # 1. A MOUSE CLICK ON A BUTTON: "Anderer Benutzer" opens the name field
 zeig $(( $(fld "$OTHER" x) + 40 )) $(( $(fld "$OTHER" y) + 12 ))
 klick
-grep -aq 'glogin: anderer benutzer' "$D/serial.txt" \
+# `seen` and not a bare grep: the click travels mouse -> window server ->
+# glogin -> serial line, and a grep right after `klick` raced it (one
+# red run in two on 27.09.2026, the next run of the same tree green).
+seen 'glogin: anderer benutzer' \
     && ok "a MOUSE click on 'Anderer Benutzer' is taken" \
     || bad "'glogin: anderer benutzer' missing -- the click did not arrive"
 LAST=$(foci | tail -1 | grep -oE 'kind=[0-9]+')
