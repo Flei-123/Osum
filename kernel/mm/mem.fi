@@ -102,7 +102,7 @@ import arch.cpu
 import arch.arch
 
 export {
-    scan, frame_alloc, frame_free, frame_run, frame_free_run, frames_free,
+    scan, crash_band, frame_alloc, frame_free, frame_run, frame_free_run, frames_free,
     frame_alloc_user, reserve_init,
     // ---- round MEM ----
     bitmap_octets, mapped_gib, frames_total, stress, probe_high,
@@ -194,6 +194,88 @@ fn bit_clear(bitmap: u64, i: u64) {
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (i % 8)))) as u8)
 }
 
+// ============================================ CRASH BANDS (Dell, 27.09.2026)
+// Extra places for the panic report that must survive a warm reset
+// (see diag/crash.fi, K-011). The first band at 0x96000 lies in
+// conventional memory, and the Dell's UEFI overwrote it on the reset
+// after the panic of 27.09.2026 -- the report was gone. These two lie
+// far away from anything firmware touches below 1 MiB. A band is only
+// used when the memory map calls its whole range usable and no boot
+// module overlaps it (the loader may have put root.img there); then its
+// frames are taken out of the allocator for good.
+const CRASH_BAND_LEN: u64 = 0x3000
+const CRASH_BANDS: u64 = 2
+static mut crash_band_ok: [u64; 2] = [0, 0]
+
+fn crash_band_base(i: u64) -> u64 {
+    if i == 0 {
+        return 0x0F000000
+    }
+    return 0x1F000000
+}
+
+// 0 = this band is not usable on this machine.
+fn crash_band(i: u64) -> u64 {
+    if i >= CRASH_BANDS {
+        return 0
+    }
+    if crash_band_ok[i as usize] == 0 {
+        return 0
+    }
+    return crash_band_base(i)
+}
+
+fn crash_band_usable(mbi: u64, b: u64) -> bool {
+    let e: u64 = b + CRASH_BAND_LEN
+    if (kstate.get32(mbi + MB_FLAGS) & 64) == 0 {
+        return false
+    }
+    var inside: bool = false
+    let len: u64 = kstate.get32(mbi + MB_MMAP_LEN)
+    let addr: u64 = kstate.get32(mbi + MB_MMAP_ADDR)
+    var p: u64 = addr
+    while p < addr + len {
+        let size: u64 = kstate.get32(p)
+        let base: u64 = __mmio_read64((p + 4) as *mut u64)
+        let length: u64 = __mmio_read64((p + 12) as *mut u64)
+        if kstate.get32(p + 20) == 1 && base <= b && base + length >= e {
+            inside = true
+        }
+        if size == 0 {
+            p = addr + len
+        } else {
+            p = p + size + 4
+        }
+    }
+    if !inside {
+        return false
+    }
+    let mc: u64 = mods(mbi)
+    var m: u64 = 0
+    while m < mc {
+        if mod_start(mbi, m) < e && mod_end(mbi, m) > b {
+            return false
+        }
+        m = m + 1
+    }
+    if kstate.get32(mbi + MB_MODS_ADDR) < e && kstate.get32(mbi + MB_MODS_ADDR) + 4096 > b && mc != 0 {
+        return false
+    }
+    return true
+}
+
+fn crash_bands_take(bitmap: u64, frames: u64, mbi: u64) {
+    var i: u64 = 0
+    while i < CRASH_BANDS {
+        let b: u64 = crash_band_base(i)
+        if crash_band_usable(mbi, b) {
+            reserve(bitmap, frames, b, CRASH_BAND_LEN)
+            crash_band_ok[i as usize] = 1
+        }
+        i = i + 1
+    }
+}
+
 // Reads the memory map, builds the bitmap, marks the kernel as taken.
 // Returns the number of map entries seen.
 fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
@@ -267,6 +349,8 @@ fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
             m = m + 1
         }
     }
+
+    crash_bands_take(bitmap, frames, mbi)
 
     kstate.set(state, kstate.FRAMES_FREE, count_free(state))
 

@@ -1125,7 +1125,32 @@ fn alle_stoppen(state: u64) {
     apic.ipi(state, 0, 0xC4400)
 }
 
-fn report(frame: u64, state: u64, vector: u64) {
+static mut rep_own: [u64; 1] = [0 as u64; 1]
+static mut rep_depth: u64 = 0
+static mut rep_first: u64 = 0
+static mut rep_cr2: u64 = 0
+
+// Another core is already writing the report. Give it time; if it never
+// finishes (it may hang itself), this core does the reset that
+// `absturzneustart` promised, so the machine does not stand forever.
+fn other_core_waits(state: u64) {
+    asm("cli")
+    if !kstate.mode_on(state, kstate.M_PANICBOOT) {
+        power.halt_forever()
+    }
+    var hz: u64 = apic.tsc_hz(state)
+    if hz < 100000000 || hz > 10000000000 {
+        hz = 4000000000
+    }
+    let t0: u64 = apic.tsc()
+    while apic.tsc() - t0 < hz * (PANIC_REBOOT_S + 20) {
+        asm("pause")
+    }
+    power.acpi_reset(state)
+    power.halt_forever()
+}
+
+fn report(frame0: u64, state: u64, vector0: u64) {
     // Four octets per name, so that the index is a multiplication and not
     // a search: entry n starts at 4 * n.
     var names: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
@@ -1138,6 +1163,62 @@ fn report(frame: u64, state: u64, vector: u64) {
     var s_rsp: [u8; 8] = "  rsp=\0\0"
     var s_ss: [u8; 6] = "  ss=\0"
     var s_tail: [u8; 20] = "*** kernel halted\0\0\0"
+    // ============================================ DELL, 27.09.2026
+    // ONE REPORT, AND IT IS THE FIRST FAULT.
+    //
+    // The Dell's panic picture of 27.09.2026 showed a fault INSIDE the
+    // report of an earlier one (the stack scan still held trap.report
+    // and its serial output under it) -- the first fault, the one that
+    // mattered, was painted over by the second. Now:
+    //   * another core already reporting: this one keeps out of the way;
+    //   * a fault during this core's own report (depth 2): the FIRST
+    //     frame is still intact on the stack above, so it is reported
+    //     again, and the second fault goes into three log lines that the
+    //     picture and the report both show under PROTOKOLL;
+    //   * a third fault: nothing more is tried.
+    var frame: u64 = frame0
+    var vector: u64 = vector0
+    let me: u64 = cpu.here(state) + 1
+    let owner: u64 = __atomic_swap((&rep_own[0 as usize]) as u64 as *mut u64, 0, me)
+    if owner != 0 && owner != me {
+        other_core_waits(state)
+    }
+    rep_depth = rep_depth + 1
+    var c2: u64 = cr2()
+    if rep_depth == 1 {
+        rep_first = frame
+        rep_cr2 = c2
+        crash.doppel_check()
+    } else if rep_depth == 2 {
+        var s_src: [u8; 5] = "trap\0"
+        var s_v: [u8; 42] = "VERSCHACHTELT: 2. fehler im bericht, vek \0"
+        var s_r: [u8; 15] = "2. fehler rip \0"
+        var s_c: [u8; 15] = "2. fehler cr2 \0"
+        var s_n: [u8; 39] = "*** fault during the report (nested): \0"
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(vector)
+        serial.put(32 as u8)
+        serial.hex(word(frame, F_RIP))
+        serial.put(32 as u8)
+        serial.hex(c2)
+        serial.nl()
+        klog.sayn(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_v[0]) as u64, vector)
+        klog.sayh(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_r[0]) as u64,
+            word(frame, F_RIP))
+        klog.sayh(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_c[0]) as u64, c2)
+        frame = rep_first
+        vector = word(frame, F_VECTOR)
+        c2 = rep_cr2
+    } else {
+        var s_3: [u8; 30] = "*** third fault -- giving up\0\0"
+        serial.puts((&s_3[0]) as u64)
+        serial.nl()
+        if kstate.mode_on(state, kstate.M_PANICBOOT) {
+            panic_reboot(state)
+        }
+        power.halt_forever()
+    }
+
 
     serial.nl()
     serial.puts((&head[0]) as u64)
@@ -1148,7 +1229,7 @@ fn report(frame: u64, state: u64, vector: u64) {
     serial.hex(word(frame, F_ERROR))
     if vector == 14 {
         serial.puts((&s_cr2[0]) as u64)
-        serial.hex(cr2())
+        serial.hex(c2)
     }
     serial.nl()
 
@@ -1197,7 +1278,7 @@ fn report(frame: u64, state: u64, vector: u64) {
     let _bok: bool = crash.kern_bericht(state, regblock_fuellen(frame),
         word(frame, F_RIP), word(frame, F_CS), word(frame, F_RFLAGS),
         word(frame, F_RSP), word(frame, F_SS), word(frame, F_ERROR),
-        cr2(), vector, (&kspur[0 as usize]) as u64, kspur_n)
+        c2, vector, (&kspur[0 as usize]) as u64, kspur_n)
     serial.puts((&s_tail[0]) as u64)
     serial.nl()
     // ======================================== RUNDE BLECHFUENF
@@ -1221,7 +1302,7 @@ fn report(frame: u64, state: u64, vector: u64) {
     // einen Speicherfehler sichtbar gemacht zu haben, wird kein
     // Import hinzugefuegt, der sich vermeiden laesst.
     gfx.absturz(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
-        cr2(), word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
+        c2, word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
         (&kspur[0]) as u64, kspur_n, stoppzahl(state))
     // ==================================================== RUNDE PROTOKOLL
     // UND DANN DER GANZE SCHIRM.
@@ -1237,7 +1318,7 @@ fn report(frame: u64, state: u64, vector: u64) {
     // wenn das Malen selbst noch einmal faellt, ist alles andere bereits
     // gesagt und geschrieben.
     gfx.panikbild(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
-        cr2(), word(frame, F_RSP), word(frame, F_CS),
+        c2, word(frame, F_RSP), word(frame, F_CS),
         word(frame, F_RFLAGS), word(frame, F_SS), cpu.here(state),
         (&regblock[0 as usize]) as u64,
         (&kspur[0 as usize]) as u64, kspur_n, crash.last_file())

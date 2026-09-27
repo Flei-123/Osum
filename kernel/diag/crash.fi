@@ -71,10 +71,12 @@ import gfx.gfx
 import arch.cpu
 import sched.sched
 import lib.version
+import mm.mem
 
 export {
     init, open, brand_delete, knall,
     kern_bericht, prog_bericht, last_file, ram_retten, set_volatile,
+    doppel_check,
     A_KERN, A_PROG, geschrieben, versucht, gescheitert
 }
 
@@ -573,19 +575,53 @@ fn ram_sum(p: u64, n: u64) -> u64 {
     return h
 }
 
-// Inhalt zuerst, die Magie zuletzt: ein Absturz mitten im Sichern
-// hinterlaesst einen Kopf ohne Magie und damit nichts.
-fn ram_sichern() {
-    __mmio_write64(RAM_BASE as *mut u64, 0)
+// ==================================================== DELL, 27.09.2026
+// THREE BANDS INSTEAD OF ONE. The Dell's UEFI overwrote 0x96000 on the
+// warm reset after a panic, and the report was lost. Band 0 stays where
+// it was (measured under QEMU/OVMF); bands 1 and 2 lie at 240 MiB and
+// 496 MiB (`mem.crash_band`, only when the memory map says usable and no
+// boot module lies there). The report goes into EVERY usable band; the
+// next start takes the first one whose checksum holds.
+//
+// THE HEARTBEAT. The last 64 octets of every band carry a start counter
+// that every start reads, logs and increments. So every ordinary
+// reboot measures which band survives a reset on this machine -- no
+// panic needed to find out.
+const BANDS: u64 = 3
+const BAND_LEN: u64 = 0x3000
+const BEAT_OFF: u64 = 0x2FC0
+const BEAT_MAGIC: u64 = 0x31544145425A534F // "OSZBEAT1"
+
+fn band(i: u64) -> u64 {
+    if i == 0 {
+        return RAM_BASE
+    }
+    return mem.crash_band(i - 1)
+}
+
+fn band_write(b: u64) {
+    __mmio_write64(b as *mut u64, 0)
     var i: u64 = 0
     while i < buf_n {
-        kstate.set8(RAM_BASE + RAM_HDR + i, buf[i as usize])
+        kstate.set8(b + RAM_HDR + i, buf[i as usize])
         i = i + 1
     }
-    __mmio_write64((RAM_BASE + 8) as *mut u64, buf_n)
-    __mmio_write64((RAM_BASE + 16) as *mut u64,
-        ram_sum(RAM_BASE + RAM_HDR, buf_n))
-    __mmio_write64(RAM_BASE as *mut u64, RAM_MAGIC)
+    __mmio_write64((b + 8) as *mut u64, buf_n)
+    __mmio_write64((b + 16) as *mut u64, ram_sum(b + RAM_HDR, buf_n))
+    __mmio_write64(b as *mut u64, RAM_MAGIC)
+}
+
+// Content first, magic last: a crash in the middle of saving leaves a
+// header without magic and so nothing.
+fn ram_sichern() {
+    var i: u64 = 0
+    while i < BANDS {
+        let b: u64 = band(i)
+        if b != 0 {
+            band_write(b)
+        }
+        i = i + 1
+    }
 }
 
 // 1 = the root lives only in memory (stick boot: the root image is a boot
@@ -599,7 +635,55 @@ fn set_volatile() {
 }
 
 fn ram_loeschen() {
-    __mmio_write64(RAM_BASE as *mut u64, 0)
+    var i: u64 = 0
+    while i < BANDS {
+        let b: u64 = band(i)
+        if b != 0 {
+            __mmio_write64(b as *mut u64, 0)
+        }
+        i = i + 1
+    }
+}
+
+// 0 = empty, 1 = valid report, 2 = magic but broken
+fn band_state(b: u64) -> u64 {
+    if __mmio_read64(b as *mut u64) != RAM_MAGIC {
+        return 0
+    }
+    let n: u64 = __mmio_read64((b + 8) as *mut u64)
+    if n == 0 || n > BUF_MAX {
+        return 2
+    }
+    if ram_sum(b + RAM_HDR, n) != __mmio_read64((b + 16) as *mut u64) {
+        return 2
+    }
+    return 1
+}
+
+// Log per band: address, heartbeat found (the counter of the last start
+// or 0 = memory did not survive) and report state; then bump the beat.
+fn beats(state: u64) {
+    var s_src: [u8; 8] = "absturz\0"
+    var s_b: [u8; 9] = "band an \0"
+    var s_h: [u8; 23] = "  herz (0 = verloren) \0"
+    var s_r: [u8; 36] = "  bericht (0 leer, 1 ok, 2 kaputt) \0"
+    var i: u64 = 0
+    while i < BANDS {
+        let b: u64 = band(i)
+        klog.sayh(state, klog.L_INFO, (&s_src[0]) as u64, (&s_b[0]) as u64, b)
+        if b != 0 {
+            var n: u64 = 0
+            if __mmio_read64((b + BEAT_OFF) as *mut u64) == BEAT_MAGIC {
+                n = __mmio_read64((b + BEAT_OFF + 8) as *mut u64)
+            }
+            klog.sayn(state, klog.L_INFO, (&s_src[0]) as u64, (&s_h[0]) as u64, n)
+            klog.sayn(state, klog.L_INFO, (&s_src[0]) as u64, (&s_r[0]) as u64,
+                band_state(b))
+            __mmio_write64((b + BEAT_OFF + 8) as *mut u64, n + 1)
+            __mmio_write64((b + BEAT_OFF) as *mut u64, BEAT_MAGIC)
+        }
+        i = i + 1
+    }
 }
 
 // Beim Start, NACH dem Einhaengen der richtigen Wurzel und VOR `init`
@@ -608,23 +692,35 @@ fn ram_loeschen() {
 fn ram_retten(state: u64) -> u64 {
     var s_ok: [u8; 45] = "absturz: bericht aus dem speicher gerettet\0\0\0"
     var s_bad: [u8; 50] = "absturz: speicherbericht verworfen (pruefsumme)\0\0\0"
-    if __mmio_read64(RAM_BASE as *mut u64) != RAM_MAGIC {
-        return 0
-    }
-    let n: u64 = __mmio_read64((RAM_BASE + 8) as *mut u64)
-    if n == 0 || n > BUF_MAX {
-        ram_loeschen()
-        return 0
-    }
-    if ram_sum(RAM_BASE + RAM_HDR, n) != __mmio_read64((RAM_BASE + 16) as *mut u64) {
-        serial.puts((&s_bad[0 as usize]) as u64)
-        serial.nl()
-        ram_loeschen()
-        return 0
-    }
+    beats(state)
+    var found: u64 = 0
+    var broken: u64 = 0
     var i: u64 = 0
+    while i < BANDS && found == 0 {
+        let b: u64 = band(i)
+        if b != 0 {
+            let st: u64 = band_state(b)
+            if st == 1 {
+                found = b
+            }
+            if st == 2 {
+                broken = broken + 1
+            }
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        if broken != 0 {
+            serial.puts((&s_bad[0 as usize]) as u64)
+            serial.nl()
+            ram_loeschen()
+        }
+        return 0
+    }
+    let n: u64 = __mmio_read64((found + 8) as *mut u64)
+    i = 0
     while i < n {
-        buf[i as usize] = kstate.get8(RAM_BASE + RAM_HDR + i) as u8
+        buf[i as usize] = kstate.get8(found + RAM_HDR + i) as u8
         i = i + 1
     }
     buf_n = n
@@ -692,7 +788,28 @@ fn knall(state: u64, art: u64) {
         knall_a(0)
         return
     }
+    // art 3 (Dell, 27.09.2026): art 0, and the REPORT of it faults once
+    // more (`doppel_check` in trap.report) -- the nested case the Dell
+    // showed. The picture must show the FIRST fault, the second one
+    // under PROTOKOLL.
+    if art == 3 {
+        doppel = 1
+        knall_a(0)
+        return
+    }
     knall_a(art)
+}
+
+static mut doppel: u64 = 0
+
+// Called by trap.report once, on the first fault. Faults again when
+// art 3 asked for it; clears the flag first, so there is exactly one.
+fn doppel_check() {
+    if doppel == 0 {
+        return
+    }
+    doppel = 0
+    let _v: u64 = __mmio_read64(0x700000000008 as *mut u64)
 }
 
 fn knall_a(art: u64) {
