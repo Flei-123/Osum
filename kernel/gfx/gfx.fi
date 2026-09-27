@@ -63,6 +63,8 @@ export {
     ready, width, height, pixel, get_pixel, dirty_all, flush, echo,
     // Der Fensterserver, so weit ihn Nicht-Grafik-Code braucht.
     wm_ready, wm_on_key, wm_key_tty, wm_term_out,
+    // Extra terminal windows (SYS_OSUM_TERMNEW, /bin/term).
+    term_new, term_alive,
     // Die Kommandozeile.
     parse,
     // Die vier Tueren zu der Datei, der die Oberflaeche gehoert.
@@ -199,6 +201,62 @@ fn wm_key_tty(state: u64) -> u64 {
 
 fn wm_term_out(state: u64, i: u64, c: u64) {
     wm.term_out(state, i, c)
+}
+
+// ONE MORE TERMINAL WINDOW for tty `t` (Dell 9020, 27.09.2026: Justin
+// could open exactly one terminal; "Terminal" in the menu only started a
+// second shell inside the kernel's console window, and while a program
+// ran in the foreground there was nowhere left to type). Same size rule
+// as the console window in kgui (560x380 scaled, kept on screen), each
+// new one shifted by 32*k so they do not stack exactly. Owner 0 -- the
+// kernel -- like the console window; the shell never reads window
+// events, closing is noticed through `term_alive`.
+static mut TERM_NTH: u64 = 0
+fn term_new(state: u64, t: u64) -> u64 {
+    if !wm.ready(state) {
+        return 0xFFFFFFFF
+    }
+    let k: u64 = wm.uisc(state)
+    let sw: u64 = fb.width(state)
+    let sh: u64 = fb.height(state)
+    TERM_NTH = TERM_NTH + 1
+    let shift: u64 = (TERM_NTH % 6) * 32 * k
+    var x: u64 = 24 * k + 60 * k + shift
+    var y: u64 = 40 * k + 40 * k + shift
+    var w: u64 = 560 * k
+    var h: u64 = 380 * k
+    if w + 48 > sw {
+        w = sw - 48
+    }
+    if h + 80 > sh {
+        h = sh - 80
+    }
+    if x + w + 24 > sw {
+        x = 24
+    }
+    if y + h + 40 > sh {
+        y = 40
+    }
+    var title: [u8; 16] = "Terminal -- sh\0\0"
+    let i: u64 = wm.create(state, 0, x as i64, y as i64, w, h, wm.K_TERM,
+        (&title[0]) as u64)
+    if i >= wm.MAX_WIN {
+        return 0xFFFFFFFF
+    }
+    var app: [u8; 9] = "terminal\0"
+    let _a: bool = wm.set_app(state, i, (&app[0]) as u64)
+    wm.bind_tty(state, i, t)
+    wm.set_focus(state, i)
+    return i
+}
+
+// Is window `i` still the terminal window of tty `t`? False once the
+// user closed it (the slot is free or was reused by another window).
+fn term_alive(state: u64, i: u64, t: u64) -> bool {
+    if !wm.valid(state, i) {
+        return false
+    }
+    return wm.tty_of(state, i) == t
 }
 
 // ------------------------------------------------------ die Befehlszeile

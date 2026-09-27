@@ -262,7 +262,7 @@ widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache init svc"}
+glogin lock login passwd su chown sperrwache init svc term"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1177,7 +1177,15 @@ fi
 if [ -n "${OTA_ERSATZ:-}" ] && [ -s "${OTA_ERSATZ}" ]; then
     ARGS+=("/system/ersatz.pub=$OTA_ERSATZ")
 fi
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
+# The Terminal bundle starts /bin/term on this image: a NEW window with
+# its own tty per start (kernel SYS_OSUM_TERMNEW). The source tree keeps
+# /bin/sh in start.txt because the smaller test images do not build term.
+TERM_START=/bin/sh
+case " $PROGS " in *" term "*) TERM_START=/bin/term ;; esac
+while read -r z; do
+    [ "$z" = "/apps/terminal.osp/start@/bin/sh" ] && z="/apps/terminal.osp/start@$TERM_START"
+    ARGS+=("$z")
+done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }

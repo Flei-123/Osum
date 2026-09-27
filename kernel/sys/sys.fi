@@ -464,6 +464,8 @@ const SYS_VM_VALUE: u64 = 1504 // (h, nr) -> gemeldeter Wert, braucht R_READ
 const SYS_OSUM_PTY: u64 = 1100
 const SYS_OSUM_TTYINFO: u64 = 1101
 const SYS_OSUM_SIGINFO: u64 = 1102
+// A new terminal window with its own tty for the caller (/bin/term).
+const SYS_OSUM_TERMNEW: u64 = 1103
 
 // ROUND K8. THE SOCKET CALLS, and again Linux's numbers and Linux's
 // shapes -- there is no `send` and no `recv` in the x86-64 table,
@@ -2791,6 +2793,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_OSUM_SIGINFO {
         return do_siginfo(state, me, a0, a1)
     }
+    if number == SYS_OSUM_TERMNEW {
+        return do_termnew(state, me)
+    }
     // RUNDE K12: die Gastmaschinen.
     if number >= SYS_VM_CREATE && number <= SYS_VM_VALUE {
         return vm_call(state, me, number, a0, a1)
@@ -3450,6 +3455,11 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 // Ausgabe ist der erste, weil sie die einzige ist, deren Bruch eine
 // ABNAHME zum Luegen bringt.
 fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    // The terminal window of this tty was closed: swallow the output
+    // instead of drawing into whatever window took over the slot.
+    if term_gone(state, t) {
+        return len
+    }
     let z: u64 = serial.line_at(cpu.here(state))
     let bounce: u64 = state + kstate.BLOCK_OFF
     if !copy_in(state, me, bounce, buf, len) {
@@ -3706,6 +3716,10 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
     if !tty.valid(state, t) {
         return neg(errno.E_NOTTY)
     }
+    // Window closed = end of input; the shell leaves with "bye".
+    if term_gone(state, t) {
+        return 0
+    }
     if !foreground_ok(state, me, t) {
         return neg(errno.E_INTR)
     }
@@ -3794,6 +3808,7 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
     // `signal.interrupted` unten bricht das Warten jederzeit ab.
     let endlos: bool = (sercon.active(state) && t == tty.console())
         || (kstate.mode_on(state, kstate.M_WMDAUER) && t == tty.console())
+        || term_win_of(t) != 0
     var idle: u64 = 0
     while idle < KEY_IDLE {
         // ROUND K9: ein wartender Leser ist unterbrechbar. Das ist die
@@ -3809,6 +3824,9 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
         sercon.poll(state)
         if tty.waiting(state, t) != 0 {
             return tty_drain(state, me, t, buf, len)
+        }
+        if term_gone(state, t) {
+            return 0
         }
         sched.sleep_ticks(state, 1)
         if !endlos {
@@ -7469,6 +7487,79 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return neg(errno.E_FAULT)
     }
     return 0
+}
+
+// ==================================================================
+// EXTRA TERMINAL WINDOWS (Dell 9020, 27.09.2026)
+// ==================================================================
+//
+// Until now there was exactly one terminal: the kernel's console
+// window. `/bin/term` calls SYS_OSUM_TERMNEW, which takes a free tty
+// slot (console-like line discipline, window sink), opens a new
+// terminal window bound to it and makes it the CALLER's controlling
+// terminal. Its fds 0/1/2 are console descriptors that resolve through
+// `tty_of`, so nothing else has to change: `term` then execs /bin/sh
+// and every child inherits the tty (T_TTY is copied on fork/spawn).
+//
+// Closing the window: reads return 0 (the shell ends with "bye"),
+// writes are swallowed, and the slot goes back once no task uses it.
+static mut TERM_WIN: [u64; 8] = [0 as u64; 8] // window + 1 per tty slot
+
+fn term_win_of(t: u64) -> u64 {
+    if t >= 8 {
+        return 0
+    }
+    return TERM_WIN[t as usize]
+}
+
+fn term_gone(state: u64, t: u64) -> bool {
+    let w: u64 = term_win_of(t)
+    if w == 0 {
+        return false
+    }
+    return !gfx.term_alive(state, w - 1, t)
+}
+
+// Give back the slots of closed windows nobody uses any more.
+fn term_reap(state: u64) {
+    var t: u64 = 1
+    while t < 8 {
+        if term_gone(state, t) {
+            var used: bool = false
+            var i: u64 = 0
+            while i < kstate.MAX_TASKS {
+                if sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+                    && sched.tget(state, i, sched.T_STATE) != sched.S_ZOMBIE
+                    && sched.tget(state, i, sched.T_TTY) == t + 1 {
+                    used = true
+                }
+                i = i + 1
+            }
+            if !used {
+                TERM_WIN[t as usize] = 0
+                tty.release(state, t)
+            }
+        }
+        t = t + 1
+    }
+}
+
+fn do_termnew(state: u64, me: u64) -> u64 {
+    term_reap(state)
+    let t: u64 = tty.alloc_log(state)
+    if t >= tty.MAX_TTY || t >= 8 {
+        return neg(errno.E_NFILE)
+    }
+    tty.set_sink(state, t, tty.SINK_WINDOW)
+    let w: u64 = gfx.term_new(state, t)
+    if w == 0xFFFFFFFF {
+        tty.release(state, t)
+        return neg(errno.E_NOMEM)
+    }
+    tty.set_window(state, t, w)
+    TERM_WIN[t as usize] = w + 1
+    sched.tset(state, me, sched.T_TTY, t + 1)
+    return w
 }
 
 // `openpty(out)` -- ein Paar aus Steuer- und Nutzerseite. Zwei
