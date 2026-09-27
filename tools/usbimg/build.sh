@@ -262,7 +262,7 @@ widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache init svc term"}
+glogin lock login passwd su chown sperrwache init svc term shasum noise"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1168,6 +1168,14 @@ if [ -n "${JARVIS_DEVICE_KEY:-}" ]; then
 fi
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
 ARGS+=("/system/FASSUNG=$OUT/FASSUNG")
+# /system/BUILD: which tree this image came from (commit, "+" when the
+# tree had uncommitted changes, build time UTC). Read remotely with
+# `cat /system/BUILD` -- the only way to tell two builds apart from a
+# distance, `uname` says the same for all of them.
+{ printf '%s' "$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+  git diff --quiet HEAD -- kernel lib tools assets 2>/dev/null || printf '+'
+  printf ' %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$OUT/BUILD"
+ARGS+=("/system/BUILD=$OUT/BUILD")
 if [ -n "$KEY" ] && [ -s "$KEY" ]; then
     ARGS+=("/system/schluessel.pub=$KEY")
     sagen "schluessel  $(stat -c%s "$KEY") Oktette aus $KEY"
@@ -1422,22 +1430,34 @@ sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
 if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
     fehler "in limine.conf steht noch ein Platzhalter"
 fi
-# PERSONAL STICK: `vfs` IN THE FIRST ENTRY TOO (27.09.2026, Dell 9020).
-# Without it /dev/ is empty and the installer says "no writable disk
-# found" -- the same finding the public stick fixed in ROUND LIVE (see
-# below). vfs only shows the devices; nothing is written until the
-# installer's two questions are answered.
+# PERSONAL STICK (27.09.2026, Dell 9020 as an unattended test device).
+# Entry 1 is the boot the Dell ran all night without a single panic: no
+# `vfs`, no AHCI bring-up -- plus `absturzneustart`, so a kernel panic
+# resets the box after 20 s instead of leaving it dead until somebody
+# presses the button. The image with `vfs` + AHCI at boot in entry 1
+# panicked in two of four starts on the Dell.
+# Entry 2 (new) is the installer boot: `vfs` for /dev and `sata` for the
+# AHCI disk (/dev/sda), also with `absturzneustart`.
 if [ "$IMAGE_PROFILE" = personal ]; then
-    python3 - "$OUT/limine.conf" "$MARKE_PRODUKT" <<'PYVFS' || fehler "vfs liess sich nicht in den ersten Eintrag setzen"
+    python3 - "$OUT/limine.conf" "$MARKE_PRODUKT" <<'PYVFS' || fehler "the personal boot menu could not be written"
 import sys
 path, prod = sys.argv[1], sys.argv[2]
 lines = open(path).read().split('\n')
 i = lines.index('/' + prod)
 j = i + 1
 while j < len(lines) and lines[j].startswith(' '):
-    if lines[j].strip().startswith('cmdline:') and ' vfs ' not in lines[j] + ' ':
-        lines[j] = lines[j].replace('modfs osum ', 'modfs osum vfs ', 1)
+    if lines[j].strip().startswith('cmdline:') and ' absturzneustart' not in lines[j]:
+        lines[j] = lines[j] + ' absturzneustart'
     j += 1
+body = lines[i + 1:j]
+inst = ['', '/%s (install to SATA disk)' % prod]
+for l in body:
+    if l.strip().startswith('cmdline:'):
+        if ' vfs ' not in l + ' ':
+            l = l.replace('modfs osum ', 'modfs osum vfs ', 1)
+        l = l + ' sata'
+    inst.append(l)
+lines[j:j] = inst
 open(path, 'w').write('\n'.join(lines))
 PYVFS
 fi

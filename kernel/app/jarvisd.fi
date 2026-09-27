@@ -162,7 +162,7 @@ import libc.dns
 // ====================================================================
 
 const MAXPFAD: usize = 128 // Oktette je Eintrag der Rechteliste
-const MAXLISTE: usize = 6 // Eintraege je Liste
+const MAXLISTE: usize = 32 // Eintraege je Liste (was 6: the 7th command_allowed was silently dropped)
 const MAXBEFEHLE: usize = 8
 const MAXZEILE: usize = 4096
 const MAXFELD: usize = 10
@@ -190,6 +190,8 @@ const S_NANOSLEEP: i64 = 35
 const S_FORK: i64 = 57
 const S_EXECVE: i64 = 59
 const S_WAIT4: i64 = 61
+const S_KILL: i64 = 62
+const WNOHANG: i64 = 1
 const S_DUP2: i64 = 33
 const S_MKDIR: i64 = 83
 const S_UNLINK: i64 = 87
@@ -236,6 +238,7 @@ const TI_DROP: i64 = 2
 const TI_KEY: i64 = 3
 const TI_MOVE: i64 = 4
 const TI_BUTTON: i64 = 5
+const TI_SCAN: i64 = 6
 const S_HNDRIGHTS: i64 = 2202
 const S_HNDDUP: i64 = 2208
 
@@ -301,17 +304,20 @@ static mut k_system: bool = false
 // RUNDE BRUECKE: darf von aussen getippt werden?
 static mut k_tipp: bool = false
 static mut k_max_ausgabe: usize = 65536
+// `command_timeout = <seconds>`: how long one `befehl` may run before it is
+// killed (default 60; an update that fetches 40 MB needs minutes).
+static mut k_befehl_ms: u64 = 60000
 static mut k_max_datei: usize = 262144
 
 // Drei Praefixlisten und eine Programmliste. Eintrag i beginnt bei
 // i * MAXPFAD; die Laenge steht daneben.
-static mut l_lesen: [u8; 768] = [0; 768]
+static mut l_lesen: [u8; 4096] = [0; 4096]
 static mut n_lesen: usize = 0
-static mut l_schreiben: [u8; 768] = [0; 768]
+static mut l_schreiben: [u8; 4096] = [0; 4096]
 static mut n_schreiben: usize = 0
-static mut l_auflisten: [u8; 768] = [0; 768]
+static mut l_auflisten: [u8; 4096] = [0; 4096]
 static mut n_auflisten: usize = 0
-static mut l_befehl: [u8; 1024] = [0; 1024]
+static mut l_befehl: [u8; 4096] = [0; 4096]
 static mut n_befehl: usize = 0
 
 static mut laut: bool = false
@@ -388,6 +394,27 @@ fn schlafe_ms(ms: u64) {
         syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
         rest = rest - teil
     }
+}
+
+// A command gets COMMAND_MS to finish. Before this, jarvisd waited on the
+// child with a plain wait4 -- one `cat` on a file that never ends (the
+// Dell, `cat /proc/mounts`) and the device was gone from the bridge until
+// someone pressed the power button. Returns true when the child had to be
+// killed; `*st` holds the status either way.
+const COMMAND_MS: u64 = 60000
+
+fn wait_child(kind: i64, st: *mut i32) -> bool {
+    let t0: u64 = now_ms()
+    while now_ms() - t0 < k_befehl_ms {
+        let r: i64 = syscall(S_WAIT4, kind, st as i64, WNOHANG, 0, 0, 0)
+        if r == kind || r < 0 {
+            return false
+        }
+        schlafe_ms(50)
+    }
+    syscall(S_KILL, kind, 9, 0, 0, 0, 0)
+    syscall(S_WAIT4, kind, st as i64, 0, 0, 0, 0)
+    return true
 }
 
 fn now_ms() -> u64 {
@@ -609,6 +636,7 @@ fn konf_leeren() {
     n_befehl = 0
     k_max_ausgabe = 65536
     k_max_datei = 262144
+    k_befehl_ms = COMMAND_MS
     var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
     hinein((&k_protokoll[0]) as u64, MAXPFAD, (&p1[0]) as u64, 20)
     var p2: [u8; 23] = "/var/jarvis/output.txt\0"
@@ -641,6 +669,7 @@ fn conf_read() -> bool {
     var s_tipp: [u8; 6] = "input\0"
     var s_maxa: [u8; 11] = "max_output\0"
     var s_maxd: [u8; 9] = "max_file\0"
+    var s_cto: [u8; 16] = "command_timeout\0"
     var s_prot: [u8; 4] = "log\0"
     var s_arb: [u8; 10] = "work_file\0"
     var s_sch: [u8; 12] = "permit_file\0"
@@ -725,6 +754,11 @@ fn conf_read() -> bool {
                     k_max_ausgabe = num_from(wp, wl) as usize
                 } else if ist(sp, sl, (&s_maxd[0]) as u64) {
                     k_max_datei = num_from(wp, wl) as usize
+                } else if ist(sp, sl, (&s_cto[0]) as u64) {
+                    let sec: u64 = num_from(wp, wl)
+                    if sec >= 5 && sec <= 3600 {
+                        k_befehl_ms = sec * 1000
+                    }
                 } else if ist(sp, sl, (&s_lesen[0]) as u64) {
                     list_add((&l_lesen[0]) as u64, &n_lesen, wp, wl)
                 } else if ist(sp, sl, (&s_schr[0]) as u64) {
@@ -1603,11 +1637,14 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     }
     sys_close(ziel)
     var status: i32 = 0
-    syscall(S_WAIT4, kind, (&status) as i64, 0, 0, 0, 0)
+    let killed: bool = wait_child(kind, &status)
     rt.buf_free(&worte)
     var code: u64 = 255
     if (status & 127) == 0 {
         code = ((status >> 8) & 255) as u64
+    }
+    if killed {
+        code = 124
     }
 
     // Die Ausgabe zurueckholen, bis zur Grenze.
@@ -1822,6 +1859,7 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     var w_taste: [u8; 6] = "taste\0"
     var w_maus: [u8; 5] = "maus\0"
     var w_knopf: [u8; 6] = "knopf\0"
+    var w_scan: [u8; 5] = "scan\0"
     let wp: u64 = p + f.off[0] as u64
     let wn: usize = f.len[0]
     var a: u64 = 0
@@ -1839,9 +1877,19 @@ fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
         erg = syscall(S_TIPP, TI_MOVE, a as i64, b as i64, 0, 0, 0)
     } else if ist(wp, wn, (&w_knopf[0]) as u64) {
         erg = syscall(S_TIPP, TI_BUTTON, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_scan[0]) as u64) {
+        // scan <c1> [<c2> ...]: several set-1 codes in one job, so a
+        // whole word costs one round trip instead of two per letter.
+        var k: usize = 1
+        erg = 0
+        while k < f.n && erg >= 0 {
+            let c: u64 = num_from(p + f.off[k] as u64, f.len[k])
+            erg = syscall(S_TIPP, TI_SCAN, c as i64, 0, 0, 0, 0)
+            k = k + 1
+        }
     } else {
         syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
-        return ablehnen(aus, "unknown input kind -- taste, maus or knopf")
+        return ablehnen(aus, "unknown input kind -- taste, maus, knopf or scan")
     }
     // DEN SCHEIN IMMER ZURUECKGEBEN, auch wenn es schiefging.
     syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
@@ -2068,7 +2116,9 @@ fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     }
     sys_close(ziel)
     var status: i32 = 0
-    syscall(S_WAIT4, kind, (&status) as i64, 0, 0, 0, 0)
+    if wait_child(kind, &status) {
+        return false
+    }
     if (status & 127) != 0 || ((status >> 8) & 255) != 0 {
         return false
     }
