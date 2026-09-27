@@ -47,7 +47,7 @@ export {
     gpt_schreiben, fat32_create, wurzel_kopieren, wurzel_kopieren_ab,
     plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
     plan_passt, quelle_pruefen,
-    schritt_nr, schritt_von, fortschritt, fehler_bei,
+    schritt_nr, schritt_von, fortschritt, fehler_bei, nachgeschrieben,
     F_KEIN, F_OEFFNEN, F_LESEN, F_SCHREIBEN, F_KEINOFS, F_KLEIN, F_KARTE,
     S_GPT, S_ESP, S_KOPIE, S_WACHSEN, S_BOOT, S_FERTIG
 }
@@ -100,6 +100,8 @@ fn fehler_bei() -> u64 {
 static mut SEK: [u8; 512] = [0 as u8; 512]
 static mut SEK2: [u8; 512] = [0 as u8; 512]
 static mut KOP: [u8; 8192] = [0 as u8; 8192]
+// Read-back buffer for the verification (see `schreibe_geprueft`).
+static mut KOP2: [u8; 8192] = [0 as u8; 8192]
 
 const BS: u64 = 512
 // Wo die erste Partition anfaengt. 2048 Sektoren = 1 MiB, die Zahl, die
@@ -225,6 +227,51 @@ fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
 }
 
 
+
+// ============================================= WRITE, READ BACK, COMPARE
+//
+// Installing onto a SATA disk (QEMU q35, 27.09.2026) left files on the
+// ESP with the right size and scattered runs of zeros (always from octet
+// 16 of a sector, about 128 octets) -- the disk then rebooted in a loop
+// and nobody saw why. Whatever the cause below this program, an
+// installer must not report "done" for a disk that does not boot. So
+// every chunk is read back and compared, and written again if it
+// differs (up to five times); only then does the copy go on.
+fn gleich(p: u64, q: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if g8(p + i) != g8(q + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+static mut st_nachgeschrieben: u64 = 0
+fn nachgeschrieben() -> u64 {
+    return st_nachgeschrieben
+}
+
+fn schreibe_geprueft(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    let rb: u64 = (&KOP2[0 as usize]) as u64
+    var versuch: u64 = 0
+    while versuch < 5 {
+        if !schreibe(fd, lba, at, n) {
+            return false
+        }
+        if n <= 8192 && lese(fd, lba, rb, n) && gleich(at, rb, n) {
+            return true
+        }
+        if n > 8192 {
+            return true
+        }
+        st_nachgeschrieben = st_nachgeschrieben + 1
+        versuch = versuch + 1
+    }
+    st_fehler = F_SCHREIBEN
+    return false
+}
 
 // ------------------------------------------------------------ die GUIDs
 
@@ -607,7 +654,69 @@ fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
     return ziel
 }
 
+// Copy, then compare the target with the source; again if they differ.
 fn kopiere(von: u64, move_to: u64) -> bool {
+    var versuch: u64 = 0
+    while versuch < 3 {
+        if !kopiere_einmal(von, move_to) {
+            return false
+        }
+        if dateien_gleich(von, move_to) {
+            return true
+        }
+        st_nachgeschrieben = st_nachgeschrieben + 1
+        versuch = versuch + 1
+    }
+    return false
+}
+
+fn dateien_gleich(von: u64, nach: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, von, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, nach, 0, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    let pa: u64 = (&KOP[0 as usize]) as u64
+    let pb: u64 = (&KOP2[0 as usize]) as u64
+    var gut: bool = true
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = ulib.sys(ulib.SYS_READ, a, pa, 8192)
+        if ulib.bad(n) {
+            gut = false
+            weiter = false
+        } else if n == 0 {
+            let m0: u64 = ulib.sys(ulib.SYS_READ, b, pb, 1)
+            if ulib.bad(m0) || m0 != 0 {
+                gut = false
+            }
+            weiter = false
+        } else {
+            var m: u64 = 0
+            while m < n {
+                let r: u64 = ulib.sys(ulib.SYS_READ, b, pb + m, n - m)
+                if ulib.bad(r) || r == 0 {
+                    m = n + 1
+                } else {
+                    m = m + r
+                }
+            }
+            if m != n || !gleich(pa, pb, n) {
+                gut = false
+                weiter = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    return gut
+}
+
+fn kopiere_einmal(von: u64, move_to: u64) -> bool {
     let a: u64 = ulib.sys(ulib.SYS_OPEN, von, 0, 0)
     if ulib.bad(a) {
         return false
@@ -778,7 +887,7 @@ fn wurzel_kopieren_ab(zfd: u64, qfd: u64, ofs_start: u64, qsekt: u64) -> bool {
         if !lese(qfd, b, puffer, n * BS) {
             return false
         }
-        if !schreibe(zfd, ofs_start + b, puffer, n * BS) {
+        if !schreibe_geprueft(zfd, ofs_start + b, puffer, n * BS) {
             return false
         }
         b = b + n
