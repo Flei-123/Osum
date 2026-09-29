@@ -49,7 +49,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd su dhcp"
+PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus notes act settingsd su dhcp"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -1174,6 +1174,74 @@ usi=$(echo "$Li" | sed -n 's/.*us_per_call=\([0-9]*\).*/\1/p')
 [ -n "$usi" ] && [ "$usi" -le 2000 ] && ok "blocking receive: 500 round trips at ${usi} us each (limit 2000)" || bad "bench after idle: ${Li:-none}"
 echo "ACTIONBUS-IDLE $IDLE us_blocking=${usi:-?}"
 grep -qaE 'panic|EXCEPTION' "$I" && bad "a panic or exception in the section-17 guest" || ok "no panic, no exception (section 17)"
+
+# ===================================================================
+echo "== 18. AB-018: the catalogue is read again without a restart =="
+# ===================================================================
+# An app appears (its wrapper manifest is copied into /etc/actions.d),
+# `act reload` reads the catalogue again: the new app is callable, the
+# provider of notes stays bound, an undo record from before still works;
+# the manifest is removed, the next reload and it is gone. opk calls the
+# same reload after it rebuilt /apps (kernel/user/opk.fi, bus_reload).
+cat > "$TMPD/extra.actions" <<'EOM'
+manifest 1
+app extra
+title "An app installed while the broker runs"
+for exe /bin/echo
+action extra.hello write "Say hello"
+  adapter cli /bin/echo hello-from-extra
+EOM
+cat > "$TMPD/s18.sh" <<'EOS'
+orientbus serve 0 &
+sleep -m 300
+notes serve 0 &
+sleep 1
+echo ==L-BEFORE==
+act list
+act call notes.add text=before-reload
+echo ==L-DENY==
+act reload --as jarvis
+echo rc=$?
+echo ==L-ADD==
+cp /t/extra.actions /etc/actions.d/extra.actions
+act reload
+echo rc=$?
+act list
+act call extra.hello
+echo ==L-KEEP==
+act call notes.count
+act undo
+act call notes.count
+echo ==L-DEL==
+rm /etc/actions.d/extra.actions
+act reload
+act call extra.hello
+echo ==L-STAT==
+act stat
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/t/extra.actions=$TMPD/extra.actions")
+image "$TMPD/L.img" "$TMPD/s18.sh"
+EXTRA=()
+run "$TMPD/L.img" l 1 90
+L="$TMPD/l.klar"
+grep -qa '==FERTIG==' "$L" || { bad "section-18 guest did not finish"; tail -20 "$L" | sed 's/^/        /'; }
+part "$L" L-BEFORE L-DENY > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "extra.hello" "before: extra is not in the catalogue"
+part "$L" L-DENY L-ADD > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may reload" "only the user may reload (Jarvis may not)"
+part "$L" L-ADD L-KEEP > "$TMPD/p.txt"
+grep -qaE '^apps=[0-9]+' "$TMPD/p.txt" && ok "reload answers ($(grep -a '^apps=' "$TMPD/p.txt" | head -1), $(grep -a '^apps_was=' "$TMPD/p.txt" | head -1))" || bad "no reload answer"
+has "$TMPD/p.txt" "extra.hello write" "after the reload the new app is in the catalogue"
+has "$TMPD/p.txt" "hello-from-extra" "... and callable (its adapter ran)"
+has "$L" "orientbus: reloaded apps=" "the broker says so on its log line"
+part "$L" L-KEEP L-DEL > "$TMPD/p.txt"
+grep -qaE '^count=1$' "$TMPD/p.txt" && ok "the provider of notes stays bound across the reload (count=1)" || bad "notes after the reload: $(tr '\n' '|' < "$TMPD/p.txt" | cut -c1-200)"
+grep -qaE '^count=0$' "$TMPD/p.txt" && ok "the undo record from before the reload still works (count=0)" || bad "undo after the reload did not work"
+part "$L" L-DEL L-STAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err unknown_action extra.hello" "a removed manifest is gone after the next reload"
+grep -qaE 'panic|EXCEPTION' "$L" && bad "a panic or exception in the section-18 guest" || ok "no panic, no exception (section 18)"
 
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================

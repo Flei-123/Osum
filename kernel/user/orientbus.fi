@@ -3659,6 +3659,7 @@ fn on_request(s: u64) {
     var k_rights: [u8; 7] = "rights\0"
     var k_revoke: [u8; 7] = "revoke\0"
     var k_block: [u8; 6] = "block\0"
+    var k_reload: [u8; 7] = "reload\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -3706,6 +3707,8 @@ fn on_request(s: u64) {
         do_revoke(msg, pid, uid, id)
     } else if actwire.str_eq(vp, (&k_block[0 as usize]) as u64) {
         do_block(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_reload[0 as usize]) as u64) {
+        do_reload(msg, pid, uid, id)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)
@@ -3744,6 +3747,161 @@ fn expire() {
     }
 }
 
+// the catalogue: every app bundle's ACTIONS and every wrapper manifest
+fn catalog_scan() {
+    var d_apps: [u8; 7] = "/apps/\0"
+    var sf_prog: [u8; 6] = ".prog\0"
+    var in_prog: [u8; 9] = "/ACTIONS\0"
+    var d_etc: [u8; 16] = "/etc/actions.d/\0"
+    var sf_act: [u8; 9] = ".actions\0"
+    var in_none: [u8; 1] = "\0"
+    scan((&d_apps[0 as usize]) as u64, (&sf_prog[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    // the image's and opk's bundles are .osp (kernel/user/opk.fi)
+    var sf_osp: [u8; 5] = ".osp\0"
+    scan((&d_apps[0 as usize]) as u64, (&sf_osp[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    scan((&d_etc[0 as usize]) as u64, (&sf_act[0 as usize]) as u64,
+        (&in_none[0 as usize]) as u64, 1)
+}
+
+// ======================================== AB-018: RELOAD THE CATALOGUE
+//
+// `act reload` (the user only -- opk runs it after installing or
+// removing a package): the catalogue is read again from the disk, so a
+// new app is callable, a removed one is gone and a changed manifest
+// counts, without restarting the broker. What must survive is carried
+// over BY NAME, because every table index may change: which pid answers
+// for which app (a provider that said hello stays bound), the call
+// counts of each action, and the undo records (an undo whose action no
+// longer exists is dropped -- it could not run anyway). A reload while
+// a call is on its way is refused (`busy`): that call holds an action
+// index and its answer must find it.
+static mut rl_app: [u8; 256] = [0 as u8; 256] // APP_MAX x 16
+static mut rl_pid: [u64; 16] = [0 as u64; 16]
+static mut rl_act: [u8; 2048] = [0 as u8; 2048] // ACT_MAX x 32
+static mut rl_calls: [u64; 64] = [0 as u64; 64]
+static mut rl_un: [u8; 512] = [0 as u8; 512] // UNDO_MAX x 32
+static mut c_reloads: u64 = 0
+
+fn do_reload(msg: u64, pid: u64, uid: u64, id: u64) {
+    if !is_user(msg, uid) {
+        var e_who: [u8; 32] = "denied only the user may reload\0"
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var i: u64 = 0
+    while i < PEND_MAX {
+        if ld(pe(i), PE_USED) != 0 {
+            var e_busy: [u8; 5] = "busy\0"
+            reply_err(pid, id, (&e_busy[0 as usize]) as u64, 0)
+            return
+        }
+        i = i + 1
+    }
+    // what survives, by name
+    let a0: u64 = n_apps
+    let c0: u64 = n_acts
+    i = 0
+    while i < a0 && i < APP_MAX {
+        copyz((&rl_app[0 as usize]) as u64 + i * 16, ap(i) + AP_NAME, 16)
+        rl_pid[(i) as usize] = ld(ap(i), AP_PID)
+        i = i + 1
+    }
+    i = 0
+    while i < c0 && i < ACT_MAX {
+        copyz((&rl_act[0 as usize]) as u64 + i * 32, ac(i) + AC_NAME, 32)
+        rl_calls[(i) as usize] = ld(ac(i), AC_CALLS)
+        i = i + 1
+    }
+    i = 0
+    while i < UNDO_MAX {
+        let u: u64 = un(i)
+        st8((&rl_un[0 as usize]) as u64 + i * 32, 0, 0)
+        if ld(u, UN_USED) != 0 && ld(u, UN_ACT) < c0 {
+            copyz((&rl_un[0 as usize]) as u64 + i * 32, ac(ld(u, UN_ACT)) + AC_NAME, 32)
+        }
+        i = i + 1
+    }
+    // empty tables, read again
+    n_apps = 0
+    n_acts = 0
+    n_args = 0
+    pool_at = 1
+    c_rejected = 0
+    catalog_scan()
+    // carry over
+    i = 0
+    while i < a0 && i < APP_MAX {
+        let k: u64 = find_app((&rl_app[0 as usize]) as u64 + i * 16)
+        if k != actwire.NONE {
+            st(ap(k), AP_PID, rl_pid[(i) as usize])
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < c0 && i < ACT_MAX {
+        let nm: u64 = (&rl_act[0 as usize]) as u64 + i * 32
+        var k: u64 = find_act(nm, false)
+        if k == actwire.NONE {
+            k = find_act(nm, true)
+        }
+        if k != actwire.NONE {
+            st(ac(k), AC_CALLS, rl_calls[(i) as usize])
+        }
+        i = i + 1
+    }
+    var dropped: u64 = 0
+    i = 0
+    while i < UNDO_MAX {
+        let u: u64 = un(i)
+        if ld(u, UN_USED) != 0 {
+            let k: u64 = find_act((&rl_un[0 as usize]) as u64 + i * 32, false)
+            if k == actwire.NONE {
+                st(u, UN_USED, 0)
+                dropped = dropped + 1
+            } else {
+                st(u, UN_ACT, k)
+            }
+        }
+        i = i + 1
+    }
+    c_reloads = c_reloads + 1
+    // the answer and the log line: before -> after
+    actwire.ob_reset()
+    var s_ok: [u8; 9] = "ok\napps=\0"
+    var s_ac: [u8; 10] = "\nactions=\0"
+    var s_was: [u8; 11] = "\napps_was=\0"
+    var s_rj: [u8; 21] = "\nrejected_manifests=\0"
+    var s_ud: [u8; 15] = "\nundo_dropped=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_num(n_apps)
+    actwire.ob_str((&s_ac[0 as usize]) as u64)
+    actwire.ob_num(n_acts)
+    actwire.ob_str((&s_was[0 as usize]) as u64)
+    actwire.ob_num(a0)
+    actwire.ob_str((&s_rj[0 as usize]) as u64)
+    actwire.ob_num(c_rejected)
+    actwire.ob_str((&s_ud[0 as usize]) as u64)
+    actwire.ob_num(dropped)
+    actwire.ob_str((&s_nl[0 as usize]) as u64)
+    reply(pid, id, actwire.ob_ptr(), actwire.ob_len())
+    var r1: [u8; 26] = "orientbus: reloaded apps=\0"
+    var r2: [u8; 10] = " actions=\0"
+    lb_start((&r1[0 as usize]) as u64)
+    lb_num(n_apps)
+    lb_add((&r2[0 as usize]) as u64)
+    lb_num(n_acts)
+    lb_say()
+    var s_rl: [u8; 7] = "reload\0"
+    var s_bus: [u8; 11] = "orient.bus\0"
+    var r_ok: [u8; 3] = "ok\0"
+    audit(pid, uid, (&s_user[0 as usize]) as u64, (&s_rl[0 as usize]) as u64,
+        (&s_bus[0 as usize]) as u64, (&s_allow[0 as usize]) as u64,
+        (&r_ok[0 as usize]) as u64, false)
+}
+
 fn serve(limit: u64) -> u64 {
     var n_bus: [u8; 11] = "orient.bus\0"
     var n_evt: [u8; 11] = "orient.evt\0"
@@ -3759,20 +3917,7 @@ fn serve(limit: u64) -> u64 {
     seed_counts()
     var p_schema: [u8; 21] = "/etc/settings.schema\0"
     have_schema = setschema.load((&p_schema[0 as usize]) as u64) != setschema.NONE
-    var d_apps: [u8; 7] = "/apps/\0"
-    var sf_prog: [u8; 6] = ".prog\0"
-    var in_prog: [u8; 9] = "/ACTIONS\0"
-    var d_etc: [u8; 16] = "/etc/actions.d/\0"
-    var sf_act: [u8; 9] = ".actions\0"
-    var in_none: [u8; 1] = "\0"
-    scan((&d_apps[0 as usize]) as u64, (&sf_prog[0 as usize]) as u64,
-        (&in_prog[0 as usize]) as u64, 0)
-    // the image's and opk's bundles are .osp (kernel/user/opk.fi)
-    var sf_osp: [u8; 5] = ".osp\0"
-    scan((&d_apps[0 as usize]) as u64, (&sf_osp[0 as usize]) as u64,
-        (&in_prog[0 as usize]) as u64, 0)
-    scan((&d_etc[0 as usize]) as u64, (&sf_act[0 as usize]) as u64,
-        (&in_none[0 as usize]) as u64, 1)
+    catalog_scan()
     var r1: [u8; 23] = "orientbus: ready apps=\0"
     var r2: [u8; 10] = " actions=\0"
     var r3: [u8; 21] = " rejected_manifests=\0"

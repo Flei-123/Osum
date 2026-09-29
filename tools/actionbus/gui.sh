@@ -337,19 +337,19 @@ n=$(grep -ac 'err adapter_failed window' "$TMPD/p.txt")
 [ "$n" -ge 2 ] && ok "GEGENPROBE: a wrapper naming the SETTINGS window is refused -- click and keys ($n refusals)" \
     || bad "the settings window could be steered ($n refusals)"
 part "$G" G-LOG G-JOURNAL > "$TMPD/log.txt"
-grep -qaE '^wlkeys: key=57 state=1' "$TMPD/log.txt" && ok "the PROGRAM received space (evdev 57) -- its own log" || bad "no space in the program's log"
-grep -qaE '^wlkeys: key=29 state=1' "$TMPD/log.txt" && grep -qaE '^wlkeys: key=33 state=1' "$TMPD/log.txt" \
+grep -qaE 'keys: key=57 state=1' "$TMPD/log.txt" && ok "the PROGRAM received space (evdev 57) -- its own log" || bad "no space in the program's log"
+grep -qaE 'keys: key=29 state=1' "$TMPD/log.txt" && grep -qaE 'keys: key=33 state=1' "$TMPD/log.txt" \
     && ok "... Ctrl (29) + F (33)" || bad "no ctrl+f in the program's log"
 # m o o n = 50 24 24 49, then enter 28
 python3 - "$TMPD/log.txt" <<'PY' && ok "... 'moon' as m,o,o,n and then Enter, in that order" || bad "the typed text is not m o o n enter in order"
 import re, sys
-keys = [int(m.group(1)) for m in re.finditer(r'^wlkeys: key=(\d+) state=1', open(sys.argv[1]).read(), re.M)]
+keys = [int(m.group(1)) for m in re.finditer(r'keys: key=(\d+) state=1', open(sys.argv[1]).read(), re.M)]
 want = [50, 24, 24, 49, 28]
 s = ",".join(map(str, keys)); w = ",".join(map(str, want))
 sys.exit(0 if w in s else 1)
 PY
-grep -qaE '^wlkeys: button=272 state=1 x=40 y=30' "$TMPD/log.txt" && ok "the click arrived as BTN_LEFT at 40,30 in the program" || bad "no click at 40,30 in the program's log"
-n57=$(grep -ac '^wlkeys: key=57 state=1' "$TMPD/log.txt")
+grep -qaE 'keys: button=272 state=1 x=40 y=30' "$TMPD/log.txt" && ok "the click arrived as BTN_LEFT at 40,30 in the program" || bad "no click at 40,30 in the program's log"
+n57=$(grep -ac 'keys: key=57 state=1' "$TMPD/log.txt")
 [ "$n57" = 2 ] && ok "space arrived exactly twice (user + Jarvis after the yes), nothing extra" || bad "space arrived $n57 times (want 2)"
 has "$TMPD/log.txt" "wlkeys: close" "viewer.close: the program got xdg_toplevel.close and ended itself"
 grep -qaE 'panic|EXCEPTION|#PF|#GP' "$G" && bad "a panic or exception" || ok "no panic, no exception"
