@@ -217,7 +217,10 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '
 # nachrechnet, faellt nie auf.
 # RUNDE ROADMAP-3: ELF. BRUECKE 4/n (1960756c) hat "Bruecke" als elften
 # Reiter angehaengt; die Zahl stand hier seitdem auf dem alten Stand.
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 11
+# ROUND ROADMAP-7: VIERZEHN. ACTION-BUS-3 brachte "System" (12) und
+# "App-Rechte" (13), ROADMAP-7 "Protokoll" (14) -- die Zahl stand seit
+# ACTION-BUS-3 auf dem alten Stand (auf main rot: 13 statt 11).
+num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 14
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
