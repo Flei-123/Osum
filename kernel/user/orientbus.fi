@@ -383,6 +383,13 @@ static mut adout: [u8; 2048] = [0 as u8; 2048]
 static mut adargs: [u8; 512] = [0 as u8; 512]
 static mut adptr: [u64; 10] = [0 as u64; 10]
 static mut s_logpath: [u8; 23] = "/var/log/orientbus.log\0"
+// AB-012: ONE older generation. When the log passes `audit_max` octets
+// (256 KiB; `auditmax <n>` in the policy) it becomes orientbus.log.1 --
+// the one before that is dropped -- and a fresh log begins with a line
+// that says so. The counts per client are seeded from both files.
+static mut s_logold: [u8; 25] = "/var/log/orientbus.log.1\0"
+static mut audit_max: u64 = 262144
+static mut c_rotations: u64 = 0
 
 fn level_of(w: u64) -> u64 {
     if actwire.str_eq(w, (&s_read[0 as usize]) as u64) {
@@ -990,6 +997,14 @@ fn policy_load() {
         if actwire.str_eq(p1, (&k_df[0 as usize]) as u64) && ld8(p2, 0) != 0 {
             dryfirst_add(p2)
         }
+        // AB-012: the size at which the audit log is rotated (octets)
+        var k_amax: [u8; 9] = "auditmax\0"
+        if actwire.str_eq(p1, (&k_amax[0 as usize]) as u64) {
+            let m: u64 = ulib.to_num(p2)
+            if m >= 1024 {
+                audit_max = m
+            }
+        }
         var k_auid: [u8; 12] = "adapter_uid\0"
         if actwire.str_eq(p1, (&k_auid[0 as usize]) as u64) {
             let u: u64 = ulib.to_num(p2)
@@ -1162,6 +1177,7 @@ fn audit(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
     if !flush_lazy() {
         return false
     }
+    audit_rotate()
     let r: u64 = actwire.append_file((&s_logpath[0 as usize]) as u64, bp,
         actwire.slen(bp))
     if ulib.bad(r) {
@@ -1169,6 +1185,119 @@ fn audit(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
         return false
     }
     return true
+}
+
+// AB-012: rotate when the log has grown past audit_max. A failed rename
+// is counted and the log simply grows on (the write-ahead rule stays:
+// no audit line, no action -- rotation must never be why a line fails).
+fn audit_rotate() {
+    let sz: u64 = io.size_of((&s_logpath[0 as usize]) as u64)
+    if ulib.bad(sz) || sz < audit_max {
+        return
+    }
+    let _u: u64 = io.unlink((&s_logold[0 as usize]) as u64)
+    let r: u64 = io.rename((&s_logpath[0 as usize]) as u64,
+        (&s_logold[0 as usize]) as u64)
+    if ulib.bad(r) {
+        c_logfail = c_logfail + 1
+        return
+    }
+    c_rotations = c_rotations + 1
+    var b: [u8; 96] = [0 as u8; 96]
+    let bp: u64 = (&b[0 as usize]) as u64
+    var s1: [u8; 34] = "# rotated: the older lines are in\0"
+    var s2: [u8; 28] = " /var/log/orientbus.log.1 (\0"
+    var s3: [u8; 10] = " octets)\n\0"
+    ulib.strcpy(bp, (&s1[0 as usize]) as u64)
+    ulib.strcat(bp, (&s2[0 as usize]) as u64)
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(sz, (&z[0 as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(bp, (&z[0 as usize]) as u64)
+    ulib.strcat(bp, (&s3[0 as usize]) as u64)
+    let _w: u64 = actwire.append_file((&s_logpath[0 as usize]) as u64, bp,
+        actwire.slen(bp))
+    var r1: [u8; 32] = "orientbus: audit log rotated at\0"
+    lb_start((&r1[0 as usize]) as u64)
+    var sp: [u8; 2] = " \0"
+    lb_add((&sp[0 as usize]) as u64)
+    lb_num(sz)
+    lb_say()
+}
+
+// AB-012: `act audit [n]` -- the last n lines (default 20, at most 60) of
+// the audit log, for the user only. What every other client is allowed to
+// know about itself stays `act rights` (its own counts and rules).
+fn do_audit(msg: u64, pid: u64, uid: u64, id: u64) {
+    if !is_user(msg, uid) {
+        var e_who: [u8; 31] = "denied only the user may read\0\0"
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    let _f: bool = flush_lazy()
+    var w: [u8; 16] = [0 as u8; 16]
+    let nx: u64 = actwire.word_copy(msg, 0, (&w[0 as usize]) as u64, 16)
+    let _nx2: u64 = actwire.word_copy(msg, nx, (&w[0 as usize]) as u64, 16)
+    var want: u64 = 20
+    if ld8((&w[0 as usize]) as u64, 0) >= 48 && ld8((&w[0 as usize]) as u64, 0) <= 57 {
+        want = ulib.to_num((&w[0 as usize]) as u64)
+    }
+    if want == 0 || want > 60 {
+        want = 60
+    }
+    // the tail of the file: the last 8000 octets are more than 60 lines
+    let p: u64 = (&mf[0 as usize]) as u64
+    var have: u64 = 0
+    let sz: u64 = io.size_of((&s_logpath[0 as usize]) as u64)
+    let fd: u64 = io.open((&s_logpath[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) && !ulib.bad(sz) {
+        var from: u64 = 0
+        if sz > 8000 {
+            from = sz - 8000
+        }
+        let _sk: u64 = io.seek(fd, from, 0)
+        var more: bool = true
+        while more && have < 8000 {
+            let g: u64 = io.read(fd, p + have, 8000 - have)
+            if ulib.bad(g) || g == 0 {
+                more = false
+            } else {
+                have = have + g
+            }
+        }
+        io.close(fd)
+    }
+    // count the lines from the end
+    var start: u64 = have
+    var lines: u64 = 0
+    var i: u64 = have
+    while i > 0 && lines <= want {
+        i = i - 1
+        if ld8(p, i) == 10 && i + 1 < have {
+            lines = lines + 1
+            if lines <= want {
+                start = i + 1
+            }
+        }
+    }
+    if i == 0 && lines < want {
+        start = 0
+    }
+    actwire.ob_reset()
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_rot: [u8; 11] = "rotations=\0"
+    var s_max: [u8; 11] = "\nauditmax=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&s_rot[0 as usize]) as u64)
+    actwire.ob_num(c_rotations)
+    actwire.ob_str((&s_max[0 as usize]) as u64)
+    actwire.ob_num(audit_max)
+    actwire.ob_str((&s_nl[0 as usize]) as u64)
+    if have > start {
+        actwire.ob_n(p + start, have - start)
+    }
+    reply(pid, id, actwire.ob_ptr(), actwire.ob_len())
 }
 
 fn ag(i: u64) -> u64 {
@@ -3137,9 +3266,21 @@ fn line_field(p: u64, at: u64, e: u64, key: u64, out: u64, max: u64) -> bool {
 
 // Seed the counts from the audit log (all of it, in pieces).
 fn seed_counts() {
-    let fd: u64 = io.open((&s_logpath[0 as usize]) as u64, 0)
+    // AB-012: the older generation first, then the current log
+    let n1: u64 = seed_from((&s_logold[0 as usize]) as u64)
+    let n2: u64 = seed_from((&s_logpath[0 as usize]) as u64)
+    var s1: [u8; 31] = "orientbus: counts seeded from \0"
+    lb_start((&s1[0 as usize]) as u64)
+    lb_num(n1 + n2)
+    var s3: [u8; 11] = " log lines\0"
+    lb_add((&s3[0 as usize]) as u64)
+    lb_say()
+}
+
+fn seed_from(path: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
-        return
+        return 0
     }
     let p: u64 = (&mf[0 as usize]) as u64
     var have: u64 = 0
@@ -3211,12 +3352,7 @@ fn seed_counts() {
         }
     }
     io.close(fd)
-    var s1: [u8; 31] = "orientbus: counts seeded from \0"
-    lb_start((&s1[0 as usize]) as u64)
-    lb_num(lines)
-    var s3: [u8; 11] = " log lines\0"
-    lb_add((&s3[0 as usize]) as u64)
-    lb_say()
+    return lines
 }
 
 // ------------------------------------------------- dry run first (AB-009)
@@ -3674,6 +3810,7 @@ fn on_request(s: u64) {
     var k_revoke: [u8; 7] = "revoke\0"
     var k_block: [u8; 6] = "block\0"
     var k_reload: [u8; 7] = "reload\0"
+    var k_audit: [u8; 6] = "audit\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -3723,6 +3860,8 @@ fn on_request(s: u64) {
         do_block(msg, pid, uid, id)
     } else if actwire.str_eq(vp, (&k_reload[0 as usize]) as u64) {
         do_reload(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_audit[0 as usize]) as u64) {
+        do_audit(msg, pid, uid, id)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)

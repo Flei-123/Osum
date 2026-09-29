@@ -729,3 +729,8 @@ catalogue is read again without a restart -- provider bindings, call
 counts and undo records are carried over by name, a reload during a
 call in flight is refused as `busy`, only the user may reload; opk
 reloads after it rebuilt /apps).
+Done in round ROADMAP-7: AB-012 (the audit log rotates at 256 KiB --
+`auditmax <octets>` in the policy -- into ONE older generation,
+/var/log/orientbus.log.1, the new log starts with a line that says so,
+the counts per client are seeded from both files; `act audit [n]` gives
+the user the last n lines, nobody else).

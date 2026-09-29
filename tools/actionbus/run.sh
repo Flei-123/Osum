@@ -1243,6 +1243,82 @@ part "$L" L-DEL L-STAT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "err unknown_action extra.hello" "a removed manifest is gone after the next reload"
 grep -qaE 'panic|EXCEPTION' "$L" && bad "a panic or exception in the section-18 guest" || ok "no panic, no exception (section 18)"
 
+# ===================================================================
+echo "== 19. AB-012: the audit log rotates, and the user can read it =="
+# ===================================================================
+# A policy with `auditmax 2048`: thirty notes are added (thirty audit
+# lines of ~150 octets), so the log passes 2 KiB and rotates -- the
+# older lines go to /var/log/orientbus.log.1, the new log begins with a
+# line that says so. `act audit 5` gives the last five lines, to the user
+# only. A second boot of the same disk seeds the counts from BOTH files:
+# the user's thirty changes are still thirty.
+cat > "$TMPD/policy19" <<'EOM'
+# section 19
+auditmax 2048
+EOM
+{
+echo 'orientbus serve 0 &'
+echo 'sleep -m 300'
+echo 'notes serve 0 &'
+echo 'sleep 1'
+for i in $(seq 1 30); do echo "act call notes.add text=line-$i"; done
+echo 'echo ==A-FILES=='
+echo 'ls /var/log'
+echo 'cat /var/log/orientbus.log'
+echo 'echo ==A-READ=='
+echo 'act audit 5'
+echo 'echo ==A-DENY=='
+echo 'act audit --as jarvis'
+echo 'echo ==A-RIGHTS=='
+echo 'act rights'
+echo 'act stop'
+echo 'echo ==FERTIG=='
+} > "$TMPD/s19.sh"
+cat > "$TMPD/s19b.sh" <<'EOS'
+orientbus serve 20000 &
+sleep -m 500
+echo ==A-RESTART==
+act rights
+act stop
+echo ==FERTIG==
+EOS
+cp -f "$TMPD/etc/orientbus/policy" "$TMPD/policy.orig"
+cp -f "$TMPD/policy19" "$TMPD/etc/orientbus/policy"
+EXTRA=("/t/s2.sh=$TMPD/s19b.sh")
+image "$TMPD/A19.img" "$TMPD/s19.sh"
+EXTRA=()
+cp -f "$TMPD/policy.orig" "$TMPD/etc/orientbus/policy"
+run "$TMPD/A19.img" a19 1 120
+A19="$TMPD/a19.klar"
+timeout 90 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus script=sh /t/s2.sh;exit" \
+    -serial "file:$TMPD/a19b.txt" -display none -no-reboot \
+    -drive "file=$TMPD/A19.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/a19b.txt" > "$TMPD/a19b.klar" 2>/dev/null || true
+A19B="$TMPD/a19b.klar"
+grep -qa '==FERTIG==' "$A19" || { bad "section-19 guest did not finish"; tail -20 "$A19" | sed 's/^/        /'; }
+has "$A19" "orientbus: audit log rotated at" "the log rotated when it passed auditmax ($(grep -ao 'audit log rotated at [0-9]*' "$A19" | head -1))"
+part "$A19" A-FILES A-READ > "$TMPD/p.txt"
+has "$TMPD/p.txt" "orientbus.log.1" "the older generation is /var/log/orientbus.log.1"
+has "$TMPD/p.txt" "# rotated: the older lines are in /var/log/orientbus.log.1" "the new log begins with a line that says so"
+part "$A19" A-READ A-DENY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "rotations=" "act audit: how often it rotated ($(grep -a '^rotations=' "$TMPD/p.txt" | head -1))"
+has "$TMPD/p.txt" "auditmax=2048" "... and at which size (from the policy)"
+nl=$(grep -ac 'client=' "$TMPD/p.txt")
+[ "$nl" = 5 ] && ok "act audit 5: exactly five log lines" || bad "act audit 5 gave $nl lines"
+has "$TMPD/p.txt" "notes.add" "... the latest calls"
+part "$A19" A-DENY A-RIGHTS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may read" "GEGENPROBE: Jarvis may not read the audit log"
+part "$A19" A-RIGHTS FERTIG > "$TMPD/p.txt"
+grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "the user's thirty changes are counted" || bad "user counts: $(grep -a '^client user' "$TMPD/p.txt")"
+grep -qa '==FERTIG==' "$A19B" || bad "section-19 second boot did not finish"
+grep -qaE 'counts seeded from [0-9]+ log lines' "$A19B" && ok "the second boot seeds from both files ($(grep -aoE 'seeded from [0-9]+ log lines' "$A19B" | head -1))" || bad "no seeding on the second boot"
+part "$A19B" A-RESTART FERTIG > "$TMPD/p.txt"
+grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "... and after the restart they are still thirty (older lines included)" || bad "user counts after restart: $(grep -a '^client user' "$TMPD/p.txt")"
+grep -qaE 'panic|EXCEPTION' "$A19" "$A19B" && bad "a panic or exception in the section-19 guests" || ok "no panic, no exception (section 19)"
+
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================
 # The JARVIS server side is tools/bridge/peer.py (TLS 1.3, Ed25519 login,
