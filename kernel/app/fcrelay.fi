@@ -1,0 +1,581 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/fcrelay.fi -- A FIRNCHAT DEVICE ON ORIENTOS: the relay
+// protocol and the end-to-end sealing, as much as the Fleitec provider of
+// the social layer (kernel/app/socfleitec.fi) needs to chat.
+//
+// This file is FirnChat's wire and crypto, read out of its sources
+// (FirnChat src/proto.fi, src/e2e.fi, src/geraet.fi, docs/E2E-GERAETE.md)
+// and written again for this tree -- nothing in here is Fleitec's address
+// book or any other provider's. What it does:
+//
+//   THE DEVICE     an x25519 key pair of its own (secret || public, 128
+//                  hex in a file of mode 0600). The account learns it by
+//                  the pairing code (T_DIR "buch=1"), never by a key
+//                  typed in by hand.
+//   THE RELAY      a TCP connection: T_HELLO (my key) -> T_WELCOME
+//                  (challenge 32 || relay key 32) -> T_AUTH HMAC-SHA256(
+//                  x25519(my secret, relay key), challenge) -> T_OK. The
+//                  relay key is pinned on first use (the caller keeps it).
+//   A MESSAGE      sealed per device: x25519(mine, theirs) -> HKDF-SHA256
+//                  (salt "FIRNCHAT-v1-session", info lo || hi || direction)
+//                  -> ChaCha20-Poly1305, nonce 0000 || seq, aad sender ||
+//                  target || seq. The sequence number is the frame's.
+//   OWN DEVICES    get an own-device copy (F_SYNC): 1 || the key the
+//                  message was addressed to || the text.
+//   THE BOX        T_FETCH "8 octets wanted" -> T_MSG ... T_END; the
+//                  relay moves its cursor by what it handed over.
+//   THE DIRECTORY  T_DIR "buch=1" / "zugang=1" / "fc=<hex>" -> T_DIRR JSON
+//                  (answered by the address book behind the relay).
+//
+// NOT HERE (and said so): channels, pictures, read marks going out,
+// the key backup. A read mark that comes in is recognised and dropped.
+
+import std.rt
+import std.net
+import std.crypto.x25519
+import std.crypto.chacha
+import std.crypto.hkdf
+import std.crypto.hmac
+import std.crypto.random
+
+export {
+    Relay, relay_new, relay_open, relay_close, relay_dir, relay_send,
+    relay_fetch, relay_srv,
+    key_load_or_create, key_hex_pub,
+    Sess, sess_init, seal, open_sealed,
+    sync_wrap, SYNC_HEAD, F_ENC, F_SYNC, F_CHANNEL, HDR_LEN,
+    fr_kind, fr_flags, fr_sender, fr_target, fr_stamp, fr_seq, fr_plen,
+    hex_encode, hex_decode, now_unix, be64,
+}
+
+const HDR_LEN: usize = 90
+const MAX_PAYLOAD: usize = 65536
+const T_HELLO: u8 = 1
+const T_WELCOME: u8 = 2
+const T_AUTH: u8 = 3
+const T_OK: u8 = 4
+const T_MSG: u8 = 5
+const T_ACK: u8 = 6
+const T_FETCH: u8 = 7
+const T_END: u8 = 9
+const T_ERR: u8 = 11
+const T_BYE: u8 = 12
+const T_DIR: u8 = 21
+const T_DIRR: u8 = 22
+const F_ENC: u8 = 1
+const F_CHANNEL: u8 = 2
+const F_SYNC: u8 = 32
+const SYNC_HEAD: usize = 33
+const TAG_LEN: usize = 16
+
+// ------------------------------------------------------------ small tools
+
+fn hexd(v: u8) -> u8 {
+    if v < 10 as u8 {
+        return 48 as u8 + v
+    }
+    return 87 as u8 + v
+}
+
+fn hexv(c: u8) -> i32 {
+    if c >= 48 as u8 && c <= 57 as u8 {
+        return (c - 48 as u8) as i32
+    }
+    if c >= 97 as u8 && c <= 102 as u8 {
+        return (c - 87 as u8) as i32
+    }
+    if c >= 65 as u8 && c <= 70 as u8 {
+        return (c - 55 as u8) as i32
+    }
+    return -1
+}
+
+fn hex_encode(src: u64, n: usize, out: u64) {
+    var i: usize = 0
+    while i < n {
+        let b: u8 = rt.ld8(src, i)
+        rt.st8(out, 2 * i, hexd(b / 16 as u8))
+        rt.st8(out, 2 * i + 1, hexd(b % 16 as u8))
+        i = i + 1
+    }
+}
+
+fn hex_decode(src: u64, n: usize, out: u64) -> bool {
+    if n % 2 != 0 {
+        return false
+    }
+    var i: usize = 0
+    while i < n / 2 {
+        let h: i32 = hexv(rt.ld8(src, 2 * i))
+        let l: i32 = hexv(rt.ld8(src, 2 * i + 1))
+        if h < 0 || l < 0 {
+            return false
+        }
+        rt.st8(out, i, (h * 16 + l) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn put_be(b: *mut rt.Buf, v: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rt.buf_push(b, ((v >> ((n - 1 - i) * 8) as u64) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn be64(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        v = (v << 8) | rt.ld8(p, i) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn be32(p: u64) -> u64 {
+    return (rt.ld8(p, 0) as u64 << 24) | (rt.ld8(p, 1) as u64 << 16)
+        | (rt.ld8(p, 2) as u64 << 8) | rt.ld8(p, 3) as u64
+}
+
+fn now_unix() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn key_less(a: u64, b: u64) -> bool {
+    var i: usize = 0
+    while i < 32 {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(b, i)
+        if x != y {
+            return x < y
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------- the device
+
+// secret (32) || public (32) out of the key file (128 hex), or a fresh
+// pair written there with mode 0600. False: no randomness, no file.
+fn key_load_or_create(path: u64, out64: u64) -> bool {
+    var h: [u8; 130] = [0; 130]
+    let fd: i64 = syscall(2, path as i64, 0, 0, 0, 0, 0)
+    if fd >= 0 {
+        let n: i64 = syscall(0, fd, (&h[0]) as i64, 130, 0, 0, 0)
+        syscall(3, fd, 0, 0, 0, 0, 0)
+        if n >= 128 && hex_decode((&h[0]) as u64, 128, out64) {
+            return true
+        }
+        return false
+    }
+    if !random.random_bytes(out64, 32) {
+        return false
+    }
+    if !x25519.x25519_base(out64, out64 + 32) {
+        return false
+    }
+    hex_encode(out64, 64, (&h[0]) as u64)
+    h[128] = 10 as u8
+    // O_WRONLY | O_CREAT | O_EXCL, 0600
+    let wf: i64 = syscall(2, path as i64, 1 | 64 | 128, 384, 0, 0, 0)
+    if wf < 0 {
+        return false
+    }
+    let w: i64 = syscall(1, wf, (&h[0]) as i64, 129, 0, 0, 0)
+    syscall(3, wf, 0, 0, 0, 0, 0)
+    return w == 129
+}
+
+fn key_hex_pub(k64: u64, out64: u64) {
+    hex_encode(k64 + 32, 32, out64)
+}
+
+// ------------------------------------------------------------- a session
+
+struct Sess {
+    tx: [u8; 32],
+    rx: [u8; 32],
+    ok: bool,
+}
+
+fn sess_init(s: *mut Sess, my_sec: u64, my_pub: u64, their: u64) -> bool {
+    (*s).ok = false
+    var shared: [u8; 32] = [0; 32]
+    if !x25519.x25519(my_sec, their, (&shared[0]) as u64) {
+        return false
+    }
+    var info: [u8; 65] = [0; 65]
+    var lo: u64 = my_pub
+    var hi: u64 = their
+    if !key_less(my_pub, their) {
+        lo = their
+        hi = my_pub
+    }
+    var i: usize = 0
+    while i < 32 {
+        info[i] = rt.ld8(lo, i)
+        info[32 + i] = rt.ld8(hi, i)
+        i = i + 1
+    }
+    var dtx: u8 = 2 as u8
+    var drx: u8 = 1 as u8
+    if key_less(my_pub, their) {
+        dtx = 1 as u8
+        drx = 2 as u8
+    } else if !key_less(their, my_pub) {
+        dtx = 1 as u8 // the session with oneself
+        drx = 1 as u8
+    }
+    var salt: [u8; 19] = "FIRNCHAT-v1-session"
+    info[64] = dtx
+    if !hkdf.hkdf((&salt[0]) as u64, 19, (&shared[0]) as u64, 32,
+        (&info[0]) as u64, 65, (&(*s).tx[0]) as u64, 32) {
+        return false
+    }
+    info[64] = drx
+    if !hkdf.hkdf((&salt[0]) as u64, 19, (&shared[0]) as u64, 32,
+        (&info[0]) as u64, 65, (&(*s).rx[0]) as u64, 32) {
+        return false
+    }
+    (*s).ok = true
+    return true
+}
+
+fn nonce_aad(sender: u64, target: u64, seq: u64, nonce: u64, aad: u64) {
+    var i: usize = 0
+    while i < 4 {
+        rt.st8(nonce, i, 0 as u8)
+        i = i + 1
+    }
+    var k: usize = 0
+    while k < 8 {
+        let b: u8 = ((seq >> ((7 - k) * 8) as u64) & 255) as u8
+        rt.st8(nonce, 4 + k, b)
+        rt.st8(aad, 64 + k, b)
+        k = k + 1
+    }
+    i = 0
+    while i < 32 {
+        rt.st8(aad, i, rt.ld8(sender, i))
+        rt.st8(aad, 32 + i, rt.ld8(target, i))
+        i = i + 1
+    }
+}
+
+// n octets -> n + 16 at out
+fn seal(s: *mut Sess, sender: u64, target: u64, seq: u64, p: u64, n: usize,
+    out: u64) {
+    var nonce: [u8; 12] = [0; 12]
+    var aad: [u8; 72] = [0; 72]
+    nonce_aad(sender, target, seq, (&nonce[0]) as u64, (&aad[0]) as u64)
+    chacha.aead_seal((&(*s).tx[0]) as u64, (&nonce[0]) as u64, (&aad[0]) as u64,
+        72, p, n, out)
+}
+
+// n octets of ciphertext -> n - 16 at out; false = forged
+fn open_sealed(s: *mut Sess, sender: u64, target: u64, seq: u64, ct: u64,
+    n: usize, out: u64) -> bool {
+    if n < TAG_LEN {
+        return false
+    }
+    var nonce: [u8; 12] = [0; 12]
+    var aad: [u8; 72] = [0; 72]
+    nonce_aad(sender, target, seq, (&nonce[0]) as u64, (&aad[0]) as u64)
+    return chacha.aead_open((&(*s).rx[0]) as u64, (&nonce[0]) as u64,
+        (&aad[0]) as u64, 72, ct, n, out)
+}
+
+// 1 || anchor || text into out (n + SYNC_HEAD)
+fn sync_wrap(anchor: u64, p: u64, n: usize, out: u64) -> usize {
+    rt.st8(out, 0, 1 as u8)
+    var i: usize = 0
+    while i < 32 {
+        rt.st8(out, 1 + i, rt.ld8(anchor, i))
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        rt.st8(out, SYNC_HEAD + i, rt.ld8(p, i))
+        i = i + 1
+    }
+    return n + SYNC_HEAD
+}
+
+// ------------------------------------------------------------ the relay
+
+struct Relay {
+    conn: net.Conn,
+    open: bool,
+    key: [u8; 64], // secret || public
+    srv: [u8; 32],
+    hdr: [u8; 90],
+    body: rt.Buf,
+    err: i32,
+}
+
+fn relay_new(key64: u64) -> Relay {
+    var r: Relay = Relay { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32,
+        peer_port: 0 as u16 }, open: false, key: [0; 64], srv: [0; 32],
+        hdr: [0; 90], body: rt.buf_new(), err: 0 }
+    var i: usize = 0
+    while i < 64 {
+        r.key[i] = rt.ld8(key64, i)
+        i = i + 1
+    }
+    return r
+}
+
+fn relay_srv(r: *mut Relay) -> u64 {
+    return (&(*r).srv[0]) as u64
+}
+
+fn bad_conn(b: *mut bool) -> net.Conn {
+    *b = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+fn bad_len(b: *mut bool) -> usize {
+    *b = true
+    return 0 as usize
+}
+
+fn mypub(r: *mut Relay) -> u64 {
+    return (&(*r).key[32]) as u64
+}
+
+fn write_frame(r: *mut Relay, kind: u8, flags: u8, target: u64, stamp: u64,
+    seq: u64, p: u64, n: usize) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push(&b, 70 as u8)
+    rt.buf_push(&b, 67 as u8)
+    rt.buf_push(&b, 1 as u8)
+    rt.buf_push(&b, kind)
+    rt.buf_push(&b, flags)
+    rt.buf_push(&b, 0 as u8)
+    put_be(&b, n as u64, 4)
+    rt.buf_push_bytes(&b, mypub(r), 32)
+    var i: usize = 0
+    while i < 32 {
+        if target == 0 as u64 {
+            rt.buf_push(&b, 0 as u8)
+        } else {
+            rt.buf_push(&b, rt.ld8(target, i))
+        }
+        i = i + 1
+    }
+    put_be(&b, stamp, 8)
+    put_be(&b, seq, 8)
+    if n > 0 {
+        rt.buf_push_bytes(&b, p, n)
+    }
+    var wf: bool = false
+    let w: usize = net.write_all(&(*r).conn, b.ptr, b.len) catch bad_len(&wf)
+    let ok: bool = !wf && w == b.len
+    rt.buf_free(&b)
+    return ok
+}
+
+fn read_full(r: *mut Relay, p: u64, n: usize) -> bool {
+    var got: usize = 0
+    while got < n {
+        var f: bool = false
+        let k: usize = net.read(&(*r).conn, p + got as u64, n - got) catch bad_len(&f)
+        if f || k == 0 {
+            return false
+        }
+        got = got + k
+    }
+    return true
+}
+
+// one frame: the header into hdr, the payload into body. The kind, or -1.
+fn read_frame(r: *mut Relay) -> i32 {
+    let hp: u64 = (&(*r).hdr[0]) as u64
+    if !read_full(r, hp, HDR_LEN) {
+        return -1
+    }
+    if rt.ld8(hp, 0) != 70 as u8 || rt.ld8(hp, 1) != 67 as u8 || rt.ld8(hp, 2) != 1 as u8 {
+        return -1
+    }
+    let n: u64 = be32(hp + 6)
+    if n > MAX_PAYLOAD as u64 {
+        return -1
+    }
+    rt.buf_clear(&(*r).body)
+    if n > 0 {
+        rt.buf_reserve(&(*r).body, n as usize)
+        if !read_full(r, rt.buf_ptr(&(*r).body), n as usize) {
+            return -1
+        }
+        rt.buf_set_len(&(*r).body, n as usize)
+    }
+    return rt.ld8(hp, 3) as i32
+}
+
+// Connects and proves the key. `pin` (32 octets or 0): the relay key it
+// must have. -1 no connection, -2 no handshake, -3 a different relay key
+// than the pinned one, -4 the proof was refused; 0 open.
+fn relay_open(r: *mut Relay, addr: u32, port: u16, pin: u64) -> i32 {
+    var bad: bool = false
+    (*r).conn = net.connect_tcp(addr, port) catch bad_conn(&bad)
+    if bad {
+        return -1
+    }
+    let _t: bool = net.set_timeout(&(*r).conn, 8000 as u64) catch false
+    if !write_frame(r, T_HELLO, 0 as u8, 0 as u64, now_unix(), 0 as u64, 0 as u64, 0) {
+        net.close(&(*r).conn)
+        return -2
+    }
+    if read_frame(r) != T_WELCOME as i32 || rt.buf_len(&(*r).body) != 64 {
+        net.close(&(*r).conn)
+        return -2
+    }
+    let bp: u64 = rt.buf_ptr(&(*r).body)
+    var chal: [u8; 32] = [0; 32]
+    var i: usize = 0
+    while i < 32 {
+        chal[i] = rt.ld8(bp, i)
+        (*r).srv[i] = rt.ld8(bp, 32 + i)
+        i = i + 1
+    }
+    if pin != 0 as u64 {
+        var same: bool = true
+        i = 0
+        while i < 32 {
+            if rt.ld8(pin, i) != (*r).srv[i] {
+                same = false
+            }
+            i = i + 1
+        }
+        if !same {
+            net.close(&(*r).conn)
+            return -3
+        }
+    }
+    var k: [u8; 32] = [0; 32]
+    if !x25519.x25519((&(*r).key[0]) as u64, (&(*r).srv[0]) as u64, (&k[0]) as u64) {
+        net.close(&(*r).conn)
+        return -2
+    }
+    var tag: [u8; 32] = [0; 32]
+    hmac.hmac_sha256((&k[0]) as u64, 32, (&chal[0]) as u64, 32, (&tag[0]) as u64)
+    if !write_frame(r, T_AUTH, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+        (&tag[0]) as u64, 32) || read_frame(r) != T_OK as i32 {
+        net.close(&(*r).conn)
+        return -4
+    }
+    (*r).open = true
+    return 0
+}
+
+fn relay_close(r: *mut Relay) {
+    if (*r).open {
+        let _b: bool = write_frame(r, T_BYE, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+            0 as u64, 0)
+        net.close(&(*r).conn)
+        (*r).open = false
+    }
+}
+
+// A directory question ("buch=1", "zugang=1", "fc=<64 hex>"): the JSON
+// answer into out. False: no answer (T_ERR, no directory).
+fn relay_dir(r: *mut Relay, q: u64, qn: usize, out: *mut rt.Buf) -> bool {
+    rt.buf_clear(out)
+    if !write_frame(r, T_DIR, 0 as u8, 0 as u64, now_unix(), 0 as u64, q, qn) {
+        return false
+    }
+    if read_frame(r) != T_DIRR as i32 {
+        return false
+    }
+    rt.buf_push_bytes(out, rt.buf_ptr(&(*r).body), rt.buf_len(&(*r).body))
+    return true
+}
+
+// One sealed message to one device: sealed with the session to `target`
+// under sequence number `seq` (spent by the caller BEFORE this), `xflags`
+// added to F_ENC. True: the relay stored it (T_ACK).
+fn relay_send(r: *mut Relay, target: u64, seq: u64, xflags: u8, stamp: u64,
+    p: u64, n: usize) -> bool {
+    var s: Sess = Sess { tx: [0; 32], rx: [0; 32], ok: false }
+    if !sess_init(&s, (&(*r).key[0]) as u64, mypub(r), target) {
+        return false
+    }
+    var ct: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&ct, n + TAG_LEN)
+    seal(&s, mypub(r), target, seq, p, n, rt.buf_ptr(&ct))
+    let ok: bool = write_frame(r, T_MSG, F_ENC | xflags, target, stamp, seq,
+        rt.buf_ptr(&ct), n + TAG_LEN)
+    rt.buf_free(&ct)
+    if !ok {
+        return false
+    }
+    return read_frame(r) == T_ACK as i32
+}
+
+// What is new in the own box, at most `want` frames, appended to `out` as
+// whole frames (header + payload, each carries its own length). The
+// count, or -1.
+fn relay_fetch(r: *mut Relay, want: usize, out: *mut rt.Buf) -> i32 {
+    var head: [u8; 8] = [0; 8]
+    var i: usize = 0
+    while i < 8 {
+        head[i] = ((want as u64 >> ((7 - i) * 8) as u64) & 255) as u8
+        i = i + 1
+    }
+    if !write_frame(r, T_FETCH, 0 as u8, 0 as u64, now_unix(), 0 as u64,
+        (&head[0]) as u64, 8) {
+        return -1
+    }
+    var got: i32 = 0
+    while true {
+        let k: i32 = read_frame(r)
+        if k < 0 || k == T_ERR as i32 {
+            return -1
+        }
+        if k == T_END as i32 {
+            return got
+        }
+        if k == T_MSG as i32 {
+            rt.buf_push_bytes(out, (&(*r).hdr[0]) as u64, HDR_LEN)
+            rt.buf_push_bytes(out, rt.buf_ptr(&(*r).body), rt.buf_len(&(*r).body))
+            got = got + 1
+        }
+    }
+    return got
+}
+
+// ------------------------------------------------ reading a stored frame
+
+fn fr_kind(f: u64) -> u8 {
+    return rt.ld8(f, 3)
+}
+
+fn fr_flags(f: u64) -> u8 {
+    return rt.ld8(f, 4)
+}
+
+fn fr_plen(f: u64) -> usize {
+    return be32(f + 6) as usize
+}
+
+fn fr_sender(f: u64) -> u64 {
+    return f + 10
+}
+
+fn fr_target(f: u64) -> u64 {
+    return f + 42
+}
+
+fn fr_stamp(f: u64) -> u64 {
+    return be64(f + 74)
+}
+
+fn fr_seq(f: u64) -> u64 {
+    return be64(f + 82)
+}
