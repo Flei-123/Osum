@@ -9199,7 +9199,61 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         }
         return proc.space_pages(state, index)
     }
+    if field == uio.P_NAME0 || field == uio.P_NAME1 {
+        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE
+            || sched.tget(state, index, sched.T_KIND) != sched.K_USER {
+            return 0
+        }
+        return pstat_name(state, index, field == uio.P_NAME1)
+    }
     return uio.pstat(state, index, field)
+}
+
+// ROADMAP-7 (r191): the basename of argv[0], eight octets of it. Read
+// from the task's own argument page the way /proc/<pid>/cmdline reads it
+// (procfs.make_cmdline): the page at proc.ARGS_BASE holds argc, then the
+// pointers, then the strings -- all inside that one page.
+fn pstat_name(state: u64, t: u64, second: bool) -> u64 {
+    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    let argc: u64 = __mmio_read64(frame as *mut u64)
+    if argc == 0 || argc > proc.MAX_ARGS {
+        return 0
+    }
+    let ptr: u64 = __mmio_read64((frame + 8) as *mut u64)
+    if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+        return 0
+    }
+    let s0: u64 = frame + (ptr - proc.ARGS_BASE)
+    let lim: u64 = frame + 4096
+    // the basename: after the last '/'
+    var at: u64 = s0
+    var base: u64 = s0
+    while at < lim && kstate.get8(at) != 0 {
+        if kstate.get8(at) == 47 {
+            base = at + 1
+        }
+        at = at + 1
+    }
+    var from: u64 = base
+    if second {
+        from = base + 8
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    var going: bool = from < at
+    while going && k < 8 {
+        let q: u64 = from + k
+        if q >= at {
+            going = false
+        } else {
+            v = v | (kstate.get8(q) << (k * 8))
+            k = k + 1
+        }
+    }
+    return v
 }
 
 // Ein Feld eines Kerns. Alles daraus steht im Satz des Kerns
