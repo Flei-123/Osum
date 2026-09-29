@@ -152,6 +152,8 @@ echo ==G-SCREEN==
 sleep 25
 echo ==G-NET==
 sleep 35
+echo ==G-LOGPAGE==
+sleep 15
 echo ==G-NETDONE==
 cat /etc/network.conf
 echo ==G-CLOSE==
@@ -304,6 +306,12 @@ if waitfor "==G-NET==" 60; then
         bad "the page Netz did not report its controls"
     fi
 fi
+# S-009: the page Protokoll -- the audit log of this very run, newest first
+if waitfor "==G-LOGPAGE==" 60; then
+    T=$(mid tabn) && klick $T
+    sleep 4
+    shot "$TMPD/8-log.ppm"
+fi
 waitfor "==FERTIG==" 150 || note "no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
@@ -383,7 +391,10 @@ has "$TMPD/p.txt" "modus=dhcp" "/etc/network.conf says modus=dhcp"
 has "$TMPD/p.txt" "ip=10.0.2.15" "... and keeps the other lines"
 part "$G" G-JOURNAL G-STAT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "key=net.dhcp old=false new=true" "the journal has the DHCP change (so it can be undone)"
-for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone; do
+grep -qaE 'settings: protocol rows=([5-9]|[1-9][0-9]+) rc=0' "$G" \
+    && ok "page Protokoll (S-009): $(grep -aoE 'protocol rows=[0-9]+' "$G" | tail -1) from 'audit 40' over the bus" \
+    || bad "page Protokoll: $(grep -a 'settings: protocol' "$G" | tail -1)"
+for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log; do
     [ -s "$TMPD/$f.png" ] && ok "photo: $TMPD/$f.png" || bad "no photo $f"
 done
 echo "ACTBUS-GUI: $pass passed, $fail failed"

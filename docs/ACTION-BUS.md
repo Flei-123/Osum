@@ -732,5 +732,9 @@ reloads after it rebuilt /apps).
 Done in round ROADMAP-7: AB-012 (the audit log rotates at 256 KiB --
 `auditmax <octets>` in the policy -- into ONE older generation,
 /var/log/orientbus.log.1, the new log starts with a line that says so,
-the counts per client are seeded from both files; `act audit [n]` gives
-the user the last n lines, nobody else).
+the counts per client are seeded from both files -- a line older than
+the kept generation is gone, and so is its count; `act audit [n]` gives
+the user the last n lines, nobody else), S-009 (the settings page
+"Protokoll": the last 40 lines of the audit log over the bus, newest
+first -- time, who, verb, target, decision, result -- with a refresh
+button).

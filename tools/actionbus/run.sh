@@ -1246,15 +1246,15 @@ grep -qaE 'panic|EXCEPTION' "$L" && bad "a panic or exception in the section-18 
 # ===================================================================
 echo "== 19. AB-012: the audit log rotates, and the user can read it =="
 # ===================================================================
-# A policy with `auditmax 2048`: thirty notes are added (thirty audit
-# lines of ~150 octets), so the log passes 2 KiB and rotates -- the
+# A policy with `auditmax 3000`: thirty notes are added (thirty audit
+# lines of ~150 octets), so the log passes 3000 octets ONCE and rotates -- the
 # older lines go to /var/log/orientbus.log.1, the new log begins with a
 # line that says so. `act audit 5` gives the last five lines, to the user
 # only. A second boot of the same disk seeds the counts from BOTH files:
 # the user's thirty changes are still thirty.
 cat > "$TMPD/policy19" <<'EOM'
 # section 19
-auditmax 2048
+auditmax 3000
 EOM
 {
 echo 'orientbus serve 0 &'
@@ -1304,8 +1304,8 @@ part "$A19" A-FILES A-READ > "$TMPD/p.txt"
 has "$TMPD/p.txt" "orientbus.log.1" "the older generation is /var/log/orientbus.log.1"
 has "$TMPD/p.txt" "# rotated: the older lines are in /var/log/orientbus.log.1" "the new log begins with a line that says so"
 part "$A19" A-READ A-DENY > "$TMPD/p.txt"
-has "$TMPD/p.txt" "rotations=" "act audit: how often it rotated ($(grep -a '^rotations=' "$TMPD/p.txt" | head -1))"
-has "$TMPD/p.txt" "auditmax=2048" "... and at which size (from the policy)"
+has "$TMPD/p.txt" "rotations=1" "act audit: it rotated once"
+has "$TMPD/p.txt" "auditmax=3000" "... at the size from the policy"
 nl=$(grep -ac 'client=' "$TMPD/p.txt")
 [ "$nl" = 5 ] && ok "act audit 5: exactly five log lines" || bad "act audit 5 gave $nl lines"
 has "$TMPD/p.txt" "notes.add" "... the latest calls"
@@ -1316,7 +1316,9 @@ grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "the user'
 grep -qa '==FERTIG==' "$A19B" || bad "section-19 second boot did not finish"
 grep -qaE 'counts seeded from [0-9]+ log lines' "$A19B" && ok "the second boot seeds from both files ($(grep -aoE 'seeded from [0-9]+ log lines' "$A19B" | head -1))" || bad "no seeding on the second boot"
 part "$A19B" A-RESTART FERTIG > "$TMPD/p.txt"
-grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "... and after the restart they are still thirty (older lines included)" || bad "user counts after restart: $(grep -a '^client user' "$TMPD/p.txt")"
+grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "... and after the restart they are still thirty (the older generation included)" || bad "user counts after restart: $(grep -a '^client user' "$TMPD/p.txt")"
+# (a line older than the ONE kept generation is gone for good -- the
+# counts after a restart are those of the two files; docs section 12)
 grep -qaE 'panic|EXCEPTION' "$A19" "$A19B" && bad "a panic or exception in the section-19 guests" || ok "no panic, no exception (section 19)"
 
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
