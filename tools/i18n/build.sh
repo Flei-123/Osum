@@ -107,7 +107,10 @@ printf 'de\n' > "$OUT/locale-de"
 # at 485,392 octets. Measured there on 28.08.2026, and the predecessor
 # `mergeline` (3e92c27) failed the same way, so it is older than either
 # round.
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+# ROUND ROADMAP-7: 24576 (12 MiB). The six programs plus the kernel's
+# fonts passed 8 MiB when the settings window got its fourteenth page
+# (Protokoll) -- the same wall, the same loud wrong place.
+ARGS=(build "$OUT/disk.img" 24576 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
