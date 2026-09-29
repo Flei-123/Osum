@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# pakete/bauen.sh -- DIE DREI PAKETE DIESER RUNDE BAUEN.
+# pakete/bauen.sh -- DIE PAKETE DIESES BAUMS BAUEN (wmplug x3, notes).
 #
 # Die Kette ist dieselbe wie bei tools/module/paket.sh, nur ohne Kern:
 #
@@ -68,9 +68,15 @@ echo "== die Programme =="
 elf kernel/user/wmplug.fi   pakete/wmplug-werkzeug wmplug
 elf kernel/user/pluguhr.fi  pakete/wmplug-uhr      pluguhr
 elf kernel/user/plugregel.fi pakete/wmplug-regel   plugregel
+elf kernel/user/notes.fi    pakete/notes           notes
+# every package carries an action manifest (docs/ACTION-BUS.md, section 3)
+for d in pakete/*/; do
+    [ -f "$d/ACTIONS" ] || continue
+    python3 tools/actionbus/manifest.py check "$d/ACTIONS" | sed 's/^/   /' || exit 1
+done
 
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else

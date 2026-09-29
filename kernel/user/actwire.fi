@@ -1,0 +1,576 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/actwire.fi -- THE WIRE OF THE ACTION BUS (orient-bus).
+//
+// What the three programs of the action bus share: `orientbus` (the
+// broker), `act` (the client every caller uses -- shell, scripts, voice,
+// Jarvis) and every app that PROVIDES actions (`notes` is the example).
+// The concept is docs/ACTION-BUS.md; this file is its section 4 in code.
+//
+// WHY A FRAME PROTOCOL ON TOP OF THE KERNEL BUS AND NOT A NEW SYSCALL.
+// The kernel bus (kernel/bus/bus.fi, docs/SYSTEMBUS.md) already has what
+// the action bus must not do without: named services, a sender pid/uid
+// that the KERNEL stamps into every message, and a per-service access
+// rule checked before delivery. What it does not have is room: a message
+// carries 64 octets in place. A call with a sentence as its argument,
+// and certainly the machine-readable catalogue, is bigger. So a message
+// of the action bus is a sequence of 64-octet FRAMES:
+//
+//     0      magic 0xA7
+//     1      kind   1 = request, 2 = reply, 3 = event
+//     2      flags  1 = first frame, 2 = last frame
+//     3      n      payload octets in this frame (0..56)
+//     4..7   id     the request id (the reply carries the same)
+//     8..63  payload
+//
+// The payload of a whole message is TEXT, one item per line:
+//
+//     call notes.add          <- verb and target
+//     @client=jarvis          <- meta lines start with '@'
+//     @dry=1
+//     text=hello world        <- arguments, key=value
+//
+// Text and not a binary layout because the same lines are what a human
+// sees in `act`, what the audit log stores and what a language model
+// reads -- one format, three readers, no translation step to get wrong.
+//
+// THE KERNEL POOL IS SMALL (128 messages for the whole machine), so a
+// sender that meets a full pool yields and tries again instead of
+// dropping a frame of the middle of a message.
+
+profile kernel
+
+import ulib
+import libc.io
+
+export {
+    FR_BYTES, FR_PAY, K_REQ, K_REP, K_EVT, NONE, ASM_MAX,
+    A_ANY, A_SAMEUID, A_ROOT,
+    ld8, st8, ld32, st32, ld64, st64, slen, ticks, yield_now, rnd,
+    out, outn, outnum, eout,
+    bus_reg, bus_find, bus_recv, bus_sub, send_msg, pub_msg,
+    asm_feed, asm_buf, asm_len, asm_pid, asm_uid, asm_id, asm_kind,
+    asm_free, asm_over,
+    line_end, starts, kv_find, word_copy, is_meta, str_eq, name_of,
+    ob_reset, ob_str, ob_n, ob_num, ob_ch, ob_ptr, ob_len, ob_json,
+    ob_line, append_file
+}
+
+const SYS_BUS: u64 = 1960
+const OP_REG: u64 = 1
+const OP_FIND: u64 = 2
+const OP_SEND: u64 = 3
+const OP_RECV: u64 = 4
+const OP_SUB: u64 = 5
+const OP_PUB: u64 = 6
+
+const A_ANY: u64 = 0
+const A_SAMEUID: u64 = 1
+const A_ROOT: u64 = 2
+
+const ERR_FULL: u64 = 0xFFFFFFFFFFFFFFFF // -1, the message pool is full
+
+const MAGIC: u64 = 0xA7
+const FR_BYTES: u64 = 64
+const FR_HEAD: u64 = 8
+const FR_PAY: u64 = 56
+const K_REQ: u64 = 1
+const K_REP: u64 = 2
+const K_EVT: u64 = 3
+const F_FIRST: u64 = 1
+const F_LAST: u64 = 2
+
+// "no slot", "no index" -- outside every range used here. A sentinel of
+// 0 would collide with service number 0 (see praesenz.fi, KEIN_DIENST).
+const NONE: u64 = 0xFFFFFFFF
+
+// ------------------------------------------------------------ memory
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn ld32(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8) | (ld8(p, i + 2) << 16)
+        | (ld8(p, i + 3) << 24)
+}
+
+fn st32(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+    st8(p, i + 2, v >> 16)
+    st8(p, i + 3, v >> 24)
+}
+
+fn ld64(p: u64, i: u64) -> u64 {
+    return *((p + i) as *mut u64)
+}
+
+fn st64(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u64) = v
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld8(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn yield_now() {
+    ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+}
+
+// Not cryptography: a request id that another process cannot simply
+// count up to. The broker also checks WHO answers (the bound pid), so
+// the id is the second lock, not the only one.
+static mut rnd_state: u64 = 0
+
+fn rnd() -> u64 {
+    if rnd_state == 0 {
+        rnd_state = (ticks() << 20) ^ (ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+            << 8) ^ 0x9E3779B97F4A7C15
+    }
+    var x: u64 = rnd_state
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    rnd_state = x
+    return x
+}
+
+// ------------------------------------------------------------ output
+
+fn out(p: u64) {
+    ulib.say(p)
+}
+
+fn outn(p: u64, n: u64) {
+    ulib.put(p, n)
+}
+
+fn outnum(v: u64) {
+    ulib.sayu(v)
+}
+
+fn eout(p: u64) {
+    ulib.eput(p)
+}
+
+// ------------------------------------------------------------ the bus
+
+fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_BUS, in("rdi") op,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn bus_reg(name: u64, access: u64) -> u64 {
+    return bus5(OP_REG, name, slen(name), access, 0)
+}
+
+fn bus_find(name: u64) -> u64 {
+    return bus5(OP_FIND, name, slen(name), 0, 0)
+}
+
+// One frame (64 octets) into `fr`; `meta` gets six words from the
+// kernel: pid, uid, service, kind, segment, length.
+fn bus_recv(fr: u64, meta: u64) -> u64 {
+    return bus5(OP_RECV, fr, FR_BYTES, meta, 0)
+}
+
+fn bus_sub(svc: u64) -> u64 {
+    return bus5(OP_SUB, svc, 0, 0, 0)
+}
+
+// A whole message as frames. `op` is SEND (to the owner of `svc`) or
+// PUB (to every subscriber of `svc`, which must be ours).
+fn frames(op: u64, svc: u64, kind: u64, id: u64, data: u64,
+    len: u64) -> u64 {
+    var fr: [u8; 64] = [0 as u8; 64]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    var off: u64 = 0
+    var first: bool = true
+    while first || off < len {
+        var n: u64 = len - off
+        if n > FR_PAY {
+            n = FR_PAY
+        }
+        var i: u64 = 0
+        while i < FR_BYTES {
+            st8(fp, i, 0)
+            i = i + 1
+        }
+        var flags: u64 = 0
+        if first {
+            flags = flags | F_FIRST
+        }
+        if off + n >= len {
+            flags = flags | F_LAST
+        }
+        st8(fp, 0, MAGIC)
+        st8(fp, 1, kind)
+        st8(fp, 2, flags)
+        st8(fp, 3, n)
+        st32(fp, 4, id)
+        i = 0
+        while i < n {
+            st8(fp, FR_HEAD + i, ld8(data, off + i))
+            i = i + 1
+        }
+        var tries: u64 = 0
+        var r: u64 = bus5(op, svc, fp, FR_BYTES, 0)
+        while r == ERR_FULL && tries < 5000 {
+            yield_now()
+            tries = tries + 1
+            r = bus5(op, svc, fp, FR_BYTES, 0)
+        }
+        if ulib.bad(r) {
+            return r
+        }
+        off = off + n
+        first = false
+    }
+    return 0
+}
+
+fn send_msg(svc: u64, kind: u64, id: u64, data: u64, len: u64) -> u64 {
+    return frames(OP_SEND, svc, kind, id, data, len)
+}
+
+fn pub_msg(svc: u64, kind: u64, id: u64, data: u64, len: u64) -> u64 {
+    return frames(OP_PUB, svc, kind, id, data, len)
+}
+
+// ---------------------------------------------------- reassembly
+//
+// Eight messages can be in flight towards one process at the same time,
+// keyed by (sender pid, id, kind) -- the pid from the kernel, so one
+// sender cannot finish or poison another sender's message.
+const ASM_SLOTS: u64 = 8
+const ASM_BYTES: u64 = 2048
+const ASM_MAX: u64 = 2047 // one octet stays for the terminating zero
+const M_USED: u64 = 0
+const M_PID: u64 = 8
+const M_ID: u64 = 16
+const M_KIND: u64 = 24
+const M_UID: u64 = 32
+const M_LEN: u64 = 40
+const M_OVER: u64 = 48
+const M_T0: u64 = 56
+
+static mut asm_meta: [u8; 512] = [0 as u8; 512]
+static mut asm_mem: [u8; 16384] = [0 as u8; 16384]
+
+fn am(s: u64) -> u64 {
+    return (&asm_meta[0 as usize]) as u64 + s * 64
+}
+
+fn asm_buf(s: u64) -> u64 {
+    return (&asm_mem[0 as usize]) as u64 + s * ASM_BYTES
+}
+
+fn asm_len(s: u64) -> u64 {
+    return ld64(am(s), M_LEN)
+}
+
+fn asm_pid(s: u64) -> u64 {
+    return ld64(am(s), M_PID)
+}
+
+fn asm_uid(s: u64) -> u64 {
+    return ld64(am(s), M_UID)
+}
+
+fn asm_id(s: u64) -> u64 {
+    return ld64(am(s), M_ID)
+}
+
+fn asm_kind(s: u64) -> u64 {
+    return ld64(am(s), M_KIND)
+}
+
+fn asm_over(s: u64) -> bool {
+    return ld64(am(s), M_OVER) != 0
+}
+
+fn asm_free(s: u64) {
+    st64(am(s), M_USED, 0)
+}
+
+// Feed one received frame. Returns the slot of a COMPLETE message, or
+// NONE. The message in the slot is zero-terminated.
+fn asm_feed(fr: u64, meta: u64) -> u64 {
+    if ld8(fr, 0) != MAGIC {
+        return NONE
+    }
+    let kind: u64 = ld8(fr, 1)
+    let flags: u64 = ld8(fr, 2)
+    let n: u64 = ld8(fr, 3)
+    if n > FR_PAY {
+        return NONE
+    }
+    let id: u64 = ld32(fr, 4)
+    let pid: u64 = ld64(meta, 0)
+    var s: u64 = NONE
+    var i: u64 = 0
+    while i < ASM_SLOTS {
+        let m: u64 = am(i)
+        if ld64(m, M_USED) != 0 && ld64(m, M_PID) == pid
+            && ld64(m, M_ID) == id && ld64(m, M_KIND) == kind {
+            s = i
+        }
+        i = i + 1
+    }
+    if (flags & F_FIRST) != 0 {
+        if s == NONE {
+            // a free slot, or else the oldest one
+            var oldest: u64 = 0
+            i = 0
+            while i < ASM_SLOTS {
+                if ld64(am(i), M_USED) == 0 && s == NONE {
+                    s = i
+                }
+                if ld64(am(i), M_T0) < ld64(am(oldest), M_T0) {
+                    oldest = i
+                }
+                i = i + 1
+            }
+            if s == NONE {
+                s = oldest
+            }
+        }
+        let m2: u64 = am(s)
+        st64(m2, M_USED, 1)
+        st64(m2, M_PID, pid)
+        st64(m2, M_ID, id)
+        st64(m2, M_KIND, kind)
+        st64(m2, M_UID, ld64(meta, 8))
+        st64(m2, M_LEN, 0)
+        st64(m2, M_OVER, 0)
+        st64(m2, M_T0, ticks())
+    } else {
+        if s == NONE {
+            return NONE // a middle frame without a beginning
+        }
+    }
+    let m3: u64 = am(s)
+    var len: u64 = ld64(m3, M_LEN)
+    let b: u64 = asm_buf(s)
+    i = 0
+    while i < n {
+        if len < ASM_MAX {
+            st8(b, len, ld8(fr, FR_HEAD + i))
+            len = len + 1
+        } else {
+            st64(m3, M_OVER, 1)
+        }
+        i = i + 1
+    }
+    st8(b, len, 0)
+    st64(m3, M_LEN, len)
+    if (flags & F_LAST) != 0 {
+        return s
+    }
+    return NONE
+}
+
+// ---------------------------------------------------------- text
+
+// Where the line that starts at `at` ends (the '\n' or the zero).
+fn line_end(p: u64, at: u64) -> u64 {
+    var i: u64 = at
+    while ld8(p, i) != 0 && ld8(p, i) != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+// Does `p` start with the zero-terminated `q`?
+fn starts(p: u64, q: u64) -> bool {
+    var i: u64 = 0
+    while ld8(q, i) != 0 {
+        if ld8(p, i) != ld8(q, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn str_eq(a: u64, b: u64) -> bool {
+    return ulib.streq(a, b)
+}
+
+// The word at `at` (up to a space, newline or zero) into `out`; returns
+// where it ended. Leading spaces are skipped.
+fn word_copy(p: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while ld8(p, i) == 32 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while ld8(p, i) != 0 && ld8(p, i) != 32 && ld8(p, i) != 10 {
+        if n + 1 < max {
+            st8(out, n, ld8(p, i))
+            n = n + 1
+        }
+        i = i + 1
+    }
+    st8(out, n, 0)
+    return i
+}
+
+fn is_meta(p: u64, at: u64) -> bool {
+    return ld8(p, at) == 64 // '@'
+}
+
+// The value of the line `key=value` (key given WITH a leading '@' for
+// meta lines) into `out`. The first line (the verb) is never a match.
+fn kv_find(msg: u64, key: u64, out: u64, max: u64) -> bool {
+    let kl: u64 = slen(key)
+    var at: u64 = line_end(msg, 0)
+    while ld8(msg, at) == 10 {
+        at = at + 1
+        let e: u64 = line_end(msg, at)
+        var hit: bool = e - at > kl && ld8(msg, at + kl) == 61
+        var i: u64 = 0
+        while hit && i < kl {
+            if ld8(msg, at + i) != ld8(key, i) {
+                hit = false
+            }
+            i = i + 1
+        }
+        if hit {
+            var n: u64 = 0
+            var j: u64 = at + kl + 1
+            while j < e && n + 1 < max {
+                st8(out, n, ld8(msg, j))
+                n = n + 1
+                j = j + 1
+            }
+            st8(out, n, 0)
+            return true
+        }
+        at = e
+    }
+    st8(out, 0, 0)
+    return false
+}
+
+// The name of a service for a pid: "r.<pid>" -- the reply box of a
+// client. The broker DERIVES it from the kernel-stamped pid, so a client
+// cannot direct replies anywhere else.
+fn name_of(prefix: u64, v: u64, out: u64) {
+    let pl: u64 = slen(prefix)
+    var i: u64 = 0
+    while i < pl {
+        st8(out, i, ld8(prefix, i))
+        i = i + 1
+    }
+    var d: [u8; 24] = [0 as u8; 24]
+    let dp: u64 = (&d[0 as usize]) as u64
+    let n: u64 = ulib.digits(v, dp)
+    var k: u64 = 0
+    while k < n {
+        st8(out, i + k, ld8(dp, k))
+        k = k + 1
+    }
+    st8(out, i + n, 0)
+}
+
+// ------------------------------------------------ the output builder
+//
+// One buffer per process, big enough for the catalogue in JSON.
+const OB_MAX: u64 = 16383
+static mut ob_mem: [u8; 16384] = [0 as u8; 16384]
+static mut ob_at: u64 = 0
+
+fn ob_ptr() -> u64 {
+    return (&ob_mem[0 as usize]) as u64
+}
+
+fn ob_len() -> u64 {
+    return ob_at
+}
+
+fn ob_reset() {
+    ob_at = 0
+    st8(ob_ptr(), 0, 0)
+}
+
+fn ob_ch(c: u64) {
+    if ob_at < OB_MAX {
+        st8(ob_ptr(), ob_at, c)
+        ob_at = ob_at + 1
+        st8(ob_ptr(), ob_at, 0)
+    }
+}
+
+fn ob_n(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        ob_ch(ld8(p, i))
+        i = i + 1
+    }
+}
+
+fn ob_str(p: u64) {
+    ob_n(p, slen(p))
+}
+
+fn ob_line(p: u64) {
+    ob_str(p)
+    ob_ch(10)
+}
+
+fn ob_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let dp: u64 = (&d[0 as usize]) as u64
+    let n: u64 = ulib.digits(v, dp)
+    ob_n(dp, n)
+}
+
+// A JSON string, quotes included. Control characters become spaces:
+// nothing in a manifest needs them, and a model must never see a raw one.
+fn ob_json(p: u64) {
+    ob_ch(34)
+    var i: u64 = 0
+    while ld8(p, i) != 0 {
+        let c: u64 = ld8(p, i)
+        if c == 34 || c == 92 {
+            ob_ch(92)
+            ob_ch(c)
+        } else {
+            if c < 32 {
+                ob_ch(32)
+            } else {
+                ob_ch(c)
+            }
+        }
+        i = i + 1
+    }
+    ob_ch(34)
+}
+
+// ------------------------------------------------------------ files
+
+// Append `n` octets to a file (created if missing). The audit log.
+fn append_file(path: u64, p: u64, n: u64) -> u64 {
+    // O_WRONLY | O_CREAT | O_APPEND
+    let fd: u64 = io.open(path, 1 | 64 | 1024)
+    if ulib.bad(fd) {
+        return fd
+    }
+    let r: u64 = io.write_all(fd, p, n)
+    io.close(fd)
+    return r
+}

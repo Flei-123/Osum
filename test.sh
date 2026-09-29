@@ -1657,6 +1657,14 @@ lauf "51. der echte Standby: S3 schlafen und aufwachen, Geraete und Speicher dan
 lauf "52. der Anmeldeschirm, wie Justin ihn bedient: eine Taste ein Zeichen, Tab-Kette, blinkende Marke, das Auge, Maus auf USB und PS/2 (tools/loginui/run.sh, Runde LOGIN-2)" \
      tools/loginui/run.sh loginui '^LOGINUI: |^== |^  OK    (xhci\.fi|XUSB2PR|kbd\.irq|the icon font|glogin\.fi|lock\.fi|the login screen|the USB mouse|one password|visible fields|the focus starts|caret phase|and it alternates|Tab chain|Tab: button|the password field has|a MOUSE click|a second click|BILD|the name field|name typed|GEGENPROBE|four PS/2|clock, network|a click on the|a second click closes)'
 
+# 53. THE ACTION BUS (docs/ACTION-BUS.md): apps declare actions in a
+# manifest, one broker (/bin/orientbus) checks types and rights for every
+# caller alike, critical actions always need the user, changes are
+# logged before they happen and can be undone -- and Jarvis reaches it
+# only through the bridge and the same client (/bin/act).
+lauf "53. the action bus: manifests, one broker for every caller, rights, dry run, undo, audit, Jarvis through the bridge (tools/actionbus/run.sh, round ACTION-BUS)" \
+     tools/actionbus/run.sh actionbus '^ACTIONBUS: |^ACTIONBUS-LATENCY |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
