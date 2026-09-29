@@ -17,18 +17,34 @@
 //     socfleitec v1 search <text>
 //     socfleitec v1 relation <request|accept|decline|withdraw|remove> <id>
 //     socfleitec v1 presence <online|away|dnd|invisible> [text ...]
-//     socfleitec v1 activity [name ...]          (no name = clear)
+//     socfleitec v1 activity [-j] [name ...]     (no name = clear; -j: friends may join)
 //     socfleitec v1 alive
+//     socfleitec v1 login [token <fkz1...>]      (pair this device, see LOGIN)
+//     socfleitec v1 send <id> <text ...>         (end to end, see CHAT)
+//     socfleitec v1 inbox                        (what came since the last call)
+//     socfleitec v1 invite <id> <invite|join> <target|-> <name ...>
+//     socfleitec v1 invites
+//     socfleitec v1 answer <invite id> <yes|no> [target]
+//
+// The service passes `-c<conf>` (one word) right after `v1` when /etc/social/
+// providers names a configuration -- ONE line there is ONE ACCOUNT, so two
+// Fleitec accounts are two lines with two files; nothing in here assumes
+// there is only one.
 //
 // Output, one item per line, fields separated by TAB:
 //
 //     provider fleitec 1                          (hello)
 //     caps contacts search relation presence activity alive
-//     c <id> <relation> <presence> <name> <handle> <status text> <activity> <since_s> <chat>
+//     c <id> <relation> <presence> <name> <handle> <status text> <activity> <since_s> <chat> <joinable 0|1>
+//     m <id> <unix time> <in|out> <text>          (inbox)
+//     i <invite id> <id> <in|out> <invite|join> <open|accepted|declined> <age_s> <target> <name>
+//     pair <code> <valid_s>                       (login: type the code into the account)
+//     account <id> <name>                         (login done / hello)
 //     ok <n>             the last line when it worked
 //     err <code> <text>  the last line when not; code = offline | denied | bad | http
 //
-// Exit code: 0 ok, 1 err, 2 offline, 3 denied. relation is
+// Exit code: 0 ok, 1 err, 2 offline, 3 denied, 4 pending (login shows a
+// code to type in). relation is
 // friend|incoming|outgoing|blocked|none, presence online|away|dnd|
 // offline|unknown -- social v1's words (FirnChat src/social/fleitec.fi
 // says the same for the web page).
@@ -39,6 +55,27 @@
 //     name=chat.fleitec.com         what the certificate must carry (SNI)
 //     roots=/etc/ssl/roots.pem      the trust store
 //     token=fkz1.<uid>.<64 hex>     the device access token
+//     relay=<ipv4>:<port>           the FirnChat relay (chat and pairing)
+//
+// Next to it, named after it: <conf>.key (this device's x25519 key, 0600),
+// <conf>.pin (the relay's key, pinned on first use), <conf>.seq (the next
+// sequence number -- spent BEFORE a frame goes out, a nonce is never used
+// twice), <conf>.seen (the replay window per sender).
+//
+// LOGIN. `login` makes the device key if there is none and asks the relay
+// ("zugang=1"). Not paired yet: the address book answers with an eight
+// digit code, printed as `pair`, exit 4 -- the person types it into her
+// profile ("Gerät hinzufügen"). Asked again after that, the answer carries
+// a device access token made FOR THIS KEY; it is written into the
+// configuration and `account` is printed. `login token <fkz1...>` takes a
+// token made by hand in the profile instead (no chat then until paired).
+//
+// CHAT. A message is sealed for every device of the person (their keys
+// come with the book, only where she may be written to) and as an
+// own-device copy for this account's other devices, so the browser shows
+// what was written here. `inbox` fetches the own box from the relay and
+// opens what it can: from a person in the book an `in` line, an own
+// device's copy an `out` line; read marks and strangers are dropped.
 //
 // NO FLOATING POINT anywhere (kernel/app/kjson.fi says why: ring 3 has
 // no SSE here), NO COOKIES (kernel/app/knetz.fi says why).
@@ -46,8 +83,10 @@
 import std.io
 import std.rt
 import std.str
+import std.net
 import knetz
 import kjson
+import fcrelay
 
 const S_READ: i64 = 0
 const S_WRITE: i64 = 1
@@ -151,6 +190,7 @@ struct Conf {
     name: rt.Buf,
     roots: rt.Buf,
     token: rt.Buf,
+    relay: rt.Buf,
 }
 
 // "key=value" lines; every value gets a terminating zero (knetz wants
@@ -193,6 +233,7 @@ fn conf_read(c: *mut Conf) -> bool {
     conf_value(f.ptr, f.len, "name", &(*c).name)
     conf_value(f.ptr, f.len, "roots", &(*c).roots)
     conf_value(f.ptr, f.len, "token", &(*c).token)
+    conf_value(f.ptr, f.len, "relay", &(*c).relay)
     rt.buf_free(&f)
     if (*c).roots.len <= 1 {
         rt.buf_clear(&(*c).roots)
@@ -378,6 +419,12 @@ fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
         txt(d, it, "fc", &v)
     }
     field(b, v.ptr, v.len)
+    var ko: [u8; 6] = "offen\0"
+    if ak != kjson.JSON_NONE && kjson.is_true(d, ak, (&ko[0]) as u64) {
+        fields(b, "1")
+    } else {
+        fields(b, "0")
+    }
     rt.buf_push(b, 10 as u8)
     rt.buf_free(&v)
 }
@@ -535,12 +582,15 @@ fn v_presence(c: *mut Conf, state: u64, text: *mut rt.Buf) -> i32 {
     return r
 }
 
-fn v_activity(c: *mut Conf, name: *mut rt.Buf) -> i32 {
+fn v_activity(c: *mut Conf, name: *mut rt.Buf, join: bool) -> i32 {
     var body: rt.Buf = rt.buf_new()
     var w: kjson.Schreiber = kjson.writer_new(&body)
     var k: [u8; 6] = "spiel\0"
     kjson.field(&w, (&k[0]) as u64, (*name).ptr, (*name).len)
     kjson.field_free(&w)
+    if join && (*name).len > 0 {
+        raw_bool(&body, "offen", true)
+    }
     let r: i32 = post(c, "/api/kontakte/aktivitaet", &body)
     rt.buf_free(&body)
     return r
@@ -574,19 +624,33 @@ fn main(start: u64) -> i32 {
         g_conf = rt.arg_ptr(start, 3)
         g_shift = 2
         n = n - 2
+    } else if n >= 3 && eqn(rt.arg_ptr(start, 2), 2, "-c")
+        && rt.c_length(rt.arg_ptr(start, 2)) > 2 {
+        // "-c<conf>" in one word -- what the service passes (exec takes 8)
+        g_conf = rt.arg_ptr(start, 2) + 2
+        g_shift = 1
+        n = n - 1
     }
     if n < 3 || !eqc(arg(1), "v1") {
         return fin(1, "bad", "usage: socfleitec v1 <hello|contacts|search|relation|presence|activity|alive> ...")
     }
     let verb: u64 = arg(2)
+    var c: Conf = Conf { url: rt.buf_new(), name: rt.buf_new(),
+        roots: rt.buf_new(), token: rt.buf_new(), relay: rt.buf_new() }
+    let have: bool = conf_read(&c)
     if eqc(verb, "hello") {
-        outs("provider\tfleitec\t1\ncaps\tcontacts search relation presence activity alive\n")
+        outs("provider\tfleitec\t1\ncaps\tcontacts search relation presence activity alive login send inbox invite invites answer join\n")
+        account_line(&c)
         return fin(0, "", "")
     }
-    var c: Conf = Conf { url: rt.buf_new(), name: rt.buf_new(),
-        roots: rt.buf_new(), token: rt.buf_new() }
-    if !conf_read(&c) {
-        return fin(3, "denied", "no /etc/social/fleitec.conf with url= and token=")
+    if eqc(verb, "login") {
+        if n >= 5 && eqc(arg(3), "token") {
+            return v_login_token(&c, arg(4))
+        }
+        return v_login(&c)
+    }
+    if !have {
+        return fin(3, "denied", "no configuration with url= and token= (login first)")
     }
     var dummy: rt.Buf = rt.buf_new()
     if eqc(verb, "contacts") {
@@ -607,11 +671,1028 @@ fn main(start: u64) -> i32 {
     }
     if eqc(verb, "activity") {
         var a: rt.Buf = rt.buf_new()
+        if n >= 4 && eqc(arg(3), "-j") {
+            rest_of(&dummy, n, 4, &a)
+            return v_activity(&c, &a, true)
+        }
         rest_of(&dummy, n, 3, &a)
-        return v_activity(&c, &a)
+        return v_activity(&c, &a, false)
+    }
+    if eqc(verb, "send") && n >= 5 {
+        var t: rt.Buf = rt.buf_new()
+        rest_of(&dummy, n, 4, &t)
+        return v_send(&c, arg(3), &t)
+    }
+    if eqc(verb, "inbox") {
+        return v_inbox(&c)
+    }
+    if eqc(verb, "invite") && n >= 7 {
+        var nm: rt.Buf = rt.buf_new()
+        rest_of(&dummy, n, 6, &nm)
+        return v_invite(&c, arg(3), arg(4), arg(5), &nm)
+    }
+    if eqc(verb, "invites") {
+        return v_invites(&c)
+    }
+    if eqc(verb, "answer") && n >= 5 {
+        var tg: u64 = 0
+        if n >= 6 {
+            tg = arg(5)
+        }
+        return v_answer(&c, arg(3), arg(4), tg)
     }
     if eqc(verb, "alive") {
         return v_alive(&c)
     }
     return fin(1, "bad", "unknown verb")
+}
+
+// ================================================================ LOGIN,
+// CHAT AND INVITES (Fleitec All-in-One r35/r36; docs/SOCIAL.md)
+
+// `,"key":true` into a JSON object that is already closed
+fn raw_bool(b: *mut rt.Buf, key: str, v: bool) {
+    if (*b).len > 0 && rt.ld8((*b).ptr, (*b).len - 1) == 125 as u8 {
+        (*b).len = (*b).len - 1
+    }
+    if (*b).len > 1 {
+        rt.buf_push(b, 44 as u8)
+    }
+    rt.buf_push(b, 34 as u8)
+    rt.buf_push_bytes(b, key.p as u64, key.n)
+    rt.buf_push_bytes(b, "\":".p as u64, 2)
+    if v {
+        rt.buf_push_bytes(b, "true".p as u64, 4)
+    } else {
+        rt.buf_push_bytes(b, "false".p as u64, 5)
+    }
+    rt.buf_push(b, 125 as u8)
+}
+
+// the configuration's path (C string)
+fn conf_path() -> u64 {
+    if g_conf != 0 {
+        return g_conf
+    }
+    return "/etc/social/fleitec.conf\0".p as u64
+}
+
+// "<conf><suffix>\0" into b
+fn side(b: *mut rt.Buf, suffix: str) {
+    rt.buf_clear(b)
+    let p: u64 = conf_path()
+    rt.buf_push_bytes(b, p, rt.c_length(p))
+    rt.buf_push_bytes(b, suffix.p as u64, suffix.n)
+    rt.buf_push(b, 0 as u8)
+}
+
+fn write_all_file(path: u64, p: u64, n: usize) -> bool {
+    // O_WRONLY | O_CREAT | O_TRUNC, 0600
+    let fd: i64 = syscall(S_OPEN, path as i64, 1 | 64 | 512, 384, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var at: usize = 0
+    while at < n {
+        let w: i64 = syscall(S_WRITE, fd, (p + at as u64) as i64, (n - at) as i64, 0, 0, 0)
+        if w <= 0 {
+            syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+            return false
+        }
+        at = at + w as usize
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+// the configuration with `key=value` set (the line replaced or added)
+fn conf_set(key: str, v: u64, vn: usize) -> bool {
+    var f: rt.Buf = rt.buf_new()
+    let _r: bool = read_file(conf_path(), &f)
+    var o: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    var put: bool = false
+    while i < f.len {
+        var e: usize = i
+        while e < f.len && rt.ld8(f.ptr, e) != 10 as u8 {
+            e = e + 1
+        }
+        let ln: usize = e - i
+        if ln > key.n && rt.ld8(f.ptr, i + key.n) == 61 as u8
+            && eqn(f.ptr + i as u64, key.n, key) {
+            if !put {
+                rt.buf_push_bytes(&o, key.p as u64, key.n)
+                rt.buf_push(&o, 61 as u8)
+                rt.buf_push_bytes(&o, v, vn)
+                rt.buf_push(&o, 10 as u8)
+                put = true
+            }
+        } else if ln > 0 {
+            rt.buf_push_bytes(&o, f.ptr + i as u64, ln)
+            rt.buf_push(&o, 10 as u8)
+        }
+        i = e + 1
+    }
+    if !put {
+        rt.buf_push_bytes(&o, key.p as u64, key.n)
+        rt.buf_push(&o, 61 as u8)
+        rt.buf_push_bytes(&o, v, vn)
+        rt.buf_push(&o, 10 as u8)
+    }
+    let ok: bool = write_all_file(conf_path(), o.ptr, o.len)
+    rt.buf_free(&f)
+    rt.buf_free(&o)
+    return ok
+}
+
+// "account <uid>" out of the token's middle part (no network)
+fn account_line(c: *mut Conf) {
+    let tp: u64 = (*c).token.ptr
+    let tn: usize = (*c).token.len
+    if tn < 6 + 64 + 2 || !eqn(tp, 5, "fkz1.") {
+        return
+    }
+    let un: usize = tn - 1 - 5 - 1 - 64
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, "account\t".p as u64, 8)
+    rt.buf_push_bytes(&b, tp + 5, un)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    rt.buf_free(&b)
+}
+
+fn digits_at(p: u64, n: usize, at: *mut usize) -> u64 {
+    var v: u64 = 0
+    while *at < n {
+        let ch: u8 = rt.ld8(p, *at)
+        if ch < 48 as u8 || ch > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (ch - 48 as u8) as u64
+        *at = *at + 1
+    }
+    return v
+}
+
+// relay=a.b.c.d:port
+fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
+    let p: u64 = (*c).relay.ptr
+    if (*c).relay.len <= 1 {
+        return false
+    }
+    let n: usize = (*c).relay.len - 1
+    var at: usize = 0
+    var a: u64 = 0
+    var k: usize = 0
+    while k < 4 {
+        let v: u64 = digits_at(p, n, &at)
+        if v > 255 {
+            return false
+        }
+        a = (a << 8) | v
+        if k < 3 {
+            if at >= n || rt.ld8(p, at) != 46 as u8 {
+                return false
+            }
+            at = at + 1
+        }
+        k = k + 1
+    }
+    if at >= n || rt.ld8(p, at) != 58 as u8 {
+        return false
+    }
+    at = at + 1
+    let pt: u64 = digits_at(p, n, &at)
+    if pt == 0 || pt > 65535 {
+        return false
+    }
+    *addr = net.ipv4(((a >> 24) & 255) as u8, ((a >> 16) & 255) as u8,
+        ((a >> 8) & 255) as u8, (a & 255) as u8)
+    *port = pt as u16
+    return true
+}
+
+// the device key (secret || public), made on first use
+fn device_key(k64: u64) -> bool {
+    var kp: rt.Buf = rt.buf_new()
+    side(&kp, ".key")
+    let ok: bool = fcrelay.key_load_or_create(kp.ptr, k64)
+    rt.buf_free(&kp)
+    return ok
+}
+
+// Connects to the relay with the device key; the relay's key is pinned on
+// first use. 0 open, else the exit code to give (2 offline, 1 other).
+fn relay_up(c: *mut Conf, r: *mut fcrelay.Relay) -> i32 {
+    var addr: u32 = 0
+    var port: u16 = 0
+    if !relay_addr(c, &addr, &port) {
+        return fin(1, "bad", "no relay=<ipv4>:<port> in the configuration")
+    }
+    var pp: rt.Buf = rt.buf_new()
+    side(&pp, ".pin")
+    var pf: rt.Buf = rt.buf_new()
+    var pin: [u8; 32] = [0; 32]
+    var pinned: bool = false
+    if read_file(pp.ptr, &pf) && pf.len >= 64
+        && fcrelay.hex_decode(pf.ptr, 64, (&pin[0]) as u64) {
+        pinned = true
+    }
+    var pinp: u64 = 0
+    if pinned {
+        pinp = (&pin[0]) as u64
+    }
+    let r0: i32 = fcrelay.relay_open(r, addr, port, pinp)
+    if r0 == -1 {
+        rt.buf_free(&pp)
+        return fin(2, "offline", "the relay is not reachable")
+    }
+    if r0 == -3 {
+        rt.buf_free(&pp)
+        return fin(3, "denied", "the relay has another key than the pinned one (<conf>.pin)")
+    }
+    if r0 != 0 {
+        rt.buf_free(&pp)
+        return fin(1, "http", "the relay refused the handshake")
+    }
+    if !pinned {
+        var hx: [u8; 65] = [0; 65]
+        fcrelay.hex_encode(fcrelay.relay_srv(r), 32, (&hx[0]) as u64)
+        hx[64] = 10 as u8
+        let _w: bool = write_all_file(pp.ptr, (&hx[0]) as u64, 65)
+    }
+    rt.buf_free(&pp)
+    rt.buf_free(&pf)
+    return 0
+}
+
+fn v_login_token(c: *mut Conf, tok: u64) -> i32 {
+    let n: usize = rt.c_length(tok)
+    if n < 6 + 64 + 1 || !eqn(tok, 5, "fkz1.") {
+        return fin(1, "bad", "a token looks like fkz1.<account>.<64 hex>")
+    }
+    if !conf_set("token", tok, n) {
+        return fin(1, "bad", "the configuration could not be written")
+    }
+    rt.buf_clear(&(*c).token)
+    rt.buf_push_bytes(&(*c).token, tok, n)
+    rt.buf_push(&(*c).token, 0 as u8)
+    account_line(c)
+    return fin(0, "", "")
+}
+
+fn v_login(c: *mut Conf) -> i32 {
+    var key: [u8; 64] = [0; 64]
+    if !device_key((&key[0]) as u64) {
+        return fin(1, "bad", "no device key (<conf>.key): no randomness or no file")
+    }
+    var r: fcrelay.Relay = fcrelay.relay_new((&key[0]) as u64)
+    let up: i32 = relay_up(c, &r)
+    if up != 0 {
+        return up
+    }
+    var ans: rt.Buf = rt.buf_new()
+    let asked: bool = fcrelay.relay_dir(&r, "zugang=1".p as u64, 8, &ans)
+    fcrelay.relay_close(&r)
+    if !asked {
+        return fin(2, "offline", "the relay has no address book behind it")
+    }
+    var d: kjson.Json = kjson.json_new()
+    if !kjson.json_parse(&d, ans.ptr, ans.len) {
+        return fin(1, "bad", "the answer is not JSON")
+    }
+    let root: u32 = kjson.json_root(&d)
+    var kg: [u8; 10] = "gekoppelt\0"
+    var v: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    if kjson.is_true(&d, root, (&kg[0]) as u64) {
+        txt(&d, root, "token", &v)
+        if v.len < 70 || !conf_set("token", v.ptr, v.len) {
+            return fin(1, "bad", "no token in the answer, or the configuration is not writable")
+        }
+        rt.buf_push_bytes(&b, "account\t".p as u64, 8)
+        txt(&d, root, "konto", &v)
+        rt.buf_push_bytes(&b, v.ptr, v.len)
+        rt.buf_push(&b, 9 as u8)
+        txt(&d, root, "name", &v)
+        field2(&b, v.ptr, v.len)
+        rt.buf_push(&b, 10 as u8)
+        outb(&b)
+        return fin(0, "", "")
+    }
+    txt(&d, root, "code", &v)
+    if v.len != 8 {
+        return fin(1, "bad", "neither a token nor a pairing code came back")
+    }
+    rt.buf_push_bytes(&b, "pair\t".p as u64, 5)
+    rt.buf_push_bytes(&b, v.ptr, 4)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_bytes(&b, v.ptr + 4, 4)
+    rt.buf_push(&b, 9 as u8)
+    var da: bool = false
+    var kgl: [u8; 8] = "gueltig\0"
+    var secs: i64 = kjson.int(&d, root, (&kgl[0]) as u64, &da)
+    if secs < 0 {
+        secs = 0
+    }
+    rt.buf_push_dec_u64(&b, secs as u64)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    return fin(4, "pending", "type the code into the profile: Gerät hinzufügen")
+}
+
+// a field without the leading TAB
+fn field2(b: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        var ch: u8 = rt.ld8(p, i)
+        if ch == 9 as u8 || ch == 10 as u8 || ch == 13 as u8 {
+            ch = 32 as u8
+        }
+        rt.buf_push(b, ch)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------- whose key is whose
+
+const KEYS_MAX: usize = 256
+
+// Every FirnChat key the book shows (the devices of the people) with the
+// account it belongs to; and the own account's keys out of the profile.
+struct Keys {
+    k: rt.Buf, // 32 octets each
+    who: rt.Buf, // the account, zero-terminated, 96 octets each
+    n: usize,
+    own: rt.Buf, // 32 octets each
+    on: usize,
+    uid: [u8; 96],
+}
+
+fn keys_new() -> Keys {
+    return Keys { k: rt.buf_new(), who: rt.buf_new(), n: 0, own: rt.buf_new(),
+        on: 0, uid: [0; 96] }
+}
+
+fn keys_add(ks: *mut Keys, hex: u64, hn: usize, who: u64, wn: usize) {
+    if hn != 64 || (*ks).n >= KEYS_MAX || wn == 0 || wn > 95 {
+        return
+    }
+    var raw: [u8; 32] = [0; 32]
+    if !fcrelay.hex_decode(hex, 64, (&raw[0]) as u64) {
+        return
+    }
+    rt.buf_push_bytes(&(*ks).k, (&raw[0]) as u64, 32)
+    var w: [u8; 96] = [0; 96]
+    var i: usize = 0
+    while i < wn {
+        w[i] = rt.ld8(who, i)
+        i = i + 1
+    }
+    rt.buf_push_bytes(&(*ks).who, (&w[0]) as u64, 96)
+    (*ks).n = (*ks).n + 1
+}
+
+fn key_eq(a: u64, b: u64) -> bool {
+    var i: usize = 0
+    while i < 32 {
+        if rt.ld8(a, i) != rt.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// the account of key, or 0
+fn keys_who(ks: *mut Keys, key: u64) -> u64 {
+    var i: usize = 0
+    while i < (*ks).n {
+        if key_eq((*ks).k.ptr + (i * 32) as u64, key) {
+            return (*ks).who.ptr + (i * 96) as u64
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn keys_own(ks: *mut Keys, key: u64) -> bool {
+    var i: usize = 0
+    while i < (*ks).on {
+        if key_eq((*ks).own.ptr + (i * 32) as u64, key) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// the devices ("geraete": [{art, wert}]) of a JSON object: fc keys
+// (and fa, the retired ones, when `alt` -- still an address of the person)
+fn each_key(d: *mut kjson.Json, obj: u32, alt: bool, ks: *mut Keys, who: u64,
+    wn: usize, own: bool) {
+    let gs: u32 = sub(d, obj, "geraete")
+    if gs == kjson.JSON_NONE || kjson.json_kind(d, gs) != kjson.JSON_ARRAY {
+        return
+    }
+    var g: u32 = kjson.json_child(d, gs)
+    var art: rt.Buf = rt.buf_new()
+    var w: rt.Buf = rt.buf_new()
+    while g != kjson.JSON_NONE {
+        txt(d, g, "art", &art)
+        txt(d, g, "wert", &w)
+        let fc: bool = eqn(art.ptr, art.len, "fc")
+        if fc || (alt && eqn(art.ptr, art.len, "fa")) {
+            if own {
+                var raw: [u8; 32] = [0; 32]
+                if w.len == 64 && fcrelay.hex_decode(w.ptr, 64, (&raw[0]) as u64)
+                    && fc && (*ks).on < 32 {
+                    rt.buf_push_bytes(&(*ks).own, (&raw[0]) as u64, 32)
+                    (*ks).on = (*ks).on + 1
+                }
+            } else {
+                keys_add(ks, w.ptr, w.len, who, wn)
+            }
+        }
+        g = kjson.json_next(d, g)
+    }
+    rt.buf_free(&art)
+    rt.buf_free(&w)
+}
+
+// The book and the own profile into `ks`. 0, or the exit code given.
+fn keys_load(c: *mut Conf, ks: *mut Keys, alt: bool) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "GET", "/api/kontakte/liste".p as u64, 19, 0, 0, &a)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    var d: kjson.Json = kjson.json_new()
+    if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        knetz.reply_free(&a)
+        return fin(1, "bad", "the book is not JSON")
+    }
+    let items: u32 = sub(&d, kjson.json_root(&d), "items")
+    var who: rt.Buf = rt.buf_new()
+    if items != kjson.JSON_NONE && kjson.json_kind(&d, items) == kjson.JSON_ARRAY {
+        var it: u32 = kjson.json_child(&d, items)
+        while it != kjson.JSON_NONE {
+            txt(&d, it, "konto", &who)
+            if who.len > 0 {
+                each_key(&d, it, alt, ks, who.ptr, who.len, false)
+            }
+            it = kjson.json_next(&d, it)
+        }
+    }
+    kjson.json_free(&d)
+    knetz.reply_free(&a)
+    var a2: knetz.Antw = knetz.reply_new()
+    let r2: i32 = call(c, "GET", "/api/kontakte/profil".p as u64, 20, 0, 0, &a2)
+    if r2 != 0 {
+        let e2: i32 = failed(r2, &a2)
+        knetz.reply_free(&a2)
+        return e2
+    }
+    var d2: kjson.Json = kjson.json_new()
+    if kjson.json_parse(&d2, a2.koerper.ptr, a2.koerper.len) {
+        let pr: u32 = sub(&d2, kjson.json_root(&d2), "profil")
+        each_key(&d2, pr, false, ks, 0, 0, true)
+        txt(&d2, pr, "konto", &who)
+        var i: usize = 0
+        while i < who.len && i < 95 {
+            (*ks).uid[i] = rt.ld8(who.ptr, i)
+            i = i + 1
+        }
+    }
+    kjson.json_free(&d2)
+    knetz.reply_free(&a2)
+    rt.buf_free(&who)
+    return 0
+}
+
+// --------------------------------------------------- sequence numbers
+
+// `k` numbers, spent at once: the file says the next one afterwards.
+// 0 = could not be written (then nothing may be sealed).
+fn seq_take(k: u64) -> u64 {
+    var sp: rt.Buf = rt.buf_new()
+    side(&sp, ".seq")
+    var f: rt.Buf = rt.buf_new()
+    var next: u64 = 1
+    if read_file(sp.ptr, &f) {
+        var at: usize = 0
+        let v: u64 = digits_at(f.ptr, f.len, &at)
+        if v > 0 {
+            next = v
+        }
+    }
+    var o: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&o, next + k)
+    rt.buf_push(&o, 10 as u8)
+    let ok: bool = write_all_file(sp.ptr, o.ptr, o.len)
+    rt.buf_free(&sp)
+    rt.buf_free(&f)
+    rt.buf_free(&o)
+    if !ok {
+        return 0
+    }
+    return next
+}
+
+// ----------------------------------------------------------------- send
+
+fn v_send(c: *mut Conf, id: u64, text: *mut rt.Buf) -> i32 {
+    if (*text).len == 0 || (*text).len > 4000 {
+        return fin(1, "bad", "a message has 1 to 4000 octets")
+    }
+    var ks: Keys = keys_new()
+    let kl: i32 = keys_load(c, &ks, false)
+    if kl != 0 {
+        return kl
+    }
+    let idn: usize = rt.c_length(id)
+    // the person's devices
+    var tg: rt.Buf = rt.buf_new()
+    var tn: usize = 0
+    var i: usize = 0
+    while i < ks.n {
+        let w: u64 = ks.who.ptr + (i * 96) as u64
+        if rt.c_length(w) == idn && rt_eq(w, id, idn) {
+            rt.buf_push_bytes(&tg, ks.k.ptr + (i * 32) as u64, 32)
+            tn = tn + 1
+        }
+        i = i + 1
+    }
+    if tn == 0 {
+        return fin(1, "bad", "this person has no device you may write to")
+    }
+    var key: [u8; 64] = [0; 64]
+    if !device_key((&key[0]) as u64) {
+        return fin(1, "bad", "no device key -- login first")
+    }
+    let mine: u64 = (&key[32]) as u64
+    var own: rt.Buf = rt.buf_new()
+    var on: usize = 0
+    i = 0
+    while i < ks.on {
+        let k: u64 = ks.own.ptr + (i * 32) as u64
+        if !key_eq(k, mine) {
+            rt.buf_push_bytes(&own, k, 32)
+            on = on + 1
+        }
+        i = i + 1
+    }
+    var r: fcrelay.Relay = fcrelay.relay_new((&key[0]) as u64)
+    let up: i32 = relay_up(c, &r)
+    if up != 0 {
+        return up
+    }
+    let first: u64 = seq_take((tn + on) as u64)
+    if first == 0 {
+        fcrelay.relay_close(&r)
+        return fin(1, "bad", "the sequence number could not be kept (<conf>.seq)")
+    }
+    let stamp: u64 = fcrelay.now_unix()
+    var took: u64 = 0
+    i = 0
+    while i < tn {
+        if fcrelay.relay_send(&r, tg.ptr + (i * 32) as u64, first + i as u64, 0 as u8,
+            stamp, (*text).ptr, (*text).len) {
+            took = took + 1
+        }
+        i = i + 1
+    }
+    if took > 0 && on > 0 {
+        var env: rt.Buf = rt.buf_new()
+        rt.buf_reserve(&env, (*text).len + fcrelay.SYNC_HEAD)
+        let en: usize = fcrelay.sync_wrap(tg.ptr, (*text).ptr, (*text).len, env.ptr)
+        var k2: usize = 0
+        while k2 < on {
+            let _s: bool = fcrelay.relay_send(&r, own.ptr + (k2 * 32) as u64,
+                first + (tn + k2) as u64, fcrelay.F_SYNC, stamp, env.ptr, en)
+            k2 = k2 + 1
+        }
+        rt.buf_free(&env)
+    }
+    fcrelay.relay_close(&r)
+    if took == 0 {
+        return fin(2, "offline", "the relay took the message for no device")
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, "sent\t".p as u64, 5)
+    rt.buf_push_dec_u64(&b, took)
+    rt.buf_push(&b, 9 as u8)
+    rt.buf_push_dec_u64(&b, stamp)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    return fin(0, "", "")
+}
+
+fn rt_eq(a: u64, b: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(a, i) != rt.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------ the replay window
+
+const SEEN_MAX: usize = 64
+
+struct Seen {
+    k: [u8; 2048], // SEEN_MAX * 32
+    top: [u64; 64],
+    mask: [u64; 64],
+    n: usize,
+}
+
+fn seen_load(s: *mut Seen) {
+    (*s).n = 0
+    var sp: rt.Buf = rt.buf_new()
+    side(&sp, ".seen")
+    var f: rt.Buf = rt.buf_new()
+    if read_file(sp.ptr, &f) {
+        var i: usize = 0
+        while i + 64 < f.len && (*s).n < SEEN_MAX {
+            if fcrelay.hex_decode(f.ptr + i as u64, 64, (&(*s).k[(*s).n * 32]) as u64) {
+                var at: usize = i + 65
+                let t: u64 = digits_at(f.ptr, f.len, &at)
+                at = at + 1
+                let m: u64 = digits_at(f.ptr, f.len, &at)
+                (*s).top[(*s).n] = t
+                (*s).mask[(*s).n] = m
+                (*s).n = (*s).n + 1
+                i = at
+            }
+            while i < f.len && rt.ld8(f.ptr, i) != 10 as u8 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+    }
+    rt.buf_free(&sp)
+    rt.buf_free(&f)
+}
+
+fn seen_save(s: *mut Seen) {
+    var o: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    while i < (*s).n {
+        var hx: [u8; 64] = [0; 64]
+        fcrelay.hex_encode((&(*s).k[i * 32]) as u64, 32, (&hx[0]) as u64)
+        rt.buf_push_bytes(&o, (&hx[0]) as u64, 64)
+        rt.buf_push(&o, 32 as u8)
+        rt.buf_push_dec_u64(&o, (*s).top[i])
+        rt.buf_push(&o, 32 as u8)
+        rt.buf_push_dec_u64(&o, (*s).mask[i])
+        rt.buf_push(&o, 10 as u8)
+        i = i + 1
+    }
+    var sp: rt.Buf = rt.buf_new()
+    side(&sp, ".seen")
+    let _w: bool = write_all_file(sp.ptr, o.ptr, o.len)
+    rt.buf_free(&sp)
+    rt.buf_free(&o)
+}
+
+// Fresh? Then it is marked. A sender never seen: fresh, and a slot is
+// made for it (the oldest slot goes when all are taken).
+fn seen_take(s: *mut Seen, key: u64, seq: u64) -> bool {
+    var i: usize = 0
+    while i < (*s).n {
+        if key_eq((&(*s).k[i * 32]) as u64, key) {
+            let top: u64 = (*s).top[i]
+            if seq > top {
+                let step: u64 = seq - top
+                if step >= 64 {
+                    (*s).mask[i] = 1
+                } else {
+                    (*s).mask[i] = ((*s).mask[i] << step) | 1
+                }
+                (*s).top[i] = seq
+                return true
+            }
+            let back: u64 = top - seq
+            if back >= 64 || (((*s).mask[i] >> back) & 1) == 1 {
+                return false
+            }
+            (*s).mask[i] = (*s).mask[i] | (1 << back)
+            return true
+        }
+        i = i + 1
+    }
+    var slot: usize = (*s).n
+    if slot >= SEEN_MAX {
+        // the oldest goes: shift everything down by one
+        var j: usize = 0
+        while j + 1 < SEEN_MAX {
+            var q: usize = 0
+            while q < 32 {
+                (*s).k[j * 32 + q] = (*s).k[(j + 1) * 32 + q]
+                q = q + 1
+            }
+            (*s).top[j] = (*s).top[j + 1]
+            (*s).mask[j] = (*s).mask[j + 1]
+            j = j + 1
+        }
+        slot = SEEN_MAX - 1
+    } else {
+        (*s).n = (*s).n + 1
+    }
+    var q2: usize = 0
+    while q2 < 32 {
+        (*s).k[slot * 32 + q2] = rt.ld8(key, q2)
+        q2 = q2 + 1
+    }
+    (*s).top[slot] = seq
+    (*s).mask[slot] = 1
+    return true
+}
+
+// ---------------------------------------------------------------- inbox
+
+fn m_line(b: *mut rt.Buf, who: u64, stamp: u64, dir: str, p: u64, n: usize) {
+    rt.buf_push_bytes(b, "m\t".p as u64, 2)
+    rt.buf_push_bytes(b, who, rt.c_length(who))
+    rt.buf_push(b, 9 as u8)
+    rt.buf_push_dec_u64(b, stamp)
+    rt.buf_push(b, 9 as u8)
+    rt.buf_push_bytes(b, dir.p as u64, dir.n)
+    rt.buf_push(b, 9 as u8)
+    field2(b, p, n)
+    rt.buf_push(b, 10 as u8)
+}
+
+fn v_inbox(c: *mut Conf) -> i32 {
+    var ks: Keys = keys_new()
+    let kl: i32 = keys_load(c, &ks, true)
+    if kl != 0 {
+        return kl
+    }
+    var key: [u8; 64] = [0; 64]
+    if !device_key((&key[0]) as u64) {
+        return fin(1, "bad", "no device key -- login first")
+    }
+    let sec: u64 = (&key[0]) as u64
+    let mine: u64 = (&key[32]) as u64
+    var r: fcrelay.Relay = fcrelay.relay_new(sec)
+    let up: i32 = relay_up(c, &r)
+    if up != 0 {
+        return up
+    }
+    var sn: Seen = Seen { k: [0; 2048], top: [0; 64], mask: [0; 64], n: 0 }
+    seen_load(&sn)
+    var out: rt.Buf = rt.buf_new()
+    var lines: u64 = 0
+    var dropped: u64 = 0
+    var round: usize = 0
+    var more: bool = true
+    while more && round < 8 {
+        var raw: rt.Buf = rt.buf_new()
+        let got: i32 = fcrelay.relay_fetch(&r, 64, &raw)
+        if got < 0 {
+            fcrelay.relay_close(&r)
+            seen_save(&sn)
+            return fin(2, "offline", "the relay broke off the box")
+        }
+        more = got == 64
+        var at: usize = 0
+        while at + fcrelay.HDR_LEN <= raw.len {
+            let f: u64 = raw.ptr + at as u64
+            let pn: usize = fcrelay.fr_plen(f)
+            at = at + fcrelay.HDR_LEN + pn
+            let fl: u8 = fcrelay.fr_flags(f)
+            let snd: u64 = fcrelay.fr_sender(f)
+            if (fl & fcrelay.F_ENC) == 0 as u8 || (fl & fcrelay.F_CHANNEL) != 0 as u8
+                || pn < 16 {
+                dropped = dropped + 1
+                continue
+            }
+            let own: bool = keys_own(&ks, snd) || key_eq(snd, mine)
+            let who: u64 = keys_who(&ks, snd)
+            if !own && who == 0 {
+                dropped = dropped + 1 // somebody not in the book
+                continue
+            }
+            var s: fcrelay.Sess = fcrelay.Sess { tx: [0; 32], rx: [0; 32], ok: false }
+            if !fcrelay.sess_init(&s, sec, mine, snd) {
+                dropped = dropped + 1
+                continue
+            }
+            var pl: rt.Buf = rt.buf_new()
+            rt.buf_reserve(&pl, pn)
+            let seq: u64 = fcrelay.fr_seq(f)
+            if !fcrelay.open_sealed(&s, snd, fcrelay.fr_target(f), seq,
+                f + fcrelay.HDR_LEN as u64, pn, pl.ptr) || !seen_take(&sn, snd, seq) {
+                rt.buf_free(&pl)
+                dropped = dropped + 1
+                continue
+            }
+            let tn: usize = pn - 16
+            if own {
+                // an own device's copy: 1 || anchor || text; 2 = a read mark
+                if (fl & fcrelay.F_SYNC) != 0 as u8 && tn > fcrelay.SYNC_HEAD
+                    && rt.ld8(pl.ptr, 0) == 1 as u8 {
+                    let anc: u64 = keys_who(&ks, pl.ptr + 1)
+                    if anc != 0 {
+                        m_line(&out, anc, fcrelay.fr_stamp(f), "out",
+                            pl.ptr + fcrelay.SYNC_HEAD as u64, tn - fcrelay.SYNC_HEAD)
+                        lines = lines + 1
+                    } else {
+                        dropped = dropped + 1
+                    }
+                } else {
+                    dropped = dropped + 1
+                }
+            } else if (fl & fcrelay.F_SYNC) != 0 as u8 {
+                dropped = dropped + 1 // only my own devices speak for me
+            } else {
+                m_line(&out, who, fcrelay.fr_stamp(f), "in", pl.ptr, tn)
+                lines = lines + 1
+            }
+            rt.buf_free(&pl)
+        }
+        rt.buf_free(&raw)
+        round = round + 1
+    }
+    fcrelay.relay_close(&r)
+    seen_save(&sn)
+    rt.buf_push_bytes(&out, "ok\t".p as u64, 3)
+    rt.buf_push_dec_u64(&out, lines)
+    rt.buf_push(&out, 9 as u8)
+    rt.buf_push_dec_u64(&out, dropped)
+    rt.buf_push(&out, 10 as u8)
+    outb(&out)
+    return 0
+}
+
+// -------------------------------------------------------------- invites
+
+fn state_word(p: u64, n: usize) -> str {
+    if eqn(p, n, "angenommen") {
+        return "accepted"
+    }
+    if eqn(p, n, "abgelehnt") {
+        return "declined"
+    }
+    return "open"
+}
+
+// {"id","konto","richtung","art","name","status","ziel","alter_s"} as i line
+fn i_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
+    var v: rt.Buf = rt.buf_new()
+    rt.buf_push(b, 105 as u8) // 'i'
+    txt(d, it, "id", &v)
+    field(b, v.ptr, v.len)
+    txt(d, it, "konto", &v)
+    field(b, v.ptr, v.len)
+    txt(d, it, "richtung", &v)
+    if eqn(v.ptr, v.len, "ein") {
+        fields(b, "in")
+    } else {
+        fields(b, "out")
+    }
+    txt(d, it, "art", &v)
+    if eqn(v.ptr, v.len, "beitreten") {
+        fields(b, "join")
+    } else {
+        fields(b, "invite")
+    }
+    txt(d, it, "status", &v)
+    fields(b, state_word(v.ptr, v.len))
+    rt.buf_clear(&v)
+    var da: bool = false
+    var ka: [u8; 8] = "alter_s\0"
+    var age: i64 = kjson.int(d, it, (&ka[0]) as u64, &da)
+    if age < 0 {
+        age = 0
+    }
+    rt.buf_push_dec_u64(&v, age as u64)
+    field(b, v.ptr, v.len)
+    txt(d, it, "ziel", &v)
+    field(b, v.ptr, v.len)
+    txt(d, it, "name", &v)
+    field(b, v.ptr, v.len)
+    rt.buf_push(b, 10 as u8)
+    rt.buf_free(&v)
+}
+
+fn v_invites(c: *mut Conf) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "GET", "/api/kontakte/einladungen".p as u64, 25, 0, 0, &a)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    var d: kjson.Json = kjson.json_new()
+    if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        knetz.reply_free(&a)
+        return fin(1, "bad", "the answer is not JSON")
+    }
+    let items: u32 = sub(&d, kjson.json_root(&d), "items")
+    var b: rt.Buf = rt.buf_new()
+    var n: u64 = 0
+    if items != kjson.JSON_NONE && kjson.json_kind(&d, items) == kjson.JSON_ARRAY {
+        var it: u32 = kjson.json_child(&d, items)
+        while it != kjson.JSON_NONE {
+            i_line(&d, it, &b)
+            n = n + 1
+            it = kjson.json_next(&d, it)
+        }
+    }
+    kjson.json_free(&d)
+    knetz.reply_free(&a)
+    rt.buf_push_bytes(&b, "ok\t".p as u64, 3)
+    rt.buf_push_dec_u64(&b, n)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    return 0
+}
+
+fn v_invite(c: *mut Conf, id: u64, kind: u64, target: u64, name: *mut rt.Buf) -> i32 {
+    var art: str = ""
+    if eqc(kind, "invite") {
+        art = "einladen"
+    } else if eqc(kind, "join") {
+        art = "beitreten"
+    } else {
+        return fin(1, "bad", "invite: invite|join")
+    }
+    var body: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var k1: [u8; 6] = "konto\0"
+    var k2: [u8; 4] = "art\0"
+    var k3: [u8; 5] = "name\0"
+    var k4: [u8; 5] = "ziel\0"
+    kjson.field(&w, (&k1[0]) as u64, id, rt.c_length(id))
+    kjson.field(&w, (&k2[0]) as u64, art.p as u64, art.n)
+    kjson.field(&w, (&k3[0]) as u64, (*name).ptr, (*name).len)
+    if !eqc(target, "-") {
+        kjson.field(&w, (&k4[0]) as u64, target, rt.c_length(target))
+    }
+    kjson.field_free(&w)
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "POST", "/api/kontakte/einladen".p as u64, 22, body.ptr, body.len, &a)
+    rt.buf_free(&body)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    var d: kjson.Json = kjson.json_new()
+    var v: rt.Buf = rt.buf_new()
+    if kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        txt(&d, kjson.json_root(&d), "id", &v)
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push(&b, 105 as u8)
+    field(&b, v.ptr, v.len)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    knetz.reply_free(&a)
+    return fin(0, "", "")
+}
+
+fn v_answer(c: *mut Conf, inv: u64, yn: u64, target: u64) -> i32 {
+    let yes: bool = eqc(yn, "yes")
+    if !yes && !eqc(yn, "no") {
+        return fin(1, "bad", "answer: yes|no")
+    }
+    var body: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var k1: [u8; 3] = "id\0"
+    var k2: [u8; 5] = "ziel\0"
+    kjson.field(&w, (&k1[0]) as u64, inv, rt.c_length(inv))
+    if target != 0 && !eqc(target, "-") {
+        kjson.field(&w, (&k2[0]) as u64, target, rt.c_length(target))
+    }
+    kjson.field_free(&w)
+    raw_bool(&body, "ja", yes)
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "POST", "/api/kontakte/einladung/antwort".p as u64, 31,
+        body.ptr, body.len, &a)
+    rt.buf_free(&body)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    var d: kjson.Json = kjson.json_new()
+    var b: rt.Buf = rt.buf_new()
+    if kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        let ei: u32 = sub(&d, kjson.json_root(&d), "einladung")
+        if ei != kjson.JSON_NONE {
+            i_line(&d, ei, &b)
+        }
+    }
+    outb(&b)
+    knetz.reply_free(&a)
+    return fin(0, "", "")
 }

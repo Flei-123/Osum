@@ -27,6 +27,16 @@
 #   7. the audit log names the calls
 #   8. the friends bar /bin/freunde (wlib/fUi) in a guest with the window
 #      server reads the service over the bus: who plays first, a picture
+#   9. accounts: three lines in /etc/social/providers = three accounts
+#      (fleitec, local, lan2 -- the same local program twice, two bases),
+#      each says what it can; the Fleitec account pairs THIS device by a
+#      code the host types into justin's profile
+#  10. chat: OrientOS -> anna's FirnChat client (end to end, over the real
+#      relay) and back; the message, the unread count, the event, the bell;
+#      the local accounts keep their messages apart
+#  11. invites: OrientOS invites anna (she says yes on the server); anna
+#      invites justin, the guest accepts by `from=` and gets the target
+#  12. the bar opens a chat and writes into it (the service's actions)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -49,7 +59,8 @@ BLOCKS=30000
 PROGS="sh ls cat echo sleep mkdir orientbus act social soclocal freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-FLEIKONTAKTE=${FLEIKONTAKTE:-/root/jarvis/projects/u_DiS4in7esMF1/firnchat/bin/fleikontakte}
+FCBIN=${FIRNCHAT_BIN:-/root/jarvis/projects/u_DiS4in7esMF1/firnchat/bin}
+FLEIKONTAKTE=${FLEIKONTAKTE:-$FCBIN/fleikontakte}
 
 echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
@@ -101,6 +112,18 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 [ -n "$PORT" ] && ok "fleikontakte runs on the host (port $PORT)" || { bad "fleikontakte did not start"; fin; }
+mkdir -p "$TMPD/relay"
+( cd "$TMPD" && exec "$FCBIN/firnchat" serve 0 "$TMPD/relay" 0 --kontakte-port "$PORT" ) > "$TMPD/relay.out" 2>&1 &
+RELAYPID=$!
+RP=""; for _ in $(seq 1 50); do RP=$(sed -n 's/^FIRNCHAT listening \([0-9]*\).*/\1/p' "$TMPD/relay.out" | head -1); [ -n "$RP" ] && break; sleep 0.1; done
+[ -n "$RP" ] && ok "the FirnChat relay runs on the host (port $RP)" || { bad "the relay did not start"; fin; }
+if [ -n "${SOCIAL_KEEP:-}" ]; then
+    trap '[ -n "$SRV" ] && kill $SRV 2>/dev/null; kill $RELAYPID 2>/dev/null; echo "kept $TMPD"' EXIT
+else
+    trap 'rm -rf "$TMPD"; [ -n "$SRV" ] && kill $SRV 2>/dev/null; kill $RELAYPID 2>/dev/null' EXIT
+fi
+( cd "$TMPD" && "$FCBIN/firnchat" id "$TMPD/anna.id" ) > /dev/null 2>&1
+export SOCIAL_RELAY_PORT=$RP SOCIAL_FCBIN=$FCBIN SOCIAL_ANNA_ID=$TMPD/anna.id
 SECRET=$(cat "$TMPD/jarvis.secret")
 TOKEN=$(python3 tools/social/host.py setup "$PORT" "$SECRET")
 case "$TOKEN" in fkz1.u_JUSTIN.*) ok "justin's device access token made on the host (fkz1)";;
@@ -108,8 +131,10 @@ case "$TOKEN" in fkz1.u_JUSTIN.*) ok "justin's device access token made on the h
 
 mkdir -p "$TMPD/etc"
 printf 'lang=de\n' > "$TMPD/etc/locale.conf"
-printf 'provider fleitec /bin/socfleitec\nprovider local /bin/soclocal\n' > "$TMPD/etc/providers"
-printf 'url=http://10.0.2.2:%s\ntoken=%s\n' "$PORT" "$TOKEN" > "$TMPD/etc/fleitec.conf"
+printf 'provider fleitec /bin/socfleitec /etc/social/fleitec.conf\nprovider local /bin/soclocal\nprovider lan2 /bin/soclocal /etc/social/lan2\n' > "$TMPD/etc/providers"
+printf 'url=http://10.0.2.2:%s\ntoken=%s\nrelay=10.0.2.2:%s\n' "$PORT" "$TOKEN" "$RP" > "$TMPD/etc/fleitec.conf"
+printf 'c\tzoe\tfriend\tonline\tZoe (LAN 2)\tzoe\t\t\t0\t\t0\n' > "$TMPD/etc/lan2.book"
+printf 'm\tpeter\t1790000000\tin\tHallo von Peter aus dem Keller\n' > "$TMPD/etc/local.inbox"
 printf 'c\toma\tincoming\tunknown\tOma Rosi\t\t\t\t0\t\nc\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tim Keller\tMinecraft\t60\t\n' \
     > "$TMPD/etc/local.book"
 
@@ -195,6 +220,56 @@ echo ==ME==
 cat /tmp/social/local.me
 echo ==PRIVFILE==
 cat /etc/social/privacy
+echo ==ACCOUNTS==
+act call social.accounts.list
+echo ==PAIR==
+act call social.accounts.login provider=fleitec
+act confirm last
+echo rc=$?
+echo ==PAIRWAIT==
+sleep 4
+echo ==PAIR2==
+act call social.accounts.login provider=fleitec
+act confirm last
+echo rc=$?
+echo ==KEY==
+cat /etc/social/fleitec.conf.key
+echo ==SEND==
+act call social.messages.send id=fleitec:u_ANNA "text=Hallo Anna, aus OrientOS"
+echo rc=$?
+act call social.messages.send id=fleitec:u_ANNA "text=zweite Zeile" --as app:spam
+echo rc=$?
+act reject last
+echo ==MSG1==
+sleep 14
+echo ==GOT==
+act call social.messages.list id=fleitec:u_ANNA
+act call social.messages.unread
+echo ==READ==
+act call social.messages.read id=fleitec:u_ANNA
+act call social.messages.unread
+echo ==BELL==
+social glocke
+echo ==LOCALCHAT==
+act call social.messages.list id=local:peter
+act call social.messages.send id=local:peter "text=Servus Peter"
+act call social.messages.send id=lan2:zoe "text=Hi Zoe"
+echo ==OUTBOX==
+cat /etc/social/local.outbox
+echo ==OUTBOX2==
+cat /etc/social/lan2.outbox
+echo ==INVITE==
+act call social.invites.send id=fleitec:u_ANNA kind=invite name=Minecraft target=mc://10.0.2.15:25565
+echo rc=$?
+echo ==INV1==
+sleep 12
+echo ==INVLIST==
+act call social.invites.list
+echo ==ANSWER==
+act call social.invites.answer from=fleitec:u_ANNA accept=true
+echo rc=$?
+echo ==BELL2==
+social glocke
 echo ==EVENTS==
 cat /tmp/events.txt
 echo ==LOG==
@@ -215,6 +290,8 @@ A_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/providers=$TMPD/etc/providers"
      "/etc/social/fleitec.conf=$TMPD/etc/fleitec.conf"
      "/etc/social/local.book=$TMPD/etc/local.book"
+     "/etc/social/lan2.book=$TMPD/etc/lan2.book"
+     "/etc/social/local.inbox=$TMPD/etc/local.inbox"
      "/t/s.sh=$TMPD/s1.sh")
 python3 tools/osum/mkfs.py "${A_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
 
@@ -223,7 +300,7 @@ if [ -n "${SOCIAL_ONLY_BAR:-}" ]; then echo "(SOCIAL_ONLY_BAR: main guest skippe
 python3 tools/social/host.py watch "$PORT" "$SECRET" "$TMPD/a.txt" "$TMPD/host.txt" &
 WATCH=$!
 T0=$(date +%s)
-timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+timeout 400 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -kernel "$TMPD/k0.img" -m 512 \
     -append "osum vfs nokbd bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
     -serial "file:$TMPD/a.txt" -display none -no-reboot \
@@ -241,27 +318,28 @@ echo "== 2. the catalogue =="
 part "$A" LIST STATUS > "$TMPD/p.txt"
 n_act=$(grep -ac '^social\.' "$TMPD/p.txt")
 n_evt=$(grep -ac '^event social\.' "$TMPD/p.txt")
-[ "$n_act" = 14 ] && [ "$n_evt" = 3 ] && ok "the catalogue has 14 social.* actions and 3 events" \
+[ "$n_act" = 23 ] && [ "$n_evt" = 5 ] && ok "the catalogue has 23 social.* actions and 5 events" \
     || { bad "catalogue: $n_act actions, $n_evt events"; head -20 "$TMPD/p.txt" | sed 's/^/        /'; }
 has "$TMPD/p.txt" "social.privacy.set critical" "privacy.set is critical"
 hasnot "$TMPD/p.txt" "(not running)" "the service is bound (not 'not running')"
-has "$A" "social: serving a.social, providers=2" "the service reads both providers from /etc/social/providers"
+has "$A" "social: serving a.social, providers=3" "the service reads three accounts from /etc/social/providers"
 
 echo "== 3. the book =="
 part "$A" STATUS ALL > "$TMPD/p.txt"
 has "$TMPD/p.txt" "provider.1=fleitec ok 4" "fleitec: ok, 4 contacts (anna, bert, carla, dora) over the guest's network"
 has "$TMPD/p.txt" "provider.2=local ok 2" "local: ok, 2 contacts"
-has "$TMPD/p.txt" "contacts=6" "the merged book has 6"
-has "$TMPD/p.txt" "online=2" "2 friends online (anna, peter)"
+has "$TMPD/p.txt" "provider.3=lan2 ok 1" "lan2 (the local program again, another base): ok, 1 contact"
+has "$TMPD/p.txt" "contacts=7" "the merged book has 7"
+has "$TMPD/p.txt" "online=3" "3 friends online (anna, peter, zoe)"
 has "$TMPD/p.txt" "active=2" "2 friends active (anna plays, peter plays)"
 part "$A" ALL ONLINE > "$TMPD/p.txt"
-has "$TMPD/p.txt" "total=6" "list: 6 contacts"
+has "$TMPD/p.txt" "total=7" "list: 7 contacts"
 has "$TMPD/p.txt" "fleitec:u_ANNA|friend|online|Anna Berger|anna_berger||Counter-Strike 2|" "anna: friend, online, plays Counter-Strike 2"
 has "$TMPD/p.txt" "fleitec:u_CARLA|incoming|" "carla asks justin (incoming)"
 has "$TMPD/p.txt" "fleitec:u_DORA|outgoing|" "justin asked dora (outgoing)"
 has "$TMPD/p.txt" "local:peter|friend|online|Peter (LAN)|peter|im Keller|Minecraft|" "a contact of the local provider in the same book"
 part "$A" ONLINE ACTIVE > "$TMPD/p.txt"
-has "$TMPD/p.txt" "total=2" "filter=online: 2"
+has "$TMPD/p.txt" "total=3" "filter=online: 3"
 hasnot "$TMPD/p.txt" "u_BERT" "bert (invisible) is not online"
 part "$A" GET SEARCH > "$TMPD/p.txt"
 has "$TMPD/p.txt" "activity=Counter-Strike 2" "get: one contact with every field"
@@ -312,7 +390,7 @@ while IFS= read -r l; do
     case "$l" in OK*) ok "${l#OK    }";; FAIL*) bad "${l#FAIL  }";; esac
 done < "$TMPD/host.txt"
 n_host=$(grep -c . "$TMPD/host.txt" 2>/dev/null || echo 0)
-[ "$n_host" = 5 ] && ok "the host checked at both markers (5 checks)" || bad "host checks: $n_host of 5 ran"
+[ "$n_host" = 11 ] && ok "the host checked at every marker (11 checks)" || bad "host checks: $n_host of 11 ran"
 
 echo "== 6. events =="
 part "$A" BERTON INVISIBLE > "$TMPD/p.txt"
@@ -327,6 +405,58 @@ part "$A" LOG FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "action=social.contacts.accept" "the audit log names the relation calls"
 has "$TMPD/p.txt" "action=social.privacy.set" "... and the privacy switch"
 has "$TMPD/p.txt" "client=app:game" "... and which app set the activity"
+
+echo "== 9. accounts"
+part "$A" ACCOUNTS PAIR > "$TMPD/p.txt"
+has "$TMPD/p.txt" "count=3" "three accounts"
+grep -aq "^account.1=fleitec|ok|u_JUSTIN|contacts .*send inbox invite invites answer" "$TMPD/p.txt" \
+    && ok "fleitec: ok, u_JUSTIN, it can chat and invite (its own caps)" || bad "fleitec account line: $(grep -a '^account.1' "$TMPD/p.txt")"
+grep -aq "^account.3=lan2|ok||contacts" "$TMPD/p.txt" && ok "lan2 is an account of its own" || bad "lan2 account line"
+part "$A" PAIR PAIRWAIT > "$TMPD/p.txt"
+grep -aq "^confirm [0-9]* social.accounts.login" "$TMPD/p.txt" && ok "signing in is critical: asked even for the user" || bad "login was not asked"
+grep -aq "^state=pending" "$TMPD/p.txt" && grep -aq "^code=[0-9]\{4\} [0-9]\{4\}" "$TMPD/p.txt" \
+    && ok "not paired yet: a code to type in (pending)" || bad "no pairing code: $(head -5 "$TMPD/p.txt")"
+part "$A" PAIR2 KEY > "$TMPD/p.txt"
+grep -aq "^state=ok" "$TMPD/p.txt" && grep -aq "^account=u_JUSTIN" "$TMPD/p.txt" \
+    && ok "after the host typed the code in: signed in as u_JUSTIN, with this device's own token" || bad "second login: $(head -6 "$TMPD/p.txt")"
+
+echo "== 10. chat"
+part "$A" SEND MSG1 > "$TMPD/p.txt"
+grep -aq "^devices=1" "$TMPD/p.txt" && ok "OrientOS -> anna: sealed for her one device" || bad "send: $(head -4 "$TMPD/p.txt")"
+grep -aq "^confirm [0-9]* social.messages.send" "$TMPD/p.txt" && ok "an app writing in my name is parked for the user" || bad "app send was not parked"
+part "$A" GOT READ > "$TMPD/p.txt"
+grep -aq "|out|1|Hallo Anna, aus OrientOS" "$TMPD/p.txt" && ok "the conversation keeps what I wrote (out)" || bad "no out line"
+grep -aq "|in|0|Servus Justin, hier Anna" "$TMPD/p.txt" && ok "anna's answer from her FirnChat client came in (in, unread)" || bad "no answer: $(grep -a message "$TMPD/p.txt" | head)"
+grep -aq "^contact.[0-9]=fleitec:u_ANNA|1" "$TMPD/p.txt" && ok "unread: 1 from anna" || bad "unread: $(grep -a contact "$TMPD/p.txt")"
+part "$A" READ BELL > "$TMPD/p.txt"
+grep -aq "^marked=1" "$TMPD/p.txt" && ! grep -aq "=fleitec:u_ANNA|" "$TMPD/p.txt" && ok "marked read: nothing unread from anna" || bad "read: $(grep -av '^elf' "$TMPD/p.txt" | head)"
+part "$A" BELL LOCALCHAT > "$TMPD/p.txt"
+grep -aq "^glocke: Anna Berger: Servus Justin, hier Anna" "$TMPD/p.txt" && ok "the bell rang with name and text" || bad "bell: $(head -3 "$TMPD/p.txt")"
+grep -aq "^glocke: Peter (LAN): Hallo von Peter aus dem Keller" "$TMPD/p.txt" && ok "... and for the local account's message" || bad "no bell for peter"
+part "$A" LOCALCHAT OUTBOX > "$TMPD/p.txt"
+grep -aq "|in|0|Hallo von Peter aus dem Keller" "$TMPD/p.txt" && ok "the local account: a message from its inbox" || bad "local inbox"
+part "$A" OUTBOX OUTBOX2 > "$TMPD/p.txt"
+grep -aq "^m	peter	[0-9]*	out	Servus Peter" "$TMPD/p.txt" && ok "writing to local:peter goes to local's outbox" || bad "local outbox: $(cat "$TMPD/p.txt")"
+grep -aq "Zoe" "$TMPD/p.txt" && bad "lan2's message landed in local's outbox" || ok "... and nothing of lan2's"
+part "$A" OUTBOX2 INVITE > "$TMPD/p.txt"
+grep -aq "^m	zoe	[0-9]*	out	Hi Zoe" "$TMPD/p.txt" && ok "lan2:zoe -> lan2's own outbox (two accounts, kept apart)" || bad "lan2 outbox: $(cat "$TMPD/p.txt")"
+
+echo "== 11. invites"
+part "$A" INVITE INV1 > "$TMPD/p.txt"
+grep -aq "^invite=fleitec:[0-9a-f]\{16\}" "$TMPD/p.txt" && ok "OrientOS invites anna into Minecraft (an invite id)" || bad "invite: $(grep -av '^elf' "$TMPD/p.txt" | head -5)"
+part "$A" INVLIST ANSWER > "$TMPD/p.txt"
+grep -aq "|fleitec:u_ANNA|out|invite|accepted|[0-9]*|mc://10.0.2.15:25565|Minecraft" "$TMPD/p.txt" \
+    && ok "anna said yes on the server: accepted" || bad "invite list: $(grep -a invite "$TMPD/p.txt" | head)"
+grep -aq "|fleitec:u_ANNA|in|invite|open|[0-9]*||Counter-Strike 2" "$TMPD/p.txt" \
+    && ok "anna's invite to justin: in, open, no target before yes" || bad "incoming invite"
+part "$A" ANSWER BELL2 > "$TMPD/p.txt"
+grep -aq "^state=accepted" "$TMPD/p.txt" && grep -aq "^target=steam://connect/10.0.2.2:27015" "$TMPD/p.txt" \
+    && ok "accepted by from=fleitec:u_ANNA: the target comes with the yes" || bad "answer: $(head -5 "$TMPD/p.txt")"
+part "$A" BELL2 EVENTS > "$TMPD/p.txt"
+grep -aq "^glocke: Anna Berger l[^ ]*dt dich ein: Counter-Strike 2" "$TMPD/p.txt" && ok "the bell for the invite, in the system's language" || bad "invite bell: $(head -3 "$TMPD/p.txt")"
+part "$A" EVENTS LOG > "$TMPD/p.txt"
+grep -aq "event social.message @app=social id=fleitec:u_ANNA text=Servus Justin" "$TMPD/p.txt" && ok "an event social.message went out" || bad "no social.message event"
+grep -aq "event social.invite @app=social id=fleitec:[0-9a-f]* from=fleitec:u_ANNA kind=invite name=Counter-Strike 2" "$TMPD/p.txt" && ok "an event social.invite went out" || bad "no social.invite event"
 fi
 
 echo "== 8. the friends bar =="
@@ -335,7 +465,7 @@ orientbus serve 6000 &
 sleep -m 300
 social serve 6000 300 &
 sleep 3
-freunde --rahmen 900
+freunde --rahmen 900 --chat 0 --sende "aus der Leiste"
 EOS
 A2_=(); for x in "${A_[@]}"; do A2_+=("${x/$TMPD\/A.img/$TMPD/B.img}"); done
 A3_=(); for x in "${A2_[@]}"; do A3_+=("${x/s1.sh/s2.sh}"); done
@@ -363,15 +493,18 @@ tr -cd '\11\12\15\40-\176' < "$TMPD/b.txt" > "$TMPD/b.klar"
 B="$TMPD/b.klar"
 has "$B" "quelle=bus" "the bar found orient-bus and the social service"
 EIN=$(grep -a 'freunde: eintraege=' "$B" | head -1 | sed 's/.*eintraege=\([0-9]*\).*/\1/')
-# as many as justin has friends at fleikontakte right now, plus peter on the device
+# as many as justin has friends at fleikontakte right now, plus peter
+# (local) and zoe (lan2) on the device
 WANT=$(python3 - "$PORT" "$SECRET" <<'PY'
 import sys; sys.path.insert(0, 'tools/social'); import host
 st, j = host.api(int(sys.argv[1]), host.people(sys.argv[2])["justin"], "/api/kontakte/liste")
-print(1 + sum(1 for i in j.get("items", []) if i.get("status") == "freunde"))
+print(2 + sum(1 for i in j.get("items", []) if i.get("status") == "freunde"))
 PY
 )
 [ "${EIN:-x}" = "$WANT" ] && ok "the bar shows justin's $WANT friends (fleitec + the device's own), from the service" \
     || { bad "the bar shows ${EIN:-no} entries instead of $WANT"; grep -a "freunde:\|social:" "$B" | head -5 | sed 's/^/        /'; }
+grep -aq "freunde: gesendet=1" "$B" && ok "the bar wrote into the chat (social.messages.send)" || bad "the bar did not send: $(grep -a 'freunde:' "$B" | head -4)"
+grep -aq "freunde: chat=[a-z0-9]*:[A-Za-z_0-9]* nachrichten=[1-9]" "$B" && ok "the bar's chat window shows the conversation" || bad "chat window: $(grep -a 'freunde: chat' "$B" | head -2)"
 if [ -f "$TMPD/bar.ppm" ]; then
     python3 -c "from PIL import Image; Image.open('$TMPD/bar.ppm').save('docs/shots/social/freunde.png')" 2>/dev/null \
         && ok "a picture of the bar: docs/shots/social/freunde.png" || bad "the picture could not be converted"
