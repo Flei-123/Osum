@@ -724,4 +724,8 @@ brightness), AB-006, AB-008b (foreign-window layer, keys/ui), AB-009
 (dry run first; the bridge may run `/bin/act`).
 Done in round ACTION-BUS-4: AB-002 (blocking receive), AB-005c (pages
 Bildschirm/Sprache/Netz, sound and language where they take effect,
-the meaning column from the catalogue).
+the meaning column from the catalogue), AB-018 (`act reload`: the
+catalogue is read again without a restart -- provider bindings, call
+counts and undo records are carried over by name, a reload during a
+call in flight is refused as `busy`, only the user may reload; opk
+reloads after it rebuilt /apps).
