@@ -29,6 +29,9 @@
 #      critical always asks, journal, undo, revert, a real config file
 #  14. AB-008: a Linux program behind a wrapper manifest -- cli and file
 #      adapters, no shell, not root, labelled, timeout, honest refusals
+#  15. AB-006 "what may which app" (rights, revoke, block, counts kept
+#      over a restart), AB-009 dry run first for Jarvis, and the person
+#      who signed in is the user (not only uid 0)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -46,7 +49,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd"
+PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd su"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -815,6 +818,185 @@ part "$E" C-STAT C-LOG > "$TMPD/p.txt"
 grep -qa '^adapter_runs=[1-9]' "$TMPD/p.txt" && ok "the broker counted $(grep -a '^adapter_runs=' "$TMPD/p.txt")" || bad "adapter_runs"
 has "$TMPD/log.txt" "client=user verb=call action=media.pause decision=allow result=forwarded" "the audit log has the write-ahead line of the adapter call"
 grep -qaE 'panic|EXCEPTION' "$E" && bad "a panic or exception in the settings/compat guest" || ok "no panic, no exception"
+
+# ===================================================================
+echo "== 15. AB-006 what may which app, AB-009 dry run first, the signed-in user =="
+# ===================================================================
+if musl-gcc -static -O2 -nostartfiles -T tools/foreign/osum.ld -Wl,--build-id=none \
+        -o "$TMPD/setsess" tools/foreign/start.s tools/foreign/osum_main.c \
+        tools/actionbus/setsess.c 2>"$TMPD/ss.txt"; then
+    ok "setsess (test aid: the one kernel call glogin makes) builds"
+else
+    bad "setsess does not build: $(grep -v 'GNU-stack' "$TMPD/ss.txt" | head -3)"
+fi
+cat > "$TMPD/policy15" <<'EOF'
+# section 15
+deny  intruder *
+allow script notes.add write
+dryfirst jarvis
+EOF
+printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\nmara:x:1001:1001:Mara:/:/bin/sh\n' > "$TMPD/passwd15"
+printf 'root:x:0:\njustin:x:1000:\nmara:x:1001:\n' > "$TMPD/group15"
+cat > "$TMPD/s15.sh" <<'EOS'
+orientbus serve 60000 &
+sleep -m 300
+notes serve 60000 &
+sleep 1
+echo ==R-WHO==
+act whoami --as jarvis
+echo ==R-NODRY==
+act call notes.add text=plan-a --as jarvis
+echo rc=$?
+echo ==R-DRY==
+act call notes.add text=plan-a --dry --as jarvis
+echo rc=$?
+echo ==R-REAL==
+act call notes.add text=plan-a --as jarvis
+echo rc=$?
+echo ==R-AGAIN==
+act call notes.add text=plan-a --as jarvis
+echo rc=$?
+echo ==R-OTHER==
+act call notes.add text=plan-b --dry --as jarvis
+act call notes.add text=plan-c --as jarvis
+echo rc=$?
+echo ==R-READ==
+act call notes.count --as jarvis
+echo rc=$?
+echo ==R-USER==
+act call notes.add text=by-hand
+echo rc=$?
+echo ==R-GRANT==
+act grant jarvis notes.* write
+cat /etc/orientbus/policy
+act grant app:evil notes.count read 600
+echo ==R-RIGHTS==
+act rights
+echo ==R-JRIGHTS==
+act rights --as jarvis
+echo ==R-JREVOKE==
+act revoke 1 --as jarvis
+echo rc=$?
+act block jarvis notes.* --as jarvis
+echo rc=$?
+echo ==R-REVOKE==
+act revoke jarvis notes.*
+cat /etc/orientbus/policy
+echo ==R-BLOCK==
+act block app:evil notes.*
+cat /etc/orientbus/policy
+act call notes.count --as app:evil
+echo rc=$?
+echo ==R-SESS==
+act call notes.add text=from-agent --as script2
+act reject last
+act call notes.add text=from-agent2 --as script2
+su justin /bin/act confirm last
+echo rc=$?
+setsess 1000
+su mara /bin/act confirm last
+echo rc=$?
+su justin /bin/act confirm last
+echo rc=$?
+su justin /bin/act rights
+echo ==R-STAT==
+act stat
+act stop
+echo ==FERTIG==
+EOS
+# the SECOND boot of the same disk: the broker starts again, reads the
+# policy the first boot changed and seeds its counts from the audit log
+cat > "$TMPD/s15b.sh" <<'EOS'
+orientbus serve 20000 &
+sleep -m 500
+echo ==R-RESTART==
+act rights
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/passwd=$TMPD/passwd15" "/etc/group=$TMPD/group15"
+       "/bin/setsess=$TMPD/setsess" "/t/s2.sh=$TMPD/s15b.sh")
+cp -f "$TMPD/etc/orientbus/policy" "$TMPD/policy.orig"
+cp -f "$TMPD/policy15" "$TMPD/etc/orientbus/policy"
+image "$TMPD/R.img" "$TMPD/s15.sh"
+cp -f "$TMPD/policy.orig" "$TMPD/etc/orientbus/policy"
+EXTRA=()
+run "$TMPD/R.img" r 1 180
+R="$TMPD/r.klar"
+timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus script=sh /t/s2.sh;exit" \
+    -serial "file:$TMPD/r2.txt" -display none -no-reboot \
+    -drive "file=$TMPD/R.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/r2.txt" > "$TMPD/r2.klar" 2>/dev/null || true
+R2="$TMPD/r2.klar"
+grep -qa '==FERTIG==' "$R" || { bad "section-15 guest did not finish"; tail -20 "$R" | sed 's/^/        /'; }
+part "$R" R-WHO R-NODRY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "dry_first=yes" "AB-009: whoami tells Jarvis it must dry-run first"
+part "$R" R-NODRY R-DRY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err dry_run_first notes.add" "a Jarvis change without a dry run is refused -- before anyone is asked"
+part "$R" R-DRY R-REAL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "dry=1" "the dry run answers (and is noted)"
+part "$R" R-REAL R-AGAIN > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 1 notes.add" "the same call after its dry run goes on -- parked for the user as usual"
+part "$R" R-AGAIN R-OTHER > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err dry_run_first" "one dry run pays for ONE call: the next identical call is refused again"
+part "$R" R-OTHER R-READ > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err dry_run_first" "a dry run of plan-b does not pay for plan-c (the arguments count)"
+part "$R" R-READ R-USER > "$TMPD/p.txt"
+has "$TMPD/p.txt" "count=" "reads need no dry run"
+part "$R" R-USER R-GRANT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "count=1" "the user is not under dryfirst"
+part "$R" R-GRANT R-RIGHTS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "allow jarvis notes.* write" "a grant without seconds is permanent: it is written into /etc/orientbus/policy"
+part "$R" R-RIGHTS R-JRIGHTS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "rule 1 deny intruder * permanent" "rights: the deny rule from the file, marked permanent"
+has "$TMPD/p.txt" "rule 2 allow script notes.add write permanent" "rights: an allow rule from the file"
+has "$TMPD/p.txt" "allow jarvis notes.* write permanent" "rights: the new permanent grant"
+grep -qaE 'allow app:evil notes.count read left=(59[0-9]|600)' "$TMPD/p.txt" \
+    && ok "rights: a timed grant with the seconds left ($(grep -aoE 'left=[0-9]+' "$TMPD/p.txt" | head -1))" \
+    || bad "rights: no timed grant with seconds left"
+has "$TMPD/p.txt" "dryfirst jarvis" "rights: the dry-run-first clients"
+grep -qaE '^client jarvis reads=[1-9][0-9]* changes=0 asked=1 refused=3 dry=2' "$TMPD/p.txt" \
+    && ok "rights: Jarvis' counts are exact ($(grep -a '^client jarvis' "$TMPD/p.txt"))" \
+    || bad "rights: Jarvis' counts: $(grep -a '^client jarvis' "$TMPD/p.txt")"
+grep -qaE '^client user reads=[0-9]+ changes=1 ' "$TMPD/p.txt" \
+    && ok "rights: the user's change is counted" || bad "rights: user counts: $(grep -a '^client user' "$TMPD/p.txt")"
+part "$R" R-JRIGHTS R-JREVOKE > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "intruder" "a client that is not the user sees only its own rules"
+has "$TMPD/p.txt" "allow jarvis notes.* write" "... Jarvis sees its own grant"
+part "$R" R-JREVOKE R-REVOKE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may revoke" "Jarvis cannot revoke a rule"
+has "$TMPD/p.txt" "err denied only the user may block" "... nor block anybody"
+part "$R" R-REVOKE R-BLOCK > "$TMPD/p.txt"
+has "$TMPD/p.txt" "ok" "the user revokes Jarvis' permanent grant"
+hasnot "$TMPD/p.txt" "allow jarvis notes.* write" "... and it is gone from /etc/orientbus/policy"
+has "$TMPD/p.txt" "dryfirst jarvis" "... every other line of the file stays"
+part "$R" R-BLOCK R-SESS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "deny app:evil notes.*" "block writes a permanent deny rule into the policy"
+has "$TMPD/p.txt" "err denied notes.count" "... and the app is refused at once, even a read it had a grant for"
+part "$R" R-SESS R-STAT > "$TMPD/p.txt"
+grep -qa 'err denied only the user may confirm' "$TMPD/p.txt" \
+    && ok "without a session, a uid-1000 process is not the user (as before)" || bad "uid 1000 confirmed without a session"
+has "$TMPD/p.txt" "setsess: rc=0 who=1000" "the session is entered in the kernel (as glogin does)"
+n_den=$(grep -ac 'err denied only the user may confirm' "$TMPD/p.txt")
+[ "$n_den" -ge 2 ] && ok "another person (mara, uid 1001) is still not the user" || bad "mara could confirm ($n_den refusals)"
+grep -qa 'index=2' "$TMPD/p.txt" \
+    && ok "the person who signed in (justin, uid 1000) confirms -- the real device's case" \
+    || bad "justin could not confirm in his own session"
+has "$TMPD/p.txt" "rule " "... and sees all rules on the page"
+part "$R" R-STAT R-RESTART > "$TMPD/p.txt"
+has "$TMPD/p.txt" "dry_run_first=3" "stat counts the refused undry changes"
+part "$R2" R-RESTART FERTIG > "$TMPD/p.txt"
+has "$R2" "orientbus: counts seeded from" "after a reboot the broker seeds the counts from the audit log ($(grep -ao 'seeded from [0-9]* log lines' "$R2" | head -1))"
+grep -qaE '^client jarvis reads=[1-9][0-9]* changes=0 asked=1 refused=3 dry=2' "$TMPD/p.txt" \
+    && ok "... and they are the same numbers after the restart" \
+    || bad "counts after restart: $(grep -a '^client jarvis' "$TMPD/p.txt")"
+has "$TMPD/p.txt" "rule 1 deny intruder * permanent" "... the permanent rules come back from the file"
+has "$TMPD/p.txt" "deny app:evil notes.* permanent" "... including the block"
+hasnot "$TMPD/p.txt" "allow jarvis notes.* write" "... and the revoked grant stays revoked"
+grep -qaE 'panic|EXCEPTION' "$R" "$R2" && bad "a panic or exception in the section-15 guests" || ok "no panic, no exception"
 
 # ===================================================================
 echo "== 11. Jarvis is a client: the real bridge, the real client =="

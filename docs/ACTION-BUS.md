@@ -3,7 +3,10 @@
 Status: **concept + working prototype** (round ACTION-BUS, branch
 `action-bus`), extended in round ACTION-BUS-2 (branch `action-bus-2`) by
 AB-003 attested caller identity, AB-005 settings on the bus, AB-008 the
-cli/file adapters and AB-016 the bus in the shipped image. Everything
+cli/file adapters and AB-016 the bus in the shipped image, and in round
+ACTION-BUS-3 (branch `action-bus-3`) by AB-005b the settings window as a
+client, AB-006 "what may which app", AB-008b the foreign-window layer
+(`keys`/`ui` adapters) and AB-009 "dry run first" for Jarvis. Everything
 marked *built* runs in `tools/actionbus/run.sh` (test guests) or
 `tools/actionbus/image.sh` (the real stick image, booted like the Dell);
 everything marked *planned* is a roadmap item (section 12), not a promise
@@ -237,6 +240,14 @@ its task record (`sched.T_ORIGIN`, rules in `kernel/sched/origin.fi`):
   the app. Because a label only narrows and pids are never reused, the
   broker's lookup after receiving a message cannot be raced.
 
+**The user** is an unlabelled sender whose uid is 0 *or the uid of the
+person who signed in* (round ACTION-BUS-3). On a real device `glogin`
+drops the session to the person's own uid (justin, 1000) after entering
+it in the kernel (`SYS_SPERRE` op 7, root only, once); until this round
+only uid 0 counted, so the one human at the machine could neither
+confirm nor grant. Another person's uid (mara, 1001) is still not the
+user (tested with `su`, `tools/actionbus/setsess.c`).
+
 The broker resolves the client once per request: a labelled sender *is*
 its label (`--as` is ignored and counted, `claims_ignored`); an unlabelled
 sender (the user's shell, the desktop, init) is `user`, or may **narrow**
@@ -266,9 +277,21 @@ confirm` on a shell.
 
 Grants: `allow <client> <glob> <read|write>` in `/etc/orientbus/policy`
 (permanent), or `act grant <client> <glob> write <seconds>` at run time
-(timed; expired grants vanish). "Once" is simply a confirmation. Only the
-user may grant. *Planned (AB-006):* a settings page "What may which app
-do" listing rules, grants, and the audit counts per client.
+(timed; expired grants vanish). `act grant` *without* seconds is
+permanent and is written into the policy file, so it survives a restart.
+"Once" is simply a confirmation. Only the user may grant.
+
+*Built (AB-006):* `act rights` lists every rule with its number, allow/
+deny, client, glob, level and `permanent` / `left=<s>` / `session`, the
+`dryfirst` clients, and per client the counts reads / changes / asked /
+refused / dry runs -- kept since the broker started and seeded from the
+audit log at start, so they survive a reboot (tested over a second boot
+of the same disk). A client that is not the user sees only its own
+lines. `act revoke <n>` (or `<client> <glob>`) takes a rule away -- a
+permanent one also out of the policy file, every other line of the file
+stays; `act block <client> <glob>` writes a permanent deny rule. Both are
+user-only and logged write-ahead. The settings window shows all of it on
+the page "App rights" (section 6).
 
 ### 5.4 The audit log
 
@@ -287,7 +310,38 @@ t=1402 pid=31 uid=0 client=jarvis verb=call action=notes.add decision=ask result
   kinds, or after 0.5 s idle — see section 10 for why.
 *Planned:* rotation, a viewer (roadmap S-009), export.
 
-## 6. Settings on the bus — *built (AB-005)*
+## 6. Settings on the bus — *built (AB-005, AB-005b)*
+
+**The settings window is a client (AB-005b, round ACTION-BUS-3).**
+`kernel/user/actcli.fi` is the bus for programs with a window: the same
+frames and reply box as `act`, a short wait, no process per call. Two
+pages of `/bin/settings` know nothing themselves:
+
+* **System** lists every setting of the schema through `settings.list`
+  (key, value, risk, meaning). "Set" is `settings.set`; a critical key
+  comes back as a question with a number, the page asks the person in
+  front of it and only then sends `confirm <n>`; "Undo last change" is
+  the bus undo. Without a broker the page says so and changes nothing.
+* **App rights** is AB-006 (section 5.3): rules with their end, the
+  dry-run-first clients, the counts per client; "Revoke rule", "Block
+  this app", and "Allow Jarvis the display for 1 hour" (a timed grant
+  for `settings.display.*`; critical keys stay unreachable).
+* The lock time on the page "Users" reads and writes `lock.idle`
+  through the bus; only an image *without* a broker still uses the file
+  (and says so on the serial line).
+* `display.brightness` now lives in the kernel: settingsd reads and
+  writes `DG_BRIGHT` (40..200, 100 = unchanged; 50 % = the picture as
+  it comes); without a display it stays in /etc/settings.db.
+* `settings page=12` opens on that page.
+
+Measured in `tools/actionbus/gui.sh` (real window server, clicks through
+the QEMU monitor): 14 rows, 30 % reaches the kernel as 60, a critical
+change is asked and done only after the yes, the journal names the
+window's changes as the user's, the Jarvis button leaves a rule with an
+hour to run. Not yet on the bus: theme, time zone, network address,
+language -- their pages still write their own files (roadmap).
+
+### 6.1 The design (AB-005)
 
 `/bin/settingsd` (provider `settings`, manifest
 `etc/actions.d/settings.actions`), the schema `etc/settings.schema`
@@ -349,6 +403,45 @@ actions for a program that has none and binds each to an **adapter**:
 | `file` | settings in known config files | set a key in `~/.config/x.conf` | medium, program may need restart |
 | `ui` | accessibility tree: AT-SPI for Linux toolkits; UIA/MSAA as far as Wine exposes it; OrientOS's own a11y tree (S-007) for windows of the compat window server | "press button *Send* in window *Thunderbird*" | medium |
 | `keys` | last resort for Wine/Proton and anything else: focus a window, inject keys through the window server | `space` in window matching `VLC` | low, marked as such |
+
+*Built (AB-008b, round ACTION-BUS-3): the foreign-window layer* -- `ui`
+and `keys` for a program's WINDOW:
+
+```
+for window "Fake Viewer*"            the window: title or app id (glob)
+action viewer.search write "Search"
+  arg text string required "What"
+  adapter keys ctrl+f {text} enter   named keys, ctrl+<letter>, one
+                                     character, {arg} = typed text
+action viewer.play write "Play"
+  adapter ui click 40 30             also: ui close, ui raise
+```
+
+The kernel call behind it is `WM_FWIN` (2128, `kernel/sys/sysgui.fi`):
+list windows (with the owner's pid), put a key / a click / the close box
+into the ring of ONE window, or raise it. Root only -- the broker is the
+one caller, after rights, confirmation, dry run and the write-ahead log.
+It never touches a terminal, the lock screen (or anything while locked),
+a panel, the desktop, the caller's own window, or **any window whose
+owner is not a foreign program** (the owner's kernel label must start
+with `compat:`): the user's own tools and installed apps are never
+steered by synthetic input -- otherwise a wrapper manifest could name
+the settings window and an agent could click "Yes, change it" for
+itself (tested: refused). `wayd` labels itself `compat:wayland`, and it
+now passes input on: every window it made is polled, keys go out as
+`wl_keyboard` enter/key (Linux evdev codes, shift/ctrl as their own
+presses), clicks as `wl_pointer` enter/motion/button, the close box as
+`xdg_toplevel.close`; `set_title`/`set_app_id` are kept and given to the
+window. Tested with an unchanged Linux Wayland program
+(`tools/actionbus/wlkeys.c`, libwayland-client + xdg-shell, static musl)
+whose own log shows every key, the typed text in order, the click at
+40,30 and the close. *Not built:* `wl_keyboard.keymap` (needs an fd sent
+out of wayd and an XKB keymap) -- programs that insist on a keymap get
+none; an accessibility tree for foreign windows (element names like
+"button Send") -- Wayland has none, and OrientOS's own (S-007) is for
+its own toolkit. **Wine/Proton does not run on OrientOS** (no Win32,
+docs FREMDSOFTWARE); if it does one day, its windows come through wayd
+(winewayland) and are steerable by exactly this layer.
 
 *Built (AB-008):* `cli` and `file`, in the broker (`run_adapter`), with
 the rules below — no shell (a value `a b;rm -rf /` reaches the program as
@@ -453,8 +546,19 @@ batch runs (dry run).
 ### 9.2 Dry run — **yes, built**
 Every action can be dry-run. If the app declares `dryrun`, it simulates
 ("would delete 2"); otherwise the broker answers with what would be
-called and the decision that would apply. Jarvis rule (planned AB-009):
-dry-run every write/critical call first and show the plan.
+called and the decision that would apply.
+
+*Built (AB-009): dry run first, enforced by the device.* A policy line
+`dryfirst <client>` (the shipped policy has `dryfirst jarvis`) makes the
+broker refuse every change of that client (`write`/`critical`; reads
+and undo are free) with `err dry_run_first <action>` unless the SAME call
+-- action and arguments in order, a FNV-1a print without the `@` meta
+lines -- was dry-run by the same client in the last 60 s. One dry run
+pays for one call; a dry run of plan-b does not pay for plan-c. The
+check comes before a call is parked, so the human is never asked about
+something nobody looked at first. `act whoami` says `dry_first=yes`, so
+an agent knows. On Justin's personal image `/bin/act` is on the bridge's
+command list (`/root/abbilder/justin-permissions.conf`).
 
 ### 9.3 Automations ("Baukasten", like Shortcuts) — **yes, as a client**
 An automation is a file: trigger (event, time, manual), steps (action
@@ -465,7 +569,7 @@ granted it, and it shows up in the log under its own name. Created by
 hand, from the UI, or by Jarvis (as a proposal the user saves).
 Dry-running an automation dry-runs every step.
 
-### 9.4 "What may which app" — **yes**
+### 9.4 "What may which app" — **yes, built (AB-006, section 5.3)**
 A settings page built entirely from bus data: rules, timed grants with
 remaining time, deny rules, and per client the counts from the audit log
 (e.g. "Jarvis: 41 reads, 3 changes, 1 refused this week"). Revoking is
@@ -488,6 +592,10 @@ enforced by the kernel (handles instead of ambient authority,
 | `kernel/user/actwire.fi` | frames, reassembly, text helpers — shared by all three programs |
 | `kernel/user/orientbus.fi` | the broker |
 | `kernel/user/act.fi` | the client |
+| `kernel/user/actcli.fi` | the client for programs with a window (settings) |
+| `tools/actionbus/gui.sh` | the screen test: foreign-window layer, settings pages |
+| `tools/actionbus/wlkeys.c` | a Linux Wayland program for that test |
+| `tools/actionbus/setsess.c` | test aid: the session uid, as glogin sets it |
 | `kernel/user/notes.fi` + `pakete/notes/` | example app with manifest and package recipe |
 | `tools/actionbus/manifest.py` | host reader (check / JSON) |
 | `tools/actionbus/run.sh` | the test: three guests, 10 sections |
@@ -545,10 +653,11 @@ Server images with `init` add `bus:*:respawn:/bin/orientbus serve`.
 dialog (5.3); events visible to every subscriber; payloads above 2 KB
 per request refused; manifests are read once at the broker's start (an
 app installed later needs a broker restart); an adapter call blocks the
-broker for up to 5 s; `dbus`/`ui`/`keys` adapters not executable; the
-settings window and most subsystems do not read their settings from the
-bus yet; Jarvis on the device may not run `/bin/act` until its bridge
-permissions say so (AB-009).
+broker for up to 5 s; `dbus` not executable, no keymap for Wayland
+programs, no element tree for foreign windows; theme, time zone,
+network and language pages of the settings window still write their own
+files; a broker that exits keeps its bus names until its parent reaps
+it (the kernel frees them in `reap`, not at exit).
 
 ## 11. Comparison
 
@@ -582,3 +691,6 @@ the bus · AB-011 automations · AB-012 audit rotation/viewer · AB-013
 large payloads via segments · AB-014 action versioning · AB-015 event
 permissions · AB-016 orientbus in the image and started by init.
 Done in round ACTION-BUS-2: AB-003, AB-005, AB-008 (cli/file), AB-016.
+Done in round ACTION-BUS-3: AB-005b (settings window + lock time +
+brightness), AB-006, AB-008b (foreign-window layer, keys/ui), AB-009
+(dry run first; the bridge may run `/bin/act`).

@@ -84,6 +84,14 @@ const SYS_POLL: u64 = 7
 const SYS_MMAP: u64 = 9
 const SYS_SOCKET: u64 = 41
 const SYS_ACCEPT: u64 = 43
+// ROUND ACTION-BUS-3: ACCEPT4, NOT ACCEPT. The loop below passes
+// SOCK_NONBLOCK as a fourth argument -- and `accept` (43) has no fourth
+// argument: the kernel took the flag as 0 and BLOCKED in the second
+// round until another client came. Measured with a libwayland program
+// (tools/actionbus/wlkeys.c): it connected, sent get_registry (12
+// octets), and waited for ever; the server sat in accept. A client that
+// connected twice (or the test with two) never showed it.
+const SYS_ACCEPT4: u64 = 288
 const SYS_SENDMSG: u64 = 46
 const SYS_RECVMSG: u64 = 47
 const SYS_BIND: u64 = 49
@@ -104,6 +112,7 @@ const WM_EVENT: u64 = 2103
 const WM_INFO: u64 = 2104
 const WM_FLUSH: u64 = 2105
 const WM_CLOSE: u64 = 2107
+const WM_APP: u64 = 2116
 
 // ------------------------------------------------------------- Grenzen
 
@@ -168,6 +177,44 @@ static mut n_bad: u64 = 0
 static mut n_wins: u64 = 0
 static mut n_commits: u64 = 0
 static mut n_fds: u64 = 0
+
+// ============================================ ROUND ACTION-BUS-3 (AB-008b)
+//
+// INPUT. Until this round the seat was offered and nothing came through
+// it: `get_keyboard` made no object, and no key or click of the window
+// server ever reached a Wayland program. Now every window this server
+// made is polled with WM_EVENT and what comes out goes to the client as
+// wl_keyboard / wl_pointer / xdg_toplevel events:
+//
+//   E_KEY    wl_keyboard.enter (once per surface), key pressed, released
+//            -- as a Linux evdev code (KEY_A = 30 ...), shift and ctrl
+//            as their own key presses around it
+//   E_DOWN/E_UP  wl_pointer.enter, motion, button (BTN_LEFT/BTN_RIGHT)
+//   E_CLOSE  xdg_toplevel.close -- the program decides, as with any
+//            compositor
+//
+// The same path carries a person's typing and the action bus's `keys` /
+// `ui` adapters (the kernel's WM_FWIN puts their events into THIS
+// window's ring and nowhere else).
+//
+// NOT BUILT, written here and not in a footnote: wl_keyboard.keymap.
+// It needs a file descriptor sent WITH the event (SCM_RIGHTS out of this
+// server) and an XKB keymap to put in it. Without it a program gets raw
+// evdev codes -- enough for a program that reads them (tools/actionbus/
+// wlkeys.c, and SDL/games), not for a toolkit that insists on a keymap.
+//
+// And the title and app id of xdg_toplevel are no longer thrown away:
+// the window carries the title (WM_CREATE) and the app id (WM_APP), so a
+// wrapper manifest can name the window it steers.
+static mut c_kbd: [u64; 4] = [0 as u64; 4]
+static mut c_ptr: [u64; 4] = [0 as u64; 4]
+static mut c_kfoc: [u64; 4] = [0 as u64; 4]
+static mut c_pfoc: [u64; 4] = [0 as u64; 4]
+static mut c_title: [u8; 128] = [0 as u8; 128] // MAX_CLIENTS x 32
+static mut c_appid: [u8; 96] = [0 as u8; 96] // MAX_CLIENTS x 24
+static mut evb: [u64; 2] = [0 as u64; 2]
+static mut n_keys: u64 = 0
+static mut n_ptr: u64 = 0
 
 fn obj_base(c: u64, i: u64) -> u64 {
     return (c * MAX_OBJ + i) * O_FIELDS
@@ -588,7 +635,11 @@ fn surface_commit(c: u64, sid: u64) {
         var versuch: u64 = 0
         while versuch < 600 && (win == 0
             || win > 0xFFFFFFFFFFFF0000) {
-            win = ulib.sys4(WM_CREATE, xy, wh, 0, 0)
+            var tp: u64 = 0
+            if c_title[(c * 32) as usize] != 0 as u8 {
+                tp = (&c_title[0 as usize]) as u64 + c * 32
+            }
+            win = ulib.sys4(WM_CREATE, xy, wh, tp, 0)
             if win == 0 || win > 0xFFFFFFFFFFFF0000 {
                 ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
                 versuch = versuch + 1
@@ -602,6 +653,14 @@ fn surface_commit(c: u64, sid: u64) {
         }
         obj_set(c, sid, O_A, win)
         n_wins = n_wins + 1
+        let ap: u64 = (&c_appid[0 as usize]) as u64 + c * 24
+        if c_appid[(c * 24) as usize] != 0 as u8 {
+            var al: u64 = 0
+            while al < 23 && c_appid[(c * 24 + al) as usize] != 0 as u8 {
+                al = al + 1
+            }
+            ulib.sys(WM_APP, win, ap, al)
+        }
     }
     // Zeile fuer Zeile in den Fensterpuffer. WM_FILL malt ein Rechteck
     // in EINER Farbe -- fuer ein Bild ist das ein Aufruf je Bildpunkt,
@@ -746,6 +805,7 @@ fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
             return
         }
         obj_set(c, tid, O_A, id)
+        obj_set(c, id, O_B, tid) // ROUND ACTION-BUS-3: for the close box
         // Sofort ein configure schicken: erst eines mit 0x0 (der
         // Client darf seine Groesse selbst waehlen), dann das
         // xdg_surface.configure mit der Folgenummer.
@@ -778,9 +838,17 @@ fn on_xdg_toplevel(c: u64, id: u64, op: u64, argp: u64) {
         obj_drop(c, id)
         return
     }
-    // set_title, set_app_id, set_min_size, move, resize und der ganze
-    // Rest: angenommen, ohne Wirkung. Ein Fenstertitel waere WM_TITLE
-    // und ist eine eigene Runde wert.
+    // ROUND ACTION-BUS-3: title and app id are kept -- the window gets
+    // them when it is made (the first commit comes after both).
+    if op == wlproto.RQ_XDG_TOPLEVEL_SET_TITLE {
+        str_arg(argp, (&c_title[0 as usize]) as u64 + c * 32, 32)
+        return
+    }
+    if op == wlproto.RQ_XDG_TOPLEVEL_SET_APP_ID {
+        str_arg(argp, (&c_appid[0 as usize]) as u64 + c * 24, 24)
+        return
+    }
+    // set_min_size, move, resize and the rest: accepted, no effect.
 }
 
 // ====================================================== DER ZERLEGER
@@ -841,8 +909,302 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         if op == 0 {
             obj_drop(c, id)
         }
+    } else if iface == wlproto.IF_WL_SEAT {
+        on_seat(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_KEYBOARD {
+        if op == wlproto.RQ_WL_KEYBOARD_RELEASE {
+            if c_kbd[c as usize] == id {
+                c_kbd[c as usize] = 0
+            }
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_WL_POINTER {
+        // set_cursor: accepted, no effect (the server draws its own)
+        if op == wlproto.RQ_WL_POINTER_RELEASE {
+            if c_ptr[c as usize] == id {
+                c_ptr[c as usize] = 0
+            }
+            obj_drop(c, id)
+        }
     }
     return true
+}
+
+fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_SEAT_GET_POINTER {
+        let nid: u64 = rd32(argp)
+        if obj_new(c, nid, wlproto.IF_WL_POINTER) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        c_ptr[c as usize] = nid
+        c_pfoc[c as usize] = 0
+        return
+    }
+    if op == wlproto.RQ_WL_SEAT_GET_KEYBOARD {
+        let nid: u64 = rd32(argp)
+        if obj_new(c, nid, wlproto.IF_WL_KEYBOARD) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        c_kbd[c as usize] = nid
+        c_kfoc[c as usize] = 0
+        return
+    }
+    if op == wlproto.RQ_WL_SEAT_GET_TOUCH {
+        // capabilities never offered touch; the object exists so the
+        // number does not point into nothing
+        obj_new(c, rd32(argp), wlproto.IF_NONE)
+        return
+    }
+    // release: nothing to free here
+}
+
+// A Wayland string argument (length with the zero, octets) at `argp`
+// into `out` (at most max-1 octets).
+fn str_arg(argp: u64, out: u64, max: u64) {
+    let l: u64 = rd32(argp)
+    var k: u64 = 0
+    while k + 1 < l && k + 1 < max {
+        __mmio_write8((out + k) as *mut u8, inbuf[(argp + 4 + k) as usize])
+        k = k + 1
+    }
+    __mmio_write8((out + k) as *mut u8, 0 as u8)
+}
+
+// OrientOS key code (wlib: ASCII, 0x101.. arrows, 0x110.. F keys) ->
+// Linux evdev code | modifier << 16 (1 = shift, 2 = ctrl); 0 = none.
+fn evdev_of(k: u64) -> u64 {
+    var abc: [u8; 26] = [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+        49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44]
+    if k >= 97 && k <= 122 {
+        return abc[(k - 97) as usize] as u64
+    }
+    if k >= 65 && k <= 90 {
+        return (abc[(k - 65) as usize] as u64) | (1 << 16)
+    }
+    if k >= 49 && k <= 57 {
+        return k - 49 + 2
+    }
+    if k == 48 {
+        return 11
+    }
+    if k == 32 {
+        return 57
+    }
+    if k == 13 || k == 10 {
+        return 28
+    }
+    if k == 9 {
+        return 15
+    }
+    if k == 8 || k == 127 {
+        return 14
+    }
+    if k == 27 {
+        return 1
+    }
+    if k == 45 {
+        return 12
+    }
+    if k == 61 {
+        return 13
+    }
+    if k == 44 {
+        return 51
+    }
+    if k == 46 {
+        return 52
+    }
+    if k == 47 {
+        return 53
+    }
+    if k >= 1 && k <= 26 {
+        return (abc[(k - 1) as usize] as u64) | (2 << 16)
+    }
+    if k == 0x101 {
+        return 103
+    }
+    if k == 0x102 {
+        return 108
+    }
+    if k == 0x103 {
+        return 105
+    }
+    if k == 0x104 {
+        return 106
+    }
+    if k == 0x105 {
+        return 102
+    }
+    if k == 0x106 {
+        return 107
+    }
+    if k == 0x107 {
+        return 104
+    }
+    if k == 0x108 {
+        return 109
+    }
+    if k == 0x109 {
+        return 111
+    }
+    if k >= 0x110 && k <= 0x119 {
+        return k - 0x110 + 59
+    }
+    return 0
+}
+
+fn ms_now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) * 10
+}
+
+fn kb_key(c: u64, code: u64, pressed: u64) {
+    let p: u64 = ev_begin(c, c_kbd[c as usize], 3) // wl_keyboard.key
+    ev_arg(c, p, 0, next_serial)
+    ev_arg(c, p, 1, ms_now() & 0xFFFFFFFF)
+    ev_arg(c, p, 2, code)
+    ev_arg(c, p, 3, pressed)
+    ev_end(c, p, 4)
+    next_serial = next_serial + 1
+}
+
+fn in_key(c: u64, sid: u64, k: u64) {
+    if c_kbd[c as usize] == 0 {
+        return
+    }
+    let e: u64 = evdev_of(k)
+    if e == 0 {
+        return
+    }
+    if c_kfoc[c as usize] != sid {
+        let p: u64 = ev_begin(c, c_kbd[c as usize], 1) // enter
+        ev_arg(c, p, 0, next_serial)
+        ev_arg(c, p, 1, sid)
+        ev_arg(c, p, 2, 0) // keys: an empty array
+        ev_end(c, p, 3)
+        next_serial = next_serial + 1
+        c_kfoc[c as usize] = sid
+    }
+    let m: u64 = e >> 16
+    let code: u64 = e & 0xFFFF
+    if m == 1 {
+        kb_key(c, 42, 1) // KEY_LEFTSHIFT
+    }
+    if m == 2 {
+        kb_key(c, 29, 1) // KEY_LEFTCTRL
+    }
+    kb_key(c, code, 1)
+    kb_key(c, code, 0)
+    if m == 1 {
+        kb_key(c, 42, 0)
+    }
+    if m == 2 {
+        kb_key(c, 29, 0)
+    }
+    n_keys = n_keys + 1
+    if dbg != 0 {
+        var s1: [u8; 18] = "wayd: key evdev=\0\0"
+        ulib.say((&s1[0 as usize]) as u64)
+        ulib.sayu(code)
+        ulib.nl()
+    }
+}
+
+fn in_button(c: u64, sid: u64, x: u64, y: u64, btn: u64, down: bool) {
+    if c_ptr[c as usize] == 0 {
+        return
+    }
+    if c_pfoc[c as usize] != sid {
+        let p: u64 = ev_begin(c, c_ptr[c as usize], 0) // enter
+        ev_arg(c, p, 0, next_serial)
+        ev_arg(c, p, 1, sid)
+        ev_arg(c, p, 2, x * 256)
+        ev_arg(c, p, 3, y * 256)
+        ev_end(c, p, 4)
+        next_serial = next_serial + 1
+        c_pfoc[c as usize] = sid
+    }
+    let pm: u64 = ev_begin(c, c_ptr[c as usize], 2) // motion
+    ev_arg(c, pm, 0, ms_now() & 0xFFFFFFFF)
+    ev_arg(c, pm, 1, x * 256)
+    ev_arg(c, pm, 2, y * 256)
+    ev_end(c, pm, 3)
+    var code: u64 = 0x110 // BTN_LEFT
+    if (btn & 2) != 0 {
+        code = 0x111 // BTN_RIGHT
+    }
+    var st: u64 = 0
+    if down {
+        st = 1
+    }
+    let pb: u64 = ev_begin(c, c_ptr[c as usize], 3) // button
+    ev_arg(c, pb, 0, next_serial)
+    ev_arg(c, pb, 1, ms_now() & 0xFFFFFFFF)
+    ev_arg(c, pb, 2, code)
+    ev_arg(c, pb, 3, st)
+    ev_end(c, pb, 4)
+    next_serial = next_serial + 1
+    n_ptr = n_ptr + 1
+    if dbg != 0 && down {
+        var s1: [u8; 19] = "wayd: button x=\0\0\0\0"
+        var s2: [u8; 4] = " y=\0"
+        ulib.say((&s1[0 as usize]) as u64)
+        ulib.sayu(x)
+        ulib.say((&s2[0 as usize]) as u64)
+        ulib.sayu(y)
+        ulib.nl()
+    }
+}
+
+// Every window of every client: what the window server has for it.
+fn pump_input() {
+    var c: u64 = 0
+    while c < MAX_CLIENTS {
+        if c_used[c as usize] != 0 {
+            var o: u64 = 0
+            while o < MAX_OBJ {
+                let b: u64 = obj_base(c, o)
+                if objs[(b + O_ID) as usize] != 0
+                    && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SURFACE {
+                    let sid: u64 = objs[(b + O_ID) as usize]
+                    let win: u64 = obj_get(c, sid, O_A)
+                    var n: u64 = 0
+                    while win != 0 && n < 16 && c_outlen[c as usize] + 256 < OUT_CAP
+                        && ulib.sys(WM_EVENT, win,
+                            (&evb[0 as usize]) as u64, 0) == 1 {
+                        let typ: u64 = evb[0 as usize]
+                        let d: u64 = evb[1 as usize]
+                        let ea: u64 = (d >> 32) & 0xFFFF
+                        let eb: u64 = (d >> 16) & 0xFFFF
+                        let ec: u64 = d & 0xFFFF
+                        if typ == 1 {
+                            in_key(c, sid, ea)
+                        } else if typ == 2 {
+                            in_button(c, sid, ea, eb, ec, true)
+                        } else if typ == 3 {
+                            in_button(c, sid, ea, eb, ec, false)
+                        } else if typ == 5 {
+                            // close box: xdg_toplevel.close
+                            let xs: u64 = obj_get(c, sid, O_C)
+                            if xs != 0 {
+                                let tl: u64 = obj_get(c, xs, O_B)
+                                if tl != 0 {
+                                    let p: u64 = ev_begin(c, tl, 1)
+                                    ev_end(c, p, 0)
+                                    var s1: [u8; 25] = "wayd: close to toplevel\n\0"
+                                    ulib.say((&s1[0 as usize]) as u64)
+                                }
+                            }
+                        }
+                        n = n + 1
+                    }
+                }
+                o = o + 1
+            }
+        }
+        c = c + 1
+    }
 }
 
 // ================================================== EIN- UND AUSGANG
@@ -1064,6 +1426,12 @@ fn u_start(args: u64) -> u64 {
     var s_bad: [u8; 6] = " bad=\0"
 
     // Der Pfad: erstes Argument, sonst /tmp/wayland-0.
+    // ROUND ACTION-BUS-3: THIS SERVER HOSTS FOREIGN PROGRAMS, and says
+    // so in the kernel: `compat:wayland` (only if nobody labelled it
+    // before -- a label only narrows). The foreign-window layer steers
+    // windows of compat:* owners and no others (sysgui.fwin_target).
+    var lbl: [u8; 15] = "compat:wayland\0"
+    ulib.sys(1990, 1, (&lbl[0 as usize]) as u64, 14)
     var path: u64 = (&deflt[0 as usize]) as u64
     if ulib.arg_count(args) > 1 {
         path = ulib.arg_at(args, 1)
@@ -1178,7 +1546,7 @@ fn u_start(args: u64) -> u64 {
     while n < grenze {
         // Neue Verbindungen -- nicht blockierend (SOCK_NONBLOCK = 2048
         // als accept4-Flag), damit der Umlauf weiterlaeuft.
-        let nf: u64 = ulib.sys4(SYS_ACCEPT, ls, 0, 0, 2048)
+        let nf: u64 = ulib.sys4(SYS_ACCEPT4, ls, 0, 0, 2048)
         if nf < 0xFFFFFFFFFFFF0000 {
             var slot: u64 = MAX_CLIENTS
             var k: u64 = 0
@@ -1194,6 +1562,12 @@ fn u_start(args: u64) -> u64 {
                 c_inlen[slot as usize] = 0
                 c_outlen[slot as usize] = 0
                 c_nextid[slot as usize] = 0xFF000000
+                c_kbd[slot as usize] = 0
+                c_ptr[slot as usize] = 0
+                c_kfoc[slot as usize] = 0
+                c_pfoc[slot as usize] = 0
+                c_title[(slot * 32) as usize] = 0 as u8
+                c_appid[(slot * 24) as usize] = 0 as u8
                 var o: u64 = 0
                 while o < MAX_OBJ {
                     objs[(obj_base(slot, o) + O_ID) as usize] = 0
@@ -1210,6 +1584,7 @@ fn u_start(args: u64) -> u64 {
             }
         }
 
+        pump_input()
         var c: u64 = 0
         while c < MAX_CLIENTS {
             if c_used[c as usize] != 0 {

@@ -46,6 +46,7 @@ import ipc.perm
 import sched.proc
 import drv.hid.ps2m
 import sched.sched
+import sched.origin
 import ui.shot
 import ipc.tip
 import drv.hid.kbd
@@ -55,6 +56,7 @@ import gfx.vmode
 import ui.wig
 import ui.wm
 import ui.wmplug
+import serial
 
 import sys.sys
 
@@ -594,17 +596,28 @@ fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
     if platz >= wm.MAX_WIN || max < sys.WL_BYTES {
         return cap.err(cap.E_INVALID)
     }
+    return wl_fill(state, me, platz, aus, sys.WL_BYTES)
+}
+
+// One record of the window table into Ring 3: WL_BYTES for the taskbar,
+// FW_BYTES (with owner and kind) for the foreign-window layer.
+fn wl_fill(state: u64, me: u64, platz: u64, aus: u64, n: u64) -> u64 {
     let puffer: u64 = blockb(state) + 3600
     var k: u64 = 0
-    while k < sys.WL_BYTES {
+    while k < n {
         kstate.set8(puffer + k, 0 as u8)
         k = k + 1
     }
     if !wm.valid(state, platz) {
-        if !sys.copy_out(state, me, aus, puffer, sys.WL_BYTES) {
+        if !sys.copy_out(state, me, aus, puffer, n) {
             return cap.err(cap.E_INVALID)
         }
         return 0
+    }
+    if n >= sys.FW_BYTES {
+        kstate.set(puffer, sys.FW_OWNER,
+            sched.tget(state, wm.win_owner(state, platz), sched.T_PID))
+        kstate.set(puffer, sys.FW_KIND, wm.win_kind(state, platz))
     }
     kstate.set(puffer, sys.WL_ID, wm.win_id(state, platz))
     kstate.set(puffer, sys.WL_X, wm.win_x(state, platz) as u64)
@@ -645,10 +658,128 @@ fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
         kstate.set8(puffer + sys.WL_APP + k, kstate.get8(ap + k) as u8)
         k = k + 1
     }
-    if !sys.copy_out(state, me, aus, puffer, sys.WL_BYTES) {
+    if !sys.copy_out(state, me, aus, puffer, n) {
         return cap.err(cap.E_INVALID)
     }
     return 1
+}
+
+// ============================================ ROUND ACTION-BUS-3 (AB-008b)
+//
+// MAY THE FOREIGN-WINDOW LAYER TOUCH THIS WINDOW? Four windows it never
+// touches, whoever asks:
+//
+//   the lock screen, and ANY window while the screen is locked -- a key
+//     that reaches the window behind the lock screen is exactly the leak
+//     round ANMELDUNG closed for the keyboard (r205);
+//   a TERMINAL window (kind K_TERM) -- keys into a terminal are shell
+//     commands, and a wrapper manifest for a media player must not be a
+//     way to type `rm` into root's shell;
+//   the desktop (L_DESK) and panels / menus (layers above L_NORMAL) --
+//     they belong to the session, not to a program;
+//   a window of the caller itself;
+//   ANY window whose owner is not a FOREIGN program -- the owner's
+//     kernel label (AB-003, sched/origin.fi) must start with `compat:`.
+//     The user's own tools (settings, explorer: no label) and installed
+//     OrientOS apps (`app:<name>`, they have actions of their own) are
+//     never steered by synthetic input. Without this rule a wrapper
+//     manifest could name the settings window, and an agent with a grant
+//     for that wrapper could click "Yes, change it" for itself. wayd
+//     labels itself `compat:wayland`, so the windows of Linux programs
+//     (and one day Wine's) are foreign; the adapter children are
+//     `compat:<app>` already.
+//
+// Everything else is a program's own window, and the broker only names
+// one that its wrapper manifest describes (`for window <glob>`).
+fn owner_foreign(state: u64, t: u64) -> bool {
+    var want: [u8; 8] = "compat:\0"
+    var i: u64 = 0
+    while i < 7 {
+        if origin.byte_at(state, t, i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn fwin_target(state: u64, me: u64, id: u64) -> u64 {
+    let w: u64 = wm.by_id(state, id)
+    if w >= wm.MAX_WIN {
+        return wm.MAX_WIN
+    }
+    if wm.sperre_an(state) {
+        return wm.MAX_WIN
+    }
+    if wm.win_kind(state, w) == wm.K_TERM {
+        return wm.MAX_WIN
+    }
+    if wm.win_layer(state, w) != wm.L_NORMAL {
+        return wm.MAX_WIN
+    }
+    if wm.win_owner(state, w) == me {
+        return wm.MAX_WIN
+    }
+    if !owner_foreign(state, wm.win_owner(state, w)) {
+        return wm.MAX_WIN
+    }
+    return w
+}
+
+fn wm_fwin(state: u64, me: u64, op: u64, a: u64, b: u64, c: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return cap.err(cap.E_RIGHTS)
+    }
+    if op == sys.FW_LIST {
+        if a >= wm.MAX_WIN {
+            return cap.err(cap.E_INVALID)
+        }
+        return wl_fill(state, me, a, b, sys.FW_BYTES)
+    }
+    let w: u64 = fwin_target(state, me, a)
+    if w >= wm.MAX_WIN {
+        return cap.err(cap.E_RIGHTS)
+    }
+    var s_fw: [u8; 16] = "wm: fwin op=\0\0\0\0"
+    var s_id: [u8; 6] = " win=\0"
+    var s_v: [u8; 4] = " v=\0"
+    serial.puts((&s_fw[0]) as u64)
+    serial.dec(op)
+    serial.puts((&s_id[0]) as u64)
+    serial.dec(a)
+    serial.puts((&s_v[0]) as u64)
+    serial.dec(b)
+    serial.nl()
+    if op == sys.FW_KEY {
+        wm.ev_push(state, w, wm.E_KEY, b & 0xFFFF, 0, 0)
+        return 0
+    }
+    if op == sys.FW_CLICK {
+        let x: u64 = b & 0xFFFF
+        let y: u64 = (b >> 16) & 0xFFFF
+        if x >= wm.win_w(state, w) || y >= wm.win_h(state, w) {
+            return cap.err(cap.E_INVALID)
+        }
+        var btn: u64 = 1 // ps2m.B_LEFT
+        if c == 2 {
+            btn = 2 // ps2m.B_RIGHT
+        }
+        wm.ev_push(state, w, wm.E_DOWN, x, y, btn)
+        wm.ev_push(state, w, wm.E_UP, x, y, btn)
+        return 0
+    }
+    if op == sys.FW_CLOSE {
+        wm.ev_push(state, w, wm.E_CLOSE, 0, 0, 0)
+        return 0
+    }
+    if op == sys.FW_RAISE {
+        wm.set_hidden(state, w, false)
+        wm.raise_win(state, w)
+        wm.set_focus(state, w)
+        wm.compose(state)
+        return 0
+    }
+    return cap.err(cap.E_INVALID)
 }
 
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
@@ -713,6 +844,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     // Titel der anderen nicht.
     if number == sys.WM_LIST {
         return wm_list(state, me, a0, a1, a2)
+    }
+    if number == sys.WM_FWIN {
+        return wm_fwin(state, me, a0, a1, a2, a3)
     }
     if number == sys.WM_DECO {
         if !is_taskbar(state, me) {

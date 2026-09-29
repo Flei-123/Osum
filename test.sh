@@ -1679,6 +1679,14 @@ lauf "54. the action bus in the real image: broker + settingsd started by the se
 lauf "55. the social layer: social.* actions on orient-bus, providers behind one interface, presence/activity/privacy, the friends bar (tools/social/run.sh, round SOCIAL)" \
      tools/social/run.sh social '^SOCIAL: |^== |^  OK    |^  FAIL  '
 
+# 56. ROUND ACTION-BUS-3 ON A SCREEN: the foreign-window layer (a Linux
+# Wayland program on wayd steered through its window -- keys, typed text,
+# a click, the close box; the settings window is NOT steerable) and the
+# settings window as a client of the bus (pages System and App rights,
+# a critical change only after the yes, brightness into the kernel).
+lauf "56. the action bus on a screen: foreign windows (keys/ui adapters, wayd input) and the settings window as a bus client (tools/actionbus/gui.sh, round ACTION-BUS-3)" \
+     tools/actionbus/gui.sh actbusgui '^ACTBUS-GUI: |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

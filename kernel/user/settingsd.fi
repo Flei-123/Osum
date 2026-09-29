@@ -89,8 +89,35 @@ fn copyz(dst: u64, src: u64, max: u64) {
 
 // ------------------------------------------------ values
 
+// ROUND ACTION-BUS-3: display.brightness LIVES IN THE KERNEL. The screen
+// tab has always set it with SYS_DISPSET (1811, field 3); the kernel's
+// scale is 40..200 with 100 = unchanged, the schema's is 0..100 percent,
+// so 50 % is the picture as it comes and every step is two kernel
+// points (never below the kernel's 40). With no display (a test guest
+// without a screen) the value stays in /etc/settings.db as before.
+static mut K_BRIGHT: [u8; 19] = "display.brightness\0"
+
+fn is_bright(i: u64) -> bool {
+    return actwire.str_eq(setschema.key(i), (&K_BRIGHT[0 as usize]) as u64)
+}
+
+fn disp_ready() -> bool {
+    let r: u64 = ulib.sys(1810, 0, 0, 0) // SYS_DISPGET, DG_READY
+    return !ulib.bad(r) && r == 1
+}
+
 fn value_of(i: u64, out: u64) {
     var found: bool = false
+    if is_bright(i) && disp_ready() {
+        let k: u64 = ulib.sys(1810, 16, 0, 0) // DG_BRIGHT
+        if !ulib.bad(k) {
+            var z: [u8; 24] = [0 as u8; 24]
+            let n: u64 = ulib.digits(k / 2, (&z[0 as usize]) as u64)
+            z[(n) as usize] = 0 as u8
+            copyz(out, (&z[0 as usize]) as u64, 64)
+            return
+        }
+    }
     if setschema.has_store(i) {
         found = actwire.kvfile_get(setschema.store_file(i), setschema.store_field(i), out, 64)
     } else {
@@ -102,6 +129,23 @@ fn value_of(i: u64, out: u64) {
 }
 
 fn value_put(i: u64, v: u64) -> bool {
+    if is_bright(i) && disp_ready() {
+        var k: u64 = ulib.to_num(v) * 2
+        if k < 40 {
+            k = 40
+        }
+        let r: u64 = ulib.sys(1811, 3, k, 0) // SYS_DISPSET, DS_BRIGHT
+        var s1: [u8; 33] = "settingsd: display brightness k=\0"
+        say((&s1[0 as usize]) as u64)
+        actwire.outnum(k)
+        var s2: [u8; 5] = " rc=\0"
+        say((&s2[0 as usize]) as u64)
+        actwire.outnum(r)
+        nl()
+        if ulib.bad(r) {
+            return false
+        }
+    }
     if setschema.has_store(i) {
         return actwire.kvfile_set(setschema.store_file(i), setschema.store_field(i), v)
     }

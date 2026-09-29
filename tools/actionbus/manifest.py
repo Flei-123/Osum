@@ -116,8 +116,11 @@ def parse(text, path="<manifest>", wrapper=False):
             if cur is not None and "args" in cur:
                 cur["keyed"] = "settings.schema"
         elif k == "for":
-            if len(w) < 3 or w[1] != "exe":
-                raise Bad("%s: 'for exe <path>'" % where)
+            # AB-008: `for exe <path>`; AB-008b: `for window "<glob>"`
+            if len(w) < 3 or w[1] not in ("exe", "window"):
+                raise Bad("%s: 'for exe <path>' or 'for window \"<glob>\"'" % where)
+            if w[1] == "window" and not wrapper:
+                raise Bad("%s: 'for window' is for wrapper manifests" % where)
             title_for = w[2]
         elif k == "adapter":
             if len(w) < 2 or w[1] not in ADAPTERS:
