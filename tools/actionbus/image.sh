@@ -89,8 +89,36 @@ tr -cd '\11\12\15\40-\176' < "$D/ser.txt" > "$D/ser.klar"
 S="$D/ser.klar"
 grep -qaE 'desk: orientbus pid=[0-9]' "$S" && ok "the session starts /bin/orientbus ($(grep -aoE 'desk: orientbus pid=[0-9]+' "$S" | head -1))" \
     || bad "the session did not start the broker"
-has "$S" "orientbus: ready apps=1 actions=6 rejected_manifests=0" "the broker reads the settings manifest (1 app, 5 actions + 1 event)"
-has "$S" "settingsd: ready keys=14" "settingsd reads the shipped schema (14 settings)"
+# The serial line is shared with the kernel, and with two cores its lines
+# can tear a program's line apart (A-046). So the ready lines are looked
+# for with the kernel's characters taken OUT: every character of the
+# expected line, in order, within a window of three times its length.
+torn() { # file text -> 0 if the text is there, possibly interleaved
+    python3 - "$1" "$2" <<'PY2'
+import sys
+d = open(sys.argv[1], encoding="latin-1").read()
+t = sys.argv[2]
+start = 0
+while True:
+    i = d.find(t[0], start)
+    if i < 0:
+        sys.exit(1)
+    j, k = i, 0
+    while j < len(d) and k < len(t) and j - i < 3 * len(t):
+        if d[j] == t[k]:
+            k += 1
+        j += 1
+    if k == len(t):
+        sys.exit(0)
+    start = i + 1
+PY2
+}
+torn "$S" "orientbus: ready apps=1 actions=6 rejected_manifests=0" \
+    && ok "the broker reads the settings manifest (1 app, 5 actions + 1 event, none refused)" \
+    || bad "no 'orientbus: ready apps=1 actions=6 rejected_manifests=0'"
+torn "$S" "settingsd: ready keys=14" \
+    && ok "settingsd reads the shipped schema (14 settings)" \
+    || bad "no 'settingsd: ready keys=14'"
 has "$S" "orientbus: provider settings bound" "settingsd is bound as the provider of settings.*"
 # the broker comes before the sign-in screen
 lb=$(grep -anE 'desk: orientbus pid=' "$S" | head -1 | cut -d: -f1)
