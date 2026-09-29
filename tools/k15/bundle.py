@@ -134,6 +134,14 @@ def main(argv):
             print(r.stdout + r.stderr, file=sys.stderr)
             return 1
         zeilen.append("%s/symbol=%s" % (ziel, sym))
+        # AB-003: the image's own bundles carry SYSTEM -- their programs act
+        # as the user and get no app label from the kernel
+        # (kernel/sched/origin.fi). `opk` never installs this name.
+        marke = os.path.join(arbeit, "SYSTEM")
+        if not os.path.exists(marke):
+            with open(marke, "w") as f:
+                f.write("shipped with the OrientOS image; see docs/ACTION-BUS.md 5.2\n")
+        zeilen.append("%s/SYSTEM=%s" % (ziel, marke))
         zeilen.append("%s/data/" % ziel)
         zeilen.append("%s/data/README=%s"
                       % (ziel, os.path.join(pfad, "data", "README")))

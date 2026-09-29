@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/sched/origin.fi -- AB-003: WHERE A PROCESS COMES FROM, attested
+// by the kernel (docs/ACTION-BUS.md section 5.2).
+//
+// THE PROBLEM. The action bus decides by CLIENT: the human at the device
+// ("user"), Jarvis, an app, a script. Until this round the client NAMED
+// ITSELF (`act ... --as jarvis`), so any local program could say "I am
+// the user" and skip every confirmation a write would need. The kernel
+// only stamped pid and uid into a bus message, and on a desktop almost
+// everything runs under the same uid.
+//
+// THE RULE, in three sentences:
+//
+//   1. Every task carries an ORIGIN label in its task record (32 octets,
+//      `sched.T_ORIGIN`). Empty = "started by the system or the person at
+//      the device"; otherwise e.g. `app:notes` or `jarvis`.
+//   2. A program started from an app bundle -- a path of the form
+//      `/apps/<name>.osp/...` or `/apps/<name>.prog/...` (the path
+//      `execve` resolved, the SCRIPT's path for a `#!` file) -- gets
+//      `app:<name>`, IF its creator had no label yet. EXCEPT a bundle
+//      that carries a root-owned file `SYSTEM`: those are the bundles
+//      the image itself ships (terminal, explorer, settings ...), written
+//      by `tools/k15/bundle.py`; they are the user's own tools, and a
+//      label on the terminal would, being sticky, swallow the label of
+//      every app the user starts from it. `opk` never installs a file
+//      called SYSTEM (kernel/user/opk.fi), so a package cannot claim it.
+//   3. The label is STICKY: `fork`, `clone`, `execve`, `spawn` and every
+//      other way of starting something hand it on unchanged, and nothing
+//      can clear or change a label once set. A process may only set its
+//      OWN label, and only while it is still empty (`set_self`).
+//
+// Why sticky and not "the file that is running now": an app that runs
+// `/bin/act`, or copies itself to /tmp and runs the copy, would otherwise
+// become the user. With the rule above every descendant of an app is that
+// app, whatever file it executes. The only way to an empty label is to be
+// started by a process that has an empty one -- the shell, the desktop,
+// init -- which is exactly "the user started it".
+//
+// Why a label can only NARROW. The empty label is the most trusted one
+// (the user). Setting any label moves a process away from it, never
+// towards it; and a set label never changes again. `jarvisd` uses this:
+// every command Jarvis runs is marked `jarvis` before it is exec'ed, so
+// even if Jarvis sends `--as user`, the broker sees `jarvis`.
+//
+// Race-free by construction: because a label can only go from empty to
+// set, a broker that looks up the label of a sender AFTER it received the
+// message sees a label at least as restrictive as the one the sender had
+// when it sent it. pids are never reused (`kstate.NEXT_PID` only counts
+// up), so a dead sender cannot be impersonated by a newcomer.
+//
+// What this does NOT cover (written down so nobody thinks it does): a
+// process of the user that runs a file an app PLACED somewhere (an app
+// that writes the user's autostart). That is the sandbox's job (roadmap
+// S-010: an app gets handles, not the whole home directory).
+
+profile kernel
+
+import lib.kstate
+import sched.sched
+import fs.fs
+
+export {
+    LEN, LABEL_MAX, at, is_empty, clear, inherit, derive, set_self, byte_at,
+    valid_char, same_app, probe, B_NONE, B_APP, B_SYSTEM,
+}
+
+// The field: 32 octets (T_ORIGIN is 688..719, TASK_BYTES is 1024). A
+// LABEL is at most 23 characters, because that is what a client name in
+// the broker's tables holds (24 octets with the zero); an app name in a
+// label at most 19 ("app:" + 19). A longer app name gets "app:?".
+const LEN: u64 = 32
+const LABEL_MAX: u64 = 23
+
+fn at(state: u64, t: u64) -> u64 {
+    return sched.task_at(state, t) + sched.T_ORIGIN
+}
+
+fn byte_at(state: u64, t: u64, i: u64) -> u64 {
+    if t >= kstate.MAX_TASKS || i >= LEN {
+        return 0
+    }
+    return kstate.get8(at(state, t) + i)
+}
+
+fn is_empty(state: u64, t: u64) -> bool {
+    if t >= kstate.MAX_TASKS {
+        return true
+    }
+    return kstate.get8(at(state, t)) == 0
+}
+
+fn clear(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    var k: u64 = 0
+    while k < LEN {
+        kstate.set8(at(state, t) + k, 0 as u8)
+        k = k + 1
+    }
+}
+
+// fork, clone, spawn of a built-in program: the child IS the parent's.
+fn inherit(state: u64, parent: u64, child: u64) {
+    if parent >= kstate.MAX_TASKS || child >= kstate.MAX_TASKS {
+        return
+    }
+    var k: u64 = 0
+    while k < LEN {
+        kstate.set8(at(state, child) + k,
+            kstate.get8(at(state, parent) + k) as u8)
+        k = k + 1
+    }
+}
+
+// Letters, digits and . _ - : -- what a client name in the audit log may
+// consist of. Anything else would let a label smuggle a space or a line
+// break into a log line.
+fn valid_char(c: u64) -> bool {
+    if c >= 97 && c <= 122 {
+        return true // a-z
+    }
+    if c >= 65 && c <= 90 {
+        return true // A-Z
+    }
+    if c >= 48 && c <= 57 {
+        return true // 0-9
+    }
+    return c == 46 || c == 95 || c == 45 || c == 58 // . _ - :
+}
+
+fn put(state: u64, t: u64, i: u64, c: u64) {
+    kstate.set8(at(state, t) + i, c as u8)
+}
+
+// What kind of path is `path`? Called by `elf.build` BEFORE it turns the
+// interrupts off: the SYSTEM test looks a file up, and a lookup may have
+// to read a disk.
+const B_NONE: u64 = 0 // not inside an app bundle
+const B_APP: u64 = 1 // /apps/<name>.osp|.prog/...
+const B_SYSTEM: u64 = 2 // ... with a root-owned SYSTEM marker
+
+// The end of the bundle segment after "/apps/": the index of the slash
+// that follows it, or 0 if `path` is not "/apps/<seg>/...".
+fn seg_end(path: u64) -> u64 {
+    if kstate.get8(path) != 47 || kstate.get8(path + 1) != 97
+        || kstate.get8(path + 2) != 112 || kstate.get8(path + 3) != 112
+        || kstate.get8(path + 4) != 115 || kstate.get8(path + 5) != 47 {
+        return 0
+    }
+    var e: u64 = 6
+    var going: bool = true
+    while going {
+        let c: u64 = kstate.get8(path + e)
+        if c == 0 || c == 47 || e > 6 + 200 {
+            going = false
+        } else {
+            e = e + 1
+        }
+    }
+    if kstate.get8(path + e) != 47 {
+        return 0
+    }
+    return e
+}
+
+// The length of the suffix (".osp" = 4, ".prog" = 5) the segment ends in,
+// 0 = neither.
+fn suffix_len(path: u64, e: u64) -> u64 {
+    let seg: u64 = e - 6
+    if seg >= 5 {
+        let d: u64 = path + e - 5
+        if kstate.get8(d) == 46 && kstate.get8(d + 1) == 112
+            && kstate.get8(d + 2) == 114 && kstate.get8(d + 3) == 111
+            && kstate.get8(d + 4) == 103 {
+            return 5
+        }
+    }
+    if seg >= 4 {
+        let d2: u64 = path + e - 4
+        if kstate.get8(d2) == 46 && kstate.get8(d2 + 1) == 111
+            && kstate.get8(d2 + 2) == 115 && kstate.get8(d2 + 3) == 112 {
+            return 4
+        }
+    }
+    return 0
+}
+
+fn probe(state: u64, path: u64) -> u64 {
+    let e: u64 = seg_end(path)
+    if e == 0 {
+        return B_NONE
+    }
+    let sl: u64 = suffix_len(path, e)
+    if sl == 0 || e - 6 <= sl {
+        return B_NONE
+    }
+    // "/apps/<seg>/SYSTEM"
+    if e + 8 > 200 {
+        return B_APP
+    }
+    var pb: [u8; 216] = [0 as u8; 216]
+    let pp: u64 = (&pb[0 as usize]) as u64
+    var k: u64 = 0
+    while k <= e {
+        kstate.set8(pp + k, kstate.get8(path + k) as u8)
+        k = k + 1
+    }
+    kstate.set8(pp + e + 1, 83 as u8) // S
+    kstate.set8(pp + e + 2, 89 as u8) // Y
+    kstate.set8(pp + e + 3, 83 as u8) // S
+    kstate.set8(pp + e + 4, 84 as u8) // T
+    kstate.set8(pp + e + 5, 69 as u8) // E
+    kstate.set8(pp + e + 6, 77 as u8) // M
+    kstate.set8(pp + e + 7, 0 as u8)
+    let ino: u64 = fs.path(state, pp)
+    if ino != 0 && fs.inode_uid(state, ino) == 0 {
+        return B_SYSTEM
+    }
+    return B_APP
+}
+
+// `elf.build` calls this for EVERY new program image, with the path the
+// caller asked for (for `#!` files the script, not the interpreter) and
+// what `probe` said about it. `parent` is the task that asked
+// (`sched.current`).
+fn derive(state: u64, parent: u64, t: u64, path: u64, kind: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    clear(state, t)
+    if parent < kstate.MAX_TASKS && !is_empty(state, parent) {
+        inherit(state, parent, t)
+        return
+    }
+    if kind != B_APP {
+        return
+    }
+    let e: u64 = seg_end(path)
+    if e == 0 {
+        return
+    }
+    let sl: u64 = suffix_len(path, e)
+    if sl == 0 || e - 6 <= sl {
+        return
+    }
+    let nlen: u64 = e - 6 - sl
+    // "app:"
+    put(state, t, 0, 97)
+    put(state, t, 1, 112)
+    put(state, t, 2, 112)
+    put(state, t, 3, 58)
+    // a name that does not fit or has odd characters still gets a label
+    // -- "app:?" -- because NO label would mean "the user"
+    var ok: bool = nlen <= LABEL_MAX - 4
+    var k: u64 = 0
+    while ok && k < nlen {
+        if !valid_char(kstate.get8(path + 6 + k)) {
+            ok = false
+        }
+        k = k + 1
+    }
+    if !ok {
+        put(state, t, 4, 63)
+        put(state, t, 5, 0)
+        return
+    }
+    k = 0
+    while k < nlen {
+        put(state, t, 4 + k, kstate.get8(path + 6 + k))
+        k = k + 1
+    }
+    put(state, t, 4 + nlen, 0)
+}
+
+// A process marks ITSELF. `src` is a kernel copy of what ring 3 passed,
+// `n` its length. 0 = done; 1 = not allowed (already labelled); 2 = the
+// label is malformed or reserved.
+fn set_self(state: u64, me: u64, src: u64, n: u64) -> u64 {
+    if me >= kstate.MAX_TASKS {
+        return 1
+    }
+    if !is_empty(state, me) {
+        return 1
+    }
+    if n == 0 || n > LABEL_MAX {
+        return 2
+    }
+    var k: u64 = 0
+    while k < n {
+        if !valid_char(kstate.get8(src + k)) {
+            return 2
+        }
+        k = k + 1
+    }
+    // "user" is what an EMPTY label means; nobody may write it down
+    if n == 4 && kstate.get8(src) == 117 && kstate.get8(src + 1) == 115
+        && kstate.get8(src + 2) == 101 && kstate.get8(src + 3) == 114 {
+        return 2
+    }
+    k = 0
+    while k < n {
+        put(state, me, k, kstate.get8(src + k))
+        k = k + 1
+    }
+    put(state, me, n, 0)
+    return 0
+}
+
+// For the bus: may task `t` hold the service name `a.<app>`? The name
+// bytes are `name` (kernel address), `n` long, WITHOUT the "a." prefix.
+// Yes if its label is exactly "app:<app>", or if it has no label at all
+// (a system program or the user's own) -- that case the caller further
+// restricts to uid 0.
+fn same_app(state: u64, t: u64, name: u64, n: u64) -> bool {
+    if is_empty(state, t) {
+        return true
+    }
+    if byte_at(state, t, 0) != 97 || byte_at(state, t, 1) != 112
+        || byte_at(state, t, 2) != 112 || byte_at(state, t, 3) != 58 {
+        return false
+    }
+    if n + 4 >= LEN {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        if byte_at(state, t, 4 + k) != kstate.get8(name + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return byte_at(state, t, 4 + n) == 0
+}

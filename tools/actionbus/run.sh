@@ -22,6 +22,9 @@
 #   9. GEGENPROBE: without /var/log a change is refused (fail closed),
 #      a read still works
 #  10. latency through broker and app, 4 cores
+#  11. Jarvis over the real bridge
+#  12. AB-003: the KERNEL names the caller -- an app cannot claim to be
+#      the user, not via /bin/act, not via a copy; reserved bus names
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -39,7 +42,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir orientbus notes act"
+PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -98,7 +101,8 @@ python3 tools/actionbus/manifest.py check "$TMPD/etc/actions.d/evil.actions" > "
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "ACTIONBUS: skipped, qemu missing"; echo "ACTIONBUS: $pass passed, $fail failed"; exit 0; }
 
-image() { # <image> <script> [novarlog]
+EXTRA=()
+image() { # <image> <script> [novarlog]   (+ specs in EXTRA)
     local img=$1 script=$2 novar=${3:-}
     local -a A=(build "$img" $BLOCKS /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
@@ -113,6 +117,7 @@ image() { # <image> <script> [novarlog]
         "/etc/actions.d/evil.actions=$TMPD/etc/actions.d/evil.actions"
         "/etc/orientbus/policy=$TMPD/etc/orientbus/policy"
         "/t/s.sh=$script")
+    A+=("${EXTRA[@]}")
     python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
@@ -409,6 +414,122 @@ us4=$(echo "$L4" | sed -n 's/.*us_per_call=\([0-9]*\).*/\1/p')
 echo "ACTIONBUS-LATENCY us_1core=${us:-?} us_4core=${us4:-?}"
 
 # ===================================================================
+echo "== 12. AB-003: attested caller identity =="
+# ===================================================================
+# /apps/evil.prog is an app bundle whose "start" is a shell: everything
+# it runs -- /bin/act, a COPY of act in /tmp -- is app:evil for the
+# kernel, whatever it claims with --as.
+cat > "$TMPD/evil.sh" <<'EOS'
+echo ==E-WHO==
+act whoami --as user
+echo ==E-WRITE==
+act call notes.add "text=evil" --as user
+echo rc=$?
+echo ==E-CONFIRM==
+act confirm last --as user
+echo rc=$?
+echo ==E-GRANT==
+act grant app:evil notes.* write 60
+echo rc=$?
+echo ==E-COPY==
+cp /bin/act /tmp/a2
+chmod 755 /tmp/a2
+/tmp/a2 whoami --as user
+echo ==E-SQUAT==
+act claim a.notes2
+echo rc=$?
+act claim a.evil
+echo rc=$?
+act claim orient.bus2
+echo rc=$?
+act claim r.1
+echo rc=$?
+echo ==E-PROC==
+cat /proc/self/status
+echo ==E-END==
+EOS
+cat > "$TMPD/s4.sh" <<'EOS'
+orientbus serve 30000 &
+sleep -m 300
+notes serve 30000 &
+sleep 1
+echo ==WHO==
+act whoami
+act whoami --as jarvis
+echo ==EVIL==
+/apps/evil.prog/start /t/evil.sh
+echo ==OSP==
+/apps/evil2.osp/start /t/who.sh
+echo ==SYSB==
+/apps/tool.osp/start /t/who.sh
+echo ==CHAIN==
+/apps/tool.osp/start /t/chain.sh
+echo ==AFTER==
+act call notes.list
+act claim a.notes2
+act claim orient.probe
+echo ==STAT==
+act stat
+echo ==LOG==
+cat /var/log/orientbus.log
+act stop
+echo ==FERTIG==
+EOS
+echo "act whoami --as user" > "$TMPD/who.sh"
+echo "/apps/evil.prog/start /t/who.sh" > "$TMPD/chain.sh"
+echo "shipped with the image" > "$TMPD/SYSTEM"
+EXTRA=(/apps/evil.prog/ "/apps/evil.prog/start=$TMPD/bin/sh.elf" "/t/evil.sh=$TMPD/evil.sh"
+       /apps/evil2.osp/ "/apps/evil2.osp/start=$TMPD/bin/sh.elf"
+       /apps/tool.osp/ "/apps/tool.osp/start=$TMPD/bin/sh.elf" "/apps/tool.osp/SYSTEM=$TMPD/SYSTEM"
+       "/t/who.sh=$TMPD/who.sh" "/t/chain.sh=$TMPD/chain.sh")
+image "$TMPD/D.img" "$TMPD/s4.sh"
+EXTRA=()
+run "$TMPD/D.img" d 1 90
+D="$TMPD/d.klar"
+grep -qa '==FERTIG==' "$D" || { bad "identity guest did not finish"; tail -20 "$D" | sed 's/^/        /'; }
+part "$D" WHO EVIL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=user" "a process of the user without a label is 'user'"
+has "$TMPD/p.txt" "attested=no" "... and the broker says it only took the default"
+grep -qa 'client=jarvis' "$TMPD/p.txt" && ok "an unlabelled process may still NARROW itself (--as jarvis)" || bad "--as jarvis from the user's shell"
+part "$D" E-WHO E-WRITE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "an app saying --as user is app:evil for the broker"
+has "$TMPD/p.txt" "origin=app:evil" "... because the KERNEL says so (origin from /apps/evil.prog)"
+has "$TMPD/p.txt" "attested=yes" "... attested, not claimed"
+part "$D" E-WRITE E-CONFIRM > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 1 notes.add" "the app's write is parked for the user, not done"
+part "$D" E-CONFIRM E-GRANT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may confirm" "the app cannot confirm its own request, not even with --as user"
+part "$D" E-GRANT E-COPY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may grant" "... nor grant itself rights"
+part "$D" E-COPY E-SQUAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "a COPY of act run by the app is still app:evil (the label is sticky)"
+part "$D" E-SQUAT E-PROC > "$TMPD/p.txt"
+has "$TMPD/p.txt" "act: claim refused a.notes2" "the app cannot take another app's provider name"
+has "$TMPD/p.txt" "act: claimed ok a.evil" "... but its own"
+has "$TMPD/p.txt" "act: claim refused orient.bus2" "an app cannot take an orient.* name"
+has "$TMPD/p.txt" "act: claim refused r.1" "nobody can take another process's reply box"
+has "$D" 'bus: reserved name "a.notes2" refused' "the kernel says so on the console"
+part "$D" E-PROC E-END > "$TMPD/p.txt"
+has "$TMPD/p.txt" "Origin: app:evil" "/proc/<pid>/status shows the origin"
+part "$D" OSP SYSB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil2" "an installed-style bundle (/apps/evil2.osp) is app:evil2"
+part "$D" SYSB CHAIN > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=user" "a bundle the image ships (root-owned SYSTEM marker) acts as the user"
+has "$TMPD/p.txt" "attested=no" "... it has no label"
+part "$D" CHAIN AFTER > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "an app started FROM a system bundle (like the terminal) still gets its own label"
+part "$D" AFTER STAT > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "note.1=evil" "the app's note was never written"
+has "$TMPD/p.txt" "act: claimed ok a.notes2" "the user's own process may take a free a.* name"
+has "$TMPD/p.txt" "act: claimed ok orient.probe" "... and, as root without a label, an orient.* name"
+part "$D" STAT LOG > "$TMPD/p.txt"
+grep -qa '^claims_ignored=[1-9]' "$TMPD/p.txt" && ok "the broker counted the ignored claims ($(grep -a '^claims_ignored=' "$TMPD/p.txt"))" || bad "claims_ignored"
+has "$TMPD/p.txt" "foreign_providers=0" "no provider with a foreign origin"
+part "$D" LOG FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil verb=call action=notes.add decision=ask result=confirm" "the audit log names app:evil, not 'user'"
+hasnot "$TMPD/p.txt" "client=user verb=call action=notes.add decision=allow result=forwarded" "no write by 'user' happened in this run"
+
+# ===================================================================
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================
 # The JARVIS server side is tools/bridge/peer.py (TLS 1.3, Ed25519 login,
@@ -478,6 +599,8 @@ befehl|/bin/act call notes.clear --dry --as jarvis|
 befehl|/bin/act call notes.clear --as jarvis|
 befehl|/bin/act call notes.count --as jarvis|
 befehl|/bin/sh -c act|
+befehl|/bin/act whoami --as user|
+befehl|/bin/act call notes.add text=j2 --as user|
 JOBS
     ip link del "$V0" 2>/dev/null
     ip netns add "$NS"
@@ -524,6 +647,10 @@ JOBS
         && bad "the log shows a critical action allowed for Jarvis" \
         || ok "... and no critical action allowed for it (only its dry run)"
     has "$TMPD/jl.txt" "client=jarvis verb=call action=notes.clear decision=allow result=ok dry=1" "... the dry run is logged as such"
+    # AB-003: the bridge marks what it runs; --as user changes nothing
+    has "$G.7.bin" "client=jarvis" "AB-003: a Jarvis command saying --as user is still jarvis"
+    has "$G.7.bin" "origin=jarvis" "... because jarvisd labelled it in the kernel"
+    has "$G.8.bin" "confirm 3 notes.add" "... so its write as 'user' is parked like any Jarvis write"
 fi
 
 echo "ACTIONBUS: $pass passed, $fail failed"

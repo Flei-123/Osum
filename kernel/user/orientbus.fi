@@ -121,15 +121,16 @@ static mut pend: [u8; 1024] = [0 as u8; 1024]
 
 // calls waiting for a confirmation
 const TOK_MAX: u64 = 8
-const TOK_B: u64 = 64
+const TOK_B: u64 = 96
 const TK_USED: u64 = 0
 const TK_NO: u64 = 8
 const TK_T0: u64 = 16
 const TK_LEN: u64 = 24
 const TK_PID: u64 = 32
 const TK_UID: u64 = 40
+const TK_CLIENT: u64 = 48 // 24 octets: the RESOLVED client (AB-003)
 const TOK_BYTES: u64 = 1024
-static mut toks: [u8; 512] = [0 as u8; 512]
+static mut toks: [u8; 768] = [0 as u8; 768]
 static mut tokmem: [u8; 8192] = [0 as u8; 8192]
 static mut tok_next: u64 = 1
 
@@ -345,6 +346,16 @@ static mut s_int: [u8; 4] = "int\0"
 static mut s_bool: [u8; 5] = "bool\0"
 static mut s_string: [u8; 7] = "string\0"
 static mut s_user: [u8; 5] = "user\0"
+// AB-003: WHO is calling, decided ONCE per request in `on_request` and
+// used by every verb. The kernel's origin of the sender pid wins; only a
+// process WITHOUT a label (the user's own, the system's) may name a
+// client itself -- which can only narrow its rights ("--as jarvis").
+static mut g_client: [u8; 24] = [0 as u8; 24]
+static mut g_origin: [u8; 32] = [0 as u8; 32]
+static mut g_attested: bool = false
+static mut c_claims: u64 = 0 // a labelled process named another client
+static mut c_badprov: u64 = 0 // a provider with the wrong origin
+static mut idle_since: u64 = 0
 static mut s_logpath: [u8; 23] = "/var/log/orientbus.log\0"
 
 fn level_of(w: u64) -> u64 {
@@ -1495,12 +1506,8 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     actwire.word_copy(msg, nx, np, 40)
     var client: [u8; 24] = [0 as u8; 24]
     let cp: u64 = (&client[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
     var k_dry: [u8; 5] = "@dry\0"
-    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
-        || ld8(cp, 0) == 0 {
-        copyz(cp, (&s_user[0 as usize]) as u64, 24)
-    }
+    copyz(cp, (&g_client[0 as usize]) as u64, 24)
     var dv: [u8; 8] = [0 as u8; 8]
     let dvp: u64 = (&dv[0 as usize]) as u64
     let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, dvp, 8)
@@ -1573,6 +1580,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         st(tp, TK_LEN, len)
         st(tp, TK_PID, pid)
         st(tp, TK_UID, uid)
+        copyz(tp + TK_CLIENT, cp, 24)
         copyn(tkmem(t), msg, len, TOK_BYTES)
         tok_next = tok_next + 1
         var s_c: [u8; 9] = "confirm \0"
@@ -1729,7 +1737,17 @@ fn on_reply(s: u64) {
         return
     }
     if bound == 0 {
-        // only the owner of a.<app> received the nonce: bind it
+        // only the owner of a.<app> received the nonce: bind it -- if
+        // the kernel says it comes from that app or from the system
+        if !provider_ok(app, from) {
+            c_badprov = c_badprov + 1
+            var w2: [u8; 48] = "orientbus: provider with a foreign origin, pid \0"
+            lb_start((&w2[0 as usize]) as u64)
+            lb_num(from)
+            lb_say()
+            st(p, PE_USED, 0)
+            return
+        }
         st(ap(app), AP_PID, from)
     }
     let flags: u64 = ld(p, PE_FLAGS)
@@ -1856,15 +1874,92 @@ fn on_event(s: u64) {
 // ================================================== the other verbs
 
 fn is_user(msg: u64, uid: u64) -> bool {
-    var cl: [u8; 24] = [0 as u8; 24]
-    let cp: u64 = (&cl[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
-    if actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24) {
-        if ld8(cp, 0) != 0 && !actwire.str_eq(cp, (&s_user[0 as usize]) as u64) {
-            return false
-        }
+    if !actwire.str_eq((&g_client[0 as usize]) as u64,
+        (&s_user[0 as usize]) as u64) {
+        return false
     }
     return uid == 0
+}
+
+// AB-003: the client of this request. `g_attested` = the kernel named it.
+fn resolve_client(msg: u64, pid: u64) {
+    let gc: u64 = (&g_client[0 as usize]) as u64
+    let go: u64 = (&g_origin[0 as usize]) as u64
+    var claim: [u8; 24] = [0 as u8; 24]
+    let clp: u64 = (&claim[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    let claimed: bool = actwire.kv_find(msg, (&k_client[0 as usize]) as u64,
+        clp, 24) && ld8(clp, 0) != 0
+    let n: u64 = actwire.origin_of(pid, go)
+    if n == actwire.NONE {
+        // the sender is gone: never "user"
+        var s_gone: [u8; 5] = "gone\0"
+        copyz(gc, (&s_gone[0 as usize]) as u64, 24)
+        g_attested = true
+        return
+    }
+    if n > 0 {
+        copyz(gc, go, 24)
+        g_attested = true
+        if claimed && !actwire.str_eq(clp, go) {
+            c_claims = c_claims + 1
+        }
+        return
+    }
+    g_attested = false
+    if claimed {
+        copyz(gc, clp, 24)
+    } else {
+        copyz(gc, (&s_user[0 as usize]) as u64, 24)
+    }
+}
+
+// whoami: what the broker sees -- for a client that wants to know, and
+// for the test that shows the kernel, not the caller, decides
+fn do_whoami(pid: u64, id: u64) {
+    var s_ok: [u8; 11] = "ok\nclient=\0"
+    var s_or: [u8; 9] = "\norigin=\0"
+    var s_at: [u8; 11] = "\nattested=\0"
+    var s_y: [u8; 4] = "yes\0"
+    var s_n: [u8; 3] = "no\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&g_client[0 as usize]) as u64)
+    actwire.ob_str((&s_or[0 as usize]) as u64)
+    if ld8((&g_origin[0 as usize]) as u64, 0) == 0 {
+        actwire.ob_ch(45)
+    } else {
+        actwire.ob_str((&g_origin[0 as usize]) as u64)
+    }
+    actwire.ob_str((&s_at[0 as usize]) as u64)
+    if g_attested {
+        actwire.ob_str((&s_y[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_n[0 as usize]) as u64)
+    }
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
+// AB-003: may process `pid` be the provider of `app`? The kernel already
+// refuses `a.<app>` to a process with another app's label; this is the
+// second lock on the same door, and the one that also holds if a
+// provider was registered before this kernel rule existed.
+fn provider_ok(app: u64, pid: u64) -> bool {
+    var o: [u8; 32] = [0 as u8; 32]
+    let op: u64 = (&o[0 as usize]) as u64
+    let n: u64 = actwire.origin_of(pid, op)
+    if n == actwire.NONE {
+        return false
+    }
+    if n == 0 {
+        return true
+    }
+    var s_app: [u8; 5] = "app:\0"
+    if !actwire.starts(op, (&s_app[0 as usize]) as u64) {
+        return false
+    }
+    return actwire.str_eq(op + 4, ap(app) + AP_NAME)
 }
 
 // confirm <no|last> / reject <no|last>
@@ -1920,7 +2015,10 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
             (&r_rej[0 as usize]) as u64, false)
         return
     }
-    // the ORIGINAL request, confirmed; the answer goes to the confirmer
+    // the ORIGINAL request, confirmed; the answer goes to the confirmer.
+    // It runs as the client that ASKED, not as the user who said yes --
+    // otherwise its undo entry and its log line would name the wrong one.
+    copyz((&g_client[0 as usize]) as u64, tk(t) + TK_CLIENT, 24)
     do_call(m, pid, ld(tk(t), TK_UID), id, true, false)
 }
 
@@ -1928,11 +2026,7 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
 fn do_undo(msg: u64, pid: u64, uid: u64, id: u64) {
     var cl: [u8; 24] = [0 as u8; 24]
     let cp: u64 = (&cl[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
-    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
-        || ld8(cp, 0) == 0 {
-        copyz(cp, (&s_user[0 as usize]) as u64, 24)
-    }
+    copyz(cp, (&g_client[0 as usize]) as u64, 24)
     var best: u64 = actwire.NONE
     var seq: u64 = 0
     var i: u64 = 0
@@ -2055,6 +2149,10 @@ fn do_stat(pid: u64, id: u64) {
     stat_line((&k14[0 as usize]) as u64, c_logfail)
     var k15: [u8; 14] = "lazy_entries=\0"
     stat_line((&k15[0 as usize]) as u64, c_lazy)
+    var k16: [u8; 16] = "claims_ignored=\0"
+    stat_line((&k16[0 as usize]) as u64, c_claims)
+    var k17: [u8; 19] = "foreign_providers=\0"
+    stat_line((&k17[0 as usize]) as u64, c_badprov)
     reply_ob(pid, id)
 }
 
@@ -2098,6 +2196,7 @@ fn on_request(s: u64) {
         reply_err(pid, id, (&e[0 as usize]) as u64, 0)
         return
     }
+    resolve_client(msg, pid)
     var v: [u8; 16] = [0 as u8; 16]
     let vp: u64 = (&v[0 as usize]) as u64
     let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
@@ -2111,6 +2210,7 @@ fn on_request(s: u64) {
     var k_stat: [u8; 5] = "stat\0"
     var k_hello: [u8; 6] = "hello\0"
     var k_stop: [u8; 5] = "stop\0"
+    var k_who: [u8; 7] = "whoami\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -2150,6 +2250,8 @@ fn on_request(s: u64) {
         do_stat(pid, id)
     } else if actwire.str_eq(vp, (&k_hello[0 as usize]) as u64) {
         do_hello(msg)
+    } else if actwire.str_eq(vp, (&k_who[0 as usize]) as u64) {
+        do_whoami(pid, id)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)
@@ -2229,6 +2331,7 @@ fn serve(limit: u64) -> u64 {
     while running && (limit == 0 || actwire.ticks() - t0 < limit) {
         let n: u64 = actwire.bus_recv(fp, mp)
         if !ulib.bad(n) && n > 0 {
+            idle_since = 0
             let s: u64 = actwire.asm_feed(fp, mp)
             if s != actwire.NONE {
                 let k: u64 = actwire.asm_kind(s)
@@ -2246,7 +2349,19 @@ fn serve(limit: u64) -> u64 {
             if lazy_t != 0 && actwire.ticks() - lazy_t > 50 {
                 flush_lazy()
             }
-            actwire.yield_now()
+            // AB-016: the kernel bus cannot block yet (S-003). Busy for
+            // 0.2 s after the last message -- a burst of calls stays at
+            // microseconds -- then one tick of sleep per round, so an
+            // idle broker in the image costs next to nothing.
+            let now: u64 = actwire.ticks()
+            if idle_since == 0 {
+                idle_since = now
+            }
+            if now - idle_since > 20 {
+                ulib.sleep_ms(10)
+            } else {
+                actwire.yield_now()
+            }
         }
     }
     flush_lazy()

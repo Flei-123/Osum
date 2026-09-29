@@ -102,6 +102,7 @@ import sync.atomic
 import sched.sched
 import mm.mem
 import sched.proc
+import sched.origin
 
 export {
     init, forget_task,
@@ -496,6 +497,11 @@ fn reg(state: u64, task: u64, w0: u64, w1: u64, access: u64) -> u64 {
     if access > A_ROOT {
         return err(E_INVAL)
     }
+    // AB-003: three families of names are RESERVED -- see `name_ok`.
+    if !name_ok(state, task, w0, w1) {
+        say_reserved(state, task, w0, w1)
+        return err(E_DENIED)
+    }
     take(state)
     // Denselben Namen zweimal gibt es nicht: der zweite Anmelder
     // bekommt E_FULL und nicht etwa den Platz des ersten.
@@ -528,6 +534,98 @@ fn reg(state: u64, task: u64, w0: u64, w1: u64, access: u64) -> u64 {
     }
     give(state)
     return err(E_FULL)
+}
+
+// ============================================ AB-003: RESERVED NAMES
+//
+// The action bus (docs/ACTION-BUS.md) trusts three kinds of names, and
+// before this round the first process to register one owned it:
+//
+//   a.<app>      the provider of an app. Only a process whose ORIGIN
+//                (kernel/sched/origin.fi) is `app:<app>` -- or a process
+//                without a label (system program, the user's own) -- may
+//                take it. An app cannot squat another app's name.
+//   orient.*     the broker and its event channel. Only a process
+//                without a label and with euid 0 (what init starts).
+//   r.<number>   a client's reply box. Only the process whose pid IS
+//                that number -- otherwise one process could register
+//                r.<pid of another> first and read its replies.
+//
+// Every other name is first come, first served, as before.
+fn name_byte(w0: u64, w1: u64, i: u64) -> u64 {
+    if i < 8 {
+        return (w0 >> (i * 8)) & 0xFF
+    }
+    if i < 16 {
+        return (w1 >> ((i - 8) * 8)) & 0xFF
+    }
+    return 0
+}
+
+fn name_ok(state: u64, task: u64, w0: u64, w1: u64) -> bool {
+    let b0: u64 = name_byte(w0, w1, 0)
+    let b1: u64 = name_byte(w0, w1, 1)
+    // "a."
+    if b0 == 97 && b1 == 46 {
+        var nb: [u8; 17] = [0 as u8; 17]
+        var n: u64 = 0
+        var going: bool = true
+        while going && n < 14 {
+            let c: u64 = name_byte(w0, w1, 2 + n)
+            if c == 0 {
+                going = false
+            } else {
+                nb[n as usize] = c as u8
+                n = n + 1
+            }
+        }
+        return origin.same_app(state, task, (&nb[0 as usize]) as u64, n)
+    }
+    // "orient."
+    if b0 == 111 && b1 == 114 && name_byte(w0, w1, 2) == 105
+        && name_byte(w0, w1, 3) == 101 && name_byte(w0, w1, 4) == 110
+        && name_byte(w0, w1, 5) == 116 && name_byte(w0, w1, 6) == 46 {
+        return origin.is_empty(state, task)
+            && sched.tget(state, task, sched.T_EUID) == 0
+    }
+    // "r.<digits>"
+    if b0 == 114 && b1 == 46 {
+        var v: u64 = 0
+        var i: u64 = 2
+        var digits: u64 = 0
+        var going2: bool = true
+        while going2 && i < 16 {
+            let c: u64 = name_byte(w0, w1, i)
+            if c >= 48 && c <= 57 {
+                v = v * 10 + (c - 48)
+                digits = digits + 1
+                i = i + 1
+            } else {
+                going2 = false
+            }
+        }
+        if digits == 0 || name_byte(w0, w1, i) != 0 {
+            return true // "r.x" is not a reply box
+        }
+        return v == sched.tget(state, task, sched.T_PID)
+    }
+    return true
+}
+
+fn say_reserved(state: u64, task: u64, w0: u64, w1: u64) {
+    var s1: [u8; 22] = "bus: reserved name \"\0\0"
+    var s2: [u8; 11] = "\" refused \0"
+    var s3: [u8; 5] = "pid=\0"
+    serial.puts((&s1[0]) as u64)
+    var i: u64 = 0
+    while i < 16 && name_byte(w0, w1, i) != 0 {
+        serial.put(name_byte(w0, w1, i) as u8)
+        i = i + 1
+    }
+    serial.puts((&s2[0]) as u64)
+    serial.puts((&s3[0]) as u64)
+    serial.dec(sched.tget(state, task, sched.T_PID))
+    serial.nl()
 }
 
 fn find(state: u64, w0: u64, w1: u64) -> u64 {
