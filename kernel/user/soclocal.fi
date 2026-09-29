@@ -1,0 +1,356 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/soclocal.fi -- THE LOCAL PROVIDER OF THE SOCIAL LAYER.
+//
+// A provider without a server: the contacts kept on this device, in
+// /etc/social/local.book, one contact per line in exactly the form a
+// provider prints them (kernel/app/socfleitec.fi documents the
+// interface):
+//
+//     c<TAB>id<TAB>relation<TAB>presence<TAB>name<TAB>handle<TAB>status<TAB>activity<TAB>since<TAB>chat
+//
+// It is the second provider next to fleitec -- the proof that `social`
+// merges several -- and the place where people on the same network will
+// land once the LAN finder exists. What the service tells it about
+// myself (presence, activity, signs of life) it writes to
+// /tmp/social/local.me, one line per call, so that it can be checked.
+//
+//     soclocal v1 hello|contacts|search <text>|relation <verb> <id>|
+//                 presence <state> [text]|activity [name]|alive
+
+profile app
+
+import ulib
+
+export { u_start }
+
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+
+
+// ------------------------------------------------ buffers without a heap
+//
+// The programs under kernel/user/ are also assembled by `fas` on the
+// system itself (tools/k16/run.sh), and fas cannot take what the heap of
+// `profile app` compiles to (`lock xadd`, `fs:0`). So no SB here: a
+// buffer is a window on a static array, full is full (and counted).
+// std.rt is NOT imported: under `profile app` it brings the heap's
+// runtime along (see SB above) -- these five are all this file needs.
+fn r_ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn r_st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn r_copy(d: u64, s: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        r_st8(d, i, r_ld8(s, i))
+        i = i + 1
+    }
+}
+
+fn r_eq(a: u64, b: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if r_ld8(a, i) != r_ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn r_clen(p: u64) -> usize {
+    var n: usize = 0
+    while r_ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+struct SB {
+    ptr: u64,
+    len: usize,
+    cap: usize,
+}
+
+fn sb(p: u64, cap: usize) -> SB {
+    return SB { ptr: p, len: 0, cap: cap }
+}
+
+fn sb_clear(b: *mut SB) {
+    (*b).len = 0
+}
+
+fn sb_push(b: *mut SB, c: u8) {
+    if (*b).len < (*b).cap {
+        r_st8((*b).ptr, (*b).len, c)
+        (*b).len = (*b).len + 1
+    }
+}
+
+fn sb_bytes(b: *mut SB, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        sb_push(b, r_ld8(p, i))
+        i = i + 1
+    }
+}
+
+fn sb_dec(b: *mut SB, v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: usize = 0
+    var x: u64 = v
+    while x > 0 || n == 0 {
+        d[n] = (48 + x % 10) as u8
+        n = n + 1
+        x = x / 10
+    }
+    while n > 0 {
+        n = n - 1
+        sb_push(b, d[n])
+    }
+}
+
+static mut st_f: [u8; 16384] = [0 as u8; 16384]
+static mut st_nb: [u8; 16384] = [0 as u8; 16384]
+static mut st_b: [u8; 1024] = [0 as u8; 1024]
+
+fn say(s: str) {
+    syscall(S_WRITE, 1, s.p as i64, s.n as i64, 0, 0, 0)
+}
+
+fn sayb(p: u64, n: usize) {
+    syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
+}
+
+fn isz(p: u64, s: str) -> bool {
+    let n: usize = r_clen(p)
+    return n == s.n && r_eq(p, s.p as u64, n)
+}
+
+fn read_file(path: str, into: *mut SB) -> bool {
+    let fd: i64 = syscall(S_OPEN, path.p as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var chunk: [u8; 1024] = [0 as u8; 1024]
+    while true {
+        let n: i64 = syscall(S_READ, fd, (&chunk[0]) as i64, 1024, 0, 0, 0)
+        if n <= 0 {
+            break
+        }
+        sb_bytes(into, (&chunk[0]) as u64, n as usize)
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn write_file(path: str, p: u64, n: usize, append: bool) -> bool {
+    var fl: i64 = 1 | 64 | 512 // O_WRONLY | O_CREAT | O_TRUNC
+    if append {
+        fl = 1 | 64 | 1024 // O_WRONLY | O_CREAT | O_APPEND
+    }
+    let fd: i64 = syscall(S_OPEN, path.p as i64, fl, 384, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn line_len(p: u64, max: usize) -> usize {
+    var i: usize = 0
+    while i < max && r_ld8(p, i) != 10 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+// field k of the TAB line at p (length ll)
+fn fld(p: u64, ll: usize, k: usize, out_n: *mut usize) -> usize {
+    var i: usize = 0
+    var f: usize = 0
+    while f < k && i < ll {
+        if r_ld8(p, i) == 9 as u8 {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    var e: usize = i
+    while e < ll && r_ld8(p, e) != 9 as u8 {
+        e = e + 1
+    }
+    *out_n = e - i
+    return i
+}
+
+// does the line's name (4) or handle (5) contain q (ASCII, case folded)?
+fn contains(p: u64, n: usize, q: u64, qn: usize) -> bool {
+    if qn == 0 {
+        return true
+    }
+    var i: usize = 0
+    while i + qn <= n {
+        var j: usize = 0
+        var ok: bool = true
+        while j < qn && ok {
+            var a: u8 = r_ld8(p, i + j)
+            var b: u8 = r_ld8(q, j)
+            if a >= 65 as u8 && a <= 90 as u8 {
+                a = a + 32 as u8
+            }
+            if b >= 65 as u8 && b <= 90 as u8 {
+                b = b + 32 as u8
+            }
+            if a != b {
+                ok = false
+            }
+            j = j + 1
+        }
+        if ok {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn ok_n(n: u64) -> u64 {
+    var d: [u8; 24] = [0 as u8; 24]
+    let dn: u64 = ulib.digits(n, (&d[0]) as u64)
+    say("ok\t")
+    sayb((&d[0]) as u64, dn as usize)
+    say("\n")
+    return 0
+}
+
+fn v_contacts(q: u64) -> u64 {
+    var f: SB = sb((&st_f[0]) as u64, 16383)
+    let _r: bool = read_file("/etc/social/local.book\0", &f)
+    var n: u64 = 0
+    var at: usize = 0
+    var qn: usize = 0
+    if q != 0 {
+        qn = r_clen(q)
+    }
+    while at < f.len {
+        let lp: u64 = f.ptr + at as u64
+        let ll: usize = line_len(lp, f.len - at)
+        if ll > 2 && r_ld8(lp, 0) == 99 as u8 {
+            var nn: usize = 0
+            let no: usize = fld(lp, ll, 4, &nn)
+            var hn: usize = 0
+            let ho: usize = fld(lp, ll, 5, &hn)
+            if q == 0 || contains(lp + no as u64, nn, q, qn)
+                || contains(lp + ho as u64, hn, q, qn) {
+                sayb(lp, ll)
+                say("\n")
+                n = n + 1
+            }
+        }
+        at = at + ll + 1
+    }
+    return ok_n(n)
+}
+
+// the relation of contact `id` becomes `rel` ("" removes a request)
+fn v_relation(verb: u64, id: u64) -> u64 {
+    var rel: str = ""
+    if isz(verb, "request") {
+        rel = "outgoing"
+    } else if isz(verb, "accept") {
+        rel = "friend"
+    } else if isz(verb, "decline") || isz(verb, "withdraw") || isz(verb, "remove") {
+        rel = "none"
+    } else {
+        say("err\tbad\trelation: request|accept|decline|withdraw|remove\n")
+        return 1
+    }
+    var f: SB = sb((&st_f[0]) as u64, 16383)
+    let _r: bool = read_file("/etc/social/local.book\0", &f)
+    var nb: SB = sb((&st_nb[0]) as u64, 16383)
+    let idn: usize = r_clen(id)
+    var hit: bool = false
+    var at: usize = 0
+    while at < f.len {
+        let lp: u64 = f.ptr + at as u64
+        let ll: usize = line_len(lp, f.len - at)
+        var in_: usize = 0
+        let io: usize = fld(lp, ll, 1, &in_)
+        if ll > 2 && in_ == idn && r_eq(lp + io as u64, id, idn) {
+            hit = true
+            var rn: usize = 0
+            let ro: usize = fld(lp, ll, 2, &rn)
+            sb_bytes(&nb, lp, ro)
+            sb_bytes(&nb, rel.p as u64, rel.n)
+            sb_bytes(&nb, lp + (ro + rn) as u64, ll - ro - rn)
+        } else {
+            sb_bytes(&nb, lp, ll)
+        }
+        sb_push(&nb, 10 as u8)
+        at = at + ll + 1
+    }
+    if !hit {
+        say("err\tbad\tno such contact\n")
+        return 1
+    }
+    let _w: bool = write_file("/etc/social/local.book\0", nb.ptr, nb.len, false)
+    say("ok\n")
+    return 0
+}
+
+// what the service said about myself, for the test
+fn note(args: u64, from: u64) -> u64 {
+    var b: SB = sb((&st_b[0]) as u64, 1023)
+    var i: u64 = from
+    while i < ulib.arg_count(args) {
+        if i > from {
+            sb_push(&b, 32 as u8)
+        }
+        let a: u64 = ulib.arg_at(args, i)
+        sb_bytes(&b, a, r_clen(a))
+        i = i + 1
+    }
+    sb_push(&b, 10 as u8)
+    syscall(83, "/tmp/social\0".p as i64, 493, 0, 0, 0, 0)
+    let _w: bool = write_file("/tmp/social/local.me\0", b.ptr, b.len, true)
+    say("ok\n")
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let n: u64 = ulib.arg_count(args)
+    if n < 3 || !isz(ulib.arg_at(args, 1), "v1") {
+        say("err\tbad\tusage: soclocal v1 <verb> ...\n")
+        return 1
+    }
+    let verb: u64 = ulib.arg_at(args, 2)
+    if isz(verb, "hello") {
+        say("provider\tlocal\t1\ncaps\tcontacts search relation presence activity alive\nok\n")
+        return 0
+    }
+    if isz(verb, "contacts") {
+        return v_contacts(0)
+    }
+    if isz(verb, "search") && n >= 4 {
+        return v_contacts(ulib.arg_at(args, 3))
+    }
+    if isz(verb, "relation") && n >= 5 {
+        return v_relation(ulib.arg_at(args, 3), ulib.arg_at(args, 4))
+    }
+    if isz(verb, "presence") || isz(verb, "activity") || isz(verb, "alive") {
+        return note(args, 2)
+    }
+    say("err\tbad\tunknown verb\n")
+    return 1
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

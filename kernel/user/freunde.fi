@@ -61,6 +61,7 @@ import ulib
 import wlibc
 import wlib
 import msg
+import actwire
 
 export { u_start }
 
@@ -75,6 +76,7 @@ const Z_DA: u64 = 0
 const Z_GONE: u64 = 1
 const Z_BESCH: u64 = 2
 const Z_UNSICHT: u64 = 3
+const Z_OFF: u64 = 4 // RUNDE SOCIAL: offline (a friend, not signed in)
 
 // ------------------------------------------------------- der Bestand
 static mut f_name: [u8; 768] = [0 as u8; 768]   // MAXF * NAMEMAX
@@ -149,6 +151,9 @@ fn point(z: u64) -> u64 {
     if z == Z_UNSICHT {
         return 63        // '?' -- unsichtbar
     }
+    if z == Z_OFF {
+        return 45        // '-' -- offline
+    }
     return 46            // '.' -- abwesend
 }
 
@@ -181,8 +186,8 @@ fn list_build() {
         anhaengen_z(32)
         let np: u64 = (&f_name[0 as usize]) as u64 + i * NAMEMAX
         anhaengen(np, tlen(np))
-        anhaengen_z(32)
-        anhaengen_z(32)
+        // RUNDE SOCIAL: the text is the entry's second line (list_zwei)
+        anhaengen_z(9)
         let tp: u64 = (&f_txt[0 as usize]) as u64 + i * TXTMAX
         let tl: u64 = tlen(tp)
         if tl > 0 {
@@ -195,7 +200,11 @@ fn list_build() {
             var wweg: [u8; 9] = "abwesend\0"
             var wbes: [u8; 13] = "beschaeftigt\0"
             var wuns: [u8; 11] = "unsichtbar\0"
+            var woff: [u8; 8] = "offline\0"
             var q: u64 = (&wda[0 as usize]) as u64
+            if f_zustand[i as usize] == Z_OFF {
+                q = (&woff[0 as usize]) as u64
+            }
             if f_zustand[i as usize] == Z_GONE {
                 q = (&wweg[0 as usize]) as u64
             }
@@ -262,6 +271,210 @@ fn sag(p: u64) {
     ulib.nl()
 }
 
+
+// ==================================================== RUNDE SOCIAL
+//
+// THE BAR READS THE SOCIAL SERVICE, NOT A SERVER. The friends come from
+// `social.contacts.list` on orient-bus (kernel/user/social.fi, FirnChat
+// docs/SOCIAL.md): the service merges every provider (the Fleitec
+// account, the contacts on this device, later Matrix, XMPP, the LAN) and
+// this file never learns which one a friend came from. The same call is
+// open to any other program -- a replacement for this bar, an overlay, a
+// game -- and "Unsichtbar" is `social.presence.set`, the same action a
+// script or Jarvis would use (with the broker's rules for them).
+
+static mut svc_bus: u64 = actwire.NONE
+static mut rep: [u8; 4096] = [0 as u8; 4096]
+static mut rep_len: u64 = 0
+static mut quelle_bus: bool = false
+
+fn bus_setup() -> bool {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    var n_bus: [u8; 11] = "orient.bus\0"
+    var n_soc: [u8; 9] = "a.social\0"
+    // no broker at all: no social layer on this machine, at once (the
+    // bar then says what it always said). A broker without the service
+    // yet: the service may start after the bar -- a few seconds.
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    if ulib.bad(svc_bus) {
+        return false
+    }
+    let t0: u64 = actwire.ticks()
+    while ulib.bad(actwire.bus_find((&n_soc[0 as usize]) as u64))
+        && actwire.ticks() - t0 < 600 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) || ulib.bad(actwire.bus_find((&n_soc[0 as usize]) as u64)) {
+        return false
+    }
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        return false
+    }
+    return true
+}
+
+// the request in actwire's output buffer; the reply lands in `rep`
+fn bus_ask() -> bool {
+    let id: u64 = actwire.rnd() & actwire.NONE
+    if ulib.bad(actwire.send_msg(svc_bus, actwire.K_REQ, id, actwire.ob_ptr(),
+        actwire.ob_len())) {
+        return false
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let rp: u64 = (&rep[0 as usize]) as u64
+    rep_len = 0
+    let t0: u64 = actwire.ticks()
+    var done: bool = false
+    while !done && actwire.ticks() - t0 < 800 {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            if actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+                && actwire.ld32(fp, 4) == id {
+                if (actwire.ld8(fp, 2) & 1) != 0 {
+                    rep_len = 0
+                }
+                let k: u64 = actwire.ld8(fp, 3)
+                var i: u64 = 0
+                while i < k && rep_len < 4095 {
+                    actwire.st8(rp, rep_len, actwire.ld8(fp, 8 + i))
+                    rep_len = rep_len + 1
+                    i = i + 1
+                }
+                if (actwire.ld8(fp, 2) & 2) != 0 {
+                    done = true
+                }
+            }
+        } else {
+            actwire.yield_now()
+        }
+    }
+    actwire.st8(rp, rep_len, 0)
+    return done && ld8(rp, 0) == 111 && ld8(rp, 1) == 107
+}
+
+// field k of "id|relation|presence|name|handle|status|activity|since"
+fn feld(p: u64, e: u64, k: u64, out: u64, max: u64) {
+    var i: u64 = 0
+    var f: u64 = 0
+    while f < k && p + i < e {
+        if ld8(p, i) == 124 {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    var n: u64 = 0
+    while p + i < e && ld8(p, i) != 124 && n + 1 < max {
+        st8(out, n, ld8(p, i))
+        n = n + 1
+        i = i + 1
+    }
+    st8(out, n, 0)
+}
+
+fn zustand_von(w: u64) -> u64 {
+    var s_on: [u8; 7] = "online\0"
+    var s_dnd: [u8; 4] = "dnd\0"
+    var s_away: [u8; 5] = "away\0"
+    if ulib.streq(w, (&s_on[0 as usize]) as u64) {
+        return Z_DA
+    }
+    if ulib.streq(w, (&s_dnd[0 as usize]) as u64) {
+        return Z_BESCH
+    }
+    if ulib.streq(w, (&s_away[0 as usize]) as u64) {
+        return Z_GONE
+    }
+    return Z_OFF
+}
+
+// The friends out of the service, in the order a friends list has:
+// who plays first ("Jetzt aktiv"), then who is there, then the rest.
+fn bus_load() -> bool {
+    var s_req: [u8; 44] = "call social.contacts.list\nfilter=friends\n\0\0\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    if !bus_ask() {
+        return false
+    }
+    f_n = 0
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var pass: u64 = 0
+    while pass < 3 {
+        var at: u64 = 0
+        while at < rep_len {
+            var e: u64 = at
+            while e < rep_len && ld8(rp, e) != 10 {
+                e = e + 1
+            }
+            // "contact.N=<fields>"
+            var pfx: [u8; 9] = "contact.\0"
+            if ulib.strneq(rp + at, (&pfx[0 as usize]) as u64, 8) {
+                var v: u64 = at
+                while v < e && ld8(rp, v) != 61 {
+                    v = v + 1
+                }
+                let fp: u64 = rp + v + 1
+                var pres: [u8; 16] = [0 as u8; 16]
+                var name: [u8; 64] = [0 as u8; 64]
+                var st: [u8; 64] = [0 as u8; 64]
+                var akt: [u8; 64] = [0 as u8; 64]
+                feld(fp, rp + e, 2, (&pres[0 as usize]) as u64, 16)
+                feld(fp, rp + e, 3, (&name[0 as usize]) as u64, 64)
+                feld(fp, rp + e, 5, (&st[0 as usize]) as u64, 64)
+                feld(fp, rp + e, 6, (&akt[0 as usize]) as u64, 64)
+                let z: u64 = zustand_von((&pres[0 as usize]) as u64)
+                let spielt: bool = akt[0 as usize] != 0 as u8
+                var nimm: bool = false
+                if pass == 0 {
+                    nimm = spielt
+                }
+                if pass == 1 {
+                    nimm = !spielt && z != Z_OFF
+                }
+                if pass == 2 {
+                    nimm = !spielt && z == Z_OFF
+                }
+                if nimm {
+                    var txt: [u8; 80] = [0 as u8; 80]
+                    let tp: u64 = (&txt[0 as usize]) as u64
+                    if spielt {
+                        var s_sp: [u8; 8] = "spielt \0"
+                        ulib.strcpy(tp, (&s_sp[0 as usize]) as u64)
+                        ulib.strncpy(tp + 7, (&akt[0 as usize]) as u64, 60)
+                    } else {
+                        ulib.strncpy(tp, (&st[0 as usize]) as u64, 64)
+                    }
+                    peer_set((&name[0 as usize]) as u64, z, tp, 1)
+                }
+            }
+            at = e + 1
+        }
+        pass = pass + 1
+    }
+    return true
+}
+
+// "Unsichtbar" is an action of the service, not a flag of this bar
+fn bus_unsichtbar(an: bool) -> bool {
+    var s_inv: [u8; 51] = "call social.presence.set\nstate=invisible\n\0\0\0\0\0\0\0\0\0\0"
+    var s_on: [u8; 48] = "call social.presence.set\nstate=online\n\0\0\0\0\0\0\0\0\0\0"
+    actwire.ob_reset()
+    if an {
+        actwire.ob_str((&s_inv[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_on[0 as usize]) as u64)
+    }
+    return bus_ask()
+}
+
 // ==================================================== DIE OBERFLAECHE
 fn bauen() -> u64 {
     // Die Leiste steht rechts und ist schmal. 240 Bildpunkte breit,
@@ -280,7 +493,8 @@ fn bauen() -> u64 {
     }
     i_titel = wlib.label(msg.get((&k_titel[0 as usize]) as u64))
     list_build()
-    i_liste = wlib.list((&blob[0 as usize]) as u64, 14)
+    i_liste = wlib.list((&blob[0 as usize]) as u64, 12)
+    wlib.list_zwei(i_liste, true)
     i_chat = wlib.button(msg.get((&k_chat[0 as usize]) as u64))
     i_unsicht = wlib.check(msg.get((&k_unsicht[0 as usize]) as u64),
         unsicht != 0)
@@ -360,6 +574,17 @@ fn u_start(args: u64) -> u64 {
         i = i + 1
     }
 
+    // RUNDE SOCIAL: the catalogue was never loaded -- the bar showed its
+    // keys ("freunde.titel") instead of the words
+    let _mk: u64 = msg.init()
+
+    // RUNDE SOCIAL: without --demo the friends come from the service
+    if angemeldet == 0 && bus_setup() {
+        quelle_bus = true
+        angemeldet = 1
+        let _l: bool = bus_load()
+    }
+
     if !wlib.begin(false, false) {
         var e: [u8; 25] = "freunde: kein Fenstersrv\0"
         sag((&e[0 as usize]) as u64)
@@ -382,6 +607,10 @@ fn u_start(args: u64) -> u64 {
     var m3: [u8; 10] = " zeichen=\0"
     ulib.say((&m3[0 as usize]) as u64)
     ulib.sayn(blen)
+    if quelle_bus {
+        var m4: [u8; 12] = " quelle=bus\0"
+        ulib.say((&m4[0 as usize]) as u64)
+    }
     ulib.nl()
 
     if schuss {
@@ -389,8 +618,28 @@ fn u_start(args: u64) -> u64 {
     }
 
     var runden: u64 = 0
+    var t_neu: u64 = actwire.ticks()
     while wlib.alive() && (grenze == 0 || runden < grenze) {
         runden = runden + 1
+        // RUNDE SOCIAL: every 3 s the list again (presence, games)
+        if quelle_bus && actwire.ticks() - t_neu > 300 {
+            t_neu = actwire.ticks()
+            let alt: u64 = f_n
+            let altb: u64 = blen
+            if bus_load() {
+                list_build()
+                wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
+                if f_n != alt || blen != altb {
+                    var m5: [u8; 20] = "freunde: eintraege=\0"
+                    ulib.say((&m5[0 as usize]) as u64)
+                    ulib.sayn(f_n)
+                    var m6: [u8; 10] = " zeichen=\0"
+                    ulib.say((&m6[0 as usize]) as u64)
+                    ulib.sayn(blen)
+                    ulib.nl()
+                }
+            }
+        }
         let id: u64 = wlib.step()
         if id < wlib.MAXWD {
             let art: u64 = wlib.fired_kind()
@@ -417,6 +666,15 @@ fn u_start(args: u64) -> u64 {
                 var mu: [u8; 21] = "freunde: unsichtbar=\0"
                 ulib.say((&mu[0 as usize]) as u64)
                 ulib.sayn(unsicht)
+                if quelle_bus {
+                    var mb: [u8; 11] = " dienst=ok\0"
+                    var mn: [u8; 13] = " dienst=nein\0"
+                    if bus_unsichtbar(unsicht != 0) {
+                        ulib.say((&mb[0 as usize]) as u64)
+                    } else {
+                        ulib.say((&mn[0 as usize]) as u64)
+                    }
+                }
                 ulib.nl()
             }
             if art == wlib.K_BUTTON && id == i_senden {

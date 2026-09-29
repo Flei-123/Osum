@@ -1,0 +1,1332 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/social.fi -- THE SOCIAL SERVICE: friends, presence and
+// activity for the whole system, as a provider on orient-bus.
+//
+//     social serve [ticks] [refresh-ticks]
+//
+// The concept is FirnChat's docs/SOCIAL.md and docs/ACTION-BUS.md
+// section 8 ("API v1 IS a set of actions on orient-bus"):
+//
+//   * ONE service owns the merged address book, the own presence and
+//     activity. UIs (the friends bar /bin/freunde, an overlay, a game,
+//     Jarvis) never talk to a provider; they call `social.*` actions --
+//     so every caller goes through the broker's rights, confirmation,
+//     dry run and audit log, and the UI is replaceable.
+//   * PROVIDERS sit behind one interface and are PROGRAMS, not code in
+//     here: /etc/social/providers names them,
+//
+//         provider fleitec /bin/socfleitec
+//         provider local /bin/soclocal
+//
+//     and the service runs `<program> v1 <verb> ...` and reads lines
+//     (kernel/app/socfleitec.fi documents the interface). Several at
+//     once; their contacts merge into one book, an id is
+//     `<provider>:<id>`. A new provider (Matrix, XMPP, the LAN) is a new
+//     program and a line in that file -- this file does not change and
+//     does not even know which providers exist.
+//   * Privacy is enforced HERE, where the data goes out: invisible stops
+//     the signs of life and the activity, `share_activity=false` keeps an
+//     activity on the device.
+//
+// What it does on its own: asks every provider for the book every
+// refresh (30 s), sends a sign of life every 120 s while not invisible,
+// repeats the activity every 60 s (fleikontakte forgets it after 150 s),
+// and publishes `social.presence`, `social.activity` and `social.contact`
+// events for what changed between two books.
+//
+// A provider call blocks this loop while it runs (at most CALL_TICKS);
+// frames for us wait in the kernel meanwhile. The broker gives a call 5 s
+// -- a provider that takes longer is killed and the call answered
+// `err provider offline`, never left hanging.
+
+profile app
+
+import ulib
+import actwire
+
+export { u_start }
+
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+const S_NANOSLEEP: i64 = 35
+const S_DUP2: i64 = 33
+const S_FORK: i64 = 57
+const S_EXECVE: i64 = 59
+const S_WAIT4: i64 = 61
+const S_KILL: i64 = 62
+const S_MKDIR: i64 = 83
+const WNOHANG: i64 = 1
+
+const PROV_MAX: usize = 4
+const CALL_TICKS: u64 = 400 // 4 s: inside the broker's 5 s
+const ALIVE_TICKS: u64 = 12000 // 120 s
+const ACT_TICKS: u64 = 6000 // 60 s
+const PAGE_MAX: usize = 1700 // octets of contact lines in one reply
+
+// ----------------------------------------------------------------- state
+
+// The providers: name and program, from /etc/social/providers.
+static mut p_name: [u8; 64] = [0 as u8; 64] // PROV_MAX * 16
+static mut p_prog: [u8; 256] = [0 as u8; 256] // PROV_MAX * 64
+static mut p_state: [u8; 4] = [0 as u8; 4] // 0 not asked, 1 ok, 2 offline, 3 denied, 4 error
+static mut p_count: [u64; 4] = [0 as u64; 4]
+static mut n_prov: usize = 0
+
+// The merged book: one line per contact, TAB between fields:
+//   provider id relation presence name handle status activity since chat
+// `since` is counted from `got` (ticks when the book came).
+static mut book: SB = SB { ptr: 0, len: 0, cap: 0 }
+static mut st_a: [u8; 16384] = [0 as u8; 16384] // the book, and the next one
+static mut st_b: [u8; 16384] = [0 as u8; 16384]
+static mut flip: bool = false
+static mut st_out: [u8; 16384] = [0 as u8; 16384] // what a provider said
+static mut st_file: [u8; 4096] = [0 as u8; 4096]
+static mut st_lines: [u8; 4096] = [0 as u8; 4096]
+static mut got: u64 = 0
+
+// Myself
+static mut my_pres: [u8; 16] = [0 as u8; 16]
+static mut my_text: [u8; 64] = [0 as u8; 64]
+static mut my_act: [u8; 64] = [0 as u8; 64]
+static mut my_act_client: [u8; 24] = [0 as u8; 24]
+static mut share_act: bool = true
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut evt_no: u64 = 1
+static mut refresh_ticks: u64 = 3000
+
+
+// ------------------------------------------------ buffers without a heap
+//
+// The programs under kernel/user/ are also assembled by `fas` on the
+// system itself (tools/k16/run.sh), and fas cannot take what the heap of
+// `profile app` compiles to (`lock xadd`, `fs:0`). So no SB here: a
+// buffer is a window on a static array, full is full (and counted).
+// std.rt is NOT imported: under `profile app` it brings the heap's
+// runtime along (see SB above) -- these five are all this file needs.
+fn r_ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn r_st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn r_copy(d: u64, s: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        r_st8(d, i, r_ld8(s, i))
+        i = i + 1
+    }
+}
+
+fn r_eq(a: u64, b: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if r_ld8(a, i) != r_ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn r_clen(p: u64) -> usize {
+    var n: usize = 0
+    while r_ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+struct SB {
+    ptr: u64,
+    len: usize,
+    cap: usize,
+}
+
+fn sb(p: u64, cap: usize) -> SB {
+    return SB { ptr: p, len: 0, cap: cap }
+}
+
+fn sb_clear(b: *mut SB) {
+    (*b).len = 0
+}
+
+fn sb_push(b: *mut SB, c: u8) {
+    if (*b).len < (*b).cap {
+        r_st8((*b).ptr, (*b).len, c)
+        (*b).len = (*b).len + 1
+    }
+}
+
+fn sb_bytes(b: *mut SB, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        sb_push(b, r_ld8(p, i))
+        i = i + 1
+    }
+}
+
+fn sb_dec(b: *mut SB, v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: usize = 0
+    var x: u64 = v
+    while x > 0 || n == 0 {
+        d[n] = (48 + x % 10) as u8
+        n = n + 1
+        x = x / 10
+    }
+    while n > 0 {
+        n = n - 1
+        sb_push(b, d[n])
+    }
+}
+
+// ----------------------------------------------------------- small tools
+
+fn zlen(p: u64) -> usize {
+    return r_clen(p)
+}
+
+fn zset(dst: u64, cap: usize, p: u64, n: usize) {
+    var k: usize = n
+    if k > cap - 1 {
+        k = cap - 1
+    }
+    r_copy(dst, p, k)
+    r_st8(dst, k, 0 as u8)
+}
+
+fn zset_s(dst: u64, cap: usize, s: str) {
+    zset(dst, cap, s.p as u64, s.n)
+}
+
+fn is(p: u64, n: usize, s: str) -> bool {
+    if n != s.n {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if r_ld8(p, i) != r_ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn isz(p: u64, s: str) -> bool {
+    return is(p, zlen(p), s)
+}
+
+fn say(s: str) {
+    syscall(S_WRITE, 1, s.p as i64, s.n as i64, 0, 0, 0)
+}
+
+fn sayb(p: u64, n: usize) {
+    syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
+}
+
+fn ob_s(s: str) {
+    actwire.ob_n(s.p as u64, s.n as u64)
+}
+
+fn ob_kv(k: str, p: u64, n: usize) {
+    ob_s(k)
+    actwire.ob_ch(61)
+    actwire.ob_n(p, n as u64)
+    actwire.ob_ch(10)
+}
+
+fn ob_kn(k: str, v: u64) {
+    ob_s(k)
+    actwire.ob_ch(61)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+fn ob_err(code: str) {
+    actwire.ob_reset()
+    ob_s("err ")
+    ob_s(code)
+    actwire.ob_ch(10)
+}
+
+fn read_file(path: str, into: *mut SB) -> bool {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var chunk: [u8; 1024] = [0 as u8; 1024]
+    while true {
+        let n: i64 = syscall(S_READ, fd, (&chunk[0]) as i64, 1024, 0, 0, 0)
+        if n <= 0 {
+            break
+        }
+        sb_bytes(into, (&chunk[0]) as u64, n as usize)
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn write_file(path: str, p: u64, n: usize) -> bool {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    // O_WRONLY | O_CREAT | O_TRUNC
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 1 | 64 | 512, 384, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+fn sleep_ms(ms: u64) {
+    var ts: [i64; 2] = [0 as i64; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+// Field k (0-based) of a TAB line starting at p (ends at LF or 0):
+// pointer and length.
+fn fld(p: u64, k: usize, out_n: *mut usize) -> u64 {
+    var i: usize = 0
+    var f: usize = 0
+    while f < k {
+        let c: u8 = r_ld8(p, i)
+        if c == 10 as u8 || c == 0 as u8 {
+            *out_n = 0
+            return p + i as u64
+        }
+        if c == 9 as u8 {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    var e: usize = i
+    while r_ld8(p, e) != 9 as u8 && r_ld8(p, e) != 10 as u8
+        && r_ld8(p, e) != 0 as u8 {
+        e = e + 1
+    }
+    *out_n = e - i
+    return p + i as u64
+}
+
+fn line_len(p: u64) -> usize {
+    var i: usize = 0
+    while r_ld8(p, i) != 10 as u8 && r_ld8(p, i) != 0 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+// ------------------------------------------------------- the providers
+
+fn pname(i: usize) -> u64 {
+    return (&p_name[0]) as u64 + (i * 16) as u64
+}
+
+fn pprog(i: usize) -> u64 {
+    return (&p_prog[0]) as u64 + (i * 64) as u64
+}
+
+// /etc/social/providers: "provider <name> <program>" per line
+fn providers_load() {
+    n_prov = 0
+    var f: SB = sb((&st_file[0]) as u64, 4095)
+    if !read_file("/etc/social/providers", &f) {
+        return
+    }
+    sb_push(&f, 0 as u8)
+    var at: usize = 0
+    while at < f.len && n_prov < PROV_MAX {
+        let lp: u64 = f.ptr + at as u64
+        let ll: usize = line_len(lp)
+        var w: [u8; 64] = [0 as u8; 64]
+        let x0: u64 = actwire.word_copy(lp, 0, (&w[0]) as u64, 16)
+        if isz((&w[0]) as u64, "provider") {
+            let x1: u64 = actwire.word_copy(lp, x0, pname(n_prov), 16)
+            actwire.word_copy(lp, x1, pprog(n_prov), 64)
+            if zlen(pname(n_prov)) > 0 && r_ld8(pprog(n_prov), 0) == 47 as u8 {
+                p_state[n_prov] = 0 as u8
+                p_count[n_prov] = 0
+                n_prov = n_prov + 1
+            }
+        }
+        at = at + ll + 1
+    }
+}
+
+fn prov_find(p: u64, n: usize) -> i64 {
+    var i: usize = 0
+    while i < n_prov {
+        if n == zlen(pname(i)) && r_eq(pname(i), p, n) {
+            return i as i64
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Run `<program> v1 <w1> <w2> <w3...>` of provider i; the output lands
+// in `out`, the exit code is returned (124 = killed after `limit`
+// ticks, 127 = could not run). Words are zero-terminated strings; w3 may
+// be several words joined by spaces -- the provider joins them back.
+fn run(i: usize, w1: u64, w2: u64, w3: u64, out: *mut SB,
+    limit: u64) -> i64 {
+    sb_clear(out)
+    syscall(S_MKDIR, "/tmp/social\0".p as i64, 493, 0, 0, 0, 0)
+    // O_WRONLY | O_CREAT | O_TRUNC
+    let fd: i64 = syscall(S_OPEN, "/tmp/social/provider.out\0".p as i64,
+        1 | 64 | 512, 384, 0, 0, 0)
+    if fd < 0 {
+        return 127
+    }
+    var v1: [u8; 3] = "v1\0"
+    var argv: [u64; 8] = [0 as u64; 8]
+    argv[0] = pprog(i)
+    argv[1] = (&v1[0]) as u64
+    var n: usize = 2
+    if w1 != 0 {
+        argv[n] = w1
+        n = n + 1
+    }
+    if w2 != 0 {
+        argv[n] = w2
+        n = n + 1
+    }
+    if w3 != 0 {
+        argv[n] = w3
+        n = n + 1
+    }
+    argv[n] = 0
+    let kid: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+    if kid < 0 {
+        syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+        return 127
+    }
+    if kid == 0 {
+        syscall(S_DUP2, fd, 1, 0, 0, 0, 0)
+        syscall(S_DUP2, fd, 2, 0, 0, 0, 0)
+        syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+        syscall(S_EXECVE, argv[0] as i64, (&argv[0]) as i64, 0, 0, 0, 0)
+        syscall(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    var st: i32 = 0
+    let t0: u64 = actwire.ticks()
+    var code: i64 = -1
+    while code < 0 {
+        let r: i64 = syscall(S_WAIT4, kid, (&st) as i64, WNOHANG, 0, 0, 0)
+        if r == kid {
+            code = 255
+            if (st & 127) == 0 {
+                code = ((st >> 8) & 255) as i64
+            }
+        } else if r < 0 {
+            code = 127
+        } else if actwire.ticks() - t0 > limit {
+            syscall(S_KILL, kid, 9, 0, 0, 0, 0)
+            var k: u64 = 0
+            while k < 100 {
+                let r2: i64 = syscall(S_WAIT4, kid, (&st) as i64, WNOHANG, 0, 0, 0)
+                if r2 == kid || r2 < 0 {
+                    k = 100
+                }
+                sleep_ms(10)
+                k = k + 1
+            }
+            code = 124
+        } else {
+            sleep_ms(10)
+        }
+    }
+    let _r: bool = read_file("/tmp/social/provider.out", out)
+    sb_push(out, 0 as u8)
+    (*out).len = (*out).len - 1
+    return code
+}
+
+fn state_of(code: i64) -> u8 {
+    if code == 0 {
+        return 1 as u8
+    }
+    if code == 2 || code == 124 || code == 127 {
+        return 2 as u8
+    }
+    if code == 3 {
+        return 3 as u8
+    }
+    return 4 as u8
+}
+
+fn state_word(s: u8) -> str {
+    if s == 1 as u8 {
+        return "ok"
+    }
+    if s == 2 as u8 {
+        return "offline"
+    }
+    if s == 3 as u8 {
+        return "denied"
+    }
+    if s == 4 as u8 {
+        return "error"
+    }
+    return "new"
+}
+
+// ------------------------------------------------------------- the book
+
+// the book line of `id` ("prov:id"), or -1
+fn book_find(p: u64, n: usize) -> i64 {
+    var at: usize = 0
+    while at < book.len {
+        let lp: u64 = book.ptr + at as u64
+        var pn: usize = 0
+        let pp: u64 = fld(lp, 0, &pn)
+        var inn: usize = 0
+        let ip: u64 = fld(lp, 1, &inn)
+        if n == pn + 1 + inn && r_eq(p, pp, pn)
+            && r_ld8(p, pn) == 58 as u8 && r_eq(p + (pn + 1) as u64, ip, inn) {
+            return at as i64
+        }
+        at = at + line_len(lp) + 1
+    }
+    return -1
+}
+
+// "prov:id" of the line at lp into the output buffer
+fn ob_id(lp: u64) {
+    var n: usize = 0
+    let p0: u64 = fld(lp, 0, &n)
+    actwire.ob_n(p0, n as u64)
+    actwire.ob_ch(58)
+    let p1: u64 = fld(lp, 1, &n)
+    actwire.ob_n(p1, n as u64)
+}
+
+// a field into the output, with '|' and control characters out
+fn ob_safe(p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        var c: u8 = r_ld8(p, i)
+        if c == 124 as u8 {
+            c = 47 as u8
+        }
+        if c < 32 as u8 {
+            c = 32 as u8
+        }
+        actwire.ob_ch(c as u64)
+        i = i + 1
+    }
+}
+
+fn since_now(lp: u64) -> u64 {
+    var n: usize = 0
+    let p: u64 = fld(lp, 8, &n)
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        v = v * 10 + (r_ld8(p, i) - 48 as u8) as u64
+        i = i + 1
+    }
+    return v + (actwire.ticks() - got) / 100
+}
+
+// "prov:id|relation|presence|name|handle|status|activity|since_s"
+fn ob_contact(lp: u64) {
+    ob_id(lp)
+    var k: usize = 2
+    while k <= 7 {
+        actwire.ob_ch(124)
+        var n: usize = 0
+        let p: u64 = fld(lp, k, &n)
+        ob_safe(p, n)
+        k = k + 1
+    }
+    actwire.ob_ch(124)
+    var an: usize = 0
+    let _a: u64 = fld(lp, 7, &an)
+    if an > 0 {
+        actwire.ob_num(since_now(lp))
+    }
+}
+
+fn fld_is(lp: u64, k: usize, s: str) -> bool {
+    var n: usize = 0
+    let p: u64 = fld(lp, k, &n)
+    return is(p, n, s)
+}
+
+fn matches(lp: u64, filter: u64) -> bool {
+    if zlen(filter) == 0 || isz(filter, "all") {
+        return true
+    }
+    if isz(filter, "friends") {
+        return fld_is(lp, 2, "friend")
+    }
+    if isz(filter, "incoming") {
+        return fld_is(lp, 2, "incoming")
+    }
+    if isz(filter, "outgoing") {
+        return fld_is(lp, 2, "outgoing")
+    }
+    let friend: bool = fld_is(lp, 2, "friend")
+    if isz(filter, "online") {
+        return friend && (fld_is(lp, 3, "online") || fld_is(lp, 3, "away")
+            || fld_is(lp, 3, "dnd"))
+    }
+    if isz(filter, "active") {
+        var n: usize = 0
+        let _p: u64 = fld(lp, 7, &n)
+        return friend && n > 0
+    }
+    return false
+}
+
+// the same field in two lines?
+fn same_fld(a: u64, b: u64, k: usize) -> bool {
+    var an: usize = 0
+    var bn: usize = 0
+    let ap: u64 = fld(a, k, &an)
+    let bp: u64 = fld(b, k, &bn)
+    return an == bn && r_eq(ap, bp, an)
+}
+
+fn event2(name: str, lp: u64, key: str, k: usize) {
+    actwire.ob_reset()
+    ob_s("event ")
+    ob_s(name)
+    actwire.ob_ch(10)
+    ob_s("id=")
+    ob_id(lp)
+    actwire.ob_ch(10)
+    ob_s(key)
+    actwire.ob_ch(61)
+    var n: usize = 0
+    let p: u64 = fld(lp, k, &n)
+    ob_safe(p, n)
+    actwire.ob_ch(10)
+    actwire.send_msg(svc_bus, actwire.K_EVT, evt_no, actwire.ob_ptr(),
+        actwire.ob_len())
+    evt_no = evt_no + 1
+}
+
+// What changed between `old` and the book: events.
+fn diff(old: *mut SB) {
+    var at: usize = 0
+    while at < book.len {
+        let lp: u64 = book.ptr + at as u64
+        // the same id in the old book
+        var pn: usize = 0
+        let pp: u64 = fld(lp, 0, &pn)
+        var inn: usize = 0
+        let ip: u64 = fld(lp, 1, &inn)
+        var found: u64 = 0
+        var bt: usize = 0
+        while bt < (*old).len && found == 0 {
+            let op: u64 = (*old).ptr + bt as u64
+            if same_fld(lp, op, 0) && same_fld(lp, op, 1) {
+                found = op
+            }
+            bt = bt + line_len(op) + 1
+        }
+        if found == 0 {
+            event2("social.contact", lp, "relation", 2)
+        } else {
+            if !same_fld(lp, found, 2) {
+                event2("social.contact", lp, "relation", 2)
+            }
+            if !same_fld(lp, found, 3) {
+                event2("social.presence", lp, "presence", 3)
+            }
+            if !same_fld(lp, found, 7) {
+                event2("social.activity", lp, "activity", 7)
+            }
+        }
+        at = at + line_len(lp) + 1
+    }
+}
+
+// Ask every provider for its contacts; the merged book replaces the old.
+fn refresh(limit: u64) {
+    // the next book in the array the current one is not in
+    var nb: SB = sb((&st_a[0]) as u64, 16383)
+    if !flip {
+        nb = sb((&st_b[0]) as u64, 16383)
+    }
+    flip = !flip
+    var out: SB = sb((&st_out[0]) as u64, 16383)
+    var w: [u8; 9] = "contacts\0"
+    var i: usize = 0
+    while i < n_prov {
+        let code: i64 = run(i, (&w[0]) as u64, 0, 0, &out, limit)
+        p_state[i] = state_of(code)
+        var cnt: u64 = 0
+        if code == 0 {
+            var at: usize = 0
+            while at < out.len {
+                let lp: u64 = out.ptr + at as u64
+                let ll: usize = line_len(lp)
+                // "c<TAB>..." -> "<provider><TAB>..."
+                if ll > 2 && r_ld8(lp, 0) == 99 as u8 && r_ld8(lp, 1) == 9 as u8 {
+                    sb_bytes(&nb, pname(i), zlen(pname(i)))
+                    sb_bytes(&nb, lp + 1, ll - 1)
+                    sb_push(&nb, 10 as u8)
+                    cnt = cnt + 1
+                }
+                at = at + ll + 1
+            }
+        } else {
+            // offline: keep what this provider said last time, so a
+            // lost connection does not look like "everybody left"
+            var at2: usize = 0
+            while at2 < book.len {
+                let lp2: u64 = book.ptr + at2 as u64
+                let ll2: usize = line_len(lp2)
+                var pn: usize = 0
+                let pp: u64 = fld(lp2, 0, &pn)
+                if pn == zlen(pname(i)) && r_eq(pp, pname(i), pn) {
+                    sb_bytes(&nb, lp2, ll2 + 1)
+                    cnt = cnt + 1
+                }
+                at2 = at2 + ll2 + 1
+            }
+        }
+        p_count[i] = cnt
+        i = i + 1
+    }
+    var old: SB = book
+    book = nb
+    sb_push(&book, 0 as u8)
+    book.len = book.len - 1
+    got = actwire.ticks()
+    diff(&old)
+}
+
+// ------------------------------------------------------------ the verbs
+
+static mut k_dry: [u8; 5] = "@dry\0"
+static mut k_client: [u8; 8] = "@client\0"
+
+fn arg(msg: u64, key: str, out: u64, max: u64) -> bool {
+    var kz: [u8; 24] = [0 as u8; 24]
+    zset((&kz[0]) as u64, 24, key.p as u64, key.n)
+    return actwire.kv_find(msg, (&kz[0]) as u64, out, max)
+}
+
+fn a_status() {
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_kn("providers", n_prov as u64)
+    var i: usize = 0
+    while i < n_prov {
+        ob_s("provider.")
+        actwire.ob_num((i + 1) as u64)
+        actwire.ob_ch(61)
+        actwire.ob_n(pname(i), zlen(pname(i)) as u64)
+        actwire.ob_ch(32)
+        ob_s(state_word(p_state[i]))
+        actwire.ob_ch(32)
+        actwire.ob_num(p_count[i])
+        actwire.ob_ch(10)
+        i = i + 1
+    }
+    var total: u64 = 0
+    var online: u64 = 0
+    var active: u64 = 0
+    var on: [u8; 7] = "online\0"
+    var ac: [u8; 7] = "active\0"
+    var at: usize = 0
+    while at < book.len {
+        let lp: u64 = book.ptr + at as u64
+        total = total + 1
+        if matches(lp, (&on[0]) as u64) {
+            online = online + 1
+        }
+        if matches(lp, (&ac[0]) as u64) {
+            active = active + 1
+        }
+        at = at + line_len(lp) + 1
+    }
+    ob_kn("contacts", total)
+    ob_kn("online", online)
+    ob_kn("active", active)
+    ob_kv("presence", (&my_pres[0]) as u64, zlen((&my_pres[0]) as u64))
+    ob_kv("activity", (&my_act[0]) as u64, zlen((&my_act[0]) as u64))
+}
+
+fn a_list(msg: u64) {
+    var filter: [u8; 16] = [0 as u8; 16]
+    var offs: [u8; 16] = [0 as u8; 16]
+    let _f: bool = arg(msg, "filter", (&filter[0]) as u64, 16)
+    let _o: bool = arg(msg, "offset", (&offs[0]) as u64, 16)
+    let skip: u64 = ulib.to_num((&offs[0]) as u64)
+    var total: u64 = 0
+    var shown: u64 = 0
+    var next: u64 = 0
+    var lines: SB = sb((&st_lines[0]) as u64, 4095)
+    actwire.ob_reset()
+    var at: usize = 0
+    while at < book.len {
+        let lp: u64 = book.ptr + at as u64
+        if matches(lp, (&filter[0]) as u64) {
+            if total >= skip && next == 0 {
+                let before: u64 = actwire.ob_len()
+                ob_s("contact.")
+                actwire.ob_num(shown + 1)
+                actwire.ob_ch(61)
+                ob_contact(lp)
+                actwire.ob_ch(10)
+                if actwire.ob_len() > PAGE_MAX as u64 {
+                    // does not fit: this one starts the next page
+                    next = total
+                } else {
+                    sb_bytes(&lines, actwire.ob_ptr() + before,
+                        (actwire.ob_len() - before) as usize)
+                    shown = shown + 1
+                }
+            }
+            total = total + 1
+        }
+        at = at + line_len(lp) + 1
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_kn("total", total)
+    ob_kn("next", next)
+    actwire.ob_n(lines.ptr, lines.len as u64)
+}
+
+fn a_get(msg: u64) {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = arg(msg, "id", (&id[0]) as u64, 96)
+    let at: i64 = book_find((&id[0]) as u64, zlen((&id[0]) as u64))
+    if at < 0 {
+        ob_err("no_such_contact")
+        return
+    }
+    let lp: u64 = book.ptr + at as u64
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_s("id=")
+    ob_id(lp)
+    actwire.ob_ch(10)
+    var n: usize = 0
+    var p: u64 = fld(lp, 0, &n)
+    ob_kv("provider", p, n)
+    var names: [str; 10] = ["provider", "id_at_provider", "relation", "presence", "name",
+        "handle", "status_text", "activity", "since_s", "chat"]
+    var k: usize = 2
+    while k <= 9 {
+        if k == 8 {
+            ob_kn("since_s", since_now(lp))
+        } else {
+            p = fld(lp, k, &n)
+            ob_s(names[k])
+            actwire.ob_ch(61)
+            ob_safe(p, n)
+            actwire.ob_ch(10)
+        }
+        k = k + 1
+    }
+}
+
+// "prov:id" -> provider index and the id at the provider (zero-terminated)
+fn split_id(msg: u64, idz: u64, max: usize) -> i64 {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = arg(msg, "id", (&id[0]) as u64, 96)
+    let ip: u64 = (&id[0]) as u64
+    let n: usize = zlen(ip)
+    var c: usize = 0
+    while c < n && r_ld8(ip, c) != 58 as u8 {
+        c = c + 1
+    }
+    if c == 0 || c >= n - 1 {
+        return -1
+    }
+    let pi: i64 = prov_find(ip, c)
+    if pi < 0 {
+        return -1
+    }
+    zset(idz, max, ip + (c + 1) as u64, n - c - 1)
+    return pi
+}
+
+fn relation_after(msg: u64) -> str {
+    var id: [u8; 96] = [0 as u8; 96]
+    let _i: bool = arg(msg, "id", (&id[0]) as u64, 96)
+    let at: i64 = book_find((&id[0]) as u64, zlen((&id[0]) as u64))
+    if at < 0 {
+        return "none"
+    }
+    let lp: u64 = book.ptr + at as u64
+    if fld_is(lp, 2, "friend") {
+        return "friend"
+    }
+    if fld_is(lp, 2, "incoming") {
+        return "incoming"
+    }
+    if fld_is(lp, 2, "outgoing") {
+        return "outgoing"
+    }
+    if fld_is(lp, 2, "blocked") {
+        return "blocked"
+    }
+    return "none"
+}
+
+// the last line of a provider's answer ("err<TAB>code<TAB>text") as our error
+fn ob_provider_err(out: *mut SB, code: i64) {
+    if code == 3 {
+        ob_err("provider denied")
+    } else if code == 2 || code == 124 || code == 127 {
+        ob_err("provider offline")
+    } else {
+        ob_err("provider error")
+    }
+}
+
+// request / accept / decline / withdraw / remove
+fn a_relation(msg: u64, verb: str, dry: bool) -> bool {
+    var idz: [u8; 96] = [0 as u8; 96]
+    let pi: i64 = split_id(msg, (&idz[0]) as u64, 96)
+    if pi < 0 {
+        ob_err("no_such_contact")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        ob_s("ok\ndry=1\nwould=")
+        ob_s(verb)
+        actwire.ob_ch(32)
+        actwire.ob_n(pname(pi as usize), zlen(pname(pi as usize)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_ch(10)
+        return false
+    }
+    var w1: [u8; 9] = "relation\0"
+    var w2: [u8; 12] = [0 as u8; 12]
+    zset_s((&w2[0]) as u64, 12, verb)
+    var out: SB = sb((&st_out[0]) as u64, 16383)
+    let code: i64 = run(pi as usize, (&w1[0]) as u64, (&w2[0]) as u64,
+        (&idz[0]) as u64, &out, CALL_TICKS)
+    if code != 0 {
+        ob_provider_err(&out, code)
+        return false
+    }
+    refresh(CALL_TICKS)
+    actwire.ob_reset()
+    ob_s("ok\n")
+    let rel: str = relation_after(msg)
+    ob_s("relation=")
+    ob_s(rel)
+    actwire.ob_ch(10)
+    // the inverse's arguments (WHICH action is fixed by the manifest)
+    if is(verb.p as u64, verb.n, "request") || is(verb.p as u64, verb.n, "accept") {
+        ob_s("@undo id=")
+        actwire.ob_n(pname(pi as usize), zlen(pname(pi as usize)) as u64)
+        actwire.ob_ch(58)
+        actwire.ob_str((&idz[0]) as u64)
+        actwire.ob_ch(10)
+    }
+    return true
+}
+
+// run `verb w2 w3` at every provider; true when at least one took it
+fn all_providers(w1: u64, w2: u64, w3: u64) -> bool {
+    var out: SB = sb((&st_out[0]) as u64, 16383)
+    var any: bool = false
+    var i: usize = 0
+    while i < n_prov {
+        let code: i64 = run(i, w1, w2, w3, &out, CALL_TICKS)
+        if code == 0 {
+            any = true
+        }
+        i = i + 1
+    }
+    return any
+}
+
+fn a_presence(msg: u64, dry: bool) -> bool {
+    var st: [u8; 16] = [0 as u8; 16]
+    var tx: [u8; 64] = [0 as u8; 64]
+    let _s: bool = arg(msg, "state", (&st[0]) as u64, 16)
+    let _t: bool = arg(msg, "text", (&tx[0]) as u64, 64)
+    let sp: u64 = (&st[0]) as u64
+    if !(isz(sp, "online") || isz(sp, "away") || isz(sp, "dnd") || isz(sp, "invisible")) {
+        ob_err("bad_arg state")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        ob_s("ok\ndry=1\nwould=presence ")
+        actwire.ob_str(sp)
+        actwire.ob_ch(10)
+        return false
+    }
+    zset((&my_pres[0]) as u64, 16, sp, zlen(sp))
+    zset((&my_text[0]) as u64, 64, (&tx[0]) as u64, zlen((&tx[0]) as u64))
+    var w1: [u8; 9] = "presence\0"
+    var t3: u64 = 0
+    if zlen((&tx[0]) as u64) > 0 {
+        t3 = (&tx[0]) as u64
+    }
+    let _a: bool = all_providers((&w1[0]) as u64, sp, t3)
+    // invisible: the activity goes too (an invisible player plays unseen)
+    if isz(sp, "invisible") {
+        var w2: [u8; 9] = "activity\0"
+        let _b: bool = all_providers((&w2[0]) as u64, 0, 0)
+    } else if zlen((&my_act[0]) as u64) > 0 && share_act {
+        var w3: [u8; 9] = "activity\0"
+        let _c: bool = all_providers((&w3[0]) as u64, (&my_act[0]) as u64, 0)
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_kv("presence", sp, zlen(sp))
+    return true
+}
+
+fn invisible() -> bool {
+    return isz((&my_pres[0]) as u64, "invisible")
+}
+
+fn a_activity(msg: u64, dry: bool) -> bool {
+    var nm: [u8; 64] = [0 as u8; 64]
+    let _n: bool = arg(msg, "name", (&nm[0]) as u64, 64)
+    if zlen((&nm[0]) as u64) == 0 {
+        ob_err("bad_arg name")
+        return false
+    }
+    let goes: bool = share_act && !invisible()
+    if dry {
+        actwire.ob_reset()
+        ob_s("ok\ndry=1\nwould=activity ")
+        actwire.ob_str((&nm[0]) as u64)
+        actwire.ob_ch(10)
+        if goes {
+            ob_s("shared=true\n")
+        } else {
+            ob_s("shared=false\n")
+        }
+        return false
+    }
+    zset((&my_act[0]) as u64, 64, (&nm[0]) as u64, zlen((&nm[0]) as u64))
+    let _c: bool = arg(msg, "@client", (&my_act_client[0]) as u64, 24)
+    var shared: bool = false
+    if goes {
+        var w1: [u8; 9] = "activity\0"
+        shared = all_providers((&w1[0]) as u64, (&my_act[0]) as u64, 0)
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    if shared {
+        ob_s("shared=true\n")
+    } else {
+        ob_s("shared=false\n")
+    }
+    return true
+}
+
+fn a_activity_clear(msg: u64, dry: bool) -> bool {
+    // an app clears only what it set itself; the user clears anything
+    var cl: [u8; 24] = [0 as u8; 24]
+    let _c: bool = arg(msg, "@client", (&cl[0]) as u64, 24)
+    if zlen((&my_act[0]) as u64) > 0 && !isz((&cl[0]) as u64, "user")
+        && !r_eq((&cl[0]) as u64, (&my_act_client[0]) as u64, 24) {
+        ob_err("denied not_your_activity")
+        return false
+    }
+    if dry {
+        actwire.ob_reset()
+        ob_s("ok\ndry=1\nwould=clear activity\n")
+        return false
+    }
+    r_st8((&my_act[0]) as u64, 0, 0 as u8)
+    var w1: [u8; 9] = "activity\0"
+    let _a: bool = all_providers((&w1[0]) as u64, 0, 0)
+    actwire.ob_reset()
+    ob_s("ok\n")
+    return true
+}
+
+fn a_privacy(msg: u64, dry: bool) -> bool {
+    var v: [u8; 8] = [0 as u8; 8]
+    let _v: bool = arg(msg, "share_activity", (&v[0]) as u64, 8)
+    let on: bool = isz((&v[0]) as u64, "true") || isz((&v[0]) as u64, "1")
+    if dry {
+        actwire.ob_reset()
+        ob_s("ok\ndry=1\n")
+        if on {
+            ob_s("would_share_activity=true\n")
+        } else {
+            ob_s("would_share_activity=false\n")
+        }
+        return false
+    }
+    share_act = on
+    if on {
+        let _w: bool = write_file("/etc/social/privacy", "share_activity=true\n".p as u64, 20)
+    } else {
+        let _w2: bool = write_file("/etc/social/privacy", "share_activity=false\n".p as u64, 21)
+        var w1: [u8; 9] = "activity\0"
+        let _a: bool = all_providers((&w1[0]) as u64, 0, 0)
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    if on {
+        ob_s("share_activity=true\n")
+    } else {
+        ob_s("share_activity=false\n")
+    }
+    return true
+}
+
+fn a_search(msg: u64) {
+    var q: [u8; 64] = [0 as u8; 64]
+    let _q: bool = arg(msg, "query", (&q[0]) as u64, 64)
+    var w1: [u8; 7] = "search\0"
+    var out: SB = sb((&st_out[0]) as u64, 16383)
+    var lines: SB = sb((&st_lines[0]) as u64, 4095)
+    var cnt: u64 = 0
+    var i: usize = 0
+    while i < n_prov {
+        let code: i64 = run(i, (&w1[0]) as u64, (&q[0]) as u64, 0, &out, CALL_TICKS)
+        if code == 0 {
+            var at: usize = 0
+            while at < out.len && cnt < 10 {
+                let lp: u64 = out.ptr + at as u64
+                let ll: usize = line_len(lp)
+                if ll > 2 && r_ld8(lp, 0) == 99 as u8 {
+                    // "c<TAB>id<TAB>rel<TAB>pres<TAB>name<TAB>handle..."
+                    sb_bytes(&lines, "contact.".p as u64, 8)
+                    sb_dec(&lines, cnt + 1)
+                    sb_push(&lines, 61 as u8)
+                    sb_bytes(&lines, pname(i), zlen(pname(i)))
+                    sb_push(&lines, 58 as u8)
+                    var k: usize = 1
+                    while k <= 5 {
+                        var n: usize = 0
+                        let p: u64 = fld(lp, k, &n)
+                        if k > 1 {
+                            sb_push(&lines, 124 as u8)
+                        }
+                        var j: usize = 0
+                        while j < n {
+                            var ch: u8 = r_ld8(p, j)
+                            if ch == 124 as u8 {
+                                ch = 47 as u8
+                            }
+                            sb_push(&lines, ch)
+                            j = j + 1
+                        }
+                        k = k + 1
+                    }
+                    sb_bytes(&lines, "|||\n".p as u64, 4)
+                    cnt = cnt + 1
+                }
+                at = at + ll + 1
+            }
+        }
+        i = i + 1
+    }
+    actwire.ob_reset()
+    ob_s("ok\n")
+    ob_kn("count", cnt)
+    actwire.ob_n(lines.ptr, lines.len as u64)
+}
+
+// One call; the reply is built in actwire's output buffer.
+fn handle(msg: u64) {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0]) as u64
+    let np: u64 = (&name[0]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var dv: [u8; 4] = [0 as u8; 4]
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0]) as u64, (&dv[0]) as u64, 4)
+    if isz(vp, "ping") {
+        actwire.ob_reset()
+        ob_s("pong\n")
+        return
+    }
+    if isz(np, "social.status") {
+        a_status()
+    } else if isz(np, "social.contacts.list") {
+        a_list(msg)
+    } else if isz(np, "social.contacts.get") {
+        a_get(msg)
+    } else if isz(np, "social.contacts.search") {
+        a_search(msg)
+    } else if isz(np, "social.contacts.request") {
+        let _r: bool = a_relation(msg, "request", dry)
+    } else if isz(np, "social.contacts.accept") {
+        let _r: bool = a_relation(msg, "accept", dry)
+    } else if isz(np, "social.contacts.decline") {
+        let _r: bool = a_relation(msg, "decline", dry)
+    } else if isz(np, "social.contacts.withdraw") {
+        let _r: bool = a_relation(msg, "withdraw", dry)
+    } else if isz(np, "social.contacts.remove") {
+        let _r: bool = a_relation(msg, "remove", dry)
+    } else if isz(np, "social.presence.set") {
+        let _r: bool = a_presence(msg, dry)
+    } else if isz(np, "social.activity.set") {
+        let _r: bool = a_activity(msg, dry)
+    } else if isz(np, "social.activity.clear") {
+        let _r: bool = a_activity_clear(msg, dry)
+    } else if isz(np, "social.privacy.set") {
+        let _r: bool = a_privacy(msg, dry)
+    } else if isz(np, "social.refresh") {
+        refresh(CALL_TICKS)
+        var total: u64 = 0
+        var at: usize = 0
+        while at < book.len {
+            total = total + 1
+            at = at + line_len(book.ptr + at as u64) + 1
+        }
+        actwire.ob_reset()
+        ob_s("ok\n")
+        ob_kn("contacts", total)
+    } else {
+        ob_err("unknown_action")
+    }
+}
+
+// ---------------------------------------------------------------- serve
+
+fn serve(limit: u64) -> u64 {
+    book = sb((&st_a[0]) as u64, 16383)
+    flip = false
+    zset_s((&my_pres[0]) as u64, 16, "online")
+    var pv: SB = sb((&st_file[0]) as u64, 4095)
+    if read_file("/etc/social/privacy", &pv) {
+        var i: usize = 0
+        while i + 20 <= pv.len {
+            if is(pv.ptr + i as u64, 20, "share_activity=false") {
+                share_act = false
+            }
+            i = i + 1
+        }
+    }
+    providers_load()
+    var n_me: [u8; 9] = "a.social\0"
+    let me: u64 = actwire.bus_reg((&n_me[0]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        say("social: a.social is taken\n")
+        return 1
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        say("social: no orient.bus here\n")
+        return 1
+    }
+    var s_hello: [u8; 14] = "hello social\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0]) as u64, 13)
+    say("social: serving a.social, providers=")
+    var d: [u8; 8] = [0 as u8; 8]
+    let dn: u64 = ulib.digits(n_prov as u64, (&d[0]) as u64)
+    sayb((&d[0]) as u64, dn as usize)
+    say("\n")
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0]) as u64
+    let mp: u64 = (&meta[0]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    // the first book after the broker had time to ping us
+    var next_refresh: u64 = t1 + 50
+    var next_alive: u64 = t1 + 60
+    var next_act: u64 = t1 + ACT_TICKS
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id,
+                        actwire.ob_ptr(), actwire.ob_len())
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            let now: u64 = actwire.ticks()
+            if now - last_check > 100 {
+                last_check = now
+                if ulib.bad(actwire.bus_find((&n_bus[0]) as u64)) {
+                    say("social: orient-bus is gone\n")
+                    return 0
+                }
+            }
+            if now >= next_refresh {
+                refresh(CALL_TICKS)
+                say("social: book ")
+                var d2: [u8; 8] = [0 as u8; 8]
+                var cnt: u64 = 0
+                var at: usize = 0
+                while at < book.len {
+                    cnt = cnt + 1
+                    at = at + line_len(book.ptr + at as u64) + 1
+                }
+                let dn2: u64 = ulib.digits(cnt, (&d2[0]) as u64)
+                sayb((&d2[0]) as u64, dn2 as usize)
+                say("\n")
+                next_refresh = actwire.ticks() + refresh_ticks
+            } else if now >= next_alive {
+                if !invisible() {
+                    var w1: [u8; 6] = "alive\0"
+                    let _a: bool = all_providers((&w1[0]) as u64, 0, 0)
+                }
+                next_alive = actwire.ticks() + ALIVE_TICKS
+            } else if now >= next_act {
+                if zlen((&my_act[0]) as u64) > 0 && share_act && !invisible() {
+                    var w2: [u8; 9] = "activity\0"
+                    let _b: bool = all_providers((&w2[0]) as u64, (&my_act[0]) as u64, 0)
+                }
+                next_act = actwire.ticks() + ACT_TICKS
+            }
+            actwire.yield_now()
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) >= 2 && isz(ulib.arg_at(args, 1), "serve") {
+        var lim: u64 = 0
+        if ulib.arg_count(args) >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        if ulib.arg_count(args) >= 4 {
+            refresh_ticks = ulib.to_num(ulib.arg_at(args, 3))
+        }
+        return serve(lim)
+    }
+    say("usage: social serve [ticks] [refresh-ticks]\n")
+    return 1
+}
+
+// profile app: firnc's own _start calls main (kernel/user/freunde.fi
+// says why the argument block has to be passed on by hand)
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
