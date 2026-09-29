@@ -1665,6 +1665,12 @@ lauf "52. der Anmeldeschirm, wie Justin ihn bedient: eine Taste ein Zeichen, Tab
 lauf "53. the action bus: manifests, one broker for every caller, rights, dry run, undo, audit, Jarvis through the bridge (tools/actionbus/run.sh, round ACTION-BUS)" \
      tools/actionbus/run.sh actionbus '^ACTIONBUS: |^ACTIONBUS-LATENCY |^== |^  OK    |^  FAIL  '
 
+# 54. AB-016: the action bus in the SHIPPED image -- the stick is built,
+# booted like the Dell (UEFI, USB, default entry), and the session starts
+# the broker and the settings provider before the sign-in.
+lauf "54. the action bus in the real image: broker + settingsd started by the session, before the sign-in (tools/actionbus/image.sh, AB-016)" \
+     tools/actionbus/image.sh actbusimage '^ACTBUS-IMAGE: |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

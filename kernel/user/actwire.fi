@@ -54,7 +54,9 @@ export {
     ob_reset, ob_str, ob_n, ob_num, ob_ch, ob_ptr, ob_len, ob_json,
     ob_line, append_file,
     // AB-003
-    origin_of, origin_set
+    origin_of, origin_set,
+    // AB-005 / AB-008
+    kvfile_get, kvfile_set, adapter_word, adapter_reliability
 }
 
 const SYS_BUS: u64 = 1960
@@ -602,4 +604,170 @@ fn origin_of(pid: u64, out: u64) -> u64 {
 // Mark MYSELF (only possible while unlabelled; a label only narrows).
 fn origin_set(label: u64) -> bool {
     return ulib.sys(SYS_ORIGIN, 1, label, slen(label)) == 0
+}
+
+// ================================================ AB-005 / AB-008
+//
+// key=value files: the store of settingsd (/etc/settings.db and the
+// `store` files of the schema) and the `file` adapter of the broker.
+
+static mut kvbuf: [u8; 8192] = [0 as u8; 8192]
+static mut kvout: [u8; 8192] = [0 as u8; 8192]
+
+
+// The value of `field` in the key=value file `path` into `out`.
+fn kvfile_get(path: u64, field: u64, out: u64, max: u64) -> bool {
+    st8(out, 0, 0)
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let p: u64 = (&kvbuf[0 as usize]) as u64
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    st8(p, n, 0)
+    let fl: u64 = slen(field)
+    var at: u64 = 0
+    while ld8(p, at) != 0 {
+        let e: u64 = line_end(p, at)
+        var hit: bool = e - at > fl && ld8(p, at + fl) == 61
+        var i: u64 = 0
+        while hit && i < fl {
+            if ld8(p, at + i) != ld8(field, i) {
+                hit = false
+            }
+            i = i + 1
+        }
+        if hit {
+            var k: u64 = 0
+            var j: u64 = at + fl + 1
+            while j < e && k + 1 < max {
+                st8(out, k, ld8(p, j))
+                k = k + 1
+                j = j + 1
+            }
+            st8(out, k, 0)
+            return true
+        }
+        at = e
+        if ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+    return false
+}
+
+fn ob_add(q: u64, at: u64, src: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && at + i < 8190 {
+        st8(q, at + i, ld8(src, i))
+        i = i + 1
+    }
+    return at + i
+}
+
+// Sets `field` in the file to `v`: the line is replaced where it stands,
+// or appended; every other line stays as it was.
+fn kvfile_set(path: u64, field: u64, v: u64) -> bool {
+    let p: u64 = (&kvbuf[0 as usize]) as u64
+    var n: u64 = 0
+    let fd: u64 = io.open(path, 0)
+    if !ulib.bad(fd) {
+        n = io.read(fd, p, 8000)
+        io.close(fd)
+        if ulib.bad(n) {
+            n = 0
+        }
+    }
+    st8(p, n, 0)
+    let q: u64 = (&kvout[0 as usize]) as u64
+    var o: u64 = 0
+    let fl: u64 = slen(field)
+    var done: bool = false
+    var eqs: [u8; 2] = "=\0"
+    var lf: [u8; 2] = "\n\0"
+    var at: u64 = 0
+    while ld8(p, at) != 0 {
+        let e: u64 = line_end(p, at)
+        var hit: bool = e - at > fl && ld8(p, at + fl) == 61
+        var i: u64 = 0
+        while hit && i < fl {
+            if ld8(p, at + i) != ld8(field, i) {
+                hit = false
+            }
+            i = i + 1
+        }
+        if hit && !done {
+            o = ob_add(q, o, field, fl)
+            o = ob_add(q, o, (&eqs[0 as usize]) as u64, 1)
+            o = ob_add(q, o, v, slen(v))
+            done = true
+        } else {
+            o = ob_add(q, o, p + at, e - at)
+        }
+        o = ob_add(q, o, (&lf[0 as usize]) as u64, 1)
+        at = e
+        if ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+    if !done {
+        o = ob_add(q, o, field, fl)
+        o = ob_add(q, o, (&eqs[0 as usize]) as u64, 1)
+        o = ob_add(q, o, v, slen(v))
+        o = ob_add(q, o, (&lf[0 as usize]) as u64, 1)
+    }
+    let w: u64 = ulib.sys(ulib.SYS_OPEN, path, 1 | 64 | 512, 420)
+    if ulib.bad(w) {
+        return false
+    }
+    let r: u64 = io.write_all(w, q, o)
+    io.close(w)
+    return !ulib.bad(r)
+}
+
+
+static mut W_NONE: [u8; 5] = "none\0"
+static mut W_CLI: [u8; 4] = "cli\0"
+static mut W_FILE: [u8; 5] = "file\0"
+static mut W_DBUS: [u8; 5] = "dbus\0"
+static mut W_UI: [u8; 3] = "ui\0"
+static mut W_KEYS: [u8; 5] = "keys\0"
+static mut W_GOOD: [u8; 5] = "good\0"
+static mut W_MED: [u8; 7] = "medium\0"
+static mut W_LOW: [u8; 4] = "low\0"
+
+// the adapter kinds of the broker (orientbus.fi AD_*): 1 cli, 2 file,
+// 3 dbus, 4 ui, 5 keys
+fn adapter_word(k: u64) -> u64 {
+    if k == 1 {
+        return (&W_CLI[0 as usize]) as u64
+    }
+    if k == 2 {
+        return (&W_FILE[0 as usize]) as u64
+    }
+    if k == 3 {
+        return (&W_DBUS[0 as usize]) as u64
+    }
+    if k == 4 {
+        return (&W_UI[0 as usize]) as u64
+    }
+    if k == 5 {
+        return (&W_KEYS[0 as usize]) as u64
+    }
+    return (&W_NONE[0 as usize]) as u64
+}
+
+// how far a model should trust it (docs/ACTION-BUS.md 7)
+fn adapter_reliability(k: u64) -> u64 {
+    if k == 1 || k == 3 {
+        return (&W_GOOD[0 as usize]) as u64
+    }
+    if k == 5 {
+        return (&W_LOW[0 as usize]) as u64
+    }
+    return (&W_MED[0 as usize]) as u64
 }

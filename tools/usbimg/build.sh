@@ -262,7 +262,8 @@ widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache init svc term shasum noise"}
+glogin lock login passwd su chown sperrwache init svc term shasum noise \
+orientbus act settingsd"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1126,6 +1127,16 @@ ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/ /run/)
 ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
 # RUNDE STICK: die Verzeichnisse, in denen die neuen Programme leben.
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
+# AB-016: THE ACTION BUS (docs/ACTION-BUS.md). The broker /bin/orientbus
+# and the settings provider /bin/settingsd are started by the session
+# (kgui.desk_start, before the sign-in) -- there is no init on an image
+# with a screen. What they read: the rules, the settings schema, and the
+# wrapper directory with the settings manifest. The audit log goes to
+# /var/log/orientbus.log, the settings journal next to it.
+ARGS+=(/etc/orientbus/ /etc/actions.d/
+       "/etc/orientbus/policy=etc/orientbus/policy"
+       "/etc/settings.schema=etc/settings.schema"
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
@@ -1227,6 +1238,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
 /apps/installer.osp/symbol \
 /bin/init /etc/inittab /etc/ziel \
+/bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
+/etc/settings.schema /etc/actions.d/settings.actions \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

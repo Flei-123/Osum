@@ -1,9 +1,13 @@
 # The action bus (orient-bus) — concept and prototype
 
 Status: **concept + working prototype** (round ACTION-BUS, branch
-`action-bus`). Everything in sections 3–5 marked *built* runs in
-`tools/actionbus/run.sh` against a real Osum guest; everything marked
-*planned* is a roadmap item (section 12), not a promise that it exists.
+`action-bus`), extended in round ACTION-BUS-2 (branch `action-bus-2`) by
+AB-003 attested caller identity, AB-005 settings on the bus, AB-008 the
+cli/file adapters and AB-016 the bus in the shipped image. Everything
+marked *built* runs in `tools/actionbus/run.sh` (test guests) or
+`tools/actionbus/image.sh` (the real stick image, booted like the Dell);
+everything marked *planned* is a roadmap item (section 12), not a promise
+that it exists.
 
 ---
 
@@ -212,17 +216,43 @@ undo | grant | stat | watch | bench`. `act call notes.add "text=hi"
 A dry run executes nothing and reports the decision that *would* apply
 (`decision=ask`), so an agent can plan honestly.
 
-### 5.2 Clients and identity
+### 5.2 Clients and identity — *built (AB-003)*
 
-Every call names its client: `user` (default), `jarvis`, `script:<n>`,
-`app:<n>`. **Prototype limit:** the name is *declared* (`--as`). Only the
-uid/pid are attested by the kernel. The decision table is therefore safe
-against *honest* clients and against privilege by accident, not yet
-against a malicious local process that claims to be `user`.
-*Planned (AB-003):* the kernel records which `.prog` bundle a task was
-started from; the broker takes the identity from there, and the bridge
-(`jarvisd`) marks its children as `jarvis`. Until then the bridge
-command list is the gate for Jarvis.
+The **kernel** names the client. Every task carries an ORIGIN label in
+its task record (`sched.T_ORIGIN`, rules in `kernel/sched/origin.fi`):
+
+* a program started from an app bundle (`/apps/<name>.osp/...` or
+  `.prog/...`, the path `execve` resolved; for a `#!` file the script)
+  gets `app:<name>` — unless the bundle carries a **root-owned `SYSTEM`
+  file**: those are the bundles the image ships (terminal, explorer,
+  settings …, written by `tools/k15/bundle.py`); they are the user's own
+  tools. `opk` never links a file called `SYSTEM` into `/apps`, so a
+  package cannot claim it;
+* `jarvisd` marks every command it runs `jarvis` before `execve`;
+* adapters run their programs as `compat:<app>` (section 7);
+* the label is **sticky**: fork, clone, execve, spawn hand it on, nothing
+  clears it, a process may only set its *own* label and only while empty
+  (`SYS_OSUM_ORIGIN` 1990: `(0,pid,buf)` read, `(1,label,len)` set). An
+  app that runs `/bin/act`, or copies it to /tmp and runs the copy, stays
+  the app. Because a label only narrows and pids are never reused, the
+  broker's lookup after receiving a message cannot be raced.
+
+The broker resolves the client once per request: a labelled sender *is*
+its label (`--as` is ignored and counted, `claims_ignored`); an unlabelled
+sender (the user's shell, the desktop, init) is `user`, or may **narrow**
+itself with `--as jarvis`/`--as script`. `act whoami` shows what the
+broker sees (`client=`, `origin=`, `attested=`). `/proc/<pid>/status`
+shows `Origin:`.
+
+**Reserved bus names** (`kernel/bus/bus.fi`, `name_ok`): `a.<app>` only
+for a process labelled `app:<app>` or unlabelled; `orient.*` only for an
+unlabelled root process; `r.<n>` only for the process whose pid is n.
+The broker additionally checks the origin of a provider before binding
+it (`foreign_providers`).
+
+*Not covered*, on purpose written down: a user process that runs a file an
+app *placed* somewhere (e.g. in an autostart list) is the user's. That is
+the sandbox's job (S-010).
 
 ### 5.3 Confirmation and grants
 
@@ -257,9 +287,23 @@ t=1402 pid=31 uid=0 client=jarvis verb=call action=notes.add decision=ask result
   kinds, or after 0.5 s idle — see section 10 for why.
 *Planned:* rotation, a viewer (roadmap S-009), export.
 
-## 6. Settings on the bus
+## 6. Settings on the bus — *built (AB-005)*
 
-*Planned (AB-005)* — the design:
+`/bin/settingsd` (provider `settings`, manifest
+`etc/actions.d/settings.actions`), the schema `etc/settings.schema`
+(14 keys), the shared reader `kernel/user/setschema.fi`. Built as designed
+below, plus: `settings.history`, `settings.revert key change` (refused
+with `changed_since` if the value was changed again since — nothing is
+silently thrown away), a journal `/var/log/settings.journal` written
+*before* the value, and the manifest word `keyed` (the argument `key`
+names a setting; the broker checks the value against the schema and
+decides by `settings.<key>` at the schema's risk). Today one key is wired
+to a real consumer: `lock.idle` → `/etc/sperre.conf leerlauf`
+(sperrwache). The others live in `/etc/settings.db` until their programs
+read them from there, and the settings window does not use the bus yet
+(roadmap).
+
+The design:
 
 System settings are served by a provider `settings` like any other app;
 the settings window itself is just one client. A **schema** declares each
@@ -306,7 +350,24 @@ actions for a program that has none and binds each to an **adapter**:
 | `ui` | accessibility tree: AT-SPI for Linux toolkits; UIA/MSAA as far as Wine exposes it; OrientOS's own a11y tree (S-007) for windows of the compat window server | "press button *Send* in window *Thunderbird*" | medium |
 | `keys` | last resort for Wine/Proton and anything else: focus a window, inject keys through the window server | `space` in window matching `VLC` | low, marked as such |
 
-Rules for adapters (*planned, AB-008*):
+*Built (AB-008):* `cli` and `file`, in the broker (`run_adapter`), with
+the rules below — no shell (a value `a b;rm -rf /` reaches the program as
+one argument, tested), the program runs in a child that dropped to the
+caller's uid (`adapter_uid`, default 65534, for root callers — never root)
+and is labelled `compat:<app>` by the kernel, 5 s timeout then SIGKILL,
+`for exe <path>` decides `available`, output `k=v` lines pass through,
+the manifest's `undo` works (pause → play). `dbus`, `ui` and `keys` are
+parsed and shown with their reliability, and a call is refused with
+`err adapter_unsupported <kind>`: OrientOS has no D-Bus, no accessibility
+bridge for foreign windows and no key injection for them yet, and a faked
+success would be worse than a refusal. Adapters are only accepted in
+wrapper manifests (`/etc/actions.d`), never in an app's own manifest.
+Tested with an unchanged static Linux (musl) program,
+`tools/actionbus/fakeplayer.c`. Wine/Proton programs need the `ui`/`keys`
+adapters, i.e. a foreign-window layer in the compat window server — that
+part is still planned.
+
+Rules for adapters:
 
 * No shell. `cli` is an argv template (`{arg}` substituted as one
   argument), executed by the broker's adapter host under the **user's**
@@ -453,13 +514,36 @@ its write is parked for the user, its dry run of `notes.clear` answers,
 its real `notes.clear` needs a human yes, `/bin/sh` is refused by the
 bridge, and the device's audit log names `client=jarvis`.
 
-**Limits of the prototype** (all on the roadmap): declared client names
-(5.2); `act confirm` instead of a trusted dialog (5.3); no adapter
-execution (7); events visible to every subscriber; the kernel bus does
-not block, so all three programs poll with `yield` (roadmap S-003) --
-an idle broker spins; payloads above 2 KB per request are refused
-(segments planned); `orientbus` is not yet started by init or shipped in
-the image, so on the Dell nothing changes yet.
+**Round ACTION-BUS-2** (sections 12–14 of `run.sh`, and `image.sh`):
+an app bundle's program saying `--as user` is `app:evil` for the broker,
+its write is parked, it cannot confirm or grant, a copy of `act` is still
+the app, it cannot take `a.<other>`, `orient.*` or `r.<pid>`; Jarvis
+saying `--as user` over the real bridge is still `jarvis`; settings:
+per-area grant, critical asks even the user, bad values refused by the
+broker, journal, undo, revert, `/etc/sperre.conf` really changed;
+adapters: the Linux program runs as uid 65534 with label `compat:media`,
+no shell, timeout, honest refusals. `image.sh`: the shipped image boots
+under UEFI from USB, the session starts `orientbus` before the sign-in,
+`settingsd` binds, the sign-in screen comes up, no panic.
+
+**AB-016 in the image.** On an image with a screen `init` does not run
+(`kmain.wm_owns_shell`); the session is started by the kernel's
+`kgui.desk_start`, and that is where the broker and settingsd start —
+first, before the sign-in, and only if the image carries
+`/bin/orientbus` (older test images start exactly what they did). The
+bus cannot block yet (S-003): broker and settingsd spin with `yield` for
+0.2 s after the last message and then sleep one tick per round, so an
+idle bus costs next to nothing and a burst still runs at microseconds.
+Server images with `init` add `bus:*:respawn:/bin/orientbus serve`.
+
+**Limits** (all on the roadmap): `act confirm` instead of a trusted
+dialog (5.3); events visible to every subscriber; payloads above 2 KB
+per request refused; manifests are read once at the broker's start (an
+app installed later needs a broker restart); an adapter call blocks the
+broker for up to 5 s; `dbus`/`ui`/`keys` adapters not executable; the
+settings window and most subsystems do not read their settings from the
+bus yet; Jarvis on the device may not run `/bin/act` until its bridge
+permissions say so (AB-009).
 
 ## 11. Comparison
 
@@ -492,3 +576,4 @@ AB-008 adapters (cli → file → ui → keys) · AB-009 Jarvis as client
 the bus · AB-011 automations · AB-012 audit rotation/viewer · AB-013
 large payloads via segments · AB-014 action versioning · AB-015 event
 permissions · AB-016 orientbus in the image and started by init.
+Done in round ACTION-BUS-2: AB-003, AB-005, AB-008 (cli/file), AB-016.

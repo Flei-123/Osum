@@ -14,12 +14,20 @@
 #
 #   manifest.py check <ACTIONS> [...]      exit 1 on the first broken file
 #   manifest.py json  <ACTIONS> [...]      the catalogue as JSON on stdout
+#   manifest.py check --wrapper <file>     a wrapper manifest (adapters)
+#
+# AB-005: `keyed` (the argument `key` names a setting of
+# /etc/settings.schema; rights by <app>.<key>). AB-008: `for exe <path>`
+# and `adapter cli|file|dbus|ui|keys ...`, only in wrapper manifests.
 import json
 import re
 import sys
 
 LEVELS = ("read", "write", "critical")
 TYPES = ("string", "int", "bool")
+ADAPTERS = ("cli", "file", "dbus", "ui", "keys")
+RELIABILITY = {"cli": "good", "dbus": "good", "file": "medium", "ui": "medium",
+               "keys": "low"}
 NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-zA-Z0-9_]+)+$")
 
 
@@ -35,10 +43,11 @@ def quoted(line):
     return line[a + 1:b]
 
 
-def parse(text, path="<manifest>"):
+def parse(text, path="<manifest>", wrapper=False):
     """Returns (app, actions, events, warnings) or raises Bad."""
     app = None
     title = ""
+    title_for = None
     actions, events = [], []
     cur = None
     warnings = []
@@ -103,6 +112,21 @@ def parse(text, path="<manifest>"):
                 cur.setdefault("returns", []).append(item)
             else:
                 cur.setdefault("fields", []).append(item)
+        elif k == "keyed":
+            if cur is not None and "args" in cur:
+                cur["keyed"] = "settings.schema"
+        elif k == "for":
+            if len(w) < 3 or w[1] != "exe":
+                raise Bad("%s: 'for exe <path>'" % where)
+            title_for = w[2]
+        elif k == "adapter":
+            if len(w) < 2 or w[1] not in ADAPTERS:
+                raise Bad("%s: adapter kind: cli, file, dbus, ui or keys" % where)
+            if not wrapper:
+                raise Bad("%s: adapters are for wrapper manifests" % where)
+            if cur is not None and "args" in cur:
+                cur["adapter"] = w[1]
+                cur["reliability"] = RELIABILITY[w[1]]
         elif k == "dryrun":
             if cur is not None and "dry_run" in cur:
                 cur["dry_run"] = True
@@ -128,9 +152,11 @@ def main(argv):
         return 2
     cat = {"bus": "orient-bus", "version": 1, "actions": [], "events": []}
     rc = 0
-    for p in argv[2:]:
+    wrapper = "--wrapper" in argv[2:]
+    for p in [a for a in argv[2:] if a != "--wrapper"]:
         try:
-            app, acts, evs, warns = parse(open(p, encoding="utf-8").read(), p)
+            app, acts, evs, warns = parse(open(p, encoding="utf-8").read(), p,
+                                          wrapper)
         except (Bad, OSError) as e:
             print("FAIL %s" % e, file=sys.stderr)
             rc = 1

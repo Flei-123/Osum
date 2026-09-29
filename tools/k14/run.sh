@@ -353,7 +353,9 @@ sagt "$H" umount_ok 0 "dann geht umount"
 sagt "$H" gone_is_err 2 "und danach ist die Datei wirklich weg"
 sagt "$H" mount_ok 0 "mount /dev/hdb1 /mnt vfat bringt sie zurueck"
 sagt "$H" back_is_err 0 "und sie ist wieder da"
-sagt "$H" status_lines 10 "/proc/<pid>/status hat zehn Zeilen"
+# AB-003 (docs/ACTION-BUS.md 5.2): die elfte Zeile ist `Origin:`, die
+# Herkunft, die der Kern bezeugt (kernel/sched/origin.fi).
+sagt "$H" status_lines 11 "/proc/<pid>/status hat elf Zeilen (die elfte: Origin)"
 sagt "$H" mounts_lines 4 "/proc/mounts hat eine Zeile je Einhaengung"
 sagt "$H" maps_grew 1 "/proc/<pid>/maps waechst mit einer neuen Abbildung"
 sagt "$H" cmdline_len 4 "/proc/<pid>/cmdline ist 'k14' plus Null"
