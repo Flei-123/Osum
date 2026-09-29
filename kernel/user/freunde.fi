@@ -5,6 +5,8 @@
 //     freunde              die Leiste
 //     freunde --rahmen n   n Runden, dann Schluss (Pruefstand)
 //     freunde --schuss     einmal zeichnen und beenden (Schirmbild)
+//     freunde --chat n     den Chat mit Freund n oeffnen (Pruefstand)
+//     freunde --sende txt  ... und txt hineinschreiben und senden
 //
 // ====================================================================
 // WAS MAN SIEHT
@@ -68,6 +70,7 @@ export { u_start }
 const MAXF: u64 = 32          // so viele Freunde zeigt die Leiste
 const NAMEMAX: u64 = 24
 const TXTMAX: u64 = 44
+const NO_ITEM: u64 = 4294967295 // "no widget" (wlib indices are 32 bit)
 
 // Die Zustaende -- dieselben Zahlen wie in praesenz.fi und im Rahmen
 // auf dem Draht. Drei Stellen mit derselben Bedeutung waeren drei
@@ -85,6 +88,12 @@ static mut f_zustand: [u64; 32] = [0 as u64; 32]
 static mut f_seit: [u64; 32] = [0 as u64; 32]
 static mut f_online: [u64; 32] = [0 as u64; 32]
 static mut f_n: u64 = 0
+// RUNDE CHAT: the id at the service ("account:id") -- whose it is, the
+// bar never asks -- whether the activity is open to join, unread count
+const IDMAX: u64 = 96
+static mut f_id: [u8; 3072] = [0 as u8; 3072] // MAXF * IDMAX
+static mut f_join: [u64; 32] = [0 as u64; 32]
+static mut f_unread: [u64; 32] = [0 as u64; 32]
 
 static mut angemeldet: u64 = 0
 static mut w: u64 = 0
@@ -109,6 +118,16 @@ static mut eingabe: [u8; 256] = [0 as u8; 256]
 static mut verlauf: [u8; 4096] = [0 as u8; 4096]
 static mut vlen: u64 = 0
 static mut chat_mit: u64 = 0   // Index des Freundes, mit dem geredet wird
+static mut chat_id: [u8; 96] = [0 as u8; 96] // his id, fixed while open
+static mut chat_n: u64 = 0     // messages shown
+static mut i_einladen: u64 = 0
+static mut i_beitreten: u64 = 0
+// the bar: the first open invite that came in
+static mut i_einl: u64 = 0
+static mut i_einl_ja: u64 = 0
+static mut i_einl_nein: u64 = 0
+static mut einl_id: [u8; 96] = [0 as u8; 96]
+static mut einl_txt: [u8; 160] = [0 as u8; 160]
 
 // die Sprachschluessel
 static mut k_titel: [u8; 14] = "freunde.titel\0"
@@ -117,6 +136,12 @@ static mut k_chat: [u8; 13] = "freunde.chat\0"
 static mut k_unsicht: [u8; 19] = "freunde.unsichtbar\0"
 static mut k_senden: [u8; 15] = "freunde.senden\0"
 static mut k_leer: [u8; 13] = "freunde.leer\0"
+static mut k_ich: [u8; 12] = "freunde.ich\0"
+static mut k_einladen: [u8; 17] = "freunde.einladen\0"
+static mut k_beitreten: [u8; 18] = "freunde.beitreten\0"
+static mut k_annehmen: [u8; 17] = "freunde.annehmen\0"
+static mut k_ablehnen: [u8; 17] = "freunde.ablehnen\0"
+static mut k_einladung: [u8; 18] = "freunde.einladung\0"
 
 fn ld8(p: u64, i: u64) -> u64 {
     return (*((p + i) as *mut u8)) as u64
@@ -184,6 +209,15 @@ fn list_build() {
     while i < f_n {
         anhaengen_z(point(f_zustand[i as usize]))
         anhaengen_z(32)
+        if f_unread[i as usize] > 0 {
+            // "(2) Anna": unread messages, before the name
+            anhaengen_z(40)
+            var dg: [u8; 24] = [0 as u8; 24]
+            let dn: u64 = ulib.digits(f_unread[i as usize], (&dg[0 as usize]) as u64)
+            anhaengen((&dg[0 as usize]) as u64, dn)
+            anhaengen_z(41)
+            anhaengen_z(32)
+        }
         let np: u64 = (&f_name[0 as usize]) as u64 + i * NAMEMAX
         anhaengen(np, tlen(np))
         // RUNDE SOCIAL: the text is the entry's second line (list_zwei)
@@ -443,6 +477,10 @@ fn bus_load() -> bool {
                     nimm = !spielt && z == Z_OFF
                 }
                 if nimm {
+                    var idf: [u8; 96] = [0 as u8; 96]
+                    var jf: [u8; 4] = [0 as u8; 4]
+                    feld(fp, rp + e, 0, (&idf[0 as usize]) as u64, 96)
+                    feld(fp, rp + e, 8, (&jf[0 as usize]) as u64, 4)
                     var txt: [u8; 80] = [0 as u8; 80]
                     let tp: u64 = (&txt[0 as usize]) as u64
                     if spielt {
@@ -452,7 +490,17 @@ fn bus_load() -> bool {
                     } else {
                         ulib.strncpy(tp, (&st[0 as usize]) as u64, 64)
                     }
+                    let slot: u64 = f_n
                     peer_set((&name[0 as usize]) as u64, z, tp, 1)
+                    if slot < MAXF {
+                        let ip: u64 = (&f_id[0 as usize]) as u64 + slot * IDMAX
+                        ulib.strncpy(ip, (&idf[0 as usize]) as u64, IDMAX - 1)
+                        f_join[slot as usize] = 0
+                        if jf[0 as usize] == 49 as u8 {
+                            f_join[slot as usize] = 1
+                        }
+                        f_unread[slot as usize] = 0
+                    }
                 }
             }
             at = e + 1
@@ -460,6 +508,272 @@ fn bus_load() -> bool {
         pass = pass + 1
     }
     return true
+}
+
+// ==================================================== RUNDE CHAT
+//
+// The conversation, the unread counts and the invites are the service's
+// too (`social.messages.*`, `social.invites.*`): this bar keeps nothing
+// but what is on the screen. Which provider carries a message -- and
+// whether it is end to end -- the service and its provider decide.
+
+// "key=value" lines of the reply: the value of `key` into out
+fn rep_val(key: u64, out: u64, max: u64) -> bool {
+    let rp: u64 = (&rep[0 as usize]) as u64
+    let kn: u64 = tlen(key)
+    var at: u64 = 0
+    while at < rep_len {
+        var e: u64 = at
+        while e < rep_len && ld8(rp, e) != 10 {
+            e = e + 1
+        }
+        if e - at > kn && ulib.strneq(rp + at, key, kn) && ld8(rp, at + kn) == 61 {
+            var n: u64 = 0
+            var i: u64 = at + kn + 1
+            while i < e && n + 1 < max {
+                st8(out, n, ld8(rp, i))
+                n = n + 1
+                i = i + 1
+            }
+            st8(out, n, 0)
+            return true
+        }
+        at = e + 1
+    }
+    return false
+}
+
+// ob += "key=value\n" (value a C string)
+fn ob_kv(key: u64, v: u64) {
+    actwire.ob_str(key)
+    actwire.ob_ch(61)
+    actwire.ob_str(v)
+    actwire.ob_ch(10)
+}
+
+// unread messages per friend
+fn unread_load() {
+    var s_req: [u8; 30] = "call social.messages.unread\n\0\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    if !bus_ask() {
+        return
+    }
+    var i: u64 = 0
+    while i < f_n {
+        f_unread[i as usize] = 0
+        i = i + 1
+    }
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var at: u64 = 0
+    while at < rep_len {
+        var e: u64 = at
+        while e < rep_len && ld8(rp, e) != 10 {
+            e = e + 1
+        }
+        var pfx: [u8; 9] = "contact.\0"
+        if ulib.strneq(rp + at, (&pfx[0 as usize]) as u64, 8) {
+            var v: u64 = at
+            while v < e && ld8(rp, v) != 61 {
+                v = v + 1
+            }
+            var idf: [u8; 96] = [0 as u8; 96]
+            var cnt: [u8; 16] = [0 as u8; 16]
+            feld(rp + v + 1, rp + e, 0, (&idf[0 as usize]) as u64, 96)
+            feld(rp + v + 1, rp + e, 1, (&cnt[0 as usize]) as u64, 16)
+            var k: u64 = 0
+            while k < f_n {
+                if ulib.streq((&f_id[0 as usize]) as u64 + k * IDMAX, (&idf[0 as usize]) as u64) {
+                    f_unread[k as usize] = ulib.to_num((&cnt[0 as usize]) as u64)
+                }
+                k = k + 1
+            }
+        }
+        at = e + 1
+    }
+}
+
+// the conversation with chat_id into `verlauf` ("Name: text" per line)
+fn verlauf_load() -> bool {
+    var s_req: [u8; 28] = "call social.messages.list\n\0\0"
+    var k_id: [u8; 3] = "id\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, (&chat_id[0 as usize]) as u64)
+    if !bus_ask() {
+        return false
+    }
+    vlen = 0
+    chat_n = 0
+    let vp: u64 = (&verlauf[0 as usize]) as u64
+    let np: u64 = (&f_name[0 as usize]) as u64 + chat_mit * NAMEMAX
+    let ich: u64 = msg.get((&k_ich[0 as usize]) as u64)
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var at: u64 = 0
+    while at < rep_len {
+        var e: u64 = at
+        while e < rep_len && ld8(rp, e) != 10 {
+            e = e + 1
+        }
+        var pfx: [u8; 9] = "message.\0"
+        if ulib.strneq(rp + at, (&pfx[0 as usize]) as u64, 8) {
+            var v: u64 = at
+            while v < e && ld8(rp, v) != 61 {
+                v = v + 1
+            }
+            // index|stamp|dir|read|text
+            var dir: [u8; 8] = [0 as u8; 8]
+            feld(rp + v + 1, rp + e, 2, (&dir[0 as usize]) as u64, 8)
+            var tx: [u8; 200] = [0 as u8; 200]
+            // the text is everything after the fourth '|'
+            var q: u64 = v + 1
+            var bars: u64 = 0
+            while q < e && bars < 4 {
+                if ld8(rp, q) == 124 {
+                    bars = bars + 1
+                }
+                q = q + 1
+            }
+            var who: u64 = np
+            if dir[0 as usize] == 111 as u8 {
+                who = ich
+            }
+            var k: u64 = 0
+            let wn: u64 = tlen(who)
+            while k < wn && vlen < 4000 {
+                st8(vp, vlen, ld8(who, k))
+                vlen = vlen + 1
+                k = k + 1
+            }
+            if vlen < 4000 {
+                st8(vp, vlen, 58)
+                st8(vp, vlen + 1, 32)
+                vlen = vlen + 2
+            }
+            while q < e && vlen < 4090 {
+                st8(vp, vlen, ld8(rp, q))
+                vlen = vlen + 1
+                q = q + 1
+            }
+            st8(vp, vlen, 10)
+            vlen = vlen + 1
+            chat_n = chat_n + 1
+        }
+        at = e + 1
+    }
+    st8(vp, vlen, 0)
+    // what is on the screen is read
+    var s_rd: [u8; 28] = "call social.messages.read\n\0\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_rd[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, (&chat_id[0 as usize]) as u64)
+    let _r: bool = bus_ask()
+    return true
+}
+
+fn chat_send() -> bool {
+    if tlen((&eingabe[0 as usize]) as u64) == 0 {
+        return false
+    }
+    var s_req: [u8; 28] = "call social.messages.send\n\0\0"
+    var k_id: [u8; 3] = "id\0"
+    var k_tx: [u8; 5] = "text\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, (&chat_id[0 as usize]) as u64)
+    ob_kv((&k_tx[0 as usize]) as u64, (&eingabe[0 as usize]) as u64)
+    return bus_ask()
+}
+
+// invite the friend of the open chat into my activity, or ask to join his
+fn chat_invite(kind: u64) -> bool {
+    var s_req: [u8; 27] = "call social.invites.send\n\0\0"
+    var k_id: [u8; 3] = "id\0"
+    var k_k: [u8; 5] = "kind\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, (&chat_id[0 as usize]) as u64)
+    ob_kv((&k_k[0 as usize]) as u64, kind)
+    return bus_ask()
+}
+
+// the first open invite that came in -> the bar's line
+fn invites_load() {
+    var s_req: [u8; 40] = "call social.invites.list\nfilter=open\n\0\0\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    st8((&einl_id[0 as usize]) as u64, 0, 0)
+    st8((&einl_txt[0 as usize]) as u64, 0, 0)
+    if !bus_ask() {
+        return
+    }
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var at: u64 = 0
+    while at < rep_len {
+        var e: u64 = at
+        while e < rep_len && ld8(rp, e) != 10 {
+            e = e + 1
+        }
+        var pfx: [u8; 8] = "invite.\0"
+        if ulib.strneq(rp + at, (&pfx[0 as usize]) as u64, 7)
+            && ld8((&einl_id[0 as usize]) as u64, 0) == 0 {
+            var v: u64 = at
+            while v < e && ld8(rp, v) != 61 {
+                v = v + 1
+            }
+            // invite|peer|dir|kind|state|age|target|name
+            var dir: [u8; 8] = [0 as u8; 8]
+            feld(rp + v + 1, rp + e, 2, (&dir[0 as usize]) as u64, 8)
+            if dir[0 as usize] == 105 as u8 && dir[1 as usize] == 110 as u8 {
+                feld(rp + v + 1, rp + e, 0, (&einl_id[0 as usize]) as u64, 96)
+                var peer: [u8; 96] = [0 as u8; 96]
+                var nm: [u8; 64] = [0 as u8; 64]
+                feld(rp + v + 1, rp + e, 1, (&peer[0 as usize]) as u64, 96)
+                feld(rp + v + 1, rp + e, 7, (&nm[0 as usize]) as u64, 64)
+                // "Einladung: Anna – Minecraft"
+                let tp: u64 = (&einl_txt[0 as usize]) as u64
+                ulib.strncpy(tp, msg.get((&k_einladung[0 as usize]) as u64), 40)
+                var n: u64 = tlen(tp)
+                st8(tp, n, 32)
+                n = n + 1
+                var who: u64 = (&peer[0 as usize]) as u64
+                var k: u64 = 0
+                while k < f_n {
+                    if ulib.streq((&f_id[0 as usize]) as u64 + k * IDMAX, who) {
+                        who = (&f_name[0 as usize]) as u64 + k * NAMEMAX
+                    }
+                    k = k + 1
+                }
+                ulib.strncpy(tp + n, who, 40)
+                n = tlen(tp)
+                st8(tp, n, 32)
+                st8(tp, n + 1, 45)
+                st8(tp, n + 2, 32)
+                ulib.strncpy(tp + n + 3, (&nm[0 as usize]) as u64, 60)
+            }
+        }
+        at = e + 1
+    }
+}
+
+fn invite_answer(yes: bool) -> bool {
+    if ld8((&einl_id[0 as usize]) as u64, 0) == 0 {
+        return false
+    }
+    var s_req: [u8; 29] = "call social.invites.answer\n\0\0"
+    var k_id: [u8; 3] = "id\0"
+    var k_a: [u8; 7] = "accept\0"
+    var v_t: [u8; 5] = "true\0"
+    var v_f: [u8; 6] = "false\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, (&einl_id[0 as usize]) as u64)
+    if yes {
+        ob_kv((&k_a[0 as usize]) as u64, (&v_t[0 as usize]) as u64)
+    } else {
+        ob_kv((&k_a[0 as usize]) as u64, (&v_f[0 as usize]) as u64)
+    }
+    return bus_ask()
 }
 
 // "Unsichtbar" is an action of the service, not a flag of this bar
@@ -498,6 +812,10 @@ fn bauen() -> u64 {
     i_chat = wlib.button(msg.get((&k_chat[0 as usize]) as u64))
     i_unsicht = wlib.check(msg.get((&k_unsicht[0 as usize]) as u64),
         unsicht != 0)
+    // RUNDE CHAT: an invite that came in, with its two answers
+    i_einl = wlib.label((&einl_txt[0 as usize]) as u64)
+    i_einl_ja = wlib.button(msg.get((&k_annehmen[0 as usize]) as u64))
+    i_einl_nein = wlib.button(msg.get((&k_ablehnen[0 as usize]) as u64))
     wlib.box_end()
     return 0
 }
@@ -509,6 +827,13 @@ fn chat_open(idx: u64) {
         wlib.close(cw)
     }
     chat_mit = idx
+    ulib.strncpy((&chat_id[0 as usize]) as u64,
+        (&f_id[0 as usize]) as u64 + idx * IDMAX, 95)
+    vlen = 0
+    if quelle_bus {
+        let _v: bool = verlauf_load()
+        f_unread[idx as usize] = 0
+    }
     let np: u64 = (&f_name[0 as usize]) as u64 + idx * NAMEMAX
     cw = wlib.window(120, 80, 420, 380, np)
     if cw >= wlib.MAXWN {
@@ -523,8 +848,20 @@ fn chat_open(idx: u64) {
     }
     i_eingabe = wlib.entry((&eingabe[0 as usize]) as u64, 255)
     i_senden = wlib.button(msg.get((&k_senden[0 as usize]) as u64))
+    i_einladen = wlib.button(msg.get((&k_einladen[0 as usize]) as u64))
+    i_beitreten = NO_ITEM
+    if f_join[idx as usize] != 0 {
+        i_beitreten = wlib.button(msg.get((&k_beitreten[0 as usize]) as u64))
+    }
     wlib.box_end()
     wlib.draw_all()
+    var mc: [u8; 15] = "freunde: chat=\0"
+    ulib.say((&mc[0 as usize]) as u64)
+    ulib.say((&chat_id[0 as usize]) as u64)
+    var mn: [u8; 14] = " nachrichten=\0"
+    ulib.say((&mn[0 as usize]) as u64)
+    ulib.sayn(chat_n)
+    ulib.nl()
 }
 
 // ==================================================== DER LAUF
@@ -537,6 +874,10 @@ fn u_start(args: u64) -> u64 {
     var a_schuss: [u8; 9] = "--schuss\0"
     var a_konto: [u8; 8] = "--konto\0"
     var a_demo: [u8; 7] = "--demo\0"
+    var a_chat: [u8; 7] = "--chat\0"
+    var a_sende: [u8; 8] = "--sende\0"
+    var chat_auf: u64 = NO_ITEM
+    var sende: u64 = 0
     while i < argc {
         let a: u64 = ulib.arg_at(args, i)
         if ulib.streq(a, (&a_rahmen[0 as usize]) as u64) && i + 1 < argc {
@@ -545,6 +886,14 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(a, (&a_schuss[0 as usize]) as u64) {
             schuss = true
+        }
+        if ulib.streq(a, (&a_chat[0 as usize]) as u64) && i + 1 < argc {
+            chat_auf = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_sende[0 as usize]) as u64) && i + 1 < argc {
+            sende = ulib.arg_at(args, i + 1)
+            i = i + 1
         }
         // --konto sagt der Leiste, dass ein Konto angemeldet IST. Die
         // Anmeldung selbst macht /bin/konto; diese Datei fragt nur.
@@ -583,6 +932,8 @@ fn u_start(args: u64) -> u64 {
         quelle_bus = true
         angemeldet = 1
         let _l: bool = bus_load()
+        unread_load()
+        invites_load()
     }
 
     if !wlib.begin(false, false) {
@@ -613,6 +964,25 @@ fn u_start(args: u64) -> u64 {
     }
     ulib.nl()
 
+    // the test stand: open a chat, maybe write into it
+    if chat_auf < f_n {
+        if sende != 0 {
+            ulib.strncpy((&eingabe[0 as usize]) as u64, sende, 250)
+            chat_open(chat_auf)
+            let ok: bool = chat_send()
+            var ms0: [u8; 19] = "freunde: gesendet=\0"
+            ulib.say((&ms0[0 as usize]) as u64)
+            if ok {
+                ulib.sayn(1)
+            } else {
+                ulib.sayn(0)
+            }
+            ulib.nl()
+            st8((&eingabe[0 as usize]) as u64, 0, 0)
+        }
+        chat_open(chat_auf)
+    }
+
     if schuss {
         return 0
     }
@@ -627,6 +997,15 @@ fn u_start(args: u64) -> u64 {
             let alt: u64 = f_n
             let altb: u64 = blen
             if bus_load() {
+                unread_load()
+                invites_load()
+                wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
+                if cw != 0 && !wlib.closed(cw) {
+                    let vor: u64 = chat_n
+                    if verlauf_load() && chat_n != vor {
+                        wlib.set_text(i_verlauf, (&verlauf[0 as usize]) as u64)
+                    }
+                }
                 list_build()
                 wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
                 if f_n != alt || blen != altb {
@@ -678,13 +1057,30 @@ fn u_start(args: u64) -> u64 {
                 ulib.nl()
             }
             if art == wlib.K_BUTTON && id == i_senden {
-                // Die Nachricht geht verschluesselt ueber den
-                // Netzhelfer -- diese Datei sieht den Schluessel nie.
+                // Die Nachricht geht ueber den Dienst an den Anbieter des
+                // Kontos -- diese Datei sieht keinen Schluessel.
                 var ms: [u8; 17] = "freunde: senden=\0"
                 ulib.say((&ms[0 as usize]) as u64)
                 ulib.sayn(tlen((&eingabe[0 as usize]) as u64))
                 ulib.nl()
-                st8((&eingabe[0 as usize]) as u64, 0, 0)
+                if quelle_bus && chat_send() {
+                    st8((&eingabe[0 as usize]) as u64, 0, 0)
+                    wlib.set_text(i_eingabe, (&eingabe[0 as usize]) as u64)
+                    chat_open(chat_mit)
+                }
+            }
+            if art == wlib.K_BUTTON && id == i_einladen && quelle_bus {
+                var ki: [u8; 7] = "invite\0"
+                let _i: bool = chat_invite((&ki[0 as usize]) as u64)
+            }
+            if art == wlib.K_BUTTON && id == i_beitreten && quelle_bus {
+                var kj: [u8; 5] = "join\0"
+                let _j: bool = chat_invite((&kj[0 as usize]) as u64)
+            }
+            if art == wlib.K_BUTTON && (id == i_einl_ja || id == i_einl_nein) && quelle_bus {
+                let _a: bool = invite_answer(id == i_einl_ja)
+                invites_load()
+                wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
             }
         }
     }
@@ -711,7 +1107,7 @@ fn u_start(args: u64) -> u64 {
 // Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
 // Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
 // und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=0x4007f000`.
+// dieses Systems druckt sie als `ustack=` (T_USTACK).
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }

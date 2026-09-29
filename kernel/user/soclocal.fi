@@ -14,8 +14,24 @@
 // myself (presence, activity, signs of life) it writes to
 // /tmp/social/local.me, one line per call, so that it can be checked.
 //
-//     soclocal v1 hello|contacts|search <text>|relation <verb> <id>|
-//                 presence <state> [text]|activity [name]|alive
+//     soclocal v1 [-c <base>] hello|contacts|search <text>|relation <verb> <id>|
+//                 presence <state> [text]|activity [-j] [name]|alive|
+//                 login [token <t>]|send <id> <text>|inbox|
+//                 invite <id> <invite|join> <target|-> <name>|invites|
+//                 answer <invite id> <yes|no> [target]
+//
+// ONE BASE = ONE ACCOUNT: with `-c /etc/social/lan2` its files are
+// lan2.book, lan2.me, lan2.inbox, lan2.outbox, lan2.invites -- two lines
+// in /etc/social/providers with two bases are two local accounts, the
+// proof that the service keeps accounts apart without knowing what they
+// are. Without -c: /etc/social/local.book and /tmp/social/local.me.
+//
+// CHAT AND INVITES WITHOUT A SERVER. What is sent lands in <base>.outbox
+// (where a LAN finder -- later -- or a test picks it up); what is in
+// <base>.inbox comes in (and is taken out: each line once). Invites live
+// in <base>.invites, both ways, in the form the interface prints them.
+// This is the second provider that passes the same tests as the Fleitec
+// one (tools/social/run.sh) -- the social layer is not built around one.
 
 profile app
 
@@ -119,6 +135,8 @@ fn sb_dec(b: *mut SB, v: u64) {
 static mut st_f: [u8; 16384] = [0 as u8; 16384]
 static mut st_nb: [u8; 16384] = [0 as u8; 16384]
 static mut st_b: [u8; 1024] = [0 as u8; 1024]
+static mut g_base: u64 = 0 // -c <base>, 0 = the defaults
+static mut st_path: [u8; 256] = [0 as u8; 256]
 
 fn say(s: str) {
     syscall(S_WRITE, 1, s.p as i64, s.n as i64, 0, 0, 0)
@@ -131,6 +149,18 @@ fn sayb(p: u64, n: usize) {
 fn isz(p: u64, s: str) -> bool {
     let n: usize = r_clen(p)
     return n == s.n && r_eq(p, s.p as u64, n)
+}
+
+// "<base><suffix>\0", or the default for that suffix
+fn path(suffix: str, dflt: str) -> str {
+    if g_base == 0 {
+        return dflt
+    }
+    var b: SB = sb((&st_path[0]) as u64, 255)
+    sb_bytes(&b, g_base, r_clen(g_base))
+    sb_bytes(&b, suffix.p as u64, suffix.n)
+    sb_push(&b, 0 as u8)
+    return str { p: b.ptr as *mut u8, n: b.len }
 }
 
 fn read_file(path: str, into: *mut SB) -> bool {
@@ -232,7 +262,7 @@ fn ok_n(n: u64) -> u64 {
 
 fn v_contacts(q: u64) -> u64 {
     var f: SB = sb((&st_f[0]) as u64, 16383)
-    let _r: bool = read_file("/etc/social/local.book\0", &f)
+    let _r: bool = read_file(path(".book\0", "/etc/social/local.book\0"), &f)
     var n: u64 = 0
     var at: usize = 0
     var qn: usize = 0
@@ -273,7 +303,7 @@ fn v_relation(verb: u64, id: u64) -> u64 {
         return 1
     }
     var f: SB = sb((&st_f[0]) as u64, 16383)
-    let _r: bool = read_file("/etc/social/local.book\0", &f)
+    let _r: bool = read_file(path(".book\0", "/etc/social/local.book\0"), &f)
     var nb: SB = sb((&st_nb[0]) as u64, 16383)
     let idn: usize = r_clen(id)
     var hit: bool = false
@@ -300,7 +330,7 @@ fn v_relation(verb: u64, id: u64) -> u64 {
         say("err\tbad\tno such contact\n")
         return 1
     }
-    let _w: bool = write_file("/etc/social/local.book\0", nb.ptr, nb.len, false)
+    let _w: bool = write_file(path(".book\0", "/etc/social/local.book\0"), nb.ptr, nb.len, false)
     say("ok\n")
     return 0
 }
@@ -319,33 +349,288 @@ fn note(args: u64, from: u64) -> u64 {
     }
     sb_push(&b, 10 as u8)
     syscall(83, "/tmp/social\0".p as i64, 493, 0, 0, 0, 0)
-    let _w: bool = write_file("/tmp/social/local.me\0", b.ptr, b.len, true)
+    let _w: bool = write_file(path(".me\0", "/tmp/social/local.me\0"), b.ptr, b.len, true)
     say("ok\n")
     return 0
 }
 
-fn u_start(args: u64) -> u64 {
-    let n: u64 = ulib.arg_count(args)
-    if n < 3 || !isz(ulib.arg_at(args, 1), "v1") {
-        say("err\tbad\tusage: soclocal v1 <verb> ...\n")
+
+fn now_unix() -> u64 {
+    var ts: [i64; 2] = [0 as i64; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// the words from i on, joined with spaces
+fn rest(b: *mut SB, args: u64, n: u64, from: u64) {
+    var i: u64 = from
+    while i < n {
+        if i > from {
+            sb_push(b, 32 as u8)
+        }
+        let a: u64 = at(args, i)
+        var k: usize = 0
+        let an: usize = r_clen(a)
+        while k < an {
+            var ch: u8 = r_ld8(a, k)
+            if ch == 9 as u8 || ch == 10 as u8 {
+                ch = 32 as u8
+            }
+            sb_push(b, ch)
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+fn v_send(args: u64, n: u64) -> u64 {
+    let id: u64 = at(args, 3)
+    var b: SB = sb((&st_b[0]) as u64, 1023)
+    let t: u64 = now_unix()
+    sb_bytes(&b, "m\t".p as u64, 2)
+    sb_bytes(&b, id, r_clen(id))
+    sb_push(&b, 9 as u8)
+    sb_dec(&b, t)
+    sb_bytes(&b, "\tout\t".p as u64, 5)
+    rest(&b, args, n, 4)
+    sb_push(&b, 10 as u8)
+    let _w: bool = write_file(path(".outbox\0", "/etc/social/local.outbox\0"), b.ptr, b.len, true)
+    say("sent\t1\t")
+    var d: [u8; 24] = [0 as u8; 24]
+    let dn: u64 = ulib.digits(t, (&d[0]) as u64)
+    sayb((&d[0]) as u64, dn as usize)
+    say("\nok\n")
+    return 0
+}
+
+// every line of the inbox once: printed, then the file is emptied
+fn v_inbox() -> u64 {
+    var f: SB = sb((&st_f[0]) as u64, 16383)
+    let p: str = path(".inbox\0", "/etc/social/local.inbox\0")
+    let _r: bool = read_file(p, &f)
+    var c: u64 = 0
+    var a: usize = 0
+    while a < f.len {
+        let lp: u64 = f.ptr + a as u64
+        let ll: usize = line_len(lp, f.len - a)
+        if ll > 2 && r_ld8(lp, 0) == 109 as u8 {
+            sayb(lp, ll)
+            say("\n")
+            c = c + 1
+        }
+        a = a + ll + 1
+    }
+    if f.len > 0 {
+        let _w: bool = write_file(p, f.ptr, 0, false)
+    }
+    return ok_n(c)
+}
+
+static mut inv_no: u64 = 0
+
+fn v_invite(args: u64, n: u64) -> u64 {
+    let id: u64 = at(args, 3)
+    let kind: u64 = at(args, 4)
+    let tg: u64 = at(args, 5)
+    if !isz(kind, "invite") && !isz(kind, "join") {
+        say("err\tbad\tinvite: invite|join\n")
         return 1
     }
-    let verb: u64 = ulib.arg_at(args, 2)
+    var b: SB = sb((&st_b[0]) as u64, 1023)
+    // an id: l + the time + how many lines the file has
+    var f: SB = sb((&st_f[0]) as u64, 16383)
+    let _r: bool = read_file(path(".invites\0", "/etc/social/local.invites\0"), &f)
+    var lines: u64 = 0
+    var a: usize = 0
+    while a < f.len {
+        a = a + line_len(f.ptr + a as u64, f.len - a) + 1
+        lines = lines + 1
+    }
+    var idb: [u8; 32] = [0 as u8; 32]
+    var ib: SB = sb((&idb[0]) as u64, 31)
+    sb_push(&ib, 108 as u8)
+    sb_dec(&ib, now_unix() % 100000)
+    sb_push(&ib, 120 as u8)
+    sb_dec(&ib, lines + 1)
+    sb_bytes(&b, "i\t".p as u64, 2)
+    sb_bytes(&b, ib.ptr, ib.len)
+    sb_push(&b, 9 as u8)
+    sb_bytes(&b, id, r_clen(id))
+    sb_bytes(&b, "\tout\t".p as u64, 5)
+    sb_bytes(&b, kind, r_clen(kind))
+    sb_bytes(&b, "\topen\t0\t".p as u64, 8)
+    if !isz(tg, "-") && isz(kind, "invite") {
+        sb_bytes(&b, tg, r_clen(tg))
+    }
+    sb_push(&b, 9 as u8)
+    rest(&b, args, n, 6)
+    sb_push(&b, 10 as u8)
+    let _w: bool = write_file(path(".invites\0", "/etc/social/local.invites\0"), b.ptr, b.len, true)
+    say("i\t")
+    sayb(ib.ptr, ib.len)
+    say("\nok\n")
+    return 0
+}
+
+// an incoming invite answered: its state (and, for a join, my target)
+fn v_answer(inv: u64, yn: u64, tg: u64) -> u64 {
+    let yes: bool = isz(yn, "yes")
+    if !yes && !isz(yn, "no") {
+        say("err\tbad\tanswer: yes|no\n")
+        return 1
+    }
+    var f: SB = sb((&st_f[0]) as u64, 16383)
+    let p: str = path(".invites\0", "/etc/social/local.invites\0")
+    let _r: bool = read_file(p, &f)
+    var nb: SB = sb((&st_nb[0]) as u64, 16383)
+    var hit: bool = false
+    var outl: [u8; 1024] = [0 as u8; 1024]
+    var ob: SB = sb((&outl[0]) as u64, 1023)
+    let idn: usize = r_clen(inv)
+    var a: usize = 0
+    while a < f.len {
+        let lp: u64 = f.ptr + a as u64
+        let ll: usize = line_len(lp, f.len - a)
+        var in_: usize = 0
+        let io: usize = fld(lp, ll, 1, &in_)
+        var dn: usize = 0
+        let dof: usize = fld(lp, ll, 3, &dn)
+        var sn: usize = 0
+        let so: usize = fld(lp, ll, 5, &sn)
+        if ll > 2 && in_ == idn && r_eq(lp + io as u64, inv, idn)
+            && dn == 2 && r_eq(lp + dof as u64, "in".p as u64, 2)
+            && r_eq(lp + so as u64, "open".p as u64, 4) && sn == 4 {
+            hit = true
+            // fields 0..4 as they were, then the new state, age, target, name
+            sb_bytes(&ob, lp, so)
+            if yes {
+                sb_bytes(&ob, "accepted".p as u64, 8)
+            } else {
+                sb_bytes(&ob, "declined".p as u64, 8)
+            }
+            sb_bytes(&ob, "\t0\t".p as u64, 3)
+            var kn: usize = 0
+            let ko: usize = fld(lp, ll, 4, &kn)
+            var tn: usize = 0
+            let to: usize = fld(lp, ll, 7, &tn)
+            if yes && kn == 4 && r_eq(lp + ko as u64, "join".p as u64, 4) && tg != 0 {
+                sb_bytes(&ob, tg, r_clen(tg))
+            } else if yes {
+                sb_bytes(&ob, lp + to as u64, tn)
+            }
+            sb_push(&ob, 9 as u8)
+            var nn: usize = 0
+            let no: usize = fld(lp, ll, 8, &nn)
+            sb_bytes(&ob, lp + no as u64, ll - no)
+            sb_bytes(&nb, ob.ptr, ob.len)
+        } else {
+            sb_bytes(&nb, lp, ll)
+        }
+        sb_push(&nb, 10 as u8)
+        a = a + ll + 1
+    }
+    if !hit {
+        say("err\tbad\tno such open invite\n")
+        return 1
+    }
+    let _w: bool = write_file(p, nb.ptr, nb.len, false)
+    sayb(ob.ptr, ob.len)
+    say("\nok\n")
+    return 0
+}
+
+static mut g_shift: u64 = 0
+
+fn at(args: u64, i: u64) -> u64 {
+    if i >= 2 {
+        return ulib.arg_at(args, i + g_shift)
+    }
+    return ulib.arg_at(args, i)
+}
+
+fn u_start(args: u64) -> u64 {
+    var n: u64 = ulib.arg_count(args)
+    if n >= 5 && isz(ulib.arg_at(args, 2), "-c") {
+        g_base = ulib.arg_at(args, 3)
+        g_shift = 2
+        n = n - 2
+    } else if n >= 4 && r_clen(ulib.arg_at(args, 2)) > 2
+        && r_eq(ulib.arg_at(args, 2), "-c".p as u64, 2) {
+        // "-c<base>" in one word -- what the service passes
+        g_base = ulib.arg_at(args, 2) + 2
+        g_shift = 1
+        n = n - 1
+    }
+    if n < 3 || !isz(ulib.arg_at(args, 1), "v1") {
+        say("err\tbad\tusage: soclocal v1 [-c <base>] <verb> ...\n")
+        return 1
+    }
+    let verb: u64 = at(args, 2)
     if isz(verb, "hello") {
-        say("provider\tlocal\t1\ncaps\tcontacts search relation presence activity alive\nok\n")
+        say("provider\tlocal\t1\ncaps\tcontacts search relation presence activity alive login send inbox invite invites answer join\n")
+        var tk: SB = sb((&st_b[0]) as u64, 1023)
+        if read_file(path(".token\0", "/etc/social/local.token\0"), &tk) && tk.len > 0 {
+            say("account\t")
+            sayb(tk.ptr, line_len(tk.ptr, tk.len))
+            say("\n")
+        }
+        say("ok\n")
         return 0
+    }
+    if isz(verb, "login") {
+        if n >= 5 && isz(at(args, 3), "token") {
+            let t: u64 = at(args, 4)
+            let _w: bool = write_file(path(".token\0", "/etc/social/local.token\0"), t, r_clen(t), false)
+            say("account\t")
+            sayb(t, r_clen(t))
+            say("\tthis device\nok\n")
+            return 0
+        }
+        // pairing without a server: a fixed code the test types in
+        var tk2: SB = sb((&st_b[0]) as u64, 1023)
+        if read_file(path(".token\0", "/etc/social/local.token\0"), &tk2) && tk2.len > 0 {
+            say("account\t")
+            sayb(tk2.ptr, line_len(tk2.ptr, tk2.len))
+            say("\tthis device\nok\n")
+            return 0
+        }
+        say("pair\t1234 5678\t600\nerr\tpending\ttype the code in\n")
+        return 4
+    }
+    if isz(verb, "send") && n >= 5 {
+        return v_send(args, n)
+    }
+    if isz(verb, "inbox") {
+        return v_inbox()
+    }
+    if isz(verb, "invite") && n >= 7 {
+        return v_invite(args, n)
+    }
+    if isz(verb, "invites") {
+        var f: SB = sb((&st_f[0]) as u64, 16383)
+        let _r: bool = read_file(path(".invites\0", "/etc/social/local.invites\0"), &f)
+        sayb(f.ptr, f.len)
+        say("ok\n")
+        return 0
+    }
+    if isz(verb, "answer") && n >= 5 {
+        var tg: u64 = 0
+        if n >= 6 {
+            tg = at(args, 5)
+        }
+        return v_answer(at(args, 3), at(args, 4), tg)
     }
     if isz(verb, "contacts") {
         return v_contacts(0)
     }
     if isz(verb, "search") && n >= 4 {
-        return v_contacts(ulib.arg_at(args, 3))
+        return v_contacts(at(args, 3))
     }
     if isz(verb, "relation") && n >= 5 {
-        return v_relation(ulib.arg_at(args, 3), ulib.arg_at(args, 4))
+        return v_relation(at(args, 3), at(args, 4))
     }
     if isz(verb, "presence") || isz(verb, "activity") || isz(verb, "alive") {
-        return note(args, 2)
+        return note(args, 2 + g_shift)
     }
     say("err\tbad\tunknown verb\n")
     return 1
