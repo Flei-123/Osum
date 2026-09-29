@@ -22,6 +22,13 @@
 #   9. GEGENPROBE: without /var/log a change is refused (fail closed),
 #      a read still works
 #  10. latency through broker and app, 4 cores
+#  11. Jarvis over the real bridge
+#  12. AB-003: the KERNEL names the caller -- an app cannot claim to be
+#      the user, not via /bin/act, not via a copy; reserved bus names
+#  13. AB-005: system settings on the bus -- schema, rights per area,
+#      critical always asks, journal, undo, revert, a real config file
+#  14. AB-008: a Linux program behind a wrapper manifest -- cli and file
+#      adapters, no shell, not root, labelled, timeout, honest refusals
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -39,7 +46,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir orientbus notes act"
+PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -75,6 +82,8 @@ cat > "$TMPD/etc/actions.d/player.actions" <<'EOF'
 manifest 1
 app player
 title "Media player (compat wrapper, written by us)"
+for exe /usr/bin/vlc
+icon vlc.png
 action player.pause write "Pause playback"
   adapter dbus org.mpris.MediaPlayer2.Player.Pause
 action player.status read "What is playing"
@@ -91,6 +100,9 @@ deny  intruder *
 allow script notes.add write
 allow script notes.* critical
 EOF
+python3 tools/actionbus/manifest.py check etc/actions.d/settings.actions > "$TMPD/lint3.txt" 2>&1 \
+    && ok "host reader: the settings manifest ($(head -1 "$TMPD/lint3.txt" | cut -d' ' -f3-))" \
+    || bad "host reader refuses etc/actions.d/settings.actions: $(cat "$TMPD/lint3.txt")"
 python3 tools/actionbus/manifest.py check "$TMPD/etc/actions.d/evil.actions" > "$TMPD/lint2.txt" 2>&1 \
     && bad "host reader takes a foreign namespace" \
     || ok "host reader refuses a foreign namespace ($(sed 's/.*line [0-9]*: //' "$TMPD/lint2.txt"))"
@@ -98,7 +110,8 @@ python3 tools/actionbus/manifest.py check "$TMPD/etc/actions.d/evil.actions" > "
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "ACTIONBUS: skipped, qemu missing"; echo "ACTIONBUS: $pass passed, $fail failed"; exit 0; }
 
-image() { # <image> <script> [novarlog]
+EXTRA=()
+image() { # <image> <script> [novarlog]   (+ specs in EXTRA)
     local img=$1 script=$2 novar=${3:-}
     local -a A=(build "$img" $BLOCKS /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
@@ -113,6 +126,7 @@ image() { # <image> <script> [novarlog]
         "/etc/actions.d/evil.actions=$TMPD/etc/actions.d/evil.actions"
         "/etc/orientbus/policy=$TMPD/etc/orientbus/policy"
         "/t/s.sh=$script")
+    A+=("${EXTRA[@]}")
     python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
@@ -409,6 +423,400 @@ us4=$(echo "$L4" | sed -n 's/.*us_per_call=\([0-9]*\).*/\1/p')
 echo "ACTIONBUS-LATENCY us_1core=${us:-?} us_4core=${us4:-?}"
 
 # ===================================================================
+echo "== 12. AB-003: attested caller identity =="
+# ===================================================================
+# /apps/evil.prog is an app bundle whose "start" is a shell: everything
+# it runs -- /bin/act, a COPY of act in /tmp -- is app:evil for the
+# kernel, whatever it claims with --as.
+cat > "$TMPD/evil.sh" <<'EOS'
+echo ==E-WHO==
+act whoami --as user
+echo ==E-WRITE==
+act call notes.add "text=evil" --as user
+echo rc=$?
+echo ==E-CONFIRM==
+act confirm last --as user
+echo rc=$?
+echo ==E-GRANT==
+act grant app:evil notes.* write 60
+echo rc=$?
+echo ==E-COPY==
+cp /bin/act /tmp/a2
+chmod 755 /tmp/a2
+/tmp/a2 whoami --as user
+echo ==E-SQUAT==
+act claim a.notes2
+echo rc=$?
+act claim a.evil
+echo rc=$?
+act claim orient.bus2
+echo rc=$?
+act claim r.1
+echo rc=$?
+echo ==E-PROC==
+cat /proc/self/status
+echo ==E-END==
+EOS
+cat > "$TMPD/s4.sh" <<'EOS'
+orientbus serve 30000 &
+sleep -m 300
+notes serve 30000 &
+sleep 1
+echo ==WHO==
+act whoami
+act whoami --as jarvis
+echo ==EVIL==
+/apps/evil.prog/start /t/evil.sh
+echo ==OSP==
+/apps/evil2.osp/start /t/who.sh
+echo ==SYSB==
+/apps/tool.osp/start /t/who.sh
+echo ==CHAIN==
+/apps/tool.osp/start /t/chain.sh
+echo ==AFTER==
+act call notes.list
+act claim a.notes2
+act claim orient.probe
+echo ==STAT==
+act stat
+echo ==LOG==
+cat /var/log/orientbus.log
+act stop
+echo ==FERTIG==
+EOS
+echo "act whoami --as user" > "$TMPD/who.sh"
+echo "/apps/evil.prog/start /t/who.sh" > "$TMPD/chain.sh"
+echo "shipped with the image" > "$TMPD/SYSTEM"
+EXTRA=(/apps/evil.prog/ "/apps/evil.prog/start=$TMPD/bin/sh.elf" "/t/evil.sh=$TMPD/evil.sh"
+       /apps/evil2.osp/ "/apps/evil2.osp/start=$TMPD/bin/sh.elf"
+       /apps/tool.osp/ "/apps/tool.osp/start=$TMPD/bin/sh.elf" "/apps/tool.osp/SYSTEM=$TMPD/SYSTEM"
+       "/t/who.sh=$TMPD/who.sh" "/t/chain.sh=$TMPD/chain.sh")
+image "$TMPD/D.img" "$TMPD/s4.sh"
+EXTRA=()
+run "$TMPD/D.img" d 1 90
+D="$TMPD/d.klar"
+grep -qa '==FERTIG==' "$D" || { bad "identity guest did not finish"; tail -20 "$D" | sed 's/^/        /'; }
+part "$D" WHO EVIL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=user" "a process of the user without a label is 'user'"
+has "$TMPD/p.txt" "attested=no" "... and the broker says it only took the default"
+grep -qa 'client=jarvis' "$TMPD/p.txt" && ok "an unlabelled process may still NARROW itself (--as jarvis)" || bad "--as jarvis from the user's shell"
+part "$D" E-WHO E-WRITE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "an app saying --as user is app:evil for the broker"
+has "$TMPD/p.txt" "origin=app:evil" "... because the KERNEL says so (origin from /apps/evil.prog)"
+has "$TMPD/p.txt" "attested=yes" "... attested, not claimed"
+part "$D" E-WRITE E-CONFIRM > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 1 notes.add" "the app's write is parked for the user, not done"
+part "$D" E-CONFIRM E-GRANT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may confirm" "the app cannot confirm its own request, not even with --as user"
+part "$D" E-GRANT E-COPY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err denied only the user may grant" "... nor grant itself rights"
+part "$D" E-COPY E-SQUAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "a COPY of act run by the app is still app:evil (the label is sticky)"
+part "$D" E-SQUAT E-PROC > "$TMPD/p.txt"
+has "$TMPD/p.txt" "act: claim refused a.notes2" "the app cannot take another app's provider name"
+has "$TMPD/p.txt" "act: claimed ok a.evil" "... but its own"
+has "$TMPD/p.txt" "act: claim refused orient.bus2" "an app cannot take an orient.* name"
+has "$TMPD/p.txt" "act: claim refused r.1" "nobody can take another process's reply box"
+has "$D" 'bus: reserved name "a.notes2" refused' "the kernel says so on the console"
+part "$D" E-PROC E-END > "$TMPD/p.txt"
+has "$TMPD/p.txt" "Origin: app:evil" "/proc/<pid>/status shows the origin"
+part "$D" OSP SYSB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil2" "an installed-style bundle (/apps/evil2.osp) is app:evil2"
+part "$D" SYSB CHAIN > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=user" "a bundle the image ships (root-owned SYSTEM marker) acts as the user"
+has "$TMPD/p.txt" "attested=no" "... it has no label"
+part "$D" CHAIN AFTER > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil" "an app started FROM a system bundle (like the terminal) still gets its own label"
+part "$D" AFTER STAT > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "note.1=evil" "the app's note was never written"
+has "$TMPD/p.txt" "act: claimed ok a.notes2" "the user's own process may take a free a.* name"
+has "$TMPD/p.txt" "act: claimed ok orient.probe" "... and, as root without a label, an orient.* name"
+part "$D" STAT LOG > "$TMPD/p.txt"
+grep -qa '^claims_ignored=[1-9]' "$TMPD/p.txt" && ok "the broker counted the ignored claims ($(grep -a '^claims_ignored=' "$TMPD/p.txt"))" || bad "claims_ignored"
+has "$TMPD/p.txt" "foreign_providers=0" "no provider with a foreign origin"
+part "$D" LOG FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=app:evil verb=call action=notes.add decision=ask result=confirm" "the audit log names app:evil, not 'user'"
+hasnot "$TMPD/p.txt" "client=user verb=call action=notes.add decision=allow result=forwarded" "no write by 'user' happened in this run"
+
+# ===================================================================
+echo "== 13./14. settings on the bus, a Linux program behind adapters =="
+# ===================================================================
+if musl-gcc -static -O2 -nostartfiles -T tools/foreign/osum.ld -Wl,--build-id=none \
+        -o "$TMPD/fakeplayer" tools/foreign/start.s tools/foreign/osum_main.c \
+        tools/actionbus/fakeplayer.c 2>"$TMPD/fp.txt"; then
+    ok "fakeplayer: a plain POSIX C program, built as a static Linux binary (musl)"
+else
+    bad "fakeplayer does not build: $(grep -v 'GNU-stack' "$TMPD/fp.txt" | head -3)"
+fi
+cat > "$TMPD/fplayer.actions" <<'EOF'
+manifest 1
+app media
+title "Media player (Linux program, wrapper by the community)"
+for exe /opt/linux/fakeplayer
+action media.status read "What is playing"
+  adapter cli /opt/linux/fakeplayer status
+  returns state string "playing, paused or stopped"
+action media.pause write "Pause playback"
+  adapter cli /opt/linux/fakeplayer pause
+  undo media.play
+action media.play write "Resume playback"
+  adapter cli /opt/linux/fakeplayer play
+action media.volume write "Set the volume"
+  arg level int required "0..100"
+  adapter cli /opt/linux/fakeplayer volume {level}
+action media.title write "Name what is playing"
+  arg text string required "Any text"
+  adapter cli /opt/linux/fakeplayer title {text}
+action media.echo read "Show the arguments the program receives"
+  arg text string required "Any text"
+  adapter cli /opt/linux/fakeplayer argv {text}
+action media.hang read "A program that never answers"
+  adapter cli /opt/linux/fakeplayer hang
+action media.eq read "The equaliser preset, from the program's config file"
+  adapter file /var/player/player.conf eq
+action media.set_eq write "Choose the equaliser preset"
+  arg preset string required "flat, rock or voice"
+  adapter file /var/player/player.conf eq
+action media.next write "Next track, by a key press in its window"
+  adapter keys ctrl+right
+EOF
+cat > "$TMPD/gimp.actions" <<'EOF'
+manifest 1
+app gimp
+title "GIMP (not installed here)"
+for exe /opt/linux/gimp
+action gimp.open write "Open a picture"
+  adapter cli /opt/linux/gimp {path}
+  arg path string required "The picture"
+EOF
+cat > "$TMPD/nativead.actions" <<'EOF'
+manifest 1
+app sneaky
+action sneaky.run write "A native app may not hide an adapter"
+  adapter cli /bin/sh -c x
+EOF
+printf '# /etc/sperre.conf -- test copy\nleerlauf=300\n' > "$TMPD/sperre.conf"
+printf 'schema 1\nsetting display.brightness int 0..100 dangerous "typo in the risk"\n' > "$TMPD/bad.schema"
+python3 tools/actionbus/manifest.py check --wrapper "$TMPD/fplayer.actions" > "$TMPD/lint4.txt" 2>&1 \
+    && ok "host reader takes the wrapper manifest ($(head -1 "$TMPD/lint4.txt" | cut -d' ' -f3-))" \
+    || bad "host reader refuses the wrapper: $(cat "$TMPD/lint4.txt")"
+python3 tools/actionbus/manifest.py check "$TMPD/fplayer.actions" > "$TMPD/lint5.txt" 2>&1 \
+    && bad "host reader takes adapters in a NATIVE manifest" \
+    || ok "host reader refuses adapters outside a wrapper manifest"
+cat > "$TMPD/s5.sh" <<'EOS'
+orientbus serve 30000 &
+sleep -m 300
+settingsd serve 30000 &
+sleep 1
+echo ==S-CHECK==
+settingsd check /etc/settings.schema
+settingsd check /t/bad.schema
+echo ==S-LIST==
+act call settings.list area=display
+echo ==S-DESC==
+act describe settings.set
+echo ==S-GET==
+act call settings.get key=lock.idle
+echo ==S-SETUSER==
+act call settings.set key=display.brightness value=40
+echo rc=$?
+echo ==S-BADVAL==
+act call settings.set key=display.brightness value=140
+echo rc=$?
+act call settings.set key=display.scale value=110
+echo rc=$?
+act call settings.set key=no.such value=1
+echo rc=$?
+echo ==S-AGENT==
+act call settings.set key=display.brightness value=30 --as jarvis
+echo rc=$?
+act reject last
+echo ==S-GRANT==
+act grant jarvis settings.display.* write 60
+act call settings.set key=display.brightness value=30 --as jarvis
+echo rc=$?
+act call settings.set key=sound.volume value=10 --as jarvis
+echo rc=$?
+act reject last
+echo ==S-CRIT==
+act call settings.set key=update.auto value=true --as jarvis
+echo rc=$?
+act reject last
+act call settings.set key=update.auto value=true
+echo rc=$?
+act confirm last
+echo rc=$?
+echo ==S-DRY==
+act call settings.set key=net.wifi.enabled value=false --dry --as jarvis
+echo rc=$?
+echo ==S-STORE==
+act call settings.set key=lock.idle value=900
+cat /etc/sperre.conf
+echo ==S-HIST==
+act call settings.history
+echo ==S-UNDO==
+act undo --as jarvis
+echo rc=$?
+act call settings.get key=display.brightness
+echo ==S-REVERT==
+act call settings.revert key=lock.idle change=4
+echo rc=$?
+cat /etc/sperre.conf
+act call settings.revert key=display.brightness change=2
+echo rc=$?
+echo ==S-DB==
+cat /etc/settings.db
+echo ==S-JOURNAL==
+cat /var/log/settings.journal
+echo ==C-LIST==
+act list
+echo ==C-DESC==
+act describe media.
+echo ==C-STATUS==
+act call media.status
+echo ==C-RAW==
+cat /tmp/orientbus.adapter.out
+echo ==C-PAUSE==
+act call media.pause
+echo rc=$?
+act call media.status
+echo ==C-AGENT==
+act call media.volume level=20 --as jarvis
+echo rc=$?
+act confirm last
+act call media.status
+echo ==C-INJECT==
+act call media.echo "text=a b;rm -rf /"
+echo ==C-DRY==
+act call media.title text=hello --dry
+act call media.status
+echo ==C-FILE==
+act call media.set_eq preset=rock
+act call media.eq
+cat /var/player/player.conf
+echo ==C-UNDO==
+act undo
+act call media.status
+echo ==C-KEYS==
+act call media.next
+echo rc=$?
+echo ==C-GONE==
+act call gimp.open path=/x.png
+echo rc=$?
+echo ==C-HANG==
+act call media.hang
+echo rc=$?
+echo ==C-STAT==
+act stat
+echo ==C-LOG==
+cat /var/log/orientbus.log
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/settings.schema=etc/settings.schema"
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
+       "/etc/actions.d/fplayer.actions=$TMPD/fplayer.actions"
+       "/etc/actions.d/gimp.actions=$TMPD/gimp.actions"
+       /apps/sneaky.osp/ "/apps/sneaky.osp/ACTIONS=$TMPD/nativead.actions"
+       "/etc/sperre.conf=$TMPD/sperre.conf" "/t/bad.schema=$TMPD/bad.schema"
+       /opt/ /opt/linux/ "/opt/linux/fakeplayer=$TMPD/fakeplayer"
+       /var/player/@755:65534:65534)
+image "$TMPD/E.img" "$TMPD/s5.sh"
+EXTRA=()
+run "$TMPD/E.img" e 1 150
+E="$TMPD/e.klar"
+grep -qa '==FERTIG==' "$E" || { bad "settings/compat guest did not finish"; tail -20 "$E" | sed 's/^/        /'; }
+echo "  -- 13. settings"
+has "$E" "orientbus: provider settings bound" "settingsd is a provider like any app (bound by the kernel-routed ping)"
+part "$E" S-CHECK S-LIST > "$TMPD/p.txt"
+has "$TMPD/p.txt" "settingsd: schema ok keys=14" "the shipped schema: 14 settings"
+has "$TMPD/p.txt" "risk must be harmless or critical" "a broken schema is refused, with the reason"
+part "$E" S-LIST S-DESC > "$TMPD/p.txt"
+has "$TMPD/p.txt" "count=3" "settings.list area=display: 3 settings"
+has "$TMPD/p.txt" "display.brightness=80" "... with the default value"
+has "$TMPD/p.txt" "display.brightness.type=int 0..100 harmless" "... type, range and risk"
+has "$TMPD/p.txt" "display.brightness.text=Screen brightness in percent" "... and the description"
+part "$E" S-DESC S-GET > "$TMPD/p.txt"
+has "$TMPD/p.txt" '"keyed":"settings.schema"' "describe tells an agent that the key decides"
+part "$E" S-GET S-SETUSER > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=300" "lock.idle is read from the real /etc/sperre.conf"
+part "$E" S-SETUSER S-BADVAL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "old=80" "the user changes a harmless setting at once (old=80)"
+has "$TMPD/p.txt" "change=1" "... journalled as change 1"
+part "$E" S-BADVAL S-AGENT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err bad_value display.brightness out of range" "140 for 0..100 is refused -- by the broker, before the provider"
+has "$TMPD/p.txt" "err bad_value display.scale not one of the words" "an enum value outside the list is refused"
+has "$TMPD/p.txt" "err unknown_setting no.such" "an unknown key is refused"
+part "$E" S-AGENT S-GRANT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 1 settings.display.brightness" "an agent's change is parked, and the rights name is the KEY"
+part "$E" S-GRANT S-CRIT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "old=40" "with 'grant jarvis settings.display.* write 60' Jarvis sets display.brightness"
+has "$TMPD/p.txt" "confirm 2 settings.sound.volume" "... but the grant is per AREA: sound.volume still asks"
+part "$E" S-CRIT S-DRY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 3 settings.update.auto" "a critical setting asks Jarvis"
+has "$TMPD/p.txt" "level=critical" "... at level critical (from the schema's risk)"
+has "$TMPD/p.txt" "confirm 4 settings.update.auto" "... and asks the USER too -- critical always asks"
+has "$TMPD/p.txt" "change=3" "after the user's yes it is done"
+part "$E" S-DRY S-STORE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "would=net.wifi.enabled from true to false" "a dry run of a critical change says what WOULD happen and changes nothing"
+part "$E" S-STORE S-HIST > "$TMPD/p.txt"
+has "$TMPD/p.txt" "leerlauf=900" "lock.idle lands in /etc/sperre.conf, where sperrwache reads it"
+has "$TMPD/p.txt" "# /etc/sperre.conf -- test copy" "... and the file's other lines stay"
+part "$E" S-HIST S-UNDO > "$TMPD/p.txt"
+has "$TMPD/p.txt" "change.2=display.brightness 40 -> 30 by jarvis" "settings.history: number, key, old, new, who"
+part "$E" S-UNDO S-REVERT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=40" "act undo --as jarvis puts Jarvis' change back (the manifest's undo settings.set)"
+part "$E" S-REVERT S-DB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "leerlauf=300" "settings.revert of change 4 writes the old value back into the file"
+has "$TMPD/p.txt" "err changed_since display.brightness" "a revert of a value changed since is refused -- nothing is silently thrown away"
+part "$E" S-DB S-JOURNAL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "display.brightness=40" "/etc/settings.db holds the stored value"
+part "$E" S-JOURNAL C-LIST > "$TMPD/p.txt"
+has "$TMPD/p.txt" "verb=set client=jarvis key=display.brightness old=40 new=30" "the journal names who changed what from what to what"
+has "$TMPD/p.txt" "verb=revert client=user key=lock.idle old=900 new=300" "... and the revert"
+part "$E" C-LOG FERTIG > "$TMPD/log.txt"
+has "$TMPD/log.txt" "client=jarvis verb=call action=settings.update.auto decision=ask result=confirm" "the bus log names the key of the parked change"
+echo "  -- 14. compat adapters"
+has "$E" "sneaky.osp/ACTIONS line 4: adapters are for wrapper manifests" "a native app's manifest may not carry an adapter"
+part "$E" C-LIST C-DESC > "$TMPD/p.txt"
+has "$TMPD/p.txt" "gimp.open write Open a picture (not running)" "a wrapper whose program is not installed says so"
+hasnot "$TMPD/p.txt" "media.status read What is playing (not running)" "... the installed one is available"
+part "$E" C-DESC C-STATUS > "$TMPD/p.txt"
+has "$TMPD/p.txt" '"adapter":"cli","reliability":"good"' "describe: adapter and reliability for an agent"
+has "$TMPD/p.txt" '"adapter":"keys","reliability":"low"' "... a key-press adapter is marked low"
+part "$E" C-STATUS C-RAW > "$TMPD/p.txt"
+has "$TMPD/p.txt" "state=stopped" "the Linux program answers through the cli adapter"
+has "$TMPD/p.txt" "uid=65534" "... it ran as uid 65534, NOT as root (the broker is root)"
+has "$TMPD/p.txt" "origin=compat:media" "... and the kernel labels it compat:media"
+has "$TMPD/p.txt" "adapter=cli" "... the reply says which adapter"
+part "$E" C-PAUSE C-AGENT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "state=paused" "media.pause through the adapter changes the program's state"
+part "$E" C-AGENT C-INJECT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm 5 media.volume" "an agent's write to a wrapped program is parked like any other"
+has "$TMPD/p.txt" "volume=20" "... and runs after the user's yes"
+part "$E" C-INJECT C-DRY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "argc=3" "NO SHELL: 'a b;rm -rf /' reaches the program as ONE argument"
+has "$TMPD/p.txt" "arg1=a b;rm -rf /" "... unchanged"
+part "$E" C-DRY C-FILE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "would=/opt/linux/fakeplayer title hello" "a dry run shows the exact command and runs nothing"
+has "$TMPD/p.txt" "title=nothing" "... the title is unchanged"
+part "$E" C-FILE C-UNDO > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=rock" "the file adapter writes and reads the program's config file"
+has "$TMPD/p.txt" "eq=rock" "... the file holds eq=rock"
+part "$E" C-UNDO C-KEYS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "state=playing" "act undo runs the manifest's inverse (pause -> play) through the adapter"
+part "$E" C-KEYS C-GONE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err adapter_unsupported keys" "a key-press adapter is refused honestly (no key injection for foreign programs yet)"
+part "$E" C-GONE C-HANG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err app_not_running gimp" "a wrapped program that is not installed: app_not_running"
+part "$E" C-HANG C-STAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "err adapter_failed exit=timeout" "a program that hangs is killed after 5 s, the broker keeps serving"
+part "$E" C-STAT C-LOG > "$TMPD/p.txt"
+grep -qa '^adapter_runs=[1-9]' "$TMPD/p.txt" && ok "the broker counted $(grep -a '^adapter_runs=' "$TMPD/p.txt")" || bad "adapter_runs"
+has "$TMPD/log.txt" "client=user verb=call action=media.pause decision=allow result=forwarded" "the audit log has the write-ahead line of the adapter call"
+grep -qaE 'panic|EXCEPTION' "$E" && bad "a panic or exception in the settings/compat guest" || ok "no panic, no exception"
+
+# ===================================================================
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================
 # The JARVIS server side is tools/bridge/peer.py (TLS 1.3, Ed25519 login,
@@ -478,6 +886,8 @@ befehl|/bin/act call notes.clear --dry --as jarvis|
 befehl|/bin/act call notes.clear --as jarvis|
 befehl|/bin/act call notes.count --as jarvis|
 befehl|/bin/sh -c act|
+befehl|/bin/act whoami --as user|
+befehl|/bin/act call notes.add text=j2 --as user|
 JOBS
     ip link del "$V0" 2>/dev/null
     ip netns add "$NS"
@@ -524,6 +934,10 @@ JOBS
         && bad "the log shows a critical action allowed for Jarvis" \
         || ok "... and no critical action allowed for it (only its dry run)"
     has "$TMPD/jl.txt" "client=jarvis verb=call action=notes.clear decision=allow result=ok dry=1" "... the dry run is logged as such"
+    # AB-003: the bridge marks what it runs; --as user changes nothing
+    has "$G.7.bin" "client=jarvis" "AB-003: a Jarvis command saying --as user is still jarvis"
+    has "$G.7.bin" "origin=jarvis" "... because jarvisd labelled it in the kernel"
+    has "$G.8.bin" "confirm 3 notes.add" "... so its write as 'user' is parked like any Jarvis write"
 fi
 
 echo "ACTIONBUS: $pass passed, $fail failed"

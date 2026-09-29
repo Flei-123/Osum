@@ -11,6 +11,7 @@
  * musl is initialised with it exactly as a Linux kernel would.
  */
 #include <stddef.h>
+#include <stdlib.h>
 
 #define AT_NULL   0
 #define AT_PHDR   3
@@ -70,5 +71,12 @@ long osum_main(long argc, char **argv, char **envp)
     #undef AUX
 
     __init_libc((char **)blk, argv[0] ? argv[0] : "osum");
-    return (long)main((int)argc, argv, envp);
+    /* exit(), NOT return: start.s ends with exit_group, which does not
+     * flush stdio. On the console musl's stdout is line-buffered and
+     * nobody noticed; into a FILE or a pipe it is fully buffered after
+     * the first line, and everything after that first line was lost
+     * (found in round ACTION-BUS-2: a wrapped Linux program printed four
+     * lines, the adapter got one). Linux's crt1 does exactly this. */
+    exit(main((int)argc, argv, envp));
+    return 0;
 }

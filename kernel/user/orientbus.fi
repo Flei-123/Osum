@@ -37,6 +37,7 @@ profile kernel
 import ulib
 import libc.io
 import actwire
+import setschema
 
 export { u_start }
 
@@ -49,11 +50,13 @@ const AP_NAME: u64 = 8 // 16 octets
 const AP_PID: u64 = 24 // the pid that answered for `a.<app>`; 0 = not yet
 const AP_TITLE: u64 = 32
 const AP_COMPAT: u64 = 40
+const AP_FOR: u64 = 48 // AB-008: pool offset of `for exe <path>`, 0 = none
+const AP_ADAPT: u64 = 56 // 1 = its actions run through adapters
 static mut apps: [u8; 1024] = [0 as u8; 1024]
 static mut n_apps: u64 = 0
 
 const ACT_MAX: u64 = 64
-const ACT_B: u64 = 96
+const ACT_B: u64 = 112
 const AC_NAME: u64 = 0 // 32 octets
 const AC_APP: u64 = 32
 const AC_LEVEL: u64 = 40
@@ -63,9 +66,19 @@ const AC_ARG0: u64 = 64
 const AC_ARGN: u64 = 72
 const AC_UNDO: u64 = 80 // pool offset of the inverse action's name
 const AC_CALLS: u64 = 88
+const AC_ADKIND: u64 = 96 // AB-008: AD_* below, 0 = a provider answers
+const AC_ADCMD: u64 = 104 // pool offset of the adapter's rest of line
 const FL_DRY: u64 = 1
 const FL_EVENT: u64 = 2
-static mut acts: [u8; 6144] = [0 as u8; 6144]
+const FL_KEYED: u64 = 4 // AB-005: arg `key` names a setting of the schema
+
+const AD_NONE: u64 = 0
+const AD_CLI: u64 = 1
+const AD_FILE: u64 = 2
+const AD_DBUS: u64 = 3
+const AD_UI: u64 = 4
+const AD_KEYS: u64 = 5
+static mut acts: [u8; 7168] = [0 as u8; 7168]
 static mut n_acts: u64 = 0
 
 const ARG_MAX: u64 = 256
@@ -121,15 +134,16 @@ static mut pend: [u8; 1024] = [0 as u8; 1024]
 
 // calls waiting for a confirmation
 const TOK_MAX: u64 = 8
-const TOK_B: u64 = 64
+const TOK_B: u64 = 96
 const TK_USED: u64 = 0
 const TK_NO: u64 = 8
 const TK_T0: u64 = 16
 const TK_LEN: u64 = 24
 const TK_PID: u64 = 32
 const TK_UID: u64 = 40
+const TK_CLIENT: u64 = 48 // 24 octets: the RESOLVED client (AB-003)
 const TOK_BYTES: u64 = 1024
-static mut toks: [u8; 512] = [0 as u8; 512]
+static mut toks: [u8; 768] = [0 as u8; 768]
 static mut tokmem: [u8; 8192] = [0 as u8; 8192]
 static mut tok_next: u64 = 1
 
@@ -345,6 +359,26 @@ static mut s_int: [u8; 4] = "int\0"
 static mut s_bool: [u8; 5] = "bool\0"
 static mut s_string: [u8; 7] = "string\0"
 static mut s_user: [u8; 5] = "user\0"
+// AB-003: WHO is calling, decided ONCE per request in `on_request` and
+// used by every verb. The kernel's origin of the sender pid wins; only a
+// process WITHOUT a label (the user's own, the system's) may name a
+// client itself -- which can only narrow its rights ("--as jarvis").
+static mut g_client: [u8; 24] = [0 as u8; 24]
+static mut g_origin: [u8; 32] = [0 as u8; 32]
+static mut g_attested: bool = false
+static mut c_claims: u64 = 0 // a labelled process named another client
+static mut c_badprov: u64 = 0 // a provider with the wrong origin
+static mut idle_since: u64 = 0
+// AB-005: the schema is loaded once at the start
+static mut have_schema: bool = false
+static mut g_rlevel: u64 = 0 // the level a keyed call is decided at
+// AB-008: adapters run as this uid when the caller is root (policy line
+// `adapter_uid <n>`); never as root
+static mut adapter_uid: u64 = 65534
+static mut c_adapt: u64 = 0
+static mut adout: [u8; 2048] = [0 as u8; 2048]
+static mut adargs: [u8; 512] = [0 as u8; 512]
+static mut adptr: [u64; 10] = [0 as u64; 10]
 static mut s_logpath: [u8; 23] = "/var/log/orientbus.log\0"
 
 fn level_of(w: u64) -> u64 {
@@ -404,6 +438,20 @@ fn app_svc_name(app: u64, out: u64) {
 }
 
 fn app_running(app: u64) -> bool {
+    if ld(ap(app), AP_ADAPT) != 0 {
+        // AB-008: a wrapped program is "running" when it is installed;
+        // `for exe <path>` names the file, no line = always
+        let f: u64 = ld(ap(app), AP_FOR)
+        if f == 0 {
+            return true
+        }
+        let fd: u64 = io.open(pl(f), 0)
+        if ulib.bad(fd) {
+            return false
+        }
+        io.close(fd)
+        return true
+    }
     var nm: [u8; 24] = [0 as u8; 24]
     let np: u64 = (&nm[0 as usize]) as u64
     app_svc_name(app, np)
@@ -537,6 +585,8 @@ fn load_manifest(path: u64, compat: u64) -> bool {
     let p2: u64 = (&w2[0 as usize]) as u64
     let p3: u64 = (&w3[0 as usize]) as u64
     let pq: u64 = (&q[0 as usize]) as u64
+    var w4x: [u8; 8] = [0 as u8; 8]
+    let p4x: u64 = (&w4x[0 as usize]) as u64
 
     var k_manifest: [u8; 9] = "manifest\0"
     var k_app: [u8; 4] = "app\0"
@@ -550,6 +600,17 @@ fn load_manifest(path: u64, compat: u64) -> bool {
     var k_undo: [u8; 5] = "undo\0"
     var k_req: [u8; 9] = "required\0"
     var k_one: [u8; 2] = "1\0"
+    var k_keyed: [u8; 6] = "keyed\0"
+    var k_adapter: [u8; 8] = "adapter\0"
+    var k_for: [u8; 4] = "for\0"
+    var k_cli: [u8; 4] = "cli\0"
+    var k_file: [u8; 5] = "file\0"
+    var k_dbus: [u8; 5] = "dbus\0"
+    var k_ui: [u8; 3] = "ui\0"
+    var k_keys: [u8; 5] = "keys\0"
+    var k_exe: [u8; 4] = "exe\0"
+    var e_ad: [u8; 42] = "adapter kind: cli, file, dbus, ui or keys\0"
+    var e_adnat: [u8; 37] = "adapters are for wrapper manifests\0\0\0"
 
     var e_ver: [u8; 25] = "unknown manifest version\0"
     var e_noapp: [u8; 25] = "declaration before 'app'\0"
@@ -686,6 +747,45 @@ fn load_manifest(path: u64, compat: u64) -> bool {
                     ok = false
                 } else if !add_arg(p2, t, role, pq, line) {
                     ok = false
+                }
+            } else if actwire.str_eq(p1, (&k_keyed[0 as usize]) as u64) {
+                if m_cur != actwire.NONE {
+                    st(ac(m_cur), AC_FLAGS, ld(ac(m_cur), AC_FLAGS) | FL_KEYED)
+                }
+            } else if actwire.str_eq(p1, (&k_for[0 as usize]) as u64)
+                && actwire.str_eq(p2, (&k_exe[0 as usize]) as u64) {
+                st(ap(m_app), AP_FOR, pool_add(p3, actwire.slen(p3)))
+            } else if actwire.str_eq(p1, (&k_adapter[0 as usize]) as u64) {
+                // adapter <kind> <rest of the line>
+                var kind: u64 = AD_NONE
+                if actwire.str_eq(p2, (&k_cli[0 as usize]) as u64) {
+                    kind = AD_CLI
+                } else if actwire.str_eq(p2, (&k_file[0 as usize]) as u64) {
+                    kind = AD_FILE
+                } else if actwire.str_eq(p2, (&k_dbus[0 as usize]) as u64) {
+                    kind = AD_DBUS
+                } else if actwire.str_eq(p2, (&k_ui[0 as usize]) as u64) {
+                    kind = AD_UI
+                } else if actwire.str_eq(p2, (&k_keys[0 as usize]) as u64) {
+                    kind = AD_KEYS
+                }
+                if kind == AD_NONE {
+                    m_fail(line, (&e_ad[0 as usize]) as u64)
+                    ok = false
+                } else if compat == 0 {
+                    // a native app answers itself; an adapter in its
+                    // manifest would be a second, unchecked way in
+                    m_fail(line, (&e_adnat[0 as usize]) as u64)
+                    ok = false
+                } else if m_cur != actwire.NONE {
+                    var r: u64 = actwire.word_copy(p, s, p4x, 8)
+                    r = actwire.word_copy(p, r, p4x, 8)
+                    while ld8(p, r) == 32 {
+                        r = r + 1
+                    }
+                    st(ac(m_cur), AC_ADKIND, kind)
+                    st(ac(m_cur), AC_ADCMD, pool_add(p + r, actwire.slen(p + r)))
+                    st(ap(m_app), AP_ADAPT, 1)
                 }
             } else if actwire.str_eq(p1, (&k_dry[0 as usize]) as u64) {
                 if m_cur != actwire.NONE {
@@ -850,6 +950,13 @@ fn policy_load() {
         if actwire.str_eq(p1, (&k_deny[0 as usize]) as u64) {
             rule_add(p2, p3, true, 0, 0)
         }
+        var k_auid: [u8; 12] = "adapter_uid\0"
+        if actwire.str_eq(p1, (&k_auid[0 as usize]) as u64) {
+            let u: u64 = ulib.to_num(p2)
+            if u != 0 {
+                adapter_uid = u // 0 would be root: never
+            }
+        }
         st8(p, e, save)
         at = e
         if ld8(p, at) == 10 {
@@ -864,7 +971,13 @@ const D_DENY: u64 = 2
 
 // THE DECISION. Deny rules first, then the level of the action.
 fn decide(client: u64, act: u64, dry: bool) -> u64 {
-    let name: u64 = ac(act) + AC_NAME
+    return decide_named(client, ac(act) + AC_NAME, ld(ac(act), AC_LEVEL), dry)
+}
+
+// AB-005: the decision by NAME and LEVEL -- for a keyed call the name is
+// `<app>.<key>` (settings.display.brightness) and the level comes from
+// the schema, so rules and grants work per area of settings.
+fn decide_named(client: u64, name: u64, lvl0: u64, dry: bool) -> u64 {
     let now: u64 = actwire.ticks()
     var i: u64 = 0
     while i < RULE_MAX {
@@ -879,7 +992,7 @@ fn decide(client: u64, act: u64, dry: bool) -> u64 {
     if dry {
         return D_ALLOW
     }
-    let lvl: u64 = ld(ac(act), AC_LEVEL)
+    let lvl: u64 = lvl0
     if lvl == L_READ {
         return D_ALLOW
     }
@@ -1292,6 +1405,18 @@ fn do_describe(pid: u64, id: u64, filter: u64) {
                     } else {
                         actwire.ob_str((&s_false[0 as usize]) as u64)
                     }
+                    if (ld(c, AC_FLAGS) & FL_KEYED) != 0 {
+                        var s_k: [u8; 27] = ",\"keyed\":\"settings.schema\"\0"
+                        actwire.ob_str((&s_k[0 as usize]) as u64)
+                    }
+                    if ld(c, AC_ADKIND) != AD_NONE {
+                        var s_ad: [u8; 12] = ",\"adapter\":\0"
+                        var s_rl: [u8; 16] = ",\"reliability\":\0"
+                        actwire.ob_str((&s_ad[0 as usize]) as u64)
+                        actwire.ob_json(adapter_name(ld(c, AC_ADKIND)))
+                        actwire.ob_str((&s_rl[0 as usize]) as u64)
+                        actwire.ob_json(actwire.adapter_reliability(ld(c, AC_ADKIND)))
+                    }
                     actwire.ob_str((&s_args[0 as usize]) as u64)
                     json_args(i, 0, 1)
                     actwire.ob_str((&s_ret[0 as usize]) as u64)
@@ -1485,6 +1610,323 @@ fn forward(app: u64, act: u64, msg: u64, pid: u64, uid: u64, id: u64,
 // THE CALL. `msg` is the request text, `confirmed` says a human has
 // just said yes to exactly this request (only `confirm` sets it),
 // `undo` marks the replay of an inverse action.
+// AB-005. The call names a setting (`key=`): it must be in the schema,
+// a value must fit it, the rights name becomes `<app>.<key>` and the
+// level the schema's risk (a read action stays read).
+fn keyed_check(msg: u64, act: u64, np: u64, why: u64) -> bool {
+    var e_none: [u8; 10] = "no_schema\0"
+    var e_key: [u8; 17] = "unknown_setting \0"
+    var e_val: [u8; 11] = "bad_value \0"
+    var k_key: [u8; 4] = "key\0"
+    var k_val: [u8; 6] = "value\0"
+    if !have_schema {
+        copyz(why, (&e_none[0 as usize]) as u64, 80)
+        return false
+    }
+    var kb: [u8; 32] = [0 as u8; 32]
+    let kp: u64 = (&kb[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_key[0 as usize]) as u64, kp, 32)
+    let i: u64 = setschema.find(kp)
+    if i == setschema.NONE {
+        copyz(why, (&e_key[0 as usize]) as u64, 80)
+        ulib.strcat(why, kp)
+        return false
+    }
+    var vb: [u8; 200] = [0 as u8; 200]
+    let vp: u64 = (&vb[0 as usize]) as u64
+    if actwire.kv_find(msg, (&k_val[0 as usize]) as u64, vp, 200) {
+        var w: [u8; 40] = [0 as u8; 40]
+        if !setschema.validate(i, vp, (&w[0 as usize]) as u64) {
+            copyz(why, (&e_val[0 as usize]) as u64, 80)
+            ulib.strcat(why, kp)
+            var sp: [u8; 2] = " \0"
+            ulib.strcat(why, (&sp[0 as usize]) as u64)
+            ulib.strcat(why, (&w[0 as usize]) as u64)
+            return false
+        }
+    }
+    // the name the rights and the log see
+    copyz(np, ap(ld(ac(act), AC_APP)) + AP_NAME, 40)
+    var dot: [u8; 2] = ".\0"
+    ulib.strcat(np, (&dot[0 as usize]) as u64)
+    ulib.strcat(np, kp)
+    if ld(ac(act), AC_LEVEL) == L_READ {
+        g_rlevel = L_READ
+    } else if setschema.risk(i) == setschema.R_CRITICAL {
+        g_rlevel = L_CRIT
+    } else {
+        g_rlevel = L_WRITE
+    }
+    return true
+}
+
+// ================================================= AB-008: adapters
+//
+// A wrapper manifest (/etc/actions.d/*.actions) binds an action of a
+// program that knows nothing of the bus to one of these:
+//
+//   adapter cli <program> <word> {arg} ...   run it; {arg} = ONE argument
+//   adapter file <path> <field>              read or set field=value
+//   adapter dbus|ui|keys ...                 declared, not executable yet
+//
+// NO SHELL: the template is split at spaces, a word that is exactly
+// {name} becomes the value of that argument as one argv entry -- a value
+// with spaces or `;` stays one harmless argument. The program runs in a
+// child that dropped to the CALLER's uid (or `adapter_uid` for root
+// callers, never root) and carries the kernel label compat:<app>, so what
+// the foreign program does is neither root's nor the user's.
+
+fn adapter_name(k: u64) -> u64 {
+    return actwire.adapter_word(k)
+}
+
+// the child: never returns
+fn adapter_child(act: u64, msg: u64, fd: u64, uid: u64) {
+    ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+    ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+    var run_as: u64 = uid
+    if run_as == 0 {
+        run_as = adapter_uid
+    }
+    // group first, then user: after setuid there is no way back
+    ulib.sys(106, run_as, 0, 0)
+    if ulib.bad(ulib.sys(105, run_as, 0, 0)) {
+        ulib.sys(ulib.SYS_EXIT, 125, 0, 0)
+    }
+    var lbl: [u8; 24] = "compat:\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    ulib.strcat((&lbl[0 as usize]) as u64, ap(ld(ac(act), AC_APP)) + AP_NAME)
+    actwire.origin_set((&lbl[0 as usize]) as u64)
+    let kind: u64 = ld(ac(act), AC_ADKIND)
+    if kind == AD_FILE {
+        // <path> <field>: read -> value=..., write -> the first argument
+        let cmd: u64 = pl(ld(ac(act), AC_ADCMD))
+        var fp: [u8; 160] = [0 as u8; 160]
+        var fl: [u8; 40] = [0 as u8; 40]
+        let nx: u64 = actwire.word_copy(cmd, 0, (&fp[0 as usize]) as u64, 160)
+        actwire.word_copy(cmd, nx, (&fl[0 as usize]) as u64, 40)
+        if ld(ac(act), AC_LEVEL) == L_READ {
+            var v: [u8; 200] = [0 as u8; 200]
+            if !actwire.kvfile_get((&fp[0 as usize]) as u64, (&fl[0 as usize]) as u64,
+                (&v[0 as usize]) as u64, 200) {
+                ulib.sys(ulib.SYS_EXIT, 3, 0, 0)
+            }
+            var s_v: [u8; 7] = "value=\0"
+            actwire.out((&s_v[0 as usize]) as u64)
+            actwire.out((&v[0 as usize]) as u64)
+            var lf: [u8; 2] = "\n\0"
+            actwire.out((&lf[0 as usize]) as u64)
+            ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+        }
+        let a0: u64 = ld(ac(act), AC_ARG0)
+        var v2: [u8; 200] = [0 as u8; 200]
+        actwire.kv_find(msg, ar(a0) + AR_NAME, (&v2[0 as usize]) as u64, 200)
+        if !actwire.kvfile_set((&fp[0 as usize]) as u64, (&fl[0 as usize]) as u64,
+            (&v2[0 as usize]) as u64) {
+            ulib.sys(ulib.SYS_EXIT, 4, 0, 0)
+        }
+        ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+    }
+    // cli: argv was built by the parent before the fork
+    ulib.sys(ulib.SYS_EXECVE, adptr[0 as usize], (&adptr[0 as usize]) as u64, 0)
+    ulib.sys(ulib.SYS_EXIT, 127, 0, 0)
+}
+
+// argv for a cli adapter into adargs/adptr; returns argc (0 = broken)
+fn adapter_argv(act: u64, msg: u64) -> u64 {
+    let cmd: u64 = pl(ld(ac(act), AC_ADCMD))
+    let q: u64 = (&adargs[0 as usize]) as u64
+    var at: u64 = 0
+    var o: u64 = 0
+    var argc: u64 = 0
+    var w: [u8; 64] = [0 as u8; 64]
+    let wp: u64 = (&w[0 as usize]) as u64
+    while ld8(cmd, at) != 0 && argc < 9 {
+        at = actwire.word_copy(cmd, at, wp, 64)
+        let n: u64 = actwire.slen(wp)
+        if n > 0 {
+            var src: u64 = wp
+            var val: [u8; 200] = [0 as u8; 200]
+            var skip: bool = false
+            if n > 2 && ld8(wp, 0) == 123 && ld8(wp, n - 1) == 125 {
+                // {name}: the argument's value, one argv entry
+                st8(wp, n - 1, 0)
+                if actwire.kv_find(msg, wp + 1, (&val[0 as usize]) as u64, 200) {
+                    src = (&val[0 as usize]) as u64
+                } else {
+                    skip = true // an optional argument that was not given
+                }
+            }
+            let l: u64 = actwire.slen(src)
+            if !skip && o + l + 1 < 512 {
+                adptr[argc as usize] = q + o
+                var i: u64 = 0
+                while i < l {
+                    st8(q, o + i, ld8(src, i))
+                    i = i + 1
+                }
+                st8(q, o + l, 0)
+                o = o + l + 1
+                argc = argc + 1
+            }
+        }
+    }
+    adptr[argc as usize] = 0
+    return argc
+}
+
+// Runs the adapter of `act`; the reply is left in the output buffer.
+fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
+    let kind: u64 = ld(ac(act), AC_ADKIND)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_ad: [u8; 9] = "adapter=\0"
+    if kind == AD_DBUS || kind == AD_UI || kind == AD_KEYS {
+        // declared honestly, not faked: OrientOS has no D-Bus, no
+        // accessibility bridge and no key injection for foreign programs
+        // yet (docs/ACTION-BUS.md 7)
+        var e: [u8; 24] = "err adapter_unsupported\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e[0 as usize]) as u64)
+        actwire.ob_ch(32)
+        actwire.ob_str(adapter_name(kind))
+        actwire.ob_ch(10)
+        return false
+    }
+    var argc: u64 = 0
+    if kind == AD_CLI {
+        argc = adapter_argv(act, msg)
+        if argc == 0 {
+            var e2: [u8; 20] = "err adapter_broken\n\0"
+            actwire.ob_reset()
+            actwire.ob_str((&e2[0 as usize]) as u64)
+            return false
+        }
+    }
+    if dry {
+        var s_d: [u8; 16] = "ok\ndry=1\nwould=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_d[0 as usize]) as u64)
+        if kind == AD_CLI {
+            var i: u64 = 0
+            while i < argc {
+                if i > 0 {
+                    actwire.ob_ch(32)
+                }
+                actwire.ob_str(adptr[i as usize])
+                i = i + 1
+            }
+        } else {
+            actwire.ob_str(pl(ld(ac(act), AC_ADCMD)))
+        }
+        actwire.ob_ch(10)
+        actwire.ob_str((&s_ad[0 as usize]) as u64)
+        actwire.ob_str(adapter_name(kind))
+        actwire.ob_ch(10)
+        return true
+    }
+    c_adapt = c_adapt + 1
+    var outp: [u8; 26] = "/tmp/orientbus.adapter.out"
+    var op: [u8; 27] = [0 as u8; 27]
+    copyn((&op[0 as usize]) as u64, (&outp[0 as usize]) as u64, 26, 27)
+    // O_WRONLY|O_CREAT|O_TRUNC, mode 0666 -- the child writes it after
+    // dropping to another uid; the descriptor is already open
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&op[0 as usize]) as u64, 1 | 64 | 512, 438)
+    if ulib.bad(fd) {
+        var e3: [u8; 25] = "err adapter_unavailable\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e3[0 as usize]) as u64)
+        return false
+    }
+    let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if child == 0 {
+        adapter_child(act, msg, fd, uid)
+    }
+    io.close(fd)
+    if ulib.bad(child) {
+        var e4: [u8; 20] = "err adapter_failed\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e4[0 as usize]) as u64)
+        return false
+    }
+    // wait at most 5 s; a hanging program is killed, the broker stays
+    var status: [u64; 1] = [0 as u64; 1]
+    let t0: u64 = actwire.ticks()
+    var done: bool = false
+    var killed: bool = false
+    while !done {
+        let r: u64 = ulib.sys4(61, child, (&status[0 as usize]) as u64, 1, 0)
+        if r == child {
+            done = true
+        } else if actwire.ticks() - t0 > 500 {
+            ulib.sys(62, child, 9, 0)
+            ulib.sys4(61, child, (&status[0 as usize]) as u64, 0, 0)
+            done = true
+            killed = true
+        } else {
+            ulib.sleep_ms(10)
+        }
+    }
+    let code: u64 = (status[0 as usize] >> 8) & 255
+    // the output: k=v lines pass through, anything else becomes out=
+    let rfd: u64 = io.open((&op[0 as usize]) as u64, 0)
+    var n: u64 = 0
+    let ob: u64 = (&adout[0 as usize]) as u64
+    if !ulib.bad(rfd) {
+        n = io.read(rfd, ob, 2000)
+        io.close(rfd)
+        if ulib.bad(n) {
+            n = 0
+        }
+    }
+    st8(ob, n, 0)
+    actwire.ob_reset()
+    if killed || code != 0 {
+        var e5: [u8; 25] = "err adapter_failed exit=\0"
+        actwire.ob_str((&e5[0 as usize]) as u64)
+        if killed {
+            var s_to: [u8; 8] = "timeout\0"
+            actwire.ob_str((&s_to[0 as usize]) as u64)
+        } else {
+            actwire.ob_num(code)
+        }
+        actwire.ob_ch(10)
+    } else {
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+    }
+    var s_out: [u8; 5] = "out=\0"
+    var at: u64 = 0
+    var lines: u64 = 0
+    while ld8(ob, at) != 0 && lines < 16 {
+        let le: u64 = actwire.line_end(ob, at)
+        if le > at {
+            var has_eq: bool = false
+            var j: u64 = at
+            while j < le && !has_eq {
+                let c: u64 = ld8(ob, j)
+                if c == 61 {
+                    has_eq = true
+                } else if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 46) {
+                    j = le
+                }
+                j = j + 1
+            }
+            if !has_eq || ld8(ob, at) == 64 {
+                actwire.ob_str((&s_out[0 as usize]) as u64)
+            }
+            actwire.ob_n(ob + at, le - at)
+            actwire.ob_ch(10)
+            lines = lines + 1
+        }
+        at = le
+        if ld8(ob, at) == 10 {
+            at = at + 1
+        }
+    }
+    actwire.ob_str((&s_ad[0 as usize]) as u64)
+    actwire.ob_str(adapter_name(kind))
+    actwire.ob_ch(10)
+    return !killed && code == 0
+}
+
 fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     undo: bool) {
     var name: [u8; 40] = [0 as u8; 40]
@@ -1495,12 +1937,8 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     actwire.word_copy(msg, nx, np, 40)
     var client: [u8; 24] = [0 as u8; 24]
     let cp: u64 = (&client[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
     var k_dry: [u8; 5] = "@dry\0"
-    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
-        || ld8(cp, 0) == 0 {
-        copyz(cp, (&s_user[0 as usize]) as u64, 24)
-    }
+    copyz(cp, (&g_client[0 as usize]) as u64, 24)
     var dv: [u8; 8] = [0 as u8; 8]
     let dvp: u64 = (&dv[0 as usize]) as u64
     let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, dvp, 8)
@@ -1534,9 +1972,20 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
         return
     }
-    var d: u64 = decide(cp, act, dry)
+    g_rlevel = ld(ac(act), AC_LEVEL)
+    if (ld(ac(act), AC_FLAGS) & FL_KEYED) != 0 {
+        // AB-005: the key decides -- name, level, and whether the value
+        // fits the schema. From here on `np` is `<app>.<key>`.
+        if !keyed_check(msg, act, np, wp) {
+            reply_err(pid, id, wp, 0)
+            audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+            return
+        }
+    }
+    let rlvl: u64 = g_rlevel
+    var d: u64 = decide_named(cp, np, rlvl, dry)
     // what the decision would be without the dry run (dry runs report it)
-    let real: u64 = decide(cp, act, false)
+    let real: u64 = decide_named(cp, np, rlvl, false)
     if d == D_ASK && confirmed {
         d = D_ALLOW
     }
@@ -1573,6 +2022,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         st(tp, TK_LEN, len)
         st(tp, TK_PID, pid)
         st(tp, TK_UID, uid)
+        copyz(tp + TK_CLIENT, cp, 24)
         copyn(tkmem(t), msg, len, TOK_BYTES)
         tok_next = tok_next + 1
         var s_c: [u8; 9] = "confirm \0"
@@ -1584,7 +2034,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         actwire.ob_ch(32)
         actwire.ob_str(np)
         actwire.ob_str((&s_lv[0 as usize]) as u64)
-        actwire.ob_str(level_name(ld(ac(act), AC_LEVEL)))
+        actwire.ob_str(level_name(rlvl))
         actwire.ob_str((&s_ds[0 as usize]) as u64)
         actwire.ob_str(pl(ld(ac(act), AC_DESC)))
         actwire.ob_ch(10)
@@ -1614,7 +2064,8 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     if dry {
         c_dry = c_dry + 1
     }
-    if dry && (ld(ac(act), AC_FLAGS) & FL_DRY) == 0 {
+    if dry && (ld(ac(act), AC_FLAGS) & FL_DRY) == 0
+        && ld(ac(act), AC_ADKIND) == AD_NONE {
         // the provider cannot simulate: the broker answers with what
         // WOULD happen, and nothing is sent anywhere
         var s_hd: [u8; 16] = "ok\ndry=1\nwould=\0"
@@ -1626,7 +2077,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         actwire.ob_str((&s_dc[0 as usize]) as u64)
         actwire.ob_str(decision_name(real))
         actwire.ob_str((&s_lv[0 as usize]) as u64)
-        actwire.ob_str(level_name(ld(ac(act), AC_LEVEL)))
+        actwire.ob_str(level_name(rlvl))
         actwire.ob_ch(10)
         reply_ob(pid, id)
         audit_lazy = true
@@ -1635,7 +2086,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         return
     }
     // WRITE-AHEAD: a change is logged before it is made, or not made
-    if !dry && ld(ac(act), AC_LEVEL) != L_READ {
+    if !dry && rlvl != L_READ {
         if !audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
             (&r_fwd[0 as usize]) as u64, false) {
             var e4: [u8; 18] = "audit_unavailable\0"
@@ -1652,6 +2103,36 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
     }
     if confirmed {
         fl = fl | PF_CONF
+    }
+    // AB-008: a wrapped program has no provider -- the adapter runs here
+    if ld(ac(act), AC_ADKIND) != AD_NONE {
+        if !app_running(app) {
+            var e6: [u8; 16] = "app_not_running\0"
+            reply_err(pid, id, (&e6[0 as usize]) as u64, ap(app) + AP_NAME)
+            audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+                (&r_err[0 as usize]) as u64, dry)
+            return
+        }
+        let aok: bool = run_adapter(act, msg, dry, uid)
+        reply_ob(pid, id)
+        if aok && !dry && !undo {
+            // the manifest's inverse, without arguments (a wrapped program
+            // cannot hand any back): pause <-> play and the like
+            var noargs: [u8; 1] = "\0"
+            push_undo(cp, act, (&noargs[0 as usize]) as u64)
+        }
+        if !dry && rlvl == L_READ {
+            audit_lazy = true
+        }
+        if aok {
+            audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+                (&r_ok[0 as usize]) as u64, dry)
+        } else {
+            audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+                (&r_err[0 as usize]) as u64, dry)
+        }
+        st(ac(act), AC_CALLS, ld(ac(act), AC_CALLS) + 1)
+        return
     }
     // stash the real decision for the dry-run reply
     if !forward(app, act, msg, pid, uid, id, cp, fl) {
@@ -1729,7 +2210,17 @@ fn on_reply(s: u64) {
         return
     }
     if bound == 0 {
-        // only the owner of a.<app> received the nonce: bind it
+        // only the owner of a.<app> received the nonce: bind it -- if
+        // the kernel says it comes from that app or from the system
+        if !provider_ok(app, from) {
+            c_badprov = c_badprov + 1
+            var w2: [u8; 48] = "orientbus: provider with a foreign origin, pid \0"
+            lb_start((&w2[0 as usize]) as u64)
+            lb_num(from)
+            lb_say()
+            st(p, PE_USED, 0)
+            return
+        }
         st(ap(app), AP_PID, from)
     }
     let flags: u64 = ld(p, PE_FLAGS)
@@ -1856,15 +2347,92 @@ fn on_event(s: u64) {
 // ================================================== the other verbs
 
 fn is_user(msg: u64, uid: u64) -> bool {
-    var cl: [u8; 24] = [0 as u8; 24]
-    let cp: u64 = (&cl[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
-    if actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24) {
-        if ld8(cp, 0) != 0 && !actwire.str_eq(cp, (&s_user[0 as usize]) as u64) {
-            return false
-        }
+    if !actwire.str_eq((&g_client[0 as usize]) as u64,
+        (&s_user[0 as usize]) as u64) {
+        return false
     }
     return uid == 0
+}
+
+// AB-003: the client of this request. `g_attested` = the kernel named it.
+fn resolve_client(msg: u64, pid: u64) {
+    let gc: u64 = (&g_client[0 as usize]) as u64
+    let go: u64 = (&g_origin[0 as usize]) as u64
+    var claim: [u8; 24] = [0 as u8; 24]
+    let clp: u64 = (&claim[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    let claimed: bool = actwire.kv_find(msg, (&k_client[0 as usize]) as u64,
+        clp, 24) && ld8(clp, 0) != 0
+    let n: u64 = actwire.origin_of(pid, go)
+    if n == actwire.NONE {
+        // the sender is gone: never "user"
+        var s_gone: [u8; 5] = "gone\0"
+        copyz(gc, (&s_gone[0 as usize]) as u64, 24)
+        g_attested = true
+        return
+    }
+    if n > 0 {
+        copyz(gc, go, 24)
+        g_attested = true
+        if claimed && !actwire.str_eq(clp, go) {
+            c_claims = c_claims + 1
+        }
+        return
+    }
+    g_attested = false
+    if claimed {
+        copyz(gc, clp, 24)
+    } else {
+        copyz(gc, (&s_user[0 as usize]) as u64, 24)
+    }
+}
+
+// whoami: what the broker sees -- for a client that wants to know, and
+// for the test that shows the kernel, not the caller, decides
+fn do_whoami(pid: u64, id: u64) {
+    var s_ok: [u8; 11] = "ok\nclient=\0"
+    var s_or: [u8; 9] = "\norigin=\0"
+    var s_at: [u8; 11] = "\nattested=\0"
+    var s_y: [u8; 4] = "yes\0"
+    var s_n: [u8; 3] = "no\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&g_client[0 as usize]) as u64)
+    actwire.ob_str((&s_or[0 as usize]) as u64)
+    if ld8((&g_origin[0 as usize]) as u64, 0) == 0 {
+        actwire.ob_ch(45)
+    } else {
+        actwire.ob_str((&g_origin[0 as usize]) as u64)
+    }
+    actwire.ob_str((&s_at[0 as usize]) as u64)
+    if g_attested {
+        actwire.ob_str((&s_y[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_n[0 as usize]) as u64)
+    }
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
+// AB-003: may process `pid` be the provider of `app`? The kernel already
+// refuses `a.<app>` to a process with another app's label; this is the
+// second lock on the same door, and the one that also holds if a
+// provider was registered before this kernel rule existed.
+fn provider_ok(app: u64, pid: u64) -> bool {
+    var o: [u8; 32] = [0 as u8; 32]
+    let op: u64 = (&o[0 as usize]) as u64
+    let n: u64 = actwire.origin_of(pid, op)
+    if n == actwire.NONE {
+        return false
+    }
+    if n == 0 {
+        return true
+    }
+    var s_app: [u8; 5] = "app:\0"
+    if !actwire.starts(op, (&s_app[0 as usize]) as u64) {
+        return false
+    }
+    return actwire.str_eq(op + 4, ap(app) + AP_NAME)
 }
 
 // confirm <no|last> / reject <no|last>
@@ -1920,7 +2488,10 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
             (&r_rej[0 as usize]) as u64, false)
         return
     }
-    // the ORIGINAL request, confirmed; the answer goes to the confirmer
+    // the ORIGINAL request, confirmed; the answer goes to the confirmer.
+    // It runs as the client that ASKED, not as the user who said yes --
+    // otherwise its undo entry and its log line would name the wrong one.
+    copyz((&g_client[0 as usize]) as u64, tk(t) + TK_CLIENT, 24)
     do_call(m, pid, ld(tk(t), TK_UID), id, true, false)
 }
 
@@ -1928,11 +2499,7 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
 fn do_undo(msg: u64, pid: u64, uid: u64, id: u64) {
     var cl: [u8; 24] = [0 as u8; 24]
     let cp: u64 = (&cl[0 as usize]) as u64
-    var k_client: [u8; 8] = "@client\0"
-    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
-        || ld8(cp, 0) == 0 {
-        copyz(cp, (&s_user[0 as usize]) as u64, 24)
-    }
+    copyz(cp, (&g_client[0 as usize]) as u64, 24)
     var best: u64 = actwire.NONE
     var seq: u64 = 0
     var i: u64 = 0
@@ -2055,6 +2622,14 @@ fn do_stat(pid: u64, id: u64) {
     stat_line((&k14[0 as usize]) as u64, c_logfail)
     var k15: [u8; 14] = "lazy_entries=\0"
     stat_line((&k15[0 as usize]) as u64, c_lazy)
+    var k16: [u8; 16] = "claims_ignored=\0"
+    stat_line((&k16[0 as usize]) as u64, c_claims)
+    var k17: [u8; 19] = "foreign_providers=\0"
+    stat_line((&k17[0 as usize]) as u64, c_badprov)
+    var k18: [u8; 14] = "adapter_runs=\0"
+    stat_line((&k18[0 as usize]) as u64, c_adapt)
+    var k19: [u8; 13] = "schema_keys=\0"
+    stat_line((&k19[0 as usize]) as u64, setschema.count())
     reply_ob(pid, id)
 }
 
@@ -2098,6 +2673,7 @@ fn on_request(s: u64) {
         reply_err(pid, id, (&e[0 as usize]) as u64, 0)
         return
     }
+    resolve_client(msg, pid)
     var v: [u8; 16] = [0 as u8; 16]
     let vp: u64 = (&v[0 as usize]) as u64
     let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
@@ -2111,6 +2687,7 @@ fn on_request(s: u64) {
     var k_stat: [u8; 5] = "stat\0"
     var k_hello: [u8; 6] = "hello\0"
     var k_stop: [u8; 5] = "stop\0"
+    var k_who: [u8; 7] = "whoami\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -2150,6 +2727,8 @@ fn on_request(s: u64) {
         do_stat(pid, id)
     } else if actwire.str_eq(vp, (&k_hello[0 as usize]) as u64) {
         do_hello(msg)
+    } else if actwire.str_eq(vp, (&k_who[0 as usize]) as u64) {
+        do_whoami(pid, id)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)
@@ -2200,6 +2779,8 @@ fn serve(limit: u64) -> u64 {
     }
     svc_evt = actwire.bus_reg((&n_evt[0 as usize]) as u64, actwire.A_ANY)
     policy_load()
+    var p_schema: [u8; 21] = "/etc/settings.schema\0"
+    have_schema = setschema.load((&p_schema[0 as usize]) as u64) != setschema.NONE
     var d_apps: [u8; 7] = "/apps/\0"
     var sf_prog: [u8; 6] = ".prog\0"
     var in_prog: [u8; 9] = "/ACTIONS\0"
@@ -2207,6 +2788,10 @@ fn serve(limit: u64) -> u64 {
     var sf_act: [u8; 9] = ".actions\0"
     var in_none: [u8; 1] = "\0"
     scan((&d_apps[0 as usize]) as u64, (&sf_prog[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    // the image's and opk's bundles are .osp (kernel/user/opk.fi)
+    var sf_osp: [u8; 5] = ".osp\0"
+    scan((&d_apps[0 as usize]) as u64, (&sf_osp[0 as usize]) as u64,
         (&in_prog[0 as usize]) as u64, 0)
     scan((&d_etc[0 as usize]) as u64, (&sf_act[0 as usize]) as u64,
         (&in_none[0 as usize]) as u64, 1)
@@ -2229,6 +2814,7 @@ fn serve(limit: u64) -> u64 {
     while running && (limit == 0 || actwire.ticks() - t0 < limit) {
         let n: u64 = actwire.bus_recv(fp, mp)
         if !ulib.bad(n) && n > 0 {
+            idle_since = 0
             let s: u64 = actwire.asm_feed(fp, mp)
             if s != actwire.NONE {
                 let k: u64 = actwire.asm_kind(s)
@@ -2246,7 +2832,19 @@ fn serve(limit: u64) -> u64 {
             if lazy_t != 0 && actwire.ticks() - lazy_t > 50 {
                 flush_lazy()
             }
-            actwire.yield_now()
+            // AB-016: the kernel bus cannot block yet (S-003). Busy for
+            // 0.2 s after the last message -- a burst of calls stays at
+            // microseconds -- then one tick of sleep per round, so an
+            // idle broker in the image costs next to nothing.
+            let now: u64 = actwire.ticks()
+            if idle_since == 0 {
+                idle_since = now
+            }
+            if now - idle_since > 20 {
+                ulib.sleep_ms(10)
+            } else {
+                actwire.yield_now()
+            }
         }
     }
     flush_lazy()
