@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/actcli.fi -- THE ACTION BUS FOR PROGRAMS WITH A WINDOW.
+//
+// `/bin/act` is the client for a shell, a script and Jarvis. A program
+// with a window -- the settings window first (AB-005b, AB-006) -- needs
+// the same door without starting a process per call and without waiting
+// fifteen seconds when the broker is not there. This module is that:
+// the same frames (actwire), the same reply box `r.<pid>`, a short wait,
+// and the reply kept here for the caller to read.
+//
+//   actcli.open()                      once; false = no broker
+//   actcli.req(verb_line)              start a request (actwire's buffer)
+//   actcli.arg(key, value)             add `key=value`
+//   actcli.send(ticks) -> R_*          send and wait at most `ticks`
+//   actcli.reply()                     the reply text (zero-terminated)
+//   actcli.field(name, out, max)       the value of `name=` in the reply
+//   actcli.line(k, out, max)           reply line k (0 = ok/err/confirm)
+//
+// There is no second path: every call goes through orient-bus and its
+// rights, confirmation and audit, exactly like `act call`. A window that
+// asks for a critical setting is parked like everybody else and gets a
+// number it can confirm -- as the person at the device, who is the user
+// (AB-003: an unlabelled program of the session's uid).
+
+profile kernel
+
+import ulib
+import actwire
+
+export {
+    open, is_open, req, arg, send, reply, reply_len, field, line,
+    R_OK, R_ERR, R_CONFIRM, R_NOBUS,
+}
+
+const R_OK: u64 = 0
+const R_ERR: u64 = 1
+const R_CONFIRM: u64 = 2
+const R_NOBUS: u64 = 3
+
+static mut svc: u64 = 0xFFFFFFFF
+static mut opened: bool = false
+static mut rep: [u8; 8192] = [0 as u8; 8192]
+static mut rlen: u64 = 0
+
+fn is_open() -> bool {
+    return opened
+}
+
+fn open() -> bool {
+    if opened {
+        return true
+    }
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        return false
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    svc = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    if ulib.bad(svc) {
+        return false
+    }
+    opened = true
+    return true
+}
+
+// "call settings.get" / "rights" / "confirm 3" -- the first line
+fn req(verb_line: u64) {
+    actwire.ob_reset()
+    actwire.ob_line(verb_line)
+}
+
+// one argument; a value with a newline would be a second line and is cut
+fn arg(key: u64, value: u64) {
+    actwire.ob_str(key)
+    actwire.ob_ch(61)
+    var i: u64 = 0
+    while actwire.ld8(value, i) != 0 && actwire.ld8(value, i) != 10 {
+        actwire.ob_ch(actwire.ld8(value, i))
+        i = i + 1
+    }
+    actwire.ob_ch(10)
+}
+
+fn send(ticks: u64) -> u64 {
+    let rp: u64 = (&rep[0 as usize]) as u64
+    rlen = 0
+    actwire.st8(rp, 0, 0)
+    if !opened && !open() {
+        return R_NOBUS
+    }
+    let id: u64 = actwire.rnd() & 0xFFFFFFFF
+    if ulib.bad(actwire.send_msg(svc, actwire.K_REQ, id, actwire.ob_ptr(),
+        actwire.ob_len())) {
+        // the broker may have been restarted: look it up once more
+        var n_bus: [u8; 11] = "orient.bus\0"
+        svc = actwire.bus_find((&n_bus[0 as usize]) as u64)
+        if ulib.bad(svc) || ulib.bad(actwire.send_msg(svc, actwire.K_REQ, id,
+            actwire.ob_ptr(), actwire.ob_len())) {
+            return R_NOBUS
+        }
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t0: u64 = actwire.ticks()
+    var done: bool = false
+    while !done && actwire.ticks() - t0 < ticks {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            if actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+                && actwire.ld32(fp, 4) == id {
+                if (actwire.ld8(fp, 2) & 1) != 0 {
+                    rlen = 0
+                }
+                let k: u64 = actwire.ld8(fp, 3)
+                var i: u64 = 0
+                while i < k && rlen < 8191 {
+                    actwire.st8(rp, rlen, actwire.ld8(fp, 8 + i))
+                    rlen = rlen + 1
+                    i = i + 1
+                }
+                if (actwire.ld8(fp, 2) & 2) != 0 {
+                    done = true
+                }
+            }
+        } else {
+            actwire.yield_now()
+        }
+    }
+    actwire.st8(rp, rlen, 0)
+    if !done {
+        return R_NOBUS
+    }
+    if actwire.ld8(rp, 0) == 111 && actwire.ld8(rp, 1) == 107 {
+        return R_OK
+    }
+    if actwire.ld8(rp, 0) == 99 && actwire.ld8(rp, 1) == 111 {
+        return R_CONFIRM
+    }
+    return R_ERR
+}
+
+fn reply() -> u64 {
+    return (&rep[0 as usize]) as u64
+}
+
+fn reply_len() -> u64 {
+    return rlen
+}
+
+// The value of `name=` at the start of a reply line.
+fn field(name: u64, out: u64, max: u64) -> bool {
+    let rp: u64 = (&rep[0 as usize]) as u64
+    let nl: u64 = actwire.slen(name)
+    actwire.st8(out, 0, 0)
+    var at: u64 = 0
+    while actwire.ld8(rp, at) != 0 {
+        let e: u64 = actwire.line_end(rp, at)
+        var hit: bool = e - at > nl && actwire.ld8(rp, at + nl) == 61
+        var k: u64 = 0
+        while hit && k < nl {
+            if actwire.ld8(rp, at + k) != actwire.ld8(name, k) {
+                hit = false
+            }
+            k = k + 1
+        }
+        if hit {
+            var j: u64 = at + nl + 1
+            var o: u64 = 0
+            while j < e && o + 1 < max {
+                actwire.st8(out, o, actwire.ld8(rp, j))
+                o = o + 1
+                j = j + 1
+            }
+            actwire.st8(out, o, 0)
+            return true
+        }
+        at = e
+        if actwire.ld8(rp, at) == 10 {
+            at = at + 1
+        }
+    }
+    return false
+}
+
+// Reply line number k (0 is the status line) into out.
+fn line(k: u64, out: u64, max: u64) -> bool {
+    let rp: u64 = (&rep[0 as usize]) as u64
+    actwire.st8(out, 0, 0)
+    var at: u64 = 0
+    var n: u64 = 0
+    while actwire.ld8(rp, at) != 0 {
+        let e: u64 = actwire.line_end(rp, at)
+        if n == k {
+            var j: u64 = at
+            var o: u64 = 0
+            while j < e && o + 1 < max {
+                actwire.st8(out, o, actwire.ld8(rp, j))
+                o = o + 1
+                j = j + 1
+            }
+            actwire.st8(out, o, 0)
+            return true
+        }
+        n = n + 1
+        at = e
+        if actwire.ld8(rp, at) == 10 {
+            at = at + 1
+        }
+    }
+    return false
+}

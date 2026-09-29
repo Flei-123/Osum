@@ -79,6 +79,9 @@ import fuib
 import pw
 import nv
 import template
+// ROUND ACTION-BUS-3: the pages "System" and "App rights" and the lock
+// time talk to orient-bus (AB-005b, AB-006)
+import actcli
 
 export { u_start }
 
@@ -263,7 +266,13 @@ const R_SYNC: u64 = 9
 // uebereinander). Seit Runde KONTO sagt `merke` es wenigstens
 // ("settings: elementtafel voll"); hier bleiben 29 Plaetze frei.
 const R_BRUECKE: u64 = 10
-const R_ANZ: u64 = 11
+// ROUND ACTION-BUS-3: TWO MORE PAGES, AT THE END for the reason the four
+// constants above give -- every other page keeps its number.
+//   11 System      every setting of the schema, through the action bus
+//   12 App rights  what may which app (AB-006)
+const R_SYSTEM: u64 = 11
+const R_RECHTE: u64 = 12
+const R_ANZ: u64 = 13
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -285,8 +294,10 @@ static mut w: u64 = 0
 // RUNDE PRAESENZ nimmt 192, weil jetzt BEIDE Seiten drin sind und die
 // Praesenzleiste noch dazukommt. Der Abstand zur Grenze wird gemessen
 // (`settings: elemente n=... max=...`), nicht geschaetzt.
-static mut ids: [u64; 192] = [0 as u64; 192]
-static mut rtr: [u64; 192] = [0 as u64; 192] // zu welchem Reiter gehoert es
+// ROUND ACTION-BUS-3: 224. The two new pages bring sixteen widgets and
+// the table held 179 of 192.
+static mut ids: [u64; 224] = [0 as u64; 224]
+static mut rtr: [u64; 224] = [0 as u64; 224] // zu welchem Reiter gehoert es
 static mut nid: u64 = 0
 static mut reiter: u64 = 0
 
@@ -370,13 +381,18 @@ static mut b_nconn: [u8; 1536] = [0 as u8; 1536] // aktive Verbindungen
 //   "192.168.100.100:65535" 161 Punkte -> 162 reichen
 //   ein Programmname (23)   176 Punkte -> die Namensspalte ist 146,
 //                           laengere Namen kuerzt die Tafel selbst ab
-static mut c_nprog: [u8; 13] = "146\t94\t94\t94\0"
+// ROUND ACTION-BUS-3: COLUMN WIDTHS ARE u64, NOT TEXT. `wlib.table` reads
+// its fourth argument as an array of u64 (wlib.column_wide); these two
+// were strings, so every column was eight ASCII digits read as a number
+// -- the first paint of a filled table overflowed (found with the two new
+// tables, which crashed the window the same way). Filled in `widths_init`.
+static mut c_nprog: [u64; 4] = [0 as u64; 4]
 // Die Verbindungstafel hat VIER Spalten und nicht fuenf: fuer Art,
 // beide Enden UND Programm UND Verbrauch reichen 428 Punkte nicht, ohne
 // dass die Adressen abgeschnitten werden. Der Verbrauch je Verbindung
 // steht in `/bin/netstat -p`; was diese Seite beantwortet, ist "wer
 // redet gerade mit wem".
-static mut c_nconn: [u8; 14] = "34\t162\t162\t70\0"
+static mut c_nconn: [u64; 4] = [0 as u64; 4]
 
 // DIE ABTASTUNG DES DURCHSATZES.
 //
@@ -905,6 +921,7 @@ static mut sl_blur: u64 = 0
 // OHNE BEIDES AENDERT SICH KEIN OKTETT gegenueber vorher -- das ist die
 // Bedingung dafuer, dass kein bestehender Testlaeufer davon etwas merkt.
 static mut s_dbg: u64 = 0
+static mut start_page: u64 = 0
 
 // Die drei Ausgaenge dieses Programms, an EINER Stelle geschaltet.
 // `sayn` und `nl` stehen hier, damit kein Aufrufer `ulib.` direkt
@@ -924,8 +941,18 @@ fn dbg_setup(args: u64) {
     let argc: u64 = ulib.arg_count(args)
     var ai: u64 = 1
     while ai < argc {
-        if ulib.streq(ulib.arg_at(args, ai), (&a_dbg[0 as usize]) as u64) {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&a_dbg[0 as usize]) as u64) {
             s_dbg = 1
+        }
+        // ROUND ACTION-BUS-3: `settings page=12` opens on that page --
+        // what a notification "an app wants a right" links to
+        if rb(a, 0) == 112 && rb(a, 1) == 97 && rb(a, 2) == 103
+            && rb(a, 3) == 101 && rb(a, 4) == 61 {
+            let pg: u64 = ulib.to_num(a + 5)
+            if pg < R_ANZ {
+                start_page = pg
+            }
         }
         ai = ai + 1
     }
@@ -1317,7 +1344,7 @@ fn tb_say() {
 }
 
 fn merke(i: u64, r: u64) -> u64 {
-    if nid < 192 {
+    if nid < 224 {
         ids[(nid) as usize] = i
         rtr[(nid) as usize] = r
         nid = nid + 1
@@ -4123,6 +4150,22 @@ fn konto_kennung(k: u64, aus: u64, max: u64) -> bool {
     return false
 }
 
+// ROUND ACTION-BUS-3: the two bus pages read the broker when shown
+fn bus_page(r: u64) {
+    if r == R_SYSTEM {
+        sys_load()
+        wlib.set_text(sy_tab, (&b_sys[0 as usize]) as u64)
+        wlib.set_text(sy_stat, (&l_systat[0 as usize]) as u64)
+    }
+    if r == R_RECHTE {
+        rights_load()
+        wlib.set_text(ri_tab, (&b_rules[0 as usize]) as u64)
+        wlib.set_text(ri_ctab, (&b_cls[0 as usize]) as u64)
+        wlib.set_text(ri_notew, (&l_rinote[0 as usize]) as u64)
+        wlib.set_text(ri_stat, (&l_ristat[0 as usize]) as u64)
+    }
+}
+
 fn zeige_reiter(r: u64) {
     var k: u64 = 0
     while k < nid {
@@ -4144,6 +4187,41 @@ fn zeige_reiter(r: u64) {
     reiter = r
     wlib.new_set()
     rects_alle()
+    bus_rects()
+}
+
+// ROUND ACTION-BUS-3: the controls of the two bus pages under names that
+// do not move when a widget is added elsewhere (tools/actionbus/gui.sh
+// clicks them)
+fn bus_rects() {
+    if reiter == R_SYSTEM {
+        var n1: [u8; 5] = "stab\0"
+        var n2: [u8; 5] = "sent\0"
+        var n3: [u8; 5] = "sset\0"
+        var n4: [u8; 6] = "sconf\0"
+        var n5: [u8; 6] = "sundo\0"
+        rect_say((&n1[0 as usize]) as u64, sy_tab)
+        rect_say((&n2[0 as usize]) as u64, sy_ent)
+        rect_say((&n3[0 as usize]) as u64, sy_bset)
+        rect_say((&n4[0 as usize]) as u64, sy_bconf)
+        rect_say((&n5[0 as usize]) as u64, sy_bundo)
+        var s_rh: [u8; 16] = "settings: rowh=\0"
+        let _p: u64 = ulib.put((&s_rh[0 as usize]) as u64, 15)
+        ulib.sayn(wlib.row_h_of(sy_tab))
+        ulib.nl()
+    }
+    if reiter == R_RECHTE {
+        var m1: [u8; 5] = "rtab\0"
+        var m2: [u8; 6] = "rctab\0"
+        var m3: [u8; 5] = "rrev\0"
+        var m4: [u8; 5] = "rjar\0"
+        var m5: [u8; 5] = "rblk\0"
+        rect_say((&m1[0 as usize]) as u64, ri_tab)
+        rect_say((&m2[0 as usize]) as u64, ri_ctab)
+        rect_say((&m3[0 as usize]) as u64, ri_brev)
+        rect_say((&m4[0 as usize]) as u64, ri_bjar)
+        rect_say((&m5[0 as usize]) as u64, ri_bblock)
+    }
 }
 
 // EVERY VISIBLE WIDGET REPORTS WHERE IT IS.
@@ -4198,7 +4276,53 @@ fn sperre_sekunden(stufe: u64) -> u64 {
     return 0
 }
 
+// ROUND ACTION-BUS-3 (AB-005b): THE LOCK TIME IS `lock.idle` ON THE BUS.
+// settingsd keeps it in /etc/sperre.conf (the schema's `store`), where
+// sperrwache reads it; this window reads and writes it through the bus,
+// like a script or Jarvis would, and the change is journalled and can be
+// undone. Only an image WITHOUT a broker (old test images) still reads
+// and writes the file itself -- and says so on the serial line.
+fn stufe_von_sek(sek: u64) -> u64 {
+    if sek >= 900 {
+        return 4
+    }
+    if sek >= 600 {
+        return 3
+    }
+    if sek >= 300 {
+        return 2
+    }
+    if sek >= 60 {
+        return 1
+    }
+    return 0
+}
+
 fn sperre_stufe() -> u64 {
+    var v_get: [u8; 18] = "call settings.get\0"
+    var k_key: [u8; 4] = "key\0"
+    var k_li: [u8; 10] = "lock.idle\0"
+    var k_val: [u8; 6] = "value\0"
+    var s_bus: [u8; 30] = "settings: lock via bus value=\0"
+    if actcli.open() {
+        actcli.req((&v_get[0 as usize]) as u64)
+        actcli.arg((&k_key[0 as usize]) as u64, (&k_li[0 as usize]) as u64)
+        if actcli.send(300) == actcli.R_OK {
+            var v: [u8; 24] = [0 as u8; 24]
+            if actcli.field((&k_val[0 as usize]) as u64, (&v[0 as usize]) as u64, 24) {
+                say((&s_bus[0 as usize]) as u64)
+                say((&v[0 as usize]) as u64)
+                nl()
+                return stufe_von_sek(ulib.to_num((&v[0 as usize]) as u64))
+            }
+        }
+    }
+    var s_file: [u8; 34] = "settings: lock via file (no bus)\n\0"
+    say((&s_file[0 as usize]) as u64)
+    return sperre_stufe_datei()
+}
+
+fn sperre_stufe_datei() -> u64 {
     var k: [u8; 10] = "leerlauf=\0"
     let fd: u64 = io.open((&sp_conf[0 as usize]) as u64, 0)
     if ulib.bad(fd) {
@@ -4232,6 +4356,30 @@ fn sperre_stufe() -> u64 {
 }
 
 fn lock_write(sek: u64) -> bool {
+    if actcli.open() {
+        var v_set: [u8; 18] = "call settings.set\0"
+        var k_key: [u8; 4] = "key\0"
+        var k_li: [u8; 10] = "lock.idle\0"
+        var k_val: [u8; 6] = "value\0"
+        var z: [u8; 24] = [0 as u8; 24]
+        let n: u64 = ulib.digits(sek, (&z[0 as usize]) as u64)
+        z[(n) as usize] = 0 as u8
+        actcli.req((&v_set[0 as usize]) as u64)
+        actcli.arg((&k_key[0 as usize]) as u64, (&k_li[0 as usize]) as u64)
+        actcli.arg((&k_val[0 as usize]) as u64, (&z[0 as usize]) as u64)
+        let rc: u64 = actcli.send(300)
+        var s1: [u8; 31] = "settings: lock set via bus rc=\0"
+        say((&s1[0 as usize]) as u64)
+        sayn(rc)
+        nl()
+        if rc != actcli.R_NOBUS {
+            return rc == actcli.R_OK
+        }
+    }
+    return lock_write_datei(sek)
+}
+
+fn lock_write_datei(sek: u64) -> bool {
     var kopf: [u8; 54] = "# /etc/sperre.conf -- von den Einstellungen\nleerlauf=\0"
     var nl2: [u8; 2] = "\n\0"
     var z: [u8; 24] = [0 as u8; 24]
@@ -4251,8 +4399,610 @@ fn lock_write(sek: u64) -> bool {
     return !ulib.bad(g) && g >= len
 }
 
+// ======================================= ROUND ACTION-BUS-3 (AB-005b/006)
+//
+// TWO PAGES THAT KNOW NOTHING THEMSELVES. Both are built from the action
+// bus and only from it (kernel/user/actcli.fi):
+//
+//   System      every setting of /etc/settings.schema, as settingsd
+//               reports it (settings.list per area): key, value, risk,
+//               text. "Set" is `settings.set` -- the broker checks type
+//               and range, decides by the key, and a critical setting
+//               (network, security, updates, privacy) comes back as a
+//               question with a number that this page asks the person
+//               in front of it, and only then answers `confirm <n>`.
+//               "Undo" is the bus undo of the user's last change.
+//   App rights  "what may which app": the broker's rules (`rights`) with
+//               their end, the dry-run-first clients, and per client how
+//               often it read, changed, was asked, was refused and
+//               dry-ran. Revoke = `revoke <n>`, block = `block <c> *`.
+//
+// Without a broker the pages say so and change nothing -- a settings
+// window that quietly wrote the files itself would be the second door
+// the bus exists to close.
+
+static mut k_sy_title: [u8; 19] = "settings.bus.title\0"
+static mut k_sy_note: [u8; 18] = "settings.bus.note\0"
+static mut k_sy_value: [u8; 19] = "settings.bus.value\0"
+static mut k_sy_set: [u8; 17] = "settings.bus.set\0"
+static mut k_sy_conf: [u8; 21] = "settings.bus.confirm\0"
+static mut k_sy_undo: [u8; 18] = "settings.bus.undo\0"
+static mut k_sy_head: [u8; 18] = "settings.bus.head\0"
+static mut k_sy_nobus: [u8; 19] = "settings.bus.nobus\0"
+static mut k_sy_ok: [u8; 16] = "settings.bus.ok\0"
+static mut k_sy_ask: [u8; 17] = "settings.bus.ask\0"
+static mut k_sy_err: [u8; 21] = "settings.bus.refused\0"
+static mut k_sy_pick: [u8; 18] = "settings.bus.pick\0"
+static mut k_sy_undone: [u8; 20] = "settings.bus.undone\0"
+static mut k_sy_harm: [u8; 22] = "settings.bus.harmless\0"
+static mut k_sy_crit: [u8; 22] = "settings.bus.critical\0"
+static mut k_ri_title: [u8; 22] = "settings.rights.title\0"
+static mut k_ri_note: [u8; 21] = "settings.rights.note\0"
+static mut k_ri_head: [u8; 21] = "settings.rights.head\0"
+static mut k_ri_act: [u8; 25] = "settings.rights.activity\0"
+static mut k_ri_chead: [u8; 22] = "settings.rights.chead\0"
+static mut k_ri_revoke: [u8; 23] = "settings.rights.revoke\0"
+static mut k_ri_block: [u8; 22] = "settings.rights.block\0"
+static mut k_ri_jarvis: [u8; 23] = "settings.rights.jarvis\0"
+static mut k_ri_perm: [u8; 26] = "settings.rights.permanent\0"
+static mut k_ri_sess: [u8; 24] = "settings.rights.session\0"
+static mut k_ri_left: [u8; 21] = "settings.rights.left\0"
+static mut k_ri_none: [u8; 21] = "settings.rights.none\0"
+static mut k_ri_dfirst: [u8; 25] = "settings.rights.dryfirst\0"
+static mut k_ri_done: [u8; 21] = "settings.rights.done\0"
+
+static mut b_sys: [u8; 4096] = [0 as u8; 4096]
+static mut c_sys: [u64; 4] = [0 as u64; 4]
+static mut sy_keys: [u8; 1024] = [0 as u8; 1024] // 32 rows x 32
+static mut sy_rows: u64 = 0
+static mut e_sval: [u8; 72] = [0 as u8; 72]
+static mut l_systat: [u8; 200] = [0 as u8; 200]
+static mut sy_pend: u64 = 0
+static mut b_rules: [u8; 2048] = [0 as u8; 2048]
+static mut c_rules: [u64; 6] = [0 as u64; 6]
+static mut ri_nums: [u64; 32] = [0 as u64; 32]
+static mut ri_rows: u64 = 0
+static mut b_cls: [u8; 2048] = [0 as u8; 2048]
+static mut c_cls: [u64; 6] = [0 as u64; 6]
+
+fn widths_init() {
+    c_nprog[0 as usize] = 146
+    c_nprog[1 as usize] = 94
+    c_nprog[2 as usize] = 94
+    c_nprog[3 as usize] = 94
+    c_nconn[0 as usize] = 34
+    c_nconn[1 as usize] = 162
+    c_nconn[2 as usize] = 162
+    c_nconn[3 as usize] = 70
+    c_sys[0 as usize] = 180
+    c_sys[1 as usize] = 90
+    c_sys[2 as usize] = 80
+    c_sys[3 as usize] = 370
+    c_rules[0 as usize] = 40
+    c_rules[1 as usize] = 60
+    c_rules[2 as usize] = 130
+    c_rules[3 as usize] = 230
+    c_rules[4 as usize] = 80
+    c_rules[5 as usize] = 180
+    c_cls[0 as usize] = 170
+    var k: u64 = 1
+    while k < 6 {
+        c_cls[k as usize] = 90
+        k = k + 1
+    }
+}
+static mut cl_names: [u8; 768] = [0 as u8; 768] // 32 x 24
+static mut cl_rows: u64 = 0
+static mut l_ristat: [u8; 200] = [0 as u8; 200]
+static mut l_rinote: [u8; 200] = [0 as u8; 200]
+
+// ids of the two pages (set where they are created)
+static mut sy_tab: u64 = 0
+static mut sy_ent: u64 = 0
+static mut sy_bset: u64 = 0
+static mut sy_bconf: u64 = 0
+static mut sy_bundo: u64 = 0
+static mut sy_stat: u64 = 0
+static mut ri_tab: u64 = 0
+static mut ri_ctab: u64 = 0
+static mut ri_brev: u64 = 0
+static mut ri_bblock: u64 = 0
+static mut ri_bjar: u64 = 0
+static mut ri_stat: u64 = 0
+static mut ri_notew: u64 = 0
+
+fn bx_put(buf: u64, at: u64, max: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while rb(p, i) != 0 && o + 1 < max {
+        __mmio_write8((buf + o) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((buf + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn bx_putn(buf: u64, at: u64, max: u64, p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while i < n && o + 1 < max {
+        __mmio_write8((buf + o) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((buf + o) as *mut u8, 0 as u8)
+    return o
+}
+
+fn bx_ch(buf: u64, at: u64, max: u64, c: u64) -> u64 {
+    if at + 1 >= max {
+        return at
+    }
+    __mmio_write8((buf + at) as *mut u8, c as u8)
+    __mmio_write8((buf + at + 1) as *mut u8, 0 as u8)
+    return at + 1
+}
+
+fn bx_num(buf: u64, at: u64, max: u64, v: u64) -> u64 {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    return bx_putn(buf, at, max, (&z[0 as usize]) as u64, n)
+}
+
+fn rb(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+// the status line of a page: a catalogue text and, if given, a detail
+fn stat_set(buf: u64, key: u64, detail: u64) {
+    var o: u64 = bx_put(buf, 0, 200, msg.get(key))
+    if detail != 0 {
+        o = bx_ch(buf, o, 200, 32)
+        o = bx_put(buf, o, 200, detail)
+    }
+}
+
+// ---------------------------------------------------------- System
+
+static mut sy_areas: [u8; 54] = "display sound lock locale net update security privacy\0"
+
+// one area of settings.list into the table; returns the new blob end
+fn sys_area(area: u64, at0: u64) -> u64 {
+    let bp: u64 = (&b_sys[0 as usize]) as u64
+    var at: u64 = at0
+    var v_list: [u8; 19] = "call settings.list\0"
+    var k_area: [u8; 5] = "area\0"
+    actcli.req((&v_list[0 as usize]) as u64)
+    actcli.arg((&k_area[0 as usize]) as u64, area)
+    if actcli.send(300) != actcli.R_OK {
+        return at
+    }
+    let rp: u64 = actcli.reply()
+    // the reply: ok, count=n, then per key three lines --
+    //   <key>=<value>   <key>.type=<type> <range> <risk>   <key>.text=<t>
+    var ln: [u8; 240] = [0 as u8; 240]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    var k: u64 = 2
+    while actcli.line(k, lp, 240) {
+        let kp: u64 = (&sy_keys[0 as usize]) as u64 + sy_rows * 32
+        // the key: up to '='
+        var e: u64 = 0
+        while rb(lp, e) != 0 && rb(lp, e) != 61 {
+            e = e + 1
+        }
+        if sy_rows < 32 {
+            let _kk: u64 = bx_putn(kp, 0, 32, lp, e)
+            at = bx_putn(bp, at, 4096, lp, e)
+            at = bx_ch(bp, at, 4096, 9)
+            if rb(lp, e) == 61 {
+                at = bx_put(bp, at, 4096, lp + e + 1)
+            }
+            at = bx_ch(bp, at, 4096, 9)
+            // the risk: last word of the .type line
+            var ty: [u8; 240] = [0 as u8; 240]
+            let tp: u64 = (&ty[0 as usize]) as u64
+            if actcli.line(k + 1, tp, 240) {
+                var s: u64 = 0
+                var j: u64 = 0
+                while rb(tp, j) != 0 {
+                    if rb(tp, j) == 32 {
+                        s = j + 1
+                    }
+                    j = j + 1
+                }
+                // shown in the user's language; the broker's word stays
+                // the key (unknown words pass through unchanged)
+                if rb(tp, s) == 99 {
+                    at = bx_put(bp, at, 4096,
+                        msg.get((&k_sy_crit[0 as usize]) as u64))
+                } else if rb(tp, s) == 104 {
+                    at = bx_put(bp, at, 4096,
+                        msg.get((&k_sy_harm[0 as usize]) as u64))
+                } else {
+                    at = bx_put(bp, at, 4096, tp + s)
+                }
+            }
+            at = bx_ch(bp, at, 4096, 9)
+            var tx: [u8; 240] = [0 as u8; 240]
+            let xp: u64 = (&tx[0 as usize]) as u64
+            if actcli.line(k + 2, xp, 240) {
+                var q: u64 = 0
+                while rb(xp, q) != 0 && rb(xp, q) != 61 {
+                    q = q + 1
+                }
+                if rb(xp, q) == 61 {
+                    at = bx_put(bp, at, 4096, xp + q + 1)
+                }
+            }
+            at = bx_ch(bp, at, 4096, 10)
+            sy_rows = sy_rows + 1
+        }
+        k = k + 3
+    }
+    return at
+}
+
+fn sys_load() {
+    let bp: u64 = (&b_sys[0 as usize]) as u64
+    var at: u64 = bx_put(bp, 0, 4096, msg.get((&k_sy_head[0 as usize]) as u64))
+    at = bx_ch(bp, at, 4096, 10)
+    sy_rows = 0
+    if !actcli.open() {
+        at = bx_put(bp, at, 4096, msg.get((&k_sy_nobus[0 as usize]) as u64))
+        at = bx_ch(bp, at, 4096, 10)
+    } else {
+        let ap: u64 = (&sy_areas[0 as usize]) as u64
+        var w0: u64 = 0
+        var i: u64 = 0
+        var wd: [u8; 24] = [0 as u8; 24]
+        let wp: u64 = (&wd[0 as usize]) as u64
+        while true {
+            let c: u64 = rb(ap, i)
+            if c == 32 || c == 0 {
+                let _w: u64 = bx_putn(wp, 0, 24, ap + w0, i - w0)
+                at = sys_area(wp, at)
+                w0 = i + 1
+            }
+            if c == 0 {
+                break
+            }
+            i = i + 1
+        }
+        if sy_rows == 0 {
+            at = bx_put(bp, at, 4096, msg.get((&k_sy_nobus[0 as usize]) as u64))
+            at = bx_ch(bp, at, 4096, 10)
+        }
+    }
+    var s1: [u8; 32] = "settings: bus page=system rows=\0"
+    say((&s1[0 as usize]) as u64)
+    sayn(sy_rows)
+    nl()
+}
+
+// the key of the selected row; false = nothing selected
+fn sys_key(out: u64) -> bool {
+    if sy_rows == 0 {
+        return false
+    }
+    // the header line is not a row: `value` counts the data rows
+    let r: u64 = wlib.value(sy_tab)
+    if r >= sy_rows {
+        return false
+    }
+    let _o: u64 = bx_put(out, 0, 32, (&sy_keys[0 as usize]) as u64 + r * 32)
+    return true
+}
+
+fn sys_answer(rc: u64, key: u64) {
+    let sp: u64 = (&l_systat[0 as usize]) as u64
+    var ln: [u8; 160] = [0 as u8; 160]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    let _l: bool = actcli.line(0, lp, 160)
+    if rc == actcli.R_OK {
+        stat_set(sp, (&k_sy_ok[0 as usize]) as u64, key)
+    } else if rc == actcli.R_CONFIRM {
+        // "confirm <no> <action>": the number is the second word
+        var j: u64 = 8
+        var no: u64 = 0
+        while rb(lp, j) >= 48 && rb(lp, j) <= 57 {
+            no = no * 10 + rb(lp, j) - 48
+            j = j + 1
+        }
+        sy_pend = no
+        stat_set(sp, (&k_sy_ask[0 as usize]) as u64, key)
+    } else if rc == actcli.R_NOBUS {
+        stat_set(sp, (&k_sy_nobus[0 as usize]) as u64, 0)
+    } else {
+        stat_set(sp, (&k_sy_err[0 as usize]) as u64, lp)
+    }
+    var s1: [u8; 25] = "settings: bus answer rc=\0"
+    var s2: [u8; 8] = " line=[\0"
+    var s3: [u8; 2] = "]\0"
+    say((&s1[0 as usize]) as u64)
+    sayn(rc)
+    say((&s2[0 as usize]) as u64)
+    say(lp)
+    say((&s3[0 as usize]) as u64)
+    nl()
+}
+
+fn sys_set() {
+    var key: [u8; 32] = [0 as u8; 32]
+    let kp: u64 = (&key[0 as usize]) as u64
+    if !sys_key(kp) {
+        stat_set((&l_systat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var v_set: [u8; 18] = "call settings.set\0"
+    var k_key: [u8; 4] = "key\0"
+    var k_val: [u8; 6] = "value\0"
+    actcli.req((&v_set[0 as usize]) as u64)
+    actcli.arg((&k_key[0 as usize]) as u64, kp)
+    actcli.arg((&k_val[0 as usize]) as u64, (&e_sval[0 as usize]) as u64)
+    sy_pend = 0
+    let rc: u64 = actcli.send(300)
+    sys_answer(rc, kp)
+}
+
+fn sys_confirm() {
+    if sy_pend == 0 {
+        stat_set((&l_systat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var cf: [u8; 32] = [0 as u8; 32]
+    let cp: u64 = (&cf[0 as usize]) as u64
+    var s_c: [u8; 9] = "confirm \0"
+    var o: u64 = bx_put(cp, 0, 32, (&s_c[0 as usize]) as u64)
+    o = bx_num(cp, o, 32, sy_pend)
+    actcli.req(cp)
+    sy_pend = 0
+    let rc: u64 = actcli.send(300)
+    var s_k: [u8; 1] = "\0"
+    sys_answer(rc, (&s_k[0 as usize]) as u64)
+}
+
+fn sys_undo() {
+    var s_u: [u8; 5] = "undo\0"
+    actcli.req((&s_u[0 as usize]) as u64)
+    let rc: u64 = actcli.send(300)
+    if rc == actcli.R_OK {
+        stat_set((&l_systat[0 as usize]) as u64, (&k_sy_undone[0 as usize]) as u64, 0)
+        var s1: [u8; 38] = "settings: bus answer rc=0 line=[undo]\0"
+        say((&s1[0 as usize]) as u64)
+        nl()
+    } else {
+        var s_k: [u8; 1] = "\0"
+        sys_answer(rc, (&s_k[0 as usize]) as u64)
+    }
+}
+
+// ------------------------------------------------------ App rights
+
+// one "rule N allow C G L tail" line into the rules table
+fn ri_rule(lp: u64, at0: u64) -> u64 {
+    let bp: u64 = (&b_rules[0 as usize]) as u64
+    var at: u64 = at0
+    var w: [u8; 48] = [0 as u8; 48]
+    let wp: u64 = (&w[0 as usize]) as u64
+    var i: u64 = 5 // after "rule "
+    var col: u64 = 0
+    var num: u64 = 0
+    var deny: bool = false
+    while col < 6 {
+        var n: u64 = 0
+        while rb(lp, i) != 0 && rb(lp, i) != 32 && n < 46 {
+            __mmio_write8((wp + n) as *mut u8, rb(lp, i) as u8)
+            n = n + 1
+            i = i + 1
+        }
+        __mmio_write8((wp + n) as *mut u8, 0 as u8)
+        if rb(lp, i) == 32 {
+            i = i + 1
+        }
+        if col == 0 {
+            num = ulib.to_num(wp)
+            at = bx_put(bp, at, 2048, wp)
+        } else if col == 1 {
+            deny = rb(wp, 0) == 100
+            at = bx_put(bp, at, 2048, wp)
+        } else if col == 4 && deny {
+            // a deny rule has no level: this word is already the end
+            at = bx_ch(bp, at, 2048, 45)
+            at = bx_ch(bp, at, 2048, 9)
+            col = 5
+        }
+        if col == 2 || col == 3 || (col == 4 && !deny) {
+            at = bx_put(bp, at, 2048, wp)
+        }
+        if col == 5 {
+            // permanent | session | left=S
+            if rb(wp, 0) == 112 {
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_perm[0 as usize]) as u64))
+            } else if rb(wp, 0) == 108 {
+                at = bx_put(bp, at, 2048, wp + 5)
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_left[0 as usize]) as u64))
+            } else {
+                at = bx_put(bp, at, 2048, msg.get((&k_ri_sess[0 as usize]) as u64))
+            }
+        } else {
+            at = bx_ch(bp, at, 2048, 9)
+        }
+        col = col + 1
+    }
+    at = bx_ch(bp, at, 2048, 10)
+    if ri_rows < 32 {
+        ri_nums[(ri_rows) as usize] = num
+        ri_rows = ri_rows + 1
+    }
+    return at
+}
+
+// "client C reads=a changes=b asked=c refused=d dry=e"
+fn ri_client(lp: u64, at0: u64) -> u64 {
+    let bp: u64 = (&b_cls[0 as usize]) as u64
+    var at: u64 = at0
+    var i: u64 = 7
+    var n: u64 = 0
+    let np: u64 = (&cl_names[0 as usize]) as u64 + cl_rows * 24
+    while rb(lp, i) != 0 && rb(lp, i) != 32 {
+        if n < 23 && cl_rows < 32 {
+            __mmio_write8((np + n) as *mut u8, rb(lp, i) as u8)
+            __mmio_write8((np + n + 1) as *mut u8, 0 as u8)
+        }
+        n = n + 1
+        i = i + 1
+    }
+    at = bx_putn(bp, at, 2048, lp + 7, n)
+    // the five numbers: every '=' starts one
+    while rb(lp, i) != 0 {
+        if rb(lp, i) == 61 {
+            at = bx_ch(bp, at, 2048, 9)
+            i = i + 1
+            while rb(lp, i) >= 48 && rb(lp, i) <= 57 {
+                at = bx_ch(bp, at, 2048, rb(lp, i))
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    at = bx_ch(bp, at, 2048, 10)
+    if cl_rows < 32 {
+        cl_rows = cl_rows + 1
+    }
+    return at
+}
+
+fn rights_load() {
+    let bp: u64 = (&b_rules[0 as usize]) as u64
+    let cp: u64 = (&b_cls[0 as usize]) as u64
+    let np: u64 = (&l_rinote[0 as usize]) as u64
+    var at: u64 = bx_put(bp, 0, 2048, msg.get((&k_ri_head[0 as usize]) as u64))
+    at = bx_ch(bp, at, 2048, 10)
+    var ac: u64 = bx_put(cp, 0, 2048, msg.get((&k_ri_chead[0 as usize]) as u64))
+    ac = bx_ch(cp, ac, 2048, 10)
+    var an: u64 = bx_put(np, 0, 200, msg.get((&k_ri_note[0 as usize]) as u64))
+    ri_rows = 0
+    cl_rows = 0
+    var ndf: u64 = 0
+    var s_r: [u8; 7] = "rights\0"
+    actcli.req((&s_r[0 as usize]) as u64)
+    let rc: u64 = actcli.send(300)
+    if rc != actcli.R_OK {
+        at = bx_put(bp, at, 2048, msg.get((&k_sy_nobus[0 as usize]) as u64))
+        at = bx_ch(bp, at, 2048, 10)
+    } else {
+        var ln: [u8; 200] = [0 as u8; 200]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        var k: u64 = 1
+        while actcli.line(k, lp, 200) {
+            if rb(lp, 0) == 114 && rb(lp, 1) == 117 { // rule
+                at = ri_rule(lp, at)
+            } else if rb(lp, 0) == 99 && rb(lp, 1) == 108 { // client
+                ac = ri_client(lp, ac)
+            } else if rb(lp, 0) == 100 && rb(lp, 1) == 114 { // dryfirst
+                if ndf == 0 {
+                    an = bx_ch(np, an, 200, 32)
+                    an = bx_put(np, an, 200, msg.get((&k_ri_dfirst[0 as usize]) as u64))
+                } else {
+                    an = bx_ch(np, an, 200, 44)
+                }
+                an = bx_ch(np, an, 200, 32)
+                an = bx_put(np, an, 200, lp + 9)
+                ndf = ndf + 1
+            }
+            k = k + 1
+        }
+        if ri_rows == 0 {
+            at = bx_put(bp, at, 2048, msg.get((&k_ri_none[0 as usize]) as u64))
+            at = bx_ch(bp, at, 2048, 10)
+        }
+    }
+    var s1: [u8; 24] = "settings: rights rules=\0"
+    var s2: [u8; 10] = " clients=\0"
+    var s3: [u8; 11] = " dryfirst=\0"
+    var s4: [u8; 5] = " rc=\0"
+    say((&s1[0 as usize]) as u64)
+    sayn(ri_rows)
+    say((&s2[0 as usize]) as u64)
+    sayn(cl_rows)
+    say((&s3[0 as usize]) as u64)
+    sayn(ndf)
+    say((&s4[0 as usize]) as u64)
+    sayn(rc)
+    nl()
+}
+
+fn ri_answer(rc: u64) {
+    let sp: u64 = (&l_ristat[0 as usize]) as u64
+    var ln: [u8; 160] = [0 as u8; 160]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    let _l: bool = actcli.line(0, lp, 160)
+    if rc == actcli.R_OK {
+        var l2: [u8; 160] = [0 as u8; 160]
+        let _l2: bool = actcli.line(1, (&l2[0 as usize]) as u64, 160)
+        stat_set(sp, (&k_ri_done[0 as usize]) as u64, (&l2[0 as usize]) as u64)
+    } else if rc == actcli.R_NOBUS {
+        stat_set(sp, (&k_sy_nobus[0 as usize]) as u64, 0)
+    } else {
+        stat_set(sp, (&k_sy_err[0 as usize]) as u64, lp)
+    }
+    var s1: [u8; 28] = "settings: rights answer rc=\0"
+    var s2: [u8; 8] = " line=[\0"
+    var s3: [u8; 2] = "]\0"
+    say((&s1[0 as usize]) as u64)
+    sayn(rc)
+    say((&s2[0 as usize]) as u64)
+    say(lp)
+    say((&s3[0 as usize]) as u64)
+    nl()
+}
+
+fn ri_revoke() {
+    let r: u64 = wlib.value(ri_tab)
+    if r >= ri_rows {
+        stat_set((&l_ristat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var cmd: [u8; 32] = [0 as u8; 32]
+    let cp: u64 = (&cmd[0 as usize]) as u64
+    var s_r: [u8; 8] = "revoke \0"
+    var o: u64 = bx_put(cp, 0, 32, (&s_r[0 as usize]) as u64)
+    o = bx_num(cp, o, 32, ri_nums[(r) as usize])
+    actcli.req(cp)
+    ri_answer(actcli.send(300))
+}
+
+fn ri_block() {
+    let r: u64 = wlib.value(ri_ctab)
+    if r >= cl_rows {
+        stat_set((&l_ristat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
+        return
+    }
+    var cmd: [u8; 48] = [0 as u8; 48]
+    let cp: u64 = (&cmd[0 as usize]) as u64
+    var s_b: [u8; 7] = "block \0"
+    var s_st: [u8; 3] = " *\0"
+    var o: u64 = bx_put(cp, 0, 48, (&s_b[0 as usize]) as u64)
+    o = bx_put(cp, o, 48, (&cl_names[0 as usize]) as u64 + r * 24)
+    o = bx_put(cp, o, 48, (&s_st[0 as usize]) as u64)
+    actcli.req(cp)
+    ri_answer(actcli.send(300))
+}
+
+// the grant a person most often wants to give: Jarvis may change the
+// display settings for one hour (never the critical ones -- the broker
+// refuses critical grants whatever this button says)
+fn ri_jarvis() {
+    var s_g: [u8; 43] = "grant jarvis settings.display.* write 3600\0"
+    actcli.req((&s_g[0 as usize]) as u64)
+    ri_answer(actcli.send(300))
+}
+
 fn u_start(args: u64) -> u64 {
     dbg_setup(args)
+    widths_init()
     var s_bad: [u8; 24] = "settings: keine Flaeche\0"
     var s_rd: [u8; 19] = "settings: ready w=\0"
     var s_hh: [u8; 4] = " h=\0"
@@ -4900,6 +5650,46 @@ fn u_start(args: u64) -> u64 {
     let _b8: u64 = merke(wlib.label((&l_br_hinw2[0 as usize]) as u64),
         R_BRUECKE)
 
+    // ---- System and App rights (ROUND ACTION-BUS-3). Filled when the
+    // page is shown, not here: the broker may start after this window.
+    let _sy1: u64 = merke(wlib.label(msg.get((&k_sy_title[0 as usize]) as u64)),
+        R_SYSTEM)
+    let _sy2: u64 = merke(wlib.label(msg.get((&k_sy_note[0 as usize]) as u64)),
+        R_SYSTEM)
+    wlib.size(0, 190)
+    sy_tab = merke(wlib.table((&b_sys[0 as usize]) as u64, 9, 4,
+        (&c_sys[0 as usize]) as u64), R_SYSTEM)
+    let _sy3: u64 = merke(wlib.label(msg.get((&k_sy_value[0 as usize]) as u64)),
+        R_SYSTEM)
+    wlib.size(260, 24)
+    sy_ent = merke(wlib.entry((&e_sval[0 as usize]) as u64, 64), R_SYSTEM)
+    wlib.size(0, 26)
+    sy_bset = merke(wlib.button(msg.get((&k_sy_set[0 as usize]) as u64)), R_SYSTEM)
+    wlib.size(0, 26)
+    sy_bconf = merke(wlib.button(msg.get((&k_sy_conf[0 as usize]) as u64)), R_SYSTEM)
+    wlib.size(0, 26)
+    sy_bundo = merke(wlib.button(msg.get((&k_sy_undo[0 as usize]) as u64)), R_SYSTEM)
+    sy_stat = merke(wlib.label((&l_systat[0 as usize]) as u64), R_SYSTEM)
+
+    let _ri1: u64 = merke(wlib.label(msg.get((&k_ri_title[0 as usize]) as u64)),
+        R_RECHTE)
+    ri_notew = merke(wlib.label((&l_rinote[0 as usize]) as u64), R_RECHTE)
+    wlib.size(0, 100)
+    ri_tab = merke(wlib.table((&b_rules[0 as usize]) as u64, 5, 6,
+        (&c_rules[0 as usize]) as u64), R_RECHTE)
+    wlib.size(0, 26)
+    ri_brev = merke(wlib.button(msg.get((&k_ri_revoke[0 as usize]) as u64)), R_RECHTE)
+    wlib.size(0, 26)
+    ri_bjar = merke(wlib.button(msg.get((&k_ri_jarvis[0 as usize]) as u64)), R_RECHTE)
+    let _ri2: u64 = merke(wlib.label(msg.get((&k_ri_act[0 as usize]) as u64)),
+        R_RECHTE)
+    wlib.size(0, 100)
+    ri_ctab = merke(wlib.table((&b_cls[0 as usize]) as u64, 5, 6,
+        (&c_cls[0 as usize]) as u64), R_RECHTE)
+    wlib.size(0, 26)
+    ri_bblock = merke(wlib.button(msg.get((&k_ri_block[0 as usize]) as u64)), R_RECHTE)
+    ri_stat = merke(wlib.label((&l_ristat[0 as usize]) as u64), R_RECHTE)
+
     // ---- Bildschirm (RUNDE DISPLAY)
     let _s1: u64 = merke(wlib.label((&l_schirm[0 as usize]) as u64),
         R_SCREEN)
@@ -5196,7 +5986,11 @@ fn u_start(args: u64) -> u64 {
     if v_n > 0 {
         wlib.set_value(tids[(0) as usize], 1)
     }
-    zeige_reiter(R_DARST)
+    if start_page != R_DARST {
+        wlib.set_value(tb, start_page)
+        bus_page(start_page)
+    }
+    zeige_reiter(start_page)
     wlib.draw_all()
     vorlage_say()
     var s_tl: [u8; 19] = "settings: tiles n=\0"
@@ -5386,6 +6180,7 @@ fn u_start(args: u64) -> u64 {
         if id < wlib.MAXWD {
             let kind: u64 = wlib.fired_kind()
             if kind == wlib.K_TABS {
+                bus_page(wlib.fired_index())
                 zeige_reiter(wlib.fired_index())
                 melde_stand()
             } else if kind == wlib.K_CHOICE {
@@ -5952,6 +6747,34 @@ fn u_start(args: u64) -> u64 {
                     state_read()
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
+                } else if id == sy_bset || id == sy_bconf || id == sy_bundo {
+                    if id == sy_bset {
+                        sys_set()
+                    } else if id == sy_bconf {
+                        sys_confirm()
+                    } else {
+                        sys_undo()
+                    }
+                    let keep: u64 = wlib.value(sy_tab)
+                    sys_load()
+                    wlib.set_text(sy_tab, (&b_sys[0 as usize]) as u64)
+                    wlib.set_value(sy_tab, keep)
+                    wlib.set_text(sy_stat, (&l_systat[0 as usize]) as u64)
+                    wlib.new_set()
+                } else if id == ri_brev || id == ri_bblock || id == ri_bjar {
+                    if id == ri_brev {
+                        ri_revoke()
+                    } else if id == ri_bblock {
+                        ri_block()
+                    } else {
+                        ri_jarvis()
+                    }
+                    rights_load()
+                    wlib.set_text(ri_tab, (&b_rules[0 as usize]) as u64)
+                    wlib.set_text(ri_ctab, (&b_cls[0 as usize]) as u64)
+                    wlib.set_text(ri_notew, (&l_rinote[0 as usize]) as u64)
+                    wlib.set_text(ri_stat, (&l_ristat[0 as usize]) as u64)
+                    wlib.new_set()
                 } else if id == bsp {
                     // RUNDE ALLTAG: /etc/sperre.conf schreiben. Der
                     // Waechter (`lock -d`) liest sie beim naechsten

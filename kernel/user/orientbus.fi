@@ -44,7 +44,7 @@ export { u_start }
 // ============================================================ tables
 
 const APP_MAX: u64 = 16
-const APP_B: u64 = 64
+const APP_B: u64 = 72
 const AP_USED: u64 = 0
 const AP_NAME: u64 = 8 // 16 octets
 const AP_PID: u64 = 24 // the pid that answered for `a.<app>`; 0 = not yet
@@ -52,7 +52,8 @@ const AP_TITLE: u64 = 32
 const AP_COMPAT: u64 = 40
 const AP_FOR: u64 = 48 // AB-008: pool offset of `for exe <path>`, 0 = none
 const AP_ADAPT: u64 = 56 // 1 = its actions run through adapters
-static mut apps: [u8; 1024] = [0 as u8; 1024]
+const AP_WIN: u64 = 64 // AB-008b: pool offset of `for window <glob>`, 0 = none
+static mut apps: [u8; 1152] = [0 as u8; 1152]
 static mut n_apps: u64 = 0
 
 const ACT_MAX: u64 = 64
@@ -111,6 +112,8 @@ const RU_GLOB: u64 = 32 // 32 octets
 const RU_DENY: u64 = 64
 const RU_LEVEL: u64 = 72
 const RU_UNTIL: u64 = 80 // tick, 0 = no end
+const RU_PERM: u64 = 88 // AB-006: 1 = written in /etc/orientbus/policy
+static mut last_rule: u64 = 0
 static mut rules: [u8; 3072] = [0 as u8; 3072]
 
 // calls forwarded to a provider and not answered yet
@@ -619,6 +622,7 @@ fn load_manifest(path: u64, compat: u64) -> bool {
     var k_ui: [u8; 3] = "ui\0"
     var k_keys: [u8; 5] = "keys\0"
     var k_exe: [u8; 4] = "exe\0"
+    var k_window: [u8; 7] = "window\0"
     var e_ad: [u8; 42] = "adapter kind: cli, file, dbus, ui or keys\0"
     var e_adnat: [u8; 37] = "adapters are for wrapper manifests\0\0\0"
 
@@ -765,6 +769,17 @@ fn load_manifest(path: u64, compat: u64) -> bool {
             } else if actwire.str_eq(p1, (&k_for[0 as usize]) as u64)
                 && actwire.str_eq(p2, (&k_exe[0 as usize]) as u64) {
                 st(ap(m_app), AP_FOR, pool_add(p3, actwire.slen(p3)))
+            } else if actwire.str_eq(p1, (&k_for[0 as usize]) as u64)
+                && actwire.str_eq(p2, (&k_window[0 as usize]) as u64) {
+                // AB-008b: `for window "<title glob>"` -- the window the
+                // keys/ui adapters steer (its title or its app id)
+                var wg: [u8; 64] = [0 as u8; 64]
+                quoted(p, s, e, (&wg[0 as usize]) as u64, 64)
+                if ld8((&wg[0 as usize]) as u64, 0) == 0 {
+                    copyz((&wg[0 as usize]) as u64, p3, 64)
+                }
+                st(ap(m_app), AP_WIN, pool_add((&wg[0 as usize]) as u64,
+                    actwire.slen((&wg[0 as usize]) as u64)))
             } else if actwire.str_eq(p1, (&k_adapter[0 as usize]) as u64) {
                 // adapter <kind> <rest of the line>
                 var kind: u64 = AD_NONE
@@ -902,6 +917,8 @@ fn rule_add(client: u64, glob: u64, deny: bool, level: u64,
         let r: u64 = ru(i)
         if ld(r, RU_USED) == 0 {
             st(r, RU_USED, 1)
+            st(r, RU_PERM, 0)
+            last_rule = i
             copyz(r + RU_CLIENT, client, 24)
             copyz(r + RU_GLOB, glob, 32)
             var d: u64 = 0
@@ -959,10 +976,19 @@ fn policy_load() {
             if l == actwire.NONE || l == L_CRIT {
                 l = L_READ // critical is never granted, section 5
             }
-            rule_add(p2, p3, false, l, 0)
+            if rule_add(p2, p3, false, l, 0) {
+                st(ru(last_rule), RU_PERM, 1)
+            }
         }
         if actwire.str_eq(p1, (&k_deny[0 as usize]) as u64) {
-            rule_add(p2, p3, true, 0, 0)
+            if rule_add(p2, p3, true, 0, 0) {
+                st(ru(last_rule), RU_PERM, 1)
+            }
+        }
+        // AB-009: this client's changes need a dry run of the same call
+        var k_df: [u8; 9] = "dryfirst\0"
+        if actwire.str_eq(p1, (&k_df[0 as usize]) as u64) && ld8(p2, 0) != 0 {
+            dryfirst_add(p2)
         }
         var k_auid: [u8; 12] = "adapter_uid\0"
         if actwire.str_eq(p1, (&k_auid[0 as usize]) as u64) {
@@ -1113,6 +1139,15 @@ fn audit_line(bp: u64, t: u64, pid: u64, uid: u64, client: u64, verb: u64,
 // each one is the rest.
 fn audit(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
     decision: u64, result: u64, dry: bool) -> bool {
+    // AB-006: the counts per client for the page "what may which app"
+    if skip_tally {
+        skip_tally = false
+    } else {
+        let tk0: u64 = tally_kind(verb, decision, result, dry)
+        if tk0 != actwire.NONE {
+            tally(client, tk0)
+        }
+    }
     if audit_lazy {
         audit_lazy = false
         return agg_add(pid, uid, client, verb, target, result, dry)
@@ -1788,15 +1823,237 @@ fn adapter_argv(act: u64, msg: u64) -> u64 {
     return argc
 }
 
+// ============================================ AB-008b: FOREIGN WINDOWS
+//
+// A program that has no command line, no config file and no bus -- a
+// Linux GUI program on wayd, a Wine window -- is steered through its
+// WINDOW. The kernel's WM_FWIN (root only; the broker is the one caller)
+// lists windows and puts events into the ring of ONE window; it refuses
+// terminals, the lock screen, panels and the desktop (sysgui.fwin_target).
+//
+//   for window "<glob>"            which window: title or app id
+//   adapter keys <token> ...       space enter tab esc backspace up down
+//                                  left right home end pgup pgdn del
+//                                  f1..f10 ctrl+<letter>, one character,
+//                                  or {arg}: that argument's text, typed
+//   adapter ui close               the close box, as if clicked
+//   adapter ui raise               show, raise, focus
+//   adapter ui click <x> <y> [right]  a click inside the window
+//
+// Reliability as written in the catalogue: keys low, ui medium -- a key
+// does what the program does with it, which may be nothing.
+
+const WM_FWIN: u64 = 2128
+const FW_LIST: u64 = 0
+const FW_KEY: u64 = 1
+const FW_CLICK: u64 = 2
+const FW_CLOSE: u64 = 3
+const FW_RAISE: u64 = 4
+static mut fwrec: [u8; 160] = [0 as u8; 160]
+static mut fw_title: [u8; 40] = [0 as u8; 40]
+static mut c_keys: u64 = 0
+
+// The first window whose title or app id matches the app's glob;
+// NONE = no such window open.
+fn find_window(app: u64) -> u64 {
+    let g: u64 = ld(ap(app), AP_WIN)
+    if g == 0 {
+        return actwire.NONE
+    }
+    let rp: u64 = (&fwrec[0 as usize]) as u64
+    var slot: u64 = 0
+    while slot < 256 {
+        let r: u64 = ulib.sys4(WM_FWIN, FW_LIST, slot, rp, 0)
+        if ulib.bad(r) {
+            return actwire.NONE // past the end of the table
+        }
+        if r == 1 && ld(rp, 40) == 1 && ld(rp, 136) == 0 {
+            // layer L_NORMAL (1), kind K_RAW (0): a program's own window
+            if glob_match(pl(g), rp + 64) || glob_match(pl(g), rp + 104) {
+                copyz((&fw_title[0 as usize]) as u64, rp + 64, 32)
+                return ld(rp, 0)
+            }
+        }
+        slot = slot + 1
+    }
+    return actwire.NONE
+}
+
+// A key token -> OrientOS key code (wlib: ASCII, 0x101.. arrows,
+// 0x110.. F keys); 0 = not a key
+fn key_code(w: u64) -> u64 {
+    let n: u64 = actwire.slen(w)
+    if n == 1 {
+        return ld8(w, 0)
+    }
+    var k_ctrl: [u8; 6] = "ctrl+\0"
+    if n == 6 && actwire.starts(w, (&k_ctrl[0 as usize]) as u64) {
+        let c: u64 = ld8(w, 5)
+        if c >= 97 && c <= 122 {
+            return c - 96
+        }
+        return 0
+    }
+    var names: [u8; 72] = "space enter tab esc backspace up down left right home end pgup pgdn del\0"
+    var codes: [u64; 14] = [32, 13, 9, 27, 8, 0x101, 0x102, 0x103, 0x104,
+        0x105, 0x106, 0x107, 0x108, 0x109]
+    let np: u64 = (&names[0 as usize]) as u64
+    var at: u64 = 0
+    var i: u64 = 0
+    var nw: [u8; 16] = [0 as u8; 16]
+    let nwp: u64 = (&nw[0 as usize]) as u64
+    while ld8(np, at) != 0 && i < 14 {
+        at = actwire.word_copy(np, at, nwp, 16)
+        if actwire.str_eq(nwp, w) {
+            return codes[i as usize]
+        }
+        i = i + 1
+    }
+    if n >= 2 && n <= 3 && ld8(w, 0) == 102 { // f1..f10
+        let f: u64 = ulib.to_num(w + 1)
+        if f >= 1 && f <= 10 {
+            return 0x110 + f - 1
+        }
+    }
+    return 0
+}
+
+// keys/ui: runs in the broker (a kernel call, no child); reply in ob
+fn run_window(act: u64, msg: u64, dry: bool) -> bool {
+    let kind: u64 = ld(ac(act), AC_ADKIND)
+    let app: u64 = ld(ac(act), AC_APP)
+    let cmd: u64 = pl(ld(ac(act), AC_ADCMD))
+    var s_ad: [u8; 9] = "adapter=\0"
+    let win: u64 = find_window(app)
+    if win == actwire.NONE {
+        var e: [u8; 22] = "err window_not_found \0"
+        actwire.ob_reset()
+        actwire.ob_str((&e[0 as usize]) as u64)
+        actwire.ob_str(ap(app) + AP_NAME)
+        actwire.ob_ch(10)
+        return false
+    }
+    var w: [u8; 64] = [0 as u8; 64]
+    let wp: u64 = (&w[0 as usize]) as u64
+    var val: [u8; 208] = [0 as u8; 208]
+    let vp: u64 = (&val[0 as usize]) as u64
+    var sent: u64 = 0
+    var bad: bool = false
+    var k_close: [u8; 6] = "close\0"
+    var k_raise: [u8; 6] = "raise\0"
+    var k_click: [u8; 6] = "click\0"
+    var k_right: [u8; 6] = "right\0"
+    if dry {
+        var s_d: [u8; 16] = "ok\ndry=1\nwould=\0"
+        var s_in: [u8; 12] = " -> window \0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_d[0 as usize]) as u64)
+        actwire.ob_str(adapter_name(kind))
+        actwire.ob_ch(32)
+        actwire.ob_str(cmd)
+        actwire.ob_str((&s_in[0 as usize]) as u64)
+        actwire.ob_num(win)
+        actwire.ob_ch(32)
+        actwire.ob_ch(91)
+        actwire.ob_str((&fw_title[0 as usize]) as u64)
+        actwire.ob_ch(93)
+        actwire.ob_ch(10)
+        actwire.ob_str((&s_ad[0 as usize]) as u64)
+        actwire.ob_str(adapter_name(kind))
+        actwire.ob_ch(10)
+        return true
+    }
+    c_adapt = c_adapt + 1
+    if kind == AD_UI {
+        var nx: u64 = actwire.word_copy(cmd, 0, wp, 64)
+        var r: u64 = 0
+        if actwire.str_eq(wp, (&k_close[0 as usize]) as u64) {
+            r = ulib.sys4(WM_FWIN, FW_CLOSE, win, 0, 0)
+        } else if actwire.str_eq(wp, (&k_raise[0 as usize]) as u64) {
+            r = ulib.sys4(WM_FWIN, FW_RAISE, win, 0, 0)
+        } else if actwire.str_eq(wp, (&k_click[0 as usize]) as u64) {
+            nx = actwire.word_copy(cmd, nx, wp, 64)
+            let x: u64 = ulib.to_num(wp)
+            nx = actwire.word_copy(cmd, nx, wp, 64)
+            let y: u64 = ulib.to_num(wp)
+            actwire.word_copy(cmd, nx, wp, 64)
+            var b: u64 = 1
+            if actwire.str_eq(wp, (&k_right[0 as usize]) as u64) {
+                b = 2
+            }
+            r = ulib.sys4(WM_FWIN, FW_CLICK, win, (x & 0xFFFF) | ((y & 0xFFFF) << 16), b)
+        } else {
+            bad = true
+        }
+        if !bad && ulib.bad(r) {
+            bad = true
+        }
+        sent = 1
+    } else {
+        // keys: token by token; {arg} types that argument's text
+        var at: u64 = 0
+        while !bad && ld8(cmd, at) != 0 {
+            at = actwire.word_copy(cmd, at, wp, 64)
+            let n: u64 = actwire.slen(wp)
+            if n > 2 && ld8(wp, 0) == 123 && ld8(wp, n - 1) == 125 {
+                st8(wp, n - 1, 0)
+                if actwire.kv_find(msg, wp + 1, vp, 200) {
+                    var i: u64 = 0
+                    while ld8(vp, i) != 0 && !bad {
+                        if ulib.bad(ulib.sys4(WM_FWIN, FW_KEY, win, ld8(vp, i), 0)) {
+                            bad = true
+                        }
+                        sent = sent + 1
+                        i = i + 1
+                    }
+                }
+            } else if n > 0 {
+                let kc: u64 = key_code(wp)
+                if kc == 0 || ulib.bad(ulib.sys4(WM_FWIN, FW_KEY, win, kc, 0)) {
+                    bad = true
+                }
+                sent = sent + 1
+            }
+        }
+        c_keys = c_keys + sent
+    }
+    actwire.ob_reset()
+    if bad {
+        var e2: [u8; 26] = "err adapter_failed window\0"
+        actwire.ob_str((&e2[0 as usize]) as u64)
+        actwire.ob_ch(10)
+    } else {
+        var s_ok: [u8; 4] = "ok\n\0"
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+    }
+    var s_w: [u8; 8] = "window=\0"
+    var s_t: [u8; 8] = "\ntitle=\0"
+    var s_n: [u8; 7] = "\nsent=\0"
+    actwire.ob_str((&s_w[0 as usize]) as u64)
+    actwire.ob_num(win)
+    actwire.ob_str((&s_t[0 as usize]) as u64)
+    actwire.ob_str((&fw_title[0 as usize]) as u64)
+    actwire.ob_str((&s_n[0 as usize]) as u64)
+    actwire.ob_num(sent)
+    actwire.ob_ch(10)
+    actwire.ob_str((&s_ad[0 as usize]) as u64)
+    actwire.ob_str(adapter_name(kind))
+    actwire.ob_ch(10)
+    return !bad
+}
+
 // Runs the adapter of `act`; the reply is left in the output buffer.
 fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
     let kind: u64 = ld(ac(act), AC_ADKIND)
     var s_ok: [u8; 4] = "ok\n\0"
     var s_ad: [u8; 9] = "adapter=\0"
+    if (kind == AD_UI || kind == AD_KEYS) && ld(ap(ld(ac(act), AC_APP)), AP_WIN) != 0 {
+        return run_window(act, msg, dry)
+    }
     if kind == AD_DBUS || kind == AD_UI || kind == AD_KEYS {
-        // declared honestly, not faked: OrientOS has no D-Bus, no
-        // accessibility bridge and no key injection for foreign programs
-        // yet (docs/ACTION-BUS.md 7)
+        // declared honestly, not faked: OrientOS has no D-Bus, and a
+        // keys/ui adapter without `for window` names no window to steer
+        // (docs/ACTION-BUS.md 7)
         var e: [u8; 24] = "err adapter_unsupported\0"
         actwire.ob_reset()
         actwire.ob_str((&e[0 as usize]) as u64)
@@ -2011,6 +2268,24 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
             (&r_err[0 as usize]) as u64, dry)
         return
     }
+    // AB-009: dry run first. A dry run is noted, a change of a client
+    // under `dryfirst` needs one -- before it is even parked, so the
+    // human is never asked about a call nobody looked at first.
+    if dryfirst_for(cp) {
+        let print: u64 = call_print(msg, np)
+        if dry {
+            dry_note(cp, print)
+        } else if rlvl != L_READ && !confirmed && !undo {
+            if !dry_take(cp, print) {
+                c_dryfirst = c_dryfirst + 1
+                var e7: [u8; 14] = "dry_run_first\0"
+                reply_err(pid, id, (&e7[0 as usize]) as u64, np)
+                audit(pid, uid, cp, vb, np, (&s_deny[0 as usize]) as u64,
+                    (&e7[0 as usize]) as u64, false)
+                return
+            }
+        }
+    }
     if d == D_ASK {
         // park the request and hand out a number; `act confirm` from the
         // user replays it (section 5.3)
@@ -2137,6 +2412,9 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         }
         if !dry && rlvl == L_READ {
             audit_lazy = true
+        }
+        if !dry && rlvl != L_READ {
+            skip_tally = true // counted as a change at its write-ahead line
         }
         if aok {
             audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
@@ -2365,7 +2643,17 @@ fn is_user(msg: u64, uid: u64) -> bool {
         (&s_user[0 as usize]) as u64) {
         return false
     }
-    return uid == 0
+    if uid == 0 {
+        return true
+    }
+    // ROUND ACTION-BUS-3: THE PERSON WHO SIGNED IN IS THE USER TOO.
+    // Until here only uid 0 counted -- but on a real device glogin drops
+    // the session to the person's own uid (justin, >= 1000), so the one
+    // human at the machine could neither confirm nor grant. The kernel
+    // knows whose session it is (SYS_SPERRE op 8, set once by glogin
+    // while still root); an unlabelled process of THAT uid is the user.
+    let su: u64 = actwire.session_uid()
+    return su != 0 && su == uid
 }
 
 // AB-003: the client of this request. `g_attested` = the kernel named it.
@@ -2420,6 +2708,14 @@ fn do_whoami(pid: u64, id: u64) {
     }
     actwire.ob_str((&s_at[0 as usize]) as u64)
     if g_attested {
+        actwire.ob_str((&s_y[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_n[0 as usize]) as u64)
+    }
+    // AB-009: must this client dry-run its changes first?
+    var s_df: [u8; 12] = "\ndry_first=\0"
+    actwire.ob_str((&s_df[0 as usize]) as u64)
+    if dryfirst_for((&g_client[0 as usize]) as u64) {
         actwire.ob_str((&s_y[0 as usize]) as u64)
     } else {
         actwire.ob_str((&s_n[0 as usize]) as u64)
@@ -2497,6 +2793,7 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
         let n2: u64 = actwire.word_copy(m, 0, np, 40)
         actwire.word_copy(m, n2, np, 40)
         var s_rej: [u8; 7] = "reject\0"
+        tally(tk(t) + TK_CLIENT, TA_REFUSED)
         audit(pid, uid, (&s_user[0 as usize]) as u64,
             (&s_rej[0 as usize]) as u64, np, (&s_deny[0 as usize]) as u64,
             (&r_rej[0 as usize]) as u64, false)
@@ -2581,10 +2878,24 @@ fn do_grant(msg: u64, pid: u64, uid: u64, id: u64) {
     if secs > 0 {
         until = actwire.ticks() + secs * 100
     }
+    // AB-006: a grant without seconds is permanent -- and permanent
+    // means it is in the policy file, so it survives a restart and the
+    // page "what may which app" can take it out again
+    if secs == 0 {
+        var k_allow: [u8; 6] = "allow\0"
+        if !policy_append((&k_allow[0 as usize]) as u64, p1, p2, p3) {
+            var e5: [u8; 20] = "policy_not_writable\0"
+            reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+            return
+        }
+    }
     if !rule_add(p1, p2, false, l, until) {
         var e: [u8; 11] = "rules_full\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, 0)
         return
+    }
+    if secs == 0 {
+        st(ru(last_rule), RU_PERM, 1)
     }
     var s_ok: [u8; 10] = "ok\ngrant \0"
     actwire.ob_reset()
@@ -2642,8 +2953,12 @@ fn do_stat(pid: u64, id: u64) {
     stat_line((&k17[0 as usize]) as u64, c_badprov)
     var k18: [u8; 14] = "adapter_runs=\0"
     stat_line((&k18[0 as usize]) as u64, c_adapt)
+    var k18b: [u8; 11] = "keys_sent=\0"
+    stat_line((&k18b[0 as usize]) as u64, c_keys)
     var k19: [u8; 13] = "schema_keys=\0"
     stat_line((&k19[0 as usize]) as u64, setschema.count())
+    var k20: [u8; 15] = "dry_run_first=\0"
+    stat_line((&k20[0 as usize]) as u64, c_dryfirst)
     reply_ob(pid, id)
 }
 
@@ -2675,6 +2990,659 @@ fn do_hello(msg: u64) {
         (&s_user[0 as usize]) as u64, PF_PING)
 }
 
+// ============================================ AB-006: WHAT MAY WHICH APP
+//
+// The page "what may which app" in the settings window is built from
+// these verbs and nothing else -- the broker is the only place that
+// knows the rules, so it is the only place that can list them honestly:
+//
+//   rights                 every rule (number, allow/deny, client, glob,
+//                          level, permanent or seconds left), the
+//                          dry-run-first clients, and per client the
+//                          counts: reads, changes, asked, refused, dry runs
+//   revoke <n>             remove rule n (user only); a permanent rule
+//   revoke <client> <glob> is also taken out of /etc/orientbus/policy
+//   block <client> <glob>  a permanent deny rule (user only)
+//
+// A client that is not the user sees only its own lines: what Jarvis may
+// do is Jarvis's business and the user's, not every app's.
+//
+// The counts are kept per client since the broker started and are seeded
+// from the audit log when it starts, so they survive a restart. Imprecise
+// on purpose in one place: an adapter write logs `forwarded` and then
+// `ok`, and the seed counts that `ok` as a read.
+
+const CL_MAX: u64 = 24
+const CL_B: u64 = 64
+const CL_NAME: u64 = 0 // 24 octets
+const CL_READ: u64 = 24
+const CL_CHANGE: u64 = 32
+const CL_ASK: u64 = 40
+const CL_REFUSED: u64 = 48
+const CL_DRY: u64 = 56
+static mut cls: [u8; 1536] = [0 as u8; 1536]
+static mut skip_tally: bool = false
+
+const TA_READ: u64 = 0
+const TA_CHANGE: u64 = 1
+const TA_ASK: u64 = 2
+const TA_REFUSED: u64 = 3
+const TA_DRY: u64 = 4
+
+fn cl(i: u64) -> u64 {
+    return (&cls[0 as usize]) as u64 + i * CL_B
+}
+
+fn cl_slot(name: u64) -> u64 {
+    if ld8(name, 0) == 0 {
+        return actwire.NONE
+    }
+    var i: u64 = 0
+    while i < CL_MAX {
+        if ld8(cl(i), CL_NAME) != 0 && actwire.str_eq(cl(i) + CL_NAME, name) {
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < CL_MAX {
+        if ld8(cl(i), CL_NAME) == 0 {
+            copyz(cl(i) + CL_NAME, name, 24)
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+fn tally_n(client: u64, kind: u64, n: u64) {
+    let s: u64 = cl_slot(client)
+    if s == actwire.NONE {
+        return
+    }
+    let off: u64 = CL_READ + kind * 8
+    st(cl(s), off, ld(cl(s), off) + n)
+}
+
+fn tally(client: u64, kind: u64) {
+    tally_n(client, kind, 1)
+}
+
+// What an audit line means for the counts; NONE = not counted.
+fn tally_kind(verb: u64, decision: u64, result: u64, dry: bool) -> u64 {
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    if !actwire.str_eq(verb, (&s_callv[0 as usize]) as u64)
+        && !actwire.str_eq(verb, (&s_undov[0 as usize]) as u64) {
+        return actwire.NONE
+    }
+    var r_conf: [u8; 8] = "confirm\0"
+    var r_fwd: [u8; 10] = "forwarded\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var r_dry: [u8; 4] = "dry\0"
+    var r_dfirst: [u8; 14] = "dry_run_first\0"
+    if actwire.str_eq(decision, (&s_deny[0 as usize]) as u64)
+        || actwire.str_eq(result, (&r_dfirst[0 as usize]) as u64) {
+        return TA_REFUSED
+    }
+    if dry {
+        if actwire.str_eq(result, (&r_dry[0 as usize]) as u64)
+            || actwire.str_eq(result, (&r_ok[0 as usize]) as u64)
+            || actwire.str_eq(result, (&r_fwd[0 as usize]) as u64) {
+            return TA_DRY
+        }
+        return actwire.NONE
+    }
+    if actwire.str_eq(result, (&r_conf[0 as usize]) as u64) {
+        return TA_ASK
+    }
+    if actwire.str_eq(result, (&r_fwd[0 as usize]) as u64) {
+        return TA_CHANGE
+    }
+    if actwire.str_eq(result, (&r_ok[0 as usize]) as u64) {
+        return TA_READ
+    }
+    return actwire.NONE
+}
+
+// The value of ` key=` in one audit line (p..e) into out.
+fn line_field(p: u64, at: u64, e: u64, key: u64, out: u64, max: u64) -> bool {
+    let kl: u64 = actwire.slen(key)
+    var i: u64 = at
+    st8(out, 0, 0)
+    while i + kl <= e {
+        var hit: bool = i == at || ld8(p, i - 1) == 32
+        var k: u64 = 0
+        while hit && k < kl {
+            if ld8(p, i + k) != ld8(key, k) {
+                hit = false
+            }
+            k = k + 1
+        }
+        if hit {
+            var j: u64 = i + kl
+            var o: u64 = 0
+            while j < e && ld8(p, j) != 32 && o + 1 < max {
+                st8(out, o, ld8(p, j))
+                o = o + 1
+                j = j + 1
+            }
+            st8(out, o, 0)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Seed the counts from the audit log (all of it, in pieces).
+fn seed_counts() {
+    let fd: u64 = io.open((&s_logpath[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let p: u64 = (&mf[0 as usize]) as u64
+    var have: u64 = 0
+    var k_cl: [u8; 8] = "client=\0"
+    var k_vb: [u8; 6] = "verb=\0"
+    var k_dc: [u8; 10] = "decision=\0"
+    var k_rs: [u8; 8] = "result=\0"
+    var k_dr: [u8; 5] = "dry=\0"
+    var k_ct: [u8; 7] = "count=\0"
+    var c: [u8; 24] = [0 as u8; 24]
+    var v: [u8; 16] = [0 as u8; 16]
+    var d: [u8; 16] = [0 as u8; 16]
+    var r: [u8; 24] = [0 as u8; 24]
+    var y: [u8; 8] = [0 as u8; 8]
+    var n: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&c[0 as usize]) as u64
+    let vp: u64 = (&v[0 as usize]) as u64
+    let dp: u64 = (&d[0 as usize]) as u64
+    let rp: u64 = (&r[0 as usize]) as u64
+    let yp: u64 = (&y[0 as usize]) as u64
+    let np: u64 = (&n[0 as usize]) as u64
+    var lines: u64 = 0
+    var more: bool = true
+    while more {
+        let got: u64 = io.read(fd, p + have, 8000 - have)
+        if ulib.bad(got) || got == 0 {
+            more = false
+        } else {
+            have = have + got
+        }
+        // every complete line in p[0..have]
+        var at: u64 = 0
+        var i: u64 = 0
+        while i < have {
+            if ld8(p, i) == 10 || (!more && i + 1 == have) {
+                var e: u64 = i
+                if ld8(p, i) != 10 {
+                    e = i + 1
+                }
+                if line_field(p, at, e, (&k_cl[0 as usize]) as u64, cp, 24)
+                    && line_field(p, at, e, (&k_vb[0 as usize]) as u64, vp, 16)
+                    && line_field(p, at, e, (&k_dc[0 as usize]) as u64, dp, 16)
+                    && line_field(p, at, e, (&k_rs[0 as usize]) as u64, rp, 24) {
+                    line_field(p, at, e, (&k_dr[0 as usize]) as u64, yp, 8)
+                    var cnt: u64 = 1
+                    if line_field(p, at, e, (&k_ct[0 as usize]) as u64, np, 24) {
+                        cnt = ulib.to_num(np)
+                    }
+                    let kind: u64 = tally_kind(vp, dp, rp, ld8(yp, 0) == 49)
+                    if kind != actwire.NONE {
+                        tally_n(cp, kind, cnt)
+                    }
+                    lines = lines + 1
+                }
+                at = i + 1
+            }
+            i = i + 1
+        }
+        // keep the unfinished line
+        if at < have {
+            if at == 0 && have >= 8000 {
+                have = 0 // one line longer than the buffer: drop it
+            } else {
+                ulib.copy(p, p + at, have - at)
+                have = have - at
+            }
+        } else {
+            have = 0
+        }
+    }
+    io.close(fd)
+    var s1: [u8; 31] = "orientbus: counts seeded from \0"
+    lb_start((&s1[0 as usize]) as u64)
+    lb_num(lines)
+    var s3: [u8; 11] = " log lines\0"
+    lb_add((&s3[0 as usize]) as u64)
+    lb_say()
+}
+
+// ------------------------------------------------- dry run first (AB-009)
+//
+// `dryfirst <client>` in the policy: that client's changes (write and
+// critical, not reads, not undo) are refused with `dry_run_first` unless
+// the SAME call -- same action, same arguments in the same order -- was
+// dry-run by the same client within the last 60 s. One dry run pays for
+// one real call. It turns "Jarvis dry-runs first and shows the plan"
+// from a promise in a prompt into a rule the device enforces.
+
+const DF_MAX: u64 = 4
+static mut dfirst: [u8; 96] = [0 as u8; 96] // DF_MAX x 24
+const DRY_MAX: u64 = 16
+const DRY_B: u64 = 48
+const DR_USED: u64 = 0
+const DR_HASH: u64 = 8
+const DR_T: u64 = 16
+const DR_CLIENT: u64 = 24 // 24 octets
+static mut drys: [u8; 768] = [0 as u8; 768]
+static mut c_dryfirst: u64 = 0
+
+fn df(i: u64) -> u64 {
+    return (&dfirst[0 as usize]) as u64 + i * 24
+}
+
+fn dryfirst_add(client: u64) {
+    var i: u64 = 0
+    while i < DF_MAX {
+        if ld8(df(i), 0) == 0 {
+            copyz(df(i), client, 24)
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn dryfirst_for(client: u64) -> bool {
+    var i: u64 = 0
+    while i < DF_MAX {
+        if ld8(df(i), 0) != 0 && client_match(df(i), client) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn dr(i: u64) -> u64 {
+    return (&drys[0 as usize]) as u64 + i * DRY_B
+}
+
+// FNV-1a over the action name and every argument line (not the verb
+// line, not the '@' meta lines -- `--dry` must not change the print).
+fn call_print(msg: u64, name: u64) -> u64 {
+    var h: u64 = 0xCBF29CE484222325
+    var i: u64 = 0
+    while ld8(name, i) != 0 {
+        h = (h ^ ld8(name, i)) *% 0x100000001B3
+        i = i + 1
+    }
+    h = (h ^ 10) *% 0x100000001B3
+    var at: u64 = actwire.line_end(msg, 0)
+    if ld8(msg, at) == 10 {
+        at = at + 1
+    }
+    while ld8(msg, at) != 0 {
+        let e: u64 = actwire.line_end(msg, at)
+        if ld8(msg, at) != 64 && e > at {
+            var k: u64 = at
+            while k < e {
+                h = (h ^ ld8(msg, k)) *% 0x100000001B3
+                k = k + 1
+            }
+            h = (h ^ 10) *% 0x100000001B3
+        }
+        at = e
+        if ld8(msg, at) == 10 {
+            at = at + 1
+        }
+    }
+    return h
+}
+
+fn dry_note(client: u64, hash: u64) {
+    let now: u64 = actwire.ticks()
+    var slot: u64 = 0
+    var oldest: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < DRY_MAX {
+        let d: u64 = dr(i)
+        if ld(d, DR_USED) == 0 {
+            slot = i
+            oldest = 0
+        } else if ld(d, DR_T) < oldest {
+            slot = i
+            oldest = ld(d, DR_T)
+        }
+        i = i + 1
+    }
+    let d2: u64 = dr(slot)
+    st(d2, DR_USED, 1)
+    st(d2, DR_HASH, hash)
+    st(d2, DR_T, now)
+    copyz(d2 + DR_CLIENT, client, 24)
+}
+
+// true (and the dry run is used up) if this client dry-ran this call
+fn dry_take(client: u64, hash: u64) -> bool {
+    let now: u64 = actwire.ticks()
+    var i: u64 = 0
+    while i < DRY_MAX {
+        let d: u64 = dr(i)
+        if ld(d, DR_USED) != 0 {
+            if now - ld(d, DR_T) > 6000 {
+                st(d, DR_USED, 0)
+            } else if ld(d, DR_HASH) == hash
+                && actwire.str_eq(d + DR_CLIENT, client) {
+                st(d, DR_USED, 0)
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------ the policy file, kept
+
+static mut pol_out: [u8; 8192] = [0 as u8; 8192]
+static mut s_polpath: [u8; 22] = "/etc/orientbus/policy\0"
+
+// Append one rule line; false if the file cannot be written.
+fn policy_append(kind: u64, client: u64, glob: u64, level: u64) -> bool {
+    actwire.ob_reset()
+    actwire.ob_str(kind)
+    actwire.ob_ch(32)
+    actwire.ob_str(client)
+    actwire.ob_ch(32)
+    actwire.ob_str(glob)
+    if level != 0 {
+        actwire.ob_ch(32)
+        actwire.ob_str(level)
+    }
+    actwire.ob_ch(10)
+    let r: u64 = actwire.append_file((&s_polpath[0 as usize]) as u64,
+        actwire.ob_ptr(), actwire.ob_len())
+    return !ulib.bad(r)
+}
+
+// Take the first `allow|deny <client> <glob>` line out of the policy;
+// every other line (comments too) stays as it was.
+fn policy_drop(deny: bool, client: u64, glob: u64) -> bool {
+    let p: u64 = (&mf[0 as usize]) as u64
+    let fd: u64 = io.open((&s_polpath[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    st8(p, n, 0)
+    let q: u64 = (&pol_out[0 as usize]) as u64
+    var o: u64 = 0
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    var k_allow: [u8; 6] = "allow\0"
+    var k_deny: [u8; 5] = "deny\0"
+    var kind: u64 = (&k_allow[0 as usize]) as u64
+    if deny {
+        kind = (&k_deny[0 as usize]) as u64
+    }
+    var done: bool = false
+    var at: u64 = 0
+    while ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        let save: u64 = ld8(p, e)
+        st8(p, e, 0)
+        var nx: u64 = actwire.word_copy(p, at, p1, 32)
+        nx = actwire.word_copy(p, nx, p2, 32)
+        actwire.word_copy(p, nx, p3, 32)
+        st8(p, e, save)
+        var skip: bool = false
+        if !done && actwire.str_eq(p1, kind) && actwire.str_eq(p2, client)
+            && actwire.str_eq(p3, glob) {
+            skip = true
+            done = true
+        }
+        var stop: u64 = e
+        if ld8(p, stop) == 10 {
+            stop = stop + 1
+        }
+        if !skip {
+            var k: u64 = at
+            while k < stop && o < 8190 {
+                st8(q, o, ld8(p, k))
+                o = o + 1
+                k = k + 1
+            }
+        }
+        at = stop
+    }
+    if !done {
+        return true // it was not in the file (a rule from `grant`)
+    }
+    let w: u64 = ulib.sys(ulib.SYS_OPEN, (&s_polpath[0 as usize]) as u64,
+        1 | 64 | 512, 420)
+    if ulib.bad(w) {
+        return false
+    }
+    let r: u64 = io.write_all(w, q, o)
+    io.close(w)
+    return !ulib.bad(r)
+}
+
+// rights: the page "what may which app", as text
+fn do_rights(msg: u64, pid: u64, uid: u64, id: u64) {
+    let all: bool = is_user(msg, uid)
+    let me: u64 = (&g_client[0 as usize]) as u64
+    let now: u64 = actwire.ticks()
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_rule: [u8; 6] = "rule \0"
+    var s_allow2: [u8; 7] = " allow\0"
+    var s_deny2: [u8; 6] = " deny\0"
+    var s_perm: [u8; 11] = " permanent\0"
+    var s_left: [u8; 7] = " left=\0"
+    var s_sess: [u8; 9] = " session\0"
+    var s_df: [u8; 10] = "dryfirst \0"
+    var s_cl: [u8; 8] = "client \0"
+    var s_rd: [u8; 8] = " reads=\0"
+    var s_ch: [u8; 10] = " changes=\0"
+    var s_as: [u8; 8] = " asked=\0"
+    var s_rf: [u8; 10] = " refused=\0"
+    var s_dr: [u8; 6] = " dry=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < RULE_MAX {
+        let r: u64 = ru(i)
+        if ld(r, RU_USED) != 0 && ld(r, RU_UNTIL) != 0 && now >= ld(r, RU_UNTIL) {
+            st(r, RU_USED, 0) // ran out
+        }
+        if ld(r, RU_USED) != 0 && (all || actwire.str_eq(r + RU_CLIENT, me)) {
+            actwire.ob_str((&s_rule[0 as usize]) as u64)
+            actwire.ob_num(i + 1)
+            if ld(r, RU_DENY) != 0 {
+                actwire.ob_str((&s_deny2[0 as usize]) as u64)
+            } else {
+                actwire.ob_str((&s_allow2[0 as usize]) as u64)
+            }
+            actwire.ob_ch(32)
+            actwire.ob_str(r + RU_CLIENT)
+            actwire.ob_ch(32)
+            actwire.ob_str(r + RU_GLOB)
+            if ld(r, RU_DENY) == 0 {
+                actwire.ob_ch(32)
+                actwire.ob_str(level_name(ld(r, RU_LEVEL)))
+            }
+            if ld(r, RU_UNTIL) != 0 {
+                actwire.ob_str((&s_left[0 as usize]) as u64)
+                actwire.ob_num((ld(r, RU_UNTIL) - now + 99) / 100)
+            } else if ld(r, RU_PERM) != 0 {
+                actwire.ob_str((&s_perm[0 as usize]) as u64)
+            } else {
+                actwire.ob_str((&s_sess[0 as usize]) as u64)
+            }
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < DF_MAX {
+        if ld8(df(i), 0) != 0 && (all || client_match(df(i), me)) {
+            actwire.ob_str((&s_df[0 as usize]) as u64)
+            actwire.ob_str(df(i))
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < CL_MAX {
+        let c: u64 = cl(i)
+        if ld8(c, CL_NAME) != 0 && (all || actwire.str_eq(c + CL_NAME, me)) {
+            actwire.ob_str((&s_cl[0 as usize]) as u64)
+            actwire.ob_str(c + CL_NAME)
+            actwire.ob_str((&s_rd[0 as usize]) as u64)
+            actwire.ob_num(ld(c, CL_READ))
+            actwire.ob_str((&s_ch[0 as usize]) as u64)
+            actwire.ob_num(ld(c, CL_CHANGE))
+            actwire.ob_str((&s_as[0 as usize]) as u64)
+            actwire.ob_num(ld(c, CL_ASK))
+            actwire.ob_str((&s_rf[0 as usize]) as u64)
+            actwire.ob_num(ld(c, CL_REFUSED))
+            actwire.ob_str((&s_dr[0 as usize]) as u64)
+            actwire.ob_num(ld(c, CL_DRY))
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    reply_ob(pid, id)
+}
+
+// revoke <n> | revoke <client> <glob>
+fn do_revoke(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 32] = "denied only the user may revoke\0"
+    if !is_user(msg, uid) {
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    actwire.word_copy(msg, nx, p2, 32)
+    var t: u64 = actwire.NONE
+    if ld8(p1, 0) >= 48 && ld8(p1, 0) <= 57 && ld8(p2, 0) == 0 {
+        let k: u64 = ulib.to_num(p1)
+        if k >= 1 && k <= RULE_MAX && ld(ru(k - 1), RU_USED) != 0 {
+            t = k - 1
+        }
+    } else {
+        var i: u64 = 0
+        while i < RULE_MAX && t == actwire.NONE {
+            let r: u64 = ru(i)
+            if ld(r, RU_USED) != 0 && actwire.str_eq(r + RU_CLIENT, p1)
+                && actwire.str_eq(r + RU_GLOB, p2) {
+                t = i
+            }
+            i = i + 1
+        }
+    }
+    if t == actwire.NONE {
+        var e: [u8; 13] = "no_such_rule\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, p1)
+        return
+    }
+    let r2: u64 = ru(t)
+    var s_rv: [u8; 7] = "revoke\0"
+    var r_ok: [u8; 3] = "ok\0"
+    // write-ahead like every change
+    if !audit(pid, uid, r2 + RU_CLIENT, (&s_rv[0 as usize]) as u64,
+        r2 + RU_GLOB, (&s_allow[0 as usize]) as u64,
+        (&r_ok[0 as usize]) as u64, false) {
+        var e4: [u8; 18] = "audit_unavailable\0"
+        reply_err(pid, id, (&e4[0 as usize]) as u64, 0)
+        return
+    }
+    if ld(r2, RU_PERM) != 0 {
+        if !policy_drop(ld(r2, RU_DENY) != 0, r2 + RU_CLIENT, r2 + RU_GLOB) {
+            var e5: [u8; 20] = "policy_not_writable\0"
+            reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+            return
+        }
+    }
+    st(r2, RU_USED, 0)
+    var s_ok: [u8; 11] = "ok\nrevoke \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(r2 + RU_CLIENT)
+    actwire.ob_ch(32)
+    actwire.ob_str(r2 + RU_GLOB)
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
+// block <client> <glob>: a permanent deny rule
+fn do_block(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 31] = "denied only the user may block\0"
+    var e_bad: [u8; 30] = "bad_arg block <client> <glob>\0"
+    if !is_user(msg, uid) {
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    actwire.word_copy(msg, nx, p2, 32)
+    if ld8(p1, 0) == 0 || ld8(p2, 0) == 0 {
+        reply_err(pid, id, (&e_bad[0 as usize]) as u64, 0)
+        return
+    }
+    var s_bl: [u8; 6] = "block\0"
+    var r_ok: [u8; 3] = "ok\0"
+    if !audit(pid, uid, p1, (&s_bl[0 as usize]) as u64, p2,
+        (&s_deny[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false) {
+        var e4: [u8; 18] = "audit_unavailable\0"
+        reply_err(pid, id, (&e4[0 as usize]) as u64, 0)
+        return
+    }
+    var k_deny: [u8; 5] = "deny\0"
+    if !policy_append((&k_deny[0 as usize]) as u64, p1, p2, 0) {
+        var e5: [u8; 20] = "policy_not_writable\0"
+        reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+        return
+    }
+    if !rule_add(p1, p2, true, 0, 0) {
+        var e: [u8; 11] = "rules_full\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    st(ru(last_rule), RU_PERM, 1)
+    var s_ok: [u8; 10] = "ok\nblock \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(p1)
+    actwire.ob_ch(32)
+    actwire.ob_str(p2)
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
 // ============================================================ the loop
 
 fn on_request(s: u64) {
@@ -2702,6 +3670,9 @@ fn on_request(s: u64) {
     var k_hello: [u8; 6] = "hello\0"
     var k_stop: [u8; 5] = "stop\0"
     var k_who: [u8; 7] = "whoami\0"
+    var k_rights: [u8; 7] = "rights\0"
+    var k_revoke: [u8; 7] = "revoke\0"
+    var k_block: [u8; 6] = "block\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -2743,6 +3714,12 @@ fn on_request(s: u64) {
         do_hello(msg)
     } else if actwire.str_eq(vp, (&k_who[0 as usize]) as u64) {
         do_whoami(pid, id)
+    } else if actwire.str_eq(vp, (&k_rights[0 as usize]) as u64) {
+        do_rights(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_revoke[0 as usize]) as u64) {
+        do_revoke(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_block[0 as usize]) as u64) {
+        do_block(msg, pid, uid, id)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)
@@ -2793,6 +3770,7 @@ fn serve(limit: u64) -> u64 {
     }
     svc_evt = actwire.bus_reg((&n_evt[0 as usize]) as u64, actwire.A_ANY)
     policy_load()
+    seed_counts()
     var p_schema: [u8; 21] = "/etc/settings.schema\0"
     have_schema = setschema.load((&p_schema[0 as usize]) as u64) != setschema.NONE
     var d_apps: [u8; 7] = "/apps/\0"
