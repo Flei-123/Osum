@@ -1665,12 +1665,18 @@ lauf "52. der Anmeldeschirm, wie Justin ihn bedient: eine Taste ein Zeichen, Tab
 lauf "53. the action bus: manifests, one broker for every caller, rights, dry run, undo, audit, Jarvis through the bridge (tools/actionbus/run.sh, round ACTION-BUS)" \
      tools/actionbus/run.sh actionbus '^ACTIONBUS: |^ACTIONBUS-LATENCY |^== |^  OK    |^  FAIL  '
 
-# 54. THE SOCIAL LAYER (FirnChat docs/SOCIAL.md, docs/ACTION-BUS.md § 8):
+# 54. AB-016: the action bus in the SHIPPED image -- the stick is built,
+# booted like the Dell (UEFI, USB, default entry), and the session starts
+# the broker and the settings provider before the sign-in.
+lauf "54. the action bus in the real image: broker + settingsd started by the session, before the sign-in (tools/actionbus/image.sh, AB-016)" \
+     tools/actionbus/image.sh actbusimage '^ACTBUS-IMAGE: |^== |^  OK    |^  FAIL  '
+
+# 55. THE SOCIAL LAYER (FirnChat docs/SOCIAL.md, docs/ACTION-BUS.md § 8):
 # the service /bin/social on the action bus, providers as programs behind
 # one interface (Fleitec over the network with a device access token, the
 # device's own contacts), the friends bar reading it -- friends on the
 # host's fleikontakte see what was set on OrientOS.
-lauf "54. the social layer: social.* actions on orient-bus, providers behind one interface, presence/activity/privacy, the friends bar (tools/social/run.sh, round SOCIAL)" \
+lauf "55. the social layer: social.* actions on orient-bus, providers behind one interface, presence/activity/privacy, the friends bar (tools/social/run.sh, round SOCIAL)" \
      tools/social/run.sh social '^SOCIAL: |^== |^  OK    |^  FAIL  '
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie

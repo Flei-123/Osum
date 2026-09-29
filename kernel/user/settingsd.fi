@@ -1,0 +1,606 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/settingsd.fi -- AB-005: THE SYSTEM SETTINGS ON THE ACTION BUS
+// (docs/ACTION-BUS.md section 6).
+//
+// A provider like any other app: it registers `a.settings` (A_ROOT, so
+// the kernel lets only the broker through), says `hello settings`, and
+// answers the actions its manifest (/etc/actions.d/settings.actions)
+// declares:
+//
+//   settings.list [area]        every setting: value, type, range, risk, text
+//   settings.get key            one value
+//   settings.set key value      change it -- the broker has ALREADY checked
+//                               type and range against the schema and the
+//                               rights by the KEY (settings.<key>), so a
+//                               grant can be per area, and a critical key
+//                               always needed a human yes
+//   settings.history            the last changes: number, who, old, new
+//   settings.revert key change  put back what change <n> replaced
+//
+// Every change is journalled BEFORE it is made (/var/log/settings.journal:
+// number, time, client, key, old, new); no journal line, no change. Undo
+// works twice over: the bus undo (`act undo`: the manifest says
+// `undo settings.set`, this provider hands back key + old value) and
+// `settings.revert` for any change still in the history.
+//
+// Where a value lives: /etc/settings.db (key=value), or -- for a key with
+// `store <file> <field>` in the schema -- the configuration file the
+// program that uses it already reads. The settings window, a script and
+// Jarvis all change the same thing through the same door.
+//
+//   settingsd serve [ticks]
+
+profile kernel
+
+import ulib
+import libc.io
+import actwire
+import setschema
+
+export { u_start }
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut evt_no: u64 = 1
+static mut P_SCHEMA: [u8; 21] = "/etc/settings.schema\0"
+static mut P_DB: [u8; 17] = "/etc/settings.db\0"
+static mut P_JOURNAL: [u8; 26] = "/var/log/settings.journal\0"
+
+const CH_MAX: u64 = 32
+const CH_B: u64 = 192
+const CH_NO: u64 = 0
+const CH_KEY: u64 = 8 // 32 octets
+const CH_OLD: u64 = 40 // 64
+const CH_NEW: u64 = 104 // 64
+const CH_CLIENT: u64 = 168 // 24
+static mut changes: [u8; 6144] = [0 as u8; 6144]
+static mut ch_next: u64 = 1
+
+static mut lastmsg: u64 = 0
+
+fn ch(i: u64) -> u64 {
+    return (&changes[0 as usize]) as u64 + i * CH_B
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return actwire.ld8(p, i)
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    actwire.st8(p, i, v)
+}
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    say((&s[0 as usize]) as u64)
+}
+
+fn copyz(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while i + 1 < max && ld8(src, i) != 0 {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+    st8(dst, i, 0)
+}
+
+// ------------------------------------------------ values
+
+fn value_of(i: u64, out: u64) {
+    var found: bool = false
+    if setschema.has_store(i) {
+        found = actwire.kvfile_get(setschema.store_file(i), setschema.store_field(i), out, 64)
+    } else {
+        found = actwire.kvfile_get((&P_DB[0 as usize]) as u64, setschema.key(i), out, 64)
+    }
+    if !found {
+        copyz(out, setschema.default_of(i), 64)
+    }
+}
+
+fn value_put(i: u64, v: u64) -> bool {
+    if setschema.has_store(i) {
+        return actwire.kvfile_set(setschema.store_file(i), setschema.store_field(i), v)
+    }
+    return actwire.kvfile_set((&P_DB[0 as usize]) as u64, setschema.key(i), v)
+}
+
+// ------------------------------------------------ the journal
+
+fn journal(no: u64, client: u64, k: u64, old: u64, new: u64, verb: u64) -> bool {
+    var s_n: [u8; 3] = "n=\0"
+    var s_t: [u8; 4] = " t=\0"
+    var s_v: [u8; 7] = " verb=\0"
+    var s_c: [u8; 9] = " client=\0"
+    var s_k: [u8; 6] = " key=\0"
+    var s_o: [u8; 6] = " old=\0"
+    var s_w: [u8; 6] = " new=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_n[0 as usize]) as u64)
+    actwire.ob_num(no)
+    actwire.ob_str((&s_t[0 as usize]) as u64)
+    actwire.ob_num(actwire.ticks())
+    actwire.ob_str((&s_v[0 as usize]) as u64)
+    actwire.ob_str(verb)
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_str(client)
+    actwire.ob_str((&s_k[0 as usize]) as u64)
+    actwire.ob_str(k)
+    actwire.ob_str((&s_o[0 as usize]) as u64)
+    actwire.ob_str(old)
+    actwire.ob_str((&s_w[0 as usize]) as u64)
+    actwire.ob_str(new)
+    actwire.ob_ch(10)
+    let r: u64 = actwire.append_file((&P_JOURNAL[0 as usize]) as u64,
+        actwire.ob_ptr(), actwire.ob_len())
+    return !ulib.bad(r)
+}
+
+fn remember(no: u64, client: u64, k: u64, old: u64, new: u64) {
+    let c: u64 = ch((no - 1) % CH_MAX)
+    actwire.st64(c, CH_NO, no)
+    copyz(c + CH_KEY, k, 32)
+    copyz(c + CH_OLD, old, 64)
+    copyz(c + CH_NEW, new, 64)
+    copyz(c + CH_CLIENT, client, 24)
+}
+
+fn event(k: u64, v: u64, client: u64) {
+    var s_ev: [u8; 28] = "event settings.changed\nkey=\0"
+    var s_v: [u8; 8] = "\nvalue=\0"
+    var s_c: [u8; 9] = "\nclient=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ev[0 as usize]) as u64)
+    actwire.ob_str(k)
+    actwire.ob_str((&s_v[0 as usize]) as u64)
+    actwire.ob_str(v)
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_str(client)
+    actwire.ob_ch(10)
+    actwire.send_msg(svc_bus, actwire.K_EVT, evt_no, actwire.ob_ptr(),
+        actwire.ob_len())
+    evt_no = evt_no + 1
+}
+
+// ------------------------------------------------ the calls
+//
+// The reply is built in `obuf2` (the actwire output buffer is also used
+// by the journal and the event, so a reply is assembled at the end).
+
+static mut rbuf: [u8; 8192] = [0 as u8; 8192]
+static mut rlen: u64 = 0
+
+fn r_reset() {
+    rlen = 0
+    st8((&rbuf[0 as usize]) as u64, 0, 0)
+}
+
+fn r_str(p: u64) {
+    let n: u64 = actwire.slen(p)
+    var i: u64 = 0
+    while i < n && rlen + 1 < 8190 {
+        st8((&rbuf[0 as usize]) as u64, rlen, ld8(p, i))
+        rlen = rlen + 1
+        i = i + 1
+    }
+    st8((&rbuf[0 as usize]) as u64, rlen, 0)
+}
+
+fn r_ch(c: u64) {
+    if rlen + 1 < 8190 {
+        st8((&rbuf[0 as usize]) as u64, rlen, c)
+        rlen = rlen + 1
+        st8((&rbuf[0 as usize]) as u64, rlen, 0)
+    }
+}
+
+fn r_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var t: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        r_ch(48)
+        return
+    }
+    while x > 0 {
+        st8((&t[0 as usize]) as u64, n, 48 + x % 10)
+        x = x / 10
+        n = n + 1
+    }
+    var i: u64 = 0
+    while i < n {
+        st8((&d[0 as usize]) as u64, i, ld8((&t[0 as usize]) as u64, n - 1 - i))
+        i = i + 1
+    }
+    st8((&d[0 as usize]) as u64, n, 0)
+    r_str((&d[0 as usize]) as u64)
+}
+
+fn r_err(code: u64, detail: u64) {
+    var s_e: [u8; 5] = "err \0"
+    r_reset()
+    r_str((&s_e[0 as usize]) as u64)
+    r_str(code)
+    if detail != 0 {
+        r_ch(32)
+        r_str(detail)
+    }
+    r_ch(10)
+}
+
+fn do_list(msg: u64) {
+    var k_area: [u8; 5] = "area\0"
+    var area: [u8; 32] = [0 as u8; 32]
+    let arp: u64 = (&area[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_area[0 as usize]) as u64, arp, 32)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_cnt: [u8; 7] = "count=\0"
+    var s_ty: [u8; 7] = ".type=\0"
+    var s_tx: [u8; 7] = ".text=\0"
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < setschema.count() {
+        if setschema.in_area(i, arp) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&s_cnt[0 as usize]) as u64)
+    r_num(n)
+    r_ch(10)
+    var v: [u8; 64] = [0 as u8; 64]
+    var rg: [u8; 208] = [0 as u8; 208]
+    i = 0
+    while i < setschema.count() {
+        if setschema.in_area(i, arp) {
+            value_of(i, (&v[0 as usize]) as u64)
+            r_str(setschema.key(i))
+            r_ch(61)
+            r_str((&v[0 as usize]) as u64)
+            r_ch(10)
+            r_str(setschema.key(i))
+            r_str((&s_ty[0 as usize]) as u64)
+            r_str(setschema.type_name(setschema.typ(i)))
+            r_ch(32)
+            setschema.range_text(i, (&rg[0 as usize]) as u64)
+            r_str((&rg[0 as usize]) as u64)
+            r_ch(32)
+            r_str(setschema.risk_name(setschema.risk(i)))
+            r_ch(10)
+            r_str(setschema.key(i))
+            r_str((&s_tx[0 as usize]) as u64)
+            r_str(setschema.desc(i))
+            r_ch(10)
+        }
+        i = i + 1
+    }
+}
+
+// set / revert share the change itself. Returns true if something changed.
+fn change(i: u64, v: u64, client: u64, dry: bool, verb: u64) -> bool {
+    var old: [u8; 64] = [0 as u8; 64]
+    let op: u64 = (&old[0 as usize]) as u64
+    value_of(i, op)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_old: [u8; 5] = "old=\0"
+    var s_new: [u8; 5] = "new=\0"
+    if dry {
+        var s_d: [u8; 16] = "ok\ndry=1\nwould=\0"
+        var s_fr: [u8; 7] = " from \0"
+        var s_to: [u8; 5] = " to \0"
+        r_reset()
+        r_str((&s_d[0 as usize]) as u64)
+        r_str(setschema.key(i))
+        r_str((&s_fr[0 as usize]) as u64)
+        r_str(op)
+        r_str((&s_to[0 as usize]) as u64)
+        r_str(v)
+        r_ch(10)
+        return false
+    }
+    if actwire.str_eq(op, v) {
+        var s_un: [u8; 12] = "unchanged=1\0"
+        r_reset()
+        r_str((&s_ok[0 as usize]) as u64)
+        r_str((&s_old[0 as usize]) as u64)
+        r_str(op)
+        r_ch(10)
+        r_str((&s_un[0 as usize]) as u64)
+        r_ch(10)
+        return false
+    }
+    let no: u64 = ch_next
+    // write-ahead: the journal first, then the value
+    if !journal(no, client, setschema.key(i), op, v, verb) {
+        var e: [u8; 20] = "journal_unavailable\0"
+        r_err((&e[0 as usize]) as u64, setschema.key(i))
+        return false
+    }
+    if !value_put(i, v) {
+        var e2: [u8; 13] = "store_failed\0"
+        r_err((&e2[0 as usize]) as u64, setschema.key(i))
+        return false
+    }
+    ch_next = ch_next + 1
+    remember(no, client, setschema.key(i), op, v)
+    var s_c: [u8; 8] = "change=\0"
+    var s_u: [u8; 11] = "@undo key=\0"
+    var s_uv: [u8; 8] = " value=\0"
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&s_old[0 as usize]) as u64)
+    r_str(op)
+    r_ch(10)
+    r_str((&s_new[0 as usize]) as u64)
+    r_str(v)
+    r_ch(10)
+    r_str((&s_c[0 as usize]) as u64)
+    r_num(no)
+    r_ch(10)
+    // the inverse: settings.set (fixed by the manifest) with the old value
+    r_str((&s_u[0 as usize]) as u64)
+    r_str(setschema.key(i))
+    r_str((&s_uv[0 as usize]) as u64)
+    r_str(op)
+    r_ch(10)
+    event(setschema.key(i), v, client)
+    return true
+}
+
+fn do_history() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_cnt: [u8; 7] = "count=\0"
+    var s_ch: [u8; 8] = "change.\0"
+    var s_ar: [u8; 5] = " -> \0"
+    var s_by: [u8; 5] = " by \0"
+    var first: u64 = 1
+    if ch_next > CH_MAX {
+        first = ch_next - CH_MAX
+    }
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&s_cnt[0 as usize]) as u64)
+    r_num(ch_next - first)
+    r_ch(10)
+    var no: u64 = first
+    while no < ch_next {
+        let c: u64 = ch((no - 1) % CH_MAX)
+        r_str((&s_ch[0 as usize]) as u64)
+        r_num(no)
+        r_ch(61)
+        r_str(c + CH_KEY)
+        r_ch(32)
+        r_str(c + CH_OLD)
+        r_str((&s_ar[0 as usize]) as u64)
+        r_str(c + CH_NEW)
+        r_str((&s_by[0 as usize]) as u64)
+        r_str(c + CH_CLIENT)
+        r_ch(10)
+        no = no + 1
+    }
+}
+
+fn handle(msg: u64) -> bool {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var k_dry: [u8; 5] = "@dry\0"
+    var k_cl: [u8; 8] = "@client\0"
+    var k_key: [u8; 4] = "key\0"
+    var k_val: [u8; 6] = "value\0"
+    var k_chg: [u8; 7] = "change\0"
+    var dv: [u8; 4] = [0 as u8; 4]
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64,
+        (&dv[0 as usize]) as u64, 4)
+    var client: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&client[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_cl[0 as usize]) as u64, cp, 24)
+    var kb: [u8; 32] = [0 as u8; 32]
+    let kp: u64 = (&kb[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_key[0 as usize]) as u64, kp, 32)
+    var vb: [u8; 200] = [0 as u8; 200]
+    let valp: u64 = (&vb[0 as usize]) as u64
+
+    var k_ping: [u8; 5] = "ping\0"
+    var a_list: [u8; 14] = "settings.list\0"
+    var a_get: [u8; 13] = "settings.get\0"
+    var a_set: [u8; 13] = "settings.set\0"
+    var a_hist: [u8; 17] = "settings.history\0"
+    var a_rev: [u8; 16] = "settings.revert\0"
+    var e_key: [u8; 16] = "unknown_setting\0"
+    var e_val: [u8; 10] = "bad_value\0"
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_val: [u8; 7] = "value=\0"
+
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        var s_pong: [u8; 6] = "pong\n\0"
+        r_reset()
+        r_str((&s_pong[0 as usize]) as u64)
+        return false
+    }
+    if actwire.str_eq(np, (&a_list[0 as usize]) as u64) {
+        do_list(msg)
+        return false
+    }
+    if actwire.str_eq(np, (&a_hist[0 as usize]) as u64) {
+        do_history()
+        return false
+    }
+    let i: u64 = setschema.find(kp)
+    if i == setschema.NONE {
+        r_err((&e_key[0 as usize]) as u64, kp)
+        return false
+    }
+    if actwire.str_eq(np, (&a_get[0 as usize]) as u64) {
+        var v: [u8; 64] = [0 as u8; 64]
+        value_of(i, (&v[0 as usize]) as u64)
+        r_reset()
+        r_str((&s_ok[0 as usize]) as u64)
+        r_str((&s_val[0 as usize]) as u64)
+        r_str((&v[0 as usize]) as u64)
+        r_ch(10)
+        return false
+    }
+    if actwire.str_eq(np, (&a_set[0 as usize]) as u64) {
+        actwire.kv_find(msg, (&k_val[0 as usize]) as u64, valp, 200)
+        // the broker checked it; checked again, because a provider that
+        // trusts a single check is one bug away from a broken setting
+        var why: [u8; 80] = [0 as u8; 80]
+        if !setschema.validate(i, valp, (&why[0 as usize]) as u64) {
+            r_err((&e_val[0 as usize]) as u64, (&why[0 as usize]) as u64)
+            return false
+        }
+        var s_set: [u8; 4] = "set\0"
+        return change(i, valp, cp, dry, (&s_set[0 as usize]) as u64)
+    }
+    if actwire.str_eq(np, (&a_rev[0 as usize]) as u64) {
+        var cb: [u8; 24] = [0 as u8; 24]
+        actwire.kv_find(msg, (&k_chg[0 as usize]) as u64, (&cb[0 as usize]) as u64, 24)
+        let no: u64 = ulib.to_num((&cb[0 as usize]) as u64)
+        var e_no: [u8; 15] = "no_such_change\0"
+        var e_since: [u8; 14] = "changed_since\0"
+        if no == 0 || no >= ch_next || no + CH_MAX < ch_next {
+            r_err((&e_no[0 as usize]) as u64, (&cb[0 as usize]) as u64)
+            return false
+        }
+        let c: u64 = ch((no - 1) % CH_MAX)
+        if !actwire.str_eq(c + CH_KEY, kp) {
+            r_err((&e_no[0 as usize]) as u64, (&cb[0 as usize]) as u64)
+            return false
+        }
+        var cur: [u8; 64] = [0 as u8; 64]
+        value_of(i, (&cur[0 as usize]) as u64)
+        if !actwire.str_eq((&cur[0 as usize]) as u64, c + CH_NEW) {
+            // somebody changed it again since: putting the old value back
+            // would silently throw that away
+            r_err((&e_since[0 as usize]) as u64, kp)
+            return false
+        }
+        var old: [u8; 64] = [0 as u8; 64]
+        copyz((&old[0 as usize]) as u64, c + CH_OLD, 64)
+        var s_rev: [u8; 7] = "revert\0"
+        return change(i, (&old[0 as usize]) as u64, cp, dry,
+            (&s_rev[0 as usize]) as u64)
+    }
+    var e3: [u8; 15] = "unknown_action\0"
+    r_err((&e3[0 as usize]) as u64, np)
+    return false
+}
+
+fn serve(limit: u64) -> u64 {
+    if setschema.load((&P_SCHEMA[0 as usize]) as u64) == setschema.NONE {
+        var e0: [u8; 45] = "settingsd: no usable /etc/settings.schema\n\0\0\0"
+        say((&e0[0 as usize]) as u64)
+        return 1
+    }
+    var n_me: [u8; 11] = "a.settings\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        var e: [u8; 29] = "settingsd: a.settings taken\n\0"
+        say((&e[0 as usize]) as u64)
+        return 1
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        ulib.sleep_ms(10)
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 31] = "settingsd: no orient.bus here\n\0"
+        say((&e2[0 as usize]) as u64)
+        return 1
+    }
+    var s_hello: [u8; 16] = "hello settings\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 15)
+    var s_ready: [u8; 25] = "settingsd: ready keys=\0\0\0"
+    say((&s_ready[0 as usize]) as u64)
+    actwire.outnum(setschema.count())
+    nl()
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    lastmsg = t1
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            lastmsg = actwire.ticks()
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id,
+                        (&rbuf[0 as usize]) as u64, rlen)
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            if actwire.ticks() - last_check > 100 {
+                last_check = actwire.ticks()
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    var s_by: [u8; 31] = "settingsd: orient-bus is gone\n\0"
+                    say((&s_by[0 as usize]) as u64)
+                    return 0
+                }
+            }
+            // idle: sleep instead of spinning (the kernel bus cannot
+            // block yet, S-003) -- busy only for 0.2 s after a message
+            if actwire.ticks() - lastmsg > 20 {
+                ulib.sleep_ms(10)
+            } else {
+                actwire.yield_now()
+            }
+        }
+    }
+    return 0
+}
+
+// `settingsd check <schema>`: the schema as this system understands it
+fn check(path: u64) -> u64 {
+    let n: u64 = setschema.load(path)
+    var s1: [u8; 27] = "settingsd: schema ok keys=\0"
+    var s2: [u8; 26] = "settingsd: schema FAILED\n\0"
+    if n == setschema.NONE {
+        say((&s2[0 as usize]) as u64)
+        return 1
+    }
+    say((&s1[0 as usize]) as u64)
+    actwire.outnum(n)
+    nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var h: [u8; 51] = "usage: settingsd serve [ticks] | check <schema>\n\0\0\0"
+    var c_serve: [u8; 6] = "serve\0"
+    var c_check: [u8; 6] = "check\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if argc >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    if argc >= 3 && actwire.str_eq(ulib.arg_at(args, 1), (&c_check[0 as usize]) as u64) {
+        return check(ulib.arg_at(args, 2))
+    }
+    say((&h[0 as usize]) as u64)
+    return 1
+}

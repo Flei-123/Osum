@@ -1,0 +1,629 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/setschema.fi -- AB-005: THE SETTINGS SCHEMA
+// (docs/ACTION-BUS.md section 6).
+//
+// Every system setting is declared ONCE, in /etc/settings.schema:
+//
+//   schema 1
+//   setting display.brightness int 0..100 harmless "Screen brightness in percent"
+//     default 80
+//   setting lock.idle int 0..3600 harmless "Seconds until the screen locks, 0 = never"
+//     default 300
+//     store /etc/sperre.conf leerlauf
+//   setting net.wifi.enabled bool - critical "Wi-Fi on or off"
+//   setting ui.theme enum tageslicht,nacht harmless "Colour scheme"
+//
+// key, type (int with min..max, bool, enum with the allowed words, string
+// with its longest length), risk (harmless / critical), a description a
+// person AND a language model can read. `store <file> <field>` keeps the
+// value in an existing configuration file (key=value lines) instead of
+// /etc/settings.db, so the program that reads that file sees the change.
+//
+// Two programs read this file with this module: the BROKER, which checks
+// the value against type and range and decides the rights by the key
+// (`settings.<key>`, so a grant can be per area), and the provider
+// `settingsd`, which stores it. One reader, two users -- a value the
+// broker let through is a value the provider can store.
+
+profile kernel
+
+import ulib
+import libc.io
+import actwire
+
+export {
+    NONE, T_INT, T_BOOL, T_ENUM, T_STRING, R_HARMLESS, R_CRITICAL,
+    load, count, find, key, typ, risk, lo, hi, choices, desc, default_of,
+    store_file, store_field, has_store, validate, type_name, risk_name,
+    range_text, in_area
+}
+
+const NONE: u64 = 0xFFFFFFFF
+
+const T_INT: u64 = 0
+const T_BOOL: u64 = 1
+const T_ENUM: u64 = 2
+const T_STRING: u64 = 3
+
+const R_HARMLESS: u64 = 0
+const R_CRITICAL: u64 = 1
+
+const SE_MAX: u64 = 48
+const SE_B: u64 = 96
+const F_KEY: u64 = 0 // 32 octets
+const F_TYPE: u64 = 32
+const F_LO: u64 = 40
+const F_HI: u64 = 48
+const F_RISK: u64 = 56
+const F_ENUM: u64 = 64 // pool offset
+const F_DESC: u64 = 72
+const F_DEF: u64 = 80
+const F_FILE: u64 = 88 // pool offset of "<file>\0<field>\0", 0 = none
+static mut tab: [u8; 4608] = [0 as u8; 4608]
+static mut n_set: u64 = 0
+
+const POOL_MAX: u64 = 6144
+static mut pool: [u8; 6144] = [0 as u8; 6144]
+static mut pool_at: u64 = 1
+
+static mut buf: [u8; 8192] = [0 as u8; 8192]
+
+static mut S_INT: [u8; 4] = "int\0"
+static mut S_BOOL: [u8; 5] = "bool\0"
+static mut S_ENUM: [u8; 5] = "enum\0"
+static mut S_STRING: [u8; 7] = "string\0"
+static mut S_HARM: [u8; 9] = "harmless\0"
+static mut S_CRIT: [u8; 9] = "critical\0"
+
+// v as decimal digits, zero-terminated, into out
+fn dec(v: u64, out: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        st8(out, 0, 48)
+        st8(out, 1, 0)
+        return
+    }
+    while x > 0 {
+        st8((&t[0 as usize]) as u64, n, 48 + x % 10)
+        x = x / 10
+        n = n + 1
+    }
+    var i: u64 = 0
+    while i < n {
+        st8(out, i, ld8((&t[0 as usize]) as u64, n - 1 - i))
+        i = i + 1
+    }
+    st8(out, n, 0)
+}
+
+fn se(i: u64) -> u64 {
+    return (&tab[0 as usize]) as u64 + i * SE_B
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return actwire.ld8(p, i)
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    actwire.st8(p, i, v)
+}
+
+fn ld(p: u64, off: u64) -> u64 {
+    return actwire.ld64(p, off)
+}
+
+fn st(p: u64, off: u64, v: u64) {
+    actwire.st64(p, off, v)
+}
+
+fn pl(off: u64) -> u64 {
+    return (&pool[0 as usize]) as u64 + off
+}
+
+fn pool_add(src: u64, n: u64) -> u64 {
+    if pool_at + n + 1 >= POOL_MAX {
+        return 0
+    }
+    let at: u64 = pool_at
+    var i: u64 = 0
+    while i < n {
+        st8(pl(0), at + i, ld8(src, i))
+        i = i + 1
+    }
+    st8(pl(0), at + n, 0)
+    pool_at = at + n + 1
+    return at
+}
+
+fn copyz(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while i + 1 < max && ld8(src, i) != 0 {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+    st8(dst, i, 0)
+}
+
+fn say_fail(path: u64, line: u64, why: u64) {
+    var s1: [u8; 12] = "setschema: \0"
+    var s2: [u8; 7] = " line \0"
+    var s3: [u8; 3] = ": \0"
+    var s4: [u8; 2] = "\n\0"
+    actwire.eout((&s1[0 as usize]) as u64)
+    actwire.eout(path)
+    actwire.eout((&s2[0 as usize]) as u64)
+    var d: [u8; 24] = [0 as u8; 24]
+    dec(line, (&d[0 as usize]) as u64)
+    actwire.eout((&d[0 as usize]) as u64)
+    actwire.eout((&s3[0 as usize]) as u64)
+    actwire.eout(why)
+    actwire.eout((&s4[0 as usize]) as u64)
+}
+
+// the text between the first and the last double quote of [from, to)
+fn quoted(p: u64, from: u64, to: u64, out: u64, max: u64) {
+    var a: u64 = from
+    while a < to && ld8(p, a) != 34 {
+        a = a + 1
+    }
+    var b: u64 = to
+    while b > a + 1 && ld8(p, b - 1) != 34 {
+        b = b - 1
+    }
+    if a >= to || b <= a + 1 {
+        st8(out, 0, 0)
+        return
+    }
+    var n: u64 = b - a - 2
+    if n + 1 > max {
+        n = max - 1
+    }
+    var i: u64 = 0
+    while i < n {
+        st8(out, i, ld8(p, a + 1 + i))
+        i = i + 1
+    }
+    st8(out, n, 0)
+}
+
+fn num_of(p: u64, from: u64, to: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = from
+    while i < to {
+        let c: u64 = ld8(p, i)
+        if c < 48 || c > 57 {
+            return NONE
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if to == from {
+        return NONE
+    }
+    return v
+}
+
+fn valid_key(k: u64) -> bool {
+    let n: u64 = actwire.slen(k)
+    if n == 0 || n > 30 {
+        return false
+    }
+    var dot: bool = false
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld8(k, i)
+        if c == 46 {
+            dot = true
+        } else if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95) {
+            return false
+        }
+        i = i + 1
+    }
+    return dot && ld8(k, 0) != 46 && ld8(k, n - 1) != 46
+}
+
+// Reads the schema. Returns the number of settings, or NONE if the file
+// is missing or broken -- a broken schema is refused as a whole, never
+// used by halves (the same rule as for manifests).
+fn load(path: u64) -> u64 {
+    n_set = 0
+    pool_at = 1
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return NONE
+    }
+    let p: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return NONE
+    }
+    st8(p, n, 0)
+    var w1: [u8; 40] = [0 as u8; 40]
+    var w2: [u8; 40] = [0 as u8; 40]
+    var w3: [u8; 40] = [0 as u8; 40]
+    var w4: [u8; 200] = [0 as u8; 200]
+    var w5: [u8; 40] = [0 as u8; 40]
+    var q: [u8; 200] = [0 as u8; 200]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let p4: u64 = (&w4[0 as usize]) as u64
+    let p5: u64 = (&w5[0 as usize]) as u64
+    let pq: u64 = (&q[0 as usize]) as u64
+    var k_schema: [u8; 7] = "schema\0"
+    var k_setting: [u8; 8] = "setting\0"
+    var k_default: [u8; 8] = "default\0"
+    var k_store: [u8; 6] = "store\0"
+    var k_one: [u8; 2] = "1\0"
+    var k_int: [u8; 4] = "int\0"
+    var k_bool: [u8; 5] = "bool\0"
+    var k_enum: [u8; 5] = "enum\0"
+    var k_string: [u8; 7] = "string\0"
+    var k_harm: [u8; 9] = "harmless\0"
+    var k_crit: [u8; 9] = "critical\0"
+    var e_first: [u8; 30] = "first line must be 'schema 1'\0"
+    var e_key: [u8; 50] = "a key is area.name, a-z 0-9 _, at most 30 octets\0\0"
+    var e_type: [u8; 39] = "type must be int, bool, enum or string\0"
+    var e_range: [u8; 48] = "range: int min..max, enum a,b,c, string length\0\0"
+    var e_risk: [u8; 34] = "risk must be harmless or critical\0"
+    var e_dup: [u8; 20] = "key declared twice\0\0"
+    var e_full: [u8; 16] = "tables are full\0"
+    var e_orph: [u8; 28] = "default/store before a key\0\0"
+    var e_def: [u8; 36] = "the default is not a valid value\0\0\0\0"
+    var e_unk: [u8; 13] = "unknown word\0"
+    var why: [u8; 80] = [0 as u8; 80]
+    let wp: u64 = (&why[0 as usize]) as u64
+    var cur: u64 = NONE
+    var line: u64 = 0
+    var at: u64 = 0
+    var head: bool = false
+    var ok: bool = true
+    while ok && ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        line = line + 1
+        var s: u64 = at
+        while s < e && ld8(p, s) == 32 {
+            s = s + 1
+        }
+        if s < e && ld8(p, s) != 35 {
+            let save: u64 = ld8(p, e)
+            st8(p, e, 0)
+            var nx: u64 = actwire.word_copy(p, s, p1, 40)
+            nx = actwire.word_copy(p, nx, p2, 40)
+            nx = actwire.word_copy(p, nx, p3, 40)
+            nx = actwire.word_copy(p, nx, p4, 200)
+            actwire.word_copy(p, nx, p5, 40)
+            quoted(p, s, e, pq, 200)
+            if !head {
+                if !actwire.str_eq(p1, (&k_schema[0 as usize]) as u64)
+                    || !actwire.str_eq(p2, (&k_one[0 as usize]) as u64) {
+                    say_fail(path, line, (&e_first[0 as usize]) as u64)
+                    ok = false
+                }
+                head = true
+            } else if actwire.str_eq(p1, (&k_setting[0 as usize]) as u64) {
+                // setting <key> <type> <range> <risk> "<desc>"
+                var t: u64 = NONE
+                if actwire.str_eq(p3, (&k_int[0 as usize]) as u64) {
+                    t = T_INT
+                } else if actwire.str_eq(p3, (&k_bool[0 as usize]) as u64) {
+                    t = T_BOOL
+                } else if actwire.str_eq(p3, (&k_enum[0 as usize]) as u64) {
+                    t = T_ENUM
+                } else if actwire.str_eq(p3, (&k_string[0 as usize]) as u64) {
+                    t = T_STRING
+                }
+                var r: u64 = NONE
+                if actwire.str_eq(p5, (&k_harm[0 as usize]) as u64) {
+                    r = R_HARMLESS
+                } else if actwire.str_eq(p5, (&k_crit[0 as usize]) as u64) {
+                    r = R_CRITICAL
+                }
+                var lo_v: u64 = 0
+                var hi_v: u64 = 0
+                var en: u64 = 0
+                var rok: bool = true
+                if t == T_INT {
+                    // min..max
+                    let rl: u64 = actwire.slen(p4)
+                    var dd: u64 = 0
+                    while dd + 1 < rl && !(ld8(p4, dd) == 46 && ld8(p4, dd + 1) == 46) {
+                        dd = dd + 1
+                    }
+                    if dd + 1 >= rl {
+                        rok = false
+                    } else {
+                        lo_v = num_of(p4, 0, dd)
+                        hi_v = num_of(p4, dd + 2, rl)
+                        if lo_v == NONE || hi_v == NONE || lo_v > hi_v {
+                            rok = false
+                        }
+                    }
+                } else if t == T_ENUM {
+                    rok = actwire.slen(p4) > 0 && ld8(p4, 0) != 44
+                    en = pool_add(p4, actwire.slen(p4))
+                } else if t == T_STRING {
+                    hi_v = num_of(p4, 0, actwire.slen(p4))
+                    rok = hi_v != NONE && hi_v > 0 && hi_v <= 200
+                }
+                if !valid_key(p2) {
+                    say_fail(path, line, (&e_key[0 as usize]) as u64)
+                    ok = false
+                } else if t == NONE {
+                    say_fail(path, line, (&e_type[0 as usize]) as u64)
+                    ok = false
+                } else if !rok {
+                    say_fail(path, line, (&e_range[0 as usize]) as u64)
+                    ok = false
+                } else if r == NONE {
+                    say_fail(path, line, (&e_risk[0 as usize]) as u64)
+                    ok = false
+                } else if find(p2) != NONE {
+                    say_fail(path, line, (&e_dup[0 as usize]) as u64)
+                    ok = false
+                } else if n_set >= SE_MAX {
+                    say_fail(path, line, (&e_full[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    let c: u64 = se(n_set)
+                    var i: u64 = 0
+                    while i < SE_B {
+                        st8(c, i, 0)
+                        i = i + 1
+                    }
+                    copyz(c + F_KEY, p2, 32)
+                    st(c, F_TYPE, t)
+                    st(c, F_LO, lo_v)
+                    st(c, F_HI, hi_v)
+                    st(c, F_RISK, r)
+                    st(c, F_ENUM, en)
+                    st(c, F_DESC, pool_add(pq, actwire.slen(pq)))
+                    cur = n_set
+                    n_set = n_set + 1
+                }
+            } else if actwire.str_eq(p1, (&k_default[0 as usize]) as u64) {
+                if cur == NONE {
+                    say_fail(path, line, (&e_orph[0 as usize]) as u64)
+                    ok = false
+                } else if !validate(cur, p2, wp) {
+                    say_fail(path, line, (&e_def[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    st(se(cur), F_DEF, pool_add(p2, actwire.slen(p2)))
+                }
+            } else if actwire.str_eq(p1, (&k_store[0 as usize]) as u64) {
+                if cur == NONE || actwire.slen(p2) == 0 || actwire.slen(p3) == 0 {
+                    say_fail(path, line, (&e_orph[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    // "<file>\0<field>\0" in the pool
+                    let off: u64 = pool_add(p2, actwire.slen(p2))
+                    pool_add(p3, actwire.slen(p3))
+                    st(se(cur), F_FILE, off)
+                }
+            } else {
+                say_fail(path, line, (&e_unk[0 as usize]) as u64)
+            }
+            st8(p, e, save)
+        }
+        at = e
+        if ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+    if !ok || !head {
+        n_set = 0
+        return NONE
+    }
+    return n_set
+}
+
+fn count() -> u64 {
+    return n_set
+}
+
+fn find(k: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_set {
+        if actwire.str_eq(se(i) + F_KEY, k) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn key(i: u64) -> u64 {
+    return se(i) + F_KEY
+}
+
+fn typ(i: u64) -> u64 {
+    return ld(se(i), F_TYPE)
+}
+
+fn risk(i: u64) -> u64 {
+    return ld(se(i), F_RISK)
+}
+
+fn lo(i: u64) -> u64 {
+    return ld(se(i), F_LO)
+}
+
+fn hi(i: u64) -> u64 {
+    return ld(se(i), F_HI)
+}
+
+fn choices(i: u64) -> u64 {
+    return pl(ld(se(i), F_ENUM))
+}
+
+fn desc(i: u64) -> u64 {
+    return pl(ld(se(i), F_DESC))
+}
+
+// the default, "" if none was declared
+fn default_of(i: u64) -> u64 {
+    return pl(ld(se(i), F_DEF))
+}
+
+fn has_store(i: u64) -> bool {
+    return ld(se(i), F_FILE) != 0
+}
+
+fn store_file(i: u64) -> u64 {
+    return pl(ld(se(i), F_FILE))
+}
+
+fn store_field(i: u64) -> u64 {
+    let f: u64 = store_file(i)
+    return f + actwire.slen(f) + 1
+}
+
+fn type_name(t: u64) -> u64 {
+    if t == T_INT {
+        return (&S_INT[0 as usize]) as u64
+    }
+    if t == T_BOOL {
+        return (&S_BOOL[0 as usize]) as u64
+    }
+    if t == T_ENUM {
+        return (&S_ENUM[0 as usize]) as u64
+    }
+    return (&S_STRING[0 as usize]) as u64
+}
+
+fn risk_name(r: u64) -> u64 {
+    if r == R_CRITICAL {
+        return (&S_CRIT[0 as usize]) as u64
+    }
+    return (&S_HARM[0 as usize]) as u64
+}
+
+// "0..100", "a,b,c", "-" (bool), "<=64" (string) into `out`
+fn range_text(i: u64, out: u64) {
+    let t: u64 = typ(i)
+    if t == T_INT {
+        dec(lo(i), out)
+        var dd: [u8; 3] = "..\0"
+        ulib.strcat(out, (&dd[0 as usize]) as u64)
+        var d: [u8; 24] = [0 as u8; 24]
+        dec(hi(i), (&d[0 as usize]) as u64)
+        ulib.strcat(out, (&d[0 as usize]) as u64)
+        return
+    }
+    if t == T_ENUM {
+        copyz(out, choices(i), 200)
+        return
+    }
+    if t == T_STRING {
+        var le: [u8; 3] = "<=\0"
+        copyz(out, (&le[0 as usize]) as u64, 8)
+        var d2: [u8; 24] = [0 as u8; 24]
+        dec(hi(i), (&d2[0 as usize]) as u64)
+        ulib.strcat(out, (&d2[0 as usize]) as u64)
+        return
+    }
+    var dash: [u8; 2] = "-\0"
+    copyz(out, (&dash[0 as usize]) as u64, 4)
+}
+
+// Is `v` a value of setting `i`? If not, `why` says what is wrong.
+fn validate(i: u64, v: u64, why: u64) -> bool {
+    let t: u64 = typ(i)
+    var e_int: [u8; 19] = "not a whole number\0"
+    var e_rng: [u8; 13] = "out of range\0"
+    var e_bool: [u8; 22] = "must be true or false\0"
+    var e_enum: [u8; 21] = "not one of the words\0"
+    var e_long: [u8; 9] = "too long\0"
+    var e_ctl: [u8; 26] = "control characters inside\0"
+    let n: u64 = actwire.slen(v)
+    var k: u64 = 0
+    while k < n {
+        if ld8(v, k) < 32 {
+            copyz(why, (&e_ctl[0 as usize]) as u64, 80)
+            return false
+        }
+        k = k + 1
+    }
+    if t == T_INT {
+        let x: u64 = num_of(v, 0, n)
+        if x == NONE {
+            copyz(why, (&e_int[0 as usize]) as u64, 80)
+            return false
+        }
+        if x < lo(i) || x > hi(i) {
+            copyz(why, (&e_rng[0 as usize]) as u64, 80)
+            return false
+        }
+        return true
+    }
+    if t == T_BOOL {
+        var s_t: [u8; 5] = "true\0"
+        var s_f: [u8; 6] = "false\0"
+        if actwire.str_eq(v, (&s_t[0 as usize]) as u64)
+            || actwire.str_eq(v, (&s_f[0 as usize]) as u64) {
+            return true
+        }
+        copyz(why, (&e_bool[0 as usize]) as u64, 80)
+        return false
+    }
+    if t == T_ENUM {
+        // compare against every comma-separated word
+        let c: u64 = choices(i)
+        var a: u64 = 0
+        var going: bool = true
+        while going {
+            var b: u64 = a
+            while ld8(c, b) != 0 && ld8(c, b) != 44 {
+                b = b + 1
+            }
+            if b - a == n && n > 0 {
+                var same: bool = true
+                var j: u64 = 0
+                while same && j < n {
+                    if ld8(c, a + j) != ld8(v, j) {
+                        same = false
+                    }
+                    j = j + 1
+                }
+                if same {
+                    return true
+                }
+            }
+            if ld8(c, b) == 0 {
+                going = false
+            } else {
+                a = b + 1
+            }
+        }
+        copyz(why, (&e_enum[0 as usize]) as u64, 80)
+        return false
+    }
+    // string
+    if n > hi(i) {
+        copyz(why, (&e_long[0 as usize]) as u64, 80)
+        return false
+    }
+    return true
+}
+
+// Does key `i` belong to `area` ("" = all; "display" matches
+// "display.brightness", not "displayx.y")?
+fn in_area(i: u64, area: u64) -> bool {
+    let n: u64 = actwire.slen(area)
+    if n == 0 {
+        return true
+    }
+    let k: u64 = key(i)
+    var j: u64 = 0
+    while j < n {
+        if ld8(k, j) != ld8(area, j) {
+            return false
+        }
+        j = j + 1
+    }
+    return ld8(k, n) == 46 || ld8(k, n) == 0
+}
