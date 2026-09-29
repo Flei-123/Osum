@@ -49,7 +49,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd su"
+PROGS="sh ls cat echo sleep mkdir cp chmod orientbus notes act settingsd su dhcp"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -999,6 +999,182 @@ hasnot "$TMPD/p.txt" "allow jarvis notes.* write" "... and the revoked grant sta
 grep -qaE 'panic|EXCEPTION' "$R" "$R2" && bad "a panic or exception in the section-15 guests" || ok "no panic, no exception"
 
 # ===================================================================
+# ===================================================================
+echo "== 16. AB-005c: sound, language and DHCP where they really live =="
+# ===================================================================
+# A guest WITH a sound card (intel-hda) and the session of justin: the
+# bus reads and writes the card (sound.volume/sound.mute), the language
+# lands in justin's own /users/justin/config/locale (handed to him), and
+# net.dhcp is modus= in /etc/network.conf. GEGENPROBEN: without a
+# session the language stays in the database; "fixed" without an ip= is
+# refused; undo gives the language back.
+printf 'modus=fest\nip=10.0.2.15\nmaske=255.255.255.0\ngateway=10.0.2.2\n' > "$TMPD/net16"
+cat > "$TMPD/s16.sh" <<'EOS'
+mkdir /users
+mkdir /users/justin
+orientbus serve 60000 &
+sleep -m 300
+settingsd serve 60000 &
+sleep 1
+echo ==V-VOL==
+act call settings.set key=sound.volume value=35
+act call settings.get key=sound.volume
+act call settings.set key=sound.mute value=true
+act call settings.get key=sound.mute
+act call settings.set key=sound.mute value=false
+echo ==V-NOSESS==
+act call settings.set key=locale.language value=en
+act call settings.get key=locale.language
+cat /etc/settings.db
+echo ==V-LANG==
+setsess 1000
+act call settings.set key=locale.language value=de
+cat /users/justin/config/locale
+echo ==V-OWN==
+su justin /bin/chmod 600 /users/justin/config/locale
+echo rc=$?
+su mara /bin/chmod 666 /users/justin/config/locale
+echo rc=$?
+echo ==V-GET==
+act call settings.get key=locale.language
+echo ==V-UNDO==
+act undo
+cat /users/justin/config/locale
+echo ==V-DGET==
+act call settings.get key=net.dhcp
+echo ==V-DSET==
+act call settings.set key=net.dhcp value=true
+act confirm last
+cat /etc/network.conf
+act call settings.get key=net.dhcp
+echo ==V-DOFF==
+act call settings.set key=net.dhcp value=false
+act confirm last
+cat /etc/network.conf
+echo ==V-NOIP==
+echo modus=dhcp > /etc/network.conf
+act call settings.set key=net.dhcp value=false
+act confirm last
+cat /etc/network.conf
+echo ==V-DB==
+cat /etc/settings.db
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/passwd=$TMPD/passwd15" "/etc/group=$TMPD/group15"
+       "/bin/setsess=$TMPD/setsess" "/etc/network.conf=$TMPD/net16"
+       "/etc/settings.schema=etc/settings.schema"
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+image "$TMPD/V.img" "$TMPD/s16.sh"
+EXTRA=()
+timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus audio nosounds script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/v.txt" -display none -no-reboot \
+    -audiodev "wav,id=snd0,path=$TMPD/v.wav" \
+    -device intel-hda -device hda-duplex,audiodev=snd0 \
+    -drive "file=$TMPD/V.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/v.txt" > "$TMPD/v.klar" 2>/dev/null || true
+V="$TMPD/v.klar"
+grep -qa '==FERTIG==' "$V" || { bad "section-16 guest did not finish"; tail -20 "$V" | sed 's/^/        /'; }
+part "$V" V-VOL V-NOSESS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "settingsd: sound card volume=35 rc=0" "sound.volume goes to the sound card (SYS_AUDSET), not into a file"
+has "$TMPD/p.txt" "value=35" "... and settings.get reads it back FROM the card"
+has "$TMPD/p.txt" "value=true" "sound.mute: set and read back through the card"
+part "$V" V-NOSESS V-LANG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "locale.language=en" "GEGENPROBE: without a session the language stays in /etc/settings.db"
+part "$V" V-LANG V-UNDO > "$TMPD/p.txt"
+has "$TMPD/p.txt" "settingsd: language for uid=1000 ok=1" "with justin's session settingsd writes HIS choice"
+grep -qaE '^de$' "$TMPD/p.txt" && ok "... into /users/justin/config/locale (the file msg.fi reads first)" || bad "no 'de' in /users/justin/config/locale"
+has "$TMPD/p.txt" "settingsd: chown rc=0" "... handed to him (chown)"
+part "$V" V-OWN V-GET > "$TMPD/p.txt"
+grep -qa '^rc=0' "$TMPD/p.txt" && ok "... his file: justin may chmod it (only the owner may)" || bad "justin cannot chmod his own locale file: $(tr '\n' '|' < "$TMPD/p.txt")"
+grep -qaE '^rc=[1-9]' "$TMPD/p.txt" && ok "GEGENPROBE: mara may not" || bad "mara could chmod justin's file"
+part "$V" V-GET V-UNDO > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=de" "settings.get reads the language from his file"
+part "$V" V-UNDO V-DGET > "$TMPD/p.txt"
+grep -qaE '^en$' "$TMPD/p.txt" && ok "undo writes the old language back into his file" || bad "undo: $(tr '\n' '|' < "$TMPD/p.txt" | cut -c1-200)"
+part "$V" V-DGET V-DSET > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=false" "net.dhcp is read from /etc/network.conf (modus=fest -> false)"
+part "$V" V-DSET V-DOFF > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm " "net.dhcp is critical: the user is asked too"
+has "$TMPD/p.txt" "modus=dhcp" "after the yes: modus=dhcp in /etc/network.conf"
+has "$TMPD/p.txt" "ip=10.0.2.15" "... every other line of the file stays"
+has "$TMPD/p.txt" "settingsd: dhcp started pid=" "... and /bin/dhcp is started (as the page did)"
+part "$V" V-DOFF V-NOIP > "$TMPD/p.txt"
+has "$TMPD/p.txt" "modus=fest" "back to the fixed address that is written there"
+part "$V" V-NOIP V-DB > "$TMPD/p.txt"
+has "$TMPD/p.txt" "net.dhcp=false refused, no ip=" "GEGENPROBE: 'fixed' without an address is refused"
+has "$TMPD/p.txt" "modus=dhcp" "... and the file is untouched"
+part "$V" V-DB FERTIG > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "sound.volume" "the volume never went into /etc/settings.db"
+hasnot "$TMPD/p.txt" "net.dhcp" "... nor net.dhcp"
+grep -qaE 'panic|EXCEPTION' "$V" && bad "a panic or exception in the section-16 guest" || ok "no panic, no exception (section 16)"
+
+# ===================================================================
+echo "== 17. AB-002: the bus blocks -- an idle broker does not run =="
+# ===================================================================
+# Before this round the broker and settingsd turned once per tick (and
+# yielded in between) while nothing happened. Now they wait in the
+# kernel (BUS_RECV with a wait, S_POLL) and are woken by the delivery.
+# Measured: how often the scheduler ran each of them in 5 idle seconds
+# (/proc/<pid>/status Runs:). The wait is capped at 100 ms for their
+# timers, so the ceiling is ~50 wakes; the old loop was ~500.
+# And a call still gets through at once (the latency of section 10).
+cat > "$TMPD/s17.sh" <<'EOS'
+orientbus serve 0 &
+B=$!
+sleep -m 300
+settingsd serve 0 &
+S=$!
+notes serve 0 &
+sleep 2
+echo ==I-A==
+cat /proc/$B/status
+cat /proc/$S/status
+sleep 5
+echo ==I-B==
+cat /proc/$B/status
+cat /proc/$S/status
+echo ==I-CALL==
+act call settings.get key=lock.idle
+act bench 500
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/settings.schema=etc/settings.schema"
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+image "$TMPD/I.img" "$TMPD/s17.sh"
+EXTRA=()
+run "$TMPD/I.img" i 1 90
+I="$TMPD/i.klar"
+grep -qa '==FERTIG==' "$I" || { bad "section-17 guest did not finish"; tail -20 "$I" | sed 's/^/        /'; }
+python3 - "$I" <<'PY' > "$TMPD/idle.txt"
+import re, sys
+t = open(sys.argv[1], errors="replace").read()
+def runs(a, b):
+    seg = t.split("==%s==" % a, 1)[1].split("==%s==" % b, 1)[0]
+    return [int(x) for x in re.findall(r"Runs:\s*(\d+)", seg)]
+a = runs("I-A", "I-B"); b = runs("I-B", "I-CALL")
+if len(a) == 2 and len(b) == 2:
+    print("broker=%d settingsd=%d" % (b[0] - a[0], b[1] - a[1]))
+else:
+    print("none")
+PY
+IDLE=$(cat "$TMPD/idle.txt")
+note "scheduler runs in 5 idle seconds: $IDLE"
+db=$(echo "$IDLE" | sed -n 's/broker=\([0-9]*\).*/\1/p'); ds=$(echo "$IDLE" | sed -n 's/.*settingsd=\([0-9]*\).*/\1/p')
+[ -n "$db" ] && [ "$db" -le 80 ] && ok "the idle broker ran $db times in 5 s (<= 80; the old loop slept 10 ms per turn: up to 500)" || bad "idle broker runs: ${db:-?}"
+[ -n "$ds" ] && [ "$ds" -le 80 ] && ok "idle settingsd ran $ds times in 5 s (<= 80)" || bad "idle settingsd runs: ${ds:-?}"
+part "$I" I-CALL FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=300" "after the idle wait a call is answered (the delivery woke them)"
+Li=$(grep -a 'act: bench calls=500' "$TMPD/p.txt" | tail -1)
+usi=$(echo "$Li" | sed -n 's/.*us_per_call=\([0-9]*\).*/\1/p')
+[ -n "$usi" ] && [ "$usi" -le 2000 ] && ok "blocking receive: 500 round trips at ${usi} us each (limit 2000)" || bad "bench after idle: ${Li:-none}"
+echo "ACTIONBUS-IDLE $IDLE us_blocking=${usi:-?}"
+grep -qaE 'panic|EXCEPTION' "$I" && bad "a panic or exception in the section-17 guest" || ok "no panic, no exception (section 17)"
+
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================
 # The JARVIS server side is tools/bridge/peer.py (TLS 1.3, Ed25519 login,

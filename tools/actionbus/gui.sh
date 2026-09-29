@@ -111,6 +111,7 @@ printf '# /etc/sperre.conf -- gui test\nleerlauf=300\n' > "$TMPD/sperre.conf"
 printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'lang=de\n' > "$TMPD/locale.conf"
+printf 'modus=fest\nip=10.0.2.15\nmaske=255.255.255.0\ngateway=10.0.2.2\n' > "$TMPD/network.conf"
 
 cat > "$TMPD/g.sh" <<'EOS'
 orientbus serve 0 &
@@ -146,10 +147,13 @@ act call trap.type
 echo ==G-WAIT==
 sleep 60
 echo ==G-RIGHTS==
-settings debug page=12 &
-sleep 6
-echo ==G-SHOT2==
+sleep 30
+echo ==G-SCREEN==
 sleep 25
+echo ==G-NET==
+sleep 35
+echo ==G-NETDONE==
+cat /etc/network.conf
 echo ==G-CLOSE==
 act call viewer.close
 sleep 3
@@ -175,6 +179,7 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
    "/etc/orientbus/policy=etc/orientbus/policy"
    "/etc/sperre.conf=$TMPD/sperre.conf" "/etc/theme.conf=$TMPD/theme.conf"
    "/etc/passwd=$TMPD/passwd" "/etc/locale.conf=$TMPD/locale.conf"
+   "/etc/network.conf=$TMPD/network.conf"
    "/etc/uitrace=$TMPD/locale.conf"
    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
    "/usr/share/locale/de/messages=locale/de/messages"
@@ -261,10 +266,43 @@ if waitfor "==G-WAIT==" 120; then
 else
     bad "the script did not reach the settings part"
 fi
-if waitfor "==G-SHOT2==" 120; then
-    sleep 3
+# ONE window from here on: the pages are switched by clicking their tab
+# (the window reports every tab as "taba", "tabb", ...), like a person
+if waitfor "==G-RIGHTS==" 120; then
+    sleep 1
+    T=$(mid tabm) && klick $T || bad "the settings window did not report its tabs"
+    sleep 4
     shot "$TMPD/4-rights.ppm"
     J=$(mid rjar) && { klick $J; sleep 2; shot "$TMPD/5-granted.ppm"; } || bad "the rights page did not report its controls"
+fi
+# AB-005c: the page Bildschirm sets the brightness through the bus, the
+# page Netz switches to DHCP through the bus -- critical, so it asks, and
+# "Ja, ändern" on that page answers
+if waitfor "==G-SCREEN==" 60; then
+    T=$(mid tabb) && klick $T
+    sleep 5
+    shot "$TMPD/5b-screen.ppm"
+    # the brightness as it stands; "Übernehmen" sends it
+    if A2=$(mid dapply); then
+        klick $A2; sleep 2
+    else
+        bad "the page Bildschirm did not report its controls"
+    fi
+fi
+if waitfor "==G-NET==" 60; then
+    T=$(mid tabd) && klick $T
+    sleep 5
+    if M=$(mid nmode) && N=$(mid napply) && C=$(mid nconf); then
+        # the choice opens its list below itself; item 0 is "über DHCP"
+        read mx my mw mh <<< "$(rect nmode)"
+        klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
+        klick $N; sleep 2
+        shot "$TMPD/6-netask.ppm"
+        klick $C; sleep 2
+        shot "$TMPD/7-netdone.ppm"
+    else
+        bad "the page Netz did not report its controls"
+    fi
 fi
 waitfor "==FERTIG==" 150 || note "no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
@@ -332,7 +370,20 @@ grep -qa 'settings: rights answer rc=0 line=\[ok\]' "$G" && ok "'Allow Jarvis th
 part "$G" G-STAT FERTIG > "$TMPD/p.txt"
 grep -qaE 'rule [0-9]+ allow jarvis settings.display.\* write left=3[0-9]{3}' "$TMPD/p.txt" \
     && ok "... it is a timed rule with about an hour left" || bad "no timed Jarvis rule in 'act rights'"
-for f in 1-system 2-ask 3-done 4-rights 5-granted; do
+echo "== 5. the other pages through the bus (AB-005c) =="
+grep -qa 'settings: page set key=display.brightness' "$G" && ok "page Bildschirm: 'Übernehmen' sends display.brightness over the bus" || bad "the page Bildschirm did not use the bus"
+n_k=$(grep -ac 'settingsd: display brightness k=' "$G")
+[ "$n_k" -ge 2 ] && ok "... and settingsd set the kernel ($(grep -a 'settingsd: display brightness k=' "$G" | tail -1 | cut -c1-60))" || bad "settingsd did not set the brightness from the page ($n_k)"
+grep -qa 'settings: page set key=net.dhcp' "$G" && ok "page Netz: DHCP goes over the bus (net.dhcp)" || bad "the page Netz did not use the bus"
+n_ask=$(grep -ac 'settings: bus answer rc=2 line=\[confirm' "$G")
+[ "$n_ask" -ge 2 ] && ok "... net.dhcp is critical: the page Netz asks as well" || bad "the page Netz was not asked ($n_ask questions)"
+has "$G" "settingsd: dhcp started pid=" "after 'Ja, ändern' on the page Netz settingsd starts DHCP"
+part "$G" G-NETDONE G-CLOSE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "modus=dhcp" "/etc/network.conf says modus=dhcp"
+has "$TMPD/p.txt" "ip=10.0.2.15" "... and keeps the other lines"
+part "$G" G-JOURNAL G-STAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "key=net.dhcp old=false new=true" "the journal has the DHCP change (so it can be undone)"
+for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone; do
     [ -s "$TMPD/$f.png" ] && ok "photo: $TMPD/$f.png" || bad "no photo $f"
 done
 echo "ACTBUS-GUI: $pass passed, $fail failed"

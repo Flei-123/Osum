@@ -36,6 +36,7 @@ import ulib
 import libc.io
 import actwire
 import setschema
+import msg
 
 export { u_start }
 
@@ -97,6 +98,148 @@ fn copyz(dst: u64, src: u64, max: u64) {
 // without a screen) the value stays in /etc/settings.db as before.
 static mut K_BRIGHT: [u8; 19] = "display.brightness\0"
 
+// ROUND ACTION-BUS-4 (AB-005c): three more keys have their real home
+// outside /etc/settings.db, and the bus now reads and writes THERE, so a
+// value read over the bus is the value that is in effect:
+//   sound.volume, sound.mute  the sound card (SYS_AUDGET 1850 / AUDSET
+//                             1851: field 4 volume, 21 muted / 0 volume,
+//                             2 mute) -- the same calls the taskbar and
+//                             /bin/play make. Without a sound card they
+//                             stay in the database as before.
+//   locale.language           the CHOICE of the person whose session it
+//                             is: /users/<name>/config/locale, the file
+//                             msg.fi reads first (a language belongs to
+//                             the user, not to the machine). Written as
+//                             that person, i.e. handed back with chown.
+//                             No session (a server, a test guest): the
+//                             database.
+static mut K_VOL: [u8; 13] = "sound.volume\0"
+static mut K_MUTE: [u8; 11] = "sound.mute\0"
+static mut K_LANG: [u8; 16] = "locale.language\0"
+
+// net.dhcp is `modus=dhcp|fest` in /etc/network.conf, the file /bin/dhcp
+// and the page Netz share. true writes modus=dhcp and starts /bin/dhcp
+// (what the page did itself before); false is only possible where a
+// fixed address is already written (ip=...) -- the bus has no key for the
+// address, so switching to "fixed" without one would leave the device
+// without any, and that is refused instead.
+static mut K_DHCP: [u8; 9] = "net.dhcp\0"
+static mut P_NET: [u8; 18] = "/etc/network.conf\0"
+static mut F_MODUS: [u8; 6] = "modus\0"
+
+fn dhcp_get(out: u64) -> bool {
+    var m: [u8; 16] = [0 as u8; 16]
+    if !actwire.kvfile_get((&P_NET[0 as usize]) as u64, (&F_MODUS[0 as usize]) as u64, (&m[0 as usize]) as u64, 16) {
+        return false
+    }
+    var t: [u8; 6] = "true\0\0"
+    var f: [u8; 6] = "false\0"
+    if ld8((&m[0 as usize]) as u64, 0) == 100 { // "dhcp"
+        copyz(out, (&t[0 as usize]) as u64, 64)
+    } else {
+        copyz(out, (&f[0 as usize]) as u64, 64)
+    }
+    return true
+}
+
+fn dhcp_put(v: u64) -> bool {
+    if is_true(v) {
+        var w: [u8; 5] = "dhcp\0"
+        if !actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&F_MODUS[0 as usize]) as u64, (&w[0 as usize]) as u64) {
+            return false
+        }
+        var bin: [u8; 10] = "/bin/dhcp\0"
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&bin[0 as usize]) as u64, 0, 0)
+        var s1: [u8; 29] = "settingsd: dhcp started pid=\0"
+        say((&s1[0 as usize]) as u64)
+        actwire.outnum(pid)
+        nl()
+        return true
+    }
+    var ip: [u8; 24] = [0 as u8; 24]
+    var f_ip: [u8; 3] = "ip\0"
+    if !actwire.kvfile_get((&P_NET[0 as usize]) as u64, (&f_ip[0 as usize]) as u64, (&ip[0 as usize]) as u64, 24) {
+        var s2: [u8; 44] = "settingsd: net.dhcp=false refused, no ip=\n\0\0"
+        say((&s2[0 as usize]) as u64)
+        return false
+    }
+    var fe: [u8; 5] = "fest\0"
+    return actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&F_MODUS[0 as usize]) as u64, (&fe[0 as usize]) as u64)
+}
+
+fn is_key(i: u64, k: u64) -> bool {
+    return actwire.str_eq(setschema.key(i), k)
+}
+
+fn audio_ready() -> bool {
+    return ulib.sys(1850, 0, 0, 0) == 1
+}
+
+fn put_num(out: u64, v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    copyz(out, (&z[0 as usize]) as u64, 64)
+}
+
+fn is_true(v: u64) -> bool {
+    return ld8(v, 0) == 116 || ld8(v, 0) == 49 // "true" / "1"
+}
+
+// the session's uid, or 0 when nobody is signed in (or root is)
+fn lang_uid() -> u64 {
+    let u: u64 = actwire.session_uid()
+    if u == 0 || u >= 0xFFFFFFFF {
+        return 0
+    }
+    return u
+}
+
+fn lang_get(out: u64) -> bool {
+    let u: u64 = lang_uid()
+    if u == 0 {
+        return false
+    }
+    msg.use_uid(u)
+    var c: [u8; 16] = [0 as u8; 16]
+    let src: u64 = msg.read_lang((&c[0 as usize]) as u64)
+    msg.use_uid(0)
+    if src == 0 {
+        return false
+    }
+    copyz(out, (&c[0 as usize]) as u64, 64)
+    return true
+}
+
+fn lang_put(v: u64) -> bool {
+    let u: u64 = lang_uid()
+    msg.use_uid(u)
+    let ok: bool = msg.save_lang(v)
+    var pfad: [u8; 96] = [0 as u8; 96]
+    let hat: bool = msg.user_path((&pfad[0 as usize]) as u64)
+    msg.use_uid(0)
+    if ok && hat {
+        // the image gives every account uid = gid (tools/usbimg/build.sh)
+        let c: u64 = ulib.sys(92, (&pfad[0 as usize]) as u64, u, u) // chown
+        var s0: [u8; 21] = "settingsd: chown rc=\0"
+        say((&s0[0 as usize]) as u64)
+        actwire.outnum(c)
+        nl()
+    }
+    var s1: [u8; 29] = "settingsd: language for uid=\0"
+    say((&s1[0 as usize]) as u64)
+    actwire.outnum(u)
+    var s2: [u8; 5] = " ok=\0"
+    say((&s2[0 as usize]) as u64)
+    if ok {
+        actwire.outnum(1)
+    } else {
+        actwire.outnum(0)
+    }
+    nl()
+    return ok
+}
+
 fn is_bright(i: u64) -> bool {
     return actwire.str_eq(setschema.key(i), (&K_BRIGHT[0 as usize]) as u64)
 }
@@ -108,6 +251,29 @@ fn disp_ready() -> bool {
 
 fn value_of(i: u64, out: u64) {
     var found: bool = false
+    if audio_ready() && is_key(i, (&K_VOL[0 as usize]) as u64) {
+        let v: u64 = ulib.sys(1850, 4, 0, 0)
+        if !ulib.bad(v) {
+            put_num(out, v)
+            return
+        }
+    }
+    if audio_ready() && is_key(i, (&K_MUTE[0 as usize]) as u64) {
+        var t: [u8; 6] = "true\0\0"
+        var f: [u8; 6] = "false\0"
+        if ulib.sys(1850, 21, 0, 0) == 1 {
+            copyz(out, (&t[0 as usize]) as u64, 64)
+        } else {
+            copyz(out, (&f[0 as usize]) as u64, 64)
+        }
+        return
+    }
+    if is_key(i, (&K_LANG[0 as usize]) as u64) && lang_get(out) {
+        return
+    }
+    if is_key(i, (&K_DHCP[0 as usize]) as u64) && dhcp_get(out) {
+        return
+    }
     if is_bright(i) && disp_ready() {
         let k: u64 = ulib.sys(1810, 16, 0, 0) // DG_BRIGHT
         if !ulib.bad(k) {
@@ -145,6 +311,31 @@ fn value_put(i: u64, v: u64) -> bool {
         if ulib.bad(r) {
             return false
         }
+    }
+    if audio_ready() && is_key(i, (&K_VOL[0 as usize]) as u64) {
+        let r: u64 = ulib.sys(1851, 0, ulib.to_num(v), 0)
+        var s3: [u8; 30] = "settingsd: sound card volume=\0"
+        say((&s3[0 as usize]) as u64)
+        say(v)
+        var s4: [u8; 5] = " rc=\0"
+        say((&s4[0 as usize]) as u64)
+        actwire.outnum(r)
+        nl()
+        return !ulib.bad(r)
+    }
+    if audio_ready() && is_key(i, (&K_MUTE[0 as usize]) as u64) {
+        var m: u64 = 0
+        if is_true(v) {
+            m = 1
+        }
+        let r: u64 = ulib.sys(1851, 2, m, 0)
+        return !ulib.bad(r)
+    }
+    if is_key(i, (&K_LANG[0 as usize]) as u64) && lang_uid() != 0 {
+        return lang_put(v)
+    }
+    if is_key(i, (&K_DHCP[0 as usize]) as u64) {
+        return dhcp_put(v)
     }
     if setschema.has_store(i) {
         return actwire.kvfile_set(setschema.store_file(i), setschema.store_field(i), v)
@@ -581,7 +772,7 @@ fn serve(limit: u64) -> u64 {
     var last_check: u64 = t1
     lastmsg = t1
     while limit == 0 || actwire.ticks() - t1 < limit {
-        let n: u64 = actwire.bus_recv(fp, mp)
+        let n: u64 = actwire.bus_wait(fp, mp, 100) // AB-002: blocks
         if !ulib.bad(n) && n > 0 {
             lastmsg = actwire.ticks()
             let s: u64 = actwire.asm_feed(fp, mp)
@@ -602,13 +793,6 @@ fn serve(limit: u64) -> u64 {
                     say((&s_by[0 as usize]) as u64)
                     return 0
                 }
-            }
-            // idle: sleep instead of spinning (the kernel bus cannot
-            // block yet, S-003) -- busy only for 0.2 s after a message
-            if actwire.ticks() - lastmsg > 20 {
-                ulib.sleep_ms(10)
-            } else {
-                actwire.yield_now()
             }
         }
     }

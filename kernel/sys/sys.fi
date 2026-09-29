@@ -14225,6 +14225,42 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
         let mp: u64 = (&meta[0]) as u64
         if op == BUS_RECV {
             got = bus.recv(state, me, bp, max, mp)
+            // ROUND ACTION-BUS-4 (AB-002 = S-003): THE BUS CAN BLOCK.
+            // a4 = how long to wait for a message, in milliseconds: 0 is
+            // the old non-blocking receive (every existing caller passes
+            // 0), >= 0x80000000 waits until something arrives. The wait
+            // is `poll`'s: remember the wake sequence BEFORE looking,
+            // sleep in S_POLL only if it has not moved, and a delivery
+            // into this task's box (`bus.queue_put`) kicks exactly this
+            // task. No instruction of the waiting program runs until a
+            // message, a signal or the deadline -- a broker, settingsd or
+            // any provider idles at zero instead of a tick-sleep loop.
+            if a4 != 0 && got == (0 -% bus.E_EMPTY) {
+                let forever: bool = a4 >= 0x80000000
+                var ticks: u64 = 0
+                if !forever {
+                    ticks = (a4 + 9) / 10 + 1 // never earlier than asked
+                }
+                let deadline: u64 = kstate.get(state, kstate.TICKS) + ticks
+                var waiting: bool = true
+                while waiting {
+                    let seen: u64 = sched.poll_seq(state)
+                    got = bus.recv(state, me, bp, max, mp)
+                    if got != (0 -% bus.E_EMPTY) {
+                        waiting = false
+                    } else if signal.interrupted(state, me) {
+                        return neg(errno.E_INTR)
+                    } else if !forever && kstate.get(state, kstate.TICKS) >= deadline {
+                        waiting = false
+                    } else {
+                        var wake: u64 = deadline
+                        if forever {
+                            wake = sched.POLL_FOREVER
+                        }
+                        sched.poll_sleep(state, seen, wake)
+                    }
+                }
+            }
         }
         if op == BUS_CLIPGET {
             got = bus.clip_get(state, me, a1, bp, max, mp)

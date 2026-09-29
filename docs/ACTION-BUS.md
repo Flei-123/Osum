@@ -6,7 +6,9 @@ AB-003 attested caller identity, AB-005 settings on the bus, AB-008 the
 cli/file adapters and AB-016 the bus in the shipped image, and in round
 ACTION-BUS-3 (branch `action-bus-3`) by AB-005b the settings window as a
 client, AB-006 "what may which app", AB-008b the foreign-window layer
-(`keys`/`ui` adapters) and AB-009 "dry run first" for Jarvis. Everything
+(`keys`/`ui` adapters) and AB-009 "dry run first" for Jarvis, and in round
+ACTION-BUS-4 (branch `action-bus-4`) by AB-002 the blocking receive and
+AB-005c the remaining settings pages on the bus. Everything
 marked *built* runs in `tools/actionbus/run.sh` (test guests) or
 `tools/actionbus/image.sh` (the real stick image, booted like the Dell);
 everything marked *planned* is a roadmap item (section 12), not a promise
@@ -333,13 +335,33 @@ pages of `/bin/settings` know nothing themselves:
   writes `DG_BRIGHT` (40..200, 100 = unchanged; 50 % = the picture as
   it comes); without a display it stays in /etc/settings.db.
 * `settings page=12` opens on that page.
+* **AB-005c (round ACTION-BUS-4).** "Übernehmen" on the page Bildschirm
+  sends `display.brightness` over the bus (contrast, gamma, saturation,
+  rotation and the mode are not in the schema and stay direct); the page
+  Sprache sets `locale.language`; switching the page Netz to DHCP is
+  `net.dhcp` -- critical, so the page asks, and "Ja, ändern" on that
+  page answers. A fixed address stays a direct write (the schema has no
+  key for an address). Behind the bus the values now live where they
+  take effect: `sound.volume`/`sound.mute` in the sound card
+  (SYS_AUDGET/AUDSET, as the taskbar), `locale.language` in the session
+  person's own `/users/<name>/config/locale` (the file msg.fi reads
+  first; handed to them with chown; without a session the database),
+  `net.dhcp` as `modus=` in /etc/network.conf (true also starts
+  /bin/dhcp; false is refused where no `ip=` is written). The column
+  "Meaning" comes from the catalogue (`settings.key.<key>`).
+  Still only in /etc/settings.db: `display.scale` (the kernel's scale is
+  an integer factor fixed at boot), `display.night`, `net.wifi.enabled`,
+  `net.proxy`, `update.*`, `security.lock`, `privacy.crashreports` --
+  no program reads them yet.
 
 Measured in `tools/actionbus/gui.sh` (real window server, clicks through
 the QEMU monitor): 14 rows, 30 % reaches the kernel as 60, a critical
 change is asked and done only after the yes, the journal names the
 window's changes as the user's, the Jarvis button leaves a rule with an
-hour to run. Not yet on the bus: theme, time zone, network address,
-language -- their pages still write their own files (roadmap).
+hour to run. Round ACTION-BUS-4 adds: the brightness from the page
+Bildschirm reaches the kernel through settingsd, the page Netz asks for
+DHCP and after the yes /etc/network.conf says `modus=dhcp`. Not on the
+bus: theme, time zone, the fixed network address, contrast/gamma/mode.
 
 ### 6.1 The design (AB-005)
 
@@ -644,9 +666,15 @@ under UEFI from USB, the session starts `orientbus` before the sign-in,
 `kgui.desk_start`, and that is where the broker and settingsd start —
 first, before the sign-in, and only if the image carries
 `/bin/orientbus` (older test images start exactly what they did). The
-bus cannot block yet (S-003): broker and settingsd spin with `yield` for
-0.2 s after the last message and then sleep one tick per round, so an
-idle bus costs next to nothing and a burst still runs at microseconds.
+bus blocks since round ACTION-BUS-4 (AB-002 = S-003): `BUS_RECV` takes a
+wait in milliseconds (its fifth argument; 0 = the old non-blocking
+receive, every older caller passes 0) and sleeps like `poll` does -- the
+wake sequence is read before looking, the task sleeps in S_POLL, and a
+delivery into its box (`bus.queue_put`) wakes exactly that task.
+Broker, settingsd, notes, `act` and the window client wait there (at
+most 100 ms, for their timers). Measured (`run.sh` section 17): an idle
+broker is scheduled 46 times and settingsd 47 times in 5 s (the old
+loop slept 10 ms per turn, up to 500); a round trip is 40-50 us (was 60).
 Server images with `init` add `bus:*:respawn:/bin/orientbus serve`.
 
 **Limits** (all on the roadmap): `act confirm` instead of a trusted
@@ -694,3 +722,6 @@ Done in round ACTION-BUS-2: AB-003, AB-005, AB-008 (cli/file), AB-016.
 Done in round ACTION-BUS-3: AB-005b (settings window + lock time +
 brightness), AB-006, AB-008b (foreign-window layer, keys/ui), AB-009
 (dry run first; the bridge may run `/bin/act`).
+Done in round ACTION-BUS-4: AB-002 (blocking receive), AB-005c (pages
+Bildschirm/Sprache/Netz, sound and language where they take effect,
+the meaning column from the catalogue).
