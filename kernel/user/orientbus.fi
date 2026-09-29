@@ -1,0 +1,2306 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/orientbus.fi -- orient-bus, THE ACTION BUS (prototype).
+//
+// One broker through which EVERY caller -- an app, a script, the shell,
+// voice, Jarvis -- invokes what apps declare they can do. The concept,
+// the decisions and the limits of this prototype are in
+// docs/ACTION-BUS.md; the numbers in the section headers below refer to
+// it.
+//
+//   orientbus serve [ticks]   run the broker (0 or nothing = forever)
+//   orientbus check <file>    parse a manifest and say what is in it
+//
+// WHAT IT DOES, IN ORDER:
+//
+//   1. It reads every manifest: /apps/<app>.prog/ACTIONS (native apps)
+//      and /etc/actions.d/*.actions (wrapper manifests for programs that
+//      do not ship one -- the compatibility path, section 7). An app may
+//      only declare actions in ITS OWN namespace (`notes.` for `notes`).
+//   2. It registers the kernel service `orient.bus` (anyone may call)
+//      and `orient.evt` (events, published by the broker only).
+//   3. For each call it checks, in this order: the action exists, the
+//      arguments match the declared types, the rights (section 5):
+//      read = allowed, write = allowed for the user and for callers with
+//      a grant, critical = ALWAYS a confirmation. A dry run executes
+//      nothing and answers with the decision that WOULD apply.
+//   4. It writes the audit line BEFORE it forwards anything that
+//      changes state. No log, no change (fail closed).
+//   5. It forwards the call to the provider's service `a.<app>`. That
+//      service is registered with A_ROOT, so the KERNEL refuses every
+//      caller but the broker -- there is no way around the checks.
+//   6. It relays the reply, keeps the undo entry the provider offered
+//      (the inverse action is fixed by the MANIFEST, only its arguments
+//      come from the provider) and republishes the provider's events.
+
+profile kernel
+
+import ulib
+import libc.io
+import actwire
+
+export { u_start }
+
+// ============================================================ tables
+
+const APP_MAX: u64 = 16
+const APP_B: u64 = 64
+const AP_USED: u64 = 0
+const AP_NAME: u64 = 8 // 16 octets
+const AP_PID: u64 = 24 // the pid that answered for `a.<app>`; 0 = not yet
+const AP_TITLE: u64 = 32
+const AP_COMPAT: u64 = 40
+static mut apps: [u8; 1024] = [0 as u8; 1024]
+static mut n_apps: u64 = 0
+
+const ACT_MAX: u64 = 64
+const ACT_B: u64 = 96
+const AC_NAME: u64 = 0 // 32 octets
+const AC_APP: u64 = 32
+const AC_LEVEL: u64 = 40
+const AC_DESC: u64 = 48
+const AC_FLAGS: u64 = 56
+const AC_ARG0: u64 = 64
+const AC_ARGN: u64 = 72
+const AC_UNDO: u64 = 80 // pool offset of the inverse action's name
+const AC_CALLS: u64 = 88
+const FL_DRY: u64 = 1
+const FL_EVENT: u64 = 2
+static mut acts: [u8; 6144] = [0 as u8; 6144]
+static mut n_acts: u64 = 0
+
+const ARG_MAX: u64 = 256
+const ARG_B: u64 = 48
+const AR_NAME: u64 = 0 // 24 octets
+const AR_TYPE: u64 = 24
+const AR_ROLE: u64 = 32 // 0 required arg, 1 optional arg, 2 returns, 3 event field
+const AR_DESC: u64 = 40
+static mut argt: [u8; 12288] = [0 as u8; 12288]
+static mut n_args: u64 = 0
+
+const T_STRING: u64 = 0
+const T_INT: u64 = 1
+const T_BOOL: u64 = 2
+
+const L_READ: u64 = 0
+const L_WRITE: u64 = 1
+const L_CRIT: u64 = 2
+
+const POOL_MAX: u64 = 16384
+static mut pool: [u8; 16384] = [0 as u8; 16384]
+static mut pool_at: u64 = 1 // offset 0 is the empty string
+
+// rights: rules from /etc/orientbus/policy and grants at run time
+const RULE_MAX: u64 = 32
+const RULE_B: u64 = 96
+const RU_USED: u64 = 0
+const RU_CLIENT: u64 = 8 // 24 octets
+const RU_GLOB: u64 = 32 // 32 octets
+const RU_DENY: u64 = 64
+const RU_LEVEL: u64 = 72
+const RU_UNTIL: u64 = 80 // tick, 0 = no end
+static mut rules: [u8; 3072] = [0 as u8; 3072]
+
+// calls forwarded to a provider and not answered yet
+const PEND_MAX: u64 = 8
+const PEND_B: u64 = 128
+const PE_USED: u64 = 0
+const PE_NONCE: u64 = 8
+const PE_PID: u64 = 16 // who gets the reply
+const PE_ID: u64 = 24 // with which id
+const PE_ACT: u64 = 32
+const PE_FLAGS: u64 = 40
+const PE_T0: u64 = 48
+const PE_APP: u64 = 56
+const PE_UID: u64 = 64
+const PE_CLIENT: u64 = 72 // 24 octets
+const PF_DRY: u64 = 1
+const PF_UNDO: u64 = 2
+const PF_PING: u64 = 4
+const PF_CONF: u64 = 8
+static mut pend: [u8; 1024] = [0 as u8; 1024]
+
+// calls waiting for a confirmation
+const TOK_MAX: u64 = 8
+const TOK_B: u64 = 64
+const TK_USED: u64 = 0
+const TK_NO: u64 = 8
+const TK_T0: u64 = 16
+const TK_LEN: u64 = 24
+const TK_PID: u64 = 32
+const TK_UID: u64 = 40
+const TOK_BYTES: u64 = 1024
+static mut toks: [u8; 512] = [0 as u8; 512]
+static mut tokmem: [u8; 8192] = [0 as u8; 8192]
+static mut tok_next: u64 = 1
+
+// the undo stack
+const UNDO_MAX: u64 = 16
+const UNDO_B: u64 = 256
+const UN_USED: u64 = 0
+const UN_SEQ: u64 = 8
+const UN_ACT: u64 = 16
+const UN_CLIENT: u64 = 24 // 24 octets
+const UN_ARGS: u64 = 48 // 200 octets, "k=v\n" lines
+const UN_ARGMAX: u64 = 200
+static mut undos: [u8; 4096] = [0 as u8; 4096]
+static mut undo_seq: u64 = 0
+
+// counters (`act stat`)
+static mut c_calls: u64 = 0
+static mut c_allow: u64 = 0
+static mut c_ask: u64 = 0
+static mut c_deny: u64 = 0
+static mut c_dry: u64 = 0
+static mut c_undo: u64 = 0
+static mut c_events: u64 = 0
+static mut c_badrep: u64 = 0
+static mut c_badevt: u64 = 0
+static mut c_logfail: u64 = 0
+static mut c_manifests: u64 = 0
+static mut c_rejected: u64 = 0
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut running: bool = true
+static mut svc_evt: u64 = 0xFFFFFFFF
+static mut evt_seq: u64 = 1
+
+// the audit counters for allowed reads and dry runs (section 5.4)
+const LAZY_MAX: u64 = 4096
+static mut lazy: [u8; 4096] = [0 as u8; 4096]
+static mut lazy_t: u64 = 0 // when the oldest counted entry came, 0 = none
+static mut audit_lazy: bool = false
+static mut c_lazy: u64 = 0
+const AGG_MAX: u64 = 16
+const AGG_B: u64 = 128
+const AG_USED: u64 = 0
+const AG_COUNT: u64 = 8
+const AG_PID: u64 = 16
+const AG_UID: u64 = 24
+const AG_DRY: u64 = 32
+const AG_T: u64 = 40
+const AG_CLIENT: u64 = 48 // 24 octets
+const AG_TARGET: u64 = 72 // 32 octets
+const AG_VERB: u64 = 104 // 8
+const AG_RESULT: u64 = 112 // 8
+static mut aggs: [u8; 2048] = [0 as u8; 2048]
+
+static mut mf: [u8; 8192] = [0 as u8; 8192]
+static mut scratch: [u8; 2048] = [0 as u8; 2048]
+static mut scan_path: [u8; 160] = [0 as u8; 160]
+
+// ============================================================ helpers
+
+fn ap(i: u64) -> u64 {
+    return (&apps[0 as usize]) as u64 + i * APP_B
+}
+
+fn ac(i: u64) -> u64 {
+    return (&acts[0 as usize]) as u64 + i * ACT_B
+}
+
+fn ar(i: u64) -> u64 {
+    return (&argt[0 as usize]) as u64 + i * ARG_B
+}
+
+fn ru(i: u64) -> u64 {
+    return (&rules[0 as usize]) as u64 + i * RULE_B
+}
+
+fn pe(i: u64) -> u64 {
+    return (&pend[0 as usize]) as u64 + i * PEND_B
+}
+
+fn tk(i: u64) -> u64 {
+    return (&toks[0 as usize]) as u64 + i * TOK_B
+}
+
+fn tkmem(i: u64) -> u64 {
+    return (&tokmem[0 as usize]) as u64 + i * TOK_BYTES
+}
+
+fn un(i: u64) -> u64 {
+    return (&undos[0 as usize]) as u64 + i * UNDO_B
+}
+
+fn pl(off: u64) -> u64 {
+    return (&pool[0 as usize]) as u64 + off
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return actwire.ld8(p, i)
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    actwire.st8(p, i, v)
+}
+
+fn ld(p: u64, i: u64) -> u64 {
+    return actwire.ld64(p, i)
+}
+
+fn st(p: u64, i: u64, v: u64) {
+    actwire.st64(p, i, v)
+}
+
+// copy a zero-terminated string, at most max-1 octets, always terminated
+fn copyz(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while ld8(src, i) != 0 && i + 1 < max {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+    st8(dst, i, 0)
+}
+
+// copy n octets and terminate
+fn copyn(dst: u64, src: u64, n: u64, max: u64) {
+    var i: u64 = 0
+    while i < n && i + 1 < max {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+    st8(dst, i, 0)
+}
+
+fn pool_add(src: u64, n: u64) -> u64 {
+    if pool_at + n + 1 > POOL_MAX {
+        return 0
+    }
+    let at: u64 = pool_at
+    copyn(pl(at), src, n, n + 1)
+    pool_at = pool_at + n + 1
+    return at
+}
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn sayn(v: u64) {
+    actwire.outnum(v)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    say((&s[0 as usize]) as u64)
+}
+
+// A status line is written with ONE write: pieces written one after the
+// other get torn apart by the shell's job lines and the kernel's own
+// lines on the same console (roadmap A-046, measured here: "ready apps=2
+// ... rejected_manifests=[1] 19").
+static mut line_buf: [u8; 256] = [0 as u8; 256]
+
+fn lb() -> u64 {
+    return (&line_buf[0 as usize]) as u64
+}
+
+fn lb_start(p: u64) {
+    copyz(lb(), p, 256)
+}
+
+fn lb_add(p: u64) {
+    if actwire.slen(lb()) + actwire.slen(p) < 250 {
+        ulib.strcat(lb(), p)
+    }
+}
+
+fn lb_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let dp: u64 = (&d[0 as usize]) as u64
+    st8(dp, ulib.digits(v, dp), 0)
+    lb_add(dp)
+}
+
+fn lb_say() {
+    var nlc: [u8; 2] = "\n\0"
+    ulib.strcat(lb(), (&nlc[0 as usize]) as u64)
+    say(lb())
+}
+
+fn level_name(l: u64) -> u64 {
+    if l == L_READ {
+        return (&s_read[0 as usize]) as u64
+    }
+    if l == L_WRITE {
+        return (&s_write[0 as usize]) as u64
+    }
+    return (&s_crit[0 as usize]) as u64
+}
+
+fn type_name(t: u64) -> u64 {
+    if t == T_INT {
+        return (&s_int[0 as usize]) as u64
+    }
+    if t == T_BOOL {
+        return (&s_bool[0 as usize]) as u64
+    }
+    return (&s_string[0 as usize]) as u64
+}
+
+static mut s_read: [u8; 5] = "read\0"
+static mut s_write: [u8; 6] = "write\0"
+static mut s_crit: [u8; 9] = "critical\0"
+static mut s_int: [u8; 4] = "int\0"
+static mut s_bool: [u8; 5] = "bool\0"
+static mut s_string: [u8; 7] = "string\0"
+static mut s_user: [u8; 5] = "user\0"
+static mut s_logpath: [u8; 23] = "/var/log/orientbus.log\0"
+
+fn level_of(w: u64) -> u64 {
+    if actwire.str_eq(w, (&s_read[0 as usize]) as u64) {
+        return L_READ
+    }
+    if actwire.str_eq(w, (&s_write[0 as usize]) as u64) {
+        return L_WRITE
+    }
+    if actwire.str_eq(w, (&s_crit[0 as usize]) as u64) {
+        return L_CRIT
+    }
+    return actwire.NONE
+}
+
+fn type_of(w: u64) -> u64 {
+    if actwire.str_eq(w, (&s_string[0 as usize]) as u64) {
+        return T_STRING
+    }
+    if actwire.str_eq(w, (&s_int[0 as usize]) as u64) {
+        return T_INT
+    }
+    if actwire.str_eq(w, (&s_bool[0 as usize]) as u64) {
+        return T_BOOL
+    }
+    return actwire.NONE
+}
+
+fn find_app(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_apps {
+        if actwire.str_eq(ap(i) + AP_NAME, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+fn find_act(name: u64, event: bool) -> u64 {
+    var i: u64 = 0
+    while i < n_acts {
+        let is_ev: bool = (ld(ac(i), AC_FLAGS) & FL_EVENT) != 0
+        if is_ev == event && actwire.str_eq(ac(i) + AC_NAME, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+// the service of an app's provider: "a.<app>"
+fn app_svc_name(app: u64, out: u64) {
+    st8(out, 0, 97) // 'a'
+    st8(out, 1, 46) // '.'
+    copyz(out + 2, ap(app) + AP_NAME, 15)
+}
+
+fn app_running(app: u64) -> bool {
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    app_svc_name(app, np)
+    return !ulib.bad(actwire.bus_find(np))
+}
+
+// ====================================================== the manifest
+//
+// Section 3 of the concept. One item per line, the first word says
+// what it is, a description is the quoted rest of the line:
+//
+//     manifest 1
+//     app notes
+//     title "Notes"
+//     action notes.add write "Add a note"
+//       arg text string required "The text of the note"
+//       returns count int "How many notes there are afterwards"
+//       undo notes.remove
+//     action notes.clear critical "Delete all notes"
+//       dryrun
+//     event notes.changed "Sent after every change"
+//       field count int "How many notes there are"
+//
+// Unknown words are reported and skipped (a newer manifest must not
+// stop an older broker); a broken line stops the FILE, so that half an
+// app never appears.
+
+static mut m_app: u64 = 0xFFFFFFFF
+static mut m_cur: u64 = 0xFFFFFFFF
+static mut m_err: u64 = 0
+static mut m_path: u64 = 0
+
+fn m_fail(line: u64, why: u64) {
+    var s1: [u8; 21] = "orientbus: manifest \0"
+    var s2: [u8; 7] = " line \0"
+    var s3: [u8; 3] = ": \0"
+    lb_start((&s1[0 as usize]) as u64)
+    lb_add(m_path)
+    lb_add((&s2[0 as usize]) as u64)
+    lb_num(line)
+    lb_add((&s3[0 as usize]) as u64)
+    lb_add(why)
+    lb_say()
+    m_err = m_err + 1
+}
+
+// the quoted part of a line (between the first and the last '"')
+fn quoted(p: u64, from: u64, to: u64, out: u64, max: u64) {
+    var a: u64 = from
+    while a < to && ld8(p, a) != 34 {
+        a = a + 1
+    }
+    var b: u64 = to
+    while b > a + 1 && ld8(p, b - 1) != 34 {
+        b = b - 1
+    }
+    if a >= to || b <= a + 1 {
+        st8(out, 0, 0)
+        return
+    }
+    copyn(out, p + a + 1, b - a - 2, max)
+}
+
+// does `name` start with "<app>." ?
+fn in_namespace(name: u64, app: u64) -> bool {
+    let an: u64 = ap(app) + AP_NAME
+    let n: u64 = actwire.slen(an)
+    var i: u64 = 0
+    while i < n {
+        if ld8(name, i) != ld8(an, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return ld8(name, n) == 46 && ld8(name, n + 1) != 0
+}
+
+fn add_arg(name: u64, typ: u64, role: u64, desc: u64, line: u64) -> bool {
+    var e1: [u8; 22] = "arg outside an action\0"
+    var e2: [u8; 14] = "too many args\0"
+    if m_cur == actwire.NONE {
+        m_fail(line, (&e1[0 as usize]) as u64)
+        return false
+    }
+    if n_args >= ARG_MAX {
+        m_fail(line, (&e2[0 as usize]) as u64)
+        return false
+    }
+    let a: u64 = ar(n_args)
+    copyz(a + AR_NAME, name, 24)
+    st(a, AR_TYPE, typ)
+    st(a, AR_ROLE, role)
+    st(a, AR_DESC, pool_add(desc, actwire.slen(desc)))
+    if ld(ac(m_cur), AC_ARGN) == 0 {
+        st(ac(m_cur), AC_ARG0, n_args)
+    }
+    st(ac(m_cur), AC_ARGN, ld(ac(m_cur), AC_ARGN) + 1)
+    n_args = n_args + 1
+    return true
+}
+
+// one manifest file; returns true when it was taken
+fn load_manifest(path: u64, compat: u64) -> bool {
+    m_path = path
+    m_app = actwire.NONE
+    m_cur = actwire.NONE
+    m_err = 0
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let p: u64 = (&mf[0 as usize]) as u64
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    st8(p, n, 0)
+    // remember where this file's entries start: a failed file is
+    // rolled back completely
+    let apps0: u64 = n_apps
+    let acts0: u64 = n_acts
+    let args0: u64 = n_args
+    let pool0: u64 = pool_at
+
+    var w1: [u8; 40] = [0 as u8; 40]
+    var w2: [u8; 40] = [0 as u8; 40]
+    var w3: [u8; 40] = [0 as u8; 40]
+    var q: [u8; 200] = [0 as u8; 200]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let pq: u64 = (&q[0 as usize]) as u64
+
+    var k_manifest: [u8; 9] = "manifest\0"
+    var k_app: [u8; 4] = "app\0"
+    var k_title: [u8; 6] = "title\0"
+    var k_action: [u8; 7] = "action\0"
+    var k_arg: [u8; 4] = "arg\0"
+    var k_returns: [u8; 8] = "returns\0"
+    var k_event: [u8; 6] = "event\0"
+    var k_field: [u8; 6] = "field\0"
+    var k_dry: [u8; 7] = "dryrun\0"
+    var k_undo: [u8; 5] = "undo\0"
+    var k_req: [u8; 9] = "required\0"
+    var k_one: [u8; 2] = "1\0"
+
+    var e_ver: [u8; 25] = "unknown manifest version\0"
+    var e_noapp: [u8; 25] = "declaration before 'app'\0"
+    var e_dupapp: [u8; 23] = "app declared elsewhere\0"
+    var e_ns: [u8; 37] = "name outside the app's own namespace\0"
+    var e_dup: [u8; 20] = "name declared twice\0"
+    var e_lvl: [u8; 38] = "level must be read, write or critical\0"
+    var e_typ: [u8; 33] = "type must be string, int or bool\0"
+    var e_full: [u8; 16] = "tables are full\0"
+    var e_unk: [u8; 28] = "unknown word (line skipped)\0"
+    var e_first: [u8; 32] = "first line must be 'manifest 1'\0"
+    var e_long: [u8; 18] = "app name too long\0"
+
+    var line: u64 = 0
+    var at: u64 = 0
+    var seen_head: bool = false
+    var ok: bool = true
+    while ok && ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        line = line + 1
+        // an empty line or a comment
+        var s: u64 = at
+        while s < e && ld8(p, s) == 32 {
+            s = s + 1
+        }
+        if s < e && ld8(p, s) != 35 {
+            // terminate the line for the word reader
+            let save: u64 = ld8(p, e)
+            st8(p, e, 0)
+            var nx: u64 = actwire.word_copy(p, s, p1, 40)
+            nx = actwire.word_copy(p, nx, p2, 40)
+            nx = actwire.word_copy(p, nx, p3, 40)
+            quoted(p, s, e, pq, 200)
+            if !seen_head {
+                if !actwire.str_eq(p1, (&k_manifest[0 as usize]) as u64) {
+                    m_fail(line, (&e_first[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    if !actwire.str_eq(p2, (&k_one[0 as usize]) as u64) {
+                        m_fail(line, (&e_ver[0 as usize]) as u64)
+                        ok = false
+                    }
+                }
+                seen_head = true
+            } else if actwire.str_eq(p1, (&k_app[0 as usize]) as u64) {
+                if actwire.slen(p2) > 13 || actwire.slen(p2) == 0 {
+                    m_fail(line, (&e_long[0 as usize]) as u64)
+                    ok = false
+                } else if find_app(p2) != actwire.NONE {
+                    m_fail(line, (&e_dupapp[0 as usize]) as u64)
+                    ok = false
+                } else if n_apps >= APP_MAX {
+                    m_fail(line, (&e_full[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    m_app = n_apps
+                    let a: u64 = ap(n_apps)
+                    var i: u64 = 0
+                    while i < APP_B {
+                        st8(a, i, 0)
+                        i = i + 1
+                    }
+                    st(a, AP_USED, 1)
+                    copyz(a + AP_NAME, p2, 16)
+                    st(a, AP_COMPAT, compat)
+                    n_apps = n_apps + 1
+                }
+            } else if m_app == actwire.NONE {
+                m_fail(line, (&e_noapp[0 as usize]) as u64)
+                ok = false
+            } else if actwire.str_eq(p1, (&k_title[0 as usize]) as u64) {
+                st(ap(m_app), AP_TITLE, pool_add(pq, actwire.slen(pq)))
+            } else if actwire.str_eq(p1, (&k_action[0 as usize]) as u64)
+                || actwire.str_eq(p1, (&k_event[0 as usize]) as u64) {
+                let is_ev: bool = actwire.str_eq(p1,
+                    (&k_event[0 as usize]) as u64)
+                var lvl: u64 = L_READ
+                if !is_ev {
+                    lvl = level_of(p3)
+                }
+                if !in_namespace(p2, m_app) {
+                    m_fail(line, (&e_ns[0 as usize]) as u64)
+                    ok = false
+                } else if find_act(p2, is_ev) != actwire.NONE {
+                    m_fail(line, (&e_dup[0 as usize]) as u64)
+                    ok = false
+                } else if lvl == actwire.NONE {
+                    m_fail(line, (&e_lvl[0 as usize]) as u64)
+                    ok = false
+                } else if n_acts >= ACT_MAX {
+                    m_fail(line, (&e_full[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    let c: u64 = ac(n_acts)
+                    var i: u64 = 0
+                    while i < ACT_B {
+                        st8(c, i, 0)
+                        i = i + 1
+                    }
+                    copyz(c + AC_NAME, p2, 32)
+                    st(c, AC_APP, m_app)
+                    st(c, AC_LEVEL, lvl)
+                    st(c, AC_DESC, pool_add(pq, actwire.slen(pq)))
+                    if is_ev {
+                        st(c, AC_FLAGS, FL_EVENT)
+                    }
+                    st(c, AC_UNDO, actwire.NONE)
+                    m_cur = n_acts
+                    n_acts = n_acts + 1
+                }
+            } else if actwire.str_eq(p1, (&k_arg[0 as usize]) as u64)
+                || actwire.str_eq(p1, (&k_returns[0 as usize]) as u64)
+                || actwire.str_eq(p1, (&k_field[0 as usize]) as u64) {
+                let t: u64 = type_of(p3)
+                var role: u64 = 0
+                if actwire.str_eq(p1, (&k_returns[0 as usize]) as u64) {
+                    role = 2
+                } else if actwire.str_eq(p1, (&k_field[0 as usize]) as u64) {
+                    role = 3
+                } else {
+                    // arg <name> <type> <required|optional> "<desc>"
+                    var w4: [u8; 16] = [0 as u8; 16]
+                    let p4: u64 = (&w4[0 as usize]) as u64
+                    var sk: u64 = actwire.word_copy(p, s, p4, 16)
+                    sk = actwire.word_copy(p, sk, p4, 16)
+                    sk = actwire.word_copy(p, sk, p4, 16)
+                    actwire.word_copy(p, sk, p4, 16)
+                    if !actwire.str_eq(p4, (&k_req[0 as usize]) as u64) {
+                        role = 1
+                    }
+                }
+                if t == actwire.NONE {
+                    m_fail(line, (&e_typ[0 as usize]) as u64)
+                    ok = false
+                } else if !add_arg(p2, t, role, pq, line) {
+                    ok = false
+                }
+            } else if actwire.str_eq(p1, (&k_dry[0 as usize]) as u64) {
+                if m_cur != actwire.NONE {
+                    st(ac(m_cur), AC_FLAGS, ld(ac(m_cur), AC_FLAGS) | FL_DRY)
+                }
+            } else if actwire.str_eq(p1, (&k_undo[0 as usize]) as u64) {
+                if m_cur != actwire.NONE && in_namespace(p2, m_app) {
+                    st(ac(m_cur), AC_UNDO, pool_add(p2, actwire.slen(p2)))
+                } else {
+                    m_fail(line, (&e_ns[0 as usize]) as u64)
+                    ok = false
+                }
+            } else {
+                m_fail(line, (&e_unk[0 as usize]) as u64)
+            }
+            st8(p, e, save)
+        }
+        at = e
+        if ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+    if !ok || m_app == actwire.NONE {
+        n_apps = apps0
+        n_acts = acts0
+        n_args = args0
+        pool_at = pool0
+        c_rejected = c_rejected + 1
+        return false
+    }
+    c_manifests = c_manifests + 1
+    return true
+}
+
+// every manifest in a directory: <dir>/<entry><inner> where the entry
+// ends in `suffix` (".prog" + "/ACTIONS", or ".actions" + "")
+fn scan(dir: u64, suffix: u64, inner: u64, compat: u64) {
+    let fd: u64 = io.dir_open(dir)
+    if ulib.bad(fd) {
+        return
+    }
+    var buf: [u8; 2048] = [0 as u8; 2048]
+    let bp: u64 = (&buf[0 as usize]) as u64
+    let pp: u64 = (&scan_path[0 as usize]) as u64
+    let sl: u64 = actwire.slen(suffix)
+    var n: u64 = io.dir_read(fd, bp, 2048)
+    while !ulib.bad(n) && n > 0 {
+        var at: u64 = 0
+        while at < n {
+            let nm: u64 = io.dir_name(bp + at)
+            let ln: u64 = actwire.slen(nm)
+            if ln > sl && ln < 64 && actwire.str_eq(nm + ln - sl, suffix) {
+                copyz(pp, dir, 160)
+                ulib.strcat(pp, nm)
+                ulib.strcat(pp, inner)
+                load_manifest(pp, compat)
+            }
+            at = at + io.dir_reclen(bp + at)
+        }
+        n = io.dir_read(fd, bp, 2048)
+    }
+    io.close(fd)
+}
+
+// ==================================================== the rights
+//
+// Section 5. /etc/orientbus/policy, one rule per line:
+//
+//     allow <client> <glob> <read|write>
+//     deny  <client> <glob>
+//
+// `<glob>` is `*`, a prefix ending in `*` (`notes.*`) or a full name.
+// `act grant` adds the same kind of rule at run time, with an end.
+
+fn glob_match(g: u64, name: u64) -> bool {
+    let n: u64 = actwire.slen(g)
+    if n == 0 {
+        return false
+    }
+    if ld8(g, n - 1) == 42 { // '*'
+        var i: u64 = 0
+        while i + 1 < n {
+            if ld8(g, i) != ld8(name, i) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    return actwire.str_eq(g, name)
+}
+
+fn client_match(c: u64, client: u64) -> bool {
+    if ld8(c, 0) == 42 && ld8(c, 1) == 0 {
+        return true
+    }
+    return actwire.str_eq(c, client)
+}
+
+fn rule_add(client: u64, glob: u64, deny: bool, level: u64,
+    until: u64) -> bool {
+    var i: u64 = 0
+    while i < RULE_MAX {
+        let r: u64 = ru(i)
+        if ld(r, RU_USED) == 0 {
+            st(r, RU_USED, 1)
+            copyz(r + RU_CLIENT, client, 24)
+            copyz(r + RU_GLOB, glob, 32)
+            var d: u64 = 0
+            if deny {
+                d = 1
+            }
+            st(r, RU_DENY, d)
+            st(r, RU_LEVEL, level)
+            st(r, RU_UNTIL, until)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn policy_load() {
+    var path: [u8; 22] = "/etc/orientbus/policy\0"
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let p: u64 = (&mf[0 as usize]) as u64
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return
+    }
+    st8(p, n, 0)
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    var w4: [u8; 32] = [0 as u8; 32]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let p4: u64 = (&w4[0 as usize]) as u64
+    var k_allow: [u8; 6] = "allow\0"
+    var k_deny: [u8; 5] = "deny\0"
+    var at: u64 = 0
+    while ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        let save: u64 = ld8(p, e)
+        st8(p, e, 0)
+        var nx: u64 = actwire.word_copy(p, at, p1, 32)
+        nx = actwire.word_copy(p, nx, p2, 32)
+        nx = actwire.word_copy(p, nx, p3, 32)
+        actwire.word_copy(p, nx, p4, 32)
+        if actwire.str_eq(p1, (&k_allow[0 as usize]) as u64) {
+            var l: u64 = level_of(p4)
+            if l == actwire.NONE || l == L_CRIT {
+                l = L_READ // critical is never granted, section 5
+            }
+            rule_add(p2, p3, false, l, 0)
+        }
+        if actwire.str_eq(p1, (&k_deny[0 as usize]) as u64) {
+            rule_add(p2, p3, true, 0, 0)
+        }
+        st8(p, e, save)
+        at = e
+        if ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+}
+
+const D_ALLOW: u64 = 0
+const D_ASK: u64 = 1
+const D_DENY: u64 = 2
+
+// THE DECISION. Deny rules first, then the level of the action.
+fn decide(client: u64, act: u64, dry: bool) -> u64 {
+    let name: u64 = ac(act) + AC_NAME
+    let now: u64 = actwire.ticks()
+    var i: u64 = 0
+    while i < RULE_MAX {
+        let r: u64 = ru(i)
+        if ld(r, RU_USED) != 0 && ld(r, RU_DENY) != 0
+            && client_match(r + RU_CLIENT, client)
+            && glob_match(r + RU_GLOB, name) {
+            return D_DENY
+        }
+        i = i + 1
+    }
+    if dry {
+        return D_ALLOW
+    }
+    let lvl: u64 = ld(ac(act), AC_LEVEL)
+    if lvl == L_READ {
+        return D_ALLOW
+    }
+    if lvl == L_CRIT {
+        return D_ASK // always, whoever asks -- section 5
+    }
+    // write
+    if actwire.str_eq(client, (&s_user[0 as usize]) as u64) {
+        return D_ALLOW
+    }
+    i = 0
+    while i < RULE_MAX {
+        let r: u64 = ru(i)
+        if ld(r, RU_USED) != 0 && ld(r, RU_DENY) == 0
+            && ld(r, RU_LEVEL) >= L_WRITE
+            && client_match(r + RU_CLIENT, client)
+            && glob_match(r + RU_GLOB, name) {
+            let until: u64 = ld(r, RU_UNTIL)
+            if until == 0 || now < until {
+                return D_ALLOW
+            }
+            st(r, RU_USED, 0) // a grant that ran out is gone
+        }
+        i = i + 1
+    }
+    return D_ASK
+}
+
+// what `decide` WOULD say without the dry-run shortcut (for a dry run)
+fn decision_name(d: u64) -> u64 {
+    if d == D_ALLOW {
+        return (&s_allow[0 as usize]) as u64
+    }
+    if d == D_ASK {
+        return (&s_ask[0 as usize]) as u64
+    }
+    return (&s_deny[0 as usize]) as u64
+}
+
+static mut s_allow: [u8; 6] = "allow\0"
+static mut s_ask: [u8; 4] = "ask\0"
+static mut s_deny: [u8; 5] = "deny\0"
+
+// ====================================================== the audit log
+//
+// Section 5.4. One line per decision, written BEFORE a change is
+// forwarded. Returns false when the line could not be written -- the
+// caller then refuses anything that changes state.
+// One audit line (without its newline) into `bp` (320 octets).
+fn audit_line(bp: u64, t: u64, pid: u64, uid: u64, client: u64, verb: u64,
+    target: u64, decision: u64, result: u64, dry: bool) {
+    var s_t: [u8; 3] = "t=\0"
+    var s_pid: [u8; 6] = " pid=\0"
+    var s_uid: [u8; 6] = " uid=\0"
+    var s_cl: [u8; 9] = " client=\0"
+    var s_vb: [u8; 7] = " verb=\0"
+    var s_ac: [u8; 9] = " action=\0"
+    var s_dc: [u8; 11] = " decision=\0"
+    var s_rs: [u8; 9] = " result=\0"
+    var s_dry: [u8; 7] = " dry=1\0"
+    var s_nod: [u8; 7] = " dry=0\0"
+    var d: [u8; 24] = [0 as u8; 24]
+    let dp: u64 = (&d[0 as usize]) as u64
+    copyz(bp, (&s_t[0 as usize]) as u64, 320)
+    st8(dp, ulib.digits(t, dp), 0)
+    ulib.strcat(bp, dp)
+    ulib.strcat(bp, (&s_pid[0 as usize]) as u64)
+    st8(dp, ulib.digits(pid, dp), 0)
+    ulib.strcat(bp, dp)
+    ulib.strcat(bp, (&s_uid[0 as usize]) as u64)
+    st8(dp, ulib.digits(uid, dp), 0)
+    ulib.strcat(bp, dp)
+    ulib.strcat(bp, (&s_cl[0 as usize]) as u64)
+    ulib.strcat(bp, client)
+    ulib.strcat(bp, (&s_vb[0 as usize]) as u64)
+    ulib.strcat(bp, verb)
+    ulib.strcat(bp, (&s_ac[0 as usize]) as u64)
+    ulib.strcat(bp, target)
+    ulib.strcat(bp, (&s_dc[0 as usize]) as u64)
+    ulib.strcat(bp, decision)
+    ulib.strcat(bp, (&s_rs[0 as usize]) as u64)
+    ulib.strcat(bp, result)
+    if dry {
+        ulib.strcat(bp, (&s_dry[0 as usize]) as u64)
+    } else {
+        ulib.strcat(bp, (&s_nod[0 as usize]) as u64)
+    }
+}
+
+// Section 5.4. One line per decision. Everything that changes state, is
+// parked or refused is written AT ONCE and BEFORE the change is
+// forwarded; returns false when that failed -- the caller then refuses
+// the change (fail closed).
+//
+// Allowed reads and dry runs change nothing. They are COUNTED per
+// (client, action, result) and written as one line with `count=` when
+// the next change is logged, when 16 kinds have piled up, or when the
+// broker has been idle for half a second.
+//
+// MEASURED (docs/ACTION-BUS.md, section 10): one synchronous append per
+// call cost ~16 ms on the IDE disk of the test guest -- 100 calls took
+// 165 ticks with the log and 3 without. Buffering the lines brought 200
+// calls down from 407 ticks to 79; counting them instead of writing
+// each one is the rest.
+fn audit(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
+    decision: u64, result: u64, dry: bool) -> bool {
+    if audit_lazy {
+        audit_lazy = false
+        return agg_add(pid, uid, client, verb, target, result, dry)
+    }
+    var b: [u8; 320] = [0 as u8; 320]
+    let bp: u64 = (&b[0 as usize]) as u64
+    audit_line(bp, actwire.ticks(), pid, uid, client, verb, target,
+        decision, result, dry)
+    var nlc: [u8; 2] = "\n\0"
+    ulib.strcat(bp, (&nlc[0 as usize]) as u64)
+    // what is counted so far goes first, so the file stays in order
+    if !flush_lazy() {
+        return false
+    }
+    let r: u64 = actwire.append_file((&s_logpath[0 as usize]) as u64, bp,
+        actwire.slen(bp))
+    if ulib.bad(r) {
+        c_logfail = c_logfail + 1
+        return false
+    }
+    return true
+}
+
+fn ag(i: u64) -> u64 {
+    return (&aggs[0 as usize]) as u64 + i * AGG_B
+}
+
+fn agg_add(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
+    result: u64, dry: bool) -> bool {
+    var dv: u64 = 0
+    if dry {
+        dv = 1
+    }
+    var slot: u64 = actwire.NONE
+    var free: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < AGG_MAX {
+        let g: u64 = ag(i)
+        if ld(g, AG_USED) == 0 {
+            if free == actwire.NONE {
+                free = i
+            }
+        } else if ld(g, AG_DRY) == dv && actwire.str_eq(g + AG_CLIENT, client)
+            && actwire.str_eq(g + AG_TARGET, target)
+            && actwire.str_eq(g + AG_VERB, verb)
+            && actwire.str_eq(g + AG_RESULT, result) {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot == actwire.NONE {
+        if free == actwire.NONE {
+            if !flush_lazy() {
+                return false
+            }
+            free = 0
+        }
+        slot = free
+        let g2: u64 = ag(slot)
+        st(g2, AG_USED, 1)
+        st(g2, AG_COUNT, 0)
+        st(g2, AG_DRY, dv)
+        copyz(g2 + AG_CLIENT, client, 24)
+        copyz(g2 + AG_TARGET, target, 32)
+        copyz(g2 + AG_VERB, verb, 8)
+        copyz(g2 + AG_RESULT, result, 8)
+    }
+    let g3: u64 = ag(slot)
+    st(g3, AG_COUNT, ld(g3, AG_COUNT) + 1)
+    st(g3, AG_PID, pid)
+    st(g3, AG_UID, uid)
+    st(g3, AG_T, actwire.ticks())
+    if lazy_t == 0 {
+        lazy_t = actwire.ticks()
+    }
+    c_lazy = c_lazy + 1
+    return true
+}
+
+// the counted lines to the file; false when the file cannot be written
+fn flush_lazy() -> bool {
+    var s_allow2: [u8; 6] = "allow\0"
+    var s_cnt: [u8; 8] = " count=\0"
+    var nlc: [u8; 2] = "\n\0"
+    var d: [u8; 24] = [0 as u8; 24]
+    let dp: u64 = (&d[0 as usize]) as u64
+    var b: [u8; 320] = [0 as u8; 320]
+    let bp: u64 = (&b[0 as usize]) as u64
+    let lz: u64 = (&lazy[0 as usize]) as u64
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < AGG_MAX {
+        let g: u64 = ag(i)
+        if ld(g, AG_USED) != 0 {
+            audit_line(bp, ld(g, AG_T), ld(g, AG_PID), ld(g, AG_UID),
+                g + AG_CLIENT, g + AG_VERB, g + AG_TARGET,
+                (&s_allow2[0 as usize]) as u64, g + AG_RESULT,
+                ld(g, AG_DRY) != 0)
+            ulib.strcat(bp, (&s_cnt[0 as usize]) as u64)
+            st8(dp, ulib.digits(ld(g, AG_COUNT), dp), 0)
+            ulib.strcat(bp, dp)
+            ulib.strcat(bp, (&nlc[0 as usize]) as u64)
+            let bl: u64 = actwire.slen(bp)
+            if n + bl < LAZY_MAX {
+                ulib.copy(lz + n, bp, bl)
+                n = n + bl
+            }
+            st(g, AG_USED, 0)
+        }
+        i = i + 1
+    }
+    lazy_t = 0
+    if n == 0 {
+        return true
+    }
+    let r: u64 = actwire.append_file((&s_logpath[0 as usize]) as u64, lz, n)
+    if ulib.bad(r) {
+        c_logfail = c_logfail + 1
+        return false
+    }
+    return true
+}
+
+// ============================================================ replies
+
+// A reply goes to "r.<pid>" -- the pid the KERNEL stamped on the
+// request, so nobody can have replies sent to someone else.
+fn reply(pid: u64, id: u64, p: u64, n: u64) {
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    var pre: [u8; 3] = "r.\0"
+    actwire.name_of((&pre[0 as usize]) as u64, pid, np)
+    let svc: u64 = actwire.bus_find(np)
+    if ulib.bad(svc) {
+        return
+    }
+    actwire.send_msg(svc, actwire.K_REP, id, p, n)
+}
+
+fn reply_ob(pid: u64, id: u64) {
+    reply(pid, id, actwire.ob_ptr(), actwire.ob_len())
+}
+
+fn reply_err(pid: u64, id: u64, code: u64, detail: u64) {
+    var s_err: [u8; 5] = "err \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_err[0 as usize]) as u64)
+    actwire.ob_str(code)
+    if detail != 0 {
+        actwire.ob_ch(32)
+        actwire.ob_str(detail)
+    }
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+}
+
+// ============================================================ list
+
+fn do_list(pid: u64, id: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_ev: [u8; 7] = "event \0"
+    var s_off: [u8; 15] = " (not running)\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n_acts {
+        let c: u64 = ac(i)
+        if (ld(c, AC_FLAGS) & FL_EVENT) != 0 {
+            actwire.ob_str((&s_ev[0 as usize]) as u64)
+            actwire.ob_str(c + AC_NAME)
+        } else {
+            actwire.ob_str(c + AC_NAME)
+            actwire.ob_ch(32)
+            actwire.ob_str(level_name(ld(c, AC_LEVEL)))
+        }
+        actwire.ob_ch(32)
+        actwire.ob_str(pl(ld(c, AC_DESC)))
+        if !app_running(ld(c, AC_APP)) {
+            actwire.ob_str((&s_off[0 as usize]) as u64)
+        }
+        actwire.ob_ch(10)
+        i = i + 1
+    }
+    reply_ob(pid, id)
+}
+
+// ======================================================== describe
+//
+// Section 3.3: the catalogue as JSON, for a program or a language model
+// that has never seen this system. Everything it needs to call an
+// action correctly is here -- and nothing it could use to skip a check.
+
+fn json_args(act: u64, role_a: u64, role_b: u64) {
+    var s_n: [u8; 9] = "{\"name\":\0"
+    var s_t: [u8; 9] = ",\"type\":\0"
+    var s_r: [u8; 13] = ",\"required\":\0"
+    var s_d: [u8; 16] = ",\"description\":\0"
+    var s_true: [u8; 5] = "true\0"
+    var s_false: [u8; 6] = "false\0"
+    actwire.ob_ch(91)
+    let a0: u64 = ld(ac(act), AC_ARG0)
+    let an: u64 = ld(ac(act), AC_ARGN)
+    var first: bool = true
+    var k: u64 = 0
+    while k < an {
+        let a: u64 = ar(a0 + k)
+        let role: u64 = ld(a, AR_ROLE)
+        if role == role_a || role == role_b {
+            if !first {
+                actwire.ob_ch(44)
+            }
+            first = false
+            actwire.ob_str((&s_n[0 as usize]) as u64)
+            actwire.ob_json(a + AR_NAME)
+            actwire.ob_str((&s_t[0 as usize]) as u64)
+            actwire.ob_json(type_name(ld(a, AR_TYPE)))
+            if role_a == 0 {
+                actwire.ob_str((&s_r[0 as usize]) as u64)
+                if role == 0 {
+                    actwire.ob_str((&s_true[0 as usize]) as u64)
+                } else {
+                    actwire.ob_str((&s_false[0 as usize]) as u64)
+                }
+            }
+            actwire.ob_str((&s_d[0 as usize]) as u64)
+            actwire.ob_json(pl(ld(a, AR_DESC)))
+            actwire.ob_ch(125)
+        }
+        k = k + 1
+    }
+    actwire.ob_ch(93)
+}
+
+fn do_describe(pid: u64, id: u64, filter: u64) {
+    var s_head: [u8; 47] = "ok\n{\"bus\":\"orient-bus\",\"version\":1,\"actions\":[\0"
+    var s_name: [u8; 9] = "{\"name\":\0"
+    var s_app: [u8; 8] = ",\"app\":\0"
+    var s_lvl: [u8; 10] = ",\"level\":\0"
+    var s_desc: [u8; 16] = ",\"description\":\0"
+    var s_dry: [u8; 12] = ",\"dry_run\":\0"
+    var s_undo: [u8; 9] = ",\"undo\":\0"
+    var s_args: [u8; 9] = ",\"args\":\0"
+    var s_ret: [u8; 12] = ",\"returns\":\0"
+    var s_fld: [u8; 11] = ",\"fields\":\0"
+    var s_run: [u8; 14] = ",\"available\":\0"
+    var s_conf: [u8; 23] = ",\"needs_confirmation\":\0"
+    var s_evs: [u8; 13] = "],\"events\":[\0"
+    var s_end: [u8; 4] = "]}\n\0"
+    var s_true: [u8; 5] = "true\0"
+    var s_false: [u8; 6] = "false\0"
+    var s_null: [u8; 5] = "null\0"
+    let fl: u64 = actwire.slen(filter)
+    actwire.ob_reset()
+    actwire.ob_str((&s_head[0 as usize]) as u64)
+    var pass: u64 = 0
+    while pass < 2 {
+        var first: bool = true
+        var i: u64 = 0
+        while i < n_acts {
+            let c: u64 = ac(i)
+            let is_ev: bool = (ld(c, AC_FLAGS) & FL_EVENT) != 0
+            var take: bool = (pass == 0 && !is_ev) || (pass == 1 && is_ev)
+            if take && fl > 0 {
+                take = actwire.starts(c + AC_NAME, filter)
+            }
+            if take {
+                if !first {
+                    actwire.ob_ch(44)
+                }
+                first = false
+                let app: u64 = ld(c, AC_APP)
+                actwire.ob_str((&s_name[0 as usize]) as u64)
+                actwire.ob_json(c + AC_NAME)
+                actwire.ob_str((&s_app[0 as usize]) as u64)
+                actwire.ob_json(ap(app) + AP_NAME)
+                if !is_ev {
+                    actwire.ob_str((&s_lvl[0 as usize]) as u64)
+                    actwire.ob_json(level_name(ld(c, AC_LEVEL)))
+                }
+                actwire.ob_str((&s_desc[0 as usize]) as u64)
+                actwire.ob_json(pl(ld(c, AC_DESC)))
+                if !is_ev {
+                    actwire.ob_str((&s_conf[0 as usize]) as u64)
+                    if ld(c, AC_LEVEL) == L_CRIT {
+                        actwire.ob_str((&s_true[0 as usize]) as u64)
+                    } else {
+                        actwire.ob_str((&s_false[0 as usize]) as u64)
+                    }
+                    actwire.ob_str((&s_dry[0 as usize]) as u64)
+                    if (ld(c, AC_FLAGS) & FL_DRY) != 0 {
+                        actwire.ob_str((&s_true[0 as usize]) as u64)
+                    } else {
+                        actwire.ob_str((&s_false[0 as usize]) as u64)
+                    }
+                    actwire.ob_str((&s_undo[0 as usize]) as u64)
+                    if ld(c, AC_UNDO) != actwire.NONE {
+                        actwire.ob_json(pl(ld(c, AC_UNDO)))
+                    } else {
+                        actwire.ob_str((&s_null[0 as usize]) as u64)
+                    }
+                    actwire.ob_str((&s_run[0 as usize]) as u64)
+                    if app_running(app) {
+                        actwire.ob_str((&s_true[0 as usize]) as u64)
+                    } else {
+                        actwire.ob_str((&s_false[0 as usize]) as u64)
+                    }
+                    actwire.ob_str((&s_args[0 as usize]) as u64)
+                    json_args(i, 0, 1)
+                    actwire.ob_str((&s_ret[0 as usize]) as u64)
+                    json_args(i, 2, 2)
+                } else {
+                    actwire.ob_str((&s_fld[0 as usize]) as u64)
+                    json_args(i, 3, 3)
+                }
+                actwire.ob_ch(125)
+            }
+            i = i + 1
+        }
+        if pass == 0 {
+            actwire.ob_str((&s_evs[0 as usize]) as u64)
+        }
+        pass = pass + 1
+    }
+    actwire.ob_str((&s_end[0 as usize]) as u64)
+    reply_ob(pid, id)
+}
+
+// ========================================================== the call
+
+fn is_int(v: u64) -> bool {
+    var i: u64 = 0
+    if ld8(v, 0) == 45 {
+        i = 1
+    }
+    if ld8(v, i) == 0 {
+        return false
+    }
+    while ld8(v, i) != 0 {
+        if ld8(v, i) < 48 || ld8(v, i) > 57 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_bool(v: u64) -> bool {
+    var t: [u8; 5] = "true\0"
+    var f: [u8; 6] = "false\0"
+    var o: [u8; 2] = "1\0"
+    var z: [u8; 2] = "0\0"
+    return actwire.str_eq(v, (&t[0 as usize]) as u64)
+        || actwire.str_eq(v, (&f[0 as usize]) as u64)
+        || actwire.str_eq(v, (&o[0 as usize]) as u64)
+        || actwire.str_eq(v, (&z[0 as usize]) as u64)
+}
+
+// Check the argument lines of `msg` against the manifest of `act`.
+// Returns 0 when they fit, else a pointer to the reason (in `why`).
+fn check_args(msg: u64, act: u64, why: u64) -> bool {
+    var e_unknown: [u8; 17] = "bad_arg unknown \0"
+    var e_type: [u8; 20] = "bad_arg wrong type \0"
+    var e_miss: [u8; 13] = "missing_arg \0"
+    let a0: u64 = ld(ac(act), AC_ARG0)
+    let an: u64 = ld(ac(act), AC_ARGN)
+    var key: [u8; 24] = [0 as u8; 24]
+    let kp: u64 = (&key[0 as usize]) as u64
+    var val: [u8; 400] = [0 as u8; 400]
+    let vp: u64 = (&val[0 as usize]) as u64
+    // every given argument must be declared and of its type
+    var at: u64 = actwire.line_end(msg, 0)
+    while ld8(msg, at) == 10 {
+        at = at + 1
+        let e: u64 = actwire.line_end(msg, at)
+        if e > at && !actwire.is_meta(msg, at) {
+            var k: u64 = 0
+            while at + k < e && ld8(msg, at + k) != 61 && k + 1 < 24 {
+                st8(kp, k, ld8(msg, at + k))
+                k = k + 1
+            }
+            st8(kp, k, 0)
+            var j: u64 = 0
+            var found: u64 = actwire.NONE
+            while j < an {
+                let a: u64 = ar(a0 + j)
+                if ld(a, AR_ROLE) <= 1 && actwire.str_eq(a + AR_NAME, kp) {
+                    found = a0 + j
+                }
+                j = j + 1
+            }
+            if found == actwire.NONE {
+                copyz(why, (&e_unknown[0 as usize]) as u64, 80)
+                ulib.strcat(why, kp)
+                return false
+            }
+            copyn(vp, msg + at + k + 1, e - at - k - 1, 400)
+            let t: u64 = ld(ar(found), AR_TYPE)
+            if (t == T_INT && !is_int(vp)) || (t == T_BOOL && !is_bool(vp)) {
+                copyz(why, (&e_type[0 as usize]) as u64, 80)
+                ulib.strcat(why, kp)
+                return false
+            }
+        }
+        at = e
+    }
+    // every required argument must be there
+    var j2: u64 = 0
+    while j2 < an {
+        let a: u64 = ar(a0 + j2)
+        if ld(a, AR_ROLE) == 0 {
+            if !actwire.kv_find(msg, a + AR_NAME, vp, 400) {
+                copyz(why, (&e_miss[0 as usize]) as u64, 80)
+                ulib.strcat(why, a + AR_NAME)
+                return false
+            }
+        }
+        j2 = j2 + 1
+    }
+    return true
+}
+
+fn pend_free_slot() -> u64 {
+    var i: u64 = 0
+    while i < PEND_MAX {
+        if ld(pe(i), PE_USED) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+// Forward a call (or a ping) to the provider of `app`.
+fn forward(app: u64, act: u64, msg: u64, pid: u64, uid: u64, id: u64,
+    client: u64, flags: u64) -> bool {
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    app_svc_name(app, np)
+    let svc: u64 = actwire.bus_find(np)
+    if ulib.bad(svc) {
+        return false
+    }
+    let s: u64 = pend_free_slot()
+    if s == actwire.NONE {
+        return false
+    }
+    let p: u64 = pe(s)
+    let nonce: u64 = actwire.rnd() & 0xFFFFFFFF
+    st(p, PE_USED, 1)
+    st(p, PE_NONCE, nonce)
+    st(p, PE_PID, pid)
+    st(p, PE_ID, id)
+    st(p, PE_ACT, act)
+    st(p, PE_FLAGS, flags)
+    st(p, PE_T0, actwire.ticks())
+    st(p, PE_APP, app)
+    st(p, PE_UID, uid)
+    copyz(p + PE_CLIENT, client, 24)
+    // the request as the provider sees it: the verb line, @dry and
+    // @client (for its information -- the decision is already taken),
+    // then the argument lines exactly as the caller sent them
+    var s_call: [u8; 6] = "call \0"
+    var s_ping: [u8; 6] = "ping\n\0"
+    var s_dry: [u8; 8] = "@dry=1\n\0"
+    var s_cl: [u8; 9] = "@client=\0"
+    actwire.ob_reset()
+    if (flags & PF_PING) != 0 {
+        actwire.ob_str((&s_ping[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_call[0 as usize]) as u64)
+        actwire.ob_line(ac(act) + AC_NAME)
+        if (flags & PF_DRY) != 0 {
+            actwire.ob_str((&s_dry[0 as usize]) as u64)
+        }
+        actwire.ob_str((&s_cl[0 as usize]) as u64)
+        actwire.ob_line(client)
+        var at: u64 = actwire.line_end(msg, 0)
+        while ld8(msg, at) == 10 {
+            at = at + 1
+            let e: u64 = actwire.line_end(msg, at)
+            if e > at && !actwire.is_meta(msg, at) {
+                actwire.ob_n(msg + at, e - at)
+                actwire.ob_ch(10)
+            }
+            at = e
+        }
+    }
+    let r: u64 = actwire.send_msg(svc, actwire.K_REQ, nonce,
+        actwire.ob_ptr(), actwire.ob_len())
+    if ulib.bad(r) {
+        st(p, PE_USED, 0)
+        return false
+    }
+    return true
+}
+
+// THE CALL. `msg` is the request text, `confirmed` says a human has
+// just said yes to exactly this request (only `confirm` sets it),
+// `undo` marks the replay of an inverse action.
+fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
+    undo: bool) {
+    var name: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&name[0 as usize]) as u64
+    var verb: [u8; 16] = [0 as u8; 16]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var client: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&client[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    var k_dry: [u8; 5] = "@dry\0"
+    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
+        || ld8(cp, 0) == 0 {
+        copyz(cp, (&s_user[0 as usize]) as u64, 24)
+    }
+    var dv: [u8; 8] = [0 as u8; 8]
+    let dvp: u64 = (&dv[0 as usize]) as u64
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, dvp, 8)
+        && ld8(dvp, 0) == 49
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if undo {
+        vb = (&s_undov[0 as usize]) as u64
+    }
+    var s_dash: [u8; 2] = "-\0"
+    let dash: u64 = (&s_dash[0 as usize]) as u64
+    var r_err: [u8; 4] = "err\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var r_conf: [u8; 8] = "confirm\0"
+    var r_dry: [u8; 4] = "dry\0"
+    var r_fwd: [u8; 10] = "forwarded\0"
+
+    c_calls = c_calls + 1
+    let act: u64 = find_act(np, false)
+    if act == actwire.NONE {
+        var e: [u8; 15] = "unknown_action\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, np)
+        audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    var why: [u8; 80] = [0 as u8; 80]
+    let wp: u64 = (&why[0 as usize]) as u64
+    if !check_args(msg, act, wp) {
+        reply_err(pid, id, wp, 0)
+        audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    var d: u64 = decide(cp, act, dry)
+    // what the decision would be without the dry run (dry runs report it)
+    let real: u64 = decide(cp, act, false)
+    if d == D_ASK && confirmed {
+        d = D_ALLOW
+    }
+    if d == D_DENY {
+        c_deny = c_deny + 1
+        var e2: [u8; 7] = "denied\0"
+        reply_err(pid, id, (&e2[0 as usize]) as u64, np)
+        audit(pid, uid, cp, vb, np, (&s_deny[0 as usize]) as u64,
+            (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    if d == D_ASK {
+        // park the request and hand out a number; `act confirm` from the
+        // user replays it (section 5.3)
+        c_ask = c_ask + 1
+        let len: u64 = actwire.slen(msg)
+        var t: u64 = actwire.NONE
+        var i: u64 = 0
+        while i < TOK_MAX {
+            if ld(tk(i), TK_USED) == 0 && t == actwire.NONE {
+                t = i
+            }
+            i = i + 1
+        }
+        if t == actwire.NONE || len >= TOK_BYTES {
+            var e3: [u8; 13] = "confirm_full\0"
+            reply_err(pid, id, (&e3[0 as usize]) as u64, np)
+            return
+        }
+        let tp: u64 = tk(t)
+        st(tp, TK_USED, 1)
+        st(tp, TK_NO, tok_next)
+        st(tp, TK_T0, actwire.ticks())
+        st(tp, TK_LEN, len)
+        st(tp, TK_PID, pid)
+        st(tp, TK_UID, uid)
+        copyn(tkmem(t), msg, len, TOK_BYTES)
+        tok_next = tok_next + 1
+        var s_c: [u8; 9] = "confirm \0"
+        var s_lv: [u8; 8] = "\nlevel=\0"
+        var s_ds: [u8; 7] = "\ntext=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_c[0 as usize]) as u64)
+        actwire.ob_num(ld(tp, TK_NO))
+        actwire.ob_ch(32)
+        actwire.ob_str(np)
+        actwire.ob_str((&s_lv[0 as usize]) as u64)
+        actwire.ob_str(level_name(ld(ac(act), AC_LEVEL)))
+        actwire.ob_str((&s_ds[0 as usize]) as u64)
+        actwire.ob_str(pl(ld(ac(act), AC_DESC)))
+        actwire.ob_ch(10)
+        reply_ob(pid, id)
+        audit(pid, uid, cp, vb, np, (&s_ask[0 as usize]) as u64,
+            (&r_conf[0 as usize]) as u64, dry)
+        // tell whoever shows confirmation dialogs
+        var s_ev: [u8; 29] = "event bus.confirm_needed\nno=\0"
+        var s_ac: [u8; 9] = "\naction=\0"
+        var s_cl: [u8; 9] = "\nclient=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_ev[0 as usize]) as u64)
+        actwire.ob_num(ld(tp, TK_NO))
+        actwire.ob_str((&s_ac[0 as usize]) as u64)
+        actwire.ob_str(np)
+        actwire.ob_str((&s_cl[0 as usize]) as u64)
+        actwire.ob_str(cp)
+        actwire.ob_ch(10)
+        actwire.pub_msg(svc_evt, actwire.K_EVT, evt_seq, actwire.ob_ptr(),
+            actwire.ob_len())
+        evt_seq = evt_seq + 1
+        return
+    }
+    // allowed
+    c_allow = c_allow + 1
+    let app: u64 = ld(ac(act), AC_APP)
+    if dry {
+        c_dry = c_dry + 1
+    }
+    if dry && (ld(ac(act), AC_FLAGS) & FL_DRY) == 0 {
+        // the provider cannot simulate: the broker answers with what
+        // WOULD happen, and nothing is sent anywhere
+        var s_hd: [u8; 16] = "ok\ndry=1\nwould=\0"
+        var s_dc: [u8; 11] = "\ndecision=\0"
+        var s_lv: [u8; 8] = "\nlevel=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_hd[0 as usize]) as u64)
+        actwire.ob_str(np)
+        actwire.ob_str((&s_dc[0 as usize]) as u64)
+        actwire.ob_str(decision_name(real))
+        actwire.ob_str((&s_lv[0 as usize]) as u64)
+        actwire.ob_str(level_name(ld(ac(act), AC_LEVEL)))
+        actwire.ob_ch(10)
+        reply_ob(pid, id)
+        audit_lazy = true
+        audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+            (&r_dry[0 as usize]) as u64, true)
+        return
+    }
+    // WRITE-AHEAD: a change is logged before it is made, or not made
+    if !dry && ld(ac(act), AC_LEVEL) != L_READ {
+        if !audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+            (&r_fwd[0 as usize]) as u64, false) {
+            var e4: [u8; 18] = "audit_unavailable\0"
+            reply_err(pid, id, (&e4[0 as usize]) as u64, np)
+            return
+        }
+    }
+    var fl: u64 = 0
+    if dry {
+        fl = fl | PF_DRY
+    }
+    if undo {
+        fl = fl | PF_UNDO
+    }
+    if confirmed {
+        fl = fl | PF_CONF
+    }
+    // stash the real decision for the dry-run reply
+    if !forward(app, act, msg, pid, uid, id, cp, fl) {
+        var e5: [u8; 16] = "app_not_running\0"
+        reply_err(pid, id, (&e5[0 as usize]) as u64, ap(app) + AP_NAME)
+        audit(pid, uid, cp, vb, np, (&s_allow[0 as usize]) as u64,
+            (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    st(ac(act), AC_CALLS, ld(ac(act), AC_CALLS) + 1)
+}
+
+// ======================================================== replies in
+
+fn push_undo(client: u64, act: u64, args: u64) {
+    // the inverse action is the one the MANIFEST names, in the same app
+    let uo: u64 = ld(ac(act), AC_UNDO)
+    if uo == actwire.NONE {
+        return
+    }
+    let inv: u64 = find_act(pl(uo), false)
+    if inv == actwire.NONE || ld(ac(inv), AC_APP) != ld(ac(act), AC_APP) {
+        return
+    }
+    var slot: u64 = 0
+    var oldest: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < UNDO_MAX {
+        let u: u64 = un(i)
+        if ld(u, UN_USED) == 0 {
+            slot = i
+            oldest = 0
+        } else if ld(u, UN_SEQ) < oldest {
+            slot = i
+            oldest = ld(u, UN_SEQ)
+        }
+        i = i + 1
+    }
+    undo_seq = undo_seq + 1
+    let u2: u64 = un(slot)
+    st(u2, UN_USED, 1)
+    st(u2, UN_SEQ, undo_seq)
+    st(u2, UN_ACT, inv)
+    copyz(u2 + UN_CLIENT, client, 24)
+    copyz(u2 + UN_ARGS, args, UN_ARGMAX)
+}
+
+// A reply from a provider: find the call it answers, check who sent
+// it, relay it to the caller.
+fn on_reply(s: u64) {
+    let id: u64 = actwire.asm_id(s)
+    let from: u64 = actwire.asm_pid(s)
+    let msg: u64 = actwire.asm_buf(s)
+    var k: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < PEND_MAX {
+        if ld(pe(i), PE_USED) != 0 && ld(pe(i), PE_NONCE) == id {
+            k = i
+        }
+        i = i + 1
+    }
+    if k == actwire.NONE {
+        c_badrep = c_badrep + 1
+        return
+    }
+    let p: u64 = pe(k)
+    let app: u64 = ld(p, PE_APP)
+    let bound: u64 = ld(ap(app), AP_PID)
+    if bound != 0 && bound != from {
+        // not the process that owns a.<app>: an impostor guessed an id
+        c_badrep = c_badrep + 1
+        var w: [u8; 45] = "orientbus: reply from a foreign pid, dropped\0"
+        say((&w[0 as usize]) as u64)
+        nl()
+        return
+    }
+    if bound == 0 {
+        // only the owner of a.<app> received the nonce: bind it
+        st(ap(app), AP_PID, from)
+    }
+    let flags: u64 = ld(p, PE_FLAGS)
+    st(p, PE_USED, 0)
+    if (flags & PF_PING) != 0 {
+        var b: [u8; 21] = "orientbus: provider \0"
+        var b2: [u8; 10] = " bound to\0"
+        var sp: [u8; 6] = " pid=\0"
+        lb_start((&b[0 as usize]) as u64)
+        lb_add(ap(app) + AP_NAME)
+        lb_add((&b2[0 as usize]) as u64)
+        lb_add((&sp[0 as usize]) as u64)
+        lb_num(from)
+        lb_say()
+        return
+    }
+    let act: u64 = ld(p, PE_ACT)
+    let dry: bool = (flags & PF_DRY) != 0
+    // relay everything but the @-lines; collect "@undo k=v k=v"
+    var args: [u8; 200] = [0 as u8; 200]
+    let agp: u64 = (&args[0 as usize]) as u64
+    var have_undo: bool = false
+    var k_undo: [u8; 7] = "@undo \0"
+    actwire.ob_reset()
+    var at: u64 = 0
+    var first: bool = true
+    while ld8(msg, at) != 0 {
+        let e: u64 = actwire.line_end(msg, at)
+        if actwire.is_meta(msg, at) {
+            if actwire.starts(msg + at, (&k_undo[0 as usize]) as u64) {
+                // "@undo a=1 b=2" -> "a=1\nb=2\n"
+                var n: u64 = 0
+                var j: u64 = at + 6
+                while j < e && n + 2 < 200 {
+                    var c: u64 = ld8(msg, j)
+                    if c == 32 {
+                        c = 10
+                    }
+                    st8(agp, n, c)
+                    n = n + 1
+                    j = j + 1
+                }
+                st8(agp, n, 10)
+                st8(agp, n + 1, 0)
+                have_undo = true
+            }
+        } else {
+            actwire.ob_n(msg + at, e - at)
+            actwire.ob_ch(10)
+        }
+        if first {
+            first = false
+        }
+        at = e
+        if ld8(msg, at) == 10 {
+            at = at + 1
+        }
+    }
+    let okr: bool = ld8(msg, 0) == 111 && ld8(msg, 1) == 107 // "ok"
+    if okr && have_undo && !dry && (flags & PF_UNDO) == 0 {
+        push_undo(p + PE_CLIENT, act, agp)
+        var s_u: [u8; 16] = "undo=available\n\0"
+        actwire.ob_str((&s_u[0 as usize]) as u64)
+    }
+    reply_ob(ld(p, PE_PID), ld(p, PE_ID))
+    var r_ok: [u8; 3] = "ok\0"
+    var r_err: [u8; 4] = "err\0"
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if (flags & PF_UNDO) != 0 {
+        vb = (&s_undov[0 as usize]) as u64
+        c_undo = c_undo + 1
+    }
+    var res: u64 = (&r_ok[0 as usize]) as u64
+    if !okr {
+        res = (&r_err[0 as usize]) as u64
+    }
+    var dec: u64 = (&s_allow[0 as usize]) as u64
+    audit_lazy = okr && (dry || ld(ac(act), AC_LEVEL) == L_READ)
+    audit(ld(p, PE_PID), ld(p, PE_UID), p + PE_CLIENT, vb, ac(act) + AC_NAME,
+        dec, res, dry)
+}
+
+// An event from a provider: declared in its manifest, sent by the pid
+// that owns a.<app>, then published to everyone on orient.evt.
+fn on_event(s: u64) {
+    let msg: u64 = actwire.asm_buf(s)
+    var w: [u8; 16] = [0 as u8; 16]
+    var nm: [u8; 40] = [0 as u8; 40]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let np: u64 = (&nm[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    let ev: u64 = find_act(np, true)
+    if ev == actwire.NONE {
+        c_badevt = c_badevt + 1
+        return
+    }
+    let app: u64 = ld(ac(ev), AC_APP)
+    if ld(ap(app), AP_PID) == 0 || ld(ap(app), AP_PID) != actwire.asm_pid(s) {
+        c_badevt = c_badevt + 1
+        var m: [u8; 48] = "orientbus: event from a pid that is not the app\0"
+        say((&m[0 as usize]) as u64)
+        nl()
+        return
+    }
+    var s_app: [u8; 6] = "@app=\0"
+    actwire.ob_reset()
+    let e0: u64 = actwire.line_end(msg, 0)
+    actwire.ob_n(msg, e0)
+    actwire.ob_ch(10)
+    actwire.ob_str((&s_app[0 as usize]) as u64)
+    actwire.ob_line(ap(app) + AP_NAME)
+    if ld8(msg, e0) == 10 {
+        actwire.ob_str(msg + e0 + 1)
+    }
+    actwire.pub_msg(svc_evt, actwire.K_EVT, evt_seq, actwire.ob_ptr(),
+        actwire.ob_len())
+    evt_seq = evt_seq + 1
+    c_events = c_events + 1
+}
+
+// ================================================== the other verbs
+
+fn is_user(msg: u64, uid: u64) -> bool {
+    var cl: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&cl[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    if actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24) {
+        if ld8(cp, 0) != 0 && !actwire.str_eq(cp, (&s_user[0 as usize]) as u64) {
+            return false
+        }
+    }
+    return uid == 0
+}
+
+// confirm <no|last> / reject <no|last>
+fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
+    var e_who: [u8; 33] = "denied only the user may confirm\0"
+    var e_none: [u8; 16] = "no_such_request\0"
+    if !is_user(msg, uid) {
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w: [u8; 16] = [0 as u8; 16]
+    var a: [u8; 16] = [0 as u8; 16]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let arp: u64 = (&a[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, arp, 16)
+    var k_last: [u8; 5] = "last\0"
+    var t: u64 = actwire.NONE
+    var best: u64 = 0
+    var i: u64 = 0
+    while i < TOK_MAX {
+        let tp: u64 = tk(i)
+        if ld(tp, TK_USED) != 0 {
+            if actwire.str_eq(arp, (&k_last[0 as usize]) as u64) {
+                if ld(tp, TK_NO) > best {
+                    best = ld(tp, TK_NO)
+                    t = i
+                }
+            } else if ld(tp, TK_NO) == ulib.to_num(arp) {
+                t = i
+            }
+        }
+        i = i + 1
+    }
+    if t == actwire.NONE {
+        reply_err(pid, id, (&e_none[0 as usize]) as u64, arp)
+        return
+    }
+    st(tk(t), TK_USED, 0)
+    let m: u64 = (&scratch[0 as usize]) as u64
+    copyn(m, tkmem(t), ld(tk(t), TK_LEN), 2048)
+    if !yes {
+        var s_rj: [u8; 13] = "ok\nrejected\n\0"
+        reply(pid, id, (&s_rj[0 as usize]) as u64, 12)
+        var r_rej: [u8; 9] = "rejected\0"
+        var nm: [u8; 40] = [0 as u8; 40]
+        let np: u64 = (&nm[0 as usize]) as u64
+        let n2: u64 = actwire.word_copy(m, 0, np, 40)
+        actwire.word_copy(m, n2, np, 40)
+        var s_rej: [u8; 7] = "reject\0"
+        audit(pid, uid, (&s_user[0 as usize]) as u64,
+            (&s_rej[0 as usize]) as u64, np, (&s_deny[0 as usize]) as u64,
+            (&r_rej[0 as usize]) as u64, false)
+        return
+    }
+    // the ORIGINAL request, confirmed; the answer goes to the confirmer
+    do_call(m, pid, ld(tk(t), TK_UID), id, true, false)
+}
+
+// undo [@client=...]: the newest undo entry of that client
+fn do_undo(msg: u64, pid: u64, uid: u64, id: u64) {
+    var cl: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&cl[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    if !actwire.kv_find(msg, (&k_client[0 as usize]) as u64, cp, 24)
+        || ld8(cp, 0) == 0 {
+        copyz(cp, (&s_user[0 as usize]) as u64, 24)
+    }
+    var best: u64 = actwire.NONE
+    var seq: u64 = 0
+    var i: u64 = 0
+    while i < UNDO_MAX {
+        let u: u64 = un(i)
+        if ld(u, UN_USED) != 0 && actwire.str_eq(u + UN_CLIENT, cp)
+            && ld(u, UN_SEQ) > seq {
+            seq = ld(u, UN_SEQ)
+            best = i
+        }
+        i = i + 1
+    }
+    if best == actwire.NONE {
+        var e: [u8; 16] = "nothing_to_undo\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    let u2: u64 = un(best)
+    st(u2, UN_USED, 0)
+    var s_call: [u8; 6] = "call \0"
+    var s_cl: [u8; 9] = "@client=\0"
+    let m: u64 = (&scratch[0 as usize]) as u64
+    copyz(m, (&s_call[0 as usize]) as u64, 2048)
+    ulib.strcat(m, ac(ld(u2, UN_ACT)) + AC_NAME)
+    var nlc: [u8; 2] = "\n\0"
+    ulib.strcat(m, (&nlc[0 as usize]) as u64)
+    ulib.strcat(m, (&s_cl[0 as usize]) as u64)
+    ulib.strcat(m, cp)
+    ulib.strcat(m, (&nlc[0 as usize]) as u64)
+    ulib.strcat(m, u2 + UN_ARGS)
+    // trailing newline of the args would make an empty line: harmless
+    do_call(m, pid, uid, id, false, true)
+}
+
+// grant <client> <glob> <read|write> [seconds]
+fn do_grant(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 31] = "denied only the user may grant\0"
+    var e_bad: [u8; 34] = "bad_arg grant <client> <glob> <l>\0"
+    if !is_user(msg, uid) {
+        reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    var w4: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let p4: u64 = (&w4[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    nx = actwire.word_copy(msg, nx, p2, 32)
+    nx = actwire.word_copy(msg, nx, p3, 32)
+    actwire.word_copy(msg, nx, p4, 32)
+    let l: u64 = level_of(p3)
+    if ld8(p1, 0) == 0 || ld8(p2, 0) == 0 || l == actwire.NONE || l == L_CRIT {
+        reply_err(pid, id, (&e_bad[0 as usize]) as u64, 0)
+        return
+    }
+    var until: u64 = 0
+    let secs: u64 = ulib.to_num(p4)
+    if secs > 0 {
+        until = actwire.ticks() + secs * 100
+    }
+    if !rule_add(p1, p2, false, l, until) {
+        var e: [u8; 11] = "rules_full\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    var s_ok: [u8; 10] = "ok\ngrant \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(p1)
+    actwire.ob_ch(32)
+    actwire.ob_str(p2)
+    actwire.ob_ch(32)
+    actwire.ob_str(p3)
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+    var s_g: [u8; 6] = "grant\0"
+    var r_ok: [u8; 3] = "ok\0"
+    audit(pid, uid, p1, (&s_g[0 as usize]) as u64, p2,
+        (&s_allow[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false)
+}
+
+fn do_stat(pid: u64, id: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var k1: [u8; 11] = "manifests=\0"
+    stat_line((&k1[0 as usize]) as u64, c_manifests)
+    var k2: [u8; 20] = "rejected_manifests=\0"
+    stat_line((&k2[0 as usize]) as u64, c_rejected)
+    var k3: [u8; 6] = "apps=\0"
+    stat_line((&k3[0 as usize]) as u64, n_apps)
+    var k4: [u8; 9] = "actions=\0"
+    stat_line((&k4[0 as usize]) as u64, n_acts)
+    var k5: [u8; 7] = "calls=\0"
+    stat_line((&k5[0 as usize]) as u64, c_calls)
+    var k6: [u8; 9] = "allowed=\0"
+    stat_line((&k6[0 as usize]) as u64, c_allow)
+    var k7: [u8; 7] = "asked=\0"
+    stat_line((&k7[0 as usize]) as u64, c_ask)
+    var k8: [u8; 8] = "denied=\0"
+    stat_line((&k8[0 as usize]) as u64, c_deny)
+    var k9: [u8; 5] = "dry=\0"
+    stat_line((&k9[0 as usize]) as u64, c_dry)
+    var k10: [u8; 8] = "undone=\0"
+    stat_line((&k10[0 as usize]) as u64, c_undo)
+    var k11: [u8; 8] = "events=\0"
+    stat_line((&k11[0 as usize]) as u64, c_events)
+    var k12: [u8; 17] = "foreign_replies=\0"
+    stat_line((&k12[0 as usize]) as u64, c_badrep)
+    var k13: [u8; 16] = "foreign_events=\0"
+    stat_line((&k13[0 as usize]) as u64, c_badevt)
+    var k14: [u8; 14] = "log_failures=\0"
+    stat_line((&k14[0 as usize]) as u64, c_logfail)
+    var k15: [u8; 14] = "lazy_entries=\0"
+    stat_line((&k15[0 as usize]) as u64, c_lazy)
+    reply_ob(pid, id)
+}
+
+fn stat_line(k: u64, v: u64) {
+    actwire.ob_str(k)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+// hello <app>: a provider announces itself; the broker pings a.<app>
+// (the kernel routes that ping to the REAL owner) and binds its pid
+fn do_hello(msg: u64) {
+    var w: [u8; 16] = [0 as u8; 16]
+    var a: [u8; 24] = [0 as u8; 24]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let arp: u64 = (&a[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, arp, 24)
+    let app: u64 = find_app(arp)
+    if app == actwire.NONE {
+        var m: [u8; 35] = "orientbus: hello from unknown app \0"
+        lb_start((&m[0 as usize]) as u64)
+        lb_add(arp)
+        lb_say()
+        return
+    }
+    var nothing: [u8; 1] = "\0"
+    forward(app, actwire.NONE, (&nothing[0 as usize]) as u64, 0, 0, 0,
+        (&s_user[0 as usize]) as u64, PF_PING)
+}
+
+// ============================================================ the loop
+
+fn on_request(s: u64) {
+    let msg: u64 = actwire.asm_buf(s)
+    let pid: u64 = actwire.asm_pid(s)
+    let uid: u64 = actwire.asm_uid(s)
+    let id: u64 = actwire.asm_id(s)
+    if actwire.asm_over(s) {
+        var e: [u8; 9] = "too_long\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    var v: [u8; 16] = [0 as u8; 16]
+    let vp: u64 = (&v[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    var k_call: [u8; 5] = "call\0"
+    var k_list: [u8; 5] = "list\0"
+    var k_desc: [u8; 9] = "describe\0"
+    var k_conf: [u8; 8] = "confirm\0"
+    var k_rej: [u8; 7] = "reject\0"
+    var k_undo: [u8; 5] = "undo\0"
+    var k_grant: [u8; 6] = "grant\0"
+    var k_stat: [u8; 5] = "stat\0"
+    var k_hello: [u8; 6] = "hello\0"
+    var k_stop: [u8; 5] = "stop\0"
+    if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
+        // the broker ends (shutdown, tests); only the user may say so
+        if !is_user(msg, uid) {
+            var e_who: [u8; 30] = "denied only the user may stop\0"
+            reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+            return
+        }
+        var s_ok: [u8; 9] = "ok\nstop\n\0"
+        reply(pid, id, (&s_ok[0 as usize]) as u64, 8)
+        var s_st: [u8; 5] = "stop\0"
+        var s_bus: [u8; 11] = "orient.bus\0"
+        var r_ok: [u8; 3] = "ok\0"
+        audit(pid, uid, (&s_user[0 as usize]) as u64, (&s_st[0 as usize]) as u64,
+            (&s_bus[0 as usize]) as u64, (&s_allow[0 as usize]) as u64,
+            (&r_ok[0 as usize]) as u64, false)
+        running = false
+        return
+    }
+    if actwire.str_eq(vp, (&k_call[0 as usize]) as u64) {
+        do_call(msg, pid, uid, id, false, false)
+    } else if actwire.str_eq(vp, (&k_list[0 as usize]) as u64) {
+        do_list(pid, id)
+    } else if actwire.str_eq(vp, (&k_desc[0 as usize]) as u64) {
+        var f: [u8; 40] = [0 as u8; 40]
+        let fp: u64 = (&f[0 as usize]) as u64
+        actwire.word_copy(msg, nx, fp, 40)
+        do_describe(pid, id, fp)
+    } else if actwire.str_eq(vp, (&k_conf[0 as usize]) as u64) {
+        do_confirm(msg, pid, uid, id, true)
+    } else if actwire.str_eq(vp, (&k_rej[0 as usize]) as u64) {
+        do_confirm(msg, pid, uid, id, false)
+    } else if actwire.str_eq(vp, (&k_undo[0 as usize]) as u64) {
+        do_undo(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_grant[0 as usize]) as u64) {
+        do_grant(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_stat[0 as usize]) as u64) {
+        do_stat(pid, id)
+    } else if actwire.str_eq(vp, (&k_hello[0 as usize]) as u64) {
+        do_hello(msg)
+    } else {
+        var e: [u8; 13] = "unknown_verb\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, vp)
+    }
+}
+
+// calls a provider never answered, confirmations nobody gave
+fn expire() {
+    let now: u64 = actwire.ticks()
+    var i: u64 = 0
+    while i < PEND_MAX {
+        let p: u64 = pe(i)
+        if ld(p, PE_USED) != 0 && now - ld(p, PE_T0) > 500 {
+            st(p, PE_USED, 0)
+            if (ld(p, PE_FLAGS) & PF_PING) == 0 {
+                var e: [u8; 8] = "timeout\0"
+                reply_err(ld(p, PE_PID), ld(p, PE_ID), (&e[0 as usize]) as u64,
+                    ac(ld(p, PE_ACT)) + AC_NAME)
+                var r_to: [u8; 8] = "timeout\0"
+                var s_callv: [u8; 5] = "call\0"
+                audit(ld(p, PE_PID), ld(p, PE_UID), p + PE_CLIENT,
+                    (&s_callv[0 as usize]) as u64, ac(ld(p, PE_ACT)) + AC_NAME,
+                    (&s_allow[0 as usize]) as u64, (&r_to[0 as usize]) as u64,
+                    false)
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < TOK_MAX {
+        let t: u64 = tk(i)
+        if ld(t, TK_USED) != 0 && now - ld(t, TK_T0) > 6000 {
+            st(t, TK_USED, 0)
+        }
+        i = i + 1
+    }
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_bus: [u8; 11] = "orient.bus\0"
+    var n_evt: [u8; 11] = "orient.evt\0"
+    svc_bus = actwire.bus_reg((&n_bus[0 as usize]) as u64, actwire.A_ANY)
+    if ulib.bad(svc_bus) {
+        var e: [u8; 41] = "orientbus: orient.bus is taken or no bus\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    svc_evt = actwire.bus_reg((&n_evt[0 as usize]) as u64, actwire.A_ANY)
+    policy_load()
+    var d_apps: [u8; 7] = "/apps/\0"
+    var sf_prog: [u8; 6] = ".prog\0"
+    var in_prog: [u8; 9] = "/ACTIONS\0"
+    var d_etc: [u8; 16] = "/etc/actions.d/\0"
+    var sf_act: [u8; 9] = ".actions\0"
+    var in_none: [u8; 1] = "\0"
+    scan((&d_apps[0 as usize]) as u64, (&sf_prog[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    scan((&d_etc[0 as usize]) as u64, (&sf_act[0 as usize]) as u64,
+        (&in_none[0 as usize]) as u64, 1)
+    var r1: [u8; 23] = "orientbus: ready apps=\0"
+    var r2: [u8; 10] = " actions=\0"
+    var r3: [u8; 21] = " rejected_manifests=\0"
+    lb_start((&r1[0 as usize]) as u64)
+    lb_num(n_apps)
+    lb_add((&r2[0 as usize]) as u64)
+    lb_num(n_acts)
+    lb_add((&r3[0 as usize]) as u64)
+    lb_num(c_rejected)
+    lb_say()
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t0: u64 = actwire.ticks()
+    while running && (limit == 0 || actwire.ticks() - t0 < limit) {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                let k: u64 = actwire.asm_kind(s)
+                if k == actwire.K_REQ {
+                    on_request(s)
+                } else if k == actwire.K_REP {
+                    on_reply(s)
+                } else if k == actwire.K_EVT {
+                    on_event(s)
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            expire()
+            if lazy_t != 0 && actwire.ticks() - lazy_t > 50 {
+                flush_lazy()
+            }
+            actwire.yield_now()
+        }
+    }
+    flush_lazy()
+    var z: [u8; 17] = "orientbus: done \0"
+    lb_start((&z[0 as usize]) as u64)
+    lb_num(c_calls)
+    lb_say()
+    return 0
+}
+
+// `orientbus check <file>`: the manifest as the broker understands it
+fn check(path: u64) -> u64 {
+    let ok: bool = load_manifest(path, 0)
+    var s1: [u8; 21] = "orientbus: check ok \0"
+    var s2: [u8; 25] = "orientbus: check FAILED \0"
+    var s3: [u8; 10] = " actions=\0"
+    var s4: [u8; 7] = " args=\0"
+    if ok {
+        say((&s1[0 as usize]) as u64)
+    } else {
+        say((&s2[0 as usize]) as u64)
+    }
+    say(path)
+    say((&s3[0 as usize]) as u64)
+    sayn(n_acts)
+    say((&s4[0 as usize]) as u64)
+    sayn(n_args)
+    nl()
+    if ok {
+        return 0
+    }
+    return 1
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var h: [u8; 61] = "usage: orientbus serve [ticks] | orientbus check <manifest>\n\0"
+    if argc < 2 {
+        say((&h[0 as usize]) as u64)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var c_serve: [u8; 6] = "serve\0"
+    var c_check: [u8; 6] = "check\0"
+    if actwire.str_eq(cmd, (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if argc >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    if actwire.str_eq(cmd, (&c_check[0 as usize]) as u64) && argc >= 3 {
+        return check(ulib.arg_at(args, 2))
+    }
+    say((&h[0 as usize]) as u64)
+    return 1
+}

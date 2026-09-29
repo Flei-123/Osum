@@ -1,0 +1,494 @@
+# The action bus (orient-bus) — concept and prototype
+
+Status: **concept + working prototype** (round ACTION-BUS, branch
+`action-bus`). Everything in sections 3–5 marked *built* runs in
+`tools/actionbus/run.sh` against a real Osum guest; everything marked
+*planned* is a roadmap item (section 12), not a promise that it exists.
+
+---
+
+## 0. In one paragraph
+
+Every app declares in its package what it can **do** — `notes.add(text)`,
+`player.pause()`, `mail.send(to, text)` — with typed arguments, a
+description a language model can read without training, and a **level**
+(read / write / critical). A broker, `orient-bus`, collects these
+declarations and is the **only** door through which anything is invoked:
+other apps, scripts, the shell, voice and Jarvis all use the same client
+and the same checks. Jarvis is a client like any other and has no side
+entrance. Critical actions always need a human "yes", every change is
+logged before it happens, and changes can be undone. Programs that were
+not built for OrientOS — Linux programs, Windows programs under
+Wine/Proton — keep running exactly as before; they become steerable
+through wrapper manifests and adapters, never by being forced to change.
+
+## 1. Goals and non-goals
+
+Goals
+
+1. **One catalogue** of what the system can do, machine-readable, typed,
+   described — the same for a human, a script and an AI.
+2. **One door.** No caller has a private path. A rights check that can
+   be bypassed is decoration.
+3. **The user stays in charge**: levels, confirmations, grants that end,
+   an audit log, undo, a dry run for every action.
+4. **Nothing breaks.** Foreign programs run unchanged; the action layer is
+   added *around* them.
+5. **Cheap for app authors**: a text manifest and three bus calls. Rights,
+   confirmation, logging and undo bookkeeping are the broker's job, done
+   once for all apps.
+
+Non-goals
+
+* Not a general IPC system. Streams, shared memory and the clipboard stay
+  on the kernel bus (`docs/SYSTEMBUS.md`); the action bus sits on top of it.
+* Not a replacement for the UI. An action is what an app *offers*; how
+  its window looks is unaffected.
+* No scripting language of its own. Automations (section 9.3) are
+  sequences of the same calls.
+
+## 2. Architecture
+
+```
+  shell / script / voice / Jarvis bridge / other apps
+                      │   /bin/act  (or the same frames from any program)
+                      ▼
+            ┌────────────────────┐      /apps/<app>.prog/ACTIONS
+            │   orient-bus       │◄──── /etc/actions.d/*.actions (wrappers)
+            │   (/bin/orientbus) │      /etc/orientbus/policy
+            │  catalogue · rights│───►  /var/log/orientbus.log (audit)
+            │  confirm · undo    │
+            └─────────┬──────────┘
+      kernel service  │  a.<app>   (A_ROOT: only the broker gets through)
+                      ▼
+      native app (notes)   ·   adapter (cli / file / ui / keys) → foreign program
+```
+
+**Why a broker in Ring 3 and not a kernel feature.** The kernel bus
+already provides what cannot be done in user space: named services, a
+sender pid/uid that the *kernel* stamps into every message, and an access
+rule checked before delivery. Everything else — manifests, types, rights
+policy, confirmation, undo — is policy, and policy belongs in a process
+that can be replaced, updated and restarted. `docs/ASSISTENT.md` § 1
+("no kernel code belongs to the assistant") applies literally: nothing in
+the kernel exists because of Jarvis.
+
+**Why the checks cannot be skipped.** A provider registers its service
+`a.<app>` with `A_ROOT`. The kernel refuses delivery to it from any
+process that is not uid 0 — so every call an app receives has passed the
+broker. An app does not have to trust its callers or check anything
+itself.
+
+**Why not D-Bus.** D-Bus is an IPC system with typed signatures and
+XML introspection; authorization lives in a separate daemon (polkit), and
+descriptions for humans or models are not part of it. Building an
+action catalogue on D-Bus means re-inventing everything in sections 3–5
+anyway, on top of a daemon this system does not have. D-Bus *does* matter
+as an adapter target for Linux programs (section 7).
+
+## 3. The manifest
+
+*Built* (parser in `kernel/user/orientbus.fi`, second reader for the host
+in `tools/actionbus/manifest.py`; both must agree, the test compares
+them field by field).
+
+A package ships `ACTIONS` next to `start`; after installation it is
+`/apps/<app>.prog/ACTIONS`. One item per line, first word = kind, the
+quoted rest = description:
+
+```
+manifest 1
+app notes
+title "Notes"
+
+action notes.add write "Add a note at the end of the list"
+  arg text string required "The text of the note, one line"
+  returns count int "How many notes there are afterwards"
+  dryrun
+  undo notes.remove
+
+action notes.clear critical "Delete ALL notes"
+  returns deleted int "How many notes were deleted"
+  dryrun
+
+event notes.changed "Sent after every change of the list"
+  field count int "How many notes there are now"
+```
+
+Rules
+
+| rule | why |
+|---|---|
+| names are `<app>.<verb>`; an app may only declare in **its own** namespace | a wrapper called `evil` must not publish `notes.clear` (tested: refused) |
+| types: `string`, `int`, `bool` | enough for the prototype; `enum`, `path` (a handle, not a string), `datetime`, lists are planned |
+| level: `read`, `write`, `critical` | the input of the rights decision (section 5) |
+| `dryrun` | the app can *simulate* the action; otherwise the broker answers a dry run itself |
+| `undo <action>` | the **manifest** fixes which action reverses this one, in the same app; the app only supplies its arguments at run time |
+| unknown words are skipped with a warning; a broken line rejects the whole file | newer manifests on older brokers; never half an app |
+
+**Line format, not JSON or TOML.** The broker is written in Firn without
+an allocator; a line format is 200 lines to parse and impossible to
+mis-nest. JSON is what goes *out* (section 4, `describe`).
+
+**Mandatory base.** Every `.opk` must carry a manifest — at minimum
+`manifest 1` + `app <name>` (zero actions is valid). *Planned:*
+`pkg/opk.py bauen` runs `manifest.py check` and refuses to build
+otherwise; the store refuses packages without one. The actions
+themselves stay optional.
+
+**Versioning.** `manifest 1` is the format version. Actions are
+append-only: a changed meaning gets a new name (`mail.send2`), an old one
+may be marked `deprecated` (planned). `describe` reports the bus version.
+
+**Machine-readable for AI.** `act describe` returns the catalogue as JSON:
+name, app, level, description, `needs_confirmation`, `dry_run`, `undo`,
+`available` (is the provider running), arguments with type/required/
+description, returns, events with their fields. That is the same shape as
+an MCP tool list, so Jarvis (or any agent) can turn it into tools without
+any per-app knowledge.
+
+## 4. The bus API
+
+*Built.* The broker is the kernel service `orient.bus` (anyone may call);
+events come from `orient.evt` (published by the broker only).
+
+**Frames.** A kernel bus message carries 64 octets. An action message is
+a sequence of frames: magic `0xA7`, kind (request/reply/event), flags
+(first/last), payload length, a 32-bit id, 56 octets payload. Reassembly
+is keyed by *(kernel-stamped pid, id, kind)*, so one sender cannot
+complete or poison another's message.
+
+**Payload** is text, one item per line — the same text the human sees,
+the log stores and a model reads:
+
+```
+call notes.add          verb + target
+@client=jarvis          meta lines start with '@'
+@dry=1
+text=hello world        arguments, key=value
+```
+
+Verbs: `list`, `describe [prefix]`, `call <action>`, `confirm <no|last>`,
+`reject <no|last>`, `undo`, `grant <client> <glob> <read|write> [s]`,
+`stat`; from providers `hello <app>`.
+
+Replies: `ok` + result lines · `err <code> <detail>` · `confirm <no>
+<action>` + level + description. Codes: `unknown_action`, `bad_arg`,
+`missing_arg`, `denied`, `app_not_running`, `timeout`,
+`audit_unavailable`, `nothing_to_undo`, `too_long`. `act` exits 0 / 1 /
+2 (confirmation needed) / 3 (no broker).
+
+**Replies go to `r.<pid>`**, a reply box the client registers; the broker
+*derives* the name from the kernel-stamped pid, so nobody can direct
+replies to someone else.
+
+**Provider binding.** A provider registers `a.<app>` (A_ROOT) and says
+`hello <app>`. The broker pings `a.<app>` — the kernel routes that ping
+to the real owner — and binds the pid that answers. From then on replies
+and events for that app are accepted only from that pid; a second
+process cannot even register `a.notes` (tested).
+
+**Events.** Declared in the manifest; sent by the bound provider; checked
+and republished on `orient.evt` with `@app=`. `act watch` subscribes. The
+broker itself publishes `bus.confirm_needed` so a dialog can appear.
+
+**Client:** `/bin/act` — `list | describe | call | confirm | reject |
+undo | grant | stat | watch | bench`. `act call notes.add "text=hi"
+--as jarvis --dry`.
+
+## 5. Rights
+
+*Built*, except where marked.
+
+### 5.1 The decision
+
+| | user (human at the device) | agent / app / script without grant | with grant | deny rule |
+|---|---|---|---|---|
+| read | allow | allow | allow | **deny** |
+| write | allow | **ask** | allow | **deny** |
+| critical | **ask** | **ask** | **ask** — critical is never granted | **deny** |
+| dry run | allow | allow | allow | **deny** |
+
+A dry run executes nothing and reports the decision that *would* apply
+(`decision=ask`), so an agent can plan honestly.
+
+### 5.2 Clients and identity
+
+Every call names its client: `user` (default), `jarvis`, `script:<n>`,
+`app:<n>`. **Prototype limit:** the name is *declared* (`--as`). Only the
+uid/pid are attested by the kernel. The decision table is therefore safe
+against *honest* clients and against privilege by accident, not yet
+against a malicious local process that claims to be `user`.
+*Planned (AB-003):* the kernel records which `.prog` bundle a task was
+started from; the broker takes the identity from there, and the bridge
+(`jarvisd`) marks its children as `jarvis`. Until then the bridge
+command list is the gate for Jarvis.
+
+### 5.3 Confirmation and grants
+
+A call that needs a "yes" is **parked** with a number and answered
+`confirm <no>`; the broker publishes `bus.confirm_needed`. Only the user
+can `confirm` or `reject` (an agent asking to confirm its own request is
+refused — tested); parked calls expire after 60 s.
+*Planned (AB-004):* the confirmation is a dialog owned by the window
+server (a trusted path an app cannot draw over or click), not `act
+confirm` on a shell.
+
+Grants: `allow <client> <glob> <read|write>` in `/etc/orientbus/policy`
+(permanent), or `act grant <client> <glob> write <seconds>` at run time
+(timed; expired grants vanish). "Once" is simply a confirmation. Only the
+user may grant. *Planned (AB-006):* a settings page "What may which app
+do" listing rules, grants, and the audit counts per client.
+
+### 5.4 The audit log
+
+`/var/log/orientbus.log`, one line per decision:
+
+```
+t=1402 pid=31 uid=0 client=jarvis verb=call action=notes.add decision=ask result=confirm dry=0
+```
+
+* **Write-ahead:** a change is logged *before* it is forwarded. If the
+  line cannot be written, the change is refused (`audit_unavailable`);
+  reads still work. Tested as a counter-check with no `/var/log`.
+* Parked, refused, confirmed, rejected, undone, granted: written at once.
+* Allowed reads and dry runs are **counted** per (client, action, result)
+  and written as one line with `count=` at the next change, after 16
+  kinds, or after 0.5 s idle — see section 10 for why.
+*Planned:* rotation, a viewer (roadmap S-009), export.
+
+## 6. Settings on the bus
+
+*Planned (AB-005)* — the design:
+
+System settings are served by a provider `settings` like any other app;
+the settings window itself is just one client. A **schema** declares each
+key:
+
+```
+setting display.brightness int 0..100 harmless "Screen brightness in percent"
+setting display.scale enum 100,125,150,200 harmless "UI scale"
+setting net.wifi.enabled bool critical "Wi-Fi on/off"
+setting update.auto bool critical "Install updates automatically"
+```
+
+* Actions: `settings.get(key)`, `settings.set(key, value)`,
+  `settings.list(area)`, `settings.undo(change)`; the broker maps a key to
+  the right `settings.<area>.read|write` so a grant can be *per area*
+  ("Jarvis may change display settings for 1 hour").
+* Values are validated against type and range **in the broker** (same
+  code as action arguments), before the provider sees them.
+* Risk `critical` for network, security, accounts, updates, power
+  policy: always a confirmation, never grantable.
+* Every change is a journal entry (key, old value, new value, client,
+  time); undo writes the old value back — the general undo of section 9.1
+  with a trivial inverse.
+* The existing `/bin/settings` window keeps its UI and moves its reads and
+  writes onto these actions; nothing else in the system writes settings
+  files directly any more.
+
+## 7. Compatibility: Linux and Windows programs
+
+**Rule: native OrientOS apps first, full actions. Everything else keeps
+running unchanged and gets as many actions as an adapter can honestly
+provide.** Nothing in the action layer is a precondition for starting a
+program.
+
+A **wrapper manifest** (`/etc/actions.d/<program>.actions`, shipped by us
+or the community as its own signed package, e.g. `actions-vlc`) declares
+actions for a program that has none and binds each to an **adapter**:
+
+| adapter | for | example | reliability |
+|---|---|---|---|
+| `cli` | programs with a command line / remote control | `playerctl pause`, `code --goto f:12` | good |
+| `dbus` | Linux programs with D-Bus interfaces (MPRIS, etc.) via the compat layer | `org.mpris.MediaPlayer2.Player.Pause` | good |
+| `file` | settings in known config files | set a key in `~/.config/x.conf` | medium, program may need restart |
+| `ui` | accessibility tree: AT-SPI for Linux toolkits; UIA/MSAA as far as Wine exposes it; OrientOS's own a11y tree (S-007) for windows of the compat window server | "press button *Send* in window *Thunderbird*" | medium |
+| `keys` | last resort for Wine/Proton and anything else: focus a window, inject keys through the window server | `space` in window matching `VLC` | low, marked as such |
+
+Rules for adapters (*planned, AB-008*):
+
+* No shell. `cli` is an argv template (`{arg}` substituted as one
+  argument), executed by the broker's adapter host under the **user's**
+  uid, never root.
+* A wrapper manifest names what it wraps (`for exe vlc version >=3`); an
+  action is `available` only if that program is present/running.
+* Adapter actions carry `compat` in the catalogue and a reliability; an
+  AI can prefer native actions and knows a `keys` action may misfire.
+* The same rights, confirmation, audit and dry run apply — a dry run of
+  an adapter action reports the command it would run.
+* The prototype already *reads* wrapper manifests (the test ships one for
+  `player`, with an `adapter` line the prototype skips) and reports
+  `app_not_running` cleanly; executing adapters is AB-008.
+
+**"Manifest mandatory" and compat.** A Linux or Windows program packaged
+as `.opk` gets a generated minimal manifest (`manifest 1`, `app <name>`,
+no actions). That satisfies the rule without touching the program.
+
+## 8. The social layer (Fleitec All-in-One)
+
+The social layer already has a concept of its own (FirnChat repo,
+`docs/SOCIAL.md`, 29.09.2026): a local service `social` that owns the
+merged address book, presence, activity, messages and invites, providers
+behind one interface, and a local **API v1** (JSON lines over a Unix
+socket / localhost + token) that every UI and app speaks.
+
+**Agreed shape on OrientOS: API v1 *is* a set of actions on orient-bus.**
+The desktop app on Windows/Linux keeps the socket; on OrientOS the
+`social` service is a provider on the bus and the v1 calls keep their
+names under the `social.` namespace — one set of words on both sides:
+
+| API v1 call (SOCIAL.md) | action on orient-bus | level |
+|---|---|---|
+| `contacts.list` | `social.contacts.list` | read |
+| `contacts.request / accept / decline / withdraw / block` | `social.contacts.<verb>` | write (agent → ask) |
+| `presence.set {state, text, until}` | `social.presence.set` | write |
+| `activity.set {kind, name, details, party, join}` / `activity.clear` | `social.activity.set` / `.clear` | write |
+| `messages.send {to, text, files}` / `messages.history` | `social.messages.send` / `.history` | write (agent → ask) / read |
+| `invites.send {to, activity}` / `invites.answer` | `social.invites.send` / `.answer` | write |
+| `subscribe {topics}` | events `social.contact`, `social.presence`, `social.activity`, `social.message`, `social.invite` | — |
+| privacy: invisible | `social.privacy.set` | critical |
+
+Consequences:
+
+* SOCIAL.md's per-app rights (`contacts.read`, `activity.write`,
+  `messages.send`, `invites.send`, "asked once") become ordinary bus
+  grants (`allow <app> social.activity.* write`) — the same page
+  "What may which app do" shows them (9.4). The service does not need a
+  permission store of its own.
+* "Every app that opens the socket is identified by its package id" is
+  exactly AB-003 (attested client identity). One mechanism, both uses.
+* `setActivity` from an app: the broker passes the calling client, so an
+  app can only set *its own* activity; the SDK (C header / Firn module)
+  becomes a thin wrapper over `social.activity.set`.
+* Providers (fleitec, lan, later matrix/xmpp) stay *behind* `social`;
+  the bus never sees them. Privacy switches stay enforced in the service
+  ("invisible" is enforced where the data is — PRAESENZ.md).
+* The existing `/bin/praesenz` (kernel bus, `docs/PRAESENZ.md`) is the
+  starting point of the OrientOS `social` service; its window-focus feed
+  ("in <app>") stays a kernel-bus stream, not an action.
+* For games under Wine/Proton, "plays X" comes from the same detection the
+  Windows Melder uses (process list against the detectable-games list),
+  done by `social` itself — no adapter needed.
+
+## 9. Further ideas — assessed
+
+### 9.1 Undo and transactions — **yes to undo, no to transactions**
+*Built:* per-client undo stack; the manifest fixes the inverse action,
+the provider returns only its arguments (`@undo index=3`), so an app
+cannot make the broker call something else as "undo". Undo is a normal
+call (rights, log). *Not built on purpose:* multi-app transactions with
+rollback. Apps have side effects the broker cannot roll back (a sent mail).
+The honest model is **compensation** (sagas): a batch runs step by step,
+and on failure the already-done steps are undone in reverse where an
+inverse exists; steps without an inverse are marked as such *before* the
+batch runs (dry run).
+
+### 9.2 Dry run — **yes, built**
+Every action can be dry-run. If the app declares `dryrun`, it simulates
+("would delete 2"); otherwise the broker answers with what would be
+called and the decision that would apply. Jarvis rule (planned AB-009):
+dry-run every write/critical call first and show the plan.
+
+### 9.3 Automations ("Baukasten", like Shortcuts) — **yes, as a client**
+An automation is a file: trigger (event, time, manual), steps (action
+calls, simple conditions on results), and **its own client identity**
+`automation:<name>` with its own grants. It is executed by a runner that
+is just another client — so an automation can never do more than the user
+granted it, and it shows up in the log under its own name. Created by
+hand, from the UI, or by Jarvis (as a proposal the user saves).
+Dry-running an automation dry-runs every step.
+
+### 9.4 "What may which app" — **yes**
+A settings page built entirely from bus data: rules, timed grants with
+remaining time, deny rules, and per client the counts from the audit log
+(e.g. "Jarvis: 41 reads, 3 changes, 1 refused this week"). Revoking is
+one click (= removing a rule). AB-006.
+
+### 9.5 Sandbox / capabilities per `.opk` — **yes, but it is the kernel's job**
+The action manifest says what an app *offers*; a capability list says
+what it *needs* (`needs files ~/Music read`, `needs net`, `needs call
+player.*`). The second part — outgoing action calls — the broker can
+enforce today with the same rules. Files, network and devices must be
+enforced by the kernel (handles instead of ambient authority,
+`PACKAGING.md` § 7; roadmap S-010). One manifest file, two enforcers.
+
+### 9.6 Audit log — **yes, built** (section 5.4), rotation/viewer planned.
+
+## 10. Prototype and measurements
+
+| file | what |
+|---|---|
+| `kernel/user/actwire.fi` | frames, reassembly, text helpers — shared by all three programs |
+| `kernel/user/orientbus.fi` | the broker |
+| `kernel/user/act.fi` | the client |
+| `kernel/user/notes.fi` + `pakete/notes/` | example app with manifest and package recipe |
+| `tools/actionbus/manifest.py` | host reader (check / JSON) |
+| `tools/actionbus/run.sh` | the test: three guests, 10 sections |
+| `tools/actionbus/fixlen.py` | development aid: exact lengths of Firn string arrays |
+
+**The test** (`bash tools/actionbus/run.sh`, KVM): see the result line
+`ACTIONBUS: n passed, 0 failed` and the numbers below.
+
+**Experiment log — round-trip latency** (client → broker → app → broker
+→ client, `act bench`, `notes.count`, KVM, 10 ms tick clock):
+
+| round | hypothesis / change | 200 calls | per call |
+|---|---|---|---|
+| 1 | first version, audit line appended synchronously per call | 407 ticks | 20.3 ms |
+| 1b | same, *without* `/var/log` (counter-check) | 3 ticks / 100 | ~0.3 ms |
+| 2 | → the disk write is the cost; buffer allowed reads (3 KB) | 79 ticks | 3.95 ms |
+| 3 | → buffer flushes still cost; **count** reads per (client, action) instead of writing each | 2 ticks | ~0.1 ms |
+| 3b | same, 2000 calls for resolution (1 core) / 2 × 3000 (4 cores) | 13 / 18 ticks | **65 µs / 60 µs** |
+
+Conclusion: 20.3 ms → 65 µs, a factor of ~300. The bus itself is well
+below a millisecond; the design question was the audit log. Changes stay synchronous and write-ahead —
+that is the point of the log — and reads are aggregated.
+
+**Jarvis end to end** (section 11 of the test): the JARVIS side of the
+test bridge (`tools/bridge/peer.py`, TLS 1.3 + Ed25519 login, the wire
+the live server speaks) sends `befehl` jobs; `jarvisd` on the guest may
+run exactly one program, `/bin/act`. Jarvis gets the JSON catalogue,
+its write is parked for the user, its dry run of `notes.clear` answers,
+its real `notes.clear` needs a human yes, `/bin/sh` is refused by the
+bridge, and the device's audit log names `client=jarvis`.
+
+**Limits of the prototype** (all on the roadmap): declared client names
+(5.2); `act confirm` instead of a trusted dialog (5.3); no adapter
+execution (7); events visible to every subscriber; the kernel bus does
+not block, so all three programs poll with `yield` (roadmap S-003) --
+an idle broker spins; payloads above 2 KB per request are refused
+(segments planned); `orientbus` is not yet started by init or shipped in
+the image, so on the Dell nothing changes yet.
+
+## 11. Comparison
+
+| | declared where | typed args | descriptions for AI | who decides rights | audit/undo | foreign programs |
+|---|---|---|---|---|---|---|
+| **Android Intents** | manifest intent filters | loose (extras) | no | app permissions at install/run time | no / no | n/a |
+| **Android AppFunctions** (2025) | code annotations | yes | yes | system + agent permission | no / no | no |
+| **Apple App Intents + Shortcuts** | Swift code, compiled metadata | yes | yes | system; `requestConfirmation` by the app | no / no | no |
+| **Windows** App Actions (2025) / COM / UIA | JSON action definitions / type libraries / none | partly | partly | app / none | no / no | UIA as fallback |
+| **D-Bus + polkit** | XML introspection | yes | no | polkit rules | no / no | Linux only |
+| **MCP** | server tool list | JSON Schema | yes | the host application | host-specific | via wrappers |
+| **orient-bus** | text manifest in the package | yes | yes | **one broker, for every caller alike** | **yes / yes** | wrapper manifests + adapters |
+
+What we take: App Intents' idea that actions are *declared* and typed;
+Android's rule that the package states it up front; MCP's JSON shape for
+the catalogue; polkit's separation of policy from the service; Shortcuts
+as the automation model. What we do not take: per-app confirmation code
+(the app decides whether to ask — here the broker does), a second path
+for the system assistant, and rights that exist only at install time.
+
+## 12. Roadmap
+
+Kept in the JARVIS project roadmap (group *Aktions-Bus*), not in a file:
+AB-001 prototype (this round) · AB-002 blocking receive (= S-003) ·
+AB-003 attested client identity + reserved `a.<app>` names · AB-004
+trusted confirmation dialog · AB-005 settings on the bus · AB-006 "what
+may which app" page · AB-007 manifest mandatory in `opk.py`/store ·
+AB-008 adapters (cli → file → ui → keys) · AB-009 Jarvis as client
+(bridge identity, dry run first, catalogue → tools) · AB-010 social on
+the bus · AB-011 automations · AB-012 audit rotation/viewer · AB-013
+large payloads via segments · AB-014 action versioning · AB-015 event
+permissions · AB-016 orientbus in the image and started by init.

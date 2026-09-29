@@ -1,0 +1,360 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/act.fi -- THE CLIENT OF THE ACTION BUS.
+//
+// The one way into orient-bus, for everybody: a human at the shell, a
+// script, the voice front end and Jarvis (through its bridge, which may
+// run `/bin/act` like any other permitted program). There is no second
+// door for anyone -- docs/ACTION-BUS.md, section 2.
+//
+//   act list                          what can be done, one line each
+//   act describe [prefix]             the same as JSON (for programs/AI)
+//   act call <action> [k=v ...] [--dry] [--as <client>]
+//   act confirm <no|last>             say yes to a parked call (user only)
+//   act reject <no|last>              say no
+//   act undo [--as <client>]          undo that client's last change
+//   act grant <client> <glob> <read|write> [seconds]
+//   act stat                          the broker's counters
+//   act watch [ticks]                 print events as they come
+//   act bench <n>                     n calls of notes.count, timed
+//   act stop                          end the broker (user only)
+//
+// Exit code: 0 ok, 1 error, 2 a confirmation is needed, 3 no broker.
+
+profile kernel
+
+import ulib
+import actwire
+
+export { u_start }
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut rep: [u8; 16384] = [0 as u8; 16384]
+static mut rep_len: u64 = 0
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    say((&s[0 as usize]) as u64)
+}
+
+fn setup() -> bool {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        var e: [u8; 29] = "act: cannot open a reply box\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return false
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 31] = "act: orient-bus is not running\0"
+        say((&e2[0 as usize]) as u64)
+        nl()
+        return false
+    }
+    return true
+}
+
+// Send the request in the output buffer and collect the reply with the
+// same id into `rep`. Frames are gathered here directly (and not through
+// actwire's slots): a catalogue is bigger than one slot.
+fn ask(quiet: bool) -> u64 {
+    let id: u64 = actwire.rnd() & 0xFFFFFFFF
+    if ulib.bad(actwire.send_msg(svc_bus, actwire.K_REQ, id, actwire.ob_ptr(),
+        actwire.ob_len())) {
+        var e: [u8; 30] = "act: the bus refused the call\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let rp: u64 = (&rep[0 as usize]) as u64
+    rep_len = 0
+    let t0: u64 = actwire.ticks()
+    var done: bool = false
+    while !done && actwire.ticks() - t0 < 1500 {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            if actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+                && actwire.ld32(fp, 4) == id {
+                if (actwire.ld8(fp, 2) & 1) != 0 {
+                    rep_len = 0
+                }
+                let k: u64 = actwire.ld8(fp, 3)
+                var i: u64 = 0
+                while i < k && rep_len < 16383 {
+                    actwire.st8(rp, rep_len, actwire.ld8(fp, 8 + i))
+                    rep_len = rep_len + 1
+                    i = i + 1
+                }
+                if (actwire.ld8(fp, 2) & 2) != 0 {
+                    done = true
+                }
+            }
+        } else {
+            actwire.yield_now()
+        }
+    }
+    actwire.st8(rp, rep_len, 0)
+    if !done {
+        var e2: [u8; 31] = "act: no answer from orient-bus\0"
+        say((&e2[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    if !quiet {
+        actwire.outn(rp, rep_len)
+    }
+    if actwire.ld8(rp, 0) == 111 && actwire.ld8(rp, 1) == 107 {
+        return 0 // ok
+    }
+    if actwire.ld8(rp, 0) == 99 && actwire.ld8(rp, 1) == 111 {
+        return 2 // confirm
+    }
+    return 1
+}
+
+fn is_opt(p: u64, o: u64) -> bool {
+    return actwire.str_eq(p, o)
+}
+
+fn call(args: u64, argc: u64) -> u64 {
+    var o_dry: [u8; 6] = "--dry\0"
+    var o_as: [u8; 5] = "--as\0"
+    var s_call: [u8; 6] = "call \0"
+    var s_dry: [u8; 8] = "@dry=1\n\0"
+    var s_cl: [u8; 9] = "@client=\0"
+    var e_arg: [u8; 36] = "act: arguments are key=value, not: \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_call[0 as usize]) as u64)
+    actwire.ob_line(ulib.arg_at(args, 2))
+    var i: u64 = 3
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if is_opt(a, (&o_dry[0 as usize]) as u64) {
+            actwire.ob_str((&s_dry[0 as usize]) as u64)
+        } else if is_opt(a, (&o_as[0 as usize]) as u64) && i + 1 < argc {
+            actwire.ob_str((&s_cl[0 as usize]) as u64)
+            actwire.ob_line(ulib.arg_at(args, i + 1))
+            i = i + 1
+        } else {
+            // an argument must be key=value and must not smuggle a line
+            var eq: bool = false
+            var bad: bool = false
+            var k: u64 = 0
+            while actwire.ld8(a, k) != 0 {
+                if actwire.ld8(a, k) == 61 && k > 0 {
+                    eq = true
+                }
+                if actwire.ld8(a, k) == 10 || (k == 0 && actwire.ld8(a, 0) == 64) {
+                    bad = true
+                }
+                k = k + 1
+            }
+            if !eq || bad {
+                say((&e_arg[0 as usize]) as u64)
+                say(a)
+                nl()
+                return 1
+            }
+            actwire.ob_line(a)
+        }
+        i = i + 1
+    }
+    return ask(false)
+}
+
+// verb [word ...] [--as client]
+fn simple(verb: u64, args: u64, argc: u64, from: u64) -> u64 {
+    var o_as: [u8; 5] = "--as\0"
+    var s_cl: [u8; 9] = "@client=\0"
+    actwire.ob_reset()
+    actwire.ob_str(verb)
+    var client: u64 = 0
+    var i: u64 = from
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if is_opt(a, (&o_as[0 as usize]) as u64) && i + 1 < argc {
+            client = ulib.arg_at(args, i + 1)
+            i = i + 1
+        } else {
+            actwire.ob_ch(32)
+            actwire.ob_str(a)
+        }
+        i = i + 1
+    }
+    actwire.ob_ch(10)
+    if client != 0 {
+        actwire.ob_str((&s_cl[0 as usize]) as u64)
+        actwire.ob_line(client)
+    }
+    return ask(false)
+}
+
+fn watch(lim: u64) -> u64 {
+    var limit: u64 = lim
+    var n_evt: [u8; 11] = "orient.evt\0"
+    let svc: u64 = actwire.bus_find((&n_evt[0 as usize]) as u64)
+    if ulib.bad(svc) || ulib.bad(actwire.bus_sub(svc)) {
+        var e: [u8; 22] = "act: no event channel\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var s_ready: [u8; 19] = "act: watching ...\n\0"
+    say((&s_ready[0 as usize]) as u64)
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    var s_pre: [u8; 7] = "EVENT \0"
+    let t0: u64 = actwire.ticks()
+    var last_check: u64 = t0
+    var seen: u64 = 0
+    while limit == 0 || actwire.ticks() - t0 < limit {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_EVT {
+                    // one line per event, the fields joined with ' '
+                    let b: u64 = actwire.asm_buf(s)
+                    var k: u64 = 0
+                    while actwire.ld8(b, k) != 0 {
+                        if actwire.ld8(b, k) == 10 && actwire.ld8(b, k + 1) != 0 {
+                            actwire.st8(b, k, 32)
+                        }
+                        k = k + 1
+                    }
+                    // one write per event line, so nothing tears it apart
+                    actwire.ob_reset()
+                    actwire.ob_str((&s_pre[0 as usize]) as u64)
+                    actwire.ob_str(b)
+                    actwire.outn(actwire.ob_ptr(), actwire.ob_len())
+                    seen = seen + 1
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            if actwire.ticks() - last_check > 100 {
+                last_check = actwire.ticks()
+                var n_bus: [u8; 11] = "orient.bus\0"
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    limit = 1 // the broker is gone: stop watching
+                }
+            }
+            actwire.yield_now()
+        }
+    }
+    var s_end: [u8; 19] = "act: watch events=\0"
+    say((&s_end[0 as usize]) as u64)
+    actwire.outnum(seen)
+    nl()
+    return 0
+}
+
+// n round trips through the broker to the example app
+fn bench(n: u64) -> u64 {
+    var s_call: [u8; 18] = "call notes.count\n\0"
+    var s_r: [u8; 18] = "act: bench calls=\0"
+    var s_t: [u8; 8] = " ticks=\0"
+    var s_u: [u8; 14] = " us_per_call=\0"
+    var s_f: [u8; 9] = " failed=\0"
+    let t0: u64 = actwire.ticks()
+    var fails: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        actwire.ob_reset()
+        actwire.ob_str((&s_call[0 as usize]) as u64)
+        if ask(true) != 0 {
+            fails = fails + 1
+        }
+        i = i + 1
+    }
+    let dt: u64 = actwire.ticks() - t0
+    actwire.ob_reset()
+    actwire.ob_str((&s_r[0 as usize]) as u64)
+    actwire.ob_num(n)
+    actwire.ob_str((&s_t[0 as usize]) as u64)
+    actwire.ob_num(dt)
+    actwire.ob_str((&s_u[0 as usize]) as u64)
+    if n > 0 {
+        actwire.ob_num(dt * 10000 / n)
+    }
+    actwire.ob_str((&s_f[0 as usize]) as u64)
+    actwire.ob_num(fails)
+    actwire.ob_ch(10)
+    actwire.outn(actwire.ob_ptr(), actwire.ob_len())
+    if fails > 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var h: [u8; 87] = "usage: act list|describe|call|confirm|reject|undo|grant|stat|watch|bench (see act.fi)\n\0"
+    if argc < 2 {
+        say((&h[0 as usize]) as u64)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var c_list: [u8; 5] = "list\0"
+    var c_desc: [u8; 9] = "describe\0"
+    var c_call: [u8; 5] = "call\0"
+    var c_conf: [u8; 8] = "confirm\0"
+    var c_rej: [u8; 7] = "reject\0"
+    var c_undo: [u8; 5] = "undo\0"
+    var c_grant: [u8; 6] = "grant\0"
+    var c_stat: [u8; 5] = "stat\0"
+    var c_watch: [u8; 6] = "watch\0"
+    var c_bench: [u8; 6] = "bench\0"
+    var c_stop: [u8; 5] = "stop\0"
+    if !setup() {
+        return 3
+    }
+    if actwire.str_eq(cmd, (&c_call[0 as usize]) as u64) {
+        if argc < 3 {
+            say((&h[0 as usize]) as u64)
+            return 1
+        }
+        return call(args, argc)
+    }
+    if actwire.str_eq(cmd, (&c_watch[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if argc >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return watch(lim)
+    }
+    if actwire.str_eq(cmd, (&c_bench[0 as usize]) as u64) {
+        var n: u64 = 100
+        if argc >= 3 {
+            n = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return bench(n)
+    }
+    if actwire.str_eq(cmd, (&c_list[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_desc[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_conf[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_rej[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_undo[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_grant[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_stat[0 as usize]) as u64)
+        || actwire.str_eq(cmd, (&c_stop[0 as usize]) as u64) {
+        return simple(cmd, args, argc, 2)
+    }
+    say((&h[0 as usize]) as u64)
+    return 1
+}

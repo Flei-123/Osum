@@ -1,0 +1,272 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/notes.fi -- THE EXAMPLE APP OF THE ACTION BUS.
+//
+// A list of notes that exists only to show what an app has to do to be
+// steerable by everyone -- the shell, a script, voice, Jarvis -- through
+// orient-bus (docs/ACTION-BUS.md):
+//
+//   1. ship a manifest (pakete/notes/ACTIONS -> /apps/notes.prog/ACTIONS)
+//      that declares its actions, their arguments and their level;
+//   2. register the kernel service `a.notes` with A_ROOT -- then the
+//      KERNEL delivers calls only from the broker, and every call has
+//      passed the broker's checks;
+//   3. say `hello notes` to the broker, answer its ping, and after that
+//      answer calls and send events.
+//
+// What the app does NOT do: check rights, ask for confirmation, log.
+// That is the broker's job, once, for every app.
+//
+//   notes serve [ticks]
+
+profile kernel
+
+import ulib
+import actwire
+
+export { u_start }
+
+const NOTE_MAX: u64 = 32
+const NOTE_B: u64 = 96
+static mut notes: [u8; 3072] = [0 as u8; 3072]
+static mut n_notes: u64 = 0
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut evt_no: u64 = 1
+
+fn note(i: u64) -> u64 {
+    return (&notes[0 as usize]) as u64 + i * NOTE_B
+}
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    say((&s[0 as usize]) as u64)
+}
+
+fn kv(k: u64, v: u64) {
+    actwire.ob_str(k)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+fn event() {
+    var s_ev: [u8; 27] = "event notes.changed\ncount=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ev[0 as usize]) as u64)
+    actwire.ob_num(n_notes)
+    actwire.ob_ch(10)
+    actwire.send_msg(svc_bus, actwire.K_EVT, evt_no, actwire.ob_ptr(),
+        actwire.ob_len())
+    evt_no = evt_no + 1
+}
+
+// one call; the reply is built in the output buffer
+fn handle(msg: u64) -> bool {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var val: [u8; 96] = [0 as u8; 96]
+    let valp: u64 = (&val[0 as usize]) as u64
+    var k_dry: [u8; 5] = "@dry\0"
+    var dv: [u8; 4] = [0 as u8; 4]
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64,
+        (&dv[0 as usize]) as u64, 4)
+
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_count: [u8; 7] = "count=\0"
+    var s_index: [u8; 7] = "index=\0"
+    var k_ping: [u8; 5] = "ping\0"
+    var a_add: [u8; 10] = "notes.add\0"
+    var a_rm: [u8; 13] = "notes.remove\0"
+    var a_count: [u8; 12] = "notes.count\0"
+    var a_list: [u8; 11] = "notes.list\0"
+    var a_clear: [u8; 12] = "notes.clear\0"
+    var k_text: [u8; 5] = "text\0"
+    var k_index: [u8; 6] = "index\0"
+
+    actwire.ob_reset()
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        var s_pong: [u8; 6] = "pong\n\0"
+        actwire.ob_str((&s_pong[0 as usize]) as u64)
+        return false
+    }
+    if actwire.str_eq(np, (&a_add[0 as usize]) as u64) {
+        actwire.kv_find(msg, (&k_text[0 as usize]) as u64, valp, 96)
+        if n_notes >= NOTE_MAX {
+            var e: [u8; 9] = "err full\0"
+            actwire.ob_line((&e[0 as usize]) as u64)
+            return false
+        }
+        if dry {
+            var s_w: [u8; 25] = "ok\ndry=1\nwould=add note \0"
+            actwire.ob_str((&s_w[0 as usize]) as u64)
+            actwire.ob_num(n_notes + 1)
+            actwire.ob_ch(10)
+            return false
+        }
+        ulib.strncpy(note(n_notes), valp, NOTE_B)
+        n_notes = n_notes + 1
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        kv((&s_count[0 as usize]) as u64, n_notes)
+        kv((&s_index[0 as usize]) as u64, n_notes)
+        // the inverse, with its arguments; WHICH action undoes this is
+        // fixed by the manifest (`undo notes.remove`), not by the app
+        var s_u: [u8; 13] = "@undo index=\0"
+        actwire.ob_str((&s_u[0 as usize]) as u64)
+        actwire.ob_num(n_notes)
+        actwire.ob_ch(10)
+        return true
+    }
+    if actwire.str_eq(np, (&a_rm[0 as usize]) as u64) {
+        actwire.kv_find(msg, (&k_index[0 as usize]) as u64, valp, 96)
+        let ix: u64 = ulib.to_num(valp)
+        if ix == 0 || ix > n_notes {
+            var e2: [u8; 17] = "err no_such_note\0"
+            actwire.ob_line((&e2[0 as usize]) as u64)
+            return false
+        }
+        if dry {
+            var s_w2: [u8; 28] = "ok\ndry=1\nwould=remove note \0"
+            actwire.ob_str((&s_w2[0 as usize]) as u64)
+            actwire.ob_num(ix)
+            actwire.ob_ch(10)
+            return false
+        }
+        var i: u64 = ix - 1
+        while i + 1 < n_notes {
+            ulib.strncpy(note(i), note(i + 1), NOTE_B)
+            i = i + 1
+        }
+        n_notes = n_notes - 1
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        kv((&s_count[0 as usize]) as u64, n_notes)
+        return true
+    }
+    if actwire.str_eq(np, (&a_count[0 as usize]) as u64) {
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        kv((&s_count[0 as usize]) as u64, n_notes)
+        return false
+    }
+    if actwire.str_eq(np, (&a_list[0 as usize]) as u64) {
+        var s_n: [u8; 6] = "note.\0"
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        kv((&s_count[0 as usize]) as u64, n_notes)
+        var i2: u64 = 0
+        while i2 < n_notes {
+            actwire.ob_str((&s_n[0 as usize]) as u64)
+            actwire.ob_num(i2 + 1)
+            actwire.ob_ch(61)
+            actwire.ob_line(note(i2))
+            i2 = i2 + 1
+        }
+        return false
+    }
+    if actwire.str_eq(np, (&a_clear[0 as usize]) as u64) {
+        if dry {
+            var s_w3: [u8; 23] = "ok\ndry=1\nwould_delete=\0"
+            actwire.ob_str((&s_w3[0 as usize]) as u64)
+            actwire.ob_num(n_notes)
+            actwire.ob_ch(10)
+            return false
+        }
+        var s_d: [u8; 9] = "deleted=\0"
+        let was: u64 = n_notes
+        n_notes = 0
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        kv((&s_d[0 as usize]) as u64, was)
+        return true
+    }
+    var e3: [u8; 19] = "err unknown_action\0"
+    actwire.ob_line((&e3[0 as usize]) as u64)
+    return false
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_me: [u8; 8] = "a.notes\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        var e: [u8; 24] = "notes: a.notes is taken\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    // wait for the broker (it may start after us), then say hello
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 26] = "notes: no orient.bus here\0"
+        say((&e2[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var s_hello: [u8; 13] = "hello notes\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 12)
+    var s_ready: [u8; 23] = "notes: serving a.notes\0"
+    say((&s_ready[0 as usize]) as u64)
+    nl()
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_recv(fp, mp)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    let changed: bool = handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id,
+                        actwire.ob_ptr(), actwire.ob_len())
+                    if changed {
+                        event()
+                    }
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            // the broker is gone (stopped, crashed): so is our reason
+            // to run -- checked once a second, not on every turn
+            if actwire.ticks() - last_check > 100 {
+                last_check = actwire.ticks()
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    var s_by: [u8; 27] = "notes: orient-bus is gone\n\0"
+                    say((&s_by[0 as usize]) as u64)
+                    return 0
+                }
+            }
+            actwire.yield_now()
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var h: [u8; 27] = "usage: notes serve [ticks]\0"
+    var c_serve: [u8; 6] = "serve\0"
+    if ulib.arg_count(args) >= 2
+        && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if ulib.arg_count(args) >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    say((&h[0 as usize]) as u64)
+    nl()
+    return 1
+}
