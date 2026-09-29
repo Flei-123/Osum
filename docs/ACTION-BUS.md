@@ -327,6 +327,11 @@ no actions). That satisfies the rule without touching the program.
 
 ## 8. The social layer (Fleitec All-in-One)
 
+*Built* (round SOCIAL, `docs/SOCIAL.md`): `/bin/social` is the provider
+`social` with the actions of the table below (messages/invites still
+planned), providers as programs behind one interface, the friends bar
+reads it; `tools/social/run.sh` (test.sh § 54).
+
 The social layer already has a concept of its own (FirnChat repo,
 `docs/SOCIAL.md`, 29.09.2026): a local service `social` that owns the
 merged address book, presence, activity, messages and invites, providers

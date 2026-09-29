@@ -1,0 +1,617 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/socfleitec.fi -- THE FLEITEC PROVIDER OF THE SOCIAL LAYER.
+//
+// One provider behind the provider interface of `/bin/social`
+// (docs/SOCIAL.md). It speaks for the device's Fleitec account to
+// fleikontakte (the address book of FirnChat / chat.fleitec.com) with a
+// DEVICE ACCESS TOKEN ("fkz1.<uid>.<64 hex>", made in the profile or with
+// POST /api/kontakte/zugang). That token can read the book, set status
+// and activity and ask/accept/decline/end friendships -- nothing that
+// changes who the person is. The service never sees the provider's
+// protocol; it runs this program and reads lines.
+//
+// THE PROVIDER INTERFACE, version 1 (the same for every provider):
+//
+//     socfleitec v1 hello
+//     socfleitec v1 contacts
+//     socfleitec v1 search <text>
+//     socfleitec v1 relation <request|accept|decline|withdraw|remove> <id>
+//     socfleitec v1 presence <online|away|dnd|invisible> [text ...]
+//     socfleitec v1 activity [name ...]          (no name = clear)
+//     socfleitec v1 alive
+//
+// Output, one item per line, fields separated by TAB:
+//
+//     provider fleitec 1                          (hello)
+//     caps contacts search relation presence activity alive
+//     c <id> <relation> <presence> <name> <handle> <status text> <activity> <since_s> <chat>
+//     ok <n>             the last line when it worked
+//     err <code> <text>  the last line when not; code = offline | denied | bad | http
+//
+// Exit code: 0 ok, 1 err, 2 offline, 3 denied. relation is
+// friend|incoming|outgoing|blocked|none, presence online|away|dnd|
+// offline|unknown -- social v1's words (FirnChat src/social/fleitec.fi
+// says the same for the web page).
+//
+// The configuration, /etc/social/fleitec.conf, one field per line:
+//
+//     url=https://<ipv4>[:port]     where fleikontakte answers /api/kontakte
+//     name=chat.fleitec.com         what the certificate must carry (SNI)
+//     roots=/etc/ssl/roots.pem      the trust store
+//     token=fkz1.<uid>.<64 hex>     the device access token
+//
+// NO FLOATING POINT anywhere (kernel/app/kjson.fi says why: ring 3 has
+// no SSE here), NO COOKIES (kernel/app/knetz.fi says why).
+
+import std.io
+import std.rt
+import std.str
+import knetz
+import kjson
+
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+
+// ------------------------------------------------------------ small tools
+
+fn out(p: u64, n: usize) {
+    syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
+}
+
+fn outs(s: str) {
+    out(s.p as u64, s.n)
+}
+
+fn outb(b: *mut rt.Buf) {
+    out((*b).ptr, (*b).len)
+}
+
+// a field of a contact line: TAB and line ends become spaces
+fn field(b: *mut rt.Buf, p: u64, n: usize) {
+    rt.buf_push(b, 9 as u8)
+    var i: usize = 0
+    while i < n {
+        var c: u8 = rt.ld8(p, i)
+        if c == 9 as u8 || c == 10 as u8 || c == 13 as u8 {
+            c = 32 as u8
+        }
+        rt.buf_push(b, c)
+        i = i + 1
+    }
+}
+
+fn fields(b: *mut rt.Buf, s: str) {
+    field(b, s.p as u64, s.n)
+}
+
+fn eqc(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.n {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, s.n) == 0 as u8
+}
+
+fn eqn(p: u64, n: usize, s: str) -> bool {
+    if n != s.n {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn fin(code: i32, kind: str, text: str) -> i32 {
+    var b: rt.Buf = rt.buf_new()
+    if code == 0 {
+        rt.buf_push_bytes(&b, "ok".p as u64, 2)
+    } else {
+        rt.buf_push_bytes(&b, "err\t".p as u64, 4)
+        rt.buf_push_bytes(&b, kind.p as u64, kind.n)
+        rt.buf_push(&b, 9 as u8)
+        rt.buf_push_bytes(&b, text.p as u64, text.n)
+    }
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    rt.buf_free(&b)
+    return code
+}
+
+fn read_file(path: u64, into: *mut rt.Buf) -> bool {
+    let fd: i64 = syscall(S_OPEN, path as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var chunk: [u8; 1024] = [0; 1024]
+    while true {
+        let n: i64 = syscall(S_READ, fd, (&chunk[0]) as i64, 1024, 0, 0, 0)
+        if n <= 0 {
+            break
+        }
+        rt.buf_push_bytes(into, (&chunk[0]) as u64, n as usize)
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return true
+}
+
+// ------------------------------------------------------ the configuration
+
+struct Conf {
+    url: rt.Buf,
+    name: rt.Buf,
+    roots: rt.Buf,
+    token: rt.Buf,
+}
+
+// "key=value" lines; every value gets a terminating zero (knetz wants
+// C strings for name and roots)
+fn conf_value(p: u64, n: usize, key: str, into: *mut rt.Buf) {
+    var i: usize = 0
+    while i < n {
+        var e: usize = i
+        while e < n && rt.ld8(p, e) != 10 as u8 {
+            e = e + 1
+        }
+        var ln: usize = e - i
+        if ln > 0 && rt.ld8(p, i + ln - 1) == 13 as u8 {
+            ln = ln - 1
+        }
+        if ln > key.n && rt.ld8(p, i + key.n) == 61 as u8
+            && eqn(p + i as u64, key.n, key) {
+            rt.buf_clear(into)
+            rt.buf_push_bytes(into, p + (i + key.n + 1) as u64, ln - key.n - 1)
+        }
+        i = e + 1
+    }
+    rt.buf_push(into, 0 as u8)
+}
+
+static mut g_conf: u64 = 0 // -c <file>, for a test on the host
+
+fn conf_read(c: *mut Conf) -> bool {
+    var f: rt.Buf = rt.buf_new()
+    var path: [u8; 25] = "/etc/social/fleitec.conf\0"
+    var pp: u64 = (&path[0]) as u64
+    if g_conf != 0 {
+        pp = g_conf
+    }
+    if !read_file(pp, &f) {
+        rt.buf_free(&f)
+        return false
+    }
+    conf_value(f.ptr, f.len, "url", &(*c).url)
+    conf_value(f.ptr, f.len, "name", &(*c).name)
+    conf_value(f.ptr, f.len, "roots", &(*c).roots)
+    conf_value(f.ptr, f.len, "token", &(*c).token)
+    rt.buf_free(&f)
+    if (*c).roots.len <= 1 {
+        rt.buf_clear(&(*c).roots)
+        rt.buf_push_bytes(&(*c).roots, "/etc/ssl/roots.pem".p as u64, 18)
+        rt.buf_push(&(*c).roots, 0 as u8)
+    }
+    return (*c).url.len > 1 && (*c).token.len > 1
+}
+
+// --------------------------------------------------------------- one call
+
+// A request to fleikontakte. Returns 0 (200), 2 (no connection), 3 (the
+// token was refused), 1 (anything else; the code is in (*a).code).
+fn call(c: *mut Conf, method: str, path: u64, pn: usize, body: u64, bn: usize,
+    a: *mut knetz.Antw) -> i32 {
+    var z: knetz.Target = knetz.target_new()
+    var name: u64 = 0
+    if (*c).name.len > 1 {
+        name = (*c).name.ptr
+    }
+    if !knetz.target_read((*c).url.ptr, (*c).url.len - 1, name, (*c).roots.ptr,
+        &z) {
+        return 1
+    }
+    // the path of the URL (a prefix like /x) goes in front of the call
+    var full: rt.Buf = rt.buf_new()
+    var i: usize = 0
+    var slashes: usize = 0
+    while i < (*c).url.len - 1 {
+        if rt.ld8((*c).url.ptr, i) == 47 as u8 {
+            slashes = slashes + 1
+            if slashes == 3 {
+                rt.buf_push_bytes(&full, (*c).url.ptr + i as u64,
+                    (*c).url.len - 1 - i)
+                i = (*c).url.len
+            }
+        }
+        i = i + 1
+    }
+    if full.len > 0 && rt.ld8(full.ptr, full.len - 1) == 47 as u8 {
+        full.len = full.len - 1
+    }
+    rt.buf_push_bytes(&full, path, pn)
+    let da: bool = knetz.sende(&z, method.p as u64, method.n, full.ptr, full.len,
+        body, bn, (*c).token.ptr, (*c).token.len - 1, 0, 0, a)
+    rt.buf_free(&full)
+    if !da {
+        return 2
+    }
+    if (*a).code == 401 as u32 || (*a).code == 403 as u32 {
+        return 3
+    }
+    if (*a).code != 200 as u32 {
+        return 1
+    }
+    return 0
+}
+
+fn failed(r: i32, a: *mut knetz.Antw) -> i32 {
+    if r == 2 {
+        return fin(2, "offline", "fleikontakte is not reachable")
+    }
+    if r == 3 {
+        return fin(3, "denied", "the device access token was refused")
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, "err\thttp\t".p as u64, 9)
+    rt.buf_push_dec_u64(&b, (*a).code as u64)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    rt.buf_free(&b)
+    return 1
+}
+
+// ---------------------------------------------------------------- words
+
+fn relation_word(p: u64, n: usize) -> str {
+    if eqn(p, n, "freunde") {
+        return "friend"
+    }
+    if eqn(p, n, "eingehend") {
+        return "incoming"
+    }
+    if eqn(p, n, "angefragt") {
+        return "outgoing"
+    }
+    if eqn(p, n, "blockiert") {
+        return "blocked"
+    }
+    return "none"
+}
+
+fn presence_word(p: u64, n: usize) -> str {
+    if eqn(p, n, "online") {
+        return "online"
+    }
+    if eqn(p, n, "abwesend") {
+        return "away"
+    }
+    if eqn(p, n, "dnd") {
+        return "dnd"
+    }
+    if eqn(p, n, "offline") {
+        return "offline"
+    }
+    return "unknown"
+}
+
+// the string at obj.key (empty when missing)
+fn txt(d: *mut kjson.Json, obj: u32, key: str, into: *mut rt.Buf) {
+    rt.buf_clear(into)
+    var k: [u8; 24] = [0; 24]
+    rt.mem_copy((&k[0]) as u64, key.p as u64, key.n)
+    let _t: bool = kjson.text(d, obj, (&k[0]) as u64, into)
+}
+
+fn sub(d: *mut kjson.Json, obj: u32, key: str) -> u32 {
+    if obj == kjson.JSON_NONE {
+        return kjson.JSON_NONE
+    }
+    var k: [u8; 24] = [0; 24]
+    rt.mem_copy((&k[0]) as u64, key.p as u64, key.n)
+    return kjson.json_get_c(d, obj, (&k[0]) as u64)
+}
+
+// One item of /liste or /suche as a contact line.
+fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
+    var v: rt.Buf = rt.buf_new()
+    rt.buf_push(b, 99 as u8) // 'c'
+    txt(d, it, "konto", &v)
+    if v.len == 0 {
+        txt(d, it, "id", &v)
+    }
+    field(b, v.ptr, v.len)
+    txt(d, it, "status", &v)
+    fields(b, relation_word(v.ptr, v.len))
+    let pr: u32 = sub(d, it, "profil")
+    txt(d, pr, "praesenz", &v)
+    fields(b, presence_word(v.ptr, v.len))
+    txt(d, it, "anzeige", &v)
+    if v.len == 0 {
+        txt(d, it, "name", &v)
+    }
+    field(b, v.ptr, v.len)
+    txt(d, pr, "handle", &v)
+    if v.len == 0 {
+        txt(d, it, "handle", &v)
+    }
+    field(b, v.ptr, v.len)
+    txt(d, pr, "status_text", &v)
+    field(b, v.ptr, v.len)
+    let ak: u32 = sub(d, pr, "aktivitaet")
+    txt(d, ak, "name", &v)
+    field(b, v.ptr, v.len)
+    rt.buf_clear(&v)
+    var da: bool = false
+    var ks: [u8; 7] = "seit_s\0"
+    var secs: i64 = 0
+    if ak != kjson.JSON_NONE {
+        secs = kjson.int(d, ak, (&ks[0]) as u64, &da)
+    }
+    if secs < 0 {
+        secs = 0
+    }
+    rt.buf_push_dec_u64(&v, secs as u64)
+    field(b, v.ptr, v.len)
+    // the FirnChat key of the person (the chat goes there, E2E)
+    rt.buf_clear(&v)
+    let gs: u32 = sub(d, it, "geraete")
+    if gs != kjson.JSON_NONE && kjson.json_kind(d, gs) == kjson.JSON_ARRAY {
+        var g: u32 = kjson.json_child(d, gs)
+        var art: rt.Buf = rt.buf_new()
+        while g != kjson.JSON_NONE && v.len == 0 {
+            txt(d, g, "art", &art)
+            if eqn(art.ptr, art.len, "fc") {
+                txt(d, g, "wert", &v)
+            }
+            g = kjson.json_next(d, g)
+        }
+        rt.buf_free(&art)
+    }
+    if v.len == 0 {
+        txt(d, it, "fc", &v)
+    }
+    field(b, v.ptr, v.len)
+    rt.buf_push(b, 10 as u8)
+    rt.buf_free(&v)
+}
+
+// the "items" of an answer as contact lines
+fn items_out(a: *mut knetz.Antw) -> i32 {
+    var d: kjson.Json = kjson.json_new()
+    if !kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len) {
+        kjson.json_free(&d)
+        return fin(1, "bad", "the answer is not JSON")
+    }
+    let items: u32 = sub(&d, kjson.json_root(&d), "items")
+    var b: rt.Buf = rt.buf_new()
+    var n: u64 = 0
+    if items != kjson.JSON_NONE && kjson.json_kind(&d, items) == kjson.JSON_ARRAY {
+        var it: u32 = kjson.json_child(&d, items)
+        while it != kjson.JSON_NONE {
+            contact_line(&d, it, &b)
+            n = n + 1
+            it = kjson.json_next(&d, it)
+        }
+    }
+    kjson.json_free(&d)
+    rt.buf_push_bytes(&b, "ok\t".p as u64, 3)
+    rt.buf_push_dec_u64(&b, n)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    rt.buf_free(&b)
+    return 0
+}
+
+// the words from argument `from` on, joined with spaces
+fn rest_of(args: *mut rt.Buf, n: usize, from: usize, into: *mut rt.Buf) {
+    var i: usize = from
+    while i < n {
+        if i > from {
+            rt.buf_push(into, 32 as u8)
+        }
+        let p: u64 = arg(i)
+        rt.buf_push_bytes(into, p, rt.c_length(p))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------- the verbs
+
+fn v_contacts(c: *mut Conf) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "GET", "/api/kontakte/liste".p as u64, 19, 0, 0, &a)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    let x: i32 = items_out(&a)
+    knetz.reply_free(&a)
+    return x
+}
+
+fn hexd(v: u8) -> u8 {
+    if v < 10 as u8 {
+        return 48 as u8 + v
+    }
+    return 55 as u8 + v
+}
+
+fn v_search(c: *mut Conf, q: *mut rt.Buf) -> i32 {
+    var path: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&path, "/api/kontakte/suche?q=".p as u64, 22)
+    var i: usize = 0
+    while i < (*q).len {
+        let ch: u8 = rt.ld8((*q).ptr, i)
+        let plain: bool = (ch >= 48 as u8 && ch <= 57 as u8)
+            || (ch >= 65 as u8 && ch <= 90 as u8) || (ch >= 97 as u8 && ch <= 122 as u8)
+            || ch == 95 as u8 || ch == 46 as u8 || ch == 45 as u8
+        if plain {
+            rt.buf_push(&path, ch)
+        } else {
+            rt.buf_push(&path, 37 as u8)
+            rt.buf_push(&path, hexd(ch / 16 as u8))
+            rt.buf_push(&path, hexd(ch % 16 as u8))
+        }
+        i = i + 1
+    }
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "GET", path.ptr, path.len, 0, 0, &a)
+    rt.buf_free(&path)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    let x: i32 = items_out(&a)
+    knetz.reply_free(&a)
+    return x
+}
+
+fn post(c: *mut Conf, path: str, body: *mut rt.Buf) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "POST", path.p as u64, path.n, (*body).ptr, (*body).len, &a)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    knetz.reply_free(&a)
+    return fin(0, "", "")
+}
+
+fn v_relation(c: *mut Conf, verb: u64, id: u64) -> i32 {
+    var path: str = ""
+    if eqc(verb, "request") {
+        path = "/api/kontakte/anfragen"
+    } else if eqc(verb, "accept") {
+        path = "/api/kontakte/annehmen"
+    } else if eqc(verb, "decline") {
+        path = "/api/kontakte/ablehnen"
+    } else if eqc(verb, "withdraw") || eqc(verb, "remove") {
+        path = "/api/kontakte/entfernen"
+    } else {
+        return fin(1, "bad", "relation: request|accept|decline|withdraw|remove")
+    }
+    var body: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var k: [u8; 6] = "konto\0"
+    kjson.field(&w, (&k[0]) as u64, id, rt.c_length(id))
+    kjson.field_free(&w)
+    let r: i32 = post(c, path, &body)
+    rt.buf_free(&body)
+    return r
+}
+
+fn v_presence(c: *mut Conf, state: u64, text: *mut rt.Buf) -> i32 {
+    var st: str = ""
+    if eqc(state, "online") {
+        st = "online"
+    } else if eqc(state, "away") {
+        st = "abwesend"
+    } else if eqc(state, "dnd") {
+        st = "dnd"
+    } else if eqc(state, "invisible") {
+        st = "unsichtbar"
+    } else {
+        return fin(1, "bad", "presence: online|away|dnd|invisible")
+    }
+    var body: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var k1: [u8; 7] = "status\0"
+    var k2: [u8; 12] = "status_text\0"
+    kjson.field(&w, (&k1[0]) as u64, st.p as u64, st.n)
+    kjson.field(&w, (&k2[0]) as u64, (*text).ptr, (*text).len)
+    kjson.field_free(&w)
+    let r: i32 = post(c, "/api/kontakte/profil", &body)
+    rt.buf_free(&body)
+    return r
+}
+
+fn v_activity(c: *mut Conf, name: *mut rt.Buf) -> i32 {
+    var body: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var k: [u8; 6] = "spiel\0"
+    kjson.field(&w, (&k[0]) as u64, (*name).ptr, (*name).len)
+    kjson.field_free(&w)
+    let r: i32 = post(c, "/api/kontakte/aktivitaet", &body)
+    rt.buf_free(&body)
+    return r
+}
+
+fn v_alive(c: *mut Conf) -> i32 {
+    var body: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&body, "{}".p as u64, 2)
+    let r: i32 = post(c, "/api/kontakte/da", &body)
+    rt.buf_free(&body)
+    return r
+}
+
+// ---------------------------------------------------------- the arguments
+
+static mut g_args: u64 = 0
+static mut g_shift: usize = 0
+
+// argument i, counted as if there were no "-c <file>"
+fn arg(i: usize) -> u64 {
+    if i >= 2 {
+        return rt.arg_ptr(g_args, i + g_shift)
+    }
+    return rt.arg_ptr(g_args, i)
+}
+
+fn main(start: u64) -> i32 {
+    g_args = start
+    var n: usize = rt.arg_count(start)
+    if n >= 4 && eqc(rt.arg_ptr(start, 2), "-c") {
+        g_conf = rt.arg_ptr(start, 3)
+        g_shift = 2
+        n = n - 2
+    }
+    if n < 3 || !eqc(arg(1), "v1") {
+        return fin(1, "bad", "usage: socfleitec v1 <hello|contacts|search|relation|presence|activity|alive> ...")
+    }
+    let verb: u64 = arg(2)
+    if eqc(verb, "hello") {
+        outs("provider\tfleitec\t1\ncaps\tcontacts search relation presence activity alive\n")
+        return fin(0, "", "")
+    }
+    var c: Conf = Conf { url: rt.buf_new(), name: rt.buf_new(),
+        roots: rt.buf_new(), token: rt.buf_new() }
+    if !conf_read(&c) {
+        return fin(3, "denied", "no /etc/social/fleitec.conf with url= and token=")
+    }
+    var dummy: rt.Buf = rt.buf_new()
+    if eqc(verb, "contacts") {
+        return v_contacts(&c)
+    }
+    if eqc(verb, "search") {
+        var q: rt.Buf = rt.buf_new()
+        rest_of(&dummy, n, 3, &q)
+        return v_search(&c, &q)
+    }
+    if eqc(verb, "relation") && n >= 5 {
+        return v_relation(&c, arg(3), arg(4))
+    }
+    if eqc(verb, "presence") && n >= 4 {
+        var t: rt.Buf = rt.buf_new()
+        rest_of(&dummy, n, 4, &t)
+        return v_presence(&c, arg(3), &t)
+    }
+    if eqc(verb, "activity") {
+        var a: rt.Buf = rt.buf_new()
+        rest_of(&dummy, n, 3, &a)
+        return v_activity(&c, &a)
+    }
+    if eqc(verb, "alive") {
+        return v_alive(&c)
+    }
+    return fin(1, "bad", "unknown verb")
+}

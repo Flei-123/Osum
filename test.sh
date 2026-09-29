@@ -1665,6 +1665,14 @@ lauf "52. der Anmeldeschirm, wie Justin ihn bedient: eine Taste ein Zeichen, Tab
 lauf "53. the action bus: manifests, one broker for every caller, rights, dry run, undo, audit, Jarvis through the bridge (tools/actionbus/run.sh, round ACTION-BUS)" \
      tools/actionbus/run.sh actionbus '^ACTIONBUS: |^ACTIONBUS-LATENCY |^== |^  OK    |^  FAIL  '
 
+# 54. THE SOCIAL LAYER (FirnChat docs/SOCIAL.md, docs/ACTION-BUS.md § 8):
+# the service /bin/social on the action bus, providers as programs behind
+# one interface (Fleitec over the network with a device access token, the
+# device's own contacts), the friends bar reading it -- friends on the
+# host's fleikontakte see what was set on OrientOS.
+lauf "54. the social layer: social.* actions on orient-bus, providers behind one interface, presence/activity/privacy, the friends bar (tools/social/run.sh, round SOCIAL)" \
+     tools/social/run.sh social '^SOCIAL: |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

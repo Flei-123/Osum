@@ -169,6 +169,7 @@ static mut k2_taken: bool = false
 // (the imm8 of pshufd/palignr/pclmulqdq). rip counts from the END of the
 // instruction, so they belong into the distance.
 static mut after_disp: u64 = 0
+static mut seg_fs: bool = false // RUNDE SOCIAL: `fs:` in an operand
 
 // K16/A-007: numeric local labels (`1:` ... `jnz 1b` / `jmp 1f`), as the
 // inline asm of lib/crypto (aesni, shani) writes them. Every definition
@@ -834,6 +835,18 @@ fn operand(a: u64, b: u64, nr: u64) {
         mem_operand(i + 1, b, nr, groesse)
         return
     }
+    // RUNDE SOCIAL: `qword ptr fs:0` -- the thread block of `profile
+    // app` (__thread_tcb). The segment prefix 64 goes in front of the
+    // instruction (do_cmd), the address is absolute: ModRM rm=100 with
+    // SIB 0x25 and a 32-bit displacement (p = 2, modrm_mem).
+    if groesse != 0 && i + 3 <= b && at(i) == 102 && at(i + 1) == 115
+        && at(i + 2) == 58 {
+        seg_fs = true
+        let ze: u64 = word_end(i + 3, b)
+        let v: u64 = imm_von(i + 3, ze)
+        setz(nr, K_MEM, 0, groesse, 0, v, 2, 0, 0)
+        return
+    }
     if groesse != 0 {
         var t2: [u8; 23] = "nach 'ptr' fehlt '['\0\0\0"
         oops((&t2[0]) as u64)
@@ -974,6 +987,12 @@ fn modrm_mem(reg: u64, wo: u64) {
         basisreg = b1
         disp = d1
         riprel = p1
+    }
+    if riprel == 2 {
+        emit(((reg & 7) << 3) | 4)
+        emit(0x25)
+        emit32(disp & 0xFFFFFFFF)
+        return
     }
     if riprel != 0 {
         emit(((reg & 7) << 3) | 5)
@@ -1279,6 +1298,7 @@ fn do_cmd(a: u64, m: u64, b: u64) {
     k1 = K_NONE
     k2 = K_NONE
     k2_taken = false
+    seg_fs = false
     var i: u64 = gap_gone(m, b)
     if i < b {
         // Bei den beiden Ketten-Praefixen steht ein zweiter Befehl dahinter.
@@ -1335,6 +1355,9 @@ fn do_cmd(a: u64, m: u64, b: u64) {
     }
     if fehler != 0 {
         return
+    }
+    if seg_fs {
+        emit(0x64)
     }
     kodiere(a, m)
     if fehler == 0 && k2 != K_NONE && !k2_taken {
@@ -1996,6 +2019,36 @@ fn kodiere(a: u64, m: u64) {
             return
         }
     }
+    // ---- xadd / cmpxchg (RUNDE SOCIAL): r/m, r -- 0F C1 /r and 0F B1 /r,
+    // REX.W for 64 bit; the heap of `profile app` uses both with `lock`
+    var w_xadd: [u8; 5] = "xadd\0"
+    var w_cmpx: [u8; 8] = "cmpxchg\0"
+    var op2: u64 = 0
+    if ist(a, m, (&w_xadd[0]) as u64) {
+        op2 = 0xC1
+    }
+    if ist(a, m, (&w_cmpx[0]) as u64) {
+        op2 = 0xB1
+    }
+    if op2 != 0 {
+        if k0 == K_MEM && k1 == K_REG {
+            rex(s1 == 8, r1, 0, mem_base(0), false)
+            emit(0x0F)
+            emit(op2)
+            modrm_mem(r1, 0)
+            return
+        }
+        if k0 == K_REG && k1 == K_REG {
+            rex(s1 == 8, r1, 0, r0, false)
+            emit(0x0F)
+            emit(op2)
+            modrm_reg(r1, r0)
+            return
+        }
+        var tx: [u8; 24] = "braucht r/m und r\0\0\0\0\0\0\0"
+        oops((&tx[0]) as u64)
+        return
+    }
     // ---- lea
     var w_lea: [u8; 4] = "lea\0"
     if ist(a, m, (&w_lea[0]) as u64) {
@@ -2647,6 +2700,19 @@ fn do_line(a0z: u64, b: u64) {
     }
     if c == 46 {
         tue_direktive(i, w, b)
+        return
+    }
+    // RUNDE SOCIAL: the `lock` prefix (F0) in front of an instruction.
+    // firnc1 emits `lock xadd qword ptr [rcx], rax` in the heap of
+    // `profile app` (__gc_alloc_local); every Ring-3 program that uses
+    // std.rt or `str` brings it along.
+    if w == i + 4 && at(i) == 108 && at(i + 1) == 111 && at(i + 2) == 99
+        && at(i + 3) == 107 {
+        emit(0xF0)
+        let rest2: u64 = gap_gone(w, b)
+        if rest2 < b {
+            do_line(rest2, b)
+        }
         return
     }
     if w == i {
