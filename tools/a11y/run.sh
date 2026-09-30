@@ -197,6 +197,13 @@ waitfor "==FERTIG==" 90 || note "no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" > "$TMPD/ser.klar"
+# The window server's window list (`wm: fen ... tka=N`, one line per
+# window, printed on the measuring key tile.A_SAY) shares the serial line with
+# the programs. It can land in the MIDDLE of an a11ydemo line
+# ("a11ydemo: noright read=wm: fen ... tka=81<nl>1 event=1 ..."), and the
+# check then fails on a line the program printed correctly. No check here
+# reads the window list, so it is cut out, which rejoins the split line.
+perl -0pi -e 's/wm: fen i=[^\n]*? tka=\d+\r?\n//g' "$TMPD/ser.klar"
 G="$TMPD/ser.klar"
 for q in "$TMPD"/*.ppm; do
     [ -s "$q" ] && python3 -c "from PIL import Image; Image.open('$q').save('${q%.ppm}.png')" 2>/dev/null
