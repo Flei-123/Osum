@@ -90,6 +90,7 @@ import fui.core
 
 export {
     sperre_an, sperrer, lock_space, darf, input_seen,
+    trust_ask, trust_poll, trust_cancel,
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, destroy, valid, count, focus, set_focus, raise_win,
@@ -6000,6 +6001,9 @@ fn compose_one(state: u64) -> u64 {
     if gs(state, S_PVON) != 0 {
         paint_preview(state, x0, y0, x1, y1)
     }
+    // 2c. ROUND ACTION-BUS-5 (AB-004): the trusted dialog, over every
+    //     window and under the pointer only
+    td_paint(state, x0, y0, x1, y1)
     // 3. der Zeiger, ganz oben
     //
     // RUNDE GPU (G-012): NUR NOCH, WENN IHN NIEMAND ANDERES TRAEGT.
@@ -10648,6 +10652,17 @@ fn on_mouse(state: u64) {
     }
     let x: i64 = nx as i64
     let y: i64 = ny as i64
+    // ROUND ACTION-BUS-5 (AB-004): while the trusted dialog is up the
+    // mouse belongs to it -- a press on a button answers it, nothing
+    // reaches a window below
+    if td_live(state) {
+        if (btn & ps2m.B_LEFT) != 0 && (td_mb & ps2m.B_LEFT) == 0 {
+            td_click(state, nx, ny)
+        }
+        td_mb = btn
+        return
+    }
+    td_mb = btn
     // Ziehen
     if gs(state, S_DRAG) != 0 {
         let i: u64 = gs(state, S_DRAG) - 1
@@ -11057,6 +11072,328 @@ fn sperre_an(state: u64) -> bool {
     return kstate.get(state, kstate.K11_OFF + kstate.SP_ON) != 0
 }
 
+// ============================================ ROUND ACTION-BUS-5 (AB-004)
+// THE TRUSTED CONFIRMATION DIALOG.
+//
+// Until this round a parked call of the action bus was confirmed with
+// `act confirm <no>` on a shell -- a line of text any program could fake
+// on the screen, and a question the person had to go and look for. Now
+// the broker asks HERE (sys.WM_TRUST) and the window server paints the
+// question itself, in `compose`, AFTER every window and before the
+// pointer: no window, no panel, no plugin can draw over it. The answer
+// comes from `on_key` and `on_mouse` only -- the paths of the real
+// keyboard and mouse. A program that types into windows (WM_FWIN) puts
+// events into the ring of a WINDOW; the dialog is none, so no program
+// can press its buttons, the broker's own adapters included.
+//
+//   J / Y or a click on "Erlauben"  -> yes
+//   N / Escape or "Ablehnen"        -> no
+//
+// Keys and clicks in the first 400 ms after it appears are ignored, so a
+// key already on its way (someone typing when it pops up) cannot answer
+// it; Enter is NOT an answer for the same reason. While the screen is
+// locked the dialog waits invisibly: the lock screen owns keyboard and
+// screen, and a question over it would show who wants what to anyone
+// standing at the machine. One dialog at a time; the broker queues.
+const TD_COLS: u64 = 60
+const TD_LINES: u64 = 6
+const TD_BTN: u64 = 18 // button width in columns
+static mut td_on: u64 = 0
+static mut td_no: u64 = 0
+static mut td_ans: u64 = 0 // 1 yes, 2 no
+static mut td_ansno: u64 = 0
+static mut td_t0: u64 = 0
+static mut td_mb: u64 = 0 // the mouse buttons last seen
+static mut td_shown: u64 = 0
+static mut td_txt: [u8; 384] = [0 as u8; 384]
+
+fn td_line(l: u64) -> u64 {
+    return ((&td_txt[0]) as u64) + l * 64
+}
+
+// `p` is a KERNEL copy of `n` octets: lines split at a newline and wrapped
+// at TD_COLS; what the 8x16 font has not got becomes '?'
+fn trust_ask(state: u64, no: u64, p: u64, n: u64) -> bool {
+    if td_on != 0 || no == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 384 {
+        kstate.set8(td_line(0) + i, 0 as u8)
+        i = i + 1
+    }
+    var l: u64 = 0
+    var c: u64 = 0
+    var k: u64 = 0
+    while k < n && l < TD_LINES {
+        var ch: u64 = kstate.get8(p + k)
+        k = k + 1
+        if ch == 0 {
+            k = n
+        } else if ch == 10 {
+            l = l + 1
+            c = 0
+        } else if ch >= 0x80 && ch < 0xC0 {
+            // a UTF-8 continuation octet: its lead octet was the '?'
+        } else {
+            if ch < 32 || ch > 126 {
+                ch = 63
+            }
+            if c >= TD_COLS {
+                // wrap at the last space of the line, not inside a word
+                var sp: u64 = TD_COLS
+                while sp > 0 && kstate.get8(td_line(l) + sp - 1) != 32 {
+                    sp = sp - 1
+                }
+                var nc: u64 = 0
+                if sp > TD_COLS / 2 && l + 1 < TD_LINES {
+                    var q: u64 = sp
+                    while q < TD_COLS {
+                        kstate.set8(td_line(l + 1) + nc, kstate.get8(td_line(l) + q) as u8)
+                        kstate.set8(td_line(l) + q, 0 as u8)
+                        nc = nc + 1
+                        q = q + 1
+                    }
+                }
+                l = l + 1
+                c = nc
+            }
+            if l < TD_LINES {
+                kstate.set8(td_line(l) + c, ch as u8)
+                c = c + 1
+            }
+        }
+    }
+    td_no = no
+    td_ans = 0
+    td_ansno = 0
+    td_t0 = time.mono_ns(state)
+    td_on = 1
+    td_shown = td_shown + 1
+    damage_all(state)
+    var s_td: [u8; 26] = "wm: trusted dialog up no=\0"
+    serial.puts((&s_td[0]) as u64)
+    serial.dec(no)
+    serial.nl()
+    return true
+}
+
+// 0 open, 1 yes, 2 no, 3 no such dialog
+fn trust_poll(state: u64, no: u64) -> u64 {
+    if no != 0 && td_ansno == no && td_ans != 0 {
+        return td_ans
+    }
+    if td_on != 0 && td_no == no {
+        return 0
+    }
+    return 3
+}
+
+fn trust_cancel(state: u64, no: u64) {
+    if td_on != 0 && td_no == no {
+        td_on = 0
+        damage_all(state)
+        var s_tc: [u8; 28] = "wm: trusted dialog down no=\0"
+        serial.puts((&s_tc[0]) as u64)
+        serial.dec(no)
+        serial.nl()
+    }
+}
+
+fn td_answer(state: u64, v: u64) {
+    td_ans = v
+    td_ansno = td_no
+    td_on = 0
+    damage_all(state)
+    var s_ta: [u8; 27] = "wm: trusted dialog answer=\0"
+    var s_tn: [u8; 5] = " no=\0"
+    serial.puts((&s_ta[0]) as u64)
+    serial.dec(v)
+    serial.puts((&s_tn[0]) as u64)
+    serial.dec(td_no)
+    serial.nl()
+}
+
+// is the dialog on the screen and old enough to be answered?
+fn td_live(state: u64) -> bool {
+    return td_on != 0 && !sperre_an(state)
+}
+
+fn td_armed(state: u64) -> bool {
+    return time.mono_ns(state) - td_t0 >= 400000000
+}
+
+// from `on_key`: true = the key was the dialog's (answer or swallowed)
+fn trust_key(state: u64, c: u64) -> bool {
+    if !td_live(state) {
+        return false
+    }
+    if !td_armed(state) {
+        return true
+    }
+    if c == 106 || c == 74 || c == 121 || c == 89 {
+        td_answer(state, 1)
+    } else if c == 110 || c == 78 || c == 27 {
+        td_answer(state, 2)
+    }
+    return true
+}
+
+fn td_k(state: u64) -> u64 {
+    if fb.width(state) >= 1600 {
+        return 2
+    }
+    return 1
+}
+
+fn td_gw(state: u64) -> u64 {
+    return font.GLYPH_W * td_k(state)
+}
+
+fn td_gh(state: u64) -> u64 {
+    return font.GLYPH_H * td_k(state)
+}
+
+fn td_w(state: u64) -> u64 {
+    return (TD_COLS + 4) * td_gw(state)
+}
+
+fn td_h(state: u64) -> u64 {
+    return (TD_LINES + 6) * td_gh(state)
+}
+
+fn td_x(state: u64) -> u64 {
+    if td_w(state) >= fb.width(state) {
+        return 0
+    }
+    return (fb.width(state) - td_w(state)) / 2
+}
+
+fn td_y(state: u64) -> u64 {
+    if td_h(state) >= fb.height(state) {
+        return 0
+    }
+    return (fb.height(state) - td_h(state)) / 3
+}
+
+// the top of text row `r` (0 = the margin)
+fn td_row(state: u64, r: u64) -> u64 {
+    return td_y(state) + r * td_gh(state)
+}
+
+// the buttons: 0 = yes (left), 1 = no (right)
+fn td_bx(state: u64, b: u64) -> u64 {
+    if b == 0 {
+        return td_x(state) + 2 * td_gw(state)
+    }
+    return td_x(state) + (TD_COLS + 2 - TD_BTN) * td_gw(state)
+}
+
+fn td_by(state: u64) -> u64 {
+    return td_row(state, TD_LINES + 4) - td_gh(state) / 4
+}
+
+fn td_bh(state: u64) -> u64 {
+    return td_gh(state) + td_gh(state) / 2
+}
+
+fn td_click(state: u64, x: u64, y: u64) {
+    if !td_armed(state) {
+        return
+    }
+    if y < td_by(state) || y >= td_by(state) + td_bh(state) {
+        return
+    }
+    var b: u64 = 0
+    while b < 2 {
+        let bx: u64 = td_bx(state, b)
+        if x >= bx && x < bx + TD_BTN * td_gw(state) {
+            td_answer(state, b + 1)
+            b = 2
+        } else {
+            b = b + 1
+        }
+    }
+}
+
+// one string in the 8x16 font, scaled by k, stops at NUL or n octets
+fn td_str(state: u64, x: u64, y: u64, p: u64, n: u64, fg: u64) {
+    let k: u64 = td_k(state)
+    let gw: u64 = td_gw(state)
+    var i: u64 = 0
+    var cx: u64 = x
+    while i < n && cx + gw <= fb.width(state) {
+        let ch: u64 = kstate.get8(p + i)
+        if ch == 0 {
+            i = n
+        } else {
+            var r: u64 = 0
+            while r < font.GLYPH_H {
+                let bits: u64 = font.row(state + fb.FONT_OFF, ch, r)
+                var c: u64 = 0
+                while c < font.GLYPH_W {
+                    if (bits & (1 << (7 - c))) != 0 {
+                        if k == 1 {
+                            fb.pixel(state, cx + c, y + r, fg)
+                        } else {
+                            fb.fill(state, cx + c * k, y + r * k, k, k, fg)
+                        }
+                    }
+                    c = c + 1
+                }
+                r = r + 1
+            }
+            cx = cx + gw
+            i = i + 1
+        }
+    }
+}
+
+// from `compose`, after the windows and before the pointer
+fn td_paint(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if !td_live(state) {
+        return
+    }
+    let x: u64 = td_x(state)
+    let y: u64 = td_y(state)
+    let w: u64 = td_w(state)
+    let h: u64 = td_h(state)
+    if x1 <= x || x0 >= x + w || y1 <= y || y0 >= y + h {
+        return
+    }
+    let k: u64 = td_k(state)
+    let gw: u64 = td_gw(state)
+    let gh: u64 = td_gh(state)
+    let rand: u64 = fb.rgb(state, 0xFF, 0xE0, 0x00)
+    fb.fill(state, x, y, w, h, rand)
+    fb.fill(state, x + 3 * k, y + 3 * k, w - 6 * k, h - 6 * k,
+        fb.rgb(state, 0x16, 0x18, 0x24))
+    var s_t: [u8; 43] = "OrientOS - Bestaetigung (vom System)\0\0\0\0\0\0\0"
+    td_str(state, x + 2 * gw, td_row(state, 1), (&s_t[0]) as u64, 44,
+        fb.rgb(state, 0xFF, 0xE0, 0x00))
+    var l: u64 = 0
+    while l < TD_LINES {
+        td_str(state, x + 2 * gw, td_row(state, 3 + l), td_line(l), 64,
+            fb.rgb(state, 0xE8, 0xE8, 0xE8))
+        l = l + 1
+    }
+    var s_h: [u8; 55] = "Nur echte Tastatur/Maus:  J = erlauben   N = ablehnen\0\0"
+    td_str(state, x + 2 * gw, td_row(state, TD_LINES + 3) - gh / 4,
+        (&s_h[0]) as u64, 56, fb.rgb(state, 0x9A, 0xA0, 0xB0))
+    let by: u64 = td_by(state)
+    let bh: u64 = td_bh(state)
+    let bw: u64 = TD_BTN * gw
+    fb.fill(state, td_bx(state, 0), by, bw, bh, fb.rgb(state, 0x1E, 0x7F, 0x3E))
+    fb.fill(state, td_bx(state, 1), by, bw, bh, fb.rgb(state, 0x9B, 0x2C, 0x2C))
+    var s_y: [u8; 16] = "[J] Erlauben\0\0\0\0"
+    var s_n: [u8; 16] = "[N] Ablehnen\0\0\0\0"
+    let ty: u64 = by + gh / 4
+    td_str(state, td_bx(state, 0) + 3 * gw, ty, (&s_y[0]) as u64, 16,
+        fb.rgb(state, 0xFF, 0xFF, 0xFF))
+    td_str(state, td_bx(state, 1) + 3 * gw, ty, (&s_n[0]) as u64, 16,
+        fb.rgb(state, 0xFF, 0xFF, 0xFF))
+}
+
 fn sperrer(state: u64) -> u64 {
     return kstate.get(state, kstate.K11_OFF + kstate.SP_PID)
 }
@@ -11092,6 +11429,13 @@ fn on_key(state: u64, c: u64) {
         return
     }
     input_seen(state)
+    // ROUND ACTION-BUS-5 (AB-004): the trusted dialog takes the key
+    // FIRST -- before a plugin, before the focus, and not for the
+    // terminal either
+    if trust_key(state, c) {
+        ss(state, S_KSWAL, 1)
+        return
+    }
     // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
     ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
     // ================================================ RUNDE WMPLUGIN

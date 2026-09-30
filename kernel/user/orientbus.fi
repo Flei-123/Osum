@@ -72,6 +72,7 @@ const AC_ADCMD: u64 = 104 // pool offset of the adapter's rest of line
 const FL_DRY: u64 = 1
 const FL_EVENT: u64 = 2
 const FL_KEYED: u64 = 4 // AB-005: arg `key` names a setting of the schema
+const FL_PRIVATE: u64 = 8 // AB-015: an event only the user and the app hear
 
 const AD_NONE: u64 = 0
 const AD_CLI: u64 = 1
@@ -617,6 +618,7 @@ fn load_manifest(path: u64, compat: u64) -> bool {
     var k_event: [u8; 6] = "event\0"
     var k_field: [u8; 6] = "field\0"
     var k_dry: [u8; 7] = "dryrun\0"
+    var k_private: [u8; 8] = "private\0"
     var k_undo: [u8; 5] = "undo\0"
     var k_req: [u8; 9] = "required\0"
     var k_one: [u8; 2] = "1\0"
@@ -822,6 +824,13 @@ fn load_manifest(path: u64, compat: u64) -> bool {
             } else if actwire.str_eq(p1, (&k_dry[0 as usize]) as u64) {
                 if m_cur != actwire.NONE {
                     st(ac(m_cur), AC_FLAGS, ld(ac(m_cur), AC_FLAGS) | FL_DRY)
+                }
+            } else if actwire.str_eq(p1, (&k_private[0 as usize]) as u64) {
+                // AB-015: `private` under an event -- the user and the
+                // app itself hear it, nobody else, whatever the rules say
+                if m_cur != actwire.NONE
+                    && (ld(ac(m_cur), AC_FLAGS) & FL_EVENT) != 0 {
+                    st(ac(m_cur), AC_FLAGS, ld(ac(m_cur), AC_FLAGS) | FL_PRIVATE)
                 }
             } else if actwire.str_eq(p1, (&k_undo[0 as usize]) as u64) {
                 if m_cur != actwire.NONE && in_namespace(p2, m_app) {
@@ -2223,10 +2232,24 @@ fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
         actwire.ob_ch(10)
         return true
     }
+    // AB-019: a free job slot first -- four programs may run at once
+    var slot: u64 = actwire.NONE
+    var q: u64 = 0
+    while q < AJ_MAX && slot == actwire.NONE {
+        if ld(aj(q), AJ_USED) == 0 {
+            slot = q
+        }
+        q = q + 1
+    }
+    if slot == actwire.NONE {
+        var eb: [u8; 18] = "err adapter_busy\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&eb[0 as usize]) as u64)
+        return false
+    }
     c_adapt = c_adapt + 1
-    var outp: [u8; 26] = "/tmp/orientbus.adapter.out"
-    var op: [u8; 27] = [0 as u8; 27]
-    copyn((&op[0 as usize]) as u64, (&outp[0 as usize]) as u64, 26, 27)
+    var op: [u8; 32] = [0 as u8; 32]
+    aj_path(slot, (&op[0 as usize]) as u64)
     // O_WRONLY|O_CREAT|O_TRUNC, mode 0666 -- the child writes it after
     // dropping to another uid; the descriptor is already open
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&op[0 as usize]) as u64, 1 | 64 | 512, 438)
@@ -2247,25 +2270,67 @@ fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
         actwire.ob_str((&e4[0 as usize]) as u64)
         return false
     }
-    // wait at most 5 s; a hanging program is killed, the broker stays
-    var status: [u64; 1] = [0 as u64; 1]
-    let t0: u64 = actwire.ticks()
-    var done: bool = false
-    var killed: bool = false
-    while !done {
-        let r: u64 = ulib.sys4(61, child, (&status[0 as usize]) as u64, 1, 0)
-        if r == child {
-            done = true
-        } else if actwire.ticks() - t0 > 500 {
-            ulib.sys(62, child, 9, 0)
-            ulib.sys4(61, child, (&status[0 as usize]) as u64, 0, 0)
-            done = true
-            killed = true
-        } else {
-            ulib.sleep_ms(10)
-        }
+    // AB-019: the broker does NOT wait here. Until round ACTION-BUS-5 it
+    // polled waitpid for up to 5 s, and every other call -- a read of
+    // another app, a confirmation, the settings window -- stood still
+    // behind one slow program. The job is noted, the caller gets its
+    // answer when the program ends (aj_poll in the serve loop), and the
+    // bus goes on meanwhile.
+    let jp: u64 = aj(slot)
+    st(jp, AJ_USED, 1)
+    st(jp, AJ_CHILD, child)
+    st(jp, AJ_T0, actwire.ticks())
+    st(jp, AJ_ACT, act)
+    g_started = true
+    g_slot = slot
+    aj_n = aj_n + 1
+    if aj_n > aj_peak {
+        aj_peak = aj_n
     }
-    let code: u64 = (status[0 as usize] >> 8) & 255
+    return true
+}
+
+// ================================= AB-019: ADAPTER CALLS RUN CONCURRENTLY
+const AJ_MAX: u64 = 4
+const AJ_B: u64 = 128
+const AJ_USED: u64 = 0
+const AJ_CHILD: u64 = 8
+const AJ_PID: u64 = 16 // who gets the answer
+const AJ_ID: u64 = 24
+const AJ_UID: u64 = 32
+const AJ_ACT: u64 = 40
+const AJ_T0: u64 = 48
+const AJ_UNDO: u64 = 56 // 1 = this is an undo
+const AJ_LVL: u64 = 64
+const AJ_CLIENT: u64 = 72 // 24 octets
+static mut ajobs: [u8; 512] = [0 as u8; 512]
+static mut aj_n: u64 = 0
+static mut aj_peak: u64 = 0
+static mut g_started: bool = false
+static mut g_slot: u64 = 0
+
+fn aj(i: u64) -> u64 {
+    return (&ajobs[0 as usize]) as u64 + i * AJ_B
+}
+
+// /tmp/orientbus.adapter.<slot>: one output file per job
+fn aj_path(slot: u64, out: u64) {
+    var base: [u8; 24] = "/tmp/orientbus.adapter.\0"
+    copyz(out, (&base[0 as usize]) as u64, 32)
+    st8(out, 23, 48 + slot)
+    st8(out, 24, 0)
+}
+
+// the program of job `slot` has ended (or was killed): the reply as it
+// was before AB-019, then the caller, the undo record and the log
+fn aj_finish(slot: u64, killed: bool, code: u64) {
+    let jp: u64 = aj(slot)
+    let act: u64 = ld(jp, AJ_ACT)
+    let kind: u64 = ld(ac(act), AC_ADKIND)
+    var op: [u8; 32] = [0 as u8; 32]
+    aj_path(slot, (&op[0 as usize]) as u64)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_ad: [u8; 9] = "adapter=\0"
     // the output: k=v lines pass through, anything else becomes out=
     let rfd: u64 = io.open((&op[0 as usize]) as u64, 0)
     var n: u64 = 0
@@ -2324,7 +2389,63 @@ fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
     actwire.ob_str((&s_ad[0 as usize]) as u64)
     actwire.ob_str(adapter_name(kind))
     actwire.ob_ch(10)
-    return !killed && code == 0
+    let aok: bool = !killed && code == 0
+    let pid: u64 = ld(jp, AJ_PID)
+    let uid: u64 = ld(jp, AJ_UID)
+    let cp: u64 = jp + AJ_CLIENT
+    reply_ob(pid, ld(jp, AJ_ID))
+    let undo: bool = ld(jp, AJ_UNDO) != 0
+    if aok && !undo {
+        var noargs: [u8; 1] = "\0"
+        push_undo(cp, act, (&noargs[0 as usize]) as u64)
+    }
+    if ld(jp, AJ_LVL) == L_READ {
+        audit_lazy = true
+    } else {
+        skip_tally = true // counted as a change at its write-ahead line
+    }
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if undo {
+        vb = (&s_undov[0 as usize]) as u64
+    }
+    var r_err: [u8; 4] = "err\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var res: u64 = (&r_err[0 as usize]) as u64
+    if aok {
+        res = (&r_ok[0 as usize]) as u64
+    }
+    audit(pid, uid, cp, vb, ac(act) + AC_NAME, (&s_allow[0 as usize]) as u64,
+        res, false)
+    st(jp, AJ_USED, 0)
+    aj_n = aj_n - 1
+}
+
+// every turn of the serve loop: which programs have ended, which ran
+// out of time (5 s, as before: a hanging program is killed)
+fn aj_poll() {
+    if aj_n == 0 {
+        return
+    }
+    var status: [u64; 1] = [0 as u64; 1]
+    var i: u64 = 0
+    while i < AJ_MAX {
+        let jp: u64 = aj(i)
+        if ld(jp, AJ_USED) != 0 {
+            let child: u64 = ld(jp, AJ_CHILD)
+            status[0 as usize] = 0
+            let r: u64 = ulib.sys4(61, child, (&status[0 as usize]) as u64, 1, 0)
+            if r == child {
+                aj_finish(i, false, (status[0 as usize] >> 8) & 255)
+            } else if actwire.ticks() - ld(jp, AJ_T0) > 500 {
+                ulib.sys(62, child, 9, 0)
+                ulib.sys4(61, child, (&status[0 as usize]) as u64, 0, 0)
+                aj_finish(i, true, 0)
+            }
+        }
+        i = i + 1
+    }
 }
 
 fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
@@ -2471,9 +2592,10 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         actwire.ob_str((&s_cl[0 as usize]) as u64)
         actwire.ob_str(cp)
         actwire.ob_ch(10)
-        actwire.pub_msg(svc_evt, actwire.K_EVT, evt_seq, actwire.ob_ptr(),
-            actwire.ob_len())
-        evt_seq = evt_seq + 1
+        var s_cn: [u8; 19] = "bus.confirm_needed\0"
+        deliver((&s_cn[0 as usize]) as u64, actwire.NONE, true)
+        trusted_ask(ld(tp, TK_NO), cp, np, level_name(rlvl),
+            pl(ld(ac(act), AC_DESC)))
         return
     }
     // allowed
@@ -2531,7 +2653,23 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
                 (&r_err[0 as usize]) as u64, dry)
             return
         }
+        g_started = false
         let aok: bool = run_adapter(act, msg, dry, uid)
+        if g_started {
+            // AB-019: the program runs; the answer comes from aj_finish
+            let jp: u64 = aj(g_slot)
+            st(jp, AJ_PID, pid)
+            st(jp, AJ_ID, id)
+            st(jp, AJ_UID, uid)
+            st(jp, AJ_LVL, rlvl)
+            st(jp, AJ_UNDO, 0)
+            if undo {
+                st(jp, AJ_UNDO, 1)
+            }
+            copyz(jp + AJ_CLIENT, cp, 24)
+            st(ac(act), AC_CALLS, ld(ac(act), AC_CALLS) + 1)
+            return
+        }
         reply_ob(pid, id)
         if aok && !dry && !undo {
             // the manifest's inverse, without arguments (a wrapped program
@@ -2759,10 +2897,163 @@ fn on_event(s: u64) {
     if ld8(msg, e0) == 10 {
         actwire.ob_str(msg + e0 + 1)
     }
-    actwire.pub_msg(svc_evt, actwire.K_EVT, evt_seq, actwire.ob_ptr(),
-        actwire.ob_len())
-    evt_seq = evt_seq + 1
+    deliver(ac(ev) + AC_NAME, app, (ld(ac(ev), AC_FLAGS) & FL_PRIVATE) != 0)
     c_events = c_events + 1
+}
+
+// ============================================ AB-015: WHO HEARS WHICH EVENT
+//
+// Until round ACTION-BUS-5 the broker PUBLISHED every event on orient.evt
+// and the kernel handed it to whoever subscribed there: any app could
+// listen to every other app, and to `bus.confirm_needed`, which says who
+// wants to change what. Now nothing is published. A listener says
+// `subscribe [glob]` to the broker, and the broker SENDS each event into
+// that listener's reply box r.<pid> after a decision made for THAT event
+// and THAT listener:
+//
+//   * the user hears everything;
+//   * the broker's own events (`bus.*`: the questions to the person, the
+//     automations' runs) go to the user only;
+//   * an app hears its own events;
+//   * an event marked `private` in its manifest: nobody else;
+//   * everybody else hears an event like it would READ it: a deny rule
+//     for that client whose glob matches the event's name keeps it away
+//     (`act block jarvis notes.*` silences notes.changed for Jarvis too).
+//
+// The listener's client is the one the kernel attested when it subscribed
+// (AB-003); the rules are asked again for every event, so a block takes
+// effect at once, without a new subscription. A listener whose box is
+// gone is dropped. orient.evt stays registered by the broker, so nobody
+// else can hold the name; it carries nothing any more.
+const SB_MAX: u64 = 16
+const SB_B: u64 = 104
+const SB_USED: u64 = 0
+const SB_PID: u64 = 8
+const SB_USER: u64 = 16 // 1 = the listener is the user
+const SB_N: u64 = 24 // events it got
+const SB_CLIENT: u64 = 32 // 24 octets
+const SB_GLOB: u64 = 56 // 48 octets
+static mut subs: [u8; 1664] = [0 as u8; 1664]
+static mut c_withheld: u64 = 0 // events a listener did not get (AB-015)
+static mut c_subs: u64 = 0
+
+fn sb(i: u64) -> u64 {
+    return (&subs[0 as usize]) as u64 + i * SB_B
+}
+
+// may this listener hear event `name` of app `app` (NONE = the broker)?
+fn ev_allowed(sp: u64, name: u64, app: u64, private: bool) -> bool {
+    if ld(sp, SB_USER) != 0 {
+        return true
+    }
+    if app == actwire.NONE {
+        return false // bus.*: the user only
+    }
+    // the app itself: client `app:<name>`
+    let c: u64 = sp + SB_CLIENT
+    if ld8(c, 0) == 97 && ld8(c, 1) == 112 && ld8(c, 2) == 112 && ld8(c, 3) == 58
+        && actwire.str_eq(c + 4, ap(app) + AP_NAME) {
+        return true
+    }
+    if private {
+        return false
+    }
+    return decide_named(c, name, L_READ, false) != D_DENY
+}
+
+// the message is in actwire's output buffer
+fn deliver(name: u64, app: u64, private: bool) {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    var i: u64 = 0
+    while i < SB_MAX {
+        let sp: u64 = sb(i)
+        if ld(sp, SB_USED) != 0 && glob_match(sp + SB_GLOB, name) {
+            if !ev_allowed(sp, name, app, private) {
+                c_withheld = c_withheld + 1
+            } else {
+                actwire.name_of((&pre[0 as usize]) as u64, ld(sp, SB_PID), np)
+                let svc: u64 = actwire.bus_find(np)
+                if ulib.bad(svc) || ulib.bad(actwire.send_msg(svc, actwire.K_EVT,
+                    evt_seq, actwire.ob_ptr(), actwire.ob_len())) {
+                    st(sp, SB_USED, 0) // the listener is gone
+                } else {
+                    st(sp, SB_N, ld(sp, SB_N) + 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    evt_seq = evt_seq + 1
+}
+
+// subscribe [glob] | unsubscribe
+fn do_subscribe(msg: u64, pid: u64, uid: u64, id: u64, on: bool) {
+    var slot: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < SB_MAX {
+        let sp: u64 = sb(i)
+        if ld(sp, SB_USED) != 0 && ld(sp, SB_PID) == pid {
+            if on {
+                slot = i
+            } else {
+                st(sp, SB_USED, 0)
+            }
+        }
+        i = i + 1
+    }
+    var s_ok: [u8; 4] = "ok\n\0"
+    if !on {
+        reply(pid, id, (&s_ok[0 as usize]) as u64, 3)
+        return
+    }
+    i = 0
+    while i < SB_MAX && slot == actwire.NONE {
+        if ld(sb(i), SB_USED) == 0 {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot == actwire.NONE {
+        var e: [u8; 15] = "subscribe_full\0"
+        reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    var w: [u8; 16] = [0 as u8; 16]
+    var g: [u8; 48] = [0 as u8; 48]
+    let gp: u64 = (&g[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, (&w[0 as usize]) as u64, 16)
+    actwire.word_copy(msg, nx, gp, 48)
+    if ld8(gp, 0) == 0 || ld8(gp, 0) == 64 {
+        st8(gp, 0, 42) // "*"
+        st8(gp, 1, 0)
+    }
+    let sp: u64 = sb(slot)
+    st(sp, SB_USED, 1)
+    st(sp, SB_PID, pid)
+    st(sp, SB_N, 0)
+    st(sp, SB_USER, 0)
+    if is_user(msg, uid) {
+        st(sp, SB_USER, 1)
+    }
+    copyz(sp + SB_CLIENT, (&g_client[0 as usize]) as u64, 24)
+    copyz(sp + SB_GLOB, gp, 48)
+    c_subs = c_subs + 1
+    var s_s: [u8; 15] = "ok\nsubscribed=\0"
+    var s_c: [u8; 9] = "\nclient=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_s[0 as usize]) as u64)
+    actwire.ob_str(gp)
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_str(sp + SB_CLIENT)
+    actwire.ob_ch(10)
+    reply_ob(pid, id)
+    var s_v: [u8; 10] = "subscribe\0"
+    var r_ok: [u8; 3] = "ok\0"
+    audit_lazy = true
+    audit(pid, uid, sp + SB_CLIENT, (&s_v[0 as usize]) as u64, gp,
+        (&s_allow[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false)
 }
 
 // ================================================== the other verbs
@@ -3088,6 +3379,14 @@ fn do_stat(pid: u64, id: u64) {
     stat_line((&k19[0 as usize]) as u64, setschema.count())
     var k20: [u8; 15] = "dry_run_first=\0"
     stat_line((&k20[0 as usize]) as u64, c_dryfirst)
+    var k21: [u8; 17] = "events_withheld=\0"
+    stat_line((&k21[0 as usize]) as u64, c_withheld)
+    var k22: [u8; 15] = "subscriptions=\0"
+    stat_line((&k22[0 as usize]) as u64, c_subs)
+    var k23: [u8; 18] = "adapters_at_once=\0"
+    stat_line((&k23[0 as usize]) as u64, aj_peak)
+    var k24: [u8; 17] = "trusted_dialogs=\0"
+    stat_line((&k24[0 as usize]) as u64, c_trusted)
     reply_ob(pid, id)
 }
 
@@ -3811,6 +4110,8 @@ fn on_request(s: u64) {
     var k_block: [u8; 6] = "block\0"
     var k_reload: [u8; 7] = "reload\0"
     var k_audit: [u8; 6] = "audit\0"
+    var k_sub: [u8; 10] = "subscribe\0"
+    var k_unsub: [u8; 12] = "unsubscribe\0"
     if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
         // the broker ends (shutdown, tests); only the user may say so
         if !is_user(msg, uid) {
@@ -3862,6 +4163,10 @@ fn on_request(s: u64) {
         do_reload(msg, pid, uid, id)
     } else if actwire.str_eq(vp, (&k_audit[0 as usize]) as u64) {
         do_audit(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_sub[0 as usize]) as u64) {
+        do_subscribe(msg, pid, uid, id, true)
+    } else if actwire.str_eq(vp, (&k_unsub[0 as usize]) as u64) {
+        do_subscribe(msg, pid, uid, id, false)
     } else {
         var e: [u8; 13] = "unknown_verb\0"
         reply_err(pid, id, (&e[0 as usize]) as u64, vp)
@@ -3869,6 +4174,157 @@ fn on_request(s: u64) {
 }
 
 // calls a provider never answered, confirmations nobody gave
+// ============================================ AB-004: THE TRUSTED DIALOG
+//
+// Every call an agent or an app parks is also put to the person in the
+// window server's own dialog (kernel/ui/wm.fi, sys.WM_TRUST): painted over every window,
+// answered with the real keyboard or mouse only. `act confirm` from the
+// user's shell stays -- it is the path without a screen -- and whichever
+// answers first wins: a token confirmed on the shell takes its dialog
+// off the screen, an expired token too.
+//
+// One dialog at a time (the window server holds one); the others wait
+// here, oldest first. The text is made when the call is parked, so the
+// dialog shows what the call was, not what the catalogue says later.
+// Without a window server (a guest with no screen) WM_TRUST fails and
+// the broker simply tries again later; nothing else changes.
+const WM_TRUST: u64 = 2129
+const TR_ASK: u64 = 0
+const TR_POLL: u64 = 1
+const TR_CANCEL: u64 = 2
+const TR_BYTES: u64 = 384
+static mut tr_text: [u8; 3072] = [0 as u8; 3072] // TOK_MAX x TR_BYTES
+static mut tr_up: u64 = 0 // the token number on the screen, 0 = none
+static mut tr_retry: u64 = 0 // ticks: no screen, try again from then
+static mut c_trusted: u64 = 0 // calls answered in the dialog
+
+fn trt(i: u64) -> u64 {
+    return (&tr_text[0 as usize]) as u64 + i * TR_BYTES
+}
+
+fn tk_by_no(no: u64) -> u64 {
+    var i: u64 = 0
+    while i < TOK_MAX {
+        if ld(tk(i), TK_USED) != 0 && ld(tk(i), TK_NO) == no {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64) {
+    let t: u64 = tk_by_no(no)
+    if t == actwire.NONE {
+        return
+    }
+    // the slot may hold the text of an earlier token that was answered on
+    // the shell or expired: a new token starts without one
+    st8(trt(t), 0, 0)
+    // the person's OWN request (the settings window, `act` on their
+    // shell) is answered where it was made; the dialog is for what an
+    // agent or an app asks -- the case where a fake "yes" is the danger
+    if actwire.str_eq(cp, (&s_user[0 as usize]) as u64) {
+        return
+    }
+    var s1: [u8; 17] = " will ausfuehren\0"
+    var s2: [u8; 11] = "\n  Aktion \0"
+    var s3: [u8; 11] = "   Stufe: \0"
+    var s4: [u8; 3] = "\n\n\0"
+    var s5: [u8; 15] = "\n\nAnfrage Nr. \0"
+    var s6: [u8; 31] = " -- verfaellt nach 60 Sekunden\0"
+    actwire.ob_reset()
+    actwire.ob_str(cp)
+    actwire.ob_str((&s1[0 as usize]) as u64)
+    actwire.ob_str((&s2[0 as usize]) as u64)
+    actwire.ob_str(np)
+    actwire.ob_str((&s3[0 as usize]) as u64)
+    actwire.ob_str(lvl)
+    if desc != 0 && ld8(desc, 0) != 0 {
+        actwire.ob_str((&s4[0 as usize]) as u64)
+        actwire.ob_str(desc)
+    }
+    actwire.ob_str((&s5[0 as usize]) as u64)
+    actwire.ob_num(no)
+    actwire.ob_str((&s6[0 as usize]) as u64)
+    copyn(trt(t), actwire.ob_ptr(), actwire.ob_len(), TR_BYTES)
+    actwire.ob_reset()
+    trusted_poll()
+}
+
+// every turn of the serve loop: an answer? a token gone? the next one up?
+fn trusted_poll() {
+    if tr_up != 0 {
+        let t: u64 = tk_by_no(tr_up)
+        let r: u64 = ulib.sys4(WM_TRUST, TR_POLL, tr_up, 0, 0)
+        if t == actwire.NONE {
+            // confirmed on the shell, or expired
+            ulib.sys4(WM_TRUST, TR_CANCEL, tr_up, 0, 0)
+            tr_up = 0
+        } else if ulib.bad(r) || r == 3 {
+            tr_up = 0
+        } else if r == 1 || r == 2 {
+            tr_up = 0
+            trusted_apply(t, r == 1)
+        }
+    }
+    if tr_up != 0 || actwire.ticks() < tr_retry {
+        return
+    }
+    // the oldest parked call with a text
+    var best: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < TOK_MAX {
+        if ld(tk(i), TK_USED) != 0 && ld8(trt(i), 0) != 0 {
+            if best == actwire.NONE || ld(tk(i), TK_NO) < ld(tk(best), TK_NO) {
+                best = i
+            }
+        }
+        i = i + 1
+    }
+    if best == actwire.NONE {
+        return
+    }
+    let no: u64 = ld(tk(best), TK_NO)
+    let r2: u64 = ulib.sys4(WM_TRUST, TR_ASK, no, trt(best),
+        actwire.slen(trt(best)))
+    if ulib.bad(r2) {
+        tr_retry = actwire.ticks() + 100 // no screen yet, or busy
+        return
+    }
+    tr_up = no
+}
+
+// the person answered in the dialog: exactly what `act confirm` and
+// `act reject` do, with the user as the one who said it and nobody to
+// send the answer to (the caller learnt its number when it was parked)
+fn trusted_apply(t: u64, yes: bool) {
+    c_trusted = c_trusted + 1
+    st(tk(t), TK_USED, 0)
+    st8(trt(t), 0, 0)
+    let m: u64 = (&scratch[0 as usize]) as u64
+    copyn(m, tkmem(t), ld(tk(t), TK_LEN), 2048)
+    var nm: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&nm[0 as usize]) as u64
+    let n2: u64 = actwire.word_copy(m, 0, np, 40)
+    actwire.word_copy(m, n2, np, 40)
+    var s_dlg: [u8; 7] = "dialog\0"
+    var r_yes: [u8; 10] = "confirmed\0"
+    var r_no: [u8; 9] = "rejected\0"
+    if !yes {
+        tally(tk(t) + TK_CLIENT, TA_REFUSED)
+        audit(0, ld(tk(t), TK_UID), (&s_user[0 as usize]) as u64,
+            (&s_dlg[0 as usize]) as u64, np, (&s_deny[0 as usize]) as u64,
+            (&r_no[0 as usize]) as u64, false)
+        return
+    }
+    audit(0, ld(tk(t), TK_UID), (&s_user[0 as usize]) as u64,
+        (&s_dlg[0 as usize]) as u64, np, (&s_allow[0 as usize]) as u64,
+        (&r_yes[0 as usize]) as u64, false)
+    copyz((&g_client[0 as usize]) as u64, tk(t) + TK_CLIENT, 24)
+    do_call(m, 0, ld(tk(t), TK_UID), 0, true, false)
+}
+
 fn expire() {
     let now: u64 = actwire.ticks()
     var i: u64 = 0
@@ -3944,6 +4400,11 @@ fn do_reload(msg: u64, pid: u64, uid: u64, id: u64) {
         return
     }
     var i: u64 = 0
+    if aj_n > 0 {
+        var e_busy2: [u8; 5] = "busy\0"
+        reply_err(pid, id, (&e_busy2[0 as usize]) as u64, 0)
+        return
+    }
     while i < PEND_MAX {
         if ld(pe(i), PE_USED) != 0 {
             var e_busy: [u8; 5] = "busy\0"
@@ -4091,7 +4552,13 @@ fn serve(limit: u64) -> u64 {
         // AB-002: blocks in the kernel until a message comes, at most
         // 100 ms -- the timers below (expiring questions, the lazy
         // policy write) need a turn now and then
-        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        var wait: u64 = 100
+        if aj_n > 0 || tr_up != 0 {
+            wait = 10 // AB-019/AB-004: a program or a person may answer
+        }
+        let n: u64 = actwire.bus_wait(fp, mp, wait)
+        aj_poll()
+        trusted_poll()
         if !ulib.bad(n) && n > 0 {
             idle_since = 0
             let s: u64 = actwire.asm_feed(fp, mp)
