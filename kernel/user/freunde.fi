@@ -142,6 +142,66 @@ static mut k_beitreten: [u8; 18] = "freunde.beitreten\0"
 static mut k_annehmen: [u8; 17] = "freunde.annehmen\0"
 static mut k_ablehnen: [u8; 17] = "freunde.ablehnen\0"
 static mut k_einladung: [u8; 18] = "freunde.einladung\0"
+static mut k_t_online: [u8; 17] = "freunde.t_online\0"
+static mut k_t_alle: [u8; 15] = "freunde.t_alle\0"
+static mut k_t_aus: [u8; 14] = "freunde.t_aus\0"
+static mut k_t_add: [u8; 14] = "freunde.t_add\0"
+static mut k_zurueck: [u8; 16] = "freunde.zurueck\0"
+static mut k_suchen: [u8; 15] = "freunde.suchen\0"
+static mut k_anfrage: [u8; 16] = "freunde.anfrage\0"
+static mut k_will: [u8; 13] = "freunde.will\0"
+static mut k_gefragt: [u8; 16] = "freunde.gefragt\0"
+static mut k_keine: [u8; 14] = "freunde.keine\0"
+static mut k_niemand: [u8; 16] = "freunde.niemand\0"
+
+// ==================================================== RUNDE REITER
+//
+// THE FRIENDS VIEW LIKE DISCORD (Fleitec All-in-One r38): four tabs --
+// Online (who is there; who plays first, "Jetzt aktiv"), Alle, Ausstehend
+// (requests both ways, Annehmen / Ablehnen / Zurueckziehen) and
+// Hinzufuegen (search at every provider, send a request). Everything is
+// an action of the social service (social.contacts.*), whose provider it
+// is does not matter here: an id is always "account:peer".
+// The presence gets its colour from the THEME's roles (success, warning,
+// danger, secondary text) through the list's colour tiles -- this file
+// holds no colour value; the dot character stays, so the state is never
+// said by the colour alone.
+const T_ONLINE: u64 = 0
+const T_ALLE: u64 = 1
+const T_AUS: u64 = 2
+const T_ADD: u64 = 3
+const MAXP: u64 = 16
+static mut tab: u64 = 0
+static mut tab_arg: u64 = 99 // --tab N (the test stand), 99 = choose
+static mut i_tabs: u64 = NO_ITEM
+static mut tabtxt: [u8; 200] = [0 as u8; 200]
+static mut l_map: [u64; 32] = [0 as u64; 32] // row of the list -> friend
+static mut l_col: [u64; 32] = [0 as u64; 32] // its colour tile
+static mut l_n: u64 = 0
+// Ausstehend
+static mut p_name: [u8; 384] = [0 as u8; 384] // MAXP * NAMEMAX
+static mut p_id: [u8; 1536] = [0 as u8; 1536] // MAXP * IDMAX
+static mut p_out: [u64; 16] = [0 as u64; 16]
+static mut p_n: u64 = 0
+static mut p_in: u64 = 0 // how many came in (the tab's number)
+static mut p_sel: u64 = 0
+static mut pblob: [u8; 1536] = [0 as u8; 1536]
+static mut i_pliste: u64 = NO_ITEM
+static mut i_pleer: u64 = NO_ITEM
+static mut i_pja: u64 = NO_ITEM
+static mut i_pnein: u64 = NO_ITEM
+static mut i_pzur: u64 = NO_ITEM
+// Hinzufuegen
+static mut such: [u8; 64] = [0 as u8; 64]
+static mut s_name: [u8; 384] = [0 as u8; 384]
+static mut s_id: [u8; 1536] = [0 as u8; 1536]
+static mut s_n: u64 = 0
+static mut s_sel: u64 = 0
+static mut sblob: [u8; 1536] = [0 as u8; 1536]
+static mut i_such: u64 = NO_ITEM
+static mut i_suchen: u64 = NO_ITEM
+static mut i_sliste: u64 = NO_ITEM
+static mut i_sanfrage: u64 = NO_ITEM
 
 fn ld8(p: u64, i: u64) -> u64 {
     return (*((p + i) as *mut u8)) as u64
@@ -203,10 +263,45 @@ fn anhaengen_z(c: u64) {
 //     * Justin        spielt Certus
 //     . Anna          abwesend
 //
-fn list_build() {
-    blen = 0
+// the theme's colour of a presence (roles, never a number here)
+fn pres_farbe(z: u64) -> u64 {
+    if z == Z_DA {
+        return wlibc.theme(wlibc.C_SUCCESS)
+    }
+    if z == Z_BESCH {
+        return wlibc.theme(wlibc.C_DANGER)
+    }
+    if z == Z_GONE {
+        return wlibc.theme(wlibc.C_WARNING)
+    }
+    return wlibc.theme(wlibc.C_TITLEBAR_OFF_TEXT)
+}
+
+fn online_n() -> u64 {
+    var n: u64 = 0
     var i: u64 = 0
     while i < f_n {
+        if f_zustand[i as usize] != Z_OFF && f_zustand[i as usize] != Z_UNSICHT {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn list_build() {
+    blen = 0
+    l_n = 0
+    var i: u64 = 0
+    while i < f_n {
+        let z0: u64 = f_zustand[i as usize]
+        if tab == T_ONLINE && (z0 == Z_OFF || z0 == Z_UNSICHT) {
+            i = i + 1
+            continue
+        }
+        l_map[l_n as usize] = i
+        l_col[l_n as usize] = pres_farbe(z0)
+        l_n = l_n + 1
         anhaengen_z(point(f_zustand[i as usize]))
         anhaengen_z(32)
         if f_unread[i as usize] > 0 {
@@ -787,6 +882,265 @@ fn bus_unsichtbar(an: bool) -> bool {
     return bus_ask()
 }
 
+// ---------------------------------------------------- the tabs
+
+// "Online\nAlle\nAusstehend (2)\nHinzufuegen"
+fn tabtxt_bauen() {
+    let tp: u64 = (&tabtxt[0 as usize]) as u64
+    ulib.strncpy(tp, msg.get((&k_t_online[0 as usize]) as u64), 40)
+    var n: u64 = tlen(tp)
+    st8(tp, n, 10)
+    ulib.strncpy(tp + n + 1, msg.get((&k_t_alle[0 as usize]) as u64), 40)
+    n = tlen(tp)
+    st8(tp, n, 10)
+    ulib.strncpy(tp + n + 1, msg.get((&k_t_aus[0 as usize]) as u64), 40)
+    n = tlen(tp)
+    if p_in > 0 {
+        st8(tp, n, 32)
+        st8(tp, n + 1, 40)
+        let dn: u64 = ulib.digits(p_in, tp + n + 2)
+        st8(tp, n + 2 + dn, 41)
+        n = n + 3 + dn
+    }
+    st8(tp, n, 10)
+    ulib.strncpy(tp + n + 1, msg.get((&k_t_add[0 as usize]) as u64), 40)
+}
+
+// "account:id|relation|presence|name|..." lines of `rep` with the given
+// relation(s) into names/ids; returns how many
+fn rep_contacts(names: u64, ids: u64, outs: u64, want_rel: bool) -> u64 {
+    let rp: u64 = (&rep[0 as usize]) as u64
+    var n: u64 = 0
+    var at: u64 = 0
+    while at < rep_len && n < MAXP {
+        var e: u64 = at
+        while e < rep_len && ld8(rp, e) != 10 {
+            e = e + 1
+        }
+        var pfx: [u8; 9] = "contact.\0"
+        if ulib.strneq(rp + at, (&pfx[0 as usize]) as u64, 8) {
+            var v: u64 = at
+            while v < e && ld8(rp, v) != 61 {
+                v = v + 1
+            }
+            let fp: u64 = rp + v + 1
+            var rel: [u8; 16] = [0 as u8; 16]
+            feld(fp, rp + e, 1, (&rel[0 as usize]) as u64, 16)
+            // incoming "i", outgoing "o"
+            let r0: u8 = rel[0 as usize]
+            var nimm: bool = !want_rel
+            if want_rel && (r0 == 105 as u8 || r0 == 111 as u8) {
+                nimm = true
+            }
+            if nimm {
+                feld(fp, rp + e, 3, names + n * NAMEMAX, NAMEMAX)
+                if ld8(names + n * NAMEMAX, 0) == 0 {
+                    feld(fp, rp + e, 4, names + n * NAMEMAX, NAMEMAX)
+                }
+                feld(fp, rp + e, 0, ids + n * IDMAX, IDMAX)
+                if outs != 0 {
+                    var o: u64 = 0
+                    if r0 == 111 as u8 {
+                        o = 1
+                    }
+                    __mmio_write64((outs + n * 8) as *mut u64, o)
+                }
+                n = n + 1
+            }
+        }
+        at = e + 1
+    }
+    return n
+}
+
+// Ausstehend: the requests both ways, incoming first
+fn pending_load() {
+    var s_req: [u8; 39] = "call social.contacts.list\nfilter=all\n\0\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    p_n = 0
+    p_in = 0
+    if !bus_ask() {
+        return
+    }
+    p_n = rep_contacts((&p_name[0 as usize]) as u64, (&p_id[0 as usize]) as u64,
+        (&p_out[0 as usize]) as u64, true)
+    // incoming first (a stable pass: two rounds over a copy)
+    var k: u64 = 0
+    while k < p_n {
+        if p_out[k as usize] == 0 {
+            p_in = p_in + 1
+        }
+        k = k + 1
+    }
+    var tn: [u8; 384] = [0 as u8; 384]
+    var ti: [u8; 1536] = [0 as u8; 1536]
+    var to: [u64; 16] = [0 as u64; 16]
+    var m: u64 = 0
+    var pass: u64 = 0
+    while pass < 2 {
+        k = 0
+        while k < p_n {
+            if p_out[k as usize] == pass {
+                ulib.strncpy((&tn[0 as usize]) as u64 + m * NAMEMAX,
+                    (&p_name[0 as usize]) as u64 + k * NAMEMAX, NAMEMAX - 1)
+                ulib.strncpy((&ti[0 as usize]) as u64 + m * IDMAX,
+                    (&p_id[0 as usize]) as u64 + k * IDMAX, IDMAX - 1)
+                to[m as usize] = pass
+                m = m + 1
+            }
+            k = k + 1
+        }
+        pass = pass + 1
+    }
+    k = 0
+    while k < p_n {
+        ulib.strncpy((&p_name[0 as usize]) as u64 + k * NAMEMAX,
+            (&tn[0 as usize]) as u64 + k * NAMEMAX, NAMEMAX - 1)
+        ulib.strncpy((&p_id[0 as usize]) as u64 + k * IDMAX,
+            (&ti[0 as usize]) as u64 + k * IDMAX, IDMAX - 1)
+        p_out[k as usize] = to[k as usize]
+        k = k + 1
+    }
+    // the list: "name \t möchte befreundet sein | Anfrage gesendet"
+    let bp: u64 = (&pblob[0 as usize]) as u64
+    var b: u64 = 0
+    k = 0
+    while k < p_n && b < 1400 {
+        let np: u64 = (&p_name[0 as usize]) as u64 + k * NAMEMAX
+        ulib.strncpy(bp + b, np, NAMEMAX)
+        b = b + tlen(np)
+        st8(bp, b, 9)
+        b = b + 1
+        var wk: u64 = (&k_will[0 as usize]) as u64
+        if p_out[k as usize] != 0 {
+            wk = (&k_gefragt[0 as usize]) as u64
+        }
+        ulib.strncpy(bp + b, msg.get(wk), 60)
+        b = b + tlen(bp + b)
+        st8(bp, b, 10)
+        b = b + 1
+        k = k + 1
+    }
+    st8(bp, b, 0)
+    if p_sel >= p_n {
+        p_sel = 0
+    }
+}
+
+// Hinzufuegen: search every provider
+fn search_run() -> bool {
+    s_n = 0
+    st8((&sblob[0 as usize]) as u64, 0, 0)
+    if tlen((&such[0 as usize]) as u64) == 0 {
+        return false
+    }
+    var s_req: [u8; 29] = "call social.contacts.search\n\0"
+    var k_q: [u8; 6] = "query\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_req[0 as usize]) as u64)
+    ob_kv((&k_q[0 as usize]) as u64, (&such[0 as usize]) as u64)
+    if !bus_ask() {
+        return false
+    }
+    s_n = rep_contacts((&s_name[0 as usize]) as u64, (&s_id[0 as usize]) as u64,
+        0, false)
+    let bp: u64 = (&sblob[0 as usize]) as u64
+    var b: u64 = 0
+    var k: u64 = 0
+    while k < s_n && b < 1400 {
+        let np: u64 = (&s_name[0 as usize]) as u64 + k * NAMEMAX
+        ulib.strncpy(bp + b, np, NAMEMAX)
+        b = b + tlen(np)
+        st8(bp, b, 9)
+        b = b + 1
+        // the second line: the account, so two providers stay apart
+        let ip: u64 = (&s_id[0 as usize]) as u64 + k * IDMAX
+        ulib.strncpy(bp + b, ip, 60)
+        b = b + tlen(bp + b)
+        st8(bp, b, 10)
+        b = b + 1
+        k = k + 1
+    }
+    st8(bp, b, 0)
+    s_sel = 0
+    return true
+}
+
+// social.contacts.<verb> id=<id>
+fn contact_act(verb: u64, id: u64) -> bool {
+    var s_c: [u8; 22] = "call social.contacts.\0"
+    var k_id: [u8; 3] = "id\0"
+    var nl: [u8; 2] = "\n\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_str(verb)
+    actwire.ob_str((&nl[0 as usize]) as u64)
+    ob_kv((&k_id[0 as usize]) as u64, id)
+    let ok: bool = bus_ask()
+    var m0: [u8; 10] = "freunde: \0"
+    ulib.say((&m0[0 as usize]) as u64)
+    ulib.say(verb)
+    var mid: [u8; 2] = " \0"
+    ulib.say((&mid[0 as usize]) as u64)
+    ulib.say(id)
+    var mo: [u8; 5] = " ok\n\0"
+    var mf: [u8; 7] = " nein\n\0"
+    if ok {
+        ulib.say((&mo[0 as usize]) as u64)
+    } else {
+        ulib.say((&mf[0 as usize]) as u64)
+    }
+    return ok
+}
+
+// which widgets the tab shows; the window lays itself out anew
+fn tab_zeigen() {
+    let liste: bool = tab == T_ONLINE || tab == T_ALLE
+    wlib.show(i_liste, liste)
+    wlib.show(i_chat, liste)
+    wlib.show(i_pliste, tab == T_AUS && p_n > 0)
+    wlib.show(i_pleer, tab == T_AUS && p_n == 0)
+    let in_sel: bool = p_n > 0 && p_out[p_sel as usize] == 0
+    wlib.show(i_pja, tab == T_AUS && in_sel)
+    wlib.show(i_pnein, tab == T_AUS && in_sel)
+    wlib.show(i_pzur, tab == T_AUS && p_n > 0 && !in_sel)
+    wlib.show(i_such, tab == T_ADD)
+    wlib.show(i_suchen, tab == T_ADD)
+    wlib.show(i_sliste, tab == T_ADD && s_n > 0)
+    wlib.show(i_sanfrage, tab == T_ADD && s_n > 0)
+    // the answers to an invite only while there is one
+    let einl: bool = ld8((&einl_id[0 as usize]) as u64, 0) != 0
+    wlib.show(i_einl, einl)
+    wlib.show(i_einl_ja, einl)
+    wlib.show(i_einl_nein, einl)
+    if liste {
+        list_build()
+        wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
+        wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
+    }
+    wlib.new_set()
+}
+
+fn tab_melden() {
+    var m1: [u8; 14] = "freunde: tab=\0"
+    ulib.say((&m1[0 as usize]) as u64)
+    ulib.sayn(tab)
+    var m2: [u8; 8] = " liste=\0"
+    ulib.say((&m2[0 as usize]) as u64)
+    ulib.sayn(l_n)
+    var m3: [u8; 13] = " ausstehend=\0"
+    ulib.say((&m3[0 as usize]) as u64)
+    ulib.sayn(p_n)
+    var m4: [u8; 6] = " ein=\0"
+    ulib.say((&m4[0 as usize]) as u64)
+    ulib.sayn(p_in)
+    var m5: [u8; 10] = " treffer=\0"
+    ulib.say((&m5[0 as usize]) as u64)
+    ulib.sayn(s_n)
+    ulib.nl()
+}
+
 // ==================================================== DIE OBERFLAECHE
 fn bauen() -> u64 {
     // Die Leiste steht rechts und ist schmal. 240 Bildpunkte breit,
@@ -804,10 +1158,36 @@ fn bauen() -> u64 {
         return 0
     }
     i_titel = wlib.label(msg.get((&k_titel[0 as usize]) as u64))
+    // the tab the view starts on: Online when somebody is there, else
+    // Alle (the web page's friends view does the same)
+    if tab_arg <= T_ADD {
+        tab = tab_arg
+    } else if online_n() > 0 {
+        tab = T_ONLINE
+    } else {
+        tab = T_ALLE
+    }
+    tabtxt_bauen()
+    i_tabs = wlib.tabs((&tabtxt[0 as usize]) as u64)
+    wlib.set_value(i_tabs, tab)
     list_build()
     i_liste = wlib.list((&blob[0 as usize]) as u64, 12)
     wlib.list_zwei(i_liste, true)
+    wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
     i_chat = wlib.button(msg.get((&k_chat[0 as usize]) as u64))
+    // Ausstehend
+    i_pleer = wlib.label(msg.get((&k_keine[0 as usize]) as u64))
+    i_pliste = wlib.list((&pblob[0 as usize]) as u64, 8)
+    wlib.list_zwei(i_pliste, true)
+    i_pja = wlib.button(msg.get((&k_annehmen[0 as usize]) as u64))
+    i_pnein = wlib.button(msg.get((&k_ablehnen[0 as usize]) as u64))
+    i_pzur = wlib.button(msg.get((&k_zurueck[0 as usize]) as u64))
+    // Hinzufuegen
+    i_such = wlib.entry((&such[0 as usize]) as u64, 60)
+    i_suchen = wlib.button(msg.get((&k_suchen[0 as usize]) as u64))
+    i_sliste = wlib.list((&sblob[0 as usize]) as u64, 8)
+    wlib.list_zwei(i_sliste, true)
+    i_sanfrage = wlib.button(msg.get((&k_anfrage[0 as usize]) as u64))
     i_unsicht = wlib.check(msg.get((&k_unsicht[0 as usize]) as u64),
         unsicht != 0)
     // RUNDE CHAT: an invite that came in, with its two answers
@@ -876,6 +1256,13 @@ fn u_start(args: u64) -> u64 {
     var a_sende: [u8; 8] = "--sende\0"
     var chat_auf: u64 = NO_ITEM
     var sende: u64 = 0
+    var a_tab: [u8; 6] = "--tab\0"
+    var a_annehmen: [u8; 11] = "--annehmen\0"
+    var a_suche: [u8; 8] = "--suche\0"
+    var a_anfrage: [u8; 10] = "--anfrage\0"
+    var annehmen: u64 = NO_ITEM
+    var suche: u64 = 0
+    var anfrage: u64 = NO_ITEM
     while i < argc {
         let a: u64 = ulib.arg_at(args, i)
         if ulib.streq(a, (&a_rahmen[0 as usize]) as u64) && i + 1 < argc {
@@ -887,6 +1274,22 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(a, (&a_chat[0 as usize]) as u64) && i + 1 < argc {
             chat_auf = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_tab[0 as usize]) as u64) && i + 1 < argc {
+            tab_arg = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_annehmen[0 as usize]) as u64) && i + 1 < argc {
+            annehmen = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_suche[0 as usize]) as u64) && i + 1 < argc {
+            suche = ulib.arg_at(args, i + 1)
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_anfrage[0 as usize]) as u64) && i + 1 < argc {
+            anfrage = ulib.to_num(ulib.arg_at(args, i + 1))
             i = i + 1
         }
         if ulib.streq(a, (&a_sende[0 as usize]) as u64) && i + 1 < argc {
@@ -932,6 +1335,7 @@ fn u_start(args: u64) -> u64 {
         let _l: bool = bus_load()
         unread_load()
         invites_load()
+        pending_load()
     }
 
     if !wlib.begin(false, false) {
@@ -944,7 +1348,38 @@ fn u_start(args: u64) -> u64 {
         sag((&e2[0 as usize]) as u64)
         return 1
     }
+    // the test stand: answer a request, search, ask
+    if quelle_bus && annehmen < p_n {
+        var va: [u8; 7] = "accept\0"
+        if contact_act((&va[0 as usize]) as u64,
+            (&p_id[0 as usize]) as u64 + annehmen * IDMAX) {
+            let _l2: bool = bus_load()
+            pending_load()
+        }
+    }
+    if quelle_bus && suche != 0 {
+        ulib.strncpy((&such[0 as usize]) as u64, suche, 60)
+        let _s: bool = search_run()
+        if anfrage < s_n {
+            var vr: [u8; 8] = "request\0"
+            if contact_act((&vr[0 as usize]) as u64,
+                (&s_id[0 as usize]) as u64 + anfrage * IDMAX) {
+                pending_load()
+            }
+        }
+        wlib.set_text(i_such, (&such[0 as usize]) as u64)
+        wlib.set_text(i_sliste, (&sblob[0 as usize]) as u64)
+    }
+    if angemeldet != 0 {
+        tabtxt_bauen()
+        wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
+        wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
+        tab_zeigen()
+    }
     wlib.draw_all()
+    if angemeldet != 0 {
+        tab_melden()
+    }
 
     // Was die Abnahme liest. Zahlen und keine Prosa.
     var m1: [u8; 20] = "freunde: eintraege=\0"
@@ -997,7 +1432,17 @@ fn u_start(args: u64) -> u64 {
             if bus_load() {
                 unread_load()
                 invites_load()
+                let pin: u64 = p_in
+                let pn0: u64 = p_n
+                pending_load()
+                if p_in != pin || p_n != pn0 {
+                    tabtxt_bauen()
+                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
+                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
+                    tab_zeigen()
+                }
                 wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
+                tab_zeigen()
                 if cw != 0 && !wlib.closed(cw) {
                     let vor: u64 = chat_n
                     if verlauf_load() && chat_n != vor {
@@ -1006,6 +1451,7 @@ fn u_start(args: u64) -> u64 {
                 }
                 list_build()
                 wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
+                wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
                 if f_n != alt || blen != altb {
                     var m5: [u8; 20] = "freunde: eintraege=\0"
                     ulib.say((&m5[0 as usize]) as u64)
@@ -1022,13 +1468,70 @@ fn u_start(args: u64) -> u64 {
             let art: u64 = wlib.fired_kind()
             if art == wlib.K_LIST && id == i_liste {
                 let z: u64 = wlib.fired_index()
-                if z < f_n {
-                    chat_open(z)
+                if z < l_n {
+                    chat_open(l_map[z as usize])
                 }
             }
             if art == wlib.K_BUTTON && id == i_chat {
-                if f_n > 0 {
-                    chat_open(0)
+                if l_n > 0 {
+                    chat_open(l_map[0 as usize])
+                }
+            }
+            if art == wlib.K_TABS && id == i_tabs {
+                tab = wlib.fired_index()
+                tab_zeigen()
+                tab_melden()
+            }
+            if art == wlib.K_LIST && id == i_pliste {
+                let pz: u64 = wlib.fired_index()
+                if pz < p_n {
+                    p_sel = pz
+                    tab_zeigen()
+                }
+            }
+            if art == wlib.K_LIST && id == i_sliste {
+                let sz: u64 = wlib.fired_index()
+                if sz < s_n {
+                    s_sel = sz
+                }
+            }
+            if art == wlib.K_BUTTON && (id == i_pja || id == i_pnein || id == i_pzur)
+                && quelle_bus && p_sel < p_n {
+                var v_a: [u8; 7] = "accept\0"
+                var v_d: [u8; 8] = "decline\0"
+                var v_w: [u8; 9] = "withdraw\0"
+                var vb: u64 = (&v_a[0 as usize]) as u64
+                if id == i_pnein {
+                    vb = (&v_d[0 as usize]) as u64
+                }
+                if id == i_pzur {
+                    vb = (&v_w[0 as usize]) as u64
+                }
+                if contact_act(vb, (&p_id[0 as usize]) as u64 + p_sel * IDMAX) {
+                    let _b2: bool = bus_load()
+                    pending_load()
+                    tabtxt_bauen()
+                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
+                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
+                    tab_zeigen()
+                    tab_melden()
+                }
+            }
+            if (art == wlib.K_BUTTON && id == i_suchen || id == i_such) && quelle_bus {
+                let _r: bool = search_run()
+                wlib.set_text(i_sliste, (&sblob[0 as usize]) as u64)
+                tab_zeigen()
+                tab_melden()
+            }
+            if art == wlib.K_BUTTON && id == i_sanfrage && quelle_bus && s_sel < s_n {
+                var v_r: [u8; 8] = "request\0"
+                if contact_act((&v_r[0 as usize]) as u64,
+                    (&s_id[0 as usize]) as u64 + s_sel * IDMAX) {
+                    pending_load()
+                    tabtxt_bauen()
+                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
+                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
+                    tab_melden()
                 }
             }
             if art == wlib.K_CHECK && id == i_unsicht {
@@ -1079,6 +1582,7 @@ fn u_start(args: u64) -> u64 {
                 let _a: bool = invite_answer(id == i_einl_ja)
                 invites_load()
                 wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
+                tab_zeigen()
             }
         }
     }
