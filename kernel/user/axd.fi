@@ -1,0 +1,620 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/axd.fi -- ROUND A11Y-2 (AB-021): THE ACCESSIBILITY TREE ON
+// THE ACTION BUS.
+//
+// The tree of every window (kernel/ui/ax.fi) is read and operated HERE,
+// through the bus, and not through a side door: whoever wants to read the
+// screen or press a control asks orient-bus, and then the bus rules hold
+// for it like for every other app -- policy allow/deny, `act grant`, the
+// audit log, the dry run Jarvis must do first (`dryfirst jarvis`).
+//
+//   a11y.tree    the nodes: role, place, state, name, bus action
+//   a11y.find    the nodes of one role and/or with one name
+//   a11y.press   press a button or check box by its name or bus action
+//   a11y.status  numbers about the tree (no content)
+//
+// THE RIGHTS, and why the manifest (etc/actions.d/a11y.actions) declares
+// `a11y.tree` and `a11y.find` as WRITE although they change nothing: the
+// bus lets every client READ without asking (docs/ACTION-BUS.md 5.1), and
+// the tree is everything on the screen -- every label, list row and field
+// text of every window. A read level would hand that to any app. On the
+// write level the user reads freely, every other client (an app, Jarvis,
+// a script) needs a grant (`allow jarvis a11y.tree write`) or is asked.
+// `a11y.status` is only numbers and stays a read.
+//
+// THE KERNEL RIGHT behind it: axd runs as root and grants ITSELF P_READ |
+// P_ACT at start (AX_PERM, root only). The right falls at exec, so it is
+// axd's alone; a program axd might run never has it.
+//
+// RECORDING STARTS WITH THE FIRST QUESTION. axd switches the kernel's
+// recording on (AX_SET C_ON) only when the first a11y.tree / find / press
+// arrives, and gives the apps a moment to push (they look every 64
+// frames). Until somebody asks, no program builds or sends a tree -- a
+// session nobody reads pays nothing. (`a11y` on the command line
+// switches it on from boot.)
+//
+//   axd serve [ticks]
+
+profile kernel
+
+import ulib
+import actwire
+
+export { u_start }
+
+const AX_READ: u64 = 1911
+const AX_PERM: u64 = 1913
+const AX_INFO: u64 = 1914
+const AX_SET: u64 = 1915
+const AX_PRESS: u64 = 1916
+const NODE_BYTES: u64 = 96
+const MAXN: u64 = 224
+const AI_COUNT: u64 = 0
+const AI_GEN: u64 = 1
+const AI_READS: u64 = 3
+const AI_DENIED: u64 = 4
+const AI_SECRETS: u64 = 5
+const AI_LEAKS: u64 = 6
+const AI_ON: u64 = 12
+const AI_FOREIGN: u64 = 13
+const AI_PRESSES: u64 = 14
+const AI_REFUSED: u64 = 15
+const S_ENABLED: u64 = 1
+const S_FOCUSABLE: u64 = 2
+const S_FOCUSED: u64 = 4
+const S_SELECTED: u64 = 8
+const S_HIDDEN: u64 = 16
+const S_CHECKED: u64 = 32
+const S_PROTECTED: u64 = 64
+const REPLY_MAX: u64 = 1900 // the broker reassembles 2047 octets
+
+static mut nodes: [u8; 21504] = [0 as u8; 21504] // MAXN * NODE_BYTES
+static mut n_nodes: u64 = 0
+static mut gen_read: u64 = 0
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut recording: u64 = 0
+static mut roles: [u8; 204] = "none\0\0\0\0\0\0\0\0window\0\0\0\0\0\0label\0\0\0\0\0\0\0button\0\0\0\0\0\0check\0\0\0\0\0\0\0entry\0\0\0\0\0\0\0password\0\0\0\0list\0\0\0\0\0\0\0\0table\0\0\0\0\0\0\0tab\0\0\0\0\0\0\0\0\0menubar\0\0\0\0\0choice\0\0\0\0\0\0separator\0\0\0scrollbar\0\0\0menu\0\0\0\0\0\0\0\0dialog\0\0\0\0\0\0slider\0\0\0\0\0\0"
+
+fn role_name(r: u64) -> u64 {
+    var k: u64 = r
+    if k > 16 {
+        k = 0
+    }
+    return (&roles[0 as usize]) as u64 + k * 12
+}
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn nd(i: u64) -> u64 {
+    return (&nodes[0 as usize]) as u64 + i * NODE_BYTES
+}
+
+fn w0(i: u64) -> u64 {
+    return *((nd(i)) as *mut u64)
+}
+
+fn role(i: u64) -> u64 {
+    return w0(i) & 0xFF
+}
+
+fn flags(i: u64) -> u64 {
+    return (w0(i) >> 8) & 0xFF
+}
+
+fn win(i: u64) -> u64 {
+    return (w0(i) >> 16) & 0xFF
+}
+
+fn task(i: u64) -> u64 {
+    return (w0(i) >> 32) & 0xFF
+}
+
+fn is_window(i: u64) -> bool {
+    let r: u64 = role(i)
+    return r == 1 || r == 14 || r == 15
+}
+
+// Read the whole store, consistent: the generation before and after
+// must agree, else once more (at most four tries).
+fn load() -> bool {
+    var tries: u64 = 0
+    while tries < 4 {
+        let g0: u64 = ulib.sys(AX_INFO, AI_GEN, 0, 0)
+        var n: u64 = ulib.sys(AX_INFO, AI_COUNT, 0, 0)
+        if ulib.bad(n) {
+            return false
+        }
+        if n > MAXN {
+            n = MAXN
+        }
+        var i: u64 = 0
+        var ok: bool = true
+        while i < n && ok {
+            if ulib.bad(ulib.sys(AX_READ, i, nd(i), NODE_BYTES)) {
+                ok = false
+            }
+            i = i + 1
+        }
+        if ok && ulib.sys(AX_INFO, AI_GEN, 0, 0) == g0 {
+            n_nodes = n
+            gen_read = g0
+            return true
+        }
+        tries = tries + 1
+    }
+    return false
+}
+
+// the window node of node i (same task, same ring-3 window number)
+fn window_of(i: u64) -> u64 {
+    var k: u64 = 0
+    while k < n_nodes {
+        if is_window(k) && task(k) == task(i) && win(k) == win(i) {
+            return k
+        }
+        k = k + 1
+    }
+    return MAXN
+}
+
+// does the name of node i equal / contain p
+fn name_is(i: u64, p: u64, whole: bool) -> bool {
+    let a: u64 = nd(i) + 24
+    if !whole {
+        return contains(a, p)
+    }
+    return actwire.str_eq(a, p)
+}
+
+fn act_is(i: u64, p: u64) -> bool {
+    return actwire.str_eq(nd(i) + 64, p)
+}
+
+fn contains(hay: u64, nee: u64) -> bool {
+    if *((nee) as *mut u8) == 0 as u8 {
+        return true
+    }
+    var i: u64 = 0
+    while *((hay + i) as *mut u8) != 0 as u8 {
+        var k: u64 = 0
+        var same: bool = true
+        while same && *((nee + k) as *mut u8) != 0 as u8 {
+            if *((hay + i + k) as *mut u8) != *((nee + k) as *mut u8) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn in_window(i: u64, wsel: u64) -> bool {
+    if *((wsel) as *mut u8) == 0 as u8 {
+        return true
+    }
+    let w: u64 = window_of(i)
+    if w >= MAXN {
+        return false
+    }
+    return contains(nd(w) + 24, wsel)
+}
+
+fn flag_word(f: u64, bit: u64, name: u64, first: bool) -> bool {
+    if (f & bit) == 0 {
+        return first
+    }
+    if !first {
+        actwire.ob_ch(44)
+    }
+    actwire.ob_str(name)
+    return false
+}
+
+// One node as one line. The value of a protected node never goes out:
+// the kernel has it as 0 anyway, and "0" would still say "a number".
+fn line(i: u64) {
+    var s_n: [u8; 6] = "node.\0"
+    var s_st: [u8; 2] = " \0"
+    var s_q: [u8; 3] = " \"\0"
+    var s_a: [u8; 6] = " act=\0"
+    var s_v: [u8; 8] = " value=\0"
+    var s_w: [u8; 5] = " win\0"
+    var f_en: [u8; 8] = "enabled\0"
+    var f_fo: [u8; 10] = "focusable\0"
+    var f_fd: [u8; 8] = "focused\0"
+    var f_se: [u8; 9] = "selected\0"
+    var f_hi: [u8; 7] = "hidden\0"
+    var f_ch: [u8; 8] = "checked\0"
+    var f_pr: [u8; 10] = "protected\0"
+    let p: u64 = nd(i)
+    let w1: u64 = *((p + 8) as *mut u64)
+    actwire.ob_str((&s_n[0 as usize]) as u64)
+    actwire.ob_num(i)
+    actwire.ob_ch(61)
+    actwire.ob_str(role_name(role(i)))
+    actwire.ob_str((&s_w[0 as usize]) as u64)
+    actwire.ob_num(task(i) * 100 + win(i))
+    actwire.ob_str((&s_st[0 as usize]) as u64)
+    actwire.ob_num(w1 & 0xFFFF)
+    actwire.ob_ch(44)
+    actwire.ob_num((w1 >> 16) & 0xFFFF)
+    actwire.ob_ch(32)
+    actwire.ob_num((w1 >> 32) & 0xFFFF)
+    actwire.ob_ch(120)
+    actwire.ob_num((w1 >> 48) & 0xFFFF)
+    actwire.ob_ch(32)
+    let f: u64 = flags(i)
+    var first: bool = true
+    first = flag_word(f, S_ENABLED, (&f_en[0 as usize]) as u64, first)
+    first = flag_word(f, S_FOCUSABLE, (&f_fo[0 as usize]) as u64, first)
+    first = flag_word(f, S_FOCUSED, (&f_fd[0 as usize]) as u64, first)
+    first = flag_word(f, S_SELECTED, (&f_se[0 as usize]) as u64, first)
+    first = flag_word(f, S_HIDDEN, (&f_hi[0 as usize]) as u64, first)
+    first = flag_word(f, S_CHECKED, (&f_ch[0 as usize]) as u64, first)
+    first = flag_word(f, S_PROTECTED, (&f_pr[0 as usize]) as u64, first)
+    if first {
+        actwire.ob_ch(45)
+    }
+    actwire.ob_str((&s_q[0 as usize]) as u64)
+    actwire.ob_str(p + 24)
+    actwire.ob_ch(34)
+    if *((p + 64) as *mut u8) != 0 as u8 {
+        actwire.ob_str((&s_a[0 as usize]) as u64)
+        actwire.ob_str(p + 64)
+    }
+    let r: u64 = role(i)
+    if (f & S_PROTECTED) == 0 && !is_window(i)
+        && (r == 4 || r == 7 || r == 8 || r == 9 || r == 11 || r == 16) {
+        actwire.ob_str((&s_v[0 as usize]) as u64)
+        actwire.ob_num(*((p + 16) as *mut u64))
+    }
+    actwire.ob_ch(10)
+}
+
+fn want_role(i: u64, rsel: u64) -> bool {
+    if *((rsel) as *mut u8) == 0 as u8 {
+        return true
+    }
+    return actwire.str_eq(role_name(role(i)), rsel)
+}
+
+// a11y.tree / a11y.find: the listing, at most REPLY_MAX octets. What
+// does not fit is said (`more_from=`), never cut silently.
+fn listing(wsel: u64, rsel: u64, nsel: u64, from: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_c: [u8; 7] = "count=\0"
+    var s_g: [u8; 5] = "gen=\0"
+    var s_m: [u8; 11] = "more_from=\0"
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&s_g[0 as usize]) as u64)
+    actwire.ob_num(gen_read)
+    actwire.ob_ch(10)
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < n_nodes {
+        if in_window(i, wsel) && want_role(i, rsel)
+            && name_is(i, nsel, false) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_num(count)
+    actwire.ob_ch(10)
+    i = from
+    while i < n_nodes {
+        if in_window(i, wsel) && want_role(i, rsel)
+            && name_is(i, nsel, false) {
+            if actwire.ob_len() > REPLY_MAX - 140 {
+                actwire.ob_str((&s_m[0 as usize]) as u64)
+                actwire.ob_num(i)
+                actwire.ob_ch(10)
+                return
+            }
+            line(i)
+        }
+        i = i + 1
+    }
+}
+
+fn err(p: u64) {
+    actwire.ob_reset()
+    actwire.ob_line(p)
+}
+
+// a11y.press: exactly one enabled button / check box with this name (or
+// this bus action), optionally in a window whose title contains `wsel`.
+fn press(nsel: u64, asel: u64, wsel: u64, dry: bool) {
+    var e_arg: [u8; 44] = "err missing_arg name or action is needed\0\0\0\0"
+    var e_none: [u8; 22] = "err no_such_control\0\0\0"
+    var e_amb: [u8; 21] = "err ambiguous count=\0"
+    if *((nsel) as *mut u8) == 0 as u8 && *((asel) as *mut u8) == 0 as u8 {
+        err((&e_arg[0 as usize]) as u64)
+        return
+    }
+    var hit: u64 = MAXN
+    var hits: u64 = 0
+    var i: u64 = 0
+    while i < n_nodes {
+        let r: u64 = role(i)
+        if (r == 3 || r == 4) && in_window(i, wsel) {
+            var m: bool = true
+            if *((nsel) as *mut u8) != 0 as u8 && !name_is(i, nsel, true) {
+                m = false
+            }
+            if *((asel) as *mut u8) != 0 as u8 && !act_is(i, asel) {
+                m = false
+            }
+            if m {
+                hits = hits + 1
+                hit = i
+            }
+        }
+        i = i + 1
+    }
+    if hits == 0 {
+        err((&e_none[0 as usize]) as u64)
+        return
+    }
+    if hits > 1 {
+        actwire.ob_reset()
+        actwire.ob_str((&e_amb[0 as usize]) as u64)
+        actwire.ob_num(hits)
+        actwire.ob_ch(10)
+        return
+    }
+    let wn: u64 = window_of(hit)
+    var s_would: [u8; 23] = "ok\ndry=1\nwould=press \"\0"
+    var s_in: [u8; 14] = "\" in window \"\0"
+    var s_ok: [u8; 23] = "ok\npressed=1\ncontrol=\"\0"
+    var s_win: [u8; 10] = "\nwindow=\"\0"
+    if dry {
+        actwire.ob_reset()
+        actwire.ob_str((&s_would[0 as usize]) as u64)
+        actwire.ob_str(nd(hit) + 24)
+        actwire.ob_str((&s_in[0 as usize]) as u64)
+        if wn < MAXN {
+            actwire.ob_str(nd(wn) + 24)
+        }
+        actwire.ob_ch(34)
+        actwire.ob_ch(10)
+        return
+    }
+    let rc: u64 = ulib.sys(AX_PRESS, hit, gen_read, 0)
+    if ulib.bad(rc) {
+        var e_ref: [u8; 27] = "err refused kernel_errno=\0\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e_ref[0 as usize]) as u64)
+        actwire.ob_num((~rc) + 1)
+        actwire.ob_ch(10)
+        return
+    }
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(nd(hit) + 24)
+    actwire.ob_ch(34)
+    actwire.ob_str((&s_win[0 as usize]) as u64)
+    if wn < MAXN {
+        actwire.ob_str(nd(wn) + 24)
+    }
+    actwire.ob_ch(34)
+    actwire.ob_ch(10)
+}
+
+fn status() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var k1: [u8; 7] = "nodes=\0"
+    var k2: [u8; 7] = "reads=\0"
+    var k3: [u8; 8] = "denied=\0"
+    var k4: [u8; 9] = "secrets=\0"
+    var k5: [u8; 7] = "leaks=\0"
+    var k6: [u8; 9] = "foreign=\0"
+    var k7: [u8; 9] = "presses=\0"
+    var k8: [u8; 9] = "refused=\0"
+    var k9: [u8; 4] = "on=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    kv((&k1[0 as usize]) as u64, AI_COUNT)
+    kv((&k2[0 as usize]) as u64, AI_READS)
+    kv((&k3[0 as usize]) as u64, AI_DENIED)
+    kv((&k4[0 as usize]) as u64, AI_SECRETS)
+    kv((&k5[0 as usize]) as u64, AI_LEAKS)
+    kv((&k6[0 as usize]) as u64, AI_FOREIGN)
+    kv((&k7[0 as usize]) as u64, AI_PRESSES)
+    kv((&k8[0 as usize]) as u64, AI_REFUSED)
+    kv((&k9[0 as usize]) as u64, AI_ON)
+}
+
+fn kv(k: u64, field: u64) {
+    actwire.ob_str(k)
+    actwire.ob_num(ulib.sys(AX_INFO, field, 0, 0))
+    actwire.ob_ch(10)
+}
+
+fn handle(msg: u64) {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var k_ping: [u8; 5] = "ping\0"
+    var a_tree: [u8; 10] = "a11y.tree\0"
+    var a_find: [u8; 10] = "a11y.find\0"
+    var a_press: [u8; 11] = "a11y.press\0"
+    var a_stat: [u8; 12] = "a11y.status\0"
+    var k_dry: [u8; 5] = "@dry\0"
+    var k_win: [u8; 7] = "window\0"
+    var k_role: [u8; 5] = "role\0"
+    var k_name: [u8; 5] = "name\0"
+    var k_act: [u8; 7] = "action\0"
+    var k_from: [u8; 5] = "from\0"
+    var e_load: [u8; 26] = "err tree_unavailable\0\0\0\0\0\0"
+    var e_unk: [u8; 19] = "err unknown_action\0"
+    var wsel: [u8; 40] = [0 as u8; 40]
+    var rsel: [u8; 16] = [0 as u8; 16]
+    var nsel: [u8; 40] = [0 as u8; 40]
+    var asel: [u8; 32] = [0 as u8; 32]
+    var fsel: [u8; 8] = [0 as u8; 8]
+    var dv: [u8; 4] = [0 as u8; 4]
+    let wp: u64 = (&wsel[0 as usize]) as u64
+    let rp: u64 = (&rsel[0 as usize]) as u64
+    let sp: u64 = (&nsel[0 as usize]) as u64
+    let ap: u64 = (&asel[0 as usize]) as u64
+    let fp: u64 = (&fsel[0 as usize]) as u64
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64,
+        (&dv[0 as usize]) as u64, 4) && dv[0 as usize] == 49 as u8
+    actwire.kv_find(msg, (&k_win[0 as usize]) as u64, wp, 40)
+    actwire.kv_find(msg, (&k_role[0 as usize]) as u64, rp, 16)
+    actwire.kv_find(msg, (&k_name[0 as usize]) as u64, sp, 40)
+    actwire.kv_find(msg, (&k_act[0 as usize]) as u64, ap, 32)
+    actwire.kv_find(msg, (&k_from[0 as usize]) as u64, fp, 8)
+    actwire.ob_reset()
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        var s_pong: [u8; 6] = "pong\n\0"
+        actwire.ob_str((&s_pong[0 as usize]) as u64)
+        return
+    }
+    if actwire.str_eq(np, (&a_stat[0 as usize]) as u64) {
+        status()
+        return
+    }
+    let is_tree: bool = actwire.str_eq(np, (&a_tree[0 as usize]) as u64)
+    let is_find: bool = actwire.str_eq(np, (&a_find[0 as usize]) as u64)
+    let is_press: bool = actwire.str_eq(np, (&a_press[0 as usize]) as u64)
+    if !is_tree && !is_find && !is_press {
+        err((&e_unk[0 as usize]) as u64)
+        return
+    }
+    if recording == 0 {
+        wake()
+    }
+    if !load() {
+        err((&e_load[0 as usize]) as u64)
+        return
+    }
+    var zero: [u8; 2] = [0 as u8; 2]
+    if is_tree {
+        listing(wp, (&zero[0 as usize]) as u64, (&zero[0 as usize]) as u64,
+            ulib.to_num(fp))
+        return
+    }
+    if is_find {
+        listing(wp, rp, sp, ulib.to_num(fp))
+        return
+    }
+    press(sp, ap, wp, dry)
+}
+
+// the first question: recording on, then wait until the pushes stop
+// arriving (at most one second)
+fn wake() {
+    recording = 1
+    if ulib.sys(AX_INFO, AI_ON, 0, 0) == 1 {
+        return
+    }
+    let _o: u64 = ulib.sys(AX_SET, 3, 1, 0)
+    let t0: u64 = actwire.ticks()
+    var last: u64 = ulib.sys(AX_INFO, 2, 0, 0)
+    var quiet: u64 = actwire.ticks()
+    while actwire.ticks() - t0 < 100 && actwire.ticks() - quiet < 30 {
+        actwire.yield_now()
+        let p: u64 = ulib.sys(AX_INFO, 2, 0, 0)
+        if p != last {
+            last = p
+            quiet = actwire.ticks()
+        }
+    }
+    var s_w: [u8; 22] = "axd: recording nodes=\0"
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(AX_INFO, AI_COUNT, 0, 0))
+    ulib.nl()
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_me: [u8; 7] = "a.a11y\0"
+    var s_ready: [u8; 36] = "axd: serving a.a11y rights=\0\0\0\0\0\0\0\0\0"
+    var s_on: [u8; 5] = " on=\0"
+    // 0xFFFF = "myself": root grants its own task both rights
+    let r: u64 = ulib.sys(AX_PERM, 1, 0xFFFF, 3)
+    let o: u64 = ulib.sys(AX_INFO, AI_ON, 0, 0)
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        var e: [u8; 22] = "axd: a.a11y is taken\0\0"
+        say((&e[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 24] = "axd: no orient.bus here\0"
+        say((&e2[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var s_hello: [u8; 12] = "hello a11y\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 11)
+    say((&s_ready[0 as usize]) as u64)
+    ulib.sayn(r)
+    say((&s_on[0 as usize]) as u64)
+    ulib.sayn(o)
+    ulib.nl()
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fpp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_wait(fpp, mp, 100)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fpp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id,
+                        actwire.ob_ptr(), actwire.ob_len())
+                }
+                actwire.asm_free(s)
+            }
+        } else if actwire.ticks() - last_check > 100 {
+            last_check = actwire.ticks()
+            if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                var s_by: [u8; 25] = "axd: orient-bus is gone\n\0"
+                say((&s_by[0 as usize]) as u64)
+                return 0
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var h: [u8; 25] = "usage: axd serve [ticks]\0"
+    var c_serve: [u8; 6] = "serve\0"
+    if ulib.arg_count(args) >= 2
+        && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if ulib.arg_count(args) >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    say((&h[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}

@@ -60,6 +60,7 @@ import drv.con.tty
 import gfx.gfx
 import utf8
 import sched.time
+import ui.ax
 
 export {
     irq, ghosts, on_code, translate, shifted, take, waiting,
@@ -68,7 +69,9 @@ export {
     super_down, hotkey_seq, hotkey_key, hotkey_ns,
     // RUNDE BLECHEINGABE: die drei Feststelltasten und ihre Lampen.
     locks, locks_dirty, locks_clean, locks_set,
-    LK_NUM, LK_CAPS, LK_SCROLL
+    LK_NUM, LK_CAPS, LK_SCROLL,
+    // ROUND A11Y-2 (S-008): sticky keys.
+    latched, sticks
 }
 
 // How many octets fit into the buffer in the data area.
@@ -199,7 +202,80 @@ fn lock_toggle(bit: u64) {
     lock_neu = 1
 }
 
+// ==================================================================
+// ROUND A11Y-2 (S-008) -- STICKY KEYS
+//
+// WHAT THEY SOLVE. Who cannot press Shift and a key at the same time --
+// one hand, a mouth stick, a tremor -- gets no capital letter, no Ctrl+C
+// and no Shift+Tab (so no way BACK through the controls). The old and
+// cheap answer: a modifier pressed and released ALONE latches and holds
+// for exactly the next key.
+//
+// WHY "ALONE". Otherwise every ordinary Shift+A would drag a second,
+// unwanted capital behind it -- the Shift key is released after it too.
+// `KB_SEEN` remembers whether another key came between press and release.
+//
+// WHERE. Here, in the keyboard, and NOT in the widget layer: it must
+// work in the shell as in a window, before any program runs. Switched by
+// `a11ysticky` or AX_SET(C_STICKY) (docs/A11Y.md 4.5).
+fn latched(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_LATCH)
+}
+
+fn sticks(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_STICKS)
+}
+
+fn mod_down(state: u64) {
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 0)
+}
+
+// A modifier went up. true = keep it held (it latched).
+fn mod_up(state: u64, bit: u64) -> bool {
+    if !ax.sticky(state) {
+        return false
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SEEN) != 0 {
+        return false
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LATCH,
+        latched(state) | bit)
+    kstate.add(state, kstate.K11_OFF + kstate.KB_STICKS, 1)
+    var s_l: [u8; 19] = "kbd: sticky latch=\0"
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(latched(state))
+    serial.nl()
+    return true
+}
+
+// The latched modifiers fall -- after EXACTLY ONE key.
+fn unlatch(state: u64) {
+    let l: u64 = latched(state)
+    if (l & 1) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+    }
+    if (l & 2) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+    }
+    if (l & 4) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 0)
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LATCH, 0)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 0)
+}
+
+// THE WRAPPER. `on_code_inner` has a few dozen return points; the
+// latched modifiers must fall after EVERY one of them once a real key
+// went through. A wrapper is the one form that cannot forget one.
 fn on_code(state: u64, code: u64) {
+    on_code_inner(state, code)
+    if latched(state) != 0
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_SEEN) != 0 {
+        unlatch(state)
+    }
+}
+
+fn on_code_inner(state: u64, code: u64) {
     // DIE DREI FESTSTELLTASTEN, VOR ALLEM ANDEREN. Sie erzeugen kein
     // Zeichen; sie legen einen Zustand um und lassen eine Lampe
     // nachziehen. Nur das DRUECKEN zaehlt (Loslassen ist Code + 0x80),
@@ -249,19 +325,25 @@ fn on_code(state: u64, code: u64) {
     }
     if code == 0x2A || code == 0x36 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 1)
+        mod_down(state)
         return
     }
     if code == 0xAA || code == 0xB6 {
-        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+        if !mod_up(state, 1) {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+        }
         return
     }
     if code == 0x1D {
         kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 1)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        mod_down(state)
         return
     }
     if code == 0x9D {
-        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+        if !mod_up(state, 2) {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+        }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
@@ -276,6 +358,7 @@ fn on_code(state: u64, code: u64) {
             kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 1)
         } else {
             kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 1)
+            mod_down(state)
         }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
@@ -284,7 +367,9 @@ fn on_code(state: u64, code: u64) {
         if ext == 1 {
             kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 0)
         } else {
-            kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 0)
+            if !mod_up(state, 4) {
+                kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 0)
+            }
         }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
@@ -350,6 +435,10 @@ fn on_code(state: u64, code: u64) {
     if code >= 0x80 {
         return
     }
+    // ROUND A11Y-2: A REAL KEY WENT THROUGH. A modifier still held no
+    // longer latches when it is released, and one already latched falls
+    // once this key is done (`on_code`, the wrapper).
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 1)
     // 26.09.2026 (Dell 9020): THE NUMERIC KEYPAD. Its keys arrive as the
     // plain (non-E0) codes 0x47..0x53 -- the same codes as the cursor
     // block WITH E0. Nothing here looked at the Num Lock state: the

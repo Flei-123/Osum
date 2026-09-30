@@ -263,7 +263,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd"}
+orientbus act settingsd axd"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1136,7 +1136,9 @@ ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/orientbus/policy=etc/orientbus/policy"
        "/etc/settings.schema=etc/settings.schema"
-       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
+       # A11Y-2 (AB-021): the accessibility tree on the bus, provider /bin/axd
+       "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
@@ -1240,6 +1242,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/init /etc/inittab /etc/ziel \
 /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
 /etc/settings.schema /etc/actions.d/settings.actions \
+/bin/axd /etc/actions.d/a11y.actions \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

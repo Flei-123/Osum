@@ -188,6 +188,10 @@ BEREICHE = [
     ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
     ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
     ("BLOCKK",     "kstate.fi", "BLOCKK_OFF",     "BLOCKK_MAX"),
+    # ROUND A11Y-2 (S-007): the accessibility tree. Six pages,
+    # 0x13E000..0x144000, allotted in advance by the wave of 18.09.2026
+    # (see kstate.fi at KDATA_SIZE) -- this round took exactly that.
+    ("AX",         "kstate.fi", "AX_OFF",         "AX_MAX"),
     # RUNDE FREMDLAND: die Tafel der Dateisperren.  Eine Seite, 64
     # Eintraege zu 48 Oktetten -- (Inode, Einhaengung, Bereich, Art,
     # Halter).  Sie liegt HINTER NAMEK, in den 0x1000 Oktetten, die

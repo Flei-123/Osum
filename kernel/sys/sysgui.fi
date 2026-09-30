@@ -56,11 +56,12 @@ import gfx.vmode
 import ui.wig
 import ui.wm
 import ui.wmplug
+import ui.ax
 import serial
 
 import sys.sys
 
-export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call }
+export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call }
 
 
 // The copy page of THIS system call: one page per core for ring 3 callers,
@@ -2592,4 +2593,316 @@ fn desk_anwenden(state: u64) {
         w = w + 1
     }
     wm.damage_all(state)
+}
+
+// ====================================================== ROUND A11Y-2
+//
+// THE SEVEN CALLS OF THE ACCESSIBILITY TREE (sys.AX_*, docs/A11Y.md 5).
+// The store is `kernel/ui/ax.fi`; every check that needs the window table
+// is HERE, next to the other window calls -- `ax.fi` cannot import the
+// window server, the window server imports it.
+fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if !ax.ready(state) {
+        return errno.neg(errno.E_NODEV)
+    }
+    if number == sys.AX_INFO {
+        return ax.info(state, a0)
+    }
+    if number == sys.AX_PUSH {
+        return ax_push(state, me, a0, a1)
+    }
+    if number == sys.AX_READ {
+        if !ax.allowed(state, me, ax.P_READ) {
+            ax.count_denied(state)
+            return errno.neg(errno.E_PERM)
+        }
+        if a0 >= ax.node_count(state) || a2 < ax.NODE_BYTES {
+            return errno.neg(errno.E_INVAL)
+        }
+        if !sys.copy_out(state, me, a1, ax.node_addr(state, a0),
+            ax.NODE_BYTES) {
+            return errno.neg(errno.E_FAULT)
+        }
+        ax.count_read(state)
+        return ax.NODE_BYTES
+    }
+    if number == sys.AX_EVENT {
+        if !ax.allowed(state, me, ax.P_READ) {
+            ax.count_denied(state)
+            return errno.neg(errno.E_PERM)
+        }
+        if a1 < ax.EV_BYTES {
+            return errno.neg(errno.E_INVAL)
+        }
+        let buf: u64 = blockb(state) + 3456
+        if ax.ev_pop(state, buf) == 0 {
+            return 0
+        }
+        if !sys.copy_out(state, me, a0, buf, ax.EV_BYTES) {
+            return errno.neg(errno.E_FAULT)
+        }
+        return ax.EV_BYTES
+    }
+    if number == sys.AX_PERM {
+        if a0 == sys.AP_MINE {
+            return ax.perm_of(state, me)
+        }
+        if a0 == sys.AP_COUNT {
+            return ax.granted(state)
+        }
+        // GIVING IS A HUMAN DECISION, taken by root: a reader sees every
+        // label and field on the screen, a presser can click in another
+        // program's window.
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return errno.neg(errno.E_PERM)
+        }
+        // task 0xFFFF = the caller itself (a root provider such as axd
+        // does not know its own task number)
+        var t: u64 = a1
+        if t == 0xFFFF {
+            t = me
+        }
+        if t >= kstate.MAX_TASKS {
+            return errno.neg(errno.E_INVAL)
+        }
+        if a0 == sys.AP_GRANT {
+            ax.allow(state, t, a2)
+            return ax.perm_of(state, t)
+        }
+        if a0 == sys.AP_REVOKE {
+            ax.deny(state, t, a2)
+            return ax.perm_of(state, t)
+        }
+        return errno.neg(errno.E_INVAL)
+    }
+    if number == sys.AX_SET {
+        // SYSTEM-WIDE MEANS: NOT ANYONE. Contrast, magnifier and sticky
+        // keys hold for every window; any program that could switch them
+        // could make everyone else's screen unusable.
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return errno.neg(errno.E_PERM)
+        }
+        if a0 == sys.AX_DUMP {
+            ax_dump(state)
+            return 0
+        }
+        if !ax.set_cfg(state, a0, a1) {
+            return errno.neg(errno.E_INVAL)
+        }
+        if a0 == ax.C_MAG || a0 == ax.C_HIGH {
+            wm.damage_all(state)
+            wm.compose(state)
+        }
+        return 0
+    }
+    if number == sys.AX_PRESS {
+        return ax_press(state, me, a0, a1)
+    }
+    return errno.neg(errno.E_NOSYS)
+}
+
+// NODES FROM RING 3, in exactly the packing of the store. At most 32 per
+// call (32 * 96 = 3072 octets of this core's copy page); more are sent in
+// several calls between the begin (0, 1) and the end (0, 0).
+//
+// PUSH ONLY FOR ONE'S OWN WINDOWS. A window node (R_WINDOW, R_DIALOG or
+// R_MENU) names
+// its window-server window by id in its value; the kernel looks it up and
+// maps the ring-3 window number to the slot ONLY if the caller owns it.
+// Every other node of an unmapped window is refused and counted
+// (AI_FOREIGN) -- a process cannot put nodes under another window.
+fn ax_push(state: u64, me: u64, ptr: u64, n: u64) -> u64 {
+    if ptr == 0 {
+        if n == 0 {
+            return ax.push_end(state, me)
+        }
+        if !ax.push_begin(state, me) {
+            return errno.neg(errno.E_AGAIN)
+        }
+        return 0
+    }
+    if n == 0 || n > 32 {
+        return errno.neg(errno.E_INVAL)
+    }
+    let block: u64 = blockb(state)
+    if !sys.copy_in(state, me, block, ptr, n * ax.NODE_BYTES) {
+        return errno.neg(errno.E_FAULT)
+    }
+    var k: u64 = 0
+    var taken: u64 = 0
+    while k < n {
+        let p: u64 = block + k * ax.NODE_BYTES
+        let w0: u64 = kstate.get(p, 0)
+        let w2: u64 = kstate.get(p, 16)
+        let role: u64 = w0 & 0xFF
+        if role == ax.R_WINDOW || role == ax.R_DIALOG || role == ax.R_MENU {
+            let slot: u64 = wm.by_id(state, w2)
+            if slot < wm.MAX_WIN && wm.win_owner(state, slot) == me {
+                ax.map_win(state, (w0 >> 16) & 0xFF, slot)
+            } else {
+                ax.map_win(state, (w0 >> 16) & 0xFF, 0xFFF)
+            }
+        }
+        taken = taken + ax.push_node(state, me, w0, kstate.get(p, 8), w2, p)
+        k = k + 1
+    }
+    return taken
+}
+
+// MAY THE TREE PRESS THIS CONTROL? The same spirit as `fwin_target` of
+// the foreign-window layer (AB-008b), for the controls of native apps:
+//
+//   * a button or a check box, enabled, visible, not protected;
+//   * the tree has not changed since the caller read it (`gen`) -- a
+//     press by number into a tree that moved could hit another control;
+//   * the window is still the one the node was pushed for, owned by the
+//     task that pushed it;
+//   * NOT while the screen is locked, NOT the desktop or a panel, NOT a
+//     terminal, NOT the caller's own window;
+//   * ONLY a window of an APP or a FOREIGN program: the owner's kernel
+//     label (AB-003) starts with `app:` or `compat:`. The user's own tools
+//     (settings, explorer, the login and lock screens -- no label) are
+//     never pressed: the settings window has the "Yes, change it" of a
+//     critical bus call, and an agent with a press grant must not be
+//     able to answer its own question.
+fn ax_press(state: u64, me: u64, n: u64, gen: u64) -> u64 {
+    if !ax.allowed(state, me, ax.P_ACT) {
+        ax.count_denied(state)
+        return errno.neg(errno.E_PERM)
+    }
+    if gen != ax.info(state, ax.AI_GEN) {
+        return errno.neg(errno.E_AGAIN)
+    }
+    if n >= ax.node_count(state) {
+        return errno.neg(errno.E_INVAL)
+    }
+    let role: u64 = ax.node_role(state, n)
+    let fl: u64 = ax.node_flags(state, n)
+    let slot: u64 = ax.node_slot(state, n)
+    let owner: u64 = ax.node_task(state, n)
+    var why: u64 = 0
+    if role != ax.R_BUTTON && role != ax.R_CHECK {
+        why = 1
+    } else if (fl & ax.S_ENABLED) == 0 || (fl & ax.S_HIDDEN) != 0
+        || (fl & ax.S_PROTECTED) != 0 {
+        why = 2
+    } else if !wm.valid(state, slot) || wm.win_owner(state, slot) != owner {
+        why = 3
+    } else if wm.sperre_an(state) {
+        why = 4
+    } else if wm.win_layer(state, slot) != wm.L_NORMAL
+        || wm.win_kind(state, slot) == wm.K_TERM {
+        why = 5
+    } else if owner == me {
+        why = 6
+    } else if !owner_app(state, owner) && !owner_foreign(state, owner) {
+        why = 7
+    }
+    var s_p: [u8; 16] = "ax: press node=\0"
+    var s_w: [u8; 6] = " wid=\0"
+    var s_s: [u8; 7] = " slot=\0"
+    var s_r: [u8; 9] = " refuse=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(ax.node_wid(state, n))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(slot)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(why)
+    serial.nl()
+    if why != 0 {
+        ax.count_refused(state)
+        return errno.neg(errno.E_ACCES)
+    }
+    wm.ev_push(state, slot, wm.E_AXPRESS, ax.node_wid(state, n), 0, 0)
+    ax.count_press(state)
+    return 0
+}
+
+fn owner_app(state: u64, t: u64) -> bool {
+    var want: [u8; 5] = "app:\0"
+    var i: u64 = 0
+    while i < 4 {
+        if origin.byte_at(state, t, i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// THE STORE ON THE SERIAL LINE (AX_SET 99, root). Not for convenience:
+// it is the one place where a test sees what is REALLY in the kernel
+// instead of what a ring-3 program says about it. A password node shows
+// here as well -- with the value 0 it was forced to on entry.
+fn ax_dump(state: u64) {
+    ax.say(state)
+    wm.say_mag(state)
+    var i: u64 = 0
+    while i < ax.node_count(state) {
+        var s_n: [u8; 10] = "ax: node \0"
+        var s_r: [u8; 7] = " role=\0"
+        var s_f: [u8; 8] = " state=\0"
+        var s_w: [u8; 6] = " win=\0"
+        var s_t: [u8; 7] = " task=\0"
+        var s_sl: [u8; 7] = " slot=\0"
+        var s_d: [u8; 6] = " wid=\0"
+        var s_x: [u8; 4] = " x=\0"
+        var s_y: [u8; 4] = " y=\0"
+        var s_ww: [u8; 4] = " w=\0"
+        var s_hh: [u8; 4] = " h=\0"
+        var s_v: [u8; 8] = " value=\0"
+        var s_a: [u8; 6] = " act=\0"
+        var s_na: [u8; 7] = " name=\0"
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(ax.node_role(state, i))
+        serial.puts((&s_f[0]) as u64)
+        serial.dec(ax.node_flags(state, i))
+        serial.puts((&s_w[0]) as u64)
+        serial.dec(ax.node_win(state, i))
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(ax.node_task(state, i))
+        serial.puts((&s_sl[0]) as u64)
+        serial.dec(ax.node_slot(state, i))
+        serial.puts((&s_d[0]) as u64)
+        serial.dec(ax.node_wid(state, i))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(ax.node_x(state, i))
+        serial.puts((&s_y[0]) as u64)
+        serial.dec(ax.node_y(state, i))
+        serial.puts((&s_ww[0]) as u64)
+        serial.dec(ax.node_w(state, i))
+        serial.puts((&s_hh[0]) as u64)
+        serial.dec(ax.node_h(state, i))
+        serial.puts((&s_v[0]) as u64)
+        serial.dec(ax.node_value(state, i))
+        serial.puts((&s_a[0]) as u64)
+        var k: u64 = 0
+        while k < ax.ACT_MAX {
+            let c: u64 = ax.node_act_at(state, i, k)
+            if c == 0 {
+                k = ax.ACT_MAX
+            } else {
+                serial.put(c as u8)
+                k = k + 1
+            }
+        }
+        serial.puts((&s_na[0]) as u64)
+        k = 0
+        while k < ax.NAME_MAX {
+            let c2: u64 = ax.node_name_at(state, i, k)
+            if c2 == 0 {
+                k = ax.NAME_MAX
+            } else {
+                serial.put(c2 as u8)
+                k = k + 1
+            }
+        }
+        serial.nl()
+        i = i + 1
+    }
 }

@@ -76,6 +76,9 @@ import fuib
 import icons
 
 export {
+    // ROUND A11Y-2: the accessibility tree (docs/A11Y.md).
+    ax_name, ax_action, ax_flush, ax_flushes, ax_last, ax_presses,
+    win_handle,
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
     trace, set_trace, set_menu_title, reshape, say_rects,
     win_w, win_h, win_x, win_y, win_cx, win_cy, win_hide, win_layer, win_fokus,
@@ -1584,6 +1587,7 @@ fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
     ns(i, N_OWNER, 0)
     ns(i, N_X, x)
     ns(i, N_Y, y)
+    ax_keep_title(i, titel)
     wncur = i
     dirty_all(i)
     say_window(i)
@@ -11722,6 +11726,8 @@ fn step() -> u64 {
                     on_move(w, ex, ey, btn)
                 } else if typ == wlibc.EV_KEY {
                     on_key(w, ex)
+                } else if typ == wlibc.EV_AXPRESS {
+                    ax_on_press(w, ex)
                 } else if typ == wlibc.EV_CLOSE {
                     ns(w, N_H, 0)
                     if w == mn_win {
@@ -11801,6 +11807,9 @@ fn step() -> u64 {
     if gewechselt {
         s_thpx = s_thpx + gemalt
     }
+    // ROUND A11Y-2: the tree after the picture -- it describes what is
+    // now on the screen. Cheap when nothing changed (a hash, no call).
+    ax_tick(etwas || gemalt != 0)
     // Eine laufende Bewegung ist ETWAS. Ohne diese Zeile schlaeft die
     // Schleife mitten in einer Animation ein und das Fenster bleibt auf
     // halbem Weg stehen, bis die Maus wackelt.
@@ -12181,4 +12190,415 @@ fn noti_take(back: u64, p: u64, max: u64) -> u64 {
 // RUNDE DREI (S-006): lesen, ohne die Glocke zurueckzustellen.
 fn noti_peek(back: u64, p: u64, max: u64) -> u64 {
     return wlibc.noti_peek(back, p, max)
+}
+
+// ==================================================================
+// ROUND A11Y-2 (S-007) -- THE ACCESSIBILITY TREE, MADE ONCE, HERE
+//
+// Every program that uses these controls is accessible without one line
+// of its own: after each picture, `ax_tick` describes the controls as
+// nodes (role, state, place, value, name, bus action) and, if anything
+// changed and the kernel records a tree at all, sends them with AX_PUSH.
+// The packing is kernel/ui/ax.fi's; tools/a11y/fields.py compares both.
+//
+// A program only does something for the tree in two cases:
+//   * `ax_name(i, text)` -- where the visible text is not the name (a
+//     password field has no visible text worth reading);
+//   * `ax_action(i, "notes.save")` -- this button does what the bus
+//     action does; a reader (or an agent) can then call the action
+//     instead of clicking.
+//
+// THE SECOND LOCK IN FRONT OF THE PASSWORD FIELD. An entry with
+// F_PASSWORT or F_GEHEIM goes out as R_PASSWORD with value 0, and its
+// buffer is NEVER copied into the name -- not the text, not its length.
+// The kernel forces the same on entry (the first lock, ax.push_node);
+// the test puts a canary word into such a field and looks for it in
+// every export, log and dump.
+const AXN_BYTES: u64 = 96
+const AXN_NAME: u64 = 24
+const AXN_NAMEMAX: u64 = 40
+const AXN_ACT: u64 = 64
+const AXN_ACTMAX: u64 = 32
+const AXN_MAX: u64 = 224
+const AXR_WINDOW: u64 = 1
+const AXR_LABEL: u64 = 2
+const AXR_BUTTON: u64 = 3
+const AXR_CHECK: u64 = 4
+const AXR_ENTRY: u64 = 5
+const AXR_PASSWORD: u64 = 6
+const AXR_LIST: u64 = 7
+const AXR_TABLE: u64 = 8
+const AXR_TAB: u64 = 9
+const AXR_MENUBAR: u64 = 10
+const AXR_CHOICE: u64 = 11
+const AXR_SEPARATOR: u64 = 12
+const AXR_SCROLLBAR: u64 = 13
+const AXR_MENU: u64 = 14
+const AXR_DIALOG: u64 = 15
+const AXR_SLIDER: u64 = 16
+const AXS_ENABLED: u64 = 1
+const AXS_FOCUSABLE: u64 = 2
+const AXS_FOCUSED: u64 = 4
+const AXS_SELECTED: u64 = 8
+const AXS_HIDDEN: u64 = 16
+const AXS_CHECKED: u64 = 32
+const AXS_PROTECTED: u64 = 64
+const AX_SIDE: u64 = 32 // names / actions set by programs
+
+static mut ax_buf: [u8; 21504] = [0 as u8; 21504] // AXN_MAX * AXN_BYTES
+static mut ax_wtitle: [u8; 240] = [0 as u8; 240] // MAXWN * 40
+static mut ax_nm_wd: [u64; 32] = [0 as u64; 32] // widget + 1
+static mut ax_nm_p: [u64; 32] = [0 as u64; 32]
+static mut ax_ac_wd: [u64; 32] = [0 as u64; 32]
+static mut ax_ac_p: [u64; 32] = [0 as u64; 32]
+static mut ax_on: u64 = 0
+static mut ax_onpoll: u64 = 0
+static mut ax_hash: u64 = 0
+static mut ax_n: u64 = 0
+static mut ax_nflush: u64 = 0
+static mut ax_npress: u64 = 0
+static mut ax_step: u64 = 0
+
+// The window server's handle of window w (0 = none) -- for a program
+// that talks to the server directly (a11ydemo's GEGENPROBE).
+fn win_handle(w: u64) -> u64 {
+    return ng(w, N_H)
+}
+
+fn ax_flushes() -> u64 {
+    return ax_nflush
+}
+
+// how many nodes the last flush sent
+fn ax_last() -> u64 {
+    return ax_n
+}
+
+fn ax_presses() -> u64 {
+    return ax_npress
+}
+
+fn ax_keep_title(w: u64, t: u64) {
+    if w >= MAXWN {
+        return
+    }
+    let d: u64 = (&ax_wtitle[0 as usize]) as u64 + w * 40
+    var k: u64 = 0
+    while k < 39 {
+        var c: u8 = 0 as u8
+        if t != 0 {
+            c = *((t + k) as *mut u8)
+        }
+        *((d + k) as *mut u8) = c
+        if c == 0 as u8 {
+            k = 39
+        } else {
+            k = k + 1
+        }
+    }
+    *((d + 39) as *mut u8) = 0 as u8
+}
+
+fn ax_side_set(tw: u64, tp: u64, i: u64, p: u64) {
+    var k: u64 = 0
+    var free: u64 = AX_SIDE
+    while k < AX_SIDE {
+        let at: u64 = *((tw + k * 8) as *mut u64)
+        if at == i + 1 {
+            *((tp + k * 8) as *mut u64) = p
+            return
+        }
+        if at == 0 && free == AX_SIDE {
+            free = k
+        }
+        k = k + 1
+    }
+    if free < AX_SIDE {
+        *((tw + free * 8) as *mut u64) = i + 1
+        *((tp + free * 8) as *mut u64) = p
+    }
+}
+
+fn ax_side_get(tw: u64, tp: u64, i: u64) -> u64 {
+    var k: u64 = 0
+    while k < AX_SIDE {
+        if *((tw + k * 8) as *mut u64) == i + 1 {
+            return *((tp + k * 8) as *mut u64)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// The name a reader says for control i (the text must stay alive, like
+// every other text handed to this library).
+fn ax_name(i: u64, txt: u64) {
+    if i < MAXWD {
+        ax_side_set((&ax_nm_wd[0 as usize]) as u64,
+            (&ax_nm_p[0 as usize]) as u64, i, txt)
+    }
+}
+
+// The bus action control i stands for, e.g. "notes.save".
+fn ax_action(i: u64, name: u64) {
+    if i < MAXWD {
+        ax_side_set((&ax_ac_wd[0 as usize]) as u64,
+            (&ax_ac_p[0 as usize]) as u64, i, name)
+    }
+}
+
+fn ax_role(i: u64) -> u64 {
+    let k: u64 = g(i, D_KIND)
+    if k == K_LABEL {
+        return AXR_LABEL
+    }
+    if k == K_BUTTON || k == K_TILE {
+        return AXR_BUTTON
+    }
+    if k == K_CHECK {
+        return AXR_CHECK
+    }
+    if k == K_ENTRY || k == K_TEXTAREA {
+        if (g(i, D_FLAGS) & (F_GEHEIM | F_PASSWORT)) != 0 {
+            return AXR_PASSWORD
+        }
+        return AXR_ENTRY
+    }
+    if k == K_LIST {
+        return AXR_LIST
+    }
+    if k == K_TABLE {
+        return AXR_TABLE
+    }
+    if k == K_TABS {
+        return AXR_TAB
+    }
+    if k == K_MENUBAR {
+        return AXR_MENUBAR
+    }
+    if k == K_CHOICE {
+        return AXR_CHOICE
+    }
+    if k == K_SEP {
+        return AXR_SEPARATOR
+    }
+    if k == K_SCROLL {
+        return AXR_SCROLLBAR
+    }
+    if k == K_SLIDER {
+        return AXR_SLIDER
+    }
+    return 0
+}
+
+// Copy a zero-terminated text into a node field, at most max-1 octets.
+fn ax_put(dst: u64, src: u64, max: u64) {
+    var k: u64 = 0
+    var end: bool = src == 0
+    while k < max {
+        var c: u8 = 0 as u8
+        if !end {
+            c = *((src + k) as *mut u8)
+            // a list blob separates rows with 10 or 9: the name ends there
+            if c == 10 as u8 || c == 9 as u8 {
+                c = 0 as u8
+            }
+            if c == 0 as u8 {
+                end = true
+            }
+        }
+        if k + 1 == max {
+            c = 0 as u8
+        }
+        *((dst + k) as *mut u8) = c
+        k = k + 1
+    }
+}
+
+fn ax_clear(p: u64) {
+    var k: u64 = 0
+    while k < AXN_BYTES {
+        *((p + k) as *mut u64) = 0
+        k = k + 8
+    }
+}
+
+// Build all nodes into ax_buf. Returns how many.
+fn ax_build() -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var n: u64 = 0
+    var w: u64 = 0
+    while w < nwn && n < AXN_MAX {
+        if ng(w, N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            var r: u64 = AXR_WINDOW
+            if ng(w, N_KIND) == NK_DLG {
+                r = AXR_DIALOG
+            } else if ng(w, N_KIND) == NK_MENU {
+                r = AXR_MENU
+            }
+            // A window node (window, dialog, menu) says WHICH window it
+            // is -- the server's id in its value; the kernel maps the
+            // number `w` to that window only if it belongs to us.
+            let id: u64 = wlibc.sys3w(wlibc.WM_INFO, ng(w, N_H),
+                wlibc.WI_ID, 0)
+            *((p) as *mut u64) = r | (AXS_ENABLED << 8) | (w << 16)
+            *((p + 8) as *mut u64) = (ng(w, N_W) & 0xFFFF) << 32
+                | ((ng(w, N_HH) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = id
+            ax_put(p + AXN_NAME, (&ax_wtitle[0 as usize]) as u64 + w * 40,
+                AXN_NAMEMAX)
+            n = n + 1
+        }
+        w = w + 1
+    }
+    var i: u64 = 0
+    while i < nwd && n < AXN_MAX {
+        let role: u64 = ax_role(i)
+        let wi: u64 = g(i, D_WIN)
+        if role != 0 && wi < nwn && ng(wi, N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            let fl: u64 = g(i, D_FLAGS)
+            var st: u64 = 0
+            if (fl & F_OFF) == 0 {
+                st = st | AXS_ENABLED
+            }
+            if (fl & F_FOCUSABLE) != 0 {
+                st = st | AXS_FOCUSABLE
+            }
+            if s_focus == i + 1 {
+                st = st | AXS_FOCUSED
+            }
+            if (fl & F_HIDE) != 0 {
+                st = st | AXS_HIDDEN
+            }
+            var value: u64 = 0
+            if role == AXR_CHECK {
+                if g(i, D_VAL) != 0 {
+                    st = st | AXS_CHECKED
+                    value = 1
+                }
+            } else if role == AXR_LIST || role == AXR_TABLE
+                || role == AXR_TAB || role == AXR_CHOICE
+                || role == AXR_SLIDER || role == AXR_MENUBAR {
+                value = g(i, D_VAL)
+            }
+            let nm: u64 = ax_side_get((&ax_nm_wd[0 as usize]) as u64,
+                (&ax_nm_p[0 as usize]) as u64, i)
+            if role == AXR_PASSWORD {
+                // THE SECOND LOCK: no value, no text, no length.
+                st = st | AXS_PROTECTED
+                value = 0
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if nm != 0 {
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if role != AXR_LIST && role != AXR_TABLE {
+                ax_put(p + AXN_NAME, g(i, D_TEXT), AXN_NAMEMAX)
+            }
+            ax_put(p + AXN_ACT, ax_side_get((&ax_ac_wd[0 as usize]) as u64,
+                (&ax_ac_p[0 as usize]) as u64, i), AXN_ACTMAX)
+            *((p) as *mut u64) = role | (st << 8) | (wi << 16) | (wi << 24)
+                | ((i & 0xFFFF) << 48)
+            *((p + 8) as *mut u64) = (g(i, D_X) & 0xFFFF)
+                | ((g(i, D_Y) & 0xFFFF) << 16)
+                | ((g(i, D_W) & 0xFFFF) << 32)
+                | ((g(i, D_H) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = value
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn ax_sum(n: u64) -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var h: u64 = 0xCBF29CE484222325
+    var k: u64 = 0
+    while k < n * AXN_BYTES {
+        h = (h ^ *((b + k) as *mut u64)) *% 0x100000001B3
+        k = k + 8
+    }
+    return h ^ n
+}
+
+// Send the tree now (if the kernel records one). Returns the nodes sent.
+fn ax_flush() -> u64 {
+    if ax_on == 0 {
+        return 0
+    }
+    let n: u64 = ax_build()
+    let h: u64 = ax_sum(n)
+    if h == ax_hash {
+        return n
+    }
+    if ulib.bad(wlibc.ax_begin()) {
+        return 0 // another program is in the middle of its push
+    }
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var k: u64 = 0
+    while k < n {
+        var m: u64 = n - k
+        if m > 32 {
+            m = 32
+        }
+        let _t: u64 = wlibc.ax_send(b + k * AXN_BYTES, m)
+        k = k + m
+    }
+    let _e: u64 = wlibc.ax_end()
+    ax_hash = h
+    ax_n = n
+    ax_nflush = ax_nflush + 1
+    return n
+}
+
+fn ax_tick(changed: bool) {
+    ax_step = ax_step + 1
+    if ax_step >= ax_onpoll {
+        ax_onpoll = ax_step + 64
+        var v: u64 = 0
+        if wlibc.ax_info(wlibc.AXI_ON) == 1 {
+            v = 1
+        }
+        if v != ax_on {
+            ax_on = v
+            ax_hash = 0
+        }
+    }
+    if ax_on == 0 {
+        return
+    }
+    if changed || (ax_step & 15) == 0 {
+        let _n: u64 = ax_flush()
+    }
+}
+
+// THE PRESS THROUGH THE TREE (E_AXPRESS). The kernel has checked who
+// asked, and that this is a window and control it may press; here it is
+// the same as a click that went down and up on the control -- `fire`,
+// and a check box toggles. Only buttons and check boxes, only enabled
+// and visible ones, only of THIS window.
+fn ax_on_press(w: u64, i: u64) {
+    if i >= nwd || g(i, D_WIN) != w {
+        return
+    }
+    let fl: u64 = g(i, D_FLAGS)
+    if (fl & (F_OFF | F_HIDE)) != 0 {
+        return
+    }
+    let k: u64 = g(i, D_KIND)
+    if k == K_BUTTON || k == K_TILE {
+        ax_npress = ax_npress + 1
+        dirty_wd(i)
+        fire(i, k, 0, w)
+        return
+    }
+    if k == K_CHECK {
+        ax_npress = ax_npress + 1
+        s(i, D_VAL, 1 - g(i, D_VAL))
+        dirty_wd(i)
+        fire(i, K_CHECK, g(i, D_VAL), w)
+    }
 }

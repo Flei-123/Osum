@@ -80,6 +80,7 @@ import bus.bus
 import ipc.perm
 import sched.ctr
 import sched.origin
+import ui.ax
 import klog
 import diag.crash
 import pwr.power
@@ -174,6 +175,9 @@ export {
     SYS_FSYNC,
     AIO_BASE, AIO_VERSION, AIO_SUBMIT, AIO_WAIT, AIO_CANCEL, AIO_STATE,
     AIO_INFO, AIO_MAXNR,
+    // ROUND A11Y-2: the accessibility tree (bodies in sysgui.ax_call).
+    AX_BASE, AX_PUSH, AX_READ, AX_EVENT, AX_PERM, AX_INFO, AX_SET, AX_PRESS,
+    AX_MAXNR, AP_MINE, AP_GRANT, AP_REVOKE, AP_COUNT, AX_DUMP,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier braucht.
     copy_in, copy_out, do_jrnl, do_scan, SYS_OSUM_DISPGET,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier holt.
@@ -674,6 +678,44 @@ const WE_LEFT: u64 = 2
 // verteilen: eine Glyphe, eine Unterschneidung und die Zwischenablage
 // sind kein Fenster. Der einzige, der ein Handle braucht, ist der, der
 // in ein Fenster schreibt -- WIG_BLIT.
+// ====================================================== ROUND A11Y-2
+//
+// SEVEN NUMBERS, 1910..1916, FOR THE ACCESSIBILITY TREE (S-007,
+// docs/A11Y.md 5). The old branch `archiv/a11y` had 1960..1965 -- today
+// SYS_OSUM_BUS; `tools/kernel/syscalls.py --zweige` showed 1904..1949
+// free on every branch. The bodies are in `kernel/sys/sysgui.fi`
+// (`ax_call`), reached through the seam `gfx.sys_ax`: without a window
+// server there is no window and so no tree (-ENOSYS).
+//
+// WHO MAY WHAT:
+//   AX_PUSH   anyone, ONLY for itself and only for its own windows (the
+//             kernel stamps task and window slot into every node)
+//   AX_READ   only with the right P_READ (given by euid 0, falls at exec)
+//   AX_EVENT  the same -- a focus change tells where the user types
+//   AX_PERM   ask about oneself: anyone; grant / revoke: euid 0
+//   AX_INFO   open -- numbers ABOUT the tree, nothing FROM it
+//   AX_SET    euid 0 -- high contrast, magnifier, sticky keys are for all
+//   AX_PRESS  only with the right P_ACT, and only into windows the target
+//             rule allows (sysgui.ax_target)
+const AX_BASE: u64 = 1910
+const AX_PUSH: u64 = 1910 // (ptr, n) begin=(0,1) end=(0,0) -> nodes taken
+const AX_READ: u64 = 1911 // (nr, dst, len) -> NODE_BYTES or -E
+const AX_EVENT: u64 = 1912 // (dst, len) -> 16, 0 or -E
+const AX_PERM: u64 = 1913 // (op, task, bits) -> rights or -E
+const AX_INFO: u64 = 1914 // (field) -> number
+const AX_SET: u64 = 1915 // (field, value) -> 0 or -E
+const AX_PRESS: u64 = 1916 // (nr, gen) -> 0 or -E
+const AX_MAXNR: u64 = 1916
+
+// What AX_PERM does
+const AP_MINE: u64 = 0 // my own rights -- anyone may ask
+const AP_GRANT: u64 = 1 // give bits to a task -- euid 0
+const AP_REVOKE: u64 = 2 // take bits away -- euid 0
+const AP_COUNT: u64 = 3 // how many tasks hold a right
+// AX_SET field 99: the store on the serial line, node by node -- the
+// test shows with it that the kernel store never held a password (euid 0)
+const AX_DUMP: u64 = 99
+
 const WIG_BASE: u64 = 1800
 const WIG_BLIT: u64 = 1800 // (h, xy, wh, quelle, zeilenlaenge) -> Bildpunkte
 const WIG_MAXNR: u64 = 1809
@@ -2989,7 +3031,8 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // Deshalb geht beides durch EINEN Aufruf mit VIER Argumenten; die
     // Argumente holt sich `late_call` selbst aus dem Rahmen, und ihr
     // Platz entsteht erst dort.
-    if is_k13(number) || (number >= WIG_BASE && number <= WIG_MAXNR) {
+    if is_k13(number) || (number >= WIG_BASE && number <= WIG_MAXNR)
+        || (number >= AX_BASE && number <= AX_MAXNR) {
         return late_call(state, me, number, frame)
     }
     // RUNDE K17. Zwei Nummern, in einer eigenen Funktion -- aus genau
@@ -3134,6 +3177,10 @@ fn late_call(state: u64, me: u64, number: u64, frame: u64) -> u64 {
     let a1: u64 = fget(frame, F_RSI)
     let a2: u64 = fget(frame, F_RDX)
     let a3: u64 = fget(frame, F_R10)
+    // ROUND A11Y-2: the tree, through the same seam as the WIG calls.
+    if number >= AX_BASE && number <= AX_MAXNR {
+        return gfx.sys_ax(state, me, number, a0, a1, a2)
+    }
     if number >= WIG_BASE && number <= WIG_MAXNR {
         // RUNDE MERGE-2: nicht mehr `wig_call`, sondern die Naht.
         // Runde SERVERBUILD hat den Rumpf nach `sysgui.fi` gezogen und
@@ -8367,6 +8414,11 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     // megabytes because it `exec`ed `wget`.
     netmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
     netmon.name_set(state, me, name)
+    // ROUND A11Y-2: the rights of the accessibility tree fall -- they
+    // were given to the program that is gone (the spawn paths drop them
+    // in ldr/elf.fi; execve keeps its slot and does not pass there).
+    // Measured: before this line the new program still had mine=3.
+    ax.drop_perm(state, me)
     sched.irq_restore(flags)
     return 0
 }

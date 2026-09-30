@@ -40,6 +40,7 @@ fi
 python3 tools/osum/mkfs.py list "$IMGDIR/root.img" > "$TMPD/list.txt" 2>&1
 for f in /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
          /etc/settings.schema /etc/actions.d/settings.actions \
+         /bin/axd /etc/actions.d/a11y.actions \
          /apps/terminal.osp/SYSTEM /apps/settings.osp/SYSTEM; do
     grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$TMPD/list.txt" \
         && ok "in the image: $f" || bad "missing in the image: $f"
@@ -113,13 +114,20 @@ while True:
     start = i + 1
 PY2
 }
-torn "$S" "orientbus: ready apps=1 actions=6 rejected_manifests=0" \
-    && ok "the broker reads the settings manifest (1 app, 5 actions + 1 event, none refused)" \
-    || bad "no 'orientbus: ready apps=1 actions=6 rejected_manifests=0'"
+torn "$S" "orientbus: ready apps=2 actions=10 rejected_manifests=0" \
+    && ok "the broker reads the settings and a11y manifests (2 apps, 5+4 actions + 1 event, none refused)" \
+    || bad "no 'orientbus: ready apps=2 actions=10 rejected_manifests=0'"
 torn "$S" "settingsd: ready keys=14" \
     && ok "settingsd reads the shipped schema (14 settings)" \
     || bad "no 'settingsd: ready keys=14'"
-has "$S" "orientbus: provider settings bound" "settingsd is bound as the provider of settings.*"
+# `torn`: since A11Y-2 two providers start at once and their lines and
+# the broker's interleave on the serial line
+torn "$S" "orientbus: provider settings bound" \
+    && ok "settingsd is bound as the provider of settings.*" \
+    || bad "no 'orientbus: provider settings bound'"
+torn "$S" "orientbus: provider a11y bound" \
+    && ok "axd (A11Y-2, AB-021) is bound as the provider of a11y.*" \
+    || bad "no 'orientbus: provider a11y bound'"
 # the broker comes before the sign-in screen
 lb=$(grep -anE 'desk: orientbus pid=' "$S" | head -1 | cut -d: -f1)
 la=$(grep -anE 'desk: start /bin/glogin|desk: start /bin/desktop' "$S" | head -1 | cut -d: -f1)

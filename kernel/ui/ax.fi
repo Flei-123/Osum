@@ -1,0 +1,963 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ui/ax.fi -- ROUND A11Y-2 (S-007, S-008, AB-021): THE
+// ACCESSIBILITY TREE.
+//
+// WHY IN THE PROTOCOL AND NOT LATER. A tree that comes afterwards has to
+// be built into EVERY program on its own -- the history of X11 (AT-SPI
+// came sixteen years after the protocol) and of Windows before UI
+// Automation. Here the window server lives in the kernel
+// (`kernel/ui/wm.fi`) and ALL programs use the same widget layer
+// (`kernel/user/wlib.fi`). So the tree is made EXACTLY ONCE, in
+// `wlib.ax_flush`, and every program that uses ordinary controls is
+// accessible without one line of its own. docs/A11Y.md, section 1.
+//
+// This is the port of the branch `archiv/a11y` (983eeedc..4b0f10f3) onto
+// today's main. What changed against it, and why:
+//
+//   * the area moved from 0x7A000 (today NETDEV) to 0x13E000, the six
+//     pages the wave of 18.09.2026 allotted to this branch;
+//   * the calls moved from 1960..1965 (today SYS_OSUM_BUS) to 1910..1916;
+//   * a node is 96 octets, not 64: it carries the WINDOW SLOT the kernel
+//     verified (push only for windows the caller owns), the widget index
+//     (so a press reaches the right control) and a bus ACTION ID (a
+//     button "Save" can say `notes.save`);
+//   * there are TWO rights, read and act (press), not one; both are
+//     dropped at exec (the old branch listed "the grant survives exec" as
+//     its first open point);
+//   * the reads of other programs go through the action bus (axd, AB-021)
+//     -- the raw calls stay, but only for a process a root granted.
+//
+// WHAT LIVES HERE AND WHAT DOES NOT:
+//
+//   HERE    the STORE of the tree (it must be readable from outside, and
+//           that only goes through the kernel), the RIGHTS table, the
+//           EVENT ring (focus change, value change, rebuild) and the
+//           system-wide SETTINGS of S-008 (high contrast, magnifier,
+//           sticky keys).
+//   NOT     what a button is or how a name comes about -- that is the
+//           widget layer in ring 3. And NOT the checks that need the
+//           window table (whose window is it, may it be pressed): those
+//           are in `kernel/sys/sysgui.fi` (`ax_call`), next to the other
+//           window calls, because this file must not import the window
+//           server (the window server imports this file).
+//
+// THE SECURITY DECISION, plainly:
+//
+//   1. THE TREE IS NOT PUBLIC. It carries every label, every list row,
+//      every field text -- everything on the screen. Reading needs the
+//      right R_READ, pressing the right R_ACT; both are given only by
+//      euid 0 (`AX_PERM`), per task, and both fall at exec. Without them:
+//      -EPERM, and the attempt is counted (`AI_DENIED`).
+//   2. A PASSWORD FIELD NEVER GIVES OUT ITS CONTENT -- NOR ITS LENGTH. It
+//      reports its role, place, size, state and the name the program set
+//      explicitly. The value is forced to zero HERE, when it is entered,
+//      not when it is read; the widget layer does not send it anyway.
+//      Two locks, both counted (`AI_SECRETS`, `AI_LEAKS`).
+//   3. WHO WRITES, WRITES ONLY FOR ITSELF. The kernel stamps the task
+//      into every node, and a node of a window the caller does not own is
+//      refused (`AI_FOREIGN`).
+//
+// MEMORY: `kstate.AX_OFF`, 0x13E000..0x144000, six pages:
+//
+//   +0x0000  the scalars
+//   +0x0100  the rights, one word per task (MAX_TASKS = 32)
+//   +0x0200  the event ring, 64 entries of 16 octets
+//   +0x0600  the nodes, MAX_NODES of NODE_BYTES (224 * 96 = 0x5400)
+
+profile kernel
+
+import lib.kstate
+import serial
+
+export {
+    init, ready, parse, clear_task, drop_perm,
+    push_begin, push_node, push_end, map_win,
+    node_count, node_word, node_name_at, node_act_at, node_role,
+    node_flags, node_win, node_parent, node_task, node_slot, node_wid,
+    node_x, node_y, node_w, node_h, node_value, node_addr,
+    ev_pop, ev_waiting,
+    allowed, allow, deny, perm_of, granted,
+    info, set_cfg, high, mag, sticky, on, fseq, focus_node,
+    count_denied, count_read, count_press, count_refused,
+    selftest, selftest_max, say,
+    NODE_BYTES, NAME_OFF, NAME_MAX, ACT_OFF, ACT_MAX, MAX_NODES, EV_BYTES,
+    P_READ, P_ACT,
+    R_NONE, R_WINDOW, R_LABEL, R_BUTTON, R_CHECK, R_ENTRY, R_PASSWORD,
+    R_LIST, R_TABLE, R_TAB, R_MENUBAR, R_CHOICE, R_SEPARATOR,
+    R_SCROLLBAR, R_MENU, R_DIALOG, R_SLIDER, R_ROLES,
+    S_ENABLED, S_FOCUSABLE, S_FOCUSED, S_SELECTED, S_HIDDEN, S_CHECKED,
+    S_PROTECTED,
+    AE_FOCUS, AE_VALUE, AE_TREE,
+    AI_COUNT, AI_GEN, AI_PUSHES, AI_READS, AI_DENIED, AI_SECRETS,
+    AI_LEAKS, AI_HIGH, AI_MAG, AI_STICKY, AI_EVENTS, AI_EVDROP, AI_ON,
+    AI_FOREIGN, AI_PRESSES, AI_REFUSED, AI_FIELDS,
+    C_HIGH, C_MAG, C_STICKY, C_ON, C_FIELDS
+}
+
+// ------------------------------------------------------------ numbers
+
+// ONE NODE, 96 octets. The packing is here AND in `kernel/user/wlib.fi`
+// (there as `AX_*`); `tools/a11y/fields.py` holds both against each
+// other -- a packing written in two places drifts otherwise.
+//
+//   +0   role | state << 8 | win << 16 | parent << 24
+//        | task << 32 (KERNEL) | slot << 40 (KERNEL) | wid << 48
+//   +8   x | y << 16 | width << 32 | height << 48   (window-relative)
+//   +16  the value (R_WINDOW: the window id, checked by the kernel)
+//   +24  the accessible name, 40 octets, zero-terminated
+//   +64  the bus action this control stands for, 32 octets ("notes.save")
+const NODE_BYTES: u64 = 96
+const NAME_OFF: u64 = 24
+const NAME_MAX: u64 = 40
+const ACT_OFF: u64 = 64
+const ACT_MAX: u64 = 32
+const MAX_NODES: u64 = 224
+
+const NODES_OFF: u64 = 0x600
+const PERM_OFF: u64 = 0x100
+const EV_OFF: u64 = 0x200
+const EV_BYTES: u64 = 16
+const EV_SLOTS: u64 = 64
+
+// The two rights.
+const P_READ: u64 = 1 // read the tree and its events
+const P_ACT: u64 = 2 // press a control through the tree
+
+// THE ROLES -- what a screen reader reads out ("button Save"). None of
+// them is a paint command: a role says WHAT a thing is.
+const R_NONE: u64 = 0
+const R_WINDOW: u64 = 1
+const R_LABEL: u64 = 2
+const R_BUTTON: u64 = 3
+const R_CHECK: u64 = 4
+const R_ENTRY: u64 = 5
+const R_PASSWORD: u64 = 6 // never gives out its content
+const R_LIST: u64 = 7
+const R_TABLE: u64 = 8
+const R_TAB: u64 = 9
+const R_MENUBAR: u64 = 10
+const R_CHOICE: u64 = 11
+const R_SEPARATOR: u64 = 12
+const R_SCROLLBAR: u64 = 13
+const R_MENU: u64 = 14
+const R_DIALOG: u64 = 15
+const R_SLIDER: u64 = 16
+const R_ROLES: u64 = 17
+
+// THE STATE, one bit per statement.
+const S_ENABLED: u64 = 1
+const S_FOCUSABLE: u64 = 2
+const S_FOCUSED: u64 = 4
+const S_SELECTED: u64 = 8
+const S_HIDDEN: u64 = 16
+const S_CHECKED: u64 = 32
+const S_PROTECTED: u64 = 64 // the value is withheld
+
+// Event kinds
+const AE_FOCUS: u64 = 1
+const AE_VALUE: u64 = 2
+const AE_TREE: u64 = 3
+
+// The scalars
+const A_READY: u64 = 0x000
+const A_COUNT: u64 = 0x008
+const A_GEN: u64 = 0x010
+const A_PUSHES: u64 = 0x018
+const A_READS: u64 = 0x020
+const A_DENIED: u64 = 0x028
+const A_SECRETS: u64 = 0x030
+const A_LEAKS: u64 = 0x038
+const A_EVHEAD: u64 = 0x040
+const A_EVTAIL: u64 = 0x048
+const A_EVENTS: u64 = 0x050
+const A_EVDROP: u64 = 0x058
+const A_HIGH: u64 = 0x060
+const A_MAG: u64 = 0x068
+const A_STICKY: u64 = 0x070
+const A_ON: u64 = 0x078
+const A_FILL: u64 = 0x080 // how far push_node has written
+const A_PTASK: u64 = 0x088 // which task is pushing (+1)
+const A_PBASE: u64 = 0x090 // where its old nodes start
+const A_PCOUNT: u64 = 0x098 // how many there were
+const A_FOREIGN: u64 = 0x0A0 // nodes refused: not the caller's window
+const A_PRESSES: u64 = 0x0A8
+const A_REFUSED: u64 = 0x0B0 // presses refused by the target rule
+const A_WMAP: u64 = 0x0B8 // 8 words: wlib window index -> slot + 1
+const A_FSEQ: u64 = 0x0F8 // counts focus changes (the magnifier follows)
+
+// The fields of `AX_INFO`
+const AI_COUNT: u64 = 0
+const AI_GEN: u64 = 1
+const AI_PUSHES: u64 = 2
+const AI_READS: u64 = 3
+const AI_DENIED: u64 = 4
+const AI_SECRETS: u64 = 5
+const AI_LEAKS: u64 = 6
+const AI_HIGH: u64 = 7
+const AI_MAG: u64 = 8
+const AI_STICKY: u64 = 9
+const AI_EVENTS: u64 = 10
+const AI_EVDROP: u64 = 11
+const AI_ON: u64 = 12
+const AI_FOREIGN: u64 = 13
+const AI_PRESSES: u64 = 14
+const AI_REFUSED: u64 = 15
+const AI_FIELDS: u64 = 16
+
+// The fields of `AX_SET`
+const C_HIGH: u64 = 0
+const C_MAG: u64 = 1
+const C_STICKY: u64 = 2
+const C_ON: u64 = 3
+const C_FIELDS: u64 = 4
+
+fn base(state: u64) -> u64 {
+    return state + kstate.AX_OFF
+}
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.AX_OFF + off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.AX_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return gs(state, A_READY) != 0
+}
+
+fn on(state: u64) -> bool {
+    return ready(state) && gs(state, A_ON) != 0
+}
+
+// The layer is THERE from boot on, but it records nothing until it is
+// switched on (`a11y` on the command line, or `AX_SET(C_ON, 1)` -- axd
+// does that). A tree costs one system call of a few KiB per rebuild; a
+// system without any reader does not pay for it.
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.AX_MAX {
+        kstate.set8(base(state) + i, 0 as u8)
+        i = i + 1
+    }
+    ss(state, A_READY, 1)
+}
+
+// The four words on the command line. They are not contained in one
+// another except `a11y`, which is the start of all four -- so `a11y` is
+// looked for as a word of its own (followed by a space or the end).
+fn parse(state: u64, cmd: u64) {
+    if cmd == 0 {
+        return
+    }
+    var w_mag: [u8; 8] = "a11ymag\0"
+    var w_high: [u8; 9] = "a11yhigh\0"
+    var w_st: [u8; 11] = "a11ysticky\0"
+    var w_on: [u8; 5] = "a11y\0"
+    if find(cmd, (&w_mag[0]) as u64, 7, false) {
+        kstate.mode_add(state, kstate.M_A11YMAG)
+        ss(state, A_MAG, 1)
+    }
+    if find(cmd, (&w_high[0]) as u64, 8, false) {
+        kstate.mode_add(state, kstate.M_A11YHIGH)
+        ss(state, A_HIGH, 1)
+    }
+    if find(cmd, (&w_st[0]) as u64, 10, false) {
+        kstate.mode_add(state, kstate.M_A11YSTICKY)
+        ss(state, A_STICKY, 1)
+    }
+    if find(cmd, (&w_on[0]) as u64, 4, true) {
+        kstate.mode_add(state, kstate.M_A11Y)
+        ss(state, A_ON, 1)
+    }
+}
+
+// Is `needle` (n octets) in the command line? `whole`: only as a word
+// of its own.
+fn find(hay: u64, needle: u64, n: u64, whole: bool) -> bool {
+    var i: u64 = 0
+    while kstate.get8(hay + i) != 0 {
+        var k: u64 = 0
+        var same: bool = true
+        while k < n && same {
+            if kstate.get8(hay + i + k) != kstate.get8(needle + k) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            if !whole {
+                return true
+            }
+            let before: u64 = if_prev(hay, i)
+            let after: u64 = kstate.get8(hay + i + n)
+            if before == 32 && (after == 32 || after == 0) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn if_prev(hay: u64, i: u64) -> u64 {
+    if i == 0 {
+        return 32
+    }
+    return kstate.get8(hay + i - 1)
+}
+
+// ------------------------------------------------------------- nodes
+
+fn node_addr(state: u64, n: u64) -> u64 {
+    return base(state) + NODES_OFF + n * NODE_BYTES
+}
+
+fn node_word(state: u64, n: u64, w: u64) -> u64 {
+    if n >= MAX_NODES || w >= 3 {
+        return 0
+    }
+    return kstate.get(state, kstate.AX_OFF + NODES_OFF + n * NODE_BYTES
+        + w * 8)
+}
+
+fn nw_set(state: u64, n: u64, w: u64, v: u64) {
+    kstate.set(state, kstate.AX_OFF + NODES_OFF + n * NODE_BYTES + w * 8, v)
+}
+
+fn node_count(state: u64) -> u64 {
+    return gs(state, A_COUNT)
+}
+
+fn node_role(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 0) & 0xFF
+}
+
+fn node_flags(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 8) & 0xFF
+}
+
+fn node_win(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 16) & 0xFF
+}
+
+fn node_parent(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 24) & 0xFF
+}
+
+fn node_task(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 32) & 0xFF
+}
+
+fn node_slot(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 40) & 0xFF
+}
+
+fn node_wid(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 48) & 0xFFFF
+}
+
+fn node_x(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 1) & 0xFFFF
+}
+
+fn node_y(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 16) & 0xFFFF
+}
+
+fn node_w(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 32) & 0xFFFF
+}
+
+fn node_h(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 48) & 0xFFFF
+}
+
+fn node_value(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 2)
+}
+
+fn node_name_at(state: u64, n: u64, k: u64) -> u64 {
+    if n >= MAX_NODES || k >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(node_addr(state, n) + NAME_OFF + k)
+}
+
+fn node_act_at(state: u64, n: u64, k: u64) -> u64 {
+    if n >= MAX_NODES || k >= ACT_MAX {
+        return 0
+    }
+    return kstate.get8(node_addr(state, n) + ACT_OFF + k)
+}
+
+fn node_copy(state: u64, to: u64, from: u64) {
+    var k: u64 = 0
+    while k < NODE_BYTES {
+        kstate.set(state, kstate.AX_OFF + NODES_OFF + to * NODE_BYTES + k,
+            kstate.get(state, kstate.AX_OFF + NODES_OFF + from * NODE_BYTES
+                + k))
+        k = k + 8
+    }
+}
+
+// ------------------------------------------------------------ pushing
+//
+// THREE STEPS, because the tree of a program holds as a whole. A
+// process marks its old nodes (`push_begin`), appends the new ones
+// (`push_node` per node) and closes (`push_end`, which makes the events
+// from the difference and removes the old ones). Between begin and end
+// the store holds half a tree behind A_COUNT -- a reader only ever sees
+// the nodes below A_COUNT, so it always sees a WHOLE state.
+
+// Take the nodes of one task out and close the gap.
+fn drop_task(state: u64, task: u64) -> u64 {
+    let n: u64 = gs(state, A_COUNT)
+    var rd: u64 = 0
+    var wr: u64 = 0
+    var gone: u64 = 0
+    while rd < n {
+        if node_task(state, rd) == task {
+            gone = gone + 1
+        } else {
+            if wr != rd {
+                node_copy(state, wr, rd)
+            }
+            wr = wr + 1
+        }
+        rd = rd + 1
+    }
+    ss(state, A_COUNT, wr)
+    ss(state, A_FILL, wr)
+    return gone
+}
+
+// A task is gone or its slot is reused (`proc.create`). A tree of a
+// process that no longer exists would describe a window that is no
+// longer on the screen -- and its rights must not pass to a newcomer.
+fn clear_task(state: u64, task: u64) {
+    if !ready(state) {
+        return
+    }
+    if gs(state, A_PTASK) == task + 1 {
+        ss(state, A_PTASK, 0) // a push that never ended
+    }
+    if drop_task(state, task) != 0 {
+        ss(state, A_GEN, gs(state, A_GEN) + 1)
+        ev_push(state, AE_TREE, 0, 0, gs(state, A_COUNT))
+    }
+    drop_perm(state, task)
+}
+
+// exec: the RIGHTS fall, the tree stays until the new program pushes
+// its own (it then replaces the old one; a program without windows
+// leaves the old nodes until it exits -- they describe windows that the
+// kernel closes at exec anyway, see docs/A11Y.md 3.3).
+fn drop_perm(state: u64, task: u64) {
+    if task < kstate.MAX_TASKS {
+        ss(state, PERM_OFF + task * 8, 0)
+    }
+}
+
+// THE OLD NODES STAY until push_end removes them -- only so focus and
+// values can be compared. One push at a time: a second task that starts
+// while another is between begin and end gets `false` and tries again
+// on its next frame (the calls run with interrupts down, so this is
+// only possible across calls, never inside one).
+fn push_begin(state: u64, task: u64) -> bool {
+    if !on(state) {
+        return false
+    }
+    let busy: u64 = gs(state, A_PTASK)
+    if busy != 0 && busy != task + 1 {
+        return false
+    }
+    // a half push of the same task (it died between begin and end, or
+    // began twice): throw away what it appended
+    ss(state, A_FILL, gs(state, A_COUNT))
+    let n: u64 = gs(state, A_COUNT)
+    var first: u64 = n
+    var many: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if node_task(state, i) == task {
+            if many == 0 {
+                first = i
+            }
+            many = many + 1
+        }
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < 8 {
+        ss(state, A_WMAP + k * 8, 0)
+        k = k + 1
+    }
+    ss(state, A_PTASK, task + 1)
+    ss(state, A_PBASE, first)
+    ss(state, A_PCOUNT, many)
+    return true
+}
+
+// The kernel-side check of a window node (sysgui.fi): wlib window `win`
+// is the window-server slot `slot`, and it belongs to the caller. MAXWIN
+// or more = refused; the nodes of that window are then dropped.
+fn map_win(state: u64, win: u64, slot: u64) {
+    if win < 8 {
+        ss(state, A_WMAP + win * 8, slot + 1)
+    }
+}
+
+// Append one node. `w0`, `w1`, `w2`, the name and the action come from
+// ring 3 and are checked HERE; `namep` points to NODE_BYTES octets IN
+// THE KERNEL (sysgui.fi has copied them in). Returns 1 if taken.
+fn push_node(state: u64, task: u64, w0: u64, w1: u64, w2: u64,
+    namep: u64) -> u64 {
+    if !on(state) || gs(state, A_PTASK) != task + 1 {
+        return 0
+    }
+    let n: u64 = gs(state, A_FILL)
+    if n >= MAX_NODES {
+        return 0
+    }
+    var role: u64 = w0 & 0xFF
+    if role >= R_ROLES {
+        role = R_NONE
+    }
+    var st: u64 = (w0 >> 8) & 0xFF
+    let win: u64 = (w0 >> 16) & 0xFF
+    let parent: u64 = (w0 >> 24) & 0xFF
+    let wid: u64 = (w0 >> 48) & 0xFFFF
+    // WHOSE WINDOW. Only a window the kernel mapped for THIS push (the
+    // window node came first and named a window of the caller).
+    if win >= 8 || gs(state, A_WMAP + win * 8) == 0
+        || gs(state, A_WMAP + win * 8) > 0xFF {
+        ss(state, A_FOREIGN, gs(state, A_FOREIGN) + 1)
+        return 0
+    }
+    let slot: u64 = gs(state, A_WMAP + win * 8) - 1
+    var value: u64 = w2
+    // ------------------------------------------------------------
+    // THE FIRST OF THE TWO LOCKS IN FRONT OF THE PASSWORD FIELD.
+    //
+    // Here, when the node is entered, and not when it is read: a value
+    // that never reaches the store cannot fall out even if the read
+    // path gets a bug later. The second lock is in wlib.ax_flush, which
+    // never sends the content. `A_LEAKS` counts how often a password
+    // node came WITH a value -- it must stay zero; the test fails on it.
+    if role == R_PASSWORD {
+        st = st | S_PROTECTED
+        if value != 0 {
+            ss(state, A_LEAKS, gs(state, A_LEAKS) + 1)
+        }
+        value = 0
+        ss(state, A_SECRETS, gs(state, A_SECRETS) + 1)
+    }
+    nw_set(state, n, 0, role | (st << 8) | (win << 16) | (parent << 24)
+        | ((task & 0xFF) << 32) | ((slot & 0xFF) << 40) | (wid << 48))
+    nw_set(state, n, 1, w1)
+    nw_set(state, n, 2, value)
+    let dst: u64 = node_addr(state, n)
+    var k: u64 = 0
+    while k < NAME_MAX {
+        var c: u64 = kstate.get8(namep + NAME_OFF + k)
+        if k + 1 == NAME_MAX {
+            c = 0
+        }
+        kstate.set8(dst + NAME_OFF + k, c as u8)
+        k = k + 1
+    }
+    k = 0
+    while k < ACT_MAX {
+        var c2: u64 = kstate.get8(namep + ACT_OFF + k)
+        if k + 1 == ACT_MAX {
+            c2 = 0
+        }
+        kstate.set8(dst + ACT_OFF + k, c2 as u8)
+        k = k + 1
+    }
+    ss(state, A_FILL, n + 1)
+    return 1
+}
+
+// Compare with the old state, then remove the old nodes. The events
+// are made HERE and not in ring 3 -- they say what is in the STORE, not
+// what a program claims.
+fn push_end(state: u64, task: u64) -> u64 {
+    if !on(state) || gs(state, A_PTASK) != task + 1 {
+        return 0
+    }
+    let old0: u64 = gs(state, A_PBASE)
+    let oldn: u64 = gs(state, A_PCOUNT)
+    let new0: u64 = gs(state, A_COUNT)
+    let newn: u64 = gs(state, A_FILL) - new0
+    var i: u64 = 0
+    while i < newn && i < oldn {
+        let a: u64 = old0 + i
+        let b: u64 = new0 + i
+        if (node_flags(state, a) & S_FOCUSED) == 0
+            && (node_flags(state, b) & S_FOCUSED) != 0 {
+            ev_push(state, AE_FOCUS, node_win(state, b), i,
+                node_role(state, b))
+            ss(state, A_FSEQ, gs(state, A_FSEQ) + 1)
+        }
+        if node_value(state, a) != node_value(state, b)
+            || ((node_flags(state, a) ^ node_flags(state, b))
+                & (S_CHECKED | S_SELECTED)) != 0 {
+            ev_push(state, AE_VALUE, node_win(state, b), i,
+                node_value(state, b))
+        }
+        i = i + 1
+    }
+    if newn != oldn {
+        ev_push(state, AE_TREE, 0, newn, gs(state, A_GEN) + 1)
+        ss(state, A_FSEQ, gs(state, A_FSEQ) + 1)
+    }
+    // the old ones out, the new ones together
+    var rd: u64 = 0
+    var wr: u64 = 0
+    let all: u64 = gs(state, A_FILL)
+    while rd < all {
+        var keep: bool = true
+        if rd < new0 && node_task(state, rd) == task {
+            keep = false
+        }
+        if keep {
+            if wr != rd {
+                node_copy(state, wr, rd)
+            }
+            wr = wr + 1
+        }
+        rd = rd + 1
+    }
+    ss(state, A_COUNT, wr)
+    ss(state, A_FILL, wr)
+    ss(state, A_PTASK, 0)
+    ss(state, A_GEN, gs(state, A_GEN) + 1)
+    ss(state, A_PUSHES, gs(state, A_PUSHES) + 1)
+    return newn
+}
+
+// ------------------------------------------------------------- events
+
+fn ev_addr(state: u64, k: u64) -> u64 {
+    return kstate.AX_OFF + EV_OFF + (k % EV_SLOTS) * EV_BYTES
+}
+
+fn ev_push(state: u64, typ: u64, win: u64, node: u64, value: u64) {
+    let head: u64 = gs(state, A_EVHEAD)
+    let tail: u64 = gs(state, A_EVTAIL)
+    if head - tail >= EV_SLOTS {
+        // Full. The oldest falls and that is COUNTED -- a silent loss
+        // would be a screen reader that never learns of a focus change.
+        ss(state, A_EVTAIL, tail + 1)
+        ss(state, A_EVDROP, gs(state, A_EVDROP) + 1)
+    }
+    kstate.set(state, ev_addr(state, head),
+        typ | ((win & 0xFFFF) << 32) | ((node & 0xFFFF) << 48))
+    kstate.set(state, ev_addr(state, head) + 8, value)
+    ss(state, A_EVHEAD, head + 1)
+    ss(state, A_EVENTS, gs(state, A_EVENTS) + 1)
+}
+
+fn ev_waiting(state: u64) -> u64 {
+    return gs(state, A_EVHEAD) - gs(state, A_EVTAIL)
+}
+
+// Take one entry into `dst` (in the kernel), two words. 1 if there was.
+fn ev_pop(state: u64, dst: u64) -> u64 {
+    let tail: u64 = gs(state, A_EVTAIL)
+    if gs(state, A_EVHEAD) == tail {
+        return 0
+    }
+    kstate.set(dst, 0, kstate.get(state, ev_addr(state, tail)))
+    kstate.set(dst, 8, kstate.get(state, ev_addr(state, tail) + 8))
+    ss(state, A_EVTAIL, tail + 1)
+    return 1
+}
+
+// ------------------------------------------------------------- rights
+
+fn perm_of(state: u64, task: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return 0
+    }
+    return gs(state, PERM_OFF + task * 8)
+}
+
+fn allowed(state: u64, task: u64, bit: u64) -> bool {
+    return (perm_of(state, task) & bit) != 0
+}
+
+fn allow(state: u64, task: u64, bits: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    ss(state, PERM_OFF + task * 8,
+        perm_of(state, task) | (bits & (P_READ | P_ACT)))
+}
+
+fn deny(state: u64, task: u64, bits: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    ss(state, PERM_OFF + task * 8, perm_of(state, task) & ~bits)
+}
+
+fn granted(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if perm_of(state, i) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn count_denied(state: u64) {
+    ss(state, A_DENIED, gs(state, A_DENIED) + 1)
+}
+
+fn count_read(state: u64) {
+    ss(state, A_READS, gs(state, A_READS) + 1)
+}
+
+fn count_press(state: u64) {
+    ss(state, A_PRESSES, gs(state, A_PRESSES) + 1)
+}
+
+fn count_refused(state: u64) {
+    ss(state, A_REFUSED, gs(state, A_REFUSED) + 1)
+}
+
+// For the magnifier (wm.fi): how often the focus moved, and which node
+// of the window in slot `slot` has it (MAX_NODES = none).
+fn fseq(state: u64) -> u64 {
+    return gs(state, A_FSEQ)
+}
+
+fn focus_node(state: u64, slot: u64) -> u64 {
+    let n: u64 = gs(state, A_COUNT)
+    var i: u64 = 0
+    while i < n {
+        if node_slot(state, i) == slot && node_role(state, i) != R_WINDOW
+            && (node_flags(state, i) & S_FOCUSED) != 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_NODES
+}
+
+// ----------------------------------------------------------- settings
+
+fn high(state: u64) -> bool {
+    return ready(state) && gs(state, A_HIGH) != 0
+}
+
+fn mag(state: u64) -> bool {
+    return ready(state) && gs(state, A_MAG) != 0
+}
+
+fn sticky(state: u64) -> bool {
+    return ready(state) && gs(state, A_STICKY) != 0
+}
+
+fn set_cfg(state: u64, field: u64, v: u64) -> bool {
+    if !ready(state) || v > 1 {
+        return false
+    }
+    if field == C_HIGH {
+        ss(state, A_HIGH, v)
+        return true
+    }
+    if field == C_MAG {
+        ss(state, A_MAG, v)
+        return true
+    }
+    if field == C_STICKY {
+        ss(state, A_STICKY, v)
+        return true
+    }
+    if field == C_ON {
+        ss(state, A_ON, v)
+        if v == 0 {
+            // off means: nothing stays in the store
+            ss(state, A_COUNT, 0)
+            ss(state, A_FILL, 0)
+            ss(state, A_PTASK, 0)
+            ss(state, A_GEN, gs(state, A_GEN) + 1)
+        }
+        return true
+    }
+    return false
+}
+
+fn info(state: u64, field: u64) -> u64 {
+    if field == AI_COUNT {
+        return gs(state, A_COUNT)
+    }
+    if field == AI_GEN {
+        return gs(state, A_GEN)
+    }
+    if field == AI_PUSHES {
+        return gs(state, A_PUSHES)
+    }
+    if field == AI_READS {
+        return gs(state, A_READS)
+    }
+    if field == AI_DENIED {
+        return gs(state, A_DENIED)
+    }
+    if field == AI_SECRETS {
+        return gs(state, A_SECRETS)
+    }
+    if field == AI_LEAKS {
+        return gs(state, A_LEAKS)
+    }
+    if field == AI_HIGH {
+        return gs(state, A_HIGH)
+    }
+    if field == AI_MAG {
+        return gs(state, A_MAG)
+    }
+    if field == AI_STICKY {
+        return gs(state, A_STICKY)
+    }
+    if field == AI_EVENTS {
+        return gs(state, A_EVENTS)
+    }
+    if field == AI_EVDROP {
+        return gs(state, A_EVDROP)
+    }
+    if field == AI_ON {
+        return gs(state, A_ON)
+    }
+    if field == AI_FOREIGN {
+        return gs(state, A_FOREIGN)
+    }
+    if field == AI_PRESSES {
+        return gs(state, A_PRESSES)
+    }
+    if field == AI_REFUSED {
+        return gs(state, A_REFUSED)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------- self test
+//
+// The store on its own, without ring 3: a push of three nodes with a
+// password node that carries a value; the value must arrive as zero and
+// the leak must be counted; a second push of the same task must replace
+// and not append; clear_task must empty it. Runs on a copy of nothing --
+// it saves and restores the counters it touches, and it is only called
+// from the `a11y` boot line (kmain), before any program runs.
+fn selftest_max() -> u64 {
+    return 6
+}
+
+fn selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let was_on: u64 = gs(state, A_ON)
+    let leaks0: u64 = gs(state, A_LEAKS)
+    let sec0: u64 = gs(state, A_SECRETS)
+    ss(state, A_ON, 1)
+    var ok: u64 = 0
+    let t: u64 = kstate.MAX_TASKS - 1
+    var nb: [u8; 96] = [0 as u8; 96]
+    let np: u64 = (&nb[0]) as u64
+    nb[24 as usize] = 75 as u8 // "K"
+    if push_begin(state, t) {
+        map_win(state, 0, 3)
+        let _a: u64 = push_node(state, t, R_WINDOW, 0, 7, np)
+        let _b: u64 = push_node(state, t, R_BUTTON | (1 << 48), 0, 0, np)
+        let _c: u64 = push_node(state, t, R_PASSWORD | (2 << 48), 0,
+            0x3753494E4D494548, np)
+        if push_end(state, t) == 3 {
+            ok = ok + 1
+        }
+    }
+    let n0: u64 = node_count(state)
+    if n0 >= 3 && node_value(state, n0 - 1) == 0
+        && (node_flags(state, n0 - 1) & S_PROTECTED) != 0 {
+        ok = ok + 1
+    }
+    if gs(state, A_LEAKS) == leaks0 + 1 {
+        ok = ok + 1
+    }
+    if node_slot(state, n0 - 1) == 3 && node_wid(state, n0 - 1) == 2 {
+        ok = ok + 1
+    }
+    // a node for an unmapped window is refused
+    let f0: u64 = gs(state, A_FOREIGN)
+    if push_begin(state, t) {
+        let _d: u64 = push_node(state, t, R_BUTTON | (5 << 16), 0, 0, np)
+        let _e: u64 = push_end(state, t)
+    }
+    if gs(state, A_FOREIGN) == f0 + 1 {
+        ok = ok + 1
+    }
+    clear_task(state, t)
+    if node_count(state) == n0 - 3 {
+        ok = ok + 1
+    }
+    ss(state, A_LEAKS, leaks0)
+    ss(state, A_SECRETS, sec0)
+    ss(state, A_FOREIGN, f0)
+    ss(state, A_ON, was_on)
+    return ok
+}
+
+// The layer in one line on the serial line (kmain at the end of a GUI
+// run, and `a11ysay` from the tests). `leaks` must be 0.
+fn say(state: u64) {
+    var s_a: [u8; 11] = "ax: nodes=\0"
+    var s_b: [u8; 7] = "  gen=\0"
+    var s_c: [u8; 10] = "  pushes=\0"
+    var s_d: [u8; 9] = "  reads=\0"
+    var s_e: [u8; 10] = "  denied=\0"
+    var s_f: [u8; 11] = "  secrets=\0"
+    var s_g: [u8; 9] = "  leaks=\0"
+    var s_h: [u8; 11] = "  foreign=\0"
+    var s_i: [u8; 11] = "  presses=\0"
+    var s_j: [u8; 11] = "  refused=\0"
+    var s_k: [u8; 8] = "  high=\0"
+    var s_l: [u8; 7] = "  mag=\0"
+    var s_m: [u8; 10] = "  sticky=\0"
+    var s_n: [u8; 6] = "  on=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(gs(state, A_COUNT))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(gs(state, A_GEN))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(gs(state, A_PUSHES))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(gs(state, A_READS))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, A_DENIED))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(gs(state, A_SECRETS))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gs(state, A_LEAKS))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(gs(state, A_FOREIGN))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(gs(state, A_PRESSES))
+    serial.puts((&s_j[0]) as u64)
+    serial.dec(gs(state, A_REFUSED))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(gs(state, A_HIGH))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(gs(state, A_MAG))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(gs(state, A_STICKY))
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(gs(state, A_ON))
+    serial.nl()
+}
