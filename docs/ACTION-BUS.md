@@ -159,7 +159,9 @@ any per-app knowledge.
 ## 4. The bus API
 
 *Built.* The broker is the kernel service `orient.bus` (anyone may call);
-events come from `orient.evt` (published by the broker only).
+events are SENT by the broker to each listener that may hear them
+(AB-015, below). `orient.evt` stays registered by the broker so nobody
+else can hold the name, but carries nothing.
 
 **Frames.** A kernel bus message carries 64 octets. An action message is
 a sequence of frames: magic `0xA7`, kind (request/reply/event), flags
@@ -198,8 +200,19 @@ and events for that app are accepted only from that pid; a second
 process cannot even register `a.notes` (tested).
 
 **Events.** Declared in the manifest; sent by the bound provider; checked
-and republished on `orient.evt` with `@app=`. `act watch` subscribes. The
-broker itself publishes `bus.confirm_needed` so a dialog can appear.
+and given `@app=`. *Built (AB-015):* a listener says `subscribe [glob]`
+(`act watch [ticks] [glob] [--as c]`), the broker sends each event into
+its reply box after a decision for THAT event and THAT listener: the
+user hears everything; the broker's own events (`bus.*`, e.g.
+`bus.confirm_needed` -- who wants to change what) only the user; an app
+its own; an event marked `private` in its manifest nobody else; every
+other client what a deny rule for it does not keep away (`act block
+jarvis notes.*` silences `notes.changed` for Jarvis too). The rules are
+asked again for every event, so a block works at once, without a new
+subscription. `act stat` counts `events_withheld` and `subscriptions`.
+Measured (section 20): Jarvis hears `notes.changed` but not
+`bus.confirm_needed` nor a private event; a blocked helper hears nothing
+more from the next event on.
 
 **Client:** `/bin/act` — `list | describe | call | confirm | reject |
 undo | grant | stat | watch | bench`. `act call notes.add "text=hi"
@@ -273,9 +286,22 @@ A call that needs a "yes" is **parked** with a number and answered
 `confirm <no>`; the broker publishes `bus.confirm_needed`. Only the user
 can `confirm` or `reject` (an agent asking to confirm its own request is
 refused — tested); parked calls expire after 60 s.
-*Planned (AB-004):* the confirmation is a dialog owned by the window
-server (a trusted path an app cannot draw over or click), not `act
-confirm` on a shell.
+*Built (AB-004):* every call an agent or an app parks is also put to
+the person in the WINDOW SERVER's own dialog (`WM_TRUST` 2129, root
+only, called by the broker): painted in `compose` after every window and
+before the pointer, so nothing can draw over it; answered only on the
+paths of the real keyboard and mouse (`wm.on_key`, `wm.on_mouse`) -- J/Y
+or "Erlauben" = yes, N/Escape or "Ablehnen" = no; keys in its first
+400 ms and Enter are ignored so a key already on its way cannot answer.
+A program that types into windows (WM_FWIN, the adapters) reaches a
+window's ring, and the dialog has none: measured in tools/actionbus/
+gui.sh, a program typing "jjj" into a window left it open, a real "j"
+answered it. One dialog at a time, the broker queues the rest; a token
+answered with `act confirm` or expired takes its dialog down; while the
+screen is locked it waits invisibly. The person's OWN requests (the
+settings window, `act` on their shell) are still answered where they
+were made. The yes is logged as verb `dialog` by the user; the call runs
+as the client that asked.
 
 Grants: `allow <client> <glob> <read|write>` in `/etc/orientbus/policy`
 (permanent), or `act grant <client> <glob> write <seconds>` at run time
@@ -582,7 +608,7 @@ something nobody looked at first. `act whoami` says `dry_first=yes`, so
 an agent knows. On Justin's personal image `/bin/act` is on the bridge's
 command list (`/root/abbilder/justin-permissions.conf`).
 
-### 9.3 Automations ("Baukasten", like Shortcuts) — **yes, as a client**
+### 9.3 Automations ("Baukasten", like Shortcuts) — **yes, built as a client (AB-011)**
 An automation is a file: trigger (event, time, manual), steps (action
 calls, simple conditions on results), and **its own client identity**
 `automation:<name>` with its own grants. It is executed by a runner that
@@ -590,6 +616,29 @@ is just another client — so an automation can never do more than the user
 granted it, and it shows up in the log under its own name. Created by
 hand, from the UI, or by Jarvis (as a proposal the user saves).
 Dry-running an automation dry-runs every step.
+
+*Built (AB-011):* `/bin/autorun` and `/etc/automations/<name>.auto`:
+
+```
+automation 1
+name tidy                          a-z 0-9 - _, at most 12
+title "Keep at most three notes"
+trigger event notes.changed        | trigger every <s> | trigger manual
+step notes.count
+if count > 3                       on the answer before: = != < >
+step notes.remove index=1          false = stop
+```
+
+`autorun list`, `autorun run <name> [--dry]`, `autorun serve [ticks]`.
+Each run labels itself `automation:<name>` in the KERNEL (AB-003)
+before its first call -- so even when the user's shell starts it, the
+broker decides for that client: a rule (`allow automation:tidy notes.*
+write`) lets it write, without one a write is parked (and the person
+asked in the trusted dialog), and the log names it. `serve` watches
+(subscription as above, timers), forks one labelled child per run, one
+run per automation at a time; events that come meanwhile coalesce into
+one more run a second later, so an automation that causes its own event
+settles through its condition. Measured (section 21).
 
 ### 9.4 "What may which app" — **yes, built (AB-006, section 5.3)**
 A settings page built entirely from bus data: rules, timed grants with
@@ -677,11 +726,17 @@ broker is scheduled 46 times and settingsd 47 times in 5 s (the old
 loop slept 10 ms per turn, up to 500); a round trip is 40-50 us (was 60).
 Server images with `init` add `bus:*:respawn:/bin/orientbus serve`.
 
-**Limits** (all on the roadmap): `act confirm` instead of a trusted
-dialog (5.3); events visible to every subscriber; payloads above 2 KB
+*AB-019:* an adapter call no longer holds the broker. It forks the
+program and notes the job (up to four at once, `err adapter_busy`
+beyond); the serve loop polls the jobs every 10 ms while any runs and
+answers each caller when its program ends or is killed after 5 s.
+Measured (section 20): while two programs hang, 50 reads of notes and
+a third adapter call are answered at once; `act reload` under a running
+job is refused as `busy`.
+
+**Limits** (all on the roadmap): payloads above 2 KB
 per request refused; manifests are read once at the broker's start (an
-app installed later needs a broker restart); an adapter call blocks the
-broker for up to 5 s; `dbus` not executable, no keymap for Wayland
+app installed later needs a broker restart); `dbus` not executable, no keymap for Wayland
 programs, no element tree for foreign windows; theme, time zone,
 network and language pages of the settings window still write their own
 files; a broker that exits keeps its bus names until its parent reaps
@@ -717,7 +772,8 @@ AB-008 adapters (cli → file → ui → keys) · AB-009 Jarvis as client
 (bridge identity, dry run first, catalogue → tools) · AB-010 social on
 the bus · AB-011 automations · AB-012 audit rotation/viewer · AB-013
 large payloads via segments · AB-014 action versioning · AB-015 event
-permissions · AB-016 orientbus in the image and started by init.
+permissions · AB-016 orientbus in the image and started by init ·
+AB-019 adapters in parallel.
 Done in round ACTION-BUS-2: AB-003, AB-005, AB-008 (cli/file), AB-016.
 Done in round ACTION-BUS-3: AB-005b (settings window + lock time +
 brightness), AB-006, AB-008b (foreign-window layer, keys/ui), AB-009
@@ -738,3 +794,6 @@ the user the last n lines, nobody else), S-009 (the settings page
 "Protokoll": the last 40 lines of the audit log over the bus, newest
 first -- time, who, verb, target, decision, result -- with a refresh
 button).
+Done in round ACTION-BUS-5: AB-004 (the trusted dialog in the window
+server), AB-011 (automations, `/bin/autorun`), AB-015 (event rights,
+`subscribe`, `private`), AB-019 (adapters in parallel).

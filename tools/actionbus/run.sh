@@ -49,7 +49,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 TMPD=$(mktemp -d)
 [ -n "${ACTBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus notes act settingsd su dhcp"
+PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus notes act settingsd su dhcp autorun"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
@@ -102,6 +102,8 @@ cat > "$TMPD/etc/orientbus/policy" <<'EOF'
 deny  intruder *
 allow script notes.add write
 allow script notes.* critical
+allow automation:addtwo notes.* write
+allow automation:tidy notes.* write
 EOF
 python3 tools/actionbus/manifest.py check etc/actions.d/settings.actions > "$TMPD/lint3.txt" 2>&1 \
     && ok "host reader: the settings manifest ($(head -1 "$TMPD/lint3.txt" | cut -d' ' -f3-))" \
@@ -1321,6 +1323,217 @@ grep -qaE '^client user reads=[0-9]+ changes=30 ' "$TMPD/p.txt" && ok "... and a
 # counts after a restart are those of the two files; docs section 12)
 grep -qaE 'panic|EXCEPTION' "$A19" "$A19B" && bad "a panic or exception in the section-19 guests" || ok "no panic, no exception (section 19)"
 
+echo "== 20. AB-015 who hears which event, AB-019 adapters at the same time =="
+# ===================================================================
+# AB-015: nothing is published on orient.evt any more; a listener says
+# `subscribe [glob]` and the broker SENDS it each event it may hear:
+# the user everything, `bus.*` only the user, an event marked `private`
+# nobody but the user (and the app), everybody else what a deny rule
+# does not keep away -- asked again for every event.
+# AB-019: an adapter call does not hold the broker. Two programs that
+# hang run at the same time; meanwhile a read of another app is
+# answered at once, and the catalogue is not re-read under a running job.
+sed 's/^event notes.changed .*/&\n  private/' pakete/notes/ACTIONS > "$TMPD/np.actions"
+cat > "$TMPD/s20.sh" <<'EOS'
+orientbus serve 0 &
+sleep -m 300
+notes serve 0 &
+sleep -m 500
+act watch 0 > /tmp/ev_u.txt &
+act watch 0 --as jarvis > /tmp/ev_j.txt &
+act watch 0 notes.* --as helper > /tmp/ev_h.txt &
+act watch 0 bus.* --as jarvis > /tmp/ev_jb.txt &
+sleep 1
+echo ==V-A==
+act call notes.add "text=one"
+act call notes.add "text=two" --as jarvis
+act block helper notes.*
+act call notes.add "text=three"
+echo ==V-PRIV==
+cp /t/np.actions /apps/notes.prog/ACTIONS
+act reload
+act call notes.add "text=four"
+sleep 1
+echo ==V-STAT==
+act stat
+echo ==V-ADAPT==
+act call media.hang > /tmp/h1.txt &
+act call media.hang > /tmp/h2.txt &
+sleep -m 800
+act bench 50
+act call media.status
+act reload
+echo rc=$?
+act stat
+sleep 7
+echo ==V-HANG==
+cat /tmp/h1.txt
+cat /tmp/h2.txt
+act stat
+act stop
+sleep 1
+echo ==V-EVU==
+cat /tmp/ev_u.txt
+echo ==V-EVJ==
+cat /tmp/ev_j.txt
+echo ==V-EVH==
+cat /tmp/ev_h.txt
+echo ==V-EVJB==
+cat /tmp/ev_jb.txt
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/actions.d/fplayer.actions=$TMPD/fplayer.actions"
+       /opt/ /opt/linux/ "/opt/linux/fakeplayer=$TMPD/fakeplayer"
+       /var/player/@755:65534:65534 "/t/np.actions=$TMPD/np.actions")
+image "$TMPD/V.img" "$TMPD/s20.sh"
+EXTRA=()
+run "$TMPD/V.img" v 1 120
+V="$TMPD/v.klar"
+grep -qa '==FERTIG==' "$V" || { bad "section-20 guest did not finish"; tail -20 "$V" | sed 's/^/        /'; }
+part "$V" V-EVU V-EVJ > "$TMPD/eu.txt"; part "$V" V-EVJ V-EVH > "$TMPD/ej.txt"
+part "$V" V-EVH V-EVJB > "$TMPD/eh.txt"; part "$V" V-EVJB FERTIG > "$TMPD/ejb.txt"
+has "$TMPD/eu.txt" "notes.changed @app=notes count=1" "the user hears the app's event"
+has "$TMPD/eu.txt" "event bus.confirm_needed" "... and the broker's own (a parked call)"
+has "$TMPD/eu.txt" "notes.changed @app=notes count=3" "... and a private event"
+has "$TMPD/ej.txt" "notes.changed @app=notes count=1" "Jarvis hears an ordinary app event it may read"
+hasnot "$TMPD/ej.txt" "bus.confirm_needed" "Jarvis does NOT hear bus.confirm_needed (who wants to change what: the user only)"
+hasnot "$TMPD/ej.txt" "count=3" "Jarvis does NOT hear an event marked private"
+hasnot "$TMPD/ejb.txt" "EVENT" "subscribing to bus.* as Jarvis yields nothing"
+has "$TMPD/eh.txt" "notes.changed @app=notes count=1" "helper hears notes.changed before the block"
+hasnot "$TMPD/eh.txt" "count=2" "after 'act block helper notes.*' it hears nothing more -- at once, same subscription"
+part "$V" V-STAT V-ADAPT > "$TMPD/p.txt"
+grep -qaE 'events_withheld=[1-9]' "$TMPD/p.txt" && ok "the broker counts what it kept back ($(grep -aoE 'events_withheld=[0-9]+' "$TMPD/p.txt"))" || bad "events_withheld not counted"
+has "$TMPD/p.txt" "subscriptions=4" "four listeners subscribed"
+part "$V" V-ADAPT V-HANG > "$TMPD/p.txt"
+Lb=$(grep -a 'act: bench calls=50' "$TMPD/p.txt" | tail -1)
+tb=$(echo "$Lb" | sed -n 's/.*ticks=\([0-9]*\).*/\1/p'); fb=$(echo "$Lb" | sed -n 's/.*failed=\([0-9]*\).*/\1/p')
+[ -n "$tb" ] && [ "$tb" -le 50 ] && [ "${fb:-1}" = 0 ] && ok "while two programs hang, 50 reads of notes take $tb ticks (<= 50; before AB-019 the broker stood 5 s)" || bad "bench during hangs: ${Lb:-none}"
+has "$TMPD/p.txt" "state=" "... and another adapter call (media.status) is answered meanwhile"
+has "$TMPD/p.txt" "err busy" "the catalogue is not re-read under a running program"
+grep -qaE 'adapters_at_once=[2-4]' "$TMPD/p.txt" && ok "adapter programs ran at the same time ($(grep -aoE 'adapters_at_once=[0-9]+' "$TMPD/p.txt" | tail -1): two hanging + media.status)" || bad "adapters at once: $(grep -aoE 'adapters_at_once=[0-9]+' "$TMPD/p.txt" | tail -1)"
+part "$V" V-HANG V-EVU > "$TMPD/p.txt"
+n_to=$(grep -ac 'err adapter_failed exit=timeout' "$TMPD/p.txt")
+[ "$n_to" = 2 ] && ok "both hanging programs are killed after 5 s and their callers answered" || bad "hang answers: $n_to"
+echo "ACTIONBUS-EVENTS $(grep -aoE 'events_withheld=[0-9]+' "$V" | tail -1) $(grep -aoE 'adapters_at_once=[0-9]+' "$V" | tail -1) ticks50=${tb:-?}"
+grep -qaE 'panic|EXCEPTION' "$V" && bad "a panic or exception in the section-20 guest" || ok "no panic, no exception (section 20)"
+
+# ===================================================================
+echo "== 21. AB-011 automations, as a client of the bus =="
+# ===================================================================
+# An automation is a file; each run labels itself automation:<name> in
+# the kernel before its first call, so the broker decides every step for
+# that client: a rule lets addtwo and tidy write notes, sneak has none
+# and its critical step is parked; the log names each. tidy runs on the
+# event notes.changed and keeps at most three notes; tick runs every
+# second. A file with a bad name is refused.
+mkdir -p "$TMPD/auto"
+cat > "$TMPD/auto/addtwo.auto" <<'EOF'
+automation 1
+name addtwo
+title "Two notes, by hand"
+trigger manual
+step notes.add text=auto-a
+step notes.add text=auto-b
+EOF
+cat > "$TMPD/auto/tidy.auto" <<'EOF'
+automation 1
+name tidy
+title "Keep at most three notes"
+trigger event notes.changed
+step notes.count
+if count > 3
+step notes.remove index=1
+EOF
+cat > "$TMPD/auto/sneak.auto" <<'EOF'
+automation 1
+name sneak
+trigger manual
+step notes.clear
+EOF
+cat > "$TMPD/auto/tick.auto" <<'EOF'
+automation 1
+name tick
+trigger every 1
+step notes.count
+EOF
+cat > "$TMPD/auto/bad.auto" <<'EOF'
+automation 1
+name Bad Name
+trigger manual
+step notes.count
+EOF
+cat > "$TMPD/s21.sh" <<'EOS'
+orientbus serve 0 &
+sleep -m 300
+notes serve 0 &
+sleep -m 500
+echo ==U-LIST==
+autorun list
+echo ==U-DRY==
+autorun run addtwo --dry
+act call notes.count
+echo ==U-RUN==
+autorun run addtwo
+echo rc=$?
+act call notes.count
+echo ==U-SNEAK==
+autorun run sneak
+echo rc=$?
+act call notes.count
+echo ==U-SERVE==
+autorun serve 900 > /tmp/serve.txt &
+sleep 1
+act call notes.add text=c
+act call notes.add text=d
+act call notes.add text=e
+sleep 5
+echo ==U-COUNT==
+act call notes.count
+sleep 4
+echo ==U-OUT==
+cat /tmp/serve.txt
+echo ==U-LOG==
+cat /var/log/orientbus.log
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=(/etc/automations/)
+for f in addtwo tidy sneak tick bad; do EXTRA+=("/etc/automations/$f.auto=$TMPD/auto/$f.auto"); done
+image "$TMPD/U.img" "$TMPD/s21.sh"
+EXTRA=()
+run "$TMPD/U.img" u 1 120
+U="$TMPD/u.klar"
+grep -qa '==FERTIG==' "$U" || { bad "section-21 guest did not finish"; tail -20 "$U" | sed 's/^/        /'; }
+part "$U" U-LIST U-DRY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "addtwo manual steps=2" "autorun list: a manual automation"
+has "$TMPD/p.txt" "tidy event notes.changed steps=2" "... one on an event"
+has "$TMPD/p.txt" "tick every 1s steps=1" "... one on a timer"
+has "$TMPD/p.txt" "autorun: refused: /etc/automations/bad.auto" "a file with a bad name is refused"
+part "$U" U-DRY U-RUN > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autorun: done addtwo steps=2" "a dry run goes through every step (each sent with @dry=1)"
+has "$TMPD/p.txt" "count=0" "... and changes nothing"
+part "$U" U-RUN U-SNEAK > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autorun: done addtwo steps=2" "a manual run does its steps"
+has "$TMPD/p.txt" "count=2" "... two notes"
+part "$U" U-SNEAK U-SERVE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autorun: parked for a confirmation, stop" "an automation without a rule is parked like any client (notes.clear)"
+has "$TMPD/p.txt" "rc=2" "... exit code 2"
+has "$TMPD/p.txt" "count=2" "... and nothing was cleared"
+part "$U" U-COUNT U-OUT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "count=3" "tidy ran on notes.changed and kept three notes (5 -> 3)"
+part "$U" U-OUT U-LOG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autorun: tidy triggered by notes.changed" "the trigger loop names the event"
+n_t=$(grep -ac 'autorun: tick triggered by timer' "$TMPD/p.txt")
+[ "$n_t" -ge 4 ] && ok "the timer ran tick $n_t times in ~9 s" || bad "tick ran $n_t times"
+part "$U" U-LOG FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=automation:addtwo" "the audit log names the automation (kernel label), not the user"
+has "$TMPD/p.txt" "client=automation:sneak" "... also the one that was parked"
+has "$TMPD/p.txt" "client=automation:tidy verb=call action=notes.remove decision=allow" "tidy's removals are in the log under its own name"
+grep -qa 'autorun: already labelled' "$U" && bad "a run could not label itself" || ok "every run labelled itself in the kernel"
+echo "ACTIONBUS-AUTOMATIONS tick_runs=$n_t"
+grep -qaE 'panic|EXCEPTION' "$U" && bad "a panic or exception in the section-21 guest" || ok "no panic, no exception (section 21)"
+
+# ===================================================================
 echo "== 11. Jarvis is a client: the real bridge, the real client =="
 # ===================================================================
 # The JARVIS server side is tools/bridge/peer.py (TLS 1.3, Ed25519 login,

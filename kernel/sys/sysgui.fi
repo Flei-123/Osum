@@ -782,6 +782,43 @@ fn wm_fwin(state: u64, me: u64, op: u64, a: u64, b: u64, c: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
+// ROUND ACTION-BUS-5 (AB-004): the trusted dialog, see sys.WM_TRUST.
+// The text is COPIED into the kernel; the window server never follows a
+// pointer of the caller.
+static mut trust_buf: [u8; 400] = [0 as u8; 400]
+
+fn wm_trust(state: u64, me: u64, op: u64, no: u64, p: u64, n: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return cap.err(cap.E_RIGHTS)
+    }
+    if op == sys.TR_ASK {
+        if no == 0 || n == 0 || n > 384 {
+            return cap.err(cap.E_INVALID)
+        }
+        let buf: u64 = (&trust_buf[0]) as u64
+        var k: u64 = 0
+        while k < 400 {
+            kstate.set8(buf + k, 0 as u8)
+            k = k + 1
+        }
+        if !sys.copy_in(state, me, buf, p, n) {
+            return cap.err(cap.E_INVALID)
+        }
+        if !wm.trust_ask(state, no, buf, n) {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return 0
+    }
+    if op == sys.TR_POLL {
+        return wm.trust_poll(state, no)
+    }
+    if op == sys.TR_CANCEL {
+        wm.trust_cancel(state, no)
+        return 0
+    }
+    return cap.err(cap.E_INVALID)
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > sys.WM_MAXNR {
@@ -847,6 +884,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == sys.WM_FWIN {
         return wm_fwin(state, me, a0, a1, a2, a3)
+    }
+    if number == sys.WM_TRUST {
+        return wm_trust(state, me, a0, a1, a2, a3)
     }
     if number == sys.WM_DECO {
         if !is_taskbar(state, me) {

@@ -156,6 +156,20 @@ echo ==G-LOGPAGE==
 sleep 15
 echo ==G-NETDONE==
 cat /etc/network.conf
+echo ==G-TRUST==
+act call settings.set key=lock.idle value=600 --as helper
+sleep 8
+act call settings.get key=lock.idle
+echo ==G-TRUST2==
+act call settings.set key=lock.idle value=600 --as helper
+sleep 2
+act call viewer.search text=jjj
+sleep 2
+act stat
+echo ==G-TRUST3==
+sleep 8
+act call settings.get key=lock.idle
+echo ==G-TRUSTEND==
 echo ==G-CLOSE==
 act call viewer.close
 sleep 3
@@ -312,6 +326,28 @@ if waitfor "==G-LOGPAGE==" 60; then
     sleep 4
     shot "$TMPD/8-log.ppm"
 fi
+# AB-004: the trusted dialog. Helper (an agent) asks to change the lock
+# time; the window server shows the question over everything. "n" on the
+# REAL keyboard rejects it; the second time a program types "jjj" into a
+# window first (the dialog stays), then "j" on the real keyboard says yes
+if waitfor "==G-TRUST==" 90; then
+    if waitfor "wm: trusted dialog up no=" 10; then
+        sleep 1.5
+        shot "$TMPD/9-trust.ppm"
+        echo "sendkey n" > "$TMPD/kn.txt"
+        python3 tools/wm/monitor.py "$SOCK" "$TMPD/kn.txt" > /dev/null 2>&1
+    else
+        bad "no trusted dialog came up for the helper's change"
+    fi
+fi
+if waitfor "==G-TRUST3==" 60; then
+    sleep 1
+    shot "$TMPD/10-trust-still.ppm"
+    echo "sendkey j" > "$TMPD/kj.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$TMPD/kj.txt" > /dev/null 2>&1
+    sleep 2
+    shot "$TMPD/11-trust-done.ppm"
+fi
 waitfor "==FERTIG==" 150 || note "no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
@@ -394,7 +430,22 @@ has "$TMPD/p.txt" "key=net.dhcp old=false new=true" "the journal has the DHCP ch
 grep -qaE 'settings: protocol rows=([5-9]|[1-9][0-9]+) rc=0' "$G" \
     && ok "page Protokoll (S-009): $(grep -aoE 'protocol rows=[0-9]+' "$G" | tail -1) from 'audit 40' over the bus" \
     || bad "page Protokoll: $(grep -a 'settings: protocol' "$G" | tail -1)"
-for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log; do
+echo "== 6. the trusted dialog (AB-004) =="
+n_up=$(grep -ac 'wm: trusted dialog up no=' "$G")
+[ "$n_up" -ge 2 ] && ok "the window server showed its own dialog for the agents' requests ($n_up times)" || bad "trusted dialog shown $n_up times"
+has "$G" "wm: trusted dialog answer=2" "'n' on the real keyboard rejects"
+part "$G" G-TRUST G-TRUST2 > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=300" "... and the lock time stayed 300"
+part "$G" G-TRUST2 G-TRUST3 > "$TMPD/p.txt"
+has "$TMPD/p.txt" "trusted_dialogs=1" "a program typing 'jjj' into a window did not answer the dialog (still one answer)"
+has "$G" "wlkeys: key=36 state=1" "... although the program's 'j' did reach its window"
+has "$G" "wm: trusted dialog answer=1" "'j' on the real keyboard says yes"
+part "$G" G-TRUST3 G-TRUSTEND > "$TMPD/p.txt"
+has "$TMPD/p.txt" "value=600" "... and then the change is done (lock.idle=600)"
+part "$G" G-JOURNAL G-STAT > "$TMPD/p.txt"
+has "$TMPD/p.txt" "client=helper key=lock.idle" "the journal names the agent that asked, not the person who said yes"
+has "$G" "wm: trusted dialog down no=" "a request confirmed with 'act confirm' takes its dialog off the screen"
+for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log 9-trust 10-trust-still 11-trust-done; do
     [ -s "$TMPD/$f.png" ] && ok "photo: $TMPD/$f.png" || bad "no photo $f"
 done
 echo "ACTBUS-GUI: $pass passed, $fail failed"

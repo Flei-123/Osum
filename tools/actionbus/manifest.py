@@ -130,6 +130,12 @@ def parse(text, path="<manifest>", wrapper=False):
             if cur is not None and "args" in cur:
                 cur["adapter"] = w[1]
                 cur["reliability"] = RELIABILITY[w[1]]
+        elif k == "private":
+            # AB-015: an event only the user and the app itself hear
+            if cur is not None and "fields" in cur:
+                cur["private"] = True
+            else:
+                raise Bad("%s: 'private' belongs under an event" % where)
         elif k == "dryrun":
             if cur is not None and "dry_run" in cur:
                 cur["dry_run"] = True
