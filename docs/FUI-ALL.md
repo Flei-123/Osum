@@ -101,3 +101,23 @@ userland, loginui green or not worse than main.
   with `FIRN_OSUM_PAINTTIME=1` prints `wlib: paint frames=32
   avg_kcyc=… max_kcyc=… prims=…` once per program. Normal builds print
   nothing.
+
+## 4. Stage 2: the first program ON fUi (lock screen), 30.09.2026
+
+- `kernel/user/fuiapp.fi`: window (wlib's, so window server, a11y tree
+  and event pump stay the system's), ONE `wlib.canvas` over the client
+  area with the program's own buffer, fUi bound to it
+  (`fuib.app_bind`), events in fUi terms (`next`), clock (`now_ms`).
+- `lock.fi` paints label, text box (secret mode), button and eye with
+  fUi's widgets and `fui.textbuf`; the bullets are a second buffer
+  (`render.secret_mask`). The old wlib form stays as the emergency
+  fallback (`u_gui_wlib`) if fUi refuses the canvas.
+- Found on the way: a program's fUi painter had NO font (`fuib.s_fm`
+  was never set), so every fUi text was silently invisible. Fix:
+  `fuiglyph.fontset(role)` builds the `metrics.FontSet` from the fonts
+  fuiglyph already loaded.
+- fUi's `icon.stroke` is not exported -> the struck-through eye uses a
+  local stepped line. Lucide's `eye` cannot be imported next to
+  OrientOS's own `icons` module (same module name) -- open item.
+- `lock` prints `lock: rect id=..` lines (like `wlib.say_rects`) so
+  `tools/design/messen.py` still measures the 4-pixel grid (100 %).

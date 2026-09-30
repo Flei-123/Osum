@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fuiapp.fi -- FUI-ALL STAGE 2: A PROGRAM ON fUi DIRECTLY.
+//
+// wlib is a retained widget list that paints with fUi primitive by
+// primitive (stage 1). A program on fUi DIRECTLY describes and paints its
+// content with fUi itself -- fUi's widgets (`fui.widget` + `fui.render`),
+// fUi's text buffer (`fui.textbuf`, secret fields included) -- and needs
+// from the system only three things, which is exactly what this file is:
+//
+//   1. a WINDOW (wlib's window, so the window server, the a11y tree, the
+//      theme watch and the event pump stay the system's),
+//   2. PIXELS that belong to the program: one `wlib.canvas` widget over
+//      the whole client area, its buffer taken from the heap, and fUi
+//      bound to that buffer (`fuib.app_bind`: the system scheme, the
+//      system fonts, its own painter),
+//   3. EVENTS in fUi's terms: key, pointer down/up/move in canvas
+//      coordinates, plus a clock for caret blinking.
+//
+// Usage (see lock.fi, the first program built on it):
+//
+//     if !fuiapp.open_plain(0, 0, sw, sh, title, wlibc.L_TOP) { ... }
+//     let c: *mut render.Ctx = fuiapp.ctx()
+//     loop:
+//         fuiapp.frame_begin()          -- clears to the theme's base
+//         render.draw_widget(c, &w) ... -- fUi paints
+//         fuiapp.frame_end()            -- shows it
+//         while fuiapp.next(&ev) { ... }
+//
+// What stays out: layout (a program places its fUi widgets itself or uses
+// fui.flex / fui.scene) and focus order (a program with fUi widgets owns
+// its Tab chain) -- both are fUi's, not this file's.
+profile app
+
+import ulib
+import std.rt
+import wlibc
+import wlib
+import fuib
+import fui.render
+import fui.theme
+import paint.canvas
+
+export {
+    open_plain, open_window, ctx, width, height, frame_begin, frame_end,
+    next, alive, now_ms, win, theme, Ev, ev_new,
+    EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE,
+}
+
+const EV_NONE: u64 = 0
+const EV_KEY: u64 = 1
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+
+struct Ev {
+    kind: u64,
+    key: u64,   // EV_KEY: wlib's key code (KEY_* or an octet)
+    x: u64,     // pointer events: canvas coordinates
+    y: u64,
+    btn: u64,
+}
+
+fn ev_new() -> Ev {
+    return Ev { kind: 0, key: 0, x: 0, y: 0, btn: 0 }
+}
+
+static mut s_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut s_cv: u64 = 0xFFFFFFFFFFFFFFFF
+static mut s_px: u64 = 0
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+static mut s_bound: u64 = 0
+static mut s_ring: [u64; 4] = [0 as u64; 4]
+
+static mut m_nobuf: [u8; 30] = "fuiapp: no pixels for canvas\0\0"
+static mut m_nobind: [u8; 38] = "fuiapp: fUi refused the canvas (bind)\0"
+static mut m_ok: [u8; 20] = "fuiapp: canvas w=\0\0\0"
+static mut m_h: [u8; 4] = " h=\0"
+
+fn win() -> u64 { return s_win }
+fn width() -> u64 { return s_w }
+fn height() -> u64 { return s_h }
+fn ctx() -> *mut render.Ctx { return fuib.app_ctx() }
+fn theme() -> *mut theme.Theme { return fuib.app_theme() }
+
+fn now_ms() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+// The canvas widget over the whole client area, and fUi on its buffer.
+// The window is painted once first: that is what makes the bridge ready
+// (theme and fonts), so the bind below cannot fail for want of them.
+fn attach(w: u64, bw: u64, bh: u64) -> bool {
+    let n: u64 = bw * bh * 4
+    let px: u64 = rt.heap_alloc(n as usize) as u64
+    if px == 0 {
+        ulib.say((&m_nobuf[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    wlib.box_v(w, 0, 0, bw, bh, 0, 0)
+    wlib.size(bw, bh)
+    s_cv = wlib.canvas(px, bw, bh)
+    wlib.box_end()
+    wlib.set_focus(s_cv)
+    s_px = px
+    s_w = bw
+    s_h = bh
+    wlib.draw_all()
+    if !fuib.app_bind(px, bw, bh) {
+        ulib.say((&m_nobind[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    s_bound = 1
+    ulib.say((&m_ok[0 as usize]) as u64)
+    ulib.sayn(bw)
+    ulib.say((&m_h[0 as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    return true
+}
+
+// A frameless window (lock screen, login): `wlib.window_plain`.
+fn open_plain(x: u64, y: u64, bw: u64, bh: u64, title: u64,
+    layer: u64) -> bool {
+    let w: u64 = wlib.window_plain(x, y, bw, bh, title, layer)
+    if w >= wlib.MAXWN {
+        return false
+    }
+    s_win = w
+    return attach(w, bw, bh)
+}
+
+// An ordinary window with a frame: the canvas takes the client area.
+fn open_window(x: u64, y: u64, bw: u64, bh: u64, title: u64) -> bool {
+    let w: u64 = wlib.window(x, y, bw, bh, title)
+    if w >= wlib.MAXWN {
+        return false
+    }
+    s_win = w
+    return attach(w, wlib.win_w(w), wlib.win_h(w))
+}
+
+// The start of a picture: the whole canvas in the theme's base colour.
+fn frame_begin() {
+    if s_bound == 0 {
+        return
+    }
+    let c: *mut canvas.Canvas = fuib.app_canvas()
+    (*c).depth = 0
+    (*c).cx0[0] = 0.0
+    (*c).cy0[0] = 0.0
+    (*c).cx1[0] = s_w as f64
+    (*c).cy1[0] = s_h as f64
+    let base: u32 = (*theme.theme_colors(fuib.app_theme())).base | 4278190080 as u32
+    canvas.canvas_fill_rect(c, 0.0, 0.0, s_w as f64, s_h as f64, base)
+}
+
+// The picture is done: the canvas is dirty, and the window server gets it.
+fn frame_end() {
+    if s_bound == 0 {
+        return
+    }
+    wlib.canvas_new(s_cv)
+    wlib.draw_all()
+}
+
+fn alive() -> bool {
+    return wlib.alive()
+}
+
+// One step of the system's event pump, then the next canvas event.
+// false = nothing waiting (the caller repaints if it wants to and calls
+// again; wlib.step yields while idle).
+fn next(e: *mut Ev) -> bool {
+    (*e).kind = EV_NONE
+    if wlib.canvas_pending() == 0 {
+        let _id: u64 = wlib.step()
+    }
+    let q: u64 = (&s_ring[0 as usize]) as u64
+    if !wlib.canvas_event(q) {
+        return false
+    }
+    let art: u64 = s_ring[1 as usize]
+    let a: u64 = s_ring[2 as usize]
+    let b: u64 = s_ring[3 as usize]
+    if art == wlib.LE_KEY {
+        (*e).kind = EV_KEY
+        (*e).key = a
+        return true
+    }
+    (*e).x = a >> 16
+    (*e).y = a & 0xFFFF
+    (*e).btn = b
+    if art == wlib.LE_DOWN {
+        (*e).kind = EV_DOWN
+    } else if art == wlib.LE_UP {
+        (*e).kind = EV_UP
+    } else {
+        (*e).kind = EV_MOVE
+    }
+    return true
+}
+

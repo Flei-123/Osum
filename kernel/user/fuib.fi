@@ -71,6 +71,7 @@ import ulib
 import wlibc
 import paint.canvas
 import font.metrics
+import fuiglyph
 import fui.theme
 import fui.style
 import fui.widget
@@ -106,6 +107,8 @@ export {
     // ROUND FUI-ALL stage 1: wlib's paint primitives, drawn by fUi.
     rect, hline, vline, dot, frame, frame3, rrect, rring, rframe, shadow,
     fui_prims, icon, picture,
+    // FUI-ALL stage 2: a program's own fUi canvas (see fuiapp.fi).
+    app_bind, app_ctx, app_canvas, app_theme,
 }
 
 const Z_NORMAL: u64 = 0
@@ -147,16 +150,22 @@ const S_PROGRESS: u64 = 12
 // benannten Wert -- deshalb stehen die 128/64/128 hier ausgeschrieben
 // und die Namen daneben nur als Erklaerung.
 //   s_cvm  128 Woerter = 1024 Oktette  fuer paint.canvas.Canvas
-//   s_pzm   64 Woerter =  512 Oktette  fuer fui.painter.Painter
+//   s_pzm  256 Woerter = 2048 Oktette  fuer fui.painter.Painter
+//          (FUI-ALL: Painter is 648 octets since the Firn pin of stage 0;
+//          at 64 words `ready()` refused it and EVERY program silently
+//          painted with wlibc again -- measured: prims=0, fui=0.)
 //   s_thm  128 Woerter = 1024 Oktette  fuer fui.theme.Theme
 // Ob das reicht, wird in `bereit()` GEMESSEN und nicht geglaubt.
 const CV_BYTES: usize = 1024
-const PZ_BYTES: usize = 512
+const PZ_BYTES: usize = 2048
 const TH_BYTES: usize = 1024
 
 static mut s_auf: u64 = 0
+static mut s_said_big: u64 = 0
+static mut m_big: [u8; 46] = "fuib: wlibc fallback, fUi struct grew: cv/pz=\0"
+static mut m_sp: [u8; 2] = " \0"
 static mut s_cvm: [u64; 128] = [0; 128]
-static mut s_pzm: [u64; 64] = [0; 64]
+static mut s_pzm: [u64; 256] = [0; 256]
 static mut s_thm: [u64; 128] = [0; 128]
 // render.Ctx carries a function pointer (the animation hook) since the
 // Firn pin of round FUI-ALL, and a static cannot be initialised with one.
@@ -452,6 +461,20 @@ fn ready() -> bool {
     var mcx: [render.Ctx; 2] = [render.ctx_new(&mth[0], &mpz[0]); 2]
     let ncx: usize = ((&mcx[1]) as u64 - (&mcx[0]) as u64) as usize
     if ncv > CV_BYTES || npz > PZ_BYTES || nth > TH_BYTES || ncx > 64 {
+        // Say it, once: a silent refusal here made every program paint
+        // with wlibc again for a whole stage without anybody seeing it.
+        if s_said_big == 0 {
+            s_said_big = 1
+            ulib.say((&m_big[0 as usize]) as u64)
+            ulib.sayn(ncv as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(npz as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(nth as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(ncx as u64)
+            ulib.nl()
+        }
         return false
     }
     canvas_on_surface(cv(), sp, w, h)
@@ -1132,4 +1155,58 @@ fn picture(px: u64, iw: u64, ih: u64, turn: u64, ox: i64, oy: i64,
 // field shows. Returns the octets written to `out` (at most `cap`).
 fn secret_mask(p: u64, n: u64, out: u64, cap: u64) -> u64 {
     return render.secret_mask(p, n as usize, out, cap as usize) as u64
+}
+
+// ====================================================================
+// FUI-ALL STAGE 2: A PROGRAM THAT PAINTS WITH fUi ITSELF.
+//
+// Up to here fUi only painted what wlib asked for, primitive by primitive
+// on wlib's band. A program on fUi DIRECTLY owns its pixels: one wlib
+// canvas widget (`wlib.canvas`, the same widget Certus paints its page
+// into) whose buffer the program hands to fUi. This is the second canvas
+// of the bridge -- same theme (the system scheme, R and B swapped, so the
+// octets land in the framebuffer's order), same fonts, its own painter
+// and render context, bound to the program's buffer instead of wlib's
+// surface. `kernel/user/fuiapp.fi` wraps window, buffer and events.
+// ====================================================================
+static mut s_app_ok: u64 = 0
+static mut s_acvm: [u64; 128] = [0; 128]
+static mut s_apzm: [u64; 256] = [0; 256]
+static mut s_actxm: [u64; 8] = [0; 8]
+
+fn app_canvas() -> *mut canvas.Canvas {
+    return ((&s_acvm[0 as usize]) as u64) as *mut canvas.Canvas
+}
+
+fn app_pz() -> *mut painter.Painter {
+    return ((&s_apzm[0 as usize]) as u64) as *mut painter.Painter
+}
+
+fn app_ctx() -> *mut render.Ctx {
+    return ((&s_actxm[0 as usize]) as u64) as *mut render.Ctx
+}
+
+fn app_theme() -> *mut theme.Theme {
+    return th()
+}
+
+// Bind fUi to `px` (w*h words, B,G,R,0 like the surface). The theme and
+// fonts come from `ready()`, so the window must have been painted once.
+// A new buffer (resize) rebinds the canvas; the painter keeps its raster
+// store as long as the height does not grow.
+fn app_bind(px: u64, w: u64, h: u64) -> bool {
+    if px == 0 || w == 0 || h == 0 || !ready() {
+        return false
+    }
+    canvas_on_surface(app_canvas(), px, w as usize, h as usize)
+    if s_app_ok == 0 || s_app_ok < h {
+        if !painter.painter_init(app_pz(), app_canvas(), w as usize,
+            (h + 3) as usize) {
+            return false
+        }
+        painter.painter_set_font(app_pz(), fuiglyph.fontset(fuiglyph.ROLE_UI))
+        *app_ctx() = render.ctx_new(th(), app_pz())
+        s_app_ok = h
+    }
+    return true
 }

@@ -46,6 +46,13 @@ import libc.io
 import wlibc
 import wlib
 import pw
+import fuiapp
+import fui.widget
+import fui.render
+import fui.textbuf
+import fui.icon
+import fui.painter
+import fui.theme
 
 export { u_start }
 
@@ -138,7 +145,10 @@ fn leeren() {
         kenn[(i) as usize] = 0 as u8
         i = i + 1
     }
-    wlib.set_text(w_kenn, (&kenn[(0) as usize]) as u64)
+    f_caret = 0
+    if !f_fui {
+        wlib.set_text(w_kenn, (&kenn[(0) as usize]) as u64)
+    }
 }
 
 fn versuchen() -> bool {
@@ -149,7 +159,9 @@ fn versuchen() -> bool {
         leeren()
         ulib.strcpy((&kopf[(0) as usize]) as u64,
             (&T_FALSCH[(0) as usize]) as u64)
-        wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+        if !f_fui {
+            wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+        }
         say((&s_no[(0) as usize]) as u64)
         ulib.nl()
         return false
@@ -164,17 +176,352 @@ fn versuchen() -> bool {
     return true
 }
 
+// ============================================ FUI-ALL STAGE 2
+// THE LOCK SCREEN ON fUi DIRECTLY.
+//
+// Until here this screen was a wlib form (label, label, password,
+// button). Now it is fUi's: one canvas over the whole screen
+// (kernel/user/fuiapp.fi), and on it fUi's own label, text field and
+// button widgets, fUi's text buffer in SECRET mode (fUi refuses copy and
+// cut of it) and fUi's Lucide eye. wlib only supplies the window, the
+// pixels and the events. If fUi cannot take the canvas the old wlib form
+// comes up instead (`u_gui_wlib`) -- a lock screen that does not appear
+// is worse than one in the old look.
+//
+// The mask: fUi's field paints its buffer as it is, so the bullets are a
+// SECOND buffer (render.secret_mask, one U+2022 per character) with the
+// caret mapped onto it; the eye paints the real buffer instead.
+const F_FIELD: u64 = 1
+const F_BUTTON: u64 = 2
+const COL_W: u64 = 420
+const FIELD_H: u64 = 36
+const BTN_W: u64 = 140
+
+static mut v_mask: [u8; 400] = [0 as u8; 400]
+static mut f_focus: u64 = 1
+static mut f_eye: bool = false
+static mut f_caret_on: bool = true
+static mut f_blink_t: u64 = 0
+
+fn draw_label_at(c: *mut render.Ctx, x: u64, y: u64, w: u64, p: u64) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&e, x as f64, y as f64, w as f64, 24.0)
+    widget.w_set_text(&e, p, ulib.length(p) as usize)
+    render.draw_widget(c, &e)
+}
+
+// The buffer as fUi's TextBuf, over `kenn` itself (no copy).
+fn tb_of(t: *mut textbuf.TextBuf) {
+    textbuf.tb_init(t, (&kenn[(0) as usize]) as u64, 120)
+    textbuf.tb_set_len(t, ulib.length((&kenn[(0) as usize]) as u64) as usize)
+    textbuf.tb_set_range(t, f_caret, f_caret)
+    textbuf.tb_set_secret(t, true)
+}
+
+static mut f_caret: usize = 0
+// true while the fUi screen is up: the wlib widgets below do not exist.
+static mut f_fui: bool = false
+static mut s_begun: bool = false
+
+fn geometry(bw: u64, bh: u64, x: *mut u64, y: *mut u64) {
+    // On the 4-pixel grid (tools/design/messen.py checks it).
+    *x = ((bw - COL_W) / 2) / 4 * 4
+    *y = (bh / 3) / 4 * 4
+}
+
+// A slanted line, stepped with small squares (fUi's own icon.stroke is
+// not exported).
+fn slash(z: *mut painter.Painter, x0: f64, y0: f64, x1: f64, y1: f64,
+    col: u32) {
+    var i: i64 = 0
+    while i <= 40 {
+        let t: f64 = (i as f64) / 40.0
+        painter.surface(z, x0 + (x1 - x0) * t - 0.75,
+            y0 + (y1 - y0) * t - 0.75, 1.5, 1.5, col)
+        i = i + 1
+    }
+}
+
+// One trace line per element, in the format of wlib.say_rects, so the
+// layout checks (tools/design/messen.py) see the fUi screen like any
+// other: `lock: rect id=N kind=K x= y= w= h=`.
+fn say_one(id: u64, kind: u64, x: u64, y: u64, w: u64, h: u64) {
+    var s_r: [u8; 15] = "lock: rect id=\0"
+    var s_k: [u8; 7] = " kind=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    say((&s_r[(0) as usize]) as u64)
+    ulib.sayn(id)
+    say((&s_k[(0) as usize]) as u64)
+    ulib.sayn(kind)
+    say((&s_x[(0) as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_y[(0) as usize]) as u64)
+    ulib.sayn(y)
+    say((&s_w[(0) as usize]) as u64)
+    ulib.sayn(w)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(h)
+    ulib.nl()
+}
+
+fn say_rects_fui() {
+    if !wlib.trace() {
+        return
+    }
+    var x: u64 = 0
+    var y: u64 = 0
+    geometry(fuiapp.width(), fuiapp.height(), &x, &y)
+    say_one(1, 1, x, y, COL_W, 24)
+    say_one(2, 1, x, y + 28, COL_W, 24)
+    say_one(3, 4, x, y + 60, COL_W, FIELD_H)
+    say_one(4, 2, x, y + 108, BTN_W, FIELD_H)
+}
+
+fn paint_fui() {
+    let c: *mut render.Ctx = fuiapp.ctx()
+    let bw: u64 = fuiapp.width()
+    let bh: u64 = fuiapp.height()
+    var x: u64 = 0
+    var y: u64 = 0
+    geometry(bw, bh, &x, &y)
+    fuiapp.frame_begin()
+    draw_label_at(c, x, y, COL_W, (&name[(0) as usize]) as u64)
+    draw_label_at(c, x, y + 28, COL_W, (&kopf[(0) as usize]) as u64)
+
+    // The field: fUi's text box, its content either the mask or (eye
+    // open) the buffer itself.
+    var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&fe, x as f64, (y + 60) as f64, COL_W as f64,
+        FIELD_H as f64)
+    widget.w_set_secret(&fe, true)
+    widget.w_set_focus(&fe, f_focus == F_FIELD)
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    tb_of(&tb)
+    if f_eye {
+        render.draw_field(c, &fe, &tb, 0.0, f_caret_on, 0, 0)
+    } else {
+        let kp: u64 = (&kenn[(0) as usize]) as u64
+        let mp: u64 = (&v_mask[(0) as usize]) as u64
+        let mn: usize = render.secret_mask(kp, ulib.length(kp) as usize, mp, 396)
+        var mv: textbuf.TextBuf = textbuf.tb_new()
+        textbuf.tb_init(&mv, mp, 396)
+        textbuf.tb_set_len(&mv, mn)
+        textbuf.tb_set_range(&mv, mask_at(f_caret), mask_at(f_caret))
+        render.draw_field(c, &fe, &mv, 0.0, f_caret_on, 0, 0)
+    }
+    // The eye: a square at the right end of the field, drawn with fUi's
+    // painter (an almond ring and a pupil; struck through while the text
+    // shows). fUi's Lucide set (fui.icons) cannot be imported next to
+    // OrientOS's own `icons` module -- two modules of one name.
+    let col: u32 = (*theme.theme_colors(fuiapp.theme())).text | 4278190080 as u32
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let ex: f64 = (x + COL_W - FIELD_H) as f64
+    let ey: f64 = (y + 60) as f64
+    painter.round_ring(z, ex + 8.0, ey + 12.0, 20.0, 12.0, 6.0, 1.5, col)
+    icon.dot(z, ex + 15.0, ey + 15.0, 6.0, col)
+    if f_eye {
+        slash(z, ex + 8.0, ey + 26.0, ex + 28.0, ey + 10.0, col)
+    }
+
+    var be: widget.Widget = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&be, x as f64, (y + 108) as f64, BTN_W as f64,
+        FIELD_H as f64)
+    widget.w_set_text(&be, (&T_AUF[(0) as usize]) as u64, 10)
+    widget.w_set_focus(&be, f_focus == F_BUTTON)
+    render.draw_widget(c, &be)
+    fuiapp.frame_end()
+}
+
+// Octets of the mask before the caret: three per character before it.
+fn mask_at(caret: usize) -> usize {
+    var n: usize = 0
+    var i: usize = 0
+    while i < caret {
+        let b: u8 = kenn[i]
+        if (b & 0xC0 as u8) != 0x80 as u8 {
+            n = n + 3
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn key_fui(k: u64) -> bool {
+    if k == wlib.KEY_TAB || k == wlib.KEY_BTAB {
+        if f_focus == F_FIELD {
+            f_focus = F_BUTTON
+        } else {
+            f_focus = F_FIELD
+        }
+        return false
+    }
+    if f_focus == F_BUTTON {
+        return k == wlib.KEY_ENTER || k == 32
+    }
+    if k == wlib.KEY_ENTER {
+        return true
+    }
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    tb_of(&tb)
+    if k == wlib.KEY_LEFT {
+        textbuf.tb_left(&tb, false)
+    } else if k == wlib.KEY_RIGHT {
+        textbuf.tb_right(&tb, false)
+    } else if k == wlib.KEY_HOME {
+        textbuf.tb_home(&tb, false)
+    } else if k == wlib.KEY_END {
+        textbuf.tb_end(&tb, false)
+    } else if k == wlib.KEY_BS || k == 127 {
+        let _b: bool = textbuf.tb_backspace(&tb)
+    } else if k == wlib.KEY_DEL {
+        let _d: bool = textbuf.tb_delete_fwd(&tb)
+    } else if k >= 32 && k < 256 && k != 127 {
+        var ch: [u8; 1] = [k as u8; 1]
+        let _i: bool = textbuf.tb_insert(&tb, (&ch[0 as usize]) as u64, 1)
+    }
+    // Copy/cut are fUi's and refused on a secret buffer -- there is no
+    // clipboard path here at all.
+    kenn[textbuf.tb_len(&tb)] = 0 as u8
+    f_caret = textbuf.tb_caret(&tb)
+    return false
+}
+
+fn leeren_fui() {
+    var i: u64 = 0
+    while i < 128 {
+        kenn[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    f_caret = 0
+}
+
+fn click_fui(px: u64, py: u64) -> bool {
+    var x: u64 = 0
+    var y: u64 = 0
+    geometry(fuiapp.width(), fuiapp.height(), &x, &y)
+    if py >= y + 60 && py < y + 60 + FIELD_H && px >= x && px < x + COL_W {
+        if px >= x + COL_W - FIELD_H {
+            f_eye = !f_eye
+        }
+        f_focus = F_FIELD
+        return false
+    }
+    if py >= y + 108 && py < y + 108 + FIELD_H && px >= x && px < x + BTN_W {
+        f_focus = F_BUTTON
+        return true
+    }
+    return false
+}
+
 fn u_gui() -> u64 {
     var s_bad: [u8; 20] = "lock: keine Flaeche\0"
     var s_go: [u8; 15] = "sperre: bereit\0"
     var s_geom: [u8; 16] = "sperre: geom w=\0"
     var s_h: [u8; 4] = " h=\0"
     var s_pid: [u8; 21] = "sperre: sperrer pid=\0"
+    var s_fui: [u8; 19] = "sperre: fUi direkt\0"
     if !wlib.begin(false, true) {
         say((&s_bad[(0) as usize]) as u64)
         ulib.nl()
         return 1
     }
+    s_begun = true
+    // ERST SPERREN, DANN MALEN (see u_gui_wlib).
+    let _a: u64 = sy(OP_AN, 0)
+    let _i: u64 = sy(OP_ICH, 0)
+    whoami()
+    let bw: u64 = wlibc.screen_w()
+    let bh: u64 = wlibc.screen_h()
+    if !fuiapp.open_plain(0, 0, bw, bh, (&T_TITEL[(0) as usize]) as u64,
+        wlibc.L_TOP) {
+        if fuiapp.win() < wlib.MAXWN {
+            wlib.close(fuiapp.win())
+        }
+        return u_gui_wlib()
+    }
+    w_win = fuiapp.win()
+    f_fui = true
+    let _ap: u64 = wlib.window_app(w_win, (&T_APP[(0) as usize]) as u64)
+    if hat_kennwort() {
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_FRAGE[(0) as usize]) as u64)
+    } else {
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_KEIN[(0) as usize]) as u64)
+    }
+    say((&s_fui[(0) as usize]) as u64)
+    ulib.nl()
+    say((&s_geom[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    say((&s_pid[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_NUM, 4))
+    ulib.nl()
+    f_blink_t = fuiapp.now_ms()
+    paint_fui()
+    say_rects_fui()
+    say((&s_go[(0) as usize]) as u64)
+    ulib.nl()
+
+    var offen: bool = false
+    var ev: fuiapp.Ev = fuiapp.ev_new()
+    while wlib.alive() && !offen {
+        var neu: bool = false
+        while fuiapp.next(&ev) {
+            var los: bool = false
+            if ev.kind == fuiapp.EV_KEY {
+                los = key_fui(ev.key)
+                neu = true
+            } else if ev.kind == fuiapp.EV_DOWN {
+                los = click_fui(ev.x, ev.y)
+                neu = true
+            }
+            if los {
+                offen = versuchen()
+                if !offen {
+                    leeren_fui()
+                    f_focus = F_FIELD
+                }
+            }
+            f_caret_on = true
+            f_blink_t = fuiapp.now_ms()
+        }
+        // The caret blinks at 530 ms, like wlib's (and Windows').
+        let t: u64 = fuiapp.now_ms()
+        if t >= f_blink_t + 530 {
+            f_blink_t = t
+            f_caret_on = !f_caret_on
+            neu = true
+        }
+        if neu && !offen {
+            paint_fui()
+        }
+        if !wlib.alive() && sy(OP_STATE, 0) == 1 {
+            return 1
+        }
+    }
+    wlib.close(w_win)
+    wlib.draw_all()
+    return 0
+}
+
+fn u_gui_wlib() -> u64 {
+    var s_bad: [u8; 20] = "lock: keine Flaeche\0"
+    var s_go: [u8; 15] = "sperre: bereit\0"
+    var s_geom: [u8; 16] = "sperre: geom w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_pid: [u8; 21] = "sperre: sperrer pid=\0"
+    if !s_begun && !wlib.begin(false, true) {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    s_begun = true
     // ERST SPERREN, DANN MALEN. Andersherum gaebe es einen Augenblick,
     // in dem ein Fenster mit der Kennwortfrage dasteht und die Tastatur
     // noch der Sitzung darunter gehoert.
