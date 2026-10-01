@@ -319,7 +319,7 @@ open(d + "/sperre.conf", "w").write("# /etc/sperre.conf\nleerlauf=2\n")
 PY
 MON=""
 for c in f a l s c h ret g e h e i m 1 2 ret; do MON="$MON mon=sendkey\ $c"; done
-eval bash "$B" "$OUT/sp1" kbd=yes warten=8 extra=\"wigapp=/bin/lock\" \
+eval bash "$B" "$OUT/sp1" kbd=yes uitrace=yes warten=8 extra=\"wigapp=/bin/lock\" \
     progs=\"lock desktop taskbar launcher theme sh echo ls cat\" \
     xfile=/etc/shadow="$OUT/shadow" $MON > "$OUT/sp1.log" 2>&1
 S=$OUT/sp1/serial.txt
