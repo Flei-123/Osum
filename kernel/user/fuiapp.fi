@@ -39,11 +39,17 @@ import fuib
 import fui.render
 import fui.theme
 import paint.canvas
+import fuiglyph
+import fui.widget
+import fui.textbuf
+import fui.painter
 
 export {
     open_plain, open_window, ctx, width, height, frame_begin, frame_end,
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE,
+    label, button, field, eye, glyph, edit, mask_off,
+    ink, panel, row, sel_on, sel_clear,
 }
 
 const EV_NONE: u64 = 0
@@ -83,8 +89,14 @@ fn height() -> u64 { return s_h }
 fn ctx() -> *mut render.Ctx { return fuib.app_ctx() }
 fn theme() -> *mut theme.Theme { return fuib.app_theme() }
 
+// Monotonic milliseconds (clock_gettime, like wlib's blink clock); the
+// timer ticks (I_TICKS) are 10 ms apart and stand still in the file system.
 fn now_ms() -> u64 {
-    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(228, 1, (&ts[0 as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] * 1000 + ts[1 as usize] / 1000000
 }
 
 // The canvas widget over the whole client area, and fUi on its buffer.
@@ -129,6 +141,7 @@ fn open_plain(x: u64, y: u64, bw: u64, bh: u64, title: u64,
         return false
     }
     s_win = w
+    wlib.canvas_tab(true)
     return attach(w, bw, bh)
 }
 
@@ -139,6 +152,7 @@ fn open_window(x: u64, y: u64, bw: u64, bh: u64, title: u64) -> bool {
         return false
     }
     s_win = w
+    wlib.canvas_tab(true)
     return attach(w, wlib.win_w(w), wlib.win_h(w))
 }
 
@@ -203,3 +217,208 @@ fn next(e: *mut Ev) -> bool {
     return true
 }
 
+
+// ====================================================================
+// FUI-ALL STAGE 2b: THE PARTS A FORM NEEDS (label, button, text field,
+// eye, icon glyph, key editing). Every program that paints with fUi
+// directly needs the same handful; they live here so that a form is
+// placement + state and nothing else. All of them paint with fUi's own
+// widgets (fui.widget + fui.render) into the program's canvas.
+// ====================================================================
+static mut a_mask: [u8; 400] = [0 as u8; 400]
+
+fn lbl_h() -> u64 { return 24 }
+
+// A text label at (x, y), `w` wide.
+fn label(x: u64, y: u64, w: u64, p: u64) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&e, x as f64, y as f64, w as f64, 24.0)
+    widget.w_set_text(&e, p, ulib.length(p) as usize)
+    render.draw_widget(ctx(), &e)
+}
+
+// A push button; `focus` draws fUi's focus ring.
+fn button(x: u64, y: u64, w: u64, h: u64, p: u64, focus: bool) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&e, x as f64, y as f64, w as f64, h as f64)
+    if p != 0 {
+        widget.w_set_text(&e, p, ulib.length(p) as usize)
+    }
+    widget.w_set_focus(&e, focus)
+    render.draw_widget(ctx(), &e)
+}
+
+// UTF-8 octets of the private-use codepoint `cp` (0xE000..0xEFFF).
+// The icon font (/lib/icons.ttf) keeps its symbols there.
+fn glyph(cp: u64, x: u64, y: u64, size: u64, col: u32) {
+    let ifs: u64 = fuiglyph.fontset(fuiglyph.ROLE_ICON)
+    if ifs == 0 {
+        return
+    }
+    var b: [u8; 4] = [0 as u8; 4]
+    b[0 as usize] = (0xE0 | ((cp >> 12) & 0x0F)) as u8
+    b[1 as usize] = (0x80 | ((cp >> 6) & 0x3F)) as u8
+    b[2 as usize] = (0x80 | (cp & 0x3F)) as u8
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let old: u64 = painter.painter_font(z)
+    painter.painter_set_font(z, ifs)
+    let base: f64 = (y as f64) + (size as f64) * 0.85
+    let _w: f64 = painter.text(z, x as f64, base, size as f64, size as f64,
+        col, (&b[0 as usize]) as u64, 3, painter.TEXT_L)
+    painter.painter_set_font(z, old)
+}
+
+// Octets of the mask before `caret`: three per character before it.
+fn mask_off(buf: u64, caret: usize) -> usize {
+    var n: usize = 0
+    var i: usize = 0
+    while i < caret {
+        let c: u8 = __mmio_read8((buf + i as u64) as *mut u8)
+        if (c & 0xC0 as u8) != 0x80 as u8 {
+            n = n + 3
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// A text field over `buf` (NUL-terminated, `cap` octets of text). Secret
+// fields show fUi's bullets (a second buffer, render.secret_mask) unless
+// `show` (the eye is open).
+fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
+    focus: bool, secret: bool, show: bool, caret_on: bool, sel: bool) {
+    var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&fe, x as f64, y as f64, w as f64, h as f64)
+    if secret {
+        widget.w_set_secret(&fe, true)
+    }
+    widget.w_set_focus(&fe, focus)
+    let n: usize = ulib.length(buf) as usize
+    if secret && !show {
+        let mp: u64 = (&a_mask[0 as usize]) as u64
+        let mn: usize = render.secret_mask(buf, n, mp, 396)
+        var mv: textbuf.TextBuf = textbuf.tb_new()
+        textbuf.tb_init(&mv, mp, 396)
+        textbuf.tb_set_len(&mv, mn)
+        if sel {
+            textbuf.tb_set_range(&mv, 0, mn)
+        } else {
+            textbuf.tb_set_range(&mv, mask_off(buf, caret), mask_off(buf, caret))
+        }
+        render.draw_field(ctx(), &fe, &mv, 0.0, caret_on, 0, 0)
+    } else {
+        var tb: textbuf.TextBuf = textbuf.tb_new()
+        textbuf.tb_init(&tb, buf, cap)
+        textbuf.tb_set_len(&tb, n)
+        if sel {
+            textbuf.tb_set_range(&tb, 0, n)
+        } else {
+            textbuf.tb_set_range(&tb, caret, caret)
+        }
+        if secret {
+            textbuf.tb_set_secret(&tb, true)
+        }
+        render.draw_field(ctx(), &fe, &tb, 0.0, caret_on, 0, 0)
+    }
+}
+
+// The eye in the square at the right end of a field of height `h`.
+fn eye(x: u64, y: u64, h: u64, open: bool, col: u32) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let ex: f64 = x as f64
+    let ey: f64 = y as f64
+    painter.round_ring(z, ex + 8.0, ey + 10.0, 16.0, 12.0, 6.0, 1.5, col)
+    painter.round_rect(z, ex + 13.5, ey + 13.5, 5.0, 5.0, 2.5, col)
+    if open {
+        var i: i64 = 0
+        while i <= 24 {
+            let t: f64 = (i as f64) / 24.0
+            painter.surface(z, ex + 8.0 + 16.0 * t - 0.75,
+                ey + 22.0 - 12.0 * t - 0.75, 1.5, 1.5, col)
+            i = i + 1
+        }
+    }
+}
+
+// One key into the text in `buf` (`cap` octets of text), caret at
+// *`caret`. Insert, delete, caret keys; copy/cut/paste do nothing (fUi
+// refuses them on a secret buffer, and this form has no clipboard path).
+static mut a_sel: bool = false
+fn sel_on() -> bool { return a_sel }
+fn sel_clear() { a_sel = false }
+
+fn edit(buf: u64, cap: usize, caret: *mut usize, k: u64, secret: bool) {
+    // Ctrl+A (octet 1) selects everything; the next delete key empties
+    // the field, the next character replaces it. Any other key ends it.
+    if k == 1 {
+        a_sel = true
+        *caret = ulib.length(buf) as usize
+        return
+    }
+    if a_sel {
+        a_sel = false
+        if k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL
+            || (k >= 32 && k < 256 && k != 127) {
+            var z: usize = 0
+            while z < cap {
+                __mmio_write8((buf + z as u64) as *mut u8, 0 as u8)
+                z = z + 1
+            }
+            *caret = 0
+            if k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL {
+                return
+            }
+        }
+    }
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    textbuf.tb_init(&tb, buf, cap)
+    textbuf.tb_set_len(&tb, ulib.length(buf) as usize)
+    textbuf.tb_set_range(&tb, *caret, *caret)
+    if secret {
+        textbuf.tb_set_secret(&tb, true)
+    }
+    if k == wlib.KEY_LEFT {
+        textbuf.tb_left(&tb, false)
+    } else if k == wlib.KEY_RIGHT {
+        textbuf.tb_right(&tb, false)
+    } else if k == wlib.KEY_HOME {
+        textbuf.tb_home(&tb, false)
+    } else if k == wlib.KEY_END {
+        textbuf.tb_end(&tb, false)
+    } else if k == wlib.KEY_BS || k == 127 {
+        let _b: bool = textbuf.tb_backspace(&tb)
+    } else if k == wlib.KEY_DEL {
+        let _d: bool = textbuf.tb_delete_fwd(&tb)
+    } else if k >= 32 && k < 256 && k != 127 {
+        var ch: [u8; 1] = [k as u8; 1]
+        let _i: bool = textbuf.tb_insert(&tb, (&ch[0 as usize]) as u64, 1)
+    }
+    __mmio_write8((buf + textbuf.tb_len(&tb) as u64) as *mut u8, 0 as u8)
+    *caret = textbuf.tb_caret(&tb)
+}
+
+// Ink colour (text) with full alpha, for what a program paints itself.
+fn ink() -> u32 {
+    return (*theme.theme_colors(fuib.app_theme())).text | 4278190080 as u32
+}
+
+// A raised panel (popup under the quick-access icons).
+fn panel(x: u64, y: u64, w: u64, h: u64) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuib.app_theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 8.0,
+        (*t).surface_raised | 4278190080 as u32)
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
+        (*t).border_col | 4278190080 as u32)
+}
+
+// One row of a list: text at (x+12, y), highlighted when `on`.
+fn row(x: u64, y: u64, w: u64, h: u64, p: u64, on: bool) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuib.app_theme())
+    if on {
+        painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 6.0,
+            (*t).selection | 4278190080 as u32)
+    }
+    label(x + 12, y + (h - 24) / 2, w - 24, p)
+}
