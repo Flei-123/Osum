@@ -181,7 +181,7 @@ gebraucht wird. Der Läufer misst beide Hälften.
     quelle=https://10.0.2.2:8443     woher (IPv4 -- es gibt keinen Resolver)
     name=ota.test                    der Name, den das Zertifikat tragen MUSS
     abstand=3600                     Sekunden zwischen zwei Suchen
-    auto=ja                          automatisch suchen? ja/nein
+    auto=ja                          automatisch suchen? ja/nein (Vorgabe: ja -- auch wenn der Schlüssel fehlt)
     frist=120                        Sekunden für den Wachhund
 
 **Es wird nie von selbst neu gestartet.** `einspielen` endet mit „BEREIT
