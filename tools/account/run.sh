@@ -220,7 +220,8 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '
 # ROUND ROADMAP-7: VIERZEHN. ACTION-BUS-3 brachte "System" (12) und
 # "App-Rechte" (13), ROADMAP-7 "Protokoll" (14) -- die Zahl stand seit
 # ACTION-BUS-3 auf dem alten Stand (auf main rot: 13 statt 11).
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 14
+# DAILY-DRIVER: FUENFZEHN -- "Updates" ist der 15. Reiter.
+num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 15
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="

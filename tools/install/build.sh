@@ -257,7 +257,7 @@ else
 #quelle=https://192.0.2.1:443
 #name=pkg.example.org
 abstand=3600
-auto=nein
+auto=false
 frist=120
 EOFC
 fi

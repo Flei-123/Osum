@@ -275,7 +275,10 @@ const R_RECHTE: u64 = 12
 // ROUND ROADMAP-7 (S-009): the audit log of the action bus as a page --
 // newest first, what `act audit` gives the user
 const R_PROTO: u64 = 13
-const R_ANZ: u64 = 14
+// DAILY-DRIVER: the system update as a page -- state and buttons over the
+// bus (settings.update.* of settingsd, which is root and runs `ota`)
+const R_UPDATE: u64 = 14
+const R_ANZ: u64 = 15
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -4170,6 +4173,9 @@ fn konto_kennung(k: u64, aus: u64, max: u64) -> bool {
 
 // ROUND ACTION-BUS-3: the two bus pages read the broker when shown
 fn bus_page(r: u64) {
+    if r == R_UPDATE {
+        upd_show()
+    }
     if r == R_PROTO {
         proto_load()
         wlib.set_text(pr_tab, (&b_proto[0 as usize]) as u64)
@@ -4256,6 +4262,20 @@ fn bus_rects() {
         rect_say((&q1[0 as usize]) as u64, nz_cn)
         rect_say((&q2[0 as usize]) as u64, nz_b4)
         rect_say((&q3[0 as usize]) as u64, nz_b4j)
+    }
+    if reiter == R_UPDATE {
+        var u1: [u8; 7] = "ucheck\0"
+        var u2: [u8; 6] = "uinst\0"
+        var u3: [u8; 6] = "uchan\0"
+        var u4: [u8; 6] = "uauto\0"
+        var u5: [u8; 6] = "uback\0"
+        var u6: [u8; 6] = "uconf\0"
+        rect_say((&u1[0 as usize]) as u64, up_bchk)
+        rect_say((&u2[0 as usize]) as u64, up_binst)
+        rect_say((&u3[0 as usize]) as u64, up_bchan)
+        rect_say((&u4[0 as usize]) as u64, up_bauto)
+        rect_say((&u5[0 as usize]) as u64, up_brb)
+        rect_say((&u6[0 as usize]) as u64, up_bconf)
     }
     if reiter == R_RECHTE {
         var m1: [u8; 5] = "rtab\0"
@@ -4511,6 +4531,42 @@ static mut ri_nums: [u64; 32] = [0 as u64; 32]
 static mut ri_rows: u64 = 0
 static mut b_cls: [u8; 2048] = [0 as u8; 2048]
 static mut c_cls: [u64; 6] = [0 as u64; 6]
+static mut l_upver: [u8; 200] = [0 as u8; 200]
+static mut l_uplast: [u8; 200] = [0 as u8; 200]
+static mut l_upphase: [u8; 200] = [0 as u8; 200]
+static mut up_lver: u64 = 0
+static mut up_llast: u64 = 0
+static mut up_lphase: u64 = 0
+static mut up_lstat: u64 = 0
+static mut up_bchk: u64 = 0
+static mut up_binst: u64 = 0
+static mut up_bchan: u64 = 0
+static mut up_bauto: u64 = 0
+static mut up_brb: u64 = 0
+static mut up_bconf: u64 = 0
+static mut up_chan: [u8; 16] = [0 as u8; 16]
+static mut up_auto: [u8; 16] = [0 as u8; 16]
+static mut up_busy: u64 = 0
+static mut k_up_title: [u8; 19] = "settings.upd.title\0"
+static mut k_up_note: [u8; 18] = "settings.upd.note\0"
+static mut k_up_ver: [u8; 17] = "settings.upd.ver\0"
+static mut k_up_chan: [u8; 18] = "settings.upd.chan\0"
+static mut k_up_auto: [u8; 18] = "settings.upd.auto\0"
+static mut k_up_on: [u8; 16] = "settings.upd.on\0"
+static mut k_up_off: [u8; 17] = "settings.upd.off\0"
+static mut k_up_last: [u8; 18] = "settings.upd.last\0"
+static mut k_up_never: [u8; 19] = "settings.upd.never\0"
+static mut k_up_srv: [u8; 17] = "settings.upd.srv\0"
+static mut k_up_busy: [u8; 18] = "settings.upd.busy\0"
+static mut k_up_ph: [u8; 20] = "settings.upd.phase.\0"
+static mut k_up_bchk: [u8; 18] = "settings.upd.bchk\0"
+static mut k_up_binst: [u8; 19] = "settings.upd.binst\0"
+static mut k_up_bchan: [u8; 19] = "settings.upd.bchan\0"
+static mut k_up_bauto: [u8; 19] = "settings.upd.bauto\0"
+static mut k_up_brb: [u8; 17] = "settings.upd.brb\0"
+static mut k_up_bconf: [u8; 19] = "settings.upd.bconf\0"
+static mut s_true: [u8; 5] = "true\0"
+static mut s_ja: [u8; 3] = "ja\0"
 static mut b_proto: [u8; 6144] = [0 as u8; 6144]
 static mut c_proto: [u64; 6] = [0 as u64; 6]
 static mut l_prostat: [u8; 120] = [0 as u8; 120]
@@ -5158,6 +5214,189 @@ fn proto_load() {
     say((&s2[0 as usize]) as u64)
     sayn(rc)
     nl()
+}
+
+// ------------------------------------------------- Updates (DAILY-DRIVER)
+//
+// `settings.update.status` over the bus: here=, there=, time=, phase=,
+// channel=, auto=, busy= -- from /system/ota.stand and /etc/ota.conf,
+// read by settingsd (root). The buttons call settings.update.check /
+// install / rollback (settingsd runs `ota` in a child and answers at
+// once); install and rollback are critical, so the answer is a question
+// and "Bestaetigen" (sys_confirm) sends the yes, like on the page System.
+// Channel and automatic updates are `update.channel` / `update.auto`
+// through the same settings.set (also critical). Nothing here updates by
+// itself.
+fn upd_val(lp: u64, key: u64, out: u64, max: u64) -> bool {
+    let kl: u64 = ulib.length(key)
+    var i: u64 = 0
+    while i < kl {
+        if rb(lp, i) != rb(key, i) {
+            return false
+        }
+        i = i + 1
+    }
+    var o: u64 = 0
+    while rb(lp, kl + o) != 0 && o + 1 < max {
+        __mmio_write8((out + o) as *mut u8, rb(lp, kl + o) as u8)
+        o = o + 1
+    }
+    __mmio_write8((out + o) as *mut u8, 0 as u8)
+    return true
+}
+
+fn upd_load() {
+    var k_here: [u8; 6] = "here=\0"
+    var k_there: [u8; 7] = "there=\0"
+    var k_time: [u8; 6] = "time=\0"
+    var k_phase: [u8; 7] = "phase=\0"
+    var k_chan: [u8; 9] = "channel=\0"
+    var k_auto: [u8; 6] = "auto=\0"
+    var k_busy: [u8; 6] = "busy=\0"
+    var here: [u8; 24] = [0 as u8; 24]
+    var there: [u8; 24] = [0 as u8; 24]
+    var tm: [u8; 40] = [0 as u8; 40]
+    var ph: [u8; 24] = [0 as u8; 24]
+    var bz: [u8; 8] = [0 as u8; 8]
+    var ln: [u8; 120] = [0 as u8; 120]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    var s_st: [u8; 28] = "call settings.update.status\0"
+    var s_sp: [u8; 4] = " | \0"
+    ph[(0) as usize] = 0 as u8
+    here[(0) as usize] = 48 as u8
+    here[(1) as usize] = 0 as u8
+    there[(0) as usize] = 48 as u8
+    there[(1) as usize] = 0 as u8
+    tm[(0) as usize] = 0 as u8
+    up_busy = 0
+    __mmio_write8((&up_chan[0 as usize]) as u64 as *mut u8, 0 as u8)
+    __mmio_write8((&up_auto[0 as usize]) as u64 as *mut u8, 0 as u8)
+    var got: bool = false
+    if actcli.open() {
+        actcli.req((&s_st[0 as usize]) as u64)
+        if actcli.send(300) == actcli.R_OK {
+            got = true
+            var n: u64 = 1
+            while actcli.line(n, lp, 120) {
+                let _a: bool = upd_val(lp, (&k_here[0 as usize]) as u64, (&here[0 as usize]) as u64, 24)
+                let _b: bool = upd_val(lp, (&k_there[0 as usize]) as u64, (&there[0 as usize]) as u64, 24)
+                let _c: bool = upd_val(lp, (&k_time[0 as usize]) as u64, (&tm[0 as usize]) as u64, 40)
+                let _d: bool = upd_val(lp, (&k_phase[0 as usize]) as u64, (&ph[0 as usize]) as u64, 24)
+                let _e: bool = upd_val(lp, (&k_chan[0 as usize]) as u64, (&up_chan[0 as usize]) as u64, 16)
+                let _f: bool = upd_val(lp, (&k_auto[0 as usize]) as u64, (&up_auto[0 as usize]) as u64, 16)
+                var bb: [u8; 8] = [0 as u8; 8]
+                if upd_val(lp, (&k_busy[0 as usize]) as u64, (&bb[0 as usize]) as u64, 8) {
+                    up_busy = ulib.to_num((&bb[0 as usize]) as u64)
+                }
+                n = n + 1
+            }
+        }
+    }
+    let p1: u64 = (&l_upver[0 as usize]) as u64
+    let p2: u64 = (&l_uplast[0 as usize]) as u64
+    let p3: u64 = (&l_upphase[0 as usize]) as u64
+    if !got {
+        var o0: u64 = bx_put(p1, 0, 200, msg.get((&k_sy_nobus[0 as usize]) as u64))
+        __mmio_write8((p2) as *mut u8, 0 as u8)
+        __mmio_write8((p3) as *mut u8, 0 as u8)
+        return
+    }
+    // line 1: version | channel | automatic
+    var o: u64 = bx_put(p1, 0, 200, msg.get((&k_up_ver[0 as usize]) as u64))
+    o = bx_put(p1, o, 200, (&here[0 as usize]) as u64)
+    o = bx_put(p1, o, 200, (&s_sp[0 as usize]) as u64)
+    o = bx_put(p1, o, 200, msg.get((&k_up_chan[0 as usize]) as u64))
+    o = bx_put(p1, o, 200, (&up_chan[0 as usize]) as u64)
+    o = bx_put(p1, o, 200, (&s_sp[0 as usize]) as u64)
+    o = bx_put(p1, o, 200, msg.get((&k_up_auto[0 as usize]) as u64))
+    var on: bool = ulib.streq((&up_auto[0 as usize]) as u64, (&s_true[0 as usize]) as u64)
+        || ulib.streq((&up_auto[0 as usize]) as u64, (&s_ja[0 as usize]) as u64)
+    if on {
+        o = bx_put(p1, o, 200, msg.get((&k_up_on[0 as usize]) as u64))
+    } else {
+        o = bx_put(p1, o, 200, msg.get((&k_up_off[0 as usize]) as u64))
+    }
+    // line 2: last check | version on the server
+    o = bx_put(p2, 0, 200, msg.get((&k_up_last[0 as usize]) as u64))
+    if tm[0 as usize] == 0 as u8 {
+        o = bx_put(p2, o, 200, msg.get((&k_up_never[0 as usize]) as u64))
+    } else {
+        o = bx_put(p2, o, 200, (&tm[0 as usize]) as u64)
+    }
+    if ulib.to_num((&there[0 as usize]) as u64) != 0 {
+        o = bx_put(p2, o, 200, (&s_sp[0 as usize]) as u64)
+        o = bx_put(p2, o, 200, msg.get((&k_up_srv[0 as usize]) as u64))
+        o = bx_put(p2, o, 200, (&there[0 as usize]) as u64)
+    }
+    // line 3: what the device is doing
+    var key: [u8; 48] = [0 as u8; 48]
+    let kp: u64 = (&key[0 as usize]) as u64
+    var kq: u64 = bx_put(kp, 0, 48, (&k_up_ph[0 as usize]) as u64)
+    kq = bx_put(kp, kq, 48, (&ph[0 as usize]) as u64)
+    o = bx_put(p3, 0, 200, msg.get(kp))
+    if up_busy != 0 {
+        o = bx_put(p3, o, 200, (&s_sp[0 as usize]) as u64)
+        o = bx_put(p3, o, 200, msg.get((&k_up_busy[0 as usize]) as u64))
+    }
+    var s1: [u8; 28] = "settings: update page here=\0"
+    say((&s1[0 as usize]) as u64)
+    say((&here[0 as usize]) as u64)
+    var s2: [u8; 8] = " phase=\0"
+    say((&s2[0 as usize]) as u64)
+    say((&ph[0 as usize]) as u64)
+    var s3: [u8; 10] = " channel=\0"
+    say((&s3[0 as usize]) as u64)
+    say((&up_chan[0 as usize]) as u64)
+    var s4: [u8; 7] = " busy=\0"
+    say((&s4[0 as usize]) as u64)
+    sayn(up_busy)
+    nl()
+}
+
+// the three actions; critical ones come back as a question (sys_answer
+// keeps its number in sy_pend)
+fn upd_call(verb: u64, shown: u64) {
+    sy_pend = 0
+    if !actcli.open() {
+        stat_set((&l_systat[0 as usize]) as u64, (&k_sy_nobus[0 as usize]) as u64, 0)
+        return
+    }
+    actcli.req(verb)
+    let rc: u64 = actcli.send(300)
+    sys_answer(rc, shown)
+}
+
+// channel and automatic updates: the other value of the same setting
+fn upd_toggle(which: u64) {
+    var k_ch: [u8; 15] = "update.channel\0"
+    var k_au: [u8; 12] = "update.auto\0"
+    var v_stable: [u8; 7] = "stable\0"
+    var v_test: [u8; 5] = "test\0"
+    var v_true: [u8; 5] = "true\0"
+    var v_false: [u8; 6] = "false\0"
+    if which == 0 {
+        if ulib.streq((&up_chan[0 as usize]) as u64, (&v_test[0 as usize]) as u64) {
+            let _r: u64 = bus_set((&k_ch[0 as usize]) as u64, (&v_stable[0 as usize]) as u64)
+        } else {
+            let _r2: u64 = bus_set((&k_ch[0 as usize]) as u64, (&v_test[0 as usize]) as u64)
+        }
+    } else {
+        if ulib.streq((&up_auto[0 as usize]) as u64, (&v_true[0 as usize]) as u64)
+            || ulib.streq((&up_auto[0 as usize]) as u64, (&s_ja[0 as usize]) as u64) {
+            let _r3: u64 = bus_set((&k_au[0 as usize]) as u64, (&v_false[0 as usize]) as u64)
+        } else {
+            let _r4: u64 = bus_set((&k_au[0 as usize]) as u64, (&v_true[0 as usize]) as u64)
+        }
+    }
+}
+
+fn upd_show() {
+    upd_load()
+    wlib.set_text(up_lver, (&l_upver[0 as usize]) as u64)
+    wlib.set_text(up_llast, (&l_uplast[0 as usize]) as u64)
+    wlib.set_text(up_lphase, (&l_upphase[0 as usize]) as u64)
+    wlib.set_text(up_lstat, (&l_systat[0 as usize]) as u64)
+    wlib.new_set()
 }
 
 fn rights_load() {
@@ -5990,6 +6229,26 @@ fn u_start(args: u64) -> u64 {
     wlib.size(0, 26)
     pr_bref = merke(wlib.button(msg.get((&k_pr_ref[0 as usize]) as u64)), R_PROTO)
     pr_stat = merke(wlib.label((&l_prostat[0 as usize]) as u64), R_PROTO)
+
+    // ---- Updates (DAILY-DRIVER)
+    let _up1: u64 = merke(wlib.label(msg.get((&k_up_title[0 as usize]) as u64)), R_UPDATE)
+    let _up2: u64 = merke(wlib.label(msg.get((&k_up_note[0 as usize]) as u64)), R_UPDATE)
+    up_lver = merke(wlib.label((&l_upver[0 as usize]) as u64), R_UPDATE)
+    up_llast = merke(wlib.label((&l_uplast[0 as usize]) as u64), R_UPDATE)
+    up_lphase = merke(wlib.label((&l_upphase[0 as usize]) as u64), R_UPDATE)
+    wlib.size(260, 26)
+    up_bchk = merke(wlib.button(msg.get((&k_up_bchk[0 as usize]) as u64)), R_UPDATE)
+    wlib.size(260, 26)
+    up_binst = merke(wlib.button(msg.get((&k_up_binst[0 as usize]) as u64)), R_UPDATE)
+    wlib.size(260, 26)
+    up_bchan = merke(wlib.button(msg.get((&k_up_bchan[0 as usize]) as u64)), R_UPDATE)
+    wlib.size(260, 26)
+    up_bauto = merke(wlib.button(msg.get((&k_up_bauto[0 as usize]) as u64)), R_UPDATE)
+    wlib.size(260, 26)
+    up_brb = merke(wlib.button(msg.get((&k_up_brb[0 as usize]) as u64)), R_UPDATE)
+    wlib.size(260, 26)
+    up_bconf = merke(wlib.button(msg.get((&k_up_bconf[0 as usize]) as u64)), R_UPDATE)
+    up_lstat = merke(wlib.label((&l_systat[0 as usize]) as u64), R_UPDATE)
 
     // ---- Bildschirm (RUNDE DISPLAY), since ROUND ACTION-BUS-4 in two
     // columns: left what the picture IS (mode, scaling, rotation,
@@ -7109,6 +7368,26 @@ fn u_start(args: u64) -> u64 {
                     wlib.set_value(sy_tab, keep)
                     wlib.set_text(sy_stat, (&l_systat[0 as usize]) as u64)
                     wlib.new_set()
+                } else if id == up_bchk || id == up_binst || id == up_brb
+                    || id == up_bchan || id == up_bauto || id == up_bconf {
+                    var a_chk: [u8; 27] = "call settings.update.check\0"
+                    var a_ins: [u8; 29] = "call settings.update.install\0"
+                    var a_rb: [u8; 30] = "call settings.update.rollback\0"
+                    if id == up_bchk {
+                        upd_call((&a_chk[0 as usize]) as u64, (&a_chk[0 as usize]) as u64 + 5)
+                    } else if id == up_binst {
+                        upd_call((&a_ins[0 as usize]) as u64, (&a_ins[0 as usize]) as u64 + 5)
+                    } else if id == up_brb {
+                        upd_call((&a_rb[0 as usize]) as u64, (&a_rb[0 as usize]) as u64 + 5)
+                    } else if id == up_bchan {
+                        upd_toggle(0)
+                    } else if id == up_bauto {
+                        upd_toggle(1)
+                    } else {
+                        sys_confirm()
+                    }
+                    upd_show()
+                    wlib.dirty_all(w)
                 } else if id == pr_bref {
                     proto_load()
                     wlib.set_text(pr_tab, (&b_proto[0 as usize]) as u64)

@@ -839,11 +839,11 @@ else
 #          Nameserver auf, den ihm DHCP gegeben hat (Runde BETRIEB), und
 #          prueft das Zertifikat gegen /etc/ssl/roots.pem.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe NEIN: gesucht wird, wenn jemand es sagt.
+# auto     true/false (ja/nein gehen auch). Vorgabe false: gesucht wird, wenn jemand es sagt.
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 quelle=$STORE/aktuell
 abstand=3600
-auto=nein
+auto=false
 frist=120
 EOFOTA
 fi

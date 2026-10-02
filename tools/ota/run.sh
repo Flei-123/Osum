@@ -321,6 +321,10 @@ fi
 BASISBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\1 \2/p' \
           "$OUT/basis0.txt" | tail -1)
 
+# RUNDE DAILY-DRIVER: $OTA_NUR=kanal ueberspringt die Abschnitte 2-6 und
+# faehrt nur Abschnitt 7 (Kanaele, Wechsel, Rollback von Hand). Gebaut und
+# installiert wird weiter -- Abschnitt 7 braucht die Platte `basis.img`.
+if [ "${OTA_NUR:-}" != kanal ]; then
 # =====================================================================
 echo
 echo "== 2. der gute Weg, Ende zu Ende: suchen, holen, pruefen, einspielen =="
@@ -774,6 +778,131 @@ printf '   %-52s %s\n' "Bloecke frei -- nach Fassung 1 / nach Fassung 2" \
 printf '   %-52s %s\n' "Zeilen: kernel/user/ota.fi" "$(grep -c . kernel/user/ota.fi)"
 printf '   %-52s %s\n' "Zeilen: tools/ota/ (server, verzeichnis, mkcerts, pakete, run)" \
     "$(cat tools/ota/*.py tools/ota/*.sh | grep -c .)"
+
+fi   # Ende von "$OTA_NUR != kanal"
+
+# =====================================================================
+echo
+echo "== 7. Kanaele stable/test, Stand, Hintergrund-Dienst, Rueckschritt =="
+# =====================================================================
+#
+# RUNDE DAILY-DRIVER. `kanal=stable|test` in /etc/ota.conf haengt ein
+# Verzeichnis an die Quelle: <quelle>/<kanal>/VERZEICHNIS. Die Gegenstelle
+# haelt zwei Baeume: stable/ = Fassung 2, test/ = dasselbe Paket als
+# Fassung 4 (ein Testkanal ist dem stabilen immer voraus). Gemessen wird:
+#
+#   (a) ein Geraet auf `stable` sieht Fassung 2, fragt unter /stable/,
+#       und /system/ota.stand sagt phase=verfuegbar;
+#   (b) ein Geraet auf `test` sieht 4, spielt sie ein (phase=bereit),
+#       startet, bestaetigt (phase=ruhe);
+#   (c) zurueck auf `stable` ist ein RUECKSCHRITT und wird abgelehnt --
+#       der Fassungszaehler gilt ueber die Kanaele hinweg;
+#   (d) ungueltige Kanaele (`beta`, `../x`) werden abgelehnt;
+#   (e) `ota zurueck` nach einem bestaetigten Update bringt die vorige
+#       Generation wieder, und sie laeuft;
+#   (f) GEGENPROBE: ohne `kanal=` fragt das Geraet weiter flach;
+#   (g) `ota boot`: ein Update in Erprobung wird von selbst bestaetigt,
+#       wenn das System gesund laeuft -- und nur dann;
+#   (h) `ota dienst 1` mit auto=ja holt und spielt von selbst ein,
+#       mit auto=nein tut es nichts.
+rm -rf "$OUT/netzkanal"
+mkdir -p "$OUT/netzkanal/stable" "$OUT/netzkanal/test"
+cp "$OUT/netz2"/* "$OUT/netzkanal/stable/"
+cp "$OUT/quelle2"/* "$OUT/netzkanal/test/" 2>/dev/null
+rm -f "$OUT/netzkanal/test/VERZEICHNIS" "$OUT/netzkanal/test/VERZEICHNIS.sig"
+python3 tools/ota/listing.py "$OUT/netzkanal/test" --fassung 4 \
+    --schluessel "$OUT/geheim.key" > "$OUT/netzkanal.log" 2>&1 \
+    && ok "zwei Kanaele gebaut: stable = Fassung 2, test = Fassung 4" \
+    || { cat "$OUT/netzkanal.log"; bad "Kanalbaum"; }
+
+dienst "$OUT/netzkanal" || bad "Gegenstelle (Kanaele)"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan1 "ota einstellen kanal stable;ota zeigen;ota suchen;cat /system/ota.stand;exit")
+gleich "(a) stable: die Maschine kommt hoch" "$rc" "21"
+hat "$OUT/kan1.txt" "ota: kanal stable" "(a) der Kanal steht in der Anzeige"
+hat "$OUT/kan1.txt" "ota: fassung dort 2" "(a) auf stable liegt Fassung 2"
+hatnicht "$OUT/kan1.txt" "ota: fassung dort 4" "(a) und nicht die Fassung des Testkanals"
+hat "$OUT/kan1.txt" "phase=verfuegbar" "(a) /system/ota.stand: phase=verfuegbar"
+hat "$OUT/kan1.txt" "dort=2" "(a) /system/ota.stand: dort=2"
+grep -qa "^200 stable/VERZEICHNIS" "$OUT/srv.log" \
+    && ok "(a) die Gegenstelle sah die Anfrage unter /stable/" \
+    || bad "(a) kein Zugriff auf /stable/VERZEICHNIS im Protokoll"
+
+# (b) Testkanal: einspielen, neu starten, bestaetigen
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan2 "ota einstellen kanal test;ota einspielen;cat /system/ota.stand;exit")
+hat "$OUT/kan2.txt" "ota: fassung dort 4" "(b) auf test liegt Fassung 4"
+hat "$OUT/kan2.txt" "opk: installiert hallo" "(b) die Fassung vom Testkanal wird installiert"
+hat "$OUT/kan2.txt" "ota: BEREIT ZUM NEUSTART" "(b) und zum Neustart angeboten"
+hat "$OUT/kan2.txt" "phase=bereit" "(b) /system/ota.stand: phase=bereit"
+rc=$(lauf kan3 "sh /start.sh;ota zeigen;cat /system/ota.stand;exit")
+gleich "(b) der Neustart" "$rc" "21"
+hat "$OUT/kan3.txt" "paket-hallo fassung 2" "(b) die neue Generation laeuft"
+hat "$OUT/kan3.txt" "ota: fassung hier 4" "(b) der Fassungszaehler steht auf 4"
+hat "$OUT/kan3.txt" "ota: kanal test" "(b) und der Kanal ist noch test"
+hat "$OUT/kan3.txt" "phase=ruhe" "(b) nach der Bestaetigung steht phase=ruhe"
+
+# (c) zurueck auf stable: Rueckschritt
+rc=$(lauf kan4 "ota einstellen kanal stable;ota suchen;exit")
+hat "$OUT/kan4.txt" "RUECKSCHRITT ABGELEHNT" "(c) test -> stable ist ein Rueckschritt und wird abgelehnt"
+hatnicht "$OUT/kan4.txt" "opk: installiert" "(c) und es wird nichts installiert"
+
+# (d) ungueltige Kanaele
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan5 "ota einstellen kanal stable;ota einstellen kanal beta;ota einstellen kanal ../x;ota einstellungen;exit")
+n=$(grep -ca "kanal muss stable oder test sein" "$OUT/kan5.txt")
+zahl "(d) ungueltige Kanalnamen abgelehnt (beta, ../x)" "$n" ge 2
+hat "$OUT/kan5.txt" "kanal    stable" "(d) die Einstellung blieb auf stable"
+
+# (e) Rueckschritt von Hand, nachdem ein Update bestaetigt wurde
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan6 "ota einstellen kanal test;ota einspielen;exit")
+rc=$(lauf kan7 "sh /start.sh;exit")
+hat "$OUT/kan7.txt" "paket-hallo fassung 2" "(e) Ausgangslage: Fassung 4 laeuft und ist bestaetigt"
+rc=$(lauf kan8 "ota zurueck;ota zeigen;exit")
+rc=$(lauf kan9 "sh /start.sh;ota zeigen;exit")
+gleich "(e) nach ota zurueck: die Maschine kommt hoch" "$rc" "21"
+hat "$OUT/kan9.txt" "paket-hallo fassung 1" "(e) ota zurueck: die VORIGE Generation laeuft wieder"
+hatnicht "$OUT/kan9.txt" "SCHEITERT" "(e) und sie meldet keinen Fehler"
+dienst_aus
+
+# (f) GEGENPROBE: ohne kanal= flach (wie jedes Geraet vor dieser Runde)
+dienst "$OUT/netz2" || bad "Gegenstelle (flach)"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan10 "ota zeigen;ota suchen;exit")
+hat "$OUT/kan10.txt" "ota: fassung dort 2" "(f) ohne kanal= wird wie bisher flach gelesen"
+hatnicht "$OUT/kan10.txt" "ota: kanal" "(f) und es wird kein Kanal angezeigt"
+
+# (g) ota boot: Erprobung wird von selbst bestaetigt -- wenn gesund
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan11 "ota einspielen;exit")
+hat "$OUT/kan11.txt" "ota: BEREIT ZUM NEUSTART" "(g) Ausgangslage: Fassung 2 steht in Erprobung"
+# `sh` laeuft in diesem Lauf immer -- als Stellvertreter fuer den
+# Schreibtisch, den es im Textlauf nicht gibt (`ota boot <name>`).
+rc=$(lauf kan12 "opk richten;ota einstellen gesund 3;ota boot sh;ota zeigen;cat /system/ota.stand;exit" 300)
+hat "$OUT/kan12.txt" "ota: Start gesund, Erprobung bestätigt" "(g) ein gesunder Start wird von selbst bestaetigt"
+hat "$OUT/kan12.txt" "ota: nichts in erprobung" "(g) danach steht nichts mehr in Erprobung"
+hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
+# GEGENPROBE: ein Lauf, in dem das Stellvertreterprogramm NICHT laeuft,
+# gilt nicht als gesund und startet neu (der Kern zaehlt).
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan13 "ota einspielen;exit")
+rc=$(lauf kan14 "opk richten;ota einstellen gesund 2;ota einstellen frist 6;ota boot nirgends;exit" 300)
+hat "$OUT/kan14.txt" "Start NICHT gesund" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
+hatnicht "$OUT/kan14.txt" "Erprobung bestätigt" "(g) GEGENPROBE: und es wird nichts bestaetigt"
+
+# (h) der Hintergrund-Dienst
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan15 "ota einstellen auto nein;ota dienst 1;ota zeigen;exit")
+hat "$OUT/kan15.txt" "AUSgeschaltet" "(h) mit auto=nein tut der Dienst nichts"
+hatnicht "$OUT/kan15.txt" "opk: installiert" "(h) und installiert nichts"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan16 "ota einstellen auto ja;ota dienst 1;cat /system/ota.stand;exit")
+hat "$OUT/kan16.txt" "opk: installiert hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"
+hat "$OUT/kan16.txt" "ota: BEREIT ZUM NEUSTART" "(h) ohne Neustart -- er wird nur angeboten"
+hat "$OUT/kan16.txt" "phase=bereit" "(h) die Anzeige sagt phase=bereit"
+hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gestartet"
+dienst_aus
 
 echo
 echo "=================================================================="

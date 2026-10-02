@@ -154,6 +154,8 @@ echo ==G-NET==
 sleep 35
 echo ==G-LOGPAGE==
 sleep 15
+echo ==G-UPDPAGE==
+sleep 15
 echo ==G-NETDONE==
 cat /etc/network.conf
 echo ==G-TRUST==
@@ -326,6 +328,21 @@ if waitfor "==G-LOGPAGE==" 60; then
     sleep 4
     shot "$TMPD/8-log.ppm"
 fi
+# DAILY-DRIVER: the page Updates (15th tab) -- state over settings.update.status,
+# "Jetzt nach Updates suchen" asks settingsd, which starts `ota` (no server in
+# this run, so the check fails -- what is measured is that the page asks the
+# bus and that settingsd answers)
+if waitfor "==G-UPDPAGE==" 60; then
+    T=$(mid tabo) && klick $T
+    sleep 4
+    shot "$TMPD/9-update.ppm"
+    if U=$(mid ucheck); then
+        klick $U; sleep 3
+        shot "$TMPD/9b-update.ppm"
+    else
+        bad "the page Updates did not report its controls"
+    fi
+fi
 # AB-004: the trusted dialog. Helper (an agent) asks to change the lock
 # time; the window server shows the question over everything. "n" on the
 # REAL keyboard rejects it; the second time a program types "jjj" into a
@@ -445,7 +462,10 @@ has "$TMPD/p.txt" "value=600" "... and then the change is done (lock.idle=600)"
 part "$G" G-JOURNAL G-STAT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "client=helper key=lock.idle" "the journal names the agent that asked, not the person who said yes"
 has "$G" "wm: trusted dialog down no=" "a request confirmed with 'act confirm' takes its dialog off the screen"
-for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log 9-trust 10-trust-still 11-trust-done; do
+grep -qaE 'settings: update page here=[0-9]+ phase=[a-z]* channel=[a-z]+ busy=[01]' "$G" \
+    && ok "page Updates (DAILY-DRIVER): $(grep -a 'settings: update page' "$G" | tail -1 | cut -c1-90)" \
+    || bad "page Updates: no status over settings.update.status ($(grep -a 'settings: update page' "$G" | tail -1))"
+for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log 9-update 9-trust 10-trust-still 11-trust-done; do
     [ -s "$TMPD/$f.png" ] && ok "photo: $TMPD/$f.png" || bad "no photo $f"
 done
 echo "ACTBUS-GUI: $pass passed, $fail failed"
