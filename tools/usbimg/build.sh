@@ -96,7 +96,10 @@ ESP_MIB=${ESP_MIB:-96}
 # STATUS-FREMDLAND.md ("4096 Bloecke = 2 MB je Platte") und der
 # Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
 # nicht mehr -- das gebaute Abbild meldet bmblocks=128.
-FS_BLOCKS=${FS_BLOCKS:-65536}
+# DAILY-DRIVER (02.10.2026): 65536 -> 81920 blocks (40 MiB). The PDF viewer
+# (pdfview, 1.9 MB), kontocli and the fatter installer filled the 32 MiB image:
+# "mkfs: the disk is full". 81920 blocks need 20 of the 128 map blocks.
+FS_BLOCKS=${FS_BLOCKS:-81920}
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 

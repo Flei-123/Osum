@@ -468,6 +468,9 @@ grep -qa 'from module' "$OUT/start.txt" \
     && bad "es lief doch ueber ein Boot-Modul -- dann ist nichts bewiesen" \
     || ok "GEGENPROBE: 'from module' kommt nicht vor -- es war kein Stick im Spiel"
 
+# the installer's own limine.conf, kept for step 7c (the next steps overwrite it with scripts)
+mcopy -i "$ZIEL@@1048576" ::/limine.conf "$OUT/inst-limine.conf" 2>/dev/null
+
 # ==================================================================
 titel "6. eine Datei anlegen -- auf der Platte"
 # ==================================================================
@@ -591,6 +594,61 @@ grep -q '^ok5' "$OUT/konto-py.txt" && ok "GEGENPROBE: ein falsches Passwort und 
 grep -q '^ok6' "$OUT/konto-py.txt" && ok "/etc/group kennt abnahme" || bad "/etc/group ohne abnahme"
 grep -q '^ok7' "$OUT/konto-py.txt" && ok "/users/abnahme liegt da, /users/live nicht" || bad "Heimordner falsch"
 grep -q '^ok8' "$OUT/konto-py.txt" && ok "kein /etc/autologin auf der installierten Platte" || bad "/etc/autologin liegt noch da"
+
+# ==================================================================
+titel "7c. MIT DEM NEUEN KONTO ANMELDEN -- am echten Anmeldeschirm"
+# ==================================================================
+#
+# Die Platte startet ohne Skript und ohne Autologin: der Anmeldeschirm kommt.
+# Das Passwort wird durch den QEMU-Monitor getippt (Tastendruecke, wie ein
+# Mensch). Richtiges Passwort -> "angemeldet als abnahme" mit uid=1000;
+# GEGENPROBE: ein falsches wird abgewiesen und es meldet sich niemand an.
+login_lauf() { # name keys...
+    local name=$1; shift
+    local ser="$OUT/$name.txt" vars="$OUT/$name.vars.fd" msock="$OUT/mon-$name.sock"
+    rm -f "$ser" "$msock"
+    cp -f /usr/share/OVMF/OVMF_VARS.fd "$vars" 2>/dev/null || true
+    # the file the INSTALLER wrote (saved after step 5, before the script runs overwrote it)
+    mcopy -o -i "$ZIEL@@1048576" "$OUT/inst-limine.conf" ::/limine.conf 2>/dev/null || true
+    local a=(-machine pc -cpu max -m 512 -display none -no-reboot
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
+        -serial "file:$ser"
+        -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32
+        -monitor "unix:$msock,server,nowait"
+        -drive "file=$ZIEL,format=raw,if=ide,index=0")
+    [ -f "$vars" ] && a+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
+    timeout 300 $QEMU_X86 "${a[@]}" > /dev/null 2>&1 &
+    local qp=$! w=0
+    while [ $w -lt 240 ]; do
+        grep -qa 'glogin: bereit' "$ser" 2>/dev/null && break
+        kill -0 "$qp" 2>/dev/null || break
+        sleep 1; w=$((w+1))
+    done
+    sleep 4
+    local k
+    for k in "$@"; do
+        echo "sendkey $k" | socat - "UNIX-CONNECT:$msock" > /dev/null 2>&1
+        sleep 0.4
+    done
+    w=0
+    while [ $w -lt 40 ]; do
+        grep -qa 'glogin: angemeldet als\|glogin: abgewiesen' "$ser" 2>/dev/null && break
+        sleep 1; w=$((w+1))
+    done
+    sleep 2
+    kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null
+}
+if command -v socat >/dev/null 2>&1; then
+    login_lauf login-ok shift-g e h e i m minus 1 2 3 ret
+    grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "der Anmeldeschirm kommt (kein Autologin auf der installierten Platte)" || bad "kein Anmeldeschirm"
+    grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "Anmeldung mit dem neuen Konto und dem gewaehlten Passwort klappt" || bad "Anmeldung mit dem neuen Konto: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
+    grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "die Sitzung laeuft als uid 1000" || bad "uid 1000 fehlt"
+    login_lauf login-bad shift-f a l s c h minus 9 9 9 ret
+    grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "GEGENPROBE: ein falsches Passwort wird abgewiesen" || bad "falsches Passwort nicht abgewiesen"
+    grep -aq 'glogin: angemeldet als' "$OUT/login-bad.txt" && bad "GEGENPROBE: trotzdem angemeldet" || ok "GEGENPROBE: niemand angemeldet"
+else
+    echo "   (socat fehlt: 7c uebersprungen)"
+fi
 
 titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 # ==================================================================

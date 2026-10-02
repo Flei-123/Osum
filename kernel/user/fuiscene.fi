@@ -36,6 +36,7 @@
 // Text is passed as pointers to NUL-terminated octets that must outlive
 // the node (a node only points at its text, like fui.scene says).
 import ulib
+import std.rt
 import wlib
 import fuiapp
 import fuib
@@ -49,6 +50,7 @@ import fui.theme
 import fui.textbuf
 import fui.style
 import fui.painter
+import fui.uiimage
 import wlibc
 import plat.fuiwirt
 
@@ -67,6 +69,7 @@ export {
     table_blob, table_set_blob,
     dialog_open, dialog_is_open, dialog_result, KEY_DIALOG,
     canvas, last_key, pan_x, pan_y, canvas_focus,
+    canvas_view, canvas_set, canvas_vw, canvas_vh,
 }
 
 const NONE: usize = 4294967295
@@ -1708,4 +1711,105 @@ fn pan_move(x: u64, y: u64) {
     s_pan_dy = s_pan_dy + (s_pan_py as i64) - (y as i64)
     s_pan_px = x
     s_pan_py = y
+}
+
+
+// ------------------------------------------------- a canvas that shows pixels
+//
+// The PDF viewer's page area (and anything else that has a picture of its own
+// in memory): the program gives the picture (`canvas_set`: 0xAARRGGBB pixels,
+// width, height) and where the viewport starts in it; this module crops what is
+// visible, centres a picture smaller than the viewport on a grey desk and draws
+// it with fUi's image routine. The program never touches fUi itself.
+static mut s_vw: u64 = 0
+static mut s_vh: u64 = 0
+static mut s_vpx: u64 = 0
+static mut s_vpw: u64 = 0
+static mut s_vph: u64 = 0
+static mut s_vox: u64 = 0
+static mut s_voy: u64 = 0
+static mut s_vcrop: u64 = 0
+static mut s_vcap: u64 = 0
+
+fn canvas_vw() -> u64 {
+    return s_vw
+}
+
+fn canvas_vh() -> u64 {
+    return s_vh
+}
+
+fn canvas_set(px: u64, pw: u64, ph: u64, ox: u64, oy: u64) {
+    s_vpx = px
+    s_vpw = pw
+    s_vph = ph
+    s_vox = ox
+    s_voy = oy
+}
+
+fn draw_view(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let x: f64 = widget.w_x(e)
+    let y: f64 = widget.w_y(e)
+    let vw: u64 = widget.w_w(e) as u64
+    let vh: u64 = widget.w_h(e) as u64
+    if vw == 0 || vh == 0 || vw > 4096 || vh > 4096 {
+        return
+    }
+    s_vw = vw
+    s_vh = vh
+    let need: u64 = vw * vh * 4
+    if s_vcap < need {
+        if s_vcrop != 0 {
+            rt.heap_free(s_vcrop, s_vcap as usize)
+        }
+        s_vcrop = rt.heap_alloc(need as usize)
+        s_vcap = need
+        if s_vcrop == 0 {
+            s_vcap = 0
+            return
+        }
+    }
+    var i: u64 = 0
+    while i < vw * vh {
+        *((s_vcrop + i * 4) as *mut u32) = 0xFF9AA1AB as u32
+        i = i + 1
+    }
+    if s_vpx != 0 && s_vpw > 0 && s_vph > 0 {
+        var dx: u64 = 0
+        var sx: u64 = 0
+        var cw: u64 = s_vpw
+        if s_vpw < vw {
+            dx = (vw - s_vpw) / 2
+        } else {
+            sx = s_vox
+            if sx + vw > s_vpw {
+                sx = s_vpw - vw
+            }
+            cw = vw
+        }
+        var dy: u64 = 0
+        var sy: u64 = 0
+        var ch: u64 = s_vph
+        if s_vph < vh {
+            dy = (vh - s_vph) / 2
+        } else {
+            sy = s_voy
+            if sy + vh > s_vph {
+                sy = s_vph - vh
+            }
+            ch = vh
+        }
+        var r: u64 = 0
+        while r < ch {
+            rt.mem_copy(s_vcrop + ((dy + r) * vw + dx) * 4, s_vpx + ((sy + r) * s_vpw + sx) * 4, (cw * 4) as usize)
+            r = r + 1
+        }
+    }
+    var im: uiimage.Image = uiimage.image_wrap(s_vcrop, vw as usize, vh as usize, 0)
+    uiimage.image_draw_rect(z, &im, x, y, vw as f64, vh as f64, 0 as u32)
+}
+
+fn canvas_view(parent: usize, key: u64, w: u64, h: u64) -> usize {
+    return canvas(parent, key, w, h, draw_view)
 }

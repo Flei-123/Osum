@@ -21,10 +21,6 @@ import fuiscene
 import fuiapp
 import fuiglyph
 import wlib
-import fui.widget
-import fui.render
-import fui.painter
-import fui.uiimage
 import pdfread.pdfread
 import pdfread.pdfpage
 
@@ -82,10 +78,6 @@ static mut s_pw: u64 = 0
 static mut s_ph: u64 = 0
 static mut s_ox: i64 = 0
 static mut s_oy: i64 = 0
-static mut s_vw: u64 = 0             // the size of the viewport (the page node)
-static mut s_vh: u64 = 0
-static mut s_crop: u64 = 0
-static mut s_crop_cap: u64 = 0
 static mut s_fm: u64 = 0
 static mut s_path: [u8; 256] = [0 as u8; 256]
 static mut s_pageinfo: [u8; 40] = [0 as u8; 40]
@@ -176,77 +168,9 @@ fn build() {
         cw = 600
         ch = 400
     }
-    let pg: usize = fuiscene.canvas(root, K_PAGE, cw, ch, draw_page)
+    let pg: usize = fuiscene.canvas_view(root, K_PAGE, cw, ch)
     let sl: usize = fuiscene.label(root, (&s_status[0 as usize]) as u64)
     fuiscene.set_size(sl, 0, 24)
-}
-
-fn draw_page(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
-    let z: *mut painter.Painter = render.ctx_painter(c)
-    let x: f64 = widget.w_x(e)
-    let y: f64 = widget.w_y(e)
-    let vw: u64 = widget.w_w(e) as u64
-    let vh: u64 = widget.w_h(e) as u64
-    if vw == 0 || vh == 0 || vw > 4096 || vh > 4096 {
-        return
-    }
-    s_vw = vw
-    s_vh = vh
-    let need: u64 = vw * vh * 4
-    if s_crop_cap < need {
-        if s_crop != 0 {
-            rt.heap_free(s_crop, s_crop_cap as usize)
-        }
-        s_crop = rt.heap_alloc(need as usize)
-        s_crop_cap = need
-        if s_crop == 0 {
-            s_crop_cap = 0
-            return
-        }
-    }
-    // the grey desk
-    var i: u64 = 0
-    while i < vw * vh {
-        *((s_crop + i * 4) as *mut u32) = 0xFF9AA1AB as u32
-        i = i + 1
-    }
-    if s_px != 0 && s_pw > 0 && s_ph > 0 {
-        let px: u64 = rt.buf_ptr(s_px as *mut rt.Buf)
-        // where the page's left/top edge lies in the viewport, and which part of it shows
-        var dx: u64 = 0
-        var sx: u64 = 0
-        var cw: u64 = s_pw
-        if s_pw < vw {
-            dx = (vw - s_pw) / 2
-        } else {
-            sx = s_ox as u64
-            if sx + vw > s_pw {
-                sx = s_pw - vw
-            }
-            cw = vw
-        }
-        var dy: u64 = 0
-        var sy: u64 = 0
-        var ch: u64 = s_ph
-        if s_ph < vh {
-            dy = (vh - s_ph) / 2
-        } else {
-            sy = s_oy as u64
-            if sy + vh > s_ph {
-                sy = s_ph - vh
-            }
-            ch = vh
-        }
-        var r: u64 = 0
-        while r < ch {
-            let from: u64 = px + ((sy + r) * s_pw + sx) * 4
-            let to: u64 = s_crop + ((dy + r) * vw + dx) * 4
-            rt.mem_copy(to, from, (cw * 4) as usize)
-            r = r + 1
-        }
-    }
-    var im: uiimage.Image = uiimage.image_wrap(s_crop, vw as usize, vh as usize, 0)
-    uiimage.image_draw_rect(z, &im, x, y, vw as f64, vh as f64, 0 as u32)
 }
 
 // ------------------------------------------------------------- the document
@@ -306,8 +230,8 @@ fn want_pct() -> u64 {
     if !pdfread.doc_page_size(s_doc as *mut pdfread.Doc, s_page, &w, &h) || w < 1.0 || h < 1.0 {
         return 100
     }
-    var vw: u64 = s_vw
-    var vh: u64 = s_vh
+    var vw: u64 = fuiscene.canvas_vw()
+    var vh: u64 = fuiscene.canvas_vh()
     if vw < 100 {
         vw = 600
     }
@@ -353,11 +277,13 @@ fn render_now() {
 fn clamp_view() {
     var mx: i64 = 0
     var my: i64 = 0
-    if s_pw > s_vw {
-        mx = (s_pw - s_vw) as i64
+    let vw: u64 = fuiscene.canvas_vw()
+    let vh: u64 = fuiscene.canvas_vh()
+    if s_pw > vw {
+        mx = (s_pw - vw) as i64
     }
-    if s_ph > s_vh {
-        my = (s_ph - s_vh) as i64
+    if s_ph > vh {
+        my = (s_ph - vh) as i64
     }
     if s_ox > mx {
         s_ox = mx
@@ -401,6 +327,15 @@ fn zoom_by(up: bool) {
     s_zoom = pct
     s_mode = 0
     s_dirty = true
+}
+
+// hand the picture and the view position to the canvas
+fn push_view() {
+    var p: u64 = 0
+    if s_pw > 0 {
+        p = rt.buf_ptr(s_px as *mut rt.Buf)
+    }
+    fuiscene.canvas_set(p, s_pw, s_ph, s_ox as u64, s_oy as u64)
 }
 
 fn crc32_of(p: u64, n: u64) -> u64 {
@@ -592,16 +527,17 @@ fn u_start(args: u64) -> u64 {
             s_oy = s_oy + dy
             changed = true
         }
-        if s_dirty && s_open && s_vw > 0 {
+        if s_dirty && s_open && fuiscene.canvas_vw() > 0 {
             render_now()
             update_texts()
             changed = true
-        } else if s_dirty && s_open && s_vw == 0 {
+        } else if s_dirty && s_open && fuiscene.canvas_vw() == 0 {
             // the first paint tells the viewport size; ask for one
             changed = true
         }
         if changed {
             clamp_view()
+            push_view()
             fuiscene.refresh()
         }
     }
