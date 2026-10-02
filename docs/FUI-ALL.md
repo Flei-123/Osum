@@ -188,3 +188,70 @@ children in the pinned fUi -- compute pixel widths; the 4-point grid
 
 Ported so far: `calc`, `papierkorb` (and `scenedemo`). Acceptances:
 alltag raster 100 % for both.
+
+## 7. Stage 2, round F-5: the mid-sized programs, 02.10.2026 (night)
+
+On the scene tree now (nothing of them is left on wlib's widgets):
+`taskmgr`, `storage` (/bin/speicher), `viewer`, `snip`. Together with
+`calc`, `papierkorb`, `netmon`, `lock`, `glogin`.
+
+New building blocks in `fuiscene.fi` (all state by KEY, so a rebuild keeps
+it):
+
+| block | what |
+|---|---|
+| `canvas(parent, key, w, h, draw)` | a node the PROGRAM paints; `cv_rect/cv_round/cv_ring/cv_text` in theme roles, `cv_rgb` for an exact colour (treemap tiles) |
+| `image(parent, key, w, h)` | a picture from memory: zoom (`image_set_zoom`, `image_fit` never over 100 %), quarter turns, pan by dragging, `image_click` (thumbnails), `image_tool` = a drag draws a frame in IMAGE pixels (`image_sel_*`, snip) |
+| `table_single(key, on)` | one click on a row answers the key (a task list); `HEAD_ROW` as the selection = no row selected |
+| `dialog_ok_x/y/w/h` | where the first dialog button stands (tests press it) |
+| `hide(on)`, `handle()`, `set_app`, `raise`, `build_now` | what the old wlib window calls were |
+| `compact(node)` | a tool-bar button with 8-point inner margin |
+| `ax_action(key, name)` | the bus action a node stands for |
+
+### 7.1 Accessibility tree and bus actions for scene windows
+
+A fUi window has ONE canvas widget in wlib's list, so wlib's tree was empty
+for it. `fuiscene.open` now hands wlib two functions (`wlib.ax_set_hooks`):
+one writes the nodes of the scene tree behind wlib's own (96 octets, same
+format: role, state, place, value, name, bus action), one takes a press.
+Node ids are `AXP_BASE (0x8000) + node index`. A reader presses a button or a
+check box; the next `pump` answers its key, exactly like a click. Tabs are
+refused by the kernel like in a wlib window (buttons and check boxes only).
+Test: `bash tools/a11y/scene.sh` (13/0): tabs, field, button, label are in the
+tree; two presses of the main button change the counter label; a tab press
+is refused. `tools/a11y/run.sh` stays 58/0.
+
+### 7.2 The caret (known defect, fixed)
+
+`render.draw_field` places the text pieces and the caret with `field_x_of`,
+which measures through a function pointer that returns `f64` -- in a ring-3
+program that call comes back as 0.0 (measured: `tb_x_of` 0, `field_meas`
+called directly 37). Effect: caret at the left end; with the caret inside
+a text the part after it was painted over the part before it.
+`fuiapp.field_paint` draws the text as one piece (caret at the end for the
+call, caret drawing off) and measures the caret with a direct `field_meas`
+call. A press in a field puts the caret at the closest character boundary
+(`fuiscene.entry_click`, direct calls as well). Used by lock, login and every
+scene field. The cause (f64 through a function pointer) is a Firn item.
+
+### 7.3 Full-width panels (known defect, fixed)
+
+`painter.raster_window` needs `(bx - ax) + 1` columns; the app painter was
+initialised with exactly the canvas width, so a shape as wide as the canvas
+was dropped. `fuib.app_bind` now reserves `w + 2` columns (and re-inits when
+the width grows, not only the height).
+
+### 7.4 Acceptances
+
+* toolbench (taskmgr): 28/6 on main (sections 6 and 8 red on main already:
+  the 20-second hold ends before the click plan reaches the question; the
+  control centre part is qs) -- same 28/6 with fUi. With `wighalt=120` the
+  plan reaches the question ("frage pid=") and the answer button.
+  `tools/toolbench/klickplan.py ja` reads the new report
+  `taskmgr: dialog ok x= y= w= h=` (the question is an overlay of the same
+  window now, not a second window).
+* storage: the tile probe measures the tiles IN THE PICTURE; tile colours are
+  exact RGB (`cv_rgb` swaps R/B like the theme colours do).
+* Design rule honoured by the tokens: fields, tables, picture boxes use the
+  `field` step, tool-bar buttons the `control` step, the main action (Sichern,
+  OK) the accent.
