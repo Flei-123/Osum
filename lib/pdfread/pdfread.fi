@@ -36,7 +36,6 @@
 import std.rt
 import std.deflate
 import std.md5
-import std.crypto.aes
 import pdfread.pdftab
 import jpeg.jpeg
 
@@ -1285,6 +1284,200 @@ fn enc_setup(d: *mut Doc) -> bool {
     return true
 }
 
+
+// ---- AES-128, decryption only (CBC), self-contained: lib/std/crypto/aes.fi uses
+// AES-NI inline assembly that the stage-1 compiler (tools/k16, firnc1) cannot
+// compile, and every program of the userland must go through both compilers.
+struct AesTab {
+    sbox: [u8; 256],
+    isbox: [u8; 256],
+}
+
+fn xtime(a: u32) -> u32 {
+    let v: u32 = (a << 1) & 255
+    if (a & 128) != 0 {
+        return v ^ 27
+    }
+    return v
+}
+
+fn gmul(a0: u32, b0: u32) -> u32 {
+    var a: u32 = a0
+    var b: u32 = b0
+    var r: u32 = 0
+    var i: u32 = 0
+    while i < 8 {
+        if (b & 1) != 0 {
+            r = r ^ a
+        }
+        a = xtime(a)
+        b = b >> 1
+        i = i + 1
+    }
+    return r
+}
+
+fn aes_tables(t: *mut AesTab) {
+    // sbox[x] = affine(inverse(x)); the inverse by search (256 x 256, once per file)
+    var x: u32 = 0
+    while x < 256 {
+        var inv: u32 = 0
+        if x != 0 {
+            var y: u32 = 1
+            while y < 256 {
+                if gmul(x, y) == 1 {
+                    inv = y
+                    y = 256
+                } else {
+                    y = y + 1
+                }
+            }
+        }
+        var b: u32 = inv
+        var r: u32 = inv
+        var k: u32 = 0
+        while k < 4 {
+            b = ((b << 1) | (b >> 7)) & 255
+            r = r ^ b
+            k = k + 1
+        }
+        r = r ^ 99
+        (*t).sbox[x as usize] = r as u8
+        (*t).isbox[r as usize] = x as u8
+        x = x + 1
+    }
+}
+
+// the 176 octets of round keys of a 16-octet key
+fn aes_expand(t: *mut AesTab, key: u64, rk: u64) {
+    var i: u64 = 0
+    while i < 16 {
+        wr8(rk + i, ld(key + i))
+        i = i + 1
+    }
+    var rcon: u32 = 1
+    i = 16
+    while i < 176 {
+        var t0: u32 = ld(rk + i - 4)
+        var t1: u32 = ld(rk + i - 3)
+        var t2: u32 = ld(rk + i - 2)
+        var t3: u32 = ld(rk + i - 1)
+        if (i % 16) == 0 {
+            let a: u32 = t0
+            t0 = (*t).sbox[t1 as usize] as u32 ^ rcon
+            t1 = (*t).sbox[t2 as usize] as u32
+            t2 = (*t).sbox[t3 as usize] as u32
+            t3 = (*t).sbox[a as usize] as u32
+            rcon = xtime(rcon)
+        }
+        wr8(rk + i, ld(rk + i - 16) ^ t0)
+        wr8(rk + i + 1, ld(rk + i - 15) ^ t1)
+        wr8(rk + i + 2, ld(rk + i - 14) ^ t2)
+        wr8(rk + i + 3, ld(rk + i - 13) ^ t3)
+        i = i + 4
+    }
+}
+
+// one block, in -> out (16 octets each; may be the same memory)
+fn aes_decrypt_block(t: *mut AesTab, rk: u64, inp: u64, outp: u64) {
+    var st: [u32; 16] = [0 as u32; 16]
+    var i: u64 = 0
+    while i < 16 {
+        st[i as usize] = ld(inp + i) ^ ld(rk + 160 + i)
+        i = i + 1
+    }
+    var round: u64 = 9
+    while round > 0 {
+        // InvShiftRows (state is column-major: index = col * 4 + row)
+        var s2: [u32; 16] = [0 as u32; 16]
+        var c: u64 = 0
+        while c < 4 {
+            var r: u64 = 0
+            while r < 4 {
+                s2[(((c + r) % 4) * 4 + r) as usize] = st[(c * 4 + r) as usize]
+                r = r + 1
+            }
+            c = c + 1
+        }
+        i = 0
+        while i < 16 {
+            st[i as usize] = (*t).isbox[s2[i as usize] as usize] as u32 ^ ld(rk + round * 16 + i)
+            i = i + 1
+        }
+        // InvMixColumns
+        c = 0
+        while c < 4 {
+            let a0: u32 = st[(c * 4) as usize]
+            let a1: u32 = st[(c * 4 + 1) as usize]
+            let a2: u32 = st[(c * 4 + 2) as usize]
+            let a3: u32 = st[(c * 4 + 3) as usize]
+            st[(c * 4) as usize] = gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9)
+            st[(c * 4 + 1) as usize] = gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13)
+            st[(c * 4 + 2) as usize] = gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11)
+            st[(c * 4 + 3) as usize] = gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14)
+            c = c + 1
+        }
+        round = round - 1
+    }
+    // the last round: InvShiftRows, InvSubBytes, AddRoundKey(0)
+    var s3: [u32; 16] = [0 as u32; 16]
+    var c2: u64 = 0
+    while c2 < 4 {
+        var r2: u64 = 0
+        while r2 < 4 {
+            s3[(((c2 + r2) % 4) * 4 + r2) as usize] = st[(c2 * 4 + r2) as usize]
+            r2 = r2 + 1
+        }
+        c2 = c2 + 1
+    }
+    i = 0
+    while i < 16 {
+        wr8(outp + i, (*t).isbox[s3[i as usize] as usize] as u32 ^ ld(rk + i))
+        i = i + 1
+    }
+}
+
+// CBC over whole blocks (`n` a multiple of 16)
+fn aes128_cbc_decrypt(key: u64, iv: u64, src: u64, n: u64, dst: u64) -> bool {
+    if n % 16 != 0 {
+        return false
+    }
+    let tp: u64 = alloc0(1024)
+    let rkp: u64 = alloc0(256)
+    if tp == 0 || rkp == 0 {
+        return false
+    }
+    let t: *mut AesTab = tp as *mut AesTab
+    aes_tables(t)
+    aes_expand(t, key, rkp)
+    var prev: [u8; 16] = [0 as u8; 16]
+    var cur: [u8; 16] = [0 as u8; 16]
+    var i: u64 = 0
+    while i < 16 {
+        prev[i as usize] = ld(iv + i) as u8
+        i = i + 1
+    }
+    var at: u64 = 0
+    while at < n {
+        i = 0
+        while i < 16 {
+            cur[i as usize] = ld(src + at + i) as u8
+            i = i + 1
+        }
+        aes_decrypt_block(t, rkp, (&cur[0]) as u64, dst + at)
+        i = 0
+        while i < 16 {
+            wr8(dst + at + i, ld(dst + at + i) ^ (prev[i as usize] as u32))
+            prev[i as usize] = cur[i as usize]
+            i = i + 1
+        }
+        at = at + 16
+    }
+    rt.heap_free(tp, 1024)
+    rt.heap_free(rkp, 256)
+    return true
+}
+
 // Algorithm 1: the key of one object, then RC4 or AES-CBC (IV = first 16 octets,
 // PKCS#7 padding). `out` receives the plain octets.
 fn decrypt_stream(d: *mut Doc, rn: u64, rg: u64, src: u64, n: u64, out: *mut rt.Buf) -> bool {
@@ -1330,13 +1523,12 @@ fn decrypt_stream(d: *mut Doc, rn: u64, rg: u64, src: u64, n: u64, out: *mut rt.
     if n < 32 || (n % 16) != 0 {
         return false
     }
-    var a: aes.Aes = aes.aes128_new((&h[0]) as u64)
     let body: u64 = n - 16
     let tmp2: u64 = alloc0(body + 16)
     if tmp2 == 0 {
         return false
     }
-    if !aes.aes_cbc_decrypt_soft(&a, src, src + 16, body as usize, tmp2) {
+    if !aes128_cbc_decrypt((&h[0]) as u64, src, src + 16, body, tmp2) {
         rt.heap_free(tmp2, (body + 16) as usize)
         return false
     }
