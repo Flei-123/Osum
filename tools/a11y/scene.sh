@@ -63,6 +63,8 @@ act call a11y.press name=Klick! window=Szenenbaum
 sleep 3
 act call a11y.press name=Klick! window=Szenenbaum
 sleep 3
+act call a11y.press action=scene.click window=Szenenbaum
+sleep 3
 echo ==S-TREE2==
 act call a11y.tree window=Szenenbaum
 echo ==S-TAB==
@@ -118,6 +120,7 @@ echo "== 3. the tree of a scene window =="
 part "$G" S-TREE S-PRESS > "$TMPD/p.txt"
 has "$TMPD/p.txt" '=window win' "the window node is there"
 has "$TMPD/p.txt" '"Szenenbaum"' "... named by its title"
+grep -qaF '"Klick!" act=scene.click' "$TMPD/p.txt" && ok "the main button carries its bus action scene.click (fuiscene.ax_action)" || bad "no act=scene.click on the main button"
 grep -qaE '=button .*"Klick!"' "$TMPD/p.txt" && ok "the main button: role button, name Klick!" || bad "no button Klick!: $(head -8 "$TMPD/p.txt" | tr '\n' '|')"
 grep -qaE '=tab .*"Eins"' "$TMPD/p.txt" && ok "the tabs: role tab, name Eins" || bad "no tab Eins"
 grep -qaE '=tab .*"Zwei"' "$TMPD/p.txt" && ok "... and Zwei" || bad "no tab Zwei"
@@ -126,7 +129,7 @@ grep -qaF '"Klicks: 0"' "$TMPD/p.txt" && ok "the label: role label, 'Klicks: 0'"
 
 echo "== 4. a press through the tree reaches the program =="
 part "$G" S-TREE2 S-TAB > "$TMPD/p.txt"
-grep -qaF '"Klicks: 2"' "$TMPD/p.txt" && ok "two presses of Klick! -> the label says 'Klicks: 2'" || bad "label after two presses: $(grep -a 'Klicks' "$TMPD/p.txt" | head -2)"
+grep -qaF '"Klicks: 3"' "$TMPD/p.txt" && ok "two presses by name and one by bus action (action=scene.click) -> the label says 'Klicks: 3'" || bad "label after three presses: $(grep -a 'Klicks' "$TMPD/p.txt" | head -2)"
 part "$G" S-TAB S-TREE3 > "$TMPD/p.txt"
 grep -qaF 'err no_such_control' "$TMPD/p.txt" && ok "a tab is not pressable through the tree (only buttons and check boxes), same as in a wlib window" || bad "tab press: $(grep -a 'err' "$TMPD/p.txt" | head -1)"
 part "$G" S-TREE3 S-END > "$TMPD/p.txt"

@@ -92,7 +92,7 @@ profile app
 
 import ulib
 import wlibc
-import wlib
+import fuiscene
 import msg
 import instkern
 import dualkern
@@ -1115,8 +1115,7 @@ fn wo(n: u64) {
 fn melde_schritt(wschritt: u64, nr: u64) {
     st_zeige = nr
     schritt_bauen()
-    wlib.set_text(wschritt, (&schrittzeile[0 as usize]) as u64)
-    wlib.draw_all()
+    fuiscene.repaint_now()
     say(ptr((&m_step[0 as usize]) as u64))
     ulib.sayu(nr)
     luft()
@@ -1437,6 +1436,78 @@ fn arg_hat(args: u64, was: u64) -> bool {
 
 // --------------------------------------------------------------- das Ganze
 
+
+// ================================================== DAS FENSTER (fUi)
+//
+// FUI-ALL: das Fenster ist ein Baum von Knoten (kernel/user/fuiscene.fi),
+// kein Satz Bedienelemente mehr. Der Zustand (Platte, Weg, Frage, Lauf)
+// liegt in den Variablen oben; `fuiscene.refresh()` beschreibt den Baum
+// neu.
+const K_TTAB: u64 = 1
+const K_TAB0: u64 = 10
+const K_TAB1: u64 = 11
+const K_PTAB: u64 = 3
+const K_SUCH: u64 = 4
+const K_GO: u64 = 5
+
+static mut t_ja: [u8; 3] = "Ja\0"
+static mut t_nein: [u8; 5] = "Nein\0"
+
+fn build() {
+    let col: usize = fuiscene.root()
+    let _h: usize = fuiscene.label(col, msg.get(ptr((&k_head[0 as usize]) as u64)))
+    let _t: usize = fuiscene.table_blob(col, K_TTAB, BW - 16, 160, NCOL,
+        (&tblob[0 as usize]) as u64)
+    // DIE ZWEI WEGE ALS REITER. Sie stehen UNTER der Plattenliste und
+    // nicht darueber: erst wird eine Platte gewaehlt, dann entschieden,
+    // was mit ihr geschehen soll.
+    let reiter: usize = fuiscene.row(col)
+    let _r0: usize = fuiscene.tab(reiter, msg.get(ptr((&k_d_tganz[0 as usize]) as u64)),
+        K_TAB0, welcher_weg == 0)
+    let _r1: usize = fuiscene.tab(reiter, msg.get(ptr((&k_d_tneben[0 as usize]) as u64)),
+        K_TAB1, welcher_weg == 1)
+    // Die Partitionsansicht gehoert dem zweiten Reiter.
+    if welcher_weg == 1 {
+        let _p: usize = fuiscene.table_blob(col, K_PTAB, BW - 16, 120, PCOL,
+            (&pblob[0 as usize]) as u64)
+        let _f: usize = fuiscene.label(col, (&freizeile[0 as usize]) as u64)
+        let _e: usize = fuiscene.label(col, (&espzeile[0 as usize]) as u64)
+    }
+    let _s: usize = fuiscene.label(col, (&zeile[0 as usize]) as u64)
+    let _c: usize = fuiscene.label(col, (&schrittzeile[0 as usize]) as u64)
+    // DIE KNOPFREIHE STEHT RECHTS UNTEN -- dieselbe Stelle, an der der
+    // Dialog seine Antwortknoepfe hat.
+    let t_such: u64 = msg.get(ptr((&k_refresh[0 as usize]) as u64))
+    let t_go: u64 = weg_knopftext()
+    var w_such: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_such,
+        ulib.length(t_such)) + 40
+    w_such = (w_such + 3) / 4 * 4
+    var w_go: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_go,
+        ulib.length(t_go)) + 40
+    w_go = (w_go + 3) / 4 * 4
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let _sp: usize = fuiscene.space(bar, BW - 16 - w_such - w_go - 16, 4)
+    let bs: usize = fuiscene.button(bar, t_such, K_SUCH)
+    fuiscene.set_size(bs, w_such, 36)
+    // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
+    // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
+    // erkennbar nicht bereit ist.
+    let bg: usize = fuiscene.button_main(bar, t_go, K_GO)
+    fuiscene.set_size(bg, w_go, 36)
+    fuiscene.set_enabled(bs, laeuft == 0)
+    fuiscene.set_enabled(bg, laeuft == 0 && weg_moeglich())
+}
+
+// The chosen disk is the selected row of the table (or no row).
+fn wahl_zeigen() {
+    if gewaehlt < p_anz {
+        fuiscene.table_set_sel(K_TTAB, gewaehlt)
+    } else {
+        fuiscene.table_set_sel(K_TTAB, fuiscene.HEAD_ROW)
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     // WAS AN ARGUMENTEN ANGEKOMMEN IST -- ALS ERSTES, vor allem
     // anderen. Ein Schalter, der nicht wirkt, hat zwei moegliche
@@ -1463,14 +1534,10 @@ fn u_start(args: u64) -> u64 {
     let zweite: bool = arg_hat(args, ptr((&a_zwei[0 as usize]) as u64))
     let daneben: bool = arg_hat(args, ptr((&a_neben[0 as usize]) as u64))
 
-    if !wlib.begin(nohit, false) {
-        say(ptr((&m_nowm[0 as usize]) as u64))
-        ulib.nl()
-        return 1
-    }
-    // DER KATALOG ZUERST, vor jedem Bedienelement: `wlib` behaelt den
-    // Zeiger auf den Text eines Knopfes, und ein Knopf, der vor dem
-    // Katalog entsteht, traegt den Schluessel statt des Wortes.
+    fuiscene.set_nohit(nohit)
+    // DER KATALOG ZUERST, vor jedem Bedienelement: ein Knoten behaelt den
+    // Zeiger auf seinen Text, und ein Knopf, der vor dem Katalog
+    // entsteht, traegt den Schluessel statt des Wortes.
     let _mk: u64 = msg.init()
 
     if daneben {
@@ -1487,110 +1554,49 @@ fn u_start(args: u64) -> u64 {
     dzeilen_bauen()
     status_bauen()
 
-    let w: u64 = wlib.window(wlibc.snap(40), wlibc.snap(40),
-        wlibc.snap_up(BW), wlibc.snap_up(BH),
-        msg.get(ptr((&k_title[0 as usize]) as u64)))
-    if w >= wlib.MAXWN {
+    // The column widths of the two tables (4-point grid).
+    tspalten[(0) as usize] = 180
+    tspalten[(1) as usize] = 100
+    tspalten[(2) as usize] = 140
+    tspalten[(3) as usize] = 280
+    pspalten[(0) as usize] = 48
+    pspalten[(1) as usize] = 120
+    pspalten[(2) as usize] = 120
+    pspalten[(3) as usize] = 180
+    pspalten[(4) as usize] = 232
+
+    if !fuiscene.open(40, 40, BW, BH, msg.get(ptr((&k_title[0 as usize]) as u64)),
+        build) {
         say(ptr((&m_nowm[0 as usize]) as u64))
         ulib.nl()
         return 1
     }
-    let _wa: u64 = wlib.window_app(w, ptr((&m_self[0 as usize]) as u64))
-
-    let pad: u64 = wlibc.space(2)
-    let gap: u64 = wlibc.space(1)
-    let bw: u64 = wlib.win_w(w)
-    let bh: u64 = wlib.win_h(w)
-    let kh: u64 = wlibc.metric(wlibc.M_CTRL_H)
-
-    // ============================================ DIE ANORDNUNG
-    //
-    // EINE senkrechte Schachtel ueber das ganze Fenster, und die
-    // Bibliothek verteilt darin. Die erste Fassung dieser Datei hat
-    // stattdessen VIER Schachteln mit ausgerechneten Y-Werten
-    // nebeneinandergesetzt -- und das Ergebnis war ein Fenster, in dem
-    // ausser dem Titelbalken NICHTS stand: 94,6 % einfarbige Flaeche,
-    // gemessen mit `pruef/bildpruef.py`. Im Quelltext war das nicht zu
-    // sehen; erst das Foto hat es gezeigt.
-    //
-    // Deshalb hier derselbe Aufbau wie im Aufgabenverwalter: EIN
-    // `box_v` mit Rand und Abstand, die Widgets der Reihe nach hinein,
-    // `size` nur dort, wo eine Hoehe nicht die Vorgabe ist.
-    let tbh: u64 = wlibc.snap_up(160)
-    let pbh: u64 = wlibc.snap_up(140)
-    wlib.box_v(w, 0, 0, bw, bh, pad, gap)
-    let lhead: u64 = wlib.label(msg.get(ptr((&k_head[0 as usize]) as u64)))
-    wlib.size(0, tbh)
-    let ttab: u64 = wlib.table((&tblob[0 as usize]) as u64, 5, NCOL,
-        (&tspalten[0 as usize]) as u64)
-    // ============================== DIE ZWEI WEGE ALS REITER
-    //
-    // Sie stehen UNTER der Plattenliste und nicht darueber: erst wird
-    // eine Platte gewaehlt, dann entschieden, was mit ihr geschehen
-    // soll. Umgekehrt muesste der Mensch ueber etwas entscheiden, das
-    // er noch nicht benannt hat.
-    let treiter: u64 = wlib.tabs((&tabtext[0 as usize]) as u64)
-    // Die Partitionsansicht des zweiten Weges.
-    wlib.size(0, pbh)
-    let ptab: u64 = wlib.table((&pblob[0 as usize]) as u64, 5, PCOL,
-        (&pspalten[0 as usize]) as u64)
-    let lfrei: u64 = wlib.label((&freizeile[0 as usize]) as u64)
-    let lesp: u64 = wlib.label((&espzeile[0 as usize]) as u64)
-    let lstat: u64 = wlib.label((&zeile[0 as usize]) as u64)
-    let lschritt: u64 = wlib.label((&schrittzeile[0 as usize]) as u64)
-    wlib.box_end()
-
-    // Die Partitionsansicht gehoert dem zweiten Reiter -- am Anfang
-    // steht der erste, also ist sie zu.
-    wlib.show(ptab, false)
-    wlib.show(lfrei, false)
-    wlib.show(lesp, false)
-
-    // EIN KLICK GENUEGT. Eine Platte waehlt man einmal aus; ein
-    // Doppelklick waere hier die Regel eines Dateimanagers am falschen
-    // Ort.
-    wlib.list_einklick(ttab, true)
-
-    // DIE KNOPFREIHE STEHT RECHTS UNTEN -- dieselbe Stelle, an der
-    // `wlib.dlg_new` seit Runde K15 die Antwortknoepfe hinsetzt.
-    let t_such: u64 = msg.get(ptr((&k_refresh[0 as usize]) as u64))
-    let t_go: u64 = msg.get(ptr((&k_go[0 as usize]) as u64))
-    let w_such: u64 = wlibc.snap_up(
-        wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_such, ulib.length(t_such))
-        + 2 * wlibc.metric(wlibc.M_PAD_X))
-    let w_go: u64 = wlibc.snap_up(
-        wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_go, ulib.length(t_go))
-        + 2 * wlibc.metric(wlibc.M_PAD_X))
-    let reihe: u64 = w_such + gap + w_go
-    wlib.box_h(w, bw - pad - reihe, bh - pad - kh, reihe, kh, 0, gap)
-    wlib.size(w_such, kh)
-    let bsuch: u64 = wlib.button(t_such)
-    wlib.size(w_go, kh)
-    let bgo: u64 = wlib.button(t_go)
-    wlib.box_end()
-
-    // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
-    // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
-    // erkennbar nicht bereit ist.
-    wlib.enable(bgo, weg_moeglich())
-    wlib.set_text(bgo, weg_knopftext())
-    if welcher_weg == 1 {
-        wlib.set_value(treiter, 1)
-        wlib.show(ptab, true)
-        wlib.show(lfrei, true)
-        wlib.show(lesp, true)
-        wlib.show(ttab, true)
+    fuiscene.set_app(ptr((&m_self[0 as usize]) as u64))
+    // The first pump describes the tree and paints it.
+    let _k0: u64 = fuiscene.pump()
+    var ci: u64 = 0
+    while ci < NCOL {
+        fuiscene.table_colw(K_TTAB, ci, tspalten[(ci) as usize])
+        ci = ci + 1
     }
+    var cj: u64 = 0
+    while cj < PCOL {
+        fuiscene.table_colw(K_PTAB, cj, pspalten[(cj) as usize])
+        cj = cj + 1
+    }
+    fuiscene.table_single(K_TTAB, true)
+    wahl_zeigen()
+    fuiscene.refresh()
 
-    wlib.draw_all()
     say(ptr((&m_ready[0 as usize]) as u64))
     ulib.sayu(p_anz)
     ulib.nl()
-    // WAS DIE BIBLIOTHEK WIRKLICH HINGESTELLT HAT. Ein Fenster, das
-    // leer aussieht, kann zweierlei heissen: die Widgets sind nicht da,
-    // oder sie stehen ausserhalb. Diese Zeile unterscheidet die beiden
-    // Faelle, und sie hat in dieser Runde genau das getan.
-    wlib.say_rects(ptr((&m_self[0 as usize]) as u64))
+    // WAS DIE OBERFLAECHE WIRKLICH HINGESTELLT HAT. Ein Fenster, das
+    // leer aussieht, kann zweierlei heissen: die Knoten sind nicht da,
+    // oder sie stehen ausserhalb. Diese Zeilen unterscheiden die beiden
+    // Faelle.
+    let _k1: u64 = fuiscene.pump()
+    fuiscene.say_rects(ptr((&m_self[0 as usize]) as u64))
 
     if nurzeig {
         return 0
@@ -1602,9 +1608,8 @@ fn u_start(args: u64) -> u64 {
     // Vorauswahl oben greift nur bei genau einer gefundenen Platte --
     // das ist fuer einen Menschen richtig (bei zweien soll er
     // waehlen), fuer den Laeufer aber eine Bedingung, die er nicht in
-    // der Hand hat: taucht ein zweites Geraet auf, tut der Lauf
-    // stillschweigend nichts und die Abnahme meldet "keine Schritte".
-    // Genau das ist in dieser Runde passiert.
+    // der Hand hat.
+    var los: bool = false
     if sofort {
         if gewaehlt >= p_anz && p_anz > 0 {
             gewaehlt = 0
@@ -1620,10 +1625,10 @@ fn u_start(args: u64) -> u64 {
             tafel_holen(nptr(gewaehlt))
             ptabelle_bauen()
             dzeilen_bauen()
-            wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
-            wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
-            wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
-            wlib.draw_all()
+            fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
+            wahl_zeigen()
+            fuiscene.refresh()
+            let _k2: u64 = fuiscene.pump()
             // AUF DEM WEG "DANEBEN" WIRD NUR LOSGELEGT, WENN ES GEHT.
             // Sonst bliebe der Lauf haengen und die Abnahme meldete
             // "keine Schritte", statt den Abbruchgrund zu zeigen.
@@ -1635,21 +1640,22 @@ fn u_start(args: u64) -> u64 {
                 return 0
             }
             frage = 2
+            los = true
         }
     }
 
     var runden: u64 = 0
-    while wlib.alive() && runden < 4000000 {
+    while fuiscene.alive() && runden < 4000000 {
         runden = runden + 1
 
-        // Die zweite Frage ist beantwortet: jetzt wird geschrieben.
-        if frage == 2 && laeuft == 0 && fertig == 0 {
+        // Die zweite Frage ist beantwortet (oder der Laeufer darf
+        // ohne): jetzt wird geschrieben.
+        if los && laeuft == 0 && fertig == 0 {
+            los = false
             laeuft = 1
             status_bauen()
-            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-            wlib.enable(bgo, false)
-            wlib.enable(bsuch, false)
-            wlib.draw_all()
+            fuiscene.refresh()
+            fuiscene.repaint_now()
             say(ptr((&m_go[0 as usize]) as u64))
             ulib.nl()
 
@@ -1658,9 +1664,9 @@ fn u_start(args: u64) -> u64 {
             // dahinter ist dieselbe Meldung.
             var gut: bool = false
             if welcher_weg == 1 {
-                gut = installieren_daneben(nptr(gewaehlt), lstat, lschritt)
+                gut = installieren_daneben(nptr(gewaehlt), 0, 0)
             } else {
-                gut = installieren(nptr(gewaehlt), lstat, lschritt)
+                gut = installieren(nptr(gewaehlt), 0, 0)
             }
             laeuft = 0
             if gut {
@@ -1684,144 +1690,108 @@ fn u_start(args: u64) -> u64 {
             } else {
                 status_bauen()
             }
-            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
             schritt_bauen()
-            wlib.set_text(lschritt, (&schrittzeile[0 as usize]) as u64)
-            wlib.enable(bsuch, true)
-            wlib.draw_all()
+            fuiscene.refresh()
             frage = 0
             if sofort {
                 return 0
             }
         }
 
-        let id: u64 = wlib.step()
-        if id < wlib.MAXWD {
-            let kind: u64 = wlib.fired_kind()
-            let idx: u64 = wlib.fired_index()
-            if kind == wlib.K_BUTTON {
-                if id == bsuch {
-                    platten_suchen()
-                    gewaehlt = 0xFFFFFFFFFFFFFFFF
-                    fertig = 0
-                    tabelle_bauen()
-                    wlib.set_text(ttab, (&tblob[0 as usize]) as u64)
-                    status_bauen()
-                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                    wlib.enable(bgo, false)
-                    wlib.draw_all()
-                } else if id == bgo && weg_moeglich() && laeuft == 0 {
-                    if welcher_weg == 1 {
-                        // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
-                        //
-                        // Die zweite Frage des anderen Weges gibt es,
-                        // weil dort eine ganze Platte geloescht wird --
-                        // die folgenreichste Sache, die dieses System
-                        // auf Knopfdruck tut. Hier wird NICHTS
-                        // geloescht; die vorhandenen Partitionen
-                        // bleiben, und das steht auch in der Frage.
-                        // Zwei Warnungen vor einem harmlosen Schritt
-                        // sind keine Vorsicht, sondern Gewoehnung --
-                        // und Gewoehnung ist genau das, was die zweite
-                        // Frage auf dem anderen Reiter wertlos machen
-                        // wuerde.
-                        frage = 2
-                        wlib.dlg_ask(
-                            msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
-                            msg.get(ptr((&k_d_askx[0 as usize]) as u64)))
-                        say(ptr((&m_ask[0 as usize]) as u64))
-                        ulib.sayu(9)
-                        ulib.nl()
-                    } else {
-                        // DIE ERSTE FRAGE.
-                        frage = 1
-                        wlib.dlg_ask(
-                            msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
-                            msg.get(ptr((&k_ask1x[0 as usize]) as u64)))
-                        say(ptr((&m_ask[0 as usize]) as u64))
-                        ulib.sayu(1)
-                        ulib.nl()
-                    }
-                }
-            } else if kind == wlib.K_TABLE && id == ttab {
-                if idx < p_anz {
-                    gewaehlt = idx
-                    say(ptr((&m_pick[0 as usize]) as u64))
-                    luft()
-                    say(nptr(gewaehlt))
-                    ulib.nl()
-                    // DIE TAFEL DIESER PLATTE LESEN. Erst jetzt -- vorher
-                    // ist nicht klar, um welche Platte es geht, und ein
-                    // Programm, das beim Start jede Platte durchliest,
-                    // haelt den Menschen auf.
-                    tafel_holen(nptr(gewaehlt))
-                    ptabelle_bauen()
-                    dzeilen_bauen()
-                    wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
-                    wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
-                    wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
-                    status_bauen()
-                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                    wlib.enable(bgo, weg_moeglich())
-                    wlib.draw_all()
-                }
-            } else if kind == wlib.K_TABS && id == treiter {
-                // DER WEG WIRD GEWECHSELT.
-                welcher_weg = idx
-                say(ptr((&m_d_weg[0 as usize]) as u64))
-                ulib.sayu(welcher_weg)
+        let id: u64 = fuiscene.pump()
+        if id == K_SUCH {
+            platten_suchen()
+            gewaehlt = 0xFFFFFFFFFFFFFFFF
+            fertig = 0
+            tabelle_bauen()
+            fuiscene.table_set_blob(K_TTAB, (&tblob[0 as usize]) as u64)
+            status_bauen()
+            wahl_zeigen()
+            fuiscene.refresh()
+        } else if id == K_GO && weg_moeglich() && laeuft == 0 {
+            if welcher_weg == 1 {
+                // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
+                //
+                // Die zweite Frage des anderen Weges gibt es,
+                // weil dort eine ganze Platte geloescht wird --
+                // die folgenreichste Sache, die dieses System
+                // auf Knopfdruck tut. Hier wird NICHTS
+                // geloescht; die vorhandenen Partitionen
+                // bleiben, und das steht auch in der Frage.
+                // Zwei Warnungen vor einem harmlosen Schritt
+                // sind keine Vorsicht, sondern Gewoehnung --
+                // und Gewoehnung ist genau das, was die zweite
+                // Frage auf dem anderen Reiter wertlos machen
+                // wuerde.
+                frage = 2
+                fuiscene.dialog_open(
+                    msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
+                    msg.get(ptr((&k_d_askx[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(9)
                 ulib.nl()
-                wlib.show(ptab, welcher_weg == 1)
-                wlib.show(lfrei, welcher_weg == 1)
-                wlib.show(lesp, welcher_weg == 1)
-                wlib.set_text(bgo, weg_knopftext())
-                status_bauen()
-                wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                wlib.enable(bgo, weg_moeglich())
-                wlib.draw_all()
+            } else {
+                // DIE ERSTE FRAGE.
+                frage = 1
+                fuiscene.dialog_open(
+                    msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
+                    msg.get(ptr((&k_ask1x[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(1)
+                ulib.nl()
             }
-        }
-
-        // Die Antwort auf eine der beiden Fragen.
-        if wlib.dlg_state() > 1 {
-            let ja: bool = wlib.dlg_state() == 2
-            wlib.dlg_close()
+        } else if id == K_TTAB {
+            let idx: u64 = fuiscene.table_sel(K_TTAB)
+            if idx < p_anz {
+                gewaehlt = idx
+                say(ptr((&m_pick[0 as usize]) as u64))
+                luft()
+                say(nptr(gewaehlt))
+                ulib.nl()
+                // DIE TAFEL DIESER PLATTE LESEN. Erst jetzt -- vorher
+                // ist nicht klar, um welche Platte es geht, und ein
+                // Programm, das beim Start jede Platte durchliest,
+                // haelt den Menschen auf.
+                tafel_holen(nptr(gewaehlt))
+                ptabelle_bauen()
+                dzeilen_bauen()
+                fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
+                status_bauen()
+                fuiscene.refresh()
+            }
+        } else if id == K_TAB0 || id == K_TAB1 {
+            // DER WEG WIRD GEWECHSELT.
+            welcher_weg = id - K_TAB0
+            say(ptr((&m_d_weg[0 as usize]) as u64))
+            ulib.sayu(welcher_weg)
+            ulib.nl()
+            status_bauen()
+            fuiscene.refresh()
+        } else if id == fuiscene.KEY_DIALOG {
+            // Die Antwort auf eine der beiden Fragen.
+            let ja: bool = fuiscene.dialog_result() == 1
             if ja && frage == 1 {
                 // DIE ZWEITE FRAGE. Sie kommt erst, wenn die erste mit
                 // Ja beantwortet ist -- und sie sagt, dass es jetzt
                 // unwiderruflich wird.
                 frage = 2
-                wlib.dlg_ask(
+                fuiscene.dialog_open(
                     msg.get(ptr((&k_ask2t[0 as usize]) as u64)),
-                    msg.get(ptr((&k_ask2x[0 as usize]) as u64)))
+                    msg.get(ptr((&k_ask2x[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
                 say(ptr((&m_ask[0 as usize]) as u64))
                 ulib.sayu(2)
                 ulib.nl()
-                // Die zweite Frage steht jetzt; ihre Antwort kommt in
-                // einer der naechsten Runden. `frage` bleibt auf 2 und
-                // wird oben erst dann ausgewertet, wenn der Dialog
-                // wirklich zu ist.
-                wlib.draw_all()
-                // Warten, bis sie beantwortet ist.
-                var warte: u64 = 0
-                var zusage: bool = false
-                while wlib.alive() && warte < 4000000 {
-                    warte = warte + 1
-                    let _x: u64 = wlib.step()
-                    if wlib.dlg_state() > 1 {
-                        zusage = wlib.dlg_state() == 2
-                        wlib.dlg_close()
-                        wlib.draw_all()
-                        warte = 4000000
-                    }
-                }
-                if !zusage {
-                    frage = 0
-                    wlib.draw_all()
-                }
-            } else if !ja {
+            } else if ja && frage == 2 {
+                // Beide Fragen mit Ja: es wird geschrieben (oben).
+                los = true
+            } else {
                 frage = 0
-                wlib.draw_all()
             }
         }
     }
