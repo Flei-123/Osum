@@ -144,6 +144,7 @@ SEMANTIC = [
     "border", "border-strong", "border-focus", "accent", "accent-hover",
     "accent-pressed", "accent-disabled", "on-accent", "selection",
     "on-selection", "overlay", "danger", "warning", "success", "shadow",
+    "control", "control-hover", "control-pressed", "field",
 ]
 S = {n: i for i, n in enumerate(SEMANTIC)}
 
@@ -157,14 +158,14 @@ COMPONENT = [
     ("window-text", "text-primary"),
     ("text-muted", "text-secondary"),
     ("panel-bg", "surface-raised"),
-    ("button-face", "surface-raised"),
-    ("button-hover", "surface-hover"),
-    ("button-pressed", "surface-pressed"),
+    ("button-face", "control"),
+    ("button-hover", "control-hover"),
+    ("button-pressed", "control-pressed"),
     ("border", "border"),
     ("select-bg", "selection"),
     ("select-text", "on-selection"),
     ("focus-ring", "border-focus"),
-    ("input-bg", "surface-sunken"),
+    ("input-bg", "field"),
     ("header-bg", "surface-hover"),
     ("scroll-track", "surface-sunken"),
     ("scroll-thumb", "border-strong"),
@@ -185,7 +186,7 @@ COMPONENT = [
     ("button-disabled-text", "text-disabled"),
     ("input-text", "text-primary"),
     ("input-border", "border-strong"),
-    ("list-bg", "surface-sunken"),
+    ("list-bg", "field"),
     ("menu-text", "text-primary"),
     ("shadow", "shadow"),
     ("danger", "danger"),
@@ -257,6 +258,10 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_0])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
+            put("control", neutral[N_0])
+            put("control-hover", neutral[N_100])
+            put("control-pressed", neutral[N_200])
+            put("field", neutral[N_0])
             put("text-primary", neutral[N_1000])
             put("text-secondary", neutral[N_1000])
             put("text-disabled", neutral[N_500])
@@ -269,12 +274,16 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_100])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
+            put("control", neutral[N_200])
+            put("control-hover", neutral[N_300])
+            put("control-pressed", neutral[N_400])
+            put("field", neutral[N_100])
             put("text-primary", neutral[N_900])
             # n600 and not n500: n500 on surface-sunken measures 4.34:1
             # and that is below 4.5.  The number decided the token.
             put("text-secondary", neutral[N_600])
             put("text-disabled", neutral[N_400])
-            put("border", neutral[N_200])
+            put("border", neutral[N_300])
             # n500 and not n400: a control boundary is a user interface
             # component (WCAG 1.4.11) and needs 3:1.  n400 measures
             # 2.45:1 on this surface.  The number decided the token.
@@ -288,6 +297,10 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_1000])
             put("surface-hover", neutral[N_800])
             put("surface-pressed", neutral[N_700])
+            put("control", neutral[N_1000])
+            put("control-hover", neutral[N_800])
+            put("control-pressed", neutral[N_700])
+            put("field", neutral[N_1000])
             put("text-primary", neutral[N_0])
             put("text-secondary", neutral[N_0])
             put("text-disabled", neutral[N_400])
@@ -311,6 +324,10 @@ def resolve(scheme, dark, accent_override=None):
             # this file was simply never pulled after that commit.
             put("surface-hover", neutral[N_700])
             put("surface-pressed", neutral[N_600])
+            put("control", neutral[N_700])
+            put("control-hover", neutral[N_600])
+            put("control-pressed", neutral[N_500])
+            put("field", neutral[N_950])
             put("text-primary", neutral[N_50])
             # ROUND FARBE (15.09.2026), A-021: text-secondary N_400 ->
             # N_300 in the dark branch.  WCAG 2.1 (1.4.3) wants 4.5:1
@@ -452,6 +469,10 @@ TEXT_PAIRS = [
     ("danger", "surface", "normal"),
     ("warning", "surface", "normal"),
     ("success", "surface", "normal"),
+    ("text-primary", "control", "normal"),
+    ("text-primary", "control-hover", "normal"),
+    ("text-primary", "control-pressed", "normal"),
+    ("text-primary", "field", "normal"),
     # non-text: a user interface component against its background, 3:1
     ("accent", "surface", "ui"),
     ("border-focus", "surface", "ui"),

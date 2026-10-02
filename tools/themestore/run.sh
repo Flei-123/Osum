@@ -13,7 +13,7 @@
 #   3. ZWEI UMSETZUNGEN, EIN ERGEBNIS. `/bin/theme list` rechnet die
 #      Kontraste IM SYSTEM aus, `tools/theme/model.py` auf dem Wirt --
 #      zwei Rechnungen, die nichts voneinander wissen, Zahl fuer Zahl
-#      verglichen. Fuer eine Vorlage zusaetzlich alle 17 Paarungen.
+#      verglichen. Fuer eine Vorlage zusaetzlich alle 21 Paarungen.
 #   4. KEINE VORLAGE UNTER IHRER LATTE. 4,5:1, und 7:1 fuer ein
 #      Schema, das `contrast=high` sagt. GEGENPROBE: eine Vorlage auf
 #      einem absichtlich schlechten Schema MUSS als geringer Kontrast
@@ -225,7 +225,7 @@ bash tools/themestore/build.sh "$TMPD/show" script='theme show mitternacht;exit'
     > "$TMPD/show.log" 2>&1
 S="$TMPD/show/serial.txt"
 PN=$(grep -ac 'theme: pair i=' "$S")
-num "eine Vorlage meldet alle siebzehn Textpaarungen einzeln" "$PN" eq 17
+num "eine Vorlage meldet alle einundzwanzig Textpaarungen einzeln" "$PN" eq 21
 PD=0
 while read -r i fg bg r; do
     hr=$(python3 tools/themestore/model.py onepair "assets/themes/mitternacht.preset" "$fg" "$bg")
@@ -1165,7 +1165,15 @@ done
 num "bei Radius 12 ist die Ecke wirklich abgeschnitten (Bildpunkte)" "${T12:-0}" ge 8
 num "und bei 24 tiefer als bei 12" "${T24:-0}" gt "${T12:-0}"
 num "die Rundung bei 24 ist kantengeglaettet (Zeilen mit Mischton)" "${W24:-0}" ge 12
-num "und die bei 12 auch" "${W12:-0}" ge 6
+# DESIGN-REGEL 02.10.2026: der Rand (S_BORDER) ist im hellen Schema von N_200
+# auf N_300 gewandert, damit sich Knoepfe und Felder von ihrer Flaeche
+# abheben. Der Fensterrand ist damit kraeftiger, und die Abtastung unten
+# (glascheck.py ecke) zaehlt weniger "Zeilen mit Mischton", weil der Rand
+# selbst jetzt als Ring statt als Mischton gilt: vorher 8 und 8..14, jetzt 4
+# und 8. Eine TREPPE hat dort 0 (die Gegenprobe bei Radius 0 fordert das
+# weiterhin), also trennt jede Zahl >= 3 Glaettung von Treppe -- die
+# Schwellen sind von 6/12 auf 3/6 gesenkt, nicht aufgegeben.
+num "und die bei 12 auch" "${W12:-0}" ge 3
 num "GEGENPROBE: bei Radius 0 ist die Ecke ein rechter Winkel" "${T0:-99}" eq 0
 num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" eq 0
 
@@ -1222,7 +1230,7 @@ num "alle vier Fensterecken sind gemessen worden" "$ECKBAD" eq 0
 num "und die FLACHSTE der vier ist bei Radius 24 immer noch rund (tiefe)" \
     "$ECKTIEF" gt 0
 num "und die HAERTESTE der vier ist kantengeglaettet (Zeilen mit Mischton)" \
-    "$ECKWEICH" ge 12
+    "$ECKWEICH" ge 6
 # GEGENPROBE: bei Radius 0 hat KEINE der vier Ecken eine Rundung. Ohne
 # sie waere "tiefe > 0" auch dann gruen, wenn dieses Werkzeug in jedem
 # Bild irgendetwas findet.
@@ -2993,13 +3001,26 @@ for m in S.KNOPF.finditer(tail):
     grund = pic.at(ax - 8, ay + bh // 2)
     if grund is None:
         continue
+    # DESIGN-REGEL 02.10.2026: ein Hauptknopf traegt die Akzentfarbe, und
+    # die liegt mehr als 90 von der Karte entfernt -- nach der alten Regel
+    # galt seine ganze Flaeche als "Schrift" und blieb stehen. Darum wird
+    # auch die FLAECHENFARBE des Knopfes (die haeufigste Farbe in seinem
+    # Rechteck) uebermalt; die Schrift bleibt.
+    from collections import Counter
+    cnt = Counter()
+    for j in range(0, bh):
+        for i in range(0, bw):
+            if 0 <= ax + i < w and 0 <= ay + j < h:
+                cnt[pic.at(ax + i, ay + j)] += 1
+    flaeche = cnt.most_common(1)[0][0] if cnt else grund
     for j in range(-2, bh + 2):
         for i in range(-2, bw + 2):
             X, Y = ax + i, ay + j
             if not (0 <= X < w and 0 <= Y < h):
                 continue
             p = pic.at(X, Y)
-            if max(abs(p[k] - grund[k]) for k in range(3)) > 90:
+            if max(abs(p[k] - grund[k]) for k in range(3)) > 90 \
+                    and max(abs(p[k] - flaeche[k]) for k in range(3)) > 40:
                 continue          # das ist die Schrift, die bleibt
             o = (Y * w + X) * 3
             d[o], d[o + 1], d[o + 2] = grund

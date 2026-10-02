@@ -260,8 +260,13 @@ for r in sys.argv[2:]:
     d = dict(re.findall(r'(\w+)=(\d+)', r))
     x, y, h = int(d['x']), int(d['y']), int(d['h'])
     # the left edge, half way down: ring = dark, no ring = light border
-    p = [im.getpixel((x + k, y + h // 2)) for k in range(0, 3)]
-    if min(sum(c) for c in p) < 600:
+    # (a main button's ring sits three points OUTSIDE its face, hence -3)
+    p = [im.getpixel((x + k, y + h // 2)) for k in range(-3, 3)]
+    # DESIGN RULE 02.10.2026: the main button ("Anmelden") is filled with
+    # the accent colour, which is dark too. A ring is a dark edge that
+    # DIFFERS from the face behind it: the face is read 10 points inside.
+    face = sum(im.getpixel((x + 10, y + h // 2)))
+    if any(sum(c) < 600 and abs(sum(c) - face) > 60 for c in p):
         hits.append(d['id'])
 print(' '.join(hits) if hits else '-')
 PY

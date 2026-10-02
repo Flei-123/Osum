@@ -121,3 +121,36 @@ userland, loginui green or not worse than main.
   OrientOS's own `icons` module (same module name) -- open item.
 - `lock` prints `lock: rect id=..` lines (like `wlib.say_rects`) so
   `tools/design/messen.py` still measures the 4-pixel grid (100 %).
+
+## 5. Design rule: surface steps and the main button (Justin, 02.10.2026)
+
+A widget with a border never has the fill of what it sits on. The rule
+lives in the central token layers, not in programs:
+
+| token (layer 2, `wlibc.fi` + `tools/theme/model.py`) | light | dark |
+|---|---|---|
+| `surface` (base, the window) | n50 | n900 |
+| `surface-raised` (card, menu) | n0 | n800 |
+| `control` (button face) | n200 | n700 |
+| `control-hover` | n300 | n600 |
+| `control-pressed` | n400 | n500 |
+| `field` (text field, list, check box) | n100 | n950 |
+| `border` | n300 (was n200) | n700 |
+
+- `C_BUTTON_FACE/HOVER/PRESSED` map to the control steps, `C_INPUT_BG` and
+  `C_LIST_BG` to `field`. Four new text pairings (text on control, hover,
+  pressed, field) join the 17: 21 pairings, all checked by `model.py` and by
+  the kernel (`tools/themestore/run.sh`).
+- The main button of a form is the accent (blue): `wlib.primary(id, true)`
+  (flag `F_HAUPT`, accent / hover / pressed fill and `on-accent` label, also
+  on the old path that paints the part of a button above the band), and
+  `fuiapp.button_main` / `fuiscene.button_main` on fUi directly. Marked so:
+  settings (Übernehmen x3), calc (=), lock, login (Anmelden).
+- `high contrast` keeps its collapsed surfaces (the border is the text colour).
+- Screens before / after in both modes: `belege/design/` (`tools/design/
+  surfaces.sh before|after`).
+- Acceptances adjusted on purpose: `themestore` window-corner smoothing
+  thresholds 6/12 -> 3/6 (a staircase still measures 0), the flat-overpaint
+  counter-test also overpaints the button's face colour (a main button is
+  accent-filled), `loginui` focus ring = dark edge that differs from the
+  face (the accent-filled button is dark too).
