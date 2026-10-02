@@ -65,12 +65,16 @@ export {
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
     table_blob, table_set_blob,
+    dialog_open, dialog_is_open, dialog_result, KEY_DIALOG,
 }
 
 const NONE: usize = 4294967295
 // What `pump` answers when a popup menu entry was chosen; the index is
 // then read with `menu_pick()`.
 const KEY_POPUP: u64 = 4294967294
+// What `pump` answers when a dialog was closed (`dialog_result()`: 1 = the
+// first button / Enter, 2 = the second / Esc).
+const KEY_DIALOG: u64 = 4294967293
 
 // One scene (128 nodes of 976 octets), one stylesheet, one host. They are
 // big, so they live in the program's own static memory.
@@ -647,6 +651,9 @@ fn paint() {
     if s_pop_open {
         pop_paint()
     }
+    if s_dlg_open {
+        dlg_paint()
+    }
     fuiapp.frame_end()
     fuiwirt.host_painted(wirt())
     s_paints = s_paints + 1
@@ -711,7 +718,12 @@ fn pump() -> u64 {
         paint()
     }
     while fuiapp.next(&ev) {
-        if s_pop_open {
+        if s_dlg_open {
+            let r: u64 = dlg_event(&ev)
+            if r != 0 {
+                hit = r
+            }
+        } else if s_pop_open {
             let r: u64 = pop_event(&ev)
             if r != 0 {
                 hit = r
@@ -1519,4 +1531,101 @@ fn table_set_blob(key: u64, blob: u64) {
     }
     s_ct_blob[(k) as usize] = blob
     table_set_rows(key, blob_rows(blob))
+}
+
+
+// ------------------------------------------------------------ the dialog
+//
+// One modal dialog over the window: a title, a text, two buttons. It takes
+// the pointer and the keys while it is open; Enter = first button, Esc =
+// second. `pump` answers KEY_DIALOG, `dialog_result()` says which.
+static mut s_dlg_open: bool = false
+static mut s_dlg_title: u64 = 0
+static mut s_dlg_text: u64 = 0
+static mut s_dlg_b1: u64 = 0
+static mut s_dlg_b2: u64 = 0
+static mut s_dlg_res: u64 = 0
+static mut s_dlg_hot: u64 = 0
+const DLG_W: u64 = 320
+const DLG_H: u64 = 148
+
+fn dialog_is_open() -> bool {
+    return s_dlg_open
+}
+
+fn dialog_open(title: u64, text: u64, b1: u64, b2: u64) {
+    s_dlg_open = true
+    s_dlg_title = title
+    s_dlg_text = text
+    s_dlg_b1 = b1
+    s_dlg_b2 = b2
+    s_dlg_res = 0
+    s_dlg_hot = 0
+    touch()
+}
+
+// 1 or 2 once, then 0.
+fn dialog_result() -> u64 {
+    let r: u64 = s_dlg_res
+    s_dlg_res = 0
+    return r
+}
+
+fn dlg_w() -> u64 {
+    if fuiapp.width() < DLG_W + 24 {
+        return fuiapp.width() - 24
+    }
+    return DLG_W
+}
+
+fn dlg_x() -> u64 {
+    return (fuiapp.width() - dlg_w()) / 2
+}
+
+fn dlg_y() -> u64 {
+    return (fuiapp.height() - DLG_H) / 2
+}
+
+fn dlg_paint() {
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    // the dialog stands on a raised plate
+    fuiapp.panel(dlg_x(), dlg_y(), dlg_w(), DLG_H)
+    text_tok(dlg_x() + 16, dlg_y() + 12, dlg_w() - 32, s_dlg_title, style.TOK_TEXT_MUTED)
+    text_tok(dlg_x() + 16, dlg_y() + 48, dlg_w() - 32, s_dlg_text, style.TOK_TEXT)
+    let by: u64 = dlg_y() + DLG_H - 52
+    let bw: u64 = (dlg_w() - 48) / 2
+    fuiapp.button_main(dlg_x() + 16, by, bw, 36, s_dlg_b1, s_dlg_hot == 0)
+    fuiapp.button(dlg_x() + 32 + bw, by, bw, 36, s_dlg_b2, s_dlg_hot == 1)
+}
+
+fn dlg_event(e: *mut fuiapp.Ev) -> u64 {
+    let ev: fuiapp.Ev = *e
+    let by: u64 = dlg_y() + DLG_H - 52
+    if ev.kind == fuiapp.EV_DOWN {
+        if ev.y >= by && ev.y < by + 36 {
+            let bw: u64 = (dlg_w() - 48) / 2
+            if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + 16 + bw {
+                s_dlg_res = 1
+            } else if ev.x >= dlg_x() + 32 + bw && ev.x < dlg_x() + 32 + 2 * bw {
+                s_dlg_res = 2
+            }
+        }
+    } else if ev.kind == fuiapp.EV_KEY {
+        if ev.key == wlib.KEY_ENTER {
+            s_dlg_res = s_dlg_hot + 1
+        } else if ev.key == wlib.KEY_ESC {
+            s_dlg_res = 2
+        } else if ev.key == wlib.KEY_TAB || ev.key == wlib.KEY_LEFT
+            || ev.key == wlib.KEY_RIGHT {
+            s_dlg_hot = 1 - s_dlg_hot
+            touch()
+        }
+    }
+    if s_dlg_res != 0 {
+        s_dlg_open = false
+        touch()
+        return KEY_DIALOG
+    }
+    return 0
 }
