@@ -55,17 +55,27 @@ last() { grep -a 'installer: konto ks=' "$SER" | tail -1 | sed 's/.*konto //'; }
 grep -aq 'installer: ready' "$SER" && ok "the installer window is up" || { bad "no installer window"; tail -3 "$SER"; }
 grep -aq 'installer: disk /dev/hda' "$SER" && ok "the blank disk is listed (so the button CAN be on)" || bad "no disk listed"
 [ -z "$(last)" ] && ok "empty form: nothing valid yet, the button is off" || bad "state before typing: '$(last)'"
-# fields on the screen: window at (40,40), border 2, title 20 -> client origin (42,62)
-click 576,518; keys b o b
+# the three fields: the installer says where its rectangles are (`installer: rect
+# ... kind=4`, canvas coordinates); the window sits at (40,40), border 2, title 20,
+# so the client origin is (42,62)
+rect_of() { grep -aoE "installer: rect id=[0-9]+ kind=4 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$SER" | sed -n "${1}p"; }
+centre() { # n -> "x,y" on the screen
+    local r; r=$(rect_of "$1")
+    [ -n "$r" ] || { echo "0,0"; return; }
+    echo "$r" | awk '{ split($5,a,"="); split($6,b,"="); split($7,c,"="); split($8,d,"="); printf "%d,%d", 42 + a[2] + c[2]/2, 62 + b[2] + d[2]/2 }'
+}
+F1=$(centre 1); F2=$(centre 2); F3=$(centre 3)
+[ "$F1" != "0,0" ] && ok "the installer reports its three fields (name at $F1, password $F2, repeat $F3)" || bad "no field rectangles reported"
+click "$F1"; keys b o b
 [ "$(last)" = "ks=1 go=0" ] && ok "a valid name alone: ks=1, button off" || bad "after the name: '$(last)'"
-click 576,558; keys a b c d
+click "$F2"; keys a b c d
 [ "$(last)" = "ks=2 go=0" ] && ok "name + password, the repeat empty: ks=2, button off" || bad "after the password: '$(last)'"
-click 576,598; keys a b c d
+click "$F3"; keys a b c d
 [ "$(last)" = "ks=3 go=1" ] && ok "both passwords equal: ks=3, the button is ON" || bad "after the repeat: '$(last)'"
 keys x
 [ "$(last)" = "ks=2 go=0" ] && ok "one more key in the repeat: the button goes OFF again" || bad "after a mismatch: '$(last)'"
 # counter-check: a bad name
-click 576,518; keys ctrl-a delete shift-b o b
+click "$F1"; keys ctrl-a delete shift-b o b
 n=$(grep -ac 'installer: konto ks=' "$SER"); l=$(last)
 case "$l" in "ks=0"*) ok "a name with a capital letter is no name (ks=0)";; *) bad "capital letter accepted: '$l'";; esac
 kill $QP 2>/dev/null; wait $QP 2>/dev/null

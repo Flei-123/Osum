@@ -78,7 +78,10 @@ import icons
 
 export {
     // ROUND A11Y-2: the accessibility tree (docs/A11Y.md).
-    ax_name, ax_action, ax_flush, ax_flushes, ax_last, ax_presses,
+    ax_name, ax_action, ax_set_hooks, AXP_BASE, AXN_BYTES, AXN_NAME, AXN_NAMEMAX,
+    AXN_ACT, AXN_ACTMAX, AXR_LABEL, AXR_BUTTON, AXR_CHECK, AXR_ENTRY, AXR_LIST,
+    AXR_TABLE, AXR_TAB, AXR_CHOICE, AXR_SEPARATOR, AXR_SLIDER, AXS_ENABLED,
+    AXS_FOCUSABLE, AXS_FOCUSED, AXS_SELECTED, AXS_CHECKED, ax_flush, ax_flushes, ax_last, ax_presses,
     win_handle,
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
     trace, set_trace, set_menu_title, reshape, say_rects,
@@ -12495,6 +12498,30 @@ fn ax_clear(p: u64) {
     }
 }
 
+// FUI-ALL: a program that paints with fUi's scene tree (fuiscene) has ONE
+// canvas widget in wlib's list, so the nodes of its tree are invisible to
+// the code below. Such a program hands over two functions:
+//   build(buf, have, room) -> n   writes up to `room` nodes of 96 octets
+//                                 behind the `have` nodes already there
+//   press(id)                     a reader pressed node `id` (the id the
+//                                 node carried, AXP_BASE and up)
+// Their node ids start at AXP_BASE, far above any widget index.
+const AXP_BASE: u64 = 0x8000
+static mut ax_hooks: [u8; 16] = [0 as u8; 16]
+
+fn ax_hook_build() -> *mut fn(u64, u64, u64) -> u64 {
+    return ((&ax_hooks[0 as usize]) as u64) as *mut fn(u64, u64, u64) -> u64
+}
+
+fn ax_hook_press() -> *mut fn(u64) {
+    return (((&ax_hooks[0 as usize]) as u64) + 8) as *mut fn(u64)
+}
+
+fn ax_set_hooks(b: fn(u64, u64, u64) -> u64, p: fn(u64)) {
+    *ax_hook_build() = b
+    *ax_hook_press() = p
+}
+
 // Build all nodes into ax_buf. Returns how many.
 fn ax_build() -> u64 {
     let b: u64 = (&ax_buf[0 as usize]) as u64
@@ -12582,6 +12609,10 @@ fn ax_build() -> u64 {
         }
         i = i + 1
     }
+    if *((&ax_hooks[0 as usize]) as *mut u64) != 0 && n < AXN_MAX {
+        let hb: fn(u64, u64, u64) -> u64 = *ax_hook_build()
+        n = n + hb(b + n * AXN_BYTES, n, AXN_MAX - n)
+    }
     return n
 }
 
@@ -12653,6 +12684,14 @@ fn ax_tick(changed: bool) {
 // and a check box toggles. Only buttons and check boxes, only enabled
 // and visible ones, only of THIS window.
 fn ax_on_press(w: u64, i: u64) {
+    if i >= AXP_BASE {
+        if *(((&ax_hooks[0 as usize]) as u64 + 8) as *mut u64) != 0 {
+            ax_npress = ax_npress + 1
+            let hp: fn(u64) = *ax_hook_press()
+            hp(i)
+        }
+        return
+    }
     if i >= nwd || g(i, D_WIN) != w {
         return
     }

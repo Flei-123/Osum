@@ -49,7 +49,7 @@ export {
     open_plain, open_window, ctx, width, height, frame_begin, frame_end,
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE,
-    label, button, button_main, field, eye, glyph, edit, mask_off,
+    label, button, button_main, field, field_paint, eye, glyph, edit, mask_off,
     ink, panel, row, sel_on, sel_clear,
 }
 
@@ -89,6 +89,7 @@ fn width() -> u64 { return s_w }
 fn height() -> u64 { return s_h }
 fn ctx() -> *mut render.Ctx { return fuib.app_ctx() }
 fn theme() -> *mut theme.Theme { return fuib.app_theme() }
+fn theme_ptr() -> *mut theme.Theme { return fuib.app_theme() }
 
 // Monotonic milliseconds (clock_gettime, like wlib's blink clock); the
 // timer ticks (I_TICKS) are 10 ms apart and stand still in the file system.
@@ -306,6 +307,42 @@ fn mask_off(buf: u64, caret: usize) -> usize {
     return n
 }
 
+// A text field's picture WITH its caret where the typing is.
+//
+// `render.draw_field` places the pieces of the text (before / inside /
+// after the selection) and the caret with `field_x_of`, which measures
+// through a function pointer that RETURNS f64 -- and in a ring-3 program
+// that call comes back as 0.0 (measured 02.10.2026: `tb_x_of` = 0 while
+// the very same `field_meas` called directly = 37). Result: the caret at
+// the left end, and with the caret in the middle of a text the part after
+// it painted over the part before it. So: the text goes out as ONE piece
+// (caret at the end for the call, caret drawing off), and the caret is
+// measured here by a direct call. A selection (everything, Ctrl+A) is
+// one piece anyway and goes the normal way.
+fn field_paint(fe: *mut widget.Widget, tb: *mut textbuf.TextBuf,
+    caret_on: bool) {
+    let c: *mut render.Ctx = ctx()
+    if textbuf.tb_has_sel(tb) {
+        render.draw_field(c, fe, tb, 0.0, caret_on, 0, 0)
+        return
+    }
+    let caret: usize = textbuf.tb_caret(tb)
+    let n: usize = textbuf.tb_len(tb)
+    textbuf.tb_set_range(tb, n, n)
+    render.draw_field(c, fe, tb, 0.0, false, 0, 0)
+    textbuf.tb_set_range(tb, caret, caret)
+    if caret_on && widget.w_is_focus(fe) {
+        var fm: render.FieldMeas = render.field_meas_new(c, fe)
+        let cx: f64 = render.field_text_x0(c, fe)
+            + render.field_meas((&fm) as u64, textbuf.tb_ptr(tb), caret)
+        var top: f64 = 0.0
+        var lh: f64 = 0.0
+        let _by: f64 = render.field_line(c, fe, &top, &lh)
+        painter.caret_bar(render.ctx_painter(c), cx, top, lh, 1.0,
+            (*theme.theme_colors(theme_ptr())).text | 4278190080 as u32)
+    }
+}
+
 // A text field over `buf` (NUL-terminated, `cap` octets of text). Secret
 // fields show fUi's bullets (a second buffer, render.secret_mask) unless
 // `show` (the eye is open).
@@ -329,7 +366,7 @@ fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
         } else {
             textbuf.tb_set_range(&mv, mask_off(buf, caret), mask_off(buf, caret))
         }
-        render.draw_field(ctx(), &fe, &mv, 0.0, caret_on, 0, 0)
+        field_paint(&fe, &mv, caret_on)
     } else {
         var tb: textbuf.TextBuf = textbuf.tb_new()
         textbuf.tb_init(&tb, buf, cap)
@@ -342,7 +379,7 @@ fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
         if secret {
             textbuf.tb_set_secret(&tb, true)
         }
-        render.draw_field(ctx(), &fe, &tb, 0.0, caret_on, 0, 0)
+        field_paint(&fe, &tb, caret_on)
     }
 }
 

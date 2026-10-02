@@ -59,6 +59,12 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
+# FUI-ALL (02.10.2026): `wighalt=120`. The window server holds 20 seconds by
+# default, and the click plan below (list, row, button, question, answer,
+# a photo of 3 MB between the steps) needs longer on the slow test VM: on
+# main the plan never got past the second click, and section 6 was red
+# for that reason alone ('taskmgr: frage pid=' never came). The hold is only
+# the upper limit.
 SHOTS=docs/shots/werkzeug
 mkdir -p "$SHOTS"
 
@@ -80,7 +86,7 @@ warte 4
 foto v04_nachher
 EOF
 if bash tools/toolbench/build.sh "$TMPD/b1" desk=yes \
-       app=/bin/taskmgr,melde,takt,500 wait=14 last=260 \
+       app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
        plan="$TMPD/plan1.txt" > "$TMPD/b1.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kern ' "$TMPD/b1.log" | head -1))"
     ok "die Platte steht ($(grep -a '^platte ' "$TMPD/b1.log" | head -1))"

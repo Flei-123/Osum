@@ -76,8 +76,8 @@ static mut s_scale_pct: u64 = 100    // the percent the shown picture was made a
 static mut s_px: u64 = 0             // address of the rt.Buf with the page pixels
 static mut s_pw: u64 = 0
 static mut s_ph: u64 = 0
-static mut s_ox: i64 = 0
-static mut s_oy: i64 = 0
+static mut s_vw: u64 = 0             // the size of the page area (the picture box)
+static mut s_vh: u64 = 0
 static mut s_fm: u64 = 0
 static mut s_fmb: u64 = 0
 static mut s_fmm: u64 = 0
@@ -170,7 +170,10 @@ fn build() {
         cw = 600
         ch = 400
     }
-    let pg: usize = fuiscene.canvas_view(root, K_PAGE, cw, ch)
+    let pg: usize = fuiscene.image(root, K_PAGE, cw, ch)
+    s_vw = cw
+    s_vh = ch
+    let _pg2: usize = pg
     let sl: usize = fuiscene.label(root, (&s_status[0 as usize]) as u64)
     fuiscene.set_size(sl, 0, 24)
 }
@@ -218,8 +221,6 @@ fn load_file(path: u64) {
     s_page = 0
     s_mode = 1
     s_dirty = true
-    s_ox = 0
-    s_oy = 0
 }
 
 // the scale (percent) to make the current page at
@@ -232,8 +233,8 @@ fn want_pct() -> u64 {
     if !pdfread.doc_page_size(s_doc as *mut pdfread.Doc, s_page, &w, &h) || w < 1.0 || h < 1.0 {
         return 100
     }
-    var vw: u64 = fuiscene.canvas_vw()
-    var vh: u64 = fuiscene.canvas_vh()
+    var vw: u64 = s_vw
+    var vh: u64 = s_vh
     if vw < 100 {
         vw = 600
     }
@@ -268,37 +269,15 @@ fn render_now() {
         s_pw = w
         s_ph = h
         s_scale_pct = pct
+        // the picture was made at its final size: shown at 100 %, top of the page
+        fuiscene.image_set(K_PAGE, rt.buf_ptr(px), w, h)
+        fuiscene.image_set_zoom(K_PAGE, 100)
+        fuiscene.image_pan(K_PAGE, 0, 100000000)
         set_status(0)
     } else {
         set_status((&E_BIG[0 as usize]) as u64)
     }
-    clamp_view()
     s_dirty = false
-}
-
-fn clamp_view() {
-    var mx: i64 = 0
-    var my: i64 = 0
-    let vw: u64 = fuiscene.canvas_vw()
-    let vh: u64 = fuiscene.canvas_vh()
-    if s_pw > vw {
-        mx = (s_pw - vw) as i64
-    }
-    if s_ph > vh {
-        my = (s_ph - vh) as i64
-    }
-    if s_ox > mx {
-        s_ox = mx
-    }
-    if s_ox < 0 {
-        s_ox = 0
-    }
-    if s_oy > my {
-        s_oy = my
-    }
-    if s_oy < 0 {
-        s_oy = 0
-    }
 }
 
 fn goto_page(p: u64) {
@@ -306,7 +285,6 @@ fn goto_page(p: u64) {
         return
     }
     s_page = p
-    s_oy = 0
     s_dirty = true
 }
 
@@ -329,15 +307,6 @@ fn zoom_by(up: bool) {
     s_zoom = pct
     s_mode = 0
     s_dirty = true
-}
-
-// hand the picture and the view position to the canvas
-fn push_view() {
-    var p: u64 = 0
-    if s_pw > 0 {
-        p = rt.buf_ptr(s_px as *mut rt.Buf)
-    }
-    fuiscene.canvas_set(p, s_pw, s_ph, s_ox as u64, s_oy as u64)
 }
 
 fn crc32_of(p: u64, n: u64) -> u64 {
@@ -502,18 +471,13 @@ fn u_start(args: u64) -> u64 {
             } else if k == wlib.KEY_PGUP || k == wlib.KEY_LEFT {
                 goto_page(s_page - 1)
             } else if k == wlib.KEY_DOWN {
-                s_oy = s_oy + 48
-                changed = true
+                fuiscene.image_pan(K_PAGE, 0, 0 - 48)
             } else if k == wlib.KEY_UP {
-                s_oy = s_oy - 48
-                changed = true
+                fuiscene.image_pan(K_PAGE, 0, 48)
             } else if k == wlib.KEY_HOME {
-                s_oy = 0
-                s_ox = 0
-                changed = true
+                fuiscene.image_pan(K_PAGE, 0, 100000000)
             } else if k == wlib.KEY_END {
-                s_oy = 100000000
-                changed = true
+                fuiscene.image_pan(K_PAGE, 0, 0 - 100000000)
             } else if k == 43 || k == 61 {
                 zoom_by(true)
             } else if k == 45 {
@@ -526,24 +490,12 @@ fn u_start(args: u64) -> u64 {
                 s_dirty = true
             }
         }
-        let dx: i64 = fuiscene.pan_x()
-        let dy: i64 = fuiscene.pan_y()
-        if dx != 0 || dy != 0 {
-            s_ox = s_ox + dx
-            s_oy = s_oy + dy
-            changed = true
-        }
-        if s_dirty && s_open && fuiscene.canvas_vw() > 0 {
+        if s_dirty && s_open {
             render_now()
             update_texts()
             changed = true
-        } else if s_dirty && s_open && fuiscene.canvas_vw() == 0 {
-            // the first paint tells the viewport size; ask for one
-            changed = true
         }
         if changed {
-            clamp_view()
-            push_view()
             fuiscene.refresh()
         }
     }
