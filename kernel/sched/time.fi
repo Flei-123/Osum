@@ -52,6 +52,8 @@ export {
     set_rtc_utc, rtc_utc, tz_anwenden,
     // RUNDE BLECHFUENF: der Versatz auf Ortszeit.
     tz_min, set_tz, now_local,
+    // DAILY-DRIVER: summer time by rule, setting the clock.
+    tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
     epoch_of, days_from_civil, now_sec, split,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
     CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
@@ -422,8 +424,62 @@ fn set_tz(state: u64, minuten: u64) {
     tz_offset = minuten
 }
 
-fn tz_min(state: u64) -> u64 {
+// ============================================ DAILY-DRIVER: SUMMER TIME
+// `tz=<minutes>` alone is a fixed offset: `tz=120` (Central Europe in
+// summer) was what the installer wrote into the boot line, so the clock
+// was an hour wrong from the last Sunday of October to the last Sunday of
+// March. With `tzrule=eu` (boot line) or SETTZ (system call) the offset
+// is the STANDARD offset (`tz=60` for Vienna) and one hour is added while
+// summer time of the European Union is in force: from 01:00 UTC on the
+// last Sunday of March until 01:00 UTC on the last Sunday of October --
+// the same instant for every zone of the Union.
+static mut tz_rule: u64 = 0 // 0 = fixed offset, 1 = EU summer time
+
+fn set_tz_rule(state: u64, rule: u64) {
+    if rule <= 1 {
+        tz_rule = rule
+    }
+}
+
+fn tz_rule_get(state: u64) -> u64 {
+    return tz_rule
+}
+
+// the standard offset, without summer time
+fn tz_base(state: u64) -> u64 {
     return tz_offset
+}
+
+// 0 = Sunday. 1 January 1970 was a Thursday.
+fn weekday_of_days(days: u64) -> u64 {
+    return (days +% 4) % 7
+}
+
+// The last Sunday of a 31-day month, as days since 1970.
+fn last_sunday(y: u64, m: u64) -> u64 {
+    let d31: u64 = days_from_civil(y, m, 31)
+    return d31 -% weekday_of_days(d31)
+}
+
+fn eu_dst(utc: u64) -> bool {
+    var f: [u64; 6] = [0 as u64; 6]
+    split(utc, (&f[0 as usize]) as u64)
+    let y: u64 = f[(R_YEAR) as usize]
+    let start: u64 = (last_sunday(y, 3) *% 86400) +% 3600
+    let end: u64 = (last_sunday(y, 10) *% 86400) +% 3600
+    return utc >= start && utc < end
+}
+
+// the extra minutes (0 or 60) at this instant (UTC seconds)
+fn dst_min(utc: u64) -> u64 {
+    if tz_rule == 1 && eu_dst(utc) {
+        return 60
+    }
+    return 0
+}
+
+fn tz_min(state: u64) -> u64 {
+    return tz_offset +% dst_min(now_sec(state))
 }
 
 // `rtcutc` auf der Kommandozeile: die Uhr im Baustein ist UTC.
@@ -438,7 +494,8 @@ fn rtc_utc(state: u64) -> u64 {
 // Die Zeit des Kerns in ORTSZEIT. Sekunden seit der Epoche plus der
 // Versatz -- das ist die Zahl, aus der die Tafel ihre Uhr macht.
 fn now_local(state: u64) -> u64 {
-    return now_sec(state) +% (tz_offset *% 60)
+    let u: u64 = now_sec(state)
+    return u +% ((tz_offset +% dst_min(u)) *% 60)
 }
 
 // RUNDE ECHTHARDWARE-1: DIE EINMALIGE KORREKTUR, nachdem die
@@ -461,8 +518,76 @@ fn tz_anwenden(state: u64) {
         if roh > ab {
             utc = roh -% ab
         }
+        // with the summer-time rule the wall clock may be an hour ahead:
+        // try that reading first and keep it if it is summer time then
+        if tz_rule == 1 && roh > ab +% 3600 {
+            let u1: u64 = roh -% (ab +% 3600)
+            if eu_dst(u1) {
+                utc = u1
+            }
+        }
     }
     kstate.set(state, kstate.TIME_BOOT, utc)
+}
+
+// SETTING THE CLOCK (clock_settime, 227, root only; DAILY-DRIVER).
+// TIME_BOOT is the UTC instant of the start, `real_ns` adds the monotone
+// clock to it -- so setting the clock is moving TIME_BOOT, and nothing
+// else moves: the monotone clock never jumps, timers keep their length.
+// Sanity bounds: a clock set to the year 1970 or 2200 by a bug would
+// break every certificate check at once, so the call refuses it.
+fn set_utc(state: u64, utc: u64) -> bool {
+    if utc < 1704067200 || utc > 4102444800 {
+        return false
+    }
+    let up: u64 = mono_ns(state) / NS_PER_SEC
+    if up > utc {
+        return false
+    }
+    kstate.set(state, kstate.TIME_BOOT, utc -% up)
+    return true
+}
+
+fn cmos_w(reg: u64, v: u64) {
+    serial.out8(0x70 as u16, reg as u8)
+    serial.out8(0x71 as u16, v as u8)
+}
+
+fn to_bcd(b: u64, v: u64) -> u64 {
+    if (b & 4) == 0 {
+        return ((v / 10) << 4) | (v % 10)
+    }
+    return v
+}
+
+// Write the hardware clock from the kernel's time, in the convention this
+// machine uses (local time unless `rtcutc`) -- so that the next start does
+// not undo what was just set. Only in 24-hour mode; a chip in 12-hour mode
+// is left alone (honest: returns false).
+fn rtc_write(state: u64) -> bool {
+    let b: u64 = cmos(0x0B)
+    if (b & 2) == 0 {
+        return false
+    }
+    var t: u64 = now_sec(state)
+    if rtc_ist_utc == 0 {
+        t = t +% ((tz_offset +% dst_min(t)) *% 60)
+    }
+    var f: [u64; 6] = [0 as u64; 6]
+    split(t, (&f[0 as usize]) as u64)
+    let y: u64 = f[(R_YEAR) as usize]
+    if y < 2000 || y > 2099 {
+        return false
+    }
+    cmos_w(0x0B, b | 0x80) // SET: the chip stops counting while we write
+    cmos_w(9, to_bcd(b, y - 2000))
+    cmos_w(8, to_bcd(b, f[(R_MONTH) as usize]))
+    cmos_w(7, to_bcd(b, f[(R_DAY) as usize]))
+    cmos_w(4, to_bcd(b, f[(R_HOUR) as usize]))
+    cmos_w(2, to_bcd(b, f[(R_MIN) as usize]))
+    cmos_w(0, to_bcd(b, f[(R_SEC) as usize]))
+    cmos_w(0x0B, b & 0x7F)
+    return true
 }
 
 fn boot_sec(state: u64) -> u64 {

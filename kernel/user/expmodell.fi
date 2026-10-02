@@ -304,6 +304,55 @@ fn two(out: u64, at: u64, v: u64) -> u64 {
 // Der Versatz kommt aus /etc/time.conf, genau wie in der Taskleiste.
 // Null heisst "keine Zeit vom Dateisystem" und wird zu "--"; alles
 // andere waere eine erfundene Zahl.
+// DAILY-DRIVER: FILE TIMES FOLLOW SUMMER TIME TOO.
+// `/etc/time.conf` carries one fixed offset; with the zone rule of the
+// kernel (`tzrule=eu`, SETTZ) the right offset depends on the instant of
+// the FILE, not on now: a file from July shows summer time, one from
+// January winter time -- even when it is looked at in December. The
+// kernel is asked for the standard offset and the rule; without a zone in
+// the kernel the file's offset is used, as before.
+fn days_civil(y0: u64, m: u64, d: u64) -> u64 {
+    var y: u64 = y0
+    if m <= 2 {
+        y = y - 1
+    }
+    let era: u64 = y / 400
+    let yoe: u64 = y - era * 400
+    var mp: u64 = m + 9
+    if m > 2 {
+        mp = m - 3
+    }
+    let doy: u64 = (153 * mp + 2) / 5 + (d - 1)
+    let doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// the last Sunday of a 31-day month, as days since 1970 (1 Jan 1970: Thursday)
+fn last_sunday_of(y: u64, m: u64) -> u64 {
+    let d31: u64 = days_civil(y, m, 31)
+    return d31 - (d31 + 4) % 7
+}
+
+fn eu_summer(sek: u64) -> bool {
+    // the mean year is exact enough: the changeovers are far from 1 January
+    let y: u64 = 1970 + sek / 31556952
+    let a: u64 = last_sunday_of(y, 3) * 86400 + 3600
+    let b: u64 = last_sunday_of(y, 10) * 86400 + 3600
+    return sek >= a && sek < b
+}
+
+fn zone_minutes_at(sek: u64) -> u64 {
+    let base: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZBASE, 0, 0)
+    let rule: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZRULE, 0, 0)
+    if !ulib.bad(base) && !ulib.bad(rule) && (base != 0 || rule != 0) {
+        if rule == 1 && eu_summer(sek) {
+            return base + 60
+        }
+        return base
+    }
+    return time_offset()
+}
+
 fn time_text(sek: u64, out: u64) -> u64 {
     if sek == 0 {
         __mmio_write8((out + 0) as *mut u8, 45 as u8)
@@ -311,7 +360,7 @@ fn time_text(sek: u64, out: u64) -> u64 {
         __mmio_write8((out + 2) as *mut u8, 0 as u8)
         return out
     }
-    let place: u64 = sek + time_offset() * 60
+    let place: u64 = sek + zone_minutes_at(sek) * 60
     let tage: u64 = place / 86400
     let rest: u64 = place % 86400
     let z: u64 = tage + 719468
