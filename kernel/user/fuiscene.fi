@@ -64,6 +64,7 @@ export {
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
+    table_blob, table_set_blob,
 }
 
 const NONE: usize = 4294967295
@@ -1042,7 +1043,79 @@ fn ct_get_slot(k: u64) -> *mut fn(u64, u64) -> u64 {
     return (((&s_ct_get[0 as usize]) as u64) + k * 8) as *mut fn(u64, u64) -> u64
 }
 
+// A table fed from a text blob (what wlib.table took): lines end in a
+// newline, cells in a tab, the FIRST line is the header.
+static mut s_ct_blob: [u64; 3] = [0 as u64; 3]
+static mut s_cellbuf: [u8; 200] = [0 as u8; 200]
+
+fn blob_rows(blob: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while __mmio_read8((blob + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((blob + i) as *mut u8) == 10 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n == 0 {
+        return 0
+    }
+    return n - 1
+}
+
+// The cell `col` of blob line `line` (0 = header), copied into a buffer.
+fn blob_cell(blob: u64, line: u64, col: u64) -> u64 {
+    var at: u64 = 0
+    var l: u64 = 0
+    while l < line {
+        while __mmio_read8((blob + at) as *mut u8) != 10 as u8 {
+            if __mmio_read8((blob + at) as *mut u8) == 0 as u8 {
+                break
+            }
+            at = at + 1
+        }
+        at = at + 1
+        l = l + 1
+    }
+    var c: u64 = 0
+    while c < col {
+        while __mmio_read8((blob + at) as *mut u8) != 9 as u8 {
+            let ch: u8 = __mmio_read8((blob + at) as *mut u8)
+            if ch == 10 as u8 || ch == 0 as u8 {
+                break
+            }
+            at = at + 1
+        }
+        if __mmio_read8((blob + at) as *mut u8) == 9 as u8 {
+            at = at + 1
+        }
+        c = c + 1
+    }
+    let b: u64 = (&s_cellbuf[0 as usize]) as u64
+    var n: u64 = 0
+    while n < 198 {
+        let ch2: u8 = __mmio_read8((blob + at + n) as *mut u8)
+        if ch2 == 9 as u8 || ch2 == 10 as u8 || ch2 == 0 as u8 {
+            break
+        }
+        __mmio_write8((b + n) as *mut u8, ch2)
+        n = n + 1
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    return b
+}
+
+fn no_get(row: u64, col: u64) -> u64 {
+    return (&s_empty[0 as usize]) as u64
+}
+
 fn ct_text(k: u64, row: u64, col: u64) -> u64 {
+    if s_ct_blob[(k) as usize] != 0 {
+        if row == HEAD_ROW {
+            return blob_cell(s_ct_blob[(k) as usize], 0, col)
+        }
+        return blob_cell(s_ct_blob[(k) as usize], row + 1, col)
+    }
     let f: fn(u64, u64) -> u64 = *ct_get_slot(k)
     return f(row, col)
 }
@@ -1420,4 +1493,30 @@ fn val_sync() -> u64 {
         k = k + 1
     }
     return hit
+}
+
+
+// A table over a text blob (see ct_text). The row count follows the blob.
+fn table_blob(parent: usize, key: u64, w: u64, h: u64, cols: u64,
+    blob: u64) -> usize {
+    let i: usize = table(parent, key, w, h, cols, true, blob_rows(blob), no_get)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_blob[(k) as usize] = blob
+        s_ct_rows[(k) as usize] = blob_rows(blob)
+        if s_ct_sel[(k) as usize] >= s_ct_rows[(k) as usize] {
+            s_ct_sel[(k) as usize] = 0
+        }
+    }
+    return i
+}
+
+// New contents for a blob table (the pointer may stay the same).
+fn table_set_blob(key: u64, blob: u64) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_blob[(k) as usize] = blob
+    table_set_rows(key, blob_rows(blob))
 }
