@@ -1,27 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/fuiscene.fi -- the OrientOS HOST for fUi's scene tree.
 //
-// FUI-ALL stage 2 (F-1). A program describes its window as a tree of
-// nodes (fui.scene: boxes with flex layout, text, widgets); this module
-// owns everything around it:
+// FUI-ALL stage 2 (F-1). A program DESCRIBES its window: it hands over a
+// `build` function that fills a tree of nodes (fui.scene: boxes with flex
+// layout, text, widgets). This module owns everything around it:
 //
 //   * the window and the ONE canvas under it (fuiapp: wlib's window, so
 //     the window server and the event pump stay the system's),
-//   * the stylesheet, the scene, fUi's control panel (hover, press,
+//   * the scene, the stylesheet, fUi's control panel (hover, press,
 //     focus chain) and the platform host (plat.fuiwirt),
 //   * the event translation (fuiapp events -> host pointer/key calls),
+//   * text fields (fUi's field drawing over a textbuf per field),
+//   * one popup menu (overlay, painted last, takes the pointer first),
 //   * painting ONLY when something changed (the host's dirty flag, so an
-//     idle window costs nothing -- see the lesson of FUI-ALL stage 3:
-//     a repaint loop floods the slow test VM and `wm: hold` never comes).
+//     idle window costs nothing -- the lesson of FUI-ALL stage 3: a
+//     repaint loop floods the slow test VM and `wm: hold` never comes).
 //
-// A program:
+// THE MODEL IS "DESCRIBE AGAIN". State lives in the program; when it
+// changes the program calls `refresh()` and the tree is rebuilt by the
+// program's `build`. Every node a program wants to hear from carries a
+// KEY (a number > 0 it chose); `pump()` answers with the key of the node
+// that was activated. Focus survives a rebuild (found again by key).
 //
-//     fuiscene.open(x, y, w, h, title)             // false = no surface
-//     let col: usize = fuiscene.column(fuiscene.root())
-//     let b: usize = fuiscene.button(col, text_ptr)
+//     fn build() {
+//         let col: usize = fuiscene.root()
+//         fuiscene.label(col, text_ptr)
+//         fuiscene.button(col, text_ptr, 1)
+//     }
+//     fuiscene.open(60, 60, 320, 200, title_ptr, build)
 //     while fuiscene.alive() {
-//         let hit: usize = fuiscene.pump()          // activated node or NONE
-//         if hit == b { ... fuiscene.set_text(lbl, ptr) ... }
+//         let key: u64 = fuiscene.pump()
+//         if key == 1 { ... fuiscene.refresh() }
 //     }
 //
 // Text is passed as pointers to NUL-terminated octets that must outlive
@@ -37,26 +46,42 @@ import fui.widget
 import fui.flex
 import fui.render
 import fui.theme
+import fui.textbuf
+import fui.style
 import plat.fuiwirt
 
 export {
-    open, alive, pump, root, NONE,
-    row, column, label, button, space, set_text, set_size, set_gap,
-    set_pad, set_grow, set_id, node_id, node_x, node_y, node_w, node_h,
-    node_count, touch, scene_ptr, painted, quit,
+    open, alive, pump, root, refresh, quit, NONE,
+    row, column, label, button, button_main, tab, space, separator,
+    set_size, set_gap, set_pad, set_grow, set_align_end, flat,
+    key_of_node, node_of_key, node_x, node_y, node_w, node_h, node_count, scene_ptr,
+    painted, builds,
+    entry, entry_text, entry_set, focus_key,
+    menu_open, menu_close, menu_pick, menu_is_open,
+    KEY_POPUP,
 }
 
 const NONE: usize = 4294967295
+// What `pump` answers when a popup menu entry was chosen; the index is
+// then read with `menu_pick()`.
+const KEY_POPUP: u64 = 4294967294
 
-// One scene (128 nodes of ~0.8 KB), one stylesheet, one host. They are
+// One scene (128 nodes of 976 octets), one stylesheet, one host. They are
 // big, so they live in the program's own static memory.
 static mut s_sc_mem: [u8; 163840] = [0 as u8; 163840]
 static mut s_sh_mem: [u8; 65536] = [0 as u8; 65536]
 static mut s_wirt_mem: [u8; 8192] = [0 as u8; 8192]
-static mut s_open: u64 = 0
 static mut s_paints: u64 = 0
+static mut s_builds: u64 = 0
 static mut s_quit: u64 = 0
-static mut s_mods: u64 = 0
+static mut s_stale: bool = true
+// The program's `build` function, kept in static memory (a static cannot
+// be initialised with a function address, so it is stored at `open`).
+static mut s_bf: [u8; 8] = [0 as u8; 8]
+
+fn buildf_slot() -> *mut fn() {
+    return ((&s_bf[0 as usize]) as u64) as *mut fn()
+}
 
 fn sc() -> *mut scene.Scene {
     return ((&s_sc_mem[0 as usize]) as u64) as *mut scene.Scene
@@ -86,15 +111,222 @@ fn painted() -> u64 {
     return s_paints
 }
 
-// Open the window and build the empty tree: a column that fills the
-// window. false when fUi could not get a surface (the caller falls back).
-fn open(x: u64, y: u64, w: u64, h: u64, title: u64) -> bool {
+fn builds() -> u64 {
+    return s_builds
+}
+
+// ---------------------------------------------------------- text fields
+//
+// Up to 8, 256 octets each, found by KEY. A field is a TEXTBOX node whose
+// drawing is ours (fUi's draw_field over a textbuf on the field's buffer).
+// The text and the caret live here, not in the tree, so they survive a
+// rebuild.
+const ENTRY_MAX: u64 = 8
+const ENTRY_CAP: u64 = 256
+const NO_SLOT: u64 = 4294967295
+static mut s_ebuf: [u8; 2048] = [0 as u8; 2048]
+static mut s_ecar: [usize; 8] = [0 as usize; 8]
+static mut s_ekey: [u64; 8] = [0 as u64; 8]
+static mut s_enode: [usize; 8] = [4294967295 as usize; 8]
+static mut s_en: u64 = 0
+static mut s_caret_on: bool = true
+static mut s_caret_t: u64 = 0
+
+fn ebuf(k: u64) -> u64 {
+    return ((&s_ebuf[0 as usize]) as u64) + k * ENTRY_CAP
+}
+
+fn slot_of_key(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_en {
+        if s_ekey[(k) as usize] == key {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+fn slot_of_node(i: usize) -> u64 {
+    var k: u64 = 0
+    while k < s_en {
+        if s_enode[(k) as usize] == i {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+// The pointer to a field's text (NUL-terminated).
+fn entry_text(key: u64) -> u64 {
+    let k: u64 = slot_of_key(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return ebuf(k)
+}
+
+fn entry_set(key: u64, text: u64) {
+    var k: u64 = slot_of_key(key)
+    if k == NO_SLOT {
+        if s_en >= ENTRY_MAX {
+            return
+        }
+        k = s_en
+        s_en = s_en + 1
+        s_ekey[(k) as usize] = key
+        s_enode[(k) as usize] = NONE
+    }
+    var m: u64 = ulib.length(text)
+    if m > ENTRY_CAP - 1 {
+        m = ENTRY_CAP - 1
+    }
+    var j: u64 = 0
+    while j < m {
+        __mmio_write8((ebuf(k) + j) as *mut u8,
+            __mmio_read8((text + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((ebuf(k) + m) as *mut u8, 0 as u8)
+    s_ecar[(k) as usize] = m as usize
+    touch()
+}
+
+fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let i: usize = scene.scene_node_of(sc(), e)
+    let k: u64 = slot_of_node(i)
+    if k == NO_SLOT {
+        return
+    }
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    textbuf.tb_init(&tb, ebuf(k), ENTRY_CAP as usize)
+    textbuf.tb_set_len(&tb, ulib.length(ebuf(k)) as usize)
+    textbuf.tb_set_range(&tb, s_ecar[(k) as usize], s_ecar[(k) as usize])
+    render.draw_field(c, e, &tb, 0.0, s_caret_on, 0, 0)
+}
+
+// A one-line text field, `w` wide (design points). `text` is only the
+// START value: a field that already exists under `key` keeps what the
+// user typed.
+fn entry(parent: usize, key: u64, w: u64, text: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_widget_kind(sc(), i, widget.KIND_TEXTBOX)
+    scene.node_set_size(sc(), i, w as f64, 34.0)
+    scene.node_set_draw(sc(), i, 0, draw_entry)
+    scene.node_set_id(sc(), i, key as u32)
+    var k: u64 = slot_of_key(key)
+    if k == NO_SLOT {
+        if text != 0 {
+            entry_set(key, text)
+        } else {
+            entry_set(key, (&s_empty[0 as usize]) as u64)
+        }
+        k = slot_of_key(key)
+    }
+    if k != NO_SLOT {
+        s_enode[(k) as usize] = i
+    }
+    return i
+}
+
+static mut s_empty: [u8; 2] = "\0\0"
+
+// ------------------------------------------------------------ the popup
+//
+// One popup menu: a raised panel with a list of rows, painted over the
+// tree. While it is open it takes the pointer and the keys first.
+// `items` is a blob of NUL-terminated strings one after the other.
+const POP_ROW: u64 = 28
+static mut s_pop_open: bool = false
+static mut s_pop_x: u64 = 0
+static mut s_pop_y: u64 = 0
+static mut s_pop_w: u64 = 0
+static mut s_pop_n: u64 = 0
+static mut s_pop_items: u64 = 0
+static mut s_pop_hot: u64 = 0
+static mut s_pop_pick: u64 = 0
+
+fn menu_is_open() -> bool {
+    return s_pop_open
+}
+
+fn menu_open(x: u64, y: u64, w: u64, items: u64, n: u64) {
+    s_pop_open = true
+    s_pop_x = x
+    s_pop_y = y
+    s_pop_w = w
+    s_pop_items = items
+    s_pop_n = n
+    s_pop_hot = 0
+    s_pop_pick = 0
+    touch()
+}
+
+fn menu_close() {
+    if s_pop_open {
+        s_pop_open = false
+        touch()
+    }
+}
+
+// The chosen row (1-based) after `pump` answered KEY_POPUP; 0 = none.
+fn menu_pick() -> u64 {
+    let p: u64 = s_pop_pick
+    s_pop_pick = 0
+    return p
+}
+
+fn pop_item(i: u64) -> u64 {
+    var p: u64 = s_pop_items
+    var k: u64 = 0
+    while k < i {
+        p = p + ulib.length(p) + 1
+        k = k + 1
+    }
+    return p
+}
+
+fn pop_h() -> u64 {
+    return s_pop_n * POP_ROW + 8
+}
+
+fn pop_row_at(x: u64, y: u64) -> u64 {
+    if x < s_pop_x || x >= s_pop_x + s_pop_w {
+        return NO_SLOT
+    }
+    if y < s_pop_y + 4 || y >= s_pop_y + 4 + s_pop_n * POP_ROW {
+        return NO_SLOT
+    }
+    return (y - s_pop_y - 4) / POP_ROW
+}
+
+fn pop_paint() {
+    fuiapp.panel(s_pop_x, s_pop_y, s_pop_w, pop_h())
+    var k: u64 = 0
+    while k < s_pop_n {
+        fuiapp.row(s_pop_x + 4, s_pop_y + 4 + k * POP_ROW, s_pop_w - 8,
+            POP_ROW, pop_item(k), k == s_pop_hot)
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------------- the tree
+
+// Open the window. `build` describes the tree (called now and after each
+// `refresh`). false when fUi could not get a surface (the caller falls
+// back to wlib).
+fn open(x: u64, y: u64, w: u64, h: u64, title: u64, build: fn()) -> bool {
     if !wlib.begin(false, false) {
         return false
     }
     if !fuiapp.open_window(x, y, w, h, title) {
         return false
     }
+    *buildf_slot() = build
     // NOT `scene_new()` / `sheet_new()`: they return their ~100 KB by
     // value, which a user stack does not hold. The static memory is zero,
     // and scene_reset / an empty rule count do the rest (scene_add makes
@@ -104,14 +336,11 @@ fn open(x: u64, y: u64, w: u64, h: u64, title: u64) -> bool {
     (*sh()).n = 0
     (*sh()).ruleof = 0
     *wirt() = fuiwirt.host_new(sc(), fuiapp.ctx())
-    let r: usize = scene.scene_box(sc(), scene.SCENE_NONE, 0 as u32,
-        flex.FLEX_COLUMN, flex.JUSTIFY_START, flex.AL_STRETCH)
-    scene.node_set_padding(sc(), r, 8, 8, 8, 8)
-    scene.node_set_gap(sc(), r, 6, 6)
-    s_open = 1
     s_quit = 0
     s_paints = 0
-    return r != scene.SCENE_NONE
+    s_builds = 0
+    s_stale = true
+    return true
 }
 
 fn alive() -> bool {
@@ -124,6 +353,40 @@ fn quit() {
 
 fn touch() {
     fuiwirt.host_touch(wirt())
+}
+
+// The state changed: describe the tree again before the next picture.
+fn refresh() {
+    s_stale = true
+    touch()
+}
+
+// Throw the old tree away, let the program describe the new one, and put
+// the keyboard focus back on the node with the same key.
+fn rebuild() {
+    let fk: u64 = focus_key()
+    scene.scene_reset(sc())
+    (*sh()).n = 0
+    var k: u64 = 0
+    while k < s_en {
+        s_enode[(k) as usize] = NONE
+        k = k + 1
+    }
+    let r: usize = scene.scene_box(sc(), scene.SCENE_NONE, 0 as u32,
+        flex.FLEX_COLUMN, flex.JUSTIFY_START, flex.AL_STRETCH)
+    scene.node_set_padding(sc(), r, 8, 8, 8, 8)
+    scene.node_set_gap(sc(), r, 6, 6)
+    let f: fn() = *buildf_slot()
+    f()
+    fuiwirt.host_bind(wirt())
+    if fk != 0 {
+        let n: usize = scene.scene_find_id(sc(), fk as u32)
+        if n != scene.SCENE_NONE {
+            control.panel_set_focus(fuiwirt.host_panel(wirt()), n)
+        }
+    }
+    s_builds = s_builds + 1
+    s_stale = false
 }
 
 fn row(parent: usize) -> usize {
@@ -144,6 +407,15 @@ fn space(parent: usize, w: u64, h: u64) -> usize {
     return i
 }
 
+fn separator(parent: usize) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i != scene.SCENE_NONE {
+        scene.node_set_widget_kind(sc(), i, widget.KIND_SEPARATOR)
+        scene.node_set_size(sc(), i, 0.0, 1.0)
+    }
+    return i
+}
+
 fn label(parent: usize, text: u64) -> usize {
     let i: usize = scene.scene_add(sc(), parent, scene.N_TEXT)
     if i != scene.SCENE_NONE {
@@ -152,18 +424,50 @@ fn label(parent: usize, text: u64) -> usize {
     return i
 }
 
-fn button(parent: usize, text: u64) -> usize {
+fn button(parent: usize, text: u64, key: u64) -> usize {
     let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
     if i != scene.SCENE_NONE {
         scene.node_set_widget_kind(sc(), i, widget.KIND_BUTTON)
         scene.node_set_text(sc(), i, text, ulib.length(text) as usize)
+        scene.node_set_id(sc(), i, key as u32)
     }
     return i
 }
 
-fn set_text(i: usize, text: u64) {
-    scene.node_set_text(sc(), i, text, ulib.length(text) as usize)
-    touch()
+// The main button of a form: accent fill, label on accent (design rule
+// 02.10.2026).
+fn button_main(parent: usize, text: u64, key: u64) -> usize {
+    let i: usize = button(parent, text, key)
+    if i != NONE {
+        let e: *mut widget.Widget = scene.node_widget(sc(), i)
+        widget.w_set_selected(e, true)
+        // The label colour comes from a stylesheet rule (scene_style
+        // recomputes every node's style from the sheet each frame).
+        let _r: usize = sheet.sheet_rule(sh(), sheet.sel_id(key as u32),
+            style.style_set_fg(style.style_new(),
+                style.color_token(style.TOK_TEXT_ON_ACCENT)))
+    }
+    return i
+}
+
+// A tab; `on` marks the current one.
+fn tab(parent: usize, text: u64, key: u64, on: bool) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i != scene.SCENE_NONE {
+        scene.node_set_widget_kind(sc(), i, widget.KIND_TAB)
+        scene.node_set_text(sc(), i, text, ulib.length(text) as usize)
+        scene.node_set_id(sc(), i, key as u32)
+        widget.w_set_selected(scene.node_widget(sc(), i), on)
+    }
+    return i
+}
+
+// A button without its own surface (menu bar titles): marks the node a
+// plain label look but still focusable and clickable.
+fn flat(i: usize) {
+    if i != NONE {
+        scene.node_set_widget_kind(sc(), i, widget.KIND_TAB)
+    }
 }
 
 fn set_size(i: usize, w: u64, h: u64) {
@@ -182,12 +486,27 @@ fn set_grow(i: usize, g: u64) {
     scene.node_set_grow(sc(), i, g as i64, 1)
 }
 
-fn set_id(i: usize, id: u64) {
-    scene.node_set_id(sc(), i, id as u32)
+// Push a child to the end of its row/column (CSS `margin-left: auto`).
+fn set_align_end(i: usize) {
+    scene.node_set_align_self(sc(), i, flex.AL_END)
 }
 
-fn node_id(i: usize) -> u64 {
+// The node with this key in the current tree (NONE if there is none).
+fn node_of_key(key: u64) -> usize {
+    return scene.scene_find_id(sc(), key as u32)
+}
+
+fn key_of_node(i: usize) -> u64 {
     return scene.node_id(sc(), i) as u64
+}
+
+// The key of the node that has the keyboard (0 = nobody).
+fn focus_key() -> u64 {
+    let f: usize = fuiwirt.host_focus(wirt())
+    if f == fuiwirt.KEINER || f >= scene.scene_count(sc()) {
+        return 0
+    }
+    return scene.node_id(sc(), f) as u64
 }
 
 fn node_x(i: usize) -> u64 {
@@ -207,7 +526,7 @@ fn node_h(i: usize) -> u64 {
 }
 
 // fUi's key numbers for the keys wlib hands over.
-fn key_of(k: u64) -> u32 {
+fn key_num(k: u64) -> u32 {
     if k == wlib.KEY_TAB {
         return fuiwirt.KEY_TAB
     }
@@ -234,25 +553,79 @@ fn paint() {
     fuiapp.frame_begin()
     scene.scene_run(sc(), fuiapp.ctx(), sh(), 0.0, 0.0,
         fuiapp.width() as f64, fuiapp.height() as f64)
+    if s_pop_open {
+        pop_paint()
+    }
     fuiapp.frame_end()
     fuiwirt.host_painted(wirt())
     s_paints = s_paints + 1
 }
 
+// The popup takes the event (true = consumed). A press outside closes it.
+fn pop_event(e: *mut fuiapp.Ev) -> u64 {
+    let ev: fuiapp.Ev = *e
+    if ev.kind == fuiapp.EV_MOVE {
+        let r: u64 = pop_row_at(ev.x, ev.y)
+        if r != NO_SLOT && r != s_pop_hot {
+            s_pop_hot = r
+            touch()
+        }
+        return 0
+    }
+    if ev.kind == fuiapp.EV_DOWN {
+        let r: u64 = pop_row_at(ev.x, ev.y)
+        s_pop_open = false
+        touch()
+        if r != NO_SLOT {
+            s_pop_pick = r + 1
+            return KEY_POPUP
+        }
+        return 0
+    }
+    if ev.kind == fuiapp.EV_KEY {
+        if ev.key == wlib.KEY_ESC {
+            s_pop_open = false
+            touch()
+        } else if ev.key == wlib.KEY_DOWN {
+            if s_pop_hot + 1 < s_pop_n {
+                s_pop_hot = s_pop_hot + 1
+                touch()
+            }
+        } else if ev.key == wlib.KEY_UP {
+            if s_pop_hot > 0 {
+                s_pop_hot = s_pop_hot - 1
+                touch()
+            }
+        } else if ev.key == wlib.KEY_ENTER {
+            s_pop_open = false
+            s_pop_pick = s_pop_hot + 1
+            touch()
+            return KEY_POPUP
+        }
+    }
+    return 0
+}
+
 // One step: take the events that are waiting, feed them to the host,
-// paint if (and only if) something changed. Returns the node that was
-// activated (a button pressed), or NONE.
-fn pump() -> usize {
+// rebuild if the program said so, paint if (and only if) something
+// changed. Returns the KEY of the node that was activated (a button
+// pressed, Enter in a field), KEY_POPUP for a popup choice, else 0.
+fn pump() -> u64 {
     var ev: fuiapp.Ev = fuiapp.ev_new()
-    var hit: usize = NONE
+    var hit: u64 = 0
     let w: *mut fuiwirt.Host = wirt()
     if s_paints == 0 {
-        // first picture: layout, then bind the panel to the nodes
+        // first picture: describe, layout, bind the panel to the nodes
+        rebuild()
         paint()
-        fuiwirt.host_bind(w)
     }
     while fuiapp.next(&ev) {
-        if ev.kind == fuiapp.EV_MOVE {
+        if s_pop_open {
+            let r: u64 = pop_event(&ev)
+            if r != 0 {
+                hit = r
+            }
+        } else if ev.kind == fuiapp.EV_MOVE {
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
         } else if ev.kind == fuiapp.EV_DOWN {
@@ -264,17 +637,57 @@ fn pump() -> usize {
             let _c: u32 = fuiwirt.host_pointer_up(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
         } else if ev.kind == fuiapp.EV_KEY {
-            let k: u32 = key_of(ev.key)
-            if k != 0 as u32 {
-                let _c: u32 = fuiwirt.host_key(w, k, 0 as u32)
-            } else if ev.key >= 32 && ev.key < 127 {
-                let _c: u32 = fuiwirt.host_char(w, ev.key as u32, 0 as u32)
+            let fk: usize = fuiwirt.host_focus(w)
+            var fslot: u64 = NO_SLOT
+            if fk != fuiwirt.KEINER {
+                fslot = slot_of_node(fk)
+            }
+            if fslot != NO_SLOT && ev.key != wlib.KEY_TAB {
+                // a text field has the keyboard: Enter activates it, the
+                // rest edits its text
+                if ev.key == wlib.KEY_ENTER {
+                    hit = s_ekey[(fslot) as usize]
+                } else {
+                    let cp: *mut usize = (&s_ecar[(fslot) as usize]) as *mut usize
+                    fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
+                        false)
+                    s_caret_on = true
+                    s_caret_t = fuiapp.now_ms()
+                    touch()
+                }
+            } else {
+                let k: u32 = key_num(ev.key)
+                if k != 0 as u32 {
+                    let _c: u32 = fuiwirt.host_key(w, k, 0 as u32)
+                } else if ev.key >= 32 && ev.key < 127 {
+                    let _c: u32 = fuiwirt.host_char(w, ev.key as u32,
+                        0 as u32)
+                }
             }
         }
         let a: usize = fuiwirt.host_take_activated(w)
-        if a != fuiwirt.KEINER {
-            hit = a
+        if a != fuiwirt.KEINER && a < scene.scene_count(sc()) {
+            let kk: u64 = scene.node_id(sc(), a) as u64
+            if kk != 0 {
+                hit = kk
+            }
         }
+    }
+    // the caret of the focused field blinks -- but only where the system
+    // allows it (never under /etc/uitrace: the test VM is too slow for a
+    // repaint every half second)
+    let fk2: usize = fuiwirt.host_focus(w)
+    if fk2 != fuiwirt.KEINER && slot_of_node(fk2) != NO_SLOT
+        && wlib.blink_enabled() {
+        let t: u64 = fuiapp.now_ms()
+        if t >= s_caret_t + 530 {
+            s_caret_t = t
+            s_caret_on = !s_caret_on
+            touch()
+        }
+    }
+    if s_stale {
+        rebuild()
     }
     if fuiwirt.host_dirty(w) {
         paint()
