@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-FONT="$ROOT/assets/osum-sans.ttf"
+FONT="$ROOT/assets/osum-sans.ttf"; FONTB="$ROOT/assets/osum-sans-bold.ttf"; FONTM="$ROOT/assets/osum-mono.ttf"
 for t in python3 pdftotext pdftoppm; do
     command -v "$t" >/dev/null 2>&1 || { echo "PDF: skipped, $t is missing"; exit 0; }
 done
@@ -67,14 +67,14 @@ x = np.asarray(im.crop((0, 0, cw, ch)).filter(ImageFilter.GaussianBlur(2)), dtyp
 y = np.asarray(rim.crop((0, 0, cw, ch)).filter(ImageFilter.GaussianBlur(2)), dtype=float)
 print("diff %.2f" % float(np.abs(x - y).mean()))
 PY
-for f in basic graphics unicode images rot90 rot180 rot270 xrefstm plain-flate a85 ahx rl lzw form long; do
+for f in basic graphics unicode images styles rotated rot90 rot180 rot270 xrefstm plain-flate a85 ahx rl lzw form long; do
     mkdir -p "$OUT/s/$f"
     "$OUT/pdfdump" "$OUT/c/$f.pdf" "$OUT/s/$f" 100 > "$OUT/s/$f.txt" 2>&1
     np=$(sed -n 's/^pages=//p' "$OUT/s/$f.txt")
     ref=$(pdfinfo "$OUT/c/$f.pdf" 2>/dev/null | sed -n 's/^Pages: *//p')
     [ -n "$np" ] && [ "$np" = "$ref" ] && ok "$f: $np page(s), as pdfinfo says" || { bad "$f: pages '$np', pdfinfo '$ref'"; continue; }
     read -r w h < <(sed -n 's/^page 1 \([0-9]*\)x\([0-9]*\).*/\1 \2/p' "$OUT/s/$f.txt")
-    "$OUT/pdfpng" "$OUT/c/$f.pdf" 1 100 "$OUT/s/$f.raw" "$FONT" > /dev/null 2>&1
+    "$OUT/pdfpng" "$OUT/c/$f.pdf" 1 100 "$OUT/s/$f.raw" "$FONT" "$FONTB" "$FONTM" > /dev/null 2>&1
     res=$(python3 "$OUT/cmp.py" "$OUT/c/$f.pdf" "$OUT/s/$f.raw" "$OUT/s/$f/page1.svg" "$w" "$h" 1 2>&1)
     t=$(echo "$res" | sed -n 's/^text //p'); d=$(echo "$res" | sed -n 's/^diff //p')
     [ "$t" = ok ] && ok "$f: the characters equal pdftotext's" || bad "$f: text $t ($res)"
@@ -113,7 +113,7 @@ for rnd in range(int(sys.argv[2])):
         a = random.randrange(len(d))
         for i in range(a, min(len(d), a + random.randint(1, 200))): d[i] = 0
     open(f"{out}/fz.pdf","wb").write(d); os.makedirs(f"{out}/fzo", exist_ok=True)
-    tool = [f"{out}/pdfdump", f"{out}/fz.pdf", f"{out}/fzo", "100"] if rnd % 4 else [f"{out}/pdfpng", f"{out}/fz.pdf", "1", "100", f"{out}/fz.raw", sys.argv[3]]
+    tool = [f"{out}/pdfdump", f"{out}/fz.pdf", f"{out}/fzo", "100"] if rnd % 4 else [f"{out}/pdfpng", f"{out}/fz.pdf", "1", "100", f"{out}/fz.raw", sys.argv[3], sys.argv[4], sys.argv[5]]
     try: rc = subprocess.run(tool, capture_output=True, timeout=30).returncode
     except subprocess.TimeoutExpired: rc = 124
     n += 1
@@ -122,7 +122,7 @@ for rnd in range(int(sys.argv[2])):
 print("runs", n, "bad", bad)
 sys.exit(1 if bad else 0)
 PY
-r=$(python3 "$OUT/fuzz.py" "$OUT" 800 "$FONT" 2>&1 | tail -3)
+r=$(python3 "$OUT/fuzz.py" "$OUT" 800 "$FONT" "$FONTB" "$FONTM" 2>&1 | tail -3)
 echo "$r" | grep -q 'bad 0' && ok "800 corruptions: no crash, no hang ($(echo "$r" | tail -1))" || bad "fuzz: $r"
 
 echo; echo "== 6. speed =="
@@ -157,7 +157,7 @@ grep -aq 'pdfview: error=100' "$S" && ok "a missing file is an error (100), not 
 i=0
 for spec in "basic 1 100" "graphics 1 100" "unicode 1 100" "images 1 100" "images 1 150"; do
     set -- $spec; f=$1; pg=$2; pct=$3
-    "$OUT/pdfpng" "$OUT/c/$f.pdf" "$pg" "$pct" "$OUT/h-$f-$pct.raw" "$FONT" > "$OUT/h-$f-$pct.txt" 2>&1
+    "$OUT/pdfpng" "$OUT/c/$f.pdf" "$pg" "$pct" "$OUT/h-$f-$pct.raw" "$FONT" "$FONTB" "$FONTM" > "$OUT/h-$f-$pct.txt" 2>&1
     hc=$(crc_host "$OUT/h-$f-$pct.raw"); hs=$(cat "$OUT/h-$f-$pct.txt")
     gl=$(grep -a 'pdfview: rendered' "$S" | sed -n "$((i+1))p")
     case "$gl" in

@@ -43,6 +43,17 @@ def main(out):
     c.setFillAlpha(1); c.setLineWidth(.2); c.grid([50, 100, 150, 200], [50, 100, 150, 200])
     c.showPage(); c.save()
 
+    # 2b. the faces (bold, italic, monospace) and big rotated text
+    c = canvas.Canvas(f"{out}/styles.pdf", pagesize=A4)
+    y = 780
+    for f in ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Times-Roman", "Times-Bold", "Times-Italic", "Courier", "Courier-Bold"]:
+        c.setFont(f, 16); c.drawString(60, y, "%s: The quick brown fox 0123" % f); y -= 30
+    c.showPage(); c.save()
+    c = canvas.Canvas(f"{out}/rotated.pdf", pagesize=A4)
+    for ang, x0, y0 in ((30, 150, 500), (90, 100, 300), (180, 500, 700), (-45, 300, 450)):
+        c.saveState(); c.translate(x0, y0); c.rotate(ang); c.setFont("Helvetica-Bold", 40); c.drawString(0, 0, "Rotated %d" % ang); c.restoreState()
+    c.showPage(); c.save()
+
     # 3. platypus: a long text with a table, many pages
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet

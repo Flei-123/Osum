@@ -45,7 +45,7 @@ export {
     Val, parse_val, skip_ws, K_NONE, K_BOOL, K_INT, K_REAL, K_STR, K_NAME,
     K_ARR, K_DICT, K_REF, K_STREAM,
     doc_object, doc_dict_get, doc_stream, doc_img_info, doc_obj_of,
-    doc_img_rgba, doc_img_blit, doc_img_color,
+    doc_img_rgba, doc_img_blit, doc_img_color, doc_styles,
 }
 
 const ERR_NONE: u32 = 0
@@ -112,7 +112,7 @@ struct Doc {
     depth: u64,
     fonts: u64,   // FontInfo records (FONT_MAX)
     nfonts: u64,
-    cmyk: u32,
+    styles: u32,   // bit 2: bold text was seen, bit 3: monospace text (layers of doc_page_svg)
 }
 
 fn doc_new() -> Doc {
@@ -120,8 +120,12 @@ fn doc_new() -> Doc {
         data: 0, len: 0, nobj: 0, xk: 0, xo: 0, xi: 0,
         trailer: val_none(), root: val_none(), npages: 0, pages: 0, err: 0,
         os: OStm { num: 0, buf: rt.buf_new(), count: 0, first: 0 },
-        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, cmyk: 0,
+        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, styles: 0,
     }
+}
+
+fn doc_styles(d: *mut Doc) -> u32 {
+    return (*d).styles
 }
 
 fn doc_error(d: *mut Doc) -> u32 {
@@ -1991,6 +1995,7 @@ struct R {
     scratch: u64,
     ops: u64,
     in_text: bool,
+    which: u32,    // 0 everything, 1 vectors + regular text, 2 bold text only, 3 monospace text only
 }
 
 // ---------------------------------------------------------------- output
@@ -2191,7 +2196,7 @@ fn paint_path(r: *mut R, fill: bool, stroke: bool, evenodd: bool) {
         (*r).pclip = 0
         return
     }
-    if fill || stroke {
+    if (fill || stroke) && (*r).which <= 1 {
         let o: *mut rt.Buf = (*r).out
         put_s(o, "<path d=\"")
         rt.buf_push_bytes(o, rt.buf_ptr(&(*r).path), rt.buf_len(&(*r).path))
@@ -2550,6 +2555,50 @@ fn std_kind_of(name_p: u64, n: u64) -> u32 {
     return 2
 }
 
+// case-insensitive substring search
+fn has_sub(p: u64, n: u64, lit: str) -> bool {
+    let m: u64 = lit.n as u64
+    if m == 0 || n < m {
+        return false
+    }
+    var i: u64 = 0
+    while i + m <= n {
+        var k: u64 = 0
+        var same: bool = true
+        while k < m {
+            let a: u32 = ld(p + i + k) | 32
+            let b: u32 = (*((lit.p as u64 + k) as *mut u8)) as u32
+            if a != b {
+                same = false
+                k = m
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// the style bits of a font by its name: 1 bold, 2 monospace, 4 italic
+fn style_of_name(p: u64, n: u64) -> u64 {
+    var st: u64 = 0
+    if has_sub(p, n, "bold") || has_sub(p, n, "black") || has_sub(p, n, "heavy") || has_sub(p, n, "demi") {
+        st = st | 1
+    }
+    if has_sub(p, n, "courier") || has_sub(p, n, "mono") || has_sub(p, n, "consolas") || has_sub(p, n, "typewriter")
+        || has_sub(p, n, "fixed") {
+        st = st | 2
+    }
+    if has_sub(p, n, "italic") || has_sub(p, n, "oblique") {
+        st = st | 4
+    }
+    return st
+}
+
 fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
     let s: u64 = fslot(d, slot)
     rt.mem_set(s, 0 as u8, FONT_SZ as usize)
@@ -2585,9 +2634,12 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
     }
     var bf: Val = val_none()
     var std: u32 = 99
+    var fstyle: u64 = 0
     if doc_dict_get(d, fd, "BaseFont", &bf) && bf.kind == K_NAME {
         std = std_kind_of(bf.a, bf.n)
+        fstyle = style_of_name(bf.a, bf.n)
     }
+    wr64(s + 96, fstyle)
     if kind == 2 {
         // Type0: the descendant's /DW and /W
         var df: Val = val_none()
@@ -2728,6 +2780,25 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
         var mv: Val = val_none()
         if doc_dict_get(d, &fdesc, "MissingWidth", &mv) {
             mw = val_num(&mv)
+        }
+        var fl: Val = val_none()
+        if doc_dict_get(d, &fdesc, "Flags", &fl) {
+            let fb: u64 = f2u(val_num(&fl))
+            if (fb & 1) != 0 {
+                wr64(s + 96, rd64(s + 96) | 2)
+            }
+            if (fb & 64) != 0 {
+                wr64(s + 96, rd64(s + 96) | 4)
+            }
+            if (fb & 262144) != 0 {
+                wr64(s + 96, rd64(s + 96) | 1)
+            }
+        }
+        var fw: Val = val_none()
+        if doc_dict_get(d, &fdesc, "FontWeight", &fw) {
+            if val_num(&fw) >= 600.0 {
+                wr64(s + 96, rd64(s + 96) | 1)
+            }
         }
     }
     *((s + 24) as *mut f64) = mw
@@ -2978,28 +3049,53 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
     if (*r).gs.tr == 3 || u == 0 || u == 32 || u < 32 {
         return w
     }
-    // the text rendering matrix
+    // the layer of this glyph: the system has a regular, a bold and a monospace face
+    let style: u64 = rd64(s + 96)
+    var layer: u32 = 1
+    if (style & 2) != 0 {
+        layer = 3
+    } else if (style & 1) != 0 {
+        layer = 2
+    }
+    if layer > 1 {
+        (*d).styles = (*d).styles | (1 << layer)
+    }
+    if (*r).which != 0 && (*r).which != layer {
+        return w
+    }
+    // the text rendering matrix (an italic face is the upright one sheared by 12 degrees)
     let fs: f64 = (*r).gs.fsize
-    let local: M = M { a: fs * (*r).gs.th, b: 0.0, c: 0.0, d: fs, e: 0.0, f: (*r).gs.ts }
+    var slant: f64 = 0.0
+    if (style & 4) != 0 {
+        slant = 0.2126
+    }
+    let local: M = M { a: fs * (*r).gs.th, b: 0.0, c: slant * fs, d: fs, e: 0.0, f: (*r).gs.ts }
     let trm: M = m_mul(m_mul(local, (*r).tm), (*r).gs.ctm)
-    var em: f64 = fsqrt(trm.c * trm.c + trm.d * trm.d)
+    var em: f64 = fsqrt(trm.c * trm.c + trm.d * trm.d) / fsqrt(1.0 + slant * slant)
     if em < 0.05 {
         return w
     }
     let o: *mut rt.Buf = (*r).out
-    put_s(o, "<text")
     let ia: f64 = trm.a / em
     let ib: f64 = trm.b / em
     let ic: f64 = 0.0 - trm.c / em
     let id: f64 = 0.0 - trm.d / em
+    var plain: bool = false
     if fabs(ia - 1.0) < 0.002 && fabs(ib) < 0.002 && fabs(ic) < 0.002 && fabs(id - 1.0) < 0.002 {
-        put_s(o, " x=\"")
+        plain = true
+    }
+    // A transformed glyph goes into a <g> that carries the matrix and the text
+    // sits at 0,0 inside it: lib/svg applies a `transform` that is written ON a
+    // <text> element TWICE (times_text applies the state again), so a matrix on
+    // the text itself would double the translation and square the shear.
+    if plain {
+        put_s(o, "<text x=\"")
         put_f(o, trm.e, 2)
         put_s(o, "\" y=\"")
         put_f(o, trm.f, 2)
         put_s(o, "\"")
     } else {
-        put_s(o, " transform=\"matrix(")
+        put_s(o, "<g transform=\"matrix(")
         put_f(o, ia, 4)
         push(o, 32)
         put_f(o, ib, 4)
@@ -3011,7 +3107,7 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
         put_f(o, trm.e, 2)
         push(o, 32)
         put_f(o, trm.f, 2)
-        put_s(o, ")\"")
+        put_s(o, ")\"><text x=\"0\" y=\"0\"")
     }
     put_s(o, " font-size=\"")
     put_f(o, em, 2)
@@ -3026,6 +3122,9 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
     put_s(o, ">")
     put_utf8_xml(o, u)
     put_s(o, "</text>")
+    if !plain {
+        put_s(o, "</g>")
+    }
     return w
 }
 
@@ -3650,7 +3749,7 @@ fn doc_page_size(d: *mut Doc, page: u64, w: *mut f64, h: *mut f64) -> bool {
 
 // The page as SVG text at `scale` (1.0 = one point per pixel). `wo`/`ho`
 // receive the size in pixels.
-fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, which: u32, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
     var bx: [f64; 4] = [0.0; 4]
     var rot: u64 = 0
     var pv: Val = val_none()
@@ -3684,6 +3783,9 @@ fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, out: *mut rt.Buf, wo: *mut u
     }
     *wo = wpx
     *ho = hpx
+    if which <= 1 {
+        (*d).styles = 0
+    }
     (*d).nimg = 0
     // the contents: one stream or an array of them
     var cv: Val = val_none()
@@ -3726,7 +3828,7 @@ fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, out: *mut rt.Buf, wo: *mut u
         var r: R = R {
             d: d, out: out, gs: gs_new(), stack: [gs_new(); 32], sp: 0, path: rt.buf_new(),
             cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
-            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false,
+            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false, which: which,
         }
         r.gs.ctm = base
         r.scratch = alloc0(65536 + 16)
@@ -3781,7 +3883,7 @@ fn doc_img_info(d: *mut Doc, obj: u64, w: *mut u64, h: *mut u64, bpc: *mut u64, 
         var rr: R = R {
             d: d, out: 0 as *mut rt.Buf, gs: gs_new(), stack: [gs_new(); 32], sp: 0, path: rt.buf_new(),
             cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
-            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false,
+            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false, which: 0,
         }
         *comps = cs_comps(&rr, &t, &sep) as u64
     }

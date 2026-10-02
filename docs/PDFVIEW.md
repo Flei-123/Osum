@@ -51,11 +51,13 @@ PDF-Datei vorgibt (Breiten aus `/Widths`, `/W` bzw. den Metriken der Standardsch
 
 ## Was er NICHT kann (ehrlich)
 
-* **Schrift: eine einzige Schnittform.** Gezeichnet wird mit der Systemschrift. Fett, Kursiv,
-  Serifen und Festbreite aus der PDF-Datei unterscheiden sich im Bild **nicht** — die
-  **Positionen** stimmen (aus der Datei), die **Glyphenformen** sind die des Systems.
-  Eingebettete Schriften werden nicht benutzt, Ligaturen/Kerning der Datei nur über die
-  Breiten.
+* **Schrift: drei Schnitte, keine Serifen.** Das System hat eine normale, eine fette und eine
+  Festbreitenschrift; daraus macht der Betrachter: fett (Name enthält Bold/Black/Heavy/Demi, `/FontWeight`
+  ≥ 600, ForceBold), Festbreite (Courier/Mono/Consolas/…, FixedPitch) und kursiv (Oblique/Italic,
+  `/ItalicAngle`: die aufrechte Schrift um 12° geschert). **Serifenschriften (Times & Co.) werden in der
+  Systemschrift ohne Serifen gezeigt**; Glyphenformen sind überhaupt die des Systems, die **Positionen**
+  stimmen (aus der Datei). Eingebettete Schriften werden nicht benutzt, Ligaturen/Kerning der Datei nur
+  über die Breiten.
 * **Schattierungen (`sh`) und Muster (Pattern)** werden nicht gezeichnet (Muster: mittelgrau).
 * **Bilder liegen immer unter der Vektorschicht,** egal in welcher Reihenfolge die Datei
   sie zeichnet (eine weiße Fläche, die *über* ein Bild gezeichnet wird, würde das Bild
@@ -84,5 +86,5 @@ Acht Abschnitte, alle gegen etwas **Äußeres**:
    Seite — sie muss der des Wirts **Bit für Bit** gleichen.
 8. **Das Fenster:** Bild, dann PgDn und `-` über den QEMU-Monitor: „Seite 2 von 2", Zoom sinkt.
 
-Gefundene und behobene Fehler beim Bauen: LZW-Tabelle bei beschädigtem Strom (Überlauf),
+Gefundene und behobene Fehler beim Bauen: **`lib/svg` wendet ein `transform` auf `<text>` zweimal an** (`times_text` wendet den Zustand erneut an) — gedrehte/geschrägte Glyphen stehen deshalb in einem `<g transform>`, der Text bei 0,0 darin (gedrehter Text stand vorher falsch); LZW-Tabelle bei beschädigtem Strom (Überlauf),
 `as u32`-Überläufe bei ToUnicode-/CID-Werten (jetzt geklemmt), Datei ohne Trailer (Katalog-Suche).
