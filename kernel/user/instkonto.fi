@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/instkonto.fi -- DAILY-DRIVER (A2/r172): THE INSTALLER
+// CREATES THE OWNER'S OWN ACCOUNT.
+//
+// WHY. The installer copies the running root file system 1:1 onto the
+// disk. The public image therefore arrived on the disk with the generic
+// user `live` (password `live`) and auto-login, the personal image with
+// the owner's own account. Nobody can use that for every day: the
+// well-known password stays on the machine.
+//
+// WHAT. BEFORE the copy (so before anything on the target disk is touched),
+// the installer rewrites the account files of the RUNNING root -- which is
+// the module in RAM, and exactly the thing the installer then copies to the
+// disk (an OFS cannot be mounted a second time, so the new partition is
+// never opened as a file system):
+//
+//   1. /etc/passwd, /etc/shadow and /etc/group with exactly two accounts:
+//      `root` (LOCKED, shadow field `!`) and the new user (uid/gid 1000,
+//      PBKDF2 `$osum1$` hash made by `pw.make_hash`, i.e. the same code
+//      `passwd` uses);
+//   2. /etc/autologin removed (no automatic sign-in on an installed system
+//      -- the owner types the password he just chose);
+//   3. /users/<name> and /users/<name>/config created, owner 1000:1000,
+//      mode 0700 -- the same promise /etc/passwd makes;
+//   4. the empty home of the `live` user removed, if there is one.
+//
+// It needs root (it writes /etc/shadow and chowns): the boot-menu entry
+// "Install OrientOS" starts the installer as root. A caller that is not root
+// gets F_ROOT and nothing is written.
+//
+// There is NO default password and NO second copy of the hashing: a name or
+// password that does not pass the checks writes NOTHING, and the failure
+// reason is a number the caller turns into a sentence.
+//
+// The caller is `installer` (window) and `/bin/instkonto` (command line
+// for scripts and tests).
+
+profile kernel
+
+import ulib
+import pw
+
+export {
+    anlegen, name_ok, pass_ok, grund,
+    F_KEIN, F_NAME, F_PASS, F_ZUFALL, F_ROOT, F_SCHREIBEN, F_HEIM
+}
+
+const F_KEIN: u64 = 0
+const F_NAME: u64 = 1
+const F_PASS: u64 = 2
+const F_ZUFALL: u64 = 3
+const F_ROOT: u64 = 4
+const F_SCHREIBEN: u64 = 5
+const F_HEIM: u64 = 6
+
+const SYS_GETEUID: u64 = 107
+const SYS_CHMOD: u64 = 90
+const SYS_CHOWN: u64 = 92
+const MODE_0700: u64 = 448
+const MODE_0600: u64 = 384
+
+static mut st_grund: u64 = 0
+static mut bufp: [u8; 512] = [0 as u8; 512]
+static mut bufs: [u8; 512] = [0 as u8; 512]
+static mut bufg: [u8; 256] = [0 as u8; 256]
+static mut pfad: [u8; 128] = [0 as u8; 128]
+
+fn grund() -> u64 {
+    return st_grund
+}
+
+fn at(p: u64, i: u64) -> u64 {
+    let v: u8 = *((p + i) as *mut u8)
+    return v as u64
+}
+
+// The user name: 1..31 characters, a-z first, then a-z 0-9 _ -, and not
+// one of the names the system uses itself.
+fn name_ok(name: u64) -> bool {
+    var s_root: [u8; 5] = "root\0"
+    var s_live: [u8; 5] = "live\0"
+    var s_nobody: [u8; 7] = "nobody\0"
+    var s_daemon: [u8; 7] = "daemon\0"
+    let n: u64 = ulib.length(name)
+    if n == 0 || n > 31 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = at(name, i)
+        let lower: bool = c >= 97 && c <= 122
+        let digit: bool = c >= 48 && c <= 57
+        let other: bool = c == 95 || c == 45
+        if i == 0 {
+            if !lower {
+                return false
+            }
+        } else {
+            if !lower && !digit && !other {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if ulib.streq(name, (&s_root[0]) as u64) || ulib.streq(name, (&s_nobody[0]) as u64)
+        || ulib.streq(name, (&s_daemon[0]) as u64) {
+        return false
+    }
+    // `live` is the generic user of the live image; a real account
+    // must not take its name.
+    if ulib.streq(name, (&s_live[0]) as u64) {
+        return false
+    }
+    return true
+}
+
+// At least four characters and not longer than 100 octets, no control
+// characters (a newline would end the line in /etc/shadow).
+fn pass_ok(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n < 4 || n > 100 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if at(p, i) < 32 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Appends `src` to the buffer `b` (position `o`), returns the new position.
+fn put(b: u64, o: u64, src: u64) -> u64 {
+    return o + ulib.strcpy(b + o, src)
+}
+
+// The full name goes into the GECOS field: no ':' and no control
+// characters; an empty one becomes the account name.
+fn put_voll(b: u64, o: u64, voll: u64, name: u64) -> u64 {
+    var p: u64 = o
+    let n: u64 = ulib.length(voll)
+    if n == 0 {
+        return put(b, p, name)
+    }
+    var i: u64 = 0
+    while i < n && i < 60 {
+        var c: u64 = at(voll, i)
+        if c == 58 || c < 32 {
+            c = 32
+        }
+        __mmio_write8((b + p) as *mut u8, c as u8)
+        p = p + 1
+        i = i + 1
+    }
+    __mmio_write8((b + p) as *mut u8, 0 as u8)
+    return p
+}
+
+// "<mount point><suffix>" into `pfad`.
+fn pf(suffix: u64) -> u64 {
+    ulib.strcpy((&pfad[0]) as u64, suffix)
+    return (&pfad[0]) as u64
+}
+
+fn pf2(mid: u64, tail: u64) -> u64 {
+    let o: u64 = ulib.strcpy((&pfad[0]) as u64, mid)
+    ulib.strcpy((&pfad[0]) as u64 + o, tail)
+    return (&pfad[0]) as u64
+}
+
+fn aufraeumen() {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+}
+
+// Creates the account in the running root. Returns true on success;
+// `grund()` says why not.
+fn anlegen(name: u64, voll: u64, pass: u64) -> bool {
+    st_grund = F_KEIN
+    if !name_ok(name) {
+        st_grund = F_NAME
+        return false
+    }
+    if !pass_ok(pass) {
+        st_grund = F_PASS
+        return false
+    }
+    var rec: [u8; 160] = [0 as u8; 160]
+    if !pw.make_hash(pass, (&rec[0]) as u64) {
+        st_grund = F_ZUFALL
+        return false
+    }
+    if ulib.sys(SYS_GETEUID, 0, 0, 0) != 0 {
+        st_grund = F_ROOT
+        return false
+    }
+
+    // ---- the three files, built in memory first
+    var p1: [u8; 27] = "root:x:0:0:root:/:/bin/sh\n\0"
+    var p2: [u8; 14] = ":x:1000:1000:\0"
+    var p3: [u8; 9] = ":/users/\0"
+    var p4: [u8; 10] = ":/bin/sh\n\0"
+    var sh1: [u8; 23] = "root:!:0:0:99999:7:::\n\0"
+    var sh2: [u8; 2] = ":\0"
+    var sh3: [u8; 17] = ":0:0:99999:7:::\n\0"
+    var g1: [u8; 11] = "root:x:0:\n\0"
+    var g2: [u8; 10] = ":x:1000:\n\0"
+    var home: [u8; 8] = "/users/\0"
+    var conf: [u8; 8] = "/config\0"
+
+    var o: u64 = 0
+    o = put((&bufp[0]) as u64, o, (&p1[0]) as u64)
+    o = put((&bufp[0]) as u64, o, name)
+    o = put((&bufp[0]) as u64, o, (&p2[0]) as u64)
+    o = put_voll((&bufp[0]) as u64, o, voll, name)
+    o = put((&bufp[0]) as u64, o, (&p3[0]) as u64)
+    o = put((&bufp[0]) as u64, o, name)
+    o = put((&bufp[0]) as u64, o, (&p4[0]) as u64)
+    let lp: u64 = o
+    o = 0
+    o = put((&bufs[0]) as u64, o, (&sh1[0]) as u64)
+    o = put((&bufs[0]) as u64, o, name)
+    o = put((&bufs[0]) as u64, o, (&sh2[0]) as u64)
+    o = put((&bufs[0]) as u64, o, (&rec[0]) as u64)
+    o = put((&bufs[0]) as u64, o, (&sh3[0]) as u64)
+    let ls: u64 = o
+    o = 0
+    o = put((&bufg[0]) as u64, o, (&g1[0]) as u64)
+    o = put((&bufg[0]) as u64, o, name)
+    o = put((&bufg[0]) as u64, o, (&g2[0]) as u64)
+    let lg: u64 = o
+
+    // ---- the home first: if it fails nothing else has been touched
+    o = ulib.strcpy((&pfad[0]) as u64, (&home[0]) as u64)
+    ulib.strcpy((&pfad[0]) as u64 + o, name)
+    ulib.sys(ulib.SYS_MKDIR, (&pfad[0]) as u64, 448, 0)
+    if ulib.bad(ulib.sys(SYS_CHOWN, (&pfad[0]) as u64, 1000, 1000)) {
+        st_grund = F_HEIM
+        aufraeumen()
+        return false
+    }
+    ulib.sys(SYS_CHMOD, (&pfad[0]) as u64, MODE_0700, 0)
+    o = ulib.strcpy((&pfad[0]) as u64, (&home[0]) as u64)
+    o = o + ulib.strcpy((&pfad[0]) as u64 + o, name)
+    ulib.strcpy((&pfad[0]) as u64 + o, (&conf[0]) as u64)
+    ulib.sys(ulib.SYS_MKDIR, (&pfad[0]) as u64, 448, 0)
+    if ulib.bad(ulib.sys(SYS_CHOWN, (&pfad[0]) as u64, 1000, 1000)) {
+        st_grund = F_HEIM
+        aufraeumen()
+        return false
+    }
+    ulib.sys(SYS_CHMOD, (&pfad[0]) as u64, MODE_0700, 0)
+
+    // ---- the three files; shadow first (a half-written set must never
+    // leave an account WITHOUT its hash)
+    var etc_sh: [u8; 13] = "/etc/shadow\0\0"
+    if !pw.write_all(pf((&etc_sh[0]) as u64), (&bufs[0]) as u64, ls) {
+        st_grund = F_SCHREIBEN
+        aufraeumen()
+        return false
+    }
+    ulib.sys(SYS_CHMOD, pf((&etc_sh[0]) as u64), MODE_0600, 0)
+    var etc_gr: [u8; 11] = "/etc/group\0"
+    if !pw.write_all(pf((&etc_gr[0]) as u64), (&bufg[0]) as u64, lg) {
+        st_grund = F_SCHREIBEN
+        aufraeumen()
+        return false
+    }
+    var etc_pw: [u8; 12] = "/etc/passwd\0"
+    if !pw.write_all(pf((&etc_pw[0]) as u64), (&bufp[0]) as u64, lp) {
+        st_grund = F_SCHREIBEN
+        aufraeumen()
+        return false
+    }
+
+    // ---- no automatic sign-in; the empty home of `live` goes away
+    var etc_al: [u8; 15] = "/etc/autologin\0"
+    ulib.sys(ulib.SYS_UNLINK, pf((&etc_al[0]) as u64), 0, 0)
+    var h_live: [u8; 8] = "/users/\0"
+    var t_live: [u8; 5] = "live\0"
+    var t_lconf: [u8; 12] = "live/config\0"
+    ulib.sys(ulib.SYS_RMDIR, pf2((&h_live[0]) as u64, (&t_lconf[0]) as u64), 0, 0)
+    ulib.sys(ulib.SYS_RMDIR, pf2((&h_live[0]) as u64, (&t_live[0]) as u64), 0, 0)
+    aufraeumen()
+    return true
+}

@@ -902,6 +902,14 @@ hat "$OUT/kan16.txt" "opk: installiert hallo" "(h) mit auto=ja holt und installi
 hat "$OUT/kan16.txt" "ota: BEREIT ZUM NEUSTART" "(h) ohne Neustart -- er wird nur angeboten"
 hat "$OUT/kan16.txt" "phase=bereit" "(h) die Anzeige sagt phase=bereit"
 hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gestartet"
+# DEFAULT ON (owner decision 02.10.2026): no `auto=` key at all -> the service runs
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan17 "grep -v auto= /etc/ota.conf > /etc/ota.neu;cp /etc/ota.neu /etc/ota.conf;cat /etc/ota.conf;ota dienst 1;cat /system/ota.stand;exit")
+hatnicht "$OUT/kan17.txt" "AUSgeschaltet" "(h) DEFAULT: without an auto= key the service is ON"
+hat "$OUT/kan17.txt" "opk: installiert hallo" "(h) DEFAULT: and it fetches and installs by itself"
+for f in tools/usbimg/build.sh tools/install/build.sh; do
+    if grep -q '^auto=true$' "$f"; then ok "(h) $f writes auto=true as the image default"; else bad "(h) $f does not write auto=true"; fi
+done
 dienst_aus
 
 echo

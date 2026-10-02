@@ -63,6 +63,8 @@ static mut C_VERIFY: [u8; 7] = "verify\0"
 static mut A0: [u8; 6] = "wrace\0"
 static mut A1: [u8; 6] = "child\0"
 static mut P_SELF: [u8; 11] = "/bin/wrace\0"
+static mut P_SPAM: [u8; 12] = "/bin/wspam\0\0"
+static mut A_SPAM: [u8; 6] = "wspam\0"
 static mut S_SLASHF: [u8; 3] = "/f\0"
 static mut S_BAD: [u8; 14] = "wrace: BAD f\0\0"
 static mut S_BLK: [u8; 8] = " block \0"
@@ -241,10 +243,22 @@ fn verify_all(dir: u64, procs: u64, kib: u64) -> u64 {
     return 1
 }
 
-fn run(dir: u64, procs: u64, kib: u64) -> u64 {
+fn run(dir: u64, procs: u64, kib: u64, spam: u64) -> u64 {
     ulib.sys(ulib.SYS_MKDIR, dir, 493, 0)
     var pids: [u64; 16] = [0 as u64; 16]
     var n: u64 = 0
+    // DAILY-DRIVER (r200): `spam` > 0 starts /bin/wspam next to the
+    // writers -- the taskbar's window-list poll on another core, the one
+    // caller that used the shared copy page OUTSIDE the file-system lock.
+    var spid: u64 = 0xFFFFFFFFFFFFFFFF
+    if spam > 0 {
+        var sargv: [u64; 4] = [0 as u64; 4]
+        ulib.digits(spam, (&NUM2[0 as usize]) as u64)
+        sargv[0 as usize] = (&A_SPAM[0 as usize]) as u64
+        sargv[1 as usize] = (&NUM2[0 as usize]) as u64
+        spid = ulib.sys(ulib.SYS_EXEC, (&P_SPAM[0 as usize]) as u64,
+            (&sargv[0 as usize]) as u64, 2)
+    }
     while n < procs && n < 16 {
         ulib.digits(n, (&NUM1[0 as usize]) as u64)
         ulib.digits(kib, (&NUM2[0 as usize]) as u64)
@@ -270,6 +284,9 @@ fn run(dir: u64, procs: u64, kib: u64) -> u64 {
         }
         k = k + 1
     }
+    if !ulib.bad(spid) {
+        let _c: u64 = ulib.wait_code(spid)
+    }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     if verify_all(dir, procs, kib) != 0 {
         rc = 1
@@ -294,7 +311,11 @@ fn u_start(args: u64) -> u64 {
         return verify_all(dir, a, kib)
     }
     if ulib.streq(cmd, (&C_RUN[0 as usize]) as u64) {
-        return run(dir, a, kib)
+        var spam: u64 = 0
+        if argc > 5 {
+            spam = ulib.to_num(ulib.arg_at(args, 5))
+        }
+        return run(dir, a, kib, spam)
     }
     ulib.say((&S_USE[0 as usize]) as u64)
     return 1

@@ -263,7 +263,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd axd sntp"}
+orientbus act settingsd axd sntp kontocli"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -801,10 +801,11 @@ printf 'de\n' > "$OUT/locale-de"
 #                        Let's-Encrypt-Kette von store.fleitec.com
 #                        geprueft hat. $OTA_ROOTS ueberschreibt.
 #   /etc/ota.conf        WOHER. Ein NAME und keine Adresse: das Geraet
-#                        loest ihn selbst auf (Runde BETRIEB). `auto=nein`
-#                        bleibt -- ein Stick, der ab Werk von selbst
-#                        nachfragt, waere eine Entscheidung, die niemand
-#                        getroffen hat. Der Mensch tippt `ota suchen`.
+#                        loest ihn selbst auf (Runde BETRIEB). `auto=true` ist
+#                        die Vorgabe (Entscheidung des Besitzers
+#                        02.10.2026): das Abbild sucht, holt und spielt
+#                        Updates selbst ein; abschaltbar in Einstellungen
+#                        -> Updates oder mit `ota einstellen auto nein`.
 #   /system/schluessel.pub  WEM. Ohne den vertrauten Schluessel nimmt
 #                        `ota` kein Verzeichnis und `opk` kein Paket an.
 #
@@ -839,11 +840,11 @@ else
 #          Nameserver auf, den ihm DHCP gegeben hat (Runde BETRIEB), und
 #          prueft das Zertifikat gegen /etc/ssl/roots.pem.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     true/false (ja/nein gehen auch). Vorgabe false: gesucht wird, wenn jemand es sagt.
+# auto     true/false (ja/nein gehen auch). Vorgabe true (Entscheidung des Besitzers 02.10.2026): suchen, holen, einspielen; abschaltbar in Einstellungen -> Updates.
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 quelle=$STORE/aktuell
 abstand=3600
-auto=false
+auto=true
 frist=120
 EOFOTA
 fi

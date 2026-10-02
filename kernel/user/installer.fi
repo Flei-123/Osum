@@ -95,6 +95,7 @@ import wlibc
 import wlib
 import msg
 import instkern
+import instkonto
 import dualkern
 
 export { u_start }
@@ -114,7 +115,8 @@ const PCOL: u64 = 5
 // Das Fenster. Die Zahlen liegen auf dem Viererraster der Runde
 // OBERFLAECHE -- `tools/design/messen.py` zaehlt genau sie.
 const BW: u64 = 720
-const BH: u64 = 560
+// DAILY-DRIVER (r172): 140 more for the account rows above the buttons.
+const BH: u64 = 656
 
 // Die Schritte, die der Balken abbildet. Sie sind dieselben Zahlen wie
 // in `instkern` (S_GPT..S_FERTIG) und stehen hier NICHT noch einmal als
@@ -139,6 +141,30 @@ static mut tspalten: [u64; 4] = [0 as u64; 4]
 static mut tabtext: [u8; 80] = [0 as u8; 80]
 
 // Die Statuszeile und die Schrittzeile.
+// DAILY-DRIVER (r172): the account of the installed system.
+static mut k_a_name: [u8; 21] = "installer.acct.name\0\0"
+static mut k_a_pw1: [u8; 20] = "installer.acct.pw1\0\0"
+static mut k_a_pw2: [u8; 20] = "installer.acct.pw2\0\0"
+static mut k_a_hname: [u8; 26] = "installer.acct.hint.name\0\0"
+static mut k_a_hpw: [u8; 24] = "installer.acct.hint.pw\0\0"
+static mut k_a_hsame: [u8; 26] = "installer.acct.hint.same\0\0"
+static mut k_a_hok: [u8; 24] = "installer.acct.hint.ok\0\0"
+static mut k_a_fail: [u8; 21] = "installer.acct.fail\0\0"
+static mut a_kname: [u8; 8] = "konto=\0\0"
+static mut a_kpw: [u8; 10] = "kontopw=\0\0"
+static mut m_konto: [u8; 19] = "installer: konto=\0\0"
+static mut a_nam: [u8; 64] = [0 as u8; 64]
+static mut a_pw1: [u8; 128] = [0 as u8; 128]
+static mut a_pw2: [u8; 128] = [0 as u8; 128]
+static mut a_zeile: [u8; 200] = [0 as u8; 200]
+static mut a_leer: [u8; 4] = [0 as u8; 4]
+static mut d_ofs: [u8; 24] = [0 as u8; 24]
+// 1 = the installed system gets the account typed into the three fields
+// (always in the window; in the test runner only with `konto=`/`kontopw=`).
+static mut konto_an: u64 = 1
+static mut konto_ks: u64 = 0
+static mut konto_noroot: u64 = 0
+static mut k_a_hroot: [u8; 26] = "installer.acct.hint.root\0\0"
 static mut zeile: [u8; 200] = [0 as u8; 200]
 static mut schrittzeile: [u8; 200] = [0 as u8; 200]
 
@@ -762,8 +788,93 @@ fn dzeilen_bauen() {
 // die Zeile darueber sagt, woran es liegt. Ein Knopf, der eine
 // Fehlermeldung ausloest, die man vorher haette anzeigen koennen, ist
 // eine Falle.
+// ============================================ DAILY-DRIVER: THE ACCOUNT
+//
+// The three fields (name, password, again) are valid when the name
+// passes `instkonto.name_ok`, the password `instkonto.pass_ok` and both
+// passwords are equal. Until then the install button stays off -- an
+// installed system without a way to sign in is the worst result.
+fn konto_gueltig() -> bool {
+    if konto_an == 0 {
+        return true
+    }
+    if !instkonto.name_ok((&a_nam[0 as usize]) as u64) {
+        return false
+    }
+    if !instkonto.pass_ok((&a_pw1[0 as usize]) as u64) {
+        return false
+    }
+    return ulib.streq((&a_pw1[0 as usize]) as u64, (&a_pw2[0 as usize]) as u64)
+}
+
+fn konto_zeile_bauen() {
+    b_start((&a_zeile[0 as usize]) as u64, 200)
+    if konto_noroot != 0 {
+        b_s(msg.get(ptr((&k_a_hroot[0 as usize]) as u64)))
+    } else if !instkonto.name_ok((&a_nam[0 as usize]) as u64) {
+        b_s(msg.get(ptr((&k_a_hname[0 as usize]) as u64)))
+    } else if !instkonto.pass_ok((&a_pw1[0 as usize]) as u64) {
+        b_s(msg.get(ptr((&k_a_hpw[0 as usize]) as u64)))
+    } else if !ulib.streq((&a_pw1[0 as usize]) as u64, (&a_pw2[0 as usize]) as u64) {
+        b_s(msg.get(ptr((&k_a_hsame[0 as usize]) as u64)))
+    } else {
+        b_s(msg.get(ptr((&k_a_hok[0 as usize]) as u64)))
+    }
+    b_ende()
+}
+
+// The account step of both ways. It runs BEFORE anything on the disk is
+// touched (it rewrites the account files of the running root, which is what
+// gets copied). true = nothing to do or done; false = failed (`wo` says
+// 90 + reason). The password buffers are wiped in every case.
+fn konto_schreiben() -> bool {
+    if konto_an == 0 {
+        return true
+    }
+    say(ptr((&m_konto[0 as usize]) as u64))
+    ulib.nl()
+    let gut: bool = instkonto.anlegen((&a_nam[0 as usize]) as u64,
+        (&a_nam[0 as usize]) as u64, (&a_pw1[0 as usize]) as u64)
+    if !gut {
+        wo(90 + instkonto.grund())
+    }
+    ulib.fill((&a_pw1[0 as usize]) as u64, 0, 128)
+    ulib.fill((&a_pw2[0 as usize]) as u64, 0, 128)
+    return gut
+}
+
+// `konto=NAME` / `kontopw=SECRET` of the test runner: copies the value
+// behind the prefix into `out`; false when the argument is not there.
+fn arg_wert(args: u64, pre: u64, out: u64, max: u64) -> bool {
+    let n: u64 = ulib.arg_count(args)
+    let pl: u64 = ulib.length(pre)
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < pl {
+            if (*((a + k) as *mut u8)) as u64 != (*((pre + k) as *mut u8)) as u64 {
+                gleich = false
+                k = pl
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich && ulib.length(a) > pl {
+            ulib.strncpy(out, a + pl, max)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn weg_moeglich() -> bool {
     if gewaehlt >= p_anz {
+        return false
+    }
+    if !konto_gueltig() {
         return false
     }
     if welcher_weg == 1 {
@@ -900,6 +1011,14 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
+    // DAILY-DRIVER (r172): the owner's own account goes into the running
+    // root NOW -- the copy below carries it, and a refusal leaves the disk
+    // untouched.
+    if !konto_schreiben() {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
 
     // ---- 1. die Partitionstafel
     melde_schritt(wschritt, instkern.S_GPT)
@@ -987,6 +1106,11 @@ fn installieren_daneben(dev: u64, wstat: u64, wschritt: u64) -> bool {
     }
     if instkern.quelle_pruefen(qfd) == 0 {
         wo(71)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    // DAILY-DRIVER (r172): the owner's own account, before the table is touched.
+    if !konto_schreiben() {
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
@@ -1462,7 +1586,31 @@ fn u_start(args: u64) -> u64 {
     let sofort: bool = arg_hat(args, ptr((&a_ja[0 as usize]) as u64))
     let zweite: bool = arg_hat(args, ptr((&a_zwei[0 as usize]) as u64))
     let daneben: bool = arg_hat(args, ptr((&a_neben[0 as usize]) as u64))
+    // DAILY-DRIVER (r172): the test runner names the account with
+    // `konto=NAME` and `kontopw=SECRET`; without them it installs the
+    // old way (the copy of the stick keeps its accounts).
+    if sofort {
+        if arg_wert(args, ptr((&a_kname[0 as usize]) as u64),
+            (&a_nam[0 as usize]) as u64, 63)
+            && arg_wert(args, ptr((&a_kpw[0 as usize]) as u64),
+            (&a_pw1[0 as usize]) as u64, 127) {
+            ulib.strncpy((&a_pw2[0 as usize]) as u64,
+                (&a_pw1[0 as usize]) as u64, 127)
+            konto_an = 1
+        } else {
+            konto_an = 0
+        }
+    }
 
+    // The account needs root (it rewrites /etc/shadow and chowns): the
+    // boot-menu entry "Install OrientOS" is root, a window started from the
+    // live desktop is not. Then the install runs as before and says so.
+    var noroot: bool = false
+    if ulib.sys(107, 0, 0, 0) != 0 && !sofort {
+        konto_an = 0
+        noroot = true
+        konto_noroot = 1
+    }
     if !wlib.begin(nohit, false) {
         say(ptr((&m_nowm[0 as usize]) as u64))
         ulib.nl()
@@ -1516,8 +1664,8 @@ fn u_start(args: u64) -> u64 {
     // Deshalb hier derselbe Aufbau wie im Aufgabenverwalter: EIN
     // `box_v` mit Rand und Abstand, die Widgets der Reihe nach hinein,
     // `size` nur dort, wo eine Hoehe nicht die Vorgabe ist.
-    let tbh: u64 = wlibc.snap_up(160)
-    let pbh: u64 = wlibc.snap_up(140)
+    let tbh: u64 = wlibc.snap_up(120)
+    let pbh: u64 = wlibc.snap_up(100)
     wlib.box_v(w, 0, 0, bw, bh, pad, gap)
     let lhead: u64 = wlib.label(msg.get(ptr((&k_head[0 as usize]) as u64)))
     wlib.size(0, tbh)
@@ -1538,6 +1686,34 @@ fn u_start(args: u64) -> u64 {
     let lesp: u64 = wlib.label((&espzeile[0 as usize]) as u64)
     let lstat: u64 = wlib.label((&zeile[0 as usize]) as u64)
     let lschritt: u64 = wlib.label((&schrittzeile[0 as usize]) as u64)
+    wlib.box_end()
+
+    // ============================== DAILY-DRIVER (r172): DAS KONTO
+    //
+    // Drei Zeilen (Name, Passwort, noch einmal) und eine Hinweiszeile,
+    // in einem Gitter ueber der Knopfreihe. Der Knopf bleibt aus, bis
+    // sie stimmen.
+    konto_zeile_bauen()
+    let kw_l: u64 = wlibc.snap_up(220)
+    let kgh: u64 = 4 * (kh + gap)
+    let kfeld: u64 = bw - 2 * pad - kw_l - gap
+    wlib.box_grid(w, pad, bh - pad - kh - gap - kgh, bw - 2 * pad, kgh, 0, gap, 2)
+    wlib.size(kw_l, kh)
+    let _kl1: u64 = wlib.label(msg.get(ptr((&k_a_name[0 as usize]) as u64)))
+    wlib.size(kfeld, kh)
+    let _ke1: u64 = wlib.entry((&a_nam[0 as usize]) as u64, 31)
+    wlib.size(kw_l, kh)
+    let _kl2: u64 = wlib.label(msg.get(ptr((&k_a_pw1[0 as usize]) as u64)))
+    wlib.size(kfeld, kh)
+    let _ke2: u64 = wlib.password((&a_pw1[0 as usize]) as u64, 100)
+    wlib.size(kw_l, kh)
+    let _kl3: u64 = wlib.label(msg.get(ptr((&k_a_pw2[0 as usize]) as u64)))
+    wlib.size(kfeld, kh)
+    let _ke3: u64 = wlib.password((&a_pw2[0 as usize]) as u64, 100)
+    wlib.size(kw_l, kh)
+    let _kl4: u64 = wlib.label((&a_leer[0 as usize]) as u64)
+    wlib.size(kfeld, kh)
+    let lkhint: u64 = wlib.label((&a_zeile[0 as usize]) as u64)
     wlib.box_end()
 
     // Die Partitionsansicht gehoert dem zweiten Reiter -- am Anfang
@@ -1696,6 +1872,28 @@ fn u_start(args: u64) -> u64 {
         }
 
         let id: u64 = wlib.step()
+        // DAILY-DRIVER (r172): hint line and install button follow the
+        // three account fields -- redrawn only when their state changes.
+        if laeuft == 0 && fertig == 0 && konto_an != 0 {
+            var ks: u64 = 0
+            if instkonto.name_ok((&a_nam[0 as usize]) as u64) {
+                ks = 1
+                if instkonto.pass_ok((&a_pw1[0 as usize]) as u64) {
+                    ks = 2
+                    if ulib.streq((&a_pw1[0 as usize]) as u64,
+                        (&a_pw2[0 as usize]) as u64) {
+                        ks = 3
+                    }
+                }
+            }
+            if ks != konto_ks {
+                konto_ks = ks
+                konto_zeile_bauen()
+                wlib.set_text(lkhint, (&a_zeile[0 as usize]) as u64)
+                wlib.enable(bgo, weg_moeglich())
+                wlib.draw_all()
+            }
+        }
         if id < wlib.MAXWD {
             let kind: u64 = wlib.fired_kind()
             let idx: u64 = wlib.fired_index()

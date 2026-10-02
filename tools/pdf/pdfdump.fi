@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/pdf/pdfdump.fi -- HOST test driver of lib/pdfread: every page of a
+// PDF as SVG into a directory.
+//
+//     firnc tools/pdf/pdfdump.fi -o /tmp/pdfdump
+//     /tmp/pdfdump file.pdf outdir [scale-percent]
+//
+// Prints `pages=N`, one `page I WxH images=K` per page, or `error=E`.
+import std.rt
+import pdfread.pdfread
+
+fn cstr_len(p: u64) -> usize {
+    var n: usize = 0
+    while rt.ld8(p, n) != (0 as u8) {
+        n = n + 1
+    }
+    return n
+}
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 3 {
+        return 64
+    }
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(rt.arg_ptr(start, 1), &b) {
+        return 2
+    }
+    var scale: f64 = 1.0
+    if argc > 3 {
+        var v: u64 = 0
+        let ap: u64 = rt.arg_ptr(start, 3)
+        var i: usize = 0
+        while rt.ld8(ap, i) != (0 as u8) {
+            v = v * 10 + ((rt.ld8(ap, i) - 48) as u64)
+            i = i + 1
+        }
+        scale = (v as f64) / 100.0
+    }
+    var d: pdfread.Doc = pdfread.doc_new()
+    if !pdfread.doc_open(&d, rt.buf_ptr(&b), rt.buf_len(&b) as u64) {
+        var o: rt.Buf = rt.buf_new()
+        let e1: str = "error="
+        rt.buf_push_bytes(&o, e1.p as u64, 6)
+        rt.buf_push_dec_u64(&o, pdfread.doc_error(&d) as u64)
+        rt.buf_push(&o, 10 as u8)
+        rt.write_everything(1, rt.buf_ptr(&o), rt.buf_len(&o))
+        return 3
+    }
+    let np: u64 = pdfread.doc_pages(&d)
+    var o2: rt.Buf = rt.buf_new()
+    let e2: str = "pages="
+    rt.buf_push_bytes(&o2, e2.p as u64, 6)
+    rt.buf_push_dec_u64(&o2, np)
+    rt.buf_push(&o2, 10 as u8)
+    var pg: u64 = 0
+    while pg < np {
+        var svg: rt.Buf = rt.buf_new()
+        var w: u64 = 0
+        var h: u64 = 0
+        pdfread.doc_page_svg(&d, pg, scale, &svg, &w, &h)
+        // outdir/page<N>.svg
+        var path: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&path, rt.arg_ptr(start, 2), cstr_len(rt.arg_ptr(start, 2)))
+        let e3: str = "/page"
+        rt.buf_push_bytes(&path, e3.p as u64, 5)
+        rt.buf_push_dec_u64(&path, pg + 1)
+        let e4: str = ".svg"
+        rt.buf_push_bytes(&path, e4.p as u64, 4)
+        rt.buf_push(&path, 0 as u8)
+        rt.write_file(rt.buf_ptr(&path), rt.buf_ptr(&svg), rt.buf_len(&svg))
+        let e5: str = "page "
+        rt.buf_push_bytes(&o2, e5.p as u64, 5)
+        rt.buf_push_dec_u64(&o2, pg + 1)
+        rt.buf_push(&o2, 32 as u8)
+        rt.buf_push_dec_u64(&o2, w)
+        rt.buf_push(&o2, 120 as u8)
+        rt.buf_push_dec_u64(&o2, h)
+        let e6: str = " images="
+        rt.buf_push_bytes(&o2, e6.p as u64, 8)
+        rt.buf_push_dec_u64(&o2, pdfread.doc_img_count(&d))
+        rt.buf_push(&o2, 10 as u8)
+        rt.buf_free(&svg)
+        rt.buf_free(&path)
+        pg = pg + 1
+    }
+    rt.write_everything(1, rt.buf_ptr(&o2), rt.buf_len(&o2))
+    return 0
+}

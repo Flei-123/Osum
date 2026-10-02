@@ -1,0 +1,4224 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/pdfread/pdfread.fi -- a PDF READER for OrientOS (DAILY-DRIVER r55).
+//
+// The file in, one page out as SVG text -- the picture itself is made by
+// lib/svg (svg.svgimage), the same renderer the system icons use.
+//
+//     var d: pdfread.Doc = pdfread.doc_new()
+//     if pdfread.doc_open(&d, ptr, len) { ... pdfread.doc_pages(&d) ... }
+//     var svg: rt.Buf = rt.buf_new()
+//     pdfread.doc_page_svg(&d, page, 1.0, &svg)
+//
+// WHAT IT UNDERSTANDS (docs/PDFVIEW.md has the list with its limits):
+//   file structure   classic xref tables, xref streams, object streams,
+//                    hybrid files, incremental updates (/Prev); a damaged
+//                    file is rebuilt by scanning for "N G obj"
+//   filters          Flate (with PNG predictors), ASCIIHex, ASCII85,
+//                    RunLength, LZW
+//   pages            the page tree with inherited MediaBox/CropBox/Resources/
+//                    Rotate, content streams in an array, form XObjects
+//   graphics         paths (fill, stroke, even-odd, clip), colours (Gray, RGB,
+//                    CMYK, ICCBased by component count, Separation as tint),
+//                    line width/cap/join/dash, opacity (ExtGState ca/CA),
+//                    transformation matrices
+//   text             simple and Type0 (Identity) fonts, widths from /Widths,
+//                    /W and the 14 standard fonts, Unicode from ToUnicode,
+//                    /Encoding (WinAnsi, MacRoman, Standard, Differences);
+//                    drawn with the system face -- the glyph SHAPES are the
+//                    system's, the POSITIONS are the file's
+//   images           their places are listed (`doc_img_*`), the viewer draws
+//                    them; shadings and patterns are NOT drawn
+//   encryption       reported, not decoded
+//
+// Memory: heap_alloc/heap_free from std.rt, nothing else. No recursion deeper
+// than 32 on the file's own structure (page tree, objects, forms).
+
+import std.rt
+import std.deflate
+import pdfread.pdftab
+import jpeg.jpeg
+
+export {
+    Doc, doc_new, doc_open, doc_free, doc_pages, doc_page_size, doc_page_svg,
+    doc_error, doc_img_count, doc_img_obj, doc_img_m,
+    ERR_NONE, ERR_FORMAT, ERR_ENCRYPTED, ERR_NOPAGES, ERR_MEMORY,
+    Val, parse_val, skip_ws, K_NONE, K_BOOL, K_INT, K_REAL, K_STR, K_NAME,
+    K_ARR, K_DICT, K_REF, K_STREAM,
+    doc_object, doc_dict_get, doc_stream, doc_img_info, doc_obj_of,
+    doc_img_rgba, doc_img_blit, doc_img_color,
+}
+
+const ERR_NONE: u32 = 0
+const ERR_FORMAT: u32 = 1
+const ERR_ENCRYPTED: u32 = 2
+const ERR_NOPAGES: u32 = 3
+const ERR_MEMORY: u32 = 4
+
+const K_NONE: u32 = 0
+const K_BOOL: u32 = 1
+const K_INT: u32 = 2
+const K_REAL: u32 = 3
+const K_STR: u32 = 4
+const K_NAME: u32 = 5
+const K_ARR: u32 = 6
+const K_DICT: u32 = 7
+const K_REF: u32 = 8
+const K_STREAM: u32 = 9
+const K_OP: u32 = 10
+
+// One PDF value. For strings, names, arrays and dictionaries `a`/`n` is the
+// byte range INSIDE the delimiters (a string keeps its escapes: `str_bytes`
+// decodes it). For a stream `a`/`n` is the dictionary and `so`/`sl` the data.
+struct Val {
+    kind: u32,
+    a: u64,
+    n: u64,
+    num: f64,
+    so: u64,
+    sl: u64,
+    rn: u32,
+    rg: u32,
+    hex: u32,
+}
+
+fn val_none() -> Val {
+    return Val { kind: K_NONE, a: 0, n: 0, num: 0.0, so: 0, sl: 0, rn: 0, rg: 0, hex: 0 }
+}
+
+const MAXDEPTH: u64 = 32
+
+struct OStm {
+    num: u64,
+    buf: rt.Buf,
+    count: u64,
+    first: u64,
+}
+
+struct Doc {
+    data: u64,
+    len: u64,
+    nobj: u64,
+    xk: u64,      // u8 per object: 0 free, 1 at offset, 2 in an object stream
+    xo: u64,      // u64 per object: offset, or the number of the object stream
+    xi: u64,      // u32 per object: gen, or the index in the object stream
+    trailer: Val,
+    root: Val,
+    npages: u64,
+    pages: u64,   // u32 object numbers of the leaves
+    err: u32,
+    os: OStm,
+    nimg: u64,
+    img: u64,     // ImgPlace records (IMG_MAX)
+    depth: u64,
+    fonts: u64,   // FontInfo records (FONT_MAX)
+    nfonts: u64,
+    cmyk: u32,
+}
+
+fn doc_new() -> Doc {
+    return Doc {
+        data: 0, len: 0, nobj: 0, xk: 0, xo: 0, xi: 0,
+        trailer: val_none(), root: val_none(), npages: 0, pages: 0, err: 0,
+        os: OStm { num: 0, buf: rt.buf_new(), count: 0, first: 0 },
+        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, cmyk: 0,
+    }
+}
+
+fn doc_error(d: *mut Doc) -> u32 {
+    return (*d).err
+}
+
+fn doc_pages(d: *mut Doc) -> u64 {
+    return (*d).npages
+}
+
+// ---------------------------------------------------------- small helpers
+
+fn ld(p: u64) -> u32 {
+    let v: u8 = *(p as *mut u8)
+    return v as u32
+}
+
+fn is_ws(c: u32) -> bool {
+    return c == 32 || c == 10 || c == 13 || c == 9 || c == 12 || c == 0
+}
+
+fn is_delim(c: u32) -> bool {
+    return c == 40 || c == 41 || c == 60 || c == 62 || c == 91 || c == 93
+        || c == 123 || c == 125 || c == 47 || c == 37
+}
+
+fn is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn skip_ws(p0: u64, end: u64) -> u64 {
+    var p: u64 = p0
+    while p < end {
+        let c: u32 = ld(p)
+        if is_ws(c) {
+            p = p + 1
+        } else if c == 37 {
+            while p < end && ld(p) != 10 && ld(p) != 13 {
+                p = p + 1
+            }
+        } else {
+            return p
+        }
+    }
+    return p
+}
+
+fn mem_eq_str(p: u64, n: u64, lit: str) -> bool {
+    if n != lit.n as u64 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if ld(p + i) != (*((lit.p as u64 + i) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn starts_with(p: u64, end: u64, lit: str) -> bool {
+    if p + (lit.n as u64) > end {
+        return false
+    }
+    var i: u64 = 0
+    while i < (lit.n as u64) {
+        if ld(p + i) != (*((lit.p as u64 + i) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn fsqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var g: f64 = x
+    if g < 1.0 {
+        g = 1.0
+    }
+    var i: u64 = 0
+    while i < 40 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+// ------------------------------------------------------------ the parser
+
+// Parses one value at p (end = the end of the readable range). Returns the
+// position after it. A bare keyword (an operator in a content stream, or
+// `obj`, `endobj`, `R`, `stream` ...) comes back as K_OP with its bytes.
+// `R` is NOT folded here (`parse_ref` does it where refs can occur).
+fn parse_val(p0: u64, end: u64, v: *mut Val) -> u64 {
+    var p: u64 = skip_ws(p0, end)
+    *v = val_none()
+    if p >= end {
+        return p
+    }
+    let c: u32 = ld(p)
+    if c == 47 {
+        // name
+        p = p + 1
+        (*v).kind = K_NAME
+        (*v).a = p
+        while p < end && !is_ws(ld(p)) && !is_delim(ld(p)) {
+            p = p + 1
+        }
+        (*v).n = p - (*v).a
+        return p
+    }
+    if c == 40 {
+        // string with escapes and balanced parentheses
+        p = p + 1
+        (*v).kind = K_STR
+        (*v).a = p
+        var depth: u64 = 1
+        while p < end {
+            let ch: u32 = ld(p)
+            if ch == 92 {
+                p = p + 2
+            } else {
+                if ch == 40 {
+                    depth = depth + 1
+                } else if ch == 41 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        (*v).n = p - (*v).a
+                        return p + 1
+                    }
+                }
+                p = p + 1
+            }
+        }
+        (*v).n = end - (*v).a
+        return end
+    }
+    if c == 60 {
+        if p + 1 < end && ld(p + 1) == 60 {
+            // dictionary
+            p = p + 2
+            (*v).kind = K_DICT
+            (*v).a = p
+            var depth: u64 = 1
+            while p < end {
+                let ch: u32 = ld(p)
+                if ch == 60 && p + 1 < end && ld(p + 1) == 60 {
+                    depth = depth + 1
+                    p = p + 2
+                } else if ch == 62 && p + 1 < end && ld(p + 1) == 62 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        (*v).n = p - (*v).a
+                        return p + 2
+                    }
+                    p = p + 2
+                } else if ch == 40 {
+                    // skip a string whole: ">>" inside it is not the end
+                    var sv: Val = val_none()
+                    p = parse_val(p, end, &sv)
+                } else {
+                    p = p + 1
+                }
+            }
+            (*v).n = end - (*v).a
+            return end
+        }
+        // hex string
+        p = p + 1
+        (*v).kind = K_STR
+        (*v).hex = 1
+        (*v).a = p
+        while p < end && ld(p) != 62 {
+            p = p + 1
+        }
+        (*v).n = p - (*v).a
+        if p < end {
+            p = p + 1
+        }
+        return p
+    }
+    if c == 91 {
+        p = p + 1
+        (*v).kind = K_ARR
+        (*v).a = p
+        var depth: u64 = 1
+        while p < end {
+            let ch: u32 = ld(p)
+            if ch == 91 {
+                depth = depth + 1
+                p = p + 1
+            } else if ch == 93 {
+                depth = depth - 1
+                if depth == 0 {
+                    (*v).n = p - (*v).a
+                    return p + 1
+                }
+                p = p + 1
+            } else if ch == 40 || ch == 60 {
+                var sv2: Val = val_none()
+                p = parse_val(p, end, &sv2)
+            } else {
+                p = p + 1
+            }
+        }
+        (*v).n = end - (*v).a
+        return end
+    }
+    if c == 93 || c == 62 || c == 41 || c == 123 || c == 125 {
+        // a stray delimiter: skip it as an operator of one byte
+        (*v).kind = K_OP
+        (*v).a = p
+        (*v).n = 1
+        return p + 1
+    }
+    if is_digit(c) || c == 43 || c == 45 || c == 46 {
+        // number (or a keyword that starts with a sign -- not in PDF)
+        var q: u64 = p
+        var neg: bool = false
+        if ld(q) == 45 {
+            neg = true
+            q = q + 1
+        } else if ld(q) == 43 {
+            q = q + 1
+        }
+        var ip: f64 = 0.0
+        var any: bool = false
+        var real: bool = false
+        while q < end && (is_digit(ld(q)) || ld(q) == 45) {
+            if ld(q) != 45 {
+                ip = ip * 10.0 + ((ld(q) - 48) as f64)
+                any = true
+            }
+            q = q + 1
+        }
+        if q < end && ld(q) == 46 {
+            real = true
+            q = q + 1
+            var scale: f64 = 0.1
+            while q < end && is_digit(ld(q)) {
+                ip = ip + ((ld(q) - 48) as f64) * scale
+                scale = scale / 10.0
+                any = true
+                q = q + 1
+            }
+        }
+        if any && (q >= end || is_ws(ld(q)) || is_delim(ld(q))) {
+            if neg {
+                ip = 0.0 - ip
+            }
+            if real {
+                (*v).kind = K_REAL
+            } else {
+                (*v).kind = K_INT
+            }
+            (*v).num = ip
+            (*v).a = p
+            (*v).n = q - p
+            return q
+        }
+    }
+    // a keyword
+    (*v).kind = K_OP
+    (*v).a = p
+    while p < end && !is_ws(ld(p)) && !is_delim(ld(p)) {
+        p = p + 1
+    }
+    if p == (*v).a {
+        p = p + 1
+    }
+    (*v).n = p - (*v).a
+    // true / false / null
+    if mem_eq_str((*v).a, (*v).n, "true") {
+        (*v).kind = K_BOOL
+        (*v).num = 1.0
+    } else if mem_eq_str((*v).a, (*v).n, "false") {
+        (*v).kind = K_BOOL
+        (*v).num = 0.0
+    } else if mem_eq_str((*v).a, (*v).n, "null") {
+        (*v).kind = K_NONE
+    }
+    return p
+}
+
+// A value where an indirect reference may stand: "N G R" becomes K_REF.
+fn parse_ref(p0: u64, end: u64, v: *mut Val) -> u64 {
+    let p1: u64 = parse_val(p0, end, v)
+    if (*v).kind != K_INT || (*v).num < 0.0 {
+        return p1
+    }
+    var g: Val = val_none()
+    let p2: u64 = parse_val(p1, end, &g)
+    if g.kind != K_INT {
+        return p1
+    }
+    var r: Val = val_none()
+    let p3: u64 = parse_val(p2, end, &r)
+    if r.kind == K_OP && r.n == 1 && ld(r.a) == 82 {
+        (*v).rn = (*v).num as u32
+        (*v).rg = g.num as u32
+        (*v).kind = K_REF
+        return p3
+    }
+    return p1
+}
+
+// A name equal to `lit`? (names with #xx escapes are decoded)
+fn name_is(v: *mut Val, lit: str) -> bool {
+    if (*v).kind != K_NAME {
+        return false
+    }
+    var i: u64 = 0
+    var j: u64 = 0
+    while i < (*v).n {
+        var c: u32 = ld((*v).a + i)
+        if c == 35 && i + 2 < (*v).n {
+            let h1: u32 = hexval(ld((*v).a + i + 1))
+            let h2: u32 = hexval(ld((*v).a + i + 2))
+            if h1 < 16 && h2 < 16 {
+                c = h1 * 16 + h2
+                i = i + 2
+            }
+        }
+        if j >= (lit.n as u64) {
+            return false
+        }
+        if c != (*((lit.p as u64 + j) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+        j = j + 1
+    }
+    return j == (lit.n as u64)
+}
+
+// Looks `key` up in the dictionary bytes [a, a+n). The value is NOT resolved.
+fn dict_find(a: u64, n: u64, key: str, out: *mut Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + n
+    var guard: u64 = 0
+    while guard < 4096 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var k: Val = val_none()
+        p = parse_val(p, end, &k)
+        if k.kind == K_NAME {
+            var v: Val = val_none()
+            p = parse_ref(p, end, &v)
+            if name_is(&k, key) {
+                *out = v
+                return true
+            }
+        }
+    }
+    *out = val_none()
+    return false
+}
+
+// ---------------------------------------------------------- numbers etc.
+
+fn val_num(v: *mut Val) -> f64 {
+    if (*v).kind == K_INT || (*v).kind == K_REAL || (*v).kind == K_BOOL {
+        return (*v).num
+    }
+    return 0.0
+}
+
+// the n-th element of the array bytes [a, a+len); false when there is none
+fn arr_at(a: u64, len: u64, idx: u64, out: *mut Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + len
+    var i: u64 = 0
+    var guard: u64 = 0
+    while guard < 200000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var v: Val = val_none()
+        p = parse_ref(p, end, &v)
+        if i == idx {
+            *out = v
+            return true
+        }
+        i = i + 1
+    }
+    *out = val_none()
+    return false
+}
+
+fn arr_len(a: u64, len: u64) -> u64 {
+    var p: u64 = a
+    let end: u64 = a + len
+    var i: u64 = 0
+    var guard: u64 = 0
+    while guard < 200000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var v: Val = val_none()
+        p = parse_ref(p, end, &v)
+        i = i + 1
+    }
+    return i
+}
+
+// ------------------------------------------------------ raw memory access
+
+fn rd64(p: u64) -> u64 {
+    return *(p as *mut u64)
+}
+
+fn wr64(p: u64, v: u64) {
+    *(p as *mut u64) = v
+}
+
+fn rd32(p: u64) -> u32 {
+    return *(p as *mut u32)
+}
+
+fn wr32(p: u64, v: u32) {
+    *(p as *mut u32) = v
+}
+
+fn rd8(p: u64) -> u32 {
+    return ld(p)
+}
+
+fn wr8(p: u64, v: u32) {
+    *(p as *mut u8) = v as u8
+}
+
+fn alloc0(n: u64) -> u64 {
+    let p: u64 = rt.heap_alloc(n as usize)
+    if p != 0 {
+        rt.mem_set(p, 0 as u8, n as usize)
+    }
+    return p
+}
+
+// make room for object number `num` in the cross-reference arrays
+fn xgrow(d: *mut Doc, num: u64) -> bool {
+    if num < (*d).nobj {
+        return true
+    }
+    if num > 16777216 {
+        return false
+    }
+    var ncap: u64 = (*d).nobj * 2
+    if ncap < num + 1024 {
+        ncap = num + 1024
+    }
+    let nk: u64 = alloc0(ncap)
+    let no: u64 = alloc0(ncap * 8)
+    let ni: u64 = alloc0(ncap * 4)
+    if nk == 0 || no == 0 || ni == 0 {
+        (*d).err = ERR_MEMORY
+        return false
+    }
+    if (*d).nobj > 0 {
+        rt.mem_copy(nk, (*d).xk, (*d).nobj as usize)
+        rt.mem_copy(no, (*d).xo, ((*d).nobj * 8) as usize)
+        rt.mem_copy(ni, (*d).xi, ((*d).nobj * 4) as usize)
+        rt.heap_free((*d).xk, (*d).nobj as usize)
+        rt.heap_free((*d).xo, ((*d).nobj * 8) as usize)
+        rt.heap_free((*d).xi, ((*d).nobj * 4) as usize)
+    }
+    (*d).xk = nk
+    (*d).xo = no
+    (*d).xi = ni
+    (*d).nobj = ncap
+    return true
+}
+
+// ------------------------------------------------------------- the filters
+
+const F_NONE: u32 = 0
+const F_DCT: u32 = 1
+const F_JPX: u32 = 2
+const F_CCITT: u32 = 3
+const F_JBIG2: u32 = 4
+
+fn push(b: *mut rt.Buf, c: u32) {
+    rt.buf_push(b, c as u8)
+}
+
+fn ascii_hex(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    var hi: u32 = 16
+    while i < n {
+        let c: u32 = ld(src + i)
+        if c == 62 {
+            break
+        }
+        let h: u32 = hexval(c)
+        if h < 16 {
+            if hi == 16 {
+                hi = h
+            } else {
+                push(out, hi * 16 + h)
+                hi = 16
+            }
+        }
+        i = i + 1
+    }
+    if hi != 16 {
+        push(out, hi * 16)
+    }
+}
+
+fn ascii85(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    var grp: [u32; 5] = [0 as u32; 5]
+    var k: u64 = 0
+    while i < n {
+        let c: u32 = ld(src + i)
+        i = i + 1
+        if c == 126 {
+            break
+        }
+        if is_ws(c) {
+            continue_marker()
+        } else if c == 122 && k == 0 {
+            push(out, 0)
+            push(out, 0)
+            push(out, 0)
+            push(out, 0)
+        } else if c >= 33 && c <= 117 {
+            grp[k as usize] = c - 33
+            k = k + 1
+            if k == 5 {
+                var v: u64 = 0
+                var j: u64 = 0
+                while j < 5 {
+                    v = v * 85 + (grp[j as usize] as u64)
+                    j = j + 1
+                }
+                push(out, ((v >> 24) & 255) as u32)
+                push(out, ((v >> 16) & 255) as u32)
+                push(out, ((v >> 8) & 255) as u32)
+                push(out, (v & 255) as u32)
+                k = 0
+            }
+        }
+    }
+    if k > 1 {
+        var j2: u64 = k
+        while j2 < 5 {
+            grp[j2 as usize] = 84
+            j2 = j2 + 1
+        }
+        var v2: u64 = 0
+        var j3: u64 = 0
+        while j3 < 5 {
+            v2 = v2 * 85 + (grp[j3 as usize] as u64)
+            j3 = j3 + 1
+        }
+        var sh: u64 = 24
+        var m: u64 = 0
+        while m < k - 1 {
+            push(out, ((v2 >> sh) & 255) as u32)
+            sh = sh - 8
+            m = m + 1
+        }
+    }
+}
+
+fn continue_marker() {
+}
+
+fn run_length(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    while i < n {
+        let l: u32 = ld(src + i)
+        i = i + 1
+        if l == 128 {
+            break
+        }
+        if l < 128 {
+            var k: u64 = 0
+            while k < (l as u64) + 1 && i < n {
+                push(out, ld(src + i))
+                i = i + 1
+                k = k + 1
+            }
+        } else {
+            if i < n {
+                let c: u32 = ld(src + i)
+                i = i + 1
+                var k2: u64 = 0
+                while k2 < 257 - (l as u64) {
+                    push(out, c)
+                    k2 = k2 + 1
+                }
+            }
+        }
+    }
+}
+
+// LZW as PDF has it (MSB first, 9..12 bits, 256 clear, 257 end). Entry i >= 258
+// is (prefix code, last byte): tab[i] = (byte << 16) | prefix.
+fn lzw_expand(tab: u64, tmp: u64, code0: u64, out: *mut rt.Buf) -> u32 {
+    var c: u64 = code0
+    var len: u64 = 0
+    var guard: u64 = 0
+    while c >= 258 && guard < 4100 {
+        let e: u32 = rd32(tab + c * 4)
+        wr8(tmp + len, e >> 16)
+        len = len + 1
+        c = (e & 65535) as u64
+        guard = guard + 1
+    }
+    wr8(tmp + len, c as u32)
+    len = len + 1
+    let first: u32 = rd8(tmp + len - 1)
+    var j: u64 = len
+    while j > 0 {
+        push(out, rd8(tmp + j - 1))
+        j = j - 1
+    }
+    return first
+}
+
+fn lzw(src: u64, n: u64, early: u64, out: *mut rt.Buf) {
+    let tab: u64 = alloc0(4096 * 4)
+    let tmp: u64 = alloc0(4200)
+    if tab == 0 || tmp == 0 {
+        return
+    }
+    var next: u64 = 258
+    var bits: u64 = 9
+    var acc: u64 = 0
+    var nacc: u64 = 0
+    var prev: u64 = 65536
+    var i: u64 = 0
+    var done: bool = false
+    while i < n && !done {
+        acc = ((acc << 8) | (ld(src + i) as u64)) & 0xFFFFFF
+        nacc = nacc + 8
+        i = i + 1
+        while nacc >= bits && !done {
+            let code: u64 = (acc >> (nacc - bits)) & ((1 << bits) - 1)
+            nacc = nacc - bits
+            if code == 256 {
+                next = 258
+                bits = 9
+                prev = 65536
+            } else if code == 257 {
+                done = true
+            } else if prev == 65536 {
+                if code < 256 {
+                    push(out, code as u32)
+                }
+                prev = code
+            } else {
+                if code < next {
+                    let first: u32 = lzw_expand(tab, tmp, code, out)
+                    if next < 4096 {
+                        wr32(tab + next * 4, (first << 16) | (prev as u32))
+                        next = next + 1
+                    }
+                } else {
+                    // the string of `prev` plus its own first byte
+                    let first2: u32 = lzw_expand(tab, tmp, prev, out)
+                    push(out, first2)
+                    if next < 4096 {
+                        wr32(tab + next * 4, (first2 << 16) | (prev as u32))
+                        next = next + 1
+                    }
+                }
+                prev = code
+            }
+            if next + early >= 2048 {
+                bits = 12
+            } else if next + early >= 1024 {
+                bits = 11
+            } else if next + early >= 512 {
+                bits = 10
+            } else {
+                bits = 9
+            }
+        }
+    }
+    rt.heap_free(tab, 4096 * 4)
+    rt.heap_free(tmp, 4200)
+}
+
+// PNG predictors (10..15) and TIFF predictor 2 on 8-bit data
+fn predictor(src: u64, n: u64, pred: u64, colors: u64, bpc: u64, cols: u64, out: *mut rt.Buf) {
+    var rb: u64 = (colors * bpc * cols + 7) / 8
+    var bpp: u64 = (colors * bpc + 7) / 8
+    if bpp < 1 {
+        bpp = 1
+    }
+    if rb == 0 {
+        return
+    }
+    if pred == 2 {
+        // TIFF: horizontal differencing, 8 bits only
+        var row: u64 = 0
+        let rows: u64 = n / rb
+        while row < rows {
+            var k: u64 = 0
+            while k < rb {
+                var v: u32 = ld(src + row * rb + k)
+                if k >= colors && bpc == 8 {
+                    v = (v + ld(src + row * rb + k - colors)) & 255
+                    wr8(src + row * rb + k, v)
+                }
+                push(out, v)
+                k = k + 1
+            }
+            row = row + 1
+        }
+        return
+    }
+    let prev: u64 = alloc0(rb + 8)
+    let cur: u64 = alloc0(rb + 8)
+    if prev == 0 || cur == 0 {
+        return
+    }
+    var p: u64 = 0
+    while p + 1 + rb <= n {
+        let ft: u32 = ld(src + p)
+        var i: u64 = 0
+        while i < rb {
+            let x: u32 = ld(src + p + 1 + i)
+            var a: u32 = 0
+            var b: u32 = ld(prev + i)
+            var c: u32 = 0
+            if i >= bpp {
+                a = ld(cur + i - bpp)
+                c = ld(prev + i - bpp)
+            }
+            var v: u32 = x
+            if ft == 1 {
+                v = (x + a) & 255
+            } else if ft == 2 {
+                v = (x + b) & 255
+            } else if ft == 3 {
+                v = (x + ((a + b) / 2)) & 255
+            } else if ft == 4 {
+                let pa: i64 = (b as i64) - (c as i64)
+                let pb: i64 = (a as i64) - (c as i64)
+                let pc: i64 = pa + pb
+                var apa: i64 = pa
+                if apa < 0 {
+                    apa = 0 - apa
+                }
+                var apb: i64 = pb
+                if apb < 0 {
+                    apb = 0 - apb
+                }
+                var apc: i64 = pc
+                if apc < 0 {
+                    apc = 0 - apc
+                }
+                var pr: u32 = c
+                if apa <= apb && apa <= apc {
+                    pr = a
+                } else if apb <= apc {
+                    pr = b
+                }
+                v = (x + pr) & 255
+            }
+            wr8(cur + i, v)
+            i = i + 1
+        }
+        var j: u64 = 0
+        while j < rb {
+            push(out, rd8(cur + j))
+            wr8(prev + j, rd8(cur + j))
+            j = j + 1
+        }
+        p = p + 1 + rb
+    }
+    rt.heap_free(prev, (rb + 8) as usize)
+    rt.heap_free(cur, (rb + 8) as usize)
+}
+
+fn inflate_into(src: u64, n: u64, out: *mut rt.Buf) -> bool {
+    let r: usize = deflate.zlib_decompress(src, n as usize, out) catch 0
+    if r > 0 {
+        return true
+    }
+    // a damaged or headerless stream: raw deflate, or whatever came out
+    if rt.buf_len(out) > 0 {
+        return true
+    }
+    if n > 2 {
+        let r2: usize = deflate.inflate(src + 2, (n - 2) as usize, out) catch 0
+        if r2 > 0 {
+            return true
+        }
+    }
+    return false
+}
+
+fn val_resolved_int(d: *mut Doc, v: *mut Val, dflt: u64) -> u64 {
+    var r: Val = val_none()
+    resolve(d, v, &r)
+    if r.kind == K_INT || r.kind == K_REAL {
+        if r.num < 0.0 {
+            return dflt
+        }
+        return r.num as u64
+    }
+    return dflt
+}
+
+// Decodes the stream `v` fully into `out`. `imgf` receives F_DCT etc. when the
+// last filter is an image codec (then `out` holds that codec's raw bytes).
+fn doc_stream(d: *mut Doc, v: *mut Val, out: *mut rt.Buf, imgf: *mut u32) -> bool {
+    *imgf = F_NONE
+    if (*v).kind != K_STREAM {
+        return false
+    }
+    var cur: u64 = (*v).so
+    var curn: u64 = (*v).sl
+    var own: rt.Buf = rt.buf_new()
+    var haveown: bool = false
+    var fl: Val = val_none()
+    var fr: Val = val_none()
+    if !dict_find((*v).a, (*v).n, "Filter", &fl) {
+        dict_find((*v).a, (*v).n, "F", &fl)
+    }
+    resolve(d, &fl, &fr)
+    var pl: Val = val_none()
+    var pr: Val = val_none()
+    if !dict_find((*v).a, (*v).n, "DecodeParms", &pl) {
+        dict_find((*v).a, (*v).n, "DP", &pl)
+    }
+    resolve(d, &pl, &pr)
+    var nf: u64 = 0
+    if fr.kind == K_NAME {
+        nf = 1
+    } else if fr.kind == K_ARR {
+        nf = arr_len(fr.a, fr.n)
+    }
+    var fi: u64 = 0
+    while fi < nf {
+        var fname: Val = val_none()
+        var parm: Val = val_none()
+        if fr.kind == K_NAME {
+            fname = fr
+            if pr.kind == K_DICT {
+                parm = pr
+            }
+        } else {
+            var e: Val = val_none()
+            arr_at(fr.a, fr.n, fi, &e)
+            resolve(d, &e, &fname)
+            if pr.kind == K_ARR {
+                var pe: Val = val_none()
+                arr_at(pr.a, pr.n, fi, &pe)
+                resolve(d, &pe, &parm)
+            } else if pr.kind == K_DICT && nf == 1 {
+                parm = pr
+            }
+        }
+        var nb: rt.Buf = rt.buf_new()
+        var handled: bool = true
+        if name_is(&fname, "FlateDecode") || name_is(&fname, "Fl") {
+            inflate_into(cur, curn, &nb)
+        } else if name_is(&fname, "ASCIIHexDecode") || name_is(&fname, "AHx") {
+            ascii_hex(cur, curn, &nb)
+        } else if name_is(&fname, "ASCII85Decode") || name_is(&fname, "A85") {
+            ascii85(cur, curn, &nb)
+        } else if name_is(&fname, "RunLengthDecode") || name_is(&fname, "RL") {
+            run_length(cur, curn, &nb)
+        } else if name_is(&fname, "LZWDecode") || name_is(&fname, "LZW") {
+            var early: u64 = 1
+            if parm.kind == K_DICT {
+                var ev: Val = val_none()
+                if dict_find(parm.a, parm.n, "EarlyChange", &ev) {
+                    if ev.num == 0.0 {
+                        early = 0
+                    }
+                }
+            }
+            lzw(cur, curn, early, &nb)
+        } else if name_is(&fname, "DCTDecode") || name_is(&fname, "DCT") {
+            *imgf = F_DCT
+            handled = false
+        } else if name_is(&fname, "JPXDecode") {
+            *imgf = F_JPX
+            handled = false
+        } else if name_is(&fname, "CCITTFaxDecode") || name_is(&fname, "CCF") {
+            *imgf = F_CCITT
+            handled = false
+        } else if name_is(&fname, "JBIG2Decode") {
+            *imgf = F_JBIG2
+            handled = false
+        } else {
+            // Crypt, unknown: leave the data alone
+            handled = false
+        }
+        if !handled {
+            rt.buf_free(&nb)
+            fi = nf
+        } else {
+            // predictor for Flate and LZW
+            var pv: u64 = 1
+            if parm.kind == K_DICT && (name_is(&fname, "FlateDecode") || name_is(&fname, "Fl")
+                || name_is(&fname, "LZWDecode") || name_is(&fname, "LZW")) {
+                var t: Val = val_none()
+                if dict_find(parm.a, parm.n, "Predictor", &t) {
+                    pv = val_resolved_int(d, &t, 1)
+                }
+                if pv > 1 {
+                    var colors: u64 = 1
+                    var bpc: u64 = 8
+                    var cols: u64 = 1
+                    if dict_find(parm.a, parm.n, "Colors", &t) {
+                        colors = val_resolved_int(d, &t, 1)
+                    }
+                    if dict_find(parm.a, parm.n, "BitsPerComponent", &t) {
+                        bpc = val_resolved_int(d, &t, 8)
+                    }
+                    if dict_find(parm.a, parm.n, "Columns", &t) {
+                        cols = val_resolved_int(d, &t, 1)
+                    }
+                    var pb: rt.Buf = rt.buf_new()
+                    predictor(rt.buf_ptr(&nb), rt.buf_len(&nb) as u64, pv, colors, bpc, cols, &pb)
+                    rt.buf_free(&nb)
+                    nb = pb
+                }
+            }
+            if haveown {
+                rt.buf_free(&own)
+            }
+            own = nb
+            haveown = true
+            cur = rt.buf_ptr(&own)
+            curn = rt.buf_len(&own) as u64
+            fi = fi + 1
+        }
+    }
+    if haveown {
+        *out = own
+        return true
+    }
+    // no filter we handle: the raw bytes
+    rt.buf_push_bytes(out, cur, curn as usize)
+    return true
+}
+
+// -------------------------------------------------------------- the objects
+
+// Object streams stay decoded for the life of the document: a value read
+// from one holds pointers into it. Up to OS_MAX of them.
+const OS_MAX: u64 = 512
+
+// parse "N G obj <value> [stream]" at file offset `off`; fills `out`
+fn parse_indirect_at(d: *mut Doc, off: u64, out: *mut Val, want: u64) -> bool {
+    if off >= (*d).len {
+        return false
+    }
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data + off
+    var t1: Val = val_none()
+    var t2: Val = val_none()
+    var t3: Val = val_none()
+    p = parse_val(p, end, &t1)
+    p = parse_val(p, end, &t2)
+    p = parse_val(p, end, &t3)
+    if t1.kind != K_INT || t2.kind != K_INT || t3.kind != K_OP || !mem_eq_str(t3.a, t3.n, "obj") {
+        return false
+    }
+    if want != 0xFFFFFFFFFFFFFFFF && (t1.num as u64) != want {
+        return false
+    }
+    var v: Val = val_none()
+    p = parse_ref(p, end, &v)
+    *out = v
+    if v.kind == K_DICT {
+        let q: u64 = skip_ws(p, end)
+        if starts_with(q, end, "stream") {
+            var s: u64 = q + 6
+            if s < end && ld(s) == 13 {
+                s = s + 1
+            }
+            if s < end && ld(s) == 10 {
+                s = s + 1
+            }
+            var lv: Val = val_none()
+            var sl: u64 = 0xFFFFFFFFFFFFFFFF
+            if dict_find(v.a, v.n, "Length", &lv) {
+                if (*d).depth < MAXDEPTH {
+                    (*d).depth = (*d).depth + 1
+                    sl = val_resolved_int(d, &lv, 0xFFFFFFFFFFFFFFFF)
+                    (*d).depth = (*d).depth - 1
+                }
+            }
+            var ok: bool = false
+            if sl != 0xFFFFFFFFFFFFFFFF && s + sl <= end {
+                let e2: u64 = skip_ws(s + sl, end)
+                if starts_with(e2, end, "endstream") {
+                    ok = true
+                }
+            }
+            if !ok {
+                // length wrong or missing: look for "endstream"
+                var f: u64 = s
+                var found: bool = false
+                while f + 9 <= end && !found {
+                    if ld(f) == 101 && starts_with(f, end, "endstream") {
+                        found = true
+                    } else {
+                        f = f + 1
+                    }
+                }
+                if found {
+                    sl = f - s
+                    if sl > 0 && ld(s + sl - 1) == 10 {
+                        sl = sl - 1
+                    }
+                    if sl > 0 && ld(s + sl - 1) == 13 {
+                        sl = sl - 1
+                    }
+                } else {
+                    sl = end - s
+                }
+            }
+            (*out).kind = K_STREAM
+            (*out).so = s
+            (*out).sl = sl
+        }
+    }
+    return true
+}
+
+// the decoded object stream number `stm`; returns its slot or OS_MAX
+fn ostm_slot(d: *mut Doc, stm: u64) -> u64 {
+    if (*d).os.num == 0 && (*d).os.first == 0 {
+        // lazily allocate the table: 4 words per slot (num, ptr, len, first|count<<32)
+    }
+    var i: u64 = 0
+    let tab: u64 = (*d).os.count
+    var cnt: u64 = (*d).os.num
+    while i < cnt {
+        if rd64(tab + i * 40) == stm {
+            return i
+        }
+        i = i + 1
+    }
+    if cnt >= OS_MAX {
+        return OS_MAX
+    }
+    var sv: Val = val_none()
+    if !load_obj(d, stm, &sv) || sv.kind != K_STREAM {
+        return OS_MAX
+    }
+    var b: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &sv, &b, &imf) {
+        return OS_MAX
+    }
+    var nv: Val = val_none()
+    var fv: Val = val_none()
+    var n: u64 = 0
+    var first: u64 = 0
+    if dict_find(sv.a, sv.n, "N", &nv) {
+        n = val_resolved_int(d, &nv, 0)
+    }
+    if dict_find(sv.a, sv.n, "First", &fv) {
+        first = val_resolved_int(d, &fv, 0)
+    }
+    wr64(tab + cnt * 40, stm)
+    wr64(tab + cnt * 40 + 8, rt.buf_ptr(&b))
+    wr64(tab + cnt * 40 + 16, rt.buf_len(&b) as u64)
+    wr64(tab + cnt * 40 + 24, (n << 32) | first)
+    wr64(tab + cnt * 40 + 32, b.cap as u64)
+    (*d).os.num = cnt + 1
+    return cnt
+}
+
+fn load_obj(d: *mut Doc, num: u64, out: *mut Val) -> bool {
+    *out = val_none()
+    if num >= (*d).nobj || (*d).xk == 0 {
+        return false
+    }
+    let k: u32 = rd8((*d).xk + num)
+    if k == 1 {
+        return parse_indirect_at(d, rd64((*d).xo + num * 8), out, num)
+    }
+    if k == 2 {
+        let stm: u64 = rd64((*d).xo + num * 8)
+        let slot: u64 = ostm_slot(d, stm)
+        if slot >= OS_MAX {
+            return false
+        }
+        let tab: u64 = (*d).os.count
+        let base: u64 = rd64(tab + slot * 40 + 8)
+        let blen: u64 = rd64(tab + slot * 40 + 16)
+        let nf: u64 = rd64(tab + slot * 40 + 24)
+        let n: u64 = nf >> 32
+        let first: u64 = nf & 0xFFFFFFFF
+        let end: u64 = base + blen
+        // the header: N pairs of (object number, offset)
+        var p: u64 = base
+        var i: u64 = 0
+        while i < n {
+            var a: Val = val_none()
+            var b: Val = val_none()
+            p = parse_val(p, end, &a)
+            p = parse_val(p, end, &b)
+            if a.kind != K_INT || b.kind != K_INT {
+                return false
+            }
+            if (a.num as u64) == num {
+                let at: u64 = base + first + (b.num as u64)
+                if at >= end {
+                    return false
+                }
+                parse_ref(at, end, out)
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+    return false
+}
+
+// Follows references until a direct value (or nothing) comes back.
+fn resolve(d: *mut Doc, v: *mut Val, out: *mut Val) {
+    var cur: Val = *v
+    var guard: u64 = 0
+    while cur.kind == K_REF && guard < 16 {
+        var nx: Val = val_none()
+        if !load_obj(d, cur.rn as u64, &nx) {
+            *out = val_none()
+            return
+        }
+        cur = nx
+        guard = guard + 1
+    }
+    if cur.kind == K_REF {
+        cur = val_none()
+    }
+    *out = cur
+}
+
+fn doc_object(d: *mut Doc, num: u64, out: *mut Val) -> bool {
+    return load_obj(d, num, out)
+}
+
+// dictionary lookup with reference resolution (value comes back direct)
+fn doc_dict_get(d: *mut Doc, dv: *mut Val, key: str, out: *mut Val) -> bool {
+    var raw: Val = val_none()
+    if (*dv).kind != K_DICT && (*dv).kind != K_STREAM {
+        *out = val_none()
+        return false
+    }
+    if !dict_find((*dv).a, (*dv).n, key, &raw) {
+        *out = val_none()
+        return false
+    }
+    resolve(d, &raw, out)
+    return (*out).kind != K_NONE
+}
+
+fn doc_obj_of(d: *mut Doc, dv: *mut Val, key: str) -> u64 {
+    var raw: Val = val_none()
+    if dict_find((*dv).a, (*dv).n, key, &raw) {
+        if raw.kind == K_REF {
+            return raw.rn as u64
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------------ the cross-reference
+
+fn set_entry(d: *mut Doc, num: u64, kind: u32, off: u64, gen: u32) {
+    if !xgrow(d, num) {
+        return
+    }
+    if rd8((*d).xk + num) != 0 {
+        return
+    }
+    wr8((*d).xk + num, kind)
+    wr64((*d).xo + num * 8, off)
+    wr32((*d).xi + num * 4, gen)
+}
+
+fn find_startxref(d: *mut Doc) -> u64 {
+    let n: u64 = (*d).len
+    var from: u64 = 0
+    if n > 4096 {
+        from = n - 4096
+    }
+    var p: u64 = n
+    while p > from + 9 {
+        p = p - 1
+        if ld((*d).data + p) == 115 && starts_with((*d).data + p, (*d).data + n, "startxref") {
+            var v: Val = val_none()
+            parse_val((*d).data + p + 9, (*d).data + n, &v)
+            if v.kind == K_INT {
+                return v.num as u64
+            }
+            return 0xFFFFFFFFFFFFFFFF
+        }
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn read_xref_stream(d: *mut Doc, off: u64, first: bool, prev: *mut u64, xrefstm: *mut u64) -> bool {
+    var sv: Val = val_none()
+    if !parse_indirect_at(d, off, &sv, 0xFFFFFFFFFFFFFFFF) || sv.kind != K_STREAM {
+        return false
+    }
+    var buf: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &sv, &buf, &imf) {
+        return false
+    }
+    var wv: Val = val_none()
+    if !dict_find(sv.a, sv.n, "W", &wv) || wv.kind != K_ARR {
+        rt.buf_free(&buf)
+        return false
+    }
+    var w: [u64; 3] = [0 as u64; 3]
+    var i: u64 = 0
+    while i < 3 {
+        var e: Val = val_none()
+        arr_at(wv.a, wv.n, i, &e)
+        w[i as usize] = val_resolved_int(d, &e, 0)
+        i = i + 1
+    }
+    let rowlen: u64 = w[0] + w[1] + w[2]
+    if rowlen == 0 || rowlen > 24 {
+        rt.buf_free(&buf)
+        return false
+    }
+    var size: u64 = 0
+    var sz: Val = val_none()
+    if dict_find(sv.a, sv.n, "Size", &sz) {
+        size = val_resolved_int(d, &sz, 0)
+    }
+    var idx: Val = val_none()
+    var has_index: bool = dict_find(sv.a, sv.n, "Index", &idx) && idx.kind == K_ARR
+    var pairs: u64 = 1
+    if has_index {
+        pairs = arr_len(idx.a, idx.n) / 2
+    }
+    var data: u64 = rt.buf_ptr(&buf)
+    let total: u64 = rt.buf_len(&buf) as u64
+    var pos: u64 = 0
+    var pi: u64 = 0
+    while pi < pairs {
+        var start: u64 = 0
+        var count: u64 = size
+        if has_index {
+            var a: Val = val_none()
+            var b: Val = val_none()
+            arr_at(idx.a, idx.n, pi * 2, &a)
+            arr_at(idx.a, idx.n, pi * 2 + 1, &b)
+            start = val_resolved_int(d, &a, 0)
+            count = val_resolved_int(d, &b, 0)
+        }
+        var k: u64 = 0
+        while k < count && pos + rowlen <= total {
+            var f: [u64; 3] = [0 as u64; 3]
+            var fi: u64 = 0
+            var q: u64 = pos
+            while fi < 3 {
+                var val: u64 = 0
+                var bi: u64 = 0
+                while bi < w[fi as usize] {
+                    val = (val << 8) | (ld(data + q) as u64)
+                    q = q + 1
+                    bi = bi + 1
+                }
+                f[fi as usize] = val
+                fi = fi + 1
+            }
+            var t: u64 = f[0]
+            if w[0] == 0 {
+                t = 1
+            }
+            let num: u64 = start + k
+            if t == 1 {
+                set_entry(d, num, 1, f[1], f[2] as u32)
+            } else if t == 2 {
+                set_entry(d, num, 2, f[1], f[2] as u32)
+            } else if t == 0 {
+                set_entry(d, num, 3, 0, 0)
+            }
+            pos = pos + rowlen
+            k = k + 1
+        }
+        pi = pi + 1
+    }
+    rt.buf_free(&buf)
+    var pv: Val = val_none()
+    if dict_find(sv.a, sv.n, "Prev", &pv) {
+        *prev = val_resolved_int(d, &pv, 0xFFFFFFFFFFFFFFFF)
+    } else {
+        *prev = 0xFFFFFFFFFFFFFFFF
+    }
+    *xrefstm = 0xFFFFFFFFFFFFFFFF
+    if first {
+        (*d).trailer = sv
+        (*d).trailer.kind = K_DICT
+    }
+    return true
+}
+
+fn read_xref_table(d: *mut Doc, off: u64, first: bool, prev: *mut u64, xrefstm: *mut u64) -> bool {
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data + off + 4
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            return false
+        }
+        if starts_with(p, end, "trailer") {
+            p = p + 7
+            break
+        }
+        var a: Val = val_none()
+        var b: Val = val_none()
+        p = parse_val(p, end, &a)
+        p = parse_val(p, end, &b)
+        if a.kind != K_INT || b.kind != K_INT {
+            return false
+        }
+        var start: u64 = a.num as u64
+        let count: u64 = b.num as u64
+        var k: u64 = 0
+        while k < count {
+            var o: Val = val_none()
+            var g: Val = val_none()
+            var t: Val = val_none()
+            p = parse_val(p, end, &o)
+            p = parse_val(p, end, &g)
+            p = parse_val(p, end, &t)
+            if o.kind != K_INT || g.kind != K_INT || t.kind != K_OP {
+                return false
+            }
+            if ld(t.a) == 110 {
+                set_entry(d, start + k, 1, o.num as u64, g.num as u32)
+            } else {
+                set_entry(d, start + k, 3, 0, 0)
+            }
+            k = k + 1
+        }
+    }
+    var tv: Val = val_none()
+    p = parse_val(p, end, &tv)
+    if tv.kind != K_DICT {
+        return false
+    }
+    if first {
+        (*d).trailer = tv
+    }
+    var pv: Val = val_none()
+    *prev = 0xFFFFFFFFFFFFFFFF
+    if dict_find(tv.a, tv.n, "Prev", &pv) {
+        *prev = val_resolved_int(d, &pv, 0xFFFFFFFFFFFFFFFF)
+    }
+    *xrefstm = 0xFFFFFFFFFFFFFFFF
+    var xv: Val = val_none()
+    if dict_find(tv.a, tv.n, "XRefStm", &xv) {
+        *xrefstm = val_resolved_int(d, &xv, 0xFFFFFFFFFFFFFFFF)
+    }
+    return true
+}
+
+fn read_xref_chain(d: *mut Doc) -> bool {
+    var off: u64 = find_startxref(d)
+    var first: bool = true
+    var guard: u64 = 0
+    let end: u64 = (*d).data + (*d).len
+    while off != 0xFFFFFFFFFFFFFFFF && off < (*d).len && guard < 256 {
+        guard = guard + 1
+        let p: u64 = skip_ws((*d).data + off, end)
+        var prev: u64 = 0xFFFFFFFFFFFFFFFF
+        var xs: u64 = 0xFFFFFFFFFFFFFFFF
+        var ok: bool = false
+        if starts_with(p, end, "xref") {
+            // `off` may point at whitespace before it
+            ok = read_xref_table(d, p - (*d).data, first, &prev, &xs)
+            if ok && xs != 0xFFFFFFFFFFFFFFFF && xs < (*d).len {
+                var p2: u64 = 0xFFFFFFFFFFFFFFFF
+                var x2: u64 = 0xFFFFFFFFFFFFFFFF
+                read_xref_stream(d, xs, false, &p2, &x2)
+            }
+        } else {
+            ok = read_xref_stream(d, p - (*d).data, first, &prev, &xs)
+        }
+        if !ok {
+            return false
+        }
+        first = false
+        off = prev
+    }
+    return !first
+}
+
+// --------------------------------------------- a damaged file: scan for objects
+
+fn rebuild(d: *mut Doc) -> bool {
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data
+    var guard_trailer: bool = false
+    while p < end {
+        let c: u32 = ld(p)
+        // an object header starts a line: digits, blank, digits, blank, "obj"
+        var line_start: bool = p == (*d).data
+        if !line_start {
+            let pc: u32 = ld(p - 1)
+            line_start = pc == 10 || pc == 13 || is_ws(pc)
+        }
+        if line_start && is_digit(c) {
+            var q: u64 = p
+            var num: u64 = 0
+            while q < end && is_digit(ld(q)) && q - p < 10 {
+                num = num * 10 + ((ld(q) - 48) as u64)
+                q = q + 1
+            }
+            if q < end && ld(q) == 32 {
+                q = q + 1
+                var gen: u64 = 0
+                var gd: u64 = 0
+                while q < end && is_digit(ld(q)) && gd < 6 {
+                    gen = gen * 10 + ((ld(q) - 48) as u64)
+                    q = q + 1
+                    gd = gd + 1
+                }
+                if gd > 0 && q < end && ld(q) == 32 {
+                    q = q + 1
+                    if starts_with(q, end, "obj") {
+                        if xgrow(d, num) {
+                            wr8((*d).xk + num, 1)
+                            wr64((*d).xo + num * 8, p - (*d).data)
+                            wr32((*d).xi + num * 4, gen as u32)
+                        }
+                        p = q + 3
+                        continue_marker()
+                    }
+                }
+            }
+        }
+        if c == 116 && starts_with(p, end, "trailer") {
+            var tv: Val = val_none()
+            parse_val(p + 7, end, &tv)
+            if tv.kind == K_DICT {
+                var rv: Val = val_none()
+                if dict_find(tv.a, tv.n, "Root", &rv) {
+                    (*d).trailer = tv
+                    guard_trailer = true
+                }
+            }
+        }
+        p = p + 1
+    }
+    // object streams: register what they hold
+    var i: u64 = 0
+    while i < (*d).nobj && i < 100000 {
+        if rd8((*d).xk + i) == 1 {
+            var ov: Val = val_none()
+            if load_obj(d, i, &ov) && ov.kind == K_STREAM {
+                var tv2: Val = val_none()
+                var raw: Val = val_none()
+                if dict_find(ov.a, ov.n, "Type", &raw) {
+                    resolve(d, &raw, &tv2)
+                    if name_is(&tv2, "ObjStm") {
+                        var b: rt.Buf = rt.buf_new()
+                        var imf: u32 = 0
+                        if doc_stream(d, &ov, &b, &imf) {
+                            var nv: Val = val_none()
+                            var n: u64 = 0
+                            if dict_find(ov.a, ov.n, "N", &nv) {
+                                n = val_resolved_int(d, &nv, 0)
+                            }
+                            var pp: u64 = rt.buf_ptr(&b)
+                            let be: u64 = pp + (rt.buf_len(&b) as u64)
+                            var k: u64 = 0
+                            while k < n && k < 100000 {
+                                var a: Val = val_none()
+                                var o: Val = val_none()
+                                pp = parse_val(pp, be, &a)
+                                pp = parse_val(pp, be, &o)
+                                if a.kind == K_INT && xgrow(d, a.num as u64) {
+                                    let an: u64 = a.num as u64
+                                    if rd8((*d).xk + an) == 0 {
+                                        wr8((*d).xk + an, 2)
+                                        wr64((*d).xo + an * 8, i)
+                                        wr32((*d).xi + an * 4, k as u32)
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                        rt.buf_free(&b)
+                    } else if name_is(&tv2, "XRef") {
+                        var rr: Val = val_none()
+                        if dict_find(ov.a, ov.n, "Root", &rr) && !guard_trailer {
+                            (*d).trailer = ov
+                            (*d).trailer.kind = K_DICT
+                            guard_trailer = true
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if !guard_trailer {
+        // no trailer anywhere: the catalog is the object that says so
+        var c: u64 = 0
+        while c < (*d).nobj && c < 200000 && !guard_trailer {
+            if rd8((*d).xk + c) != 0 {
+                var cv: Val = val_none()
+                if load_obj(d, c, &cv) && cv.kind == K_DICT {
+                    var tv3: Val = val_none()
+                    var tr3: Val = val_none()
+                    if dict_find(cv.a, cv.n, "Type", &tv3) {
+                        resolve(d, &tv3, &tr3)
+                        if name_is(&tr3, "Catalog") {
+                            // a synthetic trailer: "<< /Root N 0 R >>"
+                            let tb: u64 = alloc0(64)
+                            if tb != 0 {
+                                var ob: rt.Buf = rt.buf_new()
+                                put_s(&ob, " /Root ")
+                                put_u(&ob, c)
+                                put_s(&ob, " 0 R ")
+                                rt.mem_copy(tb, rt.buf_ptr(&ob), rt.buf_len(&ob))
+                                (*d).trailer = val_none()
+                                (*d).trailer.kind = K_DICT
+                                (*d).trailer.a = tb
+                                (*d).trailer.n = rt.buf_len(&ob) as u64
+                                rt.buf_free(&ob)
+                                guard_trailer = true
+                            }
+                        }
+                    }
+                }
+            }
+            c = c + 1
+        }
+    }
+    return guard_trailer
+}
+
+// ------------------------------------------------------------- the page tree
+
+fn collect_pages(d: *mut Doc, node: u64, depth: u64) {
+    if depth > MAXDEPTH || (*d).npages >= 100000 {
+        return
+    }
+    var nv: Val = val_none()
+    if !load_obj(d, node, &nv) || nv.kind != K_DICT {
+        return
+    }
+    var kids: Val = val_none()
+    var kr: Val = val_none()
+    var has_kids: bool = dict_find(nv.a, nv.n, "Kids", &kr)
+    if has_kids {
+        resolve(d, &kr, &kids)
+    }
+    if has_kids && kids.kind == K_ARR {
+        var i: u64 = 0
+        let nk: u64 = arr_len(kids.a, kids.n)
+        while i < nk {
+            var e: Val = val_none()
+            arr_at(kids.a, kids.n, i, &e)
+            if e.kind == K_REF {
+                collect_pages(d, e.rn as u64, depth + 1)
+            }
+            i = i + 1
+        }
+        return
+    }
+    // a leaf
+    if (*d).pages == 0 {
+        (*d).pages = alloc0(400000)
+    }
+    if (*d).pages == 0 {
+        return
+    }
+    wr32((*d).pages + (*d).npages * 4, node as u32)
+    (*d).npages = (*d).npages + 1
+}
+
+fn doc_open(d: *mut Doc, data: u64, len: u64) -> bool {
+    (*d).data = data
+    (*d).len = len
+    (*d).err = ERR_NONE
+    (*d).os.count = alloc0(OS_MAX * 40)
+    (*d).os.num = 0
+    (*d).img = alloc0(IMG_MAX * 64)
+    (*d).fonts = alloc0(FONT_MAX * FONT_SZ)
+    if (*d).os.count == 0 || (*d).img == 0 || (*d).fonts == 0 {
+        (*d).err = ERR_MEMORY
+        return false
+    }
+    if len < 8 || !starts_with(data, data + len, "%PDF") {
+        // some files carry junk before the header: look for it
+        var f: u64 = 0
+        var found: bool = false
+        while f + 5 < len && f < 1024 && !found {
+            if starts_with(data + f, data + len, "%PDF") {
+                found = true
+            } else {
+                f = f + 1
+            }
+        }
+        if !found {
+            (*d).err = ERR_FORMAT
+            return false
+        }
+    }
+    var ok: bool = read_xref_chain(d)
+    var root: Val = val_none()
+    var rr: Val = val_none()
+    if ok {
+        if dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
+            resolve(d, &rr, &root)
+        }
+        if root.kind != K_DICT {
+            ok = false
+        }
+    }
+    if !ok {
+        // start again from the scan
+        if (*d).xk != 0 {
+            rt.mem_set((*d).xk, 0 as u8, (*d).nobj as usize)
+        }
+        (*d).trailer = val_none()
+        (*d).os.num = 0
+        ok = rebuild(d)
+        if ok {
+            if dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
+                resolve(d, &rr, &root)
+            }
+            if root.kind != K_DICT {
+                ok = false
+            }
+        }
+    }
+    if !ok {
+        (*d).err = ERR_FORMAT
+        return false
+    }
+    var ev: Val = val_none()
+    if dict_find((*d).trailer.a, (*d).trailer.n, "Encrypt", &ev) {
+        (*d).err = ERR_ENCRYPTED
+        return false
+    }
+    (*d).root = root
+    var pr: Val = val_none()
+    if !dict_find(root.a, root.n, "Pages", &pr) || pr.kind != K_REF {
+        (*d).err = ERR_NOPAGES
+        return false
+    }
+    collect_pages(d, pr.rn as u64, 0)
+    if (*d).npages == 0 {
+        (*d).err = ERR_NOPAGES
+        return false
+    }
+    return true
+}
+
+fn doc_free(d: *mut Doc) {
+    if (*d).xk != 0 {
+        rt.heap_free((*d).xk, (*d).nobj as usize)
+        rt.heap_free((*d).xo, ((*d).nobj * 8) as usize)
+        rt.heap_free((*d).xi, ((*d).nobj * 4) as usize)
+    }
+    var i: u64 = 0
+    while i < (*d).os.num {
+        let t: u64 = (*d).os.count
+        rt.heap_free(rd64(t + i * 40 + 8), rd64(t + i * 40 + 32) as usize)
+        i = i + 1
+    }
+    if (*d).os.count != 0 {
+        rt.heap_free((*d).os.count, (OS_MAX * 40) as usize)
+    }
+    if (*d).pages != 0 {
+        rt.heap_free((*d).pages, 400000)
+    }
+    if (*d).img != 0 {
+        rt.heap_free((*d).img, (IMG_MAX * 64) as usize)
+    }
+    if (*d).fonts != 0 {
+        rt.heap_free((*d).fonts, (FONT_MAX * FONT_SZ) as usize)
+    }
+    *d = doc_new()
+}
+
+// ============================================================ the renderer
+
+const IMG_MAX: u64 = 256
+const FONT_MAX: u64 = 48
+const FONT_SZ: u64 = 128
+
+// ImgPlace record (64 octets): obj u32 @0, m[6] f64 @8..56
+fn doc_img_count(d: *mut Doc) -> u64 {
+    return (*d).nimg
+}
+
+fn doc_img_obj(d: *mut Doc, i: u64) -> u64 {
+    return rd32((*d).img + i * 64) as u64
+}
+
+fn doc_img_m(d: *mut Doc, i: u64, k: u64) -> f64 {
+    return *(((*d).img + i * 64 + 8 + k * 8) as *mut f64)
+}
+
+struct M {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+fn m_id() -> M {
+    return M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }
+}
+
+// x then y: the point goes through `p` first, then through `q`
+fn m_mul(p: M, q: M) -> M {
+    return M {
+        a: p.a * q.a + p.b * q.c,
+        b: p.a * q.b + p.b * q.d,
+        c: p.c * q.a + p.d * q.c,
+        d: p.c * q.b + p.d * q.d,
+        e: p.e * q.a + p.f * q.c + q.e,
+        f: p.e * q.b + p.f * q.d + q.f,
+    }
+}
+
+struct GS {
+    ctm: M,
+    fill: u32,
+    stroke: u32,
+    fill_a: f64,
+    stroke_a: f64,
+    lw: f64,
+    cap: u32,
+    join: u32,
+    miter: f64,
+    dash: [f64; 8],
+    ndash: u32,
+    dphase: f64,
+    fcs: u32,   // components of the fill colour space (1, 3, 4; 9 = pattern)
+    scs: u32,
+    fsep: u32,  // 1 when the fill space is a Separation (value = tint)
+    ssep: u32,
+    gslevel: u64,
+    font: u64,
+    fsize: f64,
+    tc: f64,
+    tw: f64,
+    th: f64,
+    tl: f64,
+    ts: f64,
+    tr: u32,
+}
+
+fn gs_new() -> GS {
+    return GS {
+        ctm: m_id(), fill: 0, stroke: 0, fill_a: 1.0, stroke_a: 1.0, lw: 1.0,
+        cap: 0, join: 0, miter: 10.0, dash: [0.0; 8], ndash: 0, dphase: 0.0,
+        fcs: 1, scs: 1, fsep: 0, ssep: 0, gslevel: 0,
+        font: 4294967295, fsize: 0.0, tc: 0.0, tw: 0.0, th: 1.0, tl: 0.0, ts: 0.0, tr: 0,
+    }
+}
+
+struct R {
+    d: *mut Doc,
+    out: *mut rt.Buf,
+    gs: GS,
+    stack: [GS; 32],
+    sp: u64,
+    path: rt.Buf,
+    cx: f64,
+    cy: f64,
+    sx: f64,
+    sy: f64,
+    pclip: u32,
+    clipid: u32,
+    open_groups: u64,
+    tm: M,
+    tlm: M,
+    res: Val,
+    depth: u64,
+    scratch: u64,
+    ops: u64,
+    in_text: bool,
+}
+
+// ---------------------------------------------------------------- output
+
+fn put_s(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn put_u(b: *mut rt.Buf, v: u64) {
+    rt.buf_push_dec_u64(b, v)
+}
+
+// a number with `dec` decimals (0..4)
+fn put_f(b: *mut rt.Buf, v0: f64, dec: u64) {
+    var v: f64 = v0
+    if v != v || v > 1.0e9 || v < 0.0 - 1.0e9 {
+        v = 0.0
+    }
+    if v < 0.0 {
+        push(b, 45)
+        v = 0.0 - v
+    }
+    var mul: f64 = 1.0
+    var i: u64 = 0
+    while i < dec {
+        mul = mul * 10.0
+        i = i + 1
+    }
+    let scaled: u64 = (v * mul + 0.5) as u64
+    let ip: u64 = scaled / (mul as u64)
+    var fp: u64 = scaled % (mul as u64)
+    put_u(b, ip)
+    if dec > 0 && fp > 0 {
+        push(b, 46)
+        var div: u64 = (mul as u64) / 10
+        var tail: bool = true
+        // write the fraction without trailing zeros
+        var digits: [u32; 5] = [0 as u32; 5]
+        var k: u64 = 0
+        while k < dec {
+            digits[k as usize] = ((fp / div) % 10) as u32
+            div = div / 10
+            if div == 0 {
+                div = 1
+            }
+            k = k + 1
+        }
+        var last: u64 = dec
+        while last > 0 && digits[(last - 1) as usize] == 0 {
+            last = last - 1
+        }
+        var m: u64 = 0
+        while m < last {
+            push(b, 48 + digits[m as usize])
+            m = m + 1
+        }
+        if tail {
+            tail = false
+        }
+    }
+}
+
+fn put_hex2(b: *mut rt.Buf, v: u32) {
+    let h: str = "0123456789abcdef"
+    push(b, (*((h.p as u64 + ((v >> 4) & 15) as u64) as *mut u8)) as u32)
+    push(b, (*((h.p as u64 + (v & 15) as u64) as *mut u8)) as u32)
+}
+
+fn put_color(b: *mut rt.Buf, rgb: u32) {
+    push(b, 35)
+    put_hex2(b, (rgb >> 16) & 255)
+    put_hex2(b, (rgb >> 8) & 255)
+    put_hex2(b, rgb & 255)
+}
+
+fn put_utf8_xml(b: *mut rt.Buf, u: u32) {
+    if u == 60 {
+        put_s(b, "&lt;")
+    } else if u == 62 {
+        put_s(b, "&gt;")
+    } else if u == 38 {
+        put_s(b, "&amp;")
+    } else if u < 128 {
+        push(b, u)
+    } else if u < 2048 {
+        push(b, 192 | (u >> 6))
+        push(b, 128 | (u & 63))
+    } else {
+        push(b, 224 | (u >> 12))
+        push(b, 128 | ((u >> 6) & 63))
+        push(b, 128 | (u & 63))
+    }
+}
+
+// device coordinates of the point (x, y) under `m`
+fn tx_x(m: M, x: f64, y: f64) -> f64 {
+    return m.a * x + m.c * y + m.e
+}
+
+fn tx_y(m: M, x: f64, y: f64) -> f64 {
+    return m.b * x + m.d * y + m.f
+}
+
+// ------------------------------------------------------------ the path
+
+fn path_xy(r: *mut R, x: f64, y: f64) {
+    put_f(&(*r).path, tx_x((*r).gs.ctm, x, y), 2)
+    push(&(*r).path, 32)
+    put_f(&(*r).path, tx_y((*r).gs.ctm, x, y), 2)
+    push(&(*r).path, 32)
+}
+
+fn path_move(r: *mut R, x: f64, y: f64) {
+    push(&(*r).path, 77)
+    push(&(*r).path, 32)
+    path_xy(r, x, y)
+    (*r).cx = x
+    (*r).cy = y
+    (*r).sx = x
+    (*r).sy = y
+}
+
+fn path_line(r: *mut R, x: f64, y: f64) {
+    if rt.buf_len(&(*r).path) == 0 {
+        path_move(r, x, y)
+        return
+    }
+    push(&(*r).path, 76)
+    push(&(*r).path, 32)
+    path_xy(r, x, y)
+    (*r).cx = x
+    (*r).cy = y
+}
+
+fn path_curve(r: *mut R, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) {
+    if rt.buf_len(&(*r).path) == 0 {
+        path_move(r, x1, y1)
+    }
+    push(&(*r).path, 67)
+    push(&(*r).path, 32)
+    path_xy(r, x1, y1)
+    path_xy(r, x2, y2)
+    path_xy(r, x3, y3)
+    (*r).cx = x3
+    (*r).cy = y3
+}
+
+fn path_close(r: *mut R) {
+    if rt.buf_len(&(*r).path) == 0 {
+        return
+    }
+    push(&(*r).path, 90)
+    push(&(*r).path, 32)
+    (*r).cx = (*r).sx
+    (*r).cy = (*r).sy
+}
+
+fn path_reset(r: *mut R) {
+    rt.buf_clear(&(*r).path)
+}
+
+// the scale of the CTM (for line widths)
+fn ctm_scale(m: M) -> f64 {
+    let det: f64 = fabs(m.a * m.d - m.b * m.c)
+    return fsqrt(det)
+}
+
+fn emit_clip(r: *mut R) {
+    if (*r).pclip == 0 || rt.buf_len(&(*r).path) == 0 {
+        (*r).pclip = 0
+        return
+    }
+    (*r).clipid = (*r).clipid + 1
+    let o: *mut rt.Buf = (*r).out
+    put_s(o, "<clipPath id=\"c")
+    put_u(o, (*r).clipid as u64)
+    put_s(o, "\"><path d=\"")
+    rt.buf_push_bytes(o, rt.buf_ptr(&(*r).path), rt.buf_len(&(*r).path))
+    if (*r).pclip == 2 {
+        put_s(o, "\" clip-rule=\"evenodd\"/></clipPath>")
+    } else {
+        put_s(o, "\"/></clipPath>")
+    }
+    put_s(o, "<g clip-path=\"url(#c")
+    put_u(o, (*r).clipid as u64)
+    put_s(o, ")\">")
+    (*r).open_groups = (*r).open_groups + 1
+    (*r).pclip = 0
+}
+
+fn paint_path(r: *mut R, fill: bool, stroke: bool, evenodd: bool) {
+    if rt.buf_len(&(*r).path) == 0 {
+        (*r).pclip = 0
+        return
+    }
+    if fill || stroke {
+        let o: *mut rt.Buf = (*r).out
+        put_s(o, "<path d=\"")
+        rt.buf_push_bytes(o, rt.buf_ptr(&(*r).path), rt.buf_len(&(*r).path))
+        put_s(o, "\"")
+        if fill {
+            put_s(o, " fill=\"")
+            put_color(o, (*r).gs.fill)
+            put_s(o, "\"")
+            if (*r).gs.fill_a < 0.999 {
+                put_s(o, " fill-opacity=\"")
+                put_f(o, (*r).gs.fill_a, 3)
+                put_s(o, "\"")
+            }
+            if evenodd {
+                put_s(o, " fill-rule=\"evenodd\"")
+            }
+        } else {
+            put_s(o, " fill=\"none\"")
+        }
+        if stroke {
+            put_s(o, " stroke=\"")
+            put_color(o, (*r).gs.stroke)
+            put_s(o, "\" stroke-width=\"")
+            var w: f64 = (*r).gs.lw * ctm_scale((*r).gs.ctm)
+            if w < 0.5 {
+                w = 0.5
+            }
+            put_f(o, w, 3)
+            put_s(o, "\"")
+            if (*r).gs.stroke_a < 0.999 {
+                put_s(o, " stroke-opacity=\"")
+                put_f(o, (*r).gs.stroke_a, 3)
+                put_s(o, "\"")
+            }
+            if (*r).gs.cap == 1 {
+                put_s(o, " stroke-linecap=\"round\"")
+            } else if (*r).gs.cap == 2 {
+                put_s(o, " stroke-linecap=\"square\"")
+            }
+            if (*r).gs.join == 1 {
+                put_s(o, " stroke-linejoin=\"round\"")
+            } else if (*r).gs.join == 2 {
+                put_s(o, " stroke-linejoin=\"bevel\"")
+            }
+            if (*r).gs.ndash > 0 {
+                put_s(o, " stroke-dasharray=\"")
+                var i: u64 = 0
+                let sc: f64 = ctm_scale((*r).gs.ctm)
+                while i < ((*r).gs.ndash as u64) {
+                    if i > 0 {
+                        push(o, 32)
+                    }
+                    put_f(o, (*r).gs.dash[i as usize] * sc, 2)
+                    i = i + 1
+                }
+                put_s(o, "\" stroke-dashoffset=\"")
+                put_f(o, (*r).gs.dphase * sc, 2)
+                put_s(o, "\"")
+            }
+        }
+        put_s(o, "/>")
+    }
+    emit_clip(r)
+    path_reset(r)
+}
+
+// ----------------------------------------------------------------- colours
+
+fn rgb_pack(r: f64, g: f64, b: f64) -> u32 {
+    var rr: f64 = r
+    var gg: f64 = g
+    var bb: f64 = b
+    if rr < 0.0 {
+        rr = 0.0
+    }
+    if rr > 1.0 {
+        rr = 1.0
+    }
+    if gg < 0.0 {
+        gg = 0.0
+    }
+    if gg > 1.0 {
+        gg = 1.0
+    }
+    if bb < 0.0 {
+        bb = 0.0
+    }
+    if bb > 1.0 {
+        bb = 1.0
+    }
+    return (((rr * 255.0 + 0.5) as u32) << 16) | (((gg * 255.0 + 0.5) as u32) << 8) | ((bb * 255.0 + 0.5) as u32)
+}
+
+fn cmyk_pack(c: f64, m: f64, y: f64, k: f64) -> u32 {
+    return rgb_pack((1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k))
+}
+
+// ------------------------------------------------------------------ fonts
+//
+// FontInfo record (FONT_SZ octets):
+//   0 key (u64: object number + 1; 0 = free)    8 kind (1 simple, 2 type0)
+//  16 dw f64     24 missing width f64           32 widths ptr (256 f64, simple)
+//  40 unicode ptr (256 u32, simple)             48 tounicode ptr   56 count
+//  64 cid widths ptr   72 count   80 has_tounicode   88 stdkind (+1; 0 none)
+
+fn fslot(d: *mut Doc, i: u64) -> u64 {
+    return (*d).fonts + i * FONT_SZ
+}
+
+fn font_release(d: *mut Doc, i: u64) {
+    let s: u64 = fslot(d, i)
+    if rd64(s + 32) != 0 {
+        rt.heap_free(rd64(s + 32), 2048)
+    }
+    if rd64(s + 40) != 0 {
+        rt.heap_free(rd64(s + 40), 1024)
+    }
+    if rd64(s + 48) != 0 {
+        rt.heap_free(rd64(s + 48), (CMAP_MAX * 12) as usize)
+    }
+    if rd64(s + 64) != 0 {
+        rt.heap_free(rd64(s + 64), (CIDW_MAX * 16) as usize)
+    }
+    rt.mem_set(s, 0 as u8, FONT_SZ as usize)
+}
+
+const CMAP_MAX: u64 = 8192
+const CIDW_MAX: u64 = 4096
+
+fn hex_run(p: u64, end: u64, out: *mut u64) -> u64 {
+    // reads "<hex>" at p (after whitespace): value of up to 8 hex digits
+    var q: u64 = skip_ws(p, end)
+    var v: u64 = 0
+    if q < end && ld(q) == 60 {
+        q = q + 1
+        while q < end && ld(q) != 62 {
+            let h: u32 = hexval(ld(q))
+            if h < 16 {
+                v = (v << 4) | (h as u64)
+            }
+            q = q + 1
+        }
+        if q < end {
+            q = q + 1
+        }
+        *out = v
+        return q
+    }
+    *out = 0xFFFFFFFFFFFFFFFF
+    return q
+}
+
+// a UTF-16BE value read from <...> (first code point)
+fn utf16_first(v: u64, nd: u64) -> u32 {
+    // nd = number of hex digits read; for 8 digits: a surrogate pair?
+    if nd >= 8 {
+        let hi: u64 = (v >> 16) & 0xFFFF
+        let lo: u64 = v & 0xFFFF
+        if hi >= 0xD800 && hi < 0xDC00 && lo >= 0xDC00 && lo < 0xE000 {
+            return (0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)) as u32
+        }
+        return hi as u32
+    }
+    return v as u32
+}
+
+fn cmap_add(tab: u64, cnt: *mut u64, lo: u64, hi: u64, dst: u64) {
+    if *cnt >= CMAP_MAX {
+        return
+    }
+    wr32(tab + (*cnt) * 12, lo as u32)
+    wr32(tab + (*cnt) * 12 + 4, hi as u32)
+    wr32(tab + (*cnt) * 12 + 8, dst as u32)
+    *cnt = *cnt + 1
+}
+
+// the ToUnicode CMap: bfchar and bfrange
+fn parse_tounicode(p0: u64, n: u64, tab: u64, cnt: *mut u64) {
+    let end: u64 = p0 + n
+    var p: u64 = p0
+    var guard: u64 = 0
+    while p < end && guard < 400000 {
+        guard = guard + 1
+        var t: Val = val_none()
+        p = parse_val(p, end, &t)
+        if t.kind == K_OP && t.n == 11 && mem_eq_str(t.a, t.n, "beginbfchar") {
+            var go: bool = true
+            while go {
+                var a: u64 = 0
+                var q: u64 = hex_run(p, end, &a)
+                if a == 0xFFFFFFFFFFFFFFFF {
+                    go = false
+                } else {
+                    var b: u64 = 0
+                    var q2: u64 = q
+                    // count the digits of the destination
+                    let sv: u64 = skip_ws(q, end)
+                    q2 = hex_run(q, end, &b)
+                    var nd: u64 = 0
+                    if q2 > sv {
+                        nd = q2 - sv - 2
+                    }
+                    cmap_add(tab, cnt, a, a, utf16_first(b, nd) as u64)
+                    p = q2
+                }
+            }
+        } else if t.kind == K_OP && t.n == 12 && mem_eq_str(t.a, t.n, "beginbfrange") {
+            var go2: bool = true
+            while go2 {
+                var lo: u64 = 0
+                var hi: u64 = 0
+                var q: u64 = hex_run(p, end, &lo)
+                if lo == 0xFFFFFFFFFFFFFFFF {
+                    go2 = false
+                } else {
+                    q = hex_run(q, end, &hi)
+                    let q3: u64 = skip_ws(q, end)
+                    if q3 < end && ld(q3) == 91 {
+                        // an array of destinations
+                        var r: u64 = q3 + 1
+                        var c: u64 = lo
+                        var inner: bool = true
+                        while inner && c <= hi {
+                            let sv2: u64 = skip_ws(r, end)
+                            if sv2 < end && ld(sv2) == 93 {
+                                inner = false
+                            } else {
+                                var dv: u64 = 0
+                                let r2: u64 = hex_run(r, end, &dv)
+                                if dv == 0xFFFFFFFFFFFFFFFF {
+                                    inner = false
+                                } else {
+                                    var nd2: u64 = 0
+                                    if r2 > sv2 {
+                                        nd2 = r2 - sv2 - 2
+                                    }
+                                    cmap_add(tab, cnt, c, c, utf16_first(dv, nd2) as u64)
+                                    c = c + 1
+                                    r = r2
+                                }
+                            }
+                        }
+                        // skip to the closing bracket
+                        while r < end && ld(r) != 93 {
+                            r = r + 1
+                        }
+                        p = r + 1
+                    } else {
+                        var dst: u64 = 0
+                        let sv3: u64 = skip_ws(q, end)
+                        let q4: u64 = hex_run(q, end, &dst)
+                        var nd3: u64 = 0
+                        if q4 > sv3 {
+                            nd3 = q4 - sv3 - 2
+                        }
+                        if dst != 0xFFFFFFFFFFFFFFFF {
+                            cmap_add(tab, cnt, lo, hi, utf16_first(dst, nd3) as u64)
+                        }
+                        p = q4
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tounicode_lookup(s: u64, code: u64) -> u32 {
+    let tab: u64 = rd64(s + 48)
+    let cnt: u64 = rd64(s + 56)
+    var i: u64 = 0
+    while i < cnt {
+        let lo: u64 = rd32(tab + i * 12) as u64
+        let hi: u64 = rd32(tab + i * 12 + 4) as u64
+        if code >= lo && code <= hi {
+            return rd32(tab + i * 12 + 8) + ((code - lo) as u32)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cid_width(s: u64, cid: u64) -> f64 {
+    let tab: u64 = rd64(s + 64)
+    let cnt: u64 = rd64(s + 72)
+    var i: u64 = 0
+    while i < cnt {
+        let lo: u64 = rd32(tab + i * 16) as u64
+        let hi: u64 = rd32(tab + i * 16 + 4) as u64
+        if cid >= lo && cid <= hi {
+            return *((tab + i * 16 + 8) as *mut f64)
+        }
+        i = i + 1
+    }
+    return *((s + 16) as *mut f64)
+}
+
+fn std_kind_of(name_p: u64, n: u64) -> u32 {
+    // 0 Helvetica 1 Helvetica-Bold 2 Times 3 Times-Bold 4 Times-Italic 5 Times-BoldItalic 6 Courier; 99 none
+    var bold: bool = false
+    var ital: bool = false
+    var fam: u32 = 99
+    var i: u64 = 0
+    // skip a subset prefix "ABCDEF+"
+    var from: u64 = 0
+    if n > 7 && ld(name_p + 6) == 43 {
+        from = 7
+    }
+    i = from
+    while i + 3 <= n {
+        let c0: u32 = ld(name_p + i) | 32
+        let c1: u32 = ld(name_p + i + 1) | 32
+        let c2: u32 = ld(name_p + i + 2) | 32
+        let c3: u32 = 0
+        if i + 4 <= n {
+            let _x: u32 = ld(name_p + i + 3) | 32
+        }
+        if c0 == 99 && c1 == 111 && c2 == 117 {
+            fam = 6
+        } else if c0 == 104 && c1 == 101 && c2 == 108 {
+            fam = 0
+        } else if c0 == 97 && c1 == 114 && c2 == 105 {
+            fam = 0
+        } else if c0 == 116 && c1 == 105 && c2 == 109 {
+            fam = 2
+        } else if c0 == 98 && c1 == 111 && c2 == 108 {
+            bold = true
+        } else if c0 == 105 && c1 == 116 && c2 == 97 {
+            ital = true
+        } else if c0 == 111 && c1 == 98 && c2 == 108 {
+            ital = true
+        }
+        let _y: u32 = c3
+        i = i + 1
+    }
+    if fam == 99 {
+        return 99
+    }
+    if fam == 6 {
+        return 6
+    }
+    if fam == 0 {
+        if bold {
+            return 1
+        }
+        return 0
+    }
+    if bold && ital {
+        return 5
+    }
+    if bold {
+        return 3
+    }
+    if ital {
+        return 4
+    }
+    return 2
+}
+
+fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
+    let s: u64 = fslot(d, slot)
+    rt.mem_set(s, 0 as u8, FONT_SZ as usize)
+    wr64(s, key)
+    var st: Val = val_none()
+    var kind: u64 = 1
+    if doc_dict_get(d, fd, "Subtype", &st) {
+        if name_is(&st, "Type0") {
+            kind = 2
+        }
+    }
+    wr64(s + 8, kind)
+    *((s + 16) as *mut f64) = 1000.0
+    *((s + 24) as *mut f64) = 0.0
+    // the ToUnicode map (any kind of font)
+    var tu: Val = val_none()
+    if doc_dict_get(d, fd, "ToUnicode", &tu) && tu.kind == K_STREAM {
+        var b: rt.Buf = rt.buf_new()
+        var imf: u32 = 0
+        if doc_stream(d, &tu, &b, &imf) {
+            let tab: u64 = alloc0(CMAP_MAX * 12)
+            if tab != 0 {
+                var cnt: u64 = 0
+                parse_tounicode(rt.buf_ptr(&b), rt.buf_len(&b) as u64, tab, &cnt)
+                wr64(s + 48, tab)
+                wr64(s + 56, cnt)
+                if cnt > 0 {
+                    wr64(s + 80, 1)
+                }
+            }
+        }
+        rt.buf_free(&b)
+    }
+    var bf: Val = val_none()
+    var std: u32 = 99
+    if doc_dict_get(d, fd, "BaseFont", &bf) && bf.kind == K_NAME {
+        std = std_kind_of(bf.a, bf.n)
+    }
+    if kind == 2 {
+        // Type0: the descendant's /DW and /W
+        var df: Val = val_none()
+        if doc_dict_get(d, fd, "DescendantFonts", &df) && df.kind == K_ARR {
+            var e0: Val = val_none()
+            var e0r: Val = val_none()
+            arr_at(df.a, df.n, 0, &e0)
+            resolve(d, &e0, &e0r)
+            if e0r.kind == K_DICT {
+                var dwv: Val = val_none()
+                if doc_dict_get(d, &e0r, "DW", &dwv) {
+                    *((s + 16) as *mut f64) = val_num(&dwv)
+                }
+                var wv: Val = val_none()
+                if doc_dict_get(d, &e0r, "W", &wv) && wv.kind == K_ARR {
+                    let tab: u64 = alloc0(CIDW_MAX * 16)
+                    if tab != 0 {
+                        var cnt: u64 = 0
+                        var p: u64 = wv.a
+                        let end: u64 = wv.a + wv.n
+                        var guard: u64 = 0
+                        while p < end && cnt < CIDW_MAX - 1 && guard < 100000 {
+                            guard = guard + 1
+                            var a: Val = val_none()
+                            p = parse_ref(p, end, &a)
+                            if a.kind != K_INT {
+                                continue_marker()
+                            } else {
+                                var b2: Val = val_none()
+                                p = parse_ref(p, end, &b2)
+                                if b2.kind == K_ARR {
+                                    var k: u64 = 0
+                                    var q: u64 = b2.a
+                                    let qe: u64 = b2.a + b2.n
+                                    while q < qe && cnt < CIDW_MAX - 1 {
+                                        var wvv: Val = val_none()
+                                        q = parse_ref(q, qe, &wvv)
+                                        var wr: Val = val_none()
+                                        resolve(d, &wvv, &wr)
+                                        let c: u64 = (a.num as u64) + k
+                                        wr32(tab + cnt * 16, c as u32)
+                                        wr32(tab + cnt * 16 + 4, c as u32)
+                                        *((tab + cnt * 16 + 8) as *mut f64) = val_num(&wr)
+                                        cnt = cnt + 1
+                                        k = k + 1
+                                    }
+                                } else if b2.kind == K_INT {
+                                    var w3: Val = val_none()
+                                    p = parse_ref(p, end, &w3)
+                                    var w3r: Val = val_none()
+                                    resolve(d, &w3, &w3r)
+                                    wr32(tab + cnt * 16, a.num as u32)
+                                    wr32(tab + cnt * 16 + 4, b2.num as u32)
+                                    *((tab + cnt * 16 + 8) as *mut f64) = val_num(&w3r)
+                                    cnt = cnt + 1
+                                }
+                            }
+                        }
+                        wr64(s + 64, tab)
+                        wr64(s + 72, cnt)
+                    }
+                }
+            }
+        }
+        return
+    }
+    // simple font: widths and the code -> Unicode table
+    let wt: u64 = alloc0(2048)
+    let ut: u64 = alloc0(1024)
+    if wt == 0 || ut == 0 {
+        return
+    }
+    wr64(s + 32, wt)
+    wr64(s + 40, ut)
+    wr64(s + 88, if_std(std))
+    // encoding
+    var enc: u32 = 0
+    var diff: Val = val_none()
+    var ev: Val = val_none()
+    var has_diff: bool = false
+    if doc_dict_get(d, fd, "Encoding", &ev) {
+        if ev.kind == K_NAME {
+            if name_is(&ev, "MacRomanEncoding") {
+                enc = 1
+            } else if name_is(&ev, "StandardEncoding") {
+                enc = 2
+            }
+        } else if ev.kind == K_DICT {
+            var be: Val = val_none()
+            if doc_dict_get(d, &ev, "BaseEncoding", &be) {
+                if name_is(&be, "MacRomanEncoding") {
+                    enc = 1
+                } else if name_is(&be, "StandardEncoding") {
+                    enc = 2
+                }
+            }
+            if doc_dict_get(d, &ev, "Differences", &diff) && diff.kind == K_ARR {
+                has_diff = true
+            }
+        }
+    }
+    var c: u64 = 0
+    while c < 256 {
+        wr32(ut + c * 4, pdftab.base_uni(enc, c as u32))
+        c = c + 1
+    }
+    if has_diff {
+        var p: u64 = diff.a
+        let end: u64 = diff.a + diff.n
+        var code: u64 = 0
+        var guard: u64 = 0
+        while p < end && guard < 4000 {
+            guard = guard + 1
+            var e: Val = val_none()
+            p = parse_ref(p, end, &e)
+            if e.kind == K_INT {
+                code = e.num as u64
+            } else if e.kind == K_NAME {
+                if code < 256 {
+                    let u: u32 = pdftab.agl_lookup(e.a, e.n)
+                    if u != 0 {
+                        wr32(ut + code * 4, u)
+                    }
+                }
+                code = code + 1
+            }
+        }
+    }
+    // widths
+    var fc: Val = val_none()
+    var first: u64 = 0
+    if doc_dict_get(d, fd, "FirstChar", &fc) {
+        first = val_num(&fc) as u64
+    }
+    var mw: f64 = 0.0
+    var fdesc: Val = val_none()
+    if doc_dict_get(d, fd, "FontDescriptor", &fdesc) && fdesc.kind == K_DICT {
+        var mv: Val = val_none()
+        if doc_dict_get(d, &fdesc, "MissingWidth", &mv) {
+            mw = val_num(&mv)
+        }
+    }
+    *((s + 24) as *mut f64) = mw
+    var wa: Val = val_none()
+    var have_w: bool = false
+    if doc_dict_get(d, fd, "Widths", &wa) && wa.kind == K_ARR {
+        have_w = true
+    }
+    var k: u64 = 0
+    while k < 256 {
+        var wv: f64 = mw
+        if have_w && k >= first {
+            var e2: Val = val_none()
+            var e2r: Val = val_none()
+            if arr_at(wa.a, wa.n, k - first, &e2) {
+                resolve(d, &e2, &e2r)
+                if e2r.kind == K_INT || e2r.kind == K_REAL {
+                    wv = e2r.num
+                }
+            }
+        } else if !have_w && std != 99 {
+            // a standard font without /Widths: Adobe's metrics, by WinAnsi code
+            wv = pdftab.std_width(std, k as u32) as f64
+        } else if !have_w {
+            wv = 500.0
+        }
+        *((wt + k * 8) as *mut f64) = wv
+        k = k + 1
+    }
+}
+
+fn if_std(std: u32) -> u64 {
+    if std == 99 {
+        return 0
+    }
+    return (std as u64) + 1
+}
+
+fn dict_find_name(a: u64, n: u64, np: u64, nn: u64, out: *mut Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + n
+    var guard: u64 = 0
+    while guard < 8192 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var k: Val = val_none()
+        p = parse_val(p, end, &k)
+        if k.kind == K_NAME {
+            var v: Val = val_none()
+            p = parse_ref(p, end, &v)
+            if k.n == nn {
+                var same: bool = true
+                var i: u64 = 0
+                while i < nn {
+                    if ld(k.a + i) != ld(np + i) {
+                        same = false
+                        i = nn
+                    } else {
+                        i = i + 1
+                    }
+                }
+                if same {
+                    *out = v
+                    return true
+                }
+            }
+        }
+    }
+    *out = val_none()
+    return false
+}
+
+// Resources/<sub>/<name> -> the direct value
+fn res_get(r: *mut R, sub: str, np: u64, nn: u64, out: *mut Val) -> bool {
+    var sv: Val = val_none()
+    if !doc_dict_get((*r).d, &(*r).res, sub, &sv) || sv.kind != K_DICT {
+        *out = val_none()
+        return false
+    }
+    var raw: Val = val_none()
+    if !dict_find_name(sv.a, sv.n, np, nn, &raw) {
+        *out = val_none()
+        return false
+    }
+    resolve((*r).d, &raw, out)
+    return (*out).kind != K_NONE
+}
+
+fn res_obj(r: *mut R, sub: str, np: u64, nn: u64) -> u64 {
+    var sv: Val = val_none()
+    if !doc_dict_get((*r).d, &(*r).res, sub, &sv) || sv.kind != K_DICT {
+        return 0
+    }
+    var raw: Val = val_none()
+    if dict_find_name(sv.a, sv.n, np, nn, &raw) && raw.kind == K_REF {
+        return raw.rn as u64
+    }
+    return 0
+}
+
+// the slot of the font named np/nn in the current resources
+fn font_slot_for(r: *mut R, np: u64, nn: u64) -> u64 {
+    let d: *mut Doc = (*r).d
+    let objn: u64 = res_obj(r, "Font", np, nn)
+    var fv: Val = val_none()
+    if !res_get(r, "Font", np, nn, &fv) || fv.kind != K_DICT {
+        return 4294967295
+    }
+    var key: u64 = objn + 1
+    if objn == 0 {
+        key = fv.a | 0x8000000000000000
+    }
+    var i: u64 = 0
+    while i < FONT_MAX {
+        if rd64(fslot(d, i)) == key {
+            return i
+        }
+        i = i + 1
+    }
+    // a free slot, else the next one in turn
+    var free: u64 = FONT_MAX
+    var j: u64 = 0
+    while j < FONT_MAX {
+        if rd64(fslot(d, j)) == 0 && free == FONT_MAX {
+            free = j
+        }
+        j = j + 1
+    }
+    if free == FONT_MAX {
+        free = (*d).nfonts % FONT_MAX
+        (*d).nfonts = (*d).nfonts + 1
+        font_release(d, free)
+    }
+    font_build(d, &fv, key, free)
+    return free
+}
+
+// ------------------------------------------------------------- strings
+
+// decodes a string value into `out` (at most max); returns the octets
+fn str_bytes(v: *mut Val, out: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    if (*v).hex == 1 {
+        var hi: u32 = 16
+        var i: u64 = 0
+        while i < (*v).n {
+            let h: u32 = hexval(ld((*v).a + i))
+            if h < 16 {
+                if hi == 16 {
+                    hi = h
+                } else {
+                    if n < max {
+                        wr8(out + n, hi * 16 + h)
+                        n = n + 1
+                    }
+                    hi = 16
+                }
+            }
+            i = i + 1
+        }
+        if hi != 16 && n < max {
+            wr8(out + n, hi * 16)
+            n = n + 1
+        }
+        return n
+    }
+    var i2: u64 = 0
+    while i2 < (*v).n {
+        var c: u32 = ld((*v).a + i2)
+        if c == 92 && i2 + 1 < (*v).n {
+            i2 = i2 + 1
+            let e: u32 = ld((*v).a + i2)
+            if e == 110 {
+                c = 10
+            } else if e == 114 {
+                c = 13
+            } else if e == 116 {
+                c = 9
+            } else if e == 98 {
+                c = 8
+            } else if e == 102 {
+                c = 12
+            } else if e >= 48 && e <= 55 {
+                var o: u32 = e - 48
+                var k: u64 = 1
+                while k < 3 && i2 + 1 < (*v).n && ld((*v).a + i2 + 1) >= 48 && ld((*v).a + i2 + 1) <= 55 {
+                    i2 = i2 + 1
+                    o = o * 8 + (ld((*v).a + i2) - 48)
+                    k = k + 1
+                }
+                c = o & 255
+            } else if e == 13 || e == 10 {
+                // a line continuation
+                if e == 13 && i2 + 1 < (*v).n && ld((*v).a + i2 + 1) == 10 {
+                    i2 = i2 + 1
+                }
+                i2 = i2 + 1
+                continue_marker()
+                c = 256
+            } else {
+                c = e
+            }
+        }
+        if c < 256 && n < max {
+            wr8(out + n, c)
+            n = n + 1
+        }
+        i2 = i2 + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------------- text
+
+fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
+    // draws one glyph at the current text position; returns its advance in
+    // thousandths of an em
+    let d: *mut Doc = (*r).d
+    if (*r).gs.font >= FONT_MAX {
+        return 500.0
+    }
+    let s: u64 = fslot(d, (*r).gs.font)
+    var w: f64 = 0.0
+    var u: u32 = 0
+    if rd64(s + 80) != 0 {
+        u = tounicode_lookup(s, code)
+    }
+    if is_t0 {
+        w = cid_width(s, code)
+        if u == 0 && rd64(s + 80) == 0 {
+            u = 0
+        }
+    } else {
+        let wt: u64 = rd64(s + 32)
+        let ut: u64 = rd64(s + 40)
+        if code < 256 {
+            if wt != 0 {
+                w = *((wt + code * 8) as *mut f64)
+            }
+            if u == 0 && ut != 0 {
+                u = rd32(ut + code * 4)
+            }
+        }
+    }
+    if (*r).gs.tr == 3 || u == 0 || u == 32 || u < 32 {
+        return w
+    }
+    // the text rendering matrix
+    let fs: f64 = (*r).gs.fsize
+    let local: M = M { a: fs * (*r).gs.th, b: 0.0, c: 0.0, d: fs, e: 0.0, f: (*r).gs.ts }
+    let trm: M = m_mul(m_mul(local, (*r).tm), (*r).gs.ctm)
+    var em: f64 = fsqrt(trm.c * trm.c + trm.d * trm.d)
+    if em < 0.05 {
+        return w
+    }
+    let o: *mut rt.Buf = (*r).out
+    put_s(o, "<text")
+    let ia: f64 = trm.a / em
+    let ib: f64 = trm.b / em
+    let ic: f64 = 0.0 - trm.c / em
+    let id: f64 = 0.0 - trm.d / em
+    if fabs(ia - 1.0) < 0.002 && fabs(ib) < 0.002 && fabs(ic) < 0.002 && fabs(id - 1.0) < 0.002 {
+        put_s(o, " x=\"")
+        put_f(o, trm.e, 2)
+        put_s(o, "\" y=\"")
+        put_f(o, trm.f, 2)
+        put_s(o, "\"")
+    } else {
+        put_s(o, " transform=\"matrix(")
+        put_f(o, ia, 4)
+        push(o, 32)
+        put_f(o, ib, 4)
+        push(o, 32)
+        put_f(o, ic, 4)
+        push(o, 32)
+        put_f(o, id, 4)
+        push(o, 32)
+        put_f(o, trm.e, 2)
+        push(o, 32)
+        put_f(o, trm.f, 2)
+        put_s(o, ")\"")
+    }
+    put_s(o, " font-size=\"")
+    put_f(o, em, 2)
+    put_s(o, "\" fill=\"")
+    put_color(o, (*r).gs.fill)
+    put_s(o, "\"")
+    if (*r).gs.fill_a < 0.999 {
+        put_s(o, " fill-opacity=\"")
+        put_f(o, (*r).gs.fill_a, 3)
+        put_s(o, "\"")
+    }
+    put_s(o, ">")
+    put_utf8_xml(o, u)
+    put_s(o, "</text>")
+    return w
+}
+
+fn text_show(r: *mut R, v: *mut Val) {
+    let d: *mut Doc = (*r).d
+    let n: u64 = str_bytes(v, (*r).scratch, 65536)
+    var is_t0: bool = false
+    if (*r).gs.font < FONT_MAX {
+        is_t0 = rd64(fslot(d, (*r).gs.font) + 8) == 2
+    }
+    var i: u64 = 0
+    while i < n {
+        var code: u64 = 0
+        var single: bool = true
+        if is_t0 {
+            if i + 1 < n {
+                code = ((rd8((*r).scratch + i) as u64) << 8) | (rd8((*r).scratch + i + 1) as u64)
+            } else {
+                code = rd8((*r).scratch + i) as u64
+            }
+            i = i + 2
+            single = false
+        } else {
+            code = rd8((*r).scratch + i) as u64
+            i = i + 1
+        }
+        let w: f64 = glyph_out(r, code, is_t0)
+        var adv: f64 = w / 1000.0 * (*r).gs.fsize + (*r).gs.tc
+        if single && code == 32 {
+            adv = adv + (*r).gs.tw
+        }
+        adv = adv * (*r).gs.th
+        (*r).tm = m_mul(M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: adv, f: 0.0 }, (*r).tm)
+    }
+}
+
+fn text_tj_array(r: *mut R, v: *mut Val) {
+    var p: u64 = (*v).a
+    let end: u64 = (*v).a + (*v).n
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var e: Val = val_none()
+        p = parse_val(p, end, &e)
+        if e.kind == K_STR {
+            text_show(r, &e)
+        } else if e.kind == K_INT || e.kind == K_REAL {
+            let adj: f64 = 0.0 - e.num / 1000.0 * (*r).gs.fsize * (*r).gs.th
+            (*r).tm = m_mul(M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: adj, f: 0.0 }, (*r).tm)
+        }
+    }
+}
+
+fn text_nextline(r: *mut R, tx: f64, ty: f64) {
+    (*r).tlm = m_mul(M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: tx, f: ty }, (*r).tlm)
+    (*r).tm = (*r).tlm
+}
+
+// ----------------------------------------------------- colour space names
+
+// components of a colour space value (name or array); 9 = Pattern
+fn cs_comps(r: *mut R, v: *mut Val, sep: *mut u32) -> u32 {
+    *sep = 0
+    if (*v).kind == K_NAME {
+        if name_is(v, "DeviceGray") || name_is(v, "G") || name_is(v, "CalGray") {
+            return 1
+        }
+        if name_is(v, "DeviceRGB") || name_is(v, "RGB") || name_is(v, "CalRGB") {
+            return 3
+        }
+        if name_is(v, "DeviceCMYK") || name_is(v, "CMYK") {
+            return 4
+        }
+        if name_is(v, "Pattern") {
+            return 9
+        }
+        var cv: Val = val_none()
+        if res_get(r, "ColorSpace", (*v).a, (*v).n, &cv) {
+            if cv.kind == K_NAME {
+                return cs_comps(r, &cv, sep)
+            }
+            if cv.kind == K_ARR {
+                return cs_comps(r, &cv, sep)
+            }
+        }
+        return 1
+    }
+    if (*v).kind == K_ARR {
+        var f: Val = val_none()
+        var fr: Val = val_none()
+        arr_at((*v).a, (*v).n, 0, &f)
+        resolve((*r).d, &f, &fr)
+        if name_is(&fr, "ICCBased") {
+            var sv: Val = val_none()
+            var sr: Val = val_none()
+            arr_at((*v).a, (*v).n, 1, &sv)
+            resolve((*r).d, &sv, &sr)
+            var nn: Val = val_none()
+            if (sr.kind == K_STREAM || sr.kind == K_DICT) && doc_dict_get((*r).d, &sr, "N", &nn) {
+                return val_num(&nn) as u32
+            }
+            return 3
+        }
+        if name_is(&fr, "CalRGB") || name_is(&fr, "Lab") {
+            return 3
+        }
+        if name_is(&fr, "CalGray") || name_is(&fr, "Indexed") || name_is(&fr, "I") {
+            return 1
+        }
+        if name_is(&fr, "Separation") {
+            *sep = 1
+            return 1
+        }
+        if name_is(&fr, "DeviceN") {
+            var nv: Val = val_none()
+            var nr: Val = val_none()
+            arr_at((*v).a, (*v).n, 1, &nv)
+            resolve((*r).d, &nv, &nr)
+            if nr.kind == K_ARR {
+                return arr_len(nr.a, nr.n) as u32
+            }
+            return 1
+        }
+        if name_is(&fr, "Pattern") {
+            return 9
+        }
+        return cs_comps(r, &fr, sep)
+    }
+    return 1
+}
+
+fn set_color_from(r: *mut R, ops: *mut [Val; 64], n: usize, stroke: bool) {
+    var comps: u32 = (*r).gs.fcs
+    var sep: u32 = (*r).gs.fsep
+    if stroke {
+        comps = (*r).gs.scs
+        sep = (*r).gs.ssep
+    }
+    var col: u32 = 0
+    if comps == 9 {
+        col = 0x808080
+    } else if n == 0 {
+        return
+    } else if sep == 1 {
+        let t: f64 = val_num(&(*ops)[0])
+        col = rgb_pack(1.0 - t, 1.0 - t, 1.0 - t)
+    } else if n >= 4 && comps >= 4 {
+        col = cmyk_pack(val_num(&(*ops)[n - 4]), val_num(&(*ops)[n - 3]), val_num(&(*ops)[n - 2]), val_num(&(*ops)[n - 1]))
+    } else if n >= 3 && comps >= 3 {
+        col = rgb_pack(val_num(&(*ops)[n - 3]), val_num(&(*ops)[n - 2]), val_num(&(*ops)[n - 1]))
+    } else {
+        let g: f64 = val_num(&(*ops)[n - 1])
+        col = rgb_pack(g, g, g)
+    }
+    if stroke {
+        (*r).gs.stroke = col
+    } else {
+        (*r).gs.fill = col
+    }
+}
+
+// ------------------------------------------------------- the interpreter
+
+fn close_groups_to(r: *mut R, level: u64) {
+    while (*r).open_groups > level {
+        put_s((*r).out, "</g>")
+        (*r).open_groups = (*r).open_groups - 1
+    }
+}
+
+fn gs_apply_ext(r: *mut R, ev: *mut Val) {
+    var v: Val = val_none()
+    if doc_dict_get((*r).d, ev, "ca", &v) {
+        (*r).gs.fill_a = val_num(&v)
+    }
+    if doc_dict_get((*r).d, ev, "CA", &v) {
+        (*r).gs.stroke_a = val_num(&v)
+    }
+    if doc_dict_get((*r).d, ev, "LW", &v) {
+        (*r).gs.lw = val_num(&v)
+    }
+    if doc_dict_get((*r).d, ev, "LC", &v) {
+        (*r).gs.cap = val_num(&v) as u32
+    }
+    if doc_dict_get((*r).d, ev, "LJ", &v) {
+        (*r).gs.join = val_num(&v) as u32
+    }
+}
+
+fn do_xobject(r: *mut R, np: u64, nn: u64) {
+    let d: *mut Doc = (*r).d
+    var xv: Val = val_none()
+    if !res_get(r, "XObject", np, nn, &xv) || xv.kind != K_STREAM {
+        return
+    }
+    var st: Val = val_none()
+    var sub: bool = doc_dict_get(d, &xv, "Subtype", &st)
+    if sub && name_is(&st, "Image") {
+        if (*d).nimg < IMG_MAX {
+            let rec: u64 = (*d).img + (*d).nimg * 64
+            wr32(rec, res_obj(r, "XObject", np, nn) as u32)
+            *((rec + 8) as *mut f64) = (*r).gs.ctm.a
+            *((rec + 16) as *mut f64) = (*r).gs.ctm.b
+            *((rec + 24) as *mut f64) = (*r).gs.ctm.c
+            *((rec + 32) as *mut f64) = (*r).gs.ctm.d
+            *((rec + 40) as *mut f64) = (*r).gs.ctm.e
+            *((rec + 48) as *mut f64) = (*r).gs.ctm.f
+            wr32(rec + 56, (*r).gs.fill)
+            (*d).nimg = (*d).nimg + 1
+        }
+        return
+    }
+    if !sub || !name_is(&st, "Form") {
+        return
+    }
+    if (*r).depth >= 8 {
+        return
+    }
+    var buf: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &xv, &buf, &imf) {
+        return
+    }
+    // save, apply the form matrix, run, restore
+    let saved_gs: GS = (*r).gs
+    let saved_res: Val = (*r).res
+    let saved_level: u64 = (*r).open_groups
+    let saved_tm: M = (*r).tm
+    let saved_tlm: M = (*r).tlm
+    var mv: Val = val_none()
+    if doc_dict_get(d, &xv, "Matrix", &mv) && mv.kind == K_ARR {
+        var fm: M = m_id()
+        var k: u64 = 0
+        var vals: [f64; 6] = [0.0; 6]
+        while k < 6 {
+            var e: Val = val_none()
+            var er: Val = val_none()
+            arr_at(mv.a, mv.n, k, &e)
+            resolve(d, &e, &er)
+            vals[k as usize] = val_num(&er)
+            k = k + 1
+        }
+        fm = M { a: vals[0], b: vals[1], c: vals[2], d: vals[3], e: vals[4], f: vals[5] }
+        (*r).gs.ctm = m_mul(fm, (*r).gs.ctm)
+    }
+    var rv: Val = val_none()
+    if doc_dict_get(d, &xv, "Resources", &rv) && rv.kind == K_DICT {
+        (*r).res = rv
+    }
+    (*r).depth = (*r).depth + 1
+    run_content(r, rt.buf_ptr(&buf), rt.buf_len(&buf) as u64)
+    (*r).depth = (*r).depth - 1
+    close_groups_to(r, saved_level)
+    (*r).gs = saved_gs
+    (*r).res = saved_res
+    (*r).tm = saved_tm
+    (*r).tlm = saved_tlm
+    rt.buf_free(&buf)
+}
+
+fn run_content(r: *mut R, data: u64, len: u64) {
+    var ops: [Val; 64] = [val_none(); 64]
+    var nops: usize = 0
+    var p: u64 = data
+    let end: u64 = data + len
+    var guard: u64 = 0
+    while p < end && guard < 4000000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var t: Val = val_none()
+        p = parse_val(p, end, &t)
+        if t.kind != K_OP {
+            if nops < 64 {
+                ops[nops] = t
+                nops = nops + 1
+            }
+        } else {
+            // an operator
+            (*r).ops = (*r).ops + 1
+            let o: u64 = t.a
+            let on: u64 = t.n
+            if on == 1 {
+                let c: u32 = ld(o)
+                if c == 109 && nops >= 2 {
+                    path_move(r, val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c == 108 && nops >= 2 {
+                    path_line(r, val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c == 99 && nops >= 6 {
+                    path_curve(r, val_num(&ops[nops - 6]), val_num(&ops[nops - 5]), val_num(&ops[nops - 4]),
+                        val_num(&ops[nops - 3]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c == 118 && nops >= 4 {
+                    path_curve(r, (*r).cx, (*r).cy, val_num(&ops[nops - 4]), val_num(&ops[nops - 3]),
+                        val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c == 121 && nops >= 4 {
+                    path_curve(r, val_num(&ops[nops - 4]), val_num(&ops[nops - 3]), val_num(&ops[nops - 2]),
+                        val_num(&ops[nops - 1]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c == 104 {
+                    path_close(r)
+                } else if c == 83 {
+                    paint_path(r, false, true, false)
+                } else if c == 115 {
+                    path_close(r)
+                    paint_path(r, false, true, false)
+                } else if c == 102 || c == 70 {
+                    paint_path(r, true, false, false)
+                } else if c == 66 {
+                    paint_path(r, true, true, false)
+                } else if c == 98 {
+                    path_close(r)
+                    paint_path(r, true, true, false)
+                } else if c == 110 {
+                    paint_path(r, false, false, false)
+                } else if c == 87 {
+                    (*r).pclip = 1
+                } else if c == 113 {
+                    if (*r).sp < 31 {
+                        (*r).gs.gslevel = (*r).open_groups
+                        (*r).stack[(*r).sp as usize] = (*r).gs
+                        (*r).sp = (*r).sp + 1
+                    }
+                } else if c == 81 {
+                    if (*r).sp > 0 {
+                        (*r).sp = (*r).sp - 1
+                        let sv: GS = (*r).stack[(*r).sp as usize]
+                        close_groups_to(r, sv.gslevel)
+                        (*r).gs = sv
+                    }
+                } else if c == 119 && nops >= 1 {
+                    (*r).gs.lw = val_num(&ops[nops - 1])
+                } else if c == 74 && nops >= 1 {
+                    (*r).gs.cap = val_num(&ops[nops - 1]) as u32
+                } else if c == 106 && nops >= 1 {
+                    (*r).gs.join = val_num(&ops[nops - 1]) as u32
+                } else if c == 77 && nops >= 1 {
+                    (*r).gs.miter = val_num(&ops[nops - 1])
+                } else if c == 100 && nops >= 2 {
+                    (*r).gs.ndash = 0
+                    if ops[nops - 2].kind == K_ARR {
+                        let na: u64 = arr_len(ops[nops - 2].a, ops[nops - 2].n)
+                        var k: u64 = 0
+                        while k < na && k < 8 {
+                            var e: Val = val_none()
+                            arr_at(ops[nops - 2].a, ops[nops - 2].n, k, &e)
+                            (*r).gs.dash[k as usize] = val_num(&e)
+                            k = k + 1
+                        }
+                        (*r).gs.ndash = k as u32
+                        // a dash pattern of zeros is no pattern
+                        var any: bool = false
+                        var q: u64 = 0
+                        while q < k {
+                            if (*r).gs.dash[q as usize] > 0.0 {
+                                any = true
+                            }
+                            q = q + 1
+                        }
+                        if !any {
+                            (*r).gs.ndash = 0
+                        }
+                    }
+                    (*r).gs.dphase = val_num(&ops[nops - 1])
+                } else if c == 103 && nops >= 1 {
+                    let g: f64 = val_num(&ops[nops - 1])
+                    (*r).gs.fill = rgb_pack(g, g, g)
+                    (*r).gs.fcs = 1
+                    (*r).gs.fsep = 0
+                } else if c == 71 && nops >= 1 {
+                    let g2: f64 = val_num(&ops[nops - 1])
+                    (*r).gs.stroke = rgb_pack(g2, g2, g2)
+                    (*r).gs.scs = 1
+                    (*r).gs.ssep = 0
+                } else if c == 107 && nops >= 4 {
+                    (*r).gs.fill = cmyk_pack(val_num(&ops[nops - 4]), val_num(&ops[nops - 3]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                    (*r).gs.fcs = 4
+                    (*r).gs.fsep = 0
+                } else if c == 75 && nops >= 4 {
+                    (*r).gs.stroke = cmyk_pack(val_num(&ops[nops - 4]), val_num(&ops[nops - 3]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                    (*r).gs.scs = 4
+                    (*r).gs.ssep = 0
+                }
+            } else if on == 2 {
+                let c0: u32 = ld(o)
+                let c1: u32 = ld(o + 1)
+                if c0 == 99 && c1 == 109 && nops >= 6 {
+                    let m: M = M { a: val_num(&ops[nops - 6]), b: val_num(&ops[nops - 5]), c: val_num(&ops[nops - 4]),
+                        d: val_num(&ops[nops - 3]), e: val_num(&ops[nops - 2]), f: val_num(&ops[nops - 1]) }
+                    (*r).gs.ctm = m_mul(m, (*r).gs.ctm)
+                } else if c0 == 114 && c1 == 101 && nops >= 4 {
+                    let x: f64 = val_num(&ops[nops - 4])
+                    let y: f64 = val_num(&ops[nops - 3])
+                    let w: f64 = val_num(&ops[nops - 2])
+                    let h: f64 = val_num(&ops[nops - 1])
+                    path_move(r, x, y)
+                    path_line(r, x + w, y)
+                    path_line(r, x + w, y + h)
+                    path_line(r, x, y + h)
+                    path_close(r)
+                } else if c0 == 102 && c1 == 42 {
+                    paint_path(r, true, false, true)
+                } else if c0 == 66 && c1 == 42 {
+                    paint_path(r, true, true, true)
+                } else if c0 == 98 && c1 == 42 {
+                    path_close(r)
+                    paint_path(r, true, true, true)
+                } else if c0 == 87 && c1 == 42 {
+                    (*r).pclip = 2
+                } else if c0 == 114 && c1 == 103 && nops >= 3 {
+                    (*r).gs.fill = rgb_pack(val_num(&ops[nops - 3]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                    (*r).gs.fcs = 3
+                    (*r).gs.fsep = 0
+                } else if c0 == 82 && c1 == 71 && nops >= 3 {
+                    (*r).gs.stroke = rgb_pack(val_num(&ops[nops - 3]), val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                    (*r).gs.scs = 3
+                    (*r).gs.ssep = 0
+                } else if c0 == 99 && c1 == 115 && nops >= 1 {
+                    var sp: u32 = 0
+                    (*r).gs.fcs = cs_comps(r, &ops[nops - 1], &sp)
+                    (*r).gs.fsep = sp
+                    if (*r).gs.fcs == 1 {
+                        (*r).gs.fill = 0
+                        if sp == 1 {
+                            (*r).gs.fill = 0
+                        }
+                    } else if (*r).gs.fcs == 3 || (*r).gs.fcs == 4 {
+                        (*r).gs.fill = 0
+                    }
+                } else if c0 == 67 && c1 == 83 && nops >= 1 {
+                    var sp2: u32 = 0
+                    (*r).gs.scs = cs_comps(r, &ops[nops - 1], &sp2)
+                    (*r).gs.ssep = sp2
+                    (*r).gs.stroke = 0
+                } else if c0 == 115 && c1 == 99 {
+                    set_color_from(r, &ops, nops, false)
+                } else if c0 == 83 && c1 == 67 {
+                    set_color_from(r, &ops, nops, true)
+                } else if c0 == 103 && c1 == 115 && nops >= 1 {
+                    var ev: Val = val_none()
+                    if res_get(r, "ExtGState", ops[nops - 1].a, ops[nops - 1].n, &ev) && ev.kind == K_DICT {
+                        gs_apply_ext(r, &ev)
+                    }
+                } else if c0 == 68 && c1 == 111 && nops >= 1 {
+                    do_xobject(r, ops[nops - 1].a, ops[nops - 1].n)
+                } else if c0 == 66 && c1 == 84 {
+                    (*r).tm = m_id()
+                    (*r).tlm = m_id()
+                    (*r).in_text = true
+                } else if c0 == 69 && c1 == 84 {
+                    (*r).in_text = false
+                } else if c0 == 84 && c1 == 102 && nops >= 2 {
+                    (*r).gs.fsize = val_num(&ops[nops - 1])
+                    if ops[nops - 2].kind == K_NAME {
+                        (*r).gs.font = font_slot_for(r, ops[nops - 2].a, ops[nops - 2].n)
+                    }
+                } else if c0 == 84 && c1 == 100 && nops >= 2 {
+                    text_nextline(r, val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c0 == 84 && c1 == 68 && nops >= 2 {
+                    (*r).gs.tl = 0.0 - val_num(&ops[nops - 1])
+                    text_nextline(r, val_num(&ops[nops - 2]), val_num(&ops[nops - 1]))
+                } else if c0 == 84 && c1 == 109 && nops >= 6 {
+                    (*r).tm = M { a: val_num(&ops[nops - 6]), b: val_num(&ops[nops - 5]), c: val_num(&ops[nops - 4]),
+                        d: val_num(&ops[nops - 3]), e: val_num(&ops[nops - 2]), f: val_num(&ops[nops - 1]) }
+                    (*r).tlm = (*r).tm
+                } else if c0 == 84 && c1 == 42 {
+                    text_nextline(r, 0.0, 0.0 - (*r).gs.tl)
+                } else if c0 == 84 && c1 == 99 && nops >= 1 {
+                    (*r).gs.tc = val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 119 && nops >= 1 {
+                    (*r).gs.tw = val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 122 && nops >= 1 {
+                    (*r).gs.th = val_num(&ops[nops - 1]) / 100.0
+                } else if c0 == 84 && c1 == 76 && nops >= 1 {
+                    (*r).gs.tl = val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 115 && nops >= 1 {
+                    (*r).gs.ts = val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 114 && nops >= 1 {
+                    (*r).gs.tr = val_num(&ops[nops - 1]) as u32
+                } else if c0 == 84 && c1 == 106 && nops >= 1 {
+                    if ops[nops - 1].kind == K_STR {
+                        text_show(r, &ops[nops - 1])
+                    }
+                } else if c0 == 84 && c1 == 74 && nops >= 1 {
+                    if ops[nops - 1].kind == K_ARR {
+                        text_tj_array(r, &ops[nops - 1])
+                    }
+                } else if c0 == 66 && c1 == 73 {
+                    // an inline image: skip to its EI
+                    var q: u64 = p
+                    var found: bool = false
+                    while q + 2 <= end && !found {
+                        if ld(q) == 69 && ld(q + 1) == 73 && (q + 2 == end || is_ws(ld(q + 2)))
+                            && q > data && is_ws(ld(q - 1)) {
+                            found = true
+                        } else {
+                            q = q + 1
+                        }
+                    }
+                    p = q + 2
+                }
+            } else if on == 3 {
+                if ld(o) == 84 && ld(o + 1) == 42 {
+                    continue_marker()
+                }
+            }
+            if on == 1 && (ld(o) == 39 || ld(o) == 34) {
+                // ' and "
+                if ld(o) == 34 && nops >= 3 {
+                    (*r).gs.tw = val_num(&ops[nops - 3])
+                    (*r).gs.tc = val_num(&ops[nops - 2])
+                }
+                text_nextline(r, 0.0, 0.0 - (*r).gs.tl)
+                if nops >= 1 && ops[nops - 1].kind == K_STR {
+                    text_show(r, &ops[nops - 1])
+                }
+            }
+            nops = 0
+        }
+    }
+}
+
+// ---------------------------------------------------------------- pages
+
+fn page_attr(d: *mut Doc, pv: *mut Val, key: str, out: *mut Val) -> bool {
+    var cur: Val = *pv
+    var guard: u64 = 0
+    while guard < 32 && cur.kind == K_DICT {
+        if doc_dict_get(d, &cur, key, out) {
+            return true
+        }
+        var par: Val = val_none()
+        if !doc_dict_get(d, &cur, "Parent", &par) {
+            break
+        }
+        cur = par
+        guard = guard + 1
+    }
+    *out = val_none()
+    return false
+}
+
+fn box_of(d: *mut Doc, pv: *mut Val, key: str, bx: *mut [f64; 4]) -> bool {
+    var v: Val = val_none()
+    if !page_attr(d, pv, key, &v) || v.kind != K_ARR {
+        return false
+    }
+    var i: u64 = 0
+    while i < 4 {
+        var e: Val = val_none()
+        var er: Val = val_none()
+        if !arr_at(v.a, v.n, i, &e) {
+            return false
+        }
+        resolve(d, &e, &er)
+        (*bx)[i as usize] = val_num(&er)
+        i = i + 1
+    }
+    // normalise
+    if (*bx)[0] > (*bx)[2] {
+        let t: f64 = (*bx)[0]
+        (*bx)[0] = (*bx)[2]
+        (*bx)[2] = t
+    }
+    if (*bx)[1] > (*bx)[3] {
+        let t2: f64 = (*bx)[1]
+        (*bx)[1] = (*bx)[3]
+        (*bx)[3] = t2
+    }
+    return (*bx)[2] - (*bx)[0] > 1.0 && (*bx)[3] - (*bx)[1] > 1.0
+}
+
+fn page_geometry(d: *mut Doc, page: u64, bx: *mut [f64; 4], rot: *mut u64, pv: *mut Val) -> bool {
+    if page >= (*d).npages {
+        return false
+    }
+    if !load_obj(d, rd32((*d).pages + page * 4) as u64, pv) || (*pv).kind != K_DICT {
+        return false
+    }
+    if !box_of(d, pv, "CropBox", bx) {
+        if !box_of(d, pv, "MediaBox", bx) {
+            (*bx)[0] = 0.0
+            (*bx)[1] = 0.0
+            (*bx)[2] = 612.0
+            (*bx)[3] = 792.0
+        }
+    }
+    var rv: Val = val_none()
+    *rot = 0
+    if page_attr(d, pv, "Rotate", &rv) {
+        var q: i64 = val_num(&rv) as i64
+        q = q % 360
+        if q < 0 {
+            q = q + 360
+        }
+        *rot = (q / 90) as u64
+    }
+    return true
+}
+
+// the size of the page in points, rotation applied
+fn doc_page_size(d: *mut Doc, page: u64, w: *mut f64, h: *mut f64) -> bool {
+    var bx: [f64; 4] = [0.0; 4]
+    var rot: u64 = 0
+    var pv: Val = val_none()
+    if !page_geometry(d, page, &bx, &rot, &pv) {
+        return false
+    }
+    if rot % 2 == 1 {
+        *w = bx[3] - bx[1]
+        *h = bx[2] - bx[0]
+    } else {
+        *w = bx[2] - bx[0]
+        *h = bx[3] - bx[1]
+    }
+    return true
+}
+
+// The page as SVG text at `scale` (1.0 = one point per pixel). `wo`/`ho`
+// receive the size in pixels.
+fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+    var bx: [f64; 4] = [0.0; 4]
+    var rot: u64 = 0
+    var pv: Val = val_none()
+    if !page_geometry(d, page, &bx, &rot, &pv) {
+        return false
+    }
+    let s: f64 = scale
+    var pw: f64 = bx[2] - bx[0]
+    var ph: f64 = bx[3] - bx[1]
+    var base: M = M { a: s, b: 0.0, c: 0.0, d: 0.0 - s, e: 0.0 - bx[0] * s, f: bx[3] * s }
+    if rot == 1 {
+        base = M { a: 0.0, b: s, c: s, d: 0.0, e: 0.0 - bx[1] * s, f: 0.0 - bx[0] * s }
+        let t: f64 = pw
+        pw = ph
+        ph = t
+    } else if rot == 2 {
+        base = M { a: 0.0 - s, b: 0.0, c: 0.0, d: s, e: bx[2] * s, f: 0.0 - bx[1] * s }
+    } else if rot == 3 {
+        base = M { a: 0.0, b: 0.0 - s, c: 0.0 - s, d: 0.0, e: bx[3] * s, f: bx[2] * s }
+        let t2: f64 = pw
+        pw = ph
+        ph = t2
+    }
+    var wpx: u64 = (pw * s + 0.5) as u64
+    var hpx: u64 = (ph * s + 0.5) as u64
+    if wpx < 1 {
+        wpx = 1
+    }
+    if hpx < 1 {
+        hpx = 1
+    }
+    *wo = wpx
+    *ho = hpx
+    (*d).nimg = 0
+    // the contents: one stream or an array of them
+    var cv: Val = val_none()
+    var content: rt.Buf = rt.buf_new()
+    var got: bool = false
+    var craw: Val = val_none()
+    if dict_find(pv.a, pv.n, "Contents", &craw) {
+        resolve(d, &craw, &cv)
+        if cv.kind == K_STREAM {
+            var imf: u32 = 0
+            got = doc_stream(d, &cv, &content, &imf)
+        } else if cv.kind == K_ARR {
+            let na: u64 = arr_len(cv.a, cv.n)
+            var i: u64 = 0
+            while i < na {
+                var e: Val = val_none()
+                var er: Val = val_none()
+                arr_at(cv.a, cv.n, i, &e)
+                resolve(d, &e, &er)
+                if er.kind == K_STREAM {
+                    var imf2: u32 = 0
+                    doc_stream(d, &er, &content, &imf2)
+                    push(&content, 10)
+                }
+                i = i + 1
+            }
+            got = true
+        }
+    }
+    put_s(out, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"")
+    put_u(out, wpx)
+    put_s(out, "\" height=\"")
+    put_u(out, hpx)
+    put_s(out, "\" viewBox=\"0 0 ")
+    put_u(out, wpx)
+    push(out, 32)
+    put_u(out, hpx)
+    put_s(out, "\">")
+    if got {
+        var r: R = R {
+            d: d, out: out, gs: gs_new(), stack: [gs_new(); 32], sp: 0, path: rt.buf_new(),
+            cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
+            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false,
+        }
+        r.gs.ctm = base
+        r.scratch = alloc0(65536 + 16)
+        var rv: Val = val_none()
+        if page_attr(d, &pv, "Resources", &rv) {
+            r.res = rv
+        }
+        if r.scratch != 0 {
+            run_content(&r, rt.buf_ptr(&content), rt.buf_len(&content) as u64)
+            rt.heap_free(r.scratch, 65536 + 16)
+        }
+        close_groups_to(&r, 0)
+        rt.buf_free(&r.path)
+    }
+    put_s(out, "</svg>")
+    rt.buf_free(&content)
+    return true
+}
+
+// image information for the viewer: width, height, bits, components, filter,
+// colour-space name kind (1 gray, 3 rgb, 4 cmyk), has SMask object, mask flag
+fn doc_img_info(d: *mut Doc, obj: u64, w: *mut u64, h: *mut u64, bpc: *mut u64, comps: *mut u64, smask: *mut u64, imagemask: *mut bool) -> bool {
+    var v: Val = val_none()
+    if !load_obj(d, obj, &v) || v.kind != K_STREAM {
+        return false
+    }
+    var t: Val = val_none()
+    *w = 0
+    *h = 0
+    *bpc = 8
+    *comps = 3
+    *smask = 0
+    *imagemask = false
+    if doc_dict_get(d, &v, "Width", &t) {
+        *w = val_num(&t) as u64
+    }
+    if doc_dict_get(d, &v, "Height", &t) {
+        *h = val_num(&t) as u64
+    }
+    if doc_dict_get(d, &v, "BitsPerComponent", &t) {
+        *bpc = val_num(&t) as u64
+    }
+    if doc_dict_get(d, &v, "ImageMask", &t) {
+        if t.num != 0.0 {
+            *imagemask = true
+            *bpc = 1
+            *comps = 1
+        }
+    }
+    if doc_dict_get(d, &v, "ColorSpace", &t) {
+        var sep: u32 = 0
+        var rr: R = R {
+            d: d, out: 0 as *mut rt.Buf, gs: gs_new(), stack: [gs_new(); 32], sp: 0, path: rt.buf_new(),
+            cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
+            tm: m_id(), tlm: m_id(), res: val_none(), depth: 0, scratch: 0, ops: 0, in_text: false,
+        }
+        *comps = cs_comps(&rr, &t, &sep) as u64
+    }
+    *smask = doc_obj_of(d, &v, "SMask")
+    return *w > 0 && *h > 0
+}
+
+// ============================================================ the pictures
+
+fn doc_img_color(d: *mut Doc, i: u64) -> u32 {
+    return rd32((*d).img + i * 64 + 56)
+}
+
+// the colour space of an image: kind 1 gray, 3 rgb, 4 cmyk, 5 indexed (palette
+// of `pn` entries of `pc` components), 6 separation (tint)
+fn img_space(d: *mut Doc, v: *mut Val, kind: *mut u32, pal: *mut u64, pn: *mut u64, pc: *mut u32, depth: u64) {
+    *kind = 3
+    if depth > 4 {
+        return
+    }
+    if (*v).kind == K_NAME {
+        if name_is(v, "DeviceGray") || name_is(v, "G") || name_is(v, "CalGray") {
+            *kind = 1
+        } else if name_is(v, "DeviceRGB") || name_is(v, "RGB") || name_is(v, "CalRGB") {
+            *kind = 3
+        } else if name_is(v, "DeviceCMYK") || name_is(v, "CMYK") {
+            *kind = 4
+        }
+        return
+    }
+    if (*v).kind != K_ARR {
+        return
+    }
+    var f: Val = val_none()
+    var fr: Val = val_none()
+    arr_at((*v).a, (*v).n, 0, &f)
+    resolve(d, &f, &fr)
+    if name_is(&fr, "ICCBased") {
+        var sv: Val = val_none()
+        var sr: Val = val_none()
+        arr_at((*v).a, (*v).n, 1, &sv)
+        resolve(d, &sv, &sr)
+        var nn: Val = val_none()
+        var n: u64 = 3
+        if (sr.kind == K_STREAM || sr.kind == K_DICT) && doc_dict_get(d, &sr, "N", &nn) {
+            n = val_num(&nn) as u64
+        }
+        if n == 1 {
+            *kind = 1
+        } else if n == 4 {
+            *kind = 4
+        } else {
+            *kind = 3
+        }
+    } else if name_is(&fr, "CalGray") {
+        *kind = 1
+    } else if name_is(&fr, "Separation") {
+        *kind = 6
+    } else if name_is(&fr, "Indexed") || name_is(&fr, "I") {
+        var bv: Val = val_none()
+        var br: Val = val_none()
+        arr_at((*v).a, (*v).n, 1, &bv)
+        resolve(d, &bv, &br)
+        var bk: u32 = 3
+        var dummy_pal: u64 = 0
+        var dummy_n: u64 = 0
+        var dummy_c: u32 = 0
+        img_space(d, &br, &bk, &dummy_pal, &dummy_n, &dummy_c, depth + 1)
+        var bc: u32 = 3
+        if bk == 1 || bk == 6 {
+            bc = 1
+        } else if bk == 4 {
+            bc = 4
+        }
+        var hv: Val = val_none()
+        var hr: Val = val_none()
+        arr_at((*v).a, (*v).n, 2, &hv)
+        resolve(d, &hv, &hr)
+        let hival: u64 = val_num(&hr) as u64
+        var lv: Val = val_none()
+        var lr: Val = val_none()
+        arr_at((*v).a, (*v).n, 3, &lv)
+        resolve(d, &lv, &lr)
+        let cnt: u64 = hival + 1
+        let table: u64 = alloc0(cnt * 4 + 16)
+        if table != 0 {
+            // the lookup bytes, converted to rgb right here
+            var raw: rt.Buf = rt.buf_new()
+            if lr.kind == K_STR {
+                let tmp: u64 = alloc0(cnt * 4 + 16)
+                if tmp != 0 {
+                    let got: u64 = str_bytes(&lr, tmp, cnt * (bc as u64))
+                    rt.buf_push_bytes(&raw, tmp, got as usize)
+                    rt.heap_free(tmp, (cnt * 4 + 16) as usize)
+                }
+            } else if lr.kind == K_STREAM {
+                var imf: u32 = 0
+                doc_stream(d, &lr, &raw, &imf)
+            }
+            var k: u64 = 0
+            while k < cnt {
+                var r8: u32 = 0
+                var g8: u32 = 0
+                var b8: u32 = 0
+                let base: u64 = k * (bc as u64)
+                if base + (bc as u64) <= (rt.buf_len(&raw) as u64) {
+                    let rp: u64 = rt.buf_ptr(&raw) + base
+                    if bc == 1 {
+                        var gv: u32 = rd8(rp)
+                        if bk == 6 {
+                            gv = 255 - gv
+                        }
+                        r8 = gv
+                        g8 = gv
+                        b8 = gv
+                    } else if bc == 4 {
+                        let cc: f64 = (rd8(rp) as f64) / 255.0
+                        let mm: f64 = (rd8(rp + 1) as f64) / 255.0
+                        let yy: f64 = (rd8(rp + 2) as f64) / 255.0
+                        let kk: f64 = (rd8(rp + 3) as f64) / 255.0
+                        let px: u32 = cmyk_pack(cc, mm, yy, kk)
+                        r8 = (px >> 16) & 255
+                        g8 = (px >> 8) & 255
+                        b8 = px & 255
+                    } else {
+                        r8 = rd8(rp)
+                        g8 = rd8(rp + 1)
+                        b8 = rd8(rp + 2)
+                    }
+                }
+                wr32(table + k * 4, (r8 << 16) | (g8 << 8) | b8)
+                k = k + 1
+            }
+            rt.buf_free(&raw)
+            *pal = table
+            *pn = cnt
+        }
+        *pc = 3
+        *kind = 5
+    }
+}
+
+// sample `s` of `bpc` bits at index `idx` of a row starting at `row`
+fn sample_at(row: u64, idx: u64, bpc: u64) -> u64 {
+    if bpc == 8 {
+        return rd8(row + idx) as u64
+    }
+    if bpc == 16 {
+        return rd8(row + idx * 2) as u64
+    }
+    if bpc == 1 {
+        return ((rd8(row + idx / 8) >> (7 - (idx % 8))) & 1) as u64
+    }
+    if bpc == 2 {
+        return ((rd8(row + idx / 4) >> (6 - 2 * (idx % 4))) & 3) as u64
+    }
+    // 4
+    return ((rd8(row + idx / 2) >> (4 - 4 * (idx % 2))) & 15) as u64
+}
+
+fn scale_sample(v: u64, bpc: u64) -> u32 {
+    if bpc == 8 || bpc == 16 {
+        return v as u32
+    }
+    if bpc == 1 {
+        return (v * 255) as u32
+    }
+    if bpc == 2 {
+        return (v * 85) as u32
+    }
+    return (v * 17) as u32
+}
+
+const IMG_MAXPX: u64 = 12000000
+
+// The pixels of image object `obj` as straight RGBA into `out`. `fillrgb` is
+// the colour of an image mask. Returns false for what it cannot decode
+// (JPX, CCITT, JBIG2 -- the viewer then draws a grey box).
+fn doc_img_rgba(d: *mut Doc, obj: u64, fillrgb: u32, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+    var v: Val = val_none()
+    if !load_obj(d, obj, &v) || v.kind != K_STREAM {
+        return false
+    }
+    var w: u64 = 0
+    var h: u64 = 0
+    var bpc: u64 = 8
+    var comps: u64 = 3
+    var smask: u64 = 0
+    var is_mask: bool = false
+    if !doc_img_info(d, obj, &w, &h, &bpc, &comps, &smask, &is_mask) {
+        return false
+    }
+    if w * h > 400000000 {
+        return false
+    }
+    var data: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &v, &data, &imf) {
+        return false
+    }
+    var invert: bool = false
+    var dv: Val = val_none()
+    if doc_dict_get(d, &v, "Decode", &dv) && dv.kind == K_ARR {
+        var d0: Val = val_none()
+        var d1: Val = val_none()
+        arr_at(dv.a, dv.n, 0, &d0)
+        arr_at(dv.a, dv.n, 1, &d1)
+        if val_num(&d0) > val_num(&d1) {
+            invert = true
+        }
+    }
+    if imf == F_DCT {
+        var im: jpeg.JpegImage = jpeg.jpeg_image_new()
+        let ok: bool = jpeg.jpeg_decode_limited(rt.buf_ptr(&data), rt.buf_len(&data), 16000000, &im) catch false
+        rt.buf_free(&data)
+        if !ok {
+            jpeg.jpeg_image_free(&im)
+            return false
+        }
+        *wo = im.w as u64
+        *ho = im.h as u64
+        rt.buf_push_bytes(out, rt.buf_ptr(&im.px), rt.buf_len(&im.px))
+        jpeg.jpeg_image_free(&im)
+        if smask != 0 {
+            apply_smask(d, smask, out, *wo, *ho)
+        }
+        return true
+    }
+    if imf != F_NONE {
+        rt.buf_free(&data)
+        return false
+    }
+    // raw samples
+    var kind: u32 = 3
+    var pal: u64 = 0
+    var pn: u64 = 0
+    var pc: u32 = 0
+    var csv: Val = val_none()
+    if is_mask {
+        kind = 1
+    } else if doc_dict_get(d, &v, "ColorSpace", &csv) {
+        img_space(d, &csv, &kind, &pal, &pn, &pc, 0)
+    }
+    var ncomp: u64 = 3
+    if kind == 1 || kind == 6 || kind == 5 {
+        ncomp = 1
+    } else if kind == 4 {
+        ncomp = 4
+    }
+    var step: u64 = 1
+    while (w / step) * (h / step) > IMG_MAXPX {
+        step = step + 1
+    }
+    let ow: u64 = w / step
+    let oh: u64 = h / step
+    if ow == 0 || oh == 0 {
+        rt.buf_free(&data)
+        return false
+    }
+    let rowbytes: u64 = (w * ncomp * bpc + 7) / 8
+    if (rt.buf_len(&data) as u64) < rowbytes * h {
+        // a short stream: the missing rows stay empty
+    }
+    rt.buf_reserve(out, (ow * oh * 4) as usize)
+    let base: u64 = rt.buf_ptr(&data)
+    let dlen: u64 = rt.buf_len(&data) as u64
+    var y: u64 = 0
+    while y < oh {
+        let row: u64 = base + (y * step) * rowbytes
+        var x: u64 = 0
+        while x < ow {
+            var r8: u32 = 255
+            var g8: u32 = 255
+            var b8: u32 = 255
+            var a8: u32 = 255
+            let sx: u64 = x * step
+            if (y * step + 1) * rowbytes > dlen {
+                a8 = 0
+            } else if is_mask {
+                let bit: u64 = sample_at(row, sx, 1)
+                var paint: bool = bit == 0
+                if invert {
+                    paint = bit == 1
+                }
+                r8 = (fillrgb >> 16) & 255
+                g8 = (fillrgb >> 8) & 255
+                b8 = fillrgb & 255
+                if !paint {
+                    a8 = 0
+                }
+            } else if kind == 5 {
+                let ix: u64 = sample_at(row, sx, bpc)
+                var px: u32 = 0
+                if pal != 0 && ix < pn {
+                    px = rd32(pal + ix * 4)
+                }
+                r8 = (px >> 16) & 255
+                g8 = (px >> 8) & 255
+                b8 = px & 255
+            } else if kind == 1 || kind == 6 {
+                var g: u32 = scale_sample(sample_at(row, sx, bpc), bpc)
+                if invert != (kind == 6) {
+                    g = 255 - g
+                }
+                r8 = g
+                g8 = g
+                b8 = g
+            } else if kind == 4 {
+                let c0: f64 = (scale_sample(sample_at(row, sx * 4, bpc), bpc) as f64) / 255.0
+                let c1: f64 = (scale_sample(sample_at(row, sx * 4 + 1, bpc), bpc) as f64) / 255.0
+                let c2: f64 = (scale_sample(sample_at(row, sx * 4 + 2, bpc), bpc) as f64) / 255.0
+                let c3: f64 = (scale_sample(sample_at(row, sx * 4 + 3, bpc), bpc) as f64) / 255.0
+                let px2: u32 = cmyk_pack(c0, c1, c2, c3)
+                r8 = (px2 >> 16) & 255
+                g8 = (px2 >> 8) & 255
+                b8 = px2 & 255
+            } else {
+                r8 = scale_sample(sample_at(row, sx * 3, bpc), bpc)
+                g8 = scale_sample(sample_at(row, sx * 3 + 1, bpc), bpc)
+                b8 = scale_sample(sample_at(row, sx * 3 + 2, bpc), bpc)
+            }
+            push(out, r8)
+            push(out, g8)
+            push(out, b8)
+            push(out, a8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.buf_free(&data)
+    if pal != 0 {
+        rt.heap_free(pal, (pn * 4 + 16) as usize)
+    }
+    *wo = ow
+    *ho = oh
+    if smask != 0 {
+        apply_smask(d, smask, out, ow, oh)
+    }
+    return true
+}
+
+// the soft mask (8-bit gray, any size) as the alpha channel of `px` (w x h RGBA)
+fn apply_smask(d: *mut Doc, mobj: u64, px: *mut rt.Buf, w: u64, h: u64) {
+    var mb: rt.Buf = rt.buf_new()
+    var mw: u64 = 0
+    var mh: u64 = 0
+    if !doc_img_rgba(d, mobj, 0, &mb, &mw, &mh) {
+        return
+    }
+    if mw == 0 || mh == 0 {
+        rt.buf_free(&mb)
+        return
+    }
+    let dst: u64 = rt.buf_ptr(px)
+    let src: u64 = rt.buf_ptr(&mb)
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let sx: u64 = x * mw / w
+            let sy: u64 = y * mh / h
+            wr8(dst + (y * w + x) * 4 + 3, rd8(src + (sy * mw + sx) * 4))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.buf_free(&mb)
+}
+
+// Draws placement `i` of the last page (see doc_page_svg) into `dst`: w x h
+// pixels of 0x00RRGGBB. The unit square of the image goes through the
+// placement matrix (device pixels); nearest neighbour with 2x2 averaging when
+// the picture is much larger than its place.
+fn doc_img_blit(d: *mut Doc, i: u64, dst: u64, w: u64, h: u64) -> bool {
+    if i >= (*d).nimg {
+        return false
+    }
+    let obj: u64 = doc_img_obj(d, i)
+    var px: rt.Buf = rt.buf_new()
+    var iw: u64 = 0
+    var ih: u64 = 0
+    var ok: bool = doc_img_rgba(d, obj, doc_img_color(d, i), &px, &iw, &ih)
+    let m: M = M { a: doc_img_m(d, i, 0), b: doc_img_m(d, i, 1), c: doc_img_m(d, i, 2),
+        d: doc_img_m(d, i, 3), e: doc_img_m(d, i, 4), f: doc_img_m(d, i, 5) }
+    // the bounding box on the page
+    var minx: f64 = m.e
+    var maxx: f64 = m.e
+    var miny: f64 = m.f
+    var maxy: f64 = m.f
+    var k: u64 = 1
+    while k < 4 {
+        var ux: f64 = 0.0
+        var uy: f64 = 0.0
+        if k == 1 || k == 3 {
+            ux = 1.0
+        }
+        if k == 2 || k == 3 {
+            uy = 1.0
+        }
+        let X: f64 = tx_x(m, ux, uy)
+        let Y: f64 = tx_y(m, ux, uy)
+        if X < minx {
+            minx = X
+        }
+        if X > maxx {
+            maxx = X
+        }
+        if Y < miny {
+            miny = Y
+        }
+        if Y > maxy {
+            maxy = Y
+        }
+        k = k + 1
+    }
+    var x0: i64 = minx as i64
+    var x1: i64 = (maxx + 1.0) as i64
+    var y0: i64 = miny as i64
+    var y1: i64 = (maxy + 1.0) as i64
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    if x1 > (w as i64) {
+        x1 = w as i64
+    }
+    if y1 > (h as i64) {
+        y1 = h as i64
+    }
+    let det: f64 = m.a * m.d - m.b * m.c
+    if fabs(det) < 0.0001 {
+        rt.buf_free(&px)
+        return false
+    }
+    // inverse: device -> unit square
+    let ia: f64 = m.d / det
+    let ib: f64 = 0.0 - m.b / det
+    let ic: f64 = 0.0 - m.c / det
+    let id: f64 = m.a / det
+    let ie: f64 = (m.c * m.f - m.d * m.e) / det
+    let iff: f64 = (m.b * m.e - m.a * m.f) / det
+    var yy: i64 = y0
+    while yy < y1 {
+        var xx: i64 = x0
+        while xx < x1 {
+            let dx: f64 = (xx as f64) + 0.5
+            let dy: f64 = (yy as f64) + 0.5
+            let u: f64 = ia * dx + ic * dy + ie
+            let vv: f64 = ib * dx + id * dy + iff
+            if u >= 0.0 && u < 1.0 && vv >= 0.0 && vv < 1.0 {
+                var r8: u32 = 200
+                var g8: u32 = 200
+                var b8: u32 = 200
+                var a8: u32 = 255
+                if ok {
+                    // image row 0 is the TOP of the picture = v = 1
+                    let sx: u64 = (u * (iw as f64)) as u64
+                    let sy: u64 = ((1.0 - vv) * (ih as f64)) as u64
+                    let sp: u64 = rt.buf_ptr(&px) + (sy * iw + sx) * 4
+                    r8 = rd8(sp)
+                    g8 = rd8(sp + 1)
+                    b8 = rd8(sp + 2)
+                    a8 = rd8(sp + 3)
+                }
+                if a8 > 0 {
+                    let dp: u64 = dst + ((yy as u64) * w + (xx as u64)) * 4
+                    let old: u32 = rd32(dp)
+                    let or: u32 = (old >> 16) & 255
+                    let og: u32 = (old >> 8) & 255
+                    let ob: u32 = old & 255
+                    let nr: u32 = (r8 * a8 + or * (255 - a8)) / 255
+                    let ng: u32 = (g8 * a8 + og * (255 - a8)) / 255
+                    let nb: u32 = (b8 * a8 + ob * (255 - a8)) / 255
+                    wr32(dp, (nr << 16) | (ng << 8) | nb)
+                }
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    rt.buf_free(&px)
+    ok = true
+    return ok
+}

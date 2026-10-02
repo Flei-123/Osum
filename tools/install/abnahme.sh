@@ -208,7 +208,7 @@ rm -f "$SER" "$SOCK"
 # und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
 # der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=Geheim-123"
 
 timeout 900 $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
@@ -532,6 +532,65 @@ else
 fi
 
 # ==================================================================
+# ==================================================================
+titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
+# ==================================================================
+#
+# Der Installer wurde mit `konto=abnahme,kontopw=Geheim-123` gestartet
+# (das Fenster fragt einen Menschen; der Laeufer bekommt es als
+# Argument). Auf der installierten Platte muss GENAU dieses Konto
+# stehen, mit einem Hash, der zu dem Passwort passt -- nachgerechnet
+# von PYTHON (hashlib), nicht vom System selbst --, und OHNE die
+# Konten des Sticks, OHNE Autologin, mit Heimordner.
+platte_lauf konto "echo ==PASSWD;cat /etc/passwd;echo ==SHADOW;cat /etc/shadow;echo ==GROUP;cat /etc/group;echo ==AUTOLOGIN;ls /etc;echo ==USERS;ls /users;echo ==ENDE;exit" 300
+rc=$?
+if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
+    ok "der Kontolauf ist durchgelaufen (Code $rc)"
+else
+    bad "der Kontolauf endete mit Code $rc"
+fi
+python3 - "$OUT/konto.txt" "Geheim-123" > "$OUT/konto-py.txt" 2>&1 <<'PYEOF2'
+import sys, hashlib, binascii, re
+raw = open(sys.argv[1], 'rb').read().decode('latin1')
+# the serial line also carries the shell's echo and the loader's chatter
+raw = '\n'.join(l for l in raw.replace('\r', '').split('\n') if not l.startswith('elf:') and not l.startswith('osum$ ') and not l.startswith('osum:'))
+pw = sys.argv[2]
+# the guest echoes the script on the kernel command line; take the part after the last "==PASSWD" that is a line of its own
+def sect(name, nxt):
+    m = re.findall(r'(?m)^==%s\r?\n(.*?)^==%s' % (name, nxt), raw, re.S)
+    return m[-1] if m else ''
+passwd = sect('PASSWD', 'SHADOW'); shadow = sect('SHADOW', 'GROUP')
+group = sect('GROUP', 'AUTOLOGIN'); users = sect('USERS', 'ENDE')
+auto = sect('AUTOLOGIN', 'USERS')
+names = [l.split(':')[0] for l in passwd.splitlines() if ':' in l]
+print("passwd-names", names)
+print("ok1" if names == ['root', 'abnahme'] else "bad1 passwd names %r" % names)
+row = [l for l in passwd.splitlines() if l.startswith('abnahme:')]
+print("ok2" if row and row[0].split(':')[2:4] == ['1000', '1000'] and row[0].split(':')[5] == '/users/abnahme' else "bad2 %r" % row)
+sh = {l.split(':')[0]: l.split(':')[1] for l in shadow.splitlines() if ':' in l}
+print("ok3" if sh.get('root') == '!' else "bad3 root field %r" % sh.get('root'))
+h = sh.get('abnahme', '')
+m = re.match(r'^\$osum1\$(\d+)\$([0-9a-f]+)\$([0-9a-f]+)$', h)
+def check(p):
+    if not m: return False
+    dk = hashlib.pbkdf2_hmac('sha256', p.encode(), binascii.unhexlify(m.group(2)), int(m.group(1)), 32)
+    return binascii.hexlify(dk).decode() == m.group(3)
+print("ok4" if check(pw) else "bad4 hash does not match the password")
+print("ok5" if not check('falsch-123') and not check('live') and not check('startkennwort') else "bad5 wrong password accepted")
+print("ok6" if 'abnahme' in [l.split(':')[0] for l in group.splitlines() if ':' in l] else "bad6 group")
+print("ok7" if 'abnahme' in users.split() and 'live' not in users.split() else "bad7 users %r" % users)
+print("ok8" if 'autologin' not in auto.split() and 'passwd' in auto.split() else "bad8 autologin still there or no listing: %r" % auto[:200])
+PYEOF2
+cat "$OUT/konto-py.txt" | sed 's/^/        /'
+grep -q '^ok1' "$OUT/konto-py.txt" && ok "/etc/passwd: genau root und abnahme (die Konten des Sticks sind weg)" || bad "/etc/passwd stimmt nicht"
+grep -q '^ok2' "$OUT/konto-py.txt" && ok "abnahme hat uid/gid 1000 und Heimordner /users/abnahme" || bad "uid/gid/Heimordner falsch"
+grep -q '^ok3' "$OUT/konto-py.txt" && ok "root ist gesperrt (!)" || bad "root nicht gesperrt"
+grep -q '^ok4' "$OUT/konto-py.txt" && ok "der Hash gehoert zum gewaehlten Passwort (PBKDF2, von Python nachgerechnet)" || bad "Hash passt nicht zum Passwort"
+grep -q '^ok5' "$OUT/konto-py.txt" && ok "GEGENPROBE: ein falsches Passwort und die Standardpasswoerter live/startkennwort passen NICHT" || bad "ein falsches Passwort passt"
+grep -q '^ok6' "$OUT/konto-py.txt" && ok "/etc/group kennt abnahme" || bad "/etc/group ohne abnahme"
+grep -q '^ok7' "$OUT/konto-py.txt" && ok "/users/abnahme liegt da, /users/live nicht" || bad "Heimordner falsch"
+grep -q '^ok8' "$OUT/konto-py.txt" && ok "kein /etc/autologin auf der installierten Platte" || bad "/etc/autologin liegt noch da"
+
 titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 # ==================================================================
 #

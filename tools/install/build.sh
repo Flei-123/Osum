@@ -252,12 +252,12 @@ else
 #          Adresse als Name genommen, und die traegt kein Zertifikat --
 #          die Verbindung wird dann abgelehnt, und das ist richtig so.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe: nein.
+# auto     ja/nein. Vorgabe: ja (Entscheidung des Besitzers 02.10.2026).
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 #quelle=https://192.0.2.1:443
 #name=pkg.example.org
 abstand=3600
-auto=false
+auto=true
 frist=120
 EOFC
 fi

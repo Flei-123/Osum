@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wspam.fi -- DAILY-DRIVER (r200): THE TASKBAR'S WINDOW-LIST
+// POLL, AS FAST AS IT GOES.
+//
+//     wspam <polls>
+//
+// Roadmap r200 (27.09.2026): "128 octets from byte 16 of a sector zeroed,
+// at random". Measured here: those are bytes 3600..3727 of the 4 KiB
+// copy page (kernel/sys/sysgui.fi `wl_fill` zeroes `blockb(state)+3600` for
+// WL_BYTES = 128 octets before it fills in a window record) -- and 3600 mod
+// 512 = 16. Before the copy page was made per core, every file write that
+// bounced its data through the shared page could have those 128 octets
+// zeroed by the taskbar polling the window list on another core.
+//
+// This program does what the taskbar does, and nothing else: it creates one
+// window, puts it on the top layer, reserves a screen edge (a root-only
+// call -- that is what makes the kernel treat the caller as the taskbar,
+// `sysgui.is_taskbar`) and then calls WM_LIST for every slot, <polls>
+// times. tools/fsrobust/r200.sh runs it next to four file writers on four
+// cores and checks every octet they wrote.
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const WM_CREATE: u64 = 2100
+const WM_STATE: u64 = 2109
+const WM_LIST: u64 = 2110
+const WM_STRUT: u64 = 2112
+const SLOTS: u64 = 16
+
+static mut REC: [u8; 256] = [0 as u8; 256]
+
+fn u_start(args: u64) -> u64 {
+    var title: [u8; 6] = "wspam\0"
+    var s_nowin: [u8; 44] = "wspam: no window (is the window server on?)\0"
+    var s_nostrut: [u8; 31] = "wspam: no strut (root? layer?)\0"
+    var s_done: [u8; 20] = "wspam: done listed=\0"
+    var polls: u64 = 100000
+    if ulib.arg_count(args) > 1 {
+        polls = ulib.to_num(ulib.arg_at(args, 1))
+    }
+    // position and size are packed as (x << 16) | y and (w << 16) | h
+    let h: u64 = ulib.sys4(WM_CREATE, (4 << 16) | 4, (64 << 16) | 20,
+        (&title[0]) as u64, 0)
+    if ulib.bad(h) {
+        ulib.say((&s_nowin[0]) as u64)
+        ulib.nl()
+        return 2
+    }
+    // layer 2 = L_TOP; a panel has to be on L_DESK or L_TOP
+    ulib.sys(WM_STATE, h, 0, 2)
+    let rc: u64 = ulib.sys(WM_STRUT, h, 0, 16)
+    if ulib.bad(rc) {
+        ulib.say((&s_nostrut[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    var listed: u64 = 0
+    var p: u64 = 0
+    while p < polls {
+        var i: u64 = 0
+        while i < SLOTS {
+            let r: u64 = ulib.sys(WM_LIST, i, (&REC[0]) as u64, 128)
+            if !ulib.bad(r) {
+                listed = listed + 1
+            }
+            i = i + 1
+        }
+        p = p + 1
+    }
+    ulib.say((&s_done[0]) as u64)
+    ulib.sayu(listed)
+    ulib.nl()
+    return 0
+}
