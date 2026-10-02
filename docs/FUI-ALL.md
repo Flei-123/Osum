@@ -192,7 +192,8 @@ alltag raster 100 % for both.
 ## 7. Stage 2, round F-5: the mid-sized programs, 02.10.2026 (night)
 
 On the scene tree now (nothing of them is left on wlib's widgets):
-`taskmgr`, `storage` (/bin/speicher), `viewer`, `snip`. Together with
+`taskmgr`, `storage` (/bin/speicher), `viewer`, `snip`, `installer`,
+`powermon`. Together with
 `calc`, `papierkorb`, `netmon`, `lock`, `glogin`.
 
 New building blocks in `fuiscene.fi` (all state by KEY, so a rebuild keeps
@@ -255,3 +256,33 @@ the width grows, not only the height).
 * Design rule honoured by the tokens: fields, tables, picture boxes use the
   `field` step, tool-bar buttons the `control` step, the main action (Sichern,
   OK) the accent.
+
+### 7.5 Installer, powermon, and what else changed
+
+* `installer`: the disk table and the partition table are blob tables, the
+  two ways are tabs, the two questions are in-window dialogs (state machine
+  instead of a blocking wait loop: "Ja" on the first opens the second,
+  "Ja" on the second sets `los`), the progress is `fuiscene.repaint_now()`
+  between the steps (the installation still runs in ONE go, see the long
+  comment in the file). Old behaviour kept: on the "daneben" way one
+  question. NOTE (read from the code, not measured): the old code set `frage = 2`
+  BEFORE showing that single question, and its loop starts the writing
+  when `frage == 2` -- so on that way the question seems not to have held
+  anything back. The new code starts only on the answer. `tools/install/abnahme.sh` (full chain: install, reboot from the
+  disk, file survives, root block flipped).
+* `powermon`: label, table, close button.
+* `fuiscene.set_value` writes the live node's widget too. Before, `val_sync`
+  (run before the rebuild) compared the OLD tree's slider with the NEW
+  stored value and read the difference as a drag by the user: the viewer's
+  zoom crept to 89 %.
+* `say_rects` no longer needs the trace switch (programs call it once at
+  start; the repeated calls of taskmgr stay behind `melde` / trace), tables
+  are reported as kind 6, sliders as kind 17.
+* Acceptance runs: `tools/alltag/run.sh` section 9 builds a 16 MiB image
+  (`bloecke=32768`): eleven programs that each carry the scene host no
+  longer fit 8 MiB. `tools/toolbench/run.sh` holds the window server for
+  120 s (`wighalt=120`).
+* Firn: the caret bug was a compiler bug (regalloc `CallIndirect` ignored
+  floating point), fixed in Firn main `93a688d77`, test
+  `tests/2002_calli_float.fi`. OrientOS' pin (`vendor/firn/COMMIT`) is older;
+  `fuiapp.field_paint` works on both.
