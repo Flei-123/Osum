@@ -114,9 +114,9 @@ while True:
     start = i + 1
 PY2
 }
-torn "$S" "orientbus: ready apps=2 actions=10 rejected_manifests=0" \
-    && ok "the broker reads the settings and a11y manifests (2 apps, 5+4 actions + 1 event, none refused)" \
-    || bad "no 'orientbus: ready apps=2 actions=10 rejected_manifests=0'"
+torn "$S" "orientbus: ready apps=2 actions=14 rejected_manifests=0" \
+    && ok "the broker reads the settings and a11y manifests (2 apps, 5+4 settings + 4 update actions + 1 event, none refused)" \
+    || bad "no 'orientbus: ready apps=2 actions=14 rejected_manifests=0'"
 torn "$S" "settingsd: ready keys=14" \
     && ok "settingsd reads the shipped schema (14 settings)" \
     || bad "no 'settingsd: ready keys=14'"
