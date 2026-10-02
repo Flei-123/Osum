@@ -26,11 +26,15 @@
 #   host check must see it; without that a checker that always says "ok"
 #   would pass for ever.
 #
-# What this cannot say: that there is no race -- a race that needs a rarer
-# interleaving than the rounds produce stays hidden. It says that the
-# window the fix closed stays closed in the way it was measured, and every
-# round that passes on a changed kernel is one more place it could have
-# been seen.
+# WHAT THIS CANNOT SAY, MEASURED ON 02.10.2026: that the copy-page race of
+# r200 is gone. The shared page was put back on purpose (blockb = BLOCK_OFF
+# for everybody) and three rounds still passed -- the writers share the
+# file-system lock, so they never meet in the page. What the test does
+# prove: four writers on four cores lose and mix up nothing, the guest
+# and the host agree on every octet, and the files survive a restart.
+# Roadmap r200 therefore stays open for what it names: the DESKTOP on four
+# cores (window calls + file writes) -- tools/multicore/run.sh is the place
+# for a negative control.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
