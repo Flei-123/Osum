@@ -1,6 +1,6 @@
 # DAILY-DRIVER — Alltags-Lückenliste
 
-Stand 02.10.2026, Zweig `daily-driver` (Basis `main` 632ed76c).
+Stand 02.10.2026 (Abend), Zweig `daily-driver` (Basis `main` 632ed76c). **Erledigt seit der ersten Fassung dieser Liste:** A3 (Auto-Update: Kanäle, Hintergrund, Start-Bestätigung, Einstellungsseite), A7 (Zeit: Sommerzeit nach Regel, SNTP, Uhr stellen), Teil des A1 (Schreiber-Test auf vier Kernen). Zeilen unten sind entsprechend fortgeschrieben.
 Ziel des Boss: OrientOS **täglich benutzen**, mit **Auto-Update**.
 
 **Wie diese Liste entstand:** Ist-Stand aus Roadmap (Projekt OrientOS, r1–r265), `docs/RUNDE-*.md`, `STATUS-*.md`, `docs/BLECH-BEREIT.md`, `docs/REALHW.md` und Stichproben im Code (`kernel/user/installer.fi`, `ota.fi`, `tools/ota/*`). Nichts davon ist heute neu am Gerät gemessen. Stufen: **OK** = in QEMU/KVM durch eine Abnahme belegt · **TEIL** = Prototyp oder Teilstück · **FEHLT** = nicht da.
@@ -16,13 +16,13 @@ Kennzahl-Konvention: `Wichtigkeit 5` = ohne das kein Alltag, `1` = Komfort.
 
 | # | Bereich | Stand | Beleg / Lücke | In VM testbar? | Nächster Schritt |
 |---|---|---|---|---|---|
-| A1 | **Dateisystem hält** | TEIL | OFS mit Journal (`docs/OFS-JOURNAL.md`), fsck. ABER r200: Daten-Wettlauf im Kern nullt zufällig ~128 Oktette in Sektoren (SATA, QEMU q35); Installer fängt es durch Prüfen+Nachschreiben ab, das **laufende** System nicht. r211/r212/r213 SMP-Zustände ohne Sperre. | ja | Ursache r200 finden (Verdacht: gemeinsamer Umschlagpuffer `BLOCK_OFF` bei Präemption), Dauertest mit Prüfsummen |
+| A1 | **Dateisystem hält** | TEIL | OFS mit Journal (`docs/OFS-JOURNAL.md`), fsck. **Neu:** `tools/fsrobust/wrace.sh` — vier Schreiber auf vier Kernen, jeder Oktett vom Gast **und vom Wirt aus dem Plattenabbild** geprüft, auch nach Neustart (11/0). **Ehrliche Grenze, gemessen:** setzt man die gemeinsame Kopierseite absichtlich zurück, bleibt der Test grün (die Schreiber teilen die Dateisystem-Sperre). r200 selbst (Fix 0538cbd1 vom 27.09., je Kern eine Seite) ist damit **nicht unabhängig bestätigt**; der Auslöser war der Schreibtisch auf vier Kernen. r211/r212/r213 SMP-Zustände ohne Sperre offen. | ja | Negativkontrolle für r200 auf Basis `tools/multicore/run.sh` (Schreibtisch + Dateischreiben); r211–r213 |
 | A2 | **Installation auf Platte, benutzbar** | TEIL | P-001 fertig (`tools/install/abnahme.sh` 35/0), Dual-Boot neben Windows gemessen (`RUNDE-DUALBOOT.md`). Lücken: r172 Installer legt **kein eigenes Konto** an (Platte erbt `live`/Autologin bzw. Justins Konto), r202/r175 Plattenliste leer gezeichnet, r203 nur UEFI/GPT, Verkleinern einer Partition geht nicht. | ja | Konto + Kennwort im Installer, danach Abnahme „installieren → neu starten → anmelden" |
-| A3 | **Auto-Update** | TEIL | OTA 107/0: signiert (Ed25519, Schlüsselbund), Rückschrittsschutz, Wiederaufnahme, Wachhund, Rückfall auf vorige Generation, Stromausfall 30×. Fehlt: Kanäle, Anzeige in den Einstellungen, Update beim Neustart, Kern im A/B (r104), O-013 (14 Pakete ≈ 25 min in QEMU). | ja | → Teil C |
+| A3 | **Auto-Update** | OK/TEIL | OTA **146/0**: signiert (Ed25519, Schlüsselbund), Rückschrittsschutz, Wiederaufnahme, Wachhund, Rückfall, Stromausfall; **neu:** Kanäle stable/test, Hintergrund-Einspielen (`ota dienst`), gesunder Start wird selbst bestätigt (`ota boot`), Reiter *Updates* in den Einstellungen, `ota zurueck` von Hand gemessen. Fehlt: Kern im A/B (r104), O-013 (14 Pakete ≈ 25 min in QEMU), `stable/`/`test/` auf dem Live-Store (Freigabe), Standard `auto` (Entscheidung). | ja | → Teil C |
 | A4 | **Start auf dem echten Rechner** | TEIL | Justins PC (AMD, NVIDIA GA106): UEFI-Stick startet (BLECH-ECHT). Dell 9020: Panik/DHCP/Maus offen (r153, r189, r206, r210). | nein | Teil B |
 | A5 | **Anmeldung/Sperre** | OK | Login + Sperrbildschirm direkt auf fUi (`main` b3e4a65b), PBKDF2 `$osum1$`, Mehrbenutzer. Fehlt: PIN/Passkey (r253), r170 Taskleisten-Fenster schluckt Klicks unter dem Login. | ja | r170, danach PIN |
 | A6 | **Netzwerk Ethernet** | OK/TEIL | DHCP, DNS-Resolver (r17), TLS 1.3, e1000/I217/I219/RTL (BLECH). Dell: kein Netz (r182/r189), I219-Ringe (r155). | VM ja, Dell nein | Teil B |
-| A7 | **Uhr/Zeit** | FEHLT | r19 kein NTP, r20 keine Zeitzonen-DB, r79 RTC-Zeitzone ist Annahme (`tz=120` fest in der Startzeile, Sommerzeit nicht berücksichtigt). Folge: Zertifikatsprüfung scheitert bei falscher Uhr → auch **Update** scheitert. Dell zeigt 2016 (r184). | ja | SNTP + Zeitzonentabelle (Europe/Vienna) + `tz` aus Einstellung |
+| A7 | **Uhr/Zeit** | OK/TEIL | **Neu (`docs/TIME.md`, `tools/time/run.sh` 39/0):** `tzrule=eu` (Sommerzeit nach Regel; die Startzeilen trugen ein festes `tz=120`, im Winter eine Stunde falsch), `clock_settime`, `/bin/sntp` mit Absicherung (Nonce, Zufallsport, KoD/LI3/kurz/Modus abgelehnt, NTP-Ära 1), `sntp boot` beim Start, Einstellungsreiter *Zeit* zeigt den Kernwert, Dateizeiten im Explorer je Datei. Fehlt: weitere Zonen als EU + feste Versätze (keine Zeitzonen-DB, r20), ob die echte CMOS-Uhr `rtc_write` annimmt (nur Blech), NTS (Authentifizierung). | ja | Zonen-Tabelle (US, UK …) falls nötig; am Dell Uhr prüfen |
 | A8 | **Sicherheit der Daten (Backup)** | TEIL | `/bin/backup` + Explorer „Backup hierhin sichern", Schnappschüsse, 61+ Zusagen (`tools/vault`). Fehlt: Wiederherstellung auf leeres Blech (r60), kein Zeitplan. | ja | Zeitplan + Restore-aus-Backup-Abnahme |
 
 ### Stufe 4 — man hält es ein paar Tage aus, dann nervt es
@@ -37,7 +37,7 @@ Kennzahl-Konvention: `Wichtigkeit 5` = ohne das kein Alltag, `1` = Komfort.
 | B6 | **Office/PDF** | FEHLT | Texteditor (`edit`, `nedit`), Rechner, ZIP, Notizen da. Kein PDF-Betrachter (r55), kein Office (r64). | ja | PDF-Betrachter (Text + Bilder) |
 | B7 | **Medien** | TEIL | WAV/MP3 (`play`), H.264 bitgenau, 640×480 mit 25 Bildern/s (`RUNDE-H264T.md`), Bildbetrachter PNG/JPEG/BMP/GIF. Roadmap r56 steht noch offen, obwohl Dekoder da ist — Player-Oberfläche + AAC/Container prüfen. | ja | Videoplayer-Fenster |
 | B8 | **App-Store** | TEIL | Inhalt da (14 Programme, `store.fleitec.com`), Installation per `ota`/`opk` auf der Konsole. **Keine Store-Oberfläche** (r54), Auslieferung wird nicht automatisch nachgezogen (r178). | ja | Store-Seite in den Einstellungen |
-| B9 | **Einstellungen vollständig** | TEIL | 14 Reiter. Fehlt: Updates (CLI `ota einstellungen`), Zeit/Zeitzone, Datenträger (r59), Drucker, Bluetooth. fUi-Umbau läuft parallel. | ja | Reiter „Updates", „Datum & Zeit" |
+| B9 | **Einstellungen vollständig** | TEIL | 15 Reiter (neu: **Updates**; *Zeit* zeigt den echten Kernwert). Fehlt: Datenträger (r59), Drucker, Bluetooth. fUi-Umbau läuft parallel. | ja | Datenträger-Reiter |
 | B10 | **Tastatur/Sprache DE** | OK/TEIL | Deutsche Oberfläche, Umlaute (`umlaut`-Läufer), Layout. H-001: schnelles Tippen auf USB vertauscht Tasten (r157). | ja | r157 beheben |
 | B11 | **Terminal** | OK | `/bin/term`, Shell, ~100 Programme. r217 Debugzeilen beim Start. | ja | r217 |
 | B12 | **Explorer** | OK | Kopieren, Papierkorb je Datenträger, Suche, ZIP, USB ein-/auswerfen, Drag&Drop. | ja | — |
@@ -91,20 +91,20 @@ Reihenfolge = was zuerst am Dell/Justins PC angeschaut werden sollte.
 * Server-Seite: `veroeffentlichen.py` (Fassungsregister, Vorrat, alte Fassungen, Rücknahme, Sperrliste), `schluesselbund.py` (Haupt-/Ersatzschlüssel, Kettensatz).
 * Live-Store `store.fleitec.com` Fassung 4 (14 Programme).
 
-**Fehlt für „Auto-Update im Alltag"** (Anforderung des Boss ↔ Stand):
+**Stand der Anforderungen des Boss** (alles in QEMU/KVM gemessen, `tools/ota/run.sh` **146/0**, Abschnitt 7 neu):
 
-| Anforderung | Stand | Plan |
-|---|---|---|
-| Signierte Updates | OK | — |
-| Hintergrund-Download | TEIL (`ota dienst`, `auto=ja`) | Dienst in Standard-`inittab`/Abbild, Drosselung, Wiederholung bei Netzausfall prüfen |
-| A/B bzw. Rollback | TEIL: Generationen + Zähler. **Kern nicht im Wechsel** (r104) | Zwei Kernabbilder auf der ESP + Lader-Umschaltung (eigene Runde); bis dahin ESP-Kern nur ersetzen, wenn Kern unverändert |
-| Update beim Neustart | TEIL: `einspielen` legt Generation an, nie Auto-Neustart | „Beim nächsten Neustart aktivieren" als Standard, Hinweis in der Leiste |
-| Anzeige in Einstellungen | FEHLT (nur CLI) | Reiter „Updates" (Fassung, Kanal, letzte Suche, Knopf Suchen/Installieren/Zurück) |
-| Kanäle stabil/test | FEHLT | `kanal=` in `/etc/ota.conf`, getrennte Auslieferungsbäume `stabil/` und `test/`, Test: Gerät auf `test` sieht höhere Fassung, `stabil` nicht |
-| E2E alt→neu→Rollback in VM | OK für Pakete (Abschnitte 2, 4, 5) | erweitern um Kanalwechsel und Rollback per `ota zurueck` über Neustart |
-| Update-Dauer | O-013: 14 Pakete ≈ 25 min | messen, wo die Zeit bleibt |
-| Uhr | A7 | NTP, sonst scheitert die Zertifikatsprüfung |
-| Store automatisch nachziehen | r178 | Veröffentlichen als Schritt nach main-Merge |
+| Anforderung | Stand |
+|---|---|
+| Signierte Updates | OK (Ed25519, zwei unabhängige Prüfungen, Rückschrittsschutz, Sperrliste) |
+| Hintergrund-Download | OK: `ota dienst` (bei `auto=true`) sucht, holt, prüft und spielt als neue Generation ein — **ohne Neustart** (7 (h)); vom Schreibtischstart gerufen (`ota boot`) |
+| A/B bzw. Rollback | OK für Programme/Userland: Generationen, Erprobungszähler, Wachhund, `ota zurueck` von Hand (7 (e)), 10 Fehlstarts → Rückfall. **Der Kern selbst ist nicht im Wechsel** (r104) |
+| Update beim Neustart | OK: eingespielt wird in eine neue Generation, wirksam beim nächsten Start; nie ein Neustart von selbst außer zum Zurückrollen |
+| Gesunder Start bestätigt sich selbst | OK: `ota boot` bestätigt, wenn Anmeldeschirm/Schreibtisch nach 60 s laufen; sonst Neustart und nach drei Versuchen Kern-Rückfall (7 (g) mit Gegenprobe). Grenze: ein Schreibtisch, der später abstürzt, wird nicht mehr zurückgerollt (DD-9) |
+| Anzeige in den Einstellungen | OK: Reiter *Updates* (Version, Kanal, automatisch, zuletzt geprüft, Stand; Knöpfe Suchen / Installieren / Zurück / Kanal / Automatisch / Bestätigen) über `settings.update.*` am Bus; GUI-Abnahme `tools/actionbus/gui.sh` |
+| Kanäle stable/test | OK im Gerät (`kanal=`, `update.channel`); der Wechsel test→stable ist ein Rückschritt und wird abgelehnt (gewollt). **Auf dem Live-Store gibt es die Verzeichnisse noch nicht** (Freigabe) |
+| E2E alt→neu→Rollback in der VM | OK (Abschnitte 2–5 und 7) |
+| Uhr | OK (A7); ohne richtige Uhr scheitert die Zertifikatsprüfung |
+| Offen | O-013 Dauer; Store automatisch nachziehen (r178); Kern im A/B (r104); `auto` als Standard? (Boss) |
 
 **Nicht ohne Freigabe des Boss:** echte Auslieferung an Geräte, Schlüsselwechsel, Veröffentlichen einer Fassung auf `store.fleitec.com`.
 
@@ -112,11 +112,14 @@ Reihenfolge = was zuerst am Dell/Justins PC angeschaut werden sollte.
 
 ## TEIL D — Reihenfolge der Arbeit (VM-machbar zuerst)
 
-1. **OTA-Kanäle + Einstellungsseite „Updates" + E2E-Rollback-Test** (A3).
-2. **Zeit**: SNTP, Zeitzonen, `tz` aus Einstellung (A7) — Voraussetzung für verlässliches Update.
-3. **Dateisystem-Wettlauf r200** (A1).
-4. **Installer legt Konto an** (A2/r172) + Abnahme „Installation → Neustart → Anmeldung".
-5. Standby-Menüpunkt (B4/r143), Store-Oberfläche (B8), PDF-Betrachter (B6).
-6. Verschlüsselung im Installer (B2).
+Erledigt am 02.10.2026: **1** OTA-Kanäle/Seite/Rollback-Test, **2** Zeit (SNTP, Sommerzeit nach Regel), **3** Schreiber-Test (mit ehrlicher Grenze).
+
+Als Nächstes:
+
+1. **Installer legt eigenes Konto an** (A2/r172) + Abnahme „installieren → neu starten → anmelden" (nur das öffentliche Abbild braucht es; das persönliche trägt Justins Konto).
+2. **r200 sauber**: Negativkontrolle auf dem Schreibtisch mit vier Kernen.
+3. Standby-Menüpunkt (B4/r143), Store-Oberfläche (B8), PDF-Betrachter (B6).
+4. Verschlüsselung im Installer (B2).
+5. Hardware (Teil B): Dell-Stick, Uhr, Update am Gerät.
 
 Pflege: Roadmap (Projekt OrientOS) bleibt die einzige Punktliste; diese Datei ist die Sicht nach Alltagsrelevanz. Bei Abschluss eines Punkts hier die Zeile aktualisieren.

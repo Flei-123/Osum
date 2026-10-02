@@ -375,22 +375,31 @@ den Live-Store (`store.fleitec.com`) wird erst umgestellt, wenn die
 Verzeichnisse `stable/` und `test/` dort veröffentlicht sind — das ist ein
 Eingriff in ein Live-System und braucht die Freigabe des Boss.
 
-## Die Einstellungen am Bus
+## Die Einstellungen am Bus und die Seite *Updates*
 
 `etc/settings.schema` kennt `update.auto` (bool) und `update.channel`
 (`stable,test`) mit `store /etc/ota.conf auto|kanal`: Einstellungsfenster,
 Skripte und Jarvis ändern dieselbe Datei durch dieselbe Tür; beide Schlüssel
 sind `critical` (fragen immer den Nutzer). `auto` versteht `ja`/`true`.
 
+`settingsd` (läuft als root) bietet vier Aktionen: `settings.update.status`
+(read), `settings.update.check` (write), `settings.update.install` und
+`settings.update.rollback` (critical). Sie starten `ota` in einem Kind
+(`suchen`/`einspielen`/`zurueck`), antworten sofort und liefern bei einer
+zweiten Anfrage `err busy`. Der 15. Reiter des Einstellungsfensters
+(*Updates*) ist Kunde dieser Aktionen und liest `/system/ota.stand`.
+Messung: `tools/actionbus/run.sh` Abschnitt 13 (`S-UPD`), `tools/actionbus/gui.sh`
+(`G-UPDPAGE`).
+
 ## Was weiter fehlt
 
-* Eine Seite „Updates" im Einstellungsfenster mit Stand und Knöpfen (Suchen /
-  Installieren / Neu starten / Zurück). Die Daten dafür liegen jetzt vor
-  (`/system/ota.stand`); die Knöpfe brauchen Root-Aktionen am Bus
-  (`update.check`, `update.install`, `update.rollback` in `settingsd`).
 * `ota boot` bestätigt, wenn der Schreibtisch **eine Minute nach dem Start**
   noch läuft. Ein Schreibtisch, der danach abstürzt, wird nicht mehr
-  zurückgerollt.
+  zurückgerollt (DD-9).
 * Der Kern selbst ist nicht im A/B-Wechsel (Roadmap r104).
 * `ota einspielen` ist langsam (r179: 14 Pakete ≈ 25 min in QEMU).
-* Die Uhr muss stimmen, sonst scheitert die Zertifikatsprüfung (DAILY-DRIVER A7).
+* Auf dem Live-Store (`store.fleitec.com`) gibt es `stable/` und `test/` noch
+  nicht; solange bleiben die ausgelieferten Abbilder bei `quelle=…/aktuell`
+  ohne `kanal=` (Freigabe des Boss nötig).
+* Die Uhr muss stimmen, sonst scheitert die Zertifikatsprüfung — jetzt gelöst
+  durch `/bin/sntp` (`docs/TIME.md`).
