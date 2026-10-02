@@ -47,7 +47,7 @@ PDF-Datei vorgibt (Breiten aus `/Widths`, `/W` bzw. den Metriken der Standardsch
   Zeilenabstand, horizontale Skalierung, Rise, gedrehte und geschrägte Matrizen.
 * **Bilder:** JPEG, rohe Abtastwerte mit 1/2/4/8/16 Bit in Gray/RGB/CMYK/Indexed,
   Bildmasken, weiche Masken (`/SMask`), beliebige Drehung/Skalierung.
-* **Verschlüsselung:** wird **erkannt und gemeldet** („Verschlüsselte PDF-Dateien: nicht möglich").
+* **Verschlüsselung:** Dateien, die ohne Passwort aufgehen (leeres Benutzerkennwort — Rechnungen, Kontoauszüge, mit Eigentümerkennwort gegen Kopieren/Drucken): **RC4 40/128 Bit und AES-128** werden entschlüsselt (Streams). Braucht die Datei ein Kennwort oder ist sie AES-256 (V5, braucht SHA-512), wird das gemeldet („Verschlüsselte PDF-Dateien: nicht möglich"). Strings in Wörterbüchern werden nicht entschlüsselt.
 
 ## Was er NICHT kann (ehrlich)
 

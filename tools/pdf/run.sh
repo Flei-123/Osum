@@ -11,7 +11,7 @@
 #   3. against poppler: per page the multiset of characters equals pdftotext's,
 #      and the picture (reader -> SVG -> OrientOS's SVG renderer, images blitted)
 #      differs from pdftoppm's by less than 3 grey levels on average
-#   4. damaged files: encrypted -> error 2, garbage/empty -> error 1, truncated or
+#   4. damaged files: password needed / AES-256 -> error 2, garbage/empty -> error 1, truncated or
 #      with a wrong startxref -> the file is rebuilt and the page is there
 #   5. fuzz: 800 random corruptions of the corpus; the reader may refuse, never
 #      crash, never hang (exit 0 or 3, nothing else)
@@ -67,7 +67,7 @@ x = np.asarray(im.crop((0, 0, cw, ch)).filter(ImageFilter.GaussianBlur(2)), dtyp
 y = np.asarray(rim.crop((0, 0, cw, ch)).filter(ImageFilter.GaussianBlur(2)), dtype=float)
 print("diff %.2f" % float(np.abs(x - y).mean()))
 PY
-for f in basic graphics unicode images styles rotated rot90 rot180 rot270 xrefstm plain-flate a85 ahx rl lzw form long; do
+for f in basic graphics unicode images styles rotated enc-rc4-40 enc-rc4-128 enc-aes-128 rot90 rot180 rot270 xrefstm plain-flate a85 ahx rl lzw form long; do
     mkdir -p "$OUT/s/$f"
     "$OUT/pdfdump" "$OUT/c/$f.pdf" "$OUT/s/$f" 100 > "$OUT/s/$f.txt" 2>&1
     np=$(sed -n 's/^pages=//p' "$OUT/s/$f.txt")
@@ -87,7 +87,8 @@ chk() { # file expected-line-regex label
     grep -qE "$2" "$OUT/s/$1.d.txt" && ok "$3" || bad "$3 ($(head -1 "$OUT/s/$1.d.txt"))"
 }
 mkdir -p "$OUT/s/_x"
-chk encrypted '^error=2' "an encrypted file is named as such (error 2) and not shown as rubbish"
+chk encrypted '^error=2' "a file that needs a password is named as such (error 2) and not shown as rubbish"
+chk enc-aes-256 '^error=2' "AES-256 (needs SHA-512, not built) is refused as encrypted (error 2)"
 chk damaged-garbage '^error=1' "a file that is no PDF: error 1"
 chk damaged-empty '^error=1' "an empty file: error 1"
 chk damaged-notrailer '^pages=1' "no trailer, no xref: the objects are found by scanning, the page is there"

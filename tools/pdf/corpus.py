@@ -105,6 +105,18 @@ def main(out):
     c = canvas.Canvas(f"{out}/encrypted.pdf", pagesize=A4, encrypt="secret")
     c.drawString(72, 700, "secret"); c.save()
 
+    # 7b. encrypted with the EMPTY user password (opens everywhere without asking)
+    for name, alg in (("rc4-40", "RC4-40"), ("rc4-128", "RC4-128"), ("aes-128", "AES-128"), ("aes-256", "AES-256")):
+        try:
+            w = PdfWriter(); r = PdfReader(f"{out}/long.pdf" if name != "rc4-40" else f"{out}/basic.pdf")
+            for pg in list(r.pages)[:3]:
+                w.add_page(pg)
+            w.encrypt(user_password="", owner_password="owner-secret", algorithm=alg)
+            with open(f"{out}/enc-{name}.pdf", "wb") as f:
+                w.write(f)
+        except Exception as e:
+            print("no enc-%s.pdf:" % name, e)
+
     # 8. the raw writer: xref stream + object stream, and the old filters
     def raw_pdf(path, objs, content_filter=None, xref_stream=False, objstm=False):
         """objs: dict num -> bytes (a dict/array text) or ('stream', dict_text, data)."""

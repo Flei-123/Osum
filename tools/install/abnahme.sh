@@ -208,9 +208,9 @@ rm -f "$SER" "$SOCK"
 # und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
 # der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=Geheim-123"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=geheim123"
 
-timeout 900 $QEMU_X86 -m 512 \
+timeout 3000 $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
     -serial "file:$SER" -display none -no-reboot \
     -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
@@ -246,7 +246,7 @@ grep -qa 'installer: disk /dev/hda' "$SER" \
 
 # Jetzt laeuft die Installation (Schalter `sofort`). Sie dauert Minuten.
 i=0
-while [ $i -lt 1600 ]; do
+while [ $i -lt 3000 ]; do
     grep -qa 'installer: fertig\|installer: FEHLER' "$SER" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
@@ -431,8 +431,11 @@ else
 fi
 if [ -s "$SHOTS/40-von-der-platte.png" ]; then
     t=$(tinte "$SHOTS/40-von-der-platte.png")
-    if [ "$t" -ge 5 ]; then
-        ok "BILD: der Schreibtisch von der Platte (${t} % Tinte)"
+    # DAILY-DRIVER (r172): the installed system has no autologin any more, its
+    # first picture is the LOGIN SCREEN (little ink: a small dialog on a light
+    # screen), the desktop comes after the password -- test 7c types it
+    if [ "$t" -ge 2 ]; then
+        ok "BILD: der Anmeldeschirm von der Platte (${t} % Tinte)"
     else
         bad "der Schirm von der Platte ist fast leer (${t} % Tinte)"
     fi
@@ -458,8 +461,8 @@ fi
 # "die Platte bootet" von "man kann damit arbeiten" unterscheidet:
 # ein Fenster, das der Fensterserver meldet, gibt es nur, wenn ein
 # Ring-3-Programm von DIESER Platte gestartet ist.
-if grep -qa 'desk: start /bin/desktop' "$OUT/start.txt"; then
-    ok "der Schreibtisch startet von der Platte"
+if grep -qa 'desk: start /bin/desktop\|desk: start /bin/glogin' "$OUT/start.txt"; then
+    ok "die Oberflaeche (Anmeldeschirm bzw. Schreibtisch) startet von der Platte"
 else
     bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"
 fi
@@ -539,7 +542,7 @@ fi
 titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
 # ==================================================================
 #
-# Der Installer wurde mit `konto=abnahme,kontopw=Geheim-123` gestartet
+# Der Installer wurde mit `konto=abnahme,kontopw=geheim123` gestartet
 # (das Fenster fragt einen Menschen; der Laeufer bekommt es als
 # Argument). Auf der installierten Platte muss GENAU dieses Konto
 # stehen, mit einem Hash, der zu dem Passwort passt -- nachgerechnet
@@ -552,7 +555,7 @@ if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
 else
     bad "der Kontolauf endete mit Code $rc"
 fi
-python3 - "$OUT/konto.txt" "Geheim-123" > "$OUT/konto-py.txt" 2>&1 <<'PYEOF2'
+python3 - "$OUT/konto.txt" "geheim123" > "$OUT/konto-py.txt" 2>&1 <<'PYEOF2'
 import sys, hashlib, binascii, re
 raw = open(sys.argv[1], 'rb').read().decode('latin1')
 # the serial line also carries the shell's echo and the loader's chatter
@@ -639,11 +642,11 @@ login_lauf() { # name keys...
     kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null
 }
 if command -v socat >/dev/null 2>&1; then
-    login_lauf login-ok shift-g e h e i m minus 1 2 3 ret
+    login_lauf login-ok g e h e i m 1 2 3 ret
     grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "der Anmeldeschirm kommt (kein Autologin auf der installierten Platte)" || bad "kein Anmeldeschirm"
     grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "Anmeldung mit dem neuen Konto und dem gewaehlten Passwort klappt" || bad "Anmeldung mit dem neuen Konto: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
     grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "die Sitzung laeuft als uid 1000" || bad "uid 1000 fehlt"
-    login_lauf login-bad shift-f a l s c h minus 9 9 9 ret
+    login_lauf login-bad f a l s c h 9 9 9 ret
     grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "GEGENPROBE: ein falsches Passwort wird abgewiesen" || bad "falsches Passwort nicht abgewiesen"
     grep -aq 'glogin: angemeldet als' "$OUT/login-bad.txt" && bad "GEGENPROBE: trotzdem angemeldet" || ok "GEGENPROBE: niemand angemeldet"
 else

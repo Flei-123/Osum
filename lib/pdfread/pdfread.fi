@@ -35,6 +35,8 @@
 
 import std.rt
 import std.deflate
+import std.md5
+import std.crypto.aes
 import pdfread.pdftab
 import jpeg.jpeg
 
@@ -112,6 +114,9 @@ struct Doc {
     depth: u64,
     fonts: u64,   // FontInfo records (FONT_MAX)
     nfonts: u64,
+    enc_mode: u32,   // 0 not encrypted, 1 RC4, 2 AES-128 (the standard handler, empty user password)
+    enc_klen: u32,
+    enc_key: [u8; 16],
     styles: u32,   // bit 2: bold text was seen, bit 3: monospace text (layers of doc_page_svg)
 }
 
@@ -120,7 +125,7 @@ fn doc_new() -> Doc {
         data: 0, len: 0, nobj: 0, xk: 0, xo: 0, xi: 0,
         trailer: val_none(), root: val_none(), npages: 0, pages: 0, err: 0,
         os: OStm { num: 0, buf: rt.buf_new(), count: 0, first: 0 },
-        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, styles: 0,
+        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, enc_mode: 0, enc_klen: 0, enc_key: [0; 16], styles: 0,
     }
 }
 
@@ -995,6 +1000,356 @@ fn inflate_into(src: u64, n: u64, out: *mut rt.Buf) -> bool {
     return false
 }
 
+
+// ----------------------------------------------------------- encryption
+//
+// The standard security handler with the EMPTY user password (a file that opens
+// in every viewer without asking): V 1-3 (RC4 40..128 bit) and V 4 with RC4 or
+// AES-128 (R 2-4). Streams are decrypted; the strings of dictionaries are not
+// (nothing that is drawn depends on them, but an Indexed palette written as a
+// string). V 5 (AES-256, R 5/6) needs SHA-512 and is refused as encrypted.
+
+static mut PADSTR: [u8; 32] = [40, 191, 78, 94, 78, 117, 138, 65, 100, 0, 78, 86, 255, 250, 1, 8,
+    46, 46, 0, 182, 208, 104, 62, 128, 47, 12, 169, 254, 100, 83, 105, 122]
+
+fn rc4(key: u64, klen: u64, src: u64, n: u64, dst: u64) {
+    var st: [u8; 256] = [0 as u8; 256]
+    var i: u64 = 0
+    while i < 256 {
+        st[i as usize] = i as u8
+        i = i + 1
+    }
+    var j: u64 = 0
+    i = 0
+    while i < 256 {
+        j = (j + (st[i as usize] as u64) + (ld(key + (i % klen)) as u64)) & 255
+        let t: u8 = st[i as usize]
+        st[i as usize] = st[j as usize]
+        st[j as usize] = t
+        i = i + 1
+    }
+    var a: u64 = 0
+    var b: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        a = (a + 1) & 255
+        b = (b + (st[a as usize] as u64)) & 255
+        let t2: u8 = st[a as usize]
+        st[a as usize] = st[b as usize]
+        st[b as usize] = t2
+        let ks: u64 = st[(((st[a as usize] as u64) + (st[b as usize] as u64)) & 255) as usize] as u64
+        wr8(dst + k, ((ld(src + k) as u64) ^ ks) as u32)
+        k = k + 1
+    }
+}
+
+fn md5_of(p: u64, n: u64, out: u64) {
+    md5.md5(p, n as usize, out)
+}
+
+// Algorithm 2 (key from the empty user password) and the check of Algorithm 4/5
+fn enc_setup(d: *mut Doc) -> bool {
+    var ev: Val = val_none()
+    var er: Val = val_none()
+    if !dict_find((*d).trailer.a, (*d).trailer.n, "Encrypt", &ev) {
+        return true
+    }
+    resolve(d, &ev, &er)
+    if er.kind != K_DICT {
+        return false
+    }
+    var t: Val = val_none()
+    if !doc_dict_get(d, &er, "Filter", &t) || !name_is(&t, "Standard") {
+        return false
+    }
+    var vv: u64 = 0
+    var rr: u64 = 2
+    var lenbits: u64 = 40
+    if doc_dict_get(d, &er, "V", &t) {
+        vv = f2u(val_num(&t))
+    }
+    if doc_dict_get(d, &er, "R", &t) {
+        rr = f2u(val_num(&t))
+    }
+    if doc_dict_get(d, &er, "Length", &t) {
+        lenbits = f2u(val_num(&t))
+    }
+    if vv >= 5 || rr > 4 || rr < 2 {
+        return false
+    }
+    var pval: u32 = 0
+    if doc_dict_get(d, &er, "P", &t) {
+        pval = (f2i(val_num(&t)) & 0xFFFFFFFF) as u32
+    }
+    var obuf: [u8; 64] = [0 as u8; 64]
+    var ubuf: [u8; 64] = [0 as u8; 64]
+    var on: u64 = 0
+    var un: u64 = 0
+    if doc_dict_get(d, &er, "O", &t) && t.kind == K_STR {
+        on = str_bytes(&t, (&obuf[0]) as u64, 64)
+    }
+    if doc_dict_get(d, &er, "U", &t) && t.kind == K_STR {
+        un = str_bytes(&t, (&ubuf[0]) as u64, 64)
+    }
+    if on < 32 || un < 32 {
+        return false
+    }
+    var encmeta: bool = true
+    if doc_dict_get(d, &er, "EncryptMetadata", &t) && t.kind == K_BOOL {
+        encmeta = t.num != 0.0
+    }
+    var mode: u32 = 1
+    var klen: u64 = 5
+    if vv >= 2 {
+        klen = lenbits / 8
+    }
+    if klen < 5 {
+        klen = 5
+    }
+    if klen > 16 {
+        klen = 16
+    }
+    if vv == 4 {
+        // the crypt filter named by /StmF
+        var smf: Val = val_none()
+        var cf: Val = val_none()
+        klen = 16
+        if !doc_dict_get(d, &er, "StmF", &smf) || smf.kind != K_NAME || !doc_dict_get(d, &er, "CF", &cf) || cf.kind != K_DICT {
+            return false
+        }
+        if name_is(&smf, "Identity") {
+            (*d).enc_mode = 0
+            return true
+        }
+        var f: Val = val_none()
+        var fr: Val = val_none()
+        if !dict_find_name(cf.a, cf.n, smf.a, smf.n, &f) {
+            return false
+        }
+        resolve(d, &f, &fr)
+        var cfm: Val = val_none()
+        if !doc_dict_get(d, &fr, "CFM", &cfm) {
+            return false
+        }
+        if name_is(&cfm, "V2") {
+            mode = 1
+        } else if name_is(&cfm, "AESV2") {
+            mode = 2
+        } else {
+            return false
+        }
+    }
+    // the first element of the trailer's /ID
+    var idb: [u8; 64] = [0 as u8; 64]
+    var idn: u64 = 0
+    var idv: Val = val_none()
+    var idr: Val = val_none()
+    if dict_find((*d).trailer.a, (*d).trailer.n, "ID", &idv) {
+        resolve(d, &idv, &idr)
+        if idr.kind == K_ARR {
+            var e0: Val = val_none()
+            var e0r: Val = val_none()
+            arr_at(idr.a, idr.n, 0, &e0)
+            resolve(d, &e0, &e0r)
+            if e0r.kind == K_STR {
+                idn = str_bytes(&e0r, (&idb[0]) as u64, 64)
+            }
+        }
+    }
+    // Algorithm 2: MD5(pad + O + P + ID [+ FFFFFFFF]) (+ 50 more rounds for R >= 3)
+    let inb: u64 = alloc0(256)
+    if inb == 0 {
+        return false
+    }
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < 32 {
+        wr8(inb + at, PADSTR[k as usize] as u32)
+        at = at + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 32 {
+        wr8(inb + at, ld((&obuf[0]) as u64 + k))
+        at = at + 1
+        k = k + 1
+    }
+    wr8(inb + at, pval & 255)
+    wr8(inb + at + 1, (pval >> 8) & 255)
+    wr8(inb + at + 2, (pval >> 16) & 255)
+    wr8(inb + at + 3, (pval >> 24) & 255)
+    at = at + 4
+    k = 0
+    while k < idn {
+        wr8(inb + at, ld((&idb[0]) as u64 + k))
+        at = at + 1
+        k = k + 1
+    }
+    if rr >= 4 && !encmeta {
+        wr8(inb + at, 255)
+        wr8(inb + at + 1, 255)
+        wr8(inb + at + 2, 255)
+        wr8(inb + at + 3, 255)
+        at = at + 4
+    }
+    var h: [u8; 16] = [0 as u8; 16]
+    md5_of(inb, at, (&h[0]) as u64)
+    if rr >= 3 {
+        var round: u64 = 0
+        while round < 50 {
+            var h2: [u8; 16] = [0 as u8; 16]
+            md5_of((&h[0]) as u64, klen, (&h2[0]) as u64)
+            k = 0
+            while k < 16 {
+                h[k as usize] = h2[k as usize]
+                k = k + 1
+            }
+            round = round + 1
+        }
+    }
+    var key: [u8; 16] = [0 as u8; 16]
+    k = 0
+    while k < klen {
+        key[k as usize] = h[k as usize]
+        k = k + 1
+    }
+    // check against /U (Algorithm 4 for R 2, Algorithm 5 for R >= 3)
+    var good: bool = false
+    var chk: [u8; 32] = [0 as u8; 32]
+    if rr == 2 {
+        rc4((&key[0]) as u64, klen, (&PADSTR[0]) as u64, 32, (&chk[0]) as u64)
+        good = true
+        k = 0
+        while k < 32 {
+            if chk[k as usize] != ubuf[k as usize] {
+                good = false
+            }
+            k = k + 1
+        }
+    } else {
+        // MD5(pad + ID), then RC4 with the key and 19 more passes with key XOR i
+        at = 0
+        k = 0
+        while k < 32 {
+            wr8(inb + at, PADSTR[k as usize] as u32)
+            at = at + 1
+            k = k + 1
+        }
+        k = 0
+        while k < idn {
+            wr8(inb + at, ld((&idb[0]) as u64 + k))
+            at = at + 1
+            k = k + 1
+        }
+        var m: [u8; 16] = [0 as u8; 16]
+        md5_of(inb, at, (&m[0]) as u64)
+        var cur: [u8; 16] = [0 as u8; 16]
+        rc4((&key[0]) as u64, klen, (&m[0]) as u64, 16, (&cur[0]) as u64)
+        var pass: u64 = 1
+        while pass < 20 {
+            var xk: [u8; 16] = [0 as u8; 16]
+            k = 0
+            while k < klen {
+                xk[k as usize] = ((key[k as usize] as u64) ^ pass) as u8
+                k = k + 1
+            }
+            var nx: [u8; 16] = [0 as u8; 16]
+            rc4((&xk[0]) as u64, klen, (&cur[0]) as u64, 16, (&nx[0]) as u64)
+            k = 0
+            while k < 16 {
+                cur[k as usize] = nx[k as usize]
+                k = k + 1
+            }
+            pass = pass + 1
+        }
+        good = true
+        k = 0
+        while k < 16 {
+            if cur[k as usize] != ubuf[k as usize] {
+                good = false
+            }
+            k = k + 1
+        }
+    }
+    rt.heap_free(inb, 256)
+    if !good {
+        return false
+    }
+    (*d).enc_mode = mode
+    (*d).enc_klen = klen as u32
+    k = 0
+    while k < 16 {
+        (*d).enc_key[k as usize] = key[k as usize]
+        k = k + 1
+    }
+    return true
+}
+
+// Algorithm 1: the key of one object, then RC4 or AES-CBC (IV = first 16 octets,
+// PKCS#7 padding). `out` receives the plain octets.
+fn decrypt_stream(d: *mut Doc, rn: u64, rg: u64, src: u64, n: u64, out: *mut rt.Buf) -> bool {
+    var inb: [u8; 32] = [0 as u8; 32]
+    var at: u64 = 0
+    var k: u64 = 0
+    let klen: u64 = (*d).enc_klen as u64
+    while k < klen {
+        inb[at as usize] = (*d).enc_key[k as usize]
+        at = at + 1
+        k = k + 1
+    }
+    inb[at as usize] = (rn & 255) as u8
+    inb[(at + 1) as usize] = ((rn >> 8) & 255) as u8
+    inb[(at + 2) as usize] = ((rn >> 16) & 255) as u8
+    inb[(at + 3) as usize] = (rg & 255) as u8
+    inb[(at + 4) as usize] = ((rg >> 8) & 255) as u8
+    at = at + 5
+    if (*d).enc_mode == 2 {
+        inb[at as usize] = 115
+        inb[(at + 1) as usize] = 65
+        inb[(at + 2) as usize] = 108
+        inb[(at + 3) as usize] = 84
+        at = at + 4
+    }
+    var h: [u8; 16] = [0 as u8; 16]
+    md5_of((&inb[0]) as u64, at, (&h[0]) as u64)
+    var okl: u64 = klen + 5
+    if okl > 16 {
+        okl = 16
+    }
+    if (*d).enc_mode == 1 {
+        let tmp: u64 = alloc0(n + 16)
+        if tmp == 0 {
+            return false
+        }
+        rc4((&h[0]) as u64, okl, src, n, tmp)
+        rt.buf_push_bytes(out, tmp, n as usize)
+        rt.heap_free(tmp, (n + 16) as usize)
+        return true
+    }
+    // AES-128-CBC
+    if n < 32 || (n % 16) != 0 {
+        return false
+    }
+    var a: aes.Aes = aes.aes128_new((&h[0]) as u64)
+    let body: u64 = n - 16
+    let tmp2: u64 = alloc0(body + 16)
+    if tmp2 == 0 {
+        return false
+    }
+    if !aes.aes_cbc_decrypt_soft(&a, src, src + 16, body as usize, tmp2) {
+        rt.heap_free(tmp2, (body + 16) as usize)
+        return false
+    }
+    var plain: u64 = body
+    let padn: u64 = ld(tmp2 + body - 1) as u64
+    if padn >= 1 && padn <= 16 && padn <= body {
+        plain = body - padn
+    }
+    rt.buf_push_bytes(out, tmp2, plain as usize)
+    rt.heap_free(tmp2, (body + 16) as usize)
+    return true
+}
+
 fn val_resolved_int(d: *mut Doc, v: *mut Val, dflt: u64) -> u64 {
     var r: Val = val_none()
     resolve(d, v, &r)
@@ -1018,6 +1373,22 @@ fn doc_stream(d: *mut Doc, v: *mut Val, out: *mut rt.Buf, imgf: *mut u32) -> boo
     var curn: u64 = (*v).sl
     var own: rt.Buf = rt.buf_new()
     var haveown: bool = false
+    if (*d).enc_mode != 0 {
+        var ty: Val = val_none()
+        var is_xref: bool = false
+        if dict_find((*v).a, (*v).n, "Type", &ty) && name_is(&ty, "XRef") {
+            is_xref = true
+        }
+        if !is_xref {
+            var dec: rt.Buf = rt.buf_new()
+            if decrypt_stream(d, (*v).rn as u64, (*v).rg as u64, cur, curn, &dec) {
+                own = dec
+                haveown = true
+                cur = rt.buf_ptr(&own)
+                curn = rt.buf_len(&own) as u64
+            }
+        }
+    }
     var fl: Val = val_none()
     var fr: Val = val_none()
     if !dict_find((*v).a, (*v).n, "Filter", &fl) {
@@ -1172,6 +1543,8 @@ fn parse_indirect_at(d: *mut Doc, off: u64, out: *mut Val, want: u64) -> bool {
     var v: Val = val_none()
     p = parse_ref(p, end, &v)
     *out = v
+    (*out).rn = f2u32(t1.num)
+    (*out).rg = f2u32(t2.num)
     if v.kind == K_DICT {
         let q: u64 = skip_ws(p, end)
         if starts_with(q, end, "stream") {
@@ -1819,6 +2192,14 @@ fn doc_open(d: *mut Doc, data: u64, len: u64) -> bool {
     var root: Val = val_none()
     var rr: Val = val_none()
     if ok {
+        // an encrypted file: the key first -- the catalog may sit in an
+        // (encrypted) object stream
+        if !enc_setup(d) {
+            (*d).err = ERR_ENCRYPTED
+            return false
+        }
+    }
+    if ok {
         if dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
             resolve(d, &rr, &root)
         }
@@ -1835,6 +2216,12 @@ fn doc_open(d: *mut Doc, data: u64, len: u64) -> bool {
         (*d).os.num = 0
         ok = rebuild(d)
         if ok {
+            if !enc_setup(d) {
+                (*d).err = ERR_ENCRYPTED
+                return false
+            }
+        }
+        if ok {
             if dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
                 resolve(d, &rr, &root)
             }
@@ -1845,11 +2232,6 @@ fn doc_open(d: *mut Doc, data: u64, len: u64) -> bool {
     }
     if !ok {
         (*d).err = ERR_FORMAT
-        return false
-    }
-    var ev: Val = val_none()
-    if dict_find((*d).trailer.a, (*d).trailer.n, "Encrypt", &ev) {
-        (*d).err = ERR_ENCRYPTED
         return false
     }
     (*d).root = root
