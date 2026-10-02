@@ -49,6 +49,9 @@ import fui.theme
 import fui.textbuf
 import fui.style
 import fui.painter
+import fui.uiimage
+import fui.transform
+import paint.canvas
 import wlibc
 import plat.fuiwirt
 
@@ -64,8 +67,16 @@ export {
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
-    table_blob, table_set_blob,
+    table_blob, table_set_blob, table_single,
+    set_app, raise, ax_action, build_now, compact,
+    canvas, role_col, cv_rect, cv_round, cv_ring, cv_text, set_nohit,
+    R_FIELD, R_BORDER, R_ACCENT, R_SUCCESS, R_TEXT, R_MUTED, R_SURFACE, R_ONFILL,
+    cv_rgb,
+    image, image_set, image_fit, image_zoom, image_set_zoom, image_rotate,
+    image_click, image_has, image_tool, image_sel_present, image_sel_x0,
+    image_sel_y0, image_sel_x1, image_sel_y1, image_sel_clear, hide, handle,
     dialog_open, dialog_is_open, dialog_result, KEY_DIALOG,
+    dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
 }
 
 const NONE: usize = 4294967295
@@ -217,7 +228,7 @@ fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     textbuf.tb_init(&tb, ebuf(k), ENTRY_CAP as usize)
     textbuf.tb_set_len(&tb, ulib.length(ebuf(k)) as usize)
     textbuf.tb_set_range(&tb, s_ecar[(k) as usize], s_ecar[(k) as usize])
-    render.draw_field(c, e, &tb, 0.0, s_caret_on, 0, 0)
+    fuiapp.field_paint(e, &tb, s_caret_on)
 }
 
 // A one-line text field, `w` wide (design points). `text` is only the
@@ -378,6 +389,9 @@ fn open(x: u64, y: u64, w: u64, h: u64, title: u64, build: fn()) -> bool {
     s_paints = 0
     s_builds = 0
     s_stale = true
+    s_axkey = 0
+    // the accessibility tree: wlib asks us for the nodes of our tree
+    wlib.ax_set_hooks(ax_nodes, ax_press)
     return true
 }
 
@@ -387,6 +401,32 @@ fn alive() -> bool {
 
 fn quit() {
     s_quit = 1
+}
+
+// The program's name for the window server (what `wlib.window_app` did).
+fn set_app(name: u64) {
+    let _a: u64 = wlib.window_app(fuiapp.win(), name)
+}
+
+// Take the window off the screen (and back): a tool that photographs the
+// screen must not photograph itself. Waits until the server has it.
+fn hide(on: bool) {
+    let _h: u64 = wlib.win_hide(fuiapp.win(), on)
+    let _p: u64 = wlib.paint_all()
+    if !on {
+        touch()
+    }
+}
+
+// The window server's handle of our window.
+fn handle() -> u64 {
+    return wlib.handle(fuiapp.win())
+}
+
+// Bring the window to the front -- once, when a program has just started.
+fn raise() {
+    let _r: u64 = wlibc.win_act(wlibc.sys3w(wlibc.WM_INFO,
+        wlib.handle(fuiapp.win()), wlibc.WI_ID, 0), wlibc.WA_RAISE)
 }
 
 fn touch() {
@@ -406,7 +446,13 @@ fn rebuild() {
     scene.scene_reset(sc())
     (*sh()).n = 0
     s_nhaupt = 0
+    s_cv_n = 0
     var k: u64 = 0
+    while k < s_im_n {
+        s_im_node[(k) as usize] = NONE
+        k = k + 1
+    }
+    k = 0
     while k < s_en {
         s_enode[(k) as usize] = NONE
         k = k + 1
@@ -436,6 +482,14 @@ fn rebuild() {
     }
     s_builds = s_builds + 1
     s_stale = false
+}
+
+// Describe the tree NOW if the program said it changed (so that state kept
+// by key -- pictures, tables -- can be set before the next pump).
+fn build_now() {
+    if s_stale && s_paints > 0 {
+        rebuild()
+    }
 }
 
 fn row(parent: usize) -> usize {
@@ -502,6 +556,21 @@ fn button_main(parent: usize, text: u64, key: u64) -> usize {
         }
     }
     return i
+}
+
+// A button with the narrow inner margin (8 points instead of 16): for a
+// tool bar where the room is tight and the label would otherwise be cut
+// to "Anpas...". The node must have a key.
+fn compact(i: usize) {
+    if i == NONE {
+        return
+    }
+    let key: u32 = scene.node_id(sc(), i)
+    if key == 0 as u32 {
+        return
+    }
+    let _r: usize = sheet.sheet_rule(sh(), sheet.sel_id(key),
+        style.style_set_pad(style.style_new(), 8, 8))
 }
 
 // A tab; `on` marks the current one.
@@ -642,6 +711,54 @@ fn halo() {
     }
 }
 
+// A press inside a text field puts the caret where the pointer is (the
+// boundary closest to the pointer, measured with the field's own font).
+fn entry_click(x: u64, y: u64) {
+    var k: u64 = 0
+    while k < s_en {
+        let i: usize = s_enode[(k) as usize]
+        if i != NONE && i < scene.scene_count(sc()) && x >= node_x(i)
+            && x < node_x(i) + node_w(i) && y >= node_y(i)
+            && y < node_y(i) + node_h(i) {
+            let e: *mut widget.Widget = scene.node_widget(sc(), i)
+            // the boundary closest to the pointer, measured with direct
+            // calls (the function-pointer path of tb_caret_from_x returns
+            // 0.0 for f64 in a ring-3 program, see fuiapp.field_paint)
+            var fm: render.FieldMeas = render.field_meas_new(fuiapp.ctx(), e)
+            let rel: f64 = (x as f64) - render.field_text_x0(fuiapp.ctx(), e)
+            let nn: u64 = ulib.length(ebuf(k))
+            var best: u64 = 0
+            var bestd: f64 = rel
+            if bestd < 0.0 {
+                bestd = 0.0 - bestd
+            }
+            var bi: u64 = 1
+            while bi <= nn {
+                let atb: bool = bi == nn
+                    || (__mmio_read8((ebuf(k) + bi) as *mut u8) & 192 as u8) != 128 as u8
+                if atb {
+                    let wv: f64 = render.field_meas((&fm) as u64, ebuf(k), bi as usize)
+                    var dv: f64 = wv - rel
+                    if dv < 0.0 {
+                        dv = 0.0 - dv
+                    }
+                    if dv < bestd {
+                        bestd = dv
+                        best = bi
+                    }
+                }
+                bi = bi + 1
+            }
+            s_ecar[(k) as usize] = best as usize
+            s_caret_on = true
+            s_caret_t = fuiapp.now_ms()
+            touch()
+            return
+        }
+        k = k + 1
+    }
+}
+
 // Paint the whole tree into the canvas and hand it to the window server.
 fn paint() {
     fuiapp.frame_begin()
@@ -729,13 +846,21 @@ fn pump() -> u64 {
                 hit = r
             }
         } else if ev.kind == fuiapp.EV_MOVE {
+            im_move(ev.x, ev.y)
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
+        } else if ev.kind == fuiapp.EV_DOWN && s_nohit {
+            let _skip: u64 = 0
         } else if ev.kind == fuiapp.EV_DOWN {
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
             let _d: u32 = fuiwirt.host_pointer_down(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
+            entry_click(ev.x, ev.y)
+            let ik: u64 = im_press(ev.x, ev.y)
+            if ik != 0 {
+                hit = ik
+            }
             let ck: u64 = ct_at(ev.x, ev.y)
             if ck != NO_SLOT {
                 let r: u64 = ct_press(ck, ev.x, ev.y)
@@ -744,6 +869,8 @@ fn pump() -> u64 {
                 }
             }
         } else if ev.kind == fuiapp.EV_UP {
+            s_im_drag = NO_SLOT
+            s_im_selk = NO_SLOT
             let _c: u32 = fuiwirt.host_pointer_up(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
         } else if ev.kind == fuiapp.EV_KEY {
@@ -808,6 +935,13 @@ fn pump() -> u64 {
     let vk: u64 = val_sync()
     if vk != 0 && hit == 0 {
         hit = vk
+    }
+    // a reader pressed a control through the accessibility tree
+    if s_axkey != 0 {
+        if hit == 0 {
+            hit = s_axkey
+        }
+        s_axkey = 0
     }
     if s_stale {
         rebuild()
@@ -898,6 +1032,9 @@ fn nk_of(k: u32) -> u64 {
     }
     if k == widget.KIND_DROPDOWN {
         return 9
+    }
+    if k == widget.KIND_SLIDER {
+        return 17
     }
     return 0
 }
@@ -1023,6 +1160,9 @@ static mut s_ct_cols: [u64; 3] = [1 as u64; 3]
 static mut s_ct_top: [u64; 3] = [0 as u64; 3]
 static mut s_ct_sel: [u64; 3] = [0 as u64; 3]
 static mut s_ct_head: [bool; 3] = [false; 3]
+// A table where ONE click on a row already activates it (a list the
+// program wants to hear from at once, e.g. a task list with a kill button).
+static mut s_ct_one: [bool; 3] = [false; 3]
 static mut s_ct_colw: [u64; 18] = [0 as u64; 18]
 static mut s_ct_get: [u8; 24] = [0 as u8; 24]
 static mut s_ct_last_row: u64 = 4294967295
@@ -1244,7 +1384,8 @@ fn table(parent: usize, key: u64, w: u64, h: u64, cols: u64, head: bool,
     s_ct_cols[(k) as usize] = cols
     s_ct_head[(k) as usize] = head
     *ct_get_slot(k) = get
-    if s_ct_sel[(k) as usize] >= rows && rows > 0 {
+    if s_ct_sel[(k) as usize] >= rows && rows > 0
+        && s_ct_sel[(k) as usize] != HEAD_ROW {
         s_ct_sel[(k) as usize] = rows - 1
     }
     return i
@@ -1258,7 +1399,8 @@ fn table_set_rows(key: u64, rows: u64) {
     s_ct_rows[(k) as usize] = rows
     if rows == 0 {
         s_ct_sel[(k) as usize] = 0
-    } else if s_ct_sel[(k) as usize] >= rows {
+    } else if s_ct_sel[(k) as usize] >= rows
+        && s_ct_sel[(k) as usize] != HEAD_ROW {
         s_ct_sel[(k) as usize] = rows - 1
     }
     touch()
@@ -1279,7 +1421,8 @@ fn table_set_sel(key: u64, row: u64) {
     }
     s_ct_sel[(k) as usize] = row
     let i: usize = s_ct_node[(k) as usize]
-    if i != NONE {
+    // HEAD_ROW as the row means "no row selected"
+    if i != NONE && row != HEAD_ROW {
         ct_reveal(k, node_h(i))
     }
     touch()
@@ -1340,6 +1483,10 @@ fn ct_press(k: u64, x: u64, y: u64) -> u64 {
     if row == s_ct_last_row && now < s_ct_last_t + 450 {
         act = s_ct_key[(k) as usize]
     }
+    if s_ct_one[(k) as usize] {
+        act = s_ct_key[(k) as usize]
+        s_ct_headcol = 4294967295
+    }
     s_ct_last_row = row
     s_ct_last_t = now
     s_ct_sel[(k) as usize] = row
@@ -1359,7 +1506,14 @@ fn ct_key(k: u64, key: u64) -> u64 {
     if rows == 0 {
         return 0
     }
-    if key == wlib.KEY_DOWN && sel + 1 < rows {
+    if sel >= rows {
+        // nothing is selected yet: a movement key picks a row
+        if key == wlib.KEY_DOWN || key == wlib.KEY_HOME || key == wlib.KEY_PGDN {
+            sel = 0
+        } else if key == wlib.KEY_UP || key == wlib.KEY_END || key == wlib.KEY_PGUP {
+            sel = rows - 1
+        }
+    } else if key == wlib.KEY_DOWN && sel + 1 < rows {
         sel = sel + 1
     } else if key == wlib.KEY_UP && sel > 0 {
         sel = sel - 1
@@ -1383,6 +1537,10 @@ fn ct_key(k: u64, key: u64) -> u64 {
         s_ct_sel[(k) as usize] = sel
         ct_reveal(k, node_h(i))
         touch()
+        if s_ct_one[(k) as usize] {
+            s_ct_headcol = 4294967295
+            return s_ct_key[(k) as usize]
+        }
     }
     return 0
 }
@@ -1516,7 +1674,8 @@ fn table_blob(parent: usize, key: u64, w: u64, h: u64, cols: u64,
     if k != NO_SLOT {
         s_ct_blob[(k) as usize] = blob
         s_ct_rows[(k) as usize] = blob_rows(blob)
-        if s_ct_sel[(k) as usize] >= s_ct_rows[(k) as usize] {
+        if s_ct_sel[(k) as usize] >= s_ct_rows[(k) as usize]
+            && s_ct_sel[(k) as usize] != HEAD_ROW {
             s_ct_sel[(k) as usize] = 0
         }
     }
@@ -1533,6 +1692,764 @@ fn table_set_blob(key: u64, blob: u64) {
     table_set_rows(key, blob_rows(blob))
 }
 
+
+
+// One click on a row activates it (`pump` answers the table's key; read
+// the row with `table_sel`). Default: a double click.
+fn table_single(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_one[(k) as usize] = on
+}
+
+
+// ------------------------------------------------------ free painting
+//
+// A canvas node: a rectangle in the tree that the PROGRAM paints (a graph,
+// a preview). `draw(x, y, w, h)` is called with the node's place in canvas
+// pixels, every time the tree is painted; it paints with the `cv_*`
+// helpers below (colours are theme ROLES, never numbers, so the dark
+// mode and the high-contrast mode keep working).
+const R_FIELD: u64 = 0
+const R_BORDER: u64 = 1
+const R_ACCENT: u64 = 2
+const R_SUCCESS: u64 = 3
+const R_TEXT: u64 = 4
+const R_MUTED: u64 = 5
+const R_SURFACE: u64 = 6
+// Text on a coloured fill (cv_text only): light on the fill
+const R_ONFILL: u64 = 7
+
+// The colour of a role as 0xAARRGGBB.
+fn role_col(r: u64) -> u32 {
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    var c: u32 = (*t).field
+    if r == R_BORDER {
+        c = (*t).border_col
+    } else if r == R_ACCENT {
+        c = (*t).accent
+    } else if r == R_SUCCESS {
+        c = (*t).success
+    } else if r == R_TEXT {
+        c = (*t).text
+    } else if r == R_MUTED {
+        c = (*t).text_muted
+    } else if r == R_SURFACE {
+        c = (*t).surface
+    }
+    return c | 4278190080 as u32
+}
+
+fn cv_rect(x: u64, y: u64, w: u64, h: u64, role: u64) {
+    painter.surface(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64,
+        w as f64, h as f64, role_col(role))
+}
+
+// A flat rectangle in an exact colour 0xRRGGBB (what a treemap tile or a
+// swatch is: the colour IS the data).
+fn cv_rgb(x: u64, y: u64, w: u64, h: u64, rgb: u64) {
+    // the canvas keeps its octets as B, G, R (like the window surface), and
+    // the theme colours are swapped on the way in (fuib.swap_rb): so is this
+    let sw: u64 = ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+    painter.surface(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64,
+        w as f64, h as f64, (sw as u32) | 4278190080 as u32)
+}
+
+fn cv_round(x: u64, y: u64, w: u64, h: u64, r: u64, role: u64) {
+    painter.round_rect(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64,
+        w as f64, h as f64, r as f64, role_col(role))
+}
+
+fn cv_ring(x: u64, y: u64, w: u64, h: u64, r: u64, role: u64) {
+    painter.round_ring(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64,
+        w as f64, h as f64, r as f64, 1.0, role_col(role))
+}
+
+// A line of text (24 high) at (x, y); role R_TEXT or R_MUTED.
+fn cv_text(x: u64, y: u64, w: u64, p: u64, role: u64) {
+    var tok: u32 = style.TOK_TEXT
+    if role == R_MUTED {
+        tok = style.TOK_TEXT_MUTED
+    } else if role == R_ONFILL {
+        tok = style.TOK_TEXT_ON_ACCENT
+    }
+    text_tok(x, y, w, p, tok)
+}
+
+const CV_MAX: u64 = 3
+static mut s_cv_n: u64 = 0
+static mut s_cv_node: [usize; 3] = [4294967295 as usize; 3]
+static mut s_cv_fn: [u8; 24] = [0 as u8; 24]
+
+fn cv_fn_slot(k: u64) -> *mut fn(u64, u64, u64, u64) {
+    return (((&s_cv_fn[0 as usize]) as u64) + k * 8) as *mut fn(u64, u64, u64, u64)
+}
+
+fn draw_cv(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let i: usize = scene.scene_node_of(sc(), e)
+    var k: u64 = 0
+    while k < s_cv_n {
+        if s_cv_node[(k) as usize] == i {
+            let f: fn(u64, u64, u64, u64) = *cv_fn_slot(k)
+            f(widget.w_x(e) as u64, widget.w_y(e) as u64,
+                widget.w_w(e) as u64, widget.w_h(e) as u64)
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn canvas(parent: usize, key: u64, w: u64, h: u64,
+    draw: fn(u64, u64, u64, u64)) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_widget_kind(sc(), i, widget.KIND_LABEL)
+    scene.node_set_size(sc(), i, w as f64, h as f64)
+    scene.node_set_draw(sc(), i, 0, draw_cv)
+    scene.node_set_id(sc(), i, key as u32)
+    if s_cv_n < CV_MAX {
+        s_cv_node[(s_cv_n) as usize] = i
+        *cv_fn_slot(s_cv_n) = draw
+        s_cv_n = s_cv_n + 1
+    }
+    return i
+}
+
+// Ignore the pointer (the control experiment of the click tests: with it
+// a click must change nothing).
+static mut s_nohit: bool = false
+
+fn set_nohit(on: bool) {
+    s_nohit = on
+}
+
+
+// ------------------------------------------------- the accessibility tree
+//
+// wlib's tree (docs/A11Y.md) is made from wlib's widget list, and a
+// window painted by fUi has only ONE canvas widget in it. So the host
+// describes its own nodes in the same 96-octet format and wlib puts them
+// behind its own (wlib.ax_set_hooks): role, state, place, value, name and
+// the bus action. A reader can press a node (button, check box, tab, list,
+// choice); that arrives as the node's KEY at the next `pump`, like a click.
+// Passwords are not a thing here (no secret field in the scene tree).
+const ACT_MAX: u64 = 16
+static mut s_act_key: [u64; 16] = [0 as u64; 16]
+static mut s_act_ptr: [u64; 16] = [0 as u64; 16]
+static mut s_act_n: u64 = 0
+static mut s_axkey: u64 = 0
+
+// The bus action the node with this KEY stands for, e.g. "calc.clear"
+// (the text must stay alive). A reader can then call the action instead of
+// clicking. The same word wlib.ax_action puts on a wlib control.
+fn ax_action(key: u64, name: u64) {
+    var k: u64 = 0
+    while k < s_act_n {
+        if s_act_key[(k) as usize] == key {
+            s_act_ptr[(k) as usize] = name
+            return
+        }
+        k = k + 1
+    }
+    if s_act_n < ACT_MAX {
+        s_act_key[(s_act_n) as usize] = key
+        s_act_ptr[(s_act_n) as usize] = name
+        s_act_n = s_act_n + 1
+    }
+}
+
+fn ax_action_of(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_act_n {
+        if s_act_key[(k) as usize] == key {
+            return s_act_ptr[(k) as usize]
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// The role of a node (0 = it is not part of the tree).
+fn ax_role_of(i: usize) -> u64 {
+    if scene.node_kind(sc(), i) == scene.N_TEXT {
+        return wlib.AXR_LABEL
+    }
+    if scene.node_kind(sc(), i) != scene.N_WIDGET {
+        return 0
+    }
+    let k: u32 = widget.w_kind(scene.node_widget(sc(), i))
+    if k == widget.KIND_BUTTON {
+        return wlib.AXR_BUTTON
+    }
+    if k == widget.KIND_TAB {
+        if scene.node_id(sc(), i) == 0 as u32 {
+            return 0
+        }
+        return wlib.AXR_TAB
+    }
+    if k == widget.KIND_CHECKBOX {
+        return wlib.AXR_CHECK
+    }
+    if k == widget.KIND_TEXTBOX {
+        return wlib.AXR_ENTRY
+    }
+    if k == widget.KIND_SLIDER {
+        return wlib.AXR_SLIDER
+    }
+    if k == widget.KIND_DROPDOWN {
+        return wlib.AXR_CHOICE
+    }
+    if k == widget.KIND_SEPARATOR {
+        return wlib.AXR_SEPARATOR
+    }
+    if k == widget.KIND_LIST {
+        let c: u64 = ct_slot_of_node(i)
+        if c != NO_SLOT && (s_ct_head[(c) as usize] || s_ct_cols[(c) as usize] > 1) {
+            return wlib.AXR_TABLE
+        }
+        return wlib.AXR_LIST
+    }
+    return 0
+}
+
+// A text into a node field: at most `max` - 1 octets, then a NUL.
+fn ax_copy(dst: u64, src: u64, n: u64, max: u64) {
+    var k: u64 = 0
+    while k + 1 < max && k < n {
+        var c: u8 = __mmio_read8((src + k) as *mut u8)
+        if c == 0 as u8 || c == 10 as u8 || c == 9 as u8 {
+            break
+        }
+        __mmio_write8((dst + k) as *mut u8, c)
+        k = k + 1
+    }
+    __mmio_write8((dst + k) as *mut u8, 0 as u8)
+}
+
+// wlib's hook: write the nodes of the tree behind `have` nodes.
+fn ax_nodes(buf: u64, have: u64, room: u64) -> u64 {
+    var n: u64 = 0
+    let win: u64 = fuiapp.win()
+    let fk: usize = fuiwirt.host_focus(wirt())
+    var i: usize = 0
+    while i < scene.scene_count(sc()) && n < room {
+        let role: u64 = ax_role_of(i)
+        if role != 0 {
+            let p: u64 = buf + n * wlib.AXN_BYTES
+            var z: u64 = 0
+            while z < wlib.AXN_BYTES {
+                __mmio_write64((p + z) as *mut u64, 0)
+                z = z + 8
+            }
+            let e: *mut widget.Widget = scene.node_widget(sc(), i)
+            let key: u64 = scene.node_id(sc(), i) as u64
+            var st: u64 = wlib.AXS_ENABLED
+            var value: u64 = 0
+            if role != wlib.AXR_LABEL && role != wlib.AXR_SEPARATOR {
+                st = st | wlib.AXS_FOCUSABLE
+            }
+            if fk != fuiwirt.KEINER && fk == i {
+                st = st | wlib.AXS_FOCUSED
+            }
+            if role == wlib.AXR_CHECK {
+                if value_of(key) != 0 {
+                    st = st | wlib.AXS_CHECKED
+                    value = 1
+                }
+            } else if role == wlib.AXR_SLIDER {
+                value = value_of(key) as u64
+            } else if role == wlib.AXR_TAB {
+                if widget.w_is_selected(e) {
+                    st = st | wlib.AXS_SELECTED
+                    value = 1
+                }
+            } else if role == wlib.AXR_TABLE || role == wlib.AXR_LIST {
+                let c: u64 = ct_slot_of_node(i)
+                if c != NO_SLOT && s_ct_sel[(c) as usize] < s_ct_rows[(c) as usize] {
+                    value = s_ct_sel[(c) as usize]
+                }
+            }
+            // the name: the node's own text; a field's name is its text
+            if role == wlib.AXR_ENTRY {
+                let sl: u64 = slot_of_node(i)
+                if sl != NO_SLOT {
+                    ax_copy(p + wlib.AXN_NAME, ebuf(sl), ENTRY_CAP, wlib.AXN_NAMEMAX)
+                }
+            } else if role != wlib.AXR_TABLE && role != wlib.AXR_LIST {
+                ax_copy(p + wlib.AXN_NAME, widget.w_text(e),
+                    widget.w_text_len(e) as u64, wlib.AXN_NAMEMAX)
+            }
+            let act: u64 = ax_action_of(key)
+            if act != 0 && key != 0 {
+                ax_copy(p + wlib.AXN_ACT, act, 64, wlib.AXN_ACTMAX)
+            }
+            __mmio_write64(p as *mut u64, role | (st << 8) | (win << 16)
+                | (win << 24) | ((wlib.AXP_BASE + i as u64) << 48))
+            __mmio_write64((p + 8) as *mut u64, (node_x(i) & 0xFFFF)
+                | ((node_y(i) & 0xFFFF) << 16) | ((node_w(i) & 0xFFFF) << 32)
+                | ((node_h(i) & 0xFFFF) << 48))
+            __mmio_write64((p + 16) as *mut u64, value)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// A reader pressed the node `id` (AXP_BASE + node index): the same as a
+// click that went down and up on it.
+fn ax_press(id: u64) {
+    let i: usize = (id - wlib.AXP_BASE) as usize
+    if i >= scene.scene_count(sc()) {
+        return
+    }
+    let role: u64 = ax_role_of(i)
+    let key: u64 = scene.node_id(sc(), i) as u64
+    if key == 0 {
+        return
+    }
+    if role == wlib.AXR_CHECK {
+        set_value(key, 1 - value_of(key))
+        s_axkey = key
+    } else if role == wlib.AXR_BUTTON || role == wlib.AXR_TAB
+        || role == wlib.AXR_CHOICE || role == wlib.AXR_LIST
+        || role == wlib.AXR_TABLE {
+        s_axkey = key
+    }
+    touch()
+}
+
+
+// ------------------------------------------------------------- pictures
+//
+// An image node shows a picture from memory (B, G, R, A octets, `iw` x `ih`
+// pixels) at a zoom in percent, turned in quarters, panned by dragging
+// with the pointer -- what wlib's image widget did (viewer, snip). Its
+// state lives here by KEY, so it survives a rebuild. A picture marked
+// `image_click` answers its key when it is pressed (thumbnails).
+const IM_MAX: u64 = 16
+static mut s_im_n: u64 = 0
+static mut s_im_key: [u64; 16] = [0 as u64; 16]
+static mut s_im_node: [usize; 16] = [4294967295 as usize; 16]
+static mut s_im_px: [u64; 16] = [0 as u64; 16]
+static mut s_im_w: [u64; 16] = [0 as u64; 16]
+static mut s_im_h: [u64; 16] = [0 as u64; 16]
+static mut s_im_bw: [u64; 16] = [0 as u64; 16]
+static mut s_im_bh: [u64; 16] = [0 as u64; 16]
+static mut s_im_zoom: [u64; 16] = [100 as u64; 16]
+static mut s_im_turn: [u64; 16] = [0 as u64; 16]
+static mut s_im_ox: [i64; 16] = [0 as i64; 16]
+static mut s_im_oy: [i64; 16] = [0 as i64; 16]
+static mut s_im_clk: [bool; 16] = [false; 16]
+// the selection tool: a drag draws a frame in IMAGE pixels (inclusive)
+static mut s_im_tool: [bool; 16] = [false; 16]
+static mut s_im_sp: [bool; 16] = [false; 16]
+static mut s_im_a0: [u64; 16] = [0 as u64; 16]
+static mut s_im_b0: [u64; 16] = [0 as u64; 16]
+static mut s_im_a1: [u64; 16] = [0 as u64; 16]
+static mut s_im_b1: [u64; 16] = [0 as u64; 16]
+static mut s_im_selk: u64 = 4294967295
+static mut s_im_ax: u64 = 0
+static mut s_im_ay: u64 = 0
+static mut s_im_drag: u64 = 4294967295
+static mut s_im_sx: u64 = 0
+static mut s_im_sy: u64 = 0
+static mut s_im_sox: i64 = 0
+static mut s_im_soy: i64 = 0
+
+fn im_slot(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_im_n {
+        if s_im_key[(k) as usize] == key {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+fn im_slot_of_node(i: usize) -> u64 {
+    var k: u64 = 0
+    while k < s_im_n {
+        if s_im_node[(k) as usize] == i {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+fn im_turned_w(k: u64) -> u64 {
+    if s_im_turn[(k) as usize] & 1 == 1 {
+        return s_im_h[(k) as usize]
+    }
+    return s_im_w[(k) as usize]
+}
+
+fn im_turned_h(k: u64) -> u64 {
+    if s_im_turn[(k) as usize] & 1 == 1 {
+        return s_im_w[(k) as usize]
+    }
+    return s_im_h[(k) as usize]
+}
+
+fn draw_im(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let i: usize = scene.scene_node_of(sc(), e)
+    let k: u64 = im_slot_of_node(i)
+    if k == NO_SLOT {
+        return
+    }
+    let x: i64 = widget.w_x(e) as i64
+    let y: i64 = widget.w_y(e) as i64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 8.0,
+        (*t).field | 4278190080 as u32)
+    let px: u64 = s_im_px[(k) as usize]
+    if px != 0 && s_im_w[(k) as usize] != 0 && s_im_h[(k) as usize] != 0 {
+        let zw: u64 = im_turned_w(k) * s_im_zoom[(k) as usize] / 100
+        let zh: u64 = im_turned_h(k) * s_im_zoom[(k) as usize] / 100
+        if zw > 0 && zh > 0 {
+            let ox: i64 = x + ((w as i64) - (zw as i64)) / 2 + s_im_ox[(k) as usize]
+            let oy: i64 = y + ((h as i64) - (zh as i64)) / 2 + s_im_oy[(k) as usize]
+            let cv: *mut canvas.Canvas = painter.painter_canvas(z)
+            let pushed: bool = canvas.clip_push_rect(cv, x as f64, y as f64,
+                (x + w as i64) as f64, (y + h as i64) as f64)
+            var im: uiimage.Image = uiimage.image_wrap(px,
+                s_im_w[(k) as usize] as usize, s_im_h[(k) as usize] as usize, 0)
+            let q: u64 = s_im_turn[(k) as usize] & 3
+            if q == 0 {
+                uiimage.image_draw_rect(z, &im, ox as f64, oy as f64,
+                    zw as f64, zh as f64, 0 as u32)
+            } else {
+                let iw: u64 = s_im_w[(k) as usize]
+                let ih: u64 = s_im_h[(k) as usize]
+                var bw: f64 = iw as f64
+                var bh: f64 = ih as f64
+                if q == 1 || q == 3 {
+                    bw = ih as f64
+                    bh = iw as f64
+                }
+                var xf: transform.Xform = transform.xf_new()
+                transform.xf_translate(&xf, ox as f64, oy as f64)
+                transform.xf_scale(&xf, (zw as f64) / bw, (zh as f64) / bh, 0.0, 0.0)
+                if q == 1 {
+                    transform.xf_translate(&xf, ih as f64, 0.0)
+                } else if q == 2 {
+                    transform.xf_translate(&xf, iw as f64, ih as f64)
+                } else {
+                    transform.xf_translate(&xf, 0.0, iw as f64)
+                }
+                transform.xf_rotate(&xf, (q * 90) as f64)
+                transform.tf_draw_image(z, &xf, &im, 0.0, 0.0, iw as f64,
+                    ih as f64, 1.0)
+            }
+            if pushed {
+                canvas.clip_pop(cv)
+            }
+        }
+    }
+    if s_im_sp[(k) as usize] && px != 0 {
+        let zw2: u64 = im_turned_w(k) * s_im_zoom[(k) as usize] / 100
+        let zh2: u64 = im_turned_h(k) * s_im_zoom[(k) as usize] / 100
+        let ox2: i64 = x + ((w as i64) - (zw2 as i64)) / 2 + s_im_ox[(k) as usize]
+        let oy2: i64 = y + ((h as i64) - (zh2 as i64)) / 2 + s_im_oy[(k) as usize]
+        let zm: u64 = s_im_zoom[(k) as usize]
+        let fx0: i64 = ox2 + ((s_im_a0[(k) as usize] * zm / 100) as i64)
+        let fy0: i64 = oy2 + ((s_im_b0[(k) as usize] * zm / 100) as i64)
+        let fw: u64 = (s_im_a1[(k) as usize] - s_im_a0[(k) as usize] + 1) * zm / 100
+        let fh: u64 = (s_im_b1[(k) as usize] - s_im_b0[(k) as usize] + 1) * zm / 100
+        painter.round_ring(z, fx0 as f64, fy0 as f64, (fw + 2) as f64,
+            (fh + 2) as f64, 0.0, 2.0, (*t).accent | 4278190080 as u32)
+    }
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
+        (*t).border_col | 4278190080 as u32)
+}
+
+// A picture box `w` x `h`. The picture, zoom, turn and pan stay with the
+// KEY when the tree is described again.
+fn image(parent: usize, key: u64, w: u64, h: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_widget_kind(sc(), i, widget.KIND_LABEL)
+    scene.node_set_size(sc(), i, w as f64, h as f64)
+    scene.node_set_draw(sc(), i, 0, draw_im)
+    scene.node_set_id(sc(), i, key as u32)
+    var k: u64 = im_slot(key)
+    if k == NO_SLOT && s_im_n < IM_MAX {
+        k = s_im_n
+        s_im_n = s_im_n + 1
+        s_im_key[(k) as usize] = key
+    }
+    if k != NO_SLOT {
+        s_im_node[(k) as usize] = i
+        s_im_bw[(k) as usize] = w
+        s_im_bh[(k) as usize] = h
+    }
+    return i
+}
+
+fn image_set(key: u64, px: u64, iw: u64, ih: u64) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_im_px[(k) as usize] = px
+    s_im_w[(k) as usize] = iw
+    s_im_h[(k) as usize] = ih
+    s_im_ox[(k) as usize] = 0
+    s_im_oy[(k) as usize] = 0
+    touch()
+}
+
+fn image_has(key: u64) -> bool {
+    let k: u64 = im_slot(key)
+    return k != NO_SLOT && s_im_px[(k) as usize] != 0
+}
+
+// The whole picture in the box, never bigger than 100 %.
+fn image_fit(key: u64) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    let bw: u64 = im_turned_w(k)
+    let bh: u64 = im_turned_h(k)
+    if bw == 0 || bh == 0 {
+        return
+    }
+    var z: u64 = s_im_bw[(k) as usize] * 100 / bw
+    let zy: u64 = s_im_bh[(k) as usize] * 100 / bh
+    if zy < z {
+        z = zy
+    }
+    if z > 100 {
+        z = 100
+    }
+    if z < 5 {
+        z = 5
+    }
+    s_im_zoom[(k) as usize] = z
+    s_im_ox[(k) as usize] = 0
+    s_im_oy[(k) as usize] = 0
+    touch()
+}
+
+fn image_zoom(key: u64) -> u64 {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return 100
+    }
+    return s_im_zoom[(k) as usize]
+}
+
+fn image_set_zoom(key: u64, z: u64) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    var v: u64 = z
+    if v < 5 {
+        v = 5
+    }
+    if v > 3200 {
+        v = 3200
+    }
+    s_im_zoom[(k) as usize] = v
+    touch()
+}
+
+// Turn by `q` quarters clockwise.
+fn image_rotate(key: u64, q: u64) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_im_turn[(k) as usize] = (s_im_turn[(k) as usize] + q) & 3
+    touch()
+}
+
+// One press on the picture answers its key (a thumbnail to click).
+fn image_click(key: u64, on: bool) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_im_clk[(k) as usize] = on
+}
+
+// The picture under (x, y), or NO_SLOT.
+fn im_at(x: u64, y: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_im_n {
+        let i: usize = s_im_node[(k) as usize]
+        if i != NONE && i < scene.scene_count(sc()) && x >= node_x(i)
+            && x < node_x(i) + node_w(i) && y >= node_y(i)
+            && y < node_y(i) + node_h(i) {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+// The selection tool of a picture: a drag draws a frame, taken in IMAGE
+// pixels (only for an unturned picture).
+fn image_tool(key: u64, on: bool) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_im_tool[(k) as usize] = on
+}
+
+fn image_sel_present(key: u64) -> bool {
+    let k: u64 = im_slot(key)
+    return k != NO_SLOT && s_im_sp[(k) as usize]
+}
+
+fn image_sel_x0(key: u64) -> u64 {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_im_a0[(k) as usize]
+}
+
+fn image_sel_y0(key: u64) -> u64 {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_im_b0[(k) as usize]
+}
+
+fn image_sel_x1(key: u64) -> u64 {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_im_a1[(k) as usize]
+}
+
+fn image_sel_y1(key: u64) -> u64 {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_im_b1[(k) as usize]
+}
+
+fn image_sel_clear(key: u64) {
+    let k: u64 = im_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_im_sp[(k) as usize] = false
+    touch()
+}
+
+// The pointer position as a pixel of the picture (clamped to it).
+fn im_pixel(k: u64, x: u64, y: u64, ix: *mut u64, iy: *mut u64) {
+    let i: usize = s_im_node[(k) as usize]
+    let zm: u64 = s_im_zoom[(k) as usize]
+    let zw: u64 = im_turned_w(k) * zm / 100
+    let zh: u64 = im_turned_h(k) * zm / 100
+    let ox: i64 = (node_x(i) as i64) + ((node_w(i) as i64) - (zw as i64)) / 2 + s_im_ox[(k) as usize]
+    let oy: i64 = (node_y(i) as i64) + ((node_h(i) as i64) - (zh as i64)) / 2 + s_im_oy[(k) as usize]
+    var px: i64 = ((x as i64) - ox) * 100 / (zm as i64)
+    var py: i64 = ((y as i64) - oy) * 100 / (zm as i64)
+    if px < 0 {
+        px = 0
+    }
+    if py < 0 {
+        py = 0
+    }
+    if px >= (s_im_w[(k) as usize] as i64) {
+        px = (s_im_w[(k) as usize] as i64) - 1
+    }
+    if py >= (s_im_h[(k) as usize] as i64) {
+        py = (s_im_h[(k) as usize] as i64) - 1
+    }
+    *ix = px as u64
+    *iy = py as u64
+}
+
+fn im_sel_update(k: u64, x: u64, y: u64) {
+    var cx: u64 = 0
+    var cy: u64 = 0
+    im_pixel(k, x, y, &cx, &cy)
+    var a0: u64 = s_im_ax
+    var a1: u64 = cx
+    if cx < a0 {
+        a0 = cx
+        a1 = s_im_ax
+    }
+    var b0: u64 = s_im_ay
+    var b1: u64 = cy
+    if cy < b0 {
+        b0 = cy
+        b1 = s_im_ay
+    }
+    s_im_a0[(k) as usize] = a0
+    s_im_a1[(k) as usize] = a1
+    s_im_b0[(k) as usize] = b0
+    s_im_b1[(k) as usize] = b1
+    s_im_sp[(k) as usize] = true
+    touch()
+}
+
+// A press on a picture: starts a drag (pan, or a frame with the tool); a
+// clickable one answers.
+fn im_press(x: u64, y: u64) -> u64 {
+    let k: u64 = im_at(x, y)
+    if k == NO_SLOT {
+        return 0
+    }
+    if s_im_tool[(k) as usize] && s_im_px[(k) as usize] != 0
+        && (s_im_turn[(k) as usize] & 3) == 0 {
+        var ax: u64 = 0
+        var ay: u64 = 0
+        im_pixel(k, x, y, &ax, &ay)
+        s_im_ax = ax
+        s_im_ay = ay
+        s_im_selk = k
+        s_im_sp[(k) as usize] = false
+        im_sel_update(k, x, y)
+        return 0
+    }
+    s_im_drag = k
+    s_im_sx = x
+    s_im_sy = y
+    s_im_sox = s_im_ox[(k) as usize]
+    s_im_soy = s_im_oy[(k) as usize]
+    if s_im_clk[(k) as usize] {
+        return s_im_key[(k) as usize]
+    }
+    return 0
+}
+
+fn im_move(x: u64, y: u64) {
+    if s_im_selk != NO_SLOT {
+        im_sel_update(s_im_selk, x, y)
+        return
+    }
+    if s_im_drag == NO_SLOT {
+        return
+    }
+    let k: u64 = s_im_drag
+    s_im_ox[(k) as usize] = s_im_sox + (x as i64) - (s_im_sx as i64)
+    s_im_oy[(k) as usize] = s_im_soy + (y as i64) - (s_im_sy as i64)
+    touch()
+}
 
 // ------------------------------------------------------------ the dialog
 //
@@ -1584,6 +2501,24 @@ fn dlg_x() -> u64 {
 
 fn dlg_y() -> u64 {
     return (fuiapp.height() - DLG_H) / 2
+}
+
+// Where the first button of the dialog stands (canvas points): what a
+// test or a reader needs to press it.
+fn dialog_ok_x() -> u64 {
+    return dlg_x() + 16
+}
+
+fn dialog_ok_y() -> u64 {
+    return dlg_y() + DLG_H - 52
+}
+
+fn dialog_ok_w() -> u64 {
+    return (dlg_w() - 48) / 2
+}
+
+fn dialog_ok_h() -> u64 {
+    return 36
 }
 
 fn dlg_paint() {
