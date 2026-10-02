@@ -217,6 +217,42 @@ fn fabs(x: f64) -> f64 {
     return x
 }
 
+// float -> integer without a panic: NaN, negatives and huge values are clamped
+fn f2u(v: f64) -> u64 {
+    if v != v || v < 0.0 {
+        return 0
+    }
+    if v > 1.0e15 {
+        return 1000000000000000
+    }
+    return v as u64
+}
+
+fn f2u32(v: f64) -> u32 {
+    let u: u64 = f2u(v)
+    if u > 4294967295 {
+        return 4294967295
+    }
+    return u as u32
+}
+
+fn f2i(v: f64) -> i64 {
+    if v != v {
+        return 0
+    }
+    if v > 1.0e15 {
+        return 1000000000000000
+    }
+    if v < 0.0 - 1.0e15 {
+        return 0 - 1000000000000000
+    }
+    return v as i64
+}
+
+fn u2u32(v: u64) -> u32 {
+    return (v & 0xFFFFFFFF) as u32
+}
+
 fn fsqrt(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0
@@ -444,8 +480,8 @@ fn parse_ref(p0: u64, end: u64, v: *mut Val) -> u64 {
     var r: Val = val_none()
     let p3: u64 = parse_val(p2, end, &r)
     if r.kind == K_OP && r.n == 1 && ld(r.a) == 82 {
-        (*v).rn = (*v).num as u32
-        (*v).rg = g.num as u32
+        (*v).rn = f2u32((*v).num)
+        (*v).rg = f2u32(g.num)
         (*v).kind = K_REF
         return p3
     }
@@ -581,7 +617,7 @@ fn rd8(p: u64) -> u32 {
 }
 
 fn wr8(p: u64, v: u32) {
-    *(p as *mut u8) = v as u8
+    *(p as *mut u8) = (v & 255) as u8
 }
 
 fn alloc0(n: u64) -> u64 {
@@ -635,7 +671,7 @@ const F_CCITT: u32 = 3
 const F_JBIG2: u32 = 4
 
 fn push(b: *mut rt.Buf, c: u32) {
-    rt.buf_push(b, c as u8)
+    rt.buf_push(b, (c & 255) as u8)
 }
 
 fn ascii_hex(src: u64, n: u64, out: *mut rt.Buf) {
@@ -764,6 +800,9 @@ fn lzw_expand(tab: u64, tmp: u64, code0: u64, out: *mut rt.Buf) -> u32 {
         c = (e & 65535) as u64
         guard = guard + 1
     }
+    if c >= 256 {
+        c = 0
+    }
     wr8(tmp + len, c as u32)
     len = len + 1
     let first: u32 = rd8(tmp + len - 1)
@@ -806,6 +845,8 @@ fn lzw(src: u64, n: u64, early: u64, out: *mut rt.Buf) {
                     push(out, code as u32)
                 }
                 prev = code
+            } else if code > next {
+                done = true
             } else {
                 if code < next {
                     let first: u32 = lzw_expand(tab, tmp, code, out)
@@ -957,7 +998,7 @@ fn val_resolved_int(d: *mut Doc, v: *mut Val, dflt: u64) -> u64 {
         if r.num < 0.0 {
             return dflt
         }
-        return r.num as u64
+        return f2u(r.num)
     }
     return dflt
 }
@@ -1121,7 +1162,7 @@ fn parse_indirect_at(d: *mut Doc, off: u64, out: *mut Val, want: u64) -> bool {
     if t1.kind != K_INT || t2.kind != K_INT || t3.kind != K_OP || !mem_eq_str(t3.a, t3.n, "obj") {
         return false
     }
-    if want != 0xFFFFFFFFFFFFFFFF && (t1.num as u64) != want {
+    if want != 0xFFFFFFFFFFFFFFFF && (f2u(t1.num)) != want {
         return false
     }
     var v: Val = val_none()
@@ -1262,8 +1303,8 @@ fn load_obj(d: *mut Doc, num: u64, out: *mut Val) -> bool {
             if a.kind != K_INT || b.kind != K_INT {
                 return false
             }
-            if (a.num as u64) == num {
-                let at: u64 = base + first + (b.num as u64)
+            if (f2u(a.num)) == num {
+                let at: u64 = base + first + (f2u(b.num))
                 if at >= end {
                     return false
                 }
@@ -1352,7 +1393,7 @@ fn find_startxref(d: *mut Doc) -> u64 {
             var v: Val = val_none()
             parse_val((*d).data + p + 9, (*d).data + n, &v)
             if v.kind == K_INT {
-                return v.num as u64
+                return f2u(v.num)
             }
             return 0xFFFFFFFFFFFFFFFF
         }
@@ -1436,9 +1477,9 @@ fn read_xref_stream(d: *mut Doc, off: u64, first: bool, prev: *mut u64, xrefstm:
             }
             let num: u64 = start + k
             if t == 1 {
-                set_entry(d, num, 1, f[1], f[2] as u32)
+                set_entry(d, num, 1, f[1], u2u32(f[2]))
             } else if t == 2 {
-                set_entry(d, num, 2, f[1], f[2] as u32)
+                set_entry(d, num, 2, f[1], u2u32(f[2]))
             } else if t == 0 {
                 set_entry(d, num, 3, 0, 0)
             }
@@ -1483,8 +1524,8 @@ fn read_xref_table(d: *mut Doc, off: u64, first: bool, prev: *mut u64, xrefstm: 
         if a.kind != K_INT || b.kind != K_INT {
             return false
         }
-        var start: u64 = a.num as u64
-        let count: u64 = b.num as u64
+        var start: u64 = f2u(a.num)
+        let count: u64 = f2u(b.num)
         var k: u64 = 0
         while k < count {
             var o: Val = val_none()
@@ -1497,7 +1538,7 @@ fn read_xref_table(d: *mut Doc, off: u64, first: bool, prev: *mut u64, xrefstm: 
                 return false
             }
             if ld(t.a) == 110 {
-                set_entry(d, start + k, 1, o.num as u64, g.num as u32)
+                set_entry(d, start + k, 1, f2u(o.num), f2u32(g.num))
             } else {
                 set_entry(d, start + k, 3, 0, 0)
             }
@@ -1640,8 +1681,8 @@ fn rebuild(d: *mut Doc) -> bool {
                                 var o: Val = val_none()
                                 pp = parse_val(pp, be, &a)
                                 pp = parse_val(pp, be, &o)
-                                if a.kind == K_INT && xgrow(d, a.num as u64) {
-                                    let an: u64 = a.num as u64
+                                if a.kind == K_INT && xgrow(d, f2u(a.num)) {
+                                    let an: u64 = f2u(a.num)
                                     if rd8((*d).xk + an) == 0 {
                                         wr8((*d).xk + an, 2)
                                         wr64((*d).xo + an * 8, i)
@@ -1978,7 +2019,7 @@ fn put_f(b: *mut rt.Buf, v0: f64, dec: u64) {
         mul = mul * 10.0
         i = i + 1
     }
-    let scaled: u64 = (v * mul + 0.5) as u64
+    let scaled: u64 = f2u(v * mul + 0.5)
     let ip: u64 = scaled / (mul as u64)
     var fp: u64 = scaled % (mul as u64)
     put_u(b, ip)
@@ -2037,8 +2078,13 @@ fn put_utf8_xml(b: *mut rt.Buf, u: u32) {
     } else if u < 2048 {
         push(b, 192 | (u >> 6))
         push(b, 128 | (u & 63))
-    } else {
+    } else if u < 65536 {
         push(b, 224 | (u >> 12))
+        push(b, 128 | ((u >> 6) & 63))
+        push(b, 128 | (u & 63))
+    } else if u < 1114112 {
+        push(b, 240 | (u >> 18))
+        push(b, 128 | ((u >> 12) & 63))
         push(b, 128 | ((u >> 6) & 63))
         push(b, 128 | (u & 63))
     }
@@ -2236,7 +2282,7 @@ fn rgb_pack(r: f64, g: f64, b: f64) -> u32 {
     if bb > 1.0 {
         bb = 1.0
     }
-    return (((rr * 255.0 + 0.5) as u32) << 16) | (((gg * 255.0 + 0.5) as u32) << 8) | ((bb * 255.0 + 0.5) as u32)
+    return ((f2u32(rr * 255.0 + 0.5)) << 16) | ((f2u32(gg * 255.0 + 0.5)) << 8) | (f2u32(bb * 255.0 + 0.5))
 }
 
 fn cmyk_pack(c: f64, m: f64, y: f64, k: f64) -> u32 {
@@ -2305,20 +2351,20 @@ fn utf16_first(v: u64, nd: u64) -> u32 {
         let hi: u64 = (v >> 16) & 0xFFFF
         let lo: u64 = v & 0xFFFF
         if hi >= 0xD800 && hi < 0xDC00 && lo >= 0xDC00 && lo < 0xE000 {
-            return (0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)) as u32
+            return u2u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
         }
-        return hi as u32
+        return u2u32(hi)
     }
-    return v as u32
+    return u2u32(v)
 }
 
 fn cmap_add(tab: u64, cnt: *mut u64, lo: u64, hi: u64, dst: u64) {
     if *cnt >= CMAP_MAX {
         return
     }
-    wr32(tab + (*cnt) * 12, lo as u32)
-    wr32(tab + (*cnt) * 12 + 4, hi as u32)
-    wr32(tab + (*cnt) * 12 + 8, dst as u32)
+    wr32(tab + (*cnt) * 12, u2u32(lo))
+    wr32(tab + (*cnt) * 12 + 4, u2u32(hi))
+    wr32(tab + (*cnt) * 12 + 8, u2u32(dst))
     *cnt = *cnt + 1
 }
 
@@ -2581,9 +2627,9 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
                                         q = parse_ref(q, qe, &wvv)
                                         var wr: Val = val_none()
                                         resolve(d, &wvv, &wr)
-                                        let c: u64 = (a.num as u64) + k
-                                        wr32(tab + cnt * 16, c as u32)
-                                        wr32(tab + cnt * 16 + 4, c as u32)
+                                        let c: u64 = (f2u(a.num)) + k
+                                        wr32(tab + cnt * 16, u2u32(c))
+                                        wr32(tab + cnt * 16 + 4, u2u32(c))
                                         *((tab + cnt * 16 + 8) as *mut f64) = val_num(&wr)
                                         cnt = cnt + 1
                                         k = k + 1
@@ -2593,8 +2639,8 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
                                     p = parse_ref(p, end, &w3)
                                     var w3r: Val = val_none()
                                     resolve(d, &w3, &w3r)
-                                    wr32(tab + cnt * 16, a.num as u32)
-                                    wr32(tab + cnt * 16 + 4, b2.num as u32)
+                                    wr32(tab + cnt * 16, f2u32(a.num))
+                                    wr32(tab + cnt * 16 + 4, f2u32(b2.num))
                                     *((tab + cnt * 16 + 8) as *mut f64) = val_num(&w3r)
                                     cnt = cnt + 1
                                 }
@@ -2658,7 +2704,7 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
             var e: Val = val_none()
             p = parse_ref(p, end, &e)
             if e.kind == K_INT {
-                code = e.num as u64
+                code = f2u(e.num)
             } else if e.kind == K_NAME {
                 if code < 256 {
                     let u: u32 = pdftab.agl_lookup(e.a, e.n)
@@ -2674,7 +2720,7 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
     var fc: Val = val_none()
     var first: u64 = 0
     if doc_dict_get(d, fd, "FirstChar", &fc) {
-        first = val_num(&fc) as u64
+        first = f2u(val_num(&fc))
     }
     var mw: f64 = 0.0
     var fdesc: Val = val_none()
@@ -3083,7 +3129,7 @@ fn cs_comps(r: *mut R, v: *mut Val, sep: *mut u32) -> u32 {
             resolve((*r).d, &sv, &sr)
             var nn: Val = val_none()
             if (sr.kind == K_STREAM || sr.kind == K_DICT) && doc_dict_get((*r).d, &sr, "N", &nn) {
-                return val_num(&nn) as u32
+                return f2u32(val_num(&nn))
             }
             return 3
         }
@@ -3166,10 +3212,10 @@ fn gs_apply_ext(r: *mut R, ev: *mut Val) {
         (*r).gs.lw = val_num(&v)
     }
     if doc_dict_get((*r).d, ev, "LC", &v) {
-        (*r).gs.cap = val_num(&v) as u32
+        (*r).gs.cap = f2u32(val_num(&v))
     }
     if doc_dict_get((*r).d, ev, "LJ", &v) {
-        (*r).gs.join = val_num(&v) as u32
+        (*r).gs.join = f2u32(val_num(&v))
     }
 }
 
@@ -3317,9 +3363,9 @@ fn run_content(r: *mut R, data: u64, len: u64) {
                 } else if c == 119 && nops >= 1 {
                     (*r).gs.lw = val_num(&ops[nops - 1])
                 } else if c == 74 && nops >= 1 {
-                    (*r).gs.cap = val_num(&ops[nops - 1]) as u32
+                    (*r).gs.cap = f2u32(val_num(&ops[nops - 1]))
                 } else if c == 106 && nops >= 1 {
-                    (*r).gs.join = val_num(&ops[nops - 1]) as u32
+                    (*r).gs.join = f2u32(val_num(&ops[nops - 1]))
                 } else if c == 77 && nops >= 1 {
                     (*r).gs.miter = val_num(&ops[nops - 1])
                 } else if c == 100 && nops >= 2 {
@@ -3462,7 +3508,7 @@ fn run_content(r: *mut R, data: u64, len: u64) {
                 } else if c0 == 84 && c1 == 115 && nops >= 1 {
                     (*r).gs.ts = val_num(&ops[nops - 1])
                 } else if c0 == 84 && c1 == 114 && nops >= 1 {
-                    (*r).gs.tr = val_num(&ops[nops - 1]) as u32
+                    (*r).gs.tr = f2u32(val_num(&ops[nops - 1]))
                 } else if c0 == 84 && c1 == 106 && nops >= 1 {
                     if ops[nops - 1].kind == K_STR {
                         text_show(r, &ops[nops - 1])
@@ -3574,12 +3620,12 @@ fn page_geometry(d: *mut Doc, page: u64, bx: *mut [f64; 4], rot: *mut u64, pv: *
     var rv: Val = val_none()
     *rot = 0
     if page_attr(d, pv, "Rotate", &rv) {
-        var q: i64 = val_num(&rv) as i64
+        var q: i64 = f2i(val_num(&rv))
         q = q % 360
         if q < 0 {
             q = q + 360
         }
-        *rot = (q / 90) as u64
+        *rot = ((q / 90) & 3) as u64
     }
     return true
 }
@@ -3628,8 +3674,8 @@ fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, out: *mut rt.Buf, wo: *mut u
         pw = ph
         ph = t2
     }
-    var wpx: u64 = (pw * s + 0.5) as u64
-    var hpx: u64 = (ph * s + 0.5) as u64
+    var wpx: u64 = f2u(pw * s + 0.5)
+    var hpx: u64 = f2u(ph * s + 0.5)
     if wpx < 1 {
         wpx = 1
     }
@@ -3715,13 +3761,13 @@ fn doc_img_info(d: *mut Doc, obj: u64, w: *mut u64, h: *mut u64, bpc: *mut u64, 
     *smask = 0
     *imagemask = false
     if doc_dict_get(d, &v, "Width", &t) {
-        *w = val_num(&t) as u64
+        *w = f2u(val_num(&t))
     }
     if doc_dict_get(d, &v, "Height", &t) {
-        *h = val_num(&t) as u64
+        *h = f2u(val_num(&t))
     }
     if doc_dict_get(d, &v, "BitsPerComponent", &t) {
-        *bpc = val_num(&t) as u64
+        *bpc = f2u(val_num(&t))
     }
     if doc_dict_get(d, &v, "ImageMask", &t) {
         if t.num != 0.0 {
@@ -3781,7 +3827,7 @@ fn img_space(d: *mut Doc, v: *mut Val, kind: *mut u32, pal: *mut u64, pn: *mut u
         var nn: Val = val_none()
         var n: u64 = 3
         if (sr.kind == K_STREAM || sr.kind == K_DICT) && doc_dict_get(d, &sr, "N", &nn) {
-            n = val_num(&nn) as u64
+            n = f2u(val_num(&nn))
         }
         if n == 1 {
             *kind = 1
@@ -3814,7 +3860,7 @@ fn img_space(d: *mut Doc, v: *mut Val, kind: *mut u32, pal: *mut u64, pn: *mut u
         var hr: Val = val_none()
         arr_at((*v).a, (*v).n, 2, &hv)
         resolve(d, &hv, &hr)
-        let hival: u64 = val_num(&hr) as u64
+        let hival: u64 = f2u(val_num(&hr))
         var lv: Val = val_none()
         var lr: Val = val_none()
         arr_at((*v).a, (*v).n, 3, &lv)
@@ -4151,10 +4197,10 @@ fn doc_img_blit(d: *mut Doc, i: u64, dst: u64, w: u64, h: u64) -> bool {
         }
         k = k + 1
     }
-    var x0: i64 = minx as i64
-    var x1: i64 = (maxx + 1.0) as i64
-    var y0: i64 = miny as i64
-    var y1: i64 = (maxy + 1.0) as i64
+    var x0: i64 = f2i(minx)
+    var x1: i64 = f2i(maxx + 1.0)
+    var y0: i64 = f2i(miny)
+    var y1: i64 = f2i(maxy + 1.0)
     if x0 < 0 {
         x0 = 0
     }

@@ -47,6 +47,7 @@ import pwr.pmon
 import sched.proc
 import drv.hid.ps2m
 import pwr.pwr
+import pwr.s3
 import sched.sched
 import serial
 import sched.signal
@@ -2433,6 +2434,7 @@ fn surface(state: u64) {
             // Schleife und aus demselben Grund -- der Starter kann ihn
             // nur aufschreiben, ausfuehren muss ihn der Kern.
             abmelde_wache(state)
+            standby_wache(state)
             // RUNDE VSYNC: DIE REIHENFOLGE IM TAKT, und sie ist der
             // ganze Punkt. Erst die Bewegungen weiterstellen (das
             // macht die betroffenen Bereiche schmutzig), dann
@@ -4496,6 +4498,43 @@ static mut sp_startet: u64 = 0
 // sie zu.
 static mut lo_startet: u64 = 0
 
+// DAILY-DRIVER (r143): THE STANDBY WISH (sperre op 11), done here because S3
+// needs the kernel's own context. The screen is locked first, so the wake-up
+// shows the lock screen and not an open session; the answer goes into
+// SP_STANDBYRC (see kstate) for the program that asked.
+fn standby_wache(state: u64) {
+    let sp: u64 = kstate.K11_OFF
+    if kstate.get(state, sp + kstate.SP_STANDBY) == 0 {
+        return
+    }
+    kstate.set(state, sp + kstate.SP_STANDBY, 0)
+    var s_w: [u8; 18] = "standby: wunsch\0\0\0"
+    var s_z: [u8; 20] = "standby: antwort=\0\0\0"
+    serial.puts((&s_w[0]) as u64)
+    serial.nl()
+    let _f: bool = blk.flush(state)
+    if kstate.get(state, sp + kstate.SP_ON) == 0 {
+        kstate.set(state, sp + kstate.SP_ON, 1)
+        kstate.add(state, sp + kstate.SP_LOCKS, 1)
+    }
+    let r: u64 = s3.suspend(state)
+    var rc: u64 = 4
+    if r == s3.R_OK_S3 {
+        rc = 1
+        kstate.add(state, sp + kstate.SP_STANDBYS, 1)
+        // the picture has to be made again after the sleep
+        wm.damage_all(state)
+    } else if r == s3.R_SMP {
+        rc = 2
+    } else if r == s3.R_NOS3 {
+        rc = 3
+    }
+    kstate.set(state, sp + kstate.SP_STANDBYRC, rc)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(rc)
+    serial.nl()
+}
+
 fn abmelde_wache(state: u64) {
     let sp: u64 = kstate.K11_OFF
     if kstate.get(state, sp + kstate.SP_LOGOUT) == 0 {
@@ -4859,6 +4898,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         sperre_wache(state)
         // RUNDE LOGIND: der Abmeldewunsch, siehe `abmelde_wache`.
         abmelde_wache(state)
+        standby_wache(state)
         st(35)
         // 24.09.2026: THE WINDOW MOVEMENTS TICK HERE TOO. `anim_tick`
         // stood only in the hold loop of `surface`; on the desktop every

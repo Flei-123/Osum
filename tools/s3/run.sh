@@ -262,6 +262,71 @@ else
     tail -8 "$TMPD/inst.txt" | sed 's/^/        /'
 fi
 
+# ------------------------------------------------------------ 8. the wish
+echo "== 8. the menu's path: sperre op 11 (wish), the kernel sleeps under the window server =="
+# DAILY-DRIVER (r143): the Start menu's "Energie sparen" writes a WISH (sperre
+# op 11) -- any user may, like signing out -- and the window server's loop
+# (kgui.standby_wache) puts the machine to sleep, locks the screen first and
+# answers in op 12: 1 slept and woke, 2 several processors run, 3 no S3.
+# `standby --wish` is the same call as the menu makes, without the menu.
+B8="$TMPD/b8"
+mkdir -p "$B8"
+if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm shot=no script=exit \
+        progs="standby sh echo" > "$B8/log" 2>&1 && [ -s "$B8/bd/k0.mb" ] && [ -s "$B8/o/disk.img" ]; then
+    ok "kernel and root with the window server's files built"
+    CRC8=$(python3 -c "import zlib,sys;print('0x%08x' % (zlib.crc32(open(sys.argv[1],'rb').read()) & 0xffffffff))" "$B8/o/disk.img")
+    lauf8() { # name smp
+        local name=$1 smp=$2 t="$TMPD/e8.img" sock="$TMPD/mon.8$2"
+        printf 'timeout: 0\ndefault_entry: 1\n/s3\n    protocol: multiboot1\n    path: boot():/osum.mb\n    module_path: boot():/quelle.img\n    cmdline: osum vfs modfs modcrc=%s gfx wm wig wmhold wighalt=120 nokbd nosched noproc nofs wigapp=/bin/standby,--wish\n' "$CRC8" > "$TMPD/limine.conf"
+        dd if=/dev/zero of="$TMPD/r8.img" bs=1M count=0 seek=80 status=none
+        sgdisk --clear --new=1:2048:+72M --typecode=1:EF00 "$TMPD/r8.img" >/dev/null 2>&1
+        dd if=/dev/zero of="$t" bs=1M count=72 status=none
+        mkfs.vfat -F 32 "$t" >/dev/null 2>&1
+        mcopy -i "$t" "$LIMINE/limine-bios.sys" ::/limine-bios.sys
+        mcopy -i "$t" "$TMPD/limine.conf" ::/limine.conf
+        mcopy -i "$t" "$B8/bd/k0.mb" ::/osum.mb
+        mcopy -i "$t" "$B8/o/disk.img" ::/quelle.img
+        dd if="$t" of="$TMPD/r8.img" bs=512 seek=2048 conv=notrunc status=none
+        rm -f "$t"
+        "$LIMINE/limine" bios-install "$TMPD/r8.img" >/dev/null 2>&1
+        L8="$TMPD/l-$name.txt"; rm -f "$L8"
+        timeout 150 $QEMU_X86 -m 512 -smp "$smp" -drive "file=$TMPD/r8.img,format=raw,if=ide,index=0" \
+            -serial "file:$L8" -display none -no-reboot -vga std \
+            -monitor "unix:$sock,server,nowait" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+        P8=$!
+        local i
+        for i in $(seq 1 600); do
+            grep -qa 's3: schlafe\|standby: antwort=' "$L8" 2>/dev/null && break
+            kill -0 "$P8" 2>/dev/null || break
+            sleep 0.2
+        done
+        sleep 1
+        ST8=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
+        case $ST8 in *suspended*) echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 ;; esac
+        for i in $(seq 1 300); do
+            [ "$(grep -ac 'standby: antwort=' "$L8" 2>/dev/null)" -ge 2 ] && break
+            kill -0 "$P8" 2>/dev/null || break
+            sleep 0.2
+        done
+        sleep 1
+        ST9=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
+        kill "$P8" 2>/dev/null; wait "$P8" 2>/dev/null
+    }
+    lauf8 one 1
+    has "$L8" "standby: wunsch gestellt" "the program put the wish"
+    has "$L8" "standby: wunsch" "the kernel took it up in the window server's loop"
+    case $ST8 in *suspended*) ok "the machine sleeps ($ST8)";; *) bad "state at the standby: '$ST8'";; esac
+    n=$(grep -ac 'standby: antwort=1' "$L8"); num "the answer 1 (slept and woke), kernel + program" "$n" eq 2
+    case $ST9 in *running*) ok "and it runs again after the wake-up ($ST9)";; *) bad "state after the wake-up: '$ST9'";; esac
+    lauf8 two 2
+    has "$L8" "standby: antwort=2" "with two processors the kernel REFUSES (answer 2) and does not half-sleep"
+    case $ST8 in *suspended*) bad "two processors: it slept after all ($ST8)";; *) ok "two processors: the machine keeps running ($ST8)";; esac
+else
+    bad "build for the wish run"
+    tail -6 "$B8/log" | sed 's/^/        /'
+fi
+
 echo
 echo "S3: $pass bestanden, $fail gefallen"
 [ "$fail" -eq 0 ]

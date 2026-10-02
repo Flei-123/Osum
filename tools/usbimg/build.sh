@@ -263,7 +263,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd axd sntp kontocli"}
+orientbus act settingsd axd sntp kontocli pdfview"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1259,6 +1259,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
 /etc/settings.schema /etc/actions.d/settings.actions \
 /bin/axd /etc/actions.d/a11y.actions \
+/bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

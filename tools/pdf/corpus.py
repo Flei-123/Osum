@@ -202,7 +202,8 @@ def main(out):
             acc &= (1 << n) - 1
         if n: res.append((acc << (8 - n)) & 255)
         return bytes(res)
-    objs = dict(base); objs[4] = ("stream", "/Filter /LZWDecode", lzw_encode(cs * 6))
+    lines = b" ".join(b"BT /F1 9 Tf 72 %d Td (LZW line %d with some text to grow the string table) Tj ET" % (700 - 11 * k, k) for k in range(60))
+    objs = dict(base); objs[4] = ("stream", "/Filter /LZWDecode", lzw_encode(cs + b" " + lines))
     raw_pdf(f"{out}/lzw.pdf", objs)
 
     # 9. damaged: truncated (no xref, no trailer) and with a wrong startxref

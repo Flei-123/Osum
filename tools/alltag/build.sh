@@ -326,7 +326,7 @@ else
     WAITFOR='^wm: hold'
 fi
 T0=$(date +%s%N)
-timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
+timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 -smp "${OSUM_SMP:-1}" \
     -append "$APPEND" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \

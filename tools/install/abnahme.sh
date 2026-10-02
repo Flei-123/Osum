@@ -578,7 +578,8 @@ def check(p):
 print("ok4" if check(pw) else "bad4 hash does not match the password")
 print("ok5" if not check('falsch-123') and not check('live') and not check('startkennwort') else "bad5 wrong password accepted")
 print("ok6" if 'abnahme' in [l.split(':')[0] for l in group.splitlines() if ':' in l] else "bad6 group")
-print("ok7" if 'abnahme' in users.split() and 'live' not in users.split() else "bad7 users %r" % users)
+ut = [t.rstrip('/') for t in users.split()]
+print("ok7" if 'abnahme' in ut and 'live' not in ut else "bad7 users %r" % users)
 print("ok8" if 'autologin' not in auto.split() and 'passwd' in auto.split() else "bad8 autologin still there or no listing: %r" % auto[:200])
 PYEOF2
 cat "$OUT/konto-py.txt" | sed 's/^/        /'
