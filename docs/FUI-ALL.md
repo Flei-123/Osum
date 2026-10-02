@@ -154,3 +154,37 @@ lives in the central token layers, not in programs:
   counter-test also overpaints the button's face colour (a main button is
   accent-filled), `loginui` focus ring = dark edge that differs from the
   face (the accent-filled button is dark too).
+
+## 6. Stage 2: programs on fUi's scene tree (`kernel/user/fuiscene.fi`), 02.10.2026
+
+Decision (Justin): everything is built with fUi, nothing stays on wlib.
+Stage 1 ("wlib paints with fUi") was already done; the work that is left is
+the retained widget model, the layout and the events. They move program by
+program to the host in `fuiscene.fi` (scene tree + `control.Panel` +
+`plat.fuiwirt`), and `wlib`/`wlibc`/the painting in `wm.fi` disappear when the
+last program has left them.
+
+**The model is "describe again".** A program hands over `build()`; the tree
+is rebuilt whenever the program calls `refresh()`. Nodes the program wants to
+hear from carry a KEY; `pump()` answers with the key of the activated node.
+Text fields, table selection and check / slider values live in the host by
+key, so they survive a rebuild; focus is found again by key.
+
+Building blocks: boxes (`row`, `column`, `space`), `label`, `button`,
+`button_main` (accent), `tab`, flat menu-bar buttons, `entry`, `check`,
+`slider`, `choice`, `table` / `table_blob` (one painted node: header, rows,
+selection, keys, header clicks; a list is a table of one column), one popup
+menu overlay (`menu_open`), and `say_rects` / `say_texts` which write the
+lines `tools/design/messen.py` and `tools/alltag/shotcheck.py` read.
+
+Lessons paid for (all in `fuiscene.fi` comments): `scene_new()` /
+`sheet_new()` return ~100 KB by value and kill a user stack silently --
+static memory plus `scene_reset`; a static cannot hold a function address --
+store it at `open`; `wlib.begin` must run before the window; a node's style is
+recomputed from the stylesheet each frame (colours go through
+`sheet_rule(sel_id)`); box `grow` / fixed width of a row do not reach their
+children in the pinned fUi -- compute pixel widths; the 4-point grid
+(`messen.py`, 92 %) wants gaps and sizes in multiples of 4.
+
+Ported so far: `calc`, `papierkorb` (and `scenedemo`). Acceptances:
+alltag raster 100 % for both.
