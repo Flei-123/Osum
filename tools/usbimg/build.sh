@@ -263,7 +263,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd axd"}
+orientbus act settingsd axd sntp"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -839,11 +839,11 @@ else
 #          Nameserver auf, den ihm DHCP gegeben hat (Runde BETRIEB), und
 #          prueft das Zertifikat gegen /etc/ssl/roots.pem.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe NEIN: gesucht wird, wenn jemand es sagt.
+# auto     true/false (ja/nein gehen auch). Vorgabe false: gesucht wird, wenn jemand es sagt.
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 quelle=$STORE/aktuell
 abstand=3600
-auto=nein
+auto=false
 frist=120
 EOFOTA
 fi
@@ -1168,6 +1168,21 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
     fi
 done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
+# DAILY-DRIVER: THE ZONE AND THE NETWORK CLOCK. `sntp boot` (started by
+# the desktop) applies /etc/time.conf to the kernel and, with auto=true,
+# sets the clock from /etc/ntp.conf as soon as the network is there. The
+# personal image is Vienna (60 minutes + EU summer time) with the network
+# clock on; the public image is UTC with it OFF -- a download that asks a
+# server by itself on first start is the thing the public image avoids.
+if [ "$IMAGE_PROFILE" = public ]; then
+    printf 'offset=0\nrule=none\n' > "$OUT/time.conf"
+    NTPAUTO=false
+else
+    printf 'offset=60\nrule=eu\n' > "$OUT/time.conf"
+    NTPAUTO=true
+fi
+printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  host or host:port; auto  true/false; abstand  seconds between two checks\nserver=pool.ntp.org\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
+ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
 # PRE-PAIRED DEVICE KEY (personal image only). The seed was generated on
 # the JARVIS server and its public key is already registered there
@@ -1310,19 +1325,19 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe graphics)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (no network)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
 
 /Command line
     protocol: multiboot1
@@ -1342,55 +1357,55 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
 
 //@MARKE_PRODUKT@ (measuring board)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: interrupt pin)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: polled)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (framebuffer uncached)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (framebuffer write-back)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (status lamp, blink fields)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (apps on core 0 only)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
 
 //@MARKE_PRODUKT@ (check: wrong GS base)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (2560x1440)
     protocol: multiboot1

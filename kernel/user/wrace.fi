@@ -1,0 +1,301 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wrace.fi -- DAILY-DRIVER: SEVERAL PROCESSES WRITE FILES AT
+// THE SAME TIME, AND EVERY OCTET IS CHECKED.
+//
+//     wrace run <dir> <procs> <kib>      start <procs> writers, wait, verify
+//     wrace child <dir> <n> <kib>        one writer (started by `run`)
+//     wrace verify <dir> <procs> <kib>   only read back and compare
+//
+// WHY IT EXISTS. Roadmap r200: on 27.09.2026 an installed system on a SATA
+// disk (QEMU q35) came up after the restart with a broken file system --
+// 128 octets from byte 16 of a sector zeroed, at random. The suspect was
+// the one copy page every file read/write call bounced its data through
+// (`kstate.BLOCK_OFF`): with ring 3 on all cores two calls filled it at the
+// same time. The fix of 27.09. gave every core its own page (`BLOCKK_OFF`),
+// and the Dell update that had been getting 512-octet pieces of
+// /etc/theme.conf written onto the stick was seen to stop. What was never
+// built is the TEST that would catch it coming back: this program, run on
+// four cores (`-smp 4 r3alle`), writes <procs> files of <kib> KiB each --
+// in parallel, with a read of another file between the writes, which is
+// the traffic that corrupted the stick -- and then every octet of every
+// file is recomputed and compared. The host does it a second time from the
+// disk image after the guest has shut down (tools/fsrobust/wrace.sh), so
+// the kernel is not its own witness.
+//
+// HONEST LIMIT (measured, 02.10.2026): the shared page was put back into the
+// kernel on purpose (a copy of this tree with `blockb` returning
+// `state + kstate.BLOCK_OFF` for every caller, i.e. the state before the fix)
+// and this test passed three rounds anyway. The file-system calls share the
+// big file-system lock, so two WRITERS never meet in the page; the race of
+// r200 needs a user of the page OUTSIDE that lock (window calls of the
+// desktop, `conout`) at the same moment, and with two console writers added
+// (tried, 8000 lines) it still did not show in three rounds. So this program
+// is an end-to-end data-integrity test of parallel writers on four cores,
+// verified from the disk image by the host -- it does NOT prove the copy-page
+// race is gone. The reproducer of 27.09. was the full desktop on `-smp 4
+// r3alle` (tools/multicore/run.sh); a negative control for r200 has to be
+// built on that.
+//
+// The pattern of octet `o` of file `n` is a function of both, so a block
+// that lands in the wrong file, a block written twice, or a block of
+// zeros or of some other file's text is a mismatch, and the first
+// mismatch is reported with file, block, offset and both values.
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const BLK: u64 = 4096
+const NOT_YET: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut BUF: [u8; 4096] = [0 as u8; 4096]
+static mut RDB: [u8; 4096] = [0 as u8; 4096]
+static mut PATH: [u8; 160] = [0 as u8; 160]
+static mut ARGV: [u64; 8] = [0 as u64; 8]
+static mut NUM1: [u8; 24] = [0 as u8; 24]
+static mut NUM2: [u8; 24] = [0 as u8; 24]
+static mut NUM3: [u8; 24] = [0 as u8; 24]
+
+static mut C_RUN: [u8; 4] = "run\0"
+static mut C_CHILD: [u8; 6] = "child\0"
+static mut C_VERIFY: [u8; 7] = "verify\0"
+static mut A0: [u8; 6] = "wrace\0"
+static mut A1: [u8; 6] = "child\0"
+static mut P_SELF: [u8; 11] = "/bin/wrace\0"
+static mut S_SLASHF: [u8; 3] = "/f\0"
+static mut S_BAD: [u8; 14] = "wrace: BAD f\0\0"
+static mut S_BLK: [u8; 8] = " block \0"
+static mut S_OFF: [u8; 9] = " octet \0\0"
+static mut S_GOT: [u8; 7] = " got \0\0"
+static mut S_WANT: [u8; 8] = " want \0\0"
+static mut S_OK: [u8; 17] = "wrace: ok files=\0"
+static mut S_BYTES: [u8; 9] = " octets=\0"
+static mut S_FAIL: [u8; 20] = "wrace: FAILED bad=\0\0"
+static mut S_SHORT: [u8; 22] = "wrace: short file f\0\0\0"
+static mut S_NOOPEN: [u8; 22] = "wrace: cannot open f\0\0"
+static mut S_WERR: [u8; 22] = "wrace: write failed f\0"
+static mut S_USE: [u8; 51] = "usage: wrace run|verify <dir> <procs> <kib>\n\0\0\0\0\0\0\0"
+
+fn g8(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 255) as u8)
+}
+
+// octet `off` of file `n`
+fn pat(n: u64, off: u64) -> u64 {
+    return (((off * 131) + (n * 17) + ((off >> 12) * 7)) & 255) ^ 0x5A
+}
+
+fn fill(n: u64, blk: u64) {
+    var i: u64 = 0
+    while i < BLK {
+        p8((&BUF[0 as usize]) as u64 + i, pat(n, blk * BLK + i))
+        i = i + 1
+    }
+}
+
+fn path_of(dir: u64, n: u64) {
+    let p: u64 = (&PATH[0 as usize]) as u64
+    ulib.strcpy(p, dir)
+    ulib.strcat(p, (&S_SLASHF[0 as usize]) as u64)
+    ulib.digits(n, (&NUM3[0 as usize]) as u64)
+    ulib.strcat(p, (&NUM3[0 as usize]) as u64)
+}
+
+// reads up to `len` octets of a file just for the traffic
+fn side_read() {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SELF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let _n: u64 = ulib.sys(ulib.SYS_READ, fd, (&RDB[0 as usize]) as u64, BLK)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn child(dir: u64, n: u64, kib: u64) -> u64 {
+    path_of(dir, n)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&PATH[0 as usize]) as u64,
+        ulib.O_MAKE, 420)
+    if ulib.bad(fd) {
+        ulib.say((&S_NOOPEN[0 as usize]) as u64)
+        ulib.sayu(n)
+        ulib.nl()
+        return 2
+    }
+    let blocks: u64 = kib / 4
+    var j: u64 = 0
+    while j < blocks {
+        fill(n, j)
+        var done: u64 = 0
+        while done < BLK {
+            let w: u64 = ulib.sys(ulib.SYS_WRITE, fd,
+                (&BUF[0 as usize]) as u64 + done, BLK - done)
+            if ulib.bad(w) || w == 0 {
+                ulib.say((&S_WERR[0 as usize]) as u64)
+                ulib.sayu(n)
+                ulib.nl()
+                ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                return 3
+            }
+            done = done + w
+        }
+        // the traffic that corrupted the stick: another file is read
+        // between two writes
+        if j % 2 == 1 {
+            side_read()
+        }
+        j = j + 1
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return 0
+}
+
+// compare file `n`; returns the number of bad blocks
+fn verify_one(dir: u64, n: u64, kib: u64) -> u64 {
+    path_of(dir, n)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&PATH[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        ulib.say((&S_NOOPEN[0 as usize]) as u64)
+        ulib.sayu(n)
+        ulib.nl()
+        return kib / 4
+    }
+    let blocks: u64 = kib / 4
+    var bad: u64 = 0
+    var reported: bool = false
+    var j: u64 = 0
+    while j < blocks {
+        var got: u64 = 0
+        while got < BLK {
+            let r: u64 = ulib.sys(ulib.SYS_READ, fd,
+                (&RDB[0 as usize]) as u64 + got, BLK - got)
+            if ulib.bad(r) || r == 0 {
+                break
+            }
+            got = got + r
+        }
+        if got < BLK {
+            ulib.say((&S_SHORT[0 as usize]) as u64)
+            ulib.sayu(n)
+            ulib.nl()
+            bad = bad + (blocks - j)
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return bad
+        }
+        var i: u64 = 0
+        var blk_bad: bool = false
+        while i < BLK {
+            let want: u64 = pat(n, j * BLK + i)
+            let have: u64 = g8((&RDB[0 as usize]) as u64 + i)
+            if have != want {
+                blk_bad = true
+                if !reported {
+                    reported = true
+                    ulib.say((&S_BAD[0 as usize]) as u64)
+                    ulib.sayu(n)
+                    ulib.say((&S_BLK[0 as usize]) as u64)
+                    ulib.sayu(j)
+                    ulib.say((&S_OFF[0 as usize]) as u64)
+                    ulib.sayu(i)
+                    ulib.say((&S_GOT[0 as usize]) as u64)
+                    ulib.sayu(have)
+                    ulib.say((&S_WANT[0 as usize]) as u64)
+                    ulib.sayu(want)
+                    ulib.nl()
+                }
+                i = BLK
+            }
+            i = i + 1
+        }
+        if blk_bad {
+            bad = bad + 1
+        }
+        j = j + 1
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return bad
+}
+
+fn verify_all(dir: u64, procs: u64, kib: u64) -> u64 {
+    var bad: u64 = 0
+    var n: u64 = 0
+    while n < procs {
+        bad = bad + verify_one(dir, n, kib)
+        n = n + 1
+    }
+    if bad == 0 {
+        ulib.say((&S_OK[0 as usize]) as u64)
+        ulib.sayu(procs)
+        ulib.say((&S_BYTES[0 as usize]) as u64)
+        ulib.sayu(procs * kib * 1024)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&S_FAIL[0 as usize]) as u64)
+    ulib.sayu(bad)
+    ulib.nl()
+    return 1
+}
+
+fn run(dir: u64, procs: u64, kib: u64) -> u64 {
+    ulib.sys(ulib.SYS_MKDIR, dir, 493, 0)
+    var pids: [u64; 16] = [0 as u64; 16]
+    var n: u64 = 0
+    while n < procs && n < 16 {
+        ulib.digits(n, (&NUM1[0 as usize]) as u64)
+        ulib.digits(kib, (&NUM2[0 as usize]) as u64)
+        ARGV[0 as usize] = (&A0[0 as usize]) as u64
+        ARGV[1 as usize] = (&A1[0 as usize]) as u64
+        ARGV[2 as usize] = dir
+        ARGV[3 as usize] = (&NUM1[0 as usize]) as u64
+        ARGV[4 as usize] = (&NUM2[0 as usize]) as u64
+        pids[(n) as usize] = ulib.sys(ulib.SYS_EXEC, (&P_SELF[0 as usize]) as u64,
+            (&ARGV[0 as usize]) as u64, 5)
+        n = n + 1
+    }
+    var rc: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        if !ulib.bad(pids[(k) as usize]) {
+            let c: u64 = ulib.wait_code(pids[(k) as usize])
+            if c != 0 {
+                rc = 1
+            }
+        } else {
+            rc = 1
+        }
+        k = k + 1
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if verify_all(dir, procs, kib) != 0 {
+        rc = 1
+    }
+    return rc
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 5 {
+        ulib.say((&S_USE[0 as usize]) as u64)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let dir: u64 = ulib.arg_at(args, 2)
+    let a: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let kib: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    if ulib.streq(cmd, (&C_CHILD[0 as usize]) as u64) {
+        return child(dir, a, kib)
+    }
+    if ulib.streq(cmd, (&C_VERIFY[0 as usize]) as u64) {
+        return verify_all(dir, a, kib)
+    }
+    if ulib.streq(cmd, (&C_RUN[0 as usize]) as u64) {
+        return run(dir, a, kib)
+    }
+    ulib.say((&S_USE[0 as usize]) as u64)
+    return 1
+}

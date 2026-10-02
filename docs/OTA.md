@@ -336,3 +336,70 @@ weil `df` in keinem der Prüfläufe je aufgerufen wurde.
 10. **Diese Kryptographie ist nicht auditiert.** Sie ist gegen die Normen
     und gegen libsodium gemessen (Runde UPDATE, 4725 Prüfungen) — viel
     mehr als nichts und viel weniger als eine Prüfung.
+
+---
+
+# RUNDE DAILY-DRIVER — Auto-Update für den Alltag (02.10.2026)
+
+Zweig `daily-driver`. Auftrag des Boss: OrientOS soll täglich benutzbar sein,
+mit Auto-Update. Die Liste der Alltagslücken steht in `docs/DAILY-DRIVER.md`;
+dieser Abschnitt ist der Teil C davon.
+
+## Was dazugekommen ist
+
+| Was | Wo | Wie geprüft |
+|---|---|---|
+| **Kanäle** `kanal=stable` / `kanal=test` in `/etc/ota.conf` | `kernel/user/ota.fi` (`kanal_gueltig`, `hole`) | `tools/ota/run.sh` Abschnitt 7 (a)–(f) |
+| **Stand-Datei** `/system/ota.stand` (`dort`, `hier`, `zeit`, `phase`) | `stand_write` | Abschnitt 7 (a), (b), (g), (h) |
+| **Hintergrund-Dienst** `ota dienst [runden]`: bei `auto=ja` suchen, holen, prüfen, als neue Generation einspielen — **ohne Neustart** | `cmd_dienst` | Abschnitt 7 (h) |
+| **Start-Dienst** `ota boot [name]`: nach dem Start Erprobung selbst bestätigen, wenn Anmeldeschirm/Schreibtisch nach `gesund=` s (Vorgabe 60) noch laufen; sonst nach `frist=` s Neustart → der Kern schaltet nach drei Versuchen zurück | `cmd_boot`, aufgerufen aus `kgui.desk_start` | Abschnitt 7 (g) mit Gegenprobe |
+| `ota zurueck` von Hand nach bestätigtem Update | schon da, jetzt gemessen | Abschnitt 7 (e) |
+| neue Schlüssel in `ota einstellen`: `kanal`, `gesund` | `cmd_einstellen` | Abschnitt 7 (d) |
+
+## Das Ablageformat auf dem Server
+
+Ohne `kanal=` bleibt alles wie vorher: `<quelle>/VERZEICHNIS`. Mit `kanal=stable`
+fragt das Gerät `<quelle>/stable/VERZEICHNIS`, mit `kanal=test`
+`<quelle>/test/VERZEICHNIS`. Jeder Kanal ist eine vollständige Auslieferung
+(`tools/ota/veroeffentlichen.py <quelle>/stable …` und `… <quelle>/test …`),
+mit **eigenem** Register. Ein Testkanal liegt normalerweise vor dem stabilen.
+
+**Wechsel test → stable ist ein Rückschritt** und wird vom Rückschrittsschutz
+abgelehnt, solange `stable` nicht über der Fassung des Geräts liegt. Das ist
+gewollt (Abschnitt 7 (c)); ein Gerät kommt über den Weg `ota zurueck` oder
+eine Neuinstallation zurück.
+
+`tools/install/build.sh` und `tools/usbimg/build.sh` liefern weiter **ohne**
+`kanal=` aus, damit bestehende Geräte unverändert von `…/aktuell` holen. Auf
+den Live-Store (`store.fleitec.com`) wird erst umgestellt, wenn die
+Verzeichnisse `stable/` und `test/` dort veröffentlicht sind — das ist ein
+Eingriff in ein Live-System und braucht die Freigabe des Boss.
+
+## Die Einstellungen am Bus und die Seite *Updates*
+
+`etc/settings.schema` kennt `update.auto` (bool) und `update.channel`
+(`stable,test`) mit `store /etc/ota.conf auto|kanal`: Einstellungsfenster,
+Skripte und Jarvis ändern dieselbe Datei durch dieselbe Tür; beide Schlüssel
+sind `critical` (fragen immer den Nutzer). `auto` versteht `ja`/`true`.
+
+`settingsd` (läuft als root) bietet vier Aktionen: `settings.update.status`
+(read), `settings.update.check` (write), `settings.update.install` und
+`settings.update.rollback` (critical). Sie starten `ota` in einem Kind
+(`suchen`/`einspielen`/`zurueck`), antworten sofort und liefern bei einer
+zweiten Anfrage `err busy`. Der 15. Reiter des Einstellungsfensters
+(*Updates*) ist Kunde dieser Aktionen und liest `/system/ota.stand`.
+Messung: `tools/actionbus/run.sh` Abschnitt 13 (`S-UPD`), `tools/actionbus/gui.sh`
+(`G-UPDPAGE`).
+
+## Was weiter fehlt
+
+* `ota boot` bestätigt, wenn der Schreibtisch **eine Minute nach dem Start**
+  noch läuft. Ein Schreibtisch, der danach abstürzt, wird nicht mehr
+  zurückgerollt (DD-9).
+* Der Kern selbst ist nicht im A/B-Wechsel (Roadmap r104).
+* `ota einspielen` ist langsam (r179: 14 Pakete ≈ 25 min in QEMU).
+* Auf dem Live-Store (`store.fleitec.com`) gibt es `stable/` und `test/` noch
+  nicht; solange bleiben die ausgelieferten Abbilder bei `quelle=…/aktuell`
+  ohne `kanal=` (Freigabe des Boss nötig).
+* Die Uhr muss stimmen, sonst scheitert die Zertifikatsprüfung — jetzt gelöst
+  durch `/bin/sntp` (`docs/TIME.md`).
