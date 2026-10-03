@@ -62,7 +62,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
-BLOCKS=4096
+BLOCKS=8192
 PROGS="sh echo cat ls power powermon burn"
 
 TMPD=$(mktemp -d)
