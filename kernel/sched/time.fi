@@ -55,6 +55,8 @@ export {
     // DAILY-DRIVER: summer time by rule, setting the clock.
     tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
     epoch_of, days_from_civil, now_sec, split,
+    // DD-12: clock across S3.
+    suspend_mark, resume_fix,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
     CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
     CLOCK_BOOTTIME, CLOCK_MAX,
@@ -592,4 +594,68 @@ fn rtc_write(state: u64) -> bool {
 
 fn boot_sec(state: u64) -> u64 {
     return kstate.get(state, kstate.TIME_BOOT)
+}
+
+// ======================================================= DD-12: CLOCK ACROSS S3
+//
+// During S3 the kernel's counters stand still (the timer is off, and on
+// many boards the TSC restarts from zero), but the wall clock goes on.
+// `suspend_mark` remembers the hardware clock and the monotone clock before
+// the sleep; `resume_fix` after it (a) puts the cycle counter's origin so
+// that the monotone clock continues WHERE IT STOPPED (sleep time does not
+// count, like CLOCK_MONOTONIC on Linux; the counter-reset case is covered
+// too) and (b) moves TIME_BOOT forward by the seconds the hardware clock
+// advanced, so real time includes the sleep. Using the DIFFERENCE of two
+// hardware clock readings (not its absolute value) keeps a clock that was
+// set by SNTP or by hand correct: whatever offset the kernel's clock has
+// to the CMOS stays.
+static mut s3_rtc0: u64 = 0
+static mut s3_mono0: u64 = 0
+
+fn rtc_epoch_now() -> u64 {
+    // read twice: a reading that straddles a carry differs from the next
+    var a: u64 = 0
+    var n: u64 = 0
+    while n < 3 {
+        let y: u64 = rtc_field(R_YEAR)
+        let mo: u64 = rtc_field(R_MONTH)
+        let d: u64 = rtc_field(R_DAY)
+        let h: u64 = rtc_field(R_HOUR)
+        let mi: u64 = rtc_field(R_MIN)
+        let s: u64 = rtc_field(R_SEC)
+        var t: u64 = 0
+        if y >= 1970 && y < 2200 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h < 24 && mi < 60 && s < 60 {
+            t = epoch_of(y, mo, d, h, mi, s)
+        }
+        if n > 0 && t == a {
+            return t
+        }
+        a = t
+        n = n + 1
+    }
+    return a
+}
+
+fn suspend_mark(state: u64) {
+    s3_rtc0 = rtc_epoch_now()
+    s3_mono0 = mono_ns(state)
+}
+
+// Returns the seconds the sleep added to the wall clock (0 when the
+// hardware clock is unreadable or went backwards).
+fn resume_fix(state: u64) -> u64 {
+    let r1: u64 = rtc_epoch_now()
+    var dt: u64 = 0
+    if s3_rtc0 != 0 && r1 > s3_rtc0 && r1 - s3_rtc0 < 864000 {
+        dt = r1 - s3_rtc0
+    }
+    let k: u64 = kstate.get(state, kstate.TIME_KHZ)
+    if k != 0 {
+        // raw_ns(now) must equal the monotone value at the moment of
+        // the sleep: origin = now - mono0 * khz / 1e6
+        let back: u64 = (s3_mono0 / 1000000) *% k +% (((s3_mono0 % 1000000) *% k) / 1000000)
+        kstate.set(state, kstate.TIME_TSC0, tsc() -% back)
+    }
+    kstate.set(state, kstate.TIME_BOOT, kstate.get(state, kstate.TIME_BOOT) +% dt)
+    return dt
 }
