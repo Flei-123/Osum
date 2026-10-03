@@ -46,7 +46,7 @@ import fui.textbuf
 import fui.painter
 
 export {
-    open_plain, open_window, ctx, width, height, frame_begin, frame_end,
+    open_plain, open_window, resize, ctx, width, height, frame_begin, frame_end,
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE,
     label, button, button_main, field, field_paint, eye, glyph, edit, mask_off,
@@ -77,6 +77,7 @@ static mut s_px: u64 = 0
 static mut s_w: u64 = 0
 static mut s_h: u64 = 0
 static mut s_bound: u64 = 0
+static mut s_box: u64 = 0
 static mut s_ring: [u64; 4] = [0 as u64; 4]
 
 static mut m_nobuf: [u8; 30] = "fuiapp: no pixels for canvas\0\0"
@@ -112,7 +113,7 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
         ulib.nl()
         return false
     }
-    wlib.box_v(w, 0, 0, bw, bh, 0, 0)
+    s_box = wlib.box_v(w, 0, 0, bw, bh, 0, 0)
     wlib.size(bw, bh)
     s_cv = wlib.canvas(px, bw, bh)
     wlib.box_end()
@@ -132,6 +133,41 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     ulib.say((&m_h[0 as usize]) as u64)
     ulib.sayn(bh)
     ulib.nl()
+    return true
+}
+
+// The window changed its size (the user dragged a border): a new pixel
+// buffer of the new size, the box and the canvas of the same size, fUi bound
+// to the new buffer. false when the size is what it was (or no memory).
+fn resize() -> bool {
+    let nw: u64 = wlib.win_w(s_win)
+    let nh: u64 = wlib.win_h(s_win)
+    if nw == s_w && nh == s_h {
+        return false
+    }
+    if nw < 64 || nh < 64 {
+        return false
+    }
+    let n: u64 = nw * nh * 4
+    let px: u64 = rt.heap_alloc(n as usize) as u64
+    if px == 0 {
+        return false
+    }
+    let old: u64 = s_px
+    let oldn: u64 = s_w * s_h * 4
+    wlib.box_at(s_box, 0, 0, nw, nh)
+    wlib.set_size(s_cv, nw, nh)
+    wlib.canvas_set(s_cv, px, nw, nh, nw)
+    if !fuib.app_bind(px, nw, nh) {
+        return false
+    }
+    s_px = px
+    s_w = nw
+    s_h = nh
+    wlib.relayout()
+    if old != 0 {
+        rt.heap_free(old, oldn as usize)
+    }
     return true
 }
 
@@ -350,7 +386,9 @@ fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
     focus: bool, secret: bool, show: bool, caret_on: bool, sel: bool) {
     var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
     widget.w_place(&fe, x as f64, y as f64, w as f64, h as f64)
-    if secret {
+    // a field with the eye OPEN is a plain field: the newer fUi masks a
+    // secret buffer by itself, so the flag is only set while it is masked
+    if secret && !show {
         widget.w_set_secret(&fe, true)
     }
     widget.w_set_focus(&fe, focus)
@@ -375,9 +413,6 @@ fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
             textbuf.tb_set_range(&tb, 0, n)
         } else {
             textbuf.tb_set_range(&tb, caret, caret)
-        }
-        if secret {
-            textbuf.tb_set_secret(&tb, true)
         }
         field_paint(&fe, &tb, caret_on)
     }

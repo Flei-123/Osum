@@ -36,7 +36,7 @@ num() { local n=$1 v=${2:-} o=$3 w=$4
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
-BLOCKS=20000
+BLOCKS=40000
 PROGS="sh ls cat echo sleep praesenz freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 
@@ -242,7 +242,7 @@ MSGN=$(grep -c 'msg.get' "$UI" || true)
 num "Texte aus dem Sprachkatalog (msg.get)" "$MSGN" ge 5
 # Die Schluessel stehen in BEIDEN Katalogen.
 FEHLT=0
-for k in $(grep -oE '"freunde\.[a-z]+' "$UI" | tr -d '"' | sort -u); do
+for k in $(grep -oE '"freunde\.[a-z_]+' "$UI" | tr -d '"' | sort -u); do
     grep -qa "^$k " locale/de/messages || FEHLT=$((FEHLT+1))
     grep -qa "^$k " locale/en/messages || FEHLT=$((FEHLT+1))
 done
@@ -276,7 +276,13 @@ qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -monitor "unix:$TMPD/mon,server,nowait" >/dev/null 2>&1 &
 QP=$!
-sleep 12
+# wait for the bar to say it is there (a 1.6 MB program takes its time to load
+# from the emulated disk), then a moment for the first picture
+w=0
+while [ $w -lt 90 ] && ! grep -qa 'freunde: eintraege=' "$TMPD/o9.txt" 2>/dev/null; do
+    sleep 1; w=$((w+1))
+done
+sleep 3
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
     printf 'screendump %s\n' "$ROOT/docs/shots/praesenz/leiste.ppm" \
         | timeout 10 socat - "unix-connect:$TMPD/mon" >/dev/null 2>&1 || true
