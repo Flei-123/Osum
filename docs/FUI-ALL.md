@@ -146,7 +146,22 @@ lives in the central token layers, not in programs:
   on the old path that paints the part of a button above the band), and
   `fuiapp.button_main` / `fuiscene.button_main` on fUi directly. Marked so:
   settings (Übernehmen x3), calc (=), lock, login (Anmelden).
-- `high contrast` keeps its collapsed surfaces (the border is the text colour).
+- `high contrast` keeps its collapsed surfaces (the border is the text colour),
+  but `control` and `field` now step off them by one ramp step (light: n100 /
+  n200 / n300 for the control states, dark: n800 / n700 / n600), so the rule
+  holds there too (03.10.2026, r120).
+- `surface-sunken` moved because it was the fill of `field` (a list with a
+  scroll track: the track vanished into the list): light n100 -> n200, dark
+  n950 -> n1000. It is the scroll track and the top of the desktop gradient.
+- THE RULE IS MEASURED, not just stated: `tools/theme/model.py fill <scheme>
+  <light|dark>` prints the OKLab distance of every field / control pair
+  against surface, surface-raised, overlay (and field against sunken); all
+  must be >= 0.012 (the same number as fUi's `themefile.check_fill_distinct`).
+  `tests/theme/run.sh` section 5b runs it for the five schemes in both modes,
+  with a counter-check (a scheme whose light steps all fall together MUST
+  violate it). The kernel binds the same tokens as the model (section 4), so
+  the model's measurement is the kernel's. Templates (`assets/themes/*.preset`)
+  pick a scheme and a mode, so they are covered by the same table.
 - Screens before / after in both modes: `belege/design/` (`tools/design/
   surfaces.sh before|after`).
 - Acceptances adjusted on purpose: `themestore` window-corner smoothing
