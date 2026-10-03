@@ -256,7 +256,7 @@ for s in $SCHEMES; do
         awk '{print $1, $2, $6}' "$TMPD/con-$s-$m.txt" \
             > "$TMPD/conpy-$s-$m.txt"
         if diff -q "$TMPD/conos-$s-$m.txt" "$TMPD/conpy-$s-$m.txt" >/dev/null; then
-            ok "$s/$m: 21 Kontrastverhaeltnisse stimmen mit dem Modell"
+            ok "$s/$m: 25 Kontrastverhaeltnisse stimmen mit dem Modell"
         else
             bad "$s/$m Kontrast: $(diff "$TMPD/conos-$s-$m.txt" "$TMPD/conpy-$s-$m.txt" | head -3 | tr '\n' ' ')"
         fi
@@ -275,6 +275,34 @@ for s in $SCHEMES; do
 done
 
 # ---------------------------------------------------- 6. die Akzentfarbe
+echo
+echo "== 5b. die Fuellregel (Widget mit Rand != Fuellfarbe des Untergrunds)"
+# Justin 02.10.2026, dieselbe Regel wie fUi themefile.check_fill_distinct:
+# Feld und Knopf muessen sich vom Untergrund um OKLab >= 0,012 abheben.
+# Die Tokens kommen aus dem Kernel (Abschnitt 4 vergleicht sie mit dem
+# Modell), hier wird das Modell gemessen -- plus die GEGENPROBE: ein
+# Schema, dessen Stufen zusammenfallen, MUSS die Regel verletzen.
+for s in $SCHEMES; do
+    for m in light dark; do
+        python3 tools/theme/model.py fill "assets/schemes/$s.scheme" $m \
+            > "$TMPD/fill-$s-$m.txt" 2>/dev/null
+        zu=$(awk '$4 == 0' "$TMPD/fill-$s-$m.txt" | wc -l)
+        n=$(wc -l < "$TMPD/fill-$s-$m.txt")
+        kl=$(awk '{if (min == "" || $3 < min) min = $3} END {print min}' "$TMPD/fill-$s-$m.txt")
+        if [ "$zu" -eq 0 ] && [ "$n" -gt 0 ]; then
+            ok "$s/$m: $n Fuellpaarungen, kleinster Abstand $kl"
+        else
+            bad "$s/$m: $zu von $n Fuellpaarungen gleich dem Untergrund -- $(awk '$4 == 0 {printf "%s/%s ", $1, $2}' "$TMPD/fill-$s-$m.txt")"
+        fi
+    done
+done
+# Gegenprobe: alle hellen Stufen auf einen Wert gesetzt
+sed -e 's/^neutral\(0\|50\|100\|200\|300\)=.*/neutral\1=e0e0e0/' \
+    assets/schemes/day.scheme > "$TMPD/flat.scheme"
+python3 tools/theme/model.py fill "$TMPD/flat.scheme" light > "$TMPD/fill-flat.txt" 2>/dev/null
+flach=$(awk '$4 == 0' "$TMPD/fill-flat.txt" | wc -l)
+num "Gegenprobe: ein Schema ohne Stufen verletzt die Regel (Paarungen)" "$flach" gt 0
+
 echo
 echo "== 6. die Akzentfarbe und was die Oberflaeche darueber sagt"
 GUT="2563eb 7c3aed a16207"
