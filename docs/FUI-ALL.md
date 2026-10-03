@@ -342,3 +342,54 @@ Still open: taskbar, explorer, nedit, qs (see the roadmap); the scene tree
 ignores `wlibc.ui_scale` (HiDPI); right click / context menus, multiple
 selection, drag and drop, a dialog with an entry, closable tabs and a
 progress bar are missing for the explorer.
+
+## 9. Stage F-8/F-9: the file manager and the editor on the scene tree (03.10.2026)
+
+New pieces of `fuiscene` (all state by KEY, like the rest):
+
+* **Several rows marked**: `table_multi(key)` -- Ctrl+click toggles, Shift+click
+  and Shift+arrow mark a range, Ctrl+A is `table_sel_all`, the bits are read with
+  `table_sel_has/num`. A plain click is a new beginning. The cursor row
+  (`table_sel`) is still the keyboard's place; with no row marked at all it is
+  drawn as the selection (the Delete key then acts on it, as before).
+* **Scroll bar** on every table that has more rows than room (click or drag on
+  it). The wheel is not delivered by the window server yet (roadmap).
+* **Drag and drop**: `table_drag(key)` makes a press on a row and a move to
+  another row answer `KEY_DRAG` (`drag_key`, `drag_row`); the program puts the
+  payload on the system's drag place (`wlib.drag_put`) and hangs the label at
+  the pointer (`drag_shield`). `drop_accept(true)` makes wlib fire `K_DROP`,
+  which `fuiapp` turns into `EV_DROP` and `pump` into `KEY_DROP` (`drop_key`,
+  `drop_row`, `drop_x/y`). `table_drop_filter(key, f)` says which rows may take
+  a drop -- they get a ring while the pointer is over them. A stale payload (a
+  drag that ended on the desktop) is dropped at the next press.
+* **Dialogs**: besides the two-button question there are `dialog_entry` (a text
+  field, `dialog_entry_text`), `dialog_choice` (up to four answers side by side,
+  Esc = `dialog_cancelled`), `dialog_busy` + `dialog_set_text` + `repaint_now`
+  (a job that runs between two pumps, with a progress bar) and
+  `dialog_progress`.
+* **Nodes**: `icon_button` (a glyph of the icon font, the label is only the name
+  for a reader), `tab_close` (a tab with its cross), `progress`, `editor`.
+* **Keys nobody took** (`key_free_seq` / `key_free`): not a text field, not the
+  text area. A field also hands on the keys it does not edit with (function
+  keys, control letters), so Ctrl+L works with the path field in focus.
+* `table_own(key)`: the table answers only through its own press/key handling
+  (the host's "a click activates the node" would open a folder on ONE click).
+  `table_exact(key)`: the cell texts on whole pixels like the system's text.
+* A popup is moved back into the window when it would stick out.
+
+`fuied.fi` is the text area of wlib (`K_TEXTAREA`: the line table, caret,
+selection, undo, keys, syntax colours) with the widget list taken out: the host
+tells it how many rows and columns fit (`ed_size`) and it paints with fUi's
+painter and the mono font on a grid of cells. `nedit` runs on it.
+
+`explorer.fi` keeps its logic (model, acts, places, backup) and has a new top:
+`build()` describes menu bar, tool bar, crumbs or path field, tabs, places, tree,
+files, status line; `behandeln(key)` is what the old event loop did. The
+parameter lists `(baum, tab, stat, fpfad)` stayed -- they are keys now.
+
+Acceptances changed on purpose: `tools/explorer2/run.sh` runs with `uitrace=yes`
+(without it the run was blind and red already on main), `tools/design/drive.py`
+finds menu titles, context-menu rows and table rows from the new reports,
+`tools/clip2/run.sh` looks for `fuiscene.drop_accept`, `tools/check-ui.sh` lists
+the host modules (`fuiapp`, `fuiscene`, `fuied`, `lock`, `wlib`) as files that
+may touch fUi directly (four of them were red on main).

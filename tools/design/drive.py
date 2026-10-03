@@ -565,11 +565,11 @@ class Fahrer:
         if name.startswith("fmbar"):
             # Eintrag <N> der Menueleiste des Dateimanagers.  Seit FUI-ALL
             # F-8 meldet jeder Titel sein eigenes Rechteck
-            # (`explorer: rect id=<100+N> kind=7`); die Leiste als Ganzes
-            # ist weiter `id=0 kind=8`.
+            # (`explorer: rect id=<N> kind=7`); die Leiste als Ganzes
+            # gibt es nicht mehr.
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=7 "
-                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % (100 + n))
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
             o = self.fenster("explorer")
             if m is None or o is None:
                 return None
