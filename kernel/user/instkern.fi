@@ -44,7 +44,7 @@ import ulib
 export {
     BS, AUSRICHT, ESP_STD,
     lese, schreibe, ist_ofs, wachsen, kopiere,
-    gpt_schreiben, fat32_create, wurzel_kopieren, wurzel_kopieren_ab,
+    gpt_schreiben, bios_laden, bios_da, fat32_create, wurzel_kopieren, wurzel_kopieren_ab,
     plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
     plan_passt, quelle_pruefen,
     schritt_nr, schritt_von, fortschritt, fehler_bei, nachgeschrieben,
@@ -102,6 +102,34 @@ static mut SEK2: [u8; 512] = [0 as u8; 512]
 static mut KOP: [u8; 8192] = [0 as u8; 8192]
 // Read-back buffer for the verification (see `schreibe_geprueft`).
 static mut KOP2: [u8; 8192] = [0 as u8; 8192]
+
+// ===================================================== LEGACY-BIOS BOOT
+//
+// r309 (03.10.2026): the installed disk used to boot through UEFI only; the
+// protective MBR had no boot code and SeaBIOS stopped at "Booting from Hard
+// Disk...". Limine's BIOS stages are embedded EXACTLY the way
+// `limine bios-install` does it for a GPT disk without a BIOS boot partition
+// (vendor limine.c, bios_install(), "Attempting GPT embedding"):
+//
+//   * sector 0       stage 1 (the first 512 bytes of limine-bios-hdd.bin),
+//                    bytes 440..509 are the protective MBR, the four fields
+//                    at 0x1a4 say where the two halves of stage 2 lie
+//   * stage 2 half A at the END of the primary partition entry array
+//   * stage 2 half B at the END of the backup partition entry array
+//   * the entry arrays are SHORTER (only the sectors before the halves), and
+//     both headers carry the new entry count and the CRC32 over the shorter
+//     array -- the same code that writes the tables writes them.
+//
+// `limine-bios-hdd.bin` is read from the running root (`/boot/limine-hdd.bin`,
+// tools/usbimg/build.sh puts it there); without it nothing changes and the
+// disk is UEFI-only as before. `limine-bios.sys` (stage 3) is copied onto the
+// EFI partition by the caller.
+const BIOSMAX: u64 = 32768
+static mut BIOSBIN: [u8; 32768] = [0 as u8; 32768]
+static mut bios_n: u64 = 0
+static mut p_bios_hdd: [u8; 22] = "/boot/limine-hdd.bin\0\0"
+static mut g_entries: u64 = 128
+static mut g_entsect: u64 = 32
 
 const BS: u64 = 512
 // Wo die erste Partition anfaengt. 2048 Sektoren = 1 MiB, die Zahl, die
@@ -371,7 +399,7 @@ fn tafel_crc(esp_start: u64, esp_ende: u64, ofs_start: u64,
     ofs_ende: u64) -> u64 {
     var c: u64 = crc_start()
     var i: u64 = 0
-    while i < ENTSECT {
+    while i < g_entsect {
         tafel_sektor(i, esp_start, esp_ende, ofs_start, ofs_ende)
         c = crc_feed(c, (&SEK2[0 as usize]) as u64, BS)
         i = i + 1
@@ -400,7 +428,7 @@ fn header(at: u64, meine: u64, andere: u64, tafel: u64, ersteb: u64,
     p64(at + 48, letzteb)
     guid_own(at + 56, 3)
     p64(at + 72, tafel)
-    p32(at + 80, ENTRIES)
+    p32(at + 80, g_entries)
     p32(at + 84, ENTSIZE)
     p32(at + 88, tcrc)
     // Und JETZT die Summe ueber die 92 Oktette, mit dem Feld auf Null.
@@ -793,6 +821,50 @@ fn plan_passt(sekt: u64, espsek: u64) -> bool {
 // `u_start` der Vorlage, Wort fuer Wort -- was sich geaendert hat, ist
 // nur, dass der Grund eines Fehlschlags in `st_fehler` landet statt auf
 // der seriellen Leitung.
+// Read /boot/limine-hdd.bin into BIOSBIN. True when it is a plausible boot
+// sector plus stage 2; false (and bios_n = 0) otherwise -- then the disk is
+// written UEFI-only, exactly as before r309.
+fn bios_laden() -> bool {
+    bios_n = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_bios_hdd[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let buf: u64 = (&BIOSBIN[0 as usize]) as u64
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter && n < BIOSMAX {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, buf + n, BIOSMAX - n)
+        if ulib.bad(r) || r == 0 {
+            weiter = false
+        } else {
+            n = n + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // a boot sector (0x55AA) plus at least a few stage-2 sectors, and it must
+    // have fitted into the buffer with room to spare
+    if n < 2048 || n >= BIOSMAX {
+        return false
+    }
+    if g8(buf + 510) != 0x55 || g8(buf + 511) != 0xAA {
+        return false
+    }
+    bios_n = n
+    return true
+}
+
+fn bios_da() -> bool {
+    return bios_n != 0
+}
+
+// ================================================== GPT SCHREIBEN
+//
+// Protective MBR, both entry arrays, both headers -- and, when
+// `bios_laden()` found limine-bios-hdd.bin, Limine's BIOS stages (see the
+// comment at BIOSBIN). Taken from `u_start` of the template word for word;
+// what changed is that the reason of a failure lands in `st_fehler` instead of
+// the serial line.
 fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
     st_schritt = S_GPT
     let erste_b: u64 = 2 + ENTSECT
@@ -802,9 +874,114 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
     let ofs_start: u64 = plan_ofs_start(espsek)
     let ofs_ende: u64 = letzte_b
 
-    // ---- der Schutz-MBR
+    // ---- the BIOS stages: where do the two halves of stage 2 go?
+    var s2_size: u64 = 0
+    var size_a: u64 = 0
+    var size_b: u64 = 0
+    var loc_a: u64 = 0 // sector numbers
+    var loc_b: u64 = 0
+    g_entries = ENTRIES
+    g_entsect = ENTSECT
+    if bios_n != 0 {
+        s2_size = bios_n - 512
+        let sects: u64 = (s2_size + 511) / 512
+        size_a = (sects / 2) * 512
+        if sects % 2 != 0 {
+            size_a = size_a + 512
+        }
+        size_b = (sects / 2) * 512
+        loc_a = 2 + ENTSECT - size_a / 512
+        loc_b = sekt - 33 + ENTSECT - size_b / 512
+        // the shorter entry array: only the sectors in front of half A
+        g_entsect = loc_a - 2
+        g_entries = g_entsect * (BS / ENTSIZE)
+        if g_entsect < 2 || size_a / 512 + 2 > ENTSECT {
+            bios_n = 0
+            g_entries = ENTRIES
+            g_entsect = ENTSECT
+        }
+    }
+
+    // ---- the entry arrays, twice, and the two headers
+    let tcrc: u64 = tafel_crc(esp_start, esp_ende, ofs_start, ofs_ende)
+    var k: u64 = 0
+    while k < g_entsect {
+        tafel_sektor(k, esp_start, esp_ende, ofs_start, ofs_ende)
+        let q: u64 = (&SEK2[0 as usize]) as u64
+        if !schreibe(zfd, 2 + k, q, BS) {
+            return false
+        }
+        if !schreibe(zfd, sekt - 33 + k, q, BS) {
+            return false
+        }
+        k = k + 1
+    }
     let p: u64 = (&SEK[0 as usize]) as u64
+    header(p, 1, sekt - 1, 2, erste_b, letzte_b, tcrc)
+    if !schreibe(zfd, 1, p, BS) {
+        return false
+    }
+    header(p, sekt - 1, 1, sekt - 33, erste_b, letzte_b, tcrc)
+    if !schreibe(zfd, sekt - 1, p, BS) {
+        return false
+    }
+
+    // ---- stage 2 (BIOS), in the tail of both entry arrays
+    if bios_n != 0 {
+        let b: u64 = (&BIOSBIN[0 as usize]) as u64
+        var i: u64 = 0
+        while i < size_a / 512 {
+            if !schreibe(zfd, loc_a + i, b + 512 + i * 512, BS) {
+                return false
+            }
+            i = i + 1
+        }
+        // half B: the rest of stage 2, the last sector zero-padded
+        let rest_b: u64 = s2_size - size_a
+        var j: u64 = 0
+        while j * 512 < rest_b {
+            let q: u64 = (&SEK2[0 as usize]) as u64
+            nullen(q, BS)
+            var m: u64 = rest_b - j * 512
+            if m > 512 {
+                m = 512
+            }
+            var t: u64 = 0
+            while t < m {
+                p8(q + t, g8(b + 512 + size_a + j * 512 + t))
+                t = t + 1
+            }
+            if !schreibe(zfd, loc_b + j, q, BS) {
+                return false
+            }
+            j = j + 1
+        }
+    }
+
+    // ---- sector 0: stage 1 (when BIOS) + the protective MBR
     nullen(p, BS)
+    if bios_n != 0 {
+        let b: u64 = (&BIOSBIN[0 as usize]) as u64
+        var c: u64 = 0
+        while c < 512 {
+            p8(p + c, g8(b + c))
+            c = c + 1
+        }
+        // where the two halves of stage 2 lie (little endian, 0x1a4)
+        p16(p + 0x1a4, size_a)
+        p16(p + 0x1a4 + 2, size_b)
+        p64(p + 0x1a4 + 4, loc_a * BS)
+        p64(p + 0x1a4 + 12, loc_b * BS)
+        // bytes 218..223 (timestamp) and 440..509 (disk id + table) stay zero
+        // like on a fresh disk
+        var z: u64 = 440
+        while z < 510 {
+            p8(p + z, 0)
+            z = z + 1
+        }
+        p32(p + 218, 0)
+        p16(p + 222, 0)
+    }
     p8(p + 446 + 1, 0x00)
     p8(p + 446 + 2, 0x02)
     p8(p + 446 + 3, 0x00)
@@ -821,29 +998,6 @@ fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
     p8(p + 510, 0x55)
     p8(p + 511, 0xAA)
     if !schreibe(zfd, 0, p, BS) {
-        return false
-    }
-
-    // ---- die Eintragstafel, zweimal, und die beiden Koepfe
-    let tcrc: u64 = tafel_crc(esp_start, esp_ende, ofs_start, ofs_ende)
-    var k: u64 = 0
-    while k < ENTSECT {
-        tafel_sektor(k, esp_start, esp_ende, ofs_start, ofs_ende)
-        let q: u64 = (&SEK2[0 as usize]) as u64
-        if !schreibe(zfd, 2 + k, q, BS) {
-            return false
-        }
-        if !schreibe(zfd, sekt - 33 + k, q, BS) {
-            return false
-        }
-        k = k + 1
-    }
-    header(p, 1, sekt - 1, 2, erste_b, letzte_b, tcrc)
-    if !schreibe(zfd, 1, p, BS) {
-        return false
-    }
-    header(p, sekt - 1, 1, sekt - 33, erste_b, letzte_b, tcrc)
-    if !schreibe(zfd, sekt - 1, p, BS) {
         return false
     }
     return true

@@ -1068,8 +1068,21 @@ ARGS+=(/users/ /users/root/ /users/root/config/
 if [ "$IMAGE_PROFILE" = public ]; then
     ARGS+=("/etc/autologin=$OUT/autologin")
 fi
+# r309: Limine's BIOS stages for the INSTALLER (kernel/user/instkern.fi embeds
+# stage 1/2 into the GPT it writes, the installer copies stage 3 to the EFI
+# partition). limine-bios-hdd.bin is not shipped as a file by Limine; it is the
+# C array in limine-bios-hdd.h, the same bytes `limine bios-install` embeds.
+python3 - "$LIMINE/limine-bios-hdd.h" "$OUT/limine-hdd.bin" <<'PYHDD' || fehler "limine-hdd.bin could not be made"
+import re, sys
+t = open(sys.argv[1]).read()
+b = bytes(int(x, 16) for x in re.findall(r'0x([0-9a-fA-F]{2})\b', t))
+assert 4096 < len(b) < 32768 and b[510:512] == b"\x55\xaa", len(b)
+open(sys.argv[2], "wb").write(b)
+PYHDD
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
-       "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
+       "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI"
+       "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
+       "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
 # ==================================================== RUNDE ENERGIE
 # /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
 # NIEMANDEN, DEM ER ES SAGEN KANN.
