@@ -38,6 +38,7 @@
 import ulib
 import wlib
 import fuiapp
+import fuiglyph
 import fuib
 import fui.scene
 import fui.sheet
@@ -68,6 +69,8 @@ export {
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
     table_blob, table_set_blob, table_single, table_two, table_icons, table_list,
+    table_text_x, table_row_h, table_row_top, table_base, table_icon_x,
+    table_icon_y, table_rgb,
     set_app, raise, ax_action, build_now, compact, set_enabled, repaint_now,
     canvas, role_col, cv_rect, cv_round, cv_ring, cv_text, set_nohit,
     R_FIELD, R_BORDER, R_ACCENT, R_SUCCESS, R_TEXT, R_MUTED, R_SURFACE, R_ONFILL,
@@ -75,10 +78,10 @@ export {
     image, image_set, image_fit, image_zoom, image_set_zoom, image_rotate,
     image_click, image_has, image_tool, image_sel_present, image_sel_x0,
     image_sel_y0, image_sel_x1, image_sel_y1, image_sel_clear, hide, handle,
-    dialog_open, dialog_is_open, dialog_result, KEY_DIALOG,
+    dialog_open, dialog_is_open, dialog_result, dialog_default, KEY_DIALOG,
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
-    memo, memo_text, memo_set, open_plain, set_flags, begin, win_id, keys_always, has_focus,
+    memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, keys_always, has_focus,
     key_seq, key_any,
 }
 
@@ -1060,6 +1063,16 @@ fn key_of_node(i: usize) -> u64 {
     return scene.node_id(sc(), i) as u64
 }
 
+// Put the keyboard on the node with this key (a start menu puts it on its
+// search field every time it opens).
+fn focus(key: u64) {
+    let n: usize = scene.scene_find_id(sc(), key as u32)
+    if n != scene.SCENE_NONE {
+        control.panel_set_focus(fuiwirt.host_panel(wirt()), n)
+        touch()
+    }
+}
+
 // The key of the node that has the keyboard (0 = nobody).
 fn focus_key() -> u64 {
     let f: usize = fuiwirt.host_focus(wirt())
@@ -1619,6 +1632,8 @@ static mut s_ct_icons: [u64; 4] = [0 as u64; 4]
 // A table where ONE click on a row already activates it (a list the
 // program wants to hear from at once, e.g. a task list with a kill button).
 static mut s_ct_one: [bool; 4] = [false; 4]
+// ... but the arrow keys only move the selection (they do not activate)
+static mut s_ct_kq: [bool; 4] = [false; 4]
 static mut s_ct_colw: [u64; 24] = [0 as u64; 24]
 static mut s_ct_get: [u8; 32] = [0 as u8; 32]
 static mut s_ct_last_row: u64 = 4294967295
@@ -1822,9 +1837,22 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
             ix = ICON_W
         }
         if s_ct_two[(k) as usize] {
-            // line 1 = cell 0, line 2 = cell 1 (muted)
-            text_tok(x + 10 + ix, ry + 4, w - 22 - ix, ct_text(k, ri, 0), tok)
-            text_tok(x + 10 + ix, ry + 4 + 22, w - 22 - ix, ct_text(k, ri, 1), tok2)
+            // line 1 = cell 0 (bold, 15), line 2 = cell 1 (12, muted); the
+            // baselines are ours: 20 and 46 points under the row top
+            var c1: u32 = (*t).text
+            var c2: u32 = (*t).text_muted
+            if on {
+                c1 = (*t).selection_text
+                c2 = c1
+            }
+            two_text(x + 10 + ix, ry + 20, w - 22 - ix, ct_text(k, ri, 0), 15,
+                true, c1 | 4278190080 as u32)
+            two_text(x + 10 + ix, ry + 46, w - 22 - ix, ct_text(k, ri, 1), 12,
+                false, c2 | 4278190080 as u32)
+            if trace_on() {
+                say_text2(x + 10 + ix, ry + 46, c2, (*t).field, 12,
+                    ct_text(k, ri, 1))
+            }
         } else {
             var cx2: u64 = x
             var col2: u64 = 0
@@ -1924,6 +1952,144 @@ fn table_two(key: u64, on: bool) {
         s_ct_rh[(k) as usize] = ROW_H
     }
     touch()
+}
+
+// Text at an explicit baseline (the two-line rows): `size` pixels, in the
+// bold cut or the normal one, clipped to `w`.
+fn two_text(x: u64, base: u64, w: u64, p: u64, size: u64, bold: bool,
+    col: u32) {
+    let n: u64 = ulib.length(p)
+    if n == 0 {
+        return
+    }
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let old: u64 = painter.painter_font(z)
+    if bold {
+        let bf: u64 = fuiglyph.fontset(fuiglyph.ROLE_BOLD)
+        if bf != 0 {
+            painter.painter_set_font(z, bf)
+        }
+    }
+    let _w: f64 = painter.text(z, x as f64, base as f64, w as f64, size as f64,
+        col, p, n as usize, painter.TEXT_L)
+    painter.painter_set_font(z, old)
+}
+
+// fUi's colour (painter order) as the acceptance runs read it (wlib order,
+// red in the high octet).
+fn rgb_of(c: u32) -> u64 {
+    let v: u64 = c as u64
+    return ((v & 255) << 16) | (v & 65280) | ((v >> 16) & 255)
+}
+
+// The second line of a two-line row, reported like wlib did (`wlib: text2`).
+static mut t_txt2: [u8; 18] = "wlib: text2 win=\0\0"
+static mut t_pxk: [u8; 6] = " px=\0\0"
+fn say_text2(x: u64, base: u64, fg: u32, bg: u32, px: u64, p: u64) {
+    let n: u64 = ulib.length(p)
+    if n == 0 {
+        return
+    }
+    let b: u64 = (&s_trb[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&t_txt2[0 as usize]) as u64)
+    at = tr_num(b, at, fuiapp.win())
+    at = tr_put(b, at, (&t_kind[0 as usize]) as u64)
+    at = tr_num(b, at, 5)
+    at = tr_put(b, at, (&t_x[0 as usize]) as u64)
+    at = tr_num(b, at, x)
+    at = tr_put(b, at, (&t_base[0 as usize]) as u64)
+    at = tr_num(b, at, base)
+    at = tr_put(b, at, (&t_fg[0 as usize]) as u64)
+    at = tr_num(b, at, rgb_of(fg))
+    at = tr_put(b, at, (&t_bg[0 as usize]) as u64)
+    at = tr_num(b, at, rgb_of(bg))
+    at = tr_put(b, at, (&t_tw[0 as usize]) as u64)
+    at = tr_num(b, at, wlibc.text_w(wlibc.F_UI, px, p, n))
+    at = tr_put(b, at, (&t_ax[0 as usize]) as u64)
+    at = tr_num(b, at, wlib.win_x(fuiapp.win()) + 2)
+    at = tr_put(b, at, (&t_ay[0 as usize]) as u64)
+    at = tr_num(b, at, wlib.win_y(fuiapp.win()) + 22)
+    at = tr_put(b, at, (&t_pxk[0 as usize]) as u64)
+    at = tr_num(b, at, px)
+    at = tr_put(b, at, (&t_t[0 as usize]) as u64)
+    var j: u64 = 0
+    while j < n && at + 2 < 318 {
+        __mmio_write8((b + at) as *mut u8, __mmio_read8((p + j) as *mut u8))
+        at = at + 1
+        j = j + 1
+    }
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    let _w: u64 = ulib.put(b, at + 1)
+}
+
+// Where a table paints (for the programs that report it): the left edge of
+// the row text, the baseline of line 1 of a row, the row pitch, the icon.
+fn table_text_x(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || s_ct_node[(k) as usize] == NONE {
+        return 0
+    }
+    var ix: u64 = 0
+    if s_ct_icons[(k) as usize] != 0 {
+        ix = ICON_W
+    }
+    return node_x(s_ct_node[(k) as usize]) + 10 + ix
+}
+
+fn table_row_h(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_ct_rh[(k) as usize]
+}
+
+fn table_row_top(key: u64, row: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || s_ct_node[(k) as usize] == NONE {
+        return 0
+    }
+    var by: u64 = node_y(s_ct_node[(k) as usize]) + 2
+    if s_ct_head[(k) as usize] {
+        by = by + HEAD_H
+    }
+    return by + (row - s_ct_top[(k) as usize]) * s_ct_rh[(k) as usize]
+}
+
+fn table_base(key: u64, row: u64) -> u64 {
+    return table_row_top(key, row) + 20
+}
+
+// The picture of a 16 x 16 row icon: left / top edge
+fn table_icon_x(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || s_ct_node[(k) as usize] == NONE {
+        return 0
+    }
+    return node_x(s_ct_node[(k) as usize]) + 8 + 1 + 3
+}
+
+fn table_icon_y(key: u64, row: u64) -> u64 {
+    return table_row_top(key, row) + (table_row_h(key) - 22) / 2 + 3
+}
+
+// Colours as the runs read them: 0 field, 1 text, 2 muted, 3 selection,
+// 4 selection text.
+fn table_rgb(which: u64) -> u64 {
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    if which == 1 {
+        return rgb_of((*t).text)
+    }
+    if which == 2 {
+        return rgb_of((*t).text_muted)
+    }
+    if which == 3 {
+        return rgb_of((*t).selection)
+    }
+    if which == 4 {
+        return rgb_of((*t).selection_text)
+    }
+    return rgb_of((*t).field)
 }
 
 // An array with one word per row for the icon column (0 = no icon in this
@@ -2127,7 +2293,7 @@ fn ct_key(k: u64, key: u64) -> u64 {
         s_ct_sel[(k) as usize] = sel
         ct_reveal(k, node_h(i))
         touch()
-        if s_ct_one[(k) as usize] {
+        if s_ct_one[(k) as usize] && !s_ct_kq[(k) as usize] {
             s_ct_headcol = 4294967295
             return s_ct_key[(k) as usize]
         }
@@ -2327,6 +2493,18 @@ fn table_single(key: u64, on: bool) {
         return
     }
     s_ct_one[(k) as usize] = on
+}
+
+
+// ... a pointer click activates the row, the arrow keys only move (a start
+// menu: a click starts, the arrow keys choose, Enter starts).
+fn table_click_only(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_one[(k) as usize] = on
+    s_ct_kq[(k) as usize] = on
 }
 
 
@@ -3144,6 +3322,16 @@ fn dialog_open(title: u64, text: u64, b1: u64, b2: u64) {
     touch()
 }
 
+// Which button has the focus when the dialog opens (0 = the first, 1 = the
+// second): a question that must not be answered by a reflex puts it on
+// the safe one.
+fn dialog_default(n: u64) {
+    if n < 2 {
+        s_dlg_hot = n
+        touch()
+    }
+}
+
 // 1 or 2 once, then 0.
 fn dialog_result() -> u64 {
     let r: u64 = s_dlg_res
@@ -3193,8 +3381,12 @@ fn dlg_paint() {
     text_tok(dlg_x() + 16, dlg_y() + 48, dlg_w() - 32, s_dlg_text, style.TOK_TEXT)
     let by: u64 = dlg_y() + DLG_H - 52
     let bw: u64 = (dlg_w() - 48) / 2
-    fuiapp.button_main(dlg_x() + 16, by, bw, 36, s_dlg_b1, s_dlg_hot == 0)
-    fuiapp.button(dlg_x() + 32 + bw, by, bw, 36, s_dlg_b2, s_dlg_hot == 1)
+    if s_dlg_b2 == 0 {
+        fuiapp.button_main(dlg_x() + 16, by, dlg_w() - 32, 36, s_dlg_b1, true)
+    } else {
+        fuiapp.button_main(dlg_x() + 16, by, bw, 36, s_dlg_b1, s_dlg_hot == 0)
+        fuiapp.button(dlg_x() + 32 + bw, by, bw, 36, s_dlg_b2, s_dlg_hot == 1)
+    }
 }
 
 fn dlg_event(e: *mut fuiapp.Ev) -> u64 {
@@ -3203,7 +3395,11 @@ fn dlg_event(e: *mut fuiapp.Ev) -> u64 {
     if ev.kind == fuiapp.EV_DOWN {
         if ev.y >= by && ev.y < by + 36 {
             let bw: u64 = (dlg_w() - 48) / 2
-            if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + 16 + bw {
+            if s_dlg_b2 == 0 {
+                if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + dlg_w() - 16 {
+                    s_dlg_res = 1
+                }
+            } else if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + 16 + bw {
                 s_dlg_res = 1
             } else if ev.x >= dlg_x() + 32 + bw && ev.x < dlg_x() + 32 + 2 * bw {
                 s_dlg_res = 2
@@ -3213,9 +3409,13 @@ fn dlg_event(e: *mut fuiapp.Ev) -> u64 {
         if ev.key == wlib.KEY_ENTER {
             s_dlg_res = s_dlg_hot + 1
         } else if ev.key == wlib.KEY_ESC {
-            s_dlg_res = 2
-        } else if ev.key == wlib.KEY_TAB || ev.key == wlib.KEY_LEFT
-            || ev.key == wlib.KEY_RIGHT {
+            if s_dlg_b2 == 0 {
+                s_dlg_res = 1
+            } else {
+                s_dlg_res = 2
+            }
+        } else if (ev.key == wlib.KEY_TAB || ev.key == wlib.KEY_LEFT
+            || ev.key == wlib.KEY_RIGHT) && s_dlg_b2 != 0 {
             s_dlg_hot = 1 - s_dlg_hot
             touch()
         }
