@@ -927,6 +927,10 @@ ARGS+=(/lib/
        "/lib/mono.ttf=assets/osum-mono.ttf"
        "/lib/sans.ttf=assets/osum-sans.ttf"
        "/lib/bold.ttf=assets/osum-sans-bold.ttf"
+       # DD / PDFVIEW: the serif faces (Liberation Serif, SIL OFL; assets/LICENSE-OFL-liberation.txt),
+       # loaded by fuiglyph on the first ask of ROLE_SERIF -- only the PDF viewer asks
+       "/lib/serif.ttf=assets/osum-serif.ttf"
+       "/lib/serifb.ttf=assets/osum-serif-bold.ttf"
        "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done

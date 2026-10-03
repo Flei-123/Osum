@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/pdfread/pdftext.fi -- TEXT SEARCH in a PDF page (DAILY-DRIVER, r55).
+//
+// The reader (pdfread.fi) has a pass that draws nothing and records every glyph
+// with its place (`doc_page_svg(.., WHICH_TEXT, ..)`, see text_cap). This file
+// turns the records into SEARCHABLE TEXT and into RECTANGLES:
+//
+//   page_text(d, page, scale, &txt, &map) -> bool
+//       txt: u32 code points, normalised (lower case, ligatures split, one
+//            space for any run of blanks and line ends, a hyphen at a line end
+//            joined to the next line when that starts with a lower-case letter);
+//       map: u32 per code point: the glyph record it came from (NONE for an
+//            invented space). A ligature is several code points of ONE glyph.
+//   fold_utf8(src, n, &out)                the same normalisation for the query
+//   find(txt, n, q, qn, from) -> index or NONE
+//   glyph_box(d, gi, &x0, &y0, &x1, &y1)   the pixel box of a glyph
+//   mark(px, w, h, x0, y0, x1, y1, color)  multiply a box with a colour (the
+//                                          text stays black, white turns yellow)
+import std.rt
+import pdfread.pdfread
+
+export { page_text, fold_utf8, find, glyph_box, mark, count_in, NONE, match_glyphs, highlight }
+
+const NONE: u32 = 4294967295
+const OFF: f64 = 1073741824.0
+
+fn rd8p(p: u64) -> u32 {
+    let v: u8 = *(p as *mut u8)
+    return v as u32
+}
+
+fn rd32p(p: u64) -> u32 {
+    return *(p as *mut u32)
+}
+
+fn wr32p(p: u64, v: u32) {
+    *(p as *mut u32) = v
+}
+
+fn push32(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, (v & 255) as u8)
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, ((v >> 16) & 255) as u8)
+    rt.buf_push(b, ((v >> 24) & 255) as u8)
+}
+
+fn at32(b: *mut rt.Buf, i: u64) -> u32 {
+    return rd32p(rt.buf_ptr(b) + i * 4)
+}
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+// simple case folding: ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic
+fn fold1(u: u32) -> u32 {
+    if u >= 65 && u <= 90 {
+        return u + 32
+    }
+    if u < 192 {
+        return u
+    }
+    if u >= 192 && u <= 222 && u != 215 {
+        return u + 32
+    }
+    if u >= 256 && u <= 311 {
+        if (u & 1) == 0 {
+            return u + 1
+        }
+        return u
+    }
+    if u >= 313 && u <= 328 {
+        if (u & 1) == 1 {
+            return u + 1
+        }
+        return u
+    }
+    if u >= 330 && u <= 375 {
+        if (u & 1) == 0 {
+            return u + 1
+        }
+        return u
+    }
+    if u == 376 {
+        return 255
+    }
+    if u >= 377 && u <= 382 {
+        if (u & 1) == 1 {
+            return u + 1
+        }
+        return u
+    }
+    if u >= 913 && u <= 937 && u != 930 {
+        return u + 32
+    }
+    if u >= 1040 && u <= 1071 {
+        return u + 32
+    }
+    if u >= 1024 && u <= 1039 {
+        return u + 80
+    }
+    return u
+}
+
+// appends the folded form of one code point (a ligature gives several);
+// returns how many were appended. Soft hyphens give none.
+fn push_folded(txt: *mut rt.Buf, map: *mut rt.Buf, u: u32, gi: u32) -> u64 {
+    var n: u64 = 0
+    var c1: u32 = 0
+    var c2: u32 = 0
+    var c3: u32 = 0
+    if u == 173 {
+        return 0
+    }
+    if u == 160 || u == 8199 || u == 8239 || (u >= 8192 && u <= 8202) {
+        c1 = 32
+    } else if u == 64256 {
+        c1 = 102
+        c2 = 102
+    } else if u == 64257 {
+        c1 = 102
+        c2 = 105
+    } else if u == 64258 {
+        c1 = 102
+        c2 = 108
+    } else if u == 64259 {
+        c1 = 102
+        c2 = 102
+        c3 = 105
+    } else if u == 64260 {
+        c1 = 102
+        c2 = 102
+        c3 = 108
+    } else if u == 8208 || u == 8209 {
+        c1 = 45
+    } else {
+        c1 = fold1(u)
+    }
+    push32(txt, c1)
+    push32(map, gi)
+    n = 1
+    if c2 != 0 {
+        push32(txt, c2)
+        push32(map, gi)
+        n = 2
+    }
+    if c3 != 0 {
+        push32(txt, c3)
+        push32(map, gi)
+        n = 3
+    }
+    return n
+}
+
+fn is_space(c: u32) -> bool {
+    return c == 32 || c == 10 || c == 13 || c == 9
+}
+
+fn push_space(txt: *mut rt.Buf, map: *mut rt.Buf) {
+    let n: u64 = (rt.buf_len(txt) as u64) / 4
+    if n == 0 {
+        return
+    }
+    if at32(txt, n - 1) == 32 {
+        return
+    }
+    push32(txt, 32)
+    push32(map, NONE)
+}
+
+fn pop1(txt: *mut rt.Buf, map: *mut rt.Buf) {
+    let l: usize = rt.buf_len(txt)
+    rt.buf_set_len(txt, l - 4)
+    rt.buf_set_len(map, l - 4)
+}
+
+fn glyph_dx(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return ((pdfread.doc_tcap_word(d, i, 5) as f64) - 8192.0) / 4096.0
+}
+
+fn glyph_dy(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return ((pdfread.doc_tcap_word(d, i, 6) as f64) - 8192.0) / 4096.0
+}
+
+fn glyph_x(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return ((pdfread.doc_tcap_word(d, i, 1) as f64) - OFF) / 16.0
+}
+
+fn glyph_y(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return ((pdfread.doc_tcap_word(d, i, 2) as f64) - OFF) / 16.0
+}
+
+fn glyph_w(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return (pdfread.doc_tcap_word(d, i, 3) as f64) / 16.0
+}
+
+fn glyph_em(d: *mut pdfread.Doc, i: u64) -> f64 {
+    return (pdfread.doc_tcap_word(d, i, 4) as f64) / 16.0
+}
+
+// Runs the capture pass for `page` at `scale` and builds the searchable text.
+// `txt` and `map` are cleared first. False if the page cannot be read.
+fn page_text(d: *mut pdfread.Doc, page: u64, scale: f64, txt: *mut rt.Buf, map: *mut rt.Buf) -> bool {
+    rt.buf_clear(txt)
+    rt.buf_clear(map)
+    var svg: rt.Buf = rt.buf_new()
+    var w: u64 = 0
+    var h: u64 = 0
+    let ok: bool = pdfread.doc_page_svg(d, page, scale, pdfread.WHICH_TEXT, &svg, &w, &h)
+    rt.buf_free(&svg)
+    if !ok {
+        return false
+    }
+    let n: u64 = pdfread.doc_tcap_count(d)
+    var i: u64 = 0
+    var pdx: f64 = 1.0
+    var pdy: f64 = 0.0
+    var pal: f64 = 0.0   // the end of the previous glyph along its line
+    var pac: f64 = 0.0   // its place across the line
+    var pem: f64 = 10.0
+    while i < n {
+        let u: u32 = pdfread.doc_tcap_word(d, i, 0)
+        let x: f64 = glyph_x(d, i)
+        let y: f64 = glyph_y(d, i)
+        let dx: f64 = glyph_dx(d, i)
+        let dy: f64 = glyph_dy(d, i)
+        let em: f64 = glyph_em(d, i)
+        let gw: f64 = glyph_w(d, i)
+        let al: f64 = x * dx + y * dy
+        let ac: f64 = 0.0 - x * dy + y * dx
+        if i > 0 {
+            if fabs(dx - pdx) + fabs(dy - pdy) > 0.1 {
+                push_space(txt, map)
+            } else if fabs(ac - pac) > pem * 0.6 {
+                // a new line. A hyphen at the end joins to a lower-case start.
+                let m: u64 = (rt.buf_len(txt) as u64) / 4
+                var joined: bool = false
+                if m > 0 && at32(txt, m - 1) == 45 && u >= 97 && u <= 122 {
+                    pop1(txt, map)
+                    joined = true
+                }
+                if !joined {
+                    push_space(txt, map)
+                }
+            } else if al - pal > pem * 0.15 || al - pal < 0.0 - pem * 0.5 {
+                push_space(txt, map)
+            }
+        }
+        if is_space(u) {
+            push_space(txt, map)
+        } else {
+            let _a: u64 = push_folded(txt, map, u, i as u32)
+        }
+        pdx = dx
+        pdy = dy
+        pal = al + gw
+        pac = ac
+        pem = em
+        i = i + 1
+    }
+    return true
+}
+
+// the query (UTF-8) in the same normal form; spaces collapse, edges trimmed
+fn fold_utf8(src: u64, n: u64, out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    var map: rt.Buf = rt.buf_new()
+    var i: u64 = 0
+    while i < n {
+        let c: u32 = rd8p(src + i)
+        var u: u32 = c
+        var len: u64 = 1
+        if c >= 240 && i + 3 < n {
+            u = ((c & 7) << 18) | ((rd8p(src + i + 1) & 63) << 12)
+                | ((rd8p(src + i + 2) & 63) << 6) | (rd8p(src + i + 3) & 63)
+            len = 4
+        } else if c >= 224 && i + 2 < n {
+            u = ((c & 15) << 12) | ((rd8p(src + i + 1) & 63) << 6) | (rd8p(src + i + 2) & 63)
+            len = 3
+        } else if c >= 192 && i + 1 < n {
+            u = ((c & 31) << 6) | (rd8p(src + i + 1) & 63)
+            len = 2
+        }
+        if is_space(u) {
+            push_space(out, &map)
+        } else {
+            let _a: u64 = push_folded(out, &map, u, 0)
+        }
+        i = i + len
+    }
+    // trim a trailing space
+    let m: u64 = (rt.buf_len(out) as u64) / 4
+    if m > 0 && at32(out, m - 1) == 32 {
+        rt.buf_set_len(out, ((m - 1) * 4) as usize)
+    }
+    rt.buf_free(&map)
+}
+
+// the first match of q (qn code points) in txt at an index >= from
+fn find(txt: *mut rt.Buf, q: *mut rt.Buf, from: u64) -> u32 {
+    let n: u64 = (rt.buf_len(txt) as u64) / 4
+    let qn: u64 = (rt.buf_len(q) as u64) / 4
+    if qn == 0 || n < qn {
+        return NONE
+    }
+    let t: u64 = rt.buf_ptr(txt)
+    let p: u64 = rt.buf_ptr(q)
+    let first: u32 = rd32p(p)
+    var i: u64 = from
+    while i + qn <= n {
+        if rd32p(t + i * 4) == first {
+            var k: u64 = 1
+            while k < qn && rd32p(t + (i + k) * 4) == rd32p(p + k * 4) {
+                k = k + 1
+            }
+            if k == qn {
+                return i as u32
+            }
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+// how many matches (not overlapping) the text has
+fn count_in(txt: *mut rt.Buf, q: *mut rt.Buf) -> u64 {
+    let qn: u64 = (rt.buf_len(q) as u64) / 4
+    var c: u64 = 0
+    var at: u64 = 0
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        let m: u32 = find(txt, q, at)
+        if m == NONE {
+            break
+        }
+        c = c + 1
+        at = (m as u64) + qn
+    }
+    return c
+}
+
+// The pixel box of glyph gi: its advance along the baseline, from 0.2 em below
+// to 0.8 em above (the box of a rotated page is the axis-aligned hull).
+fn glyph_box(d: *mut pdfread.Doc, gi: u64, x0: *mut f64, y0: *mut f64, x1: *mut f64, y1: *mut f64) {
+    let x: f64 = glyph_x(d, gi)
+    let y: f64 = glyph_y(d, gi)
+    let dx: f64 = glyph_dx(d, gi)
+    let dy: f64 = glyph_dy(d, gi)
+    let em: f64 = glyph_em(d, gi)
+    var gw: f64 = glyph_w(d, gi)
+    if gw < em * 0.3 {
+        gw = em * 0.3
+    }
+    // up = (dy, -dx)
+    let ux: f64 = dy
+    let uy: f64 = 0.0 - dx
+    var minx: f64 = x
+    var maxx: f64 = x
+    var miny: f64 = y
+    var maxy: f64 = y
+    var k: u64 = 0
+    while k < 4 {
+        var t: f64 = 0.0
+        if (k & 1) != 0 {
+            t = gw
+        }
+        var s: f64 = 0.0 - 0.2 * em
+        if k >= 2 {
+            s = 0.8 * em
+        }
+        let px: f64 = x + dx * t + ux * s
+        let py: f64 = y + dy * t + uy * s
+        if px < minx {
+            minx = px
+        }
+        if px > maxx {
+            maxx = px
+        }
+        if py < miny {
+            miny = py
+        }
+        if py > maxy {
+            maxy = py
+        }
+        k = k + 1
+    }
+    *x0 = minx
+    *y0 = miny
+    *x1 = maxx
+    *y1 = maxy
+}
+
+// Multiplies the pixels of a box with a colour 0xRRGGBB: white becomes the
+// colour, black stays black, so the text under the mark stays readable.
+fn mark(px: u64, w: u64, h: u64, x0: f64, y0: f64, x1: f64, y1: f64, color: u32) {
+    var a: i64 = x0 as i64
+    var b: i64 = y0 as i64
+    var c: i64 = (x1 + 0.999) as i64
+    var e: i64 = (y1 + 0.999) as i64
+    if a < 0 {
+        a = 0
+    }
+    if b < 0 {
+        b = 0
+    }
+    if c > (w as i64) {
+        c = w as i64
+    }
+    if e > (h as i64) {
+        e = h as i64
+    }
+    let cr: u32 = (color >> 16) & 255
+    let cg: u32 = (color >> 8) & 255
+    let cb: u32 = color & 255
+    var yy: i64 = b
+    while yy < e {
+        var xx: i64 = a
+        while xx < c {
+            let p: u64 = px + (((yy as u64) * w + (xx as u64)) * 4)
+            let o: u32 = rd32p(p)
+            let r: u32 = (((o >> 16) & 255) * cr) / 255
+            let g: u32 = (((o >> 8) & 255) * cg) / 255
+            let bl: u32 = ((o & 255) * cb) / 255
+            wr32p(p, (o & 0xFF000000) | (r << 16) | (g << 8) | bl)
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+// the distinct glyph records of the match [s, s+qn) of txt, one per call of
+// `f`-style iteration: returns the glyph of position k in the match or NONE
+fn match_glyphs(map: *mut rt.Buf, s: u64, qn: u64, k: u64) -> u32 {
+    if k >= qn {
+        return NONE
+    }
+    let g: u32 = at32(map, s + k)
+    if k > 0 && at32(map, s + k - 1) == g {
+        return NONE
+    }
+    return g
+}
+
+// ------------------------------------------------------------ marking a page
+
+// Builds the text of `page` at `scale` into txt/map and multiplies the boxes of
+// every match of q into the pixels (yellow; the match starting at `cur` -- an
+// index into txt, NONE for none -- orange). Returns the number of matches.
+// `first_y` receives the top edge (pixels) of the current match, or -1.
+fn highlight(d: *mut pdfread.Doc, page: u64, scale: f64, px: u64, w: u64, h: u64,
+    q: *mut rt.Buf, cur: u32, txt: *mut rt.Buf, map: *mut rt.Buf, first_y: *mut i64) -> u64 {
+    *first_y = 0 - 1
+    if !page_text(d, page, scale, txt, map) {
+        return 0
+    }
+    let qn: u64 = (rt.buf_len(q) as u64) / 4
+    if qn == 0 {
+        return 0
+    }
+    var c: u64 = 0
+    var at: u64 = 0
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        let m: u32 = find(txt, q, at)
+        if m == NONE {
+            break
+        }
+        c = c + 1
+        var color: u32 = 0xFFE633
+        if m == cur {
+            color = 0xFF8C1A
+        }
+        var k: u64 = 0
+        while k < qn {
+            let g: u32 = match_glyphs(map, m as u64, qn, k)
+            if g != NONE {
+                var x0: f64 = 0.0
+                var y0: f64 = 0.0
+                var x1: f64 = 0.0
+                var y1: f64 = 0.0
+                glyph_box(d, g as u64, &x0, &y0, &x1, &y1)
+                mark(px, w, h, x0, y0, x1, y1, color)
+                if m == cur && *first_y < 0 {
+                    *first_y = y0 as i64
+                }
+            }
+            k = k + 1
+        }
+        at = (m as u64) + qn
+    }
+    return c
+}

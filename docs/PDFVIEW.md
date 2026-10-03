@@ -51,13 +51,15 @@ PDF-Datei vorgibt (Breiten aus `/Widths`, `/W` bzw. den Metriken der Standardsch
 
 ## Was er NICHT kann (ehrlich)
 
-* **Schrift: drei Schnitte, keine Serifen.** Das System hat eine normale, eine fette und eine
-  Festbreitenschrift; daraus macht der Betrachter: fett (Name enthält Bold/Black/Heavy/Demi, `/FontWeight`
-  ≥ 600, ForceBold), Festbreite (Courier/Mono/Consolas/…, FixedPitch) und kursiv (Oblique/Italic,
-  `/ItalicAngle`: die aufrechte Schrift um 12° geschert). **Serifenschriften (Times & Co.) werden in der
-  Systemschrift ohne Serifen gezeigt**; Glyphenformen sind überhaupt die des Systems, die **Positionen**
-  stimmen (aus der Datei). Eingebettete Schriften werden nicht benutzt, Ligaturen/Kerning der Datei nur
-  über die Breiten.
+* **Schrift: Sans, Serif, Festbreite — je normal/fett; Glyphenformen sind die des Systems.** Der Betrachter wählt
+  den Schnitt aus dem Schriftnamen: fett (Bold/Black/Heavy/Demi, `/FontWeight` ≥ 600, ForceBold), Festbreite
+  (Courier/Mono/Consolas/…, FixedPitch), **Serifen** (Times, Georgia, Garamond, Palatino, Cambria, Bookman,
+  Century, Minion, Charter, Caslon, Baskerville, Didot, Bodoni, Name mit „serif“ ohne „sans“ → **Liberation Serif**, Times-metrikkompatibel, OFL, im Abbild
+  als `/lib/serif.ttf` und `/lib/serifb.ttf`; fehlt die Datei, bleibt es bei der Systemschrift) und kursiv
+  (die aufrechte Schrift um 12° geschert, `/ItalicAngle`). Die **Positionen** stimmen (aus der Datei).
+  Eingebettete Schriften werden nicht benutzt, Ligaturen/Kerning der Datei nur über die Breiten. Schreib- und
+  Zierschriften erscheinen in der Systemschrift. [gemessen: `serif.pdf` liegt mit den Serif-Schnitten 0,87
+  Graustufen von poppler entfernt, ohne sie 2,16]
 * **Schattierungen (`sh`) und Muster (Pattern)** werden nicht gezeichnet (Muster: mittelgrau).
 * **Bilder liegen immer unter der Vektorschicht,** egal in welcher Reihenfolge die Datei
   sie zeichnet (eine weiße Fläche, die *über* ein Bild gezeichnet wird, würde das Bild
@@ -65,13 +67,21 @@ PDF-Datei vorgibt (Breiten aus `/Widths`, `/W` bzw. den Metriken der Standardsch
   fehlt. Bilder über 12 Mio. Punkte werden beim Einlesen herunterskaliert, JPEGs über 16 Mio.
   Punkte nicht gezeigt.
 * **Inline-Bilder** (`BI … EI`) werden übersprungen.
-* **Keine Textauswahl, keine Suche, keine Lesezeichen/Links, keine Formulare, keine Ebenen.**
+* **Textsuche (neu):** Suchfeld in der Leiste (Enter und ▼ = nächster, ▲ = vorheriger Treffer; ohne Fokus im Feld auch die Tasten `n` / `p`), über alle Seiten
+  mit Umlauf; „Treffer 3 von 8"; die Treffer sind gelb, der aktuelle orange hinterlegt (Text bleibt schwarz).
+  Gesucht wird im **gelesenen Text** (`lib/pdfread/pdftext.fi`): Groß-/Kleinschreibung egal (auch Umlaute),
+  Ligaturen (ﬁ ﬂ …) aufgelöst, Silbentrennung am Zeilenende zusammengezogen („Was-⏎ser" = „Wasser"), mehrfache
+  Leerzeichen/Zeilenumbrüche = ein Leerzeichen. Aufruf `pdfview datei.pdf --find wort` öffnet mit dem ersten Treffer.
+  **Grenzen:** ein Wort, das die Datei als **Bild** enthält (Scan ohne Textschicht), wird nicht gefunden; Text
+  in Schriften ohne ToUnicode kann falsche Zeichen liefern; keine Regex, kein „ganzes Wort", kein Suchen über
+  Dateien; bis 1024 Seiten (danach wird nicht mehr gezählt).
+* **Keine Textauswahl/Kopieren, keine Lesezeichen/Links, keine Formulare, keine Ebenen.**
 * **Kein Mausrad** (fuiapp liefert keine Radereignisse): Scrollen mit Tasten oder Ziehen.
 * Fenstergröße fest (900 × 700).
 
 ## Wie es geprüft wird — `tools/pdf/run.sh`
 
-Acht Abschnitte, alle gegen etwas **Äußeres**:
+Zehn Abschnitte, alle gegen etwas **Äußeres**:
 
 1. Bau der Host-Treiber (`pdfdump`, `pdfpng` — derselbe Code wie im Programm).
 2. Korpus aus **reportlab, pypdf und einem Rohschreiber** (xref-/Objektströme, A85/Hex/RL/LZW,
@@ -81,10 +91,14 @@ Acht Abschnitte, alle gegen etwas **Äußeres**:
 4. Beschädigte Dateien: verschlüsselt → Fehler 2, Müll/leer → Fehler 1, abgeschnitten oder
    falsches `startxref` → wiederaufgebaut, die Seite ist da.
 5. **Fuzz:** 800 zufällige Verderbungen, nie Absturz, nie Hängen.
-6. Tempo: 40 Seiten < 5 s, 150 Seiten mit 9000 Zeilen < 15 s (Host).
+6. Tempo: 40 Seiten < 5 s, 150 Seiten mit 9000 Zeilen < 15 s (Host). **6b Serifen:** dieselbe Seite mit und ohne die
+   Serif-Schnitte gegen poppler. **6c Suche:** Treffer je Seite gegen `pdftotext` + Python-Vergleich
+   (`tools/pdf/search_cmp.py`: 55 Fälle, alle gleich), Markierung per Pixelzählung (gelb, Text bleibt schwarz),
+   300 beschädigte Dateien durchsucht.
 7. **Im Gast** (QEMU, OrientOS-Bau): `pdfview --render` meldet die Prüfsumme der gemalten
    Seite — sie muss der des Wirts **Bit für Bit** gleichen.
-8. **Das Fenster:** Bild, dann PgDn und `-` über den QEMU-Monitor: „Seite 2 von 2", Zoom sinkt.
+8. **Das Fenster:** Bild, dann PgDn und `-` über den QEMU-Monitor: „Seite 2 von 2", Zoom sinkt; dann `--find wasser`,
+   `n n p`: „Treffer 1/2/3 von 8", Markierung im Bild.
 
 Gefundene und behobene Fehler beim Bauen: **`lib/svg` wendet ein `transform` auf `<text>` zweimal an** (`times_text` wendet den Zustand erneut an) — gedrehte/geschrägte Glyphen stehen deshalb in einem `<g transform>`, der Text bei 0,0 darin (gedrehter Text stand vorher falsch); LZW-Tabelle bei beschädigtem Strom (Überlauf),
 `as u32`-Überläufe bei ToUnicode-/CID-Werten (jetzt geklemmt), Datei ohne Trailer (Katalog-Suche).

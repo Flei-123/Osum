@@ -41,6 +41,7 @@ import jpeg.jpeg
 
 export {
     Doc, doc_new, doc_open, doc_free, doc_pages, doc_page_size, doc_page_svg,
+    doc_tcap_count, doc_tcap_word, doc_tcap_clear, WHICH_TEXT,
     doc_error, doc_img_count, doc_img_obj, doc_img_m,
     ERR_NONE, ERR_FORMAT, ERR_ENCRYPTED, ERR_NOPAGES, ERR_MEMORY,
     Val, parse_val, skip_ws, K_NONE, K_BOOL, K_INT, K_REAL, K_STR, K_NAME,
@@ -116,7 +117,8 @@ struct Doc {
     enc_mode: u32,   // 0 not encrypted, 1 RC4, 2 AES-128 (the standard handler, empty user password)
     enc_klen: u32,
     enc_key: [u8; 16],
-    styles: u32,   // bit 2: bold text was seen, bit 3: monospace text (layers of doc_page_svg)
+    styles: u32,   // bit 2: bold text was seen, bit 3: monospace, bit 4: serif, bit 5: serif bold (layers of doc_page_svg)
+    tcap: rt.Buf,  // text capture (which == WHICH_TEXT): 8 u32 per glyph, see text_cap
 }
 
 fn doc_new() -> Doc {
@@ -124,12 +126,48 @@ fn doc_new() -> Doc {
         data: 0, len: 0, nobj: 0, xk: 0, xo: 0, xi: 0,
         trailer: val_none(), root: val_none(), npages: 0, pages: 0, err: 0,
         os: OStm { num: 0, buf: rt.buf_new(), count: 0, first: 0 },
-        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, enc_mode: 0, enc_klen: 0, enc_key: [0; 16], styles: 0,
+        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, enc_mode: 0, enc_klen: 0, enc_key: [0; 16], styles: 0, tcap: rt.buf_new(),
     }
 }
 
 fn doc_styles(d: *mut Doc) -> u32 {
     return (*d).styles
+}
+
+// ------------------------------------------------------------ text capture
+//
+// A pass with `which == WHICH_TEXT` draws NOTHING and records every glyph the
+// content stream shows (also invisible text, render mode 3 -- the layer an OCR
+// program puts under a scan). 8 u32 per glyph (32 bytes):
+//   0 unicode  1 x*16  2 y*16 (the glyph origin in device pixels, offset 2^30)
+//   3 advance*16  4 em*16  5 dx*4096  6 dy*4096 (the unit vector of the baseline)
+//   7 reserved
+// The search in pdftext.fi turns this into text and rectangles.
+const WHICH_TEXT: u32 = 99
+const TCAP_MAX: u64 = 4000000   // bytes: 125 000 glyphs per page
+
+fn doc_tcap_count(d: *mut Doc) -> u64 {
+    return (rt.buf_len(&(*d).tcap) as u64) / 32
+}
+
+fn doc_tcap_word(d: *mut Doc, i: u64, k: u64) -> u32 {
+    let p: u64 = rt.buf_ptr(&(*d).tcap) + i * 32 + k * 4
+    return *(p as *mut u32)
+}
+
+fn doc_tcap_clear(d: *mut Doc) {
+    rt.buf_clear(&(*d).tcap)
+}
+
+fn push32(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, (v & 255) as u8)
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, ((v >> 16) & 255) as u8)
+    rt.buf_push(b, ((v >> 24) & 255) as u8)
+}
+
+fn q16(v: f64) -> u32 {
+    return f2u32(v * 16.0 + 1073741824.0)
 }
 
 fn doc_error(d: *mut Doc) -> u32 {
@@ -2464,6 +2502,7 @@ fn doc_free(d: *mut Doc) {
     if (*d).fonts != 0 {
         rt.heap_free((*d).fonts, (FONT_MAX * FONT_SZ) as usize)
     }
+    rt.buf_free(&(*d).tcap)
     *d = doc_new()
 }
 
@@ -2569,7 +2608,7 @@ struct R {
     scratch: u64,
     ops: u64,
     in_text: bool,
-    which: u32,    // 0 everything, 1 vectors + regular text, 2 bold text only, 3 monospace text only
+    which: u32,    // 0 everything, 1 vectors + regular text, 2 bold text only, 3 monospace text only, 4 serif, 5 serif bold
 }
 
 // ---------------------------------------------------------------- output
@@ -3157,9 +3196,18 @@ fn has_sub(p: u64, n: u64, lit: str) -> bool {
     return false
 }
 
-// the style bits of a font by its name: 1 bold, 2 monospace, 4 italic
+// the style bits of a font by its name: 1 bold, 2 monospace, 4 italic, 8 serif
 fn style_of_name(p: u64, n: u64) -> u64 {
     var st: u64 = 0
+    // DD / PDFVIEW: serif faces. `times` (Times-Roman, TimesNewRoman, TimesNewRomanPS), `serif` but not
+    // `sans`, and the other well known text faces; a font descriptor can also say it (flag 2)
+    if has_sub(p, n, "times") || has_sub(p, n, "georgia") || has_sub(p, n, "garamond") || has_sub(p, n, "palatino")
+        || has_sub(p, n, "bookman") || has_sub(p, n, "century") || has_sub(p, n, "minion") || has_sub(p, n, "cambria")
+        || has_sub(p, n, "charter") || has_sub(p, n, "caslon") || has_sub(p, n, "baskerville") || has_sub(p, n, "didot")
+        || has_sub(p, n, "bodoni") || has_sub(p, n, "tinos") || has_sub(p, n, "liberationserif") || has_sub(p, n, "nimbusrom")
+        || (has_sub(p, n, "serif") && !has_sub(p, n, "sans")) {
+        st = st | 8
+    }
     if has_sub(p, n, "bold") || has_sub(p, n, "black") || has_sub(p, n, "heavy") || has_sub(p, n, "demi") {
         st = st | 1
     }
@@ -3360,6 +3408,9 @@ fn font_build(d: *mut Doc, fd: *mut Val, key: u64, slot: u64) {
             let fb: u64 = f2u(val_num(&fl))
             if (fb & 1) != 0 {
                 wr64(s + 96, rd64(s + 96) | 2)
+            }
+            if (fb & 2) != 0 {
+                wr64(s + 96, rd64(s + 96) | 8)
             }
             if (fb & 64) != 0 {
                 wr64(s + 96, rd64(s + 96) | 4)
@@ -3620,6 +3671,12 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
             }
         }
     }
+    if (*r).which == WHICH_TEXT {
+        if u >= 32 {
+            text_cap(r, u, w)
+        }
+        return w
+    }
     if (*r).gs.tr == 3 || u == 0 || u == 32 || u < 32 {
         return w
     }
@@ -3628,6 +3685,11 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
     var layer: u32 = 1
     if (style & 2) != 0 {
         layer = 3
+    } else if (style & 8) != 0 {
+        layer = 4
+        if (style & 1) != 0 {
+            layer = 5
+        }
     } else if (style & 1) != 0 {
         layer = 2
     }
@@ -3700,6 +3762,33 @@ fn glyph_out(r: *mut R, code: u64, is_t0: bool) -> f64 {
         put_s(o, "</g>")
     }
     return w
+}
+
+// records one glyph (see the comment at WHICH_TEXT)
+fn text_cap(r: *mut R, u: u32, w: f64) {
+    let d: *mut Doc = (*r).d
+    let o: *mut rt.Buf = &(*d).tcap
+    if (rt.buf_len(o) as u64) >= TCAP_MAX {
+        return
+    }
+    let fs: f64 = (*r).gs.fsize
+    let local: M = M { a: fs * (*r).gs.th, b: 0.0, c: 0.0, d: fs, e: 0.0, f: (*r).gs.ts }
+    let trm: M = m_mul(m_mul(local, (*r).tm), (*r).gs.ctm)
+    let along: f64 = fsqrt(trm.a * trm.a + trm.b * trm.b)
+    let em: f64 = fsqrt(trm.c * trm.c + trm.d * trm.d)
+    if em < 0.05 || along < 0.00001 {
+        return
+    }
+    let dx: f64 = trm.a / along
+    let dy: f64 = trm.b / along
+    push32(o, u)
+    push32(o, q16(trm.e))
+    push32(o, q16(trm.f))
+    push32(o, f2u32(w / 1000.0 * along * 16.0))
+    push32(o, f2u32(em * 16.0))
+    push32(o, f2u32(dx * 4096.0 + 8192.0))
+    push32(o, f2u32(dy * 4096.0 + 8192.0))
+    push32(o, 0)
 }
 
 fn text_show(r: *mut R, v: *mut Val) {
@@ -4359,6 +4448,9 @@ fn doc_page_svg(d: *mut Doc, page: u64, scale: f64, which: u32, out: *mut rt.Buf
     *ho = hpx
     if which <= 1 {
         (*d).styles = 0
+    }
+    if which == WHICH_TEXT {
+        rt.buf_clear(&(*d).tcap)
     }
     (*d).nimg = 0
     // the contents: one stream or an array of them
