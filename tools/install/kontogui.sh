@@ -53,7 +53,7 @@ click() { python3 tools/themestore/click.py "$1" > "$OUT/c.txt"; python3 tools/w
 keys() { local k; for k in "$@"; do mon "sendkey $k"; sleep 0.35; done; sleep 1; }
 last() { grep -a 'installer: konto ks=' "$SER" | tail -1 | sed 's/.*konto //'; }
 grep -aq 'installer: ready' "$SER" && ok "the installer window is up" || { bad "no installer window"; tail -3 "$SER"; }
-grep -aq 'installer: disk /dev/hda' "$SER" && ok "the blank disk is listed (so the button CAN be on)" || bad "no disk listed"
+grep -aq 'installer: ready n=1' "$SER" && ok "one disk is listed (so the button CAN be on)" || bad "no disk listed"
 [ -z "$(last)" ] && ok "empty form: nothing valid yet, the button is off" || bad "state before typing: '$(last)'"
 # the three fields: the installer says where its rectangles are (`installer: rect
 # ... kind=4`, canvas coordinates); the window sits at (40,40), border 2, title 20,
