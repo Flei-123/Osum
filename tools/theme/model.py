@@ -14,6 +14,7 @@ test.
 
     model.py tokens <scheme.file> <light|dark> [accent-hex]
     model.py contrast <scheme.file> <light|dark> [accent-hex]
+    model.py fill <scheme.file> <light|dark>   fill rule: OKLab distances
     model.py srgb                       the 256 linear-light values
     model.py table <scheme> [<scheme> ...]   the documentation table
 
@@ -258,10 +259,13 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_0])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
-            put("control", neutral[N_0])
-            put("control-hover", neutral[N_100])
-            put("control-pressed", neutral[N_200])
-            put("field", neutral[N_0])
+            # FILL RULE (Justin 02.10.2026): a widget with a border never
+            # has the fill of its ground -- control and field step off
+            # the collapsed surface by one ramp step.
+            put("control", neutral[N_100])
+            put("control-hover", neutral[N_200])
+            put("control-pressed", neutral[N_300])
+            put("field", neutral[N_100])
             put("text-primary", neutral[N_1000])
             put("text-secondary", neutral[N_1000])
             put("text-disabled", neutral[N_500])
@@ -271,7 +275,9 @@ def resolve(scheme, dark, accent_override=None):
         else:
             put("surface", neutral[N_50])
             put("surface-raised", neutral[N_0])
-            put("surface-sunken", neutral[N_100])
+            # FILL RULE: sunken N_100 -> N_200, it was the fill of the field
+            # (a list with a scroll track: the track vanished).
+            put("surface-sunken", neutral[N_200])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
             put("control", neutral[N_200])
@@ -297,10 +303,11 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_1000])
             put("surface-hover", neutral[N_800])
             put("surface-pressed", neutral[N_700])
-            put("control", neutral[N_1000])
-            put("control-hover", neutral[N_800])
-            put("control-pressed", neutral[N_700])
-            put("field", neutral[N_1000])
+            # FILL RULE: see the light high-contrast binding.
+            put("control", neutral[N_800])
+            put("control-hover", neutral[N_700])
+            put("control-pressed", neutral[N_600])
+            put("field", neutral[N_800])
             put("text-primary", neutral[N_0])
             put("text-secondary", neutral[N_0])
             put("text-disabled", neutral[N_400])
@@ -310,7 +317,8 @@ def resolve(scheme, dark, accent_override=None):
         else:
             put("surface", neutral[N_900])
             put("surface-raised", neutral[N_800])
-            put("surface-sunken", neutral[N_950])
+            # FILL RULE: sunken N_950 -> N_1000, it was the fill of the field.
+            put("surface-sunken", neutral[N_1000])
             # ROUND KLEINKRAM (14.09.2026), A-017: hover N_800 -> N_700 and
             # pressed N_700 -> N_600.  This is the SECOND implementation
             # catching up with the first, not a softened expectation.
@@ -497,6 +505,52 @@ def checks(res):
     return out
 
 
+# --------------------------------------------------------------- fill rule
+#
+# FILL RULE (Justin 02.10.2026, same rule as fUi's
+# themefile.check_fill_distinct): a widget with a border never has the
+# fill of the ground it sits on.  Measured in OKLab (perceptual), the
+# distance has to be at least FILL_MIN.  This is a CHECK, not part of
+# the resolution, so floating point is fine here; the kernel binds the
+# same tokens and tests/theme/run.sh section 5b compares the two.
+FILL_MIN = 0.012
+FILL_PAIRS = [
+    ("field", "surface"), ("field", "surface-raised"),
+    ("field", "overlay"), ("field", "surface-sunken"),
+    ("control", "surface"), ("control", "surface-raised"),
+    ("control", "overlay"),
+]
+
+
+def _lin_f(c):
+    c /= 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def oklab(rgb):
+    r, g, b = (_lin_f((rgb >> s) & 255) for s in (16, 8, 0))
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+def fill_distance(a, b):
+    pa, pb = oklab(a), oklab(b)
+    return sum((x - y) ** 2 for x, y in zip(pa, pb)) ** 0.5
+
+
+def fill_checks(res):
+    sem = res["sem"]
+    out = []
+    for w, g in FILL_PAIRS:
+        d = fill_distance(sem[S[w]], sem[S[g]])
+        out.append((w, g, d, d >= FILL_MIN))
+    return out
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -526,6 +580,12 @@ def main():
             for fg, bg, kind, cf, cb, r, good in checks(res):
                 print("%s %s %s %06x %06x %d %d"
                       % (fg, bg, kind, cf, cb, r, 1 if good else 0))
+        return 0
+    if cmd == "fill":
+        sch = read_scheme(sys.argv[2])
+        res = resolve(sch, sys.argv[3] == "dark")
+        for w, g, d, good in fill_checks(res):
+            print("%s %s %.4f %d" % (w, g, d, 1 if good else 0))
         return 0
     if cmd == "table":
         for path in sys.argv[2:]:
