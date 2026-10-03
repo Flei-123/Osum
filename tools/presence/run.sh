@@ -276,7 +276,13 @@ qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -monitor "unix:$TMPD/mon,server,nowait" >/dev/null 2>&1 &
 QP=$!
-sleep 12
+# wait for the bar to say it is there (a 1.6 MB program takes its time to load
+# from the emulated disk), then a moment for the first picture
+w=0
+while [ $w -lt 90 ] && ! grep -qa 'freunde: eintraege=' "$TMPD/o9.txt" 2>/dev/null; do
+    sleep 1; w=$((w+1))
+done
+sleep 3
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
     printf 'screendump %s\n' "$ROOT/docs/shots/praesenz/leiste.ppm" \
         | timeout 10 socat - "unix-connect:$TMPD/mon" >/dev/null 2>&1 || true
