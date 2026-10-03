@@ -286,3 +286,44 @@ the width grows, not only the height).
   floating point), fixed in Firn main `93a688d77`, test
   `tests/2002_calli_float.fi`. OrientOS' pin (`vendor/firn/COMMIT`) is older;
   `fuiapp.field_paint` works on both.
+
+## 8. Stage F-6/F-7: freunde, the start menu and the settings window on the scene tree (03.10.2026)
+
+New pieces of `fuiscene` (what the big programs needed first):
+
+* **Frameless layer windows**: `open_plain(x, y, w, h, title, layer, build)`,
+  `keys_always` (the window also gets keys while it is not the focus
+  window), `has_focus`, `hide`, `focus(key)`, `set_flags`/`begin`.
+* **Every key counted**: `key_seq` / `key_any` (the old `last_key` only knows
+  keys nobody took). A click into a text field is NOT an activation, Enter
+  is.
+* **Lists**: `table_list` (one row per line, no header), `table_two` (two
+  lines per row: name bold 15, description 12 muted, baselines 20 and 46
+  under the row top), `table_icons` (one word per row: bit 63 = icon of the
+  icon font, "OSYM" picture, else a colour tile), `table_click_only`,
+  `table_prep`, geometry getters for the acceptance reports. The glyphs of
+  the two-line rows are placed one by one on whole pixels with
+  `wlibc.pen_x` (the running sum `text_at` uses): the k15 ink check
+  (tolerance 0) passes.
+* **`memo`**: a multi-line field (Enter, Up/Down, Home/End, scrolling).
+* **Resizing**: the window can be dragged to another size (`fuiapp.resize`
+  makes a new pixel buffer, the tree is described again).
+* **Settings helpers**: `card`, `label_wrap`, `canvas2`, `cv_*_rgb`,
+  `row_stretch`, `set_dense`; more slots (fields 24, tables 8, values 24).
+
+Programs:
+
+* `freunde`: the chat is a second PAGE of the same window (the scene host
+  holds one window per process).
+* `launcher` (start menu): plain window on `L_MENUE`, search field, two-line
+  list with pictures, the power menu is a popup of the window, the two
+  questions are in-window dialogs (focus on "Cancel").
+* `settings`: 15 pages, each a `page_*` builder; keys `K_*`; choice values
+  in `kval`; the text of the fields is copied to and from the program's own
+  buffers around each event (`pull_entries` / `push_entries`); the theme
+  tiles are painted by `draw_tile`.
+
+Still open: taskbar, explorer, nedit, qs (see the roadmap); the scene tree
+ignores `wlibc.ui_scale` (HiDPI); right click / context menus, multiple
+selection, drag and drop, a dialog with an entry, closable tabs and a
+progress bar are missing for the explorer.

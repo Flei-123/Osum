@@ -39,6 +39,7 @@ import ulib
 import libc.io
 import wlibc
 import wlib
+import fuiscene
 import msg
 import appdir
 import nidx
@@ -205,7 +206,7 @@ fn kv(name: u64, v: u64) {
 // Feld aus Farben fuer die Symbole. Und dieselbe Auskunft auf die
 // serielle Leitung, damit der Laeufer draussen nachrechnen kann, was
 // drinnen ausgewaehlt wurde.
-fn new_find(ls: u64) {
+fn new_find() {
     var s_s: [u8; 25] = "launcher: suche [\0\0\0\0\0\0\0\0"
     var s_t: [u8; 16] = "] treffer=\0\0\0\0\0\0"
     var s_e: [u8; 21] = "launcher: treffer \0\0\0"
@@ -347,8 +348,9 @@ fn new_find(ls: u64) {
         ntreffer = napp + ndatei
     }
     liste[(lp) as usize] = 0 as u8
-    wlib.set_text(ls, (&liste[0 as usize]) as u64)
-    wlib.list_icons(ls, (&farben[0 as usize]) as u64)
+    // the list is a blob table on the scene tree: describe it again
+    fuiscene.refresh()
+    fuiscene.table_set_sel(K_LIST, 0)
     say((&s_s[0 as usize]) as u64)
     say((&suchfeld[0 as usize]) as u64)
     say((&s_t[0 as usize]) as u64)
@@ -514,7 +516,7 @@ fn zumachen() {
     if !g_offen {
         return
     }
-    let _h: u64 = wlib.win_hide(g_win, true)
+    fuiscene.hide(true)
     g_offen = false
     g_clear = true
     say((&s_zu[0 as usize]) as u64)
@@ -685,7 +687,7 @@ fn anker_y(bh: u64) -> u64 {
 // Server nicht (Hoehe 0 oder groesser als der Schirm), bleibt das
 // Fenster stehen, wo es angelegt wurde.
 fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
-    let hh: u64 = wlib.handle(w)
+    let hh: u64 = fuiscene.handle()
     if hh == 0 {
         return
     }
@@ -950,20 +952,41 @@ fn pw_abmelden() -> bool {
 // Programmen steckt und keinen Katalog laden darf (siehe den Kopf von
 // `menu_open`). Ein Programm, das einen hat, reicht ihn mit
 // `set_menu_title` hinunter -- genau dafuer gibt es die Funktion.
+static mut pw_items: [u8; 200] = [0 as u8; 200]
+
+// The power menu: a popup of the scene tree over the window, standing on the
+// button (`mx`, `my` = the top left of the button, window coordinates) and
+// opening upwards. The catalogue text has the entries separated by '\n'; the
+// popup wants them separated by NUL.
 fn pw_menue_auf(mx: u64, my: u64) {
     if pw_menue != 0 {
         return
     }
-    wlib.set_menu_title(msg.get((&k_ptitel[0 as usize]) as u64))
-    let mw: u64 = wlib.menu_open(0, mx, my,
-        msg.get((&k_pmenu[0 as usize]) as u64), POWER_N)
-    if mw >= wlib.MAXWN {
-        return
+    let src: u64 = msg.get((&k_pmenu[0 as usize]) as u64)
+    let n: u64 = ulib.length(src)
+    var q: u64 = 0
+    while q < n && q < 190 {
+        let c: u8 = __mmio_read8((src + q) as *mut u8)
+        if c == 10 as u8 {
+            pw_items[(q) as usize] = 0 as u8
+        } else {
+            pw_items[(q) as usize] = c
+        }
+        q = q + 1
     }
+    pw_items[(q) as usize] = 0 as u8
+    pw_items[((q + 1)) as usize] = 0 as u8
+    let hh: u64 = POWER_N * 28 + 8
+    var y: u64 = 0
+    if my > hh + 4 {
+        y = my - hh - 4
+    }
+    fuiscene.menu_open(mx, y, 220, (&pw_items[0 as usize]) as u64, POWER_N)
     pw_menue = 1
     say((&s_pmauf[0 as usize]) as u64)
     nl()
 }
+
 
 // DIE RUECKFRAGE. Ausschalten und Neustart sind nicht umkehrbar -- wer
 // sie aus Versehen trifft, verliert, was offen war. Also fragt das
@@ -1015,30 +1038,9 @@ fn pw_frage_auf(was: u64) {
     // Wer das umdreht, muss `dl_no` in wlib umdrehen -- und das
     // betrifft dreizehn Programme.
     let cancel: u64 = msg.get((&k_bcan[0 as usize]) as u64)
-    let bp: u64 = (&pw_block[0 as usize]) as u64
-    var p: u64 = 0
-    p = p + ulib.strncpy(bp + p, ja, 30)
-    __mmio_write8((bp + p) as *mut u8, 10 as u8)
-    p = p + 1
-    p = p + ulib.strncpy(bp + p, cancel, 30)
-    __mmio_write8((bp + p) as *mut u8, 0 as u8)
-    // Der Block muss den Aufruf UEBERLEBEN: `dlg_wahl` kopiert die
-    // Beschriftungen zwar in seinen eigenen Puffer (dw_buf), aber der
-    // Titel und die Frage bleiben Zeiger -- und die zeigen in den
-    // Katalog, der fest liegt. Der Block hier liegt deshalb ebenfalls
-    // statisch und nicht im Rahmen dieser Funktion.
-    let dw: u64 = wlib.dlg_wahl(titel, text,
-        (&pw_block[0 as usize]) as u64, 2)
-    if dw >= wlib.MAXWN {
-        return
-    }
-    // DER FOKUS GEHOERT DEM ABBRUCH. `dlg_wahl` setzt ihn auf den
-    // ersten Knopf -- und das ist seit der Umstellung oben die TAT.
-    // Ein Dialog, bei dem die Eingabetaste ohne jede weitere Bewegung
-    // ausschaltet, ist dieselbe Falle wie die Flucht von vorhin, nur
-    // andersherum. Also ausdruecklich auf den zweiten Knopf.
-    let _f: u64 = 0
-    wlib.set_focus(wlib.dlg_button(1))
+    fuiscene.dialog_open(titel, text, ja, cancel)
+    // the focus lies on CANCEL: Enter must never shut the machine down
+    fuiscene.dialog_default(1)
     pw_frage = was
     say((&s_pmfrage[0 as usize]) as u64)
     sayn(was)
@@ -1144,7 +1146,8 @@ fn u_start(args: u64) -> u64 {
         }
         a = a + 1
     }
-    if !wlib.begin(nohit, noclip) {
+    fuiscene.set_flags(nohit, noclip)
+    if !fuiscene.begin() {
         say((&s_bad[0 as usize]) as u64)
         nl()
         return 1
@@ -1260,204 +1263,51 @@ fn u_start(args: u64) -> u64 {
     // Rahmen: unter der Leiste (und unter dem reservierten Band der
     // Messtafel) hat das Menue nichts verloren.
     conf_read()
-    let anker: u64 = anker_x(bw)
-    let ay: u64 = anker_y(bh)
+    // FUI-ALL F-6: the window is described to fUi's scene tree. Its size is
+    // the sum of what is in it: 8 padding, the prompt (24), the search field
+    // (36), the list (LIST_ROWS two-line rows of 52 + 4), the button row (36),
+    // 8 gaps/padding between.
+    let sbw: u64 = 440
+    let slh: u64 = LIST_ROWS * 52 + 4
+    let sbh: u64 = 8 + 24 + 8 + 36 + 8 + slh + 8 + 36 + 8
+    let ky: u64 = sbh - 8 - 36
+    let anker: u64 = anker_x(sbw)
+    let ay: u64 = anker_y(sbh)
     // RUNDE ECHTHARDWARE-3: das Startmenue liegt auf SEINER eigenen
     // Ebene -- ueber der Taskleiste (sonst deckt die Leiste es zu),
     // aber UNTER Klappmenues und Blasen.
-    let w: u64 = wlib.window_plain(anker, ay, bw, bh,
-        (&t_titel[0 as usize]) as u64, wlibc.L_MENUE)
-    // RUNDE PAINT: welchem Buendel dieses Fenster gehoert --
-    // damit die Taskleiste sein Symbol findet.
-    var a_app: [u8; 9] = "launcher\0"
-    g_win = w
-    let _ap: u64 = wlib.window_app(w, (&a_app[0 as usize]) as u64)
-    // ============================================ RUNDE MERGE-11: R5
-    // JETZT erst steht das Fenster, und JETZT beantwortet der
-    // Fensterserver die Frage nach der Arbeitsflaeche. Sie ist die
-    // bessere Quelle als jede eigene Rechnung: dort ist JEDE
-    // Reservierung abgezogen, nicht nur die der Leiste (auch das
-    // reservierte Band der Messtafel oben).
-    an_arbeitsflaeche(w, bw, bh)
-    // ===================================================== RUNDE ECHTHARDWARE-1
-    //
-    // "ICH WILL DIE TASTATUR" -- UND OHNE DIESE ZEILE KAM NIE EINE AN.
-    //
-    // Justins Befund vom 09.09.: im Startmenue laesst sich nichts
-    // tippen, das Suchfeld bleibt leer, obwohl die Tastatur erkannt
-    // ist (TAS 23 FAIL 0) und der Kern jede Taste meldet (`key: e`).
-    // Zwischen Kern und Feld liegt genau eine Regel:
-    //
-    //   wm.on_mouse:  if wg(state, i, W_LAYER) == L_NORMAL {
-    //                     set_focus(state, i)   }
-    //
-    // Dieses Fenster liegt auf L_TOP -- es MUSS dort liegen, sonst
-    // verschwindet das Menue hinter Fenstern. Damit war es aber von
-    // jedem Fokus ausgeschlossen, und `wm.on_key` gibt die Taste nur
-    // an den Fokus. Die Tasten kamen also bis in den Fensterserver und
-    // fielen dort auf den Boden.
-    //
-    // Die Regel bleibt richtig (eine Taskleiste, die den Fokus zieht,
-    // macht jeden Tastendruck danach wirkungslos) -- also sagt dieses
-    // Fenster ausdruecklich, dass es eine Ausnahme ist.
-    let _k: u64 = wlib.win_keys(w, true)
-    if w >= wlib.MAXWN {
+    if !fuiscene.open_plain(anker, ay, sbw, sbh, (&t_titel[0 as usize]) as u64,
+        wlibc.L_MENUE, build) {
         say((&s_bad[0 as usize]) as u64)
         nl()
         return 1
     }
-    // ===================================================== RUNDE TUERSCHLOSS
-    //
-    // HIER STANDEN `bx` UND `by`, UND DAS WAREN DIE FALSCHEN ZAHLEN.
-    //
-    // `bx=190 by=110` sind seit Runde STARTKNOPF tot: das Fenster wird
-    // eine Handvoll Zeilen darueber mit `anker_x(bw)` / `anker_y(bh)`
-    // angelegt, weil das Menue an der Leiste haengt und nicht in der
-    // Bildmitte. Die MELDUNG hat weiter die alten Festwerte gesagt.
-    //
-    // Das ist keine Schoenheitsfrage, sondern eine falsche Messung: wer
-    // sich auf diese Zeile verlaesst, um einen Eintrag anzuklicken --
-    // ein Testlaeufer, ein Mensch mit einem Skript --, klickt 340
-    // Bildpunkte daneben ins Leere und misst danach "der Start geht
-    // nicht". Genau das ist in dieser Runde zweimal passiert, bevor die
-    // echte Lage aus den Fensterberichten des Servers kam (id=11 und
-    // id=12 bei x=8 y=452, waehrend hier x=190 y=110 stand).
-    //
-    // Eine Meldung ueber eine Lage, die das Programm selbst nicht
-    // benutzt, ist schlimmer als keine.
+    var a_app: [u8; 9] = "launcher\0"
+    g_win = fuiscene.win_id()
+    fuiscene.set_app((&a_app[0 as usize]) as u64)
+    // the work area is the better source for the place (every reservation
+    // is taken off, not only the task bar's)
+    an_arbeitsflaeche(g_win, sbw, sbh)
+    // keys even while the window does not hold the focus (it lies on a layer
+    // that never takes it)
+    fuiscene.keys_always(true)
     say((&s_geo[0 as usize]) as u64)
     kv((&sx[0 as usize]) as u64, anker)
     kv((&sy[0 as usize]) as u64, ay)
-    kv((&sw[0 as usize]) as u64, bw)
-    kv((&sh[0 as usize]) as u64, bh)
+    kv((&sw[0 as usize]) as u64, sbw)
+    kv((&sh[0 as usize]) as u64, sbh)
     nl()
-
-    wlib.box_v(w, 0, 0, bw, 84 * sk, 12 * sk, 8 * sk)
-    let lb: u64 = wlib.label(msg.get((&k_prompt[0 as usize]) as u64))
-    wlib.size(0, 26 * sk)
-    let fe: u64 = wlib.entry((&suchfeld[0 as usize]) as u64, 62)
-    wlib.box_end()
-
-    // RUNDE FUI-WIN11: der Kasten ist so hoch wie die Liste, die
-    // hineinkommt -- dieselbe Rechnung wie oben bei `bh`.
-    wlib.box_v(w, 12 * sk, 82 * sk, bw - 24 * sk, lh + 4 * sk, 0, 0)
-    wlib.size(0, lh)
-    let ls: u64 = wlib.list((&liste[0 as usize]) as u64, LIST_ROWS)
-    // ============================================== RUNDE STARTKNOPF
-    // EIN KLICK GENUEGT.
-    //
-    // Justin klickt einen Eintrag an, und nichts geschieht. Die
-    // Trefferflaeche stimmt und die Auswahl WIRD gesetzt -- eine Liste
-    // loeste bis hierher nur beim DOPPELKLICK aus (`wlib.fi`,
-    // `s_lastclick`). Fuer einen Dateimanager ist das richtig: dort
-    // waehlt man oft und oeffnet selten. Fuer ein STARTMENUE ist es
-    // falsch, denn dort ist der einzige Zweck eines Klicks, das
-    // Programm zu starten -- und kein System der Welt verlangt dafuer
-    // zwei Klicks.
-    //
-    // Die Regel haengt deshalb an DIESER Liste und nicht in der
-    // Bibliothek; der Explorer behaelt seinen Doppelklick.
-    wlib.list_einklick(ls, true)
-    // ============================================== RUNDE FUI-WIN11
-    // ZWEI ZEILEN JE TREFFER: NAME OBEN, BESCHREIBUNG DARUNTER.
-    //
-    // Justins Kritik: die Beschreibung stand in DERSELBEN Zeile hinter
-    // "--". Windows setzt den Namen in Zeile 1 und die Beschreibung
-    // gedaempft in Zeile 2; genau das macht die Liste jetzt. Der
-    // Schnitt ist der Tabulator, den `new_find` setzt.
-    //
-    // ES GILT NUR FUER DIESE LISTE. `wlib.list` wird von sechs
-    // Programmen benutzt; die Zeilenhoehe der anderen bleibt, wie sie
-    // war (`list_zwei` ist abwaehlbar und standardmaessig aus).
-    wlib.list_zwei(ls, true)
-    wlib.box_end()
-
-    // DER KNOPF BEKOMMT KEINE FESTE BREITE MEHR -- er misst sich
-    // selbst. Der Kasten ist so breit wie der Inhalt des Fensters und
-    // rechtsbuendig; damit steht der Knopf rechts unten und ist in
-    // JEDER Sprache und bei jeder Vervielfachung ganz zu lesen.
-    // DER KNOPF MISST SICH SELBST, UND DER KASTEN IST GENAU SO
-    // BREIT WIE ER.
-    //
-    // Der erste Versuch dieser Runde stellte ein leeres Schild mit
-    // Wunschbreite 0 davor, damit es "den Rest nimmt". Das ist genau
-    // falsch herum: `wlib.add` liest eine Wunschbreite von 0 als
-    // "nimm deine NATUERLICHE Breite" (Zeile 1497), und die eines
-    // leeren Schildes ist null. Gemessen hat das ein schwarzes Band
-    // ueber die ganze Fensterbreite ergeben -- ein Kasten, in dem
-    // nichts steht, wird nicht uebermalt.
-    //
-    // Also andersherum und ohne jede Wette: die Breite des Knopfes
-    // wird AUSGERECHNET (Text + zweimal Polsterung, dieselbe Rechnung
-    // wie in `wlib.button`), und der Kasten bekommt genau diese
-    // Breite, rechtsbuendig gesetzt. Nichts bleibt leer, nichts wird
-    // geraten, und in einer anderen Sprache wird der Knopf einfach
-    // breiter.
-    let kh: u64 = wlibc.metric(wlibc.M_CTRL_H)
-    let ktxt: u64 = msg.get((&k_run[0 as usize]) as u64)
-    let kbr: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), ktxt,
-        ulib.length(ktxt)) + 2 * wlibc.metric(wlibc.M_PAD_X)
-    let ky: u64 = bh - kh - 12 * sk
-    var kx: u64 = 12 * sk
-    if bw > kbr + 12 * sk {
-        kx = bw - kbr - 12 * sk
+    if vorgabe != 0 {
+        fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
     }
-    wlib.box_h(w, kx, ky, kbr, kh, 0, 0)
-    let bt: u64 = wlib.button(ktxt)
-    wlib.box_end()
-
-    // ================================================ RUNDE ENERGIE
-    // DER ENERGIEKNOPF, UNTEN LINKS.
-    //
-    // Er steht in DERSELBEN Zeile wie "Ausfuehren" und am anderen Ende
-    // -- links unten, wo ihn Windows, Zorin und GNOME haben. Die
-    // Rechnung ist dieselbe wie beim Knopf rechts und aus demselben
-    // Grund (Runde ECHTHARDWARE-1): der Knopf MISST SICH SELBST aus
-    // Text plus Polsterung. Eine feste Breite waere in der naechsten
-    // Sprache wieder abgeschnitten -- "Ausschalten" ist laenger als
-    // "Power", und bei `uiscale=2` ist alles doppelt so breit.
-    //
-    // Warum ein KNOPF und kein Symbol: dieses System hat eine
-    // Symbolschrift (`wlib.draw_icon`), aber ein Symbol ohne Text ist
-    // genau die Sorte Raterei, die Justin am Kontrollzentrum kritisiert
-    // hat. Der Text sagt, was geschieht.
-    let ptxt: u64 = msg.get((&k_pitem[0 as usize]) as u64)
-    let pbr: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), ptxt,
-        ulib.length(ptxt)) + 2 * wlibc.metric(wlibc.M_PAD_X)
-    wlib.box_h(w, 12 * sk, ky, pbr, kh, 0, 0)
-    let pb: u64 = wlib.button(ptxt)
-    wlib.box_end()
-
-    wlib.set_focus(fe)
-    new_find(ls)
-    wlib.draw_all()
-    say_rects(lb, fe, ls, bt, pb)
-    // ============================================ RUNDE ECHTHARDWARE-4
-    // DER SCHREIBTISCH IST LEER, BIS JEMAND SUPER DRUECKT.
-    //
-    // Justin an ALLEN 44 Bildern aus ECHTHARDWARE-3: "Search programs"
-    // klebt unten links am Schreibtisch, auf jedem einzelnen Bild, in
-    // hell wie dunkel, bei 1280 wie bei 2560. Er will es wie bei
-    // Windows: unsichtbar, bis die Super-Taste kommt oder das Logo
-    // angeklickt wird.
-    //
-    // DIE URSACHE WAR DER SYSTEMSTART UND NICHT DIESES FENSTER.
-    // `kgui.desk_start` startet `/bin/launcher` mit, damit das Menue
-    // beim ersten Super-Druck SOFORT da ist (ein Programmstart kostet
-    // sonst eine knappe Sekunde, und ein Startmenue, das erst denkt,
-    // fuehlt sich kaputt an). Das ist richtig -- nur darf das Fenster
-    // dann nicht SICHTBAR herumstehen.
-    //
-    // ALSO: anlegen, EINMAL malen (damit alle Masse, Rechtecke und
-    // Meldungen stehen, an denen die Abnahme misst), und sofort
-    // minimieren. `WA_TOGGLE` aus der Leiste holt es danach in
-    // Nullzeit zurueck -- derselbe Weg, den der zweite Super-Druck
-    // schon immer genommen hat.
-    //
-    // Ohne `versteckt` aendert sich nichts: wer den Starter von Hand
-    // aufruft, will ihn sehen.
+    new_find()
+    // first picture: describe, lay out, paint; then the focus on the field
+    let _p0: u64 = fuiscene.pump()
+    fuiscene.focus(K_ENTRY)
+    let _p1: u64 = fuiscene.pump()
+    say_rects()
     if versteckt {
-        let _vh: u64 = wlib.win_hide(w, true)
+        fuiscene.hide(true)
         g_offen = false
         say((&s_vers[0 as usize]) as u64)
         nl()
@@ -1469,28 +1319,8 @@ fn u_start(args: u64) -> u64 {
 
     var vorher: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
     var runden: u64 = 0
-    while wlib.alive() && runden < 4000000 {
+    while fuiscene.alive() && runden < 4000000 {
         runden = runden + 1
-        // ==================================== RUNDE ACPI-EREIGNISSE
-        //
-        // DIE EINSCHALTTASTE OEFFNET DAS ENERGIEMENUE.
-        //
-        // Justins Vorgabe war "das Energiemenue oeffnen oder sauber
-        // herunterfahren, nicht hart ausschalten" -- und das Menue ist
-        // das Richtige: wer die Taste aus Versehen streift, hat sonst
-        // seine offenen Fenster verloren. Der Weg danach ist derselbe
-        // wie beim Knopf in der Leiste (Rueckfrage, dann
-        // `/run/svc.cmd` an init) -- KEINE zweite Abschaltroutine.
-        //
-        // `PG_BTN` HOLT DIE TASTE AB: das Lesen setzt sie zurueck.
-        // Ohne das ginge das Menue in jedem Schleifendurchlauf erneut
-        // auf, also vierzigmal je Sekunde.
-        //
-        // Steht das Menue schon offen, tut ein zweiter Druck nichts --
-        // `pw_menue_auf` steigt oben selbst aus. Das ist gewollt: die
-        // Taste ist kein Umschalter, sie ist eine Bitte.
-        // DAILY-DRIVER (r143): the answer of a standby wish. 1 = it slept and
-        // woke (nothing to say, the lock screen is up); 2.. = it did not.
         if pw_sb_wait != 0 {
             let rcs: u64 = ulib.sys(SYS_SPERRE_SB, 12, 0, 0)
             if !ulib.bad(rcs) && rcs != 0 {
@@ -1502,11 +1332,9 @@ fn u_start(args: u64) -> u64 {
                     } else if rcs == 3 {
                         sbt = msg.get((&k_sb3[0 as usize]) as u64)
                     }
-                    let okp: u64 = (&pw_block[0 as usize]) as u64
                     let okt: u64 = msg.get((&k_sbok[0 as usize]) as u64)
-                    let n: u64 = ulib.strncpy(okp, okt, 30)
-                    __mmio_write8((okp + n) as *mut u8, 0 as u8)
-                    let _dw: u64 = wlib.dlg_wahl(msg.get((&k_sbt[0 as usize]) as u64), sbt, okp, 1)
+                    // one button: the second text is 0
+                    fuiscene.dialog_open(msg.get((&k_sbt[0 as usize]) as u64), sbt, okt, 0)
                 }
             }
         }
@@ -1515,185 +1343,74 @@ fn u_start(args: u64) -> u64 {
             say((&s_pwbtn[0 as usize]) as u64)
             nl()
             if !versteckt || g_offen {
-                pw_menue_auf(anker + 12 * sk, ay + ky)
+                pw_menue_auf(12, ky)
             } else {
-                // Der Starter steht minimiert (der Normalfall beim
-                // Systemstart). Erst herholen, dann aufklappen --
-                // sonst haengt das Menue an einem Fenster, das
-                // niemand sieht.
-                let _vs: u64 = wlib.win_hide(w, false)
+                fuiscene.hide(false)
                 g_offen = true
-                pw_menue_auf(anker + 12 * sk, ay + ky)
+                pw_menue_auf(12, ky)
             }
         }
-        let id: u64 = wlib.step()
-        if id < wlib.MAXWD {
-            let kind: u64 = wlib.fired_kind()
-            let idx: u64 = wlib.fired_index()
-            if kind == wlib.K_ENTRY && id == fe {
-                starten(wlib.value(ls))
-            } else if kind == wlib.K_LIST && id == ls {
-                starten(idx)
-            } else if kind == wlib.K_BUTTON && id == bt {
-                starten(wlib.value(ls))
-            } else if kind == wlib.K_BUTTON && id == pb {
-                // ============================ RUNDE ENERGIE
-                // Der Knopf klappt das Menue auf -- ueber sich
-                // selbst, nicht am Mauszeiger. Ein Menue, das am
-                // Zeiger aufgeht, steht bei Tastaturbedienung
-                // irgendwo; der Knopf steht immer da, wo er steht.
-                //
-                // `menu_open` rechnet die Bildschirmlage selbst um,
-                // wenn unten kein Platz ist -- und unter diesem
-                // Knopf ist die Leiste, also klappt es nach oben.
-                pw_menue_auf(anker + 12 * sk, ay + ky)
-            } else if kind == wlib.K_MENUBAR && pw_menue != 0 {
-                // DIE WAHL AUS DEM ENERGIEMENUE. `wlib.step` legt
-                // das Ergebnis eines Menues als K_MENUBAR-Ereignis
-                // auf den Besitzer (wlib.fi, am Ende von `step`) --
-                // `idx` ist der Eintrag, `0xFFFF` waere Abbruch,
-                // aber den filtert wlib schon vorher heraus.
-                pw_menue = 0
-                say((&s_pmwahl[0 as usize]) as u64)
-                sayn(idx)
-                nl()
-                if idx == PW_SB {
-                    // sleep: the kernel answers in sperre op 12 (0 = not yet)
-                    let _sb: u64 = ulib.sys(SYS_SPERRE_SB, 11, 0, 0)
-                    pw_sb_wait = 1
-                } else if idx == PW_AUS {
-                    pw_frage_auf(1)
-                } else if idx == PW_NEU {
-                    pw_frage_auf(2)
-                } else if idx == PW_AB {
-                    // ABMELDEN FRAGT NICHT NACH. Es ist der einzige
-                    // der drei Punkte, der nichts Unwiederbringliches
-                    // tut -- der Schreibtisch kommt sofort zurueck.
-                    let _ab: bool = pw_abmelden()
-                    zumachen()
-                }
+        let key: u64 = fuiscene.pump()
+        if key == K_ENTRY {
+            starten(fuiscene.table_sel(K_LIST))
+        } else if key == K_LIST {
+            starten(fuiscene.table_sel(K_LIST))
+        } else if key == K_RUN {
+            starten(fuiscene.table_sel(K_LIST))
+        } else if key == K_POWER {
+            pw_menue_auf(12, ky)
+        } else if key == fuiscene.KEY_POPUP && pw_menue != 0 {
+            let idx: u64 = fuiscene.menu_pick() - 1
+            pw_menue = 0
+            say((&s_pmwahl[0 as usize]) as u64)
+            sayn(idx)
+            nl()
+            if idx == PW_SB {
+                let _sb: u64 = ulib.sys(SYS_SPERRE_SB, 11, 0, 0)
+                pw_sb_wait = 1
+            } else if idx == PW_AUS {
+                pw_frage_auf(1)
+            } else if idx == PW_NEU {
+                pw_frage_auf(2)
+            } else if idx == PW_AB {
+                let _ab: bool = pw_abmelden()
+                zumachen()
             }
-        }
-        // ==================================================== RUNDE ENERGIE
-        // DIE ANTWORT DER RUECKFRAGE, EINMAL JE UMLAUF ABGEHOLT.
-        //
-        // `dlg_state` ist 1, solange sie offen ist, 2 nach einem
-        // Knopf und 3 nach Flucht/Kreuz. Welcher Knopf es war, sagt
-        // `dlg_wahl_at` -- 0 ist der erste, und der erste ist hier
-        // ABBRECHEN (siehe `pw_frage_auf`).
-        //
-        // WARUM DAS HIER STEHT UND NICHT IM `if id < MAXWD` DARUEBER:
-        // die Knoepfe eines Dialogs feuern zwar, aber `wlib.step`
-        // FAENGT ihr Feuern ab und verwandelt es in `dl_state`
-        // (wlib.fi, "Der Dialog: die beiden Knoepfe sind seine
-        // Antwort") -- beim Aufrufer kommt kein Ereignis an. Wer hier
-        // auf ein Ereignis wartet, wartet fuer immer.
-        if pw_frage != 0 {
-            let ds: u64 = wlib.dlg_state()
-            if ds == 2 {
-                let welcher: u64 = wlib.dlg_wahl_at()
+        } else if key == fuiscene.KEY_DIALOG {
+            let res: u64 = fuiscene.dialog_result()
+            if pw_frage != 0 {
                 let was: u64 = pw_frage
                 pw_frage = 0
-                wlib.dlg_close()
-                // Knopf 0 ist die TAT (siehe pw_frage_auf: die
-                // Reihenfolge ist wegen der Fluchttaste umgedreht).
-                if welcher == 0 {
+                if res == 1 {
                     pw_tun(was)
                 } else {
                     say((&s_pmab[0 as usize]) as u64)
                     nl()
                 }
-            } else if ds == 3 {
-                // FLUCHT ODER KREUZ: nichts geschieht, und das wird
-                // gesagt. Ein Abbruch, der stumm ist, sieht aus wie
-                // ein Knopf, der nicht reagiert hat.
-                pw_frage = 0
-                wlib.dlg_close()
-                say((&s_pmab[0 as usize]) as u64)
-                nl()
             }
         }
-        // ============================================ RUNDE STARTKNOPF
-        // ESCAPE SCHLIESST DAS MENUE.
-        //
-        // Ein Feld ohne Titelleiste hat kein Kreuz -- also braucht es
-        // einen anderen Weg hinaus, und der ist auf jedem System
-        // derselbe. (Der zweite Druck auf Super geht ueber die
-        // Taskleiste; die kennt das Fenster und schaltet es um.)
-        // ======================================== RUNDE ECHTHARDWARE-4
-        // ESCAPE SCHLIESST, ES BEENDET NICHT.
-        //
-        // Hier stand `return 0` -- der Starter war danach WEG, und der
-        // naechste Super-Druck musste ihn neu starten (`SYS_EXEC` in
-        // `taskbar.startmenue_um`, weil `launcher_fenster()` nichts
-        // mehr findet). Das kostet nicht nur Zeit; es ist auch der
-        // Grund, warum sich in frueheren Runden Starter gestapelt
-        // haben.
-        //
-        // Ein Startmenue ist ein Fenster, das man ZUMACHT. Also wird
-        // es minimiert und die Schleife laeuft weiter -- genau der
-        // Zustand, den `versteckt` beim Systemstart herstellt.
-        // ==================================== RUNDE ECHTHARDWARE-4
-        // EINE TASTE ZAEHLT EINMAL, NICHT IN JEDER RUNDE.
-        //
-        // GEMESSEN an menue-2560/serial.txt: das Menue ging per Super
-        // auf und mit Escape zu -- richtig. Beim NAECHSTEN Aufmachen
-        // (Klick aufs Logo) war es sofort wieder zu, ohne dass jemand
-        // etwas gedrueckt haette. `key_last()` ist die ZULETZT
-        // gedrueckte Taste und bleibt es fuer immer; die Bedingung
-        // hier war also ab dem ersten Escape in JEDER Schleifenrunde
-        // wahr. wlib fuehrt fuer genau diesen Fall einen Zaehler
-        // (`key_seq`, siehe die Anmerkung dort: "zweimal Entf ist
-        // zweimal dieselbe Zahl").
-        // ==================================================== RUNDE ENERGIE
-        // SOLANGE MENUE ODER RUECKFRAGE OFFEN SIND, GEHOERT DIE
-        // FLUCHTTASTE IHNEN UND NICHT DEM STARTMENUE.
-        //
-        // Sonst waere die Reihenfolge falsch herum: Escape im
-        // Ausschalt-Dialog haette das GANZE Startmenue zugemacht und
-        // den Dialog als verwaistes Fenster stehen lassen. `wlib`
-        // fuehrt die Flucht im Dialog selbst (dl_state 3), und das
-        // Ergebnis holt der Block oben ab -- hier muss sie nur
-        // durchgelassen werden.
-        let ks: u64 = wlib.key_seq()
-        if ks != g_kseq && wlib.key_last() == wlib.KEY_ESC
+        // the menu closed without a choice (Esc, a click beside it)
+        if pw_menue != 0 && !fuiscene.menu_is_open()
+            && key != fuiscene.KEY_POPUP {
+            pw_menue = 0
+        }
+        let ks: u64 = fuiscene.key_seq()
+        if ks != g_kseq && fuiscene.key_any() == wlib.KEY_ESC
             && pw_frage == 0 && pw_menue == 0 {
             g_kseq = ks
             zumachen()
-            // Das Suchfeld wird geleert: wer das Menue neu aufmacht,
-            // faengt bei der vollen Liste an und nicht bei der
-            // Trefferliste von vorhin.
             suchfeld[0 as usize] = 0 as u8
-            wlib.set_text(fe, (&suchfeld[0 as usize]) as u64)
+            fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
             vorher = 0
-            new_find(ls)
+            new_find()
         }
-        // WAEHREND MAN TIPPT wird die Liste kuerzer. Das Textfeld meldet
-        // keinen Tastendruck (es meldet die Eingabetaste), also wird
-        // hier nachgesehen, ob sich der Inhalt geaendert hat -- eine
-        // Zeile, und sie ist der Unterschied zwischen einem Suchfeld und
-        // einem Eingabefeld mit einem Knopf daneben.
-        // ==================================== RUNDE ECHTHARDWARE-4
-        // KLICK DANEBEN UND FOKUSVERLUST SCHLIESSEN EBENFALLS.
-        //
-        // Ein Klick auf ein fremdes Fenster kommt hier nie an -- er
-        // geht an das fremde Fenster. Sichtbar ist nur die Folge:
-        // der Eingabefokus ist woanders (`wlib.win_fokus`). Das ist
-        // dieselbe Bedingung wie "Fokusverlust", also braucht es
-        // dafuer auch nur diese eine Abfrage.
-        //
-        // `g_offen` muss dazu wissen, dass das Fenster GERADE offen
-        // ist: waehrend es verborgen liegt, hat es selbstredend auch
-        // keinen Fokus, und ohne diese Bedingung schriebe der Starter
-        // dann in jeder Runde eine Zeile.
-        // Arrow keys move the highlighted entry while the cursor sits in
-        // the search field (like the Windows start menu). If the list
-        // itself has the focus, wlib already moved it -- do not step twice.
+        // Up and Down move the choice in the list while the keyboard is in
+        // the search field (in the list the list itself takes them)
         if ks != g_kseq && pw_frage == 0 && pw_menue == 0 && ntreffer > 0
-            && wlib.focus_id() != ls {
-            let kl: u64 = wlib.key_last()
+            && fuiscene.focus_key() != K_LIST {
+            let kl: u64 = fuiscene.key_any()
             if kl == wlib.KEY_DOWN || kl == wlib.KEY_UP {
-                var sel: u64 = wlib.value(ls)
+                var sel: u64 = fuiscene.table_sel(K_LIST)
                 if sel >= ntreffer {
                     sel = 0
                 } else if kl == wlib.KEY_DOWN && sel + 1 < ntreffer {
@@ -1701,27 +1418,20 @@ fn u_start(args: u64) -> u64 {
                 } else if kl == wlib.KEY_UP && sel > 0 {
                     sel = sel - 1
                 }
-                wlib.set_value(ls, sel)
-                wlib.scroll_to(ls, sel)
-                wlib.draw_all()
+                fuiscene.table_set_sel(K_LIST, sel)
             }
         }
         if g_clear {
             g_clear = false
             suchfeld[0 as usize] = 0 as u8
-            wlib.set_text(fe, (&suchfeld[0 as usize]) as u64)
+            fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
             vorher = 0
-            new_find(ls)
-            wlib.set_value(ls, 0)
-            wlib.scroll_to(ls, 0)
+            new_find()
+            fuiscene.table_set_sel(K_LIST, 0)
         }
         g_kseq = ks
         let nun: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
-        if g_offen && !wlib.win_fokus(w) {
-            // Diagnose: WANN der Fokus wegging und ob die Gnadenfrist
-            // noch lief. Ohne diese Zeile ist "das Menue ging von
-            // selbst zu" nicht von "jemand hat daneben geklickt" zu
-            // unterscheiden.
+        if g_offen && !fuiscene.has_focus() {
             var s_bl: [u8; 23] = "launcher: fokus weg t=\0"
             var s_bg: [u8; 9] = " gnade=\0\0"
             say((&s_bl[0 as usize]) as u64)
@@ -1730,85 +1440,61 @@ fn u_start(args: u64) -> u64 {
             sayn(g_gnade)
             nl()
         }
-        // ==================================================== RUNDE ENERGIE
-        // EIN EIGENES FENSTER DES PROGRAMMS IST KEIN "KLICK DANEBEN".
-        //
-        // Das Energiemenue und die Rueckfrage sind eigene Fenster und
-        // ziehen den Fokus zwangslaeufig vom Startmenue ab. Ohne diese
-        // Bedingung haette die Regel "Fokus weg heisst zu" das
-        // Startmenue in dem Augenblick zugeklappt, in dem die
-        // Rueckfrage aufging -- und die Frage stuende allein auf dem
-        // Schreibtisch. Gemessen genau so, bevor diese zwei Worte
-        // dazukamen.
-        if g_offen && nun >= g_gnade && !wlib.win_fokus(w)
+        if g_offen && nun >= g_gnade && !fuiscene.has_focus()
             && pw_frage == 0 && pw_menue == 0 {
             zumachen()
         }
-        // Umgekehrt: die Leiste holt das Fenster mit WA_TOGGLE zurueck,
-        // ohne dass dieses Programm davon erfaehrt. Der Fokus ist dann
-        // wieder hier -- daran merkt es, dass es offen ist.
-        if !g_offen && wlib.win_fokus(w) {
+        if !g_offen && fuiscene.has_focus() {
             g_offen = true
             g_gnade = nun + GNADE_TICKS
-            // ==================================== RUNDE ECHTHARDWARE-5
-            // BEIM AUFGEHEN: FARBEN NACHSEHEN, ALLES NEU MALEN,
-            // UND DER CURSOR GEHOERT INS SUCHFELD.
-            //
-            // Justins Befund A: das Suchfenster steht im Dunkelmodus
-            // WEISS da, und er kann darin nichts anklicken und nichts
-            // tippen.
-            //
-            // OFFEN GESAGT: im Nachbau ist das nicht aufgetreten --
-            // weder hell noch dunkel, weder beim Umschalten mit
-            // offenem Menue noch beim Neuaufmachen danach; getippt,
-            // gefiltert und gestartet wird jedes Mal (gemessen an
-            // `launcher: suche [term] treffer=3` und `launcher: start
-            // ... pid=7`). Was hier steht, behebt also nicht einen
-            // gemessenen Fehler, sondern SCHLIESST DIE LUECKE, durch
-            // die er entstehen KANN -- und die ist real:
-            //
-            // Das Fenster wird von der LEISTE mit `WA_TOGGLE` wieder
-            // sichtbar gemacht. Dieses Programm erfaehrt davon nichts;
-            // es merkt es erst hier, am Fokus. Zwischen dem Sichtbar-
-            // werden und dem naechsten Anstrich liegt der alte Inhalt
-            // auf dem Schirm -- mit den Farben, die beim letzten Malen
-            // galten. Hat jemand in der Zwischenzeit das Thema
-            // gewechselt, ist das genau das weisse Fenster im dunklen
-            // Schreibtisch. `theme_now()` fragt SOFORT nach (statt auf
-            // den 250-ms-Takt von `theme_watch` zu warten), `dirty_all`
-            // sorgt fuer den vollen Anstrich.
-            //
-            // Und der Eingabefokus: ein Suchfeld, das aufgeht, muss
-            // den Cursor haben. Ohne `set_focus` landet jede Taste bei
-            // dem Bedienelement, das zuletzt dran war -- beim
-            // Startknopf etwa, und dann tippt man ins Leere. Das ist
-            // die zweite Haelfte von Justins Befund, und sie ist hier
-            // beantwortet, egal woher der Zustand kam.
             let _tn: bool = wlib.theme_now()
-            wlib.set_focus(fe)
-            wlib.dirty_all(w)
-            wlib.draw_all()
+            fuiscene.focus(K_ENTRY)
+            fuiscene.refresh()
         }
+        // what the search field holds now
+        let _cp: u64 = ulib.strncpy((&suchfeld[0 as usize]) as u64,
+            fuiscene.entry_text(K_ENTRY), 62)
         let jetzt: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
         if jetzt != vorher {
             vorher = jetzt
-            new_find(ls)
+            new_find()
         }
     }
     return 0
 }
 
-// RUNDE ENERGIE: der Energieknopf steht MIT in dieser Liste. Ein
-// Bedienelement, dessen Lage nicht gemeldet wird, kann ein Testlaeufer
-// nicht treffen -- und dann misst er "der Knopf geht nicht", waehrend
-// er danebengeklickt hat. Genau dieser Fehler steht im Kopf dieser
-// Datei schon einmal (Runde TUERSCHLOSS, bx/by).
-fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64, pb: u64) {
-    say_rect(lb)
-    say_rect(fe)
-    say_rect(ls)
-    say_rect(bt)
-    say_rect(pb)
+// The keys of the nodes of the window.
+const K_ENTRY: u64 = 1
+const K_LIST: u64 = 2
+const K_RUN: u64 = 3
+const K_POWER: u64 = 4
+
+// What the window shows: the prompt, the search field, the two-line hit list
+// (picture, name in bold, description under it) and the button row: the
+// power button at the left, "Run" at the right.
+fn build() {
+    let col: usize = fuiscene.root()
+    let _lb: usize = fuiscene.label(col, msg.get((&k_prompt[0 as usize]) as u64))
+    let _fe: usize = fuiscene.entry(col, K_ENTRY, 424, (&suchfeld[0 as usize]) as u64)
+    let _ls: usize = fuiscene.table_list(col, K_LIST, 424, LIST_ROWS * 52 + 4, 2,
+        (&liste[0 as usize]) as u64)
+    fuiscene.table_two(K_LIST, true)
+    fuiscene.table_icons(K_LIST, (&farben[0 as usize]) as u64)
+    // ONE click starts the program; the arrow keys only choose
+    fuiscene.table_click_only(K_LIST, true)
+    let r: usize = fuiscene.row(col)
+    let _pb: usize = fuiscene.button(r, msg.get((&k_pitem[0 as usize]) as u64), K_POWER)
+    let sp: usize = fuiscene.row(r)
+    fuiscene.set_grow(sp, 1)
+    let _bt: usize = fuiscene.button_main(r, msg.get((&k_run[0 as usize]) as u64), K_RUN)
+}
+
+fn say_rects() {
+    say_rect(0, 1, 8, 8, 424, 24)
+    say_node(1, K_ENTRY)
+    say_node(2, K_LIST)
+    say_node(3, K_RUN)
+    say_node(4, K_POWER)
     var a: [u8; 21] = "launcher: rows \0\0\0\0\0\0"
     var sx: [u8; 4] = "x=\0\0"
     var sb: [u8; 8] = "base=\0\0\0"
@@ -1820,28 +1506,36 @@ fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64, pb: u64) {
     var si: [u8; 6] = "ix=\0\0\0"
     var sj: [u8; 6] = "iy=\0\0\0"
     say((&a[0 as usize]) as u64)
-    kv((&sx[0 as usize]) as u64, wlib.row_x(ls))
-    kv((&sb[0 as usize]) as u64, wlib.row_base(ls, 0))
-    // The pitch of THIS list: two lines per hit since FUI-WIN11, so
-    // 38 and not the system's 20 (tools/design/drive.py clicks rows
-    // with it, tools/k15 measures them with it).
-    kv((&sh[0 as usize]) as u64, wlib.row_h_of(ls))
-    kv((&sf[0 as usize]) as u64, wlibc.theme(wlibc.T_FG))
-    kv((&sg[0 as usize]) as u64, wlibc.theme(wlibc.T_ENTRY))
-    kv((&ss[0 as usize]) as u64, wlibc.theme(wlibc.T_SEL))
-    // What the list really paints the selected row in (see widgetdemo).
-    kv((&sc[0 as usize]) as u64, wlibc.theme_selfg())
-    kv((&si[0 as usize]) as u64, wlib.icon_x(ls))
-    kv((&sj[0 as usize]) as u64, wlib.icon_y(ls, 0))
+    kv((&sx[0 as usize]) as u64, fuiscene.table_text_x(K_LIST))
+    kv((&sb[0 as usize]) as u64, fuiscene.table_base(K_LIST, 0))
+    kv((&sh[0 as usize]) as u64, fuiscene.table_row_h(K_LIST))
+    kv((&sf[0 as usize]) as u64, fuiscene.table_rgb(1))
+    kv((&sg[0 as usize]) as u64, fuiscene.table_rgb(0))
+    kv((&ss[0 as usize]) as u64, fuiscene.table_rgb(3))
+    kv((&sc[0 as usize]) as u64, fuiscene.table_rgb(4))
+    kv((&si[0 as usize]) as u64, fuiscene.table_icon_x(K_LIST))
+    kv((&sj[0 as usize]) as u64, fuiscene.table_icon_y(K_LIST, 0))
     var sl: [u8; 6] = "lx=\0\0\0"
     var sm: [u8; 6] = "lb=\0\0\0"
-    kv((&sl[0 as usize]) as u64,
-        wlib.icon_letter_x(ls, appdir.name_of(0)))
-    kv((&sm[0 as usize]) as u64, wlib.icon_letter_base(ls, 0))
+    kv((&sl[0 as usize]) as u64, fuiscene.table_icon_x(K_LIST))
+    kv((&sm[0 as usize]) as u64, fuiscene.table_icon_y(K_LIST, 0) + 12)
     nl()
 }
 
-fn say_rect(i: u64) {
+// The rectangle of the node with this key, as `launcher: rect id=` says it.
+fn say_node(id: u64, key: u64) {
+    let i: usize = fuiscene.node_of_key(key)
+    var k: u64 = 2
+    if key == K_ENTRY {
+        k = 4
+    } else if key == K_LIST {
+        k = 5
+    }
+    say_rect(id, k, fuiscene.node_x(i), fuiscene.node_y(i),
+        fuiscene.node_w(i), fuiscene.node_h(i))
+}
+
+fn say_rect(i: u64, kind: u64, x: u64, y: u64, w: u64, h: u64) {
     var a: [u8; 21] = "launcher: rect \0\0\0\0\0\0"
     var si: [u8; 4] = "id=\0"
     var sk: [u8; 8] = "kind=\0\0\0"
@@ -1851,35 +1545,14 @@ fn say_rect(i: u64) {
     var sh: [u8; 4] = "h=\0\0"
     say((&a[0 as usize]) as u64)
     kv((&si[0 as usize]) as u64, i)
-    kv((&sk[0 as usize]) as u64, wlib.kind_of(i))
-    kv((&sx[0 as usize]) as u64, wlib.rect_x(i))
-    kv((&sy[0 as usize]) as u64, wlib.rect_y(i))
-    kv((&sw[0 as usize]) as u64, wlib.rect_w(i))
-    kv((&sh[0 as usize]) as u64, wlib.rect_h(i))
+    kv((&sk[0 as usize]) as u64, kind)
+    kv((&sx[0 as usize]) as u64, x)
+    kv((&sy[0 as usize]) as u64, y)
+    kv((&sw[0 as usize]) as u64, w)
+    kv((&sh[0 as usize]) as u64, h)
     nl()
 }
 
-// RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
-// ARGUMENTE WEITERGEBEN.
-//
-// Der Kommentar, der hier stand, sagte "das `main`, das nie laeuft --
-// `user.ld` springt nach `u_start`". Das stimmt fuer ein Programm, das
-// mit `kernel/user/crt.s` gebunden ist; dessen `_start` ruft
-// USER_ENTRY. Unter `profile app` stimmt es NICHT: dort bringt firnc
-// sein eigenes `_start` mit (darum darf crt.o nicht dazu, siehe
-// tools/look/shot.sh), und das endet in `call main` -- der Name steht
-// fest in lib/firnc1/codegen.fi, `--defsym=USER_ENTRY` erreicht ihn
-// nicht. Am gebauten ELF nachgesehen: Einsprung ist `_start`, sechs
-// Befehle weiter steht `call <main>`; `_F0.u_start` wird von dort nie
-// gerufen.
-//
-// `u_start(0)` warf damit den Argumentblock weg. Bei powermon waren
-// das 54 rote Zusagen (siehe ROTABSCHNITTE 11/n).
-//
-// Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
-// Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
-// und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=0x4007f000`.
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }

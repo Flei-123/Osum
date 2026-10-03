@@ -36,7 +36,7 @@ num() { local n=$1 v=${2:-} o=$3 w=$4
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
-BLOCKS=20000
+BLOCKS=40000
 PROGS="sh ls cat echo sleep praesenz freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 
