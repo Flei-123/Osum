@@ -56,6 +56,9 @@
 //   opk zurueck <n>
 //   opk richten
 //   opk pruefen
+//   opk katalog <verz> <ausgabe>     (DD / Store-Oberflaeche) der VERIFIZIERTE
+//                                    Katalog: INDEX + INDEX.sig aus <verz>,
+//                                    eine Zeile je Paket in <ausgabe>
 
 profile kernel
 
@@ -78,6 +81,8 @@ static mut S_USE7: [u8; 26] = "opk richten | opk prüfen\0"
 static mut S_USE8: [u8; 19] = "opk erprobung [ok]\0"
 
 static mut C_LISTE: [u8; 6] = "liste\0"
+static mut C_KAT: [u8; 8] = "katalog\0"
+static mut KAT: [u8; 8192] = [0 as u8; 8192]
 static mut C_INST: [u8; 13] = "installieren\0"
 static mut C_ENTF: [u8; 10] = "entfernen\0"
 static mut C_AKTU: [u8; 14] = "aktualisieren\0"
@@ -1642,6 +1647,152 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
     return 0
 }
 
+// ------------------------------------------------------------ der Katalog
+//
+// DD (Store-Oberflaeche): `opk katalog <verz> <ausgabe>` liest INDEX und
+// INDEX.sig aus <verz>, prueft die Signatur GENAU wie `aktualisieren` und
+// schreibt je Paket eine Zeile in <ausgabe>:
+//
+//     name TAB fassung TAB groesse TAB datei TAB inst TAB aktuell
+//
+// inst = 1: es ist installiert; aktuell = 1: der installierte Streuwert ist
+// der im INDEX. Ohne gueltige Signatur wird NICHTS geschrieben -- ein Katalog
+// ist nur so viel wert wie der Schluessel, der ihn deckt. Zeilen fremder
+// Architektur (sechste Spalte, nicht x86_64) werden uebergangen.
+static mut A_X86: [u8; 7] = "x86_64\0"
+
+// Feld k (ab 0) der Zeile ab `zeile` in `out` (Tabulator/Zeilenende trennt)
+fn idx_field(zeile: u64, k: u64, out: u64, max: u64) -> bool {
+    var i: u64 = zeile
+    var f: u64 = 0
+    while f < k {
+        while g8(i) != 9 && g8(i) != 10 && g8(i) != 0 {
+            i = i + 1
+        }
+        if g8(i) != 9 {
+            return false
+        }
+        i = i + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while g8(i) != 9 && g8(i) != 10 && g8(i) != 0 && n + 1 < max {
+        p8(out + n, g8(i))
+        n = n + 1
+        i = i + 1
+    }
+    p8(out + n, 0)
+    return true
+}
+
+fn kat_put(at: u64, t: u64) -> u64 {
+    var a: u64 = at
+    var i: u64 = 0
+    while g8(t + i) != 0 && a < 8100 {
+        p8((&KAT[0 as usize]) as u64 + a, g8(t + i))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+fn kat_ch(at: u64, c: u64) -> u64 {
+    if at < 8100 {
+        p8((&KAT[0 as usize]) as u64 + at, c)
+        return at + 1
+    }
+    return at
+}
+
+fn cmd_katalog(quelle: u64, ausgabe: u64) -> u64 {
+    ulib.strcpy((&PFAD[0 as usize]) as u64, quelle)
+    slash((&PFAD[0 as usize]) as u64)
+    ulib.strcat((&PFAD[0 as usize]) as u64, (&N_INDEX[0 as usize]) as u64)
+    let n: u64 = file_read((&PFAD[0 as usize]) as u64,
+        (&IDX[0 as usize]) as u64, 8000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return err((&E_INDEX[0 as usize]) as u64, quelle)
+    }
+    p8((&IDX[0 as usize]) as u64 + n, 0)
+    if !key_get() {
+        return 1
+    }
+    ulib.strcpy((&PFAD2[0 as usize]) as u64, quelle)
+    slash((&PFAD2[0 as usize]) as u64)
+    ulib.strcat((&PFAD2[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64)
+    if !signature_get((&PFAD2[0 as usize]) as u64, 0) {
+        return 1
+    }
+    if !signatur_gilt((&IDX[0 as usize]) as u64, n) {
+        return err((&E_ISIG[0 as usize]) as u64, quelle)
+    }
+    // what is installed now
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    p8(plan, 0)
+    let g: u64 = aktuell()
+    if g != 0xFFFFFFFFFFFFFFFF {
+        plan_read(g, plan)
+    }
+    let idx: u64 = (&IDX[0 as usize]) as u64
+    var at: u64 = 0
+    var i: u64 = 0
+    while g8(idx + i) != 0 {
+        var nm: [u8; 64] = [0 as u8; 64]
+        var fa: [u8; 24] = [0 as u8; 24]
+        var hs: [u8; 72] = [0 as u8; 72]
+        var gr: [u8; 24] = [0 as u8; 24]
+        var dt: [u8; 128] = [0 as u8; 128]
+        var ar: [u8; 24] = [0 as u8; 24]
+        var ih: [u8; 72] = [0 as u8; 72]
+        let z: u64 = idx + i
+        if idx_field(z, 0, (&nm[0 as usize]) as u64, 64) && g8((&nm[0 as usize]) as u64) != 0
+            && idx_field(z, 1, (&fa[0 as usize]) as u64, 24)
+            && idx_field(z, 2, (&hs[0 as usize]) as u64, 72)
+            && idx_field(z, 3, (&gr[0 as usize]) as u64, 24)
+            && idx_field(z, 4, (&dt[0 as usize]) as u64, 128) {
+            var passt: bool = true
+            if idx_field(z, 5, (&ar[0 as usize]) as u64, 24) && g8((&ar[0 as usize]) as u64) != 0 {
+                passt = ulib.streq((&ar[0 as usize]) as u64, (&A_X86[0 as usize]) as u64)
+            }
+            if passt {
+                at = kat_put(at, (&nm[0 as usize]) as u64)
+                at = kat_ch(at, 9)
+                at = kat_put(at, (&fa[0 as usize]) as u64)
+                at = kat_ch(at, 9)
+                at = kat_put(at, (&gr[0 as usize]) as u64)
+                at = kat_ch(at, 9)
+                at = kat_put(at, (&dt[0 as usize]) as u64)
+                at = kat_ch(at, 9)
+                var inst: u64 = 48
+                var akt: u64 = 48
+                if plan_hash(plan, (&nm[0 as usize]) as u64, (&ih[0 as usize]) as u64) {
+                    inst = 49
+                    if ulib.streq((&ih[0 as usize]) as u64, (&hs[0 as usize]) as u64) {
+                        akt = 49
+                    }
+                }
+                at = kat_ch(at, inst)
+                at = kat_ch(at, 9)
+                at = kat_ch(at, akt)
+                at = kat_ch(at, 10)
+            }
+        }
+        while g8(idx + i) != 10 && g8(idx + i) != 0 {
+            i = i + 1
+        }
+        if g8(idx + i) == 10 {
+            i = i + 1
+        }
+    }
+    if !commit_write(ausgabe, (&KAT[0 as usize]) as u64, at) {
+        return err((&E_OPEN[0 as usize]) as u64, ausgabe)
+    }
+    ulib.say((&S_SIGOK[0 as usize]) as u64)
+    ulib.say((&PFAD2[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
 // ------------------------------------------------------------ das Ganze
 
 fn u_start(args: u64) -> u64 {
@@ -1704,6 +1855,12 @@ fn u_start(args: u64) -> u64 {
         return err((&E_ARG[0 as usize]) as u64, 0)
     }
     let a2: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(cmd, (&C_KAT[0 as usize]) as u64) {
+        if argc < 4 {
+            return err((&E_ARG[0 as usize]) as u64, 0)
+        }
+        return cmd_katalog(a2, ulib.arg_at(args, 3))
+    }
     if ulib.streq(cmd, (&C_INST[0 as usize]) as u64) {
         return cmd_installieren(a2, grund)
     }

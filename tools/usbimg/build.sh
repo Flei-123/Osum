@@ -266,7 +266,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd axd sntp kontocli pdfview"}
+orientbus act settingsd axd sntp kontocli pdfview store stored"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1142,7 +1142,10 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/settings.schema=etc/settings.schema"
        "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
        # A11Y-2 (AB-021): the accessibility tree on the bus, provider /bin/axd
-       "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions")
+       "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
+       # DAILY-DRIVER (P-007): the program store -- provider /bin/stored, window /bin/store
+       "/etc/actions.d/store.actions=etc/actions.d/store.actions"
+       "/etc/store.conf=etc/store.conf")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
@@ -1263,6 +1266,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/settings.schema /etc/actions.d/settings.actions \
 /bin/axd /etc/actions.d/a11y.actions \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
+/bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
+/apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

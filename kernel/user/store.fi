@@ -1,0 +1,596 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/store.fi -- THE STORE WINDOW (DAILY-DRIVER, roadmap r54 / P-007).
+//
+//     store                 the window
+//     store --list          no window: the catalog the provider returns, one line per program
+//
+// A native fUi program on the scene tree (fuiscene). It owns no rights and no
+// network code: it asks the root provider `stored` over the action bus --
+// store.list / store.status (reads), store.refresh (fetch the signed catalog),
+// store.install / store.update / store.remove (critical: the broker asks, this
+// window puts the question to the person -- the bundle is one the image ships, so
+// its calls are the signed-in person's own). WHO MAY install or remove is decided
+// by the provider from /etc/store.conf; the buttons here only follow its answer
+// (`can_install`, `can_remove`).
+//
+// Keys: Up / Down choose a program, Enter installs (or updates) it, Delete
+// removes it, F5 / r fetch the catalog again.
+profile app
+
+import ulib
+import fuiscene
+import fuiapp
+import wlib
+import actcli
+
+export { u_start }
+
+static mut T_TITLE: [u8; 10] = "Programme\0"
+static mut T_APP: [u8; 6] = "store\0"
+static mut T_REFRESH: [u8; 14] = "Aktualisieren\0"
+static mut T_INSTALL: [u8; 13] = "Installieren\0"
+static mut T_UPDATE: [u8; 13] = "Neue Fassung\0"
+static mut T_REMOVE: [u8; 10] = "Entfernen\0"
+static mut T_NAME: [u8; 5] = "Name\0"
+static mut T_VER: [u8; 8] = "Version\0"
+static mut T_SIZE: [u8; 8] = "Groesse\0"
+static mut T_STATE: [u8; 7] = "Status\0"
+static mut T_NEU: [u8; 5] = "neu\0\0"
+static mut T_AKT: [u8; 8] = "aktuell\0"
+static mut T_UPD: [u8; 15] = "Neue Fassung\0\0\0"
+static mut T_INST: [u8; 12] = "installiert\0"
+static mut T_ASK_I: [u8; 24] = "Programm installieren?\0\0"
+static mut T_ASK_U: [u8; 24] = "Programm aktualisieren?\0"
+static mut T_ASK_R: [u8; 22] = "Programm entfernen?\0\0\0"
+static mut T_YES_I: [u8; 13] = "Installieren\0"
+static mut T_YES_U: [u8; 14] = "Aktualisieren\0"
+static mut T_YES_R: [u8; 10] = "Entfernen\0"
+static mut T_NO: [u8; 10] = "Abbrechen\0"
+static mut T_NOBUS: [u8; 28] = "Kein Aktionsbus (Store aus)\0"
+static mut T_EMPTY: [u8; 46] = "Kein Katalog -- Aktualisieren holt ihn\0\0\0\0\0\0\0\0"
+static mut T_BUSY: [u8; 26] = "Arbeitet ... bitte warten\0"
+static mut T_DONE: [u8; 9] = "Fertig: \0"
+static mut T_FAIL: [u8; 9] = "Fehler: \0"
+static mut T_DENIED: [u8; 40] = "Nicht erlaubt (Rechte: /etc/store.conf)\0"
+static mut T_PICK: [u8; 22] = "Zuerst ein Programm.\0\0"
+static mut T_RIGHTS: [u8; 60] = "Installieren/Entfernen: nur Administrator (/etc/store.conf)\0"
+static mut T_SENT: [u8; 14] = "Angefordert.\0\0"
+static mut T_SIZE_B: [u8; 3] = " B\0"
+static mut T_SIZE_K: [u8; 4] = " kB\0"
+static mut T_SIZE_M: [u8; 4] = " MB\0"
+static mut V_LIST: [u8; 16] = "call store.list\0"
+static mut V_STATUS: [u8; 18] = "call store.status\0"
+static mut V_REFRESH: [u8; 19] = "call store.refresh\0"
+static mut V_INSTALL: [u8; 19] = "call store.install\0"
+static mut V_UPDATE: [u8; 18] = "call store.update\0"
+static mut V_REMOVE: [u8; 18] = "call store.remove\0"
+static mut K_NAMEARG: [u8; 5] = "name\0"
+static mut S_ITEM: [u8; 6] = "item=\0"
+static mut S_CI: [u8; 13] = "can_install=\0"
+static mut S_CR: [u8; 12] = "can_remove=\0"
+static mut S_PH: [u8; 7] = "phase=\0"
+static mut S_BZ: [u8; 6] = "busy=\0"
+static mut S_MS: [u8; 5] = "msg=\0"
+static mut S_VB: [u8; 6] = "verb=\0"
+static mut S_NM: [u8; 6] = "name=\0"
+static mut S_CONF: [u8; 9] = "confirm \0"
+static mut S_LISTED: [u8; 21] = "store: listed items=\0"
+static mut S_ST: [u8; 15] = "store: status \0"
+static mut S_ASK: [u8; 17] = "store: asked rc=\0"
+static mut S_OUT: [u8; 8] = "store: \0"
+
+const K_TAB: u64 = 1
+const K_REFRESH: u64 = 2
+const K_INSTALL: u64 = 3
+const K_UPDATE: u64 = 4
+const K_REMOVE: u64 = 5
+
+const MAXI: u64 = 64
+const NAMEW: u64 = 48
+
+static mut s_names: [u8; 3072] = [0 as u8; 3072]     // MAXI x NAMEW
+static mut s_state: [u8; 64] = [0 as u8; 64]         // 0 neu, 1 aktuell, 2 update
+static mut s_count: u64 = 0
+static mut s_blob: [u8; 8192] = [0 as u8; 8192]
+static mut s_status: [u8; 160] = [0 as u8; 160]
+static mut s_info: [u8; 96] = [0 as u8; 96]
+static mut s_can_i: bool = false
+static mut s_can_r: bool = false
+static mut s_busy: bool = false
+static mut s_bus: bool = true
+static mut s_phase: [u8; 16] = [0 as u8; 16]
+static mut s_lastphase: [u8; 16] = [0 as u8; 16]
+static mut s_polled: u64 = 0
+static mut s_ask_verb: u64 = 0                       // 1 install, 2 update, 3 remove
+static mut s_ask_name: [u8; 48] = [0 as u8; 48]
+static mut s_tmp: [u8; 160] = [0 as u8; 160]
+static mut s_traced: u64 = 0
+static mut s_lastsel: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn put(buf: u64, at: u64, c: u64) -> u64 {
+    __mmio_write8((buf + at) as *mut u8, c as u8)
+    return at + 1
+}
+
+fn puts(buf: u64, at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while (*((p + i) as *mut u8)) != 0 as u8 {
+        a = put(buf, a, (*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+    return a
+}
+
+fn putn(buf: u64, at: u64, v: u64) -> u64 {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    var a: u64 = at
+    var i: u64 = 0
+    while i < n {
+        a = put(buf, a, z[i as usize] as u64)
+        i = i + 1
+    }
+    return a
+}
+
+fn name_at(i: u64) -> u64 {
+    return (&s_names[0 as usize]) as u64 + i * NAMEW
+}
+
+fn set_status(a: u64, b: u64) {
+    let st: u64 = (&s_status[0 as usize]) as u64
+    var at: u64 = 0
+    if a != 0 {
+        at = puts(st, at, a)
+    }
+    if b != 0 {
+        at = puts(st, at, b)
+    }
+    put(st, at, 0)
+}
+
+// "523 kB" for a byte count
+fn put_size(buf: u64, at: u64, bytes: u64) -> u64 {
+    var a: u64 = at
+    if bytes >= 1048576 {
+        a = putn(buf, a, bytes / 1048576)
+        a = puts(buf, a, (&T_SIZE_M[0 as usize]) as u64)
+    } else if bytes >= 1024 {
+        a = putn(buf, a, bytes / 1024)
+        a = puts(buf, a, (&T_SIZE_K[0 as usize]) as u64)
+    } else {
+        a = putn(buf, a, bytes)
+        a = puts(buf, a, (&T_SIZE_B[0 as usize]) as u64)
+    }
+    return a
+}
+
+// the table text: a header line, then one line per program
+fn make_blob() {
+    let b: u64 = (&s_blob[0 as usize]) as u64
+    var a: u64 = puts(b, 0, (&T_NAME[0 as usize]) as u64)
+    a = put(b, a, 9)
+    a = puts(b, a, (&T_VER[0 as usize]) as u64)
+    a = put(b, a, 9)
+    a = puts(b, a, (&T_SIZE[0 as usize]) as u64)
+    a = put(b, a, 9)
+    a = puts(b, a, (&T_STATE[0 as usize]) as u64)
+    a = put(b, a, 10)
+    var i: u64 = 0
+    while i < s_count {
+        let r: u64 = (&s_names[0 as usize]) as u64 + i * NAMEW
+        a = puts(b, a, r)
+        a = put(b, a, 9)
+        // the version and size follow the name in the same row buffer (see load_list)
+        a = puts(b, a, r + 24)
+        a = put(b, a, 9)
+        var sz: u64 = 0
+        var k: u64 = r + 36
+        while (*(k as *mut u8)) >= 48 as u8 && (*(k as *mut u8)) <= 57 as u8 {
+            sz = sz * 10 + ((*(k as *mut u8)) as u64 - 48)
+            k = k + 1
+        }
+        a = put_size(b, a, sz)
+        a = put(b, a, 9)
+        if s_state[i as usize] == 0 as u8 {
+            a = puts(b, a, (&T_NEU[0 as usize]) as u64)
+        } else if s_state[i as usize] == 1 as u8 {
+            a = puts(b, a, (&T_AKT[0 as usize]) as u64)
+        } else {
+            a = puts(b, a, (&T_UPD[0 as usize]) as u64)
+        }
+        a = put(b, a, 10)
+        i = i + 1
+        if a > 8000 {
+            i = s_count
+        }
+    }
+    put(b, a, 0)
+}
+
+// ----------------------------------------------------------- the bus
+
+// the value after `key` at the start of line `lp`, into out; false if the line is another
+fn kv(lp: u64, key: u64, out: u64, max: u64) -> bool {
+    let kl: u64 = ulib.length(key)
+    var i: u64 = 0
+    while i < kl {
+        if (*((lp + i) as *mut u8)) != (*((key + i) as *mut u8)) {
+            return false
+        }
+        i = i + 1
+    }
+    var o: u64 = 0
+    while (*((lp + kl + o) as *mut u8)) != 0 as u8 && o + 1 < max {
+        __mmio_write8((out + o) as *mut u8, *((lp + kl + o) as *mut u8))
+        o = o + 1
+    }
+    __mmio_write8((out + o) as *mut u8, 0 as u8)
+    return true
+}
+
+fn load_list() {
+    s_count = 0
+    s_can_i = false
+    s_can_r = false
+    if !actcli.open() {
+        s_bus = false
+        set_status((&T_NOBUS[0 as usize]) as u64, 0)
+        return
+    }
+    actcli.req((&V_LIST[0 as usize]) as u64)
+    if actcli.send(300) != actcli.R_OK {
+        s_bus = false
+        set_status((&T_NOBUS[0 as usize]) as u64, 0)
+        return
+    }
+    s_bus = true
+    var ln: [u8; 160] = [0 as u8; 160]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    var v: [u8; 40] = [0 as u8; 40]
+    var n: u64 = 1
+    while actcli.line(n, lp, 160) {
+        if kv(lp, (&S_CI[0 as usize]) as u64, (&v[0 as usize]) as u64, 40) {
+            s_can_i = (*((&v[0 as usize]) as *mut u8)) == 49 as u8
+        } else if kv(lp, (&S_CR[0 as usize]) as u64, (&v[0 as usize]) as u64, 40) {
+            s_can_r = (*((&v[0 as usize]) as *mut u8)) == 49 as u8
+        } else if kv(lp, (&S_ITEM[0 as usize]) as u64, (&s_tmp[0 as usize]) as u64, 160) && s_count < MAXI {
+            // name|version|size|state -> a row: name at +0, version at +24, size at +36
+            let t: u64 = (&s_tmp[0 as usize]) as u64
+            let row: u64 = name_at(s_count)
+            var f: u64 = 0
+            var o: u64 = 0
+            var i: u64 = 0
+            ulib.fill(row, 0, NAMEW)
+            while (*((t + i) as *mut u8)) != 0 as u8 {
+                let c: u64 = (*((t + i) as *mut u8)) as u64
+                if c == 124 {
+                    f = f + 1
+                    o = 0
+                } else {
+                    var base: u64 = 0
+                    var cap: u64 = 23
+                    if f == 1 {
+                        base = 24
+                        cap = 11
+                    } else if f == 2 {
+                        base = 36
+                        cap = 11
+                    }
+                    if f <= 2 && o < cap {
+                        __mmio_write8((row + base + o) as *mut u8, c as u8)
+                        o = o + 1
+                    } else if f == 3 {
+                        // only the first letter decides: n(eu), a(ktuell), u(pdate)
+                        if o != 0 {
+                            o = o + 1
+                        } else if c == 110 {
+                            s_state[s_count as usize] = 0 as u8
+                        } else if c == 97 {
+                            s_state[s_count as usize] = 1 as u8
+                        } else if c == 117 {
+                            s_state[s_count as usize] = 2 as u8
+                        }
+                        if o == 0 {
+                            o = 1
+                        }
+                    }
+                }
+                i = i + 1
+            }
+            s_count = s_count + 1
+        }
+        n = n + 1
+    }
+    make_blob()
+    fuiscene.table_set_blob(K_TAB, (&s_blob[0 as usize]) as u64)
+    if s_count == 0 {
+        set_status((&T_EMPTY[0 as usize]) as u64, 0)
+    }
+    ulib.say((&S_LISTED[0 as usize]) as u64)
+    ulib.sayu(s_count)
+    ulib.nl()
+}
+
+fn load_status() {
+    if !actcli.open() {
+        return
+    }
+    actcli.req((&V_STATUS[0 as usize]) as u64)
+    if actcli.send(300) != actcli.R_OK {
+        return
+    }
+    var ln: [u8; 160] = [0 as u8; 160]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    var ph: [u8; 16] = [0 as u8; 16]
+    var ms: [u8; 160] = [0 as u8; 160]
+    var vb: [u8; 16] = [0 as u8; 16]
+    var nm: [u8; 64] = [0 as u8; 64]
+    var bz: [u8; 8] = [0 as u8; 8]
+    var n: u64 = 1
+    while actcli.line(n, lp, 160) {
+        let _a: bool = kv(lp, (&S_PH[0 as usize]) as u64, (&ph[0 as usize]) as u64, 16)
+        let _b: bool = kv(lp, (&S_MS[0 as usize]) as u64, (&ms[0 as usize]) as u64, 160)
+        let _c: bool = kv(lp, (&S_VB[0 as usize]) as u64, (&vb[0 as usize]) as u64, 16)
+        let _d: bool = kv(lp, (&S_NM[0 as usize]) as u64, (&nm[0 as usize]) as u64, 64)
+        let _e: bool = kv(lp, (&S_BZ[0 as usize]) as u64, (&bz[0 as usize]) as u64, 8)
+        n = n + 1
+    }
+    s_busy = (*((&bz[0 as usize]) as *mut u8)) == 49 as u8
+    ulib.strcpy((&s_phase[0 as usize]) as u64, (&ph[0 as usize]) as u64)
+    var done: [u8; 7] = "fertig\0"
+    var fehler: [u8; 7] = "fehler\0"
+    var laedt: [u8; 6] = "laedt\0"
+    if s_busy {
+        set_status((&T_BUSY[0 as usize]) as u64, 0)
+    } else if ulib.streq((&ph[0 as usize]) as u64, (&done[0 as usize]) as u64) {
+        set_status((&T_DONE[0 as usize]) as u64, (&ms[0 as usize]) as u64)
+    } else if ulib.streq((&ph[0 as usize]) as u64, (&fehler[0 as usize]) as u64) {
+        set_status((&T_FAIL[0 as usize]) as u64, (&ms[0 as usize]) as u64)
+    }
+    let _l: bool = ulib.streq((&ph[0 as usize]) as u64, (&laedt[0 as usize]) as u64)
+    ulib.say((&S_ST[0 as usize]) as u64)
+    ulib.say((&ph[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// one call to the provider; a critical one comes back as a question that THIS
+// window has already put to the person -- so it is confirmed at once
+fn call_verb(verb: u64, name: u64) -> bool {
+    if !actcli.open() {
+        set_status((&T_NOBUS[0 as usize]) as u64, 0)
+        return false
+    }
+    actcli.req(verb)
+    if name != 0 {
+        actcli.arg((&K_NAMEARG[0 as usize]) as u64, name)
+    }
+    var rc: u64 = actcli.send(300)
+    if rc == actcli.R_CONFIRM {
+        var ln: [u8; 160] = [0 as u8; 160]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        let _l: bool = actcli.line(0, lp, 160)
+        var j: u64 = 8
+        var no: u64 = 0
+        while (*((lp + j) as *mut u8)) >= 48 as u8 && (*((lp + j) as *mut u8)) <= 57 as u8 {
+            no = no * 10 + ((*((lp + j) as *mut u8)) as u64 - 48)
+            j = j + 1
+        }
+        var cf: [u8; 32] = [0 as u8; 32]
+        let cp: u64 = (&cf[0 as usize]) as u64
+        var at: u64 = puts(cp, 0, (&S_CONF[0 as usize]) as u64)
+        at = putn(cp, at, no)
+        put(cp, at, 0)
+        actcli.req(cp)
+        rc = actcli.send(300)
+    }
+    ulib.say((&S_ASK[0 as usize]) as u64)
+    ulib.sayu(rc)
+    ulib.nl()
+    if rc == actcli.R_OK {
+        set_status((&T_SENT[0 as usize]) as u64, 0)
+        return true
+    }
+    var ln2: [u8; 160] = [0 as u8; 160]
+    let lp2: u64 = (&ln2[0 as usize]) as u64
+    let _l2: bool = actcli.line(0, lp2, 160)
+    var denied: [u8; 12] = "not_allowed\0"
+    if ulib.find(lp2, (&denied[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
+        set_status((&T_DENIED[0 as usize]) as u64, 0)
+    } else {
+        set_status((&T_FAIL[0 as usize]) as u64, lp2)
+    }
+    return false
+}
+
+// ------------------------------------------------------------- the window
+
+fn build() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_gap(root, 8)
+    fuiscene.set_pad(root, 8)
+    let _h: usize = fuiscene.label(root, (&T_TITLE[0 as usize]) as u64)
+    let _t: usize = fuiscene.table_blob(root, K_TAB, 560, 300, 4, (&s_blob[0 as usize]) as u64)
+    let bar: usize = fuiscene.row(root)
+    fuiscene.set_gap(bar, 8)
+    let _b0: usize = fuiscene.button(bar, (&T_REFRESH[0 as usize]) as u64, K_REFRESH)
+    let _b1: usize = fuiscene.button(bar, (&T_INSTALL[0 as usize]) as u64, K_INSTALL)
+    let _b2: usize = fuiscene.button(bar, (&T_UPDATE[0 as usize]) as u64, K_UPDATE)
+    let _b3: usize = fuiscene.button(bar, (&T_REMOVE[0 as usize]) as u64, K_REMOVE)
+    let _s: usize = fuiscene.label(root, (&s_status[0 as usize]) as u64)
+    let _i: usize = fuiscene.label(root, (&s_info[0 as usize]) as u64)
+}
+
+fn selected() -> u64 {
+    let r: u64 = fuiscene.table_sel(K_TAB)
+    if r == fuiscene.HEAD_ROW || r >= s_count {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return r
+}
+
+fn sync_buttons() {
+    let r: u64 = selected()
+    var st: u64 = 9
+    if r != 0xFFFFFFFFFFFFFFFF {
+        st = s_state[r as usize] as u64
+    }
+    let idle: bool = !s_busy && s_bus
+    fuiscene.set_enabled(fuiscene.node_of_key(K_REFRESH), idle)
+    fuiscene.set_enabled(fuiscene.node_of_key(K_INSTALL), idle && s_can_i && st == 0)
+    fuiscene.set_enabled(fuiscene.node_of_key(K_UPDATE), idle && s_can_i && st == 2)
+    fuiscene.set_enabled(fuiscene.node_of_key(K_REMOVE), idle && s_can_r && (st == 1 || st == 2))
+    let inf: u64 = (&s_info[0 as usize]) as u64
+    var a: u64 = 0
+    if s_bus && (!s_can_i || !s_can_r) {
+        a = puts(inf, a, (&T_RIGHTS[0 as usize]) as u64)
+    }
+    put(inf, a, 0)
+}
+
+fn ask(verb: u64) {
+    let r: u64 = selected()
+    if r == 0xFFFFFFFFFFFFFFFF {
+        set_status((&T_PICK[0 as usize]) as u64, 0)
+        return
+    }
+    if verb != 3 && !s_can_i {
+        set_status((&T_DENIED[0 as usize]) as u64, 0)
+        return
+    }
+    if verb == 3 && !s_can_r {
+        set_status((&T_DENIED[0 as usize]) as u64, 0)
+        return
+    }
+    ulib.strncpy((&s_ask_name[0 as usize]) as u64, name_at(r), 47)
+    s_ask_verb = verb
+    if verb == 1 {
+        fuiscene.dialog_open((&T_ASK_I[0 as usize]) as u64, (&s_ask_name[0 as usize]) as u64,
+            (&T_YES_I[0 as usize]) as u64, (&T_NO[0 as usize]) as u64)
+    } else if verb == 2 {
+        fuiscene.dialog_open((&T_ASK_U[0 as usize]) as u64, (&s_ask_name[0 as usize]) as u64,
+            (&T_YES_U[0 as usize]) as u64, (&T_NO[0 as usize]) as u64)
+    } else {
+        fuiscene.dialog_open((&T_ASK_R[0 as usize]) as u64, (&s_ask_name[0 as usize]) as u64,
+            (&T_YES_R[0 as usize]) as u64, (&T_NO[0 as usize]) as u64)
+    }
+}
+
+fn batch_list() -> u64 {
+    if !actcli.open() {
+        ulib.say((&T_NOBUS[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    actcli.req((&V_LIST[0 as usize]) as u64)
+    if actcli.send(300) != actcli.R_OK {
+        ulib.say((&T_NOBUS[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say(actcli.reply())
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var o_list: [u8; 7] = "--list\0"
+    if ulib.arg_count(args) >= 2 && ulib.streq(ulib.arg_at(args, 1), (&o_list[0 as usize]) as u64) {
+        return batch_list()
+    }
+    if !fuiscene.open(60, 40, 600, 520, (&T_APP[0 as usize]) as u64, build) {
+        return 1
+    }
+    load_list()
+    load_status()
+    sync_buttons()
+    fuiscene.refresh()
+    var rounds: u64 = 0
+    var wait_empty: bool = s_count == 0 && s_bus
+    while fuiscene.alive() && rounds < 4000000 {
+        rounds = rounds + 1
+        let key: u64 = fuiscene.pump()
+        var changed: bool = false
+        if fuiscene.painted() != s_traced && fuiscene.trace_on() {
+            s_traced = fuiscene.painted()
+            fuiscene.say_rects((&T_APP[0 as usize]) as u64)
+            fuiscene.say_texts()
+        }
+        // the answer of the question window
+        let dr: u64 = fuiscene.dialog_result()
+        if dr == 1 && s_ask_verb != 0 {
+            var vb: u64 = (&V_INSTALL[0 as usize]) as u64
+            if s_ask_verb == 2 {
+                vb = (&V_UPDATE[0 as usize]) as u64
+            } else if s_ask_verb == 3 {
+                vb = (&V_REMOVE[0 as usize]) as u64
+            }
+            if call_verb(vb, (&s_ask_name[0 as usize]) as u64) {
+                s_busy = true
+            }
+            s_ask_verb = 0
+            changed = true
+        } else if dr == 2 {
+            s_ask_verb = 0
+        }
+        if key == K_REFRESH {
+            if call_verb((&V_REFRESH[0 as usize]) as u64, 0) {
+                s_busy = true
+            }
+            changed = true
+        } else if key == K_INSTALL {
+            let r: u64 = selected()
+            if r != 0xFFFFFFFFFFFFFFFF && s_state[r as usize] == 2 as u8 {
+                ask(2)
+            } else {
+                ask(1)
+            }
+        } else if key == K_UPDATE {
+            ask(2)
+        } else if key == K_REMOVE {
+            ask(3)
+        }
+        let k: u64 = fuiscene.last_key()
+        if k == 114 || k == 0xF5 {
+            if call_verb((&V_REFRESH[0 as usize]) as u64, 0) {
+                s_busy = true
+            }
+            changed = true
+        }
+        // the first start with no catalog yet: fetch it once
+        if wait_empty {
+            wait_empty = false
+            if call_verb((&V_REFRESH[0 as usize]) as u64, 0) {
+                s_busy = true
+            }
+            changed = true
+        }
+        // while the provider works: ask for its state twice a second; when it
+        // is done, read the catalog again
+        if s_busy {
+            let now: u64 = fuiapp.now_ms()
+            if now - s_polled > 500 {
+                s_polled = now
+                load_status()
+                if !s_busy {
+                    load_list()
+                }
+                changed = true
+            }
+        }
+        let selnow: u64 = selected()
+        if selnow != s_lastsel {
+            s_lastsel = selnow
+            changed = true
+        }
+        if changed {
+            sync_buttons()
+            fuiscene.refresh()
+        }
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

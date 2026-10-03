@@ -1,0 +1,917 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/stored.fi -- P-007: THE STORE ON THE ACTION BUS.
+//
+// The program catalog of the signed store (the same source /etc/ota.conf
+// names for the system update) as five actions of a ROOT provider
+// (manifest /etc/actions.d/store.actions); the window is /bin/store.
+//
+//   store.list      read      the catalog: one `item=name|version|size|state`
+//                             per program, state neu | aktuell | update, plus
+//                             what THIS caller may do (can_install, can_remove)
+//   store.status    read      phase (ruhe, laedt, fertig, fehler), verb, name, text
+//   store.refresh   write     fetch the catalog again (nothing is installed)
+//   store.install   critical  download, verify (signed) and install one program
+//   store.update    critical  the same for one that is installed
+//   store.remove    critical  take one program out
+//
+// WHO MAY. Installing and removing change the system for everybody, so the
+// RIGHTS ARE CONFIGURABLE and enforced HERE, in the root provider -- the window
+// only hides buttons. /etc/store.conf (root-owned, one line per field):
+//
+//     installieren=admin      admin | benutzer | aus
+//     entfernen=admin         admin | benutzer | aus
+//     admins=1000             more administrators (uids, comma separated)
+//
+// admin = uid 0, uid 1000 (the account the installer made: the owner) or one of
+// `admins`. benutzer = any signed-in account (never nobody, uid 65534). aus =
+// nobody. No file, or an unknown value: admin. The broker's confirmation (the
+// trusted dialog of the window server) comes on top of this for every critical
+// action -- the rights say who may ASK, the dialog that the human at the screen
+// agrees.
+//
+// WHAT RUNS. The work is done by the programs that already do it, each in a
+// child process that is not waited for (a download takes minutes): `ota holen`
+// fetches a file from the configured source with the system update's fetch,
+// `opk katalog` checks INDEX + INDEX.sig against the trusted key and lists the
+// programs, `opk aktualisieren` checks the package signature and its hash
+// against the signed INDEX and installs it as a new generation. This file
+// believes none of them -- it only calls them in the right order and keeps the
+// state in /var/store/status.
+//
+//   stored serve [ticks]          the provider
+//   stored work <verb> [name]     one job (what the provider runs in a child)
+//   stored can <install|remove> <uid>   the rights decision, printed (for tests)
+//   stored list                   the catalog with the states, printed
+
+profile kernel
+
+import ulib
+import libc.io
+import actwire
+
+export { u_start }
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut P_CONF: [u8; 16] = "/etc/store.conf\0"
+static mut P_DIR: [u8; 11] = "/var/store\0"
+static mut P_KAT: [u8; 19] = "/var/store/katalog\0"
+static mut P_STAT: [u8; 18] = "/var/store/status\0"
+static mut P_TMP: [u8; 11] = "/tmp/store\0"
+static mut P_TMPI: [u8; 17] = "/tmp/store/INDEX\0"
+static mut P_TMPS: [u8; 21] = "/tmp/store/INDEX.sig\0"
+static mut P_VAR: [u8; 5] = "/var\0"
+static mut P_TMPD: [u8; 5] = "/tmp\0"
+static mut P_OTA: [u8; 9] = "/bin/ota\0"
+static mut P_OPK: [u8; 9] = "/bin/opk\0"
+static mut P_ME: [u8; 12] = "/bin/stored\0"
+static mut N_INDEX: [u8; 6] = "INDEX\0"
+static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
+
+static mut ARGV: [u64; 8] = [0 as u64; 8]
+static mut u_pid: u64 = 0
+static mut A_ME: [u8; 7] = "stored\0"
+static mut A_WORK: [u8; 5] = "work\0"
+static mut A_KAT: [u8; 8] = "katalog\0"
+static mut A_HOL: [u8; 6] = "holen\0"
+static mut A_AKT: [u8; 14] = "aktualisieren\0"
+static mut A_ENT: [u8; 10] = "entfernen\0"
+static mut A_QUELLE: [u8; 9] = "--quelle\0"
+static mut W_REFRESH: [u8; 8] = "refresh\0"
+static mut W_INSTALL: [u8; 8] = "install\0"
+static mut W_UPDATE: [u8; 7] = "update\0"
+static mut W_REMOVE: [u8; 7] = "remove\0"
+
+static mut rbuf: [u8; 8192] = [0 as u8; 8192]
+static mut rlen: u64 = 0
+static mut kbuf: [u8; 8192] = [0 as u8; 8192]
+static mut cbuf: [u8; 512] = [0 as u8; 512]
+static mut tmpn: [u8; 160] = [0 as u8; 160]
+static mut tmpn2: [u8; 160] = [0 as u8; 160]
+static mut tmpn3: [u8; 168] = [0 as u8; 168]
+static mut SIGEXT: [u8; 5] = ".sig\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn ld(p: u64, i: u64) -> u64 {
+    return actwire.ld8(p, i)
+}
+
+fn st(p: u64, i: u64, v: u64) {
+    actwire.st8(p, i, v)
+}
+
+// ------------------------------------------------------------ the reply
+
+fn r_reset() {
+    rlen = 0
+    st((&rbuf[0 as usize]) as u64, 0, 0)
+}
+
+fn r_str(p: u64) {
+    let n: u64 = actwire.slen(p)
+    var i: u64 = 0
+    while i < n && rlen + 1 < 8190 {
+        st((&rbuf[0 as usize]) as u64, rlen, ld(p, i))
+        rlen = rlen + 1
+        i = i + 1
+    }
+    st((&rbuf[0 as usize]) as u64, rlen, 0)
+}
+
+fn r_ch(c: u64) {
+    if rlen + 1 < 8190 {
+        st((&rbuf[0 as usize]) as u64, rlen, c)
+        rlen = rlen + 1
+        st((&rbuf[0 as usize]) as u64, rlen, 0)
+    }
+}
+
+fn r_num(v: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&t[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n {
+        r_ch(ld((&t[0 as usize]) as u64, i))
+        i = i + 1
+    }
+}
+
+fn r_err(code: u64, detail: u64) {
+    var s_e: [u8; 5] = "err \0"
+    r_reset()
+    r_str((&s_e[0 as usize]) as u64)
+    r_str(code)
+    if detail != 0 {
+        r_ch(32)
+        r_str(detail)
+    }
+    r_ch(10)
+}
+
+// ------------------------------------------------------- the rights
+
+const M_AUS: u64 = 0
+const M_ADMIN: u64 = 1
+const M_USER: u64 = 2
+
+// the mode of `field` in /etc/store.conf (default and anything unknown: admin)
+fn mode_of(field: u64) -> u64 {
+    var v: [u8; 24] = [0 as u8; 24]
+    var w_aus: [u8; 4] = "aus\0"
+    var w_ben: [u8; 9] = "benutzer\0"
+    var w_user: [u8; 5] = "user\0"
+    if !actwire.kvfile_get((&P_CONF[0 as usize]) as u64, field, (&v[0 as usize]) as u64, 24) {
+        return M_ADMIN
+    }
+    if actwire.str_eq((&v[0 as usize]) as u64, (&w_aus[0 as usize]) as u64) {
+        return M_AUS
+    }
+    if actwire.str_eq((&v[0 as usize]) as u64, (&w_ben[0 as usize]) as u64)
+        || actwire.str_eq((&v[0 as usize]) as u64, (&w_user[0 as usize]) as u64) {
+        return M_USER
+    }
+    return M_ADMIN
+}
+
+// uid in the comma separated list `admins=`
+fn in_admins(uid: u64) -> bool {
+    var f_ad: [u8; 7] = "admins\0"
+    var v: [u8; 64] = [0 as u8; 64]
+    if !actwire.kvfile_get((&P_CONF[0 as usize]) as u64, (&f_ad[0 as usize]) as u64, (&v[0 as usize]) as u64, 64) {
+        return false
+    }
+    let p: u64 = (&v[0 as usize]) as u64
+    var i: u64 = 0
+    while ld(p, i) != 0 {
+        var n: u64 = 0
+        var any: bool = false
+        while ld(p, i) >= 48 && ld(p, i) <= 57 {
+            n = n * 10 + (ld(p, i) - 48)
+            any = true
+            i = i + 1
+        }
+        if any && n == uid {
+            return true
+        }
+        if ld(p, i) != 0 {
+            i = i + 1
+        }
+    }
+    return false
+}
+
+fn is_admin(uid: u64) -> bool {
+    return uid == 0 || uid == 1000 || in_admins(uid)
+}
+
+// May the caller `uid` do what `field` (installieren / entfernen) governs?
+fn may(uid: u64, field: u64) -> bool {
+    let m: u64 = mode_of(field)
+    if m == M_AUS {
+        return false
+    }
+    if m == M_USER {
+        return uid != 65534
+    }
+    return is_admin(uid)
+}
+
+static mut F_INST: [u8; 13] = "installieren\0"
+static mut F_ENTF: [u8; 10] = "entfernen\0"
+
+fn may_install(uid: u64) -> bool {
+    return may(uid, (&F_INST[0 as usize]) as u64)
+}
+
+fn may_remove(uid: u64) -> bool {
+    return may(uid, (&F_ENTF[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------ the state files
+
+fn mkdirs() {
+    ulib.sys(ulib.SYS_MKDIR, (&P_VAR[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_DIR[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_TMPD[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_TMP[0 as usize]) as u64, 0, 0)
+}
+
+static mut F_PHASE: [u8; 6] = "phase\0"
+static mut F_VERB: [u8; 5] = "verb\0"
+static mut F_NAME: [u8; 5] = "name\0"
+static mut F_MSG: [u8; 4] = "msg\0"
+
+fn stat_set(phase: u64, verb: u64, name0: u64, msg: u64) {
+    // a refresh has no program: an empty name, never a null pointer
+    var name: u64 = name0
+    if name == 0 {
+        name = (&A_EMPTY[0 as usize]) as u64
+    }
+    actwire.kvfile_set((&P_STAT[0 as usize]) as u64, (&F_PHASE[0 as usize]) as u64, phase)
+    actwire.kvfile_set((&P_STAT[0 as usize]) as u64, (&F_VERB[0 as usize]) as u64, verb)
+    actwire.kvfile_set((&P_STAT[0 as usize]) as u64, (&F_NAME[0 as usize]) as u64, name)
+    actwire.kvfile_set((&P_STAT[0 as usize]) as u64, (&F_MSG[0 as usize]) as u64, msg)
+}
+
+// ------------------------------------------------------ child processes
+
+fn alive() -> bool {
+    if u_pid == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        let s: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(s) && s != 0 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == u_pid {
+                if s == 5 {
+                    ulib.wait_code(u_pid)
+                    u_pid = 0
+                    return false
+                }
+                return true
+            }
+        }
+        i = i + 1
+    }
+    u_pid = 0
+    return false
+}
+
+// start `stored work <verb> [name]` and do NOT wait for it
+fn spawn_work(verb: u64, name: u64) -> bool {
+    ARGV[0 as usize] = (&A_ME[0 as usize]) as u64
+    ARGV[1 as usize] = (&A_WORK[0 as usize]) as u64
+    ARGV[2 as usize] = verb
+    var argc: u64 = 3
+    if name != 0 {
+        ARGV[3 as usize] = name
+        argc = 4
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_ME[0 as usize]) as u64,
+        (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return false
+    }
+    u_pid = pid
+    return true
+}
+
+// run a program and WAIT (the worker only); its exit code
+fn run(path: u64, a1: u64, a2: u64, a3: u64, a4: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = path
+    ARGV[1 as usize] = a1
+    ARGV[2 as usize] = a2
+    ARGV[3 as usize] = a3
+    ARGV[4 as usize] = a4
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, path, (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return ulib.wait_code(pid)
+}
+
+// ------------------------------------------------------ the catalog
+
+// the catalog file into kbuf; its length (0 = none)
+fn kat_read() -> u64 {
+    let fd: u64 = io.open((&P_KAT[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&kbuf[0 as usize]) as u64, 8190)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    st((&kbuf[0 as usize]) as u64, n, 0)
+    return n
+}
+
+// field k (0 name, 1 version, 2 size, 3 file, 4 installed, 5 current) of the
+// line starting at `at` in kbuf
+fn kat_field(at: u64, k: u64, out: u64, max: u64) -> bool {
+    let p: u64 = (&kbuf[0 as usize]) as u64
+    var i: u64 = at
+    var f: u64 = 0
+    while f < k {
+        while ld(p, i) != 9 && ld(p, i) != 10 && ld(p, i) != 0 {
+            i = i + 1
+        }
+        if ld(p, i) != 9 {
+            return false
+        }
+        i = i + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while ld(p, i) != 9 && ld(p, i) != 10 && ld(p, i) != 0 && n + 1 < max {
+        st(out, n, ld(p, i))
+        n = n + 1
+        i = i + 1
+    }
+    st(out, n, 0)
+    return true
+}
+
+// the line of `name` in the catalog: its start in kbuf, or NONE
+fn kat_find(name: u64) -> u64 {
+    let p: u64 = (&kbuf[0 as usize]) as u64
+    var nm: [u8; 64] = [0 as u8; 64]
+    var at: u64 = 0
+    while ld(p, at) != 0 {
+        if kat_field(at, 0, (&nm[0 as usize]) as u64, 64) && actwire.str_eq((&nm[0 as usize]) as u64, name) {
+            return at
+        }
+        while ld(p, at) != 10 && ld(p, at) != 0 {
+            at = at + 1
+        }
+        if ld(p, at) == 10 {
+            at = at + 1
+        }
+    }
+    return actwire.NONE
+}
+
+// a program name goes into a URL and onto the command line: a-z 0-9 . _ - only
+fn name_ok(p: u64) -> bool {
+    let n: u64 = actwire.slen(p)
+    if n == 0 || n > 48 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld(p, i)
+        let good: bool = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 || c == 95 || c == 45
+        if !good {
+            return false
+        }
+        i = i + 1
+    }
+    if ld(p, 0) == 46 {
+        return false
+    }
+    return true
+}
+
+// ------------------------------------------------------ the provider
+
+fn busy_flag() -> u64 {
+    if alive() {
+        return 1
+    }
+    return 0
+}
+
+fn do_list(uid: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var k_count: [u8; 7] = "count=\0"
+    var k_phase: [u8; 7] = "phase=\0"
+    var k_busy: [u8; 6] = "busy=\0"
+    var k_ci: [u8; 13] = "can_install=\0"
+    var k_cr: [u8; 12] = "can_remove=\0"
+    var k_item: [u8; 6] = "item=\0"
+    var d_ruhe: [u8; 5] = "ruhe\0"
+    var v: [u8; 64] = [0 as u8; 64]
+    let vp: u64 = (&v[0 as usize]) as u64
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    let n: u64 = kat_read()
+    var count: u64 = 0
+    var at: u64 = 0
+    let p: u64 = (&kbuf[0 as usize]) as u64
+    if n > 0 {
+        while ld(p, at) != 0 {
+            if ld(p, at) != 10 {
+                count = count + 1
+            }
+            while ld(p, at) != 10 && ld(p, at) != 0 {
+                at = at + 1
+            }
+            if ld(p, at) == 10 {
+                at = at + 1
+            }
+        }
+    }
+    r_str((&k_count[0 as usize]) as u64)
+    r_num(count)
+    r_ch(10)
+    r_str((&k_phase[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_PHASE[0 as usize]) as u64, vp, 64) {
+        ulib.strcpy(vp, (&d_ruhe[0 as usize]) as u64)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_busy[0 as usize]) as u64)
+    r_num(busy_flag())
+    r_ch(10)
+    r_str((&k_ci[0 as usize]) as u64)
+    if may_install(uid) {
+        r_ch(49)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
+    r_str((&k_cr[0 as usize]) as u64)
+    if may_remove(uid) {
+        r_ch(49)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
+    at = 0
+    while n > 0 && ld(p, at) != 0 {
+        var nm: [u8; 64] = [0 as u8; 64]
+        var fa: [u8; 24] = [0 as u8; 24]
+        var gr: [u8; 24] = [0 as u8; 24]
+        var ii: [u8; 4] = [0 as u8; 4]
+        var ak: [u8; 4] = [0 as u8; 4]
+        if kat_field(at, 0, (&nm[0 as usize]) as u64, 64) && ld((&nm[0 as usize]) as u64, 0) != 0
+            && kat_field(at, 1, (&fa[0 as usize]) as u64, 24)
+            && kat_field(at, 2, (&gr[0 as usize]) as u64, 24)
+            && kat_field(at, 4, (&ii[0 as usize]) as u64, 4)
+            && kat_field(at, 5, (&ak[0 as usize]) as u64, 4) {
+            var s_neu: [u8; 4] = "neu\0"
+            var s_akt: [u8; 8] = "aktuell\0"
+            var s_upd: [u8; 7] = "update\0"
+            r_str((&k_item[0 as usize]) as u64)
+            r_str((&nm[0 as usize]) as u64)
+            r_ch(124)
+            r_str((&fa[0 as usize]) as u64)
+            r_ch(124)
+            r_str((&gr[0 as usize]) as u64)
+            r_ch(124)
+            if ld((&ii[0 as usize]) as u64, 0) != 49 {
+                r_str((&s_neu[0 as usize]) as u64)
+            } else if ld((&ak[0 as usize]) as u64, 0) == 49 {
+                r_str((&s_akt[0 as usize]) as u64)
+            } else {
+                r_str((&s_upd[0 as usize]) as u64)
+            }
+            r_ch(10)
+        }
+        while ld(p, at) != 10 && ld(p, at) != 0 {
+            at = at + 1
+        }
+        if ld(p, at) == 10 {
+            at = at + 1
+        }
+    }
+}
+
+fn do_status() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var k_phase: [u8; 7] = "phase=\0"
+    var k_verb: [u8; 6] = "verb=\0"
+    var k_name: [u8; 6] = "name=\0"
+    var k_msg: [u8; 5] = "msg=\0"
+    var k_busy: [u8; 6] = "busy=\0"
+    var d_ruhe: [u8; 5] = "ruhe\0"
+    var v: [u8; 160] = [0 as u8; 160]
+    let vp: u64 = (&v[0 as usize]) as u64
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&k_phase[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_PHASE[0 as usize]) as u64, vp, 160) {
+        ulib.strcpy(vp, (&d_ruhe[0 as usize]) as u64)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_verb[0 as usize]) as u64)
+    actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_VERB[0 as usize]) as u64, vp, 160)
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_name[0 as usize]) as u64)
+    actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_NAME[0 as usize]) as u64, vp, 160)
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_msg[0 as usize]) as u64)
+    actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_MSG[0 as usize]) as u64, vp, 160)
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_busy[0 as usize]) as u64)
+    r_num(busy_flag())
+    r_ch(10)
+}
+
+// refresh | install | update | remove : check, then start the worker
+fn do_run(verb: u64, name: u64, uid: u64, dry: bool) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_would: [u8; 7] = "would=\0"
+    var s_start: [u8; 9] = "started=\0"
+    var e_busy: [u8; 5] = "busy\0"
+    var e_name: [u8; 9] = "bad_name\0"
+    var e_perm: [u8; 12] = "not_allowed\0"
+    var e_fail: [u8; 12] = "exec_failed\0"
+    var e_nokat: [u8; 15] = "not_in_catalog\0"
+    var e_notinst: [u8; 14] = "not_installed\0"
+    var w_ref: [u8; 8] = "refresh\0"
+    var w_rem: [u8; 7] = "remove\0"
+    let is_ref: bool = actwire.str_eq(verb, (&w_ref[0 as usize]) as u64)
+    let is_rem: bool = actwire.str_eq(verb, (&w_rem[0 as usize]) as u64)
+    if !is_ref {
+        if !name_ok(name) {
+            r_err((&e_name[0 as usize]) as u64, name)
+            return
+        }
+        if is_rem {
+            if !may_remove(uid) {
+                r_err((&e_perm[0 as usize]) as u64, verb)
+                return
+            }
+        } else if !may_install(uid) {
+            r_err((&e_perm[0 as usize]) as u64, verb)
+            return
+        }
+        // the catalog this decision is made on is the verified one on disk
+        let n: u64 = kat_read()
+        let at: u64 = kat_find(name)
+        if !is_rem && (n == 0 || at == actwire.NONE) {
+            r_err((&e_nokat[0 as usize]) as u64, name)
+            return
+        }
+        if is_rem {
+            var ii: [u8; 4] = [0 as u8; 4]
+            if n == 0 || at == actwire.NONE || !kat_field(at, 4, (&ii[0 as usize]) as u64, 4)
+                || ld((&ii[0 as usize]) as u64, 0) != 49 {
+                r_err((&e_notinst[0 as usize]) as u64, name)
+                return
+            }
+        }
+    }
+    if alive() {
+        r_err((&e_busy[0 as usize]) as u64, 0)
+        return
+    }
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    if dry {
+        r_str((&s_would[0 as usize]) as u64)
+        r_str(verb)
+        r_ch(10)
+        return
+    }
+    var np: u64 = 0
+    if !is_ref {
+        np = name
+    }
+    mkdirs()
+    var s_busy: [u8; 6] = "laedt\0"
+    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&A_EMPTY[0 as usize]) as u64)
+    if !spawn_work(verb, np) {
+        r_err((&e_fail[0 as usize]) as u64, 0)
+        return
+    }
+    r_str((&s_start[0 as usize]) as u64)
+    r_str(verb)
+    r_ch(10)
+}
+
+static mut A_EMPTY: [u8; 1] = "\0"
+static mut DT: [u8; 128] = [0 as u8; 128]
+static mut NB: [u8; 64] = [0 as u8; 64]
+
+fn handle(msg: u64) -> bool {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var k_dry: [u8; 5] = "@dry\0"
+    var k_uid: [u8; 5] = "@uid\0"
+    var k_name: [u8; 5] = "name\0"
+    var dv: [u8; 4] = [0 as u8; 4]
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, (&dv[0 as usize]) as u64, 4)
+    var ub: [u8; 16] = [0 as u8; 16]
+    // no @uid line = the broker did not label the caller: nobody
+    var uid: u64 = 65534
+    if actwire.kv_find(msg, (&k_uid[0 as usize]) as u64, (&ub[0 as usize]) as u64, 16) {
+        uid = ulib.to_num((&ub[0 as usize]) as u64)
+    }
+    let nbp: u64 = (&NB[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_name[0 as usize]) as u64, nbp, 64)
+
+    var k_ping: [u8; 5] = "ping\0"
+    var a_list: [u8; 11] = "store.list\0"
+    var a_stat: [u8; 13] = "store.status\0"
+    var a_ref: [u8; 14] = "store.refresh\0"
+    var a_ins: [u8; 14] = "store.install\0"
+    var a_upd: [u8; 13] = "store.update\0"
+    var a_rem: [u8; 13] = "store.remove\0"
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        var s_pong: [u8; 6] = "pong\n\0"
+        r_reset()
+        r_str((&s_pong[0 as usize]) as u64)
+        return false
+    }
+    if actwire.str_eq(np, (&a_list[0 as usize]) as u64) {
+        do_list(uid)
+        return false
+    }
+    if actwire.str_eq(np, (&a_stat[0 as usize]) as u64) {
+        do_status()
+        return false
+    }
+    if actwire.str_eq(np, (&a_ref[0 as usize]) as u64) {
+        do_run((&W_REFRESH[0 as usize]) as u64, 0, uid, dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_ins[0 as usize]) as u64) {
+        do_run((&W_INSTALL[0 as usize]) as u64, nbp, uid, dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_upd[0 as usize]) as u64) {
+        do_run((&W_UPDATE[0 as usize]) as u64, nbp, uid, dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_rem[0 as usize]) as u64) {
+        do_run((&W_REMOVE[0 as usize]) as u64, nbp, uid, dry)
+        return false
+    }
+    var e3: [u8; 15] = "unknown_action\0"
+    r_err((&e3[0 as usize]) as u64, np)
+    return false
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_me: [u8; 8] = "a.store\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        var e: [u8; 26] = "stored: a.store taken\n\0\0\0\0"
+        say((&e[0 as usize]) as u64)
+        return 1
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        ulib.sleep_ms(10)
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 28] = "stored: no orient.bus here\n\0"
+        say((&e2[0 as usize]) as u64)
+        return 1
+    }
+    mkdirs()
+    var s_hello: [u8; 13] = "hello store\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 12)
+    var s_ready: [u8; 15] = "stored: ready\n\0"
+    say((&s_ready[0 as usize]) as u64)
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id,
+                        (&rbuf[0 as usize]) as u64, rlen)
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            if u_pid != 0 {
+                alive()
+            }
+            if actwire.ticks() - last_check > 100 {
+                last_check = actwire.ticks()
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    var s_by: [u8; 28] = "stored: orient-bus is gone\n\0"
+                    say((&s_by[0 as usize]) as u64)
+                    return 0
+                }
+            }
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------------ the worker
+
+static mut M_FAIL: [u8; 7] = "fehler\0"
+static mut M_OK: [u8; 7] = "fertig\0"
+
+fn fail(verb: u64, name: u64, why: u64) -> u64 {
+    stat_set((&M_FAIL[0 as usize]) as u64, verb, name, why)
+    return 1
+}
+
+static mut T_CAT: [u8; 25] = "Katalog nicht erreichbar\0"
+static mut T_SIG: [u8; 41] = "Katalog nicht geprueft (Signatur falsch)\0"
+static mut T_NOKAT: [u8; 22] = "nicht im Katalog\0\0\0\0\0\0"
+static mut T_PKG: [u8; 26] = "Paket nicht zu holen\0\0\0\0\0\0"
+static mut T_INST: [u8; 40] = "Paket abgelehnt (Signatur oder Hash)\0\0\0\0"
+static mut T_DONE_I: [u8; 12] = "installiert\0"
+static mut T_DONE_R: [u8; 10] = "entfernt\0\0"
+static mut T_DONE_C: [u8; 14] = "Katalog neu\0\0\0"
+static mut T_REMFAIL: [u8; 22] = "Entfernen gescheitert\0"
+static mut T_CATW: [u8; 10] = "Katalog\0\0\0"
+
+// INDEX + INDEX.sig from the source, then the VERIFIED catalog
+fn refresh_catalog(verb: u64, name: u64) -> u64 {
+    mkdirs()
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&N_INDEX[0 as usize]) as u64,
+        (&P_TMPI[0 as usize]) as u64, 0, 4) != 0 {
+        return fail(verb, name, (&T_CAT[0 as usize]) as u64)
+    }
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64,
+        (&P_TMPS[0 as usize]) as u64, 0, 4) != 0 {
+        return fail(verb, name, (&T_CAT[0 as usize]) as u64)
+    }
+    if run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
+        (&P_KAT[0 as usize]) as u64, 0, 4) != 0 {
+        return fail(verb, name, (&T_SIG[0 as usize]) as u64)
+    }
+    return 0
+}
+
+fn work(verb: u64, name: u64) -> u64 {
+    var s_busy: [u8; 6] = "laedt\0"
+    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&T_CATW[0 as usize]) as u64)
+    var w_ref: [u8; 8] = "refresh\0"
+    var w_rem: [u8; 7] = "remove\0"
+    if actwire.str_eq(verb, (&w_rem[0 as usize]) as u64) {
+        if run((&P_OPK[0 as usize]) as u64, (&A_ENT[0 as usize]) as u64, name, 0, 0, 3) != 0 {
+            return fail(verb, name, (&T_REMFAIL[0 as usize]) as u64)
+        }
+        // the states in the catalog: whatever INDEX is still in /tmp/store
+        run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
+            (&P_KAT[0 as usize]) as u64, 0, 4)
+        stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_R[0 as usize]) as u64)
+        return 0
+    }
+    let r: u64 = refresh_catalog(verb, name)
+    if r != 0 {
+        return r
+    }
+    if actwire.str_eq(verb, (&w_ref[0 as usize]) as u64) {
+        stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_C[0 as usize]) as u64)
+        return 0
+    }
+    // install | update: the file name comes from the VERIFIED catalog
+    if kat_read() == 0 {
+        return fail(verb, name, (&T_NOKAT[0 as usize]) as u64)
+    }
+    let at: u64 = kat_find(name)
+    if at == actwire.NONE {
+        return fail(verb, name, (&T_NOKAT[0 as usize]) as u64)
+    }
+    if !kat_field(at, 3, (&DT[0 as usize]) as u64, 128) || ld((&DT[0 as usize]) as u64, 0) == 0 {
+        return fail(verb, name, (&T_NOKAT[0 as usize]) as u64)
+    }
+    // /tmp/store/<file>
+    let tp: u64 = (&tmpn[0 as usize]) as u64
+    ulib.strcpy(tp, (&P_TMP[0 as usize]) as u64)
+    ulib.strcat(tp, (&SL[0 as usize]) as u64)
+    ulib.strcat(tp, (&DT[0 as usize]) as u64)
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&DT[0 as usize]) as u64, tp, 0, 4) != 0 {
+        return fail(verb, name, (&T_PKG[0 as usize]) as u64)
+    }
+    // the package's own signature (`<file>.sig`, 64 octets): `opk aktualisieren` checks it with the
+    // trusted key before it believes a single octet of the package
+    let sp: u64 = (&tmpn2[0 as usize]) as u64
+    ulib.strcpy(sp, (&DT[0 as usize]) as u64)
+    ulib.strcat(sp, (&SIGEXT[0 as usize]) as u64)
+    let tsp: u64 = (&tmpn3[0 as usize]) as u64
+    ulib.strcpy(tsp, tp)
+    ulib.strcat(tsp, (&SIGEXT[0 as usize]) as u64)
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, sp, tsp, 0, 4) != 0 {
+        ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
+        return fail(verb, name, (&T_PKG[0 as usize]) as u64)
+    }
+    let rc: u64 = run((&P_OPK[0 as usize]) as u64, (&A_AKT[0 as usize]) as u64, name,
+        (&A_QUELLE[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64, 5)
+    ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, tsp, 0, 0)
+    if rc != 0 {
+        return fail(verb, name, (&T_INST[0 as usize]) as u64)
+    }
+    run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
+        (&P_KAT[0 as usize]) as u64, 0, 4)
+    stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_I[0 as usize]) as u64)
+    return 0
+}
+
+static mut SL: [u8; 2] = "/\0"
+
+// ------------------------------------------------------ the command line
+
+fn cmd_can(what: u64, uid: u64) -> u64 {
+    var w_i: [u8; 8] = "install\0"
+    var s_yes: [u8; 5] = "yes\n\0"
+    var s_no: [u8; 4] = "no\n\0"
+    var ok: bool = false
+    if actwire.str_eq(what, (&w_i[0 as usize]) as u64) {
+        ok = may_install(uid)
+    } else {
+        ok = may_remove(uid)
+    }
+    if ok {
+        say((&s_yes[0 as usize]) as u64)
+        return 0
+    }
+    say((&s_no[0 as usize]) as u64)
+    return 1
+}
+
+fn cmd_list() -> u64 {
+    let n: u64 = kat_read()
+    if n == 0 {
+        var e: [u8; 16] = "stored: empty\n\0\0"
+        say((&e[0 as usize]) as u64)
+        return 1
+    }
+    say((&kbuf[0 as usize]) as u64)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var h: [u8; 76] = "usage: stored serve [ticks] | work <verb> [name] | can <what> <uid> | list\n\0"
+    var c_serve: [u8; 6] = "serve\0"
+    var c_work: [u8; 5] = "work\0"
+    var c_can: [u8; 4] = "can\0"
+    var c_list: [u8; 5] = "list\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if argc >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    if argc >= 3 && actwire.str_eq(ulib.arg_at(args, 1), (&c_work[0 as usize]) as u64) {
+        var nm: u64 = 0
+        if argc >= 4 {
+            nm = ulib.arg_at(args, 3)
+            if !name_ok(nm) {
+                return 2
+            }
+        }
+        return work(ulib.arg_at(args, 2), nm)
+    }
+    if argc >= 4 && actwire.str_eq(ulib.arg_at(args, 1), (&c_can[0 as usize]) as u64) {
+        return cmd_can(ulib.arg_at(args, 2), ulib.to_num(ulib.arg_at(args, 3)))
+    }
+    if argc >= 2 && actwire.str_eq(ulib.arg_at(args, 1), (&c_list[0 as usize]) as u64) {
+        return cmd_list()
+    }
+    say((&h[0 as usize]) as u64)
+    return 1
+}
