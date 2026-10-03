@@ -488,8 +488,97 @@ fn platte_dazu(dev: u64) {
     p_anz = p_anz + 1
 }
 
+
+// ========================================================= r308: DISK MODEL
+//
+// The kernel publishes the drive's own model string in /proc/hwid
+// (`nvme_model:` from IDENTIFY CONTROLLER, `ahci_model:` from ATA IDENTIFY
+// words 27..46). The list shows it in the column "Modell" so that with two
+// disks (a Windows SSD and the target) the right one can be told apart. A
+// legacy IDE disk (VM, old PC) has no such line; the column then still says
+// the way it is connected.
+static mut hw_buf: [u8; 1536] = [0 as u8; 1536]
+static mut hw_n: u64 = 0
+static mut k_hw_proc: [u8; 11] = "/proc/hwid\0"
+static mut k_hw_nvme: [u8; 13] = "nvme_model: \0"
+static mut k_hw_ahci: [u8; 13] = "ahci_model: \0"
+
+fn rb(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn hw_lesen() {
+    hw_n = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&k_hw_proc[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&hw_buf[0 as usize]) as u64
+    let r: u64 = ulib.sys(ulib.SYS_READ, fd, b, 1500)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(r) || r == 0 {
+        return
+    }
+    __mmio_write8((b + r) as *mut u8, 0 as u8)
+    hw_n = r
+}
+
+// Where the value of `key` starts in hw_buf (a line `key value`), or 0 when
+// the line is missing or the value is empty.
+fn hw_wert(key: u64) -> u64 {
+    let b: u64 = (&hw_buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < hw_n {
+        var zeile: bool = i == 0
+        if i > 0 && rb(b + i - 1) == 10 {
+            zeile = true
+        }
+        if zeile {
+            var k: u64 = 0
+            var gleich: bool = true
+            while gleich && rb(key + k) != 0 {
+                if i + k >= hw_n || rb(b + i + k) != rb(key + k) {
+                    gleich = false
+                }
+                k = k + 1
+            }
+            if gleich {
+                let v: u64 = b + i + k
+                if rb(v) != 10 && rb(v) != 0 {
+                    return v
+                }
+                return 0
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// The model of the device named at `nm` ("/dev/nvme0", "/dev/sda"), or 0.
+fn modell_von(nm: u64) -> u64 {
+    if rb(nm + 5) == 110 {
+        return hw_wert((&k_hw_nvme[0 as usize]) as u64)
+    }
+    if rb(nm + 5) == 115 {
+        return hw_wert((&k_hw_ahci[0 as usize]) as u64)
+    }
+    return 0
+}
+
+// Up to 28 printable characters of the model, nothing else (a tab would
+// break the table's columns).
+fn modell_aus(v: u64) {
+    var i: u64 = 0
+    while i < 28 && rb(v + i) >= 32 && rb(v + i) < 127 {
+        b_c(rb(v + i))
+        i = i + 1
+    }
+}
+
 fn platten_suchen() {
     p_anz = 0
+    hw_lesen()
     platte_dazu(ptr((&d_hda[0 as usize]) as u64))
     platte_dazu(ptr((&d_hdb[0 as usize]) as u64))
     platte_dazu(ptr((&d_nvme[0 as usize]) as u64))
@@ -533,7 +622,10 @@ fn tabelle_bauen() {
         b_c(9)
         // Die Art: aus dem Namen abgeleitet, nicht erfunden.
         let nm: u64 = nptr(i)
-        if (*((nm + 5) as *mut u8)) as u64 == 110 {
+        let mo: u64 = modell_von(nm)
+        if mo != 0 {
+            modell_aus(mo)
+        } else if (*((nm + 5) as *mut u8)) as u64 == 110 {
             b_c(78) // 'N'
             b_c(86) // 'V'
             b_c(77) // 'M'
@@ -1742,10 +1834,10 @@ fn u_start(args: u64) -> u64 {
     status_bauen()
 
     // The column widths of the two tables (4-point grid).
-    tspalten[(0) as usize] = 180
-    tspalten[(1) as usize] = 100
-    tspalten[(2) as usize] = 140
-    tspalten[(3) as usize] = 280
+    tspalten[(0) as usize] = 120
+    tspalten[(1) as usize] = 260
+    tspalten[(2) as usize] = 100
+    tspalten[(3) as usize] = 200
     pspalten[(0) as usize] = 48
     pspalten[(1) as usize] = 120
     pspalten[(2) as usize] = 120
