@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/pwr/s3dev.fi -- DD-12 (K-004c): THE DEVICES AFTER S3.
+//
+// `s3.fi` brings the bus side back (PCI header, BARs, MSI, APIC, 8259).
+// What a device keeps INSIDE itself -- rings, queues, slots, streams -- is
+// gone after real S3 (the board cuts the power of everything but RAM).
+// This file calls the resume hook of every driver that was up before the
+// sleep. Each hook is the driver's own first-start sequence again (the
+// drivers' init functions reset the hardware first, so they are safe to
+// run on a device in ANY state):
+//
+//   NVMe      nvme.resume   controller off, admin + I/O queue, identify
+//   AHCI      ahci.resume   HBA set up again, ports, command lists
+//   USB       usb.resume    host controller + enumeration again; keyboard,
+//                           mouse, sticks come back as new devices
+//   network   netdev.resume_cards  (e1000 family; virtio/r8169 are left
+//                           alone, see netdev.fi)
+//   audio     hda.resume    controller + codec graph again, volume kept
+//
+// QEMU does not cut a device's power on its S3, so a test would prove
+// nothing. The command-line word `s3loss` is the POWER-LOSS SIMULATION:
+// before the resume hooks run, every device is reset the way a power cut
+// leaves it (`kill` of each driver). With `s3loss`, a resume hook that
+// does not work leaves the device dead -- and the line says so.
+//
+// What this file does NOT cover (said, not hidden): a root file system on
+// a USB stick (the stick comes back as a new device; the mount does not
+// follow), virtio and r8169 network cards (never measured), a graphics
+// adapter other than the Bochs/QEMU one (s3.fi: no GPU driver exists),
+// Wi-Fi (no driver exists), Bluetooth and the camera (no driver exists).
+
+import serial
+import lib.kstate
+import mm.mem
+import drv.blk.nvme
+import drv.blk.ahci
+import drv.snd.hda
+import usb.usb
+import drv.usb.xhci
+import net.netdev
+import arch.x86_64.apic
+import arch.cpu
+
+export { prepare, resume }
+
+// checksums of the first sectors, taken BEFORE the sleep: the check that
+// the storage controller reads the same data after it came back
+static mut nv_sum: u64 = 0
+static mut ah_sum: u64 = 0
+const SECTORS: u64 = 8
+
+fn say(t: u64) {
+    serial.puts(t)
+}
+
+fn rotl(x: u64, n: u64) -> u64 {
+    return (x << n) | (x >> (64 - n))
+}
+
+// 0 = unreadable. Reads SECTORS sectors from LBA 0 and sums them.
+fn disk_sum(state: u64, which: u64, buf: u64) -> u64 {
+    var h: u64 = 0x9E3779B97F4A7C15
+    var lba: u64 = 0
+    while lba < SECTORS {
+        var ok: bool = false
+        if which == 0 {
+            ok = nvme.read_block(state, lba, buf)
+        } else {
+            ok = ahci.read_block(state, lba, buf)
+        }
+        if !ok {
+            return 0
+        }
+        var i: u64 = 0
+        while i < 64 {
+            h = rotl(h, 7) +% (__mmio_read64((buf + i * 8) as *mut u64) ^ (lba * 64 + i))
+            i = i + 1
+        }
+        lba = lba + 1
+    }
+    if h == 0 {
+        return 1
+    }
+    return h
+}
+
+// Before the sleep: the checksums of the first sectors.
+fn prepare(state: u64) {
+    nv_sum = 0
+    ah_sum = 0
+    let buf: u64 = mem.frame_run(state, 1)
+    if buf == 0 {
+        return
+    }
+    if nvme.present(state) && nvme.blocks(state) >= SECTORS {
+        nv_sum = disk_sum(state, 0, buf)
+    }
+    if ahci.mode(state) == ahci.MODE_AHCI && ahci.blocks(state) >= SECTORS {
+        ah_sum = disk_sum(state, 1, buf)
+    }
+    mem.frame_free_run(state, buf, 1)
+}
+
+// wait `ms` milliseconds on the cycle counter (interrupts as they are)
+fn wait_ms(state: u64, ms: u64) {
+    let hz: u64 = apic.tsc_hz(state)
+    let c0: u64 = apic.tsc()
+    var w: u64 = 0
+    while w < 400000000 {
+        if hz != 0 && apic.tsc() - c0 > hz / 1000 * ms {
+            w = 400000000
+        }
+        asm("pause")
+        w = w + 1
+    }
+}
+
+// The test-only probes (word `s3loss`): does the network card receive again,
+// does the USB keyboard deliver a key (the runner types one through the QEMU
+// monitor while this waits).
+fn net_probe(state: u64) {
+    var s_pr: [u8; 17] = "s3: net arp rx=\0\0"
+    var s_tx: [u8; 6] = " tx=\0\0"
+    let f: u64 = mem.frame_run(state, 1)
+    if f == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < 64 {
+        __mmio_write8((f + i) as *mut u8, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        __mmio_write8((f + i) as *mut u8, 0xFF)
+        __mmio_write8((f + 6 + i) as *mut u8, netdev.mac_at(state, i) as u8)
+        i = i + 1
+    }
+    __mmio_write8((f + 12) as *mut u8, 0x08)
+    __mmio_write8((f + 13) as *mut u8, 0x06)
+    __mmio_write8((f + 15) as *mut u8, 1)
+    __mmio_write8((f + 16) as *mut u8, 0x08)
+    __mmio_write8((f + 18) as *mut u8, 6)
+    __mmio_write8((f + 19) as *mut u8, 4)
+    __mmio_write8((f + 21) as *mut u8, 1)
+    i = 0
+    while i < 6 {
+        __mmio_write8((f + 22 + i) as *mut u8, netdev.mac_at(state, i) as u8)
+        i = i + 1
+    }
+    __mmio_write8((f + 28) as *mut u8, 10)
+    __mmio_write8((f + 30) as *mut u8, 2)
+    __mmio_write8((f + 31) as *mut u8, 15)
+    __mmio_write8((f + 38) as *mut u8, 10)
+    __mmio_write8((f + 40) as *mut u8, 2)
+    __mmio_write8((f + 41) as *mut u8, 2)
+    let rx0: u64 = netdev.rx_frames(state)
+    let tx0: u64 = netdev.tx_frames(state)
+    let sent: bool = netdev.tx_frame(state, f, 60)
+    // a frame arrived = the next receive descriptor is done (poll), or the
+    // stack's own task already took it (rx_frames grew)
+    var got: u64 = 0
+    var k: u64 = 0
+    while k < 40 && got == 0 {
+        wait_ms(state, 25)
+        if netdev.poll(state) || netdev.rx_frames(state) > rx0 {
+            got = 1
+        }
+        k = k + 1
+    }
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(got)
+    serial.puts((&s_tx[0]) as u64)
+    serial.dec(netdev.tx_frames(state) - tx0)
+    serial.nl()
+    mem.frame_free_run(state, f, 1)
+    let _s: bool = sent
+}
+
+fn usb_probe(state: u64) {
+    var s_k: [u8; 19] = "s3: usb tasten=\0\0\0\0"
+    let k0: u64 = usb.reports(state)
+    var k: u64 = 0
+    while k < 60 && usb.reports(state) == k0 {
+        wait_ms(state, 50)
+        k = k + 1
+    }
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(usb.reports(state) - k0)
+    serial.nl()
+}
+
+// After the sleep, interrupts as they were. `lose` = the power-loss
+// simulation (the word `s3loss`).
+fn resume(state: u64, lose: bool) {
+    var s_lo: [u8; 29] = "s3: geraete verloren (sim)\0\0\0"
+    var s_nv: [u8; 17] = "s3: dev nvme da=\0"
+    var s_ah: [u8; 17] = "s3: dev ahci da=\0"
+    var s_us: [u8; 16] = "s3: dev usb da=\0"
+    var s_ne: [u8; 16] = "s3: dev net da=\0"
+    var s_au: [u8; 16] = "s3: dev hda da=\0"
+    var s_re: [u8; 9] = " resume=\0"
+    var s_gl: [u8; 9] = " gleich=\0"
+    var s_dv: [u8; 10] = " geraete=\0"
+    var s_kb: [u8; 6] = " kbd=\0"
+    var s_ms: [u8; 8] = " maus=\0\0"
+    var s_lk: [u8; 7] = " link=\0"
+
+    let nv_da: bool = nv_sum != 0
+    let ah_da: bool = ah_sum != 0
+    let us_da: bool = usb.ready(state)
+    let hd_da: bool = hda.present(state)
+    var ne_da: u64 = 0
+    var c: u64 = 0
+    while c < netdev.MAX_CARDS {
+        let k: u64 = netdev.kind_on(state, c)
+        if (k == netdev.KIND_E1000 || k == netdev.KIND_I219) && netdev.ready_on(state, c) {
+            ne_da = ne_da + 1
+        }
+        c = c + 1
+    }
+
+    if lose {
+        say((&s_lo[0]) as u64)
+        serial.nl()
+        if nv_da {
+            nvme.kill(state)
+        }
+        if ah_da {
+            ahci.kill(state)
+        }
+        if us_da {
+            xhci.kill(state)
+        }
+        let _k: u64 = netdev.kill_cards(state)
+        if hd_da {
+            hda.kill(state)
+        }
+    }
+
+    let hooks: bool = !kstate.mode_on(state, kstate.M_S3NOHOOKS)
+    let buf: u64 = mem.frame_run(state, 1)
+    if nv_da {
+        let ok: bool = hooks && nvme.resume(state)
+        var same: u64 = 0
+        if ok && buf != 0 && disk_sum(state, 0, buf) == nv_sum {
+            same = 1
+        }
+        say((&s_nv[0]) as u64)
+        serial.dec(1)
+        say((&s_re[0]) as u64)
+        serial.dec(yn(ok))
+        say((&s_gl[0]) as u64)
+        serial.dec(same)
+        serial.nl()
+    }
+    if ah_da {
+        let ok: bool = hooks && ahci.resume(state)
+        var same: u64 = 0
+        if ok && buf != 0 && disk_sum(state, 1, buf) == ah_sum {
+            same = 1
+        }
+        say((&s_ah[0]) as u64)
+        serial.dec(1)
+        say((&s_re[0]) as u64)
+        serial.dec(yn(ok))
+        say((&s_gl[0]) as u64)
+        serial.dec(same)
+        serial.nl()
+    }
+    if buf != 0 {
+        mem.frame_free_run(state, buf, 1)
+    }
+    if us_da {
+        let ok: bool = hooks && usb.resume(state)
+        say((&s_us[0]) as u64)
+        serial.dec(1)
+        say((&s_re[0]) as u64)
+        serial.dec(yn(ok))
+        say((&s_dv[0]) as u64)
+        serial.dec(usb.count(state))
+        say((&s_kb[0]) as u64)
+        serial.dec(yn(usb.have_kbd(state)))
+        say((&s_ms[0]) as u64)
+        serial.dec(yn(usb.have_mouse(state)))
+        serial.nl()
+        if lose {
+            usb_probe(state)
+        }
+    }
+    if ne_da != 0 {
+        var n: u64 = 0
+        if hooks {
+            n = netdev.resume_cards(state)
+        }
+        say((&s_ne[0]) as u64)
+        serial.dec(ne_da)
+        say((&s_re[0]) as u64)
+        serial.dec(n)
+        say((&s_lk[0]) as u64)
+        serial.dec(yn(netdev.up(state)))
+        serial.nl()
+        if lose {
+            net_probe(state)
+        }
+    }
+    if hd_da {
+        let ok: bool = hooks && hda.resume(state)
+        say((&s_au[0]) as u64)
+        serial.dec(1)
+        say((&s_re[0]) as u64)
+        serial.dec(yn(ok))
+        serial.nl()
+    }
+}
+
+fn yn(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
