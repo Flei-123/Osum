@@ -178,6 +178,11 @@ static mut ST_ZEIT: [u8; 6] = "zeit=\0"
 static mut ST_PHASE: [u8; 7] = "phase=\0"
 static mut STAND: [u8; 160] = [0 as u8; 160]
 static mut st_dort: u64 = 0
+// 1 when the last cmd_find could not fetch the VERZEICHNIS (no network yet,
+// clock not set, DNS not ready). cmd_dienst then retries soon instead of
+// waiting a whole `abstand` (O-002, 03.10.2026: the first search runs before
+// DHCP/SNTP and used to cost one hour).
+static mut find_fehl: u64 = 0
 static mut P_TMP: [u8; 9] = "/tmp/ota\0"
 static mut P_FETCH: [u8; 11] = "/bin/fetch\0"
 static mut P_OPK: [u8; 9] = "/bin/opk\0"
@@ -1411,6 +1416,13 @@ fn rueckschritt(dort: u64, hier: u64, laut: bool) -> u64 {
     if dort > hier {
         return 0
     }
+    // The SAME number is not a rollback attack, it is "nothing new": say so
+    // (a person reads "RUECKSCHRITT ABGELEHNT" and thinks the update failed).
+    if dort == hier && laut {
+        ulib.say((&S_AKTU[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
     // GLEICH IST AUCH NICHT NEUER. Eine Quelle, die dieselbe Zahl noch
     // einmal anbietet, hat nichts Neues -- und ein Angreifer, der eine
     // alte Antwort wiederholt, hat damit auch nichts erreicht.
@@ -1611,8 +1623,10 @@ fn stand_write(phase: u64) {
 }
 
 fn cmd_find() -> u64 {
+    find_fehl = 0
     let r: u64 = dir_get(true)
     if r != 0 {
+        find_fehl = 1
         stand_write((&W_PH_FEHL[0 as usize]) as u64)
         return r
     }
@@ -2067,6 +2081,7 @@ fn cmd_dienst(rounds: u64) -> u64 {
     sagn((&S_DIENST[0 as usize]) as u64, abstand)
     var weiter: bool = true
     var gelaufen: u64 = 0
+    var fehlversuche: u64 = 0
     while weiter {
         // DER HINTERGRUND-DOWNLOAD (RUNDE DAILY-DRIVER). Findet die Suche
         // eine neuere Fassung (Rueckgabe 0), wird sie gleich geholt,
@@ -2082,8 +2097,21 @@ fn cmd_dienst(rounds: u64) -> u64 {
         if rounds != 0 && gelaufen >= rounds {
             return 0
         }
+        // O-002: after a failed fetch (network/clock not ready right after
+        // boot) look again in 30 s, at most 20 times (10 minutes), then fall
+        // back to the normal `abstand`.
+        var warte: u64 = abstand
+        if find_fehl != 0 && fehlversuche < 20 {
+            warte = 30
+            if abstand < warte {
+                warte = abstand
+            }
+            fehlversuche = fehlversuche + 1
+        } else {
+            fehlversuche = 0
+        }
         var s: u64 = 0
-        while s < abstand {
+        while s < warte {
             // `nanosleep` nimmt hoechstens sechzig Sekunden (Runde K4),
             // also wird in Schritten geschlafen. Das ist kein Umweg: so
             // laesst sich der Dienst auch beenden, ohne eine Stunde zu
