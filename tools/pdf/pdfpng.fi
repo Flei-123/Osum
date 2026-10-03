@@ -2,13 +2,17 @@
 // tools/pdf/pdfpng.fi -- HOST driver: page N of a PDF through the SAME code the
 // viewer uses (lib/pdfread/pdfpage.fi), as raw 0xFFRRGGBB pixels.
 //
-//     /tmp/pdfpng file.pdf page-number scale-percent out.raw sans.ttf bold.ttf mono.ttf
+//     /tmp/pdfpng file.pdf page-number scale-percent out.raw sans.ttf bold.ttf mono.ttf [serif.ttf [serifb.ttf [query]]]
+//
+// serif.ttf / serifb.ttf: the serif faces (the viewer's /lib/serif.ttf); without them serif text stays in
+// the system face, as in an image that does not carry them. `query`: mark its matches like the window does.
 //
 // Prints `WxH`.
 import std.rt
 import font.metrics
 import pdfread.pdfread
 import pdfread.pdfpage
+import pdfread.pdftext
 
 fn num_arg(start: u64, i: usize) -> u64 {
     var v: u64 = 0
@@ -53,6 +57,23 @@ fn main(start: u64) -> i32 {
     if !metrics.fontset_load(&fsm, rt.buf_data(&fbm), rt.buf_len(&fbm)) {
         return 4
     }
+    // optional serif faces
+    var fbs: rt.Buf = rt.buf_new()
+    var fss: metrics.FontSet = metrics.fontset_new()
+    var fbsb: rt.Buf = rt.buf_new()
+    var fssb: metrics.FontSet = metrics.fontset_new()
+    var serif: u64 = 0
+    var serifb: u64 = 0
+    if rt.arg_count(start) > 8 {
+        if rt.read_file(rt.arg_ptr(start, 8), &fbs) && metrics.fontset_load(&fss, rt.buf_data(&fbs), rt.buf_len(&fbs)) {
+            serif = (&fss) as u64
+        }
+    }
+    if rt.arg_count(start) > 9 {
+        if rt.read_file(rt.arg_ptr(start, 9), &fbsb) && metrics.fontset_load(&fssb, rt.buf_data(&fbsb), rt.buf_len(&fbsb)) {
+            serifb = (&fssb) as u64
+        }
+    }
     var d: pdfread.Doc = pdfread.doc_new()
     if !pdfread.doc_open(&d, rt.buf_ptr(&b), rt.buf_len(&b) as u64) {
         return 5
@@ -62,8 +83,22 @@ fn main(start: u64) -> i32 {
     var px: rt.Buf = rt.buf_new()
     var w: u64 = 0
     var h: u64 = 0
-    if !pdfpage.render_page(&d, pg - 1, scale, (&fs) as u64, (&fsb) as u64, (&fsm) as u64, &px, &w, &h) {
+    if !pdfpage.render_page(&d, pg - 1, scale, (&fs) as u64, (&fsb) as u64, (&fsm) as u64, serif, serifb, &px, &w, &h) {
         return 6
+    }
+    if rt.arg_count(start) > 10 {
+        // mark the matches of a query on the picture (same code as the window)
+        var q: rt.Buf = rt.buf_new()
+        var tx: rt.Buf = rt.buf_new()
+        var mp: rt.Buf = rt.buf_new()
+        let qa: u64 = rt.arg_ptr(start, 10)
+        var ql: usize = 0
+        while rt.ld8(qa, ql) != (0 as u8) {
+            ql = ql + 1
+        }
+        pdftext.fold_utf8(qa, ql as u64, &q)
+        var fy: i64 = 0
+        let _n: u64 = pdftext.highlight(&d, pg - 1, scale, rt.buf_ptr(&px), w, h, &q, pdftext.NONE, &tx, &mp, &fy)
     }
     rt.write_file(rt.arg_ptr(start, 4), rt.buf_ptr(&px), rt.buf_len(&px))
     var o: rt.Buf = rt.buf_new()

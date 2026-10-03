@@ -54,6 +54,41 @@ def main(out):
         c.saveState(); c.translate(x0, y0); c.rotate(ang); c.setFont("Helvetica-Bold", 40); c.drawString(0, 0, "Rotated %d" % ang); c.restoreState()
     c.showPage(); c.save()
 
+    # 2c. serif text: Times at several sizes, bold, italic, mixed with a sans heading
+    c = canvas.Canvas(f"{out}/serif.pdf", pagesize=A4)
+    c.setFont("Helvetica-Bold", 20); c.drawString(60, 790, "A heading in the sans face")
+    y = 750
+    for f, sz in (("Times-Roman", 12), ("Times-Roman", 16), ("Times-Bold", 14), ("Times-Italic", 14), ("Times-BoldItalic", 14), ("Times-Roman", 24)):
+        c.setFont(f, sz); c.drawString(60, y, "Typography is the art of arranging type: Minimum, whistle, 0123456789." if sz <= 16 else "Typography is an art."); y -= sz * 1.8
+    c.setFont("Times-Roman", 11)
+    para = ("It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of "
+            "foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light.")
+    for k in range(5):
+        c.drawString(60, y, para[k * 60:(k + 1) * 60 + 60].strip()[:100]); y -= 16
+    c.showPage(); c.save()
+
+    # 2d. text for the SEARCH: cases, umlauts, hyphenated line ends, ligatures, a word on every page
+    try:
+        from reportlab.pdfbase import pdfmetrics as pm2
+        from reportlab.pdfbase.ttfonts import TTFont as TT2
+        pm2.registerFont(TT2("DejaVuS", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"))
+        sfont = "DejaVuS"
+    except Exception:
+        sfont = "Times-Roman"
+    c = canvas.Canvas(f"{out}/search.pdf", pagesize=A4)
+    lines = [["Das Wasser ist klar. wasser, WASSER und Wasserfall.", "Die Gr\u00f6\u00dfe der \u00dcbung: \u00c4rger, \u00f6ffnen, \u00fcber.",
+              "Ein langes Wort wie Tren-", "nung am Zeilenende, aber e-", "mail bleibt geteilt (Gro\u00dfbuchstabe E-Mail: E-Mail).",
+              "Satz mit zwei Zeilen und", "einem Umbruch mitten im Satz."],
+             ["Zweite Seite: Wasser Wasser Wasser.", "Schl\u00fcsselw\u00f6rter: Fl\u00fcgel, Stra\u00dfe, Gr\u00fcn.", "The \ufb01rst o\ufb03ce is di\ufb03cult to \ufb01nd (ligatures)."],
+             ["Dritte Seite ohne das Gesuchte.", "Nur Zahlen 0123456789 und Zeichen.", "Und am Ende: wasser."]]
+    for pg in lines:
+        c.setFont(sfont, 14)
+        y = 780
+        for l in pg:
+            c.drawString(60, y, l); y -= 24
+        c.showPage()
+    c.save()
+
     # 3. platypus: a long text with a table, many pages
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet
