@@ -1164,7 +1164,13 @@ for r in 0 12 24; do
 done
 num "bei Radius 12 ist die Ecke wirklich abgeschnitten (Bildpunkte)" "${T12:-0}" ge 8
 num "und bei 24 tiefer als bei 12" "${T24:-0}" gt "${T12:-0}"
-num "die Rundung bei 24 ist kantengeglaettet (Zeilen mit Mischton)" "${W24:-0}" ge 12
+# 12 -> 8 (03.10.2026, r120): `surface-sunken` -- the top of the desktop
+# gradient behind the window -- moved one ramp step (it was the fill of the
+# fields), the ground behind the corner has another tint and the tool counts
+# 11 rows with a blend tone instead of 14. A staircase still measures 0
+# (the counter-check above at radius 0), so 8 still separates smoothing
+# from none.
+num "die Rundung bei 24 ist kantengeglaettet (Zeilen mit Mischton)" "${W24:-0}" ge 8
 # DESIGN-REGEL 02.10.2026: der Rand (S_BORDER) ist im hellen Schema von N_200
 # auf N_300 gewandert, damit sich Knoepfe und Felder von ihrer Flaeche
 # abheben. Der Fensterrand ist damit kraeftiger, und die Abtastung unten
