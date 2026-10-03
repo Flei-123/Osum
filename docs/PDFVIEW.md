@@ -23,7 +23,7 @@ Pfadfeld mit „Öffnen". Im Programmstart-Menü als „PDF-Betrachter" (Bündel
 | Lesen | `lib/pdfread/pdfread.fi` | Dateistruktur, Seitenbaum, Filter, Inhaltsstrom → SVG-Text; Bilder: Orte, Dekodierung, Einblenden |
 | Zusammensetzen | `lib/pdfread/pdfpage.fi` | Seite = weiß + Bilder + Vektorschicht (lib/svg) → `0xFFRRGGBB`-Punkte |
 | Daten | `lib/pdfread/pdftab.fi` (erzeugt von `tools/pdf/gentab.py`) | Breiten der 14 Standardschriften, Basiskodierungen, Adobes Glyphenliste |
-| Fenster | `kernel/user/pdfview.fi` + `fuiscene.canvas` | Werkzeugleiste, Seitenfläche, Tasten, Ziehen |
+| Fenster | `kernel/user/pdfview.fi` + `fuiscene.image` (Bildknoten des Szenenbaums: zeigt die Seite, Ziehen verschiebt) | Werkzeugleiste, Seitenfläche, Tasten (`fuiscene.last_key`, `image_pan`) |
 
 Die Vektorschicht und der Text werden vom **selben SVG-Maler** gezeichnet, den die
 Systemsymbole benutzen (`lib/svg`, `svg.svgimage`). Der Leser schreibt ein SVG in
