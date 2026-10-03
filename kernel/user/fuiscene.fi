@@ -54,6 +54,8 @@ import fui.uiimage
 import fui.transform
 import paint.canvas
 import wlibc
+import icons
+import fuied
 import plat.fuiwirt
 
 export {
@@ -84,6 +86,19 @@ export {
     set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb,
     cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, keys_always, has_focus,
     key_seq, key_any, width, height, resized,
+    // F-8: what the file manager needed
+    table_multi, table_drag, table_own, table_exact, table_sel_has, table_sel_num, table_sel_all,
+    table_sel_none, table_sel_set, table_anchor, table_frames,
+    table_drop_filter, table_top, table_set_top, table_visible,
+    KEY_DRAG, KEY_DROP, drag_key, drag_row, drag_shield, drop_accept,
+    drop_key, drop_row, drop_x, drop_y, key_free_seq, key_free,
+    menu_x, menu_y, menu_w, menu_h,
+    icon_button, progress, progress_set, tab_close,
+    dialog_entry, dialog_entry_text, dialog_choice, dialog_cancelled,
+    dialog_set_text, dialog_progress, dialog_busy, dialog_close,
+    dialog_kind, dialog_x, dialog_y, dialog_w, dialog_h,
+    dialog_btn_x, dialog_btn_y, dialog_btn_w, dialog_btn_h,
+    editor, editor_t, editor_prep, touch,
 }
 
 const NONE: usize = 4294967295
@@ -96,6 +111,11 @@ const KEY_DIALOG: u64 = 4294967293
 // What `pump` answers when the RIGHT button was pressed (`right_x`/`right_y`,
 // `key_at`, `table_row_at` say where).
 const KEY_RCLICK: u64 = 4294967292
+// What `pump` answers when a drag starts in a table (`drag_key`, `drag_row`
+// say which) and when something came down on the window (`drop_key`,
+// `drop_row`, `drop_x`, `drop_y` say where).
+const KEY_DRAG: u64 = 4294967291
+const KEY_DROP: u64 = 4294967290
 static mut s_rx: u64 = 0
 static mut s_ry: u64 = 0
 
@@ -678,14 +698,48 @@ fn menu_is_open() -> bool {
 
 fn menu_open(x: u64, y: u64, w: u64, items: u64, n: u64) {
     s_pop_open = true
-    s_pop_x = x
-    s_pop_y = y
+    var px: u64 = x
+    var py: u64 = y
+    // a popup that would stick out of the window is moved back in
+    let ph: u64 = n * POP_ROW + 8
+    if px + w > fuiapp.width() {
+        if fuiapp.width() > w {
+            px = fuiapp.width() - w
+        } else {
+            px = 0
+        }
+    }
+    if py + ph > fuiapp.height() {
+        if fuiapp.height() > ph {
+            py = fuiapp.height() - ph
+        } else {
+            py = 0
+        }
+    }
+    s_pop_x = px
+    s_pop_y = py
     s_pop_w = w
     s_pop_items = items
     s_pop_n = n
     s_pop_hot = 0
     s_pop_pick = 0
     touch()
+}
+
+fn menu_x() -> u64 {
+    return s_pop_x
+}
+
+fn menu_y() -> u64 {
+    return s_pop_y
+}
+
+fn menu_w() -> u64 {
+    return s_pop_w
+}
+
+fn menu_h() -> u64 {
+    return pop_h()
 }
 
 fn menu_close() {
@@ -910,6 +964,11 @@ fn rebuild() {
     }
     s_mnode = NONE
     k = 0
+    while k < s_ed_n {
+        s_ed_node[(k) as usize] = NONE
+        k = k + 1
+    }
+    k = 0
     while k < s_en {
         s_enode[(k) as usize] = NONE
         k = k + 1
@@ -1083,6 +1142,98 @@ fn flat(i: usize) {
     if i != NONE {
         scene.node_set_widget_kind(sc(), i, widget.KIND_TAB)
     }
+}
+
+// A button that shows a glyph of the icon font (`icons.*`) instead of a
+// word. The label stays the node's text: it is the name a screen reader
+// says, but it is not painted. Give it a size (`set_size`).
+fn draw_ibtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let p: u64 = widget.w_text(e)
+    let n: usize = widget.w_text_len(e)
+    widget.w_set_text(e, p, 0 as usize)
+    render.draw_widget(c, e)
+    widget.w_set_text(e, p, n)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    var col: u32 = (*t).text
+    if widget.w_is_disabled(e) {
+        col = (*t).text_disabled
+    }
+    let sz: u64 = 18
+    let bw: u64 = widget.w_w(e) as u64
+    let bh: u64 = widget.w_h(e) as u64
+    fuiapp.glyph(widget.w_value(e) as u64, (widget.w_x(e) as u64) + (bw - sz) / 2,
+        (widget.w_y(e) as u64) + (bh - sz) / 2, sz, col | 4278190080 as u32)
+}
+
+fn icon_button(parent: usize, cp: u64, label: u64, key: u64) -> usize {
+    let i: usize = button(parent, label, key)
+    if i != NONE {
+        widget.w_set_value(scene.node_widget(sc(), i), cp as i64)
+        scene.node_set_draw(sc(), i, 0, draw_ibtn)
+    }
+    return i
+}
+
+// A progress bar: a track and a fill in the accent colour, `pct` 0..100.
+fn draw_prog(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    let x: f64 = widget.w_x(e)
+    let y: f64 = widget.w_y(e)
+    let w: f64 = widget.w_w(e)
+    let h: f64 = widget.w_h(e)
+    painter.round_rect(z, x, y, w, h, h / 2.0, (*t).field | 4278190080 as u32)
+    var pct: i64 = widget.w_value(e)
+    if pct > 100 {
+        pct = 100
+    }
+    if pct > 0 {
+        var fw: f64 = w * (pct as f64) / 100.0
+        if fw < h {
+            fw = h
+        }
+        painter.round_rect(z, x, y, fw, h, h / 2.0, (*t).accent | 4278190080 as u32)
+    }
+    painter.round_ring(z, x, y, w, h, h / 2.0, 1.0, (*t).border_col | 4278190080 as u32)
+}
+
+fn progress(parent: usize, w: u64, pct: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i != scene.SCENE_NONE {
+        scene.node_set_widget_kind(sc(), i, widget.KIND_LABEL)
+        scene.node_set_size(sc(), i, w as f64, 12.0)
+        widget.w_set_value(scene.node_widget(sc(), i), pct as i64)
+        scene.node_set_draw(sc(), i, 0, draw_prog)
+    }
+    return i
+}
+
+fn progress_set(i: usize, pct: u64) {
+    if i != NONE {
+        widget.w_set_value(scene.node_widget(sc(), i), pct as i64)
+        touch()
+    }
+}
+
+// A tab with a close button beside it: two keys, one for the tab and one
+// for the cross. Returns the box that holds both.
+fn tab_close(parent: usize, text: u64, key: u64, ckey: u64, ctext: u64,
+    on: bool, w: u64, h: u64) -> usize {
+    let b: usize = row(parent)
+    if b == NONE {
+        return b
+    }
+    set_gap(b, 0)
+    let t: usize = tab(b, text, key, on)
+    if t != NONE {
+        set_size(t, w - h, h)
+    }
+    let x: usize = icon_button(b, icons.WINDOW_CLOSE, ctext, ckey)
+    if x != NONE {
+        flat(x)
+        set_size(x, h, h)
+    }
+    return b
 }
 
 fn set_size(i: usize, w: u64, h: u64) {
@@ -1278,6 +1429,15 @@ fn paint() {
     s_paints = s_paints + 1
 }
 
+// Does a text field edit with this key (fuiapp.edit)?
+fn edit_takes(k: u64) -> bool {
+    if k == 1 || k == wlib.KEY_LEFT || k == wlib.KEY_RIGHT || k == wlib.KEY_HOME
+        || k == wlib.KEY_END || k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL {
+        return true
+    }
+    return k >= 32 && k < 256
+}
+
 // The popup takes the event (true = consumed). A press outside closes it.
 fn pop_event(e: *mut fuiapp.Ev) -> u64 {
     let ev: fuiapp.Ev = *e
@@ -1360,6 +1520,23 @@ fn pump() -> u64 {
             im_move(ev.x, ev.y)
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
+            s_mx = ev.x
+            s_my = ev.y
+            if s_ed_down != NO_SLOT && (ev.btn & 1) != 0 {
+                let en2: usize = s_ed_node[(s_ed_down) as usize]
+                if en2 != NONE {
+                    fuied.ed_drag(s_ed_t[(s_ed_down) as usize], node_x(en2),
+                        node_y(en2), ev.x, ev.y)
+                    touch()
+                }
+            }
+            let dk: u64 = ct_move(ev.x, ev.y, ev.btn)
+            if dk != 0 {
+                hit = dk
+            }
+            if s_ct_dragged || wlibc.drag_an() {
+                ct_hover(ev.x, ev.y)
+            }
         } else if ev.kind == fuiapp.EV_DOWN && (ev.btn & 2) != 0
             && (ev.btn & 1) == 0 {
             // the right button: not given to the controls; the program
@@ -1370,6 +1547,11 @@ fn pump() -> u64 {
         } else if ev.kind == fuiapp.EV_DOWN && s_nohit {
             let _skip: u64 = 0
         } else if ev.kind == fuiapp.EV_DOWN {
+            // a drag payload nobody took (the last drag ended on the
+            // desktop) is stale: a new press starts clean
+            if wlibc.drag_an() {
+                let _dd: u64 = wlibc.drag_drop()
+            }
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
             let _d: u32 = fuiwirt.host_pointer_down(w, ev.x as f64,
@@ -1380,16 +1562,56 @@ fn pump() -> u64 {
             if ik != 0 {
                 hit = ik
             }
+            let ek: u64 = ed_at(ev.x, ev.y)
+            if ek != NO_SLOT {
+                let en: usize = s_ed_node[(ek) as usize]
+                if !fuied.ed_scroll_hit(s_ed_t[(ek) as usize], node_x(en),
+                    node_y(en), node_w(en), node_h(en), ev.x, ev.y) {
+                    fuied.ed_press(s_ed_t[(ek) as usize], node_x(en), node_y(en),
+                        ev.x, ev.y, (ev.btn & 8) != 0)
+                    s_ed_down = ek
+                }
+                s_caret_on = true
+                s_caret_t = fuiapp.now_ms()
+                touch()
+            }
             let ck: u64 = ct_at(ev.x, ev.y)
             if ck != NO_SLOT {
-                let r: u64 = ct_press(ck, ev.x, ev.y)
+                let r: u64 = ct_press(ck, ev.x, ev.y, ev.btn)
                 if r != 0 {
                     hit = r
                 }
             }
+        } else if ev.kind == fuiapp.EV_DROP {
+            // something came down on the window (wlib fired K_DROP)
+            s_ct_dn = NO_SLOT
+            s_ct_dragged = false
+            s_ct_sbk = NO_SLOT
+            s_hov_k = NO_SLOT
+            s_hov_row = HEAD_ROW
+            s_drop_key = 0
+            s_drop_row = HEAD_ROW
+            let dk2: u64 = ct_at(ev.x, ev.y)
+            if dk2 != NO_SLOT {
+                s_drop_key = s_ct_key[(dk2) as usize]
+                s_drop_row = table_row_at(s_drop_key, ev.x, ev.y)
+            }
+            s_drop_x = ev.x
+            s_drop_y = ev.y
+            touch()
+            hit = KEY_DROP
         } else if ev.kind == fuiapp.EV_UP {
             s_im_drag = NO_SLOT
             s_im_selk = NO_SLOT
+            s_ct_dn = NO_SLOT
+            s_ct_dragged = false
+            s_ct_sbk = NO_SLOT
+            s_ed_down = NO_SLOT
+            if s_hov_k != NO_SLOT {
+                s_hov_k = NO_SLOT
+                s_hov_row = HEAD_ROW
+                touch()
+            }
             let _c: u32 = fuiwirt.host_pointer_up(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
         } else if ev.kind == fuiapp.EV_KEY {
@@ -1406,7 +1628,21 @@ fn pump() -> u64 {
             if fk != fuiwirt.KEINER {
                 cslot = ct_slot_of_node(fk)
             }
-            if cslot != NO_SLOT && ev.key != wlib.KEY_TAB {
+            var eslot: u64 = NO_SLOT
+            if fk != fuiwirt.KEINER {
+                eslot = ed_slot_of_node(fk)
+            }
+            if eslot != NO_SLOT && ev.key != wlib.KEY_TAB {
+                // the text area has the keyboard (Tab stays the focus key)
+                s_fseq = s_fseq + 1
+                s_fkey = ev.key
+                fuied.ed_key(s_ed_t[(eslot) as usize], ev.key)
+                s_caret_on = true
+                s_caret_t = fuiapp.now_ms()
+                touch()
+            } else if cslot != NO_SLOT && ev.key != wlib.KEY_TAB {
+                s_fseq = s_fseq + 1
+                s_fkey = ev.key
                 let r: u64 = ct_key(cslot, ev.key)
                 if r != 0 {
                     hit = r
@@ -1420,6 +1656,12 @@ fn pump() -> u64 {
                 if ev.key == wlib.KEY_ENTER {
                     hit = s_ekey[(fslot) as usize]
                 } else {
+                    // a key the field does not edit with (a function key, a
+                    // control letter) belongs to the program's shortcuts
+                    if !edit_takes(ev.key) {
+                        s_fseq = s_fseq + 1
+                        s_fkey = ev.key
+                    }
                     let cp: *mut usize = (&s_ecar[(fslot) as usize]) as *mut usize
                     fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
                         false)
@@ -1431,6 +1673,8 @@ fn pump() -> u64 {
                 // DAILY-DRIVER: a key nobody took (no field, no table) is
                 // kept for the program (`last_key`): the PDF viewer's shortcuts
                 s_lastkey = ev.key
+                s_fseq = s_fseq + 1
+                s_fkey = ev.key
                 let k: u32 = key_num(ev.key)
                 if k != 0 as u32 {
                     let _c: u32 = fuiwirt.host_key(w, k, 0 as u32)
@@ -1445,7 +1689,9 @@ fn pump() -> u64 {
             let kk: u64 = scene.node_id(sc(), a) as u64
             // a click into a text field only puts the caret there; the
             // field answers with Enter (handled with the keys above)
-            if kk != 0 && slot_of_node(a) == NO_SLOT && a != s_mnode {
+            let acs: u64 = ct_slot_of_node(a)
+            if kk != 0 && slot_of_node(a) == NO_SLOT && a != s_mnode
+                && (acs == NO_SLOT || !s_ct_own[(acs) as usize]) {
                 hit = kk
             }
         }
@@ -1454,8 +1700,9 @@ fn pump() -> u64 {
     // allows it (never under /etc/uitrace: the test VM is too slow for a
     // repaint every half second)
     let fk2: usize = fuiwirt.host_focus(w)
-    if fk2 != fuiwirt.KEINER && (slot_of_node(fk2) != NO_SLOT || fk2 == s_mnode)
-        && wlib.blink_enabled() {
+    if ((fk2 != fuiwirt.KEINER && (slot_of_node(fk2) != NO_SLOT || fk2 == s_mnode
+        || ed_slot_of_node(fk2) != NO_SLOT))
+        || (s_dlg_open && s_dlg_kind == 1)) && wlib.blink_enabled() {
         let t: u64 = fuiapp.now_ms()
         if t >= s_caret_t + 530 {
             s_caret_t = t
@@ -1713,6 +1960,37 @@ static mut s_ct_last_row: u64 = 4294967295
 static mut s_ct_last_t: u64 = 0
 static mut s_ct_headcol: u64 = 4294967295
 
+// ---- F-8: several rows selected, rows dragged, things dropped on a row
+// One bit per row (4096 rows per table); the cursor row `s_ct_sel` stays
+// the keyboard's place, the bits are what is MARKED.
+const SELB: u64 = 512
+static mut s_ct_bits: [u8; 4096] = [0 as u8; 4096]
+static mut s_ct_multi: [bool; 8] = [false; 8]
+static mut s_ct_anch: [u64; 8] = [0 as u64; 8]
+static mut s_ct_dragon: [bool; 8] = [false; 8]
+static mut s_ct_own: [bool; 8] = [false; 8]
+static mut s_ct_exact: [bool; 8] = [false; 8]
+static mut s_ct_df: [u8; 64] = [0 as u8; 64]
+static mut s_ct_dfset: [bool; 8] = [false; 8]
+static mut s_ct_dn: u64 = 4294967295
+static mut s_ct_dnrow: u64 = 0
+static mut s_ct_dragged: bool = false
+static mut s_ct_frames: u64 = 0
+static mut s_ct_sbk: u64 = 4294967295
+static mut s_mx: u64 = 0
+static mut s_my: u64 = 0
+static mut s_drag_key: u64 = 0
+static mut s_drag_row: u64 = 0
+static mut s_drop_key: u64 = 0
+static mut s_drop_row: u64 = 4294967295
+static mut s_drop_x: u64 = 0
+static mut s_drop_y: u64 = 0
+static mut s_hov_k: u64 = 4294967295
+static mut s_hov_row: u64 = 4294967295
+static mut s_fseq: u64 = 0
+static mut s_fkey: u64 = 0
+const SB_W: u64 = 8
+
 // The width of a column: what the program set, else an equal share of the
 // table's present width (a table that stretches has no width at creation).
 // The room above a line of text (24 high) in a row of height `rh`: centred,
@@ -1900,8 +2178,14 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
         var cx: u64 = x
         var col: u64 = 0
         while col < s_ct_cols[(k) as usize] {
-            text_tok(cx + 10, y + (HEAD_H - 24) / 2, colw_of(k, col, w) - 12,
-                ct_text(k, HEAD_ROW, col), style.TOK_TEXT_MUTED)
+            if s_ct_exact[(k) as usize] {
+                two_text(cx + 10, y + 24, colw_of(k, col, w) - 12,
+                    ct_text(k, HEAD_ROW, col), 15, false,
+                    (*t).text_muted | 4278190080 as u32)
+            } else {
+                text_tok(cx + 10, y + (HEAD_H - 24) / 2, colw_of(k, col, w) - 12,
+                    ct_text(k, HEAD_ROW, col), style.TOK_TEXT_MUTED)
+            }
             cx = cx + colw_of(k, col, w)
             col = col + 1
         }
@@ -1909,10 +2193,17 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     }
     let vis: u64 = ct_visible(k, h)
     let rh: u64 = s_ct_rh[(k) as usize]
+    var anybit: bool = false
+    if s_ct_multi[(k) as usize] {
+        anybit = ctb_count(k) > 0
+    }
     var r: u64 = 0
     while r < vis && s_ct_top[(k) as usize] + r < s_ct_rows[(k) as usize] {
         let ri: u64 = s_ct_top[(k) as usize] + r
-        let on: bool = ri == s_ct_sel[(k) as usize]
+        var on: bool = ri == s_ct_sel[(k) as usize]
+        if s_ct_multi[(k) as usize] && anybit {
+            on = ctb(k, ri)
+        }
         let ry: u64 = by + r * rh
         if on {
             painter.round_rect(z, (x + 4) as f64, ry as f64,
@@ -1957,13 +2248,55 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                 if col2 == 0 {
                     off = ix
                 }
-                text_tok(cx2 + 10 + off, ry + tpad(rh), cw - 12 - off,
-                    ct_text(k, ri, col2), tok)
+                if s_ct_exact[(k) as usize] {
+                    // the ink of the system's text, glyph by glyph on whole
+                    // pixels; the columns after the name are the quiet ones
+                    var cc: u32 = (*t).text
+                    if on {
+                        cc = (*t).selection_text
+                    } else if col2 > 0 {
+                        cc = (*t).text_muted
+                    }
+                    two_text(cx2 + 10 + off, ry + 20, cw - 12 - off,
+                        ct_text(k, ri, col2), 15, false,
+                        cc | 4278190080 as u32)
+                } else {
+                    text_tok(cx2 + 10 + off, ry + tpad(rh), cw - 12 - off,
+                        ct_text(k, ri, col2), tok)
+                }
                 cx2 = cx2 + cw
                 col2 = col2 + 1
             }
         }
         r = r + 1
+    }
+    // the row a drag would land on
+    if s_hov_k == k && s_hov_row != HEAD_ROW && s_hov_row >= s_ct_top[(k) as usize]
+        && s_hov_row < s_ct_top[(k) as usize] + vis {
+        painter.round_ring(z, (x + 4) as f64,
+            (by + (s_hov_row - s_ct_top[(k) as usize]) * rh) as f64,
+            (w - 8) as f64, rh as f64, 6.0, 2.0, (*t).accent | 4278190080 as u32)
+    }
+    // the scroll bar: a track and a thumb at the right edge
+    let nrows: u64 = s_ct_rows[(k) as usize]
+    if nrows > vis && vis > 0 {
+        let th: u64 = vis * rh
+        var thumb: u64 = th * vis / nrows
+        if thumb < 20 {
+            thumb = 20
+        }
+        if thumb > th {
+            thumb = th
+        }
+        var toff: u64 = 0
+        if nrows > vis {
+            toff = (th - thumb) * s_ct_top[(k) as usize] / (nrows - vis)
+        }
+        let sbx: u64 = x + w - SB_W - 4
+        painter.round_rect(z, sbx as f64, by as f64, SB_W as f64, th as f64,
+            4.0, (*t).base | 4278190080 as u32)
+        painter.round_rect(z, sbx as f64, (by + toff) as f64, SB_W as f64,
+            thumb as f64, 4.0, (*t).text_muted | 4278190080 as u32)
     }
     painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
         (*t).border_col | 4278190080 as u32)
@@ -2380,12 +2713,25 @@ fn table_head_col() -> u64 {
 
 // A pointer press inside a table: returns the key when something
 // happened the program must hear about (activation / header click).
-fn ct_press(k: u64, x: u64, y: u64) -> u64 {
+fn ct_press(k: u64, x: u64, y: u64, btn: u64) -> u64 {
     let i: usize = s_ct_node[(k) as usize]
     let nx: u64 = node_x(i)
     let ny: u64 = node_y(i)
     let nh: u64 = node_h(i)
     var by: u64 = ny + 2
+    // the scroll bar (only when there is something to scroll)
+    if s_ct_rows[(k) as usize] > ct_visible(k, nh)
+        && x + SB_W + 6 >= nx + node_w(i) && y >= ny + 2 {
+        var hy: u64 = ny + 2
+        if s_ct_head[(k) as usize] {
+            hy = ny + HEAD_H + 2
+        }
+        if y >= hy {
+            s_ct_sbk = k
+            ct_sb_set(k, y)
+            return 0
+        }
+    }
     if s_ct_head[(k) as usize] {
         if y < ny + HEAD_H + 2 {
             var cx: u64 = nx
@@ -2413,18 +2759,227 @@ fn ct_press(k: u64, x: u64, y: u64) -> u64 {
     }
     let now: u64 = fuiapp.now_ms()
     var act: u64 = 0
-    if row == s_ct_last_row && now < s_ct_last_t + 450 {
+    if row == s_ct_last_row && now < s_ct_last_t + 1000 {
         act = s_ct_key[(k) as usize]
     }
     if s_ct_one[(k) as usize] {
         act = s_ct_key[(k) as usize]
         s_ct_headcol = 4294967295
     }
+    if s_ct_multi[(k) as usize] {
+        if (btn & 16) != 0 {
+            // Ctrl: this one row toggles, the rest stays; the anchor moves
+            ctb_set(k, row, !ctb(k, row))
+            s_ct_anch[(k) as usize] = row
+            act = 0
+        } else if (btn & 8) != 0 {
+            // Shift: from the anchor to here
+            ctb_range(k, s_ct_anch[(k) as usize], row)
+            act = 0
+        } else {
+            // a plain click is a new beginning
+            if !ctb(k, row) || ctb_count(k) < 2 {
+                ctb_clear(k)
+                ctb_set(k, row, true)
+            }
+            s_ct_anch[(k) as usize] = row
+        }
+    }
+    if s_ct_multi[(k) as usize] || s_ct_dragon[(k) as usize] {
+        s_ct_dn = k
+        s_ct_dnrow = row
+        s_ct_dragged = false
+    }
     s_ct_last_row = row
     s_ct_last_t = now
     s_ct_sel[(k) as usize] = row
     touch()
     return act
+}
+
+// ---- marked rows (one bit per row)
+fn ctb(k: u64, r: u64) -> bool {
+    if r >= 4096 {
+        return false
+    }
+    let byte: u64 = __mmio_read8(((&s_ct_bits[0 as usize]) as u64 + k * SELB + r / 8) as *mut u8) as u64
+    return (byte & (1 << (r % 8))) != 0
+}
+
+fn ctb_set(k: u64, r: u64, on: bool) {
+    if r >= 4096 {
+        return
+    }
+    let at: u64 = (&s_ct_bits[0 as usize]) as u64 + k * SELB + r / 8
+    var byte: u64 = __mmio_read8(at as *mut u8) as u64
+    if on {
+        byte = byte | (1 << (r % 8))
+    } else {
+        byte = byte & ~(1 << (r % 8))
+    }
+    __mmio_write8(at as *mut u8, byte as u8)
+}
+
+fn ctb_clear(k: u64) {
+    var n: u64 = 0
+    while n < SELB {
+        __mmio_write8(((&s_ct_bits[0 as usize]) as u64 + k * SELB + n) as *mut u8, 0 as u8)
+        n = n + 1
+    }
+}
+
+// Mark the rows from `a` to `b` (either order), nothing else.
+fn ctb_range(k: u64, a: u64, b: u64) {
+    var lo: u64 = a
+    var hi: u64 = b
+    if lo > hi {
+        lo = b
+        hi = a
+    }
+    ctb_clear(k)
+    var r: u64 = lo
+    while r <= hi && r < s_ct_rows[(k) as usize] {
+        ctb_set(k, r, true)
+        r = r + 1
+    }
+}
+
+fn ctb_count(k: u64) -> u64 {
+    var n: u64 = 0
+    var r: u64 = 0
+    let rows: u64 = s_ct_rows[(k) as usize]
+    while r < rows && r < 4096 {
+        if ctb(k, r) {
+            n = n + 1
+        }
+        r = r + 1
+    }
+    return n
+}
+
+// The thumb of the scroll bar was pressed or dragged to height `y`.
+fn ct_sb_set(k: u64, y: u64) {
+    let i: usize = s_ct_node[(k) as usize]
+    if i == NONE {
+        return
+    }
+    var by: u64 = node_y(i) + 2
+    if s_ct_head[(k) as usize] {
+        by = node_y(i) + HEAD_H + 2
+    }
+    let vis: u64 = ct_visible(k, node_h(i))
+    let rows: u64 = s_ct_rows[(k) as usize]
+    if rows <= vis || vis == 0 {
+        return
+    }
+    let th: u64 = vis * s_ct_rh[(k) as usize]
+    var rel: u64 = 0
+    if y > by {
+        rel = y - by
+    }
+    if rel > th {
+        rel = th
+    }
+    var top: u64 = (rel * (rows - vis) + th / 2) / th
+    if top > rows - vis {
+        top = rows - vis
+    }
+    s_ct_top[(k) as usize] = top
+    touch()
+}
+
+// The pointer moves with the button down. Returns KEY_DRAG when a drag
+// starts (the pointer left the row it pressed on).
+fn ct_move(x: u64, y: u64, btn: u64) -> u64 {
+    if s_ct_sbk != NO_SLOT {
+        if (btn & 1) == 0 {
+            s_ct_sbk = NO_SLOT
+        } else {
+            ct_sb_set(s_ct_sbk, y)
+        }
+        return 0
+    }
+    let k: u64 = s_ct_dn
+    if k == NO_SLOT {
+        return 0
+    }
+    if (btn & 1) == 0 {
+        s_ct_dn = NO_SLOT
+        return 0
+    }
+    let i: usize = s_ct_node[(k) as usize]
+    let rows: u64 = s_ct_rows[(k) as usize]
+    if i == NONE || rows == 0 {
+        return 0
+    }
+    var by: u64 = node_y(i) + 2
+    if s_ct_head[(k) as usize] {
+        by = node_y(i) + HEAD_H + 2
+    }
+    let vis: u64 = ct_visible(k, node_h(i))
+    var row: u64 = s_ct_top[(k) as usize]
+    if y >= by && vis > 0 {
+        let rr: u64 = (y - by) / s_ct_rh[(k) as usize]
+        if rr >= vis {
+            // below the last visible row: scroll one and take the last
+            if s_ct_top[(k) as usize] + vis < rows && !s_ct_dragged {
+                s_ct_top[(k) as usize] = s_ct_top[(k) as usize] + 1
+            }
+            row = s_ct_top[(k) as usize] + vis - 1
+        } else {
+            row = s_ct_top[(k) as usize] + rr
+        }
+    } else if s_ct_top[(k) as usize] > 0 && !s_ct_dragged {
+        s_ct_top[(k) as usize] = s_ct_top[(k) as usize] - 1
+        row = s_ct_top[(k) as usize]
+    }
+    if row >= rows {
+        row = rows - 1
+    }
+    if row == s_ct_sel[(k) as usize] && !s_ct_dragged {
+        return 0
+    }
+    if s_ct_dragon[(k) as usize] {
+        if !s_ct_dragged {
+            s_ct_dragged = true
+            s_drag_key = s_ct_key[(k) as usize]
+            s_drag_row = s_ct_dnrow
+            s_mx = x
+            s_my = y
+            return KEY_DRAG
+        }
+        return 0
+    }
+    if s_ct_multi[(k) as usize] {
+        ctb_range(k, s_ct_anch[(k) as usize], row)
+        s_ct_sel[(k) as usize] = row
+        s_ct_frames = s_ct_frames + 1
+        touch()
+    }
+    return 0
+}
+
+// While something is dragged: which row of which table is under the
+// pointer (and may take it) -- the ring the table paints around it.
+fn ct_hover(x: u64, y: u64) {
+    var nk: u64 = NO_SLOT
+    var nr: u64 = HEAD_ROW
+    let k: u64 = ct_at(x, y)
+    if k != NO_SLOT && s_ct_dfset[(k) as usize] {
+        let r: u64 = table_row_at(s_ct_key[(k) as usize], x, y)
+        if r != HEAD_ROW {
+            let f: fn(u64) -> bool = *(((&s_ct_df[0 as usize]) as u64 + k * 8) as *mut fn(u64) -> bool)
+            if f(r) {
+                nk = k
+                nr = r
+            }
+        }
+    }
+    if nk != s_hov_k || nr != s_hov_row {
+        s_hov_k = nk
+        s_hov_row = nr
+        touch()
+    }
 }
 
 // A key for the focused table; true when the table took it.
@@ -2468,6 +3023,15 @@ fn ct_key(k: u64, key: u64) -> u64 {
     }
     if sel != s_ct_sel[(k) as usize] {
         s_ct_sel[(k) as usize] = sel
+        if s_ct_multi[(k) as usize] {
+            if wlib.key_shift() {
+                ctb_range(k, s_ct_anch[(k) as usize], sel)
+            } else {
+                ctb_clear(k)
+                ctb_set(k, sel, true)
+                s_ct_anch[(k) as usize] = sel
+            }
+        }
         ct_reveal(k, node_h(i))
         touch()
         if s_ct_one[(k) as usize] && !s_ct_kq[(k) as usize] {
@@ -2682,6 +3246,197 @@ fn table_click_only(key: u64, on: bool) {
     }
     s_ct_one[(k) as usize] = on
     s_ct_kq[(k) as usize] = on
+}
+
+// ---- F-8: marking several rows, dragging them, dropping on them
+
+// The table answers only through its own press / key handling: the host's
+// "a click activates the node" is ignored for it (a file list that opens a
+// folder on ONE click would be wrong).
+// The cell texts are drawn on whole pixels like the system's text (the
+// acceptance runs compare ink to the pixel); columns after the first are
+// the muted colour.
+fn table_exact(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_exact[(k) as usize] = on
+    }
+}
+
+fn table_own(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_own[(k) as usize] = on
+    }
+}
+
+// Several rows can be marked (Ctrl+click toggles, Shift+click and the
+// arrow keys with Shift mark a range; Ctrl+A is `table_sel_all`).
+fn table_multi(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_multi[(k) as usize] = on
+    }
+}
+
+// A press on a row and a move to another row starts a drag: `pump`
+// answers KEY_DRAG (`drag_key`, `drag_row`).
+fn table_drag(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_dragon[(k) as usize] = on
+    }
+}
+
+// Which rows may take a drop (they get a ring while a drag is over them).
+fn table_drop_filter(key: u64, f: fn(u64) -> bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        *(((&s_ct_df[0 as usize]) as u64 + k * 8) as *mut fn(u64) -> bool) = f
+        s_ct_dfset[(k) as usize] = true
+    }
+}
+
+fn table_sel_has(key: u64, row: u64) -> bool {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return false
+    }
+    return ctb(k, row)
+}
+
+fn table_sel_num(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return ctb_count(k)
+}
+
+fn table_sel_all(key: u64) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    ctb_clear(k)
+    var r: u64 = 0
+    while r < s_ct_rows[(k) as usize] && r < 4096 {
+        ctb_set(k, r, true)
+        r = r + 1
+    }
+    touch()
+}
+
+fn table_sel_none(key: u64) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    ctb_clear(k)
+    touch()
+}
+
+fn table_sel_set(key: u64, row: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    ctb_set(k, row, on)
+    touch()
+}
+
+// The row a range started on (the last plain or Ctrl click).
+fn table_anchor(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_ct_anch[(k) as usize]
+}
+
+// How often the mouse widened a range by moving over rows.
+fn table_frames() -> u64 {
+    return s_ct_frames
+}
+
+// The first row shown (scrolling) and how many rows fit.
+fn table_top(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return 0
+    }
+    return s_ct_top[(k) as usize]
+}
+
+fn table_set_top(key: u64, top: u64) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_top[(k) as usize] = top
+    touch()
+}
+
+fn table_visible(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || s_ct_node[(k) as usize] == NONE {
+        return 0
+    }
+    return ct_visible(k, node_h(s_ct_node[(k) as usize]))
+}
+
+// After KEY_DRAG: the table and the row the drag started on.
+fn drag_key() -> u64 {
+    return s_drag_key
+}
+
+fn drag_row() -> u64 {
+    return s_drag_row
+}
+
+// The little label that hangs at the pointer while something is dragged
+// (the window server's drag picture).
+fn drag_shield(name: u64) {
+    wlib.zug_auf(name, wlib.win_cx(fuiapp.win()) + s_mx,
+        wlib.win_cy(fuiapp.win()) + s_my)
+}
+
+// The window takes drops from other windows (and its own drags).
+fn drop_accept(on: bool) {
+    wlib.drop_an(on)
+}
+
+// After KEY_DROP: the table under the pointer (0 = none) and its row
+// (HEAD_ROW = none), and the pointer in canvas coordinates.
+fn drop_key() -> u64 {
+    return s_drop_key
+}
+
+fn drop_row() -> u64 {
+    return s_drop_row
+}
+
+fn drop_x() -> u64 {
+    return s_drop_x
+}
+
+fn drop_y() -> u64 {
+    return s_drop_y
+}
+
+// Keys nobody in the window took (not a text field, not a memo): the
+// shortcuts of a program. `key_free_seq` counts them.
+fn key_free_seq() -> u64 {
+    return s_fseq
+}
+
+fn key_free() -> u64 {
+    return s_fkey
 }
 
 
@@ -3582,11 +4337,135 @@ fn im_move(x: u64, y: u64) {
     touch()
 }
 
+// ---------------------------------------------------------- the editor
+//
+// A multi-line text area (fuied.fi): the node is ONE focusable node, the
+// text lives in fuied by field index, found by KEY. Pointer and keys are
+// routed here by `pump`.
+static mut s_ed_key: [u64; 2] = [0 as u64; 2]
+static mut s_ed_t: [u64; 2] = [0 as u64; 2]
+static mut s_ed_node: [usize; 2] = [4294967295 as usize; 2]
+static mut s_ed_n: u64 = 0
+static mut s_ed_down: u64 = 4294967295
+
+fn ed_slot(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_ed_n {
+        if s_ed_key[(k) as usize] == key {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+fn ed_slot_of_node(i: usize) -> u64 {
+    var k: u64 = 0
+    while k < s_ed_n {
+        if s_ed_node[(k) as usize] == i {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+// The fuied field index of the editor under `key` (TA_MAX = none).
+fn editor_t(key: u64) -> u64 {
+    let k: u64 = ed_slot(key)
+    if k == NO_SLOT {
+        return fuied.TA_MAX
+    }
+    return s_ed_t[(k) as usize]
+}
+
+fn draw_ed(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let i: usize = scene.scene_node_of(sc(), e)
+    let k: u64 = ed_slot_of_node(i)
+    if k == NO_SLOT {
+        return
+    }
+    let t: u64 = s_ed_t[(k) as usize]
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    fuied.ed_size(t, w, h)
+    fuied.ed_paint(t, widget.w_x(e) as u64, widget.w_y(e) as u64, w, h,
+        widget.w_is_focus(e), s_caret_on)
+}
+
+// A text area `w` x `h` points. The text and the caret survive a rebuild.
+fn editor(parent: usize, key: u64, w: u64, h: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_widget_kind(sc(), i, widget.KIND_LIST)
+    scene.node_set_size(sc(), i, w as f64, h as f64)
+    scene.node_set_draw(sc(), i, 0, draw_ed)
+    scene.node_set_id(sc(), i, key as u32)
+    var k: u64 = ed_slot(key)
+    if k == NO_SLOT && s_ed_n < 2 {
+        let t: u64 = fuied.ed_new()
+        if t < fuied.TA_MAX {
+            k = s_ed_n
+            s_ed_n = s_ed_n + 1
+            s_ed_key[(k) as usize] = key
+            s_ed_t[(k) as usize] = t
+        }
+    }
+    if k != NO_SLOT {
+        s_ed_node[(k) as usize] = i
+    }
+    return i
+}
+
+// Make the field of the editor under `key` exist before its node does
+// (a program that loads a file before the window opens). The field index.
+fn editor_prep(key: u64) -> u64 {
+    var k: u64 = ed_slot(key)
+    if k == NO_SLOT && s_ed_n < 2 {
+        let t: u64 = fuied.ed_new()
+        if t < fuied.TA_MAX {
+            k = s_ed_n
+            s_ed_n = s_ed_n + 1
+            s_ed_key[(k) as usize] = key
+            s_ed_t[(k) as usize] = t
+        }
+    }
+    if k == NO_SLOT {
+        return fuied.TA_MAX
+    }
+    return s_ed_t[(k) as usize]
+}
+
+// The editor under the point (x, y), or NO_SLOT.
+fn ed_at(x: u64, y: u64) -> u64 {
+    var k: u64 = 0
+    while k < s_ed_n {
+        let i: usize = s_ed_node[(k) as usize]
+        if i != NONE && x >= node_x(i) && x < node_x(i) + node_w(i)
+            && y >= node_y(i) && y < node_y(i) + node_h(i) {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
 // ------------------------------------------------------------ the dialog
 //
-// One modal dialog over the window: a title, a text, two buttons. It takes
-// the pointer and the keys while it is open; Enter = first button, Esc =
-// second. `pump` answers KEY_DIALOG, `dialog_result()` says which.
+// One modal dialog over the window: a title, a text and
+//   kind 0: one or two buttons (Enter = the one in focus, Esc = the second),
+//   kind 1: the same with a text field under the text (Enter = the first
+//           button, Esc = the second; `dialog_entry_text()` holds what was
+//           typed),
+//   kind 2: up to four choices side by side (`dialog_choice`; Enter takes
+//           the one in focus, Esc closes with `dialog_cancelled()`),
+//   kind 3: no button at all, a text and a progress bar (`dialog_busy`;
+//           the program closes it with `dialog_close()`).
+// A progress bar under the text of any kind: `dialog_progress(0..100)`.
+// It takes the pointer and the keys while it is open. `pump` answers
+// KEY_DIALOG, `dialog_result()` says which button (1-based).
 static mut s_dlg_open: bool = false
 static mut s_dlg_title: u64 = 0
 static mut s_dlg_text: u64 = 0
@@ -3594,6 +4473,13 @@ static mut s_dlg_b1: u64 = 0
 static mut s_dlg_b2: u64 = 0
 static mut s_dlg_res: u64 = 0
 static mut s_dlg_hot: u64 = 0
+static mut s_dlg_kind: u64 = 0
+static mut s_dlg_n: u64 = 2
+static mut s_dlg_btns: u64 = 0
+static mut s_dlg_pct: u64 = 255
+static mut s_dlg_esc: bool = false
+static mut s_dbuf: [u8; 264] = [0 as u8; 264]
+static mut s_dcar: usize = 0
 const DLG_W: u64 = 320
 const DLG_H: u64 = 148
 
@@ -3601,14 +4487,99 @@ fn dialog_is_open() -> bool {
     return s_dlg_open
 }
 
-fn dialog_open(title: u64, text: u64, b1: u64, b2: u64) {
+fn dlg_reset(kind: u64) {
     s_dlg_open = true
+    s_dlg_kind = kind
+    s_dlg_res = 0
+    s_dlg_hot = 0
+    s_dlg_pct = 255
+    s_dlg_esc = false
+    s_dlg_n = 2
+}
+
+fn dialog_open(title: u64, text: u64, b1: u64, b2: u64) {
+    dlg_reset(0)
     s_dlg_title = title
     s_dlg_text = text
     s_dlg_b1 = b1
     s_dlg_b2 = b2
-    s_dlg_res = 0
-    s_dlg_hot = 0
+    touch()
+}
+
+// A question with a text field: `initial` is copied and marked (typing
+// replaces it), the field has the keyboard.
+fn dialog_entry(title: u64, label: u64, initial: u64, b1: u64, b2: u64) {
+    dlg_reset(1)
+    s_dlg_title = title
+    s_dlg_text = label
+    s_dlg_b1 = b1
+    s_dlg_b2 = b2
+    var n: u64 = 0
+    if initial != 0 {
+        while n < 255 && __mmio_read8((initial + n) as *mut u8) != 0 as u8 {
+            __mmio_write8(((&s_dbuf[0 as usize]) as u64 + n) as *mut u8,
+                __mmio_read8((initial + n) as *mut u8))
+            n = n + 1
+        }
+    }
+    __mmio_write8(((&s_dbuf[0 as usize]) as u64 + n) as *mut u8, 0 as u8)
+    s_dcar = n as usize
+    if n > 0 {
+        let cp: *mut usize = (&s_dcar) as *mut usize
+        fuiapp.edit((&s_dbuf[0 as usize]) as u64, 256, cp, 1, false)
+    } else {
+        fuiapp.sel_clear()
+    }
+    s_caret_on = true
+    s_caret_t = fuiapp.now_ms()
+    touch()
+}
+
+fn dialog_entry_text() -> u64 {
+    return (&s_dbuf[0 as usize]) as u64
+}
+
+// Up to four answers side by side; `buttons` is a blob of NUL-terminated
+// labels one after the other.
+fn dialog_choice(title: u64, text: u64, buttons: u64, n: u64) {
+    dlg_reset(2)
+    s_dlg_title = title
+    s_dlg_text = text
+    s_dlg_btns = buttons
+    s_dlg_n = n
+    if s_dlg_n > 4 {
+        s_dlg_n = 4
+    }
+    if s_dlg_n == 0 {
+        s_dlg_n = 1
+    }
+    touch()
+}
+
+// A message with a progress bar and no button: for a job that runs between
+// two pumps (`repaint_now` shows it); the program ends it with
+// `dialog_close`.
+fn dialog_busy(title: u64, text: u64) {
+    dlg_reset(3)
+    s_dlg_title = title
+    s_dlg_text = text
+    s_dlg_pct = 0
+    touch()
+}
+
+fn dialog_set_text(text: u64) {
+    s_dlg_text = text
+    touch()
+}
+
+fn dialog_progress(pct: u64) {
+    s_dlg_pct = pct
+    touch()
+}
+
+fn dialog_close() {
+    s_dlg_open = false
+    s_dlg_pct = 255
     touch()
 }
 
@@ -3616,24 +4587,66 @@ fn dialog_open(title: u64, text: u64, b1: u64, b2: u64) {
 // second): a question that must not be answered by a reflex puts it on
 // the safe one.
 fn dialog_default(n: u64) {
-    if n < 2 {
+    if n < s_dlg_n {
         s_dlg_hot = n
         touch()
     }
 }
 
-// 1 or 2 once, then 0.
+// 1.. once, then 0.
 fn dialog_result() -> u64 {
     let r: u64 = s_dlg_res
     s_dlg_res = 0
     return r
 }
 
+// Esc closed a choice dialog (true once).
+fn dialog_cancelled() -> bool {
+    let c: bool = s_dlg_esc
+    s_dlg_esc = false
+    return c
+}
+
+fn dialog_kind() -> u64 {
+    return s_dlg_kind
+}
+
+// Buttons of the dialog now open.
+fn dlg_nbtn() -> u64 {
+    if s_dlg_kind == 3 {
+        return 0
+    }
+    if s_dlg_kind == 2 {
+        return s_dlg_n
+    }
+    if s_dlg_b2 == 0 {
+        return 1
+    }
+    return 2
+}
+
 fn dlg_w() -> u64 {
-    if fuiapp.width() < DLG_W + 24 {
+    var want: u64 = DLG_W
+    if s_dlg_kind == 2 {
+        want = s_dlg_n * 136 + 16
+    }
+    if fuiapp.width() < want + 24 {
         return fuiapp.width() - 24
     }
-    return DLG_W
+    return want
+}
+
+fn dlg_h() -> u64 {
+    if s_dlg_kind == 1 {
+        return DLG_H + 52
+    }
+    if s_dlg_kind == 3 {
+        return 116
+    }
+    if s_dlg_pct != 255 {
+        return DLG_H + 28
+    }
+    return DLG_H
 }
 
 fn dlg_x() -> u64 {
@@ -3641,7 +4654,39 @@ fn dlg_x() -> u64 {
 }
 
 fn dlg_y() -> u64 {
-    return (fuiapp.height() - DLG_H) / 2
+    return (fuiapp.height() - dlg_h()) / 2
+}
+
+fn dlg_by() -> u64 {
+    return dlg_y() + dlg_h() - 52
+}
+
+fn dlg_bw() -> u64 {
+    let n: u64 = dlg_nbtn()
+    if n == 0 {
+        return 0
+    }
+    return (dlg_w() - 16 * (n + 1)) / n
+}
+
+fn blob_item(p: u64, j: u64) -> u64 {
+    var q: u64 = p
+    var k: u64 = 0
+    while k < j {
+        q = q + ulib.length(q) + 1
+        k = k + 1
+    }
+    return q
+}
+
+fn dlg_label(j: u64) -> u64 {
+    if s_dlg_kind == 2 {
+        return blob_item(s_dlg_btns, j)
+    }
+    if j == 0 {
+        return s_dlg_b1
+    }
+    return s_dlg_b2
 }
 
 // Where the first button of the dialog stands (canvas points): what a
@@ -3651,14 +4696,46 @@ fn dialog_ok_x() -> u64 {
 }
 
 fn dialog_ok_y() -> u64 {
-    return dlg_y() + DLG_H - 52
+    return dlg_by()
 }
 
 fn dialog_ok_w() -> u64 {
-    return (dlg_w() - 48) / 2
+    return dlg_bw()
 }
 
 fn dialog_ok_h() -> u64 {
+    return 36
+}
+
+fn dialog_x() -> u64 {
+    return dlg_x()
+}
+
+fn dialog_y() -> u64 {
+    return dlg_y()
+}
+
+fn dialog_w() -> u64 {
+    return dlg_w()
+}
+
+fn dialog_h() -> u64 {
+    return dlg_h()
+}
+
+fn dialog_btn_x(j: u64) -> u64 {
+    return dlg_x() + 16 + j * (dlg_bw() + 16)
+}
+
+fn dialog_btn_y() -> u64 {
+    return dlg_by()
+}
+
+fn dialog_btn_w() -> u64 {
+    return dlg_bw()
+}
+
+fn dialog_btn_h() -> u64 {
     return 36
 }
 
@@ -3666,47 +4743,102 @@ fn dlg_paint() {
     let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
     let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
     // the dialog stands on a raised plate
-    fuiapp.panel(dlg_x(), dlg_y(), dlg_w(), DLG_H)
+    fuiapp.panel(dlg_x(), dlg_y(), dlg_w(), dlg_h())
     text_tok(dlg_x() + 16, dlg_y() + 12, dlg_w() - 32, s_dlg_title, style.TOK_TEXT_MUTED)
     text_tok(dlg_x() + 16, dlg_y() + 48, dlg_w() - 32, s_dlg_text, style.TOK_TEXT)
-    let by: u64 = dlg_y() + DLG_H - 52
-    let bw: u64 = (dlg_w() - 48) / 2
-    if s_dlg_b2 == 0 {
-        fuiapp.button_main(dlg_x() + 16, by, dlg_w() - 32, 36, s_dlg_b1, true)
-    } else {
-        fuiapp.button_main(dlg_x() + 16, by, bw, 36, s_dlg_b1, s_dlg_hot == 0)
-        fuiapp.button(dlg_x() + 32 + bw, by, bw, 36, s_dlg_b2, s_dlg_hot == 1)
+    if s_dlg_kind == 1 {
+        fuiapp.field(dlg_x() + 16, dlg_y() + 80, dlg_w() - 32, 36,
+            (&s_dbuf[0 as usize]) as u64, 256, s_dcar, true, false, false,
+            s_caret_on, fuiapp.sel_on())
+    }
+    if s_dlg_pct != 255 {
+        var by2: u64 = dlg_y() + 84
+        if s_dlg_kind == 1 {
+            by2 = dlg_y() + 128
+        }
+        var pct: u64 = s_dlg_pct
+        if pct > 100 {
+            pct = 100
+        }
+        painter.round_rect(z, (dlg_x() + 16) as f64, by2 as f64,
+            (dlg_w() - 32) as f64, 12.0, 6.0, (*t).field | 4278190080 as u32)
+        if pct > 0 {
+            var fw: u64 = (dlg_w() - 32) * pct / 100
+            if fw < 12 {
+                fw = 12
+            }
+            painter.round_rect(z, (dlg_x() + 16) as f64, by2 as f64, fw as f64,
+                12.0, 6.0, (*t).accent | 4278190080 as u32)
+        }
+        painter.round_ring(z, (dlg_x() + 16) as f64, by2 as f64,
+            (dlg_w() - 32) as f64, 12.0, 6.0, 1.0,
+            (*t).border_col | 4278190080 as u32)
+    }
+    let nb: u64 = dlg_nbtn()
+    var j: u64 = 0
+    while j < nb {
+        let foc: bool = s_dlg_hot == j && (s_dlg_kind != 1 || j > 0)
+        if j == 0 {
+            fuiapp.button_main(dialog_btn_x(j), dlg_by(), dlg_bw(), 36,
+                dlg_label(j), s_dlg_hot == 0 && s_dlg_kind != 1)
+        } else {
+            fuiapp.button(dialog_btn_x(j), dlg_by(), dlg_bw(), 36,
+                dlg_label(j), foc)
+        }
+        j = j + 1
     }
 }
 
 fn dlg_event(e: *mut fuiapp.Ev) -> u64 {
     let ev: fuiapp.Ev = *e
-    let by: u64 = dlg_y() + DLG_H - 52
+    if s_dlg_kind == 3 {
+        return 0
+    }
+    let nb: u64 = dlg_nbtn()
+    let by: u64 = dlg_by()
     if ev.kind == fuiapp.EV_DOWN {
-        if ev.y >= by && ev.y < by + 36 {
-            let bw: u64 = (dlg_w() - 48) / 2
-            if s_dlg_b2 == 0 {
-                if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + dlg_w() - 16 {
-                    s_dlg_res = 1
-                }
-            } else if ev.x >= dlg_x() + 16 && ev.x < dlg_x() + 16 + bw {
-                s_dlg_res = 1
-            } else if ev.x >= dlg_x() + 32 + bw && ev.x < dlg_x() + 32 + 2 * bw {
-                s_dlg_res = 2
+        if ev.y >= by && ev.y < by + 36 && ev.x >= dlg_x() + 16 && nb > 0 {
+            let bw: u64 = dlg_bw()
+            let rel: u64 = ev.x - dlg_x() - 16
+            let j: u64 = rel / (bw + 16)
+            if j < nb && rel - j * (bw + 16) < bw {
+                s_dlg_res = j + 1
             }
         }
     } else if ev.kind == fuiapp.EV_KEY {
         if ev.key == wlib.KEY_ENTER {
-            s_dlg_res = s_dlg_hot + 1
+            if s_dlg_kind == 1 {
+                s_dlg_res = 1
+            } else {
+                s_dlg_res = s_dlg_hot + 1
+            }
         } else if ev.key == wlib.KEY_ESC {
-            if s_dlg_b2 == 0 {
+            if s_dlg_kind == 2 {
+                s_dlg_esc = true
+                s_dlg_res = nb
+            } else if nb == 1 {
                 s_dlg_res = 1
             } else {
                 s_dlg_res = 2
             }
-        } else if (ev.key == wlib.KEY_TAB || ev.key == wlib.KEY_LEFT
-            || ev.key == wlib.KEY_RIGHT) && s_dlg_b2 != 0 {
-            s_dlg_hot = 1 - s_dlg_hot
+        } else if nb > 1 && (ev.key == wlib.KEY_TAB
+            || (s_dlg_kind != 1 && (ev.key == wlib.KEY_LEFT
+            || ev.key == wlib.KEY_RIGHT))) {
+            if ev.key == wlib.KEY_LEFT && s_dlg_kind == 2 {
+                if s_dlg_hot > 0 {
+                    s_dlg_hot = s_dlg_hot - 1
+                } else {
+                    s_dlg_hot = nb - 1
+                }
+            } else {
+                s_dlg_hot = (s_dlg_hot + 1) % nb
+            }
+            touch()
+        } else if s_dlg_kind == 1 {
+            let cp: *mut usize = (&s_dcar) as *mut usize
+            fuiapp.edit((&s_dbuf[0 as usize]) as u64, 256, cp, ev.key, false)
+            s_caret_on = true
+            s_caret_t = fuiapp.now_ms()
             touch()
         }
     }
