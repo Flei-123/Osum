@@ -410,6 +410,50 @@ echo ==S-SNAP==
 opk liste
 act call store.list
 sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
+echo ==S-SNAP==
+opk liste
+act call store.list
+sleep 80
 echo ==FERTIG==
 EOS
 EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
@@ -419,7 +463,7 @@ PROGS_SAVE=$PROGS; PROGS="$PROGS store"
 image "$TMPD/W.img" "$TMPD/sW.sh" "$P0"
 PROGS=$PROGS_SAVE
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
-timeout 1100 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
+timeout 2200 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
     -append "gfx disp wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
     -serial "file:$TMPD/w.txt" -display none -no-reboot -vga std -monitor "unix:$SOCK,server,nowait" \
     -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
