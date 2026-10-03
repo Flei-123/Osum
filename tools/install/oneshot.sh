@@ -138,6 +138,10 @@ else
             echo "    path: boot():/osum.mb"
             ZL="osum vfs nokbd nosched noproc nofs noring3"
             [ -n "$NETZ" ] && ZL="$ZL $NETZ"
+            # `initsh` is what runs the script on an image whose inittab has
+            # no console target (every fUi image): without it init goes to
+            # the graphical target and `script=` is never read.
+            [ -n "$SKRIPT" ] && ZL="$ZL initsh"
             if [ -n "$SKRIPT" ]; then
                 echo "    cmdline: $ZL script=$SKRIPT"
             else
