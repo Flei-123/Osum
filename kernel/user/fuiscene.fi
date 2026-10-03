@@ -67,7 +67,7 @@ export {
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
-    table_blob, table_set_blob, table_single,
+    table_blob, table_set_blob, table_single, table_two, table_icons,
     set_app, raise, ax_action, build_now, compact, set_enabled, repaint_now,
     canvas, role_col, cv_rect, cv_round, cv_ring, cv_text, set_nohit,
     R_FIELD, R_BORDER, R_ACCENT, R_SUCCESS, R_TEXT, R_MUTED, R_SURFACE, R_ONFILL,
@@ -78,6 +78,8 @@ export {
     dialog_open, dialog_is_open, dialog_result, KEY_DIALOG,
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
+    memo, memo_text, memo_set, open_plain, set_flags, begin, win_id, keys_always, has_focus,
+    key_seq, key_any,
 }
 
 const NONE: usize = 4294967295
@@ -158,6 +160,8 @@ static mut s_en: u64 = 0
 static mut s_caret_on: bool = true
 static mut s_esecret: [bool; 8] = [false; 8]
 static mut s_lastkey: u64 = 0
+static mut s_kseq: u64 = 0
+static mut s_kany: u64 = 0
 static mut s_caret_t: u64 = 0
 
 fn ebuf(k: u64) -> u64 {
@@ -282,11 +286,334 @@ fn entry_secret(key: u64, on: bool) {
     touch()
 }
 
+// How many keys the window has seen, and the last one -- no matter who took
+// it (`last_key` only reports keys nobody took).
+fn key_seq() -> u64 {
+    return s_kseq
+}
+
+fn key_any() -> u64 {
+    return s_kany
+}
+
 // The last key that no field or table took; cleared on read (0 = none).
 fn last_key() -> u64 {
     let k: u64 = s_lastkey
     s_lastkey = 0
     return k
+}
+
+// ------------------------------------------------- a multi-line field
+//
+// ONE per window (a note, a description, a message). The text lives here
+// (4095 octets), found by KEY like the fields; Enter starts a new line, Up /
+// Down / Home / End move by lines, the rest is the one-line editing of
+// `fuiapp.edit`. The first visible line scrolls to keep the caret in view.
+const MEMO_CAP: u64 = 4096
+const MEMO_LH: u64 = 22
+static mut s_mbuf: [u8; 4096] = [0 as u8; 4096]
+static mut s_mline: [u8; 320] = [0 as u8; 320]
+static mut s_mcar: usize = 0
+static mut s_mtop: u64 = 0
+static mut s_mkey: u64 = 0
+static mut s_mnode: usize = 4294967295
+
+fn mbuf() -> u64 {
+    return (&s_mbuf[0 as usize]) as u64
+}
+
+fn memo_text(key: u64) -> u64 {
+    if key != s_mkey {
+        return 0
+    }
+    return mbuf()
+}
+
+fn memo_set(key: u64, text: u64) {
+    s_mkey = key
+    var m: u64 = ulib.length(text)
+    if m > MEMO_CAP - 1 {
+        m = MEMO_CAP - 1
+    }
+    var j: u64 = 0
+    while j < m {
+        __mmio_write8((mbuf() + j) as *mut u8, __mmio_read8((text + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((mbuf() + m) as *mut u8, 0 as u8)
+    s_mcar = m as usize
+    s_mtop = 0
+    touch()
+}
+
+// Number of lines (an empty text has one) and the start of line `l`.
+fn memo_lines() -> u64 {
+    var n: u64 = 1
+    var i: u64 = 0
+    while __mmio_read8((mbuf() + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((mbuf() + i) as *mut u8) == 10 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn memo_line_start(l: u64) -> u64 {
+    var i: u64 = 0
+    var cur: u64 = 0
+    while cur < l {
+        let c: u8 = __mmio_read8((mbuf() + i) as *mut u8)
+        if c == 0 as u8 {
+            return i
+        }
+        if c == 10 as u8 {
+            cur = cur + 1
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Length of the line that starts at `st` (without the newline).
+fn memo_line_len(st: u64) -> u64 {
+    var n: u64 = 0
+    while true {
+        let c: u8 = __mmio_read8((mbuf() + st + n) as *mut u8)
+        if c == 0 as u8 || c == 10 as u8 {
+            break
+        }
+        n = n + 1
+    }
+    return n
+}
+
+// Line and column (in octets) of the caret.
+fn memo_caret_line() -> u64 {
+    var l: u64 = 0
+    var i: u64 = 0
+    while i < s_mcar as u64 {
+        if __mmio_read8((mbuf() + i) as *mut u8) == 10 as u8 {
+            l = l + 1
+        }
+        i = i + 1
+    }
+    return l
+}
+
+fn memo_visible(h: u64) -> u64 {
+    if h < 12 + MEMO_LH {
+        return 1
+    }
+    return (h - 12) / MEMO_LH
+}
+
+fn memo_reveal(h: u64) {
+    let l: u64 = memo_caret_line()
+    let vis: u64 = memo_visible(h)
+    if l < s_mtop {
+        s_mtop = l
+    }
+    if l >= s_mtop + vis {
+        s_mtop = l + 1 - vis
+    }
+}
+
+// Move the caret to line `l`, column `col` (octets, cut to the line and to
+// a character boundary).
+fn memo_goto(l: u64, col: u64) {
+    let st: u64 = memo_line_start(l)
+    var ln: u64 = memo_line_len(st)
+    var c: u64 = col
+    if c > ln {
+        c = ln
+    }
+    while c > 0 && c < ln
+        && (__mmio_read8((mbuf() + st + c) as *mut u8) & 192 as u8) == 128 as u8 {
+        c = c - 1
+    }
+    s_mcar = (st + c) as usize
+}
+
+fn memo_key(key: u64, h: u64) {
+    let l: u64 = memo_caret_line()
+    let st: u64 = memo_line_start(l)
+    let col: u64 = (s_mcar as u64) - st
+    if key == wlib.KEY_ENTER {
+        let n: u64 = ulib.length(mbuf())
+        if n + 1 < MEMO_CAP {
+            var i: u64 = n
+            while i > s_mcar as u64 {
+                __mmio_write8((mbuf() + i) as *mut u8,
+                    __mmio_read8((mbuf() + i - 1) as *mut u8))
+                i = i - 1
+            }
+            __mmio_write8((mbuf() + s_mcar as u64) as *mut u8, 10 as u8)
+            __mmio_write8((mbuf() + n + 1) as *mut u8, 0 as u8)
+            s_mcar = s_mcar + 1
+        }
+    } else if key == wlib.KEY_UP {
+        if l > 0 {
+            memo_goto(l - 1, col)
+        }
+    } else if key == wlib.KEY_DOWN {
+        if l + 1 < memo_lines() {
+            memo_goto(l + 1, col)
+        }
+    } else if key == wlib.KEY_HOME {
+        s_mcar = st as usize
+    } else if key == wlib.KEY_END {
+        s_mcar = (st + memo_line_len(st)) as usize
+    } else {
+        fuiapp.edit(mbuf(), (MEMO_CAP - 1) as usize, (&s_mcar) as *mut usize, key, false)
+    }
+    memo_reveal(h)
+    s_caret_on = true
+    s_caret_t = fuiapp.now_ms()
+    touch()
+}
+
+fn draw_memo(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 8.0,
+        (*t).field | 4278190080 as u32)
+    let focus: bool = widget.w_is_focus(e)
+    var ring: u32 = (*t).border_col
+    if focus {
+        ring = (*t).accent
+    }
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
+        ring | 4278190080 as u32)
+    let vis: u64 = memo_visible(h)
+    let nln: u64 = memo_lines()
+    let cl: u64 = memo_caret_line()
+    var r: u64 = 0
+    while r < vis && s_mtop + r < nln {
+        let l: u64 = s_mtop + r
+        let st: u64 = memo_line_start(l)
+        var n: u64 = memo_line_len(st)
+        if n > 318 {
+            n = 318
+        }
+        var j: u64 = 0
+        while j < n {
+            __mmio_write8(((&s_mline[0 as usize]) as u64 + j) as *mut u8,
+                __mmio_read8((mbuf() + st + j) as *mut u8))
+            j = j + 1
+        }
+        __mmio_write8(((&s_mline[0 as usize]) as u64 + n) as *mut u8, 0 as u8)
+        // a text field's geometry for this line: font size, left inset,
+        // baseline -- the lines look like the one-line fields' text
+        var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+        let ly: u64 = y + 6 + r * MEMO_LH
+        widget.w_place(&fe, x as f64, ly as f64, w as f64, MEMO_LH as f64)
+        let px: f64 = render.field_px(c, &fe)
+        let x0: f64 = render.field_text_x0(c, &fe)
+        var top: f64 = 0.0
+        var lh: f64 = 0.0
+        let by: f64 = render.field_line(c, &fe, &top, &lh)
+        if n > 0 {
+            let _tw: f64 = painter.text(z, x0, by, (w as f64) - (x0 - (x as f64)) - 6.0,
+                px, (*t).text | 4278190080 as u32,
+                (&s_mline[0 as usize]) as u64, n as usize, painter.TEXT_L)
+        }
+        if focus && l == cl && s_caret_on {
+            let cc: u64 = (s_mcar as u64) - st
+            var fm: render.FieldMeas = render.field_meas_new(c, &fe)
+            let cx: f64 = x0 + render.field_meas((&fm) as u64,
+                (&s_mline[0 as usize]) as u64, cc as usize)
+            painter.caret_bar(z, cx, top, lh, 1.0,
+                (*t).text | 4278190080 as u32)
+        }
+        r = r + 1
+    }
+}
+
+// A multi-line field `w` x `h` wide. `text` is only the START value.
+fn memo(parent: usize, key: u64, w: u64, h: u64, text: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_widget_kind(sc(), i, widget.KIND_TEXTBOX)
+    scene.node_set_size(sc(), i, w as f64, h as f64)
+    scene.node_set_draw(sc(), i, 0, draw_memo)
+    scene.node_set_id(sc(), i, key as u32)
+    if s_mkey != key {
+        if text != 0 {
+            memo_set(key, text)
+        } else {
+            memo_set(key, (&s_empty[0 as usize]) as u64)
+        }
+    }
+    s_mnode = i
+    return i
+}
+
+// A press inside the memo puts the caret at the pointer (line from y, the
+// boundary closest to x measured with the field's font).
+fn memo_click(x: u64, y: u64) {
+    let i: usize = s_mnode
+    if i == NONE || i >= scene.scene_count(sc()) || x < node_x(i)
+        || x >= node_x(i) + node_w(i) || y < node_y(i)
+        || y >= node_y(i) + node_h(i) {
+        return
+    }
+    let c: *mut render.Ctx = fuiapp.ctx()
+    var rel: u64 = 0
+    if y > node_y(i) + 6 {
+        rel = (y - node_y(i) - 6) / MEMO_LH
+    }
+    var l: u64 = s_mtop + rel
+    let nl: u64 = memo_lines()
+    if l >= nl {
+        l = nl - 1
+    }
+    let st: u64 = memo_line_start(l)
+    let n: u64 = memo_line_len(st)
+    var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&fe, node_x(i) as f64, node_y(i) as f64, node_w(i) as f64,
+        MEMO_LH as f64)
+    var fm: render.FieldMeas = render.field_meas_new(c, &fe)
+    let rx: f64 = (x as f64) - render.field_text_x0(c, &fe)
+    var j: u64 = 0
+    while j < n && j < 318 {
+        __mmio_write8(((&s_mline[0 as usize]) as u64 + j) as *mut u8,
+            __mmio_read8((mbuf() + st + j) as *mut u8))
+        j = j + 1
+    }
+    var best: u64 = 0
+    var bestd: f64 = rx
+    if bestd < 0.0 {
+        bestd = 0.0 - bestd
+    }
+    var bi: u64 = 1
+    while bi <= j {
+        let atb: bool = bi == j
+            || (__mmio_read8((mbuf() + st + bi) as *mut u8) & 192 as u8) != 128 as u8
+        if atb {
+            let wv: f64 = render.field_meas((&fm) as u64,
+                (&s_mline[0 as usize]) as u64, bi as usize)
+            var dv: f64 = wv - rx
+            if dv < 0.0 {
+                dv = 0.0 - dv
+            }
+            if dv < bestd {
+                bestd = dv
+                best = bi
+            }
+        }
+        bi = bi + 1
+    }
+    s_mcar = (st + best) as usize
+    s_caret_on = true
+    s_caret_t = fuiapp.now_ms()
+    touch()
 }
 
 // ------------------------------------------------------------ the popup
@@ -398,12 +725,71 @@ fn pop_paint() {
 // `refresh`). false when fUi could not get a surface (the caller falls
 // back to wlib).
 fn open(x: u64, y: u64, w: u64, h: u64, title: u64, build: fn()) -> bool {
-    if !wlib.begin(false, false) {
+    if !begin() {
         return false
     }
     if !fuiapp.open_window(x, y, w, h, title) {
         return false
     }
+    return start(build)
+}
+
+// A frameless window on its own layer (start menu, tray popup, lock
+// screen): the program decides where it stands (`x`, `y` -- anchored to the
+// task bar by its own rule) and on which layer (wlibc.L_*).
+fn open_plain(x: u64, y: u64, w: u64, h: u64, title: u64, layer: u64,
+    build: fn()) -> bool {
+    if !begin() {
+        return false
+    }
+    if !fuiapp.open_plain(x, y, w, h, title, layer) {
+        return false
+    }
+    return start(build)
+}
+
+// The two switches wlib.begin takes (the acceptance runs' counter-proofs
+// `nohit` / `noclip`); call before the first `begin`/`open`.
+static mut s_f_nohit: bool = false
+static mut s_f_noclip: bool = false
+static mut s_begun: bool = false
+
+fn set_flags(nohit: bool, noclip: bool) {
+    s_f_nohit = nohit
+    s_f_noclip = noclip
+}
+
+// Bring up the toolkit (wlib's surface, fonts, theme). Safe to call twice;
+// a program that wants to test for "no surface" before it opens anything
+// calls it itself.
+fn begin() -> bool {
+    if s_begun {
+        return true
+    }
+    if !wlib.begin(s_f_nohit, s_f_noclip) {
+        return false
+    }
+    s_begun = true
+    return true
+}
+
+// The window of the program (what wlib calls by number).
+fn win_id() -> u64 {
+    return fuiapp.win()
+}
+
+// This window ALSO gets the keys while it is not the focus window (a
+// start menu lies on a layer that never takes the focus).
+fn keys_always(on: bool) {
+    let _k: u64 = wlib.win_keys(fuiapp.win(), on)
+}
+
+// Does the window server say this window has the keyboard?
+fn has_focus() -> bool {
+    return wlib.win_fokus(fuiapp.win())
+}
+
+fn start(build: fn()) -> bool {
     *buildf_slot() = build
     // NOT `scene_new()` / `sheet_new()`: they return their ~100 KB by
     // value, which a user stack does not hold. The static memory is zero,
@@ -481,6 +867,7 @@ fn rebuild() {
         s_im_node[(k) as usize] = NONE
         k = k + 1
     }
+    s_mnode = NONE
     k = 0
     while k < s_en {
         s_enode[(k) as usize] = NONE
@@ -904,6 +1291,7 @@ fn pump() -> u64 {
             let _d: u32 = fuiwirt.host_pointer_down(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
             entry_click(ev.x, ev.y)
+            memo_click(ev.x, ev.y)
             let ik: u64 = im_press(ev.x, ev.y)
             if ik != 0 {
                 hit = ik
@@ -921,6 +1309,10 @@ fn pump() -> u64 {
             let _c: u32 = fuiwirt.host_pointer_up(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
         } else if ev.kind == fuiapp.EV_KEY {
+            // every key is counted, whoever takes it (a start menu hears
+            // Esc and the arrow keys while the search field has the focus)
+            s_kseq = s_kseq + 1
+            s_kany = ev.key
             let fk: usize = fuiwirt.host_focus(w)
             var fslot: u64 = NO_SLOT
             if fk != fuiwirt.KEINER {
@@ -935,6 +1327,9 @@ fn pump() -> u64 {
                 if r != 0 {
                     hit = r
                 }
+            } else if fk != fuiwirt.KEINER && fk == s_mnode
+                && ev.key != wlib.KEY_TAB {
+                memo_key(ev.key, node_h(fk))
             } else if fslot != NO_SLOT && ev.key != wlib.KEY_TAB {
                 // a text field has the keyboard: Enter activates it, the
                 // rest edits its text
@@ -973,7 +1368,7 @@ fn pump() -> u64 {
     // allows it (never under /etc/uitrace: the test VM is too slow for a
     // repaint every half second)
     let fk2: usize = fuiwirt.host_focus(w)
-    if fk2 != fuiwirt.KEINER && slot_of_node(fk2) != NO_SLOT
+    if fk2 != fuiwirt.KEINER && (slot_of_node(fk2) != NO_SLOT || fk2 == s_mnode)
         && wlib.blink_enabled() {
         let t: u64 = fuiapp.now_ms()
         if t >= s_caret_t + 530 {
@@ -1197,24 +1592,33 @@ fn say_texts() {
 // a header. Keys: Up/Down/PgUp/PgDn/Home/End move the selection, Enter
 // (and a second click on the selected row) activates -- `pump` then
 // answers the table's key; a click on a header cell sets `table_head_col`.
-const CT_MAX: u64 = 3
+const CT_MAX: u64 = 4
 const CT_COLS: u64 = 6
 const ROW_H: u64 = 28
+// a two-line row (name above, description below), and the icon column
+const ROW2_H: u64 = 52
+const ICON_W: u64 = 30
 const HEAD_H: u64 = 28
 const HEAD_ROW: u64 = 4294967295
 static mut s_ct_n: u64 = 0
-static mut s_ct_key: [u64; 3] = [0 as u64; 3]
-static mut s_ct_node: [usize; 3] = [4294967295 as usize; 3]
-static mut s_ct_rows: [u64; 3] = [0 as u64; 3]
-static mut s_ct_cols: [u64; 3] = [1 as u64; 3]
-static mut s_ct_top: [u64; 3] = [0 as u64; 3]
-static mut s_ct_sel: [u64; 3] = [0 as u64; 3]
-static mut s_ct_head: [bool; 3] = [false; 3]
+static mut s_ct_key: [u64; 4] = [0 as u64; 4]
+static mut s_ct_node: [usize; 4] = [4294967295 as usize; 4]
+static mut s_ct_rows: [u64; 4] = [0 as u64; 4]
+static mut s_ct_cols: [u64; 4] = [1 as u64; 4]
+static mut s_ct_top: [u64; 4] = [0 as u64; 4]
+static mut s_ct_sel: [u64; 4] = [0 as u64; 4]
+static mut s_ct_head: [bool; 4] = [false; 4]
+// row height of each table, two-line mode, the row-icon array (one word per
+// row: 0 none, bit 63 set = an icon of the icon font, "OSYM" picture, else a
+// colour tile with the first letter of the row)
+static mut s_ct_rh: [u64; 4] = [28 as u64; 4]
+static mut s_ct_two: [bool; 4] = [false; 4]
+static mut s_ct_icons: [u64; 4] = [0 as u64; 4]
 // A table where ONE click on a row already activates it (a list the
 // program wants to hear from at once, e.g. a task list with a kill button).
-static mut s_ct_one: [bool; 3] = [false; 3]
-static mut s_ct_colw: [u64; 18] = [0 as u64; 18]
-static mut s_ct_get: [u8; 24] = [0 as u8; 24]
+static mut s_ct_one: [bool; 4] = [false; 4]
+static mut s_ct_colw: [u64; 24] = [0 as u64; 24]
+static mut s_ct_get: [u8; 32] = [0 as u8; 32]
 static mut s_ct_last_row: u64 = 4294967295
 static mut s_ct_last_t: u64 = 0
 static mut s_ct_headcol: u64 = 4294967295
@@ -1247,7 +1651,7 @@ fn ct_get_slot(k: u64) -> *mut fn(u64, u64) -> u64 {
 
 // A table fed from a text blob (what wlib.table took): lines end in a
 // newline, cells in a tab, the FIRST line is the header.
-static mut s_ct_blob: [u64; 3] = [0 as u64; 3]
+static mut s_ct_blob: [u64; 4] = [0 as u64; 4]
 static mut s_cellbuf: [u8; 200] = [0 as u8; 200]
 
 fn blob_rows(blob: u64) -> u64 {
@@ -1327,7 +1731,7 @@ fn ct_visible(k: u64, h: u64) -> u64 {
     if s_ct_head[(k) as usize] {
         hh = h - HEAD_H
     }
-    return hh / ROW_H
+    return hh / s_ct_rh[(k) as usize]
 }
 
 // Make the selected row visible (the first row shown is `top`).
@@ -1373,32 +1777,141 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
         by = y + HEAD_H + 2
     }
     let vis: u64 = ct_visible(k, h)
+    let rh: u64 = s_ct_rh[(k) as usize]
     var r: u64 = 0
     while r < vis && s_ct_top[(k) as usize] + r < s_ct_rows[(k) as usize] {
         let ri: u64 = s_ct_top[(k) as usize] + r
         let on: bool = ri == s_ct_sel[(k) as usize]
+        let ry: u64 = by + r * rh
         if on {
-            painter.round_rect(z, (x + 4) as f64, (by + r * ROW_H) as f64,
-                (w - 8) as f64, ROW_H as f64, 6.0,
+            painter.round_rect(z, (x + 4) as f64, ry as f64,
+                (w - 8) as f64, rh as f64, 6.0,
                 (*t).selection | 4278190080 as u32)
         }
         var tok: u32 = style.TOK_TEXT
+        var tok2: u32 = style.TOK_TEXT_MUTED
         if on {
             tok = style.TOK_SELECTION_TEXT
+            tok2 = style.TOK_SELECTION_TEXT
         }
-        var cx2: u64 = x
-        var col2: u64 = 0
-        while col2 < s_ct_cols[(k) as usize] {
-            let cw: u64 = s_ct_colw[(k * CT_COLS + col2) as usize]
-            text_tok(cx2 + 10, by + r * ROW_H + (ROW_H - 24) / 2, cw - 12,
-                ct_text(k, ri, col2), tok)
-            cx2 = cx2 + cw
-            col2 = col2 + 1
+        var ix: u64 = 0
+        if s_ct_icons[(k) as usize] != 0 {
+            let word: u64 = __mmio_read64((s_ct_icons[(k) as usize] + ri * 8) as *mut u64)
+            row_icon(word, x + 8, ry, rh, ct_text(k, ri, 0), on)
+            ix = ICON_W
+        }
+        if s_ct_two[(k) as usize] {
+            // line 1 = cell 0, line 2 = cell 1 (muted)
+            text_tok(x + 10 + ix, ry + 4, w - 22 - ix, ct_text(k, ri, 0), tok)
+            text_tok(x + 10 + ix, ry + 4 + 22, w - 22 - ix, ct_text(k, ri, 1), tok2)
+        } else {
+            var cx2: u64 = x
+            var col2: u64 = 0
+            while col2 < s_ct_cols[(k) as usize] {
+                let cw: u64 = s_ct_colw[(k * CT_COLS + col2) as usize]
+                var off: u64 = 0
+                if col2 == 0 {
+                    off = ix
+                }
+                text_tok(cx2 + 10 + off, ry + (rh - 24) / 2, cw - 12 - off,
+                    ct_text(k, ri, col2), tok)
+                cx2 = cx2 + cw
+                col2 = col2 + 1
+            }
         }
         r = r + 1
     }
     painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
         (*t).border_col | 4278190080 as u32)
+}
+
+// The icon of a row (one word, see s_ct_icons): an icon of the icon font
+// (bit 63 set), an "OSYM" picture of a bundle (blitted at the largest whole
+// factor that fits the tile), or a colour tile with the first letter.
+fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
+    if word == 0 {
+        return
+    }
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    let tile: u64 = 22
+    let ty: u64 = y + (rh - tile) / 2
+    if (word & wlib.ICON_TAG) != 0 {
+        var col: u32 = (*t).text | 4278190080 as u32
+        if on {
+            col = (*t).selection_text | 4278190080 as u32
+        }
+        fuiapp.glyph(word & 65535, x + 1, ty, tile, col)
+        return
+    }
+    if wlib.is_image_pub(word) {
+        let iw: u64 = __mmio_read32((word + 4) as *mut u32) as u64
+        let ih: u64 = __mmio_read32((word + 8) as *mut u32) as u64
+        if iw == 0 || ih == 0 || iw > 64 || ih > 64 {
+            return
+        }
+        var sc: u64 = tile / iw
+        let sy: u64 = tile / ih
+        if sy < sc {
+            sc = sy
+        }
+        if sc == 0 {
+            sc = 1
+        }
+        let dw: u64 = iw * sc
+        let dh: u64 = ih * sc
+        var ox: u64 = 0
+        if tile > dw {
+            ox = (tile - dw) / 2
+        }
+        var oy: u64 = 0
+        if tile > dh {
+            oy = (tile - dh) / 2
+        }
+        var im: uiimage.Image = uiimage.image_wrap(word + 12, iw as usize,
+            ih as usize, 0)
+        uiimage.image_draw_rect(z, &im, (x + 1 + ox) as f64,
+            (ty + oy) as f64, dw as f64, dh as f64, 0 as u32)
+        return
+    }
+    // a colour tile with the first letter of the row
+    painter.round_rect(z, (x + 1) as f64, ty as f64, tile as f64, tile as f64,
+        6.0, (word as u32) | 4278190080 as u32)
+    if txt != 0 {
+        var one: [u8; 2] = [0 as u8; 2]
+        one[0 as usize] = __mmio_read8(txt as *mut u8)
+        if one[0 as usize] != 0 as u8 {
+            text_tok(x + 8, ty - 1, 16, (&one[0 as usize]) as u64,
+                style.TOK_TEXT_ON_ACCENT)
+        }
+    }
+}
+
+// Two lines per row: the cell 0 of a row is the name, the cell 1 the
+// description under it (muted). Call after `table`; survives a rebuild.
+fn table_two(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_two[(k) as usize] = on
+    if on {
+        s_ct_rh[(k) as usize] = ROW2_H
+    } else {
+        s_ct_rh[(k) as usize] = ROW_H
+    }
+    touch()
+}
+
+// An array with one word per row for the icon column (0 = no icon in this
+// row; see `row_icon`). The array must stay alive; 0 removes the column.
+fn table_icons(key: u64, arr: u64) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    s_ct_icons[(k) as usize] = arr
+    touch()
 }
 
 // A table (or, with one column and no header, a list) `w` x `h` wide.
@@ -1420,6 +1933,9 @@ fn table(parent: usize, key: u64, w: u64, h: u64, cols: u64, head: bool,
         s_ct_key[(k) as usize] = key
         s_ct_top[(k) as usize] = 0
         s_ct_sel[(k) as usize] = 0
+        s_ct_rh[(k) as usize] = ROW_H
+        s_ct_two[(k) as usize] = false
+        s_ct_icons[(k) as usize] = 0
         var c: u64 = 0
         while c < CT_COLS {
             s_ct_colw[(k * CT_COLS + c) as usize] = (w - 2) / cols
@@ -1524,8 +2040,9 @@ fn ct_press(k: u64, x: u64, y: u64) -> u64 {
     if y < by {
         return 0
     }
-    let row: u64 = s_ct_top[(k) as usize] + (y - by) / ROW_H
-    if (y - by) / ROW_H >= ct_visible(k, nh) || row >= s_ct_rows[(k) as usize] {
+    let rhp: u64 = s_ct_rh[(k) as usize]
+    let row: u64 = s_ct_top[(k) as usize] + (y - by) / rhp
+    if (y - by) / rhp >= ct_visible(k, nh) || row >= s_ct_rows[(k) as usize] {
         return 0
     }
     let now: u64 = fuiapp.now_ms()
@@ -2037,6 +2554,8 @@ fn ax_nodes(buf: u64, have: u64, room: u64) -> u64 {
                 let sl: u64 = slot_of_node(i)
                 if sl != NO_SLOT {
                     ax_copy(p + wlib.AXN_NAME, ebuf(sl), ENTRY_CAP, wlib.AXN_NAMEMAX)
+                } else if i == s_mnode {
+                    ax_copy(p + wlib.AXN_NAME, mbuf(), MEMO_CAP, wlib.AXN_NAMEMAX)
                 }
             } else if role != wlib.AXR_TABLE && role != wlib.AXR_LIST {
                 ax_copy(p + wlib.AXN_NAME, widget.w_text(e),
