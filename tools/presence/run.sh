@@ -242,7 +242,7 @@ MSGN=$(grep -c 'msg.get' "$UI" || true)
 num "Texte aus dem Sprachkatalog (msg.get)" "$MSGN" ge 5
 # Die Schluessel stehen in BEIDEN Katalogen.
 FEHLT=0
-for k in $(grep -oE '"freunde\.[a-z]+' "$UI" | tr -d '"' | sort -u); do
+for k in $(grep -oE '"freunde\.[a-z_]+' "$UI" | tr -d '"' | sort -u); do
     grep -qa "^$k " locale/de/messages || FEHLT=$((FEHLT+1))
     grep -qa "^$k " locale/en/messages || FEHLT=$((FEHLT+1))
 done
