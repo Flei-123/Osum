@@ -465,16 +465,25 @@ orientbus serve 6000 &
 sleep -m 300
 social serve 6000 300 &
 sleep 3
+freunde --schuss --tab 2
+freunde --schuss --annehmen 0
+freunde --schuss --tab 3 --suche carla
 freunde --rahmen 900 --chat 0 --sende "aus der Leiste"
 EOS
+# r38: dora asks justin -- the bar's "Ausstehend" answers it
+python3 - "$PORT" "$SECRET" <<'PY'
+import sys; sys.path.insert(0, 'tools/social'); import host
+t = host.people(sys.argv[2])
+host.api(int(sys.argv[1]), t["dora"], "/api/kontakte/anfragen", {"konto": "u_JUSTIN"})
+PY
 A2_=(); for x in "${A_[@]}"; do A2_+=("${x/$TMPD\/A.img/$TMPD/B.img}"); done
 A3_=(); for x in "${A2_[@]}"; do A3_+=("${x/s1.sh/s2.sh}"); done
 python3 tools/osum/mkfs.py "${A3_[@]}" > "$TMPD/mkfs2.txt" 2>&1 || bad "mkfs (bar): $(tail -2 "$TMPD/mkfs2.txt")"
 mkdir -p docs/shots/social
 rm -f "$TMPD/mon"
-timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+timeout 200 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -kernel "$TMPD/k0.img" -m 512 -vga std \
-    -append "osum vfs bus gfx wm wig desk wmhold wiglong wmdauer nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 wigapp=/bin/sh,/t/s.sh wighalt=40 r3alle nokbd" \
+    -append "osum vfs bus gfx wm wig desk wmhold wiglong wmdauer nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 wigapp=/bin/sh,/t/s.sh wighalt=120 r3alle nokbd" \
     -serial "file:$TMPD/b.txt" -display none -no-reboot \
     -drive "file=$TMPD/B.img,format=raw,if=ide,index=0" \
     -netdev user,id=n1 -device e1000,netdev=n1,mac=52:54:00:0a:0b:0e \
@@ -482,7 +491,9 @@ timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -monitor "unix:$TMPD/mon,server,nowait" >/dev/null 2>&1 &
 QB=$!
 w=0
-while [ $w -lt 90 ] && ! grep -qa 'quelle=bus' "$TMPD/b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
+# the last run of the bar (the one that stays): its chat is open when this
+# line comes -- 'quelle=bus' alone now comes from the first, short runs
+while [ $w -lt 170 ] && ! grep -qa 'freunde: gesendet=' "$TMPD/b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
 sleep 6
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
     printf 'screendump %s\n' "$TMPD/bar.ppm" | timeout 10 socat - "unix-connect:$TMPD/mon" >/dev/null 2>&1 || true
@@ -492,7 +503,7 @@ kill -9 "$QB" 2>/dev/null; wait "$QB" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/b.txt" > "$TMPD/b.klar"
 B="$TMPD/b.klar"
 has "$B" "quelle=bus" "the bar found orient-bus and the social service"
-EIN=$(grep -a 'freunde: eintraege=' "$B" | head -1 | sed 's/.*eintraege=\([0-9]*\).*/\1/')
+EIN=$(grep -a 'freunde: eintraege=.*angemeldet=' "$B" | tail -1 | sed 's/.*eintraege=\([0-9]*\).*/\1/')
 # as many as justin has friends at fleikontakte right now, plus peter
 # (local) and zoe (lan2) on the device
 WANT=$(python3 - "$PORT" "$SECRET" <<'PY'
@@ -503,6 +514,21 @@ PY
 )
 [ "${EIN:-x}" = "$WANT" ] && ok "the bar shows justin's $WANT friends (fleitec + the device's own), from the service" \
     || { bad "the bar shows ${EIN:-no} entries instead of $WANT"; grep -a "freunde:\|social:" "$B" | head -5 | sed 's/^/        /'; }
+# r38: the tabs like Discord's friends view
+grep -aq "freunde: tab=2 liste=[0-9]* ausstehend=2 ein=2 " "$B" \
+    && ok "tab Ausstehend: two incoming from two providers (fleitec:dora, local:oma)" || bad "Ausstehend: $(grep -a 'freunde: tab=' "$B" | head -2)"
+grep -aq "freunde: accept fleitec:u_DORA ok" "$B" && ok "Annehmen: social.contacts.accept for dora" || bad "accept: $(grep -a 'freunde: accept' "$B" | head -2)"
+grep -aq "freunde: tab=3 liste=[0-9]* ausstehend=[0-9]* ein=[0-9]* treffer=[1-9]" "$B" \
+    && ok "tab Hinzufuegen: the search finds people at the providers" || bad "Hinzufuegen: $(grep -a 'freunde: tab=3' "$B" | head -2)"
+DREL=$(python3 - "$PORT" "$SECRET" <<'PY'
+import sys; sys.path.insert(0, 'tools/social'); import host
+st, j = host.api(int(sys.argv[1]), host.people(sys.argv[2])["justin"], "/api/kontakte/liste")
+print(next((i.get("status") for i in j.get("items", []) if i.get("konto") == "u_DORA"), "none"))
+PY
+)
+[ "$DREL" = freunde ] && ok "on the server dora is justin's friend now (accepted on OrientOS)" || bad "dora on the server: $DREL"
+[ "$(grep -a 'freunde: tab=' "$B" | tail -1 | sed 's/.*tab=\([0-9]\).* ein=\([0-9]*\).*/\1 \2/')" = "0 1" ] \
+    && ok "the bar starts on Online (anna is there), one request left (oma, local)" || bad "start tab: $(grep -a 'freunde: tab=' "$B" | tail -1)"
 grep -aq "freunde: gesendet=1" "$B" && ok "the bar wrote into the chat (social.messages.send)" || bad "the bar did not send: $(grep -a 'freunde:' "$B" | head -4)"
 grep -aq "freunde: chat=[a-z0-9]*:[A-Za-z_0-9]* nachrichten=[1-9]" "$B" && ok "the bar's chat window shows the conversation" || bad "chat window: $(grep -a 'freunde: chat' "$B" | head -2)"
 if [ -f "$TMPD/bar.ppm" ]; then

@@ -267,7 +267,7 @@ echo "== 8. the menu's path: sperre op 11 (wish), the kernel sleeps under the wi
 # DAILY-DRIVER (r143): the Start menu's "Energie sparen" writes a WISH (sperre
 # op 11) -- any user may, like signing out -- and the window server's loop
 # (kgui.standby_wache) puts the machine to sleep, locks the screen first and
-# answers in op 12: 1 slept and woke, 2 several processors run, 3 no S3.
+# answers in op 12: 1 slept and woke, 2 a processor did not stop (R_PARK / R_SMP), 3 no S3.
 # `standby --wish` is the same call as the menu makes, without the menu.
 B8="$TMPD/b8"
 mkdir -p "$B8"
@@ -319,9 +319,16 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
     case $ST8 in *suspended*) ok "the machine sleeps ($ST8)";; *) bad "state at the standby: '$ST8'";; esac
     n=$(grep -ac 'standby: antwort=1' "$L8"); num "the answer 1 (slept and woke), kernel + program" "$n" eq 2
     case $ST9 in *running*) ok "and it runs again after the wake-up ($ST9)";; *) bad "state after the wake-up: '$ST9'";; esac
-    lauf8 two 2
-    has "$L8" "standby: antwort=2" "with two processors the kernel REFUSES (answer 2) and does not half-sleep"
-    case $ST8 in *suspended*) bad "two processors: it slept after all ($ST8)";; *) ok "two processors: the machine keeps running ($ST8)";; esac
+    # DD-12 (K-004c): the other processors are parked before the sleep and started again
+    # after it -- with two and with four processors the menu's path now sleeps and wakes
+    # (tools/s3smp/run.sh measures the cores one by one, tools/s3dev/run.sh the devices)
+    for np in 2 4; do
+        lauf8 "cores$np" "$np"
+        n=$(grep -ac 'standby: antwort=1' "$L8"); num "$np processors: the answer 1 (slept and woke), kernel + program" "$n" eq 2
+        case $ST8 in *suspended*) ok "$np processors: the machine sleeps ($ST8)";; *) bad "$np processors: state at the standby: '$ST8'";; esac
+        case $ST9 in *running*) ok "$np processors: and it runs again after the wake-up ($ST9)";; *) bad "$np processors: state after the wake-up: '$ST9'";; esac
+        has "$L8" "s3: kerne wieder online=$np" "$np processors: all cores are back"
+    done
 else
     bad "build for the wish run"
     tail -6 "$B8/log" | sed 's/^/        /'

@@ -56,8 +56,11 @@ import arch.x86_64.apic
 import arch.x86_64.idt
 import gfx.gfx
 import arch.cpu
+import arch.x86_64.smp
+import pwr.s3dev
+import sched.time
 
-export { stage, suspend, R_OK_S3, R_NOS3, R_SMP, R_NOMEM_S3, R_NOWAKE }
+export { stage, stage_smp, suspend, R_OK_S3, R_NOS3, R_SMP, R_NOMEM_S3, R_NOWAKE, R_PARK, R_RESUME }
 
 // isr.s vector table, index 75 -> s3_vectors in smp.s
 const V_S3: u64 = 75
@@ -487,6 +490,9 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     asm("pushfq; pop rax", out("rax") & fl)
     let if_on: bool = (fl & 0x200) != 0
     let ticks_before: u64 = kstate.get(state, kstate.TICKS)
+    // DD-12: what the devices and the clock look like before the sleep
+    s3dev.prepare(state)
+    time.suspend_mark(state)
     asm("cli")
     vbe_save(buf)
     kbc_save(buf)
@@ -531,6 +537,15 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
     serial.dec(napic)
     serial.puts((&s_ba[0]) as u64)
     serial.dec(apic_bad)
+    serial.nl()
+
+    // DD-12: the wall clock goes on during S3, the kernel's counters do not
+    var s_uh: [u8; 18] = "s3: uhr schlaf=\0\0\0"
+    var s_us: [u8; 5] = " s\0\0\0"
+    let slept: u64 = time.resume_fix(state)
+    serial.puts((&s_uh[0]) as u64)
+    serial.dec(slept)
+    serial.puts((&s_us[0]) as u64)
     serial.nl()
 
     let lost: u64 = pci_lost(state, buf + 0x1000, npci)
@@ -636,6 +651,8 @@ fn cycle(state: u64, nr: u64, kaputt: bool, buf: u64, frame: u64) -> bool {
         serial.puts((&s_ms[0]) as u64)
         serial.nl()
     }
+    // DD-12: the devices' own state (rings, queues, slots, streams)
+    s3dev.resume(state, kstate.mode_on(state, kstate.M_S3LOSS))
     return true
 }
 
@@ -648,6 +665,40 @@ const R_NOS3: u64 = 1 // the machine offers no S3 (or it was not measured)
 const R_SMP: u64 = 2 // other processors are running; they would die in S3
 const R_NOMEM_S3: u64 = 3
 const R_NOWAKE: u64 = 4 // SLP_EN written, but the machine did not sleep
+const R_PARK: u64 = 5 // a processor did not stop in time (DD-12), no sleep
+const R_RESUME: u64 = 6 // slept and woke, but a processor did not come back
+
+// DD-12: one line per processor, so the runner can compare before/after.
+fn cores_report(state: u64, tag: u64) {
+    var s_k: [u8; 11] = "s3: kern \0\0"
+    var s_on: [u8; 9] = " online=\0"
+    var s_ti: [u8; 8] = " ticks=\0"
+    var s_id: [u8; 7] = " idle=\0"
+    var s_sw: [u8; 5] = " sw=\0"
+    var s_ta: [u8; 2] = " \0"
+    let n: u64 = cpu.count(state)
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&s_k[0]) as u64)
+        serial.puts(tag)
+        serial.puts((&s_ta[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_on[0]) as u64)
+        if cpu.online(state, i) {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_ti[0]) as u64)
+        serial.dec(cpu.get(state, i, cpu.C_TICKS))
+        serial.puts((&s_id[0]) as u64)
+        serial.dec(cpu.get(state, i, cpu.C_IDLERUNS))
+        serial.puts((&s_sw[0]) as u64)
+        serial.dec(cpu.get(state, i, cpu.C_SWITCHES))
+        serial.nl()
+        i = i + 1
+    }
+}
 
 fn suspend(state: u64) -> u64 {
     if !susp.ready(state) {
@@ -655,12 +706,6 @@ fn suspend(state: u64) -> u64 {
     }
     if !susp.s3_ok(state) || susp.facs(state) == 0 || susp.pm1a(state) == 0 {
         return R_NOS3
-    }
-    // K-004c: the application processors are not started again after
-    // the wake-up. Until they are, S3 with more than one processor
-    // online is refused and not half done.
-    if cpu.online_count(state) > 1 {
-        return R_SMP
     }
     let buf: u64 = mem.frame_run(state, BUF_FRAMES)
     if buf == 0 {
@@ -671,14 +716,63 @@ fn suspend(state: u64) -> u64 {
         mem.frame_free_run(state, buf, BUF_FRAMES)
         return R_NOMEM_S3
     }
+    // DD-12 (K-004c): the application processors are parked before the
+    // sleep and started again after it. A processor that does not stop
+    // means no sleep at all (R_PARK), never a half sleep.
+    var s_vor: [u8; 5] = "vor\0\0"
+    var s_nach: [u8; 7] = "nach\0\0\0"
+    var s_pk: [u8; 27] = "s3: kerne geparkt online=\0\0"
+    var s_pn: [u8; 27] = "s3: kerne nicht geparkt\0\0\0\0"
+    var s_wk: [u8; 26] = "s3: kerne wieder online=\0\0"
+    let multi: bool = cpu.online_count(state) > 1
+    let cores: u64 = cpu.count(state)
+    if multi {
+        cores_report(state, (&s_vor[0]) as u64)
+        if !smp.park_all(state) {
+            serial.puts((&s_pn[0]) as u64)
+            serial.nl()
+            mem.frame_free_run(state, buf, BUF_FRAMES)
+            mem.frame_free_run(state, frame, 1)
+            return R_PARK
+        }
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(cpu.online_count(state))
+        serial.nl()
+    }
     let n: u64 = kstate.get(state, kstate.TICKS)
     let back: bool = cycle(state, n, false, buf, frame)
     mem.frame_free_run(state, buf, BUF_FRAMES)
     mem.frame_free_run(state, frame, 1)
+    var res: u64 = R_NOWAKE
     if back {
-        return R_OK_S3
+        res = R_OK_S3
     }
-    return R_NOWAKE
+    if multi {
+        var up: u64 = cpu.online_count(state)
+        if !kstate.mode_on(state, kstate.M_S3NOSTART) {
+            up = smp.unpark_all(state)
+        }
+        serial.puts((&s_wk[0]) as u64)
+        serial.dec(up)
+        serial.nl()
+        if back && up != cores {
+            res = R_RESUME
+        }
+        // 300 ms of the machine running on all cores again, then the
+        // counters: every core's ticks and idle turns must have grown.
+        let hz: u64 = apic.tsc_hz(state)
+        let c0: u64 = apic.tsc()
+        var w: u64 = 0
+        while w < 400000000 {
+            if hz != 0 && apic.tsc() - c0 > hz * 3 / 10 {
+                w = 400000000
+            }
+            asm("pause")
+            w = w + 1
+        }
+        cores_report(state, (&s_nach[0]) as u64)
+    }
+    return res
 }
 
 fn stage(state: u64) {
@@ -762,4 +856,39 @@ fn stage(state: u64) {
     }
     serial.puts((&s_en[0]) as u64)
     serial.nl()
+}
+
+// DD-12: THE TEST ENTRY AFTER THE OTHER CORES RUN. Word `s3smp`: three sleeps
+// in a row from the kernel itself, each preceded by 300 ms of the machine
+// running on all cores (so that their counters have something to show).
+// `suspend` prints the per-core lines. Runs after `smp.stage`, where the
+// application processors stand in their scheduler loops -- the state a
+// running desktop has.
+fn stage_smp(state: u64) {
+    if !kstate.mode_on(state, kstate.M_S3SMP) {
+        return
+    }
+    var s_z: [u8; 17] = "s3: smp zyklus=\0\0"
+    var s_r: [u8; 6] = " rc=\0\0"
+    let hz: u64 = apic.tsc_hz(state)
+    var k: u64 = 1
+    while k <= 3 {
+        asm("sti")
+        let c0: u64 = apic.tsc()
+        var w: u64 = 0
+        while w < 400000000 {
+            if hz != 0 && apic.tsc() - c0 > hz * 3 / 10 {
+                w = 400000000
+            }
+            asm("pause")
+            w = w + 1
+        }
+        let r: u64 = suspend(state)
+        serial.puts((&s_z[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(r)
+        serial.nl()
+        k = k + 1
+    }
 }
