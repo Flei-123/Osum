@@ -160,7 +160,9 @@ echo ==G-NETDONE==
 cat /etc/network.conf
 echo ==G-TRUST==
 act call settings.set key=lock.idle value=600 --as helper
-sleep 8
+# 16 s and not 8: the 'n' comes from the host (after its waits and a photo);
+# on a loaded host it must still arrive before the question is asked again
+sleep 16
 act call settings.get key=lock.idle
 echo ==G-TRUST2==
 act call settings.set key=lock.idle value=600 --as helper
