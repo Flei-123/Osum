@@ -393,3 +393,11 @@ finds menu titles, context-menu rows and table rows from the new reports,
 `tools/clip2/run.sh` looks for `fuiscene.drop_accept`, `tools/check-ui.sh` lists
 the host modules (`fuiapp`, `fuiscene`, `fuied`, `lock`, `wlib`) as files that
 may touch fUi directly (four of them were red on main).
+
+**HiDPI (`ui_scale`)**: the scene tree now describes everything in design points
+and multiplies by the integer `wlibc.ui_scale()` (`s_S`, read at start; `sp(n)`,
+`spf(x)`, `scale()`). Fixed sizes (row, head, icon, scrollbar, dialog plate,
+memo line height) are functions of `s_S`; the width/height the program sees are
+in design points (`width()`/`height()`). `fuied` (the editor grid) scales its
+cells the same way. The header text of the first table column sits over the
+NAMES (after the row icon), not over the icons.
