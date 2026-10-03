@@ -440,7 +440,9 @@ if waitfor "==S-WAIT==" 150; then
     waitforn "t=Programme" 60 && ok "the window opened" || bad "no window"
     mark
     waitnew "Fertig: Katalog neu" 120 && ok "the window fetched the signed catalog by itself (first start): 'Fertig: Katalog neu'" || bad "no 'Fertig: Katalog neu'"
-    for t in Aktualisieren Installieren "Neue Fassung" Entfernen; do wclean | grep -qaF "t=$t" && ok "the window shows '$t'" || bad "no '$t'"; done
+    for t in Aktualisieren Installieren "Neue Fassung" Entfernen; do
+        MARK=1; waitnew "$t" 20 && ok "the window shows '$t'" || bad "no '$t'"
+    done
     read -r OX OY < <(wclean | grep -ao 'ax=[0-9]* ay=[0-9]*' | tail -1 | tr -cd '0-9 ')
     BI=$((OX + 146 + 58)); BY=$((OY + 348 + 17))      # the button Installieren
     DY=$((OY + 299)); DYES=$((OX + 223)); DNO=$((OX + 376))   # the question: yes / no
