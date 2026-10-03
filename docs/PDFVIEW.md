@@ -75,6 +75,7 @@ PDF-Datei vorgibt (Breiten aus `/Widths`, `/W` bzw. den Metriken der Standardsch
   **Grenzen:** ein Wort, das die Datei als **Bild** enthält (Scan ohne Textschicht), wird nicht gefunden; Text
   in Schriften ohne ToUnicode kann falsche Zeichen liefern; keine Regex, kein „ganzes Wort", kein Suchen über
   Dateien; bis 1024 Seiten (danach wird nicht mehr gezählt).
+* **Tasten und Textfelder:** die Seitentasten (Leertaste, `n`, `p`, `+`, `-` …) gelten nur, wenn kein Textfeld den Fokus hat — ein Suchwort mit „n“ blättert nicht mehr. (Am Bildschirm gefunden: `--find` stürzte beim ersten Start mit Null-Zeiger ab, weil das Feld noch nicht gebaut war.)
 * **Keine Textauswahl/Kopieren, keine Lesezeichen/Links, keine Formulare, keine Ebenen.**
 * **Kein Mausrad** (fuiapp liefert keine Radereignisse): Scrollen mit Tasten oder Ziehen.
 * Fenstergröße fest (900 × 700).
@@ -93,7 +94,7 @@ Zehn Abschnitte, alle gegen etwas **Äußeres**:
 5. **Fuzz:** 800 zufällige Verderbungen, nie Absturz, nie Hängen.
 6. Tempo: 40 Seiten < 5 s, 150 Seiten mit 9000 Zeilen < 15 s (Host). **6b Serifen:** dieselbe Seite mit und ohne die
    Serif-Schnitte gegen poppler. **6c Suche:** Treffer je Seite gegen `pdftotext` + Python-Vergleich
-   (`tools/pdf/search_cmp.py`: 55 Fälle, alle gleich), Markierung per Pixelzählung (gelb, Text bleibt schwarz),
+   (`tools/pdf/search_cmp.py`: 55 Seiten, alle gleich; im Ganzen **111/0**), Markierung per Pixelzählung (gelb, Text bleibt schwarz),
    300 beschädigte Dateien durchsucht.
 7. **Im Gast** (QEMU, OrientOS-Bau): `pdfview --render` meldet die Prüfsumme der gemalten
    Seite — sie muss der des Wirts **Bit für Bit** gleichen.
