@@ -67,7 +67,7 @@ export {
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value,
-    table_blob, table_set_blob, table_single, table_two, table_icons,
+    table_blob, table_set_blob, table_single, table_two, table_icons, table_list,
     set_app, raise, ax_action, build_now, compact, set_enabled, repaint_now,
     canvas, role_col, cv_rect, cv_round, cv_ring, cv_text, set_nohit,
     R_FIELD, R_BORDER, R_ACCENT, R_SUCCESS, R_TEXT, R_MUTED, R_SURFACE, R_ONFILL,
@@ -1612,6 +1612,8 @@ static mut s_ct_head: [bool; 4] = [false; 4]
 // row: 0 none, bit 63 set = an icon of the icon font, "OSYM" picture, else a
 // colour tile with the first letter of the row)
 static mut s_ct_rh: [u64; 4] = [28 as u64; 4]
+// a blob table without the header line (a plain list)
+static mut s_ct_plain: [bool; 4] = [false; 4]
 static mut s_ct_two: [bool; 4] = [false; 4]
 static mut s_ct_icons: [u64; 4] = [0 as u64; 4]
 // A table where ONE click on a row already activates it (a list the
@@ -1653,6 +1655,19 @@ fn ct_get_slot(k: u64) -> *mut fn(u64, u64) -> u64 {
 // newline, cells in a tab, the FIRST line is the header.
 static mut s_ct_blob: [u64; 4] = [0 as u64; 4]
 static mut s_cellbuf: [u8; 200] = [0 as u8; 200]
+
+// Number of newline-terminated lines.
+fn blob_lines(blob: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while __mmio_read8((blob + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((blob + i) as *mut u8) == 10 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
 
 fn blob_rows(blob: u64) -> u64 {
     var n: u64 = 0
@@ -1717,6 +1732,12 @@ fn no_get(row: u64, col: u64) -> u64 {
 
 fn ct_text(k: u64, row: u64, col: u64) -> u64 {
     if s_ct_blob[(k) as usize] != 0 {
+        if s_ct_plain[(k) as usize] {
+            if row == HEAD_ROW {
+                return (&s_empty[0 as usize]) as u64
+            }
+            return blob_cell(s_ct_blob[(k) as usize], row, col)
+        }
         if row == HEAD_ROW {
             return blob_cell(s_ct_blob[(k) as usize], 0, col)
         }
@@ -1875,8 +1896,10 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
         return
     }
     // a colour tile with the first letter of the row
+    // the word is a colour as wlibc hands them out (blue in the low octet)
+    let rgb: u32 = (((word & 255) << 16) | (word & 65280) | ((word >> 16) & 255)) as u32
     painter.round_rect(z, (x + 1) as f64, ty as f64, tile as f64, tile as f64,
-        6.0, (word as u32) | 4278190080 as u32)
+        6.0, rgb | 4278190080 as u32)
     if txt != 0 {
         var one: [u8; 2] = [0 as u8; 2]
         one[0 as usize] = __mmio_read8(txt as *mut u8)
@@ -2258,6 +2281,28 @@ fn table_blob(parent: usize, key: u64, w: u64, h: u64, cols: u64,
     return i
 }
 
+// A plain list fed from a blob: ONE row per line (no header line), cells
+// separated by tabs. Combine with `table_two` / `table_icons` / `table_single`.
+fn table_list(parent: usize, key: u64, w: u64, h: u64, cols: u64,
+    blob: u64) -> usize {
+    let n: u64 = blob_lines(blob)
+    let i: usize = table(parent, key, w, h, cols, false, n, no_get)
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT {
+        s_ct_blob[(k) as usize] = blob
+        s_ct_plain[(k) as usize] = true
+        s_ct_rows[(k) as usize] = n
+        if s_ct_sel[(k) as usize] >= n && s_ct_sel[(k) as usize] != HEAD_ROW {
+            if n > 0 {
+                s_ct_sel[(k) as usize] = n - 1
+            } else {
+                s_ct_sel[(k) as usize] = 0
+            }
+        }
+    }
+    return i
+}
+
 // New contents for a blob table (the pointer may stay the same).
 fn table_set_blob(key: u64, blob: u64) {
     let k: u64 = ct_slot(key)
@@ -2265,7 +2310,11 @@ fn table_set_blob(key: u64, blob: u64) {
         return
     }
     s_ct_blob[(k) as usize] = blob
-    table_set_rows(key, blob_rows(blob))
+    var n: u64 = blob_rows(blob)
+    if s_ct_plain[(k) as usize] {
+        n = blob_lines(blob)
+    }
+    table_set_rows(key, n)
 }
 
 
