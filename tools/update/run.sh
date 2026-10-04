@@ -162,7 +162,7 @@ hatnicht "$OUT/sig5.txt" "opk: installed" "und es wird nichts installiert"
 # --- gar kein Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig6 "rm /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
-hat "$OUT/sig6.txt" "kein vertrauter Schlüssel" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
+hat "$OUT/sig6.txt" "no trusted key" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
 hatnicht "$OUT/sig6.txt" "opk: installed" "und es wird nichts installiert"
 
 # =====================================================================

@@ -86,9 +86,9 @@ run r4 "ota show;ota search;exit" 900 > /dev/null
 # --- the device's own words, checked
 hat "$W/r1.txt" "ota: in trial: 00000013" "update installed: new generation is on trial"
 hat "$W/r1.txt" "ota: version here $FEEDVER" "version file says $FEEDVER after the update"
-hat "$W/r2.txt" "opk: trial best" "after the reboot the trial generation was confirmed"
+hat "$W/r2.txt" "opk: trial confirmed" "after the reboot the trial generation was confirmed"
 hat "$W/r2.txt" "ota: version there $FEEDVER" "second search: the feed still offers $FEEDVER"
 hat "$W/r2.txt" "up to date" "second search says 'up to date' (nothing new)"
-hat "$W/r3.txt" "opk: zur" "rollback went back to the previous generation"
+hat "$W/r3.txt" "opk: rolled back" "rollback went back to the previous generation"
 hat "$W/r4.txt" "ota: generation 12" "after the rollback the old generation is active"
 echo "FEEDTEST: $pass ok, $fail failed (read $W/r*.txt for the device's own words)"

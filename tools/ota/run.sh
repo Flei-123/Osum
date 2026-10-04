@@ -608,7 +608,7 @@ dienst "$OUT/netz3" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf wach1 "ota apply;ota watchdog 5;exit" 300)
 dienst_aus
-hat "$OUT/wach1.txt" "opk: in erprobung" "der Wachhund: es steht etwas in Erprobung"
+hat "$OUT/wach1.txt" "opk: in trial" "der Wachhund: es steht etwas in Erprobung"
 hat "$OUT/wach1.txt" "WATCHDOG: no confirmation" "die Frist laeuft ab, ohne dass jemand bestaetigt"
 hat "$OUT/wach1.txt" "WATCHDOG: restart" "und der Wachhund startet die Maschine neu"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
@@ -871,7 +871,7 @@ dienst "$OUT/netz2" || bad "Gegenstelle (flach)"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan10 "ota show;ota search;exit")
 hat "$OUT/kan10.txt" "ota: version there 2" "(f) ohne kanal= wird wie bisher flach gelesen"
-hatnicht "$OUT/kan10.txt" "ota: kanal" "(f) und es wird kein Kanal angezeigt"
+hatnicht "$OUT/kan10.txt" "ota: channel" "(f) und es wird kein Kanal angezeigt"
 
 # (g) ota boot: Erprobung wird von selbst bestaetigt -- wenn gesund
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
@@ -888,13 +888,13 @@ hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan13 "ota apply;exit")
 rc=$(lauf kan14 "opk rebuild;ota set gesund 2;ota set frist 6;ota boot nirgends;exit" 300)
-hat "$OUT/kan14.txt" "Start NICHT gesund" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
+hat "$OUT/kan14.txt" "start NOT healthy" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
 hatnicht "$OUT/kan14.txt" "trial confirmed" "(g) GEGENPROBE: und es wird nichts bestaetigt"
 
 # (h) der Hintergrund-Dienst
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan15 "ota set auto nein;ota service 1;ota show;exit")
-hat "$OUT/kan15.txt" "AUSgeschaltet" "(h) mit auto=nein tut der Dienst nichts"
+hat "$OUT/kan15.txt" "OFF" "(h) mit auto=nein tut der Dienst nichts"
 hatnicht "$OUT/kan15.txt" "opk: installed" "(h) und installiert nichts"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan16 "ota set auto ja;ota service 1;cat /system/ota.stand;exit")
@@ -905,7 +905,7 @@ hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gesta
 # DEFAULT ON (owner decision 02.10.2026): no `auto=` key at all -> the service runs
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan17 "grep -v auto= /etc/ota.conf > /etc/ota.neu;cp /etc/ota.neu /etc/ota.conf;cat /etc/ota.conf;ota service 1;cat /system/ota.stand;exit")
-hatnicht "$OUT/kan17.txt" "AUSgeschaltet" "(h) DEFAULT: without an auto= key the service is ON"
+hatnicht "$OUT/kan17.txt" "OFF" "(h) DEFAULT: without an auto= key the service is ON"
 hat "$OUT/kan17.txt" "opk: installed hallo" "(h) DEFAULT: and it fetches and installs by itself"
 for f in tools/usbimg/build.sh tools/install/build.sh; do
     if grep -q '^auto=true$' "$f"; then ok "(h) $f writes auto=true as the image default"; else bad "(h) $f does not write auto=true"; fi
