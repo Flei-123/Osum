@@ -663,8 +663,8 @@ def cmd_tkette(a):
     tol = int(a[12]) if len(a) > 12 else 0
     # DELL ROUND 04.10.2026: optional 14th argument `ymax`: ink rows at or below
     # this screen row are not compared. A title whose ink is centred in a bar
-    # of 20 rows has its descenders reach into the first row of the window
-    # body, where the body paints over them (the server clips there).
+    # of 20 rows has its descenders reach the last row of the bar, where the
+    # frame line is painted over them.
     ymax = int(a[13]) if len(a) > 13 else None
     stellen = [(c, x + (dx >> 6), y) for (c, dx) in schrift.stellen(text)]
 
