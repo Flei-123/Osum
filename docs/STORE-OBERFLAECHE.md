@@ -58,7 +58,7 @@ Wirts** gebaut und signiert, nicht von diesem Code), im Gast ein e1000 hinter QE
 Namen ohne Programm; 4. die Rechte (admin / benutzer / aus / `admins=` und die Anfrage eines fremden Kontos nach
 Bestätigung); 5. nach jeder der drei Ablehnungen ist **nichts** installiert; 6. **das Fenster auf dem Bildschirm** mit
 den Klicks einer Hand über den QEMU-Monitor (der Katalog holt sich selbst; *Abbrechen* startet nichts; Installieren →
-Dialog → Ja → „Arbeitet …" → „Fertig: installiert"; Neue Fassung; Entfernen; am Ende stimmen `opk liste` und
+Dialog → Ja → „Arbeitet …" → „Fertig: installiert"; Neue Fassung; Entfernen; am Ende stimmen `opk list` und
 `store.list`). `STORE_WINDOW_ONLY=1` fährt nur Abschnitt 6.
 
 **Gefunden und behoben beim Messen**

@@ -25,7 +25,7 @@ public half of `/srv/store/osum/aktuell/schluessel.pub`). Its passphrase is kept
 
 `feedtest.sh` installs the image on a disk, then on that disk: version 0 sees the new
 feed, `ota apply` installs the packages, reboot + `ota confirm`, a second
-`ota search` says "alles aktuell", rollback (`ota rollback`) and boot again.
+`ota search` says "up to date", rollback (`ota rollback`) and boot again.
 
 ## 3. Publish (only with the owner's yes)
 

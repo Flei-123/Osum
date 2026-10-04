@@ -14,6 +14,25 @@ passes to ota): sub-commands and console messages are English; tests, living doc
 with `OSUM_JOB_KINDS=en` / `BRUECKE_JOB_KINDS=en`; `dell-update.py` uses `DELL_KINDS=en`.
 Flip the defaults once the Dell runs an image with E-001, then delete the German words.
 
+DONE (E-001 step 2, 04.10.2026): program names and their sub-commands / console lines:
+
+| German program | English | sub-commands |
+|---|---|---|
+| tresor | vault | neu/auf/zu/legen/gib/liste -> new/open/close/put/get/list |
+| auswerfen | eject | (no sub-commands; texts English; `explorer: eject` marker) |
+| praesenz | presence | dienst/setzen/fokus/weg/da/unsichtbar an/zeigen -> service/set/focus/away/back/invisible on/show |
+| sperrwache | idlelock | -- |
+| netzmess | netmeter | -- (`netmeter: done`) |
+| kontocli | accountcli | -- (`accountcli: ERROR`) |
+
+Kept German on purpose: bus service name `praesenz`, `/etc/praesenz.conf`, `/etc/sperre.conf` and
+its keys, the state words `da abwesend beschaeftigt unsichtbar` (wire protocol with the friends
+server), the mount point `/tresor`, `/system/tresor.sit`.
+
+STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `dateiop`, `hurt`,
+`instkonto` (module), the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
+inside the sources (see tools/english for the identifier renamer).
+
 KEPT GERMAN ON PURPOSE (data formats, not commands -- renaming breaks signed or persisted data):
 * feed/wire: `VERZEICHNIS`, `INDEX`, field names `paket`, `fassung`, `gesperrt`, `schluesselgen`,
   `kette`, the signed text `osum-schluessel`, package members `PAKET/SYSTEM/PLAN/GRUND`

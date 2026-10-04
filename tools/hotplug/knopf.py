@@ -195,7 +195,7 @@ try:
     sag("%d gemeldete Bedienelemente" % len(rects))
 
     # Der Auswurfknopf ist der LETZTE Symbolknopf vor dem Starterknopf;
-    # seine Nummer steht im Mitschnitt hinter `explorer: auswerfen id=`.
+    # seine Nummer steht im Mitschnitt hinter `explorer: eject id=`.
     zid = re.findall(r"explorer: ausknopf id=(\d+)", txt)
     ziel = None
     if zid:
@@ -242,7 +242,7 @@ try:
 
     m.klick_auf(cx, cy)
     time.sleep(4)
-    if not warte_auf(r"explorer: auswerfen", 30, "der Knopf hat gefeuert"):
+    if not warte_auf(r"explorer: eject", 30, "der Knopf hat gefeuert"):
         pass
     time.sleep(3)
     m.foto(os.path.join(ARB, "30-ausgeworfen.ppm"))

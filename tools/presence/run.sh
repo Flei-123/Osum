@@ -6,7 +6,7 @@
 # Kontodienst (node, TLS 1.3) -- nicht gegen Nachbauten im Speicher.
 #
 # Die Abschnitte:
-#   1. bauen (Kern, /bin/praesenz, /bin/freunde)
+#   1. bauen (Kern, /bin/presence, /bin/freunde)
 #   2. der Dienst am Bus: anmelden, setzen, verteilen
 #   3. UNSICHTBAR -- die Zusage, dass nichts hinausgeht
 #   4. die Erlaubnisliste (opt-in je App)
@@ -37,7 +37,7 @@ num() { local n=$1 v=${2:-} o=$3 w=$4
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=40000
-PROGS="sh ls cat echo sleep praesenz freunde desktop taskbar"
+PROGS="sh ls cat echo sleep presence freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 
 echo "== 1. bauen =="
@@ -51,9 +51,9 @@ if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
 else
     bad "firnc0 baut die Programme nicht"; sed 's/^/        /' "$TMPD/b.txt" | head -12
 fi
-[ -f "$TMPD/bin/praesenz.elf" ] && ok "/bin/praesenz ist da" || bad "/bin/praesenz fehlt"
+[ -f "$TMPD/bin/presence.elf" ] && ok "/bin/presence ist da" || bad "/bin/presence fehlt"
 [ -f "$TMPD/bin/freunde.elf" ] && ok "/bin/freunde ist da" || bad "/bin/freunde fehlt"
-note "/bin/praesenz: $(stat -c%s "$TMPD/bin/praesenz.elf" 2>/dev/null) Oktette, /bin/freunde: $(stat -c%s "$TMPD/bin/freunde.elf" 2>/dev/null)"
+note "/bin/presence: $(stat -c%s "$TMPD/bin/presence.elf" 2>/dev/null) Oktette, /bin/freunde: $(stat -c%s "$TMPD/bin/freunde.elf" 2>/dev/null)"
 
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then
     ok "der Kern baut"
@@ -111,17 +111,17 @@ echo "== 2. der Dienst am Bus =="
 # etwas, und danach wird gefragt, was steht. Genau der Weg, den eine App
 # auch geht.
 cat > "$TMPD/s2.sh" <<'EOS'
-praesenz dienst 4000 &
-praesenz setzen certus "liest xoffi.ai"
-praesenz fokus edit
+presence service 4000 &
+presence set certus "liest xoffi.ai"
+presence focus edit
 echo ==FERTIG==
 EOS
 geraet "$TMPD/A.img" "$TMPD/s2.sh"
 lauf "$TMPD/A.img" o2
-has "$TMPD/o2.klar" "praesenz: dienst nummer=" "der Dienst meldet sich am Bus an"
-DNR=$(grep -a 'praesenz: dienst nummer=' "$TMPD/o2.klar" | head -1 | sed 's/.*nummer=//' | tr -cd '0-9')
+has "$TMPD/o2.klar" "presence: service number=" "der Dienst meldet sich am Bus an"
+DNR=$(grep -a 'presence: service number=' "$TMPD/o2.klar" | head -1 | sed 's/.*number=//' | tr -cd '0-9')
 num "die Dienstnummer ist eine Zahl" "${DNR:-}" ge 0
-hasnot "$TMPD/o2.klar" "praesenz: der Bus sagt nein" "kein abgelehnter Ruf"
+hasnot "$TMPD/o2.klar" "presence: the bus says no" "kein abgelehnter Ruf"
 hasnot "$TMPD/o2.klar" "PANIK" "keine Panik im Gast"
 
 # =====================================================================
@@ -131,25 +131,25 @@ echo "== 3. UNSICHTBAR: es geht wirklich nichts hinaus =="
 # verlaesst das Programm nicht". Also: Text setzen, unsichtbar schalten,
 # und dann im GANZEN Mitschnitt nach dem Text suchen.
 cat > "$TMPD/s3.sh" <<'EOS'
-praesenz dienst 8000 &
-praesenz setzen certus GEHEIMTEXT4711
-praesenz unsichtbar an
-praesenz zeigen
+presence service 8000 &
+presence set certus GEHEIMTEXT4711
+presence invisible on
+presence show
 echo ==FERTIG==
 EOS
 mkdir -p "$TMPD/etc3"
 printf 'text certus edit\n' > "$TMPD/etc3/praesenz.conf"
 geraet "$TMPD/B.img" "$TMPD/s3.sh" "$TMPD/etc3"
 lauf "$TMPD/B.img" o3
-has "$TMPD/o3.klar" "zustand=unsichtbar" "der Zustand steht auf unsichtbar"
+has "$TMPD/o3.klar" "state=unsichtbar" "der Zustand steht auf unsichtbar"
 # Der Text darf in der Anzeige NICHT auftauchen, solange unsichtbar gilt.
-UZ=$(grep -a 'praesenz: zustand=unsichtbar' "$TMPD/o3.klar" | grep -c 'GEHEIMTEXT4711' || true)
+UZ=$(grep -a 'presence: state=unsichtbar' "$TMPD/o3.klar" | grep -c 'GEHEIMTEXT4711' || true)
 is "der Statustext steht NICHT in der unsichtbaren Zeile" "$UZ" "0"
 # Gegenprobe: sichtbar zeigt ihn sehr wohl -- sonst misst der Test nichts.
 cat > "$TMPD/s3b.sh" <<'EOS'
-praesenz dienst 8000 &
-praesenz setzen certus GEHEIMTEXT4711
-praesenz zeigen
+presence service 8000 &
+presence set certus GEHEIMTEXT4711
+presence show
 echo ==FERTIG==
 EOS
 geraet "$TMPD/B2.img" "$TMPD/s3b.sh" "$TMPD/etc3"
@@ -161,9 +161,9 @@ echo "== 4. die Erlaubnisliste: opt-in je App =="
 # =====================================================================
 # OHNE /etc/praesenz.conf darf KEINE App einen Text setzen.
 cat > "$TMPD/s4.sh" <<'EOS'
-praesenz dienst 8000 &
-praesenz setzen certus VERBOTENERTEXT
-praesenz zeigen
+presence service 8000 &
+presence set certus VERBOTENERTEXT
+presence show
 echo ==FERTIG==
 EOS
 geraet "$TMPD/C.img" "$TMPD/s4.sh"          # kein /etc/praesenz.conf
@@ -345,7 +345,7 @@ for n in $(seq 1 20); do
     kill -9 "$qp" 2>/dev/null; wait "$qp" 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$TMPD/L.txt" > "$TMPD/L.klar" 2>/dev/null || true
     grep -qa 'PANIK\|panic' "$TMPD/L.klar" && PANIK=$((PANIK+1))
-    grep -qa 'praesenz: dienst nummer=' "$TMPD/L.klar" || LEER=$((LEER+1))
+    grep -qa 'presence: service number=' "$TMPD/L.klar" || LEER=$((LEER+1))
 done
 is "Panik in 20 Laeufen mit -smp 4" "$PANIK" "0"
 is "Laeufe, in denen der Dienst nicht hochkam" "$LEER" "0"

@@ -52,7 +52,7 @@ BLOCKS=6144
 # kam nur "nicht gefunden", die Frist lief nicht ab, und "(h) die Frist
 # wirkt nicht" war rot -- bis auf Laeufe unter Last, in denen der
 # Systemstart selbst laenger als eine Sekunde brauchte.
-PROGS="sh ls cat echo mkdir rm cp sync tresor backup key bsect sleep"
+PROGS="sh ls cat echo mkdir rm cp sync vault backup key bsect sleep"
 
 TMPD=$(mktemp -d)
 # WAS BEIM ABBRUCH ZURUECKBLEIBEN DARF: nichts. Die Gegenproben (j3, j4)
@@ -106,18 +106,18 @@ bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
 [ -f "$TMPD/bin/sync.elf" ] || { echo "SYNC: $pass passed, $((fail+1)) failed"; exit 1; }
 
 undef=""
-for p in sync tresor; do
+for p in sync vault; do
     u=$(nm -u "$TMPD/bin/$p.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "weder /bin/sync noch /bin/tresor hat einen undefinierten Namen" \
+[ -z "$undef" ] && ok "weder /bin/sync noch /bin/vault hat einen undefinierten Namen" \
                || bad "undefinierte Namen:$undef"
-note "/bin/sync: $(stat -c%s "$TMPD/bin/sync.elf") Oktette, /bin/tresor: $(stat -c%s "$TMPD/bin/tresor.elf") Oktette"
+note "/bin/sync: $(stat -c%s "$TMPD/bin/sync.elf") Oktette, /bin/vault: $(stat -c%s "$TMPD/bin/vault.elf") Oktette"
 
 # Und die zweite Stufe: derselbe Quelltext durch den Uebersetzer, der
 # selbst in Firn geschrieben ist.
-if bash tools/sync/build.sh "$TMPD/bin1" 1 sync tresor > "$TMPD/b1.txt" 2>&1; then
-    ok "firnc1 baut sync und tresor ebenfalls"
+if bash tools/sync/build.sh "$TMPD/bin1" 1 sync vault > "$TMPD/b1.txt" 2>&1; then
+    ok "firnc1 baut sync und vault ebenfalls"
 else
     note "firnc1 hat nicht gebaut -- gemessen wird mit firnc0"
     sed 's/^/        /' "$TMPD/b1.txt" | head -6
@@ -714,27 +714,27 @@ echo "== 10. (h) der Tresor =="
 # =====================================================================
 cat > "$TMPD/sH.sh" <<EOS
 echo ==OHNE==
-tresor gib /tresor bank
+vault get /tresor bank
 echo ==AUF==
-tresor auf /konto /tresor $PASS 300
+vault open /konto /tresor $PASS 300
 echo ==LEGEN==
-tresor legen /tresor bank GEHEIMNIS-4711
+vault put /tresor bank GEHEIMNIS-4711
 echo ==LISTE==
-tresor liste /tresor
+vault list /tresor
 echo ==GIB==
-tresor gib /tresor bank
+vault get /tresor bank
 echo ==ZU==
-tresor zu /tresor
+vault close /tresor
 echo ==NACHZU==
-tresor gib /tresor bank
+vault get /tresor bank
 echo ==FALSCHPASS==
-tresor auf /konto /tresor falschespass 300
+vault open /konto /tresor falschespass 300
 echo ==KURZ==
-tresor auf /konto /tresor $PASS 1
+vault open /konto /tresor $PASS 1
 echo ==WARTEN==
 sleep 3
 echo ==NACHFRIST==
-tresor gib /tresor bank
+vault get /tresor bank
 echo ==END==
 EOS
 geraet "$TMPD/H.img" "$TMPD/sH.sh" "$TMPD/kontoA" "$TMPD/store1" "$TMPD/leer" -
@@ -744,7 +744,7 @@ habs() { sed -n "/^==$1==/,/^==/p" "$TMPD/H.log"; }
 habs OHNE | grep -qa 'keine offene Sitzung' \
     && ok "(h) ohne Sitzung gibt es kein Geheimnis" \
     || bad "(h) ohne Sitzung kam etwas heraus"
-habs AUF | grep -qa 'tresor: auf' && ok "(h) der Tresor geht mit der Passphrase auf" \
+habs AUF | grep -qa 'vault: open' && ok "(h) der Tresor geht mit der Passphrase auf" \
                                   || bad "(h) der Tresor geht nicht auf"
 habs LEGEN | grep -qa 'gelegt' && ok "(h) ein Geheimnis laesst sich ablegen" \
                                || bad "(h) das Ablegen scheitert"
@@ -752,8 +752,8 @@ habs GIB | grep -qa 'GEHEIMNIS-4711' \
     && ok "(h) und mit offener Sitzung wieder herausholen" \
     || bad "(h) das Geheimnis kommt nicht zurueck"
 habs NACHZU | grep -qa 'keine offene Sitzung' \
-    && ok "(h) nach 'tresor zu' ist er zu" \
-    || bad "(h) nach 'tresor zu' ist er NICHT zu"
+    && ok "(h) nach 'vault close' ist er zu" \
+    || bad "(h) nach 'vault close' ist er NICHT zu"
 habs FALSCHPASS | grep -qa 'falsche Passphrase' \
     && ok "(h) eine falsche Passphrase oeffnet den Tresor nicht" \
     || bad "(h) eine falsche Passphrase oeffnete den Tresor"
@@ -776,7 +776,7 @@ is "(h) der Klartext steht in KEINER Datei des Tresors" "$found" "0"
 hol "$TMPD/H.img" /tresor "$TMPD/tresorH2"
 cat > "$TMPD/sH2.sh" <<'EOS'
 echo ==OHNERECHT==
-tresor gib /tresor bank
+vault get /tresor bank
 echo ==END==
 EOS
 geraet "$TMPD/H2.img" "$TMPD/sH2.sh" "$TMPD/kontoA" "$TMPD/store1" "$TMPD/leer" "$TMPD/tresorH2"
@@ -1059,9 +1059,9 @@ echo ==VOR==
 date -u
 sync neu /konto $PASS eigen /store
 date -u
-tresor neu /konto /tresor $PASS
+vault new /konto /tresor $PASS
 date -u
-tresor auf /konto /tresor $PASS 60
+vault open /konto /tresor $PASS 60
 date -u
 echo ==ZUVIEL==
 sync neu /konto2 $PASS eigen /store2 16384 8
@@ -1080,7 +1080,7 @@ klar P > "$TMPD/P.log"
 grep -qa '^konto: auf' "$TMPD/P.log" \
     && ok "der VOREINGESTELLTE Preis (N=4096, r=8, 4 MiB) legt ein Konto an" \
     || bad "der voreingestellte Preis legt KEIN Konto an -- die Voreinstellung ist kaputt"
-grep -qa '^tresor: auf' "$TMPD/P.log" \
+grep -qa '^vault: open' "$TMPD/P.log" \
     && ok "und der Tresor geht damit auf" \
     || bad "und der Tresor geht damit NICHT auf"
 sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'fehler' \
@@ -1090,7 +1090,7 @@ sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'fehler' \
 # Betriebsdauer). Keine Zusage mit fester Zahl -- sie haengen vom Wirt ab.
 python3 - "$TMPD/P.log" <<'PYT'
 import re, sys
-marke = None; letzte = None; namen = ["sync neu", "tresor neu", "tresor auf"]
+marke = None; letzte = None; namen = ["sync neu", "vault new", "vault open"]
 i = 0
 for z in open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines():
     z = z.strip()

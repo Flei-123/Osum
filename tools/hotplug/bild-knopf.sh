@@ -34,7 +34,7 @@ ARB=${HP_ARB:-$(mktemp -d)}
 mkdir -p "$ARB"
 [ -n "${HP_ARB:-}" ] || trap 'rm -rf "$ARB"' EXIT
 
-PROGS="explorer sh echo ls cat edit launcher locate auswerfen"
+PROGS="explorer sh echo ls cat edit launcher locate eject"
 
 for w in mkfs.vfat mcopy sfdisk qemu-system-x86_64 python3; do
     command -v "$w" >/dev/null 2>&1 || { echo "KNOPF: uebersprungen, $w fehlt"; exit 0; }
@@ -109,7 +109,7 @@ RC=$?
 
 echo
 echo "== was die Maschine gemeldet hat =="
-grep -aE 'wechsel:|explorer: orte |explorer: auswerfen|explorer: ausknopf' \
+grep -aE 'wechsel:|explorer: orte |explorer: eject|explorer: ausknopf' \
     "$ARB/knopf-seriell.txt" 2>/dev/null | sed 's/^/  /' | head -14
 echo "  (Arbeitsverzeichnis: $ARB)"
 exit $RC

@@ -192,7 +192,7 @@ sondern die Rettung.
 
 Der Dienst gehört in `/etc/inittab`:
 
-    ota:respawn:/bin/ota dienst
+    ota:respawn:/bin/ota service
 
 **Die Einstellungsseite ist die des Kommandozeilenwerkzeugs und kein
 Reiter in der grafischen Oberfläche**, und das ist eine Entscheidung mit

@@ -83,7 +83,7 @@ kopf "1. das Abbild traegt, was die Anmeldung braucht"
 # ANMELDUNG hat genau hier ihre eigentliche Luecke gefunden: die
 # Programme waren gebaut und gemessen, sie standen nur in keinem Abbild.
 for f in /bin/glogin /bin/lock /bin/login /bin/passwd /bin/su \
-         /bin/sperrwache /etc/shadow /etc/passwd /etc/group \
+         /bin/idlelock /etc/shadow /etc/passwd /etc/group \
          /etc/login.conf /etc/sperre.conf; do
     if grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$LISTE"; then
         ok "im Abbild: $f"

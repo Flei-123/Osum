@@ -97,7 +97,7 @@ ESP_MIB=${ESP_MIB:-96}
 # Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
 # nicht mehr -- das gebaute Abbild meldet bmblocks=128.
 # DAILY-DRIVER (02.10.2026): 65536 -> 81920 blocks (40 MiB). The PDF viewer
-# (pdfview, 1.9 MB), kontocli and the fatter installer filled the 32 MiB image:
+# (pdfview, 1.9 MB), accountcli and the fatter installer filled the 32 MiB image:
 # "mkfs: the disk is full". 81920 blocks need 20 of the 128 map blocks.
 FS_BLOCKS=${FS_BLOCKS:-81920}
 FS_INODES=${FS_INODES:-1024}
@@ -265,8 +265,8 @@ widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd axd sntp kontocli pdfview store stored"}
+glogin lock login passwd su chown idlelock init svc term shasum noise \
+orientbus act settingsd axd sntp accountcli pdfview store stored"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
