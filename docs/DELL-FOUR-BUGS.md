@@ -33,10 +33,17 @@ reproduced and measured in a VM with the Dell's own image (and with the stick ma
   taskbar), (4) nobody picked it up for 3000 ticks (safety net). A parent that waits normally
   (the shell, settings) is not touched before rule 4. Living children of a reaped corpse fall
   to the boot task (their parent slot would be given to a stranger otherwise).
-* Limit: still 31 usable slots -- with the system's ~18 that is ~13 programs open at the same
-  time on a 4-core machine, ~17 on the Dell (1 core). Raising `MAX_TASKS` is NOT done: ten
-  per-task tables (capabilities, signals, descriptors, handles, async queues, accessibility
-  rights, groups, contexts ...) are sized for 32 in `kstate.fi`; roadmap item.
+* Limit, measured with the Dell image in a VM (4 cores, no network): the FIRST limit is not the
+  task table but the **window table**: `MAX_WIN` was 16. The system itself holds five windows
+  (desktop, panel, quick settings, start menu, terminal); after nine more windows (nine file
+  managers) the sixteenth slot (`wm: fen i=15`) was taken and no further program got a window;
+  the taskbar showed ten buttons (`MAXK = 10`). Now `MAX_WIN = 32` (table and event rings moved
+  to `kstate.DSK_OFF = 0x144000`, 0x8000 long, a gap of the map) and the taskbar shows up to 16
+  window buttons. The task table is the second limit: 31 usable slots, the system holds ~18 of
+  them (4 cores) -- about 13 programs at the same time, ~17 on a one-core Dell. Raising
+  `MAX_TASKS` is NOT done: ten per-task tables (capabilities, signals, descriptors, handles,
+  async queues, accessibility rights, groups, contexts ...) are sized for 32 in `kstate.fi`;
+  roadmap item.
 * Clear message: `elf.R_NOSLOT` (task table full -> `-EAGAIN`, serial `elf: refused, reason
   30  task table full (limit reached)`) instead of `R_NOMEM`; the start menu keeps itself open
   and shows a dialog "Too many programs ... Close one and try again." (`launcher.full.*`).
