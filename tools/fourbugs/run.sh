@@ -16,13 +16,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 SCALE=${1:-1}
+RES=1920x1080
+[ "$SCALE" = 2 ] && RES=2560x1440
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="$TMPD/build"
 pass=0; fail=0
 run() { # run <name> <extra kernel words>
     local name=$1; shift
-    bash tools/design/eh6.sh "$TMPD/$name" res=1920x1080 accel=kvm uiscale=$SCALE \
+    bash tools/design/eh6.sh "$TMPD/$name" res=$RES accel=kvm uiscale=$SCALE \
         drehbuch=tools/fourbugs/dreh.txt extra="$*" > "$TMPD/$name.log" 2>&1
     grep -a "FEHLGESCHLAGEN\|NICHT DA" "$TMPD/$name.log" | head -3
     if [ -n "${KEEP:-}" ]; then mkdir -p "$KEEP/$name"; cp "$TMPD/$name"/*.ppm "$TMPD/$name"/serial.txt "$KEEP/$name"/ 2>/dev/null; fi

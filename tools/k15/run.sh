@@ -1254,10 +1254,10 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
 # title ink is centred in the bar now, wm.title_base).
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
-    255 255 255 28 78 126 "File Explorer" 96
+    255 255 255 28 78 126 "File Explorer" 96 $((FWY + 22))
 schau_nicht "und ein anderer Name steht dort NICHT" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
-    255 255 255 28 78 126 "Dateimanager" 96
+    255 255 255 28 78 126 "Dateimanager" 96 $((FWY + 22))
 
 # DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
 # Verzeichniseintraege auf DIESELBE Inode -- ein Exemplar der Oktette.
