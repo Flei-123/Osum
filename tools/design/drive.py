@@ -187,6 +187,17 @@ class Fahrer:
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    def fahre_nahe(self, x, y):
+        dx, dy = x - self.x, y - self.y
+        while dx or dy:
+            sx = max(-120, min(120, dx))
+            sy = max(-120, min(120, dy))
+            self.cmd("mouse_move %d %d" % (sx, sy))
+            dx -= sx
+            dy -= sy
+        self.x, self.y = x, y
+        time.sleep(0.6)
+
     # RUNDE ECHTHARDWARE-5: ziehen vom zuletzt bekannten Punkt aus,
     # ohne den Umweg ueber 0,0. Begruendung siehe `klick_nahe`.
     def ziehe_nahe(self, x0, y0, x1, y1, schritte=8):
@@ -775,6 +786,19 @@ def main():
                 f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
+        # `fahreauf <name>` -- only HOVER over the middle of the reported
+        # rectangle (relative moves from the last known point, no click, no
+        # detour through the corner). Needed for hover pixel checks.
+        elif b == "fahreauf":
+            r = f.rechteck(arg)
+            if r is None:
+                print("fahreauf %s -> KEIN RECHTECK GEMELDET" % arg)
+                fehler += 1
+                continue
+            x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
+            f.fahre_nahe(x, y)
+            print("fahreauf %s -> %d,%d  (rect %d,%d %dx%d)"
+                  % (arg, x, y, r[0], r[1], r[2], r[3]))
         elif b in ("klickauf", "doppelauf", "rklickauf"):
             r = f.rechteck(arg)
             if r is None:
