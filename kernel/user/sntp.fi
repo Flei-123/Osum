@@ -282,6 +282,10 @@ fn address_of_host() -> u64 {
     if d != 0 {
         return d
     }
+    // Re-read /etc/resolv.conf on EVERY attempt: the service starts next to
+    // /bin/dhcp, usually before the lease, and a resolver that found no
+    // nameserver once would keep saying so (same fix as jarvisd, 27.09.2026).
+    let _c: u64 = dns.conf_load()
     return dns.resolve_a((&HOST[0 as usize]) as u64)
 }
 
@@ -497,6 +501,32 @@ fn zone_apply() {
     }
 }
 
+// ------------------------------------------------------ status file
+//
+// /system/clock.stand: ONE line, first letter = state, then the wall clock
+// (UTC seconds) of the last change. W = waiting for the first sync, S =
+// synced, F = still no sync after two minutes. The taskbar shows a "?" next
+// to the clock while the letter is W or F, and `ota` reads it to search again
+// as soon as the clock is right. No file = no network clock on this image.
+static mut P_STATE: [u8; 21] = "/system/clock.stand\0\0"
+
+fn status_set(letter: u64) {
+    var b: [u8; 40] = [0 as u8; 40]
+    let o: u64 = (&b[0 as usize]) as u64
+    p8(o, letter)
+    p8(o + 1, 32)
+    let n: u64 = ulib.digits(wall_sec(), o + 2)
+    p8(o + 2 + n, 10)
+    p8(o + 3 + n, 0)
+    ulib.sys(ulib.SYS_UNLINK, (&P_STATE[0 as usize]) as u64, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_STATE[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if bad(fd) {
+        return
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, o, 3 + n)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
 fn cmd_boot() -> u64 {
     zone_apply()
     if !conf_load((&P_NTP[0 as usize]) as u64) {
@@ -526,31 +556,44 @@ fn cmd_boot() -> u64 {
         || server[0 as usize] == 0 as u8 {
         ulib.strcpy((&server[0 as usize]) as u64, (&D_SERVER[0 as usize]) as u64)
     }
+    // Schedule (Justin, 04.10.2026): at once when the service starts, then
+    // every 10 s for a minute, every 30 s for the next minute, every 5 min
+    // until it works -- and when it works, once an hour (never longer than
+    // `abstand` from /etc/ntp.conf). The service NEVER ends.
+    if abstand > 3600 {
+        abstand = 3600
+    }
+    status_set(87) // 'W'
+    var round: u64 = 0
+    var synced: bool = false
     while true {
-        // the network may not be up yet: try again every 10 s for 10 min,
-        // then every `abstand`
-        var tries: u64 = 0
-        var ok: bool = false
-        while tries < 60 && !ok {
-            if sync_once((&server[0 as usize]) as u64, true) == 0 {
-                ok = true
-            } else {
-                if tries == 0 {
-                    say((&S_WAIT[0 as usize]) as u64)
-                    ulib.nl()
-                }
-                var w: u64 = 0
-                while w < 10 {
-                    ulib.sleep_ms(1000)
-                    w = w + 1
-                }
+        var wait_s: u64 = 0
+        if sync_once((&server[0 as usize]) as u64, true) == 0 {
+            status_set(83) // 'S'
+            synced = true
+            round = 0
+            wait_s = abstand
+        } else {
+            if round == 0 {
+                say((&S_WAIT[0 as usize]) as u64)
+                ulib.nl()
             }
-            tries = tries + 1
+            round = round + 1
+            if round == 12 && !synced {
+                status_set(70) // 'F'
+            }
+            if round <= 6 {
+                wait_s = 10
+            } else if round <= 12 {
+                wait_s = 30
+            } else {
+                wait_s = 300
+            }
         }
-        var s: u64 = 0
-        while s < abstand {
+        var w: u64 = 0
+        while w < wait_s {
             ulib.sleep_ms(1000)
-            s = s + 1
+            w = w + 1
         }
     }
     return 0
