@@ -221,7 +221,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
         echo "timeout: 0"; echo "verbose: yes"; echo
         echo "/OrientOS"; echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
-        echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota einspielen;exit"
+        echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota apply;exit"
     } > "$OUT/e.conf"
     mcopy -o -i "$OUT/ziel.img@@1048576" "$OUT/e.conf" ::/limine.conf 2>/dev/null
     : > "$OUT/e$i.txt"
@@ -240,7 +240,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     dienst_aus
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/e$i.txt" 2>/dev/null
     # ---- und jetzt: kommt sie hoch, und was hat sie?
-    rc=$(lauf "en$i" "opk richten;/apps/hallo.osp/start;opk liste;exit" 400)
+    rc=$(lauf "en$i" "opk rebuild;/apps/hallo.osp/start;opk list;exit" 400)
     if [ "$rc" != 21 ]; then
         tot_n=$((tot_n+1))
         bad "(e) Schuss $i bei ${MS} ms: die Maschine kommt NICHT mehr hoch (rc=$rc)"

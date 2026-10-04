@@ -285,7 +285,7 @@ orientbus act settingsd axd sntp kontocli pdfview store stored"}
 #   jarvisctl   die Bruecke bedienen (koppeln, Protokoll, Fotoschein)
 #   pollbr      der Wartedienst der Runde POLL (hiess bis BLECH-ECHT
 #               ebenfalls jarvisd, siehe docs/RUNDE-BLECH-ECHT.md 2.4)
-#   reboot      nach `ota einspielen` will jemand neu starten
+#   reboot      nach `ota apply` will jemand neu starten
 #
 # RUNDE TUERSCHLOSS: UND VIER, DIE GEBAUT WAREN UND TROTZDEM GEFEHLT HABEN.
 #
@@ -735,7 +735,7 @@ host store.fleitec.com
 echo "-- 4. holen: https://store.fleitec.com/index.json"
 fetch https://store.fleitec.com/index.json
 echo "-- 5. nach einer neuen Fassung sehen"
-ota suchen
+ota search
 echo "=================================================="
 echo "  ENDE DES NETZ-SELBSTLAUFS"
 echo "=================================================="
@@ -808,7 +808,7 @@ printf 'de\n' > "$OUT/locale-de"
 #                        die Vorgabe (Entscheidung des Besitzers
 #                        02.10.2026): das Abbild sucht, holt und spielt
 #                        Updates selbst ein; abschaltbar in Einstellungen
-#                        -> Updates oder mit `ota einstellen auto nein`.
+#                        -> Updates oder mit `ota set auto nein`.
 #   /system/schluessel.pub  WEM. Ohne den vertrauten Schluessel nimmt
 #                        `ota` kein Verzeichnis und `opk` kein Paket an.
 #

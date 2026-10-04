@@ -37,7 +37,7 @@
 #   7. DIE SPERRE. Falsches Kennwort: bleibt zu. Richtiges: auf.
 #      Absturz des Sperrers: bleibt zu UND der Kern startet ihn neu.
 #      Leerlauf: sperrt von selbst.
-#   8. DER LADEN. Sechs signierte Pakete, mit `opk installieren`
+#   8. DER LADEN. Sechs signierte Pakete, mit `opk install`
 #      eingespielt, sechs Buendel unter /apps, der Starter zaehlt sechs.
 #      Gegenprobe: ein Paket mit gekipptem Oktett wird abgelehnt.
 #   9. DIE BILDER DER PROGRAMME. Je eine Aufnahme nach .alltag-shots/,
@@ -374,10 +374,10 @@ PY
     cp "$OUT/laden/stand/calc-1.opk.sig" "$OUT/boese.opk.sig"
     {
         for p in calc trash viewer snip zip lock; do
-            echo "opk installieren /pakete/$p-1.opk"
+            echo "opk install /pakete/$p-1.opk"
         done
-        echo "opk installieren /pakete/boese.opk"
-        echo "opk richten"
+        echo "opk install /pakete/boese.opk"
+        echo "opk rebuild"
         echo "ls /apps"
         echo "echo STORE-FERTIG"
     } > "$OUT/inst.sh"

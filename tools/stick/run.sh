@@ -30,7 +30,7 @@
 #   2. `fetch` holt eine ECHTE HTTPS-Seite aus dem offenen Netz --
 #      store.fleitec.com, Let's-Encrypt-Kette, geprueft gegen die
 #      Mozilla-Wurzeln IM ABBILD.
-#   3. `ota suchen` findet den Update-Server ueber den NAMEN
+#   3. `ota search` findet den Update-Server ueber den NAMEN
 #      store.fleitec.com: DHCP gibt den Nameserver, der Aufloeser macht
 #      daraus eine Adresse, das signierte VERZEICHNIS wird gelesen.
 #   4. `jarvisd` meldet sich an einer Gegenstelle an und BEANTWORTET
@@ -271,7 +271,7 @@ set -- \
     --sende 'cat /etc/resolv.conf\n'           --frist 30  --erwarte 'nameserver' \
     --sende "host $NAME\n"                     --frist 90  --erwarte 'host -> 0' \
     --sende "fetch https://$NAME/index.json\n" --frist 150 --erwarte 'fetch -> 0' \
-    --sende 'ota suchen\n'                     --frist 200 --erwarte 'ota -> '
+    --sende 'ota search\n'                     --frist 200 --erwarte 'ota -> '
 NETZFOLGE=("$@")
 
 # Mit STICK_NUR=bruecke laesst sich der letzte Abschnitt einzeln fahren
@@ -303,8 +303,8 @@ else
     bad "nur ${CERTS:-0} Zertifikate -- das ist keine echte Kette"
 fi
 hat "$B" 'fetch -> 0' "/bin/fetch endet mit 0 -- die Seite ist da"
-hat "$B" 'ota: fassung dort' "ota hat das signierte VERZEICHNIS gelesen"
-hat "$B" 'ota: NEUE FASSUNG verfügbar' "und meldet, dass es etwas Neues gibt"
+hat "$B" 'ota: version there' "ota hat das signierte VERZEICHNIS gelesen"
+hat "$B" 'ota: NEW VERSION available' "und meldet, dass es etwas Neues gibt"
 
 # =====================================================================
 echo "== 5. UEFI: dieselbe Datei, derselbe Eintrag =="
@@ -315,7 +315,7 @@ if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
     hat "$U" 'sh: ready' "unter UEFI steht dieselbe Shell"
     hat "$U" 'dhcp: gesetzt ip=' "DHCP unter UEFI"
     hat "$U" 'fetch: verify OK' "und dieselbe gepruefte Kette"
-    hat "$U" 'ota: NEUE FASSUNG verfügbar' "und dasselbe VERZEICHNIS"
+    hat "$U" 'ota: NEW VERSION available' "und dasselbe VERZEICHNIS"
 else
     echo "       (kein OVMF -- der UEFI-Lauf entfaellt)"
 fi

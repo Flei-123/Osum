@@ -88,15 +88,15 @@ hat "$OUT/boot2.txt" "e2e-was-here" "and it is still there after a restart"
 
 echo
 echo "== 4. a package, installed on the machine itself =="
-rc=$(lauf pak1 platte "opk installieren /quelle1/hallo-1.opk;opk liste;/apps/hallo.osp/start;exit" 600)
-gleich "opk installieren: exit code" "$rc" "21"
-hat "$OUT/pak1.txt" "opk: installiert hallo" "opk says it installed the package"
+rc=$(lauf pak1 platte "opk install /quelle1/hallo-1.opk;opk list;/apps/hallo.osp/start;exit" 600)
+gleich "opk install: exit code" "$rc" "21"
+hat "$OUT/pak1.txt" "opk: installed hallo" "opk says it installed the package"
 hat "$OUT/pak1.txt" "paket-hallo fassung 1" "and the installed program RUNS out of /apps"
 
 echo
 echo "== 5. an update, which is a second generation =="
-rc=$(lauf pak2 platte "opk aktualisieren hallo --quelle /quelle2;opk generationen;exit" 600)
-hat "$OUT/pak2.txt" "opk: installiert hallo" "the update is taken"
+rc=$(lauf pak2 platte "opk update hallo --source /quelle2;opk generations;exit" 600)
+hat "$OUT/pak2.txt" "opk: installed hallo" "the update is taken"
 hat "$OUT/pak2.txt" "generation 1" "there are two generations now"
 grep -aE '^generation ' "$OUT/pak2.txt" | sed 's/^/        /'
 rc=$(lauf pak3 platte "/apps/hallo.osp/start;exit" 600)
@@ -104,8 +104,8 @@ hat "$OUT/pak3.txt" "paket-hallo fassung 2" "after a restart the NEW version run
 
 echo
 echo "== 6. one generation back =="
-rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.osp/start;exit" 600)
-hat "$OUT/pak4.txt" "opk: zurück auf 0" "opk goes back one generation"
+rc=$(lauf pak4 platte "opk rollback 0;/apps/hallo.osp/start;exit" 600)
+hat "$OUT/pak4.txt" "opk: rolled back to 0" "opk goes back one generation"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "and the OLD version runs again"
 
 echo

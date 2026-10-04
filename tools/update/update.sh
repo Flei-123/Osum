@@ -8,8 +8,8 @@
 #
 # WAS HIER PASSIERT, UND IN GENAU DIESER REIHENFOLGE:
 #
-#   1. NACHSEHEN, WAS LAEUFT.       opk liste
-#   2. HOLEN UND PRUEFEN.           opk aktualisieren <name> --quelle <q>
+#   1. NACHSEHEN, WAS LAEUFT.       opk list
+#   2. HOLEN UND PRUEFEN.           opk update <name> --source <q>
 #      Darin steckt die ganze Kette: die Ed25519-Signatur ueber den
 #      INDEX, der Streuwert aus dem INDEX gegen die Oktette des Pakets,
 #      und die Ed25519-Signatur ueber das Paket selbst. Faellt eines
@@ -19,7 +19,7 @@
 #      `/system/ERPROBUNG` geschrieben.
 #   4. NEU STARTEN. Der Kern zaehlt den Versuch hoch (`kernel/ab.fi`).
 #   5. BEIM NAECHSTEN START: laeuft es, wird bestaetigt
-#      (`opk erprobung ok`); laeuft es nicht, faellt der Kern nach drei
+#      (`opk trial ok`); laeuft es nicht, faellt der Kern nach drei
 #      Versuchen von selbst auf die vorige Generation zurueck.
 #
 # DIE HTTPS-SEITE. `/bin/fetch` (Runde HWNET) holt eine Datei ueber TLS
@@ -33,6 +33,6 @@
 #     fetch -n pkg.example.org -o /tmp/q/x.opk     https://<ip>/x.opk
 #     fetch -n pkg.example.org -o /tmp/q/x.opk.sig https://<ip>/x.opk.sig
 #     update x /tmp/q
-opk liste
-opk aktualisieren $1 --quelle $2
-opk erprobung
+opk list
+opk update $1 --source $2
+opk trial

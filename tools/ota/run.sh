@@ -251,13 +251,13 @@ EOF
 # Kommandozeile des Laders bei `;` trennt und ein `if` dort nie heil
 # ankaeme:
 #
-#   opk richten                 die Sicht /apps aus der LAUFENDEN
+#   opk rebuild                 die Sicht /apps aus der LAUFENDEN
 #                               Generation neu bauen (nach einem
 #                               Rueckfall zeigt sie sonst noch auf die
 #                               Generation, die nicht hochkam)
 #   if /apps/hallo.osp/start    das Paket starten
-#   then ota bestaetigen        und NUR WENN ES LAEUFT bestaetigen
-printf 'opk richten\nif /apps/hallo.osp/start\nthen\nota bestaetigen\nfi\nopk erprobung\n' \
+#   then ota confirm        und NUR WENN ES LAEUFT bestaetigen
+printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 EX="/start.sh=$OUT/start.sh"
 if [ "$WIEDER" = 0 ]; then
@@ -293,14 +293,14 @@ hat "$OUT/inst.txt" "install: fertig" "der Installer meldet sich fertig"
 
 # Fassung 1 einspielen und bestaetigen -- das ist der Ausgangszustand
 # jedes weiteren Falls.
-rc=$(lauf basis0 "opk installieren /quelle1/hallo-1.opk;sh /start.sh;df;exit")
+rc=$(lauf basis0 "opk install /quelle1/hallo-1.opk;sh /start.sh;df;exit")
 hat "$OUT/basis0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
 # RUNDE MERGE-5: DIE DREI ERWARTUNGEN UNTEN TRAGEN JETZT ECHTE UMLAUTE.
 #
 # `kernel/user/opk.fi` druckt seit Runde UMLAUT2
 #
-#     opk: Signatur geprüft <pfad>
-#     opk: erprobung bestätigt für <n>
+#     opk: signature checked <pfad>
+#     opk: trial confirmed for <n>
 #
 # -- mit ü und ä, nachgesehen in den Zeilen 157 und 164 der Datei. Der
 # Laeufer suchte weiter nach der ASCII-Umschrift ("geprueft",
@@ -310,12 +310,12 @@ hat "$OUT/basis0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
 # wirklich auf der Leitung steht. Nachgemessen an einem echten Lauf
 # gegen store.fleitec.com (docs/RUNDE-MERGE5.md, Abschnitt 4):
 #
-#     opk: Signatur geprüft /tmp/ota/INDEX.sig
-#     opk: Signatur geprüft /tmp/ota/hallo-2.opk
+#     opk: signature checked /tmp/ota/INDEX.sig
+#     opk: signature checked /tmp/ota/hallo-2.opk
 #
 # Aufgefallen ist es erst, als MERGE-5 diesen Laeufer in `test.sh`
 # angemeldet hat -- vorher fuhr ihn nichts.
-hat "$OUT/basis0.txt" "opk: erprobung bestätigt" "und ist bestaetigt"
+hat "$OUT/basis0.txt" "opk: trial confirmed" "und ist bestaetigt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 fi
 BASISBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\1 \2/p' \
@@ -332,14 +332,14 @@ echo "== 2. der gute Weg, Ende zu Ende: suchen, holen, pruefen, einspielen =="
 dienst "$OUT/netz2" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 T0=$(date +%s%N)
-rc=$(lauf gut1 "ota zeigen;ota suchen;exit")
+rc=$(lauf gut1 "ota show;ota search;exit")
 T1=$(date +%s%N)
 gleich "die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/gut1.txt" "ota: fassung hier 0" "vorher steht hier Fassung 0 (frisch installiert)"
+hat "$OUT/gut1.txt" "ota: version here 0" "vorher steht hier Fassung 0 (frisch installiert)"
 hat "$OUT/gut1.txt" "fetch: verify OK" "die Kette des Servers wurde GEPRUEFT und nicht geglaubt"
-hat "$OUT/gut1.txt" "ota: fassung dort 2" "die Quelle bietet Fassung 2"
-hat "$OUT/gut1.txt" "ota: NEUE FASSUNG verfügbar" "und das wird gemeldet"
-hat "$OUT/gut1.txt" "ota: paket hallo 2.0.0" "mit Namen und Fassung des Pakets"
+hat "$OUT/gut1.txt" "ota: version there 2" "die Quelle bietet Fassung 2"
+hat "$OUT/gut1.txt" "ota: NEW VERSION available" "und das wird gemeldet"
+hat "$OUT/gut1.txt" "ota: package hallo 2.0.0" "mit Namen und Fassung des Pakets"
 hatnicht "$OUT/gut1.txt" "opk: installiert" "SUCHEN INSTALLIERT NICHTS"
 grep -qa "GET /VERZEICHNIS" "$OUT/srv.log" 2>/dev/null || true
 SUCHMS=$(( (T1 - T0) / 1000000 ))
@@ -347,25 +347,25 @@ SUCHMS=$(( (T1 - T0) / 1000000 ))
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 dienst "$OUT/netz2" || bad "Gegenstelle"
 T0=$(date +%s%N)
-rc=$(lauf gut2 "ota einspielen;opk erprobung;exit")
+rc=$(lauf gut2 "ota apply;opk trial;exit")
 T1=$(date +%s%N)
 EINMS=$(( (T1 - T0) / 1000000 ))
 cp -f "$OUT/srv.log" "$OUT/srv-gut.log" 2>/dev/null || true
 gleich "einspielen: die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/gut2.txt" "ota: streuwert stimmt hallo-2.opk" "der Streuwert des GELADENEN Pakets stimmt"
-hat "$OUT/gut2.txt" "opk: Signatur geprüft" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
-hat "$OUT/gut2.txt" "opk: installiert hallo" "und installiert"
-hat "$OUT/gut2.txt" "opk: in erprobung: 1 vor 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
-hat "$OUT/gut2.txt" "ota: BEREIT ZUM NEUSTART" "und der Neustart wird ANGEBOTEN"
+hat "$OUT/gut2.txt" "ota: hash ok hallo-2.opk" "der Streuwert des GELADENEN Pakets stimmt"
+hat "$OUT/gut2.txt" "opk: signature checked" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
+hat "$OUT/gut2.txt" "opk: installed hallo" "und installiert"
+hat "$OUT/gut2.txt" "opk: in trial: 1 vor 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
+hat "$OUT/gut2.txt" "ota: READY FOR RESTART" "und der Neustart wird ANGEBOTEN"
 hatnicht "$OUT/gut2.txt" "power: init sagt ab" "ES WIRD NICHT VON SELBST NEU GESTARTET"
 OKT=$(grep -a "^ota: platz" "$OUT/gut2.txt" | tail -1 | awk '{print $3}')
 
-rc=$(lauf gut3 "sh /start.sh;ota zeigen;df;exit")
+rc=$(lauf gut3 "sh /start.sh;ota show;df;exit")
 gleich "der Neustart" "$rc" "21"
 hat "$OUT/gut3.txt" "ab: gen=1 versuch=1 von 3" "der Kern zaehlt den Erprobungsversuch"
-hat "$OUT/gut3.txt" "paket-hallo fassung 2" "DIE NEUE FASSUNG LAEUFT"
-hat "$OUT/gut3.txt" "opk: erprobung bestätigt" "und wird bestaetigt"
-hat "$OUT/gut3.txt" "ota: fassung hier 2" "der Fassungszaehler steht jetzt auf 2"
+hat "$OUT/gut3.txt" "paket-hallo fassung 2" "DIE NEW VERSION LAEUFT"
+hat "$OUT/gut3.txt" "opk: trial confirmed" "und wird bestaetigt"
+hat "$OUT/gut3.txt" "ota: version here 2" "der Fassungszaehler steht jetzt auf 2"
 GENBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\2/p' "$OUT/gut3.txt" | tail -1)
 
 rc=$(lauf gut4 "sh /start.sh;exit")
@@ -385,22 +385,22 @@ echo "        hallo 1.0.0 im Store = ${H1:0:16}"
 #      nichts zu beanstanden -- und `opk` faengt es.
 dienst "$OUT/netzbadsig" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf a1 "ota einspielen;opk liste;opk generationen;exit")
-hat "$OUT/a1.txt" "ota: streuwert stimmt" "(a) das VERZEICHNIS stimmt -- ota laesst es durch"
-hat "$OUT/a1.txt" "SIGNATUR FALSCH" "(a) und opk faengt die falsche PAKETSIGNATUR"
+rc=$(lauf a1 "ota apply;opk list;opk generations;exit")
+hat "$OUT/a1.txt" "ota: hash ok" "(a) das VERZEICHNIS stimmt -- ota laesst es durch"
+hat "$OUT/a1.txt" "SIGNATURE WRONG" "(a) und opk faengt die falsche PAKETSIGNATUR"
 hatnicht "$OUT/a1.txt" "opk: installiert" "(a) es wird NICHTS installiert"
 hat "$OUT/a1.txt" "${H1:0:12}" "(a) die laufende Fassung ist unveraendert"
 hatnicht "$OUT/a1.txt" "generation 1" "(a) es entsteht KEINE zweite Generation"
-hat "$OUT/a1.txt" "ota: fassung hier 0" "(a) und der Fassungszaehler steht noch auf 0"
+hat "$OUT/a1.txt" "ota: version here 0" "(a) und der Fassungszaehler steht noch auf 0"
 dienst_aus
 
 # ---- (a2) falsch signiertes VERZEICHNIS. Hier faellt es frueher: bevor
 #      auch nur die Fassungsnummer geglaubt wird.
 dienst "$OUT/netzfremd" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf a2 "ota einspielen;opk liste;opk generationen;ota zeigen;exit")
+rc=$(lauf a2 "ota apply;opk list;opk generations;ota show;exit")
 hat "$OUT/a2.txt" "SIGNATUR DES VERZEICHNISSES FALSCH" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
-hatnicht "$OUT/a2.txt" "ota: fassung dort" "(a2) und nicht einmal die Fassungsnummer daraus wird gelesen"
+hatnicht "$OUT/a2.txt" "ota: version there" "(a2) und nicht einmal die Fassungsnummer daraus wird gelesen"
 hatnicht "$OUT/a2.txt" "opk: installiert" "(a2) es wird nichts installiert"
 hatnicht "$OUT/a2.txt" "generation 1" "(a2) es entsteht keine Generation"
 dienst_aus
@@ -408,9 +408,9 @@ dienst_aus
 # ---- (g) richtig signiertes VERZEICHNIS, veraenderter Streuwert
 dienst "$OUT/netzman" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf g1 "ota einspielen;opk liste;opk generationen;exit")
-hat "$OUT/g1.txt" "ota: fassung dort 2" "(g) die Signatur ueber das VERZEICHNIS ist GUELTIG"
-hat "$OUT/g1.txt" "STREUWERT STIMMT NICHT" "(g) und trotzdem wird abgelehnt -- die Kette wird an JEDEM Glied geprueft"
+rc=$(lauf g1 "ota apply;opk list;opk generations;exit")
+hat "$OUT/g1.txt" "ota: version there 2" "(g) die Signatur ueber das VERZEICHNIS ist GUELTIG"
+hat "$OUT/g1.txt" "HASH MISMATCH" "(g) und trotzdem wird abgelehnt -- die Kette wird an JEDEM Glied geprueft"
 hatnicht "$OUT/g1.txt" "opk: installiert" "(g) es wird nichts installiert"
 hatnicht "$OUT/g1.txt" "generation 1" "(g) es entsteht keine Generation"
 dienst_aus
@@ -418,21 +418,21 @@ dienst_aus
 # ---- (b) RUECKSCHRITT: eine aeltere Fassung, alles richtig signiert
 dienst "$OUT/netz1" || bad "Gegenstelle"
 cp -f "$OUT/nach2.img" "$OUT/ziel.img"
-rc=$(lauf b1 "ota einspielen;opk liste;ota zeigen;exit")
-hat "$OUT/b1.txt" "ota: fassung hier 2" "(b) auf dem Geraet steht Fassung 2"
-hat "$OUT/b1.txt" "ota: fassung dort 1" "(b) angeboten wird Fassung 1 -- richtig signiert"
-hat "$OUT/b1.txt" "RUECKSCHRITT ABGELEHNT" "(b) DER RUECKSCHRITTSSCHUTZ GREIFT"
+rc=$(lauf b1 "ota apply;opk list;ota show;exit")
+hat "$OUT/b1.txt" "ota: version here 2" "(b) auf dem Geraet steht Fassung 2"
+hat "$OUT/b1.txt" "ota: version there 1" "(b) angeboten wird Fassung 1 -- richtig signiert"
+hat "$OUT/b1.txt" "ROLLBACK REFUSED" "(b) DER RUECKSCHRITTSSCHUTZ GREIFT"
 hatnicht "$OUT/b1.txt" "opk: installiert" "(b) es wird nichts installiert"
-hatnicht "$OUT/b1.txt" "ota: streuwert stimmt" "(b) es wird nicht einmal ein Paket geholt"
+hatnicht "$OUT/b1.txt" "ota: hash ok" "(b) es wird nicht einmal ein Paket geholt"
 dienst_aus
 
 # ---- (b2) DIE GEGENPROBE zu (b): dieselbe Quelle, dieselbe Signatur,
 #      aber ein Geraet, das noch bei 0 steht -- dann muss sie DURCHgehen.
 dienst "$OUT/netz1" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf b2 "ota suchen;exit")
-hat "$OUT/b2.txt" "ota: NEUE FASSUNG verfügbar" "(b) GEGENPROBE: dieselbe Quelle wird angenommen, wenn hier 0 steht"
-hatnicht "$OUT/b2.txt" "RUECKSCHRITT ABGELEHNT" "(b) der Schutz schlaegt also nicht immer zu"
+rc=$(lauf b2 "ota search;exit")
+hat "$OUT/b2.txt" "ota: NEW VERSION available" "(b) GEGENPROBE: dieselbe Quelle wird angenommen, wenn hier 0 steht"
+hatnicht "$OUT/b2.txt" "ROLLBACK REFUSED" "(b) der Schutz schlaegt also nicht immer zu"
 dienst_aus
 
 # ---- (c) mitten im Laden abgebrochen -- HART, mit RST
@@ -448,18 +448,18 @@ dienst_aus
 # untergehen, das ist ja der Fall.
 dienst "$OUT/netz2" --abbruch "hallo-2.opk:9000" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf c1 "ota einspielen;exit")
+rc=$(lauf c1 "ota apply;exit")
 grep -qa "ABBRUCH hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) die Gegenstelle hat die Verbindung wirklich abgerissen (RST nach 9000 Oktett)" \
     || bad "(c) die Gegenstelle hat gar nicht abgebrochen"
 hatnicht "$OUT/c1.txt" "opk: installiert" "(c) im abgebrochenen Lauf wird nichts installiert"
 dienst_aus
-rc=$(lauf c1b "opk richten;/apps/hallo.osp/start;opk liste;opk generationen;ota zeigen;exit")
+rc=$(lauf c1b "opk rebuild;/apps/hallo.osp/start;opk list;opk generations;ota show;exit")
 gleich "(c) DANACH kommt die Maschine hoch" "$rc" "21"
 hat "$OUT/c1b.txt" "paket-hallo fassung 1" "(c) und die alte Fassung laeuft"
 hat "$OUT/c1b.txt" "${H1:0:12}" "(c) der Store nennt genau den alten Streuwert"
 hatnicht "$OUT/c1b.txt" "generation 1" "(c) es entstand keine zweite Generation"
-hat "$OUT/c1b.txt" "ota: fassung hier 0" "(c) der Fassungszaehler ist unveraendert"
+hat "$OUT/c1b.txt" "ota: version here 0" "(c) der Fassungszaehler ist unveraendert"
 
 # ---- (c2) DIE WIEDERAUFNAHME.
 #
@@ -471,17 +471,17 @@ hat "$OUT/c1b.txt" "ota: fassung hier 0" "(c) der Fassungszaehler ist unveraende
 # docs/OTA.md.) Der zweite Lauf MUSS eine 206 bekommen.
 dienst "$OUT/netz2" --kurz "hallo-2.opk:20000" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf c2a "ota einspielen;exit")
+rc=$(lauf c2a "ota apply;exit")
 hatnicht "$OUT/c2a.txt" "opk: installiert" "(c) der erste Versuch scheitert"
 grep -qa "^KURZ hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) die Gegenstelle hat den Rumpf wirklich abgeschnitten" \
     || bad "(c) die Gegenstelle hat nicht abgeschnitten"
 dienst_aus
 dienst "$OUT/netz2" || bad "Gegenstelle"
-rc=$(lauf c2b "ota einspielen;opk liste;exit")
-hat "$OUT/c2b.txt" "ota: bruchstueck, weiter ab" "(c) der zweite Versuch findet das Bruchstueck und setzt dort an"
-hat "$OUT/c2b.txt" "ota: streuwert stimmt hallo-2.opk" "(c) und bekommt das Paket vollstaendig"
-hat "$OUT/c2b.txt" "opk: installiert hallo" "(c) es wird eingespielt"
+rc=$(lauf c2b "ota apply;opk list;exit")
+hat "$OUT/c2b.txt" "ota: partial file, resuming at" "(c) der zweite Versuch findet das Bruchstueck und setzt dort an"
+hat "$OUT/c2b.txt" "ota: hash ok hallo-2.opk" "(c) und bekommt das Paket vollstaendig"
+hat "$OUT/c2b.txt" "opk: installed hallo" "(c) es wird eingespielt"
 grep -qa "^206 hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) WIEDERAUFGENOMMEN: die Gegenstelle hat 206 Partial Content geliefert" \
     || bad "(c) keine 206 -- es wurde nicht wiederaufgenommen"
@@ -510,13 +510,13 @@ dienst_aus
 # einmal ausgeliefert haben.
 dienst "$OUT/netzvoll" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf f1 "df;ota einspielen;opk liste;opk generationen;ota zeigen;exit" 900)
+rc=$(lauf f1 "df;ota apply;opk list;opk generations;ota show;exit" 900)
 gleich "(f) die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/f1.txt" "ZU WENIG PLATZ" "(f) es reicht nicht, und ota bricht SAUBER ab"
+hat "$OUT/f1.txt" "NOT ENOUGH SPACE" "(f) es reicht nicht, und ota bricht SAUBER ab"
 hatnicht "$OUT/f1.txt" "opk: installiert" "(f) es wird nichts installiert"
 hatnicht "$OUT/f1.txt" "generation 1" "(f) es entsteht keine Generation"
 hat "$OUT/f1.txt" "${H1:0:12}" "(f) die laufende Fassung ist unveraendert"
-hat "$OUT/f1.txt" "ota: fassung hier 0" "(f) der Fassungszaehler ist unveraendert"
+hat "$OUT/f1.txt" "ota: version here 0" "(f) der Fassungszaehler ist unveraendert"
 grep -qa "gross-1.opk" "$OUT/srv.log" \
     && bad "(f) das Paket wurde geholt, obwohl der Platz vorher schon nicht reichte" \
     || ok "(f) und das Paket wurde NICHT EINMAL GEHOLT -- geprueft wurde vorher"
@@ -525,25 +525,25 @@ dienst_aus
 # ---- (f) DIE GEGENPROBE: dieselbe Maschine, ein Update, das hinpasst.
 dienst "$OUT/netz2" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf f2 "ota einspielen;exit")
-hat "$OUT/f2.txt" "opk: installiert hallo" "(f) GEGENPROBE: das kleine Update geht auf derselben Platte durch"
-hatnicht "$OUT/f2.txt" "ZU WENIG PLATZ" "(f) der Platzwaechter schlaegt also nicht immer zu"
+rc=$(lauf f2 "ota apply;exit")
+hat "$OUT/f2.txt" "opk: installed hallo" "(f) GEGENPROBE: das kleine Update geht auf derselben Platte durch"
+hatnicht "$OUT/f2.txt" "NOT ENOUGH SPACE" "(f) der Platzwaechter schlaegt also nicht immer zu"
 dienst_aus
 
 # ---- die Einstellungsseite und das Umstellen im Betrieb
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf ein1 "ota einstellungen;ota einstellen abstand 900;ota einstellen auto ja;ota einstellungen;exit")
-hat "$OUT/ein1.txt" "ota: die Einstellungen (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
+rc=$(lauf ein1 "ota settings;ota set abstand 900;ota set auto ja;ota settings;exit")
+hat "$OUT/ein1.txt" "ota: settings (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
 hat "$OUT/ein1.txt" "quelle   https://10.0.2.2:$PORT" "mit der Quelle"
-hat "$OUT/ein1.txt" "ota: gesetzt abstand ist jetzt 900" "und sie laesst sich umstellen"
+hat "$OUT/ein1.txt" "ota: set abstand ist jetzt 900" "und sie laesst sich umstellen"
 hat "$OUT/ein1.txt" "abstand  900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
-rc=$(lauf ein2 "ota einstellen unsinn 5;ota dienst;exit" 200)
+rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 200)
 hat "$OUT/ein2.txt" "ota: das ist kein Schlüssel" "ein unbekannter Schluessel wird abgelehnt"
-hat "$OUT/ein2.txt" "ota: dienst, abstand 900" "und der Dienst nimmt den eingestellten Abstand"
+hat "$OUT/ein2.txt" "ota: service, interval 900" "und der Dienst nimmt den eingestellten Abstand"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf ein3 "ota dienst;exit")
-hat "$OUT/ein3.txt" "automatische Suche ist AUSgeschaltet" "GEGENPROBE: mit auto=nein sucht der Dienst gar nicht"
+rc=$(lauf ein3 "ota service;exit")
+hat "$OUT/ein3.txt" "automatic search is OFF" "GEGENPROBE: mit auto=nein sucht der Dienst gar nicht"
 
 # =====================================================================
 echo
@@ -560,9 +560,9 @@ dgut=0
 for r in $(seq 1 "$RUNDEN"); do
     dienst "$OUT/netz3" || bad "Gegenstelle"
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
-    rc=$(lauf "d$r-ein" "ota einspielen;exit")
+    rc=$(lauf "d$r-ein" "ota apply;exit")
     dienst_aus
-    e1=$(grep -ca "opk: installiert hallo" "$OUT/d$r-ein.txt")
+    e1=$(grep -ca "opk: installed hallo" "$OUT/d$r-ein.txt")
     rc=$(lauf "d$r-s1" "sh /start.sh;exit")
     rc=$(lauf "d$r-s2" "sh /start.sh;exit")
     T0=$(date +%s%N)
@@ -585,7 +585,7 @@ zahl "(d) Durchlaeufe, in denen das Geraet sich SELBST gerettet hat" "$dgut" eq 
 # waere "es faellt zurueck" auch dann gruen, wenn es IMMER zurueckfiele.
 dienst "$OUT/netz2" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf dgeg1 "ota einspielen;sh /start.sh;exit")
+rc=$(lauf dgeg1 "ota apply;sh /start.sh;exit")
 dienst_aus
 hat "$OUT/dgeg1.txt" "paket-hallo fassung 2" "(d) GEGENPROBE: das gute Update laeuft"
 rc=$(lauf dgeg2 "sh /start.sh;exit")
@@ -594,7 +594,7 @@ rc=$(lauf dgeg4 "sh /start.sh;exit")
 hat "$OUT/dgeg4.txt" "paket-hallo fassung 2" "(d) GEGENPROBE: auch nach vier Starts laeuft noch die NEUE Fassung"
 hatnicht "$OUT/dgeg4.txt" "zurueck auf" "(d) GEGENPROBE: es wird NIE zurueckgefallen"
 
-# ---- DER WACHHUND: eine Generation, die hochkommt und HAENGT
+# ---- DER WATCHDOG: eine Generation, die hochkommt und HAENGT
 #
 # Der Zaehler in `kernel/ab.fi` faengt, was nicht hochkommt -- aber nur,
 # wenn die Maschine noch einmal startet. Eine Generation, die haengt,
@@ -606,15 +606,15 @@ hatnicht "$OUT/dgeg4.txt" "zurueck auf" "(d) GEGENPROBE: es wird NIE zurueckgefa
 # dem Weg gemessen, um den es in dieser Runde geht.
 dienst "$OUT/netz3" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf wach1 "ota einspielen;ota wachhund 5;exit" 300)
+rc=$(lauf wach1 "ota apply;ota watchdog 5;exit" 300)
 dienst_aus
 hat "$OUT/wach1.txt" "opk: in erprobung" "der Wachhund: es steht etwas in Erprobung"
-hat "$OUT/wach1.txt" "WACHHUND: keine Bestaetigung" "die Frist laeuft ab, ohne dass jemand bestaetigt"
-hat "$OUT/wach1.txt" "WACHHUND: Neustart" "und der Wachhund startet die Maschine neu"
+hat "$OUT/wach1.txt" "WATCHDOG: keine Bestaetigung" "die Frist laeuft ab, ohne dass jemand bestaetigt"
+hat "$OUT/wach1.txt" "WATCHDOG: Neustart" "und der Wachhund startet die Maschine neu"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf wach2 "ota wachhund 5;exit" 300)
-hat "$OUT/wach2.txt" "ota: nichts in erprobung" "GEGENPROBE: ohne Erprobung tut der Wachhund NICHTS"
-hatnicht "$OUT/wach2.txt" "WACHHUND: Neustart" "und startet vor allem nicht neu"
+rc=$(lauf wach2 "ota watchdog 5;exit" 300)
+hat "$OUT/wach2.txt" "ota: nothing in trial" "GEGENPROBE: ohne Erprobung tut der Wachhund NICHTS"
+hatnicht "$OUT/wach2.txt" "WATCHDOG: Neustart" "und startet vor allem nicht neu"
 
 # =====================================================================
 echo
@@ -693,9 +693,9 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     if [ $(( i % 3 )) = 1 ]; then
         MARKE="ota: quelle"; VERSATZ=$(( 100 + i * 60 )); PHASE=netz
     elif [ $(( i % 3 )) = 2 ]; then
-        MARKE="ota: streuwert stimmt"; VERSATZ=$(( 50 + i * 120 )); PHASE=schreiben
+        MARKE="ota: hash ok"; VERSATZ=$(( 50 + i * 120 )); PHASE=schreiben
     else
-        MARKE="ota: BEREIT ZUM NEUSTART"; VERSATZ=$(( 20 + i * 10 )); PHASE=danach
+        MARKE="ota: READY FOR RESTART"; VERSATZ=$(( 20 + i * 10 )); PHASE=danach
     fi
     OVMF=$(ls /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -1)
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$OUT/e.vars.fd" 2>/dev/null || true
@@ -703,7 +703,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
         echo "timeout: 0"; echo "verbose: yes"; echo
         echo "/OrientOS"; echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
-        echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota einspielen;exit"
+        echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota apply;exit"
     } > "$OUT/e.conf"
     mcopy -o -i "$OUT/ziel.img@@1048576" "$OUT/e.conf" ::/limine.conf 2>/dev/null
     : > "$OUT/e$i.txt"
@@ -730,7 +730,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     dienst_aus
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/e$i.txt" 2>/dev/null
     # ---- und jetzt: kommt sie hoch, und was hat sie?
-    rc=$(lauf "en$i" "opk richten;/apps/hallo.osp/start;opk liste;exit" 400)
+    rc=$(lauf "en$i" "opk rebuild;/apps/hallo.osp/start;opk list;exit" 400)
     if [ "$rc" != 21 ]; then
         tot_n=$((tot_n+1))
         bad "(e) Schuss $i in Phase $PHASE: die Maschine kommt NICHT mehr hoch (rc=$rc)"
@@ -753,7 +753,7 @@ zahl "(e) Schuesse, die WIRKLICH nach dem Umschalten lagen (sonst misst das nich
 zahl "(e) und Schuesse, die davor lagen" "$alt_n" gt 0
 zahl "(e) Schuesse, die ihre Phase wirklich getroffen haben" "$getroffen" eq "$SCHUESSE"
 echo "        alt=$alt_n  neu=$neu_n  kaputt=$tot_n  Phase getroffen=$getroffen verfehlt=$verfehlt"
-echo "        (Schuesse an Marken der Maschine ausgerichtet: 'ota: quelle' / 'ota: streuwert stimmt' / 'ota: BEREIT ZUM NEUSTART')"
+echo "        (Schuesse an Marken der Maschine ausgerichtet: 'ota: quelle' / 'ota: hash ok' / 'ota: READY FOR RESTART')"
 
 # =====================================================================
 echo
@@ -766,8 +766,8 @@ printf '   %-52s %s\n' "ein Update auf der Leitung (VERZEICHNIS+sig+INDEX+sig+op
     "$(du -sb "$OUT/netz2" | cut -f1) Oktett"
 printf '   %-52s %s\n' "davon wirklich uebertragen (aus dem Protokoll der Gegenstelle)" \
     "$(awk '/^(200|206) /{s+=$6} END{print s+0}' "$OUT/srv-gut.log" 2>/dev/null) Oktett (der gute Lauf)"
-printf '   %-52s %s\n' "von 'ota suchen' bis zur Antwort (ganzer Start)" "$SUCHMS ms"
-printf '   %-52s %s\n' "von 'ota einspielen' bis 'bereit zum Neustart'" "$EINMS ms (Wanduhr, mit Rahmen)"
+printf '   %-52s %s\n' "von 'ota search' bis zur Antwort (ganzer Start)" "$SUCHMS ms"
+printf '   %-52s %s\n' "von 'ota apply' bis 'bereit zum Neustart'" "$EINMS ms (Wanduhr, mit Rahmen)"
 printf '   %-52s %s\n' "davon in der Maschine: Firmware->Netz / ->Paket geprueft" "$T_NETZ ms / $T_LADEN ms"
 printf '   %-52s %s\n' "in der Maschine: ->geschrieben / ->bereit zum Neustart" "$T_SCHREIB ms / $T_FERTIG ms"
 printf '   %-52s %s\n' "Rueckfall: der Start, in dem der Kern zurueckschaltet" "$RUECKMS ms"
@@ -798,12 +798,12 @@ echo "== 7. Kanaele stable/test, Stand, Hintergrund-Dienst, Rueckschritt =="
 #   (c) zurueck auf `stable` ist ein RUECKSCHRITT und wird abgelehnt --
 #       der Fassungszaehler gilt ueber die Kanaele hinweg;
 #   (d) ungueltige Kanaele (`beta`, `../x`) werden abgelehnt;
-#   (e) `ota zurueck` nach einem bestaetigten Update bringt die vorige
+#   (e) `ota rollback` nach einem bestaetigten Update bringt die vorige
 #       Generation wieder, und sie laeuft;
 #   (f) GEGENPROBE: ohne `kanal=` fragt das Geraet weiter flach;
 #   (g) `ota boot`: ein Update in Erprobung wird von selbst bestaetigt,
 #       wenn das System gesund laeuft -- und nur dann;
-#   (h) `ota dienst 1` mit auto=ja holt und spielt von selbst ein,
+#   (h) `ota service 1` mit auto=ja holt und spielt von selbst ein,
 #       mit auto=nein tut es nichts.
 rm -rf "$OUT/netzkanal"
 mkdir -p "$OUT/netzkanal/stable" "$OUT/netzkanal/test"
@@ -817,11 +817,11 @@ python3 tools/ota/listing.py "$OUT/netzkanal/test" --fassung 4 \
 
 dienst "$OUT/netzkanal" || bad "Gegenstelle (Kanaele)"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan1 "ota einstellen kanal stable;ota zeigen;ota suchen;cat /system/ota.stand;exit")
+rc=$(lauf kan1 "ota set kanal stable;ota show;ota search;cat /system/ota.stand;exit")
 gleich "(a) stable: die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/kan1.txt" "ota: kanal stable" "(a) der Kanal steht in der Anzeige"
-hat "$OUT/kan1.txt" "ota: fassung dort 2" "(a) auf stable liegt Fassung 2"
-hatnicht "$OUT/kan1.txt" "ota: fassung dort 4" "(a) und nicht die Fassung des Testkanals"
+hat "$OUT/kan1.txt" "ota: channel stable" "(a) der Kanal steht in der Anzeige"
+hat "$OUT/kan1.txt" "ota: version there 2" "(a) auf stable liegt Fassung 2"
+hatnicht "$OUT/kan1.txt" "ota: version there 4" "(a) und nicht die Fassung des Testkanals"
 hat "$OUT/kan1.txt" "phase=verfuegbar" "(a) /system/ota.stand: phase=verfuegbar"
 hat "$OUT/kan1.txt" "dort=2" "(a) /system/ota.stand: dort=2"
 grep -qa "^200 stable/VERZEICHNIS" "$OUT/srv.log" \
@@ -830,83 +830,83 @@ grep -qa "^200 stable/VERZEICHNIS" "$OUT/srv.log" \
 
 # (b) Testkanal: einspielen, neu starten, bestaetigen
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan2 "ota einstellen kanal test;ota einspielen;cat /system/ota.stand;exit")
-hat "$OUT/kan2.txt" "ota: fassung dort 4" "(b) auf test liegt Fassung 4"
-hat "$OUT/kan2.txt" "opk: installiert hallo" "(b) die Fassung vom Testkanal wird installiert"
-hat "$OUT/kan2.txt" "ota: BEREIT ZUM NEUSTART" "(b) und zum Neustart angeboten"
+rc=$(lauf kan2 "ota set kanal test;ota apply;cat /system/ota.stand;exit")
+hat "$OUT/kan2.txt" "ota: version there 4" "(b) auf test liegt Fassung 4"
+hat "$OUT/kan2.txt" "opk: installed hallo" "(b) die Fassung vom Testkanal wird installiert"
+hat "$OUT/kan2.txt" "ota: READY FOR RESTART" "(b) und zum Neustart angeboten"
 hat "$OUT/kan2.txt" "phase=bereit" "(b) /system/ota.stand: phase=bereit"
-rc=$(lauf kan3 "sh /start.sh;ota zeigen;cat /system/ota.stand;exit")
+rc=$(lauf kan3 "sh /start.sh;ota show;cat /system/ota.stand;exit")
 gleich "(b) der Neustart" "$rc" "21"
 hat "$OUT/kan3.txt" "paket-hallo fassung 2" "(b) die neue Generation laeuft"
-hat "$OUT/kan3.txt" "ota: fassung hier 4" "(b) der Fassungszaehler steht auf 4"
-hat "$OUT/kan3.txt" "ota: kanal test" "(b) und der Kanal ist noch test"
+hat "$OUT/kan3.txt" "ota: version here 4" "(b) der Fassungszaehler steht auf 4"
+hat "$OUT/kan3.txt" "ota: channel test" "(b) und der Kanal ist noch test"
 hat "$OUT/kan3.txt" "phase=ruhe" "(b) nach der Bestaetigung steht phase=ruhe"
 
 # (c) zurueck auf stable: Rueckschritt
-rc=$(lauf kan4 "ota einstellen kanal stable;ota suchen;exit")
-hat "$OUT/kan4.txt" "RUECKSCHRITT ABGELEHNT" "(c) test -> stable ist ein Rueckschritt und wird abgelehnt"
+rc=$(lauf kan4 "ota set kanal stable;ota search;exit")
+hat "$OUT/kan4.txt" "ROLLBACK REFUSED" "(c) test -> stable ist ein Rueckschritt und wird abgelehnt"
 hatnicht "$OUT/kan4.txt" "opk: installiert" "(c) und es wird nichts installiert"
 
 # (d) ungueltige Kanaele
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan5 "ota einstellen kanal stable;ota einstellen kanal beta;ota einstellen kanal ../x;ota einstellungen;exit")
-n=$(grep -ca "kanal muss stable oder test sein" "$OUT/kan5.txt")
+rc=$(lauf kan5 "ota set kanal stable;ota set kanal beta;ota set kanal ../x;ota settings;exit")
+n=$(grep -ca "channel must be stable or test" "$OUT/kan5.txt")
 zahl "(d) ungueltige Kanalnamen abgelehnt (beta, ../x)" "$n" ge 2
 hat "$OUT/kan5.txt" "kanal    stable" "(d) die Einstellung blieb auf stable"
 
 # (e) Rueckschritt von Hand, nachdem ein Update bestaetigt wurde
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan6 "ota einstellen kanal test;ota einspielen;exit")
+rc=$(lauf kan6 "ota set kanal test;ota apply;exit")
 rc=$(lauf kan7 "sh /start.sh;exit")
 hat "$OUT/kan7.txt" "paket-hallo fassung 2" "(e) Ausgangslage: Fassung 4 laeuft und ist bestaetigt"
-rc=$(lauf kan8 "ota zurueck;ota zeigen;exit")
-rc=$(lauf kan9 "sh /start.sh;ota zeigen;exit")
-gleich "(e) nach ota zurueck: die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/kan9.txt" "paket-hallo fassung 1" "(e) ota zurueck: die VORIGE Generation laeuft wieder"
+rc=$(lauf kan8 "ota rollback;ota show;exit")
+rc=$(lauf kan9 "sh /start.sh;ota show;exit")
+gleich "(e) nach ota rollback: die Maschine kommt hoch" "$rc" "21"
+hat "$OUT/kan9.txt" "paket-hallo fassung 1" "(e) ota rollback: die VORIGE Generation laeuft wieder"
 hatnicht "$OUT/kan9.txt" "SCHEITERT" "(e) und sie meldet keinen Fehler"
 dienst_aus
 
 # (f) GEGENPROBE: ohne kanal= flach (wie jedes Geraet vor dieser Runde)
 dienst "$OUT/netz2" || bad "Gegenstelle (flach)"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan10 "ota zeigen;ota suchen;exit")
-hat "$OUT/kan10.txt" "ota: fassung dort 2" "(f) ohne kanal= wird wie bisher flach gelesen"
+rc=$(lauf kan10 "ota show;ota search;exit")
+hat "$OUT/kan10.txt" "ota: version there 2" "(f) ohne kanal= wird wie bisher flach gelesen"
 hatnicht "$OUT/kan10.txt" "ota: kanal" "(f) und es wird kein Kanal angezeigt"
 
 # (g) ota boot: Erprobung wird von selbst bestaetigt -- wenn gesund
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan11 "ota einspielen;exit")
-hat "$OUT/kan11.txt" "ota: BEREIT ZUM NEUSTART" "(g) Ausgangslage: Fassung 2 steht in Erprobung"
+rc=$(lauf kan11 "ota apply;exit")
+hat "$OUT/kan11.txt" "ota: READY FOR RESTART" "(g) Ausgangslage: Fassung 2 steht in Erprobung"
 # `sh` laeuft in diesem Lauf immer -- als Stellvertreter fuer den
 # Schreibtisch, den es im Textlauf nicht gibt (`ota boot <name>`).
-rc=$(lauf kan12 "opk richten;ota einstellen gesund 3;ota boot sh;ota zeigen;cat /system/ota.stand;exit" 300)
+rc=$(lauf kan12 "opk rebuild;ota set gesund 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
 hat "$OUT/kan12.txt" "ota: Start gesund, Erprobung bestätigt" "(g) ein gesunder Start wird von selbst bestaetigt"
-hat "$OUT/kan12.txt" "ota: nichts in erprobung" "(g) danach steht nichts mehr in Erprobung"
+hat "$OUT/kan12.txt" "ota: nothing in trial" "(g) danach steht nichts mehr in Erprobung"
 hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
 # GEGENPROBE: ein Lauf, in dem das Stellvertreterprogramm NICHT laeuft,
 # gilt nicht als gesund und startet neu (der Kern zaehlt).
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan13 "ota einspielen;exit")
-rc=$(lauf kan14 "opk richten;ota einstellen gesund 2;ota einstellen frist 6;ota boot nirgends;exit" 300)
+rc=$(lauf kan13 "ota apply;exit")
+rc=$(lauf kan14 "opk rebuild;ota set gesund 2;ota set frist 6;ota boot nirgends;exit" 300)
 hat "$OUT/kan14.txt" "Start NICHT gesund" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
 hatnicht "$OUT/kan14.txt" "Erprobung bestätigt" "(g) GEGENPROBE: und es wird nichts bestaetigt"
 
 # (h) der Hintergrund-Dienst
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan15 "ota einstellen auto nein;ota dienst 1;ota zeigen;exit")
+rc=$(lauf kan15 "ota set auto nein;ota service 1;ota show;exit")
 hat "$OUT/kan15.txt" "AUSgeschaltet" "(h) mit auto=nein tut der Dienst nichts"
 hatnicht "$OUT/kan15.txt" "opk: installiert" "(h) und installiert nichts"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan16 "ota einstellen auto ja;ota dienst 1;cat /system/ota.stand;exit")
-hat "$OUT/kan16.txt" "opk: installiert hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"
-hat "$OUT/kan16.txt" "ota: BEREIT ZUM NEUSTART" "(h) ohne Neustart -- er wird nur angeboten"
+rc=$(lauf kan16 "ota set auto ja;ota service 1;cat /system/ota.stand;exit")
+hat "$OUT/kan16.txt" "opk: installed hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"
+hat "$OUT/kan16.txt" "ota: READY FOR RESTART" "(h) ohne Neustart -- er wird nur angeboten"
 hat "$OUT/kan16.txt" "phase=bereit" "(h) die Anzeige sagt phase=bereit"
 hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gestartet"
 # DEFAULT ON (owner decision 02.10.2026): no `auto=` key at all -> the service runs
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf kan17 "grep -v auto= /etc/ota.conf > /etc/ota.neu;cp /etc/ota.neu /etc/ota.conf;cat /etc/ota.conf;ota dienst 1;cat /system/ota.stand;exit")
+rc=$(lauf kan17 "grep -v auto= /etc/ota.conf > /etc/ota.neu;cp /etc/ota.neu /etc/ota.conf;cat /etc/ota.conf;ota service 1;cat /system/ota.stand;exit")
 hatnicht "$OUT/kan17.txt" "AUSgeschaltet" "(h) DEFAULT: without an auto= key the service is ON"
-hat "$OUT/kan17.txt" "opk: installiert hallo" "(h) DEFAULT: and it fetches and installs by itself"
+hat "$OUT/kan17.txt" "opk: installed hallo" "(h) DEFAULT: and it fetches and installs by itself"
 for f in tools/usbimg/build.sh tools/install/build.sh; do
     if grep -q '^auto=true$' "$f"; then ok "(h) $f writes auto=true as the image default"; else bad "(h) $f does not write auto=true"; fi
 done

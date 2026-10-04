@@ -111,7 +111,7 @@ immer zuschlägt, ist kein Schutz, sondern ein kaputter Update-Weg.
 5. **Platz prüfen** (`SYS_SYSINFO`, `I_BFREE` × `I_BSIZE`), mit Faktor
    drei: die Datei unter `/tmp/ota`, der ausgepackte Store-Eintrag, und
    Luft für Generation, Journal und Verzeichniseinträge.
-6. `opk aktualisieren` — prüft INDEX.sig und die Paketsignatur ein
+6. `opk update` — prüft INDEX.sig und die Paketsignatur ein
    **zweites** Mal mit eigenem Code, legt den Store-Eintrag an, schreibt
    die neue Generation, schaltet `/system/AKTUELL` um.
 7. **Zuletzt** `/system/FASSUNG` hochsetzen.
@@ -152,7 +152,7 @@ dritten Versuch ohne Erfolgsvermerk von selbst auf die vorige Generation
 zurück. Das fängt jede Generation, die **nicht hochkommt** — vorausgesetzt,
 die Maschine startet überhaupt noch einmal.
 
-Genau da war die Lücke, und `ota wachhund` ist sie: eine Generation, die
+Genau da war die Lücke, und `ota watchdog` ist sie: eine Generation, die
 **hochkommt und dann hängt**, startet nie wieder von selbst. Niemand setzt
 den Erfolgsvermerk, niemand zählt, das Gerät steht. Der Wachhund wartet die
 eingestellte Frist ab, sieht in `/system/ERPROBUNG` nach, und wenn dort
@@ -166,15 +166,15 @@ gebraucht wird. Der Läufer misst beide Hälften.
 
 ## 6. Die Bedienung
 
-    ota suchen                    nachsehen (schreibt nichts am System)
-    ota zeigen                    Fassung, Generation, Erprobung
-    ota einspielen                holen, prüfen, einspielen -- OHNE Neustart
-    ota bestaetigen               der Erfolgsvermerk nach einem guten Start
-    ota zurueck                   von Hand auf die vorige Generation
-    ota wachhund [sekunden]       die Frist abwarten, notfalls neu starten
-    ota dienst                    automatische Suche im Zeitabstand
-    ota einstellungen             die Einstellungsseite
-    ota einstellen <schlüssel> <wert>
+    ota search                    nachsehen (schreibt nichts am System)
+    ota show                    Fassung, Generation, Erprobung
+    ota apply                holen, prüfen, einspielen -- OHNE Neustart
+    ota confirm               der Erfolgsvermerk nach einem guten Start
+    ota rollback                   von Hand auf die vorige Generation
+    ota watchdog [sekunden]       die Frist abwarten, notfalls neu starten
+    ota service                    automatische Suche im Zeitabstand
+    ota settings             die Einstellungsseite
+    ota set <schlüssel> <wert>
 
 `/etc/ota.conf`:
 
@@ -223,7 +223,7 @@ mit der Zeit seit dem Start von QEMU. Gemessen:
 
 | Marke | ms |
 |---|---:|
-| `ota: quelle …` — das Netz steht | 9 799 |
+| `ota: source …` — das Netz steht | 9 799 |
 | `ota: streuwert stimmt` — das Paket ist geladen und geprüft | 13 938 |
 | `opk: installiert` — geschrieben | 22 731 |
 | `ota: BEREIT ZUM NEUSTART` | 22 814 |
@@ -351,10 +351,10 @@ dieser Abschnitt ist der Teil C davon.
 |---|---|---|
 | **Kanäle** `kanal=stable` / `kanal=test` in `/etc/ota.conf` | `kernel/user/ota.fi` (`kanal_gueltig`, `hole`) | `tools/ota/run.sh` Abschnitt 7 (a)–(f) |
 | **Stand-Datei** `/system/ota.stand` (`dort`, `hier`, `zeit`, `phase`) | `stand_write` | Abschnitt 7 (a), (b), (g), (h) |
-| **Hintergrund-Dienst** `ota dienst [runden]`: bei `auto=ja` suchen, holen, prüfen, als neue Generation einspielen — **ohne Neustart** | `cmd_dienst` | Abschnitt 7 (h) |
+| **Hintergrund-Dienst** `ota service [runden]`: bei `auto=ja` suchen, holen, prüfen, als neue Generation einspielen — **ohne Neustart** | `cmd_dienst` | Abschnitt 7 (h) |
 | **Start-Dienst** `ota boot [name]`: nach dem Start Erprobung selbst bestätigen, wenn Anmeldeschirm/Schreibtisch nach `gesund=` s (Vorgabe 60) noch laufen; sonst nach `frist=` s Neustart → der Kern schaltet nach drei Versuchen zurück | `cmd_boot`, aufgerufen aus `kgui.desk_start` | Abschnitt 7 (g) mit Gegenprobe |
-| `ota zurueck` von Hand nach bestätigtem Update | schon da, jetzt gemessen | Abschnitt 7 (e) |
-| neue Schlüssel in `ota einstellen`: `kanal`, `gesund` | `cmd_einstellen` | Abschnitt 7 (d) |
+| `ota rollback` von Hand nach bestätigtem Update | schon da, jetzt gemessen | Abschnitt 7 (e) |
+| neue Schlüssel in `ota set`: `kanal`, `gesund` | `cmd_einstellen` | Abschnitt 7 (d) |
 
 ## Das Ablageformat auf dem Server
 
@@ -366,7 +366,7 @@ mit **eigenem** Register. Ein Testkanal liegt normalerweise vor dem stabilen.
 
 **Wechsel test → stable ist ein Rückschritt** und wird vom Rückschrittsschutz
 abgelehnt, solange `stable` nicht über der Fassung des Geräts liegt. Das ist
-gewollt (Abschnitt 7 (c)); ein Gerät kommt über den Weg `ota zurueck` oder
+gewollt (Abschnitt 7 (c)); ein Gerät kommt über den Weg `ota rollback` oder
 eine Neuinstallation zurück.
 
 `tools/install/build.sh` und `tools/usbimg/build.sh` liefern weiter **ohne**
@@ -397,7 +397,7 @@ Messung: `tools/actionbus/run.sh` Abschnitt 13 (`S-UPD`), `tools/actionbus/gui.s
   noch läuft. Ein Schreibtisch, der danach abstürzt, wird nicht mehr
   zurückgerollt (DD-9).
 * Der Kern selbst ist nicht im A/B-Wechsel (Roadmap r104).
-* `ota einspielen` ist langsam (r179: 14 Pakete ≈ 25 min in QEMU).
+* `ota apply` ist langsam (r179: 14 Pakete ≈ 25 min in QEMU).
 * Auf dem Live-Store (`store.fleitec.com`) gibt es `stable/` und `test/` noch
   nicht; solange bleiben die ausgelieferten Abbilder bei `quelle=…/aktuell`
   ohne `kanal=` (Freigabe des Boss nötig).

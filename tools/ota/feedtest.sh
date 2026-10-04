@@ -17,7 +17,7 @@
 #   3. einspielen installs the packages, generation switches
 #   4. reboot from the disk: erprobung, bestaetigen, second search says "aktuell"
 #   5. desktop boots from the disk (screenshots by the caller via $WORK/desk.*)
-#   6. rollback (ota zurueck) and boot again
+#   6. rollback (ota rollback) and boot again
 # Nothing here touches /srv/store or any device of the owner.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -69,24 +69,24 @@ run() { # name script [limit]
     cat "$W/$1.rc" 2>/dev/null
 }
 echo "== 2. version 0 sees the new feed =="
-run r0 "ota zeigen;ota suchen;exit" 600 > /dev/null
-hat "$W/r0.txt" "ota: quelle https://10.0.2.2:$PORT/osum/aktuell" "source is the local copy of osum/aktuell"
-hat "$W/r0.txt" "fassung hier 0" "device is on version 0"
-hat "$W/r0.txt" "fassung dort 5" "feed offers version 5"
-hat "$W/r0.txt" "NEUE FASSUNG" "reports a new version"
+run r0 "ota show;ota search;exit" 600 > /dev/null
+hat "$W/r0.txt" "ota: source https://10.0.2.2:$PORT/osum/aktuell" "source is the local copy of osum/aktuell"
+hat "$W/r0.txt" "version here 0" "device is on version 0"
+hat "$W/r0.txt" "version there 5" "feed offers version 5"
+hat "$W/r0.txt" "NEW VERSION" "reports a new version"
 echo "== 3. install the packages =="
-run r1 "ota einspielen;ota zeigen;opk generationen;exit" 3000 > /dev/null
+run r1 "ota apply;ota show;opk generations;exit" 3000 > /dev/null
 echo "== 4. reboot, confirm, second search =="
-run r2 "opk richten;ota zeigen;ota bestaetigen;opk erprobung;ota suchen;exit" 900 > /dev/null
+run r2 "opk rebuild;ota show;ota confirm;opk trial;ota search;exit" 900 > /dev/null
 echo "== 6. rollback =="
 cp -f "$W/ziel.img" "$W/after-update.img"
-run r3 "ota zurueck;ota zeigen;exit" 900 > /dev/null
-run r4 "ota zeigen;ota suchen;exit" 900 > /dev/null
+run r3 "ota rollback;ota show;exit" 900 > /dev/null
+run r4 "ota show;ota search;exit" 900 > /dev/null
 # --- the device's own words, checked
-hat "$W/r1.txt" "ota: in erprobung: 00000013" "update installed: new generation is on trial"
-hat "$W/r1.txt" "ota: fassung hier 5" "version file says 5 after the update"
-hat "$W/r2.txt" "opk: erprobung best" "after the reboot the trial generation was confirmed"
-hat "$W/r2.txt" "ota: fassung dort 5" "second search: the feed still offers 5"
+hat "$W/r1.txt" "ota: in trial: 00000013" "update installed: new generation is on trial"
+hat "$W/r1.txt" "ota: version here 5" "version file says 5 after the update"
+hat "$W/r2.txt" "opk: trial best" "after the reboot the trial generation was confirmed"
+hat "$W/r2.txt" "ota: version there 5" "second search: the feed still offers 5"
 hat "$W/r2.txt" "alles aktuell" "second search says 'alles aktuell' (nothing new)"
 hat "$W/r3.txt" "opk: zur" "rollback went back to the previous generation"
 hat "$W/r4.txt" "ota: generation 12" "after the rollback the old generation is active"

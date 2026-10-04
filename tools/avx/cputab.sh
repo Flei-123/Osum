@@ -6,7 +6,7 @@
 # Abschnitt "WAS NOCH FEHLT", Punkt 1: dasselbe Abbild, derselbe Kern,
 # nur ein anderes `-cpu` -- und ab `max` stirbt `/bin/fetch` mit
 # `user fault: vector=6` (#UD). Dieses Skript faehrt genau diese Messung:
-# EIN Startvorgang je Prozessormodell, mit `ota zeigen;ota suchen`, also
+# EIN Startvorgang je Prozessormodell, mit `ota show;ota search`, also
 # mit einem echten TLS-1.3-Handschlag gegen `tools/ota/server.py`, einer
 # gepruefte Zertifikatskette und einer Ed25519-Signatur.
 #
@@ -17,9 +17,9 @@
 #
 #   bash tools/avx/cputab.sh <OUT-Verzeichnis eines ota/run.sh-Laufes>
 #
-# Je Prozessormodell ZWEI Startvorgaenge: `ota suchen` (TLS 1.3,
+# Je Prozessormodell ZWEI Startvorgaenge: `ota search` (TLS 1.3,
 # Kettenpruefung, Ed25519 ueber das VERZEICHNIS) und, wenn der
-# durchkam, `ota einspielen` -- das Paket ueber die Leitung holen,
+# durchkam, `ota apply` -- das Paket ueber die Leitung holen,
 # seine SHA-256 gegen das signierte VERZEICHNIS halten und
 # einspielen. Der zweite ist der Beweis: eine Pruefsumme, die
 # stimmt, und nicht nur ein Handschlag, der zustande kam.
@@ -109,7 +109,7 @@ start() { # <name> <skript>
 
 for M in $MODELLE; do
     # 1. SUCHEN: TLS 1.3, Kette geprueft, VERZEICHNIS mit Ed25519.
-    start "cputab-$M-suchen" "ota zeigen;ota suchen;exit"
+    start "cputab-$M-suchen" "ota show;ota search;exit"
     RC=$(cat "$OUT/cputab-$M-suchen.rc" 2>/dev/null)
     L="$OUT/cputab-$M-suchen.txt"
     MODE=$(grep -ao 'fpu: mode=[0-9]*' "$L" | head -1 | cut -d= -f2)
@@ -118,19 +118,19 @@ for M in $MODELLE; do
            | grep -ao 'size=[0-9]*' | head -1 | cut -d= -f2)
     if grep -qa "vector=6" "$L"; then
         ERG="#UD (vector=6) -- /bin/fetch tot"
-    elif grep -qa "ota: NEUE FASSUNG verfügbar" "$L" \
+    elif grep -qa "ota: NEW VERSION available" "$L" \
          && grep -qa "fetch: verify OK" "$L"; then
         # 2. EINSPIELEN: das Paket holen, die SHA-256 gegen das
         #    signierte VERZEICHNIS halten und einspielen. DAS ist der
         #    Beweis, den die Runde verlangt -- nicht der Handschlag
         #    allein, sondern die Pruefsumme der geladenen Oktette.
-        start "cputab-$M-spielen" "ota einspielen;exit"
+        start "cputab-$M-spielen" "ota apply;exit"
         S="$OUT/cputab-$M-spielen.txt"
         RC2=$(cat "$OUT/cputab-$M-spielen.rc" 2>/dev/null)
         if grep -qa "vector=6" "$S"; then
             ERG="suchen ok, EINSPIELEN #UD (vector=6)"
-        elif grep -qa "ota: streuwert stimmt" "$S" \
-             && grep -qa "opk: installiert hallo" "$S"; then
+        elif grep -qa "ota: hash ok" "$S" \
+             && grep -qa "opk: installed hallo" "$S"; then
             ERG="laeuft -- Kette geprueft, Streuwert stimmt, eingespielt (rc=$RC2)"
         else
             ERG="suchen ok, einspielen gescheitert -- siehe $S"

@@ -22,7 +22,7 @@
 #   3. DIE LISTE. Ein Osum ohne jedes Paket fragt den Laden und zaehlt
 #      acht auf. Gegenprobe: die Fassungsnummer, die es DABEI liest,
 #      ist die aus dem signierten VERZEICHNIS und nicht geraten.
-#   4. DIE INSTALLATION. `ota einspielen`: holen, Laenge und SHA-256
+#   4. DIE INSTALLATION. `ota apply`: holen, Laenge und SHA-256
 #      gegen das VERZEICHNIS, dann `opk` -- das die Signatur ein
 #      ZWEITES Mal prueft, mit eigenem Code.
 #   5. DAS PROGRAMM LAEUFT. Der Schreibtisch startet, der Starter
@@ -91,7 +91,7 @@ done
 # RUNDE STORE (25.09.2026): Anzahl, Fassung und Namen kommen aus dem
 # geholten VERZEICHNIS und nicht aus dem Laeufer. Fassung 3 (acht Pakete)
 # hatte KEINE Plattform-Spalte -- jedes Geraet ab STORE-MOBIL blendete
-# alle acht aus ("ohne Plattformangabe ausgeblendet: 8"), der Laden war
+# alle acht aus ("hidden, no platform given: 8"), der Laden war
 # leer, und dieser Laeufer zaehlte trotzdem "acht" als gruen.
 N=$(grep -c '^paket' "$OUT/netz-VERZEICHNIS" 2>/dev/null)
 FASS=$(awk -F'\t' '$1=="fassung"{print $2}' "$OUT/netz-VERZEICHNIS")
@@ -106,27 +106,27 @@ bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
     && ok "Abbild gebaut" || { bad "abbild.sh"; tail -10 "$OUT/abbild.log"; exit 1; }
 cp -f "$OUT/platte/disk.img" "$OUT/text.img"
 LADEN_PLATTE="$OUT/text.img" bash tools/loader/lauf.sh a1 \
-    "$TEXT script=opk liste;ota suchen;exit" 900 > /dev/null 2>&1
-hat "$OUT/a1.txt" "(keine Pakete)"          "vorher ist kein Paket installiert"
+    "$TEXT script=opk list;ota search;exit" 900 > /dev/null 2>&1
+hat "$OUT/a1.txt" "(no packages)"          "vorher ist kein Paket installiert"
 hat "$OUT/a1.txt" "fetch: verify OK"        "die Zertifikatskette wurde geprueft"
-hat "$OUT/a1.txt" "ota: fassung dort $FASS"  "das signierte VERZEICHNIS ist gelesen"
-hat "$OUT/a1.txt" "ota: NEUE FASSUNG"       "und es gibt etwas zu holen"
+hat "$OUT/a1.txt" "ota: version there $FASS"  "das signierte VERZEICHNIS ist gelesen"
+hat "$OUT/a1.txt" "ota: NEW VERSION"       "und es gibt etwas zu holen"
 gleich "der Laden zaehlt alle $N Programme auf" \
-       "$(grep -ac '^ota: paket ' "$OUT/a1.txt")" "$N"
+       "$(grep -ac '^ota: package ' "$OUT/a1.txt")" "$N"
 gleich "kein Paket wird ausgeblendet" \
        "$(grep -ac 'ausgeblendet' "$OUT/a1.txt")" "0"
 
 LADEN_PLATTE="$OUT/text.img" bash tools/loader/lauf.sh a2 \
-    "$TEXT script=ota einspielen;opk liste;ls /apps;exit" 3600 > /dev/null 2>&1
+    "$TEXT script=ota apply;opk list;ls /apps;exit" 3600 > /dev/null 2>&1
 gleich "$N Streuwerte stimmen" \
-       "$(grep -ac '^ota: streuwert stimmt' "$OUT/a2.txt")" "$N"
+       "$(grep -ac '^ota: hash ok' "$OUT/a2.txt")" "$N"
 gleich "opk prueft $N Paketsignaturen ein zweites Mal" \
-       "$(grep -ac '^opk: Signatur geprüft /tmp/ota/.*opk' "$OUT/a2.txt")" "$N"
+       "$(grep -ac '^opk: signature checked /tmp/ota/.*opk' "$OUT/a2.txt")" "$N"
 gleich "$N Pakete installiert" \
-       "$(grep -ac '^opk: installiert ' "$OUT/a2.txt")" "$N"
+       "$(grep -ac '^opk: installed ' "$OUT/a2.txt")" "$N"
 for p in $NAMEN; do
-    grep -qa "  $p -> " "$OUT/a2.txt" && ok "opk liste kennt $p" \
-        || bad "opk liste kennt $p nicht"
+    grep -qa "  $p -> " "$OUT/a2.txt" && ok "opk list kennt $p" \
+        || bad "opk list kennt $p nicht"
 done
 
 echo "== 5. der Schreibtisch, und ein Programm aus dem Laden laeuft =="
@@ -142,15 +142,15 @@ LADEN_WARTE=15 LADEN_KILL=ja bash tools/loader/lauf.sh a3 \
 echo "== 6. die Gegenprobe: beschaedigte Pakete =="
 cp -f "$OUT/platte/disk.img" "$OUT/boese.img"
 LADEN_PLATTE="$OUT/boese.img" bash tools/loader/lauf.sh a4 \
-    "osum vfs nokbd nosched noproc nofs noring3 script=opk installieren /boese/verdreht.opk;opk installieren /boese/ohnesig.opk;opk installieren /boese/hallo-1.opk;opk liste;exit" \
+    "osum vfs nokbd nosched noproc nofs noring3 script=opk install /boese/verdreht.opk;opk install /boese/ohnesig.opk;opk install /boese/hallo-1.opk;opk list;exit" \
     600 > /dev/null 2>&1
-hat "$OUT/a4.txt" "opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT: /boese/verdreht.opk" \
+hat "$OUT/a4.txt" "opk: SIGNATURE WRONG -- the package is REJECTED: /boese/verdreht.opk" \
     "ein gekipptes Oktett wird abgelehnt"
-hat "$OUT/a4.txt" "opk: KEINE SIGNATUR -- abgelehnt" \
+hat "$OUT/a4.txt" "opk: NO SIGNATURE -- abgelehnt" \
     "ein Paket ohne Signatur wird abgelehnt"
-hat "$OUT/a4.txt" "opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT: /boese/hallo-1.opk" \
+hat "$OUT/a4.txt" "opk: SIGNATURE WRONG -- the package is REJECTED: /boese/hallo-1.opk" \
     "ein Paket mit der Signatur eines FREMDEN Schluessels wird abgelehnt"
-hat "$OUT/a4.txt" "(keine Pakete)" \
+hat "$OUT/a4.txt" "(no packages)" \
     "und danach ist NICHTS installiert -- kein halbes Paket"
 
 echo "== 7. die Bilder werden gelesen, nicht angeschaut =="

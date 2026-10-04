@@ -27,7 +27,7 @@ es ist der längste Abschnitt.
 | `lib/crypto/sha512.fi` | 281 | SHA-512 (FIPS 180-4), strömend, ohne Profilzeile, ohne Importe |
 | `lib/crypto/ed25519.fi` | 809 | Ed25519 (RFC 8032): signieren, prüfen, Punktarithmetik, Skalare |
 | `kernel/ab.fi` | 237 | der Erprobungszähler im Kern |
-| `kernel/user/opk.fi` | 1628 (+172) | Signaturpflicht, `/system/ERPROBUNG`, `opk erprobung [ok]` |
+| `kernel/user/opk.fi` | 1628 (+172) | Signaturpflicht, `/system/ERPROBUNG`, `opk trial [ok]` |
 | `kernel/user/hallo3.fi` | 18 | das Paket, das sich sauber installiert und **nicht startet** |
 | `tools/update/oracle.fi` | 174 | das Messgerät auf dem Wirt |
 | `tools/update/vectors.py` | 325 | die Vektoren |
@@ -128,7 +128,7 @@ haben.
 `opk` schreibt den Eintrag beim Umschalten; `kernel/ab.fi` zählt bei jedem
 Start hoch, **bevor der erste Prozess läuft**; beim dritten Versuch ohne
 Erfolgsvermerk schreibt der Kern `/system/AKTUELL` auf `vor` zurück.
-`opk erprobung ok` setzt den Vermerk — auf einem ausgelieferten System
+`opk trial ok` setzt den Vermerk — auf einem ausgelieferten System
 gehört dieser Aufruf ans Ende des Startvorgangs.
 
 Gemessen mit `kernel/user/hallo3.fi`: ein Update, das **sauber signiert**
@@ -157,10 +157,10 @@ unmittelbar nach dem Einhängen der Wurzel und vor dem ersten Prozess.
 
 ## 4. Der Ablauf am Stück
 
-    opk liste
-    opk aktualisieren <name> --quelle <verzeichnis>   # Signatur, Streuwert, Generation
+    opk list
+    opk update <name> --source <verzeichnis>   # Signatur, Streuwert, Generation
     (Neustart)
-    opk richten ; if /apps/<name>.osp/start ; then opk erprobung ok ; fi
+    opk rebuild ; if /apps/<name>.osp/start ; then opk trial ok ; fi
 
 `tools/update/update.sh` ist genau das, mit dem `fetch`-Aufruf für die
 HTTPS-Seite als Kommentar darüber.
@@ -191,14 +191,14 @@ Ehrlich und vollständig, ohne Zeitplan.
    einen Kernel-Streuwert, benutzt ihn aber nicht.
 4. **Der Erfolgsvermerk wird von Hand gesetzt.** In dieser Runde tut es
    das Startskript des Testlaufs. Auf einem ausgelieferten System gehört
-   `opk erprobung ok` in `/etc/inittab` bzw. an das Ende des
+   `opk trial ok` in `/etc/inittab` bzw. an das Ende des
    Startvorgangs — und die Frage, **was** „erfolgreich gestartet"
    heißt (läuft das Paket? ist das Netz da? antwortet der Helfer?), ist
    eine Entscheidung und keine Runde.
 5. **Nach einem Rückfall zeigt `/apps` noch auf die gescheiterte
    Generation.** Der Kern schreibt nur `/system/AKTUELL` um; `/apps` ist
-   abgeleiteter Zustand und wird von `opk richten` neu gebaut. Im
-   Testlauf steht `opk richten` deshalb als erste Zeile des Startskripts.
+   abgeleiteter Zustand und wird von `opk rebuild` neu gebaut. Im
+   Testlauf steht `opk rebuild` deshalb als erste Zeile des Startskripts.
    Sauberer wäre, der Kern oder init täte es.
 6. **Der geheime Schlüssel liegt unverschlüsselt auf der Baumaschine**
    (`$OUT/geheim.key`). Er wird seit dieser Runde nicht mehr bei jedem Bau

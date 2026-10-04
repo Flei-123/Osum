@@ -48,7 +48,7 @@
 # Namen und demselben Server -- einmal normal und einmal mit dem
 # Kernwort `nofpu`, also GENAU im Zustand vor der Runde AVX. Dann muss
 # `/bin/fetch` mit `user fault: vector=6` sterben und `ota` mit
-# "nicht zu holen: VERZEICHNIS" aufhoeren. Ohne diese zweite Haelfte
+# "cannot fetch: VERZEICHNIS" aufhoeren. Ohne diese zweite Haelfte
 # waere "es geht" eine Beobachtung und kein Nachweis.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -137,8 +137,8 @@ if [ -d "$STORE_DIR" ] && [ -w "$STORE_DIR" ]; then
     # Lauf neben einer Paketsignatur aus dem VORIGEN, mit einem anderen
     # Schluessel. Das Geraet hat das gemerkt und abgelehnt:
     #
-    #     opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT
-    #     ota: opk hat nicht installiert, Code 1
+    #     opk: SIGNATURE WRONG -- das Paket wird ABGELEHNT
+    #     ota: opk did not install, code 1
     #
     # Also genau das richtige Verhalten -- der Fehler lag hier. Jetzt
     # wird ueber die WIRKLICH VORHANDENEN Dateien gegangen, und in der
@@ -257,7 +257,7 @@ auto=nein
 frist=15
 EOF
 ok "in /etc/ota.conf steht ein NAME und keine Adresse: $BASIS_URL/aktuell"
-printf 'opk richten\nif /apps/hallo.osp/start\nthen\nota bestaetigen\nfi\nopk erprobung\n' \
+printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 OTA_ROOTS="$OUT/roots.pem" OTA_CONF="$OUT/ota.conf" \
     EXTRA="/start.sh=$OUT/start.sh" OTA_ERSATZ="$OUT/ersatz.pub" ZIEL_MIB=96 \
@@ -277,7 +277,7 @@ cp -f "$OUT/ziel.img" "$OUT/basis.img"
 # =====================================================================
 echo "== 4. DER LAUF: DHCP -> Nameserver -> Name -> signiertes Verzeichnis =="
 # =====================================================================
-rc=$(lauf s1 "dhcp;cat /etc/resolv.conf;host $NAME;ota suchen;exit" 420)
+rc=$(lauf s1 "dhcp;cat /etc/resolv.conf;host $NAME;ota search;exit" 420)
 gleich "Beendigungscode" "$rc" "21"
 hat "$OUT/s1.txt" "dhcp: /etc/resolv.conf geschrieben" \
     "DHCP-Option 6 gelesen und /etc/resolv.conf geschrieben (Runde BETRIEB)"
@@ -301,32 +301,32 @@ if [ "${CERTS:-0}" -ge 3 ] 2>/dev/null; then
 else
     bad "nur $CERTS Zertifikate -- das ist keine echte Kette"
 fi
-hat "$OUT/s1.txt" "ota: fassung dort 2" "das signierte VERZEICHNIS ist gelesen"
-hat "$OUT/s1.txt" "ota: NEUE FASSUNG verfügbar" "und es gibt etwas Neues"
-hatnicht "$OUT/s1.txt" "ota: einspielen" "SUCHEN INSTALLIERT NICHTS"
+hat "$OUT/s1.txt" "ota: version there 2" "das signierte VERZEICHNIS ist gelesen"
+hat "$OUT/s1.txt" "ota: NEW VERSION available" "und es gibt etwas Neues"
+hatnicht "$OUT/s1.txt" "ota: applying" "SUCHEN INSTALLIERT NICHTS"
 
 # =====================================================================
 echo "== 5. und wirklich einspielen, von diesem Server =="
 # =====================================================================
-rc=$(lauf s2 "dhcp;ota einspielen;ota zeigen;exit" 600)
+rc=$(lauf s2 "dhcp;ota apply;ota show;exit" 600)
 gleich "Beendigungscode" "$rc" "21"
-hat "$OUT/s2.txt" "ota: streuwert stimmt hallo-2.opk" \
+hat "$OUT/s2.txt" "ota: hash ok hallo-2.opk" \
     "der Streuwert des ueber das Netz geholten Pakets stimmt"
-hat "$OUT/s2.txt" "opk: Signatur geprüft" \
+hat "$OUT/s2.txt" "opk: signature checked" \
     "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
-hat "$OUT/s2.txt" "opk: installiert hallo" "installiert"
-hat "$OUT/s2.txt" "ota: BEREIT ZUM NEUSTART" "und der Neustart wird nur ANGEBOTEN"
-hat "$OUT/s2.txt" "ota: fassung hier 2" "der Fassungszaehler steht danach auf 2"
+hat "$OUT/s2.txt" "opk: installed hallo" "installiert"
+hat "$OUT/s2.txt" "ota: READY FOR RESTART" "und der Neustart wird nur ANGEBOTEN"
+hat "$OUT/s2.txt" "ota: version here 2" "der Fassungszaehler steht danach auf 2"
 
 # =====================================================================
 echo "== 6. DIE GEGENPROBE: derselbe Lauf im Zustand VOR der Runde AVX =="
 # =====================================================================
-rc=$(lauf s3 "dhcp;ota suchen;exit" 420 "nofpu")
+rc=$(lauf s3 "dhcp;ota search;exit" 420 "nofpu")
 hat "$OUT/s3.txt" "fpu: mode=0" "mit nofpu ist die Vektoreinheit nicht freigeschaltet"
 hat "$OUT/s3.txt" "fetch: aufgeloest" "der NAME wird trotzdem noch aufgeloest (das ist BETRIEB)"
 hat "$OUT/s3.txt" "vector=6" \
     "GEGENPROBE: und dann stirbt /bin/fetch an einem #UD -- genau wie docs/OTA.md es vorhersagt"
-hat "$OUT/s3.txt" "ota: nicht zu holen: VERZEICHNIS" "ota bricht ehrlich ab"
+hat "$OUT/s3.txt" "ota: cannot fetch: VERZEICHNIS" "ota bricht ehrlich ab"
 gleich "und ota endet mit einem Fehler statt mit einem Erfolg" \
        "$(grep -aoE 'ota -> [0-9]+' "$OUT/s3.txt" | head -1 | awk '{print $3}')" "1"
 

@@ -24,7 +24,7 @@ Umschrift traegt, und sagt zu jeder, WAS sie ist:
                Kette nirgends anders hingeht als in `say`/`kv`/`sagn`.
 
   MARKE        Was mit einer EINGABE verglichen wird: Unterbefehl
-               ("opk zurueck"), Schalter ("--quelle"), Pfad, Dateiname,
+               ("opk rollback"), Schalter ("--source"), Pfad, Dateiname,
                Schluessel. Dieselbe Ausnahme wie in docs/I18N.md
                ("Befehlsname: nein") und dieselbe wie `keys=` in den
                Buendeln -- man muss das tippen koennen, auch ohne
@@ -73,7 +73,7 @@ def inhalt_von(roh):
 
 # RUNDE MERGE-2: EIN PFAD IST KEIN SATZ.
 #
-# `opk` meldet "opk: /system/schluessel.pub ist nicht 32 Oktett lang".
+# `opk` meldet "opk: /system/schluessel.pub is not 32 octets long".
 # Darin steckt `schluessel` -- aber als DATEINAME auf der Platte, und
 # der heisst so, wie er heisst. Wer ihn umschreibt, findet die Datei
 # nicht mehr. Vor der Suche nach Umschrift werden absolute Pfade
@@ -242,7 +242,7 @@ def marken(wurzel):
 
     Eine Marke darf ASCII bleiben -- man muss sie ohne Umlauttaste
     tippen koennen. Sie darf aber nicht die EINZIGE Form sein: die
-    Hilfe zeigt seit dieser Runde `opk zurück`, und wer das abtippt,
+    Hilfe zeigt seit dieser Runde `opk rollback`, und wer das abtippt,
     muss ankommen. Dieselbe Regel wie `keys=` in den Buendeln.
 
     Geprueft wird nur, was WIRKLICH mit einer Eingabe verglichen wird.

@@ -4,7 +4,7 @@
 # SIGNIERTE QUELLEN, gebaut mit dem Werkzeug des Wirts.
 #
 # WARUM DER WIRT SIE BAUT UND NICHT OSUM. `opk bauen` ist die Seite, die
-# ein Entwickler benutzt; `opk installieren` die, die auf dem Geraet
+# ein Entwickler benutzt; `opk install` die, die auf dem Geraet
 # laeuft. Diese Runde baut die zweite. Dass die erste weiter auf dem Wirt
 # steht, ist keine Luecke, sondern die Arbeitsteilung, die jede
 # Distribution hat -- und sie ist ausserdem der bessere Nachweis: was
@@ -47,7 +47,7 @@ cp "$OUT/pak/hallo-2.opk" "$OUT/quelle2/"
 # oeffentliche Schluessel entsteht bei jedem Bau neu"). Seit die
 # Signatur PFLICHT ist, ist das kein Schoenheitsfehler mehr: ein zweiter
 # Bau haette sonst Pakete signiert, die das Geraet aus dem ersten Bau
-# nicht mehr annimmt -- und die Fehlermeldung dafuer ("SIGNATUR FALSCH")
+# nicht mehr annimmt -- und die Fehlermeldung dafuer ("SIGNATURE WRONG")
 # sieht aus wie ein Angriff und ist ein Werkzeugfehler.
 if [ ! -s "$OUT/geheim.key" ]; then
     python3 "$OPK" schluessel "$OUT" > "$OUT/schluessel.log" 2>&1 || {

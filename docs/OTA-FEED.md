@@ -24,8 +24,8 @@ public half of `/srv/store/osum/aktuell/schluessel.pub`). Its passphrase is kept
     bash tools/ota/feedtest.sh <image-dir> /tmp/ota-feed [work-dir]
 
 `feedtest.sh` installs the image on a disk, then on that disk: version 0 sees the new
-feed, `ota einspielen` installs the packages, reboot + `ota bestaetigen`, a second
-`ota suchen` says "alles aktuell", rollback (`ota zurueck`) and boot again.
+feed, `ota apply` installs the packages, reboot + `ota confirm`, a second
+`ota search` says "alles aktuell", rollback (`ota rollback`) and boot again.
 
 ## 3. Publish (only with the owner's yes)
 

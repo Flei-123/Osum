@@ -372,7 +372,7 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
         num "und es bewegt sich" "$PK" ge 3
         has "$TMPD/l-opk.txt" "modul: entladen=1 present=0" "und es laesst sich wieder entladen"
     else
-        bad "opk installieren"
+        bad "opk install"
         sed 's/^/        /' "$TMPD/inst.txt" | head -6
     fi
 else

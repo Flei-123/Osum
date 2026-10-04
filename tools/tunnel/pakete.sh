@@ -21,7 +21,7 @@
 #      verglichen. Die ANZAHL der verglichenen Eintraege wird genannt --
 #      ein Vergleich, der 0 Eintraege prueft, besteht auch.
 #
-# ACHTUNG, UND DIESER LAUF HAT ES GEFUNDEN: `opk entfernen` loescht
+# ACHTUNG, UND DIESER LAUF HAT ES GEFUNDEN: `opk remove` loescht
 # /users/<n>/config/<paket>, /state/<paket> und /cache/<paket> STANDARD-
 # MAESSIG MIT. Das ist in pkg/opk.py so gebaut und dort auch begruendet
 # (ein Ruecksprung darf die Dokumente von heute nicht wegnehmen, also
@@ -189,7 +189,7 @@ python3 "$OPK" entfernen vpn --wurzel "$TMPD/wurzel-gefahr" >/dev/null 2>&1
 if [ -f "$TMPD/wurzel-gefahr/users/justin/config/vpn/daheim.conf" ]; then
     bad "unerwartet: der Standardweg hat die Schluessel stehengelassen"
 else
-    ok "GEGENPROBE: opk entfernen OHNE --behalte-daten loescht die privaten Schluessel mit"
+    ok "GEGENPROBE: opk remove OHNE --behalte-daten loescht die privaten Schluessel mit"
     note "     das ist in pkg/opk.py so gebaut -- und fuer ein Paket mit Schluesseln falsch herum"
 fi
 
@@ -205,7 +205,7 @@ done
 
 # `opk aufraeumen` ist ein EIGENER Aufruf: `entfernen` nimmt das Paket
 # aus dem Plan, der Store-Eintrag bleibt, solange irgendeine Generation
-# ihn nennt -- sonst waere `opk zurueck` eine Luege. Spurlos wird es
+# ihn nennt -- sonst waere `opk rollback` eine Luege. Spurlos wird es
 # erst, wenn auch die alten Generationen weg sind.
 python3 "$OPK" aufraeumen --wurzel "$WURZEL" --behalte 1 \
     > "$TMPD/aufr.log" 2>&1 \
@@ -248,7 +248,7 @@ else
 fi
 G_V=$(grep -cE '^system/generations/' "$TMPD/vorher.txt")
 G_N=$(grep -cE '^system/generations/' "$TMPD/nachher.txt")
-note "/system/generations: $G_V Eintraege vorher, $G_N nachher -- das ist das Gedaechtnis, aus dem opk zurueck springt, kein Rest"
+note "/system/generations: $G_V Eintraege vorher, $G_N nachher -- das ist das Gedaechtnis, aus dem opk rollback springt, kein Rest"
 
 # ----------------------- 6b. /users: was bleiben SOLL, und was nicht
 LEER=$(find "$WURZEL/users" -mindepth 3 -maxdepth 3 -type d -empty 2>/dev/null | wc -l)

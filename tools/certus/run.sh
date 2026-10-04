@@ -441,7 +441,7 @@ echo "== 9. aus dem Laden installiert =="
 # des Pakets selbst -- Signatur, Auspacken, Buendel unter /apps.
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/store.img"
 LADEN_PLATTE="$OUT/store.img" bash tools/loader/lauf.sh store \
-    "osum vfs nokbd nosched noproc nofs noring3 script=opk installieren /store/certus-1.opk;opk liste;exit" \
+    "osum vfs nokbd nosched noproc nofs noring3 script=opk install /store/certus-1.opk;opk list;exit" \
     900 > "$OUT/store.lauf" 2>&1
 hat "$OUT/store.txt" "installiert certus" "opk hat das signierte Paket angenommen"
 hat "$OUT/store.txt" "certus" "certus steht danach in der Paketliste"
