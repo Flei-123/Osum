@@ -1168,6 +1168,10 @@ const SYS_FACCESSAT: u64 = 269
 
 // Die eigene Nummer dieser Runde, aus dem zugeteilten Vorrat 1600..1699.
 const SYS_OSUM_USERINFO: u64 = 1600
+// Bring the SATA (AHCI) disk up on demand: 0 = nothing found, else the size in blocks.
+// Root only; called by the installer when it opens, so /dev/sda exists on
+// every boot entry without the `sata` word (r343).
+const SYS_OSUM_DISKUP: u64 = 1601
 
 // ============================================= RUNDE MULTIUSER
 //
@@ -3231,6 +3235,9 @@ fn is_k13(number: u64) -> bool {
     if number == SYS_OSUM_MUSTAT {
         return true
     }
+    if number == SYS_OSUM_DISKUP {
+        return true
+    }
     return number == SYS_OSUM_USERINFO
 }
 
@@ -3313,6 +3320,9 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_OSUM_USERINFO {
         return do_userinfo(state, me, a0)
+    }
+    if number == SYS_OSUM_DISKUP {
+        return do_diskup(state, me)
     }
     if number == SYS_GETGROUPS {
         return do_getgroups(state, me, a0, a1)
@@ -13953,6 +13963,24 @@ fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
 // hat es nicht gegriffen -- dann bleibt der Ausgang des Pruefstands, und
 // der Unterschied ist am Beendigungscode von QEMU zu sehen (0 gegen 21).
 // `noacpi` nimmt den ersten Weg weg; das ist die Gegenprobe.
+// r343: AHCI and NVMe on demand. Not inside the devfs lookup (that deadlocked under
+// the fs lock) and not at boot (that panicked on the Dell, 27.09.): here, in
+// a plain syscall of a root program that the person started.
+fn do_diskup(state: u64, me: u64) -> u64 {
+    if !perm.is_root(state, me) {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        return neg(errno.E_PERM)
+    }
+    var n: u64 = 0
+    if blk.ahci_up(state) {
+        n = n + blk.blocks_on(state, blk.DEV_AHCI)
+    }
+    if blk.nvme_up(state) {
+        n = n + blk.blocks_on(state, blk.DEV_NVME)
+    }
+    return n
+}
+
 fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
     if !perm.is_root(state, me) {
         kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)

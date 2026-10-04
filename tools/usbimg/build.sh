@@ -1154,8 +1154,16 @@ ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 # with a screen. What they read: the rules, the settings schema, and the
 # wrapper directory with the settings manifest. The audit log goes to
 # /var/log/orientbus.log, the settings journal next to it.
+# 04.10.2026 (Justin, explicit): on his own personal stick Jarvis may read and
+# press through the accessibility tree without a person at the keyboard for
+# every call. Still dry-run first (dryfirst jarvis stays); the public image
+# keeps the plain rules.
+cp -f etc/orientbus/policy "$OUT/policy"
+if [ "$IMAGE_PROFILE" = personal ]; then
+    printf '\n# personal stick: Justin allowed Jarvis the accessibility tree (04.10.2026)\nallow jarvis a11y.* write\n' >> "$OUT/policy"
+fi
 ARGS+=(/etc/orientbus/ /etc/actions.d/
-       "/etc/orientbus/policy=etc/orientbus/policy"
+       "/etc/orientbus/policy=$OUT/policy"
        "/etc/settings.schema=etc/settings.schema"
        "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
        # A11Y-2 (AB-021): the accessibility tree on the bus, provider /bin/axd
@@ -1506,6 +1514,10 @@ j = i + 1
 while j < len(lines) and lines[j].startswith(' '):
     if lines[j].strip().startswith('cmdline:') and ' absturzneustart' not in lines[j]:
         lines[j] = lines[j] + ' absturzneustart'
+    # r343: /dev in entry 1 too (installer from the desktop); the SATA disk
+    # comes up on demand through the installer's own syscall, not at boot.
+    if lines[j].strip().startswith('cmdline:') and ' vfs ' not in lines[j] + ' ':
+        lines[j] = lines[j].replace('modfs osum ', 'modfs osum vfs ', 1)
     j += 1
 body = lines[i + 1:j]
 inst = ['', '/%s (install to SATA disk)' % prod]
