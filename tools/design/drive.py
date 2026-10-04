@@ -187,6 +187,17 @@ class Fahrer:
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    def fahre_nahe(self, x, y):
+        dx, dy = x - self.x, y - self.y
+        while dx or dy:
+            sx = max(-120, min(120, dx))
+            sy = max(-120, min(120, dy))
+            self.cmd("mouse_move %d %d" % (sx, sy))
+            dx -= sx
+            dy -= sy
+        self.x, self.y = x, y
+        time.sleep(0.6)
+
     # RUNDE ECHTHARDWARE-5: ziehen vom zuletzt bekannten Punkt aus,
     # ohne den Umweg ueber 0,0. Begruendung siehe `klick_nahe`.
     def ziehe_nahe(self, x0, y0, x1, y1, schritte=8):
@@ -563,29 +574,28 @@ class Fahrer:
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("fmbar"):
-            # Eintrag <N> der Menueleiste des Dateimanagers.  Die
-            # Leiste meldet ihr Rechteck (`explorer: rect id=0 kind=8`);
-            # die Eintraege darin sind gleich breit gesetzt und der
-            # erste faengt am linken Innenrand an.
+            # Eintrag <N> der Menueleiste des Dateimanagers.  Seit FUI-ALL
+            # F-8 meldet jeder Titel sein eigenes Rechteck
+            # (`explorer: rect id=<N> kind=7`); die Leiste als Ganzes
+            # gibt es nicht mehr.
             n = int(name[5:])
-            m = letzte(r"explorer: rect id=0 kind=8 "
-                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = letzte(r"explorer: rect id=%d kind=7 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
             o = self.fenster("explorer")
             if m is None or o is None:
                 return None
-            return (o[0] + int(m.group(1)) + 8 + n * 60,
-                    o[1] + int(m.group(2)), 44, int(m.group(4)))
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name.startswith("emenue"):
             # Die Zeile <N> des offenen Kontextmenues des Dateimanagers.
             # Es meldet Ecke und Hoehe des MENUEFENSTERS
             # (`explorer: menurect wx= wy= wh=`); die Zeilenhoehe ist
             # die des Systems (`launcher: rows ... zh=`), sonst 20.
             n = int(name[6:])
-            m = letzte(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)")
+            m = letzte(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
             if m is None:
                 return None
-            z = letzte(r"rows x=\d+ base=\d+ zh=(\d+)")
-            zh = int(z.group(1)) if z else 20
+            zh = int(m.group(4)) if m.group(4) else 20
             return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":
             # Die unterste Zeile des Kontrollzentrums ("Alle
@@ -694,14 +704,15 @@ class Fahrer:
             n = int(name[9:])
             m = letzte(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            z = letzte(r"explorer: rows x=\d+ base=\d+ zh=(\d+)")
+            z = letzte(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: kopf=\d+ kopfh=(\d+))?")
             o = self.fenster("explorer")
             if m is None or z is None or o is None:
                 return None
             zh = int(z.group(1))
-            # Die Kopfzeile ist zh + 4 hoch (wlib.paint_table `kopf`),
-            # danach beginnt Zeile 0.
-            y0 = int(m.group(2)) + zh + 5 + n * zh
+            # Die Kopfzeile der Szenentabelle ist `kopfh` hoch (28), dazu
+            # der Rand von 2; danach beginnt Zeile 0.
+            kopf = int(z.group(2)) if z.group(2) else zh + 4
+            y0 = int(m.group(2)) + kopf + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
         if name in ("ftab", "fbaum"):
             # RUNDE EXPLORER-2: DIE TABELLE UND DIE SEITENLEISTE, OHNE
@@ -775,6 +786,19 @@ def main():
                 f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
+        # `fahreauf <name>` -- only HOVER over the middle of the reported
+        # rectangle (relative moves from the last known point, no click, no
+        # detour through the corner). Needed for hover pixel checks.
+        elif b == "fahreauf":
+            r = f.rechteck(arg)
+            if r is None:
+                print("fahreauf %s -> KEIN RECHTECK GEMELDET" % arg)
+                fehler += 1
+                continue
+            x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
+            f.fahre_nahe(x, y)
+            print("fahreauf %s -> %d,%d  (rect %d,%d %dx%d)"
+                  % (arg, x, y, r[0], r[1], r[2], r[3]))
         elif b in ("klickauf", "doppelauf", "rklickauf"):
             r = f.rechteck(arg)
             if r is None:

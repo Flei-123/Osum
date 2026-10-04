@@ -93,6 +93,7 @@ profile kernel
 import lib.kstate
 import serial
 import drv.blk.nvme
+import drv.blk.ahci
 import net.netdev
 
 export {
@@ -100,7 +101,7 @@ export {
     table_addr, table_len, structures,
     F_SYS_MANUF, F_SYS_PRODUCT, F_SYS_VERSION, F_SYS_SERIAL,
     F_BOARD_MANUF, F_BOARD_PRODUCT, F_BOARD_SERIAL,
-    F_UUID, F_NVME_SERIAL, F_NVME_MODEL, F_MAC,
+    F_UUID, F_NVME_SERIAL, F_NVME_MODEL, F_MAC, F_AHCI_MODEL,
     field, field_len, have_uuid, have_nvme, have_mac,
     from_efi, dump, ctrl_buffer, collect_nvme, collect_mac, refresh, late,
     efi_selftest,
@@ -131,6 +132,7 @@ const S_NVME_OK: u64 = 72
 const S_MAC_OK: u64 = 80
 const S_TRIED: u64 = 88 // entry points looked at and rejected
 const S_LATE: u64 = 96 // how often the late sources were asked again
+const S_AHCI_OK: u64 = 104 // r308: the SATA disk's model was read
 
 // The fields, each in a slot of FIELD_MAX octets, NUL terminated.
 const FIELD_MAX: u64 = 64
@@ -147,7 +149,8 @@ const F_UUID: u64 = 7 // sixteen raw octets, NOT text
 const F_NVME_SERIAL: u64 = 8
 const F_NVME_MODEL: u64 = 9
 const F_MAC: u64 = 10 // six raw octets
-const F_LAST: u64 = 10
+const F_AHCI_MODEL: u64 = 11 // r308: model string of the SATA disk (ATA IDENTIFY words 27..46)
+const F_LAST: u64 = 11
 
 // The second page: the NVMe controller identify lands here.
 const CTRL_OFF: u64 = 0x1000
@@ -629,6 +632,36 @@ fn collect_nvme(state: u64) -> bool {
     return true
 }
 
+// r308: the model string of the SATA disk behind the AHCI controller, for the
+// installer's disk list. ATA IDENTIFY words 27..46 hold 40 ASCII characters,
+// TWO PER WORD WITH THE FIRST CHARACTER IN THE HIGH BYTE, space padded. The
+// IDENTIFY buffer of `ahci.identify` stays in kdata (nothing else writes
+// there), so no second command is needed. The characters are swapped into the
+// second page (free on a machine without NVMe, and only used as scratch here)
+// and then trimmed like the NVMe fields.
+fn collect_ahci(state: u64) -> bool {
+    clear_field(state, F_AHCI_MODEL)
+    if ahci.blocks(state) == 0 {
+        return false
+    }
+    let id: u64 = ahci.ident(state)
+    let tmp: u64 = ctrl_buffer(state) + 2048
+    var i: u64 = 0
+    while i < 20 {
+        let w0: u64 = kstate.get8(id + (27 + i) * 2)
+        let w1: u64 = kstate.get8(id + (27 + i) * 2 + 1)
+        kstate.set8(tmp + i * 2, w1 as u8)
+        kstate.set8(tmp + i * 2 + 1, w0 as u8)
+        i = i + 1
+    }
+    copy_trimmed(state, tmp, 40, F_AHCI_MODEL)
+    if field_len(state, F_AHCI_MODEL) == 0 {
+        return false
+    }
+    sset(state, S_AHCI_OK, 1)
+    return true
+}
+
 // Copies `n` octets and drops the trailing blanks. Anything that is not a
 // printable character becomes nothing at all -- a drive that answers with
 // zeros should produce an empty field, not sixteen invisible octets in a
@@ -693,6 +726,7 @@ fn find(state: u64) -> bool {
     sset(state, S_UUID_OK, 0)
     sset(state, S_NVME_OK, 0)
     sset(state, S_MAC_OK, 0)
+    sset(state, S_AHCI_OK, 0)
     sset(state, S_COUNT, 0)
     sset(state, S_ENTRY, 0)
     sset(state, S_KIND, 0)
@@ -703,6 +737,9 @@ fn find(state: u64) -> bool {
         }
     }
     if collect_nvme(state) {
+        any = true
+    }
+    if collect_ahci(state) {
         any = true
     }
     if collect_mac(state) {
@@ -722,7 +759,7 @@ fn find(state: u64) -> bool {
 // eight times -- a machine without a drive must not pay for a failing
 // admin command on every single read.
 fn refresh(state: u64) {
-    if sget(state, S_NVME_OK) != 0 && sget(state, S_MAC_OK) != 0 {
+    if sget(state, S_NVME_OK) != 0 && sget(state, S_MAC_OK) != 0 && sget(state, S_AHCI_OK) != 0 {
         return
     }
     if sget(state, S_LATE) >= 8 {
@@ -731,6 +768,9 @@ fn refresh(state: u64) {
     sset(state, S_LATE, sget(state, S_LATE) + 1)
     if sget(state, S_NVME_OK) == 0 {
         collect_nvme(state)
+    }
+    if sget(state, S_AHCI_OK) == 0 {
+        collect_ahci(state)
     }
     if sget(state, S_MAC_OK) == 0 {
         collect_mac(state)

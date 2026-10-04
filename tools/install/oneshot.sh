@@ -91,9 +91,10 @@ if [ "$WIE" = roh ]; then
     # Gesicht bekommt (gemessen in dieser Runde), und dann prueft man
     # nicht mehr den Kern, sondern die Firmware.
     ZEILE="$BASIS"
+    [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" \
+    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
@@ -101,9 +102,13 @@ if [ "$WIE" = roh ]; then
     rc=$?
 elif [ "$WIE" = iso ]; then
     ZEILE="$BASIS modfs modcrc=$CRC"
+    # DAILY-DRIVER: $OSUM_EXTRA adds kernel words (e.g. r3alle), $OSUM_SMP
+    # the number of cores -- the writers test (tools/fsrobust/wrace.sh)
+    # needs ring 3 on four cores
+    [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" \
+    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
@@ -133,6 +138,10 @@ else
             echo "    path: boot():/osum.mb"
             ZL="osum vfs nokbd nosched noproc nofs noring3"
             [ -n "$NETZ" ] && ZL="$ZL $NETZ"
+            # `initsh` is what runs the script on an image whose inittab has
+            # no console target (every fUi image): without it init goes to
+            # the graphical target and `script=` is never read.
+            [ -n "$SKRIPT" ] && ZL="$ZL initsh"
             if [ -n "$SKRIPT" ]; then
                 echo "    cmdline: $ZL script=$SKRIPT"
             else

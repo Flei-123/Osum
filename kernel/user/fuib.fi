@@ -71,15 +71,20 @@ import ulib
 import wlibc
 import paint.canvas
 import font.metrics
+import fuiglyph
 import fui.theme
 import fui.style
 import fui.widget
 import fui.painter
 import fui.render
 import fui.wave2
+import fui.uiimage
+import fui.transform
 
 export {
-    ready, draw, draw_area_on, theme_new,
+    ready, draw, draw_area_on, theme_new, haupt,
+    // FUI-ALL stage 3: fUi's password mask.
+    secret_mask,
     // RUNDE 31: DIE ZAEHLER. Ohne sie ist "fUi malt jetzt" eine
     // Behauptung: `mal` hat einen Rueckfall auf wlibs alten Weg, und
     // ein Bild sieht in beiden Faellen aehnlich aus. Diese zwei Zahlen
@@ -99,6 +104,11 @@ export {
     S_BUTTON, S_LABEL, S_CHECK, S_ENTRY, S_SLIDER, S_TILE,
     S_CARD, S_SEP, S_TABS, S_MENUBAR, S_CHOICE, S_SCROLL,
     S_PROGRESS,
+    // ROUND FUI-ALL stage 1: wlib's paint primitives, drawn by fUi.
+    rect, hline, vline, dot, frame, frame3, rrect, rring, rframe, shadow,
+    fui_prims, icon, picture,
+    // FUI-ALL stage 2: a program's own fUi canvas (see fuiapp.fi).
+    app_bind, app_ctx, app_canvas, app_theme,
 }
 
 const Z_NORMAL: u64 = 0
@@ -140,18 +150,28 @@ const S_PROGRESS: u64 = 12
 // benannten Wert -- deshalb stehen die 128/64/128 hier ausgeschrieben
 // und die Namen daneben nur als Erklaerung.
 //   s_cvm  128 Woerter = 1024 Oktette  fuer paint.canvas.Canvas
-//   s_pzm   64 Woerter =  512 Oktette  fuer fui.painter.Painter
+//   s_pzm  256 Woerter = 2048 Oktette  fuer fui.painter.Painter
+//          (FUI-ALL: Painter is 648 octets since the Firn pin of stage 0;
+//          at 64 words `ready()` refused it and EVERY program silently
+//          painted with wlibc again -- measured: prims=0, fui=0.)
 //   s_thm  128 Woerter = 1024 Oktette  fuer fui.theme.Theme
 // Ob das reicht, wird in `bereit()` GEMESSEN und nicht geglaubt.
 const CV_BYTES: usize = 1024
-const PZ_BYTES: usize = 512
+const PZ_BYTES: usize = 2048
 const TH_BYTES: usize = 1024
 
 static mut s_auf: u64 = 0
+static mut s_said_big: u64 = 0
+static mut m_big: [u8; 46] = "fuib: wlibc fallback, fUi struct grew: cv/pz=\0"
+static mut m_sp: [u8; 2] = " \0"
 static mut s_cvm: [u64; 128] = [0; 128]
-static mut s_pzm: [u64; 64] = [0; 64]
+static mut s_pzm: [u64; 256] = [0; 256]
 static mut s_thm: [u64; 128] = [0; 128]
-static mut s_ctx: render.Ctx = render.Ctx { m: 0, z: 0 }
+// render.Ctx carries a function pointer (the animation hook) since the
+// Firn pin of round FUI-ALL, and a static cannot be initialised with one.
+// So it lives in raw words, filled by render.ctx_new in `bereit()`.
+static mut s_ctxm: [u64; 8] = [0; 8]
+fn ctx() -> *mut render.Ctx { return (&s_ctxm[0 as usize]) as u64 as *mut render.Ctx }
 static mut s_fm: u64 = 0
 static mut s_n_ok: u64 = 0
 static mut s_n_no: u64 = 0
@@ -438,7 +458,23 @@ fn ready() -> bool {
     let npz: usize = ((&mpz[1]) as u64 - (&mpz[0]) as u64) as usize
     var mth: [theme.Theme; 2] = [theme.theme_new(false); 2]
     let nth: usize = ((&mth[1]) as u64 - (&mth[0]) as u64) as usize
-    if ncv > CV_BYTES || npz > PZ_BYTES || nth > TH_BYTES {
+    var mcx: [render.Ctx; 2] = [render.ctx_new(&mth[0], &mpz[0]); 2]
+    let ncx: usize = ((&mcx[1]) as u64 - (&mcx[0]) as u64) as usize
+    if ncv > CV_BYTES || npz > PZ_BYTES || nth > TH_BYTES || ncx > 64 {
+        // Say it, once: a silent refusal here made every program paint
+        // with wlibc again for a whole stage without anybody seeing it.
+        if s_said_big == 0 {
+            s_said_big = 1
+            ulib.say((&m_big[0 as usize]) as u64)
+            ulib.sayn(ncv as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(npz as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(nth as u64)
+            ulib.say((&m_sp[0 as usize]) as u64)
+            ulib.sayn(ncx as u64)
+            ulib.nl()
+        }
         return false
     }
     canvas_on_surface(cv(), sp, w, h)
@@ -491,7 +527,7 @@ fn ready() -> bool {
     painter.painter_set_font(pz(), s_fm)
     *th() = theme.theme_new(wlibc.theme_dark())
     theme_new()
-    s_ctx = render.ctx_new(th(), pz())
+    *ctx() = render.ctx_new(th(), pz())
     s_auf = 1
     return true
 }
@@ -564,7 +600,7 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
         s_no_leer = s_no_leer + 1
         return false
     }
-    draw_area_on()
+    clip_sync()
     // ================================================== RUNDE 32
     // EIN RECHTECK, DAS OBEN AUS DEM BAND HERAUSRAGT, WIRD BESCHNITTEN
     // UND NICHT ABGELEHNT.
@@ -679,7 +715,7 @@ fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
         s_no_leer = s_no_leer + 1
         return false
     }
-    draw_area_on()
+    clip_sync()
     // Wie in `tafel`: oben aus dem Band herausragen ist kein Fehler.
     // Ein RING wird allerdings nicht beschnitten, sondern ganz
     // weggelassen, wenn seine Oberkante fehlt -- ein halber Ring ist
@@ -765,6 +801,17 @@ fn art_von(sorte: u64) -> u32 {
 // Symbolschrift, `say_painted` fuer die Pruefstaende), und zwei
 // Schriftsetzer auf einer Flaeche waeren zwei Ergebnisse.
 // ------------------------------------------------------------------
+// The main button: while set, a button is drawn in the accent colours
+// instead of the grey control steps.
+static mut s_haupt: u64 = 0
+
+fn haupt(on: bool) {
+    s_haupt = 0
+    if on {
+        s_haupt = 1
+    }
+}
+
 fn draw(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
     wert: u64) -> bool {
     if !ready() {
@@ -777,7 +824,7 @@ fn draw(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
         s_no_leer = s_no_leer + 1
         return false
     }
-    draw_area_on()
+    clip_sync()
     let art: u32 = art_von(sorte)
     if art == widget.KIND_NONE {
         s_n_no = s_n_no + 1
@@ -796,7 +843,398 @@ fn draw(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
     widget.w_place(&e, x as f64, (y - b) as f64, w as f64, h as f64)
     state_set(&e, z)
     widget.w_set_value(&e, wert as i64)
-    wave2.draw_any(&s_ctx, &e)
+    if s_haupt != 0 && sorte == S_BUTTON {
+        // The main button: STATE_SELECTED is the accent fill in fUi's own
+        // rules. Pressed gets the accent's pressed step.
+        let f: *mut theme.Colors = theme.theme_colors(th())
+        let b2: u32 = (*f).button_active
+        widget.w_set_selected(&e, true)
+        (*f).button_active = swap_rb(wlibc.theme(wlibc.C_ACCENT_PRESSED))
+        wave2.draw_any(ctx(), &e)
+        (*f).button_active = b2
+    } else {
+        wave2.draw_any(ctx(), &e)
+    }
     s_n_ok = s_n_ok + 1
+    return true
+}
+
+// ====================================================================
+// ROUND FUI-ALL, STAGE 1: THE PAINT LAYER OF wlib, ALL OF IT IN fUi.
+//
+// Up to here wlib still painted part of its controls itself, through
+// wlibc's pixel loop (`rect`, `frame`, `hline`, `rrect`, `rring`,
+// `rframe`, `drop_shadow`, `px`: about ninety call sites, counted
+// 30.09.2026). These are the same primitives, drawn by fUi's painter on
+// the same surface, so that wlib has no painting code of its own left
+// and a fix in fUi reaches every OrientOS program.
+//
+// Two things the older bridge calls (`tafel`, `ring`) did not do and
+// these do:
+//   * they honour wlibc's clip rectangle (`wlibc.clip_set`), which lists,
+//     tables and the editor set around their scrolled content;
+//   * they take the band offset as a float, so a shape that starts above
+//     the band is clipped by the canvas instead of being dropped.
+// When the bridge is not ready (no surface yet) each call falls back to
+// the wlibc primitive of the same name, so nothing is ever left unpainted.
+// ====================================================================
+
+static mut s_n_prim: u64 = 0
+
+// wlibc's RADIUS_MAX (not exported there); a change there has to be made here too.
+const W_RADIUS_MAX: u64 = 24
+
+// wlibc's clip, in canvas coordinates (canvas row 0 = band row 0).
+fn clip_sync() {
+    draw_area_on()
+    let c: *mut canvas.Canvas = cv()
+    let b: u64 = wlibc.band_y()
+    let w: u64 = (*c).w as u64
+    let h: u64 = (*c).h as u64
+    var x0: u64 = wlibc.clip_x0()
+    var x1: u64 = wlibc.clip_x1()
+    if x1 > w {
+        x1 = w
+    }
+    if x0 > x1 {
+        x0 = x1
+    }
+    var y0: u64 = 0
+    if wlibc.clip_y0() > b {
+        y0 = wlibc.clip_y0() - b
+    }
+    var y1: u64 = 0
+    if wlibc.clip_y1() > b {
+        y1 = wlibc.clip_y1() - b
+    }
+    if y1 > h {
+        y1 = h
+    }
+    if y0 > y1 {
+        y0 = y1
+    }
+    (*c).depth = 0
+    (*c).cx0[0] = x0 as f64
+    (*c).cy0[0] = y0 as f64
+    (*c).cx1[0] = x1 as f64
+    (*c).cy1[0] = y1 as f64
+}
+
+fn fy(y: u64) -> f64 {
+    return (y as f64) - (wlibc.band_y() as f64)
+}
+
+// A wlibc colour with an alpha of `a` (0..255) in fUi's channel order.
+fn argb(c: u64, a: u64) -> u32 {
+    return (((a & 255) << 24) as u32) | swap_rb(c)
+}
+
+fn rect(x: u64, y: u64, w: u64, h: u64, c: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    if !ready() {
+        wlibc.rect(x, y, w, h, c)
+        return
+    }
+    clip_sync()
+    painter.surface(pz(), x as f64, fy(y), w as f64, h as f64, swap_rb(c))
+    s_n_prim = s_n_prim + 1
+}
+
+fn hline(x: u64, y: u64, w: u64, c: u64) {
+    rect(x, y, w, 1, c)
+}
+
+fn vline(x: u64, y: u64, h: u64, c: u64) {
+    rect(x, y, 1, h, c)
+}
+
+fn dot(x: u64, y: u64, c: u64) {
+    rect(x, y, 1, 1, c)
+}
+
+fn frame(x: u64, y: u64, w: u64, h: u64, c: u64) {
+    if w < 2 || h < 2 {
+        return
+    }
+    rect(x, y, w, 1, c)
+    rect(x, y + h - 1, w, 1, c)
+    rect(x, y, 1, h, c)
+    rect(x + w - 1, y, 1, h, c)
+}
+
+// The 3D edge of the classic look: light top/left, dark bottom/right,
+// swapped when pressed -- the same order of strokes as wlibc.frame3.
+fn frame3(x: u64, y: u64, w: u64, h: u64, light: u64, dark: u64,
+    pressed: bool) {
+    if w < 2 || h < 2 {
+        return
+    }
+    var o: u64 = light
+    var u: u64 = dark
+    if pressed {
+        o = dark
+        u = light
+    }
+    rect(x, y, w, 1, o)
+    rect(x, y, 1, h, o)
+    rect(x, y + h - 1, w, 1, u)
+    rect(x + w - 1, y, 1, h, u)
+}
+
+// Radius as wlibc caps it: RADIUS_MAX, then half the shorter side.
+fn cap_r(r0: u64, w: u64, h: u64) -> u64 {
+    var r: u64 = r0
+    if r > W_RADIUS_MAX {
+        r = W_RADIUS_MAX
+    }
+    if r * 2 > w {
+        r = w / 2
+    }
+    if r * 2 > h {
+        r = h / 2
+    }
+    return r
+}
+
+fn rrect(x: u64, y: u64, w: u64, h: u64, r: u64, c: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    if !ready() {
+        wlibc.rrect(x, y, w, h, r, c)
+        return
+    }
+    clip_sync()
+    let rr: u64 = cap_r(r, w, h)
+    if rr == 0 {
+        painter.surface(pz(), x as f64, fy(y), w as f64, h as f64, swap_rb(c))
+    } else {
+        painter.round_rect(pz(), x as f64, fy(y), w as f64, h as f64,
+            rr as f64, swap_rb(c))
+    }
+    s_n_prim = s_n_prim + 1
+}
+
+fn rring(x: u64, y: u64, w: u64, h: u64, r: u64, bw: u64, c: u64) {
+    if w < 2 || h < 2 || bw == 0 {
+        return
+    }
+    if !ready() {
+        wlibc.rring(x, y, w, h, r, bw, c)
+        return
+    }
+    let rr: u64 = cap_r(r, w, h)
+    if rr == 0 {
+        var k: u64 = 0
+        while k < bw && 2 * k + 2 <= w && 2 * k + 2 <= h {
+            frame(x + k, y + k, w - 2 * k, h - 2 * k, c)
+            k = k + 1
+        }
+        return
+    }
+    clip_sync()
+    painter.round_ring(pz(), x as f64, fy(y), w as f64, h as f64,
+        rr as f64, bw as f64, swap_rb(c))
+    s_n_prim = s_n_prim + 1
+}
+
+// Border `c` of width `bw` around an inner fill -- two filled shapes, as
+// wlibc.rframe paints it (the inner radius shrinks by the border).
+fn rframe(x: u64, y: u64, w: u64, h: u64, r: u64, bw: u64, c: u64,
+    inner: u64) {
+    if w < 2 || h < 2 || bw == 0 {
+        return
+    }
+    if r == 0 && bw == 1 {
+        rect(x + 1, y + 1, w - 2, h - 2, inner)
+        frame(x, y, w, h, c)
+        return
+    }
+    var b: u64 = bw
+    if b * 2 >= w || b * 2 >= h {
+        b = 1
+    }
+    rrect(x, y, w, h, r, c)
+    var ri: u64 = 0
+    if r > b {
+        ri = r - b
+    }
+    rrect(x + b, y + b, w - 2 * b, h - 2 * b, ri, inner)
+}
+
+// A shadow below a rounded box: `reach` one-pixel rings, the outermost
+// the weakest, shifted down by one -- wlibc.drop_shadow's shape, painted
+// as translucent rings by fUi instead of a get/blend/put per pixel.
+fn shadow(x: u64, y: u64, w: u64, h: u64, r: u64, strength: u64,
+    reach: u64, c: u64) {
+    if strength == 0 || reach == 0 || w == 0 || h == 0 {
+        return
+    }
+    if !ready() {
+        wlibc.drop_shadow(x, y, w, h, r, strength, reach, c)
+        return
+    }
+    clip_sync()
+    var i: u64 = reach
+    while i > 0 {
+        let a: u64 = strength * 255 / 100 * (reach + 1 - i) / (reach + 1)
+        if a != 0 {
+            let fx: f64 = (x as f64) - (i as f64)
+            let fyy: f64 = fy(y + 1) - (i as f64)
+            let ww: u64 = w + 2 * i
+            let hh: u64 = h + 2 * i
+            painter.round_ring(pz(), fx, fyy, ww as f64, hh as f64,
+                cap_r(r + i, ww, hh) as f64, 1.0, argb(c, a))
+        }
+        i = i - 1
+    }
+    s_n_prim = s_n_prim + 1
+}
+
+// How many primitives fUi painted for wlib (the counter of stage 1).
+fn fui_prims() -> u64 {
+    return s_n_prim
+}
+
+// ====================================================================
+// ROUND FUI-ALL, STAGE 1b: PICTURES, DRAWN BY fUi.
+//
+// The last two places where wlib still set pixels itself were the icon
+// cell of a list row and the image widget (viewer: zoom, pan, quarter
+// turns). Both hold pixels as 0xAARRGGBB words -- read by fUi's Image
+// with R and B swapped, which is exactly the channel order the bridge
+// hands the painter everywhere else (`swap_rb`), so no copy is made.
+//
+//   * `icon`: 1:1, no scaling -- the sampler lands on pixel centres and
+//     reproduces the source exactly; alpha 0 leaves the row colour.
+//   * `picture`: unturned it is `uiimage.image_draw_rect` (box filter
+//     when shrinking, bilinear when growing -- no stairs); a quarter turn
+//     goes through `transform.tf_draw_image` with the turn as a matrix.
+// Both honour wlibc's clip; without a surface they return false and the
+// caller keeps its old loop.
+// ====================================================================
+
+fn icon(px: u64, w: u64, h: u64, stride: u64, x: u64, y: u64) -> bool {
+    if px == 0 || w == 0 || h == 0 || !ready() {
+        return false
+    }
+    clip_sync()
+    var im: uiimage.Image = uiimage.image_wrap(px, w as usize, h as usize,
+        stride as usize)
+    uiimage.image_draw_rect(pz(), &im, x as f64, fy(y), w as f64,
+        h as f64, 0 as u32)
+    s_n_prim = s_n_prim + 1
+    return true
+}
+
+// `iw` x `ih` pixels at `px`, turned by `turn` quarters clockwise, into
+// the box (`ox`, `oy`) of `zw` x `zh` (the turned size, zoomed). `ox`/`oy`
+// may lie left of or above the widget (panned): they are signed.
+fn picture(px: u64, iw: u64, ih: u64, turn: u64, ox: i64, oy: i64,
+    zw: u64, zh: u64) -> bool {
+    if px == 0 || iw == 0 || ih == 0 || zw == 0 || zh == 0 || !ready() {
+        return false
+    }
+    clip_sync()
+    var im: uiimage.Image = uiimage.image_wrap(px, iw as usize,
+        ih as usize, 0)
+    let fx: f64 = ox as f64
+    let fyy: f64 = (oy as f64) - (wlibc.band_y() as f64)
+    let q: u64 = turn & 3
+    if q == 0 {
+        uiimage.image_draw_rect(pz(), &im, fx, fyy, zw as f64, zh as f64,
+            0 as u32)
+    } else {
+        // turned size before zoom: quarter 1/3 swap the sides
+        var bw: f64 = iw as f64
+        var bh: f64 = ih as f64
+        if q == 1 || q == 3 {
+            bw = ih as f64
+            bh = iw as f64
+        }
+        var xf: transform.Xform = transform.xf_new()
+        transform.xf_translate(&xf, fx, fyy)
+        transform.xf_scale(&xf, (zw as f64) / bw, (zh as f64) / bh, 0.0, 0.0)
+        if q == 1 {
+            transform.xf_translate(&xf, ih as f64, 0.0)
+        } else if q == 2 {
+            transform.xf_translate(&xf, iw as f64, ih as f64)
+        } else {
+            transform.xf_translate(&xf, 0.0, iw as f64)
+        }
+        transform.xf_rotate(&xf, (q * 90) as f64)
+        transform.tf_draw_image(pz(), &xf, &im, 0.0, 0.0, iw as f64,
+            ih as f64, 1.0)
+    }
+    s_n_prim = s_n_prim + 1
+    return true
+}
+
+// FUI-ALL stage 3: the dots of a password field are fUi's mask -- one
+// U+2022 per CHARACTER (lead octets only), exactly what fUi's own secret
+// field shows. Returns the octets written to `out` (at most `cap`).
+fn secret_mask(p: u64, n: u64, out: u64, cap: u64) -> u64 {
+    return render.secret_mask(p, n as usize, out, cap as usize) as u64
+}
+
+// ====================================================================
+// FUI-ALL STAGE 2: A PROGRAM THAT PAINTS WITH fUi ITSELF.
+//
+// Up to here fUi only painted what wlib asked for, primitive by primitive
+// on wlib's band. A program on fUi DIRECTLY owns its pixels: one wlib
+// canvas widget (`wlib.canvas`, the same widget Certus paints its page
+// into) whose buffer the program hands to fUi. This is the second canvas
+// of the bridge -- same theme (the system scheme, R and B swapped, so the
+// octets land in the framebuffer's order), same fonts, its own painter
+// and render context, bound to the program's buffer instead of wlib's
+// surface. `kernel/user/fuiapp.fi` wraps window, buffer and events.
+// ====================================================================
+static mut s_app_ok: u64 = 0
+static mut s_app_w: u64 = 0
+static mut s_acvm: [u64; 128] = [0; 128]
+static mut s_apzm: [u64; 256] = [0; 256]
+static mut s_actxm: [u64; 8] = [0; 8]
+
+fn app_canvas() -> *mut canvas.Canvas {
+    return ((&s_acvm[0 as usize]) as u64) as *mut canvas.Canvas
+}
+
+fn app_pz() -> *mut painter.Painter {
+    return ((&s_apzm[0 as usize]) as u64) as *mut painter.Painter
+}
+
+fn app_ctx() -> *mut render.Ctx {
+    return ((&s_actxm[0 as usize]) as u64) as *mut render.Ctx
+}
+
+fn app_theme() -> *mut theme.Theme {
+    return th()
+}
+
+// Bind fUi to `px` (w*h words, B,G,R,0 like the surface). The theme and
+// fonts come from `ready()`, so the window must have been painted once.
+// A new buffer (resize) rebinds the canvas; the painter keeps its raster
+// store as long as the height does not grow.
+fn app_bind(px: u64, w: u64, h: u64) -> bool {
+    if px == 0 || w == 0 || h == 0 || !ready() {
+        return false
+    }
+    canvas_on_surface(app_canvas(), px, w as usize, h as usize)
+    // The raster window of a shape is one column wider than the shape
+    // (painter.raster_window: `(bx - ax) + 1`), so a panel as wide as
+    // the canvas needs `w + 1` columns -- with exactly `w` it was not
+    // painted at all (FUI-ALL known defect, 02.10.2026). Two spare ones.
+    if s_app_ok == 0 || s_app_ok < h || s_app_w < w {
+        if !painter.painter_init(app_pz(), app_canvas(), (w + 2) as usize,
+            (h + 3) as usize) {
+            return false
+        }
+        painter.painter_set_font(app_pz(), fuiglyph.fontset(fuiglyph.ROLE_UI))
+        *app_ctx() = render.ctx_new(th(), app_pz())
+        s_app_ok = h
+        s_app_w = w
+    }
     return true
 }

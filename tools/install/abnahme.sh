@@ -208,9 +208,9 @@ rm -f "$SER" "$SOCK"
 # und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
 # der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=geheim123"
 
-timeout 900 $QEMU_X86 -m 512 \
+timeout 3000 $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
     -serial "file:$SER" -display none -no-reboot \
     -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
@@ -246,7 +246,7 @@ grep -qa 'installer: disk /dev/hda' "$SER" \
 
 # Jetzt laeuft die Installation (Schalter `sofort`). Sie dauert Minuten.
 i=0
-while [ $i -lt 1600 ]; do
+while [ $i -lt 3000 ]; do
     grep -qa 'installer: fertig\|installer: FEHLER' "$SER" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
@@ -431,8 +431,11 @@ else
 fi
 if [ -s "$SHOTS/40-von-der-platte.png" ]; then
     t=$(tinte "$SHOTS/40-von-der-platte.png")
-    if [ "$t" -ge 5 ]; then
-        ok "BILD: der Schreibtisch von der Platte (${t} % Tinte)"
+    # DAILY-DRIVER (r172): the installed system has no autologin any more, its
+    # first picture is the LOGIN SCREEN (little ink: a small dialog on a light
+    # screen), the desktop comes after the password -- test 7c types it
+    if [ "$t" -ge 2 ]; then
+        ok "BILD: der Anmeldeschirm von der Platte (${t} % Tinte)"
     else
         bad "der Schirm von der Platte ist fast leer (${t} % Tinte)"
     fi
@@ -458,8 +461,8 @@ fi
 # "die Platte bootet" von "man kann damit arbeiten" unterscheidet:
 # ein Fenster, das der Fensterserver meldet, gibt es nur, wenn ein
 # Ring-3-Programm von DIESER Platte gestartet ist.
-if grep -qa 'desk: start /bin/desktop' "$OUT/start.txt"; then
-    ok "der Schreibtisch startet von der Platte"
+if grep -qa 'desk: start /bin/desktop\|desk: start /bin/glogin' "$OUT/start.txt"; then
+    ok "die Oberflaeche (Anmeldeschirm bzw. Schreibtisch) startet von der Platte"
 else
     bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"
 fi
@@ -467,6 +470,9 @@ fi
 grep -qa 'from module' "$OUT/start.txt" \
     && bad "es lief doch ueber ein Boot-Modul -- dann ist nichts bewiesen" \
     || ok "GEGENPROBE: 'from module' kommt nicht vor -- es war kein Stick im Spiel"
+
+# the installer's own limine.conf, kept for step 7c (the next steps overwrite it with scripts)
+mcopy -i "$ZIEL@@1048576" ::/limine.conf "$OUT/inst-limine.conf" 2>/dev/null
 
 # ==================================================================
 titel "6. eine Datei anlegen -- auf der Platte"
@@ -532,6 +538,121 @@ else
 fi
 
 # ==================================================================
+# ==================================================================
+titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
+# ==================================================================
+#
+# Der Installer wurde mit `konto=abnahme,kontopw=geheim123` gestartet
+# (das Fenster fragt einen Menschen; der Laeufer bekommt es als
+# Argument). Auf der installierten Platte muss GENAU dieses Konto
+# stehen, mit einem Hash, der zu dem Passwort passt -- nachgerechnet
+# von PYTHON (hashlib), nicht vom System selbst --, und OHNE die
+# Konten des Sticks, OHNE Autologin, mit Heimordner.
+platte_lauf konto "echo ==PASSWD;cat /etc/passwd;echo ==SHADOW;cat /etc/shadow;echo ==GROUP;cat /etc/group;echo ==AUTOLOGIN;ls /etc;echo ==USERS;ls /users;echo ==ENDE;exit" 300
+rc=$?
+if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
+    ok "der Kontolauf ist durchgelaufen (Code $rc)"
+else
+    bad "der Kontolauf endete mit Code $rc"
+fi
+python3 - "$OUT/konto.txt" "geheim123" > "$OUT/konto-py.txt" 2>&1 <<'PYEOF2'
+import sys, hashlib, binascii, re
+raw = open(sys.argv[1], 'rb').read().decode('latin1')
+# the serial line also carries the shell's echo and the loader's chatter
+raw = '\n'.join(l for l in raw.replace('\r', '').split('\n') if not l.startswith('elf:') and not l.startswith('osum$ ') and not l.startswith('osum:'))
+pw = sys.argv[2]
+# the guest echoes the script on the kernel command line; take the part after the last "==PASSWD" that is a line of its own
+def sect(name, nxt):
+    m = re.findall(r'(?m)^==%s\r?\n(.*?)^==%s' % (name, nxt), raw, re.S)
+    return m[-1] if m else ''
+passwd = sect('PASSWD', 'SHADOW'); shadow = sect('SHADOW', 'GROUP')
+group = sect('GROUP', 'AUTOLOGIN'); users = sect('USERS', 'ENDE')
+auto = sect('AUTOLOGIN', 'USERS')
+names = [l.split(':')[0] for l in passwd.splitlines() if ':' in l]
+print("passwd-names", names)
+print("ok1" if names == ['root', 'abnahme'] else "bad1 passwd names %r" % names)
+row = [l for l in passwd.splitlines() if l.startswith('abnahme:')]
+print("ok2" if row and row[0].split(':')[2:4] == ['1000', '1000'] and row[0].split(':')[5] == '/users/abnahme' else "bad2 %r" % row)
+sh = {l.split(':')[0]: l.split(':')[1] for l in shadow.splitlines() if ':' in l}
+print("ok3" if sh.get('root') == '!' else "bad3 root field %r" % sh.get('root'))
+h = sh.get('abnahme', '')
+m = re.match(r'^\$osum1\$(\d+)\$([0-9a-f]+)\$([0-9a-f]+)$', h)
+def check(p):
+    if not m: return False
+    dk = hashlib.pbkdf2_hmac('sha256', p.encode(), binascii.unhexlify(m.group(2)), int(m.group(1)), 32)
+    return binascii.hexlify(dk).decode() == m.group(3)
+print("ok4" if check(pw) else "bad4 hash does not match the password")
+print("ok5" if not check('falsch-123') and not check('live') and not check('startkennwort') else "bad5 wrong password accepted")
+print("ok6" if 'abnahme' in [l.split(':')[0] for l in group.splitlines() if ':' in l] else "bad6 group")
+ut = [t.rstrip('/') for t in users.split()]
+print("ok7" if 'abnahme' in ut and 'live' not in ut else "bad7 users %r" % users)
+print("ok8" if 'autologin' not in auto.split() and 'passwd' in auto.split() else "bad8 autologin still there or no listing: %r" % auto[:200])
+PYEOF2
+cat "$OUT/konto-py.txt" | sed 's/^/        /'
+grep -q '^ok1' "$OUT/konto-py.txt" && ok "/etc/passwd: genau root und abnahme (die Konten des Sticks sind weg)" || bad "/etc/passwd stimmt nicht"
+grep -q '^ok2' "$OUT/konto-py.txt" && ok "abnahme hat uid/gid 1000 und Heimordner /users/abnahme" || bad "uid/gid/Heimordner falsch"
+grep -q '^ok3' "$OUT/konto-py.txt" && ok "root ist gesperrt (!)" || bad "root nicht gesperrt"
+grep -q '^ok4' "$OUT/konto-py.txt" && ok "der Hash gehoert zum gewaehlten Passwort (PBKDF2, von Python nachgerechnet)" || bad "Hash passt nicht zum Passwort"
+grep -q '^ok5' "$OUT/konto-py.txt" && ok "GEGENPROBE: ein falsches Passwort und die Standardpasswoerter live/startkennwort passen NICHT" || bad "ein falsches Passwort passt"
+grep -q '^ok6' "$OUT/konto-py.txt" && ok "/etc/group kennt abnahme" || bad "/etc/group ohne abnahme"
+grep -q '^ok7' "$OUT/konto-py.txt" && ok "/users/abnahme liegt da, /users/live nicht" || bad "Heimordner falsch"
+grep -q '^ok8' "$OUT/konto-py.txt" && ok "kein /etc/autologin auf der installierten Platte" || bad "/etc/autologin liegt noch da"
+
+# ==================================================================
+titel "7c. MIT DEM NEUEN KONTO ANMELDEN -- am echten Anmeldeschirm"
+# ==================================================================
+#
+# Die Platte startet ohne Skript und ohne Autologin: der Anmeldeschirm kommt.
+# Das Passwort wird durch den QEMU-Monitor getippt (Tastendruecke, wie ein
+# Mensch). Richtiges Passwort -> "angemeldet als abnahme" mit uid=1000;
+# GEGENPROBE: ein falsches wird abgewiesen und es meldet sich niemand an.
+login_lauf() { # name keys...
+    local name=$1; shift
+    local ser="$OUT/$name.txt" vars="$OUT/$name.vars.fd" msock="$OUT/mon-$name.sock"
+    rm -f "$ser" "$msock"
+    cp -f /usr/share/OVMF/OVMF_VARS.fd "$vars" 2>/dev/null || true
+    # the file the INSTALLER wrote (saved after step 5, before the script runs overwrote it)
+    mcopy -o -i "$ZIEL@@1048576" "$OUT/inst-limine.conf" ::/limine.conf 2>/dev/null || true
+    local a=(-machine pc -cpu max -m 512 -display none -no-reboot
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
+        -serial "file:$ser"
+        -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32
+        -monitor "unix:$msock,server,nowait"
+        -drive "file=$ZIEL,format=raw,if=ide,index=0")
+    [ -f "$vars" ] && a+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
+    timeout 300 $QEMU_X86 "${a[@]}" > /dev/null 2>&1 &
+    local qp=$! w=0
+    while [ $w -lt 240 ]; do
+        grep -qa 'glogin: bereit' "$ser" 2>/dev/null && break
+        kill -0 "$qp" 2>/dev/null || break
+        sleep 1; w=$((w+1))
+    done
+    sleep 4
+    local k
+    for k in "$@"; do
+        echo "sendkey $k" | socat - "UNIX-CONNECT:$msock" > /dev/null 2>&1
+        sleep 0.4
+    done
+    w=0
+    while [ $w -lt 40 ]; do
+        grep -qa 'glogin: angemeldet als\|glogin: abgewiesen' "$ser" 2>/dev/null && break
+        sleep 1; w=$((w+1))
+    done
+    sleep 2
+    kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null
+}
+if command -v socat >/dev/null 2>&1; then
+    login_lauf login-ok g e h e i m 1 2 3 ret
+    grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "der Anmeldeschirm kommt (kein Autologin auf der installierten Platte)" || bad "kein Anmeldeschirm"
+    grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "Anmeldung mit dem neuen Konto und dem gewaehlten Passwort klappt" || bad "Anmeldung mit dem neuen Konto: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
+    grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "die Sitzung laeuft als uid 1000" || bad "uid 1000 fehlt"
+    login_lauf login-bad f a l s c h 9 9 9 ret
+    grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "GEGENPROBE: ein falsches Passwort wird abgewiesen" || bad "falsches Passwort nicht abgewiesen"
+    grep -aq 'glogin: angemeldet als' "$OUT/login-bad.txt" && bad "GEGENPROBE: trotzdem angemeldet" || ok "GEGENPROBE: niemand angemeldet"
+else
+    echo "   (socat fehlt: 7c uebersprungen)"
+fi
+
 titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 # ==================================================================
 #

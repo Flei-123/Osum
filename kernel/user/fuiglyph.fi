@@ -59,10 +59,11 @@ import libc.errno
 import wlibc
 import font.ttf
 import font.raster
+import font.metrics
 
 export {
-    install, ready, glyph_into, kern26, stats_loaded, stats_rastered,
-    ROLE_UI, ROLE_MONO, ROLE_ICON, ROLE_BOLD, HDR,
+    install, ready, glyph_into, fontset, kern26, stats_loaded, stats_rastered,
+    ROLE_UI, ROLE_MONO, ROLE_ICON, ROLE_BOLD, ROLE_SERIF, ROLE_SERIFB, HDR,
 }
 
 // The four roles, the same numbers as `wig.F_UI .. F_BOLD` and
@@ -71,7 +72,12 @@ const ROLE_UI: u64 = 0
 const ROLE_MONO: u64 = 1
 const ROLE_ICON: u64 = 2
 const ROLE_BOLD: u64 = 3
-const ROLES: u64 = 4
+// DD / PDFVIEW: a serif face (Liberation Serif, metric compatible with Times) for programs that
+// show other people's documents. NOT loaded with the four above: `fontset(ROLE_SERIF)` loads them
+// on the first ask (two files, ~100 KB), so no other program pays for them. 0 = no such file.
+const ROLE_SERIF: u64 = 4
+const ROLE_SERIFB: u64 = 5
+const ROLES: u64 = 6
 
 // The envelope head, as `wig.glyph_build` writes it.
 const HDR: u64 = 48
@@ -95,11 +101,15 @@ const FONT_MAX: u64 = 4194304
 static mut s_state: u64 = 0
 // One ttf.Font per slot; the struct lives in word arrays because a
 // `static` initialiser must be a literal (same pattern as fuib.fi).
-static mut s_fontm: [u64; 128] = [0; 128] // 4 slots x 32 words
-static mut s_slot_ok: [u64; 4] = [0; 4]
+// 256 words = 2 KiB per font: fUi tempo r23 gave ttf.Font a 256-entry
+// Latin cmap cache (1 KiB); at 32 words the size check below refused the
+// struct and every program fell back to the kernel rasteriser silently.
+static mut s_fontm: [u64; 1536] = [0; 1536] // 6 slots x 256 words
+static mut s_slot_ok: [u64; 6] = [0; 6]
 // role -> slot (a missing bold falls back to sans, and so on)
-static mut s_role: [u64; 4] = [0; 4]
-static mut s_rasterm: [u64; 32] = [0; 32]
+static mut s_role: [u64; 6] = [0; 6]
+static mut s_serif_tried: u64 = 0
+static mut s_rasterm: [u64; 64] = [0; 64]
 static mut s_scratch: u64 = 0
 static mut s_n_loaded: u64 = 0
 static mut s_n_rastered: u64 = 0
@@ -108,12 +118,16 @@ static mut p_sans: [u8; 15] = "/lib/sans.ttf\0\0"
 static mut p_mono: [u8; 15] = "/lib/mono.ttf\0\0"
 static mut p_icon: [u8; 16] = "/lib/icons.ttf\0\0"
 static mut p_bold: [u8; 15] = "/lib/bold.ttf\0\0"
+static mut p_serif: [u8; 16] = "/lib/serif.ttf\0\0"
+static mut p_serifb: [u8; 17] = "/lib/serifb.ttf\0\0"
 // One line on the serial log per process, so a test can tell which
 // engine drew the text -- "the text looks the same" proves nothing.
 static mut m_ok: [u8; 22] = "fuiglyph: fui fonts=\0\0"
 static mut m_no: [u8; 26] = "fuiglyph: kernel fallback\0"
+static mut m_big: [u8; 45] = "fuiglyph: kernel fallback, font struct grew\0\0"
 
-const FONT_WORDS: u64 = 32
+const FONT_WORDS: u64 = 256
+const RASTER_WORDS: u64 = 64
 const NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF
 
 fn font_at(slot: u64) -> *mut ttf.Font {
@@ -189,7 +203,10 @@ fn ready() -> bool {
     let nf: u64 = (&mf[1]) as u64 - (&mf[0]) as u64
     var mr: [raster.Raster; 2] = [raster.raster_new(); 2]
     let nr: u64 = (&mr[1]) as u64 - (&mr[0]) as u64
-    if nf > FONT_WORDS * 8 || nr > 32 * 8 {
+    if nf > FONT_WORDS * 8 || nr > RASTER_WORDS * 8 {
+        // Say it: a silent fallback here once cost a whole test round.
+        ulib.say((&m_big[0]) as u64)
+        ulib.nl()
         return false
     }
     load(ROLE_UI, (&p_sans[0]) as u64)
@@ -376,6 +393,42 @@ fn install() -> bool {
     }
     wlibc.glyph_source(glyph_into, kern26)
     return true
+}
+
+// A program that paints with fUi itself (fuiapp) needs fUi's own notion of
+// a font: a `metrics.FontSet`, which painter_set_font takes as a pointer.
+// Built here from the slot's font, once per role; 0 = no fUi fonts (the
+// process keeps the kernel's glyphs and cannot paint fUi text).
+static mut s_fsm: [u64; 1560] = [0; 1560] // 6 sets x 260 words
+static mut s_fs_done: [u64; 6] = [0; 6]
+
+fn fontset(role: u64) -> u64 {
+    if role >= ROLES || !ready() {
+        return 0
+    }
+    if role >= ROLE_SERIF && s_serif_tried == 0 {
+        s_serif_tried = 1
+        load(ROLE_SERIF, (&p_serif[0]) as u64)
+        load(ROLE_SERIFB, (&p_serifb[0]) as u64)
+        s_role[ROLE_SERIF as usize] = pick(ROLE_SERIF, NO_SLOT)
+        s_role[ROLE_SERIFB as usize] = pick(ROLE_SERIFB, s_role[ROLE_SERIF as usize])
+    }
+    let slot: u64 = s_role[role as usize]
+    if slot == NO_SLOT {
+        return 0
+    }
+    let fs: *mut metrics.FontSet = (&s_fsm[(role * 260) as usize]) as u64 as *mut metrics.FontSet
+    if s_fs_done[role as usize] == 0 {
+        var chk: [metrics.FontSet; 2] = [metrics.fontset_new(); 2]
+        let nfs: u64 = (&chk[1]) as u64 - (&chk[0]) as u64
+        if nfs > 260 * 8 {
+            return 0
+        }
+        (*fs).f = *font_at(slot)
+        (*fs).ok = 1
+        s_fs_done[role as usize] = 1
+    }
+    return fs as u64
 }
 
 fn stats_loaded() -> u64 {

@@ -74,8 +74,8 @@ import ulib
 import libc.io
 import libc.errno
 import wlibc
-import wlib
 import nidx
+import fuiscene
 
 export { u_start }
 
@@ -125,7 +125,7 @@ static mut kbheit: u64 = 0 // dieselben in Kilooktett-Bloecken
 static mut bp: u64 = 0
 
 static mut t_titel: [u8; 32] = "Speicher\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-static mut t_auf: [u8; 4] = "^\0\0\0"
+static mut t_auf: [u8; 5] = "Hoch\0"
 static mut t_neu: [u8; 16] = "Aktualisieren\0\0\0"
 static mut t_del: [u8; 12] = "Löschen\0\0\0\0"
 static mut t_wurz: [u8; 4] = "/\0\0\0"
@@ -456,19 +456,18 @@ fn anhaengen(ziel: u64, v: u64, buf: u64) -> u64 {
 // GERECHNET WIRD IN GANZEN ZAHLEN. `teil * breite / rest` -- kein
 // Gleitkomma, keine Rundungsfrage. Was durch das Abrunden verlorengeht,
 // bekommt die letzte Kachel, weil sie den Rest des Rechtecks nimmt.
-fn kacheln_malen(w: u64) {
-    let h: u64 = wlib.handle(w)
-    if h == 0 {
-        return
-    }
-    wlibc.set_band(TMY)
-    wlibc.clip_set(TMX, TMY, TMX + TMW, TMY + TMH)
-    wlib.draw_board(TMX, TMY, TMW, TMH, wlib.MR_TAFEL,
-        wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
-    var x: u64 = TMX + 1
-    var y: u64 = TMY + 1
-    var bw: u64 = TMW - 2
-    var bh: u64 = TMH - 2
+//
+// FUI-ALL: die Kachelflaeche ist ein Knoten des Szenenbaums (canvas), und
+// dieser Rueckruf malt sie mit den fUi-Malfunktionen -- die Kachelfarbe
+// ist ein genauer RGB-Wert, denn die Farbe IST hier die Aussage.
+static mut kmeld: bool = true
+
+fn kacheln_malen(tx: u64, ty: u64, tw: u64, th: u64) {
+    fuiscene.cv_round(tx, ty, tw, th, 0, fuiscene.R_SURFACE)
+    var x: u64 = tx + 1
+    var y: u64 = ty + 1
+    var bw: u64 = tw - 2
+    var bh: u64 = th - 2
     var rest: u64 = 0
     var i: u64 = 0
     while i < kanz {
@@ -511,9 +510,8 @@ fn kacheln_malen(w: u64) {
             i = i + 1
         }
     }
-    wlib.draw_frame(TMX, TMY, TMW, TMH, wlib.MR_TAFEL,
-        wlibc.theme(wlibc.T_LINE))
-    wlibc.push(h, TMX, TMY, TMW, TMH)
+    fuiscene.cv_ring(tx, ty, tw, th, 0, fuiscene.R_BORDER)
+    kmeld = false
 }
 
 fn eine_kachel(i: u64, x: u64, y: u64, w: u64, h: u64) {
@@ -525,17 +523,21 @@ fn eine_kachel(i: u64, x: u64, y: u64, w: u64, h: u64) {
     var sf: [u8; 8] = "farbe=\0\0"
     var sn: [u8; 8] = "name=\0\0\0"
     let f: u64 = farben[((i % 8)) as usize]
-    wlib.draw_board(x, y, w, h, wlib.MR_FIELD, wlibc.EL_FLAT, f,
-        wlibc.theme(wlibc.T_BG))
+    // one pixel of the surface around every tile keeps the neighbours apart
+    fuiscene.cv_rect(x, y, w, h, fuiscene.R_SURFACE)
+    if w > 2 && h > 2 {
+        fuiscene.cv_rgb(x + 1, y + 1, w - 2, h - 2, f)
+    }
     // DER NAME NUR, WENN ER HINEINPASST. Ein abgeschnittener Name in
     // einer Kachel ist schlimmer als keiner: er sieht aus wie ein
     // anderer Name.
     let ln: u64 = ulib.length(knptr(i))
     let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), knptr(i), ln)
-    if w > tw + 6 && h > wlibc.text_h(wlibc.px_ui()) + 2 {
-        let _t: u64 = wlib.draw_text(x + 3,
-            y + wlib.draw_ascent(wlibc.TY_BODY) + 2,
-            knptr(i), ln, wlibc.theme(wlibc.T_BG), wlibc.TY_BODY)
+    if w > tw + 8 && h > 28 {
+        fuiscene.cv_text(x + 4, y + 2, w - 8, knptr(i), fuiscene.R_ONFILL)
+    }
+    if !kmeld {
+        return
     }
     say((&s_k[0 as usize]) as u64)
     ulib.sayn(i)
@@ -553,7 +555,7 @@ fn eine_kachel(i: u64, x: u64, y: u64, w: u64, h: u64) {
 
 // ------------------------------------------------------- der Ortswechsel
 
-fn new_read(ltab: u64, rtab: u64, stat: u64, fpfad: u64, w: u64) {
+fn new_read() {
     var s_cd: [u8; 20] = "speicher: cd \0\0\0\0\0\0\0"
     var s_i: [u8; 8] = " ino=\0\0\0"
     var s_k: [u8; 12] = " kinder=\0\0\0\0"
@@ -571,10 +573,15 @@ fn new_read(ltab: u64, rtab: u64, stat: u64, fpfad: u64, w: u64) {
     build_left()
     build_right()
     baue_status()
-    wlib.set_text(ltab, (&lblob[0 as usize]) as u64)
-    wlib.set_text(rtab, (&rblob[0 as usize]) as u64)
-    wlib.set_text(stat, (&lauf[0 as usize]) as u64)
-    wlib.set_text(fpfad, (&pfad[0 as usize]) as u64)
+    // The tables, the path field and the status line follow the new
+    // contents; the tiles are painted again with the tree.
+    fuiscene.table_set_blob(K_LTAB, (&lblob[0 as usize]) as u64)
+    fuiscene.table_set_blob(K_RTAB, (&rblob[0 as usize]) as u64)
+    fuiscene.table_set_sel(K_LTAB, fuiscene.HEAD_ROW)
+    fuiscene.table_set_sel(K_RTAB, fuiscene.HEAD_ROW)
+    fuiscene.entry_set(K_PATH, (&pfad[0 as usize]) as u64)
+    kmeld = true
+    fuiscene.refresh()
     say((&s_cd[0 as usize]) as u64)
     say((&pfad[0 as usize]) as u64)
     kv((&s_i[0 as usize]) as u64, ino_now)
@@ -726,7 +733,48 @@ fn delete(z: u64) -> u64 {
 
 // ------------------------------------------------------------ das Fenster
 
-fn say_rect(i: u64) {
+// ------------------------------------------------------------ das Fenster
+
+const K_AUF: u64 = 1
+const K_NEU: u64 = 2
+const K_DEL: u64 = 3
+const K_PATH: u64 = 4
+const K_LTAB: u64 = 5
+const K_RTAB: u64 = 6
+const K_TILES: u64 = 7
+
+static mut n_auf: usize = 0
+static mut n_neu: usize = 0
+static mut n_del: usize = 0
+static mut n_path: usize = 0
+static mut n_ltab: usize = 0
+static mut n_rtab: usize = 0
+static mut n_stat: usize = 0
+
+// The window, described for fUi's scene tree.
+fn build() {
+    let col: usize = fuiscene.root()
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    n_auf = fuiscene.button(bar, (&t_auf[0 as usize]) as u64, K_AUF)
+    fuiscene.set_size(n_auf, 72, 36)
+    n_neu = fuiscene.button(bar, (&t_neu[0 as usize]) as u64, K_NEU)
+    fuiscene.set_size(n_neu, 144, 36)
+    n_del = fuiscene.button(bar, (&t_del[0 as usize]) as u64, K_DEL)
+    fuiscene.set_size(n_del, 104, 36)
+    n_path = fuiscene.entry(bar, K_PATH, BW - 16 - 72 - 144 - 104 - 24,
+        (&pfad[0 as usize]) as u64)
+    let tabs: usize = fuiscene.row(col)
+    fuiscene.set_gap(tabs, 8)
+    n_ltab = fuiscene.table_blob(tabs, K_LTAB, 392, 272, 3,
+        (&lblob[0 as usize]) as u64)
+    n_rtab = fuiscene.table_blob(tabs, K_RTAB, BW - 16 - 392 - 8, 272, 2,
+        (&rblob[0 as usize]) as u64)
+    let _t: usize = fuiscene.canvas(col, K_TILES, BW - 16, 64, kacheln_malen)
+    n_stat = fuiscene.label(col, (&lauf[0 as usize]) as u64)
+}
+
+fn say_rect(n: usize, i: u64, kind: u64) {
     var a: [u8; 16] = "speicher: rect \0"
     var si: [u8; 4] = "id=\0"
     var sk: [u8; 8] = "kind=\0\0\0"
@@ -736,12 +784,20 @@ fn say_rect(i: u64) {
     var sh: [u8; 4] = "h=\0\0"
     say((&a[0 as usize]) as u64)
     kv((&si[0 as usize]) as u64, i)
-    kv((&sk[0 as usize]) as u64, wlib.kind_of(i))
-    kv((&sx[0 as usize]) as u64, wlib.rect_x(i))
-    kv((&sy[0 as usize]) as u64, wlib.rect_y(i))
-    kv((&sw[0 as usize]) as u64, wlib.rect_w(i))
-    kv((&sh[0 as usize]) as u64, wlib.rect_h(i))
+    kv((&sk[0 as usize]) as u64, kind)
+    kv((&sx[0 as usize]) as u64, fuiscene.node_x(n))
+    kv((&sy[0 as usize]) as u64, fuiscene.node_y(n))
+    kv((&sw[0 as usize]) as u64, fuiscene.node_w(n))
+    kv((&sh[0 as usize]) as u64, fuiscene.node_h(n))
     ulib.nl()
+}
+
+// The path field was edited and confirmed: take its text as the place.
+fn path_take() {
+    let t: u64 = fuiscene.entry_text(K_PATH)
+    if t != 0 && ulib.length(t) > 0 {
+        ulib.strncpy((&pfad[0 as usize]) as u64, t, 190)
+    }
 }
 
 fn u_start(args: u64) -> u64 {
@@ -753,12 +809,10 @@ fn u_start(args: u64) -> u64 {
     var s_l: [u8; 10] = " lost=\0\0\0\0"
     var s_a: [u8; 12] = " abgeschn=\0\0"
     var s_no: [u8; 8] = "nohit\0\0\0"
-    var s_nc: [u8; 8] = "noclip\0\0"
     var s_ni: [u8; 8] = "noidx\0\0\0"
     var s_st: [u8; 11] = "/data\0\0\0\0\0\0"
 
     var nohit: bool = false
-    var noclip: bool = false
     var noidx: bool = false
     let argc: u64 = ulib.arg_count(args)
     var a: u64 = 1
@@ -766,9 +820,6 @@ fn u_start(args: u64) -> u64 {
         let p: u64 = ulib.arg_at(args, a)
         if ulib.streq(p, (&s_no[0 as usize]) as u64) {
             nohit = true
-        }
-        if ulib.streq(p, (&s_nc[0 as usize]) as u64) {
-            noclip = true
         }
         // GEGENPROBE: ohne Index. Dann steht in jeder Zeile eine Null,
         // die Kacheln verschwinden, und die Statuszeile sagt 0 Oktette.
@@ -779,11 +830,7 @@ fn u_start(args: u64) -> u64 {
         }
         a = a + 1
     }
-    if !wlib.begin(nohit, noclip) {
-        say((&s_bad[0 as usize]) as u64)
-        ulib.nl()
-        return 1
-    }
+    fuiscene.set_nohit(nohit)
     farben[(0) as usize] = 5273279
     farben[(1) as usize] = 12556117
     farben[(2) as usize] = 6274437
@@ -814,114 +861,99 @@ fn u_start(args: u64) -> u64 {
         ulib.strcpy((&pfad[0 as usize]) as u64, (&s_st[0 as usize]) as u64)
     }
 
-    lspalten[(0) as usize] = 210
+    lspalten[(0) as usize] = 208
     lspalten[(1) as usize] = 100
-    lspalten[(2) as usize] = 74
-    rspalten[(0) as usize] = 210
-    rspalten[(1) as usize] = 100
+    lspalten[(2) as usize] = 72
+    rspalten[(0) as usize] = 200
+    rspalten[(1) as usize] = 96
 
-    let w: u64 = wlib.window(40, 40, BW, BH, (&t_titel[0 as usize]) as u64)
-    if w >= wlib.MAXWN {
+    if !fuiscene.open(40, 40, BW, BH, (&t_titel[0 as usize]) as u64, build) {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
         return 1
     }
 
-    wlib.box_h(w, 8, 8, BW - 16, 28, 0, 6)
-    wlib.size(30, 26)
-    let bauf: u64 = wlib.button((&t_auf[0 as usize]) as u64)
-    wlib.size(96, 26)
-    let bneu: u64 = wlib.button((&t_neu[0 as usize]) as u64)
-    wlib.size(80, 26)
-    let bdel: u64 = wlib.button((&t_del[0 as usize]) as u64)
-    wlib.size(0, 26)
-    let fpfad: u64 = wlib.entry((&pfad[0 as usize]) as u64, 180)
-    wlib.box_end()
-
-    wlib.box_h(w, 8, 44, BW - 16, 254, 0, 8)
-    wlib.size(392, 254)
-    let ltab: u64 = wlib.table((&lblob[0 as usize]) as u64, 9, 3,
-        (&lspalten[0 as usize]) as u64)
-    wlib.size(0, 254)
-    let rtab: u64 = wlib.table((&rblob[0 as usize]) as u64, 9, 2,
-        (&rspalten[0 as usize]) as u64)
-    wlib.box_end()
-
-    wlib.box_v(w, 8, 376, BW - 16, 24, 0, 0)
-    wlib.size(0, 20)
-    let stat: u64 = wlib.label((&lauf[0 as usize]) as u64)
-    wlib.box_end()
-
-    new_read(ltab, rtab, stat, fpfad, w)
-    wlib.draw_all()
-    kacheln_malen(w)
+    // The first read fills the buffers the tree points to; the first
+    // pump then builds and paints the window BEFORE the cross-check runs.
+    build_left()
+    build_right()
+    var key: u64 = fuiscene.pump()
+    var c0: u64 = 0
+    while c0 < 3 {
+        fuiscene.table_colw(K_LTAB, c0, lspalten[(c0) as usize])
+        c0 = c0 + 1
+    }
+    fuiscene.table_colw(K_RTAB, 0, rspalten[(0) as usize])
+    fuiscene.table_colw(K_RTAB, 1, rspalten[(1) as usize])
+    new_read()
+    key = fuiscene.pump()
     gegenprobe()
     say((&s_go[0 as usize]) as u64)
     ulib.nl()
-    say_rect(bauf)
-    say_rect(bneu)
-    say_rect(bdel)
-    say_rect(fpfad)
-    say_rect(ltab)
-    say_rect(rtab)
-    say_rect(stat)
+    say_rect(n_auf, 0, 2)
+    say_rect(n_neu, 1, 2)
+    say_rect(n_del, 2, 2)
+    say_rect(n_path, 3, 4)
+    say_rect(n_ltab, 4, 6)
+    say_rect(n_rtab, 5, 6)
+    say_rect(n_stat, 6, 1)
 
     var wartet: u64 = 0
     var runden: u64 = 0
-    while wlib.alive() && runden < 4000000 {
+    var probe_due: bool = false
+    var probe_at: u64 = 0
+    while fuiscene.alive() && runden < 4000000 {
         runden = runden + 1
-        let id: u64 = wlib.step()
-        if id < wlib.MAXWD {
-            let kind: u64 = wlib.fired_kind()
-            let idx: u64 = wlib.fired_index()
-            if kind == wlib.K_BUTTON {
-                if id == bauf {
-                    hinauf()
-                    new_read(ltab, rtab, stat, fpfad, w)
-                    wlib.draw_all()
-                    kacheln_malen(w)
-                    gegenprobe()
-                } else if id == bneu {
-                    nidx.poll()
-                    nidx.size_build()
-                    new_read(ltab, rtab, stat, fpfad, w)
-                    wlib.draw_all()
-                    kacheln_malen(w)
-                    gegenprobe()
-                } else if id == bdel {
-                    wlib.dlg_ask((&t_delt[0 as usize]) as u64,
-                        (&t_frage[0 as usize]) as u64)
-                    wartet = 1
-                }
-            } else if kind == wlib.K_ENTRY && id == fpfad {
-                new_read(ltab, rtab, stat, fpfad, w)
-                wlib.draw_all()
-                kacheln_malen(w)
-                gegenprobe()
-            } else if kind == wlib.K_LIST {
-                if id == ltab {
-                    if hinein(idx) {
-                        new_read(ltab, rtab, stat, fpfad, w)
-                        wlib.draw_all()
-                        kacheln_malen(w)
-                        gegenprobe()
-                    }
-                }
-            }
+        key = fuiscene.pump()
+        if probe_due && fuiscene.painted() > probe_at {
+            // the new place is on the screen: now the (slow) cross-check
+            probe_due = false
+            gegenprobe()
         }
-        if wlib.dlg_state() > 1 {
-            if wlib.dlg_state() == 2 && wartet == 1 {
-                delete(wlib.value(ltab))
-                new_read(ltab, rtab, stat, fpfad, w)
+        if key == K_AUF {
+            hinauf()
+            new_read()
+            probe_due = true
+            probe_at = fuiscene.painted()
+        } else if key == K_NEU {
+            nidx.poll()
+            nidx.size_build()
+            new_read()
+            probe_due = true
+            probe_at = fuiscene.painted()
+        } else if key == K_DEL {
+            if fuiscene.table_sel(K_LTAB) < kanz {
+                fuiscene.dialog_open((&t_delt[0 as usize]) as u64,
+                    (&t_frage[0 as usize]) as u64,
+                    (&t_ok[0 as usize]) as u64, (&t_abbr[0 as usize]) as u64)
+                wartet = 1
+            }
+        } else if key == K_PATH {
+            path_take()
+            new_read()
+            probe_due = true
+            probe_at = fuiscene.painted()
+        } else if key == K_LTAB {
+            if hinein(fuiscene.table_sel(K_LTAB)) {
+                new_read()
+                probe_due = true
+                probe_at = fuiscene.painted()
+            }
+        } else if key == fuiscene.KEY_DIALOG {
+            let res: u64 = fuiscene.dialog_result()
+            if res == 1 && wartet == 1 {
+                let z: u64 = fuiscene.table_sel(K_LTAB)
+                delete(z)
+                new_read()
             }
             wartet = 0
-            wlib.dlg_close()
-            wlib.draw_all()
-            kacheln_malen(w)
         }
     }
     return 0
 }
+
+static mut t_ok: [u8; 3] = "OK\0"
+static mut t_abbr: [u8; 10] = "Abbrechen\0"
 
 // RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
 // ARGUMENTE WEITERGEBEN.

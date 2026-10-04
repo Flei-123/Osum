@@ -1,0 +1,530 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fuiapp.fi -- FUI-ALL STAGE 2: A PROGRAM ON fUi DIRECTLY.
+//
+// wlib is a retained widget list that paints with fUi primitive by
+// primitive (stage 1). A program on fUi DIRECTLY describes and paints its
+// content with fUi itself -- fUi's widgets (`fui.widget` + `fui.render`),
+// fUi's text buffer (`fui.textbuf`, secret fields included) -- and needs
+// from the system only three things, which is exactly what this file is:
+//
+//   1. a WINDOW (wlib's window, so the window server, the a11y tree, the
+//      theme watch and the event pump stay the system's),
+//   2. PIXELS that belong to the program: one `wlib.canvas` widget over
+//      the whole client area, its buffer taken from the heap, and fUi
+//      bound to that buffer (`fuib.app_bind`: the system scheme, the
+//      system fonts, its own painter),
+//   3. EVENTS in fUi's terms: key, pointer down/up/move in canvas
+//      coordinates, plus a clock for caret blinking.
+//
+// Usage (see lock.fi, the first program built on it):
+//
+//     if !fuiapp.open_plain(0, 0, sw, sh, title, wlibc.L_TOP) { ... }
+//     let c: *mut render.Ctx = fuiapp.ctx()
+//     loop:
+//         fuiapp.frame_begin()          -- clears to the theme's base
+//         render.draw_widget(c, &w) ... -- fUi paints
+//         fuiapp.frame_end()            -- shows it
+//         while fuiapp.next(&ev) { ... }
+//
+// What stays out: layout (a program places its fUi widgets itself or uses
+// fui.flex / fui.scene) and focus order (a program with fUi widgets owns
+// its Tab chain) -- both are fUi's, not this file's.
+profile app
+
+import ulib
+import std.rt
+import wlibc
+import wlib
+import fuib
+import fui.render
+import fui.theme
+import paint.canvas
+import fuiglyph
+import fui.widget
+import fui.style
+import fui.textbuf
+import fui.painter
+
+export {
+    open_plain, open_window, resize, ctx, width, height, frame_begin, frame_end,
+    next, alive, now_ms, win, theme, Ev, ev_new,
+    EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_DROP,
+    label, button, button_main, field, field_paint, eye, glyph, edit, mask_off,
+    ink, panel, row, sel_on, sel_clear,
+}
+
+const EV_NONE: u64 = 0
+const EV_KEY: u64 = 1
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+const EV_DROP: u64 = 5 // something dragged from another window came down here
+
+struct Ev {
+    kind: u64,
+    key: u64,   // EV_KEY: wlib's key code (KEY_* or an octet)
+    x: u64,     // pointer events: canvas coordinates
+    y: u64,
+    btn: u64,
+}
+
+fn ev_new() -> Ev {
+    return Ev { kind: 0, key: 0, x: 0, y: 0, btn: 0 }
+}
+
+static mut s_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut s_cv: u64 = 0xFFFFFFFFFFFFFFFF
+static mut s_px: u64 = 0
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+static mut s_bound: u64 = 0
+static mut s_box: u64 = 0
+static mut s_ring: [u64; 4] = [0 as u64; 4]
+
+static mut m_nobuf: [u8; 30] = "fuiapp: no pixels for canvas\0\0"
+static mut m_nobind: [u8; 38] = "fuiapp: fUi refused the canvas (bind)\0"
+static mut m_ok: [u8; 20] = "fuiapp: canvas w=\0\0\0"
+static mut m_h: [u8; 4] = " h=\0"
+
+fn win() -> u64 { return s_win }
+fn width() -> u64 { return s_w }
+fn height() -> u64 { return s_h }
+fn ctx() -> *mut render.Ctx { return fuib.app_ctx() }
+fn theme() -> *mut theme.Theme { return fuib.app_theme() }
+fn theme_ptr() -> *mut theme.Theme { return fuib.app_theme() }
+
+// Monotonic milliseconds (clock_gettime, like wlib's blink clock); the
+// timer ticks (I_TICKS) are 10 ms apart and stand still in the file system.
+fn now_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(228, 1, (&ts[0 as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] * 1000 + ts[1 as usize] / 1000000
+}
+
+// The canvas widget over the whole client area, and fUi on its buffer.
+// The window is painted once first: that is what makes the bridge ready
+// (theme and fonts), so the bind below cannot fail for want of them.
+fn attach(w: u64, bw: u64, bh: u64) -> bool {
+    let n: u64 = bw * bh * 4
+    let px: u64 = rt.heap_alloc(n as usize) as u64
+    if px == 0 {
+        ulib.say((&m_nobuf[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    s_box = wlib.box_v(w, 0, 0, bw, bh, 0, 0)
+    wlib.size(bw, bh)
+    s_cv = wlib.canvas(px, bw, bh)
+    wlib.box_end()
+    wlib.set_focus(s_cv)
+    s_px = px
+    s_w = bw
+    s_h = bh
+    wlib.draw_all()
+    if !fuib.app_bind(px, bw, bh) {
+        ulib.say((&m_nobind[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    s_bound = 1
+    ulib.say((&m_ok[0 as usize]) as u64)
+    ulib.sayn(bw)
+    ulib.say((&m_h[0 as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    return true
+}
+
+// The window changed its size (the user dragged a border): a new pixel
+// buffer of the new size, the box and the canvas of the same size, fUi bound
+// to the new buffer. false when the size is what it was (or no memory).
+fn resize() -> bool {
+    let nw: u64 = wlib.win_w(s_win)
+    let nh: u64 = wlib.win_h(s_win)
+    if nw == s_w && nh == s_h {
+        return false
+    }
+    if nw < 64 || nh < 64 {
+        return false
+    }
+    let n: u64 = nw * nh * 4
+    let px: u64 = rt.heap_alloc(n as usize) as u64
+    if px == 0 {
+        return false
+    }
+    let old: u64 = s_px
+    let oldn: u64 = s_w * s_h * 4
+    wlib.box_at(s_box, 0, 0, nw, nh)
+    wlib.set_size(s_cv, nw, nh)
+    wlib.canvas_set(s_cv, px, nw, nh, nw)
+    if !fuib.app_bind(px, nw, nh) {
+        return false
+    }
+    s_px = px
+    s_w = nw
+    s_h = nh
+    wlib.relayout()
+    if old != 0 {
+        rt.heap_free(old, oldn as usize)
+    }
+    return true
+}
+
+// A frameless window (lock screen, login): `wlib.window_plain`.
+fn open_plain(x: u64, y: u64, bw: u64, bh: u64, title: u64,
+    layer: u64) -> bool {
+    let w: u64 = wlib.window_plain(x, y, bw, bh, title, layer)
+    if w >= wlib.MAXWN {
+        return false
+    }
+    s_win = w
+    wlib.canvas_tab(true)
+    return attach(w, bw, bh)
+}
+
+// An ordinary window with a frame: the canvas takes the client area.
+fn open_window(x: u64, y: u64, bw: u64, bh: u64, title: u64) -> bool {
+    let w: u64 = wlib.window(x, y, bw, bh, title)
+    if w >= wlib.MAXWN {
+        return false
+    }
+    s_win = w
+    wlib.canvas_tab(true)
+    return attach(w, wlib.win_w(w), wlib.win_h(w))
+}
+
+// The start of a picture: the whole canvas in the theme's base colour.
+fn frame_begin() {
+    if s_bound == 0 {
+        return
+    }
+    let c: *mut canvas.Canvas = fuib.app_canvas()
+    (*c).depth = 0
+    (*c).cx0[0] = 0.0
+    (*c).cy0[0] = 0.0
+    (*c).cx1[0] = s_w as f64
+    (*c).cy1[0] = s_h as f64
+    let base: u32 = (*theme.theme_colors(fuib.app_theme())).base | 4278190080 as u32
+    canvas.canvas_fill_rect(c, 0.0, 0.0, s_w as f64, s_h as f64, base)
+}
+
+// The picture is done: the canvas is dirty, and the window server gets it.
+fn frame_end() {
+    if s_bound == 0 {
+        return
+    }
+    wlib.canvas_new(s_cv)
+    wlib.draw_all()
+}
+
+fn alive() -> bool {
+    return wlib.alive()
+}
+
+// One step of the system's event pump, then the next canvas event.
+// false = nothing waiting (the caller repaints if it wants to and calls
+// again; wlib.step yields while idle).
+fn next(e: *mut Ev) -> bool {
+    (*e).kind = EV_NONE
+    if wlib.canvas_pending() == 0 {
+        let sid: u64 = wlib.step()
+        // a drop from another window (wlib.drop_an(true)): wlib fires
+        // K_DROP at the canvas and remembers where the pointer came up
+        if sid < wlib.MAXWD && wlib.fired_kind() == wlib.K_DROP {
+            (*e).kind = EV_DROP
+            (*e).x = wlib.drop_x()
+            (*e).y = wlib.drop_y()
+            (*e).btn = 0
+            return true
+        }
+    }
+    let q: u64 = (&s_ring[0 as usize]) as u64
+    if !wlib.canvas_event(q) {
+        return false
+    }
+    let art: u64 = s_ring[1 as usize]
+    let a: u64 = s_ring[2 as usize]
+    let b: u64 = s_ring[3 as usize]
+    if art == wlib.LE_KEY {
+        (*e).kind = EV_KEY
+        (*e).key = a
+        return true
+    }
+    (*e).x = a >> 16
+    (*e).y = a & 0xFFFF
+    (*e).btn = b
+    if art == wlib.LE_DOWN {
+        (*e).kind = EV_DOWN
+    } else if art == wlib.LE_UP {
+        (*e).kind = EV_UP
+    } else {
+        (*e).kind = EV_MOVE
+    }
+    return true
+}
+
+
+// ====================================================================
+// FUI-ALL STAGE 2b: THE PARTS A FORM NEEDS (label, button, text field,
+// eye, icon glyph, key editing). Every program that paints with fUi
+// directly needs the same handful; they live here so that a form is
+// placement + state and nothing else. All of them paint with fUi's own
+// widgets (fui.widget + fui.render) into the program's canvas.
+// ====================================================================
+static mut a_mask: [u8; 400] = [0 as u8; 400]
+
+fn lbl_h() -> u64 { return 24 }
+
+// A text label at (x, y), `w` wide.
+fn label(x: u64, y: u64, w: u64, p: u64) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&e, x as f64, y as f64, w as f64, 24.0)
+    widget.w_set_text(&e, p, ulib.length(p) as usize)
+    render.draw_widget(ctx(), &e)
+}
+
+// A push button; `focus` draws fUi's focus ring.
+fn button(x: u64, y: u64, w: u64, h: u64, p: u64, focus: bool) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&e, x as f64, y as f64, w as f64, h as f64)
+    if p != 0 {
+        widget.w_set_text(&e, p, ulib.length(p) as usize)
+    }
+    widget.w_set_focus(&e, focus)
+    render.draw_widget(ctx(), &e)
+}
+
+// The main button of a form: accent fill, label on accent.
+fn button_main(x: u64, y: u64, w: u64, h: u64, p: u64, focus: bool) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&e, x as f64, y as f64, w as f64, h as f64)
+    if p != 0 {
+        widget.w_set_text(&e, p, ulib.length(p) as usize)
+    }
+    widget.w_set_selected(&e, true)
+    // The label colour on the accent fill (the default would be dark on blue).
+    widget.w_set_style(&e, style.style_set_fg(style.style_new(),
+        style.color_token(style.TOK_TEXT_ON_ACCENT)))
+    render.draw_widget(ctx(), &e)
+    // The focus ring: fUi's own is the accent colour and vanishes on the
+    // accent fill, so a focused main button gets a text-coloured ring
+    // three points outside its face.
+    if focus {
+        let z: *mut painter.Painter = render.ctx_painter(ctx())
+        let t: *mut theme.Colors = theme.theme_colors(fuib.app_theme())
+        painter.round_ring(z, (x - 3) as f64, (y - 3) as f64, (w + 6) as f64,
+            (h + 6) as f64, 11.0, 2.0, (*t).text | 4278190080 as u32)
+    }
+}
+
+// UTF-8 octets of the private-use codepoint `cp` (0xE000..0xEFFF).
+// The icon font (/lib/icons.ttf) keeps its symbols there.
+fn glyph(cp: u64, x: u64, y: u64, size: u64, col: u32) {
+    let ifs: u64 = fuiglyph.fontset(fuiglyph.ROLE_ICON)
+    if ifs == 0 {
+        return
+    }
+    var b: [u8; 4] = [0 as u8; 4]
+    b[0 as usize] = (0xE0 | ((cp >> 12) & 0x0F)) as u8
+    b[1 as usize] = (0x80 | ((cp >> 6) & 0x3F)) as u8
+    b[2 as usize] = (0x80 | (cp & 0x3F)) as u8
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let old: u64 = painter.painter_font(z)
+    painter.painter_set_font(z, ifs)
+    let base: f64 = (y as f64) + (size as f64) * 0.85
+    let _w: f64 = painter.text(z, x as f64, base, size as f64, size as f64,
+        col, (&b[0 as usize]) as u64, 3, painter.TEXT_L)
+    painter.painter_set_font(z, old)
+}
+
+// Octets of the mask before `caret`: three per character before it.
+fn mask_off(buf: u64, caret: usize) -> usize {
+    var n: usize = 0
+    var i: usize = 0
+    while i < caret {
+        let c: u8 = __mmio_read8((buf + i as u64) as *mut u8)
+        if (c & 0xC0 as u8) != 0x80 as u8 {
+            n = n + 3
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// A text field's picture WITH its caret where the typing is.
+//
+// `render.draw_field` places the pieces of the text (before / inside /
+// after the selection) and the caret with `field_x_of`, which measures
+// through a function pointer that RETURNS f64 -- and in a ring-3 program
+// that call comes back as 0.0 (measured 02.10.2026: `tb_x_of` = 0 while
+// the very same `field_meas` called directly = 37). Result: the caret at
+// the left end, and with the caret in the middle of a text the part after
+// it painted over the part before it. So: the text goes out as ONE piece
+// (caret at the end for the call, caret drawing off), and the caret is
+// measured here by a direct call. A selection (everything, Ctrl+A) is
+// one piece anyway and goes the normal way.
+fn field_paint(fe: *mut widget.Widget, tb: *mut textbuf.TextBuf,
+    caret_on: bool) {
+    let c: *mut render.Ctx = ctx()
+    if textbuf.tb_has_sel(tb) {
+        render.draw_field(c, fe, tb, 0.0, caret_on, 0, 0)
+        return
+    }
+    let caret: usize = textbuf.tb_caret(tb)
+    let n: usize = textbuf.tb_len(tb)
+    textbuf.tb_set_range(tb, n, n)
+    render.draw_field(c, fe, tb, 0.0, false, 0, 0)
+    textbuf.tb_set_range(tb, caret, caret)
+    if caret_on && widget.w_is_focus(fe) {
+        var fm: render.FieldMeas = render.field_meas_new(c, fe)
+        let cx: f64 = render.field_text_x0(c, fe)
+            + render.field_meas((&fm) as u64, textbuf.tb_ptr(tb), caret)
+        var top: f64 = 0.0
+        var lh: f64 = 0.0
+        let _by: f64 = render.field_line(c, fe, &top, &lh)
+        painter.caret_bar(render.ctx_painter(c), cx, top, lh, 1.0,
+            (*theme.theme_colors(theme_ptr())).text | 4278190080 as u32)
+    }
+}
+
+// A text field over `buf` (NUL-terminated, `cap` octets of text). Secret
+// fields show fUi's bullets (a second buffer, render.secret_mask) unless
+// `show` (the eye is open).
+fn field(x: u64, y: u64, w: u64, h: u64, buf: u64, cap: usize, caret: usize,
+    focus: bool, secret: bool, show: bool, caret_on: bool, sel: bool) {
+    var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&fe, x as f64, y as f64, w as f64, h as f64)
+    // a field with the eye OPEN is a plain field: the newer fUi masks a
+    // secret buffer by itself, so the flag is only set while it is masked
+    if secret && !show {
+        widget.w_set_secret(&fe, true)
+    }
+    widget.w_set_focus(&fe, focus)
+    let n: usize = ulib.length(buf) as usize
+    if secret && !show {
+        let mp: u64 = (&a_mask[0 as usize]) as u64
+        let mn: usize = render.secret_mask(buf, n, mp, 396)
+        var mv: textbuf.TextBuf = textbuf.tb_new()
+        textbuf.tb_init(&mv, mp, 396)
+        textbuf.tb_set_len(&mv, mn)
+        if sel {
+            textbuf.tb_set_range(&mv, 0, mn)
+        } else {
+            textbuf.tb_set_range(&mv, mask_off(buf, caret), mask_off(buf, caret))
+        }
+        field_paint(&fe, &mv, caret_on)
+    } else {
+        var tb: textbuf.TextBuf = textbuf.tb_new()
+        textbuf.tb_init(&tb, buf, cap)
+        textbuf.tb_set_len(&tb, n)
+        if sel {
+            textbuf.tb_set_range(&tb, 0, n)
+        } else {
+            textbuf.tb_set_range(&tb, caret, caret)
+        }
+        field_paint(&fe, &tb, caret_on)
+    }
+}
+
+// The eye in the square at the right end of a field of height `h`.
+fn eye(x: u64, y: u64, h: u64, open: bool, col: u32) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let ex: f64 = x as f64
+    let ey: f64 = y as f64
+    painter.round_ring(z, ex + 8.0, ey + 10.0, 16.0, 12.0, 6.0, 1.5, col)
+    painter.round_rect(z, ex + 13.5, ey + 13.5, 5.0, 5.0, 2.5, col)
+    if open {
+        var i: i64 = 0
+        while i <= 24 {
+            let t: f64 = (i as f64) / 24.0
+            painter.surface(z, ex + 8.0 + 16.0 * t - 0.75,
+                ey + 22.0 - 12.0 * t - 0.75, 1.5, 1.5, col)
+            i = i + 1
+        }
+    }
+}
+
+// One key into the text in `buf` (`cap` octets of text), caret at
+// *`caret`. Insert, delete, caret keys; copy/cut/paste do nothing (fUi
+// refuses them on a secret buffer, and this form has no clipboard path).
+static mut a_sel: bool = false
+fn sel_on() -> bool { return a_sel }
+fn sel_clear() { a_sel = false }
+
+fn edit(buf: u64, cap: usize, caret: *mut usize, k: u64, secret: bool) {
+    // Ctrl+A (octet 1) selects everything; the next delete key empties
+    // the field, the next character replaces it. Any other key ends it.
+    if k == 1 {
+        a_sel = true
+        *caret = ulib.length(buf) as usize
+        return
+    }
+    if a_sel {
+        a_sel = false
+        if k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL
+            || (k >= 32 && k < 256 && k != 127) {
+            var z: usize = 0
+            while z < cap {
+                __mmio_write8((buf + z as u64) as *mut u8, 0 as u8)
+                z = z + 1
+            }
+            *caret = 0
+            if k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL {
+                return
+            }
+        }
+    }
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    textbuf.tb_init(&tb, buf, cap)
+    textbuf.tb_set_len(&tb, ulib.length(buf) as usize)
+    textbuf.tb_set_range(&tb, *caret, *caret)
+    if secret {
+        textbuf.tb_set_secret(&tb, true)
+    }
+    if k == wlib.KEY_LEFT {
+        textbuf.tb_left(&tb, false)
+    } else if k == wlib.KEY_RIGHT {
+        textbuf.tb_right(&tb, false)
+    } else if k == wlib.KEY_HOME {
+        textbuf.tb_home(&tb, false)
+    } else if k == wlib.KEY_END {
+        textbuf.tb_end(&tb, false)
+    } else if k == wlib.KEY_BS || k == 127 {
+        let _b: bool = textbuf.tb_backspace(&tb)
+    } else if k == wlib.KEY_DEL {
+        let _d: bool = textbuf.tb_delete_fwd(&tb)
+    } else if k >= 32 && k < 256 && k != 127 {
+        var ch: [u8; 1] = [k as u8; 1]
+        let _i: bool = textbuf.tb_insert(&tb, (&ch[0 as usize]) as u64, 1)
+    }
+    __mmio_write8((buf + textbuf.tb_len(&tb) as u64) as *mut u8, 0 as u8)
+    *caret = textbuf.tb_caret(&tb)
+}
+
+// Ink colour (text) with full alpha, for what a program paints itself.
+fn ink() -> u32 {
+    return (*theme.theme_colors(fuib.app_theme())).text | 4278190080 as u32
+}
+
+// A raised panel (popup under the quick-access icons).
+fn panel(x: u64, y: u64, w: u64, h: u64) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuib.app_theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 8.0,
+        (*t).surface_raised | 4278190080 as u32)
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, 8.0, 1.0,
+        (*t).border_col | 4278190080 as u32)
+}
+
+// One row of a list: text at (x+12, y), highlighted when `on`.
+fn row(x: u64, y: u64, w: u64, h: u64, p: u64, on: bool) {
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuib.app_theme())
+    if on {
+        painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, 6.0,
+            (*t).selection | 4278190080 as u32)
+    }
+    label(x + 12, y + (h - 24) / 2, w - 24, p)
+}

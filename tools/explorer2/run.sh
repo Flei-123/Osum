@@ -96,7 +96,7 @@ if grep -qE '^\s*static mut t_(zur|vor|auf):' kernel/user/explorer.fi; then
 else
     ok "Punkt 12: die Textzeichen < > ^ sind weg"
 fi
-grep -qE 'wlib\.icon_button\(icons\.NAV_BACK' kernel/user/explorer.fi \
+grep -qE 'fuiscene\.icon_button\([a-z]+, icons\.NAV_BACK' kernel/user/explorer.fi \
     && ok "Punkt 12: die Werkzeugleiste ruft icon_button(NAV_BACK)" \
     || bad "Punkt 12: keine Symbolknoepfe in der Werkzeugleiste"
 
@@ -216,7 +216,9 @@ warte 4
 foto 18-ende
 DREH
 
-bash tools/design/capture.sh "$OUT/lauf" res="$RES" \
+# uitrace=yes: the explorer says what it does only under /etc/uitrace (the
+# lines below are that report); without it the run was blind (FUI-ALL F-8).
+bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes \
     extra='nostart wigapp=/bin/explorer' drehbuch="$OUT/dreh.txt" \
     > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"

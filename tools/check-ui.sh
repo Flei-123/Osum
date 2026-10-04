@@ -70,7 +70,15 @@ ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
 
 # Die Dateien, die fUi direkt anfassen duerfen.
 #   fuib.fi   ist die Naht -- genau ihre Aufgabe.
-ERLAUBT_FUI="kernel/user/fuib.fi"
+#   fuiapp.fi / fuiscene.fi / fuied.fi  (FUI-ALL, 03.10.2026) SIND der
+#             Wirt, auf dem die Programme direkt mit fUi laufen: Fenster,
+#             Szenenbaum, Textfeld. Sie sind keine "eigene Oberflaeche
+#             daneben", sie sind die, auf die alles zulaeuft, wenn wlib
+#             geht. Auf main waren sie ohne diese Zeile schon rot.
+#   lock.fi   malt den Sperrbildschirm mit fUi-Bedienelementen (Stufe 2).
+#   wlib.fi   hat seit Stufe 3 fUi's Textpuffer (`fui.textbuf`) unter jedem
+#             Einzeilenfeld -- der Einzeiler wird dort von fUi bearbeitet.
+ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi"
 
 # Die rohen Mal-Primitive. VOLLSTAENDIG -- siehe Punkt 1 oben.
 ROH='wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('

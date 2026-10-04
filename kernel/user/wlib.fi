@@ -73,9 +73,16 @@ import utf8
 // acht Pruefstaende, die `wlib:`-Zeilen lesen), und zwei Schriftsetzer
 // auf einer Flaeche waeren zwei Ergebnisse.
 import fuib
+import fui.textbuf
 import icons
 
 export {
+    // ROUND A11Y-2: the accessibility tree (docs/A11Y.md).
+    ax_name, ax_action, ax_set_hooks, AXP_BASE, AXN_BYTES, AXN_NAME, AXN_NAMEMAX,
+    AXN_ACT, AXN_ACTMAX, AXR_LABEL, AXR_BUTTON, AXR_CHECK, AXR_ENTRY, AXR_LIST,
+    AXR_TABLE, AXR_TAB, AXR_CHOICE, AXR_SEPARATOR, AXR_SLIDER, AXS_ENABLED,
+    AXS_FOCUSABLE, AXS_FOCUSED, AXS_SELECTED, AXS_CHECKED, ax_flush, ax_flushes, ax_last, ax_presses,
+    win_handle,
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
     trace, set_trace, set_menu_title, reshape, say_rects,
     win_w, win_h, win_x, win_y, win_cx, win_cy, win_hide, win_layer, win_fokus,
@@ -96,6 +103,7 @@ export {
     TL_RADB, TL_SHADOW, TL_EDGE, TL_ALIGN, TL_NAME, TL_LOW, TL_DANGER,
     sep, scrollarea,
     value, set_value, scroll_to, text_of, set_text, set_rows, set_cols, enable,
+    primary,
     show, shown, new_set,
     list_icons, row_icons, icon_id, ICON_TAG, is_image_pub,
     // RUNDE FUI-WIN11: zweizeilige Listenzeilen (Name / Beschreibung).
@@ -130,7 +138,7 @@ export {
     AN_WIN_OPEN, AN_WIN_CLOSE, AN_MENU, AN_HOVER, AN_PRESS, AN_NOTIFY,
     key_seq,
     // RUNDE GUI-EDITOR: der Modifikator der letzten Taste.
-    key_mod, key_shift, key_ctrl, feed_key_mod,
+    key_mod, key_shift, key_ctrl, feed_key_mod, set_keymod,
     // RUNDE GUI-EDITOR: das mehrzeilige Textfeld.
     textarea, ta_text_set, ta_text_get, ta_text_len, ta_leeren,
     ta_zeilen, ta_zeile, ta_spalte, ta_geaendert, ta_sauber,
@@ -161,7 +169,7 @@ export {
     K_CARD, card,
     // RUNDE CERTUS-AUF-OSUM: die Leinwand.
     K_CANVAS, canvas, canvas_set, canvas_new, canvas_new_part,
-    canvas_event, canvas_pending,
+    canvas_event, canvas_pending, canvas_tab, blink_enabled,
     LE_DOWN, LE_UP, LE_MOVE, LE_KEY, LE_FELDER,
     K_IMAGE, K_SLIDER, image, image_set, image_zoom, image_set_zoom,
     image_pan, image_rotate, image_rot_from, image_fit,
@@ -172,7 +180,7 @@ export {
     // RUNDE CLIP-2: das Ablegeziel.
     K_DROP, K_DRAG, drop_an, drop_count, drag_starts,
     // RUNDE DESIGN-3: das Zugbild am Zeiger.
-    zug_bilder, zug_laeuft,
+    zug_bilder, zug_laeuft, zug_auf, drop_x, drop_y,
     NK_MAIN, NK_MENU, NK_DLG, NK_TIP, NK_TOAST,
     tip_win_open, tip_win_close, tip_win_id, feed_key,
     toast_win_open, toast_win_close, toast_win_id,
@@ -637,6 +645,9 @@ const F_UMBRUCH: u64 = 128
 // makes the field a password field (no copying out, the eye), while
 // F_GEHEIM is only the current look.
 const F_PASSWORT: u64 = 256
+// DESIGN RULE (Justin, 02.10.2026): the main button of a form is the
+// one in the accent colour. `primary(id, true)` marks a button so.
+const F_HAUPT: u64 = 512
 
 // Ein Fenster
 const N_H: u64 = 0
@@ -822,6 +833,15 @@ static mut s_focus: u64 = 0 // Widgetnummer + 1
 static mut s_blink_vis: u64 = 1
 static mut s_blink_t: u64 = 0
 static mut s_blink_ok: u64 = 0
+static mut s_canvas_tab: u64 = 0
+
+// Tab/Shift+Tab go to the focused canvas instead of moving the focus.
+fn canvas_tab(on: bool) {
+    s_canvas_tab = 0
+    if on {
+        s_canvas_tab = 1
+    }
+}
 static mut s_blink_n: u64 = 0
 static mut s_nohit: u64 = 0
 static mut s_alive: u64 = 1
@@ -869,6 +889,10 @@ static mut s_dropan: u64 = 0
 // Widget es gerade laeuft (+1). Das zweite verhindert, dass aus einer
 // Bewegung zwanzig Meldungen werden: gemeldet wird EINMAL je Zug.
 static mut s_drags: u64 = 0
+// where the last drop came down (window coordinates): a canvas program
+// (fuiscene) asks, because its one widget cannot tell which row it was
+static mut s_dropx: u64 = 0
+static mut s_dropy: u64 = 0
 static mut s_dragwd: u64 = 0
 static mut s_dragx: u64 = 0
 static mut s_dragy: u64 = 0
@@ -1241,6 +1265,11 @@ fn begin(nohit: bool, noclip: bool) -> bool {
 // on even then -- that is how tools/loginui/run.sh measures it.
 const BLINK_MS: u64 = 530
 
+// Whether blinking is on (off while /etc/uitrace is set, unless /etc/uiblink).
+fn blink_enabled() -> bool {
+    return s_blink_ok != 0
+}
+
 fn blink_now() -> u64 {
     var ts: [u64; 2] = [0 as u64; 2]
     if ulib.bad(ulib.sys(228, 1, (&ts[(0) as usize]) as u64, 0)) {
@@ -1584,6 +1613,7 @@ fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
     ns(i, N_OWNER, 0)
     ns(i, N_X, x)
     ns(i, N_Y, y)
+    ax_keep_title(i, titel)
     wncur = i
     dirty_all(i)
     say_window(i)
@@ -2616,9 +2646,9 @@ fn paint_curve(i: u64, reihe: u64, farbe: u64, dick: bool) {
             unten = y
         }
         if dick {
-            wlibc.rect(x, oben, 2, unten - oben + 2, farbe)
+            fuib.rect(x, oben, 2, unten - oben + 2, farbe)
         } else if (k % 2) == 0 {
-            wlibc.rect(x, oben, 1, unten - oben + 1, farbe)
+            fuib.rect(x, oben, 1, unten - oben + 1, farbe)
         }
         k = k + 1
     }
@@ -2636,14 +2666,14 @@ fn paint_graph(i: u64) {
     // Marke daneben -- eine Tafel ist eine Tafel, egal ob ein Diagramm
     // oder eine Karte darauf steht.
     let r: u64 = typ_radius(RT_TAFEL, MR_TAFEL, bw, bh)
-    wlibc.rrect(x, y, bw, bh, r,
+    fuib.rrect(x, y, bw, bh, r,
         wlibc.theme_semantic(wlibc.S_SURFACE_SUNKEN))
-    wlibc.rring(x, y, bw, bh, r, 1, wlibc.theme_semantic(wlibc.S_BORDER))
+    fuib.rring(x, y, bw, bh, r, 1, wlibc.theme_semantic(wlibc.S_BORDER))
     // Das Gitter bei einem, zwei und drei Vierteln. Ohne es ist eine
     // Kurve eine Linie ohne Massstab.
     var q: u64 = 1
     while q < 4 {
-        wlibc.hline(x + 1, y + bh * q / 4, sub(bw, 2),
+        fuib.hline(x + 1, y + bh * q / 4, sub(bw, 2),
             wlibc.theme_semantic(wlibc.S_BORDER))
         q = q + 1
     }
@@ -3295,14 +3325,14 @@ fn paint_tile(i: u64) {
     // LAUFENDEN Satz kommt: ihn malt weiter fUi -- und wo fUi ihn wegen
     // des Bandes ablehnt (`fuib.ring` gibt dann `false` zurueck und
     // malte bis hierher gar nichts), malt dieselbe Eckendeckung ihn.
-    wlibc.rrect(x, y, w, h, rk, tspec(i, TL_SURFACE))
+    fuib.rrect(x, y, w, h, rk, tspec(i, TL_SURFACE))
     if sel {
         let fw: u64 = wlibc.metric(wlibc.M_FOCUS) + 1
         if !fuib.ring(x, y, w, h, rk, fw, wlibc.theme(wlibc.T_FOCUS)) {
-            wlibc.rring(x, y, w, h, rk, fw, wlibc.theme(wlibc.T_FOCUS))
+            fuib.rring(x, y, w, h, rk, fw, wlibc.theme(wlibc.T_FOCUS))
         }
     } else {
-        wlibc.rring(x, y, w, h, rk, 1,
+        fuib.rring(x, y, w, h, rk, 1,
             tspec(i, TL_FRAME))
     }
     // ---- the miniature taskbar, on ITS OWN edge
@@ -3325,8 +3355,8 @@ fn paint_tile(i: u64) {
         by = py + ph - bar
     }
     // the desktop under it
-    wlibc.rect(px, py, pw, ph, tspec(i, TL_SURFACE))
-    wlibc.rect(bx, by, bw2, bh2, tspec(i, TL_TASKBAR))
+    fuib.rect(px, py, pw, ph, tspec(i, TL_SURFACE))
+    fuib.rect(bx, by, bw2, bh2, tspec(i, TL_TASKBAR))
     say_balken(g(i, D_WIN), bx, by, bw2, bh2, x, y, w, h, ein)
     // one button on the bar, where the alignment puts it
     let blen: u64 = TP_BTN
@@ -3335,7 +3365,7 @@ fn paint_tile(i: u64) {
         if tspec(i, TL_ALIGN) == 1 {
             byy = by + sub(bh2, blen) / 2
         }
-        wlibc.rect(bx + 1, byy, sub(bar, TP_LINE), blen, tspec(i, TL_ACCENT))
+        fuib.rect(bx + 1, byy, sub(bar, TP_LINE), blen, tspec(i, TL_ACCENT))
         say_balken(g(i, D_WIN), bx + 1, byy, sub(bar, TP_LINE), blen,
             x, y, w, h, ein)
     } else {
@@ -3343,7 +3373,7 @@ fn paint_tile(i: u64) {
         if tspec(i, TL_ALIGN) == 1 {
             bxx = bx + sub(bw2, blen) / 2
         }
-        wlibc.rect(bxx, by + 1, blen, sub(bar, TP_LINE), tspec(i, TL_ACCENT))
+        fuib.rect(bxx, by + 1, blen, sub(bar, TP_LINE), tspec(i, TL_ACCENT))
         say_balken(g(i, D_WIN), bxx, by + 1, blen, sub(bar, TP_LINE),
             x, y, w, h, ein)
     }
@@ -3361,21 +3391,21 @@ fn paint_tile(i: u64) {
     if wh < 10 {
         return
     }
-    wlibc.drop_shadow(wx, wy, ww, wh, tspec(i, TL_RADW),
+    fuib.shadow(wx, wy, ww, wh, tspec(i, TL_RADW),
         tspec(i, TL_SHADOW), 3, tspec(i, TL_TEXT))
-    wlibc.rframe(wx, wy, ww, wh, tspec(i, TL_RADW), 1,
+    fuib.rframe(wx, wy, ww, wh, tspec(i, TL_RADW), 1,
         tspec(i, TL_FRAME), tspec(i, TL_RAISED))
     // the title bar in the accent, with the label colour on it
     let th: u64 = TP_TITLE
-    wlibc.rrect(wx + 1, wy + 1, ww - 2, th, tspec(i, TL_RADW),
+    fuib.rrect(wx + 1, wy + 1, ww - 2, th, tspec(i, TL_RADW),
         tspec(i, TL_ACCENT))
-    wlibc.rect(wx + 1, wy + th - 2, ww - 2, TP_LINE + 1, tspec(i, TL_ACCENT))
-    wlibc.rect(wx + 4, wy + 3, TP_MARK, TP_LINE, tspec(i, TL_ONACCENT))
+    fuib.rect(wx + 1, wy + th - 2, ww - 2, TP_LINE + 1, tspec(i, TL_ACCENT))
+    fuib.rect(wx + 4, wy + 3, TP_MARK, TP_LINE, tspec(i, TL_ONACCENT))
     // one line of body text and a button, in the body colours
-    wlibc.rect(wx + 4, wy + th + 4, ww - TP_BTN, TP_LINE, tspec(i, TL_TEXT))
+    fuib.rect(wx + 4, wy + th + 4, ww - TP_BTN, TP_LINE, tspec(i, TL_TEXT))
     let byb: u64 = wy + wh - TP_TITLE - 3
     if byb > wy + th + 6 {
-        wlibc.rframe(wx + 4, byb, TP_MARK + 2, TP_TITLE + 1, tspec(i, TL_RADB), 1,
+        fuib.rframe(wx + 4, byb, TP_MARK + 2, TP_TITLE + 1, tspec(i, TL_RADB), 1,
             tspec(i, TL_FRAME), tspec(i, TL_BUTTON))
     }
     // ---- the name, on the tile's own surface in its own text colour
@@ -3445,6 +3475,15 @@ fn set_rows(i: u64, n: u64) {
 fn set_cols(i: u64, n: u64, breiten: u64) {
     s(i, D_C, n)
     s(i, D_D, breiten)
+}
+
+// The main button of a form: accent fill, on-accent label.
+fn primary(i: u64, on: bool) {
+    if on {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_HAUPT)
+    } else {
+        s(i, D_FLAGS, g(i, D_FLAGS) & ~F_HAUPT)
+    }
 }
 
 fn enable(i: u64, on: bool) {
@@ -3768,7 +3807,7 @@ fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
     if ng(w, N_KIND) == NK_TIP || ng(w, N_KIND) == NK_TOAST {
         c = wlibc.theme(wlibc.T_MENU)
     }
-    wlibc.rect(x, y, bw, bh, c)
+    fuib.rect(x, y, bw, bh, c)
 }
 
 // Text, waagerecht ausgerichtet: 0 links, 1 mittig, 2 rechts.
@@ -3999,11 +4038,20 @@ fn focus_ring_at(i: u64, rx: u64, ry: u64, rw: u64, rh: u64) {
     // Quelle holte, wandert bei jeder Reglerbewegung von der Kante weg.
     // Gemeldet wird hier NICHT: ein Fokusring ist kein Widgettyp,
     // sondern liegt auf einem.
+    // DESIGN RULE 02.10.2026: a main button is filled with the accent, and
+    // the focus colour is a step of the same ramp -- on the fill it would
+    // vanish. Its ring is the text colour, three points OUTSIDE the face.
+    if (g(i, D_FLAGS) & F_HAUPT) != 0 && rx >= 3 && ry >= 3 {
+        if fuib.ring(rx - 3, ry - 3, rw + 6, rh + 6, draw_radius(MR_BUTTON) + 3,
+            wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FG)) {
+            return
+        }
+    }
     if fuib.ring(rx, ry, rw, rh, draw_radius(MR_BUTTON),
         wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FOCUS)) {
         return
     }
-    wlibc.rring(rx, ry, rw, rh, draw_radius(MR_BUTTON),
+    fuib.rring(rx, ry, rw, rh, draw_radius(MR_BUTTON),
         wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FOCUS))
 }
 
@@ -4047,6 +4095,16 @@ fn paint_button(i: u64) {
     } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
         area = wlibc.theme(wlibc.T_BTNHI)
     }
+    // The main button takes the accent steps -- also on the old path,
+    // which paints the part of a button that starts above the band.
+    if (g(i, D_FLAGS) & F_HAUPT) != 0 {
+        area = wlibc.theme(wlibc.C_ACCENT)
+        if (g(i, D_FLAGS) & F_PRESSED) != 0 {
+            area = wlibc.theme(wlibc.C_ACCENT_PRESSED)
+        } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
+            area = wlibc.theme(wlibc.C_ACCENT_HOVER)
+        }
+    }
     // ============================================== RUNDE 31: fUi MALT
     //
     // Hier standen zwei Zweige, die einen Knopf malten: `rect`+`frame3`
@@ -4080,12 +4138,15 @@ fn paint_button(i: u64) {
     // braucht die Kante nachgereicht. Diese Marke sagt, welcher Fall
     // vorliegt, damit die Kante nicht zweimal entsteht.
     var gerahmt: bool = false
-    if fuib.draw(fuib.S_BUTTON, x, y, bw, bh, fui_zustand(i), 0) {
+    fuib.haupt((g(i, D_FLAGS) & F_HAUPT) != 0)
+    let fui_ok: bool = fuib.draw(fuib.S_BUTTON, x, y, bw, bh, fui_zustand(i), 0)
+    fuib.haupt(false)
+    if fui_ok {
         // fUi hat die Flaeche gemalt -- weiter beim Text.
     } else {
     if rb == 0 {
-        wlibc.rect(x, y, bw, bh, area)
-        wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
+        fuib.rect(x, y, bw, bh, area)
+        fuib.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
             wlibc.theme(wlibc.T_LINE), (g(i, D_FLAGS) & F_PRESSED) != 0)
     } else {
         // ============================== RUNDE ECHTHARDWARE-1
@@ -4118,7 +4179,7 @@ fn paint_button(i: u64) {
         // mehr, das Klicks annimmt, keine Eingabe, kein Start. Genau
         // Justins Befund -- und er sah aus wie ein Ereignisproblem,
         // war aber eine Subtraktion.
-        wlibc.rrect(x, y, bw, bh, rb, wlibc.theme(wlibc.T_LINE))
+        fuib.rrect(x, y, bw, bh, rb, wlibc.theme(wlibc.T_LINE))
         var bo: u64 = wlibc.metric(wlibc.M_BORDER)
         if 2 * bo >= bw || 2 * bo >= bh {
             bo = 0
@@ -4127,7 +4188,7 @@ fn paint_button(i: u64) {
         if rb > bo {
             ri = rb - bo
         }
-        wlibc.rrect(x + bo, y + bo, bw - 2 * bo, bh - 2 * bo,
+        fuib.rrect(x + bo, y + bo, bw - 2 * bo, bh - 2 * bo,
             ri, area)
     }
     gerahmt = true
@@ -4151,6 +4212,9 @@ fn paint_button(i: u64) {
     // UND ER SAGT, WO ER STEHT -- egal, wer die Flaeche gemalt hat.
     say_knopf(g(i, D_WIN), x, y, bw, bh, rb)
     var farbe: u64 = wlibc.theme(wlibc.T_FG)
+    if (g(i, D_FLAGS) & F_HAUPT) != 0 {
+        farbe = wlibc.theme(wlibc.C_ON_ACCENT)
+    }
     if (g(i, D_FLAGS) & F_OFF) != 0 {
         farbe = wlibc.theme(wlibc.T_DIM)
     }
@@ -4473,21 +4537,21 @@ fn paint_check(i: u64) {
     let _fb8: bool = fuib.tafel(x, oy, k, k,
         typ_radius(RT_HAKEN, MR_FIELD, k, k),
         wlibc.theme(wlibc.T_ENTRY), 0, 0)
-    wlibc.frame(x, oy, k, k, wlibc.theme(wlibc.T_LINE))
+    fuib.frame(x, oy, k, k, wlibc.theme(wlibc.T_LINE))
     if g(i, D_VAL) != 0 {
         // Ein Haken aus zwei Strichen, und nicht ein gefuelltes
         // Kaestchen: ein Bildschirmfoto kann einen Haken von einer
         // Auswahlfarbe unterscheiden, eine Fuellung nicht.
         var n: u64 = 0
         while n < 4 {
-            wlibc.px(x + 3 + n, oy + 6 + n, wlibc.theme(wlibc.T_ACCENT))
-            wlibc.px(x + 3 + n, oy + 7 + n, wlibc.theme(wlibc.T_ACCENT))
+            fuib.dot(x + 3 + n, oy + 6 + n, wlibc.theme(wlibc.T_ACCENT))
+            fuib.dot(x + 3 + n, oy + 7 + n, wlibc.theme(wlibc.T_ACCENT))
             n = n + 1
         }
         n = 0
         while n < 6 {
-            wlibc.px(x + 7 + n, oy + 9 - n, wlibc.theme(wlibc.T_ACCENT))
-            wlibc.px(x + 7 + n, oy + 10 - n, wlibc.theme(wlibc.T_ACCENT))
+            fuib.dot(x + 7 + n, oy + 9 - n, wlibc.theme(wlibc.T_ACCENT))
+            fuib.dot(x + 7 + n, oy + 10 - n, wlibc.theme(wlibc.T_ACCENT))
             n = n + 1
         }
     }
@@ -4527,35 +4591,25 @@ fn zeig_text(i: u64) -> u64 {
     if (g(i, D_FLAGS) & F_GEHEIM) == 0 {
         return p
     }
-    var n: u64 = tlen(p)
-    if n > 128 {
-        n = 128
-    }
-    var k: u64 = 0
-    while k < n {
-        geheim_puf[(k * 3 + 0) as usize] = 0xE2 as u8
-        geheim_puf[(k * 3 + 1) as usize] = 0x80 as u8
-        geheim_puf[(k * 3 + 2) as usize] = 0xA2 as u8
-        k = k + 1
-    }
-    geheim_puf[(n * 3) as usize] = 0 as u8
+    // FUI-ALL stage 3: fUi's mask, one dot per character (not per octet
+    // as before -- an umlaut is one dot, and the octet count of the
+    // password no longer shows).
+    let k: u64 = fuib.secret_mask(p, tlen(p), (&geheim_puf[(0) as usize]) as u64, 384)
+    geheim_puf[(k) as usize] = 0 as u8
     return (&geheim_puf[(0) as usize]) as u64
 }
 
-// WIE VIELE OKTETTE `at` ZEICHEN IM ANGEZEIGTEN TEXT SIND. Im
+// WIE VIELE OKTETTE `at` OKTETTE DES TEXTES IM ANGEZEIGTEN TEXT SIND. Im
 // Klartextfeld ist das `at` selbst (so war es immer); im verdeckten
-// Feld sind es drei je Punkt, weil der Punkt drei Oktette breit ist.
-// `text_w` zaehlt OKTETTE und nicht Zeichen -- stuende hier `at`, saesse
-// die Einfuegemarke im Kennwortfeld bei einem Drittel des Weges.
+// Feld drei je ZEICHEN vor `at` -- genau die Laenge von fUis Maske ueber
+// den ersten `at` Oktetten. `text_w` zaehlt OKTETTE und nicht Zeichen --
+// stuende hier `at`, saesse die Einfuegemarke falsch.
 fn zeig_at(i: u64, at: u64) -> u64 {
     if (g(i, D_FLAGS) & F_GEHEIM) == 0 {
         return at
     }
-    var a: u64 = at
-    if a > 128 {
-        a = 128
-    }
-    return a * 3
+    var tmp: [u8; 384] = [0 as u8; 384]
+    return fuib.secret_mask(g(i, D_TEXT), at, (&tmp[0 as usize]) as u64, 384)
 }
 
 fn entry_x(i: u64, at: u64) -> u64 {
@@ -4747,7 +4801,7 @@ fn paint_entry(i: u64) {
     let x_b: u64 = x + inset_text()
         + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, b)
     if b > a {
-        wlibc.rect(x_a, y + 3, sub(x_b, x_a), sub(bh, 6),
+        fuib.rect(x_a, y + 3, sub(x_b, x_a), sub(bh, 6),
             wlibc.theme(wlibc.T_SEL))
     }
     // ROUND LOGIN-2: the text of a password field stops before its eye.
@@ -4778,7 +4832,7 @@ fn paint_entry(i: u64) {
         // The caret is as wide as a border and never thinner than
         // one pixel -- it is a line, and lines are the one thing this
         // round deliberately leaves alone.
-        wlibc.rect(mx, y + 3, wlibc.metric(wlibc.M_BORDER) + 1,
+        fuib.rect(mx, y + 3, wlibc.metric(wlibc.M_BORDER) + 1,
             sub(bh, 6), wlibc.theme(wlibc.T_ACCENT))
     }
     wlibc.clip_set(k_x0, k_y0, k_x1, k_y1)
@@ -4987,6 +5041,15 @@ fn drag_starts() -> u64 {
     return s_drags
 }
 
+// Window coordinates of the last drop (see s_dropx).
+fn drop_x() -> u64 {
+    return s_dropx
+}
+
+fn drop_y() -> u64 {
+    return s_dropy
+}
+
 // Wie viele Zeilen markiert sind. Gezaehlt und nicht mitgefuehrt: ein
 // Zaehler, der neben dem Bitfeld herlaeuft, ist ein zweiter Ort, an dem
 // dieselbe Wahrheit stehen kann.
@@ -5077,6 +5140,19 @@ fn image_paint(p: u64, x: u64, y: u64, kw: u64, kh: u64) {
     let w: u64 = image_w(p)
     let h: u64 = image_h(p)
     if w == 0 || h == 0 || w > 64 || h > 64 {
+        return
+    }
+    // ROUND FUI-ALL 1b: fUi blits the icon 1:1 (alpha 0 keeps what is
+    // under it); the loop is the fallback without a surface.
+    var cw: u64 = w
+    if kw < cw {
+        cw = kw
+    }
+    var ch: u64 = h
+    if kh < ch {
+        ch = kh
+    }
+    if fuib.icon(p + 12, cw, ch, w * 4, x, y) {
         return
     }
     var r: u64 = 0
@@ -5218,7 +5294,7 @@ fn paint_list(i: u64) {
     // RUNDE GLAS: der Radius der Liste kommt aus der Rolle "Feld" --
     // eine Liste ist ein Feld mit Zeilen darin, und zwei Marken fuer
     // dieselbe Kante waeren zwei Zahlen, die auseinanderlaufen.
-    wlibc.rframe(x, y, bw, bh, typ_radius(RT_LISTE, MR_FIELD, bw, bh),
+    fuib.rframe(x, y, bw, bh, typ_radius(RT_LISTE, MR_FIELD, bw, bh),
         wlibc.metric(wlibc.M_BORDER), wlibc.theme(wlibc.T_LINE),
         wlibc.theme(wlibc.T_ENTRY))
     let int: u64 = g(i, D_A)
@@ -5358,8 +5434,8 @@ fn paint_list(i: u64) {
                 // ohne dass hier eine zweite Zahl steht.
                 let rp: u64 = draw_radius(MR_FIELD)
                 let ty: u64 = ry + tile_top(zh, tile_w())
-                wlibc.rrect(x + 5, ty, tile_w(), tile_w(), rp, f)
-                wlibc.rframe(x + 5, ty, tile_w(), tile_w(), rp,
+                fuib.rrect(x + 5, ty, tile_w(), tile_w(), rp, f)
+                fuib.rframe(x + 5, ty, tile_w(), tile_w(), rp,
                     wlibc.metric(wlibc.M_BORDER),
                     wlibc.theme(wlibc.T_LINE), f)
                 if ln > 0 {
@@ -5578,11 +5654,11 @@ fn paint_table(i: u64) {
         }
         cx = cx + column_wide(i, c)
         if c + 1 < cols {
-            wlibc.vline(cx - 4, y + 1, kopf, wlibc.theme(wlibc.T_LINE))
+            fuib.vline(cx - 4, y + 1, kopf, wlibc.theme(wlibc.T_LINE))
         }
         c = c + 1
     }
-    wlibc.hline(x + 1, y + kopf, sub(bw, 2), wlibc.theme(wlibc.T_LINE))
+    fuib.hline(x + 1, y + kopf, sub(bw, 2), wlibc.theme(wlibc.T_LINE))
     let int: u64 = sub(g(i, D_A), 1)
     var r: u64 = 0
     while r < sicht {
@@ -5652,7 +5728,7 @@ fn paint_table(i: u64) {
         }
         r = r + 1
     }
-    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    fuib.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
     paint_scroll(x + bw - 15, y + kopf + 1, sub(sub(bh, kopf), 2),
         g(i, D_B), sicht, int)
     focus_ring(i)
@@ -6143,12 +6219,12 @@ fn paint_tabs(i: u64) {
             // die man runden koennte.
             let _fb15: bool = fuib.tafel(tx, ty, tw, zh,
                 typ_radius(RT_REITER, MR_BUTTON, tw, zh), area, 0, 0)
-            wlibc.vline(tx, ty, zh, wlibc.theme(wlibc.T_LINE))
+            fuib.vline(tx, ty, zh, wlibc.theme(wlibc.T_LINE))
             if k == g(i, D_VAL) {
-                wlibc.hline(tx, ty, tw, wlibc.theme(wlibc.T_ACCENT))
-                wlibc.hline(tx, ty + 1, tw, wlibc.theme(wlibc.T_ACCENT))
+                fuib.hline(tx, ty, tw, wlibc.theme(wlibc.T_ACCENT))
+                fuib.hline(tx, ty + 1, tw, wlibc.theme(wlibc.T_ACCENT))
             } else {
-                wlibc.hline(tx, ty + zh - 1, tw, wlibc.theme(wlibc.T_LINE))
+                fuib.hline(tx, ty + zh - 1, tw, wlibc.theme(wlibc.T_LINE))
             }
             // AND THE LABEL IS CLIPPED TO THE TAB -- BUT VISIBLY.
             //
@@ -6223,7 +6299,7 @@ fn paint_tabs(i: u64) {
         } else if tab_n(i) > 0 {
             ex = tab_x(i, tab_n(i) - 1) + tab_width(i, tab_n(i) - 1)
         }
-        wlibc.hline(ex, y + (r + 1) * zh - 1, sub(x + g(i, D_W), ex),
+        fuib.hline(ex, y + (r + 1) * zh - 1, sub(x + g(i, D_W), ex),
             wlibc.theme(wlibc.T_LINE))
         r = r + 1
     }
@@ -6315,7 +6391,7 @@ fn paint_choice(i: u64) {
     // Das Dreieck rechts -- sechs Zeilen, von aussen nach innen.
     var n: u64 = 0
     while n < 5 {
-        wlibc.hline(x + bw - 16 + n, y + bh / 2 - 2 + n, 10 - 2 * n,
+        fuib.hline(x + bw - 16 + n, y + bh / 2 - 2 + n, 10 - 2 * n,
             wlibc.theme(wlibc.T_FG))
         n = n + 1
     }
@@ -6354,7 +6430,7 @@ fn paint_card(i: u64) {
     // die zwei Ausstiege darueber malen nichts, und eine Meldung ueber
     // eine Karte, die es nicht gibt, waere eine Zeile ohne Bild.
     say_radius(RT_KARTE, MR_TAFEL, r, w, h)
-    wlibc.drop_shadow(x, y, w, h, r, wlibc.metric(wlibc.M_SHADOW2),
+    fuib.shadow(x, y, w, h, r, wlibc.metric(wlibc.M_SHADOW2),
         wlibc.metric(wlibc.M_SHADOW_R2), wlibc.theme(wlibc.C_SHADOW))
     // RUNDE 31: die Karte aus fUi.
     let _fb18: bool = fuib.tafel(x, y, w, h, r, wlibc.theme(wlibc.C_PANEL_BG), 0, 0)
@@ -6369,12 +6445,12 @@ fn paint_image(i: u64) {
     let y: u64 = g(i, D_Y)
     let w: u64 = g(i, D_W)
     let h: u64 = g(i, D_H)
-    wlibc.rect(x, y, w, h, wlibc.theme(wlibc.T_ENTRY))
+    fuib.rect(x, y, w, h, wlibc.theme(wlibc.T_ENTRY))
     let p: u64 = g(i, D_E)
     let iw: u64 = g(i, D_F)
     let ih: u64 = g(i, D_G)
     if p == 0 || iw == 0 || ih == 0 || w < 4 || h < 4 {
-        wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
+        fuib.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
         return
     }
     let z: u64 = g(i, D_ZOOM)
@@ -6399,6 +6475,10 @@ fn paint_image(i: u64) {
     let a_x1: u64 = wlibc.clip_x1()
     let a_y1: u64 = wlibc.clip_y1()
     wlibc.clip_set(x, y, x + w, y + h)
+    // ROUND FUI-ALL 1b: fUi draws the picture (box filter shrinking,
+    // bilinear growing, a quarter turn as a matrix); the loop below is
+    // only the fallback while there is no surface for fUi yet.
+    if !fuib.picture(p, iw, ih, dreh, ox as i64, oy as i64, zw, zh) {
     var sy: u64 = 0
     while sy < h {
         let py: u64 = y + sy
@@ -6442,6 +6522,7 @@ fn paint_image(i: u64) {
         }
         sy = sy + 1
     }
+    }
     // Der gezogene Ausschnitt: ein Rahmen in der Akzentfarbe, INNEN
     // beschnitten wie das Bild selbst.
     if g(i, D_WZ) == 1 && s_aus_da != 0 {
@@ -6451,14 +6532,14 @@ fn paint_image(i: u64) {
         let ay: u64 = oy2 + img_out_y0() * z / 100
         let aw: u64 = (img_out_x1() - img_out_x0() + 1) * z / 100
         let ah: u64 = (img_out_y1() - img_out_y0() + 1) * z / 100
-        wlibc.frame(ax, ay, aw, ah, wlibc.theme(wlibc.T_ACCENT))
+        fuib.frame(ax, ay, aw, ah, wlibc.theme(wlibc.T_ACCENT))
         if aw > 2 && ah > 2 {
-            wlibc.frame(ax + 1, ay + 1, aw - 2, ah - 2,
+            fuib.frame(ax + 1, ay + 1, aw - 2, ah - 2,
                 wlibc.theme(wlibc.T_ACCENT))
         }
     }
     wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
-    wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
+    fuib.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
     focus_ring(i)
 }
 
@@ -6872,7 +6953,7 @@ fn paint_menu(w: u64) {
         }
         k = k + 1
     }
-    wlibc.frame(0, 0, ng(w, N_W), ng(w, N_HH), wlibc.theme(wlibc.T_ACCENT))
+    fuib.frame(0, 0, ng(w, N_W), ng(w, N_HH), wlibc.theme(wlibc.T_ACCENT))
 }
 
 // DAS NEUZEICHNEN -- STREIFEN FUER STREIFEN.
@@ -7542,7 +7623,7 @@ fn draw_focus(x: u64, y: u64, w: u64, h: u64, rolle: u64) {
         wlibc.theme(wlibc.T_FOCUS)) {
         return
     }
-    wlibc.rring(x, y, w, h, r, wlibc.metric(wlibc.M_FOCUS),
+    fuib.rring(x, y, w, h, r, wlibc.metric(wlibc.M_FOCUS),
         wlibc.theme(wlibc.T_FOCUS))
 }
 
@@ -7554,7 +7635,7 @@ fn draw_area(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
     if fuib.area(x, y, w, h, farbe) {
         return
     }
-    wlibc.rect(x, y, w, h, farbe)
+    fuib.rect(x, y, w, h, farbe)
 }
 
 // EINE TAFEL: Flaeche mit dem Radius ihrer Rolle, wahlweise mit einer
@@ -7577,7 +7658,7 @@ fn draw_board(x: u64, y: u64, w: u64, h: u64, rolle: u64, stufe: u64,
         let s: u64 = wlibc.elev_strength(stufe)
         let reich: u64 = wlibc.elev_reach(stufe)
         if s != 0 && reich != 0 {
-            wlibc.drop_shadow(x, y, w, h, r, s, reich,
+            fuib.shadow(x, y, w, h, r, s, reich,
                 wlibc.theme(wlibc.C_SHADOW))
         }
     }
@@ -7599,10 +7680,10 @@ fn draw_board(x: u64, y: u64, w: u64, h: u64, rolle: u64, stufe: u64,
         return
     }
     if rand == 0 {
-        wlibc.rrect(x, y, w, h, r, fuellung)
+        fuib.rrect(x, y, w, h, r, fuellung)
         return
     }
-    wlibc.rframe(x, y, w, h, r, wlibc.metric(wlibc.M_BORDER), rand,
+    fuib.rframe(x, y, w, h, r, wlibc.metric(wlibc.M_BORDER), rand,
         fuellung)
 }
 
@@ -7642,8 +7723,8 @@ fn draw_ascent(stufe: u64) -> u64 {
 // letzte Pinselstrich dieses Systems durch das Rahmenwerk geht.
 fn draw_edge3(x: u64, y: u64, w: u64, h: u64, fuellung: u64, licht: u64,
     schatten: u64, eingedrueckt: bool) {
-    wlibc.rect(x, y, w, h, fuellung)
-    wlibc.frame3(x, y, w, h, licht, schatten, eingedrueckt)
+    fuib.rect(x, y, w, h, fuellung)
+    fuib.frame3(x, y, w, h, licht, schatten, eingedrueckt)
 }
 
 // EIN RAHMEN OHNE FUELLUNG, mit dem Radius seiner Rolle.
@@ -7652,7 +7733,7 @@ fn draw_edge3(x: u64, y: u64, w: u64, h: u64, fuellung: u64, licht: u64,
 // einer Kachelkarte, der Rand eines Diagramms. `mal_tafel` fuellt --
 // wer sie hier nimmt, loescht, was er gerade gemalt hat.
 fn draw_frame(x: u64, y: u64, w: u64, h: u64, rolle: u64, farbe: u64) {
-    wlibc.rring(x, y, w, h, draw_radius(rolle),
+    fuib.rring(x, y, w, h, draw_radius(rolle),
         wlibc.metric(wlibc.M_BORDER), farbe)
 }
 
@@ -7663,7 +7744,7 @@ fn draw_frame(x: u64, y: u64, w: u64, h: u64, rolle: u64, farbe: u64) {
 // Fuenftel). Ein Gitter in einem Diagramm ist etwas anderes -- es muss
 // ablesbar sein, sonst ist es kein Gitter.
 fn draw_line(x: u64, y: u64, w: u64, farbe: u64) {
-    wlibc.hline(x, y, w, farbe)
+    fuib.hline(x, y, w, farbe)
 }
 
 // EIN BALKEN: die Grundform eines Reglers, eines Fortschritts und eines
@@ -7679,7 +7760,7 @@ fn draw_bar(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
     if fuib.tafel(x, y, w, h, r, farbe, 0, 0) {
         return
     }
-    wlibc.rrect(x, y, w, h, r, farbe)
+    fuib.rrect(x, y, w, h, r, farbe)
 }
 
 // EIN EINZELNER BILDPUNKT -- fuer die einzige Stelle, an der das
@@ -7687,7 +7768,7 @@ fn draw_bar(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
 // gerechnet wird (kernel/user/desktop.fi). Er steht hier, damit auch
 // diese Stelle durch das Rahmenwerk geht und nicht daran vorbei.
 fn draw_point(x: u64, y: u64, farbe: u64) {
-    wlibc.px(x, y, farbe)
+    fuib.dot(x, y, farbe)
 }
 
 // EIN SYMBOL an einer Stelle, in der Farbe einer Rolle.
@@ -8107,6 +8188,8 @@ fn on_up(w: u64, x: u64, y: u64) {
             }
             s_drops = s_drops + 1
             s_down = 0
+            s_dropx = x
+            s_dropy = y
             fire(d, K_DROP, zeile, w)
             return
         }
@@ -8554,6 +8637,12 @@ fn letter_key(c: u64) -> u64 {
 // Programmen `KEY_LEFT`. Ein Umschalt+Links, das eine ANDERE Nummer
 // haette, waere fuer jedes davon eine unbekannte Taste; so bleibt es
 // dieselbe Taste, und nur wer fragt, sieht den Unterschied.
+// The modifier of the NEXT key, set by a program that feeds a key itself
+// (the editor's measuring runs) instead of through the key path.
+fn set_keymod(m: u64) {
+    s_keymod = m
+}
+
 fn key_mod() -> u64 {
     return s_keymod
 }
@@ -10137,8 +10226,8 @@ fn paint_ta(i: u64) {
     // DIE SPALTE MIT DEN ZEILENNUMMERN. Sie ist etwas dunkler als das
     // Feld, damit sie eine Spalte IST und nicht nur Zahlen am Rand.
     if gut != 0 {
-        wlibc.rect(x + 1, y + 1, gut, bh - 2, wlibc.theme(wlibc.T_HEAD))
-        wlibc.rect(x + gut, y + 1, 1, bh - 2, wlibc.theme(wlibc.T_LINE))
+        fuib.rect(x + 1, y + 1, gut, bh - 2, wlibc.theme(wlibc.T_HEAD))
+        fuib.rect(x + gut, y + 1, 1, bh - 2, wlibc.theme(wlibc.T_LINE))
     }
 
 
@@ -10206,7 +10295,7 @@ fn paint_ta(i: u64) {
             wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
             // DIE ZEILE, IN DER DIE MARKE STEHT, wird hinterlegt.
             if ln == tag(t, TS_CY) && !sel {
-                wlibc.rect(x + gut + 1, ty, bw - gut - 2 - sw, lh,
+                fuib.rect(x + gut + 1, ty, bw - gut - 2 - sw, lh,
                     ta_misch(wlibc.theme(wlibc.T_ENTRY),
                         wlibc.theme(wlibc.T_SEL), 1))
             }
@@ -10228,10 +10317,10 @@ fn paint_ta(i: u64) {
                     c1 = c1 + 1 // der Umbruch gehoert dazu
                 }
                 if c1 > left && c0 >= left {
-                    wlibc.rect(x + gut + 2 + (c0 - left) * cw, ty,
+                    fuib.rect(x + gut + 2 + (c0 - left) * cw, ty,
                         (c1 - c0) * cw, lh, wlibc.theme(wlibc.T_SEL))
                 } else if c1 > left {
-                    wlibc.rect(x + gut + 2, ty, (c1 - left) * cw, lh,
+                    fuib.rect(x + gut + 2, ty, (c1 - left) * cw, lh,
                         wlibc.theme(wlibc.T_SEL))
                 }
             }
@@ -10280,7 +10369,7 @@ fn paint_ta(i: u64) {
     if s_focus == i + 1 && caret_on() && tag(t, TS_CY) >= top && tag(t, TS_CY) < top + rows {
         let ccol: u64 = ta_cols(t, tag(t, TS_CY), tag(t, TS_CX))
         if ccol >= left {
-            wlibc.rect(x + gut + 2 + (ccol - left) * cw,
+            fuib.rect(x + gut + 2 + (ccol - left) * cw,
                 y + 2 + (tag(t, TS_CY) - top) * lh, 2, lh,
                 wlibc.theme(wlibc.T_ACCENT))
         }
@@ -10681,48 +10770,6 @@ fn next_focus(w: u64, rueckwaerts: bool) {
     set_focus(ziel)
 }
 
-fn entry_erase(i: u64) -> bool {
-    var a: u64 = g(i, D_B)
-    var b: u64 = g(i, D_C)
-    if a == b {
-        return false
-    }
-    if a > b {
-        let t: u64 = a
-        a = b
-        b = t
-    }
-    let p: u64 = g(i, D_TEXT)
-    let n: u64 = tlen(p)
-    var k: u64 = b
-    while k <= n {
-        __mmio_write8((p + a + (k - b)) as *mut u8,
-            __mmio_read8((p + k) as *mut u8))
-        k = k + 1
-    }
-    s(i, D_B, a)
-    s(i, D_C, a)
-    return true
-}
-
-fn entry_insert(i: u64, c: u64) {
-    let p: u64 = g(i, D_TEXT)
-    entry_erase(i)
-    var n: u64 = tlen(p)
-    if n + 1 >= g(i, D_D) {
-        return
-    }
-    let at: u64 = g(i, D_B)
-    var k: u64 = n + 1
-    while k > at {
-        __mmio_write8((p + k) as *mut u8, __mmio_read8((p + k - 1) as *mut u8))
-        k = k - 1
-    }
-    __mmio_write8((p + at) as *mut u8, c as u8)
-    s(i, D_B, at + 1)
-    s(i, D_C, at + 1)
-}
-
 // RUNDE I18N: die Laenge des Zeichens, das bei `at` beginnt. Steht
 // `at` auf einer Fortsetzung -- was nach dieser Runde nicht mehr
 // vorkommen soll --, kommt 1 heraus, und der Zeiger bewegt sich
@@ -10745,96 +10792,90 @@ fn druckbar(c: u64) -> bool {
     return c >= 32 && c != 127 && c < 256
 }
 
-fn entry_key(i: u64, k: u64) {
+// FUI-ALL stage 2a/3: THE EDITING OF A ONE-LINE FIELD IS fUi's.
+//
+// Up to here wlib carried its own line editor (arrows, backspace over
+// UTF-8, select all, clipboard) next to `fui.textbuf`, which does the same
+// for every fUi text field -- two editors, two places for every bug.
+// Now a key on an entry is handed to a `TextBuf` laid over the program's
+// own buffer (no copy: `tb_init` takes the pointer, `D_B`/`D_C` are its
+// caret and anchor, the terminating 0 is written back). A password field
+// is a SECRET TextBuf, so it is fUi's `tb_copy`/`tb_cut` that refuse to
+// hand the text to the clipboard -- also while the eye shows it.
+//
+// Behaviour change, deliberate (it is fUi's): an arrow key on a selection
+// collapses it to its side instead of moving one character from the caret.
+fn entry_tb(i: u64, t: *mut textbuf.TextBuf) -> bool {
     let p: u64 = g(i, D_TEXT)
-    let n: u64 = tlen(p)
-    // RUNDE I18N: DIE EINFUEGEMARKE SPRINGT UEBER ZEICHEN, NICHT UEBER
-    // OKTETTE. `D_B` und `D_C` bleiben OKTETTVERSATZE -- alles andere
-    // hier rechnet damit, und `entry_x` misst damit --, aber sie stehen
-    // ab jetzt IMMER auf einer Zeichengrenze. Der Pfeil nach links geht
-    // sonst mitten in einen Umlaut hinein, und die naechste Taste
-    // zerteilt ihn.
+    let max: u64 = g(i, D_D)
+    if p == 0 || max < 1 {
+        return false
+    }
+    textbuf.tb_init(t, p, (max - 1) as usize)
+    textbuf.tb_set_len(t, tlen(p) as usize)
+    textbuf.tb_set_range(t, g(i, D_B) as usize, g(i, D_C) as usize)
+    textbuf.tb_set_secret(t, (g(i, D_FLAGS) & F_PASSWORT) != 0)
+    return true
+}
+
+fn entry_tb_back(i: u64, t: *mut textbuf.TextBuf) {
+    let n: usize = textbuf.tb_len(t)
+    __mmio_write8((g(i, D_TEXT) + n as u64) as *mut u8, 0 as u8)
+    s(i, D_B, textbuf.tb_caret(t) as u64)
+    s(i, D_C, textbuf.tb_anchor(t) as u64)
+}
+
+fn entry_key(i: u64, k: u64) {
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    if !entry_tb(i, &tb) {
+        return
+    }
     if k == KEY_LEFT {
-        s(i, D_B, wlibc.back(p, g(i, D_B)))
-        s(i, D_C, g(i, D_B))
+        textbuf.tb_left(&tb, false)
     } else if k == KEY_RIGHT {
-        if g(i, D_B) < n {
-            s(i, D_B, g(i, D_B) + cp_len(p, n, g(i, D_B)))
-        }
-        s(i, D_C, g(i, D_B))
+        textbuf.tb_right(&tb, false)
     } else if k == KEY_HOME {
-        s(i, D_B, 0)
-        s(i, D_C, 0)
+        textbuf.tb_home(&tb, false)
     } else if k == KEY_END {
-        s(i, D_B, n)
-        s(i, D_C, n)
+        textbuf.tb_end(&tb, false)
     } else if k == KEY_BS || k == 127 {
-        // GANZ ZURUECK, NICHT EIN OKTETT ZURUECK. Ein Rueckschritt, der
-        // ein Oktett loescht, laesst von einem Umlaut die erste Haelfte
-        // stehen -- eine kaputte Folge, die als Ersatzzeichen erscheint
-        // und beim naechsten Rueckschritt noch eine haesslichere ergibt.
-        if !entry_erase(i) {
-            if g(i, D_B) > 0 {
-                let at: u64 = wlibc.back(p, g(i, D_B))
-                let weg: u64 = g(i, D_B) - at
-                var q: u64 = at
-                while q + weg <= n {
-                    __mmio_write8((p + q) as *mut u8,
-                        __mmio_read8((p + q + weg) as *mut u8))
-                    q = q + 1
-                }
-                s(i, D_B, at)
-                s(i, D_C, at)
-            }
-        }
+        let _b: bool = textbuf.tb_backspace(&tb)
     } else if k == KEY_DEL {
-        if !entry_erase(i) {
-            if g(i, D_B) < n {
-                let weg2: u64 = cp_len(p, n, g(i, D_B))
-                var q2: u64 = g(i, D_B)
-                while q2 + weg2 <= n {
-                    __mmio_write8((p + q2) as *mut u8,
-                        __mmio_read8((p + q2 + weg2) as *mut u8))
-                    q2 = q2 + 1
-                }
-            }
-        }
+        let _d: bool = textbuf.tb_delete_fwd(&tb)
     } else if k == 1 {
         // STRG-A: alles auswaehlen
-        s(i, D_C, 0)
-        s(i, D_B, n)
+        textbuf.tb_select_all(&tb)
     } else if k == 3 || k == 24 {
-        // STRG-C / STRG-X
-        var a: u64 = g(i, D_B)
-        var b: u64 = g(i, D_C)
-        if a > b {
-            let t: u64 = a
-            a = b
-            b = t
+        // STRG-C / STRG-X -- fUi refuses both on a secret field.
+        var out: [u8; 4096] = [0 as u8; 4096]
+        let o: u64 = (&out[0 as usize]) as u64
+        var m: usize = 0
+        if k == 24 {
+            m = textbuf.tb_cut(&tb, o, 4096)
+        } else {
+            m = textbuf.tb_copy(&tb, o, 4096)
         }
-        // ROUND LOGIN-2: a password never leaves its field through the
-        // clipboard -- not even while the eye shows it.
-        if b > a && (g(i, D_FLAGS) & F_PASSWORT) == 0 {
-            wlibc.clip_put(p + a, b - a)
-            if k == 24 {
-                entry_erase(i)
-            }
+        if m > 0 {
+            wlibc.clip_put(o, m as u64)
         }
     } else if k == 22 {
-        // STRG-V
+        // STRG-V: printable octets one by one, so a paste that does not
+        // fit fills the field up to its end, as it always did.
         var ein: [u8; 128] = [0 as u8; 128]
         let m: u64 = wlibc.clip_take((&ein[0 as usize]) as u64, 127)
         var q3: u64 = 0
         while q3 < m {
-            let c: u64 = (ein[(q3) as usize]) as u64
-            if druckbar(c) {
-                entry_insert(i, c)
+            if druckbar((ein[(q3) as usize]) as u64) {
+                let _i: bool = textbuf.tb_insert(&tb,
+                    (&ein[(q3) as usize]) as u64, 1)
             }
             q3 = q3 + 1
         }
     } else if druckbar(k) {
-        entry_insert(i, k)
+        var c: [u8; 1] = [k as u8; 1]
+        let _i2: bool = textbuf.tb_insert(&tb, (&c[0 as usize]) as u64, 1)
     }
+    entry_tb_back(i, &tb)
     dirty_wd(i)
 }
 
@@ -10962,6 +11003,15 @@ fn key_handle(wein: u64, k: u64) {
             entry_key(dl_ent, k)
         }
         return
+    }
+    // A canvas that runs its own focus chain (fUi programs, see
+    // kernel/user/fuiapp.fi) gets Tab and Shift+Tab itself.
+    if (k == KEY_TAB || k == KEY_BTAB) && s_canvas_tab != 0 {
+        let fc: u64 = focus_id()
+        if fc < MAXWD && g(fc, D_WIN) == w && g(fc, D_KIND) == K_CANVAS {
+            lw_push(fc, LE_KEY, k, 0)
+            return
+        }
     }
     if k == KEY_TAB {
         next_focus(w, false)
@@ -11656,7 +11706,57 @@ fn theme_stales() -> u64 {
 // Alle Fenster neu malen und die Flaeche zurueckgeben. EINE Stelle,
 // damit die Zahl aus der Messung und die Zahl aus dem Betrieb dieselbe
 // Rechnung sind.
+// ROUND FUI-ALL: THE PAINT TIME OF A PROGRAM, in TSC cycles.
+// Counted over every paint_all that painted something; after the 32nd
+// such frame one line goes to the serial log (measuring builds only, see
+// PT_ON), so a test run can compare
+// the old paint layer with the fUi one on the same scene without a
+// command of its own.
+// Printed only in a measuring build: FIRN_OSUM_PAINTTIME=1 at compile
+// time (the FIRN_ prefix needs no --env-allow). A normal build prints
+// nothing, so no serial transcript of a test changes.
+const PT_ON: str = __env_or("FIRN_OSUM_PAINTTIME", "0")
+static mut s_pt_n: u64 = 0
+static mut s_pt_sum: u64 = 0
+static mut s_pt_max: u64 = 0
+static mut s_pt_said: u64 = 0
+static mut pt_a: [u8; 20] = "wlib: paint frames=\0"
+static mut pt_b: [u8; 11] = " avg_kcyc=\0"
+static mut pt_c: [u8; 11] = " max_kcyc=\0"
+static mut pt_d: [u8; 8] = " prims=\0"
+
+fn pt_tsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
 fn paint_all() -> u64 {
+    let t0: u64 = pt_tsc()
+    let n: u64 = paint_all_inner()
+    if n != 0 {
+        let dt: u64 = pt_tsc() -% t0
+        s_pt_n = s_pt_n + 1
+        s_pt_sum = s_pt_sum + dt
+        if dt > s_pt_max {
+            s_pt_max = dt
+        }
+        if s_pt_n == 32 && s_pt_said == 0 && PT_ON.n == 1
+        && *(PT_ON.p) == 49 as u8 {
+            s_pt_said = 1
+            ulib.say((&pt_a[0 as usize]) as u64)
+            ulib.sayn(s_pt_n)
+            ulib.say((&pt_b[0 as usize]) as u64)
+            ulib.sayn(s_pt_sum / s_pt_n / 1000)
+            ulib.say((&pt_c[0 as usize]) as u64)
+            ulib.sayn(s_pt_max / 1000)
+            ulib.say((&pt_d[0 as usize]) as u64)
+            ulib.sayn(fuib.fui_prims())
+            ulib.nl()
+        }
+    }
+    return n
+}
+
+fn paint_all_inner() -> u64 {
     // RUNDE GLAS: ein Bild faengt an, also darf jeder Widgettyp seinen
     // Radius wieder einmal melden. Das ist die EINE Stelle, an der
     // wlib ein Bild beginnt -- steht der Anstoss woanders, meldet
@@ -11722,6 +11822,8 @@ fn step() -> u64 {
                     on_move(w, ex, ey, btn)
                 } else if typ == wlibc.EV_KEY {
                     on_key(w, ex)
+                } else if typ == wlibc.EV_AXPRESS {
+                    ax_on_press(w, ex)
                 } else if typ == wlibc.EV_CLOSE {
                     ns(w, N_H, 0)
                     if w == mn_win {
@@ -11801,6 +11903,9 @@ fn step() -> u64 {
     if gewechselt {
         s_thpx = s_thpx + gemalt
     }
+    // ROUND A11Y-2: the tree after the picture -- it describes what is
+    // now on the screen. Cheap when nothing changed (a hash, no call).
+    ax_tick(etwas || gemalt != 0)
     // Eine laufende Bewegung ist ETWAS. Ohne diese Zeile schlaeft die
     // Schleife mitten in einer Animation ein und das Fenster bleibt auf
     // halbem Weg stehen, bis die Maus wackelt.
@@ -12181,4 +12286,451 @@ fn noti_take(back: u64, p: u64, max: u64) -> u64 {
 // RUNDE DREI (S-006): lesen, ohne die Glocke zurueckzustellen.
 fn noti_peek(back: u64, p: u64, max: u64) -> u64 {
     return wlibc.noti_peek(back, p, max)
+}
+
+// ==================================================================
+// ROUND A11Y-2 (S-007) -- THE ACCESSIBILITY TREE, MADE ONCE, HERE
+//
+// Every program that uses these controls is accessible without one line
+// of its own: after each picture, `ax_tick` describes the controls as
+// nodes (role, state, place, value, name, bus action) and, if anything
+// changed and the kernel records a tree at all, sends them with AX_PUSH.
+// The packing is kernel/ui/ax.fi's; tools/a11y/fields.py compares both.
+//
+// A program only does something for the tree in two cases:
+//   * `ax_name(i, text)` -- where the visible text is not the name (a
+//     password field has no visible text worth reading);
+//   * `ax_action(i, "notes.save")` -- this button does what the bus
+//     action does; a reader (or an agent) can then call the action
+//     instead of clicking.
+//
+// THE SECOND LOCK IN FRONT OF THE PASSWORD FIELD. An entry with
+// F_PASSWORT or F_GEHEIM goes out as R_PASSWORD with value 0, and its
+// buffer is NEVER copied into the name -- not the text, not its length.
+// The kernel forces the same on entry (the first lock, ax.push_node);
+// the test puts a canary word into such a field and looks for it in
+// every export, log and dump.
+const AXN_BYTES: u64 = 96
+const AXN_NAME: u64 = 24
+const AXN_NAMEMAX: u64 = 40
+const AXN_ACT: u64 = 64
+const AXN_ACTMAX: u64 = 32
+const AXN_MAX: u64 = 224
+const AXR_WINDOW: u64 = 1
+const AXR_LABEL: u64 = 2
+const AXR_BUTTON: u64 = 3
+const AXR_CHECK: u64 = 4
+const AXR_ENTRY: u64 = 5
+const AXR_PASSWORD: u64 = 6
+const AXR_LIST: u64 = 7
+const AXR_TABLE: u64 = 8
+const AXR_TAB: u64 = 9
+const AXR_MENUBAR: u64 = 10
+const AXR_CHOICE: u64 = 11
+const AXR_SEPARATOR: u64 = 12
+const AXR_SCROLLBAR: u64 = 13
+const AXR_MENU: u64 = 14
+const AXR_DIALOG: u64 = 15
+const AXR_SLIDER: u64 = 16
+const AXS_ENABLED: u64 = 1
+const AXS_FOCUSABLE: u64 = 2
+const AXS_FOCUSED: u64 = 4
+const AXS_SELECTED: u64 = 8
+const AXS_HIDDEN: u64 = 16
+const AXS_CHECKED: u64 = 32
+const AXS_PROTECTED: u64 = 64
+const AX_SIDE: u64 = 32 // names / actions set by programs
+
+static mut ax_buf: [u8; 21504] = [0 as u8; 21504] // AXN_MAX * AXN_BYTES
+static mut ax_wtitle: [u8; 240] = [0 as u8; 240] // MAXWN * 40
+static mut ax_nm_wd: [u64; 32] = [0 as u64; 32] // widget + 1
+static mut ax_nm_p: [u64; 32] = [0 as u64; 32]
+static mut ax_ac_wd: [u64; 32] = [0 as u64; 32]
+static mut ax_ac_p: [u64; 32] = [0 as u64; 32]
+static mut ax_on: u64 = 0
+static mut ax_onpoll: u64 = 0
+static mut ax_hash: u64 = 0
+static mut ax_n: u64 = 0
+static mut ax_nflush: u64 = 0
+static mut ax_npress: u64 = 0
+static mut ax_step: u64 = 0
+
+// The window server's handle of window w (0 = none) -- for a program
+// that talks to the server directly (a11ydemo's GEGENPROBE).
+fn win_handle(w: u64) -> u64 {
+    return ng(w, N_H)
+}
+
+fn ax_flushes() -> u64 {
+    return ax_nflush
+}
+
+// how many nodes the last flush sent
+fn ax_last() -> u64 {
+    return ax_n
+}
+
+fn ax_presses() -> u64 {
+    return ax_npress
+}
+
+fn ax_keep_title(w: u64, t: u64) {
+    if w >= MAXWN {
+        return
+    }
+    let d: u64 = (&ax_wtitle[0 as usize]) as u64 + w * 40
+    var k: u64 = 0
+    while k < 39 {
+        var c: u8 = 0 as u8
+        if t != 0 {
+            c = *((t + k) as *mut u8)
+        }
+        *((d + k) as *mut u8) = c
+        if c == 0 as u8 {
+            k = 39
+        } else {
+            k = k + 1
+        }
+    }
+    *((d + 39) as *mut u8) = 0 as u8
+}
+
+fn ax_side_set(tw: u64, tp: u64, i: u64, p: u64) {
+    var k: u64 = 0
+    var free: u64 = AX_SIDE
+    while k < AX_SIDE {
+        let at: u64 = *((tw + k * 8) as *mut u64)
+        if at == i + 1 {
+            *((tp + k * 8) as *mut u64) = p
+            return
+        }
+        if at == 0 && free == AX_SIDE {
+            free = k
+        }
+        k = k + 1
+    }
+    if free < AX_SIDE {
+        *((tw + free * 8) as *mut u64) = i + 1
+        *((tp + free * 8) as *mut u64) = p
+    }
+}
+
+fn ax_side_get(tw: u64, tp: u64, i: u64) -> u64 {
+    var k: u64 = 0
+    while k < AX_SIDE {
+        if *((tw + k * 8) as *mut u64) == i + 1 {
+            return *((tp + k * 8) as *mut u64)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// The name a reader says for control i (the text must stay alive, like
+// every other text handed to this library).
+fn ax_name(i: u64, txt: u64) {
+    if i < MAXWD {
+        ax_side_set((&ax_nm_wd[0 as usize]) as u64,
+            (&ax_nm_p[0 as usize]) as u64, i, txt)
+    }
+}
+
+// The bus action control i stands for, e.g. "notes.save".
+fn ax_action(i: u64, name: u64) {
+    if i < MAXWD {
+        ax_side_set((&ax_ac_wd[0 as usize]) as u64,
+            (&ax_ac_p[0 as usize]) as u64, i, name)
+    }
+}
+
+fn ax_role(i: u64) -> u64 {
+    let k: u64 = g(i, D_KIND)
+    if k == K_LABEL {
+        return AXR_LABEL
+    }
+    if k == K_BUTTON || k == K_TILE {
+        return AXR_BUTTON
+    }
+    if k == K_CHECK {
+        return AXR_CHECK
+    }
+    if k == K_ENTRY || k == K_TEXTAREA {
+        if (g(i, D_FLAGS) & (F_GEHEIM | F_PASSWORT)) != 0 {
+            return AXR_PASSWORD
+        }
+        return AXR_ENTRY
+    }
+    if k == K_LIST {
+        return AXR_LIST
+    }
+    if k == K_TABLE {
+        return AXR_TABLE
+    }
+    if k == K_TABS {
+        return AXR_TAB
+    }
+    if k == K_MENUBAR {
+        return AXR_MENUBAR
+    }
+    if k == K_CHOICE {
+        return AXR_CHOICE
+    }
+    if k == K_SEP {
+        return AXR_SEPARATOR
+    }
+    if k == K_SCROLL {
+        return AXR_SCROLLBAR
+    }
+    if k == K_SLIDER {
+        return AXR_SLIDER
+    }
+    return 0
+}
+
+// Copy a zero-terminated text into a node field, at most max-1 octets.
+fn ax_put(dst: u64, src: u64, max: u64) {
+    var k: u64 = 0
+    var end: bool = src == 0
+    while k < max {
+        var c: u8 = 0 as u8
+        if !end {
+            c = *((src + k) as *mut u8)
+            // a list blob separates rows with 10 or 9: the name ends there
+            if c == 10 as u8 || c == 9 as u8 {
+                c = 0 as u8
+            }
+            if c == 0 as u8 {
+                end = true
+            }
+        }
+        if k + 1 == max {
+            c = 0 as u8
+        }
+        *((dst + k) as *mut u8) = c
+        k = k + 1
+    }
+}
+
+fn ax_clear(p: u64) {
+    var k: u64 = 0
+    while k < AXN_BYTES {
+        *((p + k) as *mut u64) = 0
+        k = k + 8
+    }
+}
+
+// FUI-ALL: a program that paints with fUi's scene tree (fuiscene) has ONE
+// canvas widget in wlib's list, so the nodes of its tree are invisible to
+// the code below. Such a program hands over two functions:
+//   build(buf, have, room) -> n   writes up to `room` nodes of 96 octets
+//                                 behind the `have` nodes already there
+//   press(id)                     a reader pressed node `id` (the id the
+//                                 node carried, AXP_BASE and up)
+// Their node ids start at AXP_BASE, far above any widget index.
+const AXP_BASE: u64 = 0x8000
+static mut ax_hooks: [u8; 16] = [0 as u8; 16]
+
+fn ax_hook_build() -> *mut fn(u64, u64, u64) -> u64 {
+    return ((&ax_hooks[0 as usize]) as u64) as *mut fn(u64, u64, u64) -> u64
+}
+
+fn ax_hook_press() -> *mut fn(u64) {
+    return (((&ax_hooks[0 as usize]) as u64) + 8) as *mut fn(u64)
+}
+
+fn ax_set_hooks(b: fn(u64, u64, u64) -> u64, p: fn(u64)) {
+    *ax_hook_build() = b
+    *ax_hook_press() = p
+}
+
+// Build all nodes into ax_buf. Returns how many.
+fn ax_build() -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var n: u64 = 0
+    var w: u64 = 0
+    while w < nwn && n < AXN_MAX {
+        if ng(w, N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            var r: u64 = AXR_WINDOW
+            if ng(w, N_KIND) == NK_DLG {
+                r = AXR_DIALOG
+            } else if ng(w, N_KIND) == NK_MENU {
+                r = AXR_MENU
+            }
+            // A window node (window, dialog, menu) says WHICH window it
+            // is -- the server's id in its value; the kernel maps the
+            // number `w` to that window only if it belongs to us.
+            let id: u64 = wlibc.sys3w(wlibc.WM_INFO, ng(w, N_H),
+                wlibc.WI_ID, 0)
+            *((p) as *mut u64) = r | (AXS_ENABLED << 8) | (w << 16)
+            *((p + 8) as *mut u64) = (ng(w, N_W) & 0xFFFF) << 32
+                | ((ng(w, N_HH) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = id
+            ax_put(p + AXN_NAME, (&ax_wtitle[0 as usize]) as u64 + w * 40,
+                AXN_NAMEMAX)
+            n = n + 1
+        }
+        w = w + 1
+    }
+    var i: u64 = 0
+    while i < nwd && n < AXN_MAX {
+        let role: u64 = ax_role(i)
+        let wi: u64 = g(i, D_WIN)
+        if role != 0 && wi < nwn && ng(wi, N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            let fl: u64 = g(i, D_FLAGS)
+            var st: u64 = 0
+            if (fl & F_OFF) == 0 {
+                st = st | AXS_ENABLED
+            }
+            if (fl & F_FOCUSABLE) != 0 {
+                st = st | AXS_FOCUSABLE
+            }
+            if s_focus == i + 1 {
+                st = st | AXS_FOCUSED
+            }
+            if (fl & F_HIDE) != 0 {
+                st = st | AXS_HIDDEN
+            }
+            var value: u64 = 0
+            if role == AXR_CHECK {
+                if g(i, D_VAL) != 0 {
+                    st = st | AXS_CHECKED
+                    value = 1
+                }
+            } else if role == AXR_LIST || role == AXR_TABLE
+                || role == AXR_TAB || role == AXR_CHOICE
+                || role == AXR_SLIDER || role == AXR_MENUBAR {
+                value = g(i, D_VAL)
+            }
+            let nm: u64 = ax_side_get((&ax_nm_wd[0 as usize]) as u64,
+                (&ax_nm_p[0 as usize]) as u64, i)
+            if role == AXR_PASSWORD {
+                // THE SECOND LOCK: no value, no text, no length.
+                st = st | AXS_PROTECTED
+                value = 0
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if nm != 0 {
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if role != AXR_LIST && role != AXR_TABLE {
+                ax_put(p + AXN_NAME, g(i, D_TEXT), AXN_NAMEMAX)
+            }
+            ax_put(p + AXN_ACT, ax_side_get((&ax_ac_wd[0 as usize]) as u64,
+                (&ax_ac_p[0 as usize]) as u64, i), AXN_ACTMAX)
+            *((p) as *mut u64) = role | (st << 8) | (wi << 16) | (wi << 24)
+                | ((i & 0xFFFF) << 48)
+            *((p + 8) as *mut u64) = (g(i, D_X) & 0xFFFF)
+                | ((g(i, D_Y) & 0xFFFF) << 16)
+                | ((g(i, D_W) & 0xFFFF) << 32)
+                | ((g(i, D_H) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = value
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if *((&ax_hooks[0 as usize]) as *mut u64) != 0 && n < AXN_MAX {
+        let hb: fn(u64, u64, u64) -> u64 = *ax_hook_build()
+        n = n + hb(b + n * AXN_BYTES, n, AXN_MAX - n)
+    }
+    return n
+}
+
+fn ax_sum(n: u64) -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var h: u64 = 0xCBF29CE484222325
+    var k: u64 = 0
+    while k < n * AXN_BYTES {
+        h = (h ^ *((b + k) as *mut u64)) *% 0x100000001B3
+        k = k + 8
+    }
+    return h ^ n
+}
+
+// Send the tree now (if the kernel records one). Returns the nodes sent.
+fn ax_flush() -> u64 {
+    if ax_on == 0 {
+        return 0
+    }
+    let n: u64 = ax_build()
+    let h: u64 = ax_sum(n)
+    if h == ax_hash {
+        return n
+    }
+    if ulib.bad(wlibc.ax_begin()) {
+        return 0 // another program is in the middle of its push
+    }
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var k: u64 = 0
+    while k < n {
+        var m: u64 = n - k
+        if m > 32 {
+            m = 32
+        }
+        let _t: u64 = wlibc.ax_send(b + k * AXN_BYTES, m)
+        k = k + m
+    }
+    let _e: u64 = wlibc.ax_end()
+    ax_hash = h
+    ax_n = n
+    ax_nflush = ax_nflush + 1
+    return n
+}
+
+fn ax_tick(changed: bool) {
+    ax_step = ax_step + 1
+    if ax_step >= ax_onpoll {
+        ax_onpoll = ax_step + 64
+        var v: u64 = 0
+        if wlibc.ax_info(wlibc.AXI_ON) == 1 {
+            v = 1
+        }
+        if v != ax_on {
+            ax_on = v
+            ax_hash = 0
+        }
+    }
+    if ax_on == 0 {
+        return
+    }
+    if changed || (ax_step & 15) == 0 {
+        let _n: u64 = ax_flush()
+    }
+}
+
+// THE PRESS THROUGH THE TREE (E_AXPRESS). The kernel has checked who
+// asked, and that this is a window and control it may press; here it is
+// the same as a click that went down and up on the control -- `fire`,
+// and a check box toggles. Only buttons and check boxes, only enabled
+// and visible ones, only of THIS window.
+fn ax_on_press(w: u64, i: u64) {
+    if i >= AXP_BASE {
+        if *(((&ax_hooks[0 as usize]) as u64 + 8) as *mut u64) != 0 {
+            ax_npress = ax_npress + 1
+            let hp: fn(u64) = *ax_hook_press()
+            hp(i)
+        }
+        return
+    }
+    if i >= nwd || g(i, D_WIN) != w {
+        return
+    }
+    let fl: u64 = g(i, D_FLAGS)
+    if (fl & (F_OFF | F_HIDE)) != 0 {
+        return
+    }
+    let k: u64 = g(i, D_KIND)
+    if k == K_BUTTON || k == K_TILE {
+        ax_npress = ax_npress + 1
+        dirty_wd(i)
+        fire(i, k, 0, w)
+        return
+    }
+    if k == K_CHECK {
+        ax_npress = ax_npress + 1
+        s(i, D_VAL, 1 - g(i, D_VAL))
+        dirty_wd(i)
+        fire(i, K_CHECK, g(i, D_VAL), w)
+    }
 }

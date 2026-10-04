@@ -99,6 +99,10 @@ accent=""
 # Ein Ordnername ist keine Messung. Ab hier steht das Wort auf der
 # Kommandozeile, und die Leistenhoehe im Bild belegt es.
 uiscale=""
+# 04.10.2026 (menu blur bug): the two glass keys of /etc/theme.conf, empty =
+# not written (the theme's default, 100 = opaque)
+window_alpha=""
+taskbar_alpha=""
 progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
     case "$a" in
@@ -108,6 +112,8 @@ for a in "$@"; do
         dark_scheme=*) dark_scheme=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
         accent=*) accent=${a#*=} ;;
+        window_alpha=*) window_alpha=${a#*=} ;;
+        taskbar_alpha=*) taskbar_alpha=${a#*=} ;;
         clock_lines=*) clock_lines=${a#*=} ;;
         hide_missing=*) hide_missing=${a#*=} ;;
         pins=*) pins=${a#*=} ;;
@@ -223,6 +229,8 @@ printf 'pins=%s\n' "${pins:-certus,explorer,terminal,settings}" \
   [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"
   printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$mode" "$accent" "$shape"
+  [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
+  [ -n "$taskbar_alpha" ] && printf 'taskbar_alpha=%s\n' "$taskbar_alpha"
 } > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 # ================================================== RUNDE MERGE-10

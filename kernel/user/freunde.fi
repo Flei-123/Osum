@@ -61,7 +61,7 @@ profile app
 
 import ulib
 import wlibc
-import wlib
+import fuiscene
 import msg
 import actwire
 
@@ -884,26 +884,22 @@ fn bus_unsichtbar(an: bool) -> bool {
 
 // ---------------------------------------------------- the tabs
 
-// "Online\nAlle\nAusstehend (2)\nHinzufuegen"
+// The four tab labels, 50 octets each: Online, Alle, "Ausstehend (2)",
+// Hinzufuegen. The scene tree points at them.
 fn tabtxt_bauen() {
     let tp: u64 = (&tabtxt[0 as usize]) as u64
     ulib.strncpy(tp, msg.get((&k_t_online[0 as usize]) as u64), 40)
-    var n: u64 = tlen(tp)
-    st8(tp, n, 10)
-    ulib.strncpy(tp + n + 1, msg.get((&k_t_alle[0 as usize]) as u64), 40)
-    n = tlen(tp)
-    st8(tp, n, 10)
-    ulib.strncpy(tp + n + 1, msg.get((&k_t_aus[0 as usize]) as u64), 40)
-    n = tlen(tp)
+    ulib.strncpy(tp + 50, msg.get((&k_t_alle[0 as usize]) as u64), 40)
+    ulib.strncpy(tp + 100, msg.get((&k_t_aus[0 as usize]) as u64), 40)
+    var n: u64 = tlen(tp + 100)
     if p_in > 0 {
-        st8(tp, n, 32)
-        st8(tp, n + 1, 40)
-        let dn: u64 = ulib.digits(p_in, tp + n + 2)
-        st8(tp, n + 2 + dn, 41)
-        n = n + 3 + dn
+        st8(tp + 100, n, 32)
+        st8(tp + 100, n + 1, 40)
+        let dn: u64 = ulib.digits(p_in, tp + 100 + n + 2)
+        st8(tp + 100, n + 2 + dn, 41)
+        st8(tp + 100, n + 3 + dn, 0)
     }
-    st8(tp, n, 10)
-    ulib.strncpy(tp + n + 1, msg.get((&k_t_add[0 as usize]) as u64), 40)
+    ulib.strncpy(tp + 150, msg.get((&k_t_add[0 as usize]) as u64), 40)
 }
 
 // "account:id|relation|presence|name|..." lines of `rep` with the given
@@ -1094,32 +1090,14 @@ fn contact_act(verb: u64, id: u64) -> bool {
     return ok
 }
 
-// which widgets the tab shows; the window lays itself out anew
+// the state of the tab changed: rebuild what it lists and describe the
+// window again
 fn tab_zeigen() {
-    let liste: bool = tab == T_ONLINE || tab == T_ALLE
-    wlib.show(i_liste, liste)
-    wlib.show(i_chat, liste)
-    wlib.show(i_pliste, tab == T_AUS && p_n > 0)
-    wlib.show(i_pleer, tab == T_AUS && p_n == 0)
-    let in_sel: bool = p_n > 0 && p_out[p_sel as usize] == 0
-    wlib.show(i_pja, tab == T_AUS && in_sel)
-    wlib.show(i_pnein, tab == T_AUS && in_sel)
-    wlib.show(i_pzur, tab == T_AUS && p_n > 0 && !in_sel)
-    wlib.show(i_such, tab == T_ADD)
-    wlib.show(i_suchen, tab == T_ADD)
-    wlib.show(i_sliste, tab == T_ADD && s_n > 0)
-    wlib.show(i_sanfrage, tab == T_ADD && s_n > 0)
-    // the answers to an invite only while there is one
-    let einl: bool = ld8((&einl_id[0 as usize]) as u64, 0) != 0
-    wlib.show(i_einl, einl)
-    wlib.show(i_einl_ja, einl)
-    wlib.show(i_einl_nein, einl)
-    if liste {
+    if tab == T_ONLINE || tab == T_ALLE {
         list_build()
-        wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
-        wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
     }
-    wlib.new_set()
+    tabtxt_bauen()
+    fuiscene.refresh()
 }
 
 fn tab_melden() {
@@ -1142,68 +1120,118 @@ fn tab_melden() {
 }
 
 // ==================================================== DIE OBERFLAECHE
-fn bauen() -> u64 {
-    // Die Leiste steht rechts und ist schmal. 240 Bildpunkte breit,
-    // damit auf einem 800er Schirm 560 fuer das uebrige Fenster
-    // bleiben -- ein Panel, das die Haelfte nimmt, wird zugemacht.
-    w = wlib.window(552, 3, 240, 566, msg.get((&k_titel[0 as usize]) as u64))
-    if w >= wlib.MAXWN {
-        return 1
-    }
-    let c: u64 = wlib.box_v(w, 8, 8, 224, 550, 6, 6)
-    if angemeldet == 0 {
-        // OHNE KONTO: ein Satz, der sagt was zu tun ist.
-        i_hinweis = wlib.label(msg.get((&k_kein[0 as usize]) as u64))
-        wlib.box_end()
-        return 0
-    }
-    i_titel = wlib.label(msg.get((&k_titel[0 as usize]) as u64))
-    // the tab the view starts on: Online when somebody is there, else
-    // Alle (the web page's friends view does the same)
-    if tab_arg <= T_ADD {
-        tab = tab_arg
-    } else if online_n() > 0 {
-        tab = T_ONLINE
+//
+// FUI-ALL F-6: the bar is described to fUi's scene tree (fuiscene), not to
+// wlib. There is ONE window: the chat is a second PAGE of it (a Back
+// button on top), because the scene host holds one window per process.
+const K_T0: u64 = 20 // the four tabs: 20..23
+const K_LIST: u64 = 30
+const K_CHAT: u64 = 31
+const K_PLIST: u64 = 32
+const K_PJA: u64 = 33
+const K_PNEIN: u64 = 34
+const K_PZUR: u64 = 35
+const K_SUCH: u64 = 36
+const K_SUCHEN: u64 = 37
+const K_SLIST: u64 = 38
+const K_SANFR: u64 = 39
+const K_UNSICHT: u64 = 40
+const K_EJA: u64 = 41
+const K_ENEIN: u64 = 42
+const K_BACK: u64 = 50
+const K_HIST: u64 = 51
+const K_EIN: u64 = 52
+const K_SEND: u64 = 53
+const K_INV: u64 = 54
+const K_JOIN: u64 = 55
+static mut page: u64 = 0 // 0 = the bar, 1 = the chat
+
+fn build_chat(col: usize) {
+    let np: u64 = (&f_name[0 as usize]) as u64 + chat_mit * NAMEMAX
+    let hdr: usize = fuiscene.row(col)
+    let _b: usize = fuiscene.button(hdr, msg.get((&k_zurueck[0 as usize]) as u64), K_BACK)
+    let _n: usize = fuiscene.label(hdr, np)
+    if vlen == 0 {
+        let _l: usize = fuiscene.label(col, msg.get((&k_leer[0 as usize]) as u64))
     } else {
-        tab = T_ALLE
+        let _t: usize = fuiscene.table_list(col, K_HIST, 224, 380, 1,
+            (&verlauf[0 as usize]) as u64)
     }
-    tabtxt_bauen()
-    i_tabs = wlib.tabs((&tabtxt[0 as usize]) as u64)
-    wlib.set_value(i_tabs, tab)
-    list_build()
-    i_liste = wlib.list((&blob[0 as usize]) as u64, 12)
-    wlib.list_zwei(i_liste, true)
-    wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
-    i_chat = wlib.button(msg.get((&k_chat[0 as usize]) as u64))
-    // Ausstehend
-    i_pleer = wlib.label(msg.get((&k_keine[0 as usize]) as u64))
-    i_pliste = wlib.list((&pblob[0 as usize]) as u64, 8)
-    wlib.list_zwei(i_pliste, true)
-    i_pja = wlib.button(msg.get((&k_annehmen[0 as usize]) as u64))
-    i_pnein = wlib.button(msg.get((&k_ablehnen[0 as usize]) as u64))
-    i_pzur = wlib.button(msg.get((&k_zurueck[0 as usize]) as u64))
-    // Hinzufuegen
-    i_such = wlib.entry((&such[0 as usize]) as u64, 60)
-    i_suchen = wlib.button(msg.get((&k_suchen[0 as usize]) as u64))
-    i_sliste = wlib.list((&sblob[0 as usize]) as u64, 8)
-    wlib.list_zwei(i_sliste, true)
-    i_sanfrage = wlib.button(msg.get((&k_anfrage[0 as usize]) as u64))
-    i_unsicht = wlib.check(msg.get((&k_unsicht[0 as usize]) as u64),
-        unsicht != 0)
-    // RUNDE CHAT: an invite that came in, with its two answers
-    i_einl = wlib.label((&einl_txt[0 as usize]) as u64)
-    i_einl_ja = wlib.button(msg.get((&k_annehmen[0 as usize]) as u64))
-    i_einl_nein = wlib.button(msg.get((&k_ablehnen[0 as usize]) as u64))
-    wlib.box_end()
-    return 0
+    let _e: usize = fuiscene.entry(col, K_EIN, 224, 0)
+    let r: usize = fuiscene.row(col)
+    let _s: usize = fuiscene.button_main(r, msg.get((&k_senden[0 as usize]) as u64), K_SEND)
+    let _i: usize = fuiscene.button(r, msg.get((&k_einladen[0 as usize]) as u64), K_INV)
+    if f_join[chat_mit as usize] != 0 {
+        let _j: usize = fuiscene.button(col, msg.get((&k_beitreten[0 as usize]) as u64), K_JOIN)
+    }
 }
 
-// Das Chatfenster. Es entsteht erst beim Klick -- ein Fenster, das
-// immer offen ist, ist ein Fenster, das im Weg ist.
-fn chat_open(idx: u64) {
-    if cw != 0 && !wlib.closed(cw) {
-        wlib.close(cw)
+fn build() {
+    let col: usize = fuiscene.root()
+    if angemeldet == 0 {
+        // OHNE KONTO: ein Satz, der sagt was zu tun ist.
+        let _h: usize = fuiscene.label(col, msg.get((&k_kein[0 as usize]) as u64))
+        return
     }
+    if page == 1 {
+        build_chat(col)
+        return
+    }
+    let _t: usize = fuiscene.label(col, msg.get((&k_titel[0 as usize]) as u64))
+    let tp: u64 = (&tabtxt[0 as usize]) as u64
+    let r1: usize = fuiscene.row(col)
+    let _a: usize = fuiscene.tab(r1, tp, K_T0, tab == 0)
+    let _b: usize = fuiscene.tab(r1, tp + 50, K_T0 + 1, tab == 1)
+    let r2: usize = fuiscene.row(col)
+    let _c: usize = fuiscene.tab(r2, tp + 100, K_T0 + 2, tab == 2)
+    let _d: usize = fuiscene.tab(r2, tp + 150, K_T0 + 3, tab == 3)
+    if tab == T_ONLINE || tab == T_ALLE {
+        let _l: usize = fuiscene.table_list(col, K_LIST, 224, 330, 1,
+            (&blob[0 as usize]) as u64)
+        fuiscene.table_two(K_LIST, true)
+        fuiscene.table_icons(K_LIST, (&l_col[0 as usize]) as u64)
+        let _ch: usize = fuiscene.button(col, msg.get((&k_chat[0 as usize]) as u64), K_CHAT)
+    } else if tab == T_AUS {
+        if p_n > 0 {
+            let _l: usize = fuiscene.table_list(col, K_PLIST, 224, 250, 1,
+                (&pblob[0 as usize]) as u64)
+            fuiscene.table_two(K_PLIST, true)
+            fuiscene.table_single(K_PLIST, true)
+            let in_sel: bool = p_out[p_sel as usize] == 0
+            let r: usize = fuiscene.row(col)
+            if in_sel {
+                let _j: usize = fuiscene.button_main(r, msg.get((&k_annehmen[0 as usize]) as u64), K_PJA)
+                let _n: usize = fuiscene.button(r, msg.get((&k_ablehnen[0 as usize]) as u64), K_PNEIN)
+            } else {
+                let _z: usize = fuiscene.button(r, msg.get((&k_zurueck[0 as usize]) as u64), K_PZUR)
+            }
+        } else {
+            let _k: usize = fuiscene.label(col, msg.get((&k_keine[0 as usize]) as u64))
+        }
+    } else {
+        let _e: usize = fuiscene.entry(col, K_SUCH, 224, (&such[0 as usize]) as u64)
+        let _s: usize = fuiscene.button(col, msg.get((&k_suchen[0 as usize]) as u64), K_SUCHEN)
+        if s_n > 0 {
+            let _l: usize = fuiscene.table_list(col, K_SLIST, 224, 200, 1,
+                (&sblob[0 as usize]) as u64)
+            fuiscene.table_two(K_SLIST, true)
+            fuiscene.table_single(K_SLIST, true)
+            let _a: usize = fuiscene.button(col, msg.get((&k_anfrage[0 as usize]) as u64), K_SANFR)
+        }
+    }
+    let _u: usize = fuiscene.check(col, msg.get((&k_unsicht[0 as usize]) as u64),
+        K_UNSICHT, unsicht != 0)
+    // RUNDE CHAT: an invite that came in, with its two answers
+    if ld8((&einl_id[0 as usize]) as u64, 0) != 0 {
+        let _i: usize = fuiscene.label(col, (&einl_txt[0 as usize]) as u64)
+        let r3: usize = fuiscene.row(col)
+        let _y: usize = fuiscene.button_main(r3, msg.get((&k_annehmen[0 as usize]) as u64), K_EJA)
+        let _x: usize = fuiscene.button(r3, msg.get((&k_ablehnen[0 as usize]) as u64), K_ENEIN)
+    }
+}
+
+// The chat page of friend `idx`.
+fn chat_open(idx: u64) {
     chat_mit = idx
     ulib.strncpy((&chat_id[0 as usize]) as u64,
         (&f_id[0 as usize]) as u64 + idx * IDMAX, 95)
@@ -1212,27 +1240,9 @@ fn chat_open(idx: u64) {
         let _v: bool = verlauf_load()
         f_unread[idx as usize] = 0
     }
-    let np: u64 = (&f_name[0 as usize]) as u64 + idx * NAMEMAX
-    cw = wlib.window(120, 80, 420, 380, np)
-    if cw >= wlib.MAXWN {
-        cw = 0
-        return
-    }
-    let c: u64 = wlib.box_v(cw, 8, 8, 404, 364, 6, 6)
-    if vlen == 0 {
-        i_verlauf = wlib.label(msg.get((&k_leer[0 as usize]) as u64))
-    } else {
-        i_verlauf = wlib.list((&verlauf[0 as usize]) as u64, 12)
-    }
-    i_eingabe = wlib.entry((&eingabe[0 as usize]) as u64, 255)
-    i_senden = wlib.button(msg.get((&k_senden[0 as usize]) as u64))
-    i_einladen = wlib.button(msg.get((&k_einladen[0 as usize]) as u64))
-    i_beitreten = NO_ITEM
-    if f_join[idx as usize] != 0 {
-        i_beitreten = wlib.button(msg.get((&k_beitreten[0 as usize]) as u64))
-    }
-    wlib.box_end()
-    wlib.draw_all()
+    page = 1
+    fuiscene.entry_set(K_EIN, (&eingabe[0 as usize]) as u64)
+    fuiscene.refresh()
     var mc: [u8; 15] = "freunde: chat=\0"
     ulib.say((&mc[0 as usize]) as u64)
     ulib.say((&chat_id[0 as usize]) as u64)
@@ -1328,7 +1338,6 @@ fn u_start(args: u64) -> u64 {
     // keys ("freunde.titel") instead of the words
     let _mk: u64 = msg.init()
 
-    // RUNDE SOCIAL: without --demo the friends come from the service
     if angemeldet == 0 && bus_setup() {
         quelle_bus = true
         angemeldet = 1
@@ -1338,17 +1347,31 @@ fn u_start(args: u64) -> u64 {
         pending_load()
     }
 
-    if !wlib.begin(false, false) {
+    // the tab the view starts on: Online when somebody is there, else
+    // Alle (the web page's friends view does the same)
+    if tab_arg <= T_ADD {
+        tab = tab_arg
+    } else if online_n() > 0 {
+        tab = T_ONLINE
+    } else {
+        tab = T_ALLE
+    }
+    tabtxt_bauen()
+    list_build()
+
+    if !fuiscene.begin() {
         var e: [u8; 25] = "freunde: kein Fenstersrv\0"
         sag((&e[0 as usize]) as u64)
         return 1
     }
-    if bauen() != 0 {
+    // The bar stands on the right and is narrow: 240 points wide, so that
+    // 560 stay for the rest of an 800 screen.
+    if !fuiscene.open(552, 3, 240, 566, msg.get((&k_titel[0 as usize]) as u64),
+        build) {
         var e2: [u8; 22] = "freunde: kein Fenster\0"
         sag((&e2[0 as usize]) as u64)
         return 1
     }
-    // the test stand: answer a request, search, ask
     if quelle_bus && annehmen < p_n {
         var va: [u8; 7] = "accept\0"
         if contact_act((&va[0 as usize]) as u64,
@@ -1359,6 +1382,7 @@ fn u_start(args: u64) -> u64 {
     }
     if quelle_bus && suche != 0 {
         ulib.strncpy((&such[0 as usize]) as u64, suche, 60)
+        fuiscene.entry_set(K_SUCH, (&such[0 as usize]) as u64)
         let _s: bool = search_run()
         if anfrage < s_n {
             var vr: [u8; 8] = "request\0"
@@ -1367,21 +1391,14 @@ fn u_start(args: u64) -> u64 {
                 pending_load()
             }
         }
-        wlib.set_text(i_such, (&such[0 as usize]) as u64)
-        wlib.set_text(i_sliste, (&sblob[0 as usize]) as u64)
     }
     if angemeldet != 0 {
-        tabtxt_bauen()
-        wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
-        wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
         tab_zeigen()
     }
-    wlib.draw_all()
     if angemeldet != 0 {
         tab_melden()
     }
 
-    // Was die Abnahme liest. Zahlen und keine Prosa.
     var m1: [u8; 20] = "freunde: eintraege=\0"
     ulib.say((&m1[0 as usize]) as u64)
     ulib.sayn(f_n)
@@ -1397,7 +1414,6 @@ fn u_start(args: u64) -> u64 {
     }
     ulib.nl()
 
-    // the test stand: open a chat, maybe write into it
     if chat_auf < f_n {
         if sende != 0 {
             ulib.strncpy((&eingabe[0 as usize]) as u64, sende, 250)
@@ -1417,14 +1433,15 @@ fn u_start(args: u64) -> u64 {
     }
 
     if schuss {
+        // one picture, then done
+        let _k: u64 = fuiscene.pump()
         return 0
     }
 
     var runden: u64 = 0
     var t_neu: u64 = actwire.ticks()
-    while wlib.alive() && (grenze == 0 || runden < grenze) {
+    while fuiscene.alive() && (grenze == 0 || runden < grenze) {
         runden = runden + 1
-        // RUNDE SOCIAL: every 3 s the list again (presence, games)
         if quelle_bus && actwire.ticks() - t_neu > 300 {
             t_neu = actwire.ticks()
             let alt: u64 = f_n
@@ -1432,26 +1449,14 @@ fn u_start(args: u64) -> u64 {
             if bus_load() {
                 unread_load()
                 invites_load()
-                let pin: u64 = p_in
-                let pn0: u64 = p_n
                 pending_load()
-                if p_in != pin || p_n != pn0 {
-                    tabtxt_bauen()
-                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
-                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
-                    tab_zeigen()
-                }
-                wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
-                tab_zeigen()
-                if cw != 0 && !wlib.closed(cw) {
+                if page == 1 {
                     let vor: u64 = chat_n
                     if verlauf_load() && chat_n != vor {
-                        wlib.set_text(i_verlauf, (&verlauf[0 as usize]) as u64)
+                        fuiscene.refresh()
                     }
                 }
-                list_build()
-                wlib.set_text(i_liste, (&blob[0 as usize]) as u64)
-                wlib.list_icons(i_liste, (&l_col[0 as usize]) as u64)
+                tab_zeigen()
                 if f_n != alt || blen != altb {
                     var m5: [u8; 20] = "freunde: eintraege=\0"
                     ulib.say((&m5[0 as usize]) as u64)
@@ -1463,153 +1468,119 @@ fn u_start(args: u64) -> u64 {
                 }
             }
         }
-        let id: u64 = wlib.step()
-        if id < wlib.MAXWD {
-            let art: u64 = wlib.fired_kind()
-            if art == wlib.K_LIST && id == i_liste {
-                let z: u64 = wlib.fired_index()
-                if z < l_n {
-                    chat_open(l_map[z as usize])
-                }
+        let key: u64 = fuiscene.pump()
+        if key == 0 {
+            continue
+        }
+        if key >= K_T0 && key < K_T0 + 4 {
+            tab = key - K_T0
+            tab_zeigen()
+            tab_melden()
+        } else if key == K_LIST {
+            let z: u64 = fuiscene.table_sel(K_LIST)
+            if z < l_n {
+                chat_open(l_map[z as usize])
             }
-            if art == wlib.K_BUTTON && id == i_chat {
-                if l_n > 0 {
-                    chat_open(l_map[0 as usize])
+        } else if key == K_CHAT {
+            if l_n > 0 {
+                var zc: u64 = fuiscene.table_sel(K_LIST)
+                if zc >= l_n {
+                    zc = 0
                 }
+                chat_open(l_map[zc as usize])
             }
-            if art == wlib.K_TABS && id == i_tabs {
-                tab = wlib.fired_index()
+        } else if key == K_BACK {
+            page = 0
+            tab_zeigen()
+        } else if key == K_PLIST {
+            let pz: u64 = fuiscene.table_sel(K_PLIST)
+            if pz < p_n {
+                p_sel = pz
+                tab_zeigen()
+            }
+        } else if key == K_SLIST {
+            let sz: u64 = fuiscene.table_sel(K_SLIST)
+            if sz < s_n {
+                s_sel = sz
+            }
+        } else if (key == K_PJA || key == K_PNEIN || key == K_PZUR)
+            && quelle_bus && p_sel < p_n {
+            var v_a: [u8; 7] = "accept\0"
+            var v_d: [u8; 8] = "decline\0"
+            var v_w: [u8; 9] = "withdraw\0"
+            var vb: u64 = (&v_a[0 as usize]) as u64
+            if key == K_PNEIN {
+                vb = (&v_d[0 as usize]) as u64
+            }
+            if key == K_PZUR {
+                vb = (&v_w[0 as usize]) as u64
+            }
+            if contact_act(vb, (&p_id[0 as usize]) as u64 + p_sel * IDMAX) {
+                let _b2: bool = bus_load()
+                pending_load()
                 tab_zeigen()
                 tab_melden()
             }
-            if art == wlib.K_LIST && id == i_pliste {
-                let pz: u64 = wlib.fired_index()
-                if pz < p_n {
-                    p_sel = pz
-                    tab_zeigen()
-                }
-            }
-            if art == wlib.K_LIST && id == i_sliste {
-                let sz: u64 = wlib.fired_index()
-                if sz < s_n {
-                    s_sel = sz
-                }
-            }
-            if art == wlib.K_BUTTON && (id == i_pja || id == i_pnein || id == i_pzur)
-                && quelle_bus && p_sel < p_n {
-                var v_a: [u8; 7] = "accept\0"
-                var v_d: [u8; 8] = "decline\0"
-                var v_w: [u8; 9] = "withdraw\0"
-                var vb: u64 = (&v_a[0 as usize]) as u64
-                if id == i_pnein {
-                    vb = (&v_d[0 as usize]) as u64
-                }
-                if id == i_pzur {
-                    vb = (&v_w[0 as usize]) as u64
-                }
-                if contact_act(vb, (&p_id[0 as usize]) as u64 + p_sel * IDMAX) {
-                    let _b2: bool = bus_load()
-                    pending_load()
-                    tabtxt_bauen()
-                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
-                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
-                    tab_zeigen()
-                    tab_melden()
-                }
-            }
-            if (art == wlib.K_BUTTON && id == i_suchen || id == i_such) && quelle_bus {
-                let _r: bool = search_run()
-                wlib.set_text(i_sliste, (&sblob[0 as usize]) as u64)
+        } else if (key == K_SUCHEN || key == K_SUCH) && quelle_bus {
+            ulib.strncpy((&such[0 as usize]) as u64,
+                fuiscene.entry_text(K_SUCH), 60)
+            let _r: bool = search_run()
+            tab_zeigen()
+            tab_melden()
+        } else if key == K_SANFR && quelle_bus && s_sel < s_n {
+            var v_r: [u8; 8] = "request\0"
+            if contact_act((&v_r[0 as usize]) as u64,
+                (&s_id[0 as usize]) as u64 + s_sel * IDMAX) {
+                pending_load()
                 tab_zeigen()
                 tab_melden()
             }
-            if art == wlib.K_BUTTON && id == i_sanfrage && quelle_bus && s_sel < s_n {
-                var v_r: [u8; 8] = "request\0"
-                if contact_act((&v_r[0 as usize]) as u64,
-                    (&s_id[0 as usize]) as u64 + s_sel * IDMAX) {
-                    pending_load()
-                    tabtxt_bauen()
-                    wlib.set_text(i_tabs, (&tabtxt[0 as usize]) as u64)
-                    wlib.set_text(i_pliste, (&pblob[0 as usize]) as u64)
-                    tab_melden()
-                }
+        } else if key == K_UNSICHT {
+            if fuiscene.value_of(K_UNSICHT) != 0 {
+                unsicht = 1
+            } else {
+                unsicht = 0
             }
-            if art == wlib.K_CHECK && id == i_unsicht {
-                if unsicht != 0 {
-                    unsicht = 0
+            var mu: [u8; 21] = "freunde: unsichtbar=\0"
+            ulib.say((&mu[0 as usize]) as u64)
+            ulib.sayn(unsicht)
+            if quelle_bus {
+                var mb: [u8; 11] = " dienst=ok\0"
+                var mn: [u8; 13] = " dienst=nein\0"
+                if bus_unsichtbar(unsicht != 0) {
+                    ulib.say((&mb[0 as usize]) as u64)
                 } else {
-                    unsicht = 1
-                }
-                // Die Leiste ENTSCHEIDET das nicht selbst: sie sagt es
-                // dem Dienst, und der ist die einzige Stelle, die den
-                // Zustand haelt (`praesenz unsichtbar an|aus`).
-                var mu: [u8; 21] = "freunde: unsichtbar=\0"
-                ulib.say((&mu[0 as usize]) as u64)
-                ulib.sayn(unsicht)
-                if quelle_bus {
-                    var mb: [u8; 11] = " dienst=ok\0"
-                    var mn: [u8; 13] = " dienst=nein\0"
-                    if bus_unsichtbar(unsicht != 0) {
-                        ulib.say((&mb[0 as usize]) as u64)
-                    } else {
-                        ulib.say((&mn[0 as usize]) as u64)
-                    }
-                }
-                ulib.nl()
-            }
-            if art == wlib.K_BUTTON && id == i_senden {
-                // Die Nachricht geht ueber den Dienst an den Anbieter des
-                // Kontos -- diese Datei sieht keinen Schluessel.
-                var ms: [u8; 17] = "freunde: senden=\0"
-                ulib.say((&ms[0 as usize]) as u64)
-                ulib.sayn(tlen((&eingabe[0 as usize]) as u64))
-                ulib.nl()
-                if quelle_bus && chat_send() {
-                    st8((&eingabe[0 as usize]) as u64, 0, 0)
-                    wlib.set_text(i_eingabe, (&eingabe[0 as usize]) as u64)
-                    chat_open(chat_mit)
+                    ulib.say((&mn[0 as usize]) as u64)
                 }
             }
-            if art == wlib.K_BUTTON && id == i_einladen && quelle_bus {
-                var ki: [u8; 7] = "invite\0"
-                let _i: bool = chat_invite((&ki[0 as usize]) as u64)
+            ulib.nl()
+        } else if key == K_SEND || key == K_EIN {
+            ulib.strncpy((&eingabe[0 as usize]) as u64,
+                fuiscene.entry_text(K_EIN), 250)
+            var ms: [u8; 17] = "freunde: senden=\0"
+            ulib.say((&ms[0 as usize]) as u64)
+            ulib.sayn(tlen((&eingabe[0 as usize]) as u64))
+            ulib.nl()
+            if quelle_bus && chat_send() {
+                st8((&eingabe[0 as usize]) as u64, 0, 0)
+                fuiscene.entry_set(K_EIN, (&eingabe[0 as usize]) as u64)
+                chat_open(chat_mit)
             }
-            if art == wlib.K_BUTTON && id == i_beitreten && quelle_bus {
-                var kj: [u8; 5] = "join\0"
-                let _j: bool = chat_invite((&kj[0 as usize]) as u64)
-            }
-            if art == wlib.K_BUTTON && (id == i_einl_ja || id == i_einl_nein) && quelle_bus {
-                let _a: bool = invite_answer(id == i_einl_ja)
-                invites_load()
-                wlib.set_text(i_einl, (&einl_txt[0 as usize]) as u64)
-                tab_zeigen()
-            }
+        } else if key == K_INV && quelle_bus {
+            var ki: [u8; 7] = "invite\0"
+            let _i: bool = chat_invite((&ki[0 as usize]) as u64)
+        } else if key == K_JOIN && quelle_bus {
+            var kj: [u8; 5] = "join\0"
+            let _j: bool = chat_invite((&kj[0 as usize]) as u64)
+        } else if (key == K_EJA || key == K_ENEIN) && quelle_bus {
+            let _a: bool = invite_answer(key == K_EJA)
+            invites_load()
+            tab_zeigen()
         }
     }
     return 0
 }
 
-// RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
-// ARGUMENTE WEITERGEBEN.
-//
-// Der Kommentar, der hier stand, sagte "das `main`, das nie laeuft --
-// `user.ld` springt nach `u_start`". Das stimmt fuer ein Programm, das
-// mit `kernel/user/crt.s` gebunden ist; dessen `_start` ruft
-// USER_ENTRY. Unter `profile app` stimmt es NICHT: dort bringt firnc
-// sein eigenes `_start` mit (darum darf crt.o nicht dazu, siehe
-// tools/look/shot.sh), und das endet in `call main` -- der Name steht
-// fest in lib/firnc1/codegen.fi, `--defsym=USER_ENTRY` erreicht ihn
-// nicht. Am gebauten ELF nachgesehen: Einsprung ist `_start`, sechs
-// Befehle weiter steht `call <main>`; `_F0.u_start` wird von dort nie
-// gerufen.
-//
-// `u_start(0)` warf damit den Argumentblock weg. Bei powermon waren
-// das 54 rote Zusagen (siehe ROTABSCHNITTE 11/n).
-//
-// Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
-// Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
-// und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=` (T_USTACK).
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }

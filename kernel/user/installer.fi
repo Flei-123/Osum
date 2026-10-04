@@ -92,9 +92,10 @@ profile app
 
 import ulib
 import wlibc
-import wlib
+import fuiscene
 import msg
 import instkern
+import instkonto
 import dualkern
 
 export { u_start }
@@ -114,7 +115,8 @@ const PCOL: u64 = 5
 // Das Fenster. Die Zahlen liegen auf dem Viererraster der Runde
 // OBERFLAECHE -- `tools/design/messen.py` zaehlt genau sie.
 const BW: u64 = 720
-const BH: u64 = 560
+// DAILY-DRIVER (r172): room for the account rows (name, two passwords, hint).
+const BH: u64 = 712
 
 // Die Schritte, die der Balken abbildet. Sie sind dieselben Zahlen wie
 // in `instkern` (S_GPT..S_FERTIG) und stehen hier NICHT noch einmal als
@@ -139,6 +141,31 @@ static mut tspalten: [u64; 4] = [0 as u64; 4]
 static mut tabtext: [u8; 80] = [0 as u8; 80]
 
 // Die Statuszeile und die Schrittzeile.
+// DAILY-DRIVER (r172): the account of the installed system.
+static mut k_a_name: [u8; 20] = "installer.acct.name\0"
+static mut k_a_pw1: [u8; 19] = "installer.acct.pw1\0"
+static mut k_a_pw2: [u8; 19] = "installer.acct.pw2\0"
+static mut k_a_hname: [u8; 25] = "installer.acct.hint.name\0"
+static mut k_a_hpw: [u8; 23] = "installer.acct.hint.pw\0"
+static mut k_a_hsame: [u8; 25] = "installer.acct.hint.same\0"
+static mut k_a_hok: [u8; 23] = "installer.acct.hint.ok\0"
+static mut k_a_hroot: [u8; 25] = "installer.acct.hint.root\0"
+static mut a_kname: [u8; 8] = "konto=\0\0"
+static mut a_kpw: [u8; 10] = "kontopw=\0\0"
+static mut m_konto: [u8; 19] = "installer: konto=\0\0"
+static mut m_kstate: [u8; 23] = "installer: konto ks=\0\0\0"
+static mut m_kgo: [u8; 5] = " go=\0"
+static mut a_nam: [u8; 64] = [0 as u8; 64]
+static mut a_pw1: [u8; 128] = [0 as u8; 128]
+static mut a_zeile: [u8; 200] = [0 as u8; 200]
+// 1 = the installed system gets the account typed into the three fields
+// (always in the window; in the test runner only with `konto=`/`kontopw=`).
+static mut konto_an: u64 = 1
+static mut konto_ks: u64 = 0
+static mut konto_noroot: u64 = 0
+const K_KNAME: u64 = 21
+const K_KPW1: u64 = 22
+const K_KPW2: u64 = 23
 static mut zeile: [u8; 200] = [0 as u8; 200]
 static mut schrittzeile: [u8; 200] = [0 as u8; 200]
 
@@ -461,8 +488,97 @@ fn platte_dazu(dev: u64) {
     p_anz = p_anz + 1
 }
 
+
+// ========================================================= r308: DISK MODEL
+//
+// The kernel publishes the drive's own model string in /proc/hwid
+// (`nvme_model:` from IDENTIFY CONTROLLER, `ahci_model:` from ATA IDENTIFY
+// words 27..46). The list shows it in the column "Modell" so that with two
+// disks (a Windows SSD and the target) the right one can be told apart. A
+// legacy IDE disk (VM, old PC) has no such line; the column then still says
+// the way it is connected.
+static mut hw_buf: [u8; 1536] = [0 as u8; 1536]
+static mut hw_n: u64 = 0
+static mut k_hw_proc: [u8; 11] = "/proc/hwid\0"
+static mut k_hw_nvme: [u8; 13] = "nvme_model: \0"
+static mut k_hw_ahci: [u8; 13] = "ahci_model: \0"
+
+fn rb(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn hw_lesen() {
+    hw_n = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&k_hw_proc[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&hw_buf[0 as usize]) as u64
+    let r: u64 = ulib.sys(ulib.SYS_READ, fd, b, 1500)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(r) || r == 0 {
+        return
+    }
+    __mmio_write8((b + r) as *mut u8, 0 as u8)
+    hw_n = r
+}
+
+// Where the value of `key` starts in hw_buf (a line `key value`), or 0 when
+// the line is missing or the value is empty.
+fn hw_wert(key: u64) -> u64 {
+    let b: u64 = (&hw_buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < hw_n {
+        var zeile: bool = i == 0
+        if i > 0 && rb(b + i - 1) == 10 {
+            zeile = true
+        }
+        if zeile {
+            var k: u64 = 0
+            var gleich: bool = true
+            while gleich && rb(key + k) != 0 {
+                if i + k >= hw_n || rb(b + i + k) != rb(key + k) {
+                    gleich = false
+                }
+                k = k + 1
+            }
+            if gleich {
+                let v: u64 = b + i + k
+                if rb(v) != 10 && rb(v) != 0 {
+                    return v
+                }
+                return 0
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// The model of the device named at `nm` ("/dev/nvme0", "/dev/sda"), or 0.
+fn modell_von(nm: u64) -> u64 {
+    if rb(nm + 5) == 110 {
+        return hw_wert((&k_hw_nvme[0 as usize]) as u64)
+    }
+    if rb(nm + 5) == 115 {
+        return hw_wert((&k_hw_ahci[0 as usize]) as u64)
+    }
+    return 0
+}
+
+// Up to 28 printable characters of the model, nothing else (a tab would
+// break the table's columns).
+fn modell_aus(v: u64) {
+    var i: u64 = 0
+    while i < 28 && rb(v + i) >= 32 && rb(v + i) < 127 {
+        b_c(rb(v + i))
+        i = i + 1
+    }
+}
+
 fn platten_suchen() {
     p_anz = 0
+    hw_lesen()
     platte_dazu(ptr((&d_hda[0 as usize]) as u64))
     platte_dazu(ptr((&d_hdb[0 as usize]) as u64))
     platte_dazu(ptr((&d_nvme[0 as usize]) as u64))
@@ -506,7 +622,10 @@ fn tabelle_bauen() {
         b_c(9)
         // Die Art: aus dem Namen abgeleitet, nicht erfunden.
         let nm: u64 = nptr(i)
-        if (*((nm + 5) as *mut u8)) as u64 == 110 {
+        let mo: u64 = modell_von(nm)
+        if mo != 0 {
+            modell_aus(mo)
+        } else if (*((nm + 5) as *mut u8)) as u64 == 110 {
             b_c(78) // 'N'
             b_c(86) // 'V'
             b_c(77) // 'M'
@@ -762,8 +881,116 @@ fn dzeilen_bauen() {
 // die Zeile darueber sagt, woran es liegt. Ein Knopf, der eine
 // Fehlermeldung ausloest, die man vorher haette anzeigen koennen, ist
 // eine Falle.
+// ============================================ DAILY-DRIVER: THE ACCOUNT
+//
+// The three fields (name, password, again) are valid when the name passes
+// `instkonto.name_ok`, the password `instkonto.pass_ok` and both passwords are
+// equal. Until then the install button stays off -- an installed system without
+// a way to sign in is the worst result.
+fn kn() -> u64 {
+    return fuiscene.entry_text(K_KNAME)
+}
+
+fn kp1() -> u64 {
+    return fuiscene.entry_text(K_KPW1)
+}
+
+fn kp2() -> u64 {
+    return fuiscene.entry_text(K_KPW2)
+}
+
+fn konto_stufe() -> u64 {
+    if kn() == 0 || kp1() == 0 || kp2() == 0 {
+        return 0
+    }
+    if !instkonto.name_ok(kn()) {
+        return 0
+    }
+    if !instkonto.pass_ok(kp1()) {
+        return 1
+    }
+    if !ulib.streq(kp1(), kp2()) {
+        return 2
+    }
+    return 3
+}
+
+fn konto_gueltig() -> bool {
+    if konto_an == 0 {
+        return true
+    }
+    return konto_stufe() == 3
+}
+
+fn konto_zeile_bauen() {
+    b_start((&a_zeile[0 as usize]) as u64, 200)
+    let st: u64 = konto_stufe()
+    if konto_noroot != 0 {
+        b_s(msg.get(ptr((&k_a_hroot[0 as usize]) as u64)))
+    } else if st == 0 {
+        b_s(msg.get(ptr((&k_a_hname[0 as usize]) as u64)))
+    } else if st == 1 {
+        b_s(msg.get(ptr((&k_a_hpw[0 as usize]) as u64)))
+    } else if st == 2 {
+        b_s(msg.get(ptr((&k_a_hsame[0 as usize]) as u64)))
+    } else {
+        b_s(msg.get(ptr((&k_a_hok[0 as usize]) as u64)))
+    }
+    b_ende()
+}
+
+// The account step of both ways. It runs BEFORE anything on the disk is
+// touched (it rewrites the account files of the running root, which is what
+// gets copied). true = nothing to do or done; false = failed (`wo` says
+// 90 + reason). The password fields are wiped in every case.
+fn konto_schreiben() -> bool {
+    if konto_an == 0 {
+        return true
+    }
+    say(ptr((&m_konto[0 as usize]) as u64))
+    ulib.nl()
+    let gut: bool = instkonto.anlegen(kn(), kn(), kp1())
+    if !gut {
+        wo(90 + instkonto.grund())
+    }
+    fuiscene.entry_set(K_KPW1, (&a_leer[0 as usize]) as u64)
+    fuiscene.entry_set(K_KPW2, (&a_leer[0 as usize]) as u64)
+    return gut
+}
+static mut a_leer: [u8; 4] = [0 as u8; 4]
+
+// `konto=NAME` / `kontopw=SECRET` of the test runner: copies the value
+// behind the prefix into `out`; false when the argument is not there.
+fn arg_wert(args: u64, pre: u64, out: u64, max: u64) -> bool {
+    let n: u64 = ulib.arg_count(args)
+    let pl: u64 = ulib.length(pre)
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < pl {
+            if (*((a + k) as *mut u8)) as u64 != (*((pre + k) as *mut u8)) as u64 {
+                gleich = false
+                k = pl
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich && ulib.length(a) > pl {
+            ulib.strncpy(out, a + pl, max)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn weg_moeglich() -> bool {
     if gewaehlt >= p_anz {
+        return false
+    }
+    if !konto_gueltig() {
         return false
     }
     if welcher_weg == 1 {
@@ -900,9 +1127,20 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
+    // DAILY-DRIVER (r172): the owner's own account goes into the running
+    // root NOW -- the copy below carries it, and a refusal leaves the disk
+    // untouched.
+    if !konto_schreiben() {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
 
     // ---- 1. die Partitionstafel
     melde_schritt(wschritt, instkern.S_GPT)
+    // r309: Limine's BIOS stages go into the same write when the image
+    // carries /boot/limine-hdd.bin (UEFI-only otherwise)
+    instkern.bios_laden()
     if !instkern.gpt_schreiben(zfd, sekt, espsek) {
         wo(1)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
@@ -992,6 +1230,11 @@ fn installieren_daneben(dev: u64, wstat: u64, wschritt: u64) -> bool {
     }
     let qsekt: u64 = ulib.size_of(ptr((&d_quelle[0 as usize]) as u64))
         / instkern.BS
+    // DAILY-DRIVER (r172): the owner's own account, before the table is touched.
+    if !konto_schreiben() {
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
 
     let zfd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
     if ulib.bad(zfd) {
@@ -1115,8 +1358,7 @@ fn wo(n: u64) {
 fn melde_schritt(wschritt: u64, nr: u64) {
     st_zeige = nr
     schritt_bauen()
-    wlib.set_text(wschritt, (&schrittzeile[0 as usize]) as u64)
-    wlib.draw_all()
+    fuiscene.repaint_now()
     say(ptr((&m_step[0 as usize]) as u64))
     ulib.sayu(nr)
     luft()
@@ -1132,6 +1374,10 @@ static mut p_efi_efi: [u8; 10] = "/efi/EFI\0\0"
 static mut p_efi_boot: [u8; 16] = "/efi/EFI/BOOT\0\0\0"
 static mut p_efi_lim: [u8; 20] = "/efi/limine.conf\0\0\0\0"
 static mut p_efi_kern: [u8; 16] = "/efi/osum.mb\0\0\0\0"
+static mut p_src_bios: [u8; 24] = "/boot/limine-bios.sys\0\0\0"
+static mut p_efi_bios: [u8; 24] = "/efi/limine-bios.sys\0\0\0\0"
+static mut m_bios_ja: [u8; 24] = "installer: bios stages\0\0"
+static mut m_bios_sys: [u8; 30] = "installer: no limine-bios.sys\0"
 static mut p_efi_ldr: [u8; 28] = "/efi/EFI/BOOT/BOOTX64.EFI\0\0\0"
 static mut p_src_lim: [u8; 20] = "/boot/limine.conf\0\0\0"
 static mut p_src_kern: [u8; 16] = "/boot/osum.mb\0\0\0"
@@ -1159,7 +1405,7 @@ static mut d_esp: [u8; 24] = [0 as u8; 24]
 // with `vfs` instead of `modfs`. Before, the installed disk booted
 // without `usb nic dhcp jarvis anmeldung`: no keyboard on a PC with a
 // USB keyboard, no network, no bridge (Dell 9020, 27.09.2026).
-static mut lim_text: [u8; 257] = "timeout: 3\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/osum.mb\n    cmdline: osum vfs gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung\n\0"
+static mut lim_text: [u8; 266] = "timeout: 3\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/osum.mb\n    cmdline: osum vfs gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung\n\0"
 
 fn startdatei() -> bool {
     ulib.sys(ulib.SYS_UNLINK, ptr((&p_efi_lim[0 as usize]) as u64), 0, 0)
@@ -1257,7 +1503,7 @@ static mut p_fremd_bm: [u8; 40] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0\0\0\0"
 // dieses System nicht hat, und er haengt an einem Speicher, den
 // Hauptplatinen beim Zuruecksetzen leeren. Der Kettenstart steht in
 // einer Datei auf der Platte und ueberlebt das.
-static mut lim_dual1: [u8; 271] = "timeout: 10\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/EFI/orientos/osum.mb\n    cmdline: osum vfs gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung\n\0"
+static mut lim_dual1: [u8; 280] = "timeout: 10\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/EFI/orientos/osum.mb\n    cmdline: osum vfs gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung\n\0"
 static mut lim_dual2: [u8; 102] = "\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n\0"
 
 // Gibt es die Datei? Geoeffnet und sofort wieder zu -- mehr will diese
@@ -1384,6 +1630,18 @@ fn bootlader() -> bool {
         wo(52)
         gut = false
     }
+    // r309: stage 3 of Limine's BIOS boot lives on the EFI partition. A
+    // failure here does not fail the install (UEFI still boots) but is said.
+    if gut && instkern.bios_da() {
+        if instkern.kopiere(ptr((&p_src_bios[0 as usize]) as u64),
+            ptr((&p_efi_bios[0 as usize]) as u64)) {
+            say(ptr((&m_bios_ja[0 as usize]) as u64))
+            ulib.nl()
+        } else {
+            say(ptr((&m_bios_sys[0 as usize]) as u64))
+            ulib.nl()
+        }
+    }
     // ============================== DIE STARTDATEI WIRD GESCHRIEBEN
     //
     // UND NICHT KOPIERT, und das ist der Fehler, an dem diese Runde
@@ -1437,6 +1695,102 @@ fn arg_hat(args: u64, was: u64) -> bool {
 
 // --------------------------------------------------------------- das Ganze
 
+
+// ================================================== DAS FENSTER (fUi)
+//
+// FUI-ALL: das Fenster ist ein Baum von Knoten (kernel/user/fuiscene.fi),
+// kein Satz Bedienelemente mehr. Der Zustand (Platte, Weg, Frage, Lauf)
+// liegt in den Variablen oben; `fuiscene.refresh()` beschreibt den Baum
+// neu.
+const K_TTAB: u64 = 1
+const K_TAB0: u64 = 10
+const K_TAB1: u64 = 11
+const K_PTAB: u64 = 3
+const K_SUCH: u64 = 4
+const K_GO: u64 = 5
+
+static mut t_ja: [u8; 3] = "Ja\0"
+static mut t_nein: [u8; 5] = "Nein\0"
+
+fn build() {
+    let col: usize = fuiscene.root()
+    let _h: usize = fuiscene.label(col, msg.get(ptr((&k_head[0 as usize]) as u64)))
+    let _t: usize = fuiscene.table_blob(col, K_TTAB, BW - 16, 112, NCOL,
+        (&tblob[0 as usize]) as u64)
+    // DIE ZWEI WEGE ALS REITER. Sie stehen UNTER der Plattenliste und
+    // nicht darueber: erst wird eine Platte gewaehlt, dann entschieden,
+    // was mit ihr geschehen soll.
+    let reiter: usize = fuiscene.row(col)
+    let _r0: usize = fuiscene.tab(reiter, msg.get(ptr((&k_d_tganz[0 as usize]) as u64)),
+        K_TAB0, welcher_weg == 0)
+    let _r1: usize = fuiscene.tab(reiter, msg.get(ptr((&k_d_tneben[0 as usize]) as u64)),
+        K_TAB1, welcher_weg == 1)
+    // Die Partitionsansicht gehoert dem zweiten Reiter.
+    if welcher_weg == 1 {
+        let _p: usize = fuiscene.table_blob(col, K_PTAB, BW - 16, 100, PCOL,
+            (&pblob[0 as usize]) as u64)
+        let _f: usize = fuiscene.label(col, (&freizeile[0 as usize]) as u64)
+        let _e: usize = fuiscene.label(col, (&espzeile[0 as usize]) as u64)
+    }
+    let _s: usize = fuiscene.label(col, (&zeile[0 as usize]) as u64)
+    let _c: usize = fuiscene.label(col, (&schrittzeile[0 as usize]) as u64)
+    // DAILY-DRIVER (r172): the account -- name, password, the password again, and
+    // what is still missing. Without root (live desktop) there is only the hint.
+    if konto_an != 0 {
+        let lw: u64 = 220
+        let fw: u64 = BW - 16 - lw - 8
+        let r1: usize = fuiscene.row(col)
+        fuiscene.set_gap(r1, 8)
+        let l1: usize = fuiscene.label(r1, msg.get(ptr((&k_a_name[0 as usize]) as u64)))
+        fuiscene.set_size(l1, lw, 24)
+        let _e1: usize = fuiscene.entry(r1, K_KNAME, fw, 0)
+        let r2: usize = fuiscene.row(col)
+        fuiscene.set_gap(r2, 8)
+        let l2: usize = fuiscene.label(r2, msg.get(ptr((&k_a_pw1[0 as usize]) as u64)))
+        fuiscene.set_size(l2, lw, 24)
+        let _e2: usize = fuiscene.entry(r2, K_KPW1, fw, 0)
+        let r3: usize = fuiscene.row(col)
+        fuiscene.set_gap(r3, 8)
+        let l3: usize = fuiscene.label(r3, msg.get(ptr((&k_a_pw2[0 as usize]) as u64)))
+        fuiscene.set_size(l3, lw, 24)
+        let _e3: usize = fuiscene.entry(r3, K_KPW2, fw, 0)
+        fuiscene.entry_secret(K_KPW1, true)
+        fuiscene.entry_secret(K_KPW2, true)
+    }
+    let _kh: usize = fuiscene.label(col, (&a_zeile[0 as usize]) as u64)
+    // DIE KNOPFREIHE STEHT RECHTS UNTEN -- dieselbe Stelle, an der der
+    // Dialog seine Antwortknoepfe hat.
+    let t_such: u64 = msg.get(ptr((&k_refresh[0 as usize]) as u64))
+    let t_go: u64 = weg_knopftext()
+    var w_such: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_such,
+        ulib.length(t_such)) + 40
+    w_such = (w_such + 3) / 4 * 4
+    var w_go: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_go,
+        ulib.length(t_go)) + 40
+    w_go = (w_go + 3) / 4 * 4
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let _sp: usize = fuiscene.space(bar, BW - 16 - w_such - w_go - 16, 4)
+    let bs: usize = fuiscene.button(bar, t_such, K_SUCH)
+    fuiscene.set_size(bs, w_such, 36)
+    // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
+    // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
+    // erkennbar nicht bereit ist.
+    let bg: usize = fuiscene.button_main(bar, t_go, K_GO)
+    fuiscene.set_size(bg, w_go, 36)
+    fuiscene.set_enabled(bs, laeuft == 0)
+    fuiscene.set_enabled(bg, laeuft == 0 && weg_moeglich())
+}
+
+// The chosen disk is the selected row of the table (or no row).
+fn wahl_zeigen() {
+    if gewaehlt < p_anz {
+        fuiscene.table_set_sel(K_TTAB, gewaehlt)
+    } else {
+        fuiscene.table_set_sel(K_TTAB, fuiscene.HEAD_ROW)
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     // WAS AN ARGUMENTEN ANGEKOMMEN IST -- ALS ERSTES, vor allem
     // anderen. Ein Schalter, der nicht wirkt, hat zwei moegliche
@@ -1463,14 +1817,25 @@ fn u_start(args: u64) -> u64 {
     let zweite: bool = arg_hat(args, ptr((&a_zwei[0 as usize]) as u64))
     let daneben: bool = arg_hat(args, ptr((&a_neben[0 as usize]) as u64))
 
-    if !wlib.begin(nohit, false) {
-        say(ptr((&m_nowm[0 as usize]) as u64))
-        ulib.nl()
-        return 1
+    // DAILY-DRIVER (r172): the account needs root (it rewrites /etc/shadow and
+    // chowns): the boot-menu entry "Install OrientOS" is root, a window started
+    // from the live desktop is not. Then the install runs as before and says so.
+    // The test runner names the account with `konto=` / `kontopw=`.
+    if sofort {
+        if arg_wert(args, ptr((&a_kname[0 as usize]) as u64), (&a_nam[0 as usize]) as u64, 63)
+            && arg_wert(args, ptr((&a_kpw[0 as usize]) as u64), (&a_pw1[0 as usize]) as u64, 127) {
+            konto_an = 1
+        } else {
+            konto_an = 0
+        }
+    } else if ulib.sys(107, 0, 0, 0) != 0 {
+        konto_an = 0
+        konto_noroot = 1
     }
-    // DER KATALOG ZUERST, vor jedem Bedienelement: `wlib` behaelt den
-    // Zeiger auf den Text eines Knopfes, und ein Knopf, der vor dem
-    // Katalog entsteht, traegt den Schluessel statt des Wortes.
+    fuiscene.set_nohit(nohit)
+    // DER KATALOG ZUERST, vor jedem Bedienelement: ein Knoten behaelt den
+    // Zeiger auf seinen Text, und ein Knopf, der vor dem Katalog
+    // entsteht, traegt den Schluessel statt des Wortes.
     let _mk: u64 = msg.init()
 
     if daneben {
@@ -1487,110 +1852,56 @@ fn u_start(args: u64) -> u64 {
     dzeilen_bauen()
     status_bauen()
 
-    let w: u64 = wlib.window(wlibc.snap(40), wlibc.snap(40),
-        wlibc.snap_up(BW), wlibc.snap_up(BH),
-        msg.get(ptr((&k_title[0 as usize]) as u64)))
-    if w >= wlib.MAXWN {
+    // The column widths of the two tables (4-point grid).
+    tspalten[(0) as usize] = 120
+    tspalten[(1) as usize] = 260
+    tspalten[(2) as usize] = 100
+    tspalten[(3) as usize] = 200
+    pspalten[(0) as usize] = 48
+    pspalten[(1) as usize] = 120
+    pspalten[(2) as usize] = 120
+    pspalten[(3) as usize] = 180
+    pspalten[(4) as usize] = 232
+
+    if !fuiscene.open(40, 40, BW, BH, msg.get(ptr((&k_title[0 as usize]) as u64)),
+        build) {
         say(ptr((&m_nowm[0 as usize]) as u64))
         ulib.nl()
         return 1
     }
-    let _wa: u64 = wlib.window_app(w, ptr((&m_self[0 as usize]) as u64))
-
-    let pad: u64 = wlibc.space(2)
-    let gap: u64 = wlibc.space(1)
-    let bw: u64 = wlib.win_w(w)
-    let bh: u64 = wlib.win_h(w)
-    let kh: u64 = wlibc.metric(wlibc.M_CTRL_H)
-
-    // ============================================ DIE ANORDNUNG
-    //
-    // EINE senkrechte Schachtel ueber das ganze Fenster, und die
-    // Bibliothek verteilt darin. Die erste Fassung dieser Datei hat
-    // stattdessen VIER Schachteln mit ausgerechneten Y-Werten
-    // nebeneinandergesetzt -- und das Ergebnis war ein Fenster, in dem
-    // ausser dem Titelbalken NICHTS stand: 94,6 % einfarbige Flaeche,
-    // gemessen mit `pruef/bildpruef.py`. Im Quelltext war das nicht zu
-    // sehen; erst das Foto hat es gezeigt.
-    //
-    // Deshalb hier derselbe Aufbau wie im Aufgabenverwalter: EIN
-    // `box_v` mit Rand und Abstand, die Widgets der Reihe nach hinein,
-    // `size` nur dort, wo eine Hoehe nicht die Vorgabe ist.
-    let tbh: u64 = wlibc.snap_up(160)
-    let pbh: u64 = wlibc.snap_up(140)
-    wlib.box_v(w, 0, 0, bw, bh, pad, gap)
-    let lhead: u64 = wlib.label(msg.get(ptr((&k_head[0 as usize]) as u64)))
-    wlib.size(0, tbh)
-    let ttab: u64 = wlib.table((&tblob[0 as usize]) as u64, 5, NCOL,
-        (&tspalten[0 as usize]) as u64)
-    // ============================== DIE ZWEI WEGE ALS REITER
-    //
-    // Sie stehen UNTER der Plattenliste und nicht darueber: erst wird
-    // eine Platte gewaehlt, dann entschieden, was mit ihr geschehen
-    // soll. Umgekehrt muesste der Mensch ueber etwas entscheiden, das
-    // er noch nicht benannt hat.
-    let treiter: u64 = wlib.tabs((&tabtext[0 as usize]) as u64)
-    // Die Partitionsansicht des zweiten Weges.
-    wlib.size(0, pbh)
-    let ptab: u64 = wlib.table((&pblob[0 as usize]) as u64, 5, PCOL,
-        (&pspalten[0 as usize]) as u64)
-    let lfrei: u64 = wlib.label((&freizeile[0 as usize]) as u64)
-    let lesp: u64 = wlib.label((&espzeile[0 as usize]) as u64)
-    let lstat: u64 = wlib.label((&zeile[0 as usize]) as u64)
-    let lschritt: u64 = wlib.label((&schrittzeile[0 as usize]) as u64)
-    wlib.box_end()
-
-    // Die Partitionsansicht gehoert dem zweiten Reiter -- am Anfang
-    // steht der erste, also ist sie zu.
-    wlib.show(ptab, false)
-    wlib.show(lfrei, false)
-    wlib.show(lesp, false)
-
-    // EIN KLICK GENUEGT. Eine Platte waehlt man einmal aus; ein
-    // Doppelklick waere hier die Regel eines Dateimanagers am falschen
-    // Ort.
-    wlib.list_einklick(ttab, true)
-
-    // DIE KNOPFREIHE STEHT RECHTS UNTEN -- dieselbe Stelle, an der
-    // `wlib.dlg_new` seit Runde K15 die Antwortknoepfe hinsetzt.
-    let t_such: u64 = msg.get(ptr((&k_refresh[0 as usize]) as u64))
-    let t_go: u64 = msg.get(ptr((&k_go[0 as usize]) as u64))
-    let w_such: u64 = wlibc.snap_up(
-        wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_such, ulib.length(t_such))
-        + 2 * wlibc.metric(wlibc.M_PAD_X))
-    let w_go: u64 = wlibc.snap_up(
-        wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), t_go, ulib.length(t_go))
-        + 2 * wlibc.metric(wlibc.M_PAD_X))
-    let reihe: u64 = w_such + gap + w_go
-    wlib.box_h(w, bw - pad - reihe, bh - pad - kh, reihe, kh, 0, gap)
-    wlib.size(w_such, kh)
-    let bsuch: u64 = wlib.button(t_such)
-    wlib.size(w_go, kh)
-    let bgo: u64 = wlib.button(t_go)
-    wlib.box_end()
-
-    // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
-    // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
-    // erkennbar nicht bereit ist.
-    wlib.enable(bgo, weg_moeglich())
-    wlib.set_text(bgo, weg_knopftext())
-    if welcher_weg == 1 {
-        wlib.set_value(treiter, 1)
-        wlib.show(ptab, true)
-        wlib.show(lfrei, true)
-        wlib.show(lesp, true)
-        wlib.show(ttab, true)
+    fuiscene.set_app(ptr((&m_self[0 as usize]) as u64))
+    if konto_an != 0 && sofort {
+        fuiscene.entry_set(K_KNAME, (&a_nam[0 as usize]) as u64)
+        fuiscene.entry_set(K_KPW1, (&a_pw1[0 as usize]) as u64)
+        fuiscene.entry_set(K_KPW2, (&a_pw1[0 as usize]) as u64)
+        ulib.fill((&a_pw1[0 as usize]) as u64, 0, 128)
     }
+    konto_zeile_bauen()
+    // The first pump describes the tree and paints it.
+    let _k0: u64 = fuiscene.pump()
+    var ci: u64 = 0
+    while ci < NCOL {
+        fuiscene.table_colw(K_TTAB, ci, tspalten[(ci) as usize])
+        ci = ci + 1
+    }
+    var cj: u64 = 0
+    while cj < PCOL {
+        fuiscene.table_colw(K_PTAB, cj, pspalten[(cj) as usize])
+        cj = cj + 1
+    }
+    fuiscene.table_single(K_TTAB, true)
+    wahl_zeigen()
+    fuiscene.refresh()
 
-    wlib.draw_all()
     say(ptr((&m_ready[0 as usize]) as u64))
     ulib.sayu(p_anz)
     ulib.nl()
-    // WAS DIE BIBLIOTHEK WIRKLICH HINGESTELLT HAT. Ein Fenster, das
-    // leer aussieht, kann zweierlei heissen: die Widgets sind nicht da,
-    // oder sie stehen ausserhalb. Diese Zeile unterscheidet die beiden
-    // Faelle, und sie hat in dieser Runde genau das getan.
-    wlib.say_rects(ptr((&m_self[0 as usize]) as u64))
+    // WAS DIE OBERFLAECHE WIRKLICH HINGESTELLT HAT. Ein Fenster, das
+    // leer aussieht, kann zweierlei heissen: die Knoten sind nicht da,
+    // oder sie stehen ausserhalb. Diese Zeilen unterscheiden die beiden
+    // Faelle.
+    let _k1: u64 = fuiscene.pump()
+    fuiscene.say_rects(ptr((&m_self[0 as usize]) as u64))
 
     if nurzeig {
         return 0
@@ -1602,9 +1913,8 @@ fn u_start(args: u64) -> u64 {
     // Vorauswahl oben greift nur bei genau einer gefundenen Platte --
     // das ist fuer einen Menschen richtig (bei zweien soll er
     // waehlen), fuer den Laeufer aber eine Bedingung, die er nicht in
-    // der Hand hat: taucht ein zweites Geraet auf, tut der Lauf
-    // stillschweigend nichts und die Abnahme meldet "keine Schritte".
-    // Genau das ist in dieser Runde passiert.
+    // der Hand hat.
+    var los: bool = false
     if sofort {
         if gewaehlt >= p_anz && p_anz > 0 {
             gewaehlt = 0
@@ -1620,10 +1930,10 @@ fn u_start(args: u64) -> u64 {
             tafel_holen(nptr(gewaehlt))
             ptabelle_bauen()
             dzeilen_bauen()
-            wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
-            wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
-            wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
-            wlib.draw_all()
+            fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
+            wahl_zeigen()
+            fuiscene.refresh()
+            let _k2: u64 = fuiscene.pump()
             // AUF DEM WEG "DANEBEN" WIRD NUR LOSGELEGT, WENN ES GEHT.
             // Sonst bliebe der Lauf haengen und die Abnahme meldete
             // "keine Schritte", statt den Abbruchgrund zu zeigen.
@@ -1635,21 +1945,22 @@ fn u_start(args: u64) -> u64 {
                 return 0
             }
             frage = 2
+            los = true
         }
     }
 
     var runden: u64 = 0
-    while wlib.alive() && runden < 4000000 {
+    while fuiscene.alive() && runden < 4000000 {
         runden = runden + 1
 
-        // Die zweite Frage ist beantwortet: jetzt wird geschrieben.
-        if frage == 2 && laeuft == 0 && fertig == 0 {
+        // Die zweite Frage ist beantwortet (oder der Laeufer darf
+        // ohne): jetzt wird geschrieben.
+        if los && laeuft == 0 && fertig == 0 {
+            los = false
             laeuft = 1
             status_bauen()
-            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-            wlib.enable(bgo, false)
-            wlib.enable(bsuch, false)
-            wlib.draw_all()
+            fuiscene.refresh()
+            fuiscene.repaint_now()
             say(ptr((&m_go[0 as usize]) as u64))
             ulib.nl()
 
@@ -1658,9 +1969,9 @@ fn u_start(args: u64) -> u64 {
             // dahinter ist dieselbe Meldung.
             var gut: bool = false
             if welcher_weg == 1 {
-                gut = installieren_daneben(nptr(gewaehlt), lstat, lschritt)
+                gut = installieren_daneben(nptr(gewaehlt), 0, 0)
             } else {
-                gut = installieren(nptr(gewaehlt), lstat, lschritt)
+                gut = installieren(nptr(gewaehlt), 0, 0)
             }
             laeuft = 0
             if gut {
@@ -1684,144 +1995,127 @@ fn u_start(args: u64) -> u64 {
             } else {
                 status_bauen()
             }
-            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
             schritt_bauen()
-            wlib.set_text(lschritt, (&schrittzeile[0 as usize]) as u64)
-            wlib.enable(bsuch, true)
-            wlib.draw_all()
+            fuiscene.refresh()
             frage = 0
             if sofort {
                 return 0
             }
         }
 
-        let id: u64 = wlib.step()
-        if id < wlib.MAXWD {
-            let kind: u64 = wlib.fired_kind()
-            let idx: u64 = wlib.fired_index()
-            if kind == wlib.K_BUTTON {
-                if id == bsuch {
-                    platten_suchen()
-                    gewaehlt = 0xFFFFFFFFFFFFFFFF
-                    fertig = 0
-                    tabelle_bauen()
-                    wlib.set_text(ttab, (&tblob[0 as usize]) as u64)
-                    status_bauen()
-                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                    wlib.enable(bgo, false)
-                    wlib.draw_all()
-                } else if id == bgo && weg_moeglich() && laeuft == 0 {
-                    if welcher_weg == 1 {
-                        // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
-                        //
-                        // Die zweite Frage des anderen Weges gibt es,
-                        // weil dort eine ganze Platte geloescht wird --
-                        // die folgenreichste Sache, die dieses System
-                        // auf Knopfdruck tut. Hier wird NICHTS
-                        // geloescht; die vorhandenen Partitionen
-                        // bleiben, und das steht auch in der Frage.
-                        // Zwei Warnungen vor einem harmlosen Schritt
-                        // sind keine Vorsicht, sondern Gewoehnung --
-                        // und Gewoehnung ist genau das, was die zweite
-                        // Frage auf dem anderen Reiter wertlos machen
-                        // wuerde.
-                        frage = 2
-                        wlib.dlg_ask(
-                            msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
-                            msg.get(ptr((&k_d_askx[0 as usize]) as u64)))
-                        say(ptr((&m_ask[0 as usize]) as u64))
-                        ulib.sayu(9)
-                        ulib.nl()
-                    } else {
-                        // DIE ERSTE FRAGE.
-                        frage = 1
-                        wlib.dlg_ask(
-                            msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
-                            msg.get(ptr((&k_ask1x[0 as usize]) as u64)))
-                        say(ptr((&m_ask[0 as usize]) as u64))
-                        ulib.sayu(1)
-                        ulib.nl()
-                    }
+        let id: u64 = fuiscene.pump()
+        // DAILY-DRIVER (r172): hint line and install button follow the three
+        // account fields -- the tree is described again only when their state changes.
+        if laeuft == 0 && fertig == 0 && konto_an != 0 {
+            let ks: u64 = konto_stufe()
+            if ks != konto_ks {
+                konto_ks = ks
+                say(ptr((&m_kstate[0 as usize]) as u64))
+                ulib.sayu(ks)
+                say(ptr((&m_kgo[0 as usize]) as u64))
+                if weg_moeglich() {
+                    ulib.sayu(1)
+                } else {
+                    ulib.sayu(0)
                 }
-            } else if kind == wlib.K_TABLE && id == ttab {
-                if idx < p_anz {
-                    gewaehlt = idx
-                    say(ptr((&m_pick[0 as usize]) as u64))
-                    luft()
-                    say(nptr(gewaehlt))
-                    ulib.nl()
-                    // DIE TAFEL DIESER PLATTE LESEN. Erst jetzt -- vorher
-                    // ist nicht klar, um welche Platte es geht, und ein
-                    // Programm, das beim Start jede Platte durchliest,
-                    // haelt den Menschen auf.
-                    tafel_holen(nptr(gewaehlt))
-                    ptabelle_bauen()
-                    dzeilen_bauen()
-                    wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
-                    wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
-                    wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
-                    status_bauen()
-                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                    wlib.enable(bgo, weg_moeglich())
-                    wlib.draw_all()
-                }
-            } else if kind == wlib.K_TABS && id == treiter {
-                // DER WEG WIRD GEWECHSELT.
-                welcher_weg = idx
-                say(ptr((&m_d_weg[0 as usize]) as u64))
-                ulib.sayu(welcher_weg)
                 ulib.nl()
-                wlib.show(ptab, welcher_weg == 1)
-                wlib.show(lfrei, welcher_weg == 1)
-                wlib.show(lesp, welcher_weg == 1)
-                wlib.set_text(bgo, weg_knopftext())
-                status_bauen()
-                wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                wlib.enable(bgo, weg_moeglich())
-                wlib.draw_all()
+                konto_zeile_bauen()
+                fuiscene.refresh()
             }
         }
-
-        // Die Antwort auf eine der beiden Fragen.
-        if wlib.dlg_state() > 1 {
-            let ja: bool = wlib.dlg_state() == 2
-            wlib.dlg_close()
+        if id == K_SUCH {
+            platten_suchen()
+            gewaehlt = 0xFFFFFFFFFFFFFFFF
+            fertig = 0
+            tabelle_bauen()
+            fuiscene.table_set_blob(K_TTAB, (&tblob[0 as usize]) as u64)
+            status_bauen()
+            wahl_zeigen()
+            fuiscene.refresh()
+        } else if id == K_GO && weg_moeglich() && laeuft == 0 {
+            if welcher_weg == 1 {
+                // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
+                //
+                // Die zweite Frage des anderen Weges gibt es,
+                // weil dort eine ganze Platte geloescht wird --
+                // die folgenreichste Sache, die dieses System
+                // auf Knopfdruck tut. Hier wird NICHTS
+                // geloescht; die vorhandenen Partitionen
+                // bleiben, und das steht auch in der Frage.
+                // Zwei Warnungen vor einem harmlosen Schritt
+                // sind keine Vorsicht, sondern Gewoehnung --
+                // und Gewoehnung ist genau das, was die zweite
+                // Frage auf dem anderen Reiter wertlos machen
+                // wuerde.
+                frage = 2
+                fuiscene.dialog_open(
+                    msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
+                    msg.get(ptr((&k_d_askx[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(9)
+                ulib.nl()
+            } else {
+                // DIE ERSTE FRAGE.
+                frage = 1
+                fuiscene.dialog_open(
+                    msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
+                    msg.get(ptr((&k_ask1x[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(1)
+                ulib.nl()
+            }
+        } else if id == K_TTAB {
+            let idx: u64 = fuiscene.table_sel(K_TTAB)
+            if idx < p_anz {
+                gewaehlt = idx
+                say(ptr((&m_pick[0 as usize]) as u64))
+                luft()
+                say(nptr(gewaehlt))
+                ulib.nl()
+                // DIE TAFEL DIESER PLATTE LESEN. Erst jetzt -- vorher
+                // ist nicht klar, um welche Platte es geht, und ein
+                // Programm, das beim Start jede Platte durchliest,
+                // haelt den Menschen auf.
+                tafel_holen(nptr(gewaehlt))
+                ptabelle_bauen()
+                dzeilen_bauen()
+                fuiscene.table_set_blob(K_PTAB, (&pblob[0 as usize]) as u64)
+                status_bauen()
+                fuiscene.refresh()
+            }
+        } else if id == K_TAB0 || id == K_TAB1 {
+            // DER WEG WIRD GEWECHSELT.
+            welcher_weg = id - K_TAB0
+            say(ptr((&m_d_weg[0 as usize]) as u64))
+            ulib.sayu(welcher_weg)
+            ulib.nl()
+            status_bauen()
+            fuiscene.refresh()
+        } else if id == fuiscene.KEY_DIALOG {
+            // Die Antwort auf eine der beiden Fragen.
+            let ja: bool = fuiscene.dialog_result() == 1
             if ja && frage == 1 {
                 // DIE ZWEITE FRAGE. Sie kommt erst, wenn die erste mit
                 // Ja beantwortet ist -- und sie sagt, dass es jetzt
                 // unwiderruflich wird.
                 frage = 2
-                wlib.dlg_ask(
+                fuiscene.dialog_open(
                     msg.get(ptr((&k_ask2t[0 as usize]) as u64)),
-                    msg.get(ptr((&k_ask2x[0 as usize]) as u64)))
+                    msg.get(ptr((&k_ask2x[0 as usize]) as u64)),
+                    ptr((&t_ja[0 as usize]) as u64),
+                    ptr((&t_nein[0 as usize]) as u64))
                 say(ptr((&m_ask[0 as usize]) as u64))
                 ulib.sayu(2)
                 ulib.nl()
-                // Die zweite Frage steht jetzt; ihre Antwort kommt in
-                // einer der naechsten Runden. `frage` bleibt auf 2 und
-                // wird oben erst dann ausgewertet, wenn der Dialog
-                // wirklich zu ist.
-                wlib.draw_all()
-                // Warten, bis sie beantwortet ist.
-                var warte: u64 = 0
-                var zusage: bool = false
-                while wlib.alive() && warte < 4000000 {
-                    warte = warte + 1
-                    let _x: u64 = wlib.step()
-                    if wlib.dlg_state() > 1 {
-                        zusage = wlib.dlg_state() == 2
-                        wlib.dlg_close()
-                        wlib.draw_all()
-                        warte = 4000000
-                    }
-                }
-                if !zusage {
-                    frage = 0
-                    wlib.draw_all()
-                }
-            } else if !ja {
+            } else if ja && frage == 2 {
+                // Beide Fragen mit Ja: es wird geschrieben (oben).
+                los = true
+            } else {
                 frage = 0
-                wlib.draw_all()
             }
         }
     }

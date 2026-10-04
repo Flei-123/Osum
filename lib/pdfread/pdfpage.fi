@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/pdfread/pdfpage.fi -- one PDF page as a PICTURE: the reader's SVG
+// (vectors and text) drawn by lib/svg over white, with the page's images
+// blitted below it.
+//
+//     render_page(&doc, page, scale, fm, &out, &w, &h)
+//
+// `out` receives w * h pixels of 0xFFRRGGBB (row 0 on top), `fm` is the font
+// set of lib/svg (font.metrics FontSet address; 0 = no text).
+//
+// The images go UNDER the vector layer, whatever the order in the file was --
+// the one place where this differs from a real PDF renderer (a white box
+// drawn over an image is the case that shows).
+import std.rt
+import paint.png
+import svg.svgimage
+import pdfread.pdfread
+
+export { render_page }
+
+fn wr32p(p: u64, v: u32) {
+    *(p as *mut u32) = v
+}
+
+fn rd32p(p: u64) -> u32 {
+    return *(p as *mut u32)
+}
+
+fn blend_svg(svg: *mut rt.Buf, w: u64, h: u64, fm: u64, px: u64) {
+    var im: png.Image = png.image_new()
+    if svgimage.svg_too_image_big(rt.buf_ptr(svg), rt.buf_len(svg), &im, fm, w as usize, h as usize) {
+        let sp: u64 = im.px as u64
+        var n: u64 = 0
+        let total: u64 = (im.w * im.h) as u64
+        while n < total && n < w * h {
+            let a: u32 = (*((sp + n * 4 + 3) as *mut u8)) as u32
+            if a > 0 {
+                let r: u32 = (*((sp + n * 4) as *mut u8)) as u32
+                let g: u32 = (*((sp + n * 4 + 1) as *mut u8)) as u32
+                let b: u32 = (*((sp + n * 4 + 2) as *mut u8)) as u32
+                let old: u32 = rd32p(px + n * 4)
+                let or: u32 = (old >> 16) & 255
+                let og: u32 = (old >> 8) & 255
+                let ob: u32 = old & 255
+                let nr: u32 = (r * a + or * (255 - a)) / 255
+                let ng: u32 = (g * a + og * (255 - a)) / 255
+                let nb: u32 = (b * a + ob * (255 - a)) / 255
+                wr32p(px + n * 4, (nr << 16) | (ng << 8) | nb)
+            }
+            n = n + 1
+        }
+        png.image_free(&im)
+    }
+}
+
+fn render_page(d: *mut pdfread.Doc, page: u64, scale: f64, fm: u64, fm_bold: u64, fm_mono: u64,
+    fm_serif: u64, fm_serifb: u64, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+    var svg: rt.Buf = rt.buf_new()
+    var w: u64 = 0
+    var h: u64 = 0
+    if !pdfread.doc_page_svg(d, page, scale, 1, &svg, &w, &h) {
+        rt.buf_free(&svg)
+        return false
+    }
+    if w * h > 24000000 {
+        rt.buf_free(&svg)
+        return false
+    }
+    rt.buf_clear(out)
+    rt.buf_reserve(out, (w * h * 4) as usize)
+    rt.buf_set_len(out, (w * h * 4) as usize)
+    let px: u64 = rt.buf_ptr(out)
+    var i: u64 = 0
+    while i < w * h {
+        wr32p(px + i * 4, 0x00FFFFFF)
+        i = i + 1
+    }
+    // the images (their places were collected by doc_page_svg)
+    var k: u64 = 0
+    while k < pdfread.doc_img_count(d) {
+        pdfread.doc_img_blit(d, k, px, w, h)
+        k = k + 1
+    }
+    // the vector layer (with the regular face) over it, then the bold and the
+    // monospace text, each rendered with its own face
+    var layer: u32 = 1
+    while layer <= 5 {
+        var use_fm: u64 = fm
+        var have: bool = true
+        if layer == 2 {
+            use_fm = fm_bold
+            have = (pdfread.doc_styles(d) & 4) != 0
+        } else if layer == 3 {
+            use_fm = fm_mono
+            have = (pdfread.doc_styles(d) & 8) != 0
+        } else if layer == 4 {
+            // a serif face; no serif face loaded: the text stays in the system face
+            use_fm = fm_serif
+            have = (pdfread.doc_styles(d) & 16) != 0
+        } else if layer == 5 {
+            use_fm = fm_serifb
+            if use_fm == 0 {
+                use_fm = fm_serif
+            }
+            have = (pdfread.doc_styles(d) & 32) != 0
+        }
+        if use_fm == 0 {
+            use_fm = fm
+        }
+        if have {
+            if layer > 1 {
+                rt.buf_clear(&svg)
+                var w2: u64 = 0
+                var h2: u64 = 0
+                pdfread.doc_page_svg(d, page, scale, layer, &svg, &w2, &h2)
+            }
+            blend_svg(&svg, w, h, use_fm, px)
+        }
+        layer = layer + 1
+    }
+    // opaque
+    var j: u64 = 0
+    while j < w * h {
+        wr32p(px + j * 4, rd32p(px + j * 4) | 0xFF000000)
+        j = j + 1
+    }
+    rt.buf_free(&svg)
+    *wo = w
+    *ho = h
+    return true
+}

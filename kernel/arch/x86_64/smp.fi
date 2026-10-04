@@ -77,6 +77,8 @@ export {
     // RUNDE ARGON (K-021): die Kerne vor der Entsperrung.
     frueh_start,
     wache_brueche,
+    // DD-12 (K-004c): park the application processors for S3, start them again.
+    park_all, unpark_all,
     M_NOSMP, M_NOLOCK, M_SMPLONG, M_NOLOCKALL,
     M_FSRACE, M_FSBLIND
 }
@@ -344,7 +346,10 @@ fn wake(state: u64, apid: u64, vector: u64) {
 
 // Copies the blob out of the kernel image down to where a STARTUP message
 // can point at it, and starts every core but this one.
-fn start(state: u64) {
+// Puts the trampoline blob and the block every core reads into low memory
+// (again). DD-12: S3 wrote its own wake-up blob over the same page, so the
+// copy has to be repeatable. Returns the address of the parameter block.
+fn prep_blob(state: u64) -> u64 {
     let vectors: u64 = kstate.get(state, kstate.VECTORS)
     let table: u64 = at(vectors, V_SMP)
     let blob: u64 = tv(table, 0)
@@ -363,6 +368,14 @@ fn start(state: u64) {
     atomic.store(param + P_CR3, kstate.get(state, kstate.KPML4))
     atomic.store(param + P_KDATA, state)
     atomic.store(param + P_ENTRY, at(vectors, V_AP_MAIN))
+    return param
+}
+
+fn start(state: u64) {
+    let vectors: u64 = kstate.get(state, kstate.VECTORS)
+    let table: u64 = at(vectors, V_SMP)
+    let base: u64 = tv(table, 2)
+    let param: u64 = prep_blob(state)
 
     let n: u64 = cpu.count(state)
     var k: u64 = 1
@@ -433,10 +446,17 @@ fn one(state: u64, k: u64, param: u64, base: u64) {
     cpu.set(state, k, cpu.C_GDT, page)
     cpu.set(state, k, cpu.C_TSS, dfst + mem.FRAME_SIZE)
 
-    atomic.store(param + P_STACK, top)
+    kstate.add(state, kstate.SMP_OFF + S_STARTED, 1)
+    bring(state, k, param, base)
+}
+
+// INIT + STARTUP for core k on the stack recorded for it, and wait until
+// it says it is there. Used for the first start and for every resume
+// after S3 (the stack, descriptor table and TSS pages are then the same).
+fn bring(state: u64, k: u64, param: u64, base: u64) {
+    atomic.store(param + P_STACK, cpu.get(state, k, cpu.C_STACK))
     atomic.store(param + P_CPU, k)
     atomic.store(param + P_FLAG, 0)
-    kstate.add(state, kstate.SMP_OFF + S_STARTED, 1)
 
     wake(state, cpu.apic_id(state, k), base >> 12)
 
@@ -522,6 +542,12 @@ fn ap_main(state: u64, index: u64) {
     apic.core_init(state, index)
     cpu.set(state, index, cpu.C_ONLINE, 1)
     atomic.barrier()
+    // DD-12: a core started again after S3 has its idle task already;
+    // it goes straight back into the scheduler loop instead of into the
+    // phase list (whose last number would start an old phase again).
+    if cpu.get(state, index, cpu.C_RESUMED) != 0 && cpu.get(state, index, cpu.C_IDLE) != 0 {
+        scheduler_core(state, index)
+    }
     phases(state, index)
     // The scheduler loop never returns; if it ever did, stopping is the
     // only honest thing left.
@@ -570,7 +596,13 @@ fn tables(state: u64, index: u64) {
 // the atomic add.
 fn phases(state: u64, index: u64) {
     var seen: u64 = PH_WAIT
+    if cpu.get(state, index, cpu.C_RESUMED) != 0 {
+        seen = atomic.load(sp(state, S_PHASE))
+    }
     while true {
+        if cpu.get(state, index, cpu.C_PARKREQ) != 0 {
+            park_here(state, index)
+        }
         let ph: u64 = atomic.load(sp(state, S_PHASE))
         if ph != seen {
             seen = ph
@@ -1687,14 +1719,23 @@ fn schedule_demo(state: u64) {
 
 // What a started core becomes once the measurements are over.
 fn scheduler_core(state: u64, index: u64) {
-    let idle: u64 = sched.adopt(state, sched.K_IDLE, 1,
-        cpu.get(state, index, cpu.C_STACK))
-    cpu.set(state, index, cpu.C_CUR, idle)
-    cpu.set(state, index, cpu.C_IDLE, idle)
+    var idle: u64 = cpu.get(state, index, cpu.C_IDLE)
+    let again: bool = idle != 0 && cpu.get(state, index, cpu.C_RESUMED) != 0
+    if again {
+        // DD-12: back from S3 -- the idle task and its stack exist.
+        cpu.set(state, index, cpu.C_CUR, idle)
+    } else {
+        idle = sched.adopt(state, sched.K_IDLE, 1,
+            cpu.get(state, index, cpu.C_STACK))
+        cpu.set(state, index, cpu.C_CUR, idle)
+        cpu.set(state, index, cpu.C_IDLE, idle)
+    }
     atomic.barrier()
     // This phase is the one a core does not come back from, so it counts
     // itself done BEFORE it starts rather than after.
-    atomic.fetch_add(sp(state, S_DONE), 1)
+    if !again {
+        atomic.fetch_add(sp(state, S_DONE), 1)
+    }
     apic.timer_start(state, 100)
     idt.enable()
     while true {
@@ -1714,8 +1755,109 @@ fn scheduler_core(state: u64, index: u64) {
             lz = lz + 1
         }
         sched.yield_now(state)
+        // DD-12 (K-004c): asked to park (S3) and standing in the idle
+        // task -- nothing of the system runs on this core any more.
+        if cpu.get(state, index, cpu.C_PARKREQ) != 0
+        && cpu.get(state, index, cpu.C_CUR) == cpu.get(state, index, cpu.C_IDLE) {
+            park_here(state, index)
+        }
         idt.halt()
     }
+}
+
+// ----------------------------------------------- DD-12: park for S3 (K-004c)
+//
+// S3 cuts the power of every core but the one that writes SLP_EN. Before
+// that the application processors are PARKED: the scheduler hands them
+// nothing new (`sched.pick`), their last task goes back to the queue, they
+// stop their timer, mask their local APIC and wait in `cli; hlt`. After
+// the wake-up each one is started like the first time (INIT + STARTUP on
+// the stack, descriptor table and TSS it already has) and goes straight
+// back into its scheduler loop with the same idle task.
+
+fn park_here(state: u64, index: u64) {
+    asm("cli")
+    // timer, LINT0/1 and error LVT masked: nothing wakes it but INIT
+    apic.core_init(state, index)
+    cpu.set(state, index, cpu.C_PARKED, 1)
+    atomic.barrier()
+    while true {
+        asm("cli")
+        asm("hlt")
+    }
+}
+
+// Park every application processor. true = all are parked and counted
+// offline (online_count is 1); false = one did not park within 3 s (a
+// task pinned to it, a core that never ran the scheduler) -- then every
+// core is started again and the caller must refuse to sleep.
+fn park_all(state: u64) -> bool {
+    let n: u64 = cpu.count(state)
+    var k: u64 = 1
+    var asked: u64 = 0
+    while k < n {
+        cpu.set(state, k, cpu.C_PARKED, 0)
+        if cpu.online(state, k) {
+            cpu.set(state, k, cpu.C_PARKREQ, 1)
+            asked = asked + 1
+        }
+        k = k + 1
+    }
+    if asked == 0 {
+        return true
+    }
+    atomic.barrier()
+    var waited: u64 = 0
+    var all: bool = false
+    while waited < 3000 && !all {
+        all = true
+        k = 1
+        while k < n {
+            if cpu.get(state, k, cpu.C_PARKREQ) != 0 && cpu.get(state, k, cpu.C_PARKED) == 0 {
+                all = false
+            }
+            k = k + 1
+        }
+        if !all {
+            udelay(state, 1000)
+            waited = waited + 1
+        }
+    }
+    if !all {
+        unpark_all(state)
+        return false
+    }
+    k = 1
+    while k < n {
+        if cpu.get(state, k, cpu.C_PARKREQ) != 0 {
+            cpu.set_online(state, k, 0)
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// Start every parked core again; cores that were only asked simply lose
+// the request. Returns how many are online afterwards.
+fn unpark_all(state: u64) -> u64 {
+    let n: u64 = cpu.count(state)
+    let param: u64 = prep_blob(state)
+    let base: u64 = sget(state, S_TRAMP)
+    var k: u64 = 1
+    while k < n {
+        if cpu.get(state, k, cpu.C_PARKREQ) != 0 {
+            let parked: bool = cpu.get(state, k, cpu.C_PARKED) != 0
+            cpu.set(state, k, cpu.C_PARKREQ, 0)
+            cpu.set(state, k, cpu.C_PARKED, 0)
+            if parked {
+                cpu.set(state, k, cpu.C_RESUMED, 1)
+                cpu.set_online(state, k, 0)
+                bring(state, k, param, base)
+            }
+        }
+        k = k + 1
+    }
+    return cpu.online_count(state)
 }
 
 // ------------------------------------------------------------ the locks

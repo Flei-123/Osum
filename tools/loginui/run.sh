@@ -148,7 +148,7 @@ PY
 }
 halt_vm() { [ -n "$D" ] && kill "$(cat "$D/pid")" 2>/dev/null; sleep 1; }
 # the n-th glogin rect of a kind, from its LAST report
-rect_of() { grep -aoE "^glogin: rect id=[0-9]+ kind=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | sed -n "${2}p"; }
+rect_of() { grep -aoE "glogin: rect id=[0-9]+ kind=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | sed -n "${2}p"; }
 fld() { echo "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # every wlib program writes to the one serial line -- only glogin's lines
 GP=""
@@ -224,7 +224,7 @@ if [ -z "$PWID" ] || [ -z "$BTNID" ] || [ -z "$OTHID" ]; then
     bad "the layout is not field + two buttons"; halt_vm; ende
 fi
 ok "one password field and two buttons on the screen"
-NENTRY=$(grep -aoE '^glogin: rect id=[0-9]+ kind=(4|5) ' "$D/serial.txt" | wc -l)
+NENTRY=$(grep -aoE 'glogin: rect id=[0-9]+ kind=(4|5) ' "$D/serial.txt" | wc -l)
 num "visible fields and lists (only the password; the name is a label)" "$NENTRY" eq 1
 F0=$(foci | tail -1)
 [ "$F0" = "id=$PWID kind=4" ] && ok "the focus starts in the password field ($F0)" \
@@ -260,8 +260,13 @@ for r in sys.argv[2:]:
     d = dict(re.findall(r'(\w+)=(\d+)', r))
     x, y, h = int(d['x']), int(d['y']), int(d['h'])
     # the left edge, half way down: ring = dark, no ring = light border
-    p = [im.getpixel((x + k, y + h // 2)) for k in range(0, 3)]
-    if min(sum(c) for c in p) < 300:
+    # (a main button's ring sits three points OUTSIDE its face, hence -3)
+    p = [im.getpixel((x + k, y + h // 2)) for k in range(-3, 3)]
+    # DESIGN RULE 02.10.2026: the main button ("Anmelden") is filled with
+    # the accent colour, which is dark too. A ring is a dark edge that
+    # DIFFERS from the face behind it: the face is read 10 points inside.
+    face = sum(im.getpixel((x + 10, y + h // 2)))
+    if any(sum(c) < 600 and abs(sum(c) - face) > 60 for c in p):
         hits.append(d['id'])
 print(' '.join(hits) if hits else '-')
 PY
@@ -325,7 +330,7 @@ NET=$(rect_of 2 3); POW=$(rect_of 2 4)
 if [ -z "$POW" ] && [ -n "$NET" ]; then
     POW="id=? kind=2 x=$(( $(fld "$NET" x) + $(fld "$NET" w) + 4 )) y=$(fld "$NET" y) w=$(fld "$NET" w) h=$(fld "$NET" h)"
 fi
-UHR=$(grep -aoE "^glogin: rect id=[0-9]+ kind=1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | awk -F'[ =]' '{ if ($8 > 900 && $10 > 650) print }' | head -1)
+UHR=$(grep -aoE "glogin: rect id=[0-9]+ kind=1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | awk -F'[ =]' '{ if ($8 > 900 && $10 > 650) print }' | head -1)
 info "clock: $UHR"; info "network: $NET"; info "power: $POW"
 if [ -n "$UHR" ] && [ "$(fld "$NET" x)" -gt 900 ] 2>/dev/null && [ "$(fld "$POW" y)" -gt 650 ] 2>/dev/null && [ "$(fld "$POW" y)" -lt 712 ] 2>/dev/null; then
     ok "clock, network and power sit in the bottom right corner (above the taskbar strip)"

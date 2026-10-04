@@ -96,7 +96,10 @@ ESP_MIB=${ESP_MIB:-96}
 # STATUS-FREMDLAND.md ("4096 Bloecke = 2 MB je Platte") und der
 # Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
 # nicht mehr -- das gebaute Abbild meldet bmblocks=128.
-FS_BLOCKS=${FS_BLOCKS:-65536}
+# DAILY-DRIVER (02.10.2026): 65536 -> 81920 blocks (40 MiB). The PDF viewer
+# (pdfview, 1.9 MB), kontocli and the fatter installer filled the 32 MiB image:
+# "mkfs: the disk is full". 81920 blocks need 20 of the 128 map blocks.
+FS_BLOCKS=${FS_BLOCKS:-81920}
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
@@ -263,7 +266,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown sperrwache init svc term shasum noise \
-orientbus act settingsd"}
+orientbus act settingsd axd sntp kontocli pdfview store stored"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -801,10 +804,11 @@ printf 'de\n' > "$OUT/locale-de"
 #                        Let's-Encrypt-Kette von store.fleitec.com
 #                        geprueft hat. $OTA_ROOTS ueberschreibt.
 #   /etc/ota.conf        WOHER. Ein NAME und keine Adresse: das Geraet
-#                        loest ihn selbst auf (Runde BETRIEB). `auto=nein`
-#                        bleibt -- ein Stick, der ab Werk von selbst
-#                        nachfragt, waere eine Entscheidung, die niemand
-#                        getroffen hat. Der Mensch tippt `ota suchen`.
+#                        loest ihn selbst auf (Runde BETRIEB). `auto=true` ist
+#                        die Vorgabe (Entscheidung des Besitzers
+#                        02.10.2026): das Abbild sucht, holt und spielt
+#                        Updates selbst ein; abschaltbar in Einstellungen
+#                        -> Updates oder mit `ota einstellen auto nein`.
 #   /system/schluessel.pub  WEM. Ohne den vertrauten Schluessel nimmt
 #                        `ota` kein Verzeichnis und `opk` kein Paket an.
 #
@@ -839,11 +843,11 @@ else
 #          Nameserver auf, den ihm DHCP gegeben hat (Runde BETRIEB), und
 #          prueft das Zertifikat gegen /etc/ssl/roots.pem.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe NEIN: gesucht wird, wenn jemand es sagt.
+# auto     true/false (ja/nein gehen auch). Vorgabe true (Entscheidung des Besitzers 02.10.2026): suchen, holen, einspielen; abschaltbar in Einstellungen -> Updates.
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 quelle=$STORE/aktuell
 abstand=3600
-auto=nein
+auto=true
 frist=120
 EOFOTA
 fi
@@ -923,6 +927,10 @@ ARGS+=(/lib/
        "/lib/mono.ttf=assets/osum-mono.ttf"
        "/lib/sans.ttf=assets/osum-sans.ttf"
        "/lib/bold.ttf=assets/osum-sans-bold.ttf"
+       # DD / PDFVIEW: the serif faces (Liberation Serif, SIL OFL; assets/LICENSE-OFL-liberation.txt),
+       # loaded by fuiglyph on the first ask of ROLE_SERIF -- only the PDF viewer asks
+       "/lib/serif.ttf=assets/osum-serif.ttf"
+       "/lib/serifb.ttf=assets/osum-serif-bold.ttf"
        "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
@@ -1060,8 +1068,21 @@ ARGS+=(/users/ /users/root/ /users/root/config/
 if [ "$IMAGE_PROFILE" = public ]; then
     ARGS+=("/etc/autologin=$OUT/autologin")
 fi
+# r309: Limine's BIOS stages for the INSTALLER (kernel/user/instkern.fi embeds
+# stage 1/2 into the GPT it writes, the installer copies stage 3 to the EFI
+# partition). limine-bios-hdd.bin is not shipped as a file by Limine; it is the
+# C array in limine-bios-hdd.h, the same bytes `limine bios-install` embeds.
+python3 - "$LIMINE/limine-bios-hdd.h" "$OUT/limine-hdd.bin" <<'PYHDD' || fehler "limine-hdd.bin could not be made"
+import re, sys
+t = open(sys.argv[1]).read()
+b = bytes(int(x, 16) for x in re.findall(r'0x([0-9a-fA-F]{2})\b', t))
+assert 4096 < len(b) < 32768 and b[510:512] == b"\x55\xaa", len(b)
+open(sys.argv[2], "wb").write(b)
+PYHDD
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
-       "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
+       "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI"
+       "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
+       "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
 # ==================================================== RUNDE ENERGIE
 # /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
 # NIEMANDEN, DEM ER ES SAGEN KANN.
@@ -1136,7 +1157,12 @@ ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/orientbus/policy=etc/orientbus/policy"
        "/etc/settings.schema=etc/settings.schema"
-       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
+       # A11Y-2 (AB-021): the accessibility tree on the bus, provider /bin/axd
+       "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
+       # DAILY-DRIVER (P-007): the program store -- provider /bin/stored, window /bin/store
+       "/etc/actions.d/store.actions=etc/actions.d/store.actions"
+       "/etc/store.conf=etc/store.conf")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
@@ -1166,6 +1192,21 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
     fi
 done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
+# DAILY-DRIVER: THE ZONE AND THE NETWORK CLOCK. `sntp boot` (started by
+# the desktop) applies /etc/time.conf to the kernel and, with auto=true,
+# sets the clock from /etc/ntp.conf as soon as the network is there. The
+# personal image is Vienna (60 minutes + EU summer time) with the network
+# clock on; the public image is UTC with it OFF -- a download that asks a
+# server by itself on first start is the thing the public image avoids.
+if [ "$IMAGE_PROFILE" = public ]; then
+    printf 'offset=0\nrule=none\n' > "$OUT/time.conf"
+    NTPAUTO=false
+else
+    printf 'offset=60\nrule=eu\n' > "$OUT/time.conf"
+    NTPAUTO=true
+fi
+printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  host or host:port; auto  true/false; abstand  seconds between two checks\nserver=pool.ntp.org\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
+ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
 # PRE-PAIRED DEVICE KEY (personal image only). The seed was generated on
 # the JARVIS server and its public key is already registered there
@@ -1240,6 +1281,10 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/init /etc/inittab /etc/ziel \
 /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
 /etc/settings.schema /etc/actions.d/settings.actions \
+/bin/axd /etc/actions.d/a11y.actions \
+/bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
+/bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
+/apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
@@ -1307,19 +1352,19 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe graphics)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (no network)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
 
 /Command line
     protocol: multiboot1
@@ -1339,55 +1384,55 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
 
 //@MARKE_PRODUKT@ (measuring board)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: interrupt pin)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: polled)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=120 usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (framebuffer uncached)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (framebuffer write-back)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (status lamp, blink fields)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (apps on core 0 only)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
 
 //@MARKE_PRODUKT@ (check: wrong GS base)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (2560x1440)
     protocol: multiboot1

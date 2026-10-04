@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/pdf/pdfsearch.fi -- HOST test driver of lib/pdfread/pdftext.fi.
+//
+//     firnc tools/pdf/pdfsearch.fi -o /tmp/pdfsearch
+//     /tmp/pdfsearch file.pdf query [scale-percent]   per page: `page N matches=M boxes=K`
+//     /tmp/pdfsearch file.pdf --dump  [scale-percent]   per page: `T N <normalised text>`
+//
+// `boxes` is the number of glyph boxes the matches would be marked with.
+import std.rt
+import pdfread.pdfread
+import pdfread.pdftext
+
+fn cstr_len(p: u64) -> usize {
+    var n: usize = 0
+    while rt.ld8(p, n) != (0 as u8) {
+        n = n + 1
+    }
+    return n
+}
+
+fn put_utf8(o: *mut rt.Buf, u: u32) {
+    if u < 128 {
+        rt.buf_push(o, u as u8)
+    } else if u < 2048 {
+        rt.buf_push(o, (192 | (u >> 6)) as u8)
+        rt.buf_push(o, (128 | (u & 63)) as u8)
+    } else if u < 65536 {
+        rt.buf_push(o, (224 | (u >> 12)) as u8)
+        rt.buf_push(o, (128 | ((u >> 6) & 63)) as u8)
+        rt.buf_push(o, (128 | (u & 63)) as u8)
+    } else {
+        rt.buf_push(o, (240 | (u >> 18)) as u8)
+        rt.buf_push(o, (128 | ((u >> 12) & 63)) as u8)
+        rt.buf_push(o, (128 | ((u >> 6) & 63)) as u8)
+        rt.buf_push(o, (128 | (u & 63)) as u8)
+    }
+}
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 3 {
+        return 64
+    }
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(rt.arg_ptr(start, 1), &b) {
+        return 2
+    }
+    var scale: f64 = 1.0
+    if argc > 3 {
+        var v: u64 = 0
+        let ap: u64 = rt.arg_ptr(start, 3)
+        var i: usize = 0
+        while rt.ld8(ap, i) != (0 as u8) {
+            v = v * 10 + ((rt.ld8(ap, i) - 48) as u64)
+            i = i + 1
+        }
+        scale = (v as f64) / 100.0
+    }
+    var d: pdfread.Doc = pdfread.doc_new()
+    if !pdfread.doc_open(&d, rt.buf_ptr(&b), rt.buf_len(&b) as u64) {
+        return 3
+    }
+    let qp: u64 = rt.arg_ptr(start, 2)
+    var dump: bool = false
+    if cstr_len(qp) == 6 && rt.ld8(qp, 0) == (45 as u8) && rt.ld8(qp, 1) == (45 as u8) && rt.ld8(qp, 2) == (100 as u8) {
+        dump = true
+    }
+    var q: rt.Buf = rt.buf_new()
+    pdftext.fold_utf8(qp, cstr_len(qp) as u64, &q)
+    let qn: u64 = (rt.buf_len(&q) as u64) / 4
+    let np: u64 = pdfread.doc_pages(&d)
+    var o: rt.Buf = rt.buf_new()
+    var pg: u64 = 0
+    while pg < np {
+        var txt: rt.Buf = rt.buf_new()
+        var map: rt.Buf = rt.buf_new()
+        if !pdftext.page_text(&d, pg, scale, &txt, &map) {
+            let e0: str = "page "
+            rt.buf_push_bytes(&o, e0.p as u64, 5)
+            rt.buf_push_dec_u64(&o, pg + 1)
+            let e00: str = " error\n"
+            rt.buf_push_bytes(&o, e00.p as u64, 7)
+            pg = pg + 1
+            continue
+        }
+        let tn: u64 = (rt.buf_len(&txt) as u64) / 4
+        if dump {
+            rt.buf_push(&o, 84 as u8)
+            rt.buf_push(&o, 32 as u8)
+            rt.buf_push_dec_u64(&o, pg + 1)
+            rt.buf_push(&o, 32 as u8)
+            var k: u64 = 0
+            while k < tn {
+                put_utf8(&o, *((rt.buf_ptr(&txt) + k * 4) as *mut u32))
+                k = k + 1
+            }
+            rt.buf_push(&o, 10 as u8)
+        } else {
+            var matches: u64 = 0
+            var boxes: u64 = 0
+            var at: u64 = 0
+            var guard: u64 = 0
+            while guard < 100000 {
+                guard = guard + 1
+                let m: u32 = pdftext.find(&txt, &q, at)
+                if m == pdftext.NONE {
+                    break
+                }
+                matches = matches + 1
+                var k2: u64 = 0
+                while k2 < qn {
+                    if pdftext.match_glyphs(&map, m as u64, qn, k2) != pdftext.NONE {
+                        boxes = boxes + 1
+                    }
+                    k2 = k2 + 1
+                }
+                at = (m as u64) + qn
+            }
+            let e1: str = "page "
+            rt.buf_push_bytes(&o, e1.p as u64, 5)
+            rt.buf_push_dec_u64(&o, pg + 1)
+            let e2: str = " matches="
+            rt.buf_push_bytes(&o, e2.p as u64, 9)
+            rt.buf_push_dec_u64(&o, matches)
+            let e3: str = " boxes="
+            rt.buf_push_bytes(&o, e3.p as u64, 7)
+            rt.buf_push_dec_u64(&o, boxes)
+            rt.buf_push(&o, 10 as u8)
+        }
+        rt.buf_free(&txt)
+        rt.buf_free(&map)
+        pg = pg + 1
+    }
+    rt.write_everything(1, rt.buf_ptr(&o), rt.buf_len(&o))
+    return 0
+}

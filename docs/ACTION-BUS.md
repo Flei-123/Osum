@@ -389,6 +389,23 @@ Bildschirm reaches the kernel through settingsd, the page Netz asks for
 DHCP and after the yes /etc/network.conf says `modus=dhcp`. Not on the
 bus: theme, time zone, the fixed network address, contrast/gamma/mode.
 
+### 6.0 The system update on the bus (DAILY-DRIVER, 02.10.2026)
+
+Two keys of the schema are wired to `/etc/ota.conf` (`store`):
+`update.auto` (`auto=`, `true`/`false`) and `update.channel` (`kanal=`,
+`stable` or `test`); both are `critical`. Four more actions of the provider
+`settings` (root) run the update: `settings.update.status` (read: `here`,
+`there`, `time`, `phase`, `channel`, `auto`, `busy`, from
+`/system/ota.stand`), `settings.update.check` (write: `ota suchen` in a
+child), `settings.update.install` and `settings.update.rollback`
+(critical: `ota einspielen` / `ota zurueck`; the new generation takes
+effect at the next start). They answer at once and run `ota` in a child
+that is reaped in the serve loop; a second request meanwhile is `err busy`.
+`dryrun` answers `would=<ota command>` and starts nothing. The settings
+window's page *Updates* (15th tab) is a client of exactly these actions.
+Tests: `tools/actionbus/run.sh` section 13 (`S-UPD`), `tools/actionbus/gui.sh`
+(`G-UPDPAGE`), `tools/ota/run.sh` section 7.
+
 ### 6.1 The design (AB-005)
 
 `/bin/settingsd` (provider `settings`, manifest

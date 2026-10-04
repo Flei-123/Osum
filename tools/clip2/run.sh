@@ -84,7 +84,7 @@ grep -qE 'fire\(d, K_DROP, zeile, w\)' kernel/user/wlib.fi \
 grep -qE 'fn drop_an\(' kernel/user/wlib.fi \
     && ok "wlib hat drop_an (ein Fenster meldet sich als Ziel an)" \
     || bad "wlib hat kein drop_an"
-grep -qE 'wlib\.drop_an\(true\)' kernel/user/explorer.fi \
+grep -qE 'fuiscene\.drop_accept\(true\)' kernel/user/explorer.fi \
     && ok "der Dateimanager meldet sich als Ablegeziel an" \
     || bad "der Dateimanager meldet sich nicht an"
 grep -qE 'fn ablegen\(' kernel/user/explorer.fi \
@@ -271,13 +271,13 @@ rm -rf "$GBAUM"; mkdir -p "$GBAUM"
 tar -C "$ROOT" --exclude=./.git --exclude=./docs --exclude=./pruef \
     --exclude=./.gauntlet-shots --exclude=./.clip2-shots -cf - . \
     | tar -C "$GBAUM" -xf -
-if ! grep -qE '^\s*wlib\.drop_an\(true\)' "$GBAUM/kernel/user/explorer.fi"; then
-    bad "GEGENPROBE GREIFT NICHT: 'wlib.drop_an(true)' steht gar nicht da"
+if ! grep -qE '^\s*fuiscene\.drop_accept\(true\)' "$GBAUM/kernel/user/explorer.fi"; then
+    bad "GEGENPROBE GREIFT NICHT: 'fuiscene.drop_accept(true)' steht gar nicht da"
 else
-    ok "Gegenprobe greift: die Zeile 'wlib.drop_an(true)' ist da"
-    sed -i 's/^\(\s*\)wlib\.drop_an(true)/\1wlib.drop_an(false)/' \
+    ok "Gegenprobe greift: die Zeile 'fuiscene.drop_accept(true)' ist da"
+    sed -i 's/^\(\s*\)fuiscene\.drop_accept(true)/\1fuiscene.drop_accept(false)/' \
         "$GBAUM/kernel/user/explorer.fi"
-    if grep -qE '^\s*wlib\.drop_an\(false\)' "$GBAUM/kernel/user/explorer.fi"; then
+    if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM/kernel/user/explorer.fi"; then
         ok "Gegenprobe: die Anmeldung ist auf false gesetzt"
         export DESIGNBUILD=/tmp/osum-clip2-gegen
         bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \

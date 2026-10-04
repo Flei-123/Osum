@@ -601,6 +601,8 @@ action sneaky.run write "A native app may not hide an adapter"
   adapter cli /bin/sh -c x
 EOF
 printf '# /etc/sperre.conf -- test copy\nleerlauf=300\n' > "$TMPD/sperre.conf"
+# DAILY-DRIVER: update.auto / update.channel are `store /etc/ota.conf auto|kanal`
+printf '# /etc/ota.conf -- test copy\nquelle=https://example.invalid/aktuell\nabstand=3600\nauto=false\nkanal=stable\n' > "$TMPD/ota.conf"
 printf 'schema 1\nsetting display.brightness int 0..100 dangerous "typo in the risk"\n' > "$TMPD/bad.schema"
 python3 tools/actionbus/manifest.py check --wrapper "$TMPD/fplayer.actions" > "$TMPD/lint4.txt" 2>&1 \
     && ok "host reader takes the wrapper manifest ($(head -1 "$TMPD/lint4.txt" | cut -d' ' -f3-))" \
@@ -657,6 +659,17 @@ echo rc=$?
 echo ==S-STORE==
 act call settings.set key=lock.idle value=900
 cat /etc/sperre.conf
+echo ==S-UPD==
+act call settings.update.status
+act call settings.update.check --dry
+act call settings.update.install --dry --as jarvis
+act call settings.update.rollback --as jarvis
+act reject last
+act call settings.set key=update.channel value=test
+act confirm last
+cat /etc/ota.conf
+act call settings.get key=update.channel
+act call settings.set key=update.channel value=beta
 echo ==S-HIST==
 act call settings.history
 echo ==S-UNDO==
@@ -723,7 +736,7 @@ EXTRA=("/etc/settings.schema=etc/settings.schema"
        "/etc/actions.d/fplayer.actions=$TMPD/fplayer.actions"
        "/etc/actions.d/gimp.actions=$TMPD/gimp.actions"
        /apps/sneaky.osp/ "/apps/sneaky.osp/ACTIONS=$TMPD/nativead.actions"
-       "/etc/sperre.conf=$TMPD/sperre.conf" "/t/bad.schema=$TMPD/bad.schema"
+       "/etc/sperre.conf=$TMPD/sperre.conf" "/etc/ota.conf=$TMPD/ota.conf" "/t/bad.schema=$TMPD/bad.schema"
        /opt/ /opt/linux/ "/opt/linux/fakeplayer=$TMPD/fakeplayer"
        /var/player/@755:65534:65534)
 image "$TMPD/E.img" "$TMPD/s5.sh"
@@ -764,9 +777,22 @@ has "$TMPD/p.txt" "confirm 4 settings.update.auto" "... and asks the USER too --
 has "$TMPD/p.txt" "change=3" "after the user's yes it is done"
 part "$E" S-DRY S-STORE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "would=net.wifi.enabled from true to false" "a dry run of a critical change says what WOULD happen and changes nothing"
-part "$E" S-STORE S-HIST > "$TMPD/p.txt"
+part "$E" S-STORE S-UPD > "$TMPD/p.txt"
 has "$TMPD/p.txt" "leerlauf=900" "lock.idle lands in /etc/sperre.conf, where sperrwache reads it"
 has "$TMPD/p.txt" "# /etc/sperre.conf -- test copy" "... and the file's other lines stay"
+part "$E" S-UPD S-HIST > "$TMPD/p.txt"
+has "$TMPD/p.txt" "here=0" "DAILY-DRIVER: settings.update.status answers (here=0: no ota.stand yet)"
+has "$TMPD/p.txt" "phase=ruhe" "... phase ruhe by default"
+has "$TMPD/p.txt" "channel=stable" "... channel from /etc/ota.conf"
+has "$TMPD/p.txt" "busy=0" "... and nothing running"
+has "$TMPD/p.txt" "would=suchen" "a dry run of update.check says what it would run and starts nothing"
+has "$TMPD/p.txt" "would=einspielen" "... update.install the same"
+has "$TMPD/p.txt" "confirm 5 settings.update.rollback" "update.rollback is critical: an agent's call is parked"
+has "$TMPD/p.txt" "kanal=test" "update.channel lands in /etc/ota.conf, where ota reads it"
+has "$TMPD/p.txt" "auto=true" "... update.auto (set to true in section S-CRIT) went into the same file"
+has "$TMPD/p.txt" "abstand=3600" "... and the file's other lines stay"
+has "$TMPD/p.txt" "value=test" "settings.get reads the channel from that file"
+has "$TMPD/p.txt" "err bad_value update.channel not one of the words" "beta is not a channel any more (stable, test)"
 part "$E" S-HIST S-UNDO > "$TMPD/p.txt"
 has "$TMPD/p.txt" "change.2=display.brightness 40 -> 30 by jarvis" "settings.history: number, key, old, new, who"
 part "$E" S-UNDO S-REVERT > "$TMPD/p.txt"
@@ -797,7 +823,7 @@ has "$TMPD/p.txt" "adapter=cli" "... the reply says which adapter"
 part "$E" C-PAUSE C-AGENT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "state=paused" "media.pause through the adapter changes the program's state"
 part "$E" C-AGENT C-INJECT > "$TMPD/p.txt"
-has "$TMPD/p.txt" "confirm 5 media.volume" "an agent's write to a wrapped program is parked like any other"
+has "$TMPD/p.txt" "confirm 7 media.volume" "an agent's write to a wrapped program is parked like any other"
 has "$TMPD/p.txt" "volume=20" "... and runs after the user's yes"
 part "$E" C-INJECT C-DRY > "$TMPD/p.txt"
 has "$TMPD/p.txt" "argc=3" "NO SHELL: 'a b;rm -rf /' reaches the program as ONE argument"

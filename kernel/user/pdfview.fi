@@ -1,0 +1,810 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pdfview.fi -- THE PDF VIEWER (DAILY-DRIVER, roadmap r55).
+//
+//     pdfview [file.pdf]               the window
+//     pdfview --render file page pct   no window: render a page and print its size and a
+//                                      checksum (the test compares it with the host's)
+//     pdfview --info file              no window: number of pages and their sizes
+//
+// A native fUi program on the scene tree (fuiscene), like calc and the Papierkorb.
+// The reading is lib/pdfread (structure, pages, text, graphics -> SVG),
+// the picture is lib/svg's renderer over white with the images blitted below.
+// See docs/PDFVIEW.md for what it draws and what it does not.
+//
+// Keys: PgDn/Space/Right next page, PgUp/Left previous page, Up/Down/Home/End scroll,
+// + / - zoom, b fit width, s fit page; dragging with the mouse pans the page.
+// Search: type in the Suche field and press Enter (or the arrows): every match is marked
+// on the page, the current one in orange, "Treffer 3 von 12"; n / p jump to the next /
+// previous match while no field has the keyboard.
+profile app
+
+import ulib
+import std.rt
+import fuiscene
+import fuiapp
+import fuiglyph
+import wlib
+import pdfread.pdfread
+import pdfread.pdfpage
+import pdfread.pdftext
+
+export { u_start }
+
+static mut T_TITLE: [u8; 8] = "PDF - \0\0"
+static mut T_APP: [u8; 8] = "pdfview\0"
+static mut T_OPEN: [u8; 8] = "Öffnen\0"
+static mut T_PREV: [u8; 8] = "Zurück\0"
+static mut T_NEXT: [u8; 7] = "Weiter\0"
+static mut T_MINUS: [u8; 2] = "-\0"
+static mut T_PLUS: [u8; 2] = "+\0"
+static mut T_FITW: [u8; 7] = "Breite\0"
+static mut T_FITP: [u8; 6] = "Seite\0"
+static mut T_PAGE: [u8; 7] = "Seite \0"
+static mut T_OF: [u8; 6] = " von \0"
+static mut T_PCT: [u8; 2] = "%\0"
+static mut T_FIND: [u8; 7] = "Suche:\0"
+static mut T_UP: [u8; 4] = "<<\0\0"
+static mut T_DOWN: [u8; 4] = ">>\0\0"
+static mut T_HITS: [u8; 9] = "Treffer \0"
+static mut T_NOHIT: [u8; 13] = "Kein Treffer\0"
+static mut T_BUSY: [u8; 16] = "Suche laeuft...\0"
+static mut T_NONE: [u8; 41] = "Keine Datei -- Pfad eingeben, Öffnen\0\0\0\0"
+static mut E_READ: [u8; 28] = "Fehler: Datei nicht lesbar\0\0"
+static mut E_FORMAT: [u8; 34] = "Fehler: keine gültige PDF-Datei\0\0"
+static mut E_ENC: [u8; 44] = "Verschlüsselte PDF-Dateien: nicht möglich\0"
+static mut E_NOPAGES: [u8; 24] = "Fehler: keine Seiten\0\0\0\0"
+static mut E_RENDER: [u8; 38] = "Fehler: Seite lässt sich nicht malen\0"
+static mut E_BIG: [u8; 32] = "Seite zu groß für diesen Zoom\0"
+static mut S_RENDER: [u8; 22] = "pdfview: rendered \0\0\0\0"
+static mut S_CRC: [u8; 8] = " crc=\0\0\0"
+static mut S_PAGES: [u8; 16] = "pdfview: pages=\0"
+static mut S_ERR: [u8; 16] = "pdfview: error=\0"
+
+const K_PREV: u64 = 1
+const K_NEXT: u64 = 2
+const K_ZOUT: u64 = 3
+const K_ZIN: u64 = 4
+const K_FITW: u64 = 5
+const K_FITP: u64 = 6
+const K_OPEN: u64 = 7
+const K_PATH: u64 = 8
+const K_PAGE: u64 = 9
+const K_FIND: u64 = 10
+const K_FPREV: u64 = 11
+const K_FNEXT: u64 = 12
+
+// the document state
+static mut s_doc_mem: [u64; 256] = [0 as u64; 256]
+static mut s_file_mem: [u64; 4] = [0 as u64; 4]
+static mut s_px_mem: [u64; 4] = [0 as u64; 4]
+static mut s_doc: u64 = 0            // address of the pdfread.Doc (in s_doc_mem)
+static mut s_file: u64 = 0           // address of the rt.Buf holding the file
+static mut s_open: bool = false
+static mut s_err: u64 = 0            // address of a message, 0 = none
+static mut s_npages: u64 = 0
+static mut s_page: u64 = 0
+static mut s_mode: u64 = 1           // 0 custom zoom, 1 fit width, 2 fit page
+static mut s_zoom: u64 = 100         // percent, when s_mode == 0
+static mut s_scale_pct: u64 = 100    // the percent the shown picture was made at
+static mut s_px: u64 = 0             // address of the rt.Buf with the page pixels
+static mut s_pw: u64 = 0
+static mut s_ph: u64 = 0
+static mut s_vw: u64 = 0             // the size of the page area (the picture box)
+static mut s_vh: u64 = 0
+static mut s_fm: u64 = 0
+static mut s_fmb: u64 = 0
+static mut s_fmm: u64 = 0
+static mut s_fms: u64 = 0            // the serif faces (0 = none: the text stays in the system face)
+static mut s_fmsb: u64 = 0
+static mut s_path: [u8; 256] = [0 as u8; 256]
+static mut s_pageinfo: [u8; 40] = [0 as u8; 40]
+static mut s_zoominfo: [u8; 16] = [0 as u8; 16]
+static mut s_status: [u8; 96] = [0 as u8; 96]
+static mut s_traced: u64 = 0
+static mut s_dirty: bool = true      // the picture has to be made again
+// ---- search (see lib/pdfread/pdftext.fi)
+static mut s_q_mem: [u64; 4] = [0 as u64; 4]     // the folded query, a rt.Buf
+static mut s_txt_mem: [u64; 4] = [0 as u64; 4]   // the normalised text of the shown page
+static mut s_map_mem: [u64; 4] = [0 as u64; 4]
+static mut s_find: [u8; 128] = [0 as u8; 128]    // the field's text
+static mut s_lastq: [u8; 128] = [0 as u8; 128]   // the query the counts belong to
+static mut s_findinfo: [u8; 48] = [0 as u8; 48]
+static mut s_counts: [u32; 1024] = [0 as u32; 1024]
+static mut s_total: u64 = 0
+static mut s_qn: u64 = 0
+static mut s_cur: u32 = 4294967295               // match start in the text of s_curpage, NONE = none
+static mut s_curpage: u64 = 0
+static mut s_scroll: bool = false                // bring the current match into view after the next picture
+
+fn put(buf: u64, at: u64, c: u64) -> u64 {
+    __mmio_write8((buf + at) as *mut u8, c as u8)
+    return at + 1
+}
+
+fn puts(buf: u64, at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while (*((p + i) as *mut u8)) != 0 as u8 {
+        a = put(buf, a, (*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+    return a
+}
+
+fn putn(buf: u64, at: u64, v: u64) -> u64 {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    var a: u64 = at
+    var i: u64 = 0
+    while i < n {
+        a = put(buf, a, z[i as usize] as u64)
+        i = i + 1
+    }
+    return a
+}
+
+fn update_texts() {
+    let pi: u64 = (&s_pageinfo[0 as usize]) as u64
+    var a: u64 = 0
+    if s_open {
+        a = puts(pi, a, (&T_PAGE[0 as usize]) as u64)
+        a = putn(pi, a, s_page + 1)
+        a = puts(pi, a, (&T_OF[0 as usize]) as u64)
+        a = putn(pi, a, s_npages)
+    }
+    put(pi, a, 0)
+    let zi: u64 = (&s_zoominfo[0 as usize]) as u64
+    a = 0
+    if s_open {
+        a = putn(zi, a, s_scale_pct)
+        a = puts(zi, a, (&T_PCT[0 as usize]) as u64)
+    }
+    put(zi, a, 0)
+}
+
+fn set_status(msg: u64) {
+    let st: u64 = (&s_status[0 as usize]) as u64
+    var a: u64 = 0
+    if msg != 0 {
+        a = puts(st, 0, msg)
+    }
+    put(st, a, 0)
+}
+
+fn build() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_gap(root, 8)
+    fuiscene.set_pad(root, 8)
+    let bar: usize = fuiscene.row(root)
+    fuiscene.set_gap(bar, 6)
+    let pe: usize = fuiscene.entry(bar, K_PATH, 150, (&s_path[0 as usize]) as u64)
+    let ob: usize = fuiscene.button(bar, (&T_OPEN[0 as usize]) as u64, K_OPEN)
+    let _b1: usize = fuiscene.button(bar, (&T_PREV[0 as usize]) as u64, K_PREV)
+    let _l1: usize = fuiscene.label(bar, (&s_pageinfo[0 as usize]) as u64)
+    fuiscene.set_size(_l1, 100, 24)
+    let _b2: usize = fuiscene.button(bar, (&T_NEXT[0 as usize]) as u64, K_NEXT)
+    let _b3: usize = fuiscene.button(bar, (&T_MINUS[0 as usize]) as u64, K_ZOUT)
+    let _l2: usize = fuiscene.label(bar, (&s_zoominfo[0 as usize]) as u64)
+    fuiscene.set_size(_l2, 48, 24)
+    let _b4: usize = fuiscene.button(bar, (&T_PLUS[0 as usize]) as u64, K_ZIN)
+    let _b5: usize = fuiscene.button(bar, (&T_FITW[0 as usize]) as u64, K_FITW)
+    let _b6: usize = fuiscene.button(bar, (&T_FITP[0 as usize]) as u64, K_FITP)
+    let _x1: usize = pe
+    let _x2: usize = ob
+    let fbar: usize = fuiscene.row(root)
+    fuiscene.set_gap(fbar, 6)
+    let _fl: usize = fuiscene.label(fbar, (&T_FIND[0 as usize]) as u64)
+    fuiscene.set_size(_fl, 56, 24)
+    let _fe: usize = fuiscene.entry(fbar, K_FIND, 220, (&s_find[0 as usize]) as u64)
+    let _fb1: usize = fuiscene.button(fbar, (&T_UP[0 as usize]) as u64, K_FPREV)
+    let _fb2: usize = fuiscene.button(fbar, (&T_DOWN[0 as usize]) as u64, K_FNEXT)
+    let _fi: usize = fuiscene.label(fbar, (&s_findinfo[0 as usize]) as u64)
+    fuiscene.set_size(_fi, 200, 24)
+    // the page area takes what the toolbar and the status line leave
+    var cw: u64 = fuiapp.width() - 16
+    var ch: u64 = fuiapp.height() - 144
+    if fuiapp.width() < 400 || fuiapp.height() < 300 {
+        cw = 600
+        ch = 400
+    }
+    let pg: usize = fuiscene.image(root, K_PAGE, cw, ch)
+    s_vw = cw
+    s_vh = ch
+    let _pg2: usize = pg
+    let sl: usize = fuiscene.label(root, (&s_status[0 as usize]) as u64)
+    fuiscene.set_size(sl, 0, 24)
+}
+
+// ------------------------------------------------------------- the document
+
+fn close_doc() {
+    if s_open {
+        pdfread.doc_free(s_doc as *mut pdfread.Doc)
+        rt.buf_free(s_file as *mut rt.Buf)
+        s_open = false
+    }
+    s_npages = 0
+    s_page = 0
+    s_pw = 0
+    s_ph = 0
+}
+
+fn load_file(path: u64) {
+    close_doc()
+    s_err = 0
+    let fb: *mut rt.Buf = s_file as *mut rt.Buf
+    *fb = rt.buf_new()
+    if !rt.read_file(path, fb) {
+        s_err = (&E_READ[0 as usize]) as u64
+        return
+    }
+    let d: *mut pdfread.Doc = s_doc as *mut pdfread.Doc
+    *d = pdfread.doc_new()
+    if !pdfread.doc_open(d, rt.buf_ptr(fb), rt.buf_len(fb) as u64) {
+        let e: u32 = pdfread.doc_error(d)
+        if e == pdfread.ERR_ENCRYPTED {
+            s_err = (&E_ENC[0 as usize]) as u64
+        } else if e == pdfread.ERR_NOPAGES {
+            s_err = (&E_NOPAGES[0 as usize]) as u64
+        } else {
+            s_err = (&E_FORMAT[0 as usize]) as u64
+        }
+        pdfread.doc_free(d)
+        rt.buf_free(fb)
+        return
+    }
+    s_open = true
+    s_npages = pdfread.doc_pages(d)
+    s_page = 0
+    s_mode = 1
+    s_dirty = true
+}
+
+// the scale (percent) to make the current page at
+fn want_pct() -> u64 {
+    if s_mode == 0 {
+        return s_zoom
+    }
+    var w: f64 = 0.0
+    var h: f64 = 0.0
+    if !pdfread.doc_page_size(s_doc as *mut pdfread.Doc, s_page, &w, &h) || w < 1.0 || h < 1.0 {
+        return 100
+    }
+    var vw: u64 = s_vw
+    var vh: u64 = s_vh
+    if vw < 100 {
+        vw = 600
+    }
+    if vh < 100 {
+        vh = 400
+    }
+    var pct: u64 = (((vw as f64) - 4.0) / w * 100.0) as u64
+    if s_mode == 2 {
+        let ph: u64 = (((vh as f64) - 4.0) / h * 100.0) as u64
+        if ph < pct {
+            pct = ph
+        }
+    }
+    if pct < 10 {
+        pct = 10
+    }
+    if pct > 800 {
+        pct = 800
+    }
+    return pct
+}
+
+// ----------------------------------------------------------------- the search
+
+fn find_info(msg: u64) {
+    let fi: u64 = (&s_findinfo[0 as usize]) as u64
+    var a: u64 = 0
+    if msg != 0 {
+        a = puts(fi, 0, msg)
+    }
+    put(fi, a, 0)
+}
+
+fn q_buf() -> *mut rt.Buf {
+    return s_q_mem_ptr() as *mut rt.Buf
+}
+
+fn s_q_mem_ptr() -> u64 {
+    return (&s_q_mem[0 as usize]) as u64
+}
+
+fn txt_buf() -> *mut rt.Buf {
+    return ((&s_txt_mem[0 as usize]) as u64) as *mut rt.Buf
+}
+
+fn map_buf() -> *mut rt.Buf {
+    return ((&s_map_mem[0 as usize]) as u64) as *mut rt.Buf
+}
+
+// the position of the current match among all: "Treffer 3 von 12"
+fn update_find_info() {
+    if s_qn == 0 {
+        find_info(0)
+        return
+    }
+    if s_total == 0 {
+        find_info((&T_NOHIT[0 as usize]) as u64)
+        return
+    }
+    let fi: u64 = (&s_findinfo[0 as usize]) as u64
+    var a: u64 = puts(fi, 0, (&T_HITS[0 as usize]) as u64)
+    if s_cur != 4294967295 {
+        var before: u64 = 0
+        var pg: u64 = 0
+        while pg < s_curpage && pg < 1024 {
+            before = before + (s_counts[pg as usize] as u64)
+            pg = pg + 1
+        }
+        // the ordinal inside the page: matches starting before the current one
+        var n: u64 = 1
+        var at: u64 = 0
+        var guard: u64 = 0
+        while guard < 100000 {
+            guard = guard + 1
+            let m: u32 = pdftext.find(txt_buf(), q_buf(), at)
+            if m == 4294967295 || m >= s_cur {
+                break
+            }
+            n = n + 1
+            at = (m as u64) + s_qn
+        }
+        a = putn(fi, a, before + n)
+        a = puts(fi, a, (&T_OF[0 as usize]) as u64)
+    }
+    a = putn(fi, a, s_total)
+    put(fi, a, 0)
+}
+
+// a NEW query: fold it, count the matches of every page
+// the search field's text; before the first build the field has no slot yet -- then the text given with --find
+fn find_text() -> u64 {
+    let t: u64 = fuiscene.entry_text(K_FIND)
+    if t == 0 {
+        return (&s_find[0 as usize]) as u64
+    }
+    return t
+}
+
+fn find_start() {
+    let t: u64 = find_text()
+    ulib.strncpy((&s_lastq[0 as usize]) as u64, t, 127)
+    pdftext.fold_utf8(t, ulib.length(t), q_buf())
+    s_qn = (rt.buf_len(q_buf()) as u64) / 4
+    s_total = 0
+    s_cur = 4294967295
+    s_curpage = s_page
+    if s_qn == 0 || !s_open {
+        s_qn = 0
+        s_dirty = true
+        update_find_info()
+        return
+    }
+    var pg: u64 = 0
+    while pg < s_npages && pg < 1024 {
+        var c: u64 = 0
+        if pdftext.page_text(s_doc as *mut pdfread.Doc, pg, 1.0, txt_buf(), map_buf()) {
+            c = pdftext.count_in(txt_buf(), q_buf())
+        }
+        s_counts[pg as usize] = c as u32
+        s_total = s_total + c
+        pg = pg + 1
+    }
+    s_dirty = true
+}
+
+fn query_changed() -> bool {
+    let t: u64 = find_text()
+    return !ulib.streq(t, (&s_lastq[0 as usize]) as u64)
+}
+
+// the match after (forward) or before the current one, over the pages, wrapping around
+fn find_step(forward: bool) {
+    if !s_open {
+        return
+    }
+    if query_changed() {
+        find_start()
+        s_cur = 4294967295
+        s_curpage = s_page
+        if !forward {
+            s_curpage = s_page
+        }
+    }
+    if s_qn == 0 || s_total == 0 {
+        s_dirty = true
+        update_find_info()
+        return
+    }
+    var pg: u64 = s_curpage
+    var found: bool = false
+    var hit: u32 = 4294967295
+    var tries: u64 = 0
+    if forward {
+        var from: u64 = 0
+        if s_cur != 4294967295 {
+            from = (s_cur as u64) + s_qn
+        }
+        while tries <= s_npages && !found && tries < 1100 {
+            if pdftext.page_text(s_doc as *mut pdfread.Doc, pg, 1.0, txt_buf(), map_buf()) {
+                let m: u32 = pdftext.find(txt_buf(), q_buf(), from)
+                if m != 4294967295 {
+                    hit = m
+                    found = true
+                }
+            }
+            if !found {
+                pg = (pg + 1) % s_npages
+                from = 0
+            }
+            tries = tries + 1
+        }
+    } else {
+        // the last match before the current one; a page without one: the previous page's last
+        var limit: u64 = 0
+        var have_lim: bool = false
+        if s_cur != 4294967295 {
+            limit = s_cur as u64
+            have_lim = true
+        }
+        while tries <= s_npages && !found && tries < 1100 {
+            if pdftext.page_text(s_doc as *mut pdfread.Doc, pg, 1.0, txt_buf(), map_buf()) {
+                var at: u64 = 0
+                var last: u32 = 4294967295
+                var guard: u64 = 0
+                while guard < 100000 {
+                    guard = guard + 1
+                    let m: u32 = pdftext.find(txt_buf(), q_buf(), at)
+                    if m == 4294967295 {
+                        break
+                    }
+                    if have_lim && (m as u64) >= limit {
+                        break
+                    }
+                    last = m
+                    at = (m as u64) + s_qn
+                }
+                if last != 4294967295 {
+                    hit = last
+                    found = true
+                }
+            }
+            if !found {
+                if pg == 0 {
+                    pg = s_npages - 1
+                } else {
+                    pg = pg - 1
+                }
+                have_lim = false
+            }
+            tries = tries + 1
+        }
+    }
+    if found {
+        s_curpage = pg
+        s_cur = hit
+        s_scroll = true
+        if pg != s_page {
+            s_page = pg
+        }
+    }
+    s_dirty = true
+}
+
+fn render_now() {
+    if !s_open {
+        return
+    }
+    let pct: u64 = want_pct()
+    var w: u64 = 0
+    var h: u64 = 0
+    let px: *mut rt.Buf = s_px as *mut rt.Buf
+    if pdfpage.render_page(s_doc as *mut pdfread.Doc, s_page, (pct as f64) / 100.0, s_fm, s_fmb, s_fmm, s_fms, s_fmsb, px, &w, &h) {
+        s_pw = w
+        s_ph = h
+        s_scale_pct = pct
+        var fy: i64 = 0 - 1
+        if s_qn != 0 {
+            var cur: u32 = 4294967295
+            if s_curpage == s_page {
+                cur = s_cur
+            }
+            let _n: u64 = pdftext.highlight(s_doc as *mut pdfread.Doc, s_page, (pct as f64) / 100.0,
+                rt.buf_ptr(px), w, h, q_buf(), cur, txt_buf(), map_buf(), &fy)
+        }
+        // the picture was made at its final size: shown at 100 %, top of the page
+        fuiscene.image_set(K_PAGE, rt.buf_ptr(px), w, h)
+        fuiscene.image_set_zoom(K_PAGE, 100)
+        fuiscene.image_pan(K_PAGE, 0, 100000000)
+        if s_scroll && fy > ((s_vh as i64) / 3) {
+            fuiscene.image_pan(K_PAGE, 0, 0 - (fy - ((s_vh as i64) / 3)))
+        }
+        s_scroll = false
+        set_status(0)
+    } else {
+        set_status((&E_BIG[0 as usize]) as u64)
+    }
+    s_dirty = false
+}
+
+fn goto_page(p: u64) {
+    if !s_open || p >= s_npages || p == s_page {
+        return
+    }
+    s_page = p
+    s_dirty = true
+}
+
+fn zoom_by(up: bool) {
+    var pct: u64 = s_scale_pct
+    if up {
+        pct = pct + pct / 4
+        if pct == s_scale_pct {
+            pct = pct + 1
+        }
+    } else {
+        pct = pct - pct / 5
+    }
+    if pct < 10 {
+        pct = 10
+    }
+    if pct > 800 {
+        pct = 800
+    }
+    s_zoom = pct
+    s_mode = 0
+    s_dirty = true
+}
+
+fn crc32_of(p: u64, n: u64) -> u64 {
+    var crc: u64 = 0xFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        crc = crc ^ (rt.ld8(p, i as usize) as u64)
+        var k: u64 = 0
+        while k < 8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320
+            } else {
+                crc = crc >> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return crc ^ 0xFFFFFFFF
+}
+
+fn say_hex(v: u64) {
+    var b: [u8; 12] = [0 as u8; 12]
+    let h: str = "0123456789abcdef"
+    var i: u64 = 0
+    while i < 8 {
+        b[i as usize] = rt.ld8(h.p as u64, ((v >> (28 - i * 4)) & 15) as usize)
+        i = i + 1
+    }
+    ulib.say((&b[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ the batch modes
+
+fn batch(args: u64) -> u64 {
+    var fb: rt.Buf = rt.buf_new()
+    let path: u64 = ulib.arg_at(args, 2)
+    if !rt.read_file(path, &fb) {
+        ulib.say((&S_ERR[0 as usize]) as u64)
+        ulib.sayu(100)
+        ulib.nl()
+        return 2
+    }
+    var d: pdfread.Doc = pdfread.doc_new()
+    if !pdfread.doc_open(&d, rt.buf_ptr(&fb), rt.buf_len(&fb) as u64) {
+        ulib.say((&S_ERR[0 as usize]) as u64)
+        ulib.sayu(pdfread.doc_error(&d) as u64)
+        ulib.nl()
+        return 3
+    }
+    if ulib.arg_count(args) < 5 {
+        ulib.say((&S_PAGES[0 as usize]) as u64)
+        ulib.sayu(pdfread.doc_pages(&d))
+        ulib.nl()
+        return 0
+    }
+    let page: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let pct: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    var px: rt.Buf = rt.buf_new()
+    var w: u64 = 0
+    var h: u64 = 0
+    let fm: u64 = fuiglyph.fontset(fuiglyph.ROLE_UI)
+    let fmb: u64 = fuiglyph.fontset(fuiglyph.ROLE_BOLD)
+    let fmm: u64 = fuiglyph.fontset(fuiglyph.ROLE_MONO)
+    let fms: u64 = fuiglyph.fontset(fuiglyph.ROLE_SERIF)
+    let fmsb: u64 = fuiglyph.fontset(fuiglyph.ROLE_SERIFB)
+    ulib.say((&S_FACES[0 as usize]) as u64)
+    ulib.sayu(fms)
+    ulib.say((&S_FACESB[0 as usize]) as u64)
+    ulib.sayu(fmsb)
+    ulib.nl()
+    if !pdfpage.render_page(&d, page - 1, (pct as f64) / 100.0, fm, fmb, fmm, fms, fmsb, &px, &w, &h) {
+        ulib.say((&S_ERR[0 as usize]) as u64)
+        ulib.sayu(101)
+        ulib.nl()
+        return 4
+    }
+    if ulib.arg_count(args) >= 6 {
+        // a fifth argument: the query -- marks its matches like the window does
+        var q: rt.Buf = rt.buf_new()
+        var tx: rt.Buf = rt.buf_new()
+        var mp: rt.Buf = rt.buf_new()
+        let qa: u64 = ulib.arg_at(args, 5)
+        pdftext.fold_utf8(qa, ulib.length(qa), &q)
+        var fy: i64 = 0
+        let nm: u64 = pdftext.highlight(&d, page - 1, (pct as f64) / 100.0, rt.buf_ptr(&px), w, h, &q, 4294967295, &tx, &mp, &fy)
+        ulib.say((&S_MATCHES[0 as usize]) as u64)
+        ulib.sayu(nm)
+        ulib.nl()
+    }
+    ulib.say((&S_RENDER[0 as usize]) as u64)
+    ulib.sayu(w)
+    ulib.say((&S_X[0 as usize]) as u64)
+    ulib.sayu(h)
+    ulib.say((&S_CRC[0 as usize]) as u64)
+    say_hex(crc32_of(rt.buf_ptr(&px), w * h * 4))
+    ulib.nl()
+    return 0
+}
+
+static mut S_FACES: [u8; 16] = "pdfview: serif=\0"
+static mut S_FACESB: [u8; 9] = " serifb=\0"
+static mut S_X: [u8; 2] = "x\0"
+static mut S_MATCHES: [u8; 18] = "pdfview: matches=\0"
+
+// ----------------------------------------------------------------- the window
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 3 {
+        var s1: [u8; 9] = "--render\0"
+        var s2: [u8; 7] = "--info\0"
+        if ulib.streq(ulib.arg_at(args, 1), (&s1[0 as usize]) as u64)
+            || ulib.streq(ulib.arg_at(args, 1), (&s2[0 as usize]) as u64) {
+            return batch(args)
+        }
+    }
+    // the big state lives in static memory (its address is kept in statics)
+    var chk: [pdfread.Doc; 2] = [pdfread.doc_new(); 2]
+    if (&chk[1]) as u64 - (&chk[0]) as u64 > 2048 {
+        return 1
+    }
+    s_doc = (&s_doc_mem[0 as usize]) as u64
+    s_file = (&s_file_mem[0 as usize]) as u64
+    s_px = (&s_px_mem[0 as usize]) as u64
+    *(s_doc as *mut pdfread.Doc) = pdfread.doc_new()
+    *(s_file as *mut rt.Buf) = rt.buf_new()
+    *(s_px as *mut rt.Buf) = rt.buf_new()
+    *(q_buf()) = rt.buf_new()
+    *(txt_buf()) = rt.buf_new()
+    *(map_buf()) = rt.buf_new()
+    s_fm = fuiglyph.fontset(fuiglyph.ROLE_UI)
+    s_fmb = fuiglyph.fontset(fuiglyph.ROLE_BOLD)
+    s_fmm = fuiglyph.fontset(fuiglyph.ROLE_MONO)
+    s_fms = fuiglyph.fontset(fuiglyph.ROLE_SERIF)
+    s_fmsb = fuiglyph.fontset(fuiglyph.ROLE_SERIFB)
+    if argc >= 2 {
+        ulib.strncpy((&s_path[0 as usize]) as u64, ulib.arg_at(args, 1), 255)
+    }
+    // `pdfview file --find word`: the window opens with the search box filled and the first match shown
+    var o_find: [u8; 7] = "--find\0"
+    var start_find: bool = false
+    if argc >= 4 && ulib.streq(ulib.arg_at(args, 2), (&o_find[0 as usize]) as u64) {
+        ulib.strncpy((&s_find[0 as usize]) as u64, ulib.arg_at(args, 3), 127)
+        start_find = true
+    }
+    if !fuiscene.open(40, 30, 900, 700, (&T_APP[0 as usize]) as u64, build) {
+        return 1
+    }
+    if s_path[0 as usize] != 0 as u8 {
+        load_file((&s_path[0 as usize]) as u64)
+    } else {
+        set_status((&T_NONE[0 as usize]) as u64)
+    }
+    if s_err != 0 {
+        set_status(s_err)
+    }
+    if start_find && s_open {
+        find_step(true)
+    }
+    update_texts()
+    fuiscene.refresh()
+    var rounds: u64 = 0
+    while fuiscene.alive() && rounds < 4000000 {
+        rounds = rounds + 1
+        let key: u64 = fuiscene.pump()
+        var changed: bool = false
+        if fuiscene.painted() != s_traced && fuiscene.trace_on() {
+            s_traced = fuiscene.painted()
+            fuiscene.say_rects((&T_APP[0 as usize]) as u64)
+            fuiscene.say_texts()
+        }
+        if key == K_PREV {
+            goto_page(s_page - 1)
+        } else if key == K_NEXT {
+            goto_page(s_page + 1)
+        } else if key == K_ZIN {
+            zoom_by(true)
+        } else if key == K_ZOUT {
+            zoom_by(false)
+        } else if key == K_FITW {
+            s_mode = 1
+            s_dirty = true
+        } else if key == K_FITP {
+            s_mode = 2
+            s_dirty = true
+        } else if key == K_FIND || key == K_FNEXT {
+            find_info((&T_BUSY[0 as usize]) as u64)
+            find_step(true)
+        } else if key == K_FPREV {
+            find_info((&T_BUSY[0 as usize]) as u64)
+            find_step(false)
+        } else if key == K_OPEN || key == K_PATH {
+            let t: u64 = fuiscene.entry_text(K_PATH)
+            if t != 0 && (*(t as *mut u8)) != 0 as u8 {
+                load_file(t)
+                if s_err != 0 {
+                    set_status(s_err)
+                }
+            }
+        }
+        let k: u64 = fuiscene.last_key()
+        // the keys of the page are the page's only when no text field has the focus (a search word has n's in it)
+        let fk: u64 = fuiscene.focus_key()
+        if k != 0 && fk != K_FIND && fk != K_PATH {
+            if k == wlib.KEY_PGDN || k == wlib.KEY_RIGHT || k == 32 {
+                goto_page(s_page + 1)
+            } else if k == wlib.KEY_PGUP || k == wlib.KEY_LEFT {
+                goto_page(s_page - 1)
+            } else if k == wlib.KEY_DOWN {
+                fuiscene.image_pan(K_PAGE, 0, 0 - 48)
+            } else if k == wlib.KEY_UP {
+                fuiscene.image_pan(K_PAGE, 0, 48)
+            } else if k == wlib.KEY_HOME {
+                fuiscene.image_pan(K_PAGE, 0, 100000000)
+            } else if k == wlib.KEY_END {
+                fuiscene.image_pan(K_PAGE, 0, 0 - 100000000)
+            } else if k == 43 || k == 61 {
+                zoom_by(true)
+            } else if k == 45 {
+                zoom_by(false)
+            } else if k == 110 {
+                find_step(true)
+            } else if k == 112 {
+                find_step(false)
+            } else if k == 98 {
+                s_mode = 1
+                s_dirty = true
+            } else if k == 115 {
+                s_mode = 2
+                s_dirty = true
+            }
+        }
+        if s_dirty && s_open {
+            render_now()
+            update_texts()
+            update_find_info()
+            changed = true
+        }
+        if changed {
+            fuiscene.refresh()
+        }
+    }
+    close_doc()
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

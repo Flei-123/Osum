@@ -861,6 +861,13 @@ TBG=$(frgb "$TMPD/files.txt" "explorer: rows" bg)
 TSEL=$(frgb "$TMPD/files.txt" "explorer: rows" sel)
 TSFG=$(frgb "$TMPD/files.txt" "explorer: rows" selfg)
 TDIM=$(frgb "$TMPD/files.txt" "explorer: rows" dim)
+THBG=$(frgb "$TMPD/files.txt" "explorer: rows" headbg)
+# FUI-ALL F-8: the file list is painted by the scene tree (glyph by glyph on
+# whole pixels, like the start menu). Its blend of ink onto the row differs
+# from the reference by ONE level in a third of the edge points (measured:
+# 1556 ink points of four rows, 758 differ, the largest difference is 1; a
+# wrong text, colour or place differs by far more). ETOL is that one level.
+ETOL=1
 SP=($(grep -a '^explorer: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^explorer: spalten //'))
 # RUNDE BAUFEHLER (14.09.2026): NICHT AN EINEM LEEREN FELD STERBEN.
 # Wenn der Dateimanager sein Fenster nicht gemalt hat ("explorer: ready
@@ -882,7 +889,7 @@ if [ "${#SP[@]}" -lt 4 ]; then
 fi
 schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TKOPF)) \
-    $TFG $(rgb 3293262) "Name"
+    $TDIM $THBG "Name" $ETOL
 # RUNDE I18N: SIE HEISST JETZT "Size" UND NICHT MEHR "Groesse".
 # Die Kopfzeile kommt aus dem Textkatalog, und die Quellsprache ist
 # Englisch -- auf diesem Abbild liegt keine Wahl unter /users/. Auf
@@ -890,7 +897,7 @@ schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
 # tools/i18n/run.sh.
 schau "und die zweite 'Size'" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
-    $TFG $(rgb 3293262) "Size"
+    $TDIM $THBG "Size" $ETOL
 # JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS baum.py ANGELEGT HAT -- und in
 # derselben Reihenfolge: Verzeichnisse zuerst, dann nach Namen.
 zeile=0
@@ -898,11 +905,11 @@ while IFS=$'\t' read -r name gr kind; do
     y=$((FCY + TB + zeile * TZH))
     if [ "$zeile" = 0 ]; then vg="$TSFG"; hg="$TSEL"; else vg="$TFG"; hg="$TBG"; fi
     schau "Zeile $zeile der Tabelle: '$name'" \
-        tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name"
+        tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name" $ETOL
     if [ "$kind" != "d" ] && [ "$zeile" != 0 ]; then
         schau "und ihre Groesse in Spalte 2: $gr" \
             tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) "$y" \
-            $TDIM $hg "$gr"
+            $TDIM $hg "$gr" $ETOL
     fi
     zeile=$((zeile + 1))
 done < "$TMPD/baum/soll.txt"
@@ -932,7 +939,7 @@ schau "und die einer Datei" \
 # Oktette und voll). Eine erfundene Zeit waere schlimmer als keine.
 schau "die Spalte Zeit zeigt zwei Striche -- OFS hat keinen Zeitstempel" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
-    $TDIM $TBG "--"
+    $TDIM $TBG "--" $ETOL
 
 echo "== 9b. hineingehen, sortieren, anlegen =="
 # Doppelklick auf Zeile 0 -- das ist ein Verzeichnis, also wird es
@@ -966,10 +973,10 @@ n2=$(grep -a '^explorer: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | 
 num "und darin liegen zwei Dateien" "$n2" eq 2
 schau "die erste davon steht im Bild" \
     tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
-    $TSFG $TSEL "blau.ppm"
+    $TSFG $TSEL "blau.ppm" $ETOL
 schau_nicht "und der alte Inhalt steht NICHT mehr da" \
     tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
-    $TSFG $TSEL "bilder"
+    $TSFG $TSEL "bilder" $ETOL
 # Nach der Spalte "Groesse" sortieren: Kopfzeile anklicken.
 SX=$((FCX + ${SP[1]} + 20)); SY=$((FCY + TKOPF - 6))
 M="$TMPD/fsort.mon"; : > "$M"
@@ -988,27 +995,28 @@ num "und zwar nach Spalte 1 (Groesse)" "$sb" eq 1
 # unter den Dateien -- Verzeichnisse bleiben davor.
 schau "nach der Groesse sortiert steht die leere Datei zuerst unter den Dateien" \
     tkette "$TMPD/fsort.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
-    $TFG $TBG "delta.txt"
+    $TFG $TBG "delta.txt" $ETOL
 schau_nicht "nach dem Namen sortiert stand dort etwas anderes" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB + 2 * TZH)) \
-    $TFG $TBG "delta.txt"
+    $TFG $TBG "delta.txt" $ETOL
 # Ein neues Verzeichnis ueber Kontextmenue und Dialog -- und danach wird
 # nicht das BILD geglaubt, sondern im PLATTENABBILD nachgesehen.
-# The table's context menu is a borderless popup with the fourteen rows
-# of `explorer.context` (22 high each, 2 padding); "New folder" is row 8
-# (ctx_wahl idx 8), so its middle lies 2 + 8*22 + 11 below the pointer.
-# In two steps: one PS/2 packet carries at most 127 (see `zeiger`), and
-# a single 189 never reached the row -- the menu closed unchosen.
-PX2=$((FCX + TX + 100)); PY2=$((FCY + TB + 2 * TZH - 6))
+# FUI-ALL F-8: the context menu is a popup INSIDE the file manager's window
+# (rows of 28 and 4 padding; it is moved up when it would stick out of the
+# window, a menu of fourteen rows is 400 high). "New folder" is row 8
+# (ctx_wahl idx 8), so its middle lies 4 + 8*28 + 14 below the menu's top.
+PXC=$((TX + 100)); PYC=$((TB + 2 * TZH - 6))
+POPH=$((14 * 28 + 8))
+if [ $((PYC + POPH)) -gt "$FBH" ]; then POPY=$((FBH - POPH)); else POPY=$PYC; fi
+DYREL=$((POPY + 4 + 8 * 28 + 14 - PYC))
 M="$TMPD/fneu.mon"; : > "$M"
-zeiger "$M" "$PX2" "$PY2"
+zeiger "$M" "$((FCX + PXC))" "$((FCY + PYC))"
 cat >> "$M" <<EOF
 mouse_button 2
 warte 0.3
 mouse_button 0
 warte 0.8
-mouse_move 40 120
-mouse_move 0 $((2 + 8 * 22 + 11 - 120))
+mouse_move 40 $DYREL
 mouse_button 1
 mouse_button 0
 warte 1.0
@@ -1017,10 +1025,12 @@ sendkey e
 sendkey u
 warte 0.5
 EOF
-# The same dialog as widgetdemo's (wlib.dlg_open: 340 wide, question
-# plus field), centred on the same screen -- so the OK button is where
-# it was measured there, not at the 800x600 place written here before.
-zeiger "$M" $((DLX + 2 + OKX + OKW / 2)) $((DLY + 22 + OKY + OKH / 2))
+# The question is a dialog IN the window too: a plate of 320 x 200 (a text
+# field makes it 52 higher than the two-button one), centred; its first
+# button (OK) stands 16 from the left and 52 above the bottom, 136 x 36.
+OKCX=$(( (FBW - 320) / 2 + 16 + 68 ))
+OKCY=$(( (FBH - 200) / 2 + 200 - 52 + 18 ))
+zeiger "$M" $((FCX + OKCX)) $((FCY + OKCY))
 cat >> "$M" <<EOF
 mouse_button 1
 mouse_button 0
@@ -1261,13 +1271,13 @@ cmp -s "$TMPD/e1.bin" "$TMPD/e2.bin" \
     || bad "die beiden Namen geben verschiedene Oktette"
 # UND ES IST WIRKLICH EIN VERWEIS UND KEINE KOPIE, gemessen an den
 # freien Bloecken: dasselbe Abbild einmal so und einmal so.
-# A-003 (24.09.2026): 8192 and not 4096 blocks. /bin/explorer has grown to
+# A-003 (24.09.2026): 8192 and not 4096 blocks; F-8 (03.10.2026): 16384, the file manager grew to 2.1 MB with the scene tree.
 # 1.7 MB; two copies no longer fit into 2 MB, mkfs said "the disk is
 # full", and the comparison read "536 gegen ''" and "-3 inodes".
-python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 8192 /bin/ \
+python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 16384 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files=$TMPD/explorer0.elf" \
     > "$TMPD/kopie.txt" 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 8192 /bin/ \
+python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 16384 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files@/bin/explorer" \
     > "$TMPD/verweis.txt" 2>&1
 fk=$(grep -oE 'free=[0-9]+' "$TMPD/kopie.txt" | sed 's/.*=//')

@@ -283,15 +283,17 @@ aus `tools/install/build.sh`.
 | Pfad | was |
 |---|---|
 | `/etc/ssl/roots.pem` | 15 261 Oktette, **11 Mozilla-Wurzeln** — ohne sie vertraut `fetch` nichts |
-| `/etc/ota.conf` | `quelle=https://store.fleitec.com/osum/aktuell`, **`auto=nein`** |
+| `/etc/ota.conf` | `quelle=https://store.fleitec.com/osum/aktuell`, **`auto=true`** (seit 02.10.2026, Entscheidung des Boss; abschaltbar in Einstellungen → Updates) |
 | `/system/schluessel.pub` | der Schlüssel der Auslieferung, 32 Oktette |
 | `/system/FASSUNG`, `/system/SCHLUESSELGEN` | je neun Oktette fester Breite |
 | `/etc/jarvis/rechte.conf` | die Rechteliste — **ab Werk ist alles aus** |
 
 Zwei Vorgaben sind ausdrücklich so gewählt und stehen so im Bauskript:
-**`auto=nein`** (ein Stick, der ab Werk von selbst irgendwo nachfragt,
-wäre eine Entscheidung, die niemand getroffen hat) und eine **leere
-Rechteliste** (kein Server, keine Befehle, kein Bildschirmfoto, keine
+**`auto=true`** (seit 02.10.2026 — Entscheidung des Boss: das Abbild sucht,
+holt und spielt Updates selbst ein; vorher stand hier `auto=nein`, mit der
+Begründung, ein Stick, der ab Werk von selbst nachfragt, sei eine
+Entscheidung, die niemand getroffen hat — jetzt ist sie getroffen) und eine
+**leere Rechteliste** (kein Server, keine Befehle, kein Bildschirmfoto, keine
 Pfade — so gestartet meldet sich `jarvisd` nirgends an).
 
 **Was jetzt noch fehlt, ist kurz und steht in `docs/RUNDE-STICK.md`:**

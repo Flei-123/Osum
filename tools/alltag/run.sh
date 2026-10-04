@@ -319,7 +319,7 @@ open(d + "/sperre.conf", "w").write("# /etc/sperre.conf\nleerlauf=2\n")
 PY
 MON=""
 for c in f a l s c h ret g e h e i m 1 2 ret; do MON="$MON mon=sendkey\ $c"; done
-eval bash "$B" "$OUT/sp1" kbd=yes warten=8 extra=\"wigapp=/bin/lock\" \
+eval bash "$B" "$OUT/sp1" kbd=yes uitrace=yes warten=8 extra=\"wigapp=/bin/lock\" \
     progs=\"lock desktop taskbar launcher theme sh echo ls cat\" \
     xfile=/etc/shadow="$OUT/shadow" $MON > "$OUT/sp1.log" 2>&1
 S=$OUT/sp1/serial.txt
@@ -429,7 +429,10 @@ echo "== 9. je ein Bild, und jedes wird gemessen =="
 schuss() { # name wigapp fenster-x,y [extra-args...]
     local name=$1 app=$2 wxy=$3
     shift 3
-    bash "$B" "$OUT/s-$name" desk=no uitrace=yes warten=2 \
+    # bloecke=32768 (16 MiB): the programs on the scene tree carry fUi's
+    # whole scene host each (~1 MiB), eleven of them no longer fit the
+    # default 8 MiB image ("mkfs: the disk is full", FUI-ALL F-5)
+    bash "$B" "$OUT/s-$name" desk=no uitrace=yes warten=2 bloecke=32768 \
         extra="wigapp=$app" progs="$PROGS" "$@" \
         > "$OUT/s-$name.log" 2>&1
     if [ ! -s "$OUT/s-$name/desktop.ppm" ]; then

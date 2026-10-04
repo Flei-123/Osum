@@ -621,6 +621,173 @@ fn do_history() {
     }
 }
 
+// ===================================================== update.* (DAILY-DRIVER)
+//
+// The system update as four actions of this root provider (manifest:
+// /etc/actions.d/settings.actions). The user's settings window cannot run
+// `ota` -- installing needs root -- so it asks here, and the broker has
+// already decided the rights: `update.status` is a read, `update.check` a
+// write, `update.install` and `update.rollback` are critical (always the
+// user's yes). Nothing here updates by itself; `/bin/ota` does the work
+// (signature, hash, rollback guard, trial counter) in a child process that
+// is NOT waited for -- a download takes minutes -- and is reaped in the
+// serve loop. One child at a time: a second request meanwhile is `busy`.
+static mut u_pid: u64 = 0
+static mut u_argv: [u64; 4] = [0 as u64; 4]
+static mut U_ARG0: [u8; 4] = "ota\0"
+static mut C_SUCH: [u8; 7] = "suchen\0"
+static mut C_EIN: [u8; 11] = "einspielen\0"
+static mut C_ZUR: [u8; 8] = "zurueck\0"
+static mut P_OTA: [u8; 9] = "/bin/ota\0"
+static mut P_STAND: [u8; 18] = "/system/ota.stand\0"
+static mut P_OCONF: [u8; 14] = "/etc/ota.conf\0"
+
+fn upd_alive() -> bool {
+    if u_pid == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == u_pid {
+                if st == 5 {
+                    // finished: collect it so the process table does not fill
+                    ulib.wait_code(u_pid)
+                    u_pid = 0
+                    return false
+                }
+                return true
+            }
+        }
+        i = i + 1
+    }
+    u_pid = 0
+    return false
+}
+
+fn upd_run(sub: u64, extra: u64) -> bool {
+    u_argv[0 as usize] = (&U_ARG0[0 as usize]) as u64
+    u_argv[1 as usize] = sub
+    var argc: u64 = 2
+    if extra != 0 {
+        u_argv[2 as usize] = extra
+        argc = 3
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_OTA[0 as usize]) as u64,
+        (&u_argv[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return false
+    }
+    u_pid = pid
+    return true
+}
+
+fn do_update_status() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var f_dort: [u8; 5] = "dort\0"
+    var f_hier: [u8; 5] = "hier\0"
+    var f_zeit: [u8; 5] = "zeit\0"
+    var f_phase: [u8; 6] = "phase\0"
+    var f_kanal: [u8; 6] = "kanal\0"
+    var f_auto: [u8; 5] = "auto\0"
+    var k_there: [u8; 7] = "there=\0"
+    var k_here: [u8; 6] = "here=\0"
+    var k_time: [u8; 6] = "time=\0"
+    var k_phase: [u8; 7] = "phase=\0"
+    var k_chan: [u8; 9] = "channel=\0"
+    var k_auto: [u8; 6] = "auto=\0"
+    var k_busy: [u8; 6] = "busy=\0"
+    var d_chan: [u8; 7] = "stable\0"
+    var d_ruhe: [u8; 5] = "ruhe\0"
+    var v: [u8; 64] = [0 as u8; 64]
+    let vp: u64 = (&v[0 as usize]) as u64
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&k_here[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_STAND[0 as usize]) as u64, (&f_hier[0 as usize]) as u64, vp, 64) {
+        st8(vp, 0, 48)
+        st8(vp, 1, 0)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_there[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_STAND[0 as usize]) as u64, (&f_dort[0 as usize]) as u64, vp, 64) {
+        st8(vp, 0, 48)
+        st8(vp, 1, 0)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_time[0 as usize]) as u64)
+    // "2026-10-02 14:30" holds a space: the key=value reader stops at it,
+    // so the date and the time are two reads of the same line
+    actwire.kvfile_get((&P_STAND[0 as usize]) as u64, (&f_zeit[0 as usize]) as u64, vp, 64)
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_phase[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_STAND[0 as usize]) as u64, (&f_phase[0 as usize]) as u64, vp, 64) {
+        copyz(vp, (&d_ruhe[0 as usize]) as u64, 64)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_chan[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&f_kanal[0 as usize]) as u64, vp, 64) {
+        copyz(vp, (&d_chan[0 as usize]) as u64, 64)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_auto[0 as usize]) as u64)
+    if !actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&f_auto[0 as usize]) as u64, vp, 64) {
+        var d_f: [u8; 5] = "true\0"
+        copyz(vp, (&d_f[0 as usize]) as u64, 64)
+    }
+    r_str(vp)
+    r_ch(10)
+    r_str((&k_busy[0 as usize]) as u64)
+    if upd_alive() {
+        r_ch(49)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
+}
+
+// check | install | rollback: start `ota` and answer at once
+fn do_update_run(name: u64, dry: bool) {
+    var a_chk: [u8; 22] = "settings.update.check\0"
+    var a_ins: [u8; 24] = "settings.update.install\0"
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_would: [u8; 7] = "would=\0"
+    var s_start: [u8; 9] = "started=\0"
+    var e_busy: [u8; 5] = "busy\0"
+    var e_fail: [u8; 12] = "exec_failed\0"
+    var sub: u64 = (&C_ZUR[0 as usize]) as u64
+    if actwire.str_eq(name, (&a_chk[0 as usize]) as u64) {
+        sub = (&C_SUCH[0 as usize]) as u64
+    } else if actwire.str_eq(name, (&a_ins[0 as usize]) as u64) {
+        sub = (&C_EIN[0 as usize]) as u64
+    }
+    if upd_alive() {
+        r_err((&e_busy[0 as usize]) as u64, 0)
+        return
+    }
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    if dry {
+        r_str((&s_would[0 as usize]) as u64)
+        r_str(sub)
+        r_ch(10)
+        return
+    }
+    if !upd_run(sub, 0) {
+        r_err((&e_fail[0 as usize]) as u64, 0)
+        return
+    }
+    r_str((&s_start[0 as usize]) as u64)
+    r_str(sub)
+    r_ch(10)
+}
+
 fn handle(msg: u64) -> bool {
     var verb: [u8; 16] = [0 as u8; 16]
     var name: [u8; 40] = [0 as u8; 40]
@@ -668,6 +835,20 @@ fn handle(msg: u64) -> bool {
     }
     if actwire.str_eq(np, (&a_hist[0 as usize]) as u64) {
         do_history()
+        return false
+    }
+    var a_ust: [u8; 23] = "settings.update.status\0"
+    var a_uch: [u8; 22] = "settings.update.check\0"
+    var a_uin: [u8; 24] = "settings.update.install\0"
+    var a_uro: [u8; 25] = "settings.update.rollback\0"
+    if actwire.str_eq(np, (&a_ust[0 as usize]) as u64) {
+        do_update_status()
+        return false
+    }
+    if actwire.str_eq(np, (&a_uch[0 as usize]) as u64)
+        || actwire.str_eq(np, (&a_uin[0 as usize]) as u64)
+        || actwire.str_eq(np, (&a_uro[0 as usize]) as u64) {
+        do_update_run(np, dry)
         return false
     }
     let i: u64 = setschema.find(kp)
@@ -786,6 +967,9 @@ fn serve(limit: u64) -> u64 {
                 actwire.asm_free(s)
             }
         } else {
+            if u_pid != 0 {
+                upd_alive()
+            }
             if actwire.ticks() - last_check > 100 {
                 last_check = actwire.ticks()
                 if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {

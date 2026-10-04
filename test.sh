@@ -1687,6 +1687,11 @@ lauf "55. the social layer: social.* actions on orient-bus, providers behind one
 lauf "56. the action bus on a screen: foreign windows (keys/ui adapters, wayd input) and the settings window as a bus client (tools/actionbus/gui.sh, round ACTION-BUS-3)" \
      tools/actionbus/gui.sh actbusgui '^ACTBUS-GUI: |^== |^  OK    |^  FAIL  '
 
+# DAILY-DRIVER: the clock -- summer time by rule, setting it (clock_settime),
+# the network clock /bin/sntp against a fake NTP server, faulty answers.
+lauf "57. the clock: summer time by rule (tzrule=eu), clock_settime, /bin/sntp, faulty NTP answers (tools/time/run.sh, round DAILY-DRIVER)" \
+     tools/time/run.sh time '^TIME: |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

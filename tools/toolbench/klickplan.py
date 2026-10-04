@@ -39,6 +39,9 @@ ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
 # (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht
 # zulaesst, findet den Ja-Knopf nicht -- und es sieht aus, als haette
 # die Nachfrage keinen.
+# FUI-ALL: the question is an overlay of the SAME window now (fuiscene's
+# dialog), and the program says where its first button stands.
+DLGOK = re.compile(r"taskmgr: dialog ok x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TBGEOM = re.compile(r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -167,20 +170,17 @@ def main(argv):
         return 0
 
     if was == "ja":
-        # Der Dialog ist ein eigenes Fenster; sein Ja-Knopf ist der
-        # erste Knopftext darin. `wlib` meldet ihn mit seiner Stelle und
-        # seiner Breite.
-        dx, dy, dw, dh, dcx, dcy = fenster(zeilen, 1)
-        best = None
+        # The answer button of the question: the program reports it in
+        # window coordinates; add the origin of the work area.
+        d = None
         for z in zeilen:
-            m = DLG.search(z)
-            if m and m.group(7).strip() in ("Ja", "Yes", "OK"):
-                best = m
-        if best is None:
+            m = DLGOK.search(z)
+            if m:
+                d = m
+        if d is None:
             raise SystemExit("klickplan: kein Ja-Knopf im Mitschnitt")
-        bx = int(best.group(2)) + int(best.group(6)) // 2
-        by = int(best.group(3)) - 5
-        print("%d,%d" % (dcx + bx, dcy + by))
+        dx, dy, dw, dh = (int(v) for v in d.groups())
+        print("%d,%d" % (cx + dx + dw // 2, cy + dy + dh // 2))
         return 0
 
     if was == "knopf":

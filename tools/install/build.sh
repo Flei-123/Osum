@@ -46,7 +46,7 @@ INODES=${INODES:-512}
 
 mkdir -p "$OUT/bin"
 
-PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk ota dhcp host reboot sync tar find du chmod id whoami wlan"}
+PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk ota dhcp host reboot sync tar find du chmod id whoami wlan sntp wrace wspam"}
 
 # RUNDE OTA: DIE PROGRAMME DER ZWEITEN BAUART.
 #
@@ -252,12 +252,12 @@ else
 #          Adresse als Name genommen, und die traegt kein Zertifikat --
 #          die Verbindung wird dann abgelehnt, und das ist richtig so.
 # abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe: nein.
+# auto     ja/nein. Vorgabe: ja (Entscheidung des Besitzers 02.10.2026).
 # frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 #quelle=https://192.0.2.1:443
 #name=pkg.example.org
 abstand=3600
-auto=nein
+auto=true
 frist=120
 EOFC
 fi

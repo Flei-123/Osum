@@ -79,6 +79,7 @@ import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import ui.tile
 import ui.wmplug
+import ui.ax
 import gfx.cursor
 import drv.gpu.vgpu
 import lib.vektor
@@ -192,7 +193,8 @@ export {
     evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
-    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS,
+    say_mag,
     M_SHIFT, M_CTRL,
     L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_TOAST, L_MAX,
     F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
@@ -439,6 +441,10 @@ const E_MOVE: u64 = 4
 const E_CLOSE: u64 = 5
 const E_FOCUS: u64 = 6
 const E_RESIZE: u64 = 7
+// ROUND A11Y-2: "press your control number a" -- put into a window by
+// the accessibility tree (sysgui.ax_call, AX_PRESS), never by input. The
+// widget layer handles it like a click on that control.
+const E_AXPRESS: u64 = 8
 
 // die Skalare
 const S_READY: u64 = 0x000
@@ -5907,6 +5913,15 @@ fn paint_sig(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
 // it taken returns, the damage stays pending (`S_DON` is only cleared by
 // the composition that runs), and the next turn of the loop paints it.
 const S_CLOCK: u64 = 0x1598
+// ROUND A11Y-2 (S-008): the magnifier. 0x15A0..0x15E0, behind S_CLOCK.
+const S_MAGN: u64 = 0x15A0 // how often the panel was painted
+const S_MAGFS: u64 = 0x15A8 // the focus count last seen (ax.fseq)
+const S_MAGPX: u64 = 0x15B0 // the pointer last seen
+const S_MAGPY: u64 = 0x15B8
+const S_MAGMODE: u64 = 0x15C0 // 0 = follows the pointer, 1 = the focus
+const S_MAGLX: u64 = 0x15C8 // where the panel stood last time, + 1
+const S_MAGCX: u64 = 0x15D0 // the centre it magnified last time
+const S_MAGCY: u64 = 0x15D8
 
 fn compose(state: u64) -> u64 {
     let lk: u64 = state + kstate.WM_OFF + S_CLOCK
@@ -5925,16 +5940,93 @@ fn compose_one(state: u64) -> u64 {
     if !ready(state) || !fb.ready(state) {
         return 0
     }
+    // ROUND A11Y-2: WITH THE MAGNIFIER ITS PANEL IS ALWAYS PART OF THE
+    // DIRTY AREA -- and so is the place it stood last time, if it moved.
+    // Without this the panel would be painted and not transferred, or
+    // its old picture would stay on the screen.
+    if ax.mag(state) {
+        mag_damage(state)
+    } else if gs(state, S_MAGLX) != 0 {
+        // switched off: the old panel goes away
+        let ox: u64 = gs(state, S_MAGLX) - 1
+        ss(state, S_MAGLX, 0)
+        damage(state, ox as i64, 0, (ox + MAG_W) as i64, MAG_H as i64)
+    }
     if gs(state, S_DON) == 0 {
         return 0
     }
-    let x0: u64 = gs(state, S_DX0)
-    let y0: u64 = gs(state, S_DY0)
-    let x1: u64 = gs(state, S_DX1)
-    let y1: u64 = gs(state, S_DY1)
+    var x0: u64 = gs(state, S_DX0)
+    var y0: u64 = gs(state, S_DY0)
+    var x1: u64 = gs(state, S_DX1)
+    var y1: u64 = gs(state, S_DY1)
     ss(state, S_DON, 0)
     if x1 <= x0 || y1 <= y0 {
         return 0
+    }
+    // ============================== FIX 04.10.2026: THE MENU BLUR BAND
+    //
+    // Justin, Dell: moving the mouse over the start menu smeared a band of
+    // it (the window's own text, blurred). THE SAME RULE AS THE BAR'S
+    // (see `damage`), FOR EVERY WINDOW THAT BLURS. `paint_win` blurs the
+    // WHOLE outer rectangle of such a window from what stands in the second
+    // buffer, but paints the window itself only inside the dirty
+    // rectangle. A pointer or a hover row dirties a small strip: the blur
+    // then read the window's OLD pixels (the rest of the window was not
+    // repainted from the desktop up) and wrote them blurred over the full
+    // width of the window; the text came back only inside the strip.
+    // So a dirty rectangle that touches a blurring window grows to that
+    // window's whole rectangle: the desktop is repainted under all of it,
+    // the blur reads a clean background, the window is painted over all
+    // of it. Grown windows can touch further ones, so up to three rounds.
+    // `noglasgrow` switches this off (the counter-proof of the tests).
+    if gs(state, S_NOGROW) == 0 && form(state, FM_BLUR) > 0 {
+        var rounds: u64 = 0
+        var grew: bool = true
+        while grew && rounds < 3 {
+            grew = false
+            rounds = rounds + 1
+            var wi: u64 = 0
+            while wi < MAX_WIN {
+                if blur_will(state, wi) {
+                    var qx0: i64 = win_x(state, wi)
+                    var qy0: i64 = win_y(state, wi)
+                    var qx1: i64 = qx0 + outer_w(state, wi) as i64
+                    var qy1: i64 = qy0 + outer_h(state, wi) as i64
+                    if qx0 < 0 {
+                        qx0 = 0
+                    }
+                    if qy0 < 0 {
+                        qy0 = 0
+                    }
+                    if qx1 > gs(state, S_SW) as i64 {
+                        qx1 = gs(state, S_SW) as i64
+                    }
+                    if qy1 > gs(state, S_SH) as i64 {
+                        qy1 = gs(state, S_SH) as i64
+                    }
+                    if qx1 > x0 as i64 && qx0 < x1 as i64
+                        && qy1 > y0 as i64 && qy0 < y1 as i64 {
+                        if (qx0 as u64) < x0 {
+                            x0 = qx0 as u64
+                            grew = true
+                        }
+                        if (qy0 as u64) < y0 {
+                            y0 = qy0 as u64
+                            grew = true
+                        }
+                        if (qx1 as u64) > x1 {
+                            x1 = qx1 as u64
+                            grew = true
+                        }
+                        if (qy1 as u64) > y1 {
+                            y1 = qy1 as u64
+                            grew = true
+                        }
+                    }
+                }
+                wi = wi + 1
+            }
+        }
     }
     // RUNDE VSYNC: DIE BILDNUMMER STEIGT HIER und nicht beim
     // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
@@ -6014,6 +6106,13 @@ fn compose_one(state: u64) -> u64 {
     // den Schaden bei der Bewegung.
     if gs(state, S_CURON) != 0 && !hwcur_an(state) {
         paint_cursor(state, x0, y0, x1, y1)
+    }
+    // 4. ROUND A11Y-2: THE MAGNIFIER, ON TOP OF EVERYTHING -- after the
+    //    pointer, so the pointer is in the magnified picture too. It
+    //    reads from the finished picture (`fb.get_pixel` reads the draw
+    //    target), so it magnifies what is ON THE SCREEN, not one window.
+    if ax.mag(state) {
+        paint_mag(state)
     }
     // RUNDE VSYNC: DIE WEICHE. Mit Bildgrenze wird das Rechteck nur
     // VORGEMERKT -- `present` uebertraegt es im Takt, und zwar als
@@ -13714,4 +13813,205 @@ fn tile_action(state: u64, act: u64) -> bool {
         return false
     }
     return false
+}
+
+// ==================================================================
+// ROUND A11Y-2 (S-008) -- THE MAGNIFIER
+//
+// A CUT-OUT, TWICE ENLARGED, IN A FIXED PANEL of 200 x 150 at the top
+// right. Not the whole screen enlarged (macOS' zoom): that needs a second
+// composition of the WHOLE picture per movement and takes away the
+// overview. A panel shows both.
+//
+// IT FOLLOWS THE FOCUS AND THE POINTER, whichever moved last. The focus
+// comes from the accessibility tree: the focused node of the focused
+// window, in screen coordinates (window corner + frame + the node's
+// place). So a person who works with the keyboard sees the control that
+// Tab just reached, magnified, without moving a mouse.
+//
+// THE PANEL GIVES WAY. If the cut-out would overlap the panel at the top
+// right, the panel goes to the top left -- otherwise it would magnify
+// itself and the picture would be a spiral. The rule is hard, not soft:
+// a test must be able to compute where the panel is, and the kernel says
+// it on the serial line (`ax: mag ...`) so the test does not need a
+// second copy of this arithmetic.
+const MAG_W: u64 = 200
+const MAG_H: u64 = 150
+const MAG_F: u64 = 2
+
+// The centre of the cut-out, in screen coordinates. Updates the mode.
+fn mag_centre(state: u64) -> u64 {
+    let px: u64 = gs(state, S_CURX)
+    let py: u64 = gs(state, S_CURY)
+    if px != gs(state, S_MAGPX) || py != gs(state, S_MAGPY) {
+        ss(state, S_MAGPX, px)
+        ss(state, S_MAGPY, py)
+        ss(state, S_MAGMODE, 0)
+    }
+    let fs: u64 = ax.fseq(state)
+    if fs != gs(state, S_MAGFS) {
+        ss(state, S_MAGFS, fs)
+        ss(state, S_MAGMODE, 1)
+    }
+    var cx: u64 = px
+    var cy: u64 = py
+    if gs(state, S_MAGMODE) == 1 {
+        let f: u64 = focus(state)
+        if f < MAX_WIN && valid(state, f) {
+            let n: u64 = ax.focus_node(state, f)
+            if n < ax.MAX_NODES {
+                var wx: i64 = win_x(state, f) + inx(state, f) as i64
+                var wy: i64 = win_y(state, f) + iny(state, f) as i64
+                if wx < 0 {
+                    wx = 0
+                }
+                if wy < 0 {
+                    wy = 0
+                }
+                // a wide control (an entry, a check box row) is centred
+                // on its START, where its text begins -- the middle of
+                // a 400-pixel field is empty
+                var half: u64 = ax.node_w(state, n) / 2
+                if half > MAG_W / MAG_F / 2 - 5 {
+                    half = MAG_W / MAG_F / 2 - 5
+                }
+                cx = wx as u64 + ax.node_x(state, n) + half
+                cy = wy as u64 + ax.node_y(state, n) + ax.node_h(state, n) / 2
+            }
+        }
+    }
+    ss(state, S_MAGCX, cx)
+    ss(state, S_MAGCY, cy)
+    return cx
+}
+
+// The top left of the CUT-OUT. k = 0: x, 1: y.
+fn mag_src(state: u64, k: u64) -> u64 {
+    let sw: u64 = gs(state, S_SW)
+    let sh: u64 = gs(state, S_SH)
+    let qw: u64 = MAG_W / MAG_F
+    let qh: u64 = MAG_H / MAG_F
+    var c: u64 = gs(state, S_MAGCX)
+    var lim: u64 = sw
+    var q: u64 = qw
+    if k == 1 {
+        c = gs(state, S_MAGCY)
+        lim = sh
+        q = qh
+    }
+    if lim <= q || c < q / 2 {
+        return 0
+    }
+    if c + q / 2 >= lim {
+        return lim - q
+    }
+    return c - q / 2
+}
+
+// Where the panel stands: top right, unless the cut-out reaches into it.
+fn mag_x(state: u64) -> u64 {
+    let sw: u64 = gs(state, S_SW)
+    if sw <= MAG_W * 2 {
+        return 0
+    }
+    let sx: u64 = mag_src(state, 0)
+    let sy: u64 = mag_src(state, 1)
+    if sx + MAG_W / MAG_F > sw - MAG_W && sy < MAG_H {
+        return 0
+    }
+    return sw - MAG_W
+}
+
+// Only when something is dirty anyway or the centre moved -- `compose`
+// runs from the idle loop too, and an unchanged panel costs nothing.
+fn mag_damage(state: u64) {
+    let ocx: u64 = gs(state, S_MAGCX)
+    let ocy: u64 = gs(state, S_MAGCY)
+    let _c: u64 = mag_centre(state)
+    if gs(state, S_DON) == 0 && ocx == gs(state, S_MAGCX)
+        && ocy == gs(state, S_MAGCY) && gs(state, S_MAGLX) != 0 {
+        return
+    }
+    let px: u64 = mag_x(state)
+    let last: u64 = gs(state, S_MAGLX)
+    if last != 0 && last - 1 != px {
+        damage(state, (last - 1) as i64, 0, (last - 1 + MAG_W) as i64,
+            MAG_H as i64)
+    }
+    ss(state, S_MAGLX, px + 1)
+    damage(state, px as i64, 0, (px + MAG_W) as i64, MAG_H as i64)
+}
+
+fn paint_mag(state: u64) {
+    let sw: u64 = gs(state, S_SW)
+    let sh: u64 = gs(state, S_SH)
+    if sw < MAG_W * 2 || sh < MAG_H * 2 {
+        return
+    }
+    let px: u64 = mag_x(state)
+    let sx: u64 = mag_src(state, 0)
+    let sy: u64 = mag_src(state, 1)
+    // READ, THEN WRITE: the cut-out never overlaps the panel (mag_x), so
+    // no pixel is read after it was written.
+    var r: u64 = 0
+    while r < MAG_H {
+        var c: u64 = 0
+        while c < MAG_W {
+            fb.pixel(state, px + c, r,
+                fb.get_pixel(state, sx + c / MAG_F, sy + r / MAG_F))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // A frame in the colour of the active title bar -- from the scheme,
+    // not a number (no raw colour in drawing code since round THEME), and
+    // it goes along with high contrast.
+    let rim: u64 = deco(state, DK_TITLE_ON)
+    var k: u64 = 0
+    while k < MAG_W {
+        fb.pixel(state, px + k, 0, rim)
+        fb.pixel(state, px + k, 1, rim)
+        fb.pixel(state, px + k, MAG_H - 2, rim)
+        fb.pixel(state, px + k, MAG_H - 1, rim)
+        k = k + 1
+    }
+    k = 0
+    while k < MAG_H {
+        fb.pixel(state, px, k, rim)
+        fb.pixel(state, px + 1, k, rim)
+        fb.pixel(state, px + MAG_W - 2, k, rim)
+        fb.pixel(state, px + MAG_W - 1, k, rim)
+        k = k + 1
+    }
+    ss(state, S_MAGN, gs(state, S_MAGN) + 1)
+}
+
+// `ax: mag ...` on the serial line: where the panel and the cut-out are,
+// so a test checks the PICTURE against the kernel's own numbers.
+fn say_mag(state: u64) {
+    var s_a: [u8; 12] = "ax: mag px=\0"
+    var s_b: [u8; 5] = " sx=\0"
+    var s_c: [u8; 5] = " sy=\0"
+    var s_d: [u8; 5] = " cx=\0"
+    var s_e: [u8; 5] = " cy=\0"
+    var s_f: [u8; 7] = " mode=\0"
+    var s_g: [u8; 9] = " frames=\0"
+    var s_h: [u8; 6] = " rim=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(mag_x(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(mag_src(state, 0))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(mag_src(state, 1))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(gs(state, S_MAGCX))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_MAGCY))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(gs(state, S_MAGMODE))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gs(state, S_MAGN))
+    serial.puts((&s_h[0]) as u64)
+    serial.hex(deco(state, DK_TITLE_ON))
+    serial.nl()
 }

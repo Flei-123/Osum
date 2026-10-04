@@ -1,0 +1,390 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/a11ydemo.fi -- ROUND A11Y-2: THE MEASURING APP OF THE
+// ACCESSIBILITY TREE (docs/A11Y.md, tools/a11y/run.sh).
+//
+// It puts ordinary controls on the screen and does NOTHING for its
+// accessibility except three lines: `ax_name` for the password field (it
+// has no visible text worth reading), and `ax_action` on two buttons that
+// stand for bus actions. Everything else in the tree comes from wlib.
+//
+// The password field holds the canary word GEHEIMNIS7 from the start. The
+// app NEVER prints it -- the test looks for it in every export, log and
+// kernel dump and must find it nowhere. What the app prints is the length
+// and a checksum, so the test knows the field really held it.
+//
+//   a11ydemo            the window, until it is closed
+//   a11ydemo plain      the same with the title "A11Y plain" -- started
+//                       from /bin it has no app label: a press into it
+//                       must be refused (a user's own tool)
+//   a11ydemo forge      GEGENPROBE of the kernel's own locks: reads and
+//                       presses without a right, pushes a password node
+//                       WITH a value and a node for a window that is not
+//                       its own; then grants itself (root) and execs
+//                       `a11ydemo mine`, which must have NO right left
+//   a11ydemo mine       prints the caller's own rights (AX_PERM mine)
+//   a11ydemo dump       the kernel store on the serial line (root)
+//   a11ydemo set F V    AX_SET: F = high | mag | sticky | on, V = 0 | 1
+//   a11ydemo theme      the colours this program gets (after `set high`)
+
+profile app
+
+import ulib
+import wlibc
+import wlib
+
+export { u_start }
+
+static mut e1: [u8; 64] = "Hello tree\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut pw: [u8; 64] = "GEHEIMNIS7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_win: [u8; 24] = "A11Y controls\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_head: [u8; 24] = "Accessibility\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_save: [u8; 8] = "Save\0\0\0\0"
+static mut t_add: [u8; 12] = "Add note\0\0\0\0"
+static mut t_off: [u8; 12] = "Disabled\0\0\0\0"
+static mut t_chk: [u8; 16] = "Remember me\0\0\0\0\0"
+static mut t_pwname: [u8; 12] = "Password\0\0\0\0"
+static mut t_act1: [u8; 12] = "notes.save\0\0"
+static mut t_act2: [u8; 12] = "notes.add\0\0\0"
+static mut t_list: [u8; 40] = "alpha\nbeta\ngamma\ndelta\n\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_app: [u8; 9] = "a11ydemo\0"
+static mut t_forge: [u8; 12] = "A11Y forge\0\0"
+static mut t_plain: [u8; 24] = "A11Y plain\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut p_self: [u8; 14] = "/bin/a11ydemo\0"
+static mut a_mine: [u8; 5] = "mine\0"
+
+fn same(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while true {
+        let x: u8 = *((a + k) as *mut u8)
+        if x != *((b + k) as *mut u8) {
+            return false
+        }
+        if x == 0 as u8 {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// a negative errno as its positive number
+fn neg(v: u64) -> u64 {
+    if v == 0 {
+        return 0
+    }
+    return (~v) + 1
+}
+
+fn say(p: u64) {
+    let _n: u64 = ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+// length and a checksum of the password -- never the password
+fn say_secret() {
+    var a: [u8; 22] = "a11ydemo: secret len=\0"
+    var b: [u8; 6] = " sum=\0"
+    let p: u64 = (&pw[0 as usize]) as u64
+    let n: u64 = ulib.length(p)
+    var h: u64 = 5381
+    var k: u64 = 0
+    while k < n {
+        h = (h * 33 + ((*((p + k) as *mut u8)) as u64)) & 0xFFFFFFFF
+        k = k + 1
+    }
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(n)
+    say((&b[0 as usize]) as u64)
+    ulib.sayn(h)
+    ulib.nl()
+}
+
+fn say_fired(id: u64, kind: u64, val: u64) {
+    var a: [u8; 20] = "a11ydemo: fired id=\0"
+    var sk: [u8; 7] = " kind=\0"
+    var sv: [u8; 6] = " val=\0"
+    var sp: [u8; 10] = " presses=\0"
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(id)
+    say((&sk[0 as usize]) as u64)
+    ulib.sayn(kind)
+    say((&sv[0 as usize]) as u64)
+    ulib.sayn(val)
+    say((&sp[0 as usize]) as u64)
+    ulib.sayn(wlib.ax_presses())
+    ulib.nl()
+}
+
+// THE GEGENPROBE OF THE KERNEL LOCKS. No wlib: a node for window 0
+// without a window node (no mapping -> refused), then a window node that
+// names window id 1 (not ours unless we happen to own it -> refused), and
+// a password node with the canary's bytes as its value (must arrive as 0,
+// and AI_LEAKS must count it). Nothing of this may show up anywhere.
+fn forge() -> u64 {
+    var nb: [u8; 288] = [0 as u8; 288]
+    let b: u64 = (&nb[0 as usize]) as u64
+    var s_a: [u8; 24] = "a11ydemo: forge begin=\0\0"
+    var s_b: [u8; 8] = " taken=\0"
+    var s_c: [u8; 6] = " end=\0"
+    var s_d: [u8; 8] = " leaks=\0"
+    var s_e: [u8; 10] = " foreign=\0"
+    if !wlib.begin(false, false) {
+        return 1
+    }
+    let w: u64 = wlib.window(900, 600, 200, 80, (&t_forge[0 as usize]) as u64)
+    wlib.draw_all()
+    let _st: u64 = wlib.step()
+    // no right yet: reading, events and pressing must all be refused
+    var s_r: [u8; 24] = "a11ydemo: noright read=\0"
+    var s_v: [u8; 8] = " event=\0"
+    var s_p: [u8; 8] = " press=\0"
+    var s_m: [u8; 7] = " mine=\0"
+    var s_n: [u8; 8] = " nodes=\0"
+    var ev: [u8; 16] = [0 as u8; 16]
+    say((&s_r[0 as usize]) as u64)
+    ulib.sayn(neg(wlibc.ax_read(0, b, 96)))
+    say((&s_v[0 as usize]) as u64)
+    ulib.sayn(neg(wlibc.ax_event((&ev[0 as usize]) as u64, 16)))
+    say((&s_p[0 as usize]) as u64)
+    ulib.sayn(neg(wlibc.ax_press(0, wlibc.ax_info(wlibc.AXI_GEN))))
+    say((&s_m[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_perm(wlibc.AXP_MINE, 0, 0))
+    say((&s_n[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AXI_COUNT))
+    ulib.nl()
+    let leaks0: u64 = wlibc.ax_info(wlibc.AXI_LEAKS)
+    let for0: u64 = wlibc.ax_info(wlibc.AXI_FOREIGN)
+    let bg: u64 = wlibc.ax_begin()
+    // node 0: a button of window 3, never mapped
+    *((b) as *mut u64) = 3 | (1 << 8) | (3 << 16)
+    // node 1: our window 0 is a window node that claims id 1
+    *((b + 96) as *mut u64) = 1 | (0 << 16)
+    *((b + 96 + 16) as *mut u64) = 1
+    // node 2: a password node of window 0 with the canary as value
+    *((b + 192) as *mut u64) = 6 | (0 << 16)
+    *((b + 192 + 16) as *mut u64) = 0x3753494E4D494548 // "HEIMNIS7"
+    let taken: u64 = wlibc.ax_send(b, 3)
+    let e: u64 = wlibc.ax_end()
+    say((&s_a[0 as usize]) as u64)
+    ulib.sayn(bg)
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(taken)
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(e)
+    say((&s_d[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AXI_LEAKS) - leaks0)
+    say((&s_e[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AXI_FOREIGN) - for0)
+    ulib.nl()
+    // and now the honest push of the same window: the password node with
+    // a value through a mapped window -> taken, value forced to 0
+    let wid: u64 = wlibc.sys3w(wlibc.WM_INFO, wlib.win_handle(w),
+        wlibc.WI_ID, 0)
+    let bg2: u64 = wlibc.ax_begin()
+    *((b + 96 + 16) as *mut u64) = wid
+    let taken2: u64 = wlibc.ax_send(b + 96, 2)
+    let e2: u64 = wlibc.ax_end()
+    var s_f: [u8; 25] = "a11ydemo: forge2 begin=\0\0"
+    say((&s_f[0 as usize]) as u64)
+    ulib.sayn(bg2)
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(taken2)
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(e2)
+    say((&s_d[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AXI_LEAKS) - leaks0)
+    ulib.nl()
+    // THE RIGHT FALLS AT EXEC. Root grants itself both rights, says so,
+    // and replaces itself with `a11ydemo mine` -- same task, new program.
+    var s_g: [u8; 24] = "a11ydemo: granted mine=\0"
+    let _gr: u64 = wlibc.ax_perm(wlibc.AXP_GRANT, 0xFFFF, 3)
+    say((&s_g[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_perm(wlibc.AXP_MINE, 0, 0))
+    ulib.nl()
+    var argv: [u64; 3] = [0 as u64; 3]
+    argv[0 as usize] = (&p_self[0 as usize]) as u64
+    argv[1 as usize] = (&a_mine[0 as usize]) as u64
+    let _x: u64 = ulib.sys(ulib.SYS_EXECVE, argv[0 as usize],
+        (&argv[0 as usize]) as u64, 0)
+    var s_x: [u8; 25] = "a11ydemo: execve failed\0\0"
+    say((&s_x[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
+
+fn mine() -> u64 {
+    var s_m: [u8; 27] = "a11ydemo: after exec mine=\0"
+    say((&s_m[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_perm(wlibc.AXP_MINE, 0, 0))
+    ulib.nl()
+    return 0
+}
+
+fn setcfg(f: u64, v: u64) -> u64 {
+    var c_high: [u8; 5] = "high\0"
+    var c_mag: [u8; 4] = "mag\0"
+    var c_st: [u8; 7] = "sticky\0"
+    var c_on: [u8; 3] = "on\0"
+    var field: u64 = 99
+    if same(f, (&c_high[0 as usize]) as u64) {
+        field = wlibc.AXC_HIGH
+    } else if same(f, (&c_mag[0 as usize]) as u64) {
+        field = wlibc.AXC_MAG
+    } else if same(f, (&c_st[0 as usize]) as u64) {
+        field = wlibc.AXC_STICKY
+    } else if same(f, (&c_on[0 as usize]) as u64) {
+        field = wlibc.AXC_ON
+    }
+    var s_a: [u8; 18] = "a11ydemo: set rc=\0"
+    say((&s_a[0 as usize]) as u64)
+    if field == 99 {
+        ulib.sayn(999)
+        ulib.nl()
+        return 1
+    }
+    let rc: u64 = wlibc.ax_set(field, ulib.to_num(v))
+    ulib.sayn(rc)
+    ulib.nl()
+    return 0
+}
+
+// the colours a program gets now, and their contrast ratio (x100)
+fn theme() -> u64 {
+    var s_a: [u8; 20] = "a11ydemo: theme fg=\0"
+    var s_b: [u8; 5] = " bg=\0"
+    var s_c: [u8; 11] = " ratio100=\0"
+    var s_d: [u8; 7] = " high=\0"
+    if !wlib.begin(false, false) {
+        return 1
+    }
+    let fg: u64 = wlibc.theme(wlibc.T_FG)
+    let bg: u64 = wlibc.theme(wlibc.T_BG)
+    say((&s_a[0 as usize]) as u64)
+    ulib.sayn(fg)
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(bg)
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(wlibc.theme_contrast(fg, bg))
+    say((&s_d[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_high())
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 24] = "a11ydemo: no surface\0\0\0\0"
+    var s_go: [u8; 16] = "a11ydemo: ready\0"
+    var s_tree: [u8; 22] = "a11ydemo: tree nodes=\0"
+    var s_on: [u8; 5] = " on=\0"
+    var s_hi: [u8; 7] = " high=\0"
+    var c_forge: [u8; 6] = "forge\0"
+    var c_mine: [u8; 5] = "mine\0"
+    var c_dump: [u8; 5] = "dump\0"
+    var c_set: [u8; 4] = "set\0"
+    var c_theme: [u8; 6] = "theme\0"
+    var c_plain: [u8; 6] = "plain\0"
+    var title: u64 = (&t_win[0 as usize]) as u64
+    var wx: u64 = 60
+    if ulib.arg_count(args) >= 2 {
+        let a1: u64 = ulib.arg_at(args, 1)
+        if same(a1, (&c_forge[0 as usize]) as u64) {
+            return forge()
+        }
+        if same(a1, (&c_mine[0 as usize]) as u64) {
+            return mine()
+        }
+        if same(a1, (&c_dump[0 as usize]) as u64) {
+            var s_d: [u8; 19] = "a11ydemo: dump rc=\0"
+            say((&s_d[0 as usize]) as u64)
+            ulib.sayn(wlibc.ax_set(wlibc.AXC_DUMP, 0))
+            ulib.nl()
+            return 0
+        }
+        if same(a1, (&c_set[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+            return setcfg(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+        }
+        if same(a1, (&c_theme[0 as usize]) as u64) {
+            return theme()
+        }
+        if same(a1, (&c_plain[0 as usize]) as u64) {
+            title = (&t_plain[0 as usize]) as u64
+            wx = 560
+        }
+    }
+    if !wlib.begin(false, false) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let bw: u64 = 420
+    let w: u64 = wlib.window(wx, 60, bw, 300, title)
+    if w >= wlib.MAXWN {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let _wa: u64 = wlib.window_app(w, (&t_app[0 as usize]) as u64)
+    wlib.box_v(w, 0, 0, bw, 150, 12, 8)
+    let lb: u64 = wlib.label((&t_head[0 as usize]) as u64)
+    let f1: u64 = wlib.entry((&e1[0 as usize]) as u64, 62)
+    let f2: u64 = wlib.password((&pw[0 as usize]) as u64, 62)
+    wlib.ax_name(f2, (&t_pwname[0 as usize]) as u64)
+    let ck: u64 = wlib.check((&t_chk[0 as usize]) as u64, false)
+    wlib.box_end()
+    wlib.box_h(w, 12, 156, bw - 24, 30, 0, 10)
+    wlib.size(100, 28)
+    let b1: u64 = wlib.button((&t_save[0 as usize]) as u64)
+    wlib.ax_action(b1, (&t_act1[0 as usize]) as u64)
+    wlib.size(110, 28)
+    let b2: u64 = wlib.button((&t_add[0 as usize]) as u64)
+    wlib.ax_action(b2, (&t_act2[0 as usize]) as u64)
+    wlib.size(110, 28)
+    let b3: u64 = wlib.button((&t_off[0 as usize]) as u64)
+    wlib.enable(b3, false)
+    wlib.box_end()
+    wlib.box_v(w, 12, 196, bw - 24, 90, 0, 0)
+    wlib.size(0, 86)
+    let ls: u64 = wlib.list((&t_list[0 as usize]) as u64, 4)
+    wlib.box_end()
+    say_secret()
+    wlib.draw_all()
+    let n: u64 = wlib.ax_flush()
+    say((&s_tree[0 as usize]) as u64)
+    ulib.sayn(n)
+    say((&s_on[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AXI_ON))
+    say((&s_hi[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_high())
+    ulib.nl()
+    say((&s_go[0 as usize]) as u64)
+    ulib.nl()
+    var focus_seen: u64 = 0
+    while wlib.alive() {
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            say_fired(id, wlib.fired_kind(), wlib.value(id))
+        }
+        let f: u64 = wlib.focus_id()
+        if f != focus_seen {
+            focus_seen = f
+            var s_f: [u8; 20] = "a11ydemo: focus id=\0"
+            say((&s_f[0 as usize]) as u64)
+            ulib.sayn(f)
+            ulib.nl()
+        }
+    }
+    let _u: u64 = lb + f1 + ck + b3 + ls
+    return 0
+}
+
+// THE BLOCK OF ARGUMENTS lies at a FIXED address (kernel K16:
+// T_USTACK = proc.ARGS_BASE), as for every app-profile program.
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
