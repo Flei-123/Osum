@@ -741,23 +741,23 @@ geraet "$TMPD/H.img" "$TMPD/sH.sh" "$TMPD/kontoA" "$TMPD/store1" "$TMPD/leer" -
 rc=$(lauf "$TMPD/H.img" H)
 klar H > "$TMPD/H.log"
 habs() { sed -n "/^==$1==/,/^==/p" "$TMPD/H.log"; }
-habs OHNE | grep -qa 'keine offene Sitzung' \
+habs OHNE | grep -qa 'no open session' \
     && ok "(h) ohne Sitzung gibt es kein Geheimnis" \
     || bad "(h) ohne Sitzung kam etwas heraus"
 habs AUF | grep -qa 'vault: open' && ok "(h) der Tresor geht mit der Passphrase auf" \
                                   || bad "(h) der Tresor geht nicht auf"
-habs LEGEN | grep -qa 'gelegt' && ok "(h) ein Geheimnis laesst sich ablegen" \
+habs LEGEN | grep -qa 'vault: stored' && ok "(h) ein Geheimnis laesst sich ablegen" \
                                || bad "(h) das Ablegen scheitert"
 habs GIB | grep -qa 'GEHEIMNIS-4711' \
     && ok "(h) und mit offener Sitzung wieder herausholen" \
     || bad "(h) das Geheimnis kommt nicht zurueck"
-habs NACHZU | grep -qa 'keine offene Sitzung' \
+habs NACHZU | grep -qa 'no open session' \
     && ok "(h) nach 'vault close' ist er zu" \
     || bad "(h) nach 'vault close' ist er NICHT zu"
-habs FALSCHPASS | grep -qa 'falsche Passphrase' \
+habs FALSCHPASS | grep -qa 'wrong passphrase' \
     && ok "(h) eine falsche Passphrase oeffnet den Tresor nicht" \
     || bad "(h) eine falsche Passphrase oeffnete den Tresor"
-habs NACHFRIST | grep -qa 'Frist ist abgelaufen' \
+habs NACHFRIST | grep -qa 'timeout has expired' \
     && ok "(h) nach der Frist ist der Tresor von selbst zu" \
     || bad "(h) die Frist wirkt nicht"
 # DER KLARTEXT LIEGT IN KEINER DATEI. Der Wirt sucht ihn im ganzen Abbild.
@@ -784,7 +784,7 @@ lauf "$TMPD/H2.img" H2 > /dev/null
 klar H2 > "$TMPD/H2.log"
 # Die Sitzungsdatei aus dem alten Lauf ist mitgereist, /system/tresor.sit
 # aber nicht -- also fehlt genau das Recht.
-if grep -qa 'kein Recht\|keine offene Sitzung\|Frist' "$TMPD/H2.log"; then
+if grep -qa 'no right\|no open session\|timeout' "$TMPD/H2.log"; then
     ok "(h) ohne den Sitzungsschluessel in /system kommt kein Geheimnis heraus"
 else
     bad "(h) ohne Sitzungsschluessel kam ein Geheimnis heraus"
