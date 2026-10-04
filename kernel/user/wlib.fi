@@ -113,7 +113,7 @@ export {
     sel_anker, sel_num, sel_anker_von, sel_frame,
     list_einklick,
     focus_id, set_focus, fired_kind, fired_index, fired_win,
-    step, draw_all, dirty, dirty_all, alive, quit,
+    step, draw_all, dirty, dirty_all, alive, quit, idle_sleep_on,
     menu_open, menu_at, menu_win, menu_close, dlg_text, dlg_open, dlg_ask, dlg_state,
     dlg_close, dlg_button, dlg_win, dlg_label,
     // RUNDE EXPLORER-2: der Hinweis (ein Knopf) und die Frage mit
@@ -11794,6 +11794,19 @@ fn paint_all_inner() -> u64 {
     return gemalt
 }
 
+// Quiet rounds in a row before `step` starts to sleep (see its end).
+const IDLE_SPIN: u64 = 200
+static mut s_idle_run: u64 = 0
+// Only the programs that ask (`fuiapp.next`: launcher, lock, settings, the
+// file manager ...) sleep when idle. The demo programs and the tests count
+// ROUNDS (widgetdemo ends after its round limit and prints its counters);
+// for them a round must stay as fast as it was.
+static mut s_idle_sleep: u64 = 0
+
+fn idle_sleep_on() {
+    s_idle_sleep = 1
+}
+
 fn step() -> u64 {
     s_fired = 0
     s_fkind = 0
@@ -11909,8 +11922,22 @@ fn step() -> u64 {
     // Eine laufende Bewegung ist ETWAS. Ohne diese Zeile schlaeft die
     // Schleife mitten in einer Animation ein und das Fenster bleibt auf
     // halbem Weg stehen, bis die Maus wackelt.
+    // 04.10.2026 (Dell): AN IDLE PROGRAM MUST NOT BURN A CORE. The loop only
+    // yielded here, and a yield with nothing else ready returns at once: the
+    // hidden start menu ("starter") spun at 100 % of a core for as long as the
+    // machine ran (taskbar "CPU 100 %", measured: 2338 of ~2700 ticks in 27 s).
+    // The first rounds of a quiet spell still yield (a click that follows
+    // is answered within microseconds); after IDLE_SPIN quiet rounds in a row
+    // the program sleeps one tick (10 ms) per round until something happens.
     if !etwas && gemalt == 0 && laufend == 0 {
-        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        s_idle_run = s_idle_run + 1
+        if s_idle_sleep != 0 && s_idle_run > IDLE_SPIN {
+            let _sl: u64 = ulib.sleep_ms(8)
+        } else {
+            ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        }
+    } else {
+        s_idle_run = 0
     }
     if s_fired == 0 {
         return MAXWD

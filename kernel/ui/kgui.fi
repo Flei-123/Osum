@@ -4627,6 +4627,46 @@ fn abmelde_wache(state: u64) {
     lo_startet = 0
 }
 
+// ==================================== 04.10.2026 (DELL): DEAD WINDOWS
+// A process that ends (round limit, fault, kill) did NOT take its windows
+// with it: only files and sockets are closed on exit. The start menu's
+// process ("starter") ended, its window stayed as a picture -- "Programm
+// suchen:" with an empty field, the highlight stuck, no click and no key
+// accepted (Justin's Dell photo, 04.10.2026 13:30). Every tick: a window
+// whose owner is a corpse (or a free slot) is destroyed. The next press on
+// Super / Start then finds no window and starts a fresh launcher.
+// NOT while the lock stands: the lock's own death must not show the desktop
+// for a moment (`sperre_wache` restarts it).
+static mut tot_say: u64 = 0
+
+fn fenster_wache(state: u64) {
+    if wm.sperre_an(state) || fb.sweep_aus(state) {
+        return
+    }
+    let tasks: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        if wm.valid(state, i) {
+            let o: u64 = wm.win_owner(state, i)
+            if o != 0 && o < tasks {
+                let zs: u64 = sched.tget(state, o, sched.T_STATE)
+                if zs == sched.S_ZOMBIE || zs == sched.S_FREE {
+                    var s_t: [u8; 29] = "kgui: dead window removed i=\0"
+                    var s_o: [u8; 8] = " owner=\0"
+                    serial.puts((&s_t[0]) as u64)
+                    serial.dec(i)
+                    serial.puts((&s_o[0]) as u64)
+                    serial.dec(o)
+                    serial.nl()
+                    let _d: bool = wm.destroy(state, i)
+                    tot_say = tot_say + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn sperre_wache(state: u64) {
     if !wm.sperre_an(state) {
         return
@@ -4906,6 +4946,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // RUNDE LOGIND: der Abmeldewunsch, siehe `abmelde_wache`.
         abmelde_wache(state)
         standby_wache(state)
+        fenster_wache(state)
         st(35)
         // 24.09.2026: THE WINDOW MOVEMENTS TICK HERE TOO. `anim_tick`
         // stood only in the hold loop of `surface`; on the desktop every
@@ -5033,6 +5074,12 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         }
         st(38)
         sched.sleep_ticks(state, 1)
+        // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
+        // (see `sched.idle_wait`); only in the permanent desktop, where the
+        // timer is known to run.
+        if dauer && !fb.hlt_aus(state) {
+            sched.idle_wait(state)
+        }
         rounds = rounds + 1
     }
     return 0xFFFFFFFFFFFFFFFE

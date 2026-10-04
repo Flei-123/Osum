@@ -748,6 +748,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     f = Fahrer(sock, serial, out)
     fehler = 0
+    tippe_gap = 0.12
     for roh in open(buch, encoding="utf-8"):
         z = roh.strip()
         if not z or z.startswith("#"):
@@ -755,6 +756,20 @@ def main():
         teile = z.split(None, 1)
         b = teile[0]
         arg = teile[1].strip() if len(teile) > 1 else ""
+        # 04.10.2026 (Dell): `killstarter` -- types `kill <pid>` of the start
+        # menu's process into the terminal (the pid is read from the line
+        # `launcher: pid=N` on the serial line). The terminal
+        # must have the keyboard focus (click on it first).
+        if b == "killstarter":
+            pids = re.findall(r"launcher: pid=(\d+)",
+                              open(serial, errors="replace").read())
+            if not pids:
+                print("killstarter: no launcher pid on the serial line")
+                fehler += 1
+                continue
+            b = "tippe"
+            arg = "kill %s" % pids[-1]
+            tippe_gap = 0.4    # a doubled letter ("ll") is lost at 0.12 s
         if b == "warte":
             time.sleep(float(arg))
         elif b == "warteauf":
@@ -1036,7 +1051,8 @@ def main():
                      "&": "shift-7", "%": "shift-5"}
             for ch in arg:
                 f.taste(namen.get(ch, ch))
-                time.sleep(0.12)
+                time.sleep(tippe_gap)
+            tippe_gap = 0.12
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))
         elif b == "foto":
             if not f.foto(arg):
