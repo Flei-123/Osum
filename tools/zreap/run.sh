@@ -61,7 +61,8 @@ run() { # run <name> <extra kernel words>
 echo "== corpses are reaped =="
 run fix
 S="$TMPD/fix/serial.txt"
-n=$(grep -a '^launcher: start ' "$S" | grep -avc 'refused'); r=$(grep -ac 'launcher: start refused' "$S"); z=$(grep -ac '^kgui: zombie reaped' "$S")
+# (serial lines of different tasks can be glued together: no ^ anchors)
+n=$(grep -ao 'launcher: start /[^ ]* pid=[0-9]*' "$S" | wc -l); r=$(grep -ao 'launcher: start refused' "$S" | wc -l); z=$(grep -ao 'kgui: zombie reaped' "$S" | wc -l)
 [ "$n" -ge "$CYC" ] && ok "all $CYC starts worked ($n x 'launcher: start')" || bad "only $n of $CYC starts worked"
 [ "$r" -eq 0 ] && ok "no start was refused" || bad "$r starts were refused"
 [ "$z" -ge 1 ] && ok "the kernel took corpses away ($z lines 'kgui: zombie reaped')" || bad "no corpse was reaped"
@@ -69,7 +70,7 @@ python3 tools/zreap/check.py "$S" fix | sed 's/^/        /'
 echo "== counter-proof: nozreap (corpses stay) =="
 run old nozreap
 S="$TMPD/old/serial.txt"
-n2=$(grep -a '^launcher: start ' "$S" | grep -avc 'refused'); r2=$(grep -ac 'launcher: start refused' "$S")
+n2=$(grep -ao 'launcher: start /[^ ]* pid=[0-9]*' "$S" | wc -l); r2=$(grep -ao 'launcher: start refused' "$S" | wc -l)
 [ "$r2" -ge 1 ] && ok "without the fix the table fills up: $r2 starts refused after $n2 good ones" || bad "the old kernel never ran out of slots ($n2 starts, none refused)"
 python3 tools/zreap/check.py "$S" old | sed 's/^/        /'
 echo "== $pass ok, $fail failed =="

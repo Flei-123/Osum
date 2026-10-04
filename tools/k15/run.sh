@@ -1250,11 +1250,13 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
 # The title text starts 12 pixels right of the frame now, not 7 (the
 # title bar got more padding in the design rounds). Measured on the
 # shot of round ROADMAP-6: 0 of 533 ink points off at x+12, 257 at x+7.
+# DELL ROUND 04.10.2026: the baseline moved from window top + 15 to + 18 (the
+# title ink is centred in the bar now, wm.title_base).
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "File Explorer" 96
 schau_nicht "und ein anderer Name steht dort NICHT" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 15)) \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "Dateimanager" 96
 
 # DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
