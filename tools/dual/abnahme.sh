@@ -90,7 +90,7 @@ grep -qE '^ +2 +133120' "$OUT/gpt-vorher.txt" && ok "die fremde Platte traegt ei
 titel "2. OrientOS in den freien Platz installieren"
 # ==================================================================
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1800 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,daneben"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,beside"
 
 timeout "${LIMIT:-1800}" $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \

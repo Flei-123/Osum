@@ -208,7 +208,7 @@ rm -f "$SER" "$SOCK"
 # und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
 # der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=geheim123"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,konto=abnahme,kontopw=geheim123"
 
 timeout 3000 $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \

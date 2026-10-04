@@ -78,7 +78,7 @@ head -c $((320 * 1024 * 1024)) /dev/zero > "$OUT/hdb.img"
 echo "   hdb  leer, 320 MiB -- das Ziel"
 
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,zweite"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,second"
 
 # SOBALD DIE INSTALLATION FERTIG IST, WIRD DIE MASCHINE BEENDET.
 # `wighalt` haelt den Fensterserver absichtlich lange offen -- das

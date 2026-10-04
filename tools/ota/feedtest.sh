@@ -44,7 +44,7 @@ if [ -n "${FEEDTEST_REUSE:-}" ] && [ -f "$W/ziel.img" ]; then
 else
 echo "== 1. install on an empty disk =="
 rm -f "$W/ziel.img"; head -c $((256*1024*1024)) /dev/zero > "$W/ziel.img"
-APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=test,kontopw=geheim123"
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now,konto=test,kontopw=geheim123"
 rm -f "$W/inst.txt"
 timeout 3000 $QEMU_X86 -m 512 -kernel "$IMG/osum.mb" -initrd "$IMG/root.img" -append "$APPEND" \
     -serial "file:$W/inst.txt" -display none -no-reboot \

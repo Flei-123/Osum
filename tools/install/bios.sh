@@ -34,7 +34,7 @@ shot() { printf 'screendump %s\n' "$2.ppm" | socat - "UNIX-CONNECT:$1" >/dev/nul
 
 echo "== 1. install onto an empty disk =="
 rm -f "$W/disk.img"; head -c $((256*1024*1024)) /dev/zero > "$W/disk.img"
-APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=bios,kontopw=geheim123"
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now,konto=bios,kontopw=geheim123"
 timeout 3000 $QEMU_X86 -m 512 -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
     -serial "file:$W/inst.txt" -display none -no-reboot \
     -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
