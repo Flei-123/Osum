@@ -110,7 +110,7 @@ import bus.pci
 import arch.x86_64.apic
 
 export {
-    resume, kill, init, present, ide_mode, read_block, write_block, read_many,
+    resume, kill, init, present, ide_mode, raid_mode, read_block, write_block, read_many,
     write_many, flush, blocks, block_shift, bdf, port, mode,
     ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
     dead, alive,
@@ -474,8 +474,19 @@ fn zero(p: u64, n: u64) {
 // und dass diese Suche nicht aus einer Tabelle im Kern kommt, sondern aus
 // dem Konfigurationsraum des Geraetes, ist seit Runde K2 gemessen.
 fn present(state: u64) -> bool {
-    return pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_SATA,
-        pci.PROGIF_AHCI) < pci.MAX_DEV
+    return pci.find_ahci(state) < pci.MAX_DEV
+}
+
+// SATA OPERATION = "RAID ON" (Dell OptiPlex 9020 and many other business
+// PCs): an Intel controller reports class 01:04 instead of 01:06:01 but
+// speaks AHCI. `present` and `init` take it (pci.find_ahci); this tells the
+// caller that it happened, so the log can say so.
+fn raid_mode(state: u64) -> bool {
+    let i: u64 = pci.find_ahci(state)
+    if i >= pci.MAX_DEV {
+        return false
+    }
+    return pci.is_raid_class(state, i)
 }
 
 // DER FALL, IN DEM DIE FIRMWARE AUF IDE STEHT. Dann ist der AHCI-Chip
@@ -516,8 +527,7 @@ fn init(state: u64) -> bool {
     kstate.set(state, sc(S_WHY), 0)
     kstate.set(state, sc(S_DEAD), 0)
 
-    let idx: u64 = pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_SATA,
-        pci.PROGIF_AHCI)
+    let idx: u64 = pci.find_ahci(state)
     if idx >= pci.MAX_DEV {
         if ide_mode(state) {
             kstate.set(state, sc(S_MODE), MODE_IDE)
@@ -541,6 +551,10 @@ fn init(state: u64) -> bool {
     if b == 0 {
         kstate.set(state, sc(S_WHY), 3)
         return false
+    }
+    if pci.is_raid_class(state, idx) {
+        var l_raid: [u8; 63] = "AHCI controller in RAID mode (Intel, class 01:04) used as AHCI\0"
+        klog.say(state, klog.L_INFO, lq(), (&l_raid[0]) as u64)
     }
     kstate.set(state, sc(S_IDX), idx)
     kstate.set(state, sc(S_ABAR), b)
