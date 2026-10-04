@@ -72,7 +72,9 @@ export {
     R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ,
     R_NOLOAD, R_ARGS,
     // RUNDE DYNLADER
-    R_IPATH, R_INOFILE, R_ICHAIN, R_IFORM, R_STACK
+    R_IPATH, R_INOFILE, R_ICHAIN, R_IFORM, R_STACK,
+    // DELL ROUND
+    R_NOSLOT
 }
 
 // -------------------------------------------------------- the reasons
@@ -124,6 +126,10 @@ const R_INOFILE: u64 = 26 // den Interpreter gibt es nicht
 const R_ICHAIN: u64 = 27 // der Interpreter hat selbst einen PT_INTERP
 const R_IFORM: u64 = 28 // der Interpreter ist kein brauchbares ET_DYN
 const R_STACK: u64 = 29 // der Startstapel passt nicht auf die Seite
+// DELL ROUND (04.10.2026): the task table is full (every slot is a running
+// program or a corpse). Not the same as R_NOMEM: more memory does not help,
+// closing a program does.
+const R_NOSLOT: u64 = 30
 // KEIN Grund, sondern die Auskunft "dieses Bild braucht gar keinen
 // Lader". Muss sich von R_OK (= 0) unterscheiden, siehe `read_interp`.
 const R_KEINER: u64 = 30
@@ -1498,7 +1504,11 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     let t: u64 = proc.create_bare(state, prio)
     if t == 0 {
         sched.irq_restore(flags)
-        fail(state, R_NOMEM)
+        if sched.free_slots(state) == 0 {
+            fail(state, R_NOSLOT)
+        } else {
+            fail(state, R_NOMEM)
+        }
         return 0
     }
     // ============================================ RUNDE DYNLADER
@@ -1801,6 +1811,10 @@ fn errno_of(r: u64) -> u64 {
     if r == R_ICHAIN {
         return errno.E_LOOP
     }
+    // DELL ROUND: "try again" -- after a program has been closed it works.
+    if r == R_NOSLOT {
+        return errno.E_AGAIN
+    }
     return errno.E_NOEXEC
 }
 
@@ -1994,6 +2008,7 @@ fn say_text_f(r: u64) {
     var t27: [u8; 24] = "interpreter chained\0\0\0\0\0"
     var t28: [u8; 22] = "interpreter format\0\0\0\0"
     var t29: [u8; 20] = "start stack too big\0"
+    var t30: [u8; 32] = "task table full (limit reached)\0"
     var tz: [u8; 8] = "unknown\0"
     if r == R_IPATH {
         serial.puts((&t25[0]) as u64)
@@ -2013,6 +2028,10 @@ fn say_text_f(r: u64) {
     }
     if r == R_STACK {
         serial.puts((&t29[0]) as u64)
+        return
+    }
+    if r == R_NOSLOT {
+        serial.puts((&t30[0]) as u64)
         return
     }
     serial.puts((&tz[0]) as u64)

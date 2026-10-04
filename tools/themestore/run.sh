@@ -2471,29 +2471,27 @@ cp "$TMPD/zug1/desktop.png" \
     && ok "und der Zug ohne Rueckweg als eigene Aufnahme (19)" \
     || bad "die Aufnahme des Zuges ohne Rueckweg fehlt"
 
-# ---- 11f3. (fix-r4-2) DIE ENDLAGE LIEGT AUF DER ARBEITSFLAECHE,
-#            UND DER REGLERBLOCK IST GANZ ZU SEHEN.
+# ---- 11f3. (fix-r4-2, CHANGED 04.10.2026 for the Dell) THE END POSITION
+#            KEEPS A HANDLE -- THE WINDOW MAY STICK OUT.
 #
-# Bis hierher durfte ein Fenster dort liegen bleiben, wohin es gezogen
-# wurde -- auch unter der Leiste und auch zu drei Vierteln unter dem
-# unteren Bildrand. Das Bild 15 der Runde war genau das, und was daran
-# zu sehen war, war nichts: Rahmen oben, Rumpf ausserhalb des Schirms.
-# Ein Fenster, das man nicht mehr anfassen kann, ist kein Zustand, den
-# ein Fensterserver herstellen darf; `wm.drag_klemmen` setzt die
-# Endlage beim LOSLASSEN auf die Arbeitsflaeche zurueck (waehrend des
-# Zuges bleibt alles wie bisher, sonst gaebe es die Schnittflaeche mit
-# der Leiste nicht, an der 11f2 misst).
+# Until 04.10.2026 `wm.drag_klemmen` put the WHOLE window back on the work
+# area when the button went up (fix-r4-2: picture 15 showed a window whose
+# body hung below the screen). Justin, Dell: "a window pushed a little over
+# the edge jumps back at once" -- he wants it the way Windows and Linux do
+# it. Since then the window may stick out left, right and below; what is
+# kept is a handle: the title bar stays on the work area (above the bar),
+# and at least 96 px stay in sight sideways (tools/fourbugs/run.sh measures
+# the rule itself, with a counter-proof). So what is asked here changed with
+# it: the title bar of the end position lies above the bar, the server says
+# where the window ended (`wm: abgelegt`), and the labels that ARE on the
+# screen are neither empty nor overlapping. "The slider block is fully
+# visible" is no longer a promise of the window server.
 #
-# Zwei Zuege, zwei Aufnahmen, dieselbe Frage:
-#   19 -- Zug auf 400,210. Die Unterkante faellt unter die Leiste, die
-#         Endlage wird nach oben geholt (nur y).
-#   22 -- Zug auf 600,600. Das Fenster wuerde zu drei Vierteln unter dem
-#         Schirm haengen; geklemmt wird in BEIDEN Richtungen.
-# Gefordert wird fuer beide: `empty 0`, nichts ausserhalb, nichts unter
-# der Leiste verdeckt -- und der Reglerblock dieser Runde (die vier
-# Regler der Seite "Darstellung") steht vollstaendig ueber der Leiste.
+# Zwei Zuege, zwei Aufnahmen:
+#   19 -- Zug auf 400,210. Die Unterkante faellt unter die Leiste.
+#   22 -- Zug auf 600,600. Das Fenster haengt zu drei Vierteln unter dem Schirm.
 echo
-echo "== 11f3. die Endlage liegt auf der Arbeitsflaeche =="
+echo "== 11f3. die Endlage behaelt einen Griff (das Fenster darf ueberstehen) =="
 bash tools/themestore/build.sh "$TMPD/zug2" extra='einst' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes click="400,10>600,600" \
     > "$TMPD/zug2.log" 2>&1
@@ -2503,64 +2501,22 @@ cp "$TMPD/zug2/desktop.png" \
     && ok "und die Endlage des weiten Zuges als eigene Aufnahme (22)" \
     || bad "die Aufnahme der Endlage unter der Leiste fehlt"
 for z in zug1 zug2; do
-    GK=$(grep -a 'wm: geklemmt ' "$TMPD/$z/serial.txt" | tail -1)
-    echo "        $z: ${GK:-KEINE Klemmung gemeldet}"
-    KX=$(printf '%s' "$GK" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-    KY=$(printf '%s' "$GK" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
-    KVY=$(printf '%s' "$GK" | grep -oE 'vory=[0-9]+' | cut -d= -f2)
-    KH=$(printf '%s' "$GK" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+    GA=$(grep -a 'wm: abgelegt ' "$TMPD/$z/serial.txt" | tail -1)
+    echo "        $z: ${GA:-KEINE Endlage gemeldet}"
+    KY=$(printf '%s' "$GA" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
     LY=$(grep -a 'taskbar: STEHT ' "$TMPD/$z/serial.txt" | tail -1 \
          | grep -oE 'y=[0-9]+' | cut -d= -f2)
-    num "$z: die Endlage wurde wirklich nach oben geholt (vory > y)" \
-        "${KVY:-0}" gt "${KY:-0}"
-    num "$z: und die Unterkante liegt ueber der Leiste" \
-        "$(( ${KY:-0} + ${KH:-0} ))" le "${LY:-772}"
+    num "$z: der Server hat die Endlage gemeldet" "$(printf '%s' "$GA" | grep -c abgelegt)" eq 1
+    num "$z: die Titelleiste liegt ueber der Leiste (Griff bleibt)" \
+        "$(( ${KY:-9999} + 24 ))" le "${LY:-772}"
     SOUT=$(python3 tools/themestore/shotcheck.py "$TMPD/$z/desktop.ppm" \
            "$TMPD/$z/serial.txt" 2>&1 | head -1)
     echo "        $SOUT"
-    num "$z: gemessene Beschriftungen" \
-        "$(printf '%s' "$SOUT" | grep -oE 'measured [0-9]+' \
-           | grep -oE '[0-9]+')" ge 20
-    for f in empty cut overlapping ausserhalb verdeckt; do
+    for f in empty overlapping; do
         num "$z: $f" \
             "$(printf '%s' "$SOUT" | grep -oE "$f [0-9]+" | head -1 \
                | cut -d' ' -f2)" eq 0
     done
-    # UND DER REGLERBLOCK STEHT GANZ DA.
-    #
-    # Gefragt werden die Rechtecke, die die Seite nach dem Zug selbst
-    # gemeldet hat (`settings: rect ... ax= ay=`, der letzte
-    # vollstaendige Bericht -- dieselbe Regel wie in shotcheck.py). Der
-    # Reglerblock dieser Runde sind die vier Zeilen zu 24 Bildpunkten
-    # unten in der rechten Spalte; ausgegeben wird, wie viele davon
-    # gemeldet wurden und wie viele davon vollstaendig ueber der
-    # Leiste und im Schirm liegen. Beide Zahlen muessen vier sein:
-    # waere nur die zweite gefordert, ginge eine Seite durch, die gar
-    # keinen Regler mehr meldet.
-    RB=$(python3 - "$TMPD/$z/serial.txt" "${LY:-772}" <<'PYR'
-import re, sys
-txt = open(sys.argv[1], 'rb').read().decode('latin1')
-leiste = int(sys.argv[2])
-schnitt = txt.rfind("settings: rect name=waa ")
-schwanz = txt[schnitt:] if schnitt >= 0 else txt
-n = 0
-gut = 0
-for m in re.finditer(r"settings: rect name=w\w\w x=\d+ y=(\d+) w=(\d+)"
-                     r" h=(\d+) ax=(\d+) ay=(\d+)", schwanz):
-    y, w, h, ax, ay = (int(v) for v in m.groups())
-    # Die vier Regler: 24 hoch, ueber die ganze Spalte breit und im
-    # unteren Drittel der Seite.
-    if h != 24 or w < 300 or y < 390:
-        continue
-    n += 1
-    if ay + h <= leiste and ax + w <= 1280:
-        gut += 1
-print("%d %d" % (n, gut))
-PYR
-)
-    echo "        $z: Reglerzeilen gemeldet/ganz sichtbar: ${RB:-? ?}"
-    num "$z: gemeldete Zeilen des Reglerblocks" "${RB%% *}" ge 4
-    num "$z: davon vollstaendig ueber der Leiste" "${RB##* }" eq "${RB%% *}"
 done
 
 # ---- 11g. DER REGLER WIRKT SOFORT UND UEBERLEBT DEN NEUSTART.

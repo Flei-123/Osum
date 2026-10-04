@@ -4667,6 +4667,96 @@ fn fenster_wache(state: u64) {
     }
 }
 
+// ==================================== 04.10.2026 (DELL): ZOMBIE LEAK
+// Justin, Dell: "after several programs are open no further one opens".
+// Measured in a VM with the Dell's own image: the task table has 32 slots
+// (slot 0 never given out), the system itself holds about 20 of them, and
+// EVERY program that ends stays in its slot as a corpse until its creator
+// calls wait4. Nobody does: the start menu, the taskbar, the file manager
+// start programs with SYS_EXEC and never wait, and the kernel's own boot
+// task (parent of the login screen, dhcp ...) never waits either. After a
+// handful of opened-and-closed programs `fork`/exec failed for good.
+// Corpses are now taken away here, every 16th round of the desktop loop:
+//   1. the parent is the boot task itself (this loop): nobody will wait;
+//   2. the parent is gone or a corpse itself: nobody will wait;
+//   3. the parent ignores SIGCHLD (POSIX: children are reaped
+//      automatically) -- the start menu and the taskbar say so at start;
+//   4. nobody picked it up for ZOMBIE_MAX_AGE ticks (about 30 s): a
+//      safety net, so that no program can leak slots for ever.
+// A parent that waits normally (the shell, settings) is never touched
+// before rule 4.
+const ZOMBIE_MAX_AGE: u64 = 3000
+static mut zw_takt: u64 = 0
+static mut zw_say: u64 = 0
+
+fn zombie_wache(state: u64) {
+    if fb.zreap_aus(state) {
+        return
+    }
+    zw_takt = zw_takt + 1
+    if (zw_takt & 15) != 0 {
+        return
+    }
+    let me: u64 = sched.current(state)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    var i: u64 = 1
+    while i < n {
+        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE && i != me {
+            let p: u64 = sched.tget(state, i, sched.T_PARENT)
+            var warum: u64 = 0
+            if p == me {
+                warum = 1
+            } else if p >= n {
+                warum = 2
+            } else {
+                let ps: u64 = sched.tget(state, p, sched.T_STATE)
+                if ps == sched.S_FREE || ps == sched.S_ZOMBIE {
+                    warum = 2
+                } else if signal.handler_of(state, p, signal.SIGCHLD)
+                    == signal.SIG_IGN {
+                    warum = 3
+                } else {
+                    let ende: u64 = sched.tget(state, i, sched.T_END)
+                    if jetzt > ende && jetzt - ende > ZOMBIE_MAX_AGE {
+                        warum = 4
+                    }
+                }
+            }
+            if warum != 0 {
+                if zw_say < 40 {
+                    zw_say = zw_say + 1
+                    var s_z: [u8; 22] = "kgui: zombie reaped \0\0"
+                    var s_p: [u8; 9] = " parent=\0"
+                    var s_w: [u8; 6] = " why=\0"
+                    serial.puts((&s_z[0]) as u64)
+                    serial.dec(sched.tget(state, i, sched.T_PID))
+                    serial.puts((&s_p[0]) as u64)
+                    serial.dec(sched.tget(state, i, sched.T_PARENT))
+                    serial.puts((&s_w[0]) as u64)
+                    serial.dec(warum)
+                    serial.nl()
+                }
+                // Its living children must not keep a slot number that is
+                // free in a moment (and given to a stranger): they fall
+                // to this loop's task, as they would fall to init.
+                var j: u64 = 0
+                while j < n {
+                    if j != i && sched.tget(state, j, sched.T_STATE)
+                        != sched.S_FREE
+                        && sched.tget(state, j, sched.T_PARENT) == i {
+                        sched.tset(state, j, sched.T_PARENT, me)
+                    }
+                    j = j + 1
+                }
+                file.close_all(state, i)
+                let _r: bool = proc.reap(state, i)
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn sperre_wache(state: u64) {
     if !wm.sperre_an(state) {
         return
@@ -4947,6 +5037,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         abmelde_wache(state)
         standby_wache(state)
         fenster_wache(state)
+        zombie_wache(state)
         st(35)
         // 24.09.2026: THE WINDOW MOVEMENTS TICK HERE TOO. `anim_tick`
         // stood only in the hold loop of `surface`; on the desktop every

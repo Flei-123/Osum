@@ -770,6 +770,19 @@ def main():
             b = "tippe"
             arg = "kill %s" % pids[-1]
             tippe_gap = 0.4    # a doubled letter ("ll") is lost at 0.12 s
+        # 04.10.2026 (Dell): `killlast` -- types `kill <pid>` of the program
+        # the start menu started LAST (line `launcher: start <arg> pid=N`,
+        # a refused start is skipped). The terminal must have the focus.
+        if b == "killlast":
+            pids = re.findall(r"launcher: start (?!refused)[^\n]*? pid=(\d+)",
+                              open(serial, errors="replace").read())
+            if not pids:
+                print("killlast: no started program on the serial line")
+                fehler += 1
+                continue
+            b = "tippe"
+            arg = "kill %s" % pids[-1]
+            tippe_gap = 0.4
         if b == "warte":
             time.sleep(float(arg))
         elif b == "warteauf":
@@ -883,6 +896,30 @@ def main():
             print("ziehkante id=%d %s von %d,%d um %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
                   % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
+        # 04.10.2026 (Dell): `fahrekante <id> <kante>` -- only HOVER at the grip
+        # of window <id> (kante: l r o u lo ro lu ru), computed like `ziehkante`.
+        elif b == "fahrekante":
+            t = arg.split()
+            wid = int(t[0])
+            kante = t[1]
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("fahrekante %d -> KEINE GEOMETRIE gemeldet" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            lx = wx + bo - 2
+            rx = wx + bo + ww + 1
+            oy = wy + 2
+            uy = wy + ti + wh + 1
+            mx = wx + bo + ww // 2
+            my = wy + ti + wh // 2
+            stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+                      "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
+                      "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my)}
+            x0, y0 = stelle[kante]
+            f.fahre(x0, y0)
+            print("fahrekante id=%d %s -> %d,%d" % (wid, kante, x0, y0))
         # ==================================== RUNDE FENSTER
         # `ziehtitel <id> <dx>,<dy>` -- das Fenster <id> an seiner
         # TITELLEISTE um dx/dy verschieben.
