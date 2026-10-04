@@ -4,8 +4,8 @@
 #
 #   BAU=<dir with osum.mb + root.img> bash tools/install/kontogui.sh [outdir]
 #
-# tools/install/abnahme.sh gives the account through arguments (`konto=`,
-# `kontopw=`); this runs the WINDOW the way a person does: clicks in the three
+# tools/install/abnahme.sh gives the account through arguments (`account=`,
+# `password=`); this runs the WINDOW the way a person does: clicks in the three
 # fields, keys through the QEMU monitor, and reads what the installer says about
 # its own state (`installer: konto ks=<n> go=<0|1>`):
 #
