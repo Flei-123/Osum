@@ -1530,7 +1530,7 @@ lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools
 # Der Abschnitt braucht node fuer den Kontodienst; fehlt es, sagt er das
 # und ueberspringt diesen Teil, statt still gruen zu sein.
 lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/presence/run.sh, Runde PRAESENZ)" \
-     tools/presence/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
+     tools/presence/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/presence|104 Bereiche)'
 # ================================================== RUNDE TON-2
 #
 # MERGE-8: dieser Abschnitt hiess auf dem Zweig 42 -- die Nummer gehoert
