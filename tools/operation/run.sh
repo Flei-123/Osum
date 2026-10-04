@@ -404,7 +404,7 @@ dienst "$OUT/fremdaus" || bad "Gegenstelle"
 frisch
 rc=$(lauf gp1 "ota set quelle https://$NAME:$PORT/aktuell;ota apply;opk list;exit")
 gpruef "ein FREMD signiertes Update wird abgelehnt" \
-    "SIGNATUR DES VERZEICHNISSES FALSCH" "$OUT/gp1.txt"
+    "SIGNATURE OF THE VERZEICHNIS WRONG" "$OUT/gp1.txt"
 hatnicht "$OUT/gp1.txt" "opk: installed" "        und es wurde wirklich nichts installiert"
 
 # (2) mit dem ERSATZSCHLUESSEL signiert -- muss durchgehen
@@ -443,7 +443,7 @@ hat "$OUT/gp5.txt" "opk: installed hallo" "        das Update selbst ging auch d
 frisch
 rc=$(lauf gp6 "ota set quelle https://$NAME:$PORT/v/8;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit UNTERBROCHENER Kette wird abgelehnt" \
-    "ota: SCHLUESSELWECHSEL: die Kette ist UNTERBROCHEN" "$OUT/gp6.txt"
+    "ota: KEY CHANGE: the chain is BROKEN" "$OUT/gp6.txt"
 hat "$OUT/gp6.txt" "ota: key generation 0" "        und die Generation ist NICHT gewechselt"
 hatnicht "$OUT/gp6.txt" "opk: installed" "        und nichts installiert"
 

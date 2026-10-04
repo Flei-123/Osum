@@ -145,12 +145,12 @@ cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig3 "opk install /boese/verdreht.opk;opk list;exit")
 hat "$OUT/sig3.txt" "SIGNATURE WRONG" "GEGENPROBE: ein gekipptes Oktett bricht die Signatur"
 hatnicht "$OUT/sig3.txt" "opk: installed" "und es wird nichts installiert"
-hatnicht "$OUT/sig3.txt" "Pruefsumme falsch" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
+hatnicht "$OUT/sig3.txt" "checksum wrong" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
 
 # --- Quelle mit veraendertem INDEX
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig4 "opk install /quelle1/hallo-1.opk;opk update hallo --source /boese;opk list;exit")
-hat "$OUT/sig4.txt" "SIGNATUR DES INDEX FALSCH" "GEGENPROBE: ein veraenderter INDEX bricht die Quelle"
+hat "$OUT/sig4.txt" "SIGNATURE OF THE INDEX WRONG" "GEGENPROBE: ein veraenderter INDEX bricht die Quelle"
 hat "$OUT/sig4.txt" "${h1:0:12}" "und die installierte Fassung bleibt die alte"
 
 # --- fremder Schluessel

@@ -146,7 +146,7 @@ LADEN_PLATTE="$OUT/boese.img" bash tools/loader/lauf.sh a4 \
     600 > /dev/null 2>&1
 hat "$OUT/a4.txt" "opk: SIGNATURE WRONG -- the package is REJECTED: /boese/verdreht.opk" \
     "ein gekipptes Oktett wird abgelehnt"
-hat "$OUT/a4.txt" "opk: NO SIGNATURE -- abgelehnt" \
+hat "$OUT/a4.txt" "opk: NO SIGNATURE -- rejected" \
     "ein Paket ohne Signatur wird abgelehnt"
 hat "$OUT/a4.txt" "opk: SIGNATURE WRONG -- the package is REJECTED: /boese/hallo-1.opk" \
     "ein Paket mit der Signatur eines FREMDEN Schluessels wird abgelehnt"

@@ -399,7 +399,7 @@ dienst_aus
 dienst "$OUT/netzfremd" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf a2 "ota apply;opk list;opk generations;ota show;exit")
-hat "$OUT/a2.txt" "SIGNATUR DES VERZEICHNISSES FALSCH" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
+hat "$OUT/a2.txt" "SIGNATURE OF THE VERZEICHNIS WRONG" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
 hatnicht "$OUT/a2.txt" "ota: version there" "(a2) und nicht einmal die Fassungsnummer daraus wird gelesen"
 hatnicht "$OUT/a2.txt" "opk: installed" "(a2) es wird nichts installiert"
 hatnicht "$OUT/a2.txt" "generation 1" "(a2) es entsteht keine Generation"
