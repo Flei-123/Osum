@@ -27,7 +27,7 @@ reproduced and measured in a VM with the Dell's own image (and with the stick ma
   wait; the boot task (parent of the login screen and `dhcp`) never waits. VM, Dell image:
   `kill` of three programs started from the menu -> three corpses (`ps`: `zombie`), plus the
   login screen and `dhcp` from boot.
-* Fix (`kgui.zombie_wache`, every 16th round of the desktop loop): a corpse is taken away when
+* Fix (`kgui.zombie_sweep`, every 16th round of the desktop loop): a corpse is taken away when
   (1) its parent is the boot task, (2) its parent is gone or a corpse, (3) its parent ignores
   `SIGCHLD` (POSIX auto-reap; `ulib.ignore_children()`, called by the start menu and the
   taskbar), (4) nobody picked it up for 3000 ticks (safety net). A parent that waits normally
