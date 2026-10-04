@@ -37,8 +37,10 @@ reproduced and measured in a VM with the Dell's own image (and with the stick ma
   task table but the **window table**: `MAX_WIN` was 16. The system itself holds five windows
   (desktop, panel, quick settings, start menu, terminal); after nine more windows (nine file
   managers) the sixteenth slot (`wm: fen i=15`) was taken and no further program got a window;
-  the taskbar showed ten buttons (`MAXK = 10`). Now `MAX_WIN = 32` (table and event rings moved
-  to `kstate.DSK_OFF = 0x144000`, 0x8000 long, a gap of the map) and the taskbar shows up to 16
+  the taskbar showed ten buttons (`MAXK = 10`). Now `MAX_WIN = 32` (the window table fills the four
+  pages it always had; the event rings moved to their own four pages `kstate.EVR_OFF = 0x10C000`, a hole of
+  the map between the extension pages and the suspend pages. NOT 0x144000: those pages are assigned in
+  `kstate.fi` to pending branches -- a first try there booted into `#UD` in two of four stick-machine runs) and the taskbar shows up to 16
   window buttons. The task table is the second limit: 31 usable slots, the system holds ~18 of
   them (4 cores) -- about 13 programs at the same time, ~17 on a one-core Dell. Raising
   `MAX_TASKS` is NOT done: ten per-task tables (capabilities, signals, descriptors, handles,
