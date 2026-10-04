@@ -222,3 +222,24 @@ Ehrlich und vollständig, ohne Zeitplan.
     als eine Prüfung. Nicht jeder Pfad ist zeitkonstant; welche das sind
     und warum es dort nichts zu holen gibt, steht als Punkte E1–E5 im Kopf
     von `lib/crypto/ed25519.fi`.
+
+## Remote update of the Dell stick (04.10.2026, `/root/abbilder/dell-update.py`)
+
+The stick's EFI partition is 96 MiB; kernel (8.1 MB) + root image (41.9 MB) leave room for one
+full set only. `dell-update.py <image>` reads the stick's own menu (`limine.conf`, first entry =
+the live kernel/root), measures the free room, and takes one of two paths:
+
+* **full** (room for a second set): new files under versioned names (`osum-<tag>.mb`,
+  `root-<tag>.img`), hashes checked on the device, then ONE rename of `limine.conf` switches
+  the system; the old set stays as "Previous version".
+* **tight** (today's case): kernel first (stage, hash, rename over the live kernel together with
+  the new menu), then the root image (stage, hash), then `root.img -> root-old.img` and
+  `root-n.img -> root.img`. Menu entries "Previous root" and "Recover: staged new root" cover the
+  short moment between the two renames.
+
+Downloads resume (`fetch -b`), pieces stay under the device's 1200 s command limit. Model test:
+`dell-update-fakedev.py` kills the device at every operation and checks that a menu entry still
+boots: full path 0 of 16 broken; tight path 18 of 19 deaths leave the default entry bootable, the
+19th (between the two renames, a few milliseconds) needs a person to pick "Previous root" in the
+menu. Measured end to end on a VM stick (UEFI, real 42 MB root): kernel 85 s, root 275 s,
+the VM came back on the new build.

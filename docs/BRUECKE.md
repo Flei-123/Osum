@@ -274,3 +274,22 @@ Solange Punkt 1 der Einschränkungen offen ist, muss in
 `/etc/jarvis/rechte.conf` die Zeile `server = <adresse>:<port>` auf den
 Anschluss zeigen. Sobald `jarvisd` selbst HTTPS spricht, steht dort
 store.fleitec.com und es ist wirklich nur noch booten.
+
+## Notes 04.10.2026 (Dell remote access)
+
+* **Permission lists hold 64 entries** (`jarvisd`, was 32). The 33rd `command_allowed`
+  line -- `/bin/act` -- had been dropped silently; a dropped entry is now logged
+  (`jarvisd: permission list full -- an entry was DROPPED`).
+* **Without fork** (task table full, `fork failed`): `/bin/ps`, `/bin/kill <pid>` (up to three
+  pids) and `/bin/reboot` still work, handled inside `jarvisd` itself. Compiled, not triggered in
+  a test (a full table cannot be produced through the bridge, `sh` waits for background jobs).
+* **Screenshot and typing need no person at the device**: `jarvisctl screenshot` /
+  `jarvisctl eingabe` are in `command_allowed`; run it, then the `foto` / `eingabe` job
+  within 60 s. Measured in the VM: PNG came back.
+* **a11y tree**: personal image only, `/etc/orientbus/policy` carries
+  `allow jarvis a11y.* write`. Dry run first is still enforced (`act call a11y.tree --dry`, then
+  `act call a11y.tree`). Measured in the VM: `decision=allow`, tree returned.
+* **`/var/jarvis` takes about seven files** (the eighth `schreib` is refused without an error);
+  `dell-update.py` therefore writes ONE script `u.sh` and removes older `*.sh`.
+* **Result files**: the bridge server keeps 300 per device and prunes by NAME (`HHMMSS-id`), not
+  by time -- fresh answers can be deleted at once (seen on the VM device). Open: r352.
