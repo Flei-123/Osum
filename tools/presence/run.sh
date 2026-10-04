@@ -320,7 +320,9 @@ qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 QB=$!
 w=0
-while [ $w -lt 30000 ] && kill -0 "$QB" 2>/dev/null; do sleep 0.25; w=$((w+250)); done
+# the bar's own line, however late a busy host starts it (30 s fixed was too short)
+while [ $w -lt 150 ] && kill -0 "$QB" 2>/dev/null && ! grep -qa 'freunde: eintraege=' "$TMPD/o9b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
+sleep 1
 kill -9 "$QB" 2>/dev/null; wait "$QB" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/o9b.txt" > "$TMPD/o9b.klar" 2>/dev/null || true
 has "$TMPD/o9b.klar" "angemeldet=0" "ohne Konto sagt die Leiste das"
