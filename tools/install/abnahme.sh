@@ -208,7 +208,7 @@ rm -f "$SER" "$SOCK"
 # und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
 # der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
-APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=abnahme,kontopw=geheim123"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,account=abnahme,password=geheim123"
 
 timeout 3000 $QEMU_X86 -m 512 \
     -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
@@ -247,14 +247,14 @@ grep -qa 'installer: disk /dev/hda' "$SER" \
 # Jetzt laeuft die Installation (Schalter `sofort`). Sie dauert Minuten.
 i=0
 while [ $i -lt 3000 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$SER" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$SER" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
 done
 sleep 3
 schuss "$SOCK" "$SHOTS/30-fertig.png" || true
 
-if grep -qa 'installer: fertig' "$SER"; then
+if grep -qa 'installer: done' "$SER"; then
     ok "die Installation meldet sich fertig"
 else
     bad "die Installation ist nicht fertig geworden"
@@ -542,7 +542,7 @@ fi
 titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
 # ==================================================================
 #
-# Der Installer wurde mit `konto=abnahme,kontopw=geheim123` gestartet
+# Der Installer wurde mit `account=abnahme,password=geheim123` gestartet
 # (das Fenster fragt einen Menschen; der Laeufer bekommt es als
 # Argument). Auf der installierten Platte muss GENAU dieses Konto
 # stehen, mit einem Hash, der zu dem Passwort passt -- nachgerechnet

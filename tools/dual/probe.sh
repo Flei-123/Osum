@@ -26,7 +26,7 @@ QP=$!
 for i in $(seq 1 60); do [ -S "$OUT/mon" ] && break; sleep 1; done
 # warten, bis das Programm etwas sagt
 for i in $(seq 1 120); do
-    grep -qa 'installer: ready\|installer: keine\|installer: NEBENNEIN\|installer: fertig\|installer: FEHLER' "$OUT/ser.txt" 2>/dev/null && break
+    grep -qa 'installer: ready\|installer: keine\|installer: BESIDE_NO\|installer: done\|installer: ERROR' "$OUT/ser.txt" 2>/dev/null && break
     sleep 1
 done
 sleep 3

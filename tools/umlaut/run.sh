@@ -172,7 +172,7 @@ gegen "eine Beschriftung in einem FENSTERPROGRAMM" \
     'g_ent: [u8; 31] = "ein Textfeld mit Einfuegemarke\0"' \
     python3 tools/i18n/quellen.py --streng
 gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
-    'E_HASH: [u8; 23] = "opk: Prüfsumme falsch\0"' \
+    'E_HASH: [u8; 23] = "opk: checksum wrong\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
     python3 tools/i18n/quellen.py --streng
 gegen "eine Beschriftung im Speicher-Dialog" "kernel/user/storage.fi" \
@@ -296,7 +296,7 @@ gegen "eine Abnahme sucht den alten Satz" \
     "'^[0-9]+ tiling: Eintraege'" \
     python3 tools/i18n/erwartung.py
 # GEGEN-GEGENPROBE: eine BESCHREIBUNG in Umschrift muss still bleiben,
-# und eine getippte EINGABE ("opk zurueck 0") erst recht. Ein Pruefer,
+# und eine getippte EINGABE ("opk rollback 0") erst recht. Ein Pruefer,
 # der die Abnahmesprache anmeckert, wird beim naechsten Mal
 # abgeschaltet, und dann prueft er gar nichts mehr. Beides ohne
 # Programmpraefix -- genau daran unterscheidet er sie vom Suchausdruck.
@@ -307,7 +307,7 @@ p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
 s = s.replace('ok "Kern und Ring 3 zaehlen dieselben Eintraege ($ub)"',
               'ok "Eintraege, die aus der Datei gelesen wurden, '
-              'und opk zurueck 0 als Eingabe ($ub)"', 1)
+              'und opk rollback 0 als Eingabe ($ub)"', 1)
 open(p, 'w', encoding='utf-8').write(s)
 PY2
 ( cd "$TMPD/kopie3" && OSUM_ROOT=. python3 tools/i18n/erwartung.py ) \

@@ -17,13 +17,14 @@
 #   3. einspielen installs the packages, generation switches
 #   4. reboot from the disk: erprobung, bestaetigen, second search says "aktuell"
 #   5. desktop boots from the disk (screenshots by the caller via $WORK/desk.*)
-#   6. rollback (ota zurueck) and boot again
+#   6. rollback (ota rollback) and boot again
 # Nothing here touches /srv/store or any device of the owner.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 IMG=${1:?image dir}; FEED=${2:?feed root}; W=${3:-/tmp/otat/run}
 PORT=${OTA_PORT:-18555}
+FEEDVER=${FEEDVER:-5}      # the version number the feed under test carries (register.json "letzte")
 CERTS=${OTA_CERTS:-/tmp/otat/certs}
 mkdir -p "$W"; rm -f "$W"/r*.txt "$W"/r*.rc
 pass=0; fail=0
@@ -44,7 +45,7 @@ if [ -n "${FEEDTEST_REUSE:-}" ] && [ -f "$W/ziel.img" ]; then
 else
 echo "== 1. install on an empty disk =="
 rm -f "$W/ziel.img"; head -c $((256*1024*1024)) /dev/zero > "$W/ziel.img"
-APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=test,kontopw=geheim123"
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now,account=test,password=geheim123"
 rm -f "$W/inst.txt"
 timeout 3000 $QEMU_X86 -m 512 -kernel "$IMG/osum.mb" -initrd "$IMG/root.img" -append "$APPEND" \
     -serial "file:$W/inst.txt" -display none -no-reboot \
@@ -52,10 +53,10 @@ timeout 3000 $QEMU_X86 -m 512 -kernel "$IMG/osum.mb" -initrd "$IMG/root.img" -ap
     -drive "file=$W/ziel.img,format=raw,if=ide,index=0" > "$W/inst.qemu" 2>&1 &
 QP=$!
 i=0; while [ $i -lt 3000 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$W/inst.txt" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$W/inst.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break; sleep 1; i=$((i+1)); done
 sleep 3; kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
-hat "$W/inst.txt" "installer: fertig" "installer finished"
+hat "$W/inst.txt" "installer: done" "installer finished"
 mcopy -i "$W/ziel.img@@1048576" ::/limine.conf "$W/limine.disk" 2>/dev/null && ok "kept the disk's own limine.conf"
 
 fi
@@ -69,25 +70,25 @@ run() { # name script [limit]
     cat "$W/$1.rc" 2>/dev/null
 }
 echo "== 2. version 0 sees the new feed =="
-run r0 "ota zeigen;ota suchen;exit" 600 > /dev/null
-hat "$W/r0.txt" "ota: quelle https://10.0.2.2:$PORT/osum/aktuell" "source is the local copy of osum/aktuell"
-hat "$W/r0.txt" "fassung hier 0" "device is on version 0"
-hat "$W/r0.txt" "fassung dort 5" "feed offers version 5"
-hat "$W/r0.txt" "NEUE FASSUNG" "reports a new version"
+run r0 "ota show;ota search;exit" 600 > /dev/null
+hat "$W/r0.txt" "ota: source https://10.0.2.2:$PORT/osum/aktuell" "source is the local copy of osum/aktuell"
+hat "$W/r0.txt" "version here 0" "device is on version 0"
+hat "$W/r0.txt" "version there $FEEDVER" "feed offers version $FEEDVER"
+hat "$W/r0.txt" "NEW VERSION" "reports a new version"
 echo "== 3. install the packages =="
-run r1 "ota einspielen;ota zeigen;opk generationen;exit" 3000 > /dev/null
+run r1 "ota apply;ota show;opk generations;exit" 3000 > /dev/null
 echo "== 4. reboot, confirm, second search =="
-run r2 "opk richten;ota zeigen;ota bestaetigen;opk erprobung;ota suchen;exit" 900 > /dev/null
+run r2 "opk rebuild;ota show;ota confirm;opk trial;ota search;exit" 900 > /dev/null
 echo "== 6. rollback =="
 cp -f "$W/ziel.img" "$W/after-update.img"
-run r3 "ota zurueck;ota zeigen;exit" 900 > /dev/null
-run r4 "ota zeigen;ota suchen;exit" 900 > /dev/null
+run r3 "ota rollback;ota show;exit" 900 > /dev/null
+run r4 "ota show;ota search;exit" 900 > /dev/null
 # --- the device's own words, checked
-hat "$W/r1.txt" "ota: in erprobung: 00000013" "update installed: new generation is on trial"
-hat "$W/r1.txt" "ota: fassung hier 5" "version file says 5 after the update"
-hat "$W/r2.txt" "opk: erprobung best" "after the reboot the trial generation was confirmed"
-hat "$W/r2.txt" "ota: fassung dort 5" "second search: the feed still offers 5"
-hat "$W/r2.txt" "alles aktuell" "second search says 'alles aktuell' (nothing new)"
-hat "$W/r3.txt" "opk: zur" "rollback went back to the previous generation"
+hat "$W/r1.txt" "ota: in trial: 00000013" "update installed: new generation is on trial"
+hat "$W/r1.txt" "ota: version here $FEEDVER" "version file says $FEEDVER after the update"
+hat "$W/r2.txt" "opk: trial confirmed" "after the reboot the trial generation was confirmed"
+hat "$W/r2.txt" "ota: version there $FEEDVER" "second search: the feed still offers $FEEDVER"
+hat "$W/r2.txt" "up to date" "second search says 'up to date' (nothing new)"
+hat "$W/r3.txt" "opk: rolled back" "rollback went back to the previous generation"
 hat "$W/r4.txt" "ota: generation 12" "after the rollback the old generation is active"
 echo "FEEDTEST: $pass ok, $fail failed (read $W/r*.txt for the device's own words)"

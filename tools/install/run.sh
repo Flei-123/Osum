@@ -350,22 +350,22 @@ for z in open('$OUT/quelle2/INDEX'):
 echo "        hallo 1.0.0 = ${h1:0:16}"
 echo "        hallo 2.0.0 = ${h2:0:16}"
 
-rc=$(lauf pak1 platte "opk installieren /quelle1/hallo-1.opk;opk liste;/apps/hallo.osp/start;opk pruefen;exit" 600)
+rc=$(lauf pak1 platte "opk install /quelle1/hallo-1.opk;opk list;/apps/hallo.osp/start;opk verify;exit" 600)
 gleich "installieren: Beendigungscode" "$rc" "21"
-hat "$OUT/pak1.txt" "opk: installiert hallo" "opk meldet die Installation"
+hat "$OUT/pak1.txt" "opk: installed hallo" "opk meldet die Installation"
 hat "$OUT/pak1.txt" "paket-hallo fassung 1" "das installierte Paket LAEUFT aus /apps"
 hat "$OUT/pak1.txt" "${h1:0:12}" "die Liste nennt genau den Hash, den der Wirt gerechnet hat"
 
-rc=$(lauf pak2 platte "opk aktualisieren hallo --quelle /quelle2;opk liste;exit" 600)
-hat "$OUT/pak2.txt" "opk: installiert hallo" "aktualisieren nimmt die neue Fassung an"
+rc=$(lauf pak2 platte "opk update hallo --source /quelle2;opk list;exit" 600)
+hat "$OUT/pak2.txt" "opk: installed hallo" "aktualisieren nimmt die neue Fassung an"
 hat "$OUT/pak2.txt" "${h2:0:12}" "und die Liste nennt den Hash aus dem INDEX der Quelle"
 
-rc=$(lauf pak3 platte "/apps/hallo.osp/start;opk generationen;exit" 600)
+rc=$(lauf pak3 platte "/apps/hallo.osp/start;opk generations;exit" 600)
 hat "$OUT/pak3.txt" "paket-hallo fassung 2" "nach dem NEUSTART laeuft die neue Fassung"
 hat "$OUT/pak3.txt" "generation 1" "es gibt zwei Generationen"
 
-rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.osp/start;opk liste;exit" 600)
-hat "$OUT/pak4.txt" "opk: zurück auf 0" "eine Generation zurueck"
+rc=$(lauf pak4 platte "opk rollback 0;/apps/hallo.osp/start;opk list;exit" 600)
+hat "$OUT/pak4.txt" "opk: rolled back to 0" "eine Generation zurueck"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "und die ALTE Fassung laeuft wieder"
 hat "$OUT/pak4.txt" "${h1:0:12}" "die Liste nennt wieder den alten Hash"
 
@@ -397,16 +397,16 @@ KAPUTT="$OUT/kaputt.opk" FALSCH="$OUT/falsch.opk" \
     bash tools/install/build.sh "$OUT" > "$OUT/bauen2.log" 2>&1
 neue_platte
 rc=$(lauf ginst iso "install /dev/hda --ja;exit" 900)
-rc=$(lauf gpak platte "opk installieren /quelle1/kaputt.opk;opk installieren /quelle1/hallo-1.opk;opk aktualisieren hallo --quelle /quelle1;exit" 600)
-hat "$OUT/gpak.txt" "opk: Prüfsumme falsch" "GEGENPROBE: ein gekipptes Oktett im Paket wird abgelehnt"
-hat "$OUT/gpak.txt" "opk: installiert hallo" "GEGENPROBE zur Gegenprobe: das UNVERSEHRTE Paket wird angenommen"
+rc=$(lauf gpak platte "opk install /quelle1/kaputt.opk;opk install /quelle1/hallo-1.opk;opk update hallo --source /quelle1;exit" 600)
+hat "$OUT/gpak.txt" "opk: checksum wrong" "GEGENPROBE: ein gekipptes Oktett im Paket wird abgelehnt"
+hat "$OUT/gpak.txt" "opk: installed hallo" "GEGENPROBE zur Gegenprobe: das UNVERSEHRTE Paket wird angenommen"
 
 echo
 echo "== 6. der Stromausfall =="
 #
 # QEMU wird mit SIGKILL beendet, waehrend die Aktualisierung schreibt.
 # Danach wird von derselben Platte neu gestartet, und drei Dinge muessen
-# gelten: die Maschine startet, `opk liste` nennt GENAU einen der beiden
+# gelten: die Maschine startet, `opk list` nennt GENAU einen der beiden
 # Hashes, und das Paket laeuft.
 #
 # WARUM SIGKILL DAS RICHTIGE WERKZEUG IST: QEMU schreibt mit
@@ -416,8 +416,8 @@ echo "== 6. der Stromausfall =="
 # Wirtsabsturz waere eine andere Frage, und die stellt dieser Lauf nicht.
 
 cp -f "$OUT/ziel.img" "$OUT/vor-strom.img"
-rc=$(lauf spak platte "opk installieren /quelle1/hallo-1.opk;exit" 600)
-hat "$OUT/spak.txt" "opk: installiert hallo" "Ausgangslage: Fassung 1 installiert"
+rc=$(lauf spak platte "opk install /quelle1/hallo-1.opk;exit" 600)
+hat "$OUT/spak.txt" "opk: installed hallo" "Ausgangslage: Fassung 1 installiert"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
 ausfaelle=0
@@ -425,12 +425,12 @@ heil=0
 for ms in 300 700 1200 1800 2600 3600; do
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
     OUT="$OUT" bash tools/install/oneshot.sh strom-$ms platte \
-        "opk aktualisieren hallo --quelle /quelle2;exit" 600 > /dev/null 2>&1 &
+        "opk update hallo --source /quelle2;exit" 600 > /dev/null 2>&1 &
     lpid=$!
     # warten, bis die Shell den Befehl wirklich angefangen hat
     i=0
     while [ $i -lt 900 ]; do
-        grep -qa "opk aktualisieren" "$OUT/strom-$ms.txt" 2>/dev/null && break
+        grep -qa "opk update" "$OUT/strom-$ms.txt" 2>/dev/null && break
         kill -0 $lpid 2>/dev/null || break
         sleep 0.1
         i=$((i + 1))
@@ -440,7 +440,7 @@ for ms in 300 700 1200 1800 2600 3600; do
     wait $lpid 2>/dev/null
     ausfaelle=$((ausfaelle + 1))
     # und jetzt: startet die Platte noch?
-    rc=$(lauf nach-$ms platte "opk liste;/apps/hallo.osp/start;opk pruefen;exit" 600)
+    rc=$(lauf nach-$ms platte "opk list;/apps/hallo.osp/start;opk verify;exit" 600)
     gestartet=0
     grep -qaF "osum: mount=1" "$OUT/nach-$ms.txt" && gestartet=1
     hh=""

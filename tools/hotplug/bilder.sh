@@ -30,7 +30,7 @@ ARB=${HP_ARB:-$(mktemp -d)}
 mkdir -p "$ARB"
 [ -n "${HP_ARB:-}" ] || trap 'rm -rf "$ARB"' EXIT
 
-PROGS="explorer sh echo ls cat edit launcher locate auswerfen"
+PROGS="explorer sh echo ls cat edit launcher locate eject"
 
 echo "== bauen =="
 ./tools/build-kernel.sh "$ARB/k.mb" > "$ARB/build.log" 2>&1 \

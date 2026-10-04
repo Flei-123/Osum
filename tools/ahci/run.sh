@@ -406,6 +406,37 @@ else
     fi
 fi
 
+# ============ 9. Dell OptiPlex 9020: "SATA Operation = RAID On"
+
+echo
+echo "== 9. the controller reports class 01:04 (Intel RST, RAID On) -- still a disk =="
+
+# The hw mode word `fakeraid` makes pci.fi report the AHCI controller the way
+# the Dell does in RAID mode (class 01:04:00). Before r340 the driver searched
+# for 01:06:01 only and said "no disk" -- the installer's "No writable disk found".
+bild g
+mapfile -t GARGS < <(platte g)
+lauf g q35 "ahci fakeraid" "${GARGS[@]}"
+gruen g "9.1 the run with a RAID-class controller"
+if grep -qa 'class=01:04' "$TMPD/g.txt"; then
+    ok "9.2 the bus list shows class 01:04 -- $(grep -a -m1 'class=01:04' "$TMPD/g.txt")"
+else
+    bad "9.2 the controller does not look like RAID mode (test hook broken)"
+fi
+if grep -qa '^ahci: raid mode' "$TMPD/g.txt"; then
+    ok "9.3 the driver says it used the RAID-mode controller as AHCI"
+else
+    bad "9.3 no raid-mode line -- $(grep -a -m1 '^ahci:' "$TMPD/g.txt")"
+fi
+GS=$(feld g '^ahci: one ' same); GN=$(feld g '^ahci: many ' same)
+zahl "9.4 one sector round trip over the RAID-class controller" "$GS" eq 1
+zahl "9.5 eight sectors in one command" "$GN" eq 1
+if grep -qa 'ahci wrote this line over DMA' "$TMPD/g.img"; then
+    ok "9.6 and the host finds the text in the image"
+else
+    bad "9.6 the image stayed empty"
+fi
+
 # ============================================================= Ergebnis
 
 echo

@@ -12,11 +12,11 @@
 #
 # Was stattdessen fotografiert wird, ist derselbe Weg eine Schicht
 # tiefer und auf demselben Schreibtisch: eine SHELL IM FENSTER
-# (`wmshell`), in der `auswerfen` laeuft -- dasselbe Programm, dasselbe
+# (`wmshell`), in der `eject` laeuft -- dasselbe Programm, dasselbe
 # Aufruf 1704, dieselbe Tafel des Kerns, die auch die Seitenleiste
 # liest. Drei Bilder aus EINER laufenden Maschine:
 #
-#   10-vorher.png   `auswerfen` sagt: kein Wechseldatentraeger da
+#   10-vorher.png   `eject` sagt: kein Wechseldatentraeger da
 #   20-steckt.png   nach dem Anstecken: /medien/usb0 mit Groesse
 #   30-danach.png   nach dem Auswerfen: wieder leer
 #
@@ -35,7 +35,7 @@ ARB=${HP_ARB:-$(mktemp -d)}
 mkdir -p "$ARB"
 [ -n "${HP_ARB:-}" ] || trap 'rm -rf "$ARB"' EXIT
 
-PROGS="sh echo ls cat auswerfen mount sleep"
+PROGS="sh echo ls cat eject mount sleep"
 
 echo "== bauen =="
 ./tools/build-kernel.sh "$ARB/k.mb" > "$ARB/build.log" 2>&1 \
@@ -86,7 +86,7 @@ echo "  Stick: FAT32, MBR, eine Datei des Wirts"
 # und diese Runde misst den Wechseldatentraeger und nicht den Tastenweg.
 # Das Skript haelt zwischen den Schritten an, damit jedes Bild einen
 # fertigen Bildschirm zeigt.
-SKRIPT='auswerfen;sleep 12;ls /medien/usb0;auswerfen;sleep 12;cat /medien/usb0/host.txt;auswerfen 0;auswerfen;sleep 8'
+SKRIPT='eject;sleep 12;ls /medien/usb0;eject;sleep 12;cat /medien/usb0/host.txt;eject 0;eject;sleep 8'
 
 cat > "$ARB/dreh.txt" <<DREH
 aufzeile wm: hold
@@ -122,7 +122,7 @@ kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 
 echo
 echo "== was die Maschine gemeldet hat =="
-grep -aE 'wechsel:|usb: msc|ausgeworfen|/medien/usb0|host.txt' "$ARB/seriell.txt" \
+grep -aE 'wechsel:|usb: msc|ejected|/medien/usb0|host.txt' "$ARB/seriell.txt" \
     | sed 's/^/  /' | head -14
 
 echo

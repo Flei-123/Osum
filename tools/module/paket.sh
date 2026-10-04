@@ -17,7 +17,7 @@
 #   speicher/index.json + index.json.sig
 #        │  store publish → https://store.fleitec.com/
 #        ▼
-#   opk installieren /store/…/ps2maus-1.0.0.opk
+#   opk install /store/…/ps2maus-1.0.0.opk
 #        │
 #        ▼
 #   /lib/ps2maus.omod  auf der Platte -- und der Kern laedt es
@@ -111,8 +111,8 @@ for k, v in d["pakete"].items():
 PY
 echo
 echo "So sieht es auf dem Geraet aus:"
-echo "    osum\$ opk installieren /store/ps2maus-$FASSUNG.opk"
-echo "    opk: installiert ps2maus $FASSUNG"
+echo "    osum\$ opk install /store/ps2maus-$FASSUNG.opk"
+echo "    opk: installed ps2maus $FASSUNG"
 echo "    osum\$ ls /lib"
 echo "    ps2maus.omod"
 echo "    (Neustart -- und der Kern findet den Treiber.)"

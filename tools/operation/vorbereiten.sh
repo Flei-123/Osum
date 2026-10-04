@@ -72,7 +72,7 @@ cat > "$OUT/resolv.conf" <<EOF
 nameserver 10.0.2.2
 options timeout:3 attempts:2
 EOF
-printf 'opk richten\nif /apps/hallo.osp/start\nthen\nota bestaetigen\nfi\nopk erprobung\n' \
+printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 EX="/start.sh=$OUT/start.sh /etc/resolv.conf=$OUT/resolv.conf"
 OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" EXTRA="$EX" \
@@ -91,10 +91,10 @@ echo "   installer rc=$(cat "$OUT/inst.rc" 2>/dev/null) $(grep -ac 'install: fer
 echo "== 6. ein Startlauf -- kommt die Maschine hoch, steht das Netz"
 OTA_NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0" OUT="$OUT" \
     bash tools/install/oneshot.sh basis0 platte \
-    "ota zeigen;cat /etc/resolv.conf;exit" 600 \
+    "ota show;cat /etc/resolv.conf;exit" 600 \
     > /dev/null 2>&1
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/basis0.txt" 2>/dev/null
-grep -a 'ota: fassung hier\|ota: schluesselgen\|ersatzschluessel\|nameserver' \
+grep -a 'ota: version here\|ota: key generation\|ersatzschluessel\|nameserver' \
     "$OUT/basis0.txt" | head -6
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 

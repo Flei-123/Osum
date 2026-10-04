@@ -484,8 +484,8 @@ if [ -r "$OPKPY" ]; then
         ok "linux-abi laesst sich installieren (Generation, Store, Pruefsumme)"
         python3 "$OPKPY" pruefen --wurzel "$TMPD/wurzel" 2>&1 \
             | grep -q '0 kaputt' \
-            && ok "und opk pruefen findet nichts Kaputtes" \
-            || bad "opk pruefen beanstandet den Baum"
+            && ok "und opk verify findet nichts Kaputtes" \
+            || bad "opk verify beanstandet den Baum"
     else
         bad "linux-abi laesst sich nicht installieren"
         sed 's/^/        /' "$TMPD/opk/inst.txt" | head -4

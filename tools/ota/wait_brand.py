@@ -6,7 +6,7 @@
 # aus einem einzelnen Messlauf hochgerechnet ("21,2 Sekunden bis bereit,
 # also schiesse ich bei 21,5"). Auf einem belasteten Wirt braucht
 # derselbe Lauf aber leicht das Doppelte -- gemessen: ein Schuss bei
-# 27,2 s traf die Maschine, als `ota einspielen` gerade erst anlief.
+# 27,2 s traf die Maschine, als `ota apply` gerade erst anlief.
 # Ergebnis waren dreissig makellose "alt" und kein einziges "neu": ein
 # Abschnitt, der nur belegt, dass eine Maschine ohne Update unveraendert
 # bleibt. Wertlos.

@@ -22,7 +22,7 @@
 # ALSO WIRD LAST ERZEUGT UND DAGEGEN GEHALTEN. Eine Maschine, ein Draht
 # (derselbe wie in `tools/netmon/run.sh`: veth, Netzraum, die
 # AF_PACKET-Bruecke), ein HTTP-Server auf dem Wirt mit einer Datei, deren
-# Groesse DER WIRT bestimmt, und `/bin/netzmess`, das genau die zwei
+# Groesse DER WIRT bestimmt, und `/bin/netmeter`, das genau die zwei
 # Zaehler im Sekundentakt liest, aus denen die Netzseite ihre Rate baut.
 #
 # DIE VIER ZUSAGEN:
@@ -48,7 +48,7 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo wget netzmess sleep"
+PROGS="sh ls cat echo wget netmeter sleep"
 BLOCKS=16384
 
 NS=nzui-$$
@@ -127,13 +127,13 @@ for p in $PROGS; do
         || { bad "ld scheitert an $p"; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
-[ -s "$TMPD/netzmess.elf" ] && ok "/bin/netzmess ist gebaut" || bad "/bin/netzmess fehlt"
+[ -s "$TMPD/netmeter.elf" ] && ok "/bin/netmeter ist gebaut" || bad "/bin/netmeter fehlt"
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 SPEC="$SPEC /var/ /var/net/ /etc/"
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
-    > "$TMPD/mkfs.txt" 2>&1 && ok "ein Abbild mit /bin/netzmess" \
+    > "$TMPD/mkfs.txt" 2>&1 && ok "ein Abbild mit /bin/netmeter" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 
 gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
@@ -158,7 +158,7 @@ bridge_up(){ "$TMPD/bruecke" "$V0" "$BPORT" "$QPORT" 2>"$TMPD/br.log" & BRPID=$!
 bridge_down(){ [ -n "$BRPID" ] && kill "$BRPID" 2>/dev/null; wait "$BRPID" 2>/dev/null; BRPID=""; sleep 0.2; }
 
 # DIE DATEI IST EIN MEGAOKTETT. Gross genug, dass der Download mehrere
-# Sekunden dauert und damit in mehreren Zeilen von `netzmess` auftaucht
+# Sekunden dauert und damit in mehreren Zeilen von `netmeter` auftaucht
 # -- eine Datei, die in einer halben Sekunde durch ist, waere in genau
 # einer Zeile zu sehen und in keiner zweiten, und "die Rate geht hoch
 # und wieder runter" liesse sich daran nicht zeigen.
@@ -217,7 +217,7 @@ NETARGS="nic nip=$OSUM_IP/24 ngw=$HOST_IP"
 # =====================================================================
 echo "== 2. die Zaehler unter echter Last =="
 # =====================================================================
-# DER ABLAUF: `netzmess` laeuft 14 Sekunden im Hintergrund und druckt
+# DER ABLAUF: `netmeter` laeuft 14 Sekunden im Hintergrund und druckt
 # jede Sekunde eine Zeile. Nach drei Sekunden Ruhe holt `wget` die
 # Datei; danach ist wieder Ruhe. Damit liegen im Mitschnitt RUHE, LAST
 # und WIEDER RUHE untereinander, und alle drei kommen aus demselben
@@ -227,7 +227,7 @@ cp "$TMPD/disk.img" "$TMPD/live.img"
 # DIE VORDERGRUNDKETTE MUSS LAENGER LAUFEN ALS DIE MESSUNG.
 #
 # Beim ersten Anlauf standen nur DREI Messzeilen im Mitschnitt, obwohl
-# `netzmess 14` vierzehn drucken sollte: `exit` beendet die Shell, die
+# `netmeter 14` vierzehn drucken sollte: `exit` beendet die Shell, die
 # Shell beendet die Maschine, und der Hintergrundlauf stirbt mitten im
 # Satz. Die Zahlen, die noch kamen, waren richtig (die Schlusszeile
 # fehlte nicht) -- aber "die Rate faellt nach der Last wieder" liess
@@ -237,7 +237,7 @@ cp "$TMPD/disk.img" "$TMPD/live.img"
 # 3 + 14 + 3 = 20 gegen 14 Sekunden Messung.
 # ZWEI LAEUFE STATT EINEM, und das ist die Folge einer Messung.
 #
-# Der erste Anlauf liess `netzmess` im Hintergrund und `wget` im
+# Der erste Anlauf liess `netmeter` im Hintergrund und `wget` im
 # Vordergrund laufen. Ergebnis: die Schlusszeile mit den richtigen
 # Summen kam an, von sechzehn Messzeilen aber KEINE EINZIGE. Die
 # Standardausgabe eines Hintergrundkindes teilt sich den Weg mit dem
@@ -247,27 +247,27 @@ cp "$TMPD/disk.img" "$TMPD/live.img"
 #
 # Also laeuft in BEIDEN Laeufen nur EIN Programm im Vordergrund:
 #
-#   LAUF A -- RUHE:  nur `netzmess`. Kein Verkehr ausser ARP.
+#   LAUF A -- RUHE:  nur `netmeter`. Kein Verkehr ausser ARP.
 #                    Das ist die Grundlinie fuer Zusage 1.
-#   LAUF B -- LAST:  `wget` holt die Datei, danach misst `netzmess`.
+#   LAUF B -- LAST:  `wget` holt die Datei, danach misst `netmeter`.
 #                    Die Zaehler stehen dann auf dem, was der Download
 #                    wirklich bewegt hat -- das ist Zusage 4 --, und
-#                    `netzmess` zeigt, dass die Rate DANACH wieder auf
+#                    `netmeter` zeigt, dass die Rate DANACH wieder auf
 #                    null faellt (Zusage 3).
 #
-# Die SPITZE unter Last (Zusage 2) kommt aus Lauf B: `netzmess` laeuft
+# Die SPITZE unter Last (Zusage 2) kommt aus Lauf B: `netmeter` laeuft
 # dort schon, waehrend `wget` noch laedt, weil die Shell den Download
 # und die Messung nacheinander startet und der letzte Teil des
 # Downloads in die erste Messsekunde faellt. Steht die Spitze nicht im
 # Mitschnitt, sagt der Laeufer das -- er behauptet sie nicht.
-qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=netzmess 6;exit" \
+qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=netmeter 6;exit" \
     "$TMPD/ruhe.txt"
 wait "$QPID" 2>/dev/null; QPID=""
 srv_down; bridge_down; wire_down
 
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live.img"
-qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netzmess 6;exit" \
+qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netmeter 6;exit" \
     "$TMPD/lauf.txt"
 wait "$QPID" 2>/dev/null; QPID=""
 srv_down; bridge_down; wire_down
@@ -278,28 +278,28 @@ if [ ! -s "$R" ]; then
     echo "NETZUI-DURCHSATZ: $pass passed, $fail failed"; exit 1
 fi
 Q="$TMPD/ruhe.txt"
-echo "-- LAUF A (Ruhe), /bin/netzmess --"
-grep -a '^netzmess:' "$Q" | sed 's/^/       /'
-echo "-- LAUF B (nach dem Download), /bin/netzmess --"
-grep -a '^netzmess:' "$R" | sed 's/^/       /'
+echo "-- LAUF A (Ruhe), /bin/netmeter --"
+grep -a '^netmeter:' "$Q" | sed 's/^/       /'
+echo "-- LAUF B (nach dem Download), /bin/netmeter --"
+grep -a '^netmeter:' "$R" | sed 's/^/       /'
 
-nA=$(grep -ac '^netzmess: t=' "$Q")
-nB=$(grep -ac '^netzmess: t=' "$R")
+nA=$(grep -ac '^netmeter: t=' "$Q")
+nB=$(grep -ac '^netmeter: t=' "$R")
 num "Messzeilen in Lauf A" "$nA" ge 5
 num "Messzeilen in Lauf B" "$nB" ge 5
 
 # ZUSAGE 1 -- IN RUHE IST DIE RATE NULL.
 # Lauf A hat keinen Verkehr ausser ARP. Die groesste Rate des ganzen
 # Laufs muss klein sein -- nicht nur eine ausgesuchte Zeile.
-maxruhe=$(grep -a '^netzmess: fertig' "$Q" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
+maxruhe=$(grep -a '^netmeter: done' "$Q" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
 num "Zusage 1 -- Spitzenrate im RUHELAUF" "${maxruhe:-}" lt 20000
-drxruhe=$(grep -a '^netzmess: fertig' "$Q" | grep -aoE 'drx=[0-9]+' | cut -d= -f2)
+drxruhe=$(grep -a '^netmeter: done' "$Q" | grep -aoE 'drx=[0-9]+' | cut -d= -f2)
 num "Zusage 1b -- empfangene Oktette im Ruhelauf" "${drxruhe:-}" lt 20000
 
 # ZUSAGE 4 -- DIE SUMME PASST ZUR DATEI.
 # Lauf B laedt die Datei VOR der Messung; die absoluten Zaehlerstaende
 # der ersten Messzeile sind deshalb das, was der Download bewegt hat.
-rxB=$(grep -a '^netzmess: t=0 ' "$R" | grep -aoE ' rx=[0-9]+' | tr -d ' ' | cut -d= -f2)
+rxB=$(grep -a '^netmeter: t=0 ' "$R" | grep -aoE ' rx=[0-9]+' | tr -d ' ' | cut -d= -f2)
 untergrenze=$(( BODY * 90 / 100 ))
 obergrenze=$(( BODY * 3 / 2 ))
 num "Zusage 4 -- die Karte hat mindestens 90% der Datei gezaehlt" "${rxB:-}" ge "$untergrenze"
@@ -312,14 +312,14 @@ fi
 
 # ZUSAGE 2 -- UNTER LAST GEHT SIE HOCH.
 # Der Rest des Downloads faellt in die erste Messsekunde von Lauf B.
-maxlast=$(grep -a '^netzmess: fertig' "$R" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
+maxlast=$(grep -a '^netmeter: done' "$R" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
 if [ -n "${maxlast:-}" ] && [ "${maxlast:-0}" -gt 20000 ]; then
     ok "Zusage 2 -- Spitzenrate unter Last: $maxlast Oktette/s"
     if [ "${maxruhe:-0}" -lt 100 ]; then rv=$maxlast; else rv=$(( maxlast / (maxruhe + 1) )); fi
     num "Zusage 2b -- Spitze zu Ruhe" "$rv" gt 10
 else
     # EHRLICH STATT SCHOEN: faellt der Download ganz vor die erste
-    # Messzeile, sieht `netzmess` keine Spitze. Das ist kein Fehler der
+    # Messzeile, sieht `netmeter` keine Spitze. Das ist kein Fehler der
     # Anzeige, und der Laeufer behauptet dann keine Zahl.
     note "Zusage 2 -- keine Spitze in Lauf B (der Download war vor der"
     note "ersten Messsekunde fertig). Die bewegten Oktette stehen oben;"
@@ -328,7 +328,7 @@ else
 fi
 
 # ZUSAGE 3 -- DANACH FAELLT SIE WIEDER.
-letzte=$(grep -a '^netzmess: t=' "$R" | tail -1 | grep -aoE 'rrx=[0-9]+' | cut -d= -f2)
+letzte=$(grep -a '^netmeter: t=' "$R" | tail -1 | grep -aoE 'rrx=[0-9]+' | cut -d= -f2)
 num "Zusage 3 -- am Ende von Lauf B wieder in Ruhe" "${letzte:-}" lt 20000
 
 # =====================================================================
@@ -336,20 +336,20 @@ echo "== 2c. die Rate WAEHREND der Last -- der troepfelnde Download =="
 # =====================================================================
 # Hier laufen Messung und Download WIRKLICH gleichzeitig: der Server
 # gibt die Datei in zehn Stuecken mit je einer halben Sekunde Pause
-# heraus, `wget` laeuft im Hintergrund, und `netzmess` misst im
+# heraus, `wget` laeuft im Hintergrund, und `netmeter` misst im
 # Vordergrund. Die Ausgabe des Hintergrundkindes geht dabei verloren
-# (siehe den Kopf von `raus` in kernel/user/netzmess.fi) -- die der
+# (siehe den Kopf von `raus` in kernel/user/netmeter.fi) -- die der
 # Messung nicht, und nur auf die kommt es an.
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live.img"
-qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/langsam &;netzmess 10;exit" \
+qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/langsam &;netmeter 10;exit" \
     "$TMPD/waehrend.txt"
 wait "$QPID" 2>/dev/null; QPID=""
 srv_down; bridge_down; wire_down
 
 W="$TMPD/waehrend.txt"
 echo "-- LAUF C (Messung WAEHREND des Downloads) --"
-grep -a '^netzmess:' "$W" | sed 's/^/       /'
+grep -a '^netmeter:' "$W" | sed 's/^/       /'
 
 # Wie viele Sekunden haben wirklich Verkehr gesehen? Das ist die Zahl,
 # die zeigt, dass die Anzeige MITGEHT und nicht nur einmal zuckt.
@@ -360,10 +360,10 @@ grep -a '^netzmess:' "$W" | sed 's/^/       /'
 # erzeugen kann -- sie haette nicht die Anzeige geprueft, sondern den
 # Server. Gegen die Ruhe (70 Oktette je Sekunde, Lauf A) sind 5 000 ein
 # Faktor von siebzig.
-bewegt=$(grep -a '^netzmess: t=' "$W" | grep -aoE 'rrx=[0-9]+' | cut -d= -f2 \
+bewegt=$(grep -a '^netmeter: t=' "$W" | grep -aoE 'rrx=[0-9]+' | cut -d= -f2 \
          | awk '$1 > 5000' | wc -l)
 num "Zusage 2 -- Sekunden mit echtem Durchsatz (>5 KiB/s)" "$bewegt" ge 5
-maxw=$(grep -a '^netzmess: fertig' "$W" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
+maxw=$(grep -a '^netmeter: done' "$W" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
 num "Zusage 2b -- Spitzenrate waehrend der Last" "${maxw:-}" gt 50000
 # UND SIE FAELLT WIEDER. Die letzte Zeile liegt hinter dem Ende des
 # Downloads (10 s Messung gegen 5 s Troepfeln).
@@ -374,7 +374,7 @@ num "Zusage 2b -- Spitzenrate waehrend der Last" "${maxw:-}" gt 50000
 # sich in diesem Lauf nicht verlangen -- die Messung endet, waehrend die
 # letzten Stuecke noch ankommen. Der RUHELAUF (A) ist der Beleg fuer die
 # Null, und er steht oben.
-spaet=$(grep -a '^netzmess: t=' "$W" | tail -2 | grep -aoE 'rrx=[0-9]+' \
+spaet=$(grep -a '^netmeter: t=' "$W" | tail -2 | grep -aoE 'rrx=[0-9]+' \
         | cut -d= -f2 | sort -n | tail -1)
 if [ -n "${spaet:-}" ] && [ -n "${maxw:-}" ] && [ "$spaet" -lt "$maxw" ]; then
     ok "Zusage 3b -- die Rate am Ende ($spaet) liegt unter der Spitze ($maxw)"
@@ -388,12 +388,12 @@ fi
 # ist langsamer als die zehn Sekunden reichen. Verlangt wird deshalb
 # nur, dass ES WIRKLICH VIEL WAR -- ein Drittel der Datei ist das
 # Dreitausendfache des Ruhelaufs.
-drxw=$(grep -a '^netzmess: fertig' "$W" | grep -aoE 'drx=[0-9]+' | cut -d= -f2)
+drxw=$(grep -a '^netmeter: done' "$W" | grep -aoE 'drx=[0-9]+' | cut -d= -f2)
 num "Zusage 4c -- waehrend der Messung bewegte Oktette" "${drxw:-}" ge "$(( BODY / 3 ))"
 
 echo "== 3. Traeger und Verbindungsrate, wie die Seite sie zeigt =="
-link=$(grep -a '^netzmess: start' "$R" | grep -aoE 'link=[0-9]+' | cut -d= -f2)
-spd=$(grep -a '^netzmess: start' "$R" | grep -aoE 'speed=[0-9]+' | cut -d= -f2)
+link=$(grep -a '^netmeter: start' "$R" | grep -aoE 'link=[0-9]+' | cut -d= -f2)
+spd=$(grep -a '^netmeter: start' "$R" | grep -aoE 'speed=[0-9]+' | cut -d= -f2)
 num "der Traeger steht (NG_LINK)" "${link:-}" eq 1
 # DIE EHRLICHE ERWARTUNG: virtio-net ohne `speed=` MELDET KEINE RATE.
 # Die Seite schreibt dann "unbekannt" hin. Ein Laeufer, der hier eine

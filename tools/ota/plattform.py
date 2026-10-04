@@ -47,7 +47,7 @@ WOERTER = ("osum-x86_64", "osum-aarch64", "osum-any")
 def teile(roh):
     """(meta, daten) eines .opk, oder ValueError."""
     if len(roh) < 64 or roh[0:8] != b"OPKG0001":
-        raise ValueError("keine OPKG-Datei (Kennung fehlt)")
+        raise ValueError("not an OPKG file (Kennung fehlt)")
     ml, dl = struct.unpack_from("<QQ", roh, 8)
     return roh[64:64 + ml], roh[64 + ml:64 + ml + dl]
 

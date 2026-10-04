@@ -29,7 +29,7 @@ sucht nach Zeichenketten UND beschreibt auf Deutsch, was er tut --
 
 Das sind BESCHREIBUNGEN. Sie duerfen ASCII bleiben (docs/I18N.md nimmt
 die Abnahmesprache aus), und ein Pruefer, der sie anmeckert, wird beim
-naechsten Mal abgeschaltet. Dasselbe gilt fuer EINGABEN: `opk zurueck 0`
+naechsten Mal abgeschaltet. Dasselbe gilt fuer EINGABEN: `opk rollback 0`
 in einer Befehlszeile ist eine getippte Marke und genau richtig so.
 
 Es wird deshalb nur nach Saetzen gesucht, die ein PROGRAMMPRAEFIX
@@ -44,7 +44,7 @@ MUSS das Praefix enthalten:
 
     Treffer:      grep '^[0-9]+ tiling: Eintraege'   -> ROT
     kein Treffer: "Eintraege, die aus tiling.conf"   -> still
-    kein Treffer: "opk zurueck 0" in einer Eingabe   -> still
+    kein Treffer: "opk rollback 0" in einer Eingabe   -> still
 
   erwartung.py            die Funde
   erwartung.py --zahlen   nur die Bilanz
