@@ -58,7 +58,7 @@ shb=$(sed -n 's/.*share=\([-0-9.]*\).*/\1/p' "$TMPD/cpub.txt" | head -1)
 awk -v s="${shb:--1}" 'BEGIN{exit !(s >= 0 && s < 15)}' \
     && ok "the desktop loop (boot task, core 0) uses ${shb} % at idle (limit 15 %)" \
     || bad "the desktop loop (boot task, core 0) uses ${shb:-?} % at idle (limit 15 %)"
-grep -aq '^kgui: dead window removed' "$D/serial.txt" \
+grep -aq 'kgui: dead window removed' "$D/serial.txt" \
     && ok "the window of the killed launcher was swept away" \
     || bad "no 'kgui: dead window removed' after the kill"
 grep -aq '^explorer: ready' "$D/serial.txt" \

@@ -215,10 +215,11 @@ export {
 // Ereignisringe (0x2000) nicht mehr in die zwei Seiten von WM_OFF;
 // beide liegen deshalb in `kstate.DSK_OFF` (0x54000..0x58000), dem
 // Vorrat dieser Runde. In WM_OFF stehen nur noch die Skalare.
-const MAX_WIN: u64 = 16
+// DELL ROUND: 16 -> 32 (see kstate.DSK_OFF).
+const MAX_WIN: u64 = 32
 const WIN_BYTES: u64 = 512
 const W_OFF: u64 = 0x0 // die Fenstertafel, Versatz IN kstate.DSK_OFF
-const EV_OFF: u64 = 0x2000 // die Ereignisringe, ebenfalls in DSK_OFF
+const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
 const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
@@ -239,6 +240,9 @@ const BORDER0: u64 = 2 // der Rand links, rechts und unten
 // in der Ecke. Multipliziert mit `uisc` sind das auf Justins Schirm 16
 // Bildpunkte Rand -- breit genug zum Treffen, schmal genug, dass ein
 // Klick in die Flaeche noch ein Klick in die Flaeche ist.
+// DELL ROUND: how much of a window must stay in sight when it is pushed
+// over the left or right screen edge (base pixels, times uisc).
+const VIS_MIN0: u64 = 96
 const GRIP0: u64 = 8 // der Rand, an dem die Groesse gezogen wird
 const CLOSE_W0: u64 = 14
 // RUNDE TITELABSTAND (Justin, 13.09.2026): der Titel klebte am Rand.
@@ -993,6 +997,13 @@ const S_SZAX: u64 = 0x11E8 // die festgehaltene x-Kante (Bildschirm)
 const S_SZAY: u64 = 0x11F0 // die festgehaltene y-Kante
 const S_SZAW: u64 = 0x11F8 // Breite beim Anfassen
 const S_SZAH: u64 = 0x1200 // Hoehe beim Anfassen
+// DELL ROUND (04.10.2026): where the pointer stood relative to the grabbed
+// edge when the button went down (signed, as u64). The edge then FOLLOWS the
+// pointer at that distance. Before, the top edge was set to the pointer
+// itself as the top of the CONTENT -- 22 px (the title bar) below the edge
+// that was grabbed: a drag of 30 px moved the window top by 8.
+const S_SZOFFX: u64 = 0x15E0
+const S_SZOFFY: u64 = 0x15E8
 
 const SZ_L: u64 = 1
 const SZ_R: u64 = 2
@@ -2823,7 +2834,7 @@ fn wins_say(state: u64) {
                 }
                 var tb: i64 = win_y(state, i) + border(state) as i64
                 if f < ttf.MAX_FONTS {
-                    tb = tb + ttf.ascent(state, f, px)
+                    tb = win_y(state, i) + title_base(state, f)
                 }
                 serial.puts((&s_tx[0]) as u64)
                 serial.dec((win_x(state, i) + border(state) as i64 + title_pad(state) as i64 + before) as u64)
@@ -4108,6 +4119,38 @@ fn title_pad(state: u64) -> u64 {
     return TITLE_PAD0 * uisc(state)
 }
 
+// DELL ROUND (04.10.2026, Justin): the title sat closer to the top edge than the
+// bottom. The baseline was border + ascent, i.e. the line box started at the top
+// of the bar and all the spare height ended up below it. A first try centred
+// the whole line box (ascent + descent) -- measured on the pictures that still
+// left 3 px above and 5 px below, because a title is mostly ascenders and few
+// descenders: the line box is not what the eye centres. Now the INK is centred:
+// its height is the height of a tall letter, about four fifths of the font size
+// (measured: 12 rows at 15 px), between the border and the bottom of the title
+// bar. The result is the baseline offset from the window's top edge; the
+// descenders are kept inside the bar. Same formula at every ui scale (px, the
+// bar and the border all scale together).
+fn title_base(state: u64, f: u64) -> i64 {
+    let px: u64 = gs(state, S_PX_UI)
+    let asc: i64 = ttf.ascent(state, f, px)
+    if fb.winfix_aus(state) {
+        return border(state) as i64 + asc
+    }
+    let desc: i64 = ttf.descent(state, f, px)
+    let ink: i64 = ((px * 4 + 2) / 5) as i64
+    let bar: i64 = title_h(state) as i64 - border(state) as i64
+    var base: i64 = border(state) as i64 + (bar + ink) / 2
+    // descenders stay inside the bar
+    let lowest: i64 = title_h(state) as i64 - 1 - desc
+    if base > lowest {
+        base = lowest
+    }
+    if base < asc {
+        base = asc
+    }
+    return base
+}
+
 fn grip(state: u64) -> u64 {
     return GRIP0 * uisc(state)
 }
@@ -4141,8 +4184,14 @@ fn grip(state: u64) -> u64 {
 // einem gewoehnlichen Schirm, acht bei uiscale 2, also genau so viel
 // wie Justins Blech vorher hatte) -- die obere Kante laesst sich
 // weiter ziehen, sie frisst nur die Titelleiste nicht mehr auf.
+// DELL ROUND (04.10.2026, Justin): the top grip was 4 px at scale 1 and
+// the cursor never changed there. Now border + 3 px = 5 px (10 at scale
+// 2) -- still well under the 22 px title bar, which stays for moving.
 fn grip_oben(state: u64) -> u64 {
-    return border(state) + 2 * uisc(state)
+    if fb.winfix_aus(state) {
+        return border(state) + 2 * uisc(state)
+    }
+    return border(state) + 3 * uisc(state)
 }
 
 fn close_w(state: u64) -> u64 {
@@ -5246,8 +5295,19 @@ fn shape_intern(state: u64, s: u64) {
         return
     }
     ss(state, S_SHAPE, s)
+    // DELL ROUND: the shape change on the wire (a runner reads it).
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
+    var s_fm: [u8; 11] = "wm: form=\0\0"
+    var s_fx: [u8; 4] = " x=\0"
+    var s_fy: [u8; 4] = " y=\0"
+    serial.puts((&s_fm[0]) as u64)
+    serial.dec(s)
+    serial.puts((&s_fx[0]) as u64)
+    serial.dec(mx as u64)
+    serial.puts((&s_fy[0]) as u64)
+    serial.dec(my as u64)
+    serial.nl()
     let gw: i64 = cur_w(state) as i64
     damage(state, mx - gw, my - gw, mx + gw, my + gw)
 }
@@ -5277,22 +5337,62 @@ fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
     if i < MAX_WIN && valid(state, i) && deko(state, i) {
         let lx: i64 = x - win_x(state, i) - inx(state, i) as i64
         let ly: i64 = y - win_y(state, i) - iny(state, i) as i64
-        let rand: i64 = grip(state) as i64
-        let rechts: bool = lx >= wg(state, i, W_W) as i64 - rand
-            && lx <= wg(state, i, W_W) as i64
-        let unten: bool = ly >= wg(state, i, W_H) as i64 - rand
-            && ly <= wg(state, i, W_H) as i64
-        if lx >= 0 && ly >= 0 {
-            if rechts && unten {
-                will = cursor.F_DIAG1
-            } else if rechts {
-                will = cursor.F_WIDTH
-            } else if unten {
-                will = cursor.F_HEIGHT
-            }
+        let k: u64 = grip_mask(state, i, lx, ly)
+        var l: bool = (k & SZ_L) != 0
+        let r: bool = (k & SZ_R) != 0
+        var t: bool = (k & SZ_T) != 0
+        var b: bool = (k & SZ_B) != 0
+        // counter-proof `nowinfix`: the old cursor knew right and bottom only
+        if fb.winfix_aus(state) {
+            l = false
+            t = false
+        }
+        // DELL ROUND: all eight directions. Before, only right, bottom
+        // and the corner between them had a cursor.
+        if (l && t) || (r && b) {
+            will = cursor.F_DIAG1
+        } else if (r && t) || (l && b) {
+            will = cursor.F_DIAG2
+        } else if l || r {
+            will = cursor.F_WIDTH
+        } else if t || b {
+            will = cursor.F_HEIGHT
         }
     }
     shape_intern(state, will)
+}
+
+// The edges a point (window-local to the work area) is on: the SAME test
+// the press uses, so the cursor shows exactly where a drag would resize.
+fn grip_mask(state: u64, i: u64, lokal_x: i64, lokal_y: i64) -> u64 {
+    // a maximised window has no grips (it fills the work area)
+    if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 && !fb.winfix_aus(state) {
+        return 0
+    }
+    let rand: i64 = grip(state) as i64
+    let iw: i64 = wg(state, i, W_W) as i64
+    let ih: i64 = wg(state, i, W_H) as i64
+    let oben: i64 = 0 - iny(state, i) as i64
+    var kanten: u64 = 0
+    if lokal_x > 0 - rand && lokal_x < rand {
+        kanten = kanten | SZ_L
+    }
+    if lokal_x >= iw - rand && lokal_x < iw + rand {
+        kanten = kanten | SZ_R
+    }
+    if lokal_y >= oben && lokal_y < oben + grip_oben(state) as i64 {
+        kanten = kanten | SZ_T
+    }
+    if lokal_y >= ih - rand && lokal_y < ih + rand {
+        kanten = kanten | SZ_B
+    }
+    let im_rahmen: bool = lokal_x > 0 - rand
+        && lokal_y >= oben
+        && lokal_x < iw + rand && lokal_y < ih + rand
+    if !im_rahmen {
+        return 0
+    }
+    return kanten
 }
 
 // Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
@@ -7837,7 +7937,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let f: u64 = gs(state, S_FONT_UI)
     if f < ttf.MAX_FONTS {
         title_text(state, i, f, wx + border(state) as i64 + title_pad(state) as i64 + before,
-            wy + border(state) as i64 + ttf.ascent(state, f, gs(state, S_PX_UI)),
+            wy + title_base(state, f),
             schrift, ax0, ay0, ax1, ay1, bx)
     }
     // die Flaeche der Anwendung
@@ -10448,7 +10548,7 @@ fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
 // ------------------------------------------------------- die Ereignisse
 
 fn ev_at(state: u64, i: u64, k: u64) -> u64 {
-    return state + kstate.DSK_OFF + EV_OFF + i * EV_RING
+    return state + kstate.EVR_OFF + i * EV_RING // DELL ROUND: own pages
         + (k % EV_SLOTS) * EV_BYTES
 }
 
@@ -10779,6 +10879,25 @@ fn on_mouse(state: u64) {
         let i: u64 = gs(state, S_SIZING) - 1
         if (btn & ps2m.B_LEFT) == 0 {
             ss(state, S_SIZING, 0)
+            // DELL ROUND: the end of a resize, on the wire (a runner reads it)
+            if i < MAX_WIN && valid(state, i) {
+                var s_gz: [u8; 17] = "wm: gezogen id=\0\0"
+                var s_gx: [u8; 4] = " x=\0"
+                var s_gy: [u8; 4] = " y=\0"
+                var s_gw: [u8; 4] = " w=\0"
+                var s_gh: [u8; 4] = " h=\0"
+                serial.puts((&s_gz[0]) as u64)
+                serial.dec(wg(state, i, W_ID))
+                serial.puts((&s_gx[0]) as u64)
+                serial.dec(win_x(state, i) as u64)
+                serial.puts((&s_gy[0]) as u64)
+                serial.dec(win_y(state, i) as u64)
+                serial.puts((&s_gw[0]) as u64)
+                serial.dec(wg(state, i, W_W))
+                serial.puts((&s_gh[0]) as u64)
+                serial.dec(wg(state, i, W_H))
+                serial.nl()
+            }
         } else {
             // RUNDE TILING: ein Fenster IM BAUM wird nicht frei
             // gezogen -- es verschiebt die Trennlinie.
@@ -10818,17 +10937,21 @@ fn on_mouse(state: u64) {
             let alt_h: u64 = wg(state, i, W_H)
             let alt_x: i64 = win_x(state, i)
             let alt_y: i64 = win_y(state, i)
+            let offx: i64 = gs(state, S_SZOFFX) as i64
+            let offy: i64 = gs(state, S_SZOFFY) as i64
             if (kanten & SZ_R) != 0 {
-                nw = x - (win_x(state, i) + ix)
+                nw = (x - offx) - (win_x(state, i) + ix)
             } else if (kanten & SZ_L) != 0 {
                 // Die rechte Kante steht bei `ax`; der Zeiger ist die
                 // neue linke. Die Breite ist der Abstand dazwischen.
-                nw = ax - x
+                nw = ax - (x - offx)
             }
             if (kanten & SZ_B) != 0 {
-                nh = y - (win_y(state, i) + iy)
+                nh = (y - offy) - (win_y(state, i) + iy)
             } else if (kanten & SZ_T) != 0 {
-                nh = ay - y
+                // DELL ROUND: `y - offy` is the OUTER top edge; the
+                // content starts `iy` (the title bar) below it.
+                nh = ay - ((y - offy) + iy)
             }
             // DIE MINDESTGROESSE, UND ZWAR VOR DEM VERSCHIEBEN.
             // Wer sie erst danach begrenzt, laesst das Fenster beim
@@ -11053,30 +11176,11 @@ fn on_mouse(state: u64) {
                 // obere Greifkante ist deshalb der schmale Streifen
                 // GANZ OBEN im Schmuck -- nicht die ganze Titelleiste,
                 // sonst liesse sich das Fenster nicht mehr schieben.
-                let rand: i64 = grip(state) as i64
                 let iw: i64 = wg(state, i, W_W) as i64
                 let ih: i64 = wg(state, i, W_H) as i64
-                let oben: i64 = 0 - iny(state, i) as i64
-                var kanten: u64 = 0
-                if lokal_x > 0 - rand && lokal_x < rand {
-                    kanten = kanten | SZ_L
-                }
-                if lokal_x >= iw - rand && lokal_x < iw + rand {
-                    kanten = kanten | SZ_R
-                }
-                // Oben gilt `grip_oben` und nicht `rand`: dahinter
-                // liegt die Titelleiste, und die ist zum Ziehen da.
-                if lokal_y >= oben && lokal_y < oben + grip_oben(state) as i64 {
-                    kanten = kanten | SZ_T
-                }
-                if lokal_y >= ih - rand && lokal_y < ih + rand {
-                    kanten = kanten | SZ_B
-                }
-                // Innerhalb des Fensters SAMT Schmuck -- weiter aussen
-                // gehoert der Klick nicht mehr diesem Fenster.
-                let im_rahmen: bool = lokal_x > 0 - rand
-                    && lokal_y >= oben
-                    && lokal_x < iw + rand && lokal_y < ih + rand
+                // DELL ROUND: one test for press and cursor (`grip_mask`).
+                let kanten: u64 = grip_mask(state, i, lokal_x, lokal_y)
+                let im_rahmen: bool = kanten != 0
                 if im_rahmen && kanten != 0 {
                     ss(state, S_SIZING, i + 1)
                     ss(state, S_SZEDGE, kanten)
@@ -11087,6 +11191,29 @@ fn on_mouse(state: u64) {
                         (win_y(state, i) + iny(state, i) as i64 + ih) as u64)
                     ss(state, S_SZAW, iw as u64)
                     ss(state, S_SZAH, ih as u64)
+                    // DELL ROUND: the grab offsets (see S_SZOFFX).
+                    var ox: i64 = 0
+                    var oy: i64 = 0
+                    if (kanten & SZ_L) != 0 {
+                        ox = x - (win_x(state, i) + inx(state, i) as i64)
+                    } else if (kanten & SZ_R) != 0 {
+                        ox = x - (win_x(state, i) + inx(state, i) as i64 + iw)
+                    }
+                    if (kanten & SZ_T) != 0 {
+                        oy = y - win_y(state, i)
+                    } else if (kanten & SZ_B) != 0 {
+                        oy = y - (win_y(state, i) + iny(state, i) as i64 + ih)
+                    }
+                    if fb.winfix_aus(state) {
+                        // counter-proof: the old rule (pointer = content edge)
+                        ox = 0
+                        oy = 0
+                        if (kanten & SZ_T) != 0 {
+                            oy = 0 - iny(state, i) as i64
+                        }
+                    }
+                    ss(state, S_SZOFFX, ox as u64)
+                    ss(state, S_SZOFFY, oy as u64)
                     return
                 }
                 if lokal_y < 0 {
@@ -13241,7 +13368,14 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     let wy0: i64 = gs(state, S_WORK_Y) as i64
     let sw: i64 = gs(state, S_WORK_W) as i64
     let sh: i64 = gs(state, S_WORK_H) as i64
-    let rand: i64 = 16
+    // DELL ROUND (04.10.2026): the snap strip was 16 px, so a window that
+    // was only pushed a little over the edge snapped to half the screen
+    // (or jumped back). Now 2 px at scale 1: the pointer must be AT the
+    // screen edge.
+    var rand: i64 = 2 * uisc(state) as i64
+    if fb.winfix_aus(state) {
+        rand = 16
+    }
     // 1. AM BILDSCHIRMRAND: die Windows-artige Schnellablage. Sie ist
     //    ein Sonderfall des Baumes und kein zweites System.
     if x < wx0 + rand {
@@ -13351,16 +13485,34 @@ fn drag_klemmen(state: u64, i: u64) {
     let ay0: i64 = work_y(state) as i64
     let ax1: i64 = ax0 + work_w(state) as i64
     let ay1: i64 = ay0 + work_h(state) as i64
+    // DELL ROUND (04.10.2026, Justin): "a window pushed a little over the
+    // screen edge jumps right back". The old rule kept the WHOLE window
+    // on the work area. Now it may stick out on the left, right and
+    // bottom: it only has to keep a strip it can be grabbed by --
+    //   * the title bar must stay on the work area vertically (top
+    //     edge >= work top, top edge <= work bottom - title bar);
+    //   * horizontally at least VIS_MIN px of the window stay in sight.
+    // A window that is fully inside is never touched.
+    var vis: i64 = (VIS_MIN0 * uisc(state)) as i64
+    if vis > aw {
+        vis = aw
+    }
+    var tb: i64 = title_h(state) as i64
+    if fb.winfix_aus(state) {
+        // counter-proof: the old rule, the whole window stays on the work area
+        vis = aw
+        tb = ah
+    }
     var nx: i64 = wx0
     var ny: i64 = wy0
-    if nx + aw > ax1 {
-        nx = ax1 - aw
+    if nx > ax1 - vis {
+        nx = ax1 - vis
     }
-    if ny + ah > ay1 {
-        ny = ay1 - ah
+    if nx + aw < ax0 + vis {
+        nx = ax0 + vis - aw
     }
-    if nx < ax0 {
-        nx = ax0
+    if ny > ay1 - tb {
+        ny = ay1 - tb
     }
     if ny < ay0 {
         ny = ay0
@@ -13444,6 +13596,24 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     preview_damage(state)
     ss(state, S_PVON, 0)
     drag_klemmen(state, i)
+    // DELL ROUND: where the window ended up (after the clamp), so a runner
+    // can tell "sticks out a little" from "jumped back".
+    var s_ab: [u8; 18] = "wm: abgelegt id=\0\0"
+    var s_abx: [u8; 4] = " x=\0"
+    var s_aby: [u8; 4] = " y=\0"
+    var s_abw: [u8; 4] = " w=\0"
+    var s_abh: [u8; 4] = " h=\0"
+    serial.puts((&s_ab[0]) as u64)
+    serial.dec(wg(state, i, W_ID))
+    serial.puts((&s_abx[0]) as u64)
+    serial.dec(win_x(state, i) as u64)
+    serial.puts((&s_aby[0]) as u64)
+    serial.dec(win_y(state, i) as u64)
+    serial.puts((&s_abw[0]) as u64)
+    serial.dec(outer_w(state, i))
+    serial.puts((&s_abh[0]) as u64)
+    serial.dec(outer_h(state, i))
+    serial.nl()
     rumpf_neu(state, i)
     if gs(state, S_TILE) == 0 {
         ss(state, S_DRAGT, 0)

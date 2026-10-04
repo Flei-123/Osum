@@ -412,10 +412,10 @@ schau "Zeile 1 des Terminalfensters" \
 # than this runner said (the title inset grew; red on main before this
 # round, measured on the screenshot: 0 wrong at x+5, 2 or more elsewhere).
 schau "der Titel des Fensters aus Ring 3, mit Unterschneidung" \
-    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 345 255 255 255 \
+    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 348 255 255 255 \
     28 78 126 "Klick mich"
 schau "der Titel des Terminalfensters, unbeleuchtet" \
-    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 55 144 156 168 \
+    tkette "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 58 144 156 168 \
     44 56 72 "Terminal -- sh"
 # ... and it IS fUi's ink: the kernel's old 4x4 samples do NOT match.
 schau_nicht "GEGENPROBE: der Titel ist NICHT mehr die alte Kern-Tinte" \
@@ -531,7 +531,7 @@ schau "das Fenster steht nach dem Ziehen an der neuen Stelle" \
 schau_nicht "und an der alten NICHT mehr" \
     rechteck "$TMPD/z.ppm" 420 330 264 174 76 154 232
 schau "der Titel ist mitgewandert, bildpunktgenau" \
-    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 225 255 255 255 \
+    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 228 255 255 255 \
     28 78 126 "Klick mich"
 # Und das Schliessfeld: es sitzt rechts oben im Rahmen.  Nach dem
 # Verschieben liegt es bei (300 + 264 - 2 - 14 - 3, 210 + 4) = (545,214).
