@@ -301,6 +301,9 @@ BEREICHE = [
     # am oberen Ende des freien Bereichs: wer sequentiell greift, greift
     # 0x4C000, und am 27.08.2026 laufen wieder mehrere Runden.
     ("DESK",       "kstate.fi", "DSK_OFF",        "DSK_MAX"),
+    # DELL ROUND 04.10.2026: the window event rings of the 32 windows, in the
+    # hole 0x10C000..0x110000.
+    ("DESKEV",     "kstate.fi", "EVR_OFF",        "EVR_MAX"),
     # RUNDE TILING: der Fensterbaum.  Vier Seiten. Diese Runde
     # hatte 0x4C000..0x50000 genommen; dort liegt seit Runde K17 der
     # Modusvektor und dahinter deren USB-Seiten. TILE zieht deshalb
