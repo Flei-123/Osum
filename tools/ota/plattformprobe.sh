@@ -169,20 +169,20 @@ OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=64 \
 
 echo "== 4. der Lauf: die gemischte Quelle =="
 dienst "$OUT/netzmix" && ok "die Gegenstelle laeuft (127.0.0.1:$PORT)" || bad "Gegenstelle"
-lauf mix "ota suchen;exit"
+lauf mix "ota search;exit"
 cat "$OUT/mix.txt" | sed -n '/ota:/p' | head -20
-hat    "$OUT/mix.txt" "ota: plattform osum-x86_64" "das Geraet nennt seine Plattform"
+hat    "$OUT/mix.txt" "ota: platform osum-x86_64" "das Geraet nennt seine Plattform"
 hat    "$OUT/mix.txt" "hallo"     "hallo wird angeboten"
 hat    "$OUT/mix.txt" "daten"     "daten (osum-any) wird angeboten"
 hatnicht "$OUT/mix.txt" "hallo-arm" "hallo-arm wird NICHT angeboten"
-hat    "$OUT/mix.txt" "ota: fuer andere Plattformen ausgeblendet: 1" \
+hat    "$OUT/mix.txt" "ota: hidden, for other platforms: 1" \
        "das Ausgeblendete wird gezaehlt und genannt"
 
 echo "== 5. der Lauf: ein VERZEICHNIS ohne die Spalte =="
 dienst "$OUT/netzalt" && ok "die Gegenstelle zeigt jetzt auf netzalt" || bad "Gegenstelle"
-lauf alt "ota suchen;exit"
+lauf alt "ota search;exit"
 cat "$OUT/alt.txt" | sed -n '/ota:/p' | head -20
-hat "$OUT/alt.txt" "ota: ohne Plattformangabe ausgeblendet: 1" \
+hat "$OUT/alt.txt" "ota: hidden, no platform given: 1" \
     "eine Zeile ohne Auskunft wird ausgeblendet und gezaehlt"
 hatnicht "$OUT/alt.txt" "daten " "und 'daten' steht nicht in der Liste"
 dienst_aus

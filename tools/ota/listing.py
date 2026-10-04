@@ -104,7 +104,7 @@ def meta_aus_opk(pfad):
     with open(pfad, "rb") as f:
         kopf = f.read(64)
         if kopf[:8] != b"OPKG0001":
-            raise SystemExit("verzeichnis: %s ist keine OPKG-Datei" % pfad)
+            raise SystemExit("verzeichnis: %s ist not an OPKG file" % pfad)
         ml = int.from_bytes(kopf[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
     name = fassung = None

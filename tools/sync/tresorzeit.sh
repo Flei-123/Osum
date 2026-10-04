@@ -17,7 +17,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 BLOCKS=8192
-PROGS="sh ls cat echo date sync tresor"
+PROGS="sh ls cat echo date sync vault"
 PASS=eine-lange-passphrase
 NP=${1:-16384}
 RP=${2:-8}
@@ -34,22 +34,22 @@ date -u
 sync neu /konto $PASS eigen /store $NP $RP
 date -u
 echo ==TRESORNEU==
-tresor neu /konto /tresor $PASS
+vault new /konto /tresor $PASS
 date -u
 echo ==AUF==
-tresor auf /konto /tresor $PASS 60
+vault open /konto /tresor $PASS 60
 date -u
 echo ==LEGEN==
-tresor legen /tresor bank geheim-4711
+vault put /tresor bank geheim-4711
 date -u
 echo ==GIB==
-tresor gib /tresor bank
+vault get /tresor bank
 date -u
 echo ==ZU==
-tresor zu /tresor
+vault close /tresor
 date -u
 echo ==AUF2==
-tresor auf /konto /tresor $PASS 60
+vault open /konto /tresor $PASS 60
 date -u
 echo ==END==
 EOS

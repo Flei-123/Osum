@@ -93,16 +93,16 @@ EX="$EX /fremd.pub=$OUT/fremd.pub"
 # heil an. Also liegt der Startvorgang als richtiges Shell-Skript auf
 # der Platte, so wie er auf einem Geraet auch laege:
 #
-#     opk richten                 die Sicht /apps aus der LAUFENDEN
+#     opk rebuild                 die Sicht /apps aus der LAUFENDEN
 #                                 Generation neu bauen (nach einem
 #                                 Rueckfall zeigt sie sonst noch auf die
 #                                 Generation, die nicht hochkam)
 #     if /apps/hallo.osp/start    das Paket starten
-#     then opk erprobung ok       und NUR WENN ES LAEUFT bestaetigen
+#     then opk trial ok       und NUR WENN ES LAEUFT bestaetigen
 #
 # Auf einem ausgelieferten System stuenden diese drei Zeilen in
 # `/etc/inittab` bzw. in dem Dienst, der den Start abschliesst.
-printf 'opk richten\nif /apps/hallo.osp/start\nthen\nopk erprobung ok\nfi\nopk erprobung\n' \
+printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nopk trial ok\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 EX="$EX /start.sh=$OUT/start.sh"
 EXTRA="$EX" bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
@@ -116,7 +116,7 @@ OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 9
 gleich "die Installation auf die leere Platte" "$(cat "$OUT/inst.rc")" "21"
 hat "$OUT/inst.txt" "install: fertig" "der Installer meldet sich fertig"
 
-rc=$(lauf erst "opk erprobung;exit")
+rc=$(lauf erst "opk trial;exit")
 gleich "der erste Start von der Platte" "$rc" "21"
 hat "$OUT/erst.txt" "ab: keine erprobung" "ohne /system/ERPROBUNG sagt der Kern genau das und tut nichts"
 cp -f "$OUT/ziel.img" "$OUT/leer.img"
@@ -128,42 +128,42 @@ echo "== 3. die Signaturpflicht =="
 h1=$(python3 -c "print(open('$OUT/quelle1/INDEX').read().split(chr(9))[2])" 2>/dev/null)
 echo "        hallo 1.0.0 = ${h1:0:16}"
 
-rc=$(lauf sig1 "opk installieren /quelle1/hallo-1.opk;opk liste;exit")
-hat "$OUT/sig1.txt" "opk: Signatur geprüft" "das signierte Paket wird geprueft"
-hat "$OUT/sig1.txt" "opk: installiert hallo" "und installiert"
+rc=$(lauf sig1 "opk install /quelle1/hallo-1.opk;opk list;exit")
+hat "$OUT/sig1.txt" "opk: signature checked" "das signierte Paket wird geprueft"
+hat "$OUT/sig1.txt" "opk: installed hallo" "und installiert"
 hat "$OUT/sig1.txt" "${h1:0:12}" "die Liste nennt genau den Streuwert des Wirts"
 
 # --- ohne Signaturdatei
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf sig2 "opk installieren /boese/ohnesig.opk;opk liste;opk generationen;exit")
-hat "$OUT/sig2.txt" "KEINE SIGNATUR" "GEGENPROBE: ohne .sig wird abgelehnt, und zwar laut"
-hatnicht "$OUT/sig2.txt" "opk: installiert" "und es wird NICHTS installiert"
+rc=$(lauf sig2 "opk install /boese/ohnesig.opk;opk list;opk generations;exit")
+hat "$OUT/sig2.txt" "NO SIGNATURE" "GEGENPROBE: ohne .sig wird abgelehnt, und zwar laut"
+hatnicht "$OUT/sig2.txt" "opk: installed" "und es wird NICHTS installiert"
 hatnicht "$OUT/sig2.txt" "generation 0" "es entsteht auch keine Generation"
 
 # --- verdrehtes Paket, richtige Signaturdatei des Originals
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf sig3 "opk installieren /boese/verdreht.opk;opk liste;exit")
-hat "$OUT/sig3.txt" "SIGNATUR FALSCH" "GEGENPROBE: ein gekipptes Oktett bricht die Signatur"
-hatnicht "$OUT/sig3.txt" "opk: installiert" "und es wird nichts installiert"
-hatnicht "$OUT/sig3.txt" "Pruefsumme falsch" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
+rc=$(lauf sig3 "opk install /boese/verdreht.opk;opk list;exit")
+hat "$OUT/sig3.txt" "SIGNATURE WRONG" "GEGENPROBE: ein gekipptes Oktett bricht die Signatur"
+hatnicht "$OUT/sig3.txt" "opk: installed" "und es wird nichts installiert"
+hatnicht "$OUT/sig3.txt" "checksum wrong" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
 
 # --- Quelle mit veraendertem INDEX
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf sig4 "opk installieren /quelle1/hallo-1.opk;opk aktualisieren hallo --quelle /boese;opk liste;exit")
-hat "$OUT/sig4.txt" "SIGNATUR DES INDEX FALSCH" "GEGENPROBE: ein veraenderter INDEX bricht die Quelle"
+rc=$(lauf sig4 "opk install /quelle1/hallo-1.opk;opk update hallo --source /boese;opk list;exit")
+hat "$OUT/sig4.txt" "SIGNATURE OF THE INDEX WRONG" "GEGENPROBE: ein veraenderter INDEX bricht die Quelle"
 hat "$OUT/sig4.txt" "${h1:0:12}" "und die installierte Fassung bleibt die alte"
 
 # --- fremder Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf sig5 "cp /fremd.pub /system/schluessel.pub;opk installieren /quelle1/hallo-1.opk;opk liste;exit")
-hat "$OUT/sig5.txt" "SIGNATUR FALSCH" "GEGENPROBE: richtig signiert, aber mit dem falschen Schluessel geprueft -> abgelehnt"
-hatnicht "$OUT/sig5.txt" "opk: installiert" "und es wird nichts installiert"
+rc=$(lauf sig5 "cp /fremd.pub /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
+hat "$OUT/sig5.txt" "SIGNATURE WRONG" "GEGENPROBE: richtig signiert, aber mit dem falschen Schluessel geprueft -> abgelehnt"
+hatnicht "$OUT/sig5.txt" "opk: installed" "und es wird nichts installiert"
 
 # --- gar kein Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf sig6 "rm /system/schluessel.pub;opk installieren /quelle1/hallo-1.opk;opk liste;exit")
-hat "$OUT/sig6.txt" "kein vertrauter Schlüssel" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
-hatnicht "$OUT/sig6.txt" "opk: installiert" "und es wird nichts installiert"
+rc=$(lauf sig6 "rm /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
+hat "$OUT/sig6.txt" "no trusted key" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
+hatnicht "$OUT/sig6.txt" "opk: installed" "und es wird nichts installiert"
 
 # =====================================================================
 echo
@@ -178,24 +178,24 @@ echo "== 4. der Erprobungszaehler: ein Update, das nicht hochkommt =="
 START='sh /start.sh;exit'
 
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
-rc=$(lauf ab0 "opk installieren /quelle1/hallo-1.opk;$START")
+rc=$(lauf ab0 "opk install /quelle1/hallo-1.opk;$START")
 hat "$OUT/ab0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
-hat "$OUT/ab0.txt" "opk: erprobung bestätigt" "und wird bestaetigt"
+hat "$OUT/ab0.txt" "opk: trial confirmed" "und wird bestaetigt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
-rc=$(lauf ab1 "opk aktualisieren hallo --quelle /quelle3;opk erprobung;exit")
-hat "$OUT/ab1.txt" "opk: Signatur geprüft" "das kaputte Update ist SAUBER SIGNIERT"
-hat "$OUT/ab1.txt" "opk: installiert hallo" "und wird installiert"
-hat "$OUT/ab1.txt" "opk: in erprobung: 1 vor 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
+rc=$(lauf ab1 "opk update hallo --source /quelle3;opk trial;exit")
+hat "$OUT/ab1.txt" "opk: signature checked" "das kaputte Update ist SAUBER SIGNIERT"
+hat "$OUT/ab1.txt" "opk: installed hallo" "und wird installiert"
+hat "$OUT/ab1.txt" "opk: in trial: 1 before 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
 
 rc=$(lauf ab2 "$START")
 hat "$OUT/ab2.txt" "ab: gen=1 versuch=1 von 3" "Start 1: der Kern zaehlt"
 hat "$OUT/ab2.txt" "SCHEITERT" "die neue Fassung meldet sich und faellt um"
-hatnicht "$OUT/ab2.txt" "opk: erprobung bestätigt" "also KEIN Erfolgsvermerk"
+hatnicht "$OUT/ab2.txt" "opk: trial confirmed" "also KEIN Erfolgsvermerk"
 
 rc=$(lauf ab3 "$START")
 hat "$OUT/ab3.txt" "ab: gen=1 versuch=2 von 3" "Start 2: der Zaehler steht auf 2"
-hatnicht "$OUT/ab3.txt" "opk: erprobung bestätigt" "immer noch kein Erfolgsvermerk"
+hatnicht "$OUT/ab3.txt" "opk: trial confirmed" "immer noch kein Erfolgsvermerk"
 
 rc=$(lauf ab4 "$START")
 gleich "Start 3: die Maschine kommt hoch" "$rc" "21"
@@ -203,16 +203,16 @@ hat "$OUT/ab4.txt" "ab: ERPROBUNG gescheitert, zurueck auf 0" "DER PUNKT DER RUN
 hat "$OUT/ab4.txt" "paket-hallo fassung 1" "und die alte, laufende Fassung ist wieder da"
 hatnicht "$OUT/ab4.txt" "SCHEITERT" "die kaputte Fassung laeuft nicht mehr"
 
-rc=$(lauf ab5 "opk erprobung;/apps/hallo.osp/start;exit")
+rc=$(lauf ab5 "opk trial;/apps/hallo.osp/start;exit")
 hat "$OUT/ab5.txt" "ab: gen=0 bestaetigt" "beim naechsten Start ist nichts mehr in Erprobung"
 hat "$OUT/ab5.txt" "paket-hallo fassung 1" "und es bleibt bei der alten Fassung"
 
 # --- DIE GEGENPROBE: dasselbe mit einem Update, das LAEUFT.
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf gab1 "opk aktualisieren hallo --quelle /quelle2;$START")
-hat "$OUT/gab1.txt" "opk: in erprobung: 1 vor 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"
+rc=$(lauf gab1 "opk update hallo --source /quelle2;$START")
+hat "$OUT/gab1.txt" "opk: in trial: 1 before 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"
 hat "$OUT/gab1.txt" "paket-hallo fassung 2" "es laeuft"
-hat "$OUT/gab1.txt" "opk: erprobung bestätigt für 1" "und wird im selben Start bestaetigt"
+hat "$OUT/gab1.txt" "opk: trial confirmed for 1" "und wird im selben Start bestaetigt"
 rc=$(lauf gab2 "$START")
 hat "$OUT/gab2.txt" "ab: gen=1 bestaetigt" "beim naechsten Start zaehlt der Kern nichts mehr hoch"
 rc=$(lauf gab3 "$START")
@@ -225,11 +225,11 @@ echo
 echo "== 5. der ganze Ablauf am Stueck =="
 # =====================================================================
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf fluss "opk liste;opk aktualisieren hallo --quelle /quelle2;opk erprobung;exit")
-hat "$OUT/fluss.txt" "opk: installiert hallo" "holen -> Signatur -> Generation"
+rc=$(lauf fluss "opk list;opk update hallo --source /quelle2;opk trial;exit")
+hat "$OUT/fluss.txt" "opk: installed hallo" "holen -> Signatur -> Generation"
 rc=$(lauf fluss2 "$START")
 hat "$OUT/fluss2.txt" "paket-hallo fassung 2" "Neustart -> die neue Fassung laeuft"
-hat "$OUT/fluss2.txt" "opk: erprobung bestätigt" "-> Erfolgsvermerk"
+hat "$OUT/fluss2.txt" "opk: trial confirmed" "-> Erfolgsvermerk"
 
 echo
 echo "=================================================================="

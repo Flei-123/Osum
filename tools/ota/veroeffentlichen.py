@@ -146,7 +146,7 @@ def meta_aus_opk(pfad):
     with open(pfad, "rb") as f:
         kopf = f.read(64)
         if kopf[:8] != b"OPKG0001":
-            raise SystemExit("veroeffentlichen: %s ist keine OPKG-Datei"
+            raise SystemExit("veroeffentlichen: %s ist not an OPKG file"
                              % pfad)
         ml = int.from_bytes(kopf[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
@@ -297,7 +297,7 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         # damit in sich widerspruechlich -- `INDEX.sig` und
         # `VERZEICHNIS.sig` trugen den neuen Schluessel, die Paketsignatur
         # den alten -- und ein Geraet, das den Wechsel gerade angenommen
-        # hatte, sagte richtigerweise `opk: SIGNATUR FALSCH -- das Paket
+        # hatte, sagte richtigerweise `opk: SIGNATURE WRONG -- das Paket
         # wird ABGELEHNT`. Das Paket ist inhaltsadressiert und
         # unveraenderlich; die Signatur darueber haengt an einer
         # SCHLUESSELGENERATION. Beides in denselben Topf zu legen war der

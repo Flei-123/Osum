@@ -2,8 +2,46 @@
 
 Rule (Justin, 04.10.2026): commands, sub-commands, identifiers, console/log text,
 comments and commit messages are English. End-user UI text on the desktop stays as is.
-This first pass lists what was FOUND by reading the command tables. It is not complete;
-nothing is renamed yet.
+This pass lists what was FOUND by reading the command tables. It is not complete.
+
+## Status (04.10.2026)
+
+DONE (E-001 step 1): `ota`, `opk`, `stored` (arguments it passes), `settingsd` (arguments it
+passes to ota): sub-commands and console messages are English; tests, living docs and
+`tools/` follow. Bridge job kinds: the device (`jarvisd`) accepts BOTH spellings
+(read/write/list/command/photo/input and lies/schreib/liste/befehl/foto/eingabe); the server
+(`lib/osumbridge.js`, `/root/bruecke/bruecke_server.py`) sends German by default and English
+with `OSUM_JOB_KINDS=en` / `BRUECKE_JOB_KINDS=en`; `dell-update.py` uses `DELL_KINDS=en`.
+Flip the defaults once the Dell runs an image with E-001, then delete the German words.
+
+DONE (E-001 step 2, 04.10.2026): program names and their sub-commands / console lines:
+
+| German program | English | sub-commands |
+|---|---|---|
+| tresor | vault | neu/auf/zu/legen/gib/liste -> new/open/close/put/get/list |
+| auswerfen | eject | (no sub-commands; texts English; `explorer: eject` marker) |
+| praesenz | presence | dienst/setzen/fokus/weg/da/unsichtbar an/zeigen -> service/set/focus/away/back/invisible on/show |
+| sperrwache | idlelock | -- |
+| netzmess | netmeter | -- (`netmeter: done`) |
+| kontocli | accountcli | -- (`accountcli: ERROR`) |
+
+Kept German on purpose: bus service name `praesenz`, `/etc/praesenz.conf`, `/etc/sperre.conf` and
+its keys, the state words `da abwesend beschaeftigt unsichtbar` (wire protocol with the friends
+server), the mount point `/tresor`, `/system/tresor.sit`.
+
+STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `dateiop`, `hurt`,
+`instkonto` (module), the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
+inside the sources (see tools/english for the identifier renamer).
+
+KEPT GERMAN ON PURPOSE (data formats, not commands -- renaming breaks signed or persisted data):
+* feed/wire: `VERZEICHNIS`, `INDEX`, field names `paket`, `fassung`, `gesperrt`, `schluesselgen`,
+  `kette`, the signed text `osum-schluessel`, package members `PAKET/SYSTEM/PLAN/GRUND`
+* files: `/system/FASSUNG`, `AKTUELL`, `ERPROBUNG`, `GESPERRT`, `ota.stand`, `schluessel.pub`
+* config keys of `/etc/ota.conf` (`quelle abstand frist kanal gesund`), `/etc/store.conf`,
+  `/etc/ntp.conf` values -- needs a config migration
+* state words shared with the settings/store windows (`ruhe verfuegbar bereit fehler laedt fertig`)
+* the other bridge wire words (`hallo gruss beweis puls fertig tschuess weg auftrag`)
+* identifiers and comments inside the sources (no user-visible effect)
 
 ## Sub-commands found (German -> proposed English)
 

@@ -10,7 +10,7 @@
 # von dreissig Durchlaeufen endeten auf "alt", KEIN EINZIGER auf "neu".
 # Dreissig gruene Haken, die nichts belegen.
 #
-# Diese Probe faehrt EINEN sauberen Lauf von `ota einspielen` und stempelt
+# Diese Probe faehrt EINEN sauberen Lauf von `ota apply` und stempelt
 # jede serielle Zeile mit der Zeit seit dem Start von QEMU. Daraus kommt
 # das Fenster fuer die Schuesse. Ausgabe auf der Standardausgabe:
 #
@@ -32,7 +32,7 @@ cp -f "$OUT/basis.img" "$OUT/zp.img"
     echo "timeout: 0"; echo "verbose: yes"; echo
     echo "/OrientOS"; echo "    protocol: multiboot1"
     echo "    path: boot():/osum.mb"
-    echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota einspielen;exit"
+    echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 $NETZ script=ota apply;exit"
 } > "$OUT/zp.conf"
 mcopy -o -i "$OUT/zp.img@@1048576" "$OUT/zp.conf" ::/limine.conf 2>/dev/null
 
@@ -74,10 +74,10 @@ wait "$LESER" 2>/dev/null
 
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/zp.stempel"
 marke() { grep -aF "$1" "$OUT/zp.stempel" | head -1 | cut -f1; }
-T_NETZ=$(marke "ota: quelle")
-T_LADEN=$(marke "ota: streuwert stimmt")
-T_SCHREIB=$(marke "opk: installiert")
-T_FERTIG=$(marke "ota: BEREIT ZUM NEUSTART")
+T_NETZ=$(marke "ota: source")
+T_LADEN=$(marke "ota: hash ok")
+T_SCHREIB=$(marke "opk: installed")
+T_FERTIG=$(marke "ota: READY FOR RESTART")
 T_ENDE=$(tail -1 "$OUT/zp.stempel" | cut -f1)
 {
     echo "T_NETZ=${T_NETZ:-0}"

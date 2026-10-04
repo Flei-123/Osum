@@ -5,7 +5,7 @@
 # `tools/ota/plattformprobe.sh` misst, was `/bin/ota` unter QEMU AUSGIBT
 # -- ueber die serielle Leitung, weil sich das vergleichen laesst. Diese
 # Datei macht das, was man nicht vergleichen, aber ansehen kann: ein
-# Bildschirmfoto DERSELBEN Maschine, waehrend `ota suchen` laeuft.
+# Bildschirmfoto DERSELBEN Maschine, waehrend `ota search` laeuft.
 #
 # Der Weg ist der aus Runde K15 (und `tools/storage/run.sh`): QEMU hat
 # auch bei `-display none` eine Bildflaeche, wenn man `-vga std` gibt,
@@ -59,7 +59,7 @@ rm -f "$SOCK" "$AUS" "$PPM" "$PNG"
 echo "== die Maschine (QEMU, -vga std, Monitor an $SOCK)"
 timeout 900 $QEMU_X86 -machine pc -cpu "$OSUM_CPU" -m "${MEM:-512}" \
     -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" \
-    -append "osum vfs nokbd nosched noproc nofs noring3 modfs modcrc=$CRC $NETZ script=ota suchen;sleep 120" \
+    -append "osum vfs nokbd nosched noproc nofs noring3 modfs modcrc=$CRC $NETZ script=ota search;sleep 120" \
     -serial "file:$AUS" -display none -no-reboot \
     -vga std -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
@@ -68,11 +68,11 @@ timeout 900 $QEMU_X86 -machine pc -cpu "$OSUM_CPU" -m "${MEM:-512}" \
 PID=$!
 
 # Warten, bis die Liste WIRKLICH auf dem Schirm steht -- nicht blind
-# schlafen. Die letzte Zeile, die `ota suchen` schreibt, ist die
+# schlafen. Die letzte Zeile, die `ota search` schreibt, ist die
 # Zaehlung des Ausgeblendeten.
 i=0
 while [ $i -lt 2000 ]; do
-    grep -qaF "ota: plattform" "$AUS" 2>/dev/null && break
+    grep -qaF "ota: platform" "$AUS" 2>/dev/null && break
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15
     i=$((i + 1))

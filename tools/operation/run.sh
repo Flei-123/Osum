@@ -320,35 +320,35 @@ echo "== 11. auf Osum: ota holt ein Update ueber einen NAMEN =="
 NSD_ADR=127.0.0.1 nsd || bad "dnsdienst"
 dienst "$OUT/aus" || bad "Gegenstelle"
 frisch
-rc=$(lauf name1 "cat /etc/ota.conf;host -v $NAME;ota einstellen quelle https://$NAME:$PORT/v/1;ota suchen;exit")
+rc=$(lauf name1 "cat /etc/ota.conf;host -v $NAME;ota set quelle https://$NAME:$PORT/v/1;ota search;exit")
 gleich "die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/name1.txt" "ota: quelle https://$NAME:$PORT/v/1" "die Quelle ist ein NAME und keine Adresse"
+hat "$OUT/name1.txt" "ota: source https://$NAME:$PORT/v/1" "die Quelle ist ein NAME und keine Adresse"
 hat "$OUT/name1.txt" "fetch: aufgeloest" "fetch hat den Namen AUFGELOEST"
 hat "$OUT/name1.txt" "fetch: verify OK" "und die Zertifikatskette GEPRUEFT -- gegen denselben Namen"
-hat "$OUT/name1.txt" "ota: fassung dort 1" "das VERZEICHNIS der Fassung 1 kam an"
-hatnicht "$OUT/name1.txt" "opk: installiert" "suchen installiert nichts"
+hat "$OUT/name1.txt" "ota: version there 1" "das VERZEICHNIS der Fassung 1 kam an"
+hatnicht "$OUT/name1.txt" "opk: installed" "suchen installiert nichts"
 grep -qa "FRAGE $NAME" "$OUT/nsd.log" && ok "der Nameserver hat die Frage wirklich gesehen" \
     || bad "keine DNS-Frage angekommen"
 
-rc=$(lauf name2 "ota einspielen;sh /start.sh;ota zeigen;exit")
+rc=$(lauf name2 "ota apply;sh /start.sh;ota show;exit")
 gleich "einspielen ueber den Namen" "$rc" "21"
-hat "$OUT/name2.txt" "ota: streuwert stimmt hallo-1.opk" "der Streuwert des geladenen Pakets stimmt"
-hat "$OUT/name2.txt" "opk: installiert hallo" "und opk hat installiert"
+hat "$OUT/name2.txt" "ota: hash ok hallo-1.opk" "der Streuwert des geladenen Pakets stimmt"
+hat "$OUT/name2.txt" "opk: installed hallo" "und opk hat installiert"
 hat "$OUT/name2.txt" "paket-hallo fassung 1" "die neue Fassung LAEUFT"
-hat "$OUT/name2.txt" "ota: fassung hier 1" "und der Fassungszaehler steht auf 1"
+hat "$OUT/name2.txt" "ota: version here 1" "und der Fassungszaehler steht auf 1"
 cp -f "$OUT/ziel.img" "$OUT/f1.img"
 
 # =====================================================================
 echo
 echo "== 12. drei Fassungen zurueck -- und wieder aktuell =="
 # =====================================================================
-rc=$(lauf drei1 "ota einstellen quelle https://$NAME:$PORT/aktuell;ota zeigen;ota suchen;exit")
-hat "$OUT/drei1.txt" "ota: fassung hier 1" "das Geraet steht auf Fassung 1"
-hat "$OUT/drei1.txt" "ota: fassung dort 4" "die Quelle steht auf Fassung 4 -- drei Fassungen weiter"
-rc=$(lauf drei2 "ota einspielen;sh /start.sh;ota zeigen;exit")
+rc=$(lauf drei1 "ota set quelle https://$NAME:$PORT/aktuell;ota show;ota search;exit")
+hat "$OUT/drei1.txt" "ota: version here 1" "das Geraet steht auf Fassung 1"
+hat "$OUT/drei1.txt" "ota: version there 4" "die Quelle steht auf Fassung 4 -- drei Fassungen weiter"
+rc=$(lauf drei2 "ota apply;sh /start.sh;ota show;exit")
 gleich "der Sprung 1 -> 4" "$rc" "21"
-hat "$OUT/drei2.txt" "opk: installiert hallo" "eingespielt"
-hat "$OUT/drei2.txt" "ota: fassung hier 4" "das Geraet steht jetzt auf Fassung 4"
+hat "$OUT/drei2.txt" "opk: installed hallo" "eingespielt"
+hat "$OUT/drei2.txt" "ota: version here 4" "das Geraet steht jetzt auf Fassung 4"
 # und die alten Fassungen sind WEITER abrufbar
 for v in 1 2 3; do
     C=$(curl -s --cacert "$OUT/certs/ca.pem" --resolve "$NAME:$PORT:127.0.0.1" \
@@ -402,58 +402,58 @@ gpruef() { # <name> <erwarteter Text> <datei>
 # (1) falsch signiertes Update
 dienst "$OUT/fremdaus" || bad "Gegenstelle"
 frisch
-rc=$(lauf gp1 "ota einstellen quelle https://$NAME:$PORT/aktuell;ota einspielen;opk liste;exit")
+rc=$(lauf gp1 "ota set quelle https://$NAME:$PORT/aktuell;ota apply;opk list;exit")
 gpruef "ein FREMD signiertes Update wird abgelehnt" \
-    "SIGNATUR DES VERZEICHNISSES FALSCH" "$OUT/gp1.txt"
-hatnicht "$OUT/gp1.txt" "opk: installiert" "        und es wurde wirklich nichts installiert"
+    "SIGNATURE OF THE VERZEICHNIS WRONG" "$OUT/gp1.txt"
+hatnicht "$OUT/gp1.txt" "opk: installed" "        und es wurde wirklich nichts installiert"
 
 # (2) mit dem ERSATZSCHLUESSEL signiert -- muss durchgehen
 dienst "$OUT/aus" || bad "Gegenstelle"
 frisch
-rc=$(lauf gp2 "ota einstellen quelle https://$NAME:$PORT/v/5;ota einspielen;exit")
+rc=$(lauf gp2 "ota set quelle https://$NAME:$PORT/v/5;ota apply;exit")
 gpruef "ein mit dem ERSATZSCHLUESSEL signiertes Update wird angenommen" \
-    "ota: mit dem ERSATZSCHLUESSEL geprüft" "$OUT/gp2.txt"
-hat "$OUT/gp2.txt" "opk: installiert hallo" "        und es wurde wirklich installiert"
+    "ota: checked with the SPARE KEY" "$OUT/gp2.txt"
+hat "$OUT/gp2.txt" "opk: installed hallo" "        und es wurde wirklich installiert"
 
 # (3) gesperrte Fassung -- das Geraet merkt sich die Sperre und lehnt
 #     die (richtig signierte!) Auslieferung 5 danach ab.
 frisch
-rc=$(lauf gp3a "ota einstellen quelle https://$NAME:$PORT/v/6;ota suchen;exit")
-hat "$OUT/gp3a.txt" "ota: gesperrte fassungen: 5" "        die Sperrliste steht im signierten VERZEICHNIS"
-rc=$(lauf gp3b "ota einstellen quelle https://$NAME:$PORT/v/5;ota einspielen;exit")
+rc=$(lauf gp3a "ota set quelle https://$NAME:$PORT/v/6;ota search;exit")
+hat "$OUT/gp3a.txt" "ota: blocked versions: 5" "        die Sperrliste steht im signierten VERZEICHNIS"
+rc=$(lauf gp3b "ota set quelle https://$NAME:$PORT/v/5;ota apply;exit")
 gpruef "eine GESPERRTE Fassung wird abgelehnt -- obwohl sie neuer ist" \
-    "ota: FASSUNG GESPERRT" "$OUT/gp3b.txt"
-hatnicht "$OUT/gp3b.txt" "opk: installiert" "        und nichts installiert"
+    "ota: VERSION BLOCKED" "$OUT/gp3b.txt"
+hatnicht "$OUT/gp3b.txt" "opk: installed" "        und nichts installiert"
 
 # (4) Rueckschritt
 cp -f "$OUT/f4.img" "$OUT/ziel.img"
-rc=$(lauf gp4 "ota einstellen quelle https://$NAME:$PORT/v/1;ota einspielen;exit")
+rc=$(lauf gp4 "ota set quelle https://$NAME:$PORT/v/1;ota apply;exit")
 gpruef "ein RUECKSCHRITT auf eine aeltere Fassung wird abgelehnt" \
-    "ota: RUECKSCHRITT ABGELEHNT" "$OUT/gp4.txt"
+    "ota: ROLLBACK REFUSED" "$OUT/gp4.txt"
 
 # (5) Schluesselwechsel mit gueltiger Kette
 frisch
-rc=$(lauf gp5 "ota einstellen quelle https://$NAME:$PORT/v/7;ota einspielen;ota zeigen;exit")
+rc=$(lauf gp5 "ota set quelle https://$NAME:$PORT/v/7;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit gueltiger Kette geht durch" \
-    "ota: SCHLUESSELWECHSEL angenommen, neue gen 1" "$OUT/gp5.txt"
-hat "$OUT/gp5.txt" "ota: schluesselgen 1" "        und die neue Generation steht auf der Platte"
-hat "$OUT/gp5.txt" "opk: installiert hallo" "        das Update selbst ging auch durch"
+    "ota: KEY CHANGE accepted, new generation 1" "$OUT/gp5.txt"
+hat "$OUT/gp5.txt" "ota: key generation 1" "        und die neue Generation steht auf der Platte"
+hat "$OUT/gp5.txt" "opk: installed hallo" "        das Update selbst ging auch durch"
 
 # (6) Schluesselwechsel mit unterbrochener Kette
 frisch
-rc=$(lauf gp6 "ota einstellen quelle https://$NAME:$PORT/v/8;ota einspielen;ota zeigen;exit")
+rc=$(lauf gp6 "ota set quelle https://$NAME:$PORT/v/8;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit UNTERBROCHENER Kette wird abgelehnt" \
-    "ota: SCHLUESSELWECHSEL: die Kette ist UNTERBROCHEN" "$OUT/gp6.txt"
-hat "$OUT/gp6.txt" "ota: schluesselgen 0" "        und die Generation ist NICHT gewechselt"
-hatnicht "$OUT/gp6.txt" "opk: installiert" "        und nichts installiert"
+    "ota: KEY CHANGE: the chain is BROKEN" "$OUT/gp6.txt"
+hat "$OUT/gp6.txt" "ota: key generation 0" "        und die Generation ist NICHT gewechselt"
+hatnicht "$OUT/gp6.txt" "opk: installed" "        und nichts installiert"
 
 # (7) zwei Wechsel verpasst -- in einem Zug nachgeholt
 frisch
-rc=$(lauf gp7 "ota einstellen quelle https://$NAME:$PORT/v/9;ota einspielen;ota zeigen;exit")
+rc=$(lauf gp7 "ota set quelle https://$NAME:$PORT/v/9;ota apply;ota show;exit")
 gpruef "ein Geraet, das ZWEI Wechsel verpasst hat, holt sie in einem Zug nach" \
-    "ota: SCHLUESSELWECHSEL angenommen, neue gen 2" "$OUT/gp7.txt"
-hat "$OUT/gp7.txt" "ota: schluesselgen 2" "        und steht danach auf Generation 2"
-hat "$OUT/gp7.txt" "opk: installiert hallo" "        das Update ging durch"
+    "ota: KEY CHANGE accepted, new generation 2" "$OUT/gp7.txt"
+hat "$OUT/gp7.txt" "ota: key generation 2" "        und steht danach auf Generation 2"
+hat "$OUT/gp7.txt" "opk: installed hallo" "        das Update ging durch"
 
 dienst_aus; nsd_aus
 echo

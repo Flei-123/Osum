@@ -30,7 +30,7 @@
 #      /medien/usb0 eingehaengt. Gemessen an `wechsel: kommt ... mount=1`
 #      UND daran, dass `ls /medien/usb0` die Datei des Wirts zeigt.
 #   2. SCHREIBEN UND AUSWERFEN. Eine Datei wird auf den Stick
-#      geschrieben, dann `auswerfen`. Danach wird der Stick abgezogen
+#      geschrieben, dann `eject`. Danach wird der Stick abgezogen
 #      und DER WIRT liest mit `mtools` nach: die Datei muss da und
 #      VOLLSTAENDIG sein. "Das Schreiben hat keinen Fehler gemeldet"
 #      ist keine Messung -- das ist die Lehre aus K17 Punkt 4.
@@ -52,7 +52,7 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
 BLOCKS=4096
-PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount auswerfen"
+PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount eject"
 
 ARB=${HP_ARB:-$(mktemp -d)}
 mkdir -p "$ARB"
@@ -213,14 +213,14 @@ aufzeile wechsel: kommt
 warte 3
 EOF
 lauf schreiben \
-    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;cat /medien/usb0/host.txt;echo osum-war-hier > /medien/usb0/osum.txt;auswerfen;auswerfen 0;auswerfen" \
+    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;cat /medien/usb0/host.txt;echo osum-war-hier > /medien/usb0/osum.txt;eject;eject 0;eject" \
     "$ARB/dreh-rw.txt"
 S="$ARB/schreiben.txt"
 num "der Lauf beendet sich selbst (21)" "${RC:-99}" eq 21
 hat "$S" "host.txt" "ls sieht die Datei, die der WIRT auf den Stick gelegt hat"
 hat "$S" "von linux auf den ersten stick" "und cat liest ihren Inhalt"
 hat "$S" "/medien/usb0" "auswerfen zeigt den Traeger an"
-hat "$S" "ausgeworfen" "und wirft ihn aus"
+hat "$S" "ejected: " "und wirft ihn aus"
 
 # DIE EIGENTLICHE MESSUNG: DER WIRT LIEST NACH. Nicht der Kern sagt,
 # dass die Datei da ist -- `mtools` auf dem Wirt sagt es, und `cmp`
@@ -319,7 +319,7 @@ stecke stk2 $ARB/stick2.img
 warte 8
 EOF
 lauf zwei \
-    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;ls /medien/usb1;cat /medien/usb0/host.txt;cat /medien/usb1/host.txt;echo eins-auf-usb0 > /medien/usb0/a.txt;echo zwei-auf-usb1 > /medien/usb1/b.txt;auswerfen;auswerfen 0;auswerfen 1;auswerfen" \
+    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;ls /medien/usb1;cat /medien/usb0/host.txt;cat /medien/usb1/host.txt;echo eins-auf-usb0 > /medien/usb0/a.txt;echo zwei-auf-usb1 > /medien/usb1/b.txt;eject;eject 0;eject 1;eject" \
     "$ARB/dreh-zwei.txt"
 S="$ARB/zwei.txt"
 num "der Lauf mit zwei Sticks beendet sich selbst (21)" "${RC:-99}" eq 21
@@ -340,7 +340,7 @@ hat "$S" "/medien/usb1" "der zweite unter /medien/usb1 -- EIGENER Pfad"
 # zweimal derselbe Text.
 hat "$S" "von linux auf den ersten stick" "cat liest die Datei des ERSTEN Sticks"
 hat "$S" "und dies ist der zweite" "cat liest die Datei des ZWEITEN Sticks"
-hat "$S" "ausgeworfen" "die Traeger werden ausgeworfen"
+hat "$S" "ejected: " "die Traeger werden ausgeworfen"
 hat_nicht "$S" "panic" "kein Absturz am zweiten Stick"
 hat_nicht "$S" "EXCEPTION" "keine Ausnahme bei zwei Sticks"
 

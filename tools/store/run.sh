@@ -20,7 +20,7 @@
 #      cannot catch), and a catalog signed with a FOREIGN key
 #   3. the good way, over the bus, from the signed-in person: the list is empty before
 #      the first fetch, `store.refresh` brings the verified catalog (gruss = neu, hallo =
-#      update), install -> the program is in `opk liste`, update -> hallo is the new
+#      update), install -> the program is in `opk list`, update -> hallo is the new
 #      version, remove -> it is gone; a dry run changes nothing; a name that is no program
 #      is refused
 #   4. the rights, enforced in the provider: admin (default) lets root and uid 1000 in and
@@ -180,7 +180,7 @@ if [ -z "${STORE_WINDOW_ONLY:-}" ]; then
 echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
 mkdir /users/justin
-opk installieren /quelle1/hallo-1.opk
+opk install /quelle1/hallo-1.opk
 orientbus serve 600000 &
 sleep -m 300
 stored serve 600000 &
@@ -211,21 +211,21 @@ act call store.install name=gruss
 act confirm last
 sleep 40
 act call store.status
-opk liste
+opk list
 act call store.list
 echo ==A-UPD==
 act call store.update name=hallo
 act confirm last
 sleep 40
 act call store.status
-opk liste
+opk list
 act call store.list
 echo ==A-REM==
 act call store.remove name=gruss
 act confirm last
 sleep 6
 act call store.status
-opk liste
+opk list
 act call store.list
 echo ==A-RIGHTS==
 stored can install 0
@@ -252,7 +252,7 @@ su mara /bin/act call store.install name=gruss
 act confirm last
 sleep 3
 act call store.status
-opk liste
+opk list
 act call store.list
 cp /etc/store.benutzer /etc/store.conf
 echo ==A-MARA2==
@@ -260,7 +260,7 @@ su mara /bin/act call store.install name=gruss
 act confirm last
 sleep 40
 act call store.status
-opk liste
+opk list
 echo ==FERTIG==
 EOS
 image "$TMPD/A.img" "$TMPD/sA.sh" $P0
@@ -289,7 +289,7 @@ has "$TMPD/p.txt" "not_in_catalog" "a name that is no program is refused (not_in
 part "$A" A-INST A-UPD > "$TMPD/p.txt"
 has "$TMPD/p.txt" "phase=fertig" "install gruss: done"
 has "$TMPD/p.txt" "msg=installiert" "... and says so"
-has "$TMPD/p.txt" "  gruss -> " "gruss is in the package list (opk liste)"
+has "$TMPD/p.txt" "  gruss -> " "gruss is in the package list (opk list)"
 has "$TMPD/p.txt" "|aktuell" "gruss is up to date (state aktuell)"
 part "$A" A-UPD A-REM > "$TMPD/p.txt"
 has "$TMPD/p.txt" "phase=fertig" "update hallo: done"
@@ -329,7 +329,7 @@ act call store.install name=gruss
 act confirm last
 sleep 40
 act call store.status
-opk liste
+opk list
 act call store.list
 echo ==FERTIG==
 EOS
@@ -365,7 +365,7 @@ printf 'lang=de\n' > "$TMPD/locale.conf"
 printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
 cat > "$TMPD/sW.sh" <<'EOS'
 mkdir /users/justin
-opk installieren /quelle1/hallo-1.opk
+opk install /quelle1/hallo-1.opk
 orientbus serve 0 &
 sleep -m 300
 stored serve 0 &
@@ -375,83 +375,83 @@ store &
 echo ==S-WAIT==
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==S-SNAP==
-opk liste
+opk list
 act call store.list
 sleep 80
 echo ==FERTIG==

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/loader/tippen.py -- aus einem Satz Tastendruecke fuer den Monitor.
 
-    tippen.py "ota suchen" [--warte 3] [--ohne-eingabe] > befehle.txt
+    tippen.py "ota search" [--warte 3] [--ohne-eingabe] > befehle.txt
 
 Die Ausgabe ist eine Befehlsdatei fuer `tools/wm/monitor.py`: eine Zeile
 `sendkey <taste>` je Zeichen, am Ende `sendkey ret`.

@@ -396,9 +396,9 @@ Two keys of the schema are wired to `/etc/ota.conf` (`store`):
 `stable` or `test`); both are `critical`. Four more actions of the provider
 `settings` (root) run the update: `settings.update.status` (read: `here`,
 `there`, `time`, `phase`, `channel`, `auto`, `busy`, from
-`/system/ota.stand`), `settings.update.check` (write: `ota suchen` in a
+`/system/ota.stand`), `settings.update.check` (write: `ota search` in a
 child), `settings.update.install` and `settings.update.rollback`
-(critical: `ota einspielen` / `ota zurueck`; the new generation takes
+(critical: `ota apply` / `ota rollback`; the new generation takes
 effect at the next start). They answer at once and run `ota` in a child
 that is reaped in the serve loop; a second request meanwhile is `err busy`.
 `dryrun` answers `would=<ota command>` and starts nothing. The settings

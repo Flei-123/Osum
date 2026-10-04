@@ -34,17 +34,17 @@ shot() { printf 'screendump %s\n' "$2.ppm" | socat - "UNIX-CONNECT:$1" >/dev/nul
 
 echo "== 1. install onto an empty disk =="
 rm -f "$W/disk.img"; head -c $((256*1024*1024)) /dev/zero > "$W/disk.img"
-APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,sofort,konto=bios,kontopw=geheim123"
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3500 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now,account=bios,password=geheim123"
 timeout 3000 $QEMU_X86 -m 512 -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
     -serial "file:$W/inst.txt" -display none -no-reboot \
     -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
     -drive "file=$W/disk.img,format=raw,if=ide,index=0" > "$W/inst.qemu" 2>&1 &
 QP=$!
 i=0; while [ $i -lt 3000 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$W/inst.txt" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$W/inst.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break; sleep 1; i=$((i+1)); done
 sleep 3; kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
-grep -qa 'installer: fertig' "$W/inst.txt" && okk "installer finished" || bd "installer did not finish"
+grep -qa 'installer: done' "$W/inst.txt" && okk "installer finished" || bd "installer did not finish"
 grep -qa 'installer: bios stages' "$W/inst.txt" && okk "installer copied limine-bios.sys (stage 3)" \
     || bd "no 'installer: bios stages' (no /boot/limine-hdd.bin in the image?)"
 
