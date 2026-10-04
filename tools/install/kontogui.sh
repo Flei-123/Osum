@@ -51,7 +51,7 @@ sleep 4
 mon() { printf '%s\n' "$@" > "$OUT/m.txt"; python3 tools/wm/monitor.py "$SOCK" "$OUT/m.txt" > "$OUT/m.log" 2>&1; }
 click() { python3 tools/themestore/click.py "$1" > "$OUT/c.txt"; python3 tools/wm/monitor.py "$SOCK" "$OUT/c.txt" > "$OUT/c.log" 2>&1; sleep 1; }
 keys() { local k; for k in "$@"; do mon "sendkey $k"; sleep 0.35; done; sleep 1; }
-last() { grep -a 'installer: account ks=' "$SER" | tail -1 | sed 's/.*konto //'; }
+last() { grep -a 'installer: account ks=' "$SER" | tail -1 | sed 's/.*account //'; }
 grep -aq 'installer: ready' "$SER" && ok "the installer window is up" || { bad "no installer window"; tail -3 "$SER"; }
 grep -aq 'installer: ready n=1' "$SER" && ok "one disk is listed (so the button CAN be on)" || bad "no disk listed"
 [ -z "$(last)" ] && ok "empty form: nothing valid yet, the button is off" || bad "state before typing: '$(last)'"
