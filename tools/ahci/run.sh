@@ -411,12 +411,12 @@ fi
 echo
 echo "== 9. the controller reports class 01:04 (Intel RST, RAID On) -- still a disk =="
 
-# The hw mode word `ahciraid` makes pci.fi report the AHCI controller the way
+# The hw mode word `fakeraid` makes pci.fi report the AHCI controller the way
 # the Dell does in RAID mode (class 01:04:00). Before r340 the driver searched
 # for 01:06:01 only and said "no disk" -- the installer's "No writable disk found".
 bild g
 mapfile -t GARGS < <(platte g)
-lauf g q35 "ahci ahciraid" "${GARGS[@]}"
+lauf g q35 "ahci fakeraid" "${GARGS[@]}"
 gruen g "9.1 the run with a RAID-class controller"
 if grep -qa 'class=01:04' "$TMPD/g.txt"; then
     ok "9.2 the bus list shows class 01:04 -- $(grep -a -m1 'class=01:04' "$TMPD/g.txt")"
