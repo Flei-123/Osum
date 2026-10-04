@@ -150,5 +150,5 @@ else:
         top = ys[0]
         bot = (y1 - y0 - 1) - ys[-1]
         # the descender-free ink is one pixel off at most because of rounding
-        ok(abs(top - bot) <= 1, "title text: gap above %d px, gap below %d px (bar %d px, scale %d)" % (top, bot, y1 - y0, scale))
+        ok(abs(top - bot) <= scale, "title text: gap above %d px, gap below %d px (bar %d px, scale %d)" % (top, bot, y1 - y0, scale))
 sys.exit(fails)

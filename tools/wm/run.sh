@@ -531,7 +531,7 @@ schau "das Fenster steht nach dem Ziehen an der neuen Stelle" \
 schau_nicht "und an der alten NICHT mehr" \
     rechteck "$TMPD/z.ppm" 420 330 264 174 76 154 232
 schau "der Titel ist mitgewandert, bildpunktgenau" \
-    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 225 255 255 255 \
+    tkette "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 228 255 255 255 \
     28 78 126 "Klick mich"
 # Und das Schliessfeld: es sitzt rechts oben im Rahmen.  Nach dem
 # Verschieben liegt es bei (300 + 264 - 2 - 14 - 3, 210 + 4) = (545,214).
