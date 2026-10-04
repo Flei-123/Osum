@@ -276,7 +276,11 @@ qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -monitor "unix:$TMPD/mon,server,nowait" >/dev/null 2>&1 &
 QP=$!
-sleep 12
+# wait for the bar's own line (a busy host starts it late), then a moment
+# for the picture; 12 s fixed was too short once the bar grew tabs
+w=0
+while [ $w -lt 90 ] && ! grep -qa 'freunde: eintraege=' "$TMPD/o9.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
+sleep 4
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
     printf 'screendump %s\n' "$ROOT/docs/shots/praesenz/leiste.ppm" \
         | timeout 10 socat - "unix-connect:$TMPD/mon" >/dev/null 2>&1 || true
@@ -314,7 +318,9 @@ qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 QB=$!
 w=0
-while [ $w -lt 30000 ] && kill -0 "$QB" 2>/dev/null; do sleep 0.25; w=$((w+250)); done
+# the bar's own line, however late a busy host starts it (30 s fixed was too short)
+while [ $w -lt 150 ] && kill -0 "$QB" 2>/dev/null && ! grep -qa 'freunde: eintraege=' "$TMPD/o9b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
+sleep 1
 kill -9 "$QB" 2>/dev/null; wait "$QB" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/o9b.txt" > "$TMPD/o9b.klar" 2>/dev/null || true
 has "$TMPD/o9b.klar" "angemeldet=0" "ohne Konto sagt die Leiste das"
