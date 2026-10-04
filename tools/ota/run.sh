@@ -340,7 +340,7 @@ hat "$OUT/gut1.txt" "fetch: verify OK" "die Kette des Servers wurde GEPRUEFT und
 hat "$OUT/gut1.txt" "ota: version there 2" "die Quelle bietet Fassung 2"
 hat "$OUT/gut1.txt" "ota: NEW VERSION available" "und das wird gemeldet"
 hat "$OUT/gut1.txt" "ota: package hallo 2.0.0" "mit Namen und Fassung des Pakets"
-hatnicht "$OUT/gut1.txt" "opk: installiert" "SUCHEN INSTALLIERT NICHTS"
+hatnicht "$OUT/gut1.txt" "opk: installed" "SUCHEN INSTALLIERT NICHTS"
 grep -qa "GET /VERZEICHNIS" "$OUT/srv.log" 2>/dev/null || true
 SUCHMS=$(( (T1 - T0) / 1000000 ))
 
@@ -388,7 +388,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf a1 "ota apply;opk list;opk generations;exit")
 hat "$OUT/a1.txt" "ota: hash ok" "(a) das VERZEICHNIS stimmt -- ota laesst es durch"
 hat "$OUT/a1.txt" "SIGNATURE WRONG" "(a) und opk faengt die falsche PAKETSIGNATUR"
-hatnicht "$OUT/a1.txt" "opk: installiert" "(a) es wird NICHTS installiert"
+hatnicht "$OUT/a1.txt" "opk: installed" "(a) es wird NICHTS installiert"
 hat "$OUT/a1.txt" "${H1:0:12}" "(a) die laufende Fassung ist unveraendert"
 hatnicht "$OUT/a1.txt" "generation 1" "(a) es entsteht KEINE zweite Generation"
 hat "$OUT/a1.txt" "ota: version here 0" "(a) und der Fassungszaehler steht noch auf 0"
@@ -401,7 +401,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf a2 "ota apply;opk list;opk generations;ota show;exit")
 hat "$OUT/a2.txt" "SIGNATUR DES VERZEICHNISSES FALSCH" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
 hatnicht "$OUT/a2.txt" "ota: version there" "(a2) und nicht einmal die Fassungsnummer daraus wird gelesen"
-hatnicht "$OUT/a2.txt" "opk: installiert" "(a2) es wird nichts installiert"
+hatnicht "$OUT/a2.txt" "opk: installed" "(a2) es wird nichts installiert"
 hatnicht "$OUT/a2.txt" "generation 1" "(a2) es entsteht keine Generation"
 dienst_aus
 
@@ -411,7 +411,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf g1 "ota apply;opk list;opk generations;exit")
 hat "$OUT/g1.txt" "ota: version there 2" "(g) die Signatur ueber das VERZEICHNIS ist GUELTIG"
 hat "$OUT/g1.txt" "HASH MISMATCH" "(g) und trotzdem wird abgelehnt -- die Kette wird an JEDEM Glied geprueft"
-hatnicht "$OUT/g1.txt" "opk: installiert" "(g) es wird nichts installiert"
+hatnicht "$OUT/g1.txt" "opk: installed" "(g) es wird nichts installiert"
 hatnicht "$OUT/g1.txt" "generation 1" "(g) es entsteht keine Generation"
 dienst_aus
 
@@ -422,7 +422,7 @@ rc=$(lauf b1 "ota apply;opk list;ota show;exit")
 hat "$OUT/b1.txt" "ota: version here 2" "(b) auf dem Geraet steht Fassung 2"
 hat "$OUT/b1.txt" "ota: version there 1" "(b) angeboten wird Fassung 1 -- richtig signiert"
 hat "$OUT/b1.txt" "ROLLBACK REFUSED" "(b) DER RUECKSCHRITTSSCHUTZ GREIFT"
-hatnicht "$OUT/b1.txt" "opk: installiert" "(b) es wird nichts installiert"
+hatnicht "$OUT/b1.txt" "opk: installed" "(b) es wird nichts installiert"
 hatnicht "$OUT/b1.txt" "ota: hash ok" "(b) es wird nicht einmal ein Paket geholt"
 dienst_aus
 
@@ -452,7 +452,7 @@ rc=$(lauf c1 "ota apply;exit")
 grep -qa "ABBRUCH hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) die Gegenstelle hat die Verbindung wirklich abgerissen (RST nach 9000 Oktett)" \
     || bad "(c) die Gegenstelle hat gar nicht abgebrochen"
-hatnicht "$OUT/c1.txt" "opk: installiert" "(c) im abgebrochenen Lauf wird nichts installiert"
+hatnicht "$OUT/c1.txt" "opk: installed" "(c) im abgebrochenen Lauf wird nichts installiert"
 dienst_aus
 rc=$(lauf c1b "opk rebuild;/apps/hallo.osp/start;opk list;opk generations;ota show;exit")
 gleich "(c) DANACH kommt die Maschine hoch" "$rc" "21"
@@ -472,7 +472,7 @@ hat "$OUT/c1b.txt" "ota: version here 0" "(c) der Fassungszaehler ist unveraende
 dienst "$OUT/netz2" --kurz "hallo-2.opk:20000" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf c2a "ota apply;exit")
-hatnicht "$OUT/c2a.txt" "opk: installiert" "(c) der erste Versuch scheitert"
+hatnicht "$OUT/c2a.txt" "opk: installed" "(c) der erste Versuch scheitert"
 grep -qa "^KURZ hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) die Gegenstelle hat den Rumpf wirklich abgeschnitten" \
     || bad "(c) die Gegenstelle hat nicht abgeschnitten"
@@ -513,7 +513,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf f1 "df;ota apply;opk list;opk generations;ota show;exit" 900)
 gleich "(f) die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/f1.txt" "NOT ENOUGH SPACE" "(f) es reicht nicht, und ota bricht SAUBER ab"
-hatnicht "$OUT/f1.txt" "opk: installiert" "(f) es wird nichts installiert"
+hatnicht "$OUT/f1.txt" "opk: installed" "(f) es wird nichts installiert"
 hatnicht "$OUT/f1.txt" "generation 1" "(f) es entsteht keine Generation"
 hat "$OUT/f1.txt" "${H1:0:12}" "(f) die laufende Fassung ist unveraendert"
 hat "$OUT/f1.txt" "ota: version here 0" "(f) der Fassungszaehler ist unveraendert"
@@ -535,11 +535,11 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein1 "ota settings;ota set abstand 900;ota set auto ja;ota settings;exit")
 hat "$OUT/ein1.txt" "ota: settings (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
 hat "$OUT/ein1.txt" "quelle   https://10.0.2.2:$PORT" "mit der Quelle"
-hat "$OUT/ein1.txt" "ota: set abstand ist jetzt 900" "und sie laesst sich umstellen"
+hat "$OUT/ein1.txt" "ota: set abstand is now 900" "und sie laesst sich umstellen"
 hat "$OUT/ein1.txt" "abstand  900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 200)
-hat "$OUT/ein2.txt" "ota: das ist kein Schlüssel" "ein unbekannter Schluessel wird abgelehnt"
+hat "$OUT/ein2.txt" "ota: not a key" "ein unbekannter Schluessel wird abgelehnt"
 hat "$OUT/ein2.txt" "ota: service, interval 900" "und der Dienst nimmt den eingestellten Abstand"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein3 "ota service;exit")
@@ -609,12 +609,12 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf wach1 "ota apply;ota watchdog 5;exit" 300)
 dienst_aus
 hat "$OUT/wach1.txt" "opk: in erprobung" "der Wachhund: es steht etwas in Erprobung"
-hat "$OUT/wach1.txt" "WATCHDOG: keine Bestaetigung" "die Frist laeuft ab, ohne dass jemand bestaetigt"
-hat "$OUT/wach1.txt" "WATCHDOG: Neustart" "und der Wachhund startet die Maschine neu"
+hat "$OUT/wach1.txt" "WATCHDOG: no confirmation" "die Frist laeuft ab, ohne dass jemand bestaetigt"
+hat "$OUT/wach1.txt" "WATCHDOG: restart" "und der Wachhund startet die Maschine neu"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf wach2 "ota watchdog 5;exit" 300)
 hat "$OUT/wach2.txt" "ota: nothing in trial" "GEGENPROBE: ohne Erprobung tut der Wachhund NICHTS"
-hatnicht "$OUT/wach2.txt" "WATCHDOG: Neustart" "und startet vor allem nicht neu"
+hatnicht "$OUT/wach2.txt" "WATCHDOG: restart" "und startet vor allem nicht neu"
 
 # =====================================================================
 echo
@@ -691,7 +691,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     #   2. das Paket ist geprueft -- jetzt wird geschrieben
     #   3. HINTER dem Umschalten: "bereit zum Neustart" steht schon da
     if [ $(( i % 3 )) = 1 ]; then
-        MARKE="ota: quelle"; VERSATZ=$(( 100 + i * 60 )); PHASE=netz
+        MARKE="ota: source"; VERSATZ=$(( 100 + i * 60 )); PHASE=netz
     elif [ $(( i % 3 )) = 2 ]; then
         MARKE="ota: hash ok"; VERSATZ=$(( 50 + i * 120 )); PHASE=schreiben
     else
@@ -753,7 +753,7 @@ zahl "(e) Schuesse, die WIRKLICH nach dem Umschalten lagen (sonst misst das nich
 zahl "(e) und Schuesse, die davor lagen" "$alt_n" gt 0
 zahl "(e) Schuesse, die ihre Phase wirklich getroffen haben" "$getroffen" eq "$SCHUESSE"
 echo "        alt=$alt_n  neu=$neu_n  kaputt=$tot_n  Phase getroffen=$getroffen verfehlt=$verfehlt"
-echo "        (Schuesse an Marken der Maschine ausgerichtet: 'ota: quelle' / 'ota: hash ok' / 'ota: READY FOR RESTART')"
+echo "        (Schuesse an Marken der Maschine ausgerichtet: 'ota: source' / 'ota: hash ok' / 'ota: READY FOR RESTART')"
 
 # =====================================================================
 echo
@@ -845,7 +845,7 @@ hat "$OUT/kan3.txt" "phase=ruhe" "(b) nach der Bestaetigung steht phase=ruhe"
 # (c) zurueck auf stable: Rueckschritt
 rc=$(lauf kan4 "ota set kanal stable;ota search;exit")
 hat "$OUT/kan4.txt" "ROLLBACK REFUSED" "(c) test -> stable ist ein Rueckschritt und wird abgelehnt"
-hatnicht "$OUT/kan4.txt" "opk: installiert" "(c) und es wird nichts installiert"
+hatnicht "$OUT/kan4.txt" "opk: installed" "(c) und es wird nichts installiert"
 
 # (d) ungueltige Kanaele
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
@@ -880,7 +880,7 @@ hat "$OUT/kan11.txt" "ota: READY FOR RESTART" "(g) Ausgangslage: Fassung 2 steht
 # `sh` laeuft in diesem Lauf immer -- als Stellvertreter fuer den
 # Schreibtisch, den es im Textlauf nicht gibt (`ota boot <name>`).
 rc=$(lauf kan12 "opk rebuild;ota set gesund 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
-hat "$OUT/kan12.txt" "ota: Start gesund, Erprobung bestätigt" "(g) ein gesunder Start wird von selbst bestaetigt"
+hat "$OUT/kan12.txt" "ota: start healthy, trial confirmed" "(g) ein gesunder Start wird von selbst bestaetigt"
 hat "$OUT/kan12.txt" "ota: nothing in trial" "(g) danach steht nichts mehr in Erprobung"
 hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
 # GEGENPROBE: ein Lauf, in dem das Stellvertreterprogramm NICHT laeuft,
@@ -889,13 +889,13 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan13 "ota apply;exit")
 rc=$(lauf kan14 "opk rebuild;ota set gesund 2;ota set frist 6;ota boot nirgends;exit" 300)
 hat "$OUT/kan14.txt" "Start NICHT gesund" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
-hatnicht "$OUT/kan14.txt" "Erprobung bestätigt" "(g) GEGENPROBE: und es wird nichts bestaetigt"
+hatnicht "$OUT/kan14.txt" "trial confirmed" "(g) GEGENPROBE: und es wird nichts bestaetigt"
 
 # (h) der Hintergrund-Dienst
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan15 "ota set auto nein;ota service 1;ota show;exit")
 hat "$OUT/kan15.txt" "AUSgeschaltet" "(h) mit auto=nein tut der Dienst nichts"
-hatnicht "$OUT/kan15.txt" "opk: installiert" "(h) und installiert nichts"
+hatnicht "$OUT/kan15.txt" "opk: installed" "(h) und installiert nichts"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan16 "ota set auto ja;ota service 1;cat /system/ota.stand;exit")
 hat "$OUT/kan16.txt" "opk: installed hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"

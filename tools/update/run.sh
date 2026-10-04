@@ -137,14 +137,14 @@ hat "$OUT/sig1.txt" "${h1:0:12}" "die Liste nennt genau den Streuwert des Wirts"
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig2 "opk install /boese/ohnesig.opk;opk list;opk generations;exit")
 hat "$OUT/sig2.txt" "NO SIGNATURE" "GEGENPROBE: ohne .sig wird abgelehnt, und zwar laut"
-hatnicht "$OUT/sig2.txt" "opk: installiert" "und es wird NICHTS installiert"
+hatnicht "$OUT/sig2.txt" "opk: installed" "und es wird NICHTS installiert"
 hatnicht "$OUT/sig2.txt" "generation 0" "es entsteht auch keine Generation"
 
 # --- verdrehtes Paket, richtige Signaturdatei des Originals
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig3 "opk install /boese/verdreht.opk;opk list;exit")
 hat "$OUT/sig3.txt" "SIGNATURE WRONG" "GEGENPROBE: ein gekipptes Oktett bricht die Signatur"
-hatnicht "$OUT/sig3.txt" "opk: installiert" "und es wird nichts installiert"
+hatnicht "$OUT/sig3.txt" "opk: installed" "und es wird nichts installiert"
 hatnicht "$OUT/sig3.txt" "Pruefsumme falsch" "die SIGNATUR schlaegt zuerst zu, nicht die Pruefsumme"
 
 # --- Quelle mit veraendertem INDEX
@@ -157,13 +157,13 @@ hat "$OUT/sig4.txt" "${h1:0:12}" "und die installierte Fassung bleibt die alte"
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig5 "cp /fremd.pub /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
 hat "$OUT/sig5.txt" "SIGNATURE WRONG" "GEGENPROBE: richtig signiert, aber mit dem falschen Schluessel geprueft -> abgelehnt"
-hatnicht "$OUT/sig5.txt" "opk: installiert" "und es wird nichts installiert"
+hatnicht "$OUT/sig5.txt" "opk: installed" "und es wird nichts installiert"
 
 # --- gar kein Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig6 "rm /system/schluessel.pub;opk install /quelle1/hallo-1.opk;opk list;exit")
 hat "$OUT/sig6.txt" "kein vertrauter Schlüssel" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
-hatnicht "$OUT/sig6.txt" "opk: installiert" "und es wird nichts installiert"
+hatnicht "$OUT/sig6.txt" "opk: installed" "und es wird nichts installiert"
 
 # =====================================================================
 echo

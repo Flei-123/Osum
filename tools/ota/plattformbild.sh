@@ -72,7 +72,7 @@ PID=$!
 # Zaehlung des Ausgeblendeten.
 i=0
 while [ $i -lt 2000 ]; do
-    grep -qaF "ota: plattform" "$AUS" 2>/dev/null && break
+    grep -qaF "ota: platform" "$AUS" 2>/dev/null && break
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15
     i=$((i + 1))

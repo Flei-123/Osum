@@ -74,9 +74,9 @@ wait "$LESER" 2>/dev/null
 
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/zp.stempel"
 marke() { grep -aF "$1" "$OUT/zp.stempel" | head -1 | cut -f1; }
-T_NETZ=$(marke "ota: quelle")
+T_NETZ=$(marke "ota: source")
 T_LADEN=$(marke "ota: hash ok")
-T_SCHREIB=$(marke "opk: installiert")
+T_SCHREIB=$(marke "opk: installed")
 T_FERTIG=$(marke "ota: READY FOR RESTART")
 T_ENDE=$(tail -1 "$OUT/zp.stempel" | cut -f1)
 {

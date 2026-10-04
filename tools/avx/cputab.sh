@@ -53,7 +53,7 @@ OUT=${1:?"Aufruf: cputab.sh <OUT eines ota/run.sh-Laufes>"}
 # DERSELBE PORT WIE IM LAEUFER, und er laesst sich nicht ausrechnen:
 # `tools/ota/run.sh` nimmt `18000 + ($$ % 900)`, also seine eigene
 # Prozessnummer. Die Zahl steht dafuer in `/etc/ota.conf` IM ABBILD, und
-# von dort schreibt sie das Geraet in jede Zeile `ota: quelle
+# von dort schreibt sie das Geraet in jede Zeile `ota: source
 # https://10.0.2.2:<port>`. Also wird sie aus den Protokollen des Laufes
 # GELESEN und nicht geraten -- ein anderer Port hiesse, dass das Geraet
 # ins Leere greift, und der Lauf saehe aus wie ein Fehler dieser Runde.

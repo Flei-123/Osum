@@ -94,7 +94,7 @@ OTA_NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0" OUT="$OUT" \
     "ota show;cat /etc/resolv.conf;exit" 600 \
     > /dev/null 2>&1
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/basis0.txt" 2>/dev/null
-grep -a 'ota: version here\|ota: schluesselgen\|ersatzschluessel\|nameserver' \
+grep -a 'ota: version here\|ota: key generation\|ersatzschluessel\|nameserver' \
     "$OUT/basis0.txt" | head -6
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 

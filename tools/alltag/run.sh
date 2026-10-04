@@ -394,7 +394,7 @@ PY
         xfile=/pakete/boese.opk="$OUT/boese.opk" \
         xfile=/pakete/boese.opk.sig="$OUT/boese.opk.sig" \
         $X > "$OUT/store.log" 2>&1
-    N=$(grep -ac 'opk: installiert' "$OUT/store/serial.txt")
+    N=$(grep -ac 'opk: installed' "$OUT/store/serial.txt")
     num "Pakete eingespielt (Signatur geprueft)" "$N" eq 6
     hat "$OUT/store/serial.txt" "STORE-FERTIG" "und der Lauf kam durch"
     if grep -qa 'boese' "$OUT/store/serial.txt" \

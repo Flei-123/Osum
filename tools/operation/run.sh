@@ -326,7 +326,7 @@ hat "$OUT/name1.txt" "ota: source https://$NAME:$PORT/v/1" "die Quelle ist ein N
 hat "$OUT/name1.txt" "fetch: aufgeloest" "fetch hat den Namen AUFGELOEST"
 hat "$OUT/name1.txt" "fetch: verify OK" "und die Zertifikatskette GEPRUEFT -- gegen denselben Namen"
 hat "$OUT/name1.txt" "ota: version there 1" "das VERZEICHNIS der Fassung 1 kam an"
-hatnicht "$OUT/name1.txt" "opk: installiert" "suchen installiert nichts"
+hatnicht "$OUT/name1.txt" "opk: installed" "suchen installiert nichts"
 grep -qa "FRAGE $NAME" "$OUT/nsd.log" && ok "der Nameserver hat die Frage wirklich gesehen" \
     || bad "keine DNS-Frage angekommen"
 
@@ -405,7 +405,7 @@ frisch
 rc=$(lauf gp1 "ota set quelle https://$NAME:$PORT/aktuell;ota apply;opk list;exit")
 gpruef "ein FREMD signiertes Update wird abgelehnt" \
     "SIGNATUR DES VERZEICHNISSES FALSCH" "$OUT/gp1.txt"
-hatnicht "$OUT/gp1.txt" "opk: installiert" "        und es wurde wirklich nichts installiert"
+hatnicht "$OUT/gp1.txt" "opk: installed" "        und es wurde wirklich nichts installiert"
 
 # (2) mit dem ERSATZSCHLUESSEL signiert -- muss durchgehen
 dienst "$OUT/aus" || bad "Gegenstelle"
@@ -423,7 +423,7 @@ hat "$OUT/gp3a.txt" "ota: blocked versions: 5" "        die Sperrliste steht im 
 rc=$(lauf gp3b "ota set quelle https://$NAME:$PORT/v/5;ota apply;exit")
 gpruef "eine GESPERRTE Fassung wird abgelehnt -- obwohl sie neuer ist" \
     "ota: VERSION BLOCKED" "$OUT/gp3b.txt"
-hatnicht "$OUT/gp3b.txt" "opk: installiert" "        und nichts installiert"
+hatnicht "$OUT/gp3b.txt" "opk: installed" "        und nichts installiert"
 
 # (4) Rueckschritt
 cp -f "$OUT/f4.img" "$OUT/ziel.img"
@@ -445,7 +445,7 @@ rc=$(lauf gp6 "ota set quelle https://$NAME:$PORT/v/8;ota apply;ota show;exit")
 gpruef "ein SCHLUESSELWECHSEL mit UNTERBROCHENER Kette wird abgelehnt" \
     "ota: SCHLUESSELWECHSEL: die Kette ist UNTERBROCHEN" "$OUT/gp6.txt"
 hat "$OUT/gp6.txt" "ota: key generation 0" "        und die Generation ist NICHT gewechselt"
-hatnicht "$OUT/gp6.txt" "opk: installiert" "        und nichts installiert"
+hatnicht "$OUT/gp6.txt" "opk: installed" "        und nichts installiert"
 
 # (7) zwei Wechsel verpasst -- in einem Zug nachgeholt
 frisch
