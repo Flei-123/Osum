@@ -52,10 +52,10 @@ timeout 3000 $QEMU_X86 -m 512 -kernel "$IMG/osum.mb" -initrd "$IMG/root.img" -ap
     -drive "file=$W/ziel.img,format=raw,if=ide,index=0" > "$W/inst.qemu" 2>&1 &
 QP=$!
 i=0; while [ $i -lt 3000 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$W/inst.txt" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$W/inst.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break; sleep 1; i=$((i+1)); done
 sleep 3; kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
-hat "$W/inst.txt" "installer: fertig" "installer finished"
+hat "$W/inst.txt" "installer: done" "installer finished"
 mcopy -i "$W/ziel.img@@1048576" ::/limine.conf "$W/limine.disk" 2>/dev/null && ok "kept the disk's own limine.conf"
 
 fi

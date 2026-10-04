@@ -7,7 +7,7 @@
 # tools/install/abnahme.sh gives the account through arguments (`account=`,
 # `password=`); this runs the WINDOW the way a person does: clicks in the three
 # fields, keys through the QEMU monitor, and reads what the installer says about
-# its own state (`installer: konto ks=<n> go=<0|1>`):
+# its own state (`installer: account ks=<n> go=<0|1>`):
 #
 #   ks 0 nothing valid, 1 the name is valid, 2 name + password valid, 3 and the
 #   two passwords equal; go = whether the Install button is on.
@@ -51,7 +51,7 @@ sleep 4
 mon() { printf '%s\n' "$@" > "$OUT/m.txt"; python3 tools/wm/monitor.py "$SOCK" "$OUT/m.txt" > "$OUT/m.log" 2>&1; }
 click() { python3 tools/themestore/click.py "$1" > "$OUT/c.txt"; python3 tools/wm/monitor.py "$SOCK" "$OUT/c.txt" > "$OUT/c.log" 2>&1; sleep 1; }
 keys() { local k; for k in "$@"; do mon "sendkey $k"; sleep 0.35; done; sleep 1; }
-last() { grep -a 'installer: konto ks=' "$SER" | tail -1 | sed 's/.*konto //'; }
+last() { grep -a 'installer: account ks=' "$SER" | tail -1 | sed 's/.*konto //'; }
 grep -aq 'installer: ready' "$SER" && ok "the installer window is up" || { bad "no installer window"; tail -3 "$SER"; }
 grep -aq 'installer: ready n=1' "$SER" && ok "one disk is listed (so the button CAN be on)" || bad "no disk listed"
 [ -z "$(last)" ] && ok "empty form: nothing valid yet, the button is off" || bad "state before typing: '$(last)'"
@@ -76,7 +76,7 @@ keys x
 [ "$(last)" = "ks=2 go=0" ] && ok "one more key in the repeat: the button goes OFF again" || bad "after a mismatch: '$(last)'"
 # counter-check: a bad name
 click "$F1"; keys ctrl-a delete shift-b o b
-n=$(grep -ac 'installer: konto ks=' "$SER"); l=$(last)
+n=$(grep -ac 'installer: account ks=' "$SER"); l=$(last)
 case "$l" in "ks=0"*) ok "a name with a capital letter is no name (ks=0)";; *) bad "capital letter accepted: '$l'";; esac
 kill $QP 2>/dev/null; wait $QP 2>/dev/null
 echo

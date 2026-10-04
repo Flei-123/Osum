@@ -94,7 +94,7 @@ timeout "${LIMIT:-1200}" $QEMU_X86 -m 512 \
 QP=$!
 i=0
 while [ $i -lt 1200 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$OUT/ser.txt" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$OUT/ser.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
 done
@@ -124,7 +124,7 @@ else
 fi
 
 # ---- 3. meldet es sich fertig?
-grep -qa 'installer: fertig' "$OUT/ser.txt" \
+grep -qa 'installer: done' "$OUT/ser.txt" \
     && ok "die Installation meldet sich fertig" \
     || bad "die Installation ist nicht fertig geworden"
 

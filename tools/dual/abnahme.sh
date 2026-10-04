@@ -101,7 +101,7 @@ timeout "${LIMIT:-1800}" $QEMU_X86 -m 512 \
 QP=$!
 i=0
 while [ $i -lt 1800 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER\|installer: NEBENNEIN' "$OUT/ser.txt" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR\|installer: BESIDE_NO' "$OUT/ser.txt" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
 done
@@ -114,16 +114,16 @@ grep -aE '^installer: (disk|ready|tafel=|part |frei |fremdesp=|weg=|neuepart|esp
     "$OUT/ser.txt" 2>/dev/null | head -30 | sed 's/^/        /'
 
 # Hat es die Tafel ueberhaupt gelesen?
-grep -qa 'installer: tafel=2' "$OUT/ser.txt" \
+grep -qa 'installer: table=2' "$OUT/ser.txt" \
     && ok "es hat die fremde Partitionstafel gelesen (2 Partitionen)" \
     || bad "die fremde Partitionstafel wurde nicht gelesen"
-grep -qa 'installer: fremdesp=1' "$OUT/ser.txt" \
+grep -qa 'installer: foreign_esp=1' "$OUT/ser.txt" \
     && ok "es hat die vorhandene EFI-Partition gefunden" \
     || bad "die vorhandene EFI-Partition wurde nicht gefunden"
-grep -qa 'installer: neuepart' "$OUT/ser.txt" \
+grep -qa 'installer: newpart' "$OUT/ser.txt" \
     && ok "es hat einen neuen Partitionseintrag ergaenzt" \
     || bad "es wurde kein Partitionseintrag ergaenzt"
-grep -qa 'installer: fertig' "$OUT/ser.txt" \
+grep -qa 'installer: done' "$OUT/ser.txt" \
     && ok "die Installation meldet sich fertig" \
     || bad "die Installation ist nicht fertig geworden"
 

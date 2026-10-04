@@ -247,14 +247,14 @@ grep -qa 'installer: disk /dev/hda' "$SER" \
 # Jetzt laeuft die Installation (Schalter `sofort`). Sie dauert Minuten.
 i=0
 while [ $i -lt 3000 ]; do
-    grep -qa 'installer: fertig\|installer: FEHLER' "$SER" 2>/dev/null && break
+    grep -qa 'installer: done\|installer: ERROR' "$SER" 2>/dev/null && break
     kill -0 "$QP" 2>/dev/null || break
     sleep 1; i=$((i+1))
 done
 sleep 3
 schuss "$SOCK" "$SHOTS/30-fertig.png" || true
 
-if grep -qa 'installer: fertig' "$SER"; then
+if grep -qa 'installer: done' "$SER"; then
     ok "die Installation meldet sich fertig"
 else
     bad "die Installation ist nicht fertig geworden"
