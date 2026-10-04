@@ -24,6 +24,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 IMG=${1:?image dir}; FEED=${2:?feed root}; W=${3:-/tmp/otat/run}
 PORT=${OTA_PORT:-18555}
+FEEDVER=${FEEDVER:-5}      # the version number the feed under test carries (register.json "letzte")
 CERTS=${OTA_CERTS:-/tmp/otat/certs}
 mkdir -p "$W"; rm -f "$W"/r*.txt "$W"/r*.rc
 pass=0; fail=0
@@ -72,7 +73,7 @@ echo "== 2. version 0 sees the new feed =="
 run r0 "ota show;ota search;exit" 600 > /dev/null
 hat "$W/r0.txt" "ota: source https://10.0.2.2:$PORT/osum/aktuell" "source is the local copy of osum/aktuell"
 hat "$W/r0.txt" "version here 0" "device is on version 0"
-hat "$W/r0.txt" "version there 5" "feed offers version 5"
+hat "$W/r0.txt" "version there $FEEDVER" "feed offers version $FEEDVER"
 hat "$W/r0.txt" "NEW VERSION" "reports a new version"
 echo "== 3. install the packages =="
 run r1 "ota apply;ota show;opk generations;exit" 3000 > /dev/null
@@ -84,9 +85,9 @@ run r3 "ota rollback;ota show;exit" 900 > /dev/null
 run r4 "ota show;ota search;exit" 900 > /dev/null
 # --- the device's own words, checked
 hat "$W/r1.txt" "ota: in trial: 00000013" "update installed: new generation is on trial"
-hat "$W/r1.txt" "ota: version here 5" "version file says 5 after the update"
+hat "$W/r1.txt" "ota: version here $FEEDVER" "version file says $FEEDVER after the update"
 hat "$W/r2.txt" "opk: trial best" "after the reboot the trial generation was confirmed"
-hat "$W/r2.txt" "ota: version there 5" "second search: the feed still offers 5"
+hat "$W/r2.txt" "ota: version there $FEEDVER" "second search: the feed still offers $FEEDVER"
 hat "$W/r2.txt" "up to date" "second search says 'up to date' (nothing new)"
 hat "$W/r3.txt" "opk: zur" "rollback went back to the previous generation"
 hat "$W/r4.txt" "ota: generation 12" "after the rollback the old generation is active"
