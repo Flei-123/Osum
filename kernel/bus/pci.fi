@@ -54,7 +54,8 @@ export {
     E_IRQLINE, E_IRQPIN, E_MSI, E_MSIX, E_BARS,
     K2_OFF, K2_SCALARS, TABLE_OFF, ENTRY_BYTES, MAX_DEV,
     CAP_MSI, CAP_MSIX,
-    CLASS_STORAGE, SUB_IDE, SUB_SATA, SUB_NVM, PROGIF_AHCI, PROGIF_NVME
+    CLASS_STORAGE, SUB_IDE, SUB_SATA, SUB_RAID, SUB_NVM, PROGIF_AHCI, PROGIF_NVME,
+    VENDOR_INTEL, find_ahci, find_raid_ahci, is_raid_class
 }
 
 // ------------------------------------------------- the K2 data area
@@ -115,9 +116,14 @@ const CAP_MSIX: u64 = 0x11
 const CLASS_STORAGE: u64 = 0x01
 const SUB_IDE: u64 = 0x01
 const SUB_SATA: u64 = 0x06
+const SUB_RAID: u64 = 0x04
+// the hw.fi mode word lives in the K2 scalar page (S_MODE there)
+const S_TESTMODE: u64 = 0x0F0
+const T_AHCIRAID: u64 = 262144
 const SUB_NVM: u64 = 0x08
 const PROGIF_AHCI: u64 = 0x01
 const PROGIF_NVME: u64 = 0x02
+const VENDOR_INTEL: u64 = 0x8086
 
 // 32 bits at a time -- that is the width of a configuration register,
 // and the only width the address port can address.
@@ -288,6 +294,14 @@ fn record(state: u64, bdf: u64) {
     eset(e, E_CLASS, cfg_read8(bdf, CFG_CLASS))
     eset(e, E_SUBCLASS, cfg_read8(bdf, CFG_SUBCLASS))
     eset(e, E_PROGIF, cfg_read8(bdf, CFG_PROGIF))
+    // TEST HOOK, command line word "ahciraid": an AHCI controller reports
+    // itself the way an Intel one in "RAID On" mode does (class 01:04:00).
+    if (kstate.get(state, K2_SCALARS + S_TESTMODE) & T_AHCIRAID) != 0 {
+        if cfg_read8(bdf, CFG_CLASS) == CLASS_STORAGE && cfg_read8(bdf, CFG_SUBCLASS) == SUB_SATA {
+            eset(e, E_SUBCLASS, SUB_RAID)
+            eset(e, E_PROGIF, 0)
+        }
+    }
     eset(e, E_HDR, hdr)
     eset(e, E_IRQLINE, cfg_read8(bdf, CFG_IRQLINE))
     eset(e, E_IRQPIN, cfg_read8(bdf, CFG_IRQPIN))
@@ -427,6 +441,41 @@ fn find_class(state: u64, cls: u64, sub: u64, pif: u64) -> u64 {
         i = i + 1
     }
     return MAX_DEV
+}
+
+// DELL OPTIPLEX 9020 (04.10.2026, "installer: no disk found"): the firmware's
+// SATA Operation was "RAID On". Intel RST then presents the very same AHCI
+// register set, but with class 01:04 (RAID) instead of 01:06:01, so a search
+// by the AHCI class alone finds nothing -- no disk, no install, no boot.
+// Linux binds its ahci driver to those Intel device ids too. Without a RAID
+// volume configured the ports behave exactly like AHCI ports; the driver's own
+// checks (BAR5 is memory, CAP/PI make sense, a port answers IDENTIFY) still
+// decide whether it is usable.
+fn is_raid_class(state: u64, i: u64) -> bool {
+    return get(state, i, E_CLASS) == CLASS_STORAGE && get(state, i, E_SUBCLASS) == SUB_RAID
+}
+
+// The first Intel controller that reports itself as RAID (class 01:04).
+fn find_raid_ahci(state: u64) -> u64 {
+    let n: u64 = count(state)
+    var i: u64 = 0
+    while i < n {
+        if is_raid_class(state, i) && get(state, i, E_VENDOR) == VENDOR_INTEL {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_DEV
+}
+
+// The controller the AHCI driver should use: native AHCI first, an Intel
+// controller in RAID mode second.
+fn find_ahci(state: u64) -> u64 {
+    let i: u64 = find_class(state, CLASS_STORAGE, SUB_SATA, PROGIF_AHCI)
+    if i < MAX_DEV {
+        return i
+    }
+    return find_raid_ahci(state)
 }
 
 fn find_bdf(state: u64, bdf: u64) -> u64 {
