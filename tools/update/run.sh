@@ -186,7 +186,7 @@ cp -f "$OUT/ziel.img" "$OUT/basis.img"
 rc=$(lauf ab1 "opk update hallo --source /quelle3;opk trial;exit")
 hat "$OUT/ab1.txt" "opk: signature checked" "das kaputte Update ist SAUBER SIGNIERT"
 hat "$OUT/ab1.txt" "opk: installed hallo" "und wird installiert"
-hat "$OUT/ab1.txt" "opk: in trial: 1 vor 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
+hat "$OUT/ab1.txt" "opk: in trial: 1 before 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
 
 rc=$(lauf ab2 "$START")
 hat "$OUT/ab2.txt" "ab: gen=1 versuch=1 von 3" "Start 1: der Kern zaehlt"
@@ -210,7 +210,7 @@ hat "$OUT/ab5.txt" "paket-hallo fassung 1" "und es bleibt bei der alten Fassung"
 # --- DIE GEGENPROBE: dasselbe mit einem Update, das LAEUFT.
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf gab1 "opk update hallo --source /quelle2;$START")
-hat "$OUT/gab1.txt" "opk: in trial: 1 vor 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"
+hat "$OUT/gab1.txt" "opk: in trial: 1 before 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"
 hat "$OUT/gab1.txt" "paket-hallo fassung 2" "es laeuft"
 hat "$OUT/gab1.txt" "opk: trial confirmed for 1" "und wird im selben Start bestaetigt"
 rc=$(lauf gab2 "$START")

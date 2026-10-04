@@ -355,7 +355,7 @@ gleich "einspielen: die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/gut2.txt" "ota: hash ok hallo-2.opk" "der Streuwert des GELADENEN Pakets stimmt"
 hat "$OUT/gut2.txt" "opk: signature checked" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
 hat "$OUT/gut2.txt" "opk: installed hallo" "und installiert"
-hat "$OUT/gut2.txt" "opk: in trial: 1 vor 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
+hat "$OUT/gut2.txt" "opk: in trial: 1 before 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
 hat "$OUT/gut2.txt" "ota: READY FOR RESTART" "und der Neustart wird ANGEBOTEN"
 hatnicht "$OUT/gut2.txt" "power: init sagt ab" "ES WIRD NICHT VON SELBST NEU GESTARTET"
 OKT=$(grep -a "^ota: platz" "$OUT/gut2.txt" | tail -1 | awk '{print $3}')
