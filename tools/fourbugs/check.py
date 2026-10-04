@@ -95,15 +95,19 @@ else:
             ok(False, "resize %s: no report" % name)
 
 # ---- (3) a window pushed over the edge keeps its place
+md = re.search(r"wm: fen i=\d+ id=8 x=\d+ y=\d+ w=(\d+) ", ser)
+mt = re.search(r"wm: fen i=\d+ id=9 x=\d+ y=(\d+) ", ser)
+SCRW = int(md.group(1)) if md else 1920      # screen width
+BARY = int(mt.group(1)) if mt else 1040      # top of the taskbar = work area bottom
 ab = [(s64(m.group(2)), s64(m.group(3)), int(m.group(4)), int(m.group(5)))
       for m in re.finditer(r"wm: abgelegt id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)]
 ok(len(ab) >= 3, "the server reported %d drops (need 3)" % len(ab))
 if len(ab) >= 3:
     x1, y1, w1, h1 = ab[-3]
-    ok(x1 + w1 > 1920, "pushed 1500 px right: it sticks out (x=%d, right edge %d > 1920) and did not jump back" % (x1, x1 + w1))
+    ok(x1 + w1 > SCRW, "pushed 1500 px right: it sticks out (x=%d, right edge %d > %d) and did not jump back" % (x1, x1 + w1, SCRW))
     x2, y2, w2, h2 = ab[-2]
-    ok(y2 + h2 > 1040, "pushed far down: it sticks out at the bottom (y=%d, bottom %d)" % (y2, y2 + h2))
-    ok(y2 < 1040 - 10 * scale, "... but its title bar stays in sight (y=%d)" % y2)
+    ok(y2 + h2 > BARY, "pushed far down: it sticks out at the bottom (y=%d, bottom %d)" % (y2, y2 + h2))
+    ok(y2 < BARY - 10 * scale, "... but its title bar stays in sight (y=%d)" % y2)
     x3, y3, w3, h3 = ab[-1]
     ok(y3 >= 0, "pushed far up: the title bar is not lost above the screen (y=%d)" % y3)
     ok(x3 + w3 >= 90 * scale, "pushed far left: at least 96*scale px stay in sight (right edge %d)" % (x3 + w3))
