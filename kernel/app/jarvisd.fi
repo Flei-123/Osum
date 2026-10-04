@@ -1586,6 +1586,69 @@ fn arg_count(p: u64, n: usize) -> usize {
     return z
 }
 
+static mut k_nf_ps: [u8; 9] = "/bin/ps\0\0"
+static mut k_nf_kill: [u8; 11] = "/bin/kill\0\0"
+static mut k_nf_reboot: [u8; 13] = "/bin/reboot\0\0"
+const S_SYNC_NF: i64 = 162
+const S_REBOOT_NF: i64 = 169
+const S_PSTAT_NF: i64 = 1003
+
+// r346: the three commands that work without a child process (fork refused
+// because the task table is full). `worte` holds the words; word 0 is the
+// program, the rest are its arguments (already checked against
+// `command_allowed` by the caller). Returns true when it answered.
+fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    var kopf: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&kopf[0]) as u64, 5)
+    if fits_entry((&k_nf_ps[0]) as u64, prog, pn) {
+        rt.buf_push_dec_u64(aus, 0)
+        rt.buf_push(aus, 10 as u8)
+        var i: u64 = 0
+        while i < 64 {
+            let st: i64 = syscall(S_PSTAT_NF, i as i64, 0, 0, 0, 0, 0)
+            if st > 0 {
+                rt.buf_push_dec_u64(aus, syscall(S_PSTAT_NF, i as i64, 1, 0, 0, 0, 0) as u64)
+                rt.buf_push(aus, 32 as u8)
+                rt.buf_push_dec_u64(aus, syscall(S_PSTAT_NF, i as i64, 2, 0, 0, 0, 0) as u64)
+                rt.buf_push(aus, 32 as u8)
+                rt.buf_push_dec_u64(aus, st as u64)
+                rt.buf_push(aus, 10 as u8)
+            }
+            i = i + 1
+        }
+        return true
+    }
+    if fits_entry((&k_nf_kill[0]) as u64, prog, pn) {
+        var bad: u64 = 0
+        if a1 != 0 {
+            if syscall(S_KILL, num_from(a1, rt.c_length(a1)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        if a2 != 0 {
+            if syscall(S_KILL, num_from(a2, rt.c_length(a2)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        if a3 != 0 {
+            if syscall(S_KILL, num_from(a3, rt.c_length(a3)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        rt.buf_push_dec_u64(aus, bad)
+        rt.buf_push(aus, 10 as u8)
+        return true
+    }
+    if fits_entry((&k_nf_reboot[0]) as u64, prog, pn) {
+        // The answer cannot be sent after this; the bridge sees the line drop.
+        syscall(S_SYNC_NF, 0, 0, 0, 0, 0, 0)
+        syscall(S_REBOOT_NF, 0x01234567, 0, 0, 0, 0, 0)
+        return false
+    }
+    return false
+}
+
 fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if !k_befehle {
         return ablehnen(aus, "`commands = no` in /etc/jarvis/permissions.conf")
@@ -1652,8 +1715,14 @@ fn do_cmd(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
     if kind < 0 {
         sys_close(ziel)
+        // r346: a full task table (no fork) must not lock the owner out. These
+        // three need no child: look at the table, end a program, restart.
+        if nofork_builtin(prog, pn, zeiger[1], zeiger[2], zeiger[3], aus) {
+            rt.buf_free(&worte)
+            return true
+        }
         rt.buf_free(&worte)
-        return ablehnen(aus, "fork failed")
+        return ablehnen(aus, "fork failed (task table full) -- allowed without fork: /bin/ps, /bin/kill <pid>, /bin/reboot")
     }
     if kind == 0 {
         syscall(S_DUP2, ziel, 1, 0, 0, 0, 0)
