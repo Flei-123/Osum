@@ -186,6 +186,9 @@ static mut find_fehl: u64 = 0
 static mut P_TMP: [u8; 9] = "/tmp/ota\0"
 static mut P_FETCH: [u8; 11] = "/bin/fetch\0"
 static mut P_OPK: [u8; 9] = "/bin/opk\0"
+static mut P_SNTP: [u8; 10] = "/bin/sntp\0"
+static mut P_CLOCK: [u8; 21] = "/system/clock.stand\0\0"
+static mut P_NTPCONF: [u8; 14] = "/etc/ntp.conf\0"
 static mut N_VZ: [u8; 12] = "VERZEICHNIS\0"
 static mut N_VZSIG: [u8; 16] = "VERZEICHNIS.sig\0"
 static mut N_INDEX: [u8; 6] = "INDEX\0"
@@ -1077,6 +1080,51 @@ fn hole(datei: u64, ziel: u64, von: u64) -> u64 {
         return 0xFFFFFFFFFFFFFFFF
     }
     return ulib.wait_code(pid)
+}
+
+// The clock service (`sntp boot`) writes /system/clock.stand; the first
+// letter S means "synced". A failed search on a machine whose network clock
+// is not synced yet (empty CMOS battery: every certificate is "not yet
+// valid") asks for the time ITSELF -- one sntp run, which sets the clock --
+// and the caller searches again at once. No such file = no network clock on
+// this image = nothing to do.
+fn clock_unsynced() -> bool {
+    var b: [u8; 8] = [0 as u8; 8]
+    let n: u64 = file_read((&P_CLOCK[0 as usize]) as u64, (&b[0 as usize]) as u64, 4)
+    if !ulib.bad(n) && n > 0 {
+        return b[0 as usize] != 83 as u8
+    }
+    // No status file: either the image has no network clock, or the clock
+    // service died before it wrote anything (Dell 9020, 04.10.2026: the
+    // clock stood 14 hours off and nothing ever corrected it). /etc/ntp.conf
+    // with auto=true says which of the two it is.
+    var c: [u8; 400] = [0 as u8; 400]
+    let m: u64 = file_read((&P_NTPCONF[0 as usize]) as u64, (&c[0 as usize]) as u64, 399)
+    if ulib.bad(m) || m == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i + 9 <= m {
+        if c[(i) as usize] == 97 as u8 && c[(i + 1) as usize] == 117 as u8
+            && c[(i + 2) as usize] == 116 as u8 && c[(i + 3) as usize] == 111 as u8
+            && c[(i + 4) as usize] == 61 as u8 && c[(i + 5) as usize] == 116 as u8
+            && c[(i + 6) as usize] == 114 as u8 && c[(i + 7) as usize] == 117 as u8
+            && c[(i + 8) as usize] == 101 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn sntp_run() -> bool {
+    ARGV[0 as usize] = (&P_SNTP[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SNTP[0 as usize]) as u64,
+        (&ARGV[0 as usize]) as u64, 1)
+    if ulib.bad(pid) {
+        return false
+    }
+    return ulib.wait_code(pid) == 0
 }
 
 fn opk_ruf(a1: u64, a2: u64, a3: u64, a4: u64, argc: u64) -> u64 {
@@ -2090,7 +2138,18 @@ fn cmd_dienst(rounds: u64) -> u64 {
         // Erprobungszaehler faengt eine Fassung, die nicht hochkommt.
         // Steht noch ein Update in ERPROBUNG, wird nichts Neues
         // eingespielt, bis es bestaetigt ist.
-        if cmd_find() == 0 && !in_erprobung() {
+        // A clock that is known not to be synced is put right BEFORE the
+        // search (a wrong but plausible clock, e.g. 14 hours off, makes no
+        // certificate fail, so waiting for a failure would never help).
+        let vorher: bool = clock_unsynced()
+        if vorher {
+            sntp_run()
+        }
+        var fr: u64 = cmd_find()
+        if fr != 0 && find_fehl != 0 && !vorher && clock_unsynced() && sntp_run() {
+            fr = cmd_find()
+        }
+        if fr == 0 && !in_erprobung() {
             cmd_einspielen()
         }
         gelaufen = gelaufen + 1
