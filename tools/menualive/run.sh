@@ -16,14 +16,17 @@
 #     toggled that picture and every key went into it. That is the Dell photo.
 # Fixes: (1) `wlib.step` sleeps after 200 quiet rounds, the round limits of the
 # scene programs are gone; (2) `kgui.fenster_wache` destroys windows whose
-# owner is dead, so the next Super / Start starts a fresh launcher.
+# owner is dead, so the next Super / Start starts a fresh launcher; (3) the
+# desktop loop of the kernel waits for the next interrupt (`sched.idle_wait`)
+# instead of spinning on core 0 (the taskbar's CPU gauge reads this core).
 #
 # What this run does (the machine of the stick: tools/design/eh6.sh, USB):
 #   1. two `ps` listings 20 s apart: the hidden launcher uses < 10 % of a core;
 #   2. the launcher is killed from the terminal (the Dell's state);
 #   3. Super: a menu comes up, typing "file" + Enter starts the file manager;
-#   4. COUNTER-PROOF with the kernel word `nowinsweep` (the sweep off): the
-#      dead window is still there, typing starts nothing -- the Dell's state.
+#   4. COUNTER-PROOF with the kernel words `nowinsweep nohltidle` (sweep off,
+#      desktop loop spinning): the dead window is still there, typing starts
+#      nothing -- the Dell's state -- and the desktop loop uses the core again.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -50,6 +53,11 @@ sh=$(sed -n 's/.*share=\([-0-9.]*\).*/\1/p' "$TMPD/cpu.txt" | head -1)
 awk -v s="${sh:--1}" 'BEGIN{exit !(s >= 0 && s < 10)}' \
     && ok "the hidden launcher uses ${sh} % of a core (limit 10 %)" \
     || bad "the hidden launcher uses ${sh:-?} % of a core (limit 10 %)"
+python3 tools/menualive/check.py cpu "$D/serial.txt" kind:boot | tee "$TMPD/cpub.txt" | sed 's/^/        /'
+shb=$(sed -n 's/.*share=\([-0-9.]*\).*/\1/p' "$TMPD/cpub.txt" | head -1)
+awk -v s="${shb:--1}" 'BEGIN{exit !(s >= 0 && s < 15)}' \
+    && ok "the desktop loop (boot task, core 0) uses ${shb} % at idle (limit 15 %)" \
+    || bad "the desktop loop (boot task, core 0) uses ${shb:-?} % at idle (limit 15 %)"
 grep -aq '^kgui: dead window removed' "$D/serial.txt" \
     && ok "the window of the killed launcher was swept away" \
     || bad "no 'kgui: dead window removed' after the kill"
@@ -64,8 +72,13 @@ if [ -s "$D/02-menu.ppm" ] && [ -s "$D/03-typed.ppm" ]; then
 fi
 
 echo "== counter-proof: the sweep off (nowinsweep) =="
-run ctl nowinsweep
+run ctl nowinsweep nohltidle
 D="$TMPD/ctl"
+python3 tools/menualive/check.py cpu "$D/serial.txt" kind:boot | tee "$TMPD/cpub2.txt" | sed 's/^/        /'
+shc=$(sed -n 's/.*share=\([-0-9.]*\).*/\1/p' "$TMPD/cpub2.txt" | head -1)
+awk -v s="${shc:--1}" 'BEGIN{exit !(s >= 50)}' \
+    && ok "with nohltidle the desktop loop spins again (${shc} %): the CPU check measures something" \
+    || bad "with nohltidle the desktop loop uses only ${shc:-?} % -- the CPU check is blind"
 if grep -aq '^explorer: ready' "$D/serial.txt"; then
     bad "even with nowinsweep the menu worked -- the test is blind"
 else

@@ -38,7 +38,7 @@ import arch.msr
 import arch.x86_64.apic
 
 export {
-    init, create, start, schedule, on_tick, yield_now, sleep_ticks,
+    init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
     tote_schlaefe,
     exit_task, reap, claim_zombie, reap_claimed, S_REAPING,
     kill_current, wake_pid, wait_sleep, find_pid, current, tget, tset, task_at,
@@ -2154,7 +2154,19 @@ fn on_tick(state: u64) {
         i = i + 1
     }
     let cur: u64 = current(state)
-    tset(state, cur, T_TICKS, tget(state, cur, T_TICKS) + 1)
+    // 04.10.2026 (Dell): a tick that falls into `idle_wait` belongs to the
+    // core's IDLE task, not to the boot task that is waiting -- otherwise
+    // `ps` and the taskbar's CPU gauge both call a waiting desktop "busy".
+    var tick_to: u64 = cur
+    var in_wait: bool = false
+    if me < 8 && desk_hlt[me as usize] != 0 {
+        in_wait = true
+        let it: u64 = cpu.get(state, me, cpu.C_IDLE)
+        if it != 0 {
+            tick_to = it
+        }
+    }
+    tset(state, tick_to, T_TICKS, tget(state, tick_to, T_TICKS) + 1)
     // RUNDE WERKZEUGE: DERSELBE SCHLAG, EIN ZWEITES MAL GEZAEHLT --
     // aber nur, wenn ihn die Leerlaufaufgabe bekommen hat. `C_TICKS`
     // (drei Zeilen weiter oben, derselbe Kern, dieselbe Unterbrechung)
@@ -2163,7 +2175,7 @@ fn on_tick(state: u64) {
     // Differenz zweier Differenzen, und ohne diese Zeile fehlt die
     // Haelfte davon. Zwei Zeilen im Zeitgeber, kein Aufruf, keine
     // Sperre -- der Zaehler gehoert dem Kern, auf dem er hochgeht.
-    if tget(state, cur, T_KIND) == K_IDLE {
+    if tget(state, cur, T_KIND) == K_IDLE || in_wait {
         cpu.add(state, me, cpu.C_IDLETICKS, 1)
     }
     // RUNDE LEISTE: zwei Lesezugriffe je Schlag. Der Preis dafuer,
@@ -2255,6 +2267,24 @@ fn tote_schlaefe(state: u64) -> u64 {
 }
 
 // `ticks` timer ticks, 10 ms each at 100 Hz. Zero is a yield.
+// 04.10.2026 (DELL): THE DESKTOP LOOP MUST NOT SPIN. The desktop loop runs in
+// the boot task and its `sleep_ticks` hands the core straight back (measured:
+// 97 % of core 0 in 30 s with nothing on the screen, ~8 rounds per tick, the
+// core's idle task never ran; the taskbar's "CPU 100 %" reads exactly this
+// core). `idle_wait` waits for the next interrupt (timer: 10 ms; a key or a
+// pointer packet comes sooner) and tells `on_tick` that the core was idle.
+static mut desk_hlt: [u64; 8] = [0 as u64; 8]
+
+fn idle_wait(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= 8 {
+        return
+    }
+    desk_hlt[me as usize] = 1
+    asm("sti\nhlt")
+    desk_hlt[me as usize] = 0
+}
+
 fn sleep_ticks(state: u64, ticks: u64) {
     if ticks == 0 {
         yield_now(state)
