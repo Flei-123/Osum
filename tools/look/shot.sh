@@ -92,7 +92,18 @@ accel=kvm
 # cannot be photographed without a pointer. `hover=x,y` drives it there
 # and does NOT click; see tools/softui/hover.py.
 hover=""
-uitrace=no
+# The programs print their reports only when /etc/uitrace exists (commit
+# adde7c58 gated the serial output); every caller of this script parses those
+# reports, so the trace file is on by default.
+uitrace=yes
+# The window shadow is OFF by default in the system (round ECHTHARDWARE-6);
+# the shadow measurements ask for it with `shadow=on`.
+shadow=off
+# The bar hides a battery / network field the machine does not have
+# (`hide_missing=1`, the system default since round STARTKNOPF). The look
+# measurements want those fields, so the default HERE is 0; a test of the
+# system default passes `hidemissing=1`.
+hidemissing=0
 autohide=0
 accel=tcg
 append=""
@@ -115,6 +126,8 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         shots=*) shots=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
+        shadow=*) shadow=${a#*=} ;;
+        hidemissing=*) hidemissing=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         append=*) append=${a#*=} ;;
@@ -215,10 +228,10 @@ echo "programs $(echo $progs | wc -w)"
 # ------------------------------------------------------------ 3. disk
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 
-printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=%s\nontop=1\nalign=%s\n' \
-    "$edge" "$autohide" "$align" > "$OUT/taskbar.conf"
-printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
-    "$scheme" "$mode" "$shape" > "$OUT/theme.conf"
+printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=%s\nontop=1\nalign=%s\nhide_missing=%s\n' \
+    "$edge" "$autohide" "$align" "$hidemissing" > "$OUT/taskbar.conf"
+printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\nshadow=%s\n' \
+    "$scheme" "$mode" "$shape" "$shadow" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 # THE SYSTEM DEFAULT LANGUAGE.  It is a DEFAULT and not the answer:
 # /users/<name>/config/locale still wins, and the settings program
@@ -432,6 +445,6 @@ print("picture %dx%d colours %d" % (im.size[0], im.size[1],
 PY
 fi
 grep -aE '^(taskbar|desktop|settings|wlib|wm|msg|i18n|theme|shape|desk): ' \
-    "$OUT/serial.txt" 2>/dev/null | head -140
+    "$OUT/serial.txt" 2>/dev/null | head -6000
 if [ "$keep" = no ]; then rm -f "$OUT/disk.img" "$OUT"/*.o 2>/dev/null; fi
 exit 0

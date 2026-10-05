@@ -55,13 +55,18 @@ ok "Kern und Programme uebersetzen"
 
 # Die fuenf neuen Bausteine muessen EINZELN uebersetzen -- einer, der
 # nur als Teil des Ganzen baut, ist beim naechsten Umbau nicht zu retten.
+# The modules have no `main` and import fUi (profile app), so each is built
+# through a one-line stub root that imports ONLY that module.
 for m in expmodell exporte expakt expdlg dateiop; do
-    if vendor/firn/bin/firnc "kernel/user/$m.fi" -o "$OUT/$m.o" \
+    stub="kernel/user/zz_chk_$m.fi"
+    printf 'profile app\nimport %s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$stub"
+    if vendor/firn/bin/firnc -c --profile=app "$stub" -o "$OUT/$m.o" \
             > "$OUT/e-$m" 2>&1; then
         ok "Baustein $m uebersetzt einzeln"
     else
         bad "Baustein $m uebersetzt einzeln"; head -10 "$OUT/e-$m"
     fi
+    rm -f "$stub"
 done
 
 # ------------------------------------------- 2. der Katalog, beide Sprachen
@@ -130,7 +135,7 @@ w4=$(grep -cE 'if welches == 4 \{' kernel/user/explorer.fi)
     || bad "Punkt 11: 'if welches == 4' steht $w4 mal da, der zweite ist tot"
 
 # Punkt 8: jeder Fehlercode bekommt einen Text.
-grep -qE 'fn fehler_schluessel' kernel/user/expakt.fi \
+grep -qE 'fn error_key' kernel/user/expakt.fi \
     && ok "Punkt 8: es gibt eine Zuordnung Fehlercode -> Katalogtext" \
     || bad "Punkt 8: keine Zuordnung Fehlercode -> Text"
 

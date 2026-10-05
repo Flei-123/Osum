@@ -211,13 +211,13 @@ fi
 echo "== 7. das Bild: modern gegen classic =="
 SH="$TMPD/shots"
 if ! LOOKBUILD="$TMPD/build" bash tools/look/shot.sh "$SH/modern" \
-        shape=modern scheme=day mode=light > "$TMPD/m.log" 2>&1; then
+        shape=modern scheme=day mode=light shadow=on extra='einst nostart' > "$TMPD/m.log" 2>&1; then
     bad "der Lauf auf shape=modern ist fehlgeschlagen"
     tail -5 "$TMPD/m.log" | sed 's/^/        /'
 else
     ok "shape=modern gebootet und fotografiert"
     if ! LOOKBUILD="$TMPD/build" bash tools/look/shot.sh "$SH/classic" \
-            shape=classic scheme=day mode=light > "$TMPD/c.log" 2>&1; then
+            shape=classic scheme=day mode=light shadow=on extra='einst nostart' > "$TMPD/c.log" 2>&1; then
         bad "der Lauf auf shape=classic ist fehlgeschlagen"
     else
         ok "shape=classic gebootet und fotografiert"

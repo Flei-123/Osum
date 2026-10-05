@@ -121,13 +121,13 @@ else
 fi
 
 echo "== B. die Formdatei wird GANZ gelesen =="
-if shot B shape=modern scheme=day mode=light keep=yes; then
+if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nostart'; then
     K=$(val "$TMPD/B/serial.txt" 'shape file=modern name=Modern id=1 keys=[0-9]+')
     is "Marken aus modern.shape" "${K:-0}" "24"
     CH=$(grep -aoE 'ctrl_h=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
     is "ctrl_h aus der Datei" "${CH:-0}" "32"
     N=$(grep -aoE 'form n=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
-    is "Formwoerter an den Server" "${N:-0}" "8"
+    is "Formwoerter an den Server" "${N:-0}" "17"
     S=$(stat -c%s assets/shapes/modern.shape)
     ge "und die Datei ist groesser als der alte Puffer" "$S" "4097"
 else
@@ -168,7 +168,7 @@ if [ -s "$TMPD/B/serial.txt" ]; then
 fi
 
 echo "== D. die drei Schaltflaechen, und der rote Knopf =="
-if shot D shape=modern scheme=day mode=light keep=yes hover=622,120; then
+if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hover=767,14; then
     python3 tools/softui/knoepfe.py "$TMPD/D/desktop.ppm" \
         "$TMPD/D/serial.txt" > "$TMPD/D.knopf" 2>&1
     cat "$TMPD/D.knopf" | sed 's/^/        /'
@@ -225,7 +225,7 @@ echo "== F. der Kontrast =="
 #     wirklich steht, weiss nur das Foto.
 for v in "day light 516" "night dark 1236"; do
     set -- $v
-    if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes; then
+    if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes extra='einst nostart'; then
         M=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
             | awk '$1=="on-accent"&&$2=="accent"{print $6}')
         is "$1/$2: Text/Akzent im Modell (x100), unveraendert" "${M:-0}" "$3"

@@ -121,7 +121,17 @@ def main(argv):
     seen = 0
     kaesten = {}
     leiste = wins.get("Taskleiste", (0, 0, W, H))
+    # THE LATEST REPORT AT A PLACE WINS. A window paints many times in one
+    # run and its text changes (the taskbar clock 07:35 -> 07:36, a button
+    # text that turns white when the window gets the focus). Only the last
+    # report at (window, x, base) describes what the picture shows; the
+    # older ones were checked against a picture they were never part of.
+    letzte = {}
     for m in texte:
+        k = (m.group(1), m.group(2), m.group(9), m.group(10),
+             m.group(4), m.group(5))
+        letzte[k] = m
+    for m in letzte.values():
         quelle = m.group(1)
         wid = m.group(2) or quelle
         x, base = int(m.group(4)), int(m.group(5))
