@@ -282,8 +282,8 @@ ziel kachel 3
 warte 2
 foto q02_dunkel
 EOF
-bash tools/toolbench/build.sh "$TMPD/b3" desk=yes wait=12 last=200 \
-    plan="$TMPD/plan2.txt" > "$TMPD/b3.log" 2>&1
+bash tools/toolbench/build.sh "$TMPD/b3" desk=yes wait=12 last=300 \
+    extra="wighalt=120" plan="$TMPD/plan2.txt" > "$TMPD/b3.log" 2>&1
 S3="$TMPD/b3/serial.txt"
 has "$S3" "qs: symbols n=6" "sechs Kacheln, sechs Symbole von der Platte"
 has "$S3" "qs: open x=" "ein Klick in die Ecke der Leiste oeffnet das Panel"
