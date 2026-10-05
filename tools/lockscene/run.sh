@@ -75,6 +75,14 @@ run t4 /bin/lock g e h e i m 1 2 tab ret
 S=$OUT/t4/serial.txt
 hatnicht "$S" "sperre: aufgesperrt" "Tab+Enter on the eye shows the text, does not unlock"
 
+echo "== keys that pile up: a slow guest (TCG) gets 'falsch' Enter 'geheim12' Enter in one go =="
+# The scene host used to type everything after an Enter into the field BEFORE
+# the program heard of the Enter: one attempt with "falschgeheim12", never open.
+OSUM_ACCEL=tcg run t6 /bin/lock f a l s c h ret g e h e i m 1 2 ret
+S=$OUT/t6/serial.txt
+hat "$S" "sperre: falsches Kennwort, bleibt zu" "burst: the first attempt is refused"
+hat "$S" "sperre: aufgesperrt" "burst: the second attempt (typed behind the first Enter) opens it"
+
 echo "== a crash locks, never unlocks =="
 bash "$B" "$OUT/t5" warten=10 extra="wigapp=/bin/lock,-absturz" progs="$PROGS" \
     xfile=/etc/shadow="$OUT/shadow" > "$OUT/t5.log" 2>&1

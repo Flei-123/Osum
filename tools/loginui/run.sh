@@ -148,7 +148,21 @@ PY
 }
 halt_vm() { [ -n "$D" ] && kill "$(cat "$D/pid")" 2>/dev/null; sleep 1; }
 # the n-th glogin rect of a kind, from its LAST report
-rect_of() { grep -aoE "glogin: rect id=[0-9]+ kind=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | sed -n "${2}p"; }
+# r373: the n-th rect of a kind, FROM ITS ID: the scene-tree screen has fixed ids
+# (7 password, 8 Anmelden, 9 Anderer Benutzer, 10 clock, 11 network, 12 power),
+# and a report line torn by another program's output on the shared serial line
+# must not shift the count -- the first COMPLETE line of that id counts.
+rect_of() {
+    local id=""
+    case "$1 $2" in
+        "4 1") id=7;; "2 1") id=8;; "2 2") id=9;; "2 3") id=11;; "2 4") id=12;; "1 1") id=10;;
+    esac
+    if [ -n "$id" ]; then
+        grep -aoE "glogin: rect id=$id kind=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | head -1
+    else
+        grep -aoE "glogin: rect id=[0-9]+ kind=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | sed -n "${2}p"
+    fi
+}
 fld() { echo "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # every wlib program writes to the one serial line -- only glogin's lines
 GP=""
@@ -224,7 +238,7 @@ if [ -z "$PWID" ] || [ -z "$BTNID" ] || [ -z "$OTHID" ]; then
     bad "the layout is not field + two buttons"; halt_vm; ende
 fi
 ok "one password field and two buttons on the screen"
-NENTRY=$(grep -aoE 'glogin: rect id=[0-9]+ kind=(4|5) ' "$D/serial.txt" | wc -l)
+NENTRY=$(grep -aoE 'glogin: rect id=[0-9]+ kind=(4|5) ' "$D/serial.txt" | sort -u | wc -l)
 num "visible fields and lists (only the password; the name is a label)" "$NENTRY" eq 1
 F0=$(foci | tail -1)
 [ "$F0" = "id=$PWID kind=4" ] && ok "the focus starts in the password field ($F0)" \
@@ -338,7 +352,7 @@ NET=$(rect_of 2 3); POW=$(rect_of 2 4)
 if [ -z "$POW" ] && [ -n "$NET" ]; then
     POW="id=? kind=2 x=$(( $(fld "$NET" x) + $(fld "$NET" w) + 4 )) y=$(fld "$NET" y) w=$(fld "$NET" w) h=$(fld "$NET" h)"
 fi
-UHR=$(grep -aoE "glogin: rect id=[0-9]+ kind=1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | awk -F'[ =]' '{ if ($8 > 900 && $10 > 650) print }' | head -1)
+UHR=$(rect_of 1 1)
 info "clock: $UHR"; info "network: $NET"; info "power: $POW"
 if [ -n "$UHR" ] && [ "$(fld "$NET" x)" -gt 900 ] 2>/dev/null && [ "$(fld "$POW" y)" -gt 650 ] 2>/dev/null && [ "$(fld "$POW" y)" -lt 712 ] 2>/dev/null; then
     ok "clock, network and power sit in the bottom right corner (above the taskbar strip)"
