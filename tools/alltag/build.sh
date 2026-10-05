@@ -63,6 +63,7 @@ uitrace=no
 clicks=""
 xscheme=""
 xfiles=""
+passwdfile=""
 xdirs=""
 desk_on=yes
 moncmds=""
@@ -104,6 +105,7 @@ ${a#*=}" ;;
         inodes=*) inodes=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
+        passwdfile=*) passwdfile="${a#*=}" ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
         xdir=*) xdirs="$xdirs ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
@@ -183,6 +185,9 @@ else
     printf 'nobody:x:65534:65534:nobody:/:/bin/sh\n' > "$OUT/passwd"
 fi
 printf '%s\n' de > "$OUT/userlocale"
+# r373: a whole /etc/passwd from outside (the sign-in screen's tests need
+# accounts with uid >= 1000): passwdfile=<host path>
+[ -n "$passwdfile" ] && cp -f "$passwdfile" "$OUT/passwd"
 
 ARGS=(build "$OUT/disk.img" "$bloecke")
 # RUNDE ALLTAG: die INODE-TAFEL ist einstellbar (mkfs.py --inodes) und

@@ -86,7 +86,7 @@ export {
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
     set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb,
-    cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, keys_always, has_focus,
+    cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
     // F-8: what the file manager needed
     table_multi, table_drag, table_own, table_exact, table_sel_has, table_sel_num, table_sel_all,
@@ -4339,6 +4339,40 @@ const ACT_MAX: u64 = 16
 // The bus action the node with this KEY stands for, e.g. "calc.clear"
 // (the text must stay alive). A reader can then call the action instead of
 // clicking. The same word wlib.ax_action puts on a wlib control.
+// The name a screen reader says for a PASSWORD field (a secret entry): the
+// program gives it (the text must stay alive), default "Password".
+static mut t_ax_pw: [u8; 9] = "Password\0"
+static mut axn_key: [u64; 8] = [0 as u64; 8]
+static mut axn_ptr: [u64; 8] = [0 as u64; 8]
+static mut axn_n: u64 = 0
+
+fn ax_name(key: u64, name: u64) {
+    var k: u64 = 0
+    while k < axn_n {
+        if axn_key[(k) as usize] == key {
+            axn_ptr[(k) as usize] = name
+            return
+        }
+        k = k + 1
+    }
+    if axn_n < 8 {
+        axn_key[(axn_n) as usize] = key
+        axn_ptr[(axn_n) as usize] = name
+        axn_n = axn_n + 1
+    }
+}
+
+fn ax_name_of(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < axn_n {
+        if axn_key[(k) as usize] == key {
+            return axn_ptr[(k) as usize]
+        }
+        k = k + 1
+    }
+    return 0
+}
+
 fn ax_action(key: u64, name: u64) {
     var k: u64 = 0
     while k < S.s_act_n {
@@ -4388,6 +4422,12 @@ fn ax_role_of(i: usize) -> u64 {
         return wlib.AXR_CHECK
     }
     if k == widget.KIND_TEXTBOX {
+        // A SECRET FIELD IS A PASSWORD NODE (r373): no text, no value, no
+        // length in the tree -- only a name the program chose.
+        let sl: u64 = slot_of_node(i)
+        if sl != NO_SLOT && S.s_esecret[(sl) as usize] {
+            return wlib.AXR_PASSWORD
+        }
         return wlib.AXR_ENTRY
     }
     if k == widget.KIND_SLIDER {
@@ -4460,7 +4500,12 @@ fn ax_nodes_one(buf: u64, have: u64, room: u64, widx: u64) -> u64 {
             let key: u64 = scene.node_id(sc(), i) as u64
             var st: u64 = wlib.AXS_ENABLED
             var value: u64 = 0
-            if role != wlib.AXR_LABEL && role != wlib.AXR_SEPARATOR {
+            // a disabled control says so (a press on it is refused by the kernel)
+            if role != wlib.AXR_LABEL && widget.w_is_disabled(e) {
+                st = 0
+            }
+            if role != wlib.AXR_LABEL && role != wlib.AXR_SEPARATOR
+                && (st & wlib.AXS_ENABLED) != 0 {
                 st = st | wlib.AXS_FOCUSABLE
             }
             if fk != fuiwirt.KEINER && fk == i {
@@ -4484,8 +4529,17 @@ fn ax_nodes_one(buf: u64, have: u64, room: u64, widx: u64) -> u64 {
                     value = S.s_ct_sel[(c) as usize]
                 }
             }
-            // the name: the node's own text; a field's name is its text
-            if role == wlib.AXR_ENTRY {
+            // the name: the node's own text; a field's name is its text --
+            // EXCEPT a password field: its name is the one the program gave
+            // it (`ax_name`), and the tree carries no text of it, ever
+            if role == wlib.AXR_PASSWORD {
+                st = st | wlib.AXS_PROTECTED
+                var nm: u64 = ax_name_of(key)
+                if nm == 0 {
+                    nm = (&t_ax_pw[0 as usize]) as u64
+                }
+                ax_copy(p + wlib.AXN_NAME, nm, 64, wlib.AXN_NAMEMAX)
+            } else if role == wlib.AXR_ENTRY {
                 let sl: u64 = slot_of_node(i)
                 if sl != NO_SLOT {
                     ax_copy(p + wlib.AXN_NAME, ebuf(sl), ENTRY_CAP, wlib.AXN_NAMEMAX)

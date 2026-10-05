@@ -90,8 +90,8 @@ grep -q 'EYE ' lib/icons.fi && grep -q 'EYE_OFF' lib/icons.fi \
     && ok "the icon font has eye and eye-off" \
     || bad "eye icons missing in lib/icons.fi"
 for p in glogin lock; do
-    grep -q 'wlib.password(' "kernel/user/$p.fi" \
-        && ok "$p.fi takes the system's password field (wlib.password)" \
+    grep -q 'fuiscene.entry_secret(' "kernel/user/$p.fi" \
+        && ok "$p.fi takes the scene host's secret field (fuiscene.entry_secret)" \
         || bad "$p.fi builds its own password field"
 done
 
@@ -250,14 +250,15 @@ mon "screendump $D/dots.ppm" "sleep 1"
 # Measured IN THE PICTURE: after every key, which of the three controls
 # carries the focus ring (the trace lines are written octet by octet and
 # another program's output can tear one of them apart).
-ring() { # ring <ppm> -> the id whose outline is the dark focus colour
-    python3 - "$1" "$PW" "$BTN" "$OTHER" <<'PY'
+ring() { # ring <ppm> <rect>... -> the ids whose outline is the dark focus colour
+    local ppm=$1; shift
+    python3 - "$ppm" "$@" <<'PY'
 import sys, re
 from PIL import Image
 im = Image.open(sys.argv[1]).convert('RGB')
 hits = []
 for r in sys.argv[2:]:
-    d = dict(re.findall(r'(\w+)=(\d+)', r))
+    d = dict(re.findall(r'(\w+)=(\w+)', r))
     x, y, h = int(d['x']), int(d['y']), int(d['h'])
     # the left edge, half way down: ring = dark, no ring = light border
     # (a main button's ring sits three points OUTSIDE its face, hence -3)
@@ -265,25 +266,32 @@ for r in sys.argv[2:]:
     # DESIGN RULE 02.10.2026: the main button ("Anmelden") is filled with
     # the accent colour, which is dark too. A ring is a dark edge that
     # DIFFERS from the face behind it: the face is read 10 points inside.
-    face = sum(im.getpixel((x + 10, y + h // 2)))
+    face = sum(im.getpixel((x + min(10, int(d.get('w', 20)) // 2), y + h // 2)))
     if any(sum(c) < 600 and abs(sum(c) - face) > 60 for c in p):
         hits.append(d['id'])
 print(' '.join(hits) if hits else '-')
 PY
 }
+# r373: THE CHAIN OF THE SCENE-TREE SCREEN. The host puts every button into
+# the Tab chain, so the eye and the two quick-access icons are stops now:
+# Kennwort -> Auge -> Anmelden -> Anderer Benutzer -> Netzwerk -> Ein/Aus.
+EYE0=$(eyerect)
+exx=$(fld "$EYE0" x); eyy=$(fld "$EYE0" y); eyw=$(fld "$EYE0" w)
+EYER="id=16 kind=2 x=$exx y=$eyy w=$eyw h=$eyw"
+NET0=$(rect_of 2 3); POW0=$(rect_of 2 4)
 KETTE=""
 k=0
-for t in tab tab tab shift-tab shift-tab shift-tab; do
+for t in tab tab tab tab tab tab; do
     k=$((k + 1))
     mon "sendkey $t" "sleep 1.2" "screendump $D/tab$k.ppm" "sleep 0.8"
-    r=$(ring "$D/tab$k.ppm")
+    r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
     if [ "$r" = "-" ] || [ -z "$r" ]; then   # mid-repaint or the dump not yet written: once more
-        mon "screendump $D/tab$k.ppm" "sleep 0.8"; r=$(ring "$D/tab$k.ppm")
+        mon "screendump $D/tab$k.ppm" "sleep 0.8"; r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
     fi
     KETTE="$KETTE$r "
 done
-WANT="$BTNID $OTHID $PWID $OTHID $BTNID $PWID "
-[ "$KETTE" = "$WANT" ] && ok "Tab chain in the picture: $KETTE(Anmelden, other user, field, and back)" \
+WANT="16 $BTNID $OTHID $(fld "$NET0" id) $(fld "$POW0" id) $PWID "
+[ "$KETTE" = "$WANT" ] && ok "Tab chain in the picture: $KETTE(Auge, Anmelden, Anderer Benutzer, Netzwerk, Ein/Aus, Kennwort)" \
     || bad "Tab chain in the picture '$KETTE', expected '$WANT'"
 # 3. THE EYE, with the MOUSE (1: the mouse works on the login screen)
 EX=$(eyerect)
@@ -323,8 +331,8 @@ PY
     num "BILD: pixels that differ in the field between dots and plain text" "$D1" gt 40
 fi
 # QUICK ACCESS at the bottom right (Justin: "like Windows -- network,
-# power, the time"): three things in the corner, none of them a Tab stop
-# (the chain above already proves that), each answering a click.
+# power, the time"): three things in the corner, each answering a click
+# (r373: network and power are Tab stops now, see the chain above).
 NET=$(rect_of 2 3); POW=$(rect_of 2 4)
 # a torn report line: the two icons are neighbours of the same size
 if [ -z "$POW" ] && [ -n "$NET" ]; then
@@ -411,13 +419,16 @@ if boot ps2 ps2; then
     BTN=$(rect_of 2 1); OTHER=$(rect_of 2 2)
     K=""
     k=0
+    EX=$(eyerect)
+    exb=$(fld "$EX" x); eyb=$(fld "$EX" y); ewb=$(fld "$EX" w)
+    EYEB="id=16 kind=2 x=$exb y=$eyb w=$ewb h=$ewb"
     for t in tab tab tab; do
         k=$((k + 1))
         mon "sendkey $t" "sleep 0.8" "screendump $D/tab$k.ppm" "sleep 0.8"
-        r=$(ring "$D/tab$k.ppm"); [ -z "$r" ] && { sleep 1; r=$(ring "$D/tab$k.ppm"); }; K="$K$r "
+        r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER"); [ "$r" = "-" ] && { sleep 1; r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER"); }; K="$K$r "
     done
-    W="$(fld "$BTN" id) $(fld "$OTHER" id) $PWID "
-    [ "$K" = "$W" ] && ok "Tab: button, button, field, in the picture ($K)" \
+    W="16 $(fld "$BTN" id) $(fld "$OTHER" id) "
+    [ "$K" = "$W" ] && ok "Tab: eye, button, button, in the picture ($K)" \
         || bad "PS/2 Tab chain '$K', expected '$W'"
     EX=$(eyerect)
     ex=$(fld "$EX" x); ey=$(fld "$EX" y); ew=$(fld "$EX" w)

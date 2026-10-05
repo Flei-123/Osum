@@ -143,6 +143,19 @@ grep -qaE '=tab .*"Zwei"' "$TMPD/p.txt" && ok "... and Zwei" || bad "no tab Zwei
 grep -qaE '=entry .*"Hallo"' "$TMPD/p.txt" && ok "the field: role entry, its text is the name" || bad "no entry Hallo"
 grep -qaF '"Klicks: 0"' "$TMPD/p.txt" && ok "the label: role label, 'Klicks: 0'" || bad "no label Klicks: 0"
 
+# r373: A SECRET FIELD IS A PASSWORD NODE. Before, a scene window exported the
+# text of a secret field as the node's name (the canary below would have been
+# in the tree for every reader). Now: role password, state protected, only
+# the name the program gave; the text appears nowhere on the serial line.
+grep -qaE '=password win[0-9]+ [0-9]+,[0-9]+ [0-9]+x[0-9]+ [a-z,]*protected[a-z,]* "Passwort"' "$TMPD/p.txt" \
+    && ok "the secret field: role password, state protected, only its set name" \
+    || bad "no protected password node: $(grep -a 'password' "$TMPD/p.txt" | head -1)"
+grep -a '=password' "$TMPD/p.txt" | grep -qa 'value=' && bad "the password node has a value in the export" || ok "... and no value in the export"
+n=$(grep -ac 'GEHEIMNIS7' "$TMPD/ser.txt")
+[ "$n" = 0 ] && ok "the canary GEHEIMNIS7 appears NOWHERE on the serial line (tree, bus log): $n" || bad "the canary appears $n times"
+n2=$(grep -ac 'HEIMNIS' "$TMPD/ser.txt")
+[ "$n2" = 0 ] && ok "... not even in part: $n2" || bad "a part of the canary appears $n2 times"
+
 echo "== 4. a press through the tree reaches the program =="
 part "$G" S-TREE2 S-TAB > "$TMPD/p.txt"
 grep -qaF '"Klicks: 3"' "$TMPD/p.txt" && ok "two presses by name and one by bus action (action=scene.click) -> the label says 'Klicks: 3'" || bad "label after three presses: $(grep -a 'Klicks' "$TMPD/p.txt" | head -2)"

@@ -17,6 +17,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
+# KVM when the machine has it (the password check, PBKDF2, is slow under TCG)
+[ -w /dev/kvm ] && export OSUM_ACCEL=kvm
 OUT=${1:-$(mktemp -d)}
 [ -n "${1:-}" ] || trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
