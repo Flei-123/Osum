@@ -45,7 +45,13 @@ shot=""
 shots=""
 plan=""
 wait_s=3
+# r368: KVM when the host has it. Under TCG on a loaded host the window server
+# never got to mix the bar or the settings window before the picture was taken
+# (px=0) and the click plans never got past their second step: eleven of the
+# 298 promises of themestore and three of toolbench were red for that reason
+# alone. OSUM_ACCEL=tcg still forces the slow way.
 accel=${OSUM_ACCEL:-tcg}
+if [ -z "${OSUM_ACCEL:-}" ] && [ -w /dev/kvm ]; then accel=kvm; fi
 last=60
 progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat sleep ps kill top"
 extra=""
