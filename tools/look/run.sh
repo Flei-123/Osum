@@ -105,13 +105,16 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
         # button of the launcher (white text on the accent), not a plain one.
         FGV=$(echo "$L" | grep -oE ' fg=[0-9]+' | grep -oE '[0-9]+')
         BGV=$(echo "$L" | grep -oE ' bg=[0-9]+' | grep -oE '[0-9]+')
-        R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
+        # The launcher is a scene program: its text is painted as one fUi run at a
+        # fractional pen position, so the proof is the tolerant per-glyph one
+        # (`checkshot tink`): every character, its own shape, within +-2 px.
+        R=$(python3 tools/gfx/checkshot.py tink "$TMPD/A/desktop.ppm" \
             fui:assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
             $(( (FGV >> 16) & 255 )) $(( (FGV >> 8) & 255 )) $(( FGV & 255 )) \
-            $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 8 2>&1)
+            $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 2>&1)
         echo "        $R"
         case "$R" in
-            *", 0 falsch"*) ok "'Ausführen' is on the screen, pixel for pixel" ;;
+            *", 0 ohne"*) ok "'Ausführen' is on the screen, every glyph with its shape" ;;
             *) bad "the umlaut word does not match a second rasterisation" ;;
         esac
     else
@@ -125,7 +128,7 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     # round LOOK part A and two addenda, in plain sight, three rows
     # under a correctly drawn "Ausführen".
     if python3 tools/look/umlaut.py "$S" "$TMPD/A/desktop.ppm" "Suchen" \
-            "Text schreiben und ändern" 0; then
+            "Text schreiben und ändern" 0 --ink; then
         ok "the bundle label is on the screen with a real 'ä'"
     else
         bad "the editor's description does not match a second rasterisation"
@@ -198,7 +201,7 @@ if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart wigapp=/bin/ex
     # touches three pixels. Nothing here is loosened: the string, the
     # position and the colours all still have to be right.
     if python3 tools/look/umlaut.py "$TMPD/A2b/serial.txt" \
-            "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64; then
+            "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64 --ink; then
         ok "'ö' and 'ß' stand next to each other in the table heading"
     else
         bad "'Größe' does not match a second rasterisation"

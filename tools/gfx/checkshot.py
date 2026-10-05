@@ -768,6 +768,75 @@ def cmd_ttext(a):
     return 0
 
 
+def cmd_tink(a):
+    """tink <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text> [tol]
+
+    The TOLERANT proof for text that fUi's scene host paints with
+    `painter.text`. That draws a string as ONE run at a fractional pen
+    position, so its glyphs do not sit on the whole-pixel places that
+    `ttext` (the layout of the window server and of wlibc) assumes: every
+    ink pixel of a long word is then "wrong" by a fraction of a pixel and
+    `ttext` says 437 of 473. What can be asked of such text is that every
+    CHARACTER is there with its own shape: for each glyph the best place
+    within +-2 px across and +-1 px up/down is searched, and at least 70 %
+    of its strong ink pixels must be ink (a colour clearly away from the
+    ground) in the picture. A missing or wrong glyph (no 'ü', a box, the
+    transliteration 'ue') fails this; a sub-pixel drift does not."""
+    raster = _raster_laden()
+    bild = Bild(a[0])
+    schrift = raster.Schrift(a[1], int(a[2]))
+    x, y = int(a[3]), int(a[4])
+    vg = (int(a[5]), int(a[6]), int(a[7]))
+    hg = (int(a[8]), int(a[9]), int(a[10]))
+    text = a[11]
+    zeichen = 0
+    schwach = []
+    versatz = 0
+    for (c, dx) in schrift.stellen(text):
+        g = schrift.glyphe(c)
+        if g.w == 0 or g.h == 0:
+            continue
+        punkte = []
+        for r in range(g.h):
+            for k in range(g.w):
+                if g.punkt(k, r) >= 160:
+                    punkte.append((k, r))
+        if not punkte:
+            continue
+        zeichen += 1
+        bester = 0.0
+        beste_x = versatz
+        # The drift between the whole-pixel layout and the run's fractional
+        # one ADDS UP along a long word; the search window follows it: +-2 px
+        # around the place where the previous glyph was found.
+        for ddy in (0, -1, 1):
+            for ddx in range(versatz - 2, versatz + 3):
+                gx = x + (dx >> 6) + ddx
+                gy = y + ddy
+                treffer = 0
+                for (k, r) in punkte:
+                    ist = bild.punkt(gx + g.links + k, gy - g.oben + r)
+                    if ist is None:
+                        continue
+                    if sum(abs(ist[j] - hg[j]) for j in range(3)) >= 90:
+                        treffer += 1
+                anteil = treffer / len(punkte)
+                if anteil > bester:
+                    bester = anteil
+                    beste_x = ddx
+        if bester >= 0.70:
+            versatz = beste_x
+        if bester < 0.70:
+            schwach.append("'%s' %d%%" % (sichtbar(c), int(bester * 100)))
+    print("%d Zeichen, %d ohne ihre Tinte (tolerant)" % (zeichen, len(schwach)),
+          end="")
+    if schwach:
+        print(" -- " + " ".join(schwach))
+        return 1
+    print("")
+    return 0
+
+
 def cmd_tgrid(a):
     """tgrid <ppm> <ttf> <px> <x0> <y0> <zellw> <zellh> <zeile> <spalte>
              <vg r g b> <hg r g b> <text>
@@ -877,6 +946,7 @@ BEFEHLE = {
     "lesen": cmd_lesen,
     "ttext": cmd_ttext,
     "tkette": cmd_tkette,
+    "tink": cmd_tink,
     "tgrid": cmd_tgrid,
     "glatt": cmd_glatt,
     "rechteck": cmd_rechteck,

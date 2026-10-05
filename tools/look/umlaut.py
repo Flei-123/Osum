@@ -21,7 +21,7 @@ Beide werden hier NICHT geraten, sondern aus dem Mitschnitt geholt --
 zwei Bildpunkte rechts und 22 darunter davon. Dieselben zwei Zahlen
 benutzt Teil A, und dieselben nennt tools/desktop/run.sh.
 
-  umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz] [--kette]
+  umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz] [--kette] [--ink]
 
 RUNDE UMLAUT2: `--kette` misst mit `checkshot tkette` statt `ttext`.
 Beide vergleichen jeden Tintenpunkt gegen dieselbe Rasterung; `tkette`
@@ -290,6 +290,10 @@ def main(argv):
         return 2
     kette = "--kette" in argv
     argv = [x for x in argv if x != "--kette"]
+    # `--ink`: text of fUi's scene host (one run at a fractional pen position):
+    # the tolerant per-glyph proof `checkshot tink` instead of `ttext`.
+    ink = "--ink" in argv
+    argv = [x for x in argv if x != "--ink"]
     # `--gitter=zeile,spalte` steht an der Stelle des Fenstertitels:
     # eine Terminalzeile hat keinen, sie hat ein Raster.
     if argv[2].startswith("--gitter="):
@@ -366,7 +370,7 @@ def main(argv):
 
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
-         "tkette" if kette else "ttext", ppm,
+         "tink" if ink else ("tkette" if kette else "ttext"), ppm,
          # ROUND FUI-TEXT: window text is Ring 3 text, drawn by fUi.
          "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
