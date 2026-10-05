@@ -535,5 +535,15 @@ Under all of them:
   (copy, cut, replace, secret field + canary, counter-proof without a
   selection). This was the one feature the wlib fields had and the scene fields
   did not (K15 section 7); it has to be there before the wlib widget list can go.
+* **Size tripwire (`tools/progsize/run.sh`):** every scene-tree program carries
+  fUi's scene host (~1.6 MB), the file manager is the largest at 2 133 536
+  octets -- a file of an OFS format-2 image holds 2 134 016 at most, and 26
+  image builders (K15 among them) still build format 2. The clipboard made it
+  2 137 632 and `mkfs` refused it (K15 and the alltag file-manager runs went
+  red); the clipboard and the password names were then cut down to fit again
+  (480 octets of room, the code segment 121 octets before its page boundary).
+  The tripwire fails when the room drops below 256 octets. The way out for good:
+  move the 26 builders to format 3 (K15 section 15d pins format 2's layout, so
+  K15 itself needs a format-2 image) or share the host between programs.
 * Test helper: `tools/alltag/build.sh passwdfile=<host file>` puts a whole
   `/etc/passwd` (accounts with uid >= 1000) on the disk.
