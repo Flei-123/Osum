@@ -99,6 +99,8 @@ uitrace=yes
 # The window shadow is OFF by default in the system (round ECHTHARDWARE-6);
 # the shadow measurements ask for it with `shadow=on`.
 shadow=off
+winalpha=100
+blur=0
 # The bar hides a battery / network field the machine does not have
 # (`hide_missing=1`, the system default since round STARTKNOPF). The look
 # measurements want those fields, so the default HERE is 0; a test of the
@@ -127,6 +129,8 @@ for a in "$@"; do
         shots=*) shots=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         shadow=*) shadow=${a#*=} ;;
+        winalpha=*) winalpha=${a#*=} ;;
+        blur=*) blur=${a#*=} ;;
         hidemissing=*) hidemissing=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
@@ -230,8 +234,8 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 
 printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=%s\nontop=1\nalign=%s\nhide_missing=%s\n' \
     "$edge" "$autohide" "$align" "$hidemissing" > "$OUT/taskbar.conf"
-printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\nshadow=%s\n' \
-    "$scheme" "$mode" "$shape" "$shadow" > "$OUT/theme.conf"
+printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\nshadow=%s\nwindow_alpha=%s\nblur=%s\n' \
+    "$scheme" "$mode" "$shape" "$shadow" "$winalpha" "$blur" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 # THE SYSTEM DEFAULT LANGUAGE.  It is a DEFAULT and not the answer:
 # /users/<name>/config/locale still wins, and the settings program
@@ -262,7 +266,9 @@ EOF
 # fiel damit auf "0 bestanden, 2 gefallen" ("classic bootet nicht",
 # "modern bootet nicht"), ohne dass am Aussehen irgendetwas falsch war.
 # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-ARGS=(build "$OUT/disk.img" 32768 /lib/
+# --v3: the default format holds 2 134 016 octets per file at most, and the
+# file manager is about to pass that (the multi-window layer of the host)
+ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS")
 [ "$icons" = yes ] && ARGS+=("/lib/icons.ttf=$ICONF")
 ARGS+=(/bin/)

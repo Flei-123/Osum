@@ -133,7 +133,9 @@ printf '%s\n' de > "$OUT/userlocale"
 #     mkfs: the disk is full
 #
 # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-ARGS=(build "$OUT/disk.img" 32768 /lib/
+# --v3: the default format holds 2 134 016 octets per file at most, and the
+# file manager is about to pass that (the multi-window layer of the host)
+ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)

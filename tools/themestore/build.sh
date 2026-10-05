@@ -228,7 +228,9 @@ printf '%s\n' de > "$OUT/userlocale"
 # tools/entry/run.sh und tools/wmplug/*.sh seit Runden bauen. Das
 # Abbild ist duenn belegt: die Datei waechst nur um das, was wirklich
 # darin steht.
-ARGS=(build "$OUT/disk.img" 32768 /lib/
+# --v3: the default format holds 2 134 016 octets per file at most, and the
+# file manager is about to pass that (the multi-window layer of the host)
+ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
