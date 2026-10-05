@@ -397,7 +397,14 @@ done
 #            surface, an antialiased step, and the card face.
 #
 # The numbers below came out of that probe on the night pair.
-for v in "classic 0 0" "modern 4 1"; do
+# THE COLOURS: the scene host paints the card LIGHTER than the window (surface-
+# raised on the base, the usual dark-UI order); the old wlib card was darker. So
+# `face` = the card (30 41 59) and `bg` = the window surface (15 23 42) here.
+# Numbers measured on the card of the Settings page (night): `classic` is square
+# -- no background pixel on the diagonal; the ONE pixel that is neither face nor
+# background is the 1 px border ring (fUi's card has one). `modern` (radius 12):
+# three surface pixels, two blended, three face.
+for v in "classic 0 1" "modern 3 2"; do
     set -- $v
     # the corner of the CARD of the left column (the Settings page reports it
     # as `kartel`; `wab` is the list INSIDE the card)
@@ -409,7 +416,7 @@ for v in "classic 0 0" "modern 4 1"; do
         continue
     fi
     C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" \
-        "$AX" "$AY" 15 23 42 30 41 59 8 2>&1)
+        "$AX" "$AY" 30 41 59 15 23 42 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
     A=$(echo "$C" | grep -oE 'antialiased [0-9]+' | grep -oE '[0-9]+')

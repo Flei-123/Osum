@@ -107,6 +107,7 @@ def main(argv):
     texte = []
     epoche = {}
     ep_von = {}
+    marke_von = {}
     for ln in open(ser, "rb").read().decode("utf-8", "replace").splitlines():
         m = WIN.match(ln.strip())
         if m:
@@ -122,6 +123,8 @@ def main(argv):
         if m:
             texte.append(m)
             ep_von[id(m)] = epoche.get((m.group(9), m.group(10)), 0)
+            mm = re.match(r"^taskbar: text (\w+) ", ln.strip())
+            marke_von[id(m)] = mm.group(1) if mm else ""
     if not texte:
         print("pruef: KEINE Textmeldung im Mitschnitt -- nichts zu pruefen")
         return 1
@@ -143,22 +146,29 @@ def main(argv):
     # report at (window, x, base) describes what the picture shows; the
     # older ones were checked against a picture they were never part of.
     letzte = {}
-    for m in texte:
+    for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
              m.group(4), m.group(5))
+        letzte[k] = (n_, m)
+    # The bar re-lays out while the machine comes up (a button moves when the first
+    # window opens): a text reported at an OLDER place is stale. Every text of the
+    # bar is on the screen once, so for the bar the latest report of each TEXT wins
+    # as well (after the latest-per-place rule: the clock changes its minute).
+    def leistenschluessel(m):
+        # a status field of the bar (clock, battery, ...) is ONE text at one place
+        # whatever it says; a window button is told apart by its text
+        mk = marke_von.get(id(m), "")
+        if mk and mk != "button":
+            return mk
+        return "button:" + m.group(11)
+    jung = {}
+    for k, (n_, m) in letzte.items():
         if m.group(1) == "taskbar":
-            # The bar re-lays out while the machine comes up (a button moves when
-            # the first window opens): a text reported at an OLDER place is stale.
-            # Every text of the bar is on the screen once, so the key is the text.
-            k = ("taskbar", m.group(11))
-        letzte[k] = m
-    for m in letzte.values():
-        if m.group(11) is not None:
-            o = (m.group(9), m.group(10))
-            letzte_pt[o] = max(letzte_pt.get(o, 0), int(m.group(11)))
-    letzte = {k: m for k, m in letzte.items()
-              if m.group(11) is None
-              or int(m.group(11)) == letzte_pt[(m.group(9), m.group(10))]}
+            lk = leistenschluessel(m)
+            if lk not in jung or jung[lk] < n_:
+                jung[lk] = n_
+    letzte = {k: m for k, (n_, m) in letzte.items()
+              if m.group(1) != "taskbar" or jung[leistenschluessel(m)] == n_}
     for m in letzte.values():
         quelle = m.group(1)
         wid = m.group(2) or quelle
