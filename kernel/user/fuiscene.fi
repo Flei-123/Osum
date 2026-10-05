@@ -1896,6 +1896,55 @@ fn paint() {
 }
 
 // Does a text field edit with this key (fuiapp.edit)?
+// ------------------------------------------------ the clipboard of a field
+//
+// Copy and cut work on what is SELECTED, and a one-line field only knows one
+// selection: everything (Ctrl+A). Without it nothing is copied (as in every
+// toolkit). A SECRET field gives nothing out -- not on copy, not on cut. Paste
+// goes into every field, a secret one too, at the caret (a selection is
+// replaced by the first character); a line break ends the pasted text.
+fn entry_copy(slot: u64, cut: bool) {
+    if S.s_esecret[(slot) as usize] || !fuiapp.sel_on() {
+        return
+    }
+    let n: u64 = ulib.length(ebuf(slot))
+    if n == 0 {
+        return
+    }
+    let _p: u64 = wlib.clip_put(ebuf(slot), n)
+    if cut {
+        // the select-all state empties the field with the next key; do it now
+        fuiapp.sel_clear()
+        var z: u64 = 0
+        while z < ENTRY_CAP {
+            __mmio_write8((ebuf(slot) + z) as *mut u8, 0 as u8)
+            z = z + 1
+        }
+        S.s_ecar[(slot) as usize] = 0
+    }
+}
+
+fn entry_paste(slot: u64) {
+    var buf: [u8; 256] = [0 as u8; 256]
+    let n: u64 = wlib.clip_take((&buf[0 as usize]) as u64, 250)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    let cp: *mut usize = (&S.s_ecar[(slot) as usize]) as *mut usize
+    while i < n && i < 250 {
+        let c: u64 = buf[(i) as usize] as u64
+        if c == 10 || c == 13 || c == 0 {
+            break
+        }
+        // a printable octet (UTF-8 continuation octets pass: 128..255)
+        if c >= 32 && c != 127 {
+            fuiapp.edit(ebuf(slot), ENTRY_CAP as usize, cp, c, false)
+        }
+        i = i + 1
+    }
+}
+
 fn edit_takes(k: u64) -> bool {
     if k == 1 || k == wlib.KEY_LEFT || k == wlib.KEY_RIGHT || k == wlib.KEY_HOME
         || k == wlib.KEY_END || k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL {
@@ -2136,8 +2185,14 @@ fn pump() -> u64 {
                         S.s_fkey = ev.key
                     }
                     let cp: *mut usize = (&S.s_ecar[(fslot) as usize]) as *mut usize
-                    fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
-                        false)
+                    if ev.key == wlib.KEY_CTRL_C || ev.key == wlib.KEY_CTRL_X {
+                        entry_copy(fslot, ev.key == wlib.KEY_CTRL_X)
+                    } else if ev.key == wlib.KEY_CTRL_V {
+                        entry_paste(fslot)
+                    } else {
+                        fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
+                            false)
+                    }
                     S.s_caret_on = true
                     S.s_caret_t = fuiapp.now_ms()
                     touch()

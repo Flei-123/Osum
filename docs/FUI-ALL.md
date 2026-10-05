@@ -528,5 +528,12 @@ Under all of them:
 * **Host additions:** `fuiscene.caret_on()`, `fuiscene.ax_name`, Shift+Tab; the
   program asks `AXI_ON` every 4 steps instead of 64 (a program that sleeps in
   its idle loop took seconds to notice the first reader).
+* **Clipboard in the fields of the scene host (r379):** Ctrl+C / Ctrl+X copy
+  and cut what is selected (a one-line field knows one selection: everything,
+  Ctrl+A), Ctrl+V pastes at the caret or over the selection. A SECRET field
+  gives nothing out, not on copy and not on cut. `tools/sceneclip/run.sh` 6/0
+  (copy, cut, replace, secret field + canary, counter-proof without a
+  selection). This was the one feature the wlib fields had and the scene fields
+  did not (K15 section 7); it has to be there before the wlib widget list can go.
 * Test helper: `tools/alltag/build.sh passwdfile=<host file>` puts a whole
   `/etc/passwd` (accounts with uid >= 1000) on the disk.
