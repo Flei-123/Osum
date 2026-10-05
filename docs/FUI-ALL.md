@@ -401,3 +401,81 @@ memo line height) are functions of `s_S`; the width/height the program sees are
 in design points (`width()`/`height()`). `fuied` (the editor grid) scales its
 cells the same way. The header text of the first table column sits over the
 NAMES (after the row icon), not over the icons.
+
+## 10. The task bar's pop-ups and the translucent windows (05.10.2026)
+
+* **Quick settings** (`qs.fi`, 2 895 -> 1 700 lines) are window 1 of the task bar's
+  scene host: a card with four tiles (`fuiscene.tile`: fUi's button face plus the
+  program's own glyph and label lines), two sliders of fUi, a separator and a
+  footer of icon buttons. The old band loop, the hit tests by hand and the poll
+  of the window's event ring are gone. The serial lines the acceptance runs
+  read (`qs: open`, `qs: kachel`, `qs: sym`, `qs: hell ...`, `qs: tile ...`) are
+  the same words; their numbers now come from the tree. Acceptance:
+  `tools/qsfui/run.sh` (20/0, ui_scale 1 and 2: tiles 117 points wide, labels
+  inside their tiles read by `kachel.py` from the panel's OWN rectangles with a
+  counter-proof, a click on a tile reaches the system and the tile turns accent,
+  a click in the slider sets the brightness and the knob moves, Escape and
+  Super+A close it). `tools/toolbench/klickplan.py` finds a tile by the same
+  rectangles; its run holds 120 s like section 6 (the Dunkelmodus checks of
+  section 8 were red on main for the 20 s hold alone).
+* **Tooltip and toast** (`barpop.fi`) are one hidden scene window each, windows 2
+  and 3 of the bar. Created at the largest size they will need; every showing
+  is text -> `WM_SIZE` (a window may shrink below its created size and grow back
+  for free) -> repaint -> `WM_MOVE` -> show. `fuiscene.win_size`,
+  `wlib.note_resize`, and `fuiapp.resize` for windows down to 16 x 8 pixels are
+  the new pieces. Acceptance: `tools/barpop/run.sh` (10/0: the bubble and the toast
+  stand where they report, the rectangle differs from the picture without them,
+  they are gone afterwards). The old `wlib.tip_win_*` / `toast_win_*` are dead
+  code now (roadmap).
+* **Text plates for translucent scene windows** (`fuiapp.plate`, called by
+  `fuiscene.plates` when `window_alpha < 100`). wlib marks every pixel that
+  carries text with `PLATTE` (the top octet) and the window server takes a
+  marked pixel unchanged; a fUi window paints into its own buffer and had no
+  mark, so foreign text (the terminal under the settings) ran through the tab
+  row. The mark is set in the canvas after the picture: text lines, and the
+  bounding box of the tabs.
+* **Window frosting for big windows**: `wm.GLASS_PX` 460 800 -> 655 360. The
+  settings window is 760 x 640 since its page stands on the scene tree; 486 400
+  pixels did not fit the old strip and `glass_prepare` refused it -- the window
+  got no frosting at all.
+* **Alpha line of the bar**: `wm: glas alpha_soll= alpha_ist=` was written once
+  at the start of the hold (`px=0`); it is written when the bar is mixed
+  (first blit, then every 240th). The settings page re-reports a lifted value.
+* **Checkers**: themestore 287/11 -> **298/0** (KVM by default; the overlap area
+  is capped at the bar's height; the glass band comes from the window's own
+  `cx/cy`; the counter-proofs narrow buttons around THEIR text and draw their
+  line where the probe has ten pixels of room). Check box labels report where
+  the TEXT starts (they reported the node's left edge and the box's accent fill
+  counted as the label's ground).
+
+## 11. What is fUi and what is not (measured 05.10.2026, main)
+
+Lines of the programs' own source (`kernel/user`), grouped by how their window
+is built. All of them paint with fUi's painter since stage 1; the question here
+is whether the window is a fUi **scene tree**.
+
+| group | programs | lines | share |
+|---|---|---|---|
+| scene tree (`fuiscene`) | explorer, settings, nedit (+`fuied`), launcher (start menu), taskmgr, calc, viewer, snip, pdfview, installer, freunde, papierkorb, storage, store, netmon, powermon | 28 739 | 66.0 % |
+| scene tree, windows of the task bar | quick settings (`qs`), tooltip and toast (`barpop`) | 1 937 | 4.4 % |
+| fUi widgets on a canvas, no tree | lock screen | 794 | 1.8 % |
+| wlib widgets (old toolkit) | login (`glogin`), widgetdemo, a11ydemo, themetest, certus | 3 741 | 8.6 % |
+| own painting routine, fUi painter | the task bar itself (7 321), the desktop (1 008) | 8 329 | 19.1 % |
+
+So **70 %** of the GUI programs' lines are described as a scene tree; by number
+**16 of 24** programs with a window are scene trees (two thirds), and the task
+bar has three of its four windows on the tree. Under all of them:
+
+* **wlib** (12 822 lines) is still the layer every fUi program sits on: window
+  creation, the event pump, the accessibility export, the clipboard and drag
+  plumbing, `canvas` widget; plus the widget list the 5 old programs use.
+  *Not replaced.*
+* **The window server** (`kernel/ui/wm.fi`, 14 212 lines) draws frame, title bar
+  and hover plates with `fb.*` fills (the caption glyphs and every corner are fUi
+  core since r42); the **terminal** is a text grid of the kernel (`ansi`, `wm`),
+  not a program. *Not replaced.*
+* Still to do, in this order of effort: lock screen -> scene (794), login ->
+  scene (1 835, the password field exists in fUi), the bar itself -> scene
+  (7 321: pins, window buttons, status fields, clock, drag-to-edge, auto-hide,
+  context menu), then wlib's widget list can go, then the window server's
+  decorations.
