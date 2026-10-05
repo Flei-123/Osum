@@ -55,15 +55,31 @@ fuiscene.refresh()
 fuiscene.win_select(0)
 ```
 
-## The quick settings are on it (05.10.2026); tooltip and toast are not (yet)
+## The bar's quick settings, tooltip and toast are on it (05.10.2026)
 
-The panel of the task bar (`qs.fi`) is **window 1** of the task bar's scene host
-(`fuiscene.foreign_main()` reserves window 0 for the bar's own raw window). It is
-created once at start, kept hidden (`WS_HIDDEN`), moved and shown on Super+A or on
-a click on the bar's icon group, and pumped with `fuiscene.pump_aux` only while it
-is open -- an idle panel costs the bar nothing. The bar's loop also calls
-`wlib.step()` while the panel is open: that is what feeds the window's pointer and
-key events to its canvas. Two details that cost an afternoon:
+The task bar (`taskbar.fi`) keeps its own raw window as window 0
+(`fuiscene.foreign_main()`, called by `qs.init`) and has three scene windows:
+
+| window | what | layer | created | life |
+|---|---|---|---|---|
+| 1 | quick settings (`qs.fi`): card, tiles, two sliders, separator, footer | `L_MENUE` | at start, hidden | shown on Super+A / a click on the icon group |
+| 2 | tooltip (`barpop.fi`) | `L_TIP` | at start, hidden, 480 x 40 points | text -> `WM_SIZE` -> repaint -> `WM_MOVE` -> show |
+| 3 | toast (`barpop.fi`) | `L_TIP` | at start, hidden, 640 x 64 points | the same |
+
+Why this works now although it did not: nothing is opened and closed per hover.
+A window can **shrink** below the size it was created with and grow back up to it
+for free (the server keeps the buffer, `wm.resize_win`); growing past it allocates a
+new buffer and leaks the old one, so a pop-up that changes its size is created at its
+largest. `fuiscene.win_size` sends `WM_SIZE` and tells wlib at once
+(`wlib.note_resize`, the same book-keeping as the `E_RESIZE` handler -- the bar does
+not call `wlib.step` every turn and cannot wait for the event); the next `pump_aux`
+rebinds fUi to a buffer of the new size (`fuiapp.resize`, which now accepts windows
+down to 16 x 8 pixels).
+
+The panel is pumped with `fuiscene.pump_aux` only while it is open -- an idle
+panel costs the bar nothing. While it is open the bar's loop also calls
+`wlib.step()`: that feeds the window's pointer and key events to its canvas. Two
+details that cost an afternoon:
 
 * the window server gives the keyboard to a window that asked for it (`WS_KEYS`)
   only when the window is **visible** at that moment: `qs.open_at` sets `WS_KEYS`
@@ -71,22 +87,16 @@ key events to its canvas. Two details that cost an afternoon:
   answers `E_RIGHTS`);
 * a tile is a **button face of fUi plus the program's own picture**
   (`fuiscene.tile`: plate, hover, press, focus ring, accent fill when on; the
-  callback paints the glyph and the label lines).
+  callback paints the glyph and the label lines), a pop-up is **one canvas node**
+  painted with the same calls (`cv_round_rgb`, `cv_ring_rgb`, `cv_text_rgb`).
 
-Still on wlib's own windows, not on the scene host:
-
-* **Tooltip and toast.** They are opened and closed per hover / per message, and
-  a scene window costs a canvas widget and ~260 KB of heap. The way out is known:
-  one window per kind, created at its largest size and kept hidden, resized down
-  with `WM_SIZE` (a window can shrink below its created size but never grow) and
-  moved with `WM_MOVE`. Not built yet (roadmap).
-* **The bar itself** (start button, window buttons, pins, status fields, clock) is
-  7 400 lines of its own layout and painting; it is painted with fUi's painter
-  through `wlib.draw_*`, but it is not a tree.
+Still not a tree: **the bar itself** (start button, window buttons, pins, status
+fields, clock) -- 7 400 lines of its own layout and painting. It is painted with
+fUi's painter through `wlib.draw_*`, but it is not a scene.
 
 ## Limits
 
-* At most `MAXWIN` = 6 windows.
+* At most `MAXWIN` = 6 windows (the task bar uses four: its own and three scene windows).
 * Tables, text fields, the text area and the editor use tables that live in
   `fuied` (global): a program uses them in window 0 only. Windows 1.. are for
   labels, buttons, cards, canvases, progress bars: panels, tips, toasts.
