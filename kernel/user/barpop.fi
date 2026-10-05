@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/barpop.fi -- THE TASK BAR'S TOOLTIP AND TOAST ON THE SCENE HOST.
+//
+// FUI-ALL (05.10.2026). The bar opened a wlib window for every tooltip and for
+// every toast (`wlib.tip_win_open`, `wlib.toast_win_open`), painted it with
+// `wlib.draw_*` and closed it again; the scene host could not take them
+// because it could not give a window back (docs/FUI-MULTIWINDOW.md). Now there
+// is ONE window of each kind for the whole life of the bar, created hidden at
+// the largest size it will ever need, and every showing is
+//
+//     text into the buffer  ->  WM_SIZE (a window can shrink below the size it
+//     was created with and grow back for free)  ->  repaint (a canvas node of
+//     the window's tree)  ->  WM_MOVE  ->  show
+//
+// The picture is the same as before (plate in the menu colour, one pixel of
+// line, the text on its baseline; the toast has the three pixel stripe on its
+// left), painted by fUi's painter through the canvas node. Both windows lie on
+// `L_TIP`: above everything, no pointer (`wm.hit` gives that layer no click),
+// no keyboard, and no button in the bar's own list of windows.
+//
+// The windows are windows 2 and 3 of the bar's scene host; window 0 is the
+// bar's own raw window (`fuiscene.foreign_main`, called by `qs.init`) and
+// window 1 is the quick settings. `init` must therefore come after `qs.init`.
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+
+export { init, tip_show, tip_hide, toast_show, toast_hide }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const TIP_MAXW: u64 = 480 // points
+const TIP_MAXH: u64 = 40
+const TOAST_MAXW: u64 = 640
+const TOAST_MAXH: u64 = 64
+
+static mut w_tip: u64 = 0xFFFFFFFFFFFFFFFF
+static mut w_toast: u64 = 0xFFFFFFFFFFFFFFFF
+static mut h_tip: u64 = 0
+static mut h_toast: u64 = 0
+
+static mut tip_txt: [u8; 100] = [0 as u8; 100]
+static mut toast_txt: [u8; 100] = [0 as u8; 100]
+static mut tip_wp: u64 = 100 // the size of the node, in points
+static mut tip_hp: u64 = 24
+static mut toast_wp: u64 = 240
+static mut toast_hp: u64 = 40
+static mut toast_prio: u64 = 1
+
+static mut t_tip: [u8; 8] = "tooltip\0"
+static mut t_toast: [u8; 6] = "toast\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn pt(px: u64) -> u64 {
+    return (px + sk() - 1) / sk()
+}
+
+fn copy_text(dst: u64, src: u64, max: u64) {
+    var n: u64 = ulib.length(src)
+    if n > max {
+        n = max
+    }
+    ulib.copy(dst, src, n)
+    __mmio_write8((dst + n) as *mut u8, 0 as u8)
+}
+
+// ------------------------------------------------------------ the pictures
+
+fn tip_draw(x: u64, y: u64, w: u64, h: u64) {
+    let r: u64 = fuiscene.rb_px()
+    fuiscene.cv_round_rgb(x, y, w, h, r, wlibc.theme(wlibc.T_MENU))
+    fuiscene.cv_ring_rgb(x, y, w, h, r, 1, wlibc.theme(wlibc.T_LINE))
+    let pad: u64 = 6 * sk()
+    let base: u64 = y + (h + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    var tw: u64 = 0
+    if w > 2 * pad {
+        tw = w - 2 * pad
+    }
+    fuiscene.cv_text_rgb(x + pad, base, tw, (&tip_txt[0 as usize]) as u64,
+        wlibc.px_ui(), false, wlibc.theme(wlibc.T_FG))
+}
+
+fn toast_draw(x: u64, y: u64, w: u64, h: u64) {
+    let r: u64 = fuiscene.rb_px()
+    fuiscene.cv_round_rgb(x, y, w, h, r, wlibc.theme(wlibc.T_MENU))
+    fuiscene.cv_ring_rgb(x, y, w, h, r, 1, wlibc.theme(wlibc.T_LINE))
+    var st: u64 = wlibc.theme(wlibc.T_LINE)
+    if toast_prio >= 2 {
+        st = wlibc.theme(wlibc.T_ACCENT)
+    }
+    fuiscene.cv_round_rgb(x, y, 3 * sk(), h, 0, st)
+    let pad: u64 = 10 * sk()
+    let base: u64 = y + (h + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    var tw: u64 = 0
+    if w > 2 * pad {
+        tw = w - 2 * pad
+    }
+    fuiscene.cv_text_rgb(x + pad, base, tw, (&toast_txt[0 as usize]) as u64,
+        wlibc.px_ui(), false, wlibc.theme(wlibc.T_FG))
+}
+
+fn build_tip() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_pad(root, 0)
+    fuiscene.set_gap(root, 0)
+    let _c: usize = fuiscene.canvas(root, 0, tip_wp, tip_hp, tip_draw)
+}
+
+fn build_toast() {
+    let root: usize = fuiscene.root()
+    fuiscene.set_pad(root, 0)
+    fuiscene.set_gap(root, 0)
+    let _c: usize = fuiscene.canvas(root, 0, toast_wp, toast_hp, toast_draw)
+}
+
+// ------------------------------------------------------------------ the life
+
+// Both windows, hidden. false if the scene host has no room (the bar then has
+// no tooltips and no toasts -- and says so).
+fn init() -> bool {
+    w_tip = fuiscene.win_open_plain(0, 0, TIP_MAXW * sk(), TIP_MAXH * sk(),
+        (&t_tip[0 as usize]) as u64, wlibc.L_TIP, build_tip)
+    if w_tip == fuiscene.BADWIN {
+        w_tip = NONE
+        return false
+    }
+    let _s1: bool = fuiscene.win_select(w_tip)
+    h_tip = fuiscene.handle()
+    let _h1: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 1)
+    w_toast = fuiscene.win_open_plain(0, 0, TOAST_MAXW * sk(), TOAST_MAXH * sk(),
+        (&t_toast[0 as usize]) as u64, wlibc.L_TIP, build_toast)
+    if w_toast == fuiscene.BADWIN {
+        w_toast = NONE
+        let _s0: bool = fuiscene.win_select(0)
+        return false
+    }
+    let _s2: bool = fuiscene.win_select(w_toast)
+    h_toast = fuiscene.handle()
+    let _h2: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 1)
+    let _s3: bool = fuiscene.win_select(0)
+    return true
+}
+
+// Paint window `i` now (the first turn describes the tree, the second lays it
+// out, the third paints).
+fn paint(i: u64) {
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(i)
+        n = n + 1
+    }
+}
+
+// Show the tooltip with `text` in a box of bw x bh PIXELS at x, y. 0 = shown.
+fn tip_show(x: u64, y: u64, bw: u64, bh: u64, text: u64) -> u64 {
+    if w_tip == NONE {
+        return 1
+    }
+    copy_text((&tip_txt[0 as usize]) as u64, text, 98)
+    var wp: u64 = pt(bw)
+    var hp: u64 = pt(bh)
+    if wp > TIP_MAXW {
+        wp = TIP_MAXW
+    }
+    if hp > TIP_MAXH {
+        hp = TIP_MAXH
+    }
+    tip_wp = wp
+    tip_hp = hp
+    let _s: bool = fuiscene.win_select(w_tip)
+    if !fuiscene.win_size(wp * sk(), hp * sk()) {
+        let _s0: bool = fuiscene.win_select(0)
+        return 2
+    }
+    fuiscene.refresh()
+    fuiscene.touch()
+    let _s1: bool = fuiscene.win_select(0)
+    paint(w_tip)
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, h_tip, (x << 16) | y, 0)
+    let _v: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 0)
+    return 0
+}
+
+fn tip_hide() {
+    if w_tip == NONE {
+        return
+    }
+    let _v: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 1)
+}
+
+fn toast_show(x: u64, y: u64, bw: u64, bh: u64, text: u64, prio: u64) -> u64 {
+    if w_toast == NONE {
+        return 1
+    }
+    copy_text((&toast_txt[0 as usize]) as u64, text, 98)
+    toast_prio = prio
+    var wp: u64 = pt(bw)
+    var hp: u64 = pt(bh)
+    if wp > TOAST_MAXW {
+        wp = TOAST_MAXW
+    }
+    if hp > TOAST_MAXH {
+        hp = TOAST_MAXH
+    }
+    toast_wp = wp
+    toast_hp = hp
+    let _s: bool = fuiscene.win_select(w_toast)
+    if !fuiscene.win_size(wp * sk(), hp * sk()) {
+        let _s0: bool = fuiscene.win_select(0)
+        return 2
+    }
+    fuiscene.refresh()
+    fuiscene.touch()
+    let _s1: bool = fuiscene.win_select(0)
+    paint(w_toast)
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, h_toast, (x << 16) | y, 0)
+    let _v: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 0)
+    return 0
+}
+
+fn toast_hide() {
+    if w_toast == NONE {
+        return
+    }
+    let _v: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 1)
+}
