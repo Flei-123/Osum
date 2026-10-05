@@ -188,6 +188,7 @@ BEREICHE = [
     ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
     ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
     ("BLOCKK",     "kstate.fi", "BLOCKK_OFF",     "BLOCKK_MAX"),
+    ("EARGK",      "kstate.fi", "EARGK_OFF",      "EARGK_MAX"),
     # ROUND A11Y-2 (S-007): the accessibility tree. Six pages,
     # 0x13E000..0x144000, allotted in advance by the wave of 18.09.2026
     # (see kstate.fi at KDATA_SIZE) -- this round took exactly that.

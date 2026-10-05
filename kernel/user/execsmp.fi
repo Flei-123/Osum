@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/execsmp.fi -- r360: many cores in `execve`/`exec` at once,
+// every program checks the arguments it was started with.
+//
+//   execsmp run exec|spawn <rounds> <workers>
+//       each round forks <workers> children at the same moment; every
+//       child gets its own id and starts the checker with the argument
+//       list  execsmp check <id> <payload>  where the payload is a run
+//       of one letter whose letter and length follow from the id.
+//         exec   the child replaces itself (`execve`)
+//         spawn  the child starts the checker with `exec` and waits for it
+//   execsmp check <id> <payload>
+//       exit code = the id it was given (low 7 bits), 255 when the payload
+//       does not belong to the id
+//       (and one line `execsmp: BAD ...` on the console). The parent checks the
+//       exit code against the id it handed out: a whole list swapped for
+//       another child's still looks consistent, the exit code gives it away.
+//
+// The parent prints  execsmp: children=N bad=B  and  execsmp: done.
+// Before the argument page was per core, two cores in `execve` mixed
+// their arguments (the page was filled BEFORE the loader lock).
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const PAY_MIN: u64 = 40
+const PAY_SPAN: u64 = 330
+
+fn pay_len(id: u64) -> u64 {
+    return PAY_MIN + (id * 37) % PAY_SPAN
+}
+
+fn pay_chr(id: u64) -> u64 {
+    return 97 + (id * 7) % 26
+}
+
+fn check(args: u64) -> u64 {
+    var s_bad: [u8; 18] = "execsmp: BAD id= \0"
+    var s_len: [u8; 7] = " len= \0"
+    var s_argc: [u8; 19] = "execsmp: BAD argc=\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc != 4 {
+        ulib.say_line((&s_argc[0 as usize]) as u64, argc)
+        return 1
+    }
+    let id: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let p: u64 = ulib.arg_at(args, 3)
+    let n: u64 = ulib.length(p)
+    var ok: bool = n == pay_len(id)
+    var i: u64 = 0
+    while ok && i < n {
+        if (*((p + i) as *mut u8)) as u64 != pay_chr(id) {
+            ok = false
+        }
+        i = i + 1
+    }
+    if !ok {
+        ulib.say((&s_bad[0 as usize]) as u64)
+        ulib.sayu(id)
+        ulib.say((&s_len[0 as usize]) as u64)
+        ulib.sayu(n)
+        ulib.nl()
+        return 255
+    }
+    // the parent knows which id this child was started with: a WHOLE
+    // argument list swapped for another child's is internally consistent,
+    // only the exit code (= the id this program saw) gives it away
+    return id & 127
+}
+
+// start the checker for <id>: with `execve` (never returns on success)
+// or with `exec` + wait
+// the APIC id of the core this runs on (cpuid leaf 1, ebx bits 31..24)
+fn core_id() -> u64 {
+    return asm("push rbx\nmov eax, 1\ncpuid\nmov eax, ebx\nshr eax, 24\npop rbx",
+        out("rax"), clobber("rcx"), clobber("rdx"))
+}
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn start_checker(self: u64, id: u64, use_spawn: bool, go: u64) -> u64 {
+    var s_path: [u8; 13] = "/bin/execsmp\0"
+    var s_check: [u8; 6] = "check\0"
+    var idb: [u8; 26] = [0 as u8; 26]
+    var pay: [u8; 460] = [0 as u8; 460]
+    var argv: [u64; 5] = [0 as u64; 5]
+    let il: u64 = ulib.digits(id, (&idb[0 as usize]) as u64)
+    __mmio_write8(((&idb[0 as usize]) as u64 + il) as *mut u8, 0 as u8)
+    let n: u64 = pay_len(id)
+    ulib.fill((&pay[0 as usize]) as u64, pay_chr(id), n)
+    __mmio_write8(((&pay[0 as usize]) as u64 + n) as *mut u8, 0 as u8)
+    argv[0 as usize] = self
+    argv[1 as usize] = (&s_check[0 as usize]) as u64
+    argv[2 as usize] = (&idb[0 as usize]) as u64
+    argv[3 as usize] = (&pay[0 as usize]) as u64
+    // everybody leaves the starting block on the same tick, so that the
+    // cores really are in `execve` at the same time
+    while ticks() < go {
+        let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+    }
+    if use_spawn {
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&s_path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 4)
+        if ulib.bad(pid) {
+            return 254
+        }
+        return ulib.wait_code(pid)
+    }
+    let _r: u64 = ulib.sys(ulib.SYS_EXECVE, (&s_path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 0)
+    return 254
+}
+
+fn run(args: u64) -> u64 {
+    var s_spawn: [u8; 6] = "spawn\0"
+    var s_sum: [u8; 20] = "execsmp: children= \0"
+    var s_bad: [u8; 7] = " bad= \0"
+    var s_done: [u8; 14] = "execsmp: done\0"
+    let self: u64 = ulib.arg_at(args, 0)
+    let use_spawn: bool = ulib.streq(ulib.arg_at(args, 2), (&s_spawn[0 as usize]) as u64)
+    let rounds: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let workers: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    var pids: [u64; 16] = [0 as u64; 16]
+    var total: u64 = 0
+    var bad: u64 = 0
+    var r: u64 = 0
+    while r < rounds {
+        let go: u64 = ticks() + 6
+        var w: u64 = 0
+        while w < workers && w < 16 {
+            let id: u64 = r * 16 + w
+            let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+            if pid == 0 {
+                let code: u64 = start_checker(self, id, use_spawn, go)
+                let _x: u64 = ulib.sys(ulib.SYS_EXIT, code, 0, 0)
+                return code
+            }
+            pids[w as usize] = pid
+            w = w + 1
+        }
+        var j: u64 = 0
+        while j < w {
+            if ulib.bad(pids[j as usize]) {
+                bad = bad + 1
+            } else {
+                let c: u64 = ulib.wait_code(pids[j as usize])
+                if c != ((r * 16 + j) & 127) {
+                    bad = bad + 1
+                }
+            }
+            total = total + 1
+            j = j + 1
+        }
+        r = r + 1
+    }
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.sayu(total)
+    ulib.say((&s_bad[0 as usize]) as u64)
+    ulib.sayu(bad)
+    ulib.nl()
+    // which cores did the work (switches per core)
+    var s_cpu: [u8; 17] = "execsmp: cores= \0"
+    ulib.say((&s_cpu[0 as usize]) as u64)
+    var c: u64 = 0
+    while c < 4 {
+        ulib.sayu(ulib.sys(ulib.SYS_CPUSTAT, c, ulib.CS_SWITCHES, 0))
+        ulib.put((&s_bad[0 as usize]) as u64, 1)
+        c = c + 1
+    }
+    ulib.nl()
+    ulib.say((&s_done[0 as usize]) as u64)
+    ulib.nl()
+    if bad != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_check: [u8; 6] = "check\0"
+    if ulib.arg_count(args) >= 2 && ulib.streq(ulib.arg_at(args, 1), (&s_check[0 as usize]) as u64) {
+        return check(args)
+    }
+    return run(args)
+}
