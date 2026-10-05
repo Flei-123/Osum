@@ -1012,7 +1012,9 @@ print(len(set(ist.values())))
 PYZ
 )
 echo "        verschiedene Zeilen der Reiterleiste: ${TABZEIL:-?}"
-num "und die Reiterleiste hat dafuer zwei Zeilen" "${TABZEIL:-0}" eq 2
+# two rows at the width of this window in English, three in German (the rows are
+# filled by MEASURED width now): what is asserted is that the bar wrapped
+num "und die Reiterleiste hat dafuer mehrere Zeilen (sie bricht um, sie schneidet nicht)" "${TABZEIL:-0}" ge 2
 # und jede der zehn Aufnahmen: die Taskleiste sagt, wo sie ist, und im
 # Bild ist sie dort.
 BARBAD=0

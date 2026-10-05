@@ -133,6 +133,8 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     else
         bad "the editor's description does not match a second rasterisation"
     fi
+else
+    bad "A did not boot to the desktop (no QEMU exit 21) -- the measurements of part A did not run"
 fi
 
 echo "== A2. five DIFFERENT umlaut characters, pixel for pixel =="
@@ -260,6 +262,8 @@ if shot B1 lang=de icons=yes nvicons=no keep=yes; then
         fi
     done
     NW1=$(val "$S" 'taskbar: field net x=[0-9]+ y=[0-9]+ w=[0-9]+')
+else
+    bad "B1 did not boot to the desktop (part B1 did not run)"
 fi
 if shot B2 lang=de icons=no nvicons=no keep=yes; then
     S="$TMPD/B2/serial.txt"
@@ -301,6 +305,8 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
     else
         bad "the bar did not report its fallback text 'kein Akku'"
     fi
+else
+    bad "B2 did not boot to the desktop (part B2 did not run)"
 fi
 
 echo "== C. the form tokens =="
