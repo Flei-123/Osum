@@ -46,6 +46,7 @@ TBGEOM = re.compile(r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSSYM = re.compile(r"qs: sym n=(\d+) x=(\d+) y=(\d+)")
+QSKACHEL = re.compile(r"qs: kachel n=(\d+) platz=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
@@ -135,18 +136,26 @@ def main(argv):
         return 0
 
     if was == "kachel":
-        # Eine Kachel des Kontrollzentrums. Das Panel meldet die Stelle
-        # JEDES Symbols in SCHIRMKOORDINATEN; die Kachel ist 180 x 74
-        # gross und ihr Symbol sitzt 10 Bildpunkte vom Rand.
+        # Eine Kachel des Kontrollzentrums: ihre MITTE. Seit die Kacheln der
+        # Szenenbaum legt (05.10.2026) rechnet niemand mehr 180 x 74 und zehn
+        # Bildpunkte Symbolabstand nach -- das Panel meldet sein Rechteck
+        # (`qs: open x y`, Ursprung auf dem Schirm) und jede Kachel mit
+        # Nummer, Stelle und Groesse IM Panel (`qs: kachel n= x= y= w= h=`).
         t = argv[3]
-        s_ = None
+        o = None
+        k = None
         for z in zeilen:
-            m = QSSYM.search(z)
+            m = QSOPEN.search(z)
+            if m:
+                o = m
+            m = QSKACHEL.search(z)
             if m and m.group(1) == t:
-                s_ = m
-        if s_ is None:
+                k = m
+        if o is None or k is None:
             raise SystemExit("klickplan: Kachel %s nicht gemeldet" % t)
-        print("%d,%d" % (int(s_.group(2)) - 10 + 90, int(s_.group(3)) - 10 + 37))
+        ox, oy = int(o.group(1)), int(o.group(2))
+        print("%d,%d" % (ox + int(k.group(2)) + int(k.group(4)) // 2,
+                         oy + int(k.group(3)) + int(k.group(5)) // 2))
         return 0
 
     if was in ("qszeile1", "qszeile2"):
