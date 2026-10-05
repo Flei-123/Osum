@@ -300,6 +300,13 @@ if [ "$uitrace" = yes ]; then
 fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
+    # The shadow switch is read out of the SCHEME file (wlibc.scheme_key),
+    # not out of /etc/theme.conf: with `shadow=on` a copy with that line is used.
+    if [ "$shadow" = on ]; then
+        cp "$s" "$OUT/$(basename "$s")"
+        printf '\nshadow=on\n' >> "$OUT/$(basename "$s")"
+        s="$OUT/$(basename "$s")"
+    fi
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
 done
 if ls assets/shapes/*.shape >/dev/null 2>&1; then

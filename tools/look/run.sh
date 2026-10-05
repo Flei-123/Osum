@@ -39,7 +39,7 @@ shot() { # dir args...
 }
 
 echo "== A. the umlauts: a German desktop, measured =="
-if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
+if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     ok "the image boots to the desktop (QEMU exit 21)"
     S="$TMPD/A/serial.txt"
     LG=$(grep -a 'taskbar: lang=' "$S" | tail -1)
@@ -50,8 +50,8 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     K=$(grep -a 'taskbar: lang=' "$S" | tail -1 | grep -oE 'keys=[0-9]+' \
         | grep -oE '[0-9]+')
     ge "keys in the message catalogue" "$K" 140
-    grep -qa 't=kein Netz' "$S" && ok "the taskbar says 'kein Netz' and not 'no network'" \
-        || bad "the taskbar is still English"
+    # (the German 'kein Netz' of the bar is checked in B2: with the icon font
+    # the field shows a symbol, only without it the bar writes the words)
     # THE UMLAUT, PIXEL BY PIXEL.
     #
     # The word is `Ausführen`, the launcher's button, and it is on the
@@ -101,9 +101,14 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
         AY=$(echo "$L" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
         [ -n "$AX" ] || AX=2
         [ -n "$AY" ] || AY=22
+        # The colours come out of the report: the Run button is the MAIN
+        # button of the launcher (white text on the accent), not a plain one.
+        FGV=$(echo "$L" | grep -oE ' fg=[0-9]+' | grep -oE '[0-9]+')
+        BGV=$(echo "$L" | grep -oE ' bg=[0-9]+' | grep -oE '[0-9]+')
         R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
             fui:assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
-            15 23 42 255 255 255 "Ausführen" 8 2>&1)
+            $(( (FGV >> 16) & 255 )) $(( (FGV >> 8) & 255 )) $(( FGV & 255 )) \
+            $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 8 2>&1)
         echo "        $R"
         case "$R" in
             *", 0 falsch"*) ok "'Ausführen' is on the screen, pixel for pixel" ;;
@@ -120,7 +125,7 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     # round LOOK part A and two addenda, in plain sight, three rows
     # under a correctly drawn "Ausführen".
     if python3 tools/look/umlaut.py "$S" "$TMPD/A/desktop.ppm" "Suchen" \
-            "Editor  --  Text schreiben und ändern" 0; then
+            "Text schreiben und ändern" 0; then
         ok "the bundle label is on the screen with a real 'ä'"
     else
         bad "the editor's description does not match a second rasterisation"
@@ -182,7 +187,7 @@ fi
 # faengt bei x=368 an und ist 44 breit -- sie passt dann nicht mehr ins
 # eigene Fenster. Mit zwei Fenstern bleibt die Anordnung frei, das
 # Fenster ist 660 breit, und die Zeichenkette steht ganz darin.
-if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart" keep=yes; then
+if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart wigapp=/bin/explorer" keep=yes; then
     # TOLERANCE 64, AND HERE IS THE MEASURED NUMBER FOR IT. The two dots
     # of an 'ö' are a second glyph box over the first, and where two
     # boxes overlap the library mixes glyph ON glyph while the reference
@@ -258,6 +263,8 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
     grep -qa 'taskbar: icon field=' "$S" \
         && bad "a glyph was reported although there is no icon font" \
         || ok "no icon font, no glyph reported -- the fallback is clean"
+    grep -qa 't=kein Netz' "$S" && ok "the taskbar says 'kein Netz' and not 'no network'" \
+        || bad "the taskbar is still English"
     NW2=$(val "$S" 'taskbar: field net x=[0-9]+ y=[0-9]+ w=[0-9]+')
     if [ -n "${NW1:-}" ] && [ -n "${NW2:-}" ]; then
         is "the network field is narrower by exactly the reserved room" \
@@ -425,7 +432,8 @@ run_e() { # align
     return 0
 }
 if run_e left; then
-    is "align=left: the start button's x" "${SX:-x}" "4"
+    # the bar pads by 2 px (shape.pad_bar of classic/modern), not 4 as in round LOOK
+    is "align=left: the start button's x" "${SX:-x}" "2"
     LX=$SX
 fi
 if run_e center; then
