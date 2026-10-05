@@ -3104,15 +3104,67 @@ fn columns_set(tb: u64, bw: u64, bh: u64) {
 // die beim naechsten zusaetzlichen Bedienelement daneben liegt.
 fn karten_say() {
     var a: [u8; 7] = "kartel\0"
-    var b: [u8; 7] = "karter\0"
-    // Auf jeder anderen Seite sind die Karten verborgen, und ein
-    // Rechteck fuer etwas, das nicht auf dem Schirm ist, waere ein
-    // Massstab fuer Bedienelemente, die gar nicht darauf liegen.
-    if true {
-        return
+    var c: [u8; 7] = "karter\0"
+    // The cards are scene nodes (no keys): their rectangles come from the
+    // nodes, after the layout. `karte_l`/`karte_r` are node index + 1, 0 = none.
+    if karte_l != 0 {
+        let i: usize = (karte_l - 1) as usize
+        rect_say_at((&a[0 as usize]) as u64, fuiscene.node_x(i), fuiscene.node_y(i),
+            fuiscene.node_w(i), fuiscene.node_h(i))
     }
-    rect_say((&a[0 as usize]) as u64, karte_l)
-    rect_say((&b[0 as usize]) as u64, karte_r)
+    if karte_r != 0 {
+        let i2: usize = (karte_r - 1) as usize
+        rect_say_at((&c[0 as usize]) as u64, fuiscene.node_x(i2), fuiscene.node_y(i2),
+            fuiscene.node_w(i2), fuiscene.node_h(i2))
+    }
+}
+
+// One `wlib: tab i=<n> x= y= w= h= ax= ay= nq= nv= t=<whole name>` line per tab
+// (the format wlib's tab bar used): nv = octets of the name, nq = how many of
+// them fit the tab's width.
+fn tabs_say() {
+    var pre: [u8; 13] = "wlib: tab i=\0"
+    var s_nq: [u8; 6] = " nq=\0\0"
+    var s_nv: [u8; 6] = " nv=\0\0"
+    var s_tt: [u8; 4] = " t=\0"
+    var i: u64 = 0
+    while i < R_ANZ {
+        let n: usize = fuiscene.node_of_key(K_TAB0 + i)
+        if n != fuiscene.NONE {
+            let name: u64 = ((&tab_buf[0 as usize]) as u64) + i * 40
+            let nv: u64 = ulib.length(name)
+            var nq: u64 = nv
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), name, nv)
+            if tw + 16 > fuiscene.node_w(n) && tw > 0 {
+                nq = nv * (fuiscene.node_w(n) - 16) / tw
+            }
+            var at: u64 = rs_put(0, (&pre[0 as usize]) as u64)
+            at = rs_num(at, i)
+            at = rs_put(at, (&ms_b[0 as usize]) as u64)
+            at = rs_num(at, fuiscene.node_x(n))
+            at = rs_put(at, (&ms_c[0 as usize]) as u64)
+            at = rs_num(at, fuiscene.node_y(n))
+            at = rs_put(at, (&mr_w[0 as usize]) as u64)
+            at = rs_num(at, fuiscene.node_w(n))
+            at = rs_put(at, (&mr_h[0 as usize]) as u64)
+            at = rs_num(at, fuiscene.node_h(n))
+            at = rs_put(at, (&mr_ax[0 as usize]) as u64)
+            at = rs_num(at, wlib.win_x(w) + 2 + fuiscene.node_x(n))
+            at = rs_put(at, (&mr_ay[0 as usize]) as u64)
+            at = rs_num(at, wlib.win_y(w) + 22 + fuiscene.node_y(n))
+            at = rs_put(at, (&s_nq[0 as usize]) as u64)
+            at = rs_num(at, nq)
+            at = rs_put(at, (&s_nv[0 as usize]) as u64)
+            at = rs_num(at, nv)
+            at = rs_put(at, (&s_tt[0 as usize]) as u64)
+            at = rs_put(at, name)
+            let bb: u64 = (&rs_buf[0 as usize]) as u64
+            __mmio_write8((bb + at) as *mut u8, 10 as u8)
+            at = at + 1
+            let _w: u64 = ulib.put(bb, at)
+        }
+        i = i + 1
+    }
 }
 
 fn templates_read() {
@@ -4164,6 +4216,13 @@ fn rects_alle() {
     var nm: [u8; 8] = [0 as u8; 8]
     nm[(0) as usize] = 119 as u8
     nm[(3) as usize] = 0 as u8
+    // `waa` opens every batch of reports: it is the room of the tab bar (the
+    // window's inner width without the 8 point margins). The acceptance runs cut
+    // the report at the last `waa` and hold every tab against its width.
+    var n_waa: [u8; 4] = "waa\0"
+    let sk: u64 = fuiscene.scale()
+    rect_say_at((&n_waa[0 as usize]) as u64, 8 * sk, 8 * sk,
+        (fuiscene.width() - 16) * sk, 28 * sk)
     var k: u64 = 1
     while k < K_COUNT {
         if fuiscene.node_of_key(k) != fuiscene.NONE {
@@ -4173,6 +4232,14 @@ fn rects_alle() {
         }
         k = k + 1
     }
+    // the rest of what the acceptance runs read: cards, tabs, buttons, radii,
+    // every text (the formats wlib used, see tools/themestore/run.sh)
+    karten_say()
+    tabs_say()
+    fuiscene.say_knoepfe()
+    fuiscene.say_radii()
+    fuiscene.say_texts()
+    glas_say()
 }
 
 // ================================ RUNDE ALLTAG: DIE SPERRE EINSTELLEN
@@ -5718,22 +5785,86 @@ fn tspv(t: u64, f: u64) -> u64 {
 
 // One tile: the preset's own colours -- its surface, a miniature task bar on
 // ITS edge with the button, a miniature window -- and the name on the left.
+// One `wlib: kachelbalken` line: a bar of a tile's miniature taskbar and the
+// rectangle it has to lie in (`ein` = how far the tile's corner cuts in at the
+// height of the bar's first row). The acceptance run holds the one against the
+// other.
+fn say_balken(x: u64, y: u64, w: u64, h: u64, kx: u64, ky: u64, kw: u64, kh: u64,
+    ein: u64) {
+    if !fuiscene.trace_on() {
+        return
+    }
+    var a0: [u8; 22] = "wlib: kachelbalken x=\0"
+    var a1: [u8; 4] = " y=\0"
+    var a2: [u8; 4] = " w=\0"
+    var a3: [u8; 4] = " h=\0"
+    var a4: [u8; 5] = " kx=\0"
+    var a5: [u8; 5] = " ky=\0"
+    var a6: [u8; 5] = " kw=\0"
+    var a7: [u8; 5] = " kh=\0"
+    var a8: [u8; 6] = " ein=\0"
+    var at: u64 = rs_put(0, (&a0[0 as usize]) as u64)
+    at = rs_num(at, x)
+    at = rs_put(at, (&a1[0 as usize]) as u64)
+    at = rs_num(at, y)
+    at = rs_put(at, (&a2[0 as usize]) as u64)
+    at = rs_num(at, w)
+    at = rs_put(at, (&a3[0 as usize]) as u64)
+    at = rs_num(at, h)
+    at = rs_put(at, (&a4[0 as usize]) as u64)
+    at = rs_num(at, kx)
+    at = rs_put(at, (&a5[0 as usize]) as u64)
+    at = rs_num(at, ky)
+    at = rs_put(at, (&a6[0 as usize]) as u64)
+    at = rs_num(at, kw)
+    at = rs_put(at, (&a7[0 as usize]) as u64)
+    at = rs_num(at, kh)
+    at = rs_put(at, (&a8[0 as usize]) as u64)
+    at = rs_num(at, ein)
+    let bb: u64 = (&rs_buf[0 as usize]) as u64
+    __mmio_write8((bb + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(bb, at)
+}
+
+// How far a corner of radius `r` cuts in at depth 4: r - sqrt(r^2 - (r-4)^2),
+// rounded up. 0 when the tile is square.
+fn corner_in(r: u64) -> u64 {
+    if r <= 4 {
+        return r
+    }
+    var d: u64 = r - 4
+    var s: u64 = 0
+    while (s + 1) * (s + 1) <= r * r - d * d {
+        s = s + 1
+    }
+    return r - s + 1
+}
+
 fn draw_tile(key: u64, x: u64, y: u64, w2: u64, h2: u64) {
     let t: u64 = key - K_TILE0
     if t >= v_n || w2 < 80 || h2 < 20 {
         return
     }
-    fuiscene.cv_round_rgb(x, y, w2, h2, 10, tspv(t, wlib.TL_SURFACE))
+    // the tile's corner is the SHAPE's button radius (0 in `classic`)
+    let tr: u64 = fuiscene.rb_px()
+    var ri: u64 = 3
+    var rj: u64 = 2
+    if tr == 0 {
+        ri = 0
+        rj = 0
+    }
+    fuiscene.cv_round_rgb(x, y, w2, h2, tr, tspv(t, wlib.TL_SURFACE))
     if v_sel == t {
-        fuiscene.cv_ring_rgb(x, y, w2, h2, 10, 3, wlibc.theme(wlibc.T_FOCUS))
+        fuiscene.cv_ring_rgb(x, y, w2, h2, tr, 3, wlibc.theme(wlibc.T_FOCUS))
     } else {
-        fuiscene.cv_ring_rgb(x, y, w2, h2, 10, 1, tspv(t, wlib.TL_FRAME))
+        fuiscene.cv_ring_rgb(x, y, w2, h2, tr, 1, tspv(t, wlib.TL_FRAME))
     }
     let pw: u64 = 92
     let px: u64 = x + w2 - pw - 8
     let py: u64 = y + 4
     let ph: u64 = h2 - 8
-    fuiscene.cv_round_rgb(px, py, pw, ph, 3, tspv(t, wlib.TL_SURFACE))
+    fuiscene.cv_round_rgb(px, py, pw, ph, ri, tspv(t, wlib.TL_SURFACE))
     let e: u64 = tspv(t, wlib.TL_EDGE)
     let bar: u64 = 5
     var bx: u64 = px
@@ -5753,6 +5884,7 @@ fn draw_tile(key: u64, x: u64, y: u64, w2: u64, h2: u64) {
         bh2 = ph
     }
     fuiscene.cv_round_rgb(bx, by, bw2, bh2, 0, tspv(t, wlib.TL_TASKBAR))
+    say_balken(bx, by, bw2, bh2, x, y, w2, h2, corner_in(tr))
     if e == 2 || e == 3 {
         fuiscene.cv_round_rgb(bx + 1, by + 3, bar - 2, 14, 0, tspv(t, wlib.TL_ACCENT))
     } else {
@@ -5769,9 +5901,9 @@ fn draw_tile(key: u64, x: u64, y: u64, w2: u64, h2: u64) {
     let ww: u64 = 60
     let wh: u64 = ph - 12
     if wh >= 10 {
-        fuiscene.cv_round_rgb(wx, wy, ww, wh, 3, tspv(t, wlib.TL_RAISED))
-        fuiscene.cv_ring_rgb(wx, wy, ww, wh, 3, 1, tspv(t, wlib.TL_FRAME))
-        fuiscene.cv_round_rgb(wx + 1, wy + 1, ww - 2, 7, 2, tspv(t, wlib.TL_ACCENT))
+        fuiscene.cv_round_rgb(wx, wy, ww, wh, ri, tspv(t, wlib.TL_RAISED))
+        fuiscene.cv_ring_rgb(wx, wy, ww, wh, ri, 1, tspv(t, wlib.TL_FRAME))
+        fuiscene.cv_round_rgb(wx + 1, wy + 1, ww - 2, 7, rj, tspv(t, wlib.TL_ACCENT))
         fuiscene.cv_round_rgb(wx + 4, wy + 3, 22, 2, 0, tspv(t, wlib.TL_ONACCENT))
         fuiscene.cv_round_rgb(wx + 4, wy + 11, ww - 14, 2, 0, tspv(t, wlib.TL_TEXT))
     }
@@ -6234,13 +6366,28 @@ fn build() {
     let r1: usize = fuiscene.row(col)
     let r2: usize = fuiscene.row(col)
     var i: u64 = 0
+    // The first row takes as many tabs as fit the window (a tab is its text plus
+    // 32 points of padding); the rest goes into the second row. A fixed "8 in
+    // the first row" overflowed the window by 19 px in German.
+    var acc: u64 = 0
+    var zweite: bool = false
+    let avail: u64 = fuiscene.width() - 16
     while i < R_ANZ {
+        let nm: u64 = ((&tab_buf[0 as usize]) as u64) + i * 40
+        let tbw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), nm, ulib.length(nm))
+            / fuiscene.scale() + 24
+        if !zweite && acc + tbw > avail {
+            zweite = true
+            acc = 0
+        }
+        acc = acc + tbw
         var par: usize = r1
-        if i >= 8 {
+        if zweite {
             par = r2
         }
-        let _t: usize = fuiscene.tab(par, ((&tab_buf[0 as usize]) as u64) + i * 40,
-            K_TAB0 + i, reiter == i)
+        let tn: usize = fuiscene.tab(par, nm, K_TAB0 + i, reiter == i)
+        // 8 points of padding on each side: fifteen tabs in two rows
+        fuiscene.compact(tn)
         i = i + 1
     }
     let body: usize = fuiscene.row_stretch(col)
@@ -6249,10 +6396,13 @@ fn build() {
     let tw: u64 = fuiscene.width() - 16
     let cl: usize = fuiscene.card(body)
     var cr: usize = cl
+    karte_l = (cl as u64) + 1
+    karte_r = 0
     if two_cols(reiter) {
         let lw: u64 = (tw - 8) * 9 / 20
         fuiscene.set_size(cl, lw, 0)
         cr = fuiscene.card(body)
+        karte_r = (cr as u64) + 1
         fuiscene.set_size(cr, tw - 8 - lw, 0)
     } else {
         fuiscene.set_size(cl, tw, 0)

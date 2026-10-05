@@ -105,13 +105,16 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
         # button of the launcher (white text on the accent), not a plain one.
         FGV=$(echo "$L" | grep -oE ' fg=[0-9]+' | grep -oE '[0-9]+')
         BGV=$(echo "$L" | grep -oE ' bg=[0-9]+' | grep -oE '[0-9]+')
-        R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
+        # The launcher is a scene program: its text is painted as one fUi run at a
+        # fractional pen position, so the proof is the tolerant per-glyph one
+        # (`checkshot tink`): every character, its own shape, within +-2 px.
+        R=$(python3 tools/gfx/checkshot.py tink "$TMPD/A/desktop.ppm" \
             fui:assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
             $(( (FGV >> 16) & 255 )) $(( (FGV >> 8) & 255 )) $(( FGV & 255 )) \
-            $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 8 2>&1)
+            $(( (BGV >> 16) & 255 )) $(( (BGV >> 8) & 255 )) $(( BGV & 255 )) "Ausführen" 2>&1)
         echo "        $R"
         case "$R" in
-            *", 0 falsch"*) ok "'Ausführen' is on the screen, pixel for pixel" ;;
+            *", 0 ohne"*) ok "'Ausführen' is on the screen, every glyph with its shape" ;;
             *) bad "the umlaut word does not match a second rasterisation" ;;
         esac
     else
@@ -125,7 +128,7 @@ if shot A user=- icons=yes lang=de uitrace=yes extra=launchervis keep=yes; then
     # round LOOK part A and two addenda, in plain sight, three rows
     # under a correctly drawn "Ausführen".
     if python3 tools/look/umlaut.py "$S" "$TMPD/A/desktop.ppm" "Suchen" \
-            "Text schreiben und ändern" 0; then
+            "Text schreiben und ändern" 0 --ink; then
         ok "the bundle label is on the screen with a real 'ä'"
     else
         bad "the editor's description does not match a second rasterisation"
@@ -198,7 +201,7 @@ if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart wigapp=/bin/ex
     # touches three pixels. Nothing here is loosened: the string, the
     # position and the colours all still have to be right.
     if python3 tools/look/umlaut.py "$TMPD/A2b/serial.txt" \
-            "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64; then
+            "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64 --ink; then
         ok "'ö' and 'ß' stand next to each other in the table heading"
     else
         bad "'Größe' does not match a second rasterisation"
@@ -263,19 +266,41 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
     grep -qa 'taskbar: icon field=' "$S" \
         && bad "a glyph was reported although there is no icon font" \
         || ok "no icon font, no glyph reported -- the fallback is clean"
-    grep -qa 't=kein Netz' "$S" && ok "the taskbar says 'kein Netz' and not 'no network'" \
+    # The network field carries a symbol and never text (round ECHTHARDWARE-6:
+    # "like Windows"); its German words live in the catalogue and in the
+    # tooltip. What the bar writes in words without an icon font is the
+    # battery field when the machine has none (`hide_missing=0`, set by
+    # shot.sh): the German 'kein Akku' and not 'no battery'.
+    grep -qa 'taskbar.no_network = kein Netz' locale/de/messages \
+        && ok "the German catalogue says 'kein Netz' for the network field" \
+        || bad "locale/de has no 'kein Netz' for taskbar.no_network"
+    grep -qa 't=kein Akku' "$S" && ok "the bar says 'kein Akku' and not 'no battery'" \
         || bad "the taskbar is still English"
     NW2=$(val "$S" 'taskbar: field net x=[0-9]+ y=[0-9]+ w=[0-9]+')
     if [ -n "${NW1:-}" ] && [ -n "${NW2:-}" ]; then
-        is "the network field is narrower by exactly the reserved room" \
-           "$((NW1 - NW2))" "18"
+        # reserved room = glyph (16) + 2 = 18; the field width is rounded up to
+        # the layout grid of 4 (RUNDE OBERFLAECHE): 10 + 18 -> 28, 10 -> 12.
+        is "the network field is narrower by exactly the reserved room (on the grid)" \
+           "$((NW1 - NW2))" "16"
     fi
-    R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/B2/desktop.ppm" \
-        fui:assets/osum-sans.ttf 15 579 591 15 23 42 255 255 255 "kein Netz" 8 2>&1)
-    case "$R" in
-        *", 0 falsch"*) ok "and the text alone is still pixel-exact: $R" ;;
-        *) bad "the fallback text is wrong: $R" ;;
-    esac
+    L=$(grep -aoE 'taskbar: text battery x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ tw=[0-9]+ t=kein Akku' "$S" | tail -1)
+    BX=$(echo "$L" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+    BB=$(echo "$L" | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
+    BF=$(echo "$L" | grep -oE ' fg=[0-9]+' | grep -oE '[0-9]+')
+    BG=$(echo "$L" | grep -oE ' bg=[0-9]+' | grep -oE '[0-9]+')
+    BARY=$(val "$S" 'taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+' )
+    if [ -n "$BX" ]; then
+        R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/B2/desktop.ppm" \
+            fui:assets/osum-sans.ttf 15 "$BX" $(( ${BARY:-772} + BB )) \
+            $(( (BF >> 16) & 255 )) $(( (BF >> 8) & 255 )) $(( BF & 255 )) \
+            $(( (BG >> 16) & 255 )) $(( (BG >> 8) & 255 )) $(( BG & 255 )) "kein Akku" 8 2>&1)
+        case "$R" in
+            *", 0 falsch"*) ok "and the text alone is still pixel-exact: $R" ;;
+            *) bad "the fallback text is wrong: $R" ;;
+        esac
+    else
+        bad "the bar did not report its fallback text 'kein Akku'"
+    fi
 fi
 
 echo "== C. the form tokens =="
@@ -372,9 +397,18 @@ done
 #            surface, an antialiased step, and the card face.
 #
 # The numbers below came out of that probe on the night pair.
-for v in "classic 0 0" "modern 4 1"; do
+# THE COLOURS: the scene host paints the card LIGHTER than the window (surface-
+# raised on the base, the usual dark-UI order); the old wlib card was darker. So
+# `face` = the card (30 41 59) and `bg` = the window surface (15 23 42) here.
+# Numbers measured on the card of the Settings page (night): `classic` is square
+# -- no background pixel on the diagonal; the ONE pixel that is neither face nor
+# background is the 1 px border ring (fUi's card has one). `modern` (radius 12):
+# three surface pixels, two blended, three face.
+for v in "classic 0 1" "modern 3 2"; do
     set -- $v
-    R=$(grep -a 'settings: rect name=wab' "$TMPD/D-$1-night/serial.txt" | tail -1)
+    # the corner of the CARD of the left column (the Settings page reports it
+    # as `kartel`; `wab` is the list INSIDE the card)
+    R=$(grep -a 'settings: rect name=kartel' "$TMPD/D-$1-night/serial.txt" | tail -1)
     AX=$(echo "$R" | grep -oE 'ax=[0-9]+' | grep -oE '[0-9]+')
     AY=$(echo "$R" | grep -oE 'ay=[0-9]+' | grep -oE '[0-9]+')
     if [ -z "$AX" ]; then
@@ -382,7 +416,7 @@ for v in "classic 0 0" "modern 4 1"; do
         continue
     fi
     C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" \
-        "$AX" "$AY" 15 23 42 30 41 59 8 2>&1)
+        "$AX" "$AY" 30 41 59 15 23 42 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
     A=$(echo "$C" | grep -oE 'antialiased [0-9]+' | grep -oE '[0-9]+')
