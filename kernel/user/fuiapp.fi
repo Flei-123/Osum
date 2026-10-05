@@ -46,7 +46,7 @@ import fui.textbuf
 import fui.painter
 
 export {
-    open_plain, open_window, resize, plain, ctx, width, height, frame_begin, frame_end,
+    open_plain, open_window, resize, plain, cv, win_save, win_load, nostep, step_once, ctx, width, height, frame_begin, frame_end,
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_DROP,
     label, button, button_main, field, field_paint, eye, glyph, edit, mask_off,
@@ -89,7 +89,61 @@ static mut m_ok: [u8; 20] = "fuiapp: canvas w=\0\0\0"
 static mut m_h: [u8; 4] = " h=\0"
 
 fn win() -> u64 { return s_win }
+
+// SEVERAL WINDOWS: the per-window state is these eight words. fuiscene keeps a
+// saved copy of them with every window and swaps them in on a window switch.
+// `win_load` also points fUi's canvas at the window's pixels again.
+fn win_save(dst: u64) {
+    __mmio_write64((dst) as *mut u64, s_win)
+    __mmio_write64((dst + 8) as *mut u64, s_plain)
+    __mmio_write64((dst + 16) as *mut u64, s_cv)
+    __mmio_write64((dst + 24) as *mut u64, s_px)
+    __mmio_write64((dst + 32) as *mut u64, s_w)
+    __mmio_write64((dst + 40) as *mut u64, s_h)
+    __mmio_write64((dst + 48) as *mut u64, s_bound)
+    __mmio_write64((dst + 56) as *mut u64, s_box)
+}
+
+fn win_load(src: u64) {
+    s_win = __mmio_read64((src) as *mut u64)
+    s_plain = __mmio_read64((src + 8) as *mut u64)
+    s_cv = __mmio_read64((src + 16) as *mut u64)
+    s_px = __mmio_read64((src + 24) as *mut u64)
+    s_w = __mmio_read64((src + 32) as *mut u64)
+    s_h = __mmio_read64((src + 40) as *mut u64)
+    s_bound = __mmio_read64((src + 48) as *mut u64)
+    s_box = __mmio_read64((src + 56) as *mut u64)
+    if s_bound != 0 {
+        // fUi paints into ONE canvas; it is this window's pixels from now on
+        let _b: bool = fuib.app_bind(s_px, s_w, s_h)
+    }
+}
+
+// With several windows the program asks the system's event pump ONCE per round
+// (`step_once`) and then every window takes its own events (`nostep`).
+static mut s_nostep: u64 = 0
+static mut s_pend_drop: u64 = 0
+static mut s_pend_x: u64 = 0
+static mut s_pend_y: u64 = 0
+
+fn nostep(on: bool) {
+    s_nostep = 0
+    if on {
+        s_nostep = 1
+    }
+}
+
+fn step_once() {
+    wlib.idle_sleep_on()
+    let sid: u64 = wlib.step()
+    if sid < wlib.MAXWD && wlib.fired_kind() == wlib.K_DROP {
+        s_pend_drop = 1
+        s_pend_x = wlib.drop_x()
+        s_pend_y = wlib.drop_y()
+    }
+}
 fn plain() -> u64 { return s_plain }
+fn cv() -> u64 { return s_cv }
 fn width() -> u64 { return s_w }
 fn height() -> u64 { return s_h }
 fn ctx() -> *mut render.Ctx { return fuib.app_ctx() }
@@ -233,7 +287,18 @@ fn alive() -> bool {
 // again; wlib.step yields while idle).
 fn next(e: *mut Ev) -> bool {
     (*e).kind = EV_NONE
-    if wlib.canvas_pending() == 0 {
+    if s_nostep != 0 {
+        // several windows: the round's step is done; a drop belongs to the
+        // window that asks first (the program's main window)
+        if s_pend_drop != 0 {
+            s_pend_drop = 0
+            (*e).kind = EV_DROP
+            (*e).x = s_pend_x
+            (*e).y = s_pend_y
+            (*e).btn = 0
+            return true
+        }
+    } else if wlib.canvas_pending_for(s_cv) == 0 {
         wlib.idle_sleep_on()
         let sid: u64 = wlib.step()
         // a drop from another window (wlib.drop_an(true)): wlib fires
@@ -247,7 +312,7 @@ fn next(e: *mut Ev) -> bool {
         }
     }
     let q: u64 = (&s_ring[0 as usize]) as u64
-    if !wlib.canvas_event(q) {
+    if !wlib.canvas_event_for(s_cv, q) {
         return false
     }
     let art: u64 = s_ring[1 as usize]

@@ -53,26 +53,42 @@ sleep -m 300
 axd serve 0 &
 sleep 1
 /apps/scenedemo.prog/start &
-sleep 4
+sleep 12
 echo ==S-STATUS==
 act call a11y.status
 echo ==S-TREE==
 act call a11y.tree window=Szenenbaum
 echo ==S-PRESS==
 act call a11y.press name=Klick! window=Szenenbaum
-sleep 3
+sleep 6
 act call a11y.press name=Klick! window=Szenenbaum
-sleep 3
+sleep 6
 act call a11y.press action=scene.click window=Szenenbaum
-sleep 3
+sleep 6
 echo ==S-TREE2==
 act call a11y.tree window=Szenenbaum
 echo ==S-TAB==
 act call a11y.press name=Zwei window=Szenenbaum
-sleep 3
+sleep 6
 echo ==S-TREE3==
 act call a11y.tree window=Szenenbaum
 echo ==S-END==
+/apps/scenedemo.prog/start multi &
+sleep 14
+echo ==M-TREE==
+act call a11y.tree window=Mehrfenster
+echo ==M-TREE-B==
+act call a11y.tree window=Zweit
+echo ==M-PRESS==
+act call a11y.press name=Zurueck! window=Zweit
+sleep 6
+act call a11y.press name=Zurueck! window=Zweit
+sleep 6
+echo ==M-A==
+act call a11y.tree window=Mehrfenster
+echo ==M-B==
+act call a11y.tree window=Zweit
+echo ==M-END==
 act stop
 echo ==FERTIG==
 EOS
@@ -134,6 +150,19 @@ part "$G" S-TAB S-TREE3 > "$TMPD/p.txt"
 grep -qaF 'err no_such_control' "$TMPD/p.txt" && ok "a tab is not pressable through the tree (only buttons and check boxes), same as in a wlib window" || bad "tab press: $(grep -a 'err' "$TMPD/p.txt" | head -1)"
 part "$G" S-TREE3 S-END > "$TMPD/p.txt"
 grep -qaE '=tab .*selected.*"Eins"' "$TMPD/p.txt" && ok "... and the page did not change" || bad "tab Eins is not selected any more"
+
+echo "== 5. two windows in ONE program (fuiscene.win_open / pump_all) =="
+part "$G" M-TREE M-TREE-B > "$TMPD/p.txt"
+grep -qaF '"Mehrfenster"' "$TMPD/p.txt" && ok "the first window is there, named by its title" || bad "no window Mehrfenster"
+grep -qaF '"Klicks: 0"' "$TMPD/p.txt" && ok "... with its own tree (label Klicks: 0)" || bad "window 1 tree: $(head -6 "$TMPD/p.txt" | tr '\n' '|')"
+part "$G" M-TREE-B M-PRESS > "$TMPD/p.txt"
+grep -qaF '"Zweit"' "$TMPD/p.txt" && ok "the second window is there, named by its title" || bad "no window Zweit"
+grep -qaE '=button .*"Zurueck!"' "$TMPD/p.txt" && ok "... its own tree: button Zurueck!" || bad "window 2 button: $(head -6 "$TMPD/p.txt" | tr '\n' '|')"
+grep -qaF '"Zaehler: 0"' "$TMPD/p.txt" && ok "... and its label Zaehler: 0" || bad "window 2 label missing"
+part "$G" M-A M-B > "$TMPD/p.txt"
+grep -qaF '"Klicks: 2"' "$TMPD/p.txt" && ok "two presses in window 2 reach the program and change the label of window 1 (Klicks: 2)" || bad "window 1 after the presses: $(grep -a 'Klicks' "$TMPD/p.txt" | head -2)"
+part "$G" M-B M-END > "$TMPD/p.txt"
+grep -qaF '"Zaehler: 2"' "$TMPD/p.txt" && ok "... and the label of window 2 itself (Zaehler: 2)" || bad "window 2 after the presses: $(grep -a 'Zaehler' "$TMPD/p.txt" | head -2)"
 
 echo
 echo "A11Y-SCENE: $pass passed, $fail failed   (workdir $TMPD)"
