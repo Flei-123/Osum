@@ -63,6 +63,7 @@ uitrace=no
 clicks=""
 xscheme=""
 xfiles=""
+passwdfile=""
 xdirs=""
 desk_on=yes
 moncmds=""
@@ -104,6 +105,7 @@ ${a#*=}" ;;
         inodes=*) inodes=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
+        passwdfile=*) passwdfile="${a#*=}" ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
         xdir=*) xdirs="$xdirs ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
@@ -183,8 +185,14 @@ else
     printf 'nobody:x:65534:65534:nobody:/:/bin/sh\n' > "$OUT/passwd"
 fi
 printf '%s\n' de > "$OUT/userlocale"
+# r373: a whole /etc/passwd from outside (the sign-in screen's tests need
+# accounts with uid >= 1000): passwdfile=<host path>
+[ -n "$passwdfile" ] && cp -f "$passwdfile" "$OUT/passwd"
 
-ARGS=(build "$OUT/disk.img" "$bloecke")
+# r373: OFS v3 (`--v3`): a file may hold 2 134 016 octets in format 2, and the
+# file manager (with the host's clipboard, password nodes, Shift+Tab) is
+# 2 137 632. The stick has been v3 for a long time (tools/usbimg/build.sh).
+ARGS=(build "$OUT/disk.img" "$bloecke" --v3)
 # RUNDE ALLTAG: die INODE-TAFEL ist einstellbar (mkfs.py --inodes) und
 # die Vorgabe 128 ist fuer sechs Pakete zu klein -- gemessen: inodes
 # 128/128 und das sechste Buendel entstand nicht mehr.

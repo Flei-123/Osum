@@ -86,7 +86,7 @@ export {
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
     set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb,
-    cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, keys_always, has_focus,
+    cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
     // F-8: what the file manager needed
     table_multi, table_drag, table_own, table_exact, table_sel_has, table_sel_num, table_sel_all,
@@ -1174,6 +1174,12 @@ fn begin() -> bool {
 }
 
 // The window of the program (what wlib calls by number).
+// Is the caret of the focused text field in its visible phase now? (A program
+// that reports the blink -- the sign-in screen's trace -- asks for it.)
+fn caret_on() -> bool {
+    return S.s_caret_on
+}
+
 fn win_id() -> u64 {
     return fuiapp.win()
 }
@@ -1890,6 +1896,45 @@ fn paint() {
 }
 
 // Does a text field edit with this key (fuiapp.edit)?
+// ------------------------------------------------ the clipboard of a field
+//
+// Copy and cut work on what is SELECTED, and a one-line field only knows one
+// selection: everything (Ctrl+A). Without it nothing is copied (as in every
+// toolkit). A SECRET field gives nothing out -- not on copy, not on cut. Paste
+// goes into every field, a secret one too, at the caret (a selection is
+// replaced by the first character); a line break ends the pasted text.
+static mut s_clipbuf: [u8; 256] = [0 as u8; 256]
+
+fn entry_copy(slot: u64, cut: bool) {
+    if S.s_esecret[(slot) as usize] || !fuiapp.sel_on() {
+        return
+    }
+    let _p: u64 = wlib.clip_put(ebuf(slot), ulib.length(ebuf(slot)))
+    if cut {
+        fuiapp.sel_clear()
+        entry_set(S.s_ekey[(slot) as usize], (&s_empty[0 as usize]) as u64)
+    }
+}
+
+fn entry_paste(slot: u64) {
+    let b: u64 = (&s_clipbuf[0 as usize]) as u64
+    let n: u64 = wlib.clip_take(b, 250)
+    if ulib.bad(n) {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = __mmio_read8((b + i) as *mut u8) as u64
+        // a line break (or the end) ends the pasted text
+        if c < 32 && c != 9 {
+            return
+        }
+        fuiapp.edit(ebuf(slot), ENTRY_CAP as usize,
+            (&S.s_ecar[(slot) as usize]) as *mut usize, c, false)
+        i = i + 1
+    }
+}
+
 fn edit_takes(k: u64) -> bool {
     if k == 1 || k == wlib.KEY_LEFT || k == wlib.KEY_RIGHT || k == wlib.KEY_HOME
         || k == wlib.KEY_END || k == wlib.KEY_BS || k == 127 || k == wlib.KEY_DEL {
@@ -2092,7 +2137,14 @@ fn pump() -> u64 {
             if fk != fuiwirt.KEINER {
                 eslot = ed_slot_of_node(fk)
             }
-            if eslot != NO_SLOT && ev.key != wlib.KEY_TAB {
+            if ev.key == wlib.KEY_BTAB {
+                // Shift+Tab (also the sticky-keys Shift, then Tab): the focus
+                // goes BACK, whatever has it now (a text field too)
+                let _bt: u32 = fuiwirt.host_key(w, fuiwirt.KEY_TAB, fuiwirt.MOD_SHIFT)
+                S.s_caret_on = true
+                S.s_caret_t = fuiapp.now_ms()
+                touch()
+            } else if eslot != NO_SLOT && ev.key != wlib.KEY_TAB {
                 // the text area has the keyboard (Tab stays the focus key)
                 S.s_fseq = S.s_fseq + 1
                 S.s_fkey = ev.key
@@ -2123,8 +2175,14 @@ fn pump() -> u64 {
                         S.s_fkey = ev.key
                     }
                     let cp: *mut usize = (&S.s_ecar[(fslot) as usize]) as *mut usize
-                    fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
-                        false)
+                    if ev.key == wlib.KEY_CTRL_C || ev.key == wlib.KEY_CTRL_X {
+                        entry_copy(fslot, ev.key == wlib.KEY_CTRL_X)
+                    } else if ev.key == wlib.KEY_CTRL_V {
+                        entry_paste(fslot)
+                    } else {
+                        fuiapp.edit(ebuf(fslot), ENTRY_CAP as usize, cp, ev.key,
+                            false)
+                    }
                     S.s_caret_on = true
                     S.s_caret_t = fuiapp.now_ms()
                     touch()
@@ -2154,6 +2212,15 @@ fn pump() -> u64 {
                 && (acs == NO_SLOT || !S.s_ct_own[(acs) as usize]) {
                 hit = kk
             }
+        }
+        // ONE ACTIVATION BY THE KEYBOARD PER CALL (r373). When keys pile up (a
+        // slow machine, a program busy with a password check) everything after
+        // an Enter used to be typed into the fields BEFORE the program heard
+        // about the Enter: the lock screen got "falsch" + Enter + "geheim12" +
+        // Enter as one text, one attempt, and never opened. The rest of the
+        // events stay queued for the next call.
+        if hit != 0 && ev.kind == fuiapp.EV_KEY {
+            break
         }
     }
     // the caret of the focused field blinks -- but only where the system
@@ -4333,6 +4400,16 @@ const ACT_MAX: u64 = 16
 // The bus action the node with this KEY stands for, e.g. "calc.clear"
 // (the text must stay alive). A reader can then call the action instead of
 // clicking. The same word wlib.ax_action puts on a wlib control.
+// The name a screen reader says for a PASSWORD field (a secret entry): the
+// program gives it (the text must stay alive), default "Password". It shares
+// the table of `ax_action` -- a password node never carries a bus action, so
+// the one pointer per key is free for the name.
+static mut t_ax_pw: [u8; 9] = "Password\0"
+
+fn ax_name(key: u64, name: u64) {
+    ax_action(key, name)
+}
+
 fn ax_action(key: u64, name: u64) {
     var k: u64 = 0
     while k < S.s_act_n {
@@ -4382,6 +4459,12 @@ fn ax_role_of(i: usize) -> u64 {
         return wlib.AXR_CHECK
     }
     if k == widget.KIND_TEXTBOX {
+        // A SECRET FIELD IS A PASSWORD NODE (r373): no text, no value, no
+        // length in the tree -- only a name the program chose.
+        let sl: u64 = slot_of_node(i)
+        if sl != NO_SLOT && S.s_esecret[(sl) as usize] {
+            return wlib.AXR_PASSWORD
+        }
         return wlib.AXR_ENTRY
     }
     if k == widget.KIND_SLIDER {
@@ -4454,7 +4537,12 @@ fn ax_nodes_one(buf: u64, have: u64, room: u64, widx: u64) -> u64 {
             let key: u64 = scene.node_id(sc(), i) as u64
             var st: u64 = wlib.AXS_ENABLED
             var value: u64 = 0
-            if role != wlib.AXR_LABEL && role != wlib.AXR_SEPARATOR {
+            // a disabled control says so (a press on it is refused by the kernel)
+            if role != wlib.AXR_LABEL && widget.w_is_disabled(e) {
+                st = 0
+            }
+            if role != wlib.AXR_LABEL && role != wlib.AXR_SEPARATOR
+                && (st & wlib.AXS_ENABLED) != 0 {
                 st = st | wlib.AXS_FOCUSABLE
             }
             if fk != fuiwirt.KEINER && fk == i {
@@ -4478,8 +4566,17 @@ fn ax_nodes_one(buf: u64, have: u64, room: u64, widx: u64) -> u64 {
                     value = S.s_ct_sel[(c) as usize]
                 }
             }
-            // the name: the node's own text; a field's name is its text
-            if role == wlib.AXR_ENTRY {
+            // the name: the node's own text; a field's name is its text --
+            // EXCEPT a password field: its name is the one the program gave
+            // it (`ax_name`), and the tree carries no text of it, ever
+            if role == wlib.AXR_PASSWORD {
+                st = st | wlib.AXS_PROTECTED
+                var nm: u64 = ax_action_of(key)
+                if nm == 0 {
+                    nm = (&t_ax_pw[0 as usize]) as u64
+                }
+                ax_copy(p + wlib.AXN_NAME, nm, 64, wlib.AXN_NAMEMAX)
+            } else if role == wlib.AXR_ENTRY {
                 let sl: u64 = slot_of_node(i)
                 if sl != NO_SLOT {
                     ax_copy(p + wlib.AXN_NAME, ebuf(sl), ENTRY_CAP, wlib.AXN_NAMEMAX)
@@ -4491,7 +4588,7 @@ fn ax_nodes_one(buf: u64, have: u64, room: u64, widx: u64) -> u64 {
                     widget.w_text_len(e) as u64, wlib.AXN_NAMEMAX)
             }
             let act: u64 = ax_action_of(key)
-            if act != 0 && key != 0 {
+            if act != 0 && key != 0 && role != wlib.AXR_PASSWORD {
                 ax_copy(p + wlib.AXN_ACT, act, 64, wlib.AXN_ACTMAX)
             }
             __mmio_write64(p as *mut u64, role | (st << 8) | (win << 16)

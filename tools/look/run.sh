@@ -176,8 +176,15 @@ PROGS_TT="desktop taskbar settings launcher dhcp explorer widgetdemo themetest l
 # BILD"). Damit ist das Bild stabil und die Zusage misst wieder das,
 # was sie behauptet: den Rasterer.
 if shot A2a lang=de icons=yes uitrace=yes extra="themeshot" progs="$PROGS_TT" keep=yes; then
+    # r374: the window of `themetest gui` is a scene tree of fUi now (its
+    # button is the host's, painted by fUi's painter, not by wlib's fixed
+    # point rasteriser). Like the file manager below (A2b) it is measured with
+    # `--ink`: every character must have its ink on the screen at the
+    # reported place; the sub-pixel position of the edge pixels is the
+    # painter's, not the second rasterisation's (tolerance 0 said 100 % of
+    # the ink "wrong" at a correct place: 'Ü' stands at x=156 y=388).
     if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
-            "$TMPD/A2a/desktop.ppm" "Themenprobe" "Übernehmen" 0; then
+            "$TMPD/A2a/desktop.ppm" "Themenprobe" "Übernehmen" 64 --ink; then
         ok "a CAPITAL umlaut is drawn: 'Übernehmen'"
     else
         bad "'Übernehmen' does not match a second rasterisation"
