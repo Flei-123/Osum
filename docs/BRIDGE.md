@@ -285,3 +285,5 @@ Ein erster Lauf meldete `core` 10/46 und `caps` 33/1. **Beides war kein
 Fehler im Code, sondern eine volle Platte** (`No space left on device` in
 `tools/core/run.sh` Zeile 152, `/` stand auf 99 %). Nach dem Aufräumen
 sind beide grün. Es steht hier, damit es niemand ein zweites Mal sucht.
+
+See `docs/BRIDGE-OFFLINE.md` for the 05.10.2026 round: why the Dell left the bridge, the why-offline record on the server, keepalive/supervisor/watchdog in the helper, Wake-on-LAN.

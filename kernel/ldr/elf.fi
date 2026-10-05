@@ -63,10 +63,11 @@ import ipc.uio
 import ipc.perm
 import pwr.pmon
 import sched.ctr
+import sync.atomic
 import ui.ax
 
 export {
-    spawn, build, load, load_at, say_reason, errno_of,
+    spawn, build, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
     R_OK, R_NOFILE, R_ISDIR, R_SHORT, R_MAGIC, R_CLASS, R_ENDIAN,
     R_VERSION, R_TYPE, R_MACHINE, R_SIZES, R_PHNUM, R_PHOFF, R_SEGFILE,
     R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ,
@@ -1079,7 +1080,12 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
 // an image off the disk gets a ZEROED data page, because there is nothing
 // sensible for it to inherit.
 fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
+    // r334: one program start at a time on the whole machine (see
+    // `lock_enter`). Interrupts stay off from here to the end of `build`;
+    // `build` itself saves and restores the (already off) flags.
+    let lk: u64 = lock_enter(state)
     let t: u64 = build(state, path, args, argc, prio)
+    lock_leave(state, lk)
     if t == 0 {
         return 0
     }
@@ -1455,6 +1461,62 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + IPATH_SLOT, p)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + IARGS_SLOT, a)
     return n
+}
+
+// ================================================ r334: THE LOADER LOCK
+//
+// Everything `build_one` touches is ONE copy for the whole machine: the
+// header buffer (`kstate.ELF_OFF`), the interpreter path and argument
+// slots (`K16_OFF`), the auxv scalars (DYN_*) and the error word. With
+// one core that was fine; with two cores starting programs at the same
+// time (the login screen and the taskbar at boot) one of them read the
+// other's program headers, and `glogin` was refused with 'reason 17 two
+// segments one page' -- no login screen on a 4-core machine.
+//
+// The lock is a cell at the end of the loader's own page (the header
+// needs 960 of 4096 octets; the 8 slots of `atomic.fi` are all taken, see
+// `klog.fi`). Same rule as every lock here: `cli` first, then `cas`, so
+// that an interrupt on the holding core cannot spin on its own lock. It
+// is the OUTERMOST lock of a program start: taken before the scheduler,
+// frame and file system locks that `build_one` takes inside, and nothing
+// that holds one of those calls `build`.
+const LK_CELL: u64 = 4096 - 16 // 0 = free, 1 = held (kstate.ELF_MAX = 4096)
+const LK_SPINS: u64 = 4096 - 8 // turns of the waiting loop
+const LK_STUCK: u64 = 400000000
+
+// The two halves are SEPARATE small functions on purpose: the kernel
+// stack is nearly full at the deepest point of a program start (see
+// `aufloesen`), and a wrapper around `build` would keep its frame alive
+// for the whole load. `spawn` calls them before and after `build`, so
+// only one extra word (the saved flags) stays on the stack.
+fn lock_enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    if kstate.mode_on(state, kstate.M_NOELFLOCK) {
+        return flags
+    }
+    let cell: u64 = state + kstate.ELF_OFF + LK_CELL
+    var spins: u64 = 0
+    while atomic.cas(cell, 0, 1) != 0 {
+        atomic.pause()
+        spins = spins + 1
+        if spins == LK_STUCK {
+            say_lock_stuck()
+        }
+    }
+    if spins > 0 {
+        atomic.fetch_add(state + kstate.ELF_OFF + LK_SPINS, spins)
+    }
+    return flags
+}
+
+fn lock_leave(state: u64, flags: u64) {
+    atomic.store(state + kstate.ELF_OFF + LK_CELL, 0)
+    sched.irq_restore(flags)
+}
+
+fn say_lock_stuck() {
+    var s: [u8; 17] = "elf: lock stuck\n\0"
+    serial.puts((&s[0]) as u64)
 }
 
 fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {

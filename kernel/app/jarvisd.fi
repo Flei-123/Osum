@@ -338,6 +338,28 @@ static mut z_verbindungen: u64 = 0
 static mut z_wartems: u64 = 0
 static mut z_warteaufrufe: u64 = 0
 
+// ==================================================== 05.10.2026: WHY OFFLINE
+// The Dell vanished from the bridge on 04.10.2026 at 16:00 UTC without a
+// trace: no goodbye, no error. Three holes were found in this client:
+//   1. While a `befehl` runs (up to command_timeout, 1200 s on the Dell) the
+//      helper does not poll, so the server sees a silent device. Now a
+//      keepalive (`lebt`) goes out every LEBT_MS from inside the wait loop.
+//   2. The resolved address was kept for the whole run: a changed DNS answer
+//      was never noticed. Now a failed round forgets it.
+//   3. NOTHING restarts the helper if it dies: the kernel starts it once
+//      (desk_start). Now the service forks a worker and restarts it when it
+//      ends, or when it has had no good contact for `watchdog` seconds
+//      (default 600, 0 = off) -- judged from /var/jarvis/alive, which the
+//      worker rewrites after every good exchange (at most every 30 s).
+static mut k_draht: u64 = 0        // the wire of the running session, 0 = none
+static mut k_lebt_ms: u64 = 0      // uptime ms of the last keepalive or exchange
+static mut k_ok_ms: u64 = 0        // uptime ms of the last good exchange with the server
+static mut k_alive_ms: u64 = 0     // when /var/jarvis/alive was written last
+static mut k_watchdog_ms: u64 = 600000
+const LEBT_MS: u64 = 20000
+const NG_MAC0: i64 = 4
+const NG_MAC1: i64 = 5
+
 // ====================================================================
 // SYSTEMAUFRUFE, DUENN UMWICKELT
 // ====================================================================
@@ -416,6 +438,7 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
             return false
         }
         schlafe_ms(50)
+        keepalive()
     }
     syscall(S_KILL, kind, 9, 0, 0, 0, 0)
     // Do NOT wait without a limit for the killed child. A child stuck in
@@ -433,6 +456,168 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
     }
     sag("jarvisd: killed command did not end within 10 s -- left behind\n")
     return true
+}
+
+// ---------------------------------------------------- 05.10.2026: keepalive etc.
+
+// Tell the server we are alive while a command runs. Only over 443 (the raw
+// TLS wire stays open and the server sees the traffic anyway). The answer to
+// `lebt` is empty, so nothing is read; if it fails, the next try comes after
+// LEBT_MS. A server that does not know `lebt` answers `weg`, which ends the
+// session after the command -- the server was updated before this client.
+fn keepalive() {
+    if k_draht == 0 as u64 {
+        return
+    }
+    let t: u64 = now_ms()
+    if t - k_lebt_ms < LEBT_MS {
+        return
+    }
+    k_lebt_ms = t
+    let d: *mut Draht = k_draht as *mut Draht
+    if !(*d).https {
+        return
+    }
+    let _k: bool = word_send(d, "lebt", 0, 0 as usize)
+}
+
+fn alive_schreiben() {
+    var name: [u8; 18] = "/var/jarvis/alive\0"
+    let fd: i64 = sys_open((&name[0]) as u64, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if fd < 0 {
+        return
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, now_ms())
+    rt.buf_push(&b, 10 as u8)
+    sys_write(fd, b.ptr, b.len)
+    sys_close(fd)
+    rt.buf_free(&b)
+}
+
+fn alive_lesen() -> u64 {
+    var name: [u8; 18] = "/var/jarvis/alive\0"
+    var b: rt.Buf = rt.buf_new()
+    var v: u64 = 0
+    if rt.read_file((&name[0]) as u64, &b) {
+        v = num_from(b.ptr, b.len)
+    }
+    rt.buf_free(&b)
+    return v
+}
+
+// One good exchange with the server happened.
+fn gut_gemeldet() {
+    let t: u64 = now_ms()
+    k_ok_ms = t
+    k_lebt_ms = t
+    var iv: u64 = k_watchdog_ms / 4
+    if iv > 30000 {
+        iv = 30000
+    }
+    if k_alive_ms == 0 || t - k_alive_ms >= iv {
+        k_alive_ms = t
+        alive_schreiben()
+    }
+}
+
+// Tell the server what only this machine knows: the MAC of its network card
+// (the server needs it for Wake-on-LAN). `info mac=aabbccddeeff` as payload.
+fn sende_info(d: *mut Draht) {
+    let m0: u64 = syscall(S_NETGET, NG_MAC0, 0, 0, 0, 0, 0) as u64
+    let m1: u64 = syscall(S_NETGET, NG_MAC1, 0, 0, 0, 0, 0) as u64
+    var m: [u8; 6] = [0; 6]
+    m[0] = ((m0 >> 24) & 255) as u8
+    m[1] = ((m0 >> 16) & 255) as u8
+    m[2] = ((m0 >> 8) & 255) as u8
+    m[3] = (m0 & 255) as u8
+    m[4] = ((m1 >> 8) & 255) as u8
+    m[5] = (m1 & 255) as u8
+    if m0 == 0 && m1 == 0 {
+        return
+    }
+    var nutz: rt.Buf = rt.buf_new()
+    var pre: [u8; 5] = "mac=\0"
+    rt.buf_push_bytes(&nutz, (&pre[0]) as u64, 4)
+    hex_an(&nutz, (&m[0]) as u64, 6)
+    var kopf: rt.Buf = rt.buf_new()
+    var w: [u8; 5] = "info\0"
+    rt.buf_push_bytes(&kopf, (&w[0]) as u64, 4)
+    let _i: bool = sende(d, &kopf, nutz.ptr, nutz.len)
+    rt.buf_free(&kopf)
+    rt.buf_free(&nutz)
+}
+
+// The worker has had no good contact for longer than `watchdog`?
+fn zu_still(t0: u64) -> bool {
+    if k_watchdog_ms == 0 {
+        return false
+    }
+    let t: u64 = now_ms()
+    var last: u64 = alive_lesen()
+    if last > t || last < t0 {
+        last = t0
+    }
+    return t - last > k_watchdog_ms
+}
+
+// The service: fork a worker, wait for it, start a new one when it ends or
+// has gone silent. Returns true IN THE WORKER; the parent never returns.
+fn supervise() -> bool {
+    var warte: u64 = 2000
+    sag("jarvisd: supervisor started\n")
+    while true {
+        let t0: u64 = now_ms()
+        let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+        if kind == 0 {
+            return true
+        }
+        if kind < 0 {
+            sag("jarvisd: supervisor: fork refused, trying again in 10 s\n")
+            schlafe_ms(10000)
+            continue
+        }
+        var status: i32 = 0
+        var grund: u64 = 0
+        while grund == 0 {
+            let r: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
+            if r == kind || r < 0 {
+                grund = 1
+                break
+            }
+            schlafe_ms(5000)
+            if zu_still(t0) {
+                sag("jarvisd: supervisor: worker silent too long -- killing it\n")
+                syscall(S_KILL, kind, 9, 0, 0, 0, 0)
+                var k0: u64 = now_ms()
+                while now_ms() - k0 < 10000 {
+                    let r2: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
+                    if r2 == kind || r2 < 0 {
+                        break
+                    }
+                    schlafe_ms(100)
+                }
+                grund = 2
+            }
+        }
+        var a: [u8; 11] = "supervisor\0"
+        if grund == 2 {
+            notiere((&a[0]) as u64, 10, "WORKER-KILLED-SILENT", 0, 0 as usize)
+        } else {
+            notiere((&a[0]) as u64, 10, "WORKER-ENDED", 0, 0 as usize)
+        }
+        if now_ms() - t0 > 120000 {
+            warte = 2000
+        } else {
+            warte = warte * 2
+            if warte > 60000 {
+                warte = 60000
+            }
+        }
+        sag("jarvisd: supervisor: restarting the worker\n")
+        schlafe_ms(warte)
+    }
+    return false
 }
 
 fn now_ms() -> u64 {
@@ -656,6 +841,7 @@ fn konf_leeren() {
     k_max_ausgabe = 65536
     k_max_datei = 262144
     k_befehl_ms = COMMAND_MS
+    k_watchdog_ms = 600000
     var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
     hinein((&k_protokoll[0]) as u64, MAXPFAD, (&p1[0]) as u64, 20)
     var p2: [u8; 23] = "/var/jarvis/output.txt\0"
@@ -689,6 +875,7 @@ fn conf_read() -> bool {
     var s_maxa: [u8; 11] = "max_output\0"
     var s_maxd: [u8; 9] = "max_file\0"
     var s_cto: [u8; 16] = "command_timeout\0"
+    var s_wdg: [u8; 9] = "watchdog\0"
     var s_prot: [u8; 4] = "log\0"
     var s_arb: [u8; 10] = "work_file\0"
     var s_sch: [u8; 12] = "permit_file\0"
@@ -777,6 +964,11 @@ fn conf_read() -> bool {
                     let sec: u64 = num_from(wp, wl)
                     if sec >= 5 && sec <= 3600 {
                         k_befehl_ms = sec * 1000
+                    }
+                } else if ist(sp, sl, (&s_wdg[0]) as u64) {
+                    let wsec: u64 = num_from(wp, wl)
+                    if wsec == 0 || (wsec >= 20 && wsec <= 86400) {
+                        k_watchdog_ms = wsec * 1000
                     }
                 } else if ist(sp, sl, (&s_lesen[0]) as u64) {
                     list_add((&l_lesen[0]) as u64, &n_lesen, wp, wl)
@@ -1154,6 +1346,7 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
         rt.buf_push_bytes(&(*d).puf, roh.ptr + ab as u64, roh.len - ab)
     }
     rt.buf_free(&roh)
+    gut_gemeldet()
     return true
 }
 
@@ -2631,6 +2824,8 @@ fn fail_conn(schief: *mut bool) -> net.Conn {
 // Funktion tut deshalb nur zwei Dinge: den Namen aufloesen (einmal je
 // Runde, nicht je Nachricht) und das Zeilenprotokoll fuehren, das ab
 // hier UNVERAENDERT ist.
+// k_draht points at the wire `d` for the keepalive and is cleared before return.
+#[allow_escape]
 fn eine_runde_https() -> u64 {
     // Der Name wird HIER aufgeloest und nicht in der Rechteliste
     // eingetragen. `rechte.conf` sagt bisher ausdruecklich, es stehe
@@ -2668,15 +2863,23 @@ fn eine_runde_https() -> u64 {
         sag("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        k_draht = (&d) as u64
+        sende_info(&d)
         if bediene(&d) {
             erg = 0
         } else {
             erg = 2
         }
+        k_draht = 0 as u64
     } else {
         erg = an
     }
     wire_gone(&d)
+    // A failed round forgets the address: the next one asks the DNS again
+    // (before, a changed answer was never noticed).
+    if erg == 2 {
+        k_ip = 0 as u32
+    }
     return erg
 }
 
@@ -3339,6 +3542,13 @@ fn main(start: u64) -> i32 {
         return 2
     }
 
+    // Normal service start (no flags) over 443: run as supervisor + worker.
+    if k_https && argc == 1 && frist == 0 {
+        if !supervise() {
+            return 0
+        }
+    }
+    k_ok_ms = now_ms()
     var a_start: [u8; 8] = "service\0"
     notiere((&a_start[0]) as u64, 7, "started", 0, 0 as usize)
     sag("jarvisd: ready\n")
