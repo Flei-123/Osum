@@ -55,15 +55,34 @@ fuiscene.refresh()
 fuiscene.win_select(0)
 ```
 
-## Why the task bar's tooltip, toast and quick settings are not on it yet
+## The quick settings are on it (05.10.2026); tooltip and toast are not (yet)
 
-* A scene window cannot be opened and closed per hover: `wlib` never frees the
-  widget slots (`MAXWD` = 224) of a closed window, and every scene window costs a
-  few. Overlays of changing size need window re-use and a programmatic resize
-  first (roadmap).
-* The quick settings (`qs.fi`, 2900 lines) are measured to the pixel by
-  `tools/netview/kachel.py` and `checkshot.py` at the places `qs: sym` reports:
-  those checkers have to be rewritten together with the panel.
+The panel of the task bar (`qs.fi`) is **window 1** of the task bar's scene host
+(`fuiscene.foreign_main()` reserves window 0 for the bar's own raw window). It is
+created once at start, kept hidden (`WS_HIDDEN`), moved and shown on Super+A or on
+a click on the bar's icon group, and pumped with `fuiscene.pump_aux` only while it
+is open -- an idle panel costs the bar nothing. The bar's loop also calls
+`wlib.step()` while the panel is open: that is what feeds the window's pointer and
+key events to its canvas. Two details that cost an afternoon:
+
+* the window server gives the keyboard to a window that asked for it (`WS_KEYS`)
+  only when the window is **visible** at that moment: `qs.open_at` sets `WS_KEYS`
+  again after `WS_HIDDEN 0` (the bar may not raise its own window, `WM_ACT`
+  answers `E_RIGHTS`);
+* a tile is a **button face of fUi plus the program's own picture**
+  (`fuiscene.tile`: plate, hover, press, focus ring, accent fill when on; the
+  callback paints the glyph and the label lines).
+
+Still on wlib's own windows, not on the scene host:
+
+* **Tooltip and toast.** They are opened and closed per hover / per message, and
+  a scene window costs a canvas widget and ~260 KB of heap. The way out is known:
+  one window per kind, created at its largest size and kept hidden, resized down
+  with `WM_SIZE` (a window can shrink below its created size but never grow) and
+  moved with `WM_MOVE`. Not built yet (roadmap).
+* **The bar itself** (start button, window buttons, pins, status fields, clock) is
+  7 400 lines of its own layout and painting; it is painted with fUi's painter
+  through `wlib.draw_*`, but it is not a tree.
 
 ## Limits
 
