@@ -35,6 +35,10 @@ pump_all()      one system step, then every busy window takes its events,
                 rebuilds, paints; returns the first key a window answered
 hit_win()       which window that key came from (that window is selected)
 pump_win(i)     one step of ONE window, for a program with its own loop
+pump_aux(i)     the same for a program whose main window is NOT a scene window
+                (the task bar): never waits, the program's own loop does the step
+foreign_main()  reserve window 0 for such a foreign main window (never pumped, no
+                a11y nodes); the scene windows are 1..
 win_close(i)    take a window off the screen (its number stays taken)
 quit()/alive()  the program ends when ANY window said quit
 ```
@@ -50,6 +54,16 @@ fuiscene.win_select(tip)      // talk to that window
 fuiscene.refresh()
 fuiscene.win_select(0)
 ```
+
+## Why the task bar's tooltip, toast and quick settings are not on it yet
+
+* A scene window cannot be opened and closed per hover: `wlib` never frees the
+  widget slots (`MAXWD` = 224) of a closed window, and every scene window costs a
+  few. Overlays of changing size need window re-use and a programmatic resize
+  first (roadmap).
+* The quick settings (`qs.fi`, 2900 lines) are measured to the pixel by
+  `tools/netview/kachel.py` and `checkshot.py` at the places `qs: sym` reports:
+  those checkers have to be rewritten together with the panel.
 
 ## Limits
 
