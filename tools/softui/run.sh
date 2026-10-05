@@ -198,9 +198,12 @@ if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hove
 fi
 
 echo "== E. der Fokus, ohne eine knallige Farbe =="
-if [ -s "$TMPD/B/desktop.ppm" ]; then
-    python3 tools/softui/fokus.py "$TMPD/B/desktop.ppm" \
-        "$TMPD/B/serial.txt" > "$TMPD/E.txt" 2>&1
+# The focused window has to stand far enough from the screen edge for its shadow
+# to be measured (fokus.py skips x < 24): the Settings window opens at x=20, so
+# this picture has the file manager as the only extra window (it gets the focus).
+if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart wigapp=/bin/explorer'; then
+    python3 tools/softui/fokus.py "$TMPD/E0/desktop.ppm" \
+        "$TMPD/E0/serial.txt" > "$TMPD/E.txt" 2>&1
     cat "$TMPD/E.txt" | sed 's/^/        /'
     # `aktiv` steht am ZEILENANFANG, `inaktiv` auch -- und `aktiv` ist
     # ein Teilwort von `inaktiv`. Ohne das ^ zaehlt die erste Zeile

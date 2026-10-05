@@ -266,19 +266,41 @@ if shot B2 lang=de icons=no nvicons=no keep=yes; then
     grep -qa 'taskbar: icon field=' "$S" \
         && bad "a glyph was reported although there is no icon font" \
         || ok "no icon font, no glyph reported -- the fallback is clean"
-    grep -qa 't=kein Netz' "$S" && ok "the taskbar says 'kein Netz' and not 'no network'" \
+    # The network field carries a symbol and never text (round ECHTHARDWARE-6:
+    # "like Windows"); its German words live in the catalogue and in the
+    # tooltip. What the bar writes in words without an icon font is the
+    # battery field when the machine has none (`hide_missing=0`, set by
+    # shot.sh): the German 'kein Akku' and not 'no battery'.
+    grep -qa 'taskbar.no_network = kein Netz' locale/de/messages \
+        && ok "the German catalogue says 'kein Netz' for the network field" \
+        || bad "locale/de has no 'kein Netz' for taskbar.no_network"
+    grep -qa 't=kein Akku' "$S" && ok "the bar says 'kein Akku' and not 'no battery'" \
         || bad "the taskbar is still English"
     NW2=$(val "$S" 'taskbar: field net x=[0-9]+ y=[0-9]+ w=[0-9]+')
     if [ -n "${NW1:-}" ] && [ -n "${NW2:-}" ]; then
-        is "the network field is narrower by exactly the reserved room" \
-           "$((NW1 - NW2))" "18"
+        # reserved room = glyph (16) + 2 = 18; the field width is rounded up to
+        # the layout grid of 4 (RUNDE OBERFLAECHE): 10 + 18 -> 28, 10 -> 12.
+        is "the network field is narrower by exactly the reserved room (on the grid)" \
+           "$((NW1 - NW2))" "16"
     fi
-    R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/B2/desktop.ppm" \
-        fui:assets/osum-sans.ttf 15 579 591 15 23 42 255 255 255 "kein Netz" 8 2>&1)
-    case "$R" in
-        *", 0 falsch"*) ok "and the text alone is still pixel-exact: $R" ;;
-        *) bad "the fallback text is wrong: $R" ;;
-    esac
+    L=$(grep -aoE 'taskbar: text battery x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ tw=[0-9]+ t=kein Akku' "$S" | tail -1)
+    BX=$(echo "$L" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+    BB=$(echo "$L" | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
+    BF=$(echo "$L" | grep -oE ' fg=[0-9]+' | grep -oE '[0-9]+')
+    BG=$(echo "$L" | grep -oE ' bg=[0-9]+' | grep -oE '[0-9]+')
+    BARY=$(val "$S" 'taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+' )
+    if [ -n "$BX" ]; then
+        R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/B2/desktop.ppm" \
+            fui:assets/osum-sans.ttf 15 "$BX" $(( ${BARY:-772} + BB )) \
+            $(( (BF >> 16) & 255 )) $(( (BF >> 8) & 255 )) $(( BF & 255 )) \
+            $(( (BG >> 16) & 255 )) $(( (BG >> 8) & 255 )) $(( BG & 255 )) "kein Akku" 8 2>&1)
+        case "$R" in
+            *", 0 falsch"*) ok "and the text alone is still pixel-exact: $R" ;;
+            *) bad "the fallback text is wrong: $R" ;;
+        esac
+    else
+        bad "the bar did not report its fallback text 'kein Akku'"
+    fi
 fi
 
 echo "== C. the form tokens =="
@@ -377,7 +399,9 @@ done
 # The numbers below came out of that probe on the night pair.
 for v in "classic 0 0" "modern 4 1"; do
     set -- $v
-    R=$(grep -a 'settings: rect name=wab' "$TMPD/D-$1-night/serial.txt" | tail -1)
+    # the corner of the CARD of the left column (the Settings page reports it
+    # as `kartel`; `wab` is the list INSIDE the card)
+    R=$(grep -a 'settings: rect name=kartel' "$TMPD/D-$1-night/serial.txt" | tail -1)
     AX=$(echo "$R" | grep -oE 'ax=[0-9]+' | grep -oE '[0-9]+')
     AY=$(echo "$R" | grep -oE 'ay=[0-9]+' | grep -oE '[0-9]+')
     if [ -z "$AX" ]; then
