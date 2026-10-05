@@ -40,7 +40,10 @@ def main():
     pause = float(sys.argv[3]) if len(sys.argv) > 3 else 0.10
 
     s = None
-    bis = time.time() + 15.0
+    # r377: 90 s, not 15. On a loaded host (a dozen acceptance runs at once)
+    # QEMU takes longer than 15 s to create its monitor socket, and the whole
+    # key script was then thrown away ("kein Monitor an ...").
+    bis = time.time() + 90.0
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)

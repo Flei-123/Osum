@@ -189,7 +189,10 @@ printf '%s\n' de > "$OUT/userlocale"
 # accounts with uid >= 1000): passwdfile=<host path>
 [ -n "$passwdfile" ] && cp -f "$passwdfile" "$OUT/passwd"
 
-ARGS=(build "$OUT/disk.img" "$bloecke")
+# r373: OFS v3 (`--v3`): a file may hold 2 134 016 octets in format 2, and the
+# file manager (with the host's clipboard, password nodes, Shift+Tab) is
+# 2 137 632. The stick has been v3 for a long time (tools/usbimg/build.sh).
+ARGS=(build "$OUT/disk.img" "$bloecke" --v3)
 # RUNDE ALLTAG: die INODE-TAFEL ist einstellbar (mkfs.py --inodes) und
 # die Vorgabe 128 ist fuer sechs Pakete zu klein -- gemessen: inodes
 # 128/128 und das sechste Buendel entstand nicht mehr.
