@@ -40,7 +40,17 @@ wie viele Reihen am oberen Rand der Kachel das Symbol einnimmt.
 Verwendung:
     kachel.py <schirm.ppm> <panel-x> <panel-y> <panel-w> <panel-h>
               <pad> <tw> <th> <gap> <kacheln> <oben>
+    kachel.py <schirm.ppm> --rects <oben> <rand> x,y,w,h [x,y,w,h ...]
     -> "ok" und Rueckgabe 0, oder je Beanstandung eine Zeile und 1
+
+DIE ZWEITE FORM (05.10.2026, Kontrollzentrum auf dem Szenenbaum): die Kacheln
+stehen nicht mehr in einem Raster, das dieses Werkzeug nachrechnen koennte --
+der Szenenbaum legt sie aus, und das Panel MELDET sie (`qs: kachel n= x= y=
+w= h=`, dazu `qs: geo` fuer den Ursprung). Die Rechtecke kommen in
+BILDSCHIRMKOORDINATEN; gemessen wird in jedem dasselbe wie vorher. `rand` ist
+der Streifen am Kachelrand, der nicht zaehlt (die Rundung der Platte; vorher
+fest 2): Die Platten des Kontrollzentrums haben Radius 8 (mal Vervielfachung, und
+bei 2 sieht man 28): 12 mal Vervielfachung lassen die Ecken aus.
 """
 
 import sys
@@ -68,36 +78,22 @@ def ppm(pfad):
     return w, h, d[at:]
 
 
-def main(argv):
-    if len(argv) < 12:
-        print(__doc__)
-        return 2
-    (schirm, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
-        argv[1], *[int(v) for v in argv[2:12]])
-    w, h, roh = ppm(schirm)
-
-    def pixel(x, y):
-        if x < 0 or y < 0 or x >= w or y >= h:
-            return None
-        at = (y * w + x) * 3
-        return (roh[at], roh[at + 1], roh[at + 2])
-
+def pruefe(w, h, pixel, kacheln, oben, rand=2):
+    """kacheln: Liste (tx, ty, tw, th). Gibt (fehler, meldungen)."""
     fehler = []
-    if px + pw > w or py + ph > h:
-        print("das Panel bei %d,%d %dx%d liegt nicht auf einem %dx%d-Schirm"
-              % (px, py, pw, ph, w, h))
-        return 1
-
-    for t in range(n):
-        tx = px + pad + (t % 2) * (tw + gap)
-        ty = py + pad + (t // 2) * (th + gap)
+    meld = []
+    for t, (tx, ty, tw, th) in enumerate(kacheln):
+        if tx < 0 or ty < 0 or tx + tw > w or ty + th > h:
+            fehler.append("Kachel %d: %d,%d %dx%d liegt nicht auf dem Schirm"
+                          % (t, tx, ty, tw, th))
+            continue
         # DIE FLAECHE DER KACHEL: die haeufigste Farbe im inneren
         # Rechteck. Nicht geraten und nicht aus einer Datei -- ein
         # Farbschema darf sich aendern, ohne dass diese Pruefung falsch
         # wird.
         zaehl = {}
-        for y in range(ty + 3, ty + th - 3):
-            for x in range(tx + 3, tx + tw - 3):
+        for y in range(ty + rand + 1, ty + th - rand - 1):
+            for x in range(tx + rand + 1, tx + tw - rand - 1):
                 c = pixel(x, y)
                 zaehl[c] = zaehl.get(c, 0) + 1
         flaeche = max(zaehl, key=zaehl.get)
@@ -108,11 +104,11 @@ def main(argv):
         # Symbol, das ueberlaeuft, waere derselbe Fehler --, aber die
         # Bloecke werden erst UNTERHALB des Symbolbandes gezaehlt.
         zeilen = []
-        rechts = tx + 2
-        links = tx + tw - 3
-        for y in range(ty + 2, ty + th - 2):
+        rechts = tx + rand
+        links = tx + tw - rand - 1
+        for y in range(ty + rand, ty + th - rand):
             n_in = 0
-            for x in range(tx + 2, tx + tw - 3):
+            for x in range(tx + rand, tx + tw - rand - 1):
                 if pixel(x, y) != flaeche:
                     n_in += 1
                     if x > rechts:
@@ -124,11 +120,11 @@ def main(argv):
         # UEBER DEN RAND: liegt rechts vom letzten eingefaerbten
         # Bildpunkt noch Kachel? Es muss, sonst steht die Beschriftung
         # auf dem Rahmen oder darueber hinaus.
-        if rechts >= tx + tw - 4:
+        if rechts >= tx + tw - rand - 2:
             fehler.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
                           "bei %d -- die Beschriftung laeuft ueber"
                           % (t, rechts, tx + tw - 1))
-        if links <= tx + 2:
+        if links <= tx + rand:
             fehler.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
                           "bei %d an" % (t, links, tx))
 
@@ -147,9 +143,10 @@ def main(argv):
                 anf = None
         if anf is not None:
             bloecke.append((anf, zeilen[-1][0]))
-        if len(bloecke) != 2:
-            fehler.append("Kachel %d: %d Textbloecke statt zwei "
-                          "(Beschriftung, Wort) -- %s"
+        # ein, zwei oder drei Zeilen Text (ein langes Wort bricht um): die
+        # Bloecke muessen nur durch Luecken getrennt sein
+        if len(bloecke) < 1 or len(bloecke) > 3:
+            fehler.append("Kachel %d: %d Textbloecke -- %s"
                           % (t, len(bloecke), bloecke))
         else:
             for i in range(len(bloecke) - 1):
@@ -158,9 +155,59 @@ def main(argv):
                     fehler.append("Kachel %d: nur %d Reihen zwischen %s "
                                   "und %s -- die Zeilen kleben"
                                   % (t, luecke, bloecke[i], bloecke[i + 1]))
-        print("kachel %d: x %d..%d von %d..%d, Bloecke %s"
-              % (t, links, rechts, tx, tx + tw - 1, bloecke))
+        meld.append("kachel %d: x %d..%d von %d..%d, Bloecke %s"
+                    % (t, links, rechts, tx, tx + tw - 1, bloecke))
+    return fehler, meld
 
+
+def main(argv):
+    if len(argv) >= 5 and argv[2] == "--rects":
+        schirm = argv[1]
+        oben = int(argv[3])
+        rand = int(argv[4])
+        rects = [tuple(int(v) for v in a.split(",")) for a in argv[5:]]
+        w, h, roh = ppm(schirm)
+
+        def pixel(x, y):
+            if x < 0 or y < 0 or x >= w or y >= h:
+                return None
+            at = (y * w + x) * 3
+            return (roh[at], roh[at + 1], roh[at + 2])
+
+        fehler, meld = pruefe(w, h, pixel, rects, oben, rand)
+        for m in meld:
+            print(m)
+        if fehler:
+            for f in fehler:
+                print("FALSCH " + f)
+            return 1
+        print("ok %d Kacheln, nichts laeuft ueber und nichts klebt" % len(rects))
+        return 0
+    if len(argv) < 12:
+        print(__doc__)
+        return 2
+    (schirm, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
+        argv[1], *[int(v) for v in argv[2:12]])
+    w, h, roh = ppm(schirm)
+
+    def pixel(x, y):
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return None
+        at = (y * w + x) * 3
+        return (roh[at], roh[at + 1], roh[at + 2])
+
+    if px + pw > w or py + ph > h:
+        print("das Panel bei %d,%d %dx%d liegt nicht auf einem %dx%d-Schirm"
+              % (px, py, pw, ph, w, h))
+        return 1
+    kacheln = []
+    for t in range(n):
+        tx = px + pad + (t % 2) * (tw + gap)
+        ty = py + pad + (t // 2) * (th + gap)
+        kacheln.append((tx, ty, tw, th))
+    fehler, meld = pruefe(w, h, pixel, kacheln, oben)
+    for m in meld:
+        print(m)
     if fehler:
         for f in fehler:
             print("FALSCH " + f)

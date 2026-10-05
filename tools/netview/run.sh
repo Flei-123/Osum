@@ -501,7 +501,7 @@ set_edge() { # edge
 # as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 32768 /lib/
+    local ARGS=(build "$img" 32768 --v3 --inodes=512 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
@@ -1073,8 +1073,16 @@ for ed in bottom top left right; do
             # this panel really had -- a label four pixels past its own
             # tile, and two text rows touching. Neither is visible in a
             # source file.
-            r=$(python3 tools/netview/kachel.py "$P" "$qx" "$qy" "$qw" "$qh" \
-                10 180 74 8 3 28 2>&1 | tail -1)
+            # THE TILES COME FROM THE PANEL'S OWN REPORT (`qs: kachel`): since
+            # 05.10.2026 the scene tree lays them out, not a grid this script
+            # could recompute. Panel-relative in the report, screen pixels here.
+            rects=""
+            while read -r kx ky kw kh; do
+                rects="$rects $((qx + kx)),$((qy + ky)),$kw,$kh"
+            done < <(grep -aoE '^qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$L" \
+                | tail -4 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
+            # shellcheck disable=SC2086
+            r=$(python3 tools/netview/kachel.py "$P" --rects 33 12 $rects 2>&1 | tail -1)
             case "$r" in ok*) ok "$ed: the tiles hold their labels -- $r" ;;
                          *)   bad "$ed: tile layout: $r" ;; esac
             # AND THE SYMBOLS at the places the panel said it drew them,

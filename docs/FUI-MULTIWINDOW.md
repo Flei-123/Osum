@@ -55,19 +55,48 @@ fuiscene.refresh()
 fuiscene.win_select(0)
 ```
 
-## Why the task bar's tooltip, toast and quick settings are not on it yet
+## The bar's quick settings, tooltip and toast are on it (05.10.2026)
 
-* A scene window cannot be opened and closed per hover: `wlib` never frees the
-  widget slots (`MAXWD` = 224) of a closed window, and every scene window costs a
-  few. Overlays of changing size need window re-use and a programmatic resize
-  first (roadmap).
-* The quick settings (`qs.fi`, 2900 lines) are measured to the pixel by
-  `tools/netview/kachel.py` and `checkshot.py` at the places `qs: sym` reports:
-  those checkers have to be rewritten together with the panel.
+The task bar (`taskbar.fi`) keeps its own raw window as window 0
+(`fuiscene.foreign_main()`, called by `qs.init`) and has three scene windows:
+
+| window | what | layer | created | life |
+|---|---|---|---|---|
+| 1 | quick settings (`qs.fi`): card, tiles, two sliders, separator, footer | `L_MENUE` | at start, hidden | shown on Super+A / a click on the icon group |
+| 2 | tooltip (`barpop.fi`) | `L_TIP` | at start, hidden, 480 x 40 points | text -> `WM_SIZE` -> repaint -> `WM_MOVE` -> show |
+| 3 | toast (`barpop.fi`) | `L_TIP` | at start, hidden, 640 x 64 points | the same |
+
+Why this works now although it did not: nothing is opened and closed per hover.
+A window can **shrink** below the size it was created with and grow back up to it
+for free (the server keeps the buffer, `wm.resize_win`); growing past it allocates a
+new buffer and leaks the old one, so a pop-up that changes its size is created at its
+largest. `fuiscene.win_size` sends `WM_SIZE` and tells wlib at once
+(`wlib.note_resize`, the same book-keeping as the `E_RESIZE` handler -- the bar does
+not call `wlib.step` every turn and cannot wait for the event); the next `pump_aux`
+rebinds fUi to a buffer of the new size (`fuiapp.resize`, which now accepts windows
+down to 16 x 8 pixels).
+
+The panel is pumped with `fuiscene.pump_aux` only while it is open -- an idle
+panel costs the bar nothing. While it is open the bar's loop also calls
+`wlib.step()`: that feeds the window's pointer and key events to its canvas. Two
+details that cost an afternoon:
+
+* the window server gives the keyboard to a window that asked for it (`WS_KEYS`)
+  only when the window is **visible** at that moment: `qs.open_at` sets `WS_KEYS`
+  again after `WS_HIDDEN 0` (the bar may not raise its own window, `WM_ACT`
+  answers `E_RIGHTS`);
+* a tile is a **button face of fUi plus the program's own picture**
+  (`fuiscene.tile`: plate, hover, press, focus ring, accent fill when on; the
+  callback paints the glyph and the label lines), a pop-up is **one canvas node**
+  painted with the same calls (`cv_round_rgb`, `cv_ring_rgb`, `cv_text_rgb`).
+
+Still not a tree: **the bar itself** (start button, window buttons, pins, status
+fields, clock) -- 7 400 lines of its own layout and painting. It is painted with
+fUi's painter through `wlib.draw_*`, but it is not a scene.
 
 ## Limits
 
-* At most `MAXWIN` = 6 windows.
+* At most `MAXWIN` = 6 windows (the task bar uses four: its own and three scene windows).
 * Tables, text fields, the text area and the editor use tables that live in
   `fuied` (global): a program uses them in window 0 only. Windows 1.. are for
   labels, buttons, cards, canvases, progress bars: panels, tips, toasts.
