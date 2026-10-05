@@ -113,5 +113,14 @@ hat "$S" "glogin: schnell=1" "the network icon opens the network text"
 hat "$S" "glogin: schnell=0" "a second Enter closes it again"
 hatnicht "$S" "glogin: energie" "COUNTER-PROOF: nothing was switched off"
 
+echo "== Shift+Tab goes back =="
+run g8 10 tab tab shift-tab
+F=$(foc "$OUT/g8/serial.txt" | tr -s ' ' | sed 's/^0 //')
+echo "        focus order: $F"
+case "$F" in
+    "7 7 16 8 16 "|"7 16 8 16 ") ok "Tab, Tab, Shift+Tab: Kennwort, Auge, Anmelden, back to Auge";;
+    *) bad "Shift+Tab chain: '$F'";;
+esac
+
 echo; echo "LOGINSCENE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

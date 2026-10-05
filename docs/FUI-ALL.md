@@ -448,7 +448,7 @@ NAMES (after the row icon), not over the icons.
   the TEXT starts (they reported the node's left edge and the box's accent fill
   counted as the label's ground).
 
-## 11. What is fUi and what is not (measured 05.10.2026, main)
+## 11. What is fUi and what is not (measured 05.10.2026 evening, branch fui-login)
 
 Lines of the programs' own source (`kernel/user`), grouped by how their window
 is built. All of them paint with fUi's painter since stage 1; the question here
@@ -456,26 +456,77 @@ is whether the window is a fUi **scene tree**.
 
 | group | programs | lines | share |
 |---|---|---|---|
-| scene tree (`fuiscene`) | explorer, settings, nedit (+`fuied`), launcher (start menu), taskmgr, calc, viewer, snip, pdfview, installer, freunde, papierkorb, storage, store, netmon, powermon | 28 739 | 66.0 % |
-| scene tree, windows of the task bar | quick settings (`qs`), tooltip and toast (`barpop`) | 1 937 | 4.4 % |
-| fUi widgets on a canvas, no tree | lock screen | 794 | 1.8 % |
-| wlib widgets (old toolkit) | login (`glogin`), widgetdemo, a11ydemo, themetest, certus | 3 741 | 8.6 % |
-| own painting routine, fUi painter | the task bar itself (7 321), the desktop (1 008) | 8 329 | 19.1 % |
+| scene tree (`fuiscene`) | explorer, settings, nedit (+`fuied`), launcher (start menu), taskmgr, calc, viewer, snip, pdfview, installer, freunde, papierkorb, storage, store, netmon, powermon | 28 739 | 67.2 % |
+| scene tree, windows of the task bar | quick settings (`qs`), tooltip and toast (`barpop`) | 1 937 | 4.5 % |
+| scene tree (r372/r373/r374, this round) | lock screen, sign-in screen (`glogin`), certus placeholder, a11ydemo, themetest (its gui test) | 3 243 | 7.6 % |
+| wlib widgets (old toolkit) | widgetdemo (the K15 anchor) | 495 | 1.2 % |
+| own painting routine, fUi painter | the task bar itself (7 321), the desktop (1 008) | 8 329 | 19.5 % |
 
-So **70 %** of the GUI programs' lines are described as a scene tree; by number
-**16 of 24** programs with a window are scene trees (two thirds), and the task
-bar has three of its four windows on the tree. Under all of them:
+So **79 %** of the GUI programs' lines are described as a scene tree (before
+this round 70 %); by number **21 of 24** programs with a window are scene trees (the three
+others: widgetdemo, the bar, the desktop). Nothing of the lock screen or the sign-in screen
+paints by hand any more, and neither keeps a wlib fallback.
+
+Under all of them:
 
 * **wlib** (12 822 lines) is still the layer every fUi program sits on: window
   creation, the event pump, the accessibility export, the clipboard and drag
-  plumbing, `canvas` widget; plus the widget list the 5 old programs use.
+  plumbing. Its **widget list** (button, entry, list, menus, dialogs ...) has
+  exactly ONE user left: `widgetdemo`, the application the K15 acceptance
+  (`tools/k15/run.sh`, 258 checks, nine of its ten sections) measures the
+  widget library on, with counter-proofs (`nohit`, `noclip`, `nodirty`,
+  `nofocus`, `nomouse`). The list can go when `widgetdemo` and K15 move to a
+  scene-tree equivalent -- a rewrite of the acceptance, not of a program.
   *Not replaced.*
 * **The window server** (`kernel/ui/wm.fi`, 14 212 lines) draws frame, title bar
-  and hover plates with `fb.*` fills (the caption glyphs and every corner are fUi
-  core since r42); the **terminal** is a text grid of the kernel (`ansi`, `wm`),
-  not a program. *Not replaced.*
-* Still to do, in this order of effort: lock screen -> scene (794), login ->
-  scene (1 835, the password field exists in fUi), the bar itself -> scene
-  (7 321: pins, window buttons, status fields, clock, drag-to-edge, auto-hide,
-  context menu), then wlib's widget list can go, then the window server's
-  decorations.
+  and hover plates with `fb.*` fills; the **terminal** is a text grid of the
+  kernel (`ansi`, `wm`). *Not replaced.*
+* **The bar itself** (`taskbar.fi`, 7 321 lines): its own layout (`layout`,
+  450 lines of pixel rules for both orientations, field widths snapped to the
+  grid, shortening, hiding of missing hardware) and its own painting
+  (`paint_band`, 800 lines), hit testing (`click`, `hover_step`), drag, auto
+  hide. Most acceptance runs measure its pixels (themestore 298, look, glyphe,
+  netview, toolbench). The way in, in this order: (1) a tree whose nodes sit at
+  the rectangles `layout()` already computes, each node painted by the existing
+  painters through a draw callback (pixel-identical, a11y nodes and focus for
+  free), (2) click/hover/drag handled by the host (`pump` keys) instead of
+  `click()`, (3) the layout itself in flex boxes, (4) the window of the bar
+  from `fuiscene.win_open_plain`. *Not started.*
+
+## 12. Round r372-r374: lock screen, sign-in screen and the small programs (05.10.2026)
+
+* **Lock screen** (`lock.fi`, 794 -> 476 lines): `fuiscene.open_plain` on layer
+  `L_TOP`, a column (name, question, password field + eye, main button). The
+  kernel side is unchanged: it locks, this program asks and tells it to open;
+  a crash still locks and never unlocks. `tools/lockscene/run.sh` 13/0: tree,
+  grid 100 %, wrong then right password, only wrong passwords (counter-proof),
+  the eye through the keyboard, crash.
+* **Sign-in screen** (`glogin.fi`, 1 835 -> 1 342 lines): card with the question,
+  the user (label, list or name field), password field with eye, "Anmelden",
+  "Anderer Benutzer"; clock, network and power at the bottom right with the
+  network text / power choice as cards. The trace lines of the old screen
+  (`glogin: rect`, `wlib: focus`, `wlib: caret`, `wlib: eye`) are written from
+  the tree, so `tools/loginui/run.sh` (stick, USB mouse and keyboard, PS/2) and
+  `tools/loginscene/run.sh` (20/0: tree, grid 97 %, Tab chain, caret, eye,
+  wrong/right password, other user, quick access, counter-proofs) measure the
+  same screen. **Different on purpose:** the host puts every button into the Tab
+  chain, so the eye and the two quick-access icons are Tab stops now
+  (Kennwort, Auge, Anmelden, Anderer Benutzer, Netzwerk, Ein/Aus); before the
+  chain had three. Shift+Tab (also sticky Shift, then Tab) now goes back in
+  every scene window (the host did not know `KEY_BTAB`).
+* **Certus placeholder, a11ydemo, themetest (gui test)**: three labels; the
+  measuring app of the accessibility tree (entry, password field, check box,
+  three buttons with bus actions, list); the window the theme-switching cost is
+  measured on. `tools/a11y/run.sh` 58/0 with them.
+* **Found on the way, fixed: the scene host exported a secret field's TEXT as
+  the node's name.** The lock screen, the sign-in screen and the installer
+  would have shown a typed password to every reader of the tree. A secret
+  field is now role `password`, state `protected`, only the name the program
+  gave it (`fuiscene.ax_name`), value 0; `tools/a11y/scene.sh` holds the canary
+  `GEHEIMNIS7` in a secret field and finds it nowhere (25/0). Disabled controls
+  also export "not enabled" now (a press on them is refused by the kernel).
+* **Host additions:** `fuiscene.caret_on()`, `fuiscene.ax_name`, Shift+Tab; the
+  program asks `AXI_ON` every 4 steps instead of 64 (a program that sleeps in
+  its idle loop took seconds to notice the first reader).
+* Test helper: `tools/alltag/build.sh passwdfile=<host file>` puts a whole
+  `/etc/passwd` (accounts with uid >= 1000) on the disk.

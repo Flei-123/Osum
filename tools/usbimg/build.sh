@@ -99,7 +99,10 @@ ESP_MIB=${ESP_MIB:-96}
 # DAILY-DRIVER (02.10.2026): 65536 -> 81920 blocks (40 MiB). The PDF viewer
 # (pdfview, 1.9 MB), accountcli and the fatter installer filled the 32 MiB image:
 # "mkfs: the disk is full". 81920 blocks need 20 of the 128 map blocks.
-FS_BLOCKS=${FS_BLOCKS:-81920}
+# r373 (05.10.2026): 81920 -> 90112 blocks (44 MiB). The lock screen, the
+# sign-in screen, certus, themetest and a11ydemo carry fUi's scene host now
+# (~250 KB each): "mkfs: the disk is full" again.
+FS_BLOCKS=${FS_BLOCKS:-90112}
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
