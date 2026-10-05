@@ -427,7 +427,10 @@ def parse(path, marke="settings: rect name=waa "):
         # Aeltere Mitschnitte haben die zwei Felder nicht -- dann gilt
         # "nicht gekuerzt", und diese Datei misst wie vorher.
         k = KURZ.search(raw)
-        out.append(dict(win=int(m.group(1)), kind=int(m.group(2)),
+        axm = re.search(r" ax=(-?\d+) ay=(-?\d+)", raw)
+        out.append(dict(ax=int(axm.group(1)) if axm else None,
+                        ay=int(axm.group(2)) if axm else None,
+                        win=int(m.group(1)), kind=int(m.group(2)),
                         x=int(m.group(3)), base=int(m.group(4)),
                         fg=int(m.group(5)), bg=int(m.group(6)),
                         tw=int(m.group(7)), t=m.group(8),
@@ -706,6 +709,12 @@ def main(argv):
     if not forced and want_win in wins:
         w = wins[want_win]
         ox, oy, ww, wh = w["cx"], w["cy"], w["w"], w["h"]
+    elif not forced and texts and texts[0].get("ax") is not None:
+        # The window-number lines (`wlib: win id=`) carry the window HANDLE and
+        # every program numbers its own windows from 0, so the number finds no
+        # line. Every text of a scene window says where its client area is
+        # (`ax=`/`ay=`, in the picture's coordinates): that is the origin.
+        ox, oy = texts[0]["ax"], texts[0]["ay"]
     # Die gemessenen Zahlen der Schrift, nicht die geratenen.
     asc, desc = font if font else (16, 6)
     bad = []

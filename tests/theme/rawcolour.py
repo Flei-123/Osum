@@ -91,13 +91,31 @@ ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
 # a wire format, an opacity mask, or a debug board that must stay
 # readable in every theme precisely BECAUSE it ignores the theme.
 ALLOWED_FN = {
-    "kernel/user/wlibc.fi": ["fn primitives_builtin"],
+    # `platte` ORs the marker of a text plate into the high byte of a pixel:
+    # 0xFFFFFF is the mask that keeps the colour, not a colour.
+    "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte"],
+    # The two report functions print the bar's colour as six hex digits:
+    # `& 0xFFFFFF` strips the alpha byte, it names no colour.
+    "kernel/user/taskbar.fi": ["fn glas_say", "fn schild_say"],
     "kernel/ui/wm.fi": [
         # The server paints frame and title bar because it composites the
         # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
         # is what it draws with until somebody does, and a machine whose
         # taskbar has not started yet may not be black on black.
         "fn deco_fallback",
+        # ---------------------------------------------- DELL ROUND, 05.10.
+        # `glass_mix` keeps the colour part of a pixel (`neu & 0xFFFFFF`):
+        # a mask, not a colour.
+        "fn glass_mix",
+        # `selftest_glas` paints known probe colours and compares them: the
+        # values are the test's fixtures, like PROBE_IN / PROBE_OUT above.
+        "fn selftest_glas",
+        # `td_paint` is the confirmation dialog "OrientOS - Bestaetigung
+        # (vom System)": a message of the SYSTEM, not of a program. It must
+        # not follow a theme -- a theme is something a program (or the user's
+        # own scheme file) controls, and a dialog that asks "may this run?"
+        # has to look the same in every theme or it can be imitated.
+        "fn td_paint",
         # ---------------------------------------------- A-022, reason 1
         # `sig_colour` IS A WIRE FORMAT, NOT A STYLE.
         #

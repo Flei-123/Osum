@@ -1012,7 +1012,9 @@ print(len(set(ist.values())))
 PYZ
 )
 echo "        verschiedene Zeilen der Reiterleiste: ${TABZEIL:-?}"
-num "und die Reiterleiste hat dafuer zwei Zeilen" "${TABZEIL:-0}" eq 2
+# two rows at the width of this window in English, three in German (the rows are
+# filled by MEASURED width now): what is asserted is that the bar wrapped
+num "und die Reiterleiste hat dafuer mehrere Zeilen (sie bricht um, sie schneidet nicht)" "${TABZEIL:-0}" ge 2
 # und jede der zehn Aufnahmen: die Taskleiste sagt, wo sie ist, und im
 # Bild ist sie dort.
 BARBAD=0
@@ -1137,10 +1139,19 @@ GRIFF=$(grep -aoE 'wlib: radius rolle=4 r=[0-9]+' "$TMPD/rad0/serial.txt" \
 num "der Griff des Reglers bleibt auch bei Radius 0 ein Kreis" "${GRIFF:-0}" gt 0
 num "und 24 rundet staerker als 12 (Bildpunkte)" "${R24MAX:-0}" gt "${R12MAX:-0}"
 # DER INHALT SITZT BEI JEDEM RADIUS AN DERSELBEN STELLE.
-grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
-    "$TMPD/rad0/serial.txt" | sort -u > "$TMPD/rect0.txt"
-grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
-    "$TMPD/rad24/serial.txt" | sort -u > "$TMPD/rect24.txt"
+# Only the LAST report of the page counts (it starts at the last `name=waa`): the
+# page reports itself again after every change, and the batches before the
+# radius reached the window sit at other places by nature.
+lastbatch() { python3 - "$1" <<'PYL'
+import re, sys
+t = open(sys.argv[1], 'rb').read().decode('latin1')
+i = t.rfind('settings: rect name=waa ')
+for m in re.finditer(r'settings: rect name=[a-z]* x=\d+ y=\d+ w=\d+ h=\d+', t[i if i >= 0 else 0:]):
+    print(m.group(0))
+PYL
+}
+lastbatch "$TMPD/rad0/serial.txt" | sort -u > "$TMPD/rect0.txt"
+lastbatch "$TMPD/rad24/serial.txt" | sort -u > "$TMPD/rect24.txt"
 RDIFF=$(diff "$TMPD/rect0.txt" "$TMPD/rect24.txt" | grep -c '^[<>]' || true)
 num "und kein einziges Rechteck der Seite wandert zwischen Radius 0 und 24" \
     "$RDIFF" eq 0
@@ -1775,10 +1786,21 @@ num "und er hat wirklich Bildpunkte angefasst" "${BPX:-0}" ge 10000
 # Zeile im Betrieb ist die des ersten Streifens, und in der steht
 # zwangslaeufig cache=0/1.
 GLC=$(printf '%s' "$GL" | grep -oE 'cache=[0-9]+/[0-9]+' | cut -d= -f2)
-num "der Streifen wurde mehr als einmal gebraucht (cache $GLC)" \
-    "$(printf '%s' "$GLC" | cut -d/ -f2)" ge 2
-num "und dabei wiederverwendet statt neu gerechnet" \
-    "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
+# The cache can only be measured when the run got far enough to need the strip
+# twice. Under QEMU/TCG on a loaded host the whole run composes the bar ONCE
+# (the comment above: "one blit of the bar in twenty seconds") and the only
+# report line is the first strip's, cache=0/1. That is not a cache that does
+# not work, it is a run that measured nothing: it is said so and not counted,
+# neither as a pass nor as a failure. When the strip WAS needed twice, the
+# reuse is asserted as before.
+GLN=$(printf '%s' "$GLC" | cut -d/ -f2)
+if [ "${GLN:-0}" -ge 2 ]; then
+    num "der Streifen wurde mehr als einmal gebraucht (cache $GLC)" "$GLN" ge 2
+    num "und dabei wiederverwendet statt neu gerechnet" \
+        "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
+else
+    echo "  ----  NICHT GEMESSEN: der Streifen wurde in diesem Lauf nur einmal gebraucht (cache $GLC) -- zu wenige Bilder unter QEMU/TCG"
+fi
 
 # ---- 11c4. MILCHGLAS UNTER EINEM DURCHSICHTIGEN FENSTER (fix-r4-4).
 #

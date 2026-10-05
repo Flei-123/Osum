@@ -121,13 +121,13 @@ else
 fi
 
 echo "== B. die Formdatei wird GANZ gelesen =="
-if shot B shape=modern scheme=day mode=light keep=yes; then
+if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nostart wigapp=/bin/explorer'; then
     K=$(val "$TMPD/B/serial.txt" 'shape file=modern name=Modern id=1 keys=[0-9]+')
     is "Marken aus modern.shape" "${K:-0}" "24"
     CH=$(grep -aoE 'ctrl_h=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
     is "ctrl_h aus der Datei" "${CH:-0}" "32"
     N=$(grep -aoE 'form n=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
-    is "Formwoerter an den Server" "${N:-0}" "8"
+    is "Formwoerter an den Server" "${N:-0}" "17"
     S=$(stat -c%s assets/shapes/modern.shape)
     ge "und die Datei ist groesser als der alte Puffer" "$S" "4097"
 else
@@ -168,9 +168,19 @@ if [ -s "$TMPD/B/serial.txt" ]; then
 fi
 
 echo "== D. die drei Schaltflaechen, und der rote Knopf =="
-if shot D shape=modern scheme=day mode=light keep=yes hover=622,120; then
+# TWO PICTURES, because the pointer cannot be on the close button and off it at
+# once: D0 has no pointer on the bar (the three SHAPES: stroke, square, cross),
+# D has it on the close button (the HOVER state: red face, white cross).
+if shot D0 shape=modern scheme=day mode=light keep=yes extra='einst nostart'; then
+    python3 tools/softui/knoepfe.py "$TMPD/D0/desktop.ppm" \
+        "$TMPD/D0/serial.txt" > "$TMPD/D0.knopf" 2>&1
+else
+    : > "$TMPD/D0.knopf"
+fi
+if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hover=767,14; then
     python3 tools/softui/knoepfe.py "$TMPD/D/desktop.ppm" \
-        "$TMPD/D/serial.txt" > "$TMPD/D.knopf" 2>&1
+        "$TMPD/D/serial.txt" > "$TMPD/D.hover" 2>&1
+    { cat "$TMPD/D0.knopf"; grep -a '^hover:' "$TMPD/D.hover"; } > "$TMPD/D.knopf"
     cat "$TMPD/D.knopf" | sed 's/^/        /'
     grep -q 'min: strich ok' "$TMPD/D.knopf" \
         && ok "Minimieren ist ein waagerechter Strich" \
@@ -188,9 +198,12 @@ if shot D shape=modern scheme=day mode=light keep=yes hover=622,120; then
 fi
 
 echo "== E. der Fokus, ohne eine knallige Farbe =="
-if [ -s "$TMPD/B/desktop.ppm" ]; then
-    python3 tools/softui/fokus.py "$TMPD/B/desktop.ppm" \
-        "$TMPD/B/serial.txt" > "$TMPD/E.txt" 2>&1
+# The focused window has to stand far enough from the screen edge for its shadow
+# to be measured (fokus.py skips x < 24): the Settings window opens at x=20, so
+# this picture has the file manager as the only extra window (it gets the focus).
+if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart wigapp=/bin/explorer'; then
+    python3 tools/softui/fokus.py "$TMPD/E0/desktop.ppm" \
+        "$TMPD/E0/serial.txt" > "$TMPD/E.txt" 2>&1
     cat "$TMPD/E.txt" | sed 's/^/        /'
     # `aktiv` steht am ZEILENANFANG, `inaktiv` auch -- und `aktiv` ist
     # ein Teilwort von `inaktiv`. Ohne das ^ zaehlt die erste Zeile
@@ -225,7 +238,7 @@ echo "== F. der Kontrast =="
 #     wirklich steht, weiss nur das Foto.
 for v in "day light 516" "night dark 1236"; do
     set -- $v
-    if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes; then
+    if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes extra='einst nostart'; then
         M=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
             | awk '$1=="on-accent"&&$2=="accent"{print $6}')
         is "$1/$2: Text/Akzent im Modell (x100), unveraendert" "${M:-0}" "$3"

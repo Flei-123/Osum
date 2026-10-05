@@ -166,6 +166,15 @@ def erlaubt(text):
     # "taskbar: ...", "settings: ...", "i18n: ..." -- ein Mitschnitt.
     if re.match(r"^[a-z0-9]+: ", t):
         return True
+    # "settings.zieh.staerke" -- ein Katalogschluessel (englisch, mit Punkten).
+    if re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)+(\\0)*$", t):
+        return True
+    # Der Bestaetigungsdialog des Fensterservers (`td_paint` in wm.fi) liegt
+    # im KERN, und der Kern hat keinen Katalog: sein Text ist fest und
+    # deutsch (J/N sind die Tasten). Er steht hier BEWUSST, nicht aus
+    # Versehen.
+    if t.startswith("OrientOS - Bestaetigung"):
+        return True
     # "modus=", "offset=", " x=", " fg=" -- ein Schluessel oder ein Feld.
     if re.match(r"^[ ]?[a-z0-9_]+=", t):
         return True

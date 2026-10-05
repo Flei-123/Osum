@@ -84,6 +84,7 @@ TEXT = re.compile(
     r"^(wlib|taskbar): text (?:win=(\d+) kind=(\d+) )?(?:\w+ )?"
     r"x=(-?\d+) base=(-?\d+) fg=(\d+) bg=(\d+)(?: tw=(\d+))?"
     r"(?: ax=(-?\d+) ay=(-?\d+))? t=(.*)$")
+MARK = re.compile(r"^wlib: texts ax=(-?\d+) ay=(-?\d+)$")
 WIN = re.compile(
     r"^wm: win nr=(\d+) id=(\d+) .* x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) "
     r".*t=\[(.*)\]$")
@@ -104,24 +105,71 @@ def main(argv):
     W, H, px = ppm(bild)
     wins = {}
     texte = []
+    epoche = {}
+    ep_von = {}
+    marke_von = {}
     for ln in open(ser, "rb").read().decode("utf-8", "replace").splitlines():
         m = WIN.match(ln.strip())
         if m:
             wins[m.group(7)] = (int(m.group(3)), int(m.group(4)),
                                 int(m.group(5)), int(m.group(6)))
             continue
+        mk = MARK.match(ln.strip())
+        if mk:
+            epoche[(mk.group(1), mk.group(2))] = epoche.get(
+                (mk.group(1), mk.group(2)), 0) + 1
+            continue
         m = TEXT.match(ln.strip())
         if m:
             texte.append(m)
+            ep_von[id(m)] = epoche.get((m.group(9), m.group(10)), 0)
+            mm = re.match(r"^taskbar: text (\w+) ", ln.strip())
+            marke_von[id(m)] = mm.group(1) if mm else ""
     if not texte:
         print("pruef: KEINE Textmeldung im Mitschnitt -- nichts zu pruefen")
         return 1
 
+    # keep, per window origin, only the texts of the LAST batch (see MARK)
+    letzte_ep = {}
+    for m in texte:
+        o = (m.group(9), m.group(10))
+        letzte_ep[o] = max(letzte_ep.get(o, 0), ep_von[id(m)])
+    texte = [m for m in texte
+             if ep_von[id(m)] == letzte_ep[(m.group(9), m.group(10))]]
     bad = 0
     seen = 0
     kaesten = {}
     leiste = wins.get("Taskleiste", (0, 0, W, H))
-    for m in texte:
+    # THE LATEST REPORT AT A PLACE WINS. A window paints many times in one
+    # run and its text changes (the taskbar clock 07:35 -> 07:36, a button
+    # text that turns white when the window gets the focus). Only the last
+    # report at (window, x, base) describes what the picture shows; the
+    # older ones were checked against a picture they were never part of.
+    letzte = {}
+    for n_, m in enumerate(texte):
+        k = (m.group(1), m.group(2), m.group(9), m.group(10),
+             m.group(4), m.group(5))
+        letzte[k] = (n_, m)
+    # The bar re-lays out while the machine comes up (a button moves when the first
+    # window opens): a text reported at an OLDER place is stale. Every text of the
+    # bar is on the screen once, so for the bar the latest report of each TEXT wins
+    # as well (after the latest-per-place rule: the clock changes its minute).
+    def leistenschluessel(m):
+        # a status field of the bar (clock, battery, ...) is ONE text at one place
+        # whatever it says; a window button is told apart by its text
+        mk = marke_von.get(id(m), "")
+        if mk and mk != "button":
+            return mk
+        return "button:" + m.group(11)
+    jung = {}
+    for k, (n_, m) in letzte.items():
+        if m.group(1) == "taskbar":
+            lk = leistenschluessel(m)
+            if lk not in jung or jung[lk] < n_:
+                jung[lk] = n_
+    letzte = {k: m for k, (n_, m) in letzte.items()
+              if m.group(1) != "taskbar" or jung[leistenschluessel(m)] == n_}
+    for m in letzte.values():
         quelle = m.group(1)
         wid = m.group(2) or quelle
         x, base = int(m.group(4)), int(m.group(5))
