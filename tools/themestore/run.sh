@@ -1841,12 +1841,18 @@ done
 # Fensterrumpfes, acht Bildpunkte innerhalb der Raender. Dort steht
 # keine Schrift, und quer durch sie laeuft eine Kante des Musters --
 # genau die Kante, die der Weichzeichner zu einem Verlauf machen soll.
-WR=$(grep -ao 'settings: rect name=win x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
-     "$TMPD/wglas16/serial.txt" | tail -1)
-WGX=$(printf '%s' "$WR" | grep -oE 'x=[0-9]+' | cut -d= -f2)
-WGY=$(printf '%s' "$WR" | grep -oE 'y=[0-9]+' | cut -d= -f2)
-WGW=$(printf '%s' "$WR" | grep -oE 'w=[0-9]+' | cut -d= -f2)
-WGH=$(printf '%s' "$WR" | grep -oE 'h=[0-9]+' | cut -d= -f2)
+# r368: DAS FENSTER DER EINSTELLUNGEN MELDET SICH ALS `wlib: win ... cx= cy=`
+# (die Seite steht auf dem Szenenbaum und kennt kein `rect name=win` mehr):
+# das BREITESTE gemeldete Fenster ist es, `cx`/`cy` ist der Ursprung seiner
+# Arbeitsflaeche auf dem Schirm, `w`/`h` deren Groesse.
+WR=$(grep -ao 'wlib: win id=[0-9]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* cx=[0-9]* cy=[0-9]*' \
+     "$TMPD/wglas16/serial.txt" \
+     | awk '{ w=$0; sub(/.* w=/, "", w); sub(/ .*/, "", w)
+              if (w+0 >= best+0) { best=w; line=$0 } } END { print line }')
+WGX=$(printf '%s' "$WR" | grep -oE ' cx=[0-9]+' | cut -d= -f2)
+WGY=$(printf '%s' "$WR" | grep -oE ' cy=[0-9]+' | cut -d= -f2)
+WGW=$(printf '%s' "$WR" | grep -oE ' w=[0-9]+' | cut -d= -f2)
+WGH=$(printf '%s' "$WR" | grep -oE ' h=[0-9]+' | cut -d= -f2)
 FY1=$(( ${WGY:-3} + ${WGH:-566} - 2 ))
 FY0=$(( FY1 - 18 ))
 FX0=$(( ${WGX:-20} + 8 ))
@@ -2431,7 +2437,16 @@ VORY=$(grep -a 'wm: geklemmt ' "$TMPD/zug1/serial.txt" | tail -1 \
 # Die Ueberlappung in Bildpunkten, damit "keine Schliere" nicht ueber
 # einem leeren Schnitt entsteht: Unterkante des Fensters SAMT Schmuck
 # (Rahmen 2 + Titel 22) gegen die Oberkante der Leiste.
-UEB=$(( (${VORY:-${ZWY:-3}} + ${ZWH:-0} + 24 - ${LEIY:-772}) * ${ZWW:-0} ))
+# r368: DIE UEBERLAPPUNG ENDET AN DER UNTERKANTE DER LEISTE. Das Fenster der
+# Einstellungen ist 640 hoch (es war 566) und reicht nach dem Zug ueber die
+# Leiste HINAUS; der Server zaehlt nur die Schnittflaeche MIT der Leiste
+# (hoechstens Leistenhoehe mal Breite), der Wirt rechnete bis zur Unterkante
+# des Fensters und kam auf das Dreifache.
+LEIH=$(grep -a 'taskbar: geom ' "$TMPD/zug1/serial.txt" | tail -1 \
+       | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+OVH=$(( ${VORY:-${ZWY:-3}} + ${ZWH:-0} + 24 - ${LEIY:-772} ))
+[ "$OVH" -gt "${LEIH:-28}" ] && OVH=${LEIH:-28}
+UEB=$(( OVH * ${ZWW:-0} ))
 [ "$UEB" -lt 0 ] && UEB=0
 echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?} (vor dem Klemmen y=${VORY:-${ZWY:-?}}), Leiste ab y=${LEIY:-?}"
 num "das Fenster reicht wirklich unter die Leiste (Bildpunkte Ueberlappung)" \
@@ -2722,8 +2737,17 @@ import shotcheck as S
 w, h, d = S.read_ppm(sys.argv[1])
 d = bytearray(d)
 texts, wins, font = S.parse(sys.argv[2])
-st = [t for t in texts if t["t"].strip()][-1]
-win = wins[st["win"]]
+# r368: a label with room to its left (the probe wants ten pixels of line on each
+# side; the status line "bereit" stands only 8 points from the window's edge)
+st = [t for t in texts if t["t"].strip() and t["x"] >= 24][-1]
+# r368: a scene window numbers its windows from 0 and the `wlib: win` lines
+# carry the window HANDLE, so `wins[st["win"]]` finds nothing; the text itself
+# says where its client area is (`ax=`/`ay=`), as `shotcheck.py` does.
+if st["win"] in wins:
+    win = dict(cx=wins[st["win"]]["cx"], cy=wins[st["win"]]["cy"],
+               w=wins[st["win"]]["w"])
+else:
+    win = dict(cx=st.get("ax") or 0, cy=st.get("ay") or 0, w=w)
 y = win["cy"] + st["base"] - 3
 for x in range(win["cx"], min(win["cx"] + win["w"], w)):
     o = (y * w + x) * 3
@@ -2950,15 +2974,31 @@ for t in texts:
     zaehl[t["win"]] = zaehl.get(t["win"], 0) + 1
 win = max(zaehl, key=lambda k: zaehl[k])
 texts = [t for t in texts if t["win"] == win and t["t"].strip()]
-w = wins[win]
+# r368: origin as in `shotcheck.py main` -- see the line counter-proof above
+if win in wins:
+    ox, oy = wins[win]["cx"], wins[win]["cy"]
+else:
+    ox, oy = texts[0].get("ax") or 0, texts[0].get("ay") or 0
 roh = open(sys.argv[2], "rb").read().decode("latin1")
 schnitt = roh.rfind("settings: rect name=waa ")
 tail = roh[schnitt:] if schnitt >= 0 else roh
-# Jeder Knopf zwanzig Bildpunkte schmaler, alles andere unveraendert.
-eng = re.sub(r"(wlib: knopf x=\d+ y=\d+ w=)(\d+)",
-             lambda m: m.group(1) + str(max(int(m.group(2)) - 20, 9)), tail)
+# Jeder Knopf, in dem eine Beschriftung steht, wird so schmal gerechnet, dass
+# sie zehn Bildpunkte UEBERSTEHT (r368: die Knoepfe der Szenenseite sind breit
+# und ihre Schrift steht in der Mitte -- zwanzig Bildpunkte weniger Breite
+# liessen sie, wo sie war, im Knopf). Alles andere bleibt unveraendert.
+def enger(m):
+    x, y, w, h, r, ax, ay = (int(g) for g in m.groups())
+    for t in texts:
+        tb = oy + t["base"]
+        tx = ox + t["x"]
+        if t["tw"] > 24 and ay <= tb <= ay + h and ax <= tx < ax + w:
+            return ("wlib: knopf x=%d y=%d w=%d h=%d r=%d ax=%d ay=%d"
+                    % (x, y, t["tw"] - 10, h, r, tx, ay))
+    return m.group(0)
+eng = re.sub(r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+)"
+             r" ax=(-?\d+) ay=(-?\d+)", enger, tail)
 gem, ohne, ueber, bad = S.knoepfe_messen(
-    pic, eng, w["cx"], w["cy"], w["w"], w["h"], None, texts)
+    pic, eng, ox, oy, pic.w, pic.h, None, texts)
 print(ueber)
 PYU
 )
