@@ -60,7 +60,7 @@ python3 tools/k15/tree.py "$OUT/baum" || exit 1
 # Ohne Vorrat an Kartenbloecken ist bei 4096 Schluss, egal welche
 # Zahl hier steht. 16384 Bloecke brauchen vier Karten; 32 sind
 # Vorrat nach oben, wie in tools/install/build.sh.
-ARGS=(build "$OUT/disk.img" 16384 "--karten=32" "--inodes=512" /lib/
+ARGS=(build "$OUT/disk.img" 16384 --v3 "--karten=32" "--inodes=512" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
