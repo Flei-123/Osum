@@ -145,7 +145,9 @@ else
 fi
 grep -aq '^wlib: tip zu' "$S" && ok "the bubble was closed (\`wlib: tip zu\`)" || bad "no 'wlib: tip zu'"
 # 3. the toast
-ts=$(grep -a '^taskbar: toast \[hello toast\] x=' "$S" | head -1)
+# not anchored at the line start: the shell's prompt ("osum$ ") shares the serial line and
+# lands in front of the bar's line when the two write at the same moment
+ts=$(grep -a 'taskbar: toast \[hello toast\] x=' "$S" | head -1 | sed 's/.*taskbar: toast/taskbar: toast/')
 if [ -z "$ts" ]; then
     bad "no 'taskbar: toast [hello toast]' line"
 else
@@ -159,7 +161,7 @@ else
     [ "$d2" -le 300 ] && ok "four seconds later the rectangle is as before ($d2 pixels differ; the CPU gauge ticks)" \
         || bad "the toast is still there after its time: $d2 pixels differ"
 fi
-grep -aq '^taskbar: toast zu' "$S" && ok "the toast was closed (\`taskbar: toast zu\`)" || bad "no 'taskbar: toast zu'"
+grep -aq 'taskbar: toast zu' "$S" && ok "the toast was closed (\`taskbar: toast zu\`)" || bad "no 'taskbar: toast zu'"
 # 4. nothing refused
 if grep -aq 'kein Platz\|no tooltip/toast host' "$S"; then
     bad "a pop-up was refused: $(grep -a 'kein Platz\|no tooltip/toast host' "$S" | head -1)"
