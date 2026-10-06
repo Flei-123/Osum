@@ -22,8 +22,9 @@ import fs.fs
 import sched.proc
 import sched.sched
 import serial
+import arch.x86_64.apic
 
-export { root_blocks, wait_for, yes, pnum, phex }
+export { root_blocks, wait_for, yes, pnum, phex, give_up_at, gave_up }
 
 const OSUM_BLOCKS: u64 = 4096
 
@@ -46,12 +47,39 @@ fn root_blocks(state: u64) -> u64 {
     return n
 }
 
+// r388 (06.10.2026): a wait of `secs` seconds is measured in TIME, not in
+// rounds. A round is `sleep_ticks(1)`, and `sleep_ticks` turns into a plain
+// `yield_now` while the timer watchdog (`timer_tot`) sees no tick on this core
+// for a third of a second -- which is exactly what four cores do when sixteen
+// children fork and exec at once (all of them spin with interrupts off for a
+// while). The 20 000 rounds of `wait_long` then ran out within two seconds
+// of real time: "osum: sh exit=-2" in 3 of 10 boots of tools/execsmp/run.sh,
+// while the script was still running. The time stamp counter does not depend
+// on the timer interrupt. Without a measured TSC the old round count stays.
+// `give_up_at(state, secs)` is the stamp to stop at (0 = no TSC), `gave_up`
+// asks whether it has passed.
+fn give_up_at(state: u64, secs: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    return apic.tsc() + hz * secs
+}
+
+fn gave_up(deadline: u64, rounds: u64, max_rounds: u64) -> bool {
+    if deadline != 0 {
+        return apic.tsc() > deadline
+    }
+    return rounds >= max_rounds
+}
+
 fn wait_for(state: u64, i: u64) -> u64 {
     if i == 0 {
         return 0xFFFFFFFFFFFFFFFF
     }
     var rounds: u64 = 0
-    while rounds < 2000 {
+    let dl: u64 = give_up_at(state, 20)
+    while !gave_up(dl, rounds, 2000) {
         if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
             let code: u64 = sched.tget(state, i, sched.T_EXIT)
             proc.reap(state, i)
