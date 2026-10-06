@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/taskview.fi -- r387: THE TASK VIEW BUTTON OF THE BAR.
+//
+// A card in the middle of the screen that lists the open windows, one button
+// each (the window's title); a click puts that window in front and brings it
+// back from the task bar if it was minimised. It is window 4 of the task bar's
+// scene host (like the quick settings and the tooltip), because only the bar
+// may list and raise other programs' windows (`WM_LIST` / `WM_ACT` want a window
+// on layer L_TOP).
+//
+// The window is created hidden at the size of the largest list (TV_MAXR rows)
+// and shrinks to the real one when it opens (`fuiscene.win_size`).
+//
+//   init()      once, after the scene host knows the bar's own window
+//   toggle()    the button's click
+//   step()      once per turn of the bar's loop; true when something changed
+//   is_open()
+//
+// Serial lines (read by tools/win11bar/run.sh):
+//   taskview: open n=<windows> x= y= w= h=
+//   taskview: row <i> id=<window> title=<title>
+//   taskview: raise id=<window> rc=<answer of WM_ACT>
+//   taskview: shut <why>
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+
+export { init, toggle, step, is_open, hit }
+
+const TV_MAXR: u64 = 12
+const KEY0: u64 = 200
+const CARD_W: u64 = 360 // design points
+const ROW_H: u64 = 36
+const HEAD_H: u64 = 24
+const GAPP: u64 = 4
+const PADP: u64 = 8
+
+static mut tv_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut tv_h: u64 = 0
+static mut tv_id: u64 = 0
+static mut open_: u64 = 0
+static mut n_rows: u64 = 0
+static mut row_id: [u64; 12] = [0 as u64; 12]
+static mut row_tit: [u8; 480] = [0 as u8; 480] // TV_MAXR x 40
+static mut rec: [u8; 128] = [0 as u8; 128]
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut btn_last: u64 = 0
+static mut key_last: u64 = 0
+
+static mut t_title: [u8; 10] = "Task view\0"
+static mut t_head: [u8; 10] = "Task view\0"
+static mut t_none: [u8; 16] = "No open windows\0"
+static mut s_open: [u8; 20] = "taskview: open n=\0\0\0"
+static mut s_xy: [u8; 4] = " x=\0"
+static mut s_yy: [u8; 4] = " y=\0"
+static mut s_ww: [u8; 4] = " w=\0"
+static mut s_hh: [u8; 4] = " h=\0"
+static mut s_row: [u8; 15] = "taskview: row \0"
+static mut s_id: [u8; 5] = " id=\0"
+static mut s_ti: [u8; 8] = " title=\0"
+static mut s_ra: [u8; 20] = "taskview: raise id=\0"
+static mut s_rc: [u8; 5] = " rc=\0"
+static mut s_shut: [u8; 16] = "taskview: shut \0"
+static mut s_esc: [u8; 4] = "esc\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_pick: [u8; 5] = "pick\0"
+static mut s_key: [u8; 7] = "button\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn rows_shown() -> u64 {
+    if n_rows == 0 {
+        return 1
+    }
+    return n_rows
+}
+
+// the card in design points
+fn card_h() -> u64 {
+    return PADP + HEAD_H + GAPP + rows_shown() * (ROW_H + GAPP) + PADP
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn build() {
+    let r: usize = fuiscene.root()
+    fuiscene.set_gap(r, GAPP)
+    let _h: usize = fuiscene.label(r, (&t_head[0 as usize]) as u64)
+    if n_rows == 0 {
+        let _n: usize = fuiscene.label(r, (&t_none[0 as usize]) as u64)
+        return
+    }
+    var i: u64 = 0
+    while i < n_rows {
+        let b: usize = fuiscene.button(r, (&row_tit[0 as usize]) as u64 + i * 40,
+            KEY0 + i)
+        fuiscene.set_size(b, CARD_W - 2 * PADP, ROW_H)
+        i = i + 1
+    }
+}
+
+// the windows of the desktop, the way the bar's own list reads them
+fn read_windows() {
+    n_rows = 0
+    var slot: u64 = 0
+    while slot < 32 && n_rows < TV_MAXR {
+        let r: u64 = wlibc.win_list(slot, (&rec[0 as usize]) as u64)
+        if ulib.bad(r) {
+            slot = 32
+        } else {
+            if r == 1 {
+                let b: u64 = (&rec[0 as usize]) as u64
+                let layer: u64 = __mmio_read64((b + wlibc.WL_LAYER) as *mut u64)
+                let own: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                if layer == wlibc.L_NORMAL && own != tv_id {
+                    row_id[n_rows as usize] = own
+                    var k: u64 = 0
+                    while k < 31 {
+                        row_tit[(n_rows * 40 + k) as usize] =
+                            __mmio_read8((b + wlibc.WL_TITLE + k) as *mut u8)
+                        k = k + 1
+                    }
+                    row_tit[(n_rows * 40 + 31) as usize] = 0 as u8
+                    n_rows = n_rows + 1
+                }
+            }
+            slot = slot + 1
+        }
+    }
+}
+
+fn init() -> bool {
+    tv_win = fuiscene.win_open_plain(0, 0, CARD_W * sk(), (PADP * 2 + HEAD_H + GAPP
+        + TV_MAXR * (ROW_H + GAPP)) * sk(), (&t_title[0 as usize]) as u64,
+        wlibc.L_MENUE, build)
+    if tv_win == fuiscene.BADWIN {
+        tv_win = 0xFFFFFFFFFFFFFFFF
+        return false
+    }
+    let _s: bool = fuiscene.win_select(tv_win)
+    fuiscene.keys_always(true)
+    tv_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(tv_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    tv_id = wlibc.sys3w(wlibc.WM_INFO, tv_h, wlibc.WI_ID, 0)
+    return true
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + CARD_W * sk() && y >= py_
+        && y < py_ + card_h() * sk()
+}
+
+fn paint_now() {
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(tv_win)
+        n = n + 1
+    }
+}
+
+fn open_now() {
+    if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    read_windows()
+    let w: u64 = CARD_W * sk()
+    let h: u64 = card_h() * sk()
+    let sw: u64 = wlibc.screen_w()
+    let sh: u64 = wlibc.screen_h()
+    px_ = 0
+    if sw > w {
+        px_ = (sw - w) / 2
+    }
+    py_ = 0
+    if sh > h + 80 {
+        py_ = (sh - h - 40) / 2
+    }
+    let _s: bool = fuiscene.win_select(tv_win)
+    let _z: bool = fuiscene.win_size(w, h)
+    fuiscene.refresh()
+    fuiscene.touch()
+    key_last = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    paint_now()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, tv_h, (px_ << 16) | py_, 0)
+    let _v: u64 = wlibc.win_state(tv_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    btn_last = wlibc.mouse_btn() & 1
+    let _a: u64 = wlibc.win_act(tv_id, wlibc.WA_RAISE)
+    let _k: u64 = wlibc.win_state(tv_h, wlibc.WS_KEYS, 1)
+    say((&s_open[0 as usize]) as u64)
+    sayn(n_rows)
+    say((&s_xy[0 as usize]) as u64)
+    sayn(px_)
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_)
+    say((&s_ww[0 as usize]) as u64)
+    sayn(w)
+    say((&s_hh[0 as usize]) as u64)
+    sayn(h)
+    nl()
+    var i: u64 = 0
+    while i < n_rows {
+        say((&s_row[0 as usize]) as u64)
+        sayn(i)
+        say((&s_id[0 as usize]) as u64)
+        sayn(row_id[i as usize])
+        say((&s_ti[0 as usize]) as u64)
+        say((&row_tit[0 as usize]) as u64 + i * 40)
+        nl()
+        i = i + 1
+    }
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    let _v: u64 = wlibc.win_state(tv_h, wlibc.WS_HIDDEN, 1)
+    say((&s_shut[0 as usize]) as u64)
+    say(why)
+    nl()
+}
+
+fn toggle() {
+    if open_ != 0 {
+        shut((&s_key[0 as usize]) as u64)
+    } else {
+        open_now()
+    }
+}
+
+fn step() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    // the events of the window ring go to the canvas of the tree
+    let _st: u64 = wlib.step()
+    let key: u64 = fuiscene.pump_aux(tv_win)
+    if key >= KEY0 && key < KEY0 + n_rows {
+        let id: u64 = row_id[(key - KEY0) as usize]
+        let rc: u64 = wlibc.win_act(id, wlibc.WA_RAISE)
+        say((&s_ra[0 as usize]) as u64)
+        sayn(id)
+        say((&s_rc[0 as usize]) as u64)
+        sayn(rc)
+        nl()
+        shut((&s_pick[0 as usize]) as u64)
+        return true
+    }
+    if open_ == 0 {
+        return true
+    }
+    let _s: bool = fuiscene.win_select(tv_win)
+    let lk: u64 = fuiscene.last_key()
+    let ks: u64 = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    if ks != key_last {
+        key_last = ks
+        if lk == 27 {
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+    }
+    // a press outside the card closes it (polled from the pointer: a press
+    // outside a window raises no event belonging to it)
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        if !hit(wlibc.mouse_x(), wlibc.mouse_y()) {
+            shut((&s_out[0 as usize]) as u64)
+            btn_last = btn
+            return true
+        }
+    }
+    btn_last = btn
+    return false
+}
