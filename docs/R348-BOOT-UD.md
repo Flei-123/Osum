@@ -26,3 +26,29 @@ Machine: `tools/design/eh6.sh` as `tools/zreap/run.sh` builds it (gfx, xHCI + us
 
 Tools used: `/tmp/r348/loop.sh`-style boot loop (KVM, 40 boots) and `gdb -batch` with
 `target remote` + `hbreak _F0.trap__report` (copy of the commands is in the roadmap note).
+
+## Update 06.10.2026 (later): two ideas read out of the code and refuted
+
+Both came from the same question -- what writes a small number (0x67 = `g`, 0xc7) into a
+return-address slot 14 KB below the top of the boot task's kernel stack -- and both are
+**not** it:
+
+1. *A syscall or an interrupt of the ring-3 excursion running on the boot task's stack.*
+   Not so: the excursion's syscalls use `%gs:CPU_KSTACK`, which `sched.init` sets to
+   `vector(61)` (`T_KTOP` of task 0 is that too), the dedicated syscall stack; interrupts from
+   ring 3 use `TSS.rsp0` = the dedicated irq stack. From `nm` of a kernel image:
+   `boot_stack` 0x8bc000..0x8c0000, `kernel_stack` 0x8c0000..0x900000 (the boot task's, 256 KB),
+   `df_stack` 0x900000..0x904000, `syscall_stack` 0x904000..0x908000, `irq_stack`
+   0x908000..0x90c000, `tss` 0x90f000, `kdata` 0x910000. No overlap, and `set_kernel_stack` on a
+   switch back to task 0 writes the same dedicated top again.
+2. *The xHCI rings or the scratchpad buffers overlapping the stack.* The rings live inside
+   `kdata` (fixed offsets, `state + ..._OFF`), the scratchpad pages come from
+   `mem.frame_alloc` (`xhci.scratchpad`); nothing there points below 0x910000.
+
+What is left from the measurements above: it needs the screen (0 of 60 without), the word is
+written by something that is not a CPU store after `unmap_user` (the hardware watchpoint saw
+none), and rbp is wrong too (0x314). The next experiment that is not a guess: record the value
+of that word at the START of `user.run` and again right after `leave_user` (a few lines
+of `serial.hex`), in the 1-in-40 boot, to learn whether it is already wrong before the
+excursion (then it is an earlier writer: look at what runs between the kernel's first text
+drawing and `user.run`) or changes inside it.
