@@ -106,6 +106,9 @@ export {
     // SEVERAL WINDOWS in one program
     win_open, win_open_plain, win_select, win_cur, win_count, win_close, win_size,
     pump_all, pump_win, pump_aux, foreign_main, hit_win, win_busy, MAXWIN, BADWIN,
+    // r381: a window whose pointer events the program takes itself (the task bar), nodes that
+    // only exist for the accessibility tree and the keyboard, a picture of the program's own behind the tree
+    set_raw, raw_take, ghost_button, ghost_space, set_overlay, canvas_px,
 }
 
 const NONE: usize = 4294967295
@@ -1882,6 +1885,13 @@ fn paint() {
     fuiapp.frame_begin()
     scene.scene_run(sc(), fuiapp.ctx(), sh(), 0.0, 0.0,
         fuiapp.width() as f64, fuiapp.height() as f64)
+    // r381: the program's own picture (the task bar) goes over what the tree painted
+    // (a node paints its kind's face, and a ghost node's custom painter runs AFTER
+    // it); the focus ring comes on top of it
+    if w_cur == raw_win {
+        let postf: fn() = *post_slot()
+        postf()
+    }
     halo()
     if S.s_pop_open {
         pop_paint()
@@ -2011,6 +2021,15 @@ fn pump() -> u64 {
         paint()
     }
     while fuiapp.next(&ev) {
+        // r381: the window of a program that handles the pointer itself (the task bar)
+        if w_cur == raw_win {
+            let rawf: fn(u64, u64, u64, u64, u64) = *raw_slot()
+            raw_took = 0
+            rawf(ev.kind, ev.x, ev.y, ev.btn, ev.key)
+            if raw_took != 0 {
+                continue
+            }
+        }
         if S.s_dlg_open {
             let r: u64 = dlg_event(&ev)
             if r != 0 {
@@ -5920,7 +5939,7 @@ fn pump_all() -> u64 {
 // window `i` take its events, rebuild and paint -- it never waits. The window that
 // was selected is selected again. Returns the key window `i` answered, else 0.
 fn pump_aux(i: u64) -> u64 {
-    if i >= w_n || i == 0 {
+    if i >= w_n {
         return 0
     }
     let prev: u64 = w_cur
@@ -5933,6 +5952,76 @@ fn pump_aux(i: u64) -> u64 {
     fuiapp.nostep(false)
     let _b: bool = win_select(prev)
     return k
+}
+
+// ---------------------------------------------------------------- r381: the task bar
+//
+// `set_raw(f)`: window `w_cur` gives every pointer / key event to `f(kind, x, y, btn,
+// key)` BEFORE the host looks at it; `raw_take()` inside it = the program took it, the host skips it.
+// The bar does its own hit tests and drags (a press that becomes a drag after six
+// pixels, a right click, the polled pointer of the hide / drag logic), so the host
+// must not turn a press into the "pressed" look of a node -- but the tree stays: names
+// for the accessibility export (a screen reader, the bridge), a press through it,
+// and the keyboard focus ring.
+static mut raw_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut rawmem: [u8; 8] = [0 as u8; 8]
+
+static mut raw_took: u64 = 0
+
+fn raw_slot() -> *mut fn(u64, u64, u64, u64, u64) {
+    return ((&rawmem[0 as usize]) as u64) as *mut fn(u64, u64, u64, u64, u64)
+}
+
+// called by the program's function: "I took this event, the host skips it"
+fn raw_take() {
+    raw_took = 1
+}
+
+fn set_raw(f: fn(u64, u64, u64, u64, u64)) {
+    *raw_slot() = f
+    raw_win = w_cur
+}
+
+// A node that paints nothing: the program's own picture stands there (a rectangle of
+// the bar). A button with a name and a key, `w` x `h` in PIXELS.
+fn draw_ghost(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let _u: u64 = ud
+}
+
+fn ghost_button(parent: usize, text: u64, key: u64, w: u64, h: u64) -> usize {
+    let i: usize = button(parent, text, key)
+    if i != NONE {
+        scene.node_set_size(sc(), i, (w as f64) / (S.s_S as f64), (h as f64) / (S.s_S as f64))
+        scene.node_set_draw(sc(), i, 0, draw_ghost)
+    }
+    return i
+}
+
+// Room between two nodes, in PIXELS.
+fn ghost_space(parent: usize, w: u64, h: u64) -> usize {
+    let i: usize = scene.scene_add(sc(), parent, scene.N_BOX)
+    if i != scene.SCENE_NONE {
+        scene.node_set_size(sc(), i, (w as f64) / (S.s_S as f64), (h as f64) / (S.s_S as f64))
+    }
+    return i
+}
+
+// The program's own picture over the tree, for the raw window (called after the tree
+// painted, before the focus ring).
+static mut postmem: [u8; 8] = [0 as u8; 8]
+
+fn post_slot() -> *mut fn() {
+    return ((&postmem[0 as usize]) as u64) as *mut fn()
+}
+
+fn set_overlay(f: fn()) {
+    *post_slot() = f
+}
+
+// The pixels of the selected window (a program that paints a retained picture of its
+// own copies it here from the hook).
+fn canvas_px() -> u64 {
+    return fuiapp.px()
 }
 
 // A program whose MAIN window is not a scene window (the task bar, still on wlib)
