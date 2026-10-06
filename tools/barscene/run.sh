@@ -205,8 +205,9 @@ echo "== 5. the tree is for READING: the kernel's target rule refuses a press on
 # the bar through `bar_raw` -- tools/win11bar measures them.)
 n=$(grep -ac 'ax: press node=.* refuse=5' "$G")
 [ "$n" -ge 2 ] && ok "both presses were refused by the target rule (refuse=5): $n" || bad "presses refused by rule 5: $n (wanted 2)"
-grep -qaE 'taskbar: click x=' "$G" && bad "a press got through to the bar as a click" || ok "and the bar saw no click"
-grep -qaE 'taskbar: chevron .* open=1' "$G" && bad "the chevron opened by a press" || ok "the chevron stayed closed"
+part "$G" B-CHEV B-KEYS > "$TMPD/pc.txt"
+grep -qaE 'taskbar: click x=' "$TMPD/pc.txt" && bad "a press got through to the bar as a click" || ok "and the bar saw no click"
+grep -qaE 'taskbar: chevron .* open=1' "$TMPD/pc.txt" && bad "the chevron opened by a press" || ok "the chevron stayed closed"
 part "$G" B-TREE2 B-TV > "$TMPD/t2.txt"
 for nm in "Start" "Task view" "Hidden icons"; do
     grep -qaE "=button .*\"$nm\"" "$TMPD/t2.txt" && ok "the node '$nm' is still there after the refused press" || bad "node '$nm' lost"
