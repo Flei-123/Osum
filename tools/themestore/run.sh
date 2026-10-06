@@ -1853,7 +1853,11 @@ WGX=$(printf '%s' "$WR" | grep -oE ' cx=[0-9]+' | cut -d= -f2)
 WGY=$(printf '%s' "$WR" | grep -oE ' cy=[0-9]+' | cut -d= -f2)
 WGW=$(printf '%s' "$WR" | grep -oE ' w=[0-9]+' | cut -d= -f2)
 WGH=$(printf '%s' "$WR" | grep -oE ' h=[0-9]+' | cut -d= -f2)
-FY1=$(( ${WGY:-3} + ${WGH:-566} - 2 ))
+# r381: the window now reaches down under the bar (its last rows show the
+# bar, which blurs the same in both runs), so the strip sits 150 px higher,
+# where a checkerboard edge crosses the free window body (measured: var
+# 5792 vs 6050, 25 vs 19 colours; at the bottom it was 162242 twice).
+FY1=$(( ${WGY:-3} + ${WGH:-566} - 150 ))
 FY0=$(( FY1 - 18 ))
 FX0=$(( ${WGX:-20} + 8 ))
 FX1=$(( ${WGX:-20} + ${WGW:-760} - 8 ))
