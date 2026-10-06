@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/signin.fi -- r383: ONE LOOK FOR THE LOCK SCREEN AND THE
+// SIGN-IN SCREEN, the layout of the Windows 11 sign-in
+// (assets/ref/win11-login-ref.png):
+//
+//   - the wallpaper behind everything (fuiapp.backdrop_load: /etc/wallpaper,
+//     blurred and shaded; a dark gradient when there is no file),
+//   - in the middle: a round avatar (the initial of the user), the name, one
+//     status line, the password field with the eye and the round arrow,
+//   - bottom left: the user(s), bottom right: language, network, power.
+//
+// This file holds what both screens paint the same way. What differs (the
+// tree, the keys, the logic) stays in lock.fi and glogin.fi. Every size is a
+// design point in the 4-pixel grid and goes through `fuiscene.sp`.
+profile app
+
+import ulib
+import wlibc
+import fuiapp
+import fuiscene
+import icons
+
+export {
+    AV_D, GAP_N, COL_W, FIELD_H, WHITE, SOFT, AVATAR_RGB,
+    big_c, circle, initial_of, paint_avatar, paint_name, paint_status,
+    paint_hint, paint_chip, paint_deu, paint_net, glyph_tile, net_glyph,
+    SYS_NETGET, NG_STATE,
+}
+
+const AV_D: u64 = 112
+const GAP_N: u64 = 12
+const COL_W: u64 = 320
+const FIELD_H: u64 = 36
+const WHITE: u64 = 0xFFFFFF
+const SOFT: u64 = 0xDCE6F5
+const AVATAR_RGB: u64 = 0x4C6A92
+const SYS_NETGET: u64 = 1300
+const NG_STATE: u64 = 8
+
+static mut T_DEU: [u8; 4] = "DEU\0"
+
+// Text centred in the box (x, y, w, h), `size` pixels high, colour 0xRRGGBB.
+fn big_c(x: u64, y: u64, w: u64, h: u64, p: u64, size: u64, bold: bool, rgb: u64) {
+    var f: u64 = wlibc.F_UI
+    if bold {
+        f = wlibc.F_BOLD
+    }
+    let n: u64 = ulib.length(p)
+    let tw: u64 = wlibc.text_w(f, size, p, n)
+    var off: u64 = 0
+    if tw < w {
+        off = (w - tw) / 2
+    }
+    fuiscene.cv_text_rgb(x + off, y + (h + size) / 2 - size / 5, w, p, size, bold, rgb)
+}
+
+fn circle(x: u64, y: u64, d: u64, rgb: u64) {
+    fuiscene.cv_round_rgb(x, y, d, d, d / 2, rgb)
+}
+
+// The first letter of a name, upper case, as a zero-ended string in `out`.
+fn initial_of(namep: u64, out: u64) {
+    var c: u64 = __mmio_read8(namep as *mut u8) as u64
+    if c >= 97 && c <= 122 {
+        c = c - 32
+    }
+    if c == 0 {
+        c = 63
+    }
+    __mmio_write8(out as *mut u8, c as u8)
+    __mmio_write8((out + 1) as *mut u8, 0 as u8)
+}
+
+fn paint_avatar(x: u64, y: u64, w: u64, h: u64, ini: u64) {
+    let d: u64 = fuiscene.sp(AV_D)
+    let x0: u64 = x + (w - d) / 2
+    circle(x0, y, d, AVATAR_RGB)
+    fuiscene.cv_ring_rgb(x0, y, d, d, d / 2, 2, SOFT)
+    big_c(x0, y, d, d, ini, d * 2 / 5, true, WHITE)
+}
+
+fn paint_name(x: u64, y: u64, w: u64, h: u64, namep: u64) {
+    big_c(x, y, w, h, namep, fuiscene.sp(24), true, WHITE)
+}
+
+fn paint_status(x: u64, y: u64, w: u64, h: u64, textp: u64) {
+    big_c(x, y, w, h, textp, fuiscene.sp(16), false, WHITE)
+}
+
+fn paint_hint(x: u64, y: u64, w: u64, h: u64, textp: u64) {
+    big_c(x, y, w, h, textp, fuiscene.sp(12), false, SOFT)
+}
+
+// Bottom left: a small avatar and the name next to it.
+fn paint_chip(x: u64, y: u64, w: u64, h: u64, ini: u64, namep: u64) {
+    let d: u64 = fuiscene.sp(36)
+    circle(x, y + (h - d) / 2, d, AVATAR_RGB)
+    big_c(x, y + (h - d) / 2, d, d, ini, d * 2 / 5, true, WHITE)
+    fuiscene.cv_text_rgb(x + d + fuiscene.sp(12), y + (h + fuiscene.sp(14)) / 2 - fuiscene.sp(3),
+        w - d - fuiscene.sp(12), namep, fuiscene.sp(14), false, WHITE)
+}
+
+fn paint_deu(x: u64, y: u64, w: u64, h: u64) {
+    big_c(x, y, w, h, (&T_DEU[(0) as usize]) as u64, fuiscene.sp(12), false, WHITE)
+}
+
+// The icon for the kernel's four network states.
+fn net_glyph(st: u64) -> u64 {
+    if st == 3 {
+        return icons.NETWORK_WIRED
+    }
+    if st == 2 {
+        return icons.NETWORK_NO_INTERNET
+    }
+    if st == 1 {
+        return icons.NETWORK_BLOCKED
+    }
+    return icons.NETWORK_OFFLINE
+}
+
+fn paint_net(x: u64, y: u64, w: u64, h: u64, st: u64) {
+    glyph_tile(net_glyph(st), x, y, w, h, 0xFFFFFFFF)
+}
+
+// An icon of the icon font, centred in a box, 20 points high.
+fn glyph_tile(cp: u64, x: u64, y: u64, w: u64, h: u64, col: u64) {
+    let s: u64 = fuiscene.sp(20)
+    fuiapp.glyph(cp, x + (w - s) / 2, y + (h - s) / 2, s, col as u32)
+}

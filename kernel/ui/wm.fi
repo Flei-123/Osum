@@ -10887,6 +10887,16 @@ fn on_mouse(state: u64) {
         return
     }
     td_mb = btn
+    // r382 LOCK SEAL: a drag or a resize that was running when the lock
+    // came is ended; nothing moves a window while the screen is locked.
+    if sperre_an(state) {
+        if gs(state, S_DRAG) != 0 {
+            ss(state, S_DRAG, 0)
+        }
+        if gs(state, S_SIZING) != 0 {
+            ss(state, S_SIZING, 0)
+        }
+    }
     // Ziehen
     if gs(state, S_DRAG) != 0 {
         let i: u64 = gs(state, S_DRAG) - 1
@@ -11095,7 +11105,13 @@ fn on_mouse(state: u64) {
     // er steht. Der Aufruf steht VOR dem Ausstieg fuer "kein Fenster
     // getroffen" -- sonst bliebe der Doppelpfeil stehen, wenn man vom
     // Fensterrand auf den Schreibtisch faehrt.
-    margin_cursor(state, i, x, y)
+    // r382 LOCK SEAL: the edges of a window that is not on the screen
+    // must not show in the pointer shape either.
+    if i < MAX_WIN && !darf(state, i) {
+        margin_cursor(state, MAX_WIN, x, y)
+    } else {
+        margin_cursor(state, i, x, y)
+    }
     if i >= MAX_WIN {
         return
     }
@@ -11706,7 +11722,9 @@ fn on_key(state: u64, c: u64) {
     if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
         mods = mods | 4
     }
-    if wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
+    // r382 LOCK SEAL: while locked no plugin gets the key (its shortcut
+    // could act on windows behind the lock); it goes to the locker only.
+    if !sperre_an(state) && wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
         wmplug.notify(state, wmplug.E_KEY, c, mods, 0)
         ss(state, S_KPLUG, gs(state, S_KPLUG) + 1)
         // Und AUCH nicht an das Terminal des Fokusfensters: `key_tty`
@@ -13760,6 +13778,20 @@ fn hotkeys(state: u64) -> u64 {
         } else {
             n = n + 1
             ss(state, S_HOTS, gs(state, S_HOTS) + 1)
+            // r382 LOCK SEAL: WHILE THE SCREEN IS LOCKED A SHORTCUT DOES
+            // NOTHING -- not Alt+Tab (raised and focused a window behind
+            // the lock), not close (destroyed it), not full screen, snap,
+            // tile; and no plugin hears it. The key is taken off the ring
+            // and thrown away, and the line below says so.
+            if sperre_an(state) {
+                var s_hl: [u8; 20] = "wm: hot gesperrt c=\0"
+                var s_hn: [u8; 6] = " mod=\0"
+                serial.puts((&s_hl[0]) as u64)
+                serial.dec(v & 0xFF)
+                serial.puts((&s_hn[0]) as u64)
+                serial.dec((v >> 8) & 0xFF)
+                serial.nl()
+            } else
             // RUNDE WMPLUGIN: DAS PLUGIN KOMMT VOR DER BINDUNG DES
             // KACHELBAUMS. Wer ein Kuerzel belegt hat, bekommt es --
             // und `tile_action` laeuft dafuer gar nicht erst an. Sonst
@@ -13868,6 +13900,12 @@ fn next_window(state: u64, von: u64) -> bool {
 // eine Handlung TUT.
 fn tile_action(state: u64, act: u64) -> bool {
     if act == tile.A_NONE || !ready(state) {
+        return false
+    }
+    // r382 LOCK SEAL: second lock, for the callers that do not come over
+    // the key ring (the syscall WM_TILEDO): no action on any window while
+    // the screen is locked.
+    if sperre_an(state) {
         return false
     }
     if act == tile.A_TILE_TOGGLE {
