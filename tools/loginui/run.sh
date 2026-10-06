@@ -274,15 +274,25 @@ hits = []
 for r in sys.argv[2:]:
     d = dict(re.findall(r'(\w+)=(\w+)', r))
     x, y, h = int(d['x']), int(d['y']), int(d['h'])
-    # the left edge, half way down: ring = dark, no ring = light border
-    # (a main button's ring sits three points OUTSIDE its face, hence -3)
-    p = [im.getpixel((x + k, y + h // 2)) for k in range(-3, 3)]
-    # DESIGN RULE 02.10.2026: the main button ("Anmelden") is filled with
-    # the accent colour, which is dark too. A ring is a dark edge that
-    # DIFFERS from the face behind it: the face is read 10 points inside.
-    face = sum(im.getpixel((x + min(10, int(d.get('w', 20)) // 2), y + h // 2)))
-    if any(sum(c) < 600 and abs(sum(c) - face) > 60 for c in p):
-        hits.append(d['id'])
+    # r383: THE SCREEN IS A WALLPAPER NOW (dark, blurred), so "a dark edge on
+    # a light ground" no longer finds the focus ring. The ring is the ACCENT
+    # colour (blue): look for it just outside the left edge (a main button's
+    # ring sits three points outside its face) and, when the face itself is
+    # not the accent, on the edge.
+    def accent(c):
+        return c[2] > 190 and 70 < c[1] < 175 and c[0] < 100
+    face_c = im.getpixel((x + min(10, int(d.get('w', 20)) // 2), y + h // 2))
+    if accent(face_c):
+        # an accent-filled tile (the sign-in arrow) shows its focus as a WHITE
+        # ring two points inside the face (fuiapp.halo_in), plain face otherwise
+        p = [im.getpixel((x + k, y + h // 2)) for k in range(2, 7)]
+        if any(min(c) > 230 for c in p):
+            hits.append(d['id'])
+    else:
+        # the ring of a plain tile sits ON its edge (neighbours touch: 0 gap)
+        p = [im.getpixel((x + k, y + h // 2)) for k in range(0, 2)]
+        if any(accent(c) for c in p):
+            hits.append(d['id'])
 print(' '.join(hits) if hits else '-')
 PY
 }
@@ -299,9 +309,12 @@ for t in tab tab tab tab tab tab; do
     k=$((k + 1))
     mon "sendkey $t" "sleep 1.2" "screendump $D/tab$k.ppm" "sleep 0.8"
     r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
-    if [ "$r" = "-" ] || [ -z "$r" ]; then   # mid-repaint or the dump not yet written: once more
-        mon "screendump $D/tab$k.ppm" "sleep 0.8"; r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
-    fi
+    case "$r" in *" "*) r="-";; esac          # two rings at once = mid-repaint
+    for _try in 1 2 3 4; do                  # mid-repaint or the dump not yet written: again
+        [ "$r" = "-" ] || [ -z "$r" ] || break
+        mon "screendump $D/tab$k.ppm" "sleep 1.2"; r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
+        case "$r" in *" "*) r="-";; esac
+    done
     KETTE="$KETTE$r "
 done
 WANT="16 $BTNID $OTHID $(fld "$NET0" id) $(fld "$POW0" id) $PWID "
@@ -326,7 +339,11 @@ else
         || bad "eye click: '$L', expected 'wlib: eye id=$PWID shown=1 len=3'"
     mon "screendump $D/plain.ppm" "sleep 1"
     klick
-    L=$(eyes | tail -1 | sed 's/ len=.*//')
+    for _w in 1 2 3 4 5 6; do   # a loaded host answers late: wait for the line
+        L=$(eyes | tail -1 | sed 's/ len=.*//')
+        [ "$L" = "wlib: eye id=$PWID shown=0" ] && break
+        sleep 1
+    done
     [ "$L" = "wlib: eye id=$PWID shown=0" ] \
         && ok "a second click hides it again" || bad "second eye click: '$L'"
     png "$D/dots.ppm" "$BEL/dots.png"; png "$D/plain.ppm" "$BEL/plain.png"
@@ -407,7 +424,7 @@ BY1=$(fld "$BN" y); BY2=$(( $(fld "$PN" y) + ABST ))
 [ "${BY1:-0}" -gt "$BY2" ] && BY2=$BY1
 BXY=$(( BY2 + 12 ))
 info "Anmelden now at y=$BY2 ($BN / $PN)"
-zeig $(( $(fld "$BN" x) + 40 )) "$BXY"
+zeig $(( $(fld "$BN" x) + $(fld "$BN" w) / 2 )) "$(( BY2 + $(fld "$BN" h) / 2 ))"
 klick
 sleep 12
 if grep -aq 'glogin: angemeldet als justin' "$D/serial.txt"; then
