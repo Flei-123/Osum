@@ -19,16 +19,18 @@ Measured on main 689d3229. Roadmap: fUi r41 (wlib replaced), r42 (wm buttons via
 (1) the *window* API under `fuiscene`, (2) the theme / metric / text-measure table in `wlibc`, (3) the
 programs that never moved (`widgetdemo`, export dialogs, `modul`, `desktop`), (4) the bar's painters.
 
-## 2. Hard limit found first: program size
+## 2. Hard limit found first: program size (in the TEST images, not in the product)
 
-`taskbar` is 7 840 octets under the OFS format-2 file limit. Stage 2 of the bar (paint from widgets) adds
-code before it removes code. **Step 0 is therefore: lift or avoid the limit** (format-3 files on the stick image
-for programs above the limit, or split `taskbar` into bar + pop-ups as two programs). Without that, every
-stage below stops at the first rebuild. Watched by `tools/progsize`.
+`taskbar` is 7 840 octets under the OFS **format-2** file limit (2 134 016). The stick (`tools/usbimg/build.sh`,
+`--v3`) and `tools/design/*.sh` already build format 3 and have no such limit; the limit bites in the 82 test
+builders, 127 `mkfs.py build` calls of which have no `--v3` (k15, alltag, sync, module ...). Stage 2 of the bar
+adds code before it removes code, so **step 0 is: every builder that puts a scene program on a disk uses `--v3`**
+(first k15, alltag, win11bar, barscene, loginui, themestore; then the rest), checked by `tools/progsize`
+(which keeps the format-2 number as an early warning for what is left).
 
 ## 3. Stages (each ends green on: loginui, look, themestore, alltag, barscene, win11bar, k15, a11yscene)
 
-W0. **Size**: format-3 programs or a split of the bar (see 2). Gate: `progsize` shows >= 256 KiB room.
+W0. **Size**: the builders above go to `--v3`. Gate: those six runners green with `taskbar` > 2 134 016 octets (a throw-away padding test).
 
 W1. **`fuiwin` — the window client of fUi.** One small module `kernel/user/fuiwin.fi` that owns what scene
     programs take from wlib: open/close/resize/focus/hide a window, the surface (canvas), key and pointer
