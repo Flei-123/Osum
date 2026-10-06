@@ -286,9 +286,19 @@ df_stack_bottom:
     .globl df_stack_top
 df_stack_top:
 
+    /* r348 (06.10.2026): THE `syscall` STACK IS ALSO THE RING-3 INTERRUPT STACK OF THE
+     * BOOT TASK (`sched.set_kernel_stack(vector 61)` writes it into TSS.rsp0 and
+     * `%gs:CPU_KSTACK`). 16 KiB was too little: a timer interrupt that hits the ring-3
+     * excursion at boot runs the diagnostic board (`trap.lower_chunk` -> `tafel_tick` ->
+     * `wm.messzeile` -> `fb.fill` ...), measured 44 376 octets deep (gdb: rsp 0x8b1270 for
+     * a stack top of 0x8bc000). It ran through this stack and `df_stack` and into the TOP of
+     * `kernel_stack`, over the frames of the functions that had entered ring 3; the next
+     * `ret` popped 0x67 or 0xc7 (#UD at rip=0x67, 2 of 30 boots on the stick's machine,
+     * 3 of 34 with the probe). 128 KiB is three times the measured depth. See
+     * docs/R348-BOOT-UD.md. */
     .align 16
 syscall_stack_bottom:
-    .skip 16384
+    .skip 131072
     .globl syscall_stack_top
 syscall_stack_top:
 
@@ -298,7 +308,7 @@ syscall_stack_top:
      * write over them. */
     .align 16
 irq_stack_bottom:
-    .skip 16384
+    .skip 65536
     .globl irq_stack_top
 irq_stack_top:
 
