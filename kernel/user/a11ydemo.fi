@@ -413,6 +413,127 @@ fn lockprobe(safe: bool) -> u64 {
     return 0
 }
 
+
+// r389 LOCK RACE: the locker is KILLED while the screen is locked. Between
+// its death and the kernel's restart (`kgui.sperre_wache`, up to 32 turns) the
+// lock still names the dead locker's task SLOT. A new process that lands in
+// that slot (the reaper frees it within ~16 turns) must NOT be able to take
+// the lock over (op 4) and open it (op 2). `lockrace` (root) kills the locker,
+// then for two seconds starts bursts of `lockclaim` children (kernel/user/lockclaim.fi) (each tries op 4
+// and, if that worked, op 2), reads the window table the whole time (nothing
+// of the victim may show) and notes when the lock screen is back.
+fn lockrace(warm: bool) -> u64 {
+    var s_h: [u8; 20] = "a11ydemo: lockrace \0"
+    var s_no: [u8; 14] = "no locker pid\0"
+    var s_k: [u8; 12] = "killed pid=\0"
+    var s_c: [u8; 11] = " children=\0"
+    var s_won: [u8; 6] = " won=\0"
+    var s_v: [u8; 14] = " victim_seen=\0"
+    var s_b: [u8; 13] = " back_after=\0"
+    var s_st: [u8; 8] = " state=\0"
+    var s_t: [u8; 11] = " hz_ticks=\0"
+    var path: [u8; 16] = "/bin/lockclaim\0\0"
+    var t_vic: [u8; 14] = "A11Y controls\0"
+    var t_lock: [u8; 9] = "Gesperrt\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+    var rec: [u8; 160] = [0 as u8; 160]
+    let rp: u64 = (&rec[0 as usize]) as u64
+    // the locker: the live task called "lock"
+    var lpid: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0) == 0x6b636f6c
+                && ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0) == 0 {
+                lpid = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+            }
+        }
+        i = i + 1
+    }
+    if lpid == 0 {
+        say((&s_h[0 as usize]) as u64)
+        say((&s_no[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    argv[0 as usize] = (&path[0 as usize]) as u64
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let _k: u64 = ulib.sys(ulib.SYS_KILL, lpid, 137, 0)
+    var kids: u64 = 0
+    var won: u64 = 0
+    var vic: u64 = 0
+    var back: u64 = 0
+    var pids: [u64; 6] = [0 as u64; 6]
+    // children for 2 seconds; the table is read until the lock screen is back
+    // (at most 8 seconds: the new locker is a big program, loaded from the disk)
+    var go: bool = true
+    while ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) < t0 + 800 {
+        if ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) >= t0 + 200 {
+            go = false
+            if back != 0 {
+                break
+            }
+        }
+        var b: u64 = 0
+        while b < 6 && !warm && go {
+            pids[b as usize] = ulib.sys(ulib.SYS_EXEC, (&path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
+            b = b + 1
+        }
+        // the table, while the children start
+        var sl: u64 = 0
+        while sl < 32 {
+            let r: u64 = wlibc.sys3w(2128, 0, sl, rp)
+            if r == 1 && (*(rp as *mut u64)) != 0 {
+                if same(rp + 64, (&t_vic[0 as usize]) as u64) {
+                    vic = vic + 1
+                }
+                if same(rp + 64, (&t_lock[0 as usize]) as u64) && back == 0 {
+                    back = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) - t0
+                    if back == 0 {
+                        back = 1
+                    }
+                }
+            }
+            sl = sl + 1
+        }
+        if warm && back != 0 {
+            let _y: u64 = ulib.sleep_ms(300)
+            break
+        }
+        if warm {
+            let _y2: u64 = ulib.sleep_ms(20)
+        }
+        b = 0
+        while b < 6 && !warm && go {
+            if !ulib.bad(pids[b as usize]) {
+                let c: u64 = ulib.wait_code(pids[b as usize])
+                kids = kids + 1
+                if c == 1 {
+                    won = won + 1
+                }
+            }
+            b = b + 1
+        }
+    }
+    let st1: u64 = ulib.sys(1870, 0, 0, 0)
+    say((&s_h[0 as usize]) as u64)
+    say((&s_k[0 as usize]) as u64)
+    ulib.sayn(lpid)
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(kids)
+    say((&s_won[0 as usize]) as u64)
+    ulib.sayn(won)
+    say((&s_v[0 as usize]) as u64)
+    ulib.sayn(vic)
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(back)
+    say((&s_st[0 as usize]) as u64)
+    ulib.sayn(st1)
+    ulib.nl()
+    return 0
+}
+
 const K_E1: u64 = 1
 const K_PW: u64 = 2
 const K_CK: u64 = 3
@@ -456,6 +577,7 @@ fn u_start(args: u64) -> u64 {
     var c_theme: [u8; 6] = "theme\0"
     var c_plain: [u8; 6] = "plain\0"
     var c_lockprobe: [u8; 10] = "lockprobe\0"
+    var c_lockrace: [u8; 9] = "lockrace\0"
     var title: u64 = (&t_win[0 as usize]) as u64
     var wx: u64 = 60
     if ulib.arg_count(args) >= 2 {
@@ -481,6 +603,9 @@ fn u_start(args: u64) -> u64 {
         }
         if same(a1, (&c_lockprobe[0 as usize]) as u64) {
             return lockprobe(ulib.arg_count(args) >= 3)
+        }
+        if same(a1, (&c_lockrace[0 as usize]) as u64) {
+            return lockrace(ulib.arg_count(args) >= 3)
         }
         if same(a1, (&c_plain[0 as usize]) as u64) {
             title = (&t_plain[0 as usize]) as u64
