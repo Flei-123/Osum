@@ -53,10 +53,35 @@ Alt+F4, Ctrl+Alt+Del, Super+D, Super+Tab, Alt+Esc and clicks into the place of
 the victim, and takes photos before the lock, at the lock and after the attacks.
 `tools/lockscene` (15/0) keeps the password logic and the crash case.
 
-Not covered and said so: a locker that is KILLED and a program that wins the
-race before the kernel restarts it is closed by the op-4 rule but not measured
-(timing); the serial console and the QEMU monitor are the host's, not the
-guest's.
+Not covered and said so: the serial console and the QEMU monitor are the host's,
+not the guest's.
+
+## The locker is killed (r390, 06.10.2026) -- measured, and it was open
+
+The first version of this document said the race "is closed by the op-4 rule but not
+measured". Measured, it was not closed. `tools/lockrace/run.sh`: a root probe kills the
+locker the kernel started itself (the zombie of a child of the kernel's guard is reaped
+within ~16 turns, so its task slot is free again almost at once), then for two seconds
+starts bursts of tiny `lockclaim` programs, each asking `osum_sperre` op 4 and, if that
+worked, op 2, while it reads the window table all the time.
+
+* **Old kernel:** a child that landed in the freed slot passed op 4 (slot equal, the old pid
+  gone) and opened the lock with op 2 WITHOUT the password: `won=1 state=0`, and the
+  victim window showed in the table 8 times (`tools/lockrace` 8 passed, 15 failed).
+* **Why:** `SP_SLOT` / `SP_PID` named the dead locker until `kgui.sperre_wache` noticed (every
+  32nd turn) and started a new one.
+* **Fix:** `sched.lock_gone(state, task)`, called by `exit_task` and by the kill path of
+  `uio.fi` under the same hold of `L_SCHED`: if the task is the one the lock names, `SP_PID`
+  becomes 0 and `SP_SLOT` a slot no task can have (0xFFFF). The lock stays ON (nobody is
+  allowed to draw: `wm.darf` is false without a locker), op 4 is refused for everyone, and the
+  guard starts a new locker as before (its pid is 0).
+* **Now:** `won=0`, `victim_seen=0`, the lock still on after the race, the lock screen is back
+  within 7 s (the new locker is a big program loaded from the disk), the right password still
+  opens it (`tools/lockrace` 23/0; `KROOT=<old tree>` is the counter-proof). `lockseal` 43/0 and
+  `lockscene` 15/0 are unchanged.
+* To reach the case the first locker (started by the shell, a child of `sh` whose zombie stays
+  in the table) is killed once (`a11ydemo lockrace warm`); the race runs against the second
+  one.
 
 ## The look (r383) and its measurements
 

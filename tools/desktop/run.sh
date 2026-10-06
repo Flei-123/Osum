@@ -55,7 +55,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+[ -n "${DESKTOP_KEEP:-}" ] && echo "workdir $TMPD" || trap 'rm -rf "$TMPD"' EXIT
 
 SHOTS="docs/shots/taskbar"
 while [ $# -gt 0 ]; do
@@ -93,7 +93,9 @@ SANS=assets/osum-sans.ttf
 # so its ink is checked against fUi's second version
 # (tools/ttf/fuiraster.py). `fui:` selects it in tools/gfx/checkshot.py.
 SANS_INK="fui:$SANS"
-BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
+# r389: fbres=800x600 -- the default mode of the VM is 1280x800 now and this runner's
+# arithmetic (rects.py, the drag from 520,586, the work areas) is for 800x600
+BASE="gfx fbres=800x600 wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 SCREEN_W=800
 SCREEN_H=600
 
@@ -147,7 +149,12 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "the directory tree is built" || bad "tools/k15/tree.py failed"
 
 conf() { # edge height width autohide ontop -> file
-    printf '# taskbar.conf\nedge=%s\nheight=%s\nwidth=%s\nautohide=%s\nontop=%s\n' \
+    # r389: hide_missing=0 -- the VM has no battery and no audio, and since the bar hides
+    # the fields of missing hardware (default hide_missing=1) the texts 'battery' / 'net'
+    # this runner reads are never painted: 18 of its checks went red on main for that
+    # reason alone. The runner measures the bar's geometry and text, so it asks for the
+    # fields to be there.
+    printf '# taskbar.conf\nedge=%s\nheight=%s\nwidth=%s\nautohide=%s\nontop=%s\nhide_missing=0\n' \
         "$1" "$2" "$3" "$4" "$5"
 }
 mk_image() { # image conf-file
@@ -362,7 +369,9 @@ for e in bottom top left right; do
     check_text "$L" "$P" "start"
     check_text "$L" "$P" "clock"
     check_text "$L" "$P" "battery"
-    check_text "$L" "$P" "net"
+    # the network field is an icon only (`field_without_text`): there is no text to check,
+    # the field has to be there
+    has "$L" "taskbar: field net " "[$e] the network field is there (icon only)"
     check_text "$L" "$P" "button"
     # a vertical bar has to wrap or shrink -- never clip. Whatever it
     # decided, the reported text is the drawn text, and the check above
@@ -510,6 +519,14 @@ rect() { # name field -> value
     # the shared serial port would otherwise hand back the x of one and
     # the y of the next, and needing a SECOND record (`name=win`) to do
     # the arithmetic doubles the chance that one of them is cut in half.
+    # r389: the record of the WINDOW itself ("name=win") has never carried ax/ay (it
+    # is the window, not a widget in it), so the pattern asked for them only on widgets
+    if [ "$1" = win ]; then
+        grep -a 'settings: rect name=win ' "$P" \
+            | grep -oE "name=win x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" \
+            | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
+        return
+    fi
     grep -a 'settings: rect name=' "$P" \
         | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+" \
         | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
@@ -551,20 +568,14 @@ else
     CX=$((EAX + EW / 2)); CY=$((EAY + EH / 2))
     # the menu opens at the chooser's own x and directly under it
     MX=$EAX; MY=$((EAY + EH))
-    # The row height of a drop-down is `zeilen_hoehe() + 2`, and
-    # `zeilen_hoehe()` is the `row` token the program prints when it
-    # starts. Read it, do not assume it: it is 20 under `classic` and
-    # 24 under `modern`, and a runner that assumes one of them is a
-    # runner that works on one appearance.
-    RH=$(grep -a 'settings: shape file=' "$P" | tail -1 \
-         | grep -oE ' row=[0-9]+' | grep -oE '[0-9]+')
-    if [ -z "$RH" ]; then
-        bad "the settings did not report their row height"
-        RH=20
-    fi
-    RH=$((RH + 2))
+    # r389: the drop-down is the scene host's popup now (`fuiscene.menu_open`): it opens
+    # 2 points under the chooser, rows are POP_ROW = 28 points high (x the interface scale,
+    # 1 here) and the first row starts 4 points inside the popup. The program prints these
+    # numbers when it opens the menu (`settings: menu open ... rh=`), but the clicks have to
+    # be planned before it is open, so they are computed.
+    RH=28
     # row 3 is "right": bottom, top, left, right
-    RX=$((MX + 20)); RY=$((MY + 3 * RH + RH / 2))
+    RX=$((MX + 20)); RY=$((MY + 2 + 4 + 3 * RH + RH / 2))
     BX=$((BAX + AW / 2)); BY=$((BAY + AH / 2))
     python3 - "$CX" "$CY" "$RX" "$RY" "$BX" "$BY" > "$TMPD/mon-set" <<'PYEOF'
 import sys
@@ -601,6 +612,7 @@ fi
 
 echo "== 9. what the older runners said, and still say =="
 for t in tools/wm/run.sh tools/k15/run.sh; do
+    [ -n "${DESKTOP_QUICK:-}" ] && break
     if [ -x "$t" ] || [ -f "$t" ]; then
         bash "$t" > "$TMPD/$(basename $(dirname $t)).log" 2>&1
         line=$(tail -4 "$TMPD/$(basename $(dirname $t)).log" | grep -iE '[0-9]+ passed' | tail -1)
