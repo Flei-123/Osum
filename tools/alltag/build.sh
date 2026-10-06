@@ -74,6 +74,7 @@ bloecke=32768
 mager=no
 inodes=""
 keep=no
+tbconf=""
 progs="desktop taskbar settings launcher theme explorer calc zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
     case "$a" in
@@ -94,6 +95,7 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
+        tbconf=*) tbconf=${a#*=} ;;
         desk=*) desk_on=${a#*=} ;;
         mon=*) moncmds="$moncmds
 ${a#*=}" ;;
@@ -171,6 +173,8 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 
 printf '# taskbar.conf -- written by tools/themestore/build.sh\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\nalign=%s\n' \
     "$edge" "$align" > "$OUT/taskbar.conf"
+# r384: a whole taskbar.conf from outside (the Windows 11 look and its tests)
+[ -n "$tbconf" ] && cp "$tbconf" "$OUT/taskbar.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$scheme" "$mode" "$accent" "$shape" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
