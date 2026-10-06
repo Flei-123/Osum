@@ -13,7 +13,7 @@
 # ("a file may hold 2134016 octets in this format"), which is how K15 and the
 # alltag file-manager runs went red once.
 #
-# Measures the file manager (and the other big scene programs) and says how
+# Measures the file manager and the task bar (and the other big scene programs) and says how
 # much room is left. FAILS when the file manager is within 256 octets of the
 # limit: the next change would break the image builders. The room is lumpy
 # (an ELF segment grows in whole 4096-octet pages), so the message also says
@@ -25,7 +25,7 @@ LIMIT=2134016
 KEEP=256
 OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-PROGS="explorer settings installer pdfview nedit launcher"
+PROGS="explorer taskbar settings installer pdfview nedit launcher"
 bash tools/sync/build.sh "$OUT" 0 $PROGS > "$OUT/b.txt" 2>&1 || { sed 's/^/    /' "$OUT/b.txt" | head; echo "PROGSIZE: build failed"; exit 1; }
 fail=0
 for p in $PROGS; do
@@ -37,6 +37,10 @@ for p in $PROGS; do
     printf '  %-10s %9d octets, %7d below the format-2 limit; code segment %d octets before its page boundary\n' "$p" "$sz" "$left" "$pend"
     if [ "$p" = explorer ] && [ "$left" -lt "$KEEP" ]; then
         echo "  FAIL  the file manager is within $KEEP octets of the format-2 limit"; fail=1
+    fi
+    # r387: the task bar grew with the Windows 11 layout (task view card, chevron, capsule, count)
+    if [ "$p" = taskbar ] && [ "$left" -lt "$KEEP" ]; then
+        echo "  FAIL  the task bar is within $KEEP octets of the format-2 limit"; fail=1
     fi
 done
 [ $fail -eq 0 ] && echo "PROGSIZE: ok" || echo "PROGSIZE: the file manager is too big for a format-2 image"

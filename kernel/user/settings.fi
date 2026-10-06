@@ -1003,7 +1003,8 @@ static mut tb_width: u64 = 104
 static mut tb_autohide: u64 = 0
 static mut tb_ontop: u64 = 1
 static mut tb_align: u64 = 0
-static mut tb_buf: [u8; 256] = [0 as u8; 256]
+static mut tb_buf: [u8; 1024] = [0 as u8; 1024]
+static mut tb_old: [u8; 1024] = [0 as u8; 1024]
 
 static mut tk_edge: [u8; 5] = "edge\0"
 static mut tk_height: [u8; 7] = "height\0"
@@ -1193,7 +1194,60 @@ fn tb_write() -> bool {
     at = text_an(b, at + 1, alp)
     __mmio_write8((b + at) as *mut u8, 10 as u8)
     at = at + 1
+    at = tb_keep(b, at)
     return file_write((&p_tbconf[0 as usize]) as u64, b, at)
+}
+
+// r387: WHAT SETTINGS DOES NOT OWN STAYS IN THE FILE. This writer used to
+// write its six keys and nothing else -- one change of the edge or the height
+// threw away the pinned programs, the labels, the clock and tray keys and every
+// key of the Windows 11 layout. The lines of the old file whose key is not one
+// of the six are copied behind them.
+fn tb_keep(b: u64, at0: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_tbconf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return at0
+    }
+    let o: u64 = (&tb_old[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, o, 1023)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return at0
+    }
+    var at: u64 = at0
+    var i: u64 = 0
+    while i < n {
+        var le: u64 = i
+        while le < n && __mmio_read8((o + le) as *mut u8) != 10 as u8 {
+            le = le + 1
+        }
+        var ke: u64 = i
+        while ke < le && __mmio_read8((o + ke) as *mut u8) != 61 as u8 {
+            ke = ke + 1
+        }
+        if ke < le && __mmio_read8((o + i) as *mut u8) != 35 as u8 {
+            let kl: u64 = ke - i
+            let own: bool = tb_key_is(o + i, kl, (&tk_edge[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_height[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_width[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_ah[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_ot[0 as usize]) as u64)
+                || tb_key_is(o + i, kl, (&tk_al[0 as usize]) as u64)
+            if !own && at + (le - i) + 2 < 1000 {
+                var k: u64 = i
+                while k < le {
+                    __mmio_write8((b + at) as *mut u8,
+                        __mmio_read8((o + k) as *mut u8))
+                    at = at + 1
+                    k = k + 1
+                }
+                __mmio_write8((b + at) as *mut u8, 10 as u8)
+                at = at + 1
+            }
+        }
+        i = le + 1
+    }
+    return at
 }
 
 static mut ts_a: [u8; 24] = "settings: taskbar edge=\0"

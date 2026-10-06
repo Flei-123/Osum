@@ -190,7 +190,7 @@ justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
 printf '%s\n' "$lang" > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 65536 --v3 --inodes=1024 "--time=$(date +%s)" /lib/
+ARGS=(build "$OUT/disk.img" 98304 --v3 --inodes=1024 "--time=$(date +%s)" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $GEBAUT; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done

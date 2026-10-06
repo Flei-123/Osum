@@ -305,7 +305,7 @@ printf '%s\n' "$lang" > "$OUT/userlocale"
 # `--time=` setzt dazu die Zeit, mit der die Dateien entstehen (die des
 # Wirtes beim Bauen des Abbildes), sonst waeren alle drei Zeiten null
 # und die Spalte bliebe leer wie zuvor.
-ARGS=(build "$OUT/disk.img" 20480 --v3 "--time=$(date +%s)" /lib/
+ARGS=(build "$OUT/disk.img" 49152 --v3 "--time=$(date +%s)" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done

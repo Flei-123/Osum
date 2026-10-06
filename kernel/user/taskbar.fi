@@ -104,6 +104,9 @@ import qs
 // RUNDE 31: nur fuer die zwei Zaehler im Bericht (fui=/fuix=).
 import fuib
 import barpop
+import taskview
+import fuiscene
+import std.rt
 
 export { u_start }
 
@@ -643,6 +646,22 @@ static mut cf_hidemissing: u64 = 1
 // r384: the Windows 11 corner: the language field, the four-digit year.
 static mut cf_lang: u64 = 0
 static mut cf_year4: u64 = 0
+// r387 (Windows 11 layout, rest): all four are OFF by default.
+static mut cf_tv: u64 = 0 // task view button after the start button
+static mut cf_chev: u64 = 0 // tray chevron: icons only <-> the texts
+static mut cf_group: u64 = 0 // network, sound, battery as ONE capsule, icons only
+static mut cf_badge: u64 = 0 // 0 = off, N = a count on a pinned program with N or more windows (2 is the usual one)
+static mut chev_open: u64 = 0 // 1 = the chevron has opened the tray: texts are shown
+static mut tv_x: u64 = 0
+static mut tv_y: u64 = 0
+static mut tv_w: u64 = 0
+static mut tv_h: u64 = 0
+static mut chv_x: u64 = 0
+static mut chv_y: u64 = 0
+static mut chv_w: u64 = 0
+static mut chv_h: u64 = 0
+static mut grp_x: u64 = 0
+static mut grp_w: u64 = 0
 static mut cf_from_file: u64 = 0
 
 // the geometry derived from it
@@ -791,7 +810,9 @@ static mut hover_on: u64 = 0
 
 static mut rec: [u8; 104] = [0 as u8; 104]
 static mut ev: [u8; 16] = [0 as u8; 16]
-static mut conf: [u8; 256] = [0 as u8; 256]
+// r387: 1024 and not 256 -- the file of a Windows 11 bar (16 keys and ten pins) is
+// ~400 octets; at 256 the reader lost the pins and the writer ran over the end.
+static mut conf: [u8; 1024] = [0 as u8; 1024]
 static mut minute_sum: u64 = 0
 static mut list_sum: u64 = 0
 static mut offset: u64 = 0
@@ -904,10 +925,6 @@ static mut s_dbg: u64 = 0
 // Die drei Ausgaenge dieses Programms, an EINER Stelle geschaltet.
 // `sayn` und `nl` stehen hier, damit kein Aufrufer `ulib.` direkt
 // nimmt und damit am Schalter vorbeigeht.
-fn dbg_on() -> bool {
-    return s_dbg != 0
-}
-
 fn dbg_setup(args: u64) {
     var p_tr: [u8; 14] = "/etc/uitrace\0\0"
     let fdt: u64 = io.open((&p_tr[0 as usize]) as u64, 0)
@@ -1042,6 +1059,10 @@ static mut k_labels: [u8; 8] = "labels\0\0"
 static mut k_nohw: [u8; 15] = "hide_missing\0\0\0"
 static mut k_lang: [u8; 14] = "tray_language\0"
 static mut k_year4: [u8; 12] = "clock_year4\0"
+static mut k_tv: [u8; 9] = "taskview\0"
+static mut k_chev: [u8; 13] = "tray_chevron\0"
+static mut k_group: [u8; 11] = "tray_group\0"
+static mut k_badge: [u8; 7] = "badges\0"
 static mut v_left: [u8; 5] = "left\0"
 static mut v_center: [u8; 7] = "center\0"
 
@@ -1133,7 +1154,7 @@ fn conf_read() -> bool {
         return false
     }
     let b: u64 = (&conf[0 as usize]) as u64
-    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 255)
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 1023)
     let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     if ulib.bad(n) || n == 0 {
         return false
@@ -1282,6 +1303,22 @@ fn conf_read() -> bool {
                 if digits > 0 {
                     cf_year4 = v & 1
                 }
+            } else if key_is(b + ks, kl, (&k_tv[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_tv = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_chev[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_chev = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_group[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_group = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_badge[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_badge = clamp(v, 0, 9)
+                }
             } else if key_is(b + ks, kl, (&k_labels[0 as usize]) as u64) {
                 // EIN WORT UND KEINE ZAHL, aus demselben Grund wie bei
                 // `edge=` und `align=`: `labels=never` sagt, was es
@@ -1306,6 +1343,25 @@ fn conf_read() -> bool {
 static mut c_head: [u8; 60] =
     "# taskbar.conf -- written by /bin/taskbar and /bin/settings\0"
 
+// r387: one key line of the file: `key=value\n`; `at` is the place of the newline
+// before it (the file's first line is written by the caller), the result the place of
+// the newline after it. These two replace twenty copies of the same four statements.
+fn wk_num(b: u64, at: u64, key: u64, v: u64) -> u64 {
+    var a: u64 = text_at_p(b, at + 1, key)
+    __mmio_write8((b + a) as *mut u8, 61 as u8)
+    a = num_at(b, a + 1, v)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    return a
+}
+
+fn wk_txt(b: u64, at: u64, key: u64, val: u64) -> u64 {
+    var a: u64 = text_at_p(b, at + 1, key)
+    __mmio_write8((b + a) as *mut u8, 61 as u8)
+    a = text_at_p(b, a + 1, val)
+    __mmio_write8((b + a) as *mut u8, 10 as u8)
+    return a
+}
+
 fn conf_write() -> bool {
     let b: u64 = (&conf[0 as usize]) as u64
     var at: u64 = text_at_p(b, 0, (&c_head[0 as usize]) as u64)
@@ -1315,58 +1371,27 @@ fn conf_write() -> bool {
     __mmio_write8((b + at) as *mut u8, 61 as u8)
     at = text_at_p(b, at + 1, wlibc.edge_name(cf_edge))
     __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_height[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_height)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_width[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_width)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_autohide[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_autohide)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_ontop[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_ontop)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_align[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = text_at_p(b, at + 1, align_name(cf_align))
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = wk_num(b, at, (&k_height[0 as usize]) as u64, cf_height)
+    at = wk_num(b, at, (&k_width[0 as usize]) as u64, cf_width)
+    at = wk_num(b, at, (&k_autohide[0 as usize]) as u64, cf_autohide)
+    at = wk_num(b, at, (&k_ontop[0 as usize]) as u64, cf_ontop)
+    at = wk_txt(b, at, (&k_align[0 as usize]) as u64, align_name(cf_align))
     // r384: THE KEYS THAT ARE NOT ABOUT THE EDGE go out too -- the clock,
     // the labels, the corner. Before, a change of the edge in Settings
     // dropped them from the file (and a bar the person had set up to look like
     // Windows 11 went back to the defaults).
-    at = text_at_p(b, at + 1, (&k_labels[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = text_at_p(b, at + 1, labels_name(cf_labels))
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_cdate[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_date)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_cwday[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_wday)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_clines[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_clines)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_seconds[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_sec)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_lang[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_lang)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = text_at_p(b, at + 1, (&k_year4[0 as usize]) as u64)
-    __mmio_write8((b + at) as *mut u8, 61 as u8)
-    at = num_at(b, at + 1, cf_year4)
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = wk_txt(b, at, (&k_labels[0 as usize]) as u64, labels_name(cf_labels))
+    at = wk_num(b, at, (&k_cdate[0 as usize]) as u64, cf_date)
+    at = wk_num(b, at, (&k_cwday[0 as usize]) as u64, cf_wday)
+    at = wk_num(b, at, (&k_clines[0 as usize]) as u64, cf_clines)
+    at = wk_num(b, at, (&k_seconds[0 as usize]) as u64, cf_sec)
+    at = wk_num(b, at, (&k_lang[0 as usize]) as u64, cf_lang)
+    at = wk_num(b, at, (&k_year4[0 as usize]) as u64, cf_year4)
+    at = wk_num(b, at, (&k_nohw[0 as usize]) as u64, cf_hidemissing)
+    at = wk_num(b, at, (&k_tv[0 as usize]) as u64, cf_tv)
+    at = wk_num(b, at, (&k_chev[0 as usize]) as u64, cf_chev)
+    at = wk_num(b, at, (&k_group[0 as usize]) as u64, cf_group)
+    at = wk_num(b, at, (&k_badge[0 as usize]) as u64, cf_badge)
     // ==================================================== RUNDE ANHEFTEN
     // DIE ANHEFTER MUESSEN MIT HINAUS, SONST LOESCHT SIE DAS SPEICHERN.
     //
@@ -1868,7 +1893,7 @@ fn geom_say() {
 // bar for exactly this reason.
 fn apply() {
     window_rect()
-    let rs: u64 = wlibc.win_size(w_h, win_w, win_h)
+    let rs: u64 = bar_size(win_w, win_h)
     say((&s_sz2[0 as usize]) as u64)
     sayn(win_w)
     say((&s_gx2[0 as usize]) as u64)
@@ -3029,8 +3054,25 @@ fn shorten_title(i: u64, width: u64) {
 // at the top instead of the left, the window buttons stack downwards,
 // and the three status fields sit at the bottom one above the other,
 // each as tall as the number of lines it needed.
+// r387: the tray shows icons only (network, sound) while the group is on and the
+// chevron has not opened it.
+fn compact() -> bool {
+    return cf_group != 0 && chev_open == 0
+}
+
+// the room the task view button takes in front of the pins (0 = none)
+fn tv_extra() -> u64 {
+    if cf_tv != 0 && vertical == 0 {
+        return btn_h() + 8 + gap()
+    }
+    return 0
+}
+
 fn layout() {
     var i: u64 = 0
+    tv_w = 0
+    chv_w = 0
+    grp_w = 0
     // RUNDE WMPLUGIN: die Widget-Felder zuerst loeschen. Ein Feld
     // behaelt sonst seine alte Breite, wenn das Plugin aufhoert -- und
     // ein Rechteck ohne Inhalt sieht aus wie ein Fehler. Die senkrechte
@@ -3207,7 +3249,27 @@ fn layout() {
         // vier Zeilen bliebe an der Stelle ein leeres Rechteck von
         // zehn Bildpunkten plus Symbolplatz stehen -- ein Loch, das
         // aussieht wie ein Fehler.
-        if tlen(full_of(f)) == 0 {
+        // r387: group gap -- network, sound and battery touch each other
+        var gg: u64 = gap()
+        if cf_group != 0 && (f == F_BAT || f == F_SND) {
+            gg = 0
+        }
+        if tlen(full_of(f)) != 0 && compact() && (f == F_NET || f == F_SND)
+            && (room != 0 || (f == F_SND && glyphs_ok())) {
+            // icon only: the field is as wide as its icon
+            var iw2: u64 = room
+            if f == F_SND {
+                iw2 = gl_w() + 2
+            }
+            let w3: u64 = wlibc.snap_up(iw2 + 8)
+            x = x - w3
+            f_x[(f) as usize] = x
+            f_y[(f) as usize] = st_y
+            f_w[(f) as usize] = w3
+            f_h[(f) as usize] = btn_h()
+            f_lines[(f) as usize] = 0
+            x = x - gg
+        } else if tlen(full_of(f)) == 0 {
             f_x[(f) as usize] = x
             f_y[(f) as usize] = st_y
             f_w[(f) as usize] = 0
@@ -3238,7 +3300,7 @@ fn layout() {
         f_y[(f) as usize] = st_y
         f_w[(f) as usize] = ww
         f_h[(f) as usize] = btn_h()
-        x = x - gap()
+        x = x - gg
         }
         if f == F_CLK {
             f = F_BAT
@@ -3252,6 +3314,27 @@ fn layout() {
             f = F_NOTI
         } else {
             f = F_N
+        }
+    }
+    // r387: the capsule around network, sound and battery
+    if cf_group != 0 {
+        var gl: u64 = 100000
+        var gr: u64 = 0
+        var gf: u64 = F_NET
+        while gf <= F_BAT {
+            if f_w[(gf) as usize] != 0 {
+                if f_x[(gf) as usize] < gl {
+                    gl = f_x[(gf) as usize]
+                }
+                if f_x[(gf) as usize] + f_w[(gf) as usize] > gr {
+                    gr = f_x[(gf) as usize] + f_w[(gf) as usize]
+                }
+            }
+            gf = gf + 1
+        }
+        if gr > gl {
+            grp_x = gl
+            grp_w = gr - gl
         }
     }
     // ================================================ RUNDE WMPLUGIN
@@ -3280,6 +3363,8 @@ fn layout() {
     // vier Bildpunkte verschoben bekommen, bloss weil es die Runde
     // WMPLUGIN gibt. (Gemessen wird der Abstand in
     // tools/wmplug/widget.sh gegen `taskbar: field clock x=`.)
+    // r387: with the chevron the widgets of the extensions sit behind it until it is opened
+    let phid: bool = cf_chev != 0 && chev_open == 0
     var pluecke: u64 = 8
     if gap() > pluecke {
         pluecke = gap()
@@ -3287,7 +3372,7 @@ fn layout() {
     var ptxt_da: bool = false
     var pq: u64 = 0
     while pq < PB_MAX {
-        if tlen(plug_text(pq)) != 0 {
+        if !phid && tlen(plug_text(pq)) != 0 {
             ptxt_da = true
         }
         pq = pq + 1
@@ -3299,7 +3384,7 @@ fn layout() {
     let pgrenze: u64 = st_x + st_w + gap() * 2
     while pw < PB_MAX {
         let pp: u64 = plug_text(pw)
-        if tlen(pp) != 0 {
+        if !phid && tlen(pp) != 0 {
             var pbw: u64 = wlibc.snap_up(width_of(pp) + 10)
             if pbw > bar_w / 3 {
                 pbw = bar_w / 3
@@ -3315,7 +3400,19 @@ fn layout() {
         }
         pw = pw + 1
     }
-    let left: u64 = st_x + st_w + gap()
+    // r387: the tray chevron, the leftmost thing of the tray
+    if cf_chev != 0 {
+        let cw: u64 = btn_h()
+        if x > pgrenze + cw + tv_extra() {
+            x = x - cw
+            chv_x = x
+            chv_y = st_y
+            chv_w = cw
+            chv_h = btn_h()
+            x = x - gap()
+        }
+    }
+    let left: u64 = st_x + st_w + gap() + tv_extra()
     var space: u64 = 0
     if x > left {
         space = x - left
@@ -3380,7 +3477,7 @@ fn layout() {
     // `sub` does here without an `if`.
     var gx: u64 = st_x
     if cf_align == AL_CENTER && nk > 0 && width >= TASK_MIN {
-        let block: u64 = st_w + gap() + nk * width + (nk - 1) * gap()
+        let block: u64 = st_w + gap() + tv_extra() + nk * width + (nk - 1) * gap()
         let run: u64 = x + gap() - pad()
         if run > block {
             gx = pad() + (run - block) / 2
@@ -3388,8 +3485,8 @@ fn layout() {
     } else if cf_align == AL_CENTER {
         // No window buttons: the start button alone is the block.
         let run: u64 = x + gap() - pad()
-        if run > st_w {
-            gx = pad() + (run - st_w) / 2
+        if run > st_w + tv_extra() {
+            gx = pad() + (run - st_w - tv_extra()) / 2
         }
     }
     st_x = gx
@@ -3420,6 +3517,13 @@ fn layout() {
     }
     let pinbr: u64 = btn_h()
     var pl: u64 = st_x + st_w + gap()
+    if tv_extra() != 0 {
+        tv_x = pl
+        tv_y = st_y
+        tv_w = btn_h() + 8
+        tv_h = btn_h()
+        pl = pl + tv_w + gap()
+    }
     pi = 0
     while pi < npin {
         px_[(pi) as usize] = pl
@@ -3864,11 +3968,6 @@ fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // point -- `real` gets no mark, so most buttons go through here
 // unchanged and the runner that measures the label position still
 // measures the same number for them.
-fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
-    dim: bool, mark: u64) -> u64 {
-    return button_sym(x, y, w, h, txt, on, dim, mark, 0)
-}
-
 // ==================================================== RUNDE SOFTUI
 //
 // EINE KACHEL UND EINE PILLE STATT EINES BESCHRIFTETEN KASTENS.
@@ -4541,6 +4640,80 @@ fn put_n(p: u64, n: u64) {
     }
 }
 
+static mut s_tvl: [u8; 21] = "taskbar: taskview x=\0"
+static mut s_chl: [u8; 20] = "taskbar: chevron x=\0"
+static mut s_grl: [u8; 18] = "taskbar: group x=\0"
+static mut s_bgl: [u8; 20] = "taskbar: badge txt=\0"
+static mut s_opn: [u8; 7] = " open=\0"
+static mut s_bgn: [u8; 4] = " n=\0"
+
+// r387: the number of open windows of the program a pin stands for
+fn app_windows(name: u64) -> u64 {
+    var c: u64 = 0
+    var j: u64 = 0
+    while j < nk {
+        if sym_eq(name, (&kapp[0 as usize]) as u64 + j * 24) {
+            c = c + 1
+        }
+        j = j + 1
+    }
+    return c
+}
+
+// r387: a button of the bar whose picture is a glyph of the icon font
+fn glyph_button(x: u64, y: u64, w: u64, h: u64, cp: u64, kante: u64) {
+    let _r: u64 = button_sym(x, y, w, h, (&s_leer[0 as usize]) as u64,
+        false, false, 0, 0)
+    if glyphs_ok() && w > kante && h > kante {
+        let _g: bool = wlibc.icon_at(cp, x + (w - kante) / 2,
+            y + (h - kante) / 2, kante, wlibc.theme(wlibc.T_FG))
+    }
+}
+
+// r387: the count on a pinned program with several windows (top right corner)
+fn badge_paint(px0: u64, py0: u64, pw0: u64, n: u64, report: bool) {
+    var dg: [u8; 4] = [0 as u8; 4]
+    var dl: u64 = 1
+    if n > 9 {
+        dg[0 as usize] = 57 as u8
+        dg[1 as usize] = 43 as u8
+        dl = 2
+    } else {
+        dg[0 as usize] = (48 + n) as u8
+    }
+    dg[(dl) as usize] = 0 as u8
+    let dp: u64 = (&dg[0 as usize]) as u64
+    let tw: u64 = wlib.draw_text_w(dp, dl, wlibc.TY_CAPTION)
+    let bh: u64 = btn_h() / 2 + 2
+    var bw: u64 = tw + 6
+    if bw < bh {
+        bw = bh
+    }
+    let bx: u64 = px0 + pw0 - bw - 1
+    let by: u64 = py0 + 1
+    wlib.draw_board(bx, by, bw, bh, wlib.MR_BUTTON, wlibc.EL_FLAT,
+        wlibc.theme(wlibc.C_ACCENT), 0)
+    let base: u64 = by + (bh + wlib.draw_ascent(wlibc.TY_CAPTION)) / 2 - 1
+    let _e: u64 = text_mit_schild(bx + (bw - tw) / 2, base, dp, dl,
+        wlibc.theme(wlibc.C_ON_ACCENT), wlibc.TY_CAPTION,
+        wlibc.theme(wlibc.C_ACCENT))
+    if report {
+        say((&s_bgl[0 as usize]) as u64)
+        say(dp)
+        say((&s_bgn[0 as usize]) as u64)
+        sayn(n)
+        say((&s_tX[0 as usize]) as u64)
+        sayn(bx)
+        say((&s_gy[0 as usize]) as u64)
+        sayn(by)
+        say((&s_gw[0 as usize]) as u64)
+        sayn(bw)
+        say((&s_gh[0 as usize]) as u64)
+        sayn(bh)
+        nl()
+    }
+}
+
 fn paint_band(y0: u64, hh: u64, report: bool) {
     wlibc.set_band(y0)
     wlibc.clip_set(0, y0, win_w, y0 + hh)
@@ -4586,7 +4759,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             wlibc.theme(wlibc.C_BORDER))
     }
     if shown == 0 {
-        let _p0: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+        let _p0: u64 = bar_push(y0, hh)
         ub_px = ub_px + _p0
         ub_soll = ub_soll + win_w * hh
         if _p0 == 0 {
@@ -4713,6 +4886,40 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     // DIE LAUFANZEIGE IST DIESELBE PILLE wie beim Fensterknopf, und sie
     // erscheint NUR, wenn das Programm laeuft (`pinwin < MAXK`). Ein
     // kalter Anhefter hat keinen Strich -- genau wie bei Windows.
+    if tv_w != 0 {
+        glyph_button(tv_x, tv_y, tv_w, tv_h, icons.TASKVIEW, tv_h - 8)
+        if report {
+            say((&s_tvl[0 as usize]) as u64)
+            sayn(tv_x)
+            say((&s_gy[0 as usize]) as u64)
+            sayn(tv_y)
+            say((&s_gw[0 as usize]) as u64)
+            sayn(tv_w)
+            say((&s_gh[0 as usize]) as u64)
+            sayn(tv_h)
+            nl()
+        }
+    }
+    if chv_w != 0 {
+        var chcp: u64 = icons.CHEVRON_UP
+        if chev_open != 0 {
+            chcp = icons.CHEVRON_DOWN
+        }
+        glyph_button(chv_x, chv_y, chv_w, chv_h, chcp, chv_h - 10)
+        if report {
+            say((&s_chl[0 as usize]) as u64)
+            sayn(chv_x)
+            say((&s_gy[0 as usize]) as u64)
+            sayn(chv_y)
+            say((&s_gw[0 as usize]) as u64)
+            sayn(chv_w)
+            say((&s_gh[0 as usize]) as u64)
+            sayn(chv_h)
+            say((&s_opn[0 as usize]) as u64)
+            sayn(chev_open)
+            nl()
+        }
+    }
     var pz2: u64 = 0
     while pz2 < npin {
         if pw_[(pz2) as usize] != 0 {
@@ -4732,6 +4939,13 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             if laeuft {
                 pill(px_[(pz2) as usize], py_[(pz2) as usize],
                     pw_[(pz2) as usize], ph_[(pz2) as usize], vorn)
+                if cf_badge != 0 {
+                    let wn: u64 = app_windows(pnm)
+                    if wn >= cf_badge {
+                        badge_paint(px_[(pz2) as usize], py_[(pz2) as usize],
+                            pw_[(pz2) as usize], wn, report)
+                    }
+                }
             }
             if report {
                 say((&s_pin[0 as usize]) as u64)
@@ -4911,6 +5125,17 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         }
         i = i + 1
     }
+    if grp_w != 0 {
+        wlib.draw_board(grp_x, st_y, grp_w, btn_h(), wlib.MR_BUTTON,
+            wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
+        if report {
+            say((&s_grl[0 as usize]) as u64)
+            sayn(grp_x)
+            say((&s_gw[0 as usize]) as u64)
+            sayn(grp_w)
+            nl()
+        }
+    }
     var f: u64 = 0
     while f < F_N {
         // RUNDE STARTKNOPF: ein Feld ohne Breite wird nicht gemalt --
@@ -4920,9 +5145,11 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         if f_w[(f) as usize] == 0 {
             f = f + 1
         } else {
-        wlib.draw_board(f_x[(f) as usize], f_y[(f) as usize],
-            f_w[(f) as usize], f_h[(f) as usize], wlib.MR_BUTTON,
-            wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
+        if grp_w == 0 || f > F_BAT {
+            wlib.draw_board(f_x[(f) as usize], f_y[(f) as usize],
+                f_w[(f) as usize], f_h[(f) as usize], wlib.MR_BUTTON,
+                wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
+        }
         // ROUND NETVIEW, addendum: the state of the MACHINE, in the
         // corner, where every system has put it for thirty years. It
         // goes in FRONT of the address and not instead of it: the icon
@@ -5321,7 +5548,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             }
         }
     }
-    let _p: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+    let _p: u64 = bar_push(y0, hh)
     // RUNDE UHRWERK: WAS HAT `push` WIRKLICH HINUEBERGEBRACHT?
     // `wig.blit` gibt die Zahl der Bildpunkte zurueck -- und NULL,
     // wenn `fetch` die Quelle nicht lesen durfte. Bis zu dieser Runde
@@ -5401,6 +5628,7 @@ fn paint(report: bool) {
         first = false
         y = y + hh
     }
+    bar_sync()
     paints = paints + 1
     // RUNDE GLAS (fix-r4-1): wie viele Textschilde dieser Durchgang
     // gemalt hat. Die Zahl wird hier gemeldet und danach wieder auf
@@ -6364,14 +6592,6 @@ static mut s_tovoll: [u8; 27] = "taskbar: toast kein Platz\0\0"
 // oben), also bringt der Absender seinen Text selbst mit.
 static mut to_puf: [u8; 96] = [0 as u8; 96]
 
-fn toast_offen() -> bool {
-    return to_win != 0xFFFFFFFFFFFFFFFF
-}
-
-fn toast_zahl() -> u64 {
-    return to_zahl
-}
-
 fn toast_zu() {
     if to_win == 0xFFFFFFFFFFFFFFFF {
         return
@@ -6633,6 +6853,10 @@ fn hotkey_step() {
     // seinen Waechter danebengestellt, und im Bericht standen ZWEI
     // "sperre: Sperrer neu" mit zwei Prozessnummern. Gemessen am
     // Abnahmelauf vom 13.09.
+    if taste == 116 {
+        bar_keys(true)
+        return
+    }
     if taste == 109 {
         if snd_da != 0 {
             let an: u64 = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
@@ -6723,6 +6947,10 @@ fn startmenue_um() {
     nl()
 }
 
+static mut s_notv: [u8; 27] = "taskbar: no task view card\0"
+static mut z_tv: [u8; 9] = "taskview\0"
+static mut z_chev: [u8; 8] = "chevron\0"
+
 fn click(x: u64, y: u64) {
     clicks = clicks + 1
     say((&s_cl[0 as usize]) as u64)
@@ -6733,6 +6961,35 @@ fn click(x: u64, y: u64) {
     // settings, the way the same corner does on every system that has
     // such a panel. Before the window buttons, because it is a field
     // and not a button and would otherwise fall through to the drag.
+    if grp_w != 0 && x >= grp_x && x < grp_x + grp_w
+        && y >= st_y && y < st_y + btn_h() {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_qs[0 as usize]) as u64)
+        nl()
+        qs.toggle()
+        return
+    }
+    if tv_w != 0 && x >= tv_x && x < tv_x + tv_w && y >= tv_y && y < tv_y + tv_h {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_tv[0 as usize]) as u64)
+        nl()
+        taskview.toggle()
+        return
+    }
+    if chv_w != 0 && x >= chv_x && x < chv_x + chv_w && y >= chv_y && y < chv_y + chv_h {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_chev[0 as usize]) as u64)
+        nl()
+        if chev_open == 0 {
+            chev_open = 1
+        } else {
+            chev_open = 0
+        }
+        let _sb: bool = status_build()
+        layout()
+        paint(true)
+        return
+    }
     if x >= f_x[(F_NET) as usize]
         && x < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
         && y >= f_y[(F_NET) as usize]
@@ -6910,6 +7167,436 @@ static mut s_title: [u8; 8] = "Taskbar\0"
 static mut s_theme: [u8; 11] = "/etc/theme\0"
 static mut a_once: [u8; 5] = "once\0"
 
+static mut t_tvn: [u8; 10] = "Task view\0"
+static mut t_chn: [u8; 13] = "Hidden icons\0"
+static mut t_nen: [u8; 8] = "Network\0"
+static mut t_snn: [u8; 7] = "Volume\0"
+static mut t_btn: [u8; 8] = "Battery\0"
+static mut t_nin: [u8; 14] = "Notifications\0"
+static mut t_stn: [u8; 6] = "Start\0"
+
+// =============================================================== r381 STAGE 1
+// THE BAR IS A WINDOW OF THE SCENE HOST (window 0), and its rectangles are nodes.
+//
+// What did not change: `layout()` computes every rectangle, `paint_band` paints with
+// the same painters into the same one-band surface, the polled pointer, the drag,
+// the auto-hide. What did:
+//   * the window is `fuiscene.open_plain` and not a raw `WM_CREATE` window;
+//   * a band is not blitted to the window server any more but copied into `bar_r`
+//     (a retained picture of the whole bar); the host paints it as its backdrop
+//     (`bar_overlay`, over the faces of the ghost nodes) and pushes it -- so the focus ring and everything else the
+//     host draws land on top of the bar's own picture, and nothing is lost when
+//     the host repaints;
+//   * the rectangles are ALSO a tree of nodes that paint nothing (ghost buttons) --
+//     start, task view, chevron, pins, window buttons, status fields, extension
+//     widgets, each with a key and the name a screen reader says: the bar is
+//     visible to the accessibility export, the bridge can press a node, and the
+//     keyboard focus ring has something to stand on;
+//   * the pointer events of the window come to `bar_raw` (the old `EV_DOWN` code,
+//     unchanged), the host skips them.
+const BI_MAX: u64 = 48
+const K_START: u64 = 1
+const K_TV: u64 = 2
+const K_CHEV: u64 = 3
+const K_PIN: u64 = 10
+const K_TASK: u64 = 30
+const K_FIELD: u64 = 60
+const K_PLUG: u64 = 80
+static mut bar_r: u64 = 0 // the retained picture of the bar, win_w x win_h x 4 octets
+static mut bar_cap: u64 = 0
+static mut bar_ready: u64 = 0
+static mut bi_n: u64 = 0
+static mut bi_x: [u64; 48] = [0 as u64; 48]
+static mut bi_y: [u64; 48] = [0 as u64; 48]
+static mut bi_w: [u64; 48] = [0 as u64; 48]
+static mut bi_h: [u64; 48] = [0 as u64; 48]
+static mut bi_k: [u64; 48] = [0 as u64; 48]
+static mut bi_l: [u64; 48] = [0 as u64; 48]
+static mut bi_o: [u64; 48] = [0 as u64; 48] // the order of the tree
+static mut bar_nodes: u64 = 0
+static mut bar_pump_said: u64 = 0
+
+fn bi_add(x: u64, y: u64, w: u64, h: u64, key: u64, lab: u64) {
+    if w == 0 || h == 0 || bi_n >= BI_MAX {
+        return
+    }
+    bi_x[(bi_n) as usize] = x
+    bi_y[(bi_n) as usize] = y
+    bi_w[(bi_n) as usize] = w
+    bi_h[(bi_n) as usize] = h
+    bi_k[(bi_n) as usize] = key
+    bi_l[(bi_n) as usize] = lab
+    bi_n = bi_n + 1
+}
+
+// the name of a status field for the accessibility tree: its text, or a word when
+// the field is an icon only
+fn field_name(f: u64) -> u64 {
+    let t: u64 = full_of(f)
+    if tlen(t) != 0 && f != F_NET {
+        return t
+    }
+    if f == F_NET {
+        return (&t_nen[0 as usize]) as u64
+    }
+    if f == F_SND {
+        return (&t_snn[0 as usize]) as u64
+    }
+    if f == F_BAT {
+        return (&t_btn[0 as usize]) as u64
+    }
+    if f == F_NOTI {
+        return (&t_nin[0 as usize]) as u64
+    }
+    return t
+}
+
+// does item `p` come after item `q` (later row, or the same row and further right)?
+fn bi_after(p: u64, q: u64) -> bool {
+    if bi_y[(p) as usize] != bi_y[(q) as usize] {
+        return bi_y[(p) as usize] > bi_y[(q) as usize]
+    }
+    return bi_x[(p) as usize] > bi_x[(q) as usize]
+}
+
+// every rectangle of the bar, in the order of the tree
+fn bi_collect() {
+    bi_n = 0
+    bi_add(st_x, st_y, st_w, st_h, K_START,
+        txt((&k_start[0 as usize]) as u64, (&t_stn[0 as usize]) as u64))
+    if tv_w != 0 {
+        bi_add(tv_x, tv_y, tv_w, tv_h, K_TV, (&t_tvn[0 as usize]) as u64)
+    }
+    if chv_w != 0 {
+        bi_add(chv_x, chv_y, chv_w, chv_h, K_CHEV, (&t_chn[0 as usize]) as u64)
+    }
+    var i: u64 = 0
+    while i < npin {
+        bi_add(px_[(i) as usize], py_[(i) as usize], pw_[(i) as usize],
+            ph_[(i) as usize], K_PIN + i, (&pinname[0 as usize]) as u64 + i * 24)
+        i = i + 1
+    }
+    i = 0
+    while i < nk {
+        if kw[(i) as usize] != 0 {
+            var lab: u64 = (&klab[0 as usize]) as u64 + i * 40
+            if tlen(lab) == 0 {
+                lab = (&ktit[0 as usize]) as u64 + i * 40
+            }
+            bi_add(kx[(i) as usize], ky[(i) as usize], kw[(i) as usize],
+                kh[(i) as usize], K_TASK + i, lab)
+        }
+        i = i + 1
+    }
+    var f: u64 = 0
+    while f < F_N {
+        if f_w[(f) as usize] != 0 {
+            bi_add(f_x[(f) as usize], f_y[(f) as usize], f_w[(f) as usize],
+                f_h[(f) as usize], K_FIELD + f, field_name(f))
+        }
+        f = f + 1
+    }
+    var q: u64 = 0
+    while q < PB_MAX {
+        if pb_w[(q) as usize] != 0 {
+            bi_add(pb_x[(q) as usize], pb_y[(q) as usize], pb_w[(q) as usize],
+                pb_h[(q) as usize], K_PLUG + q, plug_text(q))
+        }
+        q = q + 1
+    }
+    // order: top to bottom, then left to right (insertion sort of the indices, at most 48)
+    var a: u64 = 0
+    while a < bi_n {
+        bi_o[(a) as usize] = a
+        a = a + 1
+    }
+    a = 1
+    while a < bi_n {
+        var b: u64 = a
+        while b > 0 && bi_after(bi_o[(b - 1) as usize], bi_o[(b) as usize]) {
+            let t: u64 = bi_o[(b) as usize]
+            bi_o[(b) as usize] = bi_o[(b - 1) as usize]
+            bi_o[(b - 1) as usize] = t
+            b = b - 1
+        }
+        a = a + 1
+    }
+}
+
+static mut a_start: [u8; 14] = "taskbar.start\0"
+static mut a_tv: [u8; 17] = "taskbar.taskview\0"
+static mut a_chev: [u8; 16] = "taskbar.chevron\0"
+static mut a_quick: [u8; 14] = "taskbar.quick\0"
+static mut a_pinp: [u8; 13] = "taskbar.pin.\0"
+static mut a_pinb: [u8; 440] = [0 as u8; 440] // MAXPIN x 44
+
+// the bus action of a node (what `act call a11y.press action=...` names; 0 = none)
+fn bar_action(key: u64) -> u64 {
+    if key == K_START {
+        return (&a_start[0 as usize]) as u64
+    }
+    if key == K_TV {
+        return (&a_tv[0 as usize]) as u64
+    }
+    if key == K_CHEV {
+        return (&a_chev[0 as usize]) as u64
+    }
+    if key >= K_PIN && key < K_PIN + npin {
+        let i: u64 = key - K_PIN
+        let b: u64 = (&a_pinb[0 as usize]) as u64 + i * 44
+        let at: u64 = text_at_p(b, 0, (&a_pinp[0 as usize]) as u64)
+        let _e: u64 = text_at_p(b, at, (&pinname[0 as usize]) as u64 + i * 24)
+        return b
+    }
+    if key == K_FIELD + F_NET || key == K_FIELD + F_SND || key == K_FIELD + F_BAT {
+        return (&a_quick[0 as usize]) as u64
+    }
+    return 0
+}
+
+// The tree: one row per line of the bar (a horizontal bar is ONE row), spacers where
+// there is room between two rectangles, a ghost button for each rectangle.
+fn bar_build() {
+    let r: usize = fuiscene.root()
+    fuiscene.set_pad(r, 0)
+    fuiscene.set_gap(r, 0)
+    bi_collect()
+    var i: u64 = 0
+    var cy: u64 = 0
+    var nodes: u64 = 0
+    while i < bi_n {
+        let y: u64 = bi_y[(bi_o[(i) as usize]) as usize]
+        if y > cy {
+            let _sy: usize = fuiscene.ghost_space(r, 0, y - cy)
+        }
+        let row: usize = fuiscene.row(r)
+        fuiscene.set_pad(row, 0)
+        fuiscene.set_gap(row, 0)
+        var cx: u64 = 0
+        var mh: u64 = 0
+        while i < bi_n && bi_y[(bi_o[(i) as usize]) as usize] == y {
+            let o: u64 = bi_o[(i) as usize]
+            let x: u64 = bi_x[(o) as usize]
+            if x > cx {
+                let _sx: usize = fuiscene.ghost_space(row, x - cx, 1)
+            }
+            let _b: usize = fuiscene.ghost_button(row, bi_l[(o) as usize],
+                bi_k[(o) as usize], bi_w[(o) as usize], bi_h[(o) as usize])
+            let ba: u64 = bar_action(bi_k[(o) as usize])
+            if ba != 0 {
+                fuiscene.ax_action(bi_k[(o) as usize], ba)
+            }
+            nodes = nodes + 1
+            cx = x + bi_w[(o) as usize]
+            if bi_h[(o) as usize] > mh {
+                mh = bi_h[(o) as usize]
+            }
+            i = i + 1
+        }
+        cy = y + mh
+    }
+    bar_nodes = nodes
+}
+
+// a node was pressed through the tree (the accessibility export, the keyboard): the
+// same as a click in the middle of its rectangle
+fn bar_press(key: u64) {
+    var i: u64 = 0
+    while i < bi_n {
+        if bi_k[(i) as usize] == key {
+            click(bi_x[(i) as usize] + bi_w[(i) as usize] / 2,
+                bi_y[(i) as usize] + bi_h[(i) as usize] / 2)
+            return
+        }
+        i = i + 1
+    }
+}
+
+// the pointer events of the bar's window (the old loop's `EV_DOWN` branch)
+static mut s_kbon: [u8; 17] = "taskbar: keys on\0"
+static mut s_kbk: [u8; 16] = "taskbar: key n=\0"
+static mut s_kboff: [u8; 19] = "taskbar: keys off \0"
+static mut bar_kb: u64 = 0 // 1 = the keyboard is in the bar (Super+T)
+static mut bar_kb_btn: u64 = 0
+
+// Super+T: the keyboard goes to the bar. Tab / Shift+Tab walk the nodes (the focus ring
+// is the host's), Enter or Space presses the focused one (the same as a click in its
+// middle), Escape, a press of the pointer or an activation gives the keyboard back.
+// While it is on, the window server hands the keys to the bar AND to the focused
+// program (WS_KEYS), so it is short on purpose.
+fn bar_keys(on: bool) {
+    if bar_ready == 0 {
+        return
+    }
+    let _s: bool = fuiscene.win_select(0)
+    if on {
+        bar_kb = 1
+        let _k: u64 = wlibc.win_state(w_h, wlibc.WS_KEYS, 1)
+        fuiscene.focus_canvas()
+        fuiscene.focus(K_START)
+        bar_kb_btn = wlibc.mouse_btn() & 1
+        say((&s_kbon[0 as usize]) as u64)
+        nl()
+    } else {
+        bar_kb = 0
+        let _k: u64 = wlibc.win_state(w_h, wlibc.WS_KEYS, 0)
+        fuiscene.focus(0)
+        say((&s_kboff[0 as usize]) as u64)
+        nl()
+    }
+    fuiscene.refresh()
+}
+
+fn bar_kb_step() {
+    if bar_kb == 0 {
+        return
+    }
+    let b: u64 = wlibc.mouse_btn() & 1
+    if b != 0 && bar_kb_btn == 0 {
+        bar_keys(false)
+    }
+    bar_kb_btn = b
+}
+
+fn bar_raw(kind: u64, x: u64, y: u64, btn: u64, key: u64) {
+    if kind == fuiapp_down() {
+        fuiscene.raw_take()
+        if (btn & 2) != 0 {
+            rechtsklick(x, y)
+        } else {
+            let pg: u64 = pin_under(x, y)
+            if pg < npin {
+                pdrag = 1
+                pdrag_i = pg
+                pdrag_x0 = x
+                pdrag_y0 = y
+            } else {
+                click(x, y)
+            }
+        }
+        return
+    }
+    if kind == 3 || kind == 4 {
+        fuiscene.raw_take()
+        return
+    }
+    if kind == 1 {
+        if bar_kb != 0 {
+            say((&s_kbk[0 as usize]) as u64)
+            sayn(key)
+            nl()
+        }
+        if key == 27 && bar_kb != 0 {
+            bar_keys(false)
+        }
+        tb_key(key)
+    }
+}
+
+fn fuiapp_down() -> u64 {
+    return 2
+}
+
+fn bar_copy(dst: u64, src: u64, n: u64) {
+    var k: u64 = 0
+    while k + 8 <= n {
+        __mmio_write64((dst + k) as *mut u64, __mmio_read64((src + k) as *mut u64))
+        k = k + 8
+    }
+    while k < n {
+        __mmio_write8((dst + k) as *mut u8, __mmio_read8((src + k) as *mut u8))
+        k = k + 1
+    }
+}
+
+// a band of the painted bar goes into the retained picture
+fn bar_push(y0: u64, hh: u64) -> u64 {
+    if bar_r == 0 || hh == 0 || win_w == 0 {
+        return 0
+    }
+    if y0 < wlibc.band_y() {
+        return 0
+    }
+    var rows: u64 = hh
+    if y0 + rows > win_h {
+        rows = win_h - y0
+    }
+    let rr: u64 = y0 - wlibc.band_y()
+    if rr >= wlibc.surf_rows() {
+        return 0
+    }
+    if rr + rows > wlibc.surf_rows() {
+        rows = wlibc.surf_rows() - rr
+    }
+    if (y0 + rows) * win_w * 4 > bar_cap {
+        return 0
+    }
+    let src: u64 = wlibc.surface() + rr * wlibc.surf_w() * 4
+    var k: u64 = 0
+    while k < rows {
+        bar_copy(bar_r + ((y0 + k) * win_w) * 4, src + k * wlibc.surf_w() * 4,
+            win_w * 4)
+        k = k + 1
+    }
+    return win_w * rows
+}
+
+// the host's overlay for window 0: the retained picture of the bar
+fn bar_overlay() {
+    let dst: u64 = fuiscene.canvas_px()
+    if dst == 0 || bar_r == 0 {
+        return
+    }
+    let cw: u64 = fuiscene.sp(fuiscene.width())
+    let ch: u64 = fuiscene.sp(fuiscene.height())
+    if cw != win_w {
+        return
+    }
+    var rows: u64 = win_h
+    if ch < rows {
+        rows = ch
+    }
+    if rows * win_w * 4 > bar_cap {
+        return
+    }
+    bar_copy(dst, bar_r, rows * win_w * 4)
+}
+
+// the host paints what the bar painted: rebuild the tree (the rectangles moved) and
+// let the host push the picture. Called after every paint of the bar.
+fn bar_sync() {
+    if bar_ready == 0 {
+        return
+    }
+    let _s: bool = fuiscene.win_select(0)
+    fuiscene.refresh()
+}
+
+// one turn of the host for the bar's window; a node that was pressed comes back as a key
+fn bar_pump() {
+    if bar_ready == 0 {
+        return
+    }
+    let _st: u64 = wlib.step()
+    let k: u64 = fuiscene.pump_aux(0)
+    if k != 0 {
+        bar_press(k)
+        if bar_kb != 0 {
+            bar_keys(false)
+        }
+    }
+    bar_kb_step()
+}
+
+// the size of the bar's window (the host re-binds its canvas at its next turn)
+fn bar_size(w: u64, h: u64) -> u64 {
+    let _s: bool = fuiscene.win_select(0)
+    if fuiscene.win_size(w, h) {
+        return 0
+    }
+    return 1
+}
+
 fn u_start(args: u64) -> u64 {
     // DELL ROUND: this program never waits for what it starts.
     ulib.ignore_children()
@@ -6953,7 +7640,7 @@ fn u_start(args: u64) -> u64 {
     // derselben Folge; sie kommen nur nach dem Bild statt davor. Ein
     // Bericht, ohne den das Berichtete nicht stattfindet, ist kein
     // Bericht.
-    if !wlibc.start(false) {
+    if !fuiscene.begin() {
         say((&s_bad[0 as usize]) as u64)
         nl()
         return 1
@@ -6990,15 +7677,47 @@ fn u_start(args: u64) -> u64 {
     // was created with -- and a bar that starts at the bottom (800 x 28,
     // 89 kilooctets) and is dragged to the left (104 x 600, 249) would
     // be refused at exactly that moment.
-    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (V_MAX << 16) | sh,
-        txt((&k_title[0 as usize]) as u64,
-            (&s_title[0 as usize]) as u64), 0, 0)
+    // r381: window 0 of the scene host. Its buffer holds the area of the largest
+    // configuration (a vertical bar V_MAX wide, or a horizontal one h_max() high),
+    // laid out as w x h with w = the screen's width.
+    var area: u64 = V_MAX * sh
+    if sw * h_max() > area {
+        area = sw * h_max()
+    }
+    let cw0: u64 = sw
+    let ch0: u64 = (area + sw - 1) / sw
+    // On layer L_TOP from the start: a window that is created on L_NORMAL takes the keyboard
+    // focus from the program the person is typing in (barpop: `notify hello toast` went into
+    // the bar). A program that may not use L_TOP (not root) falls back to L_NORMAL, as the
+    // raw window did, and the code below says so.
+    var made: bool = fuiscene.open_plain(0, 0, cw0, ch0, txt((&k_title[0 as usize]) as u64,
+        (&s_title[0 as usize]) as u64), wlibc.L_TOP, bar_build)
+    if !made {
+        made = fuiscene.open_plain(0, 0, cw0, ch0, txt((&k_title[0 as usize]) as u64,
+            (&s_title[0 as usize]) as u64), wlibc.L_NORMAL, bar_build)
+    }
+    if !made {
+        say((&s_bad[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    let h: u64 = fuiscene.handle()
     if ulib.bad(h) || h == 0 {
         say((&s_bad[0 as usize]) as u64)
         nl()
         return 1
     }
     w_h = h
+    bar_cap = cw0 * ch0 * 4
+    bar_r = rt.heap_alloc(bar_cap as usize) as u64
+    if bar_r == 0 {
+        say((&s_bad[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    fuiscene.set_raw(bar_raw)
+    fuiscene.set_overlay(bar_overlay)
+    bar_ready = 1
     if ulib.bad(wlibc.win_state(h, wlibc.WS_DECO, 0)) {
         say((&s_bad[0 as usize]) as u64)
         nl()
@@ -7040,6 +7759,11 @@ fn u_start(args: u64) -> u64 {
     // which reserves window 0 for the bar's own window)
     if !barpop.init() {
         say((&s_nobp[0 as usize]) as u64)
+        nl()
+    }
+    // r387: the task view card (hidden until its button is pressed)
+    if !taskview.init() {
+        say((&s_notv[0 as usize]) as u64)
         nl()
     }
     apply()
@@ -7112,60 +7836,11 @@ fn u_start(args: u64) -> u64 {
     var tsum: u64 = wlibc.theme_sum()
     var alive: bool = true
     while alive {
-        var n: u64 = 0
-        while n < 32 && wlibc.sys3w(wlibc.WM_EVENT, h,
-            (&ev[0 as usize]) as u64, 0) == 1 {
-            let b: u64 = (&ev[0 as usize]) as u64
-            let typ: u64 = __mmio_read64((b) as *mut u64)
-            let d: u64 = __mmio_read64((b + 8) as *mut u64)
-            if typ == wlibc.EV_DOWN {
-                // DIE RECHTE TASTE IST BIT 1 (kernel/ps2m.fi: links 0,
-                // rechts 1, Mitte 2) -- dieselbe Zaehlung, die
-                // wlib.fi:5047 schon benutzt.
-                if ((d & 0xFFFF) & 2) != 0 {
-                    rechtsklick((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
-                } else {
-                    // ============================ RUNDE ANHEFTEN
-                    // EIN DRUCK AUF EINEN ANHEFTER IST NOCH KEIN
-                    // KLICK. Er wird erst zu einem, wenn die Taste
-                    // losgelassen wird, OHNE dass die Schwelle
-                    // ueberschritten wurde -- `pin_drag_step` ruft
-                    // `click` dann selbst nach. Jeder andere Druck
-                    // geht unveraendert durch.
-                    let cx: u64 = (d >> 32) & 0xFFFF
-                    let cy: u64 = (d >> 16) & 0xFFFF
-                    let pg: u64 = pin_under(cx, cy)
-                    if pg < npin {
-                        pdrag = 1
-                        pdrag_i = pg
-                        pdrag_x0 = cx
-                        pdrag_y0 = cy
-                    } else {
-                        click(cx, cy)
-                    }
-                }
-            } else if typ == wlibc.EV_KEY {
-                // ======================= RUNDE ECHTHARDWARE-3
-                // HIER FIELEN DIE TASTEN AUF DEN BODEN.
-                //
-                // Justins Befund: "Tippen kommt in den Programmen
-                // nicht an", waehrend die Tafel `TAS 54` und
-                // `BER 111` zeigt -- die Tastatur liefert also
-                // sauber. Diese Schleife hat das Ereignis mit
-                // `WM_EVENT` ABGEHOLT (und damit aus dem Ring des
-                // Servers entfernt) und dann nur auf `EV_DOWN` und
-                // `EV_CLOSE` geprueft. Jede Taste, die an die Leiste
-                // ging, war damit gelesen und verworfen.
-                //
-                // Sie gehoert an dieselbe Stelle wie in jedem
-                // anderen Programm: `wlib.on_key` -- das ist der
-                // Weg, ueber den ein Menue Hoch/Runter/Eingabe/
-                // Flucht bekommt.
-                tb_key((d >> 32) & 0xFFFF)
-            } else if typ == wlibc.EV_CLOSE {
-                alive = false
-            }
-            n = n + 1
+        // r381: the events of the bar's window come through the host (`bar_raw` for the
+        // pointer), a node pressed through the tree comes back from `bar_pump`
+        bar_pump()
+        if !fuiscene.alive() {
+            alive = false
         }
         if pdrag != 0 {
             pin_drag_step()
@@ -7179,6 +7854,7 @@ fn u_start(args: u64) -> u64 {
         // of `/etc/taskbar.conf` inside one process would be two
         // answers to one question.
         let _qsc: bool = qs.step()
+        let _tvs: bool = taskview.step()
         hotkey_step()
         tip_step()
         // RUNDE TOAST (S-006): an derselben Stelle wie die Blase --

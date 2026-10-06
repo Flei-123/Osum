@@ -547,3 +547,65 @@ Under all of them:
   K15 itself needs a format-2 image) or share the host between programs.
 * Test helper: `tools/alltag/build.sh passwdfile=<host file>` puts a whole
   `/etc/passwd` (accounts with uid >= 1000) on the disk.
+
+## 13. Stage 1 of the task bar (r381, 06.10.2026)
+
+The bar (`taskbar.fi`, ~7 600 lines) is **window 0 of the scene host** now, and its
+rectangles are **nodes of a tree**. Painting is not rewritten (that is stage 2): every
+rectangle is still painted by the bar's own painters into the same one-band surface, so
+the pictures of `look`, `themestore`, `glyphe`, `netview`, `alltag` ... are the proof that
+nothing moved.
+
+What changed:
+
+* **The window.** `fuiscene.open_plain` instead of a raw `WM_CREATE`; its buffer holds the
+  area of the largest configuration (a vertical bar `V_MAX` wide or a horizontal one
+  `h_max()` high, laid out as screen-width x rows). `qs.init` no longer calls
+  `foreign_main()`: window 0 is a real one, the quick settings, tooltip, toast and the task
+  view card are windows 1..4.
+* **The picture.** `wlibc.push` (a band into the window server) is `bar_push` now: the band is
+  copied into `bar_r`, a retained picture of the whole bar. The host paints the tree first and
+  then calls the program's **overlay** (`fuiscene.set_overlay`, between the scene and the focus
+  ring): `bar_overlay` copies `bar_r` over everything. So what the host draws on top (the focus
+  ring) lands on the bar's own picture, and nothing is lost when the host repaints for any reason.
+* **The tree.** One row per line of the bar (a horizontal bar is one row), spacers where
+  there is room between two rectangles, a **ghost button** (`fuiscene.ghost_button`: a button
+  whose face the program covers with its own picture) for each rectangle: start, task view,
+  chevron, every pin, every window button, every status field, every extension widget. A node
+  carries the name a screen reader says (title, pin name, the text of the field, "Network" for
+  the icon-only network field) and a bus action (`taskbar.start`, `taskbar.taskview`,
+  `taskbar.chevron`, `taskbar.pin.<name>`, `taskbar.quick`). It is rebuilt after every paint.
+* **The pointer** is not the host's: `fuiscene.set_raw` gives every pointer / key event of window
+  0 to `bar_raw` first (the old `EV_DOWN` code, unchanged: right click, a press on a pin that
+  becomes a drag after six pixels, `click`), and `raw_take()` makes the host skip it. The drag, the
+  hide and the hover logic still poll the pointer, as before.
+* **The keyboard (new): Super+T** gives the keyboard to the bar (`WS_KEYS`, wlib's keyboard focus to
+  the bar's canvas, focus on the first node); Tab / Shift+Tab walk the nodes, the focus ring is the
+  host's, Enter or Space presses the focused node (the same as a click in its middle), Escape, a
+  press of the pointer or an activation give the keyboard back. While it is on the window server
+  hands keys to the bar AND the focused program, so it ends at the first use.
+
+Rules found on the way:
+
+* **The tree is for reading.** `ax_press` (kernel/sys/sysgui.fi) presses buttons of application
+  windows only (layer L_NORMAL, reason 5 otherwise): no program with the bus right can press the
+  start button or a quick-settings tile. The nodes of the bar are names and places; a press from
+  the bus is refused (`tools/barscene` checks that it is, and that the bar sees no click).
+* A custom painter (`node_set_draw`) runs AFTER what the node's kind paints: a ghost button's face
+  and label are painted, then the overlay covers them. A node kind that paints nothing would be
+  cleaner (roadmap).
+* wlib hands Tab to a canvas only while the canvas is its focus widget, and the last window that
+  opened holds it (`fuiscene.focus_canvas`).
+* The bar's size: 2 126 160 octets of the 2 134 016 of an OFS format-2 file (page-granular: the
+  conf writer's twenty copies of four statements were folded into `wk_num` / `wk_txt` and the
+  sort of the nodes works on an index array to stay under it; `tools/progsize` watches the bar).
+
+Test: `tools/barscene/run.sh` (29/0): the tree with the names, the bus actions, a node at the
+rectangle the bar traced (within one pixel), a press refused by the target rule and no click, the
+keyboard path Super+T, Tab, Enter that opens the task view card. Counter-proof
+`BARROOT=<old tree>`: the bar of the older tree has no tree.
+
+Not done (stage 2 and on): painting the rectangles from fUi's widgets instead of the bar's
+painters (`paint_band`, 800 lines), the layout in flex boxes instead of `layout()`, the pointer
+through the host, auto-hide and drag in the host. Lines on the scene tree (by window): the bar
+now counts as a scene window for its tree and events, not yet for its painting.

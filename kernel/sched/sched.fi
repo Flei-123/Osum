@@ -40,7 +40,7 @@ import arch.x86_64.apic
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
     tote_schlaefe,
-    exit_task, reap, claim_zombie, reap_claimed, S_REAPING,
+    exit_task, reap, claim_zombie, reap_claimed, S_REAPING, lock_gone,
     kill_current, wake_pid, wait_sleep, find_pid, current, tget, tset, task_at,
     stack_high, STACK_PAINT,
     // RUNDE LEISTE: die Waechterseite unter jedem Kernstapel.
@@ -2483,6 +2483,31 @@ fn find_pid(state: u64, pid: u64) -> u64 {
 
 // ------------------------------------------------------------ the end
 
+// r389 (06.10.2026): THE LOCKER DIES, THE LOCK MUST FORGET ITS SLOT AT ONCE.
+// While the screen is locked `SP_SLOT` names the task slot of the locker and
+// `osum_sperre` op 4 ("be the locker") accepts the task that stands in that
+// slot. After the locker was killed the kernel's guard (`sperre_wache`) needs up
+// to 32 turns to start a new one, and the zombie reaper frees the slot within
+// ~16: a process that landed in the freed slot passed op 4 (slot equal, old pid
+// gone) and could open the lock with op 2, no password. Whoever ends a task
+// calls this under the same hold of L_SCHED: if the task is the one the lock
+// names, pid and slot are cleared to a slot no task can have. The lock stays ON
+// (nobody is allowed to draw: `wm.darf` is false without a locker) and the guard
+// starts a new locker as before, because the pid is 0 now.
+const LOCK_NOSLOT: u64 = 0xFFFF
+
+fn lock_gone(state: u64, task: u64) {
+    let sp: u64 = kstate.K11_OFF
+    if kstate.get(state, sp + kstate.SP_ON) == 0 {
+        return
+    }
+    if kstate.get(state, sp + kstate.SP_SLOT) != task {
+        return
+    }
+    kstate.set(state, sp + kstate.SP_PID, 0)
+    kstate.set(state, sp + kstate.SP_SLOT, LOCK_NOSLOT)
+}
+
 // A task ends. It stays in the table as a corpse until its creator picks
 // up the exit code -- otherwise `wait` would have nothing left to read.
 // Its kernel stack is the one this function is standing on and is
@@ -2493,6 +2518,7 @@ fn exit_task(state: u64, code: u64) {
     let cur: u64 = current(state)
     tset(state, cur, T_EXIT, code)
     tset(state, cur, T_END, kstate.get(state, kstate.TICKS))
+    lock_gone(state, cur)
     tset(state, cur, T_STATE, S_ZOMBIE)
     reparent(state, cur)
     wake_pid(state, tget(state, cur, T_PID))
