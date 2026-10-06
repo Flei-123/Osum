@@ -2410,7 +2410,9 @@ num "ein Griff in die Titelleiste ZIEHT das Fenster (Zahl der Groessenaenderunge
 ZW=$(grep -ao 'wlib: win id=[0-9]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
      "$TMPD/zug1/serial.txt" \
      | awk '{ w=$0; sub(/.* w=/, "", w); sub(/ .*/, "", w)
-              if (w+0 >= best+0) { best=w; line=$0 } } END { print line }')
+              if (w+0 < 1200 && w+0 >= best+0) { best=w; line=$0 } } END { print line }')
+# r381: the task bar is a `wlib` window now (scene window 0) and reports itself, 1280 wide:
+# the widest window is the bar. Windows as wide as the screen are not the one that is dragged.
 ZWY=$(printf '%s' "$ZW" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
 ZWH=$(printf '%s' "$ZW" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
 ZWW=$(printf '%s' "$ZW" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
