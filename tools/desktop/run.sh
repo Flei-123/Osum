@@ -532,6 +532,10 @@ rect() { # name field -> value
         | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
 }
 WH=$(rect win h)
+# the record of the window can be torn by another program's serial line (seen:
+# "name=win x=20 y=3 w=760launcher: apps=6"); then the widest "wlib: win" line says the same
+[ -n "$WH" ] || WH=$(grep -aoE 'wlib: win id=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$P" \
+    | sed -E 's/.* w=([0-9]+) h=([0-9]+)/\1 \2/' | sort -n | tail -1 | cut -d' ' -f2)
 EAX=$(rect edge ax); EAY=$(rect edge ay); EW=$(rect edge w); EH=$(rect edge h)
 BAX=$(rect apply ax); BAY=$(rect apply ay); AW=$(rect apply w); AH=$(rect apply h)
 if [ -z "$WH" ] || [ -z "$EAX" ] || [ -z "$BAX" ]; then

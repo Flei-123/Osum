@@ -100,7 +100,7 @@ MON=""
 D=""
 boot() { # boot <name> <xhci|ps2>
     local name=$1 mode=$2
-    D=/tmp/loginui-$name
+    D=${TMPDIR:-/tmp}/loginui-$name
     rm -rf "$D"; mkdir -p "$D"
     cp -f "$IMG" "$D/stick.img"
     local off=$((2048 * 512))
@@ -456,7 +456,15 @@ if boot ps2 ps2; then
     for t in tab tab tab; do
         k=$((k + 1))
         mon "sendkey $t" "sleep 0.8" "screendump $D/tab$k.ppm" "sleep 0.8"
-        r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER"); [ "$r" = "-" ] && { sleep 1; r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER"); }; K="$K$r "
+        r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER")
+        # the retry takes a NEW picture (it used to re-read the same file, so a frame
+        # without the ring stayed without it): up to 4 more pictures, one second apart
+        for _try in 1 2 3 4; do
+            [ "$r" = "-" ] || break
+            mon "sleep 1" "screendump $D/tab$k.ppm" "sleep 1"
+            r=$(ring "$D/tab$k.ppm" "$PW" "$EYEB" "$BTN" "$OTHER")
+        done
+        K="$K$r "
     done
     W="16 $(fld "$BTN" id) $(fld "$OTHER" id) "
     [ "$K" = "$W" ] && ok "Tab: eye, button, button, in the picture ($K)" \
