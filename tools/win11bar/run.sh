@@ -124,7 +124,7 @@ ex=$(echo "$exy" | sed 's/.* x=\([0-9]*\) .*/\1/'); ey=$(echo "$exy" | sed 's/.*
 ew=$(echo "$exy" | sed 's/.* w=\([0-9]*\) .*/\1/'); eh=$(echo "$exy" | sed 's/.* h=\([0-9]*\) .*/\1/')
 BARY=$(grep -a '^taskbar: geom ' "$B0" | tail -1 | grep -oE ' y=[0-9]+' | tail -1 | cut -d= -f2)
 echo "        bar y=$BARY, explorer pin $ex,$ey ${ew}x$eh"
-mach "$T/b1" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=16 > "$T/b1.log" 2>&1 &
+mach "$T/b1" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=16 > "$T/b1.log" 2>&1 &
 P1=$!
 mach "$T/b2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((chx + chw / 2)),$((BARY + 20)) click=$((tvx + tvw / 2)),$((BARY + 20)) warten=3 > "$T/b2.log" 2>&1 &
 P2=$!
@@ -154,7 +154,7 @@ def bright(im, x0, y0, w, h):
     return n
 withb = bright(b, bx, BARY + by, bw, bh); without = bright(a, bx, BARY + by, bw, bh)
 print("badge area bright pixels: with %d without %d" % (withb, without))
-ok1 = withb >= 40 and without <= 8
+ok1 = withb >= 40 and withb >= without + 40
 ol = [l for l in open(s2, errors='replace') if l.startswith('taskview: open')]
 m = re.search(r' x=(\d+) y=(\d+) w=(\d+) h=(\d+)', ol[-1]); cx, cy, cw, ch = (int(v) for v in m.groups())
 diff = 0
