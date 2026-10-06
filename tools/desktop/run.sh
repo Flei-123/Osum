@@ -193,7 +193,13 @@ mk_image() { # image conf-file
     local p
     for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
     ARGS+=("/bin/files@/bin/explorer")
-    ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$cf")
+    # r389: the settings page is a scene program: the chooser rows ("bottom top left right") come
+    # from the message catalogue. Without it `msg.get` hands back the KEY and the drop-down has ONE row
+    # (menu open ... rows=1), so no row can be clicked. The system always has the catalogue.
+    printf 'lang=en\n' > "$TMPD/locale.conf"
+    ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
+        "/usr/share/locale/en/messages=locale/en/messages")
+    ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$cf" "/etc/locale.conf=$TMPD/locale.conf@0644")
     # The bar's `taskbar: text ...` lines are a MEASUREMENT OUTPUT and are
     # off unless this file exists -- same switch `wlib` uses. This runner
     # reads those lines, so it turns them on.

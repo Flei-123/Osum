@@ -310,7 +310,7 @@ for t in tab tab tab tab tab tab; do
     mon "sendkey $t" "sleep 1.2" "screendump $D/tab$k.ppm" "sleep 0.8"
     r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
     case "$r" in *" "*) r="-";; esac          # two rings at once = mid-repaint
-    for _try in 1 2 3 4; do                  # mid-repaint or the dump not yet written: again
+    for _try in 1 2 3 4 5 6 7 8; do            # mid-repaint or the dump not yet written: again
         [ "$r" = "-" ] || [ -z "$r" ] || break
         mon "screendump $D/tab$k.ppm" "sleep 1.2"; r=$(ring "$D/tab$k.ppm" "$PW" "$EYER" "$BTN" "$OTHER" "$NET0" "$POW0")
         case "$r" in *" "*) r="-";; esac
