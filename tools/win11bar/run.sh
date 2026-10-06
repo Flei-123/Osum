@@ -78,6 +78,8 @@ sys.exit(0 if found >= 8 else 1)
 PY
 else bad "no photo"; fi
 
+# a machine whose screenshot step timed out under load is run once more
+mach() { bash tools/alltag/build.sh "$@"; [ -s "$1/desktop.png" ] || bash tools/alltag/build.sh "$@"; }
 echo "== D. the rest of the Windows 11 layout (task view, chevron, capsule, count)"
 cat > "$T/win11b.conf" <<'CONF'
 # taskbar.conf -- the Windows 11 layout, rest (r387)
@@ -99,7 +101,7 @@ tray_group=1
 badges=1
 pins=explorer,calc,settings,zip
 CONF
-bash tools/alltag/build.sh "$T/b0" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night > "$T/b0.log" 2>&1
+mach "$T/b0" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night > "$T/b0.log" 2>&1
 B0="$T/b0/serial.txt"
 field() { grep -a "^taskbar: $1 " "$2" | tail -1 | grep -oE "$3=[0-9]+" | tail -1 | cut -d= -f2; }
 tvx=$(field taskview "$B0" x); tvw=$(field taskview "$B0" w); stx=$(field start "$B0" x); stw=$(field start "$B0" w)
@@ -122,9 +124,9 @@ ex=$(echo "$exy" | sed 's/.* x=\([0-9]*\) .*/\1/'); ey=$(echo "$exy" | sed 's/.*
 ew=$(echo "$exy" | sed 's/.* w=\([0-9]*\) .*/\1/'); eh=$(echo "$exy" | sed 's/.* h=\([0-9]*\) .*/\1/')
 BARY=$(grep -a '^taskbar: geom ' "$B0" | tail -1 | grep -oE ' y=[0-9]+' | tail -1 | cut -d= -f2)
 echo "        bar y=$BARY, explorer pin $ex,$ey ${ew}x$eh"
-bash tools/alltag/build.sh "$T/b1" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=16 > "$T/b1.log" 2>&1 &
+mach "$T/b1" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=16 > "$T/b1.log" 2>&1 &
 P1=$!
-bash tools/alltag/build.sh "$T/b2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((chx + chw / 2)),$((BARY + 20)) click=$((tvx + tvw / 2)),$((BARY + 20)) warten=3 > "$T/b2.log" 2>&1 &
+mach "$T/b2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((chx + chw / 2)),$((BARY + 20)) click=$((tvx + tvw / 2)),$((BARY + 20)) warten=3 > "$T/b2.log" 2>&1 &
 P2=$!
 wait $P1 $P2
 B1="$T/b1/serial.txt"; B2="$T/b2/serial.txt"
