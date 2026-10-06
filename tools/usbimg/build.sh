@@ -982,6 +982,14 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
+# r383: THE DEFAULT WALLPAPER (Justin's photo of the sea at sunset, 480x270,
+# assets/WALLPAPER-SEA.txt): the desktop paints it, the lock screen and the
+# sign-in screen paint it blurred. The user's own picture (settings) replaces
+# the same file. IMAGE_NO_WALLPAPER=1 leaves it out (the gradient of the scheme).
+if [ "${IMAGE_NO_WALLPAPER:-0}" != "1" ] && [ -f assets/wallpaper-sea.osym ]; then
+    ARGS+=("/etc/wallpaper=assets/wallpaper-sea.osym@0644")
+    echo "   wallpaper  assets/wallpaper-sea.osym (the sea)"
+fi
 # ===================================================== RUNDE HOVERSTIL
 # /etc/uitrace -- DER SCHALTER, OHNE DEN DIE OBERFLAECHE STUMM IST.
 #

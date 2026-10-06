@@ -278,6 +278,141 @@ fn theme() -> u64 {
     return 0
 }
 
+
+// r382 LOCK SEAL: THE PROBE OF THE LOCK SCREEN. Run as root while the
+// screen is locked and this program's own window is behind the lock. It
+// tries everything a program can try and prints what it got:
+//   - read the whole a11y tree (root gives itself the right): a node of
+//     any other task than the locker must read as EMPTY (role 0),
+//   - drain the a11y events: none about an emptied node,
+//   - list the window table (root, WM_FWIN FW_LIST): only the locker's,
+//   - become the locker (op 4) and unlock (op 2) without the password,
+//   - the tiling actions "close" and "next window" through the syscall.
+fn lockprobe(safe: bool) -> u64 {
+    var s_h: [u8; 22] = "a11ydemo: lockprobe \0\0"
+    var s_n: [u8; 11] = "node role=\0"
+    var s_nm: [u8; 7] = " name=\0"
+    var s_c: [u8; 12] = "tree nodes=\0"
+    var s_f: [u8; 10] = " visible=\0"
+    var s_e: [u8; 14] = "events seen=\0\0"
+    var s_l: [u8; 9] = " leaked=\0"
+    var s_w: [u8; 10] = "win slot=\0"
+    var s_i: [u8; 5] = " id=\0"
+    var s_t: [u8; 8] = " title=\0"
+    var s_k: [u8; 13] = "claim rc=-\0\0\0"
+    var s_u: [u8; 12] = " unlock rc=\0"
+    var s_s: [u8; 14] = " state after=\0"
+    var s_a: [u8; 11] = "tile close\0"
+    var s_b: [u8; 11] = " next rc=-\0"
+    var s_d: [u8; 6] = " rc=-\0"
+    var buf: [u8; 96] = [0 as u8; 96]
+    let b: u64 = (&buf[0 as usize]) as u64
+    let _g: u64 = wlibc.ax_perm(wlibc.AXP_GRANT, 0xFFFF, 3)
+    let cnt: u64 = wlibc.ax_info(wlibc.AXI_COUNT)
+    var blank: [u8; 224] = [0 as u8; 224]
+    var vis: u64 = 0
+    var k: u64 = 0
+    while k < cnt && k < 224 {
+        let r: u64 = wlibc.ax_read(k, b, 96)
+        if r == 96 {
+            let role: u64 = (*(b as *mut u64)) & 0xFF
+            if role == 0 {
+                blank[k as usize] = 1 as u8
+            } else {
+                vis = vis + 1
+                say((&s_h[0 as usize]) as u64)
+                say((&s_n[0 as usize]) as u64)
+                ulib.sayn(role)
+                say((&s_nm[0 as usize]) as u64)
+                say(b + 24)
+                ulib.nl()
+            }
+        }
+        k = k + 1
+    }
+    say((&s_h[0 as usize]) as u64)
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(cnt)
+    say((&s_f[0 as usize]) as u64)
+    ulib.sayn(vis)
+    ulib.nl()
+    // the events
+    var ev: [u8; 16] = [0 as u8; 16]
+    var seen: u64 = 0
+    var leaked: u64 = 0
+    var q: u64 = 0
+    while q < 80 {
+        let r: u64 = wlibc.ax_event((&ev[0 as usize]) as u64, 16)
+        if r != 16 {
+            q = 80
+        } else {
+            seen = seen + 1
+            let nd: u64 = ((*((&ev[0 as usize]) as *mut u64)) >> 48) & 0xFFFF
+            if nd < 224 && blank[nd as usize] != 0 as u8 {
+                leaked = leaked + 1
+            }
+            q = q + 1
+        }
+    }
+    say((&s_h[0 as usize]) as u64)
+    say((&s_e[0 as usize]) as u64)
+    ulib.sayn(seen)
+    say((&s_l[0 as usize]) as u64)
+    ulib.sayn(leaked)
+    ulib.nl()
+    // the window table
+    var rec: [u8; 160] = [0 as u8; 160]
+    let rp: u64 = (&rec[0 as usize]) as u64
+    var sl: u64 = 0
+    while sl < 32 {
+        let r: u64 = wlibc.sys3w(2128, 0, sl, rp)
+        if r == 1 && (*(rp as *mut u64)) != 0 {
+            say((&s_h[0 as usize]) as u64)
+            say((&s_w[0 as usize]) as u64)
+            ulib.sayn(sl)
+            say((&s_i[0 as usize]) as u64)
+            ulib.sayn(*(rp as *mut u64))
+            say((&s_t[0 as usize]) as u64)
+            say(rp + 64)
+            ulib.nl()
+        }
+        sl = sl + 1
+    }
+    // hijack: claim the lock, then open it
+    let st0: u64 = ulib.sys(1870, 0, 0, 0)
+    let c: u64 = ulib.sys(1870, 4, 0, 0)
+    let u: u64 = ulib.sys(1870, 2, 0, 0)
+    let st1: u64 = ulib.sys(1870, 0, 0, 0)
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(st0)
+    ulib.nl()
+    say((&s_h[0 as usize]) as u64)
+    say((&s_k[0 as usize]) as u64)
+    ulib.sayn(neg(c))
+    say((&s_u[0 as usize]) as u64)
+    ulib.sayn(neg(u))
+    say((&s_s[0 as usize]) as u64)
+    ulib.sayn(st1)
+    ulib.nl()
+    // the tiling actions through the syscall: close (18), next window (30)
+    // `safe` (before the lock and after the unlock): these two would really
+    // close the focused window and switch to another one, so they stay out
+    var t1: u64 = 0
+    var t2: u64 = 0
+    if !safe {
+        t1 = ulib.sys(1821, 18, 0, 0)
+        t2 = ulib.sys(1821, 30, 0, 0)
+    }
+    say((&s_h[0 as usize]) as u64)
+    say((&s_a[0 as usize]) as u64)
+    say((&s_d[0 as usize]) as u64)
+    ulib.sayn(neg(t1))
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(neg(t2))
+    ulib.nl()
+    return 0
+}
+
 const K_E1: u64 = 1
 const K_PW: u64 = 2
 const K_CK: u64 = 3
@@ -320,6 +455,7 @@ fn u_start(args: u64) -> u64 {
     var c_set: [u8; 4] = "set\0"
     var c_theme: [u8; 6] = "theme\0"
     var c_plain: [u8; 6] = "plain\0"
+    var c_lockprobe: [u8; 10] = "lockprobe\0"
     var title: u64 = (&t_win[0 as usize]) as u64
     var wx: u64 = 60
     if ulib.arg_count(args) >= 2 {
@@ -342,6 +478,9 @@ fn u_start(args: u64) -> u64 {
         }
         if same(a1, (&c_theme[0 as usize]) as u64) {
             return theme()
+        }
+        if same(a1, (&c_lockprobe[0 as usize]) as u64) {
+            return lockprobe(ulib.arg_count(args) >= 3)
         }
         if same(a1, (&c_plain[0 as usize]) as u64) {
             title = (&t_plain[0 as usize]) as u64

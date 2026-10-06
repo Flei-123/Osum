@@ -609,7 +609,9 @@ fn wl_fill(state: u64, me: u64, platz: u64, aus: u64, n: u64) -> u64 {
         kstate.set8(puffer + k, 0 as u8)
         k = k + 1
     }
-    if !wm.valid(state, platz) {
+    // r382 LOCK SEAL: while the screen is locked the table shows nothing
+    // of the windows behind the lock (no title, no size, no owner).
+    if !wm.valid(state, platz) || !wm.darf(state, platz) {
         if !sys.copy_out(state, me, aus, puffer, n) {
             return cap.err(cap.E_INVALID)
         }
@@ -2620,8 +2622,21 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if a0 >= ax.node_count(state) || a2 < ax.NODE_BYTES {
             return errno.neg(errno.E_INVAL)
         }
-        if !sys.copy_out(state, me, a1, ax.node_addr(state, a0),
-            ax.NODE_BYTES) {
+        // r382 LOCK SEAL: while the screen is locked a node of any other
+        // task than the locker reads as an empty node (role none, no
+        // name, no value, no place): the tree must not tell what is
+        // behind the lock.
+        var src: u64 = ax.node_addr(state, a0)
+        if wm.sperre_an(state) && ax.node_task(state, a0) != wm.lock_space(state) {
+            let zb: u64 = blockb(state) + 3456
+            var zk: u64 = 0
+            while zk < ax.NODE_BYTES {
+                kstate.set8(zb + zk, 0 as u8)
+                zk = zk + 1
+            }
+            src = zb
+        }
+        if !sys.copy_out(state, me, a1, src, ax.NODE_BYTES) {
             return errno.neg(errno.E_FAULT)
         }
         ax.count_read(state)
@@ -2638,6 +2653,27 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         let buf: u64 = blockb(state) + 3456
         if ax.ev_pop(state, buf) == 0 {
             return 0
+        }
+        // r382 LOCK SEAL: while locked, an event about a node of anyone
+        // but the locker is dropped (focus and value changes of the
+        // windows behind the lock). At most 64 are looked at per call.
+        if wm.sperre_an(state) {
+            var evn: u64 = 0
+            var evgo: bool = true
+            while evgo && evn < 64 {
+                let w0: u64 = kstate.get(buf, 0)
+                let nd: u64 = (w0 >> 48) & 0xFFFF
+                if nd < ax.node_count(state)
+                    && ax.node_task(state, nd) == wm.lock_space(state) {
+                    evgo = false
+                } else if ax.ev_pop(state, buf) == 0 {
+                    return 0
+                }
+                evn = evn + 1
+            }
+            if evgo {
+                return 0
+            }
         }
         if !sys.copy_out(state, me, a0, buf, ax.EV_BYTES) {
             return errno.neg(errno.E_FAULT)

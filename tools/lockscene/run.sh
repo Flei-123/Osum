@@ -42,7 +42,7 @@ keys() { local m=""; for c in "$@"; do m="$m mon=sendkey\ $c"; done; echo "$m"; 
 run() { # name wigapp keys...
     local nm=$1 app=$2; shift 2
     eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=8 bloecke=32768 \
-        extra=\"wigapp=$app\" progs=\"$PROGS\" xfile=/etc/shadow="$OUT/shadow" \
+        extra=\"wigapp=$app\" progs=\"$PROGS\" xfile=/etc/shadow="$OUT/shadow" xfile=/etc/wallpaper=assets/wallpaper-sea.osym \
         $(keys "$@") > "$OUT/$nm.log" 2>&1
 }
 
@@ -85,7 +85,7 @@ hat "$S" "sperre: aufgesperrt" "burst: the second attempt (typed behind the firs
 
 echo "== a crash locks, never unlocks =="
 bash "$B" "$OUT/t5" warten=10 extra="wigapp=/bin/lock,-absturz" progs="$PROGS" \
-    xfile=/etc/shadow="$OUT/shadow" > "$OUT/t5.log" 2>&1
+    xfile=/etc/shadow="$OUT/shadow" xfile=/etc/wallpaper=assets/wallpaper-sea.osym > "$OUT/t5.log" 2>&1
 S=$OUT/t5/serial.txt
 hat "$S" "sperre: Sperrer neu, pid=" "the kernel restarts the locker"
 hatnicht "$S" "sperre: aufgesperrt" "a crash does not unlock"

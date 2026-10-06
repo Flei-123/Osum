@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// ================================================ r383: THE BACKDROP
+// kernel/user/backdrop.fi -- a wallpaper behind a whole-screen window (lock screen, sign-in screen):
+// `/etc/wallpaper` (the same file the desktop paints, magic OSYM, B G R A),
+// blurred once at load, dimmed a little, and scaled to the window "to cover"
+// with a bilinear filter on every frame. The source is small (480 x 270), so
+// a frame is one pass over the window's pixels and no second full-size buffer
+// is needed (the canvas alone is 4 MiB).
+//
+//     backdrop.load(path, blur_radius, dim_256)   -- once, after the window is open
+//     (fuiapp.frame_begin then paints the picture instead of the flat colour)
+//
+// No file, a wrong head or no memory: nothing changes, the flat colour stays.
+profile app
+
+import ulib
+import std.rt
+import libc.io
+import fuiapp
+
+export { load, flat, off }
+
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+static mut s_px: u64 = 0
+static mut bd_on: u64 = 0
+static mut bd_px: u64 = 0
+static mut bd_w: u64 = 0
+static mut bd_h: u64 = 0
+static mut bd_tab: u64 = 0 // per destination column: (x0 << 8) | fraction
+static mut bd_tabw: u64 = 0
+static mut bd_hdr: [u8; 12] = [0 as u8; 12]
+static mut bd_line: u64 = 0
+
+fn bd_u32(p: u64) -> u64 {
+    return (__mmio_read8((p) as *mut u8) as u64)
+        | ((__mmio_read8((p + 1) as *mut u8) as u64) << 8)
+        | ((__mmio_read8((p + 2) as *mut u8) as u64) << 16)
+        | ((__mmio_read8((p + 3) as *mut u8) as u64) << 24)
+}
+
+// One box-blur pass over rows (stride 4 octets) or columns (stride row
+// length), radius r, per channel, edges clamped. `n` = pixels in the line,
+// `step` = octets between two pixels of the line, `lines` x `lstep`.
+fn bd_blur_line(base: u64, n: u64, step: u64, r: u64) {
+    var ch: u64 = 0
+    while ch < 3 {
+        var sum: u64 = 0
+        let first: u64 = __mmio_read8((base + ch) as *mut u8) as u64
+        let last: u64 = __mmio_read8((base + (n - 1) * step + ch) as *mut u8) as u64
+        // the window [i - r, i + r] with clamped edges
+        var k: u64 = 0
+        sum = first * r
+        while k <= r {
+            var q: u64 = k
+            if q >= n {
+                q = n - 1
+            }
+            sum = sum + (__mmio_read8((base + q * step + ch) as *mut u8) as u64)
+            k = k + 1
+        }
+        let div: u64 = 2 * r + 1
+        var i: u64 = 0
+        // the output goes into the line's scratch (bd_line), then back
+        while i < n {
+            __mmio_write8((bd_line + i) as *mut u8, (sum / div) as u8)
+            // slide: add pixel i + r + 1, drop pixel i - r
+            var add_i: u64 = i + r + 1
+            if add_i >= n {
+                add_i = n - 1
+            }
+            var addv: u64 = last
+            if add_i < n {
+                addv = __mmio_read8((base + add_i * step + ch) as *mut u8) as u64
+            }
+            var drop_v: u64 = first
+            if i >= r {
+                drop_v = __mmio_read8((base + (i - r) * step + ch) as *mut u8) as u64
+            }
+            sum = sum + addv - drop_v
+            i = i + 1
+        }
+        i = 0
+        while i < n {
+            __mmio_write8((base + i * step + ch) as *mut u8,
+                __mmio_read8((bd_line + i) as *mut u8))
+            i = i + 1
+        }
+        ch = ch + 1
+    }
+}
+
+fn bd_blur(r: u64, passes: u64) {
+    if r == 0 || passes == 0 {
+        return
+    }
+    var p: u64 = 0
+    while p < passes {
+        var y: u64 = 0
+        while y < bd_h {
+            bd_blur_line(bd_px + y * bd_w * 4, bd_w, 4, r)
+            y = y + 1
+        }
+        var x: u64 = 0
+        while x < bd_w {
+            bd_blur_line(bd_px + x * 4, bd_h, bd_w * 4, r)
+            x = x + 1
+        }
+        p = p + 1
+    }
+}
+
+// Darken the picture: all of it by `dim` (0..256, 256 = unchanged), and the
+// lower part a little more, so that light text on it stays readable.
+fn bd_shade(dim: u64) {
+    var y: u64 = 0
+    while y < bd_h {
+        // 256 at the top, 200 at the bottom row, times dim
+        let k: u64 = ((256 - (y * 40) / bd_h) * dim) >> 8
+        var x: u64 = 0
+        let row: u64 = bd_px + y * bd_w * 4
+        while x < bd_w {
+            let a: u64 = __mmio_read32((row + x * 4) as *mut u32) as u64
+            let rb: u64 = (((a & 0x00FF00FF) * k) >> 8) & 0x00FF00FF
+            let g: u64 = (((a & 0x0000FF00) * k) >> 8) & 0x0000FF00
+            __mmio_write32((row + x * 4) as *mut u32, (rb | g | 0xFF000000) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn load(path: u64, blur_r: u64, dim: u64) -> bool {
+    s_w = fuiapp.width()
+    s_h = fuiapp.height()
+    s_px = fuiapp.px()
+    if s_w == 0 || s_h == 0 || s_px == 0 {
+        return false
+    }
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let h: u64 = (&bd_hdr[0 as usize]) as u64
+    let n: u64 = io.read_full(fd, h, 12)
+    if ulib.bad(n) || n < 12 || bd_hdr[0 as usize] != 79 as u8 || bd_hdr[1 as usize] != 83 as u8
+        || bd_hdr[2 as usize] != 89 as u8 || bd_hdr[3 as usize] != 77 as u8 {
+        io.close(fd)
+        return false
+    }
+    let iw: u64 = bd_u32(h + 4)
+    let ih: u64 = bd_u32(h + 8)
+    if iw < 8 || ih < 8 || iw > 640 || ih > 480 {
+        io.close(fd)
+        return false
+    }
+    let bytes: u64 = iw * ih * 4
+    let p: u64 = rt.heap_alloc(bytes as usize) as u64
+    let line: u64 = rt.heap_alloc(1024) as u64
+    if p == 0 || line == 0 {
+        io.close(fd)
+        return false
+    }
+    let g: u64 = io.read_full(fd, p, bytes)
+    io.close(fd)
+    if ulib.bad(g) || g < bytes {
+        rt.heap_free(p, bytes as usize)
+        return false
+    }
+    bd_px = p
+    bd_w = iw
+    bd_h = ih
+    bd_line = line
+    bd_blur(blur_r, 2)
+    bd_shade(dim)
+    bd_on = 1
+    fuiapp.backdrop_hook(paint)
+    return true
+}
+
+fn off() {
+    bd_on = 0
+}
+
+// No wallpaper file: a vertical gradient (0xRRGGBB top and bottom) instead,
+// so that the light text of these screens always stands on something dark.
+static mut bd_top: u64 = 0
+static mut bd_bot: u64 = 0
+
+fn flat(top: u64, bottom: u64) {
+    bd_top = top
+    bd_bot = bottom
+    bd_on = 2
+    fuiapp.backdrop_hook(paint)
+}
+
+fn bd_flat_paint() {
+    var y: u64 = 0
+    while y < s_h {
+        var t: u64 = 0
+        if s_h > 1 {
+            t = y * 255 / (s_h - 1)
+        }
+        let r: u64 = (((bd_top >> 16) & 255) * (255 - t) + ((bd_bot >> 16) & 255) * t) / 255
+        let g: u64 = (((bd_top >> 8) & 255) * (255 - t) + ((bd_bot >> 8) & 255) * t) / 255
+        let bl: u64 = ((bd_top & 255) * (255 - t) + (bd_bot & 255) * t) / 255
+        let px: u64 = 0xFF000000 | (r << 16) | (g << 8) | bl
+        let dst: u64 = s_px + y * s_w * 4
+        var x: u64 = 0
+        while x < s_w {
+            __mmio_write32((dst + x * 4) as *mut u32, px as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// The column table: for destination column x the source column (16.16 fixed
+// point, "cover": the source is scaled by the larger of the two factors and
+// centred) as (x0 << 8) | (fraction 0..255).
+fn bd_prepare() -> bool {
+    if bd_tab != 0 && bd_tabw == s_w {
+        return true
+    }
+    if bd_tab != 0 {
+        rt.heap_free(bd_tab, (bd_tabw * 4) as usize)
+        bd_tab = 0
+    }
+    let t: u64 = rt.heap_alloc((s_w * 4) as usize) as u64
+    if t == 0 {
+        return false
+    }
+    bd_tab = t
+    bd_tabw = s_w
+    return true
+}
+
+fn bd_lerp(a: u64, b: u64, f: u64) -> u64 {
+    let rb: u64 = (((a & 0x00FF00FF) * (256 - f) + (b & 0x00FF00FF) * f) >> 8) & 0x00FF00FF
+    let ag: u64 = (((a >> 8) & 0x00FF00FF) * (256 - f) + ((b >> 8) & 0x00FF00FF) * f) & 0xFF00FF00
+    return rb | ag | 0xFF000000
+}
+
+fn paint() {
+    s_w = fuiapp.width()
+    s_h = fuiapp.height()
+    s_px = fuiapp.px()
+    if bd_on == 2 {
+        bd_flat_paint()
+        return
+    }
+    if !bd_prepare() {
+        return
+    }
+    // scale (16.16): source pixels per destination pixel, "cover"
+    let sx: u64 = (bd_w << 16) / s_w
+    let sy: u64 = (bd_h << 16) / s_h
+    var step: u64 = sx
+    if sy < step {
+        step = sy
+    }
+    // the source rectangle that is seen: s_w * step wide, s_h * step high,
+    // centred in the source (16.16)
+    let offx: u64 = ((bd_w << 16) - s_w * step) / 2
+    let offy: u64 = ((bd_h << 16) - s_h * step) / 2
+    var x: u64 = 0
+    while x < s_w {
+        var pos: u64 = offx + x * step + (step >> 1)
+        if pos >= (bd_w << 16) {
+            pos = (bd_w << 16) - 1
+        }
+        // centre of the destination pixel on the source grid (pixel centres)
+        var c: u64 = pos
+        if c >= 32768 {
+            c = c - 32768
+        } else {
+            c = 0
+        }
+        let x0: u64 = c >> 16
+        __mmio_write32((bd_tab + x * 4) as *mut u32, ((x0 << 8) | ((c >> 8) & 255)) as u32)
+        x = x + 1
+    }
+    var y: u64 = 0
+    while y < s_h {
+        var pos: u64 = offy + y * step + (step >> 1)
+        if pos >= (bd_h << 16) {
+            pos = (bd_h << 16) - 1
+        }
+        var c: u64 = pos
+        if c >= 32768 {
+            c = c - 32768
+        } else {
+            c = 0
+        }
+        let y0: u64 = c >> 16
+        let fy: u64 = (c >> 8) & 255
+        var y1: u64 = y0 + 1
+        if y1 >= bd_h {
+            y1 = bd_h - 1
+        }
+        let r0: u64 = bd_px + y0 * bd_w * 4
+        let r1: u64 = bd_px + y1 * bd_w * 4
+        let dst: u64 = s_px + y * s_w * 4
+        var i: u64 = 0
+        while i < s_w {
+            let t: u64 = __mmio_read32((bd_tab + i * 4) as *mut u32) as u64
+            let xa: u64 = t >> 8
+            let fx: u64 = t & 255
+            var xb: u64 = xa + 1
+            if xb >= bd_w {
+                xb = bd_w - 1
+            }
+            let top: u64 = bd_lerp(__mmio_read32((r0 + xa * 4) as *mut u32) as u64,
+                __mmio_read32((r0 + xb * 4) as *mut u32) as u64, fx)
+            let bot: u64 = bd_lerp(__mmio_read32((r1 + xa * 4) as *mut u32) as u64,
+                __mmio_read32((r1 + xb * 4) as *mut u32) as u64, fx)
+            __mmio_write32((dst + i * 4) as *mut u32, bd_lerp(top, bot, fy) as u32)
+            i = i + 1
+        }
+        y = y + 1
+    }
+}
+

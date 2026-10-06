@@ -49,6 +49,9 @@ import wlib
 import pw
 import fuiapp
 import fuiscene
+import icons
+import signin
+import backdrop
 
 export { u_start }
 
@@ -71,7 +74,7 @@ static mut kopf: [u8; 192] = [0 as u8; 192]
 
 static mut T_TITEL: [u8; 9] = "Gesperrt\0"
 static mut T_APP: [u8; 5] = "lock\0"
-static mut T_FRAGE: [u8; 44] = "Kennwort eingeben und Eingabetaste drücken\0"
+static mut T_FRAGE: [u8; 18] = "Kennwort eingeben\0"
 static mut T_FALSCH: [u8; 26] = "Das Kennwort stimmt nicht\0"
 static mut T_AUF: [u8; 11] = "Entsperren\0"
 static mut T_KEIN: [u8; 48] = "Kein Kennwort gesetzt -- Eingabetaste entsperrt\0"
@@ -146,9 +149,6 @@ fn stimmt() -> bool {
 const K_KENN: u64 = 1
 const K_EYE: u64 = 2
 const K_GO: u64 = 3
-const COL_W: u64 = 420
-const FIELD_H: u64 = 36
-const BTN_W: u64 = 140
 
 static mut f_eye: bool = false
 static mut s_bw: u64 = 0
@@ -196,39 +196,174 @@ fn eye_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     fuiapp.eye(x, y, h, f_eye, fuiapp.ink())
 }
 
+// ===================================================== r383: THE LOOK
+// The layout of the Windows 11 sign-in screen on the wallpaper; what lock and
+// glogin paint the same way is in signin.fi. Here: the wrappers (the host's
+// canvases take a painter without arguments), the power button, the network.
+const K_POWER: u64 = 4
+const K_SLEEP: u64 = 5
+const K_OFF: u64 = 6
+const SYS_REBOOT: u64 = 169
+const RB_POWEROFF: u64 = 0x4321FEDC
+
+static mut f_pm: bool = false
+static mut net_t: u64 = 0
+static mut ini: [u8; 4] = [0 as u8; 4]
+static mut T_STROM: [u8; 8] = "Ein/Aus\0"
+static mut T_SCHLAF: [u8; 15] = "Energie sparen\0"
+static mut T_AUS: [u8; 15] = "Herunterfahren\0"
+static mut T_HINT: [u8; 42] = "Kennwort vergessen? Administrator fragen.\0"
+static mut netz_st: u64 = 99
+
+fn initial_set() {
+    signin.initial_of((&name[(0) as usize]) as u64, (&ini[(0) as usize]) as u64)
+}
+
+fn p_avatar(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_avatar(x, y, w, h, (&ini[(0) as usize]) as u64)
+}
+
+fn p_name(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_name(x, y, w, h, (&name[(0) as usize]) as u64)
+}
+
+fn p_status(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_status(x, y, w, h, (&kopf[(0) as usize]) as u64)
+}
+
+fn p_hint(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_hint(x, y, w, h, (&T_HINT[(0) as usize]) as u64)
+}
+
+fn p_chip(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_chip(x, y, w, h, (&ini[(0) as usize]) as u64, (&name[(0) as usize]) as u64)
+}
+
+fn p_net(x: u64, y: u64, w: u64, h: u64) {
+    signin.paint_net(x, y, w, h, netz_st)
+}
+
+// ONE painter for all the tiles of the window (the host keeps one): `ud`
+// says which (1 the eye, 2 the unlock arrow, 3 the power button).
+fn tile_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    if ud == 1 {
+        fuiapp.eye(x, y, h, f_eye, fuiapp.ink())
+    } else if ud == 2 {
+        signin.glyph_tile(icons.ARROW_RIGHT, x, y, w, h, fuiapp.ink() as u64)
+        if st & 8 != 0 {
+            fuiapp.halo_in(x, y, w, h)
+        }
+    } else {
+        signin.glyph_tile(icons.POWER, x, y, w, h, fuiapp.ink() as u64)
+    }
+}
+
+fn net_update() -> bool {
+    var st: u64 = ulib.sys(signin.SYS_NETGET, signin.NG_STATE, 0, 0)
+    if ulib.bad(st) {
+        st = 9
+    }
+    if st == netz_st {
+        return false
+    }
+    netz_st = st
+    return true
+}
+
+// Power off: the polite way through init (/run/svc.cmd, as the Start menu
+// does it), then the kernel's own call. The lock program runs as root.
+fn strom_aus() {
+    var p_cmd: [u8; 13] = "/run/svc.cmd\0"
+    var c_aus: [u8; 10] = "shutdown\n\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_cmd[(0) as usize]) as u64, 577, 0)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_WRITE, fd, (&c_aus[(0) as usize]) as u64, 9)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        let _w: u64 = ulib.sleep_ms(500)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+}
+
 fn build() {
     let r: usize = fuiscene.root()
-    // On the 4-pixel grid (tools/design/messen.py checks it); the root of
-    // the host has a padding of 8.
-    var top: u64 = (s_bh / 3) / 4 * 4
-    if top > 8 {
-        top = top - 8
+    let pad: u64 = 8
+    let g: u64 = 8
+    // the avatar's top edge at 30 % of the height
+    var top: u64 = 4
+    let want: u64 = s_bh * 30 / 100
+    if want > pad + g + 4 {
+        top = (want - pad - g) / 4 * 4
     }
-    var left: u64 = ((s_bw - COL_W) / 2) / 4 * 4
-    if left > 8 {
-        left = left - 8
+    var left: u64 = 4
+    let wantx: u64 = (s_bw - fuiscene.sp(signin.COL_W)) / 2
+    if wantx > pad + 4 {
+        left = (wantx - pad) / 4 * 4
     }
     let _t: usize = fuiscene.space(r, 4, top)
     let rw: usize = fuiscene.row(r)
+    fuiscene.set_gap(rw, 0)
     let _l: usize = fuiscene.space(rw, left, 4)
     let col: usize = fuiscene.column(rw)
-    fuiscene.set_size(col, COL_W, 0)
-    fuiscene.set_gap(col, 4)
-    let _n: usize = fuiscene.label(col, (&name[(0) as usize]) as u64)
-    let _k: usize = fuiscene.label(col, (&kopf[(0) as usize]) as u64)
-    let _s: usize = fuiscene.space(col, 4, 4)
+    fuiscene.set_size(col, fuiscene.sp(signin.COL_W), 0)
+    fuiscene.set_gap(col, 0)
+    let _av: usize = fuiscene.canvas(col, 0, fuiscene.sp(signin.COL_W), fuiscene.sp(signin.AV_D), p_avatar)
+    let _s1: usize = fuiscene.space(col, 4, fuiscene.sp(signin.GAP_N))
+    let _nn: usize = fuiscene.canvas(col, 0, fuiscene.sp(signin.COL_W), fuiscene.sp(36), p_name)
+    let _st: usize = fuiscene.canvas(col, 0, fuiscene.sp(signin.COL_W), fuiscene.sp(32), p_status)
+    let _s2: usize = fuiscene.space(col, 4, fuiscene.sp(12))
     let fr: usize = fuiscene.row(col)
-    fuiscene.set_gap(fr, 8)
-    let _e: usize = fuiscene.entry(fr, K_KENN, COL_W - FIELD_H - 8, 0)
+    fuiscene.set_gap(fr, 4)
+    let _e: usize = fuiscene.entry(fr, K_KENN, fuiscene.sp(signin.COL_W - 2 * signin.FIELD_H - 8), 0)
     fuiscene.entry_secret(K_KENN, !f_eye)
     fuiscene.ax_name(K_KENN, (&T_KENNW[(0) as usize]) as u64)
     let _y: usize = fuiscene.tile(fr, K_EYE, (&T_AUGE[(0) as usize]) as u64,
-        FIELD_H, FIELD_H, f_eye, 0, eye_paint)
-    let _s2: usize = fuiscene.space(col, 4, 8)
-    // in a row, so that the button keeps its own width (a column stretches)
-    let br: usize = fuiscene.row(col)
-    let bt: usize = fuiscene.button_main(br, (&T_AUF[(0) as usize]) as u64, K_GO)
-    fuiscene.set_size(bt, BTN_W, FIELD_H)
+        fuiscene.sp(signin.FIELD_H), fuiscene.sp(signin.FIELD_H), f_eye, 1, tile_paint)
+    let _gb: usize = fuiscene.tile(fr, K_GO, (&T_AUF[(0) as usize]) as u64,
+        fuiscene.sp(signin.FIELD_H), fuiscene.sp(signin.FIELD_H), true, 2, tile_paint)
+    let _s3: usize = fuiscene.space(col, 4, fuiscene.sp(16))
+    let _h: usize = fuiscene.canvas(col, 0, fuiscene.sp(signin.COL_W), fuiscene.sp(24), p_hint)
+    // ---- the bottom strip. NOT in the bottom 56 points: that strip belongs
+    // to the task bar's window, which exists (unpainted) behind this screen.
+    var qa_h: u64 = fuiscene.sp(signin.FIELD_H)
+    if f_pm {
+        qa_h = qa_h + fuiscene.sp(96) + 4
+    }
+    let col_h: u64 = fuiscene.sp(signin.AV_D + signin.GAP_N + 36 + 32 + 12 + signin.FIELD_H + 16 + 24)
+    var rest: u64 = 4
+    let sum: u64 = 2 * pad + 4 * g + top + col_h + qa_h + fuiscene.sp(56 + 8)
+    if s_bh > sum + 4 {
+        rest = s_bh - sum
+    }
+    let _gs: usize = fuiscene.space(r, 4, rest)
+    let bt: usize = fuiscene.row(r)
+    fuiscene.set_gap(bt, 0)
+    let _m0: usize = fuiscene.space(bt, fuiscene.sp(24), 4)
+    let _chip: usize = fuiscene.canvas(bt, 0, fuiscene.sp(240), fuiscene.sp(signin.FIELD_H), p_chip)
+    let cw: u64 = fuiscene.sp(44 + 2 * signin.FIELD_H)
+    var mid: u64 = 4
+    let fixed: u64 = fuiscene.sp(24 + 240 + 24) + cw + pad * 2
+    if s_bw > fixed + 4 {
+        mid = s_bw - fixed
+    }
+    let _m1: usize = fuiscene.space(bt, mid, 4)
+    let qa: usize = fuiscene.column(bt)
+    fuiscene.set_size(qa, cw, 0)
+    fuiscene.set_gap(qa, 4)
+    if f_pm {
+        let c2: usize = fuiscene.card(qa)
+        fuiscene.set_pad(c2, 8)
+        fuiscene.set_gap(c2, 4)
+        let _b1: usize = fuiscene.button(c2, (&T_SCHLAF[(0) as usize]) as u64, K_SLEEP)
+        let _b2: usize = fuiscene.button(c2, (&T_AUS[(0) as usize]) as u64, K_OFF)
+    }
+    let bar: usize = fuiscene.row(qa)
+    fuiscene.set_gap(bar, 0)
+    let _d: usize = fuiscene.canvas(bar, 0, fuiscene.sp(44), fuiscene.sp(signin.FIELD_H), signin.paint_deu)
+    let _n: usize = fuiscene.canvas(bar, 0, fuiscene.sp(signin.FIELD_H), fuiscene.sp(signin.FIELD_H), p_net)
+    let _p: usize = fuiscene.tile(bar, K_POWER, (&T_STROM[(0) as usize]) as u64,
+        fuiscene.sp(signin.FIELD_H), fuiscene.sp(signin.FIELD_H), f_pm, 3, tile_paint)
+    let _bs: usize = fuiscene.space(r, 4, fuiscene.sp(56 + 8))
 }
 
 static mut T_AUGE: [u8; 18] = "Kennwort anzeigen\0"
@@ -254,6 +389,7 @@ fn u_gui() -> u64 {
     let _a: u64 = sy(OP_AN, 0)
     let _i: u64 = sy(OP_ICH, 0)
     whoami()
+    initial_set()
     s_bw = wlibc.screen_w()
     s_bh = wlibc.screen_h()
     if hat_kennwort() {
@@ -270,6 +406,12 @@ fn u_gui() -> u64 {
         return 1
     }
     fuiscene.set_app((&T_APP[(0) as usize]) as u64)
+    var p_wall: [u8; 15] = "/etc/wallpaper\0"
+    if !backdrop.load((&p_wall[(0) as usize]) as u64, 3, 256) {
+        backdrop.flat(0x2A4468, 0x0B1424)
+    }
+    let _nu: bool = net_update()
+    fuiscene.refresh()
     say((&s_fui[(0) as usize]) as u64)
     ulib.nl()
     say((&s_geom[(0) as usize]) as u64)
@@ -304,6 +446,22 @@ fn u_gui() -> u64 {
         } else if key == K_EYE {
             f_eye = !f_eye
             fuiscene.refresh()
+        } else if key == K_POWER {
+            f_pm = !f_pm
+            fuiscene.refresh()
+        } else if key == K_SLEEP {
+            f_pm = false
+            fuiscene.refresh()
+            let _s: u64 = sy(11, 0)
+        } else if key == K_OFF {
+            strom_aus()
+        }
+        let tnow: u64 = fuiapp.now_ms()
+        if tnow > net_t + 1000 {
+            net_t = tnow
+            if net_update() {
+                fuiscene.refresh()
+            }
         }
         // THE WINDOW CANNOT BE CLOSED: `alive` turns false when the server
         // sends a close event; while the lock stands the program ends with 1

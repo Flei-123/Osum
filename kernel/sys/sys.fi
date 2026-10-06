@@ -9395,11 +9395,16 @@ fn do_sperre(state: u64, me: u64, op: u64, arg: u64) -> u64 {
         if kstate.get(state, sp + kstate.SP_ON) == 0 {
             kstate.set(state, sp + kstate.SP_ON, 1)
             kstate.add(state, sp + kstate.SP_LOCKS, 1)
+            // r382 LOCK SEAL: whoever turns the lock on from a program is
+            // the one program that may claim it (op 4) -- nobody else can
+            // step in between and become the locker.
+            kstate.set(state, sp + kstate.SP_SLOT, me)
         }
         return 0
     }
     if op == 2 {
-        if kstate.get(state, sp + kstate.SP_PID) != ich {
+        if kstate.get(state, sp + kstate.SP_PID) != ich
+            || kstate.get(state, sp + kstate.SP_SLOT) != me {
             return neg(errno.E_PERM)
         }
         kstate.set(state, sp + kstate.SP_ON, 0)
@@ -9427,6 +9432,16 @@ fn do_sperre(state: u64, me: u64, op: u64, arg: u64) -> u64 {
         return (jetzt - l) / 1000000
     }
     if op == 4 {
+        // r382 LOCK SEAL: only while the screen is locked, and only the
+        // program the lock named: the one that turned it on (op 1) or the
+        // one the kernel started for it (sperre_wache sets SP_SLOT). Before,
+        // ANY program could call op 4 -- while unlocked (to be the locker
+        // of the next lock) or while the locker was dead (before the kernel
+        // restarted it) -- and then unlock with op 2 without a password.
+        if kstate.get(state, sp + kstate.SP_ON) == 0
+            || kstate.get(state, sp + kstate.SP_SLOT) != me {
+            return neg(errno.E_PERM)
+        }
         let alt: u64 = kstate.get(state, sp + kstate.SP_PID)
         if alt != 0 && alt != ich {
             if sched.find_pid(state, alt) < kstate.MAX_TASKS {
