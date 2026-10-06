@@ -154,7 +154,7 @@ def bright(im, x0, y0, w, h):
     return n
 withb = bright(b, bx, BARY + by, bw, bh); without = bright(a, bx, BARY + by, bw, bh)
 print("badge area bright pixels: with %d without %d" % (withb, without))
-ok1 = withb >= 40 and without <= 8
+ok1 = withb >= 40 and withb >= without + 40
 ol = [l for l in open(s2, errors='replace') if l.startswith('taskview: open')]
 m = re.search(r' x=(\d+) y=(\d+) w=(\d+) h=(\d+)', ol[-1]); cx, cy, cw, ch = (int(v) for v in m.groups())
 diff = 0
