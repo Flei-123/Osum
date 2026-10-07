@@ -18,5 +18,8 @@ for ph in "1 the rest of the boot" "2 idle (six seconds)" "3 pointer moves over 
     n=$((n + 1))
     l=$(grep -a '^wm: bild n=' "$OUT/serial.txt" | sed -n "${n}p")
     printf '  phase %-34s %s\n' "$ph" "${l#wm: bild }"
+    # r460: the next line says where the time of those frames went (microseconds summed, n frames)
+    l2=$(grep -a '^wm: phase n=' "$OUT/serial.txt" | sed -n "${n}p")
+    printf '        %-34s %s\n' "" "${l2#wm: phase }"
 done
 [ -n "${1:-}" ] || rm -rf "$OUT.log" "$OUT-build"

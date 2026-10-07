@@ -88,6 +88,7 @@ import drv.snd.audio
 // in Zeile 1, keine Speicheranforderung, kein Syscall, kein Fliesskomma
 // -- sie darf hier stehen, und genau dafuer wurde sie geschrieben.
 import fui.core
+import fui.region
 
 export {
     sperre_an, sperrer, lock_space, darf, input_seen,
@@ -1007,6 +1008,26 @@ const S_SZAH: u64 = 0x1200 // Hoehe beim Anfassen
 // that was grabbed: a drag of 30 px moved the window top by 8.
 const S_SZOFFX: u64 = 0x15E0
 const S_SZOFFY: u64 = 0x15E8
+// r460 (docs/COMPOSITOR.md S0): THE TIME INSIDE `compose_one`, BY PHASE, in microseconds, summed since the last F12 (printed by
+// `bild_say_reset` as `wm: phase ...` and set to zero there). One word each, 0x1600 .. 0x1638.
+const S_PH_BG: u64 = 0x1600    // the desktop fill and the tiling bars
+const S_PH_WIN: u64 = 0x1608   // every window (`paint_win`), the drag path included
+const S_PH_DRAG: u64 = 0x1610  // only the windows painted lifted (`paint_win_drag`)
+const S_PH_TOP: u64 = 0x1618   // signature, preview, trusted dialog, pointer, magnifier
+const S_PH_PEND: u64 = 0x1620  // `pend_add` / the flush of the frame
+const S_PH_PX: u64 = 0x1628    // pixels of the dirty rectangles
+const S_PH_N: u64 = 0x1630     // frames counted
+const S_PH_BLUR: u64 = 0x1638  // inside `paint_win`: the acrylic blur of a window (`blur_flaeche`)
+const S_PH_GLASS: u64 = 0x1640 // inside `paint_win`: the frosted strip under a glass window (`glass_prepare`)
+const S_PH_SHADOW: u64 = 0x1648 // inside `paint_win`: the shadow (`paint_shadow`)
+// r461 (docs/COMPOSITOR.md S2): THE DAMAGE AS A REGION. `damage` keeps the bounding box (everything else reads it) AND adds the
+// rectangle to a list of disjoint rectangles (`fui.region`, up to 16). When the list covers clearly less than the box, `compose_one`
+// paints the rectangles one by one: two small changes in two corners cost two small rectangles, not the screen in between.
+const S_RLOCK: u64 = 0x1650    // spin lock of the region (`damage` runs on any core, the region is a list)
+const S_RBAD: u64 = 0x1658     // set when the lock could not be had: this frame uses the box
+const S_RFRAMES: u64 = 0x1660  // frames composed rectangle by rectangle
+const S_RSAVED: u64 = 0x1668   // pixels they did not have to paint (box minus region)
+const S_RGN: u64 = 0x1700      // 65 words: the region (`fui.region`, REGION_WORDS)
 
 const SZ_L: u64 = 1
 const SZ_R: u64 = 2
@@ -2827,6 +2848,66 @@ fn bild_say_reset(state: u64) {
         k = k + 1
     }
     serial.nl()
+    // r460: where the time of those frames went (microseconds summed; divide by n for the mean per frame). `blurs= bhits= blurus=`
+    // are running totals of the blur counters (NOT reset here: the acceptance runs read them); a runner takes differences.
+    var s_p: [u8; 14] = "wm: phase n=\0\0"
+    var s_p1: [u8; 5] = " bg=\0"
+    var s_p2: [u8; 6] = " win=\0"
+    var s_p3: [u8; 7] = " drag=\0"
+    var s_p4: [u8; 6] = " top=\0"
+    var s_p5: [u8; 7] = " pend=\0"
+    var s_p6: [u8; 5] = " px=\0"
+    var s_p7: [u8; 7] = " blur=\0"
+    var s_p8: [u8; 8] = " glass=\0"
+    var s_p9: [u8; 9] = " shadow=\0"
+    var s_pa: [u8; 6] = " rgn=\0"
+    var s_pb: [u8; 8] = " saved=\0"
+    var s_pc: [u8; 8] = " blurs=\0"
+    var s_pd: [u8; 8] = " bhits=\0"
+    var s_pe: [u8; 9] = " blurus=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(gs(state, S_PH_N))
+    serial.puts((&s_p1[0]) as u64)
+    serial.dec(gs(state, S_PH_BG))
+    serial.puts((&s_p2[0]) as u64)
+    serial.dec(gs(state, S_PH_WIN))
+    serial.puts((&s_p3[0]) as u64)
+    serial.dec(gs(state, S_PH_DRAG))
+    serial.puts((&s_p4[0]) as u64)
+    serial.dec(gs(state, S_PH_TOP))
+    serial.puts((&s_p5[0]) as u64)
+    serial.dec(gs(state, S_PH_PEND))
+    serial.puts((&s_p6[0]) as u64)
+    serial.dec(gs(state, S_PH_PX))
+    serial.puts((&s_p7[0]) as u64)
+    serial.dec(gs(state, S_PH_BLUR))
+    serial.puts((&s_p8[0]) as u64)
+    serial.dec(gs(state, S_PH_GLASS))
+    serial.puts((&s_p9[0]) as u64)
+    serial.dec(gs(state, S_PH_SHADOW))
+    serial.puts((&s_pa[0]) as u64)
+    serial.dec(gs(state, S_RFRAMES))
+    serial.puts((&s_pb[0]) as u64)
+    serial.dec(gs(state, S_RSAVED))
+    serial.puts((&s_pc[0]) as u64)
+    serial.dec(gs(state, S_BLURS))
+    serial.puts((&s_pd[0]) as u64)
+    serial.dec(gs(state, S_BLURCACHE))
+    serial.puts((&s_pe[0]) as u64)
+    serial.dec(gs(state, S_BLURUS))
+    serial.nl()
+    ss(state, S_RFRAMES, 0)
+    ss(state, S_RSAVED, 0)
+    ss(state, S_PH_BLUR, 0)
+    ss(state, S_PH_GLASS, 0)
+    ss(state, S_PH_SHADOW, 0)
+    ss(state, S_PH_N, 0)
+    ss(state, S_PH_BG, 0)
+    ss(state, S_PH_WIN, 0)
+    ss(state, S_PH_DRAG, 0)
+    ss(state, S_PH_TOP, 0)
+    ss(state, S_PH_PEND, 0)
+    ss(state, S_PH_PX, 0)
     ss(state, S_FRUS, 0)
     ss(state, S_FRN, 0)
     ss(state, S_FRMAX, 0)
@@ -3221,6 +3302,9 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     ss(state, S_LASTUS, 0)
     ss(state, S_DON, 0)
     ss(state, S_CLOCK, 0)
+    ss(state, S_RLOCK, 0)
+    ss(state, S_RBAD, 0)
+    region.region_clear(state + kstate.WM_OFF + S_RGN)
     ss(state, S_NODIRTY, 0)
     if nodirty {
         ss(state, S_NODIRTY, 1)
@@ -3288,6 +3372,88 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
 }
 
 // ---------------------------------------------------- die Rechtecke
+
+// The region of the damage. A short spin lock: `damage` is called from every core (mouse IRQ, client calls) and the region is a
+// list that is cut and appended to; the critical section is a few dozen instructions. If the lock cannot be had the box (which
+// is always kept) carries the frame: `S_RBAD`.
+fn rgn_lock(state: u64) -> bool {
+    let lk: u64 = state + kstate.WM_OFF + S_RLOCK
+    var spins: u64 = 0
+    var got: bool = false
+    while !got {
+        let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
+        if alt == 0 {
+            got = true
+        } else {
+            spins = spins + 1
+            if spins > 20000 {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+fn rgn_unlock(state: u64) {
+    arch.atomic_store(state + kstate.WM_OFF + S_RLOCK, 0)
+}
+
+fn rgn_add(state: u64, a: i64, b: i64, c: i64, d: i64) {
+    if !rgn_lock(state) {
+        ss(state, S_RBAD, 1)
+        return
+    }
+    region.region_add(state + kstate.WM_OFF + S_RGN, a, b, c, d)
+    rgn_unlock(state)
+}
+
+fn rgn_all(state: u64) {
+    if !rgn_lock(state) {
+        ss(state, S_RBAD, 1)
+        return
+    }
+    let r: u64 = state + kstate.WM_OFF + S_RGN
+    region.region_clear(r)
+    region.region_add(r, 0, 0, gs(state, S_SW) as i64, gs(state, S_SH) as i64)
+    rgn_unlock(state)
+}
+
+// Take the region out for one frame: copy its rectangles to `out` (4 words each) and empty it. Returns the number of rectangles,
+// or 0 when the frame should use the box: the region was marked bad, it is empty, it does not agree with the box (a racing
+// `damage`), it has one rectangle, or it covers more than three quarters of the box (cutting costs more than it saves).
+fn rgn_take(state: u64, out: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
+    if !rgn_lock(state) {
+        return 0
+    }
+    let r: u64 = state + kstate.WM_OFF + S_RGN
+    var n: u64 = region.region_count(r)
+    let bad: u64 = gs(state, S_RBAD)
+    if bad != 0 || n < 2 || region.region_bounds(r, 0) != bx0 as i64 || region.region_bounds(r, 1) != by0 as i64
+        || region.region_bounds(r, 2) != bx1 as i64 || region.region_bounds(r, 3) != by1 as i64 {
+        n = 0
+    }
+    let box_area: u64 = (bx1 - bx0) * (by1 - by0)
+    let area: u64 = region.region_area(r)
+    if n != 0 && area * 100 > box_area * 75 {
+        n = 0
+    }
+    if n != 0 {
+        var i: u64 = 0
+        while i < n {
+            var k: u64 = 0
+            while k < 4 {
+                __mmio_write64((out + (i * 4 + k) * 8) as *mut u64, region.region_rect(r, i, k) as u64)
+                k = k + 1
+            }
+            i = i + 1
+        }
+        ss(state, S_RSAVED, gs(state, S_RSAVED) + (box_area - area))
+    }
+    region.region_clear(r)
+    ss(state, S_RBAD, 0)
+    rgn_unlock(state)
+    return n
+}
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     if !ready(state) {
@@ -3391,6 +3557,7 @@ fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
             }
         }
     }
+    rgn_add(state, a, b, c, d)
     if gs(state, S_DON) == 0 {
         ss(state, S_DX0, a as u64)
         ss(state, S_DY0, b as u64)
@@ -3422,6 +3589,7 @@ fn damage_all(state: u64) {
     ss(state, S_DX1, gs(state, S_SW))
     ss(state, S_DY1, gs(state, S_SH))
     ss(state, S_DON, 1)
+    rgn_all(state)
 }
 
 // RUNDE PAINT: DER SCHATTEN GEHOERT ZUM SCHMUTZ.
@@ -6129,6 +6297,19 @@ const S_MAGLX: u64 = 0x15C8 // where the panel stood last time, + 1
 const S_MAGCX: u64 = 0x15D0 // the centre it magnified last time
 const S_MAGCY: u64 = 0x15D8
 
+// The microseconds between two clock readings (0 while the clock is not calibrated or after a world switch).
+fn ph_us(state: u64, t0: u64, t1: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 || t1 <= t0 {
+        return 0
+    }
+    return (t1 - t0) / (kh / 1000)
+}
+
+fn ph_add(state: u64, slot: u64, t0: u64, t1: u64) {
+    ss(state, slot, gs(state, slot) + ph_us(state, t0, t1))
+}
+
 fn compose(state: u64) -> u64 {
     let lk: u64 = state + kstate.WM_OFF + S_CLOCK
     let alt: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
@@ -6140,35 +6321,13 @@ fn compose(state: u64) -> u64 {
     return r
 }
 
-// Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
-// von unten nach oben jedes Fenster, das diese Stelle beruehrt.
-fn compose_one(state: u64) -> u64 {
-    if !ready(state) || !fb.ready(state) {
-        return 0
-    }
-    // ROUND A11Y-2: WITH THE MAGNIFIER ITS PANEL IS ALWAYS PART OF THE
-    // DIRTY AREA -- and so is the place it stood last time, if it moved.
-    // Without this the panel would be painted and not transferred, or
-    // its old picture would stay on the screen.
-    if ax.mag(state) {
-        mag_damage(state)
-    } else if gs(state, S_MAGLX) != 0 {
-        // switched off: the old panel goes away
-        let ox: u64 = gs(state, S_MAGLX) - 1
-        ss(state, S_MAGLX, 0)
-        damage(state, ox as i64, 0, (ox + MAG_W) as i64, MAG_H as i64)
-    }
-    if gs(state, S_DON) == 0 {
-        return 0
-    }
-    var x0: u64 = gs(state, S_DX0)
-    var y0: u64 = gs(state, S_DY0)
-    var x1: u64 = gs(state, S_DX1)
-    var y1: u64 = gs(state, S_DY1)
-    ss(state, S_DON, 0)
-    if x1 <= x0 || y1 <= y0 {
-        return 0
-    }
+// One rectangle of the frame: grow it over the blurring windows it touches, then the desktop, the windows from bottom to top,
+// the layers above them, the pointer and the hand-over to `present`. Returns the number of pixels of the (grown) rectangle.
+fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
+    var x0: u64 = bx0
+    var y0: u64 = by0
+    var x1: u64 = bx1
+    var y1: u64 = by1
     // ============================== FIX 04.10.2026: THE MENU BLUR BAND
     //
     // Justin, Dell: moving the mouse over the start menu smeared a band of
@@ -6234,17 +6393,7 @@ fn compose_one(state: u64) -> u64 {
             }
         }
     }
-    // RUNDE VSYNC: DIE BILDNUMMER STEIGT HIER und nicht beim
-    // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
-    // EINEM Bild und traegt dieselbe Signatur.
-    ss(state, S_FRAME, gs(state, S_FRAME) + 1)
-    // RUNDE WMPLUGIN: DER KEHRBESEN, EINMAL JE BILD. Acht Vergleiche,
-    // kein Warten, keine Zuteilung -- er wirft hinaus, wer gerufen wurde
-    // und nicht kommt. DAS IST DIE EINZIGE STELLE IM ZUSAMMENSETZPFAD,
-    // die ueberhaupt etwas von Plugins weiss.
-    wmplug.sweep(state)
-    // RUNDE VEKTOR: die Uhr fuer dieses Bild.
-    let t_anfang: u64 = time.tsc()
+    let ph_a0: u64 = time.tsc()
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
     // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
@@ -6253,7 +6402,9 @@ fn compose_one(state: u64) -> u64 {
     if gs(state, S_TILE) != 0 {
         paint_bars(state, x0, y0, x1, y1)
     }
+    ph_add(state, S_PH_BG, ph_a0, time.tsc())
     // 2. die Fenster, von unten nach oben
+    let ph_b: u64 = time.tsc()
     var z: u64 = 0
     while z < gs(state, S_COUNT) {
         let i: u64 = at_z(state, z)
@@ -6277,6 +6428,8 @@ fn compose_one(state: u64) -> u64 {
         }
         z = z + 1
     }
+    let ph_c: u64 = time.tsc()
+    ph_add(state, S_PH_WIN, ph_b, ph_c)
     // 2a. RUNDE VSYNC: die Signatur der Zerreissprobe, ueber der
     //     Fensterflaeche und unter allem, was darueber liegt. Sie wird
     //     je Fenster gemalt, damit ein Foto sie JE FENSTER vergleichen
@@ -6325,6 +6478,8 @@ fn compose_one(state: u64) -> u64 {
     // Ganzes. Ohne (die Gegenprobe `nopresent`) geht es den alten Weg
     // und wird sofort geschoben; dann MUSS die Zerreissprobe wieder
     // gemischte Signaturen finden.
+    let ph_d: u64 = time.tsc()
+    ph_add(state, S_PH_TOP, ph_c, ph_d)
     if gs(state, S_VSYNC) != 0 {
         pend_add(state, x0, y0, x1, y1)
         ss(state, S_SKIPPED, gs(state, S_SKIPPED) + 1)
@@ -6332,8 +6487,75 @@ fn compose_one(state: u64) -> u64 {
         fb.dirty(state, y0, y1)
         fb.flush(state)
     }
+    ph_add(state, S_PH_PEND, ph_d, time.tsc())
+    return (x1 - x0) * (y1 - y0)
+}
+
+// Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
+// von unten nach oben jedes Fenster, das diese Stelle beruehrt.
+fn compose_one(state: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return 0
+    }
+    // ROUND A11Y-2: WITH THE MAGNIFIER ITS PANEL IS ALWAYS PART OF THE
+    // DIRTY AREA -- and so is the place it stood last time, if it moved.
+    // Without this the panel would be painted and not transferred, or
+    // its old picture would stay on the screen.
+    if ax.mag(state) {
+        mag_damage(state)
+    } else if gs(state, S_MAGLX) != 0 {
+        // switched off: the old panel goes away
+        let ox: u64 = gs(state, S_MAGLX) - 1
+        ss(state, S_MAGLX, 0)
+        damage(state, ox as i64, 0, (ox + MAG_W) as i64, MAG_H as i64)
+    }
+    if gs(state, S_DON) == 0 {
+        return 0
+    }
+    let x0: u64 = gs(state, S_DX0)
+    let y0: u64 = gs(state, S_DY0)
+    let x1: u64 = gs(state, S_DX1)
+    let y1: u64 = gs(state, S_DY1)
+    ss(state, S_DON, 0)
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    // RUNDE VSYNC: DIE BILDNUMMER STEIGT HIER und nicht beim
+    // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
+    // EINEM Bild und traegt dieselbe Signatur.
+    ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE WMPLUGIN: DER KEHRBESEN, EINMAL JE BILD. Acht Vergleiche,
+    // kein Warten, keine Zuteilung -- er wirft hinaus, wer gerufen wurde
+    // und nicht kommt. DAS IST DIE EINZIGE STELLE IM ZUSAMMENSETZPFAD,
+    // die ueberhaupt etwas von Plugins weiss.
+    wmplug.sweep(state)
+    // RUNDE VEKTOR: die Uhr fuer dieses Bild.
+    let t_anfang: u64 = time.tsc()
+    // r461: with a region of several rectangles, paint them one by one (never with the magnifier: it paints one panel over
+    // the finished picture and must see the whole picture once)
+    var rs: [u64; 64] = [0 as u64; 64]
+    var nr: u64 = 0
+    if !ax.mag(state) {
+        nr = rgn_take(state, (&rs[0]) as u64, x0, y0, x1, y1)
+    } else {
+        nr = 0
+    }
+    var painted: u64 = 0
+    if nr == 0 {
+        painted = compose_rect(state, x0, y0, x1, y1)
+    } else {
+        ss(state, S_RFRAMES, gs(state, S_RFRAMES) + 1)
+        var ri: u64 = 0
+        while ri < nr {
+            painted = painted + compose_rect(state, rs[(ri * 4) as usize], rs[(ri * 4 + 1) as usize],
+                rs[(ri * 4 + 2) as usize], rs[(ri * 4 + 3) as usize])
+            ri = ri + 1
+        }
+    }
+    ss(state, S_PH_PX, gs(state, S_PH_PX) + painted)
+    ss(state, S_PH_N, gs(state, S_PH_N) + 1)
     ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
-    ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
+    ss(state, S_PIXELS, gs(state, S_PIXELS) + painted)
     // RUNDE VEKTOR: die Bildzeit. `khz` ist die Zyklenzahl je
     // Millisekunde; geteilt durch 1000 sind es die je Mikrosekunde.
     // Ist die Uhr noch nicht geeicht (khz == 0), wird nichts gezaehlt
@@ -6400,7 +6622,7 @@ fn compose_one(state: u64) -> u64 {
             }
         }
     }
-    return (x1 - x0) * (y1 - y0)
+    return painted
 }
 
 // ------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
@@ -6872,23 +7094,58 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     // -- es wird aufgehoben, nicht eingeblendet --, und `pixel` ohne
     // Mischung ist der Weg, auf dem die 0,18 ms der Kostenmessung
     // gemessen sind.
-    var y: i64 = ay0
-    while y < ay1 {
-        let sy: i64 = (y - oy) * bh / nh
-        if sy >= 0 && sy < bh {
-            var x: i64 = ax0
-            while x < ax1 {
-                let sx: i64 = (x - ox) * bw / nw
-                if sx >= 0 && sx < bw {
-                    let zeile: u64 = (sy as u64) *% stride *% 4
-                    let q: u64 = buf +% zeile +% (sx as u64) *% 4
-                    let c: u64 = __mmio_read32(q as *mut u32) as u64
-                    fb.pixel(state, x as u64, y as u64, c & RGB24)
+    // r460: ROW BY ROW, NO CALL PER PIXEL. The first version called `fb.pixel` for every pixel (five state reads and three
+    // compares each) and divided twice per pixel -- 15 ms for a 860x580 window. Now the clip is cut once, the row start is
+    // one address, and the source column steps with an integer remainder (`sx = (x - ox) * bw / nw` exactly, so the picture
+    // is the same pixel for pixel; `tools/wm` compares it).
+    let sw: i64 = fb.width(state) as i64
+    let shh: i64 = fb.height(state) as i64
+    var cl0: i64 = imax(ax0, 0)
+    var cl1: i64 = imin(ax1, sw)
+    var ct0: i64 = imax(ay0, fb.band_lo(state) as i64)
+    var ct1: i64 = imin(ay1, shh)
+    // the source column also has to stay inside the window picture
+    if cl0 < ox {
+        cl0 = ox
+    }
+    if cl1 > ox + nw {
+        cl1 = ox + nw
+    }
+    if cl1 > cl0 && ct1 > ct0 {
+        let pitch: u64 = fb.pitch(state)
+        let dst0: u64 = fb.draw_at(state)
+        // the first source column of the row and its remainder: sx = q, rem = (x - ox) * bw - q * nw
+        let num0: i64 = (cl0 - ox) * bw
+        let q0: i64 = num0 / nw
+        let r0: i64 = num0 - q0 * nw
+        let qs: i64 = bw / nw
+        let rs: i64 = bw - qs * nw
+        var y: i64 = ct0
+        while y < ct1 {
+            let sy: i64 = (y - oy) * bh / nh
+            if sy >= 0 && sy < bh {
+                let src_row: u64 = buf +% (sy as u64) *% stride *% 4
+                var out: u64 = dst0 +% (y as u64) *% pitch +% (cl0 as u64) *% 4
+                var q: i64 = q0
+                var r: i64 = r0
+                var n: i64 = cl1 - cl0
+                while n > 0 {
+                    if q >= 0 && q < bw {
+                        let c: u64 = __mmio_read32((src_row +% (q as u64) *% 4) as *mut u32) as u64
+                        __mmio_write32(out as *mut u32, (c & RGB24) as u32)
+                    }
+                    out = out +% 4
+                    q = q + qs
+                    r = r + rs
+                    if r >= nw {
+                        r = r - nw
+                        q = q + 1
+                    }
+                    n = n - 1
                 }
-                x = x + 1
             }
+            y = y + 1
         }
-        y = y + 1
     }
     wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
     wsv(state, i, W_PX,
@@ -7850,8 +8107,10 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Prozent eine unscharfe Kante ist; das Fenster haengt am Zeiger,
     // seine Titelleiste braucht in dieser halben Sekunde niemand.
     if drag_paint_on(state, i) {
+        let ph_t: u64 = time.tsc()
         paint_win_drag(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
             cy1 as i64)
+        ph_add(state, S_PH_DRAG, ph_t, time.tsc())
         return
     }
     // RUNDE MESSTAFEL: AB HIER WIRD GEMALT. Der Zaehler steht vor der
@@ -7871,8 +8130,10 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Sichtbar bleibt er dort, wo die Anwendung durchscheinen laesst --
     // und die Leiste dieses Systems tut das.
     if blur_will(state, i) {
+        let ph_t: u64 = time.tsc()
         blur_flaeche(state, i, wx, wy, wx + ow, wy + oh,
             deco(state, DK_TITLE))
+        ph_add(state, S_PH_BLUR, ph_t, time.tsc())
     }
     // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
     // Die Flaeche der Anwendung faengt am aeusseren Rechteck an, und der
@@ -7975,8 +8236,10 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         // Fenster in jedem Bild, und der Streifenpuffer ist einer.
         var grund: u64 = 0
         if pw < MAX_WIN && i == pw && form(state, FM_BLUR) > 0 {
+            let ph_g: u64 = time.tsc()
             grund = glass_prepare(state, wx, wy, wg(state, i, W_W),
                 wg(state, i, W_H), form(state, FM_BLUR))
+            ph_add(state, S_PH_GLASS, ph_g, time.tsc())
         }
         let key: u64 = form(state, FM_GLASS_KEY)
         // Die Zaehlung des wirksamen Alphas gilt der LEISTE; siehe
@@ -8037,7 +8300,9 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // RUNDE PAINT: DER SCHATTEN ZUERST. Er liegt unter dem Fenster und
     // ueber allem, was schon gemalt ist -- also genau hier, vor der
     // ersten Fuellung des Rahmens und nach allen tieferen Fenstern.
+    let ph_s: u64 = time.tsc()
     paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+    ph_add(state, S_PH_SHADOW, ph_s, time.tsc())
     // Der ganze Aussenbereich in Rahmenfarbe, danach die Leiste und die
     // Flaeche darueber. Das ist ein Rechteck mehr als noetig und spart
     // vier Sonderfaelle an den Ecken.
