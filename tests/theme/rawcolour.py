@@ -103,6 +103,12 @@ ALLOWED_FN = {
         # is what it draws with until somebody does, and a machine whose
         # taskbar has not started yet may not be black on black.
         "fn deco_fallback",
+        # ---------------------------------------------- r462
+        # `term_palette` IS THE ANSI COLOUR TABLE OF THE TERMINAL, A PROTOCOL AND NOT A STYLE: a program that writes
+        # `ESC[31m` asks for RED, and it must get the same red in every theme (a theme controls the window's own
+        # foreground and background, `W_FG` / `W_BG`, which stay tokens). The sixteen values are the table of the
+        # standard, listed here by function name like the signature colours below.
+        "fn term_palette",
         # ---------------------------------------------- DELL ROUND, 05.10.
         # `glass_mix` keeps the colour part of a pixel (`neu & 0xFFFFFF`):
         # a mask, not a colour.
