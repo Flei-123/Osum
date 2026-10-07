@@ -370,6 +370,7 @@ Abschnitt 4 — und ein weiteres Argument für die Konsolennaht.
 * **Die vier Abbilder `0x00123966`, `0x002B708C`, `0x002C6396`,
   `0x2C9D50`** (je 2,4 MB) im Wurzelverzeichnis: sie sehen nach
   Überbleibseln aus, gehören aber nicht dieser Runde. Nicht angerührt.
+  *(07.10.2026: entfernt — erzeugter Assembler-Text von `tools/kernel/symtab.py`, versehentlich eingecheckt; lässt sich neu erzeugen.)*
 
 ---
 
