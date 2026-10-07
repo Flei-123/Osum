@@ -1717,6 +1717,11 @@ lauf "61. the damage region: same picture as the single box, fewer pixels painte
 lauf "62. ring-3 compositing: row copy, blend, blur, pipe round trip against the 16 ms budget (tools/comp/run.sh)" \
      tools/comp/run.sh comp '^COMP: |^== |^  OK    |^  FAIL  '
 
+# 63. THE TERMINAL WINDOW EXECUTES THE CONTROL SEQUENCES OF FULL-SCREEN PROGRAMS (docs/TERMINAL.md): the editor in a terminal window, its
+# cells read back, the tty size answered from the window's grid.
+lauf "63. the terminal window: the editor's control sequences are executed, the screen fits the window (tools/term/run.sh)" \
+     tools/term/run.sh term '^TERM: |^== |^  OK    |^  FAIL  '
+
 # 58b. the same guard as in every other repo (Firn tools/english/no_german.py): one rule for all projects.
 lauf "58b. the shared English guard of Firn: no more German than no-german.baseline.json (tools/english/shared_guard.sh)" \
      tools/english/shared_guard.sh english-shared '^  OK    |^  FAIL  |^no-german: '
