@@ -19,3 +19,12 @@ look at the answer of `buf_reserve`):
 Licence: MPL-2.0 (Firn), author Justin — unchanged, see the SPDX lines.
 Patch 0003 was dropped from `vendor/firn/patches/` because its target
 files are no longer in Firn; its change is contained in these copies.
+
+## `lib/fui/navkit.fi` (the other way round: a MIRROR)
+
+`lib/fui/navkit.fi` + `lib/fui/navnum.fi` (size text, centre-line baseline, thin overlay scroll bar, heat plate, history
+graph, bar) is written in Firn (`lib/fui/navkit.fi`, test `tests/1930_fui_navkit.fi`, branch
+`fui-navkit`) and mirrored here because the pin (`vendor/firn/COMMIT`) does not contain it yet.
+`$FIRNLIB` is searched before the pinned library, so `import fui.navkit` finds this copy. The copy
+must stay byte-identical to Firn's (`tools/fui/navkit-sync.sh` checks it when the Firn repository is
+there); delete it when the pin has moved past the commit that holds the file.

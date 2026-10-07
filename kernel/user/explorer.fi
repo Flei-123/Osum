@@ -84,6 +84,8 @@ import wlibc
 import bstore
 import wlib
 import fuiscene
+import fui.navnum
+import fui.cmdbar
 // RUNDE 32: nur fuer die zwei Zaehler beim Start.
 import fuib
 import icons
@@ -777,6 +779,10 @@ fn ends_with(p: u64) -> bool {
 // Im Normalfall baut `expmodell` die Tabelle -- samt echter Ortszeit in
 // der Zeitspalte. Nur die beiden Sicherungsansichten bauen sie hier,
 // weil ihre Zeilen aus einer Textdatei und nicht aus `stat` kommen.
+static mut k_ty_dir2: [u8; 22] = "explorer.type.folder\0\0"
+static mut k_ty_file2: [u8; 20] = "explorer.type.file\0\0"
+static mut sizetmp: [u8; 24] = [0 as u8; 24]
+
 fn build_table() {
     if vmodus == 0 {
         let _z: u64 = expmodell.table_build(msg.get((&k_cols[0 as usize]) as u64))
@@ -788,17 +794,10 @@ fn build_table() {
     while i < anzahl {
         let e: u64 = folge[(i) as usize]
         symbole[(i) as usize] = icon_for(e)
+        // r442: Name, Date modified, Type, Size -- like the model's table
         puts(nptr(e))
         put(9)
-        if art[(e) as usize] != 0 {
-            put(45)
-            put(45)
-        } else {
-            putn(groesse[(e) as usize])
-        }
-        put(9)
-        // DIE ZEIT: in einer SICHERUNG steht sie im Kopf des
-        // Schnappschusses und kommt aus der CMOS-Uhr.
+        // the time: in a backup it stands in the header of the snapshot (CMOS clock)
         if (*((zptr(e)) as *mut u8)) != 0 as u8 {
             puts(zptr(e))
         } else {
@@ -806,7 +805,17 @@ fn build_table() {
             put(45)
         }
         put(9)
-        putmode(modus[(e) as usize], art[(e) as usize])
+        if art[(e) as usize] != 0 {
+            puts(msg.get((&k_ty_dir2[0 as usize]) as u64))
+        } else {
+            puts(msg.get((&k_ty_file2[0 as usize]) as u64))
+        }
+        put(9)
+        if art[(e) as usize] == 0 {
+            let _sn: usize = navnum.size_text(groesse[(e) as usize],
+                (&sizetmp[0 as usize]) as u64, 24)
+            puts((&sizetmp[0 as usize]) as u64)
+        }
         put(10)
         i = i + 1
     }
@@ -830,7 +839,150 @@ fn tab_icons() -> u64 {
     return (&symbole[0 as usize]) as u64
 }
 
+// ============================================================ r442 (D-012): THE NAVIGATION PANE
+//
+// ONE list instead of two boxes: group headings (Quick access, This computer, Volumes), the places, and
+// the folder tree of where we are (Folders: "..", the current folder, its sub-folders one level in).
+// `nav_refs` says what a row IS: a place number (0..999), NAV_UP, NAV_CUR, or NAV_SUB + n for the n-th
+// sub-folder (the same n that `tree_walk` counts); NAV_NONE for a heading of the tree.
+const NAV_MAX: u64 = 128
+const NAV_UP: u64 = 1000
+const NAV_CUR: u64 = 1001
+const NAV_NONE: u64 = 1002
+const NAV_SUB: u64 = 2000
+static mut nav_blob: [u8; 8192] = [0 as u8; 8192]
+static mut nav_icons: [u64; 128] = [0 as u64; 128]
+static mut nav_heads: [u8; 128] = [0 as u8; 128]
+static mut nav_levels: [u8; 128] = [0 as u8; 128]
+static mut nav_refs: [u64; 128] = [0 as u64; 128]
+static mut nav_n: u64 = 0
+static mut nav_bp: u64 = 0
+static mut k_nav_folders: [u8; 24] = "explorer.nav.folders\0\0\0\0"
+static mut k_nav_root: [u8; 22] = "explorer.place.root\0\0\0"
+static mut s_nav_up: [u8; 4] = "..\0\0"
+
+fn nav_add(text: u64, icon: u64, head: u64, level: u64, target: u64) {
+    if nav_n >= NAV_MAX {
+        return
+    }
+    let n: u64 = ulib.length(text)
+    if nav_bp + n + 2 >= 8192 {
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        nav_blob[(nav_bp + k) as usize] = *((text + k) as *mut u8)
+        k = k + 1
+    }
+    nav_blob[(nav_bp + n) as usize] = 10 as u8
+    nav_bp = nav_bp + n + 1
+    nav_icons[(nav_n) as usize] = icon
+    nav_heads[(nav_n) as usize] = head as u8
+    nav_levels[(nav_n) as usize] = level as u8
+    nav_refs[(nav_n) as usize] = target
+    nav_n = nav_n + 1
+}
+
+// The last name of the path (the folder we are in); the root shows the name of the start place.
+fn nav_last_part(p: u64) -> u64 {
+    let n: u64 = ulib.length(p)
+    var k: u64 = n
+    while k > 0 && *((p + k - 1) as *mut u8) != 47 as u8 {
+        k = k - 1
+    }
+    if k >= n {
+        return msg.get(((&k_nav_root[0 as usize]) as u64))
+    }
+    return p + k
+}
+
+fn nav_build() {
+    nav_n = 0
+    nav_bp = 0
+    let places: u64 = exporte.places_num()
+    let syms: u64 = exporte.orte_symbole()
+    var i: u64 = 0
+    while i < places {
+        var head: u64 = 0
+        if exporte.place_is_header(i) {
+            head = 1
+        }
+        nav_add(exporte.place_text(i), *((syms + i * 8) as *mut u64), head, 0, i)
+        i = i + 1
+    }
+    nav_add(msg.get(((&k_nav_folders[0 as usize]) as u64)), 0, 1, 0, NAV_NONE)
+    nav_add(((&s_nav_up[0 as usize]) as u64), wlib.icon_id(icons.NAV_UP), 0, 0, NAV_UP)
+    if vmodus == 0 {
+        let folder: u64 = wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER), 15904798)
+        nav_add(nav_last_part(((&pfad[0 as usize]) as u64)),
+            wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER_OPEN), 15904798), 0, 0, NAV_CUR)
+        var k: u64 = 0
+        var subs: u64 = 0
+        while k < m_anzahl() {
+            let e: u64 = m_ord(k)
+            if m_art(e) != 0 {
+                nav_add(m_name(e), folder, 0, 1, NAV_SUB + subs)
+                subs = subs + 1
+            }
+            k = k + 1
+        }
+    }
+    nav_blob[(nav_bp) as usize] = 0 as u8
+}
+
+// The row of the pane that says where we are: the place the user clicked while it is still our path,
+// else the first place with our path, else the row of the current folder. Also sets `ort_wahl` (what
+// the eject button needs).
+fn nav_sync_sel() {
+    let places: u64 = exporte.places_num()
+    var want: u64 = fuiscene.HEAD_ROW
+    var chosen: u64 = 0xFFFFFFFFFFFFFFFF
+    if ort_wahl < places && !exporte.place_is_header(ort_wahl)
+        && vmodus == 0 && ulib.streq(exporte.place_path(ort_wahl), ((&pfad[0 as usize]) as u64)) {
+        chosen = ort_wahl
+    } else if vmodus == 0 {
+        var i: u64 = 0
+        while i < places && chosen == 0xFFFFFFFFFFFFFFFF {
+            if !exporte.place_is_header(i) && ulib.streq(exporte.place_path(i), ((&pfad[0 as usize]) as u64)) {
+                chosen = i
+            }
+            i = i + 1
+        }
+    }
+    if chosen != 0xFFFFFFFFFFFFFFFF {
+        want = chosen
+    } else {
+        var r: u64 = places
+        while r < nav_n {
+            if nav_refs[(r) as usize] == NAV_CUR {
+                want = r
+            }
+            r = r + 1
+        }
+    }
+    ort_wahl = chosen
+    fuiscene.table_set_sel(K_ORTE, want)
+}
+
+// A click (or Enter) on a row of the pane.
+fn nav_click(baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    let row: u64 = fuiscene.table_sel(K_ORTE)
+    if row >= nav_n {
+        return
+    }
+    let t: u64 = nav_refs[(row) as usize]
+    if t < NAV_UP {
+        ort_wahl = t
+        place_walk(t, baum, tab, stat, fpfad)
+    } else if t == NAV_UP {
+        tree_walk(0, baum, tab, stat, fpfad)
+    } else if t >= NAV_SUB {
+        tree_walk(t - NAV_SUB + 1, baum, tab, stat, fpfad)
+    }
+}
+
 fn build_tree() {
+    nav_build()
     var bp: u64 = 0
     var auf: [u8; 4] = "..\0\0"
     // The first row of the tree is the way up, and it is not a folder --
@@ -885,17 +1037,76 @@ fn baue_status() {
     }
     let s1: u64 = msg.get((&k_items[0 as usize]) as u64)
     let s2: u64 = msg.get((&k_folders[0 as usize]) as u64)
-    let s3: u64 = msg.get((&k_octets[0 as usize]) as u64)
     var lp: u64 = 0
     var d: [u8; 24] = [0 as u8; 24]
     lp = anhaengen(lp, (&d[0 as usize]) as u64, n,
         s1)
     lp = anhaengen(lp, (&d[0 as usize]) as u64, dirs,
         s2)
-    lp = anhaengen(lp, (&d[0 as usize]) as u64, bytes,
-        s3)
+    // r442: the size as a person reads it ("354 B", "1.2 KB")
+    let _sn: usize = navnum.size_text(bytes, (&d[0 as usize]) as u64, 24)
+    var k: u64 = 0
+    while k < 24 && d[(k) as usize] != 0 as u8 && lp < 90 {
+        lauf[(lp) as usize] = d[(k) as usize]
+        lp = lp + 1
+        k = k + 1
+    }
     lauf[(lp) as usize] = 0 as u8
 }
+
+// r442: while rows are marked the status line says so: "3 selected (12 KB)".
+static mut selbuf: [u8; 96] = [0 as u8; 96]
+fn status_selection() {
+    let key: u64 = cur_key()
+    let marked: u64 = fuiscene.table_sel_num(key)
+    if marked == 0 || vmodus != 0 {
+        stat_msg = 0
+        return
+    }
+    var bytes: u64 = 0
+    var i: u64 = 0
+    let n: u64 = m_anzahl()
+    while i < n {
+        if fuiscene.table_sel_has(key, i) {
+            let e: u64 = m_ord(i)
+            if m_art(e) == 0 {
+                bytes = bytes + m_size(e)
+            }
+        }
+        i = i + 1
+    }
+    var d: [u8; 24] = [0 as u8; 24]
+    var at: u64 = ulib.digits(marked, (&d[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < at {
+        selbuf[(k) as usize] = d[(k) as usize]
+        k = k + 1
+    }
+    let w: u64 = msg.get((&k_selected[0 as usize]) as u64)
+    var j: u64 = 0
+    while *((w + j) as *mut u8) != 0 as u8 && at < 60 {
+        selbuf[(at) as usize] = *((w + j) as *mut u8)
+        at = at + 1
+        j = j + 1
+    }
+    if bytes > 0 {
+        selbuf[(at) as usize] = 32 as u8
+        selbuf[(at + 1) as usize] = 40 as u8
+        at = at + 2
+        let sn: usize = navnum.size_text(bytes, (&d[0 as usize]) as u64, 24)
+        var q: u64 = 0
+        while q < sn as u64 && at < 90 {
+            selbuf[(at) as usize] = d[(q) as usize]
+            at = at + 1
+            q = q + 1
+        }
+        selbuf[(at) as usize] = 41 as u8
+        at = at + 1
+    }
+    selbuf[(at) as usize] = 0 as u8
+    stat_msg = ((&selbuf[0 as usize]) as u64)
+}
+static mut k_selected: [u8; 26] = "explorer.status.selected\0\0"
 
 fn anhaengen(lp0: u64, d: u64, v: u64, txt: u64) -> u64 {
     var lp: u64 = lp0
@@ -1224,29 +1435,25 @@ fn columns_set(tbreite: u64) {
         (&probe[0 as usize]) as u64)
     let wz: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp,
         ulib.length(pp)) / fuiscene.scale()
-    let luft: u64 = wlibc.metric(wlibc.M_PAD_X) / fuiscene.scale()
-    // Die Bildlaufleiste einer Tabelle ist 16 breit (wlib.fi, Zweig
-    // "die Bildlaufleiste?" in `on_down`), dazu der Einzug der Zellen.
-    let leiste: u64 = 16
-    let w_zeit: u64 = wz + luft
-    // Rechte sind zehn Zeichen, Groessen hoechstens acht -- an
-    // derselben Probe gemessen, damit alle drei mit der Schrift wachsen.
-    let w_recht: u64 = wz * 10 / 16 + luft
-    let w_gr: u64 = wz * 8 / 16 + luft
+    let pad: u64 = wlibc.metric(wlibc.M_PAD_X) / fuiscene.scale()
+    // r442: Name | Date modified | Type | Size. The date as wide as its longest form, the type as wide as
+    // the longest of five words, the size as wide as "999.9 KB" (right-aligned, 14 points before its edge)
+    let w_date: u64 = wz + 2 * pad
+    let w_type: u64 = 96
+    let w_size: u64 = 96
     var w_name: u64 = 0
-    if tbreite > leiste + w_zeit + w_recht + w_gr {
-        w_name = tbreite - leiste - w_zeit - w_recht - w_gr
+    if tbreite > w_date + w_type + w_size {
+        w_name = tbreite - w_date - w_type - w_size
     }
-    // Der Name bekommt den Rest, aber nie weniger als die Zeit-Spalte:
-    // ein Dateimanager, in dem der Name die schmalste Spalte ist, zeigt
-    // eine Liste von Auslassungspunkten.
-    if w_name < w_zeit {
-        w_name = w_zeit
+    // The name gets the rest, but never less than the date column:
+    // a file manager in which the name is the narrowest column shows a list of dots.
+    if w_name < w_date {
+        w_name = w_date
     }
     spalten[(0) as usize] = w_name
-    spalten[(1) as usize] = w_gr
-    spalten[(2) as usize] = w_zeit
-    spalten[(3) as usize] = w_recht
+    spalten[(1) as usize] = w_date
+    spalten[(2) as usize] = w_type
+    spalten[(3) as usize] = w_size
 }
 
 // ============================ RUNDE EXPLORER-2: DIE ZWEITE ANSICHT
@@ -1811,15 +2018,12 @@ fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
         return 0
     }
     if taste == T_STRG_F {
-        ulib.strncpy((&dlgpuffer[0 as usize]) as u64,
-            (&fbuf[0 as usize]) as u64, 60)
-        let _d: u64 = dlg_entry(msg.get((&k_filter[0 as usize]) as u64),
-            msg.get((&k_filter[0 as usize]) as u64),
-            (&dlgpuffer[0 as usize]) as u64)
+        // r442: Ctrl+F goes to the search field of the address row (it filters while typing)
+        fuiscene.focus(K_SEARCH)
         say((&s_t[0 as usize]) as u64)
         sayn(taste)
         nl()
-        return 6
+        return 0
     }
     if taste == wlib.KEY_CTRL_N {
         let _d: u64 = dlg_entry(msg.get((&k_newdir[0 as usize]) as u64),
@@ -3286,14 +3490,17 @@ const K_KRUME: u64 = 40
 const K_RT: u64 = 60
 const K_RX: u64 = 70
 const K_RPLUS: u64 = 78
+const K_OVF: u64 = 79 // r442: the overflow button of the command bar
+const K_SEARCH: u64 = 16 // r442: the search field of the address row
+const K_SEP: u64 = 100 // r442: the chevrons between crumbs (100..111), nobody listens
 const K_CMD: u64 = 80 // r402: the command bar, 80..85 (new folder, cut, copy, paste, rename, delete)
 
 const MBH: u64 = 28
-const CH: u64 = 36
+const CH: u64 = 32
 const STH: u64 = 24
-const ROWH: u64 = 28
-const BW0: u64 = 760
-const BH0: u64 = 520
+const ROWH: u64 = 32
+const BW0: u64 = 860
+const BH0: u64 = 580
 const NONE_ROW: u64 = 4294967295
 
 static mut s_up: bool = false
@@ -3335,6 +3542,7 @@ static mut s_dw: [u8; 3] = "w=\0"
 static mut s_dh: [u8; 3] = "h=\0"
 static mut s_ausk: [u8; 23] = "explorer: ausknopf id=\0"
 static mut s_orteliste: [u8; 24] = "explorer: orteliste id=\0"
+static mut s_navrows: [u8; 20] = "explorer: navrows \0\0"
 static mut s_rows: [u8; 16] = "explorer: rows \0"
 static mut s_rows_x: [u8; 3] = "x=\0"
 static mut s_rows_b: [u8; 6] = "base=\0"
@@ -3523,70 +3731,89 @@ fn masse() {
     if bw > 16 {
         g_innen = bw - 16
     }
-    // five rows (menu, tools, way, tabs, status) and the content between,
-    // six gaps of 8 minus one... : padding 16 + five gaps 40
-    // r402: four rows above the content (command bar, address bar, tabs) + the status line, four gaps
-    let fix: u64 = CH + CH + CH + STH + 32 + 16
+    // r442: the command bar and the address row, the tab row only while there are two tabs or more
+    // (one tab repeated the folder name twice), the content, and the status line; the gaps are 8
+    var nrows: u64 = 1
+    if reiter_n > 1 {
+        nrows = 2
+    }
+    let fix: u64 = nrows * CH + STH + (nrows + 1) * 8 + 16
     g_hinh = 0
     if bh > fix + 40 {
         g_hinh = (bh - fix) / 4 * 4
     }
+    // ONE navigation pane (groups, places, the folder tree) a quarter of the width, 176..240 points
     g_bbaum = (g_innen / 4) / 4 * 4
-    if g_bbaum < 160 {
-        g_bbaum = 160
+    if g_bbaum < 176 {
+        g_bbaum = 176
+    }
+    if g_bbaum > 240 {
+        g_bbaum = 240
     }
     g_binh = 0
     if g_innen > g_bbaum + 8 {
         g_binh = g_innen - g_bbaum - 8
     }
-    let n_orte: u64 = exporte.places_num()
-    var gebraucht: u64 = (n_orte * ROWH + 8 + 3) / 4 * 4
-    g_horte = (g_hinh / 2) / 4 * 4
-    if gebraucht > g_horte {
-        let rest: u64 = CH * 4 + 8
-        if g_hinh > rest && gebraucht > g_hinh - rest {
-            gebraucht = (g_hinh - rest) / 4 * 4
-        }
-        g_horte = gebraucht
-    }
+    g_horte = g_hinh
     g_hbaum = 0
-    if g_hinh > g_horte + 8 {
-        g_hbaum = g_hinh - g_horte - 8
-    }
     columns_set(g_binh)
 }
 
 // What the window shows, described for the scene tree.
+// ---- r442: the command bar. The eight commands of the file manager in the order of their importance,
+// as icons; the word and the shortcut are the tooltip and the accessibility name.
+static mut sc_f5: [u8; 3] = "F5\0"
+static mut sc_find: [u8; 7] = "Ctrl+F\0"
+static mut sc_newtab: [u8; 7] = "Ctrl+T\0"
+static mut sc_newdir: [u8; 7] = "Ctrl+N\0"
+static mut sc_cut: [u8; 7] = "Ctrl+X\0"
+static mut sc_copy: [u8; 7] = "Ctrl+C\0"
+static mut sc_paste: [u8; 7] = "Ctrl+V\0"
+static mut sc_rename: [u8; 3] = "F2\0"
+static mut sc_del: [u8; 4] = "Del\0"
+static mut k_tabnew: [u8; 17] = "explorer.tab.new\0"
+static mut tipbuf: [u8; 960] = [0 as u8; 960]
+static mut cmd_words: [u8; 160] = [0 as u8; 160]
+
+// A tooltip + accessibility name "<word> (<shortcut>)" for `key`, built into slot `slot` of `tipbuf`.
+fn set_tip(key: u64, word: u64, shortcut: u64, slot: u64) {
+    if slot >= 12 {
+        return
+    }
+    let o: u64 = ((&tipbuf[(slot * 80) as usize]) as u64)
+    let _n: u64 = cmdbar.tip_text(word, shortcut, o, 80)
+    fuiscene.tip(key, o)
+}
+
+// The commands, in the order of their importance. Returns the width of the whole bar in points.
+fn cmd_room() -> u64 {
+    let mt: u64 = ((&cmd_words[0 as usize]) as u64)
+    let nm: u64 = split_items(msg.get(((&k_cmd[0 as usize]) as u64)), mt, 150)
+    fuiscene.cmd_begin()
+    if nm >= 8 {
+        fuiscene.cmd_item(icons.CMD_NEW_FOLDER, K_CMD, item_at(mt, 0), ((&sc_newdir[0 as usize]) as u64), 0)
+        fuiscene.cmd_item(icons.CMD_CUT, K_CMD + 1, item_at(mt, 1), ((&sc_cut[0 as usize]) as u64), 1)
+        fuiscene.cmd_item(icons.CMD_COPY, K_CMD + 2, item_at(mt, 2), ((&sc_copy[0 as usize]) as u64), 0)
+        fuiscene.cmd_item(icons.CMD_PASTE, K_CMD + 3, item_at(mt, 3), ((&sc_paste[0 as usize]) as u64), 0)
+        fuiscene.cmd_item(icons.CMD_RENAME, K_CMD + 4, item_at(mt, 4), ((&sc_rename[0 as usize]) as u64), 0)
+        fuiscene.cmd_item(icons.TRASH, K_CMD + 5, item_at(mt, 5), ((&sc_del[0 as usize]) as u64), 0)
+        fuiscene.cmd_item(icons.CMD_VIEW, K_MB + 2, item_at(mt, 6), 0, 1)
+        fuiscene.cmd_item(icons.CMD_MORE, K_MB, item_at(mt, 7), 0, 0)
+    }
+    return fuiscene.cmd_width()
+}
+
+static mut s_chev: [u8; 2] = ">\0"
+static mut k_search: [u8; 18] = "explorer.search\0\0\0"
+static mut search_last: [u8; 64] = [0 as u8; 64]
+const SEARCH_W: u64 = 184
+
 fn build() {
     masse()
     let col: usize = fuiscene.root()
-    // ---- r402: the COMMAND BAR (what the four menus were: new folder, cut, copy, paste, rename, delete,
-    // then View and More as menus). Text buttons of one height, one centre line.
-    let mr: usize = fuiscene.row(col)
-    n_mbar = mr
-    fuiscene.set_gap(mr, 4)
-    let mt: u64 = ((&s_mt[0 as usize]) as u64)
-    let nm: u64 = split_items(msg.get(((&k_cmd[0 as usize]) as u64)), mt, 150)
-    var m: u64 = 0
-    while m < nm && m < 8 {
-        let t: u64 = item_at(mt, m)
-        var kk: u64 = K_CMD + m
-        if m == 6 {
-            kk = K_MB + 2 // View: the old View menu (list / icons / sort / hidden files)
-        } else if m == 7 {
-            kk = K_MB // More: the old File menu (open with, properties, refresh, quit)
-        }
-        let b: usize = fuiscene.button(mr, t, kk)
-        fuiscene.flat(b)
-        fuiscene.set_size(b, (text_w(t) + 28 + 3) / 4 * 4, CH)
-        if m == 5 {
-            let sp0: usize = fuiscene.row(mr)
-            fuiscene.set_grow(sp0, 1)
-        }
-        m = m + 1
-    }
-    // ---- the ADDRESS BAR: back, forward, up, refresh, then the way as breadcrumbs (or the field after
-    // Ctrl+L) in the rest of the row; the eject button only while a drive is selected
+    // ---- the ADDRESS ROW: back, forward, up, refresh, the way as breadcrumbs (or the field after Ctrl+L),
+    // then -- at the right-hand end -- the search field and, while there is one tab only, the new-tab button.
+    // The eject button only while a drive is selected.
     let tr: usize = fuiscene.row(col)
     fuiscene.set_gap(tr, 4)
     let b1: usize = fuiscene.icon_button(tr, icons.NAV_BACK,
@@ -3601,67 +3828,120 @@ fn build() {
     let b4: usize = fuiscene.icon_button(tr, icons.NAV_REFRESH,
         msg.get(((&k_gneu[0 as usize]) as u64)), K_BNEU)
     fuiscene.set_size(b4, CH, CH)
+    set_tip(K_BZUR, msg.get(((&k_gzurueck[0 as usize]) as u64)), 0, 0)
+    set_tip(K_BVOR, msg.get(((&k_gvor[0 as usize]) as u64)), 0, 1)
+    set_tip(K_BAUF, msg.get(((&k_gauf[0 as usize]) as u64)), 0, 2)
+    set_tip(K_BNEU, msg.get(((&k_gneu[0 as usize]) as u64)), ((&sc_f5[0 as usize]) as u64), 3)
+    // the commands (icons: the word is the tooltip) in the order of their importance; the crumbs keep at
+    // least 140 points; what does not fit goes into the "..." menu
+    let cm: u64 = cmd_room()
+    var fixed: u64 = (CH + 4) * 4 + SEARCH_W + 4 + 140 + 4
+    if reiter_n == 1 && reiter_n < REITER_MAX {
+        fixed = fixed + CH + 4
+    }
     if exporte.place_is_carrier(ort_wahl) {
         let b5: usize = fuiscene.icon_button(tr, icons.FILE_DRIVE,
             msg.get(((&k_gaus[0 as usize]) as u64)), K_BAUS)
         fuiscene.set_size(b5, CH, CH)
+        fixed = fixed + CH + 4
+    }
+    var cmd_avail: u64 = 0
+    if g_innen > fixed + 8 {
+        cmd_avail = g_innen - fixed - 8
+    }
+    var room: u64 = 140
+    if cm < cmd_avail {
+        // all commands fit: the crumbs get what is left over
+        room = 140 + cmd_avail - cm
     }
     if pfadfeld_an {
-        let _fe: usize = fuiscene.entry(tr, K_PFAD, g_innen - (CH + 4) * 4 - 4, ((&pfad[0 as usize]) as u64))
+        let _fe: usize = fuiscene.entry(tr, K_PFAD, room, ((&pfad[0 as usize]) as u64))
     } else {
-        var q: u64 = 0
+        // as many of the LAST crumbs as fit (a chevron between them); the early ones drop out
+        var first: u64 = krume_n
+        var used: u64 = 0
+        while first > 0 {
+            let t1: u64 = exporte.krume_text(first - 1)
+            let w1: u64 = (text_w(t1) + 24 + 3) / 4 * 4 + 4 + 12 + 4
+            if used + w1 > room {
+                break
+            }
+            used = used + w1
+            first = first - 1
+        }
+        if first == krume_n && krume_n > 0 {
+            first = krume_n - 1
+        }
+        var q: u64 = first
         while q < krume_n {
+            if q > first {
+                // a chevron between two crumbs (a flat icon button nobody listens to: key 50 + q)
+                let sep: usize = fuiscene.icon_button(tr, icons.CHEVRON_RIGHT,
+                    ((&s_chev[0 as usize]) as u64), K_SEP + q)
+                fuiscene.flat(sep)
+                fuiscene.set_size(sep, 12, CH)
+            }
             let t2: u64 = exporte.krume_text(q)
             let kb: usize = fuiscene.button(tr, t2, K_KRUME + q)
-            fuiscene.set_size(kb, (text_w(t2) * 5 / 4 + 32 + 3) / 4 * 4, CH)
+            fuiscene.flat(kb)
+            fuiscene.set_size(kb, (text_w(t2) + 24 + 3) / 4 * 4, CH)
             q = q + 1
         }
     }
-    // ---- the tabs
-    let rr: usize = fuiscene.row(col)
-    n_rrow = rr
-    fuiscene.set_gap(rr, 4)
-    var tw: u64 = 192
-    if reiter_n > 0 && g_innen > 56 {
-        let teil: u64 = (g_innen - 56) / reiter_n
-        if teil < tw {
-            tw = teil
+    let spc: usize = fuiscene.row(tr)
+    fuiscene.set_grow(spc, 1)
+    let _se: usize = fuiscene.entry(tr, K_SEARCH, SEARCH_W, ((&search_last[0 as usize]) as u64))
+    fuiscene.entry_hint(K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)))
+    set_tip(K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)), ((&sc_find[0 as usize]) as u64), 10)
+    let _sep0: usize = fuiscene.space(tr, 4, 4)
+    let _vis: u64 = fuiscene.cmd_end(tr, cmd_avail, K_OVF)
+    if reiter_n == 1 && reiter_n < REITER_MAX {
+        let pb1: usize = fuiscene.icon_button(tr, icons.CMD_PLUS,
+            msg.get(((&k_tabnew[0 as usize]) as u64)), K_RPLUS)
+        fuiscene.flat(pb1)
+        fuiscene.set_size(pb1, CH, CH)
+        set_tip(K_RPLUS, msg.get(((&k_tabnew[0 as usize]) as u64)), ((&sc_newtab[0 as usize]) as u64), 11)
+    }
+    // ---- the tabs: only from the second tab on (one tab said the folder name a second time)
+    n_rrow = fuiscene.NONE
+    if reiter_n > 1 {
+        let rr: usize = fuiscene.row(col)
+        n_rrow = rr
+        fuiscene.set_gap(rr, 4)
+        var tw: u64 = 192
+        if g_innen > 56 {
+            let teil: u64 = (g_innen - 56) / reiter_n
+            if teil < tw {
+                tw = teil
+            }
         }
-    }
-    tw = tw / 4 * 4
-    if tw < 96 {
-        tw = 96
-    }
-    var r: u64 = 0
-    while r < reiter_n {
-        let lbl: u64 = (&s_rl[(r * 40) as usize]) as u64
-        let at: u64 = reiter_beschriftung(r, lbl, 28)
-        __mmio_write8((lbl + at) as *mut u8, 0 as u8)
-        if reiter_n > 1 {
+        tw = tw / 4 * 4
+        if tw < 96 {
+            tw = 96
+        }
+        var r: u64 = 0
+        while r < reiter_n {
+            let lbl: u64 = (&s_rl[(r * 40) as usize]) as u64
+            let at: u64 = reiter_beschriftung(r, lbl, 28)
+            __mmio_write8((lbl + at) as *mut u8, 0 as u8)
             let _tb: usize = fuiscene.tab_close(rr, lbl, K_RT + r, K_RX + r,
                 msg.get(((&k_tabzu[0 as usize]) as u64)), r == reiter_at, tw, CH)
-        } else {
-            let t3: usize = fuiscene.tab(rr, lbl, K_RT + r, true)
-            fuiscene.set_size(t3, tw, CH)
+            r = r + 1
         }
-        r = r + 1
+        if reiter_n < REITER_MAX {
+            let pb: usize = fuiscene.button(rr, ((&t_plus[0 as usize]) as u64), K_RPLUS)
+            fuiscene.set_size(pb, CH, CH)
+            fuiscene.compact(pb)
+        }
     }
-    if reiter_n < REITER_MAX {
-        let pb: usize = fuiscene.button(rr, ((&t_plus[0 as usize]) as u64), K_RPLUS)
-        fuiscene.set_size(pb, CH, CH)
-        fuiscene.compact(pb)
-    }
-    // ---- the content: places and tree on the left, the files on the right
+    // ---- the content: ONE navigation pane (groups, places, the folder tree) and the files
     let cr: usize = fuiscene.row(col)
     fuiscene.set_gap(cr, 8)
-    let lc: usize = fuiscene.column(cr)
-    fuiscene.set_gap(lc, 8)
-    let _o: usize = fuiscene.table_list(lc, K_ORTE, g_bbaum, g_horte, 1,
-        exporte.orte_ptr())
-    fuiscene.table_icons(K_ORTE, exporte.orte_symbole())
-    let _bm: usize = fuiscene.table_list(lc, K_BAUM, g_bbaum, g_hbaum, 1,
-        ((&bblob[0 as usize]) as u64))
-    fuiscene.table_icons(K_BAUM, ((&bsymbole[0 as usize]) as u64))
+    let _o: usize = fuiscene.table_list(cr, K_ORTE, g_bbaum, g_hinh, 1,
+        ((&nav_blob[0 as usize]) as u64))
+    fuiscene.table_icons(K_ORTE, ((&nav_icons[0 as usize]) as u64))
+    fuiscene.table_heads(K_ORTE, ((&nav_heads[0 as usize]) as u64))
+    fuiscene.table_indent(K_ORTE, ((&nav_levels[0 as usize]) as u64))
     if symansicht == 1 {
         let _sy: usize = fuiscene.table_list(cr, K_SYM, g_binh, g_hinh, 1,
             ((&symblob[0 as usize]) as u64))
@@ -3687,6 +3967,14 @@ fn build() {
 // The things the tables are set up for, once, before the window opens.
 fn tabellen_einrichten() {
     fuiscene.table_prep(K_ORTE)
+    fuiscene.table_prep(K_TAB)
+    fuiscene.table_prep(K_SYM)
+    // r442: rows of 32 points, the row under the pointer lights up, sizes end at the column's right edge
+    fuiscene.table_row_height(K_ORTE, ROWH)
+    fuiscene.table_row_height(K_TAB, ROWH)
+    fuiscene.table_hover(K_ORTE, true)
+    fuiscene.table_hover(K_TAB, true)
+    fuiscene.table_align_right(K_TAB, 3, true)
     fuiscene.table_prep(K_BAUM)
     fuiscene.table_own(K_TAB, true)
     fuiscene.table_exact(K_TAB, true)
@@ -3783,6 +4071,10 @@ static mut s_vw: [u8; 5] = "weg=\0"
 
 fn orte_anzeigen() {
     let n: u64 = exporte.orte_bauen()
+    nav_build()
+    if s_up {
+        nav_sync_sel()
+    }
     rfr()
     say(((&s_orte[0 as usize]) as u64))
     kv(((&s_on[0 as usize]) as u64), n)
@@ -3889,6 +4181,7 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     sortiere()
     build_table()
     build_tree()
+    nav_sync_sel()
     baue_status()
     stat_msg = 0
     pfad_set(((&pfad[0 as usize]) as u64))
@@ -3899,8 +4192,6 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
         fuiscene.table_sel_none(K_SYM)
         fuiscene.table_set_top(K_TAB, 0)
         fuiscene.table_set_top(K_SYM, 0)
-        fuiscene.table_set_top(K_BAUM, 0)
-        fuiscene.table_set_sel(K_BAUM, fuiscene.HEAD_ROW)
         fuiscene.refresh()
     }
     say(((&s_cd[0 as usize]) as u64))
@@ -3913,6 +4204,36 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
 
 static mut s_cd: [u8; 14] = "explorer: cd \0"
 static mut s_nn: [u8; 4] = " n=\0"
+
+// r442: the search field filters the list while typing (the model keeps the text for `passt`).
+fn search_poll() {
+    if !s_up || vmodus != 0 {
+        return
+    }
+    let t: u64 = fuiscene.entry_text(K_SEARCH)
+    if t == 0 || ulib.streq(t, ((&search_last[0 as usize]) as u64)) {
+        return
+    }
+    ulib.strncpy(((&search_last[0 as usize]) as u64), t, 60)
+    ulib.strncpy(((&fbuf[0 as usize]) as u64), t, 60)
+    if fbuf[0] == 0 as u8 {
+        expmodell.setz_filter(0)
+    } else {
+        expmodell.setz_filter(((&fbuf[0 as usize]) as u64))
+    }
+    view_refresh(K_BAUM, K_TAB)
+    baue_status()
+    symbolansicht_bauen()
+    fuiscene.table_sel_none(K_TAB)
+    fuiscene.table_set_top(K_TAB, 0)
+    stat_msg = 0
+    say(((&s_srch[0 as usize]) as u64))
+    sayn(m_anzahl())
+    nl()
+    rfr()
+}
+
+static mut s_srch: [u8; 20] = "explorer: search n=\0"
 
 fn view_refresh(baum: u64, tab: u64) {
     sortiere()
@@ -4035,6 +4356,7 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
         q = q + 1
     }
     say_node(25, 5, K_BAUM)
+    say_node(29, 4, K_SEARCH)
     say_node(26, 6, K_TAB)
     if n_stat != fuiscene.NONE {
         say_box(27, 1, fuiscene.node_x(n_stat), fuiscene.node_y(n_stat),
@@ -4051,6 +4373,25 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
     nl()
     say(((&s_orteliste[0 as usize]) as u64))
     sayn(24)
+    nl()
+    // r442: what each row of the navigation pane is -- h heading, p place, u up/current folder, s sub-folder
+    var kinds: [u8; 130] = [0 as u8; 130]
+    var kr: u64 = 0
+    while kr < nav_n && kr < 128 {
+        var ch: u8 = 112 as u8
+        let t: u64 = nav_refs[(kr) as usize]
+        if nav_heads[(kr) as usize] != 0 as u8 {
+            ch = 104 as u8
+        } else if t == NAV_UP || t == NAV_CUR {
+            ch = 117 as u8
+        } else if t >= NAV_SUB {
+            ch = 115 as u8
+        }
+        kinds[(kr) as usize] = ch
+        kr = kr + 1
+    }
+    say(((&s_navrows[0 as usize]) as u64))
+    say(((&kinds[0 as usize]) as u64))
     nl()
     var key: u64 = K_TAB
     if symansicht == 1 {
@@ -4121,7 +4462,23 @@ fn say_dlgrect() {
 
 // ------------------------------------------------------------ the events
 
-fn sort_header(col: u64, baum: u64, tab: u64) {
+// r442: the header columns are Name, Date modified, Type, Size; the sort keys of the model are
+// 0 name, 1 size, 2 time, 3 rights, 4 type.
+fn header_key(col: u64) -> u64 {
+    if col == 1 {
+        return 2
+    }
+    if col == 2 {
+        return 4
+    }
+    if col == 3 {
+        return 1
+    }
+    return 0
+}
+
+fn sort_header(col0: u64, baum: u64, tab: u64) {
+    let col: u64 = header_key(col0)
     if sortby == col {
         sortrev = 1 - sortrev
     } else {
@@ -4257,6 +4614,17 @@ fn behandeln(key: u64) {
     }
     if key == fuiscene.KEY_POPUP {
         let pick: u64 = fuiscene.menu_pick()
+        if s_offen == 12 {
+            // the overflow menu of the command bar: the picked line runs the same action as its button
+            s_offen = 0
+            if pick >= 1 {
+                let hk: u64 = fuiscene.cmd_hidden_key(pick - 1)
+                if hk != 0 {
+                    behandeln(hk)
+                }
+            }
+            return
+        }
         if pick >= 1 {
             let mr: u64 = menue_wahl(s_offen, pick - 1, tab, baum, stat, fpfad)
             s_wartet = mr & 255
@@ -4280,6 +4648,18 @@ fn behandeln(key: u64) {
     }
     if key == fuiscene.KEY_DROP {
         abgelegt(baum, tab, stat, fpfad)
+        return
+    }
+    if key == K_OVF {
+        let on: usize = fuiscene.node_of_key(key)
+        var ox: u64 = 8
+        var oy: u64 = 40
+        if on != fuiscene.NONE {
+            ox = fuiscene.node_x(on)
+            oy = fuiscene.node_y(on) + fuiscene.node_h(on)
+        }
+        let _no: u64 = popup_at(ox, oy, fuiscene.cmd_hidden_labels())
+        s_offen = 12
         return
     }
     if key >= K_MB && key < K_MB + 4 {
@@ -4355,8 +4735,7 @@ fn behandeln(key: u64) {
         hist_push(((&pfad[0 as usize]) as u64))
         new_read(baum, tab, stat, fpfad)
     } else if key == K_ORTE {
-        ort_wahl = fuiscene.table_sel(K_ORTE)
-        place_walk(ort_wahl, baum, tab, stat, fpfad)
+        nav_click(baum, tab, stat, fpfad)
     } else if key == K_BAUM {
         tree_walk(fuiscene.table_sel(K_BAUM), baum, tab, stat, fpfad)
     } else if key == K_TAB || key == K_SYM {
@@ -4506,8 +4885,7 @@ fn u_start(args: u64) -> u64 {
         if first && fuiscene.painted() > 0 {
             first = false
             fuiscene.focus(K_TAB)
-            fuiscene.table_set_sel(K_ORTE, fuiscene.HEAD_ROW)
-            fuiscene.table_set_sel(K_BAUM, fuiscene.HEAD_ROW)
+            nav_sync_sel()
             erste_meldung()
         }
         // The menu is gone (Esc, a click elsewhere) without a choice.
@@ -4520,7 +4898,10 @@ fn u_start(args: u64) -> u64 {
         if fuiscene.table_frames() != rahmen_zahl {
             rahmen_zahl = fuiscene.table_frames()
             sag_auswahl(K_TAB)
+            status_selection()
+            rfr()
         }
+        search_poll()
         if wlib.drop_count() != drop_zahl {
             drop_zahl = wlib.drop_count()
             say(((&s_dc[0 as usize]) as u64))

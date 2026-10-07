@@ -738,6 +738,33 @@ def cmd_tkette(a):
     return 0
 
 
+def cmd_trechts(a):
+    """trechts <ppm> <ttf> <px> <rechts> <grundlinie> <vg r g b> <hg r g b> <text> [tol [ymax]]
+
+    LIKE `tkette`, BUT THE TEXT ENDS AT `rechts` (a right-aligned cell: the size column of the file manager).
+    The left edge is `rechts` minus the width of the line; the host rounds the width to whole pixels, so
+    an offset of one pixel either way is tried before the check says no."""
+    raster = _raster_laden()
+    schrift = raster.Schrift(a[1], int(a[2]))
+    text = a[11]
+    breite = schrift.laufweite(text) >> 6
+    letzte = None
+    import io
+    import contextlib
+    for off in (0, -1, 1, -2, 2):
+        b = list(a)
+        b[3] = str(int(a[3]) - breite + off)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_tkette(b)
+        letzte = (rc, buf.getvalue())
+        if rc == 0:
+            print(letzte[1], end="")
+            return 0
+    print(letzte[1], end="")
+    return letzte[0]
+
+
 def cmd_ttext(a):
     """ttext <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
 
@@ -946,6 +973,7 @@ BEFEHLE = {
     "lesen": cmd_lesen,
     "ttext": cmd_ttext,
     "tkette": cmd_tkette,
+    "trechts": cmd_trechts,
     "tink": cmd_tink,
     "tgrid": cmd_tgrid,
     "glatt": cmd_glatt,

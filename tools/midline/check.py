@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/midline/check.py <audit-outdir> -- D-009: icon, text and row share ONE centre line (<= 1 px).
 
-Reads `explorer: geom` and `explorer: rect id=` out of serial.txt, the picture 01-explorer.ppm, and
-measures (measure.py) the rows of the detail list and of the two left lists, and the four icon buttons of
-the tool bar.  The chrome offset of the window is frame + bar + 1 (read from `wm: fen ... bar= fr=`)."""
+Reads `explorer: geom`, `explorer: rect id=`, `explorer: rows` and `explorer: navrows` out of serial.txt, the
+picture 01-explorer.ppm, and measures (measure.py) the rows of the detail list, of the navigation pane (its
+group headings are skipped, a sub-folder row is one level further in) and the four icon buttons of the
+command row.  The chrome offset of the window is frame + bar + 1 (read from `wm: fen ... bar= fr=`)."""
 import os
 import re
 import sys
@@ -38,15 +39,17 @@ def main(out):
     rects = {}
     for m in re.finditer(r"explorer: rect id=(\d+) kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t):
         rects[int(m.group(1))] = tuple(int(v) for v in m.groups()[1:])
+    zh = re.findall(r"explorer: rows .*? zh=(\d+)", t)
+    zh = int(zh[-1]) if zh else 32
+    kinds = re.findall(r"explorer: navrows ([hpus]+)", t)
+    kinds = kinds[-1] if kinds else ""
     im = Image.open(os.path.join(out, "01-explorer.ppm")).convert("RGB")
-    # ---- the detail list (id 26): header 28 + 2, then rows of 28
+    # ---- the detail list (id 26): header 28 + 2, then rows of `zh`
     lx, ly, lw, lh = rects[26]
     X, Y = ox + lx, oy + ly
-    tops = []
-    # the first row top: the selection plate / the first row after the header (x-column near the left)
     top = Y + 28 + 2
-    bg = im.getpixel((X + lw - 40, top + 14))[:3]
-    res = M.rows(im, top, 28, 6, X + 14, X + 36, X + 46, X + 100, bg)
+    bg = im.getpixel((X + lw - 40, top + zh // 2))[:3]
+    res = M.rows(im, top, zh, 6, X + 14, X + 36, X + 46, X + 100, bg)
     nrow = 0
     for i, r in enumerate(res):
         if r is None:
@@ -56,23 +59,30 @@ def main(out):
         check(abs(ic - rc) <= 1.0 and abs(tc - rc) <= 1.0,
               "detail list row %d: icon %+.1f, text %+.1f from the row centre" % (i, ic - rc, tc - rc))
     check(nrow >= 4, "%d detail rows measured" % nrow)
-    # ---- the left lists (ids 24 / 25)
-    for rid, nm in ((24, "places"), (25, "folders")):
-        if rid not in rects:
-            continue
-        lx, ly, lw, lh = rects[rid]
+    # ---- the navigation pane (id 24): one row per char of `navrows`
+    if 24 in rects and kinds:
+        lx, ly, lw, lh = rects[24]
         X, Y = ox + lx, oy + ly
-        bg = im.getpixel((X + lw - 20, Y + 20))[:3]
-        res = M.rows(im, Y + 2, 28, 4, X + 8, X + 30, X + 40, X + 90, bg)
-        for i, r in enumerate(res):
+        bg = im.getpixel((X + lw - 20, Y + 6))[:3]
+        measured = 0
+        for i, k in enumerate(kinds):
+            if k == "h":
+                continue
+            y0 = Y + 2 + i * zh
+            if y0 + zh > Y + lh:
+                break
+            lvl = 1 if k == "s" else 0
+            r = M.rows(im, y0, zh, 1, X + 8 + 16 * lvl, X + 30 + 16 * lvl, X + 40 + 16 * lvl, X + 90 + 16 * lvl, bg)[0]
             if r is None:
                 continue
             ic, tc, rc = r[0], r[1], r[2]
             if r[4][1] - r[4][0] < 4:
                 continue            # ".." has no body of lower-case letters to measure
+            measured += 1
             check(abs(ic - rc) <= 1.0 and abs(tc - rc) <= 1.0,
-                  "%s row %d: icon %+.1f, text %+.1f" % (nm, i, ic - rc, tc - rc))
-    # ---- the icon buttons of the tool bar (ids 4..8, 36 x 36): ink centre = button centre
+                  "navigation row %d (%s): icon %+.1f, text %+.1f" % (i, k, ic - rc, tc - rc))
+        check(measured >= 5, "%d navigation rows measured" % measured)
+    # ---- the icon buttons of the address row (ids 4..7, 36 x 36): ink centre = button centre
     for rid in (4, 5, 6, 7):
         bx, by, bw, bh = rects[rid]
         X, Y = ox + bx, oy + by

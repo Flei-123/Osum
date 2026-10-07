@@ -899,8 +899,17 @@ schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
 # Englisch -- auf diesem Abbild liegt keine Wahl unter /users/. Auf
 # Deutsch stuende dort "Größe", mit einem echten Umlaut; genau das misst
 # tools/i18n/run.sh.
-schau "und die zweite 'Size'" \
+# r442: the columns are Name | Date modified | Type | Size; the size column ENDS at its right edge (14 points before it:
+# the column starts at SP[3] - 10 and is 96 wide), so its header and its cells are checked with `trechts`
+SZR=$((${SP[3]} + 72))
+schau "die zweite Spalte heisst 'Date modified'" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
+    $TDIM $THBG "Date modified" $ETOL
+schau "die dritte 'Type'" \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TKOPF)) \
+    $TDIM $THBG "Type" $ETOL
+schau "und die vierte 'Size', rechtsbuendig" \
+    trechts "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) $((FCY + TKOPF)) \
     $TDIM $THBG "Size" $ETOL
 # JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS baum.py ANGELEGT HAT -- und in
 # derselben Reihenfolge: Verzeichnisse zuerst, dann nach Namen.
@@ -911,38 +920,28 @@ while IFS=$'\t' read -r name gr kind; do
     schau "Zeile $zeile der Tabelle: '$name'" \
         tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + TX)) "$y" $vg $hg "$name" $ETOL
     if [ "$kind" != "d" ] && [ "$zeile" != 0 ]; then
-        schau "und ihre Groesse in Spalte 2: $gr" \
-            tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) "$y" \
-            $TDIM $hg "$gr" $ETOL
+        schau "und ihre Groesse in Spalte 4, rechtsbuendig: $(python3 tools/k15/sizetext.py "$gr")" \
+            trechts "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + SZR)) "$y" \
+            $TDIM $hg "$(python3 tools/k15/sizetext.py "$gr")" $ETOL
     fi
     zeile=$((zeile + 1))
 done < "$TMPD/baum/soll.txt"
-# Die Spalte "Rechte" kommt aus den Bits, die `stat` meldet -- 0755 fuer
-# ein Verzeichnis, 0644 fuer eine Datei. Sie steht hier, WEIL sie sonst
-# eine hingeschriebene Zeichenkette waere.
-# EINE BENANNTE TOLERANZ, UND HIER STEHT WARUM. Der Referenzrasterer
-# mischt JEDES Zeichen auf den reinen Hintergrund; die Bibliothek (und
-# `wm.text` genauso) mischt es auf das, was schon da steht. Wo sich zwei
-# Glyphenkaesten ueberlappen -- bei "rw" in dieser Schrift und Groesse um
-# einen Bildpunkt --, kommt deshalb ein anderer Zwischenwert heraus.
-# Gemessen: 4 von 373 Tintenpunkten, und die Abweichung ist kleiner als
-# 64 Stufen. Mit Toleranz 0 waere die Zusage falsch, mit Toleranz 64 ist
-# sie richtig -- und die Gegenprobe daneben zeigt, dass sie trotzdem
-# etwas prueft: eine ANDERE Rechtezeichenkette faellt durch.
-schau "die Rechte eines Verzeichnisses, aus den Bits von stat" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
-    $TSFG $TSEL "drwxr-xr-x" 64
-schau_nicht "und eine ANDERE Rechtezeichenkette faellt bei derselben Toleranz durch" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB)) \
-    $TSFG $TSEL "drwxrwxrwx" 64
-schau "und die einer Datei" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[3]})) $((FCY + TB + 2 * TZH)) \
-    $TDIM $TBG "-rw-r--r--" 64
+# r442: the column "Rights" is gone from the list (the properties dialog shows them); the column "Type" says
+# what a row IS: a folder, a text, a program, a picture, any other file.
+schau "die Art eines Verzeichnisses" \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB)) \
+    $TSFG $TSEL "Folder" $ETOL
+schau "und die einer Textdatei" \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+    $TDIM $TBG "Text" $ETOL
+schau_nicht "und eine ANDERE Art faellt durch" \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+    $TDIM $TBG "Program" $ETOL
 # DIE SPALTE "ZEIT" IST LEER, UND DAS IST DIE EHRLICHE ZUSAGE: dieses
 # Dateisystem hat keinen Zeitstempel (`kernel/fs.fi`: der Inode ist 128
 # Oktette und voll). Eine erfundene Zeit waere schlimmer als keine.
-schau "die Spalte Zeit zeigt zwei Striche -- OFS hat keinen Zeitstempel" \
-    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[2]})) $((FCY + TB + 2 * TZH)) \
+schau "die Spalte Date modified zeigt zwei Striche -- OFS hat keinen Zeitstempel" \
+    tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FCX + ${SP[1]})) $((FCY + TB + 2 * TZH)) \
     $TDIM $TBG "--" $ETOL
 
 echo "== 9b. hineingehen, sortieren, anlegen =="
@@ -982,7 +981,7 @@ schau_nicht "und der alte Inhalt steht NICHT mehr da" \
     tkette "$TMPD/fdbl.ppm" "$SANS_INK" 15 $((FCX + TX)) $((FCY + TB)) \
     $TSFG $TSEL "bilder" $ETOL
 # Nach der Spalte "Groesse" sortieren: Kopfzeile anklicken.
-SX=$((FCX + ${SP[1]} + 20)); SY=$((FCY + TKOPF - 6))
+SX=$((FCX + ${SP[3]} + 20)); SY=$((FCY + TKOPF - 6))
 M="$TMPD/fsort.mon"; : > "$M"
 zeiger "$M" "$SX" "$SY"
 cat >> "$M" <<EOF
@@ -994,7 +993,7 @@ EOF
 foto fsort "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
 has "$TMPD/fsort.txt" "explorer: op" "ein Klick auf die Kopfzeile sortiert um"
 sb=$(grep -a '^explorer: op' "$TMPD/fsort.txt" | tail -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
-num "und zwar nach Spalte 1 (Groesse)" "$sb" eq 1
+num "und zwar nach dem Schluessel 1 (Groesse, Spalte 4)" "$sb" eq 1
 # delta.txt ist leer (0 Oktette) und steht nach der Groesse ganz oben
 # unter den Dateien -- Verzeichnisse bleiben davor.
 schau "nach der Groesse sortiert steht die leere Datei zuerst unter den Dateien" \

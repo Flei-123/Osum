@@ -132,15 +132,12 @@ def main(argv):
     treffer = 0
     daneben = 0
     for i, v in enumerate(werte[:n]):
-        px_ = gx + 1 + i * (gw - 2) // hist
-        innen = gh - 3
+        # r443: the history curve of the performance page (lib/fui/navkit.fi `paint_graph`) lays its n
+        # samples over the whole inner width: sample i at x = 1 + i * (w - 3) / (n - 1), y from the bottom
+        px_ = gx + 1 + (i * (gw - 3) // (n - 1) if n > 1 else 0)
+        innen = gh - 2
         py_ = gy + 1 + innen - min(v, 1000) * innen // 1000
-        # Dieselbe Rechnung wie `wlib.graph_x/graph_y`. Dass die beiden
-        # nicht auseinanderlaufen, sagt der Vergleich der Enden unten --
-        # das Programm meldet sie so, wie die Bibliothek sie ausgerechnet
-        # hat, und nicht wie es sie selbst gern haette.
-        # In einem Fenster von drei Bildpunkten um die gemeldete Stelle
-        # muss etwas stehen, das nicht der Grund ist.
+        # In a window of a few pixels around the reported place something that is not the ground must stand.
         gut = False
         for dy in (-1, 0, 1, 2):
             for dx in (0, 1):
@@ -154,8 +151,8 @@ def main(argv):
     print("Messpunkte %d: im Bild gefunden %d, daneben %d"
           % (n, treffer, daneben))
     # Die Enden, die das Programm selbst als Bildpunktstelle gemeldet hat
-    e0 = gx + 1 + 0 * (gw - 2) // hist
-    en = gx + 1 + (n - 1) * (gw - 2) // hist
+    e0 = gx + 1
+    en = gx + 1 + ((n - 1) * (gw - 3) // (n - 1) if n > 1 else 0)
     print("Enden: gemeldet p0x=%d pnx=%d, nachgerechnet %d und %d"
           % (p0x, pnx, e0, en))
     if p0x != e0 or pnx != en:

@@ -193,9 +193,8 @@ if [ -s "$TMPD/b0/allein.ppm" ]; then
     UEB=$(grep -oE 'overlapping [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     GEM=$(grep -oE 'measured [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     # r402: the three text lines became four cards painted on a canvas; the checker measures the texts the
-# program reports after its last `taskmgr: neu` -- that is the button only (and the legend); the cards are
-# checked by the picture of tools/design (taskmgr.txt). 3 -> 1 until the cards report after the marker.
-num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 1
+# program reports after its last `taskmgr: neu` (the cards report their texts since r443: kpi_say).
+num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 3
     num "leere Beschriftungen" "${LEER:-9}" eq 0
     num "abgeschnittene Beschriftungen" "${AB:-9}" eq 0
     num "einander ueberlappende Beschriftungen" "${UEB:-9}" eq 0
@@ -260,10 +259,15 @@ fi
 # ==================================================== 7. der Graph im Bild
 echo
 echo "== 7. der Verlaufsgraph ist gemalt und nicht behauptet =="
-G=$(grep -a 'taskmgr: graph x=' "$S0" | tail -1)
+# r443: the history graph lives on the PERFORMANCE page (a sidebar of pages since this round); the program is
+# started on that page with the word `performance`.
+bash tools/toolbench/build.sh "$TMPD/b4" app=/bin/taskmgr,melde,takt,300,performance \
+    wait=10 last=140 shot=allein > "$TMPD/b4.log" 2>&1
+S4="$TMPD/b4/serial.txt"
+G=$(grep -a 'taskmgr: graph x=' "$S4" | tail -1)
 if [ -n "$G" ]; then
     ok "das Programm meldet seinen Graphen: $G"
-    python3 tools/toolbench/graphcheck.py "$TMPD/b0/allein.ppm" "$S0" \
+    python3 tools/toolbench/graphcheck.py "$TMPD/b4/allein.ppm" "$S4" \
         20,14 > "$TMPD/graph.txt" 2>&1
     RC=$?
     sed 's/^/        /' "$TMPD/graph.txt"
@@ -272,6 +276,8 @@ if [ -n "$G" ]; then
 else
     bad "das Programm hat keinen Graphen gemeldet"
 fi
+# the pages: the sidebar names four, and each of the other three page bodies is reported
+has "$S4" "taskmgr: graph x=" "die Leistungsseite zeigt den Graphen"
 
 # =================================================== 8. das Kontrollzentrum
 echo
