@@ -126,6 +126,7 @@ for a in "$@"; do
         accel=*) accel=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         drehbuch=*) drehbuch=${a#*=} ;;
+        wallpaper=*) wallpaper=${a#*=} ;;
         halt=*) halt=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         # RUNDE FREMDFS: eine ZWEITE Platte anhaengen, damit sich
@@ -322,7 +323,8 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
-[ -f assets/wallpaper-sea.osym ] && ARGS+=("/etc/wallpaper=assets/wallpaper-sea.osym@0644")
+WALL=${wallpaper:-assets/wallpaper-sea.osym}
+[ -f "$WALL" ] && ARGS+=("/etc/wallpaper=$WALL@0644")
 # /etc/uitrace nur, wenn die Spur an ist -- siehe oben: wlib sieht nur,
 # ob die Datei da ist.
 if [ -f "$OUT/uitrace" ]; then
