@@ -96,7 +96,7 @@ export {
     presents, get_panel, SCALE_FULL, SCALE_ASPECT, SCALE_NONE, LUT_BYTES,
     selftest2, selftest2_max,
     // RUNDE PAINT -- die Mischung.
-    blend, pixel_a, hline_a, fill_a, blends, blend_reads, blend_skips,
+    blend, pixel_a, scaled_row_a, hline_a, fill_a, blends, blend_reads, blend_skips,
     // RUNDE GLAS: die Gegenprobe zur Schlierenregel des Fensterservers.
     glasgrow_aus, M_NOGLAS, sweep_aus, M_NOSWEEP, hlt_aus, M_NOHLT,
     winfix_aus, zreap_aus, M_NOWINFIX, M_NOZREAP, rgn_aus, M_NORGN, phases_an, M_PHASES,
@@ -1955,6 +1955,79 @@ fn blend(state: u64, dst: u64, src: u64, a: u64) -> u64 {
 // NICHT (`nodbl`), ist es ein Lesezugriff ueber PCI in den Speicher der
 // Grafikkarte, und der kostet ein Vielfaches eines Schreibzugriffs.
 // Deshalb zaehlt `blend_reads` die Ruecklesevorgaenge getrennt.
+// r461: ONE ROW OF A SCALED WINDOW, mixed with the opacity `a` -- what `wm.paint_win_anim` did with one `pixel_a` call and two
+// divisions per pixel (a 320 x 520 menu opening: more than 16 ms a frame). The same picture, the same counters (`blends`,
+// `blend_reads`: added in bulk), the dirty rectangle of the row at once. Destination columns x0 .. x1 of row y; the source column of
+// x is (x - ox) * bw / nw (stepped with a remainder, exactly that value) read from `src_row` (an address of a row of `bw` pixels).
+fn scaled_row_a(state: u64, y: u64, x0: i64, x1: i64, src_row: u64, ox: i64, bw: i64, nw: i64, a: u64) {
+    if a == 0 || nw <= 0 || bw <= 0 {
+        return
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) || y < band_lo(state) {
+        return
+    }
+    var c0: i64 = x0
+    var c1: i64 = x1
+    if c0 < ox {
+        c0 = ox
+    }
+    if c0 < 0 {
+        c0 = 0
+    }
+    let sw: i64 = kstate.get(state, FB_OFF + S_WIDTH) as i64
+    if c1 > sw {
+        c1 = sw
+    }
+    if c1 > ox + nw {
+        c1 = ox + nw
+    }
+    if c1 <= c0 {
+        return
+    }
+    let num0: i64 = (c0 - ox) * bw
+    var q: i64 = num0 / nw
+    var r: i64 = num0 - q * nw
+    let qs: i64 = bw / nw
+    let rs: i64 = bw - qs * nw
+    var out: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, c0 as u64, y)
+    var n: i64 = c1 - c0
+    var drawn: u64 = 0
+    let ia: u64 = 255 - a
+    while n > 0 {
+        if q >= 0 && q < bw {
+            let c: u64 = (__mmio_read32((src_row +% (q as u64) *% 4) as *mut u32) as u64) & 0x00FFFFFF
+            if a >= 255 {
+                __mmio_write32(out as *mut u32, c as u32)
+            } else {
+                let alt: u64 = __mmio_read32(out as *mut u32) as u64
+                let rr: u64 = mix8((alt >> 16) & 0xFF, (c >> 16) & 0xFF, a, ia)
+                let gg: u64 = mix8((alt >> 8) & 0xFF, (c >> 8) & 0xFF, a, ia)
+                let bb: u64 = mix8(alt & 0xFF, c & 0xFF, a, ia)
+                __mmio_write32(out as *mut u32, ((rr << 16) | (gg << 8) | bb) as u32)
+            }
+            drawn = drawn + 1
+        }
+        out = out +% 4
+        q = q + qs
+        r = r + rs
+        if r >= nw {
+            r = r - nw
+            q = q + 1
+        }
+        n = n - 1
+    }
+    if drawn == 0 {
+        return
+    }
+    if a >= 255 {
+        kstate.set(state, FB_OFF + S_BLENDS0, kstate.get(state, FB_OFF + S_BLENDS0) +% drawn)
+    } else {
+        kstate.set(state, FB_OFF + S_BLENDR, kstate.get(state, FB_OFF + S_BLENDR) +% drawn)
+        kstate.set(state, FB_OFF + S_BLENDS, kstate.get(state, FB_OFF + S_BLENDS) +% drawn)
+    }
+    dirty_x(state, c0 as u64, c1 as u64, y, y + 1)
+}
+
 fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
     if a == 0 {
         kstate.set(state, FB_OFF + S_BLENDS0,
