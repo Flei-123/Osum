@@ -37,3 +37,19 @@ foreign module.
   tools/english/modrename.py        module/file renames
   tools/english/firnlex.py          code/string/comment splitter
   tools/english/rename_final.tsv    the table: old -> new, scope, declaring files
+
+## THE GUARD (07.10.2026, standing rule of Justin)
+
+Code is English: identifiers, file names, program names, comments, log / error texts, test names, commit
+messages. German lives in the catalogs (`locale/`) only. New code is English from the first line.
+
+  tools/english/count.py            count what is left (identifiers, comment lines, log texts, German file names)
+  tools/english/count.py --check    fail when any file got MORE German than `baseline.json`
+  tools/english/count.py --update   lower the baseline (it only ever goes down, `--force` to raise)
+  tools/english/count.py --diff B   fail when a line ADDED since commit B is German (new code guard)
+  tools/english/run.sh              the three checks as one acceptance section (test.sh section 58)
+  tools/english/allow.txt           path prefixes where German is allowed, every entry with its reason
+
+Stages (each a small merge, nothing stored is broken -- formats, files on disk and the wire keep their names or
+get an alias): 1. program names / CLI (old names stay as aliases for the bridge), 2. identifiers (the renamer
+above), 3. file names, 4. comments (translated, not shortened), 5. log texts.
