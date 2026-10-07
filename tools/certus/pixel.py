@@ -33,43 +33,9 @@ import struct
 import sys
 import zlib
 from collections import Counter
-
-
-def read_ppm(path):
-    b = open(path, "rb").read()
-    if not b.startswith(b"P6"):
-        return None
-    parts = []
-    i = 2
-    while len(parts) < 3:
-        while i < len(b) and b[i:i + 1].isspace():
-            i += 1
-        if i < len(b) and b[i:i + 1] == b"#":
-            while i < len(b) and b[i:i + 1] != b"\n":
-                i += 1
-            continue
-        j = i
-        while j < len(b) and not b[j:j + 1].isspace():
-            j += 1
-        parts.append(int(b[i:j]))
-        i = j
-    i += 1
-    w, h, _ = parts
-    px = b[i:i + w * h * 3]
-    # EIN ABGESCHNITTENES BILD IST KEIN BILD, und es soll auch nicht so
-    # tun. QEMU schreibt `screendump` nicht atomar, und ein Lauf, den die
-    # Last des Wirts abgewuergt hat, hinterlaesst eine halbe Datei. Die
-    # fehlenden Zeilen werden hier NICHT mit Weiss aufgefuellt -- das
-    # waere eine erfundene Messung. Statt dessen wird die Hoehe auf das
-    # verkleinert, was wirklich da ist, und der Aufrufer sieht an der
-    # kleineren Zahl, dass etwas fehlte.
-    voll = len(px) // (w * 3)
-    if voll < h:
-        h = voll
-        px = px[:w * h * 3]
-    if h == 0:
-        return None
-    return w, h, px
+import os
+sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
+from testkit import read_ppm  # shared reader (Firn tools/testkit)
 
 
 def write_png(path, w, h, px):

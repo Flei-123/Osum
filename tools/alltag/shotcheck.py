@@ -61,30 +61,12 @@ every text on the screen instead of over a chosen few.
 """
 import re
 import sys
+import os
+sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
+from testkit import read_ppm  # shared reader (Firn tools/testkit)
 
 
 # ------------------------------------------------------------------ picture
-def read_ppm(path):
-    d = open(path, "rb").read()
-    if not d.startswith(b"P6"):
-        raise SystemExit("not a P6 PPM: %s" % path)
-    f = []
-    at = 2
-    while len(f) < 3:
-        while at < len(d) and d[at:at + 1].isspace():
-            at += 1
-        if d[at:at + 1] == b"#":
-            while d[at:at + 1] not in (b"\n", b""):
-                at += 1
-            continue
-        a = at
-        while at < len(d) and not d[at:at + 1].isspace():
-            at += 1
-        f.append(int(d[a:at]))
-    at += 1
-    return f[0], f[1], d[at:]
-
-
 def read_any(path):
     if path.endswith(".ppm"):
         return read_ppm(path)

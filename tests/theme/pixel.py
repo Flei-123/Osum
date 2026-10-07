@@ -19,31 +19,9 @@ zwei Blautoene vergleicht, rechnet nicht nach.
 """
 import sys
 from collections import Counter
-
-
-def read_ppm(path):
-    with open(path, "rb") as f:
-        data = f.read()
-    if not data.startswith(b"P6"):
-        raise SystemExit("pixel.py: %s ist kein P6-PPM" % path)
-    # Kopf: P6, Breite, Hoehe, Maximalwert -- Kommentare beginnen mit '#'
-    fields = []
-    i = 2
-    while len(fields) < 3:
-        while i < len(data) and data[i:i + 1].isspace():
-            i += 1
-        if data[i:i + 1] == b"#":
-            while i < len(data) and data[i:i + 1] != b"\n":
-                i += 1
-            continue
-        j = i
-        while j < len(data) and not data[j:j + 1].isspace():
-            j += 1
-        fields.append(int(data[i:j]))
-        i = j
-    i += 1
-    w, h, _mx = fields
-    return w, h, data[i:i + w * h * 3]
+import os
+sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
+from testkit import read_ppm  # shared reader (Firn tools/testkit)
 
 
 def census(px):
