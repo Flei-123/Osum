@@ -10,7 +10,7 @@ text (`~[19;1H[K`, `[7m`, `[24;1H[K^O Write`, `[?25h[?25l`) and a screen that ov
 2. **Nobody told the tty the size of its window.** `tty.set_winsize` was never called: `TIOCGWINSZ` answered the default 80 x 24, and
    `/bin/edit` drew a 24-row screen of 80 columns into a window of 56 columns x 20 rows. With the VT subset in place this still gave a
    broken screen: the help line wrapped, the status line and the help line landed on the same last row. Reproduced on current main with
-   `tools/term/run.sh` (picture before: `docs/shots/term/before-*.png` in the commit of this round).
+   `tools/term/run.sh` (the picture before the fix showed the help line of 80 columns wrapped inside the 56-column window).
 
 ## What was changed
 
@@ -37,7 +37,7 @@ text (`~[19;1H[K`, `[7m`, `[24;1H[K^O Write`, `[?25h[?25l`) and a screen that ov
 
 ## Tests
 
-* `wm: vttest7 / 7` (old) and `wm: vttest2 32 / 32` (new, 32 cases in `wm.vt2_selftest`: every sequence above, deferred wrap, `?7 l`,
+* `wm: vttest 7 / 7` (old) and `wm: vttest2 32 / 32` (new, 32 cases in `wm.vt2_selftest`: every sequence above, deferred wrap, `?7 l`,
   the grid size) at boot; `tools/wm/run.sh` reads them.
 * `tools/term/run.sh`: boots the desktop of the stick, starts `edit /etc/passwd` in the terminal window and reads the **cells** of the
   window (`wm: termzeile`): no sequence octet is text in any row, the help line stands on the last rows of the real window, no row is wider
