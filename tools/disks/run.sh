@@ -48,12 +48,12 @@ bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 && ok "the kernel
     || { bad "programs do not build"; head -10 "$D/bin.log"; echo "DISKS: $pass passed, $fail failed"; exit 1; }
 MK=""
 for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
+python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
 for n in gpt mbr badcrc; do
     mkdir -p "$D/vm-$n"
     cp "$D/root.img" "$D/vm-$n/hda.img"; cp "$D/$n.img" "$D/vm-$n/hdb.img"
     timeout 120 qemu-system-x86_64 -accel kvm -kernel "$D/k0.mb" -m 256 \
-        -append "osum nokbd nosched noproc nofs script=diskctl list;exit" \
+        -append "osum nokbd vfs nopart script=diskctl list;exit" \
         -serial "file:$D/vm-$n/serial.txt" -display none -no-reboot \
         -drive "file=$D/vm-$n/hda.img,format=raw,if=ide,index=0" \
         -drive "file=$D/vm-$n/hdb.img,format=raw,if=ide,index=1" \
@@ -86,7 +86,7 @@ grep -qa '^  [0-9] start=' "$S" && bad "badcrc: a partition of a table with a wr
 
 # ---------------------------------------------------------------------------------------------------
 echo "== 3. /bin/disks, the window, on the same second disk =="
-bash tools/toolbench/build.sh "$D/win" app=/bin/disks progs="disks explorer" second="$D/gpt.img" shot=allein \
+bash tools/toolbench/build.sh "$D/win" app=/bin/disks progs="disks explorer" second="$D/gpt.img" shot=allein extra="vfs nopart" \
     wait=12 last=140 accel=kvm > "$D/win.log" 2>&1
 W="$D/win/serial.txt"
 grep -qa '^disks: ready n=2 ' "$W" && ok "the window found two disks" || { bad "the window did not find two disks"; grep -a '^disks' "$W" | head -3 | sed 's/^/        /'; }

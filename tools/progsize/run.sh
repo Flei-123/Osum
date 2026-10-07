@@ -22,6 +22,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 LIMIT=2134016
+LIMIT3=136351744
 KEEP=256
 OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
@@ -32,16 +33,17 @@ for p in $PROGS; do
     [ -f "$OUT/$p.elf" ] || continue
     sz=$(stat -c%s "$OUT/$p.elf")
     left=$((LIMIT - sz))
+    left3=$((LIMIT3 - sz))
     page=$(readelf -lW "$OUT/$p.elf" | awk '/LOAD/ && NR<6 {print $5; exit}')
     pend=$(( ( (page + 4095) / 4096 ) * 4096 - page ))
     printf '  %-10s %9d octets, %7d below the format-2 limit; code segment %d octets before its page boundary\n' "$p" "$sz" "$left" "$pend"
-    if [ "$p" = explorer ] && [ "$left" -lt "$KEEP" ]; then
-        echo "  FAIL  the file manager is within $KEEP octets of the format-2 limit"; fail=1
-    fi
-    # r387: the task bar grew with the Windows 11 layout (task view card, chevron, capsule, count)
-    if [ "$p" = taskbar ] && [ "$left" -lt "$KEEP" ]; then
-        echo "  FAIL  the task bar is within $KEEP octets of the format-2 limit"; fail=1
+    # 07.10.2026: the file manager, the task bar, settings and pdfview were ALREADY past the format-2 limit on main
+    # (2 158 152 octets for the file manager), so the image builders that carry them build format 3 (`--v3`, a file
+    # may hold 136 351 744 octets). The tripwire is now the format-3 limit with a wide margin: a program that
+    # reaches half of it is a design problem, not an image problem.
+    if [ "$left3" -lt $((LIMIT3 / 2)) ]; then
+        echo "  FAIL  $p is more than half of the format-3 file limit"; fail=1
     fi
 done
-[ $fail -eq 0 ] && echo "PROGSIZE: ok" || echo "PROGSIZE: the file manager is too big for a format-2 image"
+[ $fail -eq 0 ] && echo "PROGSIZE: ok" || echo "PROGSIZE: a program is too big even for a format-3 image"
 exit $fail

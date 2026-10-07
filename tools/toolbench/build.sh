@@ -147,7 +147,7 @@ printf '%s\n' de > "$OUT/userlocale"
 ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
-ARGS+=(/bin/)
+ARGS+=(/bin/ /dev/ /mnt/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 # RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.

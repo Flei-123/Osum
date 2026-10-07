@@ -48,18 +48,23 @@ fn rd(lba: u64, n: u64, dst: u64) -> u64 {
     return 0
 }
 
-// The size of the open disk in sectors: what devfs says, else the last sector that can be read (a search).
+// The size of the open disk in sectors. devfs states one, but a stated size is a claim (the second IDE disk is
+// always stated as 80 MiB): it is believed only when its LAST sector can be read; otherwise the true size is
+// searched (the last readable sector, by halving) below the stated one.
 fn disk_sectors() -> u64 {
     var st: [u8; 160] = [0 as u8; 160]
+    var one: [u8; 512] = [0 as u8; 512]
+    var hi: u64 = 268435456
     if !ulib.bad(io.fstat_into(dfd, (&st[0]) as u64)) {
         let sz: u64 = io.stat_size((&st[0]) as u64)
         if sz >= 512 {
-            return sz / 512
+            hi = sz / 512
+            if rd(hi - 1, 1, (&one[0]) as u64) == 0 {
+                return hi
+            }
         }
     }
     var lo: u64 = 0
-    var hi: u64 = 268435456
-    var one: [u8; 512] = [0 as u8; 512]
     while lo < hi {
         let mid: u64 = (lo + hi + 1) / 2
         if rd(mid - 1, 1, (&one[0]) as u64) == 0 {
@@ -71,16 +76,48 @@ fn disk_sectors() -> u64 {
     return lo
 }
 
+// A checksum of the first sector: two device nodes that show the same sectors are one disk (the node of a
+// controller that is not there answers with another disk's data).
+fn first_sum() -> u64 {
+    var b: [u8; 512] = [0 as u8; 512]
+    if rd(0, 1, (&b[0]) as u64) != 0 {
+        return 0
+    }
+    var h: u64 = 7
+    var i: u64 = 0
+    while i < 512 {
+        h = (h * 131 + (b[i as usize] as u64) + 1) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+static mut d_sum: [u64; 3] = [0 as u64; 3]
+
 fn probe(p: u64, devnum: u64) {
     dfd = io.open(p, 0)
     if ulib.bad(dfd) {
         return
     }
     let total: u64 = disk_sectors()
+    let sum: u64 = first_sum()
+    var dup: bool = false
+    var k: u64 = 0
+    while k < n_disk {
+        if d_sum[k as usize] == sum && d_sect[k as usize] == total {
+            dup = true
+        }
+        k = k + 1
+    }
+    if dup || total == 0 {
+        io.close(dfd)
+        return
+    }
     let _s: u64 = table.read_table(rd, total, (&dtabs[0]) as u64 + n_disk * TABB, (&dscr[0]) as u64)
     d_dev[n_disk as usize] = devnum
     d_path[n_disk as usize] = p
     d_sect[n_disk as usize] = total
+    d_sum[n_disk as usize] = sum
     n_disk = n_disk + 1
     io.close(dfd)
 }

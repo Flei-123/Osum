@@ -35,6 +35,30 @@ def rows(im, top, h, n, ix0, ix1, tx0, tx1, bg):
     return out
 
 
+def ink_box(im, x0, y0, x1, y1, bg, thr=90):
+    """The bounding box (minx, maxx, miny, maxy) of the ink in the rectangle, or None."""
+    xs, ys = [], []
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if ink(im, x, y, bg, thr):
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return None
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def band_center(im, x0, x1, y0, y1, bg):
+    """The vertical centre of the text's x-height band (rows with at least 55 % of the densest row's ink) in
+    the rectangle, or None when there is no text."""
+    cnt = {y: sum(1 for x in range(x0, x1) if ink(im, x, y, bg, 140)) for y in range(y0, y1)}
+    mx = max(cnt.values()) if cnt else 0
+    band = [y for y, c in cnt.items() if mx and c >= 0.55 * mx]
+    if not band:
+        return None
+    return (min(band) + max(band)) / 2.0, (min(band), max(band))
+
+
 if __name__ == "__main__":
     f = sys.argv[1]
     a = [int(v) for v in sys.argv[2:]]

@@ -82,8 +82,10 @@ def main(out):
             check(abs(ic - rc) <= 1.0 and abs(tc - rc) <= 1.0,
                   "navigation row %d (%s): icon %+.1f, text %+.1f" % (i, k, ic - rc, tc - rc))
         check(measured >= 5, "%d navigation rows measured" % measured)
-    # ---- the icon buttons of the address row (ids 4..7, 36 x 36): ink centre = button centre
-    for rid in (4, 5, 6, 7):
+    # ---- the icon buttons of the address row (ids 4..7) and of the command bar (30..37): ink centre = button centre
+    for rid in (4, 5, 6, 7, 30, 31, 32, 33, 34, 35, 36, 37):
+        if rid not in rects:
+            continue
         bx, by, bw, bh = rects[rid]
         X, Y = ox + bx, oy + by
         bgp = im.getpixel((X + 1, Y + 1))[:3]
@@ -92,7 +94,78 @@ def main(out):
                      for xx in range(X + 6, X + bw - 6))]
         if ys:
             off = (min(ys) + max(ys)) / 2.0 - (Y + (bh - 1) / 2.0)
-            check(abs(off) <= 1.0, "tool bar button %d: icon %+.1f from the middle" % (rid, off))
+            check(abs(off) <= 1.0, "icon button %d: icon %+.1f from the middle" % (rid, off))
+    # ---- the title bar: the title text and the three control glyphs on the centre line of the bar
+    wm = re.findall(r"wm: fen i=\d+ id=\d+ x=%d y=%d w=(\d+) h=\d+ [^\n]*? bar=(\d+) capw=\d+ fr=(\d+)" % (gx, gy), t)
+    if wm:
+        ww, tbar, tfr = (int(v) for v in wm[-1])
+        cy_bar = gy + tfr + (tbar - 1) / 2.0
+        tbg = im.getpixel((gx + tfr + 3, int(cy_bar)))[:3]
+        # the title is judged like tools/fourbugs does (Justin's complaint of 04.10.2026): the gap above the ink and the
+        # gap below it agree within a pixel -- the ink box, ascenders and descenders included
+        box = M.ink_box(im, gx + tfr + 8, gy + tfr, gx + tfr + 140, gy + tfr + tbar, tbg, 140)
+        if box:
+            top = box[2] - (gy + tfr)
+            bot = (gy + tfr + tbar - 1) - box[3]
+            check(abs(top - bot) <= 1, "title bar: the gap above the title is %d px, below it %d px" % (top, bot))
+        for nm, k in (("minimise", 3), ("maximise", 2), ("close", 1)):
+            x1 = gx + ww - tfr - 46 * (k - 1)
+            box = M.ink_box(im, x1 - 46 + 8, gy + tfr, x1 - 8, gy + tfr + tbar, tbg, 150)
+            if box:
+                off = (box[2] + box[3]) / 2.0 - cy_bar
+                check(abs(off) <= 1.0, "title bar: the %s glyph is %+.1f from the middle of the bar" % (nm, off))
+    # ---- the tabs (picture 02-tabs): the label of each tab on the centre line of its box
+    p2 = os.path.join(out, "02-tabs.ppm")
+    if os.path.exists(p2):
+        t2 = Image.open(p2).convert("RGB")
+        for rid in (50, 51):
+            if rid in rects:
+                bx, by, bw, bh = rects[rid]
+                X, Y = ox + bx, oy + by
+                tb = t2.getpixel((X + 3, Y + bh // 2))[:3]
+                r = M.band_center(t2, X + 12, X + min(bw - 30, 80), Y + 3, Y + bh - 3, tb)
+                if r:
+                    check(abs(r[0] - (Y + (bh - 1) / 2.0)) <= 1.0, "tab %d: the label is %+.1f from the middle of the tab" % (rid - 49, r[0] - (Y + (bh - 1) / 2.0)))
+    # ---- the context menu (picture 03-menu): the text of each row on its centre line
+    p3 = os.path.join(out, "03-menu.ppm")
+    mr = re.findall(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+) zh=(\d+)", t)
+    if os.path.exists(p3) and mr:
+        t3 = Image.open(p3).convert("RGB")
+        mx, my, mh, mzh = (int(v) for v in mr[-1])
+        mbg = t3.getpixel((mx + 40, my + mh - 6))[:3]
+        rows_n = (mh - 8) // mzh
+        done = 0
+        for rI in range(min(rows_n, 8)):
+            y0 = my + 4 + rI * mzh
+            r = M.band_center(t3, mx + 14, mx + 90, y0 + 2, y0 + mzh - 2, mbg)
+            if r:
+                done += 1
+                check(abs(r[0] - (y0 + (mzh - 1) / 2.0)) <= 1.0, "menu row %d: the text is %+.1f from the middle of the row" % (rI, r[0] - (y0 + (mzh - 1) / 2.0)))
+        check(done >= 4, "%d menu rows measured" % done)
+    # ---- the task bar: the pinned icons and the start button on the centre line of the bar
+    gm = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)
+    if gm:
+        bx0, by0, bw0, bh0 = (int(v) for v in gm[-1])
+        cy_t = by0 + (bh0 - 1) / 2.0
+        bgt = im.getpixel((bx0 + bw0 // 2, by0 + bh0 // 2))[:3]
+        pins = re.findall(r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)
+        seen = set()
+        for nm, px_, py_, pw_, ph_ in pins:
+            if nm in seen:
+                continue
+            seen.add(nm)
+            px_, py_, pw_, ph_ = int(px_), int(py_), int(pw_), int(ph_)
+            box = M.ink_box(im, bx0 + px_ + 4, by0 + py_ + 2, bx0 + px_ + pw_ - 4, by0 + py_ + ph_ - 6, bgt, 120)
+            if box:
+                off = (box[2] + box[3]) / 2.0 - (by0 + py_ + (ph_ - 7) / 2.0 - 0.5)
+                check(abs((box[2] + box[3]) / 2.0 - cy_t) <= 2.0, "task bar: the icon of %s is %+.1f from the middle of the bar" % (nm, (box[2] + box[3]) / 2.0 - cy_t))
+        ts = re.findall(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)
+        if ts:
+            sx_, sy_, sw_, sh_ = (int(v) for v in ts[-1])
+            box = M.ink_box(im, bx0 + sx_ + 4, by0 + sy_ + 2, bx0 + sx_ + sw_ - 4, by0 + sy_ + sh_ - 2, bgt, 120)
+            if box:
+                off = (box[2] + box[3]) / 2.0 - cy_t
+                check(abs(off) <= 1.5, "task bar: the start icon is %+.1f from the middle of the bar" % off)
 
 
 if __name__ == "__main__":
