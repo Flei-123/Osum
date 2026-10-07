@@ -81,13 +81,17 @@ def main(argv):
 
     g = None
     werte = None
+    graphs = {}
+    reports = []
     for z in txt:
         m = GR.search(z)
         if m:
             g = m
+            graphs[int(m.group(5))] = m
         m = CPU.search(z)
         if m:
             werte = [int(v) for v in m.group(1).split()]
+            reports.append(werte)
     if g is None:
         print("keine graph-Zeile im Mitschnitt")
         return 1
@@ -129,25 +133,48 @@ def main(argv):
     if not werte:
         print("keine gcpu-Werte (lief das Programm ohne `melde`?)")
         return 1
-    treffer = 0
-    daneben = 0
-    for i, v in enumerate(werte[:n]):
-        # r443: the history curve of the performance page (lib/fui/navkit.fi `paint_graph`) lays its n
-        # samples over the whole inner width: sample i at x = 1 + i * (w - 3) / (n - 1), y from the bottom
-        px_ = gx + 1 + (i * (gw - 3) // (n - 1) if n > 1 else 0)
-        innen = gh - 2
-        py_ = gy + 1 + innen - min(v, 1000) * innen // 1000
-        # In a window of a few pixels around the reported place something that is not the ground must stand.
-        gut = False
-        for dy in (-1, 0, 1, 2):
-            for dx in (0, 1):
-                c = bild.at(cx + px_ + dx, cy + py_ + dy)
-                if c and c != grund:
-                    gut = True
-        if gut:
-            treffer += 1
-        else:
-            daneben += 1
+    # The program reports after every picture it paints, and the shot of the run is taken at some moment of that
+    # sequence -- a few samples before the last report is normal. The picture must show ONE of the reported states:
+    # take the report that fits best.
+    def score(vals):
+        nn = len(vals)
+        hit = 0
+        for i, v in enumerate(vals):
+            px_ = gx + 1 + (i * (gw - 3) // (nn - 1) if nn > 1 else 0)
+            innen = gh - 2
+            py_ = gy + 1 + innen - min(v, 1000) * innen // 1000
+            for dy in (-1, 0, 1, 2):
+                for dx in (0, 1):
+                    c = bild.at(cx + px_ + dx, cy + py_ + dy)
+                    if c and c != grund:
+                        hit += 1
+                        break
+                else:
+                    continue
+                break
+        return hit
+
+    best = None
+    longest = max([len(v) for v in reports] or [0])
+    for vals in reports:
+        # a short report (the first frames of the run) proves nothing: only the longer half counts
+        if len(vals) < 2 or len(vals) * 2 < longest:
+            continue
+        sc = score(vals)
+        if best is None or sc * len(best) > score(best) * len(vals) \
+                or (sc * len(best) == score(best) * len(vals) and len(vals) > len(best)):
+            best = vals
+    if best is None:
+        print("keine gcpu-Werte")
+        return 1
+    werte = best
+    n = len(best)
+    treffer = score(best)
+    daneben = n - treffer
+    if n in graphs:
+        gg = graphs[n]
+        p0x, pnx = int(gg.group(7)), int(gg.group(9))
+        gx, gy, gw, gh = (int(gg.group(k)) for k in (1, 2, 3, 4))
     print("Messpunkte %d: im Bild gefunden %d, daneben %d"
           % (n, treffer, daneben))
     # Die Enden, die das Programm selbst als Bildpunktstelle gemeldet hat

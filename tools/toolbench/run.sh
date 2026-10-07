@@ -268,7 +268,7 @@ G=$(grep -a 'taskmgr: graph x=' "$S4" | tail -1)
 if [ -n "$G" ]; then
     ok "das Programm meldet seinen Graphen: $G"
     python3 tools/toolbench/graphcheck.py "$TMPD/b4/allein.ppm" "$S4" \
-        20,14 > "$TMPD/graph.txt" 2>&1
+        20,16 > "$TMPD/graph.txt" 2>&1
     RC=$?
     sed 's/^/        /' "$TMPD/graph.txt"
     if [ $RC -eq 0 ]; then ok "und die Kurve steht im Bild, wo er sie gemeldet hat"
