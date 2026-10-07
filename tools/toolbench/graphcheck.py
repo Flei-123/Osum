@@ -165,7 +165,7 @@ def main(argv):
                 or (sc * len(best) == score(best) * len(vals) and len(vals) > len(best)):
             best = vals
     if best is None:
-        print("keine gcpu-Werte")
+        print("no gcpu values in the capture")
         return 1
     werte = best
     n = len(best)
