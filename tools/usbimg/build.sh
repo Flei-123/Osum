@@ -103,6 +103,7 @@ ESP_MIB=${ESP_MIB:-96}
 # sign-in screen, certus, themetest and a11ydemo carry fUi's scene host now
 # (~250 KB each): "mkfs: the disk is full" again.
 FS_BLOCKS=${FS_BLOCKS:-90112}
+[ "${ROOT_SLIM:-0}" = 1 ] && FS_BLOCKS=${FS_BLOCKS_SLIM:-78000}   # see ROOT_SLIM below
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
@@ -1090,10 +1091,17 @@ b = bytes(int(x, 16) for x in re.findall(r'0x([0-9a-fA-F]{2})\b', t))
 assert 4096 < len(b) < 32768 and b[510:512] == b"\x55\xaa", len(b)
 open(sys.argv[2], "wb").write(b)
 PYHDD
+# ROOT_SLIM=1 (Justin's Dell, 07.10.2026): the root file system carries NO copy of the boot files. They are only
+# there for the installer to copy onto another disk; a stick that is already installed does not need them. They
+# are 8.8 MB of a 44 MB root, and the Dell stick's 96 MiB EFI partition cannot hold the old root, the new root and
+# the kernel at once (tools: /root/abbilder/dell-update.py says "TIGHT DOES NOT FIT"). The slim root is 38 MiB. The
+# installer entry of this image cannot install; use the normal image for that.
+if [ "${ROOT_SLIM:-0}" != 1 ]; then
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI"
        "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
        "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
+fi
 # ==================================================== RUNDE ENERGIE
 # /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
 # NIEMANDEN, DEM ER ES SAGEN KANN.
@@ -1306,6 +1314,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
+[ "${ROOT_SLIM:-0}" = 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
