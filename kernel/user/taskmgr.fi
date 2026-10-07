@@ -151,7 +151,8 @@ const NAMEW: u64 = 24 // pmon.NAME_MAX
 // Lehre aus BLECHKERN, eine Etage hoeher.
 const BW: u64 = 752
 const BH: u64 = 524
-const GH: u64 = 116 // Hoehe des Graphen
+const GH: u64 = 100 // Hoehe des Graphen
+const KH: u64 = 92 // r402: Hoehe der vier Karten
 
 // Die Spalten, die keinen Text tragen, der wachsen kann. Der Name
 // bekommt, was uebrig bleibt -- so passt die Tabelle auch, wenn die
@@ -219,6 +220,11 @@ static mut blocknr: u64 = 0
 static mut blob: [u8; 4096] = [0 as u8; 4096]
 static mut cols: [u64; 6] = [0 as u64; 6]
 static mut l_sys: [u8; 160] = [0 as u8; 160]
+// r402 (D-011): the four cards of the summary: title, big number, small line (32 + 40 + 64 octets each)
+static mut kp_big: [u8; 160] = [0 as u8; 160]
+static mut kp_sub: [u8; 256] = [0 as u8; 256]
+static mut kp_pm: [u64; 4] = [0 as u64; 4]
+static mut n_kpi: usize = 0
 static mut l_cores: [u8; 200] = [0 as u8; 200]
 static mut l_disk: [u8; 200] = [0 as u8; 200]
 static mut l_sel: [u8; 160] = [0 as u8; 160]
@@ -825,6 +831,47 @@ fn build_head() {
     c = put_num(f, c, nlive)
 }
 
+// r402: the same numbers for the four cards (`kp_big` / `kp_sub`, 40 and 64 octets each)
+fn build_kpi() {
+    let b: u64 = (&kp_big[0]) as u64
+    let q: u64 = (&kp_sub[0]) as u64
+    var a: u64 = put_pm(b, 0, cpu_pm)
+    a = put_str(b, a, ptr((&u_pct[0]) as u64))
+    var z: u64 = put_str(q, 0, msg.get(ptr((&k_up[0]) as u64)))
+    z = put_str(q, z, ptr((&u_colon[0]) as u64))
+    z = put_time(q, z, up_ms)
+    kp_pm[0 as usize] = cpu_pm
+    a = put_pm(b + 40, 0, mem_pm)
+    a = put_str(b + 40, a, ptr((&u_pct[0]) as u64))
+    z = put_size(q + 64, 0, mem_used * 4)
+    z = put_str(q + 64, z, ptr((&u_slash[0]) as u64))
+    z = put_size(q + 64, z, mem_all * 4)
+    kp_pm[1 as usize] = mem_pm
+    a = put_pm(b + 80, 0, disk_pm)
+    a = put_str(b + 80, a, ptr((&u_pct[0]) as u64))
+    z = put_size(q + 128, 0, disk_used * 512 / 1024)
+    z = put_str(q + 128, z, ptr((&u_slash[0]) as u64))
+    z = put_size(q + 128, z, disk_all * 512 / 1024)
+    kp_pm[2 as usize] = disk_pm
+    if net_ok == 0 {
+        a = put_str(b + 120, 0, ptr((&u_dash[0]) as u64))
+        z = put_str(q + 192, 0, msg.get(ptr((&k_tasks[0]) as u64)))
+        z = put_str(q + 192, z, ptr((&u_colon[0]) as u64))
+        z = put_num(q + 192, z, nlive)
+        kp_pm[3 as usize] = 0
+    } else {
+        a = put_size(b + 120, 0, net_tx / 1024)
+        a = put_str(b + 120, a, ptr((&u_ps[0]) as u64))
+        z = put_size(q + 192, 0, net_rx / 1024)
+        z = put_str(q + 192, z, ptr((&u_ps[0]) as u64))
+        var np: u64 = (net_tx + net_rx) / 1024
+        if np > 1000 {
+            np = 1000
+        }
+        kp_pm[3 as usize] = np
+    }
+}
+
 // Die Kopfzeile der Tabelle ist Zeile 0 des Blocks -- so steht die
 // Beschriftung in derselben Quelle wie die Daten. Die Pfeilspitze sagt,
 // nach welcher Spalte sortiert ist und in welche Richtung; ohne sie
@@ -880,6 +927,13 @@ fn build_rows() {
             a = put_num(d, a, p_core[(s) as usize])
         }
         a = put_str(d, a, ptr((&u_nl[0]) as u64))
+        // r402: the heat of the CPU and memory cells (row r of the table is row r of `ord`)
+        fuiscene.heat_set(r, 0, p_pm[(s) as usize] * 4)
+        var mh: u64 = 0
+        if mem_all > 0 {
+            mh = p_pages[(s) as usize] * 4000 / mem_all
+        }
+        fuiscene.heat_set(r, 1, mh * 8)
         r = r + 1
     }
     __mmio_write8((d + a) as *mut u8, 0 as u8)
@@ -1032,6 +1086,69 @@ fn legende(x: u64, y: u64, role: u64, txt: u64) -> u64 {
         z_end()
     }
     return tx + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, n)
+}
+
+// the report of a text the cards paint (the shot checker finds the text where this says it is)
+fn kpi_say(x: u64, base: u64, role: u64, txt: u64) {
+    if !fuiscene.trace_on() {
+        return
+    }
+    z_new(ptr((&m_text[0]) as u64))
+    z_num(x)
+    z_kv(ptr((&m_base[0]) as u64), base)
+    z_kv(ptr((&m_fg[0]) as u64), (fuiscene.role_col(role) as u64) & 0xFFFFFF)
+    z_kv(ptr((&m_bg[0]) as u64), (fuiscene.role_col(fuiscene.R_FIELD) as u64) & 0xFFFFFF)
+    z_str(ptr((&m_ot[0]) as u64))
+    z_str(txt)
+    z_str(ptr((&m_ct2[0]) as u64))
+    z_end()
+}
+
+// r402 (D-011): THE SUMMARY AS FOUR CARDS (CPU, memory, disk, network): a muted title, the big number,
+// a small line, and a thin bar of the load under it -- the overview first, the details below.
+fn kpi_draw(kx: u64, ky: u64, kw: u64, kh: u64) {
+    let gap: u64 = 8
+    let cw: u64 = sub(kw, 3 * gap) / 4
+    var c: u64 = 0
+    while c < 4 {
+        let cx: u64 = kx + c * (cw + gap)
+        fuiscene.cv_round(cx, ky, cw, kh, 8, fuiscene.R_FIELD)
+        fuiscene.cv_ring(cx, ky, cw, kh, 8, fuiscene.R_BORDER)
+        var tt: u64 = ptr((&k_cpu[0]) as u64)
+        if c == 1 {
+            tt = ptr((&k_mem[0]) as u64)
+        } else if c == 2 {
+            tt = ptr((&k_disk[0]) as u64)
+        } else if c == 3 {
+            tt = ptr((&k_net[0]) as u64)
+        }
+        fuiscene.text_role(cx + 12, ky + 22, cw - 20, msg.get(tt), 12, false, fuiscene.R_MUTED)
+        fuiscene.text_role(cx + 12, ky + 48, cw - 20, (&kp_big[0]) as u64 + c * 40, 20, true,
+            fuiscene.R_TEXT)
+        kpi_say(cx + 12, ky + 22, fuiscene.R_MUTED, msg.get(tt))
+        kpi_say(cx + 12, ky + 48, fuiscene.R_TEXT, (&kp_big[0]) as u64 + c * 40)
+        fuiscene.text_role(cx + 12, ky + 66, cw - 20, (&kp_sub[0]) as u64 + c * 64, 12, false,
+            fuiscene.R_MUTED)
+        // the bar: a track and the load, 0..1000
+        let bx: u64 = cx + 12
+        let bw: u64 = sub(cw, 24)
+        fuiscene.cv_round(bx, ky + kh - 12, bw, 4, 2, fuiscene.R_BORDER)
+        var fw: u64 = bw * kp_pm[(c) as usize] / 1000
+        if kp_pm[(c) as usize] > 0 && fw < 4 {
+            fw = 4
+        }
+        if fw > bw {
+            fw = bw
+        }
+        var role: u64 = fuiscene.R_ACCENT
+        if c == 1 {
+            role = fuiscene.R_SUCCESS
+        }
+        if fw > 0 {
+            fuiscene.cv_round(bx, ky + kh - 12, fw, 4, 2, role)
+        }
+        c = c + 1
+    }
 }
 
 // The canvas callback: board, grid at 25/50/75 %, both curves, legend.
@@ -1231,14 +1348,17 @@ fn arg_hat(args: u64, wort: u64) -> bool {
 // `sample` and the build_* functions fill before `refresh()`.
 fn build() {
     let col: usize = fuiscene.root()
-    n_sys = fuiscene.label(col, ptr((&l_sys[0]) as u64))
-    n_core = fuiscene.label(col, ptr((&l_cores[0]) as u64))
-    n_disk = fuiscene.label(col, ptr((&l_disk[0]) as u64))
+    // r402: the three text lines became four cards (the same numbers); the reports of the three label
+    // rectangles name the one card row
+    n_kpi = fuiscene.canvas(col, 2, BW - 16, KH, kpi_draw)
+    n_sys = n_kpi
+    n_core = n_kpi
+    n_disk = n_kpi
     n_graph = fuiscene.canvas(col, 3, BW - 16, GH, graph_draw)
-    // All of the height that is left: 8 + 3*24 + 116 + 24 + 36 padding,
-    // children and the 6 gaps of 8.
-    n_tab = fuiscene.table_blob(col, K_TAB, BW - 16, BH - 16 - 72 - GH - 24 - 36 - 48,
+    // All of the height that is left: 8 + the cards + the graph + 24 + 36 padding and the gaps of 8.
+    n_tab = fuiscene.table_blob(col, K_TAB, BW - 16, BH - 16 - KH - GH - 24 - 36 - 48,
         NCOL, ptr((&blob[0]) as u64))
+    fuiscene.heat_key(K_TAB, 3, 4)
     n_sel = fuiscene.label(col, ptr((&l_sel[0]) as u64))
     // The button stands at the right-hand end, below the list: the same
     // place where every dialog of this system puts its answers.
@@ -1248,7 +1368,7 @@ fn build() {
     ktw = (ktw + 3) / 4 * 4
     let bar: usize = fuiscene.row(col)
     let _sp: usize = fuiscene.space(bar, BW - 16 - ktw, 4)
-    n_kill = fuiscene.button(bar, ktxt, K_KILL)
+    n_kill = fuiscene.button_main(bar, ktxt, K_KILL)
     fuiscene.set_size(n_kill, ktw, 36)
 }
 
@@ -1311,6 +1431,7 @@ fn u_start(args: u64) -> u64 {
     sample(true)
     hist_push()
     build_head()
+    build_kpi()
     build_rows()
     build_sel()
 
@@ -1445,6 +1566,7 @@ fn u_start(args: u64) -> u64 {
             sample(false)
             hist_push()
             build_head()
+            build_kpi()
             build_rows()
             if sel_pid != 0 && row_of_pid(sel_pid) >= SLOTS {
                 sel_pid = 0

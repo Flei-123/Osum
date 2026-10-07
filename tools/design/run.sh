@@ -17,7 +17,7 @@ OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT; fi
 # every run builds in its own directory (several of these runs at once share nothing)
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=150 drehbuch="$(pwd)/tools/design/views.txt" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$(pwd)/tools/design/views.txt" > "$OUT.log" 2>&1
 [ -z "${1:-}" ] || true
 python3 tools/design/check.py "$OUT"
 RC=$?

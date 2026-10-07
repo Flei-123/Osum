@@ -72,9 +72,9 @@ export {
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
     check, slider, choice, value_of, set_value, slider_readout, readout_text,
-    icon_at, ftile, entry_hint, text_role, text_width, role_col2, pointer_leave,
+    heat_key, heat_set, heat_clear, icon_at, ftile, entry_hint, text_role, text_width, role_col2, pointer_leave,
     table_blob, table_set_blob, table_single, table_two, table_icons, table_list, table_row_height,
-    table_text_x, table_row_h, table_row_top, table_base, table_icon_x,
+    table_text_x, table_row_h, table_row_top, table_base, table_head_base, table_icon_x,
     table_icon_y, table_rgb,
     set_app, raise, ax_action, build_now, compact, set_enabled, repaint_now,
     canvas, role_col, cv_rect, cv_round, cv_ring, cv_text, set_nohit,
@@ -1135,7 +1135,9 @@ fn row_draw(x: u64, y: u64, w: u64, h: u64, p: u64, on: bool) {
         sel_bar(z, x, y, h)
         tok = style.TOK_SELECTION_TEXT
     }
-    text_tok(x + sp(10), y + (h - sp(24)) / 2, w - sp(20), p, tok)
+    // r402: one point up -- the body of the lower-case letters of a 24 point label box sits 2 below
+    // its middle (tools/midline), the centre line of the row is the one of the icon
+    text_tok(x + sp(10), y + (h - sp(24)) / 2 - sp(1), w - sp(20), p, tok)
 }
 
 fn pop_paint() {
@@ -1603,7 +1605,11 @@ fn icon_at(word: u64, x: u64, y: u64, size: u64, txt: u64) {
     let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
     let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
     if (word & wlib.ICON_TAG) != 0 {
-        fuiapp.glyph(word & 65535, x, y, size, (*t).text | 4278190080 as u32)
+        var c0: u32 = (*t).text | 4278190080 as u32
+        if (word & 72057594037927936) != 0 {
+            c0 = tint_col(word)
+        }
+        fuiapp.glyph(word & 65535, x, y, size, c0)
         return
     }
     if wlib.is_image_pub(word) {
@@ -2795,6 +2801,53 @@ fn say_texts() {
 // answers the table's key; a click on a header cell sets `table_head_col`.
 const CT_MAX: u64 = 8
 const CT_COLS: u64 = 6
+// r402 (D-010): a COLOURED icon-font icon: the word of `wlib.icon_id` with bit 56 set and the colour
+// 0xRRGGBB in bits 32..55. A list row (`row_icon`) and `icon_at` paint it in that colour (the type of
+// a file is seen at a glance); without the bit they paint it in the text colour as before.
+
+fn tint_col(word: u64) -> u32 {
+    let rgb: u64 = (word >> 32) & 16777215
+    let sw: u64 = ((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)
+    return (sw as u32) | 4278190080 as u32
+}
+
+// r402 (D-009): THE ONE CENTRE LINE. The baseline for a line of text of `px` pixels in a box of height
+// `h` whose top is `top`: the middle between the x-height and the cap height (Inter: 0.546 and 0.727 em)
+// stands on the middle of the box, so the body of the lower-case letters and the capitals share the
+// centre line of the icon next to them (tools/midline measures it).
+fn mid_base(top: u64, h: u64, px: u64) -> u64 {
+    return top + (h * 500 + px * 318 + 500) / 1000
+}
+
+// r402 (D-011): HEAT CELLS. A table can tint cells by their value (the task manager's CPU and memory
+// columns): `heat_key` names the table, `heat_set(row, j, v)` the value 0..1000 of the tinted column
+// number j (0 or 1; which columns: `heat_cols`). The plate is the accent in 8..40 per cent, so that the
+// text on it keeps its contrast.
+static mut heat_k: u64 = 0
+static mut heat_c0: u64 = 99
+static mut heat_c1: u64 = 99
+static mut heat_v: [u64; 128] = [0 as u64; 128]
+
+fn heat_key(key: u64, c0: u64, c1: u64) {
+    heat_k = key
+    heat_c0 = c0
+    heat_c1 = c1
+}
+
+fn heat_set(row: u64, j: u64, v: u64) {
+    if row < 64 && j < 2 {
+        heat_v[(row * 2 + j) as usize] = v
+    }
+}
+
+fn heat_clear() {
+    var i: u64 = 0
+    while i < 128 {
+        heat_v[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
 fn ROW_H() -> u64 {
     return 28 * S.s_S
 }
@@ -3071,11 +3124,11 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                 hoff = icon_col(k)
             }
             if S.s_ct_exact[(k) as usize] {
-                two_text(cx + sp(10) + hoff, y + sp(24), colw_of(k, col, w) - sp(12) - hoff,
+                two_text(cx + sp(10) + hoff, mid_base(y, HEAD_H(), sp(15)), colw_of(k, col, w) - sp(12) - hoff,
                     ct_text(k, HEAD_ROW, col), sp(15), false,
                     (*t).text_muted | 4278190080 as u32)
             } else {
-                text_tok(cx + sp(10) + hoff, y + (HEAD_H() - sp(24)) / 2,
+                text_tok(cx + sp(10) + hoff, y + (HEAD_H() - sp(24)) / 2 - sp(1),
                     colw_of(k, col, w) - sp(12) - hoff,
                     ct_text(k, HEAD_ROW, col), style.TOK_TEXT_MUTED)
             }
@@ -3086,7 +3139,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                 let hasc: u64 = wlibc.ascent_of(wlibc.F_UI, hpx)
                 var hbase: u64 = y + (HEAD_H() - sp(24)) / 2 + (sp(24) + hasc) / 2
                 if S.s_ct_exact[(k) as usize] {
-                    hbase = y + sp(24)
+                    hbase = mid_base(y, HEAD_H(), sp(15))
                 }
                 say_text2(cx + sp(10) + hoff, hbase, (*t).text_muted, (*t).button,
                     hpx, ct_text(k, HEAD_ROW, col))
@@ -3115,6 +3168,31 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                 (w - sp(8)) as f64, rh as f64, rb(),
                 (*t).selection | 4278190080 as u32)
             sel_bar(z, x + sp(4), ry, rh)
+        }
+        if heat_k != 0 && ct_slot(heat_k) == k && ri < 64 && !on {
+            var hx: u64 = x
+            var hc: u64 = 0
+            while hc < S.s_ct_cols[(k) as usize] {
+                let hw: u64 = colw_of(k, hc, w)
+                var hj: u64 = 2
+                if hc == heat_c0 {
+                    hj = 0
+                } else if hc == heat_c1 {
+                    hj = 1
+                }
+                if hj < 2 && heat_v[(ri * 2 + hj) as usize] > 0 {
+                    var hv: u64 = heat_v[(ri * 2 + hj) as usize]
+                    if hv > 1000 {
+                        hv = 1000
+                    }
+                    let al: u64 = 20 + hv * 90 / 1000
+                    painter.round_rect(z, (hx + sp(4)) as f64, (ry + sp(2)) as f64,
+                        (hw - sp(8)) as f64, (rh - sp(4)) as f64, spf(4.0),
+                        ((*t).accent & 16777215 as u32) | ((al as u32) << 24))
+                }
+                hx = hx + hw
+                hc = hc + 1
+            }
         }
         var tok: u32 = style.TOK_TEXT
         var tok2: u32 = style.TOK_TEXT_MUTED
@@ -3168,11 +3246,11 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                     } else if col2 > 0 {
                         cc = (*t).text_muted
                     }
-                    two_text(cx2 + sp(10) + off, ry + sp(20), cw - sp(12) - off,
+                    two_text(cx2 + sp(10) + off, mid_base(ry, rh, sp(15)), cw - sp(12) - off,
                         ct_text(k, ri, col2), sp(15), false,
                         cc | 4278190080 as u32)
                 } else {
-                    text_tok(cx2 + sp(10) + off, ry + tpad(rh), cw - sp(12) - off,
+                    text_tok(cx2 + sp(10) + off, ry + tpad(rh) - sp(1), cw - sp(12) - off,
                         ct_text(k, ri, col2), tok)
                 }
                 cx2 = cx2 + cw
@@ -3229,7 +3307,9 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
     let ty: u64 = y + (rh - tile) / 2
     if (word & wlib.ICON_TAG) != 0 {
         var col: u32 = (*t).text | 4278190080 as u32
-        if on {
+        if (word & 72057594037927936) != 0 {
+            col = tint_col(word)
+        } else if on {
             col = (*t).selection_text | 4278190080 as u32
         }
         fuiapp.glyph(word & 65535, x + sp(1), ty, tile, col)
@@ -3432,7 +3512,21 @@ fn table_row_top(key: u64, row: u64) -> u64 {
 }
 
 fn table_base(key: u64, row: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k != NO_SLOT && !S.s_ct_two[(k) as usize] && S.s_ct_exact[(k) as usize] {
+        // r402: the centre line (mid_base)
+        return mid_base(table_row_top(key, row), S.s_ct_rh[(k) as usize], sp(15))
+    }
     return table_row_top(key, row) + sp(20)
+}
+
+// r402: the baseline of the header text of a table (the one the header is painted on)
+fn table_head_base(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || S.s_ct_node[(k) as usize] == NONE {
+        return 0
+    }
+    return mid_base(node_y(S.s_ct_node[(k) as usize]), HEAD_H(), sp(15))
 }
 
 // The picture of a 16 x 16 row icon: left / top edge
