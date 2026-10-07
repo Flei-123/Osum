@@ -81,7 +81,7 @@ echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if bash "$B" "$OUT/b0" script='echo bereit;exit' \
-       progs="calc zip papierkorb viewer snip lock sh echo ls cat" \
+       progs="calc zip trashbin viewer snip lock sh echo ls cat" \
        > "$OUT/bauen.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kernel ' "$OUT/bauen.log" | head -1))"
 else
@@ -164,31 +164,31 @@ echo "== 4. der Papierkorb =="
 cat > "$OUT/pt.sh" <<'EOF'
 mkdir /w
 cp /etc/theme.conf /w/wichtig.txt
-papierkorb weg /w/wichtig.txt
+trashbin put /w/wichtig.txt
 ls /w
-papierkorb liste
-papierkorb zurueck 1
+trashbin list
+trashbin restore 1
 diff /etc/theme.conf /w/wichtig.txt
 echo DIFF-ZURUECK $?
-papierkorb weg /w/wichtig.txt
-papierkorb leeren
-papierkorb liste
+trashbin put /w/wichtig.txt
+trashbin empty
+trashbin list
 echo KORB-FERTIG
 EOF
 bash "$B" "$OUT/korb" script='sh /pt.sh;exit' \
-    progs="papierkorb sh echo ls cat mkdir cp diff rmdir" \
+    progs="trashbin sh echo ls cat mkdir cp diff rmdir" \
     xfile=/pt.sh="$OUT/pt.sh" > "$OUT/korb.log" 2>&1
 K=$OUT/korb/serial.txt
-hat "$K" "papierkorb: nummer 1  /w/wichtig.txt" "die Liste kennt den Originalpfad"
+hat "$K" "trashbin: number 1  /w/wichtig.txt" "die Liste kennt den Originalpfad"
 hat "$K" "DIFF-ZURUECK 0" "zurueckgeholt und byte-gleich"
-hat "$K" "papierkorb: leer" "nach dem Leeren ist er leer"
+hat "$K" "trashbin: empty" "nach dem Leeren ist er leer"
 printf 'eine Notiz\n' > "$OUT/n1.txt"
 # RUNDE ROADMAP-3: `debug` schaltet den Mitschnitt des Explorers an (ohne
 # /etc/uitrace schweigt er, dbg_setup), und `/w` ist jetzt wirklich der
 # Startordner (vorher fing er immer in /data an).
 bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
     mon="sendkey delete" mon="sendkey ret" \
-    progs="explorer papierkorb theme sh echo ls cat" \
+    progs="explorer trashbin theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex1.log" 2>&1
 # RUNDE ROADMAP-3: Loeschen fragt seit EXPLORER-2 IMMER nach ("Wirklich
 # löschen?") -- also Entf UND Eingabe, wie in ex2 unten.
@@ -201,7 +201,7 @@ else
 fi
 bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
     mon="sendkey shift-delete" mon="sendkey ret" \
-    progs="explorer papierkorb theme sh echo ls cat" \
+    progs="explorer trashbin theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex2.log" 2>&1
 hat "$OUT/ex2/serial.txt" "explorer: tat 5 n=1 rc=0" "Umschalt+Entf: endgueltig"
 if python3 tools/osum/mkfs.py list "$OUT/ex2/disk.img" 2>/dev/null \
@@ -460,9 +460,9 @@ PY
         | grep -a 'raster/4' | grep -aoE '\([0-9]+%\)' | tr -dc '0-9')
     num "$name: Vierer-Raster (Prozent)" "$r" ge 92
 }
-PROGS="calc zip papierkorb viewer snip lock theme sh echo ls cat"
+PROGS="calc zip trashbin viewer snip lock theme sh echo ls cat"
 schuss calc /bin/calc 80,60
-schuss papierkorb /bin/papierkorb 70,70 \
+schuss trashbin /bin/trashbin 70,70 \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt"
 schuss viewer /bin/viewer,/b/probe.png 60,50 \
     xdir=/b xfile=/b/probe.png="$OUT/probe.png" \
@@ -474,7 +474,7 @@ schuss lock /bin/lock 0,0 xfile=/etc/shadow="$OUT/shadow"
 echo
 echo "== 10. die Regeln dieser Runde =="
 Z=0
-for f in calc papierkorb viewer snip lock korb bild jpeg zip; do
+for f in calc trashbin viewer snip lock korb bild jpeg zip; do
     n=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|frame3\|hline\|vline\|text\|glyph\|blit\|rring\|divider\|drop_shadow\)(' \
         "kernel/user/$f.fi" 2>/dev/null || true)
     Z=$((Z + n))

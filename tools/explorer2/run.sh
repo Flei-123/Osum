@@ -57,7 +57,7 @@ ok "Kern und Programme uebersetzen"
 # nur als Teil des Ganzen baut, ist beim naechsten Umbau nicht zu retten.
 # The modules have no `main` and import fUi (profile app), so each is built
 # through a one-line stub root that imports ONLY that module.
-for m in expmodell exporte expakt expdlg dateiop; do
+for m in expmodell exporte expakt expdlg fileop; do
     stub="kernel/user/zz_chk_$m.fi"
     printf 'profile app\nimport %s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$stub"
     if vendor/firn/bin/firnc -c --profile=app "$stub" -o "$OUT/$m.o" \
@@ -116,7 +116,7 @@ else
 fi
 # Und der Dateimanager fasst zum Umbenennen ueberhaupt keine Datei mehr
 # an: kein `create`, kein `write_all`, kein `unlink` in explorer.fi.
-# Die Taten liegen in `expakt`/`dateiop`, und nur dort.
+# Die Taten liegen in `expakt`/`fileop`, und nur dort.
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
     bad "Punkt 2: explorer.fi fasst Dateien noch selbst an"
 else

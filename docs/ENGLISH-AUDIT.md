@@ -29,7 +29,7 @@ Kept German on purpose: bus service name `praesenz`, `/etc/praesenz.conf`, `/etc
 its keys, the state words `da abwesend beschaeftigt unsichtbar` (wire protocol with the friends
 server), the mount point `/tresor`, `/system/tresor.sit`.
 
-STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `dateiop`, `hurt`,
+STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `hurt` (an English word -- stays),
 `instkonto` (module), the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
 inside the sources (see tools/english for the identifier renamer).
 

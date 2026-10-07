@@ -98,7 +98,7 @@ damit andere Programme sie erben. Das ist eingehalten:
   Bit 3 (`M_SHIFT`) und Bit 4 (`M_CTRL`) tragen sie mit.
 * **`lib/libc/io.fi` — `rename`.** War nie da, obwohl `SYS_RENAME` seit
   Runde K14 existiert. Genau deshalb hat der Dateimanager kopiert.
-* **`kernel/user/dateiop.fi` (neu, 510 Zeilen)** — Kopieren,
+* **`kernel/user/fileop.fi` (neu, 510 Zeilen)** — Kopieren,
   Verschieben, rekursiv Löschen, Größe und Stücke zählen. Verschieben
   ist `rename`, und nur bei `EXDEV` Kopie+Löschen. Zeitstempel und
   Rechte werden nachgezogen, blockweise mit `MAX_IO` 4096, und eine
