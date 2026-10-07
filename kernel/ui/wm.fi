@@ -5886,7 +5886,8 @@ fn anim_tick(state: u64) -> u64 {
             // Der Bereich wird IMMER schmutzig, auch wenn der
             // Fortschritt gleich blieb -- am Ende der Bewegung steht
             // sonst das letzte Zwischenbild auf dem Schirm.
-            damage_win(state, i)
+            // r461: a window that opens or closes cannot spoil the blur of the windows below it
+            damage_win_ex(state, i, i + 1)
             if p >= 1000 {
                 wsv(state, i, W_ANK, 0)
                 wsv(state, i, W_ANP, 1000)
@@ -7362,8 +7363,14 @@ fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
             k = k + 1
         }
         var x: u64 = 0
+        // r461: `n` changes only at the two ends of a row; the reciprocal (a division) is taken again only then
+        var last_n: u64 = 0
+        var rec: u64 = 0
         while x < w {
-            let rec: u64 = recip_of(n)
+            if n != last_n {
+                rec = recip_of(n)
+                last_n = n
+            }
             __mmio_write32((zz +% x *% 4) as *mut u32,
                 ((bdiv(sr, rec) << 16) | (bdiv(sg, rec) << 8)
                     | bdiv(sb, rec)) as u32)
@@ -7614,6 +7621,14 @@ fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
     if skip == BT_ALL {
         return
     }
+    // a change made by window `skip - 1` can only spoil the blur of a window ABOVE it: a blur is made from what lies under its
+    // window. The window itself and every window below it (lower `W_Z`) keep their blur.
+    var skipz: u64 = 0
+    var haveskip: bool = false
+    if skip != 0 && skip - 1 < MAX_WIN {
+        skipz = wg(state, skip - 1, W_Z)
+        haveskip = true
+    }
     // EIN ZAEHLER JE PLATZ, und nicht einer fuer alle.
     //
     // Ein gemeinsamer Zaehler waere wieder der Fehler, den die vier
@@ -7624,7 +7639,14 @@ fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
     // Rechteck das gemeldete wirklich schneidet.
     var k: u64 = 0
     while k < BC_N {
-        if gs(state, S_BC_WIN + k * 8) != 0 && gs(state, S_BC_WIN + k * 8) != skip {
+        var spoilable: bool = gs(state, S_BC_WIN + k * 8) != 0
+        if spoilable && haveskip {
+            let sj: u64 = gs(state, S_BC_WIN + k * 8) - 1
+            if sj == skip - 1 || (sj < MAX_WIN && wg(state, sj, W_Z) <= skipz) {
+                spoilable = false
+            }
+        }
+        if spoilable {
             let bx0: i64 = gs(state, S_BC_X + k * 8) as i64
             let by0: i64 = gs(state, S_BC_Y + k * 8) as i64
             let bx1: i64 = bx0 + gs(state, S_BC_W + k * 8) as i64
