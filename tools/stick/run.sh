@@ -346,7 +346,7 @@ G="$TMPD/sbr/g.log"
 # ist beim Start einfach da.
 hat "$R" '/mnt type vfat' "die zweite Platte steht in der Einhaengetafel (/mnt, vfat)"
 hat "$R" 'servername' "und ihre Rechteliste ist lesbar"
-hat "$R" 'jarvisd: verbunden' "jarvisd hat die Verbindung aufgebaut"
+hat "$R" 'jarvisd: connected' "jarvisd hat die Verbindung aufgebaut"
 hat "$R" 'jarvisd: signed in' "und sich angemeldet"
 hat "$G" 'TLSv1.3' "die Verbindung steht auf TLS 1.3 -- gesagt hat das Python, nicht Osum"
 hat "$G" 'BEWEIS gut' "die Ed25519-Unterschrift des Geraets stimmt (nachgerechnet von python-cryptography)"
