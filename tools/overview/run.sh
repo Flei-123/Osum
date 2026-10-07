@@ -19,8 +19,8 @@ echo "== 1. start in the overview =="
 bash tools/toolbench/build.sh "$TMPD/o" app=/bin/explorer,computer wait=12 last=100 shot=allein > "$TMPD/o.log" 2>&1
 S="$TMPD/o/serial.txt"
 [ -s "$TMPD/o/allein.ppm" ] && ok "the picture was taken" || { bad "no picture: $(tail -3 "$TMPD/o.log" | tr '\n' ' ')"; echo "OVERVIEW: $pass passed, $fail failed"; exit 1; }
-N=$(grep -aoE 'explorer: overview n=[0-9]+' "$S" | tail -1 | grep -oE '[0-9]+$')
-[ "${N:-0}" -ge 1 ] && ok "the overview lists $N drive(s)" || bad "no 'explorer: overview n=' (n=${N:-?})"
+N=$(grep -aoE 'explorer: overview [0-9]+' "$S" | tail -1 | grep -oE '[0-9]+$')
+[ "${N:-0}" -ge 1 ] && ok "the overview lists $N drive(s)" || bad "no 'explorer: overview N' (n=${N:-?})"
 grep -aqE 'explorer: krume n=1 ' "$S" && ok "the crumbs are the one link 'Overview'" || bad "the crumbs are not the overview's one link: $(grep -a 'explorer: krume' "$S" | tail -1)"
 
 echo "== 2. the picture =="
