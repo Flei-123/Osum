@@ -1709,6 +1709,14 @@ lauf "59. the disk manager, read side: MBR / GPT with checksums, diskctl list, t
 lauf "60. the centre line: rows, icons, tabs, menu rows, title bar, task bar (tools/midline/run.sh)" \
      tools/midline/run.sh midline '^MIDLINE: |^  OK    |^  FAIL  '
 
+# 61. THE DAMAGE REGION (docs/COMPOSITOR.md S2): the same picture as with the single box (kernel word `norgn`), and a real saving.
+lauf "61. the damage region: same picture as the single box, fewer pixels painted (tools/region/run.sh)" \
+     tools/region/run.sh region '^REGION: |^== |^  OK    |^  FAIL  '
+
+# 62. RING-3 COMPOSITING (docs/COMPOSITOR.md section 5): the window server's primitives and a process wake-up, measured in a user program.
+lauf "62. ring-3 compositing: row copy, blend, blur, pipe round trip against the 16 ms budget (tools/comp/run.sh)" \
+     tools/comp/run.sh comp '^COMP: |^== |^  OK    |^  FAIL  '
+
 # 58b. the same guard as in every other repo (Firn tools/english/no_german.py): one rule for all projects.
 lauf "58b. the shared English guard of Firn: no more German than no-german.baseline.json (tools/english/shared_guard.sh)" \
      tools/english/shared_guard.sh english-shared '^  OK    |^  FAIL  |^no-german: '
