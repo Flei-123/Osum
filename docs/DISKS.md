@@ -71,10 +71,13 @@ sectors) and approved by a person through the trusted dialog (AB-004) -- one cod
 
 ## 5. The read view in the file manager (this round)
 
-"This computer" lists the volumes (`exporte.carrier_*`: mount path, blocks, used) with a thin occupancy bar
-under each name; the numbers are the mount table's, the same ones `df` prints. A right click on a volume
-opens the context menu (Properties, Format -- with the warning --, Eject, Open disk management). Format
-and "open disk management" start `/bin/disks`; until D-2 exists they show the plan text only.
+DONE (07.10.2026): the navigation pane has an entry "Disk management" (group "This computer") that starts `/bin/disks`,
+and a right click on a place opens a menu: Open, Eject (a drive), Disk management. The volumes keep their fill in
+the label ("/ 41%", from the mount table, the same numbers `df` prints).
+
+NOT DONE: "This computer" as a view of its own with an occupancy bar per volume, Properties and Format in that menu.
+Format and everything else that writes belongs to stage D-3 and later, behind a plan and a confirmation; until then
+the file manager has no such entry.
 
 ## 6. Roadmap
 
