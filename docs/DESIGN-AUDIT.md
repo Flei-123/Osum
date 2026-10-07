@@ -65,10 +65,11 @@ The Dell was not touched.
 | 2 | wallpaper | aspect | 16:9 stretched to 16:10 (6 % distortion) | cover, centred (like the lock screen) |
 | 3 | frosting at rounded corners | pixels more than one pixel outside the arc of the start menu corner that differ from the picture without the menu | 17 of 17 | 0 of 17 |
 | 4 | icons | ink height in the bar / in the start menu | 14-16 px / 16 px | 24 px / 30 px |
+| 2 | wallpaper, cost | a full repaint of the desktop (`desktop: paint ticks=`, 1280x800, KVM, loaded host) | 28 ticks (nearest neighbour; a 199 px picture) | 41 ticks (cover + bilinear) -- once at start and on theme change, never per frame |
 | 5 | selection | contrast of the plate against the list ground; text on the plate | 4.7 : 1 plate (solid accent), white on blue | 1.26 : 1 tint + 3 px accent bar; text 13.0 : 1 |
 | 6 | slider handle | handle = widget height | 28 px | 20 px |
 | 7 | dropdown labels | labels cut off on the Appearance page | 5 of 5 | 0 (width from the face + `pad_x` 12) |
-| 8 | text on the accent, dark mode | contrast of the Run / Apply label | 2.52 : 1 | see 4.2 |
+| 8 | text on the accent, dark mode | contrast of the Run / Apply label (Run button, dark, pixels) | 2.52 : 1 | 7.96 : 1 |
 | 9 | spacing tokens | `pad_x`, `pad_y`, `gap` of the shape file in fUi's theme | not wired (fUi default) | wired in `fuib.theme_new` |
 
 Candidates that are **not** a cause (measured, so nobody chases them again):
@@ -166,4 +167,33 @@ runner needs its own `--v3` and every image built before stays octet for octet t
 
 ## 6. Tests
 
-(see the end of this file, filled in from the runs)
+Final state of this branch, each suite started through `/root/jarvis/bin/heavy`, compared with `main`
+`3e35808b` (the numbers of the right column are the ones recorded for main, or measured in this
+round where they say so). Runs on a loaded host; the interactive ones (click tests) are
+load-sensitive and were repeated when they flickered.
+
+| suite | main | this branch |
+|---|---|---|
+| `tools/themestore` | 298/0 | **298/0** |
+| `tools/look` | 41/0 | **41/0** |
+| `tools/softui` | 24/0 | **24/0** |
+| `tools/alltag` | 44/0 | **44/0** |
+| `tools/k15` | 258/0 | **258/0** (menu baseline and vector-icon checks adapted, see below) |
+| `tools/desktop` (sections 1-8) | 104/0 | **104/0** |
+| `tools/barscene` / `win11bar` / `barpop` | 29/0, 25/0, 10/0 | **29/0, 25/0, 10/0** |
+| `tools/qsfui`, `paint`, `explorer2` | 20/0, 36/0, 49/0 | **20/0, 36/0, 49/0** |
+| `tools/lockscene`, `loginscene`, `a11y/scene.sh` | 15/0, 21/0, 25/0 | **15/0, 21/0, 25/0** |
+| `tools/wm` | 107/0 | **108/0** (one more: the Inter cut is reproducible) |
+| `tools/fourbugs`, `menuhover`, `menualive` | 26/0, 14/0, 9/0 | **26/0, 14/0, 9/0** |
+| `tools/toolbench` | 34/3 (28/6 measured under load in this round) | 35/2 -- the interactive taskmgr checks flicker under load, on main too |
+| `tools/i18n` | stops at `mkfs` (file manager over the format-2 limit) | gets through; 12 stale failures remain (settings reports of the old `wlib` page, the message-quota check -- identical output on main) |
+| `tools/dmodul` | stops at `mkfs` | 9/1 (`2-gezogen.png` missing: a picture timing issue, not a measurement) |
+| **`tools/design/run.sh`** (new) | 4/6 (counter-proof on the pictures of main) | **10/0** |
+
+Changes to the harnesses, all with their reason on the line:
+`tools/k15/run.sh` (the baseline of a popup row is `4 + the height of "l"`, read out of the face with
+the second rasteriser: 16 for DejaVu, 15 for Inter, measured by trying baselines 14..20 against the
+picture: 0 wrong at 15; the vector icons are compared by their opaque pixels), `tools/k15/icon.py`,
+`tools/theme/model.py` and `tools/themestore/run.sh` (selection binding; the radius slider is found by
+its width), `tools/wm/run.sh` and `tools/i18n/run.sh` (the cut of the face), `tools/osum/mkfs.py`
+(format 3 by itself when a file is too big).
