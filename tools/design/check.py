@@ -87,25 +87,37 @@ def main(argv):
     check(share <= 0.60, "equal-neighbour share in the tree line: %.3f (nearest-neighbour stretch: 0.721)" % share)
 
     print("== C. frosted surfaces follow the rounded shape")
-    n, tot = M.corner_halo(os.path.join(d, "02-startmenue.png"), os.path.join(d, "01-schreibtisch.png"))
+    # r402: the window of the start menu stands where the launcher says (it depends on its height)
+    ser = open(os.path.join(d, "serial.txt"), "rb").read().decode("latin-1") if os.path.exists(os.path.join(d, "serial.txt")) else ""
+    gm = re.findall(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
+    gx, gy = (int(gm[-1][0]), int(gm[-1][1])) if gm else (8, 300)
+    lm = re.findall(r"launcher: rect id=2 kind=5 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
+    lx, ly, lw, lh = (int(v) for v in lm[-1]) if lm else (20, 100, 600, 300)
+    n, tot = M.corner_halo(os.path.join(d, "02-startmenue.png"), os.path.join(d, "01-schreibtisch.png"), x0=gx, y0=gy)
     check(n == 0, "pixels outside the corner arc of the start menu that differ from the picture without it: %d of %d (before: %d)" % (n, tot, tot))
 
     print("== D. a selection is a tint with an indicator bar")
     s2 = png("02-startmenue")
-    # the first row of the start menu is selected; its plate colour is the pixel right of the title
-    plate = px(s2, 380, 410)
-    ground = px(s2, 380, 470)
+    s2b = png("02b-suche")
+    # the first row of the result list is selected; its plate colour is the pixel right of the title
+    plate = px(s2b, gx + lx + lw - 40, gy + ly + 26)
+    ground = px(s2b, gx + lx + lw - 40, gy + ly + 26 + 104)
     cr_plate = M.contrast(plate, ground)
     check(cr_plate < 3.0, "the plate is a soft tint of the ground: contrast plate/ground %.2f (solid accent was 4.9)" % cr_plate)
     # the title text of the row: darkest pixel in the title box
-    dark = min((px(s2, x, y) for x in range(70, 130) for y in range(394, 408)), key=lambda p: sum(p))
+    dark = min((px(s2b, x, y) for x in range(gx + lx + 54, gx + lx + 114) for y in range(gy + ly + 4, gy + ly + 22)), key=lambda p: sum(p))
     check(M.contrast(dark, plate) >= 7.0, "the text on the plate keeps contrast %.1f:1 (>= 7)" % M.contrast(dark, plate))
     acc = 0
-    for y in range(392, 432):
-        p = px(s2, 22, y)
-        q = px(s2, 36, y)
-        if p[2] > 180 and p[0] < 120 and not (q[2] > 180 and q[0] < 120):
-            acc += 1
+    # the bar sits a few points inside the list's left edge: find the column of the first row that has
+    # the most accent pixels, and count those (the column 16 points further in must not have them)
+    for cx in range(gx + lx, gx + lx + 14):
+        n_ = 0
+        for y in range(gy + ly + 2, gy + ly + 42):
+            p = px(s2b, cx, y)
+            q = px(s2b, cx + 14, y)
+            if p[2] > 180 and p[0] < 120 and not (q[2] > 180 and q[0] < 120):
+                n_ += 1
+        acc = max(acc, n_)
     check(acc >= 10, "the accent indicator bar is there: %d accent pixels in its column" % acc)
 
     print("== E. program icons are vector art at the size of the surface")
@@ -116,8 +128,8 @@ def main(argv):
         check(h >= 22, "taskbar icon is %d px high (the 16x16 drawing was 16)" % h)
     else:
         bad("no taskbar icon found")
-    row_bg = px(s2, 300, 470)
-    b = ink_box(s2, (26, 446, 54, 486), row_bg, thr=90)
+    row_bg = plate
+    b = ink_box(s2b, (gx + lx + 10, gy + ly + 4, gx + lx + 46, gy + ly + 48), row_bg, thr=90)
     if b:
         h = b[3] - b[1] + 1
         check(h >= 28, "start menu icon is %d px high (16 before)" % h)

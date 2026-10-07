@@ -127,7 +127,8 @@ if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nos
     CH=$(grep -aoE 'ctrl_h=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
     is "ctrl_h aus der Datei" "${CH:-0}" "32"
     N=$(grep -aoE 'form n=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
-    is "Formwoerter an den Server" "${N:-0}" "17"
+    # r402: three words more (WF_TITLE_BAR, WF_CAP_W, WF_FRAME): 17 -> 20
+    is "Formwoerter an den Server" "${N:-0}" "20"
     S=$(stat -c%s assets/shapes/modern.shape)
     ge "und die Datei ist groesser als der alte Puffer" "$S" "4097"
 else

@@ -45,6 +45,7 @@ import appdir
 import nidx
 import pw
 import nv
+import icons
 
 export { u_start }
 
@@ -123,6 +124,52 @@ static mut napp: u64 = 0
 static mut idxn: u64 = 0
 static mut idxus: u64 = 0
 static mut ohne_index: bool = false
+
+// ============================================================ r402: THE WINDOWS 11 START MENU
+//
+// Justin (07.10.2026): the start menu in the Windows 11 layout -- search field on top, a grid of
+// PINNED programmes, a RECOMMENDED block, user name and power at the bottom. The old list view is
+// the "search results" and the "All apps" view of the same window, so nothing the search could do
+// is lost; `liste` as an argument (or `startmenu=list` in /etc/taskbar.conf) keeps the old window
+// exactly (the acceptance runs that measure the list rows use it).
+//
+//   g_w11    the new window (default); false = the old list window
+//   g_alle   the "All apps" view (the list with an empty query)
+//   g_home   the home view: no query, not "All apps" -- pinned + recommended
+//
+// Sizes are DESIGN POINTS (x ui scale): 640 wide, 20 padding; the rows follow the work area
+// (3 + 3 where it fits, down to 1 + 1) and what there is to show.
+static mut g_w11: bool = true
+static mut g_alle: bool = false
+static mut g_say: bool = false
+static mut g_home: bool = true
+static mut g_pr: u64 = 3 // pinned rows
+static mut g_rr: u64 = 3 // recommended rows
+static mut g_hd: u64 = 640 // window height, design points
+static mut pin_app: [u64; 18] = [0 as u64; 18]
+static mut pin_ico: [u64; 18] = [0 as u64; 18]
+static mut pin_n: u64 = 0
+static mut rec_app: [u64; 6] = [0 as u64; 6]
+static mut rec_ico: [u64; 6] = [0 as u64; 6]
+static mut rec_n: u64 = 0
+static mut mru: [u64; 6] = [0 as u64; 6]
+static mut mru_n: u64 = 0
+static mut all_app: [u64; 16] = [0 as u64; 16]
+static mut all_n: u64 = 0
+static mut s_user: [u8; 64] = [0 as u8; 64]
+static mut k_hint: [u8; 14] = "launcher.hint\0"
+static mut k_pinned: [u8; 16] = "launcher.pinned\0"
+static mut k_recom: [u8; 19] = "launcher.recommend\0"
+static mut k_allapps: [u8; 13] = "launcher.all\0"
+static mut k_backb: [u8; 14] = "launcher.back\0"
+static mut k_resl: [u8; 17] = "launcher.results\0"
+static mut k_nonerec: [u8; 17] = "launcher.nonerec\0"
+const W11_W: u64 = 640
+const W11_IN: u64 = 600
+const K_ALL: u64 = 5
+const K_BACK: u64 = 6
+const K_PIN: u64 = 100
+const K_REC: u64 = 130
 static mut pfad: [u8; 256] = [0 as u8; 256]
 
 // ============================================ RUNDE BELEG: DER MESSAUSGANG
@@ -221,6 +268,13 @@ fn new_find() {
     napp = appdir.search((&suchfeld[0 as usize]) as u64,
         (&treffer[0 as usize]) as u64, 16)
     ntreffer = napp
+    // r402: the home view of the Windows 11 window (no query, not "All apps")
+    g_home = g_w11 && ulib.length((&suchfeld[0 as usize]) as u64) == 0 && !g_alle
+    if g_w11 {
+        home_prepare()
+        // the list's rectangle is reported after the pump that builds it
+        g_say = true
+    }
     var lp: u64 = 0
     var k: u64 = 0
     while k < ntreffer && k < 16 {
@@ -451,7 +505,15 @@ fn starten(zeile: u64) {
         nl()
         return
     }
-    let a: u64 = treffer[(zeile) as usize]
+    starten_app(treffer[(zeile) as usize])
+}
+
+// r402: a PROGRAMME (index into the directory) is started -- from a hit row, a pinned tile or a
+// recommended row. The recent ones are remembered for the "Recommended" block.
+fn starten_app(a: u64) {
+    var s_go: [u8; 21] = "launcher: start \0\0\0\0\0"
+    var s_p: [u8; 8] = " pid=\0\0\0"
+    var arg: [u8; 160] = [0 as u8; 160]
     ulib.strncpy((&arg[0 as usize]) as u64, appdir.exec_of(a), 150)
     // ================================================ ROUND NETVIEW
     //
@@ -518,11 +580,134 @@ fn starten(zeile: u64) {
     say((&s_p[0 as usize]) as u64)
     sayn(pid)
     nl()
+    mru_push(a)
     // ==================================== RUNDE ECHTHARDWARE-4
     // NACH DEM START GEHT DAS MENUE ZU. So macht es jedes System,
     // und ohne das steht die Trefferliste vor dem Programm, das
     // gerade aufgeht.
     zumachen()
+}
+
+// r402: the last programmes started, most recent first, six at most (in memory: the launcher
+// stays alive while the machine runs).
+fn mru_push(a: u64) {
+    var k: u64 = 0
+    while k < mru_n && mru[(k) as usize] != a {
+        k = k + 1
+    }
+    if k == mru_n {
+        if mru_n < 6 {
+            mru_n = mru_n + 1
+        }
+        k = mru_n - 1
+    }
+    while k > 0 {
+        mru[(k) as usize] = mru[(k - 1) as usize]
+        k = k - 1
+    }
+    mru[0 as usize] = a
+}
+
+// r402: how many pinned and recommended rows fit, and how high the window is (design points).
+// H(pr, rr) = 20 + 40 + 8 + 32 + pr*88 + 4 + 32 + rr*52 + 8 + 56 + 20 + 4; the biggest pair that
+// fits the work area and is not more than there is to show.
+fn w11_layout(napps: u64, avail_d: u64) {
+    var pr: u64 = 3
+    // three rows of recommended programmes only where there are many programmes; a small
+    // system keeps the menu short (two rows = four entries)
+    var rr: u64 = 2
+    if napps > 12 {
+        rr = 3
+    }
+    var need_p: u64 = (napps + 5) / 6
+
+    if need_p < 1 {
+        need_p = 1
+    }
+    if need_p < pr {
+        pr = need_p
+    }
+    while (224 + w11_mid(pr, rr)) > avail_d && (pr > 1 || rr > 1) {
+        if rr > 1 && (rr >= pr || pr == 1) {
+            rr = rr - 1
+        } else if pr > 1 {
+            pr = pr - 1
+        } else {
+            rr = rr - 1
+        }
+    }
+    g_pr = pr
+    g_rr = rr
+    g_hd = 224 + w11_mid(pr, rr)
+}
+
+// The height of the middle of the window (between the search field and the footer line): the
+// home view needs pr*88 + rr*52, the result list at least four rows of 52 (+ its 36 of header)
+fn w11_mid(pr: u64, rr: u64) -> u64 {
+    var m: u64 = pr * 88 + rr * 52
+    if m < 176 {
+        m = 176
+    }
+    return m
+}
+
+// The pinned tiles and the recommended rows for the home view, from the directory order and the
+// recent list.
+fn home_prepare() {
+    var n: u64 = all_n
+    if n > g_pr * 6 {
+        n = g_pr * 6
+    }
+    pin_n = n
+    var k: u64 = 0
+    while k < n {
+        pin_app[(k) as usize] = all_app[(k) as usize]
+        pin_ico[(k) as usize] = appdir.icon_load(all_app[(k) as usize])
+        k = k + 1
+    }
+    // recommended: the recent ones first, then the programmes that are NOT in the pinned grid
+    // (in directory order) -- a programme is not shown twice
+    var want: u64 = g_rr * 2
+    if want > 6 {
+        want = 6
+    }
+    var m: u64 = 0
+    var j: u64 = 0
+    while j < mru_n && m < want {
+        rec_app[(m) as usize] = mru[(j) as usize]
+        m = m + 1
+        j = j + 1
+    }
+    var q: u64 = 0
+    while q < all_n && m < want {
+        let a: u64 = all_app[(q) as usize]
+        var dup: bool = false
+        var z: u64 = 0
+        while z < m {
+            if rec_app[(z) as usize] == a {
+                dup = true
+            }
+            z = z + 1
+        }
+        z = 0
+        while z < pin_n {
+            if pin_app[(z) as usize] == a {
+                dup = true
+            }
+            z = z + 1
+        }
+        if !dup {
+            rec_app[(m) as usize] = a
+            m = m + 1
+        }
+        q = q + 1
+    }
+    rec_n = m
+    var r: u64 = 0
+    while r < m {
+        rec_ico[(r) as usize] = appdir.icon_load(rec_app[(r) as usize])
+        r = r + 1
+    }
 }
 
 // EINE STELLE, an der das Menue zugeht -- gerufen von Escape, vom
@@ -549,6 +734,8 @@ static mut lp_conf: [u8; 20] = "/etc/taskbar.conf\0\0\0"
 static mut lk_align: [u8; 6] = "align\0"
 static mut lw_center: [u8; 7] = "center\0"
 static mut lk_height: [u8; 7] = "height\0"
+static mut lp_style: [u8; 20] = "/etc/startmenu.conf\0"
+static mut lw_style: [u8; 11] = "style=list\0"
 static mut l_align: u64 = 0 // 0 = links, 1 = mittig
 static mut l_bar: u64 = 40 // Hoehe der Leiste
 
@@ -608,6 +795,35 @@ fn conf_read() {
         } else {
             i = ke + 1
         }
+    }
+}
+
+// r402: `/etc/startmenu.conf` with the line `style=list` keeps the old list window (the runs that
+// measure the list's rows use it). A file of its own, because the bar rewrites taskbar.conf and
+// drops what it does not know.
+fn start_style_read() {
+    var buf: [u8; 128] = [0 as u8; 128]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&lp_style[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 127)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n < 10 {
+        return
+    }
+    var i: u64 = 0
+    while i + 10 <= n {
+        var k: u64 = 0
+        while k < 10 && __mmio_read8((b + i + k) as *mut u8) == __mmio_read8(
+            ((&lw_style[0 as usize]) as u64 + k) as *mut u8) {
+            k = k + 1
+        }
+        if k == 10 {
+            g_w11 = false
+        }
+        i = i + 1
     }
 }
 
@@ -1109,6 +1325,7 @@ fn u_start(args: u64) -> u64 {
     var s_nc: [u8; 8] = "noclip\0\0"
     var s_nk: [u8; 8] = "nokeys\0\0"
     var s_ni: [u8; 8] = "noidx\0\0\0"
+    var s_li: [u8; 6] = "liste\0"
     // RUNDE ECHTHARDWARE-4: `versteckt` -- der Starter legt sein
     // Fenster an, malt es einmal und MINIMIERT es sofort.
     var s_vs: [u8; 11] = "versteckt\0\0"
@@ -1152,6 +1369,9 @@ fn u_start(args: u64) -> u64 {
             // UNSICHTBAR HOCH. Siehe der Block bei `wlib.win_hide`
             // weiter unten -- das ist der Normalfall beim Systemstart.
             versteckt = true
+        } else if ulib.streq(p, (&s_li[0 as usize]) as u64) {
+            // r402: the old list window (see the block at `g_w11`)
+            g_w11 = false
         } else if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
             // GEGENPROBE: derselbe Starter ohne Namensindex. Dann findet
             // "blau" das Programm nicht (es heisst nicht so) und die
@@ -1171,6 +1391,13 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, nokeys)
+    // r402: the whole directory in its order (the pinned grid and the recommended block take
+    // from it); the name of the user for the footer
+    var empty_q: [u8; 2] = [0 as u8; 2]
+    all_n = appdir.search((&empty_q[0 as usize]) as u64, (&all_app[0 as usize]) as u64, 16)
+    if !pw.name_of_uid(ulib.sys(107, 0, 0, 0), (&s_user[0 as usize]) as u64, 64) {
+        s_user[0 as usize] = 0 as u8
+    }
     say((&s_n[0 as usize]) as u64)
     sayn(n)
     nl()
@@ -1281,16 +1508,33 @@ fn u_start(args: u64) -> u64 {
     // Rahmen: unter der Leiste (und unter dem reservierten Band der
     // Messtafel) hat das Menue nichts verloren.
     conf_read()
+    start_style_read()
     // FUI-ALL F-6: the window is described to fUi's scene tree. Its size is
     // the sum of what is in it: 8 padding, the prompt (24), the search field
     // (36), the list (LIST_ROWS two-line rows of 52 + 4), the button row (36),
     // 8 gaps/padding between.
     // The window is in PIXELS (x sk); the tree inside is in design points.
     let slh: u64 = LIST_ROWS * 52 + 4
-    let sbh_d: u64 = 8 + 24 + 8 + 36 + 8 + slh + 8 + 36 + 8
-    let sbw: u64 = 440 * sk
+    var sbh_d: u64 = 8 + 24 + 8 + 36 + 8 + slh + 8 + 36 + 8
+    var sbw: u64 = 440 * sk
+    var ky: u64 = sbh_d - 8 - 36
+    var pmx: u64 = 12
+    if g_w11 {
+        // r402: the height follows the work area (and what there is to show); the power menu
+        // stands on the button at the right of the footer
+        var avail_d: u64 = 640
+        let shh: u64 = wlibc.screen_h()
+        let barr: u64 = l_bar * sk
+        if shh > barr + 2 * AIR {
+            avail_d = (shh - barr - 2 * AIR) / sk
+        }
+        w11_layout(all_n, avail_d)
+        sbh_d = g_hd
+        sbw = W11_W * sk
+        ky = g_hd - 20 - 44
+        pmx = W11_W - 20 - 220
+    }
     let sbh: u64 = sbh_d * sk
-    let ky: u64 = sbh_d - 8 - 36
     let anker: u64 = anker_x(sbw)
     let ay: u64 = anker_y(sbh)
     // RUNDE ECHTHARDWARE-3: das Startmenue liegt auf SEINER eigenen
@@ -1369,22 +1613,46 @@ fn u_start(args: u64) -> u64 {
             say((&s_pwbtn[0 as usize]) as u64)
             nl()
             if !versteckt || g_offen {
-                pw_menue_auf(12, ky)
+                pw_menue_auf(pmx, ky)
             } else {
                 fuiscene.hide(false)
                 g_offen = true
-                pw_menue_auf(12, ky)
+                pw_menue_auf(pmx, ky)
             }
         }
         let key: u64 = fuiscene.pump()
+        if g_say && g_w11 {
+            g_say = false
+            say_rects_w11()
+        }
         if key == K_ENTRY {
-            starten(fuiscene.table_sel(K_LIST))
+            if !g_home {
+                starten(fuiscene.table_sel(K_LIST))
+            }
+        } else if g_w11 && key >= K_PIN && key < K_PIN + 18 {
+            // r402: a pinned tile
+            if key - K_PIN < pin_n {
+                starten_app(pin_app[(key - K_PIN) as usize])
+            }
+        } else if g_w11 && key >= K_REC && key < K_REC + 6 {
+            // r402: a recommended row
+            if key - K_REC < rec_n {
+                starten_app(rec_app[(key - K_REC) as usize])
+            }
+        } else if g_w11 && key == K_ALL {
+            g_alle = true
+            new_find()
+            fuiscene.focus(K_ENTRY)
+        } else if g_w11 && key == K_BACK {
+            g_alle = false
+            new_find()
+            fuiscene.focus(K_ENTRY)
         } else if key == K_LIST {
             starten(fuiscene.table_sel(K_LIST))
         } else if key == K_RUN {
             starten(fuiscene.table_sel(K_LIST))
         } else if key == K_POWER {
-            pw_menue_auf(12, ky)
+            pw_menue_auf(pmx, ky)
         } else if key == fuiscene.KEY_POPUP && pw_menue != 0 {
             let idx: u64 = fuiscene.menu_pick() - 1
             pw_menue = 0
@@ -1433,7 +1701,7 @@ fn u_start(args: u64) -> u64 {
         // Up and Down move the choice in the list while the keyboard is in
         // the search field (in the list the list itself takes them)
         if ks != g_kseq && pw_frage == 0 && pw_menue == 0 && ntreffer > 0
-            && fuiscene.focus_key() != K_LIST {
+            && !g_home && fuiscene.focus_key() != K_LIST {
             let kl: u64 = fuiscene.key_any()
             if kl == wlib.KEY_DOWN || kl == wlib.KEY_UP {
                 var sel: u64 = fuiscene.table_sel(K_LIST)
@@ -1449,6 +1717,7 @@ fn u_start(args: u64) -> u64 {
         }
         if g_clear {
             g_clear = false
+            g_alle = false
             suchfeld[0 as usize] = 0 as u8
             fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
             vorher = 0
@@ -1474,8 +1743,11 @@ fn u_start(args: u64) -> u64 {
             g_offen = true
             g_gnade = nun + GNADE_TICKS
             let _tn: bool = wlib.theme_now()
+            fuiscene.pointer_leave()
             fuiscene.focus(K_ENTRY)
             fuiscene.refresh()
+            // r402: the report of the new picture comes after the next pump (it rebuilds)
+            g_say = true
         }
         // what the search field holds now
         let _cp: u64 = ulib.strncpy((&suchfeld[0 as usize]) as u64,
@@ -1499,6 +1771,188 @@ const K_POWER: u64 = 4
 // (picture, name in bold, description under it) and the button row: the
 // power button at the left, "Run" at the right.
 fn build() {
+    if g_w11 {
+        build_w11()
+    } else {
+        build_classic()
+    }
+}
+
+// ---------------------------------------------------------------- r402: the Windows 11 window
+//
+// The picture of a pinned tile: the programme's icon (32 points) over its name (12 points,
+// centred). `ud` < K_PIN-ish: 0..17 = pinned index, 100..105 = recommended index.
+fn w11_tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    if ud < 100 {
+        if ud >= pin_n {
+            return
+        }
+        let a: u64 = pin_app[(ud) as usize]
+        let isz: u64 = fuiscene.sp(32)
+        fuiscene.icon_at(pin_ico[(ud) as usize], x + (w - isz) / 2, y + fuiscene.sp(12), isz,
+            appdir.name_of(a))
+        let nm: u64 = appdir.name_of(a)
+        let px: u64 = fuiscene.sp(12)
+        let tw: u64 = fuiscene.text_width(nm, px)
+        var tx: u64 = x + fuiscene.sp(4)
+        var room: u64 = w - fuiscene.sp(8)
+        if tw < room {
+            tx = x + (w - tw) / 2
+            room = tw + fuiscene.sp(2)
+        }
+        fuiscene.text_role(tx, y + fuiscene.sp(12) + isz + fuiscene.sp(8) + px - fuiscene.sp(2),
+            room, nm, px, false, fuiscene.R_TEXT)
+        return
+    }
+    let r: u64 = ud - 100
+    if r >= rec_n {
+        return
+    }
+    let a2: u64 = rec_app[(r) as usize]
+    let isz2: u64 = fuiscene.sp(32)
+    fuiscene.icon_at(rec_ico[(r) as usize], x + fuiscene.sp(10), y + (h - isz2) / 2, isz2,
+        appdir.name_of(a2))
+    let tx2: u64 = x + fuiscene.sp(54)
+    let room2: u64 = w - fuiscene.sp(54) - fuiscene.sp(8)
+    fuiscene.text_role(tx2, y + fuiscene.sp(22), room2, appdir.name_of(a2), fuiscene.sp(14),
+        false, fuiscene.R_TEXT)
+    fuiscene.text_role(tx2, y + fuiscene.sp(38), room2, appdir.info_of(a2), fuiscene.sp(12),
+        false, fuiscene.R_MUTED)
+}
+
+// The two section titles and the footer's user are small painted fields.
+fn w11_hdr_pin(x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.text_role(x + fuiscene.sp(4), y + h / 2 + fuiscene.sp(5), w,
+        msg.get((&k_pinned[0 as usize]) as u64), fuiscene.sp(14), true, fuiscene.R_TEXT)
+}
+
+fn w11_hdr_rec(x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.text_role(x + fuiscene.sp(4), y + h / 2 + fuiscene.sp(5), w,
+        msg.get((&k_recom[0 as usize]) as u64), fuiscene.sp(14), true, fuiscene.R_TEXT)
+}
+
+// shown while there is nothing recent and nothing else to recommend
+fn w11_rec_none(x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.text_role(x + fuiscene.sp(4), y + fuiscene.sp(18), w,
+        msg.get((&k_nonerec[0 as usize]) as u64), fuiscene.sp(12), false, fuiscene.R_MUTED)
+}
+
+fn w11_hdr_res(x: u64, y: u64, w: u64, h: u64) {
+    var k: u64 = (&k_resl[0 as usize]) as u64
+    if g_alle {
+        k = (&k_allapps[0 as usize]) as u64
+    }
+    fuiscene.text_role(x + fuiscene.sp(4), y + h / 2 + fuiscene.sp(5), w, msg.get(k),
+        fuiscene.sp(14), true, fuiscene.R_TEXT)
+}
+
+fn w11_footer(x: u64, y: u64, w: u64, h: u64) {
+    let d: u64 = fuiscene.sp(32)
+    let cy: u64 = y + (h - d) / 2
+    fuiscene.cv_round(x + fuiscene.sp(8), cy, d, d, d / 2, fuiscene.R_ACCENT)
+    var one: [u8; 2] = [0 as u8; 2]
+    one[0 as usize] = s_user[0 as usize]
+    if one[0 as usize] >= 97 as u8 && one[0 as usize] <= 122 as u8 {
+        one[0 as usize] = one[0 as usize] - 32 as u8
+    }
+    let px: u64 = fuiscene.sp(14)
+    let lw: u64 = fuiscene.text_width((&one[0 as usize]) as u64, px)
+    fuiscene.text_role(x + fuiscene.sp(8) + (d - lw) / 2, cy + (d - px) / 2 + px - fuiscene.sp(2),
+        d, (&one[0 as usize]) as u64, px, true, fuiscene.R_ONFILL)
+    fuiscene.text_role(x + fuiscene.sp(8) + d + fuiscene.sp(10), cy + (d - px) / 2 + px - fuiscene.sp(2),
+        w - d - fuiscene.sp(24), (&s_user[0 as usize]) as u64, px, false, fuiscene.R_TEXT)
+}
+
+fn build_w11() {
+    let col: usize = fuiscene.root()
+    fuiscene.set_pad(col, 20)
+    fuiscene.set_gap(col, 0)
+    let fe: usize = fuiscene.entry(col, K_ENTRY, W11_IN, (&suchfeld[0 as usize]) as u64)
+    fuiscene.set_size(fe, W11_IN, 40)
+    fuiscene.entry_hint(K_ENTRY, msg.get((&k_hint[0 as usize]) as u64))
+    let _g0: usize = fuiscene.space(col, W11_IN, 8)
+    if g_home {
+        let hr: usize = fuiscene.row(col)
+        fuiscene.set_gap(hr, 0)
+        let _h1: usize = fuiscene.canvas(hr, 0, 400, 32, w11_hdr_pin)
+        let sp1: usize = fuiscene.row(hr)
+        fuiscene.set_grow(sp1, 1)
+        let ba: usize = fuiscene.button(hr, msg.get((&k_allapps[0 as usize]) as u64), K_ALL)
+        fuiscene.set_size(ba, 110, 28)
+        var r: u64 = 0
+        var idx: u64 = 0
+        while r < g_pr {
+            let rw: usize = fuiscene.row(col)
+            fuiscene.set_gap(rw, 0)
+            var c: u64 = 0
+            while c < 6 {
+                if idx < pin_n {
+                    let _t: usize = fuiscene.ftile(rw, K_PIN + idx,
+                        appdir.name_of(pin_app[(idx) as usize]), 100, 88, idx, w11_tile_cb)
+                } else {
+                    let _e: usize = fuiscene.space(rw, 100, 88)
+                }
+                idx = idx + 1
+                c = c + 1
+            }
+            r = r + 1
+        }
+        let _g1: usize = fuiscene.space(col, W11_IN, 4)
+        let _h2: usize = fuiscene.canvas(col, 0, W11_IN, 32, w11_hdr_rec)
+        var rr: u64 = 0
+        var ri: u64 = 0
+        if rec_n == 0 {
+            // nothing recent yet and nothing else: one muted line, the block keeps its height
+            let _nr: usize = fuiscene.canvas(col, 0, W11_IN, g_rr * 52, w11_rec_none)
+            rr = g_rr
+        }
+        while rr < g_rr {
+            let rw2: usize = fuiscene.row(col)
+            fuiscene.set_gap(rw2, 0)
+            var c2: u64 = 0
+            while c2 < 2 {
+                if ri < rec_n {
+                    let _t2: usize = fuiscene.ftile(rw2, K_REC + ri,
+                        appdir.name_of(rec_app[(ri) as usize]), 300, 52, 100 + ri, w11_tile_cb)
+                } else {
+                    let _e2: usize = fuiscene.space(rw2, 300, 52)
+                }
+                ri = ri + 1
+                c2 = c2 + 1
+            }
+            rr = rr + 1
+        }
+    } else {
+        // search results, or "All apps": a header row and the list of the old window
+        let hr2: usize = fuiscene.row(col)
+        fuiscene.set_gap(hr2, 0)
+        let _h3: usize = fuiscene.canvas(hr2, 0, 400, 32, w11_hdr_res)
+        let sp2: usize = fuiscene.row(hr2)
+        fuiscene.set_grow(sp2, 1)
+        if g_alle {
+            let bb: usize = fuiscene.button(hr2, msg.get((&k_backb[0 as usize]) as u64), K_BACK)
+            fuiscene.set_size(bb, 90, 28)
+        }
+        let lh: u64 = 36 + w11_mid(g_pr, g_rr)
+        let _ls: usize = fuiscene.table_list(col, K_LIST, W11_IN, lh, 2,
+            (&liste[0 as usize]) as u64)
+        fuiscene.table_two(K_LIST, true)
+        fuiscene.table_icons(K_LIST, (&farben[0 as usize]) as u64)
+        fuiscene.table_click_only(K_LIST, true)
+    }
+    let _g2: usize = fuiscene.space(col, W11_IN, 8)
+    let _sep: usize = fuiscene.separator(col)
+    let fr: usize = fuiscene.row(col)
+    fuiscene.set_gap(fr, 0)
+    let _fc: usize = fuiscene.canvas(fr, 0, 500, 56, w11_footer)
+    let sp3: usize = fuiscene.row(fr)
+    fuiscene.set_grow(sp3, 1)
+    let pb: usize = fuiscene.icon_button(fr, icons.POWER, msg.get((&k_pitem[0 as usize]) as u64),
+        K_POWER)
+    fuiscene.set_size(pb, 44, 44)
+}
+
+fn build_classic() {
     let col: usize = fuiscene.root()
     let _lb: usize = fuiscene.label(col, msg.get((&k_prompt[0 as usize]) as u64))
     let _fe: usize = fuiscene.entry(col, K_ENTRY, 424, (&suchfeld[0 as usize]) as u64)
@@ -1516,6 +1970,10 @@ fn build() {
 }
 
 fn say_rects() {
+    if g_w11 {
+        say_rects_w11()
+        return
+    }
     say_rect(0, 1, 8, 8, 424, 24)
     say_node(1, K_ENTRY)
     say_node(2, K_LIST)
@@ -1550,9 +2008,85 @@ fn say_rects() {
     fuiscene.say_texts()
 }
 
+// r402: the Windows 11 window reports the field, the power button and every tile with its
+// rectangle and name -- what the acceptance run clicks on.
+fn say_rects_w11() {
+    say_node(1, K_ENTRY)
+    say_node(4, K_POWER)
+    if g_home {
+        say_node(5, K_ALL)
+    } else {
+        say_node(2, K_LIST)
+        if g_alle {
+            say_node(6, K_BACK)
+        }
+    }
+    var a: [u8; 21] = "launcher: tile \0\0\0\0\0\0"
+    var si: [u8; 4] = "i=\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    var sn: [u8; 8] = " name=[\0"
+    var sz: [u8; 4] = "]\0\0\0"
+    var k: u64 = 0
+    while k < pin_n + rec_n && g_home {
+        var key: u64 = K_PIN + k
+        var nm: u64 = 0
+        if k < pin_n {
+            nm = appdir.name_of(pin_app[(k) as usize])
+        } else {
+            key = K_REC + (k - pin_n)
+            nm = appdir.name_of(rec_app[(k - pin_n) as usize])
+        }
+        let i: usize = fuiscene.node_of_key(key)
+        if i != fuiscene.NONE {
+            say((&a[0 as usize]) as u64)
+            kv((&si[0 as usize]) as u64, key)
+            kv((&sx[0 as usize]) as u64, fuiscene.node_x(i))
+            kv((&sy[0 as usize]) as u64, fuiscene.node_y(i))
+            kv((&sw[0 as usize]) as u64, fuiscene.node_w(i))
+            kv((&sh[0 as usize]) as u64, fuiscene.node_h(i))
+            say((&sn[0 as usize]) as u64)
+            say(nm)
+            say((&sz[0 as usize]) as u64)
+            nl()
+        }
+        k = k + 1
+    }
+    var s_rc: [u8; 17] = "launcher: rec k=\0"
+    var s_rn2: [u8; 8] = " name=[\0"
+    var s_rz: [u8; 4] = "]\0\0\0"
+    var rk: u64 = 0
+    while rk < rec_n && g_home {
+        say((&s_rc[0 as usize]) as u64)
+        sayn(rk)
+        say((&s_rn2[0 as usize]) as u64)
+        say(appdir.name_of(rec_app[(rk) as usize]))
+        say((&s_rz[0 as usize]) as u64)
+        nl()
+        rk = rk + 1
+    }
+    var s_md: [u8; 22] = "launcher: w11 home=\0\0\0"
+    var hv: u64 = 0
+    if g_home {
+        hv = 1
+    }
+    kv((&s_md[0 as usize]) as u64, hv)
+    var s_pn: [u8; 6] = " pin=\0"
+    var s_rn: [u8; 6] = " rec=\0"
+    kv((&s_pn[0 as usize]) as u64, pin_n)
+    kv((&s_rn[0 as usize]) as u64, rec_n)
+    nl()
+    fuiscene.say_texts()
+}
+
 // The rectangle of the node with this key, as `launcher: rect id=` says it.
 fn say_node(id: u64, key: u64) {
     let i: usize = fuiscene.node_of_key(key)
+    if i == fuiscene.NONE {
+        return
+    }
     var k: u64 = 2
     if key == K_ENTRY {
         k = 4

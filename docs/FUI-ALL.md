@@ -609,3 +609,22 @@ Not done (stage 2 and on): painting the rectangles from fUi's widgets instead of
 painters (`paint_band`, 800 lines), the layout in flex boxes instead of `layout()`, the pointer
 through the host, auto-hide and drag in the host. Lines on the scene tree (by window): the bar
 now counts as a scene window for its tree and events, not yet for its painting.
+
+## 14. Round r402 (07.10.2026): the window chrome, the start menu, the compositor question
+
+* **The window chrome through fUi's integer core.** Title bar, caption buttons and frame are drawn by the
+  window server with `lib/fui/core.fi` (the kernel-safe, integer-only half of fUi: the three caption marks
+  `cap_*`, rounded corners with coverage, the button surface), as since 10.09.2026. New: the **measures** are
+  shape numbers (`title_bar`, `cap_w`, `frame`) carried like the radius and the shadow (`wlibc` `M_*` ->
+  `WF_*` -> `wm.FM_*`), `osum.shape` says 32 / 46 / 1 (Windows 11), the others keep 19 / 30 / 2; the buttons
+  have a hover, a **held** and a release-to-act state; Alt+F4. `docs/COMPOSITOR.md` section 3 says why a
+  fUi *scene tree* for the chrome has to wait for a ring-3 compositor (the kernel is `profile kernel`: no
+  floating point, no heap) and section 4 the stages. `tools/deco/run.sh` measures it.
+* **What the chrome is NOT yet:** a scene tree, an a11y subtree (the kernel can add four nodes per
+  framed window when a privileged reader asks -- stage C-S1 follow-up), the Alt+Tab switcher, the snap
+  preview and the window menu as fUi windows (C-S6).
+* **The start menu** is the Windows 11 window on the same host (`launcher.fi`): the pieces are in
+  `fuiscene` (`ftile` = a tile without a face of its own whose hover / press plates are two rules of the
+  style sheet on a class, `icon_at`, `entry_hint`, `text_role`). Old list: `liste` / `startmenu=list`.
+* **Console editor:** VT subset in the kernel terminal (`wm.fi`), tested in the kernel (`wm: vttest 7 / 7`).
+* **Slider read-outs:** `fuiscene.slider_readout`.

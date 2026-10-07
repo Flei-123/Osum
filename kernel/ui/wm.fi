@@ -113,7 +113,7 @@ export {
     set_form, form, form_writes, shadow_px, aa_px, paint_reset,
     shadow_builds, set_shadow_old, cap_hover, cap_hits,
     CAP_MIN, CAP_MAX, CAP_CLOSE,
-    FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
+    vt_selftest, vt_selftest_max, FORM_SLOTS, FM_TITLE_BAR, FM_CAP_W, FM_FRAME, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
     FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
     // RUNDE ZIEH: die drei Wirkungen des Aufhebens, einzeln.
     FM_LIFT, FM_TILT, FM_SWING,
@@ -726,6 +726,9 @@ const S_UISC: u64 = 0x2E8 // wie oft eine davon geklickt wurde
 //               als VERL aus dem Ring (Justins 1283).
 const S_EVKOAL: u64 = 0x2F0
 const S_EVTERM: u64 = 0x2F8
+// r402: the caption button that is held down, (window * 4 + n) + 1, 0 = none. A caption button
+// acts on RELEASE over the same button (as on Windows); the held one is painted darker.
+const S_CAPDOWN: u64 = 0x3B0
 // DIE MASKE SELBST. Zwei Baenke -- aktiv und unscharf -- mal
 // SHMASK_SIDE^2 Oktette. 40 ist RADIUS_MAX + SHADOW_MAX, also die
 // groesste Ecke, die dieser Server ueberhaupt malen darf.
@@ -1186,7 +1189,22 @@ const SHMASK_SIDE: u64 = 40
 // vorgesehen -- der faellt weg, weil `FM_BLUR` dieses Systems der eine
 // Weichzeichner ist. Wer hier etwas aendert, aendert `wlibc.FORM_SLOTS`
 // mit -- die beiden Listen halten `tools/paint/run.sh` gegeneinander.
-const FORM_SLOTS: u64 = 18
+const FORM_SLOTS: u64 = 21
+// r402 (DECO): THE THREE MEASURES OF THE WINDOW CHROME ARE SHAPE NUMBERS NOW.
+//
+// Until here the title bar (22), the frame (2) and the caption button (30) were three
+// constants; `osum.shape` could not ask for a Windows 11 bar (32 high, buttons 46 wide, a
+// one point frame). They go the same way as the radius and the shadow: resolved in ring 3, one
+// number each, 0 = "never said" = the constants of the old stand (so `classic` and `modern`
+// draw octet for octet what they drew). All three are in DESIGN POINTS and grow with
+// `uisc`. The numbers are a contract with `sys.WF_*` and `wlibc.WF_*`.
+//   FM_TITLE_BAR  the height of the bar itself (the part that carries title and buttons);
+//                 the old stand is 19 (= 22 - 1 separator - 2 frame)
+//   FM_CAP_W      the width of ONE caption button (30 before; Windows 11: 46)
+//   FM_FRAME      the frame at left, right and below (2 before; Windows 11: 1)
+const FM_TITLE_BAR: u64 = 18
+const FM_CAP_W: u64 = 19
+const FM_FRAME: u64 = 20
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -1877,6 +1895,15 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     }
     if i == FM_CAPTION && w > 1 {
         w = 1
+    }
+    if i == FM_TITLE_BAR && w > 64 {
+        w = 64
+    }
+    if i == FM_CAP_W && w > 120 {
+        w = 120
+    }
+    if i == FM_FRAME && w > 4 {
+        w = 4
     }
     // RUNDE VSYNC: eine halbe Sekunde ist die Obergrenze. Laenger ist
     // keine Rueckmeldung mehr, sondern Warten.
@@ -2766,10 +2793,55 @@ fn top_layer_win(state: u64) -> u64 {
 // Merkerbits, der Platz in der Stapelfolge -- und die beiden neuen
 // Zaehler. Wer diese Liste hat, muss ueber die Taskleiste nicht mehr
 // raten.
+// r402 (docs/COMPOSITOR.md S0): THE FRAME TIME SINCE THE LAST F12, by bucket. The counters of the frame
+// time (`S_FRUS ...`, the same ones `bildzeit:` prints at the end of a run) are printed and set to
+// zero, so that a runner can measure one PHASE after the boot (idle, pointer, menu, window drag)
+// and not the mean over a whole run that is dominated by the start.
+fn bild_say_reset(state: u64) {
+    var s_b: [u8; 12] = "wm: bild n=\0"
+    var s_m: [u8; 9] = " mittel=\0"
+    var s_x: [u8; 6] = " max=\0"
+    var s_u: [u8; 10] = " ueber16=\0"
+    var s_f: [u8; 7] = " fach=\0"
+    let n: u64 = gs(state, S_FRN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_m[0]) as u64)
+    if n != 0 {
+        serial.dec(gs(state, S_FRUS) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(gs(state, S_FRMAX))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(gs(state, S_FRUEBER))
+    serial.puts((&s_f[0]) as u64)
+    var k: u64 = 0
+    while k < 8 {
+        serial.dec(gs(state, S_FRH + k * 8))
+        if k < 7 {
+            serial.put(32 as u8)
+        }
+        ss(state, S_FRH + k * 8, 0)
+        k = k + 1
+    }
+    serial.nl()
+    ss(state, S_FRUS, 0)
+    ss(state, S_FRN, 0)
+    ss(state, S_FRMAX, 0)
+    ss(state, S_FRUEBER, 0)
+}
+
 fn wins_say(state: u64) {
     if !ready(state) {
         return
     }
+    // r402: a marker in front of every dump, so that a runner can tell one dump from the next
+    var s_fl: [u8; 14] = "wm: fenliste\0\0"
+    serial.puts((&s_fl[0]) as u64)
+    serial.nl()
+    bild_say_reset(state)
     var s_h: [u8; 11] = "wm: fen i=\0"
     var s_id: [u8; 5] = " id=\0"
     var s_x: [u8; 4] = " x=\0"
@@ -2848,6 +2920,17 @@ fn wins_say(state: u64) {
                 serial.hex(tg)
                 serial.puts((&s_tk[0]) as u64)
                 serial.dec(titel_schnitt_alt)
+                // r402: the measures of the chrome, so that a runner can place the three
+                // caption buttons without a constant of its own
+                var s_br: [u8; 6] = " bar=\0"
+                var s_cw: [u8; 7] = " capw=\0"
+                var s_fr: [u8; 5] = " fr=\0"
+                serial.puts((&s_br[0]) as u64)
+                serial.dec(title_h(state) - 1 - border(state))
+                serial.puts((&s_cw[0]) as u64)
+                serial.dec(cap_w(state))
+                serial.puts((&s_fr[0]) as u64)
+                serial.dec(border(state))
             }
             serial.nl()
         }
@@ -3594,7 +3677,7 @@ fn destroy(state: u64, i: u64) -> bool {
         wsv(state, i, W_BUF, 0)
     }
     if wg(state, i, W_GRID) != 0 {
-        mem.frame_free_run(state, wg(state, i, W_GRID), 1)
+        mem.frame_free_run(state, wg(state, i, W_GRID), 2)
         wsv(state, i, W_GRID, 0)
     }
     // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
@@ -4107,12 +4190,31 @@ fn set_uiscale(state: u64, v: u64) {
     }
 }
 
+// r402: the three measures come from the form slots (0 = the constants of the old stand).
+// The bar is `bar` design points high, below it one separator line, around it the frame:
+// `title_h` is the whole top part of the outer rectangle (frame + bar + separator).
+fn frame_d(state: u64) -> u64 {
+    let v: u64 = form(state, FM_FRAME)
+    if v == 0 {
+        return BORDER0
+    }
+    return v
+}
+
+fn bar_d(state: u64) -> u64 {
+    let v: u64 = form(state, FM_TITLE_BAR)
+    if v == 0 {
+        return TITLE_H0 - 1 - BORDER0
+    }
+    return v
+}
+
 fn title_h(state: u64) -> u64 {
-    return TITLE_H0 * uisc(state)
+    return (frame_d(state) + bar_d(state) + 1) * uisc(state)
 }
 
 fn border(state: u64) -> u64 {
-    return BORDER0 * uisc(state)
+    return frame_d(state) * uisc(state)
 }
 
 fn title_pad(state: u64) -> u64 {
@@ -4199,7 +4301,11 @@ fn close_w(state: u64) -> u64 {
 }
 
 fn cap_w(state: u64) -> u64 {
-    return CAP_W0 * uisc(state)
+    let v: u64 = form(state, FM_CAP_W)
+    if v == 0 {
+        return CAP_W0 * uisc(state)
+    }
+    return v * uisc(state)
 }
 
 // RUNDE SCHIRM: das groesste Fenster, das dieser Server macht -- die
@@ -8365,15 +8471,21 @@ fn paint_caption(state: u64, i: u64, wx: i64, wy: i64, ow: i64,
         tr = rw - border(state)
     }
     let hov: u64 = gs(state, S_CAPHOV)
+    let dwn: u64 = gs(state, S_CAPDOWN)
     var n: u64 = 0
     while n < CAP_N {
         let x: i64 = bx + (n * cap_w(state)) as i64
         var mark: u64 = schrift
         if hov != 0 && hov - 1 == i * 4 + n {
+            // r402: the held button (pointer still on it) is one step darker / stronger
+            let held: bool = dwn == hov
             if n == CAP_CLOSE {
                 // ROT MIT WEISSEM KREUZ -- die eine Stelle, an der
                 // diese Oberflaeche laut werden darf.
-                let rot: u64 = deco(state, DK_CLOSE)
+                var rot: u64 = deco(state, DK_CLOSE)
+                if held {
+                    rot = rgb24(state, mix24(deco_rgb(state, DK_CLOSE), 0, 14))
+                }
                 cap_face(state, x, by, h, tr, rot, n == CAP_CLOSE,
                     ax0, ay0, ax1, ay1)
                 mark = deco(state, DK_CLOSE_MARK)
@@ -8383,8 +8495,12 @@ fn paint_caption(state: u64, i: u64, wx: i64, wy: i64, ow: i64,
                 // neuer Farbsteckplatz und kein festes Grau -- auf
                 // einem dunklen Thema muss sie heller werden und auf
                 // einem hellen dunkler, und genau das tut das Mischen.
+                var pc: u64 = 12
+                if held {
+                    pc = 22
+                }
                 let f: u64 = rgb24(state, mix24(deco_title(state, i),
-                    deco_schrift(state, i), 12))
+                    deco_schrift(state, i), pc))
                 cap_face(state, x, by, h, tr, f, false,
                     ax0, ay0, ax1, ay1)
             }
@@ -8776,6 +8892,48 @@ fn cap_box(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
 // Der Zeiger ist gewandert: welche Schaltflaeche liegt jetzt unter ihm?
 // Aendert sich die Antwort, wird die Titelleiste des betroffenen
 // Fensters schmutzig -- und nur sie.
+// r402: what a caption button does (it used to run on the press itself).
+fn cap_act(state: u64, i: u64, cn: u64) {
+    if !valid(state, i) || !deko(state, i) {
+        return
+    }
+    ss(state, S_CAPHITS, gs(state, S_CAPHITS) + 1)
+    if cn == CAP_CLOSE {
+        // RUNDE OBERFLAECHE: UEBER DIE BEWEGUNG. `close_anim` pusht E_CLOSE selbst und ruft
+        // `destroy` erst, wenn die Bewegung durch ist -- ist sie abgeschaltet, sofort.
+        let _ca: bool = close_anim(state, i)
+        return
+    }
+    if cn == CAP_MIN {
+        // Dasselbe fuer das Minimieren: am Ende steht `set_hidden`, aber erst nach der Bewegung.
+        let _ma: bool = minimize_anim(state, i)
+        return
+    }
+    let auf: bool = (wg(state, i, W_FLAGS) & F_MAXIMIZED) == 0
+    let _m: bool = maximize(state, i, auf)
+}
+
+// The left button went up: a held caption button acts if the pointer is still on it.
+fn cap_release(state: u64, over: u64, x: i64, y: i64) {
+    let d: u64 = gs(state, S_CAPDOWN)
+    if d == 0 {
+        return
+    }
+    ss(state, S_CAPDOWN, 0)
+    let w: u64 = (d - 1) / 4
+    let n: u64 = (d - 1) % 4
+    if w >= MAX_WIN || !valid(state, w) {
+        return
+    }
+    damage_caption(state, w)
+    if over != w || sperre_an(state) || !darf(state, w) {
+        return
+    }
+    if cap_at(state, w, x, y) == n {
+        cap_act(state, w, n)
+    }
+}
+
 fn cap_track(state: u64, i: u64, x: i64, y: i64) {
     var nv: u64 = 0
     if i < MAX_WIN {
@@ -11156,6 +11314,9 @@ fn on_mouse(state: u64) {
     // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
     // hat.
     cap_track(state, i, x, y)
+    if gs(state, S_CAPDOWN) != 0 && (btn & ps2m.B_LEFT) == 0 {
+        cap_release(state, i, x, y)
+    }
     // RUNDE ECHTHARDWARE-4: die Form des Zeigers folgt dem, worueber
     // er steht. Der Aufruf steht VOR dem Ausstieg fuer "kein Fenster
     // getroffen" -- sonst bliebe der Doppelpfeil stehen, wenn man vom
@@ -11205,27 +11366,10 @@ fn on_mouse(state: u64) {
                 // wer auf das Kreuz klickt, will nicht schieben.
                 let cn: u64 = cap_at(state, i, x, y)
                 if cn < CAP_N {
-                    ss(state, S_CAPHITS, gs(state, S_CAPHITS) + 1)
-                    if cn == CAP_CLOSE {
-                        // RUNDE OBERFLAECHE: UEBER DIE BEWEGUNG.
-                        // `close_anim` pusht E_CLOSE selbst und ruft
-                        // `destroy` erst, wenn die Bewegung durch ist
-                        // -- ist sie abgeschaltet, sofort. Hier stand
-                        // `destroy` direkt, und genau deshalb war
-                        // AN_WIN_CLOSE seit jeher erklaert und nie
-                        // gesehen.
-                        let _ca: bool = close_anim(state, i)
-                        return
-                    }
-                    if cn == CAP_MIN {
-                        // Dasselbe fuer das Minimieren: am Ende steht
-                        // `set_hidden`, aber erst nach der Bewegung.
-                        let _ma: bool = minimize_anim(state, i)
-                        return
-                    }
-                    let auf: bool =
-                        (wg(state, i, W_FLAGS) & F_MAXIMIZED) == 0
-                    let _m: bool = maximize(state, i, auf)
+                    // r402: the press only HOLDS the button (painted darker); the action
+                    // is `cap_act`, on release over the same button (`cap_release`).
+                    ss(state, S_CAPDOWN, i * 4 + cn + 1)
+                    damage_caption(state, i)
                     return
                 }
                 // Schliessfeld?
@@ -11928,7 +12072,9 @@ fn term_setup(state: u64, i: u64) {
     wsv(state, i, W_ROWS, rows)
     let neu_gitter: bool = wg(state, i, W_GRID) == 0
     if neu_gitter {
-        let g0: u64 = mem.frame_run(state, 1)
+        // r400: two frames -- the first holds the characters, the second one attribute
+        // octet per cell (bit 0 = reverse video, set by the VT subset `term_csi`)
+        let g0: u64 = mem.frame_run(state, 2)
         wsv(state, i, W_GRID, g0)
     }
     let g: u64 = wg(state, i, W_GRID)
@@ -11961,9 +12107,11 @@ fn term_setup(state: u64, i: u64) {
                 kstate.set8(g + k, 32 as u8)
                 k = k + 1
             }
+            attr_clear(g)
             wsv(state, i, W_CX, 0)
             wsv(state, i, W_CY, 0)
         } else if cols != alt_cols || rows != alt_rows {
+            attr_clear(g)
             // UMKOPIEREN, VON UNTEN NACH OBEN ODER VON OBEN NACH
             // UNTEN -- je nachdem, wohin geschoben wird, damit sich
             // Quelle und Ziel im selben Rahmen nicht ueberholen.
@@ -12075,6 +12223,39 @@ fn cell_set(state: u64, i: u64, c: u64, r: u64, ch: u64) {
     kstate.set8(g + k, ch as u8)
 }
 
+// r400: the attribute octet of a cell (bit 0 = reverse video), in the second frame of the grid.
+fn attr_clear(g: u64) {
+    var k: u64 = 0
+    while k < 4096 {
+        kstate.set8(g + 4096 + k, 0 as u8)
+        k = k + 1
+    }
+}
+
+fn cell_attr(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return 0
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return 0
+    }
+    return kstate.get8(g + 4096 + k)
+}
+
+fn cell_attr_set(state: u64, i: u64, c: u64, r: u64, a: u64) {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return
+    }
+    kstate.set8(g + 4096 + k, a as u8)
+}
+
 fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
     let g: u64 = wg(state, i, W_GRID)
     if g == 0 {
@@ -12144,7 +12325,14 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
     let cw: u64 = wg(state, i, W_CELLW)
     let ch: u64 = wg(state, i, W_CELLH)
     let f: u64 = gs(state, S_FONT_MONO)
-    fill(state, i, c * cw, r * ch, cw, ch, wg(state, i, W_BG))
+    // r400: reverse video swaps the two colours of the cell
+    var cbg: u64 = wg(state, i, W_BG)
+    var cfg: u64 = wg(state, i, W_FG)
+    if (cell_attr(state, i, c, r) & 1) != 0 {
+        cbg = wg(state, i, W_FG)
+        cfg = wg(state, i, W_BG)
+    }
+    fill(state, i, c * cw, r * ch, cw, ch, cbg)
     let z: u64 = cell_get(state, i, c, r)
     if z <= 32 || f >= ttf.MAX_FONTS {
         return
@@ -12153,7 +12341,7 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
     let slot: u64 = ttf.glyph(state, f, z, px)
     if slot < ttf.SLOTS {
         draw_glyph_clip(state, i, slot, (c * cw) as i64,
-            (r * ch) as i64 + ttf.ascent(state, f, px), wg(state, i, W_FG),
+            (r * ch) as i64 + ttf.ascent(state, f, px), cfg,
             (c * cw) as i64, ((c + 1) * cw) as i64)
     }
 }
@@ -12193,6 +12381,7 @@ fn term_scroll(state: u64, i: u64) {
         var c: u64 = 0
         while c < cols {
             cell_set(state, i, c, r - 1, cell_get(state, i, c, r))
+            cell_attr_set(state, i, c, r - 1, cell_attr(state, i, c, r))
             c = c + 1
         }
         r = r + 1
@@ -12200,6 +12389,7 @@ fn term_scroll(state: u64, i: u64) {
     var c2: u64 = 0
     while c2 < cols {
         cell_set(state, i, c2, rows - 1, 32)
+        cell_attr_set(state, i, c2, rows - 1, 0)
         c2 = c2 + 1
     }
     // Der Bildinhalt wandert mit -- eine Zeile nach oben, statt alle
@@ -12246,11 +12436,249 @@ fn term_scroll(state: u64, i: u64) {
 // gesetzt, weil ein sichtbarer Platzhalter der einzige Befund ist, der
 // sich spaeter noch melden laesst.
 static mut term_utf: u64 = 0
+// r400: a SUBSET OF VT100/ANSI, enough for the console editor (`/bin/edit`) and `less`-like
+// programs: cursor position (H f A B C D G d), erase (J K), reverse video (m 7 / 27 / 0) and the
+// cursor switch (?25 h/l, ignored: the terminal draws no text cursor). Everything else after
+// `ESC [` is swallowed up to its final octet, so nothing leaks into the screen as rubbish.
+static mut term_esc: u64 = 0 // 0 = plain, 1 = after ESC, 2 = inside ESC [ ...
+static mut term_par: [u64; 4] = [0 as u64; 4]
+static mut term_has: [u64; 4] = [0 as u64; 4]
+static mut term_np: u64 = 0
+static mut term_priv: u64 = 0
+static mut term_attr: u64 = 0
+
+fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
+    // blank the cells from (c0, r0) up to but excluding (c1, r1), row-major
+    let cols: u64 = wg(state, i, W_COLS)
+    var r: u64 = r0
+    var c: u64 = c0
+    while r < r1 || (r == r1 && c < c1) {
+        cell_set(state, i, c, r, 32)
+        cell_attr_set(state, i, c, r, 0)
+        cell_paint(state, i, c, r)
+        c = c + 1
+        if c >= cols {
+            c = 0
+            r = r + 1
+        }
+    }
+}
+
+fn term_p(k: u64, dflt: u64) -> u64 {
+    if k < 4 && term_has[(k) as usize] != 0 {
+        return term_par[(k) as usize]
+    }
+    return dflt
+}
+
+fn term_csi(state: u64, i: u64, fin: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var cx: u64 = wg(state, i, W_CX)
+    var cy: u64 = wg(state, i, W_CY)
+    if term_priv != 0 {
+        return
+    }
+    if fin == 72 || fin == 102 {
+        // H / f: row ; column, one based
+        var r: u64 = term_p(0, 1)
+        var c: u64 = term_p(1, 1)
+        if r == 0 {
+            r = 1
+        }
+        if c == 0 {
+            c = 1
+        }
+        if r > rows {
+            r = rows
+        }
+        if c > cols {
+            c = cols
+        }
+        wsv(state, i, W_CY, r - 1)
+        wsv(state, i, W_CX, c - 1)
+    } else if fin == 65 {
+        var n: u64 = term_p(0, 1)
+        if n == 0 {
+            n = 1
+        }
+        if n > cy {
+            n = cy
+        }
+        wsv(state, i, W_CY, cy - n)
+    } else if fin == 66 {
+        var n2: u64 = term_p(0, 1)
+        if n2 == 0 {
+            n2 = 1
+        }
+        if cy + n2 >= rows {
+            n2 = rows - 1 - cy
+        }
+        wsv(state, i, W_CY, cy + n2)
+    } else if fin == 67 {
+        var n3: u64 = term_p(0, 1)
+        if n3 == 0 {
+            n3 = 1
+        }
+        if cx + n3 >= cols {
+            n3 = cols - 1 - cx
+        }
+        wsv(state, i, W_CX, cx + n3)
+    } else if fin == 68 {
+        var n4: u64 = term_p(0, 1)
+        if n4 == 0 {
+            n4 = 1
+        }
+        if n4 > cx {
+            n4 = cx
+        }
+        wsv(state, i, W_CX, cx - n4)
+    } else if fin == 71 {
+        var c5: u64 = term_p(0, 1)
+        if c5 == 0 {
+            c5 = 1
+        }
+        if c5 > cols {
+            c5 = cols
+        }
+        wsv(state, i, W_CX, c5 - 1)
+    } else if fin == 100 {
+        var r6: u64 = term_p(0, 1)
+        if r6 == 0 {
+            r6 = 1
+        }
+        if r6 > rows {
+            r6 = rows
+        }
+        wsv(state, i, W_CY, r6 - 1)
+    } else if fin == 75 {
+        // K: erase in line (0 = cursor to end, 1 = start to cursor, 2 = all)
+        let m: u64 = term_p(0, 0)
+        if m == 0 {
+            term_clear_rect(state, i, cx, cy, 0, cy + 1)
+        } else if m == 1 {
+            term_clear_rect(state, i, 0, cy, cx + 1, cy)
+        } else if m == 2 {
+            term_clear_rect(state, i, 0, cy, 0, cy + 1)
+        }
+    } else if fin == 74 {
+        // J: erase in display
+        let m2: u64 = term_p(0, 0)
+        if m2 == 0 {
+            term_clear_rect(state, i, cx, cy, 0, rows)
+        } else if m2 == 1 {
+            term_clear_rect(state, i, 0, 0, cx + 1, cy)
+        } else if m2 == 2 || m2 == 3 {
+            term_clear_rect(state, i, 0, 0, 0, rows)
+        }
+    } else if fin == 109 {
+        // m: only reverse video is drawn; colours and weights are accepted and dropped
+        var q: u64 = 0
+        var cnt: u64 = term_np
+        if cnt == 0 {
+            cnt = 1
+        }
+        while q < cnt && q < 4 {
+            let v: u64 = term_p(q, 0)
+            if v == 0 || v == 27 {
+                term_attr = 0
+            } else if v == 7 {
+                term_attr = 1
+            }
+            q = q + 1
+        }
+    }
+}
+
+// The escape machine in front of `term_putc`. Answers true when it took the octet.
+fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
+    if term_esc == 0 {
+        if ch == 27 {
+            term_esc = 1
+            return true
+        }
+        return false
+    }
+    if term_esc == 1 {
+        if ch == 91 {
+            term_esc = 2
+            term_np = 0
+            term_priv = 0
+            var k: u64 = 0
+            while k < 4 {
+                term_par[(k) as usize] = 0
+                term_has[(k) as usize] = 0
+                k = k + 1
+            }
+            return true
+        }
+        // ESC c (reset) and the other two-octet escapes (ESC 7, ESC 8, ESC =, ESC M ...: 0x30..0x5F)
+        // are dropped; anything else after a stray ESC is plain text and prints
+        term_esc = 0
+        if ch == 99 {
+            term_attr = 0
+            return true
+        }
+        if ch >= 48 && ch <= 95 {
+            return true
+        }
+        return false
+    }
+    // inside ESC [
+    if ch >= 48 && ch <= 57 {
+        if term_np < 4 {
+            term_par[(term_np) as usize] = term_par[(term_np) as usize] * 10 + (ch - 48)
+            if term_par[(term_np) as usize] > 9999 {
+                term_par[(term_np) as usize] = 9999
+            }
+            term_has[(term_np) as usize] = 1
+        }
+        return true
+    }
+    if ch == 59 {
+        if term_np < 3 {
+            term_np = term_np + 1
+        } else {
+            term_np = 3
+        }
+        return true
+    }
+    if ch == 63 || ch == 60 || ch == 61 || ch == 62 {
+        term_priv = 1
+        return true
+    }
+    if ch >= 64 && ch <= 126 {
+        // the final octet: the number of parameters is the one after the last `;`
+        if term_has[(term_np) as usize] != 0 || term_np > 0 {
+            term_np = term_np + 1
+        }
+        if term_np > 4 {
+            term_np = 4
+        }
+        term_esc = 0
+        term_csi(state, i, ch)
+        return true
+    }
+    if ch == 27 {
+        term_esc = 1
+        return true
+    }
+    if ch < 32 {
+        // a control octet breaks the sequence off and is then handled as itself
+        term_esc = 0
+        return false
+    }
+    // intermediate octets (space .. /): swallowed
+    return true
+}
 
 fn term_putc(state: u64, i: u64, ch: u64) {
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
     if cols == 0 || rows == 0 {
+        return
+    }
+    if ch < 256 && term_esc_take(state, i, ch) {
         return
     }
     // Ein Steuerzeichen beendet jede angefangene Folge: ein halb
@@ -12282,6 +12710,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
             cx = cx - 1
             wsv(state, i, W_CX, cx)
             cell_set(state, i, cx, cy, 32)
+            cell_attr_set(state, i, cx, cy, 0)
             cell_paint(state, i, cx, cy)
         }
         return
@@ -12301,6 +12730,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         wsv(state, i, W_CX, cx)
         wsv(state, i, W_CY, cy)
         cell_set(state, i, cx, cy, 32)
+        cell_attr_set(state, i, cx, cy, 0)
         cell_paint(state, i, cx, cy)
         return
     }
@@ -12343,6 +12773,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         return
     }
     cell_set(state, i, cx, cy, z)
+    cell_attr_set(state, i, cx, cy, term_attr)
     cell_paint(state, i, cx, cy)
     cx = cx + 1
     if cx >= cols {
@@ -12810,6 +13241,106 @@ fn selftest(state: u64) -> u64 {
     // und darf nach dem Selbsttest nicht stumm bleiben.
     fokus_still = 0
     return n
+}
+
+// r400: the VT subset of the terminal, checked on a window of its own. Seven checks, a separate
+// count (`wm: vttest n / m`) so that `selftest 30 / 30` stays what the other runs expect.
+fn vt_feed(state: u64, t: u64, a: u64, n: u64) {
+    term_write(state, t, a, n)
+}
+
+fn vt_selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    fokus_still = 1
+    // the window of this test must not take an id away from the windows of the machine: the runs
+    // that name the boot terminal by its id (`id=7`) must find it where it always was
+    let nid0: u64 = gs(state, S_NEXTID)
+    var tt: [u8; 3] = "vt\0"
+    let t: u64 = create(state, 0, 10, 300, 200 * uisc(state),
+        160 * uisc(state), K_TERM, (&tt[0]) as u64)
+    if t >= MAX_WIN || term_cols(state, t) < 12 || term_rows(state, t) < 4 {
+        if t < MAX_WIN {
+            destroy(state, t)
+        }
+        ss(state, S_NEXTID, nid0)
+        fokus_still = 0
+        return 0
+    }
+    var n: u64 = 0
+    var clr: [u8; 16] = [27 as u8, 91 as u8, 50 as u8, 74 as u8, 27 as u8, 91 as u8, 72 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    // 1. ESC[3;5H X: the cell (4, 2) holds X and the cursor stands behind it
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    var a1: [u8; 16] = [27 as u8, 91 as u8, 51 as u8, 59 as u8, 53 as u8, 72 as u8, 88 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a1[0]) as u64, 7)
+    if cell_get(state, t, 4, 2) == 88 && term_cx(state, t) == 5 && term_cy(state, t) == 2 {
+        n = n + 1
+    }
+    // 2. "hello", ESC[1;3H, ESC[K: "he" stays, the rest of the row is blank
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    var a2: [u8; 16] = [104 as u8, 101 as u8, 108 as u8, 108 as u8, 111 as u8, 27 as u8, 91 as u8,
+        49 as u8, 59 as u8, 51 as u8, 72 as u8, 27 as u8, 91 as u8, 75 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a2[0]) as u64, 14)
+    if cell_get(state, t, 0, 0) == 104 && cell_get(state, t, 1, 0) == 101
+        && cell_get(state, t, 2, 0) == 32 && cell_get(state, t, 4, 0) == 32 {
+        n = n + 1
+    }
+    // 3. ESC[7m R ESC[m N: the first cell is reverse, the second is plain
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    var a3: [u8; 16] = [27 as u8, 91 as u8, 55 as u8, 109 as u8, 82 as u8, 27 as u8, 91 as u8,
+        109 as u8, 78 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a3[0]) as u64, 9)
+    if cell_get(state, t, 0, 0) == 82 && cell_attr(state, t, 0, 0) == 1
+        && cell_get(state, t, 1, 0) == 78 && cell_attr(state, t, 1, 0) == 0 {
+        n = n + 1
+    }
+    // 4. ESC[2J clears the cells and the attributes
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    if cell_get(state, t, 0, 0) == 32 && cell_attr(state, t, 0, 0) == 0
+        && cell_get(state, t, 4, 2) == 32 && term_cx(state, t) == 0 && term_cy(state, t) == 0 {
+        n = n + 1
+    }
+    // 5. ESC[?25l is swallowed: Z lands in the first cell, no "25l" in the row
+    var a5: [u8; 16] = [27 as u8, 91 as u8, 63 as u8, 50 as u8, 53 as u8, 108 as u8, 90 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a5[0]) as u64, 7)
+    if cell_get(state, t, 0, 0) == 90 && cell_get(state, t, 1, 0) == 32 {
+        n = n + 1
+    }
+    // 6. a sequence cut in two writes: ESC | [1;1H Q
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    var a6: [u8; 16] = [27 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    var a6b: [u8; 16] = [91 as u8, 50 as u8, 59 as u8, 50 as u8, 72 as u8, 81 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a6[0]) as u64, 1)
+    vt_feed(state, t, (&a6b[0]) as u64, 6)
+    if cell_get(state, t, 1, 1) == 81 {
+        n = n + 1
+    }
+    // 7. an unknown sequence (ESC[5;6;7q) is dropped whole, W stays
+    vt_feed(state, t, (&clr[0]) as u64, 7)
+    var a7: [u8; 16] = [27 as u8, 91 as u8, 53 as u8, 59 as u8, 54 as u8, 59 as u8, 55 as u8,
+        113 as u8, 87 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&a7[0]) as u64, 9)
+    if cell_get(state, t, 0, 0) == 87 && cell_get(state, t, 1, 0) == 32 {
+        n = n + 1
+    }
+    // the machine is left plain (the VT state is global, like the UTF-8 one)
+    var rs: [u8; 16] = [27 as u8, 91 as u8, 109 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    vt_feed(state, t, (&rs[0]) as u64, 3)
+    destroy(state, t)
+    ss(state, S_NEXTID, nid0)
+    fokus_still = 0
+    return n
+}
+
+fn vt_selftest_max() -> u64 {
+    return 7
 }
 
 fn selftest_max() -> u64 {
@@ -13967,6 +14498,15 @@ fn tile_action(state: u64, act: u64) -> bool {
         set_tile_on(state, gs(state, S_TILE) == 0)
         return true
     }
+    // RUNDE FENSTER: die MESSTASTE. Sie veraendert nichts -- sie legt die Arbeitsflaeche und die
+    // ganze Fensterliste auf die Leitung. r402: VOR der Frage nach dem Fokus -- sie braucht weder
+    // ein Fenster noch den Baum (nach Alt+F4 auf dem letzten Fenster gab es keinen Fokus mehr, und
+    // die Messtaste blieb stumm).
+    if act == tile.A_SAY {
+        work_say(state)
+        wins_say(state)
+        return true
+    }
     let i: u64 = focus(state)
     if i >= MAX_WIN {
         return false
@@ -13975,6 +14515,13 @@ fn tile_action(state: u64, act: u64) -> bool {
         ev_push(state, i, E_CLOSE, 0, 0, 0)
         destroy(state, i)
         return true
+    }
+    // r402: Alt+F4 -- a window with a frame, on the normal layer, closed like its close button
+    if act == tile.A_CLOSE_WIN {
+        if !deko(state, i) || wg(state, i, W_LAYER) != L_NORMAL || !darf(state, i) {
+            return false
+        }
+        return close_anim(state, i)
     }
     if act == tile.A_FLOAT {
         return tile_float(state, i)
@@ -14017,14 +14564,6 @@ fn tile_action(state: u64, act: u64) -> bool {
             full_say(state, i)
         }
         return ok
-    }
-    // RUNDE FENSTER: die MESSTASTE. Sie veraendert nichts -- sie legt
-    // die Arbeitsflaeche und die ganze Fensterliste auf die Leitung.
-    // Vor dem Baum, weil sie den Baum nicht braucht.
-    if act == tile.A_SAY {
-        work_say(state)
-        wins_say(state)
-        return true
     }
     let nd: u64 = wg(state, i, W_NODE)
     if nd == 0 {

@@ -467,6 +467,11 @@ if boot ps2 ps2; then
         K="$K$r "
     done
     W="16 $(fld "$BTN" id) $(fld "$OTHER" id) "
+    # r398: LOGINUI_KEEP=<dir> keeps the three pictures of the chain (and the rectangles) for a look
+    if [ -n "${LOGINUI_KEEP:-}" ]; then
+        mkdir -p "$LOGINUI_KEEP"; cp "$D"/tab*.ppm "$LOGINUI_KEEP"/ 2>/dev/null
+        printf 'PW=%s\nEYE=%s\nBTN=%s\nOTHER=%s\nK=%s\nW=%s\n' "$PW" "$EYEB" "$BTN" "$OTHER" "$K" "$W" > "$LOGINUI_KEEP/rects.txt"
+    fi
     [ "$K" = "$W" ] && ok "Tab: eye, button, button, in the picture ($K)" \
         || bad "PS/2 Tab chain '$K', expected '$W'"
     EX=$(eyerect)

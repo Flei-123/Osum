@@ -234,6 +234,9 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 
 printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=%s\nontop=1\nalign=%s\nhide_missing=%s\n' \
     "$edge" "$autohide" "$align" "$hidemissing" > "$OUT/taskbar.conf"
+# r402: the runs that measure the start menu's LIST (rows, the Run button, the umlaut of its label)
+# use the list window; the Windows 11 window is measured by tools/startmenu
+echo "style=list" > "$OUT/startmenu.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\nshadow=%s\nwindow_alpha=%s\nblur=%s\n' \
     "$scheme" "$mode" "$shape" "$shadow" "$winalpha" "$blur" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
@@ -288,7 +291,7 @@ ARGS+=(/etc/
        "/etc/time.conf=$OUT/time.conf@0644"
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
-       "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+       "/etc/taskbar.conf=$OUT/taskbar.conf@0644" "/etc/startmenu.conf=$OUT/startmenu.conf@0644")
 # ====================================================== RUNDE MODULE
 # /etc/module.conf -- DIE LAGE DER SCHREIBTISCHMODULE.
 #

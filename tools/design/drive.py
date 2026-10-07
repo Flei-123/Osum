@@ -386,7 +386,33 @@ class Fahrer:
             pass
         if m is None:
             return None
-        return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
+        if prog == "launcher":
+            # the launcher has no frame at all; the old runs (menuhover, the rows `lzeile<N>`) count 2 / 22
+            # and their checkers use the same numbers -- the rows are 52 high and forgive it
+            return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
+        b, th = self.chrome()
+        return (int(m.group(1)) + b, int(m.group(2)) + th)
+
+    # r402: the frame and the whole top part of a framed window at scale 1, from the shape file the
+    # machine runs (`theme.conf` of the out directory names it): frame + bar + 1 separator.
+    # `classic` and `modern` say nothing and keep the old 2 / 22.
+    def chrome(self):
+        if getattr(self, "_chrome", None):
+            return self._chrome
+        shape = "osum"
+        for z in lies(os.path.join(self.out, "theme.conf")).splitlines():
+            if z.startswith("shape="):
+                shape = z[6:].strip()
+        bar, frame = 19, 2
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        for z in lies(os.path.join(root, "assets", "shapes", shape + ".shape")).splitlines():
+            m = re.match(r"\s*(title_bar|frame)\s*=\s*(\d+)", z)
+            if m and m.group(1) == "title_bar":
+                bar = int(m.group(2))
+            elif m:
+                frame = int(m.group(2))
+        self._chrome = (frame, frame + bar + 1)
+        return self._chrome
 
     # RUNDE ECHTHARDWARE-5: die Geometrie EINES Fensters, so wie der
     # Server sie zuletzt gemeldet hat. Rahmen und Titelhoehe stehen
@@ -415,7 +441,8 @@ class Fahrer:
             pass
         if g is not None and int(g.group(1)) >= 60:
             sk = 2
-        return (x, y, w, h, 2 * sk, 22 * sk)
+        b, th = self.chrome()
+        return (x, y, w, h, b * sk, th * sk)
 
     # RUNDE FENSTER: WELCHES FENSTER HAT DEN FOKUS.
     #
@@ -467,6 +494,50 @@ class Fahrer:
         # so wie das Kontrollzentrum sie selbst meldet. Der Platz in
         # der Reihe ist nicht die Nummer (`tile_of`), deshalb wird
         # nicht gerechnet, sondern gelesen.
+        # r402: `start_<Name>` -- a tile (pinned or recommended) of the Windows 11 start menu, as
+        # the launcher reports it: `launcher: tile i=100 x=28 y=100 w=100 h=88  name=[Editor]` in
+        # the coordinates of the menu window, which stands at `launcher: geom`.
+        # r402: `cap_min`, `cap_max`, `cap_close` -- the caption buttons of the top-most framed
+        # window of the last F12 dump (`wm: fen ... bar= capw= fr=`), the rectangle of the button
+        # (position of the window + frame, bar high, `capw` wide).
+        if name in ("cap_min", "cap_max", "cap_close"):
+            fen = []
+            # only the LAST dump counts (it starts at `wm: fenliste`), hidden windows (flag 1) do not
+            k = t.rfind("wm: fenliste")
+            tt = t[k:] if k >= 0 else t
+            letzter = []
+            for m in re.finditer(r"wm: fen i=(\d+) id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) lay=\d+ "
+                                 r"fl=(\d+) z=(\d+) [^\n]*? bar=(\d+) capw=(\d+) fr=(\d+)", tt):
+                x_, y_, w_, h_, fl_, z_, bar_, capw_, fr_ = (int(v) for v in m.groups()[1:])
+                if fl_ & 1 == 0:
+                    letzter.append((x_, y_, w_, h_, z_, bar_, capw_, fr_))
+            fen = letzter
+            if not fen:
+                return None
+            x, y, w, h, z, bar, capw, fr = max(fen, key=lambda r: r[4])
+            ow = w + 2 * fr
+            n = {"cap_min": 0, "cap_max": 1, "cap_close": 2}[name]
+            return (x + ow - fr - 3 * capw + n * capw, y + fr, capw, bar)
+        # `start_alle`, `start_zurueck`, `start_power`, `start_feld`: the buttons and the field of the
+        # Windows 11 start menu (`launcher: rect id=5 / 6 / 4 / 1`). The launcher has NO frame, so
+        # the origin is its `geom` as it stands (`lrect<N>` adds a frame and a title bar: it was
+        # made for the old list, whose rows are tall enough to forgive 22 points).
+        if name in ("start_alle", "start_zurueck", "start_power", "start_feld"):
+            n_ = {"start_alle": 5, "start_zurueck": 6, "start_power": 4, "start_feld": 1}[name]
+            m = letzte(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n_)
+            g = letzte(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name.startswith("start_"):
+            m = letzte(r"launcher: tile i=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+name=\[%s\]"
+                       % re.escape(name[6:]))
+            g = letzte(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name.startswith("qskachel"):
             n = int(name[8:])
             m = letzte(r"qs: kachel n=%d platz=\d+ x=(\d+) y=(\d+) "
@@ -806,6 +877,29 @@ def main():
         # dieses Laeufers ging als Mittelklick durch, kein Kontextmenue
         # klappte auf, und das Bild 31-kontextmenue.png zeigte deshalb
         # keines -- ein Fehler des Laeufers, nicht des Programms.
+        # r402: `halte x,y` presses the left button on the spot and KEEPS it down (a held caption
+        # button is painted darker), `loslassen` lets it go (the button then acts, if the pointer
+        # is still on it).
+        elif b == "halte":
+            x, y = (int(v) for v in arg.split(","))
+            f.fahre(x, y)
+            time.sleep(0.35)
+            f.cmd("mouse_button 1")
+            time.sleep(0.6)
+        # `halteauf <name>`: as `halte`, on the middle of a reported rectangle
+        elif b == "halteauf":
+            r = f.rechteck(arg)
+            if r is None:
+                print("halteauf %s: kein Rechteck gemeldet" % arg)
+                fehler += 1
+            else:
+                f.fahre_nahe(r[0] + r[2] // 2, r[1] + r[3] // 2)
+                time.sleep(0.35)
+                f.cmd("mouse_button 1")
+                time.sleep(0.6)
+        elif b == "loslassen":
+            f.cmd("mouse_button 0")
+            time.sleep(1.2)
         elif b in ("klick", "doppel", "fahre", "rklick"):
             x, y = (int(v) for v in arg.split(","))
             if b == "fahre":
@@ -878,10 +972,10 @@ def main():
             wx, wy, ww, wh, bo, ti = g
             # Die Arbeitsflaeche liegt bei (wx+bo, wy+ti); die
             # Greifzone ist der Rand darum. In die MITTE der Zone.
-            lx = wx + bo - 2
-            rx = wx + bo + ww + 1
-            oy = wy + 2
-            uy = wy + ti + wh + 1
+            lx = wx                      # the outermost pixel (r402: not `bo - 2`, which is outside for a frame of 1)
+            rx = wx + ww + 2 * bo - 1
+            oy = wy + 1
+            uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
             stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
@@ -908,10 +1002,10 @@ def main():
                 fehler += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
-            lx = wx + bo - 2
-            rx = wx + bo + ww + 1
-            oy = wy + 2
-            uy = wy + ti + wh + 1
+            lx = wx                      # the outermost pixel (r402: not `bo - 2`, which is outside for a frame of 1)
+            rx = wx + ww + 2 * bo - 1
+            oy = wy + 1
+            uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
             stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
