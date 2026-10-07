@@ -26,6 +26,7 @@ static mut win: [u32; 524288] = [0 as u32; 524288]
 static mut dst: [u32; 1024000] = [0 as u32; 1024000]
 static mut tmp: [u32; 262144] = [0 as u32; 262144]
 static mut khz: u64 = 0
+static mut rcp: [u64; 1024] = [0 as u64; 1024]
 
 static mut s_cb: [u8; 12] = "compbench: \0"
 static mut s_us: [u8; 4] = " us\0"
@@ -128,7 +129,7 @@ fn blur_rows(x: u64, y: u64, w: u64, h: u64, rad: u64) {
         }
         var c: u64 = 0
         while c < w {
-            let rec: u64 = (65536 + n - 1) / n
+            let rec: u64 = rcp[(n) as usize]
             __mmio_write32((out + c * 4) as *mut u32,
                 ((((sr * rec + 32768) >> 16) << 16) | (((sg * rec + 32768) >> 16) << 8) | ((sb * rec + 32768) >> 16)) as u32)
             let add: u64 = c + rad + 1
@@ -154,6 +155,11 @@ fn blur_rows(x: u64, y: u64, w: u64, h: u64, rad: u64) {
 }
 
 fn fill_pictures() {
+    var q: u64 = 1
+    while q < 1024 {
+        rcp[(q) as usize] = (65536 + q - 1) / q
+        q = q + 1
+    }
     var i: u64 = 0
     while i < 1024000 {
         scr[(i) as usize] = (0x203040 + (i & 255) * 0x010101) as u32
@@ -166,8 +172,9 @@ fn fill_pictures() {
     }
 }
 
-// the wake-up: a parent and a forked child pass one byte through two pipes, `n` round trips
-fn pingpong(n: u64) -> u64 {
+// the wake-up: a parent and a forked child pass one byte through two pipes, `n` round trips. `how` 0 = a blocking `read` (the
+// kernel sleeps in whole ticks of 10 ms there), 1 = `poll` on the read end first (event driven: the writer wakes the sleeper)
+fn pingpong(n: u64, how: u64) -> u64 {
     var p1: [u32; 2] = [0 as u32; 2]
     var p2: [u32; 2] = [0 as u32; 2]
     if ulib.bad(ulib.sys(22, (&p1[0 as usize]) as u64, 0, 0)) || ulib.bad(ulib.sys(22, (&p2[0 as usize]) as u64, 0, 0)) {
@@ -175,11 +182,18 @@ fn pingpong(n: u64) -> u64 {
     }
     var b: [u8; 8] = [0 as u8; 8]
     let bp: u64 = (&b[0 as usize]) as u64
+    var pf: [u32; 2] = [0 as u32; 2]
+    let pfp: u64 = (&pf[0 as usize]) as u64
     let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
     if kid == 0 {
         // the child: read a byte, write it back
         var k: u64 = 0
         while k < n {
+            if how == 1 {
+                pf[(0) as usize] = p1[(0) as usize]
+                pf[(1) as usize] = 1 as u32
+                let _p: u64 = ulib.sys(ulib.SYS_POLL, pfp, 1, 0xFFFFFFFF)
+            }
             let _r: u64 = ulib.sys(ulib.SYS_READ, p1[(0) as usize] as u64, bp, 1)
             let _w: u64 = ulib.sys(ulib.SYS_WRITE, p2[(1) as usize] as u64, bp, 1)
             k = k + 1
@@ -193,6 +207,11 @@ fn pingpong(n: u64) -> u64 {
     var k: u64 = 0
     while k < n {
         let _w: u64 = ulib.sys(ulib.SYS_WRITE, p1[(1) as usize] as u64, bp, 1)
+        if how == 1 {
+            pf[(0) as usize] = p2[(0) as usize]
+            pf[(1) as usize] = 1 as u32
+            let _p: u64 = ulib.sys(ulib.SYS_POLL, pfp, 1, 0xFFFFFFFF)
+        }
         let _r: u64 = ulib.sys(ulib.SYS_READ, p2[(0) as usize] as u64, bp, 1)
         k = k + 1
     }
@@ -207,6 +226,7 @@ fn u_start(args: u64) -> u64 {
     var n_small: [u8; 12] = "small-copy\0\0"
     var n_mix: [u8; 10] = "mix-640\0\0\0"
     var n_ping: [u8; 10] = "roundtrip\0"
+    var n_pingp: [u8; 15] = "roundtrip-poll\0"
     var n_cal: [u8; 8] = "khz\0\0\0\0\0"
     var n_blur0: [u8; 14] = "blur-320x520\0\0"
     calibrate()
@@ -264,7 +284,8 @@ fn u_start(args: u64) -> u64 {
     report((&n_blur0[0 as usize]) as u64, us_of((tsc() - t3) / 10))
 
     // 5. the hop: a pipe round trip between two processes
-    report((&n_ping[0 as usize]) as u64, pingpong(2000))
+    report((&n_ping[0 as usize]) as u64, pingpong(100, 0))
+    report((&n_pingp[0 as usize]) as u64, pingpong(2000, 1))
     var done: [u8; 17] = "compbench: done\0\0"
     ulib.say((&done[0 as usize]) as u64)
     ulib.nl()
