@@ -29,6 +29,12 @@ Kept German on purpose: bus service name `praesenz`, `/etc/praesenz.conf`, `/etc
 its keys, the state words `da abwesend beschaeftigt unsichtbar` (wire protocol with the friends
 server), the mount point `/tresor`, `/system/tresor.sit`.
 
+DONE (E-001 step 3, 07.10.2026): program `papierkorb` -> `trashbin` (sub-commands list/put/restore/remove/empty; the old
+German words are still understood; data stays: `<root>/.papierkorb`, `/etc/papierkorb.conf`), `drucke` -> `ipprint`
+(output keys and states English: `state=nonet|rejected|...`; `/etc/printer.conf` with `target=` first, the old
+`/etc/drucker.conf` with `ziel=` as a fall-back), module `dateiop` -> `fileop`. The guard `tools/english/run.sh`
+(test.sh section 58) keeps the counts from growing; `count.py --diff <base>` checks new lines.
+
 STILL GERMAN (next steps): `papierkorb`, `dispctl` console lines, `drucke`, `hurt` (an English word -- stays),
 `instkonto` (module), the kernel log (`/bin/log`: "Karte gefunden", ...), comments and identifiers
 inside the sources (see tools/english for the identifier renamer).
