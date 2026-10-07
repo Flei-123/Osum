@@ -239,3 +239,53 @@ window buffers, z-order, input routing, window rights, lock. The kernel only del
 | S5 scan-out switch + watchdog | not started |
 | S6 chrome and effects in `wmd` | not started |
 | S7 delete the kernel painters | not started |
+
+### S0 per-phase split and the first fixes (07.10.2026, measured with `phases` on, `tools/design/stationaer.sh`, KVM, host load 4 - 8)
+
+`F12` with the kernel word `phases` also prints `wm: phase n= bg= win= drag= top= pend= px= blur= glass= shadow= rgn= saved= blurs= bhits=
+blurus=` (microseconds summed over the n frames since the last F12; `rgn`/`saved` = frames composed rectangle by rectangle and the pixels
+that did not have to be painted; the blur counters are running totals). The first split showed where the time was:
+
+| phase | frames | mean before | over 16 ms before | where it went |
+|---|---|---|---|---|
+| window dragged | 181 | 15.1 ms | 109 | `paint_win_drag` = 93 % of the window time: one `fb.pixel` call (five state reads, three compares) and two divisions for **every pixel** of the lifted window |
+| start menu open / close | 54 | 17.1 ms | 8 (6 above 128 ms) | `blur_flaeche` = 95 % of the window time: 37 blurs in 56 frames (27 ms each); the animation frames of the opening menu with one `pixel_a` call per pixel |
+| the rest of the boot | 71 | 75 - 87 ms | 38 - 43 | the opening animation of every window (`paint_win_anim`, one `pixel_a` per pixel) |
+
+What was changed (all pixel-identical, counters included):
+
+* `paint_win_drag`: row by row (clip once, row address, source column stepped with an integer remainder instead of two divisions);
+* `paint_win_anim`: one call per row (`fb.scaled_row_a`: same `mix8`, `blends` / `blend_reads` added in bulk, one dirty rectangle per row);
+* the pointer and a window's own contents no longer spoil its cached blur (`damage_ex(..., skip)`; the blur is made from what lies **under**
+  the window); a change made by a window only spoils the blur of windows above it (`W_Z`); `blur_h` takes the reciprocal only when `n` changes;
+* damage as a region (`lib/fui/region.fi`, up to 16 disjoint rectangles) next to the bounding box, composed rectangle by rectangle when it
+  covers less than three quarters of the box (word `norgn` = the old single box; `tools/region/run.sh`: the same picture pixel for pixel,
+  134 region frames and 12.5 million pixels saved in the drehbuch).
+
+After (same drehbuch):
+
+| phase | frames | mean | max | over 16 ms | what is left |
+|---|---|---|---|---|---|
+| pointer moves | 48 | 0.9 ms | 15.2 ms | 0 | -- |
+| start menu open / close | 58 | 9.9 ms | 101 ms | 7 | the **cold blur**: 640 x 416 takes 70 - 120 ms (4 passes + tint / noise per pixel, about 260 ns a pixel), 17 blurs instead of 37, cache hits 50 |
+| window dragged | 179 | 4.7 ms | 21.6 ms | 10 | the pointer **jumps** hundreds of points in the drehbuch: one big dirty box; a real mouse moves a few points per frame |
+| the rest of the boot | 92 | 10.2 ms | 51.7 ms | 33 | the first blur and the first frames of every window |
+
+Not solved: the cold blur of a menu. Options that are left (none done): blur a half-size copy (4 times fewer pixels, changes the picture),
+spread the filter over the opening animation (the menu is drawn without blur for 120 ms anyway), a faster integer loop for tint / noise.
+
+### Section 5, points 2 and 3 answered (`kernel/user/compbench.fi`, `tools/comp/run.sh`, 1 and 4 cores, KVM)
+
+| what | measured | reading |
+|---|---|---|
+| a whole recompose in a user program (desktop + three windows, `rep movsq` rows) | 0.6 ms | ring 3 does not cost speed for plain copying |
+| a 100 x 100 damage rectangle | 4 us | -- |
+| a translucent 640 x 400 window (per-pixel integer blend in Firn) | 9 - 10 ms | **per-pixel loops are the cost**, in ring 0 and ring 3 alike (35 - 40 ns a pixel) |
+| one horizontal box-blur pass over 320 x 520 | 9.5 - 12 ms | the same: about 60 ns a pixel |
+| a round trip between two processes through `poll()` | 8 - 10 us | the hop of the plan is cheap **when the wake-up is event driven** |
+| a round trip through a blocking `read` on a pipe | 9.9 ms | the kernel sleeps in whole ticks (`pipe_read`: `sleep_ticks(1)`, 100 Hz): **not usable** for a compositor |
+
+Consequences for the plan: (1) `wmd` must wait with `poll` (or a wake-driven call), never with a blocking `read`; the input copy ring and
+`PRESENT` have to be wake driven. (2) The speed problem of compositing is the per-pixel Firn loops, not the ring; the integer primitives
+(`lib/fui/comp*.fi`) must be written and measured as loops of whole rows. (3) Not measured: the wake-up of a process that sleeps on **another,
+idle core** (both ends probably ran on the same core in the bench), and the effect of a busy second core.
