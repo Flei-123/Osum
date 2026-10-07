@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/diskscan.fi -- WHAT DISKS THE MACHINE HAS (docs/DISKS.md stage D-0/D-1: reading only).
+//
+// The probe both /bin/diskctl (command line) and /bin/disks (window) stand on: it opens the raw devices
+// (/dev/hda, /dev/nvme0, /dev/hdb -- block files of devfs), finds each one's size, reads its partition table with
+// lib/disks/table.fi (checksums verified) and joins it with the kernel's mount table (SYS_MNTSTAT). Nothing is written.
+//
+//   scan()                 look again at all disks
+//   count()                how many disks answered
+//   path(i)  dev(i)        "/dev/hda" and the device number the mount table uses (1 hda, 2 nvme0, 3 hdb)
+//   sectors(i)             size in 512-octet sectors
+//   table(i)               the table of disk i (lib/disks/table.fi accessors)
+//   part_mount(i, p)       the mount path of partition p of disk i, or 0
+//   whole_mount(i)         the mount path when the disk carries ONE file system without a table, or 0
+
+profile kernel
+
+import ulib
+import libc.io
+import disks.table
+
+export { scan, count, path, dev, sectors, table_of, part_mount, whole_mount, MAXDISK }
+
+const MAXDISK: u64 = 3
+const TABB: u64 = 2312
+
+static mut dtabs: [u8; 6936] = [0 as u8; 6936]
+static mut dscr: [u8; 17408] = [0 as u8; 17408]
+static mut d_dev: [u64; 3] = [0 as u64; 3]
+static mut d_path: [u64; 3] = [0 as u64; 3]
+static mut d_sect: [u64; 3] = [0 as u64; 3]
+static mut n_disk: u64 = 0
+static mut dfd: u64 = 0
+static mut mp: [u8; 192] = [0 as u8; 192]
+
+static mut N_HDA: [u8; 9] = "/dev/hda\0"
+static mut N_NVME: [u8; 11] = "/dev/nvme0\0"
+static mut N_HDB: [u8; 9] = "/dev/hdb\0"
+
+fn rd(lba: u64, n: u64, dst: u64) -> u64 {
+    if ulib.bad(io.seek(dfd, lba * 512, 0)) {
+        return 1
+    }
+    let got: u64 = io.read_full(dfd, dst, n * 512)
+    if ulib.bad(got) || got != n * 512 {
+        return 1
+    }
+    return 0
+}
+
+// The size of the open disk in sectors: what devfs says, else the last sector that can be read (a search).
+fn disk_sectors() -> u64 {
+    var st: [u8; 160] = [0 as u8; 160]
+    if !ulib.bad(io.fstat_into(dfd, (&st[0]) as u64)) {
+        let sz: u64 = io.stat_size((&st[0]) as u64)
+        if sz >= 512 {
+            return sz / 512
+        }
+    }
+    var lo: u64 = 0
+    var hi: u64 = 268435456
+    var one: [u8; 512] = [0 as u8; 512]
+    while lo < hi {
+        let mid: u64 = (lo + hi + 1) / 2
+        if rd(mid - 1, 1, (&one[0]) as u64) == 0 {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+    }
+    return lo
+}
+
+fn probe(p: u64, devnum: u64) {
+    dfd = io.open(p, 0)
+    if ulib.bad(dfd) {
+        return
+    }
+    let total: u64 = disk_sectors()
+    let _s: u64 = table.read_table(rd, total, (&dtabs[0]) as u64 + n_disk * TABB, (&dscr[0]) as u64)
+    d_dev[n_disk as usize] = devnum
+    d_path[n_disk as usize] = p
+    d_sect[n_disk as usize] = total
+    n_disk = n_disk + 1
+    io.close(dfd)
+}
+
+fn scan() {
+    n_disk = 0
+    probe((&N_HDA[0]) as u64, 1)
+    probe((&N_NVME[0]) as u64, 2)
+    probe((&N_HDB[0]) as u64, 3)
+}
+
+fn count() -> u64 {
+    return n_disk
+}
+
+fn path(i: u64) -> u64 {
+    return d_path[i as usize]
+}
+
+fn dev(i: u64) -> u64 {
+    return d_dev[i as usize]
+}
+
+fn sectors(i: u64) -> u64 {
+    return d_sect[i as usize]
+}
+
+fn table_of(i: u64) -> u64 {
+    return (&dtabs[0]) as u64 + i * TABB
+}
+
+// The mount path of what starts at sector `first` on device `devnum`, else 0.
+fn mount_at(devnum: u64, first: u64) -> u64 {
+    var i: u64 = 0
+    while i < 8 {
+        if ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_USED, 0) == 1
+            && ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_DEV, 0) == devnum
+            && ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_FIRST, 0) == first {
+            let n: u64 = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_PATHLEN, 0)
+            var k: u64 = 0
+            while k < n && k < 190 {
+                mp[k as usize] = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_PATHCH + k, 0) as u8
+                k = k + 1
+            }
+            mp[k as usize] = 0 as u8
+            return (&mp[0]) as u64
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn part_mount(i: u64, p: u64) -> u64 {
+    return mount_at(d_dev[i as usize], table.start_of(table_of(i), p))
+}
+
+fn whole_mount(i: u64) -> u64 {
+    if table.scheme(table_of(i)) != table.SCH_NONE {
+        return 0
+    }
+    return mount_at(d_dev[i as usize], 0)
+}

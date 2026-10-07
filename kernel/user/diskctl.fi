@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/diskctl.fi -- THE DISK MANAGER, COMMAND LINE (docs/DISKS.md, stage D-0: reading only).
+//
+//   diskctl list          every disk the machine has: its size, its partition table (MBR or GPT, checksums
+//                         verified), its partitions, and where each one is mounted
+//
+// It reads the raw devices (/dev/hda, /dev/hdb, /dev/nvme0 -- block files of devfs) and the mount table
+// (SYS_MNTSTAT) and writes NOTHING. The parsing is lib/disks/table.fi, the same code a test runs on image files.
+// Stage D-2 adds `diskctl plan ...`; no stage before D-3 writes a sector.
+//
+// Output (one disk, then one line per partition; the keys are for people and for the test):
+//
+//   disk /dev/hda sectors=32768 table=gpt partitions=3
+//     1 start=2048 sectors=2048 kind=efi name=EFI
+//     2 start=4096 sectors=16384 kind=ofs name=OrientOS mount=/
+//   disk /dev/hdb sectors=32768 table=none
+//     whole disk: mounted at /mnt
+//
+// A disk that is not there is not printed. A table with a bad checksum reads as `table=none`, with the reason on
+// the next line (`header` / `entries`) -- the kernel does not use such a table either.
+
+profile kernel
+
+import ulib
+import tools
+import disks.table
+import diskscan
+
+export { u_start }
+
+static mut S_DISK: [u8; 6] = "disk \0"
+static mut S_SECT: [u8; 10] = " sectors=\0"
+static mut S_TABLE: [u8; 8] = " table=\0"
+static mut S_PARTS: [u8; 13] = " partitions=\0"
+static mut S_START: [u8; 8] = " start=\0"
+static mut S_KIND: [u8; 7] = " kind=\0"
+static mut S_NAME: [u8; 7] = " name=\0"
+static mut S_MOUNT: [u8; 8] = " mount=\0"
+static mut S_WHOLE: [u8; 26] = "  whole disk: mounted at \0"
+static mut S_USE: [u8; 20] = "usage: diskctl list\0"
+static mut S_IND: [u8; 3] = "  \0"
+static mut W_LIST: [u8; 5] = "list\0"
+
+fn show_disk(i: u64) {
+    let t: u64 = diskscan.table_of(i)
+    let sch: u64 = table.scheme(t)
+    tools.ob_str((&S_DISK[0]) as u64)
+    tools.ob_str(diskscan.path(i))
+    tools.ob_str((&S_SECT[0]) as u64)
+    tools.ob_num(diskscan.sectors(i))
+    tools.ob_str((&S_TABLE[0]) as u64)
+    tools.ob_str(table.scheme_word(sch))
+    if sch != table.SCH_NONE {
+        tools.ob_str((&S_PARTS[0]) as u64)
+        tools.ob_num(table.count(t))
+    }
+    tools.ob_nl()
+    if sch == table.SCH_NONE {
+        // a disk without a table: the whole disk may carry a file system (a stick from a camera, our own image)
+        let w: u64 = diskscan.whole_mount(i)
+        if w != 0 {
+            tools.ob_str((&S_WHOLE[0]) as u64)
+            tools.ob_str(w)
+            tools.ob_nl()
+        }
+        return
+    }
+    var p: u64 = 0
+    while p < table.count(t) {
+        tools.ob_str((&S_IND[0]) as u64)
+        tools.ob_num(p + 1)
+        tools.ob_str((&S_START[0]) as u64)
+        tools.ob_num(table.start_of(t, p))
+        tools.ob_str((&S_SECT[0]) as u64)
+        tools.ob_num(table.sectors_of(t, p))
+        tools.ob_str((&S_KIND[0]) as u64)
+        tools.ob_str(table.kind_word(table.kind_of(t, p)))
+        if (*(table.name_of(t, p) as *mut u8)) != 0 as u8 {
+            tools.ob_str((&S_NAME[0]) as u64)
+            tools.ob_str(table.name_of(t, p))
+        }
+        let m: u64 = diskscan.part_mount(i, p)
+        if m != 0 {
+            tools.ob_str((&S_MOUNT[0]) as u64)
+            tools.ob_str(m)
+        }
+        tools.ob_nl()
+        p = p + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 || !ulib.streq(ulib.arg_at(args, 1), (&W_LIST[0]) as u64) {
+        ulib.esay_line((&S_USE[0]) as u64, 0)
+        return 2
+    }
+    diskscan.scan()
+    var i: u64 = 0
+    while i < diskscan.count() {
+        show_disk(i)
+        i = i + 1
+    }
+    tools.ob_flush()
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

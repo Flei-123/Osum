@@ -19,6 +19,7 @@
 #     plan=<datei>      Ablauf aus Schritten: warte/klick/ziel/foto/marke
 #     wait=<n>          Sekunden warten, bevor geklickt/fotografiert wird
 #     progs="..."       die Programmliste
+#     second=<img>      a second disk (hdb) from this image file
 #     accel=tcg|kvm
 #     last=<sekunden>   wie lange die Maschine insgesamt laufen darf
 #
@@ -55,6 +56,7 @@ if [ -z "${OSUM_ACCEL:-}" ] && [ -w /dev/kvm ]; then accel=kvm; fi
 last=60
 progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat sleep ps kill top"
 extra=""
+second=""
 for a in "$@"; do
     case "$a" in
         app=*) app=${a#*=} ;;
@@ -72,6 +74,7 @@ for a in "$@"; do
         last=*) last=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        second=*) second=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
     esac
 done
@@ -237,11 +240,16 @@ else
     WAITFOR='^wm: hold|^k15: start'
 fi
 T0=$(date +%s%N)
+SECOND=()
+if [ -n "$second" ]; then
+    cp "$second" "$OUT/second.img"
+    SECOND=(-drive "file=$OUT/second.img,format=raw,if=ide,index=1")
+fi
 timeout "$last" qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     -smp "$smp" -append "$APPEND" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
-    -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
+    -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" "${SECOND[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
 i=0

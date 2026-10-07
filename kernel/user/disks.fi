@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/disks.fi -- DISK MANAGEMENT, THE WINDOW (docs/DISKS.md stage D-1: reading only).
+//
+// The disks of the machine at the left, and for the chosen disk: a map of its partitions (a bar, every partition
+// as long as it is big), one line of facts, and a list (number, name, kind, start, size, where it is mounted).
+// It stands on the same probe as `/bin/diskctl list` (kernel/user/diskscan.fi) and shows the same numbers. It
+// changes nothing; the stages that do are D-3 and later, and they live behind a plan and a confirmation.
+//
+// Serial lines (read by tools/disks/run.sh; only with /etc/uitrace):
+//   disks: ready n=<disks> w= h= x= y=      (the window: size and place)
+//   disks: disk <i> <path> sectors=<n> table=<mbr|gpt|none>
+//   disks: part <i> <p> start=<n> sectors=<n> kind=<word> mount=<path or ->
+
+profile app
+
+import ulib
+import wlibc
+import wlib
+import icons
+import msg
+import fuiscene
+import fui.navnum
+import disks.table
+import diskscan
+
+export { u_start }
+
+const BW: u64 = 900
+const BH: u64 = 540
+const NAVW: u64 = 232
+const CW: u64 = 660 // BW - 16 - NAVW - 8 - 4
+const MAPH: u64 = 104
+const K_DNAV: u64 = 3
+const K_LIST: u64 = 4
+const K_MAP: u64 = 5
+const K_REFRESH: u64 = 6
+const MAXD: u64 = 3
+
+static mut sel: u64 = 0
+static mut nav_blob: [u8; 640] = [0 as u8; 640]
+static mut nav_icons: [u64; 3] = [0 as u64; 3]
+static mut list_blob: [u8; 4096] = [0 as u8; 4096]
+static mut list_icons: [u64; 32] = [0 as u64; 32]
+static mut facts: [u8; 192] = [0 as u8; 192]
+static mut sizebuf: [u8; 32] = [0 as u8; 32]
+static mut n_map: usize = 4294967295
+static mut tipbuf: [u8; 48] = [0 as u8; 48]
+static mut uitrace: bool = false
+
+static mut k_title: [u8; 13] = "disks.title\0\0"
+static mut k_cols: [u8; 12] = "disks.cols\0\0"
+static mut k_none: [u8; 12] = "disks.none\0\0"
+static mut k_disk: [u8; 12] = "disks.disk\0\0"
+static mut k_table: [u8; 13] = "disks.table\0\0"
+static mut k_parts: [u8; 13] = "disks.parts\0\0"
+static mut k_refresh: [u8; 15] = "disks.refresh\0\0"
+static mut k_free: [u8; 12] = "disks.free\0\0"
+static mut k_hdrok: [u8; 13] = "disks.hdrok\0\0"
+static mut k_backup: [u8; 14] = "disks.backup\0\0"
+static mut k_whole: [u8; 13] = "disks.whole\0\0"
+static mut k_notable: [u8; 15] = "disks.notable\0\0"
+static mut t_app: [u8; 6] = "disks\0"
+static mut s_ready: [u8; 17] = "disks: ready n=\0\0"
+static mut s_geomw: [u8; 4] = " w=\0"
+static mut s_geomh: [u8; 4] = " h=\0"
+static mut s_geomx: [u8; 4] = " x=\0"
+static mut s_geomy: [u8; 4] = " y=\0"
+static mut s_diskl: [u8; 13] = "disks: disk \0"
+static mut s_partl: [u8; 13] = "disks: part \0"
+static mut s_sect: [u8; 10] = " sectors=\0"
+static mut s_tab: [u8; 8] = " table=\0"
+static mut s_start: [u8; 8] = " start=\0"
+static mut s_kind: [u8; 7] = " kind=\0"
+static mut s_mount: [u8; 8] = " mount=\0"
+static mut s_dash: [u8; 2] = "-\0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_tab1: [u8; 2] = "\t\0"
+static mut s_nl: [u8; 2] = "\n\0"
+static mut s_dot: [u8; 6] = "  .  \0"
+
+fn put(d: u64, at: u64, s: u64) -> u64 {
+    let n: u64 = ulib.length(s)
+    var i: u64 = 0
+    while i < n {
+        *((d + at + i) as *mut u8) = *((s + i) as *mut u8)
+        i = i + 1
+    }
+    *((d + at + n) as *mut u8) = 0 as u8
+    return at + n
+}
+
+fn put_n(d: u64, at: u64, v: u64) -> u64 {
+    let n: u64 = ulib.digits(v, d + at)
+    *((d + at + n) as *mut u8) = 0 as u8
+    return at + n
+}
+
+// A size in sectors as a person reads it ("16 MiB" is written "16 MB": the units of navnum).
+fn put_size(d: u64, at: u64, sectors: u64) -> u64 {
+    let _n: usize = navnum.size_text(sectors * 512, (&sizebuf[0]) as u64, 32)
+    return put(d, at, (&sizebuf[0]) as u64)
+}
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+// The kind of a partition as a symbol colour and a role.
+fn kind_role(k: u64) -> u64 {
+    if k == table.K_EFI {
+        return fuiscene.R_ACCENT
+    }
+    if k == table.K_OFS {
+        return fuiscene.R_SUCCESS
+    }
+    if k == table.K_LINUX {
+        return fuiscene.R_WARN
+    }
+    if k == table.K_BASIC || k == table.K_FAT32 {
+        return fuiscene.R_ERR
+    }
+    return fuiscene.R_MUTED
+}
+
+fn fill_nav() {
+    let d: u64 = (&nav_blob[0]) as u64
+    var a: u64 = 0
+    var i: u64 = 0
+    while i < diskscan.count() {
+        // line 1: the device, line 2: the size and the table
+        a = put(d, a, diskscan.path(i))
+        a = put(d, a, (&s_tab1[0]) as u64)
+        a = put_size(d, a, diskscan.sectors(i))
+        a = put(d, a, (&s_dot[0]) as u64)
+        a = put(d, a, table.scheme_word(table.scheme(diskscan.table_of(i))))
+        a = put(d, a, (&s_nl[0]) as u64)
+        nav_icons[i as usize] = wlib.icon_id(icons.FILE_DRIVE)
+        i = i + 1
+    }
+}
+
+fn fill_list() {
+    let d: u64 = (&list_blob[0]) as u64
+    var a: u64 = put(d, 0, msg.get((&k_cols[0]) as u64))
+    a = put(d, a, (&s_nl[0]) as u64)
+    var np: u64 = 0
+    if diskscan.count() > 0 {
+        let t: u64 = diskscan.table_of(sel)
+        var p: u64 = 0
+        while p < table.count(t) && a < 3800 {
+            a = put_n(d, a, p + 1)
+            a = put(d, a, (&s_tab1[0]) as u64)
+            if (*(table.name_of(t, p) as *mut u8)) != 0 as u8 {
+                a = put(d, a, table.name_of(t, p))
+            }
+            a = put(d, a, (&s_tab1[0]) as u64)
+            a = put(d, a, table.kind_word(table.kind_of(t, p)))
+            a = put(d, a, (&s_tab1[0]) as u64)
+            a = put_n(d, a, table.start_of(t, p))
+            a = put(d, a, (&s_tab1[0]) as u64)
+            a = put_size(d, a, table.sectors_of(t, p))
+            a = put(d, a, (&s_tab1[0]) as u64)
+            let m: u64 = diskscan.part_mount(sel, p)
+            if m != 0 {
+                a = put(d, a, m)
+            }
+            a = put(d, a, (&s_nl[0]) as u64)
+            list_icons[p as usize] = wlib.icon_tint(wlib.icon_id(icons.FILE_DRIVE), 9741240)
+            p = p + 1
+        }
+        np = p
+    }
+    // a disk without a table: one row for the whole disk, when it carries a file system
+    if diskscan.count() > 0 && table.scheme(diskscan.table_of(sel)) == table.SCH_NONE {
+        let w: u64 = diskscan.whole_mount(sel)
+        a = put(d, a, msg.get((&k_whole[0]) as u64))
+        a = put(d, a, (&s_tab1[0]) as u64)
+        a = put(d, a, (&s_tab1[0]) as u64)
+        a = put(d, a, (&s_tab1[0]) as u64)
+        a = put_size(d, a, diskscan.sectors(sel))
+        a = put(d, a, (&s_tab1[0]) as u64)
+        if w != 0 {
+            a = put(d, a, w)
+        }
+        a = put(d, a, (&s_nl[0]) as u64)
+        list_icons[0 as usize] = wlib.icon_tint(wlib.icon_id(icons.FILE_DRIVE), 9741240)
+        np = 1
+    }
+    if np == 0 && diskscan.count() > 0 {
+        a = put(d, a, msg.get((&k_notable[0]) as u64))
+        a = put(d, a, (&s_nl[0]) as u64)
+    }
+}
+
+// The facts of the chosen disk, one line: "Disk /dev/hda, 16 MB, table gpt, 3 partitions, header and entries
+// checksums right, backup header present".
+fn fill_facts() {
+    let d: u64 = (&facts[0]) as u64
+    if diskscan.count() == 0 {
+        let _a: u64 = put(d, 0, msg.get((&k_none[0]) as u64))
+        return
+    }
+    let t: u64 = diskscan.table_of(sel)
+    var a: u64 = put(d, 0, diskscan.path(sel))
+    a = put(d, a, (&s_dot[0]) as u64)
+    a = put_size(d, a, diskscan.sectors(sel))
+    a = put(d, a, (&s_dot[0]) as u64)
+    a = put(d, a, msg.get((&k_table[0]) as u64))
+    a = put(d, a, (&s_sp[0]) as u64)
+    a = put(d, a, table.scheme_word(table.scheme(t)))
+    if table.scheme(t) == table.SCH_GPT {
+        a = put(d, a, (&s_dot[0]) as u64)
+        a = put_n(d, a, table.count(t))
+        a = put(d, a, (&s_sp[0]) as u64)
+        a = put(d, a, msg.get((&k_parts[0]) as u64))
+        a = put(d, a, (&s_dot[0]) as u64)
+        a = put(d, a, msg.get((&k_hdrok[0]) as u64))
+        if (table.flags_of(t) & table.F_BACKUP_OK) != 0 {
+            a = put(d, a, (&s_dot[0]) as u64)
+            a = put(d, a, msg.get((&k_backup[0]) as u64))
+        }
+    } else if table.scheme(t) == table.SCH_MBR {
+        a = put(d, a, (&s_dot[0]) as u64)
+        a = put_n(d, a, table.count(t))
+        a = put(d, a, (&s_sp[0]) as u64)
+        a = put(d, a, msg.get((&k_parts[0]) as u64))
+    }
+}
+
+// The map: the disk as a bar, each partition as long as it is big (at least 6 points), the rest is free space.
+fn map_draw(mx: u64, my: u64, mw: u64, mh: u64) {
+    fuiscene.cv_round(mx, my, mw, mh, 8, fuiscene.R_FIELD)
+    fuiscene.cv_ring(mx, my, mw, mh, 8, fuiscene.R_BORDER)
+    if diskscan.count() == 0 {
+        return
+    }
+    let t: u64 = diskscan.table_of(sel)
+    let total: u64 = diskscan.sectors(sel)
+    let bx: u64 = mx + 14
+    let bw: u64 = mw - 28
+    let by: u64 = my + 40
+    let bh: u64 = 32
+    fuiscene.cv_round(bx, by, bw, bh, 6, fuiscene.R_BORDER)
+    fuiscene.text_role(bx, my + 26, bw, diskscan.path(sel), 13, true, fuiscene.R_MUTED)
+    var p: u64 = 0
+    while p < table.count(t) && total > 0 {
+        var x0: u64 = bx + table.start_of(t, p) * bw / total
+        var w0: u64 = table.sectors_of(t, p) * bw / total
+        if w0 < 6 {
+            w0 = 6
+        }
+        if x0 + w0 > bx + bw {
+            w0 = bx + bw - x0
+        }
+        fuiscene.cv_round(x0, by, w0, bh, 6, kind_role(table.kind_of(t, p)))
+        if w0 > 60 {
+            fuiscene.text_role(x0 + 8, by + 21, w0 - 12, table.kind_word(table.kind_of(t, p)), 12, true,
+                fuiscene.R_ONFILL)
+        }
+        p = p + 1
+    }
+    // the legend under the bar: one swatch and the kind word per partition kind present
+    fuiscene.text_role(bx, my + 92, bw, (&facts[0]) as u64, 12, false, fuiscene.R_MUTED)
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    let top: usize = fuiscene.row(col)
+    fuiscene.set_gap(top, 8)
+    let _nv: usize = fuiscene.table_list(top, K_DNAV, NAVW, BH - 16, 1, (&nav_blob[0]) as u64)
+    fuiscene.table_two(K_DNAV, true)
+    fuiscene.table_icons(K_DNAV, (&nav_icons[0]) as u64)
+    fuiscene.table_single(K_DNAV, true)
+    fuiscene.table_set_sel(K_DNAV, sel)
+    let cc: usize = fuiscene.column(top)
+    fuiscene.set_gap(cc, 8)
+    let bar: usize = fuiscene.row(cc)
+    fuiscene.set_gap(bar, 4)
+    let rb: usize = fuiscene.icon_button(bar, icons.NAV_REFRESH, msg.get((&k_refresh[0]) as u64), K_REFRESH)
+    fuiscene.flat(rb)
+    fuiscene.set_size(rb, 32, 32)
+    fuiscene.tip(K_REFRESH, msg.get((&k_refresh[0]) as u64))
+    n_map = fuiscene.canvas(cc, K_MAP, CW, MAPH, map_draw)
+    let _lt: usize = fuiscene.table_blob(cc, K_LIST, CW, BH - 16 - MAPH - 32 - 24, 5, (&list_blob[0]) as u64)
+    fuiscene.table_icons(K_LIST, (&list_icons[0]) as u64)
+    fuiscene.table_align_right(K_LIST, 3, true)
+    fuiscene.table_align_right(K_LIST, 4, true)
+}
+
+fn report() {
+    if !uitrace {
+        return
+    }
+    say((&s_ready[0]) as u64)
+    sayn(diskscan.count())
+    say((&s_geomw[0]) as u64)
+    sayn(BW)
+    say((&s_geomh[0]) as u64)
+    sayn(BH)
+    say((&s_geomx[0]) as u64)
+    sayn(40)
+    say((&s_geomy[0]) as u64)
+    sayn(24)
+    ulib.nl()
+    var i: u64 = 0
+    while i < diskscan.count() {
+        let t: u64 = diskscan.table_of(i)
+        say((&s_diskl[0]) as u64)
+        sayn(i)
+        say((&s_sp[0]) as u64)
+        say(diskscan.path(i))
+        say((&s_sect[0]) as u64)
+        sayn(diskscan.sectors(i))
+        say((&s_tab[0]) as u64)
+        say(table.scheme_word(table.scheme(t)))
+        ulib.nl()
+        var p: u64 = 0
+        while p < table.count(t) {
+            say((&s_partl[0]) as u64)
+            sayn(i)
+            say((&s_sp[0]) as u64)
+            sayn(p)
+            say((&s_start[0]) as u64)
+            sayn(table.start_of(t, p))
+            say((&s_sect[0]) as u64)
+            sayn(table.sectors_of(t, p))
+            say((&s_kind[0]) as u64)
+            say(table.kind_word(table.kind_of(t, p)))
+            say((&s_mount[0]) as u64)
+            let m: u64 = diskscan.part_mount(i, p)
+            if m != 0 {
+                say(m)
+            } else {
+                say((&s_dash[0]) as u64)
+            }
+            ulib.nl()
+            p = p + 1
+        }
+        i = i + 1
+    }
+}
+
+fn load() {
+    diskscan.scan()
+    if sel >= diskscan.count() {
+        sel = 0
+    }
+    fill_nav()
+    fill_list()
+    fill_facts()
+}
+
+fn u_start(args: u64) -> u64 {
+    let _mk: u64 = msg.init()
+    load()
+    if !fuiscene.open(40, 24, BW, BH, msg.get((&k_title[0]) as u64), build) {
+        return 1
+    }
+    fuiscene.set_app((&t_app[0]) as u64)
+    fuiscene.raise()
+    var first: bool = true
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first && fuiscene.painted() > 0 {
+            first = false
+            fuiscene.table_row_height(K_DNAV, 56)
+            fuiscene.table_row_height(K_LIST, 32)
+            fuiscene.table_hover(K_DNAV, true)
+            fuiscene.table_hover(K_LIST, true)
+            fuiscene.table_colw(K_LIST, 0, 40)
+            fuiscene.table_colw(K_LIST, 1, 150)
+            fuiscene.table_colw(K_LIST, 2, 90)
+            fuiscene.table_colw(K_LIST, 3, 100)
+            fuiscene.table_colw(K_LIST, 4, 100)
+            fuiscene.refresh()
+            uitrace = fuiscene.trace_on()
+            report()
+            var nm: [u8; 6] = "disks\0"
+            fuiscene.say_rects((&nm[0]) as u64)
+            fuiscene.say_texts()
+        }
+        if key == K_DNAV {
+            let r: u64 = fuiscene.table_sel(K_DNAV)
+            if r < diskscan.count() && r != sel {
+                sel = r
+                fill_list()
+                fill_facts()
+                fuiscene.table_set_blob(K_LIST, (&list_blob[0]) as u64)
+                fuiscene.refresh()
+            }
+        } else if key == K_REFRESH {
+            load()
+            fuiscene.table_set_blob(K_DNAV, (&nav_blob[0]) as u64)
+            fuiscene.table_set_blob(K_LIST, (&list_blob[0]) as u64)
+            fuiscene.refresh()
+            report()
+        }
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

@@ -1,0 +1,424 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/disks/table.fi -- THE PARTITION TABLE OF A DISK, READ (docs/DISKS.md stage D-0).
+//
+// MBR, GPT and the protective MBR in front of a GPT, parsed from the sectors a caller hands over. Nothing here
+// touches a device: the caller gives a `read(lba, count, dst) -> 0 when it worked` function, so the same code
+// runs in a Ring-3 program on /dev/hda, in a test on an image file, and later in the plan of a change.
+//
+//   read_table(read, total, tab, scratch)   fills `tab` and returns the scheme
+//   scheme(tab) count(tab) ...              the answers
+//
+// THE TABLE LIVES IN A BUFFER OF THE CALLER (`TAB_BYTES` octets), as 8-octet words:
+//
+//   header (8 words): 0 scheme, 1 count, 2 total sectors, 3 first usable, 4 last usable, 5 disk guid (lo),
+//                     6 disk guid (hi), 7 flags (bit 0 header CRC ok, 1 entry array CRC ok, 2 backup header ok)
+//   record (8 words each, from word 8): 0 first sector, 1 sectors, 2 kind, 3 attributes, 4 type guid (lo),
+//                     5 type guid (hi), 6 and 7 the name (up to 15 ASCII characters, NUL-terminated)
+//
+// THE CHECKSUMS ARE COMPUTED, NOT SKIPPED: a GPT whose header or entry array does not match its CRC32 is not read
+// (scheme NONE) -- the same rule `kernel/block/part.fi` applies, so a partition this library shows is one the
+// kernel would also see.
+
+export {
+    read_table, scheme, count, total_of, first_usable, last_usable, flags_of,
+    start_of, sectors_of, kind_of, attr_of, name_of, guid_lo, guid_hi,
+    kind_word, scheme_word, crc32,
+    SCH_NONE, SCH_MBR, SCH_GPT,
+    K_OTHER, K_FAT32, K_EFI, K_LINUX, K_BASIC, K_OFS, K_EXTENDED, K_EMPTY,
+    MAXP, TAB_BYTES, SCRATCH_BYTES, F_HDR_OK, F_ARR_OK, F_BACKUP_OK,
+}
+
+const SCH_NONE: u64 = 0
+const SCH_MBR: u64 = 1
+const SCH_GPT: u64 = 2
+
+const K_OTHER: u64 = 0
+const K_FAT32: u64 = 1
+const K_EFI: u64 = 2
+const K_LINUX: u64 = 3
+const K_BASIC: u64 = 4
+const K_OFS: u64 = 5
+const K_EXTENDED: u64 = 6
+const K_EMPTY: u64 = 7
+
+const MAXP: u64 = 32
+const REC_WORDS: u64 = 8
+const HDR_WORDS: u64 = 8
+const TAB_BYTES: u64 = (HDR_WORDS + MAXP * REC_WORDS) * 8
+// room for the biggest thing read at once: a sector and 32 sectors of entries
+const SCRATCH_BYTES: u64 = 512 + 32 * 512
+
+const F_HDR_OK: u64 = 1
+const F_ARR_OK: u64 = 2
+const F_BACKUP_OK: u64 = 4
+
+// ------------------------------------------------------------ memory helpers
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn le16(p: u64) -> u64 {
+    return ld8(p, 0) | (ld8(p, 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn le64(p: u64) -> u64 {
+    return le32(p) | (le32(p + 4) << 32)
+}
+
+fn wget(tab: u64, w: u64) -> u64 {
+    return *((tab + w * 8) as *mut u64)
+}
+
+fn wput(tab: u64, w: u64, v: u64) {
+    *((tab + w * 8) as *mut u64) = v
+}
+
+fn rec(tab: u64, i: u64, w: u64) -> u64 {
+    return wget(tab, HDR_WORDS + i * REC_WORDS + w)
+}
+
+fn rec_put(tab: u64, i: u64, w: u64, v: u64) {
+    wput(tab, HDR_WORDS + i * REC_WORDS + w, v)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        *((p + i) as *mut u8) = 0 as u8
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------ CRC32 (IEEE 802.3, reflected, 0xEDB88320)
+
+fn crc32(p: u64, n: u64) -> u64 {
+    var c: u64 = 4294967295
+    var i: u64 = 0
+    while i < n {
+        c = c ^ ld8(p, i)
+        var k: u64 = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = (c >> 1) ^ 3988292384
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return c ^ 4294967295
+}
+
+// ------------------------------------------------------------ the answers
+
+fn scheme(tab: u64) -> u64 {
+    return wget(tab, 0)
+}
+
+fn count(tab: u64) -> u64 {
+    return wget(tab, 1)
+}
+
+fn total_of(tab: u64) -> u64 {
+    return wget(tab, 2)
+}
+
+fn first_usable(tab: u64) -> u64 {
+    return wget(tab, 3)
+}
+
+fn last_usable(tab: u64) -> u64 {
+    return wget(tab, 4)
+}
+
+fn guid_lo(tab: u64) -> u64 {
+    return wget(tab, 5)
+}
+
+fn guid_hi(tab: u64) -> u64 {
+    return wget(tab, 6)
+}
+
+fn flags_of(tab: u64) -> u64 {
+    return wget(tab, 7)
+}
+
+fn start_of(tab: u64, i: u64) -> u64 {
+    return rec(tab, i, 0)
+}
+
+fn sectors_of(tab: u64, i: u64) -> u64 {
+    return rec(tab, i, 1)
+}
+
+fn kind_of(tab: u64, i: u64) -> u64 {
+    return rec(tab, i, 2)
+}
+
+fn attr_of(tab: u64, i: u64) -> u64 {
+    return rec(tab, i, 3)
+}
+
+// The name of partition `i`: a pointer into the table (NUL-terminated).
+fn name_of(tab: u64, i: u64) -> u64 {
+    return tab + (HDR_WORDS + i * REC_WORDS + 6) * 8
+}
+
+static mut W_NONE: [u8; 5] = "none\0"
+static mut W_MBR: [u8; 4] = "mbr\0"
+static mut W_GPT: [u8; 4] = "gpt\0"
+static mut W_OTHER: [u8; 6] = "other\0"
+static mut W_FAT32: [u8; 6] = "fat32\0"
+static mut W_EFI: [u8; 4] = "efi\0"
+static mut W_LINUX: [u8; 6] = "linux\0"
+static mut W_BASIC: [u8; 6] = "basic\0"
+static mut W_OFS: [u8; 4] = "ofs\0"
+static mut W_EXT: [u8; 9] = "extended\0"
+static mut W_EMPTY: [u8; 6] = "empty\0"
+
+fn scheme_word(s: u64) -> u64 {
+    if s == SCH_MBR {
+        return (&W_MBR[0]) as u64
+    }
+    if s == SCH_GPT {
+        return (&W_GPT[0]) as u64
+    }
+    return (&W_NONE[0]) as u64
+}
+
+fn kind_word(k: u64) -> u64 {
+    if k == K_FAT32 {
+        return (&W_FAT32[0]) as u64
+    }
+    if k == K_EFI {
+        return (&W_EFI[0]) as u64
+    }
+    if k == K_LINUX {
+        return (&W_LINUX[0]) as u64
+    }
+    if k == K_BASIC {
+        return (&W_BASIC[0]) as u64
+    }
+    if k == K_OFS {
+        return (&W_OFS[0]) as u64
+    }
+    if k == K_EXTENDED {
+        return (&W_EXT[0]) as u64
+    }
+    if k == K_EMPTY {
+        return (&W_EMPTY[0]) as u64
+    }
+    return (&W_OTHER[0]) as u64
+}
+
+// ------------------------------------------------------------ the kinds
+
+fn mbr_kind(t: u64) -> u64 {
+    if t == 11 || t == 12 {
+        return K_FAT32
+    }
+    if t == 239 {
+        return K_EFI
+    }
+    if t == 131 {
+        return K_LINUX
+    }
+    if t == 7 {
+        return K_BASIC
+    }
+    if t == 5 || t == 15 || t == 133 {
+        return K_EXTENDED
+    }
+    return K_OTHER
+}
+
+// A type GUID (16 octets) as two little-endian words.
+fn gpt_kind(lo: u64, hi: u64) -> u64 {
+    if lo == 0 && hi == 0 {
+        return K_EMPTY
+    }
+    if lo == 0x4433b9e5ebd0a0a2 && hi == 0xc79926b7b668c087 {
+        return K_BASIC
+    }
+    if lo == 0x11d2f81fc12a7328 && hi == 0x3bc93ec9a0004bba {
+        return K_EFI
+    }
+    if lo == 0x477284830fc63daf && hi == 0xe47d47d8693d798e {
+        return K_LINUX
+    }
+    if lo == 0x53014f464f53554d && hi == 0x534f69726f6d758e {
+        return K_OFS
+    }
+    return K_OTHER
+}
+
+// ------------------------------------------------------------ the scan
+
+fn is_efi_part(p: u64) -> bool {
+    // "EFI PART"
+    return ld8(p, 0) == 69 && ld8(p, 1) == 70 && ld8(p, 2) == 73 && ld8(p, 3) == 32
+        && ld8(p, 4) == 80 && ld8(p, 5) == 65 && ld8(p, 6) == 82 && ld8(p, 7) == 84
+}
+
+// The CRC of a GPT header: over `size` octets with the CRC field (octet 16) taken as zero.
+fn header_crc(p: u64, size: u64) -> u64 {
+    let save: u64 = le32(p + 16)
+    var i: u64 = 0
+    while i < 4 {
+        *((p + 16 + i) as *mut u8) = 0 as u8
+        i = i + 1
+    }
+    let got: u64 = crc32(p, size)
+    i = 0
+    while i < 4 {
+        *((p + 16 + i) as *mut u8) = ((save >> (i * 8)) & 255) as u8
+        i = i + 1
+    }
+    return got
+}
+
+// A GPT: header at sector 1 (the primary), entries where it says. Returns true when the table was taken.
+// The primary header is read in `scratch` (512 octets), its entries in the 32 sectors behind it.
+fn read_gpt(read: fn(u64, u64, u64) -> u64, total: u64, tab: u64, scratch: u64) -> bool {
+    let hdr: u64 = scratch
+    let arr: u64 = scratch + 512
+    if read(1, 1, hdr) != 0 || !is_efi_part(hdr) {
+        return false
+    }
+    let hsize: u64 = le32(hdr + 12)
+    if hsize < 92 || hsize > 512 {
+        return false
+    }
+    // THE HEADER'S OWN CRC
+    if header_crc(hdr, hsize) != le32(hdr + 16) {
+        return false
+    }
+    let entlba: u64 = le64(hdr + 72)
+    let nent: u64 = le32(hdr + 80)
+    let esize: u64 = le32(hdr + 84)
+    let acrc: u64 = le32(hdr + 88)
+    if esize < 128 || esize > 512 || nent == 0 || nent > 128 {
+        return false
+    }
+    let bytes: u64 = nent * esize
+    let sectors: u64 = (bytes + 511) / 512
+    if sectors > 32 {
+        return false
+    }
+    if read(entlba, sectors, arr) != 0 {
+        return false
+    }
+    // THE ENTRY ARRAY'S CRC
+    if crc32(arr, bytes) != acrc {
+        return false
+    }
+    wput(tab, 0, SCH_GPT)
+    wput(tab, 2, total)
+    wput(tab, 3, le64(hdr + 40))
+    wput(tab, 4, le64(hdr + 48))
+    wput(tab, 5, le64(hdr + 56))
+    wput(tab, 6, le64(hdr + 64))
+    var flags: u64 = F_HDR_OK | F_ARR_OK
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nent && n < MAXP {
+        let e: u64 = arr + i * esize
+        let lo: u64 = le64(e)
+        let hi: u64 = le64(e + 8)
+        if lo != 0 || hi != 0 {
+            let first: u64 = le64(e + 32)
+            let last: u64 = le64(e + 40)
+            if last >= first {
+                rec_put(tab, n, 0, first)
+                rec_put(tab, n, 1, last - first + 1)
+                rec_put(tab, n, 2, gpt_kind(lo, hi))
+                rec_put(tab, n, 3, le64(e + 48))
+                rec_put(tab, n, 4, lo)
+                rec_put(tab, n, 5, hi)
+                // the name: UTF-16LE from octet 56, the low octet of up to 15 characters
+                var j: u64 = 0
+                let nm: u64 = tab + (HDR_WORDS + n * REC_WORDS + 6) * 8
+                zero(nm, 16)
+                while j < 15 {
+                    let ch: u64 = le16(e + 56 + j * 2)
+                    if ch == 0 {
+                        break
+                    }
+                    var c8: u64 = 63
+                    if ch < 128 {
+                        c8 = ch
+                    }
+                    *((nm + j) as *mut u8) = c8 as u8
+                    j = j + 1
+                }
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    wput(tab, 1, n)
+    // THE BACKUP HEADER at the last sector: present and with a good CRC is only a flag (the primary decides)
+    if total > 2 && read(total - 1, 1, hdr) == 0 && is_efi_part(hdr) {
+        let hs2: u64 = le32(hdr + 12)
+        if hs2 >= 92 && hs2 <= 512 && header_crc(hdr, hs2) == le32(hdr + 16) {
+            flags = flags | F_BACKUP_OK
+        }
+    }
+    wput(tab, 7, flags)
+    return true
+}
+
+// THE ENTRY POINT. Returns SCH_GPT, SCH_MBR or SCH_NONE. `total` is the disk size in sectors (0 when unknown).
+fn read_table(read: fn(u64, u64, u64) -> u64, total: u64, tab: u64, scratch: u64) -> u64 {
+    zero(tab, TAB_BYTES)
+    wput(tab, 2, total)
+    let b: u64 = scratch
+    if read(0, 1, b) != 0 {
+        return SCH_NONE
+    }
+    if ld8(b, 510) != 85 || ld8(b, 511) != 170 {
+        return SCH_NONE
+    }
+    var protective: bool = false
+    var i: u64 = 0
+    while i < 4 {
+        if ld8(b + 446 + i * 16, 4) == 238 {
+            protective = true
+        }
+        i = i + 1
+    }
+    if protective {
+        // a GPT behind the protective MBR; a bad table is NOT replaced by a guess
+        if read_gpt(read, total, tab, scratch) {
+            return SCH_GPT
+        }
+        wput(tab, 0, SCH_NONE)
+        return SCH_NONE
+    }
+    wput(tab, 0, SCH_MBR)
+    var n: u64 = 0
+    i = 0
+    while i < 4 {
+        let e: u64 = b + 446 + i * 16
+        let t: u64 = ld8(e, 4)
+        let s: u64 = le32(e + 8)
+        let l: u64 = le32(e + 12)
+        if t != 0 && l != 0 {
+            rec_put(tab, n, 0, s)
+            rec_put(tab, n, 1, l)
+            rec_put(tab, n, 2, mbr_kind(t))
+            rec_put(tab, n, 3, ld8(e, 0))
+            rec_put(tab, n, 4, t)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    wput(tab, 1, n)
+    return SCH_MBR
+}
