@@ -118,7 +118,7 @@ Ordner. Auf eine Datei zu zielen und sie zu treffen wäre ein Fehlgriff
 mit Folgen.
 
 **Verschoben wird, nicht kopiert** — über `expakt.einfuegen`, also
-dieselbe Funktion wie Strg+V, also `dateiop.verschiebe` → `io.rename`
+dieselbe Funktion wie Strg+V, also `fileop.verschiebe` → `io.rename`
 (`P-018`: der Verzeichniseintrag wird umgehängt, die Oktette werden
 nicht angefasst).
 
@@ -127,7 +127,7 @@ nicht angefasst).
 ## Der zweite Fehler, den die Messung gefunden hat
 
 Der erste Entwurf von `ablegen()` rief `expakt.copy_remember(false)` —
-und `einfuegen` nimmt ohne `ist_schnitt` den Zweig `dateiop.kopiere`
+und `einfuegen` nimmt ohne `ist_schnitt` den Zweig `fileop.kopiere`
 (`expakt.fi:505`). Die Platte danach:
 
 ```

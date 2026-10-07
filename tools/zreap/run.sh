@@ -24,8 +24,7 @@ TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="$TMPD/build"
 pass=0; fail=0
-ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
+. "${FIRN:-/root/firn}/tools/testkit/testkit.sh"
 {
     echo "warteauf 'launcher: ready' || 120"
     echo "warte 8"

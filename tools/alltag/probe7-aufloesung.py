@@ -64,7 +64,7 @@ def resolve(path, rules):
             elif rule == "buildsh":
                 for l in head:
                     if l.startswith("GUI="):
-                        l = l[:-2] + ' rechner papierkorb viewer snip lock"}'
+                        l = l[:-2] + ' rechner trashbin viewer snip lock"}'
                     elif l.startswith("CLI="):
                         l = l[:-2] + ' zip"}'
                     out.append(l)

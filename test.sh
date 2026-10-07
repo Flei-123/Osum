@@ -1709,6 +1709,10 @@ lauf "59. the disk manager, read side: MBR / GPT with checksums, diskctl list, t
 lauf "60. the centre line: rows, icons, tabs, menu rows, title bar, task bar (tools/midline/run.sh)" \
      tools/midline/run.sh midline '^MIDLINE: |^  OK    |^  FAIL  '
 
+# 58b. the same guard as in every other repo (Firn tools/english/no_german.py): one rule for all projects.
+lauf "58b. the shared English guard of Firn: no more German than no-german.baseline.json (tools/english/shared_guard.sh)" \
+     tools/english/shared_guard.sh english-shared '^  OK    |^  FAIL  |^no-german: '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

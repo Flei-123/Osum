@@ -264,7 +264,7 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # Abnahme der Runde GUI-EDITOR prueft ausdruecklich, dass es
 # unveraendert eines ist.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo taskmgr installer dualcli locate edit nedit papierkorb sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr installer dualcli locate edit nedit trashbin sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
@@ -1288,8 +1288,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /bin/nedit /apps/nedit.osp/start /apps/nedit.osp/INFO \
-/bin/papierkorb /apps/papierkorb.osp/start /apps/papierkorb.osp/INFO \
-/apps/papierkorb.osp/symbol /etc/papierkorb.conf \
+/bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
+/apps/trashbin.osp/symbol /etc/papierkorb.conf \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \

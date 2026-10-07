@@ -10,8 +10,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 pass=0; fail=0
-ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
+. "${FIRN:-/root/firn}/tools/testkit/testkit.sh"
 
 echo "== 1. the counter counts =="
 python3 - <<'PY' && ok "German identifier, comment line and log text are counted; English is not" || bad "the counter does not count"

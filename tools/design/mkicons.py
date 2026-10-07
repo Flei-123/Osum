@@ -33,7 +33,7 @@ APPS = {
     "settings":  ("settings",         "64748b", "334155"),
     "terminal":  ("square-terminal",  "22c55e", "15803d"),
     "installer": ("download",         "8b5cf6", "6d28d9"),
-    "papierkorb": ("trash-2",         "14b8a6", "0f766e"),
+    "trashbin":   ("trash-2",         "14b8a6", "0f766e"),
     "pdfview":   ("file-text",        "ef4444", "b91c1c"),
     "store":     ("shopping-bag",     "0ea5e9", "0369a1"),
     "taskmgr":   ("activity",         "06b6d4", "0e7490"),

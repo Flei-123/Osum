@@ -24,8 +24,7 @@ OUT=${1:-$(mktemp -d)}
 [ -n "${1:-}" ] || trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
 pass=0; fail=0
-ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
+. "${FIRN:-/root/firn}/tools/testkit/testkit.sh"
 keys() { local m=""; for c in "$@"; do m="$m mon=sendkey\\ $c mon=warte\\ 1"; done; echo "$m"; }
 run() { # name keys...
     local nm=$1; shift
