@@ -411,11 +411,11 @@ ok "eine Begruendung, die sich mit der Maschine aendert, ist eine Messung"
 echo "== 5. die Frist laeuft ohne JEDES Zutun ab =="
 cp -f "$TMPD/root.img" "$TMPD/frist.img"
 rc=$(lauf_platte frist \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 1400 1050;sleep 22;dispctl raw" \
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;sleep 22;dispctl raw" \
     "$TMPD/frist.img")
 num "der Lauf endet sauber" "$rc" eq 21
 F="$TMPD/frist.txt"
-hat "$F" "dispctl: angenommen" "ein Programm in Ring 3 hat eine eigene Aufloesung gesetzt"
+hat "$F" "dispctl: accepted" "ein Programm in Ring 3 hat eine eigene Aufloesung gesetzt"
 gleich "direkt danach steht die Tafel auf 1400" "1400" "$(uwn "$F" panelw 1)"
 gleich "und eine Frist laeuft" "1" "$(uwn "$F" pending 1)"
 # ZWISCHEN DIESEN BEIDEN ZEILEN LIEF NUR `sleep`. Das Programm hat
@@ -454,7 +454,7 @@ echo "== 6. ein bestaetigter Modus ueberlebt den Neustart =="
 cp -f "$TMPD/root.img" "$TMPD/dauer.img"
 
 rc=$(lauf_platte s1 \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 1400 1050;dispctl behalten;dispctl raw" \
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;dispctl keep;dispctl raw" \
     "$TMPD/dauer.img")
 num "START 1 endet sauber" "$rc" eq 21
 S1="$TMPD/s1.txt"
@@ -495,11 +495,11 @@ gleich "und die Tafel bleibt beim Startmodus" "800" "$(uwl "$S5" panelw)"
 # an. Sonst waere die Bestaetigung eine Geste.
 cp -f "$TMPD/root.img" "$TMPD/dauer2.img"
 rc=$(lauf_platte t1 \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 1400 1050;dispctl behalten" \
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;dispctl keep" \
     "$TMPD/dauer2.img")
 num "der Vorlauf endet sauber" "$rc" eq 21
 rc=$(lauf_platte t2 \
-    "osum gfx disp nokbd nosched noproc script=dispctl raw;dispctl behalten;dispctl raw" \
+    "osum gfx disp nokbd nosched noproc script=dispctl raw;dispctl keep;dispctl raw" \
     "$TMPD/dauer2.img")
 num "der Lauf endet sauber" "$rc" eq 21
 T2="$TMPD/t2.txt"
@@ -523,27 +523,27 @@ cp -f "$TMPD/root.img" "$TMPD/r4.img"
 # Wunsch hinterlaesst, und braucht dafuer einen, der wirklich abgelehnt
 # wird.
 rc=$(VGA_STD="-device VGA,edid=off,vgamem_mb=64" lauf_platte satz \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 3840 2160;dispctl eigen 1366 768" \
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 3840 2160;dispctl custom 1366 768" \
     "$TMPD/r4.img")
 num "der Lauf endet sauber" "$rc" eq 21
 A="$TMPD/satz.txt"
-hat "$A" "dieser Kernel kann es nicht einblenden" "der Satz nennt die Schranke"
+hat "$A" "this kernel cannot show it" "der Satz nennt die Schranke"
 hat "$A" "33177600" "und die Zahl, die es zerreisst"
 hat "$A" "29360128" "und die Zahl, die ginge"
-hat "$A" "2-MiB-Fensterplaetze" "und wovon die Schranke kommt"
-hat "$A" "die Karte nimmt diese Zahl nicht an" "die zweite Schranke nennt sich anders"
-hat "$A" "Vielfaches von" "und gibt den Hinweis, der wirklich weiterhilft"
+hat "$A" "2-MiB window slots" "und wovon die Schranke kommt"
+hat "$A" "the card does not accept this number" "die zweite Schranke nennt sich anders"
+hat "$A" "multiple of" "und gibt den Hinweis, der wirklich weiterhilft"
 # UND DIE DRITTE: eine Zahl, die kein Bildschirm ist. Sie nennt nicht nur
 # die falsche Zahl, sondern den Bereich -- sonst weiss der Benutzer zwar,
 # welche seiner beiden Zahlen es zerreisst, aber nicht, wohin damit.
 cp -f "$TMPD/root.img" "$TMPD/r5.img"
 rc=$(lauf_platte unsinn \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 4 4" "$TMPD/r5.img")
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 4 4" "$TMPD/r5.img")
 num "der Lauf endet sauber" "$rc" eq 21
 U="$TMPD/unsinn.txt"
-hat "$U" "die Zahl liegt ausserhalb" "die dritte Schranke nennt sich wieder anders"
-hat "$U" "Breite 320 .. 8192" "und sie sagt, wohin die Zahl gehoert"
-hat "$U" "Hoehe 200 .. 8192" "fuer beide Richtungen"
+hat "$U" "the number is out of range" "die dritte Schranke nennt sich wieder anders"
+hat "$U" "width 320 .. 8192" "und sie sagt, wohin die Zahl gehoert"
+hat "$U" "height 200 .. 8192" "fuer beide Richtungen"
 
 # ============================================== 8. die Gegenprobe
 
@@ -557,11 +557,11 @@ hat_nicht "$O" "disp: save" "und die Platte wird nicht angefasst"
 hat "$O" "fb: 800x600x32" "der Bildschirm von Runde K7 steht unveraendert"
 hat "$O" "fb: selftest 13 / 13" "und seine dreizehn Zusagen auch"
 cp -f "$TMPD/root.img" "$TMPD/ohne.img"
-rc=$(lauf_platte ohne3 "osum gfx nokbd nosched noproc script=dispctl eigen 1400 1050" \
+rc=$(lauf_platte ohne3 "osum gfx nokbd nosched noproc script=dispctl custom 1400 1050" \
     "$TMPD/ohne.img")
 num "der Lauf endet sauber" "$rc" eq 21
 O3="$TMPD/ohne3.txt"
-hat "$O3" "dispctl: der Bildschirm ist nicht da" "/bin/dispctl rechnet nicht weiter"
+hat "$O3" "dispctl: there is no screen" "/bin/dispctl rechnet nicht weiter"
 gleich "und der neue Grund ist ein Strich und keine Null" "-" "$(uw "$O3" custwhy)"
 gleich "auch die Zahl" "-" "$(uw "$O3" custnum)"
 gleich "auch der gespeicherte Modus" "-" "$(uw "$O3" saveok)"
