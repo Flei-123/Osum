@@ -729,6 +729,9 @@ MENUBG=$(python3 -c "print(0x2a3542)")
 UIFG=$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
     | awk '$2 == "text-primary" {print $3}')
 UIFG=$((16#$UIFG))
+# r399: the baseline of a menu row is `row top + (zh - text_h) / 2 + ascent of the face`: 16
+# with the old face (ascent 13), 17 with Inter (14). It is read OUT OF THE FACE, not typed.
+MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; print(raster.Schrift('$SANS', 15).aufsteiger())")
 i=0
 for punkt in Öffnen Umbenennen Entfernen; do
     # TOLERANZ 96, UND HIER STEHT DIE GEMESSENE ZAHL DAZU. Wo sich zwei
@@ -749,7 +752,7 @@ for punkt in Öffnen Umbenennen Entfernen; do
     # off, already at tolerance 0; the 96 stays for the "ff" seam.
     schau "Menuepunkt $i steht bildpunktgenau im Menuefenster: '$punkt'" \
         tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-        $((MNY + 16 + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
+        $((MNY + 3 + MASC + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
     i=$((i + 1))
 done
 # Its frame is one pixel in T_ACCENT (accent=5cc8ff in the /etc/theme
@@ -759,10 +762,10 @@ schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
     rechteck "$TMPD/pop.ppm" "$MNX" "$MNY" "$MNW" "$MNH" 92 200 255
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
     tkette "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
+    $((MNY + 3 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
     tkette "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
+    $((MNY + 3 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
 # Und ein Klick darauf waehlt.
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
@@ -783,7 +786,7 @@ mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
     tkette "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 16)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
+    $((MNY + 3 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
 DEL=$(mitte 9)
@@ -1427,8 +1430,14 @@ pruef() { local name=$1; shift
 pruef_nicht() { local name=$1; shift
     local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
+# r399: a bundle may carry a finished vector picture (symbol.osym, 32x32, tools/design/mkicons.py)
+# that wins over the 16x16 drawing; the screen checks then compare its opaque pixels 1:1
+ICS=16
+[ -f assets/apps/explorer.osp/symbol.osym ] && ICS=32
 for a in explorer editor; do
-    python3 tools/k15/icon.py --pruefe "$(sym $a)" "assets/apps/$a.osp/symbol.txt" \
+    SRC="assets/apps/$a.osp/symbol.txt"
+    [ -f "assets/apps/$a.osp/symbol.osym" ] && SRC="assets/apps/$a.osp/symbol.osym"
+    python3 tools/k15/icon.py --pruefe "$(sym $a)" "$SRC" \
         > "$TMPD/sym-$a.txt" 2>&1 \
         && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
@@ -1436,11 +1445,11 @@ done
 # The bundle pictures are 16 x 16 now (tools/k15/icon.py), and they sit
 # where `launcher: rows ix= iy=` says, one row pitch (SZH) apart.
 pruef "das Symbol des Dateimanagers steht Punkt fuer Punkt im Bild" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) 16 16 "$(sym explorer)"
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) $ICS $ICS "$(sym explorer)"
 pruef_nicht "und es ist NICHT das des Editors (die Gegenprobe)" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) 16 16 "$(sym editor)"
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + FEI * SZH)) $ICS $ICS "$(sym editor)"
 pruef "in der Zeile des Editors steht dafuer das des Editors" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + EDI * SZH)) 16 16 "$(sym editor)"
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + EDI * SZH)) $ICS $ICS "$(sym editor)"
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den

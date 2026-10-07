@@ -190,6 +190,17 @@ come from outside `kernel/` and `lib/libc/`.
   `/usr/share/fonts/truetype/dejavu`, wird die Reproduktion uebersprungen."
 * **Stage:** **RUNTIME.**
 
+### 4.1a r399 (design audit): the proportional faces are now Inter
+
+`assets/osum-sans.ttf` (Regular) and `assets/osum-sans-bold.ttf` (SemiBold) are cut out of
+**Inter 4.0** (https://rsms.me/inter, SIL Open Font License 1.1; the licence text is
+`assets/LICENSE-OFL-inter.txt`, the sources are `assets/src/Inter-*.ttf`) by
+`tools/design/mkfont.py`; the cut is reproducible octet for octet and checked by
+`tools/wm/run.sh` and `tools/i18n/run.sh`. Inter has no reserved font name, so the modified
+(subset) files may be shipped under their own names. The monospace face is still DejaVu Sans
+Mono (4.1). The program icons (`assets/apps/*.osp/symbol.osym`) are drawn from Lucide glyphs
+(ISC, `assets/icons/LICENSE.lucide`) by `tools/design/mkicons.py`.
+
 ### 4.2 `kernel/font.fi` -- 1,520 octets of foreign glyph bitmaps, linked into the kernel
 
 * **What / where:** `kernel/font.fi`, 130 lines. 95 glyphs, 8x16, 0x20 to

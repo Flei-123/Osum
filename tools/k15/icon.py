@@ -157,6 +157,11 @@ def zurueck(pfad):
             b, g, r, a = d[12 + (y * w + x) * 4:12 + (y * w + x) * 4 + 4]
             if a == 0:
                 reihe.append(None)
+            elif a != 255 and w >= 32 and h >= 32:
+                # r399: a vector icon (32x32 and up) carries a REAL coverage in the fourth
+                # octet; an edge pixel is a blend with whatever is behind it and cannot be
+                # recounted -- only the opaque pixels are compared
+                reihe.append(None)
             elif a != 255:
                 reihe.append(("rolle", a))
             else:
@@ -166,6 +171,13 @@ def zurueck(pfad):
 
 
 def main(argv):
+    if len(argv) >= 4 and argv[1] == "--pruefe" and argv[3].endswith(".osym"):
+        # r399: the bundle carries a finished picture; the image must hold the SAME octets
+        if open(argv[2], "rb").read() == open(argv[3], "rb").read():
+            print("symbol.osym, %d Oktette, gleich" % len(open(argv[3], "rb").read()))
+            return 0
+        print("symbol: das Abbild traegt nicht die Oktette von %s" % argv[3])
+        return 1
     if len(argv) >= 4 and argv[1] == "--pruefe":
         w, h, bild = zurueck(argv[2])
         palette, zeilen = lies(argv[3])
