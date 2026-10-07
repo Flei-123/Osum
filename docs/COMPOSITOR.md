@@ -177,3 +177,65 @@ costs 8 - 32 ms per frame (154 of 181 frames in the two top buckets), a blurred 
 bench (full recompose 1.9 - 3.8 ms) does not contain a moved window with shadow / blur. **The cost per phase inside `wm.fi`
 (damage / desktop / each window / blur / shadow / present) is still not split -- that is the next S0 step**; until then no
 change to the frame path is justified.
+
+## 8. Decision of 07.10.2026: who owns what (fUi, OrientOS, kernel) -- checked against the code
+
+The order of the day: *"`wmd` is an OrientOS program in ring 3 and does not live in Firn `lib/fui`, but uses fUi. fUi (generic,
+cross-platform): title bar, buttons, frame, menu as a scene tree, rasteriser, maybe shadow / glass. OrientOS (system-specific):
+window buffers, z-order, input routing, window rights, lock. The kernel only delivers the framebuffer, shared buffers and input."*
+
+**Verdict: confirmed, with three refinements.** It is the target of section 3, only drawn sharper. What I checked:
+
+| claim | check | result |
+|---|---|---|
+| `wmd` as an OrientOS program in ring 3 | [seen] `kernel/user/wayd.fi` is already a ring-3 server (`profile kernel`, integer only); `memfd` + `MAP_SHARED` exist; login (`glogin`), taskbar and launcher are already ring-3 programs the system depends on | **possible today**; the display server is the last big piece in ring 0 |
+| not in Firn `lib/fui` | `lib/fui` is a toolkit shared with X11 / Wayland / web hosts (pinned in `vendor/firn`; new parts are mirrored in `lib/fui`, `lib/FROM-FIRN.md`). A window table, `memfd` import and `PRESENT` are OrientOS syscalls | **right**: the *program* is OrientOS; only *pure functions* belong in `lib/fui` |
+| kernel profile has no floating point | [seen] `wm.fi` is `profile kernel` (no heap, no float); `fpu` use costs a save per use. `lib/fui/core.fi`, `navnum.fi`, `region.fi` are integer and run in both profiles (`wm.fi` already imports `fui.core`) | so **hot loops must be integer**: the same file runs in the kernel fallback and in `wmd` |
+| fUi can draw chrome as a scene tree | [seen] 34 programs, the bar already has four scene windows (`FUI-MULTIWINDOW.md`); the explorer's command bar and `cmdbar.fi` are fUi parts used by three programs | **yes** for chrome and menus (small areas, float is fine in `profile app`) |
+| shadow / glass / blur in fUi | `lib/fui/effect.fi` is float + heap; the kernel blur is integer with a cache (3.2 ms for the menu, `BEFUND-BLUR`) | **only as integer parts** for the per-frame path; the float `effect` stays for client-side use. Not shown: speed of `effect` at 1280x800 |
+| window table / z-order / focus / hit test in `wmd` | the policy table must stay readable by `ax` and `lockseal` | **table stays kernel-owned**, `wmd` reads it from a shared page (stage S3) |
+
+### Who owns what
+
+| layer | owns | where it lives |
+|---|---|---|
+| **fUi (generic, no syscalls)** | scene tree of the chrome: title bar, caption buttons, frame, window menu, snap preview, Alt+Tab list, tooltips; layout and hit-test tables of the chrome (`deco`); the painter (anti-aliased shapes, text); **integer compositing primitives** (`region`, row copy / alpha / key mix, shadow mask, box blur with running sum); animation curves | `lib/fui/*` (Firn; mirrored in `osum/lib/fui` until Firn main has it) |
+| **OrientOS `wmd` (ring 3, system-specific)** | per-window buffers (imports the shared buffers), z-order and focus *policy*, damage per window and per region, input distribution to clients (from the copy ring), window rights (`darf`), the glue between the table page and fUi, `PRESENT(rect)`, the watchdog heartbeat | `kernel/user/wmd.fi` (new), uses `lib/fui` |
+| **kernel (ring 0)** | framebuffer / GPU / flip, input capture (first reader), shared buffer objects, the read-only policy table page, the lock (`lockseal`), the trusted dialog, the a11y store and its rights, **and `wm.fi` as the fallback compositor** | `kernel/ui/wm.fi`, `fb.fi`, `ax.fi` |
+
+### Refinements to the hypothesis
+
+1. **Two profiles, one source.** Everything that runs per frame (region, row mix, blur, shadow mask) is **integer, no heap**, in
+   `lib/fui/comp*.fi`: the kernel fallback and `wmd` call the *same* file, and the differential test (S2) proves it equals the old
+   `fb_row*`. fUi's float painter and scene tree are used only for the **chrome** (title bar, menus), which is a few percent of the pixels.
+2. **The policy table is not fUi and not `wmd`.** It stays kernel-owned (written from the clients' calls, read by `wmd`, `ax`,
+   `lockseal`). If `wmd` owned it, a bug in `wmd` could forge ownership or unlock the screen. The lock is checked by the kernel
+   before any buffer is composed (`darf`), not by the compositor.
+3. **Speed is not the argument for moving, features and safety are.** The measured drag cost (15 ms / frame, 144 of 182 frames above 16 ms)
+   was **not** caused by ring 0 or by missing fUi: it was one loop that called `fb.pixel` for every pixel and divided twice per pixel
+   (`paint_win_drag`, 93 % of the window time). Rewritten row by row (same picture, integer remainder instead of two divisions) it costs
+   2.9 ms / frame and 11 of 182 frames are above 16 ms. The same fix would be needed in ring 3. What ring 3 buys is the **fUi scene tree for the
+   chrome and the isolation of a crash**, not frames per second.
+
+### Alternatives and why not
+
+| alternative | for | against |
+|---|---|---|
+| A. everything stays in `wm.fi` (ring 0) | no new process, no extra hop | no fUi scene tree for menus / frames, no float effects, 14 600 lines of integer Firn in the kernel, every look change is a kernel change, a painting bug crashes the kernel (r348) |
+| B. kernel compositor with fUi integer core (stage 1, done) | cheap, already works | stays a kernel painter; fine as a *step*, not as the target |
+| C. **ring-3 `wmd` + fUi + kernel policy core (chosen)** | crash isolation, fUi chrome, a11y from the same tree, one effects library | one more process switch per frame and per input event (not measured), the table page and `PRESENT` must be built, two compositors during the migration |
+| D. client-side decoration only | no server chrome | does not give blur / shadow / z-order; two painters |
+| E. GPU compositing (`gpu.fi`) | fast on real GPUs | never run on OrientOS; no driver (G-012); the plan must not depend on it |
+
+### Stages (r428 - r435), as built and as next
+
+| stage | state 07.10.2026 |
+|---|---|
+| S0 measure | **done**: `wm: phase` line per F12 (background / windows / lifted windows / top layer / present / blur / glass / shadow, microseconds and pixels); numbers in section 7 |
+| S1 chrome as fUi | part 1 done (shape numbers); next: layout / hit table `fui/deco.fi`, a11y nodes for the chrome |
+| S2 compositing primitives | `lib/fui/region.fi` built (test 1932); next: damage as a region in `wm.fi` and the differential tests |
+| S3 shared buffers + table page | not started |
+| S4 shadow compositor | not started (needs S3) |
+| S5 scan-out switch + watchdog | not started |
+| S6 chrome and effects in `wmd` | not started |
+| S7 delete the kernel painters | not started |
