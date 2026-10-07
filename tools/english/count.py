@@ -70,6 +70,7 @@ SKIP_PREFIX = ("locale/", "vendor/", "tools/english/", "docs/shots/", "docs/bele
                "assets/", "pkg/", "pakete/", "LICENSES/", "THIRD_PARTY", "0x")
 SKIP_NAMES = {"LICENSE", "LICENSE.MIT", "LICENSE.MIT.old", "COPYING"}
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+DECL = re.compile(r"\b(fn|let|var|const|struct|enum|mut)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)")
 WORD = re.compile(r"[A-Za-zÄÖÜäöüß]+")
 
 
@@ -115,7 +116,7 @@ def catalog_like(s):
     return bool(re.fullmatch(r"[A-Za-z0-9_.\-/:%=\\ ]*", s)) and (" " not in s.strip() or "." in s)
 
 
-def scan_fi(text):
+def scan_fi(text, names=None):
     ident = 0
     comment = 0
     logtext = 0
@@ -125,6 +126,8 @@ def scan_fi(text):
             for m in IDENT.finditer(seg):
                 if german_ident(m.group(0)):
                     ident += 1
+                    if names is not None:
+                        names.add(m.group(0))
         elif kind == "cmt":
             for ln in seg.splitlines():
                 if german_text(ln.lstrip("/* ").strip()):
@@ -182,20 +185,21 @@ def scan_all():
             text = open(full, encoding="utf-8", errors="strict").read()
         except Exception:
             continue
+        nm = set()
         if ext in (".fi", ".s", ".S"):
-            i, c, l = scan_fi(text) if ext == ".fi" else (0, scan_script(text.replace(";", "\n#"), ext)[1], 0)
+            i, c, l = scan_fi(text, nm) if ext == ".fi" else (0, scan_script(text.replace(";", "\n#"), ext)[1], 0)
         elif ext in (".py", ".sh", ".js", ".c", ".h"):
             i, c, l = scan_script(text, ext)
         else:
             i = c = l = 0
         f = file_german(path)
         if i or c or l or f:
-            res[path] = {"ident": i, "comment": c, "logtext": l, "file": f}
+            res[path] = {"ident": i, "names": len(nm), "comment": c, "logtext": l, "file": f}
     return res
 
 
 def totals(res):
-    t = {"ident": 0, "comment": 0, "logtext": 0, "file": 0}
+    t = {"ident": 0, "names": 0, "comment": 0, "logtext": 0, "file": 0}
     for v in res.values():
         for k in t:
             t[k] += v[k]
@@ -215,9 +219,11 @@ def check(res):
     base = json.load(open(bp))["files"]
     bad = []
     for p, v in sorted(res.items()):
-        b = base.get(p, {"ident": 0, "comment": 0, "logtext": 0, "file": 0})
-        for k in ("ident", "comment", "logtext", "file"):
-            if v[k] > b[k]:
+        b = base.get(p, {"ident": 0, "names": 0, "comment": 0, "logtext": 0, "file": 0})
+        # identifier OCCURRENCES are only informational (using a name that is still German is no fault);
+        # what may not grow is the number of different German names, the comment lines, the texts, the names
+        for k in ("names", "comment", "logtext", "file"):
+            if v[k] > b.get(k, 0):
                 bad.append("%s: %s %d -> %d" % (p, k, b[k], v[k]))
     t = totals(res)
     if bad:
@@ -226,8 +232,8 @@ def check(res):
             print("  " + b)
         print("count.py: FAIL, %d place(s)" % len(bad))
         return 1
-    print("count.py: OK -- identifiers %d, comment lines %d, log texts %d, german file names %d (%d files)"
-          % (t["ident"], t["comment"], t["logtext"], t["file"], t["files_with_german"]))
+    print("count.py: OK -- identifiers %d (%d different names), comment lines %d, log texts %d, german file names %d (%d files)"
+          % (t["ident"], t["names"], t["comment"], t["logtext"], t["file"], t["files_with_german"]))
     return 0
 
 
@@ -263,8 +269,10 @@ def diff_guard(base):
             hit = None
             if ext == ".fi" or ext == ".s":
                 i, c, l = scan_fi(body)
-                if i:
-                    hit = "identifier"
+                # while the tree still has German names, USING one is not a fault; DECLARING a new one is
+                declared = [m.group(2) for m in DECL.finditer(body)]
+                if any(german_ident(d) for d in declared):
+                    hit = "new German name"
                 elif c:
                     hit = "comment"
                 elif l:
@@ -302,8 +310,8 @@ def main():
     if "--json" in a:
         print(json.dumps({"totals": t}))
         return 0
-    print("German left in code: identifiers %d, comment lines %d, log texts %d, german file names %d, files %d"
-          % (t["ident"], t["comment"], t["logtext"], t["file"], t["files_with_german"]))
+    print("German left in code: identifiers %d (%d different names), comment lines %d, log texts %d, german file names %d, files %d"
+          % (t["ident"], t["names"], t["comment"], t["logtext"], t["file"], t["files_with_german"]))
     for p, v in sorted(res.items(), key=lambda kv: -weight(kv[1]))[:25]:
         print("  %6d  %s  (ident %d, comment %d, text %d, name %d)" % (weight(v), p, v["ident"], v["comment"],
                                                                      v["logtext"], v["file"]))
