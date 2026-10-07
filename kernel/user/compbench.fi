@@ -1,0 +1,272 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/compbench.fi -- docs/COMPOSITOR.md section 5, points 2 and 3: WHAT DOES COMPOSITING COST IN RING 3?
+//
+// The plan (section 3) puts the compositor `wmd` in ring 3. Two numbers decide whether that holds, and nobody had them:
+//
+//   1. the loops: composing windows into a 1280 x 800 buffer with the same primitives the window server uses (row copy with
+//      `rep movsq`, a per-pixel integer blend, a box blur with a running sum), written in Firn and run in a user program;
+//   2. the hop: how long a wake-up of another process takes (a pipe ping-pong between a parent and a forked child), because
+//      the compositor needs one wake-up per input event and one per frame.
+//
+// Every number is printed as `compbench: <name> <value> us` (microseconds, per frame or per round trip) so that
+// tools/comp/run.sh can read it. Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const W: u64 = 1280
+const H: u64 = 800
+
+// one screen (the desktop), one window picture, the destination
+static mut scr: [u32; 1024000] = [0 as u32; 1024000]
+static mut win: [u32; 524288] = [0 as u32; 524288]
+static mut dst: [u32; 1024000] = [0 as u32; 1024000]
+static mut tmp: [u32; 262144] = [0 as u32; 262144]
+static mut khz: u64 = 0
+
+static mut s_cb: [u8; 12] = "compbench: \0"
+static mut s_us: [u8; 4] = " us\0"
+static mut s_sp: [u8; 2] = " \0"
+
+fn tsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+fn copy_words(d: u64, s: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") d, in("rsi") s, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+// the cycles of the clock to microseconds
+fn us_of(cycles: u64) -> u64 {
+    if khz == 0 {
+        return 0
+    }
+    return cycles * 1000 / khz
+}
+
+fn report(name: u64, v: u64) {
+    ulib.say((&s_cb[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(v)
+    ulib.say((&s_us[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// the cycle counter against the tick (100 Hz): 20 ticks = 200 ms
+fn calibrate() {
+    var t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let edge: u64 = t
+    while t == edge {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    let c0: u64 = tsc()
+    let t0: u64 = t
+    while t < t0 + 20 {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    let c1: u64 = tsc()
+    khz = (c1 - c0) / 200
+}
+
+// a window of `w` x `h` at (x, y), plain copy
+fn blit_plain(x: u64, y: u64, w: u64, h: u64) {
+    var r: u64 = 0
+    let src: u64 = (&win[0 as usize]) as u64
+    while r < h {
+        let d: u64 = ((&dst[0 as usize]) as u64) + ((y + r) * W + x) * 4
+        copy_words(d, src + r * w * 4, w / 2)
+        r = r + 1
+    }
+}
+
+// the same window, mixed over what is there: a / 100 of the window, the rest of the old picture (integer, per pixel)
+fn blit_mix(x: u64, y: u64, w: u64, h: u64, a: u64) {
+    var r: u64 = 0
+    while r < h {
+        let d: u64 = ((&dst[0 as usize]) as u64) + ((y + r) * W + x) * 4
+        let s: u64 = ((&win[0 as usize]) as u64) + r * w * 4
+        var k: u64 = 0
+        while k < w {
+            let nw: u64 = __mmio_read32((s + k * 4) as *mut u32) as u64
+            let od: u64 = __mmio_read32((d + k * 4) as *mut u32) as u64
+            let rr: u64 = ((((nw >> 16) & 255) * a + ((od >> 16) & 255) * (100 - a)) * 655) >> 16
+            let gg: u64 = ((((nw >> 8) & 255) * a + ((od >> 8) & 255) * (100 - a)) * 655) >> 16
+            let bb: u64 = (((nw & 255) * a + (od & 255) * (100 - a)) * 655) >> 16
+            __mmio_write32((d + k * 4) as *mut u32, ((rr << 16) | (gg << 8) | bb) as u32)
+            k = k + 1
+        }
+        r = r + 1
+    }
+}
+
+// a horizontal box blur with a running sum over the rows of the destination, radius r (the kernel's `blur_h` in a user program)
+fn blur_rows(x: u64, y: u64, w: u64, h: u64, rad: u64) {
+    var row: u64 = 0
+    while row < h {
+        let base: u64 = ((&dst[0 as usize]) as u64) + ((y + row) * W + x) * 4
+        let out: u64 = (&tmp[0 as usize]) as u64
+        var sr: u64 = 0
+        var sg: u64 = 0
+        var sb: u64 = 0
+        var n: u64 = 0
+        var k: u64 = 0
+        while k <= rad && k < w {
+            let p: u64 = __mmio_read32((base + k * 4) as *mut u32) as u64
+            sr = sr + ((p >> 16) & 255)
+            sg = sg + ((p >> 8) & 255)
+            sb = sb + (p & 255)
+            n = n + 1
+            k = k + 1
+        }
+        var c: u64 = 0
+        while c < w {
+            let rec: u64 = (65536 + n - 1) / n
+            __mmio_write32((out + c * 4) as *mut u32,
+                ((((sr * rec + 32768) >> 16) << 16) | (((sg * rec + 32768) >> 16) << 8) | ((sb * rec + 32768) >> 16)) as u32)
+            let add: u64 = c + rad + 1
+            if add < w {
+                let p2: u64 = __mmio_read32((base + add * 4) as *mut u32) as u64
+                sr = sr + ((p2 >> 16) & 255)
+                sg = sg + ((p2 >> 8) & 255)
+                sb = sb + (p2 & 255)
+                n = n + 1
+            }
+            if c >= rad {
+                let p3: u64 = __mmio_read32((base + (c - rad) * 4) as *mut u32) as u64
+                sr = sr - ((p3 >> 16) & 255)
+                sg = sg - ((p3 >> 8) & 255)
+                sb = sb - (p3 & 255)
+                n = n - 1
+            }
+            c = c + 1
+        }
+        copy_words(base, out, w / 2)
+        row = row + 1
+    }
+}
+
+fn fill_pictures() {
+    var i: u64 = 0
+    while i < 1024000 {
+        scr[(i) as usize] = (0x203040 + (i & 255) * 0x010101) as u32
+        i = i + 1
+    }
+    i = 0
+    while i < 524288 {
+        win[(i) as usize] = (0xE0E8F0 - (i & 63) * 0x010101) as u32
+        i = i + 1
+    }
+}
+
+// the wake-up: a parent and a forked child pass one byte through two pipes, `n` round trips
+fn pingpong(n: u64) -> u64 {
+    var p1: [u32; 2] = [0 as u32; 2]
+    var p2: [u32; 2] = [0 as u32; 2]
+    if ulib.bad(ulib.sys(22, (&p1[0 as usize]) as u64, 0, 0)) || ulib.bad(ulib.sys(22, (&p2[0 as usize]) as u64, 0, 0)) {
+        return 0
+    }
+    var b: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&b[0 as usize]) as u64
+    let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        // the child: read a byte, write it back
+        var k: u64 = 0
+        while k < n {
+            let _r: u64 = ulib.sys(ulib.SYS_READ, p1[(0) as usize] as u64, bp, 1)
+            let _w: u64 = ulib.sys(ulib.SYS_WRITE, p2[(1) as usize] as u64, bp, 1)
+            k = k + 1
+        }
+        ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+    }
+    if ulib.bad(kid) {
+        return 0
+    }
+    let t0: u64 = tsc()
+    var k: u64 = 0
+    while k < n {
+        let _w: u64 = ulib.sys(ulib.SYS_WRITE, p1[(1) as usize] as u64, bp, 1)
+        let _r: u64 = ulib.sys(ulib.SYS_READ, p2[(0) as usize] as u64, bp, 1)
+        k = k + 1
+    }
+    let t1: u64 = tsc()
+    var st: [u64; 1] = [0 as u64; 1]
+    let _x: u64 = ulib.sys4(61, kid, (&st[0 as usize]) as u64, 0, 0)
+    return us_of((t1 - t0) / n)
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_full: [u8; 11] = "full-copy\0\0"
+    var n_small: [u8; 12] = "small-copy\0\0"
+    var n_mix: [u8; 10] = "mix-640\0\0\0"
+    var n_ping: [u8; 10] = "roundtrip\0"
+    var n_cal: [u8; 8] = "khz\0\0\0\0\0"
+    var n_blur0: [u8; 14] = "blur-320x520\0\0"
+    calibrate()
+    ulib.say((&s_cb[0 as usize]) as u64)
+    ulib.say((&n_cal[0 as usize]) as u64)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(khz)
+    ulib.nl()
+    fill_pictures()
+    let scra: u64 = (&scr[0 as usize]) as u64
+    let dsta: u64 = (&dst[0 as usize]) as u64
+
+    // 1. a whole recompose: the desktop, a 560 x 380 window, an 860 x 580 window, the bar 1280 x 40 (what `compose_one` does for the
+    //    full screen without effects)
+    var frames: u64 = 0
+    let t0: u64 = tsc()
+    while frames < 100 {
+        copy_words(dsta, scra, W * H / 2)
+        blit_plain(24, 40, 560, 380)
+        blit_plain(70, 70, 860, 580)
+        blit_plain(0, 760, 1280, 40)
+        frames = frames + 1
+    }
+    report((&n_full[0 as usize]) as u64, us_of((tsc() - t0) / 100))
+
+    // 2. a small damage rectangle of 100 x 100 (a pointer): desktop rows and the window rows over it
+    frames = 0
+    let t1: u64 = tsc()
+    while frames < 1000 {
+        var r: u64 = 0
+        while r < 100 {
+            copy_words(dsta + ((300 + r) * W + 300) * 4, scra + ((300 + r) * W + 300) * 4, 50)
+            r = r + 1
+        }
+        frames = frames + 1
+    }
+    report((&n_small[0 as usize]) as u64, us_of((tsc() - t1) / 1000))
+
+    // 3. a translucent 640 x 520 window (per pixel integer blend)
+    frames = 0
+    let t2: u64 = tsc()
+    while frames < 20 {
+        blit_mix(300, 100, 640, 400, 70)
+        frames = frames + 1
+    }
+    report((&n_mix[0 as usize]) as u64, us_of((tsc() - t2) / 20))
+
+    // 4. the box blur of a 320 x 520 menu, one horizontal pass (the kernel does two horizontal and two vertical)
+    frames = 0
+    let t3: u64 = tsc()
+    while frames < 10 {
+        blur_rows(100, 100, 320, 520, 12)
+        frames = frames + 1
+    }
+    report((&n_blur0[0 as usize]) as u64, us_of((tsc() - t3) / 10))
+
+    // 5. the hop: a pipe round trip between two processes
+    report((&n_ping[0 as usize]) as u64, pingpong(2000))
+    var done: [u8; 17] = "compbench: done\0\0"
+    ulib.say((&done[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
