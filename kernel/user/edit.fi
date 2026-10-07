@@ -151,6 +151,48 @@ fn raw_on() {
     ulib.sys(SYS_IOCTL, ulib.IN, TCSETSF, (&t[0 as usize]) as u64)
 }
 
+// SIGWINCH: the kernel sends it to the foreground group when the window
+// grid changes (r462). The handler only counts (crt.s, osum_sighandler2);
+// the main loop compares the count and asks TIOCGWINSZ again.
+const SYS_RT_SIGACTION: u64 = 13
+const SIGWINCH: u64 = 28
+
+fn winch_handler_addr() -> u64 {
+    return asm("lea rax, [rip + osum_sighandler2]", out("rax"))
+}
+
+fn winch_count() -> u64 {
+    return asm("mov rax, [rip + osum_sigcount2]", out("rax"))
+}
+
+fn winch_arm() {
+    var sa: [u64; 4] = [0 as u64; 4]
+    sa[0 as usize] = winch_handler_addr()
+    ulib.sys4(SYS_RT_SIGACTION, SIGWINCH, (&sa[0 as usize]) as u64, 0, 8)
+}
+
+static mut winch_seen: u64 = 0
+
+// True when the window size changed since the last call.
+fn winch_check() -> bool {
+    let n: u64 = winch_count()
+    if n == winch_seen {
+        return false
+    }
+    winch_seen = n
+    let r0: u64 = rows
+    let c0: u64 = cols
+    window()
+    if rows == r0 && cols == c0 {
+        return false
+    }
+    // keep the cursor and the scroll offset inside the new text area
+    if cy >= rowoff + textrows() {
+        rowoff = cy - textrows() + 1
+    }
+    return true
+}
+
 fn raw_off() {
     ulib.sys(SYS_IOCTL, ulib.IN, TCSETSF, (&saved_t[0 as usize]) as u64)
 }
@@ -1626,6 +1668,8 @@ fn u_start(args: u64) -> u64 {
         }
     }
     window()
+    winch_arm()
+    winch_seen = winch_count()
     raw_on()
     // DIESE ZEILE GEHT AUF DIE SERIELLE LEITUNG UND AUF DEN SCHIRM, und
     // sie steht hier, damit ein Testlaeufer weiss, WANN er die Tasten
@@ -1638,6 +1682,9 @@ fn u_start(args: u64) -> u64 {
     while running == 1 {
         let k: u64 = key()
         handle(k)
+        if winch_check() {
+            want_draw = W_ALL
+        }
         if want_draw == W_ALL {
             want_draw = W_NONE
             draw()
