@@ -160,3 +160,20 @@ Why (and what I rejected):
 * Left for the next steps of S1: the layout / hit table in `fui/deco.fi`, a11y nodes for the chrome (the
   kernel adds them when a privileged reader asks, no storage), the window menu on Alt+Space, the
   switcher / snap preview as scene windows (S6).
+
+### S0 steady-state measurement (07.10.2026, design3 tree, KVM, 1280x800, host load about 5)
+
+[measured] `tools/design/stationaer.sh` (one boot, F12 between the phases; buckets <1, <2, <4, <8, <16, <32, <64, more ms):
+
+| phase | frames | mean | max | over 16 ms | buckets |
+|---|---|---|---|---|---|
+| idle (6 s) | 2 | 7.9 ms | 15.7 ms | 0 | 1 0 0 0 1 0 0 0 |
+| pointer moves | 46 | 1.2 ms | 17.1 ms | 1 | 43 0 0 0 2 1 0 0 |
+| start menu open / close | 54 | 17.1 ms | 218 ms | 8 | 27 3 2 0 14 2 0 6 |
+| window dragged | 181 | 15.1 ms | 36.0 ms | 109 | 24 0 1 0 47 107 2 0 |
+
+Reading: the pointer alone is cheap (43 of 46 frames under 1 ms), so the base composition is not the problem; a dragged window
+costs 8 - 32 ms per frame (154 of 181 frames in the two top buckets), a blurred menu has six frames above 64 ms. The kernel boot
+bench (full recompose 1.9 - 3.8 ms) does not contain a moved window with shadow / blur. **The cost per phase inside `wm.fi`
+(damage / desktop / each window / blur / shadow / present) is still not split -- that is the next S0 step**; until then no
+change to the frame path is justified.
