@@ -38,6 +38,11 @@ OUT=${1:?usage: capture.sh <outdir> [key=value ...]}
 shift || true
 
 shape=osum
+# r402: `startstyle=list` puts /etc/startmenu.conf (`style=list`) on the image: the OLD list window
+# of the start menu (the runs that measure the list's rows); empty = the Windows 11 window
+startstyle=
+# r402: `shadow=on` writes the window shadow switch into /etc/theme.conf (default: off, as shipped)
+shadow=
 # RUNDE 32: die Spur ist AUS, solange niemand sie verlangt -- siehe die
 # Begruendung bei `$OUT/uitrace` weiter unten.
 uitrace=no
@@ -121,6 +126,8 @@ for a in "$@"; do
         battfake=*) battfake=${a#*=} ;;
         clock_seconds=*) clock_seconds=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
+        startstyle=*) startstyle=${a#*=} ;;
+        shadow=*) shadow=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
         res=*) res=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
@@ -231,6 +238,7 @@ printf 'pins=%s\n' "${pins:-certus,explorer,terminal,settings}" \
   [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"
   printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$mode" "$accent" "$shape"
+  [ -n "$shadow" ] && printf 'shadow=%s\n' "$shadow"
   [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
   [ -n "$taskbar_alpha" ] && printf 'taskbar_alpha=%s\n' "$taskbar_alpha"
 } > "$OUT/theme.conf"
@@ -323,6 +331,10 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+if [ "$startstyle" = list ]; then
+    printf 'style=list\n' > "$OUT/startmenu.conf"
+    ARGS+=("/etc/startmenu.conf=$OUT/startmenu.conf@0644")
+fi
 WALL=${wallpaper:-assets/wallpaper-sea.osym}
 [ -f "$WALL" ] && ARGS+=("/etc/wallpaper=$WALL@0644")
 # /etc/uitrace nur, wenn die Spur an ist -- siehe oben: wlib sieht nur,

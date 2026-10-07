@@ -17,6 +17,13 @@ def s64(v):
     v = int(v)
     return v - (1 << 64) if v >= (1 << 63) else v
 
+# r402: the chrome of the terminal as the server reports it (`bar= capw= fr=` at the end of the
+# `wm: fen` line of id 7, all in pixels): frame, and frame + bar + 1 separator. Without the fields (an
+# older kernel) the old numbers: 2 and 22 points.
+mc = re.search(r"wm: fen i=\d+ id=7 [^\n]*? bar=(\d+) capw=(\d+) fr=(\d+)", ser)
+CH_BO = int(mc.group(3)) if mc else 2 * scale
+CH_TH = CH_BO + int(mc.group(1)) + 1 if mc else 22 * scale
+
 # ---- (4) cursor shape at the eight edges and the corners
 # The wire says `wm: form=N x=X y=Y` at every change of the cursor shape. The
 # model below is the grip rule: a point of the terminal (id 7) is on the left /
@@ -34,7 +41,7 @@ if not mg:
     ok(False, "cursor: no window geometry")
 else:
     wx, wy, ww, wh = (int(v) for v in mg.groups())
-    bo, th, grip = 2 * scale, 22 * scale, 8 * scale
+    bo, th, grip = CH_BO, CH_TH, 8 * scale
     cx, cy = wx + bo, wy + th          # content origin
     def model(x, y):
         lx, ly = x - cx, y - (wy + th)
@@ -132,7 +139,7 @@ if not m or W == 0:
     ok(False, "title centring: no window geometry or no picture")
 else:
     wx, wy = s64(m.group(1)), s64(m.group(2))
-    bo, th = 2 * scale, 22 * scale
+    bo, th = CH_BO, CH_TH
     x0, x1 = wx + bo + 10 * scale, wx + bo + 10 * scale + 110 * scale
     y0, y1 = wy + bo, wy + th
     def pix(x, y):

@@ -1153,6 +1153,7 @@ PYL
 lastbatch "$TMPD/rad0/serial.txt" | sort -u > "$TMPD/rect0.txt"
 lastbatch "$TMPD/rad24/serial.txt" | sort -u > "$TMPD/rect24.txt"
 RDIFF=$(diff "$TMPD/rect0.txt" "$TMPD/rect24.txt" | grep -c '^[<>]' || true)
+if [ "${RDIFF:-0}" != 0 ]; then diff "$TMPD/rect0.txt" "$TMPD/rect24.txt" | head -12 | sed 's/^/        /'; fi
 num "und kein einziges Rechteck der Seite wandert zwischen Radius 0 und 24" \
     "$RDIFF" eq 0
 num "und es sind ueberhaupt Rechtecke gemessen worden" \

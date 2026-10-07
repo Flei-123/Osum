@@ -197,3 +197,24 @@ picture: 0 wrong at 15; the vector icons are compared by their opaque pixels), `
 `tools/theme/model.py` and `tools/themestore/run.sh` (selection binding; the radius slider is found by
 its width), `tools/wm/run.sh` and `tools/i18n/run.sh` (the cut of the face), `tools/osum/mkfs.py`
 (format 3 by itself when a file is too big).
+
+## 7. Round 2 (07.10.2026): r400 - r403, the rest of the list
+
+What section 5 left open, built:
+
+| item | what | measured / checked by |
+|---|---|---|
+| **r401 slider read-outs** | `fuiscene.slider_readout(key, lo, hi, pct)` tells the host the range once per build; `readouts()` (called from `paint`) writes the number right of the track (12, 100 %, 100 %, 8 on the Appearance page), so it is always the number the handle shows, also while dragging | picture `03-einstellungen` of the audit run; a first version died with `panic: integer overflow in 'u64 - u64'` (label height 24 > node height 20) -- found by the same run, fixed |
+| **r400 console editor** | a VT100 subset in the kernel terminal (`wm.fi` `term_esc_take` / `term_csi`): cursor position `H f`, `A B C D G d`, erase `J K`, reverse video `7 / 27 / 0 m`, private sequences (`?25h/l`) swallowed, unknown sequences dropped whole, a sequence cut in two writes works. The grid has a second frame with one attribute octet per cell (bit 0 = reverse) | kernel self-test `wm: vttest 7 / 7`, and `tools/wm/run.sh` checks it (108/0 + 1). `/bin/edit` writes exactly these sequences (`esc_num`, `clear_eol`, `reverse_on`, `cursor`) |
+| **r402 title bar / chrome** | three shape numbers (`title_bar`, `cap_w`, `frame`; `osum.shape`: 32 / 46 / 1) through `wlibc` -> `WF_*` -> `wm.FM_*`; `classic` and `modern` do not say them and keep 19 / 30 / 2. Caption buttons: hover plate, **held** plate (deeper), they act on **release** over the same button (press on one, leave, release elsewhere = nothing). Alt+F4 closes the window with the focus the way its close button does | `tools/deco/run.sh` (new): measures the bar (32), the buttons (46), the title's room above and below, red close plate, soft plates, held, release elsewhere, release on the button, Alt+F4 |
+| **r402 start menu** | Windows 11 layout: search field with hint on top, "Pinned" grid (6 columns of 100 x 88 tiles), "Recommended" (the recent ones first; a programme is never shown twice), user and power button at the bottom. Typing turns the window into the result list; "All apps" shows the whole list, "Back" returns. The old list window stays: argument `liste` or `startmenu=list` in `/etc/taskbar.conf` (the k15 runs use it) | `tools/startmenu/run.sh` (new) |
+| **r403 hover / press transitions** | not measured in this round (they are the system's tween, 120 ms, as in section 2) | still open |
+| **r399 window shadows** | the switch exists since ECHTHARDWARE-6: `shadow=on` in `/etc/theme.conf`, default **off**; the Apply button used to **drop** the line when it rewrote the file -- now it is written back (`theme_conf_write`) and the Appearance page has a check box. **Not turned on by default: only the Dell can say whether the comb streaks are gone** | `docs/DESIGN-AUDIT.md` section 5 stays true: the default is off until the Dell test |
+
+### What a user sees
+
+* the title bar is 32 points high, the buttons 46 x 32 (the size every Windows user knows), the frame one point,
+* the close button is red on hover, the others a soft grey plate, held a deeper plate,
+* the start menu is the Windows 11 one,
+* the console editor draws a screen instead of `[?25l[1;1H[7m ...`,
+* the sliders show their numbers.

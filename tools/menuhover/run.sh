@@ -64,7 +64,7 @@ DREH
 
 run() { # run <name> <extra capture args...>
     local name=$1; shift
-    bash tools/design/capture.sh "$TMPD/$name" res=1920x1080 uitrace=yes accel=kvm \
+    bash tools/design/capture.sh "$TMPD/$name" res=1920x1080 uitrace=yes accel=kvm startstyle=list \
         drehbuch="$TMPD/dreh.txt" "$@" > "$TMPD/$name.log" 2>&1
     grep -a "FEHLGESCHLAGEN" "$TMPD/$name.log" | head -3
 }

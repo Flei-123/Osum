@@ -205,7 +205,11 @@ for P in "$TMPD/p_l1.txt" "$TMPD/p_l2.txt"; do
     grep -qaE 'events seen=[0-9]+ leaked=0' "$P" && ok "$W: no a11y event about a node behind the lock" || bad "$W: events: $(grep -a 'events seen' "$P" | head -1)"
     hasnot "$P" "title=A11Y controls" "$W: the window table does not list the window behind the lock"
     if [ -n "$VID" ]; then
-        grep -qaE " id=$VID " "$P" && bad "$W: the table has the id $VID" || ok "$W: ... nor its id"
+        if grep -qaE " id=$VID " "$P"; then
+            bad "$W: the table has the id $VID"; grep -aE " id=$VID " "$P" | head -3 | sed 's/^/        /'
+        else
+            ok "$W: ... nor its id"
+        fi
     fi
     has "$P" "title=Gesperrt" "$W: the table lists the lock screen"
 done

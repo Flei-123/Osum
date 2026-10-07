@@ -71,7 +71,8 @@ export {
     KEY_POPUP, trace_on, say_rects, say_texts,
     table, table_set_rows, table_sel, table_set_sel, table_head_col,
     table_colw, HEAD_ROW,
-    check, slider, choice, value_of, set_value,
+    check, slider, choice, value_of, set_value, slider_readout, readout_text,
+    icon_at, ftile, entry_hint, text_role, text_width, role_col2, pointer_leave,
     table_blob, table_set_blob, table_single, table_two, table_icons, table_list, table_row_height,
     table_text_x, table_row_h, table_row_top, table_base, table_icon_x,
     table_icon_y, table_rgb,
@@ -605,6 +606,16 @@ fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     textbuf.tb_set_len(&tb, ulib.length(ebuf(k)) as usize)
     textbuf.tb_set_range(&tb, S.s_ecar[(k) as usize], S.s_ecar[(k) as usize])
     fuiapp.field_paint(e, &tb, S.s_caret_on)
+    // r402: the hint of an empty field
+    if k < 8 && en_hint[(k) as usize] != 0 && ulib.length(ebuf(k)) == 0 {
+        let h: u64 = widget.w_h(e) as u64
+        var ty: u64 = widget.w_y(e) as u64
+        if h > sp(24) {
+            ty = ty + (h - sp(24)) / 2
+        }
+        text_tok(widget.w_x(e) as u64 + sp(14), ty, widget.w_w(e) as u64 - sp(28),
+            en_hint[(k) as usize], style.TOK_TEXT_MUTED)
+    }
 }
 
 // A one-line text field, `w` wide (design points). `text` is only the
@@ -1580,6 +1591,155 @@ fn tile(parent: usize, key: u64, name: u64, w: u64, h: u64, on: bool, ud: u64,
     return i
 }
 
+// ---------------------------------------------------------------- the start menu's pieces (r402)
+//
+// `icon_at`: the picture of a programme (a vector tile, a legacy 16 x 16 drawing, a glyph or a
+// colour tile with the first letter) in a square of `size` pixels at (x, y). The same four
+// cases as `row_icon`, but a size of the caller's and no shift for a selection bar.
+fn icon_at(word: u64, x: u64, y: u64, size: u64, txt: u64) {
+    if word == 0 || size == 0 {
+        return
+    }
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    if (word & wlib.ICON_TAG) != 0 {
+        fuiapp.glyph(word & 65535, x, y, size, (*t).text | 4278190080 as u32)
+        return
+    }
+    if wlib.is_image_pub(word) {
+        let iw: u64 = __mmio_read32((word + 4) as *mut u32) as u64
+        let ih: u64 = __mmio_read32((word + 8) as *mut u32) as u64
+        if iw == 0 || ih == 0 || iw > 64 || ih > 64 {
+            return
+        }
+        var dw: u64 = size
+        var dh: u64 = size
+        var ox: u64 = 0
+        var oy: u64 = 0
+        if iw < 32 || ih < 32 {
+            // a pixel drawing keeps whole-number steps (crisp), centred in the square
+            var k: u64 = size / iw
+            let ky: u64 = size / ih
+            if ky < k {
+                k = ky
+            }
+            if k == 0 {
+                k = 1
+            }
+            dw = iw * k
+            dh = ih * k
+            if size > dw {
+                ox = (size - dw) / 2
+            }
+            if size > dh {
+                oy = (size - dh) / 2
+            }
+        }
+        var im: uiimage.Image = uiimage.image_wrap(word + 12, iw as usize, ih as usize, 0)
+        uiimage.image_draw_rect(z, &im, (x + ox) as f64, (y + oy) as f64, dw as f64, dh as f64,
+            0 as u32)
+        return
+    }
+    // a colour tile with the first letter
+    let rgb: u32 = (((word & 255) << 16) | (word & 65280) | ((word >> 16) & 255)) as u32
+    painter.round_rect(z, x as f64, y as f64, size as f64, size as f64, rb(),
+        rgb | 4278190080 as u32)
+    if txt != 0 {
+        var one: [u8; 2] = [0 as u8; 2]
+        one[0 as usize] = __mmio_read8(txt as *mut u8)
+        if one[0 as usize] != 0 as u8 {
+            text_tok(x + size / 2 - sp(4), y + (size - sp(24)) / 2, size, (&one[0 as usize]) as u64,
+                style.TOK_TEXT_ON_ACCENT)
+        }
+    }
+}
+
+// A colour role as the painter wants it (0xAARRGGBB).
+fn role_col2(r: u64) -> u32 {
+    return role_col(r)
+}
+
+// The width in pixels of a text at `size` pixels (the face of the interface).
+fn text_width(p: u64, size: u64) -> u64 {
+    return wlibc.text_w(wlibc.F_UI, size, p, ulib.length(p))
+}
+
+// A line of text at an explicit baseline, in a colour ROLE (R_TEXT, R_MUTED, R_ACCENT ...).
+fn text_role(x: u64, base: u64, w: u64, p: u64, size: u64, bold: bool, role: u64) {
+    two_text(x, base, w, p, size, bold, role_col(role))
+}
+
+// A tile WITHOUT a surface of its own: nothing is painted until the pointer is over it (a soft
+// plate, deeper when held -- two stylesheet rules on a class, so the system's hover / press
+// tokens do it); the program paints picture and text with `cb(ud, x, y, w, h, state)`. The
+// name of the node is the name a screen reader says; the face writes it in no colour.
+// The Windows 11 start menu's pinned tiles and recommended rows.
+const FTILE_CLS: u32 = 7771
+static mut ft_marker: u64 = 0
+
+fn draw_ftile(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    var st: u64 = 0
+    if widget.w_is_hover(e) {
+        st = st | TS_HOT
+    }
+    if widget.w_is_active(e) {
+        st = st | TS_DOWN
+    }
+    if widget.w_is_focus(e) {
+        st = st | TS_FOCUS
+    }
+    let f: fn(u64, u64, u64, u64, u64, u64) = *tile_slot()
+    f(ud, widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, st)
+}
+
+fn ftile(parent: usize, key: u64, name: u64, w: u64, h: u64, ud: u64,
+    cb: fn(u64, u64, u64, u64, u64, u64)) -> usize {
+    let i: usize = button(parent, name, key)
+    if i != NONE {
+        scene.node_set_size(sc(), i, w as f64, h as f64)
+        scene.node_set_draw(sc(), i, ud, draw_ftile)
+        let _c: bool = scene.node_add_class(sc(), i, FTILE_CLS)
+        *tile_slot() = cb
+        if ft_marker != S.s_builds + 1 {
+            // the sheet is emptied by every `rebuild`: the three rules come with the first tile.
+            // The face writes the node's text in a colour nobody can see (the program paints the
+            // label itself); the text stays the name a screen reader says.
+            ft_marker = S.s_builds + 1
+            let _r0: usize = sheet.sheet_rule(sh(), sheet.sel_class(FTILE_CLS),
+                style.style_set_fg(style.style_set_bg(style.style_new(), style.color_transparent()),
+                    style.color_transparent()))
+            let _r1: usize = sheet.sheet_rule(sh(),
+                sheet.sel_with_state(sheet.sel_class(FTILE_CLS), style.STATE_HOVER),
+                style.style_set_bg(style.style_new(), style.color_token(style.TOK_BUTTON_HOVER)))
+            let _r2: usize = sheet.sheet_rule(sh(),
+                sheet.sel_with_state(sheet.sel_class(FTILE_CLS), style.STATE_ACTIVE),
+                style.style_set_bg(style.style_new(), style.color_token(style.TOK_BUTTON_ACTIVE)))
+        }
+    }
+    return i
+}
+
+// The pointer is no longer over anything of this window: the hover state of the tree is cleared (a menu
+// that was closed with the pointer on a tile would show the tile hovered the next time it opens, until
+// the pointer moved).
+fn pointer_leave() {
+    let _l: u32 = fuiwirt.host_pointer_leave(wirt())
+    touch()
+}
+
+// A hint in an empty text field (the field `key`): muted text at the left, gone as soon as
+// something is typed. The pointer must outlive the window (a static of the program).
+static mut en_hint: [u64; 8] = [0 as u64; 8]
+
+fn entry_hint(key: u64, p: u64) {
+    let k: u64 = slot_of_key(key)
+    if k == NO_SLOT || k >= 8 {
+        return
+    }
+    en_hint[(k) as usize] = p
+}
+
 // A glyph of the icon font (code point `cp`, `size` pixels high) at the pixel
 // (x, y), in a colour 0xRRGGBB as wlibc hands them out.
 fn cv_glyph(cp: u64, x: u64, y: u64, size: u64, rgb: u64) {
@@ -1911,6 +2071,7 @@ fn paint() {
         let postf: fn() = *post_slot()
         postf()
     }
+    readouts()
     halo()
     if S.s_pop_open {
         pop_paint()
@@ -3914,6 +4075,100 @@ fn slider(parent: usize, key: u64, w: u64, init: i64) -> usize {
     scene.node_set_id(sc(), i, key as u32)
     val_node(i, key, init)
     return i
+}
+
+// r401 (design audit D-003): the VALUE READ-OUT of a slider. fUi's slider knows 0..1000;
+// the program knows what that means (12 px, 100 %). `slider_readout` tells the host the
+// range once per build and `readouts()` (called from paint) writes the number to the right of the track, so
+// the number is always the one the handle shows, also while it is dragged.
+const RO_MAX: u64 = 8
+static mut ro_key: [u64; 8] = [0 as u64; 8]
+static mut ro_lo: [u64; 8] = [0 as u64; 8]
+static mut ro_hi: [u64; 8] = [0 as u64; 8]
+static mut ro_pct: [u64; 8] = [0 as u64; 8]
+static mut ro_n: u64 = 0
+static mut ro_buf: [u8; 24] = [0 as u8; 24]
+
+fn slider_readout(key: u64, lo: u64, hi: u64, pct: bool) {
+    var k: u64 = 0
+    while k < ro_n && ro_key[(k) as usize] != key {
+        k = k + 1
+    }
+    if k == ro_n {
+        if ro_n >= RO_MAX {
+            return
+        }
+        ro_n = ro_n + 1
+    }
+    ro_key[(k) as usize] = key
+    ro_lo[(k) as usize] = lo
+    ro_hi[(k) as usize] = hi
+    var f: u64 = 0
+    if pct {
+        f = 1
+    }
+    ro_pct[(k) as usize] = f
+}
+
+// The text of the read-out of slider `k` (index in the table) into ro_buf.
+fn readout_fmt(k: u64) -> u64 {
+    let key: u64 = ro_key[(k) as usize]
+    let lo: u64 = ro_lo[(k) as usize]
+    let hi: u64 = ro_hi[(k) as usize]
+    let raw: i64 = value_of(key)
+    var v: u64 = 0
+    if raw > 0 {
+        v = raw as u64
+    }
+    let num: u64 = lo + (v * (hi - lo) + 500) / 1000
+    var n: u64 = tr_num((&ro_buf[0 as usize]) as u64, 0, num)
+    if ro_pct[(k) as usize] != 0 {
+        ro_buf[(n) as usize] = 32 as u8
+        ro_buf[(n + 1) as usize] = 37 as u8
+        n = n + 2
+    }
+    ro_buf[(n) as usize] = 0 as u8
+    return (&ro_buf[0 as usize]) as u64
+}
+
+// What the read-out of the slider with this key says (0 = no read-out).
+fn readout_text(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < ro_n {
+        if ro_key[(k) as usize] == key {
+            return readout_fmt(k)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn readouts() {
+    var k: u64 = 0
+    while k < ro_n {
+        let i: usize = node_of_key(ro_key[(k) as usize])
+        if i != scene.SCENE_NONE && i < scene.scene_count(sc()) && node_w(i) > 0 {
+            let p: u64 = readout_fmt(k)
+            let px: u64 = wlibc.px_ui()
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, px, p, ulib.length(p))
+            let lh: u64 = wlibc.text_h(px) + 2
+            let x: u64 = node_x(i) + node_w(i) + sp(12)
+            // the label box of text_tok is 24 points high; it is centred on the track
+            var ty: u64 = node_y(i)
+            if node_h(i) > sp(24) {
+                ty = ty + (node_h(i) - sp(24)) / 2
+            } else if ty >= (sp(24) - node_h(i)) / 2 {
+                ty = ty - (sp(24) - node_h(i)) / 2
+            }
+            var py: u64 = ty
+            if sp(24) > lh {
+                py = ty + (sp(24) - lh) / 2
+            }
+            fuiapp.plate(x, py, tw, lh)
+            text_tok(x, ty, tw + sp(8), p, style.TOK_TEXT_MUTED)
+        }
+        k = k + 1
+    }
 }
 
 // A choice box: shows the current text with an arrow; the program opens a

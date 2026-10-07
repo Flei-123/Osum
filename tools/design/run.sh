@@ -15,9 +15,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT; fi
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=70 drehbuch="$(pwd)/tools/design/views.txt" > "$OUT.log" 2>&1
+# every run builds in its own directory (several of these runs at once share nothing)
+export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=150 drehbuch="$(pwd)/tools/design/views.txt" > "$OUT.log" 2>&1
 [ -z "${1:-}" ] || true
 python3 tools/design/check.py "$OUT"
 RC=$?
-[ -n "${1:-}" ] || rm -f "$OUT.log"
+[ -n "${1:-}" ] || rm -rf "$OUT.log" "$OUT-build"
 exit $RC

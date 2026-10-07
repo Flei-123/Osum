@@ -68,3 +68,21 @@ no stage touches the Dell.
 ## 5. What is NOT in this plan
 
 A new compositor, GPU acceleration, Wayland-style clients: not needed for "everything on fUi".
+
+
+## 6. Update 07.10.2026 (round r402): where W6 (wm.fi) goes now
+
+`docs/COMPOSITOR.md` answers Justin's question "can fUi own the window buffers" with evidence and a staged plan.
+What that changes in this plan:
+
+* **W0 is done** (`tools/k15/build.sh` and `tools/osum/mkfs.py` build OFS format 3 where needed).
+* **W1 (`fuiwin`) and W2 (`fuimet`) stay as they are**: they replace the *client* side (wlib) and are independent of
+  who composes. They are also what a ring-3 compositor's own scene windows need.
+* **W5 (bar stage 2)** is unchanged and not started.
+* **W6 is replaced by the compositor stages C-S0 ... C-S7** (roadmap r428 - r435): the chrome first as an integer fUi
+  core piece (done in r402: measures from the shape, the three states, Alt+F4), then compositing primitives as a
+  library with a differential test, shared window buffers (memfd), a *shadow* compositor in ring 3 that is compared
+  pixel for pixel with `wm.fi`, the switch with `wm.fi` as the fall-back, and only then the chrome as a fUi scene
+  tree. The old W6.1 - W6.4 order (caption in fui/core, window list as a tree, glass as a scene effect, server out of
+  the kernel) is the same direction with a safer middle.
+* **Not started in this round:** W1, W2, W3, W5, C-S2 ... C-S7.
