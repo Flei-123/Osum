@@ -583,7 +583,7 @@ n_modes=$(grep -ac '^dispctl: mode ' "$R")
 gleich "und die Liste kommt Zeile fuer Zeile heraus" "$anz" "$n_modes"
 
 # Ein Wechsel AUS RING 3 -- und der Kernel schaltet wirklich um.
-rc=$(lauf_platte ring3b "osum gfx disp nokbd nosched noproc script=dispctl set 1024 768;dispctl behalten;dispctl raw")
+rc=$(lauf_platte ring3b "osum gfx disp nokbd nosched noproc script=dispctl set 1024 768;dispctl keep;dispctl raw")
 num "der Lauf endet sauber" "$rc" eq 21
 R2="$TMPD/ring3b.txt"
 gleich "ein Programm in Ring 3 hat die Tafel umgestellt" "1024" "$(uwl "$R2" panelw)"
@@ -592,7 +592,7 @@ gleich "die Zeilenlaenge ist mitgewandert" "4096" "$(uwl "$R2" pitch)"
 gleich "der Kernel zaehlt genau einen Wechsel" "1" "$(uwl "$R2" switches)"
 # Direkt nach dem Wechsel steht die Frist offen ...
 gleich "direkt nach dem Wechsel laeuft die Bestaetigungsfrist" "1" "$(uw "$R2" pending)"
-# ... und nach `dispctl behalten` ist sie zu. Beide Zahlen aus DEMSELBEN
+# ... und nach `dispctl keep` ist sie zu. Beide Zahlen aus DEMSELBEN
 # Mitschnitt, die erste und die letzte Zeile desselben Namens.
 gleich "nach dem Bestaetigen ist sie zu" "0" "$(uwl "$R2" pending)"
 gleich "und der Kernel hat die Bestaetigung gezaehlt" "1" "$(uwl "$R2" confirms)"
@@ -619,7 +619,7 @@ hat "$O" "fb: selftest 13 / 13" "und seine dreizehn Zusagen auch"
 rc=$(lauf_platte ohne3 "osum gfx nokbd nosched noproc script=dispctl raw;dispctl test")
 num "der Lauf endet sauber" "$rc" eq 21
 O3="$TMPD/ohne3.txt"
-hat "$O3" "dispctl: der Bildschirm ist nicht da" "/bin/dispctl sagt es und rechnet nicht weiter"
+hat "$O3" "dispctl: there is no screen" "/bin/dispctl sagt es und rechnet nicht weiter"
 gleich "und jede Zahl ist ein Strich und keine Null" "-" "$(uw "$O3" vram)"
 gleich "auch die Laenge der Liste" "-" "$(uw "$O3" count)"
 gleich "auch EDID" "-" "$(uw "$O3" edidok)"
