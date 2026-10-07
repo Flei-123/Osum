@@ -284,15 +284,24 @@ for f in mono sans; do
 done
 if [ -f "$DEJAVU/DejaVuSansMono.ttf" ]; then
     python3 tools/ttf/subset.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/mono.ttf" >/dev/null 2>&1
-    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/sans.ttf" >/dev/null 2>&1
     cmp -s "$TMPD/mono.ttf" assets/osum-mono.ttf \
         && ok "osum-mono.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans Mono" \
         || bad "osum-mono.ttf laesst sich nicht reproduzieren"
-    cmp -s "$TMPD/sans.ttf" assets/osum-sans.ttf \
-        && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans" \
-        || bad "osum-sans.ttf laesst sich nicht reproduzieren"
 else
     echo "        (DejaVu liegt nicht unter $DEJAVU -- Schnitt nicht nachgerechnet)"
+fi
+# r399 (design audit): the proportional faces are Inter (SIL OFL), cut by tools/design/mkfont.py
+if [ -f assets/src/Inter-Regular.ttf ] && python3 -c "import fontTools, uharfbuzz" 2>/dev/null; then
+    python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/sans.ttf" assets/osum-sans.ttf >/dev/null 2>&1
+    python3 tools/design/mkfont.py assets/src/Inter-SemiBold.ttf "$TMPD/sansb.ttf" assets/osum-sans-bold.ttf >/dev/null 2>&1
+    cmp -s "$TMPD/sans.ttf" assets/osum-sans.ttf \
+        && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus Inter Regular" \
+        || bad "osum-sans.ttf laesst sich nicht reproduzieren"
+    cmp -s "$TMPD/sansb.ttf" assets/osum-sans-bold.ttf \
+        && ok "osum-sans-bold.ttf entsteht Oktett fuer Oktett neu aus Inter SemiBold" \
+        || bad "osum-sans-bold.ttf laesst sich nicht reproduzieren"
+else
+    echo "        (Inter-Quelle oder fontTools/uharfbuzz fehlen -- Schnitt nicht nachgerechnet)"
 fi
 info=$(python3 tools/ttf/raster.py info assets/osum-sans.ttf)
 echo "        $info"

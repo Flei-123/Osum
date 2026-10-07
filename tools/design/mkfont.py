@@ -55,7 +55,7 @@ def main():
     opts.drop_tables += ['GPOS', 'GSUB', 'GDEF', 'OS/2', 'post', 'name', 'gasp',
                          'cvt ', 'fpgm', 'prep', 'DSIG', 'STAT', 'avar', 'fvar']
     ss = subset.Subsetter(opts)
-    f = TTFont(src)
+    f = TTFont(src, recalcTimestamp=False)
     ss.populate(unicodes=cps)
     ss.subset(f)
     keep = {'cmap', 'glyf', 'head', 'hhea', 'hmtx', 'loca', 'maxp'}
@@ -78,6 +78,8 @@ def main():
     kern.version = 0
     kern.kernTables = [kt]
     f['kern'] = kern
+    # reproducible: the head table carries a time stamp, pin it
+    f['head'].created = f['head'].modified = 3849000000
     f.save(dst)
     print("%s: %d glyphs, %d kern pairs, %d bytes" % (
         dst, len(have), len(kt.kernTable), len(open(dst, 'rb').read())))

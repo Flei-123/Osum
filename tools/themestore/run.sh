@@ -2577,15 +2577,18 @@ done
 # nicht aus einer abgemessenen Zahl.
 bash tools/themestore/build.sh "$TMPD/rvor" extra='einst' uitrace=yes \
     keep=yes radius=4 > "$TMPD/rvor.log" 2>&1
-SL=$(grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=40[0-9] w=[0-9]* h=[0-9]*' \
-     "$TMPD/rvor/serial.txt" | tail -1)
+# r399: the sliders are the four rectangles 160 wide (the first one is the corner radius);
+# their y moves with the layout of the page, so they are found by their width and not by a row
+SL=$(grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=160 h=[0-9]*' \
+     "$TMPD/rvor/serial.txt" | tail -4 | head -1)
 SLX=$(printf '%s' "$SL" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
 SLY=$(printf '%s' "$SL" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
 SLW=$(printf '%s' "$SL" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
 # Fensterinneres: 22 nach rechts (Rahmen) und 25 nach unten (Rahmen
 # und Titel), wie es die Reiterzeile selbst meldet (x=16 -> ax=38).
 CX=$(( ${SLX:-316} + 22 + (${SLW:-428} * 2 / 3) ))
-CY=$(( ${SLY:-408} + 25 + 12 ))
+SLH=$(printf '%s' "$SL" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+CY=$(( ${SLY:-408} + 25 + ${SLH:-24} / 2 ))
 bash tools/themestore/build.sh "$TMPD/rklick" extra='einst' uitrace=yes \
     keep=yes radius=4 click="$CX,$CY" click="$CX,$CY" \
     > "$TMPD/rklick.log" 2>&1

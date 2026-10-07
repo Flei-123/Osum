@@ -67,7 +67,7 @@ def corner_halo(menu_png, base_png, x0=8, y0=300, r=12):
             # centre of the corner circle is (r, r) from the corner of the window
             ddx = 2 * (r - dx) - 1
             ddy = 2 * (r - dy) - 1
-            if ddx * ddx + ddy * ddy > 4 * r * r + 8 * r:  # clearly outside the arc
+            if ddx * ddx + ddy * ddy > (2 * r + 2) ** 2:  # more than one pixel outside the arc
                 tot += 1
                 if mp[x0 + dx, y0 + dy] != bp[x0 + dx, y0 + dy]:
                     n += 1

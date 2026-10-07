@@ -440,8 +440,15 @@ def resolve(scheme, dark, accent_override=None):
     put("accent-disabled", mix(accent, sem[S["surface"]], 65))
     put("on-accent", on_accent)
     put("border-focus", ra[focus])
-    put("selection", accent)
-    put("on-selection", on_accent)
+    # r399 (design audit): a selection is a TINT of the accent over the raised surface and
+    # keeps the text colour (the accent goes into the indicator bar the list painters
+    # draw); the high-contrast schemes keep the solid accent plate.
+    if high:
+        put("selection", accent)
+        put("on-selection", on_accent)
+    else:
+        put("selection", mix(sem[S["surface-raised"]], accent, 22))
+        put("on-selection", sem[S["text-primary"]])
     put("overlay", sem[S["surface-raised"]])
     put("danger", fit_status(rd))
     put("warning", fit_status(rw))

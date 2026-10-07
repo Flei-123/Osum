@@ -92,6 +92,7 @@ gesichert" zu pruefen: nicht ein Mitschnitt ueber eine serielle Leitung,
 sondern der Inhalt der Platte. Runde K11 misst den Editor damit.
 """
 
+import os
 import struct
 import sys
 
@@ -930,6 +931,24 @@ def main(argv):
         v = OFS_V1
     if "--v3" in argv[4:]:
         v = OFS_V3
+    # r399 (design audit): A TEST IMAGE THAT WOULD NOT FIT FORMAT 2 BECOMES FORMAT 3.
+    # The file manager passed the 2 134 016 octets a format-2 file may hold (the limit is
+    # a property of the test builders, not of the product, which boots format 3: plan
+    # step W0 of docs/FUI-WLIB-PLAN.md). Every runner that puts /bin/explorer on a
+    # default image would have needed its own `--v3`; the builder now says so itself --
+    # and ONLY when a source file really is too big, so every image that was built
+    # before stays octet for octet the same (tools/k15/run.sh 15d).
+    if v == OFS_V2:
+        v2max = (DIRECT + BS // 8 + (BS // 8) ** 2) * BS
+        for spec in rest:
+            if "=" not in spec:
+                continue
+            src = spec.partition("=")[2].split("@")[0]
+            if os.path.isfile(src) and os.path.getsize(src) > v2max:
+                print("mkfs: %s is bigger than a format-2 file may be (%d octets): "
+                      "building format 3" % (src, v2max), file=sys.stderr)
+                v = OFS_V3
+                break
     fs = Fs(blocks, v, inodes, zeit, karten, journal)
     fs.format()
     if reserve:
