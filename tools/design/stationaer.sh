@@ -12,7 +12,7 @@ OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT; fi
 # every run builds in its own directory (several of these runs at once share nothing)
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=300 drehbuch="$(pwd)/tools/design/stationaer.txt" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes extra=phases halt=300 drehbuch="$(pwd)/tools/design/stationaer.txt" > "$OUT.log" 2>&1
 n=0
 for ph in "1 the rest of the boot" "2 idle (six seconds)" "3 pointer moves over the desktop" "4 start menu open / close" "5 window dragged"; do
     n=$((n + 1))

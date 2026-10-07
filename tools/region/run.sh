@@ -61,8 +61,8 @@ run() { # run <name> <extra capture args...>
 }
 
 echo "== 1. the same drehbuch with the region and without it (norgn) =="
-run reg
-run box extra=norgn
+run reg extra=phases
+run box "extra=norgn phases"
 for n in a1-jump a2-jump a3-menu-far a4-menu-hover a5-menu-hover2 a6-closed; do
     [ -s "$TMPD/reg/$n.ppm" ] && [ -s "$TMPD/box/$n.ppm" ] && ok "both runs took picture $n" \
         || bad "picture $n is missing in one run"
