@@ -179,12 +179,12 @@ load-sensitive and were repeated when they flickered.
 | `tools/softui` | 24/0 | **24/0** |
 | `tools/alltag` | 44/0 | **44/0** |
 | `tools/k15` | 258/0 | **258/0** (menu baseline and vector-icon checks adapted, see below) |
-| `tools/desktop` (sections 1-8) | 104/0 | **104/0** |
+| `tools/desktop` (sections 1-8; section 9 re-runs `wm` 108/0 and `k15`, which was run on its own) | 104/0 | **104/0** |
 | `tools/barscene` / `win11bar` / `barpop` | 29/0, 25/0, 10/0 | **29/0, 25/0, 10/0** |
 | `tools/qsfui`, `paint`, `explorer2` | 20/0, 36/0, 49/0 | **20/0, 36/0, 49/0** |
 | `tools/lockscene`, `loginscene`, `a11y/scene.sh` | 15/0, 21/0, 25/0 | **15/0, 21/0, 25/0** |
 | `tools/wm` | 107/0 | **108/0** (one more: the Inter cut is reproducible) |
-| `tools/fourbugs`, `menuhover`, `menualive` | 26/0, 14/0, 9/0 | **26/0, 14/0, 9/0** |
+| `tools/fourbugs`, `menuhover`, `menualive` | 26/0, 14/0, 9/0 | **26/0, 14/0, 9/0** (`menuhover` once showed a blind counter-proof under load; the repeat is 14/0) |
 | `tools/toolbench` | 34/3 (28/6 measured under load in this round) | 35/2 -- the interactive taskmgr checks flicker under load, on main too |
 | `tools/i18n` | stops at `mkfs` (file manager over the format-2 limit) | gets through; 12 stale failures remain (settings reports of the old `wlib` page, the message-quota check -- identical output on main) |
 | `tools/dmodul` | stops at `mkfs` | 9/1 (`2-gezogen.png` missing: a picture timing issue, not a measurement) |
