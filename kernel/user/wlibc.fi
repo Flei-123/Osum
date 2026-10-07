@@ -145,7 +145,7 @@ export {
     theme_probe_high, PAIR_COUNT, theme_accent_own, ACCENT_BLACK,
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
     // the scheme (OSYM coverage 1..5 = a role, not an alpha).
-    icon_ok, icon_w, icon_h, icon_role, icon_draw, icon_draw_sc,
+    icon_ok, icon_w, icon_h, icon_role, icon_draw, icon_draw_sc, icon_vec, icon_draw_fit,
     icon_draw_w, icon_draw_h, icon_ink_top, icon_ink_hgt,
     icon_ink_lft, icon_ink_wid, ICON_ROLES,
     F_UI, F_MONO, F_ICON, F_BOLD, px_ui, map_surface, px_mono, ui_scale,
@@ -3747,6 +3747,18 @@ fn bind_accent(dark: bool) {
     sem[(S_BORDER_FOCUS) as usize] = fbest
     sem[(S_SELECTION) as usize] = accent
     sem[(S_ON_SELECTION) as usize] = st_on
+    // r399 (design audit): a SELECTION IS A TINT, NOT THE LOUD ACCENT. A list
+    // row in full accent blue with white text shouts (Windows 10 / GTK 2); Fluent,
+    // GNOME and Material mark a selection with a soft tint of the accent and
+    // keep the text colour, and put the accent into a small indicator bar (the
+    // list painters draw it). 22 per cent accent over the raised surface, the
+    // normal text on it (contrast stays above 7:1 in both modes). The high
+    // contrast scheme keeps the solid accent plate: its whole point is the
+    // strongest contrast, not a soft one.
+    if sch_high == 0 {
+        sem[(S_SELECTION) as usize] = mix(sem[(S_SURFACE_RAISED) as usize], accent, 22)
+        sem[(S_ON_SELECTION) as usize] = sem[(S_TEXT_PRIMARY) as usize]
+    }
     sem[(S_OVERLAY) as usize] = sem[(S_SURFACE_RAISED) as usize]
     sem[(S_DANGER) as usize] = fit_status(R_DANGER, start, up, need_text)
     sem[(S_WARNING) as usize] = fit_status(R_WARNING, start, up, need_text)
@@ -7001,6 +7013,94 @@ fn icon_draw_sc(p: u64, x: u64, y: u64, sc: u64) -> bool {
             c = c + 1
         }
         r = r + 1
+    }
+    return true
+}
+
+// ============================================ r399 (DESIGN AUDIT): VECTOR ICONS
+//
+// A program icon baked from vector art (tools/design/mkicons.py) is a 48x48
+// OSYM whose fourth octet is a REAL coverage 0..255 (anti-aliased rounded tile).
+// The hand-made 16x16 symbols use the octet as a flag (0 = nothing, 255 = this
+// colour, 1..5 = a scheme role) and are drawn by `icon_draw_sc` with an integer
+// factor. The two kinds are told apart by size: 32 or more on a side = true
+// alpha. `icon_draw_fit` draws such a picture into a square of `size` pixels,
+// area-averaged (premultiplied) -- shrinking 48 -> 24 or 32 keeps the edges
+// soft instead of stair-stepped -- and blends it over what is there.
+fn icon_vec(p: u64) -> bool {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    return w >= 32 && h >= 32 && w <= 64 && h <= 64
+}
+
+fn icon_draw_fit(p: u64, x: u64, y: u64, size: u64) -> bool {
+    if !icon_vec(p) || size == 0 {
+        return false
+    }
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    var dy: u64 = 0
+    while dy < size {
+        let y0s: u64 = dy * h
+        let y1s: u64 = (dy + 1) * h
+        let sya: u64 = y0s / size
+        let syb: u64 = (y1s + size - 1) / size
+        var dx: u64 = 0
+        while dx < size {
+            let x0s: u64 = dx * w
+            let x1s: u64 = (dx + 1) * w
+            let sxa: u64 = x0s / size
+            let sxb: u64 = (x1s + size - 1) / size
+            var sa: u64 = 0
+            var sr: u64 = 0
+            var sg: u64 = 0
+            var sb: u64 = 0
+            var sy: u64 = sya
+            while sy < syb && sy < h {
+                var lo: u64 = sy * size
+                if lo < y0s {
+                    lo = y0s
+                }
+                var hi: u64 = (sy + 1) * size
+                if hi > y1s {
+                    hi = y1s
+                }
+                var sx: u64 = sxa
+                while sx < sxb && sx < w {
+                    var xl: u64 = sx * size
+                    if xl < x0s {
+                        xl = x0s
+                    }
+                    var xh: u64 = (sx + 1) * size
+                    if xh > x1s {
+                        xh = x1s
+                    }
+                    if hi > lo && xh > xl {
+                        let wgt: u64 = (hi - lo) * (xh - xl)
+                        let v: u64 = __mmio_read32((p + 12 + (sy * w + sx) * 4)
+                            as *mut u32) as u64
+                        let a: u64 = (v >> 24) & 0xFF
+                        let wa: u64 = wgt * a
+                        sa = sa + wa
+                        sb = sb + wa * (v & 255)
+                        sg = sg + wa * ((v >> 8) & 255)
+                        sr = sr + wa * ((v >> 16) & 255)
+                    }
+                    sx = sx + 1
+                }
+                sy = sy + 1
+            }
+            let alpha: u64 = sa / (w * h)
+            if alpha != 0 && sa != 0 {
+                let rr: u64 = sr / sa
+                let gg: u64 = sg / sa
+                let bb: u64 = sb / sa
+                let col: u64 = (rr << 16) | (gg << 8) | bb
+                px(x + dx, y + dy, blend(get(x + dx, y + dy), col, alpha))
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
     }
     return true
 }

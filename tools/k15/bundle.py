@@ -43,6 +43,7 @@ mit.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -127,12 +128,19 @@ def main(argv):
         zeilen.append(ziel + "/")
         zeilen.append("%s/INFO=%s" % (ziel, os.path.join(pfad, "INFO")))
         sym = os.path.join(arbeit, name + ".symbol")
-        r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
-                            os.path.join(pfad, "symbol.txt"), sym],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            print(r.stdout + r.stderr, file=sys.stderr)
-            return 1
+        # r399 (design audit): a bundle may carry a finished OSYM picture
+        # (`symbol.osym`, vector art baked by tools/design/mkicons.py); it wins over the
+        # 16x16 drawing in `symbol.txt`.
+        fertig = os.path.join(pfad, "symbol.osym")
+        if os.path.isfile(fertig):
+            shutil.copyfile(fertig, sym)
+        else:
+            r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
+                                os.path.join(pfad, "symbol.txt"), sym],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(r.stdout + r.stderr, file=sys.stderr)
+                return 1
         zeilen.append("%s/symbol=%s" % (ziel, sym))
         # AB-003: the image's own bundles carry SYSTEM -- their programs act
         # as the user and get no app label from the kernel

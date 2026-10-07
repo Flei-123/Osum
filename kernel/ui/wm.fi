@@ -7574,16 +7574,71 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     //    geschrieben, aus dem der naechste Treffer kopiert.
     let tint: u64 = form(state, FM_BLURTINT)
     let amp: u64 = form(state, FM_BLURNOISE)
+    // r399 (design audit): THE FROSTING FOLLOWS THE ROUNDED SHAPE. The filter
+    // ran over the whole outer rectangle, so a window with rounded corners
+    // (the start menu, tooltips) showed a grey blurred square behind each
+    // corner: the corner pixels outside the arc are transparent, the blurred
+    // rectangle shone through them. Pixels outside the corner arc of the
+    // window (radius FM_RADIUS, the same number the frame uses) now keep the
+    // unblurred picture that is already in the second buffer.
+    var crad: u64 = form(state, FM_RADIUS)
+    if crad > RADIUS_MAX {
+        crad = RADIUS_MAX
+    }
+    let wl: i64 = bx0
+    let wt: i64 = by0
+    let wr: i64 = bx1
+    let wb: i64 = by1
     var ry: u64 = 0
     while ry < h {
         let qz: u64 = a +% ry *% w *% 4
         let zz: u64 = b +% ry *% w *% 4
+        let py: i64 = y0 + ry as i64
+        var corner_row: bool = false
+        var cyc: i64 = 0
+        if crad > 0 {
+            if py < wt + crad as i64 {
+                corner_row = true
+                cyc = wt + crad as i64
+            } else if py >= wb - crad as i64 {
+                corner_row = true
+                cyc = wb - crad as i64
+            }
+        }
         var rx: u64 = 0
         while rx < w {
             let c: u64 = __mmio_read32((qz +% rx *% 4) as *mut u32) as u64
-            __mmio_write32((zz +% rx *% 4) as *mut u32,
-                blur_mix(c, ton, tint, amp, x0 as u64 + rx,
-                    y0 as u64 + ry) as u32)
+            var keep: bool = false
+            if corner_row {
+                let pxx: i64 = x0 + rx as i64
+                var cxc: i64 = 0
+                var in_col: bool = false
+                if pxx < wl + crad as i64 {
+                    in_col = true
+                    cxc = wl + crad as i64
+                } else if pxx >= wr - crad as i64 {
+                    in_col = true
+                    cxc = wr - crad as i64
+                }
+                if in_col {
+                    let ddx: i64 = 2 * (pxx - cxc) + 1
+                    let ddy: i64 = 2 * (py - cyc) + 1
+                    let rr2: i64 = 4 * (crad as i64) * (crad as i64)
+                    if ddx * ddx + ddy * ddy > rr2 {
+                        keep = true
+                    }
+                }
+            }
+            if keep {
+                let orow: u64 = fb.draw_at(state) +% (y0 as u64 + ry) *% fb.pitch(state)
+                let orig: u64 = orow +% (x0 as u64 + rx) *% 4
+                __mmio_write32((zz +% rx *% 4) as *mut u32,
+                    __mmio_read32(orig as *mut u32))
+            } else {
+                __mmio_write32((zz +% rx *% 4) as *mut u32,
+                    blur_mix(c, ton, tint, amp, x0 as u64 + rx,
+                        y0 as u64 + ry) as u32)
+            }
             rx = rx + 1
         }
         fb_row(state, x0 as u64, y0 as u64 + ry, zz, w)

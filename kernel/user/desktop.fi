@@ -175,27 +175,94 @@ fn u32_at(p: u64) -> u64 {
 // Laeufer draussen genau diese Rechnung nachrechnet. Waere sie an zwei
 // Stellen im Quelltext (einmal beim Malen, einmal beim Melden), waere
 // die Messung eine Tautologie.
+// r399 (design audit): the wallpaper is scaled like the lock screen's one
+// (kernel/user/backdrop.fi): COVER (the larger scale factor, centred, the
+// overhang is cropped, the picture is not distorted) with a BILINEAR filter.
+// Before, the desktop stretched the source to the screen with the nearest
+// neighbour: every source pixel of the 480x270 file became a 3x3 block
+// (stair-stepped edges in the tree line, a 6 per cent distortion on 16:10), while the
+// lock screen showed the same file smooth. Fixed point 16.16, integers only.
+static mut cv_step: u64 = 0
+static mut cv_ox: u64 = 0
+static mut cv_oy: u64 = 0
+
+fn cover_prepare() {
+    let sx: u64 = (bw << 16) / sw
+    let sy: u64 = (bh << 16) / sh
+    var step: u64 = sx
+    if sy < step {
+        step = sy
+    }
+    cv_step = step
+    cv_ox = ((bw << 16) - sw * step) / 2
+    cv_oy = ((bh << 16) - sh * step) / 2
+}
+
+fn px_chan(at: u64, c: u64) -> u64 {
+    return __mmio_read8((at + c) as *mut u8) as u64
+}
+
 fn color_at(x: u64, y: u64) -> u64 {
-    if image != 0 && bw != 0 && bh != 0 {
-        var qx: u64 = 0
-        var qy: u64 = 0
-        if sw > 1 {
-            qx = x * bw / sw
+    if image != 0 && bw != 0 && bh != 0 && sw > 1 && sh > 1 {
+        if cv_step == 0 {
+            cover_prepare()
         }
-        if sh > 1 {
-            qy = y * bh / sh
+        // source position of the pixel centre, 16.16, never below 0
+        var px: u64 = cv_ox + x * cv_step + (cv_step >> 1)
+        var py: u64 = cv_oy + y * cv_step + (cv_step >> 1)
+        if px >= 32768 {
+            px = px - 32768
+        } else {
+            px = 0
         }
-        if qx >= bw {
-            qx = bw - 1
+        if py >= 32768 {
+            py = py - 32768
+        } else {
+            py = 0
         }
-        if qy >= bh {
-            qy = bh - 1
+        var ix: u64 = px >> 16
+        var iy: u64 = py >> 16
+        var ax: u64 = (px >> 8) & 255
+        var ay: u64 = (py >> 8) & 255
+        if ix >= bw - 1 {
+            ix = bw - 1
+            ax = 0
         }
-        let at: u64 = image + (qy * bw + qx) * 4
-        let b: u64 = __mmio_read8((at) as *mut u8) as u64
-        let g: u64 = __mmio_read8((at + 1) as *mut u8) as u64
-        let r: u64 = __mmio_read8((at + 2) as *mut u8) as u64
-        return (r << 16) | (g << 8) | b
+        if iy >= bh - 1 {
+            iy = bh - 1
+            ay = 0
+        }
+        var jx: u64 = ix
+        var jy: u64 = iy
+        if ax != 0 {
+            jx = ix + 1
+        }
+        if ay != 0 {
+            jy = iy + 1
+        }
+        let p00: u64 = image + (iy * bw + ix) * 4
+        let p10: u64 = image + (iy * bw + jx) * 4
+        let p01: u64 = image + (jy * bw + ix) * 4
+        let p11: u64 = image + (jy * bw + jx) * 4
+        var out: u64 = 0
+        var c: u64 = 2
+        var shf: u64 = 16
+        var n: u64 = 0
+        // channels R (offset 2), G (1), B (0)
+        while n < 3 {
+            let top: u64 = px_chan(p00, c) * (256 - ax) + px_chan(p10, c) * ax
+            let bot: u64 = px_chan(p01, c) * (256 - ax) + px_chan(p11, c) * ax
+            let v: u64 = (top * (256 - ay) + bot * ay + 32768) >> 16
+            out = out | (v << shf)
+            if c > 0 {
+                c = c - 1
+            }
+            if shf >= 8 {
+                shf = shf - 8
+            }
+            n = n + 1
+        }
+        return out
     }
     // Der Verlauf: linear von oben nach unten, je Kanal, mit
     // Abrundung -- dieselbe ganzzahlige Division wie im Laeufer.
@@ -251,6 +318,7 @@ fn image_load(pfad: u64) -> bool {
     image = p
     bw = iw
     bh = ih
+    cv_step = 0
     return true
 }
 

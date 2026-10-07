@@ -1094,6 +1094,24 @@ fn text_tok(x: u64, y: u64, w: u64, p: u64, tok: u32) {
     render.draw_widget(fuiapp.ctx(), &e)
 }
 
+// r399 (design audit): the INDICATOR BAR of a selected row. The plate is a soft
+// tint of the accent (wlibc: selection), the accent itself goes into this small
+// rounded bar at the left edge -- Fluent's list selection. `x`/`y`/`h` are the
+// plate's. Nothing is painted on a high-contrast scheme (the plate is the solid
+// accent there, a bar of the same colour would be invisible).
+fn sel_bar(z: *mut painter.Painter, x: u64, y: u64, h: u64) {
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    if (*t).selection == (*t).accent {
+        return
+    }
+    var bh: u64 = sp(16)
+    if bh + sp(8) > h {
+        bh = h - sp(8)
+    }
+    painter.round_rect(z, (x + sp(1)) as f64, (y + (h - bh) / 2) as f64,
+        sp(3) as f64, bh as f64, spf(1.5), (*t).accent | 4278190080 as u32)
+}
+
 // One list row: a selection plate when `on`, the text in the selection
 // text colour then (dark on the accent plate would not be readable).
 fn row_draw(x: u64, y: u64, w: u64, h: u64, p: u64, on: bool) {
@@ -1103,6 +1121,7 @@ fn row_draw(x: u64, y: u64, w: u64, h: u64, p: u64, on: bool) {
     if on {
         painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, rb(),
             (*t).selection | 4278190080 as u32)
+        sel_bar(z, x, y, h)
         tok = style.TOK_SELECTION_TEXT
     }
     text_tok(x + sp(10), y + (h - sp(24)) / 2, w - sp(20), p, tok)
@@ -2625,6 +2644,15 @@ fn ROW2_H() -> u64 {
 fn ICON_W() -> u64 {
     return 30 * S.s_S
 }
+
+// r399: rows tall enough for a 32 point icon (the two-line rows of the start menu) leave
+// more room for it; the other tables keep their 30.
+fn icon_col(k: u64) -> u64 {
+    if S.s_ct_rh[(k) as usize] >= 44 * S.s_S {
+        return 46 * S.s_S
+    }
+    return ICON_W()
+}
 fn HEAD_H() -> u64 {
     return 28 * S.s_S
 }
@@ -2879,7 +2907,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
             // the first header sits over the NAMES, i.e. after the icon
             var hoff: u64 = 0
             if col == 0 && S.s_ct_icons[(k) as usize] != 0 {
-                hoff = ICON_W()
+                hoff = icon_col(k)
             }
             if S.s_ct_exact[(k) as usize] {
                 two_text(cx + sp(10) + hoff, y + sp(24), colw_of(k, col, w) - sp(12) - hoff,
@@ -2925,6 +2953,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
             painter.round_rect(z, (x + sp(4)) as f64, ry as f64,
                 (w - sp(8)) as f64, rh as f64, rb(),
                 (*t).selection | 4278190080 as u32)
+            sel_bar(z, x + sp(4), ry, rh)
         }
         var tok: u32 = style.TOK_TEXT
         var tok2: u32 = style.TOK_TEXT_MUTED
@@ -2936,7 +2965,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
         if S.s_ct_icons[(k) as usize] != 0 {
             let word: u64 = __mmio_read64((S.s_ct_icons[(k) as usize] + ri * 8) as *mut u64)
             row_icon(word, x + sp(8), ry, rh, ct_text(k, ri, 0), on)
-            ix = ICON_W()
+            ix = icon_col(k)
         }
         if S.s_ct_two[(k) as usize] {
             // line 1 = cell 0 (bold, 15), line 2 = cell 1 (12, muted); the
@@ -3032,7 +3061,10 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
     }
     let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
     let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
-    let tile: u64 = sp(22)
+    var tile: u64 = sp(22)
+    if rh >= sp(44) {
+        tile = sp(32)
+    }
     let ty: u64 = y + (rh - tile) / 2
     if (word & wlib.ICON_TAG) != 0 {
         var col: u32 = (*t).text | 4278190080 as u32
@@ -3056,8 +3088,17 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
         if sc == 0 {
             sc = 1
         }
-        let dw: u64 = iw * sc
-        let dh: u64 = ih * sc
+        var dw: u64 = iw * sc
+        var dh: u64 = ih * sc
+        // r399: a vector icon (32x32, real alpha) is fitted to the tile (uiimage
+        // shrinks with a box filter, grows bilinear) and sits 4 points further right so
+        // that the selection bar at the left edge of a row does not touch it
+        var shift: u64 = 0
+        if iw >= 32 && ih >= 32 {
+            dw = tile
+            dh = tile
+            shift = sp(4)
+        }
         var ox: u64 = 0
         if tile > dw {
             ox = (tile - dw) / 2
@@ -3068,7 +3109,7 @@ fn row_icon(word: u64, x: u64, y: u64, rh: u64, txt: u64, on: bool) {
         }
         var im: uiimage.Image = uiimage.image_wrap(word + 12, iw as usize,
             ih as usize, 0)
-        uiimage.image_draw_rect(z, &im, (x + 1 + ox) as f64,
+        uiimage.image_draw_rect(z, &im, (x + 1 + ox + shift) as f64,
             (ty + oy) as f64, dw as f64, dh as f64, 0 as u32)
         return
     }
@@ -3204,7 +3245,7 @@ fn table_text_x(key: u64) -> u64 {
     }
     var ix: u64 = 0
     if S.s_ct_icons[(k) as usize] != 0 {
-        ix = ICON_W()
+        ix = icon_col(k)
     }
     return node_x(S.s_ct_node[(k) as usize]) + sp(10) + ix
 }
@@ -3858,7 +3899,9 @@ fn slider(parent: usize, key: u64, w: u64, init: i64) -> usize {
         return NONE
     }
     scene.node_set_widget_kind(sc(), i, widget.KIND_SLIDER)
-    scene.node_set_size(sc(), i, w as f64, 28.0)
+    // r399: the handle is as big as the widget is high -- 28 made a fat disc on
+    // a thin track; 20 is Fluent's handle.
+    scene.node_set_size(sc(), i, w as f64, spf(20.0))
     scene.node_set_id(sc(), i, key as u32)
     val_node(i, key, init)
     return i
