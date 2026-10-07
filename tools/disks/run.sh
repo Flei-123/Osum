@@ -86,7 +86,7 @@ grep -qa '^  [0-9] start=' "$S" && bad "badcrc: a partition of a table with a wr
 
 # ---------------------------------------------------------------------------------------------------
 echo "== 3. /bin/disks, the window, on the same second disk =="
-bash tools/toolbench/build.sh "$D/win" app=/bin/disks progs="disks explorer" second="$D/gpt.img" shot=allein extra="vfs nopart" \
+bash tools/toolbench/build.sh "$D/win" app=/bin/disks progs="disks explorer sh echo ls cat" second="$D/gpt.img" shot=allein extra="vfs nopart" \
     wait=12 last=140 accel=kvm > "$D/win.log" 2>&1
 W="$D/win/serial.txt"
 grep -qa '^disks: ready n=2 ' "$W" && ok "the window found two disks" || { bad "the window did not find two disks"; grep -a '^disks' "$W" | head -3 | sed 's/^/        /'; }

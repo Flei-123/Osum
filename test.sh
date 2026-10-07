@@ -1698,6 +1698,17 @@ lauf "57. the clock: summer time by rule (tzrule=eu), clock_settime, /bin/sntp, 
 lauf "58. the English guard: German in code only goes down, new lines are English (tools/english/run.sh)" \
      tools/english/run.sh english '^ENGLISH: |^== |^  OK    |^  FAIL  '
 
+# 59. THE DISK MANAGER, READING ONLY (docs/DISKS.md stages D-0 / D-1): the partition table reader on image files (a GPT with
+# primary and backup, an MBR, two tables with one flipped byte -- they must read as none), /bin/diskctl in the VM on a
+# second disk, and the window /bin/disks.
+lauf "59. the disk manager, read side: MBR / GPT with checksums, diskctl list, the window (tools/disks/run.sh)" \
+     tools/disks/run.sh disks '^DISKS: |^== |^  OK    |^  FAIL  '
+
+# 60. THE CENTRE LINE (r441): icon, text and row on ONE line -- the file manager's rows, the command bar, the title bar,
+# the tabs, a menu, the task bar (tools/midline/run.sh).
+lauf "60. the centre line: rows, icons, tabs, menu rows, title bar, task bar (tools/midline/run.sh)" \
+     tools/midline/run.sh midline '^MIDLINE: |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

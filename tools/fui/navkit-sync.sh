@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 FIRN=${FIRN_REPO:-/root/jarvis/projects/u_DiS4in7esMF1/firn}
 if [ ! -f "$FIRN/lib/fui/navkit.fi" ]; then echo "navkit-sync: Firn has no navkit.fi (yet) at $FIRN -- skipped"; exit 0; fi
 rc=0
-for f in navkit navnum cmdbar; do
+for f in navkit navnum cmdbar region; do
     cmp -s "lib/fui/$f.fi" "$FIRN/lib/fui/$f.fi" || { echo "navkit-sync: $f.fi DIFFERENT"; rc=1; }
 done
 [ $rc -eq 0 ] && echo "navkit-sync: identical"
