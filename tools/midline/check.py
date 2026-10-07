@@ -101,13 +101,23 @@ def main(out):
         ww, tbar, tfr = (int(v) for v in wm[-1])
         cy_bar = gy + tfr + (tbar - 1) / 2.0
         tbg = im.getpixel((gx + tfr + 3, int(cy_bar)))[:3]
-        # the title is judged like tools/fourbugs does (Justin's complaint of 04.10.2026): the gap above the ink and the
-        # gap below it agree within a pixel -- the ink box, ascenders and descenders included
-        box = M.ink_box(im, gx + tfr + 8, gy + tfr, gx + tfr + 140, gy + tfr + tbar, tbg, 140)
-        if box:
-            top = box[2] - (gy + tfr)
-            bot = (gy + tfr + tbar - 1) - box[3]
-            check(abs(top - bot) <= 1, "title bar: the gap above the title is %d px, below it %d px" % (top, bot))
+        # the title is judged like tools/fourbugs does (Justin's complaint of 04.10.2026): the gap above the ascender top and
+        # the gap below the BASELINE agree within a pixel (descenders hang below the baseline and are not counted: a
+        # title of "File Explorer" has a `p`, a title of "Terminal" has none, and both must look centred)
+        rows = []
+        for yy in range(gy + tfr, gy + tfr + tbar):
+            n = 0
+            for xx in range(gx + tfr + 8, gx + tfr + 140):
+                px = im.getpixel((xx, yy))[:3]
+                if sum(abs(a - b) for a, b in zip(px, tbg)) > 150:
+                    n += 1
+            rows.append(n)
+        if rows and max(rows) > 0:
+            inked = [i for i, n in enumerate(rows) if n > 0]
+            solid = [i for i, n in enumerate(rows) if n * 100 >= max(rows) * 35]
+            top = inked[0]
+            bot = tbar - 1 - solid[-1]
+            check(abs(top - bot) <= 1, "title bar: the gap above the title is %d px, below its baseline %d px" % (top, bot))
         for nm, k in (("minimise", 3), ("maximise", 2), ("close", 1)):
             x1 = gx + ww - tfr - 46 * (k - 1)
             box = M.ink_box(im, x1 - 46 + 8, gy + tfr, x1 - 8, gy + tfr + tbar, tbg, 150)
