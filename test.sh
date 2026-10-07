@@ -1698,6 +1698,10 @@ lauf "57. the clock: summer time by rule (tzrule=eu), clock_settime, /bin/sntp, 
 lauf "58. the English guard: German in code only goes down, new lines are English (tools/english/run.sh)" \
      tools/english/run.sh english '^ENGLISH: |^== |^  OK    |^  FAIL  '
 
+# 58b. the same guard as in every other repo (Firn tools/english/no_german.py): one rule for all projects.
+lauf "58b. the shared English guard of Firn: no more German than no-german.baseline.json (tools/english/shared_guard.sh)" \
+     tools/english/shared_guard.sh english-shared '^  OK    |^  FAIL  |^no-german: '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
