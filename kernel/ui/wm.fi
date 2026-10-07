@@ -114,7 +114,7 @@ export {
     set_form, form, form_writes, shadow_px, aa_px, paint_reset,
     shadow_builds, set_shadow_old, cap_hover, cap_hits,
     CAP_MIN, CAP_MAX, CAP_CLOSE,
-    vt_selftest, vt_selftest_max, FORM_SLOTS, FM_TITLE_BAR, FM_CAP_W, FM_FRAME, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
+    vt_selftest, vt_selftest_max, vt2_selftest, vt2_selftest_max, FORM_SLOTS, FM_TITLE_BAR, FM_CAP_W, FM_FRAME, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
     FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
     // RUNDE ZIEH: die drei Wirkungen des Aufhebens, einzeln.
     FM_LIFT, FM_TILT, FM_SWING,
@@ -170,7 +170,7 @@ export {
     // RUNDE GLAS (nachtrag): die echten Zellenmasse, siehe `term_cellw`.
     term_cellw, term_cellh, term_asc, term_px,
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
-    term_dump,
+    term_dump, term_size,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
     hwcur_an, hwcur_moeglich,
     // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
@@ -3865,7 +3865,7 @@ fn destroy(state: u64, i: u64) -> bool {
         wsv(state, i, W_BUF, 0)
     }
     if wg(state, i, W_GRID) != 0 {
-        mem.frame_free_run(state, wg(state, i, W_GRID), 2)
+        mem.frame_free_run(state, wg(state, i, W_GRID), 6)
         wsv(state, i, W_GRID, 0)
     }
     // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
@@ -12418,9 +12418,12 @@ fn term_setup(state: u64, i: u64) {
     let neu_gitter: bool = wg(state, i, W_GRID) == 0
     if neu_gitter {
         // r400: two frames -- the first holds the characters, the second one attribute
-        // octet per cell (bit 0 = reverse video, set by the VT subset `term_csi`)
-        let g0: u64 = mem.frame_run(state, 2)
+        // octet per cell (bit 0 = reverse video, set by the VT subset `term_csi`).
+        // r462: six frames -- characters, attributes, colours, and the same three of the main screen while the alternate
+        // screen is up (frames 3 .. 5)
+        let g0: u64 = mem.frame_run(state, 6)
         wsv(state, i, W_GRID, g0)
+        tp_reset(i)
     }
     let g: u64 = wg(state, i, W_GRID)
     // ================================================== RUNDE ECHT
@@ -12457,6 +12460,11 @@ fn term_setup(state: u64, i: u64) {
             wsv(state, i, W_CY, 0)
         } else if cols != alt_cols || rows != alt_rows {
             attr_clear(g)
+            // r462: the saved main screen and the scroll region belong to the old grid
+            tp_alt[(i) as usize] = 0
+            tp_top[(i) as usize] = 0
+            tp_bot1[(i) as usize] = 0
+            tp_wrap[(i) as usize] = 0
             // UMKOPIEREN, VON UNTEN NACH OBEN ODER VON OBEN NACH
             // UNTEN -- je nachdem, wohin geschoben wird, damit sich
             // Quelle und Ziel im selben Rahmen nicht ueberholen.
@@ -12573,6 +12581,7 @@ fn attr_clear(g: u64) {
     var k: u64 = 0
     while k < 4096 {
         kstate.set8(g + 4096 + k, 0 as u8)
+        kstate.set8(g + 8192 + k, 0 as u8)
         k = k + 1
     }
 }
@@ -12601,6 +12610,31 @@ fn cell_attr_set(state: u64, i: u64, c: u64, r: u64, a: u64) {
     kstate.set8(g + 4096 + k, a as u8)
 }
 
+// r462: the colour octet of a cell (low nibble foreground, high nibble background; 0 = the window's own colour), third frame
+fn cell_col(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return 0
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return 0
+    }
+    return kstate.get8(g + 8192 + k)
+}
+
+fn cell_col_set(state: u64, i: u64, c: u64, r: u64, v: u64) {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return
+    }
+    kstate.set8(g + 8192 + k, v as u8)
+}
+
 fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
     let g: u64 = wg(state, i, W_GRID)
     if g == 0 {
@@ -12625,6 +12659,14 @@ fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
 // Funktion schreibt es Zeile fuer Zeile hinaus, und damit ist "im
 // Terminal steht eine Eingabeaufforderung" eine ABLESUNG und keine
 // Deutung eines Rasters. Leerzeilen am Ende faellt sie weg.
+// r462: the size of the window's grid, rows << 16 | columns -- what `TIOCGWINSZ` of the tty bound to this window answers
+fn term_size(state: u64, i: u64) -> u64 {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return 0
+    }
+    return (wg(state, i, W_ROWS) << 16) | wg(state, i, W_COLS)
+}
+
 fn term_dump(state: u64, i: u64) {
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return
@@ -12666,6 +12708,31 @@ fn term_dump(state: u64, i: u64) {
     }
 }
 
+// the 16 colours of the terminal (0xRRGGBB): the eight of the standard and their bright forms
+fn term_palette(k: u64) -> u64 {
+    if k == 0 { return 0x000000 }
+    if k == 1 { return 0xCD3131 }
+    if k == 2 { return 0x0DBC79 }
+    if k == 3 { return 0xE5E510 }
+    if k == 4 { return 0x2472C8 }
+    if k == 5 { return 0xBC3FBC }
+    if k == 6 { return 0x11A8CD }
+    if k == 7 { return 0xE5E5E5 }
+    if k == 8 { return 0x666666 }
+    if k == 9 { return 0xF14C4C }
+    if k == 10 { return 0x23D18B }
+    if k == 11 { return 0xF5F543 }
+    if k == 12 { return 0x3B8EEA }
+    if k == 13 { return 0xD670D6 }
+    if k == 14 { return 0x29B8DB }
+    return 0xFFFFFF
+}
+
+fn term_color(state: u64, k: u64) -> u64 {
+    let v: u64 = term_palette(k)
+    return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+}
+
 fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
     let cw: u64 = wg(state, i, W_CELLW)
     let ch: u64 = wg(state, i, W_CELLH)
@@ -12673,12 +12740,33 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
     // r400: reverse video swaps the two colours of the cell
     var cbg: u64 = wg(state, i, W_BG)
     var cfg: u64 = wg(state, i, W_FG)
-    if (cell_attr(state, i, c, r) & 1) != 0 {
-        cbg = wg(state, i, W_FG)
-        cfg = wg(state, i, W_BG)
+    let at: u64 = cell_attr(state, i, c, r)
+    // r462: colours (the nibbles of the colour octet), bright forms by bold / the 9x and 10x codes, underline
+    let co: u64 = cell_col(state, i, c, r)
+    if (co & 15) != 0 {
+        var kf: u64 = (co & 15) - 1
+        if (at & 10) != 0 {
+            kf = kf + 8
+        }
+        cfg = term_color(state, kf)
+    }
+    if (co >> 4) != 0 {
+        var kb: u64 = (co >> 4) - 1
+        if (at & 16) != 0 {
+            kb = kb + 8
+        }
+        cbg = term_color(state, kb)
+    }
+    if (at & 1) != 0 {
+        let sw: u64 = cbg
+        cbg = cfg
+        cfg = sw
     }
     fill(state, i, c * cw, r * ch, cw, ch, cbg)
     let z: u64 = cell_get(state, i, c, r)
+    if (at & 4) != 0 && ch > 2 {
+        fill(state, i, c * cw, r * ch + ch - 2, cw, 1, cfg)
+    }
     if z <= 32 || f >= ttf.MAX_FONTS {
         return
     }
@@ -12718,45 +12806,6 @@ fn term_redraw(state: u64, i: u64) {
     }
 }
 
-fn term_scroll(state: u64, i: u64) {
-    let cols: u64 = wg(state, i, W_COLS)
-    let rows: u64 = wg(state, i, W_ROWS)
-    var r: u64 = 1
-    while r < rows {
-        var c: u64 = 0
-        while c < cols {
-            cell_set(state, i, c, r - 1, cell_get(state, i, c, r))
-            cell_attr_set(state, i, c, r - 1, cell_attr(state, i, c, r))
-            c = c + 1
-        }
-        r = r + 1
-    }
-    var c2: u64 = 0
-    while c2 < cols {
-        cell_set(state, i, c2, rows - 1, 32)
-        cell_attr_set(state, i, c2, rows - 1, 0)
-        c2 = c2 + 1
-    }
-    // Der Bildinhalt wandert mit -- eine Zeile nach oben, statt alle
-    // Zellen neu zu malen. Das ist derselbe Griff wie in `fb.scroll`.
-    let cw: u64 = wg(state, i, W_CELLW)
-    let ch: u64 = wg(state, i, W_CELLH)
-    let ww: u64 = wg(state, i, W_W)
-    let buf: u64 = wg(state, i, W_BUF)
-    // RUNDE BLECHFUENF: dieselbe Zusage wie in `fill`. Hier waere sie
-    // die teuerste -- `copy_words` schreibt ZEILENWEISE ab null.
-    if buf == 0 || ww == 0 || ch == 0 {
-        return
-    }
-    var y: u64 = 0
-    while y + ch < rows * ch {
-        copy_words(buf +% y *% ww *% 4, buf +% (y + ch) *% ww *% 4,
-            ww *% 4 / 8)
-        y = y + 1
-    }
-    fill(state, i, 0, (rows - 1) * ch, ww, ch, wg(state, i, W_BG))
-}
-
 // ============================================ RUNDE GLAS (nachtrag)
 // DAS TERMINAL SPRACH KEIN UTF-8 -- UND HAT DIE UMLAUTE STILL
 // WEGGEWORFEN.
@@ -12780,17 +12829,234 @@ fn term_scroll(state: u64, i: u64) {
 // Emoji) passen NICHT in ein Oktett; sie werden als ein Fragezeichen
 // gesetzt, weil ein sichtbarer Platzhalter der einzige Befund ist, der
 // sich spaeter noch melden laesst.
-static mut term_utf: u64 = 0
-// r400: a SUBSET OF VT100/ANSI, enough for the console editor (`/bin/edit`) and `less`-like
-// programs: cursor position (H f A B C D G d), erase (J K), reverse video (m 7 / 27 / 0) and the
-// cursor switch (?25 h/l, ignored: the terminal draws no text cursor). Everything else after
-// `ESC [` is swallowed up to its final octet, so nothing leaks into the screen as rubbish.
-static mut term_esc: u64 = 0 // 0 = plain, 1 = after ESC, 2 = inside ESC [ ...
-static mut term_par: [u64; 4] = [0 as u64; 4]
-static mut term_has: [u64; 4] = [0 as u64; 4]
-static mut term_np: u64 = 0
-static mut term_priv: u64 = 0
-static mut term_attr: u64 = 0
+// r462: THE TERMINAL EXECUTES THE CONTROL SEQUENCES OF FULL-SCREEN PROGRAMS (Justin, Dell photo 07.10.2026 19:05: the editor showed
+// `~[19;1H[K`, `[7m`, `[24;1H[K^O Write`, `[?25h[?25l` as text). Two causes, both fixed: (1) an image from before the VT subset of
+// r400 printed the sequences; (2) with the subset, `/bin/edit` still drew an 80 x 24 screen into a 72 x 19 window, because nobody ever
+// told the tty the size of its window (`TIOCGWINSZ` answered the default): see `term_size`, `tty.do_ioctl`, `kgui.winch_wache`.
+//
+// WHAT THE MACHINE UNDERSTANDS (a subset of VT100 / xterm, enough for editors, pagers and `top`-like programs):
+//   cursor        CSI n A B C D E F G d ` H f, save / restore (ESC 7, ESC 8, CSI s, CSI u), ESC D / E / M, CR LF BS
+//   erase         CSI J (0 1 2 3), CSI K (0 1 2), CSI n X (erase characters)
+//   edit          CSI n @ (insert characters), P (delete characters), L (insert lines), M (delete lines), S / T (scroll up / down)
+//   region        CSI t ; b r (scroll region); line feed at its bottom scrolls only the region
+//   attributes    CSI m: 0 reset, 1 bold (bright colour), 4 underline, 7 reverse, 22 24 27 off, 30-37 40-47 colours,
+//                 38 / 48 ; 5 ; n (the 16 first) , 39 49 default, 90-97 100-107 bright
+//   modes         CSI ? 1049 h / l (alternate screen: the main screen is saved and comes back), ?47 ?1047 the same without
+//                 the cursor, ?7 wrap on / off; ?25 (cursor), ?1 ?12 ?2004 and every other mode are accepted and dropped
+//   strings       OSC / DCS / APC / PM up to BEL or ESC \ are swallowed (window titles must not become text)
+// EVERYTHING ELSE after ESC, ESC [ is swallowed up to its final octet: an unknown sequence never shows up as characters.
+// The automatic wrap is DEFERRED like on a real terminal: the 80th character of a row does not scroll the screen yet.
+//
+// The state is per window (a second terminal window must not inherit half a sequence of the first).
+static mut tp_esc: [u64; 32] = [0 as u64; 32]   // 0 plain, 1 after ESC, 2 inside CSI, 3 inside a string, 4 one octet to drop, 5 ESC inside a string
+static mut tp_np: [u64; 32] = [0 as u64; 32]    // index of the parameter being read
+static mut tp_priv: [u64; 32] = [0 as u64; 32]  // 1 = `?` marker, 2 = another marker (< = >)
+static mut tp_par: [u64; 256] = [0 as u64; 256] // TP_NP (8) parameters of each window
+static mut tp_has: [u64; 256] = [0 as u64; 256]
+static mut tp_attr: [u64; 32] = [0 as u64; 32]  // 1 reverse, 2 bold, 4 underline, 8 bright foreground, 16 bright background
+static mut tp_col: [u64; 32] = [0 as u64; 32]   // low nibble foreground, high nibble background: 0 default, 1 .. 8 = colour 0 .. 7
+static mut tp_utf: [u64; 32] = [0 as u64; 32]   // the UTF-8 lead octet that waits for its follower
+static mut tp_wrap: [u64; 32] = [0 as u64; 32]  // 1 = the cursor stands behind the last column (the wrap is pending)
+static mut tp_nowrap: [u64; 32] = [0 as u64; 32] // 1 = ?7 l: no wrap
+static mut tp_scx: [u64; 32] = [0 as u64; 32]   // the saved cursor
+static mut tp_scy: [u64; 32] = [0 as u64; 32]
+static mut tp_sat: [u64; 32] = [0 as u64; 32]
+static mut tp_sco: [u64; 32] = [0 as u64; 32]
+static mut tp_top: [u64; 32] = [0 as u64; 32]   // the scroll region: first row, and last row + 1 (0 = to the end of the screen)
+static mut tp_bot1: [u64; 32] = [0 as u64; 32]
+static mut tp_alt: [u64; 32] = [0 as u64; 32]   // 1 = the alternate screen is up (the main one lies in frames 3 .. 5 of the grid)
+const TP_NP: u64 = 8
+
+fn tp_reset(i: u64) {
+    if i >= 32 {
+        return
+    }
+    tp_esc[(i) as usize] = 0
+    tp_np[(i) as usize] = 0
+    tp_priv[(i) as usize] = 0
+    tp_attr[(i) as usize] = 0
+    tp_col[(i) as usize] = 0
+    tp_utf[(i) as usize] = 0
+    tp_wrap[(i) as usize] = 0
+    tp_nowrap[(i) as usize] = 0
+    tp_scx[(i) as usize] = 0
+    tp_scy[(i) as usize] = 0
+    tp_sat[(i) as usize] = 0
+    tp_sco[(i) as usize] = 0
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    tp_alt[(i) as usize] = 0
+}
+
+// the last row of the scroll region (a region that does not fit the screen is the whole screen)
+fn tp_bot(state: u64, i: u64) -> u64 {
+    let rows: u64 = wg(state, i, W_ROWS)
+    let b1: u64 = tp_bot1[(i) as usize]
+    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
+        return rows - 1
+    }
+    return b1 - 1
+}
+
+fn tp_first(state: u64, i: u64) -> u64 {
+    let rows: u64 = wg(state, i, W_ROWS)
+    let b1: u64 = tp_bot1[(i) as usize]
+    if b1 == 0 || b1 > rows || tp_top[(i) as usize] + 1 >= b1 {
+        return 0
+    }
+    return tp_top[(i) as usize]
+}
+
+// the parameter k of the sequence (dflt when it was not given)
+fn tp_p(i: u64, k: u64, dflt: u64) -> u64 {
+    if k < TP_NP && tp_has[(i * TP_NP + k) as usize] != 0 {
+        return tp_par[(i * TP_NP + k) as usize]
+    }
+    return dflt
+}
+
+// a count parameter: missing or 0 means 1
+fn tp_n(i: u64) -> u64 {
+    let v: u64 = tp_p(i, 0, 1)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+// the cells of one row and nothing else: character, attribute, colour
+fn grid_row_copy(state: u64, i: u64, rdst: u64, rsrc: u64) {
+    let g: u64 = wg(state, i, W_GRID)
+    let cols: u64 = wg(state, i, W_COLS)
+    if g == 0 {
+        return
+    }
+    var c: u64 = 0
+    while c < cols {
+        let d: u64 = rdst * cols + c
+        let s: u64 = rsrc * cols + c
+        if d < 4096 && s < 4096 {
+            kstate.set8(g + d, kstate.get8(g + s) as u8)
+            kstate.set8(g + 4096 + d, kstate.get8(g + 4096 + s) as u8)
+            kstate.set8(g + 8192 + d, kstate.get8(g + 8192 + s) as u8)
+        }
+        c = c + 1
+    }
+}
+
+fn grid_row_clear(state: u64, i: u64, r: u64) {
+    let g: u64 = wg(state, i, W_GRID)
+    let cols: u64 = wg(state, i, W_COLS)
+    if g == 0 {
+        return
+    }
+    var c: u64 = 0
+    while c < cols {
+        let d: u64 = r * cols + c
+        if d < 4096 {
+            kstate.set8(g + d, 32 as u8)
+            kstate.set8(g + 4096 + d, 0 as u8)
+            kstate.set8(g + 8192 + d, 0 as u8)
+        }
+        c = c + 1
+    }
+}
+
+fn term_repaint_row(state: u64, i: u64, r: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    var c: u64 = 0
+    while c < cols {
+        cell_paint(state, i, c, r)
+        c = c + 1
+    }
+}
+
+// Scroll the rows `top ..= bot` up (up = true) or down by n rows: the cells and the picture move, the rows that come free are blank.
+fn term_scroll_region(state: u64, i: u64, top: u64, bot: u64, n: u64, up: bool) {
+    let rows: u64 = wg(state, i, W_ROWS)
+    if rows == 0 || top >= rows || bot >= rows || bot < top || n == 0 {
+        return
+    }
+    var k: u64 = n
+    if k > bot - top + 1 {
+        k = bot - top + 1
+    }
+    // the cells
+    if up {
+        var r: u64 = top
+        while r + k <= bot {
+            grid_row_copy(state, i, r, r + k)
+            r = r + 1
+        }
+        var rc: u64 = bot + 1 - k
+        while rc <= bot {
+            grid_row_clear(state, i, rc)
+            rc = rc + 1
+        }
+    } else {
+        var r2: u64 = bot + 1
+        while r2 > top + k {
+            r2 = r2 - 1
+            grid_row_copy(state, i, r2, r2 - k)
+        }
+        var rc2: u64 = top
+        while rc2 < top + k {
+            grid_row_clear(state, i, rc2)
+            rc2 = rc2 + 1
+        }
+    }
+    // the picture: copy whole pixel rows (the window is as wide as its buffer), then blank the rows that came free
+    let ch: u64 = wg(state, i, W_CELLH)
+    let ww: u64 = wg(state, i, W_W)
+    let buf: u64 = wg(state, i, W_BUF)
+    if buf == 0 || ww == 0 || ch == 0 {
+        return
+    }
+    let y0: u64 = top * ch
+    let y1: u64 = (bot + 1) * ch
+    let shift: u64 = k * ch
+    if up {
+        var y: u64 = y0
+        while y + shift < y1 {
+            copy_words(buf +% y *% ww *% 4, buf +% (y + shift) *% ww *% 4, ww *% 4 / 8)
+            y = y + 1
+        }
+        fill(state, i, 0, y1 - shift, ww, shift, wg(state, i, W_BG))
+    } else {
+        var y2: u64 = y1 - shift
+        while y2 > y0 {
+            y2 = y2 - 1
+            copy_words(buf +% (y2 + shift) *% ww *% 4, buf +% y2 *% ww *% 4, ww *% 4 / 8)
+        }
+        fill(state, i, 0, y0, ww, shift, wg(state, i, W_BG))
+    }
+}
+
+// the scroll at the end of the screen (the old `term_scroll`): the region up by one row
+fn term_scroll(state: u64, i: u64) {
+    term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
+}
+
+// a line feed: down one row, or the region scrolls when the cursor stands on its last row
+fn term_lf(state: u64, i: u64) {
+    let rows: u64 = wg(state, i, W_ROWS)
+    let cy: u64 = wg(state, i, W_CY)
+    if cy == tp_bot(state, i) {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, true)
+    } else if cy + 1 < rows {
+        wsv(state, i, W_CY, cy + 1)
+    }
+}
+
+// the reverse index: up one row, or the region scrolls down when the cursor stands on its first row
+fn term_ri(state: u64, i: u64) {
+    let cy: u64 = wg(state, i, W_CY)
+    if cy == tp_first(state, i) {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), 1, false)
+    } else if cy > 0 {
+        wsv(state, i, W_CY, cy - 1)
+    }
+}
 
 fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
     // blank the cells from (c0, r0) up to but excluding (c1, r1), row-major
@@ -12800,6 +13066,7 @@ fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
     while r < r1 || (r == r1 && c < c1) {
         cell_set(state, i, c, r, 32)
         cell_attr_set(state, i, c, r, 0)
+        cell_col_set(state, i, c, r, 0)
         cell_paint(state, i, c, r)
         c = c + 1
         if c >= cols {
@@ -12809,96 +13076,286 @@ fn term_clear_rect(state: u64, i: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
     }
 }
 
-fn term_p(k: u64, dflt: u64) -> u64 {
-    if k < 4 && term_has[(k) as usize] != 0 {
-        return term_par[(k) as usize]
+fn term_set_cursor(state: u64, i: u64, c: u64, r: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var cc: u64 = c
+    var rr: u64 = r
+    if cc >= cols {
+        cc = cols - 1
     }
-    return dflt
+    if rr >= rows {
+        rr = rows - 1
+    }
+    wsv(state, i, W_CX, cc)
+    wsv(state, i, W_CY, rr)
+    tp_wrap[(i) as usize] = 0
 }
 
+fn term_save_cursor(state: u64, i: u64) {
+    tp_scx[(i) as usize] = wg(state, i, W_CX)
+    tp_scy[(i) as usize] = wg(state, i, W_CY)
+    tp_sat[(i) as usize] = tp_attr[(i) as usize]
+    tp_sco[(i) as usize] = tp_col[(i) as usize]
+}
+
+fn term_restore_cursor(state: u64, i: u64) {
+    term_set_cursor(state, i, tp_scx[(i) as usize], tp_scy[(i) as usize])
+    tp_attr[(i) as usize] = tp_sat[(i) as usize]
+    tp_col[(i) as usize] = tp_sco[(i) as usize]
+}
+
+// the whole screen blank, the cursor home
+fn term_blank_screen(state: u64, i: u64) {
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        grid_row_clear(state, i, r)
+        r = r + 1
+    }
+    fill(state, i, 0, 0, wg(state, i, W_W), wg(state, i, W_H), wg(state, i, W_BG))
+}
+
+// ESC c: back to the state of a new window
+fn term_full_reset(state: u64, i: u64) {
+    term_blank_screen(state, i)
+    tp_reset(i)
+    wsv(state, i, W_CX, 0)
+    wsv(state, i, W_CY, 0)
+}
+
+// The alternate screen: the main screen (cells, attributes, colours) is copied to frames 3 .. 5 of the grid and comes back
+// when the program leaves. `save_cursor` is the ?1049 form that also keeps the cursor.
+fn term_alt_enter(state: u64, i: u64, save_cursor: bool) {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 || tp_alt[(i) as usize] != 0 {
+        return
+    }
+    if save_cursor {
+        term_save_cursor(state, i)
+    }
+    copy_words(g + 12288, g, 1536)
+    tp_alt[(i) as usize] = 1
+    term_blank_screen(state, i)
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    term_set_cursor(state, i, 0, 0)
+}
+
+fn term_alt_leave(state: u64, i: u64, restore_cursor: bool) {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 || tp_alt[(i) as usize] == 0 {
+        return
+    }
+    copy_words(g, g + 12288, 1536)
+    tp_alt[(i) as usize] = 0
+    tp_top[(i) as usize] = 0
+    tp_bot1[(i) as usize] = 0
+    fill(state, i, 0, 0, wg(state, i, W_W), wg(state, i, W_H), wg(state, i, W_BG))
+    term_redraw(state, i)
+    if restore_cursor {
+        term_restore_cursor(state, i)
+    }
+}
+
+// CSI ? n h / l: the modes
+fn term_mode(state: u64, i: u64, on: bool) {
+    var k: u64 = 0
+    var cnt: u64 = tp_np[(i) as usize]
+    if cnt == 0 {
+        cnt = 1
+    }
+    while k < cnt && k < TP_NP {
+        let m: u64 = tp_p(i, k, 0)
+        if m == 1049 {
+            if on {
+                term_alt_enter(state, i, true)
+            } else {
+                term_alt_leave(state, i, true)
+            }
+        } else if m == 47 || m == 1047 {
+            if on {
+                term_alt_enter(state, i, false)
+            } else {
+                term_alt_leave(state, i, false)
+            }
+        } else if m == 7 {
+            if on {
+                tp_nowrap[(i) as usize] = 0
+            } else {
+                tp_nowrap[(i) as usize] = 1
+            }
+        }
+        // 25 (the text cursor: the terminal draws none), 1, 12, 2004 ...: accepted and dropped
+        k = k + 1
+    }
+}
+
+// CSI m: the attributes and colours
+fn term_sgr(i: u64) {
+    var q: u64 = 0
+    var cnt: u64 = tp_np[(i) as usize]
+    if cnt == 0 {
+        cnt = 1
+    }
+    while q < cnt && q < TP_NP {
+        let v: u64 = tp_p(i, q, 0)
+        if v == 0 {
+            tp_attr[(i) as usize] = 0
+            tp_col[(i) as usize] = 0
+        } else if v == 1 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 2
+        } else if v == 4 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 4
+        } else if v == 7 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 1
+        } else if v == 22 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFD
+        } else if v == 24 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFB
+        } else if v == 27 {
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xFE
+        } else if v >= 30 && v <= 37 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 30 + 1)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+        } else if v == 39 {
+            tp_col[(i) as usize] = tp_col[(i) as usize] & 0xF0
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+        } else if v >= 40 && v <= 47 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 40 + 1) << 4)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+        } else if v == 49 {
+            tp_col[(i) as usize] = tp_col[(i) as usize] & 0x0F
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+        } else if v >= 90 && v <= 97 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (v - 90 + 1)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
+        } else if v >= 100 && v <= 107 {
+            tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((v - 100 + 1) << 4)
+            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
+        } else if v == 38 || v == 48 {
+            // 38 ; 5 ; n  (the 16 first colours of the 256 are used, the rest is dropped)  and  38 ; 2 ; r ; g ; b (dropped)
+            let mode: u64 = tp_p(i, q + 1, 0)
+            if mode == 5 {
+                let nn: u64 = tp_p(i, q + 2, 0)
+                if nn < 16 {
+                    var idx: u64 = nn
+                    var br: u64 = 0
+                    if nn >= 8 {
+                        idx = nn - 8
+                        br = 1
+                    }
+                    if v == 38 {
+                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0xF0) | (idx + 1)
+                        if br != 0 {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 8
+                        } else {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xF7
+                        }
+                    } else {
+                        tp_col[(i) as usize] = (tp_col[(i) as usize] & 0x0F) | ((idx + 1) << 4)
+                        if br != 0 {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] | 16
+                        } else {
+                            tp_attr[(i) as usize] = tp_attr[(i) as usize] & 0xEF
+                        }
+                    }
+                }
+                q = q + 2
+            } else if mode == 2 {
+                q = q + 4
+            }
+        }
+        q = q + 1
+    }
+}
+
+// the final octet of a CSI: do it
 fn term_csi(state: u64, i: u64, fin: u64) {
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
-    var cx: u64 = wg(state, i, W_CX)
-    var cy: u64 = wg(state, i, W_CY)
-    if term_priv != 0 {
+    let cx: u64 = wg(state, i, W_CX)
+    let cy: u64 = wg(state, i, W_CY)
+    let pv: u64 = tp_priv[(i) as usize]
+    if pv != 0 {
+        // CSI ? ... h / l: the modes; every other private sequence is dropped
+        if pv == 1 && (fin == 104 || fin == 108) {
+            term_mode(state, i, fin == 104)
+        }
         return
     }
     if fin == 72 || fin == 102 {
         // H / f: row ; column, one based
-        var r: u64 = term_p(0, 1)
-        var c: u64 = term_p(1, 1)
+        var r: u64 = tp_p(i, 0, 1)
+        var c: u64 = tp_p(i, 1, 1)
         if r == 0 {
             r = 1
         }
         if c == 0 {
             c = 1
         }
-        if r > rows {
-            r = rows
-        }
-        if c > cols {
-            c = cols
-        }
-        wsv(state, i, W_CY, r - 1)
-        wsv(state, i, W_CX, c - 1)
+        term_set_cursor(state, i, c - 1, r - 1)
     } else if fin == 65 {
-        var n: u64 = term_p(0, 1)
-        if n == 0 {
-            n = 1
+        let n: u64 = tp_n(i)
+        var top: u64 = 0
+        if cy >= tp_first(state, i) {
+            top = tp_first(state, i)
         }
-        if n > cy {
-            n = cy
+        var to: u64 = 0
+        if cy > top + n {
+            to = cy - n
+        } else {
+            to = top
         }
-        wsv(state, i, W_CY, cy - n)
-    } else if fin == 66 {
-        var n2: u64 = term_p(0, 1)
-        if n2 == 0 {
-            n2 = 1
+        term_set_cursor(state, i, cx, to)
+    } else if fin == 66 || fin == 101 {
+        let n2: u64 = tp_n(i)
+        var lim: u64 = rows - 1
+        if cy <= tp_bot(state, i) {
+            lim = tp_bot(state, i)
         }
-        if cy + n2 >= rows {
-            n2 = rows - 1 - cy
+        var to2: u64 = cy + n2
+        if to2 > lim {
+            to2 = lim
         }
-        wsv(state, i, W_CY, cy + n2)
-    } else if fin == 67 {
-        var n3: u64 = term_p(0, 1)
-        if n3 == 0 {
-            n3 = 1
-        }
-        if cx + n3 >= cols {
-            n3 = cols - 1 - cx
-        }
-        wsv(state, i, W_CX, cx + n3)
+        term_set_cursor(state, i, cx, to2)
+    } else if fin == 67 || fin == 97 {
+        let n3: u64 = tp_n(i)
+        term_set_cursor(state, i, cx + n3, cy)
     } else if fin == 68 {
-        var n4: u64 = term_p(0, 1)
-        if n4 == 0 {
-            n4 = 1
+        let n4: u64 = tp_n(i)
+        var to4: u64 = 0
+        if cx > n4 {
+            to4 = cx - n4
         }
-        if n4 > cx {
-            n4 = cx
+        term_set_cursor(state, i, to4, cy)
+    } else if fin == 69 {
+        // E: next line, column 1
+        let n5: u64 = tp_n(i)
+        term_set_cursor(state, i, 0, cy + n5)
+    } else if fin == 70 {
+        // F: previous line, column 1
+        let n6: u64 = tp_n(i)
+        var to6: u64 = 0
+        if cy > n6 {
+            to6 = cy - n6
         }
-        wsv(state, i, W_CX, cx - n4)
-    } else if fin == 71 {
-        var c5: u64 = term_p(0, 1)
-        if c5 == 0 {
-            c5 = 1
+        term_set_cursor(state, i, 0, to6)
+    } else if fin == 71 || fin == 96 {
+        var c7: u64 = tp_p(i, 0, 1)
+        if c7 == 0 {
+            c7 = 1
         }
-        if c5 > cols {
-            c5 = cols
-        }
-        wsv(state, i, W_CX, c5 - 1)
+        term_set_cursor(state, i, c7 - 1, cy)
     } else if fin == 100 {
-        var r6: u64 = term_p(0, 1)
-        if r6 == 0 {
-            r6 = 1
+        var r8: u64 = tp_p(i, 0, 1)
+        if r8 == 0 {
+            r8 = 1
         }
-        if r6 > rows {
-            r6 = rows
-        }
-        wsv(state, i, W_CY, r6 - 1)
+        term_set_cursor(state, i, cx, r8 - 1)
     } else if fin == 75 {
         // K: erase in line (0 = cursor to end, 1 = start to cursor, 2 = all)
-        let m: u64 = term_p(0, 0)
+        let m: u64 = tp_p(i, 0, 0)
         if m == 0 {
             term_clear_rect(state, i, cx, cy, 0, cy + 1)
         } else if m == 1 {
@@ -12908,7 +13365,7 @@ fn term_csi(state: u64, i: u64, fin: u64) {
         }
     } else if fin == 74 {
         // J: erase in display
-        let m2: u64 = term_p(0, 0)
+        let m2: u64 = tp_p(i, 0, 0)
         if m2 == 0 {
             term_clear_rect(state, i, cx, cy, 0, rows)
         } else if m2 == 1 {
@@ -12916,101 +13373,245 @@ fn term_csi(state: u64, i: u64, fin: u64) {
         } else if m2 == 2 || m2 == 3 {
             term_clear_rect(state, i, 0, 0, 0, rows)
         }
-    } else if fin == 109 {
-        // m: only reverse video is drawn; colours and weights are accepted and dropped
-        var q: u64 = 0
-        var cnt: u64 = term_np
-        if cnt == 0 {
-            cnt = 1
+    } else if fin == 88 {
+        // X: erase n characters from the cursor
+        var n9: u64 = tp_n(i)
+        if cx + n9 > cols {
+            n9 = cols - cx
         }
-        while q < cnt && q < 4 {
-            let v: u64 = term_p(q, 0)
-            if v == 0 || v == 27 {
-                term_attr = 0
-            } else if v == 7 {
-                term_attr = 1
+        term_clear_rect(state, i, cx, cy, cx + n9, cy)
+    } else if fin == 64 {
+        // @: insert n blank characters, the rest of the row moves right
+        var n10: u64 = tp_n(i)
+        if n10 > cols - cx {
+            n10 = cols - cx
+        }
+        var c10: u64 = cols
+        while c10 > cx + n10 {
+            c10 = c10 - 1
+            cell_set(state, i, c10, cy, cell_get(state, i, c10 - n10, cy))
+            cell_attr_set(state, i, c10, cy, cell_attr(state, i, c10 - n10, cy))
+            cell_col_set(state, i, c10, cy, cell_col(state, i, c10 - n10, cy))
+        }
+        var b10: u64 = cx
+        while b10 < cx + n10 {
+            cell_set(state, i, b10, cy, 32)
+            cell_attr_set(state, i, b10, cy, 0)
+            cell_col_set(state, i, b10, cy, 0)
+            b10 = b10 + 1
+        }
+        term_repaint_row(state, i, cy)
+    } else if fin == 80 {
+        // P: delete n characters, the rest of the row moves left
+        var n11: u64 = tp_n(i)
+        if n11 > cols - cx {
+            n11 = cols - cx
+        }
+        var c11: u64 = cx
+        while c11 + n11 < cols {
+            cell_set(state, i, c11, cy, cell_get(state, i, c11 + n11, cy))
+            cell_attr_set(state, i, c11, cy, cell_attr(state, i, c11 + n11, cy))
+            cell_col_set(state, i, c11, cy, cell_col(state, i, c11 + n11, cy))
+            c11 = c11 + 1
+        }
+        while c11 < cols {
+            cell_set(state, i, c11, cy, 32)
+            cell_attr_set(state, i, c11, cy, 0)
+            cell_col_set(state, i, c11, cy, 0)
+            c11 = c11 + 1
+        }
+        term_repaint_row(state, i, cy)
+    } else if fin == 76 {
+        // L: insert n blank rows at the cursor row (inside the region), the rows below move down
+        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
+            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), false)
+            term_set_cursor(state, i, 0, cy)
+        }
+    } else if fin == 77 {
+        // M: delete n rows at the cursor row, the rows below move up
+        if cy >= tp_first(state, i) && cy <= tp_bot(state, i) {
+            term_scroll_region(state, i, cy, tp_bot(state, i), tp_n(i), true)
+            term_set_cursor(state, i, 0, cy)
+        }
+    } else if fin == 83 {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), true)
+    } else if fin == 84 {
+        term_scroll_region(state, i, tp_first(state, i), tp_bot(state, i), tp_n(i), false)
+    } else if fin == 114 {
+        // r: the scroll region, top ; bottom (one based); a bad pair resets it. The cursor goes home.
+        var t: u64 = tp_p(i, 0, 1)
+        var b: u64 = tp_p(i, 1, rows)
+        if t == 0 {
+            t = 1
+        }
+        if b == 0 || b > rows {
+            b = rows
+        }
+        if t < b {
+            tp_top[(i) as usize] = t - 1
+            if b == rows && t == 1 {
+                tp_bot1[(i) as usize] = 0
+            } else {
+                tp_bot1[(i) as usize] = b
             }
-            q = q + 1
+        } else {
+            tp_top[(i) as usize] = 0
+            tp_bot1[(i) as usize] = 0
         }
+        term_set_cursor(state, i, 0, 0)
+    } else if fin == 115 {
+        term_save_cursor(state, i)
+    } else if fin == 117 {
+        term_restore_cursor(state, i)
+    } else if fin == 109 {
+        term_sgr(i)
     }
+    // h / l without `?` (the ANSI modes), n (status request), c (attributes request), t, ... : accepted and dropped
 }
 
 // The escape machine in front of `term_putc`. Answers true when it took the octet.
 fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
-    if term_esc == 0 {
+    if i >= 32 {
+        return false
+    }
+    let st: u64 = tp_esc[(i) as usize]
+    if st == 0 {
         if ch == 27 {
-            term_esc = 1
+            tp_esc[(i) as usize] = 1
             return true
         }
         return false
     }
-    if term_esc == 1 {
+    if st == 3 {
+        // inside OSC / DCS / PM / APC: up to BEL, or ESC \
+        if ch == 7 {
+            tp_esc[(i) as usize] = 0
+        } else if ch == 27 {
+            tp_esc[(i) as usize] = 5
+        }
+        return true
+    }
+    if st == 5 {
+        tp_esc[(i) as usize] = 0
+        return true
+    }
+    if st == 4 {
+        tp_esc[(i) as usize] = 0
+        return true
+    }
+    if st == 1 {
+        tp_esc[(i) as usize] = 0
         if ch == 91 {
-            term_esc = 2
-            term_np = 0
-            term_priv = 0
+            tp_esc[(i) as usize] = 2
+            tp_np[(i) as usize] = 0
+            tp_priv[(i) as usize] = 0
             var k: u64 = 0
-            while k < 4 {
-                term_par[(k) as usize] = 0
-                term_has[(k) as usize] = 0
+            while k < TP_NP {
+                tp_par[(i * TP_NP + k) as usize] = 0
+                tp_has[(i * TP_NP + k) as usize] = 0
                 k = k + 1
             }
             return true
         }
-        // ESC c (reset) and the other two-octet escapes (ESC 7, ESC 8, ESC =, ESC M ...: 0x30..0x5F)
-        // are dropped; anything else after a stray ESC is plain text and prints
-        term_esc = 0
+        if ch == 93 || ch == 80 || ch == 94 || ch == 95 || ch == 88 {
+            // ] P ^ _ X: the string sequences
+            tp_esc[(i) as usize] = 3
+            return true
+        }
+        if ch == 40 || ch == 41 || ch == 42 || ch == 43 || ch == 35 || ch == 37 {
+            // ESC ( B, ESC # 8 ...: one more octet belongs to it
+            tp_esc[(i) as usize] = 4
+            return true
+        }
         if ch == 99 {
-            term_attr = 0
+            term_full_reset(state, i)
             return true
         }
-        if ch >= 48 && ch <= 95 {
+        if ch == 55 {
+            term_save_cursor(state, i)
             return true
         }
-        return false
+        if ch == 56 {
+            term_restore_cursor(state, i)
+            return true
+        }
+        if ch == 68 {
+            term_lf(state, i)
+            return true
+        }
+        if ch == 69 {
+            wsv(state, i, W_CX, 0)
+            tp_wrap[(i) as usize] = 0
+            term_lf(state, i)
+            return true
+        }
+        if ch == 77 {
+            term_ri(state, i)
+            return true
+        }
+        if ch == 27 {
+            tp_esc[(i) as usize] = 1
+            return true
+        }
+        if ch >= 48 && ch <= 126 {
+            // ESC = ESC > ESC H ESC Z ...: the other two-octet escapes are dropped
+            return true
+        }
+        if ch < 32 {
+            // a control octet after a lone ESC: handled as itself
+            return false
+        }
+        return true
     }
     // inside ESC [
     if ch >= 48 && ch <= 57 {
-        if term_np < 4 {
-            term_par[(term_np) as usize] = term_par[(term_np) as usize] * 10 + (ch - 48)
-            if term_par[(term_np) as usize] > 9999 {
-                term_par[(term_np) as usize] = 9999
+        let np: u64 = tp_np[(i) as usize]
+        if np < TP_NP {
+            let at: u64 = i * TP_NP + np
+            tp_par[(at) as usize] = tp_par[(at) as usize] * 10 + (ch - 48)
+            if tp_par[(at) as usize] > 9999 {
+                tp_par[(at) as usize] = 9999
             }
-            term_has[(term_np) as usize] = 1
+            tp_has[(at) as usize] = 1
         }
         return true
     }
-    if ch == 59 {
-        if term_np < 3 {
-            term_np = term_np + 1
-        } else {
-            term_np = 3
+    if ch == 59 || ch == 58 {
+        // ; and the sub-parameter colon
+        if tp_np[(i) as usize] + 1 < TP_NP {
+            tp_np[(i) as usize] = tp_np[(i) as usize] + 1
         }
         return true
     }
-    if ch == 63 || ch == 60 || ch == 61 || ch == 62 {
-        term_priv = 1
+    if ch == 63 {
+        tp_priv[(i) as usize] = 1
+        return true
+    }
+    if ch == 60 || ch == 61 || ch == 62 {
+        tp_priv[(i) as usize] = 2
         return true
     }
     if ch >= 64 && ch <= 126 {
         // the final octet: the number of parameters is the one after the last `;`
-        if term_has[(term_np) as usize] != 0 || term_np > 0 {
-            term_np = term_np + 1
+        let np2: u64 = tp_np[(i) as usize]
+        if tp_has[(i * TP_NP + np2) as usize] != 0 || np2 > 0 {
+            tp_np[(i) as usize] = np2 + 1
         }
-        if term_np > 4 {
-            term_np = 4
-        }
-        term_esc = 0
+        tp_esc[(i) as usize] = 0
         term_csi(state, i, ch)
         return true
     }
     if ch == 27 {
-        term_esc = 1
+        tp_esc[(i) as usize] = 1
+        return true
+    }
+    if ch == 24 || ch == 26 {
+        // CAN, SUB: the sequence is cancelled
+        tp_esc[(i) as usize] = 0
         return true
     }
     if ch < 32 {
-        // a control octet breaks the sequence off and is then handled as itself
-        term_esc = 0
+        // a control octet inside a sequence is carried out and the sequence goes on (ECMA-48)
         return false
     }
     // intermediate octets (space .. /): swallowed
@@ -13020,7 +13621,7 @@ fn term_esc_take(state: u64, i: u64, ch: u64) -> bool {
 fn term_putc(state: u64, i: u64, ch: u64) {
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
-    if cols == 0 || rows == 0 {
+    if cols == 0 || rows == 0 || i >= 32 {
         return
     }
     if ch < 256 && term_esc_take(state, i, ch) {
@@ -13031,31 +13632,29 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     // nicht, und ein haengengebliebenes Fuehrungsoktett wuerde das
     // NAECHSTE Zeichen verschlucken.
     if ch < 32 {
-        term_utf = 0
+        tp_utf[(i) as usize] = 0
     }
     var cx: u64 = wg(state, i, W_CX)
     var cy: u64 = wg(state, i, W_CY)
     if ch == 13 {
         wsv(state, i, W_CX, 0)
+        tp_wrap[(i) as usize] = 0
         return
     }
     if ch == 10 {
-        cx = 0
-        cy = cy + 1
-        if cy >= rows {
-            term_scroll(state, i)
-            cy = rows - 1
-        }
-        wsv(state, i, W_CX, cx)
-        wsv(state, i, W_CY, cy)
+        wsv(state, i, W_CX, 0)
+        tp_wrap[(i) as usize] = 0
+        term_lf(state, i)
         return
     }
     if ch == 8 {
+        tp_wrap[(i) as usize] = 0
         if cx > 0 {
             cx = cx - 1
             wsv(state, i, W_CX, cx)
             cell_set(state, i, cx, cy, 32)
             cell_attr_set(state, i, cx, cy, 0)
+            cell_col_set(state, i, cx, cy, 0)
             cell_paint(state, i, cx, cy)
         }
         return
@@ -13064,6 +13663,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     // A plain 8 stops at the left edge; a line typed past the right edge
     // has to be wiped back into the row above.
     if ch == 0x108 {
+        tp_wrap[(i) as usize] = 0
         if cx > 0 {
             cx = cx - 1
         } else if cy > 0 {
@@ -13076,6 +13676,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         wsv(state, i, W_CY, cy)
         cell_set(state, i, cx, cy, 32)
         cell_attr_set(state, i, cx, cy, 0)
+        cell_col_set(state, i, cx, cy, 0)
         cell_paint(state, i, cx, cy)
         return
     }
@@ -13089,9 +13690,9 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     }
     // DER UTF-8-WEG. `z` ist die Zeichennummer, die in die Zelle geht.
     var z: u64 = ch
-    if term_utf != 0 {
-        let lead: u64 = term_utf
-        term_utf = 0
+    if tp_utf[(i) as usize] != 0 {
+        let lead: u64 = tp_utf[(i) as usize]
+        tp_utf[(i) as usize] = 0
         if ch < 128 || ch > 191 {
             // Kein Folgeoktett: die angefangene Folge war Schrott.
             // Das Oktett hier wird trotzdem noch als sich selbst
@@ -13104,7 +13705,7 @@ fn term_putc(state: u64, i: u64, ch: u64) {
             }
         }
     } else if ch >= 194 && ch <= 223 {
-        term_utf = ch
+        tp_utf[(i) as usize] = ch
         return
     } else if ch >= 224 && ch <= 244 {
         // Drei oder vier Oktette: der Rest der Folge sind Folge-
@@ -13117,20 +13718,28 @@ fn term_putc(state: u64, i: u64, ch: u64) {
     if z < 32 || (z > 126 && z < 160) {
         return
     }
-    cell_set(state, i, cx, cy, z)
-    cell_attr_set(state, i, cx, cy, term_attr)
-    cell_paint(state, i, cx, cy)
-    cx = cx + 1
-    if cx >= cols {
+    // r462: THE WRAP IS DEFERRED. The character that fills the last column leaves the cursor there and only the NEXT printable
+    // character moves to the next row (and scrolls when that row is below the region). Before, the 80th character of a row
+    // scrolled the screen at once, and an editor that fills its last row (the help line) pushed its whole screen up by one row.
+    if tp_wrap[(i) as usize] != 0 {
+        tp_wrap[(i) as usize] = 0
+        wsv(state, i, W_CX, 0)
+        term_lf(state, i)
         cx = 0
-        cy = cy + 1
-        if cy >= rows {
-            term_scroll(state, i)
-            cy = rows - 1
-        }
-        wsv(state, i, W_CY, cy)
+        cy = wg(state, i, W_CY)
     }
-    wsv(state, i, W_CX, cx)
+    cell_set(state, i, cx, cy, z)
+    cell_attr_set(state, i, cx, cy, tp_attr[(i) as usize])
+    cell_col_set(state, i, cx, cy, tp_col[(i) as usize])
+    cell_paint(state, i, cx, cy)
+    if cx + 1 >= cols {
+        if tp_nowrap[(i) as usize] == 0 {
+            tp_wrap[(i) as usize] = 1
+        }
+        wsv(state, i, W_CX, cols - 1)
+    } else {
+        wsv(state, i, W_CX, cx + 1)
+    }
 }
 
 fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
@@ -13686,6 +14295,268 @@ fn vt_selftest(state: u64) -> u64 {
 
 fn vt_selftest_max() -> u64 {
     return 7
+}
+
+// r462: the VT subset, the rest of it. `|` stands for ESC, `~` for BEL, `^` for LF, `$` for a backslash in the strings of the cases:
+// the placeholders keep the strings readable. Each case starts with ESC c (full reset) and ends in a check of cells, attributes,
+// colours and cursor. A separate count (`wm: vttest2 n / m`), like `vttest`.
+fn vt_str(state: u64, t: u64, p: u64) {
+    var k: u64 = 0
+    while kstate.get8(p + k) != 0 {
+        var b: u64 = kstate.get8(p + k)
+        if b == 124 {
+            b = 27
+        } else if b == 126 {
+            b = 7
+        } else if b == 94 {
+            b = 10
+        } else if b == 36 {
+            b = 92
+        }
+        term_write_one(state, t, b)
+        k = k + 1
+    }
+}
+
+fn term_write_one(state: u64, t: u64, b: u64) {
+    term_putc(state, t, b)
+}
+
+fn vt2_selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    fokus_still = 1
+    let nid0: u64 = gs(state, S_NEXTID)
+    var tt: [u8; 4] = "vt2\0"
+    let t: u64 = create(state, 0, 10, 300, 240 * uisc(state), 180 * uisc(state), K_TERM, (&tt[0]) as u64)
+    if t >= MAX_WIN || term_cols(state, t) < 16 || term_rows(state, t) < 6 {
+        if t < MAX_WIN {
+            destroy(state, t)
+        }
+        ss(state, S_NEXTID, nid0)
+        fokus_still = 0
+        return 0
+    }
+    let COLS: u64 = term_cols(state, t)
+    let ROWS: u64 = term_rows(state, t)
+    var n: u64 = 0
+    // 1. cursor up / forward: CSI 5;5H, 2A, 3C
+    var v0: [u8; 17] = "|c|[5;5H|[2A|[3C\0"
+    vt_str(state, t, (&v0[0]) as u64)
+    if term_cx(state, t) == 7 && term_cy(state, t) == 2 {
+        n = n + 1
+    }
+    // 2. cursor down / back: 2B, 4D
+    var v1: [u8; 25] = "|c|[5;5H|[2A|[3C|[2B|[4D\0"
+    vt_str(state, t, (&v1[0]) as u64)
+    if term_cx(state, t) == 3 && term_cy(state, t) == 4 {
+        n = n + 1
+    }
+    // 3. CHA and VPA: 10G, 3d
+    var v2: [u8; 12] = "|c|[10G|[3d\0"
+    vt_str(state, t, (&v2[0]) as u64)
+    if term_cx(state, t) == 9 && term_cy(state, t) == 2 {
+        n = n + 1
+    }
+    // 4. EL 1: erase from the start of the row to the cursor
+    var v3: [u8; 24] = "|c|[1;1HXXXXX|[1;3H|[1K\0"
+    vt_str(state, t, (&v3[0]) as u64)
+    if cell_get(state, t, 0, 0) == 32 && cell_get(state, t, 1, 0) == 32 && cell_get(state, t, 2, 0) == 32 && cell_get(state, t, 3, 0) == 88 && cell_get(state, t, 4, 0) == 88 {
+        n = n + 1
+    }
+    // 5. EL 0: erase from the cursor to the end of the row
+    var v4: [u8; 24] = "|c|[1;1HXXXXX|[1;3H|[0K\0"
+    vt_str(state, t, (&v4[0]) as u64)
+    if cell_get(state, t, 1, 0) == 88 && cell_get(state, t, 2, 0) == 32 && cell_get(state, t, 4, 0) == 32 {
+        n = n + 1
+    }
+    // 6. ED 0: erase from the cursor to the end of the screen
+    var v5: [u8; 46] = "|c|[1;1HXXXXX|[2;1HYYYYY|[3;1HZZZZZ|[2;3H|[0J\0"
+    vt_str(state, t, (&v5[0]) as u64)
+    if cell_get(state, t, 0, 0) == 88 && cell_get(state, t, 1, 1) == 89 && cell_get(state, t, 2, 1) == 32 && cell_get(state, t, 0, 2) == 32 {
+        n = n + 1
+    }
+    // 7. ED 1: erase from the start of the screen to the cursor
+    var v6: [u8; 35] = "|c|[1;1HXXXXX|[2;1HYYYYY|[2;3H|[1J\0"
+    vt_str(state, t, (&v6[0]) as u64)
+    if cell_get(state, t, 0, 0) == 32 && cell_get(state, t, 0, 1) == 32 && cell_get(state, t, 2, 1) == 32 && cell_get(state, t, 3, 1) == 89 {
+        n = n + 1
+    }
+    // 8. ECH: erase two characters
+    var v7: [u8; 24] = "|c|[1;1HABCDE|[1;2H|[2X\0"
+    vt_str(state, t, (&v7[0]) as u64)
+    if cell_get(state, t, 0, 0) == 65 && cell_get(state, t, 1, 0) == 32 && cell_get(state, t, 2, 0) == 32 && cell_get(state, t, 3, 0) == 68 {
+        n = n + 1
+    }
+    // 9. ICH: insert two blanks, the rest moves right
+    var v8: [u8; 24] = "|c|[1;1HABCDE|[1;2H|[2@\0"
+    vt_str(state, t, (&v8[0]) as u64)
+    if cell_get(state, t, 0, 0) == 65 && cell_get(state, t, 1, 0) == 32 && cell_get(state, t, 2, 0) == 32 && cell_get(state, t, 3, 0) == 66 && cell_get(state, t, 6, 0) == 69 {
+        n = n + 1
+    }
+    // 10. DCH: delete two characters, the rest moves left
+    var v9: [u8; 24] = "|c|[1;1HABCDE|[1;2H|[2P\0"
+    vt_str(state, t, (&v9[0]) as u64)
+    if cell_get(state, t, 0, 0) == 65 && cell_get(state, t, 1, 0) == 68 && cell_get(state, t, 2, 0) == 69 && cell_get(state, t, 3, 0) == 32 {
+        n = n + 1
+    }
+    // 11. IL: a blank row at the cursor, the rows below move down
+    var v10: [u8; 40] = "|c|[1;1H1|[2;1H2|[3;1H3|[4;1H4|[2;1H|[L\0"
+    vt_str(state, t, (&v10[0]) as u64)
+    if cell_get(state, t, 0, 0) == 49 && cell_get(state, t, 0, 1) == 32 && cell_get(state, t, 0, 2) == 50 && cell_get(state, t, 0, 3) == 51 && cell_get(state, t, 0, 4) == 52 && term_cx(state, t) == 0 && term_cy(state, t) == 1 {
+        n = n + 1
+    }
+    // 12. DL: the row at the cursor goes, the rows below move up
+    var v11: [u8; 40] = "|c|[1;1H1|[2;1H2|[3;1H3|[4;1H4|[2;1H|[M\0"
+    vt_str(state, t, (&v11[0]) as u64)
+    if cell_get(state, t, 0, 0) == 49 && cell_get(state, t, 0, 1) == 51 && cell_get(state, t, 0, 2) == 52 && cell_get(state, t, 0, 3) == 32 {
+        n = n + 1
+    }
+    // 13. scroll region 2..4: a line feed on its last row scrolls the region only
+    var v12: [u8; 51] = "|c|[1;1HA|[2;1HB|[3;1HC|[4;1HD|[5;1HE|[2;4r|[4;1H^\0"
+    vt_str(state, t, (&v12[0]) as u64)
+    if cell_get(state, t, 0, 0) == 65 && cell_get(state, t, 0, 1) == 67 && cell_get(state, t, 0, 2) == 68 && cell_get(state, t, 0, 3) == 32 && cell_get(state, t, 0, 4) == 69 {
+        n = n + 1
+    }
+    // 14. reverse index on the first row of the region scrolls it down
+    var v13: [u8; 52] = "|c|[1;1HA|[2;1HB|[3;1HC|[4;1HD|[5;1HE|[2;4r|[2;1H|M\0"
+    vt_str(state, t, (&v13[0]) as u64)
+    if cell_get(state, t, 0, 0) == 65 && cell_get(state, t, 0, 1) == 32 && cell_get(state, t, 0, 2) == 66 && cell_get(state, t, 0, 3) == 67 && cell_get(state, t, 0, 4) == 69 {
+        n = n + 1
+    }
+    // 15. SU: the screen scrolls up one row
+    var v14: [u8; 21] = "|c|[1;1HA|[2;1HB|[1S\0"
+    vt_str(state, t, (&v14[0]) as u64)
+    if cell_get(state, t, 0, 0) == 66 && cell_get(state, t, 0, 1) == 32 {
+        n = n + 1
+    }
+    // 16. SD: the screen scrolls down one row
+    var v15: [u8; 21] = "|c|[1;1HA|[2;1HB|[1T\0"
+    vt_str(state, t, (&v15[0]) as u64)
+    if cell_get(state, t, 0, 0) == 32 && cell_get(state, t, 0, 1) == 65 && cell_get(state, t, 0, 2) == 66 {
+        n = n + 1
+    }
+    // 17. SGR colours, bold, reset
+    var v16: [u8; 22] = "|c|[31mR|[42;1mG|[0mN\0"
+    vt_str(state, t, (&v16[0]) as u64)
+    if cell_col(state, t, 0, 0) == 2 && cell_col(state, t, 1, 0) == 50 && (cell_attr(state, t, 1, 0) & 2) == 2 && cell_col(state, t, 2, 0) == 0 && cell_attr(state, t, 2, 0) == 0 {
+        n = n + 1
+    }
+    // 18. SGR reverse and underline, and their off codes
+    var v17: [u8; 25] = "|c|[7mR|[27mN|[4mU|[24mV\0"
+    vt_str(state, t, (&v17[0]) as u64)
+    if cell_attr(state, t, 0, 0) == 1 && cell_attr(state, t, 1, 0) == 0 && cell_attr(state, t, 2, 0) == 4 && cell_attr(state, t, 3, 0) == 0 {
+        n = n + 1
+    }
+    // 19. SGR 38;5;9 is bright red, 38;2 is dropped
+    var v18: [u8; 34] = "|c|[38;5;9mB|[0m|[38;2;10;20;30mQ\0"
+    vt_str(state, t, (&v18[0]) as u64)
+    if cell_col(state, t, 0, 0) == 2 && (cell_attr(state, t, 0, 0) & 8) == 8 && cell_get(state, t, 1, 0) == 81 && cell_col(state, t, 1, 0) == 0 {
+        n = n + 1
+    }
+    // 20. save and restore the cursor: ESC 7 / ESC 8
+    var v19: [u8; 19] = "|c|[3;4H|7|[1;1H|8\0"
+    vt_str(state, t, (&v19[0]) as u64)
+    if term_cx(state, t) == 3 && term_cy(state, t) == 2 {
+        n = n + 1
+    }
+    // 21. save and restore the cursor: CSI s / CSI u
+    var v20: [u8; 21] = "|c|[3;4H|[s|[1;1H|[u\0"
+    vt_str(state, t, (&v20[0]) as u64)
+    if term_cx(state, t) == 3 && term_cy(state, t) == 2 {
+        n = n + 1
+    }
+    // 22. alternate screen: the main screen and the cursor come back
+    var v21: [u8; 38] = "|c|[1;1HMAIN|[2;5H|[?1049hALT|[?1049l\0"
+    vt_str(state, t, (&v21[0]) as u64)
+    if cell_get(state, t, 0, 0) == 77 && cell_get(state, t, 3, 0) == 78 && cell_get(state, t, 1, 0) == 65 && term_cx(state, t) == 4 && term_cy(state, t) == 1 {
+        n = n + 1
+    }
+    // 23. OSC up to BEL is swallowed (the window title is no text)
+    var v22: [u8; 16] = "|c|]0;a title~Z\0"
+    vt_str(state, t, (&v22[0]) as u64)
+    if cell_get(state, t, 0, 0) == 90 && cell_get(state, t, 1, 0) == 32 {
+        n = n + 1
+    }
+    // 24. OSC up to ESC backslash is swallowed
+    var v23: [u8; 11] = "|c|]2;t|$Z\0"
+    vt_str(state, t, (&v23[0]) as u64)
+    if cell_get(state, t, 0, 0) == 90 && cell_get(state, t, 1, 0) == 32 {
+        n = n + 1
+    }
+    // 25. unknown sequences are dropped whole, ESC ( B takes its octet
+    var v24: [u8; 28] = "|c|[?2004h|[>c|[5;6;7qW|(BV\0"
+    vt_str(state, t, (&v24[0]) as u64)
+    if cell_get(state, t, 0, 0) == 87 && cell_get(state, t, 1, 0) == 86 && cell_get(state, t, 2, 0) == 32 {
+        n = n + 1
+    }
+    // 26. a cursor position beyond the screen is clamped
+    var v25: [u8; 13] = "|c|[999;999H\0"
+    vt_str(state, t, (&v25[0]) as u64)
+    if term_cx(state, t) == COLS - 1 && term_cy(state, t) == ROWS - 1 {
+        n = n + 1
+    }
+    // 27. CNL: next line, column 1
+    var v26: [u8; 13] = "|c|[3;5H|[2E\0"
+    vt_str(state, t, (&v26[0]) as u64)
+    if term_cx(state, t) == 0 && term_cy(state, t) == 4 {
+        n = n + 1
+    }
+    // 28. CPL: previous line, column 1
+    var v27: [u8; 13] = "|c|[3;5H|[1F\0"
+    vt_str(state, t, (&v27[0]) as u64)
+    if term_cx(state, t) == 0 && term_cy(state, t) == 1 {
+        n = n + 1
+    }
+    // 29. a bad scroll region (top below bottom) is the whole screen
+    var v28: [u8; 27] = "|c|[4;2r|[1;1HA|[2;1HB|[1S\0"
+    vt_str(state, t, (&v28[0]) as u64)
+    if cell_get(state, t, 0, 0) == 66 {
+        n = n + 1
+    }
+    // 30. the wrap is deferred: a row filled to the last column does not scroll, the next character opens the next row
+    var w0: [u8; 3] = "|c\0"
+    vt_str(state, t, (&w0[0]) as u64)
+    var q: u64 = 0
+    while q < COLS {
+        term_putc(state, t, 97)
+        q = q + 1
+    }
+    let at_end: bool = term_cx(state, t) == COLS - 1 && term_cy(state, t) == 0 && cell_get(state, t, COLS - 1, 0) == 97
+    term_putc(state, t, 98)
+    if at_end && cell_get(state, t, 0, 1) == 98 && term_cy(state, t) == 1 && cell_get(state, t, 0, 0) == 97 {
+        n = n + 1
+    }
+    // 31. ?7 l: no wrap, the last column is overwritten; ?7 h puts the wrap back
+    var w1: [u8; 8] = "|c|[?7l\0"
+    vt_str(state, t, (&w1[0]) as u64)
+    q = 0
+    while q < COLS + 3 {
+        term_putc(state, t, 120)
+        q = q + 1
+    }
+    term_putc(state, t, 121)
+    var w2: [u8; 8] = "|[?7h\0\0\0"
+    vt_str(state, t, (&w2[0]) as u64)
+    if term_cy(state, t) == 0 && term_cx(state, t) == COLS - 1 && cell_get(state, t, COLS - 1, 0) == 121 && cell_get(state, t, 0, 1) == 32 {
+        n = n + 1
+    }
+    // 32. the grid size the tty reports: rows << 16 | columns
+    if term_size(state, t) == (ROWS << 16) | COLS {
+        n = n + 1
+    }
+    // the machine is left plain
+    var rs: [u8; 3] = "|c\0"
+    vt_str(state, t, (&rs[0]) as u64)
+    destroy(state, t)
+    ss(state, S_NEXTID, nid0)
+    fokus_still = 0
+    return n
+}
+
+fn vt2_selftest_max() -> u64 {
+    return 32
 }
 
 fn selftest_max() -> u64 {

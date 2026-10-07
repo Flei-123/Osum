@@ -2004,6 +2004,14 @@ fn surface(state: u64) {
     serial.puts((&s_of[0]) as u64)
     serial.dec(wm.vt_selftest_max())
     serial.nl()
+    // r462: the rest of the VT subset (cursor, erase, edit, scroll region, colours, alternate screen, strings)
+    var s_vt2: [u8; 15] = "wm: vttest2 \0\0\0"
+    let vt2_n: u64 = wm.vt2_selftest(state)
+    serial.puts((&s_vt2[0]) as u64)
+    serial.dec(vt2_n)
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(wm.vt2_selftest_max())
+    serial.nl()
     // RUNDE K15: die Naht zur Widget-Bibliothek. Sie kommt NACH dem
     // Fensterserver, weil sie in seine Fenster schreibt, und sie kommt
     // IMMER -- auch ohne das Wort `wig`. Ein Aufruf, den es nur
@@ -4699,6 +4707,42 @@ fn fenster_wache(state: u64) {
     }
 }
 
+// ==================================== r462: SIGWINCH FOR TERMINAL WINDOWS
+// When the grid of a terminal window changes (the user dragged an edge, maximised it), the foreground process group of the tty
+// bound to that window gets SIGWINCH: an editor or a pager asks `TIOCGWINSZ` again and draws for the new size. Every tick, like
+// `fenster_wache`; a window is remembered the first time it is seen.
+static mut winch_c: [u64; 32] = [0 as u64; 32]
+static mut winch_r: [u64; 32] = [0 as u64; 32]
+
+fn winch_wache(state: u64) {
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        let sz: u64 = wm.term_size(state, i)
+        if sz == 0 {
+            winch_c[(i) as usize] = 0
+            winch_r[(i) as usize] = 0
+        } else {
+            let c: u64 = sz & 0xFFFF
+            let r: u64 = sz >> 16
+            if winch_c[(i) as usize] == 0 {
+                winch_c[(i) as usize] = c
+                winch_r[(i) as usize] = r
+            } else if winch_c[(i) as usize] != c || winch_r[(i) as usize] != r {
+                winch_c[(i) as usize] = c
+                winch_r[(i) as usize] = r
+                let t: u64 = wm.tty_of(state, i)
+                if t < tty.MAX_TTY && tty.valid(state, t) {
+                    let grp: u64 = tty.pgrp(state, t)
+                    if grp != 0 {
+                        let _s: u64 = signal.send_pgid(state, grp, signal.SIGWINCH)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 // ==================================== 04.10.2026 (DELL): ZOMBIE LEAK
 // Justin, Dell: "after several programs are open no further one opens".
 // Measured in a VM with the Dell's own image: the task table has 32 slots
@@ -5069,6 +5113,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         abmelde_wache(state)
         standby_wache(state)
         fenster_wache(state)
+        winch_wache(state)
         zombie_sweep(state)
         st(35)
         // 24.09.2026: THE WINDOW MOVEMENTS TICK HERE TOO. `anim_tick`
