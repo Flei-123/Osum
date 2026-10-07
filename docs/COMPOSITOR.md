@@ -289,3 +289,19 @@ Consequences for the plan: (1) `wmd` must wait with `poll` (or a wake-driven cal
 `PRESENT` have to be wake driven. (2) The speed problem of compositing is the per-pixel Firn loops, not the ring; the integer primitives
 (`lib/fui/comp*.fi`) must be written and measured as loops of whole rows. (3) Not measured: the wake-up of a process that sleeps on **another,
 idle core** (both ends probably ran on the same core in the bench), and the effect of a busy second core.
+
+### Tabs in the title bar (r454): the way that fits this architecture (design, not built)
+
+Justin's order A wants row 1 of the file manager = tabs **in the title bar** (like Windows 11). The server draws the title bar today
+(`paint_title`, `paint_caption`; the window buffer is the client area only). Three ways, and why this one:
+
+| way | what it needs | verdict |
+|---|---|---|
+| client-side decoration (the program draws frame, title, caption buttons) | a begin-move / begin-resize request, edge cursors and snap by the client, the lock and Alt+Tab must still work | too much: every program would repeat what `wm.fi` does, and the lock (`darf`) must trust the client's chrome; this is S6 for scene programs |
+| **a caption strip owned by the client (chosen)** | window flag `WF_CAPTION_CLIENT`: the window buffer grows upward by the title height; the server still draws frame, shadow and the three caption buttons and **skips the title text and background**; the client paints the strip (tabs, plus button) and declares which x-range of the strip is a **drag region** (the empty part): a press there starts the server's own move / snap / maximise on double click | small: one flag, one declared range, two rules in `paint_win` and `on_mouse`; the policy (move, resize, snap, caption buttons, lock) stays in the kernel |
+| tabs stay a row under the title bar (today) | nothing | what is built; costs one row of height |
+
+Steps: (1) the flag and the larger buffer in `create` / `resize_win`; (2) `paint_title` leaves the strip alone, `cap_at` still hits the three
+buttons; (3) the drag range through the existing `WM_` request path; (4) a11y: the strip is part of the client's tree; (5) the file manager
+paints its tabs there (cmdbar row 1 disappears); tests: `fourbugs` (title centre, edges), `midline` (tabs on the centre line of the bar),
+`lockseal` (a locked window gives no drag), `k15`. When `wmd` exists (S4 - S6) the strip is just a scene window of the same program.
