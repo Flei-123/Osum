@@ -113,7 +113,7 @@ if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
     # r399 (design audit): the proportional face is Inter now (tools/design/mkfont.py);
     # the DejaVu cut above stays as the counter-proof that the old set is a different file
     if [ -f assets/src/Inter-Regular.ttf ] && python3 -c "import fontTools, uharfbuzz" 2>/dev/null; then
-        python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/inter.ttf" "$SANS" \
+        python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/inter.ttf" assets/src/osum-sans.cps \
             >/dev/null 2>&1
         cmp -s "$TMPD/inter.ttf" "$SANS" \
             && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus Inter Regular" \

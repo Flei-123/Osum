@@ -109,7 +109,7 @@ both (section 4.3).
 
 ### 4.1 Face (`assets/osum-sans.ttf`, `osum-sans-bold.ttf`)
 Inter 4.0 Regular / SemiBold (SIL OFL, `assets/LICENSE-OFL-inter.txt`, sources in
-`assets/src/`), cut by `tools/design/mkfont.py` to the same 339 characters, no hinting,
+`assets/src/`), cut by `tools/design/mkfont.py` to the same 339 characters (`assets/src/osum-sans.cps`; U+00AD, U+0149 and U+FFFD, which Inter lacks, are mapped to a hyphen, an n and a question mark), no hinting,
 GPOS pair kerning flattened with HarfBuzz into a format-0 `kern` table (the 10 900 strongest
 pairs, the subtable length is 16 bit). The cut is reproducible octet for octet
 (`tools/wm/run.sh` part 3, `tools/i18n/run.sh`). `THIRD_PARTY.md` 4.1a.

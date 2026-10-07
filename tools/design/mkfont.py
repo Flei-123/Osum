@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/design/mkfont.py -- build the interface font subset from Inter (SIL OFL 1.1).
 
-    mkfont.py <Inter-*.ttf> <out.ttf> <codepoint-template.ttf>
+    mkfont.py <Inter-*.ttf> <out.ttf> <codepoints.cps | template.ttf>
 
 The system reads TrueType with seven tables (cmap format 4, glyf, head, hhea,
 hmtx, loca, maxp) plus an optional legacy `kern` table (format 0).  Inter keeps
@@ -21,7 +21,10 @@ import uharfbuzz as hb
 
 def main():
     src, dst, tmpl = sys.argv[1], sys.argv[2], sys.argv[3]
-    cps = sorted(TTFont(tmpl).getBestCmap().keys())
+    if tmpl.endswith('.cps'):
+        cps = sorted(int(l.split()[0], 16) for l in open(tmpl) if l.strip() and not l.startswith('#'))
+    else:
+        cps = sorted(TTFont(tmpl).getBestCmap().keys())
     # 1. kerning pairs out of GPOS, shaped on the ORIGINAL font
     blob = hb.Blob.from_file_path(src)
     face = hb.Face(blob)
@@ -62,6 +65,14 @@ def main():
     for t in list(f.keys()):
         if t not in keep and t != 'GlyphOrder':
             del f[t]
+    # Inter has no U+00AD (soft hyphen), U+0149 and U+FFFD, which the old DejaVu cut carried
+    # and the i18n runner demands: the soft hyphen draws as a hyphen, U+0149 as an n, and
+    # the replacement character of the UTF-8 decoder as a question mark
+    for cp, gname in ((0xAD, 'hyphen'), (0x149, 'n'), (0xFFFD, 'question')):
+        if cp in cps and gname in f.getGlyphOrder():
+            for t in f['cmap'].tables:
+                if t.isUnicode():
+                    t.cmap[cp] = gname
     # 3. legacy kern table, format 0
     have = set(f.getGlyphOrder())
     kt = KernTable_format_0()

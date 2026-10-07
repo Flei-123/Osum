@@ -292,8 +292,8 @@ else
 fi
 # r399 (design audit): the proportional faces are Inter (SIL OFL), cut by tools/design/mkfont.py
 if [ -f assets/src/Inter-Regular.ttf ] && python3 -c "import fontTools, uharfbuzz" 2>/dev/null; then
-    python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/sans.ttf" assets/osum-sans.ttf >/dev/null 2>&1
-    python3 tools/design/mkfont.py assets/src/Inter-SemiBold.ttf "$TMPD/sansb.ttf" assets/osum-sans-bold.ttf >/dev/null 2>&1
+    python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/sans.ttf" assets/src/osum-sans.cps >/dev/null 2>&1
+    python3 tools/design/mkfont.py assets/src/Inter-SemiBold.ttf "$TMPD/sansb.ttf" assets/src/osum-sans.cps >/dev/null 2>&1
     cmp -s "$TMPD/sans.ttf" assets/osum-sans.ttf \
         && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus Inter Regular" \
         || bad "osum-sans.ttf laesst sich nicht reproduzieren"
