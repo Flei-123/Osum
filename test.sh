@@ -1692,6 +1692,12 @@ lauf "56. the action bus on a screen: foreign windows (keys/ui adapters, wayd in
 lauf "57. the clock: summer time by rule (tzrule=eu), clock_settime, /bin/sntp, faulty NTP answers (tools/time/run.sh, round DAILY-DRIVER)" \
      tools/time/run.sh time '^TIME: |^== |^  OK    |^  FAIL  '
 
+# 58. THE ENGLISH GUARD (Justin, 07.10.2026): code is English -- identifiers, file names, program names,
+# comments, log and error texts; German lives in the catalogs only. The counter must count (counter-proof),
+# no file may get MORE German than tools/english/baseline.json says, and the lines added since main are English.
+lauf "58. the English guard: German in code only goes down, new lines are English (tools/english/run.sh)" \
+     tools/english/run.sh english '^ENGLISH: |^== |^  OK    |^  FAIL  '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
