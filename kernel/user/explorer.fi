@@ -134,6 +134,14 @@ static mut symbole: [u64; 96] = [0 as u64; 96]
 // The tree on the left: the way up and then one folder per directory.
 static mut bsymbole: [u64; 96] = [0 as u64; 96]
 static mut anzahl: u64 = 0
+// r458: the overview of the drives (`vmodus 3`): the fill in permille + 1 (0 = not known), the free bytes, the read-only flag
+static mut ov_used: [u64; 96] = [0 as u64; 96]
+static mut ov_free: [u64; 96] = [0 as u64; 96]
+static mut ov_ro: [u64; 96] = [0 as u64; 96]
+static mut k_cols_pc: [u8; 26] = "explorer.columns.computer\0"
+static mut k_ty_drive: [u8; 20] = "explorer.type.drive\0"
+static mut k_ty_system: [u8; 21] = "explorer.type.system\0"
+static mut k_ty_ro: [u8; 23] = "explorer.type.readonly\0"
 
 static mut tblob: [u8; 6144] = [0 as u8; 6144]
 static mut bblob: [u8; 1024] = [0 as u8; 1024]
@@ -784,7 +792,94 @@ static mut k_ty_dir2: [u8; 22] = "explorer.type.folder\0\0"
 static mut k_ty_file2: [u8; 20] = "explorer.type.file\0\0"
 static mut sizetmp: [u8; 24] = [0 as u8; 24]
 
+// VIEW 3: all drives with their fill. One row per mounted drive (the carriers of the side pane): the mount path, the fill as a
+// percentage with a bar (host: `heat_bar`), the kind, the free room. A drive whose fill the kernel does not report shows "--".
+fn scan_computer() -> u64 {
+    anzahl = 0
+    var bsz: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
+    if ulib.bad(bsz) || bsz == 0 {
+        bsz = 4096
+    }
+    let n: u64 = exporte.places_num()
+    var i: u64 = 0
+    while i < n && anzahl < SIC_MAXENT {
+        if exporte.place_is_carrier(i) {
+            ulib.strncpy(nptr(anzahl), exporte.place_path(i), SIC_NAMEB - 1)
+            let bl: u64 = exporte.traeger_bloecke(i)
+            let be: u64 = exporte.traeger_benutzt(i)
+            groesse[(anzahl) as usize] = bl * bsz
+            ov_free[(anzahl) as usize] = 0
+            ov_used[(anzahl) as usize] = 0
+            if bl != 0 && be != 0 && be <= bl {
+                ov_free[(anzahl) as usize] = (bl - be) * bsz
+                var pm: u64 = be * 1000 / bl
+                if pm > 1000 {
+                    pm = 1000
+                }
+                ov_used[(anzahl) as usize] = pm + 1
+            }
+            ov_ro[(anzahl) as usize] = exporte.traeger_flags(i) & ulib.MNT_RDONLY
+            art[(anzahl) as usize] = 1
+            modus[(anzahl) as usize] = 16877
+            // the fill as text in the date slot: "73 %" or "--"
+            let z: u64 = zptr(anzahl)
+            if ov_used[(anzahl) as usize] == 0 {
+                __mmio_write8(z as *mut u8, 45 as u8)
+                __mmio_write8((z + 1) as *mut u8, 45 as u8)
+                __mmio_write8((z + 2) as *mut u8, 0 as u8)
+            } else {
+                var dg: [u8; 12] = [0 as u8; 12]
+                let nd: u64 = ulib.digits((ov_used[(anzahl) as usize] - 1 + 5) / 10, (&dg[0 as usize]) as u64)
+                var k: u64 = 0
+                while k < nd && k < 4 {
+                    __mmio_write8((z + k) as *mut u8, dg[(k) as usize])
+                    k = k + 1
+                }
+                __mmio_write8((z + k) as *mut u8, 32 as u8)
+                __mmio_write8((z + k + 1) as *mut u8, 37 as u8)
+                __mmio_write8((z + k + 2) as *mut u8, 0 as u8)
+            }
+            anzahl = anzahl + 1
+        }
+        i = i + 1
+    }
+    return anzahl
+}
+
 fn build_table() {
+    if vmodus == 3 {
+        // the overview: Name, Used (with a bar), Type, Free
+        tp = 0
+        puts(msg.get((&k_cols_pc[0 as usize]) as u64))
+        var j: u64 = 0
+        while j < anzahl {
+            let e: u64 = folge[(j) as usize]
+            symbole[(j) as usize] = wlib.icon_id(icons.FILE_DRIVE)
+            puts(nptr(e))
+            put(9)
+            puts(zptr(e))
+            put(9)
+            if ov_ro[(e) as usize] != 0 {
+                puts(msg.get((&k_ty_ro[0 as usize]) as u64))
+            } else if (*((nptr(e)) as *mut u8)) == 47 as u8 && (*((nptr(e) + 1) as *mut u8)) == 0 as u8 {
+                puts(msg.get((&k_ty_system[0 as usize]) as u64))
+            } else {
+                puts(msg.get((&k_ty_drive[0 as usize]) as u64))
+            }
+            put(9)
+            if ov_used[(e) as usize] != 0 {
+                let _sf: usize = navnum.size_text(ov_free[(e) as usize], (&sizetmp[0 as usize]) as u64, 24)
+                puts((&sizetmp[0 as usize]) as u64)
+            } else {
+                put(45)
+                put(45)
+            }
+            put(10)
+            j = j + 1
+        }
+        put(0)
+        return
+    }
     if vmodus == 0 {
         let _z: u64 = expmodell.table_build(msg.get((&k_cols[0 as usize]) as u64))
         return
@@ -938,7 +1033,18 @@ fn nav_sync_sel() {
     let places: u64 = exporte.places_num()
     var want: u64 = fuiscene.HEAD_ROW
     var chosen: u64 = 0xFFFFFFFFFFFFFFFF
-    if ort_wahl < places && !exporte.place_is_header(ort_wahl)
+    if vmodus == 3 {
+        var ov: u64 = 0
+        while ov < places {
+            if exporte.place_is_overview(ov) {
+                chosen = ov
+            }
+            ov = ov + 1
+        }
+    }
+    if chosen != 0xFFFFFFFFFFFFFFFF {
+        want = chosen
+    } else if ort_wahl < places && !exporte.place_is_header(ort_wahl)
         && vmodus == 0 && ulib.streq(exporte.place_path(ort_wahl), ((&pfad[0 as usize]) as u64)) {
         chosen = ort_wahl
     } else if vmodus == 0 {
@@ -1640,6 +1746,15 @@ fn place_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
         return
     }
     if exporte.place_is_header(zeile) {
+        return
+    }
+    if exporte.place_is_overview(zeile) {
+        // r458: the overview of all drives with their fill bars
+        vmodus = 3
+        new_read(baum, tab, stat, fpfad)
+        say((&s_ovw[0 as usize]) as u64)
+        sayn(anzahl)
+        nl()
         return
     }
     if exporte.place_is_tool(zeile) {
@@ -2478,6 +2593,14 @@ fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     // auf /data stehen. Beide Zugriffe gehen jetzt durch die Adapter
     // `m_name`/`m_art`, die wissen, welches Modell gerade gilt.
     let name: u64 = m_name(e)
+    // r458: IN THE OVERVIEW a row is a drive: go there
+    if vmodus == 3 {
+        vmodus = 0
+        ulib.strncpy((&pfad[0 as usize]) as u64, name, 126)
+        hist_push((&pfad[0 as usize]) as u64)
+        new_read(baum, tab, stat, fpfad)
+        return
+    }
     // IN EINER SICHERUNG: hineingehen heisst tiefer in den
     // Schnappschuss, nicht auf die Platte.
     if vmodus == 2 {
@@ -2786,6 +2909,12 @@ fn tree_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
                 vmodus = 1
             }
             show_place(fpfad)
+            new_read(baum, tab, stat, fpfad)
+            return
+        }
+        if vmodus == 3 {
+            // up from the overview: back to the folder we came from
+            vmodus = 0
             new_read(baum, tab, stat, fpfad)
             return
         }
@@ -4134,7 +4263,12 @@ static mut s_orh: [u8; 4] = " h=\0"
 
 // The crumbs: data only (the buttons are made by `build`).
 fn krume_daten() {
-    let n: u64 = exporte.krume_bauen(((&pfad[0 as usize]) as u64))
+    var n: u64 = 0
+    if vmodus == 3 {
+        n = exporte.krume_overview()
+    } else {
+        n = exporte.krume_bauen(((&pfad[0 as usize]) as u64))
+    }
     krume_n = n
     if krume_n > 12 {
         krume_n = 12
@@ -4200,6 +4334,8 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
         r = scan_mem()
     } else if vmodus == 2 {
         r = scan_sicherung()
+    } else if vmodus == 3 {
+        r = scan_computer()
     } else {
         r = expmodell.lade(((&pfad[0 as usize]) as u64))
     }
@@ -4208,6 +4344,7 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     }
     sortiere()
     build_table()
+    heat_setup()
     build_tree()
     nav_sync_sel()
     baue_status()
@@ -4231,6 +4368,7 @@ fn new_read(baum: u64, tab: u64, stat: u64, fpfad: u64) {
 }
 
 static mut s_cd: [u8; 14] = "explorer: cd \0"
+static mut s_ovw: [u8; 20] = "explorer: overview \0"
 static mut s_nn: [u8; 4] = " n=\0"
 
 // r442: the search field filters the list while typing (the model keeps the text for `passt`).
@@ -4263,9 +4401,27 @@ fn search_poll() {
 
 static mut s_srch: [u8; 20] = "explorer: search n=\0"
 
+// the bars of the overview: the host paints the "Used" cells (column 1) of the list as bars; every other view has none
+fn heat_setup() {
+    fuiscene.heat_clear()
+    if vmodus == 3 {
+        fuiscene.heat_key(K_TAB, 1, 99)
+        fuiscene.heat_bar(true)
+        var r: u64 = 0
+        while r < anzahl && r < 64 {
+            fuiscene.heat_set(r, 0, ov_used[(folge[(r) as usize]) as usize])
+            r = r + 1
+        }
+    } else {
+        fuiscene.heat_key(0, 99, 99)
+        fuiscene.heat_bar(false)
+    }
+}
+
 fn view_refresh(baum: u64, tab: u64) {
     sortiere()
     build_table()
+    heat_setup()
     build_tree()
     rfr()
 }
