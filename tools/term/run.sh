@@ -19,7 +19,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 export DESIGNBUILD="$TMPD/build"
 
 echo "== 1. boot, open the editor in the terminal window =="
-bash tools/design/eh6.sh "$TMPD/run" accel=kvm drehbuch=tools/term/dreh.txt > "$TMPD/run.log" 2>&1
+bash tools/design/eh6.sh "$TMPD/run" accel=kvm drehbuch=tools/term/script.txt > "$TMPD/run.log" 2>&1
 S="$TMPD/run/serial.txt"
 for n in 01-edit-open 02-edit-typed 03-edit-write 04-edit-closed; do
     [ -s "$TMPD/run/$n.ppm" ] && ok "picture $n taken" || bad "picture $n missing: $(tail -2 "$TMPD/run.log" | tr '\n' ' ')"
