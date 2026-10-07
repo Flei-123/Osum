@@ -3456,6 +3456,17 @@ fn rgn_take(state: u64, out: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64
 }
 
 fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+    damage_ex(state, x0, y0, x1, y1, 0)
+}
+
+// r461: `skip` says whose blurred picture this change CANNOT spoil. The blur of a window is made from what lies UNDER it; the
+// pointer is painted over everything and a window's own contents are painted over its own blur, so neither makes the cached
+// blur wrong. Before this, every pointer move and every hover row of the start menu threw its blur away and the menu was
+// filtered again (37 times in 56 frames, 27 ms each: `wm: phase` of the menu). 0 = nobody (every change counts), BT_ALL = the
+// pointer (no blur is spoiled), i + 1 = window i's own contents.
+const BT_ALL: u64 = 0xFFFFFFFF
+
+fn damage_ex(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
     if !ready(state) {
         return
     }
@@ -3488,7 +3499,7 @@ fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     // Zwischenspeicher hin; liegt es daneben, bleibt er gueltig.
     // Deshalb steht der Ruf HIER und nicht in `compose` -- in `compose`
     // waere schon zusammengefasst, was hier noch einzeln ankommt.
-    blur_touch(state, a, b, c, d)
+    blur_touch(state, a, b, c, d, skip)
     // ================================================= RUNDE GLAS
     //
     // DIE SCHLIERENREGEL, UND WARUM ES OHNE SIE WIRKLICH SCHLIEREN GIBT.
@@ -3607,6 +3618,10 @@ fn damage_all(state: u64) {
 // zu gross ist, kostet eine Bildzeile; einer, der einen zu klein ist,
 // kostet eine sichtbare Kante.
 fn damage_win(state: u64, i: u64) {
+    damage_win_ex(state, i, 0)
+}
+
+fn damage_win_ex(state: u64, i: u64, skip: u64) {
     // RUNDE GLAS: DIESE EINE STELLE SAGT DEM MILCHGLAS, DASS SICH SEIN
     // UNTERGRUND GEAENDERT HAT. `flush_win`, `move_win`, `resize_win`,
     // `raise_win` und `destroy` laufen alle hier durch -- es gibt also
@@ -3639,9 +3654,9 @@ fn damage_win(state: u64, i: u64) {
     if y0 < 0 {
         y0 = 0
     }
-    damage(state, x0, y0,
+    damage_ex(state, x0, y0,
         win_x(state, i) + outer_w(state, i) as i64 + r + 1,
-        win_y(state, i) + outer_h(state, i) as i64 + r + 1)
+        win_y(state, i) + outer_h(state, i) as i64 + r + 1, skip)
 }
 
 fn dirty_x0(state: u64) -> u64 {
@@ -5423,7 +5438,8 @@ fn flush_win(state: u64, i: u64) {
     if !valid(state, i) {
         return
     }
-    damage_win(state, i)
+    // the client painted new contents: its own blur (made from what is under it) is still good
+    damage_win_ex(state, i, i + 1)
 }
 
 // ------------------------------------------------- das Zusammensetzen
@@ -7598,7 +7614,10 @@ fn blur_mix(farbe: u64, ton: u64, tint: u64, amp: u64, x: u64,
 
 // Schneidet das Schmutzrechteck die gespeicherte Flaeche? Dann ist sie
 // hin. Aufgerufen aus `damage`, also aus JEDER Aenderungsmeldung.
-fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
+    if skip == BT_ALL {
+        return
+    }
     // EIN ZAEHLER JE PLATZ, und nicht einer fuer alle.
     //
     // Ein gemeinsamer Zaehler waere wieder der Fehler, den die vier
@@ -7609,7 +7628,7 @@ fn blur_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     // Rechteck das gemeldete wirklich schneidet.
     var k: u64 = 0
     while k < BC_N {
-        if gs(state, S_BC_WIN + k * 8) != 0 {
+        if gs(state, S_BC_WIN + k * 8) != 0 && gs(state, S_BC_WIN + k * 8) != skip {
             let bx0: i64 = gs(state, S_BC_X + k * 8) as i64
             let by0: i64 = gs(state, S_BC_Y + k * 8) as i64
             let bx1: i64 = bx0 + gs(state, S_BC_W + k * 8) as i64
@@ -11344,12 +11363,12 @@ fn on_mouse(state: u64) {
             ss(state, S_CURY, ny)
             hwcur_bewegen(state)
         } else {
-            damage(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
-                (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64)
+            damage_ex(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
+                (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64, BT_ALL)
             ss(state, S_CURX, nx)
             ss(state, S_CURY, ny)
-            damage(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
-                (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64)
+            damage_ex(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
+                (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64, BT_ALL)
         }
     }
     let x: i64 = nx as i64
