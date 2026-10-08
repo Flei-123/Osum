@@ -36,6 +36,8 @@ def main(out):
     c = re.findall(r"wm: fen i=\d+ id=\d+ x=%d y=%d [^\n]*? bar=(\d+) capw=\d+ fr=(\d+)" % (gx, gy), t)
     bar, fr = (int(c[-1][0]), int(c[-1][1])) if c else (32, 1)   # (the shape osum; F12 prints the real ones)
     ox, oy = gx + fr, gy + fr + bar + 1
+    if re.search(r"explorer: strip h=\d+", t):
+        oy = gy + fr     # r454: the drawing area starts at the top of the title bar (the tabs live there)
     rects = {}
     for m in re.finditer(r"explorer: rect id=(\d+) kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t):
         rects[int(m.group(1))] = tuple(int(v) for v in m.groups()[1:])
@@ -112,7 +114,8 @@ def main(out):
                 if sum(abs(a - b) for a, b in zip(px, tbg)) > 150:
                     n += 1
             rows.append(n)
-        if rows and max(rows) > 0:
+        # r454: with the tabs in the title bar there is no server title text here (the tab labels are measured below)
+        if rows and max(rows) > 0 and oy == gy + fr + bar + 1:
             inked = [i for i, n in enumerate(rows) if n > 0]
             solid = [i for i, n in enumerate(rows) if n * 100 >= max(rows) * 35]
             top = inked[0]

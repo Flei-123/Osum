@@ -853,6 +853,10 @@ num "er zaehlt so viele Stuecke in /data, wie tree.py angelegt hat" "$FN" eq "$S
 FBW=$(feld "$TMPD/files.txt" "explorer: geom" w); FBH=$(feld "$TMPD/files.txt" "explorer: geom" h)
 FWX=$(feld "$TMPD/files.txt" "explorer: geom" x); FWY=$(feld "$TMPD/files.txt" "explorer: geom" y)
 FCX=$((FWX + BORDER)); FCY=$((FWY + TITLE))
+# r454: the file manager paints its own title strip (the tabs): its buffer starts at the top of the title bar and is
+# `strip` points higher than the body it reports as geom; every y it reports (rows, rects) counts from the buffer top.
+STRIP=$(grep -a 'explorer: strip h=' "$TMPD/files.txt" | head -1 | sed 's/.*explorer: strip h=\([0-9]*\).*/\1/')
+if [ -n "$STRIP" ]; then FCY=$((FWY + BORDER)); FBH=$((FBH + STRIP)); fi
 aus=$(python3 tools/k15/layout.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung des Dateimanagers: $aus"
 else bad "die Anordnung des Dateimanagers stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -6; fi
@@ -1257,12 +1261,18 @@ has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
 # title ink is centred in the bar now, wm.title_base). The ink rows from the last
 # row of the bar down are not compared: the descender tail of "p" runs into the
 # frame line there (light theme), which is painted over it.
+if [ -z "$STRIP" ]; then
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "File Explorer" 96 $((FWY + 21))
 schau_nicht "und ein anderer Name steht dort NICHT" \
     tkette "$TMPD/files.ppm" "$SANS_INK" 15 $((FWX + 12)) $((FWY + 18)) \
     255 255 255 28 78 126 "Dateimanager" 96 $((FWY + 21))
+else
+# r454: the title bar of this window is the program's tab strip: the server paints no title text there (the tabs carry
+# the folder names; tools/tabstrip measures the strip).
+ok "die Titelleiste des Dateimanagers ist sein Reiterstreifen (kein Servertitel, r454; gemessen in tools/tabstrip)"
+fi
 
 # DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
 # Verzeichniseintraege auf DIESELBE Inode -- ein Exemplar der Oktette.

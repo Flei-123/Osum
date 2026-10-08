@@ -102,6 +102,7 @@ export {
     win_owner, win_kind, win_id, outer_w, outer_h,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
     win_title, by_id, hides, shows, top_visible, deko, inx, iny,
+    cap_client, strip_h, cap_strip_w, set_cap_client, set_strip_drag, F_CAPCLIENT,
     set_nolayer, set_nomin, nolayer, nomin,
     panel_win, measure_lines,
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
@@ -429,6 +430,11 @@ const F_KEYS: u64 = 16
 // (W_FSXY/W_FSWH) und laesst F_MAXIMIZED unangetastet stehen: beim
 // Verlassen wird der alte Zustand nicht ERRATEN, sondern GELESEN.
 const F_FULL: u64 = 32
+// r454: TABS IN THE TITLE BAR. A window with this flag has its buffer grown upward by the strip of the title bar
+// (`strip_h`): the client paints the strip (tabs, plus button), the server still draws frame, shadow and the three caption
+// buttons (AFTER the client area) and skips the title background and text. The client declares the empty x-range of the
+// strip (`W_DRAGX`): a press there starts the server's own move, a double click maximises / restores. docs/COMPOSITOR.md.
+const F_CAPCLIENT: u64 = 64
 
 // ADDENDUM TASKBAR: the four screen edges. The numbers are written to
 // /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
@@ -1027,6 +1033,8 @@ const S_RLOCK: u64 = 0x1650    // spin lock of the region (`damage` runs on any 
 const S_RBAD: u64 = 0x1658     // set when the lock could not be had: this frame uses the box
 const S_RFRAMES: u64 = 0x1660  // frames composed rectangle by rectangle
 const S_RSAVED: u64 = 0x1668   // pixels they did not have to paint (box minus region)
+const S_STRIPWIN: u64 = 0x1670 // r454: window (index + 1) of the last press on a client strip's drag region, 0 = none
+const S_STRIPT: u64 = 0x1678   // r454: the time of that press (mono_ns), for the double click
 const S_RGN: u64 = 0x1700      // 65 words: the region (`fui.region`, REGION_WORDS)
 
 const SZ_L: u64 = 1
@@ -1706,6 +1714,8 @@ const W_SWOFF: u64 = 0x1A0
 // LASSEN. Fehlt das zweite, hat man Arbeit geleistet und sie danach
 // zugedeckt.
 const W_OPAC: u64 = 0x1A8
+// r454: the drag region of the caption strip: x0 in the low 32 bits, x1 in the high 32 (client coordinates); 0 = none
+const W_DRAGX: u64 = 0x1B0
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -3133,9 +3143,90 @@ fn inx(state: u64, i: u64) -> u64 {
 
 fn iny(state: u64, i: u64) -> u64 {
     if deko(state, i) {
+        // r454: the client strip lies INSIDE the buffer, so the buffer starts below the top frame line only
+        if (wg(state, i, W_FLAGS) & F_CAPCLIENT) != 0 {
+            return border(state)
+        }
         return title_h(state)
     }
     return 0
+}
+
+// r454: does this window paint its own title strip?
+fn cap_client(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN || !valid(state, i) || !deko(state, i) {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_CAPCLIENT) != 0
+}
+
+// r454: the height of the strip in buffer rows: the title bar and the line under it (what the buffer grows by)
+fn strip_h(state: u64) -> u64 {
+    return title_h(state) - border(state)
+}
+
+// r454: the width the three caption buttons (and the frame) take at the right end of the strip
+fn cap_strip_w(state: u64) -> u64 {
+    return CAP_N * cap_w(state) + border(state)
+}
+
+// r454: is the client x inside the declared drag region of the strip? (the caption buttons are tested before this)
+fn strip_drag_at(state: u64, i: u64, x: i64) -> bool {
+    let r: u64 = wg(state, i, W_DRAGX)
+    let x0: u64 = r & 0xFFFFFFFF
+    let x1: u64 = r >> 32
+    if x1 <= x0 || x < 0 {
+        return false
+    }
+    return (x as u64) >= x0 && (x as u64) < x1
+}
+
+// r454: the program declares the empty part of its strip: [x0, x1) in client coordinates (0, 0 = none)
+fn set_strip_drag(state: u64, i: u64, x0: u64, x1: u64) -> bool {
+    if !cap_client(state, i) {
+        return false
+    }
+    wsv(state, i, W_DRAGX, (x0 & 0xFFFFFFFF) | (x1 << 32))
+    return true
+}
+
+// r454: switch the client strip on or off. The buffer grows (shrinks) by the strip height so that the OUTER size of the window
+// stays what it was; the program gets an E_RESIZE with the new size and lays itself out again.
+fn set_cap_client(state: u64, i: u64, on: bool) -> bool {
+    if !valid(state, i) || !deko(state, i) {
+        return false
+    }
+    // the counter-proof of tools/tabstrip: the server says no, the program keeps its old layout
+    if on && fb.nostrip_an(state) {
+        return false
+    }
+    let has: bool = (wg(state, i, W_FLAGS) & F_CAPCLIENT) != 0
+    if on == has {
+        return true
+    }
+    let sh: u64 = strip_h(state)
+    let w: u64 = wg(state, i, W_W)
+    let h: u64 = wg(state, i, W_H)
+    let f: u64 = wg(state, i, W_FLAGS)
+    if on {
+        wsv(state, i, W_FLAGS, f | F_CAPCLIENT)
+        wsv(state, i, W_DRAGX, 0)
+        if !resize_win(state, i, w, h + sh) {
+            wsv(state, i, W_FLAGS, f)
+            return false
+        }
+        return true
+    }
+    if h <= sh + 16 {
+        return false
+    }
+    wsv(state, i, W_FLAGS, f & ~F_CAPCLIENT)
+    wsv(state, i, W_DRAGX, 0)
+    if !resize_win(state, i, w, h - sh) {
+        wsv(state, i, W_FLAGS, f)
+        return false
+    }
+    return true
 }
 
 fn outer_w(state: u64, i: u64) -> u64 {
@@ -3149,7 +3240,7 @@ fn outer_h(state: u64, i: u64) -> u64 {
     if !deko(state, i) {
         return wg(state, i, W_H)
     }
-    return wg(state, i, W_H) + title_h(state) + border(state)
+    return wg(state, i, W_H) + iny(state, i) + border(state)
 }
 
 fn win_layer(state: u64, i: u64) -> u64 {
@@ -3766,6 +3857,7 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             // wiederverwendeter Platz waere sonst durchsichtig, ohne
             // dass es jemand bestellt hat.
             wsv(state, i, W_OPAC, 0)
+            wsv(state, i, W_DRAGX, 0)
             wsv(state, i, W_DXLAST, 0)
             wsv(state, i, W_DYLAST, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
@@ -4721,11 +4813,11 @@ fn fit_work(state: u64, i: u64) -> bool {
     var iw: u64 = gs(state, S_WORK_W)
     var ih: u64 = gs(state, S_WORK_H)
     if deko(state, i) {
-        if iw <= border(state) * 2 || ih <= title_h(state) + border(state) {
+        if iw <= border(state) * 2 || ih <= iny(state, i) + border(state) {
             return false
         }
         iw = iw - border(state) * 2
-        ih = ih - title_h(state) - border(state)
+        ih = ih - iny(state, i) - border(state)
     }
     if !resize_win(state, i, iw, ih) {
         return false
@@ -7085,7 +7177,7 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     }
     // Die Malflaeche, wie sie ohne alles laege.
     let ix: i64 = win_x(state, i) + border(state) as i64
-    let iy: i64 = win_y(state, i) + title_h(state) as i64
+    let iy: i64 = win_y(state, i) + iny(state, i) as i64
     // DER PIVOT. `ax`/`ay` ist die angefasste Stelle INNERHALB der
     // Malflaeche; `tl` mischt zwischen Mitte (0) und ihr (100).
     let tl: i64 = drag_tilt_on(state) as i64
@@ -7093,7 +7185,7 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     var ay: i64 = bh / 2
     if is_dragged(state, i) {
         let gx: i64 = gs(state, S_DRAGX) as i64 - border(state) as i64
-        let gy: i64 = gs(state, S_DRAGY) as i64 - title_h(state) as i64
+        let gy: i64 = gs(state, S_DRAGY) as i64 - iny(state, i) as i64
         // Ausserhalb der Flaeche angefasst (Titelleiste, Rahmen) wird
         // auf sie geklemmt: ein Pivot ausserhalb des Bildes laesst die
         // Flaeche wegdriften statt wachsen.
@@ -7350,60 +7442,30 @@ fn bdiv(summe: u64, rec: u64) -> u64 {
 // waechst am linken Rand und schrumpft am rechten -- deshalb wird der
 // Kehrwert je Bildpunkt aus der Tafel geholt und nicht einmal vorab
 // gerechnet.
-fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
-    var y: u64 = 0
-    while y < h {
-        let qz: u64 = quelle +% y *% w *% 4
-        let zz: u64 = ziel +% y *% w *% 4
-        var sr: u64 = 0
-        var sg: u64 = 0
-        var sb: u64 = 0
-        var n: u64 = 0
-        var k: u64 = 0
-        while k <= r && k < w {
-            let px: u64 = __mmio_read32((qz +% k *% 4) as *mut u32) as u64
-            sr = sr + ((px >> 16) & 255)
-            sg = sg + ((px >> 8) & 255)
-            sb = sb + (px & 255)
-            n = n + 1
-            k = k + 1
-        }
-        var x: u64 = 0
-        // r461: `n` changes only at the two ends of a row; the reciprocal (a division) is taken again only then
-        var last_n: u64 = 0
-        var rec: u64 = 0
-        while x < w {
-            if n != last_n {
-                rec = recip_of(n)
-                last_n = n
-            }
-            __mmio_write32((zz +% x *% 4) as *mut u32,
-                ((bdiv(sr, rec) << 16) | (bdiv(sg, rec) << 8)
-                    | bdiv(sb, rec)) as u32)
-            // rechts einer dazu ...
-            let add: u64 = x + r + 1
-            if add < w {
-                let px: u64 = __mmio_read32((qz +% add *% 4)
-                    as *mut u32) as u64
-                sr = sr + ((px >> 16) & 255)
-                sg = sg + ((px >> 8) & 255)
-                sb = sb + (px & 255)
-                n = n + 1
-            }
-            // ... und links einer weg.
-            if x >= r {
-                let sub: u64 = x - r
-                let px: u64 = __mmio_read32((qz +% sub *% 4)
-                    as *mut u32) as u64
-                sr = sr -% ((px >> 16) & 255)
-                sg = sg -% ((px >> 8) & 255)
-                sb = sb -% (px & 255)
-                n = n - 1
-            }
-            x = x + 1
-        }
-        y = y + 1
-    }
+// r464: THE LOOP IS ASSEMBLY NOW. firnc turns every `+` into a load, an add with an overflow check and a store, so this loop cost
+// about 60 ns a pixel and one 640 x 416 menu 77 - 105 ms. `tools/blur/blurasm.py` holds the same arithmetic (same reciprocal table
+// `rt`, same rounding, same window) in registers; `tools/blur/asmtest.c` compares it with the old Firn loop on random pictures.
+// `rt` points at the 40 words `rt[n] = recip_of(n)` that `blur_flaeche` fills once per filter run.
+fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64) {
+    var blk: [u64; 8] = [0 as u64; 8]
+    blk[0] = quelle
+    blk[1] = ziel
+    blk[2] = w
+    blk[3] = h
+    blk[4] = r
+    blk[5] = rt
+    asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\n1:\nxor esi,esi\nxor edi,edi\nxor r8d,r8d\nxor r9d,r9d\nxor r10d,r10d\n2:\ncmp r10,[rdx+16]\njae 3f\ncmp r10,[rdx+32]\nja 3f\nmov r11,[rdx]\nmov eax,[r11+r10*4]\nmovzx ecx,al\nadd r8,rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nadd rdi,rcx\nshr eax,16\nmovzx eax,al\nadd rsi,rax\ninc r9\ninc r10\njmp 2b\n3:\nxor r10d,r10d\n4:\nmov rcx,[rdx+40]\nmov rcx,[rcx+r9*8]\nmov rax,rsi\nimul rax,rcx\nadd rax,262144\nshr rax,19\nshl eax,16\nmov r11,rdi\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,8\nor eax,r11d\nmov r11,r8\nimul r11,rcx\nadd r11,262144\nshr r11,19\nor eax,r11d\nmov r11,[rdx+8]\nmov [r11+r10*4],eax\nmov rax,[rdx+32]\nlea rax,[rax+r10+1]\ncmp rax,[rdx+16]\njae 5f\nmov r11,[rdx]\nmov eax,[r11+rax*4]\nmovzx ecx,al\nadd r8,rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nadd rdi,rcx\nshr eax,16\nmovzx eax,al\nadd rsi,rax\ninc r9\n5:\ncmp r10,[rdx+32]\njb 6f\nmov rax,r10\nsub rax,[rdx+32]\nmov r11,[rdx]\nmov eax,[r11+rax*4]\nmovzx ecx,al\nsub r8,rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nsub rdi,rcx\nshr eax,16\nmovzx eax,al\nsub rsi,rax\ndec r9\n6:\ninc r10\ncmp r10,[rdx+16]\njb 4b\nmov rax,[rdx+16]\nshl rax,2\nadd [rdx],rax\nadd [rdx+8],rax\nmov rax,[rdx+24]\ndec rax\nmov [rdx+24],rax\njnz 1b\n0:",
+        in("rdi") (&blk[0]) as u64,
+        clobber("rax"),
+        clobber("rcx"),
+        clobber("rdx"),
+        clobber("rsi"),
+        clobber("rdi"),
+        clobber("r8"),
+        clobber("r9"),
+        clobber("r10"),
+        clobber("r11"),
+        clobber("memory"))
 }
 
 // SENKRECHT -- ABER ZEILENWEISE GELESEN, und das ist der Unterschied
@@ -7420,84 +7482,32 @@ fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
 // Also: EINE Zeile gleitender Summen (drei Kanaele mal Breite) im
 // Speicher halten und das Bild von oben nach unten durchlaufen. Jeder
 // Zugriff ist dann fortlaufend.
-fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64) {
+fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64) {
     let sum: u64 = gs(state, S_BC_SUM)
     if sum == 0 {
         return
     }
-    let gr: u64 = sum
-    let gg: u64 = sum +% BLUR_W_MAX *% 8
-    let gb: u64 = sum +% BLUR_W_MAX *% 16
-    // Die Summenzeile leeren.
-    fill_words(gr, 0, w)
-    fill_words(gg, 0, w)
-    fill_words(gb, 0, w)
-    var n: u64 = 0
-    var k: u64 = 0
-    while k <= r && k < h {
-        let qz: u64 = quelle +% k *% w *% 4
-        var x: u64 = 0
-        while x < w {
-            let px: u64 = __mmio_read32((qz +% x *% 4) as *mut u32) as u64
-            __mmio_write64((gr +% x *% 8) as *mut u64,
-                __mmio_read64((gr +% x *% 8) as *mut u64) + ((px >> 16) & 255))
-            __mmio_write64((gg +% x *% 8) as *mut u64,
-                __mmio_read64((gg +% x *% 8) as *mut u64) + ((px >> 8) & 255))
-            __mmio_write64((gb +% x *% 8) as *mut u64,
-                __mmio_read64((gb +% x *% 8) as *mut u64) + (px & 255))
-            x = x + 1
-        }
-        n = n + 1
-        k = k + 1
-    }
-    var y: u64 = 0
-    while y < h {
-        let zz: u64 = ziel +% y *% w *% 4
-        let rec: u64 = recip_of(n)
-        var x: u64 = 0
-        while x < w {
-            let vr: u64 = __mmio_read64((gr +% x *% 8) as *mut u64)
-            let vg: u64 = __mmio_read64((gg +% x *% 8) as *mut u64)
-            let vb: u64 = __mmio_read64((gb +% x *% 8) as *mut u64)
-            __mmio_write32((zz +% x *% 4) as *mut u32,
-                ((bdiv(vr, rec) << 16) | (bdiv(vg, rec) << 8)
-                    | bdiv(vb, rec)) as u32)
-            x = x + 1
-        }
-        let add: u64 = y + r + 1
-        if add < h {
-            let qz: u64 = quelle +% add *% w *% 4
-            var xa: u64 = 0
-            while xa < w {
-                let px: u64 = __mmio_read32((qz +% xa *% 4) as *mut u32) as u64
-                __mmio_write64((gr +% xa *% 8) as *mut u64,
-                    __mmio_read64((gr +% xa *% 8) as *mut u64) + ((px >> 16) & 255))
-                __mmio_write64((gg +% xa *% 8) as *mut u64,
-                    __mmio_read64((gg +% xa *% 8) as *mut u64) + ((px >> 8) & 255))
-                __mmio_write64((gb +% xa *% 8) as *mut u64,
-                    __mmio_read64((gb +% xa *% 8) as *mut u64) + (px & 255))
-                xa = xa + 1
-            }
-            n = n + 1
-        }
-        if y >= r {
-            let sub: u64 = y - r
-            let qz: u64 = quelle +% sub *% w *% 4
-            var xs: u64 = 0
-            while xs < w {
-                let px: u64 = __mmio_read32((qz +% xs *% 4) as *mut u32) as u64
-                __mmio_write64((gr +% xs *% 8) as *mut u64,
-                    __mmio_read64((gr +% xs *% 8) as *mut u64) -% ((px >> 16) & 255))
-                __mmio_write64((gg +% xs *% 8) as *mut u64,
-                    __mmio_read64((gg +% xs *% 8) as *mut u64) -% ((px >> 8) & 255))
-                __mmio_write64((gb +% xs *% 8) as *mut u64,
-                    __mmio_read64((gb +% xs *% 8) as *mut u64) -% (px & 255))
-                xs = xs + 1
-            }
-            n = n - 1
-        }
-        y = y + 1
-    }
+    // r464: assembly, like `blur_h`; the three sum rows lie BLUR_W_MAX words (27520 octets) apart, the number is in the asm text
+    var blk: [u64; 8] = [0 as u64; 8]
+    blk[0] = quelle
+    blk[1] = ziel
+    blk[2] = w
+    blk[3] = h
+    blk[4] = r
+    blk[5] = rt
+    blk[6] = sum
+    asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov r8,[rdx+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[rdx+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[rdx+16]\nrep stosq\nlea rdi,[r8+55040]\nmov rcx,[rdx+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[rdx+32]\nja 4f\ncmp r10,[rdx+24]\njae 4f\nmov rsi,r10\nimul rsi,[rdx+16]\nmov rax,[rdx]\nlea rsi,[rax+rsi*4]\nxor edi,edi\n2:\nmov eax,[rsi+rdi*4]\nmovzx ecx,al\nadd [r8+rdi*8+55040],rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nadd [r8+rdi*8+27520],rcx\nshr eax,16\nmovzx eax,al\nadd [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 2b\ninc r9\ninc r10\njmp 1b\n4:\nxor r10d,r10d\n5:\nmov rcx,[rdx+40]\nmov rcx,[rcx+r9*8]\nmov rsi,[rdx+8]\nxor edi,edi\n6:\nmov rax,[r8+rdi*8]\nimul rax,rcx\nadd rax,262144\nshr rax,19\nshl eax,16\nmov r11,[r8+rdi*8+27520]\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,8\nor eax,r11d\nmov r11,[r8+rdi*8+55040]\nimul r11,rcx\nadd r11,262144\nshr r11,19\nor eax,r11d\nmov [rsi+rdi*4],eax\ninc rdi\ncmp rdi,[rdx+16]\njb 6b\nmov rax,[rdx+32]\nlea rax,[r10+rax+1]\ncmp rax,[rdx+24]\njae 8f\nimul rax,[rdx+16]\nmov rsi,[rdx]\nlea rsi,[rsi+rax*4]\nxor edi,edi\n7:\nmov eax,[rsi+rdi*4]\nmovzx ecx,al\nadd [r8+rdi*8+55040],rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nadd [r8+rdi*8+27520],rcx\nshr eax,16\nmovzx eax,al\nadd [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 7b\ninc r9\n8:\ncmp r10,[rdx+32]\njb 3f\nmov rax,r10\nsub rax,[rdx+32]\nimul rax,[rdx+16]\nmov rsi,[rdx]\nlea rsi,[rsi+rax*4]\nxor edi,edi\n9:\nmov eax,[rsi+rdi*4]\nmovzx ecx,al\nsub [r8+rdi*8+55040],rcx\nmov ecx,eax\nshr ecx,8\nmovzx ecx,cl\nsub [r8+rdi*8+27520],rcx\nshr eax,16\nmovzx eax,al\nsub [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 9b\ndec r9\n3:\nmov rax,[rdx+16]\nshl rax,2\nadd [rdx+8],rax\ninc r10\ncmp r10,[rdx+24]\njb 5b\n0:",
+        in("rdi") (&blk[0]) as u64,
+        clobber("rax"),
+        clobber("rcx"),
+        clobber("rdx"),
+        clobber("rsi"),
+        clobber("rdi"),
+        clobber("r8"),
+        clobber("r9"),
+        clobber("r10"),
+        clobber("r11"),
+        clobber("memory"))
 }
 
 // ------------------------------------------------ Toenung und Rauschen
@@ -7990,10 +8000,17 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     // 2. ZWEIMAL Kasten, jedes Mal waagrecht und senkrecht. Zweimal
     //    hintereinander ist optisch fast ein Gauss und kostet einen
     //    Bruchteil.
-    blur_h(a, b, w, h, r)
-    blur_v(state, b, a, w, h, r)
-    blur_h(a, b, w, h, r)
-    blur_v(state, b, a, w, h, r)
+    var rt: [u64; 40] = [0 as u64; 40]
+    var rk: u64 = 1
+    while rk < 40 {
+        rt[rk as usize] = recip_of(rk)
+        rk = rk + 1
+    }
+    let rtp: u64 = (&rt[0]) as u64
+    blur_h(a, b, w, h, r, rtp)
+    blur_v(state, b, a, w, h, r, rtp)
+    blur_h(a, b, w, h, r, rtp)
+    blur_v(state, b, a, w, h, r, rtp)
     // 3. Toenung und Rauschen, und dann hinaus. Beides in EINEM
     //    Durchgang ueber die Flaeche -- und in denselben Puffer `b`
     //    geschrieben, aus dem der naechste Treffer kopiert.
@@ -8014,6 +8031,21 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     let wt: i64 = by0
     let wr: i64 = bx1
     let wb: i64 = by1
+    // r464: the middle of every row (all of it, except in the corner rows, where only the part between the two corner columns)
+    // goes through ONE assembly loop (`tools/blur/blurasm.py`, block M): tint, grain and clamp in registers, 5 - 10 ns a
+    // pixel instead of about 120. The few pixels in the corner columns keep the Firn code below: they decide per pixel
+    // whether the frosting follows the rounded shape.
+    var mblk: [u64; 12] = [0 as u64; 12]
+    var tclip: u64 = tint
+    if tclip > 100 {
+        tclip = 100
+    }
+    mblk[5] = amp
+    mblk[6] = amp *% 2 + 1
+    mblk[7] = 100 - tclip
+    mblk[8] = ((ton >> 16) & 255) *% tclip
+    mblk[9] = ((ton >> 8) & 255) *% tclip
+    mblk[10] = (ton & 255) *% tclip
     var ry: u64 = 0
     while ry < h {
         let qz: u64 = a +% ry *% w *% 4
@@ -8030,41 +8062,80 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
                 cyc = wb - crad as i64
             }
         }
+        // [ms, me) = the columns that cannot be inside a corner column: the assembly takes them
+        var ms: u64 = 0
+        var me: u64 = w
+        if corner_row {
+            let lo: i64 = wl + crad as i64 - x0
+            let hi: i64 = wr - crad as i64 - x0
+            if hi <= lo || hi <= 0 || lo >= w as i64 {
+                ms = 0
+                me = 0
+            } else {
+                if lo > 0 {
+                    ms = lo as u64
+                }
+                if hi < w as i64 {
+                    me = hi as u64
+                }
+            }
+        }
         var rx: u64 = 0
         while rx < w {
-            let c: u64 = __mmio_read32((qz +% rx *% 4) as *mut u32) as u64
-            var keep: bool = false
-            if corner_row {
-                let pxx: i64 = x0 + rx as i64
-                var cxc: i64 = 0
-                var in_col: bool = false
-                if pxx < wl + crad as i64 {
-                    in_col = true
-                    cxc = wl + crad as i64
-                } else if pxx >= wr - crad as i64 {
-                    in_col = true
-                    cxc = wr - crad as i64
-                }
-                if in_col {
-                    let ddx: i64 = 2 * (pxx - cxc) + 1
-                    let ddy: i64 = 2 * (py - cyc) + 1
-                    let rr2: i64 = 4 * (crad as i64) * (crad as i64)
-                    if ddx * ddx + ddy * ddy > rr2 {
-                        keep = true
+            if rx == ms && me > ms {
+                mblk[0] = qz +% ms *% 4
+                mblk[1] = zz +% ms *% 4
+                mblk[2] = me - ms
+                mblk[3] = x0 as u64 + ms
+                mblk[4] = (y0 as u64 + ry) *% 19349663
+                asm("mov r11,rdi\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmov r8,[r11]\nmov r9,[r11+8]\nmov r10,[r11+24]\n1:\nmov rcx,[r11+40]\ntest rcx,rcx\njz 2f\nmov rcx,r10\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rax,rcx\nxor edx,edx\nmov rcx,[r11+48]\ndiv rcx\nsub rdx,[r11+40]\nmov [r11+88],rdx\n2:\nmov eax,[r8]\nmov esi,eax\nshr esi,16\nand esi,255\nmov edi,eax\nshr edi,8\nand edi,255\nmov ecx,eax\nand ecx,255\nimul rsi,[r11+56]\nadd rsi,[r11+64]\nimul rsi,rsi,5243\nshr rsi,19\nimul rdi,[r11+56]\nadd rdi,[r11+72]\nimul rdi,rdi,5243\nshr rdi,19\nimul rcx,[r11+56]\nadd rcx,[r11+80]\nimul rcx,rcx,5243\nshr rcx,19\nmov rdx,[r11+40]\ntest rdx,rdx\njz 3f\nmov rdx,[r11+88]\nadd rsi,rdx\nxor eax,eax\ntest rsi,rsi\ncmovs rsi,rax\nmov eax,255\ncmp rsi,rax\ncmova rsi,rax\nadd rdi,rdx\nxor eax,eax\ntest rdi,rdi\ncmovs rdi,rax\nmov eax,255\ncmp rdi,rax\ncmova rdi,rax\nadd rcx,rdx\nxor eax,eax\ntest rcx,rcx\ncmovs rcx,rax\nmov eax,255\ncmp rcx,rax\ncmova rcx,rax\n3:\nshl rsi,16\nshl rdi,8\nor rsi,rdi\nor rsi,rcx\nmov [r9],esi\nadd r8,4\nadd r9,4\ninc r10\nmov rax,[r11+16]\ndec rax\nmov [r11+16],rax\njnz 1b\n0:",
+                    in("rdi") (&mblk[0]) as u64,
+                    clobber("rax"),
+        clobber("rcx"),
+        clobber("rdx"),
+        clobber("rsi"),
+        clobber("rdi"),
+        clobber("r8"),
+        clobber("r9"),
+        clobber("r10"),
+        clobber("r11"),
+        clobber("memory"))
+                rx = me
+            } else {
+                let c: u64 = __mmio_read32((qz +% rx *% 4) as *mut u32) as u64
+                var keep: bool = false
+                if corner_row {
+                    let pxx: i64 = x0 + rx as i64
+                    var cxc: i64 = 0
+                    var in_col: bool = false
+                    if pxx < wl + crad as i64 {
+                        in_col = true
+                        cxc = wl + crad as i64
+                    } else if pxx >= wr - crad as i64 {
+                        in_col = true
+                        cxc = wr - crad as i64
+                    }
+                    if in_col {
+                        let ddx: i64 = 2 * (pxx - cxc) + 1
+                        let ddy: i64 = 2 * (py - cyc) + 1
+                        let rr2: i64 = 4 * (crad as i64) * (crad as i64)
+                        if ddx * ddx + ddy * ddy > rr2 {
+                            keep = true
+                        }
                     }
                 }
+                if keep {
+                    let orow: u64 = fb.draw_at(state) +% (y0 as u64 + ry) *% fb.pitch(state)
+                    let orig: u64 = orow +% (x0 as u64 + rx) *% 4
+                    __mmio_write32((zz +% rx *% 4) as *mut u32,
+                        __mmio_read32(orig as *mut u32))
+                } else {
+                    __mmio_write32((zz +% rx *% 4) as *mut u32,
+                        blur_mix(c, ton, tint, amp, x0 as u64 + rx,
+                            y0 as u64 + ry) as u32)
+                }
+                rx = rx + 1
             }
-            if keep {
-                let orow: u64 = fb.draw_at(state) +% (y0 as u64 + ry) *% fb.pitch(state)
-                let orig: u64 = orow +% (x0 as u64 + rx) *% 4
-                __mmio_write32((zz +% rx *% 4) as *mut u32,
-                    __mmio_read32(orig as *mut u32))
-            } else {
-                __mmio_write32((zz +% rx *% 4) as *mut u32,
-                    blur_mix(c, ton, tint, amp, x0 as u64 + rx,
-                        y0 as u64 + ry) as u32)
-            }
-            rx = rx + 1
         }
         fb_row(state, x0 as u64, y0 as u64 + ry, zz, w)
         ry = ry + 1
@@ -8165,6 +8236,27 @@ fn blur_reset(state: u64) {
     ss(state, S_BLURCACHE, 0)
     ss(state, S_BLURPX, 0)
     ss(state, S_BLURUS, 0)
+}
+
+// The old red close box of the classic shape (FM_CAPTION = 0): the same loop as before, in a function of its own so that a
+// window with a client strip (r454) can paint it AFTER its client area.
+fn paint_close_classic(state: u64, wx: i64, wy: i64, ow: i64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let bx: i64 = wx + ow - border(state) as i64 - close_w(state) as i64 - 3
+    let by: i64 = wy + 4
+    if bx + close_w(state) as i64 > ax0 && bx < ax1
+        && by + close_w(state) as i64 > ay0 {
+        let rot: u64 = deco(state, DK_CLOSE)
+        fb.fill(state, bx as u64, by as u64, close_w(state), close_w(state), rot)
+        let weiss: u64 = deco(state, DK_CLOSE_MARK)
+        var k: u64 = 3
+        while k < close_w(state) - 3 {
+            fb.pixel(state, (bx + k as i64) as u64,
+                (by + k as i64) as u64, weiss)
+            fb.pixel(state, (bx + k as i64) as u64,
+                (by + (close_w(state) - 1 - k) as i64) as u64, weiss)
+            k = k + 1
+        }
+    }
 }
 
 fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
@@ -8413,7 +8505,11 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Fensterradius (sonst schneidet eine eckige Leiste die runde Ecke
     // ab, die `fill_round` gerade gemalt hat), und ueber die Hoehe
     // laeuft ein Verlauf von wenigen Helligkeitsstufen.
-    paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+    // r454: a window that paints its own strip gets no title background; the caption buttons follow the client area
+    let capc: bool = cap_client(state, i)
+    if !capc {
+        paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+    }
     // ------------------------------- die Schaltflaechen rechts oben
     //
     // ZWEI FASSUNGEN, UND DIE ALTE BLEIBT WORTGLEICH STEHEN. `classic`
@@ -8424,24 +8520,12 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     var bx: i64 = wx + ow - border(state) as i64 - close_w(state) as i64 - 3
     if form(state, FM_CAPTION) != 0 {
         bx = wx + ow - border(state) as i64 - (CAP_N * cap_w(state)) as i64
-        paint_caption(state, i, wx, wy, ow, titel, schrift,
-            ax0, ay0, ax1, ay1)
-    } else {
-        let by: i64 = wy + 4
-        if bx + close_w(state) as i64 > ax0 && bx < ax1
-            && by + close_w(state) as i64 > ay0 {
-            let rot: u64 = deco(state, DK_CLOSE)
-            fb.fill(state, bx as u64, by as u64, close_w(state), close_w(state), rot)
-            let weiss: u64 = deco(state, DK_CLOSE_MARK)
-            var k: u64 = 3
-            while k < close_w(state) - 3 {
-                fb.pixel(state, (bx + k as i64) as u64,
-                    (by + k as i64) as u64, weiss)
-                fb.pixel(state, (bx + k as i64) as u64,
-                    (by + (close_w(state) - 1 - k) as i64) as u64, weiss)
-                k = k + 1
-            }
+        if !capc {
+            paint_caption(state, i, wx, wy, ow, titel, schrift,
+                ax0, ay0, ax1, ay1)
         }
+    } else if !capc {
+        paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
     }
     // ===================================== RUNDE NETVIEW, NACHTRAG
     //
@@ -8455,7 +8539,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Bildschirm voller Zeichen ohne Aussage.
     var before: i64 = 0
     let sicht: u64 = netview.view_of(state, win_owner(state, i))
-    if sicht != netview.V_REAL && sicht <= 3 {
+    if sicht != netview.V_REAL && sicht <= 3 && !capc {
         title_mark(state, sicht - 1, wx + border(state) as i64 + title_pad(state) as i64,
             wy + border(state) as i64
                 + ((title_h(state) - border(state) - netmark.H) / 2) as i64,
@@ -8464,14 +8548,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     }
     // der Titel
     let f: u64 = gs(state, S_FONT_UI)
-    if f < ttf.MAX_FONTS {
+    if f < ttf.MAX_FONTS && !capc {
         title_text(state, i, f, wx + border(state) as i64 + title_pad(state) as i64 + before,
             wy + title_base(state, f),
             schrift, ax0, ay0, ax1, ay1, bx)
     }
     // die Flaeche der Anwendung
     let px0: i64 = wx + border(state) as i64
-    let py0: i64 = wy + title_h(state) as i64
+    let py0: i64 = wy + iny(state, i) as i64
     let sx0: i64 = imax(px0, ax0)
     let sy0: i64 = imax(py0, ay0)
     let sx1: i64 = imin(px0 + wg(state, i, W_W) as i64, ax1)
@@ -8564,6 +8648,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         var rx0: i64 = sx0
         var rx1: i64 = sx1
         let dyb: i64 = wy + oh - 1 - r
+        if capc && rad > 0 && r - wy < rad as i64 {
+            // r454: the strip reaches the top corners: the same skip as at the bottom, counted from the top edge
+            let skt: i64 = ecke.corner_skip(rad, (r - wy) as u64) as i64
+            if skt > 0 {
+                rx0 = imax(rx0, px0 + skt)
+                rx1 = imin(rx1, px0 + cw - skt)
+            }
+        }
         if rad > 0 && dyb >= 0 && dyb < rad as i64 {
             // `skr` zaehlt vom FENSTERRAND, die Flaeche faengt eine
             // Rahmenbreite weiter innen an -- und sie hoert deshalb
@@ -8595,6 +8687,15 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             }
         }
         r = r + 1
+    }
+    // r454: the caption buttons of a window with a client strip lie over the strip: after the client area
+    if capc {
+        if form(state, FM_CAPTION) != 0 {
+            paint_caption(state, i, wx, wy, ow, titel, schrift,
+                ax0, ay0, ax1, ay1)
+        } else {
+            paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
+        }
     }
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
 }
@@ -11807,6 +11908,26 @@ fn on_mouse(state: u64) {
                     ss(state, S_SZOFFY, oy as u64)
                     return
                 }
+                // r454: the strip of a window that paints its own title bar. The empty part (the drag region the program
+                // declared) is the title bar: a press moves the window, a second press within one second (the system-wide double click time of wlib) maximises or restores
+                // it. The rest of the strip -- the tabs, the plus button -- is the program's: the press goes to it as a
+                // normal click (below). The caption buttons were tested above, the lock was tested before all of this.
+                if cap_client(state, i) && lokal_y >= 0 && lokal_y < strip_h(state) as i64
+                    && strip_drag_at(state, i, lokal_x) {
+                    let nowt: u64 = time.mono_ns(state)
+                    if gs(state, S_STRIPWIN) == i + 1 && nowt - gs(state, S_STRIPT) < 1000000000 {
+                        ss(state, S_STRIPWIN, 0)
+                        cap_act(state, i, CAP_MAX)
+                        return
+                    }
+                    ss(state, S_STRIPWIN, i + 1)
+                    ss(state, S_STRIPT, nowt)
+                    drag_begin(state, i)
+                    ss(state, S_DRAG, i + 1)
+                    ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
+                    ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
+                    return
+                }
                 if lokal_y < 0 {
                     // die Titelleiste: ziehen
                     // RUNDE TILING: wer aus dem Baum gezogen wird, muss
@@ -14764,8 +14885,8 @@ fn place_win(state: u64, i: u64, n: u64) {
         w = ow - border(state) * 2
     }
     var h: u64 = 16
-    if oh > title_h(state) + border(state) + 16 {
-        h = oh - title_h(state) - border(state)
+    if oh > iny(state, i) + border(state) + 16 {
+        h = oh - iny(state, i) - border(state)
     }
     // RUNDE SCHIRM-ECHT: DIE DRITTE 2048 -- dieselbe vergessene Zahl,
     // die `resize_win` schon losgeworden ist. Beim Kacheln bekommt ein

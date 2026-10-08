@@ -391,6 +391,16 @@ class Fahrer:
             # and their checkers use the same numbers -- the rows are 52 high and forgive it
             return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
         b, th = self.chrome()
+        # r454: a window that paints its own title strip (the file manager's tabs) has its drawing area at the top of the
+        # title bar: it says so on the serial line (`explorer: strip h=`)
+        if re.search(r"%s: strip h=\d+" % prog, t):
+            th = b
+            # the window may have been moved since it was created: the last F12 dump has its place now
+            k = t.rfind("wm: fenliste")
+            if k >= 0:
+                for w in re.finditer(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) w=\d+ h=\d+ lay=\d+ fl=(\d+) ", t[k:]):
+                    if int(w.group(3)) & 64:
+                        return (int(w.group(1)) + b, int(w.group(2)) + th)
         return (int(m.group(1)) + b, int(m.group(2)) + th)
 
     # r402: the frame and the whole top part of a framed window at scale 1, from the shape file the
@@ -1025,6 +1035,40 @@ def main():
         # und wo es vorher stand, weiss nur der Server. Getippte
         # Zahlen treffen nach dem ersten Ziehen daneben, genau wie bei
         # `ziehkante`. Die Greifstelle ist die MITTE der Titelleiste.
+        # r454: `kappe <id> min|max|close` -- press one of the three caption buttons of window <id> (the server's, over the
+        # client strip as well as in its own title bar). The geometry is the one `wm: fen` reported plus the chrome measures
+        # (`bar=`, `capw=`, `fr=` of the `wm: geom`-style line), so it hits what the server drew.
+        elif b == "kappe":
+            t = arg.split()
+            if t[0] == "fokus":
+                wid = f.fokus_id()
+                if wid is None:
+                    print("kappe fokus -> KEIN FOKUS gemeldet")
+                    fehler += 1
+                    continue
+            else:
+                wid = int(t[0])
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("kappe %d -> KEINE GEOMETRIE gemeldet" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            tx = lies(f.serial)
+            cm = None
+            for cm in re.finditer(r" bar=(\d+) capw=(\d+) fr=(\d+)", tx):
+                pass
+            if cm is None:
+                print("kappe %d -> KEINE MASSE gemeldet" % wid)
+                fehler += 1
+                continue
+            bar, capw, fr = (int(cm.group(i)) for i in (1, 2, 3))
+            n = {"min": 0, "max": 1, "close": 2}[t[1]]
+            ow = ww + 2 * fr
+            x0 = wx + ow - fr - 3 * capw + n * capw + capw // 2
+            y0 = wy + fr + bar // 2
+            f.klick(x0, y0)
+            print("kappe id=%d %s -> %d,%d" % (wid, t[1], x0, y0))
         elif b == "ziehtitel":
             t = arg.split()
             if t[0] == "fokus":
@@ -1063,6 +1107,20 @@ def main():
                 x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.klick_nahe(x, y)
             print("klicknah %s -> %d,%d" % (arg, x, y))
+        # r454: `ziehemitte <name> <dx>,<dy>` -- the same from the CENTRE of the reported rectangle (a tab: its label, not
+        # the cross in its corner; the empty part of the title strip)
+        elif b == "ziehemitte":
+            t = arg.split()
+            r = f.rechteck(t[0])
+            if r is None:
+                print("ziehemitte %s -> KEIN RECHTECK GEMELDET" % t[0])
+                fehler += 1
+                continue
+            dx, dy = (int(v) for v in t[1].split(","))
+            x0, y0 = r[0] + r[2] // 2, r[1] + r[3] // 2
+            f.ziehe(x0, y0, x0 + dx, y0 + dy)
+            print("ziehemitte %s -> von %d,%d um %d,%d  (rect %d,%d %dx%d)"
+                  % (t[0], x0, y0, dx, dy, r[0], r[1], r[2], r[3]))
         elif b == "zieheauf":
             t = arg.split()
             r = f.rechteck(t[0])

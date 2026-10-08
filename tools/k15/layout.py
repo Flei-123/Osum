@@ -76,6 +76,9 @@ def main():
     # Reihenfolge innerhalb einer Spalte (gleiche linke Kante)
     spalten = {}
     for (i, k, x, y, w, h) in r:
+        # r454: the ids from 50 on (the tabs, the drag region) sit in the title strip above everything, whatever their number
+        if i >= 50:
+            continue
         spalten.setdefault(x, []).append((i, y))
     for x, liste in spalten.items():
         if len(liste) < 2:
