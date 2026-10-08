@@ -10,6 +10,7 @@ typedef uint32_t u32;
 extern void blur_h_asm(u64 *p);
 extern void blur_v_asm(u64 *p);
 extern void blur_m_asm(u64 *p);
+extern void blur_d_asm(u64 *p);
 #define SHIFT 19
 #define RUND 262144ull
 static u64 rec[64];
@@ -96,6 +97,21 @@ int main(void) {
             if (b[i] != want) { printf("FAIL m t=%d i=%lu tint=%lu amp=%lu got=%06x want=%06x\n", t, i, tint, amp, b[i], want); bad++; break; }
         }
         free(a); free(b); cases++;
+    }
+    /* r465: one row of the dragged window, against the Firn loop (division per pixel) */
+    for (int t = 0; t < 2000; t++) {
+        long bw = 1 + rnd32() % 400, nw = 1 + rnd32() % 500;
+        if (t % 3 == 0) nw = bw;
+        long ox = (long)(rnd32() % 50) - 20;
+        long c0 = ox + (long)(rnd32() % nw), c1 = c0 + 1 + (long)(rnd32() % (ox + nw - c0));
+        u32 *src = malloc(bw * 4), *b = malloc((c1 - c0) * 4), *w2 = malloc((c1 - c0) * 4);
+        for (long i = 0; i < bw; i++) src[i] = rnd32();
+        for (long x = c0; x < c1; x++) w2[x - c0] = src[(x - ox) * bw / nw] & 0xFFFFFF;
+        long num0 = (c0 - ox) * bw, q0 = num0 / nw, r0 = num0 - q0 * nw, qs = bw / nw, rs = bw - qs * nw;
+        u64 p[8] = {(u64)src, (u64)b, (u64)(c1 - c0), (u64)q0, (u64)r0, (u64)qs, (u64)rs, (u64)nw};
+        blur_d_asm(p);
+        if (memcmp(b, w2, (c1 - c0) * 4)) { printf("FAIL d t=%d bw=%ld nw=%ld\n", t, bw, nw); bad++; }
+        free(src); free(b); free(w2); cases++;
     }
     printf("blurasm: %ld cases, %d failed\n", cases, bad);
     return bad ? 1 : 0;

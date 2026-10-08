@@ -7543,29 +7543,34 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
         let r0: i64 = num0 - q0 * nw
         let qs: i64 = bw / nw
         let rs: i64 = bw - qs * nw
+        // r465: the inner loop is assembly (`tools/blur/blurasm.py`, routine d; 752 + 2000 cases in `asmtest.c`). The old Firn loop
+        // cost about 10 ns a pixel (stack code, overflow checks); the column test `0 <= q < bw` is gone because the clip above
+        // keeps every x in [ox, ox + nw), which makes q = (x - ox) * bw / nw lie in [0, bw).
+        var blk: [u64; 8] = [0 as u64; 8]
+        blk[2] = (cl1 - cl0) as u64
+        blk[3] = q0 as u64
+        blk[4] = r0 as u64
+        blk[5] = qs as u64
+        blk[6] = rs as u64
+        blk[7] = nw as u64
         var y: i64 = ct0
         while y < ct1 {
             let sy: i64 = (y - oy) * bh / nh
             if sy >= 0 && sy < bh {
-                let src_row: u64 = buf +% (sy as u64) *% stride *% 4
-                var out: u64 = dst0 +% (y as u64) *% pitch +% (cl0 as u64) *% 4
-                var q: i64 = q0
-                var r: i64 = r0
-                var n: i64 = cl1 - cl0
-                while n > 0 {
-                    if q >= 0 && q < bw {
-                        let c: u64 = __mmio_read32((src_row +% (q as u64) *% 4) as *mut u32) as u64
-                        __mmio_write32(out as *mut u32, (c & RGB24) as u32)
-                    }
-                    out = out +% 4
-                    q = q + qs
-                    r = r + rs
-                    if r >= nw {
-                        r = r - nw
-                        q = q + 1
-                    }
-                    n = n - 1
-                }
+                blk[0] = buf +% (sy as u64) *% stride *% 4
+                blk[1] = dst0 +% (y as u64) *% pitch +% (cl0 as u64) *% 4
+                asm("mov rdx,rdi\nmov rcx,[rdx+16]\ntest rcx,rcx\njz 0f\nmov rsi,[rdx]\nmov rdi,[rdx+8]\nmov r8,[rdx+24]\nmov r9,[rdx+32]\nmov r10,[rdx+40]\nmov r11,[rdx+48]\n1:\nmov eax,[rsi+r8*4]\nand eax,16777215\nmov [rdi],eax\nadd rdi,4\nadd r8,r10\nadd r9,r11\ncmp r9,[rdx+56]\njl 2f\nsub r9,[rdx+56]\ninc r8\n2:\ndec rcx\njnz 1b\n0:",
+                    in("rdi") (&blk[0]) as u64,
+                    clobber("rax"),
+                    clobber("rcx"),
+                    clobber("rdx"),
+                    clobber("rsi"),
+                    clobber("rdi"),
+                    clobber("r8"),
+                    clobber("r9"),
+                    clobber("r10"),
+                    clobber("r11"),
+                    clobber("memory"))
             }
             y = y + 1
         }
