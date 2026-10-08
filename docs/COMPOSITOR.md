@@ -414,6 +414,14 @@ same integers (`sh_ramp`, `sh_build`: `isqrt`, 16ths of a point) and blends the 
 A plain framed window now takes only its own outer rectangle out of the judged area (before: 48 points around it); the ring of shadow around it is
 judged. A pixel the client left translucent is not touched and not judged, as before.
 
+**Two kernel bugs the judge found (08.10.2026).** (1) `shadow_mask` placed the top and bottom runs `side` rows away from the window instead of `reach`:
+the shadow floated R points too far out above and below (visible in the screenshot of a `shadow=on` boot; `wmd` had copied the same rows, so "0
+differ" was true and useless -- a judge that shares a bug with the oracle cannot see it). Both now start `reach` rows above / end `reach` rows below
+the window. `shadow.sh` therefore also reads the PICTURE: the row just below and the column just right of the focused window must be darker than the
+wallpaper beyond the reach (`wmd: shadow-geo x y ow oh reach` names the window). (2) `paint_win` returned early when the clip did not touch the
+window itself, so a repaint of the background that lay only in the shadow ring (an icon, the wallpaper) wiped the shadow for good (1387 pixels of the
+top strip). It now lays the shadow again when the clip touches the ring.
+
 Gate: `tools/comp/shadow.sh` (0 judged pixels differ, `shadow=` windows and `shadowpx=` pixels per cycle on the cycle line) and the counter-proof
 `noshadow=1` (`wigapp=/bin/wmd,noshadow=1`): the ring is still judged but not composed, so the judge must see the missing shadow.
 
