@@ -51,7 +51,7 @@ stats() { # stats <serial>  ->  judged cycles, max compared, sum compared, sum d
 echo "== 1. the desktop with the shadow compositor =="
 run shd ""
 S="$D/shd/serial.txt"
-grep -a '^wmd:' "$S" | sed 's/^/        /' | head -40
+grep -a '^wmd:' "$S" | sed 's/^/        /' | head -60
 grep -aq '^wmd: ' "$S" || { echo "        (no wmd line; capture log tail:)"; tail -n 12 "$D/shd.log" | sed 's/^/        /'; grep -a "desk:\|wmd\|exec\|spawn\|fault\|page" "$S" | head -20 | cut -c1-200 | sed 's/^/        D: /'; grep -a "wmd\|ELF\|elf\|error\|Error" "$D/shd.log" | head -10 | cut -c1-200 | sed 's/^/        L: /'; }
 grep -aq '^wmd: ready screen=' "$S" && ok "wmd found the screen and the window table page" || bad "wmd did not start ($(grep -a '^wmd:' "$S" | head -2 | tr '\n' ' '))"
 read N CM CS DS UM < <(stats "$S")
