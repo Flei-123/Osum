@@ -391,19 +391,22 @@ shared and `wmd` judges 0 pixels (the counter-proof that "0 differences" is not 
 
 ### S3 -- measured: what a frame costs the kernel
 
-`tools/comp/shared.sh`, the same drehbuch (idle, start menu, file manager), once with shared buffers and once with `noshare` (the old `WIG_BLIT` path):
+`tools/comp/shared.sh`, the same drehbuch (idle, start menu, file manager), once with shared buffers and once with `noshare` (the old `WIG_BLIT` path),
+KVM, host load 8 - 14 (final run, 08.10.2026):
 
-| | frames | pixels the kernel copied out of clients | per frame | `WIG_BLIT` calls |
-|---|---|---|---|---|
-| `noshare` (before) | 294 | 17 348 896 | **59 010 px** | 31 296 |
-| shared (after) | 294 | 1 561 840 | **5 312 px** | 3 952 |
+| | frames | pixels the kernel copied out of clients | per frame | `WIG_BLIT` row calls | `win` phase per frame |
+|---|---|---|---|---|---|
+| `noshare` (before) | 301 | 16 246 784 | **53 976 px** | 30 880 | 3 576 us |
+| shared (after) | 289 | 1 598 992 | **5 532 px** | 3 760 | 4 463 us |
 
-The rest is what is still copied: menus (`NK_MENU` take the old path), a window during a drag, the first frame of a window. The shared windows
-named 15 712 752 pixels of damage without a copy. Pictures: idle 0 differing pixels, start menu 20, file manager 73..184 (the tooltip edge and the
-clock digits of the file dates; two shared runs differ from each other at the same places) -- the gate allows 512 (0.05 %).
+**Copies per frame fell by a factor of 9.8.** The `win` phase of `compose` did NOT get faster (3.6 -> 4.5 ms, within the noise of a loaded host): the saving
+is the copy that used to happen inside the client's flush call (`WIG_BLIT`), not the composing. What is still copied: menus (`NK_MENU` take the old path),
+a window during a drag, the first frame of a window, programs that do not use `fuiapp`. The shared windows named 16 130 013 pixels of damage without a copy.
+Pictures, shared vs `noshare`: idle 0 differing pixels, start menu 20 (the tooltip edge, an animation step), file manager 24 (the last digits of the file
+dates: the wall clock differs between boots; two shared runs differ from each other at 491 more places) -- the gate allows 512 (0.05 %).
 
 ### What did not get done / the order for the next rounds
 
 * S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
 * Terminal and desktop windows are not shared yet (`want_shared` is on for `fuiapp` programs); the pixels of those are not judged.
-* `look`: `'Gr\u00f6\u00dfe' does not match a second rasterisation` (file manager, x=867 y=183) is red on `main` as well (since the tab strip), not from this branch.
+* `look`: `'Größe' does not match a second rasterisation` (file manager, x=867 y=183) is red on `main` as well (since the tab strip), not from this branch.
