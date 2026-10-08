@@ -397,10 +397,16 @@ PY
     N=$(grep -ac 'opk: installed' "$OUT/store/serial.txt")
     num "Pakete eingespielt (Signatur geprueft)" "$N" eq 6
     hat "$OUT/store/serial.txt" "STORE-FERTIG" "und der Lauf kam durch"
+    # E-001 renamed the console lines (`opk: installed`, `opk: SIGNATURE WRONG`).
+    # The counter-proof used to look for the German words, never matched, and
+    # was skipped silently (alltag 45 -> 44). It is mandatory now: the rejection
+    # line must be there, and the tampered package must not be installed.
     if grep -qa 'boese' "$OUT/store/serial.txt" \
-       && grep -qa 'Signatur' "$OUT/store/serial.txt"; then
-        BO=$(grep -a -A1 'boese.opk' "$OUT/store/serial.txt" | grep -ac 'installiert boese')
+       && grep -qa 'opk: SIGNATURE WRONG' "$OUT/store/serial.txt"; then
+        BO=$(grep -a 'opk: installed' "$OUT/store/serial.txt" | grep -ac 'boese')
         num "GEGENPROBE: das gekippte Paket wurde NICHT eingespielt" "$BO" eq 0
+    else
+        bad "GEGENPROBE: the tampered package was neither rejected nor reported"
     fi
     M=$(python3 tools/osum/mkfs.py list "$OUT/store/disk.img" 2>/dev/null \
         | grep -ac 'osp/start')

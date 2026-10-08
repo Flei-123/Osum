@@ -326,6 +326,14 @@ def main(argv):
 
     ix = wx + (BORDER if deco else 0)
     iy = wy + (TITLE if deco else 0)
+    # r454: the file manager owns a caption strip (WF_CAPTION_CLIENT): its window
+    # buffer grows UPWARD by the strip, so buffer row 0 is `strip_h` rows above
+    # the classic client origin and every reported `base=` counts from there.
+    # The strip height is what the program itself asked for.
+    if titel == "Datei-Explorer":
+        sm = re.findall(rb"explorer: strip h=(\d+)", roh)
+        if sm and deco:
+            iy -= int(sm[-1])
     ax, ay = ix + tx, iy + tb
 
     # EIN TEXT, DER UEBER SEIN FENSTER HINAUSRAGT, IST NICHT MESSBAR.
