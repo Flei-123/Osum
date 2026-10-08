@@ -112,17 +112,61 @@ fn bd_blur(r: u64, passes: u64) {
 
 // Darken the picture: all of it by `dim` (0..256, 256 = unchanged), and the
 // lower part a little more, so that light text on it stays readable.
+//
+// r470 (contrast measured with tools/signinlook): the sea wallpaper is bright
+// right where the name and the status line are (the glow at the horizon,
+// luminance 0.48), and white text on it reached 2.0 to 1. A SCRIM: a soft
+// ellipse around the middle column darkens the picture there by up to
+// SCRIM_DEPTH/256 (quadratic fall-off to nothing at the edge, so it reads as
+// a vignette, not as a box). The rest of the picture keeps its colours.
+const SCRIM_DEPTH: u64 = 148
+const SCRIM_RX: u64 = 22 // half width of the ellipse, per cent of the width
+const SCRIM_RY: u64 = 42 // half height, per cent of the height
+const SCRIM_CY: u64 = 50 // centre, per cent of the height
+
 fn bd_shade(dim: u64) {
+    let cx: u64 = bd_w / 2
+    let cy: u64 = bd_h * SCRIM_CY / 100
+    var rx: u64 = bd_w * SCRIM_RX / 100
+    var ry: u64 = bd_h * SCRIM_RY / 100
+    if rx == 0 {
+        rx = 1
+    }
+    if ry == 0 {
+        ry = 1
+    }
     var y: u64 = 0
     while y < bd_h {
         // 256 at the top, 200 at the bottom row, times dim
         let k: u64 = ((256 - (y * 40) / bd_h) * dim) >> 8
+        var dy: u64 = 0
+        if y > cy {
+            dy = y - cy
+        } else {
+            dy = cy - y
+        }
+        let dy2: u64 = (dy * dy * 1024) / (ry * ry)
         var x: u64 = 0
         let row: u64 = bd_px + y * bd_w * 4
         while x < bd_w {
+            var kk: u64 = k
+            if dy2 < 1024 {
+                var dx: u64 = 0
+                if x > cx {
+                    dx = x - cx
+                } else {
+                    dx = cx - x
+                }
+                let d2: u64 = dy2 + (dx * dx * 1024) / (rx * rx)
+                if d2 < 1024 {
+                    let sv: u64 = 1024 - d2
+                    let sm: u64 = (sv * sv) >> 10
+                    kk = (k * (256 - ((sm * SCRIM_DEPTH) >> 10))) >> 8
+                }
+            }
             let a: u64 = __mmio_read32((row + x * 4) as *mut u32) as u64
-            let rb: u64 = (((a & 0x00FF00FF) * k) >> 8) & 0x00FF00FF
-            let g: u64 = (((a & 0x0000FF00) * k) >> 8) & 0x0000FF00
+            let rb: u64 = (((a & 0x00FF00FF) * kk) >> 8) & 0x00FF00FF
+            let g: u64 = (((a & 0x0000FF00) * kk) >> 8) & 0x0000FF00
             __mmio_write32((row + x * 4) as *mut u32, (rb | g | 0xFF000000) as u32)
             x = x + 1
         }

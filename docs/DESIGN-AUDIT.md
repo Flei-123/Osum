@@ -218,3 +218,30 @@ What section 5 left open, built:
 * the start menu is the Windows 11 one,
 * the console editor draws a screen instead of `[?25l[1;1H[7m ...`,
 * the sliders show their numbers.
+
+## 8. Sign-in and lock screen, light and dark, measured (08.10.2026, r470) + the serial line (r483)
+
+`tools/signinlook/run.sh` (new) boots `/bin/glogin` and `/bin/lock` in the light and the dark scheme (sea
+wallpaper; two cases on the flat gradient), types three keys, parks the pointer, takes a screenshot and
+hands it to `check.py`: WCAG contrast of every text against the worst 10 % of the background under it,
+glyphs on their faces, the milk-glass plates against the picture, the password field (dots, edge), no
+clipped text. 147 checks over six pictures.
+
+| finding (before) | measured | fix | after |
+|---|---|---|---|
+| white name / status line on the glow of the sea wallpaper | 2.0 : 1 (need 3.0 / 4.5) | `backdrop.fi`: a soft ellipse around the middle column darkens the picture (`SCRIM_*`, up to 58 %) | 5.4 : 1 and better |
+| hint line (lock screen), SOFT on the glow | 3.0 : 1 | same scrim | 4.9 : 1 |
+| sign-in arrow in the dark scheme: `ink()` (white) on the light-blue accent | 2.5 : 1 | `fuiapp.on_accent()` (the theme's on-accent role) | 7.9 : 1 |
+
+Result: `signinlook` 147/0 (before the fixes 137/10); loginscene 21/0, lockscene 15/0, loginui, a11y 58/0.
+
+### r483: why `lockseal` flickered (42/1) and `midline` threw `KeyError 26`
+
+Not the tests: **the serial line.** The window server's pulse (every 500 ms: `wm: fenliste`, the window
+list, `wm: bild`, the pulse line) wrote its block character by character WITHOUT the serial line lock that
+a ring-3 `write` already takes (`sys.conout`), so the block and a program's line cut into each other
+("wm: fen i=0 id=7 ... la" + `a11ydemo: lockprobe node ...`). A different line broke each run (a leak
+check that read `id=9` out of the pulse's window list, a lost `name=Save`, a lost `explorer: rect id=26`).
+Fix: `kgui.input_pulse` holds the line lock around its serial block, and `a11ydemo lockprobe` writes each
+line with ONE `write` (`lb_say/lb_num/lb_nl`). Measured: `lockseal` 5 runs in a row 43/0 (before: one
+clean run in three), `midline` 3 runs 50/0.
