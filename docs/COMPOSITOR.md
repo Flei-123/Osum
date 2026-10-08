@@ -305,3 +305,48 @@ Steps: (1) the flag and the larger buffer in `create` / `resize_win`; (2) `paint
 buttons; (3) the drag range through the existing `WM_` request path; (4) a11y: the strip is part of the client's tree; (5) the file manager
 paints its tabs there (cmdbar row 1 disappears); tests: `fourbugs` (title centre, edges), `midline` (tabs on the centre line of the bar),
 `lockseal` (a locked window gives no drag), `k15`. When `wmd` exists (S4 - S6) the strip is just a scene window of the same program.
+
+## 9. S2 - S4 as built (08.10.2026)
+
+### S2 -- the compositing primitives as a library (`lib/fui/comp.fi`)
+
+`lib/fui/comp.fi` (integer, no heap, `profile kernel`, used by the kernel and by ring 3): `mix8`, `blend`, `copy_row`, `mix_row`, `blur_line`,
+`box_recip`, `copy_words` (`rep movsq` on x86-64, a plain loop on aarch64). `wm.fi` calls it: `fb_row` is `comp.copy_row`, `fb_row_mix` is
+`comp.mix_row`, `blend` / `mix8` / `blur_line` are one-line wrappers. The damage as a region (`lib/fui/region.fi`) was already in `wm.fi`
+(r461, `tools/region`). Not moved (they need window-server state): `glass_mix` (counters), the shadow mask, `fb_row_a`.
+
+**Differential test** `tools/comp/diff.sh` (`kernel/user/compdiff.fi`): frozen copies of the old loops (`ref_*`, copied from main 124f9874)
+against the library, whole buffers compared (guard words around the target included), in ring 3: `mix8` on all 16 777 216 (alpha, src, dst)
+triples, `blend` 2 000 000 random, `copy_row` 3000 and `mix_row` 3000 random rows (odd/even length, unaligned, alpha 0 / 1 / 254 / 255 often),
+`blur_line` 4000 random lines (across and down, radius 0..35), `box_recip` for every width 3..33 and every sum 0..8415: **0 differences
+everywhere.** Counter-proof: with `+127` changed to `+126` in `mix8` and the odd-pixel tail of `copy_row` removed the test shows 32 896 / 11 073
+/ 1 512 / 4 389 differences.
+
+### S3 -- shared window buffers and the window table page
+
+* **memfd with frames in one run.** `memfd_create(MFD_FRAMES = 0x40000000)`: the object is ONE run of frames (`mem.frame_run`), made at
+  `ftruncate` (or `mmap`), zeroed, no page table (base + count), up to 8192 pages (32 MiB). `unixsock` has 40 objects now (it had 16; the
+  first 16 keep their page tables, 16..39 are contiguous only).
+* **The mapping reference is given back now.** `map_shm` has always taken a reference for a mapping, but `munmap` and the end of a task never
+  gave it back (every mapped object lived for ever). A table of 96 records (`UMAP`, task, object, address, pages) lets `munmap` of the start
+  address and the end of the task release it. Needed: a window buffer is 1 - 4 MiB.
+* **`WM_CREATE`, fifth argument = descriptor + 1** of such a memfd: the window takes the run as its buffer (`W_SHM`, one reference). Nothing fits
+  -> the window gets its own buffer as before and `WM_INFO / WI_SHARED` says 0 (the client falls back to `WIG_BLIT`). `WM_SETBUF (h, fd)` attaches
+  a new memfd (after a resize), `WM_DAMAGE (h, xy, wh)` names the rectangle the client painted: **no copy**. A user resize of a shared window
+  hands it a buffer of its own (the row length of the old width is wrong) and the client attaches a new one on `E_RESIZE`.
+* **Window table page** `WM_TABLE` -> read-only descriptor of one kernel page (never writable: `SMF_RO`, map `PROT_WRITE` is refused):
+  magic, sequence number (odd while writing), rows with id, owner, rectangle, z, layer, kind, flags, client offset, shared object, row length,
+  opacity and a PLAIN bit (the server paints this client area as a plain copy). `WM_BUFFD (id)`: read-only descriptor of a shared window's
+  buffer, root only, never while the screen is locked.
+* **Clients.** `wlibc` (`shm_buffer`, `win_setbuf`, `win_damage`), `wlib` (`want_shared`, `N_SHP`; `flush_rect` names the damage instead of
+  painting strips and calling `WIG_BLIT`), `fuiapp` (the canvas IS the shared buffer; `resize` attaches a new one). Every scene program
+  (`fuiapp` / `fuiscene`) gets it without a change. The kernel word `noshare` switches it off (counter-proof).
+* **Gates:** `tools/comp/shared.sh` (shmtest in the desktop, screenshot shows the client's gradient, differential pictures shared vs `noshare`,
+  copies per frame), `tools/wayland` 45/0.
+
+### S4 -- `wmd`, the shadow compositor (observer)
+
+`kernel/user/wmd.fi` reads the table page and the buffers of the shared windows (`WM_BUFFD`), composes the CLIENT AREAS of the plain windows into
+an off-screen picture with `comp.copy_row`, reads the screen back (`/dev/fb`) and counts differing pixels. It judges only what it can reproduce:
+client areas of plain windows, 16 points inside the edge, 48 points around every other window given up, not near the pointer, screen and table
+read twice and unchanged. Chrome, shadow, blur, glass and the pointer are not composed (S6). `tools/comp/shadow.sh`.
