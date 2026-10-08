@@ -180,6 +180,9 @@ echo "        shared:  frames=$F1 blitpx=$B1 shpx=$P1 attach(last)=$(grep -a '^w
 echo "        noshare: frames=$F2 blitpx=$B2 shpx=$P2"
 grep -a '^wm: shared' "$D/shr/serial.txt" | sed 's/^/        shr  /' | tail -8
 grep -a '^wm: shared' "$D/nsh/serial.txt" | sed 's/^/        nsh  /' | tail -8
+phase() { grep -a '^wm: phase n=' "$1" | awk '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "n") n += kv[2]; if (kv[1] == "win") w += kv[2]; if (kv[1] == "px") p += kv[2] } } END { printf "%d %d %d\n", n, w, p }'; }
+read PN1 PW1 PP1 < <(phase "$D/shr/serial.txt"); read PN2 PW2 PP2 < <(phase "$D/nsh/serial.txt")
+[ "${PN1:-0}" -gt 0 ] && [ "${PN2:-0}" -gt 0 ] && echo "        window phase per frame: shared $((PW1 / PN1)) us, noshare $((PW2 / PN2)) us (frames $PN1 / $PN2); kernel copies per frame: shared $((B1 / F1)) px, noshare $((B2 / F2)) px"
 [ "${B2:-0}" -gt 0 ] && ok "noshare copies pixels out of the clients: $B2 in $F2 frames" || bad "noshare copied nothing (blitpx=$B2)"
 [ "${P1:-0}" -gt 0 ] && ok "shared windows named $P1 pixels of damage without a copy" || bad "no shared damage (shpx=$P1)"
 [ "${B1:-0}" -lt $((B2 / 4)) ] && ok "copies fell from $B2 to $B1 pixels (a fourth or less)" || bad "copies fell only from $B2 to $B1 pixels"
