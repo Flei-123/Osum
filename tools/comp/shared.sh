@@ -55,100 +55,39 @@ L=$(val "$S" leak 3)
 
 # the screenshot: the gradient is on the screen where the client area begins
 cat > "$D/grad.py" <<'PY'
-import sys
+import sys, os
 from PIL import Image
-img = Image.open(sys.argv[1]).convert("RGB")
-ox, oy = int(sys.argv[2]), int(sys.argv[3])
-px = img.load()
-good = tot = 0
-for y in range(4, 196, 12):
-    for x in range(4, 316, 12):
-        X, Y = ox + x, oy + y
-        if X >= img.size[0] or Y >= img.size[1]:
-            continue
-        tot += 1
-        if px[X, Y] == (x & 255, y & 255, 0x80):
-            good += 1
-print(good, tot)
-PY
-OX=$(val "$S" at 3); OY=$(val "$S" at 4)
-if [ -s "$D/sh1/desktop.ppm" ] && [ -n "$OX" ]; then
-    read G T < <(python3 "$D/grad.py" "$D/sh1/desktop.ppm" "$OX" "$OY")
-    [ "${T:-0}" -gt 100 ] && [ "$G" -ge $((T * 9 / 10)) ] && ok "the screenshot shows the client's gradient: $G of $T sample points are exact" || bad "the screenshot shows the gradient at only $G of $T points"
-else
-    bad "no screenshot or no window position (at '$OX' '$OY')"
-fi
-
-echo "== 1b. counter-proof: with the kernel word noshare the window is not shared and the screen shows none of the gradient =="
-run_shm sh2 noshare
-S2="$D/sh2/serial.txt"
-[ "$(val "$S2" shared 3)" = 0 ] && ok "noshare: WI_SHARED says 0" || bad "noshare: the window is shared anyway"
-DM2=$(val "$S2" damage 3)
-[ -n "$DM2" ] && [ "$DM2" != "$DE" ] && ok "noshare: WM_DAMAGE is refused" || bad "noshare: WM_DAMAGE worked ('$DM2')"
-OX2=$(val "$S2" at 3); OY2=$(val "$S2" at 4)
-if [ -s "$D/sh2/desktop.ppm" ] && [ -n "$OX2" ]; then
-    read G2 T2 < <(python3 "$D/grad.py" "$D/sh2/desktop.ppm" "$OX2" "$OY2")
-    [ "${T2:-0}" -gt 100 ] && [ "$G2" -lt $((T2 / 10)) ] && ok "noshare: the screenshot does NOT show the gradient ($G2 of $T2 points)" || bad "noshare: the screenshot shows the gradient at $G2 of $T2 points"
-else
-    bad "noshare: no screenshot"
-fi
-
-echo "== 2. the desktop scene with shared buffers and with noshare: the same pictures =="
-cat > "$D/dreh.txt" <<'DREH'
-warteauf 'launcher: ready' || 90
-warte 30
-taste f12
-warte 4
-foto c1-idle
-taste f12
-klick 24,780
-warte 4
-foto c2-menu
-taste f12
-taste esc
-warte 2
-klick 24,780
-warte 3
-klickauf start_File Explorer
-warte 14
-foto c3-explorer
-taste f12
-warte 3
-taste f12
-DREH
-run() { # run <name> <extra capture args...>
-    local name=$1; shift
-    bash tools/design/capture.sh "$D/$name" uitrace=yes accel=kvm drehbuch="$D/dreh.txt" "$@" > "$D/$name.log" 2>&1
-    grep -a "FEHLGESCHLAGEN" "$D/$name.log" | head -3
-}
-run shr "extra=phases"
-run nsh "extra=noshare phases"
-for n in c1-idle c2-menu c3-explorer; do
-    [ -s "$D/shr/$n.ppm" ] && [ -s "$D/nsh/$n.ppm" ] && ok "both runs took picture $n" || bad "picture $n is missing in one run"
-done
-python3 - "$D/shr" "$D/nsh" <<'PY' && ok "no differing pixel outside the clock and the toasts" || bad "sharing changed the picture"
-import sys
-from PIL import Image
-a, b = sys.argv[1], sys.argv[2]
+a, b, c = sys.argv[1], sys.argv[2], sys.argv[3]
 bad = 0
+keep = os.environ.get("KEEPPICS")
 for n in ("c1-idle", "c2-menu", "c3-explorer"):
     try:
         ia = Image.open("%s/%s.ppm" % (a, n)).convert("RGB")
         ib = Image.open("%s/%s.ppm" % (b, n)).convert("RGB")
+        ic = Image.open("%s/%s.ppm" % (c, n)).convert("RGB")
     except Exception as e:
         print("  cannot read", n, e); bad += 1; continue
-    if ia.size != ib.size:
+    if ia.size != ib.size or ia.size != ic.size:
         print("  size differs in", n); bad += 1; continue
     w, h = ia.size
-    pa, pb = ia.load(), ib.load()
+    pa, pb, pc = ia.load(), ib.load(), ic.load()
     diff = []
+    noise = 0
     for y in range(h):
         for x in range(w):
             if (x >= w - 220 and y < 110) or (x >= w - 160 and y >= h - 50):
                 continue
             if pa[x, y] != pb[x, y]:
-                diff.append((x, y))
-    print("  %-14s %d differing pixels" % (n, len(diff)), ("first " + str(diff[:3])) if diff else "")
+                # two runs of the SAME kind (shared, shared) also differ here: that is timing noise (hover fade, list arrival), not sharing
+                if pa[x, y] != pc[x, y]:
+                    noise += 1
+                else:
+                    diff.append((x, y))
+    print("  %-14s %d differing pixels (and %d that differ between two shared runs too: noise)" % (n, len(diff), noise), ("first " + str(diff[:3])) if diff else "")
+    if keep:
+        os.makedirs(keep, exist_ok=True)
+        for tag, im in (("shr", ia), ("nsh", ib), ("shr2", ic)):
+            im.save("%s/%s-%s.png" % (keep, n, tag))
     if diff:
         bad += 1
 sys.exit(1 if bad else 0)

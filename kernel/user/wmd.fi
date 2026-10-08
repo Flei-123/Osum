@@ -49,8 +49,9 @@ const PTR_H: u64 = 48
 // the off-screen picture, the mask of the pixels it is allowed to be judged on, two reads of the screen
 static mut sb: [u32; 1024000] = [0 as u32; 1024000]
 static mut mask: [u8; 1024000] = [0 as u8; 1024000]
-static mut fba: [u32; 1024000] = [0 as u32; 1024000]
-static mut fbb: [u32; 1024000] = [0 as u32; 1024000]
+// the two reads of the screen live in shared memory (4 MiB each): the program image (11 MiB) cannot hold all four pictures
+static mut p_fba: u64 = 0
+static mut p_fbb: u64 = 0
 static mut rowbuf: [u8; 8192] = [0 as u8; 8192]
 // a copy of the table (header 16 words + 32 rows of 12) taken twice
 static mut tab1: [u64; 400] = [0 as u64; 400]
@@ -258,7 +259,7 @@ fn cycle(t: u64) -> u64 {
         return 1
     }
     // the screen, the first time
-    if !read_screen((&fba[0 as usize]) as u64) {
+    if !read_screen(p_fba) {
         return 2
     }
     let px0: u64 = wlibc.mouse_x()
@@ -361,7 +362,7 @@ fn cycle(t: u64) -> u64 {
     clear_mask_rect(px0 as i64 - 8, py0 as i64 - 8, px0 as i64 + PTR_W as i64, py0 as i64 + PTR_H as i64)
 
     // 2. the screen, the second time, and the table: nothing may have moved
-    if !read_screen((&fbb[0 as usize]) as u64) {
+    if !read_screen(p_fbb) {
         return 2
     }
     if !snap(t, t2) || !same_tab() {
@@ -382,11 +383,11 @@ fn cycle(t: u64) -> u64 {
         while xx < scr_w {
             let at: u64 = yy * scr_w + xx
             if mask[at as usize] != 0 {
-                if fba[at as usize] != fbb[at as usize] {
+                if __mmio_read32((p_fba + at * 4) as *mut u32) != __mmio_read32((p_fbb + at * 4) as *mut u32) {
                     moved = moved + 1
                 } else {
                     c_cmp = c_cmp + 1
-                    if fba[at as usize] != sb[at as usize] {
+                    if __mmio_read32((p_fba + at * 4) as *mut u32) != sb[at as usize] {
                         if c_diff == 0 {
                             c_fx = xx
                             c_fy = yy
@@ -427,6 +428,8 @@ fn u_start(args: u64) -> u64 {
     var n_c: [u8; 2] = ",\0"
 
     wlibc.start(false)
+    p_fba = wlibc.shm_buffer(MAXPX * 4)
+    p_fbb = wlibc.shm_buffer(MAXPX * 4)
     scr_w = wlibc.screen_w()
     scr_h = wlibc.screen_h()
     pitch = ulib.sys(SYS_DISPGET, DG_PITCH, 0, 0)
@@ -436,6 +439,11 @@ fn u_start(args: u64) -> u64 {
     }
     if ulib.bad(bpp) || bpp == 0 {
         bpp = 4
+    }
+    if p_fba == 0 || p_fbb == 0 {
+        ulib.say((&n_nofb[0 as usize]) as u64)
+        ulib.nl()
+        return 1
     }
     if scr_w == 0 || scr_h == 0 || scr_w * scr_h > MAXPX || scr_w * bpp > 8192 || bpp != 4 {
         ulib.say((&n_nofb[0 as usize]) as u64)
