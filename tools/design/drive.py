@@ -18,6 +18,8 @@ Befehle im Drehbuch (eine Zeile je Befehl, `#` ist eine Anmerkung):
 
     warte <sekunden>            anhalten
     warteauf <regex> [|| frist] warten, bis der regex in serial.txt steht
+    marke <regex>               remember how often the regex is on the serial line now
+    warteneu <regex> [|| frist] wait until the regex is on the serial line more often than at the last `marke`
     fahre <x>,<y>               den Zeiger dorthin, ohne zu klicken
     klick <x>,<y>               dorthin fahren und einmal klicken
     doppel <x>,<y>              dorthin fahren und zweimal klicken
@@ -345,6 +347,23 @@ class Fahrer:
         bis = time.time() + frist
         while time.time() < bis:
             if r.search(lies(self.serial)):
+                return True
+            time.sleep(0.2)
+        return False
+
+    # `marke` / `warteneu`: wait for a NEW match (a count above the one taken
+    # at `marke`), not for any match in the whole history. A fixed `warte`
+    # after a program start is a race on a loaded host (zreap: 33 of 34).
+    def marke(self, muster):
+        self.marke_muster = re.compile(muster)
+        self.marke_n = len(self.marke_muster.findall(lies(self.serial)))
+
+    def warteneu(self, muster, frist=25.0):
+        r = re.compile(muster)
+        n0 = getattr(self, "marke_n", 0)
+        bis = time.time() + frist
+        while time.time() < bis:
+            if len(r.findall(lies(self.serial))) > n0:
                 return True
             time.sleep(0.2)
         return False
@@ -866,6 +885,15 @@ def main():
             tippe_gap = 0.4
         if b == "warte":
             time.sleep(float(arg))
+        elif b == "marke":
+            f.marke(arg.strip().strip("'\""))
+        elif b == "warteneu":
+            st = arg.split("||")
+            muster = st[0].strip().strip("'\"")
+            ok = f.warteneu(muster, float(st[1]) if len(st) > 1 else 25.0)
+            print("warteneu %s -> %s" % (muster, "da" if ok else "NICHT DA"))
+            if not ok:
+                fehler += 1
         elif b == "warteauf":
             st = arg.split("||")
             # Die Anfuehrungszeichen gehoeren der Lesbarkeit des
