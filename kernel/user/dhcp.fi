@@ -99,6 +99,10 @@ static mut o_maske: u64 = 0
 static mut o_gw: u64 = 0
 static mut o_server: u64 = 0
 static mut o_lease: u64 = 0
+// DELL STABILITY (08.10.2026): lease renewal (RFC 2131 4.4.5). `renewing` makes
+// `bauen(3)` a RENEWING request: ciaddr = our address, no options 50/54, and the
+// broadcast bit off.
+static mut renewing: u64 = 0
 // RUNDE BETRIEB: der Nameserver. DHCP-Option 6 traegt eine LISTE von
 // Adressen zu je vier Oktetten; drei sind mehr als genug, und mehr als
 // vier nimmt der Aufloeser ohnehin nicht (`lib/libc/dns.fi`, MAX_SRV).
@@ -437,6 +441,13 @@ fn bauen(art: u64) -> u64 {
     // wir noch nicht haben -- und das Paket kommt nie an.
     s8(B_FLAGS, 0x80)
     s8(B_FLAGS + 1, 0)
+    if art == 3 && renewing != 0 {
+        s8(B_FLAGS, 0)
+        s8(12, (o_ip >> 24) & 255) // ciaddr
+        s8(13, (o_ip >> 16) & 255)
+        s8(14, (o_ip >> 8) & 255)
+        s8(15, o_ip & 255)
+    }
     i = 0
     while i < 6 {
         s8(B_CHADDR + i, mac[(i) as usize] as u64)
@@ -452,7 +463,7 @@ fn bauen(art: u64) -> u64 {
     s8(at + 1, 1)
     s8(at + 2, art)
     at = at + 3
-    if art == 3 {
+    if art == 3 && renewing == 0 {
         s8(at, 50) // gewuenschte Adresse
         s8(at + 1, 4)
         s8(at + 2, (o_ip >> 24) & 255)
@@ -700,6 +711,168 @@ fn resolv_write(p_res: u64, k_ns: u64, k_fb: u64, k_nl: u64) -> u64 {
     return w
 }
 
+// ==================================================== DELL STABILITY
+// THE LEASE WAS NEVER RENEWED. This client took the address once and went away
+// ("keine Erneuerung des Vertrages" in the head of this file); a router with a
+// short lease (an hour, or a day) let the lease run out under a machine that was
+// still using the address, and the Dell's internet and bridge dropped for a
+// while ("Internet-Aussetzer"). With `dauer` the client now stays and does what
+// RFC 2131 4.4.5 says:
+//
+//   T1 = lease / 2        RENEWING: unicast REQUEST (ciaddr set) to the server
+//   T2 = lease * 7 / 8    REBINDING: the same, broadcast
+//   lease end             the address is gone: start over (full DISCOVER)
+//
+// Nothing is touched while it works: the address stays, no `osum_netset`, so
+// open connections (a long download!) are not reset. `t1=<seconds>` on the
+// command line shortens T1 for the test (tools/stab/lease.sh).
+// Returns true when the server answered with an ACK.
+fn renew_once(unicast: bool, give_up_ms: u64) -> u64 {
+    // 0 = nothing came back, 5 = ACK, 6 = NAK
+    let fd: u64 = net.socket(net.AF_INET, net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    if net.failed(fd) {
+        return 0
+    }
+    if net.failed(net.bind_port(fd, PORT_C)) {
+        net.close(fd)
+        return 0
+    }
+    xid = (ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) *% 2654435761) & 0xFFFFFFFF
+    if xid == 0 {
+        xid = 0x4F53554D
+    }
+    var von: u64 = 0
+    let keep_ip: u64 = o_ip
+    renewing = 1
+    let n: u64 = bauen(3)
+    renewing = 0
+    var ziel: u64 = net.ip4(255, 255, 255, 255)
+    if unicast && o_server != 0 {
+        ziel = o_server
+    }
+    let _s: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n, ziel, PORT_S)
+    var got: u64 = 0
+    var waited: u64 = 0
+    while waited < give_up_ms && got == 0 {
+        let g: u64 = net.recvfrom_ip(fd, (&ein[0 as usize]) as u64, 1024, &von)
+        if !net.failed(g) && g > 0 {
+            let t: u64 = read((&ein[0 as usize]) as u64, g)
+            if t == 5 || t == 6 {
+                got = t
+            }
+        } else {
+            ulib.sleep_ms(50)
+            waited = waited + 50
+        }
+    }
+    net.close(fd)
+    // An ACK to a renewal carries our address again; one with yiaddr 0 must not
+    // wipe it.
+    if o_ip == 0 {
+        o_ip = keep_ip
+    }
+    return got
+}
+
+// Sleep <secs> seconds in pieces the kernel accepts (it refuses > 60 s).
+fn sleep_secs(secs: u64) {
+    var left: u64 = secs
+    while left > 0 {
+        var piece: u64 = left
+        if piece > 30 {
+            piece = 30
+        }
+        ulib.sleep_ms(piece * 1000)
+        left = left - piece
+    }
+}
+
+// Runs for ever while the lease is renewed; returns when the address was lost
+// (the caller then starts over).
+fn renew_loop(t1_test: u64) -> u64 {
+    var s_r1: [u8; 28] = "dhcp: renewing lease, t1=\0\0\0"
+    var s_r2: [u8; 27] = "dhcp: lease renewed, new \0\0"
+    var s_r3: [u8; 32] = "dhcp: renewal failed, rebinding\0"
+    var s_r4: [u8; 32] = "dhcp: lease lost, starting over\0"
+    var s_r5: [u8; 22] = "dhcp: server said NAK\0"
+    while true {
+        let lease: u64 = o_lease
+        if lease == 0 || lease == 0xFFFFFFFF {
+            return 1
+        }
+        var t1: u64 = lease / 2
+        var t2: u64 = lease * 7 / 8
+        if t1_test != 0 {
+            t1 = t1_test
+            t2 = t1_test * 2
+        }
+        if t1 < 10 {
+            t1 = 10
+        }
+        if t2 <= t1 {
+            t2 = t1 + 10
+        }
+        say((&s_r1[0 as usize]) as u64)
+        ulib.sayn(t1)
+        ulib.nl()
+        sleep_secs(t1)
+        // RENEWING until T2, with a pause that grows between the attempts
+        var spent: u64 = t1
+        var got: u64 = 0
+        var gap: u64 = 4
+        while got != 5 && got != 6 && spent < t2 {
+            got = renew_once(true, 4000)
+            if got == 0 {
+                var wait: u64 = gap
+                if spent + wait > t2 {
+                    wait = t2 - spent
+                }
+                if wait > 0 {
+                    sleep_secs(wait)
+                }
+                spent = spent + wait + 4
+                if gap < 64 {
+                    gap = gap * 2
+                }
+            }
+        }
+        // REBINDING until the end of the lease
+        if got == 0 {
+            say((&s_r3[0 as usize]) as u64)
+            ulib.nl()
+            var end: u64 = lease
+            if t1_test != 0 {
+                end = t1_test * 3
+            }
+            gap = 4
+            while got != 5 && got != 6 && spent < end {
+                got = renew_once(false, 4000)
+                if got == 0 {
+                    sleep_secs(gap)
+                    spent = spent + gap + 4
+                    if gap < 64 {
+                        gap = gap * 2
+                    }
+                }
+            }
+        }
+        if got == 5 {
+            say((&s_r2[0 as usize]) as u64)
+            ulib.sayn(o_lease)
+            ulib.nl()
+        } else {
+            if got == 6 {
+                say((&s_r5[0 as usize]) as u64)
+                ulib.nl()
+            }
+            say((&s_r4[0 as usize]) as u64)
+            ulib.nl()
+            return 0
+        }
+    }
+    return 0
+}
+
 // RUNDE ECHTHARDWARE-6: der wievielte Anlauf. Statisch, weil
 // `u_start` sich fuer den naechsten Anlauf selbst ruft -- eine lokale
 // Variable waere bei jedem Anlauf wieder null und der Abstand nie
@@ -766,6 +939,8 @@ fn u_start(args: u64) -> u64 {
     // weiter -- mit wachsendem Abstand, damit ein Netz ohne
     // DHCP-Server nicht dauerhaft mit Rundrufen belegt wird.
     var s_da: [u8; 6] = "dauer\0"
+    var s_t1: [u8; 4] = "t1=\0"
+    var t1_test: u64 = 0
     var s_stand: [u8; 7] = "status\0"
     var s_probe: [u8; 8] = "txprobe\0"
     var s_wdh: [u8; 34] = "dhcp: neuer Anlauf in Sekunden: \0\0"
@@ -780,6 +955,9 @@ fn u_start(args: u64) -> u64 {
         }
         if ulib.streq(ulib.arg_at(args, a), (&s_da[0 as usize]) as u64) {
             dauer = 1
+        }
+        if ulib.strneq(ulib.arg_at(args, a), (&s_t1[0 as usize]) as u64, 3) {
+            t1_test = ulib.to_num(ulib.arg_at(args, a) + 3)
         }
         if ulib.streq(ulib.arg_at(args, a), (&s_stand[0 as usize]) as u64) {
             status()
@@ -1117,6 +1295,9 @@ fn u_start(args: u64) -> u64 {
     if o_dns1 == 0 {
         say((&s_rn[0 as usize]) as u64)
         ulib.nl()
+        if dauer != 0 && renew_loop(t1_test) == 0 {
+            return u_start(args)
+        }
         return 0
     }
     let rw: u64 = resolv_write((&p_res[0 as usize]) as u64,
@@ -1135,6 +1316,10 @@ fn u_start(args: u64) -> u64 {
     }
     ulib.sayn(dz)
     ulib.nl()
+    // DELL STABILITY: stay and keep the lease (see `renew_loop`)
+    if dauer != 0 && renew_loop(t1_test) == 0 {
+        return u_start(args)
+    }
     return 0
 }
 
