@@ -89,6 +89,7 @@ import drv.snd.audio
 // -- sie darf hier stehen, und genau dafuer wurde sie geschrieben.
 import fui.core
 import fui.region
+import fui.comp // docs/COMPOSITOR.md S2: the row loops (copy, mix, blur line) live in lib/fui/comp.fi
 
 export {
     sperre_an, sperrer, lock_space, darf, input_seen,
@@ -5281,35 +5282,12 @@ fn copy_words(dst: u64, src: u64, words: u64) {
 // rechnen dieselbe Zeile, sonst waere ein bildpunktgenauer Vergleich
 // eines kantengeglaetteten Zeichens nicht moeglich.
 fn blend(alt: u64, neu: u64, a: u64) -> u64 {
-    if a == 0 {
-        return alt
-    }
-    if a >= 255 {
-        return neu
-    }
-    let ia: u64 = 255 - a
-    // ROUND PAINT: the same arithmetic as `fb.blend`, and it is a
-    // DIFFERENT ANSWER from the one that stood here.  This line divided
-    // by 255 and truncated; measured over all 16 777 216 triples
-    // (a, src, dst) against the exact, half-up rounded value, that is
-    // off by one on 8 164 890 of them -- 48.67 per cent.
-    // `(num + 127) / 255` is exact on every one of the 16.7 million,
-    // and measured (see the header of `fb.mix8`) it is also the FASTER
-    // of the two exact forms on this machine -- the division-free
-    // variant lost by a fifth.
-    // tools/paint/blendcheck.py is the measurement, and it checks all
-    // FOUR places this line lives in (kernel/fb.fi, kernel/wm.fi,
-    // kernel/user/wlibc.fi, tools/gfx/checkshot.py) against each other.
-    let r: u64 = mix8((alt >> 16) & 0xFF, (neu >> 16) & 0xFF, a, ia)
-    let g: u64 = mix8((alt >> 8) & 0xFF, (neu >> 8) & 0xFF, a, ia)
-    let b: u64 = mix8(alt & 0xFF, neu & 0xFF, a, ia)
-    return (r << 16) | (g << 8) | b
+    return comp.blend(alt, neu, a)
 }
 
-// One channel.  See the header of `fb.mix8` for why it is written this
-// way and what it was measured against.
+// One channel (lib/fui/comp.fi `mix8`; see the header of `fb.mix8` for the measurement).
 fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
-    return (src *% a +% dst *% ia +% 127) / 255
+    return comp.mix8(dst, src, a, ia)
 }
 
 // Eine Zeile Text in ein Fenster, mit Kantenglaettung und
@@ -7820,14 +7798,7 @@ fn fb_row_mix(state: u64, x: u64, y: u64, src: u64, n: u64, a: u64) {
         return
     }
     let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
-    var k: u64 = 0
-    while k < n {
-        let neu: u64 = __mmio_read32((src +% k *% 4) as *mut u32) as u64
-        let alt: u64 = __mmio_read32((ziel +% k *% 4) as *mut u32) as u64
-        __mmio_write32((ziel +% k *% 4) as *mut u32,
-            blend(alt, neu, a) as u32)
-        k = k + 1
-    }
+    comp.mix_row(ziel, src, n, a)
 }
 
 fn set_blur_cache(state: u64, on: bool) {
@@ -9450,11 +9421,7 @@ fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
         return
     }
     let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
-    copy_words(ziel, src, n *% 4 / 8)
-    if (n & 1) != 0 {
-        __mmio_write32((ziel +% (n - 1) *% 4) as *mut u32,
-            __mmio_read32((src +% (n - 1) *% 4) as *mut u32))
-    }
+    comp.copy_row(ziel, src, n)
 }
 
 // =====================================================================
@@ -9809,64 +9776,7 @@ static mut gl_alt: [u32; 655360] = [0 as u32; 655360]
 // Uebersetzer legt vor jeden Feldzugriff eine Bereichspruefung, und
 // dieser Rumpf macht sechs davon je Bildpunkt.
 fn blur_line(qadr: u64, zadr: u64, sb: u64, n: u64, r: u64) {
-    if n == 0 || r == 0 {
-        return
-    }
-    let fen: u64 = 2 * r + 1
-    // UND DIE DIVISION DURCH DIE FENSTERBREITE ALS MULTIPLIKATION.
-    // Drei ganzzahlige Divisionen je Bildpunkt sind 322 560 Divisionen
-    // je Vollbild. `kehr` ist die aufgerundete Kehrzahl in 24
-    // Nachkommabit -- fuer jede Fensterbreite 3..33 und jede
-    // vorkommende Summe (hoechstens 255 * 33 = 8415) liefert
-    // `(x * kehr) >> 24` GENAU dasselbe wie `x / fen`, vollstaendig
-    // nachgerechnet und nicht abgeschaetzt.
-    let kehr: u64 = ((1 << 24) + fen - 1) / fen
-    let qend: u64 = qadr +% (n - 1) *% sb
-    let p0: u64 = __mmio_read32(qadr as *mut u32) as u64
-    var sr: u64 = ((p0 >> 16) & 0xFF) * (r + 1)
-    var sg: u64 = ((p0 >> 8) & 0xFF) * (r + 1)
-    var sb2: u64 = (p0 & 0xFF) * (r + 1)
-    var i: u64 = 1
-    while i <= r {
-        var j: u64 = i
-        if j > n - 1 {
-            j = n - 1
-        }
-        let p: u64 = __mmio_read32((qadr +% j *% sb) as *mut u32) as u64
-        sr = sr + ((p >> 16) & 0xFF)
-        sg = sg + ((p >> 8) & 0xFF)
-        sb2 = sb2 + (p & 0xFF)
-        i = i + 1
-    }
-    // Zwei laufende Zeiger statt zweier Multiplikationen je Bildpunkt:
-    // `pa` zeigt auf den Punkt, der ins Fenster kommt, `ps` auf den,
-    // der herausfaellt. Beide bleiben am Rand einfach stehen -- das ist
-    // dieselbe Klemmung wie oben, nur ohne Rechnung.
-    var pa: u64 = qadr +% (r + 1) *% sb
-    if pa > qend {
-        pa = qend
-    }
-    var ps: u64 = qadr
-    var zp: u64 = zadr
-    var x: u64 = 0
-    while x < n {
-        __mmio_write32(zp as *mut u32,
-            (((((sr *% kehr) >> 24) << 16) | (((sg *% kehr) >> 24) << 8)
-                | ((sb2 *% kehr) >> 24))) as u32)
-        zp = zp +% sb
-        let va: u64 = __mmio_read32(pa as *mut u32) as u64
-        let vs: u64 = __mmio_read32(ps as *mut u32) as u64
-        sr = sr + ((va >> 16) & 0xFF) - ((vs >> 16) & 0xFF)
-        sg = sg + ((va >> 8) & 0xFF) - ((vs >> 8) & 0xFF)
-        sb2 = sb2 + (va & 0xFF) - (vs & 0xFF)
-        if pa < qend {
-            pa = pa +% sb
-        }
-        if x >= r {
-            ps = ps +% sb
-        }
-        x = x + 1
-    }
+    comp.blur_line(qadr, zadr, sb, n, r)
 }
 
 // DREI DURCHGAENGE: waagerecht, senkrecht, waagerecht. Drei Kaesten

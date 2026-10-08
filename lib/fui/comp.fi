@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/fui/comp.fi -- COMPOSITING PRIMITIVES AS A LIBRARY (docs/COMPOSITOR.md stage S2).
+//
+// The row loops a window compositor lives on, with NO state of any window server in them: addresses and counts in,
+// pixels out. Integer only, no heap, no floating point, so the same file runs in the kernel profile (the window server
+// `wm.fi`, today and as the fallback) and in ring 3 (the compositor `wmd` of the plan). A pixel is one 32-bit word
+// `0x00RRGGBB`; a "row" is `n` pixels at an address, rows of a picture are `pitch` octets apart (the caller does that).
+//
+//   mix8(dst, src, a, ia)                   one channel: (src * a + dst * ia + 127) / 255, exact, half up
+//   blend(dst, src, a)                      one pixel, `a` 0..255 of `src` over `dst`
+//   copy_row(dst, src, n)                   n pixels, word wise (`rep movsq`), the odd last pixel by itself
+//   mix_row(dst, src, n, a)                 n pixels, `src` mixed over what is in `dst` with `a` (255 = copy_row)
+//   blur_line(src, dst, step, n, r)         box blur of one line with a running sum, edge pixel counted again (no dark rim)
+//   box_recip(n)                            round-up reciprocal in 24 fractional bits for the divisor `n`
+//
+// The promise is tested, not claimed: `tools/comp/diff.sh` runs these against frozen copies of the loops `wm.fi` had
+// before it called this file (`fb_row`, `fb_row_mix`, `blend`, `blur_line`) on random input, octet for octet.
+
+export {
+    mix8, blend, copy_row, mix_row, blur_line, box_recip, copy_words,
+}
+
+// whole 64-bit words from `src` to `dst`; the one place the instruction set shows
+#[arch(x86_64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    var i: u64 = 0
+    while i < words {
+        __mmio_write64((dst + i * 8) as *mut u64, __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+// One channel.  `(num + 127) / 255` is exact (round half up) on all 16.7 million triples (a, src, dst); see the header of
+// `fb.mix8` for the measurement and why the division-free form lost.
+fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    return (src *% a +% dst *% ia +% 127) / 255
+}
+
+// A colour with an opacity over another. `a == 0` leaves `dst`, `a >= 255` takes `src`.
+fn blend(dst: u64, src: u64, a: u64) -> u64 {
+    if a == 0 {
+        return dst
+    }
+    if a >= 255 {
+        return src
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = mix8((dst >> 16) & 0xFF, (src >> 16) & 0xFF, a, ia)
+    let g: u64 = mix8((dst >> 8) & 0xFF, (src >> 8) & 0xFF, a, ia)
+    let b: u64 = mix8(dst & 0xFF, src & 0xFF, a, ia)
+    return (r << 16) | (g << 8) | b
+}
+
+// n pixels from `src` to `dst`: whole words, then the last pixel when n is odd
+fn copy_row(dst: u64, src: u64, n: u64) {
+    copy_words(dst, src, n *% 4 / 8)
+    if (n & 1) != 0 {
+        __mmio_write32((dst +% (n - 1) *% 4) as *mut u32, __mmio_read32((src +% (n - 1) *% 4) as *mut u32))
+    }
+}
+
+// n pixels of `src` mixed over what `dst` already holds; `a` is the opacity of `src` (0..255)
+fn mix_row(dst: u64, src: u64, n: u64, a: u64) {
+    if a >= 255 {
+        copy_row(dst, src, n)
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        let neu: u64 = __mmio_read32((src +% k *% 4) as *mut u32) as u64
+        let alt: u64 = __mmio_read32((dst +% k *% 4) as *mut u32) as u64
+        __mmio_write32((dst +% k *% 4) as *mut u32, blend(alt, neu, a) as u32)
+        k = k + 1
+    }
+}
+
+// The round-up reciprocal of the window width `fen` in 24 fractional bits. For every width 3..33 and every sum that occurs
+// (at most 255 * 33 = 8415) `(x * box_recip(fen)) >> 24` is exactly `x / fen` (checked in full, not estimated).
+fn box_recip(fen: u64) -> u64 {
+    return ((1 << 24) + fen - 1) / fen
+}
+
+// ONE LINE OF A BOX BLUR WITH A RUNNING SUM: one addition and one subtraction per channel and pixel, whatever `r` is.
+// `qadr` is the first source pixel, `zadr` the first target pixel, `sb` the distance of two neighbours in OCTETS
+// (4 across, the pitch down), `n` the pixels in the line, `r` the radius. At the edge the edge pixel counts again.
+// Addresses and not array indices: the compiler puts a range check in front of every array access.
+fn blur_line(qadr: u64, zadr: u64, sb: u64, n: u64, r: u64) {
+    if n == 0 || r == 0 {
+        return
+    }
+    let fen: u64 = 2 * r + 1
+    let kehr: u64 = box_recip(fen)
+    let qend: u64 = qadr +% (n - 1) *% sb
+    let p0: u64 = __mmio_read32(qadr as *mut u32) as u64
+    var sr: u64 = ((p0 >> 16) & 0xFF) * (r + 1)
+    var sg: u64 = ((p0 >> 8) & 0xFF) * (r + 1)
+    var sb2: u64 = (p0 & 0xFF) * (r + 1)
+    var i: u64 = 1
+    while i <= r {
+        var j: u64 = i
+        if j > n - 1 {
+            j = n - 1
+        }
+        let p: u64 = __mmio_read32((qadr +% j *% sb) as *mut u32) as u64
+        sr = sr + ((p >> 16) & 0xFF)
+        sg = sg + ((p >> 8) & 0xFF)
+        sb2 = sb2 + (p & 0xFF)
+        i = i + 1
+    }
+    // two running pointers: `pa` is the pixel that enters the window, `ps` the one that leaves; both stay at the edge
+    var pa: u64 = qadr +% (r + 1) *% sb
+    if pa > qend {
+        pa = qend
+    }
+    var ps: u64 = qadr
+    var zp: u64 = zadr
+    var x: u64 = 0
+    while x < n {
+        __mmio_write32(zp as *mut u32,
+            (((((sr *% kehr) >> 24) << 16) | (((sg *% kehr) >> 24) << 8)
+                | ((sb2 *% kehr) >> 24))) as u32)
+        zp = zp +% sb
+        let va: u64 = __mmio_read32(pa as *mut u32) as u64
+        let vs: u64 = __mmio_read32(ps as *mut u32) as u64
+        sr = sr + ((va >> 16) & 0xFF) - ((vs >> 16) & 0xFF)
+        sg = sg + ((va >> 8) & 0xFF) - ((vs >> 8) & 0xFF)
+        sb2 = sb2 + (va & 0xFF) - (vs & 0xFF)
+        if pa < qend {
+            pa = pa +% sb
+        }
+        if x >= r {
+            ps = ps +% sb
+        }
+        x = x + 1
+    }
+}

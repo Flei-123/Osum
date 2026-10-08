@@ -1,0 +1,360 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/compdiff.fi -- docs/COMPOSITOR.md stage S2: THE LIBRARY EQUALS THE OLD LOOPS, OCTET FOR OCTET.
+//
+// `lib/fui/comp.fi` took over the row loops of the window server (`fb_row`, `fb_row_mix`, `blend`, `blur_line`). This program holds
+// FROZEN COPIES of the old loops (ref_*, copied from `kernel/ui/wm.fi` at main 124f9874) and runs both on the same random input in
+// ring 3 (the library is meant for both rings). It compares the WHOLE buffer after each case -- also the guard words around the
+// target, so a loop that writes one pixel too many is a difference too -- and prints
+//
+//     compdiff: <name> <cases> <differences>
+//
+// for tools/comp/diff.sh. Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import fui.comp
+
+export { u_start }
+
+// a few cases for the pixel loops need big buffers: 16384 pixels each, with 64 guard pixels in front and behind
+const BUFPX: u64 = 16384
+const GUARD: u64 = 64
+
+static mut src_buf: [u32; 16512] = [0 as u32; 16512]
+static mut dst_a: [u32; 16512] = [0 as u32; 16512]
+static mut dst_b: [u32; 16512] = [0 as u32; 16512]
+static mut rng: u64 = 88172645463325252
+
+static mut s_cd: [u8; 11] = "compdiff: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut n_copy: [u8; 9] = "copy_row\0"
+static mut n_mix: [u8; 8] = "mix_row\0"
+static mut n_mix8: [u8; 5] = "mix8\0"
+static mut n_blend: [u8; 6] = "blend\0"
+static mut n_blur: [u8; 10] = "blur_line\0"
+static mut n_recip: [u8; 10] = "box_recip\0"
+static mut n_done: [u8; 5] = "done\0"
+
+fn next() -> u64 {
+    var x: u64 = rng
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    rng = x
+    return x
+}
+
+// ===================================================================================================================
+// FROZEN REFERENCE COPIES -- do not "improve" them: they are what the window server did before 08.10.2026.
+// ===================================================================================================================
+
+fn ref_copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+fn ref_mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    return (src *% a +% dst *% ia +% 127) / 255
+}
+
+fn ref_blend(alt: u64, neu: u64, a: u64) -> u64 {
+    if a == 0 {
+        return alt
+    }
+    if a >= 255 {
+        return neu
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = ref_mix8((alt >> 16) & 0xFF, (neu >> 16) & 0xFF, a, ia)
+    let g: u64 = ref_mix8((alt >> 8) & 0xFF, (neu >> 8) & 0xFF, a, ia)
+    let b: u64 = ref_mix8(alt & 0xFF, neu & 0xFF, a, ia)
+    return (r << 16) | (g << 8) | b
+}
+
+// `fb_row` after the band check: the target address is given
+fn ref_fb_row(ziel: u64, src: u64, n: u64) {
+    ref_copy_words(ziel, src, n *% 4 / 8)
+    if (n & 1) != 0 {
+        __mmio_write32((ziel +% (n - 1) *% 4) as *mut u32,
+            __mmio_read32((src +% (n - 1) *% 4) as *mut u32))
+    }
+}
+
+fn ref_fb_row_mix(ziel: u64, src: u64, n: u64, a: u64) {
+    if a >= 255 {
+        ref_fb_row(ziel, src, n)
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        let neu: u64 = __mmio_read32((src +% k *% 4) as *mut u32) as u64
+        let alt: u64 = __mmio_read32((ziel +% k *% 4) as *mut u32) as u64
+        __mmio_write32((ziel +% k *% 4) as *mut u32,
+            ref_blend(alt, neu, a) as u32)
+        k = k + 1
+    }
+}
+
+fn ref_blur_line(qadr: u64, zadr: u64, sb: u64, n: u64, r: u64) {
+    if n == 0 || r == 0 {
+        return
+    }
+    let fen: u64 = 2 * r + 1
+    let kehr: u64 = ((1 << 24) + fen - 1) / fen
+    let qend: u64 = qadr +% (n - 1) *% sb
+    let p0: u64 = __mmio_read32(qadr as *mut u32) as u64
+    var sr: u64 = ((p0 >> 16) & 0xFF) * (r + 1)
+    var sg: u64 = ((p0 >> 8) & 0xFF) * (r + 1)
+    var sb2: u64 = (p0 & 0xFF) * (r + 1)
+    var i: u64 = 1
+    while i <= r {
+        var j: u64 = i
+        if j > n - 1 {
+            j = n - 1
+        }
+        let p: u64 = __mmio_read32((qadr +% j *% sb) as *mut u32) as u64
+        sr = sr + ((p >> 16) & 0xFF)
+        sg = sg + ((p >> 8) & 0xFF)
+        sb2 = sb2 + (p & 0xFF)
+        i = i + 1
+    }
+    var pa: u64 = qadr +% (r + 1) *% sb
+    if pa > qend {
+        pa = qend
+    }
+    var ps: u64 = qadr
+    var zp: u64 = zadr
+    var x: u64 = 0
+    while x < n {
+        __mmio_write32(zp as *mut u32,
+            (((((sr *% kehr) >> 24) << 16) | (((sg *% kehr) >> 24) << 8)
+                | ((sb2 *% kehr) >> 24))) as u32)
+        zp = zp +% sb
+        let va: u64 = __mmio_read32(pa as *mut u32) as u64
+        let vs: u64 = __mmio_read32(ps as *mut u32) as u64
+        sr = sr + ((va >> 16) & 0xFF) - ((vs >> 16) & 0xFF)
+        sg = sg + ((va >> 8) & 0xFF) - ((vs >> 8) & 0xFF)
+        sb2 = sb2 + (va & 0xFF) - (vs & 0xFF)
+        if pa < qend {
+            pa = pa +% sb
+        }
+        if x >= r {
+            ps = ps +% sb
+        }
+        x = x + 1
+    }
+}
+
+// ===================================================================================================================
+
+fn report(name: u64, cases: u64, diffs: u64) {
+    ulib.say((&s_cd[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(cases)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(diffs)
+    ulib.nl()
+}
+
+fn pa(i: u64) -> u64 {
+    return (&dst_a[0 as usize]) as u64 + i * 4
+}
+
+fn pb(i: u64) -> u64 {
+    return (&dst_b[0 as usize]) as u64 + i * 4
+}
+
+fn ps(i: u64) -> u64 {
+    return (&src_buf[0 as usize]) as u64 + i * 4
+}
+
+// fill source and both targets with the same random start, the source with random pixels
+fn refill() {
+    var i: u64 = 0
+    while i < BUFPX + 2 * GUARD {
+        let v: u64 = next()
+        src_buf[i as usize] = ((v >> 8) & 0xFFFFFFFF) as u32
+        let w: u32 = (v >> 32) as u32
+        dst_a[i as usize] = w
+        dst_b[i as usize] = w
+        i = i + 1
+    }
+}
+
+// number of words (of BUFPX + 2 GUARD) in which the two targets differ
+fn compare() -> u64 {
+    var d: u64 = 0
+    var i: u64 = 0
+    while i < BUFPX + 2 * GUARD {
+        if dst_a[i as usize] != dst_b[i as usize] {
+            d = d + 1
+        }
+        i = i + 1
+    }
+    return d
+}
+
+// every (a, src channel, dst channel): 16 777 216 triples, all of them
+fn test_mix8() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var a: u64 = 0
+    while a < 256 {
+        let ia: u64 = 255 - a
+        var s: u64 = 0
+        while s < 256 {
+            var d: u64 = 0
+            while d < 256 {
+                if comp.mix8(d, s, a, ia) != ref_mix8(d, s, a, ia) {
+                    diffs = diffs + 1
+                }
+                cases = cases + 1
+                d = d + 1
+            }
+            s = s + 1
+        }
+        a = a + 1
+    }
+    report((&n_mix8[0 as usize]) as u64, cases, diffs)
+}
+
+fn test_blend() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var i: u64 = 0
+    while i < 2000000 {
+        let v: u64 = next()
+        let alt: u64 = v & 0xFFFFFF
+        let neu: u64 = (v >> 24) & 0xFFFFFF
+        var a: u64 = (v >> 48) & 0xFF
+        // the edges of the range often
+        if (v >> 56) < 16 {
+            a = 0
+        } else if (v >> 56) < 32 {
+            a = 255
+        } else if (v >> 56) < 40 {
+            a = 1
+        } else if (v >> 56) < 48 {
+            a = 254
+        }
+        if comp.blend(alt, neu, a) != ref_blend(alt, neu, a) {
+            diffs = diffs + 1
+        }
+        cases = cases + 1
+        i = i + 1
+    }
+    report((&n_blend[0 as usize]) as u64, cases, diffs)
+}
+
+fn test_copy_row() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var c: u64 = 0
+    while c < 3000 {
+        refill()
+        let n: u64 = next() % 600
+        // odd and even start pixels: the row start is 4-octet aligned only, not 8
+        let so: u64 = GUARD + next() % 8
+        let dofs: u64 = GUARD + next() % 8
+        comp.copy_row(pb(dofs), ps(so), n)
+        ref_fb_row(pa(dofs), ps(so), n)
+        diffs = diffs + compare()
+        cases = cases + 1
+        c = c + 1
+    }
+    report((&n_copy[0 as usize]) as u64, cases, diffs)
+}
+
+fn test_mix_row() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var c: u64 = 0
+    while c < 3000 {
+        refill()
+        let n: u64 = next() % 500
+        let so: u64 = GUARD + next() % 8
+        let dofs: u64 = GUARD + next() % 8
+        var a: u64 = next() % 256
+        let sel: u64 = next() % 10
+        if sel == 0 {
+            a = 0
+        } else if sel == 1 {
+            a = 255
+        } else if sel == 2 {
+            a = 254
+        } else if sel == 3 {
+            a = 1
+        }
+        comp.mix_row(pb(dofs), ps(so), n, a)
+        ref_fb_row_mix(pa(dofs), ps(so), n, a)
+        diffs = diffs + compare()
+        cases = cases + 1
+        c = c + 1
+    }
+    report((&n_mix[0 as usize]) as u64, cases, diffs)
+}
+
+// a line of n pixels at distance sb (4 across a row, or a pitch down a column), radius r = 1..33
+fn test_blur_line() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var c: u64 = 0
+    while c < 4000 {
+        refill()
+        let n: u64 = 1 + next() % 90
+        let r: u64 = next() % 36
+        var stepw: u64 = 1
+        if (next() & 1) != 0 {
+            stepw = 1 + next() % 150
+        }
+        // a line of n pixels, `stepw` pixels apart, must fit into the buffer between the guards
+        let q0: u64 = GUARD + next() % 8
+        let z0: u64 = GUARD + next() % 8
+        if (n - 1) * stepw + 8 < BUFPX - 8 {
+            comp.blur_line(ps(q0), pb(z0), stepw * 4, n, r)
+            ref_blur_line(ps(q0), pa(z0), stepw * 4, n, r)
+            diffs = diffs + compare()
+            cases = cases + 1
+        }
+        c = c + 1
+    }
+    report((&n_blur[0 as usize]) as u64, cases, diffs)
+}
+
+// the reciprocal against the division, for every divisor 3..33 and every sum 0..8415
+fn test_recip() {
+    var cases: u64 = 0
+    var diffs: u64 = 0
+    var fen: u64 = 3
+    while fen <= 33 {
+        let k: u64 = comp.box_recip(fen)
+        var x: u64 = 0
+        while x <= 8415 {
+            if ((x *% k) >> 24) != x / fen {
+                diffs = diffs + 1
+            }
+            cases = cases + 1
+            x = x + 1
+        }
+        fen = fen + 1
+    }
+    report((&n_recip[0 as usize]) as u64, cases, diffs)
+}
+
+fn u_start(args: u64) -> u64 {
+    test_recip()
+    test_mix8()
+    test_blend()
+    test_copy_row()
+    test_mix_row()
+    test_blur_line()
+    ulib.say((&s_cd[0 as usize]) as u64)
+    ulib.say((&n_done[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
