@@ -60,6 +60,12 @@ read N CM CS DS UM < <(stats "$S")
 [ "${CS:-0}" -gt 0 ] && [ "${DS:-1}" = 0 ] && ok "$CS pixels judged over all cycles, 0 differ from the kernel's picture" || bad "differing pixels: ${DS:-?} of ${CS:-0}"
 [ "${UM:-99999}" -le 8000 ] && ok "composing a frame in ring 3 took ${UM} us (median of the cycles) (budget 8000)" || bad "composing took ${UM:-?} us, median (budget 8000)"
 echo "        cycles=$N max_area=$CM compared_sum=$CS differ_sum=$DS compose_us_max=$UM"
+# r486: the desktop window (the wallpaper, a screen-sized window) paints into a shared buffer too, so wmd judges the wallpaper from the
+# very first cycle on (before: nothing was judged until the file manager opened; 21.9 M pixels in all)
+grep -aq '^desktop: shared=1' "$S" && ok "the desktop window paints into a shared buffer" || bad "desktop: $(grep -a '^desktop: shared' "$S" | head -1)"
+C1=$(grep -a '^wmd: cycle ' "$S" | head -1 | tr ' ' '\n' | awk -F= '$1 == "compared" { print $2; exit }')
+[ "${C1:-0}" -ge 300000 ] && ok "the first cycle already judged the wallpaper: $C1 pixels" || bad "the first cycle judged only ${C1:-0} pixels"
+[ "${CS:-0}" -ge 30000000 ] && ok "$CS pixels judged over all cycles (21.9 M before the desktop was shared)" || bad "only ${CS:-0} pixels judged over all cycles"
 
 echo "== 2. counter-proof: noshare -- no shared buffer, wmd can judge nothing =="
 run nsh "noshare" window_alpha=100
@@ -67,6 +73,7 @@ S2="$D/nsh/serial.txt"
 read N2 CM2 CS2 DS2 UM2 < <(stats "$S2")
 echo "        cycles=$N2 max_area=$CM2 compared_sum=$CS2 differ_sum=$DS2"
 [ "${CM2:-1}" -lt "${CM:-0}" ] && [ "${CM2:-1}" -lt 20000 ] && ok "noshare: wmd could judge only $CM2 pixels (against $CM)" || bad "noshare: wmd judged $CM2 pixels anyway"
+grep -aq '^desktop: shared=0' "$S2" && ok "noshare: the desktop window falls back to the copy path (shared=0)" || bad "noshare: $(grep -a '^desktop: shared' "$S2" | head -1)"
 
 echo
 echo "SHADOW: $pass passed, $fail failed"

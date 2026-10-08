@@ -80,6 +80,7 @@ const IMAGE_MAX_W: u64 = 480
 const IMAGE_MAX_H: u64 = 300
 
 static mut w_h: u64 = 0 // das Handle des Fensters
+static mut w_shared: u64 = 0 // COMPOSITOR r486: 1 = the window paints from a shared buffer (no WIG_BLIT)
 static mut sw: u64 = 0
 static mut sh: u64 = 0
 static mut image: u64 = 0 // die Bildpunkte, oder 0
@@ -345,6 +346,16 @@ fn image_load(pfad: u64) -> bool {
     return true
 }
 
+// COMPOSITOR r486: the painted rectangle reaches the window server. Shared buffer: name the damage, nothing is copied. Otherwise the old
+// way (WIG_BLIT of a band).
+fn flush(x: u64, y: u64, w: u64, h: u64) {
+    if w_shared != 0 {
+        let _d: u64 = wlibc.win_damage(w_h, x, y, w, h)
+        return
+    }
+    let _n: u64 = wlibc.push(w_h, x, y, w, h)
+}
+
 // EINEN STREIFEN MALEN UND HINUEBERSCHIEBEN. Genau der Weg, den die
 // Widget-Bibliothek geht (`kernel/user/wlibc.fi`): die Flaeche ist 800
 // mal 81 Bildpunkte gross, ein Fenster von 800 mal 600 passt nicht in
@@ -361,7 +372,7 @@ fn streifen(y0: u64, hoehe: u64) {
         }
         y = y + 1
     }
-    let _n: u64 = wlibc.push(w_h, 0, y0, sw, hoehe)
+    flush(0, y0, sw, hoehe)
 }
 
 fn all_paint() {
@@ -443,7 +454,7 @@ fn fleck(x: u64, y: u64, w: u64, h: u64) {
             }
             py = py + 1
         }
-        let _n: u64 = wlibc.push(w_h, x0, yy, x1 - x0, bis - yy)
+        flush(x0, yy, x1 - x0, bis - yy)
         yy = bis
     }
 }
@@ -487,7 +498,7 @@ fn modul_malen(i: u64) {
         if modul_zeigt == i {
             modul.rahmen_malen(i)
         }
-        let _n: u64 = wlibc.push(w_h, x, yy, w, bis - yy)
+        flush(x, yy, w, bis - yy)
         yy = bis
     }
 }
@@ -740,14 +751,33 @@ fn u_start(args: u64) -> u64 {
     sh = wlibc.screen_h()
     // DAS FENSTER IST DER GANZE BILDSCHIRM. Ohne Schmuck heisst: das
     // aeussere Rechteck IST die Malflaeche, es geht kein Rahmen ab.
+    // COMPOSITOR r486: the screen-sized window gets a shared buffer (the wallpaper is most of what the compositor judges). No buffer to
+    // be had (noshare, no contiguous memory): the window is made as before and paints in bands.
+    let shb: u64 = sw * sh * 4
+    let shp: u64 = wlibc.shm_buffer(shb)
+    var shfd1: u64 = 0
+    if shp != 0 {
+        shfd1 = wlibc.shm_last_fd() + 1
+    }
     let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (sw << 16) | sh,
-        msg.get((&k_title[0 as usize]) as u64), 0, 0)
+        msg.get((&k_title[0 as usize]) as u64), 0, shfd1)
+    if shfd1 != 0 {
+        wlibc.shm_close(shfd1 - 1)
+    }
     if ulib.bad(h) || h == 0 {
         say((&s_bad[0 as usize]) as u64)
         nl()
         return 1
     }
     w_h = h
+    if shp != 0 {
+        if wlibc.win_shared(h) {
+            wlibc.surf_use(shp, sh)
+            w_shared = 1
+        } else {
+            wlibc.shm_unmap(shp, shb)
+        }
+    }
     if ulib.bad(wlibc.win_state(h, wlibc.WS_DECO, 0)) {
         say((&s_bad[0 as usize]) as u64)
         nl()
@@ -800,6 +830,10 @@ fn u_start(args: u64) -> u64 {
     sayn(wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_LAYER, 0))
     say((&s_d[0 as usize]) as u64)
     sayn(0)
+    nl()
+    var s_sh: [u8; 17] = "desktop: shared=\0"
+    say((&s_sh[0 as usize]) as u64)
+    sayn(w_shared)
     nl()
     if mit_bild {
         say((&s_bi[0 as usize]) as u64)
