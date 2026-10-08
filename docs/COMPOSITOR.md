@@ -115,7 +115,7 @@ Why (and what I rejected):
 | stage | what | gate (tests that exist today, plus the new ones) |
 |---|---|---|
 | **S0 -- measure** (this round, started) | document (this file); steady-state frame histogram after boot (reset the counters; pointer movement, window drag, menu open) -- **new**; split `wm.fi` time per phase (damage / desktop / each window / blur / present) and the input-to-present latency in the kernel -- **new** | numbers in this file; no behaviour change |
-| **S1 -- chrome as fUi (integer core)** (this round, first part built) | Win11 title bar / buttons / frame through shape numbers (`title_bar`, `cap_w`, `frame`), caption states (hover, pressed, inactive) from `fui/core`; the layout table of the chrome in one place (`fui/deco.fi`, later); Alt+F4 | `wm` 108/0, `fourbugs` 26/0 (title centre, window protrudes, 8 edge cursors), `look` 41/0, `softui` 24/0, `themestore` 298/0, `k15` 258/0, `alltag` 44/0, `lockseal` 43/0, frame time <= 16 ms |
+| **S1 -- chrome as fUi (integer core)** (this round, first part built) | Win11 title bar / buttons / frame through shape numbers (`title_bar`, `cap_w`, `frame`), caption states (hover, pressed, inactive) from `fui/core`; the layout table of the chrome in one place (`fui/deco.fi`, later); Alt+F4 | `wm` 108/0, `fourbugs` 26/0 (title centre, window protrudes, 8 edge cursors), `look` 41/0, `softui` 24/0, `themestore` 298/0, `k15` 259/0, `alltag` 45/0, `lockseal` 43/0, frame time <= 16 ms |
 | **S2 -- compositing primitives as a library** | `lib/fui/comp.fi`, integer, `profile kernel` (usable in both rings): rectangle algebra and a **region** (list of damage rectangles), row copy / alpha / key-colour mix, shadow mask, box blur with running sum. `wm.fi` calls it row by row; **differential test**: for random input the library output equals the old `fb_row*` octet for octet | new `tools/comp` 0 differences; `look` / `softui` unchanged; micro-bench in ring 0 and ring 3 (the ring-3 number is the first real evidence for section 5, point 3) |
 | **S3 -- shared window buffers** | `WM_CREATE` variant that takes a `memfd`-backed buffer: the client paints into the buffer the kernel composes from (no `WIG_BLIT` copy); a read-only table page (rect, z, layer, flags, owner) for ring 3; `wayd` keeps working | copies per frame 0 for scene programs; `tools/wayland` 45/0; `a11y` 58/0 |
 | **S4 -- `wmd` as a shadow compositor (observer)** | `wmd` composes the same scene into an off-screen buffer from the shared table and buffers, **does not touch the screen**; a test compares its picture with the kernel's pixel for pixel (the oracle is `wm.fi`, which exists) | pixel difference 0 on the scenes of `look` / `themestore` / `design`; time per frame <= 8 ms measured in ring 3 |
@@ -297,6 +297,27 @@ What is left: 43 ns a pixel is still about 130 cycles; the vertical pass (six re
 `div` of the grain dominate. A fused vertical pass (add and remove row in one loop) and a reciprocal for the grain's modulus
 would take it below 8 ms. Not needed for the 16 ms budget.
 
+### The next bottleneck after the shared buffers, measured and removed (r465, 08.10.2026)
+
+The shared window buffers cut the kernel's copies 9.8 times, but the frame time did not move: the copy was never the big cost. `tools/design/stationaer.sh`
+(`phases` on, KVM, host load 12 - 15) on `main` 51121409 split the frame time per phase (`wm: phase`, microseconds summed over the frames):
+
+| phase | frames | mean | max | over 16 ms | where the time went |
+|---|---|---|---|---|---|
+| window dragged | 181 | 5.09 ms | 18.2 ms | 2 | `drag` 657 ms = **3.63 ms per frame, 71 %**; `win` 766 ms in all; `px` 66 million = 10 ns a pixel |
+| start menu open / close | 52 | 3.36 ms | 21.5 ms | 6 | `blur` 77 ms (16 blurs, 4.8 ms each), `win` 98 ms, `top` 57 ms |
+
+The dragged (lifted, scaled) window is copied by `paint_win_drag`, and its per-pixel loop is firnc stack code (loads, stores and overflow checks, plus the
+`0 <= q < bw` test). The same loop is assembly now (`tools/blur/blurasm.py`, routine `d`; 2000 random cases against the Firn arithmetic in
+`tools/blur/asmtest.c`). The column test is gone: the clip keeps every x inside the window, so `q = (x - ox) * bw / nw` is always in `[0, bw)`.
+
+| after (same drehbuch) | frames | mean | max | over 16 ms | `drag` per frame |
+|---|---|---|---|---|---|
+| window dragged | 181 | **1.54 ms** | 5.6 ms | **0** | **0.34 ms** (was 3.63) |
+| start menu open / close | 51 | 3.11 ms | 20.3 ms | 3 | -- |
+
+What is left in the menu: 16 blurs of 4.4 ms and the `top` layer; both are inside the budget.
+
 ### Section 5, points 2 and 3 answered (`kernel/user/compbench.fi`, `tools/comp/run.sh`, 1 and 4 cores, KVM)
 
 | what | measured | reading |
@@ -425,4 +446,4 @@ dates: the wall clock differs between boots; two shared runs differ from each ot
 
 * S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
 * Terminal and desktop windows are not shared yet (`want_shared` is on for `fuiapp` programs); the pixels of those are not judged.
-* `look`: `'Größe' does not match a second rasterisation` (file manager, x=867 y=183) is red on `main` as well (since the tab strip), not from this branch.
+* ~~`look`: `'Größe' does not match a second rasterisation`~~ fixed (08.10.2026): the file manager's buffer grows upward by its caption strip (r454); `tools/look/umlaut.py` now subtracts the strip height the program reports (`explorer: strip h=`). `look` 41/0. `alltag` had silently lost its counter-proof (45 -> 44): the console lines were renamed (`opk: installed`, `opk: SIGNATURE WRONG`) and the German words it looked for never matched; the check is now mandatory (45/0). `k15` is 259/0: r454 added one line (the title bar of the file manager is its tab strip).

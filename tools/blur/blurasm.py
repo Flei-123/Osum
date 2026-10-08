@@ -349,7 +349,37 @@ jnz 1b
 # M block: 0 src, 1 dst, 2 count (used up), 3 x (absolute, first pixel), 4 y * 19349663, 5 amp, 6 2 * amp + 1,
 #          7 100 - tint, 8 / 9 / 10 tone red / green / blue * tint, 11 scratch
 
-BODIES = {"h": H, "v": V, "m": M}
+# r465: one row of the dragged (lifted, scaled) window. Block words: 0 source row, 1 destination, 2 count, 3 first source column q,
+# 4 remainder r, 5 whole step qs, 6 remainder step rs, 7 nw. Same stepping as the Firn loop it replaces: sx = (x - ox) * bw / nw.
+D = """
+mov rdx,rdi
+mov rcx,[rdx+16]
+test rcx,rcx
+jz 0f
+mov rsi,[rdx]
+mov rdi,[rdx+8]
+mov r8,[rdx+24]
+mov r9,[rdx+32]
+mov r10,[rdx+40]
+mov r11,[rdx+48]
+1:
+mov eax,[rsi+r8*4]
+and eax,16777215
+mov [rdi],eax
+add rdi,4
+add r8,r10
+add r9,r11
+cmp r9,[rdx+56]
+jl 2f
+sub r9,[rdx+56]
+inc r8
+2:
+dec rcx
+jnz 1b
+0:
+"""
+
+BODIES = {"h": H, "v": V, "m": M, "d": D}
 CLOB = ['clobber("rax")', 'clobber("rcx")', 'clobber("rdx")', 'clobber("rsi")', 'clobber("rdi")',
         'clobber("r8")', 'clobber("r9")', 'clobber("r10")', 'clobber("r11")', 'clobber("memory")']
 
@@ -385,7 +415,7 @@ def test():
     d = tempfile.mkdtemp()
     try:
         asm = ".intel_syntax noprefix\n"
-        for n in "hvm":
+        for n in "hvmd":
             asm += ".globl blur_%s_asm\nblur_%s_asm:\npush r12\npush r13\npush r14\npush r15\n%s\npop r15\npop r14\npop r13\npop r12\nret\n" % (n, n, "\n".join(lines(BODIES[n])))
         asm += ".att_syntax prefix\n"
         open(os.path.join(d, "a.S"), "w").write(asm)
