@@ -234,9 +234,9 @@ window buffers, z-order, input routing, window rights, lock. The kernel only del
 | S0 measure | **done**: `wm: phase` line per F12 (background / windows / lifted windows / top layer / present / blur / glass / shadow, microseconds and pixels); numbers in section 7 |
 | S1 chrome as fUi | part 1 done (shape numbers); next: layout / hit table `fui/deco.fi`, a11y nodes for the chrome |
 | S2 compositing primitives | `lib/fui/region.fi` built (test 1932); next: damage as a region in `wm.fi` and the differential tests |
-| S3 shared buffers + table page | not started |
-| S4 shadow compositor | not started (needs S3) |
-| S5 scan-out switch + watchdog | not started |
+| S3 shared buffers + table page | **done** (08.10.2026, `tools/comp/shared.sh`) |
+| S4 shadow compositor | **done** (08.10.2026, `tools/comp/shadow.sh`) |
+| S5 scan-out switch + watchdog | **done, opt-in** (`wmd present`; 08.10.2026, `tools/comp/present.sh`, section "S5") |
 | S6 chrome and effects in `wmd` | not started |
 | S7 delete the kernel painters | not started |
 
@@ -387,6 +387,22 @@ everywhere.** Counter-proof: with `+127` changed to `+126` in `mix8` and the odd
   (`fuiapp` / `fuiscene`) gets it without a change. The kernel word `noshare` switches it off (counter-proof).
 * **Gates:** `tools/comp/shared.sh` (shmtest in the desktop, screenshot shows the client's gradient, differential pictures shared vs `noshare`,
   copies per frame), `tools/wayland` 45/0.
+
+### S5 -- `wmd present`: the compositor takes the scan-out, the kernel keeps a watchdog
+
+`wmd present` (kernel/user/wmd.fi, `run_present`) attaches with `WM_COMP / CP_ATTACH` (root only). From then on `compose` still paints the whole
+picture, but the finished rectangle is handed over (`cp_hand`) and the program is woken (`CP_WAIT`); the card gets it only when the program calls
+`CP_PRESENT`. The kernel keeps the framebuffer, the lock, the trusted dialog and the **watchdog** (`wm.fi`, `cp_watch`): a rectangle that waits longer
+than 50 ms is pushed to the card by the kernel (a miss); 3 misses in a row or the death of the task detach the compositor and the kernel presents
+every frame again (the old code path, unchanged). `wmd` attaches again 500 ms after a detach. The **input copy ring** (read-only page, `CP_PAGE`)
+carries pointer moves, button changes and keys only while Alt / Windows is held; ordinary key codes are never copied, nothing is copied while the
+screen is locked or the trusted dialog is up. It is **opt-in** (`wigapp=/bin/wmd,present`); the desktop default is still the kernel path, because
+S6 (chrome in `wmd`) has to exist before the switch is worth anything.
+
+`tools/comp/present.sh` (one boot per scene, same drehbuch): normal (frames shown by `wmd`, kernel shows none, input to picture mean well below 16 ms),
+die (task exits -> detach at once, kernel presents, drag still works), hang (watchdog pushes 3 frames, detaches), slow (120 ms per frame -> misses,
+detach again and again), and the counter-proofs `nowatch` (a hung compositor freezes the picture: frames pile up, nothing shown) and `nocomp`
+(the attach is refused: the kernel shows every frame).
 
 ### S4 -- `wmd`, the shadow compositor (observer)
 

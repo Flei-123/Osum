@@ -17,6 +17,9 @@
 // `compared` says how many pixels that was; `differ` how many of them were not the same. The screen has to hold still while we look:
 // the table and the picture are read twice and a cycle where something moved is thrown away (`unstable`).
 //
+// S5 (`wmd present`, at the end of this file): the same program, started with the argument `present`, is THE COMPOSITOR that shows the frames:
+// the kernel hands every finished rectangle over, this program calls CP_PRESENT, the kernel's watchdog takes over when it hangs or dies.
+//
 // Every cycle prints one line:  wmd: cycle <n> windows=<n> plain=<n> compared=<px> differ=<px> compose_us=<us> first=<x>,<y>
 // and `wmd: summary ...` at the end. Integer only, no heap: the program runs in the kernel profile.
 
@@ -435,7 +438,7 @@ fn cycle(t: u64) -> u64 {
     return 0
 }
 
-fn u_start(args: u64) -> u64 {
+fn run_observe(args: u64) -> u64 {
     var n_cycle: [u8; 12] = "wmd: cycle \0"
     var n_win: [u8; 10] = " windows=\0"
     var n_pl: [u8; 8] = " plain=\0"
@@ -611,4 +614,274 @@ fn u_start(args: u64) -> u64 {
         k = k + 1
     }
     return 0
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// S5 -- `wmd present`: THE COMPOSITOR THAT SHOWS THE FRAMES (docs/COMPOSITOR.md section 4)
+//
+// The kernel still paints the picture; with this program attached (WM_COMP / CP_ATTACH) it does not push a finished rectangle to the card but
+// hands it over and wakes us. We sleep in CP_WAIT (wake driven: the same wake-up `poll` uses), then CP_PRESENT shows the rectangle. The kernel keeps
+// a watchdog: a rectangle that waits longer than 50 ms is shown by the kernel (a miss), three misses in a row or our death detach us and the kernel
+// presents every frame itself again. We also read the input copy ring (pointer moves, button changes, shortcut keys) the kernel writes while the screen
+// is not locked and no trusted dialog is up.
+//
+// Test hooks (arguments, `wigapp=/bin/wmd,present,slow=80`): `slow=<ms>` sleeps before every present (a compositor that is too slow),
+// `hangon=<n>` stops presenting for good after the n-th button press (a hang: alive, silent), `dieon=<n>` exits at the n-th button press (a crash).
+// Every second it prints:  wmd: present frames= shown= px= ev= move= btn= key= keycode= lost= busy= errors=
+
+const WM_COMP: u64 = 2144
+const CP_ATTACH: u64 = 0
+const CP_WAIT: u64 = 1
+const CP_PRESENT: u64 = 2
+const CP_PAGE: u64 = 3
+const CPR_AT: u64 = 16
+const CPR_N: u64 = 64
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn rd64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+// does the zero-terminated string at `p` start with the zero-terminated `lit`?
+fn has_prefix(p: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while rd8(lit + i) != 0 {
+        if rd8(p + i) != rd8(lit + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// the number after `lit` ("slow=") in one of the arguments, or `def`
+fn arg_num(args: u64, lit: u64, def: u64) -> u64 {
+    var len: u64 = 0
+    while rd8(lit + len) != 0 {
+        len = len + 1
+    }
+    var i: u64 = 1
+    let n: u64 = ulib.arg_count(args)
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if has_prefix(a, lit) {
+            return ulib.to_num(a + len)
+        }
+        i = i + 1
+    }
+    return def
+}
+
+static mut pr_frames: u64 = 0
+static mut pr_shown: u64 = 0
+static mut pr_px: u64 = 0
+static mut pr_ev: u64 = 0
+static mut pr_move: u64 = 0
+static mut pr_btn: u64 = 0
+static mut pr_key: u64 = 0
+static mut pr_code: u64 = 0
+static mut pr_lost: u64 = 0
+static mut pr_busy: u64 = 0
+static mut pr_err: u64 = 0
+static mut pr_att: u64 = 1
+
+fn pr_report() {
+    var n_p: [u8; 21] = "wmd: present frames=\0"
+    var n_s: [u8; 8] = " shown=\0"
+    var n_x: [u8; 5] = " px=\0"
+    var n_e: [u8; 5] = " ev=\0"
+    var n_m: [u8; 7] = " move=\0"
+    var n_b: [u8; 6] = " btn=\0"
+    var n_k: [u8; 6] = " key=\0"
+    var n_c: [u8; 10] = " keycode=\0"
+    var n_l: [u8; 7] = " lost=\0"
+    var n_y: [u8; 7] = " busy=\0"
+    var n_r: [u8; 9] = " errors=\0"
+    var n_a: [u8; 7] = " atts=\0"
+    ulib.say((&n_p[0 as usize]) as u64)
+    ulib.sayu(pr_frames)
+    ulib.say((&n_s[0 as usize]) as u64)
+    ulib.sayu(pr_shown)
+    ulib.say((&n_x[0 as usize]) as u64)
+    ulib.sayu(pr_px)
+    ulib.say((&n_e[0 as usize]) as u64)
+    ulib.sayu(pr_ev)
+    ulib.say((&n_m[0 as usize]) as u64)
+    ulib.sayu(pr_move)
+    ulib.say((&n_b[0 as usize]) as u64)
+    ulib.sayu(pr_btn)
+    ulib.say((&n_k[0 as usize]) as u64)
+    ulib.sayu(pr_key)
+    ulib.say((&n_c[0 as usize]) as u64)
+    ulib.sayu(pr_code)
+    ulib.say((&n_l[0 as usize]) as u64)
+    ulib.sayu(pr_lost)
+    ulib.say((&n_y[0 as usize]) as u64)
+    ulib.sayu(pr_busy)
+    ulib.say((&n_r[0 as usize]) as u64)
+    ulib.sayu(pr_err)
+    ulib.say((&n_a[0 as usize]) as u64)
+    ulib.sayu(pr_att)
+    ulib.nl()
+}
+
+fn run_present(args: u64) -> u64 {
+    var l_slow: [u8; 6] = "slow=\0"
+    var l_hang: [u8; 8] = "hangon=\0"
+    var l_die: [u8; 7] = "dieon=\0"
+    var n_att: [u8; 14] = "wmd: attached\0"
+    var n_ref: [u8; 20] = "wmd: attach refused\0"
+    var n_nop: [u8; 13] = "wmd: no page\0"
+    var n_hang: [u8; 17] = "wmd: hanging now\0"
+    var n_dying: [u8; 15] = "wmd: dying now\0"
+    var n_wer: [u8; 17] = "wmd: wait failed\0"
+    var n_rea: [u8; 16] = "wmd: reattached\0"
+    var l_rea: [u8; 10] = "reattach=\0"
+    wlibc.start(false)
+    let slow: u64 = arg_num(args, (&l_slow[0 as usize]) as u64, 0)
+    let hangon: u64 = arg_num(args, (&l_hang[0 as usize]) as u64, 0)
+    let dieon: u64 = arg_num(args, (&l_die[0 as usize]) as u64, 0)
+    let reattach_ms: u64 = arg_num(args, (&l_rea[0 as usize]) as u64, 500)
+    let r: u64 = ulib.sys(WM_COMP, CP_ATTACH, 0, 0)
+    if ulib.bad(r) {
+        ulib.say((&n_ref[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let pfd: u64 = ulib.sys(WM_COMP, CP_PAGE, 0, 0)
+    var page: u64 = 0
+    if !ulib.bad(pfd) {
+        page = mmap_fd(pfd, 4096)
+        if ulib.bad(page) {
+            page = 0
+        }
+    }
+    if page == 0 {
+        ulib.say((&n_nop[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&n_att[0 as usize]) as u64)
+    ulib.nl()
+    var seen: u64 = 0
+    var tail: u64 = 0
+    var presses: u64 = 0
+    var held: u64 = 0
+    var hanging: bool = false
+    var last_say: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var dirty_say: bool = false
+    while true {
+        if hanging {
+            // alive and silent: no wait, no present
+            let _s: u64 = ulib.sleep_ms(200)
+        } else {
+            var f: u64 = ulib.sys(WM_COMP, CP_WAIT, seen, 100)
+            if ulib.bad(f) {
+                // detached by the kernel (the watchdog took the screen back): the kernel shows the frames now. Wait a little so that the
+                // start-up storm is over, then attach again (a new compositor re-attaches to the table and the buffers, section 3, point 5).
+                ulib.say((&n_wer[0 as usize]) as u64)
+                ulib.nl()
+                pr_report()
+                let _w: u64 = ulib.sleep_ms(reattach_ms)
+                let r2: u64 = ulib.sys(WM_COMP, CP_ATTACH, 0, 0)
+                if ulib.bad(r2) {
+                    pr_err = pr_err + 1
+                } else {
+                    pr_att = pr_att + 1
+                    ulib.say((&n_rea[0 as usize]) as u64)
+                    ulib.nl()
+                }
+                seen = 0
+                f = 0
+            }
+            if f != seen {
+                if slow != 0 {
+                    let _z: u64 = ulib.sleep_ms(slow)
+                }
+                seen = f
+                pr_frames = pr_frames + 1
+                var px: u64 = ulib.sys(WM_COMP, CP_PRESENT, 0, 0)
+                var tries: u64 = 0
+                while ulib.bad(px) && tries < 8 {
+                    // busy: the compose lock did not come free in time (its holder may have been preempted): give the CPU away, once more
+                    pr_busy = pr_busy + 1
+                    let _y: u64 = ulib.sleep_ms(1)
+                    px = ulib.sys(WM_COMP, CP_PRESENT, 0, 0)
+                    tries = tries + 1
+                }
+                if ulib.bad(px) {
+                    pr_err = pr_err + 1
+                    px = 0
+                }
+                if px != 0 {
+                    pr_shown = pr_shown + 1
+                    pr_px = pr_px + px
+                }
+                dirty_say = true
+            }
+        }
+        // the input copy ring
+        let head: u64 = rd64(page + 16)
+        if head > tail + CPR_N {
+            pr_lost = pr_lost + (head - CPR_N - tail)
+            tail = head - CPR_N
+        }
+        while tail < head {
+            let at: u64 = page + (CPR_AT + (tail % CPR_N) * 4) * 8
+            let w0: u64 = rd64(at)
+            if (w0 >> 32) != tail + 1 {
+                pr_lost = pr_lost + 1
+            } else {
+                let typ: u64 = w0 & 0xFF
+                let btn: u64 = (w0 >> 16) & 0xFF
+                pr_ev = pr_ev + 1
+                if typ == 1 {
+                    pr_move = pr_move + 1
+                } else if typ == 2 {
+                    pr_btn = pr_btn + 1
+                    if (btn & 1) != 0 && (held & 1) == 0 {
+                        presses = presses + 1
+                        if hangon != 0 && presses == hangon {
+                            ulib.say((&n_hang[0 as usize]) as u64)
+                            ulib.nl()
+                            pr_report()
+                            hanging = true
+                        }
+                        if dieon != 0 && presses == dieon {
+                            ulib.say((&n_dying[0 as usize]) as u64)
+                            ulib.nl()
+                            pr_report()
+                            return 0
+                        }
+                    }
+                    held = btn
+                } else if typ == 3 {
+                    pr_key = pr_key + 1
+                    if rd64(at + 16) != 0 {
+                        pr_code = pr_code + 1
+                    }
+                }
+                dirty_say = true
+            }
+            tail = tail + 1
+        }
+        let now: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+        if dirty_say && now >= last_say + 100 {
+            pr_report()
+            last_say = now
+            dirty_say = false
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var l_present: [u8; 8] = "present\0"
+    if ulib.arg_count(args) > 1 && has_prefix(ulib.arg_at(args, 1), (&l_present[0 as usize]) as u64) {
+        return run_present(args)
+    }
+    return run_observe(args)
 }
