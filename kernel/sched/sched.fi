@@ -74,6 +74,8 @@ export {
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
     // ---- RUNDE LAUFZEIT ----
     T_FSBASE, fsbase_apply,
+    // ---- DELL STABILITY ----
+    state_cas, KILL_SET, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE,
     // ---- RUNDE O-CONTAINER ----
     T_CTR,
     // ---- RUNDE SPEICHERDRUCK (K-002) ----
@@ -617,6 +619,31 @@ fn tget(state: u64, i: u64, field: u64) -> u64 {
 
 fn tset(state: u64, i: u64, field: u64, v: u64) {
     __mmio_write64((task_at(state, i) + field) as *mut u64, v)
+}
+
+// DELL STABILITY (08.10.2026): THE LOCK-FREE WAKE-UPS MUST NOT OVERWRITE A
+// STATE THEY DID NOT SEE. `wake_pid`, `poll_kick`, `send_task` and the timer
+// used to read "S_WAIT" and then store "S_READY" with two plain accesses. In
+// between, the sleeper could have been woken by someone else and scheduled
+// on another core (S_RUN): the store then turned a RUNNING task into a READY
+// one, a third core picked it up with the stack pointer of its last switch,
+// and two cores ran on one kernel stack (garbage return addresses, #GP/#UD).
+// The change is one atomic compare-and-swap: it takes effect only if the
+// state is still the one the caller looked at.
+fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
+    if i >= kstate.MAX_TASKS {
+        return false
+    }
+    return atomic.cas(task_at(state, i) + T_STATE, from, to) == from
+}
+
+// `kill_pid` could not end the task at once because it was running on
+// another core: the request is carried in T_KILLCODE (KILL_SET + exit code)
+// and the task ends itself at its next trap / system call return.
+const KILL_SET: u64 = 0x4000000000000000
+
+fn kill_requested(state: u64, i: u64) -> bool {
+    return (tget(state, i, T_KILLCODE) & KILL_SET) != 0
 }
 
 // ----------------------------- RUNDE MULTIUSER: die Zusatzgruppen
@@ -2173,7 +2200,7 @@ fn on_tick(state: u64) {
         // kommt hier nie vorbei.
         let ts: u64 = tget(state, i, T_STATE)
         if (ts == S_SLEEP || ts == S_POLL) && tget(state, i, T_WAKE) <= now {
-            tset(state, i, T_STATE, S_READY)
+            state_cas(state, i, ts, S_READY)
         }
         i = i + 1
     }
@@ -2360,6 +2387,24 @@ fn wait_sleep(state: u64, want: u64) {
     irq_restore(flags)
 }
 
+// SIGSTOP & co: S_STOP and the switch under one hold of L_SCHED. `contbit`
+// is the pending-signal bit of SIGCONT: one that arrived before we got the
+// lock must not be slept through.
+fn stop_sleep(state: u64, contbit: u64) {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    let cur: u64 = current(state)
+    if (tget(state, cur, T_SIGPEND) & contbit) != 0 {
+        tset(state, cur, T_STOPSIG, 0)
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return
+    }
+    tset(state, cur, T_STATE, S_STOP)
+    schedule_locked(state)
+    irq_restore(flags)
+}
+
 // Whoever waits for this pid becomes ready again.
 fn wake_pid(state: u64, pid: u64) {
     let n: u64 = kstate.get(state, kstate.TASKS)
@@ -2368,7 +2413,7 @@ fn wake_pid(state: u64, pid: u64) {
         if tget(state, i, T_STATE) == S_WAIT {
             let w: u64 = tget(state, i, T_WAITPID)
             if w == 0 || w == pid {
-                tset(state, i, T_STATE, S_READY)
+                state_cas(state, i, S_WAIT, S_READY)
             }
         }
         i = i + 1
@@ -2415,7 +2460,7 @@ fn poll_kick(state: u64) {
     var i: u64 = 0
     while i < n {
         if tget(state, i, T_STATE) == S_POLL {
-            tset(state, i, T_STATE, S_READY)
+            state_cas(state, i, S_POLL, S_READY)
         }
         i = i + 1
     }
@@ -2449,7 +2494,7 @@ fn poll_kick_one(state: u64, task: u64) {
         return
     }
     if tget(state, task, T_STATE) == S_POLL {
-        tset(state, task, T_STATE, S_READY)
+        state_cas(state, task, S_POLL, S_READY)
     }
 }
 
@@ -2531,6 +2576,62 @@ fn exit_task(state: u64, code: u64) {
     }
 }
 
+// DELL STABILITY (08.10.2026): `kill` of ANOTHER task.
+//
+// Before: `uio.kill_pid` wrote S_ZOMBIE into the victim without the run queue
+// lock, whatever the victim was doing. A victim that was RUNNING on another
+// core became a corpse while that core still stood on its kernel stack; the
+// parent's wait4 (or the desktop loop) then reaped the corpse on a third core,
+// the stack frames went back to the frame allocator, and `create` painted them
+// with STACK_PAINT while the victim's core was still executing on them. The
+// Dell saw that as `ret` to 0x5A5A5A5A5A5A5A5A (stack scan in the panic report:
+// reap -> fd_free -> lock_take -> context_switch, RIP in .bss); the VM series
+// (tools/stab/crash.sh) shows the same as #GP at a painted return address.
+//
+// Now, under ONE hold of L_SCHED:
+//   * not running (READY, SLEEP, WAIT, POLL, STOP): its stack is quiet, it is
+//     made a corpse right here -- as before, but also reparenting its children
+//     (`exit_task` always did, `kill_pid` never did);
+//   * running (S_RUN, on any core): nothing is torn down. The request goes
+//     into T_KILLCODE (KILL_SET + code) and the victim ends ITSELF in
+//     `exit_task`, at its next trap or system call return (`signal.deliverable`
+//     reports SIGKILL for it).
+const KILL_DONE: u64 = 0
+const KILL_LATER: u64 = 1
+const KILL_GONE: u64 = 2
+
+fn kill_other(state: u64, i: u64, pid: u64, code: u64) -> u64 {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    if i >= kstate.MAX_TASKS || tget(state, i, T_PID) != pid {
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return KILL_GONE
+    }
+    let st: u64 = tget(state, i, T_STATE)
+    if st == S_FREE || st == S_ZOMBIE || st == S_REAPING || st == S_NEW {
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return KILL_GONE
+    }
+    if st == S_RUN || i == current(state) {
+        tset(state, i, T_KILLCODE, code | KILL_SET)
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return KILL_LATER
+    }
+    tset(state, i, T_KILLCODE, 0)
+    tset(state, i, T_EXIT, code)
+    tset(state, i, T_END, kstate.get(state, kstate.TICKS))
+    lock_gone(state, i)
+    tset(state, i, T_STATE, S_ZOMBIE)
+    reparent(state, i)
+    wake_pid(state, pid)
+    atomic.lock_give(state, atomic.L_SCHED)
+    irq_restore(flags)
+    return KILL_DONE
+}
+
 // RUNDE K13: DIE WAISEN. Stirbt ein Prozess, der noch Kinder hat, so
 // hatten diese Kinder bis zu dieser Runde einen Elternteil, dessen Platz
 // gleich wieder vergeben wird -- ihr `T_PARENT` zeigte danach auf einen
@@ -2577,10 +2678,27 @@ fn reparent(state: u64, dying: u64) {
 // the same reason -- the two locks of this kernel are never nested.
 // Claim a zombie for reaping. Only the caller that gets `true` may free
 // anything of it; everyone else must leave it alone.
+// DELL STABILITY: is task `i` the current task of ANY core? A corpse whose kernel
+// stack a core still stands on must not be torn down (the frames would go to
+// the allocator and be repainted under that core). `kill_other` no longer makes
+// such corpses; this is the second line, and a stop with evidence instead of a
+// panic: the reap is refused and tried again later.
+fn on_a_core(state: u64, i: u64) -> bool {
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n {
+        if cpu.get(state, c, cpu.C_CUR) == i {
+            return true
+        }
+        c = c + 1
+    }
+    return false
+}
+
 fn claim_zombie(state: u64, i: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    if tget(state, i, T_STATE) != S_ZOMBIE || i == current(state) {
+    if tget(state, i, T_STATE) != S_ZOMBIE || on_a_core(state, i) {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         return false
@@ -2603,7 +2721,7 @@ fn reap_claimed(state: u64, i: u64) -> bool {
 fn reap_in(state: u64, i: u64, want: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    if tget(state, i, T_STATE) != want || i == current(state) {
+    if tget(state, i, T_STATE) != want || on_a_core(state, i) {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         return false

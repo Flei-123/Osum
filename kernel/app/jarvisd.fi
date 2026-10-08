@@ -338,6 +338,26 @@ static mut z_verbindungen: u64 = 0
 static mut z_wartems: u64 = 0
 static mut z_warteaufrufe: u64 = 0
 
+// ==================================================== 08.10.2026: DELL STABILITY
+// Idle cost and reconnect time of the https transport (tools/stab/net.sh).
+//
+// Over 443 every message is its own TCP connection and TLS handshake, and an
+// idle device sends a `puls` for every one of them. The wait between two polls
+// used to grow 250 ms -> 2 s and stay there: one handshake every 2 s, for ever
+// (measured in the VM: see docs/DELL-STABILITY.md). Now it grows to POLL_MAX_MS.
+// A job (or an answer that is not empty) sets it back to zero at once.
+const POLL_MAX_MS: u64 = 5000
+// A poll that fails (connection refused, reset, timeout, a 5xx) does not end the
+// session: the https transport has no connection to lose, the session lives on
+// the server (token, 12 h). Retry a few times before signing in again.
+const POLL_TRIES: u64 = 3
+// A session that lasted at least this long was a good one: its end is a
+// transient event, and the first retry comes after 250 ms again -- not after
+// the 30 s a long-forgotten earlier failure left in the back-off.
+const GOOD_SESSION_MS: u64 = 30000
+static mut z_sitzungen: u64 = 0
+static mut k_sitzung_ms: u64 = 0
+
 // ==================================================== 05.10.2026: WHY OFFLINE
 // The Dell vanished from the bridge on 04.10.2026 at 16:00 UTC without a
 // trace: no goodbye, no error. Three holes were found in this client:
@@ -1144,11 +1164,16 @@ struct Draht {
     // Nachricht beisammen ist (Kopfzeile + Nutzlast).
     https: bool,
     aus: rt.Buf,
+    // DELL STABILITY: the root store is read and parsed ONCE per session, not for
+    // every poll (a poll is a connection of its own, one every few seconds for
+    // ever). Freed in `wire_gone`.
+    store: x509.Store,
+    store_ok: bool,
 }
 
 fn wire_new(t: *mut tls.Tls) -> Draht {
     return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
-        https: false, aus: rt.buf_new() }
+        https: false, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
 // ==================================================== RUNDE MERGE-11
@@ -1189,7 +1214,7 @@ fn wire_new(t: *mut tls.Tls) -> Draht {
 // "nichts zu tun".
 fn wire_new_https() -> Draht {
     return Draht { t: 0, puf: rt.buf_new(), at: 0, tot: false,
-        https: true, aus: rt.buf_new() }
+        https: true, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
 // Der HTTP-Kopf. Mehr als das braucht ein POST nicht, und jede weitere
@@ -1262,28 +1287,29 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     }
     let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
 
-    var storebuf: rt.Buf = rt.buf_new()
-    // The store is built for every request and MUST be freed on every way
-    // out (27.09.2026): it never was, the helper's heap grew with each
-    // request, and after a few hundred (a remote update is many) reading the
-    // root file failed with "no root store" -- the Dell kept running, the
-    // helper never came back to the bridge.
-    var store: x509.Store = x509.store_new()
-    var wurzeln: usize = 0
-    if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
-        wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
-    }
-    if wurzeln == 0 {
-        // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
-        // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
-        sag("jarvisd: no root store -- nothing is trusted\n")
-        net.close(&c)
+    // The store is parsed once per session (DELL STABILITY, see `Draht`). Before
+    // that it was built for every request and had to be freed on every way out
+    // (27.09.2026: it never was, the helper's heap grew with each request and
+    // after a few hundred reading the root file failed with "no root store").
+    // Now it lives and dies with the session: `wire_gone` frees it.
+    if !(*d).store_ok {
+        var storebuf: rt.Buf = rt.buf_new()
+        var wurzeln: usize = 0
+        if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
+            wurzeln = x509.store_load_pem(&(*d).store, storebuf.ptr, storebuf.len)
+        }
         rt.buf_free(&storebuf)
-        x509.store_free(&store)
-        return false
+        if wurzeln == 0 {
+            // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
+            // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
+            sag("jarvisd: no root store -- nothing is trusted\n")
+            net.close(&c)
+            return false
+        }
+        (*d).store_ok = true
     }
     var t: tls.Tls = tls.tls_new()
-    let oki: bool = tls.tls_init(&t, &c, &store, (&k_name[0]) as u64,
+    let oki: bool = tls.tls_init(&t, &c, &(*d).store, (&k_name[0]) as u64,
         k_namelen, now_s())
     var hschief: bool = false
     let okh: bool = tls.tls_handshake(&t) catch | e | fail_bool(&hschief)
@@ -1293,8 +1319,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
         sag("\n")
         tls.tls_free(&t)
         net.close(&c)
-        rt.buf_free(&storebuf)
-        x509.store_free(&store)
         return false
     }
 
@@ -1311,8 +1335,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
         tls.tls_close(&t)
         tls.tls_free(&t)
         net.close(&c)
-        rt.buf_free(&storebuf)
-        x509.store_free(&store)
         return false
     }
 
@@ -1330,8 +1352,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     tls.tls_close(&t)
     tls.tls_free(&t)
     net.close(&c)
-    rt.buf_free(&storebuf)
-    x509.store_free(&store)
 
     let code: u64 = http_nummer(roh.ptr, roh.len)
     if code != 200 {
@@ -1353,6 +1373,8 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
 fn wire_gone(d: *mut Draht) {
     rt.buf_free(&(*d).puf)
     rt.buf_free(&(*d).aus)
+    x509.store_free(&(*d).store)
+    (*d).store_ok = false
 }
 
 // Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
@@ -2656,15 +2678,30 @@ fn bediene(d: *mut Draht) -> bool {
         if (*d).https && (*d).at >= (*d).puf.len {
             if ruhe > 0 {
                 schlafe_ms(ruhe)
+                keepalive()
             }
-            if !word_send(d, "puls", 0, 0 as usize) {
+            var versuche: u64 = 0
+            var gesendet: bool = false
+            while versuche < POLL_TRIES && !gesendet {
+                if versuche > 0 {
+                    say_if_loud("jarvisd: poll failed, trying again\n")
+                    schlafe_ms(1000 << (versuche - 1))
+                }
+                gesendet = word_send(d, "puls", 0, 0 as usize)
+                versuche = versuche + 1
+            }
+            if !gesendet {
                 sauber = false
                 break
             }
             if (*d).at >= (*d).puf.len {
-                ruhe = ruhe + 250
-                if ruhe > 2000 {
-                    ruhe = 2000
+                if ruhe == 0 {
+                    ruhe = 250
+                } else {
+                    ruhe = ruhe * 2
+                }
+                if ruhe > POLL_MAX_MS {
+                    ruhe = POLL_MAX_MS
                 }
                 continue
             }
@@ -2863,6 +2900,8 @@ fn eine_runde_https() -> u64 {
         sag("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        z_sitzungen = z_sitzungen + 1
+        k_sitzung_ms = now_ms()
         k_draht = (&d) as u64
         sende_info(&d)
         if bediene(&d) {
@@ -2939,6 +2978,8 @@ fn eine_runde() -> u64 {
         sag("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        z_sitzungen = z_sitzungen + 1
+        k_sitzung_ms = now_ms()
         if bediene(&d) {
             erg = 0
         } else {
@@ -3559,7 +3600,15 @@ fn main(start: u64) -> i32 {
         if frist > 0 && now_ms() - t0 > frist {
             break
         }
+        let sitz0: u64 = z_sitzungen
         let erg: u64 = eine_runde()
+        // DELL STABILITY: the back-off belongs to FAILURES in a row. A session
+        // that was signed in and ran for GOOD_SESSION_MS or more ended by a blip
+        // of the network: the first retry comes after 250 ms, not after the
+        // 30 s that an old failure had left in `warte`.
+        if z_sitzungen > sitz0 && now_ms() - k_sitzung_ms >= GOOD_SESSION_MS {
+            warte = 250
+        }
         if erg == 0 {
             sag("jarvisd: the server said goodbye\n")
             if einmal {

@@ -355,8 +355,15 @@ fn pending(state: u64, task: u64) -> u64 {
 
 // Was JETZT zugestellt werden koennte: wartend und nicht blockiert.
 fn deliverable(state: u64, task: u64) -> u64 {
-    return sched.tget(state, task, sched.T_SIGPEND)
+    var d: u64 = sched.tget(state, task, sched.T_SIGPEND)
         & (0xFFFFFFFFFFFFFFFF -% sched.tget(state, task, sched.T_SIGMASK))
+    // DELL STABILITY: `kill` of a task that runs on another core is carried
+    // in T_KILLCODE (one atomic word) and not in the signal bit -- the victim's
+    // own read-modify-write of T_SIGPEND could swallow a bit set from outside.
+    if sched.kill_requested(state, task) {
+        d = d | bit(SIGKILL)
+    }
+    return d
 }
 
 // Wartet etwas, das einen blockierenden Systemaufruf abbrechen muss? Das
@@ -405,8 +412,9 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
         // laeuft: das ist die einzige Art, wie eine angehaltene Aufgabe
         // ueberhaupt wieder dazu kommt, irgendetwas zuzustellen.
         if st == sched.S_STOP {
-            sched.tset(state, task, sched.T_STATE, sched.S_READY)
-            sched.tset(state, task, sched.T_STOPSIG, 0)
+            if sched.state_cas(state, task, sched.S_STOP, sched.S_READY) {
+                sched.tset(state, task, sched.T_STOPSIG, 0)
+            }
         }
     }
     if sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU {
@@ -425,7 +433,7 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
     // Der Aufruf selbst fragt nach jedem Aufwachen `signal.interrupted`
     // und gibt dann -EINTR -- aber er muss dafuer aufwachen duerfen.
     if now == sched.S_SLEEP || now == sched.S_WAIT || now == sched.S_POLL {
-        sched.tset(state, task, sched.T_STATE, sched.S_READY)
+        sched.state_cas(state, task, now, sched.S_READY)
     }
     // SIGKILL HOLT AUCH EINEN ANGEHALTENEN ZURUECK, und das ist keine
     // Feinheit: ein Prozess, der mit STRG-Z angehalten wurde, stellt
@@ -435,8 +443,9 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
     // Selbsttest blieb hinter "job ttin" stehen, weil ein von SIGTTIN
     // angehaltenes Kind sein SIGKILL nie sah.
     if sig == SIGKILL && now == sched.S_STOP {
-        sched.tset(state, task, sched.T_STATE, sched.S_READY)
-        sched.tset(state, task, sched.T_STOPSIG, 0)
+        if sched.state_cas(state, task, sched.S_STOP, sched.S_READY) {
+            sched.tset(state, task, sched.T_STOPSIG, 0)
+        }
     }
     sched.irq_restore(flags)
     kstate.add(state, kstate.SIG_SENT, 1)
@@ -755,13 +764,16 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     }
     if what == D_STOP {
         sched.tset(state, task, sched.T_STOPSIG, sig)
-        sched.tset(state, task, sched.T_STATE, sched.S_STOP)
         kstate.add(state, kstate.SIG_STOPS, 1)
         // Der Elternteil erfaehrt es -- so wie er es vom Ende erfaehrt.
         exiting(state, task)
         // Und jetzt die Aufgabe wirklich aus der Hand geben. Kommt zurueck,
         // wenn SIGCONT sie wieder auf S_READY gesetzt hat.
-        sched.schedule(state)
+        // DELL STABILITY: S_STOP and the switch under ONE hold of L_SCHED
+        // (the same rule as `wait_sleep`): a SIGCONT on another core in the
+        // gap between the store and the switch made the task READY while it
+        // still ran here, and a third core picked it up.
+        sched.stop_sleep(state, bit(SIGCONT))
         return true
     }
     // Beenden. Der Code ist der, den jede Shell liest: 128 + Nummer.
@@ -786,7 +798,7 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     var code: u64 = 128 + sig
     let forced: u64 = sched.tget(state, task, sched.T_KILLCODE)
     if forced != 0 {
-        code = forced
+        code = forced & (0xFFFFFFFFFFFFFFFF -% sched.KILL_SET)
         sched.tset(state, task, sched.T_KILLCODE, 0)
     }
     sched.exit_task(state, code)

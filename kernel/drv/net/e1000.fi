@@ -1110,6 +1110,7 @@ const W_STORM: u64 = 512 // interrupt storm, line masked
 const TF_ICH: u64 = 1 // `nicich`: drive an 82574 through the PCH path
 const TF_FAIL: u64 = 2 // `nicfail`: pretend the reset never finished
 const TF_INTX: u64 = 4 // `nicintx`: the pin, not MSI
+const TF_FLUSH: u64 = 8 // `nicflush`: act as if the chip asked for a descriptor-ring flush
 
 // How many interrupts in a row may find ICR empty before the line is
 // called a storm and masked. A level line that nobody drives low again
@@ -1117,11 +1118,12 @@ const TF_INTX: u64 = 4 // `nicintx`: the pin, not MSI
 // second, and the timer below never gets its turn.
 const STORM_LIMIT: u64 = 20000
 
-fn set_flags(state: u64, force_ich: bool, fail: bool, intx: bool) {
+fn set_flags(state: u64, force_ich: bool, fail: bool, intx: bool, flush: bool) {
     var f: u64 = 0
     if force_ich { f = f | TF_ICH }
     if fail { f = f | TF_FAIL }
     if intx { f = f | TF_INTX }
+    if flush { f = f | TF_FLUSH }
     kstate.set(state, sc(0, S_TFLAGS), f)
 }
 
@@ -1523,11 +1525,182 @@ fn phy_wake(state: u64, u: u64) {
     swflag_give(state, u)
 }
 
+// ================================ DELL STABILITY (08.10.2026): THE RING FLUSH
+//
+// e1000e (netdev.c, e1000_flush_desc_rings) for the I219 and later (pch_spt,
+// pch_cnp, ...): after a reset, a driver unload, a kexec or a resume the part
+// can be left with descriptor prefetches in flight for rings that no longer
+// exist. It signals that in PCI config space (register 0xE4, bit 8,
+// FLUSH_DESC_REQUIRED) and, if the driver does not flush, hangs on the next
+// transmit. The flush is two small pieces:
+//
+//   TX  enable the transmitter, put ONE dummy descriptor (512 octets, IFCS)
+//       into the ring at the tail, advance the tail, wait 250 us
+//   RX  switch the receiver off, set the prefetch threshold to 31 and the
+//       host threshold to 1 with the granularity in DESCRIPTORS (not cache
+//       lines) in RXDCTL(0), switch the receiver on for 150 us and off again
+//
+// and before both, FEXTNVM11.DISABLE_MULR_FIX. Linux does the TX flush when the
+// flag is set and the ring length is not zero, and the RX flush when the flag
+// is STILL set afterwards.
+//
+// WHAT THIS IS NOT: measured on an I219. The Dell has an I217-LM (the flag does
+// not exist there) and QEMU has no I219. `nicflush` forces the whole sequence on
+// QEMU's 82574 and tools/stab/flush.sh checks what a model CAN show: the head of
+// the transmit ring moved by the dummy descriptor and RXDCTL holds the
+// thresholds.
+const R_FEXTNVM11: u64 = 0x5BBC
+const FEXTNVM11_DISABLE_MULR_FIX: u64 = 0x2000
+const CFG_DESC_RING_STATUS: u64 = 0xE4
+const FLUSH_DESC_REQUIRED: u64 = 0x100
+const R_RXDCTL0: u64 = 0x2828
+const RXDCTL_THRESH_UNIT_DESC: u64 = 0x01000000
+const TXD_CMD_IFCS: u64 = 2
+const FLUSH_TX_SIZE: u64 = 512
+
+static mut f_0: [u8; 28] = "flush: tx dummy, tdh/tdt =  "
+static mut f_1: [u8; 11] = " rxdctl =  "
+static mut f_2: [u8; 31] = "flush: required (0xe4), tdlen= "
+static mut f_3: [u8; 24] = "flush: rx stage rctl =  "
+static mut f_4: [u8; 28] = "flush: still required after "
+
+// I219 and later = every PCH part that is not an I217 or I218.
+fn spt_or_later(devid: u64) -> bool {
+    if !supports_ich(devid) {
+        return false
+    }
+    if devid == 0x153A || devid == 0x153B {
+        return false
+    }
+    if devid == 0x155A || devid == 0x1559 {
+        return false
+    }
+    if devid >= 0x15A0 && devid <= 0x15A3 {
+        return false
+    }
+    return true
+}
+
+fn flush_required(state: u64, u: u64) -> bool {
+    if tflag(state, TF_FLUSH) {
+        return true
+    }
+    if !spt_or_later(kstate.get(state, sc(u, S_DEVID))) {
+        return false
+    }
+    return (pci.cfg_read16(bdf_on(state, u), CFG_DESC_RING_STATUS) & FLUSH_DESC_REQUIRED) != 0
+}
+
+// The ring memory exists from the first flush on: the dummy descriptor needs a
+// home that belongs to this driver (it is made once and reused by the bring-up).
+fn ring_ensure(state: u64, u: u64) -> u64 {
+    var r: u64 = ring(state, u)
+    if r != 0 {
+        return r
+    }
+    r = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
+    if r == 0 {
+        return 0
+    }
+    var z: u64 = 0
+    while z < RING_BYTES {
+        __mmio_write64((r + z) as *mut u64, 0)
+        z = z + 8
+    }
+    kstate.set(state, sc(u, S_RING), r)
+    return r
+}
+
+fn flush_tx_ring(state: u64, u: u64) -> bool {
+    let r: u64 = ring_ensure(state, u)
+    if r == 0 {
+        return false
+    }
+    let t: u64 = r + TXD_OFF
+    // The chip prefetches from the ring it has in its registers; the dummy
+    // descriptor must be in THAT ring. Point it at ours (empty, head = tail = 0).
+    if reg(state, u, R_TDBAL) != (t & 0xFFFFFFFF) || reg(state, u, R_TDBAH) != (t >> 32) {
+        setreg(state, u, R_TDBAL, t & 0xFFFFFFFF)
+        setreg(state, u, R_TDBAH, t >> 32)
+        setreg(state, u, R_TDLEN, RING_SLOTS * 16)
+        setreg(state, u, R_TDH, 0)
+        setreg(state, u, R_TDT, 0)
+    }
+    let tctl: u64 = reg(state, u, R_TCTL)
+    setreg(state, u, R_TCTL, tctl | TCTL_EN)
+    let tdt: u64 = reg(state, u, R_TDT) % RING_SLOTS
+    dsc_addr(t, tdt, t)
+    dsc_len(t, tdt, FLUSH_TX_SIZE)
+    dsc_set_u8(t, tdt, TD_CMD, TXD_CMD_IFCS)
+    dsc_set_u8(t, tdt, TD_STATUS, 0)
+    arch.barrier()
+    setreg(state, u, R_TDT, (tdt + 1) % RING_SLOTS)
+    udelay(state, 250)
+    return true
+}
+
+fn flush_rx_ring(state: u64, u: u64) {
+    let rctl: u64 = reg(state, u, R_RCTL)
+    setreg(state, u, R_RCTL, rctl & (~RCTL_EN))
+    let st: u64 = reg(state, u, R_STATUS)
+    udelay(state, 150)
+    var rxdctl: u64 = reg(state, u, R_RXDCTL0)
+    rxdctl = (rxdctl & 0xFFFFC000) | 0x1F | (1 << 8) | RXDCTL_THRESH_UNIT_DESC
+    setreg(state, u, R_RXDCTL0, rxdctl)
+    setreg(state, u, R_RCTL, rctl | RCTL_EN)
+    let st2: u64 = reg(state, u, R_STATUS)
+    udelay(state, 150)
+    setreg(state, u, R_RCTL, rctl & (~RCTL_EN))
+}
+
+fn flush_desc_rings(state: u64, u: u64) {
+    if !(tflag(state, TF_FLUSH) || spt_or_later(kstate.get(state, sc(u, S_DEVID)))) {
+        return
+    }
+    // First, the MULR fix goes off (Linux does this unconditionally on SPT+).
+    setreg(state, u, R_FEXTNVM11, reg(state, u, R_FEXTNVM11) | FEXTNVM11_DISABLE_MULR_FIX)
+    if !flush_required(state, u) {
+        return
+    }
+    warn(state, u, W_FLUSH)
+    // A ring length of zero means there is no ring the chip could be
+    // prefetching from. (The forced test word skips that check: QEMU's part
+    // starts with zeros.)
+    let tdlen: u64 = reg(state, u, R_TDLEN)
+    if tdlen == 0 && !tflag(state, TF_FLUSH) {
+        return
+    }
+    note(state, u, (&f_2[0]) as u64, tdlen)
+    if !flush_tx_ring(state, u) {
+        return
+    }
+    note(state, u, (&f_0[0]) as u64, (reg(state, u, R_TDH) << 16) | reg(state, u, R_TDT))
+    // Recheck: maybe the fault is on the receive ring (Linux does the same).
+    var again: bool = (pci.cfg_read16(bdf_on(state, u), CFG_DESC_RING_STATUS) & FLUSH_DESC_REQUIRED) != 0
+    if tflag(state, TF_FLUSH) {
+        again = true
+    }
+    if again {
+        flush_rx_ring(state, u)
+        note(state, u, (&f_1[0]) as u64, reg(state, u, R_RXDCTL0))
+        if !tflag(state, TF_FLUSH) && (pci.cfg_read16(bdf_on(state, u), CFG_DESC_RING_STATUS) & FLUSH_DESC_REQUIRED) != 0 {
+            note(state, u, (&f_4[0]) as u64, 1)
+        }
+    }
+}
+
 // e1000_reset_hw_ich8lan without the PHY reset. The PHY reset would need
 // the LCD configuration out of the NVM afterwards (sw_lcd_config), and a
 // PHY that the firmware configured is better left as it is than
 // half-configured by a driver that cannot read the NVM.
 fn ich_reset(state: u64, u: u64) -> bool {
+    // SPT and later (I219): a ring the firmware or a previous driver left
+    // running must be flushed before the reset or the part hangs on the
+    // first transmit (e1000e: e1000_flush_desc_rings, called by e1000e_reset
+    // BEFORE reset_hw). PCI config 0xE4, bit 8 asks for it. It has to come
+    // before GIO master disable: the flush is DMA, and a part whose bus
+    // master requests are switched off fetches nothing.
+    flush_desc_rings(state, u)
     step(state, u, 9, (&t_16[0]) as u64)
     setreg(state, u, R_CTRL, reg(state, u, R_CTRL) | CTRL_GIO_MASTER_DISABLE)
     var t: u64 = 0
@@ -1539,11 +1712,6 @@ fn ich_reset(state: u64, u: u64) -> bool {
         warn(state, u, W_GIO)
     }
     step(state, u, 10, (&t_17[0]) as u64)
-    // SPT and later: a ring the firmware left running needs a flush the
-    // driver cannot do yet. Said, not done (PCI config 0xE4, bit 8).
-    if (pci.cfg_read16(bdf_on(state, u), 0xE4) & 0x100) != 0 {
-        warn(state, u, W_FLUSH)
-    }
     setreg(state, u, R_IMC, 0xFFFFFFFF)
     setreg(state, u, R_RCTL, 0)
     setreg(state, u, R_TCTL, TCTL_PSP)
@@ -2057,16 +2225,16 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     // The memory for both rings and all their buffers, in ONE run of
     // frames: a descriptor carries a PHYSICAL address and the heap gives
     // no promise about contiguity.
-    let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
+    let r: u64 = ring_ensure(state, u)
     if r == 0 {
         return fail(state, u, (&t_43[0]) as u64, false)
     }
+    // (a ring made for the flush before the reset holds the dummy descriptor)
     var z: u64 = 0
     while z < RING_BYTES {
         __mmio_write64((r + z) as *mut u64, 0)
         z = z + 8
     }
-    kstate.set(state, sc(u, S_RING), r)
 
     rx_setup(state, u)
     tx_setup(state, u)

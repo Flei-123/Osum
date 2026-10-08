@@ -114,6 +114,8 @@ export {
     // r381: a window whose pointer events the program takes itself (the task bar), nodes that
     // only exist for the accessibility tree and the keyboard, a picture of the program's own behind the tree
     set_raw, raw_take, ghost_button, ghost_space, set_overlay, canvas_px, focus_canvas,
+    // r454: tabs in the title bar
+    caption_strip, strip_on, strip_h, strip_caps_w, strip_row, strip_drag_node, strip_reports, set_key, accent_ink,
 }
 
 const NONE: usize = 4294967295
@@ -468,7 +470,126 @@ fn scene_ptr() -> *mut scene.Scene {
 }
 
 fn root() -> usize {
+    // r454: with a title strip the program's content goes into the body below the strip
+    if st_on && st_body != NONE {
+        return st_body
+    }
     return scene.scene_root(sc())
+}
+
+// ------------------------------------------------- r454: TABS IN THE TITLE BAR
+//
+// A program that asks for `caption_strip(true)` gets a window whose buffer starts at the top of the title bar (the server
+// grew it by the strip height, see wm.F_CAPCLIENT). The tree then has two parts: the STRIP ROW (the title bar: the program puts
+// its tabs and a plus button in it; the colour is the server's title colour, so the bar looks like the one the server paints
+// for other windows) and the BODY (what `root()` returns: the old padded column). The empty part of the strip row is the
+// DRAG REGION: the program marks a node of the row with `strip_drag_node`, and `pump` tells the server its x-range after every
+// layout (a press there moves the window, a double click maximises). The three caption buttons are the server's and lie over
+// the right end of the strip: `strip_caps_w` is the room to keep free.
+static mut st_on: bool = false
+static mut st_h: u64 = 0 // the strip height in points
+static mut st_caps: u64 = 0 // the width of the caption buttons in points
+static mut st_body: usize = 4294967295
+static mut st_row: usize = 4294967295
+static mut st_dragkey: u64 = 0
+static mut st_x0: u64 = 0xFFFFFFFFFFFFFFFF
+static mut st_x1: u64 = 0
+static mut st_foc: bool = false
+static mut st_reports: u64 = 0
+
+fn strip_on() -> bool {
+    return st_on
+}
+
+// The strip height in points (0 = no strip) and the width of the caption buttons in points.
+fn strip_h() -> u64 {
+    if st_on {
+        return st_h
+    }
+    return 0
+}
+
+fn strip_caps_w() -> u64 {
+    return st_caps
+}
+
+// Ask the server for the title strip (or give it back). false: the server said no (the program keeps its old layout).
+fn caption_strip(on: bool) -> bool {
+    if !wlib.win_cap_strip(fuiapp.win(), on) {
+        return false
+    }
+    st_on = on
+    st_x0 = 0xFFFFFFFFFFFFFFFF
+    st_x1 = 0
+    if on {
+        let sc0: u64 = S.s_S
+        st_h = (wlib.win_strip_h(fuiapp.win()) + sc0 - 1) / sc0
+        st_caps = (wlib.win_cap_w(fuiapp.win()) + sc0 - 1) / sc0
+    } else {
+        st_h = 0
+    }
+    // take the new buffer size now (the server grew or shrank it)
+    S.s_rseq = wlib.resize_seq()
+    let _rz: bool = fuiapp.resize()
+    S.s_stale = true
+    touch()
+    return true
+}
+
+// The row of the strip (NONE without a strip).
+fn strip_row() -> usize {
+    if st_on {
+        return st_row
+    }
+    return NONE
+}
+
+// The node with this key is the empty part of the strip (the drag region).
+fn strip_drag_node(key: u64) {
+    st_dragkey = key
+}
+
+// The strip's background: the server's title colour of this window (focused or not)
+fn draw_strip(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    var rgb: u64 = wlibc.theme_live(wlibc.C_TITLEBAR_OFF_BG)
+    if st_foc {
+        rgb = wlibc.theme_live(wlibc.C_TITLEBAR_BG)
+    }
+    let col: u32 = (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
+    painter.round_rect(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
+        widget.w_h(e), 0.0, col | 4278190080 as u32)
+}
+
+// After every layout: the drag region goes to the server when it changed, and the strip follows the focus colour.
+fn strip_sync() {
+    let f: bool = wlib.win_fokus(fuiapp.win())
+    if f != st_foc {
+        st_foc = f
+        touch()
+    }
+    if st_dragkey == 0 {
+        return
+    }
+    let n: usize = node_of_key(st_dragkey)
+    if n == NONE {
+        return
+    }
+    let k: u64 = S.s_S
+    let x0: u64 = node_x(n) * k
+    let x1: u64 = (node_x(n) + node_w(n)) * k
+    if x0 == st_x0 && x1 == st_x1 {
+        return
+    }
+    st_x0 = x0
+    st_x1 = x1
+    if wlib.win_strip_drag(fuiapp.win(), x0, x1) {
+        st_reports = st_reports + 1
+    }
+}
+
+fn strip_reports() -> u64 {
+    return st_reports
 }
 
 fn node_count() -> usize {
@@ -1352,8 +1473,30 @@ fn rebuild() {
     }
     let r: usize = scene.scene_box(sc(), scene.SCENE_NONE, 0 as u32,
         flex.FLEX_COLUMN, flex.JUSTIFY_START, flex.AL_STRETCH)
-    scene.node_set_padding(sc(), r, 8, 8, 8, 8)
-    scene.node_set_gap(sc(), r, 8, 8)
+    st_body = NONE
+    st_row = NONE
+    if st_on {
+        // r454: the root has no padding; the strip row on top, the padded body under it
+        scene.node_set_padding(sc(), r, 0, 0, 0, 0)
+        scene.node_set_gap(sc(), r, 0, 0)
+        let sr: usize = scene.scene_box(sc(), r, 0 as u32, flex.FLEX_ROW,
+            flex.JUSTIFY_START, flex.AL_CENTER)
+        scene.node_set_size(sc(), sr, 0.0, st_h as f64)
+        scene.node_set_padding(sc(), sr, 8, 0, 0, 0)
+        scene.node_set_gap(sc(), sr, 0, 0)
+        scene.node_set_draw(sc(), sr, 0, draw_strip)
+        st_row = sr
+        let bd: usize = scene.scene_box(sc(), r, 0 as u32, flex.FLEX_COLUMN,
+            flex.JUSTIFY_START, flex.AL_STRETCH)
+        scene.node_set_padding(sc(), bd, 8, 8, 8, 8)
+        scene.node_set_gap(sc(), bd, 8, 8)
+        scene.node_set_grow(sc(), bd, 1000, 1000)
+        scene.node_set_base(sc(), bd, 0)
+        st_body = bd
+    } else {
+        scene.node_set_padding(sc(), r, 8, 8, 8, 8)
+        scene.node_set_gap(sc(), r, 8, 8)
+    }
     let f: fn() = *buildf_slot()
     f()
     fuiwirt.host_bind(wirt())
@@ -1492,6 +1635,45 @@ fn repaint_now() {
 }
 
 // A tab; `on` marks the current one.
+// r454: nodes built while this is on sit on the accent coloured title strip (tabs in the title bar): an unselected tab, the
+// close cross and the plus button are painted in the theme's text-on-accent ink (the default ink is dark grey and would
+// vanish on the accent). The program switches it on around the strip and off again.
+static mut acc_ink: bool = false
+
+fn accent_ink(on: bool) {
+    acc_ink = on
+}
+
+// An unselected tab on the strip: the face of fUi (transparent plate, hover), the label in the on-accent ink.
+fn draw_strip_tab(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if widget.w_is_selected(e) || widget.w_is_disabled(e) {
+        render.draw_widget(c, e)
+        return
+    }
+    let m: *mut theme.Theme = render.ctx_theme(c)
+    let fo: *mut theme.Shape = theme.theme_shape(m)
+    let sz: *mut style.StyleSet = widget.w_styleset(e)
+    let s: *mut style.Style = style.styleset_base(sz)
+    if ((*s).set_mask & style.SF_BG) == 0 as u32 {
+        *s = style.style_set_bg(*s, style.color_transparent())
+        style.styleset_set_override(sz, style.STATE_HOVER,
+            style.override_set_bg(style.override_new(),
+                style.color_token(style.TOK_BUTTON_HOVER)))
+    }
+    render.draw_base(c, e)
+    let padx: f64 = render.len_of(c, (*fo).pad_x)
+    var l: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&l, widget.w_x(e) + padx, widget.w_y(e), widget.w_w(e) - 2.0 * padx, widget.w_h(e))
+    widget.w_set_text(&l, widget.w_text(e), widget.w_text_len(e))
+    let ls: *mut style.Style = widget.w_style(&l)
+    *ls = style.style_set_align(*ls, style.ALIGN_CENTER)
+    *ls = style.style_set_pad(*ls, 0, 0)
+    *ls = style.style_set_fg(*ls, style.color_token(style.TOK_TEXT_ON_ACCENT))
+    widget.w_set_focus(&l, false)
+    render.draw_text(c, &l)
+    render.draw_focus_ring(c, e)
+}
+
 fn tab(parent: usize, text: u64, key: u64, on: bool) -> usize {
     let i: usize = scene.scene_add(sc(), parent, scene.N_WIDGET)
     if i != scene.SCENE_NONE {
@@ -1499,6 +1681,9 @@ fn tab(parent: usize, text: u64, key: u64, on: bool) -> usize {
         scene.node_set_text(sc(), i, text, ulib.length(text) as usize)
         scene.node_set_id(sc(), i, key as u32)
         widget.w_set_selected(scene.node_widget(sc(), i), on)
+        if acc_ink && !on {
+            scene.node_set_draw(sc(), i, 1, draw_strip_tab)
+        }
     }
     return i
 }
@@ -1522,6 +1707,9 @@ fn draw_ibtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     widget.w_set_text(e, p, n)
     let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
     var col: u32 = (*t).text
+    if ud == 1 {
+        col = (*t).text_on_accent    // r454: on the accent coloured title strip
+    }
     if widget.w_is_disabled(e) {
         col = (*t).text_disabled
     }
@@ -1543,7 +1731,11 @@ fn icon_button(parent: usize, cp: u64, label: u64, key: u64) -> usize {
     let i: usize = button(parent, label, key)
     if i != NONE {
         widget.w_set_value(scene.node_widget(sc(), i), cp as i64)
-        scene.node_set_draw(sc(), i, 0, draw_ibtn)
+        if acc_ink {
+            scene.node_set_draw(sc(), i, 1, draw_ibtn)
+        } else {
+            scene.node_set_draw(sc(), i, 0, draw_ibtn)
+        }
     }
     return i
 }
@@ -1890,6 +2082,13 @@ fn tab_close(parent: usize, text: u64, key: u64, ckey: u64, ctext: u64,
 
 fn set_size(i: usize, w: u64, h: u64) {
     scene.node_set_size(sc(), i, w as f64, h as f64)
+}
+
+// Give a node (a plain box) a key, so that `node_of_key` finds it (the drag region of the title strip).
+fn set_key(i: usize, key: u64) {
+    if i != NONE {
+        scene.node_set_id(sc(), i, key as u32)
+    }
 }
 
 fn set_gap(i: usize, g: u64) {
@@ -2284,6 +2483,9 @@ fn pump() -> u64 {
         // first picture: describe, layout, bind the panel to the nodes
         rebuild()
         paint()
+    }
+    if st_on && S.s_paints > 0 {
+        strip_sync()
     }
     tip_tick()
     while fuiapp.next(&ev) {

@@ -18,6 +18,8 @@ Befehle im Drehbuch (eine Zeile je Befehl, `#` ist eine Anmerkung):
 
     warte <sekunden>            anhalten
     warteauf <regex> [|| frist] warten, bis der regex in serial.txt steht
+    marke <regex>               remember how often the regex is on the serial line now
+    warteneu <regex> [|| frist] wait until the regex is on the serial line more often than at the last `marke`
     fahre <x>,<y>               den Zeiger dorthin, ohne zu klicken
     klick <x>,<y>               dorthin fahren und einmal klicken
     doppel <x>,<y>              dorthin fahren und zweimal klicken
@@ -349,6 +351,23 @@ class Fahrer:
             time.sleep(0.2)
         return False
 
+    # `marke` / `warteneu`: wait for a NEW match (a count above the one taken
+    # at `marke`), not for any match in the whole history. A fixed `warte`
+    # after a program start is a race on a loaded host (zreap: 33 of 34).
+    def marke(self, muster):
+        self.marke_muster = re.compile(muster)
+        self.marke_n = len(self.marke_muster.findall(lies(self.serial)))
+
+    def warteneu(self, muster, frist=25.0):
+        r = re.compile(muster)
+        n0 = getattr(self, "marke_n", 0)
+        bis = time.time() + frist
+        while time.time() < bis:
+            if len(r.findall(lies(self.serial))) > n0:
+                return True
+            time.sleep(0.2)
+        return False
+
     # --- das Foto.  `screendump` kehrt zurueck, BEVOR die Datei fertig
     # ist; gewartet wird, bis die Groesse steht.  (tools/gfx/screenshot.py
     # hat das herausgefunden, hier steht es noch einmal, weil diese
@@ -391,6 +410,16 @@ class Fahrer:
             # and their checkers use the same numbers -- the rows are 52 high and forgive it
             return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
         b, th = self.chrome()
+        # r454: a window that paints its own title strip (the file manager's tabs) has its drawing area at the top of the
+        # title bar: it says so on the serial line (`explorer: strip h=`)
+        if re.search(r"%s: strip h=\d+" % prog, t):
+            th = b
+            # the window may have been moved since it was created: the last F12 dump has its place now
+            k = t.rfind("wm: fenliste")
+            if k >= 0:
+                for w in re.finditer(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) w=\d+ h=\d+ lay=\d+ fl=(\d+) ", t[k:]):
+                    if int(w.group(3)) & 64:
+                        return (int(w.group(1)) + b, int(w.group(2)) + th)
         return (int(m.group(1)) + b, int(m.group(2)) + th)
 
     # r402: the frame and the whole top part of a framed window at scale 1, from the shape file the
@@ -856,6 +885,15 @@ def main():
             tippe_gap = 0.4
         if b == "warte":
             time.sleep(float(arg))
+        elif b == "marke":
+            f.marke(arg.strip().strip("'\""))
+        elif b == "warteneu":
+            st = arg.split("||")
+            muster = st[0].strip().strip("'\"")
+            ok = f.warteneu(muster, float(st[1]) if len(st) > 1 else 25.0)
+            print("warteneu %s -> %s" % (muster, "da" if ok else "NICHT DA"))
+            if not ok:
+                fehler += 1
         elif b == "warteauf":
             st = arg.split("||")
             # Die Anfuehrungszeichen gehoeren der Lesbarkeit des
@@ -1025,6 +1063,40 @@ def main():
         # und wo es vorher stand, weiss nur der Server. Getippte
         # Zahlen treffen nach dem ersten Ziehen daneben, genau wie bei
         # `ziehkante`. Die Greifstelle ist die MITTE der Titelleiste.
+        # r454: `kappe <id> min|max|close` -- press one of the three caption buttons of window <id> (the server's, over the
+        # client strip as well as in its own title bar). The geometry is the one `wm: fen` reported plus the chrome measures
+        # (`bar=`, `capw=`, `fr=` of the `wm: geom`-style line), so it hits what the server drew.
+        elif b == "kappe":
+            t = arg.split()
+            if t[0] == "fokus":
+                wid = f.fokus_id()
+                if wid is None:
+                    print("kappe fokus -> KEIN FOKUS gemeldet")
+                    fehler += 1
+                    continue
+            else:
+                wid = int(t[0])
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("kappe %d -> KEINE GEOMETRIE gemeldet" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            tx = lies(f.serial)
+            cm = None
+            for cm in re.finditer(r" bar=(\d+) capw=(\d+) fr=(\d+)", tx):
+                pass
+            if cm is None:
+                print("kappe %d -> KEINE MASSE gemeldet" % wid)
+                fehler += 1
+                continue
+            bar, capw, fr = (int(cm.group(i)) for i in (1, 2, 3))
+            n = {"min": 0, "max": 1, "close": 2}[t[1]]
+            ow = ww + 2 * fr
+            x0 = wx + ow - fr - 3 * capw + n * capw + capw // 2
+            y0 = wy + fr + bar // 2
+            f.klick(x0, y0)
+            print("kappe id=%d %s -> %d,%d" % (wid, t[1], x0, y0))
         elif b == "ziehtitel":
             t = arg.split()
             if t[0] == "fokus":
@@ -1063,6 +1135,20 @@ def main():
                 x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.klick_nahe(x, y)
             print("klicknah %s -> %d,%d" % (arg, x, y))
+        # r454: `ziehemitte <name> <dx>,<dy>` -- the same from the CENTRE of the reported rectangle (a tab: its label, not
+        # the cross in its corner; the empty part of the title strip)
+        elif b == "ziehemitte":
+            t = arg.split()
+            r = f.rechteck(t[0])
+            if r is None:
+                print("ziehemitte %s -> KEIN RECHTECK GEMELDET" % t[0])
+                fehler += 1
+                continue
+            dx, dy = (int(v) for v in t[1].split(","))
+            x0, y0 = r[0] + r[2] // 2, r[1] + r[3] // 2
+            f.ziehe(x0, y0, x0 + dx, y0 + dy)
+            print("ziehemitte %s -> von %d,%d um %d,%d  (rect %d,%d %dx%d)"
+                  % (t[0], x0, y0, dx, dy, r[0], r[1], r[2], r[3]))
         elif b == "zieheauf":
             t = arg.split()
             r = f.rechteck(t[0])

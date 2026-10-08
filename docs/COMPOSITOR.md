@@ -271,8 +271,31 @@ After (same drehbuch):
 | window dragged | 179 | 4.7 ms | 21.6 ms | 10 | the pointer **jumps** hundreds of points in the drehbuch: one big dirty box; a real mouse moves a few points per frame |
 | the rest of the boot | 92 | 10.2 ms | 51.7 ms | 33 | the first blur and the first frames of every window |
 
-Not solved: the cold blur of a menu. Options that are left (none done): blur a half-size copy (4 times fewer pixels, changes the picture),
-spread the filter over the opening animation (the menu is drawn without blur for 120 ms anyway), a faster integer loop for tint / noise.
+### The cold blur, solved (r464, `tools/blur/blurasm.py`)
+
+The "cold blur" was not a cold cache. `blur_flaeche` computes the picture of a window from what lies under it whenever the cached
+picture is spoiled (a menu that opens, a bar under a moving window), and that computation cost **260 - 390 ns a pixel**: a
+640 x 416 menu 77 - 105 ms, the bar (1280 x 40) 13 - 15 ms, every time, not only the first time. Measured in the object code
+(`objdump` of `wm.blur_h`): firnc keeps every variable on the stack and puts an overflow check on every `+`, about 15 times
+slower than the same loop in C at -O2. First touch of the buffers, page faults and cache build-up were checked and are not the cause.
+
+What was done: the three inner loops (horizontal pass, vertical pass over a row of running sums, tint + grain + clamp) are
+assembly in `asm(...)` blocks. firnc allows only `rax rcx rdx rsi rdi r8..r11` there, so the loops keep their constants in a
+small parameter block and read them from memory. The arithmetic is the same (same reciprocal table, same rounding, same hash
+for the grain, the same corner rule), proved by `tools/blur/asmtest.c` (the old Firn loops written out in C against the assembly,
+752 random cases, `python3 tools/blur/blurasm.py test`) and by the pictures (design, look, themestore, region runs: the same
+pixels). `python3 tools/blur/blurasm.py check` demands that the text in `wm.fi` is the text of `blurasm.py`.
+
+| what | before | after |
+|---|---|---|
+| one blur of the start menu (640 x 416) | 77 - 105 ms | 11.3 - 15.1 ms |
+| the bar (1280 x 40), one blur | 13.3 - 15.9 ms | 2.1 - 2.2 ms |
+| start menu open / close, 55 frames (`stationaer.sh`): mean / max | 8.55 ms / 118.6 ms | 3.31 ms / 22.0 ms |
+| window dragged, 181 frames: mean / max / over 16 ms | 5.49 ms / 29.6 ms / 11 | 4.53 ms / 10.6 ms / 0 |
+
+What is left: 43 ns a pixel is still about 130 cycles; the vertical pass (six read-modify-write per pixel and pass) and the
+`div` of the grain dominate. A fused vertical pass (add and remove row in one loop) and a reciprocal for the grain's modulus
+would take it below 8 ms. Not needed for the 16 ms budget.
 
 ### Section 5, points 2 and 3 answered (`kernel/user/compbench.fi`, `tools/comp/run.sh`, 1 and 4 cores, KVM)
 
