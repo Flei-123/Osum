@@ -82,12 +82,13 @@ export {
     send_bytes, recv_bytes, waiting, room, peer_gone, shutdown_sock,
     push_fd, pop_fd, fd_waiting,
     // der geteilte Speicher
-    shm_new, shm_free, shm_used, shm_pages, shm_frame, shm_grow,
+    map_room, map_note, map_release, map_release_all, maps_live,
+    shm_new, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_unref, shm_refs, shm_size, shm_set_size,
     shm_seals, shm_add_seals,
     // Zahlen fuer die Abnahme
     socks_live, shms_live, bytes_moved, fds_moved,
-    USOCK_MAX, USHM_MAX, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX,
+    USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
     UK_FREE, UK_STREAM
 }
@@ -122,8 +123,20 @@ const UNAME_BYTES: u64 = 128
 const USUN_MAX: u64 = 108 // sun_path, wie bei Linux
 
 const USHM_OFF: u64 = 0xF5000
-const USHM_MAX: u64 = 16
+// COMPOSITOR S3 (docs/COMPOSITOR.md): 40 objects at 0xF5000..0xF5A00 (40 * 64 = 2.5 KiB, in the gap before USHMPG). The first USHM_PAGED (16) keep
+// their page-address table (USHMPG); objects 16..39 are CONTIGUOUS ONLY (a window buffer is one run of frames: base + count, no table).
+const USHM_MAX: u64 = 40
+const USHM_PAGED: u64 = 16
 const USHM_BYTES: u64 = 64
+
+// COMPOSITOR S3: WHO MAPS WHAT. `map_shm` has always added a reference for a mapping, but nothing took it away again: not `munmap`,
+// not the end of the process. A window buffer is 1 - 4 MiB; opening and closing windows would have eaten the memory. The table
+// remembers (address, task, object, pages) of every mapping, so that `munmap` of exactly that address and the end of the task
+// give the reference back. 96 records of 16 octets = 1.5 KiB at 0xF5A00..0xF6000, the rest of the gap before USHMPG
+// (0xFE000..0x100000 belong to the Wayland scratch and path buffers of sys.fi; tools/kernel/memmap.py checks all of it).
+const UMAP_OFF: u64 = 0xF5A00
+const UMAP_MAX: u64 = 96
+const UMAP_BYTES: u64 = 16
 
 const USHMPG_OFF: u64 = 0xF6000
 // RUNDE WAYLAND, Stufe 2: 256 KiB REICHEN NICHT.
@@ -146,6 +159,8 @@ const USHMPG_OFF: u64 = 0xF6000
 // allein 4 MiB; wer den will, hebt die Zahl erneut und verschiebt die
 // Tafel aus kdata heraus.
 const SHM_PAGES_MAX: u64 = 256 // 256 * 4096 = 1 MiB je Objekt
+// COMPOSITOR S3: a CONTIGUOUS object (`MFD_FRAMES`) is one run of frames and costs no table: 8192 pages = 32 MiB (3440 x 1440 x 4 is 19 MB)
+const SHM_PAGES_CONTIG: u64 = 8192
 
 // Der Ring eines Sockets ist EIN Rahmen. 4096 Oktette sind viel fuer
 // ein Wayland-Paket (das groesste im Mitschnitt oben war 132) und wenig
@@ -201,6 +216,11 @@ const SM_REFS: u64 = 8 // wieviele Deskriptoren zeigen darauf
 const SM_PAGES: u64 = 16 // wieviele Rahmen sind belegt
 const SM_SIZE: u64 = 24 // die Groesse, die `ftruncate` gesetzt hat
 const SM_SEALS: u64 = 32 // F_ADD_SEALS
+const SM_BASE: u64 = 40 // COMPOSITOR S3: the first frame of a contiguous object (the frames lie one after the other), 0 = none yet
+const SM_FLAGS: u64 = 48 // SMF_*
+const SMF_CONTIG: u64 = 1 // the frames are ONE run (`mem.frame_run`): the window server can compose from them
+const SMF_RO: u64 = 2 // may only be mapped read-only, never grown or written through a descriptor
+const SMF_KEEP: u64 = 4 // the frames belong to the kernel (the window table page): never freed with the object
 
 // Zaehler fuer die Abnahme. Sie stehen in den letzten Oktetten des
 // Socketbereichs, den kein Socket benutzt (32 * 64 = 2048 = genau der
@@ -251,6 +271,8 @@ fn pg_at(i: u64, p: u64) -> u64 {
     return USHMPG_OFF + (i * SHM_PAGES_MAX + p) * 8
 }
 
+// COMPOSITOR S3: the records of objects 16..39 follow the first 16 (record size 64): sm_at(i) = USHM_OFF + i * 64 is right for all 40.
+
 fn init(state: u64) {
     reset_all(state)
 }
@@ -282,6 +304,14 @@ fn reset_all(state: u64) {
         kstate.set(state, sm_at(i) + SM_PAGES, 0)
         kstate.set(state, sm_at(i) + SM_SIZE, 0)
         kstate.set(state, sm_at(i) + SM_SEALS, 0)
+        kstate.set(state, sm_at(i) + SM_BASE, 0)
+        kstate.set(state, sm_at(i) + SM_FLAGS, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < UMAP_MAX {
+        kstate.set(state, um_at(i), 0)
+        kstate.set(state, um_at(i) + 8, 0)
         i = i + 1
     }
     kstate.set(state, UCNT_OFF + C_SOCKS, 0)
@@ -869,19 +899,166 @@ fn shm_used(state: u64, i: u64) -> u64 {
 
 fn shm_new(state: u64) -> u64 {
     var i: u64 = 0
-    while i < USHM_MAX {
+    while i < USHM_PAGED {
         if kstate.get(state, sm_at(i) + SM_USED) == 0 {
             kstate.set(state, sm_at(i) + SM_USED, 1)
             kstate.set(state, sm_at(i) + SM_REFS, 1)
             kstate.set(state, sm_at(i) + SM_PAGES, 0)
             kstate.set(state, sm_at(i) + SM_SIZE, 0)
             kstate.set(state, sm_at(i) + SM_SEALS, 0)
+            kstate.set(state, sm_at(i) + SM_BASE, 0)
+            kstate.set(state, sm_at(i) + SM_FLAGS, 0)
             kstate.add(state, UCNT_OFF + C_SHMS, 1)
             return i
         }
         i = i + 1
     }
     return USHM_MAX
+}
+
+// COMPOSITOR S3: a CONTIGUOUS object (memfd_create with MFD_FRAMES). Its frames are one run, so the window server can use the
+// run as a window buffer and compose from what the client paints. High slots first (they have no page table and cannot be a
+// paged object), then the paged ones.
+fn shm_new_contig(state: u64) -> u64 {
+    var i: u64 = USHM_MAX
+    while i > 0 {
+        i = i - 1
+        if kstate.get(state, sm_at(i) + SM_USED) == 0 {
+            kstate.set(state, sm_at(i) + SM_USED, 1)
+            kstate.set(state, sm_at(i) + SM_REFS, 1)
+            kstate.set(state, sm_at(i) + SM_PAGES, 0)
+            kstate.set(state, sm_at(i) + SM_SIZE, 0)
+            kstate.set(state, sm_at(i) + SM_SEALS, 0)
+            kstate.set(state, sm_at(i) + SM_BASE, 0)
+            kstate.set(state, sm_at(i) + SM_FLAGS, SMF_CONTIG)
+            kstate.add(state, UCNT_OFF + C_SHMS, 1)
+            return i
+        }
+    }
+    return USHM_MAX
+}
+
+// An object over frames the KERNEL owns (the window table page): `flags` as SMF_*, never freed. One reference stays for good.
+fn shm_wrap(state: u64, base: u64, pages: u64, flags: u64) -> u64 {
+    let i: u64 = shm_new_contig(state)
+    if i >= USHM_MAX {
+        return USHM_MAX
+    }
+    kstate.set(state, sm_at(i) + SM_BASE, base)
+    kstate.set(state, sm_at(i) + SM_PAGES, pages)
+    kstate.set(state, sm_at(i) + SM_SIZE, pages * mem.FRAME_SIZE)
+    kstate.set(state, sm_at(i) + SM_FLAGS, flags | SMF_CONTIG | SMF_KEEP)
+    kstate.set(state, sm_at(i) + SM_REFS, 2)
+    return i
+}
+
+// ---- the table of mappings (COMPOSITOR S3)
+
+fn um_at(k: u64) -> u64 {
+    return UMAP_OFF + k * UMAP_BYTES
+}
+
+// is there room for one more mapping record?
+fn map_room(state: u64) -> bool {
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        if kstate.get(state, um_at(k)) == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// Remember that `task` maps object `i` (`pages` pages) at `base`. false when the table is full (the caller must not have mapped).
+fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64) -> bool {
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        if kstate.get(state, um_at(k)) == 0 {
+            kstate.set(state, um_at(k) + 8, task | (i << 16) | (pages << 32))
+            kstate.set(state, um_at(k), base)
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// `munmap(addr, len)` of a recorded mapping: its reference goes. Only the address of the start counts, and only when `len` covers all of
+// it (a part of a mapping stays mapped and stays counted).
+fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        if kstate.get(state, um_at(k)) == addr && addr != 0 {
+            let w: u64 = kstate.get(state, um_at(k) + 8)
+            if (w & 0xFFFF) == task && ((w >> 32) * mem.FRAME_SIZE) <= len {
+                kstate.set(state, um_at(k), 0)
+                kstate.set(state, um_at(k) + 8, 0)
+                shm_unref(state, (w >> 16) & 0xFFFF)
+                return true
+            }
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// The end of a task: every mapping it still holds gives its reference back.
+fn map_release_all(state: u64, task: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        if kstate.get(state, um_at(k)) != 0 {
+            let w: u64 = kstate.get(state, um_at(k) + 8)
+            if (w & 0xFFFF) == task {
+                kstate.set(state, um_at(k), 0)
+                kstate.set(state, um_at(k) + 8, 0)
+                shm_unref(state, (w >> 16) & 0xFFFF)
+                n = n + 1
+            }
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn maps_live(state: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        if kstate.get(state, um_at(k)) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn shm_flags(state: u64, i: u64) -> u64 {
+    if i >= USHM_MAX {
+        return 0
+    }
+    return kstate.get(state, sm_at(i) + SM_FLAGS)
+}
+
+fn shm_contig(state: u64, i: u64) -> bool {
+    return (shm_flags(state, i) & SMF_CONTIG) != 0
+}
+
+// the first frame of a contiguous object (0 for a paged one or one that has no frames yet)
+fn shm_base(state: u64, i: u64) -> u64 {
+    if i >= USHM_MAX || !shm_contig(state, i) {
+        return 0
+    }
+    return kstate.get(state, sm_at(i) + SM_BASE)
+}
+
+// the largest size (in pages) object `i` may have
+fn shm_max_pages(state: u64, i: u64) -> u64 {
+    if shm_contig(state, i) {
+        return SHM_PAGES_CONTIG
+    }
+    return SHM_PAGES_MAX
 }
 
 fn shm_pages(state: u64, i: u64) -> u64 {
@@ -892,10 +1069,16 @@ fn shm_pages(state: u64, i: u64) -> u64 {
 }
 
 fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
-    if i >= USHM_MAX || p >= SHM_PAGES_MAX {
+    if i >= USHM_MAX {
         return 0
     }
     if p >= kstate.get(state, sm_at(i) + SM_PAGES) {
+        return 0
+    }
+    if shm_contig(state, i) {
+        return kstate.get(state, sm_at(i) + SM_BASE) + p * mem.FRAME_SIZE
+    }
+    if p >= SHM_PAGES_MAX || i >= USHM_PAGED {
         return 0
     }
     return rd64(pg_at(i, p))
@@ -907,6 +1090,31 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
 fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 {
         return errno.E_BADF
+    }
+    if n <= kstate.get(state, sm_at(i) + SM_PAGES) {
+        return 0
+    }
+    if (shm_flags(state, i) & SMF_RO) != 0 {
+        return errno.E_PERM
+    }
+    if shm_contig(state, i) {
+        // ONE run, once. A second call may ask for the same or a smaller size, never for more.
+        let have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
+        if have != 0 || n > SHM_PAGES_CONTIG {
+            return errno.E_NOSPC
+        }
+        let run: u64 = mem.frame_run(state, n)
+        if run == 0 {
+            return errno.E_NOMEM
+        }
+        var o: u64 = 0
+        while o < n * mem.FRAME_SIZE / 8 {
+            wr64(run + o * 8, 0)
+            o = o + 1
+        }
+        kstate.set(state, sm_at(i) + SM_BASE, run)
+        kstate.set(state, sm_at(i) + SM_PAGES, n)
+        return 0
     }
     if n > SHM_PAGES_MAX {
         return errno.E_NOSPC
@@ -996,6 +1204,23 @@ fn shm_free(state: u64, i: u64) {
         return
     }
     let n: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
+    if shm_contig(state, i) {
+        if (shm_flags(state, i) & SMF_KEEP) == 0 {
+            mem.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), n)
+        }
+        kstate.set(state, sm_at(i) + SM_BASE, 0)
+        kstate.set(state, sm_at(i) + SM_FLAGS, 0)
+        kstate.set(state, sm_at(i) + SM_USED, 0)
+        kstate.set(state, sm_at(i) + SM_REFS, 0)
+        kstate.set(state, sm_at(i) + SM_PAGES, 0)
+        kstate.set(state, sm_at(i) + SM_SIZE, 0)
+        kstate.set(state, sm_at(i) + SM_SEALS, 0)
+        let n_c: u64 = kstate.get(state, UCNT_OFF + C_SHMS)
+        if n_c != 0 {
+            kstate.set(state, UCNT_OFF + C_SHMS, n_c - 1)
+        }
+        return
+    }
     var p: u64 = 0
     while p < n {
         let f: u64 = rd64(pg_at(i, p))

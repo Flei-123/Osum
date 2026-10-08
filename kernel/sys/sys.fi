@@ -181,7 +181,7 @@ export {
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier braucht.
     copy_in, copy_out, do_jrnl, do_scan, SYS_OSUM_DISPGET,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier holt.
-    WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE, WM_CLOSE, WM_WRITE, WM_STATE, WM_LIST, WM_ACT, WM_STRUT, WM_SIZE, WE_RIGHT, WM_DECO, WM_FORM, WM_APP, WM_MINRECT, WM_FWIN, FW_LIST, FW_KEY, FW_CLICK, FW_CLOSE, FW_RAISE, FW_BYTES, FW_OWNER, FW_KIND, WM_TRUST, TR_ASK, TR_POLL, TR_CANCEL, WM_MAXNR,
+    WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE, WM_CLOSE, WM_WRITE, WM_STATE, WM_LIST, WM_ACT, WM_STRUT, WM_SIZE, WE_RIGHT, WM_DECO, WM_FORM, WM_APP, WM_MINRECT, WM_FWIN, FW_LIST, FW_KEY, FW_CLICK, FW_CLOSE, FW_RAISE, FW_BYTES, FW_OWNER, FW_KIND, WM_TRUST, TR_ASK, TR_POLL, TR_CANCEL, WM_MAXNR, WM_SETBUF, WM_DAMAGE, WM_TABLE, WM_BUFFD, WI_SHARED, shm_of, writable,
     // ---- RUNDE WMPLUGIN ----
     WM_PLUG_REG, WM_PLUG_UNREG, WM_PLUG_POLL, WM_PLUG_SUB, WM_PLUG_INFO,
     WM_PLUG_ACT, WM_PLUG_KEY, WM_PLUG_BAR, WM_PLUG_BARGET, WM_PLUG_GRANT,
@@ -4142,7 +4142,15 @@ const WM_TRUST: u64 = 2129 // (op, no, a, b) -> see TR_*
 const TR_ASK: u64 = 0 // (no, text, len) -> 0; E_EXHAUSTED while one is open
 const TR_POLL: u64 = 1 // (no) -> 0 open, 1 yes, 2 no, 3 no such dialog
 const TR_CANCEL: u64 = 2 // (no) -> 0: take it off the screen
-const WM_MAXNR: u64 = 2129
+// ---- COMPOSITOR S3 (docs/COMPOSITOR.md): shared window buffers and the window table page
+// WM_CREATE takes a fifth argument: descriptor + 1 of a memfd made with MFD_FRAMES, 0 = none. The window then paints from that memfd.
+const WM_SETBUF: u64 = 2140 // (h, fd) -> 0: from now on the window paints from this MFD_FRAMES memfd (after a resize the client attaches a new one)
+const WM_DAMAGE: u64 = 2141 // (h, xy, wh) -> pixels named: the client painted this rectangle of its shared buffer (no copy)
+const WM_TABLE: u64 = 2142 // () -> a read-only descriptor of the window table page (map it PROT_READ); see wm.fi `tab_publish`
+const WM_BUFFD: u64 = 2143 // (window id) -> a read-only descriptor of a shared window's buffer, root only, not while locked
+const WM_MAXNR: u64 = 2143
+// WM_INFO: 1 when the window paints from a shared buffer, else 0
+const WI_SHARED: u64 = 30
 
 // Die Felder von WM_PLUG_INFO. PL_ABI beantwortet der Kern OHNE
 // Anmeldung -- ein Plugin muss die Fassung erfragen koennen, bevor es
@@ -7338,8 +7346,16 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
         return neg(errno.E_NODEV)
     }
     let pages: u64 = page_up(len) / PAGE
-    if pages == 0 || pages > unixsock.SHM_PAGES_MAX {
+    if pages == 0 || pages > unixsock.shm_max_pages(state, i) {
         return neg(errno.E_INVAL)
+    }
+    // COMPOSITOR S3: a read-only object (the window table page) is never mapped writable
+    if (prot & PROT_WRITE) != 0 && ((unixsock.shm_flags(state, i) & unixsock.SMF_RO) != 0 || !writable(state, of)) {
+        return neg(errno.E_ACCES)
+    }
+    // ... and the table of mappings must have room, so that the reference of this mapping can be given back
+    if !unixsock.map_room(state) {
+        return neg(errno.E_NOMEM)
     }
     // Das Objekt muss so gross sein, wie abgebildet werden soll. Linux
     // liefert sonst SIGBUS beim Zugriff; hier ist ein ehrliches -EINVAL
@@ -7404,6 +7420,7 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
         p = p + 1
     }
     unixsock.shm_ref(state, i)
+    let _noted: bool = unixsock.map_note(state, me, i, base, pages)
     if gross {
         sched.tset(state, me, sched.T_BIG, base)
     } else {
@@ -7481,6 +7498,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     if !in_alt && !in_gross {
         return neg(errno.E_INVAL)
     }
+    // COMPOSITOR S3: a mapping of a shared object gives its reference back
+    let _released: bool = unixsock.map_release(state, me, addr, page_up(len))
     var p: u64 = addr
     let end: u64 = addr + page_up(len)
     while p < end {
@@ -11635,6 +11654,8 @@ fn unref_of(state: u64, of: u64) {
 // does is closed in an orderly way -- the FIN travels, and the state
 // machine of round K3 walks through TIME_WAIT on its own afterwards.
 fn sock_close_all(state: u64, me: u64) {
+    // COMPOSITOR S3: the end of a task gives back the references of its mappings of shared objects (before, they stayed for good)
+    let _maps: u64 = unixsock.map_release_all(state, me)
     var fd: u64 = 0
     while fd < file.MAX_FD {
         let of: u64 = of_of(state, me, fd)
@@ -15212,6 +15233,8 @@ const SYS_FALLOCATE: u64 = 285
 const SYS_MEMFD_CREATE: u64 = 319
 const MFD_CLOEXEC: u64 = 1
 const MFD_ALLOW_SEALING: u64 = 2
+// COMPOSITOR S3: an OrientOS flag. The object is ONE run of frames, so the window server can compose from what the client paints into it
+const MFD_FRAMES: u64 = 0x40000000
 const F_ADD_SEALS: u64 = 1033
 const F_GET_SEALS: u64 = 1034
 const F_SEAL_SEAL: u64 = 1
@@ -15783,7 +15806,7 @@ fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
         return neg(errno.E_PERM)
     }
     let pages: u64 = page_up(size) / PAGE
-    if pages > unixsock.SHM_PAGES_MAX {
+    if pages > unixsock.shm_max_pages(state, i) {
         return neg(errno.E_FBIG)
     }
     if unixsock.shm_grow(state, i, pages) != 0 {
@@ -15802,7 +15825,12 @@ fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     if name != 0 && !proc.user_ok(state, me, name, 1) {
         return neg(errno.E_FAULT)
     }
-    let i: u64 = unixsock.shm_new(state)
+    var i: u64 = unixsock.USHM_MAX
+    if (flags & MFD_FRAMES) != 0 {
+        i = unixsock.shm_new_contig(state)
+    } else {
+        i = unixsock.shm_new(state)
+    }
     if i >= unixsock.USHM_MAX {
         return neg(errno.E_NFILE)
     }

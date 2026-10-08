@@ -1,0 +1,532 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wmd.fi -- docs/COMPOSITOR.md stage S4: `wmd`, THE SHADOW COMPOSITOR (an OBSERVER, it never touches the screen).
+//
+// The plan (docs/COMPOSITOR.md section 3) moves the compositor out of the kernel into a ring-3 program. Before anything is switched, this
+// program does the work IN PARALLEL and compares: it reads the window table page (WM_TABLE: who stands where, in which order) and the
+// buffers of the shared windows (WM_BUFFD: the very frames the clients paint into), composes the client areas into an off-screen
+// picture with the library `fui.comp` (the same row loops `wm.fi` calls), reads the picture the kernel put on the screen (/dev/fb) and
+// counts the pixels that differ. The oracle is `wm.fi`, which exists.
+//
+// WHAT IT COMPOSES, honestly: the CLIENT AREAS of the windows the table marks PLAIN (the server paints them as a plain copy: no
+// opening motion, no lift, no blur, no glass, no translucency), in the order of the table (layer, then z). Everything the server draws
+// around and over a window -- frame, title bar, caption buttons, shadow, rounded corners, blur, the pointer -- is not composed here (that
+// is stage S6). So a pixel counts for the comparison only when
+//   * it lies in the client area of a plain window, 16 points inside the edge (rounded corners), and
+//   * no window above it is anything but a plain window further up, with 48 points around its outer rectangle given up for shadows, and
+//   * it is not near the pointer.
+// `compared` says how many pixels that was; `differ` how many of them were not the same. The screen has to hold still while we look:
+// the table and the picture are read twice and a cycle where something moved is thrown away (`unstable`).
+//
+// Every cycle prints one line:  wmd: cycle <n> windows=<n> plain=<n> compared=<px> differ=<px> compose_us=<us> first=<x>,<y>
+// and `wmd: summary ...` at the end. Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import fui.comp
+
+export { u_start }
+
+const WM_TABLE: u64 = 2142
+const WM_BUFFD: u64 = 2143
+const SYS_MMAP: u64 = 9
+const SYS_MUNMAP: u64 = 11
+const SYS_DISPGET: u64 = 1810
+const DG_PITCH: u64 = 30
+const DG_BPP: u64 = 31
+const PROT_R: u64 = 1
+const MAP_SH: u64 = 1
+
+const MAXPX: u64 = 1024000 // 1280 x 800
+const MAXWIN: u64 = 32
+const MARGIN: u64 = 16 // inside the client area: rounded corners
+const SHADOW: u64 = 48 // around the outer rectangle of a window that is not composed here
+const PTR_W: u64 = 40
+const PTR_H: u64 = 48
+
+// the off-screen picture, the mask of the pixels it is allowed to be judged on, two reads of the screen
+static mut sb: [u32; 1024000] = [0 as u32; 1024000]
+static mut mask: [u8; 1024000] = [0 as u8; 1024000]
+static mut fba: [u32; 1024000] = [0 as u32; 1024000]
+static mut fbb: [u32; 1024000] = [0 as u32; 1024000]
+static mut rowbuf: [u8; 8192] = [0 as u8; 8192]
+// a copy of the table (header 16 words + 32 rows of 12) taken twice
+static mut tab1: [u64; 400] = [0 as u64; 400]
+static mut tab2: [u64; 400] = [0 as u64; 400]
+// the mapped buffers of the shared windows: window id, address, width, height
+static mut mp_id: [u64; 32] = [0 as u64; 32]
+static mut mp_ptr: [u64; 32] = [0 as u64; 32]
+static mut mp_w: [u64; 32] = [0 as u64; 32]
+static mut mp_h: [u64; 32] = [0 as u64; 32]
+static mut order: [u64; 32] = [0 as u64; 32]
+static mut khz: u64 = 0
+static mut scr_w: u64 = 0
+static mut scr_h: u64 = 0
+static mut pitch: u64 = 0
+static mut bpp: u64 = 4
+
+static mut s_w: [u8; 6] = "wmd: \0"
+static mut s_dev: [u8; 8] = "/dev/fb\0"
+
+fn tsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+fn us_of(cycles: u64) -> u64 {
+    if khz == 0 {
+        return 0
+    }
+    return cycles * 1000 / khz
+}
+
+fn calibrate() {
+    var t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let edge: u64 = t
+    while t == edge {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    let c0: u64 = tsc()
+    let t0: u64 = t
+    while t < t0 + 10 {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    let c1: u64 = tsc()
+    khz = (c1 - c0) / 100
+}
+
+fn mmap_fd(fd: u64, bytes: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_R, in("r10") MAP_SH,
+        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn say_kv(name: u64, v: u64) {
+    ulib.say(name)
+    ulib.sayu(v)
+}
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// copy the table page into `dst` (400 words); true when the sequence number was even and the same before and after the copy
+fn snap(t: u64, dst: u64) -> bool {
+    let s0: u64 = __mmio_read64((t + 8) as *mut u64)
+    if (s0 & 1) != 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 400 {
+        __mmio_write64((dst + i * 8) as *mut u64, __mmio_read64((t + i * 8) as *mut u64))
+        i = i + 1
+    }
+    return __mmio_read64((t + 8) as *mut u64) == s0
+}
+
+fn same_tab() -> bool {
+    var i: u64 = 0
+    while i < 400 {
+        // word 1 is the sequence number (it rises every frame), word 5 the frame counter: the rest must be equal
+        if i != 1 && i != 5 {
+            if tab1[i as usize] != tab2[i as usize] {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// read the screen into `dst` (scr_h rows of scr_w pixels, 4 octets each)
+fn read_screen(dst: u64) -> bool {
+    let fd: u64 = io.open((&s_dev[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let rp: u64 = (&rowbuf[0 as usize]) as u64
+    var y: u64 = 0
+    var good: bool = true
+    while y < scr_h && good {
+        if ulib.bad(io.seek(fd, y * pitch, 0)) {
+            good = false
+        } else {
+            let n: u64 = scr_w * bpp
+            if ulib.bad(io.read_full(fd, rp, n)) {
+                good = false
+            } else {
+                if bpp == 4 {
+                    // the card holds B G R x; a pixel is 0x00RRGGBB in a 32-bit word on this little-endian machine: the same octets
+                    var x: u64 = 0
+                    while x < scr_w {
+                        __mmio_write32((dst + (y * scr_w + x) * 4) as *mut u32, (__mmio_read32((rp + x * 4) as *mut u32) & 0xFFFFFF) as u32)
+                        x = x + 1
+                    }
+                } else {
+                    good = false
+                }
+            }
+        }
+        y = y + 1
+    }
+    io.close(fd)
+    return good
+}
+
+// the buffer of window `id` (slot k of the cache), mapped read-only; remapped when the size changed. 0 = none.
+fn buffer_of(k: u64, id: u64, w: u64, h: u64) -> u64 {
+    if mp_id[k as usize] == id && mp_w[k as usize] == w && mp_h[k as usize] == h && mp_ptr[k as usize] != 0 {
+        return mp_ptr[k as usize]
+    }
+    if mp_ptr[k as usize] != 0 {
+        let _u: u64 = ulib.sys(SYS_MUNMAP, mp_ptr[k as usize], mp_w[k as usize] * mp_h[k as usize] * 4, 0)
+        mp_ptr[k as usize] = 0
+    }
+    mp_id[k as usize] = id
+    mp_w[k as usize] = w
+    mp_h[k as usize] = h
+    let fd: u64 = wlibc.sys3w(WM_BUFFD, id, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let p: u64 = mmap_fd(fd, w * h * 4)
+    wlibc.shm_close(fd)
+    if ulib.bad(p) || p == 0 {
+        return 0
+    }
+    mp_ptr[k as usize] = p
+    return p
+}
+
+// `n` octets of `v` at `p` (rep stosb)
+fn fill8(p: u64, v: u64, n: u64) {
+    if n == 0 {
+        return
+    }
+    asm("cld\nrep stosb", in("rdi") p, in("rax") v, in("rcx") n,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+fn mask_rect(x0: i64, y0: i64, x1: i64, y1: i64, v: u64) {
+    let cx0: i64 = imax(x0, 0)
+    let cy0: i64 = imax(y0, 0)
+    let cx1: i64 = imin(x1, scr_w as i64)
+    let cy1: i64 = imin(y1, scr_h as i64)
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return
+    }
+    var y: i64 = cy0
+    while y < cy1 {
+        fill8((&mask[0 as usize]) as u64 + y as u64 * scr_w + cx0 as u64, v, (cx1 - cx0) as u64)
+        y = y + 1
+    }
+}
+
+fn clear_mask_rect(x0: i64, y0: i64, x1: i64, y1: i64) {
+    mask_rect(x0, y0, x1, y1, 0)
+}
+
+fn set_mask_rect(x0: i64, y0: i64, x1: i64, y1: i64) {
+    mask_rect(x0, y0, x1, y1, 1)
+}
+
+// One cycle. Returns 0 = judged, 1 = the screen or the table moved (thrown away), 2 = could not look. Fills the counters.
+static mut c_win: u64 = 0
+static mut c_plain: u64 = 0
+static mut c_cmp: u64 = 0
+static mut c_diff: u64 = 0
+static mut c_us: u64 = 0
+static mut c_fx: u64 = 0
+static mut c_fy: u64 = 0
+
+fn cycle(t: u64) -> u64 {
+    let t1: u64 = (&tab1[0 as usize]) as u64
+    let t2: u64 = (&tab2[0 as usize]) as u64
+    if !snap(t, t1) {
+        return 1
+    }
+    // the screen, the first time
+    if !read_screen((&fba[0 as usize]) as u64) {
+        return 2
+    }
+    let px0: u64 = wlibc.mouse_x()
+    let py0: u64 = wlibc.mouse_y()
+
+    // 1. compose the plain client areas into the off-screen picture, in the order of the table (layer, then z), and keep the mask
+    let tc0: u64 = tsc()
+    let n: u64 = tab1[2]
+    c_win = n
+    var i: u64 = 0
+    while i < n && i < MAXWIN {
+        order[i as usize] = i
+        i = i + 1
+    }
+    // insertion sort by layer, then z (row word 6: z | layer << 16 | kind << 24)
+    var a: u64 = 1
+    while a < n && a < MAXWIN {
+        var b: u64 = a
+        while b > 0 {
+            let ka: u64 = tab1[(16 + order[(b - 1) as usize] * 12 + 6) as usize]
+            let kb: u64 = tab1[(16 + order[b as usize] * 12 + 6) as usize]
+            let la: u64 = (ka >> 16) & 0xFF
+            let lb: u64 = (kb >> 16) & 0xFF
+            var swap: bool = false
+            if la > lb {
+                swap = true
+            } else if la == lb && (ka & 0xFFFF) > (kb & 0xFFFF) {
+                swap = true
+            }
+            if swap {
+                let tmp: u64 = order[(b - 1) as usize]
+                order[(b - 1) as usize] = order[b as usize]
+                order[b as usize] = tmp
+                b = b - 1
+            } else {
+                b = 0
+            }
+        }
+        a = a + 1
+    }
+    fill8((&mask[0 as usize]) as u64, 0, scr_w * scr_h)
+    c_plain = 0
+    var oi: u64 = 0
+    while oi < n && oi < MAXWIN {
+        let k: u64 = order[oi as usize]
+        let r: u64 = 16 + k * 12
+        let id: u64 = tab1[r as usize] & 0xFFFFFFFF
+        let x: i64 = tab1[(r + 2) as usize] as i64
+        let y: i64 = tab1[(r + 3) as usize] as i64
+        let w: u64 = tab1[(r + 4) as usize]
+        let h: u64 = tab1[(r + 5) as usize]
+        let inx: u64 = tab1[(r + 8) as usize] & 0xFFFFFFFF
+        let iny: u64 = tab1[(r + 8) as usize] >> 32
+        let shm: u64 = tab1[(r + 9) as usize]
+        let plain: u64 = (tab1[(r + 11) as usize] >> 32) & 1
+        let ow: i64 = (w + 2 * inx) as i64
+        let oh: i64 = (h + iny + inx) as i64
+        // whatever stands here is covered by this window (and by its shadow): nothing below it can be judged
+        clear_mask_rect(x - SHADOW as i64, y - SHADOW as i64, x + ow + SHADOW as i64, y + oh + SHADOW as i64)
+        var p: u64 = 0
+        if plain == 1 && shm != 0 {
+            p = buffer_of(k, id, w, h)
+        }
+        if p != 0 && w > 2 * MARGIN && h > 2 * MARGIN {
+            c_plain = c_plain + 1
+            let cx: i64 = x + inx as i64
+            let cy: i64 = y + iny as i64
+            // the rows of the client area that lie on the screen, copied with the library's row loop
+            var ry: u64 = 0
+            while ry < h {
+                let sy: i64 = cy + ry as i64
+                if sy >= 0 && sy < scr_h as i64 {
+                    var x0: i64 = cx
+                    var skip: u64 = 0
+                    if x0 < 0 {
+                        skip = (0 - x0) as u64
+                        x0 = 0
+                    }
+                    var cnt: u64 = w
+                    if skip >= cnt {
+                        cnt = 0
+                    } else {
+                        cnt = cnt - skip
+                    }
+                    if x0 + cnt as i64 > scr_w as i64 {
+                        cnt = (scr_w as i64 - x0) as u64
+                    }
+                    if cnt != 0 {
+                        comp.copy_row((&sb[0 as usize]) as u64 + (sy as u64 * scr_w + x0 as u64) * 4, p + (ry * w + skip) * 4, cnt)
+                    }
+                }
+                ry = ry + 1
+            }
+            set_mask_rect(cx + MARGIN as i64, cy + MARGIN as i64, cx + w as i64 - MARGIN as i64, cy + h as i64 - MARGIN as i64)
+        }
+        oi = oi + 1
+    }
+    c_us = us_of(tsc() - tc0)
+    // not near the pointer
+    clear_mask_rect(px0 as i64 - 8, py0 as i64 - 8, px0 as i64 + PTR_W as i64, py0 as i64 + PTR_H as i64)
+
+    // 2. the screen, the second time, and the table: nothing may have moved
+    if !read_screen((&fbb[0 as usize]) as u64) {
+        return 2
+    }
+    if !snap(t, t2) || !same_tab() {
+        return 1
+    }
+    if tab1[5] != tab2[5] {
+        return 1
+    }
+    // 3. compare, where the mask says the pixel can be judged and the screen held still
+    c_cmp = 0
+    c_diff = 0
+    c_fx = 0
+    c_fy = 0
+    var yy: u64 = 0
+    var moved: u64 = 0
+    while yy < scr_h {
+        var xx: u64 = 0
+        while xx < scr_w {
+            let at: u64 = yy * scr_w + xx
+            if mask[at as usize] != 0 {
+                if fba[at as usize] != fbb[at as usize] {
+                    moved = moved + 1
+                } else {
+                    c_cmp = c_cmp + 1
+                    if fba[at as usize] != sb[at as usize] {
+                        if c_diff == 0 {
+                            c_fx = xx
+                            c_fy = yy
+                        }
+                        c_diff = c_diff + 1
+                    }
+                }
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    if moved != 0 && c_cmp == 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_cycle: [u8; 12] = "wmd: cycle \0"
+    var n_win: [u8; 10] = " windows=\0"
+    var n_pl: [u8; 8] = " plain=\0"
+    var n_cmp: [u8; 11] = " compared=\0"
+    var n_df: [u8; 9] = " differ=\0"
+    var n_us: [u8; 13] = " compose_us=\0"
+    var n_first: [u8; 8] = " first=\0"
+    var n_un: [u8; 15] = "wmd: unstable \0"
+    var n_sum: [u8; 14] = "wmd: summary \0"
+    var n_cyc: [u8; 8] = "cycles=\0"
+    var n_good: [u8; 7] = " good=\0"
+    var n_tot: [u8; 11] = " compared=\0"
+    var n_dif: [u8; 9] = " differ=\0"
+    var n_max: [u8; 13] = " compose_us=\0"
+    var n_ready: [u8; 19] = "wmd: ready screen=\0"
+    var n_nofb: [u8; 15] = "wmd: no screen\0"
+    var n_notab: [u8; 14] = "wmd: no table\0"
+    var n_x: [u8; 2] = "x\0"
+    var n_c: [u8; 2] = ",\0"
+
+    wlibc.start(false)
+    scr_w = wlibc.screen_w()
+    scr_h = wlibc.screen_h()
+    pitch = ulib.sys(SYS_DISPGET, DG_PITCH, 0, 0)
+    bpp = ulib.sys(SYS_DISPGET, DG_BPP, 0, 0) / 8
+    if ulib.bad(pitch) || pitch == 0 {
+        pitch = scr_w * 4
+    }
+    if ulib.bad(bpp) || bpp == 0 {
+        bpp = 4
+    }
+    if scr_w == 0 || scr_h == 0 || scr_w * scr_h > MAXPX || scr_w * bpp > 8192 || bpp != 4 {
+        ulib.say((&n_nofb[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    calibrate()
+    let tfd: u64 = wlibc.sys3w(WM_TABLE, 0, 0, 0)
+    if ulib.bad(tfd) {
+        ulib.say((&n_notab[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let t: u64 = mmap_fd(tfd, 4096)
+    if ulib.bad(t) || t == 0 {
+        ulib.say((&n_notab[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&n_ready[0 as usize]) as u64)
+    ulib.sayu(scr_w)
+    ulib.say((&n_x[0 as usize]) as u64)
+    ulib.sayu(scr_h)
+    ulib.nl()
+
+    var cycles: u64 = 0
+    var good: u64 = 0
+    var tot: u64 = 0
+    var dif: u64 = 0
+    var maxus: u64 = 0
+    var tries: u64 = 0
+    // every ~1.5 s for as long as the harness lets us live
+    while tries < 160 {
+        tries = tries + 1
+        let rc: u64 = cycle(t)
+        if rc == 0 {
+            cycles = cycles + 1
+            ulib.say((&n_cycle[0 as usize]) as u64)
+            ulib.sayu(cycles)
+            ulib.say((&n_win[0 as usize]) as u64)
+            ulib.sayu(c_win)
+            ulib.say((&n_pl[0 as usize]) as u64)
+            ulib.sayu(c_plain)
+            ulib.say((&n_cmp[0 as usize]) as u64)
+            ulib.sayu(c_cmp)
+            ulib.say((&n_df[0 as usize]) as u64)
+            ulib.sayu(c_diff)
+            ulib.say((&n_us[0 as usize]) as u64)
+            ulib.sayu(c_us)
+            if c_diff != 0 {
+                ulib.say((&n_first[0 as usize]) as u64)
+                ulib.sayu(c_fx)
+                ulib.say((&n_c[0 as usize]) as u64)
+                ulib.sayu(c_fy)
+            }
+            ulib.nl()
+            if c_cmp > 0 && c_diff == 0 {
+                good = good + 1
+            }
+            tot = tot + c_cmp
+            dif = dif + c_diff
+            if c_us > maxus {
+                maxus = c_us
+            }
+        } else {
+            ulib.say((&n_un[0 as usize]) as u64)
+            ulib.sayu(rc)
+            ulib.nl()
+        }
+        if cycles >= 70 {
+            tries = 160
+        } else {
+            let _s: u64 = ulib.sleep_ms(1500)
+        }
+    }
+    ulib.say((&n_sum[0 as usize]) as u64)
+    ulib.say((&n_cyc[0 as usize]) as u64)
+    ulib.sayu(cycles)
+    ulib.say((&n_good[0 as usize]) as u64)
+    ulib.sayu(good)
+    ulib.say((&n_tot[0 as usize]) as u64)
+    ulib.sayu(tot)
+    ulib.say((&n_dif[0 as usize]) as u64)
+    ulib.sayu(dif)
+    ulib.say((&n_max[0 as usize]) as u64)
+    ulib.sayu(maxus)
+    ulib.nl()
+    var k: u64 = 0
+    while k < 60 {
+        let _z: u64 = ulib.sleep_ms(1000)
+        k = k + 1
+    }
+    return 0
+}

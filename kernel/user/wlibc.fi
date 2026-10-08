@@ -179,6 +179,8 @@ export {
     WIG_SCREEN, WIG_CURSOR,
     WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE,
     WM_CLOSE, WM_SIZE, WI_W, WI_H, WI_X, WI_Y, WI_ID, WI_EVENTS,
+    // COMPOSITOR S3: shared window buffers (docs/COMPOSITOR.md)
+    WM_SETBUF, WM_DAMAGE, WI_SHARED, MFD_FRAMES, shm_buffer, shm_last_fd, shm_unmap, shm_close, win_setbuf, win_damage, win_shared,
     WI_FOCUS, win_size,
     WM_STATE, WM_LIST, WM_ACT, WM_DECO, WI_LAYER, WI_HIDDEN,
     WS_LAYER, WS_HIDDEN, WS_DECO, WS_KEYS, WA_RAISE, WA_HIDE, WA_TOGGLE,
@@ -267,6 +269,16 @@ const WM_INFO: u64 = 2104
 const WM_FLUSH: u64 = 2105
 const WM_MOVE: u64 = 2106
 const WM_CLOSE: u64 = 2107
+// COMPOSITOR S3 -- the same numbers as `sys.WM_SETBUF`, `sys.WM_DAMAGE`, `sys.WI_SHARED` (kernel/sys/sys.fi)
+const WM_SETBUF: u64 = 2140
+const WM_DAMAGE: u64 = 2141
+const WI_SHARED: u64 = 30
+const MFD_FRAMES: u64 = 0x40000000
+const SYS_MEMFD_CREATE: u64 = 319
+const SYS_FTRUNCATE: u64 = 77
+const SYS_MUNMAP: u64 = 11
+const SYS_CLOSE_FD: u64 = 3
+const MAP_SHARED_FLAG: u64 = 1
 // RUNDE DESKTOP -- dieselben Nummern wie in `kernel/sys.fi`.
 const WM_STATE: u64 = 2109
 const WM_LIST: u64 = 2110
@@ -664,6 +676,65 @@ fn map_surface(bytes: u64) -> u64 {
         in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
         in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
         clobber("memory"))
+}
+
+// ----------------------------------------------------- COMPOSITOR S3: a window buffer the compositor reads
+//
+// `shm_buffer(bytes)`: a memfd of ONE run of frames (MFD_FRAMES), cut to `bytes`, mapped shared. Returns the address (0 = no) and
+// leaves the descriptor in `shm_last_fd()`. The window server composes from the very same frames, so a program that paints into this
+// buffer needs no WIG_BLIT: `win_damage` names the rectangle that changed and nothing is copied.
+static mut s_shfd: u64 = 0
+
+fn shm_last_fd() -> u64 {
+    return s_shfd
+}
+
+fn shm_close(fd: u64) {
+    let _r: u64 = sys3w(SYS_CLOSE_FD, fd, 0, 0)
+}
+
+fn shm_unmap(p: u64, bytes: u64) {
+    let _r: u64 = sys3w(SYS_MUNMAP, p, bytes, 0)
+}
+
+fn shm_buffer(bytes: u64) -> u64 {
+    if bytes == 0 {
+        return 0
+    }
+    let fd: u64 = sys3w(SYS_MEMFD_CREATE, 0, MFD_FRAMES, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    if ulib.bad(sys3w(SYS_FTRUNCATE, fd, bytes, 0)) {
+        shm_close(fd)
+        return 0
+    }
+    let p: u64 = asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_SHARED_FLAG,
+        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+    if ulib.bad(p) || p == 0 {
+        shm_close(fd)
+        return 0
+    }
+    s_shfd = fd
+    return p
+}
+
+// the window `h` paints from the memfd `fd` from now on (after a resize the program attaches a buffer of the new size)
+fn win_setbuf(h: u64, fd: u64) -> bool {
+    return !ulib.bad(sys3w(WM_SETBUF, h, fd, 0))
+}
+
+// the program painted this rectangle (window coordinates) into its shared buffer. Returns the pixels named, or an error value
+// (the window is no longer shared: it was resized and has a buffer of its own until the program attaches a new one)
+fn win_damage(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    return sys3w(WM_DAMAGE, h, (x << 16) | y, (w << 16) | hh)
+}
+
+// does the window paint from a shared buffer?
+fn win_shared(h: u64) -> bool {
+    return sys3w(WM_INFO, h, WI_SHARED, 0) == 1
 }
 
 fn start(noclip: bool) -> bool {

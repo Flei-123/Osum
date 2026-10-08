@@ -54,6 +54,9 @@ import ui.tile
 import sched.time
 import gfx.vmode
 import ui.wig
+import fs.file
+import fs.unixsock
+import mm.mem
 import ui.wm
 import ui.wmplug
 import ui.ax
@@ -822,6 +825,24 @@ fn wm_trust(state: u64, me: u64, op: u64, no: u64, p: u64, n: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
+// A descriptor of shared object `k` for task `me`, read-only (it can be mapped PROT_READ, never PROT_WRITE). One reference for the open file.
+fn shm_fd(state: u64, me: u64, k: u64) -> u64 {
+    unixsock.shm_ref(state, k)
+    let of: u64 = file.open_alloc(state, file.K_SHM, k, 0)
+    if of >= file.MAX_OPEN {
+        unixsock.shm_unref(state, k)
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.shm_unref(state, k)
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > sys.WM_MAXNR {
@@ -856,8 +877,22 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
         }
         kstate.set8(titel + 31, 0 as u8)
-        let i: u64 = wm.create(state, me, x as i64, y as i64, w, h,
-            a3 & 1, titel)
+        // COMPOSITOR S3: a fifth argument names a memfd (descriptor + 1, made with MFD_FRAMES) the window paints from. Anything that
+        // does not fit (not contiguous, too small, the word `noshare`) is NOT an error: the window gets its own buffer and the client
+        // finds out with WM_INFO / WI_SHARED and copies with WIG_BLIT as before.
+        var sbase: u64 = 0
+        var sbytes: u64 = 0
+        var sidx: u64 = 0
+        if a4 != 0 && wm.shared_ok(state) {
+            let si: u64 = sys.shm_of(state, me, a4 - 1)
+            if si < unixsock.USHM_MAX && unixsock.shm_contig(state, si) {
+                sbase = unixsock.shm_base(state, si)
+                sbytes = unixsock.shm_pages(state, si) * mem.FRAME_SIZE
+                sidx = si
+            }
+        }
+        let i: u64 = wm.create_ex(state, me, x as i64, y as i64, w, h,
+            a3 & 1, titel, sbase, sbytes, sidx)
         if i >= wm.MAX_WIN {
             return cap.err(cap.E_EXHAUSTED)
         }
@@ -882,6 +917,29 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     // EIGENES Fenster auf der obersten Ebene: sie muss eine Taskleiste
     // SEIN. Eine gewoehnliche Anwendung bekommt -E_RIGHTS und sieht die
     // Titel der anderen nicht.
+    // COMPOSITOR S3: the window table page, for anybody (geometry, order, owner -- no titles, no pixels)
+    if number == sys.WM_TABLE {
+        let k: u64 = wm.tab_object(state)
+        if k >= unixsock.USHM_MAX {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return shm_fd(state, me, k)
+    }
+    // ... and the buffer of a shared window, for root only (the compositor), never while the screen is locked
+    if number == sys.WM_BUFFD {
+        if !perm.is_root(state, me) || wm.sperre_an(state) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        let wb: u64 = wm.by_id(state, a0)
+        if wb >= wm.MAX_WIN {
+            return cap.err(cap.E_NOTFOUND)
+        }
+        let sh: u64 = wm.win_shm(state, wb)
+        if sh == 0 {
+            return cap.err(cap.E_INVALID)
+        }
+        return shm_fd(state, me, sh - 1)
+    }
     if number == sys.WM_LIST {
         return wm_list(state, me, a0, a1, a2)
     }
@@ -1202,6 +1260,12 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a1 == sys.WI_TB_ALPHA_IST {
             return wm.tb_alpha_ist(state)
         }
+        if a1 == sys.WI_SHARED {
+            if wm.win_shm(state, i) != 0 {
+                return 1
+            }
+            return 0
+        }
         if a1 == sys.WI_MAXIMIZED {
             if wm.is_max(state, i) {
                 return 1
@@ -1226,6 +1290,33 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.flush_win(state, i)
         wm.compose(state)
         return 0
+    }
+    // COMPOSITOR S3: the window paints from a memfd of the client (made with MFD_FRAMES, long enough for the window)
+    if number == sys.WM_SETBUF {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if !wm.shared_ok(state) {
+            return cap.err(cap.E_UNSUPPORTED)
+        }
+        let si: u64 = sys.shm_of(state, me, a1)
+        if si >= unixsock.USHM_MAX || !unixsock.shm_contig(state, si) {
+            return cap.err(cap.E_INVALID)
+        }
+        if !wm.attach_buf(state, i, unixsock.shm_base(state, si), unixsock.shm_pages(state, si) * mem.FRAME_SIZE, si) {
+            return cap.err(cap.E_INVALID)
+        }
+        return 0
+    }
+    // the client painted this rectangle (window coordinates) into its shared buffer: only the damage is named, nothing is copied
+    if number == sys.WM_DAMAGE {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if wm.win_shm(state, i) == 0 {
+            return cap.err(cap.E_INVALID)
+        }
+        return wm.damage_rect(state, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF, (a2 >> 16) & 0xFFFF, a2 & 0xFFFF)
     }
     if number == sys.WM_MOVE {
         if !cap.rights_contains(rights, cap.R_MANAGE) {

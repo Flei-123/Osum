@@ -90,13 +90,14 @@ import drv.snd.audio
 import fui.core
 import fui.region
 import fui.comp // docs/COMPOSITOR.md S2: the row loops (copy, mix, blur line) live in lib/fui/comp.fi
+import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
 
 export {
     sperre_an, sperrer, lock_space, darf, input_seen,
     trust_ask, trust_poll, trust_cancel,
     init, ready, compose, damage, damage_ex, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
-    create, destroy, valid, count, focus, set_focus, raise_win,
+    create, create_ex, attach_buf, win_shm, damage_rect, tab_object, tab_publish, shared_ok, sh_stat, destroy, valid, count, focus, set_focus, raise_win,
     // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
     close_top, close_term, top_visible, cross_point, term_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
@@ -1707,6 +1708,19 @@ const W_SWOFF: u64 = 0x1A0
 // LASSEN. Fehlt das zweite, hat man Arbeit geleistet und sie danach
 // zugedeckt.
 const W_OPAC: u64 = 0x1A8
+// COMPOSITOR S3: the shared memory object (unixsock) that holds this window's buffer, + 1; 0 = the buffer is the server's own run of frames
+const W_SHM: u64 = 0x1B0
+// COMPOSITOR S3 scalars (far from the others on purpose)
+const S_TABF: u64 = 0x1E00   // the window table page (frame address), 0 = not made yet
+const S_TABI: u64 = 0x1E08   // its shared object + 1
+const S_TABSEQ: u64 = 0x1E10 // the table's sequence number (odd while the page is being written)
+const S_SH_DMG: u64 = 0x1E18 // damage calls of shared windows since the last F12
+const S_SH_PX: u64 = 0x1E20  // pixels they named
+const S_BL_N: u64 = 0x1E28   // rows copied from a client by `blit_in` (WIG_BLIT) since the last F12
+const S_BL_PX: u64 = 0x1E30  // and their pixels
+const S_SH_ATT: u64 = 0x1E38 // windows that got a shared buffer (running total)
+const S_SH_DET: u64 = 0x1E40 // shared buffers taken back by a resize (running total)
+const S_TAB_N: u64 = 0x1E48  // table pages published
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -2907,6 +2921,36 @@ fn bild_say_reset(state: u64) {
         serial.dec(gs(state, S_BLURUS))
         serial.nl()
     }
+    // COMPOSITOR S3: what the clients' pixels cost since the last F12. `blitpx` are the pixels the kernel copied out of a client (WIG_BLIT),
+    // `shpx` the pixels of shared windows that were named dirty WITHOUT a copy. Printed only once a shared window or a blit happened.
+    if gs(state, S_BL_PX) != 0 || gs(state, S_SH_DMG) != 0 {
+        var s_s: [u8; 14] = "wm: shared n=\0"
+        var s_s1: [u8; 9] = " blitpx=\0"
+        var s_s2: [u8; 8] = " blits=\0"
+        var s_s3: [u8; 7] = " shpx=\0"
+        var s_s4: [u8; 8] = " shdmg=\0"
+        var s_s5: [u8; 9] = " attach=\0"
+        var s_s6: [u8; 9] = " detach=\0"
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(gs(state, S_FRN))
+        serial.puts((&s_s1[0]) as u64)
+        serial.dec(gs(state, S_BL_PX))
+        serial.puts((&s_s2[0]) as u64)
+        serial.dec(gs(state, S_BL_N))
+        serial.puts((&s_s3[0]) as u64)
+        serial.dec(gs(state, S_SH_PX))
+        serial.puts((&s_s4[0]) as u64)
+        serial.dec(gs(state, S_SH_DMG))
+        serial.puts((&s_s5[0]) as u64)
+        serial.dec(gs(state, S_SH_ATT))
+        serial.puts((&s_s6[0]) as u64)
+        serial.dec(gs(state, S_SH_DET))
+        serial.nl()
+        ss(state, S_BL_PX, 0)
+        ss(state, S_BL_N, 0)
+        ss(state, S_SH_PX, 0)
+        ss(state, S_SH_DMG, 0)
+    }
     ss(state, S_RFRAMES, 0)
     ss(state, S_RSAVED, 0)
     ss(state, S_PH_BLUR, 0)
@@ -3691,6 +3735,13 @@ fn dirty_y1(state: u64) -> u64 {
 
 fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
     kind: u64, title: u64) -> u64 {
+    return create_ex(state, owner, x, y, w, h, kind, title, 0, 0, 0)
+}
+
+// `sbase` != 0: the buffer is the run of frames of shared object `sidx` (`sbytes` long, one reference taken for the window) and not
+// a run of the server's own -- the client paints into it and the compositor reads it from there (docs/COMPOSITOR.md S3).
+fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
+    kind: u64, title: u64, sbase: u64, sbytes: u64, sidx: u64) -> u64 {
     if !ready(state) || w < 32 || h < 16 || w > MAX_W_HARD
         || h > MAX_H_HARD {
         return MAX_WIN
@@ -3699,8 +3750,17 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
     while i < MAX_WIN {
         if wg(state, i, W_USED) == 0 {
             let bytes: u64 = w * h * 4
-            let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-            let buf: u64 = mem.frame_run(state, rahmen)
+            var rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+            var buf: u64 = 0
+            if sbase != 0 {
+                if sbytes < bytes || kind == K_TERM {
+                    return MAX_WIN
+                }
+                buf = sbase
+                rahmen = sbytes / mem.FRAME_SIZE
+            } else {
+                buf = mem.frame_run(state, rahmen)
+            }
             if buf == 0 {
                 return MAX_WIN
             }
@@ -3734,6 +3794,12 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_H, h)
             wsv(state, i, W_BUF, buf)
             wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+            wsv(state, i, W_SHM, 0)
+            if sbase != 0 {
+                unixsock.shm_ref(state, sidx)
+                wsv(state, i, W_SHM, sidx + 1)
+                ss(state, S_SH_ATT, gs(state, S_SH_ATT) + 1)
+            }
             wsv(state, i, W_KIND, kind)
             wsv(state, i, W_EHEAD, 0)
             wsv(state, i, W_ETAIL, 0)
@@ -3867,8 +3933,14 @@ fn destroy(state: u64, i: u64) -> bool {
     wsv(state, i, W_STRUT, 0)
     wsv(state, i, W_USED, 0)
     if wg(state, i, W_BUF) != 0 {
-        mem.frame_free_run(state, wg(state, i, W_BUF),
-            wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE)
+        if wg(state, i, W_SHM) != 0 {
+            // a shared buffer belongs to its object: the window gives back its reference, the client's mapping keeps the frames until it lets go
+            unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)
+            wsv(state, i, W_SHM, 0)
+        } else {
+            mem.frame_free_run(state, wg(state, i, W_BUF),
+                wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE)
+        }
         wsv(state, i, W_BUF, 0)
     }
     if wg(state, i, W_GRID) != 0 {
@@ -5187,7 +5259,13 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Gegenstueck in diesem Kern, und ein Rahmen, der zurueckgegeben
     // wird, ohne dass es einen Weg dafuer gibt, ist schlimmer als einer,
     // der liegen bleibt. Bei sechzehn Fenstern ist das begrenzt.
-    if w * h * 4 > wg(state, i, W_BUFBYTES) {
+    if wg(state, i, W_SHM) != 0 {
+        // COMPOSITOR S3: a shared buffer has the row length of the old width. The window leaves it (the client keeps its mapping alive)
+        // and gets a buffer of its own; the client takes the new size from E_RESIZE and attaches a new shared buffer (WM_SETBUF).
+        if !detach_buf(state, i, w * h * 4) {
+            return false
+        }
+    } else if w * h * 4 > wg(state, i, W_BUFBYTES) {
         let bytes: u64 = w * h * 4
         let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
         let neu: u64 = mem.frame_run(state, rahmen)
@@ -5408,6 +5486,8 @@ fn blit_in(state: u64, i: u64, src: u64, x: u64, y: u64, w: u64,
     if y + bh > wg(state, i, W_H) {
         bh = wg(state, i, W_H) - y
     }
+    ss(state, S_BL_N, gs(state, S_BL_N) + bh)
+    ss(state, S_BL_PX, gs(state, S_BL_PX) + bw * bh)
     var r: u64 = 0
     while r < bh {
         copy_words(wg(state, i, W_BUF) +% (y + r) *% ww *% 4 +% x *% 4,
@@ -5421,6 +5501,243 @@ fn blit_in(state: u64, i: u64, src: u64, x: u64, y: u64, w: u64,
         r = r + 1
     }
     return bw * bh
+}
+
+// ================================================= COMPOSITOR S3 (docs/COMPOSITOR.md)
+//
+// SHARED WINDOW BUFFERS. Until now a client painted into memory of its own and `WIG_BLIT` copied the pixels into the server's buffer on every
+// frame (two copies in the kernel, one more in the client's strip). A window can now take over the run of frames of a memfd
+// (`memfd_create(MFD_FRAMES)`): the client maps it, paints into it, and `WM_DAMAGE` only names the rectangle that changed. The compositor
+// reads the same frames -- 0 copies of the client's pixels per frame.
+
+// the kernel word `noshare` switches it off: the counter-proof of tools/comp/shared.sh (clients fall back to WIG_BLIT)
+fn shared_ok(state: u64) -> bool {
+    return !fb.noshare_an(state)
+}
+
+// 0 = the window paints into frames of the server's own, else the shared object + 1
+fn win_shm(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_SHM)
+}
+
+// A shared window gets a buffer of its own of `bytes` and lets go of the shared one.
+fn detach_buf(state: u64, i: u64, bytes: u64) -> bool {
+    let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let neu: u64 = mem.frame_run(state, rahmen)
+    if neu == 0 {
+        return false
+    }
+    unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)
+    wsv(state, i, W_SHM, 0)
+    wsv(state, i, W_BUF, neu)
+    wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+    ss(state, S_SH_DET, gs(state, S_SH_DET) + 1)
+    return true
+}
+
+// Window `i` now paints from the run of frames of shared object `sidx` (WM_SETBUF). The old buffer (own frames or an older shared
+// object) is given back. false when the run is smaller than the window or the window is a terminal (the server paints those).
+fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
+    if !valid(state, i) || sbase == 0 {
+        return false
+    }
+    if wg(state, i, W_KIND) == K_TERM || sbytes < wg(state, i, W_W) * wg(state, i, W_H) * 4 {
+        return false
+    }
+    if wg(state, i, W_BUF) == sbase {
+        return true
+    }
+    if wg(state, i, W_SHM) != 0 {
+        unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)
+    } else if wg(state, i, W_BUF) != 0 {
+        mem.frame_free_run(state, wg(state, i, W_BUF), wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE)
+    }
+    unixsock.shm_ref(state, sidx)
+    wsv(state, i, W_SHM, sidx + 1)
+    wsv(state, i, W_BUF, sbase)
+    wsv(state, i, W_BUFBYTES, sbytes)
+    ss(state, S_SH_ATT, gs(state, S_SH_ATT) + 1)
+    damage_win(state, i)
+    return true
+}
+
+// The client painted a rectangle of its shared buffer (window coordinates): only that rectangle is dirty (the same rectangle
+// `wig.blit` names after its copy). Returns the pixels named.
+fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
+    if !valid(state, i) || w == 0 || h == 0 {
+        return 0
+    }
+    let ww: u64 = wg(state, i, W_W)
+    let wh: u64 = wg(state, i, W_H)
+    if x >= ww || y >= wh {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wh {
+        bh = wh - y
+    }
+    let sx: i64 = win_x(state, i) + inx(state, i) as i64 + x as i64
+    let sy: i64 = win_y(state, i) + iny(state, i) as i64 + y as i64
+    damage_ex(state, sx, sy, sx + bw as i64, sy + bh as i64, i + 1)
+    ss(state, S_SH_DMG, gs(state, S_SH_DMG) + 1)
+    ss(state, S_SH_PX, gs(state, S_SH_PX) + bw * bh)
+    return bw * bh
+}
+
+// THE WINDOW TABLE PAGE. One 4 KiB frame the kernel keeps up to date and any process may map READ-ONLY (WM_TABLE): who owns which
+// window, where it stands, in which layer and order, with which flags, and where its pixels are. The compositor in ring 3 (`wmd`, S4)
+// reads it; nobody can write it (the object is SMF_RO), so a program cannot forge an owner. All words are u64, little endian:
+//
+//   word 0   magic 0x42415457 ("WTAB") | version 1 << 32
+//   word 1   sequence number: odd while the kernel writes, even when the page is consistent (read it before and after; equal and even = good)
+//   word 2   number of rows         word 3  screen width | height << 32       word 4  focused window id (0 = none)
+//   word 5   number of frames composed (`composites`) when the table was written      word 6  words per row (12)      word 7  1 while the screen is locked
+//   from word 16, one row per used window, TAB_ROW words each:
+//     +0 id | slot << 32        +1 owner (task number)    +2 x (outer, i64)   +3 y (outer, i64)
+//     +4 client width           +5 client height          +6 z | layer << 16 | kind << 24
+//     +7 flags (W_FLAGS)        +8 inx | iny << 32 (client area inside the frame)
+//     +9 shared object + 1 (0 = the buffer is the server's own)      +10 row length in octets
+//     +11 opacity (W_OPAC) in the low 32 bits; bit 32 = PLAIN: right now the server paints this window's client area as a plain copy of its
+//         buffer (no opening/closing motion, no lifting, no blur, no glass, no translucency) -- the only windows a shadow compositor can
+//         reproduce exactly before the chrome and the effects move to it (S6)
+const TAB_MAGIC: u64 = 0x42415457
+const TAB_ROW: u64 = 12
+const TAB_HEAD: u64 = 16
+
+// Does `compose` paint the client area of window `i` as a plain copy of its buffer right now? (The same decisions `paint_win` takes.)
+fn tab_plain(state: u64, i: u64) -> bool {
+    if wg(state, i, W_ANK) != 0 || drag_paint_on(state, i) || blur_will(state, i) {
+        return false
+    }
+    var alpha: u64 = form_or(state, FM_WIN_ALPHA, 100)
+    let pw: u64 = panel_win(state)
+    if pw < MAX_WIN && i == pw {
+        alpha = form_or(state, FM_TB_ALPHA, 100)
+    }
+    let op: u64 = win_opac(state, i)
+    if op < 255 {
+        let opp: u64 = op *% 100 / 255
+        if opp < alpha {
+            alpha = opp
+        }
+    }
+    if deckt_schirm(state, i) {
+        alpha = 100
+    }
+    return alpha >= 100
+}
+
+fn tab_object(state: u64) -> u64 {
+    if gs(state, S_TABI) != 0 {
+        return gs(state, S_TABI) - 1
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return unixsock.USHM_MAX
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        __mmio_write64((f + o * 8) as *mut u64, 0)
+        o = o + 1
+    }
+    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
+    if k >= unixsock.USHM_MAX {
+        mem.frame_free(state, f)
+        return unixsock.USHM_MAX
+    }
+    ss(state, S_TABF, f)
+    ss(state, S_TABI, k + 1)
+    tab_publish(state)
+    return k
+}
+
+fn tw(f: u64, w: u64, v: u64) {
+    __mmio_write64((f + w * 8) as *mut u64, v)
+}
+
+// Write the table (only when somebody asked for it once: `tab_object`). Called by `compose` before the frame.
+fn tab_publish(state: u64) {
+    let f: u64 = gs(state, S_TABF)
+    if f == 0 {
+        return
+    }
+    let seq: u64 = gs(state, S_TABSEQ) + 1
+    ss(state, S_TABSEQ, seq)
+    arch.atomic_store(f + 8, seq) // odd: being written (a locked store: a full barrier, also on a core that reorders)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 {
+            let r: u64 = TAB_HEAD + n * TAB_ROW
+            tw(f, r + 0, wg(state, i, W_ID) | (i << 32))
+            tw(f, r + 1, wg(state, i, W_OWNER))
+            tw(f, r + 2, wg(state, i, W_X))
+            tw(f, r + 3, wg(state, i, W_Y))
+            tw(f, r + 4, wg(state, i, W_W))
+            tw(f, r + 5, wg(state, i, W_H))
+            tw(f, r + 6, wg(state, i, W_Z) | (wg(state, i, W_LAYER) << 16) | (wg(state, i, W_KIND) << 24))
+            tw(f, r + 7, wg(state, i, W_FLAGS))
+            tw(f, r + 8, inx(state, i) | (iny(state, i) << 32))
+            tw(f, r + 9, wg(state, i, W_SHM))
+            tw(f, r + 10, wg(state, i, W_W) * 4)
+            var plain: u64 = 0
+            if tab_plain(state, i) {
+                plain = 1
+            }
+            tw(f, r + 11, (wg(state, i, W_OPAC) & 0xFFFFFFFF) | (plain << 32))
+            n = n + 1
+        }
+        i = i + 1
+    }
+    tw(f, 0, TAB_MAGIC | (1 << 32))
+    tw(f, 2, n)
+    tw(f, 3, gs(state, S_SW) | (gs(state, S_SH) << 32))
+    var fo: u64 = 0
+    let fi: u64 = gs(state, S_FOCUS)
+    if fi != 0 {
+        fo = wg(state, fi - 1, W_ID)
+    }
+    tw(f, 4, fo)
+    ss(state, S_TAB_N, gs(state, S_TAB_N) + 1)
+    tw(f, 5, gs(state, S_COMPOSITES))
+    tw(f, 6, TAB_ROW)
+    var lk: u64 = 0
+    if sperre_an(state) {
+        lk = 1
+    }
+    tw(f, 7, lk)
+    arch.atomic_store(f + 8, seq + 1) // even: consistent
+    ss(state, S_TABSEQ, seq + 1)
+}
+
+// numbers for the F12 line and the tests: 0 attached, 1 damage calls, 2 pixels named, 3 rows blitted, 4 pixels blitted, 5 detached, 6 table pages
+fn sh_stat(state: u64, k: u64) -> u64 {
+    if k == 0 {
+        return gs(state, S_SH_ATT)
+    }
+    if k == 1 {
+        return gs(state, S_SH_DMG)
+    }
+    if k == 2 {
+        return gs(state, S_SH_PX)
+    }
+    if k == 3 {
+        return gs(state, S_BL_N)
+    }
+    if k == 4 {
+        return gs(state, S_BL_PX)
+    }
+    if k == 5 {
+        return gs(state, S_SH_DET)
+    }
+    return gs(state, S_TAB_N)
 }
 
 fn flush_win(state: u64, i: u64) {
@@ -6322,6 +6639,7 @@ fn compose(state: u64) -> u64 {
     if alt != 0 {
         return 0
     }
+    tab_publish(state)
     let r: u64 = compose_one(state)
     arch.atomic_store(lk, 0)
     return r
@@ -14645,6 +14963,9 @@ fn restore_geom(state: u64, i: u64) {
 // wird hier ein neuer Lauf Rahmen geholt und der alte zurueckgegeben.
 fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
     let bytes: u64 = w * h * 4
+    if wg(state, i, W_SHM) != 0 {
+        return detach_buf(state, i, bytes)
+    }
     if bytes <= wg(state, i, W_BUFBYTES) {
         return true
     }

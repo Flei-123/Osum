@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/shmtest.fi -- docs/COMPOSITOR.md stage S3: SHARED WINDOW BUFFERS AND THE WINDOW TABLE PAGE, from ring 3.
+//
+// Started by the kernel word `wigapp=/bin/shmtest` (tools/comp/shared.sh). Every result is one serial line `shmtest: <name> <value>`.
+//
+//   1. a window made with a memfd (MFD_FRAMES): WI_SHARED says 1, a gradient painted into the mapping, WM_DAMAGE names all of it
+//   2. the window table page (WM_TABLE): read-only (a writable mapping is refused), consistent (even sequence number), and our window is
+//      in it with the right size, owner > 0 and a shared object
+//   3. the buffer of our window through WM_BUFFD (root only): the same pixels we painted, read-only
+//   4. no leak: 20 times make a shared window, paint, close it, unmap it -- the free frames are what they were
+//   5. the window stays on the screen with the gradient, so that the runner's screenshot can be compared with it: the compositor must
+//      show the pixels the client painted into the shared buffer (`shmtest: at <x> <y>` says where the client area begins)
+//
+// Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import wlibc
+
+export { u_start }
+
+const WM_TABLE: u64 = 2142
+const WM_BUFFD: u64 = 2143
+const SYS_MMAP: u64 = 9
+const PROT_R: u64 = 1
+const PROT_RW: u64 = 3
+const MAP_SH: u64 = 1
+const W: u64 = 320
+const H: u64 = 200
+
+static mut s_t: [u8; 10] = "shmtest: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_title: [u8; 8] = "shmtest\0"
+
+fn line(name: u64, a: u64, b: u64) {
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(a)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(b)
+    ulib.nl()
+}
+
+fn yes(v: bool) -> u64 {
+    if v {
+        return 1
+    }
+    return 0
+}
+
+fn mmap_fd(fd: u64, bytes: u64, prot: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") prot, in("r10") MAP_SH,
+        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn free_frames() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0)
+}
+
+// the gradient: red = x, green = y, blue = 0x80
+fn paint(p: u64, w: u64, h: u64) {
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            __mmio_write32((p + (y * w + x) * 4) as *mut u32, (((x & 255) << 16) | ((y & 255) << 8) | 0x80) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_win: [u8; 7] = "window\0"
+    var n_shared: [u8; 7] = "shared\0"
+    var n_damage: [u8; 7] = "damage\0"
+    var n_tmagic: [u8; 8] = "t-magic\0"
+    var n_tseq: [u8; 6] = "t-seq\0"
+    var n_trows: [u8; 7] = "t-rows\0"
+    var n_twr: [u8; 11] = "t-write-no\0"
+    var n_trow: [u8; 6] = "t-row\0"
+    var n_tshm: [u8; 6] = "t-shm\0"
+    var n_bfd: [u8; 6] = "buffd\0"
+    var n_bmatch: [u8; 8] = "b-match\0"
+    var n_bwr: [u8; 11] = "b-write-no\0"
+    var n_leak: [u8; 5] = "leak\0"
+    var n_at: [u8; 3] = "at\0"
+    var n_done: [u8; 5] = "done\0"
+    var n_cyc: [u8; 7] = "cycles\0"
+
+    wlibc.start(false)
+    let bytes: u64 = W * H * 4
+
+    // 1. a shared window
+    let p: u64 = wlibc.shm_buffer(bytes)
+    line((&n_win[0 as usize]) as u64, yes(p != 0 && !ulib.bad(p)), 0)
+    if p == 0 {
+        line((&n_done[0 as usize]) as u64, 0, 0)
+        return 1
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, (200 << 16) | 120, (W << 16) | H, (&s_title[0 as usize]) as u64, 0, fd + 1)
+    wlibc.shm_close(fd)
+    var sh: u64 = 0
+    if !ulib.bad(h) && h != 0 && wlibc.win_shared(h) {
+        sh = 1
+    }
+    line((&n_shared[0 as usize]) as u64, sh, 0)
+    paint(p, W, H)
+    let dmg: u64 = wlibc.win_damage(h, 0, 0, W, H)
+    line((&n_damage[0 as usize]) as u64, dmg, W * H)
+    let id: u64 = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
+
+    // 2. the window table page
+    let tfd: u64 = wlibc.sys3w(WM_TABLE, 0, 0, 0)
+    if ulib.bad(tfd) {
+        line((&n_tmagic[0 as usize]) as u64, 0, 1)
+    } else {
+        let t: u64 = mmap_fd(tfd, 4096, PROT_R)
+        if ulib.bad(t) || t == 0 {
+            line((&n_tmagic[0 as usize]) as u64, 0, 2)
+        } else {
+            let w0: u64 = __mmio_read64(t as *mut u64)
+            line((&n_tmagic[0 as usize]) as u64, w0 & 0xFFFFFFFF, w0 >> 32)
+            let seq: u64 = __mmio_read64((t + 8) as *mut u64)
+            line((&n_tseq[0 as usize]) as u64, seq & 1, seq)
+            let rows: u64 = __mmio_read64((t + 16) as *mut u64)
+            line((&n_trows[0 as usize]) as u64, rows, __mmio_read64((t + 48) as *mut u64))
+            // our row
+            var k: u64 = 0
+            var found: u64 = 0
+            while k < rows && k < 32 {
+                let r: u64 = t + (16 + k * 12) * 8
+                if (__mmio_read64(r as *mut u64) & 0xFFFFFFFF) == id {
+                    found = 1
+                    let own: u64 = __mmio_read64((r + 8) as *mut u64)
+                    let rw: u64 = __mmio_read64((r + 32) as *mut u64)
+                    let rh: u64 = __mmio_read64((r + 40) as *mut u64)
+                    line((&n_trow[0 as usize]) as u64, rw, rh)
+                    line((&n_tshm[0 as usize]) as u64, __mmio_read64((r + 72) as *mut u64), own)
+                }
+                k = k + 1
+            }
+            if found == 0 {
+                line((&n_trow[0 as usize]) as u64, 0, 0)
+            }
+        }
+        // a writable mapping of the table page must be refused
+        let tw: u64 = mmap_fd(tfd, 4096, PROT_RW)
+        line((&n_twr[0 as usize]) as u64, yes(ulib.bad(tw)), 0)
+    }
+
+    // 3. the buffer of our window through WM_BUFFD
+    let bfd: u64 = wlibc.sys3w(WM_BUFFD, id, 0, 0)
+    line((&n_bfd[0 as usize]) as u64, yes(!ulib.bad(bfd)), 0)
+    if !ulib.bad(bfd) {
+        let b: u64 = mmap_fd(bfd, bytes, PROT_R)
+        if !ulib.bad(b) && b != 0 {
+            var same: u64 = 0
+            var tot: u64 = 0
+            var y: u64 = 0
+            while y < H {
+                var x: u64 = 0
+                while x < W {
+                    tot = tot + 1
+                    if __mmio_read32((b + (y * W + x) * 4) as *mut u32) == __mmio_read32((p + (y * W + x) * 4) as *mut u32) {
+                        same = same + 1
+                    }
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            line((&n_bmatch[0 as usize]) as u64, same, tot)
+        }
+        let bw: u64 = mmap_fd(bfd, bytes, PROT_RW)
+        line((&n_bwr[0 as usize]) as u64, yes(ulib.bad(bw)), 0)
+    }
+
+    // 4. no leak: make, paint and close shared windows 20 times
+    let before: u64 = free_frames()
+    var c: u64 = 0
+    while c < 20 {
+        let q: u64 = wlibc.shm_buffer(bytes)
+        if q != 0 {
+            let qfd: u64 = wlibc.shm_last_fd()
+            let qh: u64 = wlibc.sys5(wlibc.WM_CREATE, (500 << 16) | 100, (W << 16) | H, (&s_title[0 as usize]) as u64, 0, qfd + 1)
+            wlibc.shm_close(qfd)
+            paint(q, 8, 8)
+            let _d: u64 = wlibc.win_damage(qh, 0, 0, 8, 8)
+            let _c: u64 = wlibc.sys3w(wlibc.WM_CLOSE, qh, 0, 0)
+            wlibc.shm_unmap(q, bytes)
+        }
+        c = c + 1
+    }
+    let after: u64 = free_frames()
+    line((&n_cyc[0 as usize]) as u64, c, 0)
+    // a positive number is frames that were not given back; the program's own page tables for the 20 mappings are given back too
+    var lost: u64 = 0
+    if before > after {
+        lost = before - after
+    }
+    line((&n_leak[0 as usize]) as u64, lost, before)
+
+    // 5. stay on the screen with the gradient: where does the client area begin?
+    let ox: u64 = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_X, 0) + wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_INX, 0)
+    let oy: u64 = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_Y, 0) + wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_INY, 0)
+    line((&n_at[0 as usize]) as u64, ox, oy)
+    line((&n_done[0 as usize]) as u64, 1, 0)
+    var t: u64 = 0
+    while t < 600 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    return 0
+}

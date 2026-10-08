@@ -206,7 +206,9 @@ BEREICHE = [
     ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),
     ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
     ("USHM",       "unixsock.fi", "USHM_OFF",    "USHM_MAX * USHM_BYTES"),
-    ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_MAX * SHM_PAGES_MAX * 8"),
+    ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
+    # COMPOSITOR S3: who maps which shared object (the reference of a mapping is given back by munmap and by the end of the task)
+    ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
     # Die zwei Arbeitsplaetze von `sys.fi` fuer den Weg zwischen Ring 3
     # und dem Ring des Sockets. Sie halten keinen Zustand ueber einen
     # Systemaufruf hinaus -- aber sie belegen kdata, also stehen sie hier.

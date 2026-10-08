@@ -165,7 +165,12 @@ fn now_ms() -> u64 {
 // (theme and fonts), so the bind below cannot fail for want of them.
 fn attach(w: u64, bw: u64, bh: u64) -> bool {
     let n: u64 = bw * bh * 4
-    let px: u64 = rt.heap_alloc(n as usize) as u64
+    // COMPOSITOR S3: when the window got a shared buffer (docs/COMPOSITOR.md), fUi paints INTO it: the window server composes from
+    // the very same frames and nothing is copied per frame. Otherwise the pixels are the program's own, as before.
+    var px: u64 = wlib.win_shared_ptr(w)
+    if px == 0 {
+        px = rt.heap_alloc(n as usize) as u64
+    }
     if px == 0 {
         ulib.say((&m_nobuf[0 as usize]) as u64)
         ulib.nl()
@@ -209,12 +214,21 @@ fn resize() -> bool {
         return false
     }
     let n: u64 = nw * nh * 4
-    let px: u64 = rt.heap_alloc(n as usize) as u64
+    let old: u64 = s_px
+    let oldn: u64 = s_w * s_h * 4
+    // COMPOSITOR S3: a shared window got a buffer of its own from the server when it was resized; a new shared one of the new size is
+    // attached (the old mapping goes with it), else the program's own pixels as before
+    let was_shared: bool = wlib.win_shared_ptr(s_win) != 0
+    var px: u64 = 0
+    if was_shared {
+        px = wlib.win_reshare(s_win, nw, nh)
+    }
+    if px == 0 {
+        px = rt.heap_alloc(n as usize) as u64
+    }
     if px == 0 {
         return false
     }
-    let old: u64 = s_px
-    let oldn: u64 = s_w * s_h * 4
     wlib.box_at(s_box, 0, 0, nw, nh)
     wlib.set_size(s_cv, nw, nh)
     wlib.canvas_set(s_cv, px, nw, nh, nw)
@@ -225,7 +239,7 @@ fn resize() -> bool {
     s_w = nw
     s_h = nh
     wlib.relayout()
-    if old != 0 {
+    if old != 0 && !was_shared {
         rt.heap_free(old, oldn as usize)
     }
     return true
@@ -234,7 +248,9 @@ fn resize() -> bool {
 // A frameless window (lock screen, login): `wlib.window_plain`.
 fn open_plain(x: u64, y: u64, bw: u64, bh: u64, title: u64,
     layer: u64) -> bool {
+    wlib.want_shared(true)
     let w: u64 = wlib.window_plain(x, y, bw, bh, title, layer)
+    wlib.want_shared(false)
     if w >= wlib.MAXWN {
         return false
     }
@@ -246,7 +262,9 @@ fn open_plain(x: u64, y: u64, bw: u64, bh: u64, title: u64,
 
 // An ordinary window with a frame: the canvas takes the client area.
 fn open_window(x: u64, y: u64, bw: u64, bh: u64, title: u64) -> bool {
+    wlib.want_shared(true)
     let w: u64 = wlib.window(x, y, bw, bh, title)
+    wlib.want_shared(false)
     if w >= wlib.MAXWN {
         return false
     }

@@ -122,6 +122,8 @@ export {
     // Pflichtpunkt 2 nicht gestellt werden.
     dlg_hinweis, dlg_wahl, dlg_wahl_at, DLG_MAXB,
     counts, blits_done, key_last,
+    // COMPOSITOR S3: windows that paint into a buffer the window server reads (no WIG_BLIT copy)
+    want_shared, win_shared_ptr, win_reshare,
     // RUNDE DESIGN-2: die Bewegung. Ein Programm braucht davon im
     // Regelfall NICHTS -- die Bibliothek bewegt selbst. Nach aussen
     // gehen die Zaehler (damit ein Testlaeufer eine Bewegung messen
@@ -661,6 +663,10 @@ const N_NDIRT: u64 = 7 // wie viele Rechtecke gerade schmutzig sind
 const N_OWNER: u64 = 11
 const N_X: u64 = 12
 const N_Y: u64 = 13
+// COMPOSITOR S3: a window whose pixels live in a buffer the window server composes from. N_SHP: its address in this program (0 = no,
+// the window copies with WIG_BLIT), N_SHB: its length in octets.
+const N_SHP: u64 = 8
+const N_SHB: u64 = 9
 const N_FIELDS: u64 = 14
 
 // Ein Kasten
@@ -1592,17 +1598,90 @@ fn win_layer(w: u64) -> u64 {
     return wlibc.sys3w(wlibc.WM_INFO, ng(w, N_H), wlibc.WI_LAYER, 0)
 }
 
+// COMPOSITOR S3: the NEXT windows are made with a shared buffer (the program turns it on around the call that opens a window that
+// paints into a canvas). A window that cannot get one (the kernel word `noshare`, no contiguous memory) is made as before.
+static mut s_want_shared: u64 = 0
+
+fn want_shared(on: bool) {
+    s_want_shared = 0
+    if on {
+        s_want_shared = 1
+    }
+}
+
+// the address of window `w`'s shared buffer in this program, 0 = it copies with WIG_BLIT
+fn win_shared_ptr(w: u64) -> u64 {
+    return ng(w, N_SHP)
+}
+
+// The window changed its size: its kernel buffer was taken back (the row length of the old width is wrong for the new one). A new buffer
+// of the new size is made and attached, the old mapping goes. Returns the new address, 0 = the window stays on the WIG_BLIT path
+// (and the caller allocates its own pixels).
+fn win_reshare(w: u64, nw: u64, nh: u64) -> u64 {
+    if w >= MAXWN || ng(w, N_H) == 0 || ng(w, N_SHP) == 0 {
+        return 0
+    }
+    let old: u64 = ng(w, N_SHP)
+    let oldb: u64 = ng(w, N_SHB)
+    let b: u64 = nw * nh * 4
+    let p: u64 = wlibc.shm_buffer(b)
+    if p == 0 {
+        wlibc.shm_unmap(old, oldb)
+        ns(w, N_SHP, 0)
+        ns(w, N_SHB, 0)
+        return 0
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let ok: bool = wlibc.win_setbuf(ng(w, N_H), fd)
+    wlibc.shm_close(fd)
+    wlibc.shm_unmap(old, oldb)
+    if !ok {
+        wlibc.shm_unmap(p, b)
+        ns(w, N_SHP, 0)
+        ns(w, N_SHB, 0)
+        return 0
+    }
+    ns(w, N_SHP, p)
+    ns(w, N_SHB, b)
+    return p
+}
+
 fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
     if nwn >= MAXWN {
         return MAXWN
     }
+    var shp: u64 = 0
+    var shb: u64 = 0
+    var shfd1: u64 = 0
+    if s_want_shared != 0 && w >= 32 && h >= 16 {
+        shb = w * h * 4
+        shp = wlibc.shm_buffer(shb)
+        if shp != 0 {
+            shfd1 = wlibc.shm_last_fd() + 1
+        }
+    }
     let hh: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h,
-        titel, 0, 0)
+        titel, 0, shfd1)
+    // the window holds the buffer and so does the mapping: the descriptor is not needed any more
+    if shfd1 != 0 {
+        wlibc.shm_close(shfd1 - 1)
+    }
     if ulib.bad(hh) || hh == 0 {
+        if shp != 0 {
+            wlibc.shm_unmap(shp, shb)
+        }
         return MAXWN
+    }
+    if shp != 0 && !wlibc.win_shared(hh) {
+        // the server gave the window a buffer of its own (noshare, or the run did not fit): this program copies as before
+        wlibc.shm_unmap(shp, shb)
+        shp = 0
+        shb = 0
     }
     let i: u64 = nwn
     nwn = nwn + 1
+    ns(i, N_SHP, shp)
+    ns(i, N_SHB, shb)
     ns(i, N_H, hh)
     ns(i, N_W, w)
     ns(i, N_HH, h)
@@ -1830,6 +1909,11 @@ fn close(w: u64) {
     }
     wlibc.sys3w(wlibc.WM_CLOSE, ng(w, N_H), 0, 0)
     ns(w, N_H, 0)
+    if ng(w, N_SHP) != 0 {
+        wlibc.shm_unmap(ng(w, N_SHP), ng(w, N_SHB))
+        ns(w, N_SHP, 0)
+        ns(w, N_SHB, 0)
+    }
     // Die Widgets dieses Fensters verschwinden mit ihm.
     var i: u64 = 0
     while i < nwd {
@@ -6976,6 +7060,15 @@ fn flush_win(w: u64) -> u64 {
 fn flush_rect(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
     if x1 <= x0 || y1 <= y0 {
         return 0
+    }
+    // COMPOSITOR S3: the canvas of this window IS the buffer the window server composes from. Nothing is copied: only the rectangle that
+    // changed is named. (While a drag is under way the drop target ring is painted over the strip: that frame takes the old way.)
+    if ng(w, N_SHP) != 0 && s_zugziel == 0 && s_zugwin == 0 && ng(w, N_KIND) != NK_MENU {
+        let r: u64 = wlibc.win_damage(ng(w, N_H), x0, y0, x1 - x0, y1 - y0)
+        if !ulib.bad(r) {
+            return (x1 - x0) * (y1 - y0)
+        }
+        // the server took the buffer back (the window was resized): copy this once, and the program attaches a new buffer
     }
     var gemalt: u64 = 0
     var yb: u64 = y0
