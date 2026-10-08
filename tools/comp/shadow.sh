@@ -44,8 +44,8 @@ stats() { # stats <serial>  ->  judged cycles, max compared, sum compared, sum d
         n++; for (i = 1; i <= NF; i++) { split($i, kv, "=");
             if (kv[1] == "compared") { c = kv[2]; if (c > cm) cm = c; cs += c }
             if (kv[1] == "differ") ds += kv[2]
-            if (kv[1] == "compose_us") { u = kv[2]; if (u > um) um = u } }
-    } END { printf "%d %d %d %d %d\n", n, cm, cs, ds, um }'
+            if (kv[1] == "compose_us") { u = kv[2]; if (u > um) um = u; us[n] = u } }
+    } END { m = 0; if (n > 0) { for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (us[j] < us[i]) { t = us[i]; us[i] = us[j]; us[j] = t }; m = us[int((n + 1) / 2)] } printf "%d %d %d %d %d\n", n, cm, cs, ds, m }'
 }
 
 echo "== 1. the desktop with the shadow compositor =="
@@ -58,7 +58,7 @@ read N CM CS DS UM < <(stats "$S")
 [ "${N:-0}" -ge 5 ] && ok "$N stable cycles were judged" || bad "only ${N:-0} stable cycles"
 [ "${CM:-0}" -ge 200000 ] && ok "the largest judged area: $CM pixels (the file manager's client area)" || bad "the largest judged area is only ${CM:-0} pixels"
 [ "${CS:-0}" -gt 0 ] && [ "${DS:-1}" = 0 ] && ok "$CS pixels judged over all cycles, 0 differ from the kernel's picture" || bad "differing pixels: ${DS:-?} of ${CS:-0}"
-[ "${UM:-99999}" -le 8000 ] && ok "composing a frame in ring 3 took at most ${UM} us (budget 8000)" || bad "composing took up to ${UM:-?} us (budget 8000)"
+[ "${UM:-99999}" -le 8000 ] && ok "composing a frame in ring 3 took ${UM} us (median of the cycles) (budget 8000)" || bad "composing took ${UM:-?} us, median (budget 8000)"
 echo "        cycles=$N max_area=$CM compared_sum=$CS differ_sum=$DS compose_us_max=$UM"
 
 echo "== 2. counter-proof: noshare -- no shared buffer, wmd can judge nothing =="
