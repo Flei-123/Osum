@@ -843,6 +843,58 @@ fn shm_fd(state: u64, me: u64, k: u64) -> u64 {
     return fd
 }
 
+// COMPOSITOR S5: WM_COMP (op, a, b). The window server does the work (wm.cp_*); this maps its answers to the system call's.
+fn comp_call(state: u64, me: u64, op: u64, a: u64, b: u64) -> u64 {
+    if op == sys.CP_ATTACH {
+        let r: u64 = wm.cp_attach(state, me)
+        if r == 0 {
+            return 0
+        }
+        if r == 1 {
+            return cap.err(cap.E_UNSUPPORTED)
+        }
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    if op == sys.CP_WAIT {
+        let r: u64 = wm.cp_wait(state, me, a, b)
+        if r == wm.CP_NOT {
+            return cap.err(cap.E_RIGHTS)
+        }
+        return r
+    }
+    if op == sys.CP_PRESENT {
+        let r: u64 = wm.cp_present(state, me)
+        if r == wm.CP_NOT {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if r == wm.CP_BUSY {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return r
+    }
+    if op == sys.CP_PAGE {
+        let k: u64 = wm.cp_page_object(state)
+        if k >= unixsock.USHM_MAX {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return shm_fd(state, me, k)
+    }
+    if op == sys.CP_DETACH {
+        let r: u64 = wm.cp_detach(state, me)
+        if r == wm.CP_NOT {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if r == wm.CP_BUSY {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return 0
+    }
+    if op == sys.CP_STAT {
+        return wm.cp_stat(state, a)
+    }
+    return cap.err(cap.E_INVALID)
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > sys.WM_MAXNR {
@@ -939,6 +991,13 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_INVALID)
         }
         return shm_fd(state, me, sh - 1)
+    }
+    // COMPOSITOR S5: the compositor in ring 3 (root only: it sees the pointer and shortcut keys, and it decides when a frame is shown)
+    if number == sys.WM_COMP {
+        if !perm.is_root(state, me) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        return comp_call(state, me, a0, a1, a2)
     }
     if number == sys.WM_LIST {
         return wm_list(state, me, a0, a1, a2)

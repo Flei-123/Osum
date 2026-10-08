@@ -90,6 +90,7 @@ import drv.snd.audio
 import fui.core
 import fui.region
 import fui.comp // docs/COMPOSITOR.md S2: the row loops (copy, mix, blur line) live in lib/fui/comp.fi
+import sched.sched // docs/COMPOSITOR.md S5: the compositor's wake-up (poll_kick_one / poll_sleep) and the watchdog's look at its task
 import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
 
 export {
@@ -97,7 +98,8 @@ export {
     trust_ask, trust_poll, trust_cancel,
     init, ready, compose, damage, damage_ex, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
-    create, create_ex, attach_buf, win_shm, damage_rect, tab_object, tab_publish, shared_ok, sh_stat, destroy, valid, count, focus, set_focus, raise_win,
+    create, create_ex, attach_buf, win_shm, damage_rect, tab_object, tab_publish, shared_ok, sh_stat,
+    cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, valid, count, focus, set_focus, raise_win,
     // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
     close_top, close_term, top_visible, cross_point, term_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
@@ -2931,6 +2933,7 @@ fn bild_say_reset(state: u64) {
         serial.dec(gs(state, S_BLURUS))
         serial.nl()
     }
+    cp_say_reset(state)
     // COMPOSITOR S3: what the clients' pixels cost since the last F12. `blitpx` are the pixels the kernel copied out of a client (WIG_BLIT),
     // `shpx` the pixels of shared windows that were named dirty WITHOUT a copy. Printed only once a shared window or a blit happened.
     if gs(state, S_BL_PX) != 0 || gs(state, S_SH_DMG) != 0 {
@@ -5839,6 +5842,525 @@ fn sh_stat(state: u64, k: u64) -> u64 {
     return gs(state, S_TAB_N)
 }
 
+// ===========================================================================================================================
+// COMPOSITOR S5 (docs/COMPOSITOR.md section 4): THE COMPOSITOR IN RING 3 TAKES THE SCAN-OUT, THE KERNEL KEEPS A WATCHDOG
+//
+// `wmd` (kernel/user/wmd.fi) attaches with WM_COMP. From then on `compose` still paints the whole picture into the draw target,
+// but it does NOT push it to the card: the finished rectangle is HANDED OVER (cp_hand) and the compositor is woken (cp_kick).
+// The compositor calls WM_COMP / CP_PRESENT, and only then does the card get the rectangle (cp_flush_locked) -- the card belongs to the
+// kernel, the decision WHEN a frame is shown belongs to ring 3. What stays in the kernel on purpose: the framebuffer and the flip, the
+// lock (while it stands the compositor gets no input and no key), the trusted dialog, and THE WATCHDOG:
+//
+//   * a rectangle that waits longer than CP_LIMIT_MS for the compositor is pushed to the card by the kernel (a MISS);
+//   * CP_MAXMISS misses in a row, or the death of the task, detach the compositor: the kernel presents every frame itself again,
+//     exactly as before S5 (that is the fall-back path, it is the old code);
+//   * the word `nowatch` switches the watchdog off (the counter-proof: a compositor that hangs then freezes the screen);
+//   * the word `nocomp` refuses the attach (the counter-proof: the kernel presents, the compositor's presents stay at 0).
+//
+// The INPUT COPY RING: the compositor needs pointer and key events for chrome (move, hover, Alt+Tab). The kernel keeps routing input
+// itself (`darf`, the lock) and writes a COPY into a read-only page (WM_COMP / CP_PAGE): pointer moves, button changes, and keys ONLY
+// while Alt or the Windows key is held (a shortcut) -- the code of an ordinary key is never copied, so a password typed into a window is
+// not seen. While the screen is locked or the trusted dialog is up NOTHING is copied.
+//
+// The compositor page (u64 words): 0 magic | version << 32, 1 attached (0 / 1), 2 events written (head), 3 events refused (lock / dialog),
+// 4 frames handed over, 5 frames presented, 6 a rectangle waits, 7..10 its x0 y0 x1 y1, 11 screen locked, 12 cycles per millisecond.
+// From word 16 a ring of CP_RING entries of 4 words: 0 type | mods << 8 | buttons << 16 | (index + 1) << 32, 1 x | y << 32, 2 key code,
+// 3 time stamp counter at the interrupt. A reader keeps its own tail; an entry is good when word 0 >> 32 == its index + 1 before and after.
+const CP_MAGIC: u64 = 0x504D4357
+const CP_LIMIT_MS: u64 = 50
+const CP_MAXMISS: u64 = 3
+const CP_RING: u64 = 64
+const CP_RING_AT: u64 = 16
+const CP_NOT: u64 = 0xFFFFFFFFFFFFFFFF // the caller is not the attached compositor
+const CP_BUSY: u64 = 0xFFFFFFFFFFFFFFFE // the compose lock did not come free in time: try again
+const CP_EV_MOVE: u64 = 1
+const CP_EV_BTN: u64 = 2
+const CP_EV_KEY: u64 = 3
+const S_CP_TASK: u64 = 0x1F00   // task index of the compositor + 1, 0 = none (the kernel presents)
+const S_CP_PID: u64 = 0x1F08    // its pid (the slot may be reused)
+const S_CP_FSEQ: u64 = 0x1F10   // frames handed over
+const S_CP_ASEQ: u64 = 0x1F18   // frames shown
+const S_CP_PEND: u64 = 0x1F20   // 1 = a rectangle waits for the card
+const S_CP_X0: u64 = 0x1F28
+const S_CP_Y0: u64 = 0x1F30
+const S_CP_X1: u64 = 0x1F38
+const S_CP_Y1: u64 = 0x1F40
+const S_CP_T0: u64 = 0x1F48     // time stamp counter when the oldest waiting rectangle was handed over
+const S_CP_IN0: u64 = 0x1F50    // time stamp counter of the first pointer movement not shown yet
+const S_CP_NEW: u64 = 0x1F58    // 1 = something was handed over since the last kick
+const S_CP_MISS: u64 = 0x1F60   // misses in a row
+const S_CP_NMISS: u64 = 0x1F68  // misses, running total (the watchdog pushed a frame)
+const S_CP_NDET: u64 = 0x1F70   // detaches, running total
+const S_CP_NATT: u64 = 0x1F78   // attaches, running total
+const S_CP_NPRES: u64 = 0x1F80  // frames the compositor showed
+const S_CP_NKP: u64 = 0x1F88    // frames the kernel showed itself (no compositor)
+const S_CP_NHAND: u64 = 0x1F90  // rectangles handed over
+const S_CP_PAGEF: u64 = 0x1F98  // the compositor page (frame address)
+const S_CP_PAGEI: u64 = 0x1FA0  // its shared object + 1
+const S_CP_HEAD: u64 = 0x1FA8   // events written
+const S_CP_EVREF: u64 = 0x1FB0  // events refused (lock, dialog)
+const S_CP_HOP: u64 = 0x1FB8    // hand-over to present, microseconds: n, sum, max (3 words)
+const S_CP_WLAT: u64 = 0x1FD0   // pointer interrupt to card, compositor path: n, sum, max
+const S_CP_KLAT: u64 = 0x1FE8   // the same, kernel path: n, sum, max
+
+fn cp_on(state: u64) -> bool {
+    return gs(state, S_CP_TASK) != 0
+}
+
+fn cp_lock(state: u64) -> bool {
+    let lk: u64 = state + kstate.WM_OFF + S_CLOCK
+    var n: u64 = 0
+    while n < 200000 {
+        let was: u64 = __atomic_swap(lk as *mut u64, 0 as u64, 1 as u64)
+        if was == 0 {
+            return true
+        }
+        n = n + 1
+    }
+    return false
+}
+
+fn cp_unlock(state: u64) {
+    arch.atomic_store(state + kstate.WM_OFF + S_CLOCK, 0)
+}
+
+// the compositor page: made at the first WM_COMP / CP_PAGE, read-only for everybody (SMF_RO)
+fn cp_page_object(state: u64) -> u64 {
+    if gs(state, S_CP_PAGEI) != 0 {
+        return gs(state, S_CP_PAGEI) - 1
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return unixsock.USHM_MAX
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        __mmio_write64((f + o * 8) as *mut u64, 0)
+        o = o + 1
+    }
+    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
+    if k >= unixsock.USHM_MAX {
+        mem.frame_free(state, f)
+        return unixsock.USHM_MAX
+    }
+    ss(state, S_CP_PAGEF, f)
+    ss(state, S_CP_PAGEI, k + 1)
+    tw(f, 0, CP_MAGIC | (1 << 32))
+    tw(f, 12, time.khz(state))
+    cp_sync(state)
+    return k
+}
+
+// the header words of the page (no sequence number: every word is a single aligned store)
+fn cp_sync(state: u64) {
+    let f: u64 = gs(state, S_CP_PAGEF)
+    if f == 0 {
+        return
+    }
+    var on: u64 = 0
+    if cp_on(state) {
+        on = 1
+    }
+    tw(f, 1, on)
+    tw(f, 3, gs(state, S_CP_EVREF))
+    tw(f, 4, gs(state, S_CP_FSEQ))
+    tw(f, 5, gs(state, S_CP_ASEQ))
+    tw(f, 6, gs(state, S_CP_PEND))
+    tw(f, 7, gs(state, S_CP_X0))
+    tw(f, 8, gs(state, S_CP_Y0))
+    tw(f, 9, gs(state, S_CP_X1))
+    tw(f, 10, gs(state, S_CP_Y1))
+    var lk: u64 = 0
+    if sperre_an(state) {
+        lk = 1
+    }
+    tw(f, 11, lk)
+}
+
+// the first pointer movement that has not reached the card yet (the start of the input-to-picture clock)
+fn cp_in(state: u64) {
+    if gs(state, S_CP_IN0) == 0 {
+        ss(state, S_CP_IN0, time.tsc())
+    }
+}
+
+fn cp_stat3(state: u64, at: u64, us: u64) {
+    ss(state, at, gs(state, at) + 1)
+    ss(state, at + 8, gs(state, at + 8) + us)
+    if us > gs(state, at + 16) {
+        ss(state, at + 16, us)
+    }
+}
+
+// the frame reached the card: close the clocks. `by_comp` says who put it there.
+fn cp_lat(state: u64, by_comp: bool) {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        ss(state, S_CP_IN0, 0)
+        return
+    }
+    let now: u64 = time.tsc()
+    let t0: u64 = gs(state, S_CP_IN0)
+    ss(state, S_CP_IN0, 0)
+    if t0 != 0 && now > t0 {
+        if by_comp {
+            cp_stat3(state, S_CP_WLAT, (now - t0) / (kh / 1000))
+        } else {
+            cp_stat3(state, S_CP_KLAT, (now - t0) / (kh / 1000))
+        }
+    }
+}
+
+// A finished rectangle (compose holds the lock): it waits for the compositor instead of going to the card.
+fn cp_hand(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if gs(state, S_CP_PEND) == 0 {
+        ss(state, S_CP_X0, x0)
+        ss(state, S_CP_Y0, y0)
+        ss(state, S_CP_X1, x1)
+        ss(state, S_CP_Y1, y1)
+        ss(state, S_CP_PEND, 1)
+        ss(state, S_CP_T0, time.tsc())
+    } else {
+        if x0 < gs(state, S_CP_X0) {
+            ss(state, S_CP_X0, x0)
+        }
+        if y0 < gs(state, S_CP_Y0) {
+            ss(state, S_CP_Y0, y0)
+        }
+        if x1 > gs(state, S_CP_X1) {
+            ss(state, S_CP_X1, x1)
+        }
+        if y1 > gs(state, S_CP_Y1) {
+            ss(state, S_CP_Y1, y1)
+        }
+    }
+    ss(state, S_CP_NEW, 1)
+    ss(state, S_CP_NHAND, gs(state, S_CP_NHAND) + 1)
+}
+
+// Wake the compositor, once per `compose`, after everything was handed over (lock held).
+fn cp_kick(state: u64) {
+    if gs(state, S_CP_TASK) == 0 || gs(state, S_CP_NEW) == 0 {
+        return
+    }
+    ss(state, S_CP_NEW, 0)
+    ss(state, S_CP_FSEQ, gs(state, S_CP_FSEQ) + 1)
+    cp_sync(state)
+    sched.poll_kick_one(state, gs(state, S_CP_TASK) - 1)
+}
+
+// Push the waiting rectangle to the card (lock held): the one place where a handed-over frame becomes visible. Returns its pixels.
+fn cp_flush_locked(state: u64, by_comp: bool) -> u64 {
+    if gs(state, S_CP_PEND) == 0 {
+        return 0
+    }
+    let x0: u64 = gs(state, S_CP_X0)
+    let y0: u64 = gs(state, S_CP_Y0)
+    let x1: u64 = gs(state, S_CP_X1)
+    let y1: u64 = gs(state, S_CP_Y1)
+    let t0: u64 = gs(state, S_CP_T0)
+    ss(state, S_CP_PEND, 0)
+    ss(state, S_CP_T0, 0)
+    var area: u64 = 0
+    if x1 > x0 && y1 > y0 {
+        if gs(state, S_VSYNC) != 0 {
+            // the same two ways `present` takes
+            if fb.flip_on(state) {
+                fb.flush_rect(state, 0, 0, gs(state, S_SW), gs(state, S_SH))
+                fb.flip(state)
+            } else {
+                fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+            }
+            ss(state, S_PRESENTS, gs(state, S_PRESENTS) + 1)
+            fb.frame_done(state)
+        } else {
+            fb.dirty(state, y0, y1)
+            fb.flush(state)
+        }
+        area = (x1 - x0) * (y1 - y0)
+        ss(state, S_PXSUM, gs(state, S_PXSUM) +% area)
+    }
+    ss(state, S_CP_ASEQ, gs(state, S_CP_FSEQ))
+    if by_comp {
+        let kh: u64 = time.khz(state)
+        let now: u64 = time.tsc()
+        if kh >= 1000 && t0 != 0 && now > t0 {
+            cp_stat3(state, S_CP_HOP, (now - t0) / (kh / 1000))
+        }
+        ss(state, S_CP_NPRES, gs(state, S_CP_NPRES) + 1)
+    }
+    cp_lat(state, by_comp)
+    cp_sync(state)
+    return area
+}
+
+fn cp_detach_locked(state: u64, why: u64) {
+    if gs(state, S_CP_TASK) == 0 {
+        return
+    }
+    var s_cd: [u8; 29] = "wm: compositor detached why=\0"
+    serial.puts((&s_cd[0]) as u64)
+    serial.dec(why)
+    serial.nl()
+    // whatever waits goes to the card now; from the next frame on the kernel presents itself
+    let _px: u64 = cp_flush_locked(state, false)
+    ss(state, S_CP_TASK, 0)
+    ss(state, S_CP_PID, 0)
+    ss(state, S_CP_NDET, gs(state, S_CP_NDET) + 1)
+    cp_sync(state)
+}
+
+// THE WATCHDOG (compose calls it with the lock held, at the start of every run, and the desktop loop runs `compose` all the time):
+// a dead compositor is detached at once; a rectangle that waits longer than CP_LIMIT_MS is pushed by the kernel.
+fn cp_watch(state: u64) {
+    let tk: u64 = gs(state, S_CP_TASK)
+    if tk == 0 {
+        return
+    }
+    let idx: u64 = tk - 1
+    let st: u64 = sched.tget(state, idx, sched.T_STATE)
+    if st == sched.S_ZOMBIE || st == sched.S_FREE || sched.tget(state, idx, sched.T_PID) != gs(state, S_CP_PID) {
+        cp_detach_locked(state, 1)
+        return
+    }
+    if fb.nowatch_an(state) {
+        return
+    }
+    if gs(state, S_CP_PEND) == 0 {
+        return
+    }
+    let kh: u64 = time.khz(state)
+    let t0: u64 = gs(state, S_CP_T0)
+    let now: u64 = time.tsc()
+    if kh >= 1000 && t0 != 0 && now > t0 && (now - t0) / kh >= CP_LIMIT_MS {
+        let _px: u64 = cp_flush_locked(state, false)
+        ss(state, S_CP_NMISS, gs(state, S_CP_NMISS) + 1)
+        ss(state, S_CP_MISS, gs(state, S_CP_MISS) + 1)
+        if gs(state, S_CP_MISS) >= CP_MAXMISS {
+            cp_detach_locked(state, 2)
+        }
+    }
+}
+
+// WM_COMP / CP_ATTACH. 0 = attached, 1 = refused (`nocomp`), 2 = another live compositor is attached, 3 = busy.
+fn cp_attach(state: u64, me: u64) -> u64 {
+    if fb.nocomp_an(state) {
+        return 1
+    }
+    if !cp_lock(state) {
+        return 3
+    }
+    let cur: u64 = gs(state, S_CP_TASK)
+    if cur != 0 && cur != me + 1 {
+        let idx: u64 = cur - 1
+        let st: u64 = sched.tget(state, idx, sched.T_STATE)
+        if st != sched.S_ZOMBIE && st != sched.S_FREE && sched.tget(state, idx, sched.T_PID) == gs(state, S_CP_PID) {
+            cp_unlock(state)
+            return 2
+        }
+        cp_detach_locked(state, 1)
+    }
+    ss(state, S_CP_TASK, me + 1)
+    ss(state, S_CP_PID, sched.tget(state, me, sched.T_PID))
+    ss(state, S_CP_MISS, 0)
+    ss(state, S_CP_NATT, gs(state, S_CP_NATT) + 1)
+    cp_sync(state)
+    cp_unlock(state)
+    // a first complete frame for the new compositor to show
+    damage_all(state)
+    return 0
+}
+
+fn cp_detach(state: u64, me: u64) -> u64 {
+    if gs(state, S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    if !cp_lock(state) {
+        return CP_BUSY
+    }
+    cp_detach_locked(state, 3)
+    cp_unlock(state)
+    return 0
+}
+
+// WM_COMP / CP_PRESENT: show what waits. Returns the pixels (0 = nothing waited).
+fn cp_present(state: u64, me: u64) -> u64 {
+    if gs(state, S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    if !cp_lock(state) {
+        return CP_BUSY
+    }
+    var px: u64 = 0
+    if gs(state, S_CP_TASK) == me + 1 {
+        px = cp_flush_locked(state, true)
+        if px != 0 {
+            ss(state, S_CP_MISS, 0)
+        }
+    }
+    cp_unlock(state)
+    return px
+}
+
+// WM_COMP / CP_WAIT: sleep until a frame newer than `seen` was handed over, for at most `ms`. Returns the number of the newest frame.
+// The wake-up is the one `poll` uses: the sequence is read BEFORE the look, `poll_sleep` sleeps only if it has not moved.
+fn cp_wait(state: u64, me: u64, seen: u64, ms: u64) -> u64 {
+    if gs(state, S_CP_TASK) != me + 1 {
+        return CP_NOT
+    }
+    let ps: u64 = sched.poll_seq(state)
+    if gs(state, S_CP_FSEQ) != seen {
+        return gs(state, S_CP_FSEQ)
+    }
+    sched.poll_sleep(state, ps, kstate.get(state, kstate.TICKS) + ms / 10 + 1)
+    return gs(state, S_CP_FSEQ)
+}
+
+// the input copy: see the header. `a`, `b`, `c` as in the page description.
+fn cp_event(state: u64, typ: u64, mods: u64, btn: u64, x: u64, y: u64, code: u64) {
+    let f: u64 = gs(state, S_CP_PAGEF)
+    if f == 0 || gs(state, S_CP_TASK) == 0 {
+        return
+    }
+    if sperre_an(state) || td_live(state) {
+        ss(state, S_CP_EVREF, gs(state, S_CP_EVREF) + 1)
+        return
+    }
+    let h: u64 = gs(state, S_CP_HEAD)
+    let at: u64 = CP_RING_AT + (h % CP_RING) * 4
+    tw(f, at + 1, x | (y << 32))
+    tw(f, at + 2, code)
+    tw(f, at + 3, time.tsc())
+    tw(f, at, typ | (mods << 8) | (btn << 16) | ((h + 1) << 32))
+    ss(state, S_CP_HEAD, h + 1)
+    arch.atomic_store(f + 16, h + 1)
+}
+
+// the modifiers that make a key a shortcut (Alt or the Windows key): 1 = shortcut
+fn cp_shortcut(state: u64) -> u64 {
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) != 0 || kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn cp_stat(state: u64, k: u64) -> u64 {
+    if k == 0 {
+        return gs(state, S_CP_NATT)
+    }
+    if k == 1 {
+        return gs(state, S_CP_NDET)
+    }
+    if k == 2 {
+        return gs(state, S_CP_NMISS)
+    }
+    if k == 3 {
+        return gs(state, S_CP_NPRES)
+    }
+    if k == 4 {
+        return gs(state, S_CP_NKP)
+    }
+    if k == 5 {
+        return gs(state, S_CP_NHAND)
+    }
+    if k == 6 {
+        return gs(state, S_CP_HEAD)
+    }
+    if k == 7 {
+        return gs(state, S_CP_EVREF)
+    }
+    return 0
+}
+
+// F12: one line, only when a compositor ever attached or the word `phases` is on (the input-to-picture clock of the kernel path is wanted there).
+fn cp_say_reset(state: u64) {
+    if gs(state, S_CP_NATT) == 0 && !fb.phases_an(state) {
+        return
+    }
+    var s_c0: [u8; 13] = "wm: comp on=\0"
+    var s_c1: [u8; 6] = " att=\0"
+    var s_c2: [u8; 6] = " det=\0"
+    var s_c3: [u8; 7] = " miss=\0"
+    var s_c4: [u8; 7] = " hand=\0"
+    var s_c5: [u8; 7] = " pres=\0"
+    var s_c6: [u8; 8] = " kpres=\0"
+    var s_c7: [u8; 5] = " ev=\0"
+    var s_c8: [u8; 8] = " evref=\0"
+    var s_h0: [u8; 7] = " hopn=\0"
+    var s_h1: [u8; 9] = " hopavg=\0"
+    var s_h2: [u8; 9] = " hopmax=\0"
+    var s_w0: [u8; 8] = " wlatn=\0"
+    var s_w1: [u8; 10] = " wlatavg=\0"
+    var s_w2: [u8; 10] = " wlatmax=\0"
+    var s_k0: [u8; 8] = " klatn=\0"
+    var s_k1: [u8; 10] = " klatavg=\0"
+    var s_k2: [u8; 10] = " klatmax=\0"
+    serial.puts((&s_c0[0]) as u64)
+    if cp_on(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_c1[0]) as u64)
+    serial.dec(gs(state, S_CP_NATT))
+    serial.puts((&s_c2[0]) as u64)
+    serial.dec(gs(state, S_CP_NDET))
+    serial.puts((&s_c3[0]) as u64)
+    serial.dec(gs(state, S_CP_NMISS))
+    serial.puts((&s_c4[0]) as u64)
+    serial.dec(gs(state, S_CP_NHAND))
+    serial.puts((&s_c5[0]) as u64)
+    serial.dec(gs(state, S_CP_NPRES))
+    serial.puts((&s_c6[0]) as u64)
+    serial.dec(gs(state, S_CP_NKP))
+    serial.puts((&s_c7[0]) as u64)
+    serial.dec(gs(state, S_CP_HEAD))
+    serial.puts((&s_c8[0]) as u64)
+    serial.dec(gs(state, S_CP_EVREF))
+    var n: u64 = gs(state, S_CP_HOP)
+    serial.puts((&s_h0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_h1[0]) as u64)
+    if n != 0 {
+        serial.dec(gs(state, S_CP_HOP + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_h2[0]) as u64)
+    serial.dec(gs(state, S_CP_HOP + 16))
+    n = gs(state, S_CP_WLAT)
+    serial.puts((&s_w0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_w1[0]) as u64)
+    if n != 0 {
+        serial.dec(gs(state, S_CP_WLAT + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_w2[0]) as u64)
+    serial.dec(gs(state, S_CP_WLAT + 16))
+    n = gs(state, S_CP_KLAT)
+    serial.puts((&s_k0[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_k1[0]) as u64)
+    if n != 0 {
+        serial.dec(gs(state, S_CP_KLAT + 8) / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_k2[0]) as u64)
+    serial.dec(gs(state, S_CP_KLAT + 16))
+    serial.nl()
+    // the clocks start again for the next phase; the totals above (att, det, miss, hand, pres, kpres, ev) are running
+    var z: u64 = 0
+    while z < 3 {
+        ss(state, S_CP_HOP + z * 8, 0)
+        ss(state, S_CP_WLAT + z * 8, 0)
+        ss(state, S_CP_KLAT + z * 8, 0)
+        z = z + 1
+    }
+}
+
 fn flush_win(state: u64, i: u64) {
     if !valid(state, i) {
         return
@@ -6386,6 +6908,13 @@ fn present(state: u64) -> u64 {
     if x1 <= x0 || y1 <= y0 {
         return 0
     }
+    // COMPOSITOR S5: with a compositor the rectangle is handed over, the compositor shows it
+    if cp_on(state) && cp_lock(state) {
+        cp_hand(state, x0, y0, x1, y1)
+        cp_kick(state)
+        cp_unlock(state)
+        return (x1 - x0) * (y1 - y0)
+    }
     // `flush_rect` statt `flush`: nur die Spalten, die wirklich
     // schmutzig waren. `flush` haette die ganze Bildbreite genommen,
     // weil es nur Zeilen kennt.
@@ -6738,8 +7267,10 @@ fn compose(state: u64) -> u64 {
     if alt != 0 {
         return 0
     }
+    cp_watch(state)
     tab_publish(state)
     let r: u64 = compose_one(state)
+    cp_kick(state)
     arch.atomic_store(lk, 0)
     return r
 }
@@ -6906,9 +7437,14 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
     if gs(state, S_VSYNC) != 0 {
         pend_add(state, x0, y0, x1, y1)
         ss(state, S_SKIPPED, gs(state, S_SKIPPED) + 1)
+    } else if cp_on(state) {
+        // COMPOSITOR S5: the finished rectangle waits for the compositor in ring 3 (the watchdog pushes it when it takes too long)
+        cp_hand(state, x0, y0, x1, y1)
     } else {
         fb.dirty(state, y0, y1)
         fb.flush(state)
+        ss(state, S_CP_NKP, gs(state, S_CP_NKP) + 1)
+        cp_lat(state, false)
     }
     ph_add(state, S_PH_PEND, ph_d, time.tsc())
     return (x1 - x0) * (y1 - y0)
@@ -11737,6 +12273,8 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
 // Der Zeiger hat sich bewegt oder eine Taste gewechselt. Wird aus der
 // Unterbrechungsbehandlung heraus gerufen; alles, was hier passiert,
 // muss ohne Warten auskommen.
+static mut cp_pb: u64 = 0 // COMPOSITOR S5: the buttons of the last report (a change is an event for the compositor)
+
 fn on_mouse(state: u64) {
     if !ready(state) {
         return
@@ -11746,6 +12284,17 @@ fn on_mouse(state: u64) {
     let ox: u64 = gs(state, S_CURX)
     let oy: u64 = gs(state, S_CURY)
     let btn: u64 = ps2m.buttons(state)
+    // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
+    if nx != ox || ny != oy {
+        if !hwcur_an(state) {
+            cp_in(state)
+        }
+        cp_event(state, CP_EV_MOVE, 0, btn, nx, ny, 0)
+    }
+    if btn != cp_pb {
+        cp_pb = btn
+        cp_event(state, CP_EV_BTN, 0, btn, nx, ny, 0)
+    }
     if nx != ox || ny != oy {
         // DIE WIEDERHERSTELLUNG DES HINTERGRUNDS. Beide Rechtecke --
         // das alte und das neue -- werden schmutzig; `compose` malt
@@ -12616,6 +13165,12 @@ fn on_key(state: u64, c: u64) {
     }
     // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
     ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
+    // COMPOSITOR S5: the compositor sees THAT a key came, and its code only while Alt or the Windows key is held (a shortcut)
+    if cp_shortcut(state) != 0 {
+        cp_event(state, CP_EV_KEY, 1, 0, 0, 0, c)
+    } else {
+        cp_event(state, CP_EV_KEY, 0, 0, 0, 0, 0)
+    }
     // ================================================ RUNDE WMPLUGIN
     // ERST DAS PLUGIN, DANN DAS FENSTER -- und zwar in dieser Reihe.
     //
