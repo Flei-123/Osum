@@ -105,7 +105,7 @@ python3 "$TREE/tools/osum/mkfs.py" build "$T/d.img" 16384 \
     "/bin/chmod=$T/w0/chmod.elf" "/bin/jsig=$T/w0/jsig.elf" "/bin/jarvisctl=$T/w0/jarvisctl.elf" \
     "/bin/jarvisd=$T/w0/jarvisd.elf" "/bin/ps=$T/w0/ps.elf" "/bin/sleep=$T/w0/sleep.elf" "/bin/kill=$T/w0/kill.elf" \
     "/etc/jarvis/permissions.conf=$T/permissions.conf" \
-    "/etc/jarvis/geraet.key=$T/geraet.key@600" \
+    "/etc/jarvis/device.key=$T/geraet.key@600" \
     "/etc/ssl/roots.pem=$T/certs/ca.pem" \
     "/etc/resolv.conf=$T/resolv.conf" \
     "/t/s.sh=$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail -5 "$T/mkfs.txt"; echo "STABNET: mkfs failed"; exit 1; }
