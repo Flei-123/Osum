@@ -33,9 +33,9 @@ warte 40
 taste f12
 warte 3
 DREH
-run() { # run <name> <extra words>
+run() { # run <name> <extra words> [capture argument]
     bash tools/design/capture.sh "$D/$1" uitrace=yes accel=kvm drehbuch="$D/dreh.txt" \
-        "extra=wigapp=/bin/wmd wighalt=150 $2" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" \
+        "extra=wigapp=/bin/wmd wighalt=150 $2" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" ${3:+"$3"} \
         > "$D/$1.log" 2>&1
     grep -a "FEHLGESCHLAGEN" "$D/$1.log" | head -3
 }
@@ -49,7 +49,7 @@ stats() { # stats <serial>  ->  judged cycles, max compared, sum compared, sum d
 }
 
 echo "== 1. the desktop with the shadow compositor =="
-run shd ""
+run shd "" window_alpha=100
 S="$D/shd/serial.txt"
 grep -a '^wmd:' "$S" | sed 's/^/        /' | head -60
 grep -aq '^wmd: ' "$S" || { echo "        (no wmd line; capture log tail:)"; tail -n 12 "$D/shd.log" | sed 's/^/        /'; grep -a "desk:\|wmd\|exec\|spawn\|fault\|page" "$S" | head -20 | cut -c1-200 | sed 's/^/        D: /'; grep -a "wmd\|ELF\|elf\|error\|Error" "$D/shd.log" | head -10 | cut -c1-200 | sed 's/^/        L: /'; }
@@ -62,7 +62,7 @@ read N CM CS DS UM < <(stats "$S")
 echo "        cycles=$N max_area=$CM compared_sum=$CS differ_sum=$DS compose_us_max=$UM"
 
 echo "== 2. counter-proof: noshare -- no shared buffer, wmd can judge nothing =="
-run nsh "noshare"
+run nsh "noshare" window_alpha=100
 S2="$D/nsh/serial.txt"
 read N2 CM2 CS2 DS2 UM2 < <(stats "$S2")
 echo "        cycles=$N2 max_area=$CM2 compared_sum=$CS2 differ_sum=$DS2"
