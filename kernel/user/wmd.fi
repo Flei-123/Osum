@@ -72,6 +72,26 @@ static mut scr_h: u64 = 0
 static mut pitch: u64 = 0
 static mut bpp: u64 = 4
 
+// S6a: the window shadow, the same numbers and the same integer arithmetic as `shadow_build` / `shadow_mask` in wm.fi. The corner square holds two
+// banks (focused window, other windows) of SH_SIDE x SH_SIDE octets, the straight edges two strips of SH_MAX octets.
+const SH_SIDE: u64 = 40
+const SH_MAX: u64 = 16
+static mut sh_corner: [u8; 3200] = [0 as u8; 3200]
+static mut sh_edge: [u8; 32] = [0 as u8; 32]
+static mut sh_side: u64 = 0
+static mut sh_k8: u64 = 0 // the table words 8 and 9 the tables were built from (0 = never)
+static mut sh_k9: u64 = 0
+static mut sh_px: u64 = 0 // pixels the shadow blended in this cycle
+// the rectangle the kernel repaints when a window is damaged (`damage_win_ex`: the outer rectangle grown by the larger reach, one point more at the
+// right and bottom): the kernel paints the shadow only inside it, so only inside it can the shadow be judged
+static mut sh_cx0: i64 = 0
+static mut sh_cy0: i64 = 0
+static mut sh_cx1: i64 = 0
+static mut sh_cy1: i64 = 0
+static mut geo_done: u64 = 0 // key of the focused window's geometry last printed as a shadow-geo line
+static mut sh_win: u64 = 0 // windows whose shadow was composed in this cycle
+static mut o_noshadow: u64 = 0 // counter-proof: judge the shadow ring but do NOT compose it (the judge must then see differences)
+
 static mut s_w: [u8; 6] = "wmd: \0"
 static mut s_dev: [u8; 8] = "/dev/fb\0"
 
@@ -247,6 +267,195 @@ fn set_mask_rect(x0: i64, y0: i64, x1: i64, y1: i64) {
     mask_rect(x0, y0, x1, y1, 1)
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------
+// S6a -- THE WINDOW SHADOW IN RING 3
+//
+// `shadow_ramp` / `shadow_build` / `shadow_mask` of kernel/ui/wm.fi, line by line in the same integers. The table page (words 8 and 9) carries
+// the numbers the kernel builds its mask from.
+
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n
+    }
+    var x: u64 = n
+    var y: u64 = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn sh_ramp(strength: u64, reach: u64, d16: u64) -> u64 {
+    let full: u64 = reach * 16 + 16
+    if d16 == 0 || d16 >= full {
+        return 0
+    }
+    return strength * 255 / 100 * (full - d16) / full
+}
+
+// build the tables from the table page words (only when they changed)
+fn sh_build(w8: u64, w9: u64) {
+    if sh_k8 == w8 && sh_k9 == w9 && sh_side != 0 {
+        return
+    }
+    let a1: u64 = w8 & 0xFF
+    var r1: u64 = (w8 >> 8) & 0xFF
+    let a2: u64 = (w8 >> 16) & 0xFF
+    var r2: u64 = (w8 >> 24) & 0xFF
+    let r: u64 = (w8 >> 32) & 0xFF
+    if r1 > SH_MAX {
+        r1 = SH_MAX
+    }
+    if r2 > SH_MAX {
+        r2 = SH_MAX
+    }
+    var rmax: u64 = r1
+    if r2 > rmax {
+        rmax = r2
+    }
+    var side: u64 = r + rmax
+    if side > SH_SIDE {
+        side = SH_SIDE
+    }
+    var k: u64 = 0
+    while k < SH_MAX {
+        var v1: u64 = 0
+        var v2: u64 = 0
+        if k < r1 {
+            v1 = sh_ramp(a1, r1, (k + 1) * 16)
+        }
+        if k < r2 {
+            v2 = sh_ramp(a2, r2, (k + 1) * 16)
+        }
+        sh_edge[k as usize] = v1 as u8
+        sh_edge[(SH_MAX + k) as usize] = v2 as u8
+        k = k + 1
+    }
+    let bank: u64 = SH_SIDE * SH_SIDE
+    var j: u64 = 0
+    while j < side {
+        var ii: u64 = 0
+        while ii < side {
+            let dx: u64 = side - ii
+            let dy: u64 = side - j
+            let dist16: u64 = isqrt((dx * dx + dy * dy) * 256)
+            var d16: u64 = 0
+            if dist16 > r * 16 {
+                d16 = dist16 - r * 16
+            }
+            let o: u64 = j * SH_SIDE + ii
+            sh_corner[o as usize] = sh_ramp(a1, r1, d16) as u8
+            sh_corner[(bank + o) as usize] = sh_ramp(a2, r2, d16) as u8
+            ii = ii + 1
+        }
+        j = j + 1
+    }
+    sh_side = side
+    sh_k8 = w8
+    sh_k9 = w9
+}
+
+// `color` over the picture pixel at (x, y) with the opacity `a`; a pixel the client left clear or translucent is not touched (the server paints
+// something else there, it is not judged either). The result keeps alpha 255.
+fn sh_mix(x: i64, y: i64, color: u64, a: u64) {
+    if a == 0 || x < sh_cx0 || y < sh_cy0 || x >= sh_cx1 || y >= sh_cy1 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
+        return
+    }
+    let p: u64 = (&sb[0 as usize]) as u64 + (y as u64 * scr_w + x as u64) * 4
+    let old: u64 = __mmio_read32(p as *mut u32) as u64
+    if (old >> 24) != 255 {
+        return
+    }
+    var v: u64 = color
+    if a < 255 {
+        v = comp.blend(old & 16777215, color, a)
+    }
+    __mmio_write32(p as *mut u32, (v | 4278190080) as u32)
+    sh_px = sh_px + 1
+}
+
+// a run of `n` pixels from (x, y) to the right, the opacity read from the octets at `m` (step +1 or -1)
+fn sh_run_mask(x: i64, y: i64, n: i64, color: u64, m0: u64, step: i64) {
+    var m: u64 = m0
+    var k: i64 = 0
+    while k < n {
+        sh_mix(x + k, y, color, (sh_corner_at(m)))
+        if step < 0 {
+            m = m - 1
+        } else {
+            m = m + 1
+        }
+        k = k + 1
+    }
+}
+
+fn sh_corner_at(m: u64) -> u64 {
+    return rd8(m)
+}
+
+fn sh_run_edge(x: i64, y: i64, n: i64, color: u64, a: u64) {
+    if a == 0 {
+        return
+    }
+    var k: i64 = 0
+    while k < n {
+        sh_mix(x + k, y, color, a)
+        k = k + 1
+    }
+}
+
+// the shadow of one window: outer rectangle (wx, wy, ow, oh), reach and bank as the kernel chose them (bank 0 = the focused window)
+fn sh_window(wx: i64, wy: i64, ow: i64, oh: i64, reach: u64, bank: u64, color: u64, r: u64) {
+    let side: u64 = sh_side
+    if side == 0 || reach == 0 {
+        return
+    }
+    let base: u64 = (&sh_corner[0 as usize]) as u64 + bank * SH_SIDE * SH_SIDE
+    let ebase: u64 = (&sh_edge[0 as usize]) as u64 + bank * SH_MAX
+    let sy: i64 = wy + 1
+    let si: i64 = side as i64
+    let ri: i64 = r as i64
+    let rc: i64 = reach as i64
+    let lx: i64 = wx - rc
+    let rx: i64 = wx + ow - ri
+    let mx: i64 = wx + ri
+    let mw: i64 = ow - 2 * ri
+    let my: i64 = sy + ri
+    let mh: i64 = oh - 2 * ri
+    var j: i64 = 0
+    while j < si {
+        let y: i64 = sy - rc + j
+        let m: u64 = base + (j * SH_SIDE as i64) as u64
+        sh_run_mask(lx, y, si, color, m, 1)
+        sh_run_mask(rx, y, si, color, m + (side - 1), 0 - 1)
+        if j < rc && mw > 0 {
+            sh_run_edge(mx, y, mw, color, rd8(ebase + (rc - 1 - j) as u64))
+        }
+        j = j + 1
+    }
+    j = 0
+    while j < si {
+        let y: i64 = sy + oh + rc - 1 - j
+        let m: u64 = base + (j * SH_SIDE as i64) as u64
+        sh_run_mask(lx, y, si, color, m, 1)
+        sh_run_mask(rx, y, si, color, m + (side - 1), 0 - 1)
+        if j < rc && mw > 0 {
+            sh_run_edge(mx, y, mw, color, rd8(ebase + (rc - 1 - j) as u64))
+        }
+        j = j + 1
+    }
+    if mh > 0 && rc > 0 {
+        var q: i64 = 0
+        while q < mh {
+            let y: i64 = my + q
+            sh_run_mask(wx - rc, y, rc, color, ebase + (reach - 1), 0 - 1)
+            sh_run_mask(wx + ow, y, rc, color, ebase, 1)
+            q = q + 1
+        }
+    }
+}
+
 // One cycle. Returns 0 = judged, 1 = the screen or the table moved (thrown away), 2 = could not look. Fills the counters.
 static mut c_win: u64 = 0
 static mut c_plain: u64 = 0
@@ -258,6 +467,11 @@ static mut c_fy: u64 = 0
 static mut smp: [u64; 64] = [0 as u64; 64] // sample of 16 differing pixels: x, y, screen, ours
 static mut smp_n: u64 = 0
 static mut c_na: u64 = 0 // judged-area pixels the client left clear or translucent (not compared)
+static mut c_bx0: u64 = 0
+static mut c_by0: u64 = 0
+static mut c_bx1: u64 = 0
+static mut c_by1: u64 = 0
+static mut c_lt: u64 = 0 // differing pixels where the screen is lighter than ours
 static mut c_sv: u64 = 0 // the screen's pixel and ours at the first difference (for the log)
 static mut c_bv: u64 = 0
 
@@ -311,6 +525,8 @@ fn cycle(t: u64) -> u64 {
     }
     fill8((&mask[0 as usize]) as u64, 0, scr_w * scr_h)
     c_plain = 0
+    sh_px = 0
+    sh_win = 0
     var oi: u64 = 0
     while oi < n && oi < MAXWIN {
         let k: u64 = order[oi as usize]
@@ -329,8 +545,74 @@ fn cycle(t: u64) -> u64 {
         // whatever stands here is covered by this window (and by its shadow): nothing below it can be judged
         // a hidden window (the start menu, the search, the toast ... waiting at 0,0) puts nothing on the screen: it neither covers nor paints
         let hidden: u64 = tab1[(r + 7) as usize] & 1
+        // S6a: a plain framed window whose shadow numbers are on the table page: the shadow is composed here, so only the window itself is
+        // taken out of the judged area (frame and title bar are not composed yet); everything else keeps the 48 points of margin
+        let shadowed: u64 = (tab1[(r + 11) as usize] >> 33) & 1
+        var sh_ok: bool = false
+        if hidden == 0 && plain == 1 && shadowed == 1 && (tab1[9] & (1 << 32)) != 0 && (tab1[9] & (1 << 33)) == 0 {
+            sh_ok = true
+        }
         if hidden == 0 {
-            clear_mask_rect(x - SHADOW as i64, y - SHADOW as i64, x + ow + SHADOW as i64, y + oh + SHADOW as i64)
+            if sh_ok {
+                // the damage rectangle of the kernel: what lies outside it keeps whatever an earlier repaint left there (the shadow is only
+                // painted inside the rectangle), so the ring outside is not judged; inside it, only the window itself is taken out
+                var rr: i64 = ((tab1[8] >> 8) & 0xFF) as i64
+                let rr2: i64 = ((tab1[8] >> 24) & 0xFF) as i64
+                if rr2 > rr {
+                    rr = rr2
+                }
+                if rr > SH_MAX as i64 {
+                    rr = SH_MAX as i64
+                }
+                sh_cx0 = imax(x - rr, 0)
+                sh_cy0 = imax(y - rr, 0)
+                sh_cx1 = x + ow + rr + 1
+                sh_cy1 = y + oh + rr + 1
+                let ex: i64 = SHADOW as i64
+                clear_mask_rect(x - ex, y - ex, x + ow + ex, sh_cy0)
+                clear_mask_rect(x - ex, sh_cy1, x + ow + ex, y + oh + ex)
+                clear_mask_rect(x - ex, sh_cy0, sh_cx0, sh_cy1)
+                clear_mask_rect(sh_cx1, sh_cy0, x + ow + ex, sh_cy1)
+                clear_mask_rect(x, y, x + ow, y + oh)
+            } else {
+                clear_mask_rect(x - SHADOW as i64, y - SHADOW as i64, x + ow + SHADOW as i64, y + oh + SHADOW as i64)
+            }
+        }
+        if sh_ok {
+            sh_build(tab1[8], tab1[9])
+            var bank: u64 = 1
+            var reach: u64 = (tab1[8] >> 24) & 0xFF
+            var strength: u64 = (tab1[8] >> 16) & 0xFF
+            if id == tab1[4] {
+                bank = 0
+                reach = (tab1[8] >> 8) & 0xFF
+                strength = tab1[8] & 0xFF
+            }
+            if reach > SH_MAX {
+                reach = SH_MAX
+            }
+            if strength != 0 && o_noshadow == 0 {
+                sh_win = sh_win + 1
+                sh_window(x, y, ow, oh, reach, bank, tab1[9] & 16777215, (tab1[8] >> 32) & 0xFF)
+                // the geometry of the focused window's shadow, whenever it changes, for the gate (tools/comp/shadow.sh checks the picture just below it)
+                let gk: u64 = (x as u64 & 0xFFFF) | ((y as u64 & 0xFFFF) << 16) | ((ow as u64 & 0xFFFF) << 32) | ((oh as u64 & 0xFFFF) << 48)
+                if bank == 0 && geo_done != gk && o_noshadow == 0 {
+                    geo_done = gk
+                    var gl: [u8; 17] = "wmd: shadow-geo \0"
+                    var gs: [u8; 2] = " \0"
+                    ulib.say((&gl[0 as usize]) as u64)
+                    ulib.sayu(x as u64)
+                    ulib.say((&gs[0 as usize]) as u64)
+                    ulib.sayu(y as u64)
+                    ulib.say((&gs[0 as usize]) as u64)
+                    ulib.sayu(ow as u64)
+                    ulib.say((&gs[0 as usize]) as u64)
+                    ulib.sayu(oh as u64)
+                    ulib.say((&gs[0 as usize]) as u64)
+                    ulib.sayu(reach)
+                    ulib.nl()
+                }
+            }
         }
         var p: u64 = 0
         if hidden == 0 && plain == 1 && shm != 0 {
@@ -417,12 +699,28 @@ fn cycle(t: u64) -> u64 {
                             c_sv = __mmio_read32((p_fba + at * 4) as *mut u32) as u64
                             c_bv = sb[at as usize] as u64
                         }
-                        if smp_n < 16 && c_diff % 12000 == 0 {
+                        if smp_n < 16 && c_diff % 97 == 0 {
                             smp[(smp_n * 4) as usize] = xx
                             smp[(smp_n * 4 + 1) as usize] = yy
                             smp[(smp_n * 4 + 2) as usize] = __mmio_read32((p_fba + at * 4) as *mut u32) as u64
                             smp[(smp_n * 4 + 3) as usize] = sb[at as usize] as u64
                             smp_n = smp_n + 1
+                        }
+                        if c_diff == 0 {
+                            c_bx0 = xx
+                            c_bx1 = xx
+                            c_by0 = yy
+                            c_lt = 0
+                        }
+                        if xx < c_bx0 {
+                            c_bx0 = xx
+                        }
+                        if xx > c_bx1 {
+                            c_bx1 = xx
+                        }
+                        c_by1 = yy
+                        if __mmio_read32((p_fba + at * 4) as *mut u32) > (sb[at as usize] & 16777215 as u32) {
+                            c_lt = c_lt + 1
                         }
                         c_diff = c_diff + 1
                     }
@@ -464,8 +762,14 @@ fn run_observe(args: u64) -> u64 {
     var n_notab: [u8; 14] = "wmd: no table\0"
     var n_x: [u8; 2] = "x\0"
     var n_c: [u8; 2] = ",\0"
+    var n_shw: [u8; 9] = " shadow=\0"
+    var n_shp: [u8; 11] = " shadowpx=\0"
+    var l_nosh: [u8; 10] = "noshadow=\0"
+    var n_bb: [u8; 7] = " bbox=\0"
+    var n_lt: [u8; 8] = " light=\0"
 
     wlibc.start(false)
+    o_noshadow = arg_num(args, (&l_nosh[0 as usize]) as u64, 0)
     p_fba = wlibc.shm_buffer(MAXPX * 4)
     p_fbb = wlibc.shm_buffer(MAXPX * 4)
     scr_w = wlibc.screen_w()
@@ -537,6 +841,10 @@ fn run_observe(args: u64) -> u64 {
             ulib.sayu(c_na)
             ulib.say((&n_us[0 as usize]) as u64)
             ulib.sayu(c_us)
+            ulib.say((&n_shw[0 as usize]) as u64)
+            ulib.sayu(sh_win)
+            ulib.say((&n_shp[0 as usize]) as u64)
+            ulib.sayu(sh_px)
             if c_diff != 0 {
                 ulib.say((&n_first[0 as usize]) as u64)
                 ulib.sayu(c_fx)
@@ -546,8 +854,33 @@ fn run_observe(args: u64) -> u64 {
                 ulib.sayu(c_sv)
                 ulib.say((&n_bv[0 as usize]) as u64)
                 ulib.sayu(c_bv)
+                ulib.say((&n_bb[0 as usize]) as u64)
+                ulib.sayu(c_bx0)
+                ulib.say((&n_c[0 as usize]) as u64)
+                ulib.sayu(c_by0)
+                ulib.say((&n_c[0 as usize]) as u64)
+                ulib.sayu(c_bx1)
+                ulib.say((&n_c[0 as usize]) as u64)
+                ulib.sayu(c_by1)
+                ulib.say((&n_lt[0 as usize]) as u64)
+                ulib.sayu(c_lt)
             }
             ulib.nl()
+            if cycles == 3 && smp_n > 0 {
+                var si3: u64 = 0
+                while si3 < smp_n {
+                    ulib.say((&n_smp[0 as usize]) as u64)
+                    ulib.sayu(smp[(si3 * 4) as usize])
+                    ulib.say((&n_c[0 as usize]) as u64)
+                    ulib.sayu(smp[(si3 * 4 + 1) as usize])
+                    ulib.say((&n_sv[0 as usize]) as u64)
+                    ulib.sayu(smp[(si3 * 4 + 2) as usize])
+                    ulib.say((&n_bv[0 as usize]) as u64)
+                    ulib.sayu(smp[(si3 * 4 + 3) as usize])
+                    ulib.nl()
+                    si3 = si3 + 1
+                }
+            }
             if cycles == 40 {
                 var rk: u64 = 0
                 while rk < c_win && rk < MAXWIN {

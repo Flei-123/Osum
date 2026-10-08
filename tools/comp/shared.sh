@@ -93,6 +93,7 @@ else
     bad "noshare: no screenshot"
 fi
 
+# the pointer leaves the task bar button before the last picture: its tooltip appears after a delay that depends on the host load (a flaky 4000 pixel diff)
 echo "== 2. the desktop scene with shared buffers and with noshare: the same pictures =="
 cat > "$D/dreh.txt" <<'DREH'
 warteauf 'launcher: ready' || 90
@@ -111,6 +112,8 @@ klick 24,780
 warte 3
 klickauf start_File Explorer
 warte 14
+fahre 1250,780
+warte 8
 foto c3-explorer
 taste f12
 warte 3

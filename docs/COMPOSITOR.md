@@ -237,7 +237,7 @@ window buffers, z-order, input routing, window rights, lock. The kernel only del
 | S3 shared buffers + table page | **done** (08.10.2026, `tools/comp/shared.sh`) |
 | S4 shadow compositor | **done** (08.10.2026, `tools/comp/shadow.sh`) |
 | S5 scan-out switch + watchdog | **done, opt-in** (`wmd present`; 08.10.2026, `tools/comp/present.sh`, section "S5") |
-| S6 chrome and effects in `wmd` | not started |
+| S6 chrome and effects in `wmd` | **started**: S6a the window shadow is composed and judged in `wmd` (`tools/comp/shadow.sh`, section "S6a"); next: frame + title bar (rounded `fill_round`), caption buttons, blur, glass, pointer |
 | S7 delete the kernel painters | not started |
 
 ### S0 per-phase split and the first fixes (07.10.2026, measured with `phases` on, `tools/design/stationaer.sh`, KVM, host load 4 - 8)
@@ -403,6 +403,19 @@ S6 (chrome in `wmd`) has to exist before the switch is worth anything.
 die (task exits -> detach at once, kernel presents, drag still works), hang (watchdog pushes 3 frames, detaches), slow (120 ms per frame -> misses,
 detach again and again), and the counter-proofs `nowatch` (a hung compositor freezes the picture: frames pile up, nothing shown) and `nocomp`
 (the attach is refused: the kernel shows every frame).
+
+### S6a -- the window shadow is composed in ring 3 and judged (r485, first slice)
+
+The kernel puts the numbers its shadow mask is built from on the window table page: **word 8** = strength of the focused window | its reach << 8 |
+strength of the other windows << 16 | their reach << 24 | corner radius << 32 (strengths already scaled by the window alpha, as `shadow_staerke`
+does), **word 9** = shadow colour (rgb24) | 1 << 32 (valid) | 1 << 33 (the old ring painter is on, then `wmd` leaves the shadow alone). Row word 11
+bit 33 says "this window gets a shadow" (a framed window that is on the screen). `wmd` builds the same two corner banks and the two edge strips with the
+same integers (`sh_ramp`, `sh_build`: `isqrt`, 16ths of a point) and blends the shadow in the z order with `comp.blend`, the same `mix8` the kernel uses.
+A plain framed window now takes only its own outer rectangle out of the judged area (before: 48 points around it); the ring of shadow around it is
+judged. A pixel the client left translucent is not touched and not judged, as before.
+
+Gate: `tools/comp/shadow.sh` (0 judged pixels differ, `shadow=` windows and `shadowpx=` pixels per cycle on the cycle line) and the counter-proof
+`noshadow=1` (`wigapp=/bin/wmd,noshadow=1`): the ring is still judged but not composed, so the judge must see the missing shadow.
 
 ### S4 -- `wmd`, the shadow compositor (observer)
 

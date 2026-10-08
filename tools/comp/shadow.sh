@@ -30,12 +30,13 @@ klickauf start_File Explorer
 warte 14
 fahre 1250,780
 warte 40
+foto s
 taste f12
 warte 3
 DREH
 run() { # run <name> <extra words> [capture argument]
     bash tools/design/capture.sh "$D/$1" uitrace=yes accel=kvm drehbuch="$D/dreh.txt" \
-        "extra=wigapp=/bin/wmd wighalt=150 $2" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" ${3:+"$3"} \
+        "extra=wigapp=/bin/wmd${WMDARGS:+,$WMDARGS} wighalt=150 $2" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" "${@:3}" \
         > "$D/$1.log" 2>&1
     grep -a "FEHLGESCHLAGEN" "$D/$1.log" | head -3
 }
@@ -49,7 +50,7 @@ stats() { # stats <serial>  ->  judged cycles, max compared, sum compared, sum d
 }
 
 echo "== 1. the desktop with the shadow compositor =="
-run shd "" window_alpha=100
+run shd "" window_alpha=100 shadow=on
 S="$D/shd/serial.txt"
 grep -a '^wmd:' "$S" | sed 's/^/        /' | head -110
 grep -aq '^wmd: ' "$S" || { echo "        (no wmd line; capture log tail:)"; tail -n 12 "$D/shd.log" | sed 's/^/        /'; grep -a "desk:\|wmd\|exec\|spawn\|fault\|page" "$S" | head -20 | cut -c1-200 | sed 's/^/        D: /'; grep -a "wmd\|ELF\|elf\|error\|Error" "$D/shd.log" | head -10 | cut -c1-200 | sed 's/^/        L: /'; }
@@ -66,6 +67,12 @@ grep -aq '^desktop: shared=1' "$S" && ok "the desktop window paints into a share
 C1=$(grep -a '^wmd: cycle ' "$S" | head -1 | tr ' ' '\n' | awk -F= '$1 == "compared" { print $2; exit }')
 [ "${C1:-0}" -ge 300000 ] && ok "the first cycle already judged the wallpaper: $C1 pixels" || bad "the first cycle judged only ${C1:-0} pixels"
 [ "${CS:-0}" -ge 30000000 ] && ok "$CS pixels judged over all cycles (21.9 M before the desktop was shared)" || bad "only ${CS:-0} pixels judged over all cycles"
+# S6a: the window shadow is composed in ring 3 (the numbers come over the table page, words 8 and 9) and judged: the ring around a framed window,
+# 0 differences. How many windows had their shadow composed and how many pixels it blended, the most of any cycle:
+SHW=$(grep -a '^wmd: cycle ' "$S" | tr ' ' '\n' | awk -F= '$1 == "shadow" && $2 > m { m = $2 } END { print m + 0 }')
+SHP=$(grep -a '^wmd: cycle ' "$S" | tr ' ' '\n' | awk -F= '$1 == "shadowpx" && $2 > m { m = $2 } END { print m + 0 }')
+echo "        shadow windows (max per cycle)=$SHW shadow pixels (max per cycle)=$SHP"
+[ "${SHW:-0}" -ge 1 ] && [ "${SHP:-0}" -ge 2000 ] && ok "wmd composed the shadow of $SHW window(s), $SHP pixels in one cycle, and no judged pixel differs" || bad "the shadow was not composed (windows=$SHW pixels=$SHP)"
 
 echo "== 2. counter-proof: noshare -- no shared buffer, wmd can judge nothing =="
 run nsh "noshare" window_alpha=100
@@ -74,6 +81,46 @@ read N2 CM2 CS2 DS2 UM2 < <(stats "$S2")
 echo "        cycles=$N2 max_area=$CM2 compared_sum=$CS2 differ_sum=$DS2"
 [ "${CM2:-1}" -lt "${CM:-0}" ] && [ "${CM2:-1}" -lt 20000 ] && ok "noshare: wmd could judge only $CM2 pixels (against $CM)" || bad "noshare: wmd judged $CM2 pixels anyway"
 grep -aq '^desktop: shared=0' "$S2" && ok "noshare: the desktop window falls back to the copy path (shared=0)" || bad "noshare: $(grep -a '^desktop: shared' "$S2" | head -1)"
+
+# S6a: the picture of the kernel (the oracle) must really show the shadow NEXT to the window: the row just below the focused window and the
+# column just right of it are darker than the wallpaper beyond the reach. (Both painters once drew the top and bottom shadow R rows too far out,
+# `wmd` copied it, and "0 differ" was true and useless: a judge that shares the bug with the oracle cannot see it.)
+GEO=$(grep -a '^wmd: shadow-geo ' "$S" | tail -n 1 | cut -d' ' -f3-)
+if [ -n "$GEO" ] && [ -s "$D/shd/s.ppm" ]; then
+    python3 - "$D/shd/s.ppm" $GEO <<'PY' && ok "the shadow sits next to the window (below and to the right: darker than the wallpaper beyond the reach)" || bad "the shadow is not next to the window"
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB")
+x, y, ow, oh, reach = (int(v) for v in sys.argv[2:7])
+def lum(px, py):
+    r, g, b = im.getpixel((px, py)); return r + g + b
+def mid(px, py):
+    return lum(px, py)
+bad = 0
+for name, near, far in (
+        ("below", (x + ow // 2, y + oh + 1), (x + ow // 2, y + oh + reach + 4)),
+        ("right", (x + ow, y + oh // 2), (x + ow + reach + 4, y + oh // 2))):
+    n, f = lum(*near), lum(*far)
+    print("        %s: next to the window %d, beyond the reach %d" % (name, n, f))
+    if not n + 12 <= f:
+        bad = 1
+sys.exit(bad)
+PY
+else
+    bad "no shadow-geo line or no picture (geo='$GEO')"
+fi
+
+# S6a counter-proof: the same boot, but wmd is told NOT to compose the shadow (`noshadow=1`) while the ring around the window is still judged:
+# the kernel's shadow is on the screen, ours is not there, so the judge MUST see differences. Without this the "0 differ" above could mean
+# that the ring is simply not looked at.
+echo "== 3. counter-proof: noshadow -- the ring is judged but the shadow is not composed =="
+WMDARGS="noshadow=1" run nsd "" window_alpha=100 shadow=on
+S3="$D/nsd/serial.txt"
+read N3 CM3 CS3 DS3 UM3 < <(stats "$S3")
+SHP3=$(grep -a '^wmd: cycle ' "$S3" | tr ' ' '\n' | awk -F= '$1 == "shadowpx" { s += $2 } END { print s + 0 }')
+echo "        cycles=$N3 compared_sum=$CS3 differ_sum=$DS3 shadow_pixels=$SHP3"
+[ "${SHP3:-1}" = 0 ] && ok "noshadow: wmd blended no shadow pixel" || bad "noshadow: wmd blended $SHP3 pixels anyway"
+[ "${DS3:-0}" -ge 2000 ] && ok "noshadow: the judge sees the missing shadow ($DS3 differing pixels)" || bad "noshadow: only ${DS3:-0} differing pixels, the ring is not judged"
 
 echo
 echo "SHADOW: $pass passed, $fail failed"

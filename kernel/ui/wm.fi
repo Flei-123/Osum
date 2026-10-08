@@ -2630,10 +2630,13 @@ fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
     let mw: i64 = ow - 2 * ri
     let my: i64 = sy + ri // erste Zeile des geraden Mittelteils
     let mh: i64 = oh - 2 * ri
+    // FIX (compositor S6a): the table square starts REACH rows above the window and ends R rows inside it (its corner circle is centred at
+    // the bottom right of the square). The rows were placed `side` rows above the window (R too high above, R too low below), so the top and
+    // bottom shadow floated away from the window. The kernel picture is the oracle of wmd: both use the same rows now.
     // -------------------------------------------- oben, side Zeilen
     var j: i64 = 0
     while j < si {
-        let y: i64 = sy - si + j
+        let y: i64 = sy - rc + j
         let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
         mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
         mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
@@ -2649,7 +2652,7 @@ fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
     // ------------------------------------------- unten, side Zeilen
     j = 0
     while j < si {
-        let y: i64 = sy + oh + si - 1 - j
+        let y: i64 = sy + oh + rc - 1 - j
         let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
         mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
         mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
@@ -5701,7 +5704,8 @@ fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
 //     +9 shared object + 1 (0 = the buffer is the server's own)      +10 row length in octets
 //     +11 opacity (W_OPAC) in the low 32 bits; bit 32 = PLAIN: right now the server paints this window's client area as a plain copy of its
 //         buffer (no opening/closing motion, no lifting, no blur, no glass, no translucency) -- the only windows a shadow compositor can
-//         reproduce exactly before the chrome and the effects move to it (S6)
+//         reproduce exactly before the chrome and the effects move to it (S6); bit 33 = SHADOW: the window has a shadow under its frame (S6a)
+//   words 8 and 9 (S6a): the shadow numbers, see `tab_publish`
 const TAB_MAGIC: u64 = 0x42415457
 const TAB_ROW: u64 = 12
 const TAB_HEAD: u64 = 16
@@ -5793,7 +5797,12 @@ fn tab_publish(state: u64) {
             if tab_plain(state, i) {
                 plain = 1
             }
-            tw(f, r + 11, (wg(state, i, W_OPAC) & 0xFFFFFFFF) | (plain << 32))
+            // S6a: bit 33 = this window gets a shadow under its frame (a framed window that is on the screen): `paint_win` calls `paint_shadow`
+            var shad: u64 = 0
+            if deko(state, i) && !win_hidden(state, i) {
+                shad = 1
+            }
+            tw(f, r + 11, (wg(state, i, W_OPAC) & 0xFFFFFFFF) | (plain << 32) | (shad << 33))
             n = n + 1
         }
         i = i + 1
@@ -5807,6 +5816,16 @@ fn tab_publish(state: u64) {
         fo = wg(state, fi - 1, W_ID)
     }
     tw(f, 4, fo)
+    // S6a: what the compositor needs to paint the window shadow exactly (the same numbers `shadow_build` takes, already scaled by the window
+    // alpha): word 8 = strength of the focused window | its reach << 8 | strength of the others << 16 | their reach << 24 | corner radius << 32;
+    // word 9 = shadow colour (rgb24) | 1 << 32 (the words are valid) | 1 << 33 when the old ring painter is on
+    var sold: u64 = 0
+    if gs(state, S_SHOLD) != 0 {
+        sold = 1
+    }
+    tw(f, 8, shadow_staerke(state, FM_SHADOW) | (form(state, FM_SHADOW_R) << 8) | (shadow_staerke(state, FM_SHADOW2) << 16)
+        | (form(state, FM_SHADOW_R2) << 24) | (form(state, FM_RADIUS) << 32))
+    tw(f, 9, rgb24(state, form(state, FM_SHADOW_C)) | (1 << 32) | (sold << 33))
     ss(state, S_TAB_N, gs(state, S_TAB_N) + 1)
     tw(f, 5, gs(state, S_COMPOSITES))
     tw(f, 6, TAB_ROW)
@@ -9106,6 +9125,21 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let ax1: i64 = imin(wx + ow, cx1 as i64)
     let ay1: i64 = imin(wy + oh, cy1 as i64)
     if ax1 <= ax0 || ay1 <= ay0 {
+        // S6a: the clip may lie ONLY in the shadow ring around this window (a repaint of the wallpaper, an icon, a toast next to it): the
+        // background was just filled there, so the shadow must be laid over it again, or the ring keeps a hole until the window moves.
+        // (Found by `tools/comp/shadow.sh`: the judge saw 1387 pixels of the top strip missing after a repaint.)
+        if wg(state, i, W_ANK) == 0 && !drag_paint_on(state, i) && deko(state, i) {
+            var rr: i64 = form(state, FM_SHADOW_R) as i64
+            let rr2: i64 = form(state, FM_SHADOW_R2) as i64
+            if rr2 > rr {
+                rr = rr2
+            }
+            rr = rr + 1
+            if rr > 1 && imin(wx + ow + rr, cx1 as i64) > imax(wx - rr, cx0 as i64)
+                && imin(wy + oh + rr, cy1 as i64) > imax(wy - rr, cy0 as i64) {
+                paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+            }
+        }
         return
     }
     // RUNDE VSYNC: laeuft eine Oeffnungs- oder Schliessbewegung, wird
