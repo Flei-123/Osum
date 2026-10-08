@@ -47,6 +47,9 @@ def main(out):
     kinds = kinds[-1] if kinds else ""
     im = Image.open(os.path.join(out, "01-explorer.ppm")).convert("RGB")
     # ---- the detail list (id 26): header 28 + 2, then rows of `zh`
+    check(26 in rects, "the detail list reports its rectangle (`explorer: rect id=26`; a torn serial line loses it)")
+    if 26 not in rects:
+        return
     lx, ly, lw, lh = rects[26]
     X, Y = ox + lx, oy + ly
     top = Y + 28 + 2

@@ -288,6 +288,45 @@ fn theme() -> u64 {
 //   - list the window table (root, WM_FWIN FW_LIST): only the locker's,
 //   - become the locker (op 4) and unlock (op 2) without the password,
 //   - the tiling actions "close" and "next window" through the syscall.
+// r483: ONE `write` PER LINE. `ulib.say` puts every piece of a line on the serial line with its own
+// write; the pulse of the window server (every 500 ms, a block of lines) could land between two pieces,
+// and tools/lockseal read a torn line ("42 passed, 1 failed", a different line each run). The probe now
+// builds a line in `lb` and writes it in ONE call; sys.conout holds the serial line lock for a write and
+// the pulse holds it for its block (kgui.input_pulse), so a probe line stays whole.
+static mut lb: [u8; 256] = [0 as u8; 256]
+static mut lb_n: u64 = 0
+
+fn lb_say(p: u64) {
+    var i: u64 = 0
+    while lb_n < 240 {
+        let c: u8 = *((p + i) as *mut u8)
+        if c == 0 as u8 {
+            return
+        }
+        lb[lb_n as usize] = c
+        lb_n = lb_n + 1
+        i = i + 1
+    }
+}
+
+fn lb_num(v: u64) {
+    var d: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&d[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n && lb_n < 240 {
+        lb[lb_n as usize] = d[i as usize]
+        lb_n = lb_n + 1
+        i = i + 1
+    }
+}
+
+fn lb_nl() {
+    lb[lb_n as usize] = 10 as u8
+    lb_n = lb_n + 1
+    let _w: u64 = ulib.put((&lb[0 as usize]) as u64, lb_n)
+    lb_n = 0
+}
+
 fn lockprobe(safe: bool) -> u64 {
     var s_h: [u8; 22] = "a11ydemo: lockprobe \0\0"
     var s_n: [u8; 11] = "node role=\0"
@@ -320,22 +359,22 @@ fn lockprobe(safe: bool) -> u64 {
                 blank[k as usize] = 1 as u8
             } else {
                 vis = vis + 1
-                say((&s_h[0 as usize]) as u64)
-                say((&s_n[0 as usize]) as u64)
-                ulib.sayn(role)
-                say((&s_nm[0 as usize]) as u64)
-                say(b + 24)
-                ulib.nl()
+                lb_say((&s_h[0 as usize]) as u64)
+                lb_say((&s_n[0 as usize]) as u64)
+                lb_num(role)
+                lb_say((&s_nm[0 as usize]) as u64)
+                lb_say(b + 24)
+                lb_nl()
             }
         }
         k = k + 1
     }
-    say((&s_h[0 as usize]) as u64)
-    say((&s_c[0 as usize]) as u64)
-    ulib.sayn(cnt)
-    say((&s_f[0 as usize]) as u64)
-    ulib.sayn(vis)
-    ulib.nl()
+    lb_say((&s_h[0 as usize]) as u64)
+    lb_say((&s_c[0 as usize]) as u64)
+    lb_num(cnt)
+    lb_say((&s_f[0 as usize]) as u64)
+    lb_num(vis)
+    lb_nl()
     // the events
     var ev: [u8; 16] = [0 as u8; 16]
     var seen: u64 = 0
@@ -354,12 +393,12 @@ fn lockprobe(safe: bool) -> u64 {
             q = q + 1
         }
     }
-    say((&s_h[0 as usize]) as u64)
-    say((&s_e[0 as usize]) as u64)
-    ulib.sayn(seen)
-    say((&s_l[0 as usize]) as u64)
-    ulib.sayn(leaked)
-    ulib.nl()
+    lb_say((&s_h[0 as usize]) as u64)
+    lb_say((&s_e[0 as usize]) as u64)
+    lb_num(seen)
+    lb_say((&s_l[0 as usize]) as u64)
+    lb_num(leaked)
+    lb_nl()
     // the window table
     var rec: [u8; 160] = [0 as u8; 160]
     let rp: u64 = (&rec[0 as usize]) as u64
@@ -367,14 +406,14 @@ fn lockprobe(safe: bool) -> u64 {
     while sl < 32 {
         let r: u64 = wlibc.sys3w(2128, 0, sl, rp)
         if r == 1 && (*(rp as *mut u64)) != 0 {
-            say((&s_h[0 as usize]) as u64)
-            say((&s_w[0 as usize]) as u64)
-            ulib.sayn(sl)
-            say((&s_i[0 as usize]) as u64)
-            ulib.sayn(*(rp as *mut u64))
-            say((&s_t[0 as usize]) as u64)
-            say(rp + 64)
-            ulib.nl()
+            lb_say((&s_h[0 as usize]) as u64)
+            lb_say((&s_w[0 as usize]) as u64)
+            lb_num(sl)
+            lb_say((&s_i[0 as usize]) as u64)
+            lb_num(*(rp as *mut u64))
+            lb_say((&s_t[0 as usize]) as u64)
+            lb_say(rp + 64)
+            lb_nl()
         }
         sl = sl + 1
     }
@@ -383,17 +422,17 @@ fn lockprobe(safe: bool) -> u64 {
     let c: u64 = ulib.sys(1870, 4, 0, 0)
     let u: u64 = ulib.sys(1870, 2, 0, 0)
     let st1: u64 = ulib.sys(1870, 0, 0, 0)
-    say((&s_h[0 as usize]) as u64)
-    ulib.sayn(st0)
-    ulib.nl()
-    say((&s_h[0 as usize]) as u64)
-    say((&s_k[0 as usize]) as u64)
-    ulib.sayn(neg(c))
-    say((&s_u[0 as usize]) as u64)
-    ulib.sayn(neg(u))
-    say((&s_s[0 as usize]) as u64)
-    ulib.sayn(st1)
-    ulib.nl()
+    lb_say((&s_h[0 as usize]) as u64)
+    lb_num(st0)
+    lb_nl()
+    lb_say((&s_h[0 as usize]) as u64)
+    lb_say((&s_k[0 as usize]) as u64)
+    lb_num(neg(c))
+    lb_say((&s_u[0 as usize]) as u64)
+    lb_num(neg(u))
+    lb_say((&s_s[0 as usize]) as u64)
+    lb_num(st1)
+    lb_nl()
     // the tiling actions through the syscall: close (18), next window (30)
     // `safe` (before the lock and after the unlock): these two would really
     // close the focused window and switch to another one, so they stay out
@@ -403,13 +442,13 @@ fn lockprobe(safe: bool) -> u64 {
         t1 = ulib.sys(1821, 18, 0, 0)
         t2 = ulib.sys(1821, 30, 0, 0)
     }
-    say((&s_h[0 as usize]) as u64)
-    say((&s_a[0 as usize]) as u64)
-    say((&s_d[0 as usize]) as u64)
-    ulib.sayn(neg(t1))
-    say((&s_b[0 as usize]) as u64)
-    ulib.sayn(neg(t2))
-    ulib.nl()
+    lb_say((&s_h[0 as usize]) as u64)
+    lb_say((&s_a[0 as usize]) as u64)
+    lb_say((&s_d[0 as usize]) as u64)
+    lb_num(neg(t1))
+    lb_say((&s_b[0 as usize]) as u64)
+    lb_num(neg(t2))
+    lb_nl()
     return 0
 }
 
