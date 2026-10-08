@@ -338,6 +338,26 @@ static mut z_verbindungen: u64 = 0
 static mut z_wartems: u64 = 0
 static mut z_warteaufrufe: u64 = 0
 
+// ==================================================== 08.10.2026: DELL STABILITY
+// Idle cost and reconnect time of the https transport (tools/stab/net.sh).
+//
+// Over 443 every message is its own TCP connection and TLS handshake, and an
+// idle device sends a `puls` for every one of them. The wait between two polls
+// used to grow 250 ms -> 2 s and stay there: one handshake every 2 s, for ever
+// (measured in the VM: see docs/DELL-STABILITY.md). Now it grows to POLL_MAX_MS.
+// A job (or an answer that is not empty) sets it back to zero at once.
+const POLL_MAX_MS: u64 = 5000
+// A poll that fails (connection refused, reset, timeout, a 5xx) does not end the
+// session: the https transport has no connection to lose, the session lives on
+// the server (token, 12 h). Retry a few times before signing in again.
+const POLL_TRIES: u64 = 3
+// A session that lasted at least this long was a good one: its end is a
+// transient event, and the first retry comes after 250 ms again -- not after
+// the 30 s a long-forgotten earlier failure left in the back-off.
+const GOOD_SESSION_MS: u64 = 30000
+static mut z_sitzungen: u64 = 0
+static mut k_sitzung_ms: u64 = 0
+
 // ==================================================== 05.10.2026: WHY OFFLINE
 // The Dell vanished from the bridge on 04.10.2026 at 16:00 UTC without a
 // trace: no goodbye, no error. Three holes were found in this client:
@@ -2656,15 +2676,30 @@ fn bediene(d: *mut Draht) -> bool {
         if (*d).https && (*d).at >= (*d).puf.len {
             if ruhe > 0 {
                 schlafe_ms(ruhe)
+                keepalive()
             }
-            if !word_send(d, "puls", 0, 0 as usize) {
+            var versuche: u64 = 0
+            var gesendet: bool = false
+            while versuche < POLL_TRIES && !gesendet {
+                if versuche > 0 {
+                    say_if_loud("jarvisd: poll failed, trying again\n")
+                    schlafe_ms(1000 << (versuche - 1))
+                }
+                gesendet = word_send(d, "puls", 0, 0 as usize)
+                versuche = versuche + 1
+            }
+            if !gesendet {
                 sauber = false
                 break
             }
             if (*d).at >= (*d).puf.len {
-                ruhe = ruhe + 250
-                if ruhe > 2000 {
-                    ruhe = 2000
+                if ruhe == 0 {
+                    ruhe = 250
+                } else {
+                    ruhe = ruhe * 2
+                }
+                if ruhe > POLL_MAX_MS {
+                    ruhe = POLL_MAX_MS
                 }
                 continue
             }
@@ -2863,6 +2898,8 @@ fn eine_runde_https() -> u64 {
         sag("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        z_sitzungen = z_sitzungen + 1
+        k_sitzung_ms = now_ms()
         k_draht = (&d) as u64
         sende_info(&d)
         if bediene(&d) {
@@ -2939,6 +2976,8 @@ fn eine_runde() -> u64 {
         sag("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        z_sitzungen = z_sitzungen + 1
+        k_sitzung_ms = now_ms()
         if bediene(&d) {
             erg = 0
         } else {
@@ -3559,7 +3598,15 @@ fn main(start: u64) -> i32 {
         if frist > 0 && now_ms() - t0 > frist {
             break
         }
+        let sitz0: u64 = z_sitzungen
         let erg: u64 = eine_runde()
+        // DELL STABILITY: the back-off belongs to FAILURES in a row. A session
+        // that was signed in and ran for GOOD_SESSION_MS or more ended by a blip
+        // of the network: the first retry comes after 250 ms, not after the
+        // 30 s that an old failure had left in `warte`.
+        if z_sitzungen > sitz0 && now_ms() - k_sitzung_ms >= GOOD_SESSION_MS {
+            warte = 250
+        }
         if erg == 0 {
             sag("jarvisd: the server said goodbye\n")
             if einmal {

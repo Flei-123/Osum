@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/stab.fi -- Dell stability: fork/exit/wait4/kill churn on all cores.
+//
+//   stab run <rounds> <workers> <supervisors>
+//       <supervisors> processes run in parallel; each one does <rounds>
+//       rounds. A round forks <workers> children of different kinds:
+//         0  exits at once
+//         1  opens a handful of files and exits without closing them
+//         2  sleeps 30 ms, then exits
+//         3  yields in a loop until the supervisor kills it
+//         4  starts /bin/echo with EXEC and never waits (orphan, zombie sweep)
+//         5  forks a grandchild that sleeps, then exits (reparenting)
+//         6  sleeps 500 ms (killed while asleep)
+//         7  opens files, then yields in a loop (killed with open files)
+//       The supervisor kills the kinds 3, 6, 7 (and, to hit already dead
+//       ones, every fifth child), then waits for every child.
+//       Prints  stab: rounds=N children=C killed=K waitbad=B  and
+//       stab: done  at the end.
+//   stab child <kind>   (internal)
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn open_some(n: u64) {
+    var s_bin: [u8; 10] = "/bin/echo\0"
+    var k: u64 = 0
+    while k < n {
+        let _fd: u64 = ulib.sys(ulib.SYS_OPEN, (&s_bin[0 as usize]) as u64, 0, 0)
+        k = k + 1
+    }
+}
+
+fn worker(kind: u64, id: u64) -> u64 {
+    var s_echo: [u8; 10] = "/bin/echo\0"
+    var s_x: [u8; 2] = "x\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+    if kind == 0 {
+        return id & 127
+    }
+    if kind == 1 {
+        open_some(6)
+        return id & 127
+    }
+    if kind == 2 {
+        let _s: u64 = ulib.sleep_ms(30)
+        return id & 127
+    }
+    if kind == 3 {
+        var n: u64 = 0
+        while n < 4000000 {
+            let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+            n = n + 1
+        }
+        return 1
+    }
+    if kind == 4 {
+        argv[0 as usize] = (&s_echo[0 as usize]) as u64
+        argv[1 as usize] = (&s_x[0 as usize]) as u64
+        ulib.ignore_children()
+        let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&s_echo[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+        return id & 127
+    }
+    if kind == 5 {
+        let g: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+        if g == 0 {
+            let _s: u64 = ulib.sleep_ms(60)
+            let _e: u64 = ulib.sys(ulib.SYS_EXIT, 3, 0, 0)
+            return 3
+        }
+        return id & 127
+    }
+    if kind == 6 {
+        let _s: u64 = ulib.sleep_ms(500)
+        return 1
+    }
+    // kind 7
+    open_some(5)
+    var m: u64 = 0
+    while m < 4000000 {
+        let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        m = m + 1
+    }
+    return 1
+}
+
+fn supervise(rounds: u64, workers: u64, sup: u64) -> u64 {
+    var pids: [u64; 16] = [0 as u64; 16]
+    var kinds: [u64; 16] = [0 as u64; 16]
+    var r: u64 = 0
+    var children: u64 = 0
+    var killed: u64 = 0
+    var waitbad: u64 = 0
+    var seed: u64 = sup * 7919 + 13
+    while r < rounds {
+        var w: u64 = 0
+        while w < workers && w < 16 {
+            seed = (seed * 1103515245 + 12345) & 2147483647
+            let kind: u64 = (seed >> 8) % 8
+            let id: u64 = r * 16 + w
+            let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+            if pid == 0 {
+                let code: u64 = worker(kind, id)
+                let _x: u64 = ulib.sys(ulib.SYS_EXIT, code, 0, 0)
+                return code
+            }
+            pids[w as usize] = pid
+            kinds[w as usize] = kind
+            w = w + 1
+        }
+        // give the children a moment to get going on the other cores
+        var y: u64 = 0
+        while y < 3 {
+            let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+            y = y + 1
+        }
+        var j: u64 = 0
+        while j < w {
+            let k: u64 = kinds[j as usize]
+            if k == 3 || k == 6 || k == 7 || j % 5 == 0 {
+                if !ulib.bad(pids[j as usize]) {
+                    let kr: u64 = ulib.sys(ulib.SYS_KILL, pids[j as usize], 137, 0)
+                    if !ulib.bad(kr) {
+                        killed = killed + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        j = 0
+        while j < w {
+            if ulib.bad(pids[j as usize]) {
+                waitbad = waitbad + 1
+            } else {
+                let c: u64 = ulib.wait_code(pids[j as usize])
+                if ulib.bad(c) {
+                    waitbad = waitbad + 1
+                }
+            }
+            children = children + 1
+            j = j + 1
+        }
+        r = r + 1
+    }
+    var s_a: [u8; 12] = "stab: sup= \0"
+    var s_r: [u8; 10] = " rounds= \0"
+    var s_c: [u8; 12] = " children= \0"
+    var s_k: [u8; 10] = " killed= \0"
+    var s_w: [u8; 11] = " waitbad= \0"
+    ulib.say((&s_a[0 as usize]) as u64)
+    ulib.sayu(sup)
+    ulib.say((&s_r[0 as usize]) as u64)
+    ulib.sayu(rounds)
+    ulib.say((&s_c[0 as usize]) as u64)
+    ulib.sayu(children)
+    ulib.say((&s_k[0 as usize]) as u64)
+    ulib.sayu(killed)
+    ulib.say((&s_w[0 as usize]) as u64)
+    ulib.sayu(waitbad)
+    ulib.nl()
+    return waitbad
+}
+
+fn run(args: u64) -> u64 {
+    var s_done: [u8; 11] = "stab: done\0"
+    let rounds: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let workers: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let sups: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    var pids: [u64; 8] = [0 as u64; 8]
+    var s: u64 = 0
+    while s < sups && s < 8 {
+        let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+        if pid == 0 {
+            let code: u64 = supervise(rounds, workers, s)
+            let _x: u64 = ulib.sys(ulib.SYS_EXIT, code & 127, 0, 0)
+            return code
+        }
+        pids[s as usize] = pid
+        s = s + 1
+    }
+    var bad: u64 = 0
+    var j: u64 = 0
+    while j < s {
+        let c: u64 = ulib.wait_code(pids[j as usize])
+        if ulib.bad(c) || c != 0 {
+            bad = bad + 1
+        }
+        j = j + 1
+    }
+    ulib.say((&s_done[0 as usize]) as u64)
+    ulib.nl()
+    return bad
+}
+
+fn u_start(args: u64) -> u64 {
+    return run(args)
+}
