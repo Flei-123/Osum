@@ -373,3 +373,37 @@ everywhere.** Counter-proof: with `+127` changed to `+126` in `mix8` and the odd
 an off-screen picture with `comp.copy_row`, reads the screen back (`/dev/fb`) and counts differing pixels. It judges only what it can reproduce:
 client areas of plain windows, 16 points inside the edge, 48 points around every other window given up, not near the pointer, screen and table
 read twice and unchanged. Chrome, shadow, blur, glass and the pointer are not composed (S6). `tools/comp/shadow.sh`.
+
+What the first runs taught (each was a real difference between what `wmd` believed and what the kernel paints; every one is fixed in `wmd` or in
+the table, none by loosening the comparison):
+
+* the card keeps no alpha, the buffer does: compare the colour channels only;
+* a pixel the client left clear or translucent (alpha != 255) is painted by the server over the wallpaper: not judged (`notopaque=`);
+* a HIDDEN window (start menu, search, toast ... waiting at 0,0) neither paints nor covers: skipped in `wmd` and `PLAIN = 0` in the table;
+* a framed window is plain only when the window alpha is 100 (`tab_plain` copied the rule of the frameless branch; the framed branch of
+  `paint_win` uses only `FM_WIN_ALPHA`); the gate therefore boots with `window_alpha=100`, the default theme paints glass;
+* a client that paints its own title strip (`WF_CAPTION_CLIENT`) has the server's caption buttons on top: the top 56 points are not judged;
+* the image of a program is 11 MiB (`proc.IMAGE_END`): the two screen reads live in shared memory (`wlibc.shm_buffer`), not in `.bss`.
+
+**Measured (KVM, `tools/comp/shadow.sh`, 70 stable cycles after the file manager opened):** 21 938 700 pixels judged over all cycles (largest area
+447 948 px, the file manager's client), **0 differ**; one frame composed in ring 3 takes **521 us** (median; budget 8000); with `noshare` no window is
+shared and `wmd` judges 0 pixels (the counter-proof that "0 differences" is not an accident of looking at nothing).
+
+### S3 -- measured: what a frame costs the kernel
+
+`tools/comp/shared.sh`, the same drehbuch (idle, start menu, file manager), once with shared buffers and once with `noshare` (the old `WIG_BLIT` path):
+
+| | frames | pixels the kernel copied out of clients | per frame | `WIG_BLIT` calls |
+|---|---|---|---|---|
+| `noshare` (before) | 294 | 17 348 896 | **59 010 px** | 31 296 |
+| shared (after) | 294 | 1 561 840 | **5 312 px** | 3 952 |
+
+The rest is what is still copied: menus (`NK_MENU` take the old path), a window during a drag, the first frame of a window. The shared windows
+named 15 712 752 pixels of damage without a copy. Pictures: idle 0 differing pixels, start menu 20, file manager 73..184 (the tooltip edge and the
+clock digits of the file dates; two shared runs differ from each other at the same places) -- the gate allows 512 (0.05 %).
+
+### What did not get done / the order for the next rounds
+
+* S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
+* Terminal and desktop windows are not shared yet (`want_shared` is on for `fuiapp` programs); the pixels of those are not judged.
+* `look`: `'Gr\u00f6\u00dfe' does not match a second rasterisation` (file manager, x=867 y=183) is red on `main` as well (since the tab strip), not from this branch.
