@@ -1164,11 +1164,16 @@ struct Draht {
     // Nachricht beisammen ist (Kopfzeile + Nutzlast).
     https: bool,
     aus: rt.Buf,
+    // DELL STABILITY: the root store is read and parsed ONCE per session, not for
+    // every poll (a poll is a connection of its own, one every few seconds for
+    // ever). Freed in `wire_gone`.
+    store: x509.Store,
+    store_ok: bool,
 }
 
 fn wire_new(t: *mut tls.Tls) -> Draht {
     return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
-        https: false, aus: rt.buf_new() }
+        https: false, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
 // ==================================================== RUNDE MERGE-11
@@ -1209,7 +1214,7 @@ fn wire_new(t: *mut tls.Tls) -> Draht {
 // "nichts zu tun".
 fn wire_new_https() -> Draht {
     return Draht { t: 0, puf: rt.buf_new(), at: 0, tot: false,
-        https: true, aus: rt.buf_new() }
+        https: true, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
 }
 
 // Der HTTP-Kopf. Mehr als das braucht ein POST nicht, und jede weitere
@@ -1282,28 +1287,29 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     }
     let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
 
-    var storebuf: rt.Buf = rt.buf_new()
-    // The store is built for every request and MUST be freed on every way
-    // out (27.09.2026): it never was, the helper's heap grew with each
-    // request, and after a few hundred (a remote update is many) reading the
-    // root file failed with "no root store" -- the Dell kept running, the
-    // helper never came back to the bridge.
-    var store: x509.Store = x509.store_new()
-    var wurzeln: usize = 0
-    if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
-        wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
-    }
-    if wurzeln == 0 {
-        // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
-        // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
-        sag("jarvisd: no root store -- nothing is trusted\n")
-        net.close(&c)
+    // The store is parsed once per session (DELL STABILITY, see `Draht`). Before
+    // that it was built for every request and had to be freed on every way out
+    // (27.09.2026: it never was, the helper's heap grew with each request and
+    // after a few hundred reading the root file failed with "no root store").
+    // Now it lives and dies with the session: `wire_gone` frees it.
+    if !(*d).store_ok {
+        var storebuf: rt.Buf = rt.buf_new()
+        var wurzeln: usize = 0
+        if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
+            wurzeln = x509.store_load_pem(&(*d).store, storebuf.ptr, storebuf.len)
+        }
         rt.buf_free(&storebuf)
-        x509.store_free(&store)
-        return false
+        if wurzeln == 0 {
+            // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
+            // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
+            sag("jarvisd: no root store -- nothing is trusted\n")
+            net.close(&c)
+            return false
+        }
+        (*d).store_ok = true
     }
     var t: tls.Tls = tls.tls_new()
-    let oki: bool = tls.tls_init(&t, &c, &store, (&k_name[0]) as u64,
+    let oki: bool = tls.tls_init(&t, &c, &(*d).store, (&k_name[0]) as u64,
         k_namelen, now_s())
     var hschief: bool = false
     let okh: bool = tls.tls_handshake(&t) catch | e | fail_bool(&hschief)
@@ -1313,8 +1319,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
         sag("\n")
         tls.tls_free(&t)
         net.close(&c)
-        rt.buf_free(&storebuf)
-        x509.store_free(&store)
         return false
     }
 
@@ -1331,8 +1335,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
         tls.tls_close(&t)
         tls.tls_free(&t)
         net.close(&c)
-        rt.buf_free(&storebuf)
-        x509.store_free(&store)
         return false
     }
 
@@ -1350,8 +1352,6 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
     tls.tls_close(&t)
     tls.tls_free(&t)
     net.close(&c)
-    rt.buf_free(&storebuf)
-    x509.store_free(&store)
 
     let code: u64 = http_nummer(roh.ptr, roh.len)
     if code != 200 {
@@ -1373,6 +1373,8 @@ fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
 fn wire_gone(d: *mut Draht) {
     rt.buf_free(&(*d).puf)
     rt.buf_free(&(*d).aus)
+    x509.store_free(&(*d).store)
+    (*d).store_ok = false
 }
 
 // Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
