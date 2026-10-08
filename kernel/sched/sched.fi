@@ -2678,10 +2678,27 @@ fn reparent(state: u64, dying: u64) {
 // the same reason -- the two locks of this kernel are never nested.
 // Claim a zombie for reaping. Only the caller that gets `true` may free
 // anything of it; everyone else must leave it alone.
+// DELL STABILITY: is task `i` the current task of ANY core? A corpse whose kernel
+// stack a core still stands on must not be torn down (the frames would go to
+// the allocator and be repainted under that core). `kill_other` no longer makes
+// such corpses; this is the second line, and a stop with evidence instead of a
+// panic: the reap is refused and tried again later.
+fn on_a_core(state: u64, i: u64) -> bool {
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n {
+        if cpu.get(state, c, cpu.C_CUR) == i {
+            return true
+        }
+        c = c + 1
+    }
+    return false
+}
+
 fn claim_zombie(state: u64, i: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    if tget(state, i, T_STATE) != S_ZOMBIE || i == current(state) {
+    if tget(state, i, T_STATE) != S_ZOMBIE || on_a_core(state, i) {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         return false
@@ -2704,7 +2721,7 @@ fn reap_claimed(state: u64, i: u64) -> bool {
 fn reap_in(state: u64, i: u64, want: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    if tget(state, i, T_STATE) != want || i == current(state) {
+    if tget(state, i, T_STATE) != want || on_a_core(state, i) {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         return false
