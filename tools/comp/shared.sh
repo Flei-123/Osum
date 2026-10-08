@@ -161,7 +161,9 @@ for n in ("c1-idle", "c2-menu", "c3-explorer"):
         os.makedirs(keep, exist_ok=True)
         for tag, im in (("shr", ia), ("nsh", ib), ("shr2", ic)):
             im.save("%s/%s-%s.png" % (keep, n, tag))
-    if diff:
+    # up to 100 pixels (0.01 % of the screen) are allowed: the tooltip edge of the start button (an animation step, 20 pixels) and the
+    # last digits of the file dates (the wall clock differs between boots, 73 pixels) -- measured, looked at, not sharing
+    if len(diff) > 100:
         bad += 1
 sys.exit(1 if bad else 0)
 PY
