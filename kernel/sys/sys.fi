@@ -2655,6 +2655,33 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE UNTERBAU: the small calls a big program makes at start-up (docs/RUNDE-UNTERBAU-FIREFOX.md). Each answers with what this
     // kernel really is -- a limit that exists, a count of cores it really has, "nothing to do" where there is nothing -- and none of
     // them pretends to an effect it does not have.
+    // RUNDE UNTERBAU: select / pselect6 / ppoll -- the other ways to wait for descriptors, on the same readiness test and the same wake-up as `poll`.
+    if number == UB_SELECT {
+        return do_select(state, me, a0, a1, a2, a3, a4, 0)
+    }
+    if number == UB_PSELECT6 {
+        return do_select(state, me, a0, a1, a2, a3, a4, 1)
+    }
+    if number == UB_PPOLL {
+        // timespec* -> milliseconds (rounded up); a NULL pointer is "no limit"; the signal mask (a3) is accepted and ignored
+        var tmo: u64 = 0xFFFFFFFF
+        if a2 != 0 {
+            if !proc.user_ok(state, me, a2, 16) {
+                return neg(errno.E_FAULT)
+            }
+            let psec: u64 = user_word(state, me, a2)
+            let pns: u64 = user_word(state, me, a2 + 8)
+            if pns >= 1000000000 {
+                return neg(errno.E_INVAL)
+            }
+            if psec > 2000000 {
+                tmo = 0xFFFFFFFF
+            } else {
+                tmo = psec * 1000 + (pns + 999999) / 1000000
+            }
+        }
+        return do_poll(state, me, a0, a1, tmo)
+    }
     if number == UB_MADVISE {
         return do_madvise(state, me, a0, a1, a2)
     }
@@ -16373,6 +16400,9 @@ fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
 }
 
 // ================================================================ RUNDE UNTERBAU
+const UB_SELECT: u64 = 23
+const UB_PSELECT6: u64 = 270
+const UB_PPOLL: u64 = 271
 const UB_MREMAP: u64 = 25
 const UB_MSYNC: u64 = 26
 const UB_MADVISE: u64 = 28
@@ -16807,4 +16837,117 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         return neg(errno.E_FAULT)
     }
     return r
+}
+
+// select / pselect6 (`wide` = 1: the timeout is a timespec, not a timeval): three bit sets of descriptors, one answer. Only descriptors below
+// MAX_FD can exist, so a set bit beyond that is -EBADF. The result sets hold what is ready; the count is the number of ready bits.
+fn do_select(state: u64, me: u64, nfds: u64, rp: u64, wp: u64, ep: u64, tp: u64, wide: u64) -> u64 {
+    if nfds > 1024 {
+        return neg(errno.E_INVAL)
+    }
+    let words: u64 = (nfds + 63) / 64
+    if rp != 0 && !proc.user_ok(state, me, rp, words * 8) {
+        return neg(errno.E_FAULT)
+    }
+    if wp != 0 && !proc.user_ok(state, me, wp, words * 8) {
+        return neg(errno.E_FAULT)
+    }
+    if ep != 0 && !proc.user_ok(state, me, ep, words * 8) {
+        return neg(errno.E_FAULT)
+    }
+    var forever: bool = true
+    var ticks: u64 = 0
+    if tp != 0 {
+        if !proc.user_ok(state, me, tp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let sec: u64 = user_word(state, me, tp)
+        var frac: u64 = user_word(state, me, tp + 8)
+        if wide != 0 {
+            frac = (frac + 999) / 1000
+        }
+        if frac >= 1000000 {
+            return neg(errno.E_INVAL)
+        }
+        forever = false
+        if sec > 2000000 {
+            forever = true
+        } else {
+            let ms: u64 = sec * 1000 + (frac + 999) / 1000
+            if ms != 0 {
+                ticks = (ms + 9) / 10 + 1
+            }
+        }
+    }
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + ticks
+    var inr: [u64; 16] = [0 as u64; 16]
+    var inw: [u64; 16] = [0 as u64; 16]
+    var k: u64 = 0
+    while k < words {
+        if rp != 0 {
+            inr[k as usize] = user_word(state, me, rp + k * 8)
+        }
+        if wp != 0 {
+            inw[k as usize] = user_word(state, me, wp + k * 8)
+        }
+        k = k + 1
+    }
+    var going: bool = true
+    while going {
+        let seen: u64 = sched.poll_seq(state)
+        var outr: [u64; 16] = [0 as u64; 16]
+        var outw: [u64; 16] = [0 as u64; 16]
+        var ready: u64 = 0
+        var fd: u64 = 0
+        while fd < nfds {
+            let wi: u64 = fd / 64
+            let bit: u64 = 1 << (fd % 64)
+            let wantr: bool = (inr[wi as usize] & bit) != 0
+            let wantw: bool = (inw[wi as usize] & bit) != 0
+            if wantr || wantw {
+                let pr: u64 = poll_ready(state, me, fd)
+                if (pr & POLLNVAL) != 0 {
+                    return neg(errno.E_BADF)
+                }
+                if wantr && (pr & (POLLIN | POLLHUP | POLLERR)) != 0 {
+                    outr[wi as usize] = outr[wi as usize] | bit
+                    ready = ready + 1
+                }
+                if wantw && (pr & (POLLOUT | POLLERR)) != 0 {
+                    outw[wi as usize] = outw[wi as usize] | bit
+                    ready = ready + 1
+                }
+            }
+            fd = fd + 1
+        }
+        var expired: bool = false
+        if !forever && kstate.get(state, kstate.TICKS) >= deadline {
+            expired = true
+        }
+        if ready != 0 || expired {
+            k = 0
+            while k < words {
+                if rp != 0 {
+                    let _a: bool = put64(state, me, rp + k * 8, outr[k as usize])
+                }
+                if wp != 0 {
+                    let _b: bool = put64(state, me, wp + k * 8, outw[k as usize])
+                }
+                if ep != 0 {
+                    let _c: bool = put64(state, me, ep + k * 8, 0)
+                }
+                k = k + 1
+            }
+            return ready
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        var wake: u64 = deadline
+        if forever {
+            wake = sched.POLL_FOREVER
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return 0
 }
