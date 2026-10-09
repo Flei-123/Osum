@@ -511,7 +511,27 @@ else). Every client with a data device **and keyboard focus** is told (`data_off
 
 ### 11.6 Measured (tools/wayland/input.sh, one boot, real input)
 
-@RESULTS@
+`bash tools/wayland/input.sh`: **66 passed, 0 failed** (QEMU, KVM, three `wlin` programs, host input over the monitor):
+
+| What | Result |
+|---|---|
+| keymap | all three clients got `fmt=1 size=64434 crc=0x33fc972e` = the file the host compiled (65 KB, `us`); `repeat_info 25/400`; seat `seat0`, version 5, caps 3 |
+| focus | B (newest window) got `enter` at once and the key `a` as evdev 30 press + release; A and C got **nothing**; a click on A: A `enter`, B `leave` |
+| pointer | A: `enter`, `motion` (40,30) when (40,30) was clicked, `button` 272 pressed/released, `frame`; `leave` when the pointer left; B, over which the pointer only passed, got no button |
+| keysyms (libxkbcommon on the host) | `A 1 exclam Ctrl+c Return Left Up Delete` on `us`; every event of these keys has its own serial; Ctrl is xkb mask 4 |
+| German layout | after Ctrl+Alt+L every keyboard got the 66 KB `de` keymap (`crc=0xa5928665`); z -> `y`, ; -> `odiaeresis` (UTF-8 over two octets), Shift+1 -> `exclam` |
+| clipboard client -> client | A `set_selection` (serial of a key press), B pasted `hello-from-A` **through A** (descriptor passed on, `source.send ... wrote=12`) |
+| clipboard -> system | after that a native system call reads `hello-from-A` from the OrientOS clipboard |
+| clipboard system -> client | a native program set `native-says-hi`; B was offered it and pasted it; A (the owner before) got `cancelled` |
+| counter-proofs | no `set_selection` -> `selection=none`; a serial that was never given -> refused, `cancelled`, nothing offered; the owner exits -> `selection=none` for the next client, no hang |
+| locked screen | `osum_sperre`: no key, no pointer event (not even `leave`) reached the window; after the unlock keys arrive again; `tools/lockseal/run.sh` 43/0 as before |
+| idle | wayd alone: **122** system calls of the whole system in 5 s (24 per second); the busy loop of before: **451 010** in 5 s (90 202 per second), measured with the same program (`BASE_WAYD=<old elf> IDLE_ONLY=1 bash tools/wayland/input.sh`); three windows open and nobody touching: 4 684 in 5 s |
+
+Other gates run with this change: `tools/wayland/run.sh` **52 passed, 0 failed** (was 45; the new ones: modules present, key table and keymaps generated and
+compiled, `wl_data_device_manager` known), `tools/actionbus/gui.sh` **67 passed, 0 failed** (a real Wayland program on wayd steered by the
+action bus -- the old keymap-less path, `no_keymap`, still works), `tools/lockseal/run.sh` **43/0**, `tools/a11y/run.sh` **58/0**.
+Nothing outside Ring 3 (`wayd` and its test tools) was changed, so the other gates of the system (wm, k15, alltag, fourbugs, softui,
+themestore, comp) cannot move and were not run for this change.
 
 ### 11.7 What the measurement found (and what was changed because of it)
 
