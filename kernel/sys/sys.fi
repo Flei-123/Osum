@@ -2656,6 +2656,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // kernel really is -- a limit that exists, a count of cores it really has, "nothing to do" where there is nothing -- and none of
     // them pretends to an effect it does not have.
     // RUNDE UNTERBAU: select / pselect6 / ppoll -- the other ways to wait for descriptors, on the same readiness test and the same wake-up as `poll`.
+    if number == UB_SOCKETPAIR {
+        return cx_pair(state, me, do_socketpair(state, me, a0, a1, a2, a3), a3, a1)
+    }
     if number == UB_SELECT {
         return do_select(state, me, a0, a1, a2, a3, a4, 0)
     }
@@ -16401,6 +16404,7 @@ fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
 
 // ================================================================ RUNDE UNTERBAU
 const UB_SELECT: u64 = 23
+const UB_SOCKETPAIR: u64 = 53
 const UB_PSELECT6: u64 = 270
 const UB_PPOLL: u64 = 271
 const UB_MREMAP: u64 = 25
@@ -16950,4 +16954,80 @@ fn do_select(state: u64, me: u64, nfds: u64, rp: u64, wp: u64, ep: u64, tp: u64,
         sched.poll_sleep(state, seen, wake)
     }
     return 0
+}
+
+// socketpair(AF_UNIX, SOCK_STREAM): two connected local sockets. (SOCK_DGRAM does not exist for local sockets in this kernel.)
+fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv: u64) -> u64 {
+    if domain != AF_UNIX {
+        return neg(errno.E_AFNOSUPPORT)
+    }
+    if (kind & 0xFF) != SOCK_STREAM || protocol != 0 {
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    if !proc.user_ok(state, me, sv, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let a: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    if a >= unixsock.USOCK_MAX {
+        return neg(errno.E_NFILE)
+    }
+    let b: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    if b >= unixsock.USOCK_MAX {
+        unixsock.sock_free(state, a)
+        return neg(errno.E_NFILE)
+    }
+    let c: u64 = unixsock.connect_pair(state, a, b)
+    if c != 0 {
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return neg(c)
+    }
+    let oa: u64 = file.open_alloc(state, file.K_USOCK, a, O_RDWR)
+    if oa >= file.MAX_OPEN {
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return neg(errno.E_NFILE)
+    }
+    let ob: u64 = file.open_alloc(state, file.K_USOCK, b, O_RDWR)
+    if ob >= file.MAX_OPEN {
+        file.open_unref(state, oa)
+        unixsock.sock_free(state, b)
+        return neg(errno.E_NFILE)
+    }
+    let fa: u64 = file.fd_alloc(state, me, 0)
+    if fa >= file.MAX_FD {
+        file.open_unref(state, oa)
+        file.open_unref(state, ob)
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fa, oa)
+    let fb: u64 = file.fd_alloc(state, me, 0)
+    if fb >= file.MAX_FD {
+        file.fd_free(state, me, fa)
+        file.open_unref(state, oa)
+        file.open_unref(state, ob)
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fb, ob)
+    if (kind & SOCK_NONBLOCK) != 0 {
+        file.open_set_flags(state, oa, file.open_flags(state, oa) | UB_O_NONBLOCK)
+        file.open_set_flags(state, ob, file.open_flags(state, ob) | UB_O_NONBLOCK)
+    }
+    if !put32(state, me, sv, fa) || !put32(state, me, sv + 4, fb) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// a successful socketpair with SOCK_CLOEXEC marks both descriptors (they were just written to `sv`)
+fn cx_pair(state: u64, me: u64, r: u64, sv: u64, kind: u64) -> u64 {
+    if r == 0 && (kind & UB_O_CLOEXEC) != 0 {
+        let _a: u64 = cx_result(state, me, user_word32(state, me, sv), UB_O_CLOEXEC)
+        let _b: u64 = cx_result(state, me, user_word32(state, me, sv + 4), UB_O_CLOEXEC)
+    }
+    return r
 }

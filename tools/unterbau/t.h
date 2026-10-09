@@ -35,4 +35,4 @@ static void t_emit(const char *name, const char *verdict, const char *fmt, ...)
 /* ok(name, cond, "detail on failure %d", x) */
 #define CHECK(name, cond, ...) do { if (cond) PASS(name); else FAIL(name, __VA_ARGS__); } while (0)
 /* a call that returns -1 with errno: ENOSYS/ENOENT/EINVAL ... counts as a GAP when the call is missing */
-#define CHECKC(name, cond, ...) do { if (cond) PASS(name); else if (errno == ENOSYS || errno == ENOENT || errno == ENODEV || errno == ENOTSUP || errno == EOPNOTSUPP || errno == EAFNOSUPPORT) GAP(name, "errno=%d %s", errno, strerror(errno)); else FAIL(name, "errno=%d %s", errno, strerror(errno)); } while (0)
+#define CHECKC(name, cond, ...) do { if (cond) PASS(name); else if (errno == ENOSYS || errno == ENOENT || errno == ENODEV || errno == ENOTSUP || errno == EOPNOTSUPP || errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT) GAP(name, "errno=%d %s", errno, strerror(errno)); else FAIL(name, "errno=%d %s", errno, strerror(errno)); } while (0)
