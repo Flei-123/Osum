@@ -425,6 +425,35 @@ top strip). It now lays the shadow again when the clip touches the ring.
 Gate: `tools/comp/shadow.sh` (0 judged pixels differ, `shadow=` windows and `shadowpx=` pixels per cycle on the cycle line) and the counter-proof
 `noshadow=1` (`wigapp=/bin/wmd,noshadow=1`): the ring is still judged but not composed, so the judge must see the missing shadow.
 
+### r486 -- the terminal window in a shared buffer (09.10.2026)
+
+Who paints the terminal: NOT a user program. The kernel terminal (`K_TERM`, `wm.term_paint`) writes the cell grid into the window's own buffer; the buffer used
+to be a private run of frames, so the table page said `shm = 0` and `wmd` could not look at it. Now `create_ex` asks `kern_shared` for a **shared object the kernel
+makes itself** (`unixsock.shm_new_contig` + `shm_grow`; the window holds the one reference, no client has a descriptor), the window table names it (shm column,
+`plain` as before) and `wmd` maps it read-only (`WM_BUFFD`) like any other client buffer. The kernel keeps painting; nothing in the paint path changed.
+
+* Resize / maximise: `term_fit` keeps the object while the new size fits, else makes a bigger one; when no object or no contiguous run can be had the window goes back
+  to a private run (`detach_buf`), which is exactly the `noshare` path.
+* `noshare` (kernel word): `kern_shared` returns 0 -> the terminal has a private buffer as before (the counter-proof).
+* `wmd` marks the pixels of a kind-1 window with mask value 2 and prints `term=<windows> termpx=<judged px> termdiff=<differing px>` on every cycle line.
+  A terminal's pixels come from the kernel painter, which leaves the alpha octet clear; the terminal is opaque by its kind, so the judge and `sh_mix` (the shadow of a
+  window above) treat mask 2 as opaque. (First try: forcing the alpha octet to 255 per pixel in the picture doubled the compose time -- 6.6 ms against 3.1 ms -- and was dropped.)
+* New kernel word `termdump` (`fb.M_TERMDUMP`): every pulse the terminal's cells go to the serial line (`wm: termgeo ...`, `wm: termzeile n [...]`) without the
+  diagnostic board -- the independent witness below. `tools/design/eh6.sh` got `window_alpha=`, `tafel=nein` (the board paints over the screen, which a judge that compares
+  the screen cannot have) and runs at 1280x800 here (`wmd` reads at most 1280 x 800).
+
+**Gate `tools/comp/termshare.sh` (9/0):** (1) the terminal has a shared object (`shared=40`), `wmd` judges 183 744 terminal pixels per cycle, 913 344 - 1 099 776 over a run,
+**0 differ**; (2) an INDEPENDENT witness: the cells of the kernel's own state (`termgeo/termzeile`, a path that goes through neither `wmd` nor the judge) are looked up in the
+screenshot of the screen device: 449 - 470 cells carry ink, 1067 of 1069 checked cells agree (ink where there is a character, none where there is none), and the marker typed into the
+shell (`echo tsmarker4711`, three times: the keyboard path drops a character under host load) stands in the cells; (3) `noshare`: `shared=0`, `wmd` judges 0 terminal pixels, the text still
+stands in the picture (the old path works); (4) the witness fails on a screenshot with the terminal wiped out (it would not pass on an empty picture).
+
+**Measured (KVM):** `tools/comp/shadow.sh` 14/0, 0 of 41 277 476 judged pixels differ, largest judged area 766 609 px (was 667 538: the terminal is in it), compose median 3 727 us (main 3 095 us,
+budget 8 000); `tools/comp/shared.sh` 25/0 (the terminal was never copied by `WIG_BLIT`, so the copies per frame are unchanged: 314 928 px, 999 px per frame; what changed is that the
+terminal is now judged). The terminal region of the pictures of `shared.sh` (c3) carries the uitrace lines of the programs (`wlib: text win=...`), which scroll in by timing: a source of noise
+that was there before (the gate flickers on main too).
+Judged area per cycle: +7 % (a 560 x 380 client area that was never judged).
+
 ### S4 -- `wmd`, the shadow compositor (observer)
 
 `kernel/user/wmd.fi` reads the table page and the buffers of the shared windows (`WM_BUFFD`), composes the CLIENT AREAS of the plain windows into
@@ -466,5 +495,5 @@ dates: the wall clock differs between boots; two shared runs differ from each ot
 ### What did not get done / the order for the next rounds
 
 * S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
-* Terminal and desktop windows are not shared yet (`want_shared` is on for `fuiapp` programs); the pixels of those are not judged.
+* ~~Terminal and desktop windows are not shared yet~~: the desktop window is (r486), the terminal is (r486, see above). Menus (`NK_MENU`) and a window during a drag still take the `WIG_BLIT` / kernel path.
 * ~~`look`: `'Größe' does not match a second rasterisation`~~ fixed (08.10.2026): the file manager's buffer grows upward by its caption strip (r454); `tools/look/umlaut.py` now subtracts the strip height the program reports (`explorer: strip h=`). `look` 41/0. `alltag` had silently lost its counter-proof (45 -> 44): the console lines were renamed (`opk: installed`, `opk: SIGNATURE WRONG`) and the German words it looked for never matched; the check is now mandatory (45/0). `k15` is 259/0: r454 added one line (the title bar of the file manager is its tab strip).
