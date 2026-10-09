@@ -98,7 +98,7 @@ export {
     trust_ask, trust_poll, trust_cancel,
     init, ready, compose, damage, damage_ex, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
-    create, create_ex, attach_buf, win_shm, damage_rect, tab_object, tab_publish, shared_ok, sh_stat,
+    create, create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, tab_publish, shared_ok, sh_stat,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, valid, count, focus, set_focus, raise_win,
     // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
     close_top, close_term, top_visible, cross_point, term_win,
@@ -1734,6 +1734,8 @@ const S_SH_ATT: u64 = 0x1E38 // windows that got a shared buffer (running total)
 const S_SH_DET: u64 = 0x1E40 // shared buffers taken back by a resize (running total)
 const S_TAB_N: u64 = 0x1E48  // table pages published
 const S_TM_SH: u64 = 0x1E50  // terminal buffers made as kernel-owned shared objects (running total)
+const S_CHRF: u64 = 0x1E58   // S6b: the chrome page (frame address), 0 = not made yet
+const S_CHRI: u64 = 0x1E60   // its shared object + 1
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -5827,6 +5829,52 @@ fn tab_object(state: u64) -> u64 {
     return k
 }
 
+// S6b: THE CHROME PAGE. A second read-only frame, ROOT ONLY (WM_TABLE with argument 1): everything the compositor in ring 3 needs to paint the frame, the
+// title bar, the caption buttons and the title text of a framed window exactly as `paint_win` does -- the colours of the decoration, the measures,
+// the hover state and the titles. Titles are private (the window table page has none), so this page is for the compositor only and its title
+// words are zero while the screen is locked. Written by `tab_publish` inside the same odd/even bracket as the window table, so a reader that
+// sees the table consistent sees this page consistent too. All words u64:
+//   0 magic "WCHR" | 1 << 32      1 the table's sequence number it was written with      2 valid (1)
+//   3, 4, 5  fb.rgb(255,0,0), fb.rgb(0,255,0), fb.rgb(0,0,255): the compositor refuses to compose when they are not 0xFF0000, 0xFF00, 0xFF
+//   6..13    the colours (0xRRGGBB): frame, title, text, frame (focused), title (focused), text (focused), close, close mark
+//   14 radius  15 gradient  16 caption style (0 = old red close box)  17 border  18 title height (frame + bar + line)  19 caption button width
+//   20 ui scale  21 decoration alpha (0..255)  22 hovered caption button ((slot * 4 + n) + 1)  23 held caption button (same coding)
+//   24 ui font  25 ui font size  26 title padding  27 title baseline offset from the window top (i64)  28 netmark width | height << 16
+//   29 1 when the title font exists (the server paints a title only then)
+//   from word 32: four words of title per table row (31 octets and a zero);  from word 192: one word per table row: the netmark (1..3) or 0
+const CHR_MAGIC: u64 = 0x52484357
+const CHR_TITLE: u64 = 32
+const CHR_MARK: u64 = 192
+
+fn chrome_object(state: u64) -> u64 {
+    // the table first: the chrome page is written by `tab_publish`, which runs only once the table exists
+    let kt: u64 = tab_object(state)
+    if kt >= unixsock.USHM_MAX {
+        return kt
+    }
+    if gs(state, S_CHRI) != 0 {
+        return gs(state, S_CHRI) - 1
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return unixsock.USHM_MAX
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        __mmio_write64((f + o * 8) as *mut u64, 0)
+        o = o + 1
+    }
+    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
+    if k >= unixsock.USHM_MAX {
+        mem.frame_free(state, f)
+        return unixsock.USHM_MAX
+    }
+    ss(state, S_CHRF, f)
+    ss(state, S_CHRI, k + 1)
+    tab_publish(state)
+    return k
+}
+
 fn tw(f: u64, w: u64, v: u64) {
     __mmio_write64((f + w * 8) as *mut u64, v)
 }
@@ -5866,6 +5914,31 @@ fn tab_publish(state: u64) {
                 shad = 1
             }
             tw(f, r + 11, (wg(state, i, W_OPAC) & 0xFFFFFFFF) | (plain << 32) | (shad << 33))
+            // S6b: the title and the netmark of this row go to the chrome page (never while the screen is locked)
+            let cf: u64 = gs(state, S_CHRF)
+            if cf != 0 {
+                var t0: u64 = 0
+                var t1: u64 = 0
+                var t2: u64 = 0
+                var t3: u64 = 0
+                var mk: u64 = 0
+                if !sperre_an(state) {
+                    let tp: u64 = state + wat(i) + W_TITLE
+                    t0 = __mmio_read64(tp as *mut u64)
+                    t1 = __mmio_read64((tp + 8) as *mut u64)
+                    t2 = __mmio_read64((tp + 16) as *mut u64)
+                    t3 = __mmio_read64((tp + 24) as *mut u64) & 0x00FFFFFFFFFFFFFF
+                    let sicht: u64 = netview.view_of(state, win_owner(state, i))
+                    if sicht != netview.V_REAL && sicht <= 3 {
+                        mk = sicht
+                    }
+                }
+                tw(cf, CHR_TITLE + n * 4, t0)
+                tw(cf, CHR_TITLE + n * 4 + 1, t1)
+                tw(cf, CHR_TITLE + n * 4 + 2, t2)
+                tw(cf, CHR_TITLE + n * 4 + 3, t3)
+                tw(cf, CHR_MARK + n, mk)
+            }
             n = n + 1
         }
         i = i + 1
@@ -5889,6 +5962,48 @@ fn tab_publish(state: u64) {
     tw(f, 8, shadow_staerke(state, FM_SHADOW) | (form(state, FM_SHADOW_R) << 8) | (shadow_staerke(state, FM_SHADOW2) << 16)
         | (form(state, FM_SHADOW_R2) << 24) | (form(state, FM_RADIUS) << 32))
     tw(f, 9, rgb24(state, form(state, FM_SHADOW_C)) | (1 << 32) | (sold << 33))
+    // S6b: the numbers of the chrome (see `chrome_object`)
+    let cf2: u64 = gs(state, S_CHRF)
+    if cf2 != 0 {
+        tw(cf2, 0, CHR_MAGIC | (1 << 32))
+        tw(cf2, 2, 1)
+        tw(cf2, 3, fb.rgb(state, 255, 0, 0))
+        tw(cf2, 4, fb.rgb(state, 0, 255, 0))
+        tw(cf2, 5, fb.rgb(state, 0, 0, 255))
+        tw(cf2, 6, deco_rgb(state, DK_FRAME))
+        tw(cf2, 7, deco_rgb(state, DK_TITLE))
+        tw(cf2, 8, deco_rgb(state, DK_TEXT))
+        tw(cf2, 9, deco_rgb(state, DK_FRAME_ON))
+        tw(cf2, 10, deco_rgb(state, DK_TITLE_ON))
+        tw(cf2, 11, deco_rgb(state, DK_TEXT_ON))
+        tw(cf2, 12, deco_rgb(state, DK_CLOSE))
+        tw(cf2, 13, deco_rgb(state, DK_CLOSE_MARK))
+        tw(cf2, 14, form(state, FM_RADIUS))
+        tw(cf2, 15, form(state, FM_GRAD))
+        tw(cf2, 16, form(state, FM_CAPTION))
+        tw(cf2, 17, border(state))
+        tw(cf2, 18, title_h(state))
+        tw(cf2, 19, cap_w(state))
+        tw(cf2, 20, uisc(state))
+        tw(cf2, 21, deco_alpha(state))
+        tw(cf2, 22, gs(state, S_CAPHOV))
+        tw(cf2, 23, gs(state, S_CAPDOWN))
+        let fu: u64 = gs(state, S_FONT_UI)
+        tw(cf2, 24, fu)
+        tw(cf2, 25, gs(state, S_PX_UI))
+        tw(cf2, 26, title_pad(state))
+        var tbase: i64 = 0
+        if fu < ttf.MAX_FONTS {
+            tbase = title_base(state, fu)
+        }
+        tw(cf2, 27, tbase as u64)
+        tw(cf2, 28, netmark.W | (netmark.H << 16))
+        var fok: u64 = 0
+        if fu < ttf.MAX_FONTS {
+            fok = 1
+        }
+        tw(cf2, 29, fok)
+    }
     ss(state, S_TAB_N, gs(state, S_TAB_N) + 1)
     tw(f, 5, gs(state, S_COMPOSITES))
     tw(f, 6, TAB_ROW)
@@ -5897,6 +6012,10 @@ fn tab_publish(state: u64) {
         lk = 1
     }
     tw(f, 7, lk)
+    let cf3: u64 = gs(state, S_CHRF)
+    if cf3 != 0 {
+        tw(cf3, 1, seq + 1)
+    }
     arch.atomic_store(f + 8, seq + 1) // even: consistent
     ss(state, S_TABSEQ, seq + 1)
 }
