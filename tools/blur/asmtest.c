@@ -12,6 +12,9 @@ extern void blur_v_asm(u64 *p);
 extern void blur_m_asm(u64 *p);
 extern void blur_d_asm(u64 *p);
 extern void blur_g_asm(u64 *p);
+extern void blur_s_asm(u64 *p);
+extern void blur_w_asm(u64 *p);
+extern void blur_x_asm(u64 *p);
 #define SHIFT 19
 #define RUND 262144ull
 static u64 rec[64];
@@ -76,26 +79,39 @@ int main(void) {
         for (u64 i = 0; i < w * h; i++) a[i] = rnd32() & 0xFFFFFF;
         if (si % 3 == 0) for (u64 i = 0; i < w * h; i++) a[i] = (i & 1) ? 0xFFFFFF : 0;
         u64 *sum = malloc(3 * 27520); memset(sum, 0xA5, 3 * 27520);
+        if (si % 2) for (u64 i = 0; i < w * h; i++) a[i] |= rnd32() & 0xFF000000u;   /* alpha bytes must not matter */
         u64 p[16] = {(u64)a, (u64)b, w, h, r, (u64)rec, 0, 0};
         ref_h(a, c, w, h, r); { u64 pp[16]; memcpy(pp, p, sizeof p); blur_h_asm(pp); }
         if (memcmp(b, c, w * h * 4)) { printf("FAIL h w=%lu h=%lu r=%lu\n", w, h, r); bad++; }
-        p[6] = (u64)sum;
+        /* r481: four rows at a time (block x), the rest through the scalar loop */
+        { memset(b, 0x5A, w * h * 4); u64 h4 = h & ~3ull; u64 pp[16] = {(u64)a, (u64)b, w, h4, r, (u64)rec, 0, 0, 0, 0};
+          blur_x_asm(pp);
+          u64 p2[16] = {(u64)(a + h4 * w), (u64)(b + h4 * w), w, h - h4, r, (u64)rec, 0, 0}; blur_h_asm(p2);
+          if (memcmp(b, c, w * h * 4)) { printf("FAIL x w=%lu h=%lu r=%lu\n", w, h, r); bad++; } }
+        p[6] = (u64)sum; p[11] = w;
         ref_v(a, c, w, h, r); { u64 pp[16]; memcpy(pp, p, sizeof p); blur_v_asm(pp); }
         if (memcmp(b, c, w * h * 4)) { printf("FAIL v w=%lu h=%lu r=%lu\n", w, h, r); bad++; }
-        free(a); free(b); free(c); free(sum); cases += 2;
+        /* r481: the columns in groups of four (block w), the other columns through the scalar loop, same pitch */
+        { memset(b, 0x5A, w * h * 4); memset(sum, 0xA5, 3 * 27520); u64 c4 = w & ~3ull;
+          u64 pp[16] = {(u64)a, (u64)b, c4, h, r, (u64)rec, (u64)sum, 0, 0, 0, 0, w};
+          blur_w_asm(pp);
+          u64 p2[16] = {(u64)(a + c4), (u64)(b + c4), w - c4, h, r, (u64)rec, (u64)(sum + c4), 0, 0, 0, 0, w}; blur_v_asm(p2);
+          if (memcmp(b, c, w * h * 4)) { printf("FAIL w w=%lu h=%lu r=%lu\n", w, h, r); bad++; } }
+        free(a); free(b); free(c); free(sum); cases += 4;
     }
     for (int t = 0; t < 4000; t++) {
         u64 n = 1 + rnd32() % 300, tint = (t % 5 == 0) ? 0 : rnd32() % 101, amp = (t % 4 == 0) ? 0 : rnd32() % 40;
         u64 ton = rnd32() & 0xFFFFFF, x0 = rnd32() % 100000, y = rnd32() % 100000;
         u32 *a = malloc(n * 4), *b = malloc(n * 4);
-        for (u64 i = 0; i < n; i++) a[i] = rnd32() & 0xFFFFFF;
+        for (u64 i = 0; i < n; i++) a[i] = rnd32();
         if (t % 7 == 0) for (u64 i = 0; i < n; i++) a[i] = (i & 1) ? 0xFFFFFF : 0;
-        u64 p[16] = {(u64)a, (u64)b, n, x0, y * 19349663ull, amp, amp * 2 + 1, 100 - tint,
+        u64 p[24] = {(u64)a, (u64)b, n, x0, y * 19349663ull, amp, amp * 2 + 1, 100 - tint,
                      ((ton >> 16) & 255) * tint, ((ton >> 8) & 255) * tint, (ton & 255) * tint, 0};
         blur_g_asm(p);
+        if (t % 3) blur_s_asm(p);   /* r481: four pixels at a time, the rest through the scalar loop */
         blur_m_asm(p);
         for (u64 i = 0; i < n; i++) {
-            u32 want = (u32)ref_mix(a[i], ton, tint, amp, x0 + i, y);
+            u32 want = (u32)ref_mix(a[i], ton, tint, amp, x0 + i, y) & 0xFFFFFF;   /* the alpha byte is dropped, as in every pass */
             if (b[i] != want) { printf("FAIL m t=%d i=%lu tint=%lu amp=%lu got=%06x want=%06x\n", t, i, tint, amp, b[i], want); bad++; break; }
         }
         free(a); free(b); cases++;

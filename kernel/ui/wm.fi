@@ -8399,14 +8399,38 @@ fn bdiv(summe: u64, rec: u64) -> u64 {
 // about 60 ns a pixel and one 640 x 416 menu 77 - 105 ms. `tools/blur/blurasm.py` holds the same arithmetic (same reciprocal table
 // `rt`, same rounding, same window) in registers; `tools/blur/asmtest.c` compares it with the old Firn loop on random pictures.
 // `rt` points at the 40 words `rt[n] = recip_of(n)` that `blur_flaeche` fills once per filter run.
-fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64) {
-    var blk: [u64; 8] = [0 as u64; 8]
+fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64, simd: bool) {
+    var blk: [u64; 12] = [0 as u64; 12]
     blk[0] = quelle
     blk[1] = ziel
     blk[2] = w
     blk[3] = h
     blk[4] = r
     blk[5] = rt
+    // r481: four rows at a time in SSE2 (routine x; the interrupts stay off for each group of four rows only), the remaining
+    // rows (and every row when the vector unit is off, `fbnosimd`) through the scalar routine h. Same pixels: asmtest.c.
+    if simd && h >= 4 {
+        let done: u64 = h - (h & 3)
+        blk[3] = done
+        blk[9] = 1
+        asm("mov r11,rdi\nmov rax,[r11+24]\nshr rax,2\njz 0f\nmov [r11+24],rax\nmov rax,[r11+16]\ntest rax,rax\njz 0f\npxor xmm15,xmm15\nmov eax,4\nmovd xmm10,eax\npshuflw xmm10,xmm10,0\npshufd xmm10,xmm10,0\npcmpeqd xmm11,xmm11\npsrld xmm11,8\nmov r8,[r11]\nmov r9,[r11+8]\nmov rcx,[r11+16]\nshl rcx,2\nlea rdx,[rcx+rcx*2]\n1:\nmov rax,[r11+72]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\npxor xmm0,xmm0\npxor xmm1,xmm1\nxor eax,eax\nmov [r11+56],rax\nmov [r11+64],rax\nmov rsi,r8\nxor r10d,r10d\n2:\ncmp r10,[r11+16]\njae 3f\ncmp r10,[r11+32]\nja 3f\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npaddw xmm0,xmm6\npaddw xmm1,xmm7\nadd rsi,4\ninc qword ptr [r11+56]\ninc r10\njmp 2b\n3:\nxor r10d,r10d\n4:\nmov rax,[r11+56]\ncmp rax,[r11+64]\nje 5f\nmov [r11+64],rax\nshl rax,3\nadd rax,[r11+40]\nmov rax,[rax]\nmovzx edi,ax\nmovd xmm8,edi\npshuflw xmm8,xmm8,0\npshufd xmm8,xmm8,0\nshr eax,16\nmovd xmm9,eax\npshuflw xmm9,xmm9,0\npshufd xmm9,xmm9,0\n5:\nmovdqa xmm2,xmm0\npmulhuw xmm2,xmm8\nmovdqa xmm4,xmm0\npmullw xmm4,xmm9\npaddw xmm2,xmm4\npaddw xmm2,xmm10\npsrlw xmm2,3\nmovdqa xmm3,xmm1\npmulhuw xmm3,xmm8\nmovdqa xmm5,xmm1\npmullw xmm5,xmm9\npaddw xmm3,xmm5\npaddw xmm3,xmm10\npsrlw xmm3,3\npackuswb xmm2,xmm3\npand xmm2,xmm11\nlea rax,[r9+r10*4]\nmovd [rax],xmm2\npsrldq xmm2,4\nmovd [rax+rcx],xmm2\npsrldq xmm2,4\nmovd [rax+rcx*2],xmm2\npsrldq xmm2,4\nmovd [rax+rdx],xmm2\nmov rax,r10\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+16]\njae 6f\nlea rsi,[r8+rax*4]\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npaddw xmm0,xmm6\npaddw xmm1,xmm7\ninc qword ptr [r11+56]\n6:\ncmp r10,[r11+32]\njb 7f\nmov rax,r10\nsub rax,[r11+32]\nlea rsi,[r8+rax*4]\nmovd xmm6,[rsi]\nmovd xmm4,[rsi+rcx]\npunpckldq xmm6,xmm4\nmovd xmm7,[rsi+rcx*2]\nmovd xmm4,[rsi+rdx]\npunpckldq xmm7,xmm4\npunpcklbw xmm6,xmm15\npunpcklbw xmm7,xmm15\npsubw xmm0,xmm6\npsubw xmm1,xmm7\ndec qword ptr [r11+56]\n7:\ninc r10\ncmp r10,[r11+16]\njb 4b\nmov rax,[r11+72]\ntest rax,rax\njz 92f\npopfq\n92:\nmov rax,rcx\nshl rax,2\nadd r8,rax\nadd r9,rax\nmov rax,[r11+24]\ndec rax\nmov [r11+24],rax\njnz 1b\n0:",
+            in("rdi") (&blk[0]) as u64,
+            clobber("rax"),
+            clobber("rcx"),
+            clobber("rdx"),
+            clobber("rsi"),
+            clobber("rdi"),
+            clobber("r8"),
+            clobber("r9"),
+            clobber("r10"),
+            clobber("r11"),
+            clobber("memory"))
+        blk[9] = 0
+        blk[0] = quelle +% done *% w *% 4
+        blk[1] = ziel +% done *% w *% 4
+        blk[2] = w
+        blk[3] = h - done
+    }
     asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov rsi,[rdx]\nmov rdi,[rdx+8]\n1:\nxor r8d,r8d\nxor r9d,r9d\nxor r10d,r10d\n2:\ncmp r10,[rdx+16]\njae 3f\ncmp r10,[rdx+32]\nja 3f\nmov eax,[rsi+r10*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd r8,rax\ninc r9\ninc r10\njmp 2b\n3:\nxor r10d,r10d\n4:\nmov rcx,[rdx+40]\nmov rcx,[rcx+r9*8]\nmov rax,r8\nmovzx eax,ax\nimul rax,rcx\nadd rax,262144\nshr rax,19\nmov r11,r8\nshr r11,16\nmovzx r11d,r11w\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,16\nor eax,r11d\nmov r11,r8\nshr r11,32\nmovzx r11d,r11w\nimul r11,rcx\nadd r11,262144\nshr r11,19\nshl r11d,8\nor eax,r11d\nmov [rdi+r10*4],eax\nmov rax,[rdx+32]\nlea rax,[rax+r10+1]\ncmp rax,[rdx+16]\njae 5f\nmov eax,[rsi+rax*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd r8,rax\ninc r9\n5:\ncmp r10,[rdx+32]\njb 6f\nmov rax,r10\nsub rax,[rdx+32]\nmov eax,[rsi+rax*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nsub r8,rax\ndec r9\n6:\ninc r10\ncmp r10,[rdx+16]\njb 4b\nmov rax,[rdx+16]\nshl rax,2\nadd rsi,rax\nadd rdi,rax\nmov rax,[rdx+24]\ndec rax\nmov [rdx+24],rax\njnz 1b\n0:",
         in("rdi") (&blk[0]) as u64,
         clobber("rax"),
@@ -8435,32 +8459,62 @@ fn blur_h(quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64) {
 // Also: EINE Zeile gleitender Summen (drei Kanaele mal Breite) im
 // Speicher halten und das Bild von oben nach unten durchlaufen. Jeder
 // Zugriff ist dann fortlaufend.
-fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64) {
+fn blur_v(state: u64, quelle: u64, ziel: u64, w: u64, h: u64, r: u64, rt: u64, simd: bool) {
     let sum: u64 = gs(state, S_BC_SUM)
     if sum == 0 {
         return
     }
-    // r464: assembly, like `blur_h`; the sums of the row are three 16-bit lanes in ONE word per pixel; the row of zeros lies BLUR_W_MAX words (27520 octets) further on, the number is in the asm text; the block has 12 words (7 - 9 scratch)
+    // r464: assembly, like `blur_h`; the sums of the row are three 16-bit lanes in ONE word per pixel; the row of zeros lies BLUR_W_MAX words (27520 octets) further on, the number is in the asm text; the block has 12 words (7 - 9 scratch, 10 = interrupts off per row, 11 = the row distance in pixels)
+    // r481: a multiple of four columns goes through SSE2 (routine w, each output row with the interrupts off), the other columns (and all of them without the vector unit) through the scalar routine v with the same row distance.
     var blk: [u64; 12] = [0 as u64; 12]
-    blk[0] = quelle
-    blk[1] = ziel
-    blk[2] = w
-    blk[3] = h
-    blk[4] = r
-    blk[5] = rt
-    blk[6] = sum
-    asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov r8,[rdx+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[rdx+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[rdx+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[rdx+32]\nja 4f\ncmp r10,[rdx+24]\njae 4f\nmov rsi,r10\nimul rsi,[rdx+16]\nmov rax,[rdx]\nlea rsi,[rax+rsi*4]\nxor edi,edi\n2:\nmov eax,[rsi+rdi*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 2b\ninc r9\ninc r10\njmp 1b\n4:\nmov [rdx+64],r9\nxor eax,eax\nmov [rdx+56],rax\n5:\nmov rax,[rdx+40]\nmov rcx,[rdx+64]\nmov rax,[rax+rcx*8]\nmov [rdx+72],rax\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\nlea rsi,[r8+27520]\ncmp rax,[rdx+24]\njae 6f\nimul rax,[rdx+16]\nmov rsi,[rdx]\nlea rsi,[rsi+rax*4]\n6:\nlea r9,[r8+27520]\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 7f\nsub rax,[rdx+32]\nimul rax,[rdx+16]\nmov r9,[rdx]\nlea r9,[r9+rax*4]\n7:\nmov r10,[rdx+8]\nxor edi,edi\n8:\nmov rax,[r8+rdi*8]\nmovzx ecx,ax\nimul rcx,[rdx+72]\nadd rcx,262144\nshr rcx,19\nmov r11,rax\nshr r11,16\nmovzx r11d,r11w\nimul r11,[rdx+72]\nadd r11,262144\nshr r11,19\nshl r11d,16\nor ecx,r11d\nshr rax,32\nmovzx eax,ax\nimul rax,[rdx+72]\nadd rax,262144\nshr rax,19\nshl eax,8\nor eax,ecx\nmov [r10+rdi*4],eax\nmov rax,[r8+rdi*8]\nmov ecx,[rsi+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nadd rax,rcx\nmov ecx,[r9+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nsub rax,rcx\nmov [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 8b\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\ncmp rax,[rdx+24]\njae 9f\nmov rax,[rdx+64]\ninc rax\nmov [rdx+64],rax\n9:\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 3f\nmov rax,[rdx+64]\ndec rax\nmov [rdx+64],rax\n3:\nmov rax,[rdx+16]\nshl rax,2\nadd [rdx+8],rax\nmov rax,[rdx+56]\ninc rax\nmov [rdx+56],rax\ncmp rax,[rdx+24]\njb 5b\n0:",
-        in("rdi") (&blk[0]) as u64,
-        clobber("rax"),
-        clobber("rcx"),
-        clobber("rdx"),
-        clobber("rsi"),
-        clobber("rdi"),
-        clobber("r8"),
-        clobber("r9"),
-        clobber("r10"),
-        clobber("r11"),
-        clobber("memory"))
+    var c4: u64 = 0
+    if simd && w >= 4 {
+        c4 = w - (w & 3)
+        blk[0] = quelle
+        blk[1] = ziel
+        blk[2] = c4
+        blk[3] = h
+        blk[4] = r
+        blk[5] = rt
+        blk[6] = sum
+        blk[10] = 1
+        blk[11] = w
+        asm("mov r11,rdi\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmov rax,[r11+24]\ntest rax,rax\njz 0f\npxor xmm15,xmm15\nmov eax,4\nmovd xmm10,eax\npshuflw xmm10,xmm10,0\npshufd xmm10,xmm10,0\npcmpeqd xmm11,xmm11\npsrld xmm11,8\nmov r8,[r11+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[r11+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[r11+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[r11+32]\nja 4f\ncmp r10,[r11+24]\njae 4f\nmov rsi,r10\nimul rsi,[r11+88]\nmov rax,[r11]\nlea rsi,[rax+rsi*4]\nmov rax,[r11+80]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\nmov rax,r8\nmov rcx,[r11+16]\nshr rcx,2\n2:\nmovdqu xmm4,[rsi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\nmovdqu xmm6,[rax]\npaddw xmm6,xmm4\nmovdqu [rax],xmm6\nmovdqu xmm7,[rax+16]\npaddw xmm7,xmm5\nmovdqu [rax+16],xmm7\nadd rsi,16\nadd rax,32\ndec rcx\njnz 2b\nmov rax,[r11+80]\ntest rax,rax\njz 92f\npopfq\n92:\ninc r9\ninc r10\njmp 1b\n4:\nmov [r11+64],r9\nxor eax,eax\nmov [r11+56],rax\n5:\nmov rax,[r11+40]\nmov rcx,[r11+64]\nmov rax,[rax+rcx*8]\nmovzx ecx,ax\nmovd xmm8,ecx\npshuflw xmm8,xmm8,0\npshufd xmm8,xmm8,0\nshr eax,16\nmovd xmm9,eax\npshuflw xmm9,xmm9,0\npshufd xmm9,xmm9,0\nlea rsi,[r8+27520]\nmov rax,[r11+56]\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+24]\njae 6f\nimul rax,[r11+88]\nmov rsi,[r11]\nlea rsi,[rsi+rax*4]\n6:\nlea rdi,[r8+27520]\nmov rax,[r11+56]\ncmp rax,[r11+32]\njb 7f\nsub rax,[r11+32]\nimul rax,[r11+88]\nmov rdi,[r11]\nlea rdi,[rdi+rax*4]\n7:\nmov rdx,[r11+8]\nmov rax,[r11+80]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\nmov rax,r8\nmov rcx,[r11+16]\nshr rcx,2\n3:\nmovdqu xmm0,[rax]\nmovdqu xmm1,[rax+16]\nmovdqa xmm2,xmm0\npmulhuw xmm2,xmm8\nmovdqa xmm4,xmm0\npmullw xmm4,xmm9\npaddw xmm2,xmm4\npaddw xmm2,xmm10\npsrlw xmm2,3\nmovdqa xmm3,xmm1\npmulhuw xmm3,xmm8\nmovdqa xmm5,xmm1\npmullw xmm5,xmm9\npaddw xmm3,xmm5\npaddw xmm3,xmm10\npsrlw xmm3,3\npackuswb xmm2,xmm3\npand xmm2,xmm11\nmovdqu [rdx],xmm2\nmovdqu xmm4,[rsi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\npaddw xmm0,xmm4\npaddw xmm1,xmm5\nmovdqu xmm4,[rdi]\nmovdqa xmm5,xmm4\npunpcklbw xmm4,xmm15\npunpckhbw xmm5,xmm15\npsubw xmm0,xmm4\npsubw xmm1,xmm5\nmovdqu [rax],xmm0\nmovdqu [rax+16],xmm1\nadd rax,32\nadd rdx,16\nadd rsi,16\nadd rdi,16\ndec rcx\njnz 3b\nmov rax,[r11+80]\ntest rax,rax\njz 92f\npopfq\n92:\nmov rax,[r11+56]\nadd rax,[r11+32]\ninc rax\ncmp rax,[r11+24]\njae 8f\nmov rax,[r11+64]\ninc rax\nmov [r11+64],rax\n8:\nmov rax,[r11+56]\ncmp rax,[r11+32]\njb 9f\nmov rax,[r11+64]\ndec rax\nmov [r11+64],rax\n9:\nmov rax,[r11+88]\nshl rax,2\nadd [r11+8],rax\nmov rax,[r11+56]\ninc rax\nmov [r11+56],rax\ncmp rax,[r11+24]\njb 5b\n0:",
+            in("rdi") (&blk[0]) as u64,
+            clobber("rax"),
+            clobber("rcx"),
+            clobber("rdx"),
+            clobber("rsi"),
+            clobber("rdi"),
+            clobber("r8"),
+            clobber("r9"),
+            clobber("r10"),
+            clobber("r11"),
+            clobber("memory"))
+    }
+    if c4 < w {
+        blk[0] = quelle +% c4 *% 4
+        blk[1] = ziel +% c4 *% 4
+        blk[2] = w - c4
+        blk[3] = h
+        blk[4] = r
+        blk[5] = rt
+        blk[6] = sum +% c4 *% 8
+        blk[10] = 0
+        blk[11] = w
+        asm("mov rdx,rdi\nmov rax,[rdx+24]\ntest rax,rax\njz 0f\nmov rax,[rdx+16]\ntest rax,rax\njz 0f\nmov r8,[rdx+48]\ncld\nxor eax,eax\nmov rdi,r8\nmov rcx,[rdx+16]\nrep stosq\nlea rdi,[r8+27520]\nmov rcx,[rdx+16]\nrep stosq\nxor r10d,r10d\nxor r9d,r9d\n1:\ncmp r10,[rdx+32]\nja 4f\ncmp r10,[rdx+24]\njae 4f\nmov rsi,r10\nimul rsi,[rdx+88]\nmov rax,[rdx]\nlea rsi,[rax+rsi*4]\nxor edi,edi\n2:\nmov eax,[rsi+rdi*4]\nmov ecx,eax\nand ecx,16711935\nand eax,65280\nshl rax,24\nor rax,rcx\nadd [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 2b\ninc r9\ninc r10\njmp 1b\n4:\nmov [rdx+64],r9\nxor eax,eax\nmov [rdx+56],rax\n5:\nmov rax,[rdx+40]\nmov rcx,[rdx+64]\nmov rax,[rax+rcx*8]\nmov [rdx+72],rax\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\nlea rsi,[r8+27520]\ncmp rax,[rdx+24]\njae 6f\nimul rax,[rdx+88]\nmov rsi,[rdx]\nlea rsi,[rsi+rax*4]\n6:\nlea r9,[r8+27520]\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 7f\nsub rax,[rdx+32]\nimul rax,[rdx+88]\nmov r9,[rdx]\nlea r9,[r9+rax*4]\n7:\nmov r10,[rdx+8]\nxor edi,edi\n8:\nmov rax,[r8+rdi*8]\nmovzx ecx,ax\nimul rcx,[rdx+72]\nadd rcx,262144\nshr rcx,19\nmov r11,rax\nshr r11,16\nmovzx r11d,r11w\nimul r11,[rdx+72]\nadd r11,262144\nshr r11,19\nshl r11d,16\nor ecx,r11d\nshr rax,32\nmovzx eax,ax\nimul rax,[rdx+72]\nadd rax,262144\nshr rax,19\nshl eax,8\nor eax,ecx\nmov [r10+rdi*4],eax\nmov rax,[r8+rdi*8]\nmov ecx,[rsi+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nadd rax,rcx\nmov ecx,[r9+rdi*4]\nmov r11d,ecx\nand ecx,16711935\nand r11d,65280\nshl r11,24\nor rcx,r11\nsub rax,rcx\nmov [r8+rdi*8],rax\ninc rdi\ncmp rdi,[rdx+16]\njb 8b\nmov rax,[rdx+56]\nadd rax,[rdx+32]\ninc rax\ncmp rax,[rdx+24]\njae 9f\nmov rax,[rdx+64]\ninc rax\nmov [rdx+64],rax\n9:\nmov rax,[rdx+56]\ncmp rax,[rdx+32]\njb 3f\nmov rax,[rdx+64]\ndec rax\nmov [rdx+64],rax\n3:\nmov rax,[rdx+88]\nshl rax,2\nadd [rdx+8],rax\nmov rax,[rdx+56]\ninc rax\nmov [rdx+56],rax\ncmp rax,[rdx+24]\njb 5b\n0:",
+            in("rdi") (&blk[0]) as u64,
+            clobber("rax"),
+            clobber("rcx"),
+            clobber("rdx"),
+            clobber("rsi"),
+            clobber("rdi"),
+            clobber("r8"),
+            clobber("r9"),
+            clobber("r10"),
+            clobber("r11"),
+            clobber("memory"))
+    }
 }
 
 // ------------------------------------------------ Toenung und Rauschen
@@ -8953,10 +9007,11 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
         rk = rk + 1
     }
     let rtp: u64 = (&rt[0]) as u64
-    blur_h(a, b, w, h, r, rtp)
-    blur_v(state, b, a, w, h, r, rtp)
-    blur_h(a, b, w, h, r, rtp)
-    blur_v(state, b, a, w, h, r, rtp)
+    let simd: bool = fb.simd_ok(state)
+    blur_h(a, b, w, h, r, rtp, simd)
+    blur_v(state, b, a, w, h, r, rtp, simd)
+    blur_h(a, b, w, h, r, rtp, simd)
+    blur_v(state, b, a, w, h, r, rtp, simd)
     // 3. Toenung und Rauschen, und dann hinaus. Beides in EINEM
     //    Durchgang ueber die Flaeche -- und in denselben Puffer `b`
     //    geschrieben, aus dem der naechste Treffer kopiert.
@@ -8981,7 +9036,7 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     // goes through ONE assembly loop (`tools/blur/blurasm.py`, block M): tint, grain and clamp in registers, 5 - 10 ns a
     // pixel instead of about 120. The few pixels in the corner columns keep the Firn code below: they decide per pixel
     // whether the frosting follows the rounded shape.
-    var mblk: [u64; 16] = [0 as u64; 16]
+    var mblk: [u64; 24] = [0 as u64; 24]
     var tclip: u64 = tint
     if tclip > 100 {
         tclip = 100
@@ -9047,6 +9102,23 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
                 mblk[2] = me - ms
                 mblk[3] = x0 as u64 + ms
                 mblk[4] = (y0 as u64 + ry) *% 19349663
+                // r481: four pixels at a time in SSE2 (routine s: tint + clamp in vector registers, the grain's hash stays scalar), the
+                // rest of the run through the scalar routine m below; the interrupts stay off for the run
+                if simd {
+                    mblk[15] = 1
+                    asm("mov r11,rdi\nmov rax,[r11+16]\nshr rax,2\njz 0f\nmov rdi,rax\nmov r8,[r11]\nmov r9,[r11+8]\nmov r10,[r11+24]\npxor xmm0,xmm0\nmov rax,[r11+56]\nmovd xmm1,eax\npshuflw xmm1,xmm1,0\npshufd xmm1,xmm1,0\nmov rax,[r11+80]\nmov rcx,[r11+72]\nshl rcx,16\nor rax,rcx\nmov rcx,[r11+64]\nshl rcx,32\nor rax,rcx\nmovq xmm2,rax\npunpcklqdq xmm2,xmm2\nmov eax,5243\nmovd xmm3,eax\npshuflw xmm3,xmm3,0\npshufd xmm3,xmm3,0\npcmpeqd xmm4,xmm4\npsrld xmm4,8\nmov rax,[r11+120]\ntest rax,rax\njz 91f\npushfq\ncli\n91:\nmov rax,[r11+40]\ntest rax,rax\njz 3f\n1:\nmov rcx,r10\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+128],rsi\nlea rcx,[r10+1]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+136],rsi\nlea rcx,[r10+2]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+144],rsi\nlea rcx,[r10+3]\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmovzx esi,si\nmov rax,0x0001000100010001\nimul rsi,rax\nmov [r11+152],rsi\nmovdqu xmm6,[r8]\nmovdqa xmm7,xmm6\npunpcklbw xmm6,xmm0\npunpckhbw xmm7,xmm0\npmullw xmm6,xmm1\npmullw xmm7,xmm1\npaddw xmm6,xmm2\npaddw xmm7,xmm2\npmulhuw xmm6,xmm3\npmulhuw xmm7,xmm3\npsrlw xmm6,3\npsrlw xmm7,3\nmovdqu xmm8,[r11+128]\nmovdqu xmm9,[r11+144]\npaddw xmm6,xmm8\npaddw xmm7,xmm9\npackuswb xmm6,xmm7\npand xmm6,xmm4\nmovdqu [r9],xmm6\nadd r8,16\nadd r9,16\nadd r10,4\ndec rdi\njnz 1b\njmp 4f\n3:\nmovdqu xmm6,[r8]\nmovdqa xmm7,xmm6\npunpcklbw xmm6,xmm0\npunpckhbw xmm7,xmm0\npmullw xmm6,xmm1\npmullw xmm7,xmm1\npaddw xmm6,xmm2\npaddw xmm7,xmm2\npmulhuw xmm6,xmm3\npmulhuw xmm7,xmm3\npsrlw xmm6,3\npsrlw xmm7,3\npackuswb xmm6,xmm7\npand xmm6,xmm4\nmovdqu [r9],xmm6\nadd r8,16\nadd r9,16\nadd r10,4\ndec rdi\njnz 3b\n4:\nmov rax,[r11+120]\ntest rax,rax\njz 92f\npopfq\n92:\nmov [r11],r8\nmov [r11+8],r9\nmov [r11+24],r10\nmov rax,[r11+16]\nand rax,3\nmov [r11+16],rax\n0:",
+                        in("rdi") (&mblk[0]) as u64,
+                        clobber("rax"),
+                        clobber("rcx"),
+                        clobber("rdx"),
+                        clobber("rsi"),
+                        clobber("rdi"),
+                        clobber("r8"),
+                        clobber("r9"),
+                        clobber("r10"),
+                        clobber("r11"),
+                        clobber("memory"))
+                }
                 asm("mov r11,rdi\nmov rax,[r11+16]\ntest rax,rax\njz 0f\nmov r8,[r11]\nmov r9,[r11+8]\nmov r10,[r11+24]\n1:\nmov rcx,[r11+40]\ntest rcx,rcx\njz 2f\nmov rcx,r10\nimul rcx,rcx,73856093\nxor rcx,[r11+32]\nmov rdx,rcx\nshr rdx,13\nxor rcx,rdx\nmov rax,2654435761\nimul rcx,rax\nmov rdx,rcx\nshr rdx,15\nxor rcx,rdx\nmov rsi,rcx\nmov rax,[r11+96]\nmul rcx\nmov rax,rsi\nsub rax,rdx\nshr rax,1\nadd rax,rdx\nmov rcx,[r11+104]\nshr rax,cl\nimul rax,[r11+48]\nsub rsi,rax\nsub rsi,[r11+40]\nmov [r11+88],rsi\n2:\nmov eax,[r8]\nmov esi,eax\nshr esi,16\nand esi,255\nmov edi,eax\nshr edi,8\nand edi,255\nmov ecx,eax\nand ecx,255\nimul rsi,[r11+56]\nadd rsi,[r11+64]\nimul rsi,rsi,5243\nshr rsi,19\nimul rdi,[r11+56]\nadd rdi,[r11+72]\nimul rdi,rdi,5243\nshr rdi,19\nimul rcx,[r11+56]\nadd rcx,[r11+80]\nimul rcx,rcx,5243\nshr rcx,19\nmov rdx,[r11+40]\ntest rdx,rdx\njz 3f\nmov rdx,[r11+88]\nadd rsi,rdx\nxor eax,eax\ntest rsi,rsi\ncmovs rsi,rax\nmov eax,255\ncmp rsi,rax\ncmova rsi,rax\nadd rdi,rdx\nxor eax,eax\ntest rdi,rdi\ncmovs rdi,rax\nmov eax,255\ncmp rdi,rax\ncmova rdi,rax\nadd rcx,rdx\nxor eax,eax\ntest rcx,rcx\ncmovs rcx,rax\nmov eax,255\ncmp rcx,rax\ncmova rcx,rax\n3:\nshl rsi,16\nshl rdi,8\nor rsi,rdi\nor rsi,rcx\nmov [r9],esi\nadd r8,4\nadd r9,4\ninc r10\nmov rax,[r11+16]\ndec rax\nmov [r11+16],rax\njnz 1b\n0:",
                     in("rdi") (&mblk[0]) as u64,
                     clobber("rax"),
@@ -9122,6 +9194,7 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
                 var s_bh: [u8; 4] = " h=\0"
                 var s_bu: [u8; 5] = " us=\0"
                 var s_bm: [u8; 7] = " miss=\0"
+                var s_bs: [u8; 7] = " simd=\0"
                 serial.puts((&s_bl[0]) as u64)
                 serial.dec(i)
                 serial.puts((&s_bw[0]) as u64)
@@ -9132,6 +9205,12 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
                 serial.dec((t1 - t0) / (kh / 1000))
                 serial.puts((&s_bm[0]) as u64)
                 if tr < BC_N {
+                    serial.dec(1)
+                } else {
+                    serial.dec(0)
+                }
+                serial.puts((&s_bs[0]) as u64)
+                if simd {
                     serial.dec(1)
                 } else {
                     serial.dec(0)

@@ -140,7 +140,7 @@ ja 4f
 cmp r10,[rdx+24]
 jae 4f
 mov rsi,r10
-imul rsi,[rdx+16]
+imul rsi,[rdx+88]
 mov rax,[rdx]
 lea rsi,[rax+rsi*4]
 xor edi,edi
@@ -173,7 +173,7 @@ inc rax
 lea rsi,[r8+27520]
 cmp rax,[rdx+24]
 jae 6f
-imul rax,[rdx+16]
+imul rax,[rdx+88]
 mov rsi,[rdx]
 lea rsi,[rsi+rax*4]
 6:
@@ -182,7 +182,7 @@ mov rax,[rdx+56]
 cmp rax,[rdx+32]
 jb 7f
 sub rax,[rdx+32]
-imul rax,[rdx+16]
+imul rax,[rdx+88]
 mov r9,[rdx]
 lea r9,[r9+rax*4]
 7:
@@ -245,7 +245,7 @@ mov rax,[rdx+64]
 dec rax
 mov [rdx+64],rax
 3:
-mov rax,[rdx+16]
+mov rax,[rdx+88]
 shl rax,2
 add [rdx+8],rax
 mov rax,[rdx+56]
@@ -421,7 +421,145 @@ mov [r11+96],rax
 """
 # G block: the M block (16 words): 6 = d in, 12 = magic out, 13 = shift out
 
-BODIES = {"h": H, "v": V, "m": M, "d": D, "g": G}
+# ---------------------------------------------------------------------------------------------------------------------
+# r481: SSE2 versions of the three loops (routines s, w, x). Same arithmetic, same pixels, 3 - 4 times faster:
+#   s  = the tint + grain of block M, four pixels per round (the grain's hash stays scalar: it is 64-bit multiplications)
+#   w  = the vertical pass of block V on a multiple of 4 columns (the other columns go through the scalar V)
+#   x  = the horizontal pass of block H on four rows at once (the remaining rows go through the scalar H)
+# They use xmm0 - xmm15, so a caller MUST check `fb.simd_ok` first (the vector unit has to be switched on, and `fbnosimd`
+# is the switch for the control run), and the interrupts must not run a task switch in the middle: block word `irq`
+# (non-zero) makes the routine wrap each ROW (s: the whole call, w: each output row, x: each group of four rows) in
+# pushfq / cli ... popfq. The tests in asmtest.c run in user mode and leave it zero.
+#
+# The exactness of the normalisation: n <= 39 so a sum S is at most 255 * 39 = 9945 (a 16-bit lane). The scalar code computes
+# (S * rec + 262144) >> 19 with rec = ceil(2^19 / n). Split rec = rh * 65536 + rl (both fit a 16-bit lane, rh <= 8):
+#   S * rec >> 16 = pmulhuw(S, rl) + S * rh      (the low 16 bits of S * rl only carry INTO bit 16 of nothing: we add whole
+#                                                 multiples of 65536, so floor(S * rl / 65536) + S * rh is exact)
+# and adding 262144 is adding 4 to that, so the result is (pmulhuw(S, rl) + pmullw(S, rh) + 4) >> 3 -- every word in range.
+# The tint: (c * (100 - t) + tone * t) * 5243 >> 19 with x <= 25500 < 65536: pmulhuw(x, 5243) >> 3 (a floor of a floor).
+
+def _bcast(reg, scal32):
+    # broadcast the low 16 bits of a 32-bit register into all 8 words of an xmm register
+    return ["movd %s,%s" % (reg, scal32), "pshuflw %s,%s,0" % (reg, reg), "pshufd %s,%s,0" % (reg, reg)]
+
+def _irq_on(flagword):
+    return ["mov rax,[r11+%d]" % (flagword * 8), "test rax,rax", "jz 91f", "pushfq", "cli", "91:"]
+
+def _irq_off(flagword):
+    return ["mov rax,[r11+%d]" % (flagword * 8), "test rax,rax", "jz 92f", "popfq", "92:"]
+
+def _hash(k):
+    # the grain of pixel x + k into block word 16 + k, replicated into four words (the same noise on every channel)
+    L = ["lea rcx,[r10+%d]" % k if k else "mov rcx,r10",
+         "imul rcx,rcx,73856093", "xor rcx,[r11+32]", "mov rdx,rcx", "shr rdx,13", "xor rcx,rdx",
+         "mov rax,2654435761", "imul rcx,rax", "mov rdx,rcx", "shr rdx,15", "xor rcx,rdx", "mov rsi,rcx",
+         "mov rax,[r11+96]", "mul rcx", "mov rax,rsi", "sub rax,rdx", "shr rax,1", "add rax,rdx",
+         "mov rcx,[r11+104]", "shr rax,cl", "imul rax,[r11+48]", "sub rsi,rax", "sub rsi,[r11+40]",
+         "movzx esi,si", "mov rax,0x0001000100010001", "imul rsi,rax", "mov [r11+%d],rsi" % (128 + 8 * k)]
+    return L
+
+def _s_body():
+    L = ["mov r11,rdi", "mov rax,[r11+16]", "shr rax,2", "jz 0f", "mov rdi,rax",
+         "mov r8,[r11]", "mov r9,[r11+8]", "mov r10,[r11+24]", "pxor xmm0,xmm0"]
+    L += ["mov rax,[r11+56]"] + _bcast("xmm1", "eax")                       # 100 - tint
+    L += ["mov rax,[r11+80]", "mov rcx,[r11+72]", "shl rcx,16", "or rax,rcx", "mov rcx,[r11+64]", "shl rcx,32", "or rax,rcx",
+          "movq xmm2,rax", "punpcklqdq xmm2,xmm2"]                          # tone * tint: blue, green, red, 0 per pixel
+    L += ["mov eax,5243"] + _bcast("xmm3", "eax")
+    L += ["pcmpeqd xmm4,xmm4", "psrld xmm4,8"]                              # 0x00FFFFFF per pixel
+    L += _irq_on(15)
+    L += ["mov rax,[r11+40]", "test rax,rax", "jz 3f", "1:"]
+    for k in range(4):
+        L += _hash(k)
+    simd = ["movdqu xmm6,[r8]", "movdqa xmm7,xmm6", "punpcklbw xmm6,xmm0", "punpckhbw xmm7,xmm0", "pmullw xmm6,xmm1", "pmullw xmm7,xmm1",
+            "paddw xmm6,xmm2", "paddw xmm7,xmm2", "pmulhuw xmm6,xmm3", "pmulhuw xmm7,xmm3", "psrlw xmm6,3", "psrlw xmm7,3"]
+    tail = ["packuswb xmm6,xmm7", "pand xmm6,xmm4", "movdqu [r9],xmm6", "add r8,16", "add r9,16", "add r10,4", "dec rdi"]
+    L += simd + ["movdqu xmm8,[r11+128]", "movdqu xmm9,[r11+144]", "paddw xmm6,xmm8", "paddw xmm7,xmm9"] + tail + ["jnz 1b", "jmp 4f", "3:"]
+    L += simd + tail + ["jnz 3b", "4:"]
+    L += _irq_off(15)
+    L += ["mov [r11],r8", "mov [r11+8],r9", "mov [r11+24],r10", "mov rax,[r11+16]", "and rax,3", "mov [r11+16],rax", "0:"]
+    return "\n".join(L) + "\n"
+
+def _load4(p):
+    # four pixels of four rows (pitch rcx, 3 * pitch rdx) at [p] -> xmm6 = rows 0, 1 and xmm7 = rows 2, 3 as 16-bit lanes
+    return ["movd xmm6,[%s]" % p, "movd xmm4,[%s+rcx]" % p, "punpckldq xmm6,xmm4",
+            "movd xmm7,[%s+rcx*2]" % p, "movd xmm4,[%s+rdx]" % p, "punpckldq xmm7,xmm4",
+            "punpcklbw xmm6,xmm15", "punpcklbw xmm7,xmm15"]
+
+def _norm(src, dst, tmp):
+    return ["movdqa %s,%s" % (dst, src), "pmulhuw %s,xmm8" % dst, "movdqa %s,%s" % (tmp, src), "pmullw %s,xmm9" % tmp,
+            "paddw %s,%s" % (dst, tmp), "paddw %s,xmm10" % dst, "psrlw %s,3" % dst]
+
+def _consts():
+    return (["pxor xmm15,xmm15", "mov eax,4"] + _bcast("xmm10", "eax") + ["pcmpeqd xmm11,xmm11", "psrld xmm11,8"])
+
+def _x_body():
+    # block: 0 src, 1 dst, 2 w, 3 rows (a multiple of 4, used up), 4 r, 5 reciprocal table, 7 n, 8 last n, 9 irq
+    L = ["mov r11,rdi", "mov rax,[r11+24]", "shr rax,2", "jz 0f", "mov [r11+24],rax", "mov rax,[r11+16]", "test rax,rax", "jz 0f"]
+    L += _consts()
+    L += ["mov r8,[r11]", "mov r9,[r11+8]", "mov rcx,[r11+16]", "shl rcx,2", "lea rdx,[rcx+rcx*2]"]
+    L += ["1:"] + _irq_on(9)
+    L += ["pxor xmm0,xmm0", "pxor xmm1,xmm1", "xor eax,eax", "mov [r11+56],rax", "mov [r11+64],rax",
+          "mov rsi,r8", "xor r10d,r10d",
+          "2:", "cmp r10,[r11+16]", "jae 3f", "cmp r10,[r11+32]", "ja 3f"]
+    L += _load4("rsi") + ["paddw xmm0,xmm6", "paddw xmm1,xmm7", "add rsi,4", "inc qword ptr [r11+56]", "inc r10", "jmp 2b", "3:"]
+    L += ["xor r10d,r10d", "4:",
+          "mov rax,[r11+56]", "cmp rax,[r11+64]", "je 5f", "mov [r11+64],rax", "shl rax,3", "add rax,[r11+40]", "mov rax,[rax]",
+          "movzx edi,ax"] + _bcast("xmm8", "edi") + ["shr eax,16"] + _bcast("xmm9", "eax") + ["5:"]
+    L += _norm("xmm0", "xmm2", "xmm4") + _norm("xmm1", "xmm3", "xmm5")
+    L += ["packuswb xmm2,xmm3", "pand xmm2,xmm11", "lea rax,[r9+r10*4]", "movd [rax],xmm2", "psrldq xmm2,4", "movd [rax+rcx],xmm2",
+          "psrldq xmm2,4", "movd [rax+rcx*2],xmm2", "psrldq xmm2,4", "movd [rax+rdx],xmm2"]
+    L += ["mov rax,r10", "add rax,[r11+32]", "inc rax", "cmp rax,[r11+16]", "jae 6f", "lea rsi,[r8+rax*4]"]
+    L += _load4("rsi") + ["paddw xmm0,xmm6", "paddw xmm1,xmm7", "inc qword ptr [r11+56]", "6:"]
+    L += ["cmp r10,[r11+32]", "jb 7f", "mov rax,r10", "sub rax,[r11+32]", "lea rsi,[r8+rax*4]"]
+    L += _load4("rsi") + ["psubw xmm0,xmm6", "psubw xmm1,xmm7", "dec qword ptr [r11+56]", "7:"]
+    L += ["inc r10", "cmp r10,[r11+16]", "jb 4b"]
+    L += _irq_off(9)
+    L += ["mov rax,rcx", "shl rax,2", "add r8,rax", "add r9,rax", "mov rax,[r11+24]", "dec rax", "mov [r11+24],rax", "jnz 1b", "0:"]
+    return "\n".join(L) + "\n"
+
+def _w_body():
+    # block: 0 src, 1 dst, 2 columns (a multiple of 4), 3 h, 4 r, 5 reciprocal table, 6 sum row (4 words of 16 bits per pixel:
+    # blue, green, red, alpha), 7 y, 8 n, 10 irq, 11 pitch in pixels. The row of zeros BLUR_W_MAX * 8 octets further on.
+    L = ["mov r11,rdi", "mov rax,[r11+16]", "test rax,rax", "jz 0f", "mov rax,[r11+24]", "test rax,rax", "jz 0f"]
+    L += _consts()
+    L += ["mov r8,[r11+48]", "cld", "xor eax,eax", "mov rdi,r8", "mov rcx,[r11+16]", "rep stosq",
+          "lea rdi,[r8+27520]", "mov rcx,[r11+16]", "rep stosq", "xor r10d,r10d", "xor r9d,r9d",
+          "1:", "cmp r10,[r11+32]", "ja 4f", "cmp r10,[r11+24]", "jae 4f",
+          "mov rsi,r10", "imul rsi,[r11+88]", "mov rax,[r11]", "lea rsi,[rax+rsi*4]"]
+    L += _irq_on(10)
+    L += ["mov rax,r8", "mov rcx,[r11+16]", "shr rcx,2", "2:",
+          "movdqu xmm4,[rsi]", "movdqa xmm5,xmm4", "punpcklbw xmm4,xmm15", "punpckhbw xmm5,xmm15",
+          "movdqu xmm6,[rax]", "paddw xmm6,xmm4", "movdqu [rax],xmm6", "movdqu xmm7,[rax+16]", "paddw xmm7,xmm5", "movdqu [rax+16],xmm7",
+          "add rsi,16", "add rax,32", "dec rcx", "jnz 2b"]
+    L += _irq_off(10)
+    L += ["inc r9", "inc r10", "jmp 1b", "4:", "mov [r11+64],r9", "xor eax,eax", "mov [r11+56],rax",
+          "5:", "mov rax,[r11+40]", "mov rcx,[r11+64]", "mov rax,[rax+rcx*8]", "movzx ecx,ax"]
+    L += _bcast("xmm8", "ecx") + ["shr eax,16"] + _bcast("xmm9", "eax")
+    L += ["lea rsi,[r8+27520]", "mov rax,[r11+56]", "add rax,[r11+32]", "inc rax", "cmp rax,[r11+24]", "jae 6f",
+          "imul rax,[r11+88]", "mov rsi,[r11]", "lea rsi,[rsi+rax*4]", "6:",
+          "lea rdi,[r8+27520]", "mov rax,[r11+56]", "cmp rax,[r11+32]", "jb 7f", "sub rax,[r11+32]", "imul rax,[r11+88]",
+          "mov rdi,[r11]", "lea rdi,[rdi+rax*4]", "7:", "mov rdx,[r11+8]"]
+    L += _irq_on(10)
+    L += ["mov rax,r8", "mov rcx,[r11+16]", "shr rcx,2", "3:", "movdqu xmm0,[rax]", "movdqu xmm1,[rax+16]"]
+    L += _norm("xmm0", "xmm2", "xmm4") + _norm("xmm1", "xmm3", "xmm5")
+    L += ["packuswb xmm2,xmm3", "pand xmm2,xmm11", "movdqu [rdx],xmm2",
+          "movdqu xmm4,[rsi]", "movdqa xmm5,xmm4", "punpcklbw xmm4,xmm15", "punpckhbw xmm5,xmm15", "paddw xmm0,xmm4", "paddw xmm1,xmm5",
+          "movdqu xmm4,[rdi]", "movdqa xmm5,xmm4", "punpcklbw xmm4,xmm15", "punpckhbw xmm5,xmm15", "psubw xmm0,xmm4", "psubw xmm1,xmm5",
+          "movdqu [rax],xmm0", "movdqu [rax+16],xmm1", "add rax,32", "add rdx,16", "add rsi,16", "add rdi,16", "dec rcx", "jnz 3b"]
+    L += _irq_off(10)
+    L += ["mov rax,[r11+56]", "add rax,[r11+32]", "inc rax", "cmp rax,[r11+24]", "jae 8f",
+          "mov rax,[r11+64]", "inc rax", "mov [r11+64],rax", "8:",
+          "mov rax,[r11+56]", "cmp rax,[r11+32]", "jb 9f", "mov rax,[r11+64]", "dec rax", "mov [r11+64],rax", "9:",
+          "mov rax,[r11+88]", "shl rax,2", "add [r11+8],rax", "mov rax,[r11+56]", "inc rax", "mov [r11+56],rax",
+          "cmp rax,[r11+24]", "jb 5b", "0:"]
+    return "\n".join(L) + "\n"
+
+S = _s_body()
+W = _w_body()
+X = _x_body()
+
+
+BODIES = {"h": H, "v": V, "m": M, "d": D, "g": G, "s": S, "w": W, "x": X}
 CLOB = ['clobber("rax")', 'clobber("rcx")', 'clobber("rdx")', 'clobber("rsi")', 'clobber("rdi")',
         'clobber("r8")', 'clobber("r9")', 'clobber("r10")', 'clobber("r11")', 'clobber("memory")']
 
@@ -457,7 +595,7 @@ def test():
     d = tempfile.mkdtemp()
     try:
         asm = ".intel_syntax noprefix\n"
-        for n in "hvmdg":
+        for n in "hvmdgswx":
             asm += ".globl blur_%s_asm\nblur_%s_asm:\npush r12\npush r13\npush r14\npush r15\n%s\npop r15\npop r14\npop r13\npop r12\nret\n" % (n, n, "\n".join(lines(BODIES[n])))
         asm += ".att_syntax prefix\n"
         open(os.path.join(d, "a.S"), "w").write(asm)
