@@ -139,7 +139,14 @@ const SF_MAGIC: u64 = 0
 const SF_MASK: u64 = 8
 const SF_SIG: u64 = 16
 const SF_CTX: u64 = 24 // 22 Woerter, isr.s' Form
-const SF_BYTES: u64 = 200
+// RUNDE UNTERBAU: behind the saved context the frame carries what an SA_SIGINFO handler is promised -- a `siginfo_t` (128 octets: signo,
+// errno, code, and the fault address or sender) and a `ucontext_t` (936 octets as musl lays it out: the registers of the interrupted code
+// as `gregs`, the blocked mask). `rsi` and `rdx` of the handler point there; they were 0 (a handler that read `si->si_addr` crashed).
+// `rt_sigreturn` takes the registers back FROM the ucontext, so a handler that changes `gregs[REG_RIP]` resumes elsewhere -- what
+// JIT/wasm trap handlers do.
+const SF_INFO: u64 = 200
+const SF_UC: u64 = 328
+const SF_BYTES: u64 = 1264
 const MAGIC: u64 = 0x5349474E414C4B39 // "SIGNALK9"
 
 // Der rote Bereich von System V.
@@ -616,7 +623,9 @@ fn fault(state: u64, task: u64, v: u64) -> u64 {
     // Und eine eigene Routine gilt nur EINMAL: kehrt sie zurueck, laeuft
     // derselbe Befehl wieder und faellt wieder. Ein Programm, das das
     // will, setzt sie in der Routine neu.
-    if handler_of(state, task, sig) != SIG_DFL {
+    // RUNDE UNTERBAU: ... for a handler of the old kind. One that was installed with SA_SIGINFO stays (as on Linux): a trap handler that
+    // resumes the program (guard pages, wasm, JIT) is hit again and again, and a one-shot handler turned the second fault into a death.
+    if handler_of(state, task, sig) != SIG_DFL && (aget(act(state, task, sig) + A_FLAGS) & SA_SIGINFO) == 0 {
         aset(act(state, task, sig) + A_FLAGS,
             aget(act(state, task, sig) + A_FLAGS) | SA_RESETHAND)
     }
@@ -691,6 +700,28 @@ fn peek64(state: u64, task: u64, addr: u64) -> u64 {
 
 // ----------------------------------------------------------- zustellen
 
+// Byte offset, inside the 22-word context, of the register that is `gregs[i]` of a Linux `ucontext_t` (REG_R8 .. REG_EFL).
+fn greg_off(i: u64) -> u64 {
+    if i == 0 { return 56 }
+    if i == 1 { return 48 }
+    if i == 2 { return 40 }
+    if i == 3 { return 32 }
+    if i == 4 { return 24 }
+    if i == 5 { return 16 }
+    if i == 6 { return 8 }
+    if i == 7 { return 0 }
+    if i == 8 { return 64 }
+    if i == 9 { return 72 }
+    if i == 10 { return 80 }
+    if i == 11 { return 88 }
+    if i == 12 { return 96 }
+    if i == 13 { return 112 }
+    if i == 14 { return 104 }
+    if i == 15 { return 160 }
+    if i == 16 { return 136 }
+    return 152
+}
+
 // Die eine Stelle, an der ein Signal wirklich ankommt. `ctx` zeigt auf
 // zweiundzwanzig Woerter in der Form von isr.s -- der Aufrufer hat sie
 // entweder direkt (aus einer Unterbrechung) oder aus dem
@@ -742,11 +773,63 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     // die Nummer. rsi und rdx waeren siginfo und ucontext -- dieser
     // Kernel gibt sie nicht, und `docs/ROUNDK9.md` sagt das ausdruecklich,
     // statt zwei Zeiger auf nichts zu uebergeben.
+    // RUNDE UNTERBAU: siginfo + ucontext (see SF_INFO). A hardware fault leaves 128 + vector in T_KILLCODE (`fault`) and the page-fault
+    // address, shifted left by 16, above the error code in the context (`trap.fi`).
+    var kc: u64 = sched.tget(state, task, sched.T_KILLCODE)
+    var is_fault: bool = false
+    var vec: u64 = 0
+    if kc >= 128 && kc < 160 {
+        is_fault = true
+        vec = kc - 128
+    }
+    var zi: u64 = 0
+    while zi < (SF_BYTES - SF_INFO) / 8 {
+        poke64(state, task, base + SF_INFO + zi * 8, 0)
+        zi = zi + 1
+    }
+    var code: u64 = 0
+    var addr: u64 = 0
+    let errw: u64 = __mmio_read64((ctx + C_ERROR) as *mut u64)
+    if is_fault {
+        if vec == 14 {
+            addr = errw >> 16
+            if (errw & 1) != 0 {
+                code = 2
+            } else {
+                code = 1
+            }
+        } else {
+            addr = __mmio_read64((ctx + C_RIP) as *mut u64)
+            if vec == 0 || vec == 6 {
+                code = 1
+            } else {
+                code = 128
+            }
+        }
+    }
+    poke64(state, task, base + SF_INFO, sig)
+    poke64(state, task, base + SF_INFO + 8, code)
+    poke64(state, task, base + SF_INFO + 16, addr)
+    let ucb: u64 = base + SF_UC
+    poke64(state, task, ucb + 296, sched.tget(state, task, sched.T_SIGMASK))
+    var gi: u64 = 0
+    while gi < 18 {
+        poke64(state, task, ucb + 40 + gi * 8, __mmio_read64((ctx + greg_off(gi)) as *mut u64))
+        gi = gi + 1
+    }
+    poke64(state, task, ucb + 40 + 18 * 8, 0x33)
+    poke64(state, task, ucb + 40 + 19 * 8, errw & 0xFFFF)
+    poke64(state, task, ucb + 40 + 20 * 8, __mmio_read64((ctx + C_VECTOR) as *mut u64))
+    poke64(state, task, ucb + 40 + 22 * 8, addr)
+    if is_fault {
+        // delivered to a handler: the death code of the fault is not the death code of whatever comes later
+        sched.tset(state, task, sched.T_KILLCODE, 0)
+    }
     __mmio_write64((ctx + C_RIP) as *mut u64, h)
     __mmio_write64((ctx + C_RSP) as *mut u64, ret)
     __mmio_write64((ctx + C_RDI) as *mut u64, sig)
-    __mmio_write64((ctx + C_RSI) as *mut u64, 0)
-    __mmio_write64((ctx + C_RDX) as *mut u64, 0)
+    __mmio_write64((ctx + C_RSI) as *mut u64, base + SF_INFO)
+    __mmio_write64((ctx + C_RDX) as *mut u64, ucb)
     sched.tset(state, task, sched.T_SIGDEL,
         sched.tget(state, task, sched.T_SIGDEL) + 1)
     kstate.add(state, kstate.SIG_CAUGHT, 1)
@@ -792,7 +875,9 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
         serial.puts((&s_end[0]) as u64)
         serial.nl()
     }
-    sched.tset(state, task, sched.T_SIGLAST, sig)
+    // RUNDE UNTERBAU: bit 8 says "this task DIED of this signal" (`wait4` reports WIFSIGNALED/WTERMSIG from it); T_EXIT keeps the
+    // 128 + n that every consumer reads since round 62.
+    sched.tset(state, task, sched.T_SIGLAST, sig | 256)
     kstate.add(state, kstate.KILLED, 1)
     exiting(state, task)
     var code: u64 = 128 + sig
@@ -1062,6 +1147,13 @@ fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
         __mmio_write64((c + i * 8) as *mut u64,
             peek64(state, task, base + SF_CTX + i * 8))
         i = i + 1
+    }
+    // RUNDE UNTERBAU: the registers come from the ucontext the handler could see (and change). Selectors and the vector words stay as the
+    // frame saved them; the flags are masked below.
+    var gk: u64 = 0
+    while gk < 18 {
+        __mmio_write64((c + greg_off(gk)) as *mut u64, peek64(state, task, base + SF_UC + 40 + gk * 8))
+        gk = gk + 1
     }
     // Die Selektoren und die Flaggen kommen NICHT aus dem Rahmen, sie
     // werden neu gesetzt: was Ring 3 dort hineinschreiben koennte, waere

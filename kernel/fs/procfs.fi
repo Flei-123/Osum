@@ -322,6 +322,11 @@ fn make_meminfo(state: u64) -> u64 {
     p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE) * 4)
     p = w_str(state, p, (&kb[0]) as u64)
     p = w_nl(state, p)
+    var t2b: [u8; 17] = "MemAvailable:  \0\0"
+    p = w_str(state, p, (&t2b[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE) * 4)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
     p = w_str(state, p, (&t3[0]) as u64)
     p = w_num(state, p, kstate.get(state, kstate.BITMAP_FRAMES))
     p = w_nl(state, p)
@@ -800,6 +805,41 @@ fn make_status(state: u64, t: u64) -> u64 {
         k = k + 1
     }
     p = w_nl(state, p)
+    // RUNDE UNTERBAU: the lines a program that reads /proc/self/status looks for (Linux names, kB): Threads (the tasks of this group),
+    // VmRSS / VmSize (the pages this process holds, 4 kB each -- the kernel counts present pages, not a separate virtual size).
+    var l12: [u8; 10] = "Threads:\0\0"
+    var l13: [u8; 10] = "VmRSS:  \0\0"
+    var l14: [u8; 10] = "VmSize: \0\0"
+    var l15: [u8; 5] = " kB\0\0"
+    var grp: u64 = sched.tget(state, t, sched.T_TGID)
+    if grp == 0 {
+        grp = sched.tget(state, t, sched.T_PID)
+    }
+    var nth: u64 = 0
+    var ti: u64 = 0
+    while ti < kstate.MAX_TASKS {
+        if sched.tget(state, ti, sched.T_STATE) != sched.S_FREE && sched.tget(state, ti, sched.T_STATE) != sched.S_ZOMBIE {
+            var tg: u64 = sched.tget(state, ti, sched.T_TGID)
+            if tg == 0 {
+                tg = sched.tget(state, ti, sched.T_PID)
+            }
+            if tg == grp {
+                nth = nth + 1
+            }
+        }
+        ti = ti + 1
+    }
+    p = w_str(state, p, (&l12[0]) as u64)
+    p = w_num(state, p, nth)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l13[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_str(state, p, (&l15[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l14[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_str(state, p, (&l15[0]) as u64)
+    p = w_nl(state, p)
     // AB-003: where it comes from, as the kernel attests it
     // (kernel/sched/origin.fi). "-" = no label: the system / the user.
     var l11: [u8; 10] = "Origin: \0\0"
@@ -898,63 +938,85 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
 // steht da, weil `proc.translate` fuer diese Adresse einen Rahmen
 // gefunden hat.
 fn make_maps(state: u64, t: u64) -> u64 {
-    var rw: [u8; 5] = " rw-\0"
-    var rx: [u8; 5] = " r-x\0"
+    // RUNDE UNTERBAU: THE WHOLE PRIVATE REGION, WITH THE RIGHTS AS THEY ARE. The first version stopped at the first 2 MiB tile (the
+    // image of a program, the stack, the first heap) and knew two right sets, "rw-" and "r-x"; a library mapped by dlopen, the mmap
+    // windows and the big region were not listed at all, and a PROT_NONE guard page looked like data. Now every run of pages with
+    // the same rights is one line `start-end rwxp 00000000 00:00 0` (the shape Linux prints, so a parser reads it), a run that is
+    // mapped but closed to the user shows `---p`. The kernel keeps no list of mappings (no VMA), so a run has NO file name; the
+    // main stack and the heap get the names Linux uses.
     var p: u64 = 0
     let low: u64 = proc.USER_DATA
-    // DER GANZE PRIVATE BEREICH, und nicht nur der Stapel. `USER_TOP`
-    // ist die OBERKANTE DES STAPELS (0x40009000) und nicht das Ende
-    // des Adressraums -- die erste Fassung dieser Funktion hoerte dort
-    // auf und meldete fuer jeden Prozess genau eine Zeile, obwohl das
-    // ABBILD bei 0x40100000 liegt und der Haufen bei 0x40020000. Was
-    // eine private Seitentabelle ueberhaupt abdecken kann, steht in
-    // `proc.USER_SPAN`, und bis dahin wird gesucht.
-    let high: u64 = proc.USER_DATA + proc.USER_SPAN
+    let high: u64 = proc.USER_DATA + proc.USER_SPAN * proc.PRIV_SLOTS
     var addr: u64 = low
     var run_start: u64 = 0
-    var run_exec: bool = false
+    var run_r: u64 = 0
     var in_run: bool = false
     while addr < high {
-        let phys: u64 = proc.translate(state, t, addr)
-        var here: bool = false
-        var ex: bool = false
-        if phys != 0 {
-            here = true
-            ex = proc.page_exec(state, t, addr)
-        }
-        if here && !in_run {
-            in_run = true
-            run_start = addr
-            run_exec = ex
-        } else if in_run {
-            if !here || ex != run_exec {
-                p = w_hex16(state, p, run_start)
-                p = w_ch(state, p, 45)
-                p = w_hex16(state, p, addr)
-                if run_exec {
-                    p = w_str(state, p, (&rx[0]) as u64)
-                } else {
-                    p = w_str(state, p, (&rw[0]) as u64)
-                }
-                p = w_nl(state, p)
-                in_run = here
-                run_start = addr
-                run_exec = ex
+        var r: u64 = 0
+        let k: u64 = proc.pd_slot(addr)
+        // a 2 MiB tile that has no table is skipped whole (most of the region is empty)
+        if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
+            if in_run {
+                p = map_line(state, p, run_start, addr, run_r)
+                in_run = false
             }
+            addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
+        } else {
+            r = proc.page_rights(state, t, addr)
+            if r != 0 && !in_run {
+                in_run = true
+                run_start = addr
+                run_r = r
+            } else if in_run {
+                if r != run_r {
+                    p = map_line(state, p, run_start, addr, run_r)
+                    in_run = r != 0
+                    run_start = addr
+                    run_r = r
+                }
+            }
+            addr = addr + 4096
         }
-        addr = addr + 4096
+        if p > BUF_MAX - 120 {
+            return p
+        }
     }
     if in_run {
-        p = w_hex16(state, p, run_start)
-        p = w_ch(state, p, 45)
-        p = w_hex16(state, p, high)
-        if run_exec {
-            p = w_str(state, p, (&rx[0]) as u64)
-        } else {
-            p = w_str(state, p, (&rw[0]) as u64)
-        }
-        p = w_nl(state, p)
+        p = map_line(state, p, run_start, high, run_r)
     }
+    return p
+}
+
+// one line of /proc/<pid>/maps
+fn map_line(state: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
+    var p: u64 = at
+    p = w_hex16(state, p, a)
+    p = w_ch(state, p, 45)
+    p = w_hex16(state, p, b)
+    p = w_ch(state, p, 32)
+    if (r & 2) != 0 {
+        p = w_ch(state, p, 114)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    if (r & 4) != 0 {
+        p = w_ch(state, p, 119)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    if (r & 8) != 0 {
+        p = w_ch(state, p, 120)
+    } else {
+        p = w_ch(state, p, 45)
+    }
+    p = w_ch(state, p, 112)
+    var tail: [u8; 26] = " 00000000 00:00 0      \0\0\0"
+    p = w_str(state, p, (&tail[0]) as u64)
+    if a == proc.USER_DATA + 0x1000 {
+        var nm: [u8; 8] = "[stack]\0"
+        p = w_str(state, p, (&nm[0]) as u64)
+    }
+    p = w_nl(state, p)
     return p
 }
 

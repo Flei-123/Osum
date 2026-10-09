@@ -2230,6 +2230,7 @@ const PROT_WRITE: u64 = 2
 const PROT_EXEC: u64 = 4
 const MAP_PRIVATE: u64 = 2
 const MAP_ANONYMOUS: u64 = 32
+const MAP_FIXED: u64 = 16
 
 // The file kinds of `struct stat`, as Linux writes them.
 const S_IFDIR: u64 = 16384 // 0o40000
@@ -2437,13 +2438,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return native(state, me, number, a0, a1, a2, a3, a4)
     }
     if number == SYS_WRITE {
-        return do_write(state, me, a0, a1, a2)
+        return file_io_loop(state, me, a0, a1, a2, true)
     }
     if number == SYS_READ {
-        return do_read(state, me, a0, a1, a2)
+        return file_io_loop(state, me, a0, a1, a2, false)
     }
     if number == SYS_OPEN {
-        return do_open(state, me, a0, a1)
+        return cx_result(state, me, do_open(state, me, a0, a1), a1)
     }
     if number == SYS_CLOSE {
         return do_close(state, me, a0)
@@ -2492,7 +2493,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // of this system, and `dup2`, `fork` and `close` reach it without
     // knowing that.
     if number == SYS_SOCKET {
-        return do_socket(state, me, a0, a1, a2)
+        return cx_result(state, me, do_socket(state, me, a0, a1, a2), a1)
     }
     if number == SYS_BIND {
         return do_bind(state, me, a0, a1, a2)
@@ -2504,7 +2505,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_accept(state, me, a0, a1, a2, 0)
     }
     if number == SYS_ACCEPT4 {
-        return do_accept(state, me, a0, a1, a2, a3)
+        return cx_result(state, me, do_accept(state, me, a0, a1, a2, a3), a3)
     }
     if number == SYS_CONNECT {
         return do_connect(state, me, a0, a1, a2)
@@ -2651,11 +2652,115 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_MPROTECT {
         return do_mprotect(state, me, a0, a1, a2)
     }
+    // RUNDE UNTERBAU: the small calls a big program makes at start-up (docs/RUNDE-UNTERBAU-FIREFOX.md). Each answers with what this
+    // kernel really is -- a limit that exists, a count of cores it really has, "nothing to do" where there is nothing -- and none of
+    // them pretends to an effect it does not have.
+    if number == UB_MADVISE {
+        return do_madvise(state, me, a0, a1, a2)
+    }
+    if number == UB_MREMAP {
+        return do_mremap(state, me, a0, a1, a2, a3)
+    }
+    if number == UB_MSYNC || number == UB_MLOCK || number == UB_MUNLOCK || number == UB_MLOCKALL || number == UB_MUNLOCKALL {
+        // no swap and no file-backed shared mappings: nothing to write back, nothing that could be paged out -- the honest answer is "done"
+        return 0
+    }
+    if number == UB_GETRLIMIT {
+        return do_rlimit(state, me, a0, 0, a1)
+    }
+    if number == UB_SETRLIMIT {
+        return do_rlimit(state, me, a0, a1, 0)
+    }
+    if number == UB_PRLIMIT64 {
+        if a0 != 0 && a0 != sched.tget(state, me, sched.T_PID) {
+            return neg(errno.E_PERM)
+        }
+        return do_rlimit(state, me, a1, a2, a3)
+    }
+    if number == UB_SYSINFO {
+        return do_sysinfo_linux(state, me, a0)
+    }
+    if number == UB_GETRUSAGE {
+        return do_getrusage(state, me, a0, a1)
+    }
+    if number == UB_SCHED_GETAFFINITY {
+        return do_getaffinity(state, me, a0, a1, a2)
+    }
+    if number == UB_SCHED_SETAFFINITY {
+        return 0
+    }
+    if number == UB_SCHED_GETSCHEDULER {
+        return 0
+    }
+    if number == UB_SCHED_GETPARAM {
+        if !put32(state, me, a1, 0) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    if number == UB_SCHED_SETSCHEDULER {
+        // only the ordinary policy exists: SCHED_OTHER (0), SCHED_BATCH (3), SCHED_IDLE (5) are accepted as "the same", real-time is refused
+        if a1 == 1 || a1 == 2 {
+            return neg(errno.E_PERM)
+        }
+        return 0
+    }
+    if number == UB_SCHED_SETPARAM {
+        return 0
+    }
+    if number == UB_SCHED_GET_PRIORITY_MAX {
+        if a0 == 1 || a0 == 2 {
+            return 99
+        }
+        return 0
+    }
+    if number == UB_SCHED_GET_PRIORITY_MIN {
+        if a0 == 1 || a0 == 2 {
+            return 1
+        }
+        return 0
+    }
+    if number == UB_SET_ROBUST_LIST {
+        return 0
+    }
+    if number == UB_GETPRIORITY {
+        return 20
+    }
+    if number == UB_SETPRIORITY {
+        return 0
+    }
+    if number == UB_FDATASYNC {
+        return do_fsync(state, me, a0)
+    }
+    if number == UB_DUP3 {
+        if a0 == a1 {
+            return neg(errno.E_INVAL)
+        }
+        return cx_result(state, me, do_dup2(state, me, a0, a1), a2)
+    }
+    if number == UB_PIPE2 {
+        let pr: u64 = do_pipe(state, me, a0)
+        if pr == 0 && (a1 & UB_O_CLOEXEC) != 0 {
+            let _c0: u64 = cx_result(state, me, user_word32(state, me, a0), UB_O_CLOEXEC)
+            let _c1: u64 = cx_result(state, me, user_word32(state, me, a0 + 4), UB_O_CLOEXEC)
+        }
+        if pr == 0 && (a1 & UB_O_NONBLOCK) != 0 {
+            let r0: u64 = of_of(state, me, user_word32(state, me, a0))
+            let r1: u64 = of_of(state, me, user_word32(state, me, a0 + 4))
+            if r0 < file.MAX_OPEN {
+                file.open_set_flags(state, r0, file.open_flags(state, r0) | UB_O_NONBLOCK)
+            }
+            if r1 < file.MAX_OPEN {
+                file.open_set_flags(state, r1, file.open_flags(state, r1) | UB_O_NONBLOCK)
+            }
+        }
+        return pr
+    }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
         // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
         // ebenfalls nicht ansieht. Eine Geraeteabbildung braucht ihn.
-        return do_map(state, me, a1, a2, a3, a4, a5)
+        return do_map(state, me, a0, a1, a2, a3, a4, a5)
     }
     if number == SYS_MUNMAP {
         return do_unmap(state, me, a0, a1)
@@ -2685,10 +2790,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_nanosleep(state, me, a0)
     }
     if number == SYS_FORK {
-        return do_fork(state, me, frame)
+        return do_fork(state, me, frame, 0)
     }
     if number == SYS_EXECVE {
-        return do_execve(state, me, frame, a0, a1)
+        return do_execve(state, me, frame, a0, a1, a2)
     }
     if number == SYS_WAIT4 {
         return do_wait4(state, me, a0, a1, a2)
@@ -2823,6 +2928,11 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_TGKILL {
         return signal.do_kill(state, me, a1, a2)
+    }
+    // RUNDE UNTERBAU: `tkill(tid, sig)` -- the call musl's `raise()` and `pthread_kill()` make. It was missing, so `raise(sig)` did
+    // nothing (-ENOSYS, unnoticed) while `kill(getpid(), sig)` worked. Same function as `tgkill` without the group argument.
+    if number == UB_TKILL {
+        return signal.do_kill(state, me, a0, a1)
     }
     if number == SYS_PAUSE {
         return signal.do_pause(state, me)
@@ -4535,6 +4645,10 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         if file.pipe_writers(state, p) == 0 {
             return 0
         }
+        // RUNDE UNTERBAU: O_NONBLOCK (pipe2, fcntl F_SETFL) -- an empty pipe with a writer is -EAGAIN at once, not after the wait
+        if (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
+            return neg(errno.E_AGAIN)
+        }
         if waited >= BLOCK_ROUNDS {
             return neg(errno.E_AGAIN)
         }
@@ -4588,7 +4702,7 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                 return neg(errno.E_PIPE)
             }
             if file.pipe_room(state, p) == 0 {
-                if waited >= BLOCK_ROUNDS {
+                if waited >= BLOCK_ROUNDS || (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
                     going = false
                 } else {
                     waited = waited + 1
@@ -6728,6 +6842,19 @@ fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
     if was == PR_SET_DUMPABLE {
         return 0
     }
+    // RUNDE UNTERBAU: the options a sandboxing, threading program sets at start-up and ignores the failure of anyway -- accepted
+    // where the request is a no-op on this kernel (there is no setuid exec to gain privileges with, no core dump, no timer slack,
+    // no subreaper bookkeeping, no parent-death signal: PR_SET_PDEATHSIG is accepted WITHOUT effect, written down in
+    // docs/RUNDE-UNTERBAU-FIREFOX.md). The questions answer what is true: no seccomp filter (0), no_new_privs 1.
+    if was == 1 || was == 29 || was == 36 || was == 38 {
+        return 0
+    }
+    if was == 21 {
+        return 0
+    }
+    if was == 39 {
+        return 1
+    }
     return neg(errno.E_INVAL)
 }
 
@@ -6740,18 +6867,31 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
         return file.open_flags(state, of)
     }
     if cmd == F_SETFL {
+        // RUNDE UNTERBAU: the two flags that can change after open(): O_NONBLOCK and O_APPEND. Until now F_SETFL answered 0 and kept
+        // nothing, so `fcntl(fd, F_SETFL, O_NONBLOCK)` -- the first thing an event loop does to a socket or a pipe -- had no effect.
+        let keep: u64 = UB_O_NONBLOCK | O_APPEND
+        file.open_set_flags(state, of, (file.open_flags(state, of) & (~keep)) | (arg & keep))
         return 0
     }
     // Kein Deskriptor dieses Kerns ueberlebt ein `execve`, und keiner
     // traegt ein Nahe-Bit. Beides sagt die Antwort auch so.
+    // RUNDE UNTERBAU: FD_CLOEXEC IS REAL. It used to be "no descriptor survives an execve" (F_GETFD 0, F_SETFD ignored) -- but every
+    // descriptor DID survive, so the pipe that musl's posix_spawn leaves for the parent to wait on (closed by the exec) stayed open in the
+    // child and `posix_spawn` of a long-lived program did not return until the program ended (measured: 1607 ms for a 1 s child). The flag
+    // lives in a bit mask per task (TCPU table, word 24); `execve` closes the marked descriptors, `fork` copies the mask.
     if cmd == F_GETFD {
-        return 0
+        return (cx_get(state, me) >> fd) & 1
     }
     if cmd == F_SETFD {
+        cx_put(state, me, fd, (arg & 1) != 0)
         return 0
     }
     if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
-        return do_dup(state, me, fd)
+        let nd: u64 = do_dup(state, me, fd)
+        if cmd == F_DUPFD_CLOEXEC && !errno.is_error(nd) {
+            cx_put(state, me, nd, true)
+        }
+        return nd
     }
     // RUNDE FREMDLAND: DIE SPERREN SIND ECHT.
     if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK {
@@ -7226,12 +7366,18 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
 // by looking for the names `malloc`, `printf`, `memcpy` and `mmap` in the
 // symbol table. A kernel function that carried one of those names would
 // make that proof worthless.
-fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
+fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
     fd: u64, off: u64) -> u64 {
     if len == 0 {
         return neg(errno.E_INVAL)
     }
     if (flags & MAP_ANONYMOUS) == 0 {
+        // RUNDE UNTERBAU: a mapping of a REGULAR FILE (dlopen of a shared object, a mapped data file). The other descriptors that
+        // can be mapped (frame buffer, shared memory objects) keep their way.
+        let of: u64 = of_of(state, me, fd)
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
+            return map_file(state, me, addr, len, prot, flags, fd, off)
+        }
         // ROUNDE K7: der eine Deskriptor, der sich abbilden laesst.
         return map_fd(state, me, fd, len, prot, off)
     }
@@ -7239,7 +7385,131 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     if off != 0 {
         return neg(errno.E_INVAL)
     }
+    return map_anon(state, me, addr, len, prot, flags)
+}
+
+// RUNDE UNTERBAU: anonymous memory with the rights that were asked for. Until this round every anonymous mapping was read-write
+// whatever `prot` said (PROT_NONE guard pages were readable); the pages come out RW and zeroed from `map_alloc` and are cut down
+// afterwards when `prot` is anything but plain read-write.
+fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
     let pages: u64 = page_up(len) / PAGE
+    var base: u64 = 0
+    if (flags & MAP_FIXED) != 0 {
+        base = map_fixed(state, me, addr, pages, prot)
+    } else {
+        base = map_alloc(state, me, pages, prot)
+    }
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    if (prot & 3) != 3 {
+        let r: u64 = set_range_prot(state, me, base, pages, prot)
+        if r != 0 {
+            return neg(errno.E_NOMEM)
+        }
+    }
+    return base
+}
+
+// The rights of a range of mapped pages; 0 = done. One flush at the end.
+fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 {
+    var k: u64 = 0
+    while k < pages {
+        let r: u64 = proc.page_protect(state, me, base + k * PAGE, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+        if r != 0 {
+            proc.tlb_flush_if_current(state, me)
+            return r
+        }
+        k = k + 1
+    }
+    proc.tlb_flush_if_current(state, me)
+    return 0
+}
+
+// MAP_FIXED: the pages go exactly to `addr`, whatever was mapped there is replaced (and zero). Only inside the two windows that
+// `mmap` hands out of and only ABOVE their bump marks -- the pages below a mark are the allocator's to give, a fixed mapping there
+// would meet the next ordinary `mmap`.
+fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
+    if (addr & (PAGE - 1)) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if pages == 0 || pages > 0x100000 {
+        return neg(errno.E_INVAL)
+    }
+    let end: u64 = addr + pages * PAGE
+    let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
+    let in_gross: bool = addr >= big_bottom(state, me) && end <= proc.BIG_TOP
+    if !in_alt && !in_gross {
+        return neg(errno.E_NOMEM)
+    }
+    let _released: bool = unixsock.map_release(state, me, addr, pages * PAGE)
+    var p: u64 = addr
+    while p < end {
+        let _d: bool = proc.page_drop(state, me, p)
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            return neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + PAGE
+    }
+    return addr
+}
+
+// RUNDE UNTERBAU: mmap of a regular file. There is no page cache and no demand paging in this kernel, so the pages are made now
+// (zeroed) and filled with a read of the file -- what is beyond the end of the file stays zero. MAP_PRIVATE is exact (a copy the process
+// may change). MAP_SHARED is a snapshot only: it is allowed read-only, and refused (-ENODEV, the old answer for "no file mapping") when
+// it asks for write access, because a write would never reach the file or another process -- a half-truth is worse than the refusal.
+fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    if (off & (PAGE - 1)) != 0 || (off >> 63) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && (prot & PROT_WRITE) != 0 {
+        return neg(errno.E_NODEV)
+    }
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN || !readable(state, of) {
+        return neg(errno.E_ACCES)
+    }
+    var rw: u64 = PROT_READ | PROT_WRITE
+    if (prot & PROT_EXEC) != 0 {
+        rw = rw | PROT_EXEC
+    }
+    let base: u64 = map_anon(state, me, addr, len, rw, flags | MAP_ANONYMOUS)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    let merk: u64 = file.open_off(state, of)
+    file.open_set_off(state, of, off)
+    var done: u64 = 0
+    while done < len {
+        var chunk: u64 = len - done
+        if chunk > 65536 {
+            chunk = 65536
+        }
+        let r: u64 = do_read(state, me, fd, base + done, chunk)
+        if r >= 0xFFFFFFFFFFFFF000 {
+            file.open_set_off(state, of, merk)
+            let _u: u64 = do_unmap(state, me, base, len)
+            return r
+        }
+        if r == 0 {
+            done = len
+        } else {
+            done = done + r
+        }
+    }
+    file.open_set_off(state, of, merk)
+    if (prot & 3) != 3 {
+        let rr: u64 = set_range_prot(state, me, base, page_up(len) / PAGE, prot)
+        if rr != 0 {
+            return neg(errno.E_NOMEM)
+        }
+    }
+    return base
+}
+
+// The ordinary allocation: the next free pages below the bump marks (see `do_map` before this round, which this is).
+fn map_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     let top: u64 = map_bottom(state, me)
     if pages * PAGE > top {
         return big_map(state, me, pages, prot)
@@ -7553,7 +7823,13 @@ fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     if sec > 60 {
         return neg(errno.E_INVAL)
     }
-    let ticks: u64 = sec * 100 + (nsec + 9999999) / 10000000
+    var ticks: u64 = sec * 100 + (nsec + 9999999) / 10000000
+    // RUNDE UNTERBAU: ONE TICK MORE, as `poll` does it. The counter stands in the middle of the running tick when the call reads it, so a
+    // sleep of N ticks lasted between N-1 and N ticks: `usleep(30000)` measured 24.7 ms (t_misc `monotonic_advances_with_sleep`), and a sleep
+    // must never return EARLY (POSIX). A request of zero stays zero.
+    if ticks != 0 {
+        ticks = ticks + 1
+    }
     // ROUND K9. GESCHLAFEN WIRD MARKE FUER MARKE, und das ist kein
     // Umweg: ein Schlaefer muss von einem Signal UNTERBRECHBAR sein.
     // POSIX sagt dafuer -EINTR, und ein `sleep 30`, das sich von STRG-C
@@ -8143,8 +8419,13 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
         return neg(errno.E_NOSYS)
     }
     // Kein gemeinsamer Adressraum: das ist ein Prozess, kein Faden.
-    if (flags & CLONE_VM) == 0 {
-        return do_fork(state, me, frame)
+    // RUNDE UNTERBAU: AND NO THREAD GROUP MEANS A PROCESS TOO. `CLONE_VM` without `CLONE_THREAD` is `vfork` -- what musl's
+    // `posix_spawn`, `system()` and `popen()` do (CLONE_VM|CLONE_VFORK|SIGCHLD, the child on a stack the parent gives it, then `execve`).
+    // It was handled as a thread, sharing the address space with the parent; the child's `execve` then replaced the PARENT's space and
+    // the child died of a page fault (measured: status 0x8e00 from every posix_spawn). Now it is a fork (a copy of the space, the given
+    // stack as the child's rsp): the child can exec or exit without touching the parent, and the parent does not need to wait for it.
+    if (flags & CLONE_VM) == 0 || (flags & CLONE_THREAD) == 0 {
+        return do_fork(state, me, frame, stapel)
     }
     // Ein gemeinsamer Adressraum OHNE eigenen Stapel waere zwei
     // Ausfuehrungen auf demselben Stapelzeiger -- der eine schriebe dem
@@ -8155,6 +8436,11 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     if !proc.user_ok(state, me, stapel - 8, 8) {
         return neg(errno.E_FAULT)
     }
+    // RUNDE UNTERBAU: THE FINISHED THREADS OF THIS PROCESS GO FIRST. A thread that ended stayed a corpse in the task table until
+    // somebody called wait4 for it -- and nobody does, `pthread_join` waits on a futex word, not on wait4. The table has 32 slots,
+    // so after about thirty threads over a process's life `pthread_create` failed with EAGAIN for good (measured: tools/unterbau,
+    // t_threads `churn_64_threads`). Linux frees a non-leader thread by itself; here the next `clone` of the group does it.
+    reap_dead_threads(state, me)
     let irq: u64 = sched.irq_save()
     let faden: u64 = proc.create_thread(state, me,
         sched.tget(state, me, sched.T_PRIO))
@@ -8166,6 +8452,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     // sie je Aufgabe -- also werden sie kopiert. Der Unterschied steht
     // in STATUS-FREMDLAND.md.
     file.inherit_task(state, me, faden)
+    cx_set(state, faden, cx_get(state, me))
     sched.fpu_inherit(state, me, faden)
     signal.inherit(state, me, faden)
     sched.tset(state, faden, sched.T_CWD,
@@ -8270,8 +8557,10 @@ fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
     if (was & FUTEX_PRIVATE) != 0 {
         was = was - FUTEX_PRIVATE
     }
+    var on_real: bool = false
     if (was & FUTEX_CLOCK_RT) != 0 {
         was = was - FUTEX_CLOCK_RT
+        on_real = true
     }
     if (adresse & 3) != 0 {
         return neg(errno.E_INVAL)
@@ -8279,13 +8568,13 @@ fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
     if !proc.user_ok(state, me, adresse, 4) {
         return neg(errno.E_FAULT)
     }
-    if was == FUTEX_WAKE {
+    if was == FUTEX_WAKE || was == UB_FUTEX_WAKE_BITSET {
         // Es gibt keine Warteschlange, aus der zu wecken waere: die
         // Wartenden sehen selbst nach. Die Antwort ist die Zahl der
         // geweckten Faeden, und ehrlich ist hier 0.
         return 0
     }
-    if was != FUTEX_WAIT {
+    if was != FUTEX_WAIT && was != UB_FUTEX_WAIT_BITSET {
         return neg(errno.E_INVAL)
     }
     // Steht der Wert nicht mehr, hat der Aufrufer die Aenderung
@@ -8299,6 +8588,49 @@ fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
     // einem verklemmten nicht zu unterscheiden, und dieser Kern hat
     // keinen, der ihn loesen koennte.
     var rest: u64 = FUTEX_MAX
+    // RUNDE UNTERBAU: THE TIMEOUT IS HONOURED. Until this round `zeit` was ignored and every timed wait ran FUTEX_MAX ticks (10 s): a
+    // `pthread_cond_timedwait` of 50 ms took 9991 ms (measured, t_threads `cond_timedwait_times_out`), and with it every timeout in
+    // a program built on musl's timed waits (sem_timedwait, pthread_mutex_timedlock, ...). FUTEX_WAIT takes a RELATIVE timespec,
+    // FUTEX_WAIT_BITSET an ABSOLUTE one (on the monotonic clock, or the real-time clock with the flag). The grain is the 10 ms tick.
+    if zeit != 0 {
+        if !proc.user_ok(state, me, zeit, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let sec: u64 = user_word(state, me, zeit)
+        let nsec: u64 = user_word(state, me, zeit + 8)
+        if nsec >= 1000000000 {
+            return neg(errno.E_INVAL)
+        }
+        var ns: u64 = 0
+        if was == UB_FUTEX_WAIT_BITSET {
+            var now: u64 = time.mono_ns(state)
+            if on_real {
+                now = time.real_ns(state)
+            }
+            if sec > 4000000000 {
+                ns = 0x7FFFFFFFFFFFFFFF
+            } else {
+                ns = sec * 1000000000 + nsec
+            }
+            if ns <= now {
+                return neg(errno.E_TIMEDOUT)
+            }
+            ns = ns - now
+        } else {
+            if sec > 4000000 {
+                ns = 0x7FFFFFFFFFFFFFFF
+            } else {
+                ns = sec * 1000000000 + nsec
+            }
+            if ns == 0 {
+                return neg(errno.E_TIMEDOUT)
+            }
+        }
+        rest = (ns / 10000000) + 1
+        if rest > 0x3FFFFFFF {
+            rest = 0x3FFFFFFF
+        }
+    }
     while rest > 0 {
         if signal.interrupted(state, me) {
             return neg(errno.E_INTR)
@@ -8344,6 +8676,10 @@ fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
 // schreibt in die Nachbarseite, statt einen Seitenfehler zu bekommen.
 // Das ist ein ehrlich benannter Mangel und kein Versehen -- die
 // Alternative waere, gar keine Faeden zu koennen.
+// RUNDE UNTERBAU: `mprotect` WITH an effect. Until this round it answered 0 and changed nothing ("this kernel knows no switching of the
+// rights afterwards"), so a PROT_NONE guard page could be read and a PROT_READ page written. Now the rights go into the page table:
+// read-write, read-only, none (the page stays, the user bit goes), execute. Linux answers -ENOMEM when a page of the range is not mapped,
+// and so does this (nothing is changed then). A page of a shared object that is read-only is not made writable (-EACCES).
 fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if (addr & 4095) != 0 {
         return neg(errno.E_INVAL)
@@ -8351,16 +8687,36 @@ fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if len == 0 {
         return 0
     }
-    if !proc.user_ok(state, me, addr, 1) {
-        return neg(errno.E_FAULT)
+    if (prot & (~7)) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if len > 0x400000000 {
+        return neg(errno.E_NOMEM)
+    }
+    let pages: u64 = page_up(len) / PAGE
+    var k: u64 = 0
+    while k < pages {
+        if !proc.page_mapped(state, me, addr + k * PAGE) {
+            return neg(errno.E_NOMEM)
+        }
+        k = k + 1
+    }
+    let r: u64 = set_range_prot(state, me, addr, pages, prot)
+    if r == 2 {
+        return neg(errno.E_ACCES)
+    }
+    if r != 0 {
+        return neg(errno.E_NOMEM)
     }
     return 0
 }
 
-fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
+fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
         return neg(errno.E_NOSYS)
     }
+    // RUNDE UNTERBAU: the corpses of finished threads of this process leave first (a task slot is a task slot)
+    reap_dead_threads(state, me)
     let flags: u64 = sched.irq_save()
     let child: u64 = proc.create_bare(state, sched.tget(state, me,
             sched.T_PRIO))
@@ -8374,6 +8730,7 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
         return neg(errno.E_NOMEM)
     }
     file.inherit_task(state, me, child)
+    cx_set(state, child, cx_get(state, me))
     // RUNDE AVX: und der Vektorzustand. POSIX sagt, ein Kind faengt mit
     // der Gleitkommaumgebung seines Elternteils an -- Rundungsart,
     // Ausnahmemasken und die Register selbst.
@@ -8431,6 +8788,9 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
         i = i + 1
     }
     __mmio_write64((ctx + F_RAX) as *mut u64, 0)
+    if stapel != 0 {
+        __mmio_write64((ctx + F_RSP) as *mut u64, stapel)
+    }
     sched.tset(state, child, sched.T_ARG, proc.ARG_RESUME)
     kstate.add(state, kstate.SPAWNS, 1)
     kstate.add(state, kstate.FORKS, 1)
@@ -8449,7 +8809,7 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
 // which frees exactly the old image. Nothing else in the task changes:
 // same pid, same parent, same descriptors, and that is what `execve`
 // promises.
-fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
+fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -> u64 {
     // ROUND K9: die Routinen des alten Abbilds zeigen in Code, den es
     // nach diesem Aufruf nicht mehr gibt. Was UEBERHOERT wurde, bleibt
     // ueberhoert (POSIX), alles andere faellt auf das Standardverhalten
@@ -8511,12 +8871,68 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
             }
         }
     }
+    // RUNDE UNTERBAU: THE ENVIRONMENT OF `execve`. The kernel holds ONE environment block (a shell fills it with SYS_OSUM_SETENV, every
+    // program started afterwards finds it on its argument page) and `execve` ignored its third argument: a child started with
+    // `execve(path, argv, envp)` never saw `envp` (measured: t_proc `exec_args_env_stdout`, WAYLAND_DISPLAY and XDG_RUNTIME_DIR would
+    // not reach a child either). Now the block is replaced by `envp` for the one program start and put back afterwards. Limits are those
+    // of the argument page: 16 strings, ENV_MAX octets together; the rest of `envp` is dropped.
+    var env_saved: u64 = 0
+    var old_n: u64 = 0
+    var old_len: u64 = 0
+    if envp != 0 {
+        env_saved = mem.kalloc(state, kstate.ENV_MAX + 16)
+        if env_saved != 0 {
+            let blk: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+            old_n = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
+            old_len = kstate.get(state, kstate.K11_OFF + kstate.ENV_LEN)
+            var ci: u64 = 0
+            while ci < old_len && ci < kstate.ENV_MAX {
+                kstate.set8(env_saved + ci, kstate.get8(blk + ci) as u8)
+                ci = ci + 1
+            }
+            var eat: u64 = 0
+            var ecnt: u64 = 0
+            var egoing: bool = true
+            while egoing && ecnt < 16 {
+                if !proc.user_ok(state, me, envp + ecnt * 8, 8) {
+                    egoing = false
+                } else {
+                    let ep: u64 = user_word(state, me, envp + ecnt * 8)
+                    if ep == 0 || eat + MAX_ARG + 1 > kstate.ENV_MAX {
+                        egoing = false
+                    } else {
+                        let en: u64 = fetch_name(state, me, ep, blk + eat, MAX_ARG)
+                        if errno.is_error(en) {
+                            egoing = false
+                        } else {
+                            eat = eat + en + 1
+                            ecnt = ecnt + 1
+                        }
+                    }
+                }
+            }
+            kstate.set(state, kstate.K11_OFF + kstate.ENV_N, ecnt)
+            kstate.set(state, kstate.K11_OFF + kstate.ENV_LEN, eat)
+        }
+    }
     let flags: u64 = sched.irq_save()
     // r334: one program start at a time on the whole machine.
     let lk: u64 = elf.lock_enter(state)
     let t: u64 = elf.build(state, name, abuf, argc, sched.tget(state, me,
             sched.T_PRIO))
     elf.lock_leave(state, lk)
+    if env_saved != 0 {
+        // the new image has copied the block onto its argument page: the old block goes back
+        let blk2: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+        var cj: u64 = 0
+        while cj < old_len && cj < kstate.ENV_MAX {
+            kstate.set8(blk2 + cj, kstate.get8(env_saved + cj) as u8)
+            cj = cj + 1
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.ENV_N, old_n)
+        kstate.set(state, kstate.K11_OFF + kstate.ENV_LEN, old_len)
+        mem.kfree(state, env_saved)
+    }
     if t == 0 {
         sched.irq_restore(flags)
         let why: u64 = kstate.get(state, kstate.ELF_ERR)
@@ -8542,6 +8958,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     // label, or `app:<name>` for a program in an app bundle); `execve`
     // is not a new process, so it moves over like the four words above.
     origin.inherit(state, t, me)
+    cx_close_marked(state, me)
     proc.swap_space(state, me, t)
     // The new tables FIRST, then the old ones are freed -- in that order,
     // because the processor is standing in the old ones right now.
@@ -8664,7 +9081,16 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
             // that wins the claim -- DELL STABILITY)
             proc.reap(state, child)
             if status != 0 {
-                if !put32(state, me, status, (code & 255) << 8) {
+                // RUNDE UNTERBAU: a task that died of a signal reports it the way POSIX does -- the signal number in the low bits (WIFSIGNALED,
+                // WTERMSIG) -- and not as an exit with code 128 + n. Everything else keeps `exit code << 8`.
+                // ONLY for the waiter that is a libc program (it has set its thread pointer: T_FSBASE != 0). The programs of this system read
+                // `(status >> 8) & 255` and have measured 128 + n there since round 62; for them nothing changes.
+                var st: u64 = (code & 255) << 8
+                let sl: u64 = sched.tget(state, child, sched.T_SIGLAST)
+                if (sl & 256) != 0 && sched.tget(state, me, sched.T_FSBASE) != 0 {
+                    st = sl & 127
+                }
+                if !put32(state, me, status, st) {
                     return neg(errno.E_FAULT)
                 }
             }
@@ -15936,4 +16362,375 @@ fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     }
     file.fd_set(state, me, fd, of)
     return fd
+}
+
+// ================================================================ RUNDE UNTERBAU
+const UB_MREMAP: u64 = 25
+const UB_MSYNC: u64 = 26
+const UB_MADVISE: u64 = 28
+const UB_MLOCK: u64 = 149
+const UB_MUNLOCK: u64 = 150
+const UB_MLOCKALL: u64 = 151
+const UB_MUNLOCKALL: u64 = 152
+const UB_GETRLIMIT: u64 = 97
+const UB_GETRUSAGE: u64 = 98
+const UB_SYSINFO: u64 = 99
+const UB_GETPRIORITY: u64 = 140
+const UB_SETPRIORITY: u64 = 141
+const UB_SCHED_SETPARAM: u64 = 142
+const UB_SCHED_GETPARAM: u64 = 143
+const UB_SCHED_SETSCHEDULER: u64 = 144
+const UB_SCHED_GETSCHEDULER: u64 = 145
+const UB_SCHED_GET_PRIORITY_MAX: u64 = 146
+const UB_SCHED_GET_PRIORITY_MIN: u64 = 147
+const UB_SETRLIMIT: u64 = 160
+const UB_SCHED_SETAFFINITY: u64 = 203
+const UB_SCHED_GETAFFINITY: u64 = 204
+const UB_FDATASYNC: u64 = 75
+const UB_DUP3: u64 = 292
+const UB_PIPE2: u64 = 293
+const UB_SET_ROBUST_LIST: u64 = 273
+const UB_PRLIMIT64: u64 = 302
+const UB_O_NONBLOCK: u64 = 2048
+const UB_O_CLOEXEC: u64 = 524288
+const UB_TKILL: u64 = 200
+const UB_FUTEX_WAIT_BITSET: u64 = 9
+const UB_FUTEX_WAKE_BITSET: u64 = 10
+const UB_INF: u64 = 0xFFFFFFFFFFFFFFFF
+
+// getrlimit / setrlimit / prlimit64. The numbers are the ones of THIS kernel where it has a limit (descriptors per process,
+// processes), the ones Linux reports for "no limit" otherwise. setrlimit checks the shape (soft <= hard, a known resource) and accepts:
+// nothing here enforces a limit that is not already a table size, and saying so is the answer -- a later getrlimit gives the real value.
+fn rlimit_cur(res: u64) -> u64 {
+    if res == 3 {
+        return 8388608
+    }
+    if res == 4 {
+        return 0
+    }
+    if res == 6 {
+        return kstate.MAX_TASKS
+    }
+    if res == 7 {
+        return file.MAX_FD
+    }
+    if res == 8 {
+        return 65536
+    }
+    if res == 11 {
+        return 1024
+    }
+    if res == 12 {
+        return 819200
+    }
+    return UB_INF
+}
+
+fn rlimit_max(res: u64) -> u64 {
+    if res == 4 {
+        return 0
+    }
+    if res == 6 {
+        return kstate.MAX_TASKS
+    }
+    if res == 7 {
+        return file.MAX_FD
+    }
+    if res == 8 {
+        return 65536
+    }
+    if res == 11 {
+        return 1024
+    }
+    if res == 12 {
+        return 819200
+    }
+    return UB_INF
+}
+
+fn do_rlimit(state: u64, me: u64, res: u64, newp: u64, oldp: u64) -> u64 {
+    if res >= 16 {
+        return neg(errno.E_INVAL)
+    }
+    if oldp != 0 {
+        if !proc.user_ok(state, me, oldp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let _a: bool = put64(state, me, oldp, rlimit_cur(res))
+        let _b: bool = put64(state, me, oldp + 8, rlimit_max(res))
+    }
+    if newp != 0 {
+        if !proc.user_ok(state, me, newp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let cur: u64 = user_word(state, me, newp)
+        let mx: u64 = user_word(state, me, newp + 8)
+        if cur > mx {
+            return neg(errno.E_INVAL)
+        }
+    }
+    return 0
+}
+
+// The Linux `sysinfo`: uptime, load, memory in bytes (unit 1). The memory numbers are the frame allocator's.
+fn do_sysinfo_linux(state: u64, me: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 112) {
+        return neg(errno.E_FAULT)
+    }
+    var k: u64 = 0
+    while k < 14 {
+        let _z: bool = put64(state, me, out + k * 8, 0)
+        k = k + 1
+    }
+    let total: u64 = mem.frames_total(state) * PAGE
+    let free: u64 = mem.frames_free(state) * PAGE
+    let _up: bool = put64(state, me, out, kstate.get(state, kstate.TICKS) / 100)
+    let _tr: bool = put64(state, me, out + 32, total)
+    let _fr: bool = put64(state, me, out + 40, free)
+    let _pr: bool = put32(state, me, out + 80, kstate.get(state, kstate.TASKS))
+    let _mu: bool = put32(state, me, out + 104, 1)
+    return 0
+}
+
+// getrusage: the kernel keeps no per-process times of this kind; zeros are the honest "not accounted" and every field is there.
+fn do_getrusage(state: u64, me: u64, who: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 144) {
+        return neg(errno.E_FAULT)
+    }
+    var k: u64 = 0
+    while k < 18 {
+        let _z: bool = put64(state, me, out + k * 8, 0)
+        k = k + 1
+    }
+    return 0
+}
+
+// sched_getaffinity: one bit per processor the firmware reported (at least one), as the number of octets the caller gave
+// (musl passes the size of its cpu_set_t; the kernel's answer is the number of octets it wrote).
+fn do_getaffinity(state: u64, me: u64, pid: u64, size: u64, out: u64) -> u64 {
+    if size < 8 || (size & 7) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    var n: u64 = kstate.get(state, kstate.SMP_OFF + kstate.SMP_COUNT)
+    if n == 0 {
+        n = 1
+    }
+    if n > 64 {
+        n = 64
+    }
+    if !proc.user_ok(state, me, out, size) {
+        return neg(errno.E_FAULT)
+    }
+    // (words through `put64`, which opens the SMAP window: a plain store to a user address from ring 0 is a #PF)
+    var k: u64 = 0
+    while k < size {
+        let _z: bool = put64(state, me, out + k, 0)
+        k = k + 8
+    }
+    var mask: u64 = 0
+    if n == 64 {
+        mask = 0xFFFFFFFFFFFFFFFF
+    } else {
+        mask = (1 << n) - 1
+    }
+    let _m: bool = put64(state, me, out, mask)
+    return 8
+}
+
+// Corpses of non-leader threads of the caller's thread group are reaped (descriptors closed, slot given back). Returns how many.
+fn reap_dead_threads(state: u64, me: u64) -> u64 {
+    var g: u64 = sched.tget(state, me, sched.T_TGID)
+    if g == 0 {
+        g = sched.tget(state, me, sched.T_PID)
+    }
+    var n: u64 = 0
+    var i: u64 = 1
+    while i < kstate.MAX_TASKS {
+        if i != me && sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
+            let tg: u64 = sched.tget(state, i, sched.T_TGID)
+            if tg == g && sched.tget(state, i, sched.T_PID) != g {
+                proc.reap(state, i)
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// madvise: DONTNEED zeroes private pages (what a program relies on to get fresh memory back from a region it keeps); the other known advice
+// values are hints and are accepted; an unknown value is -EINVAL; a page that is not mapped is -ENOMEM.
+fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
+    if (addr & 4095) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    let known: bool = advice <= 4 || advice == 8 || (advice >= 9 && advice <= 19)
+    if !known {
+        return neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if len > 0x400000000 {
+        return neg(errno.E_NOMEM)
+    }
+    let pages: u64 = page_up(len) / PAGE
+    var k: u64 = 0
+    while k < pages {
+        if !proc.page_mapped(state, me, addr + k * PAGE) {
+            return neg(errno.E_NOMEM)
+        }
+        k = k + 1
+    }
+    if advice == 4 {
+        k = 0
+        while k < pages {
+            let _z: bool = proc.page_zero(state, me, addr + k * PAGE)
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// mremap: shrinking unmaps the tail; growing needs a new place (MREMAP_MAYMOVE): a new mapping is made, the pages are copied and the old
+// ones are given back. The rights of the first page carry over. MREMAP_FIXED / DONTUNMAP and growing in place are not supported (-EINVAL / -ENOMEM).
+fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, flags: u64) -> u64 {
+    if (old_addr & 4095) != 0 || old_len == 0 || new_len == 0 || (flags & 6) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    let oldp: u64 = page_up(old_len) / PAGE
+    let newp: u64 = page_up(new_len) / PAGE
+    var k: u64 = 0
+    while k < oldp {
+        if !proc.page_mapped(state, me, old_addr + k * PAGE) {
+            return neg(errno.E_FAULT)
+        }
+        k = k + 1
+    }
+    if newp == oldp {
+        return old_addr
+    }
+    if newp < oldp {
+        let _u: u64 = do_unmap(state, me, old_addr + newp * PAGE, (oldp - newp) * PAGE)
+        return old_addr
+    }
+    if (flags & 1) == 0 {
+        return neg(errno.E_NOMEM)
+    }
+    let rights: u64 = proc.page_rights(state, me, old_addr)
+    let base: u64 = map_alloc(state, me, newp, PROT_READ | PROT_WRITE)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    k = 0
+    while k < oldp {
+        let _c: bool = proc.page_copy(state, me, old_addr + k * PAGE, base + k * PAGE)
+        k = k + 1
+    }
+    var prot: u64 = 0
+    if (rights & 2) != 0 {
+        prot = PROT_READ
+    }
+    if (rights & 4) != 0 {
+        prot = prot | PROT_WRITE
+    }
+    if (rights & 8) != 0 {
+        prot = prot | PROT_EXEC
+    }
+    if (prot & 3) != 3 {
+        let _r: u64 = set_range_prot(state, me, base, newp, prot)
+    }
+    let _d: u64 = do_unmap(state, me, old_addr, oldp * PAGE)
+    return base
+}
+
+// FD_CLOEXEC bits: one per descriptor, in word 24 of the task's entry of the TCPU table (the word nobody uses; file.fd_free clears the bit).
+fn cx_get(state: u64, task: u64) -> u64 {
+    return kstate.get(state, kstate.TCPU_OFF + task * kstate.TCPU_BYTES + 24)
+}
+
+fn cx_set(state: u64, task: u64, v: u64) {
+    kstate.set(state, kstate.TCPU_OFF + task * kstate.TCPU_BYTES + 24, v)
+}
+
+fn cx_put(state: u64, task: u64, fd: u64, on: bool) {
+    if fd >= file.MAX_FD {
+        return
+    }
+    let m: u64 = cx_get(state, task)
+    if on {
+        cx_set(state, task, m | (1 << fd))
+    } else {
+        cx_set(state, task, m & (0xFFFFFFFFFFFFFFFF -% (1 << fd)))
+    }
+}
+
+// `r` is the descriptor a call returned (or an error); with O_CLOEXEC / SOCK_CLOEXEC in `flags` it gets the flag. Returns `r`.
+fn cx_result(state: u64, me: u64, r: u64, flags: u64) -> u64 {
+    if !errno.is_error(r) && (flags & UB_O_CLOEXEC) != 0 {
+        cx_put(state, me, r, true)
+    }
+    return r
+}
+
+// execve: the marked descriptors close.
+fn cx_close_marked(state: u64, me: u64) {
+    let m: u64 = cx_get(state, me)
+    if m == 0 {
+        return
+    }
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        if ((m >> fd) & 1) != 0 {
+            let of: u64 = of_of(state, me, fd)
+            if of < file.MAX_OPEN {
+                file.fd_free(state, me, fd)
+                unref_of(state, of)
+            }
+        }
+        fd = fd + 1
+    }
+    cx_set(state, me, 0)
+}
+
+// RUNDE UNTERBAU: A READ OR WRITE ON A REGULAR FILE IS NOT CUT AT 4096 OCTETS. `read`/`write` moved one block (MAX_IO) per call and
+// answered the rest with a short count; POSIX allows a short count on a regular file only at its end, and a program that reads a file
+// "all at once" (`read(fd, buf, st_size)` -- the way config files, fonts and the dynamic loader's headers are read) took the 4096 for the file.
+// For a regular file the call now repeats until the request is done or a block comes back short. Pipes, sockets and terminals keep their
+// short counts (that is their contract).
+fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    var first: u64 = 0
+    if writing {
+        first = do_write(state, me, fd, buf, len)
+    } else {
+        first = do_read(state, me, fd, buf, len)
+    }
+    if len <= MAX_IO || first != MAX_IO {
+        return first
+    }
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_FILE {
+        return first
+    }
+    var done: u64 = first
+    while done < len {
+        var chunk: u64 = len - done
+        if chunk > MAX_IO {
+            chunk = MAX_IO
+        }
+        var r: u64 = 0
+        if writing {
+            r = do_write(state, me, fd, buf + done, chunk)
+        } else {
+            r = do_read(state, me, fd, buf + done, chunk)
+        }
+        if errno.is_error(r) {
+            return done
+        }
+        done = done + r
+        if r < chunk {
+            return done
+        }
+    }
+    return done
 }

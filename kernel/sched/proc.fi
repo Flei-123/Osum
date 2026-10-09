@@ -57,7 +57,7 @@ export {
     map_programs,
     badentry_num,
     inherit, create_bare, create_thread, discard, page_free, page_exec, map_page,
-    map_page_zero, map_huge, nx,
+    map_page_zero, map_huge, nx, page_mapped, page_protect, tlb_flush_if_current, page_rights, page_zero, page_copy,
     map_frame,
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
@@ -1289,6 +1289,27 @@ fn translate(state: u64, i: u64, addr: u64) -> u64 {
     return (e1 & ADDR_MASK) + (addr & 0xFFF)
 }
 
+
+// A page of the stack zone (STACK_FLOOR .. ARGS_BASE) that is missing, with a mapped page of the zone at most 64 KiB above it: made, zeroed.
+fn stack_page_for_call(state: u64, i: u64, p: u64) -> bool {
+    if p < STACK_FLOOR || p >= ARGS_BASE {
+        return false
+    }
+    let page: u64 = p & 0xFFFFFFFFFFFFF000
+    var q: u64 = page + 4096
+    var found: bool = false
+    while q < ARGS_BASE && q <= page + 65536 + 4096 && !found {
+        if page_mapped(state, i, q) {
+            found = true
+        }
+        q = q + 4096
+    }
+    if !found {
+        return false
+    }
+    return map_page_zero(state, i, page, true, false) != 0
+}
+
 // May the process really read and write there? The kernel checks the
 // pointer of a system call ITSELF -- a kernel that simply follows a
 // pointer out of ring 3 has handed over its privilege with it. Two
@@ -1372,7 +1393,14 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
             }
             p = (p & (~(HUGE_SIZE - 1))) + HUGE_SIZE
         } else {
-            let e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
+            var e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
+            // RUNDE UNTERBAU: A SYSTEM CALL THAT NAMES A BUFFER ON THE STACK DOES NOT FAIL BECAUSE THE STACK HAS NOT GROWN THERE YET. A user access
+            // to such a page grows the stack (`grow_stack`, from the #PF); a pointer the KERNEL checks (`read(fd, buf[8192])`) came back -EFAULT,
+            // and `write` of a big stack array wrote 4096 octets and stopped (measured: t_mem `tmpfile_write_full`). The page is made when it
+            // lies at most 64 KiB below a page of the stack zone that is there already -- the same rule of distance as for the fault.
+            if (e1 & PAGE_PRESENT) == 0 && stack_page_for_call(state, i, p) {
+                e1 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
+            }
             if (e1 & PAGE_USER) == 0 || (e1 & PAGE_PRESENT) == 0 {
                 return false
             }
@@ -1601,6 +1629,142 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
         asm("mov rax, cr3\nmov cr3, rax", out("rax"))
     }
     return true
+}
+
+
+// ======================================== RUNDE UNTERBAU: RIGHTS OF A MAPPED PAGE
+//
+// `mprotect` was an answer without an effect ("0, nothing changed"). A big program (JS engines, allocators, thread
+// stacks, the dynamic loader's RELRO) uses it for guard pages and for write-xor-execute; with no effect a PROT_NONE
+// guard page is readable and a PROT_READ page is writable, and a stack overflow runs on into the next mapping.
+//
+// Is there a 4 KiB page at `addr` (a mapping with or without the user bit)? Huge pages (the frame buffer) are not.
+fn page_mapped(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    return (read_entry(pt, s) & PAGE_PRESENT) != 0
+}
+
+// Set the rights of one mapped page. 0 = done, 1 = no such page, 2 = refused: a page of a shared object (PAGE_SHARED: window
+// buffers, the window table page) that is not writable is never made writable, because the object may be read-only on purpose.
+// The frame and the bookkeeping bits stay. PROT_NONE keeps the page present and clears the user bit, so `user_ok` (the check of
+// every system call pointer) says no, the processor faults on a user access, and `page_drop` still gives the frame back.
+// No TLB flush here: `tlb_flush_if_current` does it once for a whole range.
+fn page_protect(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return 1
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return 1
+    }
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) == 0 {
+        return 1
+    }
+    var want_w: bool = writable
+    if (e & PAGE_SHARED) != 0 && (e & PAGE_WRITE) == 0 && want_w {
+        return 2
+    }
+    var rest: u64 = e & (~(PAGE_WRITE | PAGE_USER | PAGE_NX))
+    if readable || writable || runnable {
+        rest = rest | PAGE_USER
+        if want_w {
+            rest = rest | PAGE_WRITE
+        }
+        if !runnable {
+            rest = rest | nx(state)
+        }
+    } else {
+        // PROT_NONE
+        rest = rest | nx(state)
+    }
+    write_entry(pt, s, rest)
+    return 0
+}
+
+
+// The rights of the page at `addr` as bits for /proc/<pid>/maps: 0 = nothing mapped; 1 = mapped; 2 = user-readable (user bit);
+// 4 = writable; 8 = executable. A PROT_NONE page is "mapped" without the user bit.
+fn page_rights(state: u64, i: u64, addr: u64) -> u64 {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return 0
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return 0
+    }
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) == 0 {
+        return 0
+    }
+    var r: u64 = 1
+    if (e & PAGE_USER) != 0 {
+        r = r | 2
+        if (e & PAGE_WRITE) != 0 {
+            r = r | 4
+        }
+        if (e & PAGE_NX) == 0 {
+            r = r | 8
+        }
+    }
+    return r
+}
+
+
+// MADV_DONTNEED on private memory: the page stays mapped and reads as zero afterwards. A page of a shared object (PAGE_SHARED) is left
+// alone (for a shared mapping the advice drops private copies, which there are none of). false = not mapped.
+fn page_zero(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) == 0 {
+        return false
+    }
+    if (e & PAGE_SHARED) == 0 {
+        zero_frame(e & ADDR_MASK)
+    }
+    return true
+}
+
+// One page of the same process copied to another address of it (mremap that has to move). false when either page is not mapped.
+fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
+    let a: u64 = translate(state, i, from)
+    let b: u64 = translate(state, i, to)
+    if a == 0 || b == 0 {
+        return false
+    }
+    var k: u64 = 0
+    while k < mem.FRAME_SIZE / 8 {
+        __mmio_write64((b + k * 8) as *mut u64, __mmio_read64((a + k * 8) as *mut u64))
+        k = k + 1
+    }
+    return true
+}
+
+// The processor caches the tables of the CURRENT address space; writing cr3 with its own value drops the cache (the way
+// `page_drop` does it). A thread of the same process on another core keeps a stale entry until its next switch; removing a right
+// is therefore not instant there -- written down in docs/RUNDE-UNTERBAU-FIREFOX.md. Adding a right needs no flush on x86: the
+// processor re-walks before it raises a permission fault.
+fn tlb_flush_if_current(state: u64, i: u64) {
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
 }
 
 // EVERY MAPPED PAGE OF `from`, COPIED INTO `to`. This is `fork`, and it is
