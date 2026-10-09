@@ -19,6 +19,9 @@ cd "$(dirname "$0")/../.."
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
+# One fixed image time for every build of this gate: the file dates the explorer shows must not depend on the wall clock
+# (a minute change between two runs made digits differ -- the old flake).
+export CAPTURE_TIME=${CAPTURE_TIME:-1760000000}
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
@@ -130,46 +133,7 @@ run shr2 "extra=phases"
 for n in c1-idle c2-menu c3-explorer; do
     [ -s "$D/shr/$n.ppm" ] && [ -s "$D/nsh/$n.ppm" ] && ok "both runs took picture $n" || bad "picture $n is missing in one run"
 done
-python3 - "$D/shr" "$D/nsh" "$D/shr2" <<'PY' && ok "no differing pixel outside the clock and the toasts" || bad "sharing changed the picture"
-import sys, os
-from PIL import Image
-a, b, c = sys.argv[1], sys.argv[2], sys.argv[3]
-bad = 0
-keep = os.environ.get("KEEPPICS")
-for n in ("c1-idle", "c2-menu", "c3-explorer"):
-    try:
-        ia = Image.open("%s/%s.ppm" % (a, n)).convert("RGB")
-        ib = Image.open("%s/%s.ppm" % (b, n)).convert("RGB")
-        ic = Image.open("%s/%s.ppm" % (c, n)).convert("RGB")
-    except Exception as e:
-        print("  cannot read", n, e); bad += 1; continue
-    if ia.size != ib.size or ia.size != ic.size:
-        print("  size differs in", n); bad += 1; continue
-    w, h = ia.size
-    pa, pb, pc = ia.load(), ib.load(), ic.load()
-    diff = []
-    noise = 0
-    for y in range(h):
-        for x in range(w):
-            if (x >= w - 220 and y < 110) or (x >= w - 160 and y >= h - 50):
-                continue
-            if pa[x, y] != pb[x, y]:
-                # two runs of the SAME kind (shared, shared) also differ here: timing noise (hover fade, list arrival), not sharing
-                if pa[x, y] != pc[x, y]:
-                    noise += 1
-                else:
-                    diff.append((x, y))
-    print("  %-14s %d differing pixels (+%d that differ between two shared runs too: noise)" % (n, len(diff), noise), ("first " + str(diff[:3])) if diff else "")
-    if keep:
-        os.makedirs(keep, exist_ok=True)
-        for tag, im in (("shr", ia), ("nsh", ib), ("shr2", ic)):
-            im.save("%s/%s-%s.png" % (keep, n, tag))
-    # up to 512 pixels (0.05 % of the screen) are allowed: the tooltip edge of the start button (an animation step, 20 pixels) and the
-    # digits of the file dates (the wall clock differs between boots: 73 .. 184 pixels) -- measured, looked at, not sharing
-    if len(diff) > 512:
-        bad += 1
-sys.exit(1 if bad else 0)
-PY
+python3 tools/comp/shared_cmp.py "$D/shr" "$D/nsh" "$D/shr2" && ok "no differing pixel outside the clock, the toasts and the terminal text" || bad "sharing changed the picture"
 
 echo "== 3. the copies: pixels the kernel copied out of a client (WIG_BLIT) per frame =="
 sumf() { # sumf <serial> <field>   sum of a field of all `wm: shared` lines

@@ -155,7 +155,13 @@ if [ -n "$uiscale" ]; then SKAL="uiscale=$uiscale"; fi
 echo "uiscale ${uiscale:-1 (Vorgabe)}"
 
 mkdir -p "$OUT"
-BUILDD=${DESIGNBUILD:-/tmp/osum-designbuild-$(pwd | md5sum | cut -c1-12)}
+# Build dir: DESIGNBUILD wins; under /root/jarvis/bin/heavy (TMPDIR=/tmp/heavy-run.*, deleted by heavy afterwards) every run gets its own
+# $TMPDIR/db so parallel runs in one tree cannot disturb each other; otherwise one dir per tree (hash of the working directory).
+case "${TMPDIR:-}" in
+    /tmp/heavy-run.*) _bd_default="$TMPDIR/db" ;;
+    *) _bd_default="/tmp/osum-designbuild-$(pwd | md5sum | cut -c1-12)" ;;
+esac
+BUILDD=${DESIGNBUILD:-$_bd_default}
 mkdir -p "$BUILDD"
 
 # ---------------------------------------------------------- 1. bauen
@@ -313,7 +319,7 @@ printf '%s\n' "$lang" > "$OUT/userlocale"
 # `--time=` setzt dazu die Zeit, mit der die Dateien entstehen (die des
 # Wirtes beim Bauen des Abbildes), sonst waeren alle drei Zeiten null
 # und die Spalte bliebe leer wie zuvor.
-ARGS=(build "$OUT/disk.img" 49152 --v3 "--time=$(date +%s)" /lib/
+ARGS=(build "$OUT/disk.img" 49152 --v3 "--time=${CAPTURE_TIME:-$(date +%s)}" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
