@@ -23,9 +23,9 @@ jz 0f
 mov rax,[rdx+16]
 test rax,rax
 jz 0f
+mov rsi,[rdx]
+mov rdi,[rdx+8]
 1:
-xor esi,esi
-xor edi,edi
 xor r8d,r8d
 xor r9d,r9d
 xor r10d,r10d
@@ -34,17 +34,13 @@ cmp r10,[rdx+16]
 jae 3f
 cmp r10,[rdx+32]
 ja 3f
-mov r11,[rdx]
-mov eax,[r11+r10*4]
-movzx ecx,al
-add r8,rcx
+mov eax,[rsi+r10*4]
 mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-add rdi,rcx
-shr eax,16
-movzx eax,al
-add rsi,rax
+and ecx,16711935
+and eax,65280
+shl rax,24
+or rax,rcx
+add r8,rax
 inc r9
 inc r10
 jmp 2b
@@ -53,56 +49,52 @@ xor r10d,r10d
 4:
 mov rcx,[rdx+40]
 mov rcx,[rcx+r9*8]
-mov rax,rsi
+mov rax,r8
+movzx eax,ax
 imul rax,rcx
 add rax,262144
 shr rax,19
-shl eax,16
-mov r11,rdi
+mov r11,r8
+shr r11,16
+movzx r11d,r11w
+imul r11,rcx
+add r11,262144
+shr r11,19
+shl r11d,16
+or eax,r11d
+mov r11,r8
+shr r11,32
+movzx r11d,r11w
 imul r11,rcx
 add r11,262144
 shr r11,19
 shl r11d,8
 or eax,r11d
-mov r11,r8
-imul r11,rcx
-add r11,262144
-shr r11,19
-or eax,r11d
-mov r11,[rdx+8]
-mov [r11+r10*4],eax
+mov [rdi+r10*4],eax
 mov rax,[rdx+32]
 lea rax,[rax+r10+1]
 cmp rax,[rdx+16]
 jae 5f
-mov r11,[rdx]
-mov eax,[r11+rax*4]
-movzx ecx,al
-add r8,rcx
+mov eax,[rsi+rax*4]
 mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-add rdi,rcx
-shr eax,16
-movzx eax,al
-add rsi,rax
+and ecx,16711935
+and eax,65280
+shl rax,24
+or rax,rcx
+add r8,rax
 inc r9
 5:
 cmp r10,[rdx+32]
 jb 6f
 mov rax,r10
 sub rax,[rdx+32]
-mov r11,[rdx]
-mov eax,[r11+rax*4]
-movzx ecx,al
-sub r8,rcx
+mov eax,[rsi+rax*4]
 mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-sub rdi,rcx
-shr eax,16
-movzx eax,al
-sub rsi,rax
+and ecx,16711935
+and eax,65280
+shl rax,24
+or rax,rcx
+sub r8,rax
 dec r9
 6:
 inc r10
@@ -110,15 +102,18 @@ cmp r10,[rdx+16]
 jb 4b
 mov rax,[rdx+16]
 shl rax,2
-add [rdx],rax
-add [rdx+8],rax
+add rsi,rax
+add rdi,rax
 mov rax,[rdx+24]
 dec rax
 mov [rdx+24],rax
 jnz 1b
 0:
 """
-# H block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table (u64 per n); words 0, 1 and 3 are used up (cursors)
+# H block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table (u64 per n); words 3 is used up (row counter). The running sum of a
+# row is ONE register, three 16-bit lanes (blue at bit 0, red at 16, green at 32: a lane holds at most 255 * 39 = 9945, so
+# nothing carries into the next lane, and the sum minus a pixel never goes below zero): adding / removing a pixel is
+# ((p & 0x00FF00FF) | ((p & 0xFF00) << 24)) and one add / sub. The arithmetic of the output is the one of the old loop.
 
 V = """
 mov rdx,rdi
@@ -137,9 +132,6 @@ rep stosq
 lea rdi,[r8+27520]
 mov rcx,[rdx+16]
 rep stosq
-lea rdi,[r8+55040]
-mov rcx,[rdx+16]
-rep stosq
 xor r10d,r10d
 xor r9d,r9d
 1:
@@ -154,14 +146,11 @@ lea rsi,[rax+rsi*4]
 xor edi,edi
 2:
 mov eax,[rsi+rdi*4]
-movzx ecx,al
-add [r8+rdi*8+55040],rcx
 mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-add [r8+rdi*8+27520],rcx
-shr eax,16
-movzx eax,al
+and ecx,16711935
+and eax,65280
+shl rax,24
+or rax,rcx
 add [r8+rdi*8],rax
 inc rdi
 cmp rdi,[rdx+16]
@@ -170,90 +159,106 @@ inc r9
 inc r10
 jmp 1b
 4:
-xor r10d,r10d
+mov [rdx+64],r9
+xor eax,eax
+mov [rdx+56],rax
 5:
-mov rcx,[rdx+40]
-mov rcx,[rcx+r9*8]
-mov rsi,[rdx+8]
-xor edi,edi
-6:
-mov rax,[r8+rdi*8]
-imul rax,rcx
-add rax,262144
-shr rax,19
-shl eax,16
-mov r11,[r8+rdi*8+27520]
-imul r11,rcx
-add r11,262144
-shr r11,19
-shl r11d,8
-or eax,r11d
-mov r11,[r8+rdi*8+55040]
-imul r11,rcx
-add r11,262144
-shr r11,19
-or eax,r11d
-mov [rsi+rdi*4],eax
-inc rdi
-cmp rdi,[rdx+16]
-jb 6b
-mov rax,[rdx+32]
-lea rax,[r10+rax+1]
+mov rax,[rdx+40]
+mov rcx,[rdx+64]
+mov rax,[rax+rcx*8]
+mov [rdx+72],rax
+mov rax,[rdx+56]
+add rax,[rdx+32]
+inc rax
+lea rsi,[r8+27520]
 cmp rax,[rdx+24]
-jae 8f
+jae 6f
 imul rax,[rdx+16]
 mov rsi,[rdx]
 lea rsi,[rsi+rax*4]
-xor edi,edi
-7:
-mov eax,[rsi+rdi*4]
-movzx ecx,al
-add [r8+rdi*8+55040],rcx
-mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-add [r8+rdi*8+27520],rcx
-shr eax,16
-movzx eax,al
-add [r8+rdi*8],rax
-inc rdi
-cmp rdi,[rdx+16]
-jb 7b
-inc r9
-8:
-cmp r10,[rdx+32]
-jb 3f
-mov rax,r10
+6:
+lea r9,[r8+27520]
+mov rax,[rdx+56]
+cmp rax,[rdx+32]
+jb 7f
 sub rax,[rdx+32]
 imul rax,[rdx+16]
-mov rsi,[rdx]
-lea rsi,[rsi+rax*4]
+mov r9,[rdx]
+lea r9,[r9+rax*4]
+7:
+mov r10,[rdx+8]
 xor edi,edi
-9:
-mov eax,[rsi+rdi*4]
-movzx ecx,al
-sub [r8+rdi*8+55040],rcx
-mov ecx,eax
-shr ecx,8
-movzx ecx,cl
-sub [r8+rdi*8+27520],rcx
-shr eax,16
-movzx eax,al
-sub [r8+rdi*8],rax
+8:
+mov rax,[r8+rdi*8]
+movzx ecx,ax
+imul rcx,[rdx+72]
+add rcx,262144
+shr rcx,19
+mov r11,rax
+shr r11,16
+movzx r11d,r11w
+imul r11,[rdx+72]
+add r11,262144
+shr r11,19
+shl r11d,16
+or ecx,r11d
+shr rax,32
+movzx eax,ax
+imul rax,[rdx+72]
+add rax,262144
+shr rax,19
+shl eax,8
+or eax,ecx
+mov [r10+rdi*4],eax
+mov rax,[r8+rdi*8]
+mov ecx,[rsi+rdi*4]
+mov r11d,ecx
+and ecx,16711935
+and r11d,65280
+shl r11,24
+or rcx,r11
+add rax,rcx
+mov ecx,[r9+rdi*4]
+mov r11d,ecx
+and ecx,16711935
+and r11d,65280
+shl r11,24
+or rcx,r11
+sub rax,rcx
+mov [r8+rdi*8],rax
 inc rdi
 cmp rdi,[rdx+16]
-jb 9b
-dec r9
+jb 8b
+mov rax,[rdx+56]
+add rax,[rdx+32]
+inc rax
+cmp rax,[rdx+24]
+jae 9f
+mov rax,[rdx+64]
+inc rax
+mov [rdx+64],rax
+9:
+mov rax,[rdx+56]
+cmp rax,[rdx+32]
+jb 3f
+mov rax,[rdx+64]
+dec rax
+mov [rdx+64],rax
 3:
 mov rax,[rdx+16]
 shl rax,2
 add [rdx+8],rax
-inc r10
-cmp r10,[rdx+24]
+mov rax,[rdx+56]
+inc rax
+mov [rdx+56],rax
+cmp rax,[rdx+24]
 jb 5b
 0:
 """
-# V block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table, 6 sum rows (3 rows of u64, 27520 octets apart = BLUR_W_MAX * 8)
+# V block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table, 6 sum row (w words, three 16-bit lanes like block H; the row 27520 octets =
+# BLUR_W_MAX * 8 further on is a row of zeros), 7 scratch, 8 scratch (words 7 - 9 of the block are used as scratch: 7 = row y, 8 = n, 9 = reciprocal;
+# the block has 12 words). ONE pass per output row: normalise the sums of the row into the destination, then add the incoming row and remove the
+# outgoing one (a row of zeros when there is none) -- the old code made three passes over 24 octets per pixel.
 
 M = """
 mov r11,rdi
@@ -278,12 +283,19 @@ imul rcx,rax
 mov rdx,rcx
 shr rdx,15
 xor rcx,rdx
-mov rax,rcx
-xor edx,edx
-mov rcx,[r11+48]
-div rcx
-sub rdx,[r11+40]
-mov [r11+88],rdx
+mov rsi,rcx
+mov rax,[r11+96]
+mul rcx
+mov rax,rsi
+sub rax,rdx
+shr rax,1
+add rax,rdx
+mov rcx,[r11+104]
+shr rax,cl
+imul rax,[r11+48]
+sub rsi,rax
+sub rsi,[r11+40]
+mov [r11+88],rsi
 2:
 mov eax,[r8]
 mov esi,eax
@@ -379,7 +391,37 @@ jnz 1b
 0:
 """
 
-BODIES = {"h": H, "v": V, "m": M, "d": D}
+# r466: the modulus of the grain (v % (2 * amp + 1), a 64-bit `div` per pixel, 25 - 40 cycles) as a multiplication. Block word 6 = d (odd, >= 3);
+# the routine writes the magic number (word 12) and the shift (word 13) once per blur; the loop M then does q = ((v - hi) >> 1 + hi) >> shift with
+# hi = high word of magic * v and v - q * d (the libdivide "65-bit" way; checked against `%` in tools/blur/asmtest.c).
+G = """
+mov r11,rdi
+mov rcx,[r11+48]
+cmp rcx,3
+jb 0f
+bsr rcx,rcx
+mov [r11+104],rcx
+mov edx,1
+shl rdx,cl
+xor eax,eax
+mov rsi,[r11+48]
+div rsi
+mov rdi,rdx
+add rax,rax
+add rdi,rdi
+jc 1f
+cmp rdi,rsi
+jb 2f
+1:
+inc rax
+2:
+inc rax
+mov [r11+96],rax
+0:
+"""
+# G block: the M block (16 words): 6 = d in, 12 = magic out, 13 = shift out
+
+BODIES = {"h": H, "v": V, "m": M, "d": D, "g": G}
 CLOB = ['clobber("rax")', 'clobber("rcx")', 'clobber("rdx")', 'clobber("rsi")', 'clobber("rdi")',
         'clobber("r8")', 'clobber("r9")', 'clobber("r10")', 'clobber("r11")', 'clobber("memory")']
 
@@ -415,7 +457,7 @@ def test():
     d = tempfile.mkdtemp()
     try:
         asm = ".intel_syntax noprefix\n"
-        for n in "hvmd":
+        for n in "hvmdg":
             asm += ".globl blur_%s_asm\nblur_%s_asm:\npush r12\npush r13\npush r14\npush r15\n%s\npop r15\npop r14\npop r13\npop r12\nret\n" % (n, n, "\n".join(lines(BODIES[n])))
         asm += ".att_syntax prefix\n"
         open(os.path.join(d, "a.S"), "w").write(asm)
