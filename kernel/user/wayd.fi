@@ -69,6 +69,9 @@ import libc.io
 import libc.kcall
 import wlproto
 import utf8
+import wl_msg
+import wl_input
+import wl_data
 
 export { u_start }
 
@@ -128,7 +131,7 @@ const LEER_MAX: u64 = 20000
 const MAX_CLIENTS: u64 = 4
 const MAX_OBJ: u64 = 64 // Objekte je Client
 const IN_CAP: u64 = 8192 // Eingangspuffer je Client
-const OUT_CAP: u64 = 4096
+const OUT_CAP: u64 = 8192
 
 // Die Objektnummern des Clients liegen unter 0xFF000000; darueber
 // vergibt der SERVER. wl_display ist immer 1.
@@ -166,7 +169,7 @@ static mut c_fd: [u64; 4] = [0 as u64; 4]
 static mut c_inlen: [u64; 4] = [0 as u64; 4]
 static mut c_nextid: [u64; 4] = [0 as u64; 4]
 static mut inbuf: [u8; 32768] = [0 as u8; 32768] // MAX_CLIENTS * IN_CA]
-static mut outbuf: [u8; 16384] = [0 as u8; 16384]
+static mut outbuf: [u8; 32768] = [0 as u8; 32768]
 static mut c_outlen: [u64; 4] = [0 as u64; 4]
 
 // Der Zaehler fuer die Abnahme -- jede Zahl hier wird am Ende gedruckt
@@ -215,6 +218,15 @@ static mut c_appid: [u8; 96] = [0 as u8; 96] // MAX_CLIENTS x 24
 static mut evb: [u64; 2] = [0 as u64; 2]
 static mut n_keys: u64 = 0
 static mut n_ptr: u64 = 0
+
+// Addresses for the modules that write events (wl_input, wl_data): the client's output region, and a place of the input buffer.
+fn out_base(c: u64) -> u64 {
+    return (&outbuf[(c * OUT_CAP) as usize]) as u64
+}
+
+fn in_addr(i: u64) -> u64 {
+    return (&inbuf[0 as usize]) as u64 + i
+}
 
 fn obj_base(c: u64, i: u64) -> u64 {
     return (c * MAX_OBJ + i) * O_FIELDS
@@ -414,6 +426,7 @@ fn on_display(c: u64, id: u64, op: u64, argp: u64) {
         announce(c, rid, wlproto.IF_WL_SEAT)
         announce(c, rid, wlproto.IF_WL_OUTPUT)
         announce(c, rid, wlproto.IF_XDG_WM_BASE)
+        announce(c, rid, wlproto.IF_WL_DATA_DEVICE_MANAGER)
         return
     }
     send_error(c, id, 1)
@@ -459,9 +472,17 @@ fn on_registry(c: u64, id: u64, op: u64, argp: u64) {
     // wl_seat sagt, was es hat. Ohne capabilities ruft ein Client nie
     // get_keyboard, und ein Programm ohne Tastatur ist ein Bild.
     if name == wlproto.IF_WL_SEAT {
+        let sver: u64 = rd32(argp + 8 + skip)
+        wl_input.seat_bound(c, sver)
         let p: u64 = ev_begin(c, nid, 0)
         ev_arg(c, p, 0, 3) // Zeiger | Tastatur
         ev_end(c, p, 1)
+        if sver >= 2 {
+            var snm: [u8; 6] = "seat0\0"
+            c_outlen[c as usize] = wl_msg.begin(out_base(c), c_outlen[c as usize], nid, wlproto.EV_WL_SEAT_NAME)
+            wl_msg.text((&snm[0 as usize]) as u64, 5)
+            c_outlen[c as usize] = wl_msg.end()
+        }
     }
     if name == wlproto.IF_WL_OUTPUT {
         // geometry, dann mode, dann done -- in dieser Reihenfolge.
@@ -602,6 +623,32 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
 // Die oberen acht Bit fallen weg -- dieser Server mischt nicht, er
 // schreibt undurchsichtig. Das ist der ehrliche Umfang dieser Runde.
 
+// One line per window: where it is and where its pixels start (the tests turn screen clicks into window coordinates with it).
+fn dbg_win(c: u64, win: u64) {
+    var a: [u8; 16] = "wayd: window c=\0"
+    var b: [u8; 4] = " x=\0"
+    var d: [u8; 4] = " y=\0"
+    var e: [u8; 6] = " inx=\0"
+    var f: [u8; 6] = " iny=\0"
+    var g: [u8; 4] = " w=\0"
+    var h: [u8; 4] = " h=\0"
+    ulib.say((&a[0 as usize]) as u64)
+    ulib.sayu(c)
+    ulib.say((&b[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 2, 0))
+    ulib.say((&d[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 3, 0))
+    ulib.say((&e[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 16, 0))
+    ulib.say((&f[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 17, 0))
+    ulib.say((&g[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 0, 0))
+    ulib.say((&h[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_INFO, win, 1, 0))
+    ulib.nl()
+}
+
 fn surface_commit(c: u64, sid: u64) {
     let bid: u64 = obj_get(c, sid, O_B)
     if bid == 0 {
@@ -618,7 +665,8 @@ fn surface_commit(c: u64, sid: u64) {
     if win == 0 {
         // Das erste Festschreiben macht das Fenster. Vorher gibt es
         // keine Groesse, und ein Fenster ohne Groesse ist keines.
-        let xy: u64 = (60 << 16) | 60
+        // ROUND WAYLAND-INPUT: a client's windows cascade by its slot, so two programs do not sit on top of each other
+        let xy: u64 = ((60 + c * 220) << 16) | (60 + c * 40)
         let wh: u64 = (w << 16) | h
         // DER FENSTERSERVER STEHT SPAETER ALS DIESES PROGRAMM.
         //
@@ -653,6 +701,7 @@ fn surface_commit(c: u64, sid: u64) {
         }
         obj_set(c, sid, O_A, win)
         n_wins = n_wins + 1
+        dbg_win(c, win)
         let ap: u64 = (&c_appid[0 as usize]) as u64 + c * 24
         if c_appid[(c * 24) as usize] != 0 as u8 {
             var al: u64 = 0
@@ -741,6 +790,7 @@ fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
         if win != 0 {
             ulib.sys(WM_CLOSE, win, 0, 0)
         }
+        wl_input.surf_drop(c, id)
         obj_drop(c, id)
         return
     }
@@ -915,6 +965,7 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         if op == wlproto.RQ_WL_KEYBOARD_RELEASE {
             if c_kbd[c as usize] == id {
                 c_kbd[c as usize] = 0
+                wl_input.keyboard_gone(c)
             }
             obj_drop(c, id)
         }
@@ -923,11 +974,52 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         if op == wlproto.RQ_WL_POINTER_RELEASE {
             if c_ptr[c as usize] == id {
                 c_ptr[c as usize] = 0
+                wl_input.pointer_gone(c)
             }
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_WL_DATA_DEVICE_MANAGER {
+        wl_data.on_manager(c, id, op, in_addr(argp))
+        data_sync()
+    } else if iface == wlproto.IF_WL_DATA_DEVICE {
+        wl_data.on_device(c, id, op, in_addr(argp))
+        data_sync()
+        if op == wlproto.RQ_WL_DATA_DEVICE_RELEASE {
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_WL_DATA_SOURCE {
+        wl_data.on_source(c, id, op, in_addr(argp))
+        data_sync()
+        if op == wlproto.RQ_WL_DATA_SOURCE_DESTROY {
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_WL_DATA_OFFER {
+        wl_data.on_offer(c, id, op, in_addr(argp), fd)
+        data_sync()
+        if op == wlproto.RQ_WL_DATA_OFFER_DESTROY {
             obj_drop(c, id)
         }
     }
     return true
+}
+
+// What wl_data.fi has made during a call: new objects the client will talk to (registered here, because this file owns the object
+// table), and messages that carry a descriptor (sent here, because this file owns the sockets).
+fn data_sync() {
+    var i: u64 = 0
+    while i < wl_data.nq_count() {
+        obj_new(wl_data.nq_client(i), wl_data.nq_id(i), wl_data.nq_iface(i))
+        i = i + 1
+    }
+    wl_data.nq_clear()
+    i = 0
+    while i < wl_data.fm_count() {
+        send_fd_msg(wl_data.fm_client(i), wl_data.fm_ptr(i), wl_data.fm_len(i), wl_data.fm_fd(i))
+        // the descriptor is ours until it is sent; closing OUR copy is what lets the reader of a pipe see its end
+        ulib.sys(SYS_CLOSE, wl_data.fm_fd(i), 0, 0)
+        i = i + 1
+    }
+    wl_data.fm_clear()
 }
 
 fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
@@ -939,6 +1031,7 @@ fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
         }
         c_ptr[c as usize] = nid
         c_pfoc[c as usize] = 0
+        wl_input.pointer_new(c, nid)
         return
     }
     if op == wlproto.RQ_WL_SEAT_GET_KEYBOARD {
@@ -949,6 +1042,20 @@ fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
         }
         c_kbd[c as usize] = nid
         c_kfoc[c as usize] = 0
+        wl_input.keyboard_new(c, nid)
+        send_keymap(c)
+        c_outlen[c as usize] = wl_input.keyboard_ready(c, out_base(c), c_outlen[c as usize])
+        // a window of this client that has the focus right now gets its enter
+        var so: u64 = 0
+        while so < MAX_OBJ {
+            let sb: u64 = obj_base(c, so)
+            if objs[(sb + O_ID) as usize] != 0 && objs[(sb + O_IFACE) as usize] == wlproto.IF_WL_SURFACE {
+                let sid: u64 = objs[(sb + O_ID) as usize]
+                c_outlen[c as usize] = wl_input.sync_focus(c, sid, objs[(sb + O_A) as usize],
+                    out_base(c), c_outlen[c as usize])
+            }
+            so = so + 1
+        }
         return
     }
     if op == wlproto.RQ_WL_SEAT_GET_TOUCH {
@@ -972,196 +1079,16 @@ fn str_arg(argp: u64, out: u64, max: u64) {
     __mmio_write8((out + k) as *mut u8, 0 as u8)
 }
 
-// OrientOS key code (wlib: ASCII, 0x101.. arrows, 0x110.. F keys) ->
-// Linux evdev code | modifier << 16 (1 = shift, 2 = ctrl); 0 = none.
-fn evdev_of(k: u64) -> u64 {
-    var abc: [u8; 26] = [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
-        49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44]
-    if k >= 97 && k <= 122 {
-        return abc[(k - 97) as usize] as u64
-    }
-    if k >= 65 && k <= 90 {
-        return (abc[(k - 65) as usize] as u64) | (1 << 16)
-    }
-    if k >= 49 && k <= 57 {
-        return k - 49 + 2
-    }
-    if k == 48 {
-        return 11
-    }
-    if k == 32 {
-        return 57
-    }
-    if k == 13 || k == 10 {
-        return 28
-    }
-    if k == 9 {
-        return 15
-    }
-    if k == 8 || k == 127 {
-        return 14
-    }
-    if k == 27 {
-        return 1
-    }
-    if k == 45 {
-        return 12
-    }
-    if k == 61 {
-        return 13
-    }
-    if k == 44 {
-        return 51
-    }
-    if k == 46 {
-        return 52
-    }
-    if k == 47 {
-        return 53
-    }
-    if k >= 1 && k <= 26 {
-        return (abc[(k - 1) as usize] as u64) | (2 << 16)
-    }
-    if k == 0x101 {
-        return 103
-    }
-    if k == 0x102 {
-        return 108
-    }
-    if k == 0x103 {
-        return 105
-    }
-    if k == 0x104 {
-        return 106
-    }
-    if k == 0x105 {
-        return 102
-    }
-    if k == 0x106 {
-        return 107
-    }
-    if k == 0x107 {
-        return 104
-    }
-    if k == 0x108 {
-        return 109
-    }
-    if k == 0x109 {
-        return 111
-    }
-    if k >= 0x110 && k <= 0x119 {
-        return k - 0x110 + 59
-    }
-    return 0
-}
-
-fn ms_now() -> u64 {
-    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) * 10
-}
-
-fn kb_key(c: u64, code: u64, pressed: u64) {
-    let p: u64 = ev_begin(c, c_kbd[c as usize], 3) // wl_keyboard.key
-    ev_arg(c, p, 0, next_serial)
-    ev_arg(c, p, 1, ms_now() & 0xFFFFFFFF)
-    ev_arg(c, p, 2, code)
-    ev_arg(c, p, 3, pressed)
-    ev_end(c, p, 4)
-    next_serial = next_serial + 1
-}
-
-fn in_key(c: u64, sid: u64, k: u64) {
-    if c_kbd[c as usize] == 0 {
-        return
-    }
-    let e: u64 = evdev_of(k)
-    if e == 0 {
-        return
-    }
-    if c_kfoc[c as usize] != sid {
-        let p: u64 = ev_begin(c, c_kbd[c as usize], 1) // enter
-        ev_arg(c, p, 0, next_serial)
-        ev_arg(c, p, 1, sid)
-        ev_arg(c, p, 2, 0) // keys: an empty array
-        ev_end(c, p, 3)
-        next_serial = next_serial + 1
-        c_kfoc[c as usize] = sid
-    }
-    let m: u64 = e >> 16
-    let code: u64 = e & 0xFFFF
-    if m == 1 {
-        kb_key(c, 42, 1) // KEY_LEFTSHIFT
-    }
-    if m == 2 {
-        kb_key(c, 29, 1) // KEY_LEFTCTRL
-    }
-    kb_key(c, code, 1)
-    kb_key(c, code, 0)
-    if m == 1 {
-        kb_key(c, 42, 0)
-    }
-    if m == 2 {
-        kb_key(c, 29, 0)
-    }
-    n_keys = n_keys + 1
-    if dbg != 0 {
-        var s1: [u8; 18] = "wayd: key evdev=\0\0"
-        ulib.say((&s1[0 as usize]) as u64)
-        ulib.sayu(code)
-        ulib.nl()
-    }
-}
-
-fn in_button(c: u64, sid: u64, x: u64, y: u64, btn: u64, down: bool) {
-    if c_ptr[c as usize] == 0 {
-        return
-    }
-    if c_pfoc[c as usize] != sid {
-        let p: u64 = ev_begin(c, c_ptr[c as usize], 0) // enter
-        ev_arg(c, p, 0, next_serial)
-        ev_arg(c, p, 1, sid)
-        ev_arg(c, p, 2, x * 256)
-        ev_arg(c, p, 3, y * 256)
-        ev_end(c, p, 4)
-        next_serial = next_serial + 1
-        c_pfoc[c as usize] = sid
-    }
-    let pm: u64 = ev_begin(c, c_ptr[c as usize], 2) // motion
-    ev_arg(c, pm, 0, ms_now() & 0xFFFFFFFF)
-    ev_arg(c, pm, 1, x * 256)
-    ev_arg(c, pm, 2, y * 256)
-    ev_end(c, pm, 3)
-    var code: u64 = 0x110 // BTN_LEFT
-    if (btn & 2) != 0 {
-        code = 0x111 // BTN_RIGHT
-    }
-    var st: u64 = 0
-    if down {
-        st = 1
-    }
-    let pb: u64 = ev_begin(c, c_ptr[c as usize], 3) // button
-    ev_arg(c, pb, 0, next_serial)
-    ev_arg(c, pb, 1, ms_now() & 0xFFFFFFFF)
-    ev_arg(c, pb, 2, code)
-    ev_arg(c, pb, 3, st)
-    ev_end(c, pb, 4)
-    next_serial = next_serial + 1
-    n_ptr = n_ptr + 1
-    if dbg != 0 && down {
-        var s1: [u8; 19] = "wayd: button x=\0\0\0\0"
-        var s2: [u8; 4] = " y=\0"
-        ulib.say((&s1[0 as usize]) as u64)
-        ulib.sayu(x)
-        ulib.say((&s2[0 as usize]) as u64)
-        ulib.sayu(y)
-        ulib.nl()
-    }
-}
-
+// ROUND WAYLAND-INPUT: the translation of window server events into wl_keyboard / wl_pointer events is wl_input.fi; this loop only
+// takes the events out of the windows and hands them over, one surface at a time.
 // Every window of every client: what the window server has for it.
 fn pump_input() {
     var c: u64 = 0
     while c < MAX_CLIENTS {
         if c_used[c as usize] != 0 {
+            if c_outlen[c as usize] + 1024 < OUT_CAP {
+                c_outlen[c as usize] = wl_input.esc_flush(c, out_base(c), c_outlen[c as usize])
+            }
             var o: u64 = 0
             while o < MAX_OBJ {
                 let b: u64 = obj_base(c, o)
@@ -1170,7 +1097,7 @@ fn pump_input() {
                     let sid: u64 = objs[(b + O_ID) as usize]
                     let win: u64 = obj_get(c, sid, O_A)
                     var n: u64 = 0
-                    while win != 0 && n < 16 && c_outlen[c as usize] + 256 < OUT_CAP
+                    while win != 0 && n < 16 && c_outlen[c as usize] + 1024 < OUT_CAP
                         && ulib.sys(WM_EVENT, win,
                             (&evb[0 as usize]) as u64, 0) == 1 {
                         let typ: u64 = evb[0 as usize]
@@ -1178,12 +1105,16 @@ fn pump_input() {
                         let ea: u64 = (d >> 32) & 0xFFFF
                         let eb: u64 = (d >> 16) & 0xFFFF
                         let ec: u64 = d & 0xFFFF
+                        let ob: u64 = out_base(c)
+                        let ol: u64 = c_outlen[c as usize]
                         if typ == 1 {
-                            in_key(c, sid, ea)
-                        } else if typ == 2 {
-                            in_button(c, sid, ea, eb, ec, true)
-                        } else if typ == 3 {
-                            in_button(c, sid, ea, eb, ec, false)
+                            c_outlen[c as usize] = wl_input.on_key(c, sid, ea, ob, ol)
+                            n_keys = n_keys + 1
+                        } else if typ == 2 || typ == 3 || typ == 4 {
+                            c_outlen[c as usize] = wl_input.on_ptr(c, sid, typ, ea, eb, ec, ob, ol)
+                            n_ptr = n_ptr + 1
+                        } else if typ == 6 {
+                            c_outlen[c as usize] = wl_input.on_focus(c, sid, ec == 1, ob, ol)
                         } else if typ == 5 {
                             // close box: xdg_toplevel.close
                             let xs: u64 = obj_get(c, sid, O_C)
@@ -1199,6 +1130,11 @@ fn pump_input() {
                         }
                         n = n + 1
                     }
+                    // the pointer may have left the window: the window server only tells motion INSIDE
+                    // (not while the screen is locked: the client learns nothing then, not even that the pointer moved away)
+                    if win != 0 && c_outlen[c as usize] + 1024 < OUT_CAP && ulib.sys(1870, 0, 0, 0) != 1 {
+                        c_outlen[c as usize] = wl_input.ptr_check(c, sid, win, out_base(c), c_outlen[c as usize])
+                    }
                 }
                 o = o + 1
             }
@@ -1213,12 +1149,76 @@ fn pump_input() {
 // liest (kernel/sys.fi, Abschnitt RUNDE WAYLAND).
 static mut mh: [u64; 8] = [0 as u64; 8]
 static mut iov: [u64; 2] = [0 as u64; 2]
-static mut cmsg: [u64; 8] = [0 as u64; 8]
+static mut cmsg: [u64; 16] = [0 as u64; 16]
+
+// ROUND WAYLAND-INPUT: THE DESCRIPTORS A CLIENT SENT, IN ORDER. recvmsg hands over all descriptors that came with the octets it
+// reads, and several requests of one burst may each want one (wl_data_offer.receive twice, a pool and a keymap ...): they wait here,
+// per client, and the request that has a descriptor argument (wlproto.req_has_fd) takes the next one.
+static mut fdq_v: [u64; 32] = [0 as u64; 32]
+static mut fdq_n: [u64; 4] = [0 as u64; 4]
+
+fn fdq_fill(c: u64) {
+    if mh[5 as usize] < 20 {
+        return
+    }
+    let lvl: u64 = cmsg[1 as usize] & 0xFFFFFFFF
+    let typ: u64 = (cmsg[1 as usize] >> 32) & 0xFFFFFFFF
+    if lvl != 1 || typ != 1 {
+        return
+    }
+    let nfd: u64 = (mh[5 as usize] - 16) / 4
+    var k: u64 = 0
+    while k < nfd && k < 24 {
+        let w: u64 = cmsg[(2 + k / 2) as usize]
+        var fd: u64 = w & 0xFFFFFFFF
+        if (k & 1) != 0 {
+            fd = (w >> 32) & 0xFFFFFFFF
+        }
+        if fdq_n[c as usize] < 8 {
+            fdq_v[(c * 8 + fdq_n[c as usize]) as usize] = fd
+            fdq_n[c as usize] = fdq_n[c as usize] + 1
+        } else {
+            ulib.sys(SYS_CLOSE, fd, 0, 0) // more than a client may have in flight
+        }
+        k = k + 1
+    }
+}
+
+fn fdq_pop(c: u64) -> u64 {
+    if fdq_n[c as usize] == 0 {
+        return 0
+    }
+    let v: u64 = fdq_v[(c * 8) as usize]
+    var k: u64 = 1
+    while k < fdq_n[c as usize] {
+        fdq_v[(c * 8 + k - 1) as usize] = fdq_v[(c * 8 + k) as usize]
+        k = k + 1
+    }
+    fdq_n[c as usize] = fdq_n[c as usize] - 1
+    return v
+}
+
+fn fdq_drop(c: u64) {
+    while fdq_n[c as usize] != 0 {
+        ulib.sys(SYS_CLOSE, fdq_pop(c), 0, 0)
+    }
+}
+
+// Everything that belongs to a client goes when it goes: its clipboard state and what the input module tracked.
+fn client_cleanup(c: u64) {
+    wl_data.client_gone(c)
+    wl_input.client_init(c)
+    fdq_drop(c)
+}
 
 fn recv_into(c: u64) -> u64 {
     let base: u64 = c * IN_CAP
     let have: u64 = c_inlen[c as usize]
     if have >= IN_CAP - 256 {
+        return 0
+    }
+    // a client that does not read what it was sent gets nothing more to answer (the output region must never overflow)
+    if c_outlen[c as usize] + 2048 > OUT_CAP {
         return 0
     }
     iov[0 as usize] = (&inbuf[(base + have) as usize]) as u64
@@ -1232,7 +1232,7 @@ fn recv_into(c: u64) -> u64 {
     mh[2 as usize] = (&iov[0 as usize]) as u64
     mh[3 as usize] = 1
     mh[4 as usize] = (&cmsg[0 as usize]) as u64
-    mh[5 as usize] = 64
+    mh[5 as usize] = 128
     mh[6 as usize] = 0
     let n: u64 = ulib.sys(SYS_RECVMSG, c_fd[c as usize],
         (&mh[0 as usize]) as u64, MSG_DONTWAIT)
@@ -1258,6 +1258,7 @@ fn recv_into(c: u64) -> u64 {
         // Aufraeumen: der Platz wird frei, der Deskriptor geschlossen.
         c_used[c as usize] = 0
         ulib.sys(SYS_CLOSE, c_fd[c as usize], 0, 0)
+        client_cleanup(c)
         var s_bye: [u8; 22] = "wayd: Client gegangen\0"
         ulib.say((&s_bye[0 as usize]) as u64)
         ulib.nl()
@@ -1267,21 +1268,9 @@ fn recv_into(c: u64) -> u64 {
     return n
 }
 
-// Kam ein Deskriptor mit? Der Kern legt ihn als SCM_RIGHTS in den
-// Steuerteil; das erste `int` dahinter ist die Nummer im EIGENEN
-// Adressraum.
-fn taken_fd() -> u64 {
-    if mh[5 as usize] < 20 {
-        return 0
-    }
-    let lvl: u64 = cmsg[1 as usize] & 0xFFFFFFFF
-    let typ: u64 = (cmsg[1 as usize] >> 32) & 0xFFFFFFFF
-    if lvl != 1 || typ != 1 {
-        return 0
-    }
-    return cmsg[2 as usize] & 0xFFFFFFFF
-}
-
+// Send what is waiting for client c. NEVER blocks (MSG_DONTWAIT): what the socket does not take stays in the output region and goes
+// out in a later round; a client that is gone loses its backlog. (Before ROUND WAYLAND-INPUT this was a blocking send: a client
+// that did not read could stop the whole server.)
 fn flush_out(c: u64) {
     let n: u64 = c_outlen[c as usize]
     if n == 0 {
@@ -1297,8 +1286,56 @@ fn flush_out(c: u64) {
     mh[5 as usize] = 0
     mh[6 as usize] = 0
     let sr: u64 = ulib.sys(SYS_SENDMSG, c_fd[c as usize],
-        (&mh[0 as usize]) as u64, 0)
-    c_outlen[c as usize] = 0
+        (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+    if sr > 0xFFFFFFFFFFFF0000 {
+        if sr != 0 -% 11 {
+            c_outlen[c as usize] = 0 // not -EAGAIN: the peer is gone
+        }
+        return
+    }
+    if sr >= n {
+        c_outlen[c as usize] = 0
+        return
+    }
+    // a part went: the rest moves to the front
+    var k: u64 = 0
+    while k < n - sr {
+        outbuf[(c * OUT_CAP + k) as usize] = outbuf[(c * OUT_CAP + sr + k) as usize]
+        k = k + 1
+    }
+    c_outlen[c as usize] = n - sr
+}
+
+// One message WITH a descriptor (SCM_RIGHTS, like wl_shm in the other direction): what is waiting goes first (the order of events
+// matters), then this message alone with the descriptor. `ptr`/`len`: the message in our memory.
+fn send_fd_msg(c: u64, ptr: u64, len: u64, fd: u64) {
+    if c >= MAX_CLIENTS || c_used[c as usize] == 0 || fd == 0 {
+        return
+    }
+    flush_out(c)
+    if c_outlen[c as usize] != 0 {
+        return // the client does not read: this message is lost, and so is nothing else
+    }
+    iov[0 as usize] = ptr
+    iov[1 as usize] = len
+    cmsg[0 as usize] = 20
+    cmsg[1 as usize] = 1 | (1 << 32) // SOL_SOCKET, SCM_RIGHTS
+    cmsg[2 as usize] = fd
+    mh[0 as usize] = 0
+    mh[1 as usize] = 0
+    mh[2 as usize] = (&iov[0 as usize]) as u64
+    mh[3 as usize] = 1
+    mh[4 as usize] = (&cmsg[0 as usize]) as u64
+    mh[5 as usize] = 24
+    mh[6 as usize] = 0
+    ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+}
+
+// wl_keyboard.keymap of a client: the keymap of the layout in force, as a descriptor of a memfd.
+fn send_keymap(c: u64) {
+    let len: u64 = wl_input.keymap_msg(c)
+    let fd: u64 = wl_input.keymap_fd()
+    send_fd_msg(c, wl_input.keymap_ptr(), len, fd)
 }
 
 // Alles verarbeiten, was vollstaendig im Puffer liegt.
@@ -1347,8 +1384,7 @@ fn drain(c: u64, fd: u64) {
             let if0: u64 = obj_iface(c, id0)
             var mit: u64 = 0
             if if0 < wlproto.IF_COUNT && wlproto.req_has_fd(if0, op0) {
-                mit = usedfd
-                usedfd = 0
+                mit = fdq_pop(c)
             }
             live = dispatch(c, at, len, mit)
             at = at + len
@@ -1367,6 +1403,7 @@ fn drain(c: u64, fd: u64) {
     if !live {
         c_used[c as usize] = 0
         ulib.sys(SYS_CLOSE, c_fd[c as usize], 0, 0)
+        client_cleanup(c)
     }
 }
 
@@ -1412,6 +1449,53 @@ fn zahl_von(p: u64) -> u64 {
         }
     }
     return v
+}
+
+fn ticks_now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+static mut pfds: [u64; 8] = [0 as u64; 8]
+
+// Does a client of this server have a window? Then its events have to be fetched from the window server, which has no descriptor
+// to wait on: the loop wakes about every 20 ms. Without a window it sleeps until a client connects or writes.
+fn client_has_win(c: u64) -> bool {
+    var o: u64 = 0
+    while o < MAX_OBJ {
+        let b: u64 = obj_base(c, o)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SURFACE
+            && objs[(b + O_A) as usize] != 0 {
+            return true
+        }
+        o = o + 1
+    }
+    return false
+}
+
+// ROUND WAYLAND-INPUT: THE WAIT. The loop used to YIELD in a circle (a busy loop: it never slept). Now one poll() over the listening
+// socket and every client socket, with a timeout only when something has to be polled.
+fn idle_wait(ls: u64) {
+    var n: u64 = 1
+    pfds[0 as usize] = ls | (1 << 32)
+    var busy: bool = wl_data.busy()
+    var c: u64 = 0
+    while c < MAX_CLIENTS {
+        if c_used[c as usize] != 0 {
+            if n < 8 {
+                pfds[n as usize] = c_fd[c as usize] | (1 << 32)
+                n = n + 1
+            }
+            if client_has_win(c) || c_outlen[c as usize] != 0 {
+                busy = true
+            }
+        }
+        c = c + 1
+    }
+    var tmo: u64 = 200
+    if busy {
+        tmo = 10
+    }
+    ulib.sys(SYS_POLL, (&pfds[0 as usize]) as u64, n, tmo)
 }
 
 fn u_start(args: u64) -> u64 {
@@ -1528,6 +1612,8 @@ fn u_start(args: u64) -> u64 {
         c_used[i as usize] = 0
         i = i + 1
     }
+    wl_data.init_bridge()
+    wl_input.layout_changed() // the first call only takes the counter
 
     // IM BEDARFSBETRIEB ZAEHLT DIE LEERLAUFUHR, NICHT DIE RUNDENZAHL.
     //
@@ -1566,6 +1652,9 @@ fn u_start(args: u64) -> u64 {
                 c_ptr[slot as usize] = 0
                 c_kfoc[slot as usize] = 0
                 c_pfoc[slot as usize] = 0
+                wl_input.client_init(slot)
+                wl_data.client_init(slot)
+                fdq_n[slot as usize] = 0
                 c_title[(slot * 32) as usize] = 0 as u8
                 c_appid[(slot * 24) as usize] = 0 as u8
                 var o: u64 = 0
@@ -1585,20 +1674,35 @@ fn u_start(args: u64) -> u64 {
         }
 
         pump_input()
+        wl_data.tick()
+        // a keyboard layout switch (Ctrl+Alt+L, the settings): every keyboard gets the keymap of the new layout
+        if wl_input.layout_changed() {
+            var kc: u64 = 0
+            while kc < MAX_CLIENTS {
+                if c_used[kc as usize] != 0 && c_kbd[kc as usize] != 0 {
+                    send_keymap(kc)
+                }
+                kc = kc + 1
+            }
+        }
         var c: u64 = 0
         while c < MAX_CLIENTS {
             if c_used[c as usize] != 0 {
                 let got: u64 = recv_into(c)
                 if got > 0 {
-                    let gfd: u64 = taken_fd()
-                    drain(c, gfd)
+                    fdq_fill(c)
+                    drain(c, 0)
                 }
                 if c_used[c as usize] != 0 {
+                    if c_outlen[c as usize] + 2048 < OUT_CAP {
+                        c_outlen[c as usize] = wl_data.emit(c, out_base(c), c_outlen[c as usize])
+                    }
                     flush_out(c)
                 }
             }
             c = c + 1
         }
+        data_sync()
         // ============================ DIE LEERLAUFUHR DES BEDARFSSTARTS
         //
         // Der Server zaehlt seine Clients. Faellt die Zahl auf null,
@@ -1627,8 +1731,11 @@ fn u_start(args: u64) -> u64 {
                 q = q + 1
             }
             if offen == 0 && n_conn != 0 {
-                leer = leer + 1
-                if leer >= leer_max {
+                // time, not rounds (a round sleeps in poll now): the old unit was a round of about half a millisecond
+                if leer == 0 {
+                    leer = ticks_now() + 1
+                }
+                if ticks_now() + 1 - leer >= leer_max / 20 {
                     var s_idle: [u8; 31] = "wayd: kein Client mehr -- Ende\0"
                     ulib.say((&s_idle[0 as usize]) as u64)
                     ulib.nl()
@@ -1638,7 +1745,7 @@ fn u_start(args: u64) -> u64 {
                 leer = 0
             }
         }
-        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        idle_wait(ls)
         n = n + 1
     }
 
