@@ -144,7 +144,8 @@ done < "$HERE/accept.txt"
 if [ -n "${OLDKERNEL:-}" ] || [ -n "${OLDK:-}" ]; then
     echo "== 6. counter-proof: the same tests on the kernel from before this round ($OLDREF) must NOT pass the fixed checks (fixed.txt) =="
     KOLD=${OLDK:-}
-    if [ -z "$KOLD" ]; then
+    [ -z "$KOLD" ] || [ -s "$KOLD" ] || { bad "OLDK=$KOLD is not a kernel file"; KOLD=""; }
+    if [ -z "$KOLD" ] && [ -z "${OLDK:-}" ]; then
         WT=$D/oldsrc
         git -C "$ROOT" worktree add --detach "$WT" "$OLDREF" > /dev/null 2>&1 || bad "cannot check out $OLDREF"
         if [ -d "$WT" ]; then
@@ -153,7 +154,7 @@ if [ -n "${OLDKERNEL:-}" ] || [ -n "${OLDK:-}" ]; then
             git -C "$ROOT" worktree remove --force "$WT" > /dev/null 2>&1
         fi
     fi
-    if [ -s "$KOLD" ]; then
+    if [ -s "${KOLD:-/nonexistent}" ]; then
         TESTS_SAVE=$TESTS
         # only the tests that hold fixed checks
         if [ -n "${REGEN:-}" ]; then TESTS=$TESTS_SAVE; else TESTS=""; for t in $TESTS_SAVE; do grep -q "^${t#t_}\." "$HERE/fixed.txt" && TESTS="$TESTS $t"; done; fi
