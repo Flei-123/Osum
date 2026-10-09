@@ -91,7 +91,7 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
     for f in "$D"/lib/*.so; do spec="$spec /lib/$(basename $f)=$f"; done
     printf 'root:x:0:0:root:/root:/bin/sh\n' > "$D/passwd"; printf '127.0.0.1 localhost\n' > "$D/hosts"
     spec="$spec /etc/passwd=$D/passwd /etc/hosts=$D/hosts"
-    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" 65536 $spec > "$O/mkfs.txt" 2>&1
+    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" 98304 --v3 --inodes=1024 $spec > "$O/mkfs.txt" 2>&1
 }
 boot() { # boot <kernel> <disk> <script> <serial-out>
     cp -f "$2" "$2.live"
@@ -133,7 +133,8 @@ awk '{ split($1, a, "."); v[$2]++; t[a[1]]++ } END { for (k in t) ; for (k in v)
 grep -a -E ' (FAIL|GAP) ' "$D/new.all" | sed 's/^/        /' | head -${SHOWMAX:-200}
 
 echo "== 5. gate: the checks that must pass (accept.txt) =="
-while read -r name; do
+[ -n "${REGEN:-}" ] && echo "        (REGEN: the lists are written below from this run and the old-kernel run, not checked)"
+while [ -z "${REGEN:-}" ] && read -r name; do
     case "$name" in ''|'#'*) continue ;; esac
     t=${name%%.*}; case " $TESTS " in *" t_$t "*) ;; *) continue ;; esac
     line=$(grep -a "^$name " "$D/new.all" | head -1)
@@ -155,15 +156,16 @@ if [ -n "${OLDKERNEL:-}" ] || [ -n "${OLDK:-}" ]; then
     if [ -s "$KOLD" ]; then
         TESTS_SAVE=$TESTS
         # only the tests that hold fixed checks
-        TESTS=""; for t in $TESTS_SAVE; do grep -q "^${t#t_}\." "$HERE/fixed.txt" && TESTS="$TESTS $t"; done
+        if [ -n "${REGEN:-}" ]; then TESTS=$TESTS_SAVE; else TESTS=""; for t in $TESTS_SAVE; do grep -q "^${t#t_}\." "$HERE/fixed.txt" && TESTS="$TESTS $t"; done; fi
         run_all "$KOLD" "$D/new/disk.img" old
-        while read -r name; do
+        while [ -z "${REGEN:-}" ] && read -r name; do
             case "$name" in ''|'#'*) continue ;; esac
             t=${name%%.*}; case " $TESTS " in *" t_$t "*) ;; *) continue ;; esac
             line=$(grep -a "^$name " "$D/old.all" | head -1)
             case "$line" in *" PASS"*) bad "counter-proof: $name PASSES on the old kernel -- the check measures nothing" ;; *) ok "counter-proof: $name does not pass on the old kernel (${line:-no line})" ;; esac
         done < "$HERE/fixed.txt"
         cp "$D/old.all" "${UB_OLD_RESULT:-$D/results-old.txt}" 2>/dev/null
+        if [ -n "${REGEN:-}" ]; then python3 "$HERE/mkgate.py" "$D/old.all" "$D/new.all" "$HERE" && ok "accept.txt and fixed.txt written"; fi
     fi
 fi
 echo
