@@ -537,6 +537,10 @@ Beides laeuft in **Ring 3**. Im Kern laeuft nichts Fremdes.
 
 ## 10. Offene Punkte
 
+> **Stand 09.10.2026 (Runde UNTERBAU, `docs/RUNDE-UNTERBAU-FIREFOX.md`):** der Punkt *„Nur `MAP_ANONYMOUS`"* ist behoben (`mmap` einer Datei,
+> `MAP_FIXED`, `dlopen` einer fremden `.so` läuft: `tools/unterbau` `t_dl`), `mprotect` wirkt jetzt wirklich (und `mmap` beachtet `prot`). `INTERP_BASE` fest und die
+> geteilte Seite bleiben offen, sind aber gegen Firefox bewertet (Kap. 2 dort): nicht nötig / kleines Risiko.
+
 
 * **Eine geteilte Seite bekommt die Rechte des ERSTEN Segments.** Bei
   musl trifft das genau die Naht zwischen `rodata` und `data`; die
