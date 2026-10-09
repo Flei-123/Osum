@@ -55,6 +55,7 @@ Namen fuer `klickauf`:
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
     frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
 """
+import faulthandler
 import os
 import re
 import socket
@@ -98,7 +99,9 @@ class Fahrer:
     def leeren(self):
         try:
             self.s.settimeout(0.4)
-            while True:
+            # Bounded: a monitor that keeps streaming must not keep us here forever.
+            end = time.time() + 3.0
+            while time.time() < end:
                 if not self.s.recv(65536):
                     break
         except OSError:
@@ -107,7 +110,10 @@ class Fahrer:
             self.s.settimeout(5.0)
 
     def cmd(self, zeile):
-        self.s.sendall((zeile + "\n").encode())
+        try:
+            self.s.sendall((zeile + "\n").encode())
+        except OSError as e:
+            raise SystemExit("monitor write failed (%s): %s" % (e, zeile))
         time.sleep(0.06)
         self.leeren()
 
@@ -841,6 +847,11 @@ class Fahrer:
 
 
 def main():
+    # Watchdog: DRIVE_WATCHDOG=<seconds> dumps all thread stacks and ends the driver (exit code 1) when the script is not done by then.
+    # Default 1800 s so a stuck run always ends by itself (set 0 to disable).
+    wd = int(os.environ.get("DRIVE_WATCHDOG", "1800") or 0)
+    if wd > 0:
+        faulthandler.dump_traceback_later(wd, exit=True)
     if len(sys.argv) < 5:
         print(__doc__)
         return 2
