@@ -8,6 +8,7 @@
 # not look at it. Now the buffer is a shared object the kernel makes itself (wm.kern_shared); the window table names it (shm column) and
 # says "plain", wmd maps it read-only (WM_BUFFD), composes the client area and compares it with /dev/fb.
 #
+# (The keyboard path of this machine loses a character now and then under host load, so the marker is typed three times; one intact copy is enough.)
 # Gates: the terminal has a shared object (`wm: termgeo ... shared=N`, N > 0); wmd judged terminal pixels (termpx) and NOT ONE differs
 # (termdiff = 0); the cells of the kernel's own state show up in the screenshot (an INDEPENDENT witness: the screenshot comes from the
 # screen device, the cells from the terminal state, neither goes through wmd or the judge).
@@ -30,6 +31,12 @@ tippe ls /bin
 taste ret
 warte 3
 tippe echo second line of text
+taste ret
+warte 2
+tippe echo tsmarker4711
+taste ret
+warte 2
+tippe echo tsmarker4711
 taste ret
 warte 2
 tippe echo tsmarker4711
