@@ -497,3 +497,37 @@ dates: the wall clock differs between boots; two shared runs differ from each ot
 * S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
 * ~~Terminal and desktop windows are not shared yet~~: the desktop window is (r486), the terminal is (r486, see above). Menus (`NK_MENU`) and a window during a drag still take the `WIG_BLIT` / kernel path.
 * ~~`look`: `'Größe' does not match a second rasterisation`~~ fixed (08.10.2026): the file manager's buffer grows upward by its caption strip (r454); `tools/look/umlaut.py` now subtracts the strip height the program reports (`explorer: strip h=`). `look` 41/0. `alltag` had silently lost its counter-proof (45 -> 44): the console lines were renamed (`opk: installed`, `opk: SIGNATURE WRONG`) and the German words it looked for never matched; the check is now mandatory (45/0). `k15` is 259/0: r454 added one line (the title bar of the file manager is its tab strip).
+
+### The blur in SSE2 and the cursor table cache (r481, 09.10.2026)
+
+Goal: the largest frame of the first start-menu open <= 16 ms and a blur call far below 4.4 ms, with the same pixels. `tools/design/stationaer.sh`
+(KVM, phases on, host load 10 - 30) showed the menu blur at 11.3 - 12.1 ms (640 x 416) and 2.2 ms for the bar (1280 x 40); the scalar loops
+were already assembly (r464) but still 25 - 35 cycles a pixel. Three SSE2 routines in `tools/blur/blurasm.py` replace the loops when `fb.simd_ok`
+(the vector unit is on and `fbnosimd` is not given):
+
+| routine | does | how |
+|---|---|---|
+| `x` | horizontal pass, four rows at once | the sums of four rows are two xmm registers (4 x 16-bit lanes per pixel); load/store with `movd` |
+| `w` | vertical pass, a multiple of four columns | one pass per output row over the row of sums; the other columns use the scalar `v` with the same row distance |
+| `s` | tint + clamp of four pixels, then the grain | the grain's 64-bit hash stays scalar (written to a small buffer), tint and clamp are `pmullw` / `pmulhuw` / `packuswb` |
+
+The division by n is the old `(S * rec + 262144) >> 19`; with rec = rh * 65536 + rl it is `(pmulhuw(S, rl) + pmullw(S, rh) + 4) >> 3`, exact for
+S <= 9945 (derivation in the file). The tint's `* 5243 >> 19` is `pmulhuw(x, 5243) >> 3`. Interrupts are off per row group (`pushfq / cli / popfq`
+inside the routine, block flag), the constants are rebuilt at the start of every such window, and the caller's xmm0 - xmm15 are saved into the block
+and put back (no stack: firnc forbids rsp in an asm block). `python3 tools/blur/blurasm.py test`: 20 006 707 cases (random pictures with random
+alpha bytes, sizes 1 x 1 .. 640 x 5, radii 1 .. 16, every odd modulus 3 .. 201) incl. a check that xmm0 - xmm15 come back unchanged (mutation-tested).
+Pictures: start menu and desktop views of a SIMD run and an `fbnosimd` run differ only where two runs of the SAME configuration differ too (clock, hover).
+
+| measured | before | after |
+|---|---|---|
+| native, 640 x 416, r = 8: h / v / tint+grain per pass | 1.53 / 1.25 / 3.21 ms (one blur 8.78 ms) | x 0.39 / w 0.25 / s 1.07 ms (one blur 2.35 ms) |
+| KVM, start menu 640 x 416, one blur | 11.3 - 12.1 ms | 3.0 - 3.4 ms warm, 4.4 - 5.3 ms cold |
+| KVM, bar 1280 x 40, one blur | 2.1 - 2.3 ms | 0.62 ms |
+| start menu open / close, mean per blur (all blurs of the phase) | 3.3 - 5.5 ms | 0.95 - 1.2 ms |
+
+The slow frames that were left were not the blur: with `phases` the new line `wm: slow us= bg= win= top= pend= blur=` splits every frame over 16 ms and
+`wm: toplong` splits a slow top layer. Result: 16 - 42 ms frames in the **top** layer, all in `paint_cursor` -> `cursor.karte_bauen`: the pointer's
+coverage table (three rasterisations of up to 192 x 192 samples with a point-in-polygon test, in Firn) was rebuilt at EVERY change of the pointer's shape.
+`cursor.fi` now keeps the finished table per shape (`kcache`, 62 KiB) and copies it (about 20 us); a shape seen for the first time still builds once.
+Same bytes, so the same pointer. What is left in the first-open frame: the cold blur (first touch of the 5 MB scratch), the menu's own paint, and two menu
+blurs in that frame (the slot is spoiled by a damage right after the first computation).

@@ -38,3 +38,12 @@ Kanten auf 0 fallen und die weichen Uebergaenge in die Hunderte gehen.
 Der Filter in C, auf denselben Flaechen wie die Auftragsliste, gegen
 das 60-Hz-Budget von 16,7 ms. Liefert auch die Kosten einer reinen
 Kopie -- also das, was der Zwischenspeicher stattdessen zahlt.
+
+## blurasm.py / asmtest.c -- the assembly loops and their proof
+
+    python3 tools/blur/blurasm.py test     # 20 million cases against the Firn loops written out in C
+    python3 tools/blur/blurasm.py check    # the strings in kernel/ui/wm.fi are the text of blurasm.py
+
+r481: the routines `s` (tint + grain, four pixels), `w` (vertical pass, columns in fours) and `x` (horizontal pass, four rows) use SSE2; the scalar
+`m`, `v`, `h` do the rest and everything when `fb.simd_ok` is false (`fbnosimd`). The test compares each pair with the same reference, with random alpha
+bytes, and checks that xmm0 - xmm15 are returned unchanged. Native timing of one 640 x 416 blur: 8.8 ms scalar, 2.35 ms SSE2.
