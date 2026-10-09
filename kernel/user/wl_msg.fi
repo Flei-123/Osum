@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wl_msg.fi -- ROUND WAYLAND-INPUT: writing Wayland EVENTS into a client's output buffer.
+//
+// wayd.fi has its own writer for the events of the base protocol. The input and clipboard parts live in their own files
+// (wl_input.fi, wl_data.fi) and must not reach into wayd.fi's tables, so they write through THIS small module: the caller names the
+// place (the address of the client's output region and how much of it is used), the module appends one message and hands back
+// the new length. No state of its own except the message being written.
+//
+//   let l1: u64 = wl_msg.begin(buf, len, object, opcode)     (sets the write mark)
+//   wl_msg.arg(v) ... wl_msg.text(ptr, n) ... wl_msg.arr0()   (one call per argument)
+//   let l2: u64 = wl_msg.end()                                (the new length)
+//
+// Message layout: u32 object, u16 opcode, u16 size (octets, with the head), then the arguments, each rounded up to 4.
+profile kernel
+
+export { begin, arg, text, arr0, end, room_for, rd32, put32 }
+
+static mut m_base: u64 = 0
+static mut m_pos: u64 = 0 // offset of the write mark, counted from the message head
+static mut m_head: u64 = 0 // address of the message head
+
+fn put32(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 255) as u8)
+    __mmio_write8((p + 1) as *mut u8, ((v >> 8) & 255) as u8)
+    __mmio_write8((p + 2) as *mut u8, ((v >> 16) & 255) as u8)
+    __mmio_write8((p + 3) as *mut u8, ((v >> 24) & 255) as u8)
+}
+
+fn rd32(p: u64) -> u64 {
+    return (__mmio_read8(p as *mut u8) as u64)
+        | ((__mmio_read8((p + 1) as *mut u8) as u64) << 8)
+        | ((__mmio_read8((p + 2) as *mut u8) as u64) << 16)
+        | ((__mmio_read8((p + 3) as *mut u8) as u64) << 24)
+}
+
+// Is there room for `n` more octets in a region of `cap` octets of which `len` are used?
+fn room_for(len: u64, cap: u64, n: u64) -> bool {
+    return len + n <= cap
+}
+
+fn begin(buf: u64, len: u64, id: u64, op: u64) -> u64 {
+    m_base = buf
+    m_head = buf + len
+    put32(m_head, id)
+    put32(m_head + 4, op)
+    m_pos = 8
+    return len
+}
+
+fn arg(v: u64) {
+    put32(m_head + m_pos, v)
+    m_pos = m_pos + 4
+}
+
+// A string argument: the length with the closing zero, the octets, zero fill up to a multiple of 4. `p` is an address in OUR memory.
+fn text(p: u64, n: u64) {
+    put32(m_head + m_pos, n + 1)
+    m_pos = m_pos + 4
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((m_head + m_pos + k) as *mut u8, __mmio_read8((p + k) as *mut u8))
+        k = k + 1
+    }
+    let ganz: u64 = (n + 4) & 0xFFFFFFFFFFFFFFFC
+    while k < ganz {
+        __mmio_write8((m_head + m_pos + k) as *mut u8, 0 as u8)
+        k = k + 1
+    }
+    m_pos = m_pos + ganz
+}
+
+// An EMPTY array argument (size 0, no octets).
+fn arr0() {
+    put32(m_head + m_pos, 0)
+    m_pos = m_pos + 4
+}
+
+fn end() -> u64 {
+    let op: u64 = (__mmio_read8((m_head + 4) as *mut u8) as u64)
+        | ((__mmio_read8((m_head + 5) as *mut u8) as u64) << 8)
+    put32(m_head + 4, (op & 0xFFFF) | (m_pos << 16))
+    return (m_head + m_pos) - m_base
+}

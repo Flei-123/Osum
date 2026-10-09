@@ -206,5 +206,23 @@ n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
     || bad "$n Datei(en) rufen wayd -- er waere nicht abschaltbar"
 
 echo
+echo "== 7. keyboard, pointer, clipboard (round WAYLAND-INPUT; the acceptance on a screen is tools/wayland/input.sh) =="
+for f in wl_msg wl_input wl_data wl_keytab; do
+    [ -s "kernel/user/$f.fi" ] && ok "kernel/user/$f.fi is there" || bad "kernel/user/$f.fi is missing"
+done
+if python3 tools/wayland/genkeys.py 2>/dev/null | cmp -s - kernel/user/wl_keytab.fi; then
+    ok "wl_keytab.fi is GENERATED (tools/wayland/genkeys.py, from the host's libxkbcommon)"
+else
+    bad "kernel/user/wl_keytab.fi differs from what genkeys.py generates"
+fi
+if python3 tools/wayland/genkeys.py --keymaps "$TMPD/km" 2>"$TMPD/km.txt"; then
+    ok "the keymaps us and de compile with libxkbcommon and again from their own text ($(tr '\n' ' ' < "$TMPD/km.txt"))"
+else
+    bad "genkeys.py --keymaps fails"
+fi
+grep -q 'IF_WL_DATA_DEVICE_MANAGER' kernel/user/wlproto.fi \
+    && ok "wlproto.fi knows wl_data_device_manager (the clipboard)" || bad "wlproto.fi has no wl_data_device_manager"
+
+echo
 echo "== WAYLAND: $pass bestanden, $fail gescheitert =="
 [ "$fail" -eq 0 ]

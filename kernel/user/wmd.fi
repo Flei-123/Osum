@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/wmd.fi -- docs/COMPOSITOR.md stage S4: `wmd`, THE SHADOW COMPOSITOR (an OBSERVER, it never touches the screen).
+// kernel/user/wmd.fi -- docs/COMPOSITOR.md stage S4: `wmd`, THE SHADOW COMPOSITOR (an OBSERVER, it never touches the screen); since S6a it composes the window
+// shadows and since S6b the frame, title bar, caption buttons and title text of plain framed windows itself, and judges them.
 //
 // The plan (docs/COMPOSITOR.md section 3) moves the compositor out of the kernel into a ring-3 program. Before anything is switched, this
 // program does the work IN PARALLEL and compares: it reads the window table page (WM_TABLE: who stands where, in which order) and the
@@ -9,9 +10,10 @@
 //
 // WHAT IT COMPOSES, honestly: the CLIENT AREAS of the windows the table marks PLAIN (the server paints them as a plain copy: no
 // opening motion, no lift, no blur, no glass, no translucency), in the order of the table (layer, then z). Everything the server draws
-// around and over a window -- frame, title bar, caption buttons, shadow, rounded corners, blur, the pointer -- is not composed here (that
-// is stage S6). So a pixel counts for the comparison only when
-//   * it lies in the client area of a plain window, 16 points inside the edge (rounded corners), and
+// around and over a window is stage S6: the shadow (S6a) and the frame, title bar, caption buttons and title text (S6b) are composed here
+// now; blur, glass and the pointer are not. So a pixel counts for the comparison only when
+//   * it lies in the outer rectangle of a plain framed window whose chrome is composed here (S6b), or else in the client area of a plain
+//     window, 16 points inside the edge (rounded corners), and
 //   * no window above it is anything but a plain window further up, with 48 points around its outer rectangle given up for shadows, and
 //   * it is not near the pointer.
 // `compared` says how many pixels that was; `differ` how many of them were not the same. The screen has to hold still while we look:
@@ -29,6 +31,9 @@ import ulib
 import libc.io
 import wlibc
 import fui.comp
+import fui.core
+import ecke
+import utf8
 
 export { u_start }
 
@@ -457,6 +462,564 @@ fn sh_window(wx: i64, wy: i64, ow: i64, oh: i64, reach: u64, bank: u64, color: u
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------
+// S6b -- THE FRAME, THE TITLE BAR, THE CAPTION BUTTONS AND THE TITLE TEXT IN RING 3
+//
+// `paint_win` / `paint_title` / `paint_caption` / `cap_face` / `cap_glyph` / `title_text` of kernel/ui/wm.fi, step by step with the same integers.
+// The numbers (colours, measures, hover state, titles) come over the CHROME PAGE (WM_TABLE with argument 1, root only; the layout is in the header of
+// `chrome_object` in wm.fi). The glyph bitmaps of the title come from the kernel's rasteriser (WIG_GLYPH / WIG_KERN, the very bitmaps `title_text`
+// draws), the caption symbols from `fui.core` (the same source as the kernel's `cg_mal`).
+//
+// A pixel is "composed" when its alpha octet in `sb` is 255. A translucent pixel (corner smoothing, glass) can only be blended over a composed pixel: over
+// the wallpaper (not composed here) it stays as it is and is not judged, as in S6a.
+
+const CHR_MAGIC: u64 = 0x52484357
+const CHR_TITLE: u64 = 32
+const CHR_MARK: u64 = 192
+const CHR_WORDS: u64 = 224
+const CAP_N: u64 = 3
+const CAP_MIN: u64 = 0
+const CAP_MAX: u64 = 1
+const CAP_CLOSE: u64 = 2
+const F_MAXIMIZED: u64 = 4
+const F_CAPCLIENT: u64 = 64
+const CG_SIDE: u64 = 40 // 10 * the largest scale (4)
+const CG_CELL: u64 = 6400 // 40 * 40 * 4 octets: fUi writes four octets per pixel
+const GL_BUF: u64 = 8192
+
+static mut chr1: [u64; 224] = [0 as u64; 224]
+static mut chr2: [u64; 224] = [0 as u64; 224]
+static mut p_chr: u64 = 0 // the mapped chrome page
+static mut ch_have: u64 = 0 // 1 = this cycle has a consistent chrome page
+static mut ch_px: u64 = 0 // pixels the chrome wrote in this cycle (frame, title bar, buttons, text)
+static mut ch_win: u64 = 0 // windows whose chrome was composed in this cycle
+static mut ch_txt: u64 = 0 // title text pixels in this cycle
+static mut ch_cap: u64 = 0 // caption symbol pixels in this cycle
+static mut o_nochrome: u64 = 0 // counter-proof: judge the chrome but do NOT compose it
+static mut gl_buf: [u8; 8192] = [0 as u8; 8192]
+static mut cg_deck: [u8; 25600] = [0 as u8; 25600]
+static mut cg_gut: [u64; 4] = [0 as u64; 4]
+static mut cg_gr: u64 = 0
+static mut geo_chr: [u64; 32] = [0 as u64; 32] // key of each window's chrome geometry last printed
+
+fn fill32(p: u64, v: u64, n: u64) {
+    if n == 0 {
+        return
+    }
+    asm("cld\nrep stosd", in("rdi") p, in("rax") v, in("rcx") n, clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+// copy the chrome page into `dst` (224 words); true when the table's sequence number was even and the same before and after (the chrome page is
+// written inside the same odd/even bracket as the table)
+fn chr_snap(t: u64, dst: u64) -> bool {
+    if p_chr == 0 {
+        return false
+    }
+    let s0: u64 = __mmio_read64((t + 8) as *mut u64)
+    if (s0 & 1) != 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < CHR_WORDS {
+        __mmio_write64((dst + i * 8) as *mut u64, __mmio_read64((p_chr + i * 8) as *mut u64))
+        i = i + 1
+    }
+    if __mmio_read64((t + 8) as *mut u64) != s0 {
+        return false
+    }
+    // magic, valid
+    return (__mmio_read64(dst as *mut u64) & 0xFFFFFFFF) == CHR_MAGIC && __mmio_read64((dst + 16) as *mut u64) == (1 as u64)
+}
+
+fn same_chr() -> bool {
+    var i: u64 = 0
+    while i < CHR_WORDS {
+        if i != 1 && chr1[i as usize] != chr2[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// a pixel of the picture, written opaque (the kernel's `fb.pixel`)
+fn ch_set(x: i64, y: i64, color: u64) {
+    if x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
+        return
+    }
+    let p: u64 = (&sb[0 as usize]) as u64 + (y as u64 * scr_w + x as u64) * 4
+    __mmio_write32(p as *mut u32, (color | 4278190080) as u32)
+    ch_px = ch_px + 1
+}
+
+// a pixel with an opacity (the kernel's `fb.pixel_a`): over a composed pixel only
+fn ch_mix(x: i64, y: i64, color: u64, a: u64) {
+    if a == 0 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
+        return
+    }
+    if a >= 255 {
+        ch_set(x, y, color)
+        return
+    }
+    let p: u64 = (&sb[0 as usize]) as u64 + (y as u64 * scr_w + x as u64) * 4
+    let old: u64 = __mmio_read32(p as *mut u32) as u64
+    if (old >> 24) != 255 {
+        return
+    }
+    __mmio_write32(p as *mut u32, (comp.blend(old & 16777215, color, a) | 4278190080) as u32)
+    ch_px = ch_px + 1
+}
+
+// the kernel's `fill_clip`
+fn ch_fill(x: i64, y: i64, w: i64, h: i64, color: u64, a: u64) {
+    if w <= 0 || h <= 0 || a == 0 {
+        return
+    }
+    let x0: i64 = imax(x, 0)
+    let y0: i64 = imax(y, 0)
+    let x1: i64 = imin(x + w, scr_w as i64)
+    let y1: i64 = imin(y + h, scr_h as i64)
+    if x1 <= x0 || y1 <= y0 {
+        return
+    }
+    var yy: i64 = y0
+    while yy < y1 {
+        if a >= 255 {
+            fill32((&sb[0 as usize]) as u64 + (yy as u64 * scr_w + x0 as u64) * 4, color | 4278190080, (x1 - x0) as u64)
+            ch_px = ch_px + (x1 - x0) as u64
+        } else {
+            var xx: i64 = x0
+            while xx < x1 {
+                ch_mix(xx, yy, color, a)
+                xx = xx + 1
+            }
+        }
+        yy = yy + 1
+    }
+}
+
+// the kernel's `fill_round`: a rectangle with rounded, smoothed corners
+fn ch_round(x: i64, y: i64, w: i64, h: i64, r0: u64, color: u64, a: u64) {
+    if w <= 0 || h <= 0 || a == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r * 2 > w as u64 {
+        r = (w / 2) as u64
+    }
+    if r * 2 > h as u64 {
+        r = (h / 2) as u64
+    }
+    if r == 0 {
+        ch_fill(x, y, w, h, color, a)
+        return
+    }
+    let ri: i64 = r as i64
+    ch_fill(x, y + ri, w, h - 2 * ri, color, a)
+    ch_fill(x + ri, y, w - 2 * ri, ri, color, a)
+    ch_fill(x + ri, y + h - ri, w - 2 * ri, ri, color, a)
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            var cov: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
+            if a < 255 {
+                cov = cov * a / 255
+            }
+            if cov != 0 {
+                let x0: i64 = x + dx as i64
+                let y0: i64 = y + dy as i64
+                let x1: i64 = x + w - 1 - dx as i64
+                let y1: i64 = y + h - 1 - dy as i64
+                ch_mix(x0, y0, color, cov)
+                ch_mix(x1, y0, color, cov)
+                ch_mix(x0, y1, color, cov)
+                ch_mix(x1, y1, color, cov)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+// the kernel's `shade24`, `grad_room`, `mix24` (colours as 0xRRGGBB)
+fn ch_shade(c: u64, d: u64) -> u64 {
+    var r: u64 = (c >> 16) & 255
+    var g: u64 = (c >> 8) & 255
+    var b: u64 = c & 255
+    if r > d {
+        r = r - d
+    } else {
+        r = 0
+    }
+    if g > d {
+        g = g - d
+    } else {
+        g = 0
+    }
+    if b > d {
+        b = b - d
+    } else {
+        b = 0
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+fn ch_room(c: u64, want: u64) -> u64 {
+    var m: u64 = (c >> 16) & 255
+    let g: u64 = (c >> 8) & 255
+    let b: u64 = c & 255
+    if g < m {
+        m = g
+    }
+    if b < m {
+        m = b
+    }
+    if want > m {
+        return m
+    }
+    return want
+}
+
+fn ch_mix24(a: u64, b: u64, per: u64) -> u64 {
+    let r: u64 = (((a >> 16) & 255) * (100 - per) + ((b >> 16) & 255) * per) / 100
+    let g: u64 = (((a >> 8) & 255) * (100 - per) + ((b >> 8) & 255) * per) / 100
+    let bl: u64 = ((a & 255) * (100 - per) + (b & 255) * per) / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+// `paint_title`: the title bar (round at the top, with a gradient when the theme has one)
+fn ch_title_bar(wx: i64, wy: i64, ow: i64, focused: bool) {
+    let wal: u64 = chr1[21]
+    let bo: i64 = chr1[17] as i64
+    let x0: i64 = wx + bo
+    let y0: i64 = wy + bo
+    let tw: i64 = ow - 2 * bo
+    let th: i64 = chr1[18] as i64 - 1 - bo
+    if tw <= 0 || th <= 0 {
+        return
+    }
+    var tr: u64 = 0
+    let rw: u64 = chr1[14]
+    if rw > chr1[17] {
+        tr = rw - chr1[17]
+    }
+    if tr as i64 > th {
+        tr = th as u64
+    }
+    var titel: u64 = chr1[7]
+    if focused {
+        titel = chr1[10]
+    }
+    let grad: u64 = chr1[15]
+    var d: u64 = 0
+    if grad != 0 {
+        d = ch_room(titel, grad)
+    }
+    if d == 0 {
+        ch_round(x0, y0, tw, th, tr, titel, wal)
+        if tr != 0 {
+            ch_fill(x0, y0 + tr as i64, tw, th - tr as i64, titel, wal)
+        }
+        return
+    }
+    ch_round(x0, y0, tw, th, tr, ch_shade(titel, d), wal)
+    var j: i64 = tr as i64
+    while j < th {
+        let rest: u64 = d * (th - 1 - j) as u64 / (th - 1) as u64
+        ch_fill(x0, y0 + j, tw, 1, ch_shade(titel, rest), wal)
+        j = j + 1
+    }
+}
+
+// `cap_face`: the face of one caption button (only the close button follows the window's round corner)
+fn ch_cap_face(x: i64, y: i64, h: i64, tr: u64, color: u64, right: bool) {
+    let wal: u64 = chr1[21]
+    let w: i64 = chr1[19] as i64
+    if !right || tr == 0 {
+        ch_fill(x, y, w, h, color, wal)
+        return
+    }
+    let r: i64 = tr as i64
+    ch_round(x, y, w, h, tr, color, wal)
+    ch_fill(x, y, w - r, r, color, wal)
+    ch_fill(x, y + r, w, h - r, color, wal)
+}
+
+// `cg_bau` / `cg_mal`: the symbol as a coverage map (one octet per pixel), once per size. fUi's own forms, as in the kernel.
+fn cg_make(slot: u64, n: u64, maximized: bool, dd: u64, sbw: u64) -> bool {
+    if slot >= 4 || dd == 0 || dd > CG_SIDE {
+        return false
+    }
+    if cg_gr == dd && cg_gut[slot as usize] != 0 {
+        return true
+    }
+    if cg_gr != dd {
+        var k: u64 = 0
+        while k < 4 {
+            cg_gut[k as usize] = 0
+            k = k + 1
+        }
+        cg_gr = dd
+    }
+    let basis: u64 = ((&cg_deck[0 as usize]) as u64) + slot * CG_CELL
+    var z: core.Target = core.target_new(basis, dd as usize, dd as usize, (dd * 4) as usize)
+    core.fill_rect(&z, 0 as usize, 0 as usize, dd as usize, dd as usize, 0 as u32)
+    let white: u32 = 0xFFFFFF as u32
+    if n == CAP_MIN {
+        core.cap_minimize(&z, 0 as usize, 0 as usize, dd as usize, sbw as usize, white)
+    } else if n == CAP_MAX {
+        if maximized {
+            core.cap_restore(&z, 0 as usize, 0 as usize, dd as usize, sbw as usize, white)
+        } else {
+            core.cap_maximize(&z, 0 as usize, 0 as usize, dd as usize, sbw as usize, white)
+        }
+    } else {
+        core.cap_close(&z, 0 as usize, 0 as usize, dd as usize, sbw as usize, white)
+    }
+    // four octets per pixel down to one (in place: pixel k lies at k * 4 and goes to k)
+    var k2: u64 = 0
+    while k2 < dd * dd {
+        var v: u8 = 0 as u8
+        if cg_deck[(slot * CG_CELL + k2 * 4) as usize] != 0 as u8 {
+            v = 255 as u8
+        }
+        cg_deck[(slot * CG_CELL + k2) as usize] = v
+        k2 = k2 + 1
+    }
+    cg_gut[slot as usize] = 1
+    return true
+}
+
+// `cap_glyph`: the symbol at (x, y), every covered pixel in the colour `color`
+fn ch_cap_glyph(n: u64, x: i64, y: i64, color: u64, maximized: bool) {
+    let sk: u64 = chr1[20]
+    let dd: u64 = 10 * sk
+    if sk == 0 || dd > CG_SIDE {
+        return
+    }
+    var slot: u64 = n
+    if n == CAP_MAX && maximized {
+        slot = 3
+    }
+    if !cg_make(slot, n, maximized, dd, sk) {
+        return
+    }
+    var ry: u64 = 0
+    while ry < dd {
+        var rx: u64 = 0
+        while rx < dd {
+            if cg_deck[(slot * CG_CELL + ry * dd + rx) as usize] != 0 as u8 {
+                ch_set(x + rx as i64, y + ry as i64, color)
+                ch_cap = ch_cap + 1
+            }
+            rx = rx + 1
+        }
+        ry = ry + 1
+    }
+}
+
+// `paint_caption`: the three buttons at the right end of the title bar. `hov` = the hovered button coded (slot * 4 + n) + 1, `held` = pressed
+fn ch_caption(wx: i64, wy: i64, ow: i64, focused: bool, slot: u64, maximized: bool) {
+    let bo: i64 = chr1[17] as i64
+    let cwid: i64 = chr1[19] as i64
+    let bx: i64 = wx + ow - bo - CAP_N as i64 * cwid
+    let by: i64 = wy + bo
+    let h: i64 = chr1[18] as i64 - 1 - bo
+    if h <= 0 {
+        return
+    }
+    var tr: u64 = 0
+    let rw: u64 = chr1[14]
+    if rw > chr1[17] {
+        tr = rw - chr1[17]
+    }
+    var titel: u64 = chr1[7]
+    var schrift: u64 = chr1[8]
+    if focused {
+        titel = chr1[10]
+        schrift = chr1[11]
+    }
+    let hov: u64 = chr1[22]
+    let dwn: u64 = chr1[23]
+    var n: u64 = 0
+    while n < CAP_N {
+        let x: i64 = bx + n as i64 * cwid
+        var mark: u64 = schrift
+        if hov != 0 && hov - 1 == slot * 4 + n {
+            let held: bool = dwn == hov
+            if n == CAP_CLOSE {
+                var rot: u64 = chr1[12]
+                if held {
+                    rot = ch_mix24(chr1[12], 0, 14)
+                }
+                ch_cap_face(x, by, h, tr, rot, true)
+                mark = chr1[13]
+            } else {
+                var pc: u64 = 12
+                if held {
+                    pc = 22
+                }
+                ch_cap_face(x, by, h, tr, ch_mix24(titel, schrift, pc), false)
+            }
+        }
+        let zg: i64 = 10 * chr1[20] as i64
+        ch_cap_glyph(n, x + (cwid - zg) / 2, by + (h - zg) / 2, mark, maximized)
+        n = n + 1
+    }
+}
+
+// `title_text`: the title of the window, glyph by glyph (the kernel's bitmaps and kerning), blended over the bar
+fn ch_title_text(tp: u64, x: i64, y: i64, color: u64, limit: i64, px: u64) {
+    var cx: i64 = x * 64
+    var before: u64 = 0
+    var k: u64 = 0
+    let gb: u64 = (&gl_buf[0 as usize]) as u64
+    while k < 31 {
+        let v: u64 = utf8.next(tp, 31, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            k = 31
+        } else {
+            if before != 0 {
+                cx = cx + wlibc.sys5(wlibc.WIG_KERN, 0, px, before, c, 0) as i64
+            }
+            let n: u64 = wlibc.sys5(wlibc.WIG_GLYPH, 0, px, c, gb, GL_BUF)
+            if !ulib.bad(n) && n >= 48 {
+                let gw: u64 = rd64(gb)
+                let gh: u64 = rd64(gb + 8)
+                let gl: i64 = rd64(gb + 16) as i64
+                let gt: i64 = rd64(gb + 24) as i64
+                let adv: i64 = rd64(gb + 32) as i64
+                if gw > 256 || gh > 256 || gw * gh + 48 > n {
+                    return
+                }
+                if (cx >> 6) + gw as i64 > limit - 4 {
+                    return
+                }
+                var r: u64 = 0
+                while r < gh {
+                    var cc: u64 = 0
+                    while cc < gw {
+                        let a: u64 = rd8(gb + 48 + r * gw + cc)
+                        if a != 0 {
+                            let sx: i64 = (cx >> 6) + gl + cc as i64
+                            let sy: i64 = y - gt + r as i64
+                            if sx >= 0 && sy >= 0 && sx < scr_w as i64 && sy < scr_h as i64 {
+                                let p: u64 = (&sb[0 as usize]) as u64 + (sy as u64 * scr_w + sx as u64) * 4
+                                let old: u64 = __mmio_read32(p as *mut u32) as u64
+                                if (old >> 24) == 255 {
+                                    __mmio_write32(p as *mut u32, (comp.blend(old & 16777215, color, a) | 4278190080) as u32)
+                                    ch_px = ch_px + 1
+                                    ch_txt = ch_txt + 1
+                                }
+                            }
+                        }
+                        cc = cc + 1
+                    }
+                    r = r + 1
+                }
+                cx = cx + adv
+            }
+            before = c
+            k = k + l
+        }
+    }
+}
+
+// the geometry of every composed window's chrome, whenever it changes, for the gate (tools/comp/chrome.sh checks the PICTURE against it: the bar,
+// the buttons and the title ink must stand where these numbers say, in the kernel's own screenshot). One line per window and geometry:
+//   wmd: chrome-geo <focused> <own strip> x y ow oh border title_h cap_w scale radius title frame text padding gradient close
+fn chrome_geo(k: u64, x: i64, y: i64, ow: i64, oh: i64, focused: bool, capc: bool) {
+    let gk: u64 = (x as u64 & 0xFFFF) | ((y as u64 & 0xFFFF) << 16) | ((ow as u64 & 0xFFFF) << 32) | ((oh as u64 & 0xFFFF) << 48)
+        ^ (if focused { 0x5555 as u64 } else { 0 as u64 })
+    if k >= 32 || geo_chr[k as usize] == gk {
+        return
+    }
+    geo_chr[k as usize] = gk
+    var l: [u8; 17] = "wmd: chrome-geo \0"
+    var sp: [u8; 2] = " \0"
+    ulib.say((&l[0 as usize]) as u64)
+    var f: u64 = 0
+    if focused {
+        f = 1
+    }
+    var c: u64 = 0
+    if capc {
+        c = 1
+    }
+    ulib.sayu(f)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(c)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(x as u64)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(y as u64)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(ow as u64)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(oh as u64)
+    var w: u64 = 17
+    while w <= 20 {
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(chr1[w as usize])
+        w = w + 1
+    }
+    var tc: u64 = chr1[7]
+    var fc: u64 = chr1[6]
+    var xc: u64 = chr1[8]
+    if focused {
+        tc = chr1[10]
+        fc = chr1[9]
+        xc = chr1[11]
+    }
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(chr1[14])
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(tc)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(fc)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(xc)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(chr1[26])
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(chr1[15])
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(chr1[12])
+    ulib.nl()
+}
+
+// the whole chrome of one framed window, in the order of `paint_win`: frame, title bar, buttons, title (a window that paints its own strip gets its
+// buttons after the client area: `ch_strip_buttons`)
+fn ch_window(row: u64, wx: i64, wy: i64, ow: i64, oh: i64, focused: bool, slot: u64, flags: u64) {
+    let maximized: bool = (flags & F_MAXIMIZED) != 0
+    let capc: bool = (flags & F_CAPCLIENT) != 0
+    var rahmen: u64 = chr1[6]
+    var schrift: u64 = chr1[8]
+    if focused {
+        rahmen = chr1[9]
+        schrift = chr1[11]
+    }
+    ch_round(wx, wy, ow, oh, chr1[14], rahmen, chr1[21])
+    if capc {
+        return
+    }
+    ch_title_bar(wx, wy, ow, focused)
+    ch_caption(wx, wy, ow, focused, slot, maximized)
+    let bo: i64 = chr1[17] as i64
+    let limit: i64 = wx + ow - bo - CAP_N as i64 * chr1[19] as i64
+    let tp: u64 = (&chr1[0 as usize]) as u64 + (CHR_TITLE + row * 4) * 8
+    ch_title_text(tp, wx + bo + chr1[26] as i64, wy + chr1[27] as i64, schrift, limit, chr1[25])
+    ch_win = ch_win + 1
+}
+
+fn ch_strip_buttons(wx: i64, wy: i64, ow: i64, focused: bool, slot: u64, flags: u64) {
+    ch_caption(wx, wy, ow, focused, slot, (flags & F_MAXIMIZED) != 0)
+    ch_win = ch_win + 1
+}
+
 // One cycle. Returns 0 = judged, 1 = the screen or the table moved (thrown away), 2 = could not look. Fills the counters.
 static mut c_win: u64 = 0
 static mut c_plain: u64 = 0
@@ -485,6 +1048,11 @@ fn cycle(t: u64) -> u64 {
     let t2: u64 = (&tab2[0 as usize]) as u64
     if !snap(t, t1) {
         return 1
+    }
+    // S6b: the chrome page of the same table sequence (colours, measures, hover, titles); without a consistent one the chrome is left alone
+    ch_have = 0
+    if chr_snap(t, (&chr1[0 as usize]) as u64) {
+        ch_have = 1
     }
     // the screen, the first time
     if !read_screen(p_fba) {
@@ -533,6 +1101,10 @@ fn cycle(t: u64) -> u64 {
     c_term = 0
     sh_px = 0
     sh_win = 0
+    ch_px = 0
+    ch_win = 0
+    ch_txt = 0
+    ch_cap = 0
     var oi: u64 = 0
     while oi < n && oi < MAXWIN {
         let k: u64 = order[oi as usize]
@@ -628,36 +1200,71 @@ fn cycle(t: u64) -> u64 {
             c_plain = c_plain + 1
             let cx: i64 = x + inx as i64
             let cy: i64 = y + iny as i64
-            // the rows of the client area that lie on the screen, copied with the library's row loop
+            let flags: u64 = tab1[(r + 7) as usize]
+            // S6b: the frame, the title bar, the buttons and the title of a framed window are composed here too (when the chrome page is consistent
+            // and the window is one this code knows how to paint: modern buttons, a title font, no network mark, the screen not locked)
+            var chok: bool = false
+            if sh_ok && ch_have == 1 && chr1[16] != 0 && chr1[29] == 1 && chr1[3] == 0xFF0000 && chr1[4] == 0xFF00 && chr1[5] == 0xFF
+                && chr1[20] >= 1 && chr1[20] <= 4 && chr1[(CHR_MARK + k) as usize] == 0 && (tab1[7] & 1) == 0 {
+                chok = true
+            }
+            let rad: u64 = chr1[14]
+            let focused: bool = id == tab1[4]
+            let capc: bool = (flags & F_CAPCLIENT) != 0
+            if chok {
+                if o_nochrome == 0 {
+                    ch_window(k, x, y, ow, oh, focused, tab1[r as usize] >> 32, flags)
+                } else {
+                    // counter-proof: a hole in a colour no theme has, so the judge MUST see the frame it does not compose
+                    ch_fill(x, y, ow, oh, 0xFF00FF, 255)
+                }
+            }
+            // the rows of the client area that lie on the screen, copied with the library's row loop (the bottom corners, and the top ones of a window
+            // with its own strip, keep what the rounded frame left there: the same skip as the kernel's)
             var ry: u64 = 0
             while ry < h {
                 let sy: i64 = cy + ry as i64
                 if sy >= 0 && sy < scr_h as i64 {
-                    var x0: i64 = cx
-                    var skip: u64 = 0
-                    if x0 < 0 {
-                        skip = (0 - x0) as u64
-                        x0 = 0
+                    var lo: i64 = 0
+                    var hi: i64 = w as i64
+                    if chok && rad > 0 {
+                        let dyb: i64 = y + oh - 1 - sy
+                        if dyb >= 0 && dyb < rad as i64 {
+                            let sk: i64 = ecke.corner_skip(rad, dyb as u64) as i64
+                            if sk > 0 {
+                                lo = imax(lo, sk)
+                                hi = imin(hi, w as i64 - sk)
+                            }
+                        }
+                        if capc && sy - y < rad as i64 {
+                            let skt: i64 = ecke.corner_skip(rad, (sy - y) as u64) as i64
+                            if skt > 0 {
+                                lo = imax(lo, skt)
+                                hi = imin(hi, w as i64 - skt)
+                            }
+                        }
                     }
-                    var cnt: u64 = w
-                    if skip >= cnt {
-                        cnt = 0
-                    } else {
-                        cnt = cnt - skip
-                    }
-                    if x0 + cnt as i64 > scr_w as i64 {
-                        cnt = (scr_w as i64 - x0) as u64
-                    }
-                    if cnt != 0 {
-                        comp.copy_row((&sb[0 as usize]) as u64 + (sy as u64 * scr_w + x0 as u64) * 4, p + (ry * w + skip) * 4, cnt)
+                    lo = imax(lo, 0 - cx)
+                    hi = imin(hi, scr_w as i64 - cx)
+                    if hi > lo {
+                        comp.copy_row((&sb[0 as usize]) as u64 + (sy as u64 * scr_w + (cx + lo) as u64) * 4, p + (ry * w + lo as u64) * 4, (hi - lo) as u64)
                     }
                 }
                 ry = ry + 1
             }
+            if chok && capc && o_nochrome == 0 {
+                ch_strip_buttons(x, y, ow, focused, tab1[r as usize] >> 32, flags)
+            }
             // a client that paints its own title strip (flag 64) has the server's caption buttons drawn over it: that band is not judged
+            // (unless the chrome is composed here)
             var top: i64 = MARGIN as i64
-            if (tab1[(r + 7) as usize] & 64) != 0 {
+            if (flags & F_CAPCLIENT) != 0 && !chok {
                 top = CAPBAND as i64
+            }
+            if chok {
+                // the whole outer rectangle is judged: pixels over the wallpaper-less corners are skipped by the "not opaque" rule
+                mask_rect(x, y, x + ow, y + oh, 1)
+                chrome_geo(k, x, y, ow, oh, focused, capc)
             }
             // r486: a terminal window (kind 1) marks its pixels with 2, so the judge can say how much of what it compared was terminal
             var mv: u64 = 1
@@ -682,6 +1289,11 @@ fn cycle(t: u64) -> u64 {
     }
     if tab1[5] != tab2[5] {
         return 1
+    }
+    if ch_have == 1 {
+        if !chr_snap(t, (&chr2[0 as usize]) as u64) || !same_chr() {
+            return 1
+        }
     }
     // 3. compare, where the mask says the pixel can be judged and the screen held still
     c_cmp = 0
@@ -782,6 +1394,12 @@ fn run_observe(args: u64) -> u64 {
     var n_notab: [u8; 14] = "wmd: no table\0"
     var n_x: [u8; 2] = "x\0"
     var n_c: [u8; 2] = ",\0"
+    var n_chw: [u8; 9] = " chrome=\0"
+    var n_chp: [u8; 11] = " chromepx=\0"
+    var n_tx: [u8; 10] = " titlepx=\0"
+    var n_cp: [u8; 9] = " capspx=\0"
+    var n_hv: [u8; 8] = " hover=\0"
+    var l_nochr: [u8; 10] = "nochrome=\0"
     var n_shw: [u8; 9] = " shadow=\0"
     var n_shp: [u8; 11] = " shadowpx=\0"
     var n_trm: [u8; 7] = " term=\0"
@@ -793,6 +1411,7 @@ fn run_observe(args: u64) -> u64 {
 
     wlibc.start(false)
     o_noshadow = arg_num(args, (&l_nosh[0 as usize]) as u64, 0)
+    o_nochrome = arg_num(args, (&l_nochr[0 as usize]) as u64, 0)
     p_fba = wlibc.shm_buffer(MAXPX * 4)
     p_fbb = wlibc.shm_buffer(MAXPX * 4)
     scr_w = wlibc.screen_w()
@@ -831,6 +1450,15 @@ fn run_observe(args: u64) -> u64 {
         ulib.say((&n_notab[0 as usize]) as u64)
         ulib.nl()
         return 1
+    }
+    // S6b: the chrome page (root only); without it the program judges as before
+    let cfd: u64 = wlibc.sys3w(WM_TABLE, 1, 0, 0)
+    if !ulib.bad(cfd) {
+        let cm: u64 = mmap_fd(cfd, 4096)
+        if !ulib.bad(cm) && cm != 0 {
+            p_chr = cm
+        }
+        wlibc.shm_close(cfd)
     }
     ulib.say((&n_ready[0 as usize]) as u64)
     ulib.sayu(scr_w)
@@ -874,6 +1502,16 @@ fn run_observe(args: u64) -> u64 {
             ulib.sayu(c_term_cmp)
             ulib.say((&n_trd[0 as usize]) as u64)
             ulib.sayu(c_term_diff)
+            ulib.say((&n_chw[0 as usize]) as u64)
+            ulib.sayu(ch_win)
+            ulib.say((&n_chp[0 as usize]) as u64)
+            ulib.sayu(ch_px)
+            ulib.say((&n_tx[0 as usize]) as u64)
+            ulib.sayu(ch_txt)
+            ulib.say((&n_cp[0 as usize]) as u64)
+            ulib.sayu(ch_cap)
+            ulib.say((&n_hv[0 as usize]) as u64)
+            ulib.sayu(chr1[22])
             if c_diff != 0 {
                 ulib.say((&n_first[0 as usize]) as u64)
                 ulib.sayu(c_fx)

@@ -237,7 +237,7 @@ window buffers, z-order, input routing, window rights, lock. The kernel only del
 | S3 shared buffers + table page | **done** (08.10.2026, `tools/comp/shared.sh`) |
 | S4 shadow compositor | **done** (08.10.2026, `tools/comp/shadow.sh`) |
 | S5 scan-out switch + watchdog | **done, opt-in** (`wmd present`; 08.10.2026, `tools/comp/present.sh`, section "S5") |
-| S6 chrome and effects in `wmd` | **started**: S6a the window shadow is composed and judged in `wmd` (`tools/comp/shadow.sh`, section "S6a"); next: frame + title bar (rounded `fill_round`), caption buttons, blur, glass, pointer |
+| S6 chrome and effects in `wmd` | **started**: S6a the window shadow (`tools/comp/shadow.sh`), S6b frame + title bar + caption buttons + title text (`tools/comp/chrome.sh`), both composed and judged in `wmd`; next: blur / glass, the pointer, windows with the classic buttons |
 | S7 delete the kernel painters | not started |
 
 ### S0 per-phase split and the first fixes (07.10.2026, measured with `phases` on, `tools/design/stationaer.sh`, KVM, host load 4 - 8)
@@ -425,6 +425,42 @@ top strip). It now lays the shadow again when the clip touches the ring.
 Gate: `tools/comp/shadow.sh` (0 judged pixels differ, `shadow=` windows and `shadowpx=` pixels per cycle on the cycle line) and the counter-proof
 `noshadow=1` (`wigapp=/bin/wmd,noshadow=1`): the ring is still judged but not composed, so the judge must see the missing shadow.
 
+### S6b -- the frame, the title bar, the caption buttons and the title text are composed in ring 3 and judged (r485, second slice)
+
+The kernel puts a second read-only page next to the window table: the **chrome page** (`WM_TABLE` with argument 1, root only; layout in the header of
+`wm.chrome_object`; written by `tab_publish` inside the same odd/even bracket as the table, so a reader that sees the table consistent sees this page
+consistent too). It holds the colours of the decoration (frame, title bar, text, focused variants, close button), the measures (border, title height,
+button width, scale, radius, gradient, alpha, padding, baseline), the hovered / held button and, per table row, the **title** (31 octets) and the
+network mark. Titles are private: the page is root-only and its title words are zero while the screen is locked. `wmd` ports `fill_round`,
+`paint_title`, `cap_face`, `paint_caption`, `cap_glyph` (the symbols come from `fui.core`, the very forms `cg_mal` uses) and `title_text` (the glyph
+bitmaps and the kerning come from the kernel's rasteriser through `WIG_GLYPH` / `WIG_KERN`: they are the bitmaps `title_text` draws) step by step with the
+same integers. A framed plain window whose chrome page is consistent is composed in the order of `paint_win`: shadow, frame (`ch_round`), title bar
+(gradient, round at the top), buttons, title; then the client area (the bottom corners keep what the rounded frame left there: `ecke.corner_skip`, the
+same skip as the kernel's; a window with its own strip, `F_CAPCLIENT`, also at the top) and, for such a window, the buttons over the strip.
+The **whole outer rectangle** is judged now (before: only the client area, 16 points in from every edge, and 48 points around every window were given up).
+A translucent pixel (corner smoothing, glass) is blended only over a pixel that is composed (alpha octet 255); over an uncomposed one it is left alone and
+not judged, as in S6a. Windows `wmd` does not know how to paint stay as before (classic buttons, no title font, a network mark in the bar, the screen
+locked, a scale above 4).
+
+**The lesson of S6a, applied.** A judge that shares a bug with the oracle sees nothing, so `tools/comp/chrome.sh` has three checks that do not go
+through the oracle: (1) `tools/comp/chrome_check.py` reads only the kernel's SCREENSHOT and asks whether the bar has the table's height and colour, the
+title text stands inside the bar and about in the middle, each of the three buttons carries a symbol in the middle of its cell, the corner is round (for
+the server title bar of the terminal and for the file manager's own strip with the server's buttons over it); (2) a **hover** scene: the pointer stands on the
+close button, the picture must show the red face and `wmd` must still judge 0 differences; (3) the counter-proof `nochrome=1` (`wigapp=/bin/wmd,nochrome=1`):
+`wmd` fills the outer rectangle with magenta instead of composing the chrome and still judges it: the judge MUST see thousands of differing pixels.
+
+**Measured (KVM, `tools/comp/chrome.sh`, 70 stable cycles, 09.10.2026):** 52 418 478 pixels judged over all cycles (S6a: 41 277 476), largest area 787 067 px, **0 differ**;
+the chrome of 2 windows (the terminal's server title bar, the file manager's own strip with the server's buttons over it) wrote 793 378 pixels per cycle, of
+them 466 title-text pixels and 132 caption-symbol pixels; one frame composed in ring 3 takes **4.8 ms** median (budget 8 ms; S6a: 3.7 ms: the frame fill of two
+big windows costs about 1 ms). The picture checks pass (14 + 9: bar 32 rows of the title colour, text rows 52..62 of the bar 41..72 with its middle at 57.0 where the
+bar's middle is 57.0, three symbols centred to the pixel, round corner), the hover scene shows the red face (220, 38, 38) with the hovered code on the page and 0
+differences, and with `nochrome=1` the judge sees **746 908** differing pixels over the same 70 cycles.
+
+**What the first run taught.** Nothing differed at once, which is exactly the case the lesson of S6a warns about: the first PICTURE check failed on its own
+mistakes (it measured the file manager, which paints its own strip and has no server title bar; the terminal's bar was shadowed by the window above it; the pointer
+arrow stood on the close symbol in the hover scene), not on the code under test. Each was fixed in `chrome_check.py` / `chrome.sh`, none by loosening a threshold
+of the checks that bite.
+
 ### r486 -- the terminal window in a shared buffer (09.10.2026)
 
 Who paints the terminal: NOT a user program. The kernel terminal (`K_TERM`, `wm.term_paint`) writes the cell grid into the window's own buffer; the buffer used
@@ -494,7 +530,7 @@ dates: the wall clock differs between boots; two shared runs differ from each ot
 
 ### What did not get done / the order for the next rounds
 
-* S5/S6 (chrome, shadow, blur, glass and the pointer in `wmd`) -- `wmd` is an observer only; the kernel still composes everything.
+* S6 (rest): blur, glass and the pointer in `wmd`; windows with the classic caption style (red close box), a network mark in the title bar, and a title of a glyph larger than the 8 KiB envelope are left to the kernel (`wmd` does not judge their frame); the client area of a window the kernel paints with the glass alpha. `wmd` is an observer (or, with `present`, the compositor that shows what the kernel composes): the kernel still composes everything.
 * ~~Terminal and desktop windows are not shared yet~~: the desktop window is (r486), the terminal is (r486, see above). Menus (`NK_MENU`) and a window during a drag still take the `WIG_BLIT` / kernel path.
 * ~~`look`: `'Größe' does not match a second rasterisation`~~ fixed (08.10.2026): the file manager's buffer grows upward by its caption strip (r454); `tools/look/umlaut.py` now subtracts the strip height the program reports (`explorer: strip h=`). `look` 41/0. `alltag` had silently lost its counter-proof (45 -> 44): the console lines were renamed (`opk: installed`, `opk: SIGNATURE WRONG`) and the German words it looked for never matched; the check is now mandatory (45/0). `k15` is 259/0: r454 added one line (the title bar of the file manager is its tab strip).
 

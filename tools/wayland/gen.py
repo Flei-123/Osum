@@ -53,6 +53,9 @@ LIMIT = [
     "wl_shm", "wl_shm_pool", "wl_buffer", "wl_surface",
     "wl_seat", "wl_keyboard", "wl_pointer", "wl_output", "wl_region",
     "xdg_wm_base", "xdg_surface", "xdg_toplevel",
+    # ROUND WAYLAND-INPUT: the clipboard (kernel/user/wl_data.fi)
+    "wl_data_device_manager", "wl_data_device", "wl_data_source",
+    "wl_data_offer",
 ]
 
 # Welche Fassung dieser Server anbietet. Mehr zu behaupten, als gebaut
@@ -62,6 +65,7 @@ VERSION = {
     "wl_compositor": 4,
     "wl_shm": 1,
     "wl_seat": 5,
+    "wl_data_device_manager": 3,
     "wl_output": 2,
     "xdg_wm_base": 3,
 }

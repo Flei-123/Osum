@@ -1723,6 +1723,12 @@ lauf "63. the terminal window: the editor's control sequences are executed, the 
      tools/term/run.sh term '^TERM: |^== |^  OK    |^  FAIL  '
 
 # 58b. the same guard as in every other repo (Firn tools/english/no_german.py): one rule for all projects.
+# 64. ROUND WAYLAND-INPUT: a real libwayland client on wayd gets the keyboard (keymap memfd, focus, serials, modifiers), the pointer
+# (enter/motion/button/frame/leave) and the clipboard (wl_data_device, client to client and to/from the OrientOS clipboard), with
+# counter-proofs (no focus, wrong serial, dead owner, locked screen); keysyms checked with libxkbcommon on the host.
+lauf "64. Wayland input and clipboard: keymap, focus, keys, pointer, wl_data_device, bridge to the system clipboard (tools/wayland/input.sh, round WAYLAND-INPUT)" \
+     tools/wayland/input.sh wlinput '^WL-INPUT: |^== |^  OK    |^  FAIL  '
+
 lauf "58b. the shared English guard of Firn: no more German than no-german.baseline.json (tools/english/shared_guard.sh)" \
      tools/english/shared_guard.sh english-shared '^  OK    |^  FAIL  |^no-german: '
 
