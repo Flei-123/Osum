@@ -69,6 +69,10 @@ usb=ja
 # wie im System selbst. `schatten=an` schaltet ihn fuer die Gegenprobe
 # zurueck, mit der Punkt A belegt wird.
 schatten=aus
+# r486: the glass key of /etc/theme.conf (empty = the theme default; see tools/comp/shadow.sh)
+window_alpha=""
+# r486: `tafel=nein` leaves out the diagnostic board (it paints over the screen, a compositor judge compares the screen)
+tafel=ja
 extra=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
@@ -96,6 +100,8 @@ for a in "$@"; do
         netz=*) netz=${a#*=} ;;
         usb=*) usb=${a#*=} ;;
         schatten=*) schatten=${a#*=} ;;
+        window_alpha=*) window_alpha=${a#*=} ;;
+        tafel=*) tafel=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
@@ -180,6 +186,7 @@ printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\
   printf 'mode=%s\naccent=%s\nshape=osum\nlight_start=07:00\ndark_start=19:00\n' \
     "$mode" "$accent"
   if [ "$schatten" = an ]; then printf 'shadow=on\n'; else printf 'shadow=off\n'; fi
+  [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
 } > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
@@ -282,6 +289,7 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 #
 # Mit `disp` misst dieser Laeufer denselben Weg wie sein Brett.
 APPEND="osum gfx disp fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
+[ "$tafel" = nein ] && APPEND="${APPEND/ tafel herz/}"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
 [ -n "$SKAL" ] && APPEND="$APPEND $SKAL"
 [ "$halt" != 0 ] && APPEND="$APPEND wighalt=$halt"

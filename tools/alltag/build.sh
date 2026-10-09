@@ -130,7 +130,13 @@ if [ -n "$preset" ]; then
     align=$(grep -aE "^align=" "$P" | tail -1 | cut -d= -f2-)
 fi
 
-BUILDD=${ALLTAGBUILD:-/tmp/osum-alltagbuild-$(pwd | md5sum | cut -c1-12)}
+# Build dir: ALLTAGBUILD wins; under /root/jarvis/bin/heavy (TMPDIR=/tmp/heavy-run.*, deleted by heavy afterwards) use $TMPDIR/ab so parallel
+# runs in one tree cannot disturb each other; otherwise one dir per tree (hash of the working directory).
+case "${TMPDIR:-}" in
+    /tmp/heavy-run.*) _bd_default="$TMPDIR/ab" ;;
+    *) _bd_default="/tmp/osum-alltagbuild-$(pwd | md5sum | cut -c1-12)" ;;
+esac
+BUILDD=${ALLTAGBUILD:-$_bd_default}
 mkdir -p "$BUILDD" "$OUT"
 
 # ---------------------------------------------------------- 1. kernel
