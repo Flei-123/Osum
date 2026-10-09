@@ -96,7 +96,9 @@ gehört dem Objekt, nicht dem Prozess.
 |---|---|
 | `tools/wayland/gen.py` | **erzeugt** `kernel/user/wlproto.fi` aus den offiziellen XML-Dateien: 16 Schnittstellen, 146 Konstanten, 920 Zeilen |
 | `kernel/user/wlproto.fi` | erzeugt, nicht abgetippt — **nicht von Hand ändern** |
-| `kernel/user/wayd.fi` | der Server, ~1100 Zeilen |
+| `kernel/user/wayd.fi` | der Server, ~1100 Zeilen (seit Runde WAYLAND-INPUT: Tastatur/Zeiger/Zwischenablage in eigenen Dateien, siehe Kapitel 11) |
+| `kernel/user/wl_msg.fi`, `wl_input.fi`, `wl_data.fi` | Runde WAYLAND-INPUT: Ereignisse schreiben; Tastatur und Zeiger; wl_data_device und die Brücke zur Zwischenablage |
+| `kernel/user/wl_keytab.fi` | erzeugt durch `tools/wayland/genkeys.py` aus der libxkbcommon des Wirts — nicht von Hand |
 | `tools/wayland/waydctl.c` | der Wächter für den Bedarfsstart |
 | `tools/wayland/wltest.c` | die Messung der drei Primitive im Kern |
 | `tools/wayland/wlclient.c` | der Stufe-1-Client gegen libwayland |
@@ -264,7 +266,11 @@ Justins Vorgabe vom 14.09.2026, Punkt für Punkt:
 Die Gegenprobe steht da, weil eine Null sonst nichts wert wäre: eine
 blinde Messung zeigte für beide null.
 
-**Ehrlich zu den 0 Marken:** `wayd` benutzt eine **beschäftigte Schleife**
+**Stand Runde WAYLAND-INPUT (09.10.2026): überholt.** `wayd` wartet jetzt in
+einem `poll` über den Lauschsocket und alle Clientsockets (Kapitel 11,
+„Leerlauf“); die Aussage unten gilt für die frühere Fassung.
+
+**Ehrlich zu den 0 Marken (frühere Fassung):** `wayd` benutzte eine **beschäftigte Schleife**
 mit `SYS_YIELD`, kein blockierendes `poll`. Die Null heißt „gibt ab,
 bevor seine Marke voll ist" — **nicht** „schläft". Auf einer Maschine
 ohne andere Last dreht die Schleife trotzdem. Ein `poll` mit Frist wäre
@@ -358,9 +364,11 @@ was zwischen hier und Firefox liegt, ist mehr als das Bisherige:
    dynamisch gelinkt. Diese Runde hat das umgangen, indem sie statisch
    gebaut hat — bei Firefox geht das nicht. (Läuft parallel als eigene
    Runde.)
-2. **`wl_data_device`** — ohne Zwischenablage zwischen Programmen ist ein
-   Browser kaum benutzbar.
-3. **Tastatur und Zeiger wirklich.** `wl_seat` **meldet** beide, aber die
+2. **`wl_data_device`** — **gebaut in Runde WAYLAND-INPUT** (Kapitel 11).
+   Ohne Zwischenablage zwischen Programmen ist ein Browser kaum benutzbar.
+3. **Tastatur und Zeiger wirklich** — **gebaut in Runde WAYLAND-INPUT**
+   (Kapitel 11; offen bleiben Mausrad-Achsen, Touch und Zeigersperre).
+   Der alte Stand war: `wl_seat` **meldet** beide, aber die
    Ereignisse des Fensterservers werden noch nicht auf
    `wl_keyboard.key` / `wl_pointer.motion` übersetzt. Dazu gehört das
    **Tastaturformat**: Wayland schickt eine xkb-Keymap als Deskriptor,
@@ -413,11 +421,138 @@ bash tools/wayland/run.sh
 * **Stufe 3** (Fenster schließen/verschieben wirkt auf den Client) —
   nicht gebaut.
 * **Das Ablaufen der Leerlaufuhr** ist nicht bis zum Ende belegt.
-* **`wayd` dreht eine beschäftigte Schleife** statt in `poll` zu warten.
-* **Kein `wl_data_device`, kein `wl_touch`, kein `wl_subsurface`, kein
+* ~~**`wayd` dreht eine beschäftigte Schleife**~~ — erledigt in Runde WAYLAND-INPUT (`poll`).
+* **(`wl_data_device` ist seit Runde WAYLAND-INPUT da.) Kein `wl_touch`, kein `wl_subsurface`, kein
   `xdg_popup`**, keine Skalierung, keine Transformation.
-* **Tastatur und Zeiger sind angekündigt, aber nicht verdrahtet.**
+* ~~**Tastatur und Zeiger sind angekündigt, aber nicht verdrahtet.**~~ — erledigt in Runde WAYLAND-INPUT (Kapitel 11).
 * **Höchstens 4 Clients und 16 Speicherobjekte** gleichzeitig.
 * **`svc disable wayd` mit Foto und Gegenprobe** ist als Zusage
   verlangt, aber nicht gemessen — die Dienstzeile ist eingehängt, der
   Lauf mit `init` steht aus.
+
+---
+
+## 11. Keyboard, pointer, clipboard (round WAYLAND-INPUT, 09.10.2026)
+
+Until now `wayd` offered a seat and a window; a key or a click of the window server reached a Wayland program only as a raw evdev code and
+nobody could copy and paste. Now a real libwayland client gets a keyboard with a **keymap**, **focus**, **serials** and **modifiers**, a
+pointer with **enter / motion / button / frame / leave**, and a **clipboard** that works between Wayland clients and with the OrientOS system
+clipboard in both directions. Acceptance: `bash tools/wayland/input.sh` (WL-INPUT, real input over the QEMU monitor, a real
+libwayland-client program, keysyms checked by libxkbcommon on the host) and `bash tools/wayland/run.sh` (generators, keymaps).
+
+### 11.1 Where the code is
+
+| File | What |
+|---|---|
+| `kernel/user/wl_msg.fi` | writes one event into a client's output region (head, arguments, string, size) -- shared by the two modules below |
+| `kernel/user/wl_input.fi` | window server events -> `wl_keyboard` / `wl_pointer` events; the keymap descriptor; serials; focus |
+| `kernel/user/wl_data.fi` | `wl_data_device_manager`, `wl_data_device`, `wl_data_source`, `wl_data_offer`; the bridge to the system clipboard |
+| `kernel/user/wl_keytab.fi` | **generated** by `tools/wayland/genkeys.py` from the host's libxkbcommon: character -> (evdev key, modifiers) for `us` and `de` |
+| `kernel/user/wlproto.fi` | generated as before; `tools/wayland/gen.py` got four more interfaces (`LIMIT`) and `wl_data_device_manager` v3 |
+| `kernel/user/wayd.fi` | thin: object table, sockets, the descriptor queue, one `poll` instead of a busy loop, hooks into the three modules |
+| `tools/wayland/wlin.c`, `idle.c`, `keycheck.py`, `input.sh` | the test client (libwayland 1.21, xdg-shell, static musl), the system call counter, the host-side keysym check, the acceptance |
+
+`wm.fi` and `wmd.fi` were **not touched**: wayd only uses what the window server already offers (`WM_EVENT`, `WM_INFO`).
+
+### 11.2 The keyboard
+
+The window server does not deliver key codes, but **characters**, and never a key release: `A` is one `E_KEY` with 65, Ctrl+C is 3, and
+the special keys come the way a terminal sends them, one octet per event (`ESC [ A` = arrow up, `ESC [ 3 ~` = Delete, `ESC [ 20 ~` = F9,
+`ESC [ 1 ; 2 D` = Shift+Left). `wl_input.fi` puts these together (a lone ESC is the Escape key after 50 ms), maps them to evdev codes with the
+generated table, and makes the events a keyboard would: the modifier key presses, `wl_keyboard.modifiers`, the key press and release, the
+modifiers released. UTF-8 octets of the German layout (`ö` = 0xC3 0xB6) are assembled.
+
+* **The keymap** is a memfd with the xkb text compiled by libxkbcommon (`xkb_keymap_get_as_string`, 64 KB for `us`, 66 KB for `de`), sent
+  with `SCM_RIGHTS` **out of** wayd (`send_fd_msg`). It lives in `/usr/share/wayd/keymap-<us|de>.xkb` next to wayd (the package/image
+  provides it; `genkeys.py --keymaps <dir>` makes it). If the file is missing the client gets `no_keymap` and raw codes (the test
+  `tools/actionbus/gui.sh` runs like this). The layout in force is the kernel's (`SYS_OSUM_KBD`); **Ctrl+Alt+L** makes wayd send every keyboard the new keymap.
+* **The host check:** the key and modifier events a client logged are fed into libxkbcommon on the host (`tools/wayland/keycheck.py`),
+  the way a client does it: `A 1 exclam Ctrl+c Return Left Up Delete` on `us`, `y odiaeresis exclam` for z, ; and Shift+1 on `de`.
+* **Focus:** `E_FOCUS` of the window server -> `wl_keyboard.enter` / `leave` with serials and an empty key array; a window that is already
+  focused when the client calls `get_keyboard` gets its `enter` at once. Only the focused client gets keys.
+* **`repeat_info`** (25 / 400 ms, seat version 4 and up) and `wl_seat.name` (`seat0`).
+
+### 11.3 The pointer
+
+`E_MOVE`, `E_DOWN`, `E_UP` carry window-local coordinates; wayd sends `wl_pointer.enter` once, `motion`, `button` (BTN_LEFT / BTN_RIGHT,
+evdev 272 / 273) and `frame`, coordinates as 24.8 fixed point. The window server reports motion only **inside** a window, so wayd polls
+the pointer position (`WIG_SCREEN` mouse position against `WM_INFO` position, border and size of the window) and sends `leave` itself.
+**Not built:** `axis` (the window server has no wheel events at all), `axis_source`, touch, `set_cursor` (accepted, no effect), pointer
+constraints. A window hidden under another one still thinks it is hovered until the pointer leaves its rectangle.
+
+### 11.4 The clipboard
+
+One selection exists: **none**, **WL** (a Wayland client owns it) or **SYS** (the OrientOS clipboard of the bus changed, by someone
+else). Every client with a data device **and keyboard focus** is told (`data_offer`, `offer` x n, `selection`), again each time it gets the focus,
+**never while the screen is locked**.
+
+* **client -> client:** `offer.receive(mime, fd)` -> wayd passes the descriptor on to the owner with `wl_data_source.send(mime, fd)`
+  (`SCM_RIGHTS`, like `wl_shm` in the other direction). The text never sits in the server.
+* **WL -> system:** at `set_selection` wayd asks the source to send its text into a pipe of its own, reads it **without blocking** (zero timeout
+  `poll` per round, 3 s limit) and puts it into the OrientOS clipboard (bus op 10, type text). A native program can paste it.
+  The system clipboard holds 192 octets inline; a longer text reaches other Wayland clients whole but is cut there.
+* **system -> WL:** every round the newest clipboard item is read (bus op 11 with the meta block: pid, sequence); a new sequence from
+  another pid is the selection now, a Wayland owner is told `cancelled`. `receive` on it writes the text into the client's pipe (polled, bounded).
+* **Rules:** `set_selection` only with a serial this server gave **that client** after its latest keyboard enter, and only with focus
+  (`wl_input.serial_ok`); anything else is ignored and the source gets `cancelled`. A source that is replaced gets `cancelled`. A client that
+  **exits** empties the selection it owned. `start_drag` gets `cancelled` (no drag and drop). Text only, one data device per client.
+* A descriptor a client sends **per request** is now taken from a **queue** (`fdq`): several `receive` calls in one burst each get theirs
+  (before, `taken_fd` handed over only the first descriptor of a `recvmsg`).
+
+### 11.5 Idle, and one thing that was a hang
+
+* **`poll` instead of a busy loop.** One `poll` over the listening socket and all client sockets; with a window open (events must be
+  fetched from the window server, which has no descriptor to wait on) the timeout is 10 ms (the kernel rounds up to 20), without a window
+  200 ms -- a connecting or writing client wakes it at once. The idle clock of the on-demand start counts **ticks** now
+  (the old unit, a round of about half a millisecond, is converted: `leer / 20` ticks).
+* **`sendmsg` does not block any more** (`MSG_DONTWAIT`, partial writes keep the rest). Before, a client that did not read could stop the whole server in a
+  blocking `sendmsg`; with transfers between clients that would have happened to the clipboard first. A client that does not read gets no
+  more answers (`recv_into` waits) instead of overflowing its output region.
+
+### 11.6 Measured (tools/wayland/input.sh, one boot, real input)
+
+`bash tools/wayland/input.sh`: **66 passed, 0 failed** (QEMU, KVM, three `wlin` programs, host input over the monitor):
+
+| What | Result |
+|---|---|
+| keymap | all three clients got `fmt=1 size=64434 crc=0x33fc972e` = the file the host compiled (65 KB, `us`); `repeat_info 25/400`; seat `seat0`, version 5, caps 3 |
+| focus | B (newest window) got `enter` at once and the key `a` as evdev 30 press + release; A and C got **nothing**; a click on A: A `enter`, B `leave` |
+| pointer | A: `enter`, `motion` (40,30) when (40,30) was clicked, `button` 272 pressed/released, `frame`; `leave` when the pointer left; B, over which the pointer only passed, got no button |
+| keysyms (libxkbcommon on the host) | `A 1 exclam Ctrl+c Return Left Up Delete` on `us`; every event of these keys has its own serial; Ctrl is xkb mask 4 |
+| German layout | after Ctrl+Alt+L every keyboard got the 66 KB `de` keymap (`crc=0xa5928665`); z -> `y`, ; -> `odiaeresis` (UTF-8 over two octets), Shift+1 -> `exclam` |
+| clipboard client -> client | A `set_selection` (serial of a key press), B pasted `hello-from-A` **through A** (descriptor passed on, `source.send ... wrote=12`) |
+| clipboard -> system | after that a native system call reads `hello-from-A` from the OrientOS clipboard |
+| clipboard system -> client | a native program set `native-says-hi`; B was offered it and pasted it; A (the owner before) got `cancelled` |
+| counter-proofs | no `set_selection` -> `selection=none`; a serial that was never given -> refused, `cancelled`, nothing offered; the owner exits -> `selection=none` for the next client, no hang |
+| locked screen | `osum_sperre`: no key, no pointer event (not even `leave`) reached the window; after the unlock keys arrive again; `tools/lockseal/run.sh` 43/0 as before |
+| idle | wayd alone: **122** system calls of the whole system in 5 s (24 per second); the busy loop of before: **451 010** in 5 s (90 202 per second), measured with the same program (`BASE_WAYD=<old elf> IDLE_ONLY=1 bash tools/wayland/input.sh`); three windows open and nobody touching: 4 684 in 5 s |
+
+Other gates run with this change: `tools/wayland/run.sh` **52 passed, 0 failed** (was 45; the new ones: modules present, key table and keymaps generated and
+compiled, `wl_data_device_manager` known), `tools/actionbus/gui.sh` **67 passed, 0 failed** (a real Wayland program on wayd steered by the
+action bus -- the old keymap-less path, `no_keymap`, still works), `tools/lockseal/run.sh` **43/0**, `tools/a11y/run.sh` **58/0**.
+Nothing outside Ring 3 (`wayd` and its test tools) was changed, so the other gates of the system (wm, k15, alltag, fourbugs, softui,
+themestore, comp) cannot move and were not run for this change.
+
+### 11.7 What the measurement found (and what was changed because of it)
+
+1. **Arrow keys, Delete and F-keys arrive as escape sequences, one octet per event, and plain Up is the octet 14 (= Ctrl+N).** The first
+   run delivered `ESC`, `[`, `2`, `0`, `~` as five keys. Now a small state machine decodes them (`csi_key`), Ctrl+N and Ctrl+H come as
+   `ESC [ 31 ; 5 ~` / `ESC [ 30 ; 5 ~` from the kernel and stay Ctrl+N / Ctrl+H.
+2. **The pointer enters where it first touches the window**, not where the click is: the test's relative mouse walks over other windows on
+   its way. The check looks at the last motion before the button.
+3. **A locked screen must also hide that the pointer left a window**: `leave` is not sent while locked.
+4. **`osum_sperre`: op 1 locks, but only the registered locker can unlock** -- a test program has to call op 4 first.
+5. **KERNEL, NOT FIXED: a client that dies by a fault keeps its socket until somebody `wait`s for it.** `exit` closes the descriptors
+   (`sock_close_all`), a process killed by SIGSEGV becomes a zombie and its descriptors are closed only in `proc.reap` (`file.close_all`, which
+   bypasses `unref_of`, so a `K_USOCK` is not even released there). wayd then never sees the end of the connection: the dead client's
+   window and its selection stay. Measured (run of the 09.10.2026 with a client that wrote to address 0): the selection of the dead owner is still offered
+   and a paste yields nothing; no `Client gegangen` line from wayd. The fix belongs to the kernel (close descriptors at death, not at reaping); roadmap item.
+
+### 11.8 Open
+
+* no `axis` events (no wheel in the window server), no touch, no `wl_subsurface`, no drag and drop;
+* the clipboard is text only and 192 octets in the system clipboard; one data device per client;
+* a fault-killed client (see 11.7, 5);
+* the keymap files must be in the image (`/usr/share/wayd/`); the package recipe lists them;
+* the key tables are `us` and `de` (the layouts of the kernel); characters outside them (`é` on `us`) are dropped;
+* **Alt** works only as the xterm `ESC [ 27 ; 3 ~` form the kernel sends for Alt+Enter; Alt+letter does not exist in the window server.

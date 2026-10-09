@@ -1,0 +1,840 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wl_data.fi -- ROUND WAYLAND-INPUT: THE CLIPBOARD (wl_data_device_manager, wl_data_device, wl_data_source, wl_data_offer).
+//
+// One SELECTION exists at a time, and it is in one of three states:
+//
+//   NONE  nothing is offered.
+//   WL    a Wayland client owns it: it made a wl_data_source, offered mime types and called set_selection(source, serial).
+//   SYS   the OrientOS clipboard (the bus clip history, `ulib.clip_put`, Ctrl+C in a native program) changed and the change did not
+//         come from this server.
+//
+// Who gets it: every client with a wl_data_device that holds the KEYBOARD FOCUS (wl_input.has_focus) gets
+// data_device.data_offer + offer.offer + data_device.selection, and again when it gets the focus. Never while the screen is
+// locked. A client receives with offer.receive(mime, fd): for a WL selection the descriptor is passed on to the owner with
+// wl_data_source.send(mime, fd) (SCM_RIGHTS, like wl_shm), so the text goes from client to client without a copy in the server;
+// for a SYS selection this server writes the clipboard text into the descriptor itself.
+//
+// THE BRIDGE to the system clipboard, both directions:
+//   WL -> SYS  at set_selection this server asks the source to send(text) into a pipe of its own, reads it without ever blocking
+//              (3 s limit) and puts it into the OrientOS clipboard (bus clip_set, type text) -- a native program can paste it.
+//   SYS -> WL  every tick the newest clipboard item is read; a new one (sequence number) that this process did not set is a SYS
+//              selection and goes to the focused clients.
+// The system clipboard keeps at most 192 octets inline (kernel/bus/bus.fi INLINE_MAX); a longer WL text reaches other Wayland
+// clients whole (client to client) but is cut at 192 octets in the system clipboard. Text only (T_TEXT).
+//
+// NOTHING BLOCKS: every descriptor is polled with a zero timeout before it is read or written; a client that never answers is
+// dropped after 3 seconds; a client that dies empties the selection it owned (client_gone). drag and drop is NOT built:
+// start_drag gets `cancelled`.
+//
+// wayd.fi calls the on_* functions for requests (addresses in OUR memory), `emit` for the events of a client, `tick` once per
+// round, and drains two queues: new objects to register (nq_*), and messages that carry a descriptor (fm_*).
+profile kernel
+
+import ulib
+import wlproto
+import wl_msg
+import wl_input
+
+export {
+    busy, client_init, client_gone, on_manager, on_device, on_source, on_offer, emit, tick, init_bridge,
+    nq_count, nq_client, nq_id, nq_iface, nq_clear,
+    fm_count, fm_client, fm_ptr, fm_len, fm_fd, fm_clear,
+    sel_kind, n_sets, n_receives, n_mirrors, n_offers,
+}
+
+const MAXC: u64 = 4
+const MS: u64 = 4 // sources per client
+const MM: u64 = 4 // mime types per source
+const ML: u64 = 48 // octets per mime type, with the zero
+const MO: u64 = 4 // offers per client
+const TEXT_MAX: u64 = 192
+const XFER_TICKS: u64 = 300 // 3 s
+
+const SEL_NONE: u64 = 0
+const SEL_WL: u64 = 1
+const SEL_SYS: u64 = 2
+
+const SYS_BUS: u64 = 1960
+const SYS_SPERRE: u64 = 1870
+
+// ------------------------------------------------------------------ state
+static mut d_dev: [u64; 4] = [0 as u64; 4] // the wl_data_device of a client
+static mut sent_gen: [u64; 4] = [0 as u64; 4]
+static mut had_focus: [u64; 4] = [0 as u64; 4]
+static mut next_off: [u64; 4] = [0 as u64; 4]
+
+static mut sr_id: [u64; 16] = [0 as u64; 16]
+static mut sr_gen: [u64; 16] = [0 as u64; 16]
+static mut sr_dead: [u64; 16] = [0 as u64; 16] // 1: no longer usable (replaced / refused)
+static mut sr_cancel: [u64; 16] = [0 as u64; 16] // 1: `cancelled` is still to be sent
+static mut sr_nm: [u64; 16] = [0 as u64; 16]
+static mut sr_mlen: [u64; 64] = [0 as u64; 64]
+static mut sr_mime: [u8; 3072] = [0 as u8; 3072] // 16 sources * 4 mime * 48
+
+static mut of_id: [u64; 16] = [0 as u64; 16]
+static mut of_kind: [u64; 16] = [0 as u64; 16]
+static mut of_sc: [u64; 16] = [0 as u64; 16]
+static mut of_sk: [u64; 16] = [0 as u64; 16]
+static mut of_sgen: [u64; 16] = [0 as u64; 16]
+static mut of_seq: [u64; 16] = [0 as u64; 16]
+static mut of_rr: [u64; 4] = [0 as u64; 4]
+
+static mut sel_kind: u64 = 0
+static mut sel_c: u64 = 0
+static mut sel_k: u64 = 0
+static mut sel_seq: u64 = 0
+static mut sel_gen: u64 = 1
+static mut src_gen: u64 = 1
+
+static mut bus_ok: u64 = 0
+static mut sys_len: u64 = 0
+static mut sys_seq_now: u64 = 0
+static mut sys_seen: u64 = 0xFFFFFFFFFFFFFFFF
+static mut own_pid: u64 = 0
+
+// transfers: WL source -> pipe -> system clipboard
+static mut xi_fd: [u64; 4] = [0 as u64; 4]
+static mut xi_c: [u64; 4] = [0 as u64; 4]
+static mut xi_k: [u64; 4] = [0 as u64; 4]
+static mut xi_gen: [u64; 4] = [0 as u64; 4]
+static mut xi_len: [u64; 4] = [0 as u64; 4]
+static mut xi_t0: [u64; 4] = [0 as u64; 4]
+static mut xi_buf: [u8; 800] = [0 as u8; 800] // 4 * 200
+// transfers: system clipboard text -> client's pipe
+static mut xo_fd: [u64; 4] = [0 as u64; 4]
+static mut xo_len: [u64; 4] = [0 as u64; 4]
+static mut xo_off: [u64; 4] = [0 as u64; 4]
+static mut xo_t0: [u64; 4] = [0 as u64; 4]
+static mut xo_buf: [u8; 800] = [0 as u8; 800]
+
+// queues for wayd.fi
+static mut nq_n: u64 = 0
+static mut nq_c: [u64; 8] = [0 as u64; 8]
+static mut nq_i: [u64; 8] = [0 as u64; 8]
+static mut nq_f: [u64; 8] = [0 as u64; 8]
+static mut fm_n: u64 = 0
+static mut fm_c: [u64; 4] = [0 as u64; 4]
+static mut fm_l: [u64; 4] = [0 as u64; 4]
+static mut fm_d: [u64; 4] = [0 as u64; 4]
+static mut fm_buf: [u8; 512] = [0 as u8; 512] // 4 * 128
+
+static mut pf: [u64; 1] = [0 as u64; 1]
+static mut pp: [u64; 1] = [0 as u64; 1]
+static mut cl_buf: [u8; 200] = [0 as u8; 200]
+static mut cl_meta: [u64; 6] = [0 as u64; 6]
+
+static mut n_sets: u64 = 0
+static mut n_receives: u64 = 0
+static mut n_mirrors: u64 = 0
+static mut n_offers: u64 = 0
+
+// ------------------------------------------------------------- helpers
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_BUS, in("rdi") op,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn locked() -> bool {
+    return ulib.sys(SYS_SPERRE, 0, 0, 0) == 1
+}
+
+fn close_fd(fd: u64) {
+    if fd != 0 {
+        ulib.sys(3, fd, 0, 0)
+    }
+}
+
+// poll one descriptor with a zero timeout; returns revents (0 = nothing)
+fn poll1(fd: u64, events: u64) -> u64 {
+    pf[0 as usize] = fd | (events << 32)
+    let r: u64 = ulib.sys(7, (&pf[0 as usize]) as u64, 1, 0)
+    if ulib.failed(r) || r == 0 {
+        return 0
+    }
+    return (pf[0 as usize] >> 48) & 0xFFFF
+}
+
+// Anything to poll for? (a transfer is running, or a message with a descriptor is waiting)
+fn busy() -> bool {
+    var x: u64 = 0
+    while x < 4 {
+        if xi_fd[x as usize] != 0 || xo_fd[x as usize] != 0 {
+            return true
+        }
+        x = x + 1
+    }
+    return fm_n != 0
+}
+
+fn nq_push(c: u64, id: u64, iface: u64) {
+    if nq_n < 8 {
+        nq_c[nq_n as usize] = c
+        nq_i[nq_n as usize] = id
+        nq_f[nq_n as usize] = iface
+        nq_n = nq_n + 1
+    }
+}
+
+fn nq_count() -> u64 {
+    return nq_n
+}
+
+fn nq_client(i: u64) -> u64 {
+    return nq_c[i as usize]
+}
+
+fn nq_id(i: u64) -> u64 {
+    return nq_i[i as usize]
+}
+
+fn nq_iface(i: u64) -> u64 {
+    return nq_f[i as usize]
+}
+
+fn nq_clear() {
+    nq_n = 0
+}
+
+fn fm_count() -> u64 {
+    return fm_n
+}
+
+fn fm_client(i: u64) -> u64 {
+    return fm_c[i as usize]
+}
+
+fn fm_ptr(i: u64) -> u64 {
+    return (&fm_buf[(i * 128) as usize]) as u64
+}
+
+fn fm_len(i: u64) -> u64 {
+    return fm_l[i as usize]
+}
+
+fn fm_fd(i: u64) -> u64 {
+    return fm_d[i as usize]
+}
+
+// wayd has sent them all (and closed the descriptors)
+fn fm_clear() {
+    fm_n = 0
+}
+
+// The message `send(mime, fd)` for source `sid` of client `c`, queued with its descriptor. If the queue is full the descriptor is
+// closed (the reader sees an end of file: an empty paste, never a hang).
+fn fm_send(c: u64, sid: u64, mime: u64, mlen: u64, fd: u64) {
+    if fm_n >= 4 {
+        close_fd(fd)
+        return
+    }
+    let i: u64 = fm_n
+    let base: u64 = (&fm_buf[(i * 128) as usize]) as u64
+    wl_msg.begin(base, 0, sid, wlproto.EV_WL_DATA_SOURCE_SEND)
+    wl_msg.text(mime, mlen)
+    fm_l[i as usize] = wl_msg.end()
+    fm_c[i as usize] = c
+    fm_d[i as usize] = fd
+    fm_n = fm_n + 1
+}
+
+fn mime_ptr(si: u64, m: u64) -> u64 {
+    return (&sr_mime[((si * MM + m) * ML) as usize]) as u64
+}
+
+// Compare a mime string at `p` (n octets) with a stored one.
+fn same_mime(p: u64, n: u64, q: u64, qn: u64) -> bool {
+    if n != qn {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        if __mmio_read8((p + k) as *mut u8) != __mmio_read8((q + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// which of the three text types a source offers (the best one), or MM
+fn text_mime(si: u64) -> u64 {
+    var best: u64 = MM
+    var bestr: u64 = 0
+    var m: u64 = 0
+    while m < sr_nm[si as usize] {
+        let p: u64 = mime_ptr(si, m)
+        let n: u64 = sr_mlen[(si * MM + m) as usize]
+        var rank: u64 = 0
+        var u8c: [u8; 25] = "text/plain;charset=utf-8\0"
+        var pl: [u8; 11] = "text/plain\0"
+        var ut: [u8; 12] = "UTF8_STRING\0"
+        if same_mime(p, n, (&u8c[0 as usize]) as u64, 24) {
+            rank = 3
+        } else if same_mime(p, n, (&pl[0 as usize]) as u64, 10) {
+            rank = 2
+        } else if same_mime(p, n, (&ut[0 as usize]) as u64, 11) {
+            rank = 1
+        }
+        if rank > bestr {
+            bestr = rank
+            best = m
+        }
+        m = m + 1
+    }
+    return best
+}
+
+fn find_src(c: u64, id: u64) -> u64 {
+    var k: u64 = 0
+    while k < MS {
+        if sr_id[(c * MS + k) as usize] == id {
+            return c * MS + k
+        }
+        k = k + 1
+    }
+    return 16
+}
+
+fn find_off(c: u64, id: u64) -> u64 {
+    var k: u64 = 0
+    while k < MO {
+        if of_id[(c * MO + k) as usize] == id {
+            return c * MO + k
+        }
+        k = k + 1
+    }
+    return 16
+}
+
+fn init_bridge() {
+    own_pid = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    bus_ok = 0
+    if !ulib.failed(bus5(12, 0, 3, 0, 0)) {
+        bus_ok = 1
+    }
+}
+
+fn client_init(c: u64) {
+    d_dev[c as usize] = 0
+    sent_gen[c as usize] = 0
+    had_focus[c as usize] = 0
+    next_off[c as usize] = 0xFF000000
+    of_rr[c as usize] = 0
+    var k: u64 = 0
+    while k < MS {
+        sr_id[(c * MS + k) as usize] = 0
+        sr_cancel[(c * MS + k) as usize] = 0
+        sr_dead[(c * MS + k) as usize] = 0
+        k = k + 1
+    }
+    k = 0
+    while k < MO {
+        of_id[(c * MO + k) as usize] = 0
+        k = k + 1
+    }
+}
+
+fn sel_clear() {
+    sel_kind = SEL_NONE
+    sel_gen = sel_gen + 1
+}
+
+fn src_free(si: u64) {
+    // the selection of a source that goes away is empty
+    if sel_kind == SEL_WL && sel_c * MS + sel_k == si {
+        sel_clear()
+    }
+    // a transfer that was reading from it ends
+    var x: u64 = 0
+    while x < 4 {
+        if xi_fd[x as usize] != 0 && xi_c[x as usize] * MS + xi_k[x as usize] == si {
+            close_fd(xi_fd[x as usize])
+            xi_fd[x as usize] = 0
+        }
+        x = x + 1
+    }
+    sr_id[si as usize] = 0
+    sr_cancel[si as usize] = 0
+    sr_dead[si as usize] = 0
+    sr_nm[si as usize] = 0
+}
+
+// The client is gone (closed, killed, crashed): everything of it goes, and so does the selection it owned.
+fn client_gone(c: u64) {
+    var k: u64 = 0
+    while k < MS {
+        if sr_id[(c * MS + k) as usize] != 0 {
+            src_free(c * MS + k)
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < MO {
+        of_id[(c * MO + k) as usize] = 0
+        k = k + 1
+    }
+    d_dev[c as usize] = 0
+    // a transfer writing into a descriptor of that client is not stopped by the client's end: it times out or finds the pipe
+    // closed. Nothing waits for it.
+}
+
+// ====================================================== REQUESTS
+
+// wl_data_device_manager: create_data_source(id), get_data_device(id, seat)
+fn on_manager(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE {
+        let sid: u64 = wl_msg.rd32(argp)
+        nq_push(c, sid, wlproto.IF_WL_DATA_SOURCE)
+        var k: u64 = 0
+        while k < MS {
+            let si: u64 = c * MS + k
+            if sr_id[si as usize] == 0 {
+                sr_id[si as usize] = sid
+                src_gen = src_gen + 1
+                sr_gen[si as usize] = src_gen
+                sr_dead[si as usize] = 0
+                sr_cancel[si as usize] = 0
+                sr_nm[si as usize] = 0
+                return
+            }
+            k = k + 1
+        }
+        return
+    }
+    if op == wlproto.RQ_WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE {
+        let did: u64 = wl_msg.rd32(argp)
+        nq_push(c, did, wlproto.IF_WL_DATA_DEVICE)
+        d_dev[c as usize] = did
+        sent_gen[c as usize] = 0
+        had_focus[c as usize] = 0
+    }
+}
+
+// wl_data_source: offer(mime), destroy, set_actions
+fn on_source(c: u64, id: u64, op: u64, argp: u64) {
+    let si: u64 = find_src(c, id)
+    if op == wlproto.RQ_WL_DATA_SOURCE_DESTROY {
+        if si < 16 {
+            src_free(si)
+        }
+        return
+    }
+    if op == wlproto.RQ_WL_DATA_SOURCE_OFFER && si < 16 {
+        let n1: u64 = wl_msg.rd32(argp) // length with the zero
+        if n1 == 0 || sr_nm[si as usize] >= MM {
+            return
+        }
+        var n: u64 = n1 - 1
+        if n > ML - 1 {
+            n = ML - 1
+        }
+        let m: u64 = sr_nm[si as usize]
+        let dst: u64 = mime_ptr(si, m)
+        var k: u64 = 0
+        while k < n {
+            __mmio_write8((dst + k) as *mut u8, __mmio_read8((argp + 4 + k) as *mut u8))
+            k = k + 1
+        }
+        __mmio_write8((dst + n) as *mut u8, 0 as u8)
+        sr_mlen[(si * MM + m) as usize] = n
+        sr_nm[si as usize] = m + 1
+    }
+}
+
+// Ask the source for its text and mirror it into the system clipboard (never blocks).
+fn begin_fetch(c: u64, si: u64) {
+    if bus_ok == 0 {
+        return
+    }
+    let m: u64 = text_mime(si)
+    if m >= MM {
+        return
+    }
+    var x: u64 = 4
+    var k: u64 = 0
+    while k < 4 {
+        if xi_fd[k as usize] == 0 && x >= 4 {
+            x = k
+        }
+        k = k + 1
+    }
+    if x >= 4 {
+        return
+    }
+    if ulib.failed(ulib.sys(22, (&pp[0 as usize]) as u64, 0, 0)) { // pipe
+        return
+    }
+    let rfd: u64 = pp[0 as usize] & 0xFFFFFFFF
+    let wfd: u64 = (pp[0 as usize] >> 32) & 0xFFFFFFFF
+    xi_fd[x as usize] = rfd
+    xi_c[x as usize] = c
+    xi_k[x as usize] = si - c * MS
+    xi_gen[x as usize] = sel_gen
+    xi_len[x as usize] = 0
+    xi_t0[x as usize] = ticks()
+    fm_send(c, sr_id[si as usize], mime_ptr(si, m), sr_mlen[(si * MM + m) as usize], wfd)
+}
+
+// wl_data_device: start_drag, set_selection(source, serial), release
+fn on_device(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_DATA_DEVICE_RELEASE {
+        if d_dev[c as usize] == id {
+            d_dev[c as usize] = 0
+        }
+        return
+    }
+    if op == wlproto.RQ_WL_DATA_DEVICE_START_DRAG {
+        // no drag and drop here: the source is told so and does not wait for a drop
+        let si: u64 = find_src(c, wl_msg.rd32(argp))
+        if si < 16 {
+            sr_cancel[si as usize] = 1
+            sr_dead[si as usize] = 1
+        }
+        return
+    }
+    if op != wlproto.RQ_WL_DATA_DEVICE_SET_SELECTION {
+        return
+    }
+    let sid: u64 = wl_msg.rd32(argp)
+    let serial: u64 = wl_msg.rd32(argp + 4)
+    n_sets = n_sets + 1
+    var si: u64 = 16
+    if sid != 0 {
+        si = find_src(c, sid)
+        if si >= 16 {
+            return
+        }
+    }
+    // a wrong serial, no focus, or a locked screen: the request is ignored and the source is told it was refused
+    if locked() || !wl_input.serial_ok(c, serial) {
+        if si < 16 {
+            sr_cancel[si as usize] = 1
+            sr_dead[si as usize] = 1
+        }
+        return
+    }
+    if sid == 0 {
+        // clear: only the owner clears what it owns
+        if sel_kind == SEL_WL && sel_c == c {
+            sr_cancel[(sel_c * MS + sel_k) as usize] = 1
+            sr_dead[(sel_c * MS + sel_k) as usize] = 1
+            sel_clear()
+        }
+        return
+    }
+    if sel_kind == SEL_WL && sel_c * MS + sel_k != si {
+        let old: u64 = sel_c * MS + sel_k
+        sr_cancel[old as usize] = 1
+        sr_dead[old as usize] = 1
+    }
+    sel_kind = SEL_WL
+    sel_c = c
+    sel_k = si - c * MS
+    sel_gen = sel_gen + 1
+    begin_fetch(c, si)
+}
+
+// wl_data_offer: accept, receive(mime, fd), destroy, finish, set_actions
+fn on_offer(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
+    let oi: u64 = find_off(c, id)
+    if op == wlproto.RQ_WL_DATA_OFFER_DESTROY {
+        if oi < 16 {
+            of_id[oi as usize] = 0
+        }
+        return
+    }
+    if op != wlproto.RQ_WL_DATA_OFFER_RECEIVE {
+        return
+    }
+    n_receives = n_receives + 1
+    if oi >= 16 || fd == 0 || locked() {
+        close_fd(fd)
+        return
+    }
+    let n1: u64 = wl_msg.rd32(argp)
+    var n: u64 = 0
+    if n1 != 0 {
+        n = n1 - 1
+    }
+    if of_kind[oi as usize] == SEL_WL {
+        let si: u64 = of_sc[oi as usize] * MS + of_sk[oi as usize]
+        if sr_id[si as usize] == 0 || sr_gen[si as usize] != of_sgen[oi as usize] || sr_dead[si as usize] != 0 {
+            close_fd(fd)
+            return
+        }
+        // the type must be one the source offered; the descriptor goes to the source and stays there
+        var m: u64 = 0
+        while m < sr_nm[si as usize] {
+            if same_mime(argp + 4, n, mime_ptr(si, m), sr_mlen[(si * MM + m) as usize]) {
+                fm_send(of_sc[oi as usize], sr_id[si as usize], mime_ptr(si, m), n, fd)
+                return
+            }
+            m = m + 1
+        }
+        close_fd(fd)
+        return
+    }
+    if of_kind[oi as usize] == SEL_SYS {
+        read_sys_text()
+        // the clipboard moved on since this offer was made: the stale offer yields an empty paste
+        if sys_len <= 0 || sys_seq_now != of_seq[oi as usize] {
+            close_fd(fd)
+            return
+        }
+        var x: u64 = 4
+        var k: u64 = 0
+        while k < 4 {
+            if xo_fd[k as usize] == 0 && x >= 4 {
+                x = k
+            }
+            k = k + 1
+        }
+        if x >= 4 {
+            close_fd(fd)
+            return
+        }
+        var b: u64 = 0
+        while b < sys_len {
+            xo_buf[(x * 200 + b) as usize] = cl_buf[b as usize]
+            b = b + 1
+        }
+        xo_fd[x as usize] = fd
+        xo_len[x as usize] = sys_len
+        xo_off[x as usize] = 0
+        xo_t0[x as usize] = ticks()
+        return
+    }
+    close_fd(fd)
+}
+
+// ================================================ THE SYSTEM CLIPBOARD
+// The newest clipboard item as text into cl_buf; sets sys_len (0 = none or not text) and sys_seq_now, meta[1] is the setter's pid.
+fn read_sys_text() {
+    sys_len = 0
+    if bus_ok == 0 {
+        return
+    }
+    let n: u64 = bus5(11, 0, (&cl_buf[0 as usize]) as u64, TEXT_MAX, (&cl_meta[0 as usize]) as u64)
+    if ulib.failed(n) || n == 0 || n > TEXT_MAX {
+        return
+    }
+    if (cl_meta[0 as usize] & 1) == 0 {
+        return // not text
+    }
+    sys_len = n
+    sys_seq_now = cl_meta[5 as usize]
+}
+
+// Put text from cl_buf (n octets) into the system clipboard.
+fn mirror_out(n: u64) {
+    if bus_ok == 0 || n == 0 {
+        return
+    }
+    let r: u64 = bus5(10, 1, (&cl_buf[0 as usize]) as u64, n, 0)
+    if ulib.failed(r) {
+        return
+    }
+    n_mirrors = n_mirrors + 1
+    // what we just set must not come back as a system change
+    read_sys_text()
+    sys_seen = sys_seq_now
+}
+
+fn watch_system() {
+    if bus_ok == 0 || locked() {
+        return
+    }
+    var any: bool = false
+    var c: u64 = 0
+    while c < MAXC {
+        if d_dev[c as usize] != 0 {
+            any = true
+        }
+        c = c + 1
+    }
+    if !any {
+        return
+    }
+    read_sys_text()
+    if sys_len == 0 {
+        return
+    }
+    if sys_seq_now == sys_seen {
+        return
+    }
+    sys_seen = sys_seq_now
+    if cl_meta[1 as usize] == own_pid {
+        return
+    }
+    // a change made by someone else: it is the selection now; a Wayland source that owned it is told
+    if sel_kind == SEL_WL {
+        sr_cancel[(sel_c * MS + sel_k) as usize] = 1
+        sr_dead[(sel_c * MS + sel_k) as usize] = 1
+    }
+    sel_kind = SEL_SYS
+    sel_seq = sys_seq_now
+    sel_gen = sel_gen + 1
+}
+
+// ============================================================ THE ROUND
+// Transfers move, the system clipboard is looked at. Called once per round of wayd.
+fn tick() {
+    let now: u64 = ticks()
+    var x: u64 = 0
+    while x < 4 {
+        // --- source -> pipe -> clipboard
+        if xi_fd[x as usize] != 0 {
+            let fd: u64 = xi_fd[x as usize]
+            var done: bool = false
+            let rev: u64 = poll1(fd, 1)
+            if (rev & 1) != 0 {
+                // data: read what fits, drop the rest
+                var room: u64 = 0
+                if xi_len[x as usize] < TEXT_MAX {
+                    room = TEXT_MAX - xi_len[x as usize]
+                }
+                var tmp: [u8; 64] = [0 as u8; 64]
+                var want: u64 = 64
+                if room != 0 && room < 64 {
+                    want = room
+                }
+                let n: u64 = ulib.sys(0, fd, (&tmp[0 as usize]) as u64, want)
+                if ulib.failed(n) || n == 0 {
+                    done = true
+                } else if room != 0 {
+                    var b: u64 = 0
+                    while b < n {
+                        xi_buf[(x * 200 + xi_len[x as usize] + b) as usize] = tmp[b as usize]
+                        b = b + 1
+                    }
+                    xi_len[x as usize] = xi_len[x as usize] + n
+                }
+            } else if (rev & 16) != 0 || (rev & 8) != 0 {
+                done = true // the writer closed without more data
+            }
+            if !done && now - xi_t0[x as usize] > XFER_TICKS {
+                // the client never answers: give up, never hang
+                close_fd(fd)
+                xi_fd[x as usize] = 0
+            } else if done {
+                close_fd(fd)
+                xi_fd[x as usize] = 0
+                // only if this is still the selection it was fetched for
+                if sel_kind == SEL_WL && sel_gen == xi_gen[x as usize] && xi_len[x as usize] != 0 {
+                    var b2: u64 = 0
+                    while b2 < xi_len[x as usize] {
+                        cl_buf[b2 as usize] = xi_buf[(x * 200 + b2) as usize]
+                        b2 = b2 + 1
+                    }
+                    mirror_out(xi_len[x as usize])
+                }
+            }
+        }
+        // --- clipboard text -> the pipe a client gave us
+        if xo_fd[x as usize] != 0 {
+            let fd2: u64 = xo_fd[x as usize]
+            let rev2: u64 = poll1(fd2, 4)
+            if (rev2 & 8) != 0 || (rev2 & 32) != 0 {
+                close_fd(fd2) // the reader is gone
+                xo_fd[x as usize] = 0
+            } else {
+                if (rev2 & 4) != 0 {
+                    let left: u64 = xo_len[x as usize] - xo_off[x as usize]
+                    let n2: u64 = ulib.sys(1, fd2, (&xo_buf[(x * 200 + xo_off[x as usize]) as usize]) as u64, left)
+                    if !ulib.failed(n2) {
+                        xo_off[x as usize] = xo_off[x as usize] + n2
+                    }
+                }
+                if xo_off[x as usize] >= xo_len[x as usize] || now - xo_t0[x as usize] > XFER_TICKS {
+                    close_fd(fd2)
+                    xo_fd[x as usize] = 0
+                }
+            }
+        }
+        x = x + 1
+    }
+    watch_system()
+}
+
+// ================================================ EVENTS OF A CLIENT
+// Called every round for every client: `cancelled` for sources that lost, and the selection for a focused device.
+fn emit(c: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    var k: u64 = 0
+    while k < MS {
+        let si: u64 = c * MS + k
+        if sr_id[si as usize] != 0 && sr_cancel[si as usize] != 0 {
+            l = wl_msg.begin(buf, l, sr_id[si as usize], wlproto.EV_WL_DATA_SOURCE_CANCELLED)
+            l = wl_msg.end()
+            sr_cancel[si as usize] = 0
+        }
+        k = k + 1
+    }
+    let dev: u64 = d_dev[c as usize]
+    if dev == 0 {
+        return l
+    }
+    let foc: bool = wl_input.has_focus(c)
+    if !foc {
+        had_focus[c as usize] = 0
+        return l
+    }
+    if had_focus[c as usize] == 0 {
+        had_focus[c as usize] = 1
+        sent_gen[c as usize] = 0 // a client that gets the focus is told the selection again
+    }
+    if sent_gen[c as usize] == sel_gen || locked() {
+        return l
+    }
+    sent_gen[c as usize] = sel_gen
+    if sel_kind == SEL_NONE {
+        l = wl_msg.begin(buf, l, dev, wlproto.EV_WL_DATA_DEVICE_SELECTION)
+        wl_msg.arg(0)
+        l = wl_msg.end()
+        return l
+    }
+    // a new offer object (server side ids count up from 0xFF000000)
+    let oid: u64 = next_off[c as usize]
+    next_off[c as usize] = oid + 1
+    let slot: u64 = c * MO + (of_rr[c as usize] % MO)
+    of_rr[c as usize] = of_rr[c as usize] + 1
+    nq_push(c, oid, wlproto.IF_WL_DATA_OFFER)
+    of_id[slot as usize] = oid
+    of_kind[slot as usize] = sel_kind
+    of_sc[slot as usize] = sel_c
+    of_sk[slot as usize] = sel_k
+    of_seq[slot as usize] = sel_seq
+    l = wl_msg.begin(buf, l, dev, wlproto.EV_WL_DATA_DEVICE_DATA_OFFER)
+    wl_msg.arg(oid)
+    l = wl_msg.end()
+    if sel_kind == SEL_WL {
+        let si2: u64 = sel_c * MS + sel_k
+        of_sgen[slot as usize] = sr_gen[si2 as usize]
+        var m: u64 = 0
+        while m < sr_nm[si2 as usize] {
+            l = wl_msg.begin(buf, l, oid, wlproto.EV_WL_DATA_OFFER_OFFER)
+            wl_msg.text(mime_ptr(si2, m), sr_mlen[(si2 * MM + m) as usize])
+            l = wl_msg.end()
+            m = m + 1
+        }
+    } else {
+        var u8c: [u8; 25] = "text/plain;charset=utf-8\0"
+        var pl: [u8; 11] = "text/plain\0"
+        l = wl_msg.begin(buf, l, oid, wlproto.EV_WL_DATA_OFFER_OFFER)
+        wl_msg.text((&u8c[0 as usize]) as u64, 24)
+        l = wl_msg.end()
+        l = wl_msg.begin(buf, l, oid, wlproto.EV_WL_DATA_OFFER_OFFER)
+        wl_msg.text((&pl[0 as usize]) as u64, 10)
+        l = wl_msg.end()
+    }
+    l = wl_msg.begin(buf, l, dev, wlproto.EV_WL_DATA_DEVICE_SELECTION)
+    wl_msg.arg(oid)
+    l = wl_msg.end()
+    n_offers = n_offers + 1
+    return l
+}

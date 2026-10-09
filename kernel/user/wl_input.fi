@@ -1,0 +1,847 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wl_input.fi -- ROUND WAYLAND-INPUT: KEYBOARD AND POINTER for wayd.
+//
+// wayd.fi polls every window it made with WM_EVENT. What the window server says is translated HERE into Wayland events:
+//
+//   window server        Wayland
+//   E_FOCUS (gain)       wl_keyboard.enter + modifiers        (E_FOCUS lost: wl_keyboard.leave)
+//   E_KEY  c             [Shift/Ctrl/AltGr key + modifiers] key press, key release [... released, modifiers 0]
+//   E_MOVE x y           wl_pointer.enter (once) + motion + frame
+//   E_DOWN / E_UP x y b  wl_pointer.enter (once) + motion + button + frame
+//   pointer leaves the window (polled)   wl_pointer.leave + frame
+//
+// The window server delivers a CHARACTER ("A", "@", an arrow code, Ctrl+C as 3) and never a key release. A Wayland client wants an
+// evdev key code and the modifier state, and it reads both with the xkb keymap wayd sent it (wl_keyboard.keymap, a memfd sent with
+// SCM_RIGHTS). The reverse table character -> (key, modifiers) is GENERATED from the same libxkbcommon that compiles that keymap
+// (tools/wayland/genkeys.py -> wl_keytab.fi), for the layouts us and de; which one is in force is the kernel's keyboard layout
+// (SYS_OSUM_KBD), and a layout switch makes wayd send every keyboard a new keymap.
+//
+// Serials: every enter / key / button / modifiers event carries a fresh serial. The clipboard (wl_data.fi) accepts a set_selection
+// only with a serial this module handed to THAT client after its latest keyboard enter -- `serial_ok`.
+//
+// WHAT THE WINDOW SERVER DOES NOT GIVE, and so does not come: key RELEASES (they are made up right after the press), the Shift/Ctrl
+// state of a key that is held, and wheel events (there are none in the window server: no axis events).
+profile kernel
+
+import ulib
+import libc.kcall
+import wlproto
+import wl_msg
+import wl_keytab
+
+export {
+    MAXC, serial_next, client_init, seat_bound, keyboard_new, pointer_new, keyboard_gone, pointer_gone,
+    keymap_fd, keymap_msg, keymap_msg_len, layout_now, layout_changed, keyboard_ready, sync_focus,
+    on_focus, on_key, esc_flush, on_ptr, ptr_check, surf_drop, serial_ok, has_focus, last_serial, keymap_ptr,
+    n_keys_sent, n_ptr_sent, n_enters, n_leaves,
+}
+
+const MAXC: u64 = 4
+const MAXS: u64 = 8 // surfaces tracked per client
+
+// evdev codes of the modifier keys
+const KEY_LEFTSHIFT: u64 = 42
+const KEY_LEFTCTRL: u64 = 29
+const KEY_RIGHTALT: u64 = 100
+const KEY_LEFTALT: u64 = 56
+
+const SYS_OSUM_KBD: u64 = 1703
+const SYS_SYSINFO_TICKS: u64 = 0
+
+static mut i_serial: u64 = 100
+static mut i_kbd: [u64; 4] = [0 as u64; 4]
+static mut i_ptr: [u64; 4] = [0 as u64; 4]
+static mut i_ver: [u64; 4] = [0 as u64; 4]
+static mut i_enter: [u64; 4] = [0 as u64; 4] // serial of the latest keyboard enter
+static mut i_last: [u64; 4] = [0 as u64; 4] // serial of the latest event handed to this client
+static mut i_need: [u64; 4] = [0 as u64; 4] // UTF-8 continuation octets still to come
+static mut i_acc: [u64; 4] = [0 as u64; 4]
+// The window server sends the special keys the way a terminal does: ESC [ A (an arrow), ESC [ 3 ~ (Delete), ESC [ 20 ~ (F9),
+// ESC [ 1 ; 2 A (Shift+Up) -- one octet after the other, each its own E_KEY. They are put together here.
+static mut i_esc: [u64; 4] = [0 as u64; 4] // 0 normal, 1 an ESC was seen, 2 inside ESC [ ...
+static mut i_esc_t: [u64; 4] = [0 as u64; 4]
+static mut i_esc_sid: [u64; 4] = [0 as u64; 4]
+static mut i_np: [u64; 4] = [0 as u64; 4]
+static mut i_p: [u64; 8] = [0 as u64; 8] // two parameters per client
+static mut s_id: [u64; 32] = [0 as u64; 32] // surface ids (MAXC * MAXS)
+static mut s_foc: [u64; 32] = [0 as u64; 32] // 1: the window server says the window has the focus
+static mut s_kent: [u64; 32] = [0 as u64; 32] // 1: keyboard.enter was sent
+static mut s_pin: [u64; 32] = [0 as u64; 32] // 1: pointer.enter was sent
+static mut n_keys_sent: u64 = 0
+static mut n_ptr_sent: u64 = 0
+static mut n_enters: u64 = 0
+static mut n_leaves: u64 = 0
+
+fn serial_next() -> u64 {
+    i_serial = i_serial + 1
+    return i_serial
+}
+
+fn ms_now() -> u64 {
+    return (ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) * 10) & 0xFFFFFFFF
+}
+
+fn client_init(c: u64) {
+    i_kbd[c as usize] = 0
+    i_ptr[c as usize] = 0
+    i_ver[c as usize] = 1
+    i_enter[c as usize] = 0
+    i_last[c as usize] = 0
+    i_need[c as usize] = 0
+    i_acc[c as usize] = 0
+    i_esc[c as usize] = 0
+    var k: u64 = 0
+    while k < MAXS {
+        let i: u64 = c * MAXS + k
+        s_id[i as usize] = 0
+        s_foc[i as usize] = 0
+        s_kent[i as usize] = 0
+        s_pin[i as usize] = 0
+        k = k + 1
+    }
+}
+
+fn seat_bound(c: u64, ver: u64) {
+    i_ver[c as usize] = ver
+}
+
+fn keyboard_new(c: u64, id: u64) {
+    i_kbd[c as usize] = id
+    var k: u64 = 0
+    while k < MAXS {
+        s_kent[(c * MAXS + k) as usize] = 0
+        k = k + 1
+    }
+}
+
+fn pointer_new(c: u64, id: u64) {
+    i_ptr[c as usize] = id
+    var k: u64 = 0
+    while k < MAXS {
+        s_pin[(c * MAXS + k) as usize] = 0
+        k = k + 1
+    }
+}
+
+fn keyboard_gone(c: u64) {
+    i_kbd[c as usize] = 0
+}
+
+fn pointer_gone(c: u64) {
+    i_ptr[c as usize] = 0
+}
+
+// The slot of a surface (allocated on first sight), MAXS = none left.
+fn slot_of(c: u64, sid: u64) -> u64 {
+    var free: u64 = MAXS
+    var k: u64 = 0
+    while k < MAXS {
+        let v: u64 = s_id[(c * MAXS + k) as usize]
+        if v == sid {
+            return k
+        }
+        if v == 0 && free >= MAXS {
+            free = k
+        }
+        k = k + 1
+    }
+    if free < MAXS {
+        let i: u64 = c * MAXS + free
+        s_id[i as usize] = sid
+        s_foc[i as usize] = 0
+        s_kent[i as usize] = 0
+        s_pin[i as usize] = 0
+    }
+    return free
+}
+
+fn surf_drop(c: u64, sid: u64) {
+    var k: u64 = 0
+    while k < MAXS {
+        let i: u64 = c * MAXS + k
+        if s_id[i as usize] == sid {
+            s_id[i as usize] = 0
+            s_foc[i as usize] = 0
+            s_kent[i as usize] = 0
+            s_pin[i as usize] = 0
+        }
+        k = k + 1
+    }
+}
+
+// Has any surface of this client the keyboard focus (enter sent)?
+fn has_focus(c: u64) -> bool {
+    var k: u64 = 0
+    while k < MAXS {
+        let i: u64 = c * MAXS + k
+        if s_id[i as usize] != 0 && s_kent[i as usize] != 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn last_serial(c: u64) -> u64 {
+    return i_last[c as usize]
+}
+
+// A serial this client may use for set_selection: one we gave it since its latest keyboard enter, and it holds the focus.
+fn serial_ok(c: u64, serial: u64) -> bool {
+    if serial == 0 || !has_focus(c) {
+        return false
+    }
+    return serial >= i_enter[c as usize] && serial <= i_last[c as usize]
+}
+
+// ======================================================= THE KEYMAP
+
+// The message wl_keyboard.keymap lives here until wayd has sent it WITH its file descriptor.
+static mut km_msg: [u8; 32] = [0 as u8; 32]
+static mut km_msg_len: u64 = 0
+
+static mut km_fd: [u64; 2] = [0 as u64; 2]
+static mut km_none: u64 = 0 // a one octet memfd for `no_keymap` (the protocol always carries a descriptor)
+static mut km_size: [u64; 2] = [0 as u64; 2]
+static mut km_tried: [u64; 2] = [0 as u64; 2]
+static mut sw_seen: u64 = 0
+static mut lay_seen: u64 = 0
+
+fn layout_now() -> u64 {
+    let l: u64 = ulib.sys(SYS_OSUM_KBD, 0, 0, 0)
+    if l == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Did the keyboard layout change since the last time this was asked?
+fn layout_changed() -> bool {
+    let sw: u64 = ulib.sys(SYS_OSUM_KBD, 3, 0, 0)
+    if ulib.failed(sw) {
+        return false
+    }
+    if sw != sw_seen {
+        sw_seen = sw
+        return true
+    }
+    return false
+}
+
+// The memfd holding the keymap text of a layout (file /usr/share/wayd/keymap-<us|de>.xkb, packaged next to wayd), or 0.
+fn keymap_load(lay: u64) -> u64 {
+    var pus: [u8; 33] = "/usr/share/wayd/keymap-us.xkb\0\0\0\0"
+    var pde: [u8; 33] = "/usr/share/wayd/keymap-de.xkb\0\0\0\0"
+    var nm: [u8; 5] = "xkb\0\0"
+    var path: u64 = (&pus[0 as usize]) as u64
+    if lay == 1 {
+        path = (&pde[0 as usize]) as u64
+    }
+    let src: u64 = ulib.sys(2, path, 0, 0) // open, read only
+    if ulib.failed(src) {
+        return 0
+    }
+    let size: u64 = ulib.sys(8, src, 0, 2) // lseek to the end
+    if ulib.failed(size) || size == 0 || size > 1048576 {
+        ulib.sys(3, src, 0, 0)
+        return 0
+    }
+    ulib.sys(8, src, 0, 0)
+    let mfd: u64 = ulib.sys(319, (&nm[0 as usize]) as u64, 0, 0) // memfd_create
+    if ulib.failed(mfd) {
+        ulib.sys(3, src, 0, 0)
+        return 0
+    }
+    // one octet more than the text: the closing zero the protocol counts in the size (the memfd is zero filled)
+    ulib.sys(77, mfd, size + 1, 0) // ftruncate
+    let addr: u64 = kcall.map_fd(size + 1, 3, 1, mfd, 0) // PROT_READ|WRITE, MAP_SHARED
+    if addr == 0 || addr > 0xFFFFFFFFFFFF0000 {
+        ulib.sys(3, src, 0, 0)
+        ulib.sys(3, mfd, 0, 0)
+        return 0
+    }
+    var got: u64 = 0
+    var go: bool = true
+    while go && got < size {
+        let n: u64 = ulib.sys(0, src, addr + got, size - got)
+        if ulib.failed(n) || n == 0 {
+            go = false
+        } else {
+            got = got + n
+        }
+    }
+    ulib.sys(3, src, 0, 0)
+    ulib.sys(11, addr, size + 1, 0) // munmap
+    if got != size {
+        ulib.sys(3, mfd, 0, 0)
+        return 0
+    }
+    km_size[lay as usize] = size + 1
+    return mfd
+}
+
+// The keymap descriptor for the layout in force (loaded once per layout); 0 when the file is not in the image -- then wayd
+// says wl_keyboard.keymap format no_keymap and the client reads raw key codes.
+fn keymap_fd() -> u64 {
+    let lay: u64 = layout_now()
+    lay_seen = lay
+    if km_fd[lay as usize] == 0 && km_tried[lay as usize] == 0 {
+        km_tried[lay as usize] = 1
+        km_fd[lay as usize] = keymap_load(lay)
+    }
+    if km_fd[lay as usize] != 0 {
+        return km_fd[lay as usize]
+    }
+    if km_none == 0 {
+        var nm: [u8; 5] = "nok\0\0"
+        let m: u64 = ulib.sys(319, (&nm[0 as usize]) as u64, 0, 0)
+        if !ulib.failed(m) {
+            ulib.sys(77, m, 1, 0)
+            km_none = m
+        }
+    }
+    return km_none
+}
+
+fn keymap_ptr() -> u64 {
+    return (&km_msg[0 as usize]) as u64
+}
+
+fn keymap_msg_len() -> u64 {
+    return km_msg_len
+}
+
+// Builds wl_keyboard.keymap(format, fd, size) for client c into km_msg and returns its length. format 1 = xkb_v1, 0 = no_keymap.
+fn keymap_msg(c: u64) -> u64 {
+    let fd: u64 = keymap_fd()
+    var fmt: u64 = 1
+    var size: u64 = km_size[lay_seen as usize]
+    if km_fd[lay_seen as usize] == 0 {
+        fmt = 0
+        size = 1
+    }
+    let base: u64 = (&km_msg[0 as usize]) as u64
+    wl_msg.begin(base, 0, i_kbd[c as usize], 0)
+    wl_msg.arg(fmt)
+    wl_msg.arg(size)
+    km_msg_len = wl_msg.end()
+    return km_msg_len
+}
+
+// ================================================= KEYBOARD EVENTS
+
+fn kb_enter(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let kb: u64 = i_kbd[c as usize]
+    let s: u64 = serial_next()
+    l = wl_msg.begin(buf, l, kb, wlproto.EV_WL_KEYBOARD_ENTER)
+    wl_msg.arg(s)
+    wl_msg.arg(sid)
+    wl_msg.arr0()
+    l = wl_msg.end()
+    i_enter[c as usize] = s
+    i_last[c as usize] = s
+    l = kb_mods(c, buf, l, 0)
+    n_enters = n_enters + 1
+    return l
+}
+
+fn kb_leave(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let s: u64 = serial_next()
+    l = wl_msg.begin(buf, l, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_LEAVE)
+    wl_msg.arg(s)
+    wl_msg.arg(sid)
+    l = wl_msg.end()
+    i_last[c as usize] = s
+    n_leaves = n_leaves + 1
+    return l
+}
+
+fn kb_mods(c: u64, buf: u64, len: u64, mask: u64) -> u64 {
+    let s: u64 = serial_next()
+    var l: u64 = wl_msg.begin(buf, len, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_MODIFIERS)
+    wl_msg.arg(s)
+    wl_msg.arg(mask)
+    wl_msg.arg(0)
+    wl_msg.arg(0)
+    wl_msg.arg(0)
+    l = wl_msg.end()
+    i_last[c as usize] = s
+    return l
+}
+
+fn kb_key(c: u64, buf: u64, len: u64, code: u64, pressed: u64) -> u64 {
+    let s: u64 = serial_next()
+    var l: u64 = wl_msg.begin(buf, len, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_KEY)
+    wl_msg.arg(s)
+    wl_msg.arg(ms_now())
+    wl_msg.arg(code)
+    wl_msg.arg(pressed)
+    l = wl_msg.end()
+    i_last[c as usize] = s
+    n_keys_sent = n_keys_sent + 1
+    return l
+}
+
+// repeat_info (seat version 4 and up): the client repeats keys itself. 25 per second after 400 ms is what compositors say.
+fn keyboard_ready(c: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    if i_ver[c as usize] >= 4 {
+        l = wl_msg.begin(buf, l, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_REPEAT_INFO)
+        wl_msg.arg(25)
+        wl_msg.arg(400)
+        l = wl_msg.end()
+    }
+    return l
+}
+
+// The window server says the focus is gone / is here.
+fn on_focus(c: u64, sid: u64, gained: bool, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let k: u64 = slot_of(c, sid)
+    if k >= MAXS {
+        return l
+    }
+    let i: u64 = c * MAXS + k
+    if gained {
+        s_foc[i as usize] = 1
+        if i_kbd[c as usize] != 0 && s_kent[i as usize] == 0 {
+            // a surface of this client that still holds the focus is left first: a client has one keyboard focus
+            var q: u64 = 0
+            while q < MAXS {
+                let j: u64 = c * MAXS + q
+                if j != i && s_id[j as usize] != 0 && s_kent[j as usize] != 0 {
+                    l = kb_leave(c, s_id[j as usize], buf, l)
+                    s_kent[j as usize] = 0
+                }
+                q = q + 1
+            }
+            l = kb_enter(c, sid, buf, l)
+            s_kent[i as usize] = 1
+        }
+    } else {
+        s_foc[i as usize] = 0
+        if i_kbd[c as usize] != 0 && s_kent[i as usize] != 0 {
+            l = kb_leave(c, sid, buf, l)
+            s_kent[i as usize] = 0
+        }
+    }
+    return l
+}
+
+// After get_keyboard: a window that has the focus right now gets its enter.
+fn sync_focus(c: u64, sid: u64, win: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    if i_kbd[c as usize] == 0 || win == 0 {
+        return l
+    }
+    let f: u64 = ulib.sys(2104, win, 8, 0) // WM_INFO, WI_FOCUS
+    if f == 1 {
+        l = on_focus(c, sid, true, buf, l)
+    }
+    return l
+}
+
+// ---------------------------------------------------- characters -> keys
+
+// OrientOS key code (the window server's E_KEY value) -> evdev code | modifiers << 16 (1 shift, 2 ctrl, 4 altgr). 0 = none.
+fn evdev_of(cp: u64) -> u64 {
+    var abc: [u8; 26] = [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+        49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44]
+    // the keys of the window server that are no characters
+    if cp == 13 || cp == 10 {
+        return 28
+    }
+    if cp == 9 {
+        return 15
+    }
+    if cp == 8 || cp == 127 {
+        return 14
+    }
+    if cp == 27 {
+        return 1
+    }
+    if cp == 14 {
+        return 103 // the window server's plain Up arrow (Ctrl+N comes as ESC [ 31 ; 5 ~)
+    }
+    if cp >= 1 && cp <= 26 {
+        return (abc[(cp - 1) as usize] as u64) | (2 << 16)
+    }
+    if cp == 0x101 {
+        return 103
+    }
+    if cp == 0x102 {
+        return 108
+    }
+    if cp == 0x103 {
+        return 105
+    }
+    if cp == 0x104 {
+        return 106
+    }
+    if cp == 0x105 {
+        return 102
+    }
+    if cp == 0x106 {
+        return 107
+    }
+    if cp == 0x107 {
+        return 104
+    }
+    if cp == 0x108 {
+        return 109
+    }
+    if cp == 0x109 {
+        return 111
+    }
+    if cp >= 0x110 && cp <= 0x119 {
+        return cp - 0x110 + 59 // F1 .. F10
+    }
+    if cp < 32 {
+        return 0
+    }
+    if layout_now() == 1 {
+        return wl_keytab.de_find(cp)
+    }
+    return wl_keytab.us_find(cp)
+}
+
+fn xkb_mask(mods: u64) -> u64 {
+    var m: u64 = 0
+    if (mods & 1) != 0 {
+        m = m | wl_keytab.XKB_MOD_SHIFT
+    }
+    if (mods & 2) != 0 {
+        m = m | wl_keytab.XKB_MOD_CTRL
+    }
+    if (mods & 4) != 0 {
+        m = m | wl_keytab.XKB_MOD_ALTGR
+    }
+    if (mods & 8) != 0 {
+        m = m | wl_keytab.XKB_MOD_ALT
+    }
+    return m
+}
+
+// One key of the window server. Octets 0x80..0xFF are UTF-8 (the umlauts of the de layout) and come one after the other.
+fn on_key(c: u64, sid: u64, ch: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    if i_kbd[c as usize] == 0 {
+        return l
+    }
+    var cp: u64 = ch
+    if ch >= 0x80 && ch <= 0xFF {
+        if ch >= 0xC0 && ch <= 0xF7 {
+            // lead octet: 110xxxxx one more, 1110xxxx two more, 11110xxx three more
+            var need: u64 = 1
+            var first: u64 = ch & 0x1F
+            if ch >= 0xF0 {
+                need = 3
+                first = ch & 0x07
+            } else if ch >= 0xE0 {
+                need = 2
+                first = ch & 0x0F
+            }
+            i_need[c as usize] = need
+            i_acc[c as usize] = first
+            return l
+        }
+        if i_need[c as usize] != 0 {
+            i_acc[c as usize] = (i_acc[c as usize] << 6) | (ch & 0x3F)
+            i_need[c as usize] = i_need[c as usize] - 1
+            if i_need[c as usize] != 0 {
+                return l
+            }
+            cp = i_acc[c as usize]
+        } else {
+            return l
+        }
+    }
+    // octets of an escape sequence are collected first
+    if cp < 0x80 {
+        let st: u64 = i_esc[c as usize]
+        if st == 1 {
+            if cp == 91 {
+                i_esc[c as usize] = 2
+                i_np[c as usize] = 0
+                i_p[(c * 2) as usize] = 0
+                i_p[(c * 2 + 1) as usize] = 0
+                i_esc_t[c as usize] = ticks_now()
+                return l
+            }
+            // a lone ESC followed by another key: the Escape key, then that key
+            i_esc[c as usize] = 0
+            l = emit_key(c, sid, 1, buf, l)
+        } else if st == 2 {
+            if cp >= 48 && cp <= 57 {
+                let q: u64 = c * 2 + i_np[c as usize]
+                i_p[q as usize] = i_p[q as usize] * 10 + (cp - 48)
+                return l
+            }
+            if cp == 59 {
+                if i_np[c as usize] < 1 {
+                    i_np[c as usize] = i_np[c as usize] + 1
+                }
+                return l
+            }
+            i_esc[c as usize] = 0
+            if cp >= 0x40 && cp <= 0x7E {
+                let ek: u64 = csi_key(cp, i_p[(c * 2) as usize], i_p[(c * 2 + 1) as usize], i_np[c as usize])
+                if ek != 0 {
+                    l = emit_key(c, sid, ek, buf, l)
+                }
+            }
+            return l
+        }
+        if cp == 27 {
+            i_esc[c as usize] = 1
+            i_esc_t[c as usize] = ticks_now()
+            i_esc_sid[c as usize] = sid
+            return l
+        }
+    }
+    let e: u64 = evdev_of(cp)
+    if e == 0 {
+        return l
+    }
+    return emit_key(c, sid, e, buf, l)
+}
+
+fn ticks_now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+// An ESC that nothing followed within 50 ms is the Escape key; a sequence that never ended is dropped. Called every round.
+fn esc_flush(c: u64, buf: u64, len: u64) -> u64 {
+    let st: u64 = i_esc[c as usize]
+    if st == 0 {
+        return len
+    }
+    let age: u64 = ticks_now() - i_esc_t[c as usize]
+    if st == 1 && age >= 5 {
+        i_esc[c as usize] = 0
+        return emit_key(c, i_esc_sid[c as usize], 1, buf, len)
+    }
+    if st == 2 && age >= 20 {
+        i_esc[c as usize] = 0
+    }
+    return len
+}
+
+// ESC [ <p1> ; <p2> <final>  ->  evdev code | modifiers << 16 (xterm's modifier parameter: 1 + shift 1 + alt 2 + ctrl 4)
+fn csi_key(final: u64, p1: u64, p2: u64, np: u64) -> u64 {
+    var mods: u64 = 0
+    if np >= 1 && p2 >= 2 {
+        let m: u64 = p2 - 1
+        if (m & 1) != 0 {
+            mods = mods | 1
+        }
+        if (m & 2) != 0 {
+            mods = mods | 8
+        }
+        if (m & 4) != 0 {
+            mods = mods | 2
+        }
+    }
+    var code: u64 = 0
+    if final == 65 {
+        code = 103 // Up
+    } else if final == 66 {
+        code = 108 // Down
+    } else if final == 67 {
+        code = 106 // Right
+    } else if final == 68 {
+        code = 105 // Left
+    } else if final == 72 {
+        code = 102 // Home
+    } else if final == 70 {
+        code = 107 // End
+    } else if final == 90 {
+        code = 15 // Shift+Tab
+        mods = mods | 1
+    } else if final == 126 {
+        if p1 == 1 {
+            code = 102
+        } else if p1 == 2 {
+            code = 110 // Insert
+        } else if p1 == 3 {
+            code = 111 // Delete
+        } else if p1 == 4 {
+            code = 107
+        } else if p1 == 5 {
+            code = 104 // Page Up
+        } else if p1 == 6 {
+            code = 109 // Page Down
+        } else if p1 >= 11 && p1 <= 15 {
+            code = p1 - 11 + 59 // F1 .. F5
+        } else if p1 >= 17 && p1 <= 21 {
+            code = p1 - 17 + 64 // F6 .. F10
+        } else if p1 == 23 {
+            code = 87
+        } else if p1 == 24 {
+            code = 88
+        } else if p1 == 30 {
+            code = 35 // Ctrl+H (the kernel keeps Backspace for 8)
+        } else if p1 == 31 {
+            code = 49 // Ctrl+N (14 is the Up arrow)
+        } else if p1 == 27 {
+            code = 28 // Alt+Enter
+        }
+    }
+    if code == 0 {
+        return 0
+    }
+    return code | (mods << 16)
+}
+
+// One key (code | modifiers << 16) as the press and release a keyboard would make, with the modifier keys around it.
+fn emit_key(c: u64, sid: u64, e: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    if i_kbd[c as usize] == 0 {
+        return l
+    }
+    // A key before any focus event (the window was focused before get_keyboard): enter first, as a compositor would.
+    let k: u64 = slot_of(c, sid)
+    if k < MAXS && s_kent[(c * MAXS + k) as usize] == 0 {
+        l = kb_enter(c, sid, buf, l)
+        s_kent[(c * MAXS + k) as usize] = 1
+    }
+    let code: u64 = e & 0xFFFF
+    let mods: u64 = e >> 16
+    var mask: u64 = 0
+    if (mods & 1) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTSHIFT, 1)
+        mask = mask | xkb_mask(1)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 2) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTCTRL, 1)
+        mask = mask | xkb_mask(2)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 8) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTALT, 1)
+        mask = mask | xkb_mask(8)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 4) != 0 {
+        l = kb_key(c, buf, l, KEY_RIGHTALT, 1)
+        mask = mask | xkb_mask(4)
+        l = kb_mods(c, buf, l, mask)
+    }
+    l = kb_key(c, buf, l, code, 1)
+    l = kb_key(c, buf, l, code, 0)
+    if (mods & 4) != 0 {
+        l = kb_key(c, buf, l, KEY_RIGHTALT, 0)
+        mask = mask & ~xkb_mask(4)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 8) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTALT, 0)
+        mask = mask & ~xkb_mask(8)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 2) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTCTRL, 0)
+        mask = mask & ~xkb_mask(2)
+        l = kb_mods(c, buf, l, mask)
+    }
+    if (mods & 1) != 0 {
+        l = kb_key(c, buf, l, KEY_LEFTSHIFT, 0)
+        mask = mask & ~xkb_mask(1)
+        l = kb_mods(c, buf, l, mask)
+    }
+    return l
+}
+
+// ================================================== POINTER EVENTS
+
+fn ptr_frame(c: u64, buf: u64, len: u64) -> u64 {
+    if i_ver[c as usize] < 5 {
+        return len
+    }
+    var l: u64 = wl_msg.begin(buf, len, i_ptr[c as usize], wlproto.EV_WL_POINTER_FRAME)
+    l = wl_msg.end()
+    return l
+}
+
+// typ: 2 = button pressed, 3 = button released, 4 = motion. x, y: window coordinates in pixels. btn: the button mask of the window server.
+fn on_ptr(c: u64, sid: u64, typ: u64, x: u64, y: u64, btn: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let pt: u64 = i_ptr[c as usize]
+    if pt == 0 {
+        return l
+    }
+    let k: u64 = slot_of(c, sid)
+    if k < MAXS && s_pin[(c * MAXS + k) as usize] == 0 {
+        let s: u64 = serial_next()
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_ENTER)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        wl_msg.arg(x * 256)
+        wl_msg.arg(y * 256)
+        l = wl_msg.end()
+        i_last[c as usize] = s
+        s_pin[(c * MAXS + k) as usize] = 1
+        n_enters = n_enters + 1
+    }
+    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_MOTION)
+    wl_msg.arg(ms_now())
+    wl_msg.arg(x * 256)
+    wl_msg.arg(y * 256)
+    l = wl_msg.end()
+    if typ == 2 || typ == 3 {
+        var code: u64 = 0x110 // BTN_LEFT
+        if (btn & 2) != 0 {
+            code = 0x111 // BTN_RIGHT
+        }
+        var st: u64 = 0
+        if typ == 2 {
+            st = 1
+        }
+        let s2: u64 = serial_next()
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_BUTTON)
+        wl_msg.arg(s2)
+        wl_msg.arg(ms_now())
+        wl_msg.arg(code)
+        wl_msg.arg(st)
+        l = wl_msg.end()
+        i_last[c as usize] = s2
+    }
+    l = ptr_frame(c, buf, l)
+    n_ptr_sent = n_ptr_sent + 1
+    return l
+}
+
+// Polled: is the pointer still over this window's content? If not, pointer.leave (the window server only reports motion INSIDE).
+fn ptr_check(c: u64, sid: u64, win: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let pt: u64 = i_ptr[c as usize]
+    if pt == 0 || win == 0 {
+        return l
+    }
+    let k: u64 = slot_of(c, sid)
+    if k >= MAXS || s_pin[(c * MAXS + k) as usize] == 0 {
+        return l
+    }
+    let mx: i64 = ulib.sys(1805, 2, 0, 0) as i64
+    let my: i64 = ulib.sys(1805, 3, 0, 0) as i64
+    let wx: i64 = (ulib.sys(2104, win, 2, 0) as i64) + (ulib.sys(2104, win, 16, 0) as i64)
+    let wy: i64 = (ulib.sys(2104, win, 3, 0) as i64) + (ulib.sys(2104, win, 17, 0) as i64)
+    let ww: i64 = ulib.sys(2104, win, 0, 0) as i64
+    let wh: i64 = ulib.sys(2104, win, 1, 0) as i64
+    if mx >= wx && mx < wx + ww && my >= wy && my < wy + wh {
+        return l
+    }
+    let s: u64 = serial_next()
+    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_LEAVE)
+    wl_msg.arg(s)
+    wl_msg.arg(sid)
+    l = wl_msg.end()
+    i_last[c as usize] = s
+    s_pin[(c * MAXS + k) as usize] = 0
+    n_leaves = n_leaves + 1
+    l = ptr_frame(c, buf, l)
+    return l
+}
