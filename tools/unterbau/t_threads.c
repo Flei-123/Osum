@@ -7,6 +7,8 @@
 #include <sched.h>
 #include <sys/syscall.h>
 #include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 static void *ret_arg(void *a) { return (void *)((long)a * 2); }
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -44,6 +46,9 @@ static pthread_barrier_t bar;
 static void *bar_thr(void *a) { (void)a; return (void *)(long)pthread_barrier_wait(&bar); }
 static pthread_once_t once = PTHREAD_ONCE_INIT; static int once_n; static void once_f(void) { once_n++; }
 static void *once_thr(void *a) { (void)a; pthread_once(&once, once_f); return 0; }
+
+static volatile int g_fd = -1, g_go, g_res;
+static void *fdshare_thr(void *a) { (void)a; while (!g_go) usleep(2000); struct stat sb; g_res = fstat(g_fd, &sb) == 0 ? 1 : 2; return 0; }
 
 int main(void)
 {
@@ -120,6 +125,13 @@ int main(void)
     long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
     CHECK("cond_timedwait_times_out", w == ETIMEDOUT && ms >= 40 && ms < 1000, "ret %d after %ld ms", w, ms);
     CHECK("sched_yield", sched_yield() == 0, "sched_yield failed");
+    /* POSIX: all threads of a process share ONE descriptor table. A thread started BEFORE an open() must see the new descriptor. */
+    pthread_create(&t[0], 0, fdshare_thr, 0);
+    usleep(30000);
+    g_fd = open("/etc/passwd", O_RDONLY);
+    g_go = 1;
+    pthread_join(t[0], 0);
+    CHECK("fd_table_shared_between_threads", g_fd >= 0 && g_res == 1, "a descriptor opened after the thread started is not valid in the thread (each task has its own copy)");
     CHECK("pthread_self_equal", pthread_equal(pthread_self(), pthread_self()), "");
     return 0;
 }
