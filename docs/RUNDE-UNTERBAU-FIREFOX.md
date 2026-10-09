@@ -4,7 +4,17 @@ Zweig `unterbau`, Grundlage `main` = 553ef06c (09.10.2026). Teil A der Wayland-F
 OrientOS**. Diese Runde baut keinen Browser; sie misst, was ein Programm dieser Größe unter der Haube braucht, behebt die billigsten
 Lücken und schreibt die ehrliche Restliste hin.
 
-@@KURZ@@
+## 0. Kurzfassung
+
+* **`tools/dynlader/run.sh` über `heavy`: 36 bestanden, 0 gescheitert** (die Aufgabe nannte 28; seit der Runde kamen Paket-/Modularitätsabschnitte dazu).
+* **`dlopen` einer fremden `.so` aus einer Datei läuft** (`t_dl` 18 von 18; vorher `No such device`), und **`mprotect` wirkt wirklich** (Wächterseiten, W^X, `PROT_NONE`; `mmap` beachtet `prot`).
+* **Gemessen: 315 Prüfungen in 10 echten C-Programmen. Kernel von `main` vorher: 144 ok / 73 FAIL / 62 GAP (279 erreicht — Abstürze verdecken den Rest). Jetzt: 249 ok / 26 FAIL / 40 GAP.**
+* Behoben in dieser Runde (je mit Abnahme und Gegenprobe, Kap. 3): `mprotect`/`mmap`-Rechte, `mmap(fd)`, `MAP_FIXED`, Leichen von Fäden (nach ~30 Fäden ging `pthread_create` nie wieder),
+  `posix_spawn`/`system`/`popen` (`vfork`), `execve`-Umgebung, `FD_CLOEXEC`, `siginfo`/`ucontext`, `tkill` (`raise`), `futex`-Fristen, `nanosleep`, `read`/`write` auf Dateien > 4096 Oktette,
+  Stapelpuffer in Systemaufrufen, `wait4`-Signalstatus, `select`/`ppoll`/`pselect6`, `socketpair`, `read`/`write` auf lokalen Sockets, `getrlimit`/`sysinfo`/`sched_getaffinity`/`madvise`/`mremap`/`pipe2`/`dup3`/`prctl` u. a., `/proc/*/maps|status|meminfo`.
+* **Gates auf dem Stand der Runde** (alle über `heavy`): dynlader 36/0, wm 110/0, k15 259/0, a11y 58/0, alltag 45/0, wayland 45/0, lockseal 43/0, unix 107/0, posix 149/1 (die eine Rote ist **auf `main` schon rot**: drei eigene Systemaufruf-Nummern fehlen in `lib/libc/kcall.fi`), foreign (statisch, `hello`/`threads`/`forktest`/`locktest`) 4/4.
+* **Was Firefox NICHT startet, steht in Kap. 5.1: Adressraum ~198 MiB, kein Nachladen bei Bedarf, 16 Deskriptoren je Prozess / 64 offene Dateien / 32 Aufgaben, Rohr 512 Oktette, Stapel ~500 KiB.** Das sind Layoutfragen des Kerns, keine fehlenden Aufrufe — und die größte Arbeit der nächsten Runden.
+
 
 ---
 
@@ -150,7 +160,19 @@ also trägt eine Abbildung KEINEN Dateinamen. `status` hat `Threads:`, `VmRSS:`,
 
 ## 4. Die Messung
 
-@@MESSUNG@@
+| Programm | Kernel von `main` (ok / FAIL / GAP) | jetzt | Rest |
+|---|---|---|---|
+| `t_dl` | 1 / 4 / 0 | **18 / 0 / 0** | — |
+| `t_mem` | 19 / 11 / 10 | **44 / 1 / 3** | `MAP_SHARED` auf Datei (`ENODEV`), Reservierungen 256 MiB/1 GiB (Adressraum), `pread` > 4096 |
+| `t_threads` | 11 / 3 / 0 | **20 / 1 / 0** | Deskriptortabelle je Faden kopiert |
+| `t_proc` | 12 / 9 / 0 | **19 / 2 / 0** | `system()`/`popen()`: `/bin/sh` ist die Osum-Shell (kein POSIX-`-c`), mit busybox als `/bin/sh` zu prüfen |
+| `t_signals` | 7 / 14 / 2 | **16 / 5 / 2** | `setitimer` (damit `alarm`), `sigsuspend`, `sigaltstack`, `SIGCHLD`-Auto-Abräumen |
+| `t_events` | 8 / 5 / 9 | **21 / 1 / 7** | `epoll`, `eventfd`, `timerfd`, `signalfd`, `inotify`, `socketpair(DGRAM)`, `recv` auf lokalem Socket |
+| `t_misc` | 42 / 10 / 16 | **61 / 6 / 3** | `ftruncate` auf Dateien, `flock`, `dup3` > 15, `posix_fallocate`, `prctl(PR_GET_NAME)`, `RLIMIT_NOFILE` 16 |
+| `t_procfs` | 33 / 9 / 25 | **38 / 4 / 25** | Pfade/Dateien fehlen im Abbild (Kap. 5.3), `cpuinfo`-Felder, `/sys` |
+| `t_malloc` | 11 / 0 / 0 | **11 / 0 / 0** | — (siehe 5.4) |
+| `t_limits` | 0 / 8 / 0 | **1 / 6 / 0** | die Tabellengrößen, Kap. 5.1 |
+
 
 Alle Zeilen, die auf BEIDEN Kernen bestehen, sind nicht aufgeführt; der Anhang A hat sie. Wichtig fürs Lesen:
 
@@ -203,7 +225,16 @@ Nutzen: **0** ohne das startet nichts, **1** ohne das geht es nur eingeschränkt
 
 ### 5.4 Was die Messung NICHT erklärt hat — die ehrliche Restliste
 
-@@OFFEN@@
+* **`t_malloc` ist ein ungeklärter Befund.** In den ersten Läufen (OFS-v2-Abbild, frühere Testfassung) schlug `mt_stress_integrity` auf `main` UND auf dem frühen Zweig-Kernel mit Tausenden von `NULL`/Verfälschungen je Faden an,
+  ebenso `realloc` von 5 → 9 MiB und 50 000 kleine Blöcke. Im Endlauf (v3-Abbild, Testfassung mit Diagnose-Prüfungen davor) besteht alles — **auch auf `main`**. Was den Unterschied macht (Abbildformat, Reihenfolge der
+  Prüfungen, die Speicherlage nach den Diagnose-Läufen), wurde nicht eingegrenzt; die Prüfungen stehen in `accept.txt` und fangen es, falls es wiederkommt. Auf Linux besteht alles.
+* **Nicht gemessen** (hier gab es keinen Browser, und die Prüfungen sind Stellvertreter): die Startzeit von `libxul` (Kopie statt Nachladen), Grafik/Audio (kein GPU-Treiber, `dmabuf`), Netz-Sandbox, die
+  Last von hundert Fäden (der Kern hat 32 Aufgaben), `fork` großer Prozesse. Der Dynamik-Lader selbst wurde nur mit `hello`, busybox und den `libub*`-Bibliotheken geprüft, nicht mit einer Bibliothek von 100 MiB.
+* **Sicherheit:** das Entziehen eines Rechts (`mprotect` auf `PROT_NONE`/`PROT_READ`) wirkt auf einem ANDEREN Kern erst beim nächsten Kontextwechsel (Kap. 3.1); die Tabellengrenzen (Kap. 5.1)
+  schützen den Kern vor einem Prozess, der sie ausreizt — sie zu heben heißt, `kdata` neu zu zeichnen und die Gegenproben (`nobigmem`, `norights`, ...) mitzunehmen.
+* **Billig und als nächstes zu tun** (jeweils eine kleine Änderung, die diese Runde bewusst nicht mehr angefasst hat, um die Gates auf einem festen Stand zu fahren): `recvfrom`/`sendto` auf lokalen Sockets
+  (`recv` auf einem `socketpair`), `pread`/`pwrite` ohne 4096er-Kappung, `setitimer`/`getitimer` (musls `alarm()` ruft `setitimer`), `sigsuspend`, `/proc/self/exe`, `cpuinfo`-Felder.
+
 
 ---
 
@@ -213,4 +244,235 @@ Nutzen: **0** ohne das startet nichts, **1** ohne das geht es nur eingeschränkt
     /root/jarvis/bin/heavy bash tools/unterbau/run.sh                       # alle Programme auf dem Kernel dieses Baums
     OLDK=<Kernel von main> /root/jarvis/bin/heavy bash tools/unterbau/run.sh # + Gegenproben (fixed.txt)
     REGEN=1 OLDK=<Kernel von main> ... run.sh                                # accept.txt / fixed.txt neu schreiben
+
+---
+
+## Anhang A — alle Prüfungen, die sich geändert haben oder nicht bestehen
+
+Erzeugt mit `tools/unterbau/report.py` aus zwei Läufen derselben Programme: Kernel von `main` (553ef06c) und Kernel dieses Zweigs.
+Eine Zeile mit `-` in der Spalte „main" heißt: dort wurde die Prüfung nie erreicht (ein früherer Absturz oder Hänger).
+
+### `t_dl` -- main: 1 ok / 4 FAIL / 0 GAP, now: 18 ok / 0 FAIL / 0 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| open1 | FAIL | ok |  |
+| sym_add | - | ok |  |
+| call_add | - | ok |  |
+| ctor | - | ok |  |
+| reloc_ptr | - | ok |  |
+| bss_zero_and_rw | - | ok |  |
+| data_rw | - | ok |  |
+| libc_in_lib | - | ok |  |
+| dladdr | - | ok |  |
+| iterate_phdr | - | ok |  |
+| open2_needed | FAIL | ok |  |
+| call_across | - | ok |  |
+| open3_tls | FAIL | ok |  |
+| tls_main | - | ok |  |
+| tls_per_thread | - | ok |  |
+| close | - | ok |  |
+| reopen | FAIL | ok |  |
+
+### `t_events` -- main: 8 ok / 5 FAIL / 9 GAP, now: 21 ok / 1 FAIL / 7 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| pipe_cloexec | FAIL | ok |  |
+| pipe_o_nonblock_flag | FAIL | ok |  |
+| select_ready_pipe | FAIL | ok |  |
+| epoll_create1 | GAP | GAP | errno=38 Function not implemented |
+| eventfd | GAP | GAP | errno=38 Function not implemented |
+| timerfd_create | GAP | GAP | errno=38 Function not implemented |
+| signalfd | GAP | GAP | errno=38 Function not implemented |
+| socketpair_stream | GAP | ok |  |
+| socketpair_roundtrip | - | ok |  |
+| socketpair_recv | - | FAIL | recv -> -1 |
+| scm_rights_sendmsg | - | ok |  |
+| scm_rights_recvmsg | - | ok |  |
+| scm_rights_fd_works | - | ok |  |
+| socket_poll_empty | - | ok |  |
+| socket_peer_close_seen | - | ok |  |
+| socketpair_dgram | GAP | GAP | errno=93 Protocol not supported |
+| unix_stream_data | FAIL | ok |  |
+| unix_client_exit | FAIL | ok |  |
+| tcp_socket | GAP | GAP | errno=19 No such device |
+| inotify_init | GAP | GAP | errno=38 Function not implemented |
+| ppoll | GAP | ok |  |
+
+### `t_limits` -- main: 0 ok / 8 FAIL / 0 GAP, now: 1 ok / 6 FAIL / 0 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| fds_per_process | FAIL | FAIL | 13 descriptors open at once (errno 24); a browser wants >= 256 |
+| threads_at_once | FAIL | FAIL | 28 threads alive at once (errno 24); a browser wants >= 64 |
+| processes_at_once | FAIL | ok | 28 processes alive at once; a browser wants >= 16 |
+| committed_mib | FAIL | FAIL | 185 MiB of anonymous memory in 1 MiB maps; a browser wants >= 256 MiB of address space |
+| reserved_mib | FAIL | FAIL | 0 MiB of PROT_NONE reservations; JS engines and allocators reserve GiB |
+| stack_depth_4k_frames | FAIL | FAIL | recursion depth 100 x 4 KB (400 KB of stack) before the stack ended; a browser wants 8 MiB |
+| pipe_capacity | FAIL | FAIL | 512 bytes fit into a pipe before the writer must wait; Linux: 65536 |
+| file_8mib_write | FAIL | - |  |
+
+### `t_malloc` -- main: 11 ok / 0 FAIL / 0 GAP, now: 11 ok / 0 FAIL / 0 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+
+### `t_mem` -- main: 19 ok / 11 FAIL / 10 GAP, now: 44 ok / 1 FAIL / 3 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| mprotect_ro_write_faults | FAIL | ok |  |
+| mprotect_none_read_faults | FAIL | ok |  |
+| mprotect_none_write_faults | FAIL | ok |  |
+| read_into_none_is_efault | FAIL | ok |  |
+| reserve_none_really_none | FAIL | ok |  |
+| reserve_guard_holds | FAIL | ok |  |
+| jit_rx_runs | FAIL | ok |  |
+| jit_rx_write_faults | FAIL | ok |  |
+| fixed_address | FAIL | ok |  |
+| fixed_replaces_zeroed | - | ok |  |
+| tmpfile_write_full | FAIL | ok |  |
+| tmpfile_pread_full | FAIL | FAIL | pread returned 4096, content matches as far as it goes |
+| mmap_file_private | GAP | ok |  |
+| mmap_file_contents | - | ok |  |
+| mmap_file_tail_zero | - | ok |  |
+| mmap_file_ro_write_faults | - | ok |  |
+| mmap_file_offset | GAP | ok |  |
+| mmap_file_offset_contents | - | ok |  |
+| mmap_private_cow | - | ok |  |
+| mmap_file_shared | GAP | GAP | errno=19 No such device |
+| madvise_dontneed_call | GAP | ok |  |
+| madvise_dontneed_zeroes | - | ok |  |
+| madvise_free_call | GAP | ok |  |
+| madvise_nohuge_call | GAP | ok |  |
+| mremap_grow | GAP | ok |  |
+| mremap_grown_usable | - | ok |  |
+| mlock_call | GAP | ok |  |
+| reserve_256M | GAP | GAP | mmap failed errno=12 |
+| reserve_1G | GAP | GAP | mmap failed errno=12 |
+
+### `t_misc` -- main: 42 ok / 10 FAIL / 16 GAP, now: 61 ok / 6 FAIL / 3 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| sched_getaffinity | GAP | ok |  |
+| affinity_has_a_cpu | - | ok |  |
+| sysconf_phys_pages | FAIL | ok |  |
+| sched_setaffinity | GAP | ok |  |
+| prctl_get_name | FAIL | FAIL | errno=22 Invalid argument |
+| prctl_no_new_privs | FAIL | ok |  |
+| prctl_pdeathsig | FAIL | ok |  |
+| prctl_seccomp_mode_query | FAIL | ok |  |
+| getrusage | GAP | ok |  |
+| getrlimit_nofile | GAP | ok |  |
+| rlimit_nofile_sane | - | FAIL | RLIMIT_NOFILE soft 16 |
+| getrlimit_stack | GAP | ok |  |
+| getrlimit_as | GAP | ok |  |
+| setrlimit_nofile | GAP | ok |  |
+| sysinfo | GAP | ok |  |
+| fdatasync | GAP | ok |  |
+| ftruncate | FAIL | FAIL | errno=22 Invalid argument |
+| ftruncate_size | FAIL | FAIL | size 10 |
+| flock | GAP | GAP | errno=38 Function not implemented |
+| dup3 | FAIL | FAIL | errno=9 Bad file descriptor |
+| posix_fallocate | FAIL | FAIL | errno=0 No error information |
+| set_robust_list | GAP | ok |  |
+| getpriority | GAP | ok |  |
+| nice | GAP | ok |  |
+| sched_getscheduler | GAP | GAP | errno=38 Function not implemented |
+| sched_getparam | GAP | GAP | errno=38 Function not implemented |
+| sched_get_priority_max | GAP | ok |  |
+| realpath | FAIL | ok |  |
+
+### `t_proc` -- main: 12 ok / 9 FAIL / 0 GAP, now: 19 ok / 2 FAIL / 0 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| exec_args_env_stdout | FAIL | ok |  |
+| posix_spawn_returns_before_child_ends | FAIL | ok |  |
+| wait_wnohang_running | FAIL | ok |  |
+| spawn_sleeper_exit_code | FAIL | ok |  |
+| posix_spawn_exit_code | FAIL | ok |  |
+| system_exit_status | FAIL | FAIL | errno=0 No error information |
+| popen | FAIL | FAIL | got '' |
+| kill_child_sigkill | FAIL | ok |  |
+| child_segv_reported | FAIL | ok |  |
+
+### `t_procfs` -- main: 33 ok / 9 FAIL / 25 GAP, now: 38 ok / 4 FAIL / 25 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| self_maps_has_lines | FAIL | ok |  |
+| self_maps_names_libc | FAIL | FAIL | libc not named in maps |
+| self_maps_stack_or_heap_named | FAIL | ok |  |
+| self_status_pid_threads | FAIL | ok |  |
+| self_status_vm | FAIL | ok |  |
+| self_exe_readlink | GAP | GAP | errno=2 No such file or directory |
+| cpuinfo_model_name | FAIL | FAIL | no model name |
+| cpuinfo_flags_sse2 | FAIL | FAIL | no flags with sse2 (feature detection by text) |
+| meminfo_memavailable | FAIL | ok |  |
+| proc_loadavg | GAP | GAP | errno=2 No such file or directory |
+| self_limits | GAP | GAP | errno=2 No such file or directory |
+| self_cgroup | GAP | GAP | errno=2 No such file or directory |
+| random_uuid | GAP | GAP | errno=2 No such file or directory |
+| sysctl_overcommit | GAP | GAP | errno=2 No such file or directory |
+| sysctl_pid_max | GAP | GAP | errno=2 No such file or directory |
+| sys_cpu_online | GAP | GAP | errno=2 No such file or directory |
+| sys_cpu_possible | GAP | GAP | errno=2 No such file or directory |
+| sys_cpu_cache | GAP | GAP | errno=2 No such file or directory |
+| sys_drm | GAP | GAP | errno=2 No such file or directory |
+| path_dev_shm | GAP | GAP | stat(/dev/shm): errno 2 |
+| path_etc_ssl | GAP | GAP | stat(/etc/ssl): errno 2 |
+| path_etc_ssl_certs | GAP | GAP | stat(/etc/ssl/certs): errno 2 |
+| path_etc_resolv_conf | GAP | GAP | stat(/etc/resolv.conf): errno 2 |
+| path_etc_localtime | GAP | GAP | stat(/etc/localtime): errno 2 |
+| path_fontconfig | GAP | GAP | stat(/etc/fonts/fonts.conf): errno 2 |
+| path_fonts | GAP | GAP | stat(/usr/share/fonts): errno 2 |
+| path_zoneinfo | GAP | GAP | stat(/usr/share/zoneinfo): errno 2 |
+| path_dev_pts | GAP | GAP | stat(/dev/pts): errno 2 |
+| path_dev_dri | GAP | GAP | stat(/dev/dri): errno 2 |
+| path_usr_lib | GAP | GAP | stat(/usr/lib): errno 2 |
+| path_machine_id | GAP | GAP | stat(/etc/machine-id): errno 2 |
+| shm_create | FAIL | FAIL | errno=1 Operation not permitted |
+| statfs_tmp | GAP | GAP | errno=38 Function not implemented |
+| statfs_root | GAP | GAP | errno=38 Function not implemented |
+
+### `t_signals` -- main: 7 ok / 14 FAIL / 2 GAP, now: 16 ok / 5 FAIL / 2 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| raise_handler_runs | FAIL | ok |  |
+| blocked_signal_pending | FAIL | ok |  |
+| unblock_delivers | FAIL | ok |  |
+| siginfo_delivered | FAIL | ok |  |
+| siginfo_si_code_tkill | FAIL | ok |  |
+| sigsegv_siginfo_given | FAIL | ok |  |
+| sigsegv_si_addr | FAIL | ok |  |
+| sigsegv_si_code | FAIL | ok |  |
+| sigaltstack | GAP | GAP | errno=38 Function not implemented |
+| alarm_fires | FAIL | FAIL | no SIGALRM within 2 s |
+| setitimer | GAP | GAP | errno=38 Function not implemented |
+| setitimer_fires | FAIL | FAIL | no SIGALRM from setitimer |
+| signal_interrupts_nanosleep | FAIL | FAIL | r=0 errno=0 got=0 |
+| sigsuspend | FAIL | FAIL | r=-1 errno=38 got=0 |
+| sigchld_ign_autoreap | FAIL | FAIL | child not auto-reaped (w=6) |
+| sigterm_default_kills | FAIL | ok |  |
+
+### `t_threads` -- main: 11 ok / 3 FAIL / 0 GAP, now: 20 ok / 1 FAIL / 0 GAP
+
+| check | main | now | what the run said |
+|---|---|---|---|
+| churn_64_threads | FAIL | ok |  |
+| 24_threads_at_once | FAIL | ok |  |
+| big_stack_create | FAIL | ok |  |
+| big_stack_use | - | ok |  |
+| barrier | - | ok |  |
+| once | - | ok |  |
+| cond_timedwait_times_out | - | ok |  |
+| sched_yield | - | ok |  |
+| fd_table_shared_between_threads | - | FAIL | a descriptor opened after the thread started is not valid in the thread (each task has its own copy) |
+| pthread_self_equal | - | ok |  |
+
+Total now: 249 ok, 26 FAIL, 40 GAP (checks that pass on both kernels are not listed)
 
