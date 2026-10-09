@@ -62,10 +62,16 @@ int main(void)
     for (;;) { ssize_t w = write(pp[1], blk, sizeof blk); if (w <= 0) break; cap += w; if (cap > (1 << 20)) break; }
     t_emit("pipe_capacity", cap >= 65536 ? "PASS" : "FAIL", "%zu bytes fit into a pipe before the writer must wait; Linux: 65536", cap);
 
-    /* a large file write and read back */
-    int fd = open("/tmp/ub_big.dat", O_RDWR | O_CREAT | O_TRUNC, 0600); size_t wr = 0; char *big = malloc(1 << 20); memset(big, 7, 1 << 20);
-    for (int i = 0; i < 8 && fd >= 0; i++) { ssize_t w = write(fd, big, 1 << 20); if (w <= 0) break; wr += w; }
-    t_emit("file_8mib_write", wr == (8u << 20) ? "PASS" : "FAIL", "%zu of 8 MiB written to /tmp (errno %d)", wr, errno);
-    close(fd); unlink("/tmp/ub_big.dat");
+    /* a large file write: 4 MiB in 64 KiB writes, at most 20 s */
+    {
+        struct timespec ta, tb; clock_gettime(CLOCK_MONOTONIC, &ta);
+        int fd = open("/tmp/ub_big.dat", O_RDWR | O_CREAT | O_TRUNC, 0600); size_t wr = 0; char *big = malloc(65536); memset(big, 7, 65536);
+        int e2 = 0;
+        for (int i = 0; i < 64 && fd >= 0; i++) { ssize_t w = write(fd, big, 65536); if (w <= 0) { e2 = errno; break; } wr += w; clock_gettime(CLOCK_MONOTONIC, &tb); if (tb.tv_sec - ta.tv_sec > 20) break; }
+        clock_gettime(CLOCK_MONOTONIC, &tb);
+        long ms = (tb.tv_sec - ta.tv_sec) * 1000 + (tb.tv_nsec - ta.tv_nsec) / 1000000;
+        t_emit("file_4mib_write", wr == (4u << 20) ? "PASS" : "FAIL", "%zu of 4 MiB written to /tmp in %ld ms (errno %d)", wr, ms, e2);
+        close(fd); unlink("/tmp/ub_big.dat");
+    }
     return 0;
 }

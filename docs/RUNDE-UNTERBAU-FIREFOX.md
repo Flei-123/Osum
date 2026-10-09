@@ -146,3 +146,71 @@ mit `O_NONBLOCK` bei Rohr-Lesen und -Schreiben, und `read`/`write` auf einem lok
 große Arena fehlten) mit den Rechten wie sie sind (`rwxp`, `---p` für `PROT_NONE`), `[stack]` und `[heap]`; eine eigene Liste der Abbildungen (VMA) gibt es nicht,
 also trägt eine Abbildung KEINEN Dateinamen. `status` hat `Threads:`, `VmRSS:`, `VmSize:`; `meminfo` hat `MemAvailable:`.
 
+---
+
+## 4. Die Messung
+
+@@MESSUNG@@
+
+Alle Zeilen, die auf BEIDEN Kernen bestehen, sind nicht aufgeführt; der Anhang A hat sie. Wichtig fürs Lesen:
+
+* **`GAP`** heißt: der Aufruf oder die Datei FEHLT (`ENOSYS`, `ENOENT`, `ENODEV`). **`FAIL`** heißt: der Aufruf ist da und antwortet falsch — oder die Tabelle ist
+  kleiner, als ein Browser sie braucht (`t_limits`): auch das ist ein Messwert und kein Fehler im Aufruf.
+* Der **Fehlschlag auf dem alten Kernel** ist die Gegenprobe: dort bestehen diese Prüfungen nicht, hier schon.
+
+---
+
+## 5. Die Lücken, nach Aufwand und Nutzen — und was Firefox davon wirklich blockiert
+
+Reihenfolge = was zuerst fehlt, damit überhaupt ein Browser-Prozess startet. Aufwand: **S** ein Nachmittag, **M** eine Runde, **L** mehrere Runden / berührt das Kernlayout.
+Nutzen: **0** ohne das startet nichts, **1** ohne das geht es nur eingeschränkt, **2** Bequemlichkeit / Leistung.
+
+### 5.1 Strukturgrenzen des Kerns (alle mit Messwert aus `t_limits`)
+
+| Lücke | Messwert | Aufwand | Nutzen |
+|---|---|---|---|
+| **Adressraum ~198 MiB** je Prozess (`0x40000000`–`0x4C600000`, dazu 2-MiB-Kacheln des Rahmenpuffers); `0x50000000` MUSS der Lader ablehnen (`tools/osum`) | 185 MiB anonymer Speicher in 1-MiB-Stücken, **0 MiB** `PROT_NONE`-Reservierung (256 MiB scheitern). `libxul.so` allein ist über 100 MiB, JS-Engine und Allokator reservieren GiB. | **L** (PDPT/PML4 statt einem PD, anderes Zeiger-Layout, die Gate-Regel von `tools/osum` ändern) | **0** |
+| **Kein Nachladen bei Bedarf, kein Seitenpuffer**: `mmap` einer Datei liest sofort alles, `fork` kopiert JEDE Seite, `MAP_SHARED` auf Dateien nicht möglich | `dlopen` einer 10-MiB-Bibliothek kostet 10 MiB Kopie + Lesezeit; ein `fork` von 100 MiB kopiert 100 MiB | **L** (Seitenfehler-Pfad der Datei, Rahmenzähler, Kopie-beim-Schreiben) | **0** |
+| **Tabellen**: 32 Aufgaben, **16 Deskriptoren je Prozess**, **64 offene Dateien** für das ganze System, 32 lokale Sockets, 40 Speicherobjekte, **Rohr 512 Oktette**, 31 Signale | 13 Deskriptoren frei; 28 Fäden gleichzeitig; Rohr nimmt 512 Oktette statt 65536 | **L** (`kdata`-Layout: feste Offsets; jede Tabelle wandert mit) | **0** |
+| **Stapel ~500 KiB** (`0x40001000`–`0x4007F000`) | 100 Rahmen zu 4 KiB, dann Schluss; Linux: 8 MiB | **M** (Arena umlegen, `BRK_BASE` darüber) | **1** |
+| **Dateigröße**: ein `write` von 8 MiB nach `/tmp` bricht nach ~2 MiB mit `ENOSPC` ab (OFS v3-Abbild, 98304 Blöcke) | siehe `t_limits.file_8mib_write` | **M** | **1** |
+
+### 5.2 Fehlende Aufrufe — Ereignisse und IPC (Firefox: Chromium-IPC, glib-Hauptschleife, Netz)
+
+| Lücke | Aufwand | Nutzen |
+|---|---|---|
+| `epoll_create1/ctl/wait` — baut auf `poll_ready` und derselben Weckfolge wie `poll` auf; je Epoll-Objekt eine kalloc-Tabelle, neue Dateiart | **M** | **0** |
+| `eventfd2`, `timerfd_*`, `signalfd4` — kleine Dateiarten mit Zähler/Frist/Signalmaske, in `poll_ready` einzuhängen | **S–M** je | **0** (libevent, glib) |
+| `socketpair` für `AF_UNIX/SOCK_DGRAM`, `SOCK_SEQPACKET` (hier gibt es nur Ströme); `recvfrom`/`sendto` auf lokalen Sockets | **S** | **1** |
+| `inotify_*` | **M** (nur Dateimonitor) | **2** (Firefox fällt zurück) |
+| `AF_INET`-Socket im Testlauf `ENODEV` (nur mit dem Netz-Wort `bus` aufgebaut) — kein Kernproblem, der Testlauf bootet ohne Netz | — | — |
+| Signale: **`NSIG = 32`** (keine Echtzeitsignale: musl braucht 32/33 für `pthread_cancel`/`setuid`), **`sigaltstack`**, **`sigsuspend`**, **`setitimer`** (musls `alarm()` ruft `setitimer` — `alarm` geht deshalb NICHT), `SIG_IGN` auf `SIGCHLD` räumt Kinder nicht ab | **S–M** | **0–1** |
+| `futex` ohne Warteschlange: ein Wartender fragt alle 10 ms nach, `FUTEX_WAKE` weckt „niemanden" (zählt 0), kein `REQUEUE`/`WAKE_OP`/`PI` | **M** | **1** (Latenz und Leerlauflast mit vielen Fäden) |
+
+### 5.3 Prozesse und Dateien
+
+| Lücke | Aufwand | Nutzen |
+|---|---|---|
+| **Deskriptortabelle ist je Faden kopiert, nicht geteilt** (`CLONE_FILES` fehlt): ein Faden, der NACH dem Start eines anderen eine Datei öffnet, sieht der andere nicht (`t_threads.fd_table_shared_between_threads`) | **M** (Tabelle je Prozess statt je Aufgabe) | **0** |
+| `execve`: höchstens 8 Argumente, 16 Umgebungsvariablen / 3584 Oktette (Kernblock) — ein Browser startet Kinder mit mehr | **M** (Argumentseite umlegen: ABI der Osum-Programme!) | **1** |
+| Fäden und Prozesse: `PR_GET_NAME`/`PR_SET_NAME` ohne Namensfeld, `PR_SET_PDEATHSIG` ohne Wirkung | **S** | **2** |
+| Dateisystem: `ftruncate` nur auf Speicherobjekten, `symlink`/`readlink`/`utimensat` gehen nicht, `flock`, `statfs`, `posix_fallocate`; `/dev/shm`, `/dev/pts`, `/dev/dri` fehlen (`memfd_create` geht — Firefox nimmt es) | **M** (Dateisystem OFS) | **1** |
+| Dateien, die ins Abbild gehören (Paketfrage, nicht Kern): `/etc/ssl/certs`, `/etc/resolv.conf`, `/etc/localtime`, `/usr/share/zoneinfo`, `/usr/share/fonts`, `/etc/fonts/fonts.conf`, `/etc/machine-id` | **S** | **1** |
+| `/proc`: `maps` ohne Dateinamen (keine VMA-Liste), `cpuinfo` ohne `model name`/`flags`, `loadavg`, `self/exe`, `self/limits`, `/sys/devices/system/cpu/*`, `/proc/sys/*` | **S** je | **2** |
+| `mprotect` entzieht Rechte auf anderen Kernen erst beim nächsten Kontextwechsel (kein IPI-Verwerfen) | **M** | **1** (JIT-Sicherheit) |
+| `MAP_SHARED` auf einer regulären Datei: `-ENODEV` (kein Seitenpuffer) | **L** (mit 5.1) | **1** (SQLite-WAL, geteilte Dateien) |
+| `malloc` unter Fäden: siehe 5.4 | — | — |
+
+### 5.4 Was die Messung NICHT erklärt hat — die ehrliche Restliste
+
+@@OFFEN@@
+
+---
+
+## 6. Nachbauen
+
+    # Wirt braucht: musl-gcc, qemu-system-x86_64, python3 (Pillow nur für report)
+    /root/jarvis/bin/heavy bash tools/unterbau/run.sh                       # alle Programme auf dem Kernel dieses Baums
+    OLDK=<Kernel von main> /root/jarvis/bin/heavy bash tools/unterbau/run.sh # + Gegenproben (fixed.txt)
+    REGEN=1 OLDK=<Kernel von main> ... run.sh                                # accept.txt / fixed.txt neu schreiben
+
