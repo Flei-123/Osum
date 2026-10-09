@@ -195,7 +195,7 @@ Nutzen: **0** ohne das startet nichts, **1** ohne das geht es nur eingeschränkt
 | **Kein Nachladen bei Bedarf, kein Seitenpuffer**: `mmap` einer Datei liest sofort alles, `fork` kopiert JEDE Seite, `MAP_SHARED` auf Dateien nicht möglich | `dlopen` einer 10-MiB-Bibliothek kostet 10 MiB Kopie + Lesezeit; ein `fork` von 100 MiB kopiert 100 MiB | **L** (Seitenfehler-Pfad der Datei, Rahmenzähler, Kopie-beim-Schreiben) | **0** |
 | **Tabellen**: 32 Aufgaben, **16 Deskriptoren je Prozess**, **64 offene Dateien** für das ganze System, 32 lokale Sockets, 40 Speicherobjekte, **Rohr 512 Oktette**, 31 Signale | 13 Deskriptoren frei; 28 Fäden gleichzeitig; Rohr nimmt 512 Oktette statt 65536 | **L** (`kdata`-Layout: feste Offsets; jede Tabelle wandert mit) | **0** |
 | **Stapel ~500 KiB** (`0x40001000`–`0x4007F000`) | 100 Rahmen zu 4 KiB, dann Schluss; Linux: 8 MiB | **M** (Arena umlegen, `BRK_BASE` darüber) | **1** |
-| **Dateigröße**: ein `write` von 8 MiB nach `/tmp` bricht nach ~2 MiB mit `ENOSPC` ab (OFS v3-Abbild, 98304 Blöcke) | siehe `t_limits.file_8mib_write` | **M** | **1** |
+| **Dateischreiben ist sehr langsam**: 590 KiB (von 4 MiB) in 22,7 s nach `/tmp` (OFS v3, 64-KiB-`write`, die in 4096er Blöcke zerlegt werden) = ~26 KiB/s; ein früherer Lauf auf dem v2-Abbild brach nach ~2 MiB mit `ENOSPC` ab | `t_limits.file_4mib_write` | **M** (Schreibweg: ein Block je `write` mit Synchronisierung?) | **1** |
 
 ### 5.2 Fehlende Aufrufe — Ereignisse und IPC (Firefox: Chromium-IPC, glib-Hauptschleife, Netz)
 
