@@ -3717,6 +3717,11 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_SOCK {
         return sock_write(state, me, of, buf, len)
     }
+    // RUNDE UNTERBAU: `write` on a local socket (it was -EBADF: only sendmsg worked, so a program that talks to its peer with plain
+    // read/write -- most IPC code -- got nothing).
+    if kind == file.K_USOCK {
+        return usock_rw(state, me, of, buf, len, true)
+    }
     // ROUNDE K14: eine Datei auf einem eingehaengten Dateisystem.
     if kind == file.K_VFILE {
         return vfs_write(state, me, of, buf, len)
@@ -3787,6 +3792,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_SOCK {
         return sock_read(state, me, of, buf, len)
+    }
+    if kind == file.K_USOCK {
+        return usock_rw(state, me, of, buf, len, false)
     }
     if kind == file.K_DIR || kind == file.K_VDIR {
         return neg(errno.E_ISDIR)
@@ -16733,4 +16741,70 @@ fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool)
         }
     }
     return done
+}
+
+// read/write on a local (AF_UNIX) socket: the same ring as sendmsg/recvmsg, one buffer, no descriptors. O_NONBLOCK on the open file means
+// MSG_DONTWAIT. A closed peer reads as end of file (0) and writes -EPIPE.
+fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    let si: u64 = file.open_ino(state, of)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    let nonblock: bool = (file.open_flags(state, of) & UB_O_NONBLOCK) != 0
+    var n: u64 = len
+    if n > MSG_MAX {
+        n = MSG_MAX
+    }
+    if !proc.user_ok(state, me, buf, n) {
+        return neg(errno.E_FAULT)
+    }
+    if writing {
+        if unixsock.peer_gone(state, si) {
+            return neg(errno.E_PIPE)
+        }
+        var waitw: u64 = 0
+        var free: u64 = unixsock.room(state, unixsock.sock_peer(state, si))
+        while free == 0 {
+            if nonblock {
+                return neg(errno.E_AGAIN)
+            }
+            if waitw >= NET_ROUNDS || unixsock.peer_gone(state, si) {
+                return neg(errno.E_AGAIN)
+            }
+            waitw = waitw + 1
+            sched.sleep_ticks(state, 1)
+            free = unixsock.room(state, unixsock.sock_peer(state, si))
+        }
+        if n > free {
+            n = free
+        }
+        if !copy_in(state, me, state + WL_SCRATCH, buf, n) {
+            return neg(errno.E_FAULT)
+        }
+        let w: u64 = unixsock.send_bytes(state, si, WL_SCRATCH, n)
+        if errno.is_error(w) {
+            return neg(w)
+        }
+        sched.poll_kick(state)
+        return w
+    }
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) == 0 {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if nonblock || waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    let r: u64 = unixsock.recv_bytes(state, si, WL_SCRATCH, n)
+    if errno.is_error(r) {
+        return neg(r)
+    }
+    if r != 0 && !copy_out(state, me, buf, state + WL_SCRATCH, r) {
+        return neg(errno.E_FAULT)
+    }
+    return r
 }
