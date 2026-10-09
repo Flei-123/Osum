@@ -15,6 +15,7 @@ extern void blur_g_asm(u64 *p);
 extern void blur_s_asm(u64 *p);
 extern void blur_w_asm(u64 *p);
 extern void blur_x_asm(u64 *p);
+extern void xmm_check(void (*fn)(u64 *), u64 *blk, unsigned char *out, const unsigned char *pat);
 #define SHIFT 19
 #define RUND 262144ull
 static u64 rec[64];
@@ -84,7 +85,7 @@ int main(void) {
         ref_h(a, c, w, h, r); { u64 pp[16]; memcpy(pp, p, sizeof p); blur_h_asm(pp); }
         if (memcmp(b, c, w * h * 4)) { printf("FAIL h w=%lu h=%lu r=%lu\n", w, h, r); bad++; }
         /* r481: four rows at a time (block x), the rest through the scalar loop */
-        { memset(b, 0x5A, w * h * 4); u64 h4 = h & ~3ull; u64 pp[16] = {(u64)a, (u64)b, w, h4, r, (u64)rec, 0, 0, 0, 0};
+        { memset(b, 0x5A, w * h * 4); u64 h4 = h & ~3ull; u64 pp[48] = {(u64)a, (u64)b, w, h4, r, (u64)rec, 0, 0, 0, 0};
           blur_x_asm(pp);
           u64 p2[16] = {(u64)(a + h4 * w), (u64)(b + h4 * w), w, h - h4, r, (u64)rec, 0, 0}; blur_h_asm(p2);
           if (memcmp(b, c, w * h * 4)) { printf("FAIL x w=%lu h=%lu r=%lu\n", w, h, r); bad++; } }
@@ -93,7 +94,7 @@ int main(void) {
         if (memcmp(b, c, w * h * 4)) { printf("FAIL v w=%lu h=%lu r=%lu\n", w, h, r); bad++; }
         /* r481: the columns in groups of four (block w), the other columns through the scalar loop, same pitch */
         { memset(b, 0x5A, w * h * 4); memset(sum, 0xA5, 3 * 27520); u64 c4 = w & ~3ull;
-          u64 pp[16] = {(u64)a, (u64)b, c4, h, r, (u64)rec, (u64)sum, 0, 0, 0, 0, w};
+          u64 pp[48] = {(u64)a, (u64)b, c4, h, r, (u64)rec, (u64)sum, 0, 0, 0, 0, w};
           blur_w_asm(pp);
           u64 p2[16] = {(u64)(a + c4), (u64)(b + c4), w - c4, h, r, (u64)rec, (u64)(sum + c4), 0, 0, 0, 0, w}; blur_v_asm(p2);
           if (memcmp(b, c, w * h * 4)) { printf("FAIL w w=%lu h=%lu r=%lu\n", w, h, r); bad++; } }
@@ -105,7 +106,7 @@ int main(void) {
         u32 *a = malloc(n * 4), *b = malloc(n * 4);
         for (u64 i = 0; i < n; i++) a[i] = rnd32();
         if (t % 7 == 0) for (u64 i = 0; i < n; i++) a[i] = (i & 1) ? 0xFFFFFF : 0;
-        u64 p[24] = {(u64)a, (u64)b, n, x0, y * 19349663ull, amp, amp * 2 + 1, 100 - tint,
+        u64 p[64] = {(u64)a, (u64)b, n, x0, y * 19349663ull, amp, amp * 2 + 1, 100 - tint,
                      ((ton >> 16) & 255) * tint, ((ton >> 8) & 255) * tint, (ton & 255) * tint, 0};
         blur_g_asm(p);
         if (t % 3) blur_s_asm(p);   /* r481: four pixels at a time, the rest through the scalar loop */
@@ -132,6 +133,21 @@ int main(void) {
         }
         if (mbad) { printf("FAIL g: %ld of %ld\n", mbad, mn); bad++; }
         cases += mn;
+    }
+    /* r481: the routines hand the vector registers back as they found them (a user program may keep values there across a system call) */
+    {
+        unsigned char pat[256], out[256];
+        for (int k = 0; k < 256; k++) pat[k] = (unsigned char)(k * 7 + 3);
+        u64 w = 40, h = 12, r = 3;
+        u32 *a = malloc(w * h * 4), *b = malloc(w * h * 4); for (u64 i = 0; i < w * h; i++) a[i] = rnd32();
+        u64 *sum = malloc(3 * 27520);
+        u64 px[64] = {(u64)a, (u64)b, w, h, r, (u64)rec, 0, 0, 0, 0}; memset(out, 0, 256);
+        xmm_check(blur_x_asm, px, out, pat); if (memcmp(out, pat, 256)) { printf("FAIL xmm x\n"); bad++; }
+        u64 pw[64] = {(u64)a, (u64)b, w, h, r, (u64)rec, (u64)sum, 0, 0, 0, 0, w}; memset(out, 0, 256);
+        xmm_check(blur_w_asm, pw, out, pat); if (memcmp(out, pat, 256)) { printf("FAIL xmm w\n"); bad++; }
+        u64 ps[64] = {(u64)a, (u64)b, 20, 0, 77, 6, 13, 60, 2000, 2000, 2000, 0}; blur_g_asm(ps); memset(out, 0, 256);
+        xmm_check(blur_s_asm, ps, out, pat); if (memcmp(out, pat, 256)) { printf("FAIL xmm s\n"); bad++; }
+        free(a); free(b); free(sum); cases += 3;
     }
     /* r465: one row of the dragged window, against the Firn loop (division per pixel) */
     for (int t = 0; t < 2000; t++) {

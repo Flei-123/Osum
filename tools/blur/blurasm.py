@@ -458,15 +458,24 @@ def _hash(k):
          "movzx esi,si", "mov rax,0x0001000100010001", "imul rsi,rax", "mov [r11+%d],rsi" % (128 + 8 * k)]
     return L
 
+def _save(base):
+    # the caller's vector registers into the block (word base / 8 on; 256 octets): this kernel does not save them for a system call,
+    # and a user program may keep values in them. (firnc does not allow rsp in an asm block, so not on the stack.)
+    return ["movdqu [r11+%d],xmm%d" % (base + 16 * k, k) for k in range(16)]
+
+def _restore(base):
+    return ["movdqu xmm%d,[r11+%d]" % (k, base + 16 * k) for k in range(16)]
+
 def _s_body():
-    L = ["mov r11,rdi", "mov rax,[r11+16]", "shr rax,2", "jz 0f", "mov rdi,rax",
-         "mov r8,[r11]", "mov r9,[r11+8]", "mov r10,[r11+24]", "pxor xmm0,xmm0"]
-    L += ["mov rax,[r11+56]"] + _bcast("xmm1", "eax")                       # 100 - tint
+    # block: 0 src, 1 dst, 2 count (used up), 3 x, 4 y * 19349663, 5 amp, 6 d, 7 100 - tint, 8 / 9 / 10 tone red / green / blue * tint,
+    # 12 magic, 13 shift (from routine g), 15 irq, 16 - 19 the grain of four pixels. Words 0, 1, 2, 3 are advanced by 4 * (count / 4).
+    L = ["mov r11,rdi", "mov rax,[r11+16]", "shr rax,2", "jz 0f"] + _save(192) + ["mov rdi,rax", "mov r8,[r11]", "mov r9,[r11+8]", "mov r10,[r11+24]"]
+    L += _irq_on(15)
+    L += ["pxor xmm0,xmm0", "mov rax,[r11+56]"] + _bcast("xmm1", "eax")                       # 100 - tint
     L += ["mov rax,[r11+80]", "mov rcx,[r11+72]", "shl rcx,16", "or rax,rcx", "mov rcx,[r11+64]", "shl rcx,32", "or rax,rcx",
           "movq xmm2,rax", "punpcklqdq xmm2,xmm2"]                          # tone * tint: blue, green, red, 0 per pixel
     L += ["mov eax,5243"] + _bcast("xmm3", "eax")
     L += ["pcmpeqd xmm4,xmm4", "psrld xmm4,8"]                              # 0x00FFFFFF per pixel
-    L += _irq_on(15)
     L += ["mov rax,[r11+40]", "test rax,rax", "jz 3f", "1:"]
     for k in range(4):
         L += _hash(k)
@@ -476,6 +485,7 @@ def _s_body():
     L += simd + ["movdqu xmm8,[r11+128]", "movdqu xmm9,[r11+144]", "paddw xmm6,xmm8", "paddw xmm7,xmm9"] + tail + ["jnz 1b", "jmp 4f", "3:"]
     L += simd + tail + ["jnz 3b", "4:"]
     L += _irq_off(15)
+    L += _restore(192)
     L += ["mov [r11],r8", "mov [r11+8],r9", "mov [r11+24],r10", "mov rax,[r11+16]", "and rax,3", "mov [r11+16],rax", "0:"]
     return "\n".join(L) + "\n"
 
@@ -490,14 +500,14 @@ def _norm(src, dst, tmp):
             "paddw %s,%s" % (dst, tmp), "paddw %s,xmm10" % dst, "psrlw %s,3" % dst]
 
 def _consts():
+    # the constant registers; they are set again at the start of EVERY interrupt-free window (another task may use them in between)
     return (["pxor xmm15,xmm15", "mov eax,4"] + _bcast("xmm10", "eax") + ["pcmpeqd xmm11,xmm11", "psrld xmm11,8"])
 
 def _x_body():
     # block: 0 src, 1 dst, 2 w, 3 rows (a multiple of 4, used up), 4 r, 5 reciprocal table, 7 n, 8 last n, 9 irq
-    L = ["mov r11,rdi", "mov rax,[r11+24]", "shr rax,2", "jz 0f", "mov [r11+24],rax", "mov rax,[r11+16]", "test rax,rax", "jz 0f"]
-    L += _consts()
+    L = ["mov r11,rdi", "mov rax,[r11+24]", "shr rax,2", "jz 0f", "mov [r11+24],rax", "mov rax,[r11+16]", "test rax,rax", "jz 0f"] + _save(96)
     L += ["mov r8,[r11]", "mov r9,[r11+8]", "mov rcx,[r11+16]", "shl rcx,2", "lea rdx,[rcx+rcx*2]"]
-    L += ["1:"] + _irq_on(9)
+    L += ["1:"] + _irq_on(9) + _consts()
     L += ["pxor xmm0,xmm0", "pxor xmm1,xmm1", "xor eax,eax", "mov [r11+56],rax", "mov [r11+64],rax",
           "mov rsi,r8", "xor r10d,r10d",
           "2:", "cmp r10,[r11+16]", "jae 3f", "cmp r10,[r11+32]", "ja 3f"]
@@ -514,33 +524,33 @@ def _x_body():
     L += _load4("rsi") + ["psubw xmm0,xmm6", "psubw xmm1,xmm7", "dec qword ptr [r11+56]", "7:"]
     L += ["inc r10", "cmp r10,[r11+16]", "jb 4b"]
     L += _irq_off(9)
-    L += ["mov rax,rcx", "shl rax,2", "add r8,rax", "add r9,rax", "mov rax,[r11+24]", "dec rax", "mov [r11+24],rax", "jnz 1b", "0:"]
+    L += ["mov rax,rcx", "shl rax,2", "add r8,rax", "add r9,rax", "mov rax,[r11+24]", "dec rax", "mov [r11+24],rax", "jnz 1b"]
+    L += _restore(96) + ["0:"]
     return "\n".join(L) + "\n"
 
 def _w_body():
     # block: 0 src, 1 dst, 2 columns (a multiple of 4), 3 h, 4 r, 5 reciprocal table, 6 sum row (4 words of 16 bits per pixel:
     # blue, green, red, alpha), 7 y, 8 n, 10 irq, 11 pitch in pixels. The row of zeros BLUR_W_MAX * 8 octets further on.
-    L = ["mov r11,rdi", "mov rax,[r11+16]", "test rax,rax", "jz 0f", "mov rax,[r11+24]", "test rax,rax", "jz 0f"]
-    L += _consts()
+    L = ["mov r11,rdi", "mov rax,[r11+16]", "test rax,rax", "jz 0f", "mov rax,[r11+24]", "test rax,rax", "jz 0f"] + _save(96)
     L += ["mov r8,[r11+48]", "cld", "xor eax,eax", "mov rdi,r8", "mov rcx,[r11+16]", "rep stosq",
           "lea rdi,[r8+27520]", "mov rcx,[r11+16]", "rep stosq", "xor r10d,r10d", "xor r9d,r9d",
           "1:", "cmp r10,[r11+32]", "ja 4f", "cmp r10,[r11+24]", "jae 4f",
           "mov rsi,r10", "imul rsi,[r11+88]", "mov rax,[r11]", "lea rsi,[rax+rsi*4]"]
-    L += _irq_on(10)
+    L += _irq_on(10) + ["pxor xmm15,xmm15"]
     L += ["mov rax,r8", "mov rcx,[r11+16]", "shr rcx,2", "2:",
           "movdqu xmm4,[rsi]", "movdqa xmm5,xmm4", "punpcklbw xmm4,xmm15", "punpckhbw xmm5,xmm15",
           "movdqu xmm6,[rax]", "paddw xmm6,xmm4", "movdqu [rax],xmm6", "movdqu xmm7,[rax+16]", "paddw xmm7,xmm5", "movdqu [rax+16],xmm7",
           "add rsi,16", "add rax,32", "dec rcx", "jnz 2b"]
     L += _irq_off(10)
-    L += ["inc r9", "inc r10", "jmp 1b", "4:", "mov [r11+64],r9", "xor eax,eax", "mov [r11+56],rax",
-          "5:", "mov rax,[r11+40]", "mov rcx,[r11+64]", "mov rax,[rax+rcx*8]", "movzx ecx,ax"]
+    L += ["inc r9", "inc r10", "jmp 1b", "4:", "mov [r11+64],r9", "xor eax,eax", "mov [r11+56],rax", "5:"]
+    L += _irq_on(10) + _consts()
+    L += ["mov rax,[r11+40]", "mov rcx,[r11+64]", "mov rax,[rax+rcx*8]", "movzx ecx,ax"]
     L += _bcast("xmm8", "ecx") + ["shr eax,16"] + _bcast("xmm9", "eax")
     L += ["lea rsi,[r8+27520]", "mov rax,[r11+56]", "add rax,[r11+32]", "inc rax", "cmp rax,[r11+24]", "jae 6f",
           "imul rax,[r11+88]", "mov rsi,[r11]", "lea rsi,[rsi+rax*4]", "6:",
           "lea rdi,[r8+27520]", "mov rax,[r11+56]", "cmp rax,[r11+32]", "jb 7f", "sub rax,[r11+32]", "imul rax,[r11+88]",
-          "mov rdi,[r11]", "lea rdi,[rdi+rax*4]", "7:", "mov rdx,[r11+8]"]
-    L += _irq_on(10)
-    L += ["mov rax,r8", "mov rcx,[r11+16]", "shr rcx,2", "3:", "movdqu xmm0,[rax]", "movdqu xmm1,[rax+16]"]
+          "mov rdi,[r11]", "lea rdi,[rdi+rax*4]", "7:", "mov rdx,[r11+8]", "mov rax,r8", "mov rcx,[r11+16]", "shr rcx,2", "3:",
+          "movdqu xmm0,[rax]", "movdqu xmm1,[rax+16]"]
     L += _norm("xmm0", "xmm2", "xmm4") + _norm("xmm1", "xmm3", "xmm5")
     L += ["packuswb xmm2,xmm3", "pand xmm2,xmm11", "movdqu [rdx],xmm2",
           "movdqu xmm4,[rsi]", "movdqa xmm5,xmm4", "punpcklbw xmm4,xmm15", "punpckhbw xmm5,xmm15", "paddw xmm0,xmm4", "paddw xmm1,xmm5",
@@ -551,7 +561,8 @@ def _w_body():
           "mov rax,[r11+64]", "inc rax", "mov [r11+64],rax", "8:",
           "mov rax,[r11+56]", "cmp rax,[r11+32]", "jb 9f", "mov rax,[r11+64]", "dec rax", "mov [r11+64],rax", "9:",
           "mov rax,[r11+88]", "shl rax,2", "add [r11+8],rax", "mov rax,[r11+56]", "inc rax", "mov [r11+56],rax",
-          "cmp rax,[r11+24]", "jb 5b", "0:"]
+          "cmp rax,[r11+24]", "jb 5b"]
+    L += _restore(96) + ["0:"]
     return "\n".join(L) + "\n"
 
 S = _s_body()
@@ -597,6 +608,10 @@ def test():
         asm = ".intel_syntax noprefix\n"
         for n in "hvmdgswx":
             asm += ".globl blur_%s_asm\nblur_%s_asm:\npush r12\npush r13\npush r14\npush r15\n%s\npop r15\npop r14\npop r13\npop r12\nret\n" % (n, n, "\n".join(lines(BODIES[n])))
+        # r481: xmm_check(fn, block, out, pattern): load a pattern into xmm0 - xmm15, call fn(block), store the registers to out
+        asm += ".globl xmm_check\nxmm_check:\npush rbx\nmov rbx,rdx\nmov rax,rdi\nmov rdi,rsi\n"
+        asm += "".join("movdqu xmm%d,[rcx+%d]\n" % (k, 16 * k) for k in range(16))
+        asm += "call rax\n" + "".join("movdqu [rbx+%d],xmm%d\n" % (16 * k, k) for k in range(16)) + "pop rbx\nret\n"
         asm += ".att_syntax prefix\n"
         open(os.path.join(d, "a.S"), "w").write(asm)
         exe = os.path.join(d, "t")
