@@ -84,7 +84,7 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
         ld -T "$S/kernel/user/user.ld" --defsym=USER_ENTRY="_F1.u_start" -o "$O/p/$p.elf" "$O/crt.o" "$O/p/$p.o" 2>>"$O/p/$p.log" || return 1
         strip --strip-all "$O/p/$p.elf" 2>/dev/null
     done
-    local spec="/lib/ /bin/ /tmp/ /etc/ /var/ /var/tmp/ /dev/ /proc/ /sys/ /mnt/ /root/ /run/"
+    local spec="/lib/ /bin/ /tmp/ /etc/ /var/ /var/tmp/ /dev/ /proc/ /sys/ /mnt/ /root/ /run/ /w/"
     for p in $progs; do spec="$spec /bin/$p=$O/p/$p.elf"; done
     spec="$spec /lib/ld-musl-x86_64.so.1=$LDREAL"
     for f in "$D"/bin/*; do spec="$spec /bin/$(basename $f)=$f"; done
