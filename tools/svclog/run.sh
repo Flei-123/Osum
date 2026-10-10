@@ -13,6 +13,9 @@
 # the serial line (`termdump`: `wm: termzeile N [text]`).
 #   1. FIX      : the serial line carries the `fetch` output, the cells of the window do NOT.
 #   2. CONTROL  : boot word `svccon` (old behaviour): the same `fetch` text IS in the cells.
+#   3. FILE     : the same output ALSO lands in /var/log/ota.log (read back from the disk image with mkfs.py cat).
+#   4. ROTATION : boot word `svclogmax=300`: the file stays <= 300 octets, the older part is in ota.log.1.
+#   5. CONTROL  : boot word `svclogmax=0` (files off): no /var/log/ota.log at all, the serial line is unchanged.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -49,6 +52,40 @@ run con "svccon"
 S="$TMPD/con/serial.txt"
 cells "$TMPD/con" > "$TMPD/con.cells"
 n=$(grep -ac 'fetch:' "$TMPD/con.cells"); [ "$n" -gt 0 ] && ok "control: the terminal window shows $n 'fetch:' rows" || bad "control: no 'fetch:' row in the window (the test measures nothing)"
+
+fcat() { # $1 = run name, $2 = path in the image; prints the file (nothing when it does not exist)
+    # mkfs.py prints "no such path" on stdout and exits 1 for a missing file: that must read as an empty file
+    local f="$TMPD/fcat.$$"
+    if python3 tools/osum/mkfs.py cat "$TMPD/$1/disk.img" "$2" > "$f" 2> /dev/null; then tr -d '\000' < "$f"; fi
+    rm -f "$f"
+}
+
+echo "== 3. file (/var/log/ota.log) =="
+fcat fix /var/log/ota.log > "$TMPD/fix.ota.log"
+[ -s "$TMPD/fix.ota.log" ] && ok "/var/log/ota.log exists ($(stat -c%s "$TMPD/fix.ota.log") octets)" || bad "no /var/log/ota.log"
+n=$(grep -ac '^fetch:' "$TMPD/fix.ota.log"); [ "$n" -gt 0 ] && ok "the file holds the fetch lines ($n)" || bad "no fetch line in /var/log/ota.log"
+# every fetch line of the file must also be on the serial line (the file is a copy, not a different text)
+miss=0
+while IFS= read -r line; do
+    grep -aqF -- "$line" "$TMPD/fix/serial.txt" || miss=$((miss+1))
+done < <(grep -a '^fetch:' "$TMPD/fix.ota.log" | tr -d '\r' | sort -u | head -20)
+[ "$miss" = 0 ] && ok "file lines are on the serial line too (serial output kept)" || bad "$miss file line(s) missing on the serial line"
+grep -aq 'desk: svclog tty=' "$TMPD/fix/serial.txt" && ok "serial line still has the log terminal setup" || bad "serial lost the setup line"
+
+echo "== 4. rotation (svclogmax=300) =="
+run rot "svclogmax=300"
+fcat rot /var/log/ota.log > "$TMPD/rot.log"
+fcat rot /var/log/ota.log.1 > "$TMPD/rot.log.1"
+a=$(stat -c%s "$TMPD/rot.log"); b=$(stat -c%s "$TMPD/rot.log.1")
+[ "$a" -gt 0 ] && [ "$a" -le 300 ] && ok "ota.log is $a octets (limit 300)" || bad "ota.log is $a octets (limit 300)"
+[ "$b" -gt 0 ] && [ "$b" -le 300 ] && ok "ota.log.1 is $b octets (rotated, limit 300)" || bad "ota.log.1 is $b octets (expected 1..300)"
+grep -aq 'fetch:' "$TMPD/rot.log.1" && ok "the rotated file holds fetch lines" || bad "no fetch line in ota.log.1"
+
+echo "== 5. control (svclogmax=0 = files off) =="
+run off "svclogmax=0"
+fcat off /var/log/ota.log > "$TMPD/off.log"
+[ -s "$TMPD/off.log" ] && bad "files off, yet /var/log/ota.log has $(stat -c%s "$TMPD/off.log") octets (the test measures nothing)" || ok "files off: no /var/log/ota.log"
+F=$(grep -ac '^fetch:' "$TMPD/off/serial.txt"); [ "$F" -gt 0 ] && ok "files off: the serial line still carries fetch ($F lines)" || bad "files off: serial lost the fetch lines"
 
 echo "== $pass ok, $fail fail =="
 [ "$fail" = 0 ]
