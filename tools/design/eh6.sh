@@ -74,6 +74,9 @@ window_alpha=""
 # r486: `tafel=nein` leaves out the diagnostic board (it paints over the screen, a compositor judge compares the screen)
 tafel=ja
 extra=""
+# r5xx: `pins=terminal,explorer` writes the `pins=` key of /etc/taskbar.conf (the stick pins installer,explorer,terminal,settings)
+pins=""
+moreprogs=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
 # genau die beiden in Justins Befunden vorkommen.
@@ -103,9 +106,12 @@ for a in "$@"; do
         window_alpha=*) window_alpha=${a#*=} ;;
         tafel=*) tafel=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        pins=*) pins=${a#*=} ;;
+        moreprogs=*) moreprogs=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
+progs="$progs $moreprogs"
 XRES=${res%x*}
 YRES=${res#*x}
 SKAL=""
@@ -180,6 +186,7 @@ done
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
     > "$OUT/taskbar.conf"
+[ -n "$pins" ] && printf 'pins=%s\n' "$pins" >> "$OUT/taskbar.conf"
 {
   printf '# /etc/theme.conf\nscheme=%s\n' "$scheme"
   [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"
@@ -253,7 +260,13 @@ printf 'a,b,c\n1,2,3\n' > "$OUT/heim/tabelle.csv"
 ARGS+=("/users/justin/notizen.txt=$OUT/heim/notizen.txt@0644"
        "/users/justin/tabelle.csv=$OUT/heim/tabelle.csv@0644")
 rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$GEBAUT" 2>/dev/null || true)
+# like tools/usbimg/build.sh: with `term` built, the Terminal bundle opens a NEW window per start (/bin/term), not /bin/sh
+TERM_START=/bin/sh
+case " $GEBAUT " in *" term "*) TERM_START=/bin/term ;; esac
+while read -r z; do
+    [ "$z" = "/apps/terminal.osp/start@/bin/sh" ] && z="/apps/terminal.osp/start@$TERM_START"
+    ARGS+=("$z")
+done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$GEBAUT" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
