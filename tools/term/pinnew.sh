@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/term/pinnew.sh -- a pinned Terminal opens more windows (r529) and the error window (r530).
-# Start through /root/jarvis/bin/heavy. Boots the stick's machine WITH /bin/term, opens the pinned Terminal (left, middle, right click)
+# Start through /root/jarvis/bin/heavy. Boots the stick's machine WITH /bin/term, opens the pinned Terminal (left click, right-click menu)
 # and reads every window's cells from the serial line (`wm: termwin`, `wm: tw<slot> <row> [text]`).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
