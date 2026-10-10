@@ -46,10 +46,13 @@ def main(path):
         if not ok:
             bad += 1
 
-    def find(marker):
-        """the LAST snapshot in which `marker` stands in some window"""
+    def find(marker, first=False):
+        """the LAST snapshot in which `marker` stands in some window (`first`: the FIRST one -- the state
+        right after the line was typed, before later windows were opened or closed)"""
         hit = [x for x in sn if holders(x, marker)]
-        return hit[-1] if hit else None
+        if not hit:
+            return None
+        return hit[0] if first else hit[-1]
     print("%d snapshot(s)" % len(sn))
     if not sn:
         check(False, "no window dump on the serial line")
@@ -76,13 +79,13 @@ def main(path):
         check(ok and len(spots) >= 6, "new windows cascade (consecutive ones differ, >= 6 distinct spots): %s" % sorted(spots))
     # --- focus after a close, twice
     for mk, want in (("after-a", 8), ("after-b", 7)):
-        sx = find(mk)
+        sx = find(mk, first=True)
         h = holders(sx, mk) if sx else []
         check(sx is not None and len(sx) == want, "after the close %d windows are left (%s): saw %d" % (want, mk, len(sx) if sx else 0))
         check(len(h) == 1, "the line typed after the close (%s) reached exactly one window: %s" % (mk, h))
         if sx and p9:
             check(all(s in p9 for s in sx), "the survivors are windows that existed before (%s)" % mk)
-    s7 = find("after-b")
+    s7 = find("after-b", first=True)
     if s7:
         for mk in ("two-a", "three-a", "four-a", "five-a", "six-a", "seven-a"):
             check(len(holders(s7, mk)) == 1, "after two closes marker %s is still in one window" % mk)
@@ -97,7 +100,7 @@ def main(path):
     # --- openpty rounds
     txt = open(path, "rb").read().decode("latin1")
     m = re.findall(r"ptytest: ok=(\d+) fail=(\d+)", txt)
-    check(bool(m) and m[-1] == ("40", "0"), "ptytest: 40 openpty/close rounds without a failure: %s" % (m[-1] if m else "no line"))
+    check(bool(m) and m[-1] == ("40", "0"), "ptytest: 40 openpty/close rounds without a failure: %s" % (m[-1] if m else ("no line",),))
     return 0 if bad == 0 else 1
 
 
