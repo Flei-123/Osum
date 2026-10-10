@@ -3465,19 +3465,62 @@ fn wigapp_zerlegen(state: u64) {
 // nimmt.
 static mut log_open: u64 = 0
 
-fn protokoll_binden(state: u64, task: u64) {
-    if task == 0 {
-        return
+// ====================================== SERVICE LOG (r-svclog, 10.10.2026)
+// SERVICES KEEP THEIR LOG FOR THEIR CHILDREN; THE TERMINAL WINDOW GETS NOTHING.
+//
+// Dell photo: the terminal window showed `fetch: ...` lines all the time. Cause
+// (read in the code, `file.inherit_std`): `ota` is started by the desktop and has
+// the log terminal on fd 1/2 -- but whatever a service starts with `elf.spawn`
+// (`ota` -> `/bin/fetch` every 30 s while there is no network) gets the CONSOLE
+// entries instead, and the console is the terminal window (SINK_WINDOW).
+//
+// The swap in `inherit_std` is right for a `sh` started from the start menu. It is
+// wrong for a service. So services (dhcp, jarvisd, ota, sntp) get a SECOND log
+// terminal (same sink: the serial line): `inherit_std` only swaps the first one
+// (`kstate.LOGOPEN`), a descendant of a service therefore inherits the service log
+// unchanged -- fork, spawn and exec alike. Boot word `svccon` switches back to the
+// old behaviour (control sample).
+static mut svc_open: u64 = 0
+static mut jv_pid: u64 = 0
+static mut jv_born: u64 = 0
+static mut jv_next: u64 = 0
+static mut jv_wait: u64 = 500
+static mut jv_armed: u64 = 0
+static mut jv_dbg: u64 = 0
+static mut jv_killafter: u64 = 0
+static mut svc_mode: u64 = 0
+
+fn log_open_get(state: u64, svc: bool) -> u64 {
+    if svc {
+        if svc_open == 0 {
+            let t: u64 = tty.alloc_log(state)
+            if t >= tty.MAX_TTY {
+                return 0
+            }
+            let of: u64 = file.open_alloc(state, file.K_TTY, t, 1)
+            if of >= file.MAX_OPEN {
+                return 0
+            }
+            svc_open = of
+            var s_p: [u8; 18] = "desk: svclog tty=\0"
+            var s_o: [u8; 5] = " of=\0"
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(t)
+            serial.puts((&s_o[0]) as u64)
+            serial.dec(of)
+            serial.nl()
+        }
+        return svc_open
     }
     if log_open == 0 {
         let t: u64 = tty.alloc_log(state)
         if t >= tty.MAX_TTY {
-            return
+            return 0
         }
-        // 1 = O_WRONLY (sys.fi) -- `kgui` darf `sys` nicht einbinden.
+        // 1 = O_WRONLY (sys.fi) -- `kgui` must not import `sys`.
         let of: u64 = file.open_alloc(state, file.K_TTY, t, 1)
         if of >= file.MAX_OPEN {
-            return
+            return 0
         }
         log_open = of
         kstate.set(state, kstate.LOGOPEN, of)
@@ -3489,19 +3532,39 @@ fn protokoll_binden(state: u64, task: u64) {
         serial.dec(of)
         serial.nl()
     }
-    // Unter gesperrten Unterbrechungen: das Kind darf seine erste Zeile
-    // nicht schreiben, bevor sein fd 1 umgehaengt ist.
+    return log_open
+}
+
+fn protokoll_binden(state: u64, task: u64) {
+    if task == 0 {
+        return
+    }
+    let svc: bool = svc_mode != 0 && !kstate.mode_on(state, kstate.M_SVCCON)
+    let lo: u64 = log_open_get(state, svc)
+    if lo == 0 {
+        return
+    }
+    // With interrupts off: the child must not write its first line before its
+    // fd 1 is re-pointed.
     let fl: u64 = sched.irq_save()
     var fd: u64 = 1
     while fd < 3 {
-        file.open_ref(state, log_open)
+        file.open_ref(state, lo)
         file.fd_free(state, task, fd)
-        if !file.fd_set(state, task, fd, log_open) {
-            file.open_unref(state, log_open)
+        if !file.fd_set(state, task, fd, lo) {
+            file.open_unref(state, lo)
         }
         fd = fd + 1
     }
     sched.irq_restore(fl)
+}
+
+// Start a SERVICE of the desktop (log stays with the service and its children).
+fn desk_spawn_svc(state: u64, pfad: u64, arg: u64, n: u64, argc: u64) -> u64 {
+    svc_mode = 1
+    let pid: u64 = desk_spawn_n(state, pfad, arg, n, argc)
+    svc_mode = 0
+    return pid
 }
 
 // ====================================================== RUNDE BLECH2
@@ -3591,6 +3654,29 @@ fn parse(state: u64, cmd: u64) {
             return
         }
         i2 = i2 + 1
+    }
+    // `jvkill=<ticks>`: test hook of the respawn test -- kill `jarvisd` that many ticks after each start.
+    var w3: [u8; 8] = "jvkill=\0"
+    var i3: u64 = 0
+    while i3 < 4096 && kstate.get8(cmd + i3) != 0 {
+        var k3: u64 = 0
+        while k3 < 7 && kstate.get8(cmd + i3 + k3) == (w3[k3 as usize] as u64) {
+            k3 = k3 + 1
+        }
+        if k3 == 7 {
+            var v3: u64 = 0
+            var j3: u64 = i3 + 7
+            var n3: u64 = 0
+            while n3 < 7 && kstate.get8(cmd + j3) >= 48
+                && kstate.get8(cmd + j3) <= 57 {
+                v3 = v3 * 10 + (kstate.get8(cmd + j3) - 48)
+                j3 = j3 + 1
+                n3 = n3 + 1
+            }
+            jv_killafter = v3
+            return
+        }
+        i3 = i3 + 1
     }
 }
 
@@ -4088,7 +4174,7 @@ fn desk_start(state: u64) -> u64 {
     var p_ota: [u8; 9] = "/bin/ota\0"
     var a_ota: [u8; 9] = "ota\0boot\0"
     if fs.path(state, (&p_ota[0]) as u64) != 0 {
-        let _ot: u64 = desk_spawn_n(state, (&p_ota[0]) as u64,
+        let _ot: u64 = desk_spawn_svc(state, (&p_ota[0]) as u64,
             (&a_ota[0]) as u64, 9, 2)
     }
     // DAILY-DRIVER: THE ZONE AND THE NETWORK CLOCK (`sntp boot`), if the
@@ -4097,7 +4183,7 @@ fn desk_start(state: u64) -> u64 {
     var p_sn: [u8; 10] = "/bin/sntp\0"
     var a_sn: [u8; 10] = "sntp\0boot\0"
     if fs.path(state, (&p_sn[0]) as u64) != 0 {
-        let _sn: u64 = desk_spawn_n(state, (&p_sn[0]) as u64,
+        let _sn: u64 = desk_spawn_svc(state, (&p_sn[0]) as u64,
             (&a_sn[0]) as u64, 10, 2)
     }
     if anmelden {
@@ -4203,8 +4289,8 @@ fn desk_start(state: u64) -> u64 {
         }
     }
     if kstate.mode_on(state, kstate.M_DHCP) {
-        let _d: u64 = desk_spawn(state, (&p_dhcp[0]) as u64,
-            (&a_dhcp[0]) as u64, 11)
+        let _d: u64 = desk_spawn_svc(state, (&p_dhcp[0]) as u64,
+            (&a_dhcp[0]) as u64, 11, 1)
     }
     // ================================================ RUNDE MERGE-11
     // DER JARVIS-HELFER, NACH dem DHCP.
@@ -4218,8 +4304,20 @@ fn desk_start(state: u64) -> u64 {
     // Fehlermeldung beim Start ist eine, die jemand fuer den Fehler
     // haelt.
     if kstate.mode_on(state, kstate.M_JARVIS) {
-        let _j: u64 = desk_spawn(state, (&p_jv[0]) as u64,
-            (&a_jv[0]) as u64, 8)
+        let _j: u64 = desk_spawn_svc(state, (&p_jv[0]) as u64,
+            (&a_jv[0]) as u64, 8, 1)
+        jv_pid = _j
+        jv_born = kstate.get(state, kstate.TICKS)
+        if fs.path(state, (&p_jv[0]) as u64) != 0 {
+            jv_armed = 1
+            var s_a: [u8; 27] = "desk: jarvisd watch armed=\0"
+            serial.puts((&s_a[0]) as u64)
+            serial.dec(_j)
+            serial.nl()
+            if _j == 0 {
+                jv_next = jv_born + 500
+            }
+        }
     }
     // ================================================== RUNDE MERGE-6
     // HIER STAND DERSELBE START EIN ZWEITES MAL.
@@ -4997,6 +5095,85 @@ fn shell_start(state: u64) -> u64 {
 //
 // Mit `wmdauer` gibt es keine Grenze. Endet die Shell im Fenster
 // (STRG-D), wird sie NEU GESTARTET statt den Schreibtisch mitzunehmen.
+// ====================================== JARVISD RESPAWN (r-svclog, 10.10.2026)
+// THE HELPER COMES BACK WHEN ITS SUPERVISOR DIES.
+//
+// `jarvisd` supervises its own worker (restart with back-off 2 s .. 60 s, kills a
+// silent one). Nothing supervised the supervisor: if that process died (fault, kill,
+// out of memory), the Dell stayed off the bridge until somebody started it by hand
+// (Boss, 08.10. 15:45 UTC). The desktop loop now watches the process the boot word
+// `jarvis` started: gone or zombie -> start it again after 5 s, doubling up to 60 s;
+// a run of two minutes or more resets the back-off.
+
+fn jv_backoff(state: u64, now: u64) {
+    jv_next = now + jv_wait
+    var s_b: [u8; 30] = "desk: jarvisd restart in (s)=\0"
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(jv_wait / 100)
+    serial.nl()
+    jv_wait = jv_wait * 2
+    if jv_wait > 6000 {
+        jv_wait = 6000
+    }
+}
+
+fn jarvis_watch(state: u64) {
+    if jv_armed == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if jv_pid != 0 {
+        let sl: u64 = sched.find_pid(state, jv_pid)
+        var dead: bool = false
+        if sl >= kstate.MAX_TASKS {
+            dead = true
+        } else {
+            let stt: u64 = sched.tget(state, sl, sched.T_STATE)
+            if jv_killafter != 0 && stt != sched.S_ZOMBIE && now - jv_born >= jv_killafter {
+                var s_k: [u8; 21] = "desk: jarvisd killed\0"
+                serial.puts((&s_k[0]) as u64)
+                serial.nl()
+                let _k: u64 = sched.kill_other(state, sl, jv_pid, 9)
+                jv_born = now
+                return
+            }
+            if stt == sched.S_ZOMBIE {
+                let _r: bool = proc.reap(state, sl)
+                dead = true
+            } else if stt == sched.S_FREE {
+                // already reaped by somebody else; the slot still carries the pid
+                dead = true
+            }
+        }
+        if !dead {
+            return
+        }
+        var s_e: [u8; 25] = "desk: jarvisd ended pid=\0"
+        serial.puts((&s_e[0]) as u64)
+        serial.dec(jv_pid)
+        serial.nl()
+        if now - jv_born >= 12000 {
+            jv_wait = 500
+        }
+        jv_pid = 0
+        jv_backoff(state, now)
+        return
+    }
+    if now < jv_next {
+        return
+    }
+    var p_jv: [u8; 13] = "/bin/jarvisd\0"
+    var a_jv: [u8; 8] = "jarvisd\0"
+    let pid: u64 = desk_spawn_svc(state, (&p_jv[0]) as u64,
+        (&a_jv[0]) as u64, 8, 1)
+    if pid == 0 {
+        jv_backoff(state, now)
+        return
+    }
+    jv_pid = pid
+    jv_born = now
+}
+
 fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
     // ============ RUNDE TAFEL: DIESE SCHLEIFE IST DER SCHREIBTISCH,
@@ -5067,6 +5244,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // arbeitet ein Bitfeld ab und ist leer, wenn nichts anliegt;
         // ihr erster Vergleich ist ein Wort aus `kdata` gegen null.
         acpiev.pump(state)
+        jarvis_watch(state)
         // `cur == 0` heisst: es laeuft gerade keine Shell. Dann gibt es
         // auch keinen Zustand abzufragen -- gefragt wird erst wieder,
         // wenn der Puls unten eine neue gestartet hat.
