@@ -13,7 +13,7 @@ N=${1:-10}
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="${DESIGNBUILD:-$TMPD/build}"
-bash tools/usbimg/build.sh "$TMPD/img" > "$TMPD/build.txt" 2>&1 || { echo "image build failed"; tail -15 "$TMPD/build.txt"; exit 1; }
+JARVIS_CONF="${JARVIS_CONF:-assets/jarvis/rechte-justin.conf}" bash tools/usbimg/build.sh "$TMPD/img" > "$TMPD/build.txt" 2>&1 || { echo "image build failed"; tail -15 "$TMPD/build.txt"; exit 1; }
 IMG=$(ls "$TMPD"/img/*usb*.img | head -1)
 echo "image: $(basename "$IMG") $(stat -c%s "$IMG") octets"
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
@@ -33,7 +33,7 @@ while [ "$i" -le "$N" ]; do
     done
     sleep 1; kill "$q" 2>/dev/null; wait "$q" 2>/dev/null
     s=0; g=0
-    grep -qa 'desk: start /bin/jarvisd' "$TMPD/ser.txt" && s=1
+    grep -qaE 'desk: start /bin/jarvisd|jarvisd watch ar' "$TMPD/ser.txt" && s=1
     grep -qa 'jarvisd: signed in' "$TMPD/ser.txt" && g=1
     started=$((started+s)); signed=$((signed+g))
     printf 'boot %2d: started=%d signed_in=%d (%ds)\n' "$i" "$s" "$g" $((t/5))
