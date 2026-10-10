@@ -903,6 +903,7 @@ else
 commands   = no
 screenshot = no
 sysinfo    = no
+input      = no
 roots      = /etc/ssl/roots.pem
 EOFJ
 fi
@@ -1234,6 +1235,12 @@ else
 fi
 printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  host or host:port; auto  true/false; abstand  seconds between two checks\nserver=pool.ntp.org\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
 ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
+# REMOTE INPUT (click/type through the bridge) MUST NEVER BE ON IN A PUBLIC
+# IMAGE: refuse the build if the permissions file says `input = yes` there.
+if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf"; then
+    fehler "input = yes gehoert nicht in das oeffentliche Abbild"
+fi
+sagen "fernsteuerung (input) $(grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf" && echo ja || echo nein)"
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
 # PRE-PAIRED DEVICE KEY (personal image only). The seed was generated on
 # the JARVIS server and its public key is already registered there

@@ -91,6 +91,7 @@ import sched.time
 export {
     init, arm, armed, arm_pid, drop, may_inject, note,
     aktiv, eingespeist, denied, deny, arms, last_pid, gebaut,
+    locked, lock, unlock, recent, is_locked,
     TIPP_NS, MAX_ANSCHLAEGE
 }
 
@@ -141,6 +142,12 @@ const S_TOTAL: u64 = 0x20 // Anschlaege seit dem Start, insgesamt
 const S_DENIED: u64 = 0x28 // abgelehnte Versuche
 const S_ARMS: u64 = 0x30 // ausgestellte Scheine
 const S_LASTPID: u64 = 0x38 // wer zuletzt einen Schein hatte
+const S_LAST: u64 = 0x40 // monotonic ns of the last permit or injected input (0 = never)
+const S_LOCK: u64 = 0x48 // 1 = emergency stop engaged: no permit, no input until unlocked
+
+// How long the on-screen "JARVIS is controlling" sign stays up after the
+// last permit or injected key/pointer event. Longer than the bar's poll.
+const SHOW_NS: u64 = 6000000000
 
 fn gs(state: u64, off: u64) -> u64 {
     return kstate.get(state, kstate.TIPP_OFF + off)
@@ -159,6 +166,8 @@ fn init(state: u64) {
     ss(state, S_DENIED, 0)
     ss(state, S_ARMS, 0)
     ss(state, S_LASTPID, 0)
+    ss(state, S_LAST, 0)
+    ss(state, S_LOCK, 0)
 }
 
 // ------------------------------------------------------------ der Schein
@@ -173,6 +182,7 @@ fn arm(state: u64, pid: u64) {
     ss(state, S_DEADLINE, time.mono_ns(state) +% TIPP_NS)
     ss(state, S_USED, 0)
     ss(state, S_LASTPID, pid)
+    ss(state, S_LAST, time.mono_ns(state))
     kstate.add(state, kstate.TIPP_OFF + S_ARMS, 1)
 }
 
@@ -180,6 +190,9 @@ fn arm(state: u64, pid: u64) {
 // Bit: ein abgelaufener Schein, den niemand abgeraeumt hat, darf nicht
 // gelten, bloss weil gerade keiner nachgesehen hat.
 fn armed(state: u64) -> bool {
+    if gs(state, S_LOCK) != 0 {
+        return false
+    }
     if gs(state, S_ARMED) == 0 {
         return false
     }
@@ -226,6 +239,7 @@ fn may_inject(state: u64, pid: u64) -> bool {
 // Einen verbrauchten Anschlag buchen. Wird NACH dem Einspeisen
 // gerufen, damit ein abgelehnter Versuch den Zaehler nicht bewegt.
 fn note(state: u64) {
+    ss(state, S_LAST, time.mono_ns(state))
     kstate.add(state, kstate.TIPP_OFF + S_USED, 1)
     kstate.add(state, kstate.TIPP_OFF + S_TOTAL, 1)
 }
@@ -248,4 +262,48 @@ fn arms(state: u64) -> u64 {
 
 fn last_pid(state: u64) -> u64 {
     return gs(state, S_LASTPID)
+}
+
+// ------------------------------------------------- emergency stop + sign
+
+// Is the emergency stop engaged? While it is, no permit is issued and no
+// input is injected -- whatever `input = yes` says in permissions.conf.
+fn locked(state: u64) -> bool {
+    return gs(state, S_LOCK) != 0
+}
+
+// Engage the emergency stop and take away an open permit in one step.
+// Anyone may call it (stopping is always allowed); only root releases it.
+fn lock(state: u64) {
+    ss(state, S_LOCK, 1)
+    drop(state)
+}
+
+fn unlock(state: u64) {
+    ss(state, S_LOCK, 0)
+}
+
+// 1 while input from outside is flowing or was a moment ago (a permit
+// was issued or a key/pointer event injected within SHOW_NS). The task
+// bar draws its red sign from this.
+fn recent(state: u64) -> u64 {
+    let last: u64 = gs(state, S_LAST)
+    if last == 0 {
+        return 0
+    }
+    let now: u64 = time.mono_ns(state)
+    if now < last {
+        return 1
+    }
+    if now - last < SHOW_NS {
+        return 1
+    }
+    return 0
+}
+
+fn is_locked(state: u64) -> u64 {
+    if locked(state) {
+        return 1
+    }
+    return 0
 }
