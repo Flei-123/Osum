@@ -43,6 +43,7 @@
 // koennte.
 
 import serial
+import sync.atomic
 import lib.kstate
 import gfx.gfx
 import sched.sched
@@ -65,6 +66,8 @@ export {
     MAX_TTY, I_COUNT, I_LFLAG, I_PGRP, I_ROWS, I_COLS, I_QUEUED, I_SIGS,
     // RUNDE BLECH2: ein Terminal, das nur auf die Leitung schreibt.
     alloc_log,
+    // Service log with a file tee (r-svclog2): sinks 4.., per-service ring.
+    SINK_SVC0, SVC_N, alloc_log_svc, svc_take, svc_dropped,
     // Extra terminal windows: give a slot back.
     release, release_pair, TTY_FIRST_BLOCK
 }
@@ -118,6 +121,77 @@ const SINK_PEER: u64 = 2
 // er hier verloren, waere der Text im Fenster gegen nichts mehr zu
 // halten.
 const SINK_WINDOW: u64 = 3
+
+// r-svclog2: SERVICE LOG TERMINALS. Sink SINK_SVC0 + id behaves like SINK_SERIAL (the serial line gets every
+// octet, byte for byte as before) AND copies the octet into a kernel ring of its own. The desktop loop
+// (kgui.svc_flush) drains the rings into /var/log/<service>.log. The ring never blocks the writer: when it is
+// full the octet is dropped and counted (svc_dropped), the same rule as `lput`.
+const SINK_SVC0: u64 = 4
+const SVC_N: u64 = 4
+const SVC_RING: u64 = 4096
+static mut svc_buf: [u8; 16384] = [0; 16384]
+static mut svc_head: [u64; 4] = [0; 4]
+static mut svc_tail: [u64; 4] = [0; 4]
+static mut svc_drop: [u64; 4] = [0; 4]
+static mut svc_lk: [u64; 1] = [0; 1]
+
+fn svc_lock() {
+    while atomic.cas((&svc_lk[0]) as u64, 0, 1) != 0 {
+        atomic.pause()
+    }
+}
+
+fn svc_unlock() {
+    atomic.store((&svc_lk[0]) as u64, 0)
+}
+
+fn svc_put(id: u64, c: u64) {
+    let fl: u64 = sched.irq_save()
+    svc_lock()
+    let h: u64 = svc_head[id as usize]
+    if h - svc_tail[id as usize] >= SVC_RING {
+        svc_drop[id as usize] = svc_drop[id as usize] + 1
+    } else {
+        svc_buf[(id * SVC_RING + h % SVC_RING) as usize] = c as u8
+        svc_head[id as usize] = h + 1
+    }
+    svc_unlock()
+    sched.irq_restore(fl)
+}
+
+// Copy up to `max` octets of ring `id` to the kernel address `dst`; returns the count.
+fn svc_take(id: u64, dst: u64, max: u64) -> u64 {
+    if id >= SVC_N {
+        return 0
+    }
+    let fl: u64 = sched.irq_save()
+    svc_lock()
+    var n: u64 = 0
+    let tl: u64 = svc_tail[id as usize]
+    let h: u64 = svc_head[id as usize]
+    while n < max && tl + n < h {
+        kstate.set8(dst + n, svc_buf[(id * SVC_RING + (tl + n) % SVC_RING) as usize])
+        n = n + 1
+    }
+    svc_tail[id as usize] = tl + n
+    svc_unlock()
+    sched.irq_restore(fl)
+    return n
+}
+
+// Octets dropped since the last call (the ring was full).
+fn svc_dropped(id: u64) -> u64 {
+    if id >= SVC_N {
+        return 0
+    }
+    let fl: u64 = sched.irq_save()
+    svc_lock()
+    let d: u64 = svc_drop[id as usize]
+    svc_drop[id as usize] = 0
+    svc_unlock()
+    sched.irq_restore(fl)
+    return d
+}
 
 // Die Bits von `c_lflag`, Linux' Werte (`include/uapi/asm-generic/
 // termbits.h`).
@@ -408,6 +482,18 @@ fn alloc_log(state: u64) -> u64 {
     return MAX_TTY
 }
 
+// A service log terminal (serial line + file ring `id`).
+fn alloc_log_svc(state: u64, id: u64) -> u64 {
+    if id >= SVC_N {
+        return MAX_TTY
+    }
+    let t: u64 = alloc_log(state)
+    if t < MAX_TTY {
+        s(state, t, T_SINK, SINK_SVC0 + id)
+    }
+    return t
+}
+
 // Give a slot back (an extra terminal window was closed). Never the
 // console, never a pty half -- those have their own lifetime.
 fn release(state: u64, t: u64) {
@@ -531,6 +617,11 @@ fn emit(state: u64, t: u64, c: u64) {
     // nach `fb` und SINK_SERIAL und SINK_SCREEN gehen auseinander.
     // Solange sie dasselbe tun, sagt es dieser Kommentar statt eines
     // Namens, der etwas verspricht.
+    if k >= SINK_SVC0 && k < SINK_SVC0 + SVC_N {
+        serial.put(c as u8)
+        svc_put(k - SINK_SVC0, c)
+        return
+    }
     if k == SINK_WINDOW {
         // BEIDES, und in dieser Reihenfolge: erst die Leitung, dann das
         // Fenster.  Die serielle Ausgabe bleibt Oktett fuer Oktett die,
