@@ -19,6 +19,8 @@ printf 'warte 75\n' > "$TMPD/script.txt"
 bash tools/design/eh6.sh "$TMPD/run" accel=kvm "progs=desktop taskbar settings launcher explorer netview edit sh echo ls cat ps dhcp host ping" \
     "extra=jarvis" drehbuch="$TMPD/script.txt" > "$TMPD/run.log" 2>&1
 S="$TMPD/run/serial.txt"
+tail -3 "$TMPD/run.log" | cut -c1-160
+grep -a "jarvisd" "$S" | head -8 | cut -c1-160
 n=$(grep -ac 'desk: start /bin/jarvisd' "$S"); [ "$n" -ge 3 ] && ok "jarvisd was started $n times (boot + restarts)" || bad "jarvisd started only $n times"
 e=$(grep -ac 'desk: jarvisd ended pid=' "$S"); [ "$e" -ge 2 ] && ok "the desktop noticed the end $e times" || bad "end noticed only $e times"
 w=$(grep -a 'desk: jarvisd restart in (s)=' "$S" | sed 's/.*=//' | tr '\n' ' ')
