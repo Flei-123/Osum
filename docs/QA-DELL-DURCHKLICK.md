@@ -83,3 +83,8 @@ not mean the app is correct inside. Look at the photos of Settings, Explorer and
 ## Findings
 
 See the section "Findings of the first VM run" below (filled in by the run of 10.10.2026).
+
+## Run log (10.10.2026, VM, partial)
+- A full run takes far longer than 25 min under load (~2.5 photos/min, ~15 MB ppm per photo on disk): run it in stages (`--apps settings,explorer`, ...).
+- Measured (4 of 12 apps): Settings = `elf: refused` on the taskbar sign; Explorer = panic `u64 - u64` (row_icon fixed in bdb58b0f, `table_icon_y` fixed in 6fd00d28, VM re-check open); Terminal/Terminal2 = judge says "no window appeared" (check the judge threshold).
+- Not measured: editor, nedit, taskmgr, pdfview, store, trashbin, widgets, certus, tray fields.
