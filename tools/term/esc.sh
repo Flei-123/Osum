@@ -10,6 +10,7 @@ TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="$TMPD/build"
 bash tools/design/eh6.sh "$TMPD/run" accel=kvm drehbuch=tools/term/esc.txt > "$TMPD/run.log" 2>&1
 S="$TMPD/run/serial.txt"
+if [ -n "${ESC_KEEP:-}" ]; then mkdir -p "$ESC_KEEP"; cp "$S" "$ESC_KEEP/"; fi
 tail -2 "$TMPD/run.log"
 grep -a "cannot run\|elf: refused" "$S" | head -5
 python3 tools/term/esc.py "$S"; rc=$?

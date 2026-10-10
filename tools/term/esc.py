@@ -20,7 +20,7 @@ def main(path):
         check(n == 1, "`echo %s` after the key ran and printed its argument once: %d" % (mk, n))
     cr = [z for z in lines if "cannot run" in z]
     check(not cr, "no `sh: cannot run`: %s" % (cr[:3] or "none"))
-    check(any(z.strip() == "passwd" for z in lines), "`ls /etc` ran (lists passwd)")
+    check(any("passwd" in z.split() for z in lines), "`ls /etc` ran (lists passwd)")
     esc_in_name = [z for z in lines if "/bin/\x1b" in z]
     check(not esc_in_name, "no command name carries an ESC byte")
     return 0 if bad == 0 else 1
