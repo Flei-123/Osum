@@ -84,7 +84,10 @@ not mean the app is correct inside. Look at the photos of Settings, Explorer and
 
 See the section "Findings of the first VM run" below (filled in by the run of 10.10.2026).
 
-## Run log (10.10.2026, VM, partial)
-- A full run takes far longer than 25 min under load (~2.5 photos/min, ~15 MB ppm per photo on disk): run it in stages (`--apps settings,explorer`, ...).
-- Measured (4 of 12 apps): Settings = `elf: refused` on the taskbar sign; Explorer = panic `u64 - u64` (row_icon fixed in bdb58b0f, `table_icon_y` fixed in 6fd00d28, VM re-check open); Terminal/Terminal2 = judge says "no window appeared" (check the judge threshold).
-- Not measured: editor, nedit, taskmgr, pdfview, store, trashbin, widgets, certus, tray fields.
+## Run log (10.10.2026, VM, stages)
+- Stages of 1-4 apps (`--apps a,b`) over `/root/jarvis/bin/heavy`; a full run is too long under load.
+- **Explorer: OK** (1/1) after the `table_icon_y` saturating-subtraction fix (6fd00d28). Gates after it: explorer2 49/0, a11y 58/0, softui 24/0, wm 110/0 (one run showed 109/1 on the timing check "Faktor mal 100: 253 < 500" under load; the rerun was 110/0).
+- **`elf: refused, reason 1 no such file` at boot** = the walk image has no `/bin/jarvisd` (the desktop starts it). VM artefact, the judge now drops exactly that pair (`JARVISD_PAIR`).
+- **Settings**: its "no bus" line was real: the walk image had no broker. `eh6.sh` now adds `/etc/orientbus/policy`, schema and action manifests when `orientbus` is built, and the walk builds `orientbus act axd`: `settings: lock via bus value=300`. Still one refusal from Settings (`elf: refused ... no such file` right after `settings: ready`): most likely `/bin/konto` (account helper, `settings.fi` lines 3877/3998) -- not in the walk image yet (OPEN, VM-only).
+- **Terminal**: NOT a threshold problem. The first command typed into a fresh Terminal (bundle `/apps/terminal.osp/start`) fails with `elf: refused, reason 1` / `sh: cannot run ls -> -2`; later commands (`/bin/ls`, `ls /bin`) run (checked in a second VM run). Roadmap r537. Terminal2 = known multi-terminal work (r528-r530, other worker).
+- Stage runs for editor, nedit, taskmgr, pdfview and store, trashbin, widgets, certus were still running at the end of the session (see the report); tray fields not walked.

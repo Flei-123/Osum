@@ -268,7 +268,7 @@ def run_vm(args):
     apps = [a for a in APPS if not args.apps or a["id"] in args.apps.split(",")]
     progs = ("desktop taskbar launcher explorer settings netview theme echo ls cat ps uname date df mkdir rm cp mv grep "
              "head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir locate "
-             "dhcp host ping netstat sh")
+             "dhcp host ping netstat sh orientbus act axd")
     have = set(progs.split())
     for a in apps:
         for p in a["prog"].split():
