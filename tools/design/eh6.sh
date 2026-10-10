@@ -217,6 +217,19 @@ ARGS+=(/etc/
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# like tools/usbimg/build.sh (AB-016): with the broker `orientbus` built, the image carries its rules, the
+# settings schema and the action manifests -- without them every app that asks the bus says "no bus"
+case " $GEBAUT " in
+*" orientbus "*)
+    cp -f etc/orientbus/policy "$OUT/policy"
+    ARGS+=(/etc/orientbus/ /etc/actions.d/
+           "/etc/orientbus/policy=$OUT/policy"
+           "/etc/settings.schema=etc/settings.schema"
+           "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
+           "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
+           "/etc/actions.d/store.actions=etc/actions.d/store.actions"
+           "/etc/store.conf=etc/store.conf") ;;
+esac
 # r-svclog: a test runner may add files to the image (mkfs.py arguments, space separated, no blanks inside).
 # shellcheck disable=SC2206
 [ -n "${EH_MKFS_EXTRA:-}" ] && ARGS+=(${EH_MKFS_EXTRA})
