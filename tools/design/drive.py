@@ -1282,6 +1282,11 @@ def main():
                 time.sleep(tippe_gap)
             tippe_gap = 0.12
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))
+        # QA walk (tools/qa/dell_walk.py): `schritt <app> <step>` writes the serial byte offset and
+        # the time to <out>/schritte.tsv so the evaluator can cut the serial log per app and step.
+        elif b == "schritt":
+            with open(os.path.join(out, "schritte.tsv"), "a", encoding="utf-8") as sf:
+                sf.write("%d\t%.1f\t%s\n" % (len(lies(f.serial)), time.time(), arg))
         elif b == "foto":
             if not f.foto(arg):
                 fehler += 1
