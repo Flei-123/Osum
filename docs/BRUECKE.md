@@ -293,3 +293,41 @@ store.fleitec.com und es ist wirklich nur noch booten.
   `dell-update.py` therefore writes ONE script `u.sh` and removes older `*.sh`.
 * **Result files**: the bridge server keeps 300 per device and prunes by NAME (`HHMMSS-id`), not
   by time -- fresh answers can be deleted at once (seen on the VM device). Open: r352.
+
+---
+
+## Fernsteuerung für Justins Dell (Runde D1, 10.10.2026)
+
+**Befund (belegt).**
+* `jarvisd` liest NUR die englischen Schlüssel (`commands`, `input`, `transport`, `path` …,
+  `kernel/app/jarvisd.fi`, Umbenennung E-001, 02e3ffd1). `assets/jarvis/rechte-justin.conf` und
+  `rechte.conf` trugen noch die deutschen (`befehle`, `eingabe`, `weg` …): ein damit gebautes Abbild
+  hätte `transport = https` NICHT gelesen und der Dienst wäre mit „no `server =`“ beendet.
+  Beide Dateien sind jetzt englisch (Werte `yes`/`no`).
+* Welche Datei im Abbild liegt: `tools/usbimg/build.sh` kopiert `$JARVIS_CONF` nach
+  `/etc/jarvis/permissions.conf`, sonst die eingebaute Vorgabe (alles `no`, jetzt auch `input = no`
+  ausdrücklich). Justins Stick: `IMAGE_PROFILE=personal JARVIS_CONF=assets/jarvis/rechte-justin.conf`.
+  `IMAGE_PROFILE=public` lehnt `JARVIS_CONF` ab und bricht zusätzlich ab, falls `input = yes` drinsteht.
+* **Was das für den schon installierten Dell heißt.** Die Datei entsteht nur beim Abbild-Bau/Installieren.
+  OTA (`/bin/ota`, Pakete) tauscht Programme und Kern, nicht `/etc/jarvis/permissions.conf` (OTA.md kennt
+  nur `/etc/ota.conf` als Konfiguration, nichts schreibt die Rechteliste). Der Dell behält also seine
+  alte Datei (englische oder deutsche Schlüssel — NICHT verifiziert, Dell offline). Wege für `input = yes`:
+  (1) neues Abbild flashen; (2) am Gerät die Zeile `input = yes` in `/etc/jarvis/permissions.conf`
+  eintragen (der Helfer liest sie vor jedem Auftrag neu, kein Neustart); (3) per Bridge-Auftrag `schreib`
+  geht NICHT (`write` erlaubt nur `/var/jarvis/`, `/tmp/`, `/home/` — mit Absicht nicht `/etc`).
+  Ein Fern-Update der Rechteliste per OTA gibt es bewusst nicht: wer sich selbst Rechte schenken kann, hat sie.
+
+**Sichtbare Anzeige.** Der Kern merkt sich, wann zuletzt ein Tippschein ausgestellt oder eine Taste/der
+Zeiger eingespeist wurde (`tip.recent`, 6 s, `TQ_RECENT`). Die Leiste (`kernel/user/taskbar.fi`, Feld
+`F_REM`) zeigt dann ein ROTES Feld „JARVIS“ und postet einmal je Sitzung die Meldung „JARVIS steuert gerade
+diesen Rechner“. Gefragt wird der Kern, nicht der Helfer.
+
+**Not-Aus.** (a) `Win+Esc` — im Kern (`kbd.fi`), geht auch bei hängender Oberfläche; (b) `jarvisctl input
+off`; beides setzt die Sperre (`TI_LOCK`): offener Schein wird entzogen, kein neuer ausgestellt, nichts
+eingespeist — egal was `input =` sagt; `jarvisd` meldet dann „emergency stop engaged“. Aufheben: nur root,
+`jarvisctl input on`. Die Sperre liegt im RAM (nach Neustart gilt wieder die Rechteliste); dauerhaft aus:
+Einstellungen → Brücke → Aus (schreibt `input = no`). `jarvisctl input` zeigt Sperre und Anzeige.
+Nebenbei behoben: `jarvisctl input revoke` hieß durch die Umbenennung „transport“.
+
+**Abnahme.** `tools/bridge2/eingabe.sh` (Config-Schlüssel, Public-Wächter, Bau, Not-Aus in der VM mit
+Gegenprobe). Die volle Kette Auftrag → Gerät → Ergebnis: `tools/bridge2/kette.sh`.
