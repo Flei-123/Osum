@@ -120,6 +120,7 @@ BEREICHE = [
     ("SIG",        "kstate.fi", "SIG_OFF",        "SIGCTX_OFF - SIG_OFF"),
     ("SIGCTX",     "kstate.fi", "SIGCTX_OFF",     "SIGCTX_BYTES * MAX_TASKS"),
     ("TTY",        "kstate.fi", "TTY_OFF",        "TTY_MAX"),
+    ("TTY2",       "kstate.fi", "TTY2_OFF",       "TTY2_MAX"),
     ("RAND",       "kstate.fi", "RAND_OFF",       "RAND_MAX"),
     # RUNDE K7B: der Rahmenpuffer-Zustand samt Zeichensatz.  Er stand bis
     # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern

@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """multi.py <serial.txt>: judge the per-window dumps of tools/term/multi.sh (`wm: termwin ...`, `wm: tw<slot> <row> [text]`).
 
-Checks: four terminal windows at once (the console one + three opened from the start menu) (each its own tty), every typed marker stands in exactly ONE window (the
-focused one), the new windows cascade (top-left corners differ in x AND y), and after closing the top-most window the
-others are still there and still take input. Exit code 0 = all good."""
+Checks (r528-r530): nine terminal windows at once (the console one + eight opened from the start menu; the old 8-slot tty
+table allowed seven), each its own tty, every typed marker stands in exactly ONE window (the focused one), consecutive new
+windows do not stack, closing the top-most window twice leaves the others alive AND the next typed line reaches one of them
+(focus after a close), three more windows can be opened afterwards (slots given back), and 40 openpty/close rounds (ptytest)
+all succeed. Exit code 0 = all good."""
 import re
 import sys
 
@@ -43,38 +45,59 @@ def main(path):
         print(("  OK    " if ok else "  FAIL  ") + msg)
         if not ok:
             bad += 1
+
+    def find(marker):
+        """the LAST snapshot in which `marker` stands in some window"""
+        hit = [x for x in sn if holders(x, marker)]
+        return hit[-1] if hit else None
     print("%d snapshot(s)" % len(sn))
     if not sn:
         check(False, "no window dump on the serial line")
         return 1
-    # the snapshot with the most windows before the close
-    top = max(len(x) for x in sn)
-    peak = [x for x in sn if len(x) == top][-1]    # the LAST dump with the most windows: all markers are typed by then
-    check(len(peak) >= 4, "four terminal windows at once (console + 3 new): saw %d" % len(peak))
-    ttys = [w["tty"] for w in peak.values()]
-    check(len(set(ttys)) == len(ttys), "every window has its own tty: %s" % sorted(ttys))
-    owners = {}
-    for mk in ("two-a", "three-a", "four-a"):
-        h = holders(peak, mk)
-        owners[mk] = h
-        check(len(h) == 1, "marker %s stands in exactly one window: %s" % (mk, h))
-    allh = [h[0] for h in owners.values() if len(h) == 1]
-    check(len(set(allh)) == len(allh) and len(allh) == 3, "the three markers stand in three DIFFERENT windows: %s" % allh)
-    new = [(s, w) for s, w in sorted(peak.items()) if s != 0]
-    ok = len(new) >= 3
-    for i in range(len(new)):
-        for j in range(i + 1, len(new)):
-            a, b = new[i][1], new[j][1]
-            if abs(a["x"] - b["x"]) < 16 or abs(a["y"] - b["y"]) < 16:
-                ok = False
-    check(ok, "new windows cascade (corners differ by >= 16 px in x and y): %s" % [(w["x"], w["y"]) for _, w in new])
-    last = sn[-1]
-    check(len(last) == len(peak) - 1, "after the close one window less: %d -> %d" % (len(peak), len(last)))
-    check(all(s in peak for s in last), "the survivors are windows that existed before")
-    for mk in ("two-a", "three-a"):
-        check(len(holders(last, mk)) == 1, "after the close marker %s is still in one window" % mk)
-    ha = holders(last, "after-a")
-    print("  INFO  the key typed after the close reached windows: %s (open point: focus after a close)" % ha)
+    names = ["two-a", "three-a", "four-a", "five-a", "six-a", "seven-a", "eight-a", "nine-a"]
+    # --- nine windows at once
+    p9 = find("nine-a")
+    check(p9 is not None and len(p9) >= 9, "nine terminal windows at once (console + 8 new): saw %d" % (len(p9) if p9 else 0))
+    if p9:
+        ttys = [w["tty"] for w in p9.values()]
+        check(len(set(ttys)) == len(ttys), "every window has its own tty: %s" % sorted(ttys))
+        owners = {}
+        for mk in names:
+            owners[mk] = holders(p9, mk)
+        check(all(len(h) == 1 for h in owners.values()), "every marker stands in exactly one window: %s" % owners)
+        allh = [h[0] for h in owners.values() if len(h) == 1]
+        check(len(set(allh)) == len(names), "the eight markers stand in eight DIFFERENT windows: %s" % allh)
+        new = [w for _, w in sorted(p9.items()) if w["tty"] != 0]
+        ok = len(new) >= 8
+        for a, b in zip(new, new[1:]):
+            if abs(a["x"] - b["x"]) < 16 and abs(a["y"] - b["y"]) < 16:
+                ok = False    # two consecutive windows on (almost) the same spot
+        spots = set((w["x"], w["y"]) for w in new)
+        check(ok and len(spots) >= 6, "new windows cascade (consecutive ones differ, >= 6 distinct spots): %s" % sorted(spots))
+    # --- focus after a close, twice
+    for mk, want in (("after-a", 8), ("after-b", 7)):
+        sx = find(mk)
+        h = holders(sx, mk) if sx else []
+        check(sx is not None and len(sx) == want, "after the close %d windows are left (%s): saw %d" % (want, mk, len(sx) if sx else 0))
+        check(len(h) == 1, "the line typed after the close (%s) reached exactly one window: %s" % (mk, h))
+        if sx and p9:
+            check(all(s in p9 for s in sx), "the survivors are windows that existed before (%s)" % mk)
+    s7 = find("after-b")
+    if s7:
+        for mk in ("two-a", "three-a", "four-a", "five-a", "six-a", "seven-a"):
+            check(len(holders(s7, mk)) == 1, "after two closes marker %s is still in one window" % mk)
+    # --- slots come back: three more windows
+    fin = find("rec-a")
+    check(fin is not None and len(fin) == 10, "three more windows after two closes (slots given back): saw %d" % (len(fin) if fin else 0))
+    if fin:
+        ttys = [w["tty"] for w in fin.values()]
+        check(len(set(ttys)) == len(ttys), "final windows have their own ttys: %s" % sorted(ttys))
+        hs = [holders(fin, mk) for mk in ("rea-a", "reb-a", "rec-a")]
+        check(all(len(h) == 1 for h in hs) and len(set(h[0] for h in hs)) == 3, "the three new markers stand in three different windows: %s" % hs)
+    # --- openpty rounds
+    txt = open(path, "rb").read().decode("latin1")
+    m = re.findall(r"ptytest: ok=(\d+) fail=(\d+)", txt)
+    check(bool(m) and m[-1] == ("40", "0"), "ptytest: 40 openpty/close rounds without a failure: %s" % (m[-1] if m else "no line"))
     return 0 if bad == 0 else 1
 
 

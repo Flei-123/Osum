@@ -7776,10 +7776,10 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
 //
 // Closing the window: reads return 0 (the shell ends with "bye"),
 // writes are swallowed, and the slot goes back once no task uses it.
-static mut TERM_WIN: [u64; 8] = [0 as u64; 8] // window + 1 per tty slot
+static mut TERM_WIN: [u64; 24] = [0 as u64; 24] // window + 1 per tty slot (tty.MAX_TTY)
 
 fn term_win_of(t: u64) -> u64 {
-    if t >= 8 {
+    if t >= tty.MAX_TTY {
         return 0
     }
     return TERM_WIN[t as usize]
@@ -7793,28 +7793,77 @@ fn term_gone(state: u64, t: u64) -> bool {
     return !gfx.term_alive(state, w - 1, t)
 }
 
+// Does a task still have tty slot `t` as its controlling terminal?
+fn tty_task_uses(state: u64, t: u64) -> bool {
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+            && sched.tget(state, i, sched.T_STATE) != sched.S_ZOMBIE
+            && sched.tget(state, i, sched.T_TTY) == t + 1 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Does an open file entry still point at tty slot `t`?
+fn tty_file_uses(state: u64, t: u64) -> bool {
+    var i: u64 = 0
+    while i < file.MAX_OPEN {
+        if file.open_used(state, i) && file.open_kind(state, i) == file.K_TTY
+            && file.open_ino(state, i) == t {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// r528: give back pty pairs (ssh sessions, openpty) once no open file and no task refers to either half. Before, a pair
+// was never freed and eight openpty calls (or a few ssh logins) used up the whole tty table for the terminal windows too.
+//
+// A pair is only freed when it was seen unused by TWO passes in a row: `do_openpty` allocates the pair first and binds the
+// open files a moment later, and a reap on another CPU must not take the fresh pair away in between.
+static mut PTY_SEEN: [u64; 24] = [0 as u64; 24]
+
+fn pty_reap(state: u64) {
+    var t: u64 = 1
+    while t < tty.MAX_TTY {
+        if tty.valid(state, t) && tty.kind_of(state, t) == tty.K_PTY_SLAVE {
+            let m: u64 = tty.peer_of(state, t)
+            if m < tty.MAX_TTY
+                && !tty_file_uses(state, t) && !tty_file_uses(state, m)
+                && !tty_task_uses(state, t) && !tty_task_uses(state, m) {
+                if PTY_SEEN[t as usize] == 0 {
+                    PTY_SEEN[t as usize] = 1
+                } else {
+                    PTY_SEEN[t as usize] = 0
+                    tty.release_pair(state, t)
+                }
+            } else {
+                PTY_SEEN[t as usize] = 0
+            }
+        } else {
+            PTY_SEEN[t as usize] = 0
+        }
+        t = t + 1
+    }
+}
+
 // Give back the slots of closed windows nobody uses any more.
 fn term_reap(state: u64) {
     var t: u64 = 1
-    while t < 8 {
+    while t < tty.MAX_TTY {
         if term_gone(state, t) {
-            var used: bool = false
-            var i: u64 = 0
-            while i < kstate.MAX_TASKS {
-                if sched.tget(state, i, sched.T_STATE) != sched.S_FREE
-                    && sched.tget(state, i, sched.T_STATE) != sched.S_ZOMBIE
-                    && sched.tget(state, i, sched.T_TTY) == t + 1 {
-                    used = true
-                }
-                i = i + 1
-            }
-            if !used {
+            if !tty_task_uses(state, t) {
                 TERM_WIN[t as usize] = 0
                 tty.release(state, t)
             }
         }
         t = t + 1
     }
+    pty_reap(state)
 }
 
 fn do_termnew(state: u64, me: u64) -> u64 {
@@ -7824,8 +7873,13 @@ fn do_termnew(state: u64, me: u64) -> u64 {
         return neg(errno.E_NOSYS)
     }
     term_reap(state)
-    let t: u64 = tty.alloc_log(state)
-    if t >= tty.MAX_TTY || t >= 8 {
+    var t: u64 = tty.alloc_log(state)
+    if t >= tty.MAX_TTY {
+        // second pass: a pty freed only after two sightings
+        term_reap(state)
+        t = tty.alloc_log(state)
+    }
+    if t >= tty.MAX_TTY {
         return neg(errno.E_NFILE)
     }
     tty.set_sink(state, t, tty.SINK_WINDOW)
@@ -7849,7 +7903,12 @@ fn do_openpty(state: u64, me: u64, out: u64) -> u64 {
     if !proc.user_ok(state, me, out, 8) {
         return neg(errno.E_FAULT)
     }
-    let sl: u64 = tty.alloc_pair(state)
+    pty_reap(state)
+    var sl: u64 = tty.alloc_pair(state)
+    if sl >= tty.MAX_TTY {
+        pty_reap(state)
+        sl = tty.alloc_pair(state)
+    }
     if sl >= tty.MAX_TTY {
         return neg(errno.E_NFILE)
     }

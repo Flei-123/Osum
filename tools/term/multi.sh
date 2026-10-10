@@ -11,7 +11,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 MODE=${1:+extra=$1}   # `nocascade` = counter-proof: the old fixed window start
-bash tools/design/eh6.sh "$TMPD/run" accel=kvm moreprogs=term drehbuch=tools/term/multi.txt $MODE > "$TMPD/run.log" 2>&1
+bash tools/design/eh6.sh "$TMPD/run" accel=kvm moreprogs="term termfull ptytest" drehbuch=tools/term/multi.txt $MODE > "$TMPD/run.log" 2>&1
 S="$TMPD/run/serial.txt"
 if [ -n "${MULTI_KEEP:-}" ]; then
     mkdir -p "$MULTI_KEEP"; cp "$S" "$TMPD/run.log" "$MULTI_KEEP/"

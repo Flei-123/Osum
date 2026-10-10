@@ -26,6 +26,7 @@ Befehle im Drehbuch (eine Zeile je Befehl, `#` ist eine Anmerkung):
     klickauf <name>             das zuletzt gemeldete Rechteck <name>
                                 anklicken (siehe unten)
     doppelauf <name>            dasselbe, zweimal
+    mklickauf <name>            dasselbe mit der MITTLEREN Taste (r529)
     taste <name>                sendkey
     foto <name>                 screendump nach <ausgabe>/<name>.ppm
 
@@ -970,7 +971,7 @@ def main():
             f.fahre_nahe(x, y)
             print("fahreauf %s -> %d,%d  (rect %d,%d %dx%d)"
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
-        elif b in ("klickauf", "doppelauf", "rklickauf"):
+        elif b in ("klickauf", "doppelauf", "rklickauf", "mklickauf"):
             r = f.rechteck(arg)
             if r is None:
                 print("klickauf %s -> KEIN RECHTECK GEMELDET" % arg)
@@ -981,6 +982,8 @@ def main():
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
             if b == "rklickauf":
                 f.klick(x, y, 1, taste=2)
+            elif b == "mklickauf":
+                f.klick(x, y, 1, taste=4)   # r529: the middle button (bit 2)
             else:
                 f.klick(x, y, 2 if b == "doppelauf" else 1)
         # RUNDE ECHTHARDWARE-3: `ziehe <x0>,<y0> <x1>,<y1>` und

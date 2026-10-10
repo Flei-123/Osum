@@ -66,10 +66,13 @@ export {
     // RUNDE BLECH2: ein Terminal, das nur auf die Leitung schreibt.
     alloc_log,
     // Extra terminal windows: give a slot back.
-    release
+    release, release_pair, TTY_FIRST_BLOCK
 }
 
-const MAX_TTY: u64 = 8
+// r528: 24 slots (was 8: log tty + ssh ptys + terminal windows used them up). Slots 0..7 live in kstate.TTY_OFF, 8..23 in
+// kstate.TTY2_OFF.
+const MAX_TTY: u64 = 24
+const TTY_FIRST_BLOCK: u64 = 8
 const BYTES: u64 = 2048
 
 // Die Felder eines Terminals.
@@ -171,6 +174,9 @@ const I_QUEUED: u64 = 5
 const I_SIGS: u64 = 6
 
 fn at(state: u64, t: u64) -> u64 {
+    if t >= TTY_FIRST_BLOCK {
+        return state + kstate.TTY2_OFF + (t - TTY_FIRST_BLOCK) * BYTES
+    }
     return state + kstate.TTY_OFF + t * BYTES
 }
 
@@ -412,6 +418,23 @@ fn release(state: u64, t: u64) {
         return
     }
     s(state, t, T_USED, 0)
+}
+
+// Give a pty pair back (r528): both halves, once nobody holds either of them. The caller (sys.pty_reap) has checked that no
+// open file and no task uses the slot. Never the console, never a log tty.
+fn release_pair(state: u64, t: u64) {
+    if t == 0 || t >= MAX_TTY {
+        return
+    }
+    let k: u64 = g(state, t, T_KIND)
+    if k != K_PTY_SLAVE && k != K_PTY_MASTER {
+        return
+    }
+    let p: u64 = peer_of(state, t)
+    s(state, t, T_USED, 0)
+    if p < MAX_TTY {
+        s(state, p, T_USED, 0)
+    }
 }
 
 // ------------------------------------------------------------ die Ringe
