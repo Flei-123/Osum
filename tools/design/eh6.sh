@@ -210,6 +210,9 @@ ARGS+=(/etc/
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# r-svclog: a test runner may add files to the image (mkfs.py arguments, space separated, no blanks inside).
+# shellcheck disable=SC2206
+[ -n "${EH_MKFS_EXTRA:-}" ] && ARGS+=(${EH_MKFS_EXTRA})
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
