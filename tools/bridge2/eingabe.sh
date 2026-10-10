@@ -89,5 +89,12 @@ echo "$c" | grep -aq 'injected' && bad "COUNTER-PROOF: injection still worked af
 echo "$c" | grep -aq 'ENGAGED' && ok "status shows the stop: ENGAGED" || bad "C: status lacks ENGAGED"
 echo "$d" | grep -aq 'emergency stop off' && echo "$d" | grep -aq 'injected' && ok "input on (root) releases it, injection works again" || bad "D: release failed"
 
+echo "== 4. GUI: red sign + Win+Esc as a real keyboard event (eh6, QEMU sendkey) =="
+DESIGNBUILD="$W/eh6b" bash tools/design/eh6.sh "$W/gui" accel=kvm res=1280x800 moreprogs=jarvisctl drehbuch=tools/bridge2/eingabe.txt > "$W/gui.log" 2>&1
+tail -2 "$W/gui.log"
+python3 tools/bridge2/eingabe.py "$W/gui" > "$W/guichk.txt" 2>&1; grc=$?
+cat "$W/guichk.txt"
+[ "$grc" -eq 0 ] && ok "GUI: sign red, Win+Esc stops injection" || bad "GUI check (see above)"
+
 echo; echo "EINGABE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
