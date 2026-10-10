@@ -3491,6 +3491,8 @@ static mut jv_next: u64 = 0
 static mut jv_wait: u64 = 500
 static mut jv_armed: u64 = 0
 static mut jv_dbg: u64 = 0
+// `jvnoname`: control sample -- the watch does not check the program name (the old behaviour, blind to pid reuse).
+static mut jv_noname: u64 = 0
 static mut jv_killafter: u64 = 0
 static mut svc_mode: u64 = 0
 
@@ -3578,6 +3580,18 @@ fn desk_spawn_svc(state: u64, sid: u64, pfad: u64, arg: u64, n: u64, argc: u64) 
 
 // `svclogmax=<octets>`: size limit of /var/log/<service>.log (see svc_flush).
 fn svc_parse(cmd: u64) {
+    var wn: [u8; 9] = "jvnoname\0"
+    var in0: u64 = 0
+    while in0 < 4096 && kstate.get8(cmd + in0) != 0 {
+        var kn: u64 = 0
+        while kn < 8 && kstate.get8(cmd + in0 + kn) == (wn[kn as usize] as u64) {
+            kn = kn + 1
+        }
+        if kn == 8 {
+            jv_noname = 1
+        }
+        in0 = in0 + 1
+    }
     var w: [u8; 11] = "svclogmax=\0"
     var i: u64 = 0
     while i < 4096 && kstate.get8(cmd + i) != 0 {
@@ -5247,6 +5261,37 @@ fn jv_backoff(state: u64, now: u64) {
     }
 }
 
+// PID REUSE (r-svclog2). Is task slot `sl` still the process the desktop started as `jarvisd`?
+// 0 = cannot tell (arguments not mapped yet), 1 = yes, 2 = no: the pid now belongs to another program.
+//
+// WHY THIS EXISTS: `jarvisd` without permissions.conf (or without a server line) prints a message and
+// exits with 2 at once. Its corpse is reaped by somebody else and the pid is handed out again (measured:
+// `desk: start /bin/jarvisd pid=5`, then `launcher: pid=5`). The watch looked up the pid, found a live
+// task (the launcher) and never saw the end -- it looked as if `jarvisd` stayed in SLEEP/READY for ever.
+fn jv_same_program(state: u64, sl: u64) -> u64 {
+    let frame: u64 = proc.translate(state, sl, proc.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    let argc: u64 = __mmio_read64(frame as *mut u64)
+    if argc == 0 || argc > proc.MAX_ARGS {
+        return 0
+    }
+    let ptr: u64 = __mmio_read64((frame + 8) as *mut u64)
+    if ptr < proc.ARGS_BASE || ptr + 8 > proc.ARGS_BASE + 4096 {
+        return 0
+    }
+    var want: [u8; 8] = "jarvisd\0"
+    var i: u64 = 0
+    while i < 8 {
+        if kstate.get8(frame + (ptr - proc.ARGS_BASE) + i) != (want[i as usize] as u64) {
+            return 2
+        }
+        i = i + 1
+    }
+    return 1
+}
+
 fn jarvis_watch(state: u64) {
     if jv_armed == 0 {
         return
@@ -5267,7 +5312,10 @@ fn jarvis_watch(state: u64) {
                 jv_born = now
                 return
             }
-            if stt == sched.S_ZOMBIE {
+            if jv_noname == 0 && stt != sched.S_ZOMBIE && stt != sched.S_FREE && jv_same_program(state, sl) == 2 {
+                // the pid was handed out again: our process ended long ago
+                dead = true
+            } else if stt == sched.S_ZOMBIE {
                 let _r: bool = proc.reap(state, sl)
                 dead = true
             } else if stt == sched.S_FREE {

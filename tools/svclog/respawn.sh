@@ -28,5 +28,27 @@ w=$(grep -a 'desk: jarvisd restart in (s)=' "$S" | sed 's/.*=//' | tr '\n' ' ')
 echo "        waits: $w"
 set -- $w
 [ $# -ge 3 ] && [ "$1" = 5 ] && [ "$2" = 10 ] && [ "$3" = 20 ] && ok "back-off doubles: 5, 10, 20" || bad "back-off wrong: $w"
+
+# --- 2. jarvisd ends BY ITSELF (no permissions.conf in the image -> "missing -- nothing is allowed", exit 2) -------
+# Why this section exists: the exit used to go unnoticed. The corpse is reaped by somebody else, the pid is handed out
+# again (launcher: pid=5 in the same boot) and the watch saw a live task under the old pid. The watch compares the
+# program name now. Control: boot word `jvnoname` switches the check off (old behaviour) -> no end is noticed.
+echo "== 2. self-exit (no jvkill) =="
+printf 'warte 50\n' > "$TMPD/script2.txt"
+for v in fix ctl; do
+    w=""; [ "$v" = ctl ] && w="jvnoname"
+    bash tools/design/eh6.sh "$TMPD/$v" accel=kvm "progs=desktop taskbar settings launcher explorer netview edit sh echo ls cat ps dhcp host ping" \
+        "extra=jarvis $w" drehbuch="$TMPD/script2.txt" > "$TMPD/$v.log" 2>&1
+done
+S="$TMPD/fix/serial.txt"
+grep -a "jarvisd: /etc/jarvis/permissions.conf missing" "$S" | head -1 | cut -c1-120
+e=$(grep -ac 'desk: jarvisd ended pid=' "$S"); [ "$e" -ge 2 ] && ok "self-exit noticed $e times" || bad "self-exit noticed only $e times"
+w=$(grep -a 'desk: jarvisd restart in (s)=' "$S" | sed 's/.*=//' | tr '\n' ' ')
+echo "        waits: $w"
+set -- $w
+[ $# -ge 2 ] && [ "$1" = 5 ] && [ "$2" = 10 ] && ok "back-off after self-exit: 5, 10" || bad "back-off after self-exit wrong: $w"
+n=$(grep -ac 'desk: start /bin/jarvisd' "$S"); [ "$n" -ge 2 ] && ok "jarvisd was started again by the watch ($n starts)" || bad "no restart ($n starts)"
+S="$TMPD/ctl/serial.txt"
+e=$(grep -ac 'desk: jarvisd ended pid=' "$S"); [ "$e" = 0 ] && ok "control jvnoname: the end goes unnoticed (0), as before the fix" || bad "control: $e ends noticed (the test measures nothing)"
 echo "== $pass ok, $fail fail =="
 [ "$fail" = 0 ]
