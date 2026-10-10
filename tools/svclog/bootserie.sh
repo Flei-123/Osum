@@ -6,7 +6,7 @@
 #
 # Builds the personal image (tools/usbimg/build.sh), boots a fresh copy N times with BIOS + KVM + user networking and
 # counts the boots in which the desktop started `/bin/jarvisd` AND the helper signed in at the real server
-# (`jarvisd: signed in`). Needs network access to the bridge server.
+# (`jarvisd: signed in`, or -- for a fresh image that was never paired -- the server answers with `PAIRING CODE`). Needs network access to the bridge server.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 N=${1:-10}
@@ -27,14 +27,14 @@ while [ "$i" -le "$N" ]; do
     q=$!
     t=0
     while [ "$t" -lt 450 ]; do
-        grep -qa 'jarvisd: signed in' "$TMPD/ser.txt" 2>/dev/null && break
+        grep -qaE 'jarvisd: (signed in|PAIRING CODE)' "$TMPD/ser.txt" 2>/dev/null && break
         kill -0 "$q" 2>/dev/null || break
         sleep 0.2; t=$((t+1))
     done
     sleep 1; kill "$q" 2>/dev/null; wait "$q" 2>/dev/null
     s=0; g=0
     grep -qaE 'desk: start /bin/jarvisd|jarvisd watch ar' "$TMPD/ser.txt" && s=1
-    grep -qa 'jarvisd: signed in' "$TMPD/ser.txt" && g=1
+    grep -qaE 'jarvisd: (signed in|PAIRING CODE)' "$TMPD/ser.txt" && g=1
     started=$((started+s)); signed=$((signed+g))
     printf 'boot %2d: started=%d signed_in=%d (%ds)\n' "$i" "$s" "$g" $((t/5))
     [ "$g" = 0 ] && { cp "$TMPD/ser.txt" "/tmp/svclog-bootserie-fail-$i.txt" 2>/dev/null; grep -aE 'jarvisd|dhcp' "$TMPD/ser.txt" | head -6 | sed 's/^/        /'; }
