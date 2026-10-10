@@ -179,7 +179,14 @@ def load_steps(out):
     return steps
 
 
+# The VM image carries no /bin/jarvisd (the bridge daemon is not built into the walk image), so the
+# desktop's boot-time `desk: start /bin/jarvisd` is always followed by one loader refusal. That pair
+# is a property of the walk image, not an app fault: drop exactly that pair, keep every other refusal.
+JARVISD_PAIR = re.compile(r"(desk: start /bin/jarvisd[^\n]*\n)elf: refused, reason 1  no such file\n?")
+
+
 def crash_lines(text):
+    text = JARVISD_PAIR.sub(r"\1", text)
     hits = []
     for z in text.splitlines():
         if CRASH_RE.search(z) and not CRASH_IGNORE.search(z):
