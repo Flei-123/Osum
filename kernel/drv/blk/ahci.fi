@@ -113,7 +113,7 @@ export {
     resume, kill, init, present, ide_mode, raid_mode, read_block, write_block, read_many,
     write_many, flush, blocks, block_shift, bdf, port, mode,
     ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
-    dead, alive,
+    dead, alive, scan_us,
     MODE_NONE, MODE_AHCI, MODE_IDE
 }
 
@@ -322,6 +322,31 @@ fn fristab(bis: u64) -> bool {
     }
     return apic.tsc() >= bis
 }
+
+// r558: has the deadline passed? With a clock ONLY the clock decides --
+// a loop count is calibrated against one machine (KVM: ~1.5 us per
+// register read, a real chipset: ~0.8 us) and was the reason the Dell
+// gave up on its disk after 80 ms. Without a clock (`bis` == 0) the
+// loop count of the caller is the only limit.
+fn expired(bis: u64, spin: u64, limit: u64) -> bool {
+    if bis != 0 {
+        return apic.tsc() >= bis
+    }
+    return spin >= limit
+}
+
+fn have_clock(state: u64) -> bool {
+    return apic.tsc_hz(state) >= 1000000
+}
+
+// Microseconds on the TSC clock (0 when the TSC was never calibrated).
+fn usec(state: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz < 1000000 {
+        return 0
+    }
+    return apic.tsc() / (hz / 1000000)
+}
 // WIE LANGE EIN LEERER PORT KOSTEN DARF. DET == 0 in PxSSTS heisst
 // "ueberhaupt kein Geraet erkannt" -- nicht "noch nicht ausgehandelt",
 // das waere 1. Ein Port, der nach dieser kurzen Spanne immer noch
@@ -334,7 +359,39 @@ fn fristab(bis: u64) -> bool {
 // dieser Registerzugriffe ein VM-Austritt. Ein Rechner, der beim
 // Starten eine Minute auf leere SATA-Anschluesse wartet, sieht fuer den
 // Benutzer aus wie einer, der haengt.
-const PROBE_LIMIT: u64 = 100000
+const PROBE_LIMIT: u64 = 100000 // old loop count, kept for the record (see `oldsata`)
+
+// r558: the link scan is TIME based (see `find_disk`). All values in
+// microseconds.
+const COMRESET_US: u64 = 2000 // PxSCTL.DET = 1 held for >= 1 ms
+const EMPTY_US: u64 = 1000000 // DET stays 0 this long after COMRESET: no device
+const STUCK_US: u64 = 2000000 // DET = 1 (half negotiated) this long: COMRESET again
+const SIGWAIT_US: u64 = 300000 // link up, no signature: COMRESET again
+const SIGFINAL_US: u64 = 1000000 // ... and after the last COMRESET: give up (NOSIG)
+const READY_US: u64 = 15000000 // BSY/DRQ after link-up (a spinning-up HDD)
+const POLL_US: u64 = 100 // pause between two rounds over the ports
+const SCTL_RESET: u64 = 0x301 // DET = 1 (COMRESET), IPM = 3 (no partial/slumber), SPD = 0
+const SCTL_IDLE: u64 = 0x300 // DET = 0, IPM = 3
+
+// Test hooks (command line words, see `diag/hw.fi`): the same bits are
+// read from the K2 scalar page.
+//   slowsata  the link of a present disk comes LATE: after every HBA reset
+//             or COMRESET the port shows DET 0 for 0.7 s, DET 1 until 1.0 s,
+//             then the real link; the signature appears at 1.0 s and BSY
+//             stays until 2.5 s (a cold HDD)
+//   lostsig   the signature is LOST unless a COMRESET was sent after the
+//             HBA reset (the first FIS went by with FRE = 0, as on real
+//             silicon)
+//   oldsata   the scan behaves like the first version of this driver: no
+//             COMRESET, an empty port is abandoned after 0.3 s
+const HW_MODE_AT: u64 = 0x0F0
+const T_SLOWSATA: u64 = 1048576
+const T_OLDSATA: u64 = 2097152
+const T_LOSTSIG: u64 = 4194304
+const SLOW_T: u64 = 0x600 // 32 x 8: time of the last link restart
+const SLOW_C: u64 = 0x700 // 32 x 8: 1 = a COMRESET release was seen
+const S_JUNK: u64 = 0x98
+const S_SCAN_US: u64 = 0xA0 // how long the last link scan took
 
 const MODE_NONE: u64 = 0
 const MODE_AHCI: u64 = 1
@@ -400,6 +457,10 @@ fn alive(state: u64) -> bool {
     return ready(state)
 }
 
+fn scan_us(state: u64) -> u64 {
+    return kstate.get(state, sc(S_SCAN_US))
+}
+
 fn why(state: u64) -> u64 {
     return kstate.get(state, sc(S_WHY))
 }
@@ -436,11 +497,91 @@ fn pr(state: u64) -> u64 {
 }
 
 fn prd(state: u64, p: u64, off: u64) -> u64 {
-    return rd32(abar(state) + PORT_BASE + p * PORT_SIZE, off)
+    let v: u64 = rd32(abar(state) + PORT_BASE + p * PORT_SIZE, off)
+    if off == P_SSTS || off == P_SIG || off == P_TFD {
+        if hook_on(state) {
+            return hook_view(state, p, off, v)
+        }
+    }
+    return v
 }
 
 fn pwr(state: u64, p: u64, off: u64, v: u64) {
     wr32(abar(state) + PORT_BASE + p * PORT_SIZE, off, v)
+}
+
+// ------------------------------------------------------ test hooks
+
+fn hwmode(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + HW_MODE_AT)
+}
+
+fn hook_on(state: u64) -> bool {
+    if (hwmode(state) & (T_SLOWSATA | T_LOSTSIG)) == 0 {
+        return false
+    }
+    return have_clock(state)
+}
+
+// The HBA reset restarts every link.
+fn hook_hba_reset(state: u64) {
+    if !hook_on(state) {
+        return
+    }
+    var p: u64 = 0
+    while p < 32 {
+        kstate.set(state, sc(SLOW_T + p * 8), usec(state) + 1)
+        kstate.set(state, sc(SLOW_C + p * 8), 0)
+        p = p + 1
+    }
+}
+
+// A COMRESET release restarts the link of that port, and the signature
+// of the device arrives (the first FIS after FRE = 1).
+fn hook_comreset(state: u64, p: u64) {
+    if !hook_on(state) {
+        return
+    }
+    kstate.set(state, sc(SLOW_T + p * 8), usec(state) + 1)
+    kstate.set(state, sc(SLOW_C + p * 8), 1)
+}
+
+fn hook_view(state: u64, p: u64, off: u64, v: u64) -> u64 {
+    let hm: u64 = hwmode(state)
+    let real: u64 = rd32(abar(state) + PORT_BASE + p * PORT_SIZE, P_SSTS)
+    if (real & 0xF) != DET_PRESENT {
+        return v
+    }
+    if (hm & T_LOSTSIG) != 0 && kstate.get(state, sc(SLOW_C + p * 8)) == 0 {
+        if off == P_SIG {
+            return 0xFFFFFFFF
+        }
+        if off == P_TFD {
+            return 0x7F
+        }
+    }
+    if (hm & T_SLOWSATA) != 0 {
+        let t0: u64 = kstate.get(state, sc(SLOW_T + p * 8))
+        if t0 == 0 {
+            return v
+        }
+        let el: u64 = usec(state) - t0
+        if off == P_SSTS {
+            if el < 700000 {
+                return 0
+            }
+            if el < 1000000 {
+                return 1
+            }
+        }
+        if off == P_SIG && el < 1000000 {
+            return 0xFFFFFFFF
+        }
+        if off == P_TFD && el < 2500000 {
+            return 0x80
+        }
+    }
+    return v
 }
 
 // Speicher, den der Controller liest, wird durch die fluechtigen
@@ -541,6 +682,38 @@ fn log_storage(state: u64) {
     }
 }
 
+// The controller as it stands after the reset (why=8 on a real machine is
+// useless without these numbers).
+fn log_hba(state: u64, b: u64, pi: u64) {
+    var l_hcap: [u8; 9] = "hba CAP \0"
+    var l_hghc: [u8; 9] = "hba GHC \0"
+    var l_hpi: [u8; 8] = "hba PI \0"
+    var l_hvs: [u8; 8] = "hba VS \0"
+    klog.sayh(state, klog.L_INFO, lq(), (&l_hcap[0]) as u64, rd32(b, R_CAP))
+    klog.sayh(state, klog.L_INFO, lq(), (&l_hghc[0]) as u64, rd32(b, R_GHC))
+    klog.sayh(state, klog.L_INFO, lq(), (&l_hpi[0]) as u64, pi)
+    klog.sayh(state, klog.L_INFO, lq(), (&l_hvs[0]) as u64, rd32(b, R_VS))
+}
+
+// Intel PCH: PCS (PCI config 0x92, bits 5:0 = port enable). A port whose
+// enable bit is 0 shows no link whatever is plugged in. Linux sets the
+// bits of all implemented ports on every Intel AHCI controller; so do we,
+// and only if one is missing (and the log says so).
+const PCS_OFF: u64 = 0x92
+fn intel_ports_enable(state: u64, idx: u64, pi: u64) {
+    var l_pcs: [u8; 43] = "PCS enable bits were missing, PCS before: \0"
+    if pci.get(state, idx, pci.E_VENDOR) != pci.VENDOR_INTEL {
+        return
+    }
+    let dev_bdf: u64 = bdf(state)
+    let pcs: u64 = pci.cfg_read16(dev_bdf, PCS_OFF)
+    let want: u64 = pi & 0x3F
+    if (pcs & want) != want {
+        klog.sayh(state, klog.L_INFO, lq(), (&l_pcs[0]) as u64, pcs)
+        pci.cfg_write16(dev_bdf, PCS_OFF, pcs | want)
+    }
+}
+
 // The public entry: the real work is `init_inner`; a failure is written to the
 // log with its `why` code (1 no controller, 2 BAR5 not memory, 3 cannot map,
 // 4 CAP unreadable, 5 BIOS handoff, 6 HBA reset, 7 no ports, 8 no ATA disk on
@@ -552,6 +725,9 @@ fn init(state: u64) -> bool {
         return true
     }
     klog.sayn(state, klog.L_WARN, lq(), (&l_fail[0]) as u64, kstate.get(state, sc(S_WHY)))
+    // A failed bring-up is NOT "AHCI mode": `blkdev` and `rootsel` treat
+    // mode == MODE_AHCI as "the disk is up" and would never try again.
+    kstate.set(state, sc(S_MODE), MODE_NONE)
     return false
 }
 
@@ -624,17 +800,34 @@ fn init_inner(state: u64) -> bool {
     // irgendein anderes Register dieser Datei geschrieben wird.
     wr32(b, R_GHC, rd32(b, R_GHC) | GHC_AE)
 
+    // CAP and PI are write-once registers the BIOS programmed; some
+    // chipsets (Intel) forget them on a HBA reset. Remember them, and put
+    // them back if the reset changed them (as libata does).
+    let cap_before: u64 = rd32(b, R_CAP)
+    let pi_before: u64 = rd32(b, R_PI)
     if !hba_reset(state, b) {
         kstate.set(state, sc(S_WHY), 6)
         return false
     }
+    if rd32(b, R_CAP) != cap_before {
+        wr32(b, R_CAP, cap_before)
+        var l_capb: [u8; 42] = "HBA reset changed CAP, restored; CAP now \0"
+        klog.sayh(state, klog.L_INFO, lq(), (&l_capb[0]) as u64, rd32(b, R_CAP))
+    }
+    if pi_before != 0 && rd32(b, R_PI) != pi_before {
+        var l_pib: [u8; 32] = "HBA reset changed PI (before): \0"
+        klog.sayh(state, klog.L_INFO, lq(), (&l_pib[0]) as u64, pi_before)
+        wr32(b, R_PI, pi_before)
+    }
 
     let pi: u64 = rd32(b, R_PI)
     kstate.set(state, sc(S_PI), pi)
+    log_hba(state, b, pi)
     if pi == 0 {
         kstate.set(state, sc(S_WHY), 7)
         return false
     }
+    intel_ports_enable(state, idx, pi)
 
     let p: u64 = find_disk(state, pi)
     if p >= 32 {
@@ -673,7 +866,7 @@ fn handoff(state: u64, b: u64) -> bool {
     wr32(b, R_BOHC, rd32(b, R_BOHC) | BOHC_OOS)
     let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, RESET_LIMIT) {
         let v: u64 = rd32(b, R_BOHC)
         if (v & BOHC_BOS) == 0 && (v & BOHC_BB) == 0 {
             return true
@@ -692,9 +885,10 @@ fn hba_reset(state: u64, b: u64) -> bool {
     // Reset; bleibt es stehen, ist der Controller hin.
     let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, RESET_LIMIT) {
         if (rd32(b, R_GHC) & GHC_HR) == 0 {
             wr32(b, R_GHC, rd32(b, R_GHC) | GHC_AE)
+            hook_hba_reset(state)
             return true
         }
         spin = spin + 1
@@ -731,35 +925,368 @@ fn hba_reset(state: u64, b: u64) -> bool {
 // Deshalb richtet diese Funktion JEDEN in Frage kommenden Port so weit
 // ein, dass er antworten KANN, bevor sie ihn fragt. Erst danach ist die
 // Kennung eine Aussage.
-fn find_disk(state: u64, pi: u64) -> u64 {
-    let cl: u64 = state + AHCI_OFF + CLB_AT
-    let fis: u64 = state + AHCI_OFF + FB_AT
-    var seen: u64 = 0
-    var found: u64 = 32
+// ==================================================================
+// THE LINK SCAN (r558, Dell OptiPlex 9020, 11.10.2026)
+// ==================================================================
+//
+// WHAT WENT WRONG ON THE REAL DELL (class 01:04, SATA Operation = RAID On):
+// `AHCI init failed, why=8` only 0.49 s after the controller was found,
+// although a SATA disk hangs on it. Two things in the old search are
+// wrong on real silicon and invisible in QEMU:
+//
+//   1. THE WAITS COUNTED LOOPS, NOT TIME. An empty-port probe gave up after
+//      100000 register reads. Under KVM a read is a VM exit (~1.5 us), so
+//      that was ~150 ms; on a real chipset a read is ~0.8 us, so six ports
+//      cost 6 x 80 ms = 0.49 s -- exactly what the Dell log shows. A real
+//      disk needs from tens of ms (SSD) to a second or more (HDD) after a
+//      HBA reset to bring the link up. Now every deadline is TIME (TSC),
+//      and the loop counters only exist for a machine without a clock.
+//   2. NOBODY EVER RESET THE LINK AFTER FIS RECEIVE WAS ENABLED. PxSIG is
+//      filled from the device's first D2H register FIS. After the HBA reset
+//      the device sends it at once -- while PxCMD.FRE is still 0 -- and the
+//      controller throws it away: PxSIG stays 0xFFFFFFFF and the port looks
+//      empty forever. AHCI 1.3.1 section 10.1.2 / 10.3 and every real
+//      driver (Linux libata) therefore arm the port FIRST (command list,
+//      FIS area, FRE, SUD/POD) and THEN send COMRESET (PxSCTL.DET = 1 for
+//      >= 1 ms, then 0). QEMU fills PxSIG at reset, which is why this
+//      never failed there. (Both fixes are verified in tools/ahci/run.sh
+//      sections 10..12 with the hooks `slowsata` / `lostsig`.)
+//
+// THE SCAN, ALL PORTS AT THE SAME TIME (a controller with six empty ports
+// costs EMPTY_US once, not six times):
+//   * arm every implemented port, COMRESET all of them together;
+//   * poll every port with a verdict: EMPTY (DET stays 0 for EMPTY_US),
+//     ATA (DET=3, IPM=active, signature 0x101, BSY/DRQ clear), OTHER (an
+//     ATAPI drive, port multiplier ...: seen, never chosen), BROKEN,
+//     NOSIG (link up and idle but no signature even after two more
+//     COMRESETs: tried with IDENTIFY as a last resort);
+//   * a port whose link is half-negotiated (DET=1) for STUCK_US gets
+//     another COMRESET (at most 3);
+//   * the lowest ATA port wins: the scan stops as soon as an ATA disk is
+//     ready and no LOWER port is still undecided (a higher port cannot
+//     change the choice, so a disk on port 0 costs no extra wait);
+//   * a spinning-up HDD (BSY) is waited for up to READY_US.
+// Everything the scan saw is written to the klog (`ahci: port ...`), so a
+// machine that still says "no disk" leaves the register values behind.
+
+const V_PENDING: u64 = 0
+const V_EMPTY: u64 = 1
+const V_ATA: u64 = 2
+const V_OTHER: u64 = 3
+const V_BROKEN: u64 = 4
+const V_NOSIG: u64 = 5
+
+const F_STATE: u64 = 0
+const F_T0: u64 = 8 // time of the last COMRESET release
+const F_TLINK: u64 = 16 // time the link was first seen up (0 = not up)
+const F_RESETS: u64 = 24 // COMRESETs sent
+const PS_BASE: u64 = 0x200 // 32 ports x 32 octets in the scalar page
+
+fn pget(state: u64, p: u64, f: u64) -> u64 {
+    return kstate.get(state, sc(PS_BASE + p * 32 + f))
+}
+
+fn pset(state: u64, p: u64, f: u64, v: u64) {
+    kstate.set(state, sc(PS_BASE + p * 32 + f), v)
+}
+
+// Wait `us` microseconds (a MMIO read on every round so the loop cannot
+// be optimised away and the bus stays honest).
+fn udelay(state: u64, us: u64) {
+    let b: u64 = abar(state)
+    var junk: u64 = 0
+    if have_clock(state) {
+        let end: u64 = usec(state) + us
+        while usec(state) < end {
+            junk = junk + rd32(b, R_VS)
+        }
+    } else {
+        var i: u64 = 0
+        while i < us * 4 {
+            junk = junk + rd32(b, R_VS)
+            i = i + 1
+        }
+    }
+    kstate.set(state, sc(S_JUNK), junk)
+}
+
+// COMRESET, first half: PxSCTL.DET = 1 (reset), IPM = 3 (no partial or
+// slumber, as libata does), SPD = 0 (no speed limit).
+fn comreset_assert(state: u64, p: u64) {
+    pwr(state, p, P_SCTL, SCTL_RESET)
+    let flush: u64 = prd(state, p, P_SCTL)
+    kstate.set(state, sc(S_JUNK), flush)
+}
+
+// Second half: DET = 0; the device now has to answer with COMINIT. Old
+// errors are cleared (SERR is write-one-to-clear), the clocks restart.
+fn comreset_release(state: u64, p: u64, now: u64) {
+    pwr(state, p, P_SCTL, SCTL_IDLE)
+    pwr(state, p, P_SERR, prd(state, p, P_SERR))
+    pset(state, p, F_T0, now + 1)
+    pset(state, p, F_TLINK, 0)
+    pset(state, p, F_RESETS, pget(state, p, F_RESETS) + 1)
+    hook_comreset(state, p)
+}
+
+fn comreset_one(state: u64, p: u64, now: u64) {
+    comreset_assert(state, p)
+    udelay(state, COMRESET_US)
+    comreset_release(state, p, now)
+}
+
+// The clock for the scan: microseconds from the TSC, or -- on a machine
+// whose TSC was never calibrated -- the number of poll rounds (about one
+// microsecond each, a pessimistic stand-in that still ends the scan).
+fn tnow(state: u64, polls: u64) -> u64 {
+    if have_clock(state) {
+        return usec(state)
+    }
+    return polls
+}
+
+// One look at one port; changes its verdict when it is decided.
+fn scan_port(state: u64, p: u64, now: u64, legacy: bool) {
+    if pget(state, p, F_STATE) != V_PENDING {
+        return
+    }
+    let ssts: u64 = prd(state, p, P_SSTS)
+    let det: u64 = ssts & 0xF
+    let ipm: u64 = (ssts >> 8) & 0xF
+    let t0: u64 = pget(state, p, F_T0)
+    var age: u64 = 0
+    if now > t0 {
+        age = now - t0
+    }
+    let resets: u64 = pget(state, p, F_RESETS)
+
+    if det == DET_PRESENT && ipm == IPM_ACTIVE {
+        var tl: u64 = pget(state, p, F_TLINK)
+        if tl == 0 {
+            tl = now + 1
+            pset(state, p, F_TLINK, tl)
+            pwr(state, p, P_SERR, prd(state, p, P_SERR))
+        }
+        var up: u64 = 0
+        if now > tl {
+            up = now - tl
+        }
+        let sig: u64 = prd(state, p, P_SIG)
+        let tfd: u64 = prd(state, p, P_TFD)
+        let busy: bool = (tfd & (TFD_BSY | TFD_DRQ)) != 0
+        if sig != 0 && sig != 0xFFFFFFFF {
+            if sig == SIG_ATA {
+                if !busy {
+                    pset(state, p, F_STATE, V_ATA)
+                } else if up > READY_US {
+                    pset(state, p, F_STATE, V_BROKEN)
+                }
+            } else {
+                pset(state, p, F_STATE, V_OTHER)
+            }
+            return
+        }
+        // Link up, but no signature: the first FIS went by before FIS
+        // receive was on. Ask again (twice at most), then give the
+        // port to the IDENTIFY fall-back.
+        if busy {
+            if up > READY_US {
+                pset(state, p, F_STATE, V_BROKEN)
+            }
+        } else if up > SIGWAIT_US && resets < 3 && !legacy {
+            comreset_one(state, p, now)
+        } else if up > SIGFINAL_US {
+            pset(state, p, F_STATE, V_NOSIG)
+        }
+        return
+    }
+
+    pset(state, p, F_TLINK, 0)
+    if det == 1 || det == 3 {
+        // A device is there but the two ends are not talking (or the
+        // link sleeps): try again, a few times.
+        if age > STUCK_US && !legacy {
+            if resets < 3 {
+                comreset_one(state, p, now)
+            } else {
+                pset(state, p, F_STATE, V_BROKEN)
+            }
+        }
+        return
+    }
+    // DET 0 (nothing seen), 2 (reserved), 4 (offline): no device.
+    var cut: u64 = EMPTY_US
+    if legacy {
+        cut = PROBE_US
+    }
+    if age > cut {
+        pset(state, p, F_STATE, V_EMPTY)
+    }
+}
+
+// Packed task-file view for the log: F | SSTS(12) | TFD(16) | SCTL(12).
+fn pack_port(state: u64, p: u64) -> u64 {
+    return (0xF << 40) | ((prd(state, p, P_SSTS) & 0xFFF) << 28)
+        | ((prd(state, p, P_TFD) & 0xFFFF) << 12)
+        | (prd(state, p, P_SCTL) & 0xFFF)
+}
+
+// What the Boss reads at the Dell: `grep ahci /proc/klog`.
+fn log_ports(state: u64, pi: u64, all: bool, lv: u64) {
+    var l_port: [u8; 16] = "port, verdict: \0"
+    var l_regs: [u8; 38] = "  regs F<ssts:3><tfd:4><sctl:3> hex: \0"
+    var l_sig: [u8; 21] = "  sig (1 = marker): \0"
+    var l_cmd: [u8; 21] = "  cmd (1 = marker): \0"
     var i: u64 = 0
     while i < 32 {
-        if ((pi >> i) & 1) != 0 && found >= 32 {
-            zero(cl, 1024)
-            zero(fis, 256)
-            if port_arm(state, i, cl, fis) {
-                if link_up(state, i) {
-                    seen = seen + 1
-                    let s: u64 = prd(state, i, P_SIG)
-                    kstate.set(state, sc(S_SIG), s)
-                    // Nur eine PLATTE. Ein ATAPI-Laufwerk spricht SCSI
-                    // in ATA-Verpackung, ein Port-Multiplier ist gar
-                    // kein Geraet -- beide antworten auf READ DMA EXT
-                    // nicht, und ein Treiber, der sie nimmt, laeuft in
-                    // seine Zeitschranke, statt eine Platte zu finden.
-                    if s == SIG_ATA {
-                        found = i
+        if ((pi >> i) & 1) != 0 {
+            let v: u64 = pget(state, i, F_STATE)
+            if all || v == V_ATA || v == V_OTHER || v == V_NOSIG || v == V_BROKEN {
+                klog.say2(state, lv, lq(), (&l_port[0]) as u64, i, v)
+                klog.sayh(state, lv, lq(), (&l_regs[0]) as u64, pack_port(state, i))
+                klog.sayh(state, lv, lq(), (&l_sig[0]) as u64, (1 << 32) | prd(state, i, P_SIG))
+                klog.sayh(state, lv, lq(), (&l_cmd[0]) as u64, (1 << 32) | prd(state, i, P_CMD))
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn find_disk(state: u64, pi: u64) -> u64 {
+    var l_scan: [u8; 34] = "link scan done, us / ports left: \0"
+    let legacy: bool = (hwmode(state) & T_OLDSATA) != 0
+    let cl: u64 = state + AHCI_OFF + CLB_AT
+    let fis: u64 = state + AHCI_OFF + FB_AT
+    zero(cl, 1024)
+    zero(fis, 256)
+
+    // 1. Arm every implemented port so that it CAN receive the signature.
+    var i: u64 = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 {
+            pset(state, i, F_STATE, V_PENDING)
+            pset(state, i, F_T0, 0)
+            pset(state, i, F_TLINK, 0)
+            pset(state, i, F_RESETS, 0)
+            if !port_arm(state, i, cl, fis) {
+                pset(state, i, F_STATE, V_BROKEN)
+            }
+        }
+        i = i + 1
+    }
+
+    // 2. COMRESET them all together (one 2 ms wait, not one per port).
+    let t_start: u64 = tnow(state, 0)
+    if !legacy {
+        i = 0
+        while i < 32 {
+            if ((pi >> i) & 1) != 0 && pget(state, i, F_STATE) == V_PENDING {
+                comreset_assert(state, i)
+            }
+            i = i + 1
+        }
+        udelay(state, COMRESET_US)
+    }
+    let t_rel: u64 = tnow(state, 0)
+    i = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 && pget(state, i, F_STATE) == V_PENDING {
+            if legacy {
+                pset(state, i, F_T0, t_rel + 1)
+            } else {
+                comreset_release(state, i, t_rel)
+            }
+        }
+        i = i + 1
+    }
+
+    // 3. Poll all ports until the answer is clear.
+    var total: u64 = READY_US + EMPTY_US
+    if legacy {
+        total = PROBE_US
+    }
+    var polls: u64 = 0
+    var pending: u64 = 0
+    var best: u64 = 32
+    var done: bool = false
+    while !done {
+        let now: u64 = tnow(state, polls)
+        pending = 0
+        best = 32
+        var low_pending: u64 = 32
+        i = 0
+        while i < 32 {
+            if ((pi >> i) & 1) != 0 {
+                scan_port(state, i, now, legacy)
+                let v: u64 = pget(state, i, F_STATE)
+                if v == V_PENDING {
+                    pending = pending + 1
+                    if low_pending == 32 {
+                        low_pending = i
                     }
                 }
+                if v == V_ATA && best == 32 {
+                    best = i
+                }
+            }
+            i = i + 1
+        }
+        let el: u64 = now - t_start
+        if pending == 0 {
+            done = true
+        } else if best < 32 && low_pending > best {
+            done = true
+        } else if el >= total {
+            done = true
+        }
+        if !done && have_clock(state) {
+            udelay(state, POLL_US)
+        }
+        polls = polls + 1
+    }
+    let elapsed: u64 = tnow(state, polls) - t_start
+    kstate.set(state, sc(S_SCAN_US), elapsed)
+
+    // 4. Count what was seen and pick the port.
+    var seen: u64 = 0
+    var nosig: u64 = 32
+    i = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 {
+            var v: u64 = pget(state, i, F_STATE)
+            // Out of time with the link up and the task file idle: the
+            // same as NOSIG.
+            if v == V_PENDING && (prd(state, i, P_SSTS) & 0xF) == DET_PRESENT {
+                if (prd(state, i, P_TFD) & (TFD_BSY | TFD_DRQ)) == 0 {
+                    pset(state, i, F_STATE, V_NOSIG)
+                    v = V_NOSIG
+                }
+            }
+            if v == V_ATA || v == V_OTHER || v == V_NOSIG {
+                seen = seen + 1
+            }
+            if v == V_NOSIG && nosig == 32 {
+                nosig = i
             }
         }
         i = i + 1
     }
     kstate.set(state, sc(S_SEEN), seen)
+    var found: u64 = best
+    if found >= 32 && nosig < 32 {
+        // No port gave a signature, but one is linked and idle: let
+        // IDENTIFY decide (an ATA disk answers it, anything else aborts).
+        found = nosig
+    }
+    if found < 32 {
+        kstate.set(state, sc(S_SIG), prd(state, found, P_SIG))
+    }
+    var lv: u64 = klog.L_INFO
+    if found >= 32 {
+        lv = klog.L_WARN
+    }
+    klog.say2(state, lv, lq(), (&l_scan[0]) as u64, elapsed, pending)
+    log_ports(state, pi, found >= 32, lv)
     return found
 }
 
@@ -797,55 +1324,9 @@ fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_FRE)
     let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_FR) != 0 {
             return true
-        }
-        spin = spin + 1
-    }
-    return false
-}
-
-// Warten, bis die Verbindung steht UND das Laufwerk sich gemeldet hat.
-// Zwei Bedingungen, und beide werden gebraucht: DET == 3 sagt, dass die
-// physikalische Verbindung ausgehandelt ist; eine gueltige Kennung sagt,
-// dass darueber schon ein FIS gekommen ist. Ein Port ohne Geraet
-// erreicht keine von beiden und faellt nach der Schranke durch, statt
-// den Kern anzuhalten.
-fn link_up(state: u64, p: u64) -> bool {
-    let bis: u64 = frist(state, RESET_US)
-    let bisprobe: u64 = frist(state, PROBE_US)
-    var spin: u64 = 0
-    var linked: bool = false
-    while spin < RESET_LIMIT && !fristab(bis) {
-        let ssts: u64 = prd(state, p, P_SSTS)
-        let det: u64 = ssts & 0xF
-        if det == DET_PRESENT && ((ssts >> 8) & 0xF) == IPM_ACTIVE {
-            linked = true
-            spin = RESET_LIMIT
-        } else {
-            // Der Schnellausstieg fuer den leeren Anschluss: DET steht
-            // immer noch auf 0, es ist also nicht einmal etwas erkannt
-            // worden. Ein Port, an dem ausgehandelt WIRD, meldet
-            // laengst 1 und laeuft die volle Schranke weiter.
-            if det == 0 && (spin > PROBE_LIMIT || fristab(bisprobe)) {
-                spin = RESET_LIMIT
-            } else {
-                spin = spin + 1
-            }
-        }
-    }
-    if !linked {
-        return false
-    }
-    spin = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
-        let s: u64 = prd(state, p, P_SIG)
-        if s != 0 && s != 0xFFFFFFFF {
-            // Und nicht mehr beschaeftigt: solange BSY oder DRQ steht,
-            // ist das Laufwerk mit seinem eigenen Anlauf befasst und
-            // nimmt keinen Befehl an.
-            return await_idle(state, p)
         }
         spin = spin + 1
     }
@@ -897,13 +1378,10 @@ fn port_stop(state: u64, p: u64) -> bool {
     let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
     var raus: bool = false
-    while spin < RESET_LIMIT && !raus {
+    while !raus && !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_CR) == 0 {
             raus = true
         } else {
-            if fristab(bis) {
-                return false
-            }
             spin = spin + 1
         }
     }
@@ -912,7 +1390,7 @@ fn port_stop(state: u64, p: u64) -> bool {
     }
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_FRE))
     spin = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_FR) == 0 {
             return true
         }
@@ -924,7 +1402,7 @@ fn port_stop(state: u64, p: u64) -> bool {
 fn await_idle(state: u64, p: u64) -> bool {
     let bis: u64 = frist(state, CMD_US)
     var spin: u64 = 0
-    while spin < SPIN_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, SPIN_LIMIT) {
         let tfd: u64 = prd(state, p, P_TFD)
         if (tfd & (TFD_BSY | TFD_DRQ)) == 0 {
             return true
@@ -1067,7 +1545,7 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
 
     let bis: u64 = frist(state, CMD_US)
     var spin: u64 = 0
-    while spin < SPIN_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, SPIN_LIMIT) {
         if (prd(state, p, P_CI) & 1) == 0 {
             let tfd: u64 = prd(state, p, P_TFD)
             kstate.set(state, sc(S_TFD), tfd)
@@ -1124,12 +1602,11 @@ fn recover(state: u64, p: u64) {
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
     let bis: u64 = frist(state, RESET_US)
     var spin: u64 = 0
-    while spin < RESET_LIMIT && !fristab(bis) {
+    while !expired(bis, spin, RESET_LIMIT) {
         if (prd(state, p, P_CMD) & CMD_CR) == 0 {
-            spin = RESET_LIMIT
-        } else {
-            spin = spin + 1
+            break
         }
+        spin = spin + 1
     }
     pwr(state, p, P_SERR, prd(state, p, P_SERR))
     pwr(state, p, P_IS, prd(state, p, P_IS))

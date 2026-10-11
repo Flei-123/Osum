@@ -437,6 +437,80 @@ else
     bad "9.6 the image stayed empty"
 fi
 
+# ============ 10. r558: the Dell case -- the link comes LATE / the signature is LOST
+echo
+echo "== 10. late link (DET 0 for 0.7 s, BSY for 2.5 s) and lost signature, with counter-checks =="
+# Real silicon differs from QEMU in two ways the first driver version could not
+# survive: a link that needs a second or more after the HBA reset (HDD), and a
+# device signature that is thrown away because FIS receive was off when it came.
+# `slowsata` / `lostsig` model them; `oldsata` is the first-version scan
+# (no COMRESET, empty port abandoned after 0.3 s) as the counter-check.
+bild h
+mapfile -t HARGS < <(platte h)
+lauf h q35 "ahci slowsata" "${HARGS[@]}"
+gruen h "10.1 slowsata (new scan)"
+zahl "10.2 the disk is found despite the late link" "$(feld h '^ahci: blocks=' blocks)" eq 16384
+zahl "10.3 sector round trip over the late link" "$(feld h '^ahci: one ' same)" eq 1
+SU=$(feld h '^ahci: blocks=' scanus)
+zahl "10.4 the scan waited for the link (>= 1 s) but not forever (< 6 s)" "${SU:-0}" ge 1000000
+zahl "10.5 and not longer than 6 s" "${SU:-99999999}" le 6000000
+
+bild i
+mapfile -t IARGS < <(platte i)
+lauf i q35 "ahci slowsata oldsata" "${IARGS[@]}"
+if grep -qa '^ahci: init failed' "$TMPD/i.txt"; then
+    ok "10.6 counter-check: the first-version scan LOSES the disk (why=$(feld i '^ahci: init failed' why))"
+else
+    bad "10.6 counter-check: the old scan found the disk, the hook shows nothing"
+fi
+
+bild j
+mapfile -t JARGS < <(platte j)
+lauf j q35 "ahci lostsig" "${JARGS[@]}"
+gruen j "10.7 lostsig (new scan)"
+zahl "10.8 the lost signature is recovered by COMRESET" "$(feld j '^ahci: blocks=' blocks)" eq 16384
+zahl "10.9 sector round trip" "$(feld j '^ahci: one ' same)" eq 1
+bild k
+mapfile -t KARGS < <(platte k)
+lauf k q35 "ahci lostsig oldsata" "${KARGS[@]}"
+if grep -qa '^ahci: init failed' "$TMPD/k.txt"; then
+    ok "10.10 counter-check: without COMRESET the signature never comes (why=$(feld k '^ahci: init failed' why))"
+else
+    bad "10.10 counter-check: lostsig has no effect"
+fi
+# the same on the RAID-class controller, both hooks at once
+bild l
+mapfile -t LARGS < <(platte l)
+lauf l q35 "ahci fakeraid slowsata lostsig" "${LARGS[@]}"
+zahl "10.11 RAID class + late link + lost signature" "$(feld l '^ahci: blocks=' blocks)" eq 16384
+
+# ============ 11. several ports: disk not on port 0, ATAPI in front
+echo
+echo "== 11. disk on port 3 behind two CD-ROMs; two disks (lowest wins); no-disk cost =="
+dd if=/dev/zero of="$TMPD/cd.iso" bs=1M count=1 2>/dev/null
+bild m
+lauf m q35 "ahci" -drive "file=$TMPD/m.img,format=raw,if=none,id=d0" -device "ahci,id=a0" \
+    -drive "file=$TMPD/cd.iso,format=raw,if=none,id=c0,media=cdrom,readonly=on" \
+    -device "ide-cd,drive=c0,bus=a0.0" -device "ide-cd,drive=c0,bus=a0.1" \
+    -device "ide-hd,drive=d0,bus=a0.3"
+gruen m "11.1 disk behind two ATAPI drives"
+zahl "11.2 the ATA disk on port 3 is chosen" "$(feld m '^ahci: blocks=' port)" eq 3
+zahl "11.3 three devices were seen (2 ATAPI + 1 ATA)" "$(feld m '^ahci: blocks=' ports)" ge 2
+zahl "11.4 sector round trip on port 3" "$(feld m '^ahci: one ' same)" eq 1
+bild n; dd if=/dev/zero of="$TMPD/n2.img" bs=1M count=8 2>/dev/null
+lauf n q35 "ahci" -drive "file=$TMPD/n.img,format=raw,if=none,id=d0" -device "ahci,id=a0" \
+    -drive "file=$TMPD/n2.img,format=raw,if=none,id=d1" \
+    -device "ide-hd,drive=d0,bus=a0.4" -device "ide-hd,drive=d1,bus=a0.2"
+zahl "11.5 two disks (ports 2 and 4): the lowest wins" "$(feld n '^ahci: blocks=' port)" eq 2
+bild o
+lauf o q35 "ahci" -drive "file=$TMPD/o.img,format=raw,if=none,id=d0" -device "ahci,id=a0" -device "ide-hd,drive=d0,bus=a0.5"
+zahl "11.6 disk on the LAST port (5)" "$(feld o '^ahci: blocks=' port)" eq 5
+if grep -qa 'ahci: port, verdict: 0 1' "$TMPD/c.txt"; then
+    ok "11.7 a controller without disk leaves per-port register lines in the log (port 0 = empty)"
+else
+    bad "11.7 no per-port diagnostics for the empty controller"
+fi
+
 # ============================================================= Ergebnis
 
 echo
