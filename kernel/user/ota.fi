@@ -191,6 +191,16 @@ static mut P_CLOCK: [u8; 21] = "/system/clock.stand\0\0"
 static mut P_NTPCONF: [u8; 14] = "/etc/ntp.conf\0"
 static mut N_VZ: [u8; 12] = "VERZEICHNIS\0"
 static mut N_VZSIG: [u8; 16] = "VERZEICHNIS.sig\0"
+// Delta update: catalog written by `opk catalog` (verified INDEX), one line per
+// package: name TAB version TAB size TAB file TAB installed TAB current.
+static mut A_CATALOG: [u8; 8] = "catalog "
+static mut N_CATALOG: [u8; 8] = "CATALOG "
+static mut CATBUF: [u8; 8192] = [0 as u8; 8192]
+static mut cat_len: u64 = 0
+static mut S_SKIPPED: [u8; 32] = "ota: packages already current:  "
+static mut S_SHORT: [u8; 15] = "ota: short by  "
+static mut S_NOOP: [u8; 52] = "ota: nothing to install -- every package is current\0"
+static mut ota_noop: bool = false
 static mut N_INDEX: [u8; 6] = "INDEX\0"
 static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
 static mut N_SIG: [u8; 5] = ".sig\0"
@@ -1755,6 +1765,79 @@ fn cmd_find() -> u64 {
     return 0
 }
 
+// Delta update: is package `name` already installed with exactly the hash
+// the (signature-checked) INDEX names? `opk catalog` wrote one line per
+// package: name TAB version TAB size TAB file TAB installed TAB current.
+// The last column is "1" when current. No catalog (cat_len == 0) means
+// nothing is known to be current, so everything is fetched as before.
+fn pkg_current(name: u64) -> bool {
+    if cat_len == 0 {
+        return false
+    }
+    let b: u64 = (&CATBUF[0 as usize]) as u64
+    var i: u64 = 0
+    while i < cat_len {
+        // i is at a line start
+        var j: u64 = i
+        var k: u64 = 0
+        while g8(name + k) != 0 && j < cat_len && g8(b + j) == g8(name + k) {
+            j = j + 1
+            k = k + 1
+        }
+        var e: u64 = i
+        while e < cat_len && g8(b + e) != 10 {
+            e = e + 1
+        }
+        if g8(name + k) == 0 && j < cat_len && g8(b + j) == 9 {
+            return e > i && g8(b + e - 1) == 49 && g8(b + e - 2) == 9
+        }
+        i = e + 1
+    }
+    return false
+}
+
+// Must package line `z` be installed? It fits this machine AND is not
+// already current.
+fn pkg_wanted(z: u64) -> bool {
+    if paket_plattform(z) != 2 {
+        return false
+    }
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    var nm: [u8; 64] = [0 as u8; 64]
+    field(z, e, 0, (&nm[0 as usize]) as u64, 64)
+    return !pkg_current((&nm[0 as usize]) as u64)
+}
+
+// Fetch INDEX + INDEX.sig, let `opk catalog` verify them and read the
+// result. Failure is not fatal: without a catalog nothing is skipped and
+// the old (full) path runs unchanged.
+fn load_catalog() {
+    cat_len = 0
+    tmp_path((&ZIEL[0 as usize]) as u64, (&N_INDEX[0 as usize]) as u64)
+    remove((&ZIEL[0 as usize]) as u64)
+    if hole((&N_INDEX[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0) != 0 {
+        return
+    }
+    tmp_path((&ZIEL[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64)
+    remove((&ZIEL[0 as usize]) as u64)
+    if hole((&N_ISIG[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0) != 0 {
+        return
+    }
+    tmp_path((&ZIEL2[0 as usize]) as u64, (&N_CATALOG[0 as usize]) as u64)
+    remove((&ZIEL2[0 as usize]) as u64)
+    let rc: u64 = opk_ruf((&A_CATALOG[0 as usize]) as u64,
+        (&P_TMP[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64, 0, 4)
+    if rc != 0 {
+        return
+    }
+    let n: u64 = file_read((&ZIEL2[0 as usize]) as u64,
+        (&CATBUF[0 as usize]) as u64, 8191)
+    if n == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    cat_len = n
+}
+
 fn cmd_einspielen_innen() -> u64 {
     let r: u64 = dir_get(true)
     if r != 0 {
@@ -1804,16 +1887,34 @@ fn cmd_einspielen_innen() -> u64 {
     if passend < anz {
         sagn((&S_UEBER[0 as usize]) as u64, anz - passend)
     }
+    // DELTA: packages that are already current are neither counted, nor
+    // fetched, nor installed.
+    load_catalog()
     var gesamt: u64 = 0
+    var wanted: u64 = 0
     var k: u64 = 0
     while k < anz {
         let z0: u64 = packet_line(k)
         let e0: u64 = (&VZ[0 as usize]) as u64 + vz_len
-        if paket_plattform(z0) == 2 {
+        if pkg_wanted(z0) {
             field(z0, e0, 3, (&FELD[0 as usize]) as u64, 128)
             gesamt = gesamt + ulib.to_num((&FELD[0 as usize]) as u64)
+            wanted = wanted + 1
         }
         k = k + 1
+    }
+    if wanted < passend {
+        sagn((&S_SKIPPED[0 as usize]) as u64, passend - wanted)
+    }
+    if wanted == 0 {
+        // Everything on this machine is current; only the counter moves.
+        if !version_write(dort) {
+            return err((&E_FASS[0 as usize]) as u64, 0)
+        }
+        ota_noop = true
+        ulib.say((&S_NOOP[0 as usize]) as u64)
+        ulib.nl()
+        return 0
     }
     let bfree: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
     let bsize: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
@@ -1822,6 +1923,7 @@ fn cmd_einspielen_innen() -> u64 {
     sagn((&S_PLATZ[0 as usize]) as u64, free)
     sagn((&S_VON[0 as usize]) as u64, noetig)
     if free < noetig {
+        sagn((&S_SHORT[0 as usize]) as u64, noetig - free)
         ulib.eput((&E_SPACE[0 as usize]) as u64)
         var nlp: [u8; 2] = "\n\0"
         ulib.eput((&nlp[0 as usize]) as u64)
@@ -1840,7 +1942,7 @@ fn cmd_einspielen_innen() -> u64 {
         // DIE FELDNUMMERN. `paket_zeile` gibt den Zeiger HINTER
         // "paket\t" zurueck, also ist Feld 0 der Name:
         //   0 name  1 fassung  2 sha256  3 oktette  4 datei  5 plattform
-        if paket_plattform(z) == 2 {
+        if pkg_wanted(z) {
             field(z, e, 2, (&SOLLHEX[0 as usize]) as u64, 72)
             field(z, e, 3, (&FELD[0 as usize]) as u64, 128)
             field(z, e, 4, (&FELD2[0 as usize]) as u64, 128)
@@ -1900,7 +2002,7 @@ fn cmd_einspielen_innen() -> u64 {
     while k < anz {
         let z: u64 = packet_line(k)
         let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
-        if paket_plattform(z) == 2 {
+        if pkg_wanted(z) {
             field(z, e, 0, (&PNAME[0 as usize]) as u64, 64)
             sagt((&S_SPIEL[0 as usize]) as u64, (&PNAME[0 as usize]) as u64)
             let rc: u64 = opk_ruf((&A_AKTU[0 as usize]) as u64,
@@ -1927,9 +2029,12 @@ fn cmd_einspielen_innen() -> u64 {
 }
 
 fn cmd_einspielen() -> u64 {
+    ota_noop = false
     stand_write((&W_PH_EINS[0 as usize]) as u64)
     let rc: u64 = cmd_einspielen_innen()
-    if rc == 0 {
+    if rc == 0 && ota_noop {
+        stand_write((&W_PH_RUHE[0 as usize]) as u64)
+    } else if rc == 0 {
         stand_write((&W_PH_BER[0 as usize]) as u64)
     } else {
         stand_write((&W_PH_FEHL[0 as usize]) as u64)

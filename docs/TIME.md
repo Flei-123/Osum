@@ -43,3 +43,32 @@ Antwortarten, NTP-Ära 1, Gegenprobe ohne `tzrule`.
 Nicht messbar in QEMU: ob die CMOS-Uhr eines echten Brettes annimmt, was
 `rtc_write` hineinschreibt (der Aufruf wird gemacht, sein Ergebnis nicht
 geprüft); ein echter NTP-Server im echten Netz.
+
+## r544 -- the clock was 2 h ahead after the boot (11.10.2026, found on the real Dell)
+
+The Dell's first network sync said `offset=-7199s`: the clock was two hours
+AHEAD for the first minutes of every boot. Cause: `time.tz_anwenden` (takes
+the zone off the hardware clock, which holds LOCAL time by default) was
+called only from `mode_of` -- and `mode_of` (command line) runs in
+`kernel_main` at line 246, `time.init` (reads the RTC) at line 311. The call
+found nothing to convert, `init` then stored the raw local RTC value as UTC,
+and the display added the zone once more. Every VM test hid it because QEMU's
+RTC is UTC by default and the old fixed `tz=120` lines happened to add it back.
+
+Fix: `kernel_main` calls `tz_anwenden` again right after `time.init`; the
+function converts once (`tz_done`) and never after somebody set the clock
+(`clock_moved`). A boot line without `tz=` leaves the door open: the first
+SETTZ (`sntp boot` from /etc/time.conf) does the one conversion.
+
+Convention (unchanged, ECHTHARDWARE-1): the chip holds LOCAL time unless the
+boot line says `rtcutc`. `rtc_write` (after `clock_settime`) writes local too.
+
+Measured with `tools/time/boot.sh` (QEMU `-rtc base=...,clock=vm`, fake NTP
+server saying the true UTC; the first `date` and `sntp -n` run before anything
+may set the clock): offset to the true time on main vs fixed -- RTC local
+11:00 summer 7201 s vs 1 s; no zone on the boot line 7202 s vs 2 s; local
+03:30 on 25.10. (winter) 3601 s vs 2 s; local winter 3602 s vs 1 s.
+
+`sntp boot` retries: at once, then every 10 s for a minute, every 30 s for the
+next minute, every 5 minutes until it works (the Dell log shows the first
+try failing with `cannot resolve host` before the lease and the sync later).

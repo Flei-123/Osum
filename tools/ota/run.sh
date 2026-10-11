@@ -146,6 +146,31 @@ lauf() { # name skript [limit]
     cat "$OUT/$1.rc" 2>/dev/null
 }
 
+# (i) DELTA (r542): a package that is already installed with exactly the hash
+# the signed INDEX names is neither counted, nor fetched, nor installed again.
+# Same device and feed as the happy path (section 2), but hallo 2 is put on the
+# disk by hand first. Section 2 is the counter-sample: there the very same
+# package IS fetched. $OTA_NUR=delta runs only this check (needs basis.img).
+delta_test() {
+    dienst "$OUT/netz2" || bad "server"
+    cp -f "$OUT/basis.img" "$OUT/ziel.img"
+    rc=$(lauf delta1 "opk install /quelle2/hallo-2.opk;ota apply;ota show;exit")
+    gleich "(i) the machine boots" "$rc" "21"
+    hat "$OUT/delta1.txt" "ota: packages already current: 1" "(i) DELTA: the installed package is recognised as current"
+    hat "$OUT/delta1.txt" "ota: nothing to install" "(i) and it says so"
+    hatnicht "$OUT/delta1.txt" "READY FOR RESTART" "(i) and no restart is offered for nothing"
+    hat "$OUT/delta1.txt" "ota: version here 2" "(i) only the counter moved: version here 2"
+    hatnicht "$OUT/delta1.txt" "NOT ENOUGH SPACE" "(i) and no space is asked for it"
+    hatnicht "$OUT/delta1.txt" "ota: hash ok hallo-2.opk" "(i) and it is not fetched/checked again"
+    if grep -qa "hallo-2.opk" "$OUT/srv.log"; then
+        bad "(i) the package was fetched although it is already current"
+    else
+        ok "(i) the package was NOT fetched (the server never delivered hallo-2.opk)"
+    fi
+    gleich "(i) hallo is installed exactly once (by hand, not by ota)" "$(grep -ca 'opk: installed hallo' "$OUT/delta1.txt")" "1"
+    dienst_aus
+}
+
 for t in qemu-system-x86_64 python3 curl mcopy; do
     command -v "$t" >/dev/null 2>&1 || { echo "OTA: uebersprungen, $t fehlt"; exit 0; }
 done
@@ -324,6 +349,11 @@ BASISBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\1 \2/p' \
 # RUNDE DAILY-DRIVER: $OTA_NUR=kanal ueberspringt die Abschnitte 2-6 und
 # faehrt nur Abschnitt 7 (Kanaele, Wechsel, Rollback von Hand). Gebaut und
 # installiert wird weiter -- Abschnitt 7 braucht die Platte `basis.img`.
+if [ "${OTA_NUR:-}" = delta ]; then
+    delta_test
+    echo; echo "  $pass gruen, $fail rot"
+    [ "$fail" = 0 ] && exit 0 || exit 1
+fi
 if [ "${OTA_NUR:-}" != kanal ]; then
 # =====================================================================
 echo
@@ -529,6 +559,9 @@ rc=$(lauf f2 "ota apply;exit")
 hat "$OUT/f2.txt" "opk: installed hallo" "(f) GEGENPROBE: das kleine Update geht auf derselben Platte durch"
 hatnicht "$OUT/f2.txt" "NOT ENOUGH SPACE" "(f) der Platzwaechter schlaegt also nicht immer zu"
 dienst_aus
+
+# ---- (i) DELTA
+delta_test
 
 # ---- die Einstellungsseite und das Umstellen im Betrieb
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
