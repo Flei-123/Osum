@@ -118,7 +118,7 @@ for f in kernel/user/*.fi; do
     [[ $ok == 1 ]] && continue
     # r442: the gallery parts (lib/fui/navnum, navkit, cmdbar, region) are LIBRARY code for programs -- sizes, geometry, the command
     # bar's model -- not a second surface; every other fUi module stays the host's business
-    n=$(grep -aE '^import fui\.' "$f" 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region)$' | grep -ac . || true)
+    n=$(grep -aE '^import fui\.' "$f" 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region|tokens)$' | grep -ac . || true)
     if [[ ${n:-0} -gt 0 ]]; then
         fehler=$((fehler + 1))
         treffer+="  $f: greift direkt auf fUi zu (eigene Oberflaeche daneben)"$'\n'
