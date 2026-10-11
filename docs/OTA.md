@@ -111,6 +111,13 @@ immer zuschlägt, ist kein Schutz, sondern ein kaputter Update-Weg.
 5. **Platz prüfen** (`SYS_SYSINFO`, `I_BFREE` × `I_BSIZE`), mit Faktor
    drei: die Datei unter `/tmp/ota`, der ausgepackte Store-Eintrag, und
    Luft für Generation, Journal und Verzeichniseinträge.
+   **Delta (r542):** vor dieser Prüfung holt `ota` INDEX + INDEX.sig und lässt
+   `opk catalog` (Signatur geprüft) sagen, welche Pakete schon mit genau dem
+   Streuwert des INDEX installiert sind. Solche Pakete werden weder gezählt
+   noch geholt noch eingespielt (`ota: packages already current: N`). Ist
+   alles aktuell, springt nur der Fassungszähler. Fehlt der Katalog, läuft
+   der volle Weg wie bisher. Bei Platzmangel nennt `ota` die Lücke
+   (`ota: short by N`). Der Bedarf bleibt 3 × (noch nötige Paketoktette).
 6. `opk update` — prüft INDEX.sig und die Paketsignatur ein
    **zweites** Mal mit eigenem Code, legt den Store-Eintrag an, schreibt
    die neue Generation, schaltet `/system/AKTUELL` um.
