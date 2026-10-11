@@ -391,6 +391,15 @@ const ERP_LEN: u64 = 36
 // weniger nimmt, laesst `opk` mitten im Auspacken auf eine volle Platte
 // laufen -- und genau das ist der Fall, den Punkt (f) misst.
 const SPACE_FACTOR: u64 = 3
+// r542 (11.10.2026): the real peak is ONE package sum plus ONE package, not
+// three sums. Each package is deleted from `/tmp/ota` right after `opk`
+// installed it (step 7), so the bytes MOVE from the staging file into the
+// store entry instead of existing twice. Peak = all staged files (after
+// the download) + the store entry of the package being unpacked right now
+// (= the largest package) + slack for generation, journal and directory
+// entries (SPACE_SLACK + 1/8 of the sum). 15.8 MB of packages need about
+// 24 MB this way instead of 47.4 MB (SPACE_FACTOR 3 stays for reference only).
+const SPACE_SLACK: u64 = 524288
 
 // ------------------------------------------------------ Kleinigkeiten
 
@@ -1891,6 +1900,7 @@ fn cmd_einspielen_innen() -> u64 {
     // fetched, nor installed.
     load_catalog()
     var gesamt: u64 = 0
+    var maxpkg: u64 = 0
     var wanted: u64 = 0
     var k: u64 = 0
     while k < anz {
@@ -1898,7 +1908,11 @@ fn cmd_einspielen_innen() -> u64 {
         let e0: u64 = (&VZ[0 as usize]) as u64 + vz_len
         if pkg_wanted(z0) {
             field(z0, e0, 3, (&FELD[0 as usize]) as u64, 128)
-            gesamt = gesamt + ulib.to_num((&FELD[0 as usize]) as u64)
+            let psz: u64 = ulib.to_num((&FELD[0 as usize]) as u64)
+            gesamt = gesamt + psz
+            if psz > maxpkg {
+                maxpkg = psz
+            }
             wanted = wanted + 1
         }
         k = k + 1
@@ -1919,7 +1933,7 @@ fn cmd_einspielen_innen() -> u64 {
     let bfree: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
     let bsize: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
     let free: u64 = bfree * bsize
-    let noetig: u64 = gesamt * SPACE_FACTOR
+    let noetig: u64 = gesamt + maxpkg + SPACE_SLACK + gesamt / 8
     sagn((&S_PLATZ[0 as usize]) as u64, free)
     sagn((&S_VON[0 as usize]) as u64, noetig)
     if free < noetig {
@@ -1985,7 +1999,7 @@ fn cmd_einspielen_innen() -> u64 {
     //         in dem zwischen der ersten Frage und dem Laden etwas
     //         anderes den Platz weggenommen hat.
     let bfree2: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
-    if bfree2 * bsize < gesamt * 2 {
+    if bfree2 * bsize < maxpkg + SPACE_SLACK + gesamt / 8 {
         ulib.eput((&E_SPACE[0 as usize]) as u64)
         var nl: [u8; 2] = "\n\0"
         ulib.eput((&nl[0 as usize]) as u64)
@@ -2013,6 +2027,15 @@ fn cmd_einspielen_innen() -> u64 {
                 sagn((&E_OPK[0 as usize]) as u64, rc)
                 return 1
             }
+            // The package is in the store now: give the staging bytes back
+            // at once (the space check above counts on this).
+            field(z, e, 4, (&FELD2[0 as usize]) as u64, 128)
+            tmp_path((&ZIEL[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+            remove((&ZIEL[0 as usize]) as u64)
+            ulib.strcpy((&ZIEL2[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+            ulib.strcat((&ZIEL2[0 as usize]) as u64, (&N_SIG[0 as usize]) as u64)
+            tmp_path((&ZIEL[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64)
+            remove((&ZIEL[0 as usize]) as u64)
         }
         k = k + 1
     }

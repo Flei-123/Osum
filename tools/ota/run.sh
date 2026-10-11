@@ -377,7 +377,7 @@ SUCHMS=$(( (T1 - T0) / 1000000 ))
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 dienst "$OUT/netz2" || bad "Gegenstelle"
 T0=$(date +%s%N)
-rc=$(lauf gut2 "ota apply;opk trial;exit")
+rc=$(lauf gut2 "df;ota apply;df;echo LSBEGIN;ls /tmp/ota;echo LSEND;opk trial;exit")
 T1=$(date +%s%N)
 EINMS=$(( (T1 - T0) / 1000000 ))
 cp -f "$OUT/srv.log" "$OUT/srv-gut.log" 2>/dev/null || true
@@ -389,6 +389,24 @@ hat "$OUT/gut2.txt" "opk: in trial: 1 before 0" "die neue Generation steht in ER
 hat "$OUT/gut2.txt" "ota: READY FOR RESTART" "und der Neustart wird ANGEBOTEN"
 hatnicht "$OUT/gut2.txt" "power: init sagt ab" "ES WIRD NICHT VON SELBST NEU GESTARTET"
 OKT=$(grep -a "^ota: platz" "$OUT/gut2.txt" | tail -1 | awk '{print $3}')
+# r542: the staging file goes back right after opk installed the package, and the announced
+# need (needed) covers what the update really consumed. Peak space is NOT observable from outside;
+# the end state (consumed <= needed, staging empty) is.
+GFREE0=$(sed -n 's/.*blocks total=[0-9]* free=\([0-9]*\).*/\1/p' "$OUT/gut2.txt" | head -1)
+GFREE1=$(sed -n 's/.*blocks total=[0-9]* free=\([0-9]*\).*/\1/p' "$OUT/gut2.txt" | tail -1)
+GNEED=$(sed -n 's/^ota: needed \([0-9]*\).*/\1/p' "$OUT/gut2.txt" | head -1)
+if [ -n "$GFREE0" ] && [ -n "$GFREE1" ] && [ -n "$GNEED" ]; then
+    GUSED=$(( (GFREE0 - GFREE1) * 512 ))
+    echo "        MEASURED r542: update consumed $GUSED bytes (free $GFREE0 -> $GFREE1 blocks), announced need $GNEED bytes"
+    [ "$GUSED" -le "$GNEED" ] && ok "r542: consumed space ($GUSED) <= announced need ($GNEED)" \
+        || bad "r542: the update consumed $GUSED bytes, more than announced ($GNEED)"
+else
+    bad "r542: df before/after or the 'needed' line is missing in gut2.txt"
+fi
+LSTMP=$(sed -n '/^LSBEGIN/,/^LSEND/p' "$OUT/gut2.txt")
+echo "$LSTMP" | grep -qa 'LSEND' || bad "r542: no listing of /tmp/ota in gut2.txt"
+echo "$LSTMP" | grep -qa 'hallo-2' && bad "r542: the staged package is still in /tmp/ota after the install" \
+    || ok "r542: the staged package and its .sig are gone from /tmp/ota after the install"
 
 rc=$(lauf gut3 "sh /start.sh;ota show;df;exit")
 gleich "der Neustart" "$rc" "21"

@@ -119,7 +119,8 @@ python3 tools/ota/listing.py "$OUT/netzbadsig" --fassung 2 \
 # Kern nach den freien Bloecken und vergleicht. Ob die fehlen, weil die
 # Platte voll ist oder weil das Update gross ist, ist fuer den Code
 # derselbe Zweig -- und die Meldung ist dieselbe.
-GROSS_MIB=${OTA_GROSS_MIB:-20}
+# r542: 60 MiB (was 20): the need is ~2x one package now (staging + store), so 20 MiB no longer exceeds the 96 MiB test disk
+GROSS_MIB=${OTA_GROSS_MIB:-60}
 if [ ! -s "$OUT/gross.bin" ]; then
     head -c $((GROSS_MIB * 1024 * 1024)) /dev/urandom > "$OUT/gross.bin"
 fi

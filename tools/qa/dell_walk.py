@@ -686,15 +686,86 @@ def run_echt(args):
     return 0 if all(r["status"] != "FEHLER" for r in res) else 1
 
 
+# ---------------------------------------------------------------- smoke mode (bridge, READ-ONLY)
+# Only reads: no input, no write, no reboot. Safe on a machine that is installing or in use.
+# Each check is one line `OK|FAIL <name>: <why>`; the photo is archived next to the protocol.
+SMOKE_LOG_WORDS = ("panic", "fault", "refused", "failed")
+SMOKE_DAEMONS = ("jarvisd", "taskbar", "starter", "desktop")
+
+
+def run_smoke(args):
+    from concurrent.futures import ThreadPoolExecutor
+    out = os.path.abspath(args.outdir)
+    os.makedirs(os.path.join(out, "fotos"), exist_ok=True)
+    br = Bruecke(args.device, dry=args.dry)
+    t0 = time.time()
+    up, why = br.online()
+    print("device check: %s (%s)" % ("ONLINE" if up else "OFFLINE", why[:120]))
+    if not up and not args.dry:
+        print("ABORT: the Dell is not online -- nothing was sent.")
+        return 3
+    res = []
+
+    def check(name, ok, why):
+        res.append((name, ok, why))
+        print("%-5s %s: %s" % ("OK" if ok else "FAIL", name, why), flush=True)
+
+    def cmd(c):
+        st, status, body = br.job("command", c, timeout=args.timeout)
+        txt = body.decode("latin1") if isinstance(body, bytes) else str(body)
+        return st, txt
+
+    cmds = ["/bin/uname -a", "/bin/cat /system/FASSUNG", "/bin/df", "/bin/ps"] + ["/bin/grep %s /proc/klog" % w for w in SMOKE_LOG_WORDS]
+    # independent reads in parallel (the bridge answers each job on its own)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        got = dict(zip(cmds, ex.map(cmd, cmds)))
+    for c in cmds[:2]:
+        st, txt = got[c]
+        check(c.split()[-1] if "cat" in c else "uname", st == 200 and "ende 0" in txt, txt.replace("\n", " | ")[:100])
+    st, txt = got["/bin/df"]
+    m = re.search(r"total=(\d+) free=(\d+).*size=(\d+)", txt, re.S)
+    if m:
+        tot, fre, bs = (int(x) for x in m.groups())
+        check("df", fre * bs >= 20 * 1024 * 1024, "root %.0f MiB, free %.1f MiB (OTA needs about 3x the packages; < 20 MiB = stick RAM image)" % (tot * bs / 1048576, fre * bs / 1048576))
+    else:
+        check("df", False, "no df answer: " + txt[:80])
+    st, txt = got["/bin/ps"]
+    names = set(r.split()[-1] for r in txt.splitlines() if re.match(r"\s*\d+\s", r))
+    miss = [d for d in SMOKE_DAEMONS if d not in names]
+    check("daemons", st == 200 and not miss, "missing: %s" % ", ".join(miss) if miss else "all of %s run" % ", ".join(SMOKE_DAEMONS))
+    for w in SMOKE_LOG_WORDS:
+        st, txt = got["/bin/grep %s /proc/klog" % w]
+        hits = [z for z in txt.splitlines() if re.search(r"^\[\s*\d+\]", z)]
+        hits = crash_lines("\n".join(hits)) if hits else []
+        check("klog '%s'" % w, st == 200 and not hits, ("%d line(s), first: %s" % (len(hits), hits[0])) if hits else "none")
+    shot = os.path.join(out, "fotos", "smoke.png")
+    ok = br.photo(shot)
+    if ok and not args.dry:
+        try:
+            a = load_png(shot)
+            check("photo", distinct_colours(a) > 50, "%dx%d, %d colours" % (a.shape[1], a.shape[0], distinct_colours(a)))
+        except Exception as e:
+            check("photo", False, "unreadable PNG: %s" % e)
+    else:
+        check("photo", args.dry, "no photo (permit `screenshot = yes`?)")
+    bad = [r for r in res if not r[1]]
+    with open(os.path.join(out, "protokoll.md"), "w") as f:
+        f.write("# Dell smoke (%s, %.0f s)\n\n- result: **%d OK / %d FAIL**\n\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), time.time() - t0, len(res) - len(bad), len(bad)))
+        f.write("\n".join("- %s **%s**: %s" % ("OK" if o else "FAIL", n, w) for n, o, w in res) + "\n")
+    print("smoke: %d OK / %d FAIL in %.0f s -> %s" % (len(res) - len(bad), len(bad), time.time() - t0, out))
+    return 1 if bad else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["vm", "echt", "list", "eval"])
+    ap.add_argument("mode", choices=["vm", "echt", "smoke", "list", "eval"])
     ap.add_argument("outdir", nargs="?", default="")
     ap.add_argument("--res", default="3440x1440")
     ap.add_argument("--accel", default="kvm")
     ap.add_argument("--apps", default="")
     ap.add_argument("--device", default="osum-a4206b26eb96")
     ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--timeout", type=int, default=90, help="smoke: seconds to wait per bridge job")
     ap.add_argument("--keep-ppm", dest="keep_ppm", action="store_true", help="keep the raw screenshots (15 MB each)")
     ap.add_argument("--runner", default="", help="eval: an existing eh6 output directory")
     args = ap.parse_args()
@@ -710,6 +781,8 @@ def main():
     if args.mode == "eval":
         sel = [a for a in APPS if not args.apps or a["id"] in args.apps.split(",")]
         return evaluate_vm(args.runner, os.path.abspath(args.outdir), sel, args)
+    if args.mode == "smoke":
+        return run_smoke(args)
     return run_echt(args)
 
 
