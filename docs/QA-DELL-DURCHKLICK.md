@@ -49,8 +49,22 @@ Exit code 0 = every app OK. Remove the directory afterwards (`rm -rf /tmp/dwalk 
    must show the desktop with the taskbar; if a lock screen or the login stands there, stop.
 4. **Run:** `python3 tools/qa/dell_walk.py echt /tmp/dwalk-echt` (or `bash tools/qa/dell_walk.sh echt ...`).
    It re-checks step 1 itself and sends nothing when the device is offline. `--dry` prints the jobs only.
-   Per app: photo -> click start (24, H-20) -> scan codes of the search word -> Return -> wait 10 s ->
-   photo -> `ps` diff -> `log -l warn -n 40` -> kill the new process -> photo.
+   Per app (r547, repaired after the first real run on 11.10.2026):
+   - **Permit before EVERY photo:** the Dell allows ONE photo per `/bin/jarvisctl screenshot` (60 s). `Bruecke.photo`
+     sends that `command` job first, every single time.
+   - **Recognise the app by a NEW PID:** apps show as `-` in `ps` (the bundle's `start`), only the Terminal is `sh`, the
+     task manager calls them `start`. The script diffs two `ps` listings and ignores `ps/log/kill/...` themselves.
+   - Photo -> click start (24, H-20) -> scan codes of the search word -> Return -> wait 10 s -> photo -> `ps` diff ->
+     `log -l warn -n 40`.
+   - **Window steps** (maximise, restore, drag by the title bar, close with X): the window rect comes from the PHOTO
+     (`window_rect`: bounding box of what changed between the "before" and the "open" photo), the buttons sit
+     24 / 70 px from its right edge and 16 px below its top edge -- no fixed Y per window (the 1024x768 Dell puts every
+     window somewhere else). Each step is judged on the next photo: maximise = box >= 90 % of the screen, restore = box
+     back near the old one, drag = box moved >= 30 px, X = process gone or screen like before.
+   - Then `kill <new pid>` for whatever is left (kill closes the window) -> photo `*-8-zu.png`.
+   - Three terminals (`terminal`, `terminal2`, `terminal3`): the first start that makes no window (r543) shows as
+     "no new process / the screen did not change".
+   - Protocol: OK / FEHLER per app, the step results in the reason text and in `protokoll.json` (`info.steps`).
 5. **Photo per step:** the PNGs land in `fotos/`. JARVIS looks at the `*-2-offen.png` of each failed app
    (`view_image`) before writing the verdict; the pixel diff only says "something changed".
 6. **Protocol:** `protokoll.md` (OK/FEHLER per app, scope DELL). Copy findings into the roadmap; findings that

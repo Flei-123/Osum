@@ -16,6 +16,16 @@
 //
 // If the kernel cannot open a window (no desktop, all slots taken) the
 // shell still starts -- on the console, exactly as before.
+//
+// r543 (Dell, 11.10.2026): CONSOLE APPS GET THEIR OWN WINDOW TOO. The
+// "Editor" bundle starts /bin/edit, a program for a tty. Started from the
+// start menu it had no tty of its own and wrote into the boot terminal
+// window ("edit New file" on top of the shell). A bundle of such a program
+// (`console.txt`, tools/k15/bundle.py) is now a SCRIPT whose first line is
+// `#!/bin/term -c/bin/edit`: the kernel runs `/bin/term -c/bin/edit
+// /apps/editor.osp/start [args]`, term opens the window and runs the
+// program named after `-c` instead of the shell. argv[2] is the script's own
+// path (shebang rule) and is NOT passed on; the rest is.
 
 profile kernel
 
@@ -33,7 +43,26 @@ fn u_start(args: u64) -> u64 {
     var e_full: [u8; 49] = "term: no free terminal slot, close a terminal\0\0\0\0"
     var path: [u8; 8] = "/bin/sh\0"
     var a0: [u8; 3] = "sh\0"
-    var argv: [u64; 2] = [0; 2]
+    var argv: [u64; 8] = [0; 8]
+    var prog: u64 = (&path[0]) as u64
+    var nargs: u64 = 1
+    argv[0] = (&a0[0]) as u64
+    // `-c<program>`: run that program instead of the shell (console app bundles)
+    let argc: u64 = ulib.arg_count(args)
+    if argc > 1 {
+        let a1: u64 = ulib.arg_at(args, 1)
+        if *(a1 as *mut u8) == 45 && *((a1 + 1) as *mut u8) == 99 && *((a1 + 2) as *mut u8) != 0 {
+            prog = a1 + 2
+            argv[0] = prog
+            // argv[2] is the script path (shebang): skipped; the rest is forwarded
+            var k: u64 = 3
+            while k < argc && nargs < 6 {
+                argv[(nargs) as usize] = ulib.arg_at(args, k)
+                nargs = nargs + 1
+                k = k + 1
+            }
+        }
+    }
     let r: u64 = ulib.sys(SYS_OSUM_TERMNEW, 0, 0, 0)
     if ulib.bad(r) {
         if r != ENOSYS_NEG {
@@ -53,8 +82,7 @@ fn u_start(args: u64) -> u64 {
         ulib.say((&e_win[0]) as u64)
         ulib.nl()
     }
-    argv[0] = (&a0[0]) as u64
-    argv[1] = 0
-    ulib.sys(SYS_EXECVE, (&path[0]) as u64, (&argv[0]) as u64, 0)
+    argv[(nargs) as usize] = 0
+    ulib.sys(SYS_EXECVE, prog, (&argv[0]) as u64, 0)
     return 127
 }

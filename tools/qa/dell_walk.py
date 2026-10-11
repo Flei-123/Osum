@@ -52,10 +52,13 @@ APPS = [
     dict(id="terminal2", osp="terminal", name="Terminal (second window)", term="terminal", bin="sh", prog="sh",
          known="multi-terminal: worker A (tools/term/multi.sh)",
          acts=["warte 3", "klick_body", "tippe echo zwei", "taste ret", "warte 2", "foto {id}-3-echo"]),
+    dict(id="terminal3", osp="terminal", name="Terminal (third window)", term="terminal", bin="sh", prog="sh",
+         known="multi-terminal: worker A (tools/term/multi.sh)",
+         acts=["warte 3", "klick_body", "tippe echo drei", "taste ret", "warte 2", "foto {id}-3-echo"]),
     dict(id="editor", osp="editor", name="Editor", term="editor", bin="edit", prog="edit",
          acts=["warte 4", "klick_body", "tippe hello", "warte 2", "foto {id}-3-getippt",
                "taste ctrl-x", "warte 2", "foto {id}-4-ctrl-x"]),
-    dict(id="nedit", osp="nedit", name="Editor+", term="editor+", bin="nedit", prog="nedit",
+    dict(id="nedit", osp="nedit", name="Editor+", term="nedit", bin="nedit", prog="nedit",
          acts=["warte 3", "klick_body", "tippe hallo", "warte 2", "foto {id}-3-getippt"]),
     dict(id="taskmgr", osp="taskmgr", name="Task Manager", term="task", bin="taskmgr", prog="taskmgr ps kill",
          acts=["warte 6", "foto {id}-3-nach-6s"]),
@@ -420,6 +423,9 @@ class Bruecke:
         return 0, "", b"timeout"
 
     def photo(self, path):
+        """One photo. The screenshot permit of the Dell lasts ONE photo / 60 s (`jarvisctl screenshot`), so it is
+        asked for before EVERY photo, never once per run (r547)."""
+        self.job("command", "/bin/jarvisctl screenshot")
         st, status, body = self.job("photo")
         if st == 200 and body[:4] == b"\x89PNG":
             with open(path, "wb") as f:
@@ -446,6 +452,62 @@ class Bruecke:
         self.job("input", "knopf 1 0")
 
 
+    def drag(self, x1, y1, x2, y2):
+        self.job("input", "maus %d %d" % (x1, y1))
+        self.job("input", "knopf 1 1")
+        self.job("input", "maus %d %d" % ((x1 + x2) // 2, (y1 + y2) // 2))
+        self.job("input", "maus %d %d" % (x2, y2))
+        self.job("input", "knopf 1 0")
+
+
+# ps of the Dell: `PID PPID STATE ... NAME`. Apps show up with the name `-` (the bundle's `start`), only the Terminal is
+# `sh`, and the task manager calls them `start` -- so an app is recognised by a NEW PID, never by its name (r547).
+PS_RE = re.compile(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+\S+\s+\d+\s+\d+\s+\S+\s+(.*)")
+PS_TOOLS = ("ps", "log", "kill", "tail", "jarvisctl", "cat", "head")
+
+
+def parse_ps(text):
+    """{pid: (ppid, state, name)} from the output of `/bin/ps`"""
+    out = {}
+    for z in text.splitlines():
+        m = PS_RE.match(z)
+        if m:
+            out[int(m.group(1))] = (int(m.group(2)), m.group(3), m.group(4).strip())
+    return out
+
+
+def new_pids(before, after):
+    """PIDs that appeared between two ps listings (tools like ps/log themselves excluded)"""
+    return {k: v for k, v in after.items() if k not in before and v[2].split(" ")[0] not in PS_TOOLS}
+
+
+def window_rect(before_png, after_png, thresh=30):
+    """The window that appeared between two photos: bounding box (x0, y0, x1, y1) of the rows/columns that changed
+    in most of their length -- the window frame, not the soft shadow. None when nothing changed. The title bar Y is
+    taken from THIS box (every window stands somewhere else on the 1024x768 Dell)."""
+    import numpy as np
+    a, b = load_png(before_png), load_png(after_png)
+    if a.shape != b.shape:
+        return None
+    m = np.abs(a - b).max(axis=2) > thresh
+    if m.sum() < 400:
+        return None
+    rows, cols = m.sum(axis=1), m.sum(axis=0)
+    ry = np.where(rows >= 0.5 * rows.max())[0]
+    cx = np.where(cols >= 0.5 * cols.max())[0]
+    if len(ry) == 0 or len(cx) == 0:
+        return None
+    return int(cx[0]), int(ry[0]), int(cx[-1]), int(ry[-1])
+
+
+def buttons(rect):
+    """Close / maximise / minimise button and the drag point from a window rect (the buttons sit right at the top of the
+    title bar: 24 / 70 / 116 px from the right edge, 16 px below the top edge -- measured on the Dell photos)"""
+    x0, y0, x1, y1 = rect
+    ty = y0 + 16
+    return dict(close=(x1 - 24, ty), maxi=(x1 - 70, ty), mini=(x1 - 116, ty), drag=(x0 + (x1 - x0) // 3, ty))
+
+
 def png_size(path):
     with open(path, "rb") as f:
         d = f.read(32)
@@ -459,6 +521,9 @@ def load_png(path):
 
 
 def run_echt(args):
+    """The walk on the REAL Dell. r547: (1) a permit before EVERY photo (Bruecke.photo), (2) an app is a NEW PID in ps (the
+    name is `-`), (3) per window: maximise, restore, drag, close with the buttons found in THE PHOTO (window_rect), then
+    kill what is left, (4) three terminals, (5) OK / FEHLER per app and per window step in the protocol."""
     out = os.path.abspath(args.outdir)
     os.makedirs(out, exist_ok=True)
     br = Bruecke(args.device, dry=args.dry)
@@ -475,42 +540,104 @@ def run_echt(args):
     if not br.photo(first) and not args.dry:
         print("ABORT: no photo (is `screenshot = yes` in the permission list?)")
         return 3
-    W, H = png_size(first) if os.path.exists(first) else (3440, 1440)
+    W, H = png_size(first) if os.path.exists(first) else (1024, 768)
     start = (24, H - 20)
+    wait = (lambda t: None) if args.dry else time.sleep
     res, fails_in_row = [], 0
+
+    def ps_now():
+        return parse_ps(br.job("command", "/bin/ps")[2].decode("latin1"))
+
     for a in apps:
         i = a["id"]
-        pre, post, zu = (os.path.join(shotdir, "%s-%s.png" % (i, k)) for k in ("0-vorher", "2-offen", "8-zu"))
-        reasons = []
-        ps0 = br.job("command", "/bin/ps")[2].decode("latin1")
+        shot = lambda k: os.path.join(shotdir, "%s-%s.png" % (i, k))
+        pre, post = shot("0-vorher"), shot("2-offen")
+        reasons, steps = [], []
+        ps0 = ps_now()
         br.photo(pre)
         br.click(*start)
-        time.sleep(3 if not args.dry else 0)
+        wait(3)
         br.keys(a["term"])
         br.key("ret")
-        time.sleep(10 if not args.dry else 0)
+        wait(10)
         br.photo(post)
-        ps1 = br.job("command", "/bin/ps")[2].decode("latin1")
+        ps1 = ps_now()
         log = br.job("command", "/bin/log -l warn -n 40")[2].decode("latin1")
         if args.dry:
-            continue
-        d = pixel_diff(load_png(pre), load_png(post))
-        if d < 0.003:
-            reasons.append("the screen did not change after the start (diff %.4f)" % d)
-        new = [z for z in ps1.splitlines() if z not in ps0.splitlines()]
-        if not any(a["bin"] in z for z in new):
-            reasons.append("no new process `%s` in ps" % a["bin"])
+            rect = (100, 100, 700, 500)
+        else:
+            d = pixel_diff(load_png(pre), load_png(post))
+            if d < 0.003:
+                reasons.append("the screen did not change after the start (diff %.4f)" % d)
+            rect = window_rect(pre, post)
+        fresh = new_pids(ps0, ps1)
+        if not fresh and not args.dry:
+            reasons.append("no new process after the start (apps show as `-` in ps, the terminal as `sh`; looked for a new PID)")
         c = crash_lines(log)
         if c:
             reasons.append("kernel log: " + " | ".join(c[:2]))
-        for z in new:                       # close = kill the new process (window geometry is unknown here)
-            m = re.match(r"\s*(\d+)\s", z)
-            if m and a["bin"] in z:
-                br.job("command", "/bin/kill " + m.group(1))
-        time.sleep(3)
-        br.photo(zu)
+        # ---- window steps: only when a window was found in the photo
+        if rect is None and not args.dry:
+            steps.append(("window", False, "no window found in the photo (nothing to maximise / drag / close)"))
+        elif rect is not None and not reasons:
+            bt = buttons(rect)
+            # maximise
+            br.click(*bt["maxi"])
+            wait(2)
+            mx = shot("3-max")
+            br.photo(mx)
+            r2 = window_rect(pre, mx) if not args.dry else (0, 0, W, H)
+            steps.append(("maximise", bool(r2 and r2[2] - r2[0] >= 0.9 * W),
+                          "window box after: %s (screen %dx%d)" % (r2, W, H)))
+            # restore (the maximised window's buttons: same distance from the right edge, top edge 0)
+            bm = buttons(r2 if r2 else (0, 0, W, H))
+            br.click(*bm["maxi"])
+            wait(2)
+            rs = shot("4-restore")
+            br.photo(rs)
+            r3 = window_rect(pre, rs) if not args.dry else rect
+            same = bool(r3 and abs(r3[0] - rect[0]) < 24 and abs(r3[1] - rect[1]) < 24 and abs(r3[2] - rect[2]) < 24)
+            steps.append(("restore", same, "window box %s, before the maximise %s" % (r3, rect)))
+            cur = r3 if r3 else rect
+            # drag by the title bar
+            bd = buttons(cur)
+            dx, dy = (60, 60) if cur[2] + 60 < W and cur[3] + 60 < H - 40 else (-60, -60)
+            br.drag(bd["drag"][0], bd["drag"][1], bd["drag"][0] + dx, bd["drag"][1] + dy)
+            wait(2)
+            dr = shot("5-ziehen")
+            br.photo(dr)
+            r4 = window_rect(pre, dr) if not args.dry else cur
+            moved = bool(r4 and (abs(r4[0] - cur[0]) >= 30 or abs(r4[1] - cur[1]) >= 30))
+            steps.append(("drag", moved, "window box %s -> %s" % (cur, r4)))
+            # close with X
+            bc = buttons(r4 if r4 else cur)
+            br.click(*bc["close"])
+            wait(3)
+            zx = shot("6-x")
+            br.photo(zx)
+            ps2 = ps_now()
+            gone = all(k not in ps2 for k in fresh)
+            clean = (not args.dry) and pixel_diff(load_png(pre), load_png(zx)) < 0.02
+            steps.append(("close (X)", gone or clean or args.dry,
+                          "process gone: %s, screen like before: %s" % (gone, clean)))
+        for n, ok, why in steps:
+            if not ok:
+                reasons.append("%s: %s" % (n, why))
+        # ---- kill what is left (kill closes the window)
+        ps3 = ps_now()
+        for k in fresh:
+            if k in ps3:
+                br.job("command", "/bin/kill %d" % k)
+        wait(3)
+        br.photo(shot("8-zu"))
+        if args.dry:
+            continue
+        for n, ok, why in steps:
+            print("  step %-10s %s  %s" % (n, "OK    " if ok else "FEHLER", why))
         res.append(dict(kind="app", id=i, name=a["name"], status="FEHLER" if reasons else "OK",
-                        reasons=reasons, info={}, scope="DELL" if reasons else "-", known=a.get("known", "")))
+                        reasons=reasons, info={"steps": ", ".join("%s=%s" % (n, "ok" if ok else "FEHLER") for n, ok, _ in steps)},
+                        scope="DELL" if reasons else "-", known=a.get("known", "")))
+        print("%-10s %s %s" % (i, res[-1]["status"], "; ".join(reasons)[:160]), flush=True)
         fails_in_row = fails_in_row + 1 if reasons else 0
         if fails_in_row >= 4:
             print("ABORT: 4 apps in a row failed -- the machine is probably hung (see Not-Aus in the doc)")
