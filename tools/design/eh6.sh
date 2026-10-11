@@ -79,6 +79,8 @@ pins=""
 moreprogs=""
 # r545: `tzrule=eu|none` adds the `rule=` line the personal image has in /etc/time.conf (empty = no line, the old test image)
 tzrule=""
+# AA-CORNER: extra lines for /etc/theme.conf, `;`-separated (e.g. themeextra="aa_old=1"); empty = none
+themeextra=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
 # genau die beiden in Justins Befunden vorkommen.
@@ -111,6 +113,7 @@ for a in "$@"; do
         pins=*) pins=${a#*=} ;;
         moreprogs=*) moreprogs=${a#*=} ;;
         tzrule=*) tzrule=${a#*=} ;;
+        themeextra=*) themeextra=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -197,6 +200,7 @@ printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\
     "$mode" "$accent"
   if [ "$schatten" = an ]; then printf 'shadow=on\n'; else printf 'shadow=off\n'; fi
   [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
+  [ -n "$themeextra" ] && printf '%s\n' "${themeextra//;/$'\n'}"
 } > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 [ -z "$tzrule" ] || printf 'rule=%s\n' "$tzrule" >> "$OUT/time.conf"
