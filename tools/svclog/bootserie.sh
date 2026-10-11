@@ -13,7 +13,7 @@ N=${1:-10}
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 export DESIGNBUILD="${DESIGNBUILD:-$TMPD/build}"
-JARVIS_CONF="${JARVIS_CONF:-assets/jarvis/rechte-justin.conf}" bash tools/usbimg/build.sh "$TMPD/img" > "$TMPD/build.txt" 2>&1 || { echo "image build failed"; tail -15 "$TMPD/build.txt"; exit 1; }
+FS_BLOCKS="${FS_BLOCKS:-102400}" JARVIS_CONF="${JARVIS_CONF:-assets/jarvis/rechte-justin.conf}" bash tools/usbimg/build.sh "$TMPD/img" > "$TMPD/build.txt" 2>&1 || { echo "image build failed"; tail -15 "$TMPD/build.txt"; exit 1; }
 IMG=$(ls "$TMPD"/img/*usb*.img | head -1)
 echo "image: $(basename "$IMG") $(stat -c%s "$IMG") octets"
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)

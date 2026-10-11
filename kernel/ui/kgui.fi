@@ -3485,13 +3485,15 @@ static mut svc_open: [u64; 4] = [0; 4]
 // `svclogmax=<octets>` (boot word) is the size at which a file rotates to <name>.1; 0 = no files (control).
 static mut svc_max: u64 = 65536
 static mut svc_next: u64 = 0
-static mut jv_pid: u64 = 0
+static mut jv_pid: u64 = 0 // task SLOT of the helper (`elf.spawn` returns the slot, not the pid)
+static mut jv_tpid: u64 = 0 // its real process number, read at the spawn: the stamp of this incarnation
 static mut jv_born: u64 = 0
 static mut jv_next: u64 = 0
 static mut jv_wait: u64 = 500
 static mut jv_armed: u64 = 0
 static mut jv_dbg: u64 = 0
-// `jvnoname`: control sample -- the watch does not check the program name (the old behaviour, blind to pid reuse).
+// `jvnoname`: control sample -- the watch looks the SLOT up as a process number (`find_pid`, the original mistake) and does
+// not compare the stamp: it watches whichever task carries that number, so the end of the helper goes unnoticed.
 static mut jv_noname: u64 = 0
 static mut jv_killafter: u64 = 0
 static mut svc_mode: u64 = 0
@@ -3986,9 +3988,10 @@ fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
     // Umbenennen eines Programms daran denken.
     if pid != 0 {
         // `find_pid` meldet den Fehlschlag mit MAX_TASKS, nicht mit -1.
-        let sl: u64 = sched.find_pid(state, pid)
-        if sl < kstate.MAX_TASKS {
-            sched.tset(state, sl, sched.T_OOMSAFE, 1)
+        // r-jvdouble: `pid` is the task SLOT (what `elf.spawn` returns), not a process number -- `find_pid` here
+        // marked whichever task happened to carry that number (settingsd instead of jarvisd on the personal image).
+        if pid < kstate.MAX_TASKS {
+            sched.tset(state, pid, sched.T_OOMSAFE, 1)
         }
     }
     protokoll_binden(state, pid)
@@ -4451,6 +4454,7 @@ fn desk_start(state: u64) -> u64 {
         let _j: u64 = desk_spawn_svc(state, 3, (&p_jv[0]) as u64,
             (&a_jv[0]) as u64, 8, 1)
         jv_pid = _j
+        jv_tpid = jv_stamp(state, _j)
         jv_born = kstate.get(state, kstate.TICKS)
         if fs.path(state, (&p_jv[0]) as u64) != 0 {
             jv_armed = 1
@@ -5252,44 +5256,34 @@ fn shell_start(state: u64) -> u64 {
 fn jv_backoff(state: u64, now: u64) {
     jv_next = now + jv_wait
     var s_b: [u8; 30] = "desk: jarvisd restart in (s)=\0"
+    let z_b: u64 = serial.line_at(sched.hier(state))
     serial.puts((&s_b[0]) as u64)
     serial.dec(jv_wait / 100)
     serial.nl()
+    serial.line_clear(z_b)
     jv_wait = jv_wait * 2
     if jv_wait > 6000 {
         jv_wait = 6000
     }
 }
 
-// PID REUSE (r-svclog2). Is task slot `sl` still the process the desktop started as `jarvisd`?
-// 0 = cannot tell (arguments not mapped yet), 1 = yes, 2 = no: the pid now belongs to another program.
+// SLOT AND PID ARE TWO NUMBERS (r-jvdouble, 10.10.2026).
 //
-// WHY THIS EXISTS: `jarvisd` without permissions.conf (or without a server line) prints a message and
-// exits with 2 at once. Its corpse is reaped by somebody else and the pid is handed out again (measured:
-// `desk: start /bin/jarvisd pid=5`, then `launcher: pid=5`). The watch looked up the pid, found a live
-// task (the launcher) and never saw the end -- it looked as if `jarvisd` stayed in SLEEP/READY for ever.
-fn jv_same_program(state: u64, sl: u64) -> u64 {
-    let frame: u64 = proc.translate(state, sl, proc.ARGS_BASE)
-    if frame == 0 {
+// `elf.spawn` -- and so `desk_spawn_svc` -- returns the TASK SLOT, not the process number. The watch used to
+// hand that number to `sched.find_pid`, which looks for a process number. The two are equal only on a small machine
+// where nothing has ended yet; on the personal image the boot consumes pids before the desktop starts its
+// services (slot 16 = pid 27) and `find_pid(16)` found `settingsd`. The program name check of r-svclog2 then said
+// "not jarvisd" about the wrong task, the watch declared the running helper dead and started a second one
+// ("already running -- not starting a second one", exit, back-off 10, 20, 40 ... for ever).
+//
+// NOW: the watch keeps the SLOT (where to look) and the PROCESS NUMBER read from that slot at the spawn (who we
+// started). Process numbers are never handed out twice, so "the slot holds another number" is the exact
+// definition of "our process ended and the slot was reused" -- without reading anything of the program's memory.
+fn jv_stamp(state: u64, slot: u64) -> u64 {
+    if slot == 0 || slot >= kstate.MAX_TASKS {
         return 0
     }
-    let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > proc.MAX_ARGS {
-        return 0
-    }
-    let ptr: u64 = __mmio_read64((frame + 8) as *mut u64)
-    if ptr < proc.ARGS_BASE || ptr + 8 > proc.ARGS_BASE + 4096 {
-        return 0
-    }
-    var want: [u8; 8] = "jarvisd\0"
-    var i: u64 = 0
-    while i < 8 {
-        if kstate.get8(frame + (ptr - proc.ARGS_BASE) + i) != (want[i as usize] as u64) {
-            return 2
-        }
-        i = i + 1
-    }
-    return 1
+    return sched.tget(state, slot, sched.T_PID)
 }
 
 fn jarvis_watch(state: u64) {
@@ -5298,22 +5292,27 @@ fn jarvis_watch(state: u64) {
     }
     let now: u64 = kstate.get(state, kstate.TICKS)
     if jv_pid != 0 {
-        let sl: u64 = sched.find_pid(state, jv_pid)
+        var sl: u64 = jv_pid
+        if jv_noname != 0 {
+            // control sample: the original mistake -- the slot number looked up as a process number
+            sl = sched.find_pid(state, jv_pid)
+        }
         var dead: bool = false
         if sl >= kstate.MAX_TASKS {
             dead = true
         } else {
             let stt: u64 = sched.tget(state, sl, sched.T_STATE)
+            let stamp_now: u64 = sched.tget(state, sl, sched.T_PID)
             if jv_killafter != 0 && stt != sched.S_ZOMBIE && now - jv_born >= jv_killafter {
                 var s_k: [u8; 21] = "desk: jarvisd killed\0"
                 serial.puts((&s_k[0]) as u64)
                 serial.nl()
-                let _k: u64 = sched.kill_other(state, sl, jv_pid, 9)
+                let _k: u64 = sched.kill_other(state, sl, jv_tpid, 9)
                 jv_born = now
                 return
             }
-            if jv_noname == 0 && stt != sched.S_ZOMBIE && stt != sched.S_FREE && jv_same_program(state, sl) == 2 {
-                // the pid was handed out again: our process ended long ago
+            if jv_noname == 0 && stt != sched.S_FREE && stamp_now != jv_tpid {
+                // the slot belongs to another process now: ours ended (and was reaped) long ago
                 dead = true
             } else if stt == sched.S_ZOMBIE {
                 let _r: bool = proc.reap(state, sl)
@@ -5327,9 +5326,11 @@ fn jarvis_watch(state: u64) {
             return
         }
         var s_e: [u8; 25] = "desk: jarvisd ended pid=\0"
+        let z_e: u64 = serial.line_at(sched.hier(state))
         serial.puts((&s_e[0]) as u64)
         serial.dec(jv_pid)
         serial.nl()
+        serial.line_clear(z_e)
         if now - jv_born >= 12000 {
             jv_wait = 500
         }
@@ -5349,6 +5350,7 @@ fn jarvis_watch(state: u64) {
         return
     }
     jv_pid = pid
+    jv_tpid = jv_stamp(state, pid)
     jv_born = now
 }
 
