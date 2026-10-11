@@ -1,7 +1,7 @@
 # DESIGN-TOKENS — one place for the numbers of the look (11.10.2026, round W-TOKENS)
 
 Source of truth for the NEW code: **`lib/fui/tokens.fi`** (integers only, nothing imported, works in
-`profile kernel` and `profile app`). Check: `bash tools/tokens/run.sh` (76 claims, seconds, no QEMU:
+`profile kernel` and `profile app`). Check: `bash tools/tokens/run.sh` (80 claims, seconds, no QEMU:
 the library is built for the build host by `tools/tokens/host.fi` and compared with an independent
 Python model, true-sRGB contrast, scale 1 = scale 2 / 2).
 
@@ -77,6 +77,8 @@ grain from `FM_BLURTINT/FM_BLURNOISE`. Radius 0 = off: `blur=0` in `/etc/theme.c
 turns every frosted surface into a flat plate. Measured: blur per call 0.97 ms, start menu open/close largest frame
 13.1 ms (target <= 16).
 
-Fallback: `blur=0` (setting) — and the token `glass_blur(.., off = true)` returns 0 for every surface.
+Fallback: `blur=0` (setting) — and NEW the kernel word **`noglass`** (`kstate.M_NOGLASS`, bit 1087): `wm.set_form(FM_BLUR)` is
+forced to 0 whatever user space sends, so every frosted surface is a flat plate; `STATIONAER_EXTRA=noglass bash tools/design/stationaer.sh`
+measures it. The token `glass_blur(.., off = true)` returns 0 for every surface.
 
 (Progress of this round is in `reports/20261011-W-TOKENS.md`.)
