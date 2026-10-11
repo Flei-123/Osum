@@ -314,10 +314,41 @@ fn clus_lba(state: u64, m: u64, c: u64) -> u64 {
 
 // Der Eintrag eines Verbands in der Zuordnungstafel. Vier Oktette,
 // kleinendig, und die obersten vier Bit gehoeren nicht dazu.
+// r548: the FAT sector in FATBUF is remembered (mount + sector). A cluster
+// allocation used to read and write the same FAT sector about ten times
+// over the PIO disk (one port exit per word); on a 512-byte-cluster ESP
+// that made `install` copy the 8 MB kernel at ~17 KB/s and ran into the
+// kernel wait bound. Writes stay write-through, so the disk is never behind.
+// The tag is dropped wherever FATBUF is used for something else or the
+// mount changes.
+static mut fat_tag_m: u64 = 0
+static mut fat_tag_lba: u64 = 0
+// 1 = the next fresh cluster is overwritten in full by the caller (spc 1,
+// whole-sector write), so zeroing it first is a wasted disk write.
+static mut fat_skip_zero: u64 = 0
+
+fn fat_tag_drop() {
+    fat_tag_m = 0
+    fat_tag_lba = 0
+}
+
+fn fat_load(state: u64, m: u64, lba: u64) -> bool {
+    if fat_tag_m == m + 1 && fat_tag_lba == lba + 1 {
+        return true
+    }
+    fat_tag_drop()
+    if !rd(state, m, lba, buf(state, FATBUF)) {
+        return false
+    }
+    fat_tag_m = m + 1
+    fat_tag_lba = lba + 1
+    return true
+}
+
 fn fat_get(state: u64, m: u64, c: u64) -> u64 {
     let off: u64 = c * 4
     let lba: u64 = sget(state, m, S_FATLBA) + off / BS
-    if !rd(state, m, lba, buf(state, FATBUF)) {
+    if !fat_load(state, m, lba) {
         return 0
     }
     return le32(buf(state, FATBUF) + (off % BS)) & MASK28
@@ -326,20 +357,22 @@ fn fat_get(state: u64, m: u64, c: u64) -> u64 {
 // Schreiben heisst: in JEDE Tafel schreiben. Ein Dateisystem, dessen
 // zweite Tafel nicht mitgeht, faellt bei `fsck.fat` durch -- und der
 // naechste Treiber, der die zweite nimmt, sieht eine andere Platte.
+// r548: the sector is read once (first table) and written to every table.
 fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
     let off: u64 = c * 4
     let secs: u64 = sget(state, m, S_FATSEC)
     let n: u64 = sget(state, m, S_NFATS)
+    let lba0: u64 = sget(state, m, S_FATLBA) + off / BS
+    if !fat_load(state, m, lba0) {
+        return false
+    }
+    let at: u64 = buf(state, FATBUF) + (off % BS)
+    let keep: u64 = le32(at) & 0xF0000000
+    put32(at, keep | (v & MASK28))
     var k: u64 = 0
     while k < n {
-        let lba: u64 = sget(state, m, S_FATLBA) + k * secs + off / BS
-        if !rd(state, m, lba, buf(state, FATBUF)) {
-            return false
-        }
-        let at: u64 = buf(state, FATBUF) + (off % BS)
-        let keep: u64 = le32(at) & 0xF0000000
-        put32(at, keep | (v & MASK28))
-        if !wr(state, m, lba, buf(state, FATBUF)) {
+        if !wr(state, m, lba0 + k * secs, buf(state, FATBUF)) {
+            fat_tag_drop()
             return false
         }
         k = k + 1
@@ -453,7 +486,7 @@ fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
             if !fat_set(state, m, cur, fresh) {
                 return 0
             }
-            if !clus_zero(state, m, fresh) {
+            if fat_skip_zero == 0 && !clus_zero(state, m, fresh) {
                 return 0
             }
             cur = fresh
@@ -561,6 +594,7 @@ fn sync__inner(state: u64, m: u64) -> u64 {
             idx = idx + 1
         }
     }
+    fat_tag_drop()
     sset(state, m, S_FREE, free)
     sset(state, m, S_KNOWN, 1)
     fsinfo_store(state, m, true)
@@ -568,6 +602,7 @@ fn sync__inner(state: u64, m: u64) -> u64 {
 }
 
 fn release(state: u64, m: u64) {
+    fat_tag_drop()
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
@@ -595,6 +630,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     var s_c: [u8; 12] = " clusters=\0\0"
     var s_r: [u8; 8] = " root=\0\0"
     let base: u64 = mnt.first(state, m)
+    fat_tag_drop()
     sset(state, m, S_VALID, 0)
     if !rd(state, m, base, buf(state, DIRBUF)) {
         return 0
@@ -1191,7 +1227,12 @@ fn f_write__inner(state: u64, m: u64, node: u64, off: u64, src: u64,
     var done: u64 = 0
     while done < len {
         let pos: u64 = off + done
+        fat_skip_zero = 0
+        if spc == 1 && pos % BS == 0 && len - done >= BS {
+            fat_skip_zero = 1
+        }
         let c: u64 = chain_at(state, m, first, pos / csize, true)
+        fat_skip_zero = 0
         if c == 0 {
             done = len // kein Platz mehr -- was geschrieben ist, zaehlt
         } else {
