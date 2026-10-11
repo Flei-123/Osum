@@ -442,6 +442,44 @@ class Fahrer:
         print("foto %s FEHLGESCHLAGEN" % name)
         return False
 
+    # w-lock: BURST SERIES. `serie <click|idle> <n> <name>` sends (optionally) a left click and then
+    # n back-to-back `screendump`s in ONE write to the monitor, so the frames follow each other as
+    # fast as QEMU can write them (no sleeps, no size polling in between). Files: <name>-000.ppm ...
+    def serie(self, mode, n, name, frist=60.0):
+        cmds = []
+        if mode == "click":
+            cmds += ["mouse_button 1", "mouse_button 0"]
+        paths = []
+        for i in range(n):
+            pth = os.path.join(self.out, "%s-%03d.ppm" % (name, i))
+            if os.path.exists(pth):
+                os.unlink(pth)
+            paths.append(pth)
+            cmds.append("screendump %s" % pth)
+        self.s.sendall(("\n".join(cmds) + "\n").encode())
+        bis = time.time() + frist
+        for pth in paths:
+            letzte, ruhig = -1, 0
+            while time.time() < bis:
+                time.sleep(0.1)
+                try:
+                    jetzt = os.path.getsize(pth)
+                except OSError:
+                    continue
+                if jetzt == letzte and jetzt > 0:
+                    ruhig += 1
+                    if ruhig >= 2:
+                        break
+                else:
+                    ruhig, letzte = 0, jetzt
+            else:
+                print("serie %s FAILED at %s" % (name, pth))
+                self.leeren()
+                return False
+        self.leeren()
+        print("serie %s: %d frames" % (name, n))
+        return True
+
     # ------------------------------------------------ die Rechtecke
     def fenster(self, prog):
         """Der Ursprung der Malflaeche eines Programmfensters."""
@@ -1351,6 +1389,10 @@ def main():
                 sf.write("%d\t%.1f\t%s\n" % (len(lies(f.serial)), time.time(), arg))
         elif b == "foto":
             if not f.foto(arg):
+                fehler += 1
+        elif b == "serie":
+            sm, sn, snm = arg.split()
+            if not f.serie(sm, int(sn), snm):
                 fehler += 1
         else:
             print("unbekannter Befehl: %s" % z)

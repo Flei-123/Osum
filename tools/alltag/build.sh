@@ -69,6 +69,11 @@ desk_on=yes
 moncmds=""
 kbd_on=no
 warten=0
+# w-lock: `res=WxH` boots a VGA device of that size (+ `disp fbres=`), `uiscale=N` the UI scale,
+# `drive=<script>` runs tools/design/drive.py with that script instead of the plain `mon=` list.
+res=""
+uiscale=""
+drive=""
 platte=""
 bloecke=32768
 mager=no
@@ -101,6 +106,9 @@ for a in "$@"; do
 ${a#*=}" ;;
         kbd=*) kbd_on=${a#*=} ;;
         warten=*) warten=${a#*=} ;;
+        res=*) res=${a#*=} ;;
+        uiscale=*) uiscale=${a#*=} ;;
+        drive=*) drive=${a#*=} ;;
         platte=*) platte=${a#*=} ;;
         bloecke=*) bloecke=${a#*=} ;;
         mager=*) mager=${a#*=} ;;
@@ -343,10 +351,16 @@ else
     fi
     WAITFOR='^wm: hold'
 fi
+VGAARG=(-vga std)
+if [ -n "$res" ]; then
+    APPEND="$APPEND disp fbres=$res"
+    VGAARG=(-device "VGA,edid=on,xres=${res%x*},yres=${res#*x},vgamem_mb=32")
+fi
+[ -n "$uiscale" ] && [ "$uiscale" != 1 ] && APPEND="$APPEND uiscale=$uiscale"
 T0=$(date +%s%N)
 timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 -smp "${OSUM_SMP:-1}" \
     -append "$APPEND" \
-    -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
+    -serial "file:$OUT/serial.txt" -display none -no-reboot "${VGAARG[@]}" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
@@ -377,6 +391,9 @@ if [ -n "$moncmds" ]; then
     printf '%s\n' "$moncmds" | grep -v '^$' > "$OUT/mon2.txt"
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon2.txt" > "$OUT/mon2.log" 2>&1
     sleep 2
+fi
+if [ -n "$drive" ]; then
+    python3 -u tools/design/drive.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drive" > "$OUT/drive.log" 2>&1
 fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
