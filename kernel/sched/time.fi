@@ -422,6 +422,11 @@ static mut rtc_ist_utc: u64 = 0
 // Der ROHE Wert, wie er beim Start aus dem Baustein kam -- damit
 // `tz_anwenden` idempotent ist.
 static mut rtc_roh: u64 = 0
+// r544: 1 once `tz_anwenden` has converted with a known zone / once the
+// clock was set by somebody (set_utc): no conversion from the raw RTC
+// value after that.
+static mut tz_done: u64 = 0
+static mut clock_moved: u64 = 0
 
 fn set_tz(state: u64, minuten: u64) {
     if minuten > 1440 {
@@ -515,7 +520,17 @@ fn now_local(state: u64) -> u64 {
 // an einer zweiten Stelle aufruft.
 fn tz_anwenden(state: u64) {
     let roh: u64 = rtc_roh
+    // r544: `mode_of` (command line) runs BEFORE `time.init` (RTC read), so
+    // its call finds nothing here and returns; `kernel_main` calls this
+    // function again right after `init`. It used to be called only from
+    // `mode_of`, i.e. never effective: a hardware clock on local time was
+    // taken for UTC and the display went 2 h ahead until sntp fixed it.
     if roh == 0 {
+        return
+    }
+    // once is enough, and never after somebody set the clock (the offset
+    // would be taken off a value that is already UTC)
+    if tz_done != 0 || clock_moved != 0 {
         return
     }
     var utc: u64 = roh
@@ -534,6 +549,12 @@ fn tz_anwenden(state: u64) {
         }
     }
     kstate.set(state, kstate.TIME_BOOT, utc)
+    // A zone that is not known yet (no `tz=` on the boot line; it comes
+    // later from /etc/time.conf through SETTZ) leaves the door open: the
+    // next call with a zone does the one conversion.
+    if tz_offset != 0 || tz_rule != 0 || rtc_ist_utc != 0 {
+        tz_done = 1
+    }
 }
 
 // SETTING THE CLOCK (clock_settime, 227, root only; DAILY-DRIVER).
@@ -551,6 +572,7 @@ fn set_utc(state: u64, utc: u64) -> bool {
         return false
     }
     kstate.set(state, kstate.TIME_BOOT, utc -% up)
+    clock_moved = 1
     return true
 }
 

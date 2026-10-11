@@ -58,6 +58,10 @@ BASIS="osum vfs nokbd nosched noproc nofs noring3"
 # `-cpu SandyBridge` (SSE4.2, AES-NI, AVX -- aber kein AVX2) laeuft es.
 CPU=${OSUM_CPU:-max}
 NETZ=${OTA_NETZ:-}
+# $OSUM_RTC = QEMU's -rtc argument (e.g. "base=2026-10-11T11:00:00,clock=vm"):
+# the hardware clock the guest finds at boot (r544 clock tests)
+RTCARGS=()
+[ -n "${OSUM_RTC:-}" ] && RTCARGS=(-rtc "$OSUM_RTC")
 NETARGS=()
 if [ -n "$NETZ" ]; then
     NETARGS=(-netdev "user,id=otan0"
@@ -96,7 +100,7 @@ if [ "$WIE" = roh ]; then
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
     timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -append "$ZEILE" \
-        -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
+        -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     rc=$?
@@ -110,7 +114,7 @@ elif [ "$WIE" = iso ]; then
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
     timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
-        -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
+        -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
         "${ZWEITE[@]}" "${NETARGS[@]}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
@@ -158,7 +162,7 @@ else
     # limine.conf AUF DER PLATTE, die der Installer dorthin geschrieben
     # hat. Ein `-append` waere geschummelt -- dann haette der Wirt dem
     # Kern gesagt, was er tun soll, und nicht die Platte.
-    ARGS=(-machine pc -cpu "$CPU" -m "$MEM" -display none -no-reboot
+    ARGS=(-machine pc -cpu "$CPU" -m "$MEM" -display none -no-reboot "${RTCARGS[@]}"
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
           -serial "file:$OUT/$NAME.txt"
           -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0"
