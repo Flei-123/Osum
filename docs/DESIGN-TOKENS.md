@@ -1,7 +1,7 @@
 # DESIGN-TOKENS — one place for the numbers of the look (11.10.2026, round W-TOKENS)
 
 Source of truth for the NEW code: **`lib/fui/tokens.fi`** (integers only, nothing imported, works in
-`profile kernel` and `profile app`). Check: `bash tools/tokens/run.sh` (76 claims, seconds, no QEMU:
+`profile kernel` and `profile app`). Check: `bash tools/tokens/run.sh` (80 claims, seconds, no QEMU:
 the library is built for the build host by `tools/tokens/host.fi` and compared with an independent
 Python model, true-sRGB contrast, scale 1 = scale 2 / 2).
 

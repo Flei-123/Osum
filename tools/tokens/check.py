@@ -120,5 +120,19 @@ for dk, nm in ((0, "light"), (1, "dark")):
         for k in range(5) for wp in ((0, 255) if True else ()))
     chk("%s: text on tint over the WORST wallpaper (black/white) >= 4.5:1 (%.1f)" % (nm, worst), worst >= 4.5)
 
+print("== 7. drift guard: tokens agree with assets/shapes/osum.shape ==")
+import os
+shape = {}
+for ln in open(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "shapes", "osum.shape")):
+    if "=" in ln and not ln.lstrip().startswith("#"):
+        k, v = ln.strip().split("=", 1)
+        shape[k] = v
+chk("spacing xs/s/m/l = space(1,2,4,5)", [int(shape[k]) for k in ("spacing_xs", "spacing_s", "spacing_m", "spacing_l")] ==
+    [rows[(2, i, 1)] for i in (1, 2, 4, 5)])
+chk("font = type body", int(shape["font"]) == rows[(6, 1, 1)])
+chk("motion = D_NORMAL", int(shape["motion"]) == rows[(20, 1, 0)])
+chk("radius_button = R_MEDIUM, radius_window = R_LARGE", int(shape["radius_button"]) == rows[(1, 1, 1)]
+    and int(shape["radius_window"]) == rows[(1, 2, 1)])
+
 print("tokens: %d ok, %d fail" % (ok, bad))
 sys.exit(1 if bad else 0)
