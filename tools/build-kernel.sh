@@ -281,7 +281,7 @@ weg ntfs-aus
 # hat es jeden Serverbau gemeldet).
 # A-039: `vgpu` (drv/gpu/vgpu.fi) is graphics too -- only graphics files
 # import it, and the server image never had a single vgpu__ symbol.
-GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave cursor vgpu"
+GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave cursor vgpu beam"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         # RUNDE O-STRUKTUR: `rm -f` SCHWEIGT, wenn die Datei woanders

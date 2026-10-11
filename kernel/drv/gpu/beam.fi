@@ -1,0 +1,388 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/gpu/beam.fi -- W-VBLANK: BEAM SYNC. HOLD THE COPY OF A RECTANGLE BACK UNTIL THE RASTER IS OUT OF ITS WAY.
+//
+// WHY: on the Dell (Haswell HD 4600, VESA/GOP linear framebuffer, 3440x1440 in the stripe mode) there is no vblank interrupt and no page flip
+// (docs/VSYNC.md section 3). Every composed frame is copied from the back buffer to the card; while the copy runs the scan-out reads the new
+// rows above the copy cursor and the old ones below it. That is the horizontal tear. A copy cannot be made instantaneous, but it can be
+// placed where the raster is not: the raster moves down one line every few microseconds, so a copy of rows y..y+h is invisible as a tear when
+//   (a) the raster is already below y+h and needs longer to come round to y again than the copy lasts, or
+//   (b) the raster is above y and needs longer to reach y than the copy lasts.
+// Both say: "the raster is NOT inside the band y..y+h+margin, and the time until it enters the band is longer than the copy".
+//
+// WHAT TELLS WHERE THE RASTER IS: the Intel display engine's pipe registers in MMIO BAR0 of the GPU (PCI 00:02.0, class 03):
+//   PIPE_DSL      +0x70000 + 0x1000*pipe + 0x00   scan line counter (0 .. vtotal-1)
+//   PIPE_CONF     +0x70000 + 0x1000*pipe + 0x08   bit 31 = pipe enabled
+//   PIPE_STAT     +0x70000 + 0x1000*pipe + 0x24   vblank status bits (only read, for the log)
+//   PIPE_FRMCOUNT +0x70000 + 0x1000*pipe + 0x40   frame counter (Haswell)
+//   TRANS_VTOTAL  +0x60000 + 0x1000*pipe + 0x0C   (vtotal-1)<<16 | (vactive-1)
+// Nothing is written. A machine without such a GPU, with the display engine in a power well that is off (reads come back all ones or zero), or
+// with a counter that does not count never switches this on: `probe` must see DSL change many times, wrap at least twice (that gives the
+// frame period), stay below 8192 and agree with the screen height. Otherwise the state is 2 (off) and the copy path is exactly what it was.
+//
+// NOT MEASURED ON REAL HARDWARE (this was written without access to the Dell): the VM (QEMU std-vga) has no such registers, so there the state is
+// always 2. `fb: beam ...` lines in /proc/klog (`grep beam /proc/klog`) are what the Dell has to deliver; docs/VSYNC.md section 9 says how to read them.
+//
+// GUARD: a wait that ends at its deadline (1.3 frames) copies anyway; eight such timeouts in a row switch the whole thing off (state 3).
+
+import serial
+import lib.kstate
+import klog
+import bus.pci
+import arch.arch
+import arch.x86_64.apic
+import sched.time
+import gfx.fb
+
+export {
+    probe, wait, note, say, on, state_of
+}
+
+const VENDOR_INTEL: u64 = 0x8086
+const CLASS_DISPLAY: u64 = 0x03
+const PIPE_BASE: u64 = 0x70000
+const PIPE_STEP: u64 = 0x1000
+const R_DSL: u64 = 0x00
+const R_CONF: u64 = 0x08
+const R_STAT: u64 = 0x24
+const R_FRM: u64 = 0x40
+const TRANS_BASE: u64 = 0x60000
+const R_VTOTAL: u64 = 0x0C
+const DSL_MASK: u64 = 0x1FFF
+const MARGIN: u64 = 8
+const GIVE_UP: u64 = 8
+const MAX_TRIES: u64 = 3
+const PROBE_MS: u64 = 80
+const RATE_START: u64 = 200 * 64
+
+static mut q_beam: [u8; 5] = "beam\0"
+
+fn src() -> u64 {
+    return (&q_beam[0]) as u64
+}
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+// 1 = beam sync is switched on and holds copies back.
+fn on(state: u64) -> bool {
+    return fb.bm(state, fb.S_BM_ON) == 1
+}
+
+fn state_of(state: u64) -> u64 {
+    return fb.bm(state, fb.S_BM_ON)
+}
+
+// Cycles -> microseconds (0 while the clock is not calibrated).
+fn cyc_us(state: u64, cyc: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return 0
+    }
+    return cyc / (kh / 1000)
+}
+
+// The Intel display device: index in the PCI table, or MAX_DEV.
+fn find_gpu(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_VENDOR) == VENDOR_INTEL && pci.get(state, i, pci.E_CLASS) == CLASS_DISPLAY {
+            return i
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// What one pipe's registers did during the probe window.
+// Result words (written through `out`, 8 words): 0 = verdict (1 counts), 1 = dsl min, 2 = dsl max, 3 = wraps, 4 = frame period (cycles),
+// 5 = frame counter delta, 6 = window length (cycles), 7 = changes.
+fn sample_pipe(state: u64, rb: u64, out: u64) {
+    let kh: u64 = time.khz(state)
+    let limit: u64 = kh * PROBE_MS
+    var dmin: u64 = 0xFFFFFFFF
+    var dmax: u64 = 0
+    var wraps: u64 = 0
+    var changes: u64 = 0
+    var t_first: u64 = 0
+    var t_last: u64 = 0
+    var prev: u64 = rd32(rb, R_DSL) & DSL_MASK
+    let f0: u64 = rd32(rb, R_FRM)
+    let t0: u64 = time.tsc()
+    var now: u64 = t0
+    while now - t0 < limit && wraps < 4 {
+        let d: u64 = rd32(rb, R_DSL) & DSL_MASK
+        now = time.tsc()
+        if d != prev {
+            changes = changes + 1
+            if d + 64 < prev {
+                wraps = wraps + 1
+                if t_first == 0 {
+                    t_first = now
+                }
+                t_last = now
+            }
+            prev = d
+        }
+        if d < dmin {
+            dmin = d
+        }
+        if d > dmax {
+            dmax = d
+        }
+        arch.pause()
+    }
+    let f1: u64 = rd32(rb, R_FRM)
+    var period: u64 = 0
+    if wraps >= 2 {
+        period = (t_last - t_first) / (wraps - 1)
+    }
+    __mmio_write64((out + 8) as *mut u64, dmin)
+    __mmio_write64((out + 16) as *mut u64, dmax)
+    __mmio_write64((out + 24) as *mut u64, wraps)
+    __mmio_write64((out + 32) as *mut u64, period)
+    __mmio_write64((out + 40) as *mut u64, (f1 +% 0x100000000 -% f0) & 0xFFFFFFFF)
+    __mmio_write64((out + 48) as *mut u64, now - t0)
+    __mmio_write64((out + 56) as *mut u64, changes)
+    var ok: u64 = 0
+    // DSL moved many times, wrapped at least twice, and stays inside what a display can have.
+    if changes >= 16 && wraps >= 2 && dmax < 8192 && dmax >= dmin + 100 {
+        ok = 1
+    }
+    __mmio_write64(out as *mut u64, ok)
+}
+
+// Find the register block, look at every enabled pipe, settle on the first one whose counter plausibly counts. Called once from the first
+// frame (the clock must be calibrated, the PCI table scanned); at most MAX_TRIES times if it could not run yet.
+fn probe(state: u64) {
+    let st: u64 = fb.bm(state, fb.S_BM_ON)
+    if st != 0 {
+        return
+    }
+    if fb.nobeam_an(state) {
+        fb.bm_set(state, fb.S_BM_ON, 4)
+        return
+    }
+    if time.khz(state) < 1000 || !fb.ready(state) {
+        return
+    }
+    let tries: u64 = fb.bm(state, fb.S_BM_TRIES)
+    if tries >= MAX_TRIES {
+        fb.bm_set(state, fb.S_BM_ON, 2)
+        return
+    }
+    fb.bm_add(state, fb.S_BM_TRIES, 1)
+    var l_none: [u8; 39] = "no Intel display device, beam sync off\0"
+    var l_bar: [u8; 63] = "Intel GPU: BAR0 unusable or memory decoding off, beam sync off\0"
+    var l_dev: [u8; 32] = "Intel GPU vendor/device (hex): \0"
+    var l_win: [u8; 42] = "Intel GPU: no mapping slot, beam sync off\0"
+    var l_pipe: [u8; 49] = "pipe, state (0 off, 1 counts, 2 stuck, 3 dead): \0"
+    var l_dsl: [u8; 20] = "pipe dsl min, max: \0"
+    var l_wrap: [u8; 26] = "pipe dsl changes, wraps: \0"
+    var l_vt: [u8; 33] = "pipe vtotal register, measured: \0"
+    var l_hz: [u8; 46] = "pipe refresh mHz (dsl wraps), frame counter: \0"
+    var l_stat: [u8; 26] = "pipe PIPESTAT raw (hex): \0"
+    var l_verd: [u8; 34] = "verdict (1 = on, 2 = off), pipe: \0"
+    var l_scr: [u8; 38] = "screen height, lines per frame used: \0"
+    let gi: u64 = find_gpu(state)
+    if gi == pci.MAX_DEV {
+        fb.bm_set(state, fb.S_BM_ON, 2)
+        klog.say(state, klog.L_INFO, src(), (&l_none[0]) as u64)
+        return
+    }
+    let bdf: u64 = pci.get(state, gi, pci.E_BDF)
+    klog.sayh(state, klog.L_INFO, src(), (&l_dev[0]) as u64,
+        (pci.get(state, gi, pci.E_VENDOR) << 16) | pci.get(state, gi, pci.E_DEVICE))
+    let phys: u64 = pci.bar(state, gi, 0)
+    if phys == 0 || pci.bar_is_io(state, gi, 0) || (pci.cfg_read16(bdf, 0x04) & 2) == 0 {
+        fb.bm_set(state, fb.S_BM_ON, 2)
+        klog.say(state, klog.L_INFO, src(), (&l_bar[0]) as u64)
+        return
+    }
+    let base: u64 = apic.map_device(state, phys)
+    if base == 0 {
+        fb.bm_set(state, fb.S_BM_ON, 2)
+        klog.say(state, klog.L_INFO, src(), (&l_win[0]) as u64)
+        return
+    }
+    let kh: u64 = time.khz(state)
+    var chosen: u64 = 99
+    var pipe: u64 = 0
+    while pipe < 3 {
+        let rb: u64 = base + PIPE_BASE + pipe * PIPE_STEP
+        let conf: u64 = rd32(rb, R_CONF)
+        var verdict: u64 = 0
+        var res: [u64; 8] = [0 as u64; 8]
+        if conf == 0xFFFFFFFF {
+            verdict = 3
+        } else if (conf >> 31) == 0 {
+            verdict = 0
+        } else {
+            sample_pipe(state, rb, (&res[0]) as u64)
+            verdict = 2
+            if res[0] == 1 {
+                verdict = 1
+            }
+        }
+        klog.say2(state, klog.L_INFO, src(), (&l_pipe[0]) as u64, pipe, verdict)
+        if verdict == 1 || verdict == 2 {
+            let vreg: u64 = ((rd32(base + TRANS_BASE + pipe * PIPE_STEP, R_VTOTAL) >> 16) & DSL_MASK) + 1
+            let meas: u64 = res[2] + 1
+            var vt: u64 = meas
+            if vreg + 2 >= meas && vreg <= meas + 2 {
+                vt = vreg
+            }
+            var mhz: u64 = 0
+            if res[4] > 0 {
+                mhz = kh * 1000 * 1000 / res[4]
+            }
+            var mhzf: u64 = 0
+            if res[5] > 0 && res[6] > 0 {
+                mhzf = res[5] * kh * 1000 * 1000 / res[6]
+            }
+            klog.say2(state, klog.L_INFO, src(), (&l_dsl[0]) as u64, res[1], res[2])
+            klog.say2(state, klog.L_INFO, src(), (&l_wrap[0]) as u64, res[7], res[3])
+            klog.say2(state, klog.L_INFO, src(), (&l_vt[0]) as u64, vreg, meas)
+            klog.say2(state, klog.L_INFO, src(), (&l_hz[0]) as u64, mhz, mhzf)
+            klog.sayh(state, klog.L_INFO, src(), (&l_stat[0]) as u64, rd32(rb, R_STAT))
+            if verdict == 1 && chosen == 99 {
+                // The refresh must be a real one (20 .. 300 Hz) and the frame as tall as the screen (or a bit more).
+                let sh2: u64 = fb.height(state)
+                klog.say2(state, klog.L_INFO, src(), (&l_scr[0]) as u64, sh2, vt)
+                if mhz >= 20000 && mhz <= 300000 && vt * 10 >= sh2 * 9 && vt <= sh2 * 2 {
+                    chosen = pipe
+                    fb.bm_set(state, fb.S_BM_BASE, rb)
+                    fb.bm_set(state, fb.S_BM_VT, vt)
+                    fb.bm_set(state, fb.S_BM_FRAME, res[4])
+                    fb.bm_set(state, fb.S_BM_LINE, res[4] / vt)
+                    fb.bm_set(state, fb.S_BM_MHZ, mhz)
+                    fb.bm_set(state, fb.S_BM_MHZF, mhzf)
+                    fb.bm_set(state, fb.S_BM_DMIN, res[1])
+                    fb.bm_set(state, fb.S_BM_DMAX, res[2])
+                    fb.bm_set(state, fb.S_BM_PIPE, pipe)
+                    fb.bm_set(state, fb.S_BM_RATE, RATE_START)
+                }
+            }
+        }
+        pipe = pipe + 1
+    }
+    if chosen == 99 {
+        fb.bm_set(state, fb.S_BM_ON, 2)
+    } else {
+        fb.bm_set(state, fb.S_BM_ON, 1)
+    }
+    klog.say2(state, klog.L_INFO, src(), (&l_verd[0]) as u64, fb.bm(state, fb.S_BM_ON), chosen)
+}
+
+// How long ahead of the raster the copy has to start: the lines the raster moves while the copy runs.
+fn lead_lines(state: u64, w: u64, h: u64) -> u64 {
+    let rate: u64 = fb.bm(state, fb.S_BM_RATE)
+    let line: u64 = fb.bm(state, fb.S_BM_LINE)
+    if rate == 0 || line == 0 {
+        return 0
+    }
+    let octets: u64 = w * 4 * h
+    // microseconds * 64 = octets * 64 / (octets-per-microsecond * 64) ... rate is already times 64
+    let us: u64 = octets * 64 / rate
+    let kh: u64 = time.khz(state)
+    let cyc: u64 = us * (kh / 1000)
+    return cyc / line + 4
+}
+
+// Hold the copy of the rectangle (x, y, w, h) back until the raster is out of its way. Returns at once when beam sync is off.
+fn wait(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if fb.bm(state, fb.S_BM_ON) != 1 {
+        if fb.bm(state, fb.S_BM_ON) == 0 {
+            probe(state)
+        }
+        if fb.bm(state, fb.S_BM_ON) != 1 {
+            return
+        }
+    }
+    fb.bm_add(state, fb.S_BM_COPY, 1)
+    let rb: u64 = fb.bm(state, fb.S_BM_BASE)
+    let vt: u64 = fb.bm(state, fb.S_BM_VT)
+    if h == 0 || vt == 0 || y >= vt {
+        return
+    }
+    let lead: u64 = lead_lines(state, w, h)
+    if h + MARGIN + lead + 4 >= vt {
+        // Too tall to hide behind the raster: it would be in the way for the whole frame.
+        fb.bm_add(state, fb.S_BM_BIG, 1)
+        return
+    }
+    let t0: u64 = time.tsc()
+    let frame: u64 = fb.bm(state, fb.S_BM_FRAME)
+    let deadline: u64 = frame + frame / 3
+    var timed_out: bool = false
+    var waited: bool = false
+    while true {
+        let p: u64 = rd32(rb, R_DSL) & DSL_MASK
+        if p >= vt + 64 {
+            // The counter reads beyond a frame: not what it was when it was probed. Give up.
+            fb.bm_set(state, fb.S_BM_ON, 3)
+            return
+        }
+        var pp: u64 = p
+        if pp >= vt {
+            pp = vt - 1
+        }
+        // lines since the raster passed y
+        let q: u64 = (pp + vt - y) % vt
+        if q >= h + MARGIN && vt - q > lead {
+            break
+        }
+        waited = true
+        if time.tsc() - t0 > deadline {
+            timed_out = true
+            break
+        }
+        arch.pause()
+    }
+    if waited {
+        let spent: u64 = time.tsc() - t0
+        fb.bm_add(state, fb.S_BM_WAITS, 1)
+        fb.bm_add(state, fb.S_BM_WCYC, spent)
+        if spent > fb.bm(state, fb.S_BM_WMAX) {
+            fb.bm_set(state, fb.S_BM_WMAX, spent)
+        }
+    }
+    if timed_out {
+        fb.bm_add(state, fb.S_BM_TO, 1)
+        fb.bm_add(state, fb.S_BM_CONS, 1)
+        if fb.bm(state, fb.S_BM_CONS) >= GIVE_UP {
+            fb.bm_set(state, fb.S_BM_ON, 3)
+        }
+    } else {
+        fb.bm_set(state, fb.S_BM_CONS, 0)
+    }
+}
+
+// What a finished copy cost: updates the running copy speed (octets per microsecond times 64) that `lead_lines` plans with.
+fn note(state: u64, us: u64, octets: u64) {
+    if fb.bm(state, fb.S_BM_ON) != 1 || us == 0 || octets == 0 {
+        return
+    }
+    let sample: u64 = octets * 64 / us
+    let old: u64 = fb.bm(state, fb.S_BM_RATE)
+    fb.bm_set(state, fb.S_BM_RATE, (old * 3 + sample) / 4)
+}
+
+// Live counters into the log (`grep beam /proc/klog`).
+fn say(state: u64) {
+    var l_live1: [u8; 29] = "live: state (1 = on), pipe: \0"
+    var l_live2: [u8; 24] = "live: waits, timeouts: \0"
+    var l_live3: [u8; 40] = "live: copies, copies too tall to hide: \0"
+    var l_live4: [u8; 32] = "live: wait us summed, longest: \0"
+    var l_live5: [u8; 42] = "live: copy speed octets/us, refresh mHz: \0"
+    klog.say2(state, klog.L_INFO, src(), (&l_live1[0]) as u64, fb.bm(state, fb.S_BM_ON), fb.bm(state, fb.S_BM_PIPE))
+    if fb.bm(state, fb.S_BM_ON) != 1 {
+        return
+    }
+    klog.say2(state, klog.L_INFO, src(), (&l_live2[0]) as u64, fb.bm(state, fb.S_BM_WAITS), fb.bm(state, fb.S_BM_TO))
+    klog.say2(state, klog.L_INFO, src(), (&l_live3[0]) as u64, fb.bm(state, fb.S_BM_COPY), fb.bm(state, fb.S_BM_BIG))
+    klog.say2(state, klog.L_INFO, src(), (&l_live4[0]) as u64, cyc_us(state, fb.bm(state, fb.S_BM_WCYC)),
+        cyc_us(state, fb.bm(state, fb.S_BM_WMAX)))
+    klog.say2(state, klog.L_INFO, src(), (&l_live5[0]) as u64, fb.bm(state, fb.S_BM_RATE) / 64, fb.bm(state, fb.S_BM_MHZ))
+}

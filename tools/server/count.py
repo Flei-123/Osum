@@ -43,6 +43,8 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     # Die 6 "Stellen" waren also Grafik in einer Grafikdatei, und der
     # Serverbau loescht sie seitdem ausdruecklich (GFX_DATEIEN).
     "vgpu.fi",
+    # W-VBLANK: `drv/gpu/beam.fi` (scan-line counter of the Intel display pipe) is graphics only, like vgpu (wm.fi imports it).
+    "beam.fi",
     # RUNDE ROTABSCHNITTE: `shot.fi` (Runde FEEDBACK) ist das
     # Bildschirmfoto VON INNEN und liest dafuer den Rahmenpuffer -- 15
     # Stellen `fb.*`. Sie gehoert damit zur Grafik wie die zwoelf davor.

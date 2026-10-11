@@ -46,6 +46,7 @@ for c in ${CASES:-1920x1080-new 1920x1080-old 3440x1440-new 3440x1440-old}; do
     bl=${BI[$bi]:-}
     echo "        copies=$n us_sum=$us us_max=$mx octets=$okt  per copy: $((n>0 ? okt/n : 0)) octets, $((n>0 ? us/n : 0)) us"
     echo "        ${bl}"
+    echo "        $(grep -a '^wm: beam' "$ser" | tail -1)"
     OKT[$c]=$((n>0 ? okt/n : 0)); US[$c]=$((n>0 ? us/n : 0))
     [ "$n" -ge 20 ] && ok "case $c: $n frames copied during the burst" || bad "case $c: only $n copies in the burst"
     if [ -n "${KEEP:-}" ]; then mkdir -p "$KEEP"; cp "$ser" "$KEEP/$c.serial"; fi

@@ -339,3 +339,24 @@ gesammelt.
    schmutzige Rechteck. Bei den gemessenen Bildzeiten (unter 1 ms bei
    1280x800) faellt es nicht auf; auf einem grossen Schirm mit
    Seitenwechsel waere ein Rechteck je Seite die naechste Verbesserung.
+
+---
+
+## 9. W-VBLANK: ATOMIC COPY, MERGED RECTANGLES, BEAM SYNC (11.10.2026)
+
+Boss rule: never paint into the visible framebuffer; paint into the back buffer, then copy per dirty rectangle in one pass; only dirty rectangles, merged.
+
+**What was already there:** all painters (and the software pointer, `paint_cursor` in `compose_rect`) write the back buffer only; the card is written by `fb.flush*` only. A pointer move is `damage` of the old + new pointer rectangle -> `compose` -> rectangle copy; no path writes the pointer into the front buffer (hardware cursor `hwcur`/`vgpu.cursor_*` only where a device exists). W-PRESENT (`fb.flush_region`) copied only the dirty rectangle but then called `flush`, which copied the whole rows again (measured 9.45 MB per copy at 1920x1080).
+
+**What this round added:**
+- `fb.flush_done`: after the rectangle copy, dirty-row marks that lie inside the copied rows are dropped (the trailing whole-row `flush` only runs for marks outside).
+- stripe mode: a row segment crossing a 2 MiB block is now copied in two pieces (it was skipped before and left to the whole-row flush).
+- `wm.rects_merge` + `wm.flush_many`: with several rectangles in a frame (region), all are painted first, then merged (overlap, or union <= 1.25 x the sum) and copied back to back; `wm: beam ... rin= rout=` counts rectangles before/after merging. `fullrows` keeps the old per-rectangle path (counter-proof).
+- `drv/gpu/beam.fi`: beam sync. Reads the Intel display pipe scan-line counter `PIPE_DSL` (BAR0 + 0x70000 + 0x1000 x pipe; also PIPE_CONF +0x08, PIPESTAT +0x24, frame counter +0x40, TRANS_VTOTAL 0x60000 + 0x0C). Before a copy of rows y..y+h it waits until the raster is outside y..y+h+8 and needs longer to come round to y than the copy lasts (lead from the running copy speed), at most 1.3 frames; 8 timeouts in a row switch it off (state 3). Too-tall copies (would hide the whole frame) go at once.
+- Default: ON only if the probe sees the counter change >= 16 times, wrap >= 2 times, dmax < 8192, refresh 20..300 Hz and vtotal within 0.9..2 x screen height; otherwise state 2 (old behaviour). Word `nobeam` switches it off.
+
+**Vblank source yes/no: UNKNOWN for the Dell, NO in the VM.** No VGA 0x3DA path was built (UEFI/GOP usually has VGA decode off; the Intel registers are the real source). QEMU std-vga has no Intel DSL, so in the VM the probe ends in state 2 (checked by the log line). The Dell has to answer it.
+
+**How the Dell answers (no reinstall, OTA of the kernel):** `grep beam /proc/klog` after boot (`beam: pipe dsl min, max`, `vtotal register, measured`, `refresh mHz (dsl wraps), frame counter`, `verdict (1 = on, 2 = off), pipe`), F12 prints `wm: beam on= pipe= vt= mhz= copies= waits= to= big= waitus= maxus= rin= rout=` and the same live counters to klog. Expected: verdict 1, dsl max ~ 1440+vblank lines, ~60000 mHz.
+
+**Not measured on hardware:** the whole beam path (written without access to the Dell). Risk: the probe takes one 2 MiB device window slot (`apic.map_device`) and stalls the first frame up to 80 ms.

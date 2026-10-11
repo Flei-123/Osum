@@ -119,7 +119,11 @@ export {
     rect_take, dirty_x, S_TXOCT, S_TXRECT, S_FRAMES,
     set_vgpu, on_vgpu,
     // W-PRESENT: one copy per frame, only the dirty rectangle, and its cost counters.
-    flush_region, flush_note, flush_reset, fullrows_an, M_FULLROWS, flush_us_sum, flush_us_max, flush_us_n, flush_okt
+    flush_region, flush_note, flush_reset, fullrows_an, M_FULLROWS, flush_us_sum, flush_us_max, flush_us_n, flush_okt,
+    // W-VBLANK: copy several rectangles of one frame in one pass, and the beam-sync state words
+    flush_done, nobeam_an, M_NOBEAM, bm, bm_set, bm_add,
+    S_BM_ON, S_BM_BASE, S_BM_VT, S_BM_LINE, S_BM_FRAME, S_BM_RATE, S_BM_WAITS, S_BM_WCYC, S_BM_WMAX, S_BM_TO,
+    S_BM_CONS, S_BM_BIG, S_BM_TRIES, S_BM_MHZ, S_BM_DMIN, S_BM_DMAX, S_BM_PIPE, S_BM_MHZF, S_BM_COPY, S_RM_IN, S_RM_OUT
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -382,6 +386,29 @@ const S_FLUS: u64 = 0x850
 const S_FLMAX: u64 = 0x858
 const S_FLN: u64 = 0x860
 const S_FLOK: u64 = 0x868
+// W-VBLANK: beam sync (drv/gpu/beam.fi). The Intel display pipe's scan-line counter tells where the scan-out is; the window server holds the
+// copy of a rectangle back until the raster is out of the way. 0x870..0x910 belong to it.
+const S_BM_ON: u64 = 0x870 // 0 = not probed yet, 1 = on, 2 = off (no register that counts), 3 = switched off by the guard, 4 = switched off by `nobeam`
+const S_BM_BASE: u64 = 0x878 // virtual address of the pipe register block (PIPE_DSL at +0)
+const S_BM_VT: u64 = 0x880 // lines per frame (vtotal) as measured
+const S_BM_LINE: u64 = 0x888 // TSC cycles per scan line
+const S_BM_FRAME: u64 = 0x890 // TSC cycles per frame
+const S_BM_RATE: u64 = 0x898 // copy speed in octets per microsecond, times 64 (running average)
+const S_BM_WAITS: u64 = 0x8A0 // copies that went through the wait
+const S_BM_WCYC: u64 = 0x8A8 // TSC cycles spent waiting, summed
+const S_BM_WMAX: u64 = 0x8B0 // longest single wait, TSC cycles
+const S_BM_TO: u64 = 0x8B8 // waits that hit the deadline (copied anyway)
+const S_BM_CONS: u64 = 0x8C0 // timeouts in a row (the guard switches beam sync off at 8)
+const S_BM_BIG: u64 = 0x8C8 // copies too tall to hide behind the raster (copied at once)
+const S_BM_TRIES: u64 = 0x8D0 // probe attempts
+const S_BM_MHZ: u64 = 0x8D8 // refresh rate in millihertz, from the DSL wraps
+const S_BM_DMIN: u64 = 0x8E0 // smallest DSL seen by the probe
+const S_BM_DMAX: u64 = 0x8E8 // largest DSL seen by the probe
+const S_BM_PIPE: u64 = 0x8F0 // pipe the probe settled on (0 = A)
+const S_BM_MHZF: u64 = 0x8F8 // refresh rate in millihertz, from the frame counter (0 = no counter)
+const S_BM_COPY: u64 = 0x900 // copies of rectangles since boot (the denominator of the wait counters)
+const S_RM_IN: u64 = 0x908 // rectangles painted in frames that were merged (before the merge)
+const S_RM_OUT: u64 = 0x910 // ... and what was left after the merge
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -494,6 +521,8 @@ const M_NODRAGBAR: u64 = 134217728
 // W-PRESENT: `fullrows` -- the window server pushes whole screen rows to the card for every frame, as before the fix (counter-proof of
 // tools/present/run.sh: the copy is 3-6 times larger there, so the picture is exposed to the scan-out that much longer)
 const M_FULLROWS: u64 = 268435456
+// W-VBLANK: `nobeam` -- never wait for the raster before a copy (counter-proof of tools/vblank/run.sh and the way back if a pipe lies)
+const M_NOBEAM: u64 = 536870912
 const M_TERMDUMP: u64 = 33554432
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
@@ -2352,6 +2381,22 @@ fn phases_an(state: u64) -> bool {
     return (mode(state) & M_PHASES) != 0
 }
 
+fn nobeam_an(state: u64) -> bool {
+    return (mode(state) & M_NOBEAM) != 0
+}
+
+fn bm(state: u64, off: u64) -> u64 {
+    return kstate.get(state, FB_OFF + off)
+}
+
+fn bm_set(state: u64, off: u64, v: u64) {
+    kstate.set(state, FB_OFF + off, v)
+}
+
+fn bm_add(state: u64, off: u64, v: u64) {
+    kstate.add(state, FB_OFF + off, v)
+}
+
 fn fullrows_an(state: u64) -> bool {
     return (mode(state) & M_FULLROWS) != 0
 }
@@ -3404,6 +3449,7 @@ fn parse(state: u64, cmd: u64) {
     var w_ncs: [u8; 10] = "nocascade\0"
     var w_ndb: [u8; 10] = "nodragbar\0"
     var w_fur: [u8; 9] = "fullrows\0"
+    var w_nbm: [u8; 7] = "nobeam\0"
     var w_tdp: [u8; 9] = "termdump\0"
     var m: u64 = 0
     if cmd != 0 {
@@ -3461,6 +3507,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_fur[0]) as u64, 8) != 0 {
             m = m | M_FULLROWS
+        }
+        if find(cmd, (&w_nbm[0]) as u64, 6) != 0 {
+            m = m | M_NOBEAM
         }
         if find(cmd, (&w_nwa[0]) as u64, 7) != 0 {
             m = m | M_NOWATCH
@@ -5210,27 +5259,33 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
         let phys0: u64 = kstate.get(state, FB_OFF + S_PHYS)
         var r: u64 = 0
         while r < hh {
-            let off: u64 = (y + r) *% pt +% x *% 4
-            let p: u64 = phys0 +% off
-            let blk: u64 = p & (~(HUGE_SIZE - 1))
-            let inner: u64 = p - blk
-            // Eine Zeile passt immer in einen Block, solange sie
-            // schmaler als 2 MiB ist -- sonst wird sie hier ausgelassen
-            // und der volle Weg macht sie beim naechsten Bild mit.
-            if inner + n <= HUGE_SIZE {
+            // W-VBLANK: a row segment that crosses a 2 MiB block is copied in two pieces (it used to be skipped and left to the
+            // whole-row `flush` that followed; with only the rectangle copied every row of it must be copied here).
+            var rest: u64 = n
+            var off: u64 = (y + r) *% pt +% x *% 4
+            while rest > 0 {
+                let p: u64 = phys0 +% off
+                let blk: u64 = p & (~(HUGE_SIZE - 1))
+                let inner: u64 = p - blk
+                var seg: u64 = HUGE_SIZE - inner
+                if seg > rest {
+                    seg = rest
+                }
                 let fl: u64 = arch.irq_save()
                 if slot_remap(state, basis, blk, uc) {
-                    copy_words(basis +% inner, b +% off, n / 8)
-                    var k: u64 = (n / 8) * 8
-                    while k + 4 <= n {
+                    copy_words(basis +% inner, b +% off, seg / 8)
+                    var k: u64 = (seg / 8) * 8
+                    while k + 4 <= seg {
                         __mmio_write32((basis +% inner +% k) as *mut u32,
                             __mmio_read32((b +% off +% k) as *mut u32))
                         k = k + 4
                     }
                     arch.barrier_write()
-                    tx_add(state, n)
+                    tx_add(state, seg)
                 }
                 arch.irq_restore(fl)
+                off = off +% seg
+                rest = rest - seg
             }
             r = r + 1
         }
@@ -5276,6 +5331,25 @@ fn flush_region(state: u64, x: u64, y: u64, w: u64, h: u64) {
         return
     }
     flush_rect(state, x, y, w, h)
+    flush_done(state, y, y + h)
+}
+
+// W-VBLANK: the end of a frame's copies. The painters (fill, blit, glyphs) mark the ROWS they touch as dirty for the old whole-row `flush`;
+// the rectangles were copied by `flush_rect`, so the marks that lie wholly inside the copied rows are spent and are dropped here. Before this,
+// the trailing `flush` copied the whole rows again (measured: 9.45 MB per copy at 1920x1080, more than a full frame of 8.3 MB). Marks that reach
+// outside the copied rows (the board, the console) still go the old way.
+fn flush_done(state: u64, y0: u64, y1: u64) {
+    if on_vgpu(state) || transformed(state) {
+        return
+    }
+    let fl: u64 = arch.irq_save()
+    let lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
+    let hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
+    if hi > lo && lo >= y0 && hi <= y1 {
+        kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+        kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    }
+    arch.irq_restore(fl)
     flush(state)
 }
 
