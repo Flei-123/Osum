@@ -1691,6 +1691,8 @@ lauf "56. the action bus on a screen: foreign windows (keys/ui adapters, wayd in
 # the network clock /bin/sntp against a fake NTP server, faulty answers.
 lauf "57. the clock: summer time by rule (tzrule=eu), clock_settime, /bin/sntp, faulty NTP answers (tools/time/run.sh, round DAILY-DRIVER)" \
      tools/time/run.sh time '^TIME: |^== |^  OK    |^  FAIL  '
+lauf "57b. the clock right after the boot, before any sntp: hardware clock on local time / UTC / no zone yet, summer and winter (tools/time/boot.sh, r544)" \
+     tools/time/boot.sh timeboot '^TIME-BOOT: |^== |^  OK    |^  FAIL  '
 
 # 58. THE ENGLISH GUARD (Justin, 07.10.2026): code is English -- identifiers, file names, program names,
 # comments, log and error texts; German lives in the catalogs only. The counter must count (counter-proof),

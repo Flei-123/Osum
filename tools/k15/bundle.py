@@ -97,6 +97,12 @@ def start_von(pfad):
     raise SystemExit("buendel: %s/start.txt nennt kein Programm" % pfad)
 
 
+def console_von(pfad):
+    """r543: a bundle whose program is a CONSOLE program (needs a tty) has a `console.txt` file. Its start is then a
+    script `#!/bin/term -c<program>` (a new terminal window, see kernel/user/term.fi), not a second name of the program."""
+    return os.path.isfile(os.path.join(pfad, "console.txt"))
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
@@ -156,7 +162,16 @@ def main(argv):
         # DER VERWEIS ZULETZT: `mkfs.py` loest den vorhandenen Pfad auf,
         # und der muss dafuer schon im Abbild stehen. Die Reihenfolge
         # dieser Zeilen ist die Reihenfolge, in der gebaut wird.
-        zeilen.append("%s/start@%s" % (ziel, start_von(pfad)))
+        # r543: console programs run in their OWN terminal window -- only where /bin/term is on the image (the small test
+        # images without term keep the plain second name, so their runs stay octet for octet the same)
+        if (console_von(pfad) and nur is not None and "/bin/term" in nur
+                and not os.environ.get("OSUM_NOCONSOLE")):   # OSUM_NOCONSOLE: counter-proof switch of tools/term/editwin.sh
+            skript = os.path.join(arbeit, name + ".start")
+            with open(skript, "w") as f:
+                f.write("#!/bin/term -c%s\n" % start_von(pfad))
+            zeilen.append("%s/start=%s" % (ziel, skript))
+        else:
+            zeilen.append("%s/start@%s" % (ziel, start_von(pfad)))
     for z in zeilen:
         print(z)
     return 0
