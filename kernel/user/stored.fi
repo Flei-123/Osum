@@ -246,6 +246,18 @@ static mut F_PHASE: [u8; 6] = "phase\0"
 static mut F_VERB: [u8; 5] = "verb\0"
 static mut F_NAME: [u8; 5] = "name\0"
 static mut F_MSG: [u8; 4] = "msg\0"
+static mut F_PCT: [u8; 4] = "pct\0"
+static mut P_OCONF: [u8; 14] = "/etc/ota.conf\0"
+static mut F_QUELLE: [u8; 7] = "quelle\0"
+
+// progress of the running job, 0..100, for the window's bar: set at the stages of a job
+// (catalog, package, signature, install); the window shows it, nothing depends on it
+fn pct_set(v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
+    z[n as usize] = 0 as u8
+    actwire.kvfile_set((&P_STAT[0 as usize]) as u64, (&F_PCT[0 as usize]) as u64, (&z[0 as usize]) as u64)
+}
 
 fn stat_set(phase: u64, verb: u64, name0: u64, msg: u64) {
     // a refresh has no program: an empty name, never a null pointer
@@ -465,6 +477,15 @@ fn do_list(uid: u64) {
         r_ch(48)
     }
     r_ch(10)
+    // where the catalog comes from (the same source the system update uses); a catalog on disk
+    // has passed `opk catalog` (INDEX.sig against the trusted key), so it is a signed one
+    var k_src: [u8; 8] = "source=\0"
+    var src: [u8; 100] = [0 as u8; 100]
+    if actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&F_QUELLE[0 as usize]) as u64, (&src[0 as usize]) as u64, 100) {
+        r_str((&k_src[0 as usize]) as u64)
+        r_str((&src[0 as usize]) as u64)
+        r_ch(10)
+    }
     at = 0
     while n > 0 && ld(p, at) != 0 {
         var nm: [u8; 64] = [0 as u8; 64]
@@ -538,6 +559,14 @@ fn do_status() {
     r_str((&k_busy[0 as usize]) as u64)
     r_num(busy_flag())
     r_ch(10)
+    var k_pct: [u8; 5] = "pct=\0"
+    r_str((&k_pct[0 as usize]) as u64)
+    if actwire.kvfile_get((&P_STAT[0 as usize]) as u64, (&F_PCT[0 as usize]) as u64, vp, 160) && ld(vp, 0) != 0 {
+        r_str(vp)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
 }
 
 // refresh | install | update | remove : check, then start the worker
@@ -604,6 +633,7 @@ fn do_run(verb: u64, name: u64, uid: u64, dry: bool) {
     mkdirs()
     var s_busy: [u8; 6] = "laedt\0"
     stat_set((&s_busy[0 as usize]) as u64, verb, name, (&A_EMPTY[0 as usize]) as u64)
+    pct_set(2)
     if !spawn_work(verb, np) {
         r_err((&e_fail[0 as usize]) as u64, 0)
         return
@@ -771,14 +801,17 @@ fn refresh_catalog(verb: u64, name: u64) -> u64 {
         (&P_TMPI[0 as usize]) as u64, 0, 4) != 0 {
         return fail(verb, name, (&T_CAT[0 as usize]) as u64)
     }
+    pct_set(8)
     if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64,
         (&P_TMPS[0 as usize]) as u64, 0, 4) != 0 {
         return fail(verb, name, (&T_CAT[0 as usize]) as u64)
     }
+    pct_set(14)
     if run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
         (&P_KAT[0 as usize]) as u64, 0, 4) != 0 {
         return fail(verb, name, (&T_SIG[0 as usize]) as u64)
     }
+    pct_set(24)
     return 0
 }
 
@@ -794,6 +827,7 @@ fn work(verb: u64, name: u64) -> u64 {
         // the states in the catalog: whatever INDEX is still in /tmp/store
         run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
             (&P_KAT[0 as usize]) as u64, 0, 4)
+        pct_set(100)
         stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_R[0 as usize]) as u64)
         return 0
     }
@@ -802,6 +836,7 @@ fn work(verb: u64, name: u64) -> u64 {
         return r
     }
     if actwire.str_eq(verb, (&w_ref[0 as usize]) as u64) {
+        pct_set(100)
         stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_C[0 as usize]) as u64)
         return 0
     }
@@ -821,9 +856,11 @@ fn work(verb: u64, name: u64) -> u64 {
     ulib.strcpy(tp, (&P_TMP[0 as usize]) as u64)
     ulib.strcat(tp, (&SL[0 as usize]) as u64)
     ulib.strcat(tp, (&DT[0 as usize]) as u64)
+    pct_set(30)
     if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&DT[0 as usize]) as u64, tp, 0, 4) != 0 {
         return fail(verb, name, (&T_PKG[0 as usize]) as u64)
     }
+    pct_set(62)
     // the package's own signature (`<file>.sig`, 64 octets): `opk update` checks it with the
     // trusted key before it believes a single octet of the package
     let sp: u64 = (&tmpn2[0 as usize]) as u64
@@ -836,6 +873,7 @@ fn work(verb: u64, name: u64) -> u64 {
         ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
         return fail(verb, name, (&T_PKG[0 as usize]) as u64)
     }
+    pct_set(70)
     let rc: u64 = run((&P_OPK[0 as usize]) as u64, (&A_AKT[0 as usize]) as u64, name,
         (&A_QUELLE[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64, 5)
     ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
@@ -845,6 +883,7 @@ fn work(verb: u64, name: u64) -> u64 {
     }
     run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
         (&P_KAT[0 as usize]) as u64, 0, 4)
+    pct_set(100)
     stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_I[0 as usize]) as u64)
     return 0
 }
