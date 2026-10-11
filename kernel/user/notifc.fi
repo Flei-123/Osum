@@ -1,0 +1,386 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/notifc.fi -- THE NOTIFICATION CENTRE (the bell of the bar opens it).
+//
+// The kernel bus keeps the last 16 notifications (`wlibc.noti_*`); the bar shows the
+// unread count on the bell and a toast for each new one. This card lists them (newest
+// first, at most NC_MAXR rows) and has a "Clear all" button. It is window 5 of the bar's
+// scene host (after the quick settings, tooltip, toast and task view), created hidden
+// and resized to the real list when it opens, like `taskview.fi`.
+//
+// "Clear" does not delete anything in the kernel (the ring has no such call): it marks
+// every entry as read (`noti_take` sets the seen flag, so the bell goes away) and
+// remembers `noti_total()` as a base line; only entries posted after that are listed.
+//
+//   init()           once, after the scene host knows the bar's own window
+//   anchor(...)      the work area of the bar (where the card goes)
+//   toggle()         the click on the bell
+//   step()           once per turn of the bar's loop; true when something changed
+//   is_open(), hit()
+//
+// Serial lines (read by tools/features/run.sh):
+//   notifc: open n=<rows> x= y= w= h=
+//   notifc: row <i> prio=<p> text=<text>
+//   notifc: clear n=<entries marked read>
+//   notifc: shut <why>
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+
+export { init, anchor, toggle, step, is_open, hit, shown }
+
+const NC_MAXR: u64 = 8
+const ROW_BYTES: u64 = 96
+const KEY_CLEAR: u64 = 300
+const CARD_W: u64 = 400 // design points
+const ROW_H: u64 = 28
+const HEAD_H: u64 = 24
+const BTN_H: u64 = 32
+const GAPP: u64 = 4
+const PADP: u64 = 10
+const MARGIN: u64 = 12
+
+static mut nc_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut nc_h: u64 = 0
+static mut nc_id: u64 = 0
+static mut open_: u64 = 0
+static mut n_rows: u64 = 0
+static mut base_: u64 = 0 // noti_total() at the last "Clear all"
+static mut seen_total: u64 = 0 // noti_total() when the list was last built
+static mut row_txt: [u8; 768] = [0 as u8; 768] // NC_MAXR x ROW_BYTES
+static mut row_pri: [u64; 8] = [0 as u64; 8]
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut a_edge: u64 = 0
+static mut a_x: u64 = 0
+static mut a_y: u64 = 0
+static mut a_w: u64 = 0
+static mut a_h: u64 = 0
+static mut btn_last: u64 = 0
+static mut key_last: u64 = 0
+
+static mut t_title: [u8; 14] = "Notifications\0"
+static mut t_none: [u8; 17] = "No notifications\0"
+static mut t_clear: [u8; 10] = "Clear all\0"
+static mut s_open: [u8; 16] = "notifc: open n=\0"
+static mut s_xy: [u8; 4] = " x=\0"
+static mut s_yy: [u8; 4] = " y=\0"
+static mut s_ww: [u8; 4] = " w=\0"
+static mut s_hh: [u8; 4] = " h=\0"
+static mut s_row: [u8; 13] = "notifc: row \0"
+static mut s_pr: [u8; 7] = " prio=\0"
+static mut s_tx: [u8; 7] = " text=\0"
+static mut s_clr: [u8; 17] = "notifc: clear n=\0"
+static mut s_shut: [u8; 14] = "notifc: shut \0"
+static mut s_esc: [u8; 4] = "esc\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_bell: [u8; 5] = "bell\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+// the card in design points
+fn card_h() -> u64 {
+    var rows: u64 = n_rows
+    if rows == 0 {
+        rows = 1
+    }
+    var h: u64 = PADP + HEAD_H + GAPP + rows * (ROW_H + GAPP) + PADP
+    if n_rows != 0 {
+        h = h + BTN_H + GAPP
+    }
+    return h
+}
+
+fn build() {
+    let r: usize = fuiscene.root()
+    fuiscene.set_gap(r, GAPP)
+    let hd: usize = fuiscene.label(r, (&t_title[0 as usize]) as u64)
+    fuiscene.set_size(hd, CARD_W - 2 * PADP, HEAD_H)
+    if n_rows == 0 {
+        let nn: usize = fuiscene.label_muted(r, (&t_none[0 as usize]) as u64)
+        fuiscene.set_size(nn, CARD_W - 2 * PADP, ROW_H)
+        return
+    }
+    var i: u64 = 0
+    while i < n_rows {
+        let l: usize = fuiscene.label(r, (&row_txt[0 as usize]) as u64 + i * ROW_BYTES)
+        fuiscene.set_size(l, CARD_W - 2 * PADP, ROW_H)
+        i = i + 1
+    }
+    let b: usize = fuiscene.button(r, (&t_clear[0 as usize]) as u64, KEY_CLEAR)
+    fuiscene.set_size(b, CARD_W - 2 * PADP, BTN_H)
+}
+
+// How many entries are listed: the ring holds at most 16, and only those posted since
+// the last "Clear all" count.
+fn visible() -> u64 {
+    var n: u64 = wlibc.noti_count()
+    let tot: u64 = wlibc.noti_total()
+    var since: u64 = 0
+    if tot > base_ {
+        since = tot - base_
+    }
+    if since < n {
+        n = since
+    }
+    if n > NC_MAXR {
+        n = NC_MAXR
+    }
+    return n
+}
+
+// Read the newest entries WITHOUT marking them read (`noti_peek`): looking at the list
+// is not the same as having dealt with it, the bell keeps its count until "Clear all".
+fn read_rows() {
+    n_rows = visible()
+    seen_total = wlibc.noti_total()
+    var i: u64 = 0
+    while i < n_rows {
+        let p: u64 = (&row_txt[0 as usize]) as u64 + i * ROW_BYTES
+        let n: u64 = wlibc.noti_peek(i, p + 2, ROW_BYTES - 4)
+        var pr: u64 = wlibc.noti_prio(i)
+        row_pri[i as usize] = pr
+        if pr >= 2 {
+            __mmio_write8(p as *mut u8, 33 as u8) // "!"
+        } else {
+            __mmio_write8(p as *mut u8, 45 as u8) // "-"
+        }
+        __mmio_write8((p + 1) as *mut u8, 32 as u8)
+        var m: u64 = n
+        if m > ROW_BYTES - 4 {
+            m = ROW_BYTES - 4
+        }
+        __mmio_write8((p + 2 + m) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn init() -> bool {
+    nc_win = fuiscene.win_open_plain(0, 0, CARD_W * sk(), (PADP * 2 + HEAD_H + GAPP
+        + NC_MAXR * (ROW_H + GAPP) + BTN_H + GAPP) * sk(), (&t_title[0 as usize]) as u64,
+        wlibc.L_MENUE, build)
+    if nc_win == fuiscene.BADWIN {
+        nc_win = 0xFFFFFFFFFFFFFFFF
+        return false
+    }
+    let _s: bool = fuiscene.win_select(nc_win)
+    fuiscene.keys_always(true)
+    nc_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(nc_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    nc_id = wlibc.sys3w(wlibc.WM_INFO, nc_h, wlibc.WI_ID, 0)
+    return true
+}
+
+// The work area of the bar: the card goes in the corner of it, on the side of the bar.
+fn anchor(edge: u64, wx: u64, wy: u64, ww: u64, wh: u64) {
+    a_edge = edge
+    a_x = wx
+    a_y = wy
+    a_w = ww
+    a_h = wh
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+// How many rows the card shows right now (0 while it is shut).
+fn shown() -> u64 {
+    if open_ == 0 {
+        return 0
+    }
+    return n_rows
+}
+
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + CARD_W * sk() && y >= py_
+        && y < py_ + card_h() * sk()
+}
+
+fn paint_now() {
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(nc_win)
+        n = n + 1
+    }
+}
+
+fn place() {
+    let w: u64 = CARD_W * sk()
+    let h: u64 = card_h() * sk()
+    let mg: u64 = MARGIN * sk()
+    var x: u64 = a_x
+    var y: u64 = a_y
+    if a_w > w + 2 * mg {
+        x = a_x + a_w - w - mg
+    }
+    if a_h > h + 2 * mg {
+        y = a_y + a_h - h - mg
+    }
+    if a_edge == wlibc.WE_TOP {
+        y = a_y + mg
+    }
+    if a_edge == wlibc.WE_LEFT {
+        x = a_x + mg
+    }
+    px_ = x
+    py_ = y
+}
+
+// rebuild the tree from the rows and paint it (open, clear, a new notification)
+fn reload() {
+    read_rows()
+    let w: u64 = CARD_W * sk()
+    let h: u64 = card_h() * sk()
+    place()
+    let _s: bool = fuiscene.win_select(nc_win)
+    let _z: bool = fuiscene.win_size(w, h)
+    fuiscene.refresh()
+    fuiscene.touch()
+    key_last = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    paint_now()
+    if open_ != 0 {
+        let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, nc_h, (px_ << 16) | py_, 0)
+    }
+}
+
+fn report_rows() {
+    say((&s_open[0 as usize]) as u64)
+    sayn(n_rows)
+    say((&s_xy[0 as usize]) as u64)
+    sayn(px_)
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_)
+    say((&s_ww[0 as usize]) as u64)
+    sayn(CARD_W * sk())
+    say((&s_hh[0 as usize]) as u64)
+    sayn(card_h() * sk())
+    nl()
+    var i: u64 = 0
+    while i < n_rows {
+        say((&s_row[0 as usize]) as u64)
+        sayn(i)
+        say((&s_pr[0 as usize]) as u64)
+        sayn(row_pri[i as usize])
+        say((&s_tx[0 as usize]) as u64)
+        say((&row_txt[0 as usize]) as u64 + i * ROW_BYTES + 2)
+        nl()
+        i = i + 1
+    }
+}
+
+fn open_now() {
+    if open_ != 0 || nc_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    reload()
+    let _v: u64 = wlibc.win_state(nc_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    btn_last = wlibc.mouse_btn() & 1
+    let _a: u64 = wlibc.win_act(nc_id, wlibc.WA_RAISE)
+    let _k: u64 = wlibc.win_state(nc_h, wlibc.WS_KEYS, 1)
+    report_rows()
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    let _v: u64 = wlibc.win_state(nc_h, wlibc.WS_HIDDEN, 1)
+    say((&s_shut[0 as usize]) as u64)
+    say(why)
+    nl()
+}
+
+fn toggle() {
+    if open_ != 0 {
+        shut((&s_bell[0 as usize]) as u64)
+    } else {
+        open_now()
+    }
+}
+
+// Mark everything read (the bell goes away) and start the list afresh.
+fn clear_all() {
+    var buf: [u8; 8] = [0 as u8; 8]
+    let cnt: u64 = wlibc.noti_count()
+    var i: u64 = 0
+    while i < cnt {
+        let _n: u64 = wlibc.noti_take(i, (&buf[0 as usize]) as u64, 1)
+        i = i + 1
+    }
+    base_ = wlibc.noti_total()
+    say((&s_clr[0 as usize]) as u64)
+    sayn(cnt)
+    nl()
+    reload()
+    report_rows()
+}
+
+fn step() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    // the events of the window ring go to the canvas of the tree
+    let _st: u64 = wlib.step()
+    let key: u64 = fuiscene.pump_aux(nc_win)
+    if key == KEY_CLEAR {
+        clear_all()
+        return true
+    }
+    if open_ == 0 {
+        return true
+    }
+    let _s: bool = fuiscene.win_select(nc_win)
+    let lk: u64 = fuiscene.last_key()
+    let ks: u64 = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    if ks != key_last {
+        key_last = ks
+        if lk == 27 {
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+    }
+    // a press outside the card closes it (polled from the pointer: a press outside a
+    // window raises no event belonging to it)
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        if !hit(wlibc.mouse_x(), wlibc.mouse_y()) {
+            shut((&s_out[0 as usize]) as u64)
+            btn_last = btn
+            return true
+        }
+    }
+    btn_last = btn
+    // a notification arrived while the card stands: the list grows
+    if wlibc.noti_total() != seen_total {
+        reload()
+        report_rows()
+        return true
+    }
+    return false
+}
