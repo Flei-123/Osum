@@ -491,7 +491,8 @@ dd if=/dev/zero of="$TMPD/cd.iso" bs=1M count=1 2>/dev/null
 bild m
 lauf m q35 "ahci" -drive "file=$TMPD/m.img,format=raw,if=none,id=d0" -device "ahci,id=a0" \
     -drive "file=$TMPD/cd.iso,format=raw,if=none,id=c0,media=cdrom,readonly=on" \
-    -device "ide-cd,drive=c0,bus=a0.0" -device "ide-cd,drive=c0,bus=a0.1" \
+    -drive "file=$TMPD/cd.iso,format=raw,if=none,id=c1,media=cdrom,readonly=on" \
+    -device "ide-cd,drive=c0,bus=a0.0" -device "ide-cd,drive=c1,bus=a0.1" \
     -device "ide-hd,drive=d0,bus=a0.3"
 gruen m "11.1 disk behind two ATAPI drives"
 zahl "11.2 the ATA disk on port 3 is chosen" "$(feld m '^ahci: blocks=' port)" eq 3
