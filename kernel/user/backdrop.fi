@@ -19,7 +19,7 @@ import libc.io
 import fuiapp
 import wlib
 
-export { load, flat, off }
+export { load, flat, off, glass_slab, glass_bump }
 
 static mut s_w: u64 = 0
 static mut s_h: u64 = 0
@@ -294,6 +294,190 @@ fn bd_lerp(a: u64, b: u64, f: u64) -> u64 {
     return rb | ag | 0xFF000000
 }
 
+// ================================================ W-GLASS: BLURRED SLABS UNDER TRANSLUCENT PLATES
+// `glass_slab(x, y, w, h, r, br)` writes into the canvas a blurred copy of what the wallpaper shows in
+// the rectangle (corners rounded with radius r): a second box blur of radius `br` over the already
+// blurred picture, plus a fine fixed grain (the difference between "milk glass" and a flat tint).
+// The blur is done ONCE per rectangle and per background change (`glass_bump` is called when the
+// wallpaper picture is rebuilt); every later picture (caret blink, hover) only copies the slab.
+// Eight rectangles are kept; no memory or a rectangle wider than 1000 pixels: false, the caller
+// paints its plate without the slab (solid translucent fallback).
+static mut gl_gen: u64 = 1
+static mut gl_k: [u64; 40] = [0 as u64; 40]
+static mut gl_b: [u64; 8] = [0 as u64; 8]
+static mut gl_next: u64 = 0
+static mut gl_built: u64 = 0
+
+fn glass_bump() {
+    gl_gen = gl_gen + 1
+}
+
+fn gl_clamp(v: u64) -> u64 {
+    if v > 255 {
+        return 255
+    }
+    return v
+}
+
+fn gl_grain(buf: u64, w: u64, h: u64, x: u64, y: u64) {
+    var yy: u64 = 0
+    while yy < h {
+        var xx: u64 = 0
+        while xx < w {
+            let hv: u64 = (((x + xx) * 73856093) ^ ((y + yy) * 19349663)) >> 3
+            let d: u64 = (hv % 7) + 253 // 253..259 = -3..+3 around 256
+            let p: u64 = buf + (yy * w + xx) * 4
+            let v: u64 = __mmio_read32(p as *mut u32) as u64
+            let b: u64 = gl_clamp(((v & 255) + d) - 256)
+            let g: u64 = gl_clamp((((v >> 8) & 255) + d) - 256)
+            let r: u64 = gl_clamp((((v >> 16) & 255) + d) - 256)
+            __mmio_write32(p as *mut u32, (0xFF000000 | (r << 16) | (g << 8) | b) as u32)
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+fn gl_build(x: u64, y: u64, w: u64, h: u64, br: u64) -> u64 {
+    var x0: u64 = 0
+    if x > br {
+        x0 = x - br
+    }
+    var y0: u64 = 0
+    if y > br {
+        y0 = y - br
+    }
+    var x1: u64 = x + w + br
+    if x1 > s_w {
+        x1 = s_w
+    }
+    var y1: u64 = y + h + br
+    if y1 > s_h {
+        y1 = s_h
+    }
+    let ew: u64 = x1 - x0
+    let eh: u64 = y1 - y0
+    if ew > 1000 || eh > 1000 || br == 0 {
+        return 8
+    }
+    if bd_line == 0 {
+        bd_line = rt.heap_alloc(1024) as u64
+        if bd_line == 0 {
+            return 8
+        }
+    }
+    let tmp: u64 = rt.heap_alloc((ew * eh * 4) as usize) as u64
+    let out: u64 = rt.heap_alloc((w * h * 4) as usize) as u64
+    if tmp == 0 || out == 0 {
+        if tmp != 0 {
+            rt.heap_free(tmp, (ew * eh * 4) as usize)
+        }
+        if out != 0 {
+            rt.heap_free(out, (w * h * 4) as usize)
+        }
+        return 8
+    }
+    var yy: u64 = 0
+    while yy < eh {
+        fuiapp.copy64(tmp + yy * ew * 4, s_px + ((y0 + yy) * s_w + x0) * 4, ew * 4)
+        yy = yy + 1
+    }
+    var pass: u64 = 0
+    while pass < 2 {
+        var ry: u64 = 0
+        while ry < eh {
+            bd_blur_line(tmp + ry * ew * 4, ew, 4, br)
+            ry = ry + 1
+        }
+        var cx: u64 = 0
+        while cx < ew {
+            bd_blur_line(tmp + cx * 4, eh, ew * 4, br)
+            cx = cx + 1
+        }
+        pass = pass + 1
+    }
+    var oy: u64 = 0
+    while oy < h {
+        fuiapp.copy64(out + oy * w * 4, tmp + ((y - y0 + oy) * ew + (x - x0)) * 4, w * 4)
+        oy = oy + 1
+    }
+    rt.heap_free(tmp, (ew * eh * 4) as usize)
+    gl_grain(out, w, h, x, y)
+    let slot: u64 = gl_next
+    gl_next = (gl_next + 1) % 8
+    if gl_b[slot as usize] != 0 {
+        rt.heap_free(gl_b[slot as usize], (gl_k[(slot * 5 + 2) as usize] * gl_k[(slot * 5 + 3) as usize] * 4) as usize)
+    }
+    gl_b[slot as usize] = out
+    gl_k[(slot * 5) as usize] = x
+    gl_k[(slot * 5 + 1) as usize] = y
+    gl_k[(slot * 5 + 2) as usize] = w
+    gl_k[(slot * 5 + 3) as usize] = h
+    gl_k[(slot * 5 + 4) as usize] = gl_gen
+    gl_built = gl_built + 1
+    return slot
+}
+
+fn glass_slab(x: u64, y: u64, w: u64, h: u64, r: u64, br: u64) -> bool {
+    s_w = fuiapp.width()
+    s_h = fuiapp.height()
+    s_px = fuiapp.px()
+    if s_px == 0 || w < 4 || h < 4 || x + w > s_w || y + h > s_h {
+        return false
+    }
+    var slot: u64 = 8
+    var i: u64 = 0
+    while i < 8 {
+        if gl_b[i as usize] != 0 && gl_k[(i * 5 + 4) as usize] == gl_gen && gl_k[(i * 5) as usize] == x
+            && gl_k[(i * 5 + 1) as usize] == y && gl_k[(i * 5 + 2) as usize] == w
+            && gl_k[(i * 5 + 3) as usize] == h {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot == 8 {
+        slot = gl_build(x, y, w, h, br)
+        if slot == 8 {
+            return false
+        }
+    }
+    let src: u64 = gl_b[slot as usize]
+    var rr: u64 = r
+    if rr * 2 > h {
+        rr = h / 2
+    }
+    var yy: u64 = 0
+    while yy < h {
+        var dy: u64 = 0
+        if yy < rr {
+            dy = rr - 1 - yy
+        } else if yy + rr >= h {
+            dy = yy + rr - h
+        }
+        if dy == 0 && !(yy < rr || yy + rr >= h) {
+            fuiapp.copy64(s_px + ((y + yy) * s_w + x) * 4, src + yy * w * 4, w * 4)
+        } else {
+            // corner band: the straight part by copy, the two corners pixel by pixel
+            fuiapp.copy64(s_px + ((y + yy) * s_w + x + rr) * 4, src + (yy * w + rr) * 4, (w - 2 * rr) * 4)
+            var cx: u64 = 0
+            while cx < rr {
+                let dx: u64 = rr - 1 - cx
+                if dx * dx + dy * dy < rr * rr {
+                    let so: u64 = (yy * w + cx) * 4
+                    let ro: u64 = (yy * w + (w - 1 - cx)) * 4
+                    __mmio_write32((s_px + ((y + yy) * s_w + x + cx) * 4) as *mut u32,
+                        __mmio_read32((src + so) as *mut u32))
+                    __mmio_write32((s_px + ((y + yy) * s_w + x + (w - 1 - cx)) * 4) as *mut u32,
+                        __mmio_read32((src + ro) as *mut u32))
+                }
+                cx = cx + 1
+            }
+        }
+        yy = yy + 1
+    }
+    return true
+}
+
 fn paint() {
     s_w = fuiapp.width()
     s_h = fuiapp.height()
@@ -323,6 +507,7 @@ fn paint() {
 }
 
 fn paint_render() {
+    glass_bump()
     if bd_on == 2 {
         bd_flat_paint()
         return

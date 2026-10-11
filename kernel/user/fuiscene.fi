@@ -91,7 +91,7 @@ export {
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
     tip, tip_hide, say_tips, cmd_begin, cmd_item, cmd_end, cmd_hidden_n, cmd_hidden_labels, cmd_hidden_key, cmd_width,
-    table_heads, table_indent, table_align_right, table_hover, set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb, cv_round_a, cv_ring_a, glass_tile,
+    table_heads, table_indent, table_align_right, table_hover, set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb, cv_round_a, cv_ring_a, cv_round_raw, cv_ring_raw, glass_plates, glass_tile,
     cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
     // F-8: what the file manager needed
@@ -719,10 +719,43 @@ fn entry_set(key: u64, text: u64) {
     touch()
 }
 
+// W-GLASS: the lock and sign-in screens give the host a plate painter (x, y, w, h, state bits as `tile`:
+// 2 hover, 8 focus; the 9th argument of the card is 0). Fields and cards then paint the frosted plate first and
+// the control on top of it with a clear surface. Without a hook (every other program) nothing changes.
+static mut gl_plate_mem: [u8; 8] = [0 as u8; 8]
+static mut gl_plate_on: bool = false
+
+fn gl_plate_slot() -> *mut fn(u64, u64, u64, u64, u64) {
+    return ((&gl_plate_mem[0 as usize]) as u64) as *mut fn(u64, u64, u64, u64, u64)
+}
+
+fn glass_plates(f: fn(u64, u64, u64, u64, u64)) {
+    *gl_plate_slot() = f
+    gl_plate_on = true
+}
+
 fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     let i: usize = scene.scene_node_of(sc(), e)
     let k: u64 = slot_of_node(i)
     if k == NO_SLOT {
+        return
+    }
+    if gl_plate_on {
+        var gst: u64 = 0
+        if widget.w_is_focus(e) {
+            gst = 8
+        }
+        if widget.w_is_hover(e) {
+            gst = gst | 2
+        }
+        let gf: fn(u64, u64, u64, u64, u64) = *gl_plate_slot()
+        gf(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64, widget.w_h(e) as u64, gst)
+        fuiapp.field_glass(true)
+        fuiapp.field(widget.w_x(e) as u64, widget.w_y(e) as u64,
+            widget.w_w(e) as u64, widget.w_h(e) as u64, ebuf(k),
+            ENTRY_CAP as usize, S.s_ecar[(k) as usize], widget.w_is_focus(e),
+            S.s_esecret[(k) as usize], false, S.s_caret_on, false)
+        fuiapp.field_glass(false)
         return
     }
     if S.s_esecret[(k) as usize] {
@@ -5593,6 +5626,16 @@ fn cv_ring_a(x: u64, y: u64, w: u64, h: u64, r: u64, t: u64, rgb: u64, alpha: u6
         t as f64, c | ((alpha & 255) << 24) as u32)
 }
 
+// A plate / ring in the painter's own colour word (a theme colour with its alpha put in).
+fn cv_round_raw(x: u64, y: u64, w: u64, h: u64, r: u64, c: u32) {
+    painter.round_rect(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64, w as f64, h as f64, r as f64, c)
+}
+
+fn cv_ring_raw(x: u64, y: u64, w: u64, h: u64, r: u64, t: u64, c: u32) {
+    painter.round_ring(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64, w as f64, h as f64, r as f64,
+        t as f64, c)
+}
+
 fn cv_ring_rgb(x: u64, y: u64, w: u64, h: u64, r: u64, t: u64, rgb: u64) {
     let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
     let c: u32 = (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
@@ -5617,11 +5660,20 @@ fn draw_card(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
         widget.w_h(e), rp(), 1.0, (*t).border_col | 4278190080 as u32)
 }
 
+fn draw_glasscard(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let gf: fn(u64, u64, u64, u64, u64) = *gl_plate_slot()
+    gf(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64, widget.w_h(e) as u64, 0)
+}
+
 fn card(parent: usize) -> usize {
     let i: usize = scene.scene_box(sc(), parent, 0 as u32, flex.FLEX_COLUMN,
         flex.JUSTIFY_START, flex.AL_STRETCH)
     if i != scene.SCENE_NONE {
-        scene.node_set_draw(sc(), i, 0, draw_card)
+        if gl_plate_on {
+            scene.node_set_draw(sc(), i, 0, draw_glasscard)
+        } else {
+            scene.node_set_draw(sc(), i, 0, draw_card)
+        }
         if S.s_dense {
             scene.node_set_padding(sc(), i, 10, 8, 10, 8)
             scene.node_set_gap(sc(), i, 4, 4)
