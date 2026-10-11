@@ -8246,6 +8246,72 @@ fn drag_paint_on(state: u64, i: u64) -> bool {
     return swing_dx(state, i) != 0 || swing_dy(state, i) != 0
 }
 
+// W-DRAG: THE FRAME, THE TITLE BAR AND THE CAPTION BUTTONS OF A LIFTED WINDOW.
+//
+// `paint_win_drag` copies only the client area, so a dragged window lost its frame, its title bar and its caption buttons for the whole
+// drag and the swing after the release (Justin, Dell 3440x1440, scale 2: "the title bar disappears while I drag"). The old comment said
+// nobody needs the bar for half a second -- but the bar is the thing the user HOLDS. It is painted here with the geometry of the lifted
+// client rectangle: same height as always (a bar scaled by 105 percent would be a blurred edge), as wide as the lifted client plus the frame.
+// `late` = the second call, after the client area: the caption buttons of a window that paints its own strip lie over the strip.
+fn paint_drag_chrome(state: u64, i: u64, wx: i64, wy: i64, ow: i64, oh: i64, cx0: i64, cy0: i64, cx1: i64, cy1: i64, late: bool) {
+    if !deko(state, i) || fb.nodragbar_an(state) {
+        return
+    }
+    let ax0: i64 = imax(wx, cx0)
+    let ay0: i64 = imax(wy, cy0)
+    let ax1: i64 = imin(wx + ow, cx1)
+    let ay1: i64 = imin(wy + oh, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let aktiv: bool = focus(state) == i
+    var rahmen: u64 = deco(state, DK_FRAME)
+    var titel: u64 = deco(state, DK_TITLE)
+    var schrift: u64 = deco(state, DK_TEXT)
+    if aktiv {
+        rahmen = deco(state, DK_FRAME_ON)
+        titel = deco(state, DK_TITLE_ON)
+        schrift = deco(state, DK_TEXT_ON)
+    }
+    let capc: bool = cap_client(state, i)
+    if late {
+        if capc {
+            if form(state, FM_CAPTION) != 0 {
+                paint_caption(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+            } else {
+                paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
+            }
+        }
+        return
+    }
+    fill_round(state, wx, wy, ow, oh, form(state, FM_RADIUS), rahmen, deco_alpha(state), cx0, cy0, cx1, cy1)
+    if !capc {
+        paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+    }
+    var bx: i64 = wx + ow - border(state) as i64 - close_w(state) as i64 - 3
+    if form(state, FM_CAPTION) != 0 {
+        bx = wx + ow - border(state) as i64 - (CAP_N * cap_w(state)) as i64
+        if !capc {
+            paint_caption(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+        }
+    } else if !capc {
+        paint_close_classic(state, wx, wy, ow, ax0, ay0, ax1, ay1)
+    }
+    var before: i64 = 0
+    let sicht: u64 = netview.view_of(state, win_owner(state, i))
+    if sicht != netview.V_REAL && sicht <= 3 && !capc {
+        title_mark(state, sicht - 1, wx + border(state) as i64 + title_pad(state) as i64,
+            wy + border(state) as i64 + ((title_h(state) - border(state) - netmark.H) / 2) as i64,
+            schrift, ax0, ay0, ax1, ay1)
+        before = netmark.W as i64 + 4
+    }
+    let f: u64 = gs(state, S_FONT_UI)
+    if f < ttf.MAX_FONTS && !capc {
+        title_text(state, i, f, wx + border(state) as i64 + title_pad(state) as i64 + before,
+            wy + title_base(state, f), schrift, ax0, ay0, ax1, ay1, bx)
+    }
+}
+
 // DAS GEZOGENE FENSTER MALEN -- Versatz und Skalierung um einen
 // verschobenen Pivot.
 //
@@ -8293,11 +8359,18 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     // und der Nachzug legt sich darueber.
     ox = ox + swing_dx(state, i)
     oy = oy + swing_dy(state, i)
+    // W-DRAG: the frame, title bar and caption buttons go with the lifted window (the client rectangle is the anchor)
+    let fr_x: i64 = ox - border(state) as i64
+    let fr_y: i64 = oy - iny(state, i) as i64
+    let fr_w: i64 = nw + 2 * border(state) as i64
+    let fr_h: i64 = nh + iny(state, i) as i64 + border(state) as i64
+    paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, false)
     let ax0: i64 = imax(ox, cx0)
     let ay0: i64 = imax(oy, cy0)
     let ax1: i64 = imin(ox + nw, cx1)
     let ay1: i64 = imin(oy + nh, cy1)
     if ax1 <= ax0 || ay1 <= ay0 {
+        paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, true)
         return
     }
     let buf: u64 = wg(state, i, W_BUF)
@@ -8364,6 +8437,7 @@ fn paint_win_drag(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
             y = y + 1
         }
     }
+    paint_drag_chrome(state, i, fr_x, fr_y, fr_w, fr_h, cx0, cy0, cx1, cy1, true)
     wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
     wsv(state, i, W_PX,
         wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)

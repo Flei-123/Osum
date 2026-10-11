@@ -1236,6 +1236,10 @@ def main():
         elif b == "schleppfoto":
             t = arg.split()
             wid = int(t[0])
+            if wid < 0:
+                # -1 = the newest window with a frame (fl=0: the desktop shell's terminal), whatever id the boot gave it
+                ids = re.findall(r"wm: fen i=\d+ id=(\d+) x=\d+ y=\d+ w=\d+ h=\d+ lay=\d+ fl=0 ", lies(f.serial))
+                wid = int(ids[-1]) if ids else 0
             dx, dy = (int(v) for v in t[1].split(","))
             g = f.fenstergeom(wid)
             if g is None:
