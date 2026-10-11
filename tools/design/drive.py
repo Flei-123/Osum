@@ -1148,9 +1148,12 @@ def main():
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
+            # W-CURSOR: "titel" = the title bar left of the caption buttons, "aussen" = just outside the frame (desktop)
             stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
-                      "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my)}
+                      "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my),
+                      "titel": (wx + bo + ww // 4, wy + bo + (ti - bo) // 2),
+                      "aussen": (wx + ww + 2 * bo + 40 if wx + ww + 2 * bo + 40 < 1800 else max(wx - 40, 2), my)}
             x0, y0 = stelle[kante]
             f.fahre(x0, y0)
             print("fahrekante id=%d %s -> %d,%d" % (wid, kante, x0, y0))

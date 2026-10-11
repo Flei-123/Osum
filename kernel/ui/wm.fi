@@ -1723,6 +1723,8 @@ const W_OPAC: u64 = 0x1A8
 const W_DRAGX: u64 = 0x1B0
 // COMPOSITOR S3: the shared memory object (unixsock) that holds this window's buffer, + 1; 0 = the buffer is the server's own run of frames
 const W_SHM: u64 = 0x1B8
+// W-CURSOR: the pointer shape this window's program asked for (WIG_CURSOR), 0 = arrow. Used only while the pointer is over the client area.
+const W_CURSOR: u64 = 0x1C0
 // COMPOSITOR S3 scalars (far from the others on purpose)
 const S_TABF: u64 = 0x1E00   // the window table page (frame address), 0 = not made yet
 const S_TABI: u64 = 0x1E08   // its shared object + 1
@@ -3966,6 +3968,7 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_BUF, buf)
             wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
             wsv(state, i, W_SHM, 0)
+            wsv(state, i, W_CURSOR, 0)
             if sbase != 0 {
                 unixsock.shm_ref(state, sidx)
                 wsv(state, i, W_SHM, sidx + 1)
@@ -4176,6 +4179,7 @@ fn destroy(state: u64, i: u64) -> bool {
     wsv(state, i, W_CX, 0)
     wsv(state, i, W_CY, 0)
     wsv(state, i, W_KIND, 0)
+    wsv(state, i, W_CURSOR, 0)
     wsv(state, i, W_EHEAD, 0)
     wsv(state, i, W_ETAIL, 0)
     if hatte_strut {
@@ -6805,10 +6809,38 @@ fn shape_intern(state: u64, s: u64) {
 // stehen: der Zeiger laeuft dabei aus dem Randstreifen heraus, und ein
 // Zeiger, der mitten im Ziehen die Form wechselt, flackert.
 fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
-    if gs(state, S_DRAG) != 0 || gs(state, S_SIZING) != 0 {
+    // W-CURSOR counter-proof `noshapes`: an arrow over everything.
+    if fb.noshapes_an(state) {
+        shape_intern(state, cursor.F_PFEIL)
         return
     }
-    var will: u64 = gs(state, S_SHAPE_APP)
+    if gs(state, S_SIZING) != 0 {
+        return
+    }
+    if gs(state, S_DRAG) != 0 {
+        // a window is carried by its title bar: the move cross
+        shape_intern(state, cursor.F_CROSS)
+        return
+    }
+    var will: u64 = cursor.F_PFEIL
+    if i < MAX_WIN && valid(state, i) {
+        // the wish of the program counts over the CLIENT area only; the
+        // frame and the title bar are the server's and show the arrow.
+        let cx: i64 = x - win_x(state, i) - inx(state, i) as i64
+        let cy: i64 = y - win_y(state, i) - iny(state, i) as i64
+        if cx >= 0 && cy >= 0 && cx < wg(state, i, W_W) as i64
+            && cy < wg(state, i, W_H) as i64 {
+            if wg(state, i, W_KIND) == K_TERM {
+                // the terminal grid is text
+                will = cursor.F_TEXT
+            } else {
+                will = wg(state, i, W_CURSOR)
+                if will >= cursor.FORMEN {
+                    will = cursor.F_PFEIL
+                }
+            }
+        }
+    }
     if i < MAX_WIN && valid(state, i) && deko(state, i) {
         let lx: i64 = x - win_x(state, i) - inx(state, i) as i64
         let ly: i64 = y - win_y(state, i) - iny(state, i) as i64
@@ -6874,28 +6906,25 @@ fn grip_mask(state: u64, i: u64, lokal_x: i64, lokal_y: i64) -> u64 {
 // gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
 // bewegt.
 fn set_shape(state: u64, s: u64) {
-    // RUNDE ECHTHARDWARE-4: neun Formen. Hier stand `s > 1`, und
-    // damit war jede Form ausser Pfeil und Textmarke unerreichbar --
-    // auch dann, wenn ein Programm sie gesetzt haette.
     if s >= cursor.FORMEN || !ready(state) {
         return
     }
-    // Der Wunsch wird IMMER vermerkt, auch wenn das Bild gerade
-    // ohnehin dieses ist: sonst faellt der Zeiger beim Verlassen des
-    // Fensterrandes auf einen veralteten Wunsch zurueck.
     ss(state, S_SHAPE_APP, s)
-    if gs(state, S_SHAPE) == s {
-        return
-    }
-    ss(state, S_SHAPE, s)
+    // W-CURSOR: the wish belongs to the window under the pointer (the
+    // program answers a move event of exactly that window) and is
+    // remembered there. The shape shown follows from the window and the
+    // spot (`margin_cursor`), so leaving the window drops the wish at once
+    // and returning needs no new call.
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
-    // Beide Formen schmutzig machen -- die alte steht noch da, und
-    // die neue kann groesser sein oder einen anderen Griffpunkt haben.
-    // Also das groesste Rechteck: Position minus voller Zeiger, plus
-    // voller Zeiger.
-    let gw: i64 = cur_w(state) as i64
-    damage(state, mx - gw, my - gw, mx + gw, my + gw)
+    var i: u64 = hit(state, mx, my)
+    if i < MAX_WIN && valid(state, i) {
+        wsv(state, i, W_CURSOR, s)
+        if !darf(state, i) {
+            i = MAX_WIN
+        }
+    }
+    margin_cursor(state, i, mx, my)
 }
 
 // ================== RUNDE VSYNC: BEWEGUNG, BILDGRENZE, SIGNATUR
