@@ -1,6 +1,6 @@
 # DEVLOOP — OrientOS als Alltags- und Entwicklungsgerät mit Hot-Reload-Schleife
 
-Stand 11.10.2026 (main `08d38d8b`). **Nur Konzept + Ist-Analyse, nichts umgebaut.**
+Stand 11.10.2026 (main `08d38d8b`, Teil 5 + Updates W-DELLTEST am Ende). Konzept + Ist-Analyse; seit W-DELLTEST: OTA-Platzbedarf gesenkt, `dell_walk smoke`, Abschnitt 7.
 Alle Zahlen sind gelesen oder gemessen (Beleg dabei). Was nicht gemessen ist, steht als *ungemessen*.
 Alle Aufwände in Abschnitt 4 sind **SCHÄTZUNGEN**, keine Zusagen.
 
@@ -24,9 +24,9 @@ Legende: **Dell** = läuft am echten Dell (gemessen), **VM** = nur in QEMU gemes
 | **A11y-Szenenbaum** (Fensterinhalt als Knoten statt Pixel; Lesen + Knopf drücken über den Bus) | **VM** | `tools/a11y/run.sh` 58/0, `tools/a11y/scene.sh` 25/0, `docs/A11Y.md`. Bridge darf nur `act call a11y.tree` (Probelauf zuerst, `docs/BRUECKE.md`). Am Dell nicht gemessen. |
 | **Aktions-Bus (`act`)** | **VM** | `tools/actionbus/run.sh` 306/0; im Abbild 21/0; am Bildschirm 67/0 (Kennzahlen). `act reload` lädt neue Manifeste ohne Broker-Neustart (r239 erledigt, `docs/ACTION-BUS.md`). Am Dell nicht gemessen. |
 | **OTA / Feed** (`/bin/ota`, signiert, Rückschrittsschutz, Kanäle, Wachhund, Rollback) | **VM** (Dell: **blockiert**) | OTA-Abnahme 150/0 (Kennzahl; beim letzten Nachlauf `tools/ota/run.sh` am 11.10. nur bis Abschnitt 4 abgewartet, Endstand ungemessen), `feedtest.sh` 13/0 (Fassung 0→5, Bestätigen, Rollback). Live-Feed `store.fleitec.com`: Fassung 5, 14 Programmpakete. Dell steht auf **Fassung 0** (`cat /system/FASSUNG` = `00000000`, heute gelesen). Doku `docs/OTA.md`, `STATUS-OTA.md`. |
-| **Delta-Update** (r542) | **VM** | `ota` holt zuerst INDEX+Signatur und lädt nur Pakete, die fehlen (main `f69ac58f`; VM: „packages already current: 1“, Server lieferte 0 Pakete). Hilft dem Dell nicht, solange kein Platz da ist: **47,4 MB nötig (3 × 15,8 MB), 5,9 MB frei**. Heute `df`: 11391 von 102400 Blöcken frei (≈5,6 MB). |
+| **Delta-Update + Platzbedarf** (r542) | **VM** (Platz: Code umgestellt, Lauf siehe Abschnitt 7) | `ota` holt zuerst INDEX+Signatur und lädt nur Pakete, die fehlen (main `f69ac58f`; VM: „packages already current: 1“, Server lieferte 0 Pakete). Platzbedarf seit W-DELLTEST: Summe + größtes Paket + Luft = **20,3 MB** statt 47,4 MB (Staging-Datei wird nach jedem `opk` gelöscht); der Stick hat 5,4 MB frei, hilft ihm also immer noch nicht — auf einer INSTALLIERTEN Platte (Wurzel wächst auf 256 MiB) ist es kein Thema mehr. Heute `df`: 11391 von 102400 Blöcken frei (≈5,6 MB). |
 | **Kern-/Wurzel-Update ohne Stick** | **fehlt** | Kern, Starter, wlib, **Fensterserver `wm.fi` (liegt im Kern)** kommen NICHT über den Feed (r330, r104). Nur `dell-update.py` (Bridge, schreibt EFI-Partition des Sticks): Kern ~9 min, Wurzel ~30 min (Notiz r494). Rückfall nur über Bootmenü „previous version“ → braucht einen Menschen am Gerät. |
-| **dell_walk** (Durchklick aller Apps, Foto je Schritt, Urteil) | **VM**; `echt` gebaut, **nie am Dell gelaufen** | `tools/qa/dell_walk.sh vm`: 12 Apps; letzter Stand 4 von 12 Apps gemessen, davon 1 OK (Explorer); Terminal/Terminal2 FEHLER (r534), Settings mit `tzrule=eu` 0 Fehler (W4b, r545). Voller VM-Lauf ~25 min, real „4 Apps in 40 min“ unter Last (r535). Echt-Modus repariert (r547), `--dry` getestet, echter Lauf steht aus. |
+| **dell_walk** (Durchklick aller Apps, Foto je Schritt, Urteil) | **VM**; `smoke` (nur lesen, 9–10 Prüfungen + Foto) **am Dell gelaufen** (66–115 s); `echt` gebaut, bricht bei gesperrtem Schirm ab (am Dell geprüft), Durchlauf mit Eingabe **nie gelaufen**. Doku `docs/DELLWALK.md` | `tools/qa/dell_walk.sh vm`: 12 Apps; letzter Stand 4 von 12 Apps gemessen, davon 1 OK (Explorer); Terminal/Terminal2 FEHLER (r534), Settings mit `tzrule=eu` 0 Fehler (W4b, r545). Voller VM-Lauf ~25 min, real „4 Apps in 40 min“ unter Last (r535). Echt-Modus repariert (r547), `--dry` getestet, echter Lauf steht aus. |
 | **Terminal / Editor** | **VM**, teils Dell | Terminal-Abnahme 6/0 + vttest 32/32, Resize am echten Dell bestätigt. Editor im eigenen Terminalfenster (r543, editwin 11/0). Am Dell offen: erster Terminalstart ohne Fenster (r555). |
 | **Abbild-Bau** (`tools/usbimg/build.sh`, Dell-Profil) | **Dell** | Abbild 08d38d8 liegt bereit (`/root/abbilder/…08d38d8-personal-dell.img.xz`, 8,7 MiB gepackt / 148 MiB). Bauzeit ≈ 7 min (Dateizeiten 05de680: Log 12:31 → .xz 12:38; grobe Ableitung, nicht gestoppt). |
 | **Stick-Betrieb** (Wurzel = RAM) | **Dell** | `docs/LIVE-STICK.md`: Wurzel ist ein Boot-Modul (`modfs`) im RAM, **nichts, was du schreibst, bleibt nach Neustart**. Das ist der heutige Dell-Zustand (`df`: 102400 Blöcke = RAM-Abbild). |
@@ -47,7 +47,7 @@ Schweregrad: **BLOCKIERT** = ohne das kein Alltag/keine Schleife, **STÖRT** = g
 | L1 | **Nichts bleibt gespeichert** (Stick-Wurzel im RAM). Dein Zeug, Einstellungen, installierte Programme sind nach Neustart weg. | **BLOCKIERT** | `docs/LIVE-STICK.md`; Dell-`df` = RAM-Abbild |
 | L2 | **Installation auf Platte nie am Dell gelaufen**: Platte unsichtbar (BIOS RAID On, `ahci init failed why=8`); Fix r558 ungemessen; nur **eine** Platte sichtbar (r559); Installer nur UEFI (r203); USB-Platten nicht anbietbar (r355); NVMe-Größe falsch (r315) | **BLOCKIERT** | r558, r559, r203; Dell-klog heute |
 | L3 | **Installer langsam**: 7 min in VM (Kern 8,4 MB über PIO, ~25 KB/s). Auf echter Hardware ungemessen. | STÖRT | r556, Bericht W5 |
-| L4 | **OTA hat am Dell keinen Platz**: 47,4 MB nötig / 5,9 MB frei; Wurzel liegt als `root.img` auf 96-MiB-ESP, Fernupdate passt nur knapp („Tight“, `dell-update.py`); r469 will ESP ≥ 192 MiB | **BLOCKIERT** (für OTA auf Stick) | r542, r550, r336, r351, r469; nach Installation auf Platte entfällt das teilweise (Platzbedarf der Platten-Wurzel ungeprüft) |
+| L4 | **OTA hat am Dell-Stick keinen Platz**: 20,3 MB nötig (vorher 47,4) / 5,4 MB frei; Wurzel liegt als `root.img` auf 96-MiB-ESP, Fernupdate passt nur knapp („Tight“, `dell-update.py`); r469 will ESP ≥ 192 MiB | **BLOCKIERT** (für OTA auf Stick) | r542, r550, r336, r351, r469; nach Installation auf Platte entfällt das teilweise (Platzbedarf der Platten-Wurzel ungeprüft) |
 | L5 | **Kern/GUI-Änderungen nur per Voll-Update + Neustart**: Fenster, Titelleisten, Menüs, Rahmen leben im Kern (`wm.fi`, 14k Zeilen) bzw. in Starter/wlib — nicht im Feed. Das sind genau die Dinge, zu denen du Feedback gibst. | **BLOCKIERT** für „Strg+F5-Gefühl“ | r330, r104, r413 (wm.fi nach Ring 3 = Risiko, Planung) |
 | L6 | **Eingabe-Pfad (Klick/Tippen) am Dell ungeprüft**; `dell_walk echt` nie gelaufen; USB-Tasten-Reihenfolge bei schnellem Tippen vertauscht (H-001); Maus am Dell zuletzt „bewegt sich nicht“ (r153, mit neuem Abbild nachtesten) | **BLOCKIERT** für Auto-Test am Dell | r526, r157, r153 |
 | L7 | **Rollback des Kerns braucht einen Menschen** (Bootmenü). OTA-Rollback gilt nur für Programme; Gesundheitsprüfung nur 60 s nach Start (r274); Taskleiste/Starter werden bei Tod nicht neu gestartet (r331); `jarvisd`-Respawn nicht belegt (r531: `respawn.sh` 0/3) | STÖRT (Risiko: Dell hängt, keiner am Gerät) | r274, r331, r531, `dell-update.py` Kopf |
@@ -203,3 +203,57 @@ Die Punkte stehen im JARVIS-Projekt OrientOS, Gruppe **Dev-Loop** (neue Punkte) 
   (3) Zeitplan hängt an Gate-Läufen (Queue 10+ min, `dell_walk` 25 min); (4) Browser (Firefox) ist Monate-Arbeit, Certus hat Lücken.
 * **Ich brauche von dir:** BIOS-Check (SATA-Modus) am Dell, Freigabe zum Aufspielen von 08d38d8, später Freigabe für `test`-Kanal auf dem Live-Feed.
 * **Nicht versprechbar:** WLAN (Chip unbekannt), Standby am echten Gerät, Ton — erst mit Test am Dell wissbar.
+
+
+---
+
+## 7. W-DELLTEST (11.10.2026): Dell-Standardabnahme, OTA-Platz, Update-Weg
+
+### 7.1 Was sich geändert hat
+
+* **OTA-Platz (r542):** `kernel/user/ota.fi` löscht Staging-Datei + `.sig` sofort nach dem erfolgreichen `opk` je Paket. Bedarf =
+  Summe + größtes Paket + 512 KiB + Summe/8 (vorher 3 × Summe). Live-Feed Fassung 5 (aus `/srv/store/osum/aktuell/VERZEICHNIS`, 14 Pakete):
+  Summe 15 807 042, größtes 1 993 737 → **20 300 947 statt 47 421 126 Oktett**. Die Alles-erst-prüfen-Reihenfolge (Schritt 4) bleibt;
+  nur die Staging-Bytes wandern früher zurück. Lauf: `tools/ota/run.sh --kurz` (Zahlen: Bericht `reports/20261011-W-DELLTEST.md`).
+* **Wo liegt das Staging?** `/tmp/ota` im Wurzeldateisystem. Stick: 50 MiB RAM-Abbild, 5,4 MiB frei (`df` am Dell heute) → OTA geht dort nicht.
+  Installiert: `instkern.wachsen` lässt OFS auf die Partition wachsen, **gedeckelt auf 524 288 Blöcke = 256 MiB** (`FS_KARTEN=128`,
+  Blockkarte 128 × 4096 Bit × 512 B); frei ≈ 256 − 44.6 MiB ≈ 210 MiB (gerechnet, nicht am Dell gemessen). Damit liegt das Staging nach der
+  Installation automatisch auf der Platte; kein eigener „Staging-Pfad“ nötig. **Offen:** der 256-MiB-Deckel (mehr Karten = Abbildlayout ändern, `FS_KARTEN=512` → 1 GiB; nicht getestet).
+* **dell_walk:** `smoke` (nur lesen) + Sperrschirm-Wächter in `echt` + Ablage unter `/root/dellwalk-logs/<datum>/` + `docs/DELLWALK.md`.
+* **Installer am Dell:** am 11.10. ~15:20–15:35 UTC beobachtet: der Dell steht im **Live-System vom Stick am Sperrbildschirm**, kein `install`-Prozess,
+  `/dev/sda` ist in `/dev` da (AHCI-Fix im neuen Kern: `link scan done, 11605 us / ports left 0`, zwei Ports `verdict`), `FASSUNG` = 0.
+  **Eine Installation lief in dieser Zeit NICHT** (kein Prozess, `df` = Stick-Abbild) → Installer-Dauer an der echten HDD: **nicht gemessen**.
+
+### 7.2 Update-Weg: wo geht die Zeit hin? (Belege, kein Neumessen am Dell)
+
+| Weg | Dauer (Messung) | Engpass |
+|---|---|---|
+| Kern-Fernupdate (`dell-update.py`, osum.mb 8,4 MB) | ~9 min (r494) ≈ 15 KB/s | **Schreiben auf die FAT-Partition des Sticks** (PIO, ESP-Schreiben ≈ 25 KB/s, r556) + Hash zurücklesen, nicht das Netz |
+| Wurzel-Fernupdate (root.img, ~50 MB) | ~30 min (r494) ≈ 28 KB/s | dasselbe |
+| `ota apply` 14 Pakete (VM) | ~25 min (r179): ≈ 1 min Holen + 1,5 min `opk` je Paket | Dateischreiben im OFS: `t_limits.file_4mib_write` = **26 KiB/s** (Ziel ≥ 10 000) |
+
+Ergebnis: **fast die ganze Zeit ist Schreibdurchsatz (~25 KB/s) im Gerät**, nicht Download und nicht Signaturprüfung.
+Hebel in dieser Reihenfolge (alle SCHÄTZUNG):
+
+1. **Schreibdurchsatz OFS/FAT/USB** auf ≥ 1 MB/s heben (Blockgröße 512 B, Journal je Schreibaufruf, PIO-Pfad prüfen) — würde Kern-Update auf ~10 s, Wurzel auf ~1 min und `ota apply` auf Minuten drücken. Größter Hebel, eigener Auftrag.
+2. **Kern-only-Update:** `wm.fi` steckt im Kern (8,4 MB, ~9 min), `root.img` (~30 min) ändert sich dann nicht. `dell-update.py` schickt immer beide.
+   Eine Option „Wurzel behalten“ (neuer Eintrag = neuer Kern + aktuelle Wurzel) würde Kern-Änderungen von ~40 auf ~9 min bringen.
+   **Nicht umgesetzt:** das Werkzeug schreibt am Dell-Stick, war in diesem Lauf verboten und ist nur mit `dell-update-fakedev.py` testbar.
+3. **Block-Delta der Wurzel** (nur geänderte Blöcke senden): bräuchte ein Patch-Werkzeug im Gerät und ändert `root.img` an Ort und Stelle (kein „vorherige Version“).
+   Nicht klein, nicht sicher → nicht gebaut.
+4. **Programme (Stufe A) ohne Neustart** sind schon getrennt: Paket je App; Delta lädt nur geänderte Pakete (`ota: packages already current`).
+   Ein einzelnes Paket ≈ 1–2 MB ≈ 1–2,5 min (nach Zeile 3 der Tabelle) — das ist der schnellste Weg heute.
+
+### 7.3 Schnellster Weg heute: neue Fassung → Dell
+
+1. Bauen + VM-Vorprüfung (Gates, `heavy`).
+2. Feed-Stand lokal bauen + signieren (`docs/OTA-FEED.md` §1), `feedtest.sh` (§2), mit Boss-Ja veröffentlichen (§3, Live-System).
+3. Dell: Bridge-Befehl `/bin/ota apply` (nur auf INSTALLIERTEM System: Platz) → `/bin/act reload` → App neu starten → `dell_walk smoke` + Foto.
+4. Kern/wm.fi: `dell-update.py` (Stick, ~40 min) + Neustart. Bis M5 gibt es nichts Schnelleres.
+
+### 7.4 Nächste Schritte (Dell-Standardabnahme, VM nur Vorprüfung)
+
+* Nach JEDEM Update am Dell: `bash tools/qa/dell_walk.sh smoke` (~1–2 min, nur lesen). Rot = Befund in die Roadmap, Rollback prüfen.
+* Am Desktop (entsperrt, Boss am Gerät oder Not-Aus bekannt): `dell_walk.sh echt --apps settings,explorer,terminal` — erster echter Lauf steht aus (r526).
+* Installation auf die Platte am Dell (M2): Boss-Freigabe; danach `smoke` (df ≥ 20 MiB muss grün werden), dann `ota apply` am Dell messen (Zeit, Platz).
+* VM-Läufe (`dell_walk vm`, `ota/run.sh`) bleiben Vorprüfung vor dem Dell, nicht Ersatz.

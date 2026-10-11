@@ -108,16 +108,25 @@ immer zuschlägt, ist kein Schutz, sondern ein kaputter Update-Weg.
 3. **Rückschrittsschutz.**
 4. Jedes Paket **vollständig** holen, dann Länge und SHA-256 gegen das
    VERZEICHNIS halten. Erst wenn **alle** stimmen, geht es weiter.
-5. **Platz prüfen** (`SYS_SYSINFO`, `I_BFREE` × `I_BSIZE`), mit Faktor
-   drei: die Datei unter `/tmp/ota`, der ausgepackte Store-Eintrag, und
-   Luft für Generation, Journal und Verzeichniseinträge.
+5. **Platz prüfen** (`SYS_SYSINFO`, `I_BFREE` × `I_BSIZE`). **Seit r542 (11.10.2026):
+   Bedarf = Summe + größtes Paket + 512 KiB + Summe/8** (vorher 3 × Summe). Grund: nach
+   jedem erfolgreichen `opk` wird die Staging-Datei (`/tmp/ota/<paket>` + `.sig`) sofort
+   gelöscht; die Bytes WANDERN vom Staging in den Store-Eintrag, statt doppelt zu liegen.
+   Spitze = alle Staging-Dateien + der Store-Eintrag des gerade ausgepackten Pakets.
+   Live-Feed Fassung 5 (14 Pakete, 15 807 042 Oktette, größtes 1 993 737):
+   **47,4 MB → 20,3 MB**. Die zweite Prüfung nach dem Laden verlangt nur noch
+   größtes Paket + Luft (die Staging-Dateien liegen dann schon auf der Platte).
+   Staging liegt unter `/tmp/ota` im Wurzeldateisystem: auf dem Stick sind das 50 MiB RAM-Abbild
+   (5,4 MiB frei), auf einem INSTALLIERTEN System wächst das Dateisystem auf die Partition
+   (höchstens 524 288 Blöcke = 256 MiB, `FS_KARTEN=128`, `instkern.wachsen`) — dann ~200 MiB frei,
+   der Bedarf ist kein Thema mehr.
    **Delta (r542):** vor dieser Prüfung holt `ota` INDEX + INDEX.sig und lässt
    `opk catalog` (Signatur geprüft) sagen, welche Pakete schon mit genau dem
    Streuwert des INDEX installiert sind. Solche Pakete werden weder gezählt
    noch geholt noch eingespielt (`ota: packages already current: N`). Ist
    alles aktuell, springt nur der Fassungszähler. Fehlt der Katalog, läuft
    der volle Weg wie bisher. Bei Platzmangel nennt `ota` die Lücke
-   (`ota: short by N`). Der Bedarf bleibt 3 × (noch nötige Paketoktette).
+   (`ota: short by N`). Der Bedarf zählt nur die noch nötigen Paketoktette (Formel oben).
 6. `opk update` — prüft INDEX.sig und die Paketsignatur ein
    **zweites** Mal mit eigenem Code, legt den Store-Eintrag an, schreibt
    die neue Generation, schaltet `/system/AKTUELL` um.

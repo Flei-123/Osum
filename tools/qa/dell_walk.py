@@ -557,6 +557,19 @@ def load_png(path):
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.int16)
 
 
+LOCK_NAMES = ("lock", "login", "glogin")
+
+
+def screen_locked(ps_text):
+    """True when the lock screen / sign-in program is in the process list (typing into it would be typed into the
+    password field). The NAME column is the last one."""
+    for z in ps_text.splitlines():
+        p = z.split()
+        if len(p) >= 8 and p[0].isdigit() and p[-1] in LOCK_NAMES:
+            return True
+    return False
+
+
 def run_echt(args):
     """The walk on the REAL Dell. r547: (1) a permit before EVERY photo (Bruecke.photo), (2) an app is a NEW PID in ps (the
     name is `-`), (3) per window: maximise, restore, drag, close with the buttons found in THE PHOTO (window_rect), then
@@ -569,6 +582,11 @@ def run_echt(args):
         print("device check: %s (%s)" % ("ONLINE" if up else "OFFLINE", why))
         if not up:
             print("ABORT: the Dell is not online -- nothing was sent.")
+            return 3
+    if not args.dry:
+        ps_txt = br.job("command", "/bin/ps")[2].decode("latin1")
+        if screen_locked(ps_txt):
+            print("ABORT: the lock screen / sign-in is running on the Dell -- nothing was typed (log in first).")
             return 3
     apps = [a for a in APPS if not args.apps or a["id"] in args.apps.split(",")]
     shotdir = os.path.join(out, "fotos")
@@ -726,12 +744,13 @@ def run_smoke(args):
     m = re.search(r"total=(\d+) free=(\d+).*size=(\d+)", txt, re.S)
     if m:
         tot, fre, bs = (int(x) for x in m.groups())
-        check("df", fre * bs >= 20 * 1024 * 1024, "root %.0f MiB, free %.1f MiB (OTA needs about 3x the packages; < 20 MiB = stick RAM image)" % (tot * bs / 1048576, fre * bs / 1048576))
+        check("df", fre * bs >= 20 * 1024 * 1024, "root %.0f MiB, free %.1f MiB (OTA needs ~20 MB for the live feed: sum + largest package + slack; < 20 MiB = stick RAM image)" % (tot * bs / 1048576, fre * bs / 1048576))
     else:
         check("df", False, "no df answer: " + txt[:80])
     st, txt = got["/bin/ps"]
     names = set(r.split()[-1] for r in txt.splitlines() if re.match(r"\s*\d+\s", r))
     miss = [d for d in SMOKE_DAEMONS if d not in names]
+    check("session", True, "LOCKED (lock/login runs: `echt` would refuse)" if screen_locked(txt) else "desktop (no lock screen)")
     check("daemons", st == 200 and not miss, "missing: %s" % ", ".join(miss) if miss else "all of %s run" % ", ".join(SMOKE_DAEMONS))
     for w in SMOKE_LOG_WORDS:
         st, txt = got["/bin/grep %s /proc/klog" % w]
