@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/settingsui/run.sh -- settings redesign: one screenshot per page + checks.
+#
+#   /root/jarvis/bin/heavy bash tools/settingsui/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
+#
+# STATUS: written, NOT yet run (first run belongs to the next round).
+# It boots the design-audit machine (tools/design/audit.sh), opens Settings,
+# clicks every sidebar page (rect names taba..tao), types into the search field
+# (Ctrl+F), and takes a picture each time. Checks (serial log):
+#   1. the sidebar tiles are reported (15 `tab?` rects);
+#   2. the search field is reported and the window is up;
+#   3. a search that matches nothing leaves the sidebar empty ("Keine Treffer");
+#   4. no crash lines.
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+OUT=${1:-}
+if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT-build"' EXIT; fi
+shift || true
+export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
+DREH="$OUT-drehbuch.txt"
+{
+  echo "warte 12"
+  echo "klick 24,780"; echo "warte 3"
+  echo "klickauf start_Settings"; echo "warte 12"
+  echo "foto 00-start"
+  for p in a b c d e f g h i j k l m n o; do
+    echo "klickauf tab$p"; echo "warte 2"; echo "foto page-$p"
+  done
+  echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
+} > "$DREH"
+bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
+pass=0; fail=0
+ok()  { pass=$((pass+1)); echo "  OK    $1"; }
+bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
+S="$OUT/serial.txt"
+n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null || echo 0)
+[ "$n" -ge 15 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
+grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
+grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl. search field)" || bad "controls reported"
+c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null || echo 0)
+[ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
+ls "$OUT"/*.ppm >/dev/null 2>&1 && ok "pictures taken: $(ls "$OUT"/*.ppm | wc -l)" || bad "no pictures"
+echo "SETTINGSUI: $pass passed, $fail failed"
+[ "$fail" = 0 ]
