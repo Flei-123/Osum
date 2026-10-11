@@ -455,6 +455,9 @@ class Fahrer:
             if os.path.exists(pth):
                 os.unlink(pth)
             paths.append(pth)
+            if mode == "move":
+                # W-LOGIN: the pointer keeps moving between the frames (every move makes the window server compose)
+                cmds.append("mouse_move %d 0" % (6 if i % 2 == 0 else -6))
             cmds.append("screendump %s" % pth)
         self.s.sendall(("\n".join(cmds) + "\n").encode())
         bis = time.time() + frist
