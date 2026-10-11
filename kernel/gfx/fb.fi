@@ -523,6 +523,8 @@ const M_NODRAGBAR: u64 = 134217728
 const M_FULLROWS: u64 = 268435456
 // W-VBLANK: `nobeam` -- never wait for the raster before a copy (counter-proof of tools/vblank/run.sh and the way back if a pipe lies)
 const M_NOBEAM: u64 = 536870912
+// W-VBLANK: `keepmarks` -- keep the old rule (drop only marks inside the copied rows); default drops ALL dirty-row marks after the frame's rectangle copies (measured 2.4 MB vs 9.6 MB per copy at 1920x1080)
+const M_KEEPMARKS: u64 = 1073741824
 const M_TERMDUMP: u64 = 33554432
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
@@ -2381,6 +2383,10 @@ fn phases_an(state: u64) -> bool {
     return (mode(state) & M_PHASES) != 0
 }
 
+fn beam_trust(state: u64) -> bool {
+    return (mode(state) & M_KEEPMARKS) == 0
+}
+
 fn nobeam_an(state: u64) -> bool {
     return (mode(state) & M_NOBEAM) != 0
 }
@@ -3450,6 +3456,7 @@ fn parse(state: u64, cmd: u64) {
     var w_ndb: [u8; 10] = "nodragbar\0"
     var w_fur: [u8; 9] = "fullrows\0"
     var w_nbm: [u8; 7] = "nobeam\0"
+    var w_kpm: [u8; 10] = "keepmarks\0"
     var w_tdp: [u8; 9] = "termdump\0"
     var m: u64 = 0
     if cmd != 0 {
@@ -3510,6 +3517,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_nbm[0]) as u64, 6) != 0 {
             m = m | M_NOBEAM
+        }
+        if find(cmd, (&w_kpm[0]) as u64, 9) != 0 {
+            m = m | M_KEEPMARKS
         }
         if find(cmd, (&w_nwa[0]) as u64, 7) != 0 {
             m = m | M_NOWATCH
@@ -5345,7 +5355,9 @@ fn flush_done(state: u64, y0: u64, y1: u64) {
     let fl: u64 = arch.irq_save()
     let lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
     let hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
-    if hi > lo && lo >= y0 && hi <= y1 {
+    // MEASURED: the Messtafel / console leave their row marks standing after their own rectangle copies; with the covered-rows rule
+    // only, the trailing `flush` copied those rows whole again. by default the rectangles are trusted and every mark is dropped (`keepmarks` = old rule).
+    if hi > lo && ((lo >= y0 && hi <= y1) || beam_trust(state)) {
         kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
         kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
     }

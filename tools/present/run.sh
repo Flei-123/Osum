@@ -23,7 +23,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 declare -A OKT US
 for c in ${CASES:-1920x1080-new 1920x1080-old 3440x1440-new 3440x1440-old}; do
     res=${c%-*}; mode=${c#*-}
-    extra=""; [ "$mode" = old ] && extra="extra=fullrows"
+    extra=""; [ "$mode" = old ] && extra="extra=fullrows"; [ "$mode" = keep ] && extra="extra=keepmarks"
     echo "== case $c =="
     bash tools/design/eh6.sh "$TMPD/$c" res=$res accel=kvm $extra drehbuch="$(pwd)/tools/present/drag.txt" > "$TMPD/$c.log" 2>&1
     grep -a "FEHLGESCHLAGEN\|NO GEOMETRY\|schleppschnell" "$TMPD/$c.log" | head -5
