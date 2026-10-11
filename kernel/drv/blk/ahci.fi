@@ -1708,10 +1708,19 @@ fn write_block(state: u64, lba: u64, src: u64) -> bool {
     }
     let b: u64 = buffer(state, 0)
     bounce_copy(src, b, SECTOR)
+    // w-disklag: NO flush per block. FLUSH CACHE EXT on a rotating disk
+    // costs a seek/rotation (8-20 ms) and was issued after EVERY 512-byte
+    // write (measured: tools/disklag, flushes == writes). Durability is
+    // the caller's job at its barriers: the journal commit points
+    // (`ofsj.commit`), `sync` and shutdown all call `blk.flush`, which now
+    // reaches `flush` below for AHCI as well.
     if !run(state, ATA_WRITE_DMA_EXT, lba, 1, b, SECTOR, true) {
         return false
     }
-    return flush(state)
+    if kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return flush(state) // control sample: the old per-block flush
+    }
+    return true
 }
 
 // MEHRERE SEKTOREN IN EINEM BEFEHL. Das Dateisystem braucht es nicht --
@@ -1736,11 +1745,15 @@ fn write_many(state: u64, lba: u64, count: u64, src: u64) -> bool {
     if count * SECTOR > PRDT_MAX * PAGE {
         return false
     }
+    // w-disklag: no flush here either (see write_block).
     if !run(state, ATA_WRITE_DMA_EXT, lba, count, src, count * SECTOR,
         true) {
         return false
     }
-    return flush(state)
+    if kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return flush(state)
+    }
+    return true
 }
 
 // FLUSH CACHE EXT, und der ist hier nicht kosmetisch: eine SATA-Platte

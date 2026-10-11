@@ -844,6 +844,11 @@ fn probe_ata0(state: u64) -> u64 {
 // Zwischenspeicher und nicht ueber die Platte -- und ein Stromausfall
 // haette recht.
 fn flush(state: u64) -> bool {
+    // w-disklag: AHCI writes are no longer flushed one by one; the
+    // barriers (journal commit, sync, shutdown) arrive here.
+    if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        return ahci.flush(state)
+    }
     if kstate.get(state, kstate.DISK_DEV) != DEV_ATA {
         return true
     }
@@ -1016,6 +1021,26 @@ fn cache_invalidate(state: u64) {
     }
 }
 
+// w-disklag: a write drops only the ways that contain the written sector
+// (same device), not all eight. Every writer still comes through
+// `write_raw` / `write_on`, the two places that call this, so the rule
+// "a cache that misses one write is worse than no cache" still holds.
+// Before this, each metadata write threw away the pointer/inode/bitmap
+// blocks the next operation needed again (measured: 115 disk reads per
+// created file instead of ~50).
+fn cache_drop(state: u64, dev: u64, lba: u64) {
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        if wg(state, w, C_VALID) == 1 {
+            let c0: u64 = wg(state, w, C_LBA)
+            if wg(state, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wg(state, w, C_N)) {
+                ws(state, w, C_VALID, 0)
+            }
+        }
+        w = w + 1
+    }
+}
+
 fn cache_reset(state: u64) {
     cache_invalidate(state)
     cs(state, C_HITS, 0)
@@ -1097,10 +1122,21 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     }
     ws(state, ziel, C_VALID, 0)
     cs(state, C_CMDS, cg(state, C_CMDS) + 1)
-    if !ata_read_run(lba, daten, n, slave) {
+    // w-disklag: the same read-ahead for AHCI -- ONE DMA command for the
+    // whole run instead of one command per 512-byte block.
+    var run_ok: bool = false
+    if dev == DEV_AHCI {
+        run_ok = ahci.read_many(state, lba, n, daten)
+    } else {
+        run_ok = ata_read_run(lba, daten, n, slave)
+    }
+    if !run_ok {
         // RUECKFALL AUF DEN ALTEN WEG. Ein Laufwerk, das mit einem Zug
         // nicht zurechtkommt, gibt es -- und dann ist ein langsamer
         // Lauf besser als gar keiner.
+        if dev == DEV_AHCI {
+            return ahci.read_block(state, lba, dst)
+        }
         return ata_read_twice(lba, dst, slave)
     }
     ws(state, ziel, C_LBA, lba)
@@ -1109,6 +1145,13 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     ws(state, ziel, C_VALID, 1)
     copy(daten, dst)
     return true
+}
+
+fn ahci_read_cached(state: u64, lba: u64, dst: u64, ende: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return ahci.read_block(state, lba, dst) // control sample: old path
+    }
+    return ata_read_cached(state, lba, dst, DEV_AHCI, ende)
 }
 
 fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
@@ -1125,7 +1168,7 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
         return usb.msc_read_at(state, usb_slot(dev), lba, dst)
     }
     if dev == DEV_AHCI {
-        return ahci.read_block(state, lba, dst)
+        return ahci_read_cached(state, lba, dst, blocks_on(state, dev))
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
@@ -1139,7 +1182,7 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
-    cache_invalidate(state)
+    cache_drop(state, dev, lba)
     if dev == DEV_ATA {
         return ata_write_twice(lba, src, false)
     }
@@ -1238,7 +1281,8 @@ fn read_raw(state: u64, lba: u64, dst: u64) -> bool {
         return nvme.read_block(state, abs, dst)
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
-        return ahci.read_block(state, abs, dst)
+        return ahci_read_cached(state, abs, dst,
+            kstate.get(state, kstate.DISK_FIRST) + blocks(state))
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
@@ -1260,7 +1304,7 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
         return false
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
-    cache_invalidate(state)
+    cache_drop(state, kstate.get(state, kstate.DISK_DEV), abs)
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
         return ata_write_twice(abs, src, false)
     }
