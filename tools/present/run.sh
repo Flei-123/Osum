@@ -42,8 +42,7 @@ for c in ${CASES:-1920x1080-new 1920x1080-old 3440x1440-new 3440x1440-old}; do
     done
     last=${FL[$bi]}
     n=$(sed -E 's/.* n=([0-9]+).*/\1/' <<<"$last"); us=$(sed -E 's/.* us=([0-9]+).*/\1/' <<<"$last"); mx=$(sed -E 's/.* max=([0-9]+).*/\1/' <<<"$last")
-    o1=$(sed -E 's/.* okt=([0-9]+).*/\1/' <<<"$last"); o0=$(sed -E 's/.* okt=([0-9]+).*/\1/' <<<"${FL[$((bi-1))]}")
-    okt=$((o1-o0))
+    okt=$(sed -E 's/.* okt=([0-9]+).*/\1/' <<<"$last")
     bl=${BI[$bi]:-}
     echo "        copies=$n us_sum=$us us_max=$mx octets=$okt  per copy: $((n>0 ? okt/n : 0)) octets, $((n>0 ? us/n : 0)) us"
     echo "        ${bl}"
