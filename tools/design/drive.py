@@ -449,6 +449,9 @@ class Fahrer:
         cmds = []
         if mode == "click":
             cmds += ["mouse_button 1", "mouse_button 0"]
+        elif mode.startswith("key:"):
+            # w-caret: `serie key:<name> <n> <name>` presses a key in the same write, then the burst
+            cmds.append("sendkey %s" % mode[4:])
         paths = []
         for i in range(n):
             pth = os.path.join(self.out, "%s-%03d.ppm" % (name, i))
