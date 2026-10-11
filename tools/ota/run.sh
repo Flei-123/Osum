@@ -157,6 +157,9 @@ delta_test() {
     rc=$(lauf delta1 "opk install /quelle2/hallo-2.opk;ota apply;ota show;exit")
     gleich "(i) the machine boots" "$rc" "21"
     hat "$OUT/delta1.txt" "ota: packages already current: 1" "(i) DELTA: the installed package is recognised as current"
+    hat "$OUT/delta1.txt" "ota: nothing to install" "(i) and it says so"
+    hatnicht "$OUT/delta1.txt" "READY FOR RESTART" "(i) and no restart is offered for nothing"
+    hat "$OUT/delta1.txt" "ota: version here 2" "(i) only the counter moved: version here 2"
     hatnicht "$OUT/delta1.txt" "NOT ENOUGH SPACE" "(i) and no space is asked for it"
     hatnicht "$OUT/delta1.txt" "ota: hash ok hallo-2.opk" "(i) and it is not fetched/checked again"
     if grep -qa "hallo-2.opk" "$OUT/srv.log"; then
