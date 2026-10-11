@@ -40,13 +40,14 @@ G = 24.0
 # Die Formen.  Reihenfolge IST die Nummerierung, auf die sich
 # kernel/wm.fi und kernel/user/wlibc.fi stuetzen:
 #   0 Pfeil, 1 Textmarke, 2 Hand, 3 Breite, 4 Hoehe,
-#   5 Diagonale NW-SO, 6 Diagonale NO-SW, 7 Verschieben, 8 Warten
+#   5 Diagonale NW-SO, 6 Diagonale NO-SW, 7 Verschieben, 8 Warten,
+#   9 Verboten (Ring mit Schraegstrich, EIN einfacher Umriss)
 #
 # Je Form: (Name, Griffpunkt, Umriss).  Der Griffpunkt ist die Stelle
 # im Entwurfsraster, die auf der Mausposition liegt -- beim Pfeil die
 # Spitze, bei allen anderen die Mitte.
 NAMEN = ["pfeil", "text", "hand", "breite", "hoehe",
-         "diag1", "diag2", "kreuz", "warten"]
+         "diag1", "diag2", "kreuz", "warten", "verboten"]
 
 
 def _dreh(pts, grad, cx=12.0, cy=12.0):
@@ -120,6 +121,41 @@ WARTEN = [(6.5, 2.5), (17.5, 2.5), (17.5, 5.0), (13.3, 11.3),
           (13.3, 12.7), (17.5, 19.0), (17.5, 21.5), (6.5, 21.5),
           (6.5, 19.0), (10.7, 12.7), (10.7, 11.3), (6.5, 5.0)]
 
+# --- 9 VERBOTEN (Ring mit Schraegstrich) --------------------------
+# One SIMPLE outline (the rasteriser uses the even-odd rule and `pruefe`
+# forbids self-crossing). Ring + bar has two holes, so each hole is opened
+# by a radial slit of 0.45 units next to one bar end: arc1 - bar - arc2 is
+# a chain and the polygon needs no bridge. The widened white outline
+# (1.33 units) closes the slit in the final image, so it reads as a seam.
+def _verboten():
+    import math
+    cx, cy, ro, ri, w, gap = 12.0, 12.0, 10.2, 7.2, 1.5, 0.45
+    di = math.degrees(math.asin(w / ri))
+    g = math.degrees(gap / ro)
+    gi = math.degrees(gap / ri)
+    def P(r, a):
+        t = math.radians(a)
+        return (cx + r * math.cos(t), cy + r * math.sin(t))
+    def arc(r, a0, a1, n):
+        return [P(r, a0 + (a1 - a0) * k / n) for k in range(n + 1)]
+    pts = []
+    # outer circle CW from slit1 end to slit2 start
+    pts += arc(ro, 45 + di + g, 225 + di, 12)
+    # radial in at slit2 start, E- from NW corner to SE corner
+    pts += [P(ri, 225 + di), P(ri, 45 - di + 360)]
+    # inner circle of arc2 backwards (CCW) to slit2 end, radial out
+    pts += arc(ri, 405 - di, 225 + di + gi, 8)[1:]
+    # outer circle CW from slit2 end to slit1 start
+    pts += arc(ro, 225 + di + g, 405 + di, 12)
+    # radial in at slit1 start, E+ from SE corner to NW corner
+    pts += [P(ri, 45 + di + 360), P(ri, 225 - di)]
+    # inner circle of arc1 backwards to slit1 end
+    pts += arc(ri, 225 - di, 45 + di + gi, 8)[1:]
+    return pts
+
+
+VERBOTEN = _verboten()
+
 FORMEN = [
     ("pfeil",  (2.0, 2.0),   PFEIL),
     ("text",   (12.0, 12.0), TEXT),
@@ -130,6 +166,7 @@ FORMEN = [
     ("diag2",  (12.0, 12.0), DIAG2),
     ("kreuz",  (12.0, 12.0), KREUZ),
     ("warten", (12.0, 12.0), WARTEN),
+    ("verboten", (12.0, 12.0), VERBOTEN),
 ]
 
 
