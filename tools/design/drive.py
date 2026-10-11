@@ -1288,6 +1288,39 @@ def main():
             print("schleppfoto: geom %d,%d %dx%d bo=%d ti=%d" % (wx, wy, ww, wh, bo, ti))
             for nm, px, py, ph in f.schleppe_fotos(wx + bo + ww // 3, wy + ti // 2, dx, dy, int(t[2]), t[3]):
                 print("schleppfoto: %s %d %d %s" % (nm, px, py, ph))
+        # W-PRESENT: `schleppschnell <window id> <dx>,<dy> <reps>`: grab the title bar and drag the window there and back <reps> times as fast as
+        # the monitor takes the moves (120 points per move, no pause, no picture), release. Used with F12 before and after: the frames
+        # of that burst and what their copies to the card cost (`wm: bild`, `wm: flush`).
+        elif b == "schleppschnell":
+            t = arg.split()
+            wid = int(t[0])
+            if wid < 0:
+                ids = re.findall(r"wm: fen i=\d+ id=(\d+) x=\d+ y=\d+ w=\d+ h=\d+ lay=\d+ fl=0 ", lies(f.serial))
+                wid = int(ids[-1]) if ids else 0
+            dx, dy = (int(v) for v in t[1].split(","))
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("schleppschnell %d -> NO GEOMETRY reported" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            x0, y0 = wx + bo + ww // 3, wy + ti // 2
+            f.fahre(x0, y0)
+            time.sleep(0.5)
+            f.cmd("mouse_button 1")
+            time.sleep(0.4)
+            for rep in range(int(t[2])):
+                for sgn in (1, -1):
+                    ddx, ddy = sgn * dx, sgn * dy
+                    while ddx or ddy:
+                        sx = max(-120, min(120, ddx))
+                        sy = max(-120, min(120, ddy))
+                        f.cmd("mouse_move %d %d" % (sx, sy))
+                        ddx -= sx
+                        ddy -= sy
+            f.cmd("mouse_button 0")
+            f.x, f.y = x0, y0
+            print("schleppschnell: %d,%d x%d done" % (dx, dy, int(t[2])))
         elif b == "ziehfoto":
             t = arg.split()
             r = f.rechteck(t[0])

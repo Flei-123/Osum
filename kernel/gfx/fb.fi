@@ -117,7 +117,9 @@ export {
     tx_octets, tx_rects, frames, tx_add, frame_done, tx_reset,
     dirty_rect, rect_valid, rect_x0, rect_y0, rect_x1, rect_y1,
     rect_take, dirty_x, S_TXOCT, S_TXRECT, S_FRAMES,
-    set_vgpu, on_vgpu
+    set_vgpu, on_vgpu,
+    // W-PRESENT: one copy per frame, only the dirty rectangle, and its cost counters.
+    flush_region, flush_note, flush_reset, fullrows_an, M_FULLROWS, flush_us_sum, flush_us_max, flush_us_n
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -375,6 +377,10 @@ const S_RVALID: u64 = 0x840 // 0 = nichts angemeldet
 // der Treiber es braucht. Wer es nimmt, ist `vgpu.present` ueber
 // `rect_take` -- und das ist auch der Einzige, der es loescht.
 const S_VGPU: u64 = 0x848
+// W-PRESENT: what one frame's copy to the card cost: sum / max (microseconds) and the number of copies timed
+const S_FLUS: u64 = 0x850
+const S_FLMAX: u64 = 0x858
+const S_FLN: u64 = 0x860
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -484,6 +490,9 @@ const M_NOWATCH: u64 = 16777216
 const M_NOCASCADE: u64 = 67108864
 // W-DRAG: `nodragbar` -- a lifted (dragged) window is painted WITHOUT frame, title bar and caption buttons, as before the fix (counter-proof of tools/drag/run.sh)
 const M_NODRAGBAR: u64 = 134217728
+// W-PRESENT: `fullrows` -- the window server pushes whole screen rows to the card for every frame, as before the fix (counter-proof of
+// tools/present/run.sh: the copy is 3-6 times larger there, so the picture is exposed to the scan-out that much longer)
+const M_FULLROWS: u64 = 268435456
 const M_TERMDUMP: u64 = 33554432
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
@@ -2342,6 +2351,10 @@ fn phases_an(state: u64) -> bool {
     return (mode(state) & M_PHASES) != 0
 }
 
+fn fullrows_an(state: u64) -> bool {
+    return (mode(state) & M_FULLROWS) != 0
+}
+
 fn termdump_an(state: u64) -> bool {
     return (mode(state) & M_TERMDUMP) != 0
 }
@@ -2579,6 +2592,18 @@ fn clear(state: u64, color: u64) {
 // das nicht meldet, sieht sie nach dem naechsten `flush` nicht.
 // ================================================ RUNDE VIRTIOGPU
 // DIE WAAGE UND DAS SCHMUTZRECHTECK.
+
+fn flush_us_sum(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLUS)
+}
+
+fn flush_us_max(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLMAX)
+}
+
+fn flush_us_n(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLN)
+}
 
 fn tx_octets(state: u64) -> u64 {
     return kstate.get(state, FB_OFF + S_TXOCT)
@@ -3373,6 +3398,7 @@ fn parse(state: u64, cmd: u64) {
     var w_nwa: [u8; 8] = "nowatch\0"
     var w_ncs: [u8; 10] = "nocascade\0"
     var w_ndb: [u8; 10] = "nodragbar\0"
+    var w_fur: [u8; 9] = "fullrows\0"
     var w_tdp: [u8; 9] = "termdump\0"
     var m: u64 = 0
     if cmd != 0 {
@@ -3427,6 +3453,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_ndb[0]) as u64, 9) != 0 {
             m = m | M_NODRAGBAR
+        }
+        if find(cmd, (&w_fur[0]) as u64, 8) != 0 {
+            m = m | M_FULLROWS
         }
         if find(cmd, (&w_nwa[0]) as u64, 7) != 0 {
             m = m | M_NOWATCH
@@ -3962,8 +3991,15 @@ fn slot_remap(state: u64, virt: u64, block: u64, uncached: bool) -> bool {
     // DASSELBE gilt fuer `unmap_slot` und fuer den Weg darunter, der
     // die Bits eines Platzes aendert: jede Aenderung an der
     // Seitentafel eines WC-Bereichs braucht sie davor.
-    arch.barrier_write()
     let bits: u64 = fb_bits(state, uncached)
+    // W-PRESENT: ALREADY POINTING THERE -- NOTHING TO DO. The rectangle copy remaps once per ROW; without this every row paid a page
+    // table write, a full TLB flush (CR3) and a write-combining drain, 600 times for a window. The entry is read back (not a list kept
+    // on the side), so an interrupt that moved the slot in between is seen. The accessed/dirty bits (0x20, 0x40) are set by the machine.
+    let cur: u64 = __mmio_read64((pd + (WIN_FIRST + i) * 8) as *mut u64)
+    if (cur & (~(0x60 as u64))) == ((block | bits) & (~(0x60 as u64))) {
+        return true
+    }
+    arch.barrier_write()
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, block | bits)
     kstate.set(state, WIN_LIST + i * 8, block + 1)
     let c: u64 = asm("mov rax, cr3", out("rax"))
@@ -5218,6 +5254,39 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
     // einzige Weg im alten Betrieb, der SPALTEN kann.
     tx_add(state, n *% hh)
     nachspuelen(state)
+}
+
+// W-PRESENT: ONE FRAME'S COPY TO THE CARD -- only the rectangle the frame changed.
+//
+// Before: after every composed frame `fb.dirty(y0, y1); fb.flush()` pushed WHOLE screen rows between the first and the last changed
+// row. A window dragged across a 3440x1440 screen is ~1500 points wide, so 55 % of every row was copied for nothing, and on the real
+// card (write-combining over PCIe, no vblank, no page flip in the stripe mode) the copy takes as long as the bytes are many: while it
+// runs, the scan-out reads the upper rows of the NEW frame and the lower rows of the OLD one -- the horizontal tear and the "lagging
+// lower half" Justin sees when he drags a window quickly. The picture is exposed to the scan-out for as long as the copy lasts, so the
+// fix is to make the copy as short as it can be: only the columns of the changed rectangle.
+// Rows other code marked dirty (board, console) are still taken by the trailing `flush` (it returns at once when nothing is marked).
+fn flush_region(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if on_vgpu(state) || transformed(state) {
+        flush_rect(state, x, y, w, h)
+        return
+    }
+    flush_rect(state, x, y, w, h)
+    flush(state)
+}
+
+fn flush_reset(state: u64) {
+    kstate.set(state, FB_OFF + S_FLUS, 0)
+    kstate.set(state, FB_OFF + S_FLMAX, 0)
+    kstate.set(state, FB_OFF + S_FLN, 0)
+}
+
+// Cost of one frame's copy in microseconds (the window server times it with the TSC): sum, max and count for F12.
+fn flush_note(state: u64, us: u64) {
+    kstate.add(state, FB_OFF + S_FLUS, us)
+    kstate.add(state, FB_OFF + S_FLN, 1)
+    if us > kstate.get(state, FB_OFF + S_FLMAX) {
+        kstate.set(state, FB_OFF + S_FLMAX, us)
+    }
 }
 
 // ============ DIE ABBILDUNGSART, AUS DER SEITENTAFEL SELBST GELESEN

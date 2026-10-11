@@ -2986,6 +2986,25 @@ fn bild_say_reset(state: u64) {
     ss(state, S_FRN, 0)
     ss(state, S_FRMAX, 0)
     ss(state, S_FRUEBER, 0)
+    // W-PRESENT: what the copies to the card cost since the last F12 (n copies, microseconds summed, the longest one), and the running
+    // totals of octets / rectangles the card received (a runner takes differences between two F12).
+    var s_w0: [u8; 14] = "wm: flush n=\0\0"
+    var s_w1: [u8; 5] = " us=\0"
+    var s_w2: [u8; 6] = " max=\0"
+    var s_w3: [u8; 6] = " okt=\0"
+    var s_w4: [u8; 7] = " rect=\0"
+    serial.puts((&s_w0[0]) as u64)
+    serial.dec(fb.flush_us_n(state))
+    serial.puts((&s_w1[0]) as u64)
+    serial.dec(fb.flush_us_sum(state))
+    serial.puts((&s_w2[0]) as u64)
+    serial.dec(fb.flush_us_max(state))
+    serial.puts((&s_w3[0]) as u64)
+    serial.dec(fb.tx_octets(state))
+    serial.puts((&s_w4[0]) as u64)
+    serial.dec(fb.tx_rects(state))
+    serial.nl()
+    fb.flush_reset(state)
 }
 
 fn wins_say(state: u64) {
@@ -6275,8 +6294,7 @@ fn cp_flush_locked(state: u64, by_comp: bool) -> u64 {
             ss(state, S_PRESENTS, gs(state, S_PRESENTS) + 1)
             fb.frame_done(state)
         } else {
-            fb.dirty(state, y0, y1)
-            fb.flush(state)
+            flush_box(state, x0, y0, x1, y1)
         }
         area = (x1 - x0) * (y1 - y0)
         ss(state, S_PXSUM, gs(state, S_PXSUM) +% area)
@@ -7476,6 +7494,22 @@ fn compose(state: u64) -> u64 {
     return r
 }
 
+// W-PRESENT: PUSH ONE FINISHED RECTANGLE TO THE CARD WITHOUT THE PAGE FLIP (the path of every frame when `vsync` is off, i.e. the shipping
+// configuration). Only the changed columns are copied (`fb.flush_region`); the word `fullrows` brings the old whole-row copy back as the counter-proof.
+// The copy is timed with the TSC: F12 prints sum / max / count (`wm: flush`), because the time the card holds a half-copied frame is the time
+// a scan-out can tear it.
+fn flush_box(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    let t0: u64 = time.tsc()
+    if fb.fullrows_an(state) {
+        fb.dirty(state, y0, y1)
+        fb.flush(state)
+    } else {
+        fb.flush_region(state, x0, y0, x1 - x0, y1 - y0)
+    }
+    let t1: u64 = time.tsc()
+    fb.flush_note(state, ph_us(state, t0, t1))
+}
+
 // One rectangle of the frame: grow it over the blurring windows it touches, then the desktop, the windows from bottom to top,
 // the layers above them, the pointer and the hand-over to `present`. Returns the number of pixels of the (grown) rectangle.
 fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
@@ -7667,8 +7701,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64) -> u64 {
         // COMPOSITOR S5: the finished rectangle waits for the compositor in ring 3 (the watchdog pushes it when it takes too long)
         cp_hand(state, x0, y0, x1, y1)
     } else {
-        fb.dirty(state, y0, y1)
-        fb.flush(state)
+        flush_box(state, x0, y0, x1, y1)
         ss(state, S_CP_NKP, gs(state, S_CP_NKP) + 1)
         cp_lat(state, false)
     }
