@@ -68,7 +68,7 @@ export {
     row, column, label, button, button_main, tab, space, separator,
     set_size, set_gap, set_pad, set_grow, set_align_end, flat,
     key_of_node, node_of_key, node_x, node_y, node_w, node_h, node_count, scene_ptr,
-    painted, builds, scale, sp, dp,
+    painted, builds, scale, sp, dp, keep_focus,
     entry, entry_text, entry_set, focus_key,
     menu_open, menu_close, menu_pick, menu_is_open,
     KEY_POPUP, trace_on, say_rects, say_texts,
@@ -2122,6 +2122,14 @@ fn key_of_node(i: usize) -> u64 {
 
 // Put the keyboard on the node with this key (a start menu puts it on its
 // search field every time it opens).
+// W-LOGIN: a window that always keeps its keyboard focus (lock / sign-in screen: a click into the empty screen must not
+// take the focus ring and the caret away from the password field -- that was a visible change AND a repaint).
+static mut s_keep_focus: bool = false
+
+fn keep_focus(on: bool) {
+    s_keep_focus = on
+}
+
 fn focus(key: u64) {
     let n: usize = scene.scene_find_id(sc(), key as u32)
     if n != scene.SCENE_NONE {
@@ -2344,6 +2352,7 @@ fn plates() {
 
 // Paint the whole tree into the canvas and hand it to the window server.
 fn paint() {
+    let t_p0: u64 = fuiapp.now_ms()
     fuiapp.frame_begin()
     scene.scene_run(sc(), fuiapp.ctx(), sh(), 0.0, 0.0,
         fuiapp.width() as f64, fuiapp.height() as f64)
@@ -2367,6 +2376,18 @@ fn paint() {
     fuiapp.frame_end()
     fuiwirt.host_painted(wirt())
     S.s_paints = S.s_paints + 1
+    if wlib.plog_enabled() {
+        var s_pl: [u8; 16] = "fui: paint n=\0\0\0"
+        var s_pm: [u8; 6] = " ms=\0\0"
+        ulib.say((&s_pl[0 as usize]) as u64)
+        ulib.sayn(S.s_paints)
+        ulib.say((&s_pm[0 as usize]) as u64)
+        ulib.sayn(fuiapp.now_ms() - t_p0)
+        var s_pc: [u8; 6] = " chg=\0"
+        ulib.say((&s_pc[0 as usize]) as u64)
+        ulib.sayn(fuiapp.last_changed())
+        ulib.nl()
+    }
 }
 
 // Does a text field edit with this key (fuiapp.edit)?
@@ -2489,6 +2510,13 @@ fn pump() -> u64 {
     }
     tip_tick()
     while fuiapp.next(&ev) {
+        if ev.kind == fuiapp.EV_DOWN && wlib.plog_enabled() {
+            // /etc/paintlog: where the picture counter stood when a button went down
+            var s_pd: [u8; 16] = "fui: down n=\0\0\0\0"
+            ulib.say((&s_pd[0 as usize]) as u64)
+            ulib.sayn(S.s_paints)
+            ulib.nl()
+        }
         // r381: the window of a program that handles the pointer itself (the task bar)
         if w_cur == raw_win {
             let rawf: fn(u64, u64, u64, u64, u64) = *raw_slot()
@@ -2548,10 +2576,15 @@ fn pump() -> u64 {
             if wlibc.drag_an() {
                 let _dd: u64 = wlibc.drag_drop()
             }
+            let fk_pre: usize = fuiwirt.host_focus(w)
             let _c: u32 = fuiwirt.host_pointer_move(w, ev.x as f64,
                 ev.y as f64)
             let _d: u32 = fuiwirt.host_pointer_down(w, ev.x as f64,
                 ev.y as f64, fuiwirt.BTN_LEFT)
+            if s_keep_focus && fk_pre != fuiwirt.KEINER && fuiwirt.host_focus(w) == fuiwirt.KEINER {
+                // a press into the empty screen took the focus from the field: it stays where it was
+                control.panel_set_focus(fuiwirt.host_panel(w), fk_pre)
+            }
             entry_click(ev.x, ev.y)
             memo_click(ev.x, ev.y)
             let ik: u64 = im_press(ev.x, ev.y)

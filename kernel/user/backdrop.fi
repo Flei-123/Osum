@@ -17,6 +17,7 @@ import ulib
 import std.rt
 import libc.io
 import fuiapp
+import wlib
 
 export { load, flat, off }
 
@@ -31,6 +32,12 @@ static mut bd_tab: u64 = 0 // per destination column: (x0 << 8) | fraction
 static mut bd_tabw: u64 = 0
 static mut bd_hdr: [u8; 12] = [0 as u8; 12]
 static mut bd_line: u64 = 0
+// W-LOGIN: the finished wallpaper picture of the window, kept once: every later
+// picture (caret blink, a click, the clock) copies it instead of running the
+// full-screen bilinear pass again (about 150 ms per picture at 1920x1080).
+static mut bd_cache: u64 = 0
+static mut bd_cw: u64 = 0
+static mut bd_ch: u64 = 0
 
 fn bd_u32(p: u64) -> u64 {
     return (__mmio_read8((p) as *mut u8) as u64)
@@ -218,6 +225,7 @@ fn load(path: u64, blur_r: u64, dim: u64) -> bool {
     bd_blur(blur_r, 2)
     bd_shade(dim)
     bd_on = 1
+    bd_cw = 0
     fuiapp.backdrop_hook(paint)
     return true
 }
@@ -235,6 +243,7 @@ fn flat(top: u64, bottom: u64) {
     bd_top = top
     bd_bot = bottom
     bd_on = 2
+    bd_cw = 0
     fuiapp.backdrop_hook(paint)
 }
 
@@ -289,6 +298,31 @@ fn paint() {
     s_w = fuiapp.width()
     s_h = fuiapp.height()
     s_px = fuiapp.px()
+    if wlib.paintdirect() {
+        // counter-proof (/etc/paintdirect): the old way, a full bilinear pass in every picture
+        paint_render()
+        return
+    }
+    if bd_cache != 0 && bd_cw == s_w && bd_ch == s_h {
+        fuiapp.copy64(s_px, bd_cache, s_w * s_h * 4)
+        return
+    }
+    paint_render()
+    // keep the finished picture (no memory: render every time, as before)
+    if bd_cache != 0 {
+        rt.heap_free(bd_cache, (bd_cw * bd_ch * 4) as usize)
+        bd_cache = 0
+    }
+    let cp: u64 = rt.heap_alloc((s_w * s_h * 4) as usize) as u64
+    if cp != 0 {
+        fuiapp.copy64(cp, s_px, s_w * s_h * 4)
+        bd_cache = cp
+        bd_cw = s_w
+        bd_ch = s_h
+    }
+}
+
+fn paint_render() {
     if bd_on == 2 {
         bd_flat_paint()
         return

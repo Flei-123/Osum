@@ -50,7 +50,7 @@ export {
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_DROP,
     label, button, button_main, field, field_paint, eye, glyph, edit, mask_off,
-    ink, on_accent, halo_in, panel, row, sel_on, sel_clear, plate, backdrop_hook, px,
+    ink, on_accent, halo_in, panel, row, sel_on, sel_clear, plate, backdrop_hook, px, set_atomic, copy64, eye_in, last_changed,
 }
 
 const EV_NONE: u64 = 0
@@ -82,6 +82,66 @@ static mut s_h: u64 = 0
 static mut s_bound: u64 = 0
 static mut s_box: u64 = 0
 static mut s_ring: [u64; 4] = [0 as u64; 4]
+
+// W-LOGIN: ATOMIC PICTURES. A window whose picture is slow to paint (the lock
+// and sign-in screens: the wallpaper alone is a full-screen pass) used to be
+// painted IN PLACE into the buffer the window server composes from. Whenever
+// the server read that buffer in the middle of a picture (a pointer move, the
+// clock, another window) it showed the wallpaper without the middle -- the
+// flicker of avatar, name and field. Now fUi paints into a PRIVATE picture
+// (s_px) and `frame_end` copies only the pixels that differ into the shared
+// buffer (s_shpx): the server never sees a half-painted picture, and a
+// picture that changes nothing (caret blink aside) writes nothing.
+static mut s_atomic_want: u64 = 0
+static mut s_shpx: u64 = 0
+
+// Ask for the private picture; call before `open_plain` / `open_window`.
+// `/etc/paintdirect` (counter-proof) switches it off.
+fn set_atomic(on: bool) {
+    s_atomic_want = 0
+    if on && !wlib.paintdirect() {
+        s_atomic_want = 1
+    }
+}
+
+// n octets, 8 at a time (n is a multiple of 4: pixels).
+fn copy64(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i + 8 <= n {
+        __mmio_write64((dst + i) as *mut u64, __mmio_read64((src + i) as *mut u64))
+        i = i + 8
+    }
+    if i < n {
+        __mmio_write32((dst + i) as *mut u32, __mmio_read32((src + i) as *mut u32))
+    }
+}
+
+// Copy only what differs: src (private picture) into dst (shared buffer).
+// Returns how many 8-octet words were written (0 = the picture changes nothing).
+fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var chg: u64 = 0
+    while i + 8 <= n {
+        let a: u64 = __mmio_read64((src + i) as *mut u64)
+        if a != __mmio_read64((dst + i) as *mut u64) {
+            __mmio_write64((dst + i) as *mut u64, a)
+            chg = chg + 1
+        }
+        i = i + 8
+    }
+    if i < n {
+        let a4: u32 = __mmio_read32((src + i) as *mut u32)
+        if a4 != __mmio_read32((dst + i) as *mut u32) {
+            __mmio_write32((dst + i) as *mut u32, a4)
+            chg = chg + 1
+        }
+    }
+    return chg
+}
+
+// Words the last picture wrote into the shared buffer (4294967295 = painted in place: unknown, always shown).
+static mut s_chg: u64 = 4294967295
+fn last_changed() -> u64 { return s_chg }
 
 static mut m_nobuf: [u8; 30] = "fuiapp: no pixels for canvas\0\0"
 static mut m_nobind: [u8; 38] = "fuiapp: fUi refused the canvas (bind)\0"
@@ -168,6 +228,15 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     // COMPOSITOR S3: when the window got a shared buffer (docs/COMPOSITOR.md), fUi paints INTO it: the window server composes from
     // the very same frames and nothing is copied per frame. Otherwise the pixels are the program's own, as before.
     var px: u64 = wlib.win_shared_ptr(w)
+    s_shpx = 0
+    if px != 0 && s_atomic_want != 0 {
+        let pv: u64 = rt.heap_alloc(n as usize) as u64
+        if pv != 0 {
+            // fUi paints into the private picture; the shared buffer is only written by frame_end
+            s_shpx = px
+            px = pv
+        }
+    }
     if px == 0 {
         px = rt.heap_alloc(n as usize) as u64
     }
@@ -178,7 +247,11 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     }
     s_box = wlib.box_v(w, 0, 0, bw, bh, 0, 0)
     wlib.size(bw, bh)
-    s_cv = wlib.canvas(px, bw, bh)
+    var cvpx: u64 = px
+    if s_shpx != 0 {
+        cvpx = s_shpx
+    }
+    s_cv = wlib.canvas(cvpx, bw, bh)
     wlib.box_end()
     wlib.set_focus(s_cv)
     s_px = px
@@ -211,6 +284,10 @@ fn resize() -> bool {
     // a pop-up (tooltip, toast) is small: 16 is the server's own floor for a
     // window with a frame, and an undecorated one may be smaller still
     if nw < 16 || nh < 8 {
+        return false
+    }
+    if s_shpx != 0 {
+        // a private-picture window (lock / sign-in screen) is the whole screen and never resized
         return false
     }
     let n: u64 = nw * nh * 4
@@ -350,6 +427,13 @@ fn plate(x: u64, y: u64, w: u64, h: u64) {
 fn frame_end() {
     if s_bound == 0 {
         return
+    }
+    if s_shpx != 0 {
+        s_chg = copy_diff(s_shpx, s_px, s_w * s_h * 4)
+        if s_chg == 0 {
+            // nothing differs from what the window server shows: no damage, no compose, no picture
+            return
+        }
     }
     wlib.canvas_new(s_cv)
     wlib.draw_all()
@@ -593,6 +677,41 @@ fn eye(x: u64, y: u64, h: u64, open: bool, col: u32) {
             let t: f64 = (i as f64) / 24.0
             painter.surface(z, ex + 8.0 + 16.0 * t - 0.75,
                 ey + 22.0 - 12.0 * t - 0.75, 1.5, 1.5, col)
+            i = i + 1
+        }
+    }
+}
+
+// W-LOGIN: the eye centred in a tile of w x h pixels, drawn at the size of the interface scale `k` (1, 2, ...). The picture is a 32 x 32 design square
+// (ring 16 x 12, pupil 5, slash): `eye` above stood it in the top left corner of whatever square it was given (a 36-point tile: 2 points too far up
+// and left, a scale-2 tile: 24 px picture in the corner of a 72 px tile). Here the square is centred and scaled.
+fn eye_in(x: u64, y: u64, w: u64, h: u64, open: bool, col: u32, k: u64) {
+    if wlib.eyeold() {
+        // counter-proof (/etc/eyeold): the picture in the corner of the tile, unscaled
+        eye(x, y, h, open, col)
+        return
+    }
+    let z: *mut painter.Painter = render.ctx_painter(ctx())
+    let f: f64 = k as f64
+    let side: u64 = 32 * k
+    var ox: u64 = 0
+    var oy: u64 = 0
+    if w > side {
+        ox = (w - side) / 2
+    }
+    if h > side {
+        oy = (h - side) / 2
+    }
+    let ex: f64 = (x + ox) as f64
+    let ey: f64 = (y + oy) as f64
+    painter.round_ring(z, ex + 8.0 * f, ey + 10.0 * f, 16.0 * f, 12.0 * f, 6.0 * f, 1.5 * f, col)
+    painter.round_rect(z, ex + 13.5 * f, ey + 13.5 * f, 5.0 * f, 5.0 * f, 2.5 * f, col)
+    if open {
+        var i: i64 = 0
+        while i <= 24 {
+            let t: f64 = (i as f64) / 24.0
+            painter.surface(z, ex + (8.0 + 16.0 * t - 0.75) * f,
+                ey + (22.0 - 12.0 * t - 0.75) * f, 1.5 * f, 1.5 * f, col)
             i = i + 1
         }
     }

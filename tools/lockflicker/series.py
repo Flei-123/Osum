@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/lockflicker/series.py <run dir> <base> <prefix> <px> <py>
+"""tools/lockflicker/series.py <run dir> <base> <prefix> <px> <py> [max_px]
 
 Burst series (drive.py `serie click N c`): every frame <prefix>-NNN.ppm is compared with the picture <base> taken BEFORE the click.
 Pixels inside a box of 48 px around the pointer (px, py) are ignored (the pointer arrow moves there). Prints per frame the number of
@@ -16,6 +16,7 @@ def read_ppm(path):
 
 def main():
     run, base, pre, px, py = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+    maxpx = int(sys.argv[6]) if len(sys.argv) > 6 else 0  # a frame only counts as differing above this many pixels (the blinking caret)
     import numpy as np
     w, h, b = read_ppm(os.path.join(run, base + ".ppm"))
     B = np.frombuffer(b, dtype=np.uint8).reshape(h, w, 3).astype(np.int16)
@@ -34,7 +35,7 @@ def main():
         m = np.abs(I - B).max(axis=2) > 8
         m[max(0, py - 48):py + 48, max(0, px - 48):px + 48] = False
         n = int(m.sum())
-        if n:
+        if n > maxpx:
             ys, xs = np.nonzero(m)
             print("%s differs: %d px, box x %d..%d y %d..%d" % (os.path.basename(f), n, xs.min(), xs.max(), ys.min(), ys.max()))
             differing += 1
