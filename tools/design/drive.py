@@ -272,6 +272,46 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    # W-DRAG: DRAG A WINDOW BY ITS TITLE BAR AND TAKE A PICTURE AFTER EVERY STEP (button still down), then let go and take
+    # pictures at once (the swing phase). Returns [(name, pointer x, pointer y, phase)].
+    def schleppe_fotos(self, x0, y0, dx, dy, schritte, prefix, nach=2):
+        out = []
+        self.fahre(x0, y0)
+        time.sleep(0.5)
+        self.foto(prefix + "-00")
+        out.append((prefix + "-00", x0, y0, "before"))
+        self.cmd("mouse_button 1")
+        time.sleep(0.4)
+        self.foto(prefix + "-01")
+        out.append((prefix + "-01", x0, y0, "down"))
+        cx, cy = x0, y0
+        for k in range(1, schritte + 1):
+            zx = x0 + dx * k // schritte
+            zy = y0 + dy * k // schritte
+            ddx, ddy = zx - cx, zy - cy
+            while ddx or ddy:
+                sx = max(-120, min(120, ddx))
+                sy = max(-120, min(120, ddy))
+                self.cmd("mouse_move %d %d" % (sx, sy))
+                ddx -= sx
+                ddy -= sy
+            cx, cy = zx, zy
+            time.sleep(0.5)
+            nm = "%s-%02d" % (prefix, k + 1)
+            self.foto(nm)
+            out.append((nm, cx, cy, "drag"))
+        self.x, self.y = cx, cy
+        self.cmd("mouse_button 0")
+        for k in range(nach):
+            nm = "%s-r%d" % (prefix, k)
+            self.foto(nm)
+            out.append((nm, cx, cy, "release"))
+        time.sleep(1.5)
+        nm = prefix + "-end"
+        self.foto(nm)
+        out.append((nm, cx, cy, "end"))
+        return out
+
     def klick(self, x, y, mal=1, taste=1):
         self.fahre(x, y)
         time.sleep(0.35)
@@ -1191,6 +1231,21 @@ def main():
         # mittendrin fotografieren. In Punkten, nicht in Prozent: eine
         # Verschiebung um "zwei Plaetze" ist eine Strecke und kein
         # Anteil der Knopfbreite.
+        # W-DRAG: `schleppfoto <window id> <dx>,<dy> <steps> <prefix>`: grab the title bar of the window, drag in steps with a picture
+        # after each, release; prints `schleppfoto: <picture> <pointer x> <pointer y> <phase>` per picture.
+        elif b == "schleppfoto":
+            t = arg.split()
+            wid = int(t[0])
+            dx, dy = (int(v) for v in t[1].split(","))
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("schleppfoto %d -> NO GEOMETRY reported" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            print("schleppfoto: geom %d,%d %dx%d bo=%d ti=%d" % (wx, wy, ww, wh, bo, ti))
+            for nm, px, py, ph in f.schleppe_fotos(wx + bo + ww // 3, wy + ti // 2, dx, dy, int(t[2]), t[3]):
+                print("schleppfoto: %s %d %d %s" % (nm, px, py, ph))
         elif b == "ziehfoto":
             t = arg.split()
             r = f.rechteck(t[0])
