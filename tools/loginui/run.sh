@@ -248,7 +248,7 @@ F0=$(foci | tail -1)
 C0=$(carets | wc -l)
 sleep 3
 C1=$(carets | wc -l)
-num "caret phase changes in 3 s (530 ms period)" "$((C1 - C0))" ge 4
+num "caret phase changes in 3 s (500 ms period)" "$((C1 - C0))" ge 4
 # each line carries its change number n: after an odd number of changes
 # the caret is off, after an even one on (it starts on). A torn line can
 # go missing; a line that disagrees cannot happen with a real blink.
