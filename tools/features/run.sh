@@ -4,168 +4,122 @@
 #
 #   bash tools/features/run.sh        (start it through /root/jarvis/bin/heavy)
 #
-# 1. NOTIFICATION CENTRE (kernel/user/notifc.fi): two `notify` posts -> the bell node is in the bar's
-#    a11y tree (act=taskbar.notifications) -> pressing it opens the card with both rows, newest first
-#    -> Tab + Enter on the "Clear all" button empties it (`notifc: clear n=2`, `open n=0`) -> a third
-#    post while the card stands grows the list (n=1: the base line works) -> the bell closes it.
+# 1. NOTIFICATION CENTRE (kernel/user/notifc.fi), on the machine of the stick (tools/design/eh6.sh):
+#      two `notify` posts in the terminal -> the bell (`taskbar: field noti`) -> a click on it opens
+#      the card with both rows, newest first (`notifc: open n=2`, `row 0 ... second message`)
+#      -> Tab + Enter on "Clear all" empties it (`notifc: clear n=2`, `open n=0`) -> Escape closes
+#      -> a third post -> the bell comes back, its card lists ONLY the third (the base line works,
+#      `open n=1`) -> a click on the bell closes it (`notifc: shut bell`).
+#      The pictures 01-open / 02-cleared / 03-open2 differ from the bare desktop inside the card.
+#
+# Pictures go to $FEATURES_OUT when it is set.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-ROOT=$(pwd)
-export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
-BARROOT=${BARROOT:-$ROOT}
-
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT
+export DESIGNBUILD="$TMPD/build"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
-part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0} f' "$1"; }
 
-if [ -n "${1:-}" ]; then TMPD=$1; mkdir -p "$TMPD"; else TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT; fi
-mkdir -p "$TMPD/bin" "$TMPD/barbin"
-PROGS="sh ls cat echo sleep orientbus act axd notify"
+PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify"
 
-echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 \
-   && (cd "$BARROOT" && FIRNLIB="$BARROOT/lib" bash tools/sync/build.sh "$TMPD/barbin" 0 taskbar) > "$TMPD/b2.txt" 2>&1; then
-    ok "firnc0 builds $(echo $PROGS | wc -w) programs and the task bar (from $BARROOT)"
-else
-    bad "the programs do not build"; tail -15 "$TMPD/b.txt" "$TMPD/b2.txt" | sed 's/^/        /'
+cat > "$TMPD/dreh.txt" <<'EOF'
+warteauf 'taskbar: steht|taskbar: geom' || 120
+warte 6
+foto 00-before
+klick 300,200
+warte 2
+taste ret
+warte 1
+tippe notify first message
+taste ret
+warte 2
+tippe notify second message
+taste ret
+warte 3
+klickauf glocke
+warte 4
+foto 01-open
+taste tab
+warte 1
+taste ret
+warte 3
+foto 02-cleared
+taste esc
+warte 2
+klick 300,200
+warte 1
+taste ret
+tippe notify third message
+taste ret
+warte 4
+klickauf glocke
+warte 4
+foto 03-open2
+klickauf glocke
+warte 3
+foto 04-shut
+EOF
+
+bash tools/design/eh6.sh "$TMPD/o" res=1280x800 accel=kvm progs="$PROGS" \
+    drehbuch="$TMPD/dreh.txt" > "$TMPD/o.log" 2>&1
+S="$TMPD/o/serial.txt"
+if [ -n "${FEATURES_OUT:-}" ]; then mkdir -p "$FEATURES_OUT"; cp "$TMPD"/o/*.ppm "$S" "$TMPD/o.log" "$FEATURES_OUT/" 2>/dev/null; fi
+if [ ! -s "$TMPD/o/04-shut.ppm" ]; then
+    bad "no pictures: $(tail -n 3 "$TMPD/o.log" | tr '\n' ' ')"
     echo "FEATURES: $pass passed, $fail failed"; exit 1
 fi
-if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then
-    ok "the kernel builds"
-else
-    bad "the kernel does not build"; tail -5 "$TMPD/k.txt" | sed 's/^/        /'
-    echo "FEATURES: $pass passed, $fail failed"; exit 1
-fi
 
-cat > "$TMPD/g.sh" <<'EOS'
-orientbus serve 0 &
-sleep -m 300
-axd serve 0 &
-sleep 1
-taskbar &
-sleep 30
-notify first message
-notify second message
-sleep 4
-echo ==F-TREE==
-act call a11y.tree window=Taskbar
-echo ==F-OPEN==
-act call a11y.press action=taskbar.notifications window=Taskbar
-sleep 4
-echo ==F-KEYS==
-sleep 25
-echo ==F-AFTER==
-notify third message
-sleep 4
-echo ==F-CLOSE==
-act call a11y.press action=taskbar.notifications window=Taskbar
-sleep 4
-echo ==F-END==
-act stop
-echo ==FERTIG==
-EOS
-cat > "$TMPD/taskbar.conf" <<'CONF'
-# taskbar.conf -- the Windows 11 layout (r387) for the scene test
-edge=bottom
-height=40
-width=104
-autohide=0
-ontop=1
-align=center
-labels=never
-clock_lines=2
-clock_date=1
-clock_weekday=0
-clock_year4=1
-tray_language=1
-taskview=1
-tray_chevron=1
-tray_group=1
-badges=1
-hide_missing=0
-pins=explorer,calc,settings,zip
-CONF
-printf 'on\n' > "$TMPD/uitrace"
-
-A=(build "$TMPD/disk.img" 32768 --v3 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
-   "/lib/sans.ttf=assets/osum-sans.ttf" /bin/ /t/ /tmp/ /var/ /var/log/
-   /etc/ /etc/actions.d/ /etc/orientbus/
-   "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
-   "/etc/orientbus/policy=etc/orientbus/policy"
-   "/etc/taskbar.conf=$TMPD/taskbar.conf" "/etc/uitrace=$TMPD/uitrace"
-   "/bin/taskbar=$TMPD/barbin/taskbar.elf"
-   "/t/g.sh=$TMPD/g.sh")
-[ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
-[ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
-printf '# /etc/theme.conf\nscheme=night\nmode=dark\naccent=\nshape=modern\n' > "$TMPD/theme.conf"
-A+=("/etc/theme.conf=$TMPD/theme.conf" /etc/schemas/)
-for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
-for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "the disk: $(stat -c%s "$TMPD/disk.img") octets" \
-    || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt" | sed 's/^/        /'; echo "FEATURES: $pass passed, $fail failed"; exit 1; }
-
-echo "== 2. boot =="
-SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
-ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
-timeout 300 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 768 \
-    -append "gfx disp wm wmdauer wmshell osum vfs bus script=sh /t/g.sh;exit" \
-    -serial "file:$TMPD/ser.txt" -display none -no-reboot -vga std \
-    -monitor "unix:$SOCK,server,nowait" \
-    -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/qemu.txt" 2>&1 &
-QPID=$!
-
-waitfor() { # marker tries
-    local i=0
-    while [ $i -lt $2 ]; do
-        grep -qaF -- "$1" "$TMPD/ser.txt" 2>/dev/null && return 0
-        kill -0 "$QPID" 2>/dev/null || return 1
-        sleep 0.3; i=$((i + 1))
-    done
-    return 1
+# number of pixels that differ between two pictures inside a rectangle
+diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h>
+    python3 - "$@" <<'PY'
+import sys
+def load(p):
+    d = open(p, "rb").read(); f = []; at = 2
+    while len(f) < 3:
+        while d[at:at+1].isspace(): at += 1
+        s = at
+        while not d[at:at+1].isspace(): at += 1
+        f.append(int(d[s:at]))
+    return f[0], d[at+1:]
+W, a = load(sys.argv[1]); _, b = load(sys.argv[2])
+x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+n = 0
+for y in range(y0, y0 + h):
+    o = (y * W + x0) * 3
+    if a[o:o + w * 3] != b[o:o + w * 3]:
+        for x in range(w):
+            if a[o + x*3:o + x*3 + 3] != b[o + x*3:o + x*3 + 3]:
+                n += 1
+print(n)
+PY
 }
-keys() { # monitor lines
-    printf '%s\n' "$@" > "$TMPD/keys.txt"
-    python3 tools/wm/monitor.py "$SOCK" "$TMPD/keys.txt" 0.5 > /dev/null 2>&1
-    sleep 1
-}
-if waitfor "==F-KEYS==" 1500; then
-    sleep 3
-    keys "sendkey tab"
-    keys "sendkey ret"
-else
-    bad "the guest did not reach the keyboard part"
-fi
-waitfor "==FERTIG==" 600
-python3 tools/gfx/screenshot.py "$SOCK" "$TMPD/features.ppm" 8 > /dev/null 2>&1
-printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
-wait "$QPID" 2>/dev/null
-tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" > "$TMPD/ser.klar"
-perl -0pi -e 's/wm: fen i=[^\n]*? tka=\d+\r?\n//g' "$TMPD/ser.klar"
-G="$TMPD/ser.klar"
-[ -n "${FEATURES_OUT:-}" ] && { mkdir -p "$FEATURES_OUT"; cp "$G" "$TMPD/features.ppm" "$FEATURES_OUT/" 2>/dev/null; }
 
-echo "== 3. notification centre =="
-part "$G" F-TREE F-OPEN > "$TMPD/t1.txt"
-grep -qaF "act=taskbar.notifications" "$TMPD/t1.txt" && ok "the bell is a node of the bar with act=taskbar.notifications" || bad "no bell node with act=taskbar.notifications"
-grep -qaE '"Notifications"' "$TMPD/t1.txt" && ok "the bell node is named 'Notifications'" || bad "the bell node has no name"
-grep -qaF "taskbar: no notifc host" "$G" && bad "the bar had no room for the card" || ok "the card has its window (no 'no notifc host')"
-o1=$(grep -a 'notifc: open n=' "$G" | head -1)
-echo "$o1" | grep -qaF "n=2" && ok "pressing the bell opens the card with 2 rows" || bad "first open is not n=2: '$o1'"
-r0=$(grep -a 'notifc: row 0 ' "$G" | head -1); r1=$(grep -a 'notifc: row 1 ' "$G" | head -1)
+echo "== notification centre =="
+grep -qaF "taskbar: no notifc host" "$S" && bad "the bar had no room for the card" || ok "the card has its window (no 'no notifc host')"
+grep -qaE 'taskbar: field noti ' "$S" && ok "the bell is on the bar once there is something unread" || bad "no bell field"
+o1=$(grep -a 'notifc: open n=' "$S" | head -1)
+echo "$o1" | grep -qaF "n=2" && ok "the click on the bell opens the card with 2 rows" || bad "first open is not n=2: '$o1'"
+r0=$(grep -a 'notifc: row 0 ' "$S" | head -1); r1=$(grep -a 'notifc: row 1 ' "$S" | head -1)
 echo "$r0" | grep -qaF "second message" && ok "row 0 is the newest (second message)" || bad "row 0 wrong: '$r0'"
 echo "$r1" | grep -qaF "first message" && ok "row 1 is the older one (first message)" || bad "row 1 wrong: '$r1'"
-grep -qaF "notifc: clear n=2" "$G" && ok "Tab + Enter on 'Clear all' marked 2 entries read" || bad "no 'notifc: clear n=2'"
-grep -aq 'notifc: open n=0' "$G" && ok "after clearing the list is empty" || bad "no empty list after clearing"
-o3=$(grep -a 'notifc: open n=1' "$G" | tail -1)
-[ -n "$o3" ] && ok "a post while the card stands shows one row (the old two stay cleared)" || bad "no 'open n=1' after the third post"
-grep -a 'notifc: row 0 ' "$G" | tail -1 | grep -qaF "third message" && ok "that row is the third message" || bad "the last row 0 is not the third message"
-grep -qaF "notifc: shut bell" "$G" && ok "the bell closes the card again" || bad "no 'notifc: shut bell'"
-[ -s "$TMPD/features.ppm" ] && ok "screenshot taken ($(stat -c%s "$TMPD/features.ppm") octets)" || bad "no screenshot"
-
+# the card in the picture: the rectangle of 'notifc: open' differs from the bare desktop
+tx=$(echo "$o1" | sed -E 's/.* x=([0-9]+).*/\1/'); ty=$(echo "$o1" | sed -E 's/.* y=([0-9]+).*/\1/')
+tw=$(echo "$o1" | sed -E 's/.* w=([0-9]+).*/\1/'); th=$(echo "$o1" | sed -E 's/.* h=([0-9]+).*/\1/')
+if [ -n "$tx" ] && [ -n "$tw" ] && [ "$tw" -gt 0 ] 2>/dev/null; then
+    d=$(diffpix "$TMPD/o/00-before.ppm" "$TMPD/o/01-open.ppm" "$tx" "$ty" "$tw" "$th")
+    [ "$d" -gt $((tw * th / 3)) ] && ok "the card is in the picture ($d of $((tw * th)) pixels differ from before)" \
+        || bad "only $d of $((tw * th)) pixels differ -- no card in the picture"
+else
+    bad "no card rectangle in '$o1'"
+fi
+grep -qaF "notifc: clear n=2" "$S" && ok "Tab + Enter on 'Clear all' marked 2 entries read" || bad "no 'notifc: clear n=2'"
+grep -aq 'notifc: open n=0' "$S" && ok "after clearing the list is empty" || bad "no empty list after clearing"
+grep -qaF "notifc: shut esc" "$S" && ok "Escape closes the card" || bad "no 'notifc: shut esc'"
+o3=$(grep -a 'notifc: open n=1' "$S" | tail -1)
+[ -n "$o3" ] && ok "the card after the third post shows ONE row (the cleared two stay gone)" || bad "no 'open n=1' after the third post"
+grep -a 'notifc: row 0 ' "$S" | tail -1 | grep -qaF "third message" && ok "that row is the third message" || bad "the last row 0 is not the third message"
+grep -qaF "notifc: shut bell" "$S" && ok "a click on the bell closes the card again" || bad "no 'notifc: shut bell'"
 echo; echo "FEATURES: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
