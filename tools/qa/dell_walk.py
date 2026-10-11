@@ -230,6 +230,36 @@ def judge_app(a, out, serial, steps, shots):
             info["bad_lines"] = int(bad[-1])
             if int(bad[-1]) > 0:
                 reasons.append("Settings counts %s theme line(s) as not understood (settings: shape ... bad=)" % bad[-1])
+    # r541: the widget layout must fit the (scaled) window: no rectangle outside it, none on another one
+    # (at 3440x1440 the interface scale is 2; unscaled boxes put buttons on the text fields)
+    if i == "widgets":
+        g = re.search(r"widgetdemo: geom w=(\d+) h=(\d+)", sl)
+        if not g:
+            reasons.append("widgetdemo did not report its window geometry")
+        else:
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="latin-1") as tf:
+                tf.write(sl)
+            r = subprocess.run(["python3", "-I", os.path.join(ROOT, "tools/k15/layout.py"), tf.name,
+                                "widgetdemo", g.group(1), g.group(2), "8"],
+                               capture_output=True, text=True)
+            os.unlink(tf.name)
+            info["layout_rc"] = r.returncode
+            # the rectangles must also FILL the scaled window: boxes laid out unscaled leave the right
+            # 55 % and the bottom half empty while the text is drawn at scale 2 (no overlap among the
+            # rectangles themselves, so layout.py alone cannot see it)
+            rects = [tuple(int(v) for v in m) for m in re.findall(
+                r"widgetdemo: rect id=\d+ kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", sl)]
+            if rects:
+                right = max(x + w for x, y, w, h in rects)
+                bottom = max(y + h for x, y, w, h in rects)
+                info["layout_extent"] = "%dx%d of %sx%s" % (right, bottom, g.group(1), g.group(2))
+                if right * 100 < int(g.group(1)) * 90 or bottom * 100 < int(g.group(2)) * 85:
+                    reasons.append("widget rectangles reach only %dx%d of the %sx%s window (layout not scaled)" %
+                                   (right, bottom, g.group(1), g.group(2)))
+            if r.returncode != 0:
+                reasons.append("widget layout wrong in the %sx%s window: %s" %
+                               (g.group(1), g.group(2), " | ".join((r.stdout or r.stderr).strip().splitlines()[:2])))
     pre, post, closed = (shots.get("%s-%s" % (i, k)) for k in ("0-vorher", "2-offen", "8-zu"))
     d_open = pixel_diff(pre, post) if pre is not None and post is not None else None
     d_close = pixel_diff(post, closed) if post is not None and closed is not None else None
