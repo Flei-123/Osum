@@ -220,6 +220,13 @@ def judge_app(a, out, serial, steps, shots):
     crashes = [c for c in crash_lines(sl) if "launcher: start refused" not in c]
     if crashes:
         reasons.append("crash/error line(s) on the serial log: " + " | ".join(crashes[:2]))
+    # r545: Settings says how many lines of the theme files it did not understand (the window shows the same number)
+    if i == "settings":
+        bad = re.findall(r"settings: shape file=[^\n]* bad=(\d+)", sl)
+        if bad:
+            info["bad_lines"] = int(bad[-1])
+            if int(bad[-1]) > 0:
+                reasons.append("Settings counts %s theme line(s) as not understood (settings: shape ... bad=)" % bad[-1])
     pre, post, closed = (shots.get("%s-%s" % (i, k)) for k in ("0-vorher", "2-offen", "8-zu"))
     d_open = pixel_diff(pre, post) if pre is not None and post is not None else None
     d_close = pixel_diff(post, closed) if post is not None and closed is not None else None
@@ -282,7 +289,7 @@ def run_vm(args):
     env.setdefault("DESIGNBUILD", out + "-build")
     cmd = ["bash", os.path.join(ROOT, "tools/design/eh6.sh"), runner, "accel=" + args.accel,
            "res=" + args.res, "progs=" + progs, "drehbuch=" + os.path.join(out, "drehbuch.txt"),
-           "halt=0", "tafel=nein"]
+           "halt=0", "tafel=nein", "tzrule=eu"]  # tzrule=eu: the personal image has `rule=eu` in /etc/time.conf
     print("vm: eh6.sh res=%s accel=%s progs=%d" % (args.res, args.accel, len(have)), flush=True)
     t0 = time.time()
     with open(os.path.join(out, "eh6.log"), "w") as lg:

@@ -77,6 +77,8 @@ extra=""
 # r5xx: `pins=terminal,explorer` writes the `pins=` key of /etc/taskbar.conf (the stick pins installer,explorer,terminal,settings)
 pins=""
 moreprogs=""
+# r545: `tzrule=eu|none` adds the `rule=` line the personal image has in /etc/time.conf (empty = no line, the old test image)
+tzrule=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
 # genau die beiden in Justins Befunden vorkommen.
@@ -108,6 +110,7 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         pins=*) pins=${a#*=} ;;
         moreprogs=*) moreprogs=${a#*=} ;;
+        tzrule=*) tzrule=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -196,6 +199,7 @@ printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\
   [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
 } > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
+[ -z "$tzrule" ] || printf 'rule=%s\n' "$tzrule" >> "$OUT/time.conf"
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
 printf 'on\n' > "$OUT/uitrace"
 cat > "$OUT/passwd" <<'EOF'
