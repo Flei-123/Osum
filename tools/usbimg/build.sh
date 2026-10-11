@@ -102,7 +102,9 @@ ESP_MIB=${ESP_MIB:-96}
 # r373 (05.10.2026): 81920 -> 90112 blocks (44 MiB). The lock screen, the
 # sign-in screen, certus, themetest and a11ydemo carry fUi's scene host now
 # (~250 KB each): "mkfs: the disk is full" again.
-FS_BLOCKS=${FS_BLOCKS:-90112}
+# 11.10.2026: 90112 -> 102400 blocks (50 MiB). The personal Dell image was already built with FS_BLOCKS=102400 by hand; with the
+# default the build on main stopped with "mkfs: the disk is full" (tools/usbimg/run.sh 0/1). EFI partition (96 MiB) still holds it.
+FS_BLOCKS=${FS_BLOCKS:-102400}
 [ "${ROOT_SLIM:-0}" = 1 ] && FS_BLOCKS=${FS_BLOCKS_SLIM:-78000}   # see ROOT_SLIM below
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
