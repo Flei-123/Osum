@@ -21,9 +21,10 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-QA=tools/qa
+QA=$ROOT/tools/qa
+GROOT=""   # --root DIR: select/run the gates of ANOTHER worktree (manifest + redcheck stay from here)
 HEAVY=${GATES_HEAVY:-/root/jarvis/bin/heavy}
-TIMES=${GATES_TIMES:-${XDG_CACHE_HOME:-$HOME/.cache}/osum-gates/times.tsv}
+TIMES=${GATES_TIMES:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/osum-gates/times.tsv}
 
 mode=""; BASE=origin/main; LEVEL=full; RUN=0; JOBS=2; KEEP=0; ONLY=""
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,7 @@ while [[ $# -gt 0 ]]; do
         --run) RUN=1 ;;
         --jobs) JOBS=$2; shift ;;
         --keep) KEEP=1 ;;
+        --root) GROOT=$2; shift ;;   # run in this worktree instead of the current one
         --only) ONLY=$2; shift ;;   # comma list of gates: skip the selection
         -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
@@ -55,12 +57,13 @@ case $mode in
 esac
 
 # --changed
+[[ -n $GROOT ]] && cd "$GROOT"
 CH=$(mktemp)
 trap 'rm -f "$CH"' EXIT
 { git diff --name-only "$BASE"...HEAD 2>/dev/null; git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard; } | sort -u > "$CH"
 NCH=$(wc -l < "$CH")
 # notes go to stderr (prefixed '#'), the gate names to stdout
-mapfile -t SEL < <(python3 -I $QA/gates-select.py --level "$LEVEL" --explain < "$CH")
+if [[ -n $ONLY ]]; then SEL=(); else mapfile -t SEL < <(python3 -I $QA/gates-select.py --level "$LEVEL" --explain < "$CH"); fi
 [[ -n $ONLY ]] && IFS=, read -r -a SEL <<<"$ONLY"
 echo "base=$BASE level=$LEVEL changed_files=$NCH gates=${#SEL[@]}"
 printf '  %s\n' "${SEL[@]}"

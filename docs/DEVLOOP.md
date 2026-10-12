@@ -257,3 +257,31 @@ Hebel in dieser Reihenfolge (alle SCHÄTZUNG):
 * Am Desktop (entsperrt, Boss am Gerät oder Not-Aus bekannt): `dell_walk.sh echt --apps settings,explorer,terminal` — erster echter Lauf steht aus (r526).
 * Installation auf die Platte am Dell (M2): Boss-Freigabe; danach `smoke` (df ≥ 20 MiB muss grün werden), dann `ota apply` am Dell messen (Zeit, Platz).
 * VM-Läufe (`dell_walk vm`, `ota/run.sh`) bleiben Vorprüfung vor dem Dell, nicht Ersatz.
+
+---
+
+## 8. ACCEL phase 1 (12.10.2026): expected red, gate manifest, build cache
+
+Source: `docs/ACCEL.md` (C-03, C-02/B-03, B-01/B-02). Everything below is measured on the server (20 cores, load ~10 from other workers, KVM).
+
+### 8.1 Expected red (`tools/qa/expected-red.txt`, `tools/qa/redcheck.sh`)
+- One line per KNOWN red case: `gate | case-regex | red|flaky | reason | since | ref`. The case regex is matched against the text of a `FAIL`/`NEIN`/`FEHL`/`ROT` line (colour codes stripped); `*` = the gate may fail as a whole (flaky gates such as `term/multi`).
+- `redcheck.sh GATE LOG EXIT` prints `expected red : <line> (reason)` or `NEW red : <line>`, exits 1 only on NEW red. A baseline entry that did not fire in a green run is reported as `FIXED?` (remove it), flaky entries never.
+- Rule: an entry needs a control run on the old main. Remove it when the gate is green. `bash tools/qa/redcheck-test.sh` = self-test (22/0).
+- No more "was it red on old main?" control runs for the listed cases; only a NEW red needs one.
+- The regexes of the 12 starting entries come from the gate sources and the 11.10. reports; they are verified by `gates.sh --run` the first time each gate runs (a wrong regex shows up as NEW red, never as silent green).
+
+### 8.2 Gate manifest (`tools/qa/gates.tsv`, `tools/qa/gates.sh`)
+- `gates.tsv`: all 157 `tools/*/run.sh` gates with `tier` (quick 22 / full 109 / nightly 26), `needs` (qemu, netlock), `paths` (globs that trigger the gate), `source` (`auto` = generated guess, `manual` = hand-edited, kept by the generator).
+- `tools/qa/gen-manifest.py` generates/refreshes it (AREAS and tier sets are at its top); `gates.sh --check` fails when a `run.sh` has no row or a row has no script.
+- `gates.sh --changed [--base REF] [--level quick|full|nightly]` = the minimum set for the diff against `origin/main` (+ uncommitted + untracked). Dry run by default; `--run` runs the set through `/root/jarvis/bin/heavy` (`--jobs N` gates in parallel, the heavy queue still limits), classifies every log with `redcheck.sh`, exit 1 = NEW red. Unmapped files under kernel/lib/vendor/etc/assets trigger the fallback gates `kernel` + `userland` and a warning.
+- Levels are cumulative: quick = representative/cheap gates of the touched areas, full = + the rest of the touched areas (before a merge), nightly = everything (cron on main).
+- The tiers are a HEURISTIC (host-only or representative = quick; known long gates = nightly). `gates.sh --run` appends the wall time per gate to `~/.cache/osum-gates/times.tsv` (`gates.sh --times`); retier from those numbers. No per-gate runtime was measured before this round.
+
+### 8.3 Build cache for the kernel compile (`tools/kernel/buildcache.sh`, used by `tools/build-kernel.sh`)
+- Finding: `firnc` compiles the kernel as TWO whole-program units (`kmain.fi` -> `k.o`, `uprog.fi` -> `uprog.o`; the `as`/`ld`/`symtab` steps are small). There is no per-module object, so a per-module hash cannot work; the key is the hash of everything the compiler can read: firnc binary, `vendor/firn/.gebaut`, the prepared kernel copy (brand/version substituted), `lib/`, `vendor/firn/lib`, stage, root file, format version.
+- The kernel copy contains the git short hash, so the key changes with every commit: the cache pays off for every further build of the SAME commit (the dozens of gates per branch, retries, parallel workers sharing `~/.cache/osum-build`), not across commits.
+- The two compiles now run in PARALLEL and with cwd = the kernel copy and relative root paths. Before, the random mktemp name was embedded in the image 13312 times: two uncached builds of the same tree differed in 133120 bytes (not reproducible). Now cached == uncached byte for byte.
+- Measured (`bash tools/kernel/buildcache-test.sh`, 15/0, load ~10): cold 40.5 s, warm 1.7 s, uncached 46.1 s (before this change: 43.6 s with two builds at once, ~58 s single). Counter-proof: a changed source line gives 2 misses and a different image; `OSUM_BUILD_CACHE_VERIFY=1` compiles on a hit and compares.
+- Switches: `OSUM_BUILD_CACHE=off|<dir>`, `OSUM_BUILD_CACHE_MAX_MB` (default 1024, oldest entries pruned), `OSUM_BUILD_CACHE_VERIFY=1`. Log lines `buildcache: hit|miss <root> key=<12 hex> (<n> ms)`.
+- Not done (next): one kernel image per commit shared by all gates (artifact store) - gates that call `build-kernel.sh` with other options (`--gui off`, `--ohne-tunnel`, other `OSUM_*`) are other keys, which is correct. Gates that still link their own `ld` line or use `firnc` directly do not use the cache yet.

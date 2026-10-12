@@ -22,7 +22,7 @@
 #
 # Env: OSUM_BUILD_CACHE=off      disable (always compile)
 #      OSUM_BUILD_CACHE=<dir>    cache directory (default ~/.cache/osum-build)
-#      OSUM_BUILD_CACHE_MAX_MB   prune oldest entries above this size (default 2048)
+#      OSUM_BUILD_CACHE_MAX_MB   prune oldest entries above this size (default 1024)
 #      OSUM_BUILD_CACHE_VERIFY=1 on a hit ALSO compile and compare (paranoid mode, costs the time)
 # Log lines (stderr): "buildcache: hit|miss <root> key=<12 hex> (<n> ms)".
 
@@ -31,7 +31,7 @@ BC_FORMAT=1
 bc_dir() {
     case "${OSUM_BUILD_CACHE:-}" in
         off) return 1 ;;
-        "") printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/osum-build" ;;
+        "") printf '%s' "${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/osum-build" ;;
         *) printf '%s' "$OSUM_BUILD_CACHE" ;;
     esac
 }
@@ -82,7 +82,7 @@ bc_compile() {
 }
 
 bc_prune() { # dir: drop oldest objects above the size limit
-    local dir=$1 max=${OSUM_BUILD_CACHE_MAX_MB:-2048} kb f
+    local dir=$1 max=${OSUM_BUILD_CACHE_MAX_MB:-1024} kb f
     kb=$(du -sk "$dir" 2>/dev/null | cut -f1)
     [[ ${kb:-0} -le $((max * 1024)) ]] && return 0
     ls -tr "$dir"/*.o 2>/dev/null | while read -r f; do
