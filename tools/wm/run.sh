@@ -410,8 +410,10 @@ fi
 # background, two points inside it is black.
 schau_nicht "die Spitze des Zeigers steht in der Bildmitte (dort ist nicht mehr der Hintergrund)" \
     punkt "$TMPD/w.ppm" 399 299 30 42 56
-schau "und zwei Bildpunkte tiefer ist der Zeiger schwarz gefuellt" \
-    punkt "$TMPD/w.ppm" 400 301 0 0 0
+# W-CURSOR: the pointer stands over the terminal window's client grid, so it is the text bar (I-beam,
+# rim white, stem black): the stem is two points wide at x 398-399, white rim at x 400.
+schau "und zwei Bildpunkte tiefer ist die Textmarke schwarz gefuellt (Zeiger ueber dem Terminalraster)" \
+    punkt "$TMPD/w.ppm" 398 301 0 0 0
 
 echo "== 7. der Text im Fenster, bildpunktgenau gegen den zweiten Rasterer =="
 # NICHT Flaeche gegen Flaeche.  Je Zeichen die gesetzten Bildpunkte, und
