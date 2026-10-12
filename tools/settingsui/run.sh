@@ -27,7 +27,7 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klickauf start_Settings"; echo "warte 12"
   echo "foto 00-start"
   for p in a b c d e f g h i j k l m n o; do
-    echo "klickauf tab$p"; echo "warte 2"; echo "foto page-$p"
+    echo "klickauf srecttab$p"; echo "warte 2"; echo "foto page-$p"
   done
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
