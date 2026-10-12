@@ -91,14 +91,14 @@ lat() { # <log> -> µs per call
 
 echo "== 2. one core =="
 cat > "$TMPD/s1.sh" <<'EOS'
-rpcd rpc.a 30000 &
-rpcd rpc.b 30000 &
+rpcd rpc.a 2500 &
+rpcd rpc.b 2500 &
 sleep -m 400
 rpcc
 echo rc=$?
 EOS
 image "$TMPD/d1.img" "$TMPD/s1.sh"
-run "$TMPD/d1.img" r1 1 240
+run "$TMPD/d1.img" r1 1 120
 check_battery "$TMPD/r1.klar" "1 core"
 U1=$(lat "$TMPD/r1.klar")
 [ "$U1" -gt 0 ] && ok "latency 1 core: $U1 us per call (1000 sync calls, tick resolution 10 ms)" || bad "no latency line"
@@ -109,8 +109,8 @@ if [ -n "${RPC_QUICK:-}" ]; then   # debug: section 2 only (one boot)
 fi
 echo "== 3. four cores, three parallel stress clients =="
 cat > "$TMPD/s4.sh" <<'EOS'
-rpcd rpc.a 30000 &
-rpcd rpc.b 30000 &
+rpcd rpc.a 3500 &
+rpcd rpc.b 3500 &
 sleep -m 400
 rpcc stress rpc.a 300 > /tmp/st1.txt &
 rpcc stress rpc.a 300 > /tmp/st2.txt &
@@ -125,7 +125,7 @@ rpcc
 echo rc=$?
 EOS
 image "$TMPD/d4.img" "$TMPD/s4.sh"
-run "$TMPD/d4.img" r4 4 300
+run "$TMPD/d4.img" r4 4 100
 S=$(grep -ac '^STRESS 300 of 300 ok' "$TMPD/r4.klar")
 [ "$S" = 3 ] && ok "3 parallel clients x 300 calls: every answer exact (900/900)" || { bad "stress: only $S of 3 clients complete and exact"; grep -a STRESS "$TMPD/r4.klar" | sed 's/^/        /'; }
 part=$(awk '/==BATTERY==/{f=1;next} f' "$TMPD/r4.klar")
@@ -141,10 +141,10 @@ echo rc=$?
 EOS
 image "$TMPD/dn.img" "$TMPD/sn.sh"
 T0=$(date +%s)
-run "$TMPD/dn.img" rn 1 120 nobus
+run "$TMPD/dn.img" rn 1 60 nobus
 T1=$(date +%s)
 grep -aq '^T01 FAIL' "$TMPD/rn.klar" && ok "without a bus T01 fails (the check measures something)" || bad "T01 did not fail without a bus"
-grep -aq '^RPCC: ' "$TMPD/rn.klar" && [ $((T1 - T0)) -lt 100 ] && ok "and rpcc ends with its summary in $((T1 - T0)) s: no hang" || bad "rpcc hangs or prints no summary without a bus"
+grep -aq '^RPCC: 0 passed, 16 failed' "$TMPD/rn.klar" && ok "rpcc ran all 16 checks to its summary within 60 s: every call failed fast, nothing hung" || bad "rpcc hangs or prints no summary without a bus"
 
 echo "RPC: latency us/call: 1 core $U1, 4 cores $U4"
 echo "RPC: $pass passed, $fail failed"
