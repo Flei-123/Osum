@@ -34,7 +34,11 @@ open(d + "/passwd", "w").write("root:x:0:0:root:/root:/bin/sh\njustin:x:1000:100
 open(d + "/flag", "w").write("1\n")
 PY
 
+if [ -n "${CARET_F12:-}" ]; then   # diagnosis: window server counters before/after the burst (wm: shared ... shdmg=)
+    printf 'warte 6\ntippe ab\nwarte 1\ntaste f12\nwarte 0.5\nserie idle 300 blink\nwarte 0.5\ntaste f12\nwarte 1\nfoto done\n' > "$TMPD/book"
+else
 printf 'warte 6\ntippe ab\nwarte 1\nserie idle 300 blink\nwarte 1\nserie key:c 25 k1\nwarte 2\nserie key:d 25 k2\nwarte 1\nserie key:e 25 k3\ntaste tab\nwarte 0.3\nserie idle 30 nf\nwarte 1\nfoto done\n' > "$TMPD/book"
+fi
 
 for c in ${CASES:-glogin noblink caretold}; do
     xo=(); tr=no
@@ -47,6 +51,7 @@ for c in ${CASES:-glogin noblink caretold}; do
         extra="wigapp=/bin/glogin wighalt=60" progs="glogin theme sh echo ls cat" xfile=/etc/shadow="$TMPD/shadow" \
         xfile=/etc/wallpaper=assets/wallpaper-sea.osym passwdfile="$TMPD/passwd" "${xo[@]}" drive="$TMPD/book" > "$TMPD/$c.log" 2>&1
     if [ ! -f "$TMPD/$c/serial.txt" ] || [ ! -f "$TMPD/$c/blink-000.ppm" ]; then bad "case $c: no frames (build or boot failed)"; tail -3 "$TMPD/$c.log"; continue; fi
+    if [ -n "${CARET_F12:-}" ]; then grep -a "^wm: \|wm: shared\|wm: composites\|wm: flush\|wlib: caret\|fui: paint" "$TMPD/$c/serial.txt" | cut -c1-200 | tail -${CARET_F12}; fi
     # the password field's rectangle from the program's own report (last line of kind=4 with id=7)
     R=$(grep -a "glogin: rect id=7 kind=4" "$TMPD/$c/serial.txt" | tail -1 | sed 's/.* x=\([0-9]*\) y=\([0-9]*\) w=\([0-9]*\) h=\([0-9]*\).*/\1 \2 \3 \4/')
     set -- $R
