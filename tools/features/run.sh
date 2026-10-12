@@ -26,18 +26,20 @@ PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo l
 
 cat > "$TMPD/dreh.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
-warte 6
+warteauf 'launcher: ready' || 120
+warte 8
 foto 00-before
 klick 300,200
-warte 2
+warte 3
 taste ret
-warte 1
+warte 2
 tippe notify first message
 taste ret
-warte 2
+warteauf 'taskbar: toast \[' || 30
+warte 3
 tippe notify second message
 taste ret
-warte 3
+warte 4
 klickauf glocke
 warte 4
 foto 01-open
