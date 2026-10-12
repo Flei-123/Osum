@@ -1,0 +1,572 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fui/tray.fi -- fui.tray: the model of the notification area (system tray) of the task bar.
+//
+// A program REGISTERS an item (icon, tooltip, context menu); the bar ASKS which items to draw where
+// (`tray_at`), the user MOVES items between the bar and the overflow flyout (`tray_move`), and clicks
+// become EVENTS for the owner (`tray_click`, `tray_pick`, `tray_event_pop`). The bar turns those events
+// into action-bus messages to the owner; this file knows nothing about windows, pixels or the bus.
+//
+//     import fui.tray
+//     var t: tray.Tray = tray.tray_new()
+//     let id: u64 = tray.tray_register(&t, "player", 12, "Player", false)    // new apps start in the overflow
+//     tray.tray_menu_add(&t, id, "Oeffnen", tray.ACT_OPEN, 0)
+//     tray.tray_menu_add(&t, id, "Beenden", tray.ACT_QUIT, 0)
+//     tray.tray_move(&t, id, tray.PLACE_BAR, 0)                              // drag out of the overflow to the bar
+//     let n: usize = tray.tray_count(&t, tray.PLACE_BAR)
+//     tray.tray_owner_gone(&t, "player")                                     // the process exited: items vanish
+//
+// RULES
+// T1  System items (network, sound, battery, microphone: `system = true`) start in the bar, everything
+//     else in the overflow. The user may move or hide both kinds; the model keeps the choice by owner name
+//     + icon so it can be saved by the caller (`tray_place_of_owner`).
+// T2  Order inside a place is the order of `tray_move` calls, stable; a new item goes last.
+// T3  `tray_owner_gone` removes every item of an owner and returns how many (a crashed program leaves no ghost icon).
+// T4  Fixed capacity: 32 items, 6 menu entries each, 32 queued events (oldest dropped). Strings are cut at
+//     23 octets (owner, labels) and 63 (tooltip).
+// T5  Not thread safe: the bar's thread owns it.
+import std.rt
+
+export {
+    Tray, TrayEvent, tray_new, tray_free, tray_ok, tray_gen,
+    tray_register, tray_unregister, tray_owner_gone, tray_count, tray_at, tray_place, tray_move,
+    tray_set_icon, tray_icon, tray_set_tooltip, tray_tooltip, tray_set_badge, tray_badge, tray_owner, tray_is_system,
+    tray_menu_add, tray_menu_clear, tray_menu_count, tray_menu_label, tray_menu_action, tray_menu_flags,
+    tray_default_menu, tray_click, tray_pick, tray_event_pop, tray_event_count, tray_place_of_owner,
+    PLACE_BAR, PLACE_OVERFLOW, PLACE_HIDDEN,
+    ACT_OPEN, ACT_QUIT, ACT_SETTINGS, ACT_CUSTOM,
+    EV_CLICK, EV_MENU, EV_PICK,
+    BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, MF_CHECKED, MF_DISABLED,
+}
+
+const PLACE_BAR: u64 = 1
+const PLACE_OVERFLOW: u64 = 2
+const PLACE_HIDDEN: u64 = 3
+
+const ACT_OPEN: u64 = 1
+const ACT_QUIT: u64 = 2
+const ACT_SETTINGS: u64 = 3
+const ACT_CUSTOM: u64 = 16 // owner defined actions start here
+
+const EV_CLICK: u64 = 1 // a = item id, b = button  (left click on the icon: the owner opens its window)
+const EV_MENU: u64 = 2 // a = item id             (right click: the bar shows `tray_menu_*` itself)
+const EV_PICK: u64 = 3 // a = item id, b = action  (a menu entry was chosen)
+
+const BTN_LEFT: u64 = 0
+const BTN_RIGHT: u64 = 1
+const BTN_MIDDLE: u64 = 2
+
+const MF_CHECKED: u64 = 1
+const MF_DISABLED: u64 = 2
+
+const IMAX: usize = 32
+const MENUMAX: usize = 6
+const EVMAX: usize = 32
+const NONE: usize = 65535
+
+// header words
+const H_NEXT: usize = 0
+const H_GEN: usize = 1
+const H_EV_W: usize = 2
+const H_EV_R: usize = 3
+const H_WORDS: usize = 8
+
+// item record
+const I_ID: usize = 0
+const I_PLACE: usize = 1
+const I_ORDER: usize = 2
+const I_ICON: usize = 3
+const I_BADGE: usize = 4
+const I_SYS: usize = 5
+const I_MENUN: usize = 6
+const I_OWNER: usize = 8 // 3 words = 24 octets
+const I_TIP: usize = 11 // 8 words = 64 octets
+const I_MENU: usize = 19 // MENUMAX x 5 words: label (3 words), action, flags
+const MENUW: usize = 5
+const ITEMW: usize = 50
+
+const O_ITEM: usize = H_WORDS
+const O_EV: usize = O_ITEM + IMAX * ITEMW
+const EVW: usize = 3
+const TOTAL: usize = O_EV + EVMAX * EVW
+
+struct Tray {
+    blk: u64, // 0 = could not be created
+}
+
+struct TrayEvent {
+    kind: u64,
+    a: u64,
+    b: u64,
+}
+
+fn tray_new() -> Tray {
+    let blk: u64 = rt.heap_alloc(TOTAL * 8)
+    if blk == 0 {
+        return Tray { blk: 0 }
+    }
+    rt.mem_set(blk, 0 as u8, TOTAL * 8)
+    rt.st64(blk, H_NEXT, 1)
+    return Tray { blk: blk }
+}
+
+fn tray_free(t: *mut Tray) {
+    if (*t).blk != 0 {
+        rt.heap_free((*t).blk, TOTAL * 8)
+        (*t).blk = 0
+    }
+}
+
+fn tray_ok(t: *mut Tray) -> bool {
+    return (*t).blk != 0
+}
+
+// Counts every change; the bar polls this one word and repaints when it moved.
+fn tray_gen(t: *mut Tray) -> u64 {
+    return rt.ld64((*t).blk, H_GEN)
+}
+
+fn bump(b: u64) {
+    rt.st64(b, H_GEN, rt.ld64(b, H_GEN) + 1)
+}
+
+fn ibase(s: usize) -> usize {
+    return O_ITEM + s * ITEMW
+}
+
+fn slot_of(b: u64, id: u64) -> usize {
+    if id == 0 {
+        return NONE
+    }
+    var s: usize = 0
+    while s < IMAX {
+        if rt.ld64(b, ibase(s) + I_ID) == id {
+            return s
+        }
+        s = s + 1
+    }
+    return NONE
+}
+
+fn cstr_set(dst: u64, src: u64, n: usize, cap: usize) {
+    var m: usize = n
+    if m > cap {
+        m = cap
+    }
+    rt.mem_set(dst, 0 as u8, cap + 1)
+    rt.mem_copy(dst, src, m)
+}
+
+fn cstr_eq_str(p: u64, s: str) -> bool {
+    var n: usize = s.length()
+    if n > 23 {
+        n = 23
+    }
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, n) == 0 as u8
+}
+
+fn push_event(b: u64, kind: u64, a: u64, c: u64) {
+    let w: u64 = rt.ld64(b, H_EV_W)
+    let r: u64 = rt.ld64(b, H_EV_R)
+    if w - r >= EVMAX as u64 {
+        rt.st64(b, H_EV_R, r + 1)
+    }
+    let at: usize = O_EV + ((w % EVMAX as u64) as usize) * EVW
+    rt.st64(b, at, kind)
+    rt.st64(b, at + 1, a)
+    rt.st64(b, at + 2, c)
+    rt.st64(b, H_EV_W, w + 1)
+}
+
+fn tray_event_count(t: *mut Tray) -> usize {
+    return (rt.ld64((*t).blk, H_EV_W) - rt.ld64((*t).blk, H_EV_R)) as usize
+}
+
+fn tray_event_pop(t: *mut Tray, out: *mut TrayEvent) -> bool {
+    let b: u64 = (*t).blk
+    let r: u64 = rt.ld64(b, H_EV_R)
+    if b == 0 || r >= rt.ld64(b, H_EV_W) {
+        return false
+    }
+    let at: usize = O_EV + ((r % EVMAX as u64) as usize) * EVW
+    (*out).kind = rt.ld64(b, at)
+    (*out).a = rt.ld64(b, at + 1)
+    (*out).b = rt.ld64(b, at + 2)
+    rt.st64(b, H_EV_R, r + 1)
+    return true
+}
+
+// Next order value of a place: after everything already there (T2).
+fn last_order(b: u64, place: u64) -> u64 {
+    var m: u64 = 0
+    var s: usize = 0
+    while s < IMAX {
+        let at: usize = ibase(s)
+        if rt.ld64(b, at + I_ID) != 0 && rt.ld64(b, at + I_PLACE) == place && rt.ld64(b, at + I_ORDER) > m {
+            m = rt.ld64(b, at + I_ORDER)
+        }
+        s = s + 1
+    }
+    return m + 2
+}
+
+// Registers an item. System items start in the bar, all others in the overflow (T1). Returns the id or 0 (full).
+fn tray_register(t: *mut Tray, owner: str, icon: u64, tooltip: str, system: bool) -> u64 {
+    let b: u64 = (*t).blk
+    if b == 0 {
+        return 0
+    }
+    var s: usize = 0
+    while s < IMAX && rt.ld64(b, ibase(s) + I_ID) != 0 {
+        s = s + 1
+    }
+    if s == IMAX {
+        return 0
+    }
+    let at: usize = ibase(s)
+    rt.mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
+    let id: u64 = rt.ld64(b, H_NEXT)
+    rt.st64(b, H_NEXT, id + 1)
+    var place: u64 = PLACE_OVERFLOW
+    if system {
+        place = PLACE_BAR
+        rt.st64(b, at + I_SYS, 1)
+    }
+    rt.st64(b, at + I_PLACE, place)
+    rt.st64(b, at + I_ORDER, last_order(b, place))
+    rt.st64(b, at + I_ICON, icon)
+    cstr_set(b + ((at + I_OWNER) * 8) as u64, owner.p as u64, owner.length(), 23)
+    cstr_set(b + ((at + I_TIP) * 8) as u64, tooltip.p as u64, tooltip.length(), 63)
+    rt.st64(b, at + I_ID, id) // last: the slot counts as used only now
+    bump(b)
+    return id
+}
+
+fn tray_unregister(t: *mut Tray, id: u64) -> bool {
+    let b: u64 = (*t).blk
+    let s: usize = slot_of(b, id)
+    if s == NONE {
+        return false
+    }
+    rt.mem_set(b + (ibase(s) * 8) as u64, 0 as u8, ITEMW * 8)
+    bump(b)
+    return true
+}
+
+// T3: removes every item of an owner; returns how many were removed.
+fn tray_owner_gone(t: *mut Tray, owner: str) -> usize {
+    let b: u64 = (*t).blk
+    var n: usize = 0
+    var s: usize = 0
+    while s < IMAX {
+        let at: usize = ibase(s)
+        if rt.ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
+            rt.mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
+            n = n + 1
+        }
+        s = s + 1
+    }
+    if n > 0 {
+        bump(b)
+    }
+    return n
+}
+
+fn tray_count(t: *mut Tray, place: u64) -> usize {
+    var n: usize = 0
+    var s: usize = 0
+    while s < IMAX {
+        let at: usize = ibase(s)
+        if rt.ld64((*t).blk, at + I_ID) != 0 && rt.ld64((*t).blk, at + I_PLACE) == place {
+            n = n + 1
+        }
+        s = s + 1
+    }
+    return n
+}
+
+// The idx-th item of a place in display order; 0 = out of range. Orders are unique inside a place.
+fn tray_at(t: *mut Tray, place: u64, idx: usize) -> u64 {
+    let b: u64 = (*t).blk
+    var lo: u64 = 0 // order of the previous pick
+    var n: usize = 0
+    while true {
+        var best: u64 = 0
+        var bo: u64 = 0
+        var s: usize = 0
+        while s < IMAX {
+            let at: usize = ibase(s)
+            let id: u64 = rt.ld64(b, at + I_ID)
+            if id != 0 && rt.ld64(b, at + I_PLACE) == place {
+                let o: u64 = rt.ld64(b, at + I_ORDER)
+                if o > lo && (best == 0 || o < bo) {
+                    best = id
+                    bo = o
+                }
+            }
+            s = s + 1
+        }
+        if best == 0 {
+            return 0
+        }
+        if n == idx {
+            return best
+        }
+        n = n + 1
+        lo = bo
+    }
+    return 0
+}
+
+fn tray_place(t: *mut Tray, id: u64) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return rt.ld64((*t).blk, ibase(s) + I_PLACE)
+}
+
+// Renumbers a place to 2, 4, 6 ... in the current order (keeps the order, opens gaps for inserting).
+fn renumber(t: *mut Tray, place: u64) {
+    let b: u64 = (*t).blk
+    let n: usize = tray_count(t, place)
+    let tmp: u64 = rt.heap_alloc(IMAX * 8)
+    if tmp == 0 {
+        return
+    }
+    var k: usize = 0
+    while k < n {
+        rt.st64(tmp, k, tray_at(t, place, k))
+        k = k + 1
+    }
+    k = 0
+    while k < n {
+        let s: usize = slot_of(b, rt.ld64(tmp, k))
+        if s != NONE {
+            rt.st64(b, ibase(s) + I_ORDER, ((k + 1) * 2) as u64)
+        }
+        k = k + 1
+    }
+    rt.heap_free(tmp, IMAX * 8)
+}
+
+// Drag and drop: puts the item into `place` at position `idx` (clamped to the end). Moving inside a place reorders.
+fn tray_move(t: *mut Tray, id: u64, place: u64, idx: usize) -> bool {
+    let b: u64 = (*t).blk
+    let s: usize = slot_of(b, id)
+    if s == NONE || place < PLACE_BAR || place > PLACE_HIDDEN {
+        return false
+    }
+    let at: usize = ibase(s)
+    let old: u64 = rt.ld64(b, at + I_PLACE)
+    // take it out of the old place (order of the others stays), then number the target without it
+    rt.st64(b, at + I_PLACE, 0)
+    renumber(t, place)
+    var pos: usize = idx
+    let n: usize = tray_count(t, place)
+    if pos > n {
+        pos = n
+    }
+    rt.st64(b, at + I_PLACE, place)
+    rt.st64(b, at + I_ORDER, (pos * 2 + 1) as u64)
+    renumber(t, place)
+    if old != place && old != 0 {
+        renumber(t, old)
+    }
+    bump(b)
+    return true
+}
+
+// Where the user put the first item of an owner (for saving the choice); 0 = none registered.
+fn tray_place_of_owner(t: *mut Tray, owner: str) -> u64 {
+    let b: u64 = (*t).blk
+    var s: usize = 0
+    while s < IMAX {
+        let at: usize = ibase(s)
+        if rt.ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
+            return rt.ld64(b, at + I_PLACE)
+        }
+        s = s + 1
+    }
+    return 0
+}
+
+fn tray_set_icon(t: *mut Tray, id: u64, icon: u64) -> bool {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return false
+    }
+    if rt.ld64((*t).blk, ibase(s) + I_ICON) != icon {
+        rt.st64((*t).blk, ibase(s) + I_ICON, icon)
+        bump((*t).blk)
+    }
+    return true
+}
+
+fn tray_icon(t: *mut Tray, id: u64) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return rt.ld64((*t).blk, ibase(s) + I_ICON)
+}
+
+fn tray_set_tooltip(t: *mut Tray, id: u64, tip: str) -> bool {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return false
+    }
+    cstr_set((*t).blk + ((ibase(s) + I_TIP) * 8) as u64, tip.p as u64, tip.length(), 63)
+    bump((*t).blk)
+    return true
+}
+
+// NUL terminated tooltip inside the model (valid until the item goes); 0 = unknown id.
+fn tray_tooltip(t: *mut Tray, id: u64) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return (*t).blk + ((ibase(s) + I_TIP) * 8) as u64
+}
+
+fn tray_owner(t: *mut Tray, id: u64) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return (*t).blk + ((ibase(s) + I_OWNER) * 8) as u64
+}
+
+fn tray_is_system(t: *mut Tray, id: u64) -> bool {
+    let s: usize = slot_of((*t).blk, id)
+    return s != NONE && rt.ld64((*t).blk, ibase(s) + I_SYS) != 0
+}
+
+// A badge count (0 = none) drawn on the icon, e.g. unread messages.
+fn tray_set_badge(t: *mut Tray, id: u64, n: u64) -> bool {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return false
+    }
+    rt.st64((*t).blk, ibase(s) + I_BADGE, n)
+    bump((*t).blk)
+    return true
+}
+
+fn tray_badge(t: *mut Tray, id: u64) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return rt.ld64((*t).blk, ibase(s) + I_BADGE)
+}
+
+// ---------------------------------------------------------------- context menu
+
+fn mbase(s: usize, m: usize) -> usize {
+    return ibase(s) + I_MENU + m * MENUW
+}
+
+fn tray_menu_add(t: *mut Tray, id: u64, label: str, action: u64, flags: u64) -> bool {
+    let b: u64 = (*t).blk
+    let s: usize = slot_of(b, id)
+    if s == NONE {
+        return false
+    }
+    let n: usize = rt.ld64(b, ibase(s) + I_MENUN) as usize
+    if n >= MENUMAX {
+        return false
+    }
+    let at: usize = mbase(s, n)
+    cstr_set(b + (at * 8) as u64, label.p as u64, label.length(), 23)
+    rt.st64(b, at + 3, action)
+    rt.st64(b, at + 4, flags)
+    rt.st64(b, ibase(s) + I_MENUN, (n + 1) as u64)
+    bump(b)
+    return true
+}
+
+fn tray_menu_clear(t: *mut Tray, id: u64) {
+    let s: usize = slot_of((*t).blk, id)
+    if s != NONE {
+        rt.mem_set((*t).blk + (mbase(s, 0) * 8) as u64, 0 as u8, MENUMAX * MENUW * 8)
+        rt.st64((*t).blk, ibase(s) + I_MENUN, 0)
+        bump((*t).blk)
+    }
+}
+
+// The standard menu of a background app: Open, Settings, Quit.
+fn tray_default_menu(t: *mut Tray, id: u64) {
+    tray_menu_clear(t, id)
+    tray_menu_add(t, id, "Öffnen", ACT_OPEN, 0)
+    tray_menu_add(t, id, "Einstellungen", ACT_SETTINGS, 0)
+    tray_menu_add(t, id, "Beenden", ACT_QUIT, 0)
+}
+
+fn tray_menu_count(t: *mut Tray, id: u64) -> usize {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE {
+        return 0
+    }
+    return rt.ld64((*t).blk, ibase(s) + I_MENUN) as usize
+}
+
+fn tray_menu_label(t: *mut Tray, id: u64, m: usize) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE || m >= tray_menu_count(t, id) {
+        return 0
+    }
+    return (*t).blk + (mbase(s, m) * 8) as u64
+}
+
+fn tray_menu_action(t: *mut Tray, id: u64, m: usize) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE || m >= tray_menu_count(t, id) {
+        return 0
+    }
+    return rt.ld64((*t).blk, mbase(s, m) + 3)
+}
+
+fn tray_menu_flags(t: *mut Tray, id: u64, m: usize) -> u64 {
+    let s: usize = slot_of((*t).blk, id)
+    if s == NONE || m >= tray_menu_count(t, id) {
+        return 0
+    }
+    return rt.ld64((*t).blk, mbase(s, m) + 4)
+}
+
+// ---------------------------------------------------------------- clicks
+
+// A click on the icon. Left (and middle) = the owner gets EV_CLICK; right = EV_MENU for the bar to open the menu.
+fn tray_click(t: *mut Tray, id: u64, button: u64) -> bool {
+    let b: u64 = (*t).blk
+    if slot_of(b, id) == NONE {
+        return false
+    }
+    if button == BTN_RIGHT {
+        push_event(b, EV_MENU, id, 0)
+    } else {
+        push_event(b, EV_CLICK, id, button)
+    }
+    return true
+}
+
+// A menu entry was chosen: the owner gets EV_PICK with the entry's action. A disabled entry is refused.
+fn tray_pick(t: *mut Tray, id: u64, m: usize) -> bool {
+    let b: u64 = (*t).blk
+    if slot_of(b, id) == NONE || m >= tray_menu_count(t, id) {
+        return false
+    }
+    if (tray_menu_flags(t, id, m) & MF_DISABLED) != 0 {
+        return false
+    }
+    push_event(b, EV_PICK, id, tray_menu_action(t, id, m))
+    return true
+}

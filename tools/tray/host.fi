@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/tray/host.fi -- host test of lib/fui/tray.fi (tray model) and lib/fui/trayaudio.fi (mic / sound texts).
+// Built for the build host by tools/tray/run.sh; prints "ok"/"FAIL" lines and "checks=N fails=M".
+import std.rt
+import std.io
+import audio.hub
+import fui.tray
+import fui.trayaudio
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn is_s(p: u64, s: str) -> bool {
+    if p == 0 {
+        return false
+    }
+    var i: usize = 0
+    while i < s.length() {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, i) == 0 as u8
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    var y: tray.Tray = tray.tray_new()
+    check(&t, tray.tray_ok(&y), "tray created")
+
+    // ---- placement
+    let net: u64 = tray.tray_register(&y, "system", 1, "Netzwerk", true)
+    let snd: u64 = tray.tray_register(&y, "system", 2, "Lautsprecher", true)
+    let mic: u64 = tray.tray_register(&y, "system", 3, "Mikrofon", true)
+    let pl: u64 = tray.tray_register(&y, "player", 10, "Player", false)
+    let cl: u64 = tray.tray_register(&y, "cloud", 11, "Cloud-Sync", false)
+    let ch: u64 = tray.tray_register(&y, "chat", 12, "Chat", false)
+    check(&t, net != 0 && snd != net && mic != snd && pl != 0, "ids distinct, non-zero")
+    check(&t, tray.tray_count(&y, tray.PLACE_BAR) == 3 && tray.tray_count(&y, tray.PLACE_OVERFLOW) == 3, "system items in the bar, apps in the overflow")
+    check(&t, tray.tray_at(&y, tray.PLACE_BAR, 0) == net && tray.tray_at(&y, tray.PLACE_BAR, 2) == mic && tray.tray_at(&y, tray.PLACE_BAR, 3) == 0, "bar order = registration order")
+    check(&t, tray.tray_at(&y, tray.PLACE_OVERFLOW, 0) == pl && tray.tray_at(&y, tray.PLACE_OVERFLOW, 2) == ch, "overflow order = registration order")
+    check(&t, tray.tray_is_system(&y, net) && !tray.tray_is_system(&y, pl), "system flag")
+
+    // ---- drag between bar and overflow
+    check(&t, tray.tray_move(&y, cl, tray.PLACE_BAR, 1), "drag Cloud-Sync from the overflow into the bar at position 1")
+    check(&t, tray.tray_place(&y, cl) == tray.PLACE_BAR && tray.tray_at(&y, tray.PLACE_BAR, 1) == cl && tray.tray_at(&y, tray.PLACE_BAR, 0) == net && tray.tray_at(&y, tray.PLACE_BAR, 2) == snd && tray.tray_at(&y, tray.PLACE_BAR, 3) == mic, "bar is net, cloud, sound, mic")
+    check(&t, tray.tray_count(&y, tray.PLACE_OVERFLOW) == 2 && tray.tray_at(&y, tray.PLACE_OVERFLOW, 0) == pl && tray.tray_at(&y, tray.PLACE_OVERFLOW, 1) == ch, "overflow lost exactly that item")
+    check(&t, tray.tray_move(&y, mic, tray.PLACE_OVERFLOW, 0) && tray.tray_at(&y, tray.PLACE_OVERFLOW, 0) == mic && tray.tray_at(&y, tray.PLACE_OVERFLOW, 1) == pl, "drag the mic icon into the overflow at the front")
+    check(&t, tray.tray_move(&y, net, tray.PLACE_BAR, 99) && tray.tray_at(&y, tray.PLACE_BAR, 2) == net, "position past the end = last")
+    check(&t, tray.tray_move(&y, snd, tray.PLACE_BAR, 0) && tray.tray_at(&y, tray.PLACE_BAR, 0) == snd && tray.tray_at(&y, tray.PLACE_BAR, 1) == cl && tray.tray_at(&y, tray.PLACE_BAR, 2) == net, "reorder inside the bar")
+    check(&t, tray.tray_move(&y, ch, tray.PLACE_HIDDEN, 0) && tray.tray_count(&y, tray.PLACE_HIDDEN) == 1 && tray.tray_count(&y, tray.PLACE_OVERFLOW) == 2, "hidden")
+    check(&t, !tray.tray_move(&y, 9999, tray.PLACE_BAR, 0) && !tray.tray_move(&y, snd, 7, 0), "stale id and bad place refused")
+    check(&t, tray.tray_place_of_owner(&y, "cloud") == tray.PLACE_BAR && tray.tray_place_of_owner(&y, "chat") == tray.PLACE_HIDDEN && tray.tray_place_of_owner(&y, "nobody") == 0, "place of owner (for saving the choice)")
+
+    // ---- icon, tooltip, badge
+    check(&t, is_s(tray.tray_tooltip(&y, pl), "Player") && tray.tray_icon(&y, pl) == 10, "tooltip + icon")
+    let g0: u64 = tray.tray_gen(&y)
+    tray.tray_set_tooltip(&y, pl, "Player - Pause")
+    tray.tray_set_icon(&y, pl, 13)
+    tray.tray_set_badge(&y, pl, 3)
+    check(&t, is_s(tray.tray_tooltip(&y, pl), "Player - Pause") && tray.tray_icon(&y, pl) == 13 && tray.tray_badge(&y, pl) == 3 && tray.tray_gen(&y) > g0, "set tooltip / icon / badge; generation moved")
+
+    // ---- menu + clicks
+    tray.tray_default_menu(&y, pl)
+    check(&t, tray.tray_menu_count(&y, pl) == 3 && is_s(tray.tray_menu_label(&y, pl, 2), "Beenden") && tray.tray_menu_action(&y, pl, 2) == tray.ACT_QUIT, "default menu: Open, Settings, Quit")
+    tray.tray_menu_add(&y, pl, "Pause", tray.ACT_CUSTOM, tray.MF_CHECKED)
+    tray.tray_menu_add(&y, pl, "Gesperrt", tray.ACT_CUSTOM + 1, tray.MF_DISABLED)
+    check(&t, tray.tray_menu_count(&y, pl) == 5 && tray.tray_menu_flags(&y, pl, 3) == tray.MF_CHECKED, "custom entries")
+    check(&t, tray.tray_menu_add(&y, pl, "x", 1, 0) && tray.tray_menu_count(&y, pl) == 6, "sixth entry fits")
+    check(&t, !tray.tray_menu_add(&y, pl, "y", 1, 0), "seventh entry refused (capacity 6)")
+    var ev: tray.TrayEvent = tray.TrayEvent { kind: 0, a: 0, b: 0 }
+    check(&t, tray.tray_click(&y, pl, tray.BTN_LEFT) && tray.tray_event_pop(&y, &ev) && ev.kind == tray.EV_CLICK && ev.a == pl && ev.b == tray.BTN_LEFT, "left click = EV_CLICK for the owner")
+    check(&t, tray.tray_click(&y, pl, tray.BTN_RIGHT) && tray.tray_event_pop(&y, &ev) && ev.kind == tray.EV_MENU && ev.a == pl, "right click = EV_MENU")
+    check(&t, tray.tray_pick(&y, pl, 2) && tray.tray_event_pop(&y, &ev) && ev.kind == tray.EV_PICK && ev.b == tray.ACT_QUIT, "pick Quit = EV_PICK with ACT_QUIT")
+    check(&t, !tray.tray_pick(&y, pl, 4) && tray.tray_event_count(&y) == 0, "disabled entry is refused, no event")
+    check(&t, !tray.tray_pick(&y, pl, 9) && !tray.tray_click(&y, 9999, tray.BTN_LEFT), "bad entry / stale item refused")
+
+    // ---- process exit
+    let pl2: u64 = tray.tray_register(&y, "player", 10, "Player 2", false)
+    check(&t, tray.tray_owner_gone(&y, "player") == 2 && tray.tray_place(&y, pl) == 0 && tray.tray_place(&y, pl2) == 0, "owner gone removes all its items (no ghost icon)")
+    check(&t, tray.tray_owner_gone(&y, "player") == 0, "second call removes nothing")
+    check(&t, tray.tray_unregister(&y, cl) && !tray.tray_unregister(&y, cl), "unregister once")
+    var made: usize = 0
+    var i: usize = 0
+    while i < 40 {
+        if tray.tray_register(&y, "flood", 1, "x", false) != 0 {
+            made = made + 1
+        }
+        i = i + 1
+    }
+    check(&t, made > 0 && made < 40, "item table is bounded")
+    tray.tray_free(&y)
+
+    // ---- mic indicator + sound texts on top of the audio hub
+    var h: hub.Hub = hub.hub_new()
+    var b: rt.Buf = rt.buf_new()
+    let spk: u64 = hub.hub_add_device(&h, "Lautsprecher", hub.DIR_OUT, hub.K_BUILTIN, 48000, 2)
+    hub.hub_add_device(&h, "Mikrofon (intern)", hub.DIR_IN, hub.K_BUILTIN, 48000, 1)
+    check(&t, !trayaudio.mic_tooltip(&h, &b) && trayaudio.mic_indicator(&h) == 0, "no capture: no mic icon")
+    let c1: u64 = hub.hub_stream_open(&h, "Telefon", 5, hub.DIR_IN, 0, 16000)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon wird verwendet von Telefon") && trayaudio.mic_indicator(&h) == 1, "one app: names it")
+    hub.hub_stream_open(&h, "Telefon", 5, hub.DIR_IN, 0, 16000)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon wird verwendet von Telefon"), "two streams of one app: still one name")
+    hub.hub_stream_open(&h, "Recorder", 6, hub.DIR_IN, 0, 48000)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon wird verwendet von Telefon und Recorder"), "two apps")
+    hub.hub_stream_open(&h, "Diktat", 7, hub.DIR_IN, 0, 48000)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon wird verwendet von Telefon, Recorder und Diktat"), "three apps")
+    hub.hub_stream_open(&h, "Spiel", 8, hub.DIR_IN, 0, 48000)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon wird verwendet von Telefon, Recorder und 2 weiteren"), "four apps")
+    hub.hub_mic_mute(&h, true)
+    check(&t, trayaudio.mic_tooltip(&h, &b) && is_s(rt.buf_ptr(&b), "Mikrofon ist stumm") && trayaudio.mic_indicator(&h) == 2, "global mute: icon shows muted")
+    hub.hub_mic_mute(&h, false)
+    hub.hub_stream_close(&h, c1)
+    check(&t, trayaudio.volume_tooltip(&h, spk, &b) && is_s(rt.buf_ptr(&b), "Lautsprecher: 100 %"), "volume text 100 %")
+    hub.hub_set_volume(&h, spk, 35)
+    check(&t, trayaudio.volume_tooltip(&h, spk, &b) && is_s(rt.buf_ptr(&b), "Lautsprecher: 35 %"), "volume text 35 %")
+    hub.hub_set_mute(&h, spk, true)
+    check(&t, trayaudio.volume_tooltip(&h, spk, &b) && is_s(rt.buf_ptr(&b), "Lautsprecher: stumm"), "volume text muted")
+    check(&t, !trayaudio.volume_tooltip(&h, 0, &b) && is_s(rt.buf_ptr(&b), "Kein Audiogerät"), "no device")
+    rt.buf_free(&b)
+    hub.hub_free(&h)
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}
