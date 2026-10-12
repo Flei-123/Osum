@@ -56,34 +56,51 @@ def ref(idx, g):
         d = np.hypot(cx - (a[0] + t * ab[0]), cy - (a[1] + t * ab[1]))
         dist = np.minimum(dist, d)
     px = G / g                      # design units per pixel
-    core = inside & (dist > 0.8 * px)
-    rim = (~inside) & (dist > 0.8 * px) & (dist < 1.33 - 0.8 * px)
-    return core, rim, int(round(hot[0] * g / G)), int(round(hot[1] * g / G)), inside | (dist < 1.33 + 1.5 * px)
+    # thin shapes (the text bar is 1.8 design units wide) have no pixel 0.8 px from every edge:
+    # relax the margin until the "sure" set is big enough to judge
+    for margin in (0.8, 0.5, 0.25):
+        core = inside & (dist > margin * px)
+        rim = (~inside) & (dist > margin * px) & (dist < 1.33 - margin * px)
+        if core.sum() + rim.sum() >= 12:
+            break
+    return core, rim, int(round(hot[0] * g / G)), int(round(hot[1] * g / G)), inside | (dist < 1.33 + 1.5 * px), inside, dist
 
-def classify(img, hx, hy, g, base=None):
+def classify(img, hx, hy, g, base=None, slack=3):
     """base = the same picture with the pointer elsewhere: the difference is the pointer alone (the
-    terminal grid and the diagnostic board carry text that would otherwise look like ink)"""
+    terminal grid and the diagnostic board carry text that would otherwise look like ink).
+    With a base a shape scores the best IoU between the changed pixels and its silhouette (outline
+    polygon + white rim of 0.8 / 1.33 / 1.9 design units, the kernel's rim is anti-aliased), over
+    +-slack px of hot spot (the kernel rounds the 24 px design to the pixel grid, the drive log names
+    the spot it moved to). Without a base (bare desktop) the ink score of the sure pixels is used."""
     best, bs, scores = -1, -9.0, []
     for idx in range(len(zeiger2.FORMEN)):
-        core, rim, ox, oy, near = ref(idx, g)
-        x0, y0 = hx - ox, hy - oy
-        box = img[y0 - 4:y0 + g + 4, x0 - 4:x0 + g + 4]
-        if box.shape[0] != g + 8 or box.shape[1] != g + 8:
-            scores.append(-9); continue
-        fp = np.zeros((g + 8, g + 8), bool)
-        fp[4:4 + g, 4:4 + g] = near
-        sure = np.zeros((g + 8, g + 8), bool)
-        sure[4:4 + g, 4:4 + g] = core | rim
+        core, rim, ox, oy, near, inside, dist = ref(idx, g)
+        sc = -9.0
         if base is not None:
-            bb = base[y0 - 4:y0 + g + 4, x0 - 4:x0 + g + 4]
-            D = np.abs(box - bb).sum(axis=2) > 90
-            prec = (D & fp).sum() / max(1, D.sum())
-            rec = (D & sure).sum() / max(1, sure.sum())
-            sc = prec * rec
+            D = np.abs(img - base).sum(axis=2) > 90
+            for rw in (0.8, 1.33, 1.9):
+                S = np.zeros((g + 8, g + 8), bool)
+                S[4:4 + g, 4:4 + g] = inside | (dist < rw)
+                for dy in range(-slack, slack + 1):
+                    for dx in range(-slack, slack + 1):
+                        x0, y0 = hx - ox + dx - 4, hy - oy + dy - 4
+                        if x0 < 0 or y0 < 0:
+                            continue
+                        box = D[y0:y0 + g + 8, x0:x0 + g + 8]
+                        if box.shape != S.shape:
+                            continue
+                        sc = max(sc, (box & S).sum() / max(1, (box | S).sum()))
         else:
-            luma = box.sum(axis=2) / 3.0
-            sc = (((luma > 215) & sure).sum() + ((luma < 60) & sure).sum()) / max(1, sure.sum()) \
-                 - 2.0 * ((luma > 215) & ~fp).sum() / float(g * g)
+            x0, y0 = hx - ox, hy - oy
+            box = img[y0 - 4:y0 + g + 4, x0 - 4:x0 + g + 4]
+            if box.shape[0] == g + 8 and box.shape[1] == g + 8:
+                fp = np.zeros((g + 8, g + 8), bool)
+                fp[4:4 + g, 4:4 + g] = near
+                sure = np.zeros((g + 8, g + 8), bool)
+                sure[4:4 + g, 4:4 + g] = core | rim
+                luma = box.sum(axis=2) / 3.0
+                sc = (((luma > 215) & sure).sum() + ((luma < 60) & sure).sum()) / max(1, sure.sum()) \
+                     - 2.0 * ((luma > 215) & ~fp).sum() / float(g * g)
         scores.append(sc)
         if sc > bs:
             bs, best = sc, idx
@@ -97,15 +114,26 @@ spots = [(m.group(1), int(m.group(2)), int(m.group(3))) for m in
          re.finditer(r"fahrekante id=7 (\S+) -> (\d+),(\d+)", txt)]
 g = 24 * scale
 seen = {}
-names = [z[1] for z in TARGETS]
-# the first seven spots of the drehbuch belong to the seven photos
+# two base pictures with the pointer parked far apart: 01-desktop (pointer at the first spot) and
+# 99-away (pointer at the last spot); each target uses the base whose parked pointer is farther away
+bases = []
+for nm, sp in (("01-desktop", spots[0] if spots else None), ("99-away", spots[-1] if spots else None)):
+    f = os.path.join(out, nm + ".ppm")
+    if sp and os.path.exists(f):
+        bases.append((ppm(f), sp[1], sp[2]))
 for (ph, where, want), (w2, x, y) in zip(TARGETS, spots):
     f = os.path.join(out, ph + ".ppm")
     if not os.path.exists(f):
         ok(False, "%s: picture missing" % ph); continue
     img = ppm(f)
-    fb = os.path.join(out, "99-away.ppm")
-    best, sc = classify(img, x, y, g, ppm(fb) if want != 0 or ph != "01-desktop" else None)
+    base = None
+    if bases and ph != "01-desktop":
+        base = max(bases, key=lambda b: abs(b[1] - x) + abs(b[2] - y))
+        if abs(base[1] - x) + abs(base[2] - y) < 2 * g:
+            base = None
+        else:
+            base = base[0]
+    best, sc = classify(img, x, y, g, base)
     seen[ph] = best
     ok(best == want, "%s at %s (%d,%d): shape %s, expected %s  [score %.2f vs best other %.2f]"
        % (ph, where, x, y, zeiger2.NAMEN[best] if best >= 0 else "?", zeiger2.NAMEN[want],
