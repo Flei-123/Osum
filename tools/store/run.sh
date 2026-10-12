@@ -177,6 +177,8 @@ run() { # <image> <name> [seconds]
 }
 
 if [ -z "${STORE_WINDOW_ONLY:-}" ]; then
+# STORE_FAST=1 skips sections 3 and 4 (the bus + rights runs) when only the window is of interest
+if [ -z "${STORE_FAST:-}" ]; then
 echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
 mkdir /users/justin
@@ -360,10 +362,14 @@ done
 
 fi # STORE_WINDOW_ONLY
 
-echo "== 5. the window (/bin/store) on a screen: catalog, install, update, remove, with the clicks of a hand =="
+fi
+echo "== 5. the window (/bin/store) on a screen: grid, detail page, install, update, remove, search, keys =="
+# STORE_RES=WxH (default 1024x768)  STORE_MODE=light|dark  STORE_SHOTS=<dir> keeps the pictures as PNG
+RES=${STORE_RES:-1024x768}; MODE=${STORE_MODE:-light}; SHOTS=${STORE_SHOTS:-}
 printf 'lang=de\n' > "$TMPD/locale.conf"
-printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
-cat > "$TMPD/sW.sh" <<'EOS'
+printf '# /etc/theme.conf\nscheme=day\nmode=%s\naccent=\nshape=classic\n' "$MODE" > "$TMPD/theme.conf"
+{
+    cat <<'EOS'
 mkdir /users/justin
 opk install /quelle1/hallo-1.opk
 orientbus serve 0 &
@@ -373,89 +379,11 @@ sleep 1
 setsess 1000
 store &
 echo ==S-WAIT==
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==S-SNAP==
-opk list
-act call store.list
-sleep 80
-echo ==FERTIG==
 EOS
+    # the guest only has to stay alive and answer after the last key: snapshots every 40 s
+    for _ in $(seq 1 55); do printf 'sleep 40\necho ==S-SNAP==\nopk list\nact call store.list\nact call store.status\n'; done
+    echo "echo ==FERTIG=="
+} > "$TMPD/sW.sh"
 EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
@@ -464,71 +392,106 @@ image "$TMPD/W.img" "$TMPD/sW.sh" "$P0"
 PROGS=$PROGS_SAVE
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
 timeout 2200 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
-    -append "gfx disp wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
-    -serial "file:$TMPD/w.txt" -display none -no-reboot -vga std -monitor "unix:$SOCK,server,nowait" \
+    -append "gfx disp fbres=$RES wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/w.txt" -display none -no-reboot -device "VGA,edid=on,xres=${RES%x*},yres=${RES#*x},vgamem_mb=32" \
+    -monitor "unix:$SOCK,server,nowait" \
     -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
     -drive "file=$TMPD/W.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/qemuw.txt" 2>&1 &
 QPID=$!; SRVPIDS="$SRVPIDS $QPID"
-wclean() { tr -cd '\11\12\15\40-\176' < "$TMPD/w.txt"; }
+wclean() { tr -cd '\11\12\15\40-\176\200-\377' < "$TMPD/w.txt"; }
 waitfor() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do grep -qaF -- "$1" "$TMPD/w.txt" 2>/dev/null && return 0; kill -0 "$QPID" 2>/dev/null || return 1; sleep 0.2; i=$((i + 1)); done; return 1; }
-waitforn() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do wclean | grep -qaF -- "$1" && return 0; sleep 0.2; i=$((i + 1)); done; return 1; }
-shot() { python3 tools/gfx/screenshot.py "$SOCK" "$1" 5 > /dev/null 2>&1; }
-klick() { python3 tools/themestore/click.py "$1,$2" > "$TMPD/k.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" > /dev/null 2>&1; sleep 1.5; }
-taste() { echo "sendkey $1" > "$TMPD/t.txt"; python3 tools/wm/monitor.py "$SOCK" "$TMPD/t.txt" 0.15 > /dev/null 2>&1; sleep 1.5; }
+shot() { # <name>: a PPM for the checks, a PNG for the eyes
+    python3 tools/gfx/screenshot.py "$SOCK" "$TMPD/$1.ppm" 5 > /dev/null 2>&1
+    if [ -n "$SHOTS" ] && [ -s "$TMPD/$1.ppm" ]; then
+        mkdir -p "$SHOTS"; python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$TMPD/$1.ppm" "$SHOTS/$1-$MODE-$RES.png" 2>/dev/null
+    fi
+}
+tap() { python3 tools/themestore/click.py "$1,$2" > "$TMPD/k.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" > /dev/null 2>&1; sleep 1.5; }
+key() { local k; for k in "$@"; do echo "sendkey $k" > "$TMPD/t.txt"; python3 tools/wm/monitor.py "$SOCK" "$TMPD/t.txt" 0.15 > /dev/null 2>&1; sleep 0.6; done; sleep 1; }
+typetext() { local c; for c in $(echo "$1" | sed 's/./& /g'); do key "$c"; done; }
 mark() { MARK=$(wclean | wc -l); }
-waitnew() { local i=0; while [ $i -lt $2 ]; do wclean | tail -n +"$MARK" | grep -qaF -- "t=$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
-seennew() { wclean | tail -n +"$MARK" | grep -qaF -- "t=$1"; }
+# a text the window painted AFTER the mark (the trace: `wlib: text ... t=<text>`)
+sawt() { [ "$(wclean | tail -n +"$MARK" | grep -acF -- "t=$1")" -gt 0 ]; }
+waitt() { local i=0; while [ $i -lt $2 ]; do sawt "$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
+# click the label of the LAST text of that name the window painted (the trace gives its place: x, base line, width)
+tapt() {
+    local xy
+    xy=$(wclean | awk -v want="$1" '
+        /wlib: text win=/ {
+            i = index($0, " t="); txt = substr($0, i + 3); if (txt != want) next
+            match($0, / x=[0-9]+/); x = substr($0, RSTART + 3, RLENGTH - 3)
+            match($0, / base=[0-9]+/); b = substr($0, RSTART + 6, RLENGTH - 6)
+            match($0, / tw=[0-9]+/); w = substr($0, RSTART + 4, RLENGTH - 4)
+            match($0, / ax=[0-9]+/); ax = substr($0, RSTART + 4, RLENGTH - 4)
+            match($0, / ay=[0-9]+/); ay = substr($0, RSTART + 4, RLENGTH - 4)
+            have = 1; cx = ax + x + w / 2; cy = ay + b - 6 }
+        END { if (have) printf "%d %d\n", cx, cy }')
+    [ -n "$xy" ] || return 1
+    set -- $xy; tap "$1" "$2"
+}
+lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
+lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
 if waitfor "==S-WAIT==" 150; then
     ok "the script reached the window part"
-    waitforn "t=Programme" 60 && ok "the window opened" || bad "no window"
+    MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Aktualisieren" && break; sleep 1; i=$((i + 1)); done
+    sawt "Aktualisieren" && ok "the window opened" || bad "no window"
+    MARK=1
+    waitt "Fertig: Katalog neu" 120 && ok "the window fetched the signed catalog by itself (first start): 'Fertig: Katalog neu'" || bad "no 'Fertig: Katalog neu'"
+    sleep 3; shot s1-grid
+    MARK=1
+    for t in "Updates" "Installiert" "Aktualisieren" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
+    [ "$(lastn)" = 2 ] && ok "two tiles (gruss, hallo) -- what the signed catalog delivers, nothing made up" || bad "tiles: '$(lastn)'"
     mark
-    waitnew "Fertig: Katalog neu" 120 && ok "the window fetched the signed catalog by itself (first start): 'Fertig: Katalog neu'" || bad "no 'Fertig: Katalog neu'"
-    for t in Aktualisieren Installieren "Neue Fassung" Entfernen; do
-        MARK=1; waitnew "$t" 20 && ok "the window shows '$t'" || bad "no '$t'"
-    done
-    read -r OX OY < <(wclean | grep -ao 'ax=[0-9]* ay=[0-9]*' | tail -1 | tr -cd '0-9 ')
-    BI=$((OX + 146 + 58)); BY=$((OY + 348 + 17))      # the button Installieren
-    DY=$((OY + 299)); DYES=$((OX + 223)); DNO=$((OX + 376))   # the question: yes / no
-    shot "$TMPD/w1.ppm"
-    python3 - "$TMPD/w1.ppm" "$OX" "$OY" > "$TMPD/s1.txt" <<'PY'
-import sys
-from PIL import Image
-im = Image.open(sys.argv[1]).convert("RGB"); ox, oy = int(sys.argv[2]), int(sys.argv[3])
-rows = [sum(1 for x in range(ox + 20, ox + 560, 4) if im.getpixel((x, oy + 40 + 44 + 28 * i))[2] > 200 and im.getpixel((x, oy + 40 + 44 + 28 * i))[0] < 80) for i in range(2)]
-print("selected", rows.index(max(rows)) if max(rows) > 20 else -1)
-PY
-    grep -qx "selected 0" "$TMPD/s1.txt" && ok "the first row (gruss) is chosen at the start (picture)" || bad "no first row chosen"
+    echo "  -- keys: Ctrl+F, type, the grid filters"
+    key ctrl-f; typetext gru; sleep 2; shot s2-search
+    [ "$(lastn)" = 1 ] && ok "search 'gru': one tile" || bad "search 'gru': tiles '$(lastn)'"
+    key esc; sleep 2
+    [ "$(lastn)" = 2 ] && ok "Esc clears the search: two tiles again" || bad "Esc: tiles '$(lastn)'"
+    echo "  -- detail page of the first tile, by keys"
+    mark; key ctrl-f down ret; sleep 2; shot s3-detail
+    sawt "Zurück" && ok "Enter on a tile opens the detail page (Zurück)" || bad "no detail page"
+    sawt "Prüfung: Katalog und Paket" && ok "the detail page says what is checked (signature + hash)" || bad "no check line"
     echo "  -- 'Abbrechen' installs nothing"
-    mark; klick $BI $BY
-    sleep 1; shot "$TMPD/w2.ppm"
-    klick $DNO $DY
-    sleep 3
-    seennew "Arbeitet ... bitte warten" && bad "Abbrechen started a job" || ok "the question 'Programm installieren?' answered with Abbrechen: no job"
+    mark; tapt "Installieren" || bad "no 'Installieren' button"
+    sleep 1.5; shot s4-ask
+    sawt "Programm installieren?" && ok "Installieren asks first: 'Programm installieren?'" || bad "no question"
+    key esc; sleep 3
+    sawt "Arbeitet ... bitte warten" && bad "Abbrechen started a job" || ok "the question answered with Abbrechen: no job"
     echo "  -- install gruss"
-    mark; klick $BI $BY
-    klick $DYES $DY
-    waitnew "Arbeitet ... bitte warten" 30 && ok "Installieren, then yes: the window says it is working" || bad "no 'Arbeitet' after yes"
-    waitnew "Fertig: installiert" 150 && ok "... and 'Fertig: installiert'" || bad "no 'Fertig: installiert'"
-    shot "$TMPD/w3.ppm"
-    echo "  -- update hallo (row 2)"
-    mark; klick $((OX + 100)) $((OY + 40 + 44 + 28))
-    klick $((OX + 270 + 68)) $BY
-    sleep 1; shot "$TMPD/w4.ppm"
-    klick $((OX + 223)) $DY
-    waitnew "Fertig: installiert" 150 && ok "Neue Fassung, then yes: hallo is updated ('Fertig: installiert')" || bad "hallo was not updated"
-    echo "  -- remove gruss (row 1)"
-    mark; klick $((OX + 100)) $((OY + 40 + 44))
-    klick $((OX + 415 + 53)) $BY
-    sleep 1; shot "$TMPD/w5.ppm"
-    klick $((OX + 223)) $DY
-    waitnew "Fertig: entfernt" 150 && ok "Entfernen, then yes: 'Fertig: entfernt'" || bad "gruss was not removed"
-    shot "$TMPD/w6.ppm"
+    mark; tapt "Installieren"; sleep 1; key ret
+    waitt "Arbeitet ... bitte warten" 30 && ok "Installieren, then yes: the window says it is working" || bad "no 'Arbeitet' after yes"
+    shot s5-busy
+    waitt "Fertig: installiert" 150 && ok "... and 'Fertig: installiert'" || bad "no 'Fertig: installiert'"
+    PCTS=$(wclean | tail -n +"$MARK" | grep -ao "store: pct=[0-9]*" | tr -cd '0-9\n' | tr '\n' ' ')
+    note "pct seen while working: $PCTS"
+    echo "$PCTS" | awk '{ n=NF; ok=(n>=2); for (i=2;i<=n;i++) if ($i<$(i-1)) ok=0; exit ok?0:1 }' \
+        && ok "the progress of stored climbs and never goes back ($PCTS)" || bad "pct not rising: '$PCTS'"
+    shot s6-installed
+    echo "  -- the updates page: one row, 'Alle aktualisieren', one question"
+    key esc; sleep 1
+    mark; tapt "Updates" || bad "no 'Updates' in the navigation"
+    sleep 2; shot s7-updates
+    sawt "Alle aktualisieren" && ok "the updates page offers 'Alle aktualisieren'" || bad "no 'Alle aktualisieren'"
+    mark; tapt "Alle aktualisieren"; sleep 1.5; shot s7b-askall
+    sawt "Alle Programme aktualisieren?" && ok "one question for all: 'Alle Programme aktualisieren?'" || bad "no question for all"
+    key ret
+    waitt "Fertig: installiert" 150 && ok "yes: hallo is updated ('Fertig: installiert')" || bad "hallo was not updated"
+    sleep 2; shot s8-uptodate
+    sawt "Alles aktuell" && ok "afterwards the page says 'Alles aktuell'" || bad "no 'Alles aktuell'"
+    echo "  -- remove gruss from its detail page"
+    mark; tapt "Alle" || bad "no 'Alle' in the navigation"; sleep 2
+    key ctrl-f down ret; sleep 2
+    mark; tapt "Entfernen" || bad "no Entfernen button"
+    sleep 1.5; shot s8b-askremove
+    sawt "Programm entfernen?" && ok "Entfernen asks first: 'Programm entfernen?'" || bad "no remove question"
+    key ret
+    waitt "Fertig: entfernt" 150 && ok "yes: 'Fertig: entfernt'" || bad "gruss was not removed"
+    shot s9-end
     N=$(wclean | grep -ac "==S-SNAP==")
     i=0; while [ $i -lt 100 ]; do [ "$(wclean | grep -ac '==S-SNAP==')" -ge $((N + 2)) ] && break; sleep 2; i=$((i + 1)); done
     sleep 6
     wclean > "$TMPD/wc2.txt"
-    # the snapshot BEFORE the last marker: complete, and taken after the last click
     awk -v n=$((N + 1)) '/==S-SNAP==/{c++; next} c==n' "$TMPD/wc2.txt" > "$TMPD/e.txt"
     [ -s "$TMPD/e.txt" ] && ok "a snapshot of the guest after the last click" || bad "no snapshot"
     has "$TMPD/e.txt" "  hallo -> " "at the end the package list has hallo ..."
@@ -536,6 +499,7 @@ PY
     has "$TMPD/e.txt" "item=hallo|2.0.0|" "the catalog says hallo is at 2.0.0"
     has "$TMPD/e.txt" "|aktuell" "hallo is up to date after the update through the window"
     has "$TMPD/e.txt" "item=gruss|1.0.0|" "gruss is in the catalog again"
+    [ -n "$SHOTS" ] && { cp "$TMPD/w.txt" "$SHOTS/serial-$MODE-$RES.txt" 2>/dev/null; note "pictures: $SHOTS"; }
 else
     bad "the script never reached the window part"; wclean | tail -20 | sed 's/^/        /'
 fi

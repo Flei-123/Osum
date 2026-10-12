@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/fui/grid.fi -- THE GEOMETRY OF A TILE GRID / LIST: columns, pages, the visible range, arrow keys.
+//
+// A window with 5000 entries must not build 5000 widgets. This file is the arithmetic behind a VIRTUAL grid
+// (only the rows that are in view exist) and behind a PAGED one (a fixed number per page), and nothing else:
+// integers only, no heap, no widgets -- the program builds the widgets of `grid_first(..)..grid_first(..) +
+// grid_count(..)` and paints them with whatever it likes (a tile card, a list row). The Store uses the paged form
+// (columns, pages, arrow keys); the virtual form is tested the same way and ready for a long list.
+//
+// Cells are `cell_w` x `cell_h` with `gap` between them; item i sits in row i / cols, column i % cols.
+//
+//   grid_cols(avail_w, cell_w, gap)          how many columns fit (at least 1)
+//   grid_rows(n, cols)                       rows needed for n items
+//   grid_content_h(n, cols, cell_h, gap)     height of all rows
+//   grid_cell_x(i, cols, cell_w, gap)        left edge of item i inside the grid (top: grid_cell_y)
+//   grid_cell_y(i, cols, cell_h, gap)
+//   grid_first(scroll_y, cols, cell_h, gap)  first item whose row is (partly) in view
+//   grid_count(n, first, view_h, scroll_y, cols, cell_h, gap)
+//                                            how many items from `first` are (partly) in view, rows whole
+//   grid_scroll_to(i, scroll_y, view_h, cols, cell_h, gap)
+//                                            the scroll offset that shows item i fully, moving as little as possible
+//   grid_pages(n, per_page)                  pages for n items (at least 1)
+//   grid_page_of(i, per_page)                the page of item i
+//   grid_page_first(page, per_page)          the first item of a page
+//   grid_page_count(n, page, per_page)       items on that page
+//   grid_move(i, n, cols, dir)               the item an arrow key reaches: dir 0 left, 1 right, 2 up, 3 down;
+//                                            i itself when there is none (the edge)
+
+export {
+    grid_cols, grid_rows, grid_content_h, grid_cell_x, grid_cell_y, grid_first, grid_count, grid_scroll_to,
+    grid_pages, grid_page_of, grid_page_first, grid_page_count, grid_move,
+    GRID_LEFT, GRID_RIGHT, GRID_UP, GRID_DOWN,
+}
+
+const GRID_LEFT: u64 = 0
+const GRID_RIGHT: u64 = 1
+const GRID_UP: u64 = 2
+const GRID_DOWN: u64 = 3
+
+fn grid_cols(avail_w: u64, cell_w: u64, gap: u64) -> u64 {
+    if cell_w == 0 || avail_w < cell_w {
+        return 1
+    }
+    return (avail_w + gap) / (cell_w + gap)
+}
+
+fn grid_rows(n: u64, cols: u64) -> u64 {
+    if n == 0 || cols == 0 {
+        return 0
+    }
+    return (n + cols - 1) / cols
+}
+
+fn grid_content_h(n: u64, cols: u64, cell_h: u64, gap: u64) -> u64 {
+    let r: u64 = grid_rows(n, cols)
+    if r == 0 {
+        return 0
+    }
+    return r * cell_h + (r - 1) * gap
+}
+
+fn grid_cell_x(i: u64, cols: u64, cell_w: u64, gap: u64) -> u64 {
+    if cols == 0 {
+        return 0
+    }
+    return (i % cols) * (cell_w + gap)
+}
+
+fn grid_cell_y(i: u64, cols: u64, cell_h: u64, gap: u64) -> u64 {
+    if cols == 0 {
+        return 0
+    }
+    return (i / cols) * (cell_h + gap)
+}
+
+fn grid_first(scroll_y: u64, cols: u64, cell_h: u64, gap: u64) -> u64 {
+    var row: u64 = scroll_y / (cell_h + gap)
+    // inside the gap under row `row`: that row is already out of view
+    if scroll_y - row * (cell_h + gap) >= cell_h {
+        row = row + 1
+    }
+    return row * cols
+}
+
+fn grid_count(n: u64, first: u64, view_h: u64, scroll_y: u64, cols: u64, cell_h: u64, gap: u64) -> u64 {
+    if first >= n || cols == 0 || view_h == 0 {
+        return 0
+    }
+    // the last row that starts above the lower edge of the view
+    let last_row: u64 = (scroll_y + view_h - 1) / (cell_h + gap)
+    var end: u64 = (last_row + 1) * cols
+    if end > n {
+        end = n
+    }
+    if end <= first {
+        return 0
+    }
+    return end - first
+}
+
+fn grid_scroll_to(i: u64, scroll_y: u64, view_h: u64, cols: u64, cell_h: u64, gap: u64) -> u64 {
+    let top: u64 = grid_cell_y(i, cols, cell_h, gap)
+    let bottom: u64 = top + cell_h
+    if top < scroll_y {
+        return top
+    }
+    if bottom > scroll_y + view_h {
+        if bottom >= view_h {
+            return bottom - view_h
+        }
+        return 0
+    }
+    return scroll_y
+}
+
+fn grid_pages(n: u64, per_page: u64) -> u64 {
+    if n == 0 || per_page == 0 {
+        return 1
+    }
+    return (n + per_page - 1) / per_page
+}
+
+fn grid_page_of(i: u64, per_page: u64) -> u64 {
+    if per_page == 0 {
+        return 0
+    }
+    return i / per_page
+}
+
+fn grid_page_first(page: u64, per_page: u64) -> u64 {
+    return page * per_page
+}
+
+fn grid_page_count(n: u64, page: u64, per_page: u64) -> u64 {
+    let first: u64 = page * per_page
+    if first >= n {
+        return 0
+    }
+    if n - first < per_page {
+        return n - first
+    }
+    return per_page
+}
+
+fn grid_move(i: u64, n: u64, cols: u64, dir: u64) -> u64 {
+    if i >= n || cols == 0 {
+        return i
+    }
+    if dir == 0 {
+        if i % cols > 0 {
+            return i - 1
+        }
+        return i
+    }
+    if dir == 1 {
+        if i % cols + 1 < cols && i + 1 < n {
+            return i + 1
+        }
+        return i
+    }
+    if dir == 2 {
+        if i >= cols {
+            return i - cols
+        }
+        return i
+    }
+    if i + cols < n {
+        return i + cols
+    }
+    return i
+}
