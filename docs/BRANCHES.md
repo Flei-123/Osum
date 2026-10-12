@@ -53,3 +53,11 @@ Rule: only branches fully contained in main are deleted; everything else stays u
 ## Hygiene (same snapshot)
 - Reaper rule: a worktree whose HEAD is an ancestor of `origin/main` and whose `git status` is clean may be removed (`git worktree remove`) together with its branch. Dirty merged worktrees (`/root/osum-r537`, `/root/osum-jd`) hold untracked experiments - not removed.
 - Re-generate the table: the script is a 40-line `git for-each-ref` + `git merge-tree` loop (see the report of w-accel1-dev-loop-phase-1); keep decisions in this file, not in chat reports.
+
+## Deleted on 12.10.2026 (fully contained in main)
+Restore: `git push origin <tip>:refs/heads/<name>` (objects stay on the server for a while; the tips are listed for that).
+- `action-bus-4` 14a71dd92334bc2ea546e830f2c2ba2a847763f6 (ancestor of main)
+- `runde-clip2` 075a95fbfc27103e4b527fcee04e27d96c9abdb0 (ancestor of main)
+- `avx-ota` 5c591248763a7c085da170b5847a635c1648fad6 (merge-tree: no net change)
+- `avx-ota2` 2ba8ade2a58a6b3106810542119237055d433968 (merge-tree: no net change)
+- `ota-kontroll` e2e5fc93a116bab4cdde8eff68585a08c807f7f0 (merge-tree: no net change)
