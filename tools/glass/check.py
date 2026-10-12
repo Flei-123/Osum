@@ -10,7 +10,7 @@ field: <dir> holds `desktop.ppm` and `serial.txt` (the program's `rect` lines, t
             deviation of its luminance is >= 0.8 levels (blurred wallpaper + grain show through the tint). A flat
             plate has 0.
   soft      ... and it is smooth, not noise: the mean difference of horizontal neighbours is <= 3.0 levels.
-  border    a thin light rim: the mean luminance of the top edge rows is >= 3 levels above the row 5 px inside.
+  border    a defined rim: the mean luminance of the top edge rows differs by >= 3 levels from the row 5 px inside (light rim on dark glass, focus-accent rim on milk glass).
   surround  the plate is visible against the picture around it (luminance ratio >= 1.3).
   With `flat` (the control run /etc/noglass) the variance check must FAIL: the script then prints
   `GLASS <label>: control red` and exits 0; if it does not turn red it exits 1 (the check is blind).
@@ -72,7 +72,7 @@ def cmd_field(a):
     res = []
     res.append((m["sd"] >= 0.8, "variance: the field face is not a flat fill (std %.2f levels, need >= 0.8)" % m["sd"]))
     res.append((m["adj"] <= 3.0, "soft: neighbour difference %.2f (need <= 3.0: blurred, not noisy)" % m["adj"]))
-    res.append((m["rim"] - m["inner"] >= 3.0, "border: rim %.1f vs inside %.1f (need >= +3)" % (m["rim"], m["inner"])))
+    res.append((abs(m["rim"] - m["inner"]) >= 3.0, "border: rim %.1f vs inside %.1f (need |diff| >= 3: light rim on dark glass, accent/dark rim on milk glass)" % (m["rim"], m["inner"])))
     ratio = (max(m["face"], m["out"]) + 12.0) / (min(m["face"], m["out"]) + 12.0)
     res.append((ratio >= 1.3, "surround: plate %.1f vs picture around %.1f (ratio %.2f, need >= 1.3)" % (m["face"], m["out"], ratio)))
     if flat:
