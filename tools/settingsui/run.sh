@@ -4,7 +4,6 @@
 #
 #   /root/jarvis/bin/heavy bash tools/settingsui/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
-# STATUS: written, NOT yet run (first run belongs to the next round).
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings,
 # clicks every sidebar page (rect names taba..tao), types into the search field
 # (Ctrl+F), and takes a picture each time. Checks (serial log):
@@ -37,6 +36,11 @@ S="$OUT/serial.txt"
 n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null || echo 0)
 [ "$n" -ge 15 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
 grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
+# the segmented control (K_SEG0 = 180..182 -> wgy wgz wha) and the eight swatches (183..190) are real nodes
+for r in wgy wgz wha; do
+  grep -aq "settings: rect name=$r " "$S" && ok "segment $r reported" || bad "segment $r reported"
+done
+grep -aq 'settings: rect name=wgj ' "$S" && ok "search field reported" || bad "search field reported"
 grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl. search field)" || bad "controls reported"
 c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null || echo 0)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
