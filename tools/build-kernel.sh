@@ -344,8 +344,20 @@ KMAIN=$(find "$KDIR" -name kmain.fi -type f | head -1)
 UPROG=$(find "$KDIR" -name uprog.fi -type f | head -1)
 [[ -n $KMAIN ]] || { echo "kmain.fi nicht gefunden" >&2; exit 1; }
 [[ -n $UPROG ]] || { echo "uprog.fi nicht gefunden" >&2; exit 1; }
-"$FIRNC" -o "$TMP/k.o" "$KMAIN" || exit 1
-"$FIRNC" -o "$TMP/uprog.o" "$UPROG" || exit 1
+# ACCEL phase 1 (B-01/B-02): the two compiles go through a content-addressed cache and run in
+# parallel (they are independent; before: 2 x serial).  Compile with cwd = the kernel copy and
+# relative root paths, so the objects do not contain the random mktemp name (reproducible).
+# Details, env switches (OSUM_BUILD_CACHE=off) and the proof: tools/kernel/buildcache.sh, docs/DEVLOOP.md.
+. "$(dirname "$0")/kernel/buildcache.sh"
+BC_KEY=$(bc_common_key "$FIRNC" "$TMP" "$STUFE")
+bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${KMAIN#$TMP/}" "$TMP/k.o" &
+BC_P1=$!
+bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${UPROG#$TMP/}" "$TMP/uprog.o" &
+BC_P2=$!
+BC_RC=0
+wait "$BC_P1" || BC_RC=1
+wait "$BC_P2" || BC_RC=1
+[[ $BC_RC == 0 ]] || { echo "Firn compile failed" >&2; exit 1; }
 
 # firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
 # (docs/SELF_HOSTING.md im Firn-Repo).
