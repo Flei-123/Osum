@@ -121,5 +121,58 @@ o3=$(grep -a 'notifc: open n=1' "$S" | tail -1)
 [ -n "$o3" ] && ok "the card after the third post shows ONE row (the cleared two stay gone)" || bad "no 'open n=1' after the third post"
 grep -a 'notifc: row 0 ' "$S" | tail -1 | grep -qaF "third message" && ok "that row is the third message" || bad "the last row 0 is not the third message"
 grep -qaF "notifc: shut bell" "$S" && ok "a click on the bell closes the card again" || bad "no 'notifc: shut bell'"
+
+# ---------------------------------------------------------------------------------------------------------------
+# 2. DO NOT DISTURB (quick settings tile 6, kernel/user/qs.fi + the toast gate in taskbar.fi)
+#    tile on -> a posted message still reaches the bell but raises NO toast; tile off -> the next one pops up.
+cat > "$TMPD/dreh2.txt" <<'EOF'
+warteauf 'taskbar: steht|taskbar: geom' || 120
+warte 6
+klick 300,200
+warte 2
+taste ret
+warte 1
+taste meta_l-a
+warteauf 'qs: open' || 30
+warte 2
+klickauf qskachel6
+warte 2
+foto 10-dnd-on
+taste esc
+warte 2
+klick 300,200
+warte 1
+taste ret
+tippe notify muted message
+taste ret
+warte 5
+foto 11-muted
+taste meta_l-a
+warteauf 'qs: open' || 30
+warte 2
+klickauf qskachel6
+warte 2
+taste esc
+warte 2
+klick 300,200
+warte 1
+taste ret
+tippe notify loud message
+taste ret
+warte 5
+foto 12-loud
+EOF
+bash tools/design/eh6.sh "$TMPD/d" res=1280x800 accel=kvm progs="$PROGS" \
+    drehbuch="$TMPD/dreh2.txt" > "$TMPD/d.log" 2>&1
+S2="$TMPD/d/serial.txt"
+if [ -n "${FEATURES_OUT:-}" ]; then cp "$TMPD"/d/*.ppm "$S2" "$TMPD/d.log" "$FEATURES_OUT/" 2>/dev/null; fi
+echo "== do not disturb =="
+grep -aqE '^qs: kachel n=6 ' "$S2" && ok "the panel reports the do-not-disturb tile (n=6)" || bad "no 'qs: kachel n=6'"
+grep -aqE '^qs: tile n=6 to=1 rc=0' "$S2" && ok "a click on the tile switches it on (to=1)" || bad "no 'qs: tile n=6 to=1 rc=0'"
+grep -aqF 'qs: dnd = 1' "$S2" && ok "the switch reached the bar (qs: dnd = 1)" || bad "no 'qs: dnd = 1'"
+if grep -a 'taskbar: toast \[' "$S2" | grep -aqF 'muted message'; then bad "a toast popped up for the muted message"; else ok "NO toast for the message posted while do-not-disturb was on"; fi
+grep -aqE '^qs: tile n=6 to=0 rc=0' "$S2" && ok "the second click switches it off (to=0)" || bad "no 'qs: tile n=6 to=0 rc=0'"
+if grep -a 'taskbar: toast \[' "$S2" | grep -aqF 'loud message'; then ok "counter-proof: with the tile off the next message does pop up"; else bad "counter-proof failed: no toast for the loud message"; fi
+
 echo; echo "FEATURES: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
