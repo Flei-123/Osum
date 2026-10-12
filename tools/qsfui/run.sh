@@ -115,8 +115,8 @@ check_scale() {
     while read -r kx ky kw kh; do
         rects+=("$((qx + kx)),$((qy + ky)),$kw,$kh"); ws+=("$kw")
     done < <(grep -aoE '^qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
-        | head -4 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
-    if [ "${#rects[@]}" -ne 4 ]; then bad "scale $sc: the panel reported ${#rects[@]} tiles, not 4"; return 0; fi
+        | head -5 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
+    if [ "${#rects[@]}" -ne 5 ]; then bad "scale $sc: the panel reported ${#rects[@]} tiles, not 5"; return 0; fi
     allw=1
     for w in "${ws[@]}"; do [ "$w" -eq $((117 * sc)) ] || allw=0; done
     [ "$allw" = 1 ] && ok "scale $sc: every tile is $((117 * sc)) pixels wide (117 points)" \
