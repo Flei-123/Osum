@@ -1,0 +1,1047 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/traypop.fi -- THE TRAY FLYOUT OF THE BAR (W-TRAY2, 12.10.2026).
+//
+// One scene window of the bar's scene host (window 6, like barpop / taskview; NOT code in
+// taskbar.fi, which sits at its size limit). It is opened by the tray chevron when the tray has
+// icons in the overflow, and shows three things, top down:
+//
+//   network     a VECTOR glyph of the real state + the sentence the bar's tooltip uses
+//   sound       speaker glyph, mute button and a volume slider (SYS_AUDGET / SYS_AUDSET: the same
+//               calls as the quick settings; "no audio device" when the kernel has none)
+//   microphone  glyph + "in use by N programs" / "muted" -- from a STUB source (see below)
+//   overflow    one row per item of lib/fui/tray.fi (PLACE_OVERFLOW): glyph, name, a "..." button
+//               that opens the item's context menu (its entries + "Move up" + "Hide")
+//
+// GLYPHS are vectors (strokes + rounded plates through fUi's painter), no emoji, no icon font:
+//   ethernet  online / limited (no address) / no route ("!" badge) / no carrier (slash)
+//   wlan      bars 0..4 -- drawn only when `net_kind()` says Wi-Fi; there is NO Wi-Fi driver (roadmap
+//             N-005), so the kind is always Ethernet today and these bars never appear
+//   speaker   off / 1 / 2 waves, muted (cross)      mic   plain / muted (slash)      chevron
+// There is no airplane mode in this system, so there is no airplane glyph (a symbol for a switch
+// that does not exist would be a lie).
+//
+// WHERE THE ITEMS COME FROM. The action-bus message names for tray registration are not defined
+// yet (docs/TRAY.md). Until they are, programs register by writing /etc/tray.items, one item per
+// line:  owner|icon|tooltip     (icon = number; 1 net, 2 sound, 3 mic are the system glyphs, any
+// other number draws the first letter of the owner on a plate). The flyout reads it when it opens
+// and adds owners it does not know yet. Two more line kinds are test aids:
+//   mic|<users>|<muted>   the STUB capture source: there is no capture path in the kernel (no
+//                         SYS_AUDREAD, roadmap), so the mic indicator can only show what this line says
+//   sheet                 adds a glyph sheet (every state of every glyph) under the items
+//
+// Serial lines (read by tools/traypop/run.sh):
+//   traypop: open n=<overflow items> x= y= w= h=
+//   traypop: item <i> id= owner= tip=
+//   traypop: click id= owner=          traypop: menu id=        traypop: pick id= action=
+//   traypop: vol <0..100> rc=          traypop: mute <0|1>      traypop: shut <why>
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+import fuiapp
+import msg
+import fui.render
+import fui.painter
+import fui.icon
+import fui.tray
+
+export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
+    chevron_glyph }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const CARD_W: u64 = 300 // design points
+const PADP: u64 = 10
+const GAPP: u64 = 6
+const ROW_H: u64 = 34
+const MAXROWS: u64 = 8
+const MAXH: u64 = 560
+
+const K_MUTE: u64 = 300
+const K_VOL: u64 = 301
+const K_ITEM: u64 = 320
+const K_MENU: u64 = 340
+const K_ENT: u64 = 360
+const K_UP: u64 = 380
+const K_HIDE: u64 = 381
+const K_BACK: u64 = 382
+const CK_NET: u64 = 400
+const CK_SND: u64 = 401
+const CK_MIC: u64 = 402
+const CK_ITEM: u64 = 410
+const CK_SHEET: u64 = 440
+
+const M_LIST: u64 = 0
+const M_MENU: u64 = 1
+
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const A_READY: u64 = 0
+const A_VOLUME: u64 = 4
+const A_MUTED: u64 = 21
+const AS_VOLUME: u64 = 0
+const AS_MUTE: u64 = 2
+
+// glyph kinds of the network
+const NK_ETH: u64 = 0
+const NK_WLAN: u64 = 1
+
+static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut tp_h: u64 = 0
+static mut tp_id: u64 = 0
+static mut open_: u64 = 0
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut pw_: u64 = 0
+static mut ph_: u64 = 0
+static mut ax_: u64 = 0 // the chevron's rectangle (a press on it is the bar's toggle, not an "outside" press)
+static mut ay_: u64 = 0
+static mut aw_: u64 = 0
+static mut ah_: u64 = 0
+static mut btn_last: u64 = 0
+static mut key_last: u64 = 0
+static mut mode: u64 = 0
+static mut menu_item: u64 = 0 // id of the item whose menu is open
+static mut net_st: u64 = 0
+static mut net_da: u64 = 0
+static mut snd_da: u64 = 0
+static mut snd_vol: u64 = 0
+static mut snd_mute: u64 = 0
+static mut mic_users: u64 = 0 // STUB source (see the header)
+static mut mic_muted: u64 = 0
+static mut want_sheet: u64 = 0
+static mut n_rows: u64 = 0
+static mut row_id: [u64; 8] = [0 as u64; 8]
+static mut conf: [u8; 1024] = [0 as u8; 1024]
+static mut tr: tray.Tray = tray.Tray { blk: 0 }
+static mut txt: [u8; 120] = [0 as u8; 120]
+static mut owner_b: [u8; 24] = [0 as u8; 24]
+static mut tip_b: [u8; 64] = [0 as u8; 64]
+
+static mut p_items: [u8; 16] = "/etc/tray.items\0"
+static mut t_title: [u8; 5] = "Tray\0"
+static mut t_sys: [u8; 7] = "system\0"
+static mut t_net: [u8; 22] = "taskbar.tip.nocarrier\0"
+static mut t_net1: [u8; 17] = "taskbar.tip.noip\0"
+static mut t_net2: [u8; 20] = "taskbar.tip.noroute\0"
+static mut t_net3: [u8; 19] = "taskbar.tip.online\0"
+static mut k_net: [u8; 9] = "tray.net\0"
+static mut k_snd: [u8; 11] = "tray.sound\0"
+static mut k_mute: [u8; 10] = "tray.mute\0"
+static mut k_unmute: [u8; 12] = "tray.unmute\0"
+static mut k_nosnd: [u8; 13] = "tray.nosound\0"
+static mut k_micuse: [u8; 13] = "tray.mic.use\0"
+static mut k_micmuted: [u8; 15] = "tray.mic.muted\0"
+static mut k_more: [u8; 10] = "tray.more\0"
+static mut k_none: [u8; 10] = "tray.none\0"
+static mut k_up: [u8; 8] = "tray.up\0"
+static mut k_hide: [u8; 10] = "tray.hide\0"
+static mut k_back: [u8; 10] = "tray.back\0"
+static mut k_dots: [u8; 13] = "tray.options\0"
+static mut k_nonet: [u8; 11] = "tray.nonet\0"
+static mut s_open: [u8; 17] = "traypop: open n=\0"
+static mut s_xy: [u8; 4] = " x=\0"
+static mut s_yy: [u8; 4] = " y=\0"
+static mut s_ww: [u8; 4] = " w=\0"
+static mut s_hh: [u8; 4] = " h=\0"
+static mut s_item: [u8; 15] = "traypop: item \0"
+static mut s_id: [u8; 5] = " id=\0"
+static mut s_ow: [u8; 8] = " owner=\0"
+static mut s_tip: [u8; 6] = " tip=\0"
+static mut s_click: [u8; 19] = "traypop: click id=\0"
+static mut s_menu: [u8; 18] = "traypop: menu id=\0"
+static mut s_pick: [u8; 18] = "traypop: pick id=\0"
+static mut s_act: [u8; 9] = " action=\0"
+static mut s_vol: [u8; 14] = "traypop: vol \0"
+static mut s_rc: [u8; 5] = " rc=\0"
+static mut s_mute: [u8; 15] = "traypop: mute \0"
+static mut s_shut: [u8; 15] = "traypop: shut \0"
+static mut s_esc: [u8; 4] = "esc\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_toggle: [u8; 7] = "toggle\0"
+static mut s_clk: [u8; 6] = "click\0"
+static mut s_pk: [u8; 5] = "pick\0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_nop: [u8; 18] = "traypop: no model\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn mg(key: u64) -> u64 {
+    return msg.get(key)
+}
+
+fn ptr_of(b: u64) -> u64 {
+    return b
+}
+
+// ------------------------------------------------------------------ glyph drawing
+//
+// Everything below paints into the canvas of the current window through fUi's painter. `s` is the
+// side of the square the glyph lives in, in pixels; the strokes are about s/11 wide.
+
+fn zp() -> *mut painter.Painter {
+    return render.ctx_painter(fuiapp.ctx())
+}
+
+// a colour word as wlibc hands it out (red in the high octet) -> the painter's ARGB
+fn argb(rgb: u64, alpha: u64) -> u32 {
+    let c: u32 = (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
+    return c | ((alpha & 255) << 24) as u32
+}
+
+fn plate(x: f64, y: f64, w: f64, h: f64, r: f64, col: u32) {
+    painter.round_rect(zp(), x, y, w, h, r, col)
+}
+
+fn ringp(x: f64, y: f64, w: f64, h: f64, r: f64, t: f64, col: u32) {
+    painter.round_ring(zp(), x, y, w, h, r, t, col)
+}
+
+fn line(x0: f64, y0: f64, x1: f64, y1: f64, st: f64, col: u32) {
+    icon.stroke(zp(), x0, y0, x1, y1, st, col)
+}
+
+fn stw(s: f64) -> f64 {
+    var w: f64 = s / 11.0
+    if w < 1.5 {
+        w = 1.5
+    }
+    return w
+}
+
+// the "!" badge: a filled disc in the bottom right corner with a bar and a dot
+fn badge(x: f64, y: f64, s: f64, fill: u32, ink: u32) {
+    let d: f64 = s * 0.46
+    let bx: f64 = x + s - d
+    let by: f64 = y + s - d
+    plate(bx, by, d, d, d / 2.0, fill)
+    plate(bx + d * 0.43, by + d * 0.2, d * 0.14, d * 0.38, d * 0.07, ink)
+    plate(bx + d * 0.42, by + d * 0.68, d * 0.16, d * 0.16, d * 0.08, ink)
+}
+
+// the diagonal "off" slash
+fn slash(x: f64, y: f64, s: f64, col: u32) {
+    line(x + s * 0.14, y + s * 0.14, x + s * 0.86, y + s * 0.86, stw(s) * 1.1, col)
+}
+
+// ETHERNET: a plug body (ring) with three pins and a cable stub.
+// state: 3 online, 2 no route (badge), 1 no address (badge), 0 no carrier (slash)
+fn net_glyph(x: u64, y: u64, size: u64, state: u64, fg: u64, warn: u64, bg: u64) {
+    let s: f64 = size as f64
+    let fx: f64 = x as f64
+    let fy: f64 = y as f64
+    let col: u32 = argb(fg, 255)
+    let t: f64 = stw(s)
+    ringp(fx + s * 0.12, fy + s * 0.2, s * 0.76, s * 0.5, s * 0.1, t, col)
+    plate(fx + s * 0.26, fy + s * 0.34, t, s * 0.2, 0.5, col)
+    plate(fx + s * 0.5 - t / 2.0, fy + s * 0.34, t, s * 0.2, 0.5, col)
+    plate(fx + s * 0.74 - t, fy + s * 0.34, t, s * 0.2, 0.5, col)
+    plate(fx + s * 0.5 - t / 2.0, fy + s * 0.7, t, s * 0.18, 0.5, col)
+    plate(fx + s * 0.32, fy + s * 0.86, s * 0.36, t, 0.5, col)
+    if state == 0 {
+        // the slash is cut into the picture with the background colour first, so it reads on the glyph
+        line(fx + s * 0.14, fy + s * 0.14 + t, fx + s * 0.86, fy + s * 0.86 + t, t * 2.6, argb(bg, 255))
+        slash(fx, fy, s, argb(warn, 255))
+    }
+    if state == 1 || state == 2 {
+        badge(fx, fy, s, argb(warn, 255), argb(bg, 255))
+    }
+}
+
+// WLAN: four rising bars; `level` 0..4 of them are filled, the others dim. 0 also gets the slash.
+fn wlan_glyph(x: u64, y: u64, size: u64, level: u64, fg: u64, warn: u64) {
+    let s: f64 = size as f64
+    let fx: f64 = x as f64
+    let fy: f64 = y as f64
+    var k: u64 = 0
+    while k < 4 {
+        let h: f64 = s * (0.22 + 0.19 * (k as f64))
+        var a: u64 = 70
+        if k < level {
+            a = 255
+        }
+        plate(fx + s * (0.1 + 0.2 * (k as f64)), fy + s * 0.9 - h, s * 0.15, h, s * 0.05, argb(fg, a))
+        k = k + 1
+    }
+    if level == 0 {
+        slash(fx, fy, s, argb(warn, 255))
+    }
+}
+
+// SPEAKER: cone + box, up to two waves; muted = a cross instead of the waves
+fn speaker_glyph(x: u64, y: u64, size: u64, level: u64, muted: u64, fg: u64) {
+    let s: f64 = size as f64
+    let fx: f64 = x as f64
+    let fy: f64 = y as f64
+    let col: u32 = argb(fg, 255)
+    let t: f64 = stw(s)
+    plate(fx + s * 0.1, fy + s * 0.38, s * 0.16, s * 0.24, s * 0.03, col)
+    // the cone: slices of growing height
+    var i: u64 = 0
+    while i < 7 {
+        let u: f64 = (i as f64) / 6.0
+        let h: f64 = s * (0.24 + 0.4 * u)
+        plate(fx + s * (0.24 + 0.05 * (i as f64)), fy + s * 0.5 - h / 2.0, s * 0.06, h, 0.0, col)
+        i = i + 1
+    }
+    if muted != 0 {
+        line(fx + s * 0.68, fy + s * 0.38, fx + s * 0.9, fy + s * 0.62, t, col)
+        line(fx + s * 0.9, fy + s * 0.38, fx + s * 0.68, fy + s * 0.62, t, col)
+        return
+    }
+    if level >= 1 {
+        line(fx + s * 0.7, fy + s * 0.4, fx + s * 0.75, fy + s * 0.5, t, col)
+        line(fx + s * 0.75, fy + s * 0.5, fx + s * 0.7, fy + s * 0.6, t, col)
+    }
+    if level >= 2 {
+        line(fx + s * 0.78, fy + s * 0.3, fx + s * 0.86, fy + s * 0.5, t, col)
+        line(fx + s * 0.86, fy + s * 0.5, fx + s * 0.78, fy + s * 0.7, t, col)
+    }
+}
+
+// MICROPHONE: capsule, holder (a U of strokes), stem and foot; muted = slash
+fn mic_glyph(x: u64, y: u64, size: u64, muted: u64, fg: u64, warn: u64) {
+    let s: f64 = size as f64
+    let fx: f64 = x as f64
+    let fy: f64 = y as f64
+    let col: u32 = argb(fg, 255)
+    let t: f64 = stw(s)
+    plate(fx + s * 0.38, fy + s * 0.08, s * 0.24, s * 0.44, s * 0.12, col)
+    line(fx + s * 0.26, fy + s * 0.42, fx + s * 0.26, fy + s * 0.52, t, col)
+    line(fx + s * 0.26, fy + s * 0.52, fx + s * 0.34, fy + s * 0.64, t, col)
+    line(fx + s * 0.34, fy + s * 0.64, fx + s * 0.5, fy + s * 0.7, t, col)
+    line(fx + s * 0.5, fy + s * 0.7, fx + s * 0.66, fy + s * 0.64, t, col)
+    line(fx + s * 0.66, fy + s * 0.64, fx + s * 0.74, fy + s * 0.52, t, col)
+    line(fx + s * 0.74, fy + s * 0.52, fx + s * 0.74, fy + s * 0.42, t, col)
+    line(fx + s * 0.5, fy + s * 0.7, fx + s * 0.5, fy + s * 0.88, t, col)
+    line(fx + s * 0.36, fy + s * 0.88, fx + s * 0.64, fy + s * 0.88, t, col)
+    if muted != 0 {
+        slash(fx, fy, s, argb(warn, 255))
+    }
+}
+
+// CHEVRON: up (dir 0) or down (dir 1)
+fn chevron_glyph(x: u64, y: u64, size: u64, dir: u64, fg: u64) {
+    let s: f64 = size as f64
+    let fx: f64 = x as f64
+    let fy: f64 = y as f64
+    let col: u32 = argb(fg, 255)
+    let t: f64 = stw(s)
+    if dir == 0 {
+        line(fx + s * 0.22, fy + s * 0.6, fx + s * 0.5, fy + s * 0.34, t, col)
+        line(fx + s * 0.5, fy + s * 0.34, fx + s * 0.78, fy + s * 0.6, t, col)
+    } else {
+        line(fx + s * 0.22, fy + s * 0.4, fx + s * 0.5, fy + s * 0.66, t, col)
+        line(fx + s * 0.5, fy + s * 0.66, fx + s * 0.78, fy + s * 0.4, t, col)
+    }
+}
+
+// Wi-Fi exists in this system only when a driver says so. None does (roadmap N-005): Ethernet.
+fn net_kind() -> u64 {
+    return NK_ETH
+}
+
+fn speaker_level() -> u64 {
+    if snd_vol == 0 {
+        return 0
+    }
+    if snd_vol < 40 {
+        return 1
+    }
+    return 2
+}
+
+// the first letter of an owner on a plate: the glyph of a program that brings no picture
+fn letter_glyph(x: u64, y: u64, size: u64, owner: u64) {
+    let s: f64 = size as f64
+    plate(x as f64, y as f64, s, s, s * 0.22, argb(wlibc.theme(wlibc.T_ACCENT), 70))
+    ringp(x as f64, y as f64, s, s, s * 0.22, 1.0, argb(wlibc.theme(wlibc.T_ACCENT), 255))
+    var up: u8 = __mmio_read8(owner as *mut u8)
+    if up >= 97 as u8 && up <= 122 as u8 {
+        up = up - 32 as u8
+    }
+    __mmio_write8((&owner_b[0 as usize]) as *mut u8, up)
+    __mmio_write8(((&owner_b[0 as usize]) as u64 + 1) as *mut u8, 0 as u8)
+    let px: u64 = wlibc.px_ui()
+    let base: u64 = y + (size + wlibc.ascent_of(wlibc.F_UI, px)) / 2
+    fuiscene.cv_text_rgb(x + size / 3, base, size, (&owner_b[0 as usize]) as u64, px, true,
+        wlibc.theme(wlibc.T_FG))
+}
+
+fn warn_rgb() -> u64 {
+    return 0xE5484D
+}
+
+fn paint_net(x: u64, y: u64, size: u64) {
+    if net_kind() == NK_WLAN {
+        wlan_glyph(x, y, size, 4, wlibc.theme(wlibc.T_FG), warn_rgb())
+        return
+    }
+    net_glyph(x, y, size, net_st, wlibc.theme(wlibc.T_FG), warn_rgb(), wlibc.theme(wlibc.T_MENU))
+}
+
+// one function for every canvas of the window: the node's key says which glyph
+fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    var size: u64 = w
+    if h < size {
+        size = h
+    }
+    let ox: u64 = x + (w - size) / 2
+    let oy: u64 = y + (h - size) / 2
+    let fg: u64 = wlibc.theme(wlibc.T_FG)
+    if key == CK_NET {
+        paint_net(ox, oy, size)
+    } else if key == CK_SND {
+        speaker_glyph(ox, oy, size, speaker_level(), snd_mute, fg)
+    } else if key == CK_MIC {
+        mic_glyph(ox, oy, size, mic_muted, fg, warn_rgb())
+    } else if key >= CK_ITEM && key < CK_ITEM + MAXROWS {
+        let id: u64 = row_id[(key - CK_ITEM) as usize]
+        let ic: u64 = tray.tray_icon(&tr, id)
+        let ow: u64 = tray.tray_owner(&tr, id)
+        if ic == 1 {
+            paint_net(ox, oy, size)
+        } else if ic == 2 {
+            speaker_glyph(ox, oy, size, speaker_level(), snd_mute, fg)
+        } else if ic == 3 {
+            mic_glyph(ox, oy, size, mic_muted, fg, warn_rgb())
+        } else {
+            letter_glyph(ox, oy, size, ow)
+        }
+    } else if key == CK_SHEET {
+        sheet(x, y, w, h)
+    }
+}
+
+// the glyph sheet (test aid, `sheet` line in /etc/tray.items): every state of every glyph
+fn sheet(x: u64, y: u64, w: u64, h: u64) {
+    let fg: u64 = wlibc.theme(wlibc.T_FG)
+    let bg: u64 = wlibc.theme(wlibc.T_MENU)
+    let cell: u64 = 32 * sk()
+    let gap: u64 = 8 * sk()
+    var i: u64 = 0
+    while i < 4 {
+        net_glyph(x + i * (cell + gap), y, cell, i, fg, warn_rgb(), bg)
+        i = i + 1
+    }
+    i = 0
+    while i < 5 {
+        wlan_glyph(x + i * (cell + gap), y + cell + gap, cell, i, fg, warn_rgb())
+        i = i + 1
+    }
+    speaker_glyph(x, y + 2 * (cell + gap), cell, 0, 0, fg)
+    speaker_glyph(x + (cell + gap), y + 2 * (cell + gap), cell, 1, 0, fg)
+    speaker_glyph(x + 2 * (cell + gap), y + 2 * (cell + gap), cell, 2, 0, fg)
+    speaker_glyph(x + 3 * (cell + gap), y + 2 * (cell + gap), cell, 2, 1, fg)
+    mic_glyph(x + 4 * (cell + gap), y + 2 * (cell + gap), cell, 0, fg, warn_rgb())
+    mic_glyph(x + 5 * (cell + gap), y + 2 * (cell + gap), cell, 1, fg, warn_rgb())
+    chevron_glyph(x + 5 * (cell + gap), y, cell, 0, fg)
+    chevron_glyph(x + 5 * (cell + gap), y + cell + gap, cell, 1, fg)
+}
+
+// ------------------------------------------------------------------ the model
+
+fn cstr_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while __mmio_read8((a + i) as *mut u8) == __mmio_read8((b + i) as *mut u8) {
+        if __mmio_read8((a + i) as *mut u8) == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn add_system() {
+    let sys: u64 = (&t_sys[0 as usize]) as u64
+    let _n: u64 = tray.tray_register(&tr, sys, 1, mg((&k_net[0 as usize]) as u64), true)
+    let _s: u64 = tray.tray_register(&tr, sys, 2, mg((&k_snd[0 as usize]) as u64), true)
+    let _m: u64 = tray.tray_register(&tr, sys, 3, mg((&k_micuse[0 as usize]) as u64), true)
+}
+
+fn to_num(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// Reads /etc/tray.items (see the header) and adds the owners the model does not know yet.
+fn read_items() {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_items[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&conf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 1023)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    var i: u64 = 0
+    while i < n {
+        // one line: field 0 up to '|', field 1 up to '|', field 2 to the end of the line
+        var e: u64 = i
+        while e < n && __mmio_read8((b + e) as *mut u8) != 10 as u8 {
+            e = e + 1
+        }
+        var f1: u64 = i
+        while f1 < e && __mmio_read8((b + f1) as *mut u8) != 124 as u8 {
+            f1 = f1 + 1
+        }
+        var f2: u64 = f1 + 1
+        while f2 < e && __mmio_read8((b + f2) as *mut u8) != 124 as u8 {
+            f2 = f2 + 1
+        }
+        let l0: u64 = f1 - i
+        if l0 == 5 && __mmio_read8((b + i) as *mut u8) == 115 as u8 && f1 == e {
+            want_sheet = 1 // "sheet"
+        } else if l0 == 3 && __mmio_read8((b + i) as *mut u8) == 109 as u8 && f1 < e {
+            // mic|users|muted
+            mic_users = to_num(b + f1 + 1, f2 - f1 - 1)
+            if f2 < e {
+                mic_muted = to_num(b + f2 + 1, e - f2 - 1)
+            }
+        } else if l0 > 0 && l0 < 23 && f1 < e && f2 <= e {
+            var k: u64 = 0
+            while k < l0 {
+                __mmio_write8(((&owner_b[0 as usize]) as u64 + k) as *mut u8, __mmio_read8((b + i + k) as *mut u8))
+                k = k + 1
+            }
+            __mmio_write8(((&owner_b[0 as usize]) as u64 + l0) as *mut u8, 0 as u8)
+            var tl: u64 = 0
+            if f2 < e {
+                tl = e - f2 - 1
+            }
+            if tl > 62 {
+                tl = 62
+            }
+            k = 0
+            while k < tl {
+                __mmio_write8(((&tip_b[0 as usize]) as u64 + k) as *mut u8, __mmio_read8((b + f2 + 1 + k) as *mut u8))
+                k = k + 1
+            }
+            __mmio_write8(((&tip_b[0 as usize]) as u64 + tl) as *mut u8, 0 as u8)
+            let ow: u64 = (&owner_b[0 as usize]) as u64
+            if tray.tray_place_of_owner(&tr, ow) == 0 {
+                let ic: u64 = to_num(b + f1 + 1, f2 - f1 - 1)
+                let id: u64 = tray.tray_register(&tr, ow, ic, (&tip_b[0 as usize]) as u64, false)
+                if id != 0 {
+                    tray.tray_default_menu(&tr, id)
+                }
+            }
+        }
+        i = e + 1
+    }
+}
+
+// ------------------------------------------------------------------ the tree
+
+fn read_audio() {
+    snd_da = 0
+    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1 {
+        snd_da = 1
+        snd_vol = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+        snd_mute = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
+        if snd_vol > 100 {
+            snd_vol = 100
+        }
+    }
+}
+
+fn net_text() -> u64 {
+    if net_da == 0 {
+        return mg((&k_nonet[0 as usize]) as u64)
+    }
+    if net_st == 0 {
+        return mg((&t_net[0 as usize]) as u64)
+    }
+    if net_st == 1 {
+        return mg((&t_net1[0 as usize]) as u64)
+    }
+    if net_st == 2 {
+        return mg((&t_net2[0 as usize]) as u64)
+    }
+    return mg((&t_net3[0 as usize]) as u64)
+}
+
+fn num_into(at: u64, v: u64) -> u64 {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8(((&txt[0 as usize]) as u64 + at + k) as *mut u8, tmp[(n - 1 - k) as usize])
+        k = k + 1
+    }
+    __mmio_write8(((&txt[0 as usize]) as u64 + at + n) as *mut u8, 0 as u8)
+    return at + n
+}
+
+fn mic_text() {
+    if mic_muted != 0 {
+        let _a: u64 = ulib.strncpy((&txt[0 as usize]) as u64, mg((&k_micmuted[0 as usize]) as u64), 100)
+        return
+    }
+    var at: u64 = ulib.strncpy((&txt[0 as usize]) as u64, mg((&k_micuse[0 as usize]) as u64), 90)
+    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+    at = at + 1
+    let _e: u64 = num_into(at, mic_users)
+}
+
+fn rows_count() -> u64 {
+    var n: u64 = tray.tray_count(&tr, tray.PLACE_OVERFLOW) as u64
+    if n > MAXROWS {
+        n = MAXROWS
+    }
+    return n
+}
+
+fn mic_shown() -> bool {
+    return mic_users != 0 || mic_muted != 0
+}
+
+fn read_rows() {
+    n_rows = rows_count()
+    var i: u64 = 0
+    while i < n_rows {
+        row_id[i as usize] = tray.tray_at(&tr, tray.PLACE_OVERFLOW, i as usize)
+        i = i + 1
+    }
+}
+
+// the height of the card in design points (what `build` lays out)
+fn card_h() -> u64 {
+    var h: u64 = 2 * PADP
+    if mode == M_MENU {
+        let id: u64 = menu_item
+        let m: u64 = tray.tray_menu_count(&tr, id) as u64
+        return h + (m + 4) * (ROW_H + GAPP)
+    }
+    h = h + ROW_H + GAPP // network
+    h = h + ROW_H + GAPP // sound: mute button + slider on one row
+    if mic_shown() {
+        h = h + ROW_H + GAPP
+    }
+    h = h + 22 + GAPP // the "more" caption
+    if n_rows == 0 {
+        h = h + 22 + GAPP
+    } else {
+        h = h + n_rows * (ROW_H + GAPP)
+    }
+    if want_sheet != 0 {
+        h = h + 3 * 40 + 10
+    }
+    return h
+}
+
+fn build_menu(r: usize) {
+    let id: u64 = menu_item
+    let cap: usize = fuiscene.label(r, tray.tray_tooltip(&tr, id))
+    let _c: usize = cap
+    let m: u64 = tray.tray_menu_count(&tr, id) as u64
+    var j: u64 = 0
+    while j < m {
+        let b: usize = fuiscene.button(r, tray.tray_menu_label(&tr, id, j as usize), K_ENT + j)
+        fuiscene.set_size(b, CARD_W - 2 * PADP, ROW_H)
+        if (tray.tray_menu_flags(&tr, id, j as usize) & tray.MF_DISABLED) != 0 {
+            fuiscene.set_enabled(b, false)
+        }
+        j = j + 1
+    }
+    let bu: usize = fuiscene.button(r, mg((&k_up[0 as usize]) as u64), K_UP)
+    fuiscene.set_size(bu, CARD_W - 2 * PADP, ROW_H)
+    let bh: usize = fuiscene.button(r, mg((&k_hide[0 as usize]) as u64), K_HIDE)
+    fuiscene.set_size(bh, CARD_W - 2 * PADP, ROW_H)
+    let bb: usize = fuiscene.button(r, mg((&k_back[0 as usize]) as u64), K_BACK)
+    fuiscene.set_size(bb, CARD_W - 2 * PADP, ROW_H)
+}
+
+fn build() {
+    let r: usize = fuiscene.root()
+    fuiscene.set_gap(r, GAPP)
+    if mode == M_MENU {
+        build_menu(r)
+        return
+    }
+    // network
+    let rn: usize = fuiscene.row(r)
+    fuiscene.set_gap(rn, GAPP + 2)
+    let _gn: usize = fuiscene.canvas2(rn, CK_NET, ROW_H - 4, ROW_H - 4, draw_cv)
+    let _ln: usize = fuiscene.label(rn, net_text())
+    // sound
+    let rs: usize = fuiscene.row(r)
+    fuiscene.set_gap(rs, GAPP + 2)
+    if snd_da != 0 {
+        let _gs: usize = fuiscene.canvas2(rs, CK_SND, ROW_H - 4, ROW_H - 4, draw_cv)
+        var mk: u64 = (&k_mute[0 as usize]) as u64
+        if snd_mute != 0 {
+            mk = (&k_unmute[0 as usize]) as u64
+        }
+        let _bm: usize = fuiscene.button(rs, mg(mk), K_MUTE)
+        let _sl: usize = fuiscene.slider(rs, K_VOL, 120, (snd_vol * 10) as i64)
+    } else {
+        let _gs: usize = fuiscene.canvas2(rs, CK_SND, ROW_H - 4, ROW_H - 4, draw_cv)
+        let _ls: usize = fuiscene.label(rs, mg((&k_nosnd[0 as usize]) as u64))
+    }
+    // microphone (STUB source)
+    if mic_shown() {
+        let rm: usize = fuiscene.row(r)
+        fuiscene.set_gap(rm, GAPP + 2)
+        let _gm: usize = fuiscene.canvas2(rm, CK_MIC, ROW_H - 4, ROW_H - 4, draw_cv)
+        mic_text()
+        let _lm: usize = fuiscene.label(rm, (&txt[0 as usize]) as u64)
+    }
+    // overflow
+    let _lc: usize = fuiscene.label_muted(r, mg((&k_more[0 as usize]) as u64))
+    if n_rows == 0 {
+        let _ln2: usize = fuiscene.label(r, mg((&k_none[0 as usize]) as u64))
+    }
+    var i: u64 = 0
+    while i < n_rows {
+        let ri: usize = fuiscene.row(r)
+        fuiscene.set_gap(ri, GAPP)
+        let _gi: usize = fuiscene.canvas2(ri, CK_ITEM + i, ROW_H - 4, ROW_H - 4, draw_cv)
+        let id: u64 = row_id[i as usize]
+        let b: usize = fuiscene.button(ri, tray.tray_tooltip(&tr, id), K_ITEM + i)
+        fuiscene.set_size(b, CARD_W - 2 * PADP - ROW_H - 60, ROW_H)
+        let bm: usize = fuiscene.button(ri, mg((&k_dots[0 as usize]) as u64), K_MENU + i)
+        fuiscene.set_size(bm, 44, ROW_H)
+        i = i + 1
+    }
+    if want_sheet != 0 {
+        let _sh: usize = fuiscene.canvas2(r, CK_SHEET, CARD_W - 2 * PADP, 3 * 40 + 2, draw_cv)
+    }
+}
+
+// ------------------------------------------------------------------ the life
+
+fn init() -> bool {
+    tr = tray.tray_new()
+    if !tray.tray_ok(&tr) {
+        say((&s_nop[0 as usize]) as u64)
+        nl()
+        return false
+    }
+    add_system()
+    read_items()
+    tp_win = fuiscene.win_open_plain(0, 0, CARD_W * sk(), MAXH * sk(), (&t_title[0 as usize]) as u64,
+        wlibc.L_MENUE, build)
+    if tp_win == fuiscene.BADWIN {
+        tp_win = NONE
+        return false
+    }
+    let _s: bool = fuiscene.win_select(tp_win)
+    fuiscene.keys_always(true)
+    tp_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    tp_id = wlibc.sys3w(wlibc.WM_INFO, tp_h, wlibc.WI_ID, 0)
+    return true
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + pw_ && y >= py_ && y < py_ + ph_
+}
+
+fn paint_now() {
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(tp_win)
+        n = n + 1
+    }
+}
+
+// size + place the card (above the chevron, right edge kept on the screen) and repaint
+fn relayout() {
+    read_rows()
+    pw_ = CARD_W * sk()
+    ph_ = card_h() * sk()
+    if ph_ > MAXH * sk() {
+        ph_ = MAXH * sk()
+    }
+    let sw: u64 = wlibc.screen_w()
+    px_ = 0
+    if ax_ + aw_ > pw_ {
+        px_ = ax_ + aw_ - pw_
+    }
+    if px_ + pw_ > sw && sw > pw_ {
+        px_ = sw - pw_
+    }
+    py_ = 0
+    if ay_ > ph_ + 8 * sk() {
+        py_ = ay_ - ph_ - 8 * sk()
+    }
+    let _s: bool = fuiscene.win_select(tp_win)
+    let _z: bool = fuiscene.win_size(pw_, ph_)
+    fuiscene.refresh()
+    fuiscene.touch()
+    key_last = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    paint_now()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, tp_h, (px_ << 16) | py_, 0)
+}
+
+fn open_now() {
+    if open_ != 0 || tp_win == NONE {
+        return
+    }
+    read_items()
+    read_audio()
+    mode = M_LIST
+    relayout()
+    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    btn_last = wlibc.mouse_btn() & 1
+    let _a: u64 = wlibc.win_act(tp_id, wlibc.WA_RAISE)
+    let _k: u64 = wlibc.win_state(tp_h, wlibc.WS_KEYS, 1)
+    say((&s_open[0 as usize]) as u64)
+    sayn(n_rows)
+    say((&s_xy[0 as usize]) as u64)
+    sayn(px_)
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_)
+    say((&s_ww[0 as usize]) as u64)
+    sayn(pw_)
+    say((&s_hh[0 as usize]) as u64)
+    sayn(ph_)
+    nl()
+    var i: u64 = 0
+    while i < n_rows {
+        let id: u64 = row_id[i as usize]
+        say((&s_item[0 as usize]) as u64)
+        sayn(i)
+        say((&s_id[0 as usize]) as u64)
+        sayn(id)
+        say((&s_ow[0 as usize]) as u64)
+        say(tray.tray_owner(&tr, id))
+        say((&s_tip[0 as usize]) as u64)
+        say(tray.tray_tooltip(&tr, id))
+        nl()
+        i = i + 1
+    }
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 1)
+    say((&s_shut[0 as usize]) as u64)
+    say(why)
+    nl()
+}
+
+fn shut_now() {
+    shut((&s_toggle[0 as usize]) as u64)
+}
+
+// the chevron: the bar tells where it sits (pixels) and what the network is doing
+fn toggle(ax: u64, ay: u64, aw: u64, ah: u64, has_net: u64, net_state: u64) {
+    ax_ = ax
+    ay_ = ay
+    aw_ = aw
+    ah_ = ah
+    net_da = has_net
+    net_st = net_state
+    if open_ != 0 {
+        shut((&s_toggle[0 as usize]) as u64)
+    } else {
+        open_now()
+    }
+}
+
+// the context menu of an item / back to the list
+fn open_menu(id: u64) {
+    menu_item = id
+    mode = M_MENU
+    say((&s_menu[0 as usize]) as u64)
+    sayn(id)
+    nl()
+    relayout()
+}
+
+fn back_to_list() {
+    mode = M_LIST
+    relayout()
+}
+
+fn pos_of(id: u64) -> u64 {
+    var k: u64 = 0
+    while k < 32 {
+        let at: u64 = tray.tray_at(&tr, tray.PLACE_OVERFLOW, k as usize)
+        if at == 0 {
+            return 0
+        }
+        if at == id {
+            return k
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn on_key(key: u64) -> bool {
+    if key == K_MUTE {
+        var neu: u64 = 1
+        if snd_mute != 0 {
+            neu = 0
+        }
+        let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, neu, 0)
+        say((&s_mute[0 as usize]) as u64)
+        sayn(neu)
+        say((&s_rc[0 as usize]) as u64)
+        sayn(rc)
+        nl()
+        read_audio()
+        relayout()
+        return true
+    }
+    if key == K_VOL {
+        let _s: bool = fuiscene.win_select(tp_win)
+        let v: u64 = (fuiscene.value_of(K_VOL) as u64) / 10
+        let _u: bool = fuiscene.win_select(0)
+        let rc: u64 = ulib.sys(SYS_AUDSET, AS_VOLUME, v, 0)
+        if v > 0 && snd_mute != 0 {
+            let _m: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, 0, 0)
+        }
+        snd_vol = v
+        if v > 0 {
+            snd_mute = 0
+        }
+        say((&s_vol[0 as usize]) as u64)
+        sayn(v)
+        say((&s_rc[0 as usize]) as u64)
+        sayn(rc)
+        nl()
+        return true
+    }
+    if key >= K_ITEM && key < K_ITEM + n_rows {
+        let id: u64 = row_id[(key - K_ITEM) as usize]
+        let _c: bool = tray.tray_click(&tr, id, tray.BTN_LEFT)
+        say((&s_click[0 as usize]) as u64)
+        sayn(id)
+        say((&s_ow[0 as usize]) as u64)
+        say(tray.tray_owner(&tr, id))
+        nl()
+        shut((&s_clk[0 as usize]) as u64)
+        return true
+    }
+    if key >= K_MENU && key < K_MENU + n_rows {
+        open_menu(row_id[(key - K_MENU) as usize])
+        return true
+    }
+    if key >= K_ENT && key < K_ENT + 8 {
+        let j: u64 = key - K_ENT
+        let act: u64 = tray.tray_menu_action(&tr, menu_item, j as usize)
+        let _p: bool = tray.tray_pick(&tr, menu_item, j as usize)
+        say((&s_pick[0 as usize]) as u64)
+        sayn(menu_item)
+        say((&s_act[0 as usize]) as u64)
+        sayn(act)
+        nl()
+        shut((&s_pk[0 as usize]) as u64)
+        return true
+    }
+    if key == K_UP {
+        let p: u64 = pos_of(menu_item)
+        if p > 0 {
+            let _m: bool = tray.tray_move(&tr, menu_item, tray.PLACE_OVERFLOW, (p - 1) as usize)
+        }
+        back_to_list()
+        return true
+    }
+    if key == K_HIDE {
+        let _m: bool = tray.tray_move(&tr, menu_item, tray.PLACE_HIDDEN, 0)
+        back_to_list()
+        return true
+    }
+    if key == K_BACK {
+        back_to_list()
+        return true
+    }
+    return false
+}
+
+fn step() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    let _st: u64 = wlib.step()
+    let key: u64 = fuiscene.pump_aux(tp_win)
+    if key != 0 && on_key(key) {
+        return true
+    }
+    if open_ == 0 {
+        return true
+    }
+    let _s: bool = fuiscene.win_select(tp_win)
+    let lk: u64 = fuiscene.last_key()
+    let ks: u64 = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    if ks != key_last {
+        key_last = ks
+        if lk == 27 {
+            if mode == M_MENU {
+                back_to_list()
+                return true
+            }
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+    }
+    // a press outside the card closes it -- except on the chevron, which is the bar's own toggle
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        let mx: u64 = wlibc.mouse_x()
+        let my: u64 = wlibc.mouse_y()
+        let on_anchor: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
+        if !hit(mx, my) && !on_anchor {
+            shut((&s_out[0 as usize]) as u64)
+            btn_last = btn
+            return true
+        }
+    }
+    btn_last = btn
+    return false
+}
