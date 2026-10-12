@@ -129,7 +129,7 @@ if [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " foreign "; then
     case " $FOREIGN " in *" f_locktest "*) fchk locktest "lk: fertig" "FALSCH" ;; esac
 fi
 echo "== 4. the table =="
-awk '{ split($1, a, "."); v[$2]++; t[a[1]]++ } END { for (k in t) ; for (k in v) printf "        %-5s %d\n", k, v[k] }' "$D/new.all" | sort
+awk '{ split($1, a, "."); v[$2]++; t[a[1]]++ } END { for (k in t) ; for (k in v) printf "        count %s=%d\n", k, v[k] }' "$D/new.all" | sort
 grep -a -E ' (FAIL|GAP) ' "$D/new.all" | sed 's/^/        /' | head -${SHOWMAX:-200}
 
 echo "== 5. gate: the checks that must pass (accept.txt) =="
