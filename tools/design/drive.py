@@ -873,6 +873,10 @@ class Fahrer:
                     w // reiter, h)
         if name.startswith("srect"):
             k = name[5:]
+            # the rect line carries ax/ay (screen coordinates of its corner): no window lookup needed
+            ms = letzte(r"settings: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % k)
+            if ms is not None:
+                return (int(ms.group(3)), int(ms.group(4)), int(ms.group(1)), int(ms.group(2)))
             m = letzte(r"settings: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % k)
             o = self.fenster("settings")
             if m is None or o is None:
