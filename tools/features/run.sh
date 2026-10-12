@@ -121,6 +121,10 @@ o3=$(grep -a 'notifc: open n=1' "$S" | tail -1)
 [ -n "$o3" ] && ok "the card after the third post shows ONE row (the cleared two stay gone)" || bad "no 'open n=1' after the third post"
 grep -a 'notifc: row 0 ' "$S" | tail -1 | grep -qaF "third message" && ok "that row is the third message" || bad "the last row 0 is not the third message"
 grep -qaF "notifc: shut bell" "$S" && ok "a click on the bell closes the card again" || bad "no 'notifc: shut bell'"
+if [ -n "${FEATURES_ONLY:-}" ]; then # FEATURES_ONLY=notifc: skip part 2 (do not disturb)
+    grep -a -E "notifc:|taskbar: field noti" "$S" | head -40
+    echo "FEATURES: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit
+fi
 
 # ---------------------------------------------------------------------------------------------------------------
 # 2. DO NOT DISTURB (quick settings tile 6, kernel/user/qs.fi + the toast gate in taskbar.fi)
