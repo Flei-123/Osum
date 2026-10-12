@@ -18,9 +18,12 @@ if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT-build"' EXIT;
 shift || true
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
 DREH="$OUT-drehbuch.txt"
+# the start button sits 20 px above the bottom edge of the screen (default 1280x800)
+YRES=800
+for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
 {
   echo "warte 12"
-  echo "klick 24,780"; echo "warte 3"
+  echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
   echo "foto 00-start"
   for p in a b c d e f g h i j k l m n o; do
@@ -33,7 +36,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 S="$OUT/serial.txt"
-n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null || echo 0)
+n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null; true)
 [ "$n" -ge 15 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
 grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 # the segmented control (K_SEG0 = 180..182 -> wgy wgz wha) and the eight swatches (183..190) are real nodes
@@ -42,7 +45,7 @@ for r in wgy wgz wha; do
 done
 grep -aq 'settings: rect name=wgj ' "$S" && ok "search field reported" || bad "search field reported"
 grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl. search field)" || bad "controls reported"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null || echo 0)
+c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 ls "$OUT"/*.ppm >/dev/null 2>&1 && ok "pictures taken: $(ls "$OUT"/*.ppm | wc -l)" || bad "no pictures"
 echo "SETTINGSUI: $pass passed, $fail failed"
