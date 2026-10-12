@@ -58,6 +58,7 @@ lauf() { # name skript [limit]
 # =====================================================================
 echo "== 1. die Rechnung: SHA-512 und Ed25519 gegen ihre Normen =="
 # =====================================================================
+mkdir -p .probe
 vendor/firn/bin/firnc tools/update/oracle.fi -o .probe/uoracle \
     2> "$OUT/oracle.err" \
     && ok "tools/update/oracle.fi baut gegen lib/crypto/ (dieselben Dateien wie der Kern)" \
