@@ -7,6 +7,8 @@
 // into action-bus messages to the owner; this file knows nothing about windows, pixels or the bus.
 //
 //     import fui.tray
+// Texts are NUL terminated u64 pointers (the kernel profile has no `str`): a literal `"player\0"` in a
+// `static mut [u8; N]`, or `(&buf[0]) as u64`.
 //     var t: tray.Tray = tray.tray_new()
 //     let id: u64 = tray.tray_register(&t, "player", 12, "Player", false)    // new apps start in the overflow
 //     tray.tray_menu_add(&t, id, "Oeffnen", tray.ACT_OPEN, 0)
@@ -24,10 +26,14 @@
 // T4  Fixed capacity: 32 items, 6 menu entries each, 32 queued events (oldest dropped). Strings are cut at
 //     23 octets (owner, labels) and 63 (tooltip).
 // T5  Not thread safe: the bar's thread owns it.
-import std.rt
+// T6  `tray_new()` hands out the ONE static block of the process (calling it again resets that block);
+//     `tray_new_in(buf)` takes caller storage of TRAY_WORDS words for more than one tray.
+// T7  Builds in `--profile=kernel` and `--profile=app` (tools/tray/run.sh compiles both).
+// KERNEL PROFILE: no heap and no std.rt. The block is static storage (`tray_new`) or storage of the caller
+// (`tray_new_in`, TRAY_WORDS words); the raw word/octet access below is plain pointer arithmetic.
 
 export {
-    Tray, TrayEvent, tray_new, tray_free, tray_ok, tray_gen,
+    Tray, TrayEvent, tray_new, tray_new_in, tray_free, TRAY_WORDS, tray_ok, tray_gen,
     tray_register, tray_unregister, tray_owner_gone, tray_count, tray_at, tray_place, tray_move,
     tray_set_icon, tray_icon, tray_set_tooltip, tray_tooltip, tray_set_badge, tray_badge, tray_owner, tray_is_system,
     tray_menu_add, tray_menu_clear, tray_menu_count, tray_menu_label, tray_menu_action, tray_menu_flags,
@@ -88,6 +94,41 @@ const O_ITEM: usize = H_WORDS
 const O_EV: usize = O_ITEM + IMAX * ITEMW
 const EVW: usize = 3
 const TOTAL: usize = O_EV + EVMAX * EVW
+const TRAY_WORDS: usize = TOTAL
+
+static mut tray_store: [u64; 1704] = [0 as u64; 1704] // TOTAL words (checked by tray_new)
+static mut m_open: [u8; 8] = "Öffnen\0"
+static mut m_settings: [u8; 14] = "Einstellungen\0"
+static mut m_quit: [u8; 8] = "Beenden\0"
+static mut renum_tmp: [u64; 32] = [0 as u64; 32] // IMAX words, scratch of renumber
+
+fn ld64(p: u64, w: usize) -> u64 {
+    return *((p + (w * 8) as u64) as *mut u64)
+}
+
+fn st64(p: u64, w: usize, v: u64) {
+    *((p + (w * 8) as u64) as *mut u64) = v
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn mem_set(p: u64, v: u8, n: usize) {
+    var i: usize = 0
+    while i < n {
+        *((p + i as u64) as *mut u8) = v
+        i = i + 1
+    }
+}
+
+fn mem_copy(dst: u64, src: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        *((dst + i as u64) as *mut u8) = *((src + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
 
 struct Tray {
     blk: u64, // 0 = could not be created
@@ -99,21 +140,22 @@ struct TrayEvent {
     b: u64,
 }
 
-fn tray_new() -> Tray {
-    let blk: u64 = rt.heap_alloc(TOTAL * 8)
-    if blk == 0 {
+fn tray_new_in(buf: u64) -> Tray {
+    if buf == 0 {
         return Tray { blk: 0 }
     }
-    rt.mem_set(blk, 0 as u8, TOTAL * 8)
-    rt.st64(blk, H_NEXT, 1)
-    return Tray { blk: blk }
+    mem_set(buf, 0 as u8, TOTAL * 8)
+    st64(buf, H_NEXT, 1)
+    return Tray { blk: buf }
 }
 
+fn tray_new() -> Tray {
+    return tray_new_in((&tray_store[0 as usize]) as u64)
+}
+
+// The storage is not owned (static or the caller's): free only detaches the handle.
 fn tray_free(t: *mut Tray) {
-    if (*t).blk != 0 {
-        rt.heap_free((*t).blk, TOTAL * 8)
-        (*t).blk = 0
-    }
+    (*t).blk = 0
 }
 
 fn tray_ok(t: *mut Tray) -> bool {
@@ -122,11 +164,11 @@ fn tray_ok(t: *mut Tray) -> bool {
 
 // Counts every change; the bar polls this one word and repaints when it moved.
 fn tray_gen(t: *mut Tray) -> u64 {
-    return rt.ld64((*t).blk, H_GEN)
+    return ld64((*t).blk, H_GEN)
 }
 
 fn bump(b: u64) {
-    rt.st64(b, H_GEN, rt.ld64(b, H_GEN) + 1)
+    st64(b, H_GEN, ld64(b, H_GEN) + 1)
 }
 
 fn ibase(s: usize) -> usize {
@@ -139,7 +181,7 @@ fn slot_of(b: u64, id: u64) -> usize {
     }
     var s: usize = 0
     while s < IMAX {
-        if rt.ld64(b, ibase(s) + I_ID) == id {
+        if ld64(b, ibase(s) + I_ID) == id {
             return s
         }
         s = s + 1
@@ -152,53 +194,62 @@ fn cstr_set(dst: u64, src: u64, n: usize, cap: usize) {
     if m > cap {
         m = cap
     }
-    rt.mem_set(dst, 0 as u8, cap + 1)
-    rt.mem_copy(dst, src, m)
+    mem_set(dst, 0 as u8, cap + 1)
+    mem_copy(dst, src, m)
 }
 
-fn cstr_eq_str(p: u64, s: str) -> bool {
-    var n: usize = s.length()
+fn cstr_len(p: u64) -> usize {
+    var n: usize = 0
+    while ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+// `s` is a NUL terminated text (u64 pointer); compares like a name cut at 23 octets.
+fn cstr_eq_str(p: u64, s: u64) -> bool {
+    var n: usize = cstr_len(s)
     if n > 23 {
         n = 23
     }
     var i: usize = 0
     while i < n {
-        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+        if ld8(p, i) != ld8(s, i) {
             return false
         }
         i = i + 1
     }
-    return rt.ld8(p, n) == 0 as u8
+    return ld8(p, n) == 0 as u8
 }
 
 fn push_event(b: u64, kind: u64, a: u64, c: u64) {
-    let w: u64 = rt.ld64(b, H_EV_W)
-    let r: u64 = rt.ld64(b, H_EV_R)
+    let w: u64 = ld64(b, H_EV_W)
+    let r: u64 = ld64(b, H_EV_R)
     if w - r >= EVMAX as u64 {
-        rt.st64(b, H_EV_R, r + 1)
+        st64(b, H_EV_R, r + 1)
     }
     let at: usize = O_EV + ((w % EVMAX as u64) as usize) * EVW
-    rt.st64(b, at, kind)
-    rt.st64(b, at + 1, a)
-    rt.st64(b, at + 2, c)
-    rt.st64(b, H_EV_W, w + 1)
+    st64(b, at, kind)
+    st64(b, at + 1, a)
+    st64(b, at + 2, c)
+    st64(b, H_EV_W, w + 1)
 }
 
 fn tray_event_count(t: *mut Tray) -> usize {
-    return (rt.ld64((*t).blk, H_EV_W) - rt.ld64((*t).blk, H_EV_R)) as usize
+    return (ld64((*t).blk, H_EV_W) - ld64((*t).blk, H_EV_R)) as usize
 }
 
 fn tray_event_pop(t: *mut Tray, out: *mut TrayEvent) -> bool {
     let b: u64 = (*t).blk
-    let r: u64 = rt.ld64(b, H_EV_R)
-    if b == 0 || r >= rt.ld64(b, H_EV_W) {
+    let r: u64 = ld64(b, H_EV_R)
+    if b == 0 || r >= ld64(b, H_EV_W) {
         return false
     }
     let at: usize = O_EV + ((r % EVMAX as u64) as usize) * EVW
-    (*out).kind = rt.ld64(b, at)
-    (*out).a = rt.ld64(b, at + 1)
-    (*out).b = rt.ld64(b, at + 2)
-    rt.st64(b, H_EV_R, r + 1)
+    (*out).kind = ld64(b, at)
+    (*out).a = ld64(b, at + 1)
+    (*out).b = ld64(b, at + 2)
+    st64(b, H_EV_R, r + 1)
     return true
 }
 
@@ -208,8 +259,8 @@ fn last_order(b: u64, place: u64) -> u64 {
     var s: usize = 0
     while s < IMAX {
         let at: usize = ibase(s)
-        if rt.ld64(b, at + I_ID) != 0 && rt.ld64(b, at + I_PLACE) == place && rt.ld64(b, at + I_ORDER) > m {
-            m = rt.ld64(b, at + I_ORDER)
+        if ld64(b, at + I_ID) != 0 && ld64(b, at + I_PLACE) == place && ld64(b, at + I_ORDER) > m {
+            m = ld64(b, at + I_ORDER)
         }
         s = s + 1
     }
@@ -217,33 +268,33 @@ fn last_order(b: u64, place: u64) -> u64 {
 }
 
 // Registers an item. System items start in the bar, all others in the overflow (T1). Returns the id or 0 (full).
-fn tray_register(t: *mut Tray, owner: str, icon: u64, tooltip: str, system: bool) -> u64 {
+fn tray_register(t: *mut Tray, owner: u64, icon: u64, tooltip: u64, system: bool) -> u64 {
     let b: u64 = (*t).blk
     if b == 0 {
         return 0
     }
     var s: usize = 0
-    while s < IMAX && rt.ld64(b, ibase(s) + I_ID) != 0 {
+    while s < IMAX && ld64(b, ibase(s) + I_ID) != 0 {
         s = s + 1
     }
     if s == IMAX {
         return 0
     }
     let at: usize = ibase(s)
-    rt.mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
-    let id: u64 = rt.ld64(b, H_NEXT)
-    rt.st64(b, H_NEXT, id + 1)
+    mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
+    let id: u64 = ld64(b, H_NEXT)
+    st64(b, H_NEXT, id + 1)
     var place: u64 = PLACE_OVERFLOW
     if system {
         place = PLACE_BAR
-        rt.st64(b, at + I_SYS, 1)
+        st64(b, at + I_SYS, 1)
     }
-    rt.st64(b, at + I_PLACE, place)
-    rt.st64(b, at + I_ORDER, last_order(b, place))
-    rt.st64(b, at + I_ICON, icon)
-    cstr_set(b + ((at + I_OWNER) * 8) as u64, owner.p as u64, owner.length(), 23)
-    cstr_set(b + ((at + I_TIP) * 8) as u64, tooltip.p as u64, tooltip.length(), 63)
-    rt.st64(b, at + I_ID, id) // last: the slot counts as used only now
+    st64(b, at + I_PLACE, place)
+    st64(b, at + I_ORDER, last_order(b, place))
+    st64(b, at + I_ICON, icon)
+    cstr_set(b + ((at + I_OWNER) * 8) as u64, owner, cstr_len(owner), 23)
+    cstr_set(b + ((at + I_TIP) * 8) as u64, tooltip, cstr_len(tooltip), 63)
+    st64(b, at + I_ID, id) // last: the slot counts as used only now
     bump(b)
     return id
 }
@@ -254,20 +305,20 @@ fn tray_unregister(t: *mut Tray, id: u64) -> bool {
     if s == NONE {
         return false
     }
-    rt.mem_set(b + (ibase(s) * 8) as u64, 0 as u8, ITEMW * 8)
+    mem_set(b + (ibase(s) * 8) as u64, 0 as u8, ITEMW * 8)
     bump(b)
     return true
 }
 
 // T3: removes every item of an owner; returns how many were removed.
-fn tray_owner_gone(t: *mut Tray, owner: str) -> usize {
+fn tray_owner_gone(t: *mut Tray, owner: u64) -> usize {
     let b: u64 = (*t).blk
     var n: usize = 0
     var s: usize = 0
     while s < IMAX {
         let at: usize = ibase(s)
-        if rt.ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
-            rt.mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
+        if ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
+            mem_set(b + (at * 8) as u64, 0 as u8, ITEMW * 8)
             n = n + 1
         }
         s = s + 1
@@ -283,7 +334,7 @@ fn tray_count(t: *mut Tray, place: u64) -> usize {
     var s: usize = 0
     while s < IMAX {
         let at: usize = ibase(s)
-        if rt.ld64((*t).blk, at + I_ID) != 0 && rt.ld64((*t).blk, at + I_PLACE) == place {
+        if ld64((*t).blk, at + I_ID) != 0 && ld64((*t).blk, at + I_PLACE) == place {
             n = n + 1
         }
         s = s + 1
@@ -302,9 +353,9 @@ fn tray_at(t: *mut Tray, place: u64, idx: usize) -> u64 {
         var s: usize = 0
         while s < IMAX {
             let at: usize = ibase(s)
-            let id: u64 = rt.ld64(b, at + I_ID)
-            if id != 0 && rt.ld64(b, at + I_PLACE) == place {
-                let o: u64 = rt.ld64(b, at + I_ORDER)
+            let id: u64 = ld64(b, at + I_ID)
+            if id != 0 && ld64(b, at + I_PLACE) == place {
+                let o: u64 = ld64(b, at + I_ORDER)
                 if o > lo && (best == 0 || o < bo) {
                     best = id
                     bo = o
@@ -329,31 +380,27 @@ fn tray_place(t: *mut Tray, id: u64) -> u64 {
     if s == NONE {
         return 0
     }
-    return rt.ld64((*t).blk, ibase(s) + I_PLACE)
+    return ld64((*t).blk, ibase(s) + I_PLACE)
 }
 
 // Renumbers a place to 2, 4, 6 ... in the current order (keeps the order, opens gaps for inserting).
 fn renumber(t: *mut Tray, place: u64) {
     let b: u64 = (*t).blk
     let n: usize = tray_count(t, place)
-    let tmp: u64 = rt.heap_alloc(IMAX * 8)
-    if tmp == 0 {
-        return
-    }
+    let tmp: u64 = (&renum_tmp[0 as usize]) as u64
     var k: usize = 0
     while k < n {
-        rt.st64(tmp, k, tray_at(t, place, k))
+        st64(tmp, k, tray_at(t, place, k))
         k = k + 1
     }
     k = 0
     while k < n {
-        let s: usize = slot_of(b, rt.ld64(tmp, k))
+        let s: usize = slot_of(b, ld64(tmp, k))
         if s != NONE {
-            rt.st64(b, ibase(s) + I_ORDER, ((k + 1) * 2) as u64)
+            st64(b, ibase(s) + I_ORDER, ((k + 1) * 2) as u64)
         }
         k = k + 1
     }
-    rt.heap_free(tmp, IMAX * 8)
 }
 
 // Drag and drop: puts the item into `place` at position `idx` (clamped to the end). Moving inside a place reorders.
@@ -364,17 +411,17 @@ fn tray_move(t: *mut Tray, id: u64, place: u64, idx: usize) -> bool {
         return false
     }
     let at: usize = ibase(s)
-    let old: u64 = rt.ld64(b, at + I_PLACE)
+    let old: u64 = ld64(b, at + I_PLACE)
     // take it out of the old place (order of the others stays), then number the target without it
-    rt.st64(b, at + I_PLACE, 0)
+    st64(b, at + I_PLACE, 0)
     renumber(t, place)
     var pos: usize = idx
     let n: usize = tray_count(t, place)
     if pos > n {
         pos = n
     }
-    rt.st64(b, at + I_PLACE, place)
-    rt.st64(b, at + I_ORDER, (pos * 2 + 1) as u64)
+    st64(b, at + I_PLACE, place)
+    st64(b, at + I_ORDER, (pos * 2 + 1) as u64)
     renumber(t, place)
     if old != place && old != 0 {
         renumber(t, old)
@@ -384,13 +431,13 @@ fn tray_move(t: *mut Tray, id: u64, place: u64, idx: usize) -> bool {
 }
 
 // Where the user put the first item of an owner (for saving the choice); 0 = none registered.
-fn tray_place_of_owner(t: *mut Tray, owner: str) -> u64 {
+fn tray_place_of_owner(t: *mut Tray, owner: u64) -> u64 {
     let b: u64 = (*t).blk
     var s: usize = 0
     while s < IMAX {
         let at: usize = ibase(s)
-        if rt.ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
-            return rt.ld64(b, at + I_PLACE)
+        if ld64(b, at + I_ID) != 0 && cstr_eq_str(b + ((at + I_OWNER) * 8) as u64, owner) {
+            return ld64(b, at + I_PLACE)
         }
         s = s + 1
     }
@@ -402,8 +449,8 @@ fn tray_set_icon(t: *mut Tray, id: u64, icon: u64) -> bool {
     if s == NONE {
         return false
     }
-    if rt.ld64((*t).blk, ibase(s) + I_ICON) != icon {
-        rt.st64((*t).blk, ibase(s) + I_ICON, icon)
+    if ld64((*t).blk, ibase(s) + I_ICON) != icon {
+        st64((*t).blk, ibase(s) + I_ICON, icon)
         bump((*t).blk)
     }
     return true
@@ -414,15 +461,15 @@ fn tray_icon(t: *mut Tray, id: u64) -> u64 {
     if s == NONE {
         return 0
     }
-    return rt.ld64((*t).blk, ibase(s) + I_ICON)
+    return ld64((*t).blk, ibase(s) + I_ICON)
 }
 
-fn tray_set_tooltip(t: *mut Tray, id: u64, tip: str) -> bool {
+fn tray_set_tooltip(t: *mut Tray, id: u64, tip: u64) -> bool {
     let s: usize = slot_of((*t).blk, id)
     if s == NONE {
         return false
     }
-    cstr_set((*t).blk + ((ibase(s) + I_TIP) * 8) as u64, tip.p as u64, tip.length(), 63)
+    cstr_set((*t).blk + ((ibase(s) + I_TIP) * 8) as u64, tip, cstr_len(tip), 63)
     bump((*t).blk)
     return true
 }
@@ -446,7 +493,7 @@ fn tray_owner(t: *mut Tray, id: u64) -> u64 {
 
 fn tray_is_system(t: *mut Tray, id: u64) -> bool {
     let s: usize = slot_of((*t).blk, id)
-    return s != NONE && rt.ld64((*t).blk, ibase(s) + I_SYS) != 0
+    return s != NONE && ld64((*t).blk, ibase(s) + I_SYS) != 0
 }
 
 // A badge count (0 = none) drawn on the icon, e.g. unread messages.
@@ -455,7 +502,7 @@ fn tray_set_badge(t: *mut Tray, id: u64, n: u64) -> bool {
     if s == NONE {
         return false
     }
-    rt.st64((*t).blk, ibase(s) + I_BADGE, n)
+    st64((*t).blk, ibase(s) + I_BADGE, n)
     bump((*t).blk)
     return true
 }
@@ -465,7 +512,7 @@ fn tray_badge(t: *mut Tray, id: u64) -> u64 {
     if s == NONE {
         return 0
     }
-    return rt.ld64((*t).blk, ibase(s) + I_BADGE)
+    return ld64((*t).blk, ibase(s) + I_BADGE)
 }
 
 // ---------------------------------------------------------------- context menu
@@ -474,21 +521,21 @@ fn mbase(s: usize, m: usize) -> usize {
     return ibase(s) + I_MENU + m * MENUW
 }
 
-fn tray_menu_add(t: *mut Tray, id: u64, label: str, action: u64, flags: u64) -> bool {
+fn tray_menu_add(t: *mut Tray, id: u64, label: u64, action: u64, flags: u64) -> bool {
     let b: u64 = (*t).blk
     let s: usize = slot_of(b, id)
     if s == NONE {
         return false
     }
-    let n: usize = rt.ld64(b, ibase(s) + I_MENUN) as usize
+    let n: usize = ld64(b, ibase(s) + I_MENUN) as usize
     if n >= MENUMAX {
         return false
     }
     let at: usize = mbase(s, n)
-    cstr_set(b + (at * 8) as u64, label.p as u64, label.length(), 23)
-    rt.st64(b, at + 3, action)
-    rt.st64(b, at + 4, flags)
-    rt.st64(b, ibase(s) + I_MENUN, (n + 1) as u64)
+    cstr_set(b + (at * 8) as u64, label, cstr_len(label), 23)
+    st64(b, at + 3, action)
+    st64(b, at + 4, flags)
+    st64(b, ibase(s) + I_MENUN, (n + 1) as u64)
     bump(b)
     return true
 }
@@ -496,8 +543,8 @@ fn tray_menu_add(t: *mut Tray, id: u64, label: str, action: u64, flags: u64) -> 
 fn tray_menu_clear(t: *mut Tray, id: u64) {
     let s: usize = slot_of((*t).blk, id)
     if s != NONE {
-        rt.mem_set((*t).blk + (mbase(s, 0) * 8) as u64, 0 as u8, MENUMAX * MENUW * 8)
-        rt.st64((*t).blk, ibase(s) + I_MENUN, 0)
+        mem_set((*t).blk + (mbase(s, 0) * 8) as u64, 0 as u8, MENUMAX * MENUW * 8)
+        st64((*t).blk, ibase(s) + I_MENUN, 0)
         bump((*t).blk)
     }
 }
@@ -505,9 +552,9 @@ fn tray_menu_clear(t: *mut Tray, id: u64) {
 // The standard menu of a background app: Open, Settings, Quit.
 fn tray_default_menu(t: *mut Tray, id: u64) {
     tray_menu_clear(t, id)
-    tray_menu_add(t, id, "Öffnen", ACT_OPEN, 0)
-    tray_menu_add(t, id, "Einstellungen", ACT_SETTINGS, 0)
-    tray_menu_add(t, id, "Beenden", ACT_QUIT, 0)
+    tray_menu_add(t, id, (&m_open[0 as usize]) as u64, ACT_OPEN, 0)
+    tray_menu_add(t, id, (&m_settings[0 as usize]) as u64, ACT_SETTINGS, 0)
+    tray_menu_add(t, id, (&m_quit[0 as usize]) as u64, ACT_QUIT, 0)
 }
 
 fn tray_menu_count(t: *mut Tray, id: u64) -> usize {
@@ -515,7 +562,7 @@ fn tray_menu_count(t: *mut Tray, id: u64) -> usize {
     if s == NONE {
         return 0
     }
-    return rt.ld64((*t).blk, ibase(s) + I_MENUN) as usize
+    return ld64((*t).blk, ibase(s) + I_MENUN) as usize
 }
 
 fn tray_menu_label(t: *mut Tray, id: u64, m: usize) -> u64 {
@@ -531,7 +578,7 @@ fn tray_menu_action(t: *mut Tray, id: u64, m: usize) -> u64 {
     if s == NONE || m >= tray_menu_count(t, id) {
         return 0
     }
-    return rt.ld64((*t).blk, mbase(s, m) + 3)
+    return ld64((*t).blk, mbase(s, m) + 3)
 }
 
 fn tray_menu_flags(t: *mut Tray, id: u64, m: usize) -> u64 {
@@ -539,7 +586,7 @@ fn tray_menu_flags(t: *mut Tray, id: u64, m: usize) -> u64 {
     if s == NONE || m >= tray_menu_count(t, id) {
         return 0
     }
-    return rt.ld64((*t).blk, mbase(s, m) + 4)
+    return ld64((*t).blk, mbase(s, m) + 4)
 }
 
 // ---------------------------------------------------------------- clicks
