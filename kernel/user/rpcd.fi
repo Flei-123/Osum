@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/rpcd.fi -- the test service of tools/rpc/run.sh: a service
+// built on kernel/user/rpc.fi that answers a few verbs, so that every
+// path of the library (ok, error, slow, huge, dying) has a real peer.
+//
+//   rpcd <service-name> [ticks]
+//
+// verbs: echo <text> | who | slow <ms> | fail | big <n> | die | stop
+// anything else: E_NOMETHOD.
+profile kernel
+
+import ulib
+import actwire
+import rpc
+
+export { u_start }
+
+static mut obuf: [u8; 4200] = [0 as u8; 4200]
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn serve(name: u64, limit: u64) -> u64 {
+    if !rpc.serve_open(name, actwire.A_ANY) {
+        var e: [u8; 27] = "rpcd: cannot register name\0"
+        say((&e[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var v_echo: [u8; 6] = "echo \0"
+    var v_who: [u8; 4] = "who\0"
+    var v_slow: [u8; 6] = "slow \0"
+    var v_fail: [u8; 5] = "fail\0"
+    var v_big: [u8; 5] = "big \0"
+    var v_die: [u8; 4] = "die\0"
+    var v_stop: [u8; 5] = "stop\0"
+    var r_done: [u8; 10] = "slow done\0"
+    var r_boom: [u8; 5] = "boom\0"
+    var r_bye: [u8; 4] = "bye\0"
+    var r_pid: [u8; 5] = "pid=\0"
+    let ob: u64 = (&obuf[0 as usize]) as u64
+    var ready: [u8; 14] = "rpcd: serving\0"
+    say((&ready[0 as usize]) as u64)
+    ulib.nl()
+    let t1: u64 = actwire.ticks()
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let s: u64 = rpc.serve_next(100)
+        if s != actwire.NONE {
+            let b: u64 = rpc.req_buf(s)
+            let n: u64 = rpc.req_len(s)
+            if rpc.req_over(s) {
+                rpc.fail(s, rpc.E_TOOBIG, 0, 0)
+            } else if actwire.starts(b, (&v_echo[0 as usize]) as u64) {
+                rpc.reply(s, b + 5, n - 5)
+            } else if actwire.str_eq(b, (&v_who[0 as usize]) as u64) {
+                // the pid the KERNEL stamped, not one the caller wrote
+                let pre: u64 = (&r_pid[0 as usize]) as u64
+                var k: u64 = 0
+                while actwire.ld8(pre, k) != 0 {
+                    actwire.st8(ob, k, actwire.ld8(pre, k))
+                    k = k + 1
+                }
+                k = k + ulib.digits(rpc.req_pid(s), ob + k)
+                rpc.reply(s, ob, k)
+            } else if actwire.starts(b, (&v_slow[0 as usize]) as u64) {
+                ulib.sleep_ms(ulib.to_num(b + 5))
+                rpc.reply(s, (&r_done[0 as usize]) as u64, 9)
+            } else if actwire.str_eq(b, (&v_fail[0 as usize]) as u64) {
+                rpc.fail(s, rpc.E_FAILED, (&r_boom[0 as usize]) as u64, 4)
+            } else if actwire.starts(b, (&v_big[0 as usize]) as u64) {
+                let want: u64 = ulib.to_num(b + 4)
+                var i: u64 = 0
+                while i < want && i < 4199 {
+                    actwire.st8(ob, i, 120)
+                    i = i + 1
+                }
+                rpc.reply(s, ob, want)
+            } else if actwire.str_eq(b, (&v_die[0 as usize]) as u64) {
+                return 3 // gone without an answer
+            } else if actwire.str_eq(b, (&v_stop[0 as usize]) as u64) {
+                rpc.reply(s, (&r_bye[0 as usize]) as u64, 3)
+                return 0
+            } else {
+                rpc.fail(s, rpc.E_NOMETHOD, 0, 0)
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 {
+        var h: [u8; 28] = "usage: rpcd <name> [ticks]\n\0"
+        say((&h[0 as usize]) as u64)
+        return 1
+    }
+    var lim: u64 = 0
+    if ulib.arg_count(args) >= 3 {
+        lim = ulib.to_num(ulib.arg_at(args, 2))
+    }
+    return serve(ulib.arg_at(args, 1), lim)
+}
