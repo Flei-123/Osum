@@ -108,8 +108,8 @@ int main(void)
     errno = 0; char *ev = getenv("PATH"); CHECK("env_path_present", ev != 0 || 1, "");
     errno = 0; CHECKC("getpriority", (getpriority(PRIO_PROCESS, 0), errno == 0));
     errno = 0; CHECKC("nice", (nice(0), errno == 0));
-    errno = 0; CHECKC("sched_getscheduler", sched_getscheduler(0) >= 0);
-    errno = 0; struct sched_param sp; CHECKC("sched_getparam", sched_getparam(0, &sp) == 0);
+    errno = 0; CHECKC("sched_getscheduler", syscall(SYS_sched_getscheduler, 0) >= 0); /* musl's own sched_getscheduler() is a stub that returns ENOSYS on Linux too: call the system call */
+    errno = 0; struct sched_param sp; CHECKC("sched_getparam", syscall(SYS_sched_getparam, 0, &sp) == 0);
     errno = 0; CHECKC("sched_get_priority_max", sched_get_priority_max(SCHED_FIFO) > 0);
     errno = 0; CHECKC("tcgetpgrp_or_notty", (isatty(0), 1));
     errno = 0; CHECKC("pread_pwrite_devnull", (fd = open("/dev/null", O_RDWR)) >= 0 && write(fd, "x", 1) == 1);

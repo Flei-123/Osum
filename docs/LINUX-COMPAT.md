@@ -39,3 +39,15 @@ Nur Analyse. Basis origin/main 69747e75. Belege: `docs/RUNDE-UNTERBAU-FIREFOX.md
 
 ## 4. Roadmap (Gruppe 'Linux-Kompat', Priorität P0 hoch)
 P0 epoll/eventfd/timerfd/signalfd; P0 Kerngrenzen (fds, Fäden, Rohr, Stapel, Adressraum); P0 Prüfstein-Reihe busybox→python3→curl→git; P1 Signale (RT, sigaltstack, setitimer); P1 Dateisystem (ftruncate/flock/symlink, /dev/shm,/dev/pts,/proc,/sys); P1 Demand-Paging + MAP_SHARED Datei; P1 Weg E Vulkan-Teilmenge + SPIR-V-Interpreter (Daidalos-RHI als Test), lavapipe-Basismessung; P2 wgpu-Teilmenge/SPIR-V-JIT; P3 Mesa-Software nur als Rückfall; P2 linux-dmabuf; P2 inotify; P2 DRM/KMS Haswell; P3 3D-Weg D/B.
+
+## 5. Prüfstein busybox (13.10.2026, gemessen: tools/unterbau/run.sh, Abschnitt 3c)
+busybox 1.36.1 dynamisch (musl, `/root/bbdyn/busybox`, 152752 Oktette), Kernel main 34eef244 + Runde UNTERBAU-2 (Zweig staff/orientos-mv6hbib2), VM/KVM, ein Kern.
+
+| Prüfung | Ergebnis |
+|---|---|
+| `busybox sh /etc/bb.sh` (20 Proben) | 12 ok / 8 offen |
+| ok | echo, `$(...)`, expr, Pipe + Applet, for-Schleife, `sh -c`, Exit-Status, grep, sed, sha256sum, `/proc/loadavg`, date |
+| offen | `sort -r \| head` leer, `mkdir`/`touch` (kein Ergebnis), `>` in neues Verzeichnis, awk leer, `uptime`, `df`, `free`, `ps` scheitern |
+| busybox als `/bin/sh`: `system()` / `popen()` (t_proc) | beide PASS (vorher FAIL mit Osum-Shell) |
+| Hinweis | dieses busybox hat `$((..))` abgeschaltet (Syntaxfehler, Skript bricht ab) — kein Kernproblem |
+Ursachen der offenen Proben sind NICHT geklärt (je Applet `strace`-artig prüfen; Verdacht: `mkdir`-Aufruf, `/proc/uptime|mounts` Format, `sysinfo`-Felder, `/proc/<pid>/stat` Felder).

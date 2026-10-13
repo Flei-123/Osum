@@ -77,6 +77,7 @@ import sync.atomic
 import ipc.uio
 import block.blk
 import diag.hwid
+import sched.rand
 
 export { ops, node_root }
 
@@ -96,6 +97,15 @@ const K_PIDDIR: u64 = 3
 const K_PIDFILE: u64 = 4
 const K_FDDIR: u64 = 5
 const K_FDFILE: u64 = 6
+// ROUND UNTERBAU: /proc/sys/... (sub = which entry)
+const K_SYS: u64 = 7
+const S_SYS: u64 = 1
+const S_KERNEL: u64 = 2
+const S_VM: u64 = 3
+const S_RANDOM: u64 = 4
+const S_PIDMAX: u64 = 5
+const S_OVERCOMMIT: u64 = 6
+const S_UUID: u64 = 7
 
 const ART: u64 = 0x1000000
 const SLOT: u64 = 0x100
@@ -127,7 +137,11 @@ const G_HWID: u64 = 7
 // /bin/log (das liest nach Laufnummern). Diese Datei ist die bequeme
 // Antwort auf "was ist gerade los", nicht das Archiv.
 const G_KLOG: u64 = 8
-const G_LAST: u64 = 8
+// ROUND UNTERBAU: /proc/loadavg and the directory /proc/sys (a directory is not
+// a global file: lookup and readdir treat G_SYSDIR specially).
+const G_LOADAVG: u64 = 9
+const G_SYSDIR: u64 = 10
+const G_LAST: u64 = 10
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -135,7 +149,9 @@ const F_STAT: u64 = 2
 const F_CMDLINE: u64 = 3
 const F_MAPS: u64 = 4
 const F_FD: u64 = 5 // das VERZEICHNIS fd/
-const F_LAST: u64 = 5
+const F_LIMITS: u64 = 6
+const F_CGROUP: u64 = 7
+const F_LAST: u64 = 7
 
 const BUF_MAX: u64 = 4000 // von 4096; der Rest ist Luft fuer die letzte Zeile
 
@@ -345,6 +361,10 @@ fn make_cpuinfo(state: u64) -> u64 {
     var c3: [u8; 14] = "online    : \0\0"
     var c4: [u8; 14] = "switches  : \0\0"
     var c5: [u8; 14] = "ticks     : \0\0"
+    // ROUND UNTERBAU: the lines feature detection by text looks for. Only the flags
+    // every x86-64 CPU has by definition (long mode needs them) -- no guessed extras.
+    var c6: [u8; 30] = "model name : x86-64 processor\0"
+    var c7: [u8; 54] = "flags      : fpu tsc msr pae cx8 mmx fxsr sse sse2 lm\0"
     var p: u64 = 0
     // `cpu.count` ist die Zahl, die die FIRMWARE gemeldet hat -- und
     // sie ist null, solange `smp.fi` nicht gelaufen ist. Ein Lauf ohne
@@ -357,6 +377,10 @@ fn make_cpuinfo(state: u64) -> u64 {
     while i < n {
         p = w_str(state, p, (&c1[0]) as u64)
         p = w_num(state, p, i)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c6[0]) as u64)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c7[0]) as u64)
         p = w_nl(state, p)
         p = w_str(state, p, (&c2[0]) as u64)
         p = w_num(state, p, cpu.get(state, i, cpu.C_APICID))
@@ -1071,6 +1095,185 @@ fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
 
 // EINE Weiche fuer alle Dateien dieses Dateisystems. Sie ist die
 // einzige Stelle, an der ein Knoten zu Text wird.
+
+// ===================================================== ROUND UNTERBAU
+//
+// /proc/loadavg, /proc/<pid>/limits, /proc/<pid>/cgroup and /proc/sys/...:
+// the files a big Linux program reads at startup. Values are the truth this
+// kernel knows: no load average is computed (0.00), the descriptor limit is
+// the real table size.
+
+fn make_loadavg(state: u64) -> u64 {
+    var z: [u8; 18] = "0.00 0.00 0.00 1/\0"
+    var p: u64 = w_str(state, 0, (&z[0]) as u64)
+    var live: u64 = 0
+    var t: u64 = 0
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    while t < n {
+        if alive(state, t) {
+            live = live + 1
+        }
+        t = t + 1
+    }
+    p = w_num(state, p, live)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, kstate.get(state, kstate.NEXT_PID) - 1)
+    return w_nl(state, p)
+}
+
+fn make_cgroup(state: u64) -> u64 {
+    var z: [u8; 5] = "0::/\0"
+    let p: u64 = w_str(state, 0, (&z[0]) as u64)
+    return w_nl(state, p)
+}
+
+fn limit_line(state: u64, at: u64, label: u64, soft: u64, unit: u64) -> u64 {
+    var p: u64 = w_str(state, at, label)
+    p = w_num(state, p, soft)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, soft)
+    p = w_ch(state, p, 32)
+    p = w_str(state, p, unit)
+    return w_nl(state, p)
+}
+
+fn make_limits(state: u64, t: u64) -> u64 {
+    var h: [u8; 74] = "Limit                     Soft Limit           Hard Limit           Units\0"
+    var l1: [u8; 27] = "Max open files            \0"
+    var l2: [u8; 27] = "Max processes             \0"
+    var l3: [u8; 27] = "Max stack size            \0"
+    var u1: [u8; 6] = "files\0"
+    var u2: [u8; 10] = "processes\0"
+    var u3: [u8; 6] = "bytes\0"
+    var p: u64 = w_str(state, 0, (&h[0]) as u64)
+    p = w_nl(state, p)
+    p = limit_line(state, p, (&l1[0]) as u64, file.MAX_FD, (&u1[0]) as u64)
+    p = limit_line(state, p, (&l2[0]) as u64, kstate.MAX_TASKS, (&u2[0]) as u64)
+    p = limit_line(state, p, (&l3[0]) as u64, 524288, (&u3[0]) as u64)
+    return p
+}
+
+fn make_uuid_random(state: u64) -> u64 {
+    // a random (version 4) UUID, new at every read: 16 bytes from the kernel generator
+    let scratch: u64 = buf(state) + 4064
+    rand.bytes(state, scratch, 16)
+    kstate.set8(scratch + 6, ((kstate.get8(scratch + 6) & 15) | 64) as u8)
+    kstate.set8(scratch + 8, ((kstate.get8(scratch + 8) & 63) | 128) as u8)
+    var p: u64 = 0
+    var i: u64 = 0
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            p = w_ch(state, p, 45)
+        }
+        p = w_hexb(state, p, kstate.get8(scratch + i))
+        i = i + 1
+    }
+    return w_nl(state, p)
+}
+
+fn make_sys(state: u64, sub: u64) -> u64 {
+    var p: u64 = 0
+    if sub == S_PIDMAX {
+        // pids are never reused here; the counter is 64 bit. The Linux default is shown.
+        p = w_num(state, p, 4194304)
+        return w_nl(state, p)
+    }
+    if sub == S_OVERCOMMIT {
+        // mmap does not refuse by a commit estimate: that is mode 1 ("always")
+        p = w_num(state, p, 1)
+        return w_nl(state, p)
+    }
+    if sub == S_UUID {
+        return make_uuid_random(state)
+    }
+    return 0
+}
+
+fn sys_is_dir(sub: u64) -> bool {
+    return sub >= S_SYS && sub <= S_RANDOM
+}
+
+fn copy_z(out: u64, src: u64) {
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn sys_name(sub: u64, out: u64) {
+    var n1: [u8; 4] = "sys\0"
+    var n2: [u8; 7] = "kernel\0"
+    var n3: [u8; 3] = "vm\0"
+    var n4: [u8; 7] = "random\0"
+    var n5: [u8; 8] = "pid_max\0"
+    var n6: [u8; 18] = "overcommit_memory\0"
+    var n7: [u8; 5] = "uuid\0"
+    if sub == S_KERNEL {
+        copy_z(out, (&n2[0]) as u64)
+    } else if sub == S_VM {
+        copy_z(out, (&n3[0]) as u64)
+    } else if sub == S_RANDOM {
+        copy_z(out, (&n4[0]) as u64)
+    } else if sub == S_PIDMAX {
+        copy_z(out, (&n5[0]) as u64)
+    } else if sub == S_OVERCOMMIT {
+        copy_z(out, (&n6[0]) as u64)
+    } else if sub == S_UUID {
+        copy_z(out, (&n7[0]) as u64)
+    } else {
+        copy_z(out, (&n1[0]) as u64)
+    }
+}
+
+// the i-th child of directory `parent` (0 = none)
+fn sys_nth(parent: u64, i: u64) -> u64 {
+    if parent == S_SYS {
+        if i == 0 {
+            return S_KERNEL
+        }
+        if i == 1 {
+            return S_VM
+        }
+        return 0
+    }
+    if parent == S_KERNEL {
+        if i == 0 {
+            return S_PIDMAX
+        }
+        if i == 1 {
+            return S_RANDOM
+        }
+        return 0
+    }
+    if parent == S_VM && i == 0 {
+        return S_OVERCOMMIT
+    }
+    if parent == S_RANDOM && i == 0 {
+        return S_UUID
+    }
+    return 0
+}
+
+// the child of `parent` with the given name (0 = none)
+fn sys_child(parent: u64, name: u64) -> u64 {
+    var buf2: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while i < 4 {
+        let c: u64 = sys_nth(parent, i)
+        if c == 0 {
+            return 0
+        }
+        sys_name(c, (&buf2[0]) as u64)
+        if streq(name, (&buf2[0]) as u64) {
+            return c
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn build(state: u64, n: u64) -> u64 {
     let art: u64 = n_art(n)
     let slot: u64 = n_slot(n)
@@ -1100,7 +1303,13 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_KLOG {
             return make_klog(state)
         }
+        if sub == G_LOADAVG {
+            return make_loadavg(state)
+        }
         return 0
+    }
+    if art == K_SYS {
+        return make_sys(state, sub)
     }
     if art == K_PIDFILE {
         if !alive(state, slot) {
@@ -1117,6 +1326,12 @@ fn build(state: u64, n: u64) -> u64 {
         }
         if sub == F_MAPS {
             return make_maps(state, slot)
+        }
+        if sub == F_LIMITS {
+            return make_limits(state, slot)
+        }
+        if sub == F_CGROUP {
+            return make_cgroup(state)
         }
         return 0
     }
@@ -1187,6 +1402,10 @@ fn global_of(name: u64) -> u64 {
     var f: [u8; 8] = "version\0"
     var g: [u8; 5] = "hwid\0"
     var k: [u8; 5] = "klog\0"
+    var la: [u8; 8] = "loadavg\0"
+    if streq(name, (&la[0]) as u64) {
+        return G_LOADAVG
+    }
     if streq(name, (&a[0]) as u64) {
         return G_MEMINFO
     }
@@ -1220,6 +1439,14 @@ fn pidfile_of(name: u64) -> u64 {
     var c: [u8; 8] = "cmdline\0"
     var d: [u8; 5] = "maps\0"
     var e: [u8; 3] = "fd\0"
+    var lm: [u8; 7] = "limits\0"
+    var cg: [u8; 7] = "cgroup\0"
+    if streq(name, (&lm[0]) as u64) {
+        return F_LIMITS
+    }
+    if streq(name, (&cg[0]) as u64) {
+        return F_CGROUP
+    }
     if streq(name, (&a[0]) as u64) {
         return F_STATUS
     }
@@ -1254,6 +1481,29 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
             return 0
         }
         return node(K_GLOBAL, 0, g)
+    }
+    // ROUND UNTERBAU: /proc/sys/<dir>/.../<file>
+    var w_sys: [u8; 4] = "sys\0"
+    if streq((&seg[0]) as u64, (&w_sys[0]) as u64) {
+        var cur: u64 = S_SYS
+        var pos: u64 = at
+        var guard: u64 = 0
+        while guard < 6 {
+            var sg: [u8; 24] = [0 as u8; 24]
+            pos = segment(path, pos, (&sg[0]) as u64, 24)
+            if kstate.get8((&sg[0]) as u64) == 0 {
+                return node(K_SYS, 0, cur)
+            }
+            if !sys_is_dir(cur) {
+                return 0
+            }
+            cur = sys_child(cur, (&sg[0]) as u64)
+            if cur == 0 {
+                return 0
+            }
+            guard = guard + 1
+        }
+        return 0
     }
     // ===================================== RUNDE CERTUS: `/proc/self`
     //
@@ -1351,8 +1601,14 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var f: [u8; 8] = "version\0"
     var g: [u8; 5] = "hwid\0"
     var k: [u8; 5] = "klog\0"
+    var la2: [u8; 8] = "loadavg\0"
+    var sy2: [u8; 4] = "sys\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_CPUINFO {
+    if sub == G_LOADAVG {
+        src = (&la2[0]) as u64
+    } else if sub == G_SYSDIR {
+        src = (&sy2[0]) as u64
+    } else if sub == G_CPUINFO {
         src = (&b[0]) as u64
     } else if sub == G_UPTIME {
         src = (&c[0]) as u64
@@ -1381,8 +1637,14 @@ fn pidfile_name(state: u64, sub: u64, out: u64) {
     var c: [u8; 8] = "cmdline\0"
     var d: [u8; 5] = "maps\0"
     var e: [u8; 3] = "fd\0"
+    var lm2: [u8; 7] = "limits\0"
+    var cg2: [u8; 7] = "cgroup\0"
     var src: u64 = (&a[0]) as u64
-    if sub == F_STAT {
+    if sub == F_LIMITS {
+        src = (&lm2[0]) as u64
+    } else if sub == F_CGROUP {
+        src = (&cg2[0]) as u64
+    } else if sub == F_STAT {
         src = (&b[0]) as u64
     } else if sub == F_CMDLINE {
         src = (&c[0]) as u64
@@ -1434,6 +1696,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     if art == K_ROOT {
         if i < G_LAST {
             global_name(state, i + 1, out)
+            if i + 1 == G_SYSDIR {
+                return node(K_SYS, 0, S_SYS)
+            }
             return node(K_GLOBAL, 0, i + 1)
         }
         // Dahinter die Prozesse, in der Reihenfolge der Aufgabentafel.
@@ -1462,6 +1727,14 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         }
         return 0
     }
+    if art == K_SYS {
+        let c: u64 = sys_nth(n_sub(dir), i)
+        if c == 0 {
+            return 0
+        }
+        sys_name(c, out)
+        return node(K_SYS, 0, c)
+    }
     if art == K_FDDIR {
         var seen: u64 = 0
         var fd: u64 = 0
@@ -1487,6 +1760,12 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
             return vfsops.N_DIR
         }
+        if art == K_SYS {
+            if sys_is_dir(n_sub(n)) {
+                return vfsops.N_DIR
+            }
+            return vfsops.N_FILE
+        }
         if art == K_GLOBAL || art == K_PIDFILE || art == K_FDFILE {
             return vfsops.N_FILE
         }
@@ -1498,7 +1777,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         // -- das ist genau, was Linux tut, und der Grund, warum
         // `ls -l /proc` dort ueberall Nullen zeigt. Dieser Kernel sagt
         // die Wahrheit statt Null, und das kostet einen Aufbau.
-        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && sys_is_dir(n_sub(n))) {
             return 0
         }
         let flags: u64 = lock(state)
@@ -1507,7 +1786,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return len
     }
     if what == vfsops.A_MODE {
-        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && sys_is_dir(n_sub(n))) {
             return 365 // 0o555 -- lesen und betreten, nicht schreiben
         }
         return 292 // 0o444

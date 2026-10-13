@@ -85,12 +85,23 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
         strip --strip-all "$O/p/$p.elf" 2>/dev/null
     done
     local spec="/lib/ /bin/ /tmp/ /etc/ /var/ /var/tmp/ /dev/ /proc/ /sys/ /mnt/ /root/ /run/ /w/"
-    for p in $progs; do spec="$spec /bin/$p=$O/p/$p.elf"; done
+    for p in $progs; do [ -n "${BBSH:-}" ] && [ "$p" = sh ] && continue; spec="$spec /bin/$p=$O/p/$p.elf"; done
     spec="$spec /lib/ld-musl-x86_64.so.1=$LDREAL"
+    # the proof stone busybox (dynamic, musl): as /bin/busybox, and with BBSH=1 ALSO as /bin/sh (system() and popen() call /bin/sh -c)
+    if [ -r "${BBDYN:-/nonexistent}" ]; then
+        spec="$spec /bin/busybox=$BBDYN /etc/bb.sh=$D/bb.sh /etc/pruef.txt=$D/pruef.txt"
+        [ -n "${BBSH:-}" ] && spec="$spec /bin/sh=$BBDYN"
+    fi
     for f in "$D"/bin/*; do spec="$spec /bin/$(basename $f)=$f"; done
     for f in "$D"/lib/*.so; do spec="$spec /lib/$(basename $f)=$f"; done
     printf 'root:x:0:0:root:/root:/bin/sh\n' > "$D/passwd"; printf '127.0.0.1 localhost\n' > "$D/hosts"
     spec="$spec /etc/passwd=$D/passwd /etc/hosts=$D/hosts"
+    # the files and directories a Linux package set puts under /etc and /usr/share (not kernel business; the real image
+    # builder tools/usbimg/build.sh does not ship them yet -- roadmap): stat() by name is what the checks measure.
+    printf 'nameserver 10.0.2.3\n' > "$D/resolv.conf"; printf '0123456789abcdef0123456789abcdef\n' > "$D/machine-id"
+    printf '<?xml version="1.0"?>\n<fontconfig></fontconfig>\n' > "$D/fonts.conf"; printf 'UTC\n' > "$D/localtime"
+    spec="$spec /etc/ssl/ /etc/ssl/certs/ /etc/fonts/ /usr/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/zoneinfo/"
+    spec="$spec /etc/resolv.conf=$D/resolv.conf /etc/machine-id=$D/machine-id /etc/fonts/fonts.conf=$D/fonts.conf /etc/localtime=$D/localtime"
     python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" 98304 --v3 --inodes=1024 $spec > "$O/mkfs.txt" 2>&1
 }
 boot() { # boot <kernel> <disk> <script> <serial-out>
@@ -109,6 +120,32 @@ run_all() { # run_all <kernel> <disk> <tag>
     cat "$D"/$3-t_*.res 2>/dev/null | sed 's/^T //' > "$D/$3.all"
 }
 
+# the busybox probe script (lines "BB <name> ..." are read back from the serial log)
+BBDYN=${BBDYN:-/root/bbdyn/busybox}
+printf 'eins\nzwei\ndrei\n' > "$D/pruef.txt"
+cat > "$D/bb.sh" <<'BBS'
+echo "BB echo ok"
+x=$(echo sub); [ "$x" = sub ] && echo "BB cmdsubst ok" || echo "BB cmdsubst FAIL"
+echo "BB arith $(/bin/busybox expr 6 \* 7)"
+echo "BB pipe $(echo a b c | /bin/busybox wc -w)"
+echo "BB forloop $(for i in 1 2 3; do printf %s $i; done)"
+/bin/busybox sh -c 'echo "BB nested-sh ok"'
+(exit 3); echo "BB exitstatus $?"
+echo "BB grep $(/bin/busybox grep -c zwei /etc/pruef.txt)"
+echo "BB sort $(/bin/busybox sort -r /etc/pruef.txt | /bin/busybox head -1)"
+/bin/busybox mkdir /tmp/bbd && /bin/busybox touch /tmp/bbd/f && echo "BB mkdir-touch $(/bin/busybox ls /tmp/bbd)"
+echo hello > /tmp/bbd/g; echo "BB redirect $(/bin/busybox cat /tmp/bbd/g)"
+echo "BB awk $(/bin/busybox awk 'BEGIN{print 1+2}')"
+echo "BB sed $(echo abc | /bin/busybox sed 's/b/X/')"
+echo "BB sha256 $(/bin/busybox sha256sum /etc/pruef.txt | /bin/busybox cut -c1-12)"
+echo "BB loadavg $(/bin/busybox cut -d' ' -f1 /proc/loadavg)"
+echo "BB uptime-cmd $(/bin/busybox uptime >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB df-cmd $(/bin/busybox df /tmp >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB free-cmd $(/bin/busybox free >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB ps-cmd $(/bin/busybox ps >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB date-cmd $(/bin/busybox date >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB end"
+BBS
 echo "== 2. the kernel of this tree and its image =="
 KNEW=${KERNEL:-$D/k-new.mb}
 if [ -z "${KERNEL:-}" ]; then build_kernel "$ROOT" "$KNEW" && ok "kernel built" || { bad "kernel does not build"; tail -8 "$KNEW.log"; echo "UNTERBAU: $pass passed, $fail failed"; exit 1; }; fi
@@ -127,6 +164,33 @@ if [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " foreign "; then
     case " $FOREIGN " in *" f_threads "*) fchk threads "th: summe=100000 erwartet=100000 OK" "FALSCH" ;; esac
     case " $FOREIGN " in *" f_forktest "*) fchk forktest "exited=1 code=7" "FEHLER" ;; esac
     case " $FOREIGN " in *" f_locktest "*) fchk locktest "lk: fertig" "FALSCH" ;; esac
+fi
+if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox "; }; then
+    echo "== 3c. proof stone busybox (dynamic musl, $(stat -c%s "$BBDYN") octets): applets + /bin/sh -c =="
+    boot "$KNEW" "$D/new/disk.img" "busybox sh /etc/bb.sh" "$D/bb.ser"
+    grep -a '^BB ' "$D/bb.ser" > "$D/bb.res" || : > "$D/bb.res"
+    SHA12=$(sha256sum "$D/pruef.txt" | cut -c1-12)
+    BBOK=0; BBBAD=0
+    bbchk() { # bbchk <name> <expected text>
+        local line; line=$(grep -a "^BB $1 " "$D/bb.res" | head -1 | tr -d '\r')
+        if [ "$line" = "BB $1 $2" ]; then BBOK=$((BBOK+1)); printf '        BB-OK   %s\n' "$1"; else BBBAD=$((BBBAD+1)); printf '        BB-GAP  %s  (got: %s)\n' "$1" "${line:-nothing}"; fi
+    }
+    bbchk echo ok; bbchk cmdsubst ok; bbchk arith 42; bbchk pipe 3; bbchk forloop 123; bbchk nested-sh ok; bbchk exitstatus 3
+    bbchk grep 1; bbchk sort zwei; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
+    bbchk loadavg 0.00; bbchk uptime-cmd ok; bbchk df-cmd ok; bbchk free-cmd ok; bbchk ps-cmd ok; bbchk date-cmd ok
+    grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
+    # with busybox as /bin/sh: system() and popen() of t_proc
+    case " $TESTS " in *" t_proc "*)
+        BBSH=1 build_image "$ROOT" "$D/bbsh" && {
+            boot "$KNEW" "$D/bbsh/disk.img" "/bin/t_proc" "$D/bbsh-t_proc.ser"
+            grep -a '^T ' "$D/bbsh-t_proc.ser" | awk '!seen[$2]++' > "$D/bbsh-t_proc.res"
+            for c in proc.system_exit_status proc.popen; do
+                grep -a "^T $c " "$D/bbsh-t_proc.res" | head -1 | sed 's/^T /        BB-SH   /'
+            done
+        } ;;
+    esac
+    echo "        busybox probes: $BBOK ok / $BBBAD gap"
+    cp "$D/bb.res" "${UB_BB_RESULT:-$D/bb-result.txt}" 2>/dev/null
 fi
 echo "== 4. the table =="
 awk '{ split($1, a, "."); v[$2]++; t[a[1]]++ } END { for (k in t) ; for (k in v) printf "        count %s=%d\n", k, v[k] }' "$D/new.all" | sort
