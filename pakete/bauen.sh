@@ -28,7 +28,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
 OUT=${1:-/tmp/wmplug-pakete}
-OPK=${OPK:-/root/orientos-install/pkg/opk.py}
+OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}   # the old /root/orientos-install folder is gone
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 mkdir -p "$OUT"
 
@@ -64,11 +64,20 @@ paket() { # verzeichnis
     python3 "$OPK" bauen "$d/rezept" -o "$OUT/$nm-$fs.opk" | sed 's/^/   /'
 }
 
+# a BUNDLE app (start + INFO + symbol, like tools/loader/pakete.sh): ELF, lint, symbol
+app() { # source dir name
+    local quelle=$1 paket=$2 name=$3
+    elf "$quelle" "$paket" "$name" || return 1
+    python3 tools/sdk/osdk.py check "$paket/INFO" --strict | sed 's/^/   /' || return 1
+    python3 tools/k15/icon.py "$paket/symbol.txt" "$paket/bau/symbol" | sed 's/^/   /'
+}
+
 echo "== die Programme =="
 elf kernel/user/wmplug.fi   pakete/wmplug-werkzeug wmplug
 elf kernel/user/pluguhr.fi  pakete/wmplug-uhr      pluguhr
 elf kernel/user/plugregel.fi pakete/wmplug-regel   plugregel
 elf kernel/user/notes.fi    pakete/notes           notes
+app kernel/user/fvviewer.fi pakete/fvviewer        fvviewer
 # every package carries an action manifest (docs/ACTION-BUS.md, section 3)
 for d in pakete/*/; do
     [ -f "$d/ACTIONS" ] || continue
@@ -76,7 +85,7 @@ for d in pakete/*/; do
 done
 
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/fvviewer; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else
