@@ -143,6 +143,7 @@ const S_LINK: u64 = 0x2D8
 // unbekannt. Bei virtio ist "unbekannt" der REGELFALL und nicht der
 // Ausnahmefall -- siehe `read_link`.
 const S_SPEED: u64 = 0x2E0
+const S_RXPOST: u64 = 0x2E8 // TOCTOU F-07: bit per receive buffer id the DEVICE owns (posted, not yet taken)
 
 // Where the second card's copy of all of the above begins. `sc()` adds
 // it; nothing else in this file knows the number.
@@ -501,6 +502,15 @@ fn region(state: u64, c: u64, i: u64, d: u64, cap: u64) -> u64 {
         return 0
     }
     let off: u64 = pci.cfg_read32(d, cap + VC_OFFSET)
+    // TOCTOU audit F-04: offset and length come from the device's config space; the region must lie inside the BAR
+    // (a size of 0 means "not measured": keep the old behaviour then).
+    let size: u64 = pci.bar_size(state, i, which)
+    if size != 0 {
+        let len: u64 = pci.cfg_read32(d, cap + VC_LENGTH)
+        if off >= size || len > size - off {
+            return 0
+        }
+    }
     return apic.map_device(state, phys + off)
 }
 
@@ -844,6 +854,7 @@ fn rx_fill(state: u64, c: u64) {
     }
     avail_publish(a, QSIZE)
     kstate.set(state, sc(c, S_RX_AVAIL), QSIZE)
+    kstate.set(state, sc(c, S_RXPOST), 0xFFFFFFFFFFFFFFFF) // all QSIZE (64) buffers are posted
     kstate.set(state, sc(c, S_RX_USED), 0)
     kstate.set(state, sc(c, S_TX_AVAIL), 0)
     kstate.set(state, sc(c, S_TX_USED), 0)
@@ -875,10 +886,23 @@ fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     // means -- "nothing after this may be read before it" -- is the same on
     // both; the instruction is not, and neither is how badly it is needed.
     arch.barrier_read()
+    // TOCTOU F-07: used.idx is device memory. It cannot run more than QSIZE ahead of what was worked off; if it does the
+    // device lies: resynchronise and take nothing.
+    if ((now -% last) & 0xFFFF) > QSIZE {
+        kstate.set(state, sc(c, S_RX_USED), now & 0xFFFF)
+        return 0
+    }
     let i: u64 = last % QSIZE
     let id: u64 = used_id(u, i) % QSIZE
     let len: u64 = used_len(u, i)
     kstate.set(state, sc(c, S_RX_USED), (last +% 1) & 0xFFFF)
+    // ... and a buffer comes back only once per posting: an id that is not marked as posted is a repeat (or an invention)
+    // of the device -- drop it, do not post it again.
+    let posted: u64 = kstate.get(state, sc(c, S_RXPOST))
+    if ((posted >> id) & 1) == 0 {
+        return 0
+    }
+    kstate.set(state, sc(c, S_RXPOST), posted & (0xFFFFFFFFFFFFFFFF -% (1 << id)))
     if len <= 12 || len > BUFSZ {
         // Nothing usable -- but the descriptor still has to go back,
         // otherwise the ring runs dry one buffer at a time.
@@ -898,6 +922,7 @@ fn rx_recycle_on(state: u64, c: u64, id: u64) {
     let r: u64 = ring(state, c)
     let a: u64 = r + RXA_OFF
     let idx: u64 = kstate.get(state, sc(c, S_RX_AVAIL))
+    kstate.set(state, sc(c, S_RXPOST), kstate.get(state, sc(c, S_RXPOST)) | (1 << (id % QSIZE)))
     avail_put(a, idx % QSIZE, id)
     avail_publish(a, (idx +% 1) & 0xFFFF)
     kstate.set(state, sc(c, S_RX_AVAIL), (idx +% 1) & 0xFFFF)
