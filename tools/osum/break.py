@@ -21,7 +21,7 @@ traced back to that one field and to nothing else. The reason numbers are
     segfile  segment 0 moved to the last page  -> 13 R_SEGFILE
     bigoff   p_offset -> 0xFFFFFFFFFFFFF000    -> 13 R_SEGFILE
     memsz    p_filesz > p_memsz                -> 14 R_MEMSZ
-    range    p_vaddr -> 0x50000000             -> 15 R_RANGE
+    range    p_vaddr -> 0x60000000             -> 15 R_RANGE
     bigmem   p_memsz -> 0xFFFFFFFFFFFF0000     -> 15 R_RANGE
     align    p_vaddr + 8                       -> 16 R_ALIGN
     overlap  segment 1 onto segment 0          -> 17 R_OVERLAP
@@ -140,7 +140,7 @@ def main(argv):
         ph = loads(d)[0]
         p64(d, ph + P_FILESZ, u64(d, ph + P_MEMSZ) + 1)
     elif what == "range":
-        p64(d, loads(d)[0] + P_VADDR, 0x50000000)
+        p64(d, loads(d)[0] + P_VADDR, 0x60000000)
     elif what == "bigmem":
         p64(d, loads(d)[0] + P_MEMSZ, 0xFFFFFFFFFFFF0000)
     elif what == "align":

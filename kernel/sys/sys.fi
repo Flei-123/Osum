@@ -2250,6 +2250,7 @@ const PROT_EXEC: u64 = 4
 const MAP_PRIVATE: u64 = 2
 const MAP_ANONYMOUS: u64 = 32
 const MAP_FIXED: u64 = 16
+const MAP_NORESERVE: u64 = 0x4000
 
 // The file kinds of `struct stat`, as Linux writes them.
 const S_IFDIR: u64 = 16384 // 0o40000
@@ -7629,6 +7630,10 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
 // afterwards when `prot` is anything but plain read-write.
 fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
     let pages: u64 = page_up(len) / PAGE
+    // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
+    if prot == 0 && (flags & MAP_NORESERVE) != 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
+        return res_add(state, mem_owner(state, me), page_up(len))
+    }
     var base: u64 = 0
     if (flags & MAP_FIXED) != 0 {
         base = map_fixed(state, me, addr, pages, prot)
@@ -8008,6 +8013,140 @@ fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
     return gfx.fb_user_base() + gfx.fb_offset(state)
 }
 
+// ------------------------------------------------------------ RUNDE LIMITS3: PROT_NONE reservations
+//
+// `mmap(NULL, 256 MiB, PROT_NONE, MAP_NORESERVE)` is how JS engines and allocators reserve address space. Osum's mmap is eager (every
+// page of the arena is a frame at once), so such a request would eat the arena for nothing. A reservation therefore is BOOKKEEPING only:
+// a range at or above 4 GiB (RES_BASE), outside the 1 GiB window that has page tables, so every access is a #PF (the process dies, as
+// on Linux for PROT_NONE); no frame, no page table. `munmap` releases (whole, head, tail or the middle of a range), `mprotect(PROT_NONE)`
+// is a no-op, and `mprotect` to anything readable/writable inside a reservation is -ENOMEM: committing needs page tables above 4 GiB
+// (open, roadmap). The table lives in the task record of the memory owner: T_RESV (768) holds RES_SLOTS pairs (start, length),
+// T_RESNEXT (1008) the bump pointer. Adjacent new ranges are merged.
+const RES_BASE: u64 = 0x100000000
+const RES_TOP: u64 = 0x700000000000
+const RES_MIN: u64 = 0x4000000 // 64 MiB: smaller ones stay ordinary (eager) mappings
+const RES_MAX: u64 = 0x400000000 // 16 GiB per call
+const RES_SLOTS: u64 = 15
+
+fn res_start(state: u64, owner: u64, k: u64) -> u64 {
+    return sched.tget(state, owner, sched.T_RESV + k * 16)
+}
+
+fn res_len(state: u64, owner: u64, k: u64) -> u64 {
+    return sched.tget(state, owner, sched.T_RESV + k * 16 + 8)
+}
+
+fn res_set(state: u64, owner: u64, k: u64, start: u64, len: u64) {
+    sched.tset(state, owner, sched.T_RESV + k * 16, start)
+    sched.tset(state, owner, sched.T_RESV + k * 16 + 8, len)
+}
+
+fn res_clear(state: u64, owner: u64) {
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        res_set(state, owner, k, 0, 0)
+        k = k + 1
+    }
+    sched.tset(state, owner, sched.T_RESNEXT, 0)
+}
+
+fn res_add(state: u64, owner: u64, len: u64) -> u64 {
+    var next: u64 = sched.tget(state, owner, sched.T_RESNEXT)
+    if next < RES_BASE {
+        next = RES_BASE
+    }
+    if next + len > RES_TOP {
+        return neg(errno.E_NOMEM)
+    }
+    // merge with the range that ends exactly here
+    var free_slot: u64 = RES_SLOTS
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        if l == 0 {
+            if free_slot == RES_SLOTS {
+                free_slot = k
+            }
+        } else {
+            if res_start(state, owner, k) + l == next {
+                res_set(state, owner, k, res_start(state, owner, k), l + len)
+                sched.tset(state, owner, sched.T_RESNEXT, next + len)
+                return next
+            }
+        }
+        k = k + 1
+    }
+    if free_slot == RES_SLOTS {
+        return neg(errno.E_NOMEM)
+    }
+    res_set(state, owner, free_slot, next, len)
+    sched.tset(state, owner, sched.T_RESNEXT, next + len)
+    return next
+}
+
+fn res_covers(state: u64, owner: u64, addr: u64, len: u64) -> bool {
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        let s: u64 = res_start(state, owner, k)
+        if l != 0 && addr >= s && addr + len <= s + l {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// munmap inside the reservation area: the part that lies in a range is cut out; what is in no range is ignored (Linux: success).
+fn res_remove(state: u64, owner: u64, addr: u64, len: u64) -> u64 {
+    let end: u64 = addr + len
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        let s: u64 = res_start(state, owner, k)
+        if l != 0 && addr < s + l && end > s {
+            var cut_lo: u64 = s
+            if addr > s {
+                cut_lo = addr
+            }
+            var cut_hi: u64 = s + l
+            if end < s + l {
+                cut_hi = end
+            }
+            if cut_lo == s && cut_hi == s + l {
+                res_set(state, owner, k, 0, 0)
+            } else {
+                if cut_lo == s {
+                    res_set(state, owner, k, cut_hi, s + l - cut_hi)
+                } else {
+                    if cut_hi == s + l {
+                        res_set(state, owner, k, s, cut_lo - s)
+                    } else {
+                        // middle: needs a free slot for the upper part
+                        var f: u64 = RES_SLOTS
+                        var j: u64 = 0
+                        while j < RES_SLOTS {
+                            if res_len(state, owner, j) == 0 {
+                                f = j
+                                j = RES_SLOTS
+                            } else {
+                                j = j + 1
+                            }
+                        }
+                        if f == RES_SLOTS {
+                            return neg(errno.E_NOMEM)
+                        }
+                        res_set(state, owner, k, s, cut_lo - s)
+                        res_set(state, owner, f, cut_hi, s + l - cut_hi)
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
 // The pages go back, the bump pointer does not. A hole in the middle of a
 // bump allocator is a free list, and that is the libc's business, not the
 // kernel's -- written down as a gap in docs/ROUNDK4.md.
@@ -8017,6 +8156,9 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     }
     if len == 0 {
         return neg(errno.E_INVAL)
+    }
+    if addr >= RES_BASE {
+        return res_remove(state, mem_owner(state, me), addr, page_up(len))
     }
     // RUNDE K16: zwei Fenster statt einem.
     let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
@@ -8917,6 +9059,16 @@ fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if (prot & (~7)) != 0 {
         return neg(errno.E_INVAL)
     }
+    if addr >= RES_BASE {
+        // a reservation has no pages: it stays PROT_NONE, committing part of it (RW) is not supported
+        if !res_covers(state, mem_owner(state, me), addr, page_up(len)) {
+            return neg(errno.E_NOMEM)
+        }
+        if prot == 0 {
+            return 0
+        }
+        return neg(errno.E_NOMEM)
+    }
     if len > 0x400000000 {
         return neg(errno.E_NOMEM)
     }
@@ -9205,6 +9357,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     sched.tset(state, me, sched.T_BRK, 0)
     sched.tset(state, me, sched.T_MMAP, 0)
     sched.tset(state, me, sched.T_BIG, 0)
+    res_clear(state, me)
     // What ring 3 finds on the way out: a program at its entry point with
     // the argument block in rdi and nothing else left over from the
     // caller. Everything a process could have hidden in a register is gone
