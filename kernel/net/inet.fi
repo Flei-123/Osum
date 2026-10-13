@@ -521,6 +521,26 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
 
 // ---------------------------------------------------------- the pump
 
+// One read of every word of a received frame, into the scratch page.
+// `n` is at most the driver buffer (2048, all three drivers refuse more),
+// the page is 4096. Words of 4 octets: the virtio frame starts 12 octets
+// into its buffer, so 4 is the widest step that is always aligned.
+fn rx_snapshot(state: u64, src: u64, n: u64) -> u64 {
+    let dst: u64 = kstate.get(state, sc(S_SCRATCH))
+    var k: u64 = 0
+    while k + 4 <= n {
+        __mmio_write32((dst + k) as *mut u32,
+            __mmio_read32((src + k) as *mut u32))
+        k = k + 4
+    }
+    while k < n {
+        __mmio_write8((dst + k) as *mut u8,
+            __mmio_read8((src + k) as *mut u8))
+        k = k + 1
+    }
+    return dst
+}
+
 // One turn: everything the card has, into the stack; everything the
 // stack has, onto the card. Returns how many frames moved in either
 // direction, which is what netd uses to decide whether to spin or sleep.
@@ -543,6 +563,16 @@ fn pump(state: u64) -> u64 {
         if len == 0 {
             n = PUMP_BATCH
         } else {
+            // TOCTOU (docs/SECURITY-TOCTOU-KERNEL-DRIVERS.md F-01): the
+            // receive buffer is memory the card (or the hypervisor behind
+            // it) can still write. Every consumer below parses it with
+            // lengths it checked a moment earlier and re-reads (IP
+            // ihl/total in the stack, the WireGuard tag and then the
+            // ciphertext again). So the frame is read ONCE, here, into
+            // the scratch page, and everything after this line works on
+            // that private copy. The scratch page is the transmit buffer
+            // too, but the transmit loop below starts after this one.
+            frame = rx_snapshot(state, frame, len)
             // ROUND NETMON: the frame is classified BEFORE it goes into
             // the stack, because the stack may consume it and because
             // this is the only place it exists as octets with a length.
