@@ -88,7 +88,7 @@ export {
     shm_seals, shm_add_seals,
     // Zahlen fuer die Abnahme
     socks_live, shms_live, bytes_moved, fds_moved,
-    USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP,
+    USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
     UK_FREE, UK_STREAM
 }
@@ -158,7 +158,11 @@ const USHMPG_OFF: u64 = 0xF6000
 // braucht GROSSE Puffer, nicht viele. Ein Bildschirm in 1280x800 ist
 // allein 4 MiB; wer den will, hebt die Zahl erneut und verschiebt die
 // Tafel aus kdata heraus.
-const SHM_PAGES_MAX: u64 = 256 // 256 * 4096 = 1 MiB je Objekt
+const SHM_PAGES_MAX: u64 = 256 // 256 * 4096 = 1 MiB je Objekt: the INLINE part of the page table (USHMPG in kdata)
+// r710: a paged object holds up to SHM_PAGES_LIMIT pages (512 MiB). The first 256 addresses stay in USHMPG, the rest live in an
+// OUT-OF-LINE table: a run of frames (SM_BASE = its first frame, SM_TABN = how many frames) that grows with the object.
+const SHM_PAGES_LIMIT: u64 = 131072
+const PG_PER_TAB: u64 = 512 // addresses per table frame (4096 / 8)
 // COMPOSITOR S3: a CONTIGUOUS object (`MFD_FRAMES`) is one run of frames and costs no table: 8192 pages = 32 MiB (3440 x 1440 x 4 is 19 MB)
 const SHM_PAGES_CONTIG: u64 = 8192
 
@@ -218,6 +222,7 @@ const SM_SIZE: u64 = 24 // die Groesse, die `ftruncate` gesetzt hat
 const SM_SEALS: u64 = 32 // F_ADD_SEALS
 const SM_BASE: u64 = 40 // COMPOSITOR S3: the first frame of a contiguous object (the frames lie one after the other), 0 = none yet
 const SM_FLAGS: u64 = 48 // SMF_*
+const SM_TABN: u64 = 56 // r710: frames of the out-of-line page table of a paged object (SM_BASE), 0 = none
 const SMF_CONTIG: u64 = 1 // the frames are ONE run (`mem.frame_run`): the window server can compose from them
 const SMF_RO: u64 = 2 // may only be mapped read-only, never grown or written through a descriptor
 const SMF_KEEP: u64 = 4 // the frames belong to the kernel (the window table page): never freed with the object
@@ -269,6 +274,19 @@ fn sm_at(i: u64) -> u64 {
 
 fn pg_at(i: u64, p: u64) -> u64 {
     return USHMPG_OFF + (i * SHM_PAGES_MAX + p) * 8
+}
+
+// r710: where the address of page `p` of paged object `i` is stored: the inline table for the first 256 pages, the out-of-line
+// table (SM_BASE) behind it. 0 = no such slot (table not grown that far yet).
+fn pg_slot(state: u64, i: u64, p: u64) -> u64 {
+    if p < SHM_PAGES_MAX {
+        return pg_at(i, p)
+    }
+    let q: u64 = p - SHM_PAGES_MAX
+    if q >= kstate.get(state, sm_at(i) + SM_TABN) * PG_PER_TAB {
+        return 0
+    }
+    return kstate.get(state, sm_at(i) + SM_BASE) + q * 8
 }
 
 // COMPOSITOR S3: the records of objects 16..39 follow the first 16 (record size 64): sm_at(i) = USHM_OFF + i * 64 is right for all 40.
@@ -1078,7 +1096,7 @@ fn shm_max_pages(state: u64, i: u64) -> u64 {
     if shm_contig(state, i) {
         return SHM_PAGES_CONTIG
     }
-    return SHM_PAGES_MAX
+    return SHM_PAGES_LIMIT
 }
 
 fn shm_pages(state: u64, i: u64) -> u64 {
@@ -1098,10 +1116,47 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
     if shm_contig(state, i) {
         return kstate.get(state, sm_at(i) + SM_BASE) + p * mem.FRAME_SIZE
     }
-    if p >= SHM_PAGES_MAX || i >= USHM_PAGED {
+    if p >= SHM_PAGES_LIMIT || i >= USHM_PAGED {
         return 0
     }
-    return rd64(pg_at(i, p))
+    let slot: u64 = pg_slot(state, i, p)
+    if slot == 0 {
+        return 0
+    }
+    return rd64(slot)
+}
+
+// r710: make the out-of-line table big enough for `n` pages (copy the old one over, free it). 0 = ok, else an errno.
+fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
+    if n <= SHM_PAGES_MAX {
+        return 0
+    }
+    let want: u64 = (n - SHM_PAGES_MAX + PG_PER_TAB - 1) / PG_PER_TAB
+    let have: u64 = kstate.get(state, sm_at(i) + SM_TABN)
+    if want <= have {
+        return 0
+    }
+    let run: u64 = mem.frame_run(state, want)
+    if run == 0 {
+        return errno.E_NOMEM
+    }
+    var o: u64 = 0
+    while o < want * PG_PER_TAB {
+        wr64(run + o * 8, 0)
+        o = o + 1
+    }
+    if have != 0 {
+        let old: u64 = kstate.get(state, sm_at(i) + SM_BASE)
+        o = 0
+        while o < have * PG_PER_TAB {
+            wr64(run + o * 8, rd64(old + o * 8))
+            o = o + 1
+        }
+        mem.frame_free_run(state, old, have)
+    }
+    kstate.set(state, sm_at(i) + SM_BASE, run)
+    kstate.set(state, sm_at(i) + SM_TABN, want)
+    return 0
 }
 
 // Auf `n` Rahmen wachsen. Rahmen werden GENULLT -- ein Bildpuffer, in
@@ -1136,8 +1191,12 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
         kstate.set(state, sm_at(i) + SM_PAGES, n)
         return 0
     }
-    if n > SHM_PAGES_MAX {
+    if n > SHM_PAGES_LIMIT {
         return errno.E_NOSPC
+    }
+    let tab_err: u64 = shm_tab_for(state, i, n)
+    if tab_err != 0 {
+        return tab_err
     }
     var have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
     while have < n {
@@ -1150,7 +1209,7 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
             wr64(f + o * 8, 0)
             o = o + 1
         }
-        wr64(pg_at(i, have), f)
+        wr64(pg_slot(state, i, have), f)
         have = have + 1
         kstate.set(state, sm_at(i) + SM_PAGES, have)
     }
@@ -1243,12 +1302,20 @@ fn shm_free(state: u64, i: u64) {
     }
     var p: u64 = 0
     while p < n {
-        let f: u64 = rd64(pg_at(i, p))
-        if f != 0 {
-            mem.frame_free(state, f)
+        let slot: u64 = pg_slot(state, i, p)
+        if slot != 0 {
+            let f: u64 = rd64(slot)
+            if f != 0 {
+                mem.frame_free(state, f)
+            }
+            wr64(slot, 0)
         }
-        wr64(pg_at(i, p), 0)
         p = p + 1
+    }
+    if kstate.get(state, sm_at(i) + SM_TABN) != 0 {
+        mem.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), kstate.get(state, sm_at(i) + SM_TABN))
+        kstate.set(state, sm_at(i) + SM_BASE, 0)
+        kstate.set(state, sm_at(i) + SM_TABN, 0)
     }
     kstate.set(state, sm_at(i) + SM_USED, 0)
     kstate.set(state, sm_at(i) + SM_REFS, 0)

@@ -465,7 +465,7 @@ echo x >
 echo ok1
 cd
 pwd
-echo one two three four five six seven eight nine
+echo a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a
 echo ok2
 SCRIPT
 printf 'echo ' >> "$TMPD/t8.sh"

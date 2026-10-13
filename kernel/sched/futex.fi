@@ -1,0 +1,644 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/sched/futex.fi -- futex with a REAL wait queue (r714).
+//
+// Until now `futex(WAIT)` polled: every waiter slept one tick (10 ms), looked at the word again, and `FUTEX_WAKE`
+// did nothing. A lock handed over between threads cost up to 10 ms per hand-over (GTK, Qt, Firefox, foot's worker pool).
+//
+// Now: a waiter is entered into a table (one entry per task slot) and sleeps in S_SLEEP; a waker finds the entries of the
+// word and makes exactly the requested number ready.
+//
+// RACE FREEDOM. The value check, the entry in the table, S_SLEEP and the switch happen under ONE hold of L_SCHED (the same
+// lock `sleep_ticks` and `wait_sleep` use). Every waker takes the same lock. So a wake can not fall between "the value
+// still stands" and "the waiter sleeps": either the waker comes first (the user space already changed the word, the
+// waiter sees the new value and answers EAGAIN) or it comes after (the entry is in the table, it is found and woken).
+// The only thing left without the lock is a SIGNAL: `signal.send_task` does a lock-free CAS S_SLEEP -> S_READY. A signal that
+// arrives between our `interrupted` check and S_SLEEP is not lost forever, because an untimed wait is cut to one second
+// (answer 0 = spurious wake-up, which futex(2) allows).
+//
+// KEYS. A waiter is found by the PHYSICAL address of the word (shared mappings, other processes) OR by (address space,
+// virtual address) (a private word whose page was copied by COW between wait and wake). Over-matching is only a spurious
+// wake-up; under-matching would be a lost wake-up. A wake serves the virtual-key matches first, then the physical-only ones.
+//
+// Operations: WAIT, WAKE, REQUEUE, CMP_REQUEUE, WAKE_OP, WAIT_BITSET, WAKE_BITSET, LOCK_PI, UNLOCK_PI, TRYLOCK_PI.
+// PI is the MINIMUM: the owner word protocol of Linux (tid | WAITERS | OWNER_DIED bit untouched) and hand-over to the oldest
+// waiter -- but NO priority boost. Not done: the *_REQUEUE_PI pair (ENOSYS), robust lists.
+import lib.kstate
+import lib.errno
+import sched.sched
+import sched.proc
+import sched.signal
+import sched.time
+import sync.atomic
+import arch.cpu
+import arch.x86_64.guard
+
+export {
+    call, stats_waits, stats_wakes, queued_count
+}
+
+const FQ_MAX: u64 = 256 // table size, >= kstate.MAX_TASKS (W-LIMITS3 goes to 128)
+
+const OP_WAIT: u64 = 0
+const OP_WAKE: u64 = 1
+const OP_REQUEUE: u64 = 3
+const OP_CMP_REQUEUE: u64 = 4
+const OP_WAKE_OP: u64 = 5
+const OP_LOCK_PI: u64 = 6
+const OP_UNLOCK_PI: u64 = 7
+const OP_TRYLOCK_PI: u64 = 8
+const OP_WAIT_BITSET: u64 = 9
+const OP_WAKE_BITSET: u64 = 10
+const FLAG_PRIVATE: u64 = 128
+const FLAG_CLOCK_RT: u64 = 256
+
+const BITS_ANY: u64 = 0xFFFFFFFF
+const PI_BITS: u64 = 0x100000000 // marks a PI waiter: no 32-bit mask can match it
+const TID_MASK: u64 = 0x3FFFFFFF
+const WAITERS_BIT: u64 = 0x80000000
+const E_DEADLK: u64 = 35
+const SLEEP_CAP: u64 = 100 // ticks: an untimed wait is cut after this (spurious wake-up)
+const FOREVER: u64 = 0x3FFFFFFFFFFFFFFF
+
+// One entry per task slot. The entry is live while `fq_vkey` is not 0.
+static mut fq_vkey: [u64; 256] = [0 as u64; 256]
+static mut fq_pkey: [u64; 256] = [0 as u64; 256]
+static mut fq_bits: [u64; 256] = [0 as u64; 256]
+static mut fq_pid: [u64; 256] = [0 as u64; 256]
+static mut fq_ticket: [u64; 256] = [0 as u64; 256]
+static mut fq_count: [u64; 4] = [0 as u64; 4] // 0 = next ticket, 1 = waits, 2 = wakes
+
+fn neg(e: u64) -> u64 {
+    return errno.neg(e)
+}
+
+fn stats_waits() -> u64 {
+    return fq_count[1 as usize]
+}
+
+fn stats_wakes() -> u64 {
+    return fq_count[2 as usize]
+}
+
+fn queued_count() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < FQ_MAX {
+        if fq_vkey[i as usize] != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ user memory
+
+fn rd32(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    return rd32_phys(state, phys)
+}
+
+fn rd32_phys(state: u64, phys: u64) -> u64 {
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+        | ((kstate.get8(phys + 2) as u64) << 16)
+        | ((kstate.get8(phys + 3) as u64) << 24)
+    guard.clac(state)
+    return v
+}
+
+fn rd64(state: u64, me: u64, addr: u64) -> u64 {
+    return rd32(state, me, addr) | (rd32(state, me, addr + 4) << 32)
+}
+
+// Atomic compare-and-swap of a 32-bit word in user memory (through the identity mapping), done as a 64-bit CAS on the
+// aligned octet pair. True when the word was `old` and is `new` now.
+fn cas32(state: u64, phys: u64, old: u64, new: u64) -> bool {
+    let base: u64 = phys & (~7)
+    var shift: u64 = 0
+    if (phys & 4) != 0 {
+        shift = 32
+    }
+    let hole: u64 = ~(0xFFFFFFFF << shift)
+    var tries: u64 = 0
+    while tries < 1000 {
+        guard.stac(state)
+        let cur: u64 = __mmio_read64(base as *mut u64)
+        guard.clac(state)
+        if ((cur >> shift) & 0xFFFFFFFF) != (old & 0xFFFFFFFF) {
+            return false
+        }
+        let want: u64 = (cur & hole) | ((new & 0xFFFFFFFF) << shift)
+        guard.stac(state)
+        let got: u64 = atomic.cas(base, cur, want)
+        guard.clac(state)
+        if got == cur {
+            return true
+        }
+        tries = tries + 1
+    }
+    return false
+}
+
+// The key of an address: the virtual key needs the address space (the thread group leader's slot).
+fn space_of(state: u64, me: u64) -> u64 {
+    let g: u64 = sched.tget(state, me, sched.T_TGID)
+    if g == 0 || g == sched.tget(state, me, sched.T_PID) {
+        return me
+    }
+    let l: u64 = sched.find_pid(state, g)
+    if l >= kstate.MAX_TASKS {
+        return me
+    }
+    return l
+}
+
+fn vkey_of(state: u64, me: u64, addr: u64) -> u64 {
+    return ((space_of(state, me) + 1) << 48) | (addr & 0xFFFFFFFFFFFF)
+}
+
+// ---------------------------------------------- queue (L_SCHED must be held)
+
+fn lock(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    return flags
+}
+
+fn unlock(state: u64, flags: u64) {
+    atomic.lock_give(state, atomic.L_SCHED)
+    sched.irq_restore(flags)
+}
+
+// Is the entry of slot `j` a sleeper that a wake may take? A stale entry (slot reused by another pid) is dropped.
+fn live(state: u64, j: u64) -> bool {
+    if fq_vkey[j as usize] == 0 {
+        return false
+    }
+    if sched.tget(state, j, sched.T_PID) != fq_pid[j as usize] {
+        fq_vkey[j as usize] = 0
+        return false
+    }
+    return sched.tget(state, j, sched.T_STATE) == sched.S_SLEEP
+}
+
+fn matches(j: u64, pkey: u64, vkey: u64, pass: u64) -> bool {
+    if pass == 0 {
+        return fq_vkey[j as usize] == vkey
+    }
+    return fq_pkey[j as usize] == pkey && fq_vkey[j as usize] != vkey
+}
+
+// Oldest live waiter of the word whose mask meets `bits`, or FQ_MAX.
+fn oldest(state: u64, pkey: u64, vkey: u64, bits: u64, pass: u64) -> u64 {
+    var best: u64 = FQ_MAX
+    var best_t: u64 = 0xFFFFFFFFFFFFFFFF
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n && j < FQ_MAX {
+        if live(state, j) && matches(j, pkey, vkey, pass)
+            && (fq_bits[j as usize] & bits) != 0 && fq_ticket[j as usize] < best_t {
+            best = j
+            best_t = fq_ticket[j as usize]
+        }
+        j = j + 1
+    }
+    return best
+}
+
+fn wake_slot(state: u64, j: u64) {
+    fq_vkey[j as usize] = 0
+    sched.state_cas(state, j, sched.S_SLEEP, sched.S_READY)
+    fq_count[2 as usize] = fq_count[2 as usize] + 1
+}
+
+// Wake up to `want` waiters of the word. Returns how many.
+fn wake_some(state: u64, pkey: u64, vkey: u64, want: u64, bits: u64) -> u64 {
+    var done: u64 = 0
+    var pass: u64 = 0
+    while pass < 2 && done < want {
+        var more: bool = true
+        while more && done < want {
+            let j: u64 = oldest(state, pkey, vkey, bits, pass)
+            if j >= FQ_MAX {
+                more = false
+            } else {
+                wake_slot(state, j)
+                done = done + 1
+            }
+        }
+        pass = pass + 1
+    }
+    return done
+}
+
+// Move up to `want` waiters from one word to another (no wake-up). Returns how many.
+fn move_some(state: u64, pkey: u64, vkey: u64, pkey2: u64, vkey2: u64, want: u64) -> u64 {
+    var done: u64 = 0
+    var pass: u64 = 0
+    while pass < 2 && done < want {
+        var more: bool = true
+        while more && done < want {
+            let j: u64 = oldest(state, pkey, vkey, BITS_ANY | PI_BITS, pass)
+            if j >= FQ_MAX {
+                more = false
+            } else {
+                fq_vkey[j as usize] = vkey2
+                fq_pkey[j as usize] = pkey2
+                done = done + 1
+            }
+        }
+        pass = pass + 1
+    }
+    return done
+}
+
+fn pi_waiting(state: u64, pkey: u64, vkey: u64) -> bool {
+    return oldest(state, pkey, vkey, PI_BITS, 0) < FQ_MAX || oldest(state, pkey, vkey, PI_BITS, 1) < FQ_MAX
+}
+
+// ------------------------------------------------------------------ waiting
+
+// Enter the table and sleep until woken, signalled or `deadline` (absolute tick, 0 = none).
+// `expect` is the value the word must still have; PI passes check_word = false (it did its own check).
+// Returns 0 woken (or spurious), -EAGAIN, -EINTR, -ETIMEDOUT.
+fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, deadline: u64,
+    check_word: bool) -> u64 {
+    if signal.interrupted(state, me) {
+        return neg(errno.E_INTR)
+    }
+    let flags: u64 = lock(state)
+    if check_word && rd32_phys(state, phys) != (expect & 0xFFFFFFFF) {
+        unlock(state, flags)
+        return neg(errno.E_AGAIN)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if deadline != 0 && deadline <= now {
+        unlock(state, flags)
+        return neg(errno.E_TIMEDOUT)
+    }
+    fq_vkey[me as usize] = vkey
+    fq_pkey[me as usize] = phys
+    fq_bits[me as usize] = bits
+    fq_pid[me as usize] = sched.tget(state, me, sched.T_PID)
+    fq_ticket[me as usize] = fq_count[0 as usize]
+    fq_count[0 as usize] = fq_count[0 as usize] + 1
+    fq_count[1 as usize] = fq_count[1 as usize] + 1
+    var due: u64 = now + SLEEP_CAP
+    if deadline != 0 && deadline < due {
+        due = deadline
+    }
+    sched.tset(state, me, sched.T_WAKE, due)
+    sched.tset(state, me, sched.T_STATE, sched.S_SLEEP)
+    sched.schedule_locked(state)
+    sched.irq_restore(flags)
+    // Back again: woken by a waker (entry already cleared), or by the timer / a signal (entry still ours).
+    let f2: u64 = lock(state)
+    var queued: bool = false
+    if fq_vkey[me as usize] != 0 && fq_pid[me as usize] == sched.tget(state, me, sched.T_PID) {
+        queued = true
+        fq_vkey[me as usize] = 0
+    }
+    unlock(state, f2)
+    if !queued {
+        return 0
+    }
+    if signal.interrupted(state, me) {
+        return neg(errno.E_INTR)
+    }
+    if deadline != 0 && kstate.get(state, kstate.TICKS) >= deadline {
+        return neg(errno.E_TIMEDOUT)
+    }
+    return 0
+}
+
+// The tick at which a wait ends: from the user timespec (0 = no timeout). `absolute` = FUTEX_WAIT_BITSET.
+// Result >= DL_ERR is an error: DL_ERR | errno (no real deadline tick gets that high).
+const DL_ERR: u64 = 0xF000000000000000
+
+fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u64 {
+    if ts == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, ts, 16) {
+        return DL_ERR | errno.E_FAULT
+    }
+    let sec: u64 = rd64(state, me, ts)
+    let nsec: u64 = rd64(state, me, ts + 8)
+    if nsec >= 1000000000 {
+        return DL_ERR | errno.E_INVAL
+    }
+    var ns: u64 = 0
+    if absolute {
+        var clock: u64 = time.mono_ns(state)
+        if on_real {
+            clock = time.real_ns(state)
+        }
+        if sec > 4000000000 {
+            ns = 0x7FFFFFFFFFFFFFFF
+        } else {
+            ns = sec * 1000000000 + nsec
+        }
+        if ns <= clock {
+            return 1 // already past: tick 1 is always in the past
+        }
+        ns = ns - clock
+    } else {
+        if sec > 4000000 {
+            ns = 0x7FFFFFFFFFFFFFFF
+        } else {
+            ns = sec * 1000000000 + nsec
+        }
+        if ns == 0 {
+            return 1
+        }
+    }
+    var rest: u64 = (ns / 10000000) + 1
+    if rest > 0x3FFFFFFF {
+        rest = 0x3FFFFFFF
+    }
+    return kstate.get(state, kstate.TICKS) + rest
+}
+
+// ------------------------------------------------------------------- PI
+
+fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, uaddr)
+    if phys == 0 {
+        return neg(errno.E_FAULT)
+    }
+    let vkey: u64 = vkey_of(state, me, uaddr)
+    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    let deadline: u64 = deadline_of(state, me, ts, true, true)
+    if deadline >= DL_ERR {
+        return neg(deadline - DL_ERR)
+    }
+    var rounds: u64 = 0
+    while rounds < 100000 {
+        let v: u64 = rd32_phys(state, phys)
+        if v == 0 {
+            if cas32(state, phys, 0, tid) {
+                return take_done(state, phys, vkey, tid)
+            }
+        } else {
+            if (v & TID_MASK) == tid {
+                return neg(E_DEADLK)
+            }
+            if (v & WAITERS_BIT) == 0 {
+                cas32(state, phys, v, v | WAITERS_BIT)
+            }
+            let r: u64 = sleep_on(state, me, phys, vkey, v | WAITERS_BIT, PI_BITS, deadline, true)
+            if r != 0 && r != neg(errno.E_AGAIN) {
+                return r
+            }
+        }
+        rounds = rounds + 1
+    }
+    return neg(errno.E_AGAIN)
+}
+
+// The lock was just taken from state 0: keep the WAITERS bit if more PI waiters are queued.
+fn take_done(state: u64, phys: u64, vkey: u64, tid: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let more: bool = pi_waiting(state, phys, vkey)
+    unlock(state, flags)
+    if more {
+        cas32(state, phys, tid, tid | WAITERS_BIT)
+    }
+    return 0
+}
+
+fn trylock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, uaddr)
+    if phys == 0 {
+        return neg(errno.E_FAULT)
+    }
+    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    let v: u64 = rd32_phys(state, phys)
+    if v != 0 {
+        if (v & TID_MASK) == tid {
+            return neg(E_DEADLK)
+        }
+        return neg(errno.E_AGAIN)
+    }
+    if cas32(state, phys, 0, tid) {
+        return take_done(state, phys, vkey_of(state, me, uaddr), tid)
+    }
+    return neg(errno.E_AGAIN)
+}
+
+fn unlock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, uaddr)
+    if phys == 0 {
+        return neg(errno.E_FAULT)
+    }
+    let vkey: u64 = vkey_of(state, me, uaddr)
+    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    var tries: u64 = 0
+    while tries < 1000 {
+        let v: u64 = rd32_phys(state, phys)
+        if (v & TID_MASK) != tid {
+            return neg(errno.E_PERM)
+        }
+        // Free the word, then wake the oldest PI waiter, which takes it in its own retry.
+        if cas32(state, phys, v, 0) {
+            let flags: u64 = lock(state)
+            wake_some(state, phys, vkey, 1, PI_BITS)
+            unlock(state, flags)
+            return 0
+        }
+        tries = tries + 1
+    }
+    return neg(errno.E_AGAIN)
+}
+
+// ----------------------------------------------------------------- WAKE_OP
+
+fn cmp_ok(cmp: u64, a: u64, b: u64) -> bool {
+    // a, b are 32-bit; compare as signed 32-bit
+    var x: u64 = a
+    var y: u64 = b
+    if x >= 0x80000000 {
+        x = x + 0xFFFFFFFF00000000
+    }
+    if y >= 0x80000000 {
+        y = y + 0xFFFFFFFF00000000
+    }
+    // bias both by 2^63 so unsigned order equals signed order
+    let xs: u64 = x ^ 0x8000000000000000
+    let ys: u64 = y ^ 0x8000000000000000
+    if cmp == 0 {
+        return a == b
+    }
+    if cmp == 1 {
+        return a != b
+    }
+    if cmp == 2 {
+        return xs < ys
+    }
+    if cmp == 3 {
+        return xs <= ys
+    }
+    if cmp == 4 {
+        return xs > ys
+    }
+    return xs >= ys
+}
+
+fn wake_op(state: u64, me: u64, uaddr: u64, nwake: u64, uaddr2: u64, nwake2: u64, enc: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, uaddr)
+    let phys2: u64 = proc.translate(state, me, uaddr2)
+    if phys == 0 || phys2 == 0 {
+        return neg(errno.E_FAULT)
+    }
+    var op: u64 = (enc >> 28) & 0xF
+    let cmp: u64 = (enc >> 24) & 0xF
+    let oparg12: u64 = (enc >> 12) & 0xFFF
+    let cmparg12: u64 = enc & 0xFFF
+    var oparg32: u64 = oparg12
+    if oparg12 >= 0x800 {
+        oparg32 = oparg12 + 0xFFFFF000 // sign-extend 12 -> 32 bit
+    }
+    if (op & 8) != 0 {
+        op = op & 7
+        oparg32 = 1 << (oparg12 & 31)
+    }
+    var cmparg32: u64 = cmparg12
+    if cmparg12 >= 0x800 {
+        cmparg32 = cmparg12 + 0xFFFFF000
+    }
+    var old: u64 = 0
+    var done: bool = false
+    var tries: u64 = 0
+    while !done && tries < 1000 {
+        old = rd32_phys(state, phys2)
+        var nv: u64 = oparg32
+        if op == 1 {
+            nv = old + oparg32
+        }
+        if op == 2 {
+            nv = old | oparg32
+        }
+        if op == 3 {
+            nv = old & (~oparg32)
+        }
+        if op == 4 {
+            nv = old ^ oparg32
+        }
+        if op > 4 {
+            return neg(errno.E_NOSYS)
+        }
+        if cas32(state, phys2, old, nv & 0xFFFFFFFF) {
+            done = true
+        }
+        tries = tries + 1
+    }
+    if !done {
+        return neg(errno.E_AGAIN)
+    }
+    let flags: u64 = lock(state)
+    var n: u64 = wake_some(state, phys, vkey_of(state, me, uaddr), nwake, BITS_ANY)
+    if cmp_ok(cmp, old, cmparg32 & 0xFFFFFFFF) {
+        n = n + wake_some(state, phys2, vkey_of(state, me, uaddr2), nwake2, BITS_ANY)
+    }
+    unlock(state, flags)
+    return n
+}
+
+// --------------------------------------------------------------------- entry
+
+// futex(uaddr, op, val, timeout|val2, uaddr2, val3). All return values are Linux's.
+fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64, val3: u64) -> u64 {
+    var cmd: u64 = op
+    if (cmd & FLAG_PRIVATE) != 0 {
+        cmd = cmd - FLAG_PRIVATE
+    }
+    var on_real: bool = false
+    if (cmd & FLAG_CLOCK_RT) != 0 {
+        cmd = cmd - FLAG_CLOCK_RT
+        on_real = true
+    }
+    if (uaddr & 3) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, uaddr, 4) {
+        return neg(errno.E_FAULT)
+    }
+    if cmd == OP_LOCK_PI {
+        return lock_pi(state, me, uaddr, a3)
+    }
+    if cmd == OP_UNLOCK_PI {
+        return unlock_pi(state, me, uaddr)
+    }
+    if cmd == OP_TRYLOCK_PI {
+        return trylock_pi(state, me, uaddr)
+    }
+    let phys: u64 = proc.translate(state, me, uaddr)
+    if phys == 0 {
+        return neg(errno.E_FAULT)
+    }
+    let vkey: u64 = vkey_of(state, me, uaddr)
+    if cmd == OP_WAIT || cmd == OP_WAIT_BITSET {
+        var wbits: u64 = BITS_ANY
+        if cmd == OP_WAIT_BITSET {
+            wbits = val3 & 0xFFFFFFFF
+            if wbits == 0 {
+                return neg(errno.E_INVAL)
+            }
+        }
+        let deadline: u64 = deadline_of(state, me, a3, cmd == OP_WAIT_BITSET, on_real)
+        if deadline >= DL_ERR {
+            return neg(deadline - DL_ERR)
+        }
+        return sleep_on(state, me, phys, vkey, val, wbits, deadline, true)
+    }
+    if cmd == OP_WAKE || cmd == OP_WAKE_BITSET {
+        var bits: u64 = BITS_ANY
+        if cmd == OP_WAKE_BITSET {
+            bits = val3 & 0xFFFFFFFF
+            if bits == 0 {
+                return neg(errno.E_INVAL)
+            }
+        }
+        let want: u64 = val & 0xFFFFFFFF
+        if want >= 0x80000000 {
+            return 0 // a negative count wakes nobody
+        }
+        let flags: u64 = lock(state)
+        let n: u64 = wake_some(state, phys, vkey, want, bits)
+        unlock(state, flags)
+        return n
+    }
+    if cmd == OP_REQUEUE || cmd == OP_CMP_REQUEUE {
+        if (uaddr2 & 3) != 0 || !proc.user_ok(state, me, uaddr2, 4) {
+            return neg(errno.E_FAULT)
+        }
+        let phys2: u64 = proc.translate(state, me, uaddr2)
+        if phys2 == 0 {
+            return neg(errno.E_FAULT)
+        }
+        let vkey2: u64 = vkey_of(state, me, uaddr2)
+        let nwake: u64 = val & 0x7FFFFFFF
+        let nmove: u64 = a3 & 0x7FFFFFFF
+        let flags: u64 = lock(state)
+        if cmd == OP_CMP_REQUEUE && rd32_phys(state, phys) != (val3 & 0xFFFFFFFF) {
+            unlock(state, flags)
+            return neg(errno.E_AGAIN)
+        }
+        let woken: u64 = wake_some(state, phys, vkey, nwake, BITS_ANY)
+        var moved: u64 = 0
+        if phys2 != phys || vkey2 != vkey {
+            moved = move_some(state, phys, vkey, phys2, vkey2, nmove)
+        }
+        unlock(state, flags)
+        return woken + moved
+    }
+    if cmd == OP_WAKE_OP {
+        return wake_op(state, me, uaddr, val & 0x7FFFFFFF, uaddr2, a3 & 0x7FFFFFFF, val3)
+    }
+    return neg(errno.E_NOSYS)
+}

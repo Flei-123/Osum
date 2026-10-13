@@ -82,6 +82,7 @@ import bus.bus
 import ipc.perm
 import sched.ctr
 import sched.origin
+import sched.futex
 import ui.ax
 import klog
 import diag.crash
@@ -2719,7 +2720,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE FREMDLAND: `futex`. musl sperrt damit, und zwar auch dann,
     // wenn nur ein Faden laeuft.
     if number == SYS_FUTEX {
-        return do_futex(state, me, a0, a1, a2, a3)
+        return futex.call(state, me, a0, a1, a2, a3, a4, a5)
     }
     // RUNDE FREMDLAND: `mprotect`. Dieser Kern gibt jede Seite eines
     // Programms mit den Rechten aus, die sein Programmkopf verlangt, und
@@ -8870,130 +8871,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     return neue_tid
 }
 
-// RUNDE FREMDLAND: `futex` -- die Sperre, auf der musl steht.
-//
-// WAS HIER WIRKLICH GEBAUT IST, und der Satz gehoert in den Quelltext
-// und nicht in eine Zusage, die niemand nachliest: dies ist ein
-// WARTEN MIT NACHSEHEN, keine Warteschlange. `FUTEX_WAIT` prueft den
-// Wert, und solange er steht, schlaeft der Faden eine Marke und sieht
-// wieder nach. `FUTEX_WAKE` tut deshalb NICHTS ausser zu zaehlen -- es
-// gibt keine Liste, aus der zu wecken waere.
-//
-// Warum das reicht: eine Sperre, die gehalten wird, wird von IHREM
-// HALTER freigegeben, und der laeuft. Der Wartende sieht die Aenderung
-// spaetestens eine Marke (10 ms) spaeter. Das kostet Zeit und keine
-// Richtigkeit -- was NICHT passieren kann, ist ein verpasstes Wecken,
-// denn es wird nicht auf ein Wecksignal gewartet, sondern auf den WERT.
-//
-// Was es nicht kann und was deshalb hier steht: eine Sperre, die
-// hochfrequent gewechselt wird, kostet 10 ms je Wechsel statt Mikro-
-// sekunden. Eine echte Warteschlange an `T_FUTEX`/`T_FUTEXVAL` (die
-// Felder stehen seit Langem in `sched.fi`) ist der naechste Schritt.
-fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
-    zeit: u64) -> u64 {
-    // Die beiden Zusatzbits sagen nur, ob die Sperre prozesslokal ist
-    // und welche Uhr gilt; fuer das Verhalten hier macht beides nichts.
-    // Die Maske wird ABGEZOGEN und nicht negiert: `!` ist in dieser
-    // Sprache der logische Nicht-Operator und nimmt nur bool.
-    var was: u64 = befehl
-    if (was & FUTEX_PRIVATE) != 0 {
-        was = was - FUTEX_PRIVATE
-    }
-    var on_real: bool = false
-    if (was & FUTEX_CLOCK_RT) != 0 {
-        was = was - FUTEX_CLOCK_RT
-        on_real = true
-    }
-    if (adresse & 3) != 0 {
-        return neg(errno.E_INVAL)
-    }
-    if !proc.user_ok(state, me, adresse, 4) {
-        return neg(errno.E_FAULT)
-    }
-    if was == FUTEX_WAKE || was == UB_FUTEX_WAKE_BITSET {
-        // Es gibt keine Warteschlange, aus der zu wecken waere: die
-        // Wartenden sehen selbst nach. Die Antwort ist die Zahl der
-        // geweckten Faeden, und ehrlich ist hier 0.
-        return 0
-    }
-    if was != FUTEX_WAIT && was != UB_FUTEX_WAIT_BITSET {
-        return neg(errno.E_INVAL)
-    }
-    // Steht der Wert nicht mehr, hat der Aufrufer die Aenderung
-    // verpasst und darf sofort weiter -- das ist der ganze Sinn des
-    // Wertvergleichs im Kern.
-    if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
-        return neg(errno.E_AGAIN)
-    }
-    // Ohne Zeitangabe wird nicht ewig gewartet, sondern hoechstens
-    // FUTEX_MAX Marken. Ein Faden, der wirklich ewig wartet, ist von
-    // einem verklemmten nicht zu unterscheiden, und dieser Kern hat
-    // keinen, der ihn loesen koennte.
-    var rest: u64 = FUTEX_MAX
-    // RUNDE UNTERBAU: THE TIMEOUT IS HONOURED. Until this round `zeit` was ignored and every timed wait ran FUTEX_MAX ticks (10 s): a
-    // `pthread_cond_timedwait` of 50 ms took 9991 ms (measured, t_threads `cond_timedwait_times_out`), and with it every timeout in
-    // a program built on musl's timed waits (sem_timedwait, pthread_mutex_timedlock, ...). FUTEX_WAIT takes a RELATIVE timespec,
-    // FUTEX_WAIT_BITSET an ABSOLUTE one (on the monotonic clock, or the real-time clock with the flag). The grain is the 10 ms tick.
-    if zeit != 0 {
-        if !proc.user_ok(state, me, zeit, 16) {
-            return neg(errno.E_FAULT)
-        }
-        let sec: u64 = user_word(state, me, zeit)
-        let nsec: u64 = user_word(state, me, zeit + 8)
-        if nsec >= 1000000000 {
-            return neg(errno.E_INVAL)
-        }
-        var ns: u64 = 0
-        if was == UB_FUTEX_WAIT_BITSET {
-            var now: u64 = time.mono_ns(state)
-            if on_real {
-                now = time.real_ns(state)
-            }
-            if sec > 4000000000 {
-                ns = 0x7FFFFFFFFFFFFFFF
-            } else {
-                ns = sec * 1000000000 + nsec
-            }
-            if ns <= now {
-                return neg(errno.E_TIMEDOUT)
-            }
-            ns = ns - now
-        } else {
-            if sec > 4000000 {
-                ns = 0x7FFFFFFFFFFFFFFF
-            } else {
-                ns = sec * 1000000000 + nsec
-            }
-            if ns == 0 {
-                return neg(errno.E_TIMEDOUT)
-            }
-        }
-        rest = (ns / 10000000) + 1
-        if rest > 0x3FFFFFFF {
-            rest = 0x3FFFFFFF
-        }
-    }
-    while rest > 0 {
-        if signal.interrupted(state, me) {
-            return neg(errno.E_INTR)
-        }
-        sched.sleep_ticks(state, 1)
-        if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
-            return 0
-        }
-        rest = rest - 1
-    }
-    // r708: a wait WITHOUT a timeout must not fail. It used to return ETIMEDOUT after FUTEX_MAX ticks (10 s); musl's sem_wait()
-    // hands that error to its caller, and foot's idle render worker (sem_wait on `start`, result ignored) then popped an empty job
-    // queue and died with #PF cr2=0x8 exactly 10 s after it went idle. futex(2) allows spurious wake-ups, so return 0: the caller
-    // looks at its word again and waits again.
-    if zeit == 0 {
-        return 0
-    }
-    return neg(errno.E_TIMEDOUT)
-}
-
-const FUTEX_MAX: u64 = 1000 // 10 Sekunden bei 100 Hz
+// `futex` lives in sched/futex.fi (real wait queue, r714).
 
 // Vier Oktette aus dem Adressraum des Aufrufers. `futex` vergleicht
 // einen `int`, nicht ein Wort -- wer hier 64 Bit laese, verglich vier

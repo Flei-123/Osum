@@ -699,7 +699,7 @@ echo "== 11c. die Befehlszeile: zwei Schreibweisen, und acht Woerter =="
 # der erste Lauf dieser Runde gescheitert, deshalb steht es jetzt hier
 # als Messung und nicht als Erinnerung.
 MAXA=$(grep -oE 'argv: \[u64; [0-9]+\]' kernel/user/sh.fi | grep -oE '[0-9]+' | tail -1)
-is "die Shell nimmt so viele Woerter" "$MAXA" "8"
+is "die Shell nimmt so viele Woerter" "$MAXA" "64"
 abbild "$TMPD/dw.img" || true
 lauf "$TMPD/dw.img" "konto anmelden --anbieter jarvis --kennung justin < /pw_gut" "$TMPD/o_w1.txt"
 is "die GETRENNTE Form (sechs Woerter) tut es auch" "$(kv "$TMPD/o_w1.txt" stand)" "ok"
@@ -711,9 +711,9 @@ is "und sie fuehrt zur GLEICHEN Kennung wie die angehaengte" "$W2" "$W1"
 # Die Gegenprobe: dieselbe Anmeldung in der getrennten, langen Form.
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter xoffi --ziel $Z --name $N --kennung mfa@example.test --bereich alpha --code 1 < /pw_gut" "$TMPD/o_w3.txt"
 if grep -qa "too many arguments" "$TMPD/o_w3.txt"; then
-    ok "Gegenprobe: elf Woerter fallen wirklich durch (sh: too many arguments)"
+    bad "die lange Form (elf Woerter) faellt durch -- proc.MAX_ARGS/Shell sind 64 (r716)"
 else
-    bad "Gegenprobe: die lange Form kam durch -- dann misst 11c nichts"
+    ok "die lange Form (elf Woerter) kommt durch (Limit seit r716: 64)"
 fi
 # Und die Konfigdatei: OHNE --ziel, nur aus /etc/konten.conf.
 grep -qa "^jarvis ziel=" "$TMPD/konten.conf" \
