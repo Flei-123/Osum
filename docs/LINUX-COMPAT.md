@@ -54,9 +54,10 @@ Bau: `/root/jarvis/bin/heavy bash tools/unterbau/build-stones.sh <outdir>` (musl
 
 | Stein | Ergebnis (nach den Fixes) | Rest |
 |---|---|---|
-| busybox voll (`bb.sh`, 53 Proben) | 51 ok / 2 offen | `ip` (kein AF_NETLINK), `ifconfig` (kein `/proc/net/dev`; ohne `nic` im Test auch kein Socket: -ENODEV ist Absicht) |
+| busybox voll (`bb.sh`, 53 Proben) | 52 ok / 1 offen | `ip` (kein AF_NETLINK; ein Netlink-Socket mit RTM_GETLINK/GETADDR-Dump ist ein eigener fd-Typ, nicht klein). `ifconfig` geht seit STONES2 (`/proc/net/dev`, SIOCGIFCONF/FLAGS/ADDR/NETMASK/BRDADDR/HWADDR/MTU fuer `eth0`) |
 | python3 3.12.7 (`print`, `os`, Datei, json, dlopen von math/struct/zlib `.so`, Fäden, subprocess, hashlib) | 11/11 ok | Stdlib als EINE ungepackte `.pyc`-Zip (`/lib/python312.zip`), `os.pyc` als Landmark. Läuft `/bin/python3` direkt unter `/bin`, sucht getpath die Wurzel nie -> `PYTHONHOME=/` (oder Installation unter `/usr/bin`). `os.popen`/`system` brauchen busybox als `/bin/sh` (siehe t_proc, BB-SH) |
-| curl 8.10.1 (statisch libcurl, ohne TLS) | `--version`, `file://` ok | http: siehe unten; TLS fehlt (kein musl-OpenSSL gebaut) |
-| git 2.46.2 (ohne openssl/curl/perl) | version, init, hash-object, config, add, commit, log ok | Warnung "templates not found" (kein `share/git-core/templates` im Abbild) |
+| curl 8.10.1 (statisch libcurl, ohne TLS) | `--version`, `file://`, http ok | Ursache der "connect ENOSYS": `getsockopt` (Nr. 55) fehlte; curl fragt nach jedem nicht blockierenden connect SO_ERROR. Seit STONES2 gibt es `do_getsockopt`; TLS fehlt (kein musl-OpenSSL gebaut) |
+| git 2.46.2 (ohne openssl/curl/perl) | version, init, hash-object, config, add, commit, log ok | Warnung "templates not found" behoben (leeres `/share/git-core/templates/` im Abbild) |
 
 Weiter: `STONES_NET=1` startet QEMU mit virtio-net (user) und einem Wegwerf-Webserver des Wirts (10.0.2.2:18765); Kernzeile `nic nip=10.0.2.15/24 ngw=10.0.2.2`.
+Seit STONES2 laufen die Steine standardmaessig aus `/root/stones` (Neubau: `tools/unterbau/build-stones.sh /root/stones`) MIT Netz-Stufe (freier Wirt-Port, `STONES_NET=0` schaltet aus, `STONES=` leer schaltet die Steine aus). Abbild: 28 MB Inhalt belegen 29 MB (Block = 512 Oktette), mkfs.py verschwendet nichts; Stein-Abbild 131072 Bloecke.
