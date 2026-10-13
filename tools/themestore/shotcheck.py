@@ -562,7 +562,12 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
         lo_x, lo_y, hi_x, hi_y = box[0], box[1], box[2], box[3]
         # Nur die Zeilen, in denen wirklich Tinte steht, und nur so weit
         # vom Text weg, wie noch zu seinem Kasten gehoert.
-        for y in range(lo_y, hi_y + 1):
+        # r662: only rows down to the baseline. Below it (descender rows) the
+        # lower edge of a selected row's field runs through the text BOX
+        # without touching a glyph ('Darstellung' with its g: border 6 rows
+        # under the baseline) -- that is a border beside the word, not a line
+        # through it. A line through the word crosses the x-height.
+        for y in range(lo_y, min(hi_y, oy + t["base"]) + 1):
             links = _lauf(pic, lo_x - 2, y, -1, LINIE_LAUF, bg, 10)
             if links is None:
                 continue
