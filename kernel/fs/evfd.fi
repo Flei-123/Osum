@@ -1,0 +1,600 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/fs/evfd.fi -- RUNDE EVENTS (roadmap r663 / r664): the Linux event descriptors.
+//
+// eventfd, timerfd, signalfd, epoll and inotify. GUI toolkits (glib, Qt, libwayland-based clients, foot) build their main loop out of
+// exactly these. This file holds the STATE and the arithmetic; the system calls (user memory, blocking, dispatch) are in sys.fi, next to
+// `poll`, and they wait the same way `poll` waits: `sched.poll_seq` before the look, `sched.poll_sleep` after it, `sched.poll_kick` at every
+// place that makes something ready.
+//
+// WHERE THE STATE LIVES. No new table in kdata: the open-file entry (64 octets, file.fi) has the words for it.
+//   eventfd   OF_OFF = counter (updated with compare-and-swap), OF_X1 = 1 for EFD_SEMAPHORE
+//   timerfd   OF_OFF = first expiry (tick, 0 = disarmed), OF_MNT = interval (ticks), OF_X1 = expirations read, OF_X2 = expirations announced
+//   signalfd  OF_OFF = mask of the signals it takes
+//   epoll     OF_OFF = one frame: 64 octets header + EP_MAX watches of 48 octets
+//   inotify   OF_OFF = one frame: header, IN_WMAX watches, a ring of IN_QMAX events of 32 octets
+//
+// TIME. The timer runs at 100 Hz (one tick = 10 ms). A timerfd computes its expirations from the tick counter ON DEMAND (first expiry,
+// interval, now), so nothing has to be updated at every tick; `tick` only wakes pollers when the number of expirations grew.
+profile kernel
+
+import lib.kstate
+import sched.sched
+import sched.signal
+import mm.mem
+import sync.atomic
+import fs.file
+
+export {
+    efd_new, efd_take, efd_add,
+    tfd_new, tfd_set, tfd_total, tfd_unread, tfd_take, tfd_next, tfd_left, tfd_interval, tick,
+    sfd_new, sfd_mask, sfd_set_mask, sfd_take, sfd_ready,
+    ep_new, ep_find, ep_add, ep_mod, ep_del, ep_used, ep_fd, ep_of, ep_events, ep_data, ep_last,
+    ep_set_events, ep_set_last, ep_drop_slot, ep_count,
+    in_new, in_add, in_rm, in_wd_of, in_push, in_pop_size, in_pop, in_ready, in_match,
+    EP_MAX, IN_WMAX, IN_QMAX, IN_NAMEMAX, IN_EVSIZE,
+    EP_ADD, EP_DEL, EP_MOD, EPOLLET, EPOLLONESHOT, EPOLLRDHUP, EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLPRI,
+    TICK_MS
+}
+
+const TICK_MS: u64 = 10
+
+fn rd64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn wr64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn rd32(p: u64) -> u64 {
+    return __mmio_read32(p as *mut u32) as u64
+}
+
+fn wr32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, v as u32)
+}
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, v as u8)
+}
+
+fn zero_frame(p: u64) {
+    var o: u64 = 0
+    while o < 4096 {
+        wr64(p + o, 0)
+        o = o + 8
+    }
+}
+
+// ======================================================================= eventfd
+
+// A new eventfd. `flags` carries only O_NONBLOCK (2048) of what the caller passed; bit 0 of `sem` makes it a semaphore.
+fn efd_new(state: u64, initval: u64, sem: u64, flags: u64) -> u64 {
+    let of: u64 = file.open_alloc(state, file.K_EVENT, 0, 2 | (flags & 2048))
+    if of >= file.MAX_OPEN {
+        return of
+    }
+    file.open_set_off(state, of, initval)
+    file.open_set_x1(state, of, sem & 1)
+    return of
+}
+
+// Take from the counter: the whole counter, or 1 for a semaphore. 0 = nothing there (the caller blocks or answers EAGAIN).
+fn efd_take(state: u64, of: u64) -> u64 {
+    let p: u64 = file.open_addr(state, of) + file.OF_OFF
+    let sem: u64 = file.open_x1(state, of)
+    var tries: u64 = 0
+    while tries < 100 {
+        let v: u64 = atomic.load(p)
+        if v == 0 {
+            return 0
+        }
+        var want: u64 = 0
+        var got: u64 = v
+        if sem != 0 {
+            got = 1
+            want = v - 1
+        }
+        if atomic.cas(p, v, want) == v {
+            return got
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+// Add to the counter. 0 = done (readers are woken), 1 = it would overflow (0xFFFFFFFFFFFFFFFE is the largest value).
+fn efd_add(state: u64, of: u64, add: u64) -> u64 {
+    let p: u64 = file.open_addr(state, of) + file.OF_OFF
+    var tries: u64 = 0
+    while tries < 100 {
+        let v: u64 = atomic.load(p)
+        if add > 0xFFFFFFFFFFFFFFFE - v {
+            return 1
+        }
+        if atomic.cas(p, v, v + add) == v {
+            sched.poll_kick(state)
+            return 0
+        }
+        tries = tries + 1
+    }
+    return 1
+}
+
+// ======================================================================= timerfd
+
+fn tfd_new(state: u64, flags: u64) -> u64 {
+    let of: u64 = file.open_alloc(state, file.K_TIMER, 0, 2 | (flags & 2048))
+    return of
+}
+
+// Arm (first > 0) or disarm (first = 0). Both are TICK numbers. The counters restart.
+fn tfd_set(state: u64, of: u64, first: u64, interval: u64) {
+    file.open_set_off(state, of, 0)
+    file.open_set_mnt(state, of, interval)
+    file.open_set_x1(state, of, 0)
+    file.open_set_x2(state, of, 0)
+    file.open_set_off(state, of, first)
+    sched.poll_kick(state)
+}
+
+// All expirations since the timer was armed.
+fn tfd_total(state: u64, of: u64, now: u64) -> u64 {
+    let first: u64 = file.open_off(state, of)
+    if first == 0 || now < first {
+        return 0
+    }
+    let iv: u64 = file.open_mnt(state, of)
+    if iv == 0 {
+        return 1
+    }
+    return 1 + (now - first) / iv
+}
+
+fn tfd_unread(state: u64, of: u64, now: u64) -> u64 {
+    let t: u64 = tfd_total(state, of, now)
+    let r: u64 = file.open_x1(state, of)
+    if t <= r {
+        return 0
+    }
+    return t - r
+}
+
+// Read: return the unread expirations and mark them read. 0 = none.
+fn tfd_take(state: u64, of: u64, now: u64) -> u64 {
+    let t: u64 = tfd_total(state, of, now)
+    let r: u64 = file.open_x1(state, of)
+    if t <= r {
+        return 0
+    }
+    file.open_set_x1(state, of, t)
+    return t - r
+}
+
+// The tick of the next expiry that is not yet reached; 0 = the timer will not expire again (disarmed, or a one-shot that fired).
+fn tfd_next(state: u64, of: u64, now: u64) -> u64 {
+    let first: u64 = file.open_off(state, of)
+    if first == 0 {
+        return 0
+    }
+    if now < first {
+        return first
+    }
+    let iv: u64 = file.open_mnt(state, of)
+    if iv == 0 {
+        return 0
+    }
+    return first + tfd_total(state, of, now) * iv
+}
+
+// Ticks until the next expiry (0 = disarmed or expired one-shot).
+fn tfd_left(state: u64, of: u64, now: u64) -> u64 {
+    let n: u64 = tfd_next(state, of, now)
+    if n == 0 || n <= now {
+        return 0
+    }
+    return n - now
+}
+
+fn tfd_interval(state: u64, of: u64) -> u64 {
+    return file.open_mnt(state, of)
+}
+
+// Called from the timer interrupt, every tick: wake the pollers when some timerfd has more expirations than it announced.
+fn tick(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    var i: u64 = 3
+    var kick: bool = false
+    while i < file.MAX_OPEN {
+        if file.open_kind(state, i) == file.K_TIMER {
+            let t: u64 = tfd_total(state, i, now)
+            if t > file.open_x2(state, i) {
+                file.open_set_x2(state, i, t)
+                kick = true
+            }
+        }
+        i = i + 1
+    }
+    if kick {
+        sched.poll_kick(state)
+    }
+}
+
+// ======================================================================= signalfd
+
+fn sfd_new(state: u64, mask: u64, flags: u64) -> u64 {
+    let of: u64 = file.open_alloc(state, file.K_SIGFD, 0, 2 | (flags & 2048))
+    if of >= file.MAX_OPEN {
+        return of
+    }
+    file.open_set_off(state, of, mask & 0xFFFFFFFFFFFFFFFF)
+    return of
+}
+
+fn sfd_mask(state: u64, of: u64) -> u64 {
+    return file.open_off(state, of)
+}
+
+fn sfd_set_mask(state: u64, of: u64, mask: u64) {
+    file.open_set_off(state, of, mask)
+}
+
+// The pending signals of this task that the descriptor takes.
+fn sfd_ready(state: u64, me: u64, of: u64) -> u64 {
+    return signal.pending(state, me) & file.open_off(state, of)
+}
+
+// Take the lowest pending signal of the mask and clear it. 0 = none.
+fn sfd_take(state: u64, me: u64, of: u64) -> u64 {
+    let rdy: u64 = sfd_ready(state, me, of)
+    if rdy == 0 {
+        return 0
+    }
+    var sig: u64 = 1
+    while sig < 64 {
+        let b: u64 = 1 << (sig - 1)
+        if (rdy & b) != 0 {
+            let p: u64 = sched.task_at(state, me) + sched.T_SIGPEND
+            if (atomic.load(p) & b) != 0 {
+                let _o: u64 = atomic.fetch_sub(p, b)
+                return sig
+            }
+            return 0
+        }
+        sig = sig + 1
+    }
+    return 0
+}
+
+// ======================================================================= epoll
+
+const EP_MAX: u64 = 80
+const EP_HEAD: u64 = 64
+const EP_ENT: u64 = 48
+const EP_ADD: u64 = 1
+const EP_DEL: u64 = 2
+const EP_MOD: u64 = 3
+const EPOLLIN: u64 = 1
+const EPOLLPRI: u64 = 2
+const EPOLLOUT: u64 = 4
+const EPOLLERR: u64 = 8
+const EPOLLHUP: u64 = 16
+const EPOLLRDHUP: u64 = 0x2000
+const EPOLLONESHOT: u64 = 0x40000000
+const EPOLLET: u64 = 0x80000000
+
+// entry layout: +0 used, +8 fd, +16 open file, +24 events (with ET / ONESHOT), +32 data, +40 last readiness (edge triggering)
+fn ep_new(state: u64, flags: u64) -> u64 {
+    let fr: u64 = mem.frame_alloc(state)
+    if fr == 0 {
+        return file.MAX_OPEN
+    }
+    zero_frame(fr)
+    let of: u64 = file.open_alloc(state, file.K_EPOLL, 0, 2 | (flags & 2048))
+    if of >= file.MAX_OPEN {
+        mem.frame_free(state, fr)
+        return of
+    }
+    file.open_set_off(state, of, fr)
+    return of
+}
+
+fn ep_at(fr: u64, i: u64) -> u64 {
+    return fr + EP_HEAD + i * EP_ENT
+}
+
+fn ep_used(fr: u64, i: u64) -> bool {
+    return rd64(ep_at(fr, i)) != 0
+}
+
+fn ep_fd(fr: u64, i: u64) -> u64 {
+    return rd64(ep_at(fr, i) + 8)
+}
+
+fn ep_of(fr: u64, i: u64) -> u64 {
+    return rd64(ep_at(fr, i) + 16)
+}
+
+fn ep_events(fr: u64, i: u64) -> u64 {
+    return rd64(ep_at(fr, i) + 24)
+}
+
+fn ep_data(fr: u64, i: u64) -> u64 {
+    return rd64(ep_at(fr, i) + 32)
+}
+
+fn ep_last(fr: u64, i: u64) -> u64 {
+    return rd64(ep_at(fr, i) + 40)
+}
+
+fn ep_set_events(fr: u64, i: u64, v: u64) {
+    wr64(ep_at(fr, i) + 24, v)
+}
+
+fn ep_set_last(fr: u64, i: u64, v: u64) {
+    wr64(ep_at(fr, i) + 40, v)
+}
+
+fn ep_count(fr: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < EP_MAX {
+        if ep_used(fr, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// The slot of descriptor `fd`, or EP_MAX.
+fn ep_find(fr: u64, fd: u64) -> u64 {
+    var i: u64 = 0
+    while i < EP_MAX {
+        if ep_used(fr, i) && ep_fd(fr, i) == fd {
+            return i
+        }
+        i = i + 1
+    }
+    return EP_MAX
+}
+
+// Add. 0 = ok, 1 = already there, 2 = table full.
+fn ep_add(fr: u64, fd: u64, of: u64, events: u64, data: u64) -> u64 {
+    if ep_find(fr, fd) < EP_MAX {
+        return 1
+    }
+    var i: u64 = 0
+    while i < EP_MAX {
+        if !ep_used(fr, i) {
+            let a: u64 = ep_at(fr, i)
+            wr64(a + 8, fd)
+            wr64(a + 16, of)
+            wr64(a + 24, events)
+            wr64(a + 32, data)
+            wr64(a + 40, 0)
+            wr64(a, 1)
+            return 0
+        }
+        i = i + 1
+    }
+    return 2
+}
+
+// Modify. 0 = ok, 1 = not there. Edge state restarts, so a ready descriptor is reported once more -- as Linux does.
+fn ep_mod(fr: u64, fd: u64, events: u64, data: u64) -> u64 {
+    let i: u64 = ep_find(fr, fd)
+    if i >= EP_MAX {
+        return 1
+    }
+    let a: u64 = ep_at(fr, i)
+    wr64(a + 24, events)
+    wr64(a + 32, data)
+    wr64(a + 40, 0)
+    return 0
+}
+
+fn ep_del(fr: u64, fd: u64) -> u64 {
+    let i: u64 = ep_find(fr, fd)
+    if i >= EP_MAX {
+        return 1
+    }
+    wr64(ep_at(fr, i), 0)
+    return 0
+}
+
+fn ep_drop_slot(fr: u64, i: u64) {
+    if i < EP_MAX {
+        wr64(ep_at(fr, i), 0)
+    }
+}
+
+// ======================================================================= inotify
+//
+// Frame layout: +0 next watch descriptor, +8 queue head, +16 queue tail, +24 overflow flag.
+//   watches: IN_WMAX x 80 octets from +64: +0 wd (0 = free), +8 mask, +16 path length, +24 path (up to 56 octets)
+//   queue:   IN_QMAX x 32 octets from +64 + IN_WMAX * 80: wd(4) mask(4) cookie(4) namelen(4, padded to 16) name(16)
+// A watch names a DIRECTORY or a file by its absolute path; events come from the file system calls of sys.fi (create, delete, move, write).
+
+const IN_WMAX: u64 = 24
+const IN_WENT: u64 = 80
+const IN_PATHMAX: u64 = 56
+const IN_QMAX: u64 = 40
+const IN_EVSIZE: u64 = 32
+const IN_NAMEMAX: u64 = 16
+const IN_WOFF: u64 = 64
+const IN_QOFF: u64 = 1984 // 64 + 24 * 80
+
+fn in_new(state: u64, flags: u64) -> u64 {
+    let fr: u64 = mem.frame_alloc(state)
+    if fr == 0 {
+        return file.MAX_OPEN
+    }
+    zero_frame(fr)
+    wr64(fr, 1)
+    let of: u64 = file.open_alloc(state, file.K_INOTIFY, 0, 2 | (flags & 2048))
+    if of >= file.MAX_OPEN {
+        mem.frame_free(state, fr)
+        return of
+    }
+    file.open_set_off(state, of, fr)
+    return of
+}
+
+fn in_w(fr: u64, i: u64) -> u64 {
+    return fr + IN_WOFF + i * IN_WENT
+}
+
+// Add a watch for the path at user-copied `path` (kernel address, `len` octets). Returns the watch descriptor (> 0), or 0 when the table is full.
+// A watch on the same path only changes its mask.
+fn in_add(fr: u64, path: u64, len: u64, mask: u64) -> u64 {
+    if len == 0 || len > IN_PATHMAX {
+        return 0
+    }
+    var i: u64 = 0
+    var free: u64 = IN_WMAX
+    while i < IN_WMAX {
+        let w: u64 = in_w(fr, i)
+        if rd64(w) == 0 {
+            if free == IN_WMAX {
+                free = i
+            }
+        } else if rd64(w + 16) == len {
+            var same: bool = true
+            var o: u64 = 0
+            while o < len {
+                if rd8(w + 24 + o) != rd8(path + o) {
+                    same = false
+                }
+                o = o + 1
+            }
+            if same {
+                wr64(w + 8, mask)
+                return rd64(w)
+            }
+        }
+        i = i + 1
+    }
+    if free == IN_WMAX {
+        return 0
+    }
+    let w: u64 = in_w(fr, free)
+    let wd: u64 = rd64(fr)
+    wr64(fr, wd + 1)
+    wr64(w + 8, mask)
+    wr64(w + 16, len)
+    var o: u64 = 0
+    while o < len {
+        wr8(w + 24 + o, rd8(path + o))
+        o = o + 1
+    }
+    wr64(w, wd)
+    return wd
+}
+
+// Remove a watch. true = it existed.
+fn in_rm(fr: u64, wd: u64) -> bool {
+    var i: u64 = 0
+    while i < IN_WMAX {
+        let w: u64 = in_w(fr, i)
+        if rd64(w) == wd && wd != 0 {
+            wr64(w, 0)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn in_wd_of(fr: u64, i: u64) -> u64 {
+    return rd64(in_w(fr, i))
+}
+
+// Does watch slot `i` watch exactly the path (kernel address `path`, `len`)? Returns its mask, or 0.
+fn in_match(fr: u64, i: u64, path: u64, len: u64) -> u64 {
+    let w: u64 = in_w(fr, i)
+    if rd64(w) == 0 || rd64(w + 16) != len {
+        return 0
+    }
+    var o: u64 = 0
+    while o < len {
+        if rd8(w + 24 + o) != rd8(path + o) {
+            return 0
+        }
+        o = o + 1
+    }
+    return rd64(w + 8)
+}
+
+fn in_q(fr: u64, i: u64) -> u64 {
+    return fr + IN_QOFF + i * IN_EVSIZE
+}
+
+// Queue an event (name may be 0 / len 0). A full queue sets the overflow flag and drops the event.
+fn in_push(state: u64, fr: u64, wd: u64, mask: u64, cookie: u64, name: u64, nlen: u64) {
+    let head: u64 = rd64(fr + 8)
+    let tail: u64 = rd64(fr + 16)
+    if tail - head >= IN_QMAX {
+        wr64(fr + 24, 1)
+        return
+    }
+    let q: u64 = in_q(fr, tail % IN_QMAX)
+    wr32(q, wd)
+    wr32(q + 4, mask)
+    wr32(q + 8, cookie)
+    var n: u64 = nlen
+    if n > IN_NAMEMAX - 1 {
+        n = IN_NAMEMAX - 1
+    }
+    var o: u64 = 0
+    while o < IN_NAMEMAX {
+        wr8(q + 16 + o, 0)
+        o = o + 1
+    }
+    o = 0
+    while o < n {
+        wr8(q + 16 + o, rd8(name + o))
+        o = o + 1
+    }
+    var padded: u64 = 0
+    if nlen != 0 {
+        padded = IN_NAMEMAX
+    }
+    wr32(q + 12, padded)
+    wr64(fr + 16, tail + 1)
+    sched.poll_kick(state)
+}
+
+fn in_ready(fr: u64) -> bool {
+    return rd64(fr + 16) != rd64(fr + 8)
+}
+
+// The size of the next event as read(2) returns it: 16 + padded name length. 0 = queue empty.
+fn in_pop_size(fr: u64) -> u64 {
+    let head: u64 = rd64(fr + 8)
+    if head == rd64(fr + 16) {
+        return 0
+    }
+    return 16 + rd32(in_q(fr, head % IN_QMAX) + 12)
+}
+
+// Copy the next event (header + name) to kernel address `dst` and remove it. Returns its size, 0 = empty.
+fn in_pop(fr: u64, dst: u64) -> u64 {
+    let head: u64 = rd64(fr + 8)
+    if head == rd64(fr + 16) {
+        return 0
+    }
+    let q: u64 = in_q(fr, head % IN_QMAX)
+    let nl: u64 = rd32(q + 12)
+    var o: u64 = 0
+    while o < 16 + nl {
+        wr8(dst + o, rd8(q + o))
+        o = o + 1
+    }
+    wr64(fr + 8, head + 1)
+    return 16 + nl
+}
