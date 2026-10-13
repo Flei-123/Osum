@@ -7914,7 +7914,15 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     let top: u64 = map_bottom(state, me)
     var base: u64 = 0
     var gross: bool = false
-    if pages * PAGE <= top
+    // WP-DEMAND: an object with a sparse part is mapped in its own arena (above the main stack): only the pages that exist are mapped,
+    // the rest is filled by the page-fault handler at the first touch (`unixsock.shm_fault`), so a 512 MiB memfd costs address space only.
+    let lazy: bool = unixsock.shm_lazy(state, i)
+    if lazy {
+        base = unixsock.map_arena_find(state, me, pages, proc.SHM_ARENA_BASE, proc.SHM_ARENA_TOP)
+        if base == 0 {
+            return neg(errno.E_NOMEM)
+        }
+    } else if pages * PAGE <= top
         && top - pages * PAGE >= page_up(brk_of(state, me)) + PAGE {
         base = top - pages * PAGE
     } else {
@@ -7936,23 +7944,34 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     var p: u64 = 0
     while p < pages {
         let frame: u64 = unixsock.shm_frame(state, i, p)
-        if frame == 0 {
+        if frame == 0 && !lazy {
             return neg(errno.E_NOMEM)
         }
         // `proc.map_frame` gibt es seit der Runde mit den geteilten
         // Bussegmenten, und es ist genau das Richtige: es traegt
         // PAGE_SHARED ein, damit `page_drop` den Rahmen beim Abraeumen
         // des Adressraums NICHT freigibt. Er gehoert dem Objekt.
-        if !proc.map_frame(state, me, base + p * PAGE, frame,
-            schreiben) {
-            return neg(errno.E_NOMEM)
+        if frame != 0 {
+            if !proc.map_frame(state, me, base + p * PAGE, frame,
+                schreiben) {
+                return neg(errno.E_NOMEM)
+            }
+            kstate.add(state, kstate.MAPS, 1)
         }
-        kstate.add(state, kstate.MAPS, 1)
         p = p + 1
     }
     unixsock.shm_ref(state, i)
-    let _noted: bool = unixsock.map_note(state, me, i, base, pages)
-    if gross {
+    var note_flags: u64 = 0
+    if lazy {
+        note_flags = unixsock.UM_LAZY
+        if schreiben {
+            note_flags = note_flags | unixsock.UM_WRITE
+        }
+    }
+    let _noted: bool = unixsock.map_note(state, me, i, base, pages, note_flags)
+    if lazy {
+        // the arena has no bump mark
+    } else if gross {
         sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
     } else {
         sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
@@ -8163,7 +8182,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     // RUNDE K16: zwei Fenster statt einem.
     let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
     let in_gross: bool = addr >= big_bottom(state, me) && addr < proc.BIG_TOP
-    if !in_alt && !in_gross {
+    let in_arena: bool = addr >= proc.SHM_ARENA_BASE && addr < proc.SHM_ARENA_TOP
+    if !in_alt && !in_gross && !in_arena {
         return neg(errno.E_INVAL)
     }
     // COMPOSITOR S3: a mapping of a shared object gives its reference back
@@ -8171,7 +8191,7 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     var p: u64 = addr
     let end: u64 = addr + page_up(len)
     while p < end {
-        if p < MMAP_TOP || p < proc.BIG_TOP {
+        if p < MMAP_TOP || p < proc.BIG_TOP || (p >= proc.SHM_ARENA_BASE && p < proc.SHM_ARENA_TOP) {
             proc.page_drop(state, me, p)
         }
         p = p + PAGE

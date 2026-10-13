@@ -23,7 +23,7 @@
  *      `elf.IMAGE_BASE`: above the private data page (0x40000000) and the
  *      eight stack pages (up to 0x40009000), below the end of the private
  *      region (0x40200000). `tools/osum/run.sh` links one program at
- *      0x60000000 on purpose -- the loader has to refuse it.
+ *      0x7C000000 on purpose -- the loader has to refuse it.
  *
  * ENTRY is `_start` out of crt.s; the Firn function under it is named
  * with `--defsym=USER_ENTRY=...` at link time, because firnc0 and firnc1

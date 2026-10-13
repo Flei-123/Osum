@@ -66,8 +66,8 @@ profile kernel
 
 import lib.kstate
 import mm.mem
-import sched.proc
 import sched.sched
+import sync.atomic
 import fs.file
 import lib.errno
 import serial
@@ -83,6 +83,7 @@ export {
     push_fd, pop_fd, fd_waiting,
     // der geteilte Speicher
     map_room, map_note, map_release, map_release_all, maps_live,
+    map_arena_find, shm_demand, demand_lock, demand_unlock, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
     shm_new, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_unref, shm_refs, shm_size, shm_set_size,
     shm_seals, shm_add_seals,
@@ -137,6 +138,10 @@ const USHM_BYTES: u64 = 64
 const UMAP_OFF: u64 = 0xF5A00
 const UMAP_MAX: u64 = 96
 const UMAP_BYTES: u64 = 16
+// WP-DEMAND: the second word of a mapping record is task | object << 16 | pages << 32 | flags. The pages never need more than 18 bits.
+const UM_PAGES_MASK: u64 = 0x0FFFFFFF
+const UM_LAZY: u64 = 0x1000000000000000 // bit 60: the object is sparse here -- missing pages are filled by the page-fault handler
+const UM_WRITE: u64 = 0x2000000000000000 // bit 61: the mapping is writable
 
 const USHMPG_OFF: u64 = 0xF6000
 // RUNDE WAYLAND, Stufe 2: 256 KiB REICHEN NICHT.
@@ -1009,11 +1014,11 @@ fn map_room(state: u64) -> bool {
 }
 
 // Remember that `task` maps object `i` (`pages` pages) at `base`. false when the table is full (the caller must not have mapped).
-fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64) -> bool {
+fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) -> bool {
     var k: u64 = 0
     while k < UMAP_MAX {
         if kstate.get(state, um_at(k)) == 0 {
-            kstate.set(state, um_at(k) + 8, task | (i << 16) | (pages << 32))
+            kstate.set(state, um_at(k) + 8, task | (i << 16) | (pages << 32) | flags)
             kstate.set(state, um_at(k), base)
             return true
         }
@@ -1029,7 +1034,7 @@ fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
     while k < UMAP_MAX {
         if kstate.get(state, um_at(k)) == addr && addr != 0 {
             let w: u64 = kstate.get(state, um_at(k) + 8)
-            if (w & 0xFFFF) == task && ((w >> 32) * mem.FRAME_SIZE) <= len {
+            if (w & 0xFFFF) == task && (((w >> 32) & UM_PAGES_MASK) * mem.FRAME_SIZE) <= len {
                 kstate.set(state, um_at(k), 0)
                 kstate.set(state, um_at(k) + 8, 0)
                 shm_unref(state, (w >> 16) & 0xFFFF)
@@ -1070,6 +1075,90 @@ fn maps_live(state: u64) -> u64 {
         k = k + 1
     }
     return n
+}
+
+// WP-DEMAND: does the record `k` belong to the address space of `task` (same page-table root; threads share it)?
+fn map_same_space(state: u64, a: u64, b: u64) -> bool {
+    if a >= kstate.MAX_TASKS || b >= kstate.MAX_TASKS {
+        return false
+    }
+    let ca: u64 = sched.tget(state, a, sched.T_CR3)
+    return ca != 0 && ca == sched.tget(state, b, sched.T_CR3)
+}
+
+// WP-DEMAND: a free run of `pages` pages inside the sparse-mapping arena [lo, hi) of the address space of `task`: first fit over the
+// recorded lazy mappings (their pages are NOT in the page table, so scanning the table would call them free). 0 = no room.
+fn map_arena_find(state: u64, task: u64, pages: u64, lo: u64, hi: u64) -> u64 {
+    let want: u64 = pages * mem.FRAME_SIZE
+    var cand: u64 = lo
+    var again: bool = true
+    while again {
+        again = false
+        if cand + want > hi {
+            return 0
+        }
+        var k: u64 = 0
+        while k < UMAP_MAX {
+            let b: u64 = kstate.get(state, um_at(k))
+            if b != 0 {
+                let w: u64 = kstate.get(state, um_at(k) + 8)
+                if (w & UM_LAZY) != 0 && map_same_space(state, w & 0xFFFF, task) {
+                    let e: u64 = b + ((w >> 32) & UM_PAGES_MASK) * mem.FRAME_SIZE
+                    if b < cand + want && e > cand {
+                        cand = e
+                        again = true
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    return cand
+}
+
+const DEMAND_LOCK: u64 = 32 // UCNT_OFF + 32: a spin word that serialises the page-table changes of the demand fault (`proc.demand_fault`)
+
+fn demand_lock(state: u64) {
+    let lock: u64 = state + UCNT_OFF + DEMAND_LOCK
+    while atomic.cas(lock, 0, 1) != 0 {
+        atomic.pause()
+    }
+}
+
+fn demand_unlock(state: u64) {
+    atomic.store(state + UCNT_OFF + DEMAND_LOCK, 0)
+}
+
+// WP-DEMAND: `addr` (page aligned) of the address space of `cur`: is it a page of a sparse mapping that is merely not there yet? Then the
+// frame (made now, zeroed) comes back with bit 0 set when the mapping is writable; 0 = a real fault. The caller maps it, holding the
+// demand lock (`proc.demand_fault`). `err` is the error word of the fault (0 for a system call that wants the page).
+fn shm_demand(state: u64, cur: u64, addr: u64, err: u64) -> u64 {
+    if (err & 1) != 0 || (err & 8) != 0 {
+        return 0 // protection violation or reserved bit: not a missing page
+    }
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        let b: u64 = kstate.get(state, um_at(k))
+        if b != 0 && addr >= b {
+            let w: u64 = kstate.get(state, um_at(k) + 8)
+            let pages: u64 = (w >> 32) & UM_PAGES_MASK
+            if (w & UM_LAZY) != 0 && addr < b + pages * mem.FRAME_SIZE && map_same_space(state, w & 0xFFFF, cur) {
+                if (err & 2) != 0 && (w & UM_WRITE) == 0 {
+                    return 0 // a write to a read-only mapping
+                }
+                let f: u64 = shm_frame_demand(state, (w >> 16) & 0xFFFF, (addr - b) / mem.FRAME_SIZE)
+                if f == 0 {
+                    return 0
+                }
+                if (w & UM_WRITE) != 0 {
+                    return f | 1
+                }
+                return f
+            }
+        }
+        k = k + 1
+    }
+    return 0
 }
 
 fn shm_flags(state: u64, i: u64) -> u64 {
@@ -1198,8 +1287,15 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     if tab_err != 0 {
         return tab_err
     }
+    // WP-DEMAND: only the first SHM_PAGES_MAX (256) pages get their frame now; a bigger object is SPARSE behind that: its table slots
+    // stay 0 and the frame appears at the first touch (`shm_frame_demand`, called from the page-fault handler through `shm_fault`).
+    // foot's default pool is a sparse 512 MiB memfd: 131072 eager frames would eat 512 MiB of real RAM.
     var have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
-    while have < n {
+    var eager: u64 = n
+    if eager > SHM_PAGES_MAX {
+        eager = SHM_PAGES_MAX
+    }
+    while have < eager {
         let f: u64 = mem.frame_alloc(state)
         if f == 0 {
             return errno.E_NOMEM
@@ -1213,7 +1309,69 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
         have = have + 1
         kstate.set(state, sm_at(i) + SM_PAGES, have)
     }
+    kstate.set(state, sm_at(i) + SM_PAGES, n)
     return 0
+}
+
+// WP-DEMAND: does object `i` have a sparse part (pages the mapping must not map up front)?
+fn shm_lazy(state: u64, i: u64) -> bool {
+    if i >= USHM_MAX || shm_contig(state, i) {
+        return false
+    }
+    return kstate.get(state, sm_at(i) + SM_PAGES) > SHM_PAGES_MAX
+}
+
+// WP-DEMAND: the frame of page `p`, made on the spot (zeroed) when the page was never touched. Two processors may ask for the same page
+// at the same time: the slot is claimed with a compare-and-swap, the loser frees its frame and takes the winner's. 0 = out of range or
+// out of memory.
+fn shm_frame_demand(state: u64, i: u64, p: u64) -> u64 {
+    if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 || shm_contig(state, i) {
+        return 0
+    }
+    if p >= kstate.get(state, sm_at(i) + SM_PAGES) || p >= SHM_PAGES_LIMIT {
+        return 0
+    }
+    let slot: u64 = pg_slot(state, i, p)
+    if slot == 0 {
+        return 0
+    }
+    let have: u64 = rd64(slot)
+    if have != 0 {
+        return have
+    }
+    let f: u64 = mem.frame_alloc_user(state)
+    if f == 0 {
+        return 0
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        wr64(f + o * 8, 0)
+        o = o + 1
+    }
+    let old: u64 = atomic.cas(slot, 0, f)
+    if old != 0 {
+        mem.frame_free(state, f)
+        return old
+    }
+    return f
+}
+
+// WP-DEMAND: how many pages of object `i` have a frame (measurement for the gates).
+fn shm_resident(state: u64, i: u64) -> u64 {
+    if i >= USHM_MAX || shm_contig(state, i) {
+        return kstate.get(state, sm_at(i) + SM_PAGES)
+    }
+    var n: u64 = 0
+    var p: u64 = 0
+    let pages: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
+    while p < pages {
+        let slot: u64 = pg_slot(state, i, p)
+        if slot != 0 && rd64(slot) != 0 {
+            n = n + 1
+        }
+        p = p + 1
+    }
+    return n
 }
 
 fn shm_size(state: u64, i: u64) -> u64 {

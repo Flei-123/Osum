@@ -46,6 +46,7 @@ import sched.sched
 import ipc.uio
 import arch.x86_64.user
 import fs.file
+import fs.unixsock
 import ipc.handle
 import ipc.cap
 import bus.bus
@@ -63,7 +64,7 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
-    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for,
+    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
     // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
     frame_count, frame_at,
     // ---- RUNDE WACH (K-018, Abschluss: der Wiederanlauf) ----
@@ -194,7 +195,12 @@ const IMAGE_END: u64 = 0x40C00000 // CERTUS: war 0x40400000 (K16)
 // RUNDE LIMITS: 99 -> 104 tiles. The five extra tiles (10 MiB, 0x4C600000..0x4D000000) are the MAIN STACK of programs from disk:
 // it grows down from ARGS_BASE to STACK_HIGH_FLOOR (a guard page above the big arena), 10 MiB minus the argument page -- Linux gives 8 MiB.
 // Programs of `uprog.fi` keep their small stack at USER_STACK.
-const PRIV_SLOTS: u64 = 155
+// WP-DEMAND: 155 -> 475 tiles. The 320 tiles behind the main stack tile (0x53600000..0x7B600000, 640 MiB) are the ARENA OF SPARSE SHARED
+// OBJECTS (`unixsock.shm_fault`): `mmap` of a big memfd (foot's pool is a sparse 512 MiB one) lands here, and only the pages that are
+// touched get a frame. The ordinary arena and the stack are unchanged. Base = 0x40000000 + 2 MiB * 155 (the main tiles).
+const PRIV_SLOTS: u64 = 475
+const SHM_ARENA_BASE: u64 = 0x53600000
+const SHM_ARENA_TOP: u64 = 0x7B600000
 const BIG_TOP: u64 = 0x52C00000
 const BIG_FLOOR: u64 = 0x40C00000 // CERTUS: war 0x40600000 (K16)
 // RUNDE K16: DER ARGUMENTBLOCK IST HOCHGEZOGEN, DAMIT DER STAPEL WACHSEN
@@ -1299,6 +1305,31 @@ fn translate(state: u64, i: u64, addr: u64) -> u64 {
 }
 
 
+// WP-DEMAND: a page of the sparse-object arena that is not there yet: made (zeroed frame of the object) and mapped. Called from the
+// page-fault handler (`err` = the fault's error word) and from `user_ok` (a system call names such a page, err = 0). true = the page is
+// there now (the instruction/call may go on); false = a real fault.
+fn demand_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
+    if addr < SHM_ARENA_BASE || addr >= SHM_ARENA_TOP || (err & 1) != 0 {
+        return false
+    }
+    let page: u64 = addr & 0xFFFFFFFFFFFFF000
+    var ok: bool = false
+    unixsock.demand_lock(state)
+    if page_free(state, cur, page) {
+        let r: u64 = unixsock.shm_demand(state, cur, page, err)
+        if r != 0 && map_frame(state, cur, page, r & 0xFFFFFFFFFFFFF000, (r & 1) != 0) {
+            ok = true
+        }
+    } else {
+        ok = translate(state, cur, page) != 0 // another processor of this space was faster
+    }
+    unixsock.demand_unlock(state)
+    if ok {
+        tlb_flush_if_current(state, cur)
+    }
+    return ok
+}
+
 // A page of the stack zone (STACK_FLOOR .. ARGS_BASE) that is missing, with a mapped page of the zone at most 64 KiB above it: made, zeroed.
 fn stack_page_for_call(state: u64, i: u64, p: u64) -> bool {
     var top: u64 = ARGS_LOW
@@ -1385,6 +1416,12 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     var p: u64 = addr
     let last: u64 = addr +% len -% 1
     while p <= last {
+        // WP-DEMAND: a page of a sparse shared object nobody touched yet is made now (Linux faults it in the same way)
+        if p >= SHM_ARENA_BASE && p < SHM_ARENA_TOP && translate(state, i, p) == 0 {
+            if !demand_fault(state, i, p, 0) {
+                return false
+            }
+        }
         let pml4: u64 = sched.tget(state, i, sched.T_CR3)
         let e4: u64 = read_entry(pml4, (p >> 39) & 0x1FF)
         if (e4 & PAGE_USER) == 0 {

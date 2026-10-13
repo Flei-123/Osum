@@ -185,19 +185,19 @@ grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/sched/proc.fi \
 grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (die Arena beginnt darueber)" \
     || bad "BIG_FLOOR passt nicht zu IMAGE_END"
-grep -qE '^const PRIV_SLOTS: u64 = 155' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 155 Kacheln zu 2 MiB" \
-    || bad "PRIV_SLOTS steht nicht auf 155"
+grep -qE '^const PRIV_SLOTS: u64 = 475' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 Kacheln (155 + 320 Arena fuer sparse SHM) zu 2 MiB" \
+    || bad "PRIV_SLOTS steht nicht auf 475"
 grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
-python3 - <<'PY' && ok "die private Gegend endet vor 0x60000000 (tools/osum/run.sh bleibt gueltig)" \
-                 || bad "die private Gegend erreicht 0x60000000"
+python3 - <<'PY' && ok "die private Gegend endet vor 0x7C000000 (tools/osum/run.sh bleibt gueltig)" \
+                 || bad "die private Gegend erreicht 0x7C000000"
 import re, sys
 s = open("kernel/sched/proc.fi", encoding="utf-8").read()
 slots = int(re.search(r"^const PRIV_SLOTS: u64 = (\d+)$", s, re.M).group(1))
 span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
 base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
-sys.exit(0 if base + span * slots <= 0x60000000 else 1)
+sys.exit(0 if base + span * slots <= 0x7C000000 else 1)
 PY
 grep -q 'w_self' kernel/fs/procfs.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \

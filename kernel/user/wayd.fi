@@ -83,6 +83,7 @@ export { u_start }
 const SYS_READ: u64 = 0
 const SYS_WRITE: u64 = 1
 const SYS_CLOSE: u64 = 3
+const SYS_MUNMAP: u64 = 11
 const SYS_POLL: u64 = 7
 const SYS_MMAP: u64 = 9
 const SYS_SOCKET: u64 = 41
@@ -302,6 +303,75 @@ fn obj_drop(c: u64, id: u64) {
     let i: u64 = obj_find(c, id)
     if i < MAX_OBJ {
         objs[(obj_base(c, i) + O_ID) as usize] = 0
+    }
+}
+
+// r715: pool mappings. A mapping (base, size) is used by the pool it was made for (O_A = base) and by every buffer cut from it
+// (O_E = base, O_F = size). It goes (munmap) when the last of them is gone -- before r715 nothing was ever unmapped and every
+// resize/destroy leaked address space and frames.
+fn map_users(c: u64, base: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 {
+            let f: u64 = objs[(b + O_IFACE) as usize]
+            if f == wlproto.IF_WL_SHM_POOL && objs[(b + O_A) as usize] == base {
+                n = n + 1
+            }
+            if f == wlproto.IF_WL_BUFFER && objs[(b + O_E) as usize] == base {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn map_release(c: u64, base: u64, size: u64) {
+    if base != 0 && size != 0 && map_users(c, base) == 0 {
+        ulib.sys(SYS_MUNMAP, base, size, 0)
+    }
+}
+
+// the client is gone: give back every pool mapping and descriptor it still had
+fn objs_release(c: u64) {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 {
+            let f: u64 = objs[(b + O_IFACE) as usize]
+            if f == wlproto.IF_WL_SHM_POOL {
+                if objs[(b + O_C) as usize] != 0 {
+                    ulib.sys(SYS_CLOSE, objs[(b + O_C) as usize], 0, 0)
+                    objs[(b + O_C) as usize] = 0
+                }
+                if objs[(b + O_A) as usize] != 0 {
+                    ulib.sys(SYS_MUNMAP, objs[(b + O_A) as usize], objs[(b + O_B) as usize], 0)
+                    objs[(b + O_A) as usize] = 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_BUFFER && objs[(b + O_E) as usize] != 0 {
+            let base: u64 = objs[(b + O_E) as usize]
+            let size: u64 = objs[(b + O_F) as usize]
+            // every buffer of the same mapping lets go of it together
+            var j: u64 = i
+            while j < MAX_OBJ {
+                let bj: u64 = obj_base(c, j)
+                if objs[(bj + O_ID) as usize] != 0 && objs[(bj + O_IFACE) as usize] == wlproto.IF_WL_BUFFER && objs[(bj + O_E) as usize] == base {
+                    objs[(bj + O_E) as usize] = 0
+                }
+                j = j + 1
+            }
+            ulib.sys(SYS_MUNMAP, base, size, 0)
+        }
+        i = i + 1
     }
 }
 
@@ -645,17 +715,21 @@ fn on_shm(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
     // Das Argument `fd` steht NICHT im Strom -- nach der Objektnummer
     // kommt gleich die Groesse.
     let size: u64 = rd32(argp + 4)
+    // wl_shm.error: 0 invalid_format, 1 invalid_stride, 2 invalid_fd
     if fd == 0 || size == 0 {
-        send_error(c, id, 0)
+        send_error(c, id, 2)
         return
     }
     let addr: u64 = kcall.map_fd(size, PROT_READ | PROT_WRITE,
         MAP_SHARED, fd, 0)
     if addr == 0 || addr > 0xFFFFFFFFFFFF0000 {
-        send_error(c, id, 0)
+        ulib.sys(SYS_CLOSE, fd, 0, 0)
+        send_error(c, id, 2)
         return
     }
     if obj_new(c, pid, wlproto.IF_WL_SHM_POOL) >= MAX_OBJ {
+        ulib.sys(SYS_MUNMAP, addr, size, 0)
+        ulib.sys(SYS_CLOSE, fd, 0, 0)
         send_error(c, id, 0)
         return
     }
@@ -672,22 +746,31 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
         let w: u64 = rd32(argp + 8)
         let h: u64 = rd32(argp + 12)
         let stride: u64 = rd32(argp + 16)
+        let format: u64 = rd32(argp + 20)
         let base: u64 = obj_get(c, id, O_A)
         let size: u64 = obj_get(c, id, O_B)
         // Ein Puffer, der ueber das Ende des Vorrats hinausragt, waere
         // ein Leseloch in fremden Speicher. Das ist die Pruefung, die
         // ein Server nie weglassen darf.
-        if base == 0 || h == 0 || stride == 0 {
-            send_error(c, id, 0)
+        if base == 0 {
+            send_error(c, id, 2)
+            return
+        }
+        if format > 1 {
+            send_error(c, id, 0) // only ARGB8888 (0) and XRGB8888 (1) are advertised
+            return
+        }
+        if h == 0 || w == 0 || stride < w * 4 {
+            send_error(c, id, 1)
             return
         }
         if h > 4096 || stride > 65536 {
-            send_error(c, id, 0)
+            send_error(c, id, 1)
             return
         }
         if off > size || (h * stride) > (size - off) {
             err_note(off, size, h * stride)
-            send_error(c, id, 0)
+            send_error(c, id, 1)
             return
         }
         if obj_new(c, bid, wlproto.IF_WL_BUFFER) >= MAX_OBJ {
@@ -698,10 +781,20 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
         obj_set(c, bid, O_B, w)
         obj_set(c, bid, O_C, h)
         obj_set(c, bid, O_D, stride)
+        obj_set(c, bid, O_E, base) // the mapping this buffer lives in (kept until the buffer is destroyed)
+        obj_set(c, bid, O_F, size)
         return
     }
     if op == wlproto.RQ_WL_SHM_POOL_DESTROY {
+        // r715: the descriptor is closed now; the mapping stays while a buffer of it lives (`map_release`)
+        let pbase: u64 = obj_get(c, id, O_A)
+        let psize: u64 = obj_get(c, id, O_B)
+        let pfd: u64 = obj_get(c, id, O_C)
         obj_drop(c, id)
+        if pfd != 0 {
+            ulib.sys(SYS_CLOSE, pfd, 0, 0)
+        }
+        map_release(c, pbase, psize)
         return
     }
     if op == wlproto.RQ_WL_SHM_POOL_RESIZE {
@@ -715,7 +808,7 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
         if nsize <= osize {
             if nsize < osize {
                 err_note(nsize, osize, 0)
-                send_error(c, id, 1)
+                send_error(c, id, 2) // wl_shm.invalid_fd: a pool never shrinks
             }
             return
         }
@@ -725,8 +818,11 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
             send_error(c, id, 2)
             return
         }
+        let oaddr: u64 = obj_get(c, id, O_A)
         obj_set(c, id, O_A, naddr)
         obj_set(c, id, O_B, nsize)
+        // r715: buffers made earlier keep the old mapping alive, an unused one goes now
+        map_release(c, oaddr, osize)
         return
     }
     send_error(c, id, 1)
@@ -1341,7 +1437,10 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         on_xdg_toplevel(c, id, op, argp)
     } else if iface == wlproto.IF_WL_BUFFER {
         if op == 0 {
+            let ebase: u64 = obj_get(c, id, O_E)
+            let esize: u64 = obj_get(c, id, O_F)
             obj_drop(c, id)
+            map_release(c, ebase, esize)
         }
     } else if iface == wlproto.IF_WL_SEAT {
         on_seat(c, id, op, argp)
@@ -1590,6 +1689,7 @@ fn fdq_drop(c: u64) {
 
 // Everything that belongs to a client goes when it goes: its clipboard state and what the input module tracked.
 fn client_cleanup(c: u64) {
+    objs_release(c)
     wl_data.client_gone(c)
     wl_input.client_init(c)
     fdq_drop(c)
