@@ -34,7 +34,7 @@ echo "ST nettls-curl-ver $(/bin/curl --version 2>&1 | $B head -n 1 | $B grep -o 
 echo "ST nettls-year $([ "$($B date +%Y)" -ge 2026 ] && echo ok)"
 echo "ST nettls-py-ver $(/bin/python3 -c 'import ssl;print(ssl.OPENSSL_VERSION.split()[1])' 2>&1 | $B tail -n 1)"
 echo "ST nettls-py-hashlib $(/bin/python3 -c 'import _hashlib;print(_hashlib.new("sha256",b"a").hexdigest()[:8])' 2>&1 | $B tail -n 1)"
-echo "ST nettls-py-https $(/bin/python3 -c 'import ssl,socket;c=ssl.create_default_context(cafile="/etc/tls-ca.pem");s=c.wrap_socket(socket.create_connection(("10.0.2.2",18766),10),server_hostname="10.0.2.2");s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(s.recv(300).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
+echo "ST nettls-py-https $(/bin/python3 -c 'import ssl,socket;c=ssl.create_default_context(cafile="/etc/tls-ca.pem");s=c.wrap_socket(socket.create_connection(("10.0.2.2",18766),10),server_hostname="10.0.2.2");s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");d=b"".join(iter(lambda:s.recv(4096),b""));print(d.split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
 echo "ST net-procdev $($B grep -c eth0 /proc/net/dev)"
 echo "ST net-ifconfig $($B ifconfig eth0 2>&1 | $B grep -o 'inet addr:[0-9.]*')"
 echo "ST end"

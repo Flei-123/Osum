@@ -285,7 +285,7 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
             fi
             NETARGS="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"
         fi
-        KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2} ${STONES_KARGS:-}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
+        TMO="${STONES_TMO:-420}" KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2} ${STONES_KARGS:-}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
         [ -z "$NETPID" ] || kill "$NETPID" 2>/dev/null
         [ -z "${TLSPID:-}" ] || kill "$TLSPID" 2>/dev/null
         grep -a -o -E 'ST [A-Za-z0-9_-]+( .*)?$' "$D/st.ser" | tr -d '\r' | awk '!seen[$2]++' > "$D/st.res" || : > "$D/st.res"

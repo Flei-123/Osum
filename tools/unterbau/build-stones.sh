@@ -73,7 +73,7 @@ echo "== git (no openssl/curl/expat/perl/python/gettext) =="
 
 want python3 && {
 echo "== openssl (static, PIC, no-asm; no-async/afalgeng: musl lacks ucontext and linux/if_alg.h) =="
-( cd "$W/x/ossl" && ./Configure linux-x86_64 no-shared no-asm no-tests no-docs no-async no-afalgeng no-engine no-dso no-apps no-legacy \
+( cd "$W/x/ossl" && ./Configure linux-x86_64 no-shared no-asm no-tests no-async no-afalgeng no-engine no-dso no-legacy \
     --prefix="$P" --libdir=lib --openssldir=/etc/ssl CC=musl-gcc CFLAGS="-O2 -fPIC" >/dev/null 2>&1 \
   && make -j"$J" build_libs >/dev/null 2>&1 && make install_dev >/dev/null 2>&1 )
 echo "== python3 (musl-gcc wrapper: configure insists multiarch == platform triplet) =="
@@ -103,6 +103,7 @@ z.close()
 PY
   cp os.pyc "$OUT/lib/os.pyc" )
 cp "$W"/x/py/build/lib*/*.cpython-312-x86_64-linux-musl.so "$OUT/lib/ext/"
+strip --strip-unneeded "$OUT"/lib/ext/*.so 2>/dev/null || true   # _ssl/_hashlib carry all of libcrypto: 9.5 MB unstripped
 }
 ls -la "$OUT" "$OUT/lib"
 echo "BUILD-STONES DONE"
