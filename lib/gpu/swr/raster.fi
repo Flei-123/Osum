@@ -1,0 +1,599 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/gpu/swr/raster.fi -- SWR: software rasterizer prototype for the OrientOS graphics stack (way E,
+// docs/GFX-STACK.md). CPU only, multi core (jobs.parallel_for over screen bands), no SIMD (Firn has none yet).
+//
+// Pipeline (all of it deterministic: the output does not depend on the number of threads):
+//   1. setup_all   clip-space vertices (f32 x y z w u v r g b a, 10 floats) -> per triangle record (48 words):
+//                  1/16 pixel fixed point, edge functions (integer, top-left rule), plane equations for
+//                  z, 1/w, u/w, v/w, r/w, g/w, b/w, a/w (f64)
+//   2. raster      bands of BAND rows run in parallel; every band walks ALL triangles in submission order,
+//                  so the last write to a pixel is always the same triangle (no atomics, no tiles bins yet)
+//   3. per row     the x interval of a triangle is solved from the three edge functions (integer floor division),
+//                  so the inner loop only sees covered pixels; early depth test; survivors form lanes
+//   4. shading     a batch of up to LANES covered pixels runs ONE fragment program:
+//                  mode 0 native "texture * colour", mode 2 native lit program (both AOT compiled Firn),
+//                  mode 1 the batch interpreter (lib/gpu/swr/shader.fi) -- same programs, bit identical result,
+//                  mode 3 coverage counter (debug: colour += 1, used to prove the fill rule)
+//
+// NOT DONE (prototype limits, see docs/GFX-STACK.md 7): near/far clipping (triangles with w <= 0 are dropped),
+// scissor, blending, stencil, MSAA, mip maps, bilinear, discard (needs late z), index buffers, 16-bit/float targets.
+
+import std.rt
+import std.math
+import jobs.jobs
+
+export {
+    Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
+    frame_stat_pixels, frame_set_program, frame_set_texture, vtx_put,
+    MODE_NATIVE0, MODE_VM, MODE_NATIVE1, MODE_COUNT, LANES, VSTRIDE, BAND,
+    ld_f32, st_f32,
+}
+
+const LANES: usize = 64
+const VSTRIDE: usize = 10 // f32 per vertex
+const BAND: i32 = 16 // rows per job
+const MODE_NATIVE0: i32 = 0
+const MODE_VM: i32 = 1
+const MODE_NATIVE1: i32 = 2
+const MODE_COUNT: i32 = 3
+const NREG: usize = 32
+const REC: usize = 48 // words per triangle record
+
+struct Frame {
+    w: i32,
+    h: i32,
+    color: u64, // u32 [w*h], R | G << 8 | B << 16 | A << 24
+    depth: u64, // f32 [w*h], 0 near .. 1 far
+    tex: u64, // u32 [tw*th] RGBA8 (same byte order), power of two sizes
+    tw: i32,
+    th: i32,
+    vbuf: u64, // f32 [ntri*3*VSTRIDE]
+    ntri: i32,
+    rec: u64, // 48 words per triangle
+    mode: i32,
+    prog: u64, // u32 words, 5 per instruction (shader.fi)
+    cull: bool,
+    depth_test: bool,
+    stats: u64, // u64 [bands] shaded pixels
+    nbands: i32,
+    jobs: u64, // *mut jobs.Jobs or 0 (single thread)
+}
+
+fn ld_f32(p: u64, i: usize) -> f32 {
+    return *((p + (i as u64) * (4 as u64)) as *mut f32)
+}
+
+fn st_f32(p: u64, i: usize, v: f32) {
+    *((p + (i as u64) * (4 as u64)) as *mut f32) = v
+}
+
+fn ld_i64(p: u64, i: usize) -> i64 {
+    return *((p + (i as u64) * (8 as u64)) as *mut i64)
+}
+
+fn st_i64(p: u64, i: usize, v: i64) {
+    *((p + (i as u64) * (8 as u64)) as *mut i64) = v
+}
+
+fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
+    let fp: u64 = rt.heap_alloc(256)
+    let f: *mut Frame = fp as *mut Frame
+    (*f).w = w
+    (*f).h = h
+    (*f).color = rt.heap_alloc((w as usize) * (h as usize) * 4)
+    (*f).depth = rt.heap_alloc((w as usize) * (h as usize) * 4)
+    (*f).tex = 0 as u64
+    (*f).tw = 0
+    (*f).th = 0
+    (*f).vbuf = rt.heap_alloc((max_tri as usize) * 3 * VSTRIDE * 4)
+    (*f).ntri = 0
+    (*f).rec = rt.heap_alloc((max_tri as usize) * REC * 8)
+    (*f).mode = 0
+    (*f).prog = 0 as u64
+    (*f).cull = false
+    (*f).depth_test = true
+    (*f).nbands = (h + BAND - 1) / BAND
+    (*f).stats = rt.heap_alloc(((*f).nbands as usize) * 8)
+    (*f).jobs = 0 as u64
+    return f
+}
+
+fn frame_free(f: *mut Frame) {
+    rt.heap_free((*f).color, ((*f).w as usize) * ((*f).h as usize) * 4)
+    rt.heap_free((*f).depth, ((*f).w as usize) * ((*f).h as usize) * 4)
+    rt.heap_free((*f).stats, ((*f).nbands as usize) * 8)
+}
+
+fn frame_set_texture(f: *mut Frame, tex: u64, tw: i32, th: i32) {
+    (*f).tex = tex
+    (*f).tw = tw
+    (*f).th = th
+}
+
+fn frame_set_program(f: *mut Frame, prog: u64) {
+    (*f).prog = prog
+}
+
+fn frame_pixel(f: *mut Frame, x: i32, y: i32) -> u32 {
+    return rt.ld32((*f).color, (y as usize) * ((*f).w as usize) + (x as usize))
+}
+
+fn frame_clear(f: *mut Frame, rgba: u32, z: f32) {
+    let n: usize = ((*f).w as usize) * ((*f).h as usize)
+    var i: usize = 0
+    while i < n {
+        rt.st32((*f).color, i, rgba)
+        st_f32((*f).depth, i, z)
+        i = i + 1
+    }
+}
+
+// multiplicative hash over the colour buffer (determinism check)
+fn frame_hash(f: *mut Frame) -> u64 {
+    var h: u64 = 1469598103 as u64
+    let n: usize = ((*f).w as usize) * ((*f).h as usize)
+    var i: usize = 0
+    while i < n {
+        h = ((h ^ (rt.ld32((*f).color, i) as u64)) * (1000003 as u64)) & (4398046511103 as u64) // 42 bit (no wrap-around: overflow is checked)
+        i = i + 1
+    }
+    return h
+}
+
+fn frame_stat_pixels(f: *mut Frame) -> u64 {
+    var s: u64 = 0 as u64
+    var b: i32 = 0
+    while b < (*f).nbands {
+        s = s + (rt.ld64((*f).stats, b as usize))
+        b = b + 1
+    }
+    return s
+}
+
+// write vertex n of the vertex buffer: clip x y z w, u v, colour rgba
+fn vtx_put(f: *mut Frame, n: usize, x: f32, y: f32, z: f32, w: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) {
+    let o: usize = n * VSTRIDE
+    st_f32((*f).vbuf, o, x)
+    st_f32((*f).vbuf, o + 1, y)
+    st_f32((*f).vbuf, o + 2, z)
+    st_f32((*f).vbuf, o + 3, w)
+    st_f32((*f).vbuf, o + 4, u)
+    st_f32((*f).vbuf, o + 5, v)
+    st_f32((*f).vbuf, o + 6, r)
+    st_f32((*f).vbuf, o + 7, g)
+    st_f32((*f).vbuf, o + 8, b)
+    st_f32((*f).vbuf, o + 9, a)
+}
+
+fn floor_div(a: i64, b: i64) -> i64 {
+    // b > 0
+    var q: i64 = a / b
+    if a % b < 0 as i64 { q = q - 1 as i64 }
+    return q
+}
+
+fn snap(v: f64) -> i64 {
+    return math.floor(v * 16.0 + 0.5) as i64
+}
+
+// ---------------------------------------------------------------- setup
+
+// attribute j of vertex k (k = 0..2) premultiplied by 1/w; j: 0 z, 1 1/w, 2 u/w, 3 v/w, 4 r/w, 5 g/w, 6 b/w, 7 a/w
+fn attr(f: *mut Frame, t: usize, k: usize, j: usize, iw: f64) -> f64 {
+    let o: usize = (t * 3 + k) * VSTRIDE
+    if j == 0 { return (ld_f32((*f).vbuf, o + 2) as f64) * iw }
+    if j == 1 { return iw }
+    return (ld_f32((*f).vbuf, o + 2 + j) as f64) * iw
+}
+
+// one triangle -> record; rec[0] = 1 when the triangle is visible
+fn setup_tri(f: *mut Frame, t: usize) {
+    let r: u64 = (*f).rec + (t as u64) * (REC as u64) * (8 as u64)
+    st_i64(r, 0, 0 as i64)
+    var sx: [f64; 3] = [0.0; 3]
+    var sy: [f64; 3] = [0.0; 3]
+    var iw: [f64; 3] = [0.0; 3]
+    var k: usize = 0
+    while k < 3 {
+        let o: usize = (t * 3 + k) * VSTRIDE
+        let w: f64 = ld_f32((*f).vbuf, o + 3) as f64
+        if !(w > 0.000001) { return } // no clipping yet: drop
+        let ww: f64 = 1.0 / w
+        iw[k] = ww
+        sx[k] = ((ld_f32((*f).vbuf, o) as f64) * ww * 0.5 + 0.5) * ((*f).w as f64)
+        sy[k] = (0.5 - (ld_f32((*f).vbuf, o + 1) as f64) * ww * 0.5) * ((*f).h as f64)
+        let lim: f64 = 1000000.0
+        if !(math.fabs(sx[k]) < lim && math.fabs(sy[k]) < lim) { return }
+        k = k + 1
+    }
+    var ax: i64 = snap(sx[0])
+    var ay: i64 = snap(sy[0])
+    var bx: i64 = snap(sx[1])
+    var by: i64 = snap(sy[1])
+    var cx: i64 = snap(sx[2])
+    var cy: i64 = snap(sy[2])
+    var area2: i64 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if area2 == 0 as i64 { return }
+    if area2 > 0 as i64 && (*f).cull { return }
+    // vertex order for attribute planes: 0 = a, 1 = b, 2 = c; swap b and c when the winding is reversed
+    var i1: usize = 1
+    var i2: usize = 2
+    if area2 < 0 as i64 {
+        let tx: i64 = bx
+        let ty: i64 = by
+        bx = cx
+        by = cy
+        cx = tx
+        cy = ty
+        i1 = 2
+        i2 = 1
+        area2 = 0 as i64 - area2
+    }
+    // bounding box in pixels, clipped to the target
+    var minx: i64 = ax
+    var maxx: i64 = ax
+    var miny: i64 = ay
+    var maxy: i64 = ay
+    if bx < minx { minx = bx }
+    if cx < minx { minx = cx }
+    if bx > maxx { maxx = bx }
+    if cx > maxx { maxx = cx }
+    if by < miny { miny = by }
+    if cy < miny { miny = cy }
+    if by > maxy { maxy = by }
+    if cy > maxy { maxy = cy }
+    var px0: i64 = 0
+    var py0: i64 = 0
+    if minx > 0 as i64 { px0 = minx / 16 as i64 }
+    if miny > 0 as i64 { py0 = miny / 16 as i64 }
+    var px1: i64 = ((*f).w as i64) - 1
+    var py1: i64 = ((*f).h as i64) - 1
+    if maxx < 0 as i64 || maxy < 0 as i64 { return }
+    if maxx / 16 as i64 < px1 { px1 = maxx / 16 as i64 }
+    if maxy / 16 as i64 < py1 { py1 = maxy / 16 as i64 }
+    if px0 > px1 || py0 > py1 { return }
+    let e0dx: i64 = cx - bx
+    let e0dy: i64 = cy - by
+    let e1dx: i64 = ax - cx
+    let e1dy: i64 = ay - cy
+    let e2dx: i64 = bx - ax
+    let e2dy: i64 = by - ay
+    var bias0: i64 = 0
+    var bias1: i64 = 0
+    var bias2: i64 = 0
+    if e0dy < 0 as i64 || (e0dy == 0 as i64 && e0dx > 0 as i64) { bias0 = 1 }
+    if e1dy < 0 as i64 || (e1dy == 0 as i64 && e1dx > 0 as i64) { bias1 = 1 }
+    if e2dy < 0 as i64 || (e2dy == 0 as i64 && e2dx > 0 as i64) { bias2 = 1 }
+    st_i64(r, 0, 1 as i64)
+    st_i64(r, 1, px0)
+    st_i64(r, 2, px1)
+    st_i64(r, 3, py0)
+    st_i64(r, 4, py1)
+    st_i64(r, 5, bias0)
+    st_i64(r, 6, bias1)
+    st_i64(r, 7, bias2)
+    st_i64(r, 8, e0dx)
+    st_i64(r, 9, e0dy)
+    st_i64(r, 10, e1dx)
+    st_i64(r, 11, e1dy)
+    st_i64(r, 12, e2dx)
+    st_i64(r, 13, e2dy)
+    // edge values at the centre of pixel (0, 0): lambda0 = E(b, c), lambda1 = E(c, a), lambda2 = E(a, b)
+    let E0: i64 = e0dx * (8 as i64 - by) - e0dy * (8 as i64 - bx)
+    let E1: i64 = e1dx * (8 as i64 - cy) - e1dy * (8 as i64 - cx)
+    let E2: i64 = e2dx * (8 as i64 - ay) - e2dy * (8 as i64 - ax)
+    st_i64(r, 14, E0)
+    st_i64(r, 15, E1)
+    st_i64(r, 16, E2)
+    let a2: f64 = area2 as f64
+    let s0: f64 = (0 as i64 - e0dy * 16 as i64) as f64
+    let s1: f64 = (0 as i64 - e1dy * 16 as i64) as f64
+    let s2: f64 = (0 as i64 - e2dy * 16 as i64) as f64
+    let t0: f64 = (e0dx * 16 as i64) as f64
+    let t1: f64 = (e1dx * 16 as i64) as f64
+    let t2: f64 = (e2dx * 16 as i64) as f64
+    var j: usize = 0
+    while j < 8 {
+        let va: f64 = attr(f, t, 0, j, iw[0])
+        let vb: f64 = attr(f, t, i1, j, iw[i1])
+        let vc: f64 = attr(f, t, i2, j, iw[i2])
+        let base: u64 = r + (24 + (j as u64) * 3) * (8 as u64)
+        *(base as *mut f64) = ((E0 as f64) * va + (E1 as f64) * vb + (E2 as f64) * vc) / a2
+        *((base + (8 as u64)) as *mut f64) = (s0 * va + s1 * vb + s2 * vc) / a2
+        *((base + (16 as u64)) as *mut f64) = (t0 * va + t1 * vb + t2 * vc) / a2
+        j = j + 1
+    }
+}
+
+fn frame_setup(f: *mut Frame) {
+    var t: usize = 0
+    while t < ((*f).ntri as usize) {
+        setup_tri(f, t)
+        t = t + 1
+    }
+}
+
+// ---------------------------------------------------------------- shading
+
+fn pack_unit(v: f32) -> u32 {
+    var x: f32 = v
+    if x < 0.0f { x = 0.0f }
+    if x > 1.0f { x = 1.0f }
+    return (x * 255.0f + 0.5f) as u32
+}
+
+fn texel(f: *mut Frame, u: f32, v: f32) -> u32 {
+    let tx: i32 = (math.floor32(u * ((*f).tw as f32)) as i32) & ((*f).tw - 1)
+    let ty: i32 = (math.floor32(v * ((*f).th as f32)) as i32) & ((*f).th - 1)
+    return rt.ld32((*f).tex, (ty as usize) * ((*f).tw as usize) + (tx as usize))
+}
+
+// lane l of register r
+fn rg(base: u64, r: usize, l: usize) -> u64 {
+    return base + ((r * LANES + l) as u64) * (4 as u64)
+}
+
+// native program 0: colour = texture * vertex colour
+fn shade_native0(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    let k: f32 = 1.0f / 255.0f
+    var l: usize = 0
+    while l < n {
+        let tp: u32 = texel(f, ld_f32(rg(base, 0, l), 0), ld_f32(rg(base, 1, l), 0))
+        let r: f32 = ((tp & 255 as u32) as f32) * k * ld_f32(rg(base, 2, l), 0)
+        let g: f32 = (((tp >> 8 as u32) & 255 as u32) as f32) * k * ld_f32(rg(base, 3, l), 0)
+        let b: f32 = (((tp >> 16 as u32) & 255 as u32) as f32) * k * ld_f32(rg(base, 4, l), 0)
+        let a: f32 = ((tp >> 24 as u32) as f32) * k * ld_f32(rg(base, 5, l), 0)
+        let x: usize = rt.ld32(xs, l) as usize
+        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+            pack_unit(r) | (pack_unit(g) << 8 as u32) | (pack_unit(b) << 16 as u32) | (pack_unit(a) << 24 as u32))
+        l = l + 1
+    }
+}
+
+// native program 1 ("lit"): lf = 0.3 + 0.7 * col.r ; rgb = texture.rgb * lf ; rgb = rgb * col.g + col.b * 0.1 ; a = tex.a * col.a
+fn shade_native1(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    let k: f32 = 1.0f / 255.0f
+    var l: usize = 0
+    while l < n {
+        let tp: u32 = texel(f, ld_f32(rg(base, 0, l), 0), ld_f32(rg(base, 1, l), 0))
+        let cr: f32 = ld_f32(rg(base, 2, l), 0)
+        let cg: f32 = ld_f32(rg(base, 3, l), 0)
+        let cb: f32 = ld_f32(rg(base, 4, l), 0)
+        let lf: f32 = cr * 0.7f + 0.3f
+        let tr: f32 = ((tp & 255 as u32) as f32) * k * lf
+        let tg: f32 = (((tp >> 8 as u32) & 255 as u32) as f32) * k * lf
+        let tb: f32 = (((tp >> 16 as u32) & 255 as u32) as f32) * k * lf
+        let r: f32 = tr * cg + cb * 0.1f
+        let g: f32 = tg * cg + cb * 0.1f
+        let b: f32 = tb * cg + cb * 0.1f
+        let a: f32 = ((tp >> 24 as u32) as f32) * k * ld_f32(rg(base, 5, l), 0)
+        let x: usize = rt.ld32(xs, l) as usize
+        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+            pack_unit(r) | (pack_unit(g) << 8 as u32) | (pack_unit(b) << 16 as u32) | (pack_unit(a) << 24 as u32))
+        l = l + 1
+    }
+}
+
+// batch interpreter: instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
+// ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
+fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    let k: f32 = 1.0f / 255.0f
+    var pc: usize = 0
+    var run: bool = true
+    while run {
+        let op: u32 = rt.ld32((*f).prog, pc * 5)
+        let d: usize = rt.ld32((*f).prog, pc * 5 + 1) as usize
+        let a: usize = rt.ld32((*f).prog, pc * 5 + 2) as usize
+        let b: usize = rt.ld32((*f).prog, pc * 5 + 3) as usize
+        let c: usize = rt.ld32((*f).prog, pc * 5 + 4) as usize
+        pc = pc + 1
+        var l: usize = 0
+        if op == 0 as u32 {
+            run = false
+        } else if op == 1 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0)); l = l + 1 }
+        } else if op == 2 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) + ld_f32(rg(base, b, l), 0)); l = l + 1 }
+        } else if op == 3 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) - ld_f32(rg(base, b, l), 0)); l = l + 1 }
+        } else if op == 4 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) * ld_f32(rg(base, b, l), 0)); l = l + 1 }
+        } else if op == 5 as u32 {
+            while l < n {
+                st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) * ld_f32(rg(base, b, l), 0) + ld_f32(rg(base, c, l), 0))
+                l = l + 1
+            }
+        } else if op == 6 as u32 {
+            while l < n {
+                let x: f32 = ld_f32(rg(base, a, l), 0)
+                let z: f32 = ld_f32(rg(base, b, l), 0)
+                var m: f32 = z
+                if x < z { m = x }
+                st_f32(rg(base, d, l), 0, m)
+                l = l + 1
+            }
+        } else if op == 7 as u32 {
+            while l < n {
+                let x: f32 = ld_f32(rg(base, a, l), 0)
+                let z: f32 = ld_f32(rg(base, b, l), 0)
+                var m: f32 = z
+                if x > z { m = x }
+                st_f32(rg(base, d, l), 0, m)
+                l = l + 1
+            }
+        } else if op == 8 as u32 {
+            while l < n {
+                var x: f32 = ld_f32(rg(base, a, l), 0)
+                if x < 0.0f { x = 0.0f }
+                if x > 1.0f { x = 1.0f }
+                st_f32(rg(base, d, l), 0, x)
+                l = l + 1
+            }
+        } else if op == 9 as u32 {
+            let imm: f32 = *((&a) as *mut f32)
+            while l < n { st_f32(rg(base, d, l), 0, imm); l = l + 1 }
+        } else if op == 10 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, 1.0f / ld_f32(rg(base, a, l), 0)); l = l + 1 }
+        } else if op == 11 as u32 {
+            while l < n { st_f32(rg(base, d, l), 0, math.sqrt32(ld_f32(rg(base, a, l), 0))); l = l + 1 }
+        } else if op == 12 as u32 {
+            while l < n {
+                let tp: u32 = texel(f, ld_f32(rg(base, a, l), 0), ld_f32(rg(base, b, l), 0))
+                st_f32(rg(base, d, l), 0, ((tp & 255 as u32) as f32) * k)
+                st_f32(rg(base, d + 1, l), 0, (((tp >> 8 as u32) & 255 as u32) as f32) * k)
+                st_f32(rg(base, d + 2, l), 0, (((tp >> 16 as u32) & 255 as u32) as f32) * k)
+                st_f32(rg(base, d + 3, l), 0, ((tp >> 24 as u32) as f32) * k)
+                l = l + 1
+            }
+        } else {
+            run = false
+        }
+    }
+    // output registers r8..r11
+    var l: usize = 0
+    while l < n {
+        let x: usize = rt.ld32(xs, l) as usize
+        rt.st32((*f).color, (y as usize) * ((*f).w as usize) + x,
+            pack_unit(ld_f32(rg(base, 8, l), 0)) | (pack_unit(ld_f32(rg(base, 9, l), 0)) << 8 as u32)
+            | (pack_unit(ld_f32(rg(base, 10, l), 0)) << 16 as u32) | (pack_unit(ld_f32(rg(base, 11, l), 0)) << 24 as u32))
+        l = l + 1
+    }
+}
+
+// ---------------------------------------------------------------- raster
+
+fn plane(r: u64, j: usize, k: usize) -> f64 {
+    return *((r + (24 + (j as u64) * 3 + (k as u64)) * (8 as u64)) as *mut f64)
+}
+
+fn flush(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    if n == 0 { return }
+    let m: i32 = (*f).mode
+    if m == 0 { shade_native0(f, base, xs, y, n) }
+    else if m == 1 { shade_vm(f, base, xs, y, n) }
+    else if m == 2 { shade_native1(f, base, xs, y, n) }
+    else {
+        var l: usize = 0
+        while l < n {
+            let idx: usize = (y as usize) * ((*f).w as usize) + (rt.ld32(xs, l) as usize)
+            rt.st32((*f).color, idx, rt.ld32((*f).color, idx) + 1 as u32)
+            l = l + 1
+        }
+    }
+}
+
+fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, shaded: u64) -> u64 {
+    var count: u64 = shaded
+    var ys: i64 = ld_i64(r, 3)
+    var ye: i64 = ld_i64(r, 4)
+    if ys < (y0 as i64) { ys = y0 as i64 }
+    if ye > ((y1 - 1) as i64) { ye = (y1 - 1) as i64 }
+    if ys > ye { return count }
+    let px0: i64 = ld_i64(r, 1)
+    let px1: i64 = ld_i64(r, 2)
+    let bias0: i64 = ld_i64(r, 5)
+    let bias1: i64 = ld_i64(r, 6)
+    let bias2: i64 = ld_i64(r, 7)
+    let s0: i64 = 0 as i64 - ld_i64(r, 9) * 16 as i64
+    let s1: i64 = 0 as i64 - ld_i64(r, 11) * 16 as i64
+    let s2: i64 = 0 as i64 - ld_i64(r, 13) * 16 as i64
+    let t0: i64 = ld_i64(r, 8) * 16 as i64
+    let t1: i64 = ld_i64(r, 10) * 16 as i64
+    let t2: i64 = ld_i64(r, 12) * 16 as i64
+    let E0: i64 = ld_i64(r, 14)
+    let E1: i64 = ld_i64(r, 15)
+    let E2: i64 = ld_i64(r, 16)
+    let wi: usize = (*f).w as usize
+    var y: i64 = ys
+    while y <= ye {
+        // x interval from the three edge functions: n + s * x > 0
+        var lo: i64 = px0
+        var hi: i64 = px1
+        let n0: i64 = E0 + t0 * y + bias0
+        let n1: i64 = E1 + t1 * y + bias1
+        let n2: i64 = E2 + t2 * y + bias2
+        if s0 > 0 as i64 { let q: i64 = floor_div(0 as i64 - n0, s0) + 1 as i64; if q > lo { lo = q } }
+        else if s0 < 0 as i64 { let q: i64 = floor_div(n0 - 1 as i64, 0 as i64 - s0); if q < hi { hi = q } }
+        else if n0 <= 0 as i64 { hi = lo - 1 as i64 }
+        if s1 > 0 as i64 { let q: i64 = floor_div(0 as i64 - n1, s1) + 1 as i64; if q > lo { lo = q } }
+        else if s1 < 0 as i64 { let q: i64 = floor_div(n1 - 1 as i64, 0 as i64 - s1); if q < hi { hi = q } }
+        else if n1 <= 0 as i64 { hi = lo - 1 as i64 }
+        if s2 > 0 as i64 { let q: i64 = floor_div(0 as i64 - n2, s2) + 1 as i64; if q > lo { lo = q } }
+        else if s2 < 0 as i64 { let q: i64 = floor_div(n2 - 1 as i64, 0 as i64 - s2); if q < hi { hi = q } }
+        else if n2 <= 0 as i64 { hi = lo - 1 as i64 }
+        if lo <= hi {
+            let yf: f64 = y as f64
+            let zr: f64 = plane(r, 0, 0) + plane(r, 0, 2) * yf
+            let wr: f64 = plane(r, 1, 0) + plane(r, 1, 2) * yf
+            var x: i64 = lo
+            var nl: usize = 0
+            while x <= hi {
+                let xf: f64 = x as f64
+                let z: f32 = (zr + plane(r, 0, 1) * xf) as f32
+                let idx: usize = (y as usize) * wi + (x as usize)
+                var pass: bool = true
+                if (*f).depth_test {
+                    if z < ld_f32((*f).depth, idx) { st_f32((*f).depth, idx, z) } else { pass = false }
+                }
+                if pass {
+                    let iw: f64 = wr + plane(r, 1, 1) * xf
+                    let rw: f64 = 1.0 / iw
+                    if (*f).mode != 3 {
+                        st_f32(rg(base, 0, nl), 0, ((plane(r, 2, 0) + plane(r, 2, 2) * yf + plane(r, 2, 1) * xf) * rw) as f32)
+                        st_f32(rg(base, 1, nl), 0, ((plane(r, 3, 0) + plane(r, 3, 2) * yf + plane(r, 3, 1) * xf) * rw) as f32)
+                        st_f32(rg(base, 2, nl), 0, ((plane(r, 4, 0) + plane(r, 4, 2) * yf + plane(r, 4, 1) * xf) * rw) as f32)
+                        st_f32(rg(base, 3, nl), 0, ((plane(r, 5, 0) + plane(r, 5, 2) * yf + plane(r, 5, 1) * xf) * rw) as f32)
+                        st_f32(rg(base, 4, nl), 0, ((plane(r, 6, 0) + plane(r, 6, 2) * yf + plane(r, 6, 1) * xf) * rw) as f32)
+                        st_f32(rg(base, 5, nl), 0, ((plane(r, 7, 0) + plane(r, 7, 2) * yf + plane(r, 7, 1) * xf) * rw) as f32)
+                    }
+                    rt.st32(xs, nl, x as u32)
+                    nl = nl + 1
+                    count = count + 1 as u64
+                    if nl == LANES {
+                        flush(f, base, xs, y as i32, nl)
+                        nl = 0
+                    }
+                }
+                x = x + 1 as i64
+            }
+            flush(f, base, xs, y as i32, nl)
+        }
+        y = y + 1 as i64
+    }
+    return count
+}
+
+// job body: bands [lo, hi)
+fn band_job(ctx: u64, lo: u64, hi: u64) {
+    let f: *mut Frame = ctx as *mut Frame
+    let base: u64 = rt.heap_alloc(NREG * LANES * 4 + LANES * 4)
+    let xs: u64 = base + ((NREG * LANES * 4) as u64)
+    var b: u64 = lo
+    while b < hi {
+        let y0: i32 = (b as i32) * BAND
+        var y1: i32 = y0 + BAND
+        if y1 > (*f).h { y1 = (*f).h }
+        var shaded: u64 = 0 as u64
+        var t: usize = 0
+        while t < ((*f).ntri as usize) {
+            let r: u64 = (*f).rec + (t as u64) * (REC as u64) * (8 as u64)
+            if ld_i64(r, 0) == 1 as i64 {
+                shaded = band_tri(f, r, y0, y1, base, xs, shaded)
+            }
+            t = t + 1
+        }
+        rt.st64((*f).stats, b as usize, shaded)
+        b = b + 1 as u64
+    }
+    rt.heap_free(base, NREG * LANES * 4 + LANES * 4)
+}
+
+// draw all triangles of the vertex buffer; jobs_ptr = *mut jobs.Jobs as u64 (0 = this thread only)
+fn frame_draw(f: *mut Frame, jobs_ptr: u64) {
+    frame_setup(f)
+    if jobs_ptr == 0 as u64 {
+        band_job(f as u64, 0 as u64, ((*f).nbands as u64))
+    } else {
+        jobs.parallel_for(jobs_ptr as *mut jobs.Jobs, 0 as u64, ((*f).nbands as u64), 1 as u64, band_job, f as u64)
+    }
+}

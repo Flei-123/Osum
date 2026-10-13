@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/gfx/bench.fi -- measures lib/gpu/swr at 1240x720: scenes x shader modes x thread counts.
+// Output: one line per case: scene mode threads median_ms min_ms shaded_px ns_per_px_cpu
+import std.rt
+import std.io
+import std.time
+import jobs.jobs
+import gpu.swr.raster
+import gpu.swr.shader
+import gpu.swr.scene
+
+fn __thread_work(kind: u64, arg: u64) -> u64 {
+    if kind == jobs.WORKER_KIND { return jobs.worker_main(arg) }
+    return 0 as u64
+}
+
+fn sort_u64(a: *mut [u64; 16], n: usize) {
+    var i: usize = 1
+    while i < n {
+        var j: usize = i
+        while j > 0 && (*a)[j - 1] > (*a)[j] {
+            let t: u64 = (*a)[j]
+            (*a)[j] = (*a)[j - 1]
+            (*a)[j - 1] = t
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+fn build(f: *mut raster.Frame, sc: i32) {
+    (*f).ntri = 0
+    if sc == 0 { scene.scene_quads(f, 1, true) }
+    if sc == 1 { scene.scene_quads(f, 3, true) }
+    if sc == 2 { scene.scene_quads(f, 3, false) }
+    if sc == 3 { scene.scene_random(f, 4000, 0.5f, 777 as u64) }
+}
+
+fn scene_name(sc: i32) -> str {
+    if sc == 0 { return "quad-1x" }
+    if sc == 1 { return "quads-3x-far-first" }
+    if sc == 2 { return "quads-3x-near-first" }
+    return "tris-4000"
+}
+
+fn mode_name(m: i32, p: i32) -> str {
+    if m == 0 { return "native-A" }
+    if m == 2 { return "native-B" }
+    if p == 0 { return "vm-A" }
+    return "vm-B"
+}
+
+fn main() -> i32 {
+    let W: i32 = 1240
+    let H: i32 = 720
+    let f: *mut raster.Frame = raster.frame_new(W, H, 4096)
+    raster.frame_set_texture(f, scene.make_texture(256), 256, 256)
+    let progA: u64 = shader.prog_new()
+    shader.prog_tex_times_colour(progA)
+    let progB: u64 = shader.prog_new()
+    shader.prog_lit(progB)
+    // clear cost
+    var t0: u64 = time.monotonic_ns()
+    var rep: i32 = 0
+    while rep < 5 { raster.frame_clear(f, 0xFF000000 as u32, 1.0f); rep = rep + 1 }
+    let clr: u64 = (time.monotonic_ns() - t0) / (5 as u64)
+    io.fmt_print(f"clear {W}x{H}: {clr / (1000 as u64)} us\n")
+    var thr: [i32; 5] = [1, 2, 4, 8, 16]
+    var ti: i32 = 0
+    while ti < 5 {
+        let nt: i32 = thr[ti as usize]
+        var j: jobs.Jobs = jobs.create(nt - 1)
+        var sc: i32 = 0
+        while sc < 4 {
+            var mi: i32 = 0
+            while mi < 4 {
+                // mi: 0 native A, 1 vm A, 2 native B, 3 vm B
+                var m: i32 = 0
+                var p: i32 = 0
+                if mi == 0 { m = 0 }
+                if mi == 1 { m = 1; p = 0 }
+                if mi == 2 { m = 2 }
+                if mi == 3 { m = 1; p = 1 }
+                (*f).mode = m
+                if p == 0 { raster.frame_set_program(f, progA) } else { raster.frame_set_program(f, progB) }
+                build(f, sc)
+                var times: [u64; 16] = [0 as u64; 16]
+                var n: i32 = 0
+                var px: u64 = 0 as u64
+                while n < 9 {
+                    raster.frame_clear(f, 0xFF000000 as u32, 1.0f)
+                    let a: u64 = time.monotonic_ns()
+                    if nt == 1 { raster.frame_draw(f, 0 as u64) } else { raster.frame_draw(f, (&j) as u64) }
+                    let b: u64 = time.monotonic_ns()
+                    px = raster.frame_stat_pixels(f)
+                    times[n as usize] = b - a
+                    n = n + 1
+                }
+                sort_u64(&times, 9 as usize)
+                let med: u64 = times[4]
+                let mn: u64 = times[0]
+                var nspx: u64 = 0 as u64
+                if px > 0 as u64 { nspx = (med * (nt as u64)) / px }
+                io.fmt_print(f"RESULT {scene_name(sc)} {mode_name(m, p)} threads={nt} med_us={med / (1000 as u64)} min_us={mn / (1000 as u64)} px={px} cpu_ns_per_px={nspx}\n")
+                mi = mi + 1
+            }
+            sc = sc + 1
+        }
+        jobs.destroy(&j)
+        ti = ti + 1
+    }
+    return 0
+}

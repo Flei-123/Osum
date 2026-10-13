@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/gpu/swr/scene.fi -- test scenes for the SWR prototype (checks in tools/gfx/test.fi, numbers in tools/gfx/bench.fi)
+
+import std.rt
+import gpu.swr.raster
+
+export { make_texture, add_tri, add_quad, scene_quads, scene_random, rng_next, rng_f32 }
+
+// checker + gradient texture, size x size, power of two, RGBA8 (R | G << 8 | B << 16 | A << 24)
+fn make_texture(size: i32) -> u64 {
+    let n: usize = (size as usize) * (size as usize)
+    let t: u64 = rt.heap_alloc(n * 4)
+    var y: i32 = 0
+    while y < size {
+        var x: i32 = 0
+        while x < size {
+            let chk: i32 = ((x / 16) + (y / 16)) & 1
+            let r: u32 = (((x * 255) / size) as u32) & 255 as u32
+            let g: u32 = (((y * 255) / size) as u32) & 255 as u32
+            var b: u32 = 60 as u32
+            if chk == 1 { b = 220 as u32 }
+            rt.st32(t, (y as usize) * (size as usize) + (x as usize), r | (g << 8 as u32) | (b << 16 as u32) | 0xFF000000 as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return t
+}
+
+// triangle t (vertex index 3 t ..): positions are clip space; z = depth (0..1), w = 1 unless given
+fn add_tri(f: *mut raster.Frame, t: usize,
+    x0: f32, y0: f32, z0: f32, w0: f32, u0: f32, v0: f32,
+    x1: f32, y1: f32, z1: f32, w1: f32, u1: f32, v1: f32,
+    x2: f32, y2: f32, z2: f32, w2: f32, u2: f32, v2: f32,
+    r: f32, g: f32, b: f32) {
+    raster.vtx_put(f, t * 3, x0 * w0, y0 * w0, z0 * w0, w0, u0, v0, r, g, b, 1.0f)
+    raster.vtx_put(f, t * 3 + 1, x1 * w1, y1 * w1, z1 * w1, w1, u1, v1, r, g, b, 1.0f)
+    raster.vtx_put(f, t * 3 + 2, x2 * w2, y2 * w2, z2 * w2, w2, u2, v2, r, g, b, 1.0f)
+    (*f).ntri = (t + 1) as i32
+}
+
+// axis aligned quad in NDC [x0,x1] x [y0,y1] at depth z, uv 0..uvs, as two triangles (counter clockwise)
+fn add_quad(f: *mut raster.Frame, t: usize, x0: f32, y0: f32, x1: f32, y1: f32, z: f32, uvs: f32, r: f32, g: f32, b: f32) {
+    add_tri(f, t, x0, y0, z, 1.0f, 0.0f, uvs, x1, y0, z, 1.0f, uvs, uvs, x1, y1, z, 1.0f, uvs, 0.0f, r, g, b)
+    add_tri(f, t + 1, x0, y0, z, 1.0f, 0.0f, uvs, x1, y1, z, 1.0f, uvs, 0.0f, x0, y1, z, 1.0f, 0.0f, 0.0f, r, g, b)
+}
+
+// n full screen quads; far to near (draw order = every quad shades all pixels) or near to far (early z rejects)
+fn scene_quads(f: *mut raster.Frame, n: i32, far_first: bool) {
+    var i: i32 = 0
+    while i < n {
+        var z: f32 = 0.9f - 0.2f * (i as f32)
+        if !far_first { z = 0.1f + 0.2f * (i as f32) }
+        add_quad(f, (i as usize) * 2, -1.0f, -1.0f, 1.0f, 1.0f, z, 4.0f, 0.9f, 0.8f, 0.7f)
+        i = i + 1
+    }
+}
+
+fn rng_next(s: u64) -> u64 {
+    return (s * (1103515245 as u64) + (12345 as u64)) & (2147483647 as u64) // 31 bit LCG: overflow is checked, no wrap-around
+}
+
+fn rng_f32(s: u64) -> f32 {
+    return (((s >> 7 as u64) & 16777215 as u64) as f32) / 16777216.0f
+}
+
+// n random triangles, ~ `size` NDC units wide, random depth and 1/w (perspective), deterministic from seed
+fn scene_random(f: *mut raster.Frame, n: i32, size: f32, seed: u64) {
+    var s: u64 = seed
+    var i: i32 = 0
+    while i < n {
+        s = rng_next(s)
+        let cx: f32 = rng_f32(s) * 2.0f - 1.0f
+        s = rng_next(s)
+        let cy: f32 = rng_f32(s) * 2.0f - 1.0f
+        s = rng_next(s)
+        let z: f32 = 0.05f + rng_f32(s) * 0.9f
+        s = rng_next(s)
+        let w: f32 = 0.5f + rng_f32(s) * 1.5f
+        var k: i32 = 0
+        var xs: [f32; 3] = [0.0f; 3]
+        var ys: [f32; 3] = [0.0f; 3]
+        while k < 3 {
+            s = rng_next(s)
+            xs[k as usize] = cx + (rng_f32(s) - 0.5f) * size
+            s = rng_next(s)
+            ys[k as usize] = cy + (rng_f32(s) - 0.5f) * size
+            k = k + 1
+        }
+        s = rng_next(s)
+        let cr: f32 = 0.5f + rng_f32(s) * 0.5f
+        add_tri((f), (i as usize), xs[0], ys[0], z, w, 0.0f, 0.0f, xs[1], ys[1], z + 0.01f, w, 2.0f, 0.0f, xs[2], ys[2], z, w, 0.0f, 2.0f, cr, 0.9f, 0.5f)
+        i = i + 1
+    }
+}

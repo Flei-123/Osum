@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/gpu/swr/shader.fi -- SWR fragment program assembler for the batch interpreter in raster.fi.
+// Register file: r0 u, r1 v, r2..r5 colour rgba (inputs, perspective correct); r8..r11 = output rgba; r12..r31 free.
+// Instruction = 5 u32 words: op, d, a, b, c (see raster.fi shade_vm).
+// This is the STAND-IN for the SPIR-V stage of docs/GFX-STACK.md: SPIR-V -> (lowering) -> this instruction set.
+
+import std.rt
+
+export {
+    OP_END, OP_MOV, OP_ADD, OP_SUB, OP_MUL, OP_MAD, OP_MIN, OP_MAX, OP_SAT, OP_LDC, OP_RCP, OP_SQRT, OP_SAMPLE,
+    prog_new, prog_emit, prog_ldc, prog_tex_times_colour, prog_lit, prog_len,
+}
+
+const OP_END: u32 = 0
+const OP_MOV: u32 = 1
+const OP_ADD: u32 = 2
+const OP_SUB: u32 = 3
+const OP_MUL: u32 = 4
+const OP_MAD: u32 = 5
+const OP_MIN: u32 = 6
+const OP_MAX: u32 = 7
+const OP_SAT: u32 = 8
+const OP_LDC: u32 = 9
+const OP_RCP: u32 = 10
+const OP_SQRT: u32 = 11
+const OP_SAMPLE: u32 = 12
+
+// word 0 of the buffer is not used; instruction i lives at words [5 i, 5 i + 5); word count kept by the caller
+fn prog_new() -> u64 {
+    return rt.heap_alloc(4096)
+}
+
+fn prog_emit(p: u64, pc: usize, op: u32, d: u32, a: u32, b: u32, c: u32) -> usize {
+    rt.st32(p, pc * 5, op)
+    rt.st32(p, pc * 5 + 1, d)
+    rt.st32(p, pc * 5 + 2, a)
+    rt.st32(p, pc * 5 + 3, b)
+    rt.st32(p, pc * 5 + 4, c)
+    return pc + 1
+}
+
+fn f32_bits(v: f32) -> u32 {
+    var x: f32 = v
+    return *((&x) as *mut u32)
+}
+
+fn prog_ldc(p: u64, pc: usize, d: u32, v: f32) -> usize {
+    return prog_emit(p, pc, OP_LDC, d, f32_bits(v), 0 as u32, 0 as u32)
+}
+
+fn prog_len(pc: usize) -> usize {
+    return pc
+}
+
+// program 0: out = texture(u, v) * colour            (identical to shade_native0)
+fn prog_tex_times_colour(p: u64) -> usize {
+    var pc: usize = 0
+    pc = prog_emit(p, pc, OP_SAMPLE, 8 as u32, 0 as u32, 1 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 8 as u32, 8 as u32, 2 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 9 as u32, 9 as u32, 3 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 10 as u32, 10 as u32, 4 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 11 as u32, 11 as u32, 5 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_END, 0 as u32, 0 as u32, 0 as u32, 0 as u32)
+    return pc
+}
+
+// program 1 ("lit", 17 instructions + END): lf = 0.3 + 0.7 c.r ; rgb = tex.rgb * lf * c.g + c.b * 0.1 ; a = tex.a * c.a
+// (identical to shade_native1; the same op mix as the Daidalos mesh fragment shader: 1 fetch, ~12 flops, a few constants)
+fn prog_lit(p: u64) -> usize {
+    var pc: usize = 0
+    pc = prog_emit(p, pc, OP_SAMPLE, 8 as u32, 0 as u32, 1 as u32, 0 as u32)
+    pc = prog_ldc(p, pc, 16 as u32, 0.7f)
+    pc = prog_ldc(p, pc, 17 as u32, 0.3f)
+    pc = prog_ldc(p, pc, 18 as u32, 0.1f)
+    pc = prog_emit(p, pc, OP_MAD, 19 as u32, 2 as u32, 16 as u32, 17 as u32) // lf
+    pc = prog_emit(p, pc, OP_MUL, 8 as u32, 8 as u32, 19 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 9 as u32, 9 as u32, 19 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 10 as u32, 10 as u32, 19 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 20 as u32, 4 as u32, 18 as u32, 0 as u32) // c.b * 0.1
+    pc = prog_emit(p, pc, OP_MAD, 8 as u32, 8 as u32, 3 as u32, 20 as u32)
+    pc = prog_emit(p, pc, OP_MAD, 9 as u32, 9 as u32, 3 as u32, 20 as u32)
+    pc = prog_emit(p, pc, OP_MAD, 10 as u32, 10 as u32, 3 as u32, 20 as u32)
+    pc = prog_emit(p, pc, OP_MUL, 11 as u32, 11 as u32, 5 as u32, 0 as u32)
+    pc = prog_emit(p, pc, OP_END, 0 as u32, 0 as u32, 0 as u32, 0 as u32)
+    return pc
+}
