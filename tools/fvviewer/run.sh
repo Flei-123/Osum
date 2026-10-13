@@ -3,7 +3,7 @@
 # tools/fvviewer/run.sh -- FreeViewer viewer libs (M1 part): host gate.
 #   1. lib/net/ws.fi against Python `websockets` (normal + 1-octet reads)
 #   2. counter-check: a wrong Sec-WebSocket-Accept must be refused
-#   3. compile-check of lib/fv/{cryptoif,proto,session}.fi (MOCK crypto)
+#   3. compile-check of lib/fv/{crypto,proto,session}.fi (real crypto)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$PWD/lib"
@@ -24,7 +24,7 @@ c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection
 out = p.communicate(timeout=20)[0].decode()
 sys.exit(0 if "bad upgrade answer" in out and "UPGRADED" not in out else 1)
 PY
-printf 'import fv.proto\nimport fv.session\nimport fv.cryptoif\nimport net.ws\nfn main() -> i32 {\n    var s: session.Sess = session.sess_new()\n    return 0\n}\n' > "$D/c.fi"
-vendor/firn/bin/firnc "$D/c.fi" -o "$D/c" > "$D/c.log" 2>&1 && ok "lib/fv/{proto,session,cryptoif} compile" || { bad "lib/fv compile"; head -5 "$D/c.log"; }
+printf 'import fv.proto\nimport fv.session\nimport fv.crypto\nimport net.ws\nfn main() -> i32 {\n    var s: session.Sess = session.sess_new()\n    return 0\n}\n' > "$D/c.fi"
+vendor/firn/bin/firnc "$D/c.fi" -o "$D/c" > "$D/c.log" 2>&1 && ok "lib/fv/{proto,session,crypto} compile" || { bad "lib/fv compile"; head -5 "$D/c.log"; }
 echo "FVVIEWER: $pass ok, $fail fail"
 [ "$fail" = 0 ]
