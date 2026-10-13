@@ -146,6 +146,7 @@ echo "BB ps-cmd $(/bin/busybox ps >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB date-cmd $(/bin/busybox date >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB end"
 BBS
+[ -n "${BBSCRIPT:-}" ] && cp "$BBSCRIPT" "$D/bb.sh"
 echo "== 2. the kernel of this tree and its image =="
 KNEW=${KERNEL:-$D/k-new.mb}
 if [ -z "${KERNEL:-}" ]; then build_kernel "$ROOT" "$KNEW" && ok "kernel built" || { bad "kernel does not build"; tail -8 "$KNEW.log"; echo "UNTERBAU: $pass passed, $fail failed"; exit 1; }; fi
