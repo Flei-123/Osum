@@ -21,7 +21,7 @@ open(d + "/shadow", "w").write("justin:%s:1000:0:99999:7:::\nroot:%s:0:0:99999:7
 open(d + "/passwd", "w").write("root:x:0:0:root:/root:/bin/sh\njustin:x:1000:1000:Justin:/users/justin:/bin/sh\n")
 PY
 echo on > "$OUT/uiblink"; echo 1 > "$OUT/flag"
-printf 'warte 6\ntippe ab\nwarte 1\nserie idle 120 blink\nfoto done\n' > "$OUT/book"
+printf 'warte 6\ntippe ab\nwarte 1\nserie idle 120 blink 25\nfoto done\n' > "$OUT/book"
 run_case() { # name app mode [extra xfile...]
     local nm=$1 app=$2 mode=$3; shift 3
     bash tools/alltag/build.sh "$OUT/$nm" mode="$mode" kbd=yes uitrace=yes warten=12 bloecke=32768 \

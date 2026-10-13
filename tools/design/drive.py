@@ -445,7 +445,10 @@ class Fahrer:
     # w-lock: BURST SERIES. `serie <click|idle> <n> <name>` sends (optionally) a left click and then
     # n back-to-back `screendump`s in ONE write to the monitor, so the frames follow each other as
     # fast as QEMU can write them (no sleeps, no size polling in between). Files: <name>-000.ppm ...
-    def serie(self, mode, n, name, frist=60.0):
+    # r-rest: an optional pace (ms) sends the commands one by one with a wall-clock gap, so
+    # the burst spans n * pace ms however fast QEMU dumps (a blink test needs > 2 periods;
+    # an unpaced burst of 120 frames lasted 0.5-1.2 s depending on the load: 0 or 1 toggles).
+    def serie(self, mode, n, name, frist=60.0, pace_ms=0):
         cmds = []
         if mode == "click":
             cmds += ["mouse_button 1", "mouse_button 0"]
@@ -462,7 +465,13 @@ class Fahrer:
                 # W-LOGIN: the pointer keeps moving between the frames (every move makes the window server compose)
                 cmds.append("mouse_move %d 0" % (6 if i % 2 == 0 else -6))
             cmds.append("screendump %s" % pth)
-        self.s.sendall(("\n".join(cmds) + "\n").encode())
+        if pace_ms > 0:
+            for c in cmds:
+                self.s.sendall((c + "\n").encode())
+                if c.startswith("screendump"):
+                    time.sleep(pace_ms / 1000.0)
+        else:
+            self.s.sendall(("\n".join(cmds) + "\n").encode())
         bis = time.time() + frist
         for pth in paths:
             letzte, ruhig = -1, 0
@@ -1443,8 +1452,9 @@ def main():
             if not f.foto(arg):
                 fehler += 1
         elif b == "serie":
-            sm, sn, snm = arg.split()
-            if not f.serie(sm, int(sn), snm):
+            sp = arg.split()
+            sm, sn, snm = sp[0], sp[1], sp[2]
+            if not f.serie(sm, int(sn), snm, pace_ms=int(sp[3]) if len(sp) > 3 else 0):
                 fehler += 1
         else:
             print("unbekannter Befehl: %s" % z)
