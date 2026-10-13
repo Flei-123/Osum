@@ -939,6 +939,20 @@ class Fahrer:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        # FreeViewer window (kernel/user/fvviewer.fi, test mode): `fvrect<name>` = a widget the app reports
+        # ("fvviewer: rect name=id|pw|go|img|view x= y= w= h=", canvas coordinates); `fvpt<A>x<B>` = the point
+        # A % / B % into the picture area ("view"), so a click lands on a known picture pixel.
+        if name.startswith("fvrect") or name.startswith("fvpt"):
+            nm = name[6:] if name.startswith("fvrect") else "view"
+            m = letzte(r"fvviewer: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
+            o = self.fenster("fvviewer")
+            if m is None or o is None:
+                return None
+            rx, ry, rw_, rh_ = (int(m.group(i)) for i in (1, 2, 3, 4))
+            if name.startswith("fvpt"):
+                fa, fb = name[4:].split("x")
+                return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
+            return (o[0] + rx, o[1] + ry, rw_, rh_)
         if name.startswith("frect"):
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
@@ -1418,6 +1432,15 @@ def main():
             f.ziehe(x0, y, x1, y)
             print("ziehespur %s -> %d,%d nach %d,%d  (rect %d,%d %dx%d)"
                   % (t[0], x0, y, x1, y, r[0], r[1], r[2], r[3]))
+        # FreeViewer gate: `extern <shell command>` runs a helper on the host (e.g. kill / restart the test host), max 120 s.
+        elif b == "extern":
+            import subprocess
+            try:
+                rc = subprocess.run(arg, shell=True, timeout=120, capture_output=True, text=True)
+                print("extern rc=%d %s" % (rc.returncode, (rc.stdout + rc.stderr).strip()[:200]))
+            except subprocess.TimeoutExpired:
+                print("extern TIMEOUT: %s" % arg)
+                fehler += 1
         elif b == "taste":
             f.taste(arg)
         # RUNDE ECHTHARDWARE-4: `tippe <wort>` -- ein Wort Zeichen fuer

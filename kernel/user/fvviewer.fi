@@ -528,6 +528,91 @@ static mut fps_n: u64 = 0
 static mut rtt_ms: u64 = 0
 static mut ping_at: u64 = 0
 
+// ---- GATE-ONLY test entry (tools/fvviewer/gui.sh). NEVER the default: it exists only when the
+// file /etc/fvviewer.test is present in the image ("<ipv4> <port> [tls]" in one line). The window
+// then talks to <ipv4>:<port> instead of freeviewer.fleitec.com (plain ws://, or wss:// against the
+// test CA /etc/fvviewer-ca.pem for host name "localhost" with `tls`), prints "fvviewer: ..." lines on
+// the serial console, and does a clipboard self test. A normal install has no such file.
+static mut TEST_ON: bool = false
+static mut TEST_TLS: bool = false
+static mut TEST_ADDR: u32 = 0
+static mut TEST_PORT: u64 = 0
+static mut TEST_HOST: [u8; 64] = [0 as u8; 64]
+static mut t_click_at: u64 = 0 // when the last button-down went out (0 = none pending)
+static mut t_dec_ms: u64 = 0 // time spent in handle_msg, this second
+static mut t_msgs: u64 = 0
+static mut t_live_at: u64 = 0
+static mut t_conn_t0: u64 = 0
+static mut t_rects: u64 = 0
+static mut t_clip_state: u64 = 0 // 0 = not yet, 1 = put, 2 = echo seen
+static mut TEST_CLIP: [u8; 12] = "fvv-gui-clip"
+
+fn load_test_target() {
+    TEST_ON = false
+    var b: rt.Buf = rt.buf_new()
+    var path: [u8; 19] = "/etc/fvviewer.test\0"
+    if !rt.read_file((&path[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return
+    }
+    var i: u64 = 0
+    var sp1: u64 = 0
+    var sp2: u64 = 0
+    var n: u64 = b.len as u64
+    if n > 62 { n = 62 }
+    while i < n {
+        let c: u8 = rt.ld8(b.ptr, i as usize)
+        if c == 10 as u8 || c == 0 as u8 {
+            break
+        }
+        if c == 32 as u8 {
+            if sp1 == 0 { sp1 = i } else if sp2 == 0 { sp2 = i }
+            TEST_HOST[i as usize] = 0 as u8
+        } else {
+            TEST_HOST[i as usize] = c
+        }
+        i = i + 1
+    }
+    TEST_HOST[i as usize] = 0 as u8
+    if sp1 > 0 && parse_ip((&TEST_HOST[0]) as u64, &TEST_ADDR) {
+        TEST_PORT = parse_u((&TEST_HOST[0]) as u64 + sp1 + 1)
+        TEST_TLS = sp2 > 0 && rt.ld8((&TEST_HOST[0]) as u64, (sp2 + 1) as usize) == 116 as u8
+        TEST_ON = TEST_PORT > 0
+    }
+    rt.buf_free(&b)
+}
+
+fn trace_rect(name: str, key: u64) {
+    if !TEST_ON {
+        return
+    }
+    let ni: usize = fuiscene.node_of_key(key)
+    tr("rect name=")
+    say(name)
+    say(" x=")
+    pn(fuiscene.node_x(ni))
+    say(" y=")
+    pn(fuiscene.node_y(ni))
+    say(" w=")
+    pn(fuiscene.node_w(ni))
+    say(" h=")
+    pn(fuiscene.node_h(ni))
+    say("\n")
+}
+
+fn tr(s: str) {
+    if TEST_ON {
+        say("fvviewer: ")
+        say(s)
+    }
+}
+
+fn trn(v: u64) {
+    if TEST_ON {
+        pn(v)
+    }
+}
+
 fn pool(slot: u64, s: str) -> u64 {
     let base: u64 = (&POOL[0]) as u64 + slot * 128
     var i: u64 = 0
@@ -743,19 +828,39 @@ fn send_m(cl: *mut client.Client, n: u64) -> bool {
 
 // blocking: DNS, wss, pairing, first half of the handshake. true = handshake answer sent.
 fn do_connect(cl: *mut client.Client) -> bool {
-    let a4: u64 = dns.resolve_a(RELAY_HOST.p as u64)
-    if a4 == 0 {
-        st_begin()
-        st_str("DNS: freeviewer.fleitec.com nicht aufloesbar (Netz?)")
-        return false
-    }
-    var path: [u8; 6] = "/fv/ws"
-    var roots: [u8; 19] = "/etc/ssl/roots.pem\0"
-    if !client.cl_connect(cl, a4 as u32, 443, true, RELAY_HOST.p as u64, RELAY_HOST.n as u64,
-        (&path[0]) as u64, 6, (&roots[0]) as u64) {
-        st_begin()
-        err_text(cl)
-        return false
+    if TEST_ON {
+        // GATE ONLY (see load_test_target)
+        var lh: [u8; 10] = "localhost\0"
+        var ca: [u8; 23] = "/etc/fvviewer-ca.pem\0\0\0"
+        var tpath: [u8; 6] = "/fv/ws"
+        var okc: bool = false
+        if TEST_TLS {
+            okc = client.cl_connect(cl, TEST_ADDR, TEST_PORT as u16, true, (&lh[0]) as u64, 9,
+                (&tpath[0]) as u64, 6, (&ca[0]) as u64)
+        } else {
+            okc = client.cl_connect(cl, TEST_ADDR, TEST_PORT as u16, false, (&TEST_HOST[0]) as u64,
+                rt.c_length((&TEST_HOST[0]) as u64) as u64, (&tpath[0]) as u64, 6, 0)
+        }
+        if !okc {
+            st_begin()
+            err_text(cl)
+            return false
+        }
+    } else {
+        let a4: u64 = dns.resolve_a(RELAY_HOST.p as u64)
+        if a4 == 0 {
+            st_begin()
+            st_str("DNS: freeviewer.fleitec.com nicht aufloesbar (Netz?)")
+            return false
+        }
+        var path: [u8; 6] = "/fv/ws"
+        var roots: [u8; 19] = "/etc/ssl/roots.pem\0"
+        if !client.cl_connect(cl, a4 as u32, 443, true, RELAY_HOST.p as u64, RELAY_HOST.n as u64,
+            (&path[0]) as u64, 6, (&roots[0]) as u64) {
+            st_begin()
+            err_text(cl)
+            return false
+        }
     }
     if !client.cl_pair(cl, (&IDBUF[0]) as u64, rt.c_length((&IDBUF[0]) as u64) as u64) {
         st_begin()
@@ -804,12 +909,27 @@ fn go_live(cl: *mut client.Client) {
     send_m(cl, n)
     st_begin()
     st_str("Verbunden")
+    t_live_at = fuiapp.now_ms()
+    t_clip_state = 0
+    t_click_at = 0
+    t_rects = 0
+    tr("state live after ms=")
+    trn(t_live_at - t_conn_t0)
+    tr("\n")
     fuiscene.refresh()
 }
 
 fn lose(cl: *mut client.Client, why_err: bool) {
+    if TEST_ON {
+        tr("lost err=")
+        trn((*cl).err)
+        tr(" retry_n=")
+        trn(retry_n)
+        tr("\n")
+    }
     client.cl_close(cl)
     image_off()
+    t_rects = 0
     // retry the same id / password (no retry when the host said no or the password is wrong)
     if why_err && (*cl).err != client.E_AUTH && (*cl).err != client.E_DENIED && retry_n < RETRIES {
         retry_n = retry_n + 1
@@ -859,6 +979,34 @@ fn fit_image() {
         z = 5
     }
     fuiscene.image_set_zoom(K_IMG, z)
+    if TEST_ON && (bw != fit_w || bh != fit_h) {
+        tr("rect name=img x=")
+        trn(fuiscene.node_x(ni))
+        tr(" y=")
+        trn(fuiscene.node_y(ni))
+        tr(" w=")
+        trn(bw)
+        tr(" h=")
+        trn(bh)
+        tr(" zoom=")
+        trn(z)
+        tr(" img=")
+        trn(iw)
+        tr("x")
+        trn(ih)
+        tr("\n")
+        var vr: input.Rect = input.rect_new()
+        input.view_rect(fuiscene.node_x(ni), fuiscene.node_y(ni), bw, bh, rw, rh, fuiscene.image_zoom(K_IMG), &vr)
+        tr("rect name=view x=")
+        trn(vr.x as u64)
+        tr(" y=")
+        trn(vr.y as u64)
+        tr(" w=")
+        trn(vr.w as u64)
+        tr(" h=")
+        trn(vr.h as u64)
+        tr("\n")
+    }
     fit_w = bw
     fit_h = bh
 }
@@ -881,6 +1029,15 @@ fn blit_img(tmp: u64, tw: u64, th: u64, x: u64, y: u64) {
 }
 
 fn handle_msg(cl: *mut client.Client, m: u64, len: u64) {
+    let t0: u64 = fuiapp.now_ms()
+    handle_msg2(cl, m, len)
+    if TEST_ON {
+        t_dec_ms = t_dec_ms + (fuiapp.now_ms() - t0)
+        t_msgs = t_msgs + 1
+    }
+}
+
+fn handle_msg2(cl: *mut client.Client, m: u64, len: u64) {
     let t: u64 = proto.msg_type(m, len)
     if t == proto.T_SCREEN {
         var wh: [u64; 2] = [0; 2]
@@ -912,6 +1069,12 @@ fn handle_msg(cl: *mut client.Client, m: u64, len: u64) {
             while proto.tiles_next(&it, &tl) {
                 if jpeg.jpeg_read(tl.jpeg, tl.len, g_tmp, IMGCAP) {
                     blit_img(g_tmp, jpeg.width(), jpeg.height(), tl.x, tl.y)
+                    if TEST_ON && t_click_at != 0 && tl.w == 16 && tl.h == 16 {
+                        tr("click-to-mark ms=")
+                        trn(fuiapp.now_ms() - t_click_at)
+                        tr("\n")
+                        t_click_at = 0
+                    }
                 }
             }
             n_updates = n_updates + 1
@@ -938,6 +1101,17 @@ fn handle_msg(cl: *mut client.Client, m: u64, len: u64) {
     } else if t == proto.T_CLIP {
         var cp: [u64; 2] = [0; 2]
         if proto.dec_clip(m, len, (&cp[0]) as u64) {
+            if TEST_ON {
+                tr("clip rx n=")
+                trn(cp[1])
+                tr(" text=")
+                say_b(cp[0], cp[1])
+                tr("\n")
+                if cp[1] == 16 && rt.ld8(cp[0], 0) == 101 as u8 && rt.ld8(cp[0], 5) == 102 as u8 {
+                    t_clip_state = 2
+                    tr("clip echo ok\n")
+                }
+            }
             if cp[1] <= CLIPCAP {
                 // remember it as "already in sync" before it lands in the local clipboard
                 wlibc.clip_put(cp[0], cp[1])
@@ -1015,6 +1189,13 @@ fn drain_input(cl: *mut client.Client) {
         q_tail = (q_tail + 1) % QCAP
         if kind == fuiapp.EV_KEY {
             let cnt: u64 = input.key_msgs(g_kb, g_kl, key, wlib.key_mod())
+            if TEST_ON {
+                tr("key code=")
+                trn(key)
+                tr(" msgs=")
+                trn(cnt)
+                tr("\n")
+            }
             var i: u64 = 0
             while i < cnt {
                 client.cl_send(cl, g_kb + i * input.SLOT, rt.ld8(g_kl, i as usize) as u64)
@@ -1029,11 +1210,32 @@ fn drain_input(cl: *mut client.Client) {
             mvx = xy[0]
             mvy = xy[1]
         }
+        if TEST_ON && (kind == fuiapp.EV_DOWN || kind == fuiapp.EV_UP) {
+            if kind == fuiapp.EV_DOWN { tr("ev down") } else { tr("ev up") }
+            tr(" x=")
+            trn(x)
+            tr(" y=")
+            trn(y)
+            tr(" btn=")
+            trn(btn)
+            tr(" inside=")
+            if inside { tr("1") } else { tr("0") }
+            tr(" ptr=")
+            trn(xy[0])
+            tr(",")
+            trn(xy[1])
+            tr(" held=")
+            trn(btn_mask)
+            tr("\n")
+        }
         if kind == fuiapp.EV_DOWN {
             if mv {
                 let n: u64 = proto.enc_move(g_obuf, mvx as i64, mvy as i64)
                 send_m(cl, n)
                 mv = false
+            }
+            if TEST_ON && t_click_at == 0 {
+                t_click_at = fuiapp.now_ms()
             }
             if (btn & 1) != 0 && (btn_mask & 1) == 0 {
                 send_button(cl, 0, true)
@@ -1099,6 +1301,25 @@ fn live_tick(cl: *mut client.Client) -> bool {
         st_dec(rtt_ms)
         st_str(" ms")
         fuiscene.refresh()
+        if TEST_ON {
+            tr("live fps=")
+            trn(fps)
+            tr(" rtt=")
+            trn(rtt_ms)
+            tr(" handle_ms=")
+            trn(t_dec_ms)
+            tr(" msgs=")
+            trn(t_msgs)
+            tr("\n")
+            t_dec_ms = 0
+            t_msgs = 0
+        }
+    }
+    if TEST_ON && t_clip_state == 0 && now >= t_live_at + 3000 {
+        // clipboard self test: put a text into the OS clipboard, clip_sync must send it to the host
+        wlibc.clip_put((&TEST_CLIP[0]) as u64, 12)
+        t_clip_state = 1
+        tr("clip put n=12\n")
     }
     if fit_w != fuiscene.node_w(fuiscene.node_of_key(K_IMG)) || fit_h != fuiscene.node_h(fuiscene.node_of_key(K_IMG)) {
         fit_image()
@@ -1116,6 +1337,12 @@ fn start_connect() {
         return
     }
     ask_mode = rt.c_length((&PWBUF[0]) as u64) == 0
+    t_conn_t0 = fuiapp.now_ms()
+    tr("connect start id_len=")
+    trn(rt.c_length((&IDBUF[0]) as u64) as u64)
+    tr(" pw_len=")
+    trn(rt.c_length((&PWBUF[0]) as u64) as u64)
+    tr("\n")
     st = ST_CONNECT
     st_delay = 2
     retry_at = 0
@@ -1145,16 +1372,32 @@ fn gui() -> i32 {
     if !client.cl_alloc(&cl) {
         return 1
     }
+    load_test_target()
     st_begin()
-    st_str("Bereit")
+    if TEST_ON {
+        st_str("TESTMODUS (Gate): lokaler Relay statt freeviewer.fleitec.com")
+    } else {
+        st_str("Bereit")
+    }
     if !fuiscene.open(80, 50, 860, 640, pool(11, "FreeViewer"), build) {
         return 2
+    }
+    if TEST_ON {
+        tr("test mode on (gate only)\n")
+        tr("geom x=80 y=50 w=860 h=640\n")
+        tr("state form\n")
     }
     fuiscene.set_raw(raw_hook)
     fuiscene.set_overlay(overlay)
     var seen: u64 = 0
     while fuiscene.alive() {
         let key: u64 = fuiscene.pump()
+        if TEST_ON && st == ST_FORM && t_rects == 0 && fuiscene.painted() > 0 {
+            t_rects = 1
+            trace_rect("id", K_ID)
+            trace_rect("pw", K_PW)
+            trace_rect("go", K_GO)
+        }
         if st == ST_FORM {
             if key == K_GO || key == K_ID || key == K_PW {
                 start_connect()

@@ -73,6 +73,7 @@ struct Client {
     pending: bool, // a ws event is pending (needs ws.take)
     timeout: bool, // the last failed read was only the socket timeout (EAGAIN)
     askmode: bool,
+    wait_ms: u64, // secure link: how long a read waits for data (poll before tls_read, see xread)
 }
 
 fn client_new() -> Client {
@@ -80,7 +81,7 @@ fn client_new() -> Client {
         secure: false, t: tls.tls_new(), store: x509.store_new(),
         storebuf: rt.buf_new(), ebuf: rt.buf_new(), w: ws.ws_new(), s: session.sess_new(),
         rbuf: 0, rpos: 0, rlen: 0, wmsg: 0, pbuf: 0, obuf: 0, sbuf: 0,
-        fbuf: 0, err: 0, errtxt: [0 as u8; 64], errlen: 0, pending: false, timeout: false, askmode: false }
+        fbuf: 0, err: 0, errtxt: [0 as u8; 64], errlen: 0, pending: false, timeout: false, askmode: false, wait_ms: 0 }
 }
 
 fn ld8(p: u64, i: u64) -> u64 {
@@ -129,8 +130,32 @@ fn cl_timed_out(cl: *mut Client) -> bool {
     return false
 }
 
+// Plain link: SO_RCVTIMEO. TLS link: NEVER a socket timeout -- tls_read treats a failed read as a
+// dead stream (closed = true), so a quiet link would end the session. The wait is done with
+// poll() before tls_read (xread); the socket keeps its long timeout set in cl_connect.
 fn cl_set_timeout(cl: *mut Client, ms: u64) {
+    if (*cl).secure {
+        (*cl).wait_ms = ms
+        return
+    }
     let ok: bool = net.set_timeout(&(*cl).conn, ms) catch false
+}
+
+// octets already inside the TLS layer (raw or decrypted): a read needs no socket data
+fn tls_buffered(cl: *mut Client) -> bool {
+    return (*cl).t.rbuf.len > (*cl).t.rpos || (*cl).t.app.len > (*cl).t.apos
+}
+
+// poll(2) on the socket: true = readable (or hung up / error: tls_read will say so)
+fn sock_ready(cl: *mut Client, ms: u64) -> bool {
+    var pfd: [u32; 2] = [0; 2]
+    pfd[0] = (*cl).conn.fd as u32
+    pfd[1] = 1 as u32 // events = POLLIN, revents = 0
+    let r: i64 = syscall(7, (&pfd[0]) as i64, 1, ms as i64, 0, 0, 0)
+    if r < 0 {
+        return true // poll not usable: fall back to a plain read
+    }
+    return r > 0
 }
 
 // ------------------------------------------------------------ transport
@@ -140,6 +165,11 @@ fn xread(cl: *mut Client, p: u64, max: u64) -> u64 {
     var bad: bool = false
     var n: usize = 0
     if (*cl).secure {
+        if (*cl).wait_ms > 0 && !tls_buffered(cl) && !sock_ready(cl, (*cl).wait_ms) {
+            (*cl).err = E_IO
+            (*cl).timeout = true
+            return 0
+        }
         n = tls.tls_read(&(*cl).t, p, max as usize)
         catch | e | tls.tls_fail_len(&(*cl).ebuf, e, &bad)
     } else {
@@ -300,8 +330,12 @@ fn cl_connect(cl: *mut Client, addr: u32, port: u16, secure: bool, host: u64,
         (*cl).err = E_TCP
         return false
     }
-    cl_set_timeout(cl, 20000)
     (*cl).secure = secure
+    cl_set_timeout(cl, 20000)
+    if secure {
+        // long socket timeout: only for a record that stalls half way (see cl_set_timeout)
+        let ok2: bool = net.set_timeout(&(*cl).conn, 20000) catch false
+    }
     if secure {
         if roots != 0 && rt.read_file(roots, &(*cl).storebuf) {
             let taken: usize = x509.store_load_pem(&(*cl).store, (*cl).storebuf.ptr,
