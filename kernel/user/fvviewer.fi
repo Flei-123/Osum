@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fvviewer.fi -- FreeViewer viewer for OrientOS (ring 3, --profile=app).
+//
+// Stage W5: the HEADLESS test mode only. No window yet (fUi, M2, M3 follow).
+//
+//   fvviewer -t <ipv4> <port> <id> <password>    password mode
+//   fvviewer -t <ipv4> <port> <id> -a            ask mode (host user confirms)
+//
+// `-t` talks plain ws://<ipv4>:<port>/fv/ws and is the ONLY way to get an
+// unencrypted relay link: it has to be spelled out on the command line (the
+// QEMU gate uses the Rust test host on 10.0.2.2). The windowed viewer will
+// always use wss://. Everything inside the session is encrypted either way.
+//
+// What the test does against the synthetic Rust test host (FV_TESTHOST=1,
+// src/testhost.rs of the freeviewer repo): pair, handshake, Caps{h264:false},
+// NeedKeyframe, then
+//   screen    ScreenInfo 640x480
+//   frame     full JPEG decoded; pixels at 4 probe points equal the gradient
+//             (x*255/639, y*255/479, 128) within a JPEG tolerance
+//   counter   the counter tile (16,432 160x36) changes at least once
+//   ping      Ping -> Pong with the same timestamp
+//   click     MouseMove + left button -> 16x16 red mark tile at the pointer;
+//             the host log line "TESTHOST input: ..." is checked by the gate
+//   clip      Clipboard "fvv-clip" -> echo:fvv-clip
+// Prints "  ok    <name>" / "  FAIL  <name>" and "FVV: <n> ok, <m> FAIL".
+// Exit 0 = all ok.
+
+import std.io
+import std.rt
+import std.net
+import jpeg
+import fv.client
+import fv.proto
+
+const IMGCAP: u64 = 9216000 // 1920 x 1200 x 4
+const TIMEOUT_S: u64 = 40
+
+static mut K_PATH: [u8; 7] = "/fv/ws\0"
+static mut CLIP: [u8; 8] = "fvv-clip"
+
+static mut n_ok: u64 = 0
+static mut n_fail: u64 = 0
+
+fn pn(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn pass(name: str) {
+    n_ok = n_ok + 1
+    io.print("  ok    ")
+    io.print_line(name)
+}
+
+fn fail(name: str) {
+    n_fail = n_fail + 1
+    io.print("  FAIL  ")
+    io.print_line(name)
+}
+
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn parse_u(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while true {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn parse_ip(p: u64, out: *mut u32) -> bool {
+    var parts: [u32; 4] = [0; 4]
+    var k: usize = 0
+    var v: u32 = 0
+    var digits: usize = 0
+    var i: usize = 0
+    while true {
+        let ch: u8 = rt.ld8(p, i)
+        if ch == 0 as u8 {
+            break
+        }
+        if ch == 46 as u8 {
+            if digits == 0 || k >= 3 {
+                return false
+            }
+            parts[k] = v
+            k = k + 1
+            v = 0
+            digits = 0
+        } else {
+            if ch < 48 as u8 || ch > 57 as u8 {
+                return false
+            }
+            v = v * 10 as u32 + (ch - 48 as u8) as u32
+            digits = digits + 1
+            if v > 255 as u32 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if k != 3 || digits == 0 {
+        return false
+    }
+    parts[3] = v
+    *out = net.ipv4(parts[0] as u8, parts[1] as u8, parts[2] as u8, parts[3] as u8)
+    return true
+}
+
+// pixel (x,y) of a w-wide ARGB image -> 0xRRGGBB
+fn pixel(img: u64, w: u64, x: u64, y: u64) -> u64 {
+    return (rt.ld32(img, (y * w + x) as usize) as u64) & 0xFFFFFF
+}
+
+fn near(a: u64, b: u64, tol: u64) -> bool {
+    if a > b {
+        return a - b <= tol
+    }
+    return b - a <= tol
+}
+
+// does pixel (x,y) of the frame look like the gradient of the test host?
+fn gradient_ok(img: u64, w: u64, x: u64, y: u64) -> bool {
+    let px: u64 = pixel(img, w, x, y)
+    let r: u64 = (px >> 16) & 255
+    let g: u64 = (px >> 8) & 255
+    let b: u64 = px & 255
+    return near(r, x * 255 / 639, 10) && near(g, y * 255 / 479, 10) && near(b, 128, 10)
+}
+
+// sum of all pixels of a rectangle (change detector for the counter tile)
+fn rect_sum(img: u64, w: u64, x0: u64, y0: u64, rw: u64, rh: u64) -> u64 {
+    var s: u64 = 0
+    var y: u64 = y0
+    while y < y0 + rh {
+        var x: u64 = x0
+        while x < x0 + rw {
+            s = s + pixel(img, w, x, y)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return s
+}
+
+// copy a decoded tile (tw x th, tmp) into the image at (x,y)
+fn blit(img: u64, iw: u64, ih: u64, tmp: u64, tw: u64, th: u64, x: u64, y: u64) {
+    var row: u64 = 0
+    while row < th {
+        if y + row < ih {
+            var col: u64 = 0
+            while col < tw {
+                if x + col < iw {
+                    rt.st32(img, ((y + row) * iw + x + col) as usize,
+                        rt.ld32(tmp, (row * tw + col) as usize))
+                }
+                col = col + 1
+            }
+        }
+        row = row + 1
+    }
+}
+
+fn send_msg(cl: *mut client.Client, obuf: u64, n: u64) -> bool {
+    return client.cl_send(cl, obuf, n)
+}
+
+// the JPEG decoder keeps pointers to the message buffer (heap) in statics
+#[allow_escape]
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 6 || rt.ld8(rt.arg_ptr(start, 1), 1) != 116 as u8 {
+        io.print_line("usage: fvviewer -t <ipv4> <port> <id> <password|-a>")
+        return 2
+    }
+    var addr: u32 = 0
+    if !parse_ip(rt.arg_ptr(start, 2), &addr) {
+        io.print_line("fvviewer: the address must be an IPv4 number")
+        return 2
+    }
+    let port: u64 = parse_u(rt.arg_ptr(start, 3))
+    let id: u64 = rt.arg_ptr(start, 4)
+    let pw: u64 = rt.arg_ptr(start, 5)
+    var ask: bool = false
+    if rt.c_length(pw) == 2 && rt.ld8(pw, 0) == 45 as u8 && rt.ld8(pw, 1) == 97 as u8 {
+        ask = true
+    }
+
+    var cl: client.Client = client.client_new()
+    if !client.cl_alloc(&cl) {
+        io.print_line("FVV: no memory for the buffers")
+        return 1
+    }
+    let img: u64 = rt.heap_alloc(IMGCAP as usize)
+    let tmp: u64 = rt.heap_alloc(IMGCAP as usize)
+    let obuf: u64 = rt.heap_alloc(4096)
+    if img == 0 || tmp == 0 || obuf == 0 {
+        io.print_line("FVV: no memory for the image")
+        return 1
+    }
+
+    // ---- connect, pair, handshake
+    let hostp: u64 = rt.arg_ptr(start, 2)
+    if !client.cl_connect(&cl, addr, port as u16, false, hostp, rt.c_length(hostp) as u64,
+        (&K_PATH[0]) as u64, 6, 0) {
+        fail("connect + websocket upgrade")
+        pn(cl.err)
+        io.print("\n")
+        return 1
+    }
+    pass("connect + websocket upgrade")
+    if !client.cl_pair(&cl, id, rt.c_length(id) as u64) {
+        fail("relay pairing")
+        pn(cl.err)
+        io.print("\n")
+        return 1
+    }
+    pass("relay pairing")
+    var hs: bool = false
+    if ask {
+        var nm: [u8; 8] = "OrientOS"
+        hs = client.cl_handshake_ask(&cl, (&nm[0]) as u64, 8)
+    } else {
+        hs = client.cl_handshake(&cl, pw, rt.c_length(pw) as u64)
+    }
+    if !hs {
+        fail("handshake")
+        pn(cl.err)
+        io.print("\n")
+        return 1
+    }
+    if ask {
+        pass("handshake (ask mode)")
+    } else {
+        pass("handshake (password, Argon2id 19 MiB)")
+    }
+    io.print("  code  ")
+    io.print_bytes(client.cl_code(&cl), 4)
+    io.print("\n")
+
+    // ---- caps + first frame
+    var n: u64 = proto.enc_caps(obuf, false)
+    send_msg(&cl, obuf, n)
+    n = proto.enc_needkey(obuf)
+    send_msg(&cl, obuf, n)
+    n = proto.enc_ping(obuf, 123456789)
+    send_msg(&cl, obuf, n)
+    client.cl_set_timeout(&cl, 1000)
+
+    var got_screen: bool = false
+    var got_frame: bool = false
+    var got_pong: bool = false
+    var got_counter: bool = false
+    var got_mark: bool = false
+    var got_echo: bool = false
+    var sent_input: bool = false
+    var iw: u64 = 0
+    var ih: u64 = 0
+    var counter0: u64 = 0
+    var wh: [u64; 2] = [0; 2]
+    var deadline: u64 = now_seconds() + TIMEOUT_S
+
+    while now_seconds() < deadline {
+        if got_screen && got_frame && got_pong && got_counter && got_mark && got_echo {
+            break
+        }
+        let len: i64 = client.cl_recv(&cl)
+        if len < 0 {
+            if client.cl_timed_out(&cl) {
+                continue
+            }
+            if len == 0 - 2 {
+                io.print_line("  note  peer gone")
+            } else {
+                io.print("  note  connection ended, error ")
+                pn(cl.err)
+                io.print("\n")
+            }
+            break
+        }
+        let m: u64 = cl.pbuf
+        let t: u64 = proto.msg_type(m, len as u64)
+        if t == proto.T_SCREEN {
+            if proto.dec_screen(m, len as u64, (&wh[0]) as u64) {
+                if wh[0] == 640 && wh[1] == 480 {
+                    got_screen = true
+                }
+            }
+        } else if t == proto.T_FRAME {
+            var f: proto.Frame = proto.Frame { w: 0, h: 0, jpeg: 0, len: 0 }
+            if proto.dec_frame(m, len as u64, &f) {
+                let first: bool = !got_frame
+                if jpeg.jpeg_read(f.jpeg, f.len, img, IMGCAP) {
+                    iw = jpeg.width()
+                    ih = jpeg.height()
+                    got_frame = true
+                    counter0 = rect_sum(img, iw, 16, 432, 160, 36)
+                    if !first {
+                        // a keyframe sent again: image replaced, nothing to report
+                    } else if iw == 640 && ih == 480 && gradient_ok(img, iw, 500, 100)
+                        && gradient_ok(img, iw, 600, 300) && gradient_ok(img, iw, 100, 300)
+                        && gradient_ok(img, iw, 320, 400) {
+                        pass("frame decoded, 4 pixel probes equal the gradient")
+                    } else {
+                        fail("frame decoded, 4 pixel probes equal the gradient")
+                        io.print("        size ")
+                        pn(iw)
+                        io.print("x")
+                        pn(ih)
+                        io.print(" p(500,100)=")
+                        pn(pixel(img, iw, 500, 100))
+                        io.print("\n")
+                    }
+                } else {
+                    fail("frame decoded")
+                    io.print_c(jpeg.fehlertext())
+                    io.print("\n")
+                }
+            }
+        } else if t == proto.T_TILES {
+            var it: proto.TileIt = proto.TileIt { p: 0, n: 0, at: 0, left: 0, w: 0, h: 0 }
+            var tl: proto.Tile = proto.Tile { x: 0, y: 0, w: 0, h: 0, jpeg: 0, len: 0 }
+            if got_frame && proto.tiles_begin(m, len as u64, &it) {
+                while proto.tiles_next(&it, &tl) {
+                    if jpeg.jpeg_read(tl.jpeg, tl.len, tmp, IMGCAP) {
+                        let tw: u64 = jpeg.width()
+                        let th: u64 = jpeg.height()
+                        blit(img, iw, ih, tmp, tw, th, tl.x, tl.y)
+                        if tl.x == 16 && tl.y == 432 {
+                            if rect_sum(img, iw, 16, 432, 160, 36) != counter0 {
+                                got_counter = true
+                            }
+                        }
+                        if tw == 16 && th == 16 && tl.x < 640 {
+                            // the mark of the left click: red square
+                            let c: u64 = pixel(img, iw, tl.x + 8, tl.y + 8)
+                            if (c >> 16) > 200 && ((c >> 8) & 255) < 60 && (c & 255) < 60 {
+                                got_mark = true
+                            }
+                        }
+                    }
+                }
+            }
+        } else if t == proto.T_PONG {
+            if proto.dec_ping(m, len as u64) == 123456789 {
+                got_pong = true
+            }
+        } else if t == proto.T_PING {
+            let ts: u64 = proto.dec_ping(m, len as u64)
+            n = proto.enc_pong(obuf, ts)
+            send_msg(&cl, obuf, n)
+        } else if t == proto.T_CLIP {
+            var cp: [u64; 2] = [0; 2]
+            if proto.dec_clip(m, len as u64, (&cp[0]) as u64) {
+                // "echo:" + text
+                if cp[1] == 13 && rt.ld8(cp[0], 0) == 101 as u8 && rt.ld8(cp[0], 5) == 102 as u8 {
+                    got_echo = true
+                }
+            }
+        }
+        // first frame is in: send the input once
+        if got_frame && !sent_input {
+            sent_input = true
+            n = proto.enc_move(obuf, 5000, 5000)
+            send_msg(&cl, obuf, n)
+            n = proto.enc_button(obuf, 0, true)
+            send_msg(&cl, obuf, n)
+            n = proto.enc_button(obuf, 0, false)
+            send_msg(&cl, obuf, n)
+            n = proto.enc_clip(obuf, (&CLIP[0]) as u64, 8)
+            send_msg(&cl, obuf, n)
+        }
+    }
+
+    if got_screen { pass("ScreenInfo 640x480") } else { fail("ScreenInfo 640x480") }
+    if !got_frame { fail("frame decoded") }
+    if got_counter { pass("counter tile changes (tiles applied)") } else { fail("counter tile changes (tiles applied)") }
+    if got_pong { pass("ping -> pong") } else { fail("ping -> pong") }
+    if got_mark { pass("click -> red mark tile at the pointer") } else { fail("click -> red mark tile at the pointer") }
+    if got_echo { pass("clipboard echo") } else { fail("clipboard echo") }
+
+    client.cl_close(&cl)
+    io.print("FVV: ")
+    pn(n_ok)
+    io.print(" ok, ")
+    pn(n_fail)
+    io.print(" FAIL\n")
+    if n_fail == 0 {
+        return 0
+    }
+    return 1
+}

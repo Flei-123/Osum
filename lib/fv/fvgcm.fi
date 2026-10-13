@@ -1,0 +1,316 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// COPY of lib/crypto/gcm.fi under a module name of its own: the leaf names aes/aesni/gcm
+// are also taken by std.crypto.* (pulled in by tls.tls), and a program that links
+// both (fv.client) cannot have two modules with the same name. Keep in sync.
+// lib/crypto/gcm.fi -- AES-GCM (NIST SP 800-38D) with AES-128/192/256.
+//
+// WHY THIS FILE EXISTS. vendor/firn/lib/std/crypto/gcm.fi is AES-128 only
+// (its note G1) and its GHASH is the bitwise one. The FreeViewer protocol
+// (src/crypto.rs of the Rust side) uses AES-256-GCM for every frame, so
+// the viewer needs 256 bit keys and a GHASH that is not painfully slow.
+//
+// WHAT IS HERE.
+//   * the block cipher: AES-NI (`crypto.aesni`) when cpuid says it is
+//     there, otherwise the table-free software AES of `crypto.aes`.
+//     Both are measured against each other in tools/aesni; this file
+//     only picks one per key. AES-NI is NOT required.
+//   * GHASH with a 4 bit table (Shoup / mbedTLS style): 16 entries per
+//     key, 32 table lookups per block instead of 128 shift-and-reduce
+//     rounds.
+//   * 96 bit nonces only (J0 = nonce || 0^31 || 1). Any other nonce
+//     length is refused, not guessed.
+//
+// HONEST LIMITS.
+//   G1 The table lookups are indexed by secret data (the hash key H and
+//      the accumulator), so GHASH is NOT constant time on a CPU with a
+//      data cache. The same note holds for the software AES fallback.
+//   G2 The tag comparison does not stop early (`tag_equal`).
+//   G3 `gcm_open` writes NO plaintext when the tag is wrong.
+//   G4 `out` may equal `src` (in place) but must not partly overlap.
+//   G5 No PCLMULQDQ path yet; GHASH speed is table speed.
+//
+// No profile line, no import of the runtime, no allocator, no state of its
+// own: all memory belongs to the caller (same rule as sha256.fi).
+
+import fv.fvaes
+import fv.fvaesni
+
+export { Gcm, gcm_new, gcm_init, gcm_seal, gcm_open, gcm_uses_aesni,
+    ghash_blocks, GCM_TAG, GCM_NONCE }
+
+const GCM_TAG: usize = 16
+const GCM_NONCE: usize = 12
+
+struct Gcm {
+    k: fvaes.Key,
+    e: fvaesni.Enc,
+    ni: bool,
+    hh: [u64; 16], // 4 bit table, high halves
+    hl: [u64; 16], // 4 bit table, low halves
+    ok: bool,
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn be64(p: u64, off: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        v = (v << 8) | (ld8(p, off + i) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+fn put_be64(p: u64, off: usize, v: u64) {
+    var i: usize = 0
+    while i < 8 {
+        st8(p, off + i, ((v >> ((7 - i) as u64 * 8)) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn gcm_new() -> Gcm {
+    return Gcm { k: fvaes.key_new(), e: fvaesni.enc_from(0, 0), ni: false,
+        hh: [0 as u64; 16], hl: [0 as u64; 16], ok: false }
+}
+
+fn gcm_uses_aesni(g: *mut Gcm) -> bool {
+    return (*g).ok && (*g).ni
+}
+
+// One AES block (16 octets in, 16 out).
+fn blk(g: *mut Gcm, inp: u64, out: u64) {
+    if (*g).ni {
+        fvaesni.encrypt_block(&(*g).e, inp, out)
+    } else {
+        fvaes.encrypt_block(&(*g).k, inp, out)
+    }
+}
+
+// Reduction constants for a 4 bit shift (SP 800-38D table, top 16 bits).
+fn last4(i: u64) -> u64 {
+    let t: [u64; 16] = [
+        0x0000, 0x1c20, 0x3840, 0x2460, 0x7080, 0x6ca0, 0x48c0, 0x54e0,
+        0xe100, 0xfd20, 0xd940, 0xc560, 0x9180, 0x8da0, 0xa9c0, 0xb5e0]
+    return t[i as usize]
+}
+
+fn make_tables(g: *mut Gcm) {
+    var zero: [u8; 16] = [0 as u8; 16]
+    var h: [u8; 16] = [0 as u8; 16]
+    blk(g, (&zero[0]) as u64, (&h[0]) as u64)
+    var vhi: u64 = be64((&h[0]) as u64, 0)
+    var vlo: u64 = be64((&h[0]) as u64, 8)
+    (*g).hl[0] = 0
+    (*g).hh[0] = 0
+    (*g).hl[8] = vlo
+    (*g).hh[8] = vhi
+    var i: usize = 4
+    while i > 0 {
+        var t: u64 = 0
+        if (vlo & 1) != 0 {
+            t = 0xe1000000 << 32
+        }
+        vlo = (vhi << 63) | (vlo >> 1)
+        vhi = (vhi >> 1) ^ t
+        (*g).hl[i] = vlo
+        (*g).hh[i] = vhi
+        i = i >> 1
+    }
+    i = 2
+    while i <= 8 {
+        let vh: u64 = (*g).hh[i]
+        let vl: u64 = (*g).hl[i]
+        var j: usize = 1
+        while j < i {
+            (*g).hh[i + j] = vh ^ (*g).hh[j]
+            (*g).hl[i + j] = vl ^ (*g).hl[j]
+            j = j + 1
+        }
+        i = i * 2
+    }
+}
+
+// Key setup. klen = 16, 24 or 32. false = key refused.
+fn gcm_init(g: *mut Gcm, key: u64, klen: usize) -> bool {
+    (*g).ok = false
+    (*g).ni = false
+    if klen != 16 && klen != 24 && klen != 32 {
+        return false
+    }
+    if !fvaes.key_set(&(*g).k, key, klen) {
+        return false
+    }
+    if fvaesni.usable() {
+        (*g).e = fvaesni.enc_from((&(*g).k.rk[0]) as u64, (*g).k.nr)
+        (*g).ni = (*g).e.ok
+    }
+    make_tables(g)
+    (*g).ok = true
+    return true
+}
+
+// y = (y * H) in GF(2^128), GCM bit order.
+fn gmult(g: *mut Gcm, y: *mut [u8; 16]) {
+    var b: u64 = (*y)[15] as u64
+    var lo: usize = (b & 15) as usize
+    var hi: usize = (b >> 4) as usize
+    var zh: u64 = (*g).hh[lo]
+    var zl: u64 = (*g).hl[lo]
+    var i: usize = 16
+    var first: bool = true
+    while i > 0 {
+        i = i - 1
+        b = (*y)[i] as u64
+        lo = (b & 15) as usize
+        hi = (b >> 4) as usize
+        if !first {
+            let rem: u64 = zl & 15
+            zl = (zh << 60) | (zl >> 4)
+            zh = zh >> 4
+            zh = zh ^ (last4(rem) << 48)
+            zh = zh ^ (*g).hh[lo]
+            zl = zl ^ (*g).hl[lo]
+        }
+        first = false
+        let rem2: u64 = zl & 15
+        zl = (zh << 60) | (zl >> 4)
+        zh = zh >> 4
+        zh = zh ^ (last4(rem2) << 48)
+        zh = zh ^ (*g).hh[hi]
+        zl = zl ^ (*g).hl[hi]
+    }
+    put_be64((y as u64), 0, zh)
+    put_be64((y as u64), 8, zl)
+}
+
+// GHASH over `n` octets of `data`, zero padded to a block boundary,
+// folded into the accumulator `y`.
+fn ghash_blocks(g: *mut Gcm, y: *mut [u8; 16], data: u64, n: usize) {
+    var at: usize = 0
+    while at < n {
+        var i: usize = 0
+        while i < 16 {
+            if at + i < n {
+                (*y)[i] = (*y)[i] ^ ld8(data, at + i)
+            }
+            i = i + 1
+        }
+        gmult(g, y)
+        at = at + 16
+    }
+}
+
+// CTR mode from the counter block `ctr` (inc32 per block).
+fn gctr(g: *mut Gcm, ctr: u64, src: u64, n: usize, dst: u64) {
+    var cb: [u8; 16] = [0 as u8; 16]
+    var ks: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        cb[i] = ld8(ctr, i)
+        i = i + 1
+    }
+    var at: usize = 0
+    while at < n {
+        blk(g, (&cb[0]) as u64, (&ks[0]) as u64)
+        i = 0
+        while i < 16 && at + i < n {
+            st8(dst, at + i, ld8(src, at + i) ^ ks[i])
+            i = i + 1
+        }
+        var c: u64 = ((cb[12] as u64) << 24) | ((cb[13] as u64) << 16)
+            | ((cb[14] as u64) << 8) | (cb[15] as u64)
+        c = (c + 1) & 4294967295
+        cb[12] = ((c >> 24) & 255) as u8
+        cb[13] = ((c >> 16) & 255) as u8
+        cb[14] = ((c >> 8) & 255) as u8
+        cb[15] = (c & 255) as u8
+        at = at + 16
+    }
+}
+
+fn make_j0(nonce: u64, j0: *mut [u8; 16]) {
+    var i: usize = 0
+    while i < 12 {
+        (*j0)[i] = ld8(nonce, i)
+        i = i + 1
+    }
+    (*j0)[12] = 0 as u8
+    (*j0)[13] = 0 as u8
+    (*j0)[14] = 0 as u8
+    (*j0)[15] = 1 as u8
+}
+
+fn tag_of(g: *mut Gcm, j0: *mut [u8; 16], aad: u64, na: usize, ct: u64,
+    nc: usize, tag: u64) {
+    var y: [u8; 16] = [0 as u8; 16]
+    ghash_blocks(g, &y, aad, na)
+    ghash_blocks(g, &y, ct, nc)
+    var lens: [u8; 16] = [0 as u8; 16]
+    put_be64((&lens[0]) as u64, 0, (na as u64) * 8)
+    put_be64((&lens[0]) as u64, 8, (nc as u64) * 8)
+    ghash_blocks(g, &y, (&lens[0]) as u64, 16)
+    gctr(g, (j0 as u64), (&y[0]) as u64, 16, tag)
+}
+
+fn tag_equal(a: u64, b: u64, n: usize) -> bool {
+    var d: u8 = 0
+    var i: usize = 0
+    while i < n {
+        d = d | (ld8(a, i) ^ ld8(b, i))
+        i = i + 1
+    }
+    return d == 0
+}
+
+// `out` receives n + 16 octets (ciphertext, then the tag).
+fn gcm_seal(g: *mut Gcm, nonce: u64, aad: u64, na: usize,
+    plain: u64, n: usize, out: u64) -> bool {
+    if !(*g).ok {
+        return false
+    }
+    var j0: [u8; 16] = [0 as u8; 16]
+    make_j0(nonce, &j0)
+    var ctr: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        ctr[i] = j0[i]
+        i = i + 1
+    }
+    ctr[15] = 2 as u8
+    gctr(g, (&ctr[0]) as u64, plain, n, out)
+    tag_of(g, &j0, aad, na, out, n, out + n as u64)
+    return true
+}
+
+// `n` counts the tag. false = tag mismatch (nothing written to `out`).
+fn gcm_open(g: *mut Gcm, nonce: u64, aad: u64, na: usize,
+    ct: u64, n: usize, out: u64) -> bool {
+    if !(*g).ok || n < GCM_TAG {
+        return false
+    }
+    let clen: usize = n - GCM_TAG
+    var j0: [u8; 16] = [0 as u8; 16]
+    make_j0(nonce, &j0)
+    var want: [u8; 16] = [0 as u8; 16]
+    tag_of(g, &j0, aad, na, ct, clen, (&want[0]) as u64)
+    if !tag_equal((&want[0]) as u64, ct + clen as u64, GCM_TAG) {
+        return false
+    }
+    var ctr: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        ctr[i] = j0[i]
+        i = i + 1
+    }
+    ctr[15] = 2 as u8
+    gctr(g, (&ctr[0]) as u64, ct, clen, out)
+    return true
+}

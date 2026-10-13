@@ -1,0 +1,518 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/client.fi -- FreeViewer client glue: socket (plain or TLS 1.3) +
+// WebSocket (net.ws) + relay pairing + handshake and data frames
+// (fv.session / fv.crypto). Blocking I/O with a socket timeout; the
+// windowed viewer wraps the same calls.
+//
+//   cl_alloc(cl)                  buffers (anonymous mmap, lazily touched)
+//   cl_connect(cl, addr, port, secure, host, hlen, path, plen, roots)
+//                                 TCP [+ TLS], HTTP upgrade to WebSocket
+//   cl_pair(cl, id, idlen)        {"t":"connect","id":..} -> {"t":"paired"}
+//   cl_handshake(cl, pw, pwlen)   password mode  (X25519 + Argon2id proof)
+//   cl_handshake_ask(cl, name, n) ask mode (host user confirms)
+//   cl_send(cl, plain, n)         seal + binary frame
+//   cl_recv(cl)                   next data message -> (*cl).pbuf, length;
+//                                 -1 closed/error, -2 peer gone
+//   cl_close(cl)
+//
+// Every call returns 0 / true on success; the failing step is in
+// (*cl).err (E_*), a relay error text in (*cl).errtxt.
+
+import std.rt
+import std.net
+import tls.tls
+import tls.x509
+import net.ws
+import fv.crypto
+import fv.session
+import fv.proto
+
+export { Client, client_new, cl_alloc, cl_connect, cl_pair, cl_handshake,
+    cl_handshake_ask, cl_send, cl_recv, cl_close, cl_set_timeout, cl_timed_out, cl_code,
+    E_OK, E_TCP, E_TLS, E_UPGRADE, E_RELAY, E_AUTH, E_DENIED, E_PROTO, E_IO,
+    E_MEM, E_GONE, E_CRYPTO }
+
+const E_OK: u64 = 0
+const E_TCP: u64 = 1
+const E_TLS: u64 = 2
+const E_UPGRADE: u64 = 3
+const E_RELAY: u64 = 4 // relay answered {"t":"error"}: text in errtxt
+const E_AUTH: u64 = 5 // wrong password
+const E_DENIED: u64 = 6 // the host user said no
+const E_PROTO: u64 = 7
+const E_IO: u64 = 8
+const E_MEM: u64 = 9
+const E_GONE: u64 = 10 // peer_gone
+const E_CRYPTO: u64 = 11
+
+const RCAP: u64 = 65536
+const WCAP: u64 = 4194304 // one WebSocket message (a 1080p Frame fits)
+const PCAP: u64 = 4194304 // one decrypted message
+const OCAP: u64 = 393216 // outgoing message (clipboard 256 KiB + framing)
+
+struct Client {
+    conn: net.Conn,
+    secure: bool,
+    t: tls.Tls,
+    store: x509.Store,
+    storebuf: rt.Buf,
+    ebuf: rt.Buf, // TLS error name ("ERR<name>")
+    w: ws.Ws,
+    s: session.Sess,
+    rbuf: u64, // octets read from the socket, not yet fed to ws
+    rpos: u64,
+    rlen: u64,
+    wmsg: u64, // ws message buffer
+    pbuf: u64, // decrypted message of the last cl_recv
+    obuf: u64, // plaintext about to be sent
+    sbuf: u64, // sealed message
+    fbuf: u64, // ws frame about to be written
+    err: u64,
+    errtxt: [u8; 64],
+    errlen: u64,
+    pending: bool, // a ws event is pending (needs ws.take)
+    timeout: bool, // the last failed read was only the socket timeout (EAGAIN)
+}
+
+fn client_new() -> Client {
+    return Client { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 },
+        secure: false, t: tls.tls_new(), store: x509.store_new(),
+        storebuf: rt.buf_new(), ebuf: rt.buf_new(), w: ws.ws_new(), s: session.sess_new(),
+        rbuf: 0, rpos: 0, rlen: 0, wmsg: 0, pbuf: 0, obuf: 0, sbuf: 0,
+        fbuf: 0, err: 0, errtxt: [0 as u8; 64], errlen: 0, pending: false, timeout: false }
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn fail_len(bad: *mut bool) -> usize {
+    *bad = true
+    return 0 as usize
+}
+
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn cl_alloc(cl: *mut Client) -> bool {
+    (*cl).rbuf = rt.heap_alloc(RCAP as usize)
+    (*cl).wmsg = rt.heap_alloc(WCAP as usize)
+    (*cl).pbuf = rt.heap_alloc(PCAP as usize)
+    (*cl).obuf = rt.heap_alloc(OCAP as usize)
+    (*cl).sbuf = rt.heap_alloc((OCAP + 64) as usize)
+    (*cl).fbuf = rt.heap_alloc((OCAP + 256) as usize)
+    if (*cl).rbuf == 0 || (*cl).wmsg == 0 || (*cl).pbuf == 0 || (*cl).obuf == 0
+        || (*cl).sbuf == 0 || (*cl).fbuf == 0 {
+        (*cl).err = E_MEM
+        return false
+    }
+    ws.init(&(*cl).w, (*cl).wmsg, WCAP)
+    return true
+}
+
+// true after a failed cl_recv that was only the socket timeout: the
+// connection is fine, nothing arrived. Clears the failure state.
+fn cl_timed_out(cl: *mut Client) -> bool {
+    if (*cl).timeout {
+        (*cl).timeout = false
+        (*cl).err = E_OK
+        return true
+    }
+    return false
+}
+
+fn cl_set_timeout(cl: *mut Client, ms: u64) {
+    let ok: bool = net.set_timeout(&(*cl).conn, ms) catch false
+}
+
+// ------------------------------------------------------------ transport
+
+// n octets of a socket read into p. 0 = closed or error (err set).
+fn xread(cl: *mut Client, p: u64, max: u64) -> u64 {
+    var bad: bool = false
+    var n: usize = 0
+    if (*cl).secure {
+        n = tls.tls_read(&(*cl).t, p, max as usize)
+        catch | e | tls.tls_fail_len(&(*cl).ebuf, e, &bad)
+    } else {
+        n = net.read(&(*cl).conn, p, max as usize) catch fail_len(&bad)
+    }
+    if bad {
+        (*cl).err = E_IO
+        if !(*cl).secure && (*cl).conn.err == -11 {
+            (*cl).timeout = true
+        }
+        return 0
+    }
+    return n as u64
+}
+
+fn xwrite(cl: *mut Client, p: u64, n: u64) -> bool {
+    var bad: bool = false
+    if (*cl).secure {
+        let ok: bool = tls.tls_write(&(*cl).t, p, n as usize)
+        catch | e | tls.tls_fail_into(&(*cl).ebuf, e, &bad)
+    } else {
+        let w: usize = net.write_all(&(*cl).conn, p, n as usize) catch fail_len(&bad)
+    }
+    if bad {
+        (*cl).err = E_IO
+        return false
+    }
+    return true
+}
+
+// ------------------------------------------------------------ websocket
+
+fn ws_send(cl: *mut Client, op: u64, p: u64, n: u64) -> bool {
+    var m: [u8; 4] = [0 as u8; 4]
+    if !crypto.random_bytes((&m[0]) as u64, 4) {
+        (*cl).err = E_CRYPTO
+        return false
+    }
+    let mask: u64 = ld8((&m[0]) as u64, 0) | (ld8((&m[0]) as u64, 1) << 8)
+        | (ld8((&m[0]) as u64, 2) << 16) | (ld8((&m[0]) as u64, 3) << 24)
+    let len: u64 = ws.encode(op, true, p, n, mask, (*cl).fbuf, OCAP + 256)
+    if len == 0 {
+        (*cl).err = E_PROTO
+        return false
+    }
+    return xwrite(cl, (*cl).fbuf, len)
+}
+
+// Next ws event (EV_*), reading from the socket as needed. The event
+// stays pending until `release`. 0 on closed connection / error.
+fn next_event(cl: *mut Client) -> u64 {
+    while true {
+        if (*cl).rpos < (*cl).rlen {
+            let used: u64 = ws.feed(&(*cl).w, (*cl).rbuf + (*cl).rpos, (*cl).rlen - (*cl).rpos)
+            (*cl).rpos = (*cl).rpos + used
+            let ev: u64 = ws.event(&(*cl).w)
+            if ev == ws.EV_ERROR {
+                (*cl).err = E_PROTO
+                return 0
+            }
+            if ev != ws.EV_NONE {
+                (*cl).pending = true
+                return ev
+            }
+        } else {
+            let n: u64 = xread(cl, (*cl).rbuf, RCAP)
+            if n == 0 {
+                if (*cl).err == E_OK {
+                    (*cl).err = E_IO
+                }
+                return 0
+            }
+            (*cl).rpos = 0
+            (*cl).rlen = n
+        }
+    }
+    return 0
+}
+
+fn release(cl: *mut Client) {
+    if (*cl).pending {
+        ws.take(&(*cl).w)
+        (*cl).pending = false
+    }
+}
+
+// ws control frames and relay text frames that arrive while a data
+// message is awaited. Returns: 1 = binary message pending (not released),
+// 0 = failure (err set), 2 = peer gone.
+fn next_binary(cl: *mut Client) -> u64 {
+    while true {
+        let ev: u64 = next_event(cl)
+        if ev == 0 {
+            return 0
+        }
+        if ev == ws.EV_BINARY {
+            return 1
+        }
+        if ev == ws.EV_PING {
+            let ok: bool = ws_send(cl, ws.OP_PONG, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+            release(cl)
+            if !ok {
+                return 0
+            }
+        } else if ev == ws.EV_CLOSE {
+            release(cl)
+            (*cl).err = E_IO
+            return 0
+        } else if ev == ws.EV_TEXT {
+            let k: u64 = session.relay_kind(ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+            if k == session.R_GONE {
+                release(cl)
+                (*cl).err = E_GONE
+                return 2
+            }
+            if k == session.R_ERROR {
+                take_error(cl)
+                release(cl)
+                (*cl).err = E_RELAY
+                return 0
+            }
+            release(cl)
+        } else {
+            release(cl)
+        }
+    }
+    return 0
+}
+
+static mut K_MSG: [u8; 4] = "msg\0"
+
+fn take_error(cl: *mut Client) {
+    var vl: u64 = 0
+    let v: u64 = session.relay_str(ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w),
+        (&K_MSG[0]) as u64, 3, (&vl) as u64)
+    (*cl).errlen = 0
+    if v != 0 {
+        if vl > 63 {
+            vl = 63
+        }
+        var i: u64 = 0
+        while i < vl {
+            st8((&(*cl).errtxt[0]) as u64, i, ld8(v, i))
+            i = i + 1
+        }
+        (*cl).errlen = vl
+    }
+}
+
+// ------------------------------------------------------------ connect
+
+fn cl_connect(cl: *mut Client, addr: u32, port: u16, secure: bool, host: u64,
+    hlen: u64, path: u64, plen: u64, roots: u64) -> bool {
+    var bad: bool = false
+    (*cl).conn = net.connect_tcp(addr, port)
+    catch | e | tcp_fail(&bad)
+    if bad {
+        (*cl).err = E_TCP
+        return false
+    }
+    cl_set_timeout(cl, 20000)
+    (*cl).secure = secure
+    if secure {
+        if roots != 0 && rt.read_file(roots, &(*cl).storebuf) {
+            let taken: usize = x509.store_load_pem(&(*cl).store, (*cl).storebuf.ptr,
+                (*cl).storebuf.len)
+        }
+        let oki: bool = tls.tls_init(&(*cl).t, &(*cl).conn, &(*cl).store, host,
+            hlen as usize, now_seconds())
+        var tf: bool = false
+        let ok: bool = tls.tls_handshake(&(*cl).t)
+        catch | e | tls.tls_fail_into(&(*cl).ebuf, e, &tf)
+        if tf {
+            (*cl).err = E_TLS
+            return false
+        }
+    }
+    // HTTP upgrade
+    var raw: [u8; 16] = [0 as u8; 16]
+    var key: [u8; 24] = [0 as u8; 24]
+    if !crypto.random_bytes((&raw[0]) as u64, 16) {
+        (*cl).err = E_CRYPTO
+        return false
+    }
+    let kl: u64 = ws.b64_encode((&raw[0]) as u64, 16, (&key[0]) as u64)
+    let rl: u64 = ws.build_request((*cl).fbuf, 2048, host, hlen, path, plen, (&key[0]) as u64)
+    if rl == 0 {
+        (*cl).err = E_UPGRADE
+        return false
+    }
+    if !xwrite(cl, (*cl).fbuf, rl) {
+        return false
+    }
+    // read until the header is complete
+    (*cl).rpos = 0
+    (*cl).rlen = 0
+    while true {
+        if (*cl).rlen >= RCAP {
+            (*cl).err = E_UPGRADE
+            return false
+        }
+        let n: u64 = xread(cl, (*cl).rbuf + (*cl).rlen, RCAP - (*cl).rlen)
+        if n == 0 {
+            (*cl).err = E_UPGRADE
+            return false
+        }
+        (*cl).rlen = (*cl).rlen + n
+        let h: u64 = ws.check_response((*cl).rbuf, (*cl).rlen, (&key[0]) as u64)
+        if ws.failed(h) {
+            (*cl).err = E_UPGRADE
+            return false
+        }
+        if h > 0 {
+            (*cl).rpos = h
+            return true
+        }
+    }
+    return false
+}
+
+fn tcp_fail(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+// ------------------------------------------------------------ pairing
+
+fn cl_pair(cl: *mut Client, id: u64, idlen: u64) -> bool {
+    let n: u64 = session.relay_connect((*cl).obuf, 256, id, idlen)
+    if n == 0 {
+        (*cl).err = E_PROTO
+        return false
+    }
+    if !ws_send(cl, ws.OP_TEXT, (*cl).obuf, n) {
+        return false
+    }
+    while true {
+        let ev: u64 = next_event(cl)
+        if ev == 0 {
+            return false
+        }
+        if ev == ws.EV_TEXT {
+            let k: u64 = session.relay_kind(ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+            if k == session.R_PAIRED {
+                release(cl)
+                return true
+            }
+            if k == session.R_ERROR {
+                take_error(cl)
+                release(cl)
+                (*cl).err = E_RELAY
+                return false
+            }
+            release(cl)
+        } else if ev == ws.EV_PING {
+            let ok: bool = ws_send(cl, ws.OP_PONG, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+            release(cl)
+        } else if ev == ws.EV_CLOSE {
+            release(cl)
+            (*cl).err = E_IO
+            return false
+        } else {
+            release(cl)
+        }
+    }
+    return false
+}
+
+// ------------------------------------------------------------ handshake
+
+fn hs_common(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
+    name: u64, nlen: u64) -> bool {
+    let hl: u64 = session.hello(&(*cl).s, (*cl).obuf)
+    if hl == 0 {
+        (*cl).err = E_CRYPTO
+        return false
+    }
+    if !ws_send(cl, ws.OP_BINARY, (*cl).obuf, hl) {
+        return false
+    }
+    let r: u64 = next_binary(cl)
+    if r != 1 {
+        return false
+    }
+    let al: u64 = session.on_ack(&(*cl).s, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w),
+        password_mode, pw, pwlen, name, nlen, (*cl).sbuf)
+    release(cl)
+    if al == 0 {
+        (*cl).err = E_CRYPTO
+        return false
+    }
+    if !ws_send(cl, ws.OP_BINARY, (*cl).sbuf, al) {
+        return false
+    }
+    // the host user may take a while to confirm in ask mode
+    if !password_mode {
+        cl_set_timeout(cl, 120000)
+    }
+    let r2: u64 = next_binary(cl)
+    cl_set_timeout(cl, 20000)
+    if r2 != 1 {
+        return false
+    }
+    let res: u64 = session.on_result(&(*cl).s, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+    release(cl)
+    if res == 1 {
+        return true
+    }
+    if res == 2 {
+        if password_mode {
+            (*cl).err = E_AUTH
+        } else {
+            (*cl).err = E_DENIED
+        }
+        return false
+    }
+    (*cl).err = E_PROTO
+    return false
+}
+
+fn cl_handshake(cl: *mut Client, pw: u64, pwlen: u64) -> bool {
+    return hs_common(cl, true, pw, pwlen, 0, 0)
+}
+
+fn cl_handshake_ask(cl: *mut Client, name: u64, nlen: u64) -> bool {
+    return hs_common(cl, false, 0, 0, name, nlen)
+}
+
+// the 4 session code digits (ASCII, 4 octets)
+fn cl_code(cl: *mut Client) -> u64 {
+    return session.code_digits(&(*cl).s)
+}
+
+// ------------------------------------------------------------ data
+
+fn cl_send(cl: *mut Client, plain: u64, n: u64) -> bool {
+    let sl: u64 = session.seal_msg(&(*cl).s, plain, n, (*cl).sbuf)
+    if sl == 0 {
+        (*cl).err = E_CRYPTO
+        return false
+    }
+    return ws_send(cl, ws.OP_BINARY, (*cl).sbuf, sl)
+}
+
+// Next decrypted message into (*cl).pbuf; returns its length, -1 on
+// closed connection / bad frame, -2 when the peer is gone.
+fn cl_recv(cl: *mut Client) -> i64 {
+    while true {
+        let r: u64 = next_binary(cl)
+        if r == 2 {
+            return 0 - 2
+        }
+        if r != 1 {
+            return 0 - 1
+        }
+        let n: u64 = session.open_msg(&(*cl).s, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w), (*cl).pbuf)
+        release(cl)
+        if n == 0xFFFFFFFFFFFFFFFF {
+            (*cl).err = E_CRYPTO
+            return 0 - 1
+        }
+        return n as i64
+    }
+    return 0 - 1
+}
+
+fn cl_close(cl: *mut Client) {
+    if (*cl).conn.fd >= 0 {
+        if (*cl).secure {
+            tls.tls_close(&(*cl).t)
+        }
+        net.close(&(*cl).conn)
+    }
+    if (*cl).secure {
+        tls.tls_free(&(*cl).t)
+    }
+}

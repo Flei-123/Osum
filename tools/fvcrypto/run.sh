@@ -32,7 +32,7 @@ note(){ printf '        %s\n' "$1"; }
 
 echo "== 1. host: compile and compare with independent implementations =="
 if $FIRNC tools/fvcrypto/fvt.fi -o "$TMPD/fvt" 2>"$TMPD/cc.err"; then
-    ok "tools/fvcrypto/fvt.fi compiles (lib/fv/crypto.fi + lib/crypto/gcm.fi)"
+    ok "tools/fvcrypto/fvt.fi compiles (lib/fv/crypto.fi + lib/fv/fvgcm.fi)"
 else
     bad "fvt.fi does not compile"; head -20 "$TMPD/cc.err" | sed 's/^/        /'
     echo "FVCRYPTO: $pass passed, $fail failed"; exit 1

@@ -28,11 +28,12 @@
 
 import std.rt
 import std.crypto.random
-import crypto.sha256
-import crypto.hkdf
-import crypto.x25519
+import std.crypto.sha256
+import std.crypto.hmac
+import std.crypto.hkdf
+import std.crypto.x25519
+import fv.fvgcm
 import crypto.argon2
-import crypto.gcm
 
 export { Cipher, cipher_new, cipher_init, seal, open,
     random_bytes, keypair, session_key, session_code, password_key,
@@ -102,12 +103,11 @@ fn session_key(priv: u64, peer_pub: u64, salt: u64, out: u64) -> bool {
 // (4 octets) when it is not 0.
 fn session_code(key: u64, digits: u64) -> u64 {
     var s: sha256.Sha256 = sha256.sha256_new()
-    sha256.begin(&s)
     let lab: [u8; 18] = "freeviewer-v1 code"
-    sha256.update(&s, (&lab[0]) as u64, 18)
-    sha256.update(&s, key, 32)
+    sha256.sha256_update(&s, (&lab[0]) as u64, 18)
+    sha256.sha256_update(&s, key, 32)
     var d: [u8; 32] = [0 as u8; 32]
-    sha256.finish(&s, (&d[0]) as u64)
+    sha256.sha256_final(&s, (&d[0]) as u64)
     let n: u64 = (((d[0] as u64) << 24) | ((d[1] as u64) << 16)
         | ((d[2] as u64) << 8) | (d[3] as u64)) % 10000
     if digits != 0 {
@@ -150,7 +150,7 @@ fn auth_proof(pwkey: u64, client_pub: u64, host_pub: u64, salt: u64,
     copy(mp, 7, client_pub, 32)
     copy(mp, 39, host_pub, 32)
     copy(mp, 71, salt, 16)
-    sha256.hmac(pwkey, 32, mp, 87, out)
+    hmac.hmac_sha256(pwkey, 32, mp, 87, out)
 }
 
 // Constant time compare of a received proof against the expected one.
@@ -169,7 +169,7 @@ fn proof_matches(expected: u64, got: u64, gotlen: usize) -> bool {
 
 // ---------------------------------------------------------------- Cipher
 struct Cipher {
-    g: gcm.Gcm,
+    g: fvgcm.Gcm,
     dir_send: u8,
     dir_recv: u8,
     ctr_send: u64,
@@ -178,7 +178,7 @@ struct Cipher {
 }
 
 fn cipher_new() -> Cipher {
-    return Cipher { g: gcm.gcm_new(), dir_send: 0 as u8, dir_recv: 0 as u8,
+    return Cipher { g: fvgcm.gcm_new(), dir_send: 0 as u8, dir_recv: 0 as u8,
         ctr_send: 0, last_recv: 0, ok: false }
 }
 
@@ -195,7 +195,7 @@ fn cipher_init(c: *mut Cipher, key: u64, is_host: bool) -> bool {
         (*c).dir_send = 2 as u8
         (*c).dir_recv = 1 as u8
     }
-    if !gcm.gcm_init(&(*c).g, key, 32) {
+    if !fvgcm.gcm_init(&(*c).g, key, 32) {
         return false
     }
     (*c).ok = true
@@ -222,7 +222,7 @@ fn seal(c: *mut Cipher, plain: u64, n: usize, out: u64) -> usize {
     }
     st8(out, 0, TAG_DATA)
     copy(out, 1, (&nonce[0]) as u64, 12)
-    if !gcm.gcm_seal(&(*c).g, (&nonce[0]) as u64, 0, 0, plain, n, out + 13) {
+    if !fvgcm.gcm_seal(&(*c).g, (&nonce[0]) as u64, 0, 0, plain, n, out + 13) {
         return 0
     }
     return n + FRAME_OVERHEAD
@@ -250,7 +250,7 @@ fn open(c: *mut Cipher, frame: u64, flen: usize, out: u64) -> i64 {
     if ctr <= (*c).last_recv {
         return 0 - 1
     }
-    if !gcm.gcm_open(&(*c).g, frame + 1, 0, 0, frame + 13, flen - 13, out) {
+    if !fvgcm.gcm_open(&(*c).g, frame + 1, 0, 0, frame + 13, flen - 13, out) {
         return 0 - 1
     }
     (*c).last_recv = ctr

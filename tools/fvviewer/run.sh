@@ -46,5 +46,83 @@ PY
 else
     echo "  SKIP  Rust vectors not found ($RUSTVEC)"
 fi
+
+# ---- 5+6: the app (kernel/user/fvviewer.fi) against the synthetic Rust test host
+# Needs the Rust test-host binary (FV_BIN, default /root/abbilder/fv-testhost/freeviewer; build:
+#   CARGO_TARGET_DIR=<dir> /root/jarvis/bin/heavy cargo build   in /root/projects/freeviewer) and node.
+FVBIN=${FV_BIN:-/root/abbilder/fv-testhost/freeviewer}
+FVREPO=${FVV_RUST_REPO:-/root/projects/freeviewer}
+THPID=""
+stop_th() { [ -n "$THPID" ] && kill "$THPID" 2>/dev/null; wait "$THPID" 2>/dev/null; THPID=""; }
+trap 'stop_th; rm -rf "$D"' EXIT
+start_th() { # sets PORT ID
+    PORT=$((17200 + RANDOM % 600))
+    bash "$FVREPO/tools/orientos-testhost.sh" --port "$PORT" --bin "$FVBIN" > "$D/th.log" 2>&1 &
+    THPID=$!
+    ID=""
+    for _ in $(seq 1 100); do
+        ID=$(awk '/^ID /{print $2; exit}' "$D/th.log" 2>/dev/null)
+        [ -n "$ID" ] && break
+        sleep 0.2
+    done
+    [ -n "$ID" ]
+}
+echo "  == app: kernel/user/fvviewer.fi =="
+if vendor/firn/bin/firnc kernel/user/fvviewer.fi -o "$D/fvv" > "$D/fvv.log" 2>&1; then
+    ok "fvviewer.fi builds (Linux host binary)"
+else
+    bad "fvviewer.fi build"; head -8 "$D/fvv.log"
+fi
+if [ -x "$FVBIN" ] && [ -x "$D/fvv" ] && command -v node >/dev/null; then
+    if start_th; then
+        PWD_TH=testpass123
+        timeout 90 "$D/fvv" -t 127.0.0.1 "$PORT" "$ID" "$PWD_TH" > "$D/h1.txt" 2>&1
+        grep -q "^FVV: .* 0 FAIL" "$D/h1.txt" && ok "host: password mode, all checks ($(grep -c '^  ok' "$D/h1.txt") ok)" \
+            || { bad "host: password mode"; tail -12 "$D/h1.txt"; }
+        sleep 1
+        grep -q "TESTHOST input: MouseButton button=0 down=true" "$D/th.log" && grep -q "TESTHOST input: Clipboard len=8 text=fvv-clip" "$D/th.log" \
+            && ok "host: the test host logged the click and the clipboard text" || bad "host: input not logged by the test host"
+        timeout 90 "$D/fvv" -t 127.0.0.1 "$PORT" "$ID" wrong-password > "$D/h2.txt" 2>&1 && bad "host: wrong password was accepted" \
+            || { grep -q "FAIL  handshake" "$D/h2.txt" && ok "host: wrong password is refused (counter-check)" || bad "host: wrong password: no clean refusal"; }
+        sleep 1
+        timeout 130 "$D/fvv" -t 127.0.0.1 "$PORT" "$ID" -a > "$D/h3.txt" 2>&1
+        grep -q "^FVV: .* 0 FAIL" "$D/h3.txt" && ok "host: ask mode, all checks" || { bad "host: ask mode"; tail -12 "$D/h3.txt"; }
+        stop_th
+    else
+        bad "test host did not start"; head -5 "$D/th.log"
+    fi
+else
+    echo "  SKIP  app run against the Rust test host: need FV_BIN ($FVBIN), node, a built app. Nothing is claimed."
+fi
+if [ -x "$FVBIN" ] && command -v qemu-system-x86_64 >/dev/null && command -v node >/dev/null && [ "${FVV_QEMU:-1}" = 1 ]; then
+    echo "  == app inside OrientOS (QEMU, test host on 10.0.2.2) =="
+    HWNET_PROGS="sh ls cat echo dhcp" bash tools/hwnet/build.sh "$D/s0" 0 > "$D/b0.txt" 2>&1 && ok "kernel + userland built" \
+        || { bad "kernel/userland build"; tail -5 "$D/b0.txt"; }
+    if vendor/firn/bin/firnc -c --profile=app -o "$D/fvv.o" kernel/user/fvviewer.fi > "$D/fvv2.err" 2>&1 \
+        && ld -T kernel/user/user.ld -o "$D/fvv.elf" "$D/fvv.o" 2>>"$D/fvv2.err" && strip --strip-all "$D/fvv.elf"; then
+        ok "fvviewer built as a ring 3 app ($(stat -c%s "$D/fvv.elf") octets)"
+    else
+        bad "fvviewer ring 3 build"; head -8 "$D/fvv2.err"
+    fi
+    if [ -f "$D/s0/k.mb" ] && [ -f "$D/fvv.elf" ] && start_th; then
+        python3 tools/osum/mkfs.py build "$D/disk.img" 32768 /bin/ \
+            /bin/sh="$D/s0/sh.elf" /bin/ls="$D/s0/ls.elf" /bin/cat="$D/s0/cat.elf" /bin/echo="$D/s0/echo.elf" \
+            /bin/dhcp="$D/s0/dhcp.elf" /bin/fvviewer="$D/fvv.elf" > "$D/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$D/mkfs.txt"; }
+        timeout 300 qemu-system-x86_64 -kernel "$D/s0/k.mb" -m 512 \
+            -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=dhcp;fvviewer -t 10.0.2.2 $PORT $ID testpass123;exit" \
+            -serial "file:$D/vm.txt" -display none -no-reboot \
+            -drive "file=$D/disk.img,format=raw,if=ide,index=0" -netdev user,id=n0 -device e1000,netdev=n0 \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+        grep -a -E '^\s+(ok|FAIL)|FVV:|code' "$D/vm.txt" | head -14 | sed 's/^/        /'
+        grep -aq "FVV: .* 0 FAIL" "$D/vm.txt" && ok "OrientOS: password mode, all checks (Argon2id 19 MiB, JPEG, tiles, ping, click)" \
+            || bad "OrientOS: fvviewer -t failed -- serial tail: $(tail -c 300 "$D/vm.txt" | tr '\n' ' ')"
+        sleep 1
+        grep -q "TESTHOST input: MouseButton button=0 down=true" "$D/th.log" && ok "OrientOS: the test host logged the click from the guest" \
+            || bad "OrientOS: no click in the test host log"
+        stop_th
+    fi
+else
+    echo "  SKIP  QEMU part (need FV_BIN, qemu-system-x86_64, node). Nothing is claimed."
+fi
 echo "FVVIEWER: $pass ok, $fail fail"
 [ "$fail" = 0 ]
