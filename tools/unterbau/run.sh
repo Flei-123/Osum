@@ -208,8 +208,10 @@ if [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " foreign "; then
 fi
 if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox "; }; then
     echo "== 3c. proof stone busybox (dynamic musl, $(stat -c%s "$BBDYN") octets): applets + /bin/sh -c =="
-    boot "$KNEW" "$D/new/disk.img" "busybox sh /etc/bb.sh" "$D/bb.ser"
-    grep -a '^BB ' "$D/bb.ser" > "$D/bb.res" || : > "$D/bb.res"
+    # with the virtio card: `ifconfig -a` lists the interfaces of /proc/net/dev
+    KARGS="nic nip=10.0.2.15/24 ngw=10.0.2.2" NETARGS="-netdev user,id=n0 -device virtio-net-pci,netdev=n0" boot "$KNEW" "$D/new/disk.img" "busybox sh /etc/bb.sh" "$D/bb.ser"
+    # a kernel trace line (acpiev) can end without a newline just before a probe line: take the probe from the middle of the line
+    grep -a -o 'BB [A-Za-z0-9_-]\+ .*\|BB end' "$D/bb.ser" | tr -d '\r' > "$D/bb.res" || : > "$D/bb.res"
     SHA12=$(sha256sum "$D/pruef.txt" | cut -c1-12)
     BBOK=0; BBBAD=0
     bbchk() { # bbchk <name> <expected text>
@@ -235,8 +237,8 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
         } ;;
     esac
     echo "        busybox probes: $BBOK ok / $BBBAD gap"
-    # known open since 13.10.2026: ip (no AF_NETLINK) and ifconfig (no /proc/net/dev) -> at most 2 gaps
-    [ "$BBBAD" -le "${BBGAP_MAX:-2}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-2} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-2} known)"
+    # known open since 13.10.2026: ip (no AF_NETLINK) -> at most 1 gap (ifconfig works since STONES2: /proc/net/dev + SIOCGIF*)
+    [ "$BBBAD" -le "${BBGAP_MAX:-1}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-1} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-1} known)"
     cp "$D/bb.res" "${UB_BB_RESULT:-$D/bb-result.txt}" 2>/dev/null
 fi
 

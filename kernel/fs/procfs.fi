@@ -78,6 +78,7 @@ import ipc.uio
 import block.blk
 import diag.hwid
 import sched.rand
+import net.inet
 
 export { ops, node_root }
 
@@ -106,6 +107,9 @@ const S_RANDOM: u64 = 4
 const S_PIDMAX: u64 = 5
 const S_OVERCOMMIT: u64 = 6
 const S_UUID: u64 = 7
+// ROUND STONES2: /proc/net/dev (busybox ifconfig lists the interfaces from it)
+const S_NET: u64 = 8
+const S_NETDEV: u64 = 9
 
 const ART: u64 = 0x1000000
 const SLOT: u64 = 0x100
@@ -141,7 +145,8 @@ const G_KLOG: u64 = 8
 // a global file: lookup and readdir treat G_SYSDIR specially).
 const G_LOADAVG: u64 = 9
 const G_SYSDIR: u64 = 10
-const G_LAST: u64 = 10
+const G_NETDIR: u64 = 11
+const G_LAST: u64 = 11
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1186,11 +1191,49 @@ fn make_sys(state: u64, sub: u64) -> u64 {
     if sub == S_UUID {
         return make_uuid_random(state)
     }
+    if sub == S_NETDEV {
+        return make_netdev(state)
+    }
     return 0
 }
 
+// /proc/net/dev: the one interface this kernel has. Packet counts are the
+// stack's frame counters; byte counts are the card's octet counters;
+// errors/drops are not counted anywhere, so they read 0 (the columns stay).
+fn w_col(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = w_ch(state, at, 32)
+    return w_num(state, p, v)
+}
+
+fn make_netdev(state: u64) -> u64 {
+    var h1: [u8; 58] = "Inter-|   Receive                            |  Transmit\n\0"
+    var h2: [u8; 118] = " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\0"
+    var nm: [u8; 8] = "  eth0:\0"
+    var p: u64 = w_str(state, 0, (&h1[0]) as u64)
+    p = w_str(state, p, (&h2[0]) as u64)
+    if !inet.ready(state) {
+        return p
+    }
+    p = w_str(state, p, (&nm[0]) as u64)
+    p = w_col(state, p, inet.card_octets(state, 1))
+    p = w_col(state, p, inet.frames_in(state))
+    var z: u64 = 0
+    while z < 6 {
+        p = w_col(state, p, 0)
+        z = z + 1
+    }
+    p = w_col(state, p, inet.card_octets(state, 0))
+    p = w_col(state, p, inet.frames_out(state))
+    z = 0
+    while z < 6 {
+        p = w_col(state, p, 0)
+        z = z + 1
+    }
+    return w_nl(state, p)
+}
+
 fn sys_is_dir(sub: u64) -> bool {
-    return sub >= S_SYS && sub <= S_RANDOM
+    return (sub >= S_SYS && sub <= S_RANDOM) || sub == S_NET
 }
 
 fn copy_z(out: u64, src: u64) {
@@ -1210,6 +1253,8 @@ fn sys_name(sub: u64, out: u64) {
     var n5: [u8; 8] = "pid_max\0"
     var n6: [u8; 18] = "overcommit_memory\0"
     var n7: [u8; 5] = "uuid\0"
+    var n8: [u8; 4] = "net\0"
+    var n9: [u8; 4] = "dev\0"
     if sub == S_KERNEL {
         copy_z(out, (&n2[0]) as u64)
     } else if sub == S_VM {
@@ -1222,6 +1267,10 @@ fn sys_name(sub: u64, out: u64) {
         copy_z(out, (&n6[0]) as u64)
     } else if sub == S_UUID {
         copy_z(out, (&n7[0]) as u64)
+    } else if sub == S_NET {
+        copy_z(out, (&n8[0]) as u64)
+    } else if sub == S_NETDEV {
+        copy_z(out, (&n9[0]) as u64)
     } else {
         copy_z(out, (&n1[0]) as u64)
     }
@@ -1252,6 +1301,9 @@ fn sys_nth(parent: u64, i: u64) -> u64 {
     }
     if parent == S_RANDOM && i == 0 {
         return S_UUID
+    }
+    if parent == S_NET && i == 0 {
+        return S_NETDEV
     }
     return 0
 }
@@ -1484,8 +1536,14 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     }
     // ROUND UNTERBAU: /proc/sys/<dir>/.../<file>
     var w_sys: [u8; 4] = "sys\0"
-    if streq((&seg[0]) as u64, (&w_sys[0]) as u64) {
+    var w_net: [u8; 4] = "net\0"
+    let is_sys: bool = streq((&seg[0]) as u64, (&w_sys[0]) as u64)
+    let is_net: bool = streq((&seg[0]) as u64, (&w_net[0]) as u64)
+    if is_sys || is_net {
         var cur: u64 = S_SYS
+        if is_net {
+            cur = S_NET
+        }
         var pos: u64 = at
         var guard: u64 = 0
         while guard < 6 {
@@ -1603,11 +1661,14 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var k: [u8; 5] = "klog\0"
     var la2: [u8; 8] = "loadavg\0"
     var sy2: [u8; 4] = "sys\0"
+    var ne2: [u8; 4] = "net\0"
     var src: u64 = (&a[0]) as u64
     if sub == G_LOADAVG {
         src = (&la2[0]) as u64
     } else if sub == G_SYSDIR {
         src = (&sy2[0]) as u64
+    } else if sub == G_NETDIR {
+        src = (&ne2[0]) as u64
     } else if sub == G_CPUINFO {
         src = (&b[0]) as u64
     } else if sub == G_UPTIME {
@@ -1698,6 +1759,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
             global_name(state, i + 1, out)
             if i + 1 == G_SYSDIR {
                 return node(K_SYS, 0, S_SYS)
+            }
+            if i + 1 == G_NETDIR {
+                return node(K_SYS, 0, S_NET)
             }
             return node(K_GLOBAL, 0, i + 1)
         }

@@ -23,4 +23,6 @@ echo "ST git-commit $(cd /tmp/gt && /bin/git config user.email a@b && /bin/git c
 $B sleep 3
 echo "ST net-curl-http $(/bin/curl -sS --max-time 15 http://10.0.2.2:18765/h.txt 2>&1 | $B tail -n 1)"
 echo "ST net-py-http $(/bin/python3 -c 'import socket;s=socket.create_connection(("10.0.2.2",18765),5);s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(s.recv(300).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
+echo "ST net-procdev $($B grep -c eth0 /proc/net/dev)"
+echo "ST net-ifconfig $($B ifconfig eth0 2>&1 | $B grep -o 'inet addr:[0-9.]*')"
 echo "ST end"
