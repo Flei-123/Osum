@@ -185,9 +185,9 @@ grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/sched/proc.fi \
 grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (die Arena beginnt darueber)" \
     || bad "BIG_FLOOR passt nicht zu IMAGE_END"
-grep -qE '^const PRIV_SLOTS: u64 = 99' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 99 Kacheln zu 2 MiB" \
-    || bad "PRIV_SLOTS steht nicht auf 99"
+grep -qE '^const PRIV_SLOTS: u64 = 104' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 104 Kacheln zu 2 MiB" \
+    || bad "PRIV_SLOTS steht nicht auf 104"
 grep -qE '^const BIG_TOP: u64 = 0x4C600000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_TOP = 0x4C600000" || bad "BIG_TOP fehlt"
 python3 - <<'PY' && ok "die private Gegend endet vor 0x50000000 (tools/osum/run.sh bleibt gueltig)" \
