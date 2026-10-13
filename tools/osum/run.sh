@@ -275,7 +275,7 @@ has "$F" "osum: mount=1" "the kernel mounted the image the HOST wrote"
 has "$F" "osum: bin .:2 ..:2 sh:1 ls:1 cat:1 echo:1 rm:1 hurt:1 hello:1" \
     "the kernel sees exactly the seven programs the host put in /bin"
 has "$F" "sh: ready, osum" "/bin/sh started -- an ELF file, loaded from a drive"
-has "$F" "ustack=0x4007f000" \
+has "$F" "ustack=0x4cfff000" \
     "der Stapelzeiger zeigt AUF den Argumentblock -- die Uebergabe von Linux (Runde K16)"
 grep -q '^elf: seg 5 v=0x40100000 .* w=0 x=1$' "$F" \
     && ok "the code segment was mapped read+execute and NOT writable" \
@@ -366,10 +366,10 @@ H="$TMPD/hurt.txt"
 grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x7  cr2=0x40100000' "$H" \
     && ok "writing into its own code page: #PF err=0x7 (page there, write, ring 3) -- the text is read only" \
     || { bad "no #PF err=0x7 on the code page"; grep '^user fault' "$H" | sed 's/^/        /'; }
-# RUNDE K16: der Stapel reicht jetzt von 0x40001000 bis 0x4007F000
+# RUNDE LIMITS: the stack of a program from disk ends at 0x4CFFF000 now (10 MiB); K16: der Stapel reichte von 0x40001000 bis 0x4007F000
 # (`proc.ARGS_BASE`), nicht mehr nur bis 0x40009000 -- die Adresse, an
 # der `hurt` in seinen eigenen Stapel springt, liegt deshalb hoeher.
-grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x15  cr2=0x400[0-7]' "$H" \
+grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x15  cr2=0x4cf' "$H" \
     && ok "executing its own stack: #PF err=0x15 (page there, instruction fetch, ring 3) -- the no-execute bit works" \
     || { bad "no #PF err=0x15 out of the stack"; grep '^user fault' "$H" | sed 's/^/        /'; }
 grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x5  cr2=0x100000' "$H" \
