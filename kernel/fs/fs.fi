@@ -2523,9 +2523,28 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
         leave(state, flags)
         return 2
     }
-    if dir_find(state, ndir, newname) != 0 {
-        leave(state, flags)
-        return 17 // EEXIST -- dieser Kernel ueberschreibt nicht still
+    // POSIX: rename() onto an existing FILE replaces it atomically (sed -i, git, every
+    // "write temp, rename over" program). Same inode (hard links): nothing to do.
+    // Directories keep the old answer (EEXIST) -- no silent directory replacement.
+    let ex: u64 = dir_find(state, ndir, newname)
+    if ex != 0 {
+        if ex == ino {
+            leave(state, flags)
+            return 0
+        }
+        if inode_type(state, ex) != T_FILE || inode_type(state, ino) != T_FILE {
+            leave(state, flags)
+            return 17 // EEXIST
+        }
+        let exnl: u64 = inode_get(state, ex, I_NLINK)
+        if exnl > 1 {
+            inode_set(state, ex, I_NLINK, exnl - 1)
+        } else {
+            file_truncate(state, ex)
+            inode_set(state, ex, I_TYPE, T_FREE)
+            inode_set(state, ex, I_NLINK, 0)
+        }
+        dir_remove(state, ndir, newname)
     }
     if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)

@@ -326,6 +326,8 @@ const SYS_DUP2: u64 = 33
 const SYS_NANOSLEEP: u64 = 35
 const SYS_GETPID: u64 = 39
 const SYS_FORK: u64 = 57
+// vfork (musl: busybox xargs/timeout, posix_spawn fallbacks): served as fork -- the child only execs or exits, so a copy is safe
+const SYS_VFORK: u64 = 58
 const SYS_EXECVE: u64 = 59
 const SYS_EXIT: u64 = 60
 const SYS_WAIT4: u64 = 61
@@ -2866,7 +2868,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_NANOSLEEP {
         return do_nanosleep(state, me, a0)
     }
-    if number == SYS_FORK {
+    if number == SYS_FORK || number == SYS_VFORK {
         return do_fork(state, me, frame, 0)
     }
     if number == SYS_EXECVE {
@@ -5728,6 +5730,10 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
         }
         ino = fs.create_path(state, buf, fs.T_FILE)
         if ino == 0 {
+            // parent directory missing: ENOENT, not ENOSPC (git: open objects/xx/tmp, expect ENOENT, mkdir, retry)
+            if fs.parent_ino(state, buf) == 0 {
+                return neg(errno.E_NOENT)
+            }
             return neg(errno.E_NOSPC)
         }
         // Rechte und Eigentuemer der frischen Datei: 0o666 abzueglich
@@ -6069,6 +6075,9 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     }
     let made: u64 = fs.create_path(state, buf, fs.T_DIR)
     if made == 0 {
+        if dir == 0 {
+            return neg(errno.E_NOENT) // mkdir -p / git rely on ENOENT for a missing parent
+        }
         return neg(errno.E_NOSPC)
     }
     // 0o777 abzueglich der Maske -- wie bei `open`, nur mit dem anderen
@@ -8124,6 +8133,31 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
+    }
+    // FIONBIO (0x5421): int on/off -> O_NONBLOCK on the open file. Python's settimeout() and many C libraries use it instead of fcntl;
+    // without it sockets answered -ENOTTY (python create_connection: "[Errno 25] Not a tty").
+    if req == 0x5421 {
+        if arg == 0 || !proc.user_ok(state, me, arg, 4) {
+            return neg(errno.E_FAULT)
+        }
+        let nb: u64 = blockb(state)
+        if !copy_in(state, me, nb, arg, 4) {
+            return neg(errno.E_FAULT)
+        }
+        var on: u64 = 0
+        var k: u64 = 0
+        while k < 4 {
+            if (kstate.get8(nb + k) as u64) != 0 {
+                on = 1
+            }
+            k = k + 1
+        }
+        if on != 0 {
+            file.open_set_flags(state, of, file.open_flags(state, of) | UB_O_NONBLOCK)
+        } else {
+            file.open_set_flags(state, of, file.open_flags(state, of) & (~UB_O_NONBLOCK))
+        }
+        return 0
     }
     let kind: u64 = file.open_kind(state, of)
     var t: u64 = tty.MAX_TTY

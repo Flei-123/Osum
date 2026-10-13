@@ -102,13 +102,14 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
     printf '<?xml version="1.0"?>\n<fontconfig></fontconfig>\n' > "$D/fonts.conf"; printf 'UTC\n' > "$D/localtime"
     spec="$spec /etc/ssl/ /etc/ssl/certs/ /etc/fonts/ /usr/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/zoneinfo/"
     spec="$spec /etc/resolv.conf=$D/resolv.conf /etc/machine-id=$D/machine-id /etc/fonts/fonts.conf=$D/fonts.conf /etc/localtime=$D/localtime"
-    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" 98304 --v3 --inodes=1024 $spec > "$O/mkfs.txt" 2>&1
+    spec="$spec ${EXTRA_SPEC:-}"
+    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 $spec > "$O/mkfs.txt" 2>&1
 }
 boot() { # boot <kernel> <disk> <script> <serial-out>
     cp -f "$2" "$2.live"
     timeout "$TMO" $QEMU "${KVM[@]}" -smp "$SMP" -kernel "$1" -m 512 \
-        -append "osum vfs nokbd nosched noproc nofs script=$3;exit" -serial "file:$4" -display none -no-reboot \
-        -drive "file=$2.live,format=raw,if=ide,index=0" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+        -append "osum vfs nokbd nosched noproc nofs ${KARGS:-} script=$3;exit" -serial "file:$4" -display none -no-reboot \
+        ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
 }
 run_all() { # run_all <kernel> <disk> <tag>
@@ -144,6 +145,42 @@ echo "BB df-cmd $(/bin/busybox df /tmp >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB free-cmd $(/bin/busybox free >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB ps-cmd $(/bin/busybox ps >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB date-cmd $(/bin/busybox date >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB head-n $(printf 'a\nb\nc\n' | /bin/busybox head -n 2 | /bin/busybox wc -l)"
+echo "BB tail $(/bin/busybox tail -n 1 /etc/pruef.txt)"
+echo "BB tr $(echo abc | /bin/busybox tr a-z A-Z)"
+echo "BB find $(/bin/busybox find /tmp/bbd -type f | /bin/busybox wc -l)"
+echo "BB xargs $(echo 1 2 3 | /bin/busybox xargs -n1 echo | /bin/busybox wc -l)"
+/bin/busybox cp /etc/pruef.txt /tmp/p2 && /bin/busybox mv /tmp/p2 /tmp/p3 && /bin/busybox cmp /etc/pruef.txt /tmp/p3 && /bin/busybox rm /tmp/p3 && echo "BB cp-mv-rm ok"
+/bin/busybox ln -s /etc/pruef.txt /tmp/lnk 2>/dev/null; echo "BB symlink $(/bin/busybox cat /tmp/lnk 2>/dev/null | /bin/busybox wc -l)"
+/bin/busybox chmod 600 /tmp/bbd/g; echo "BB chmod-stat $(/bin/busybox stat -c %a /tmp/bbd/g 2>/dev/null)"
+echo "BB id $(/bin/busybox id -u)"
+echo "BB uname $(/bin/busybox uname -s >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB hostname $(/bin/busybox hostname >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB pwd $(cd /tmp && /bin/busybox pwd)"
+/bin/busybox tar cf /tmp/t.tar /etc/pruef.txt 2>/dev/null; echo "BB tar $(/bin/busybox tar tf /tmp/t.tar 2>/dev/null)"
+echo "BB gzip $(/bin/busybox gzip -c /etc/pruef.txt | /bin/busybox gunzip | /bin/busybox wc -l)"
+echo "BB diff $(/bin/busybox diff /etc/pruef.txt /etc/pruef.txt >/dev/null && echo same)"
+echo "BB seq $(/bin/busybox seq 1 5 | /bin/busybox tail -n 1)"
+echo "BB dd $(/bin/busybox dd if=/dev/zero bs=1k count=4 2>/dev/null | /bin/busybox wc -c)"
+echo "BB sort-uniq $(printf '2\n1\n2\n' | /bin/busybox sort -n | /bin/busybox uniq -c | /bin/busybox wc -l)"
+echo "BB date-fmt $(/bin/busybox date +%Y | /bin/busybox wc -c)"
+echo "BB mktemp $(/bin/busybox mktemp /tmp/xXXXXXX >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB realpath $(/bin/busybox realpath /tmp/../etc/pruef.txt 2>/dev/null)"
+echo "BB ash-func $(f() { echo $(($1 * 2)); }; f 21)"
+echo "BB heredoc $(/bin/busybox cat <<EOT
+hd
+EOT
+)"
+echo "BB sed-i $(echo x > /tmp/si; /bin/busybox sed -i 's/x/y/' /tmp/si; /bin/busybox cat /tmp/si)"
+echo "BB sleep $(/bin/busybox sleep 1 && echo ok)"
+echo "BB bg-wait $(/bin/busybox sleep 1 & p=$!; wait $p; echo ok)"
+echo "BB kill $(/bin/busybox sleep 30 & p=$!; /bin/busybox kill $p; wait $p 2>/dev/null; echo done)"
+echo "BB mounts $(/bin/busybox cat /proc/mounts >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB mount-cmd $(/bin/busybox mount >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB ip-cmd $(/bin/busybox ip addr >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB ifconfig-cmd $(/bin/busybox ifconfig -a >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB top-cmd $(/bin/busybox top -b -n 1 >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB lsof-cmd $(/bin/busybox timeout 5 /bin/busybox ps -o pid,comm >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB end"
 BBS
 [ -n "${BBSCRIPT:-}" ] && cp "$BBSCRIPT" "$D/bb.sh"
@@ -179,6 +216,10 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
     bbchk echo ok; bbchk cmdsubst ok; bbchk arith 42; bbchk pipe 3; bbchk forloop 123; bbchk nested-sh ok; bbchk exitstatus 3
     bbchk grep 1; bbchk sort zwei; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
     bbchk loadavg 0.00; bbchk uptime-cmd ok; bbchk df-cmd ok; bbchk free-cmd ok; bbchk ps-cmd ok; bbchk date-cmd ok
+    bbchk head-n 2; bbchk tail drei; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
+    bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
+    bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
+    bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
     grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
     # with busybox as /bin/sh: system() and popen() of t_proc
     case " $TESTS " in *" t_proc "*)
@@ -191,7 +232,47 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
         } ;;
     esac
     echo "        busybox probes: $BBOK ok / $BBBAD gap"
+    # known open since 13.10.2026: ip (no AF_NETLINK) and ifconfig (no /proc/net/dev) -> at most 2 gaps
+    [ "$BBBAD" -le "${BBGAP_MAX:-2}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-2} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-2} known)"
     cp "$D/bb.res" "${UB_BB_RESULT:-$D/bb-result.txt}" 2>/dev/null
+fi
+
+# 3d. the next proof stones: python3 (musl, dynamic, stdlib as one zip), curl (static libcurl), git (zlib) -- only when STONES points at them
+#   STONES=<dir> with: python3, lib/python312.zip, lib/ext/*.so (extension modules for lib-dynload), curl, git (each optional)
+if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " stones "; }; then
+    echo "== 3d. proof stones python3 / curl / git (from $STONES) =="
+    SX="/lib/python3.12/ /lib/python3.12/lib-dynload/ /w/"
+    [ -r "$STONES/python3" ] && SX="$SX /bin/python3=$STONES/python3 /lib/python312.zip=$STONES/lib/python312.zip"
+    [ -r "$STONES/lib/os.pyc" ] && SX="$SX /lib/python3.12/os.pyc=$STONES/lib/os.pyc"   # landmark: getpath finds the prefix by it
+    for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
+    [ -r "$STONES/curl" ] && SX="$SX /bin/curl=$STONES/curl"
+    [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git"
+    cp "${STSCRIPT:-$HERE/stones.sh}" "$D/st.sh"
+    SX="$SX /etc/st.sh=$D/st.sh"
+    EXTRA_SPEC="$SX" build_image "$ROOT" "$D/stone" && {
+        # STONES_NET=1: virtio-net with QEMU user networking; the guest reaches a throw-away http server of the host at 10.0.2.2
+        NETPID=""
+        if [ -n "${STONES_NET:-}" ]; then
+            mkdir -p "$D/www"; echo "hello-net" > "$D/www/h.txt"
+            python3 -I -m http.server 18765 --bind 127.0.0.1 --directory "$D/www" > "$D/www.log" 2>&1 &
+            NETPID=$!
+            NETARGS="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"
+        fi
+        KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
+        [ -z "$NETPID" ] || kill "$NETPID" 2>/dev/null
+        grep -a -o -E 'ST [A-Za-z0-9_-]+( .*)?$' "$D/st.ser" | tr -d '\r' | awk '!seen[$2]++' > "$D/st.res" || : > "$D/st.res"
+        STOK=0; STBAD=0
+        stchk() { # stchk <name> <expected text>
+            local line; line=$(grep -a "^ST $1 " "$D/st.res" | head -1)
+            if [ "$line" = "ST $1 $2" ]; then STOK=$((STOK+1)); printf '        ST-OK   %s\n' "$1"; else STBAD=$((STBAD+1)); printf '        ST-GAP  %s  (got: %s)\n' "$1" "${line:-nothing}"; fi
+        }
+        while read -r n v; do case "$n" in ''|'#'*) continue ;; net-*) [ -n "${STONES_NET:-}" ] || continue ;; esac; stchk "$n" "$v"; done < "$HERE/stones.expect"
+        grep -aq '^ST end' "$D/st.res" && ok "stones script ran to the end" || bad "stones script did not reach its end"
+        echo "        stones probes: $STOK ok / $STBAD gap"
+        [ "$STBAD" -le "${STGAP_MAX:-0}" ] && ok "stones probes: $STOK ok, $STBAD gap" || bad "stones probes: $STBAD gaps (> ${STGAP_MAX:-0})"
+        cp "$D/st.res" "${UB_ST_RESULT:-$D/st-result.txt}" 2>/dev/null
+        [ -n "${KEEP:-}" ] && cp "$D/st.ser" "$D/st.ser.keep"
+    } || bad "stone image does not build"
 fi
 echo "== 4. the table =="
 awk '{ split($1, a, "."); v[$2]++; t[a[1]]++ } END { for (k in t) ; for (k in v) printf "        count %s=%d\n", k, v[k] }' "$D/new.all" | sort
