@@ -43,9 +43,16 @@ elf() {
         return 1
     fi
     mkdir -p "$paket/bau"
+    # sources built with the app profile (like the fvviewer gate): own entry, no crt
+    if grep -qa -e '^profile app' -e '--profile=app' "$quelle"; then
+        "$FIRNC" --profile=app -c "$quelle" -o "$paket/bau/$name.o" || return 1
+        ld -T kernel/user/user.ld -o "$paket/bau/$name.elf" "$paket/bau/$name.o" || return 1
+        strip --strip-all "$paket/bau/$name.elf"
+    else
     "$FIRNC" "$quelle" -o "$paket/bau/$name.o" || return 1
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
         -o "$paket/bau/$name.elf" "$CRT" "$paket/bau/$name.o" || return 1
+    fi
     rm -f "$paket/bau/$name.o"
     echo "   $name.elf $(stat -c%s "$paket/bau/$name.elf") Oktette"
     return 0

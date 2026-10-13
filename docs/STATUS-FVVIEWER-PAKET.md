@@ -67,3 +67,35 @@ Signing key: stays `/root/.secrets/osum-ota-bund.json` (encrypted, passphrase fi
 | 6 | Optional: second key / separate channel (key management) | 2-4 days |
 
 Total to a first installable, auto-updating FreeViewer package after W3b: roughly 2-3 days; key management comes on top.
+
+
+## 6. STATE 13.10.2026 (W7: real package, install, update, negatives)
+
+Built and measured (nothing live touched):
+
+* `bash pakete/bauen.sh <out>` builds `fvviewer-1.0.0.opk` (544226 octets, ELF 542184, symbol 1036) next to the other packages;
+  `osdk check --strict` = ok, 0 warnings. `bauen.sh` now builds sources with the app profile
+  (`firnc --profile=app -c`, no crt, no `USER_ENTRY`), like `tools/loader/build.sh` and the fvviewer gate.
+* `bash tools/ota/fvtest.sh [out]` (run via `/root/jarvis/bin/heavy`, ~3 min): local test key + CA + feed server on the host, live image
+  (QEMU, RAM root): `opk install` of the package (signature checked), `/apps/fvviewer.osp/start` starts (headless usage line),
+  `ota apply` 1.0.0 -> 1.0.1 over the signed local feed (generation 0 -> 1), three negatives: wrong package signature
+  (`SIGNATURE WRONG`), tampered package (`HASH MISMATCH`), VERZEICHNIS signed with a foreign key
+  (`SIGNATURE OF THE VERZEICHNIS WRONG`); in each case nothing is installed.
+
+NOT done / known:
+
+* Disk install path: `install /dev/hda` fails on current origin/main ("install: FEHLER bei copy", ESP copy, reproducible on 96 and 256 MiB,
+  also with a plain image without fvviewer) -- NOT caused by the package; test therefore uses the live (iso) mode. Needs an installer fix
+  before `ota confirm` / reboot / rollback on an installed disk can be tested for fvviewer.
+* Window (fUi) comes from W6; the package only starts the headless mode until then. Not run on real hardware (FLEI-ONE needs the owner's ok).
+* Declared-only permissions (clipboard etc.) unchanged, see section 3.
+
+## 7. LIVE PUBLICATION (needs the owner's yes -- DO NOT run without it)
+
+1. `git pull` osum main (tests green), `bash tools/loader/build.sh S && bash tools/loader/pakete.sh S` (heavy).
+2. `bash tools/ota/fvstand.sh S/stand` -> `fvviewer-1.opk` in the stand.
+3. Publish into a COPY of the feed first: `python3 tools/ota/veroeffentlichen.py /tmp/ota-feed/osum --stand S/stand --bund /root/.secrets/osum-ota-bund.json --notiz "fvviewer 1.0.0"` (passphrase file, 0600).
+4. Accept locally: `bash tools/ota/feedtest.sh <image-dir> /tmp/ota-feed` and `bash tools/ota/fvtest.sh` green; store window lists FreeViewer.
+5. After the owner's ok: `rsync` the new `v/<n>/`, `aktuell/`, `pakete/`, `register.json` to `/srv/store/osum/` (=> `https://store.fleitec.com/osum/aktuell/`).
+6. Check on one device (QEMU first; FLEI-ONE only with the owner's ok): `ota search` shows fvviewer, `ota apply`, `ota boot`/confirm.
+7. Bad build: `veroeffentlichen.py ... --zuruecknehmen <n>`. Never copy the signing key into the FreeViewer repo.
