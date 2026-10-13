@@ -52,22 +52,16 @@ echo ==FERTIG==
 EOS
 cat > "$TMPD/launch.sh" <<'EOS'
 export XDG_RUNTIME_DIR=/tmp HOME=/root TERM=xterm-256color SHELL=/bin/busybox FONTCONFIG_FILE=/etc/fonts/fonts.conf WAYLAND_DISPLAY=/tmp/wayland-0
-# The kernel has 16 descriptors per process (file.MAX_FD): foot needs ~17, so stdin/stdout go (logs stay on stderr).
-exec /usr/bin/foot -d info -f monospace:size=12 /bin/busybox sh /t/child.sh <&- >&-
+exec /usr/bin/foot -d info -f monospace:size=12 /bin/busybox sh /t/child.sh
 EOS
 cat > "$TMPD/child.sh" <<'EOS'
 echo FOOT-CHILD-UP > /tmp/foot.marker
 export PS1='osum# '
 exec /bin/busybox sh
 EOS
-# One SHM object of this kernel holds at most 1 MiB (kernel/fs/unixsock.fi SHM_PAGES_MAX): foot's default is a sparse 512 MiB pool, so ask
-# for one buffer per pool and a window that fits in it.
 cat > "$TMPD/foot.ini" <<'EOS'
 [main]
-initial-window-size-pixels=560x340
 pad=4x4
-[tweak]
-max-shm-pool-size-mb=0
 EOS
 [ -z "${FOOT_GS:-}" ] || cp "$FOOT_GS" "$TMPD/g.sh"
 sed -i "s/FOOT_WAIT/${FOOT_WAIT:-25}/; s/KEY_WAIT/${KEY_WAIT:-60}/" "$TMPD/g.sh"
