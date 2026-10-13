@@ -68,6 +68,7 @@ import sched.rand
 import drv.con.tty
 
 import net.inet
+import net.netlink
 import net.netview
 import fs.unixsock
 import net.netmon
@@ -2539,6 +2540,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_sendto(state, me, a0, a1, a2, a4, a5)
     }
     if number == SYS_RECVFROM {
+        let nlof: u64 = nl_of(state, me, a0)
+        if nlof < file.MAX_OPEN {
+            return nl_recv_of(state, me, nlof, a1, a2, a3, a4, a5)
+        }
         return do_recvfrom(state, me, a0, a1, a2, a4, a5)
     }
     if number == SYS_SHUTDOWN {
@@ -3814,6 +3819,9 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_USOCK {
         return usock_rw(state, me, of, buf, len, true)
     }
+    if kind == file.K_NETLINK {
+        return nl_send_of(state, me, of, buf, len)
+    }
     // ROUNDE K14: eine Datei auf einem eingehaengten Dateisystem.
     if kind == file.K_VFILE {
         return vfs_write(state, me, of, buf, len)
@@ -3890,6 +3898,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_USOCK {
         return usock_rw(state, me, of, buf, len, false)
+    }
+    if kind == file.K_NETLINK {
+        return nl_recv_of(state, me, of, buf, len, 0, 0, 0)
     }
     if kind == file.K_DIR || kind == file.K_VDIR {
         return neg(errno.E_ISDIR)
@@ -5012,6 +5023,13 @@ fn poll_of(state: u64, me: u64, of: u64) -> u64 {
     }
     if kind == file.K_SOCK {
         return poll_sock(state, of)
+    }
+    if kind == file.K_NETLINK {
+        r = r | POLLOUT
+        if netlink.nl_pending(file.open_off(state, of)) {
+            r = r | POLLIN
+        }
+        return r
     }
     // RUNDE WAYLAND: der lokale Socket. libwayland ruft `poll` 323 mal
     // je Lauf -- ohne diese sechs Zeilen sieht es nie, dass eine
@@ -8163,7 +8181,9 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return 0
     }
     // ROUND STONES2: SIOCGIF* on a socket (busybox ifconfig): the one interface "eth0"
-    if req >= 0x8910 && req <= 0x8950 && file.open_kind(state, of) == file.K_SOCK {
+    // (musl's if_nametoindex asks on an AF_UNIX socket, so a local socket and a netlink socket answer too)
+    if req >= 0x8910 && req <= 0x8950 && (file.open_kind(state, of) == file.K_SOCK || file.open_kind(state, of) == file.K_USOCK
+        || file.open_kind(state, of) == file.K_NETLINK) {
         return do_ifioctl(state, me, req, arg)
     }
     let kind: u64 = file.open_kind(state, of)
@@ -12490,6 +12510,10 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     if domain == AF_UNIX {
         return do_usocket(state, me, kind, protocol)
     }
+    // ROUND NETLINK (r696): AF_NETLINK needs no card either.
+    if domain == netlink.AF_NETLINK {
+        return do_nlsocket(state, me, kind, protocol)
+    }
     if !inet.ready(state) && netview.view_of(state, me) == netview.V_REAL {
         return neg(errno.E_NODEV)
     }
@@ -12550,6 +12574,10 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
 }
 
 fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let nlof: u64 = nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return nl_bind(state, me, nlof, addr, len)
+    }
     // RUNDE WAYLAND: die Art des Deskriptors entscheidet, nicht die
     // Familie in der Adresse -- ein Deskriptor weiss, was er ist.
     if usock_of(state, me, fd) < unixsock.USOCK_MAX {
@@ -12727,6 +12755,9 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     let uof: u64 = of_of(state, me, fd)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
         return write_of(state, me, uof, buf, want)
+    }
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_NETLINK {
+        return nl_send_of(state, me, uof, buf, want)
     }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
@@ -12950,6 +12981,10 @@ fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
 
 fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     peer: bool) -> u64 {
+    let nlof: u64 = nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return nl_sockname(state, me, nlof, addr, lenp, peer)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -12988,6 +13023,9 @@ fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
 // which would make `curl` and `nc` give up for no reason.
 fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     name: u64) -> u64 {
+    if nl_of(state, me, fd) < file.MAX_OPEN {
+        return 0
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -13061,6 +13099,26 @@ fn do_ifioctl(state: u64, me: u64, req: u64, arg: u64) -> u64 {
     if req == 0x8912 {
         return do_ifconf(state, me, arg, bo)
     }
+    // ROUND NETLINK (r696): SIOCGIFNAME (index -> name), the call `ip` uses to name an interface it only has the index of.
+    if req == 0x8910 {
+        if kstate.get8(bo + 16) != 1 || kstate.get8(bo + 17) != 0 || kstate.get8(bo + 18) != 0 || kstate.get8(bo + 19) != 0
+            || !inet.ready(state) {
+            return neg(errno.E_NODEV)
+        }
+        var z: u64 = 0
+        while z < 16 {
+            kstate.set8(bo + z, 0 as u8)
+            z = z + 1
+        }
+        kstate.set8(bo, 101 as u8)
+        kstate.set8(bo + 1, 116 as u8)
+        kstate.set8(bo + 2, 104 as u8)
+        kstate.set8(bo + 3, 48 as u8)
+        if !copy_out(state, me, arg, bo, 40) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
+    }
     if (kstate.get8(bo) as u64) != 101 || (kstate.get8(bo + 1) as u64) != 116
         || (kstate.get8(bo + 2) as u64) != 104 || (kstate.get8(bo + 3) as u64) != 48
         || (kstate.get8(bo + 4) as u64) != 0 || !inet.ready(state) {
@@ -13105,6 +13163,13 @@ fn do_ifioctl(state: u64, me: u64, req: u64, arg: u64) -> u64 {
     } else if req == 0x8921 {
         kstate.set8(bo + 16, 0xDC as u8)
         kstate.set8(bo + 17, 0x05 as u8)
+    } else if req == 0x8933 {
+        // SIOCGIFINDEX: the same index the netlink dump gives eth0
+        kstate.set8(bo + 16, 1 as u8)
+    } else if req == 0x8942 {
+        // SIOCGIFTXQLEN: 1000, as the netlink dump says
+        kstate.set8(bo + 16, 0xE8 as u8)
+        kstate.set8(bo + 17, 0x03 as u8)
     } else if req == 0x891d {
         kstate.set8(bo + 16, 0 as u8)
     } else {
@@ -13127,6 +13192,10 @@ fn do_ifioctl(state: u64, me: u64, req: u64, arg: u64) -> u64 {
 // -ENOPROTOOPT, never a made-up value.
 fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
     val: u64, lenp: u64) -> u64 {
+    let nlof: u64 = nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return nl_getsockopt(state, me, level, name, val, lenp)
+    }
     let si: u64 = sock_of(state, me, fd)
     let ui: u64 = usock_of(state, me, fd)
     if si >= inet.SOCK_MAX && ui >= unixsock.USOCK_MAX {
@@ -16472,6 +16541,10 @@ const MH_FLAGS: u64 = 48
 const MH_BYTES: u64 = 56
 
 fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let nlof: u64 = nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return nl_sendmsg(state, me, nlof, mh)
+    }
     let si: u64 = usock_of(state, me, fd)
     if si >= unixsock.USOCK_MAX {
         return neg(errno.E_BADF)
@@ -16583,6 +16656,10 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
 }
 
 fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let nlof: u64 = nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return nl_recvmsg(state, me, nlof, mh, flags)
+    }
     let si: u64 = usock_of(state, me, fd)
     if si >= unixsock.USOCK_MAX {
         return neg(errno.E_BADF)
@@ -18255,4 +18332,334 @@ fn do_events(state: u64, me: u64, n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4
         return do_inotify_add(state, me, a0, a1, a2 & 0xFFFFFFFF)
     }
     return do_inotify_rm(state, me, a0, a1)
+}
+
+// ==================================================================
+// ROUND NETLINK (r696): AF_NETLINK / NETLINK_ROUTE. The message formats and the answers are in net/netlink.fi; this block is the system
+// calls around it (user memory, blocking, descriptors). A request is answered inside the call that carries it, so a read finds the
+// reply already in the ring of the socket.
+// ==================================================================
+const NL_MSG_PEEK: u64 = 2
+const NL_MSG_TRUNC: u64 = 32
+const NL_SA_BYTES: u64 = 12 // struct sockaddr_nl: family (2), pad (2), pid (4), groups (4)
+
+// The open file behind `fd` when it is a netlink socket; MAX_OPEN otherwise.
+fn nl_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return file.MAX_OPEN
+    }
+    if file.open_kind(state, of) != file.K_NETLINK {
+        return file.MAX_OPEN
+    }
+    return of
+}
+
+fn do_nlsocket(state: u64, me: u64, kind: u64, protocol: u64) -> u64 {
+    let base: u64 = kind & 0xFF
+    if base != 3 && base != SOCK_DGRAM {
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    if protocol != netlink.NETLINK_ROUTE {
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        return neg(errno.E_MFILE)
+    }
+    let of: u64 = netlink.nl_new(state, kind & SOCK_NONBLOCK)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+// Hand the kernel copy of a request to the answering code. `ret` is what the call returns on success.
+fn nl_run(state: u64, of: u64, kb: u64, total: u64) -> u64 {
+    let r: u64 = netlink.nl_request(state, file.open_off(state, of), kb, total)
+    if r != 0 {
+        return neg(r)
+    }
+    sched.poll_kick(state)
+    return total
+}
+
+fn nl_send_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0
+    }
+    if len > 4096 {
+        return neg(errno.E_MSGSIZE)
+    }
+    let bo: u64 = blockb(state)
+    if !copy_in(state, me, bo, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    return nl_run(state, of, bo, len)
+}
+
+fn nl_sendmsg(state: u64, me: u64, of: u64, mh: u64) -> u64 {
+    if !proc.user_ok(state, me, mh, MH_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    if iovlen > 64 {
+        return neg(errno.E_MSGSIZE)
+    }
+    let bo: u64 = blockb(state)
+    var total: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let base: u64 = get64u(state, me, iov + v * 16)
+        let blen: u64 = get64u(state, me, iov + v * 16 + 8)
+        if blen > 4096 || total + blen > 4096 {
+            return neg(errno.E_MSGSIZE)
+        }
+        if blen != 0 {
+            if !copy_in(state, me, bo + total, base, blen) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        total = total + blen
+        v = v + 1
+    }
+    return nl_run(state, of, bo, total)
+}
+
+// Wait until a datagram is there (0), or the errno to give back.
+fn nl_wait(state: u64, me: u64, of: u64, flags: u64) -> u64 {
+    let fr: u64 = file.open_off(state, of)
+    var waited: u64 = 0
+    while !netlink.nl_pending(fr) {
+        if (flags & MSG_DONTWAIT) != 0 || (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
+            return neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        if waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return 0
+}
+
+// The sockaddr_nl of the kernel (pid 0, no groups) into the caller's memory, cut to `room` octets.
+fn nl_name_out(state: u64, me: u64, addr: u64, room: u64, pid: u64) -> bool {
+    let bo: u64 = blockb(state)
+    var i: u64 = 0
+    while i < NL_SA_BYTES {
+        kstate.set8(bo + i, 0 as u8)
+        i = i + 1
+    }
+    kstate.set8(bo, netlink.AF_NETLINK as u8)
+    kstate.set8(bo + 4, (pid & 0xFF) as u8)
+    kstate.set8(bo + 5, ((pid >> 8) & 0xFF) as u8)
+    kstate.set8(bo + 6, ((pid >> 16) & 0xFF) as u8)
+    kstate.set8(bo + 7, ((pid >> 24) & 0xFF) as u8)
+    var n: u64 = NL_SA_BYTES
+    if room < n {
+        n = room
+    }
+    if n == 0 {
+        return true
+    }
+    return copy_out(state, me, addr, bo, n)
+}
+
+// recv / recvfrom / read: one datagram per call; what does not fit is dropped (MSG_TRUNC says the full length), MSG_PEEK leaves it there.
+fn nl_recv_of(state: u64, me: u64, of: u64, buf: u64, want: u64, flags: u64, addr: u64, lenp: u64) -> u64 {
+    let w: u64 = nl_wait(state, me, of, flags)
+    if w != 0 {
+        return w
+    }
+    let fr: u64 = file.open_off(state, of)
+    let rl: u64 = netlink.nl_head_len(fr)
+    var n: u64 = rl
+    if want < n {
+        n = want
+    }
+    if n > 0 {
+        if !copy_out(state, me, buf, netlink.nl_head_ptr(fr), n) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if addr != 0 {
+        var room: u64 = NL_SA_BYTES
+        if lenp != 0 {
+            if !proc.user_ok(state, me, lenp, 4) {
+                return neg(errno.E_FAULT)
+            }
+            room = get32(state, me, lenp)
+        }
+        if !nl_name_out(state, me, addr, room, 0) {
+            return neg(errno.E_FAULT)
+        }
+        if lenp != 0 {
+            if !put32(state, me, lenp, NL_SA_BYTES) {
+                return neg(errno.E_FAULT)
+            }
+        }
+    }
+    if (flags & NL_MSG_PEEK) == 0 {
+        netlink.nl_pop(fr)
+    }
+    if (flags & NL_MSG_TRUNC) != 0 {
+        return rl
+    }
+    return n
+}
+
+fn nl_recvmsg(state: u64, me: u64, of: u64, mh: u64, flags: u64) -> u64 {
+    if !proc.user_ok(state, me, mh, MH_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let w: u64 = nl_wait(state, me, of, flags)
+    if w != 0 {
+        return w
+    }
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    if iovlen > 64 {
+        return neg(errno.E_MSGSIZE)
+    }
+    let fr: u64 = file.open_off(state, of)
+    let rl: u64 = netlink.nl_head_len(fr)
+    let src: u64 = netlink.nl_head_ptr(fr)
+    var got: u64 = 0
+    var v: u64 = 0
+    while v < iovlen && got < rl {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let base: u64 = get64u(state, me, iov + v * 16)
+        let blen: u64 = get64u(state, me, iov + v * 16 + 8)
+        var chunk: u64 = blen
+        if chunk > rl - got {
+            chunk = rl - got
+        }
+        if chunk != 0 {
+            if !copy_out(state, me, base, src + got, chunk) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        got = got + chunk
+        v = v + 1
+    }
+    // The sender's address: the kernel (pid 0). busybox checks that msg_namelen is exactly sizeof(sockaddr_nl).
+    let np: u64 = get64u(state, me, mh)
+    if np != 0 {
+        let room: u64 = get32(state, me, mh + 8)
+        if !nl_name_out(state, me, np, room, 0) {
+            return neg(errno.E_FAULT)
+        }
+        if !put32(state, me, mh + 8, NL_SA_BYTES) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if !put64(state, me, mh + MH_CONTROLLEN, 0) {
+        return neg(errno.E_FAULT)
+    }
+    var mf: u64 = 0
+    if got < rl {
+        mf = NL_MSG_TRUNC
+    }
+    if !put32(state, me, mh + MH_FLAGS, mf) {
+        return neg(errno.E_FAULT)
+    }
+    if (flags & NL_MSG_PEEK) == 0 {
+        netlink.nl_pop(fr)
+    }
+    if (flags & NL_MSG_TRUNC) != 0 {
+        return rl
+    }
+    return got
+}
+
+// bind: the port id. 0 means "give me one": the pid of the caller, as Linux does for the first socket of a process. Groups (multicast) are
+// accepted and never delivered -- there are no events to deliver yet.
+fn nl_bind(state: u64, me: u64, of: u64, addr: u64, len: u64) -> u64 {
+    if addr == 0 || len < NL_SA_BYTES {
+        return neg(errno.E_INVAL)
+    }
+    let bo: u64 = blockb(state)
+    if !copy_in(state, me, bo, addr, NL_SA_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let fam: u64 = (kstate.get8(bo) as u64) | ((kstate.get8(bo + 1) as u64) << 8)
+    if fam != netlink.AF_NETLINK {
+        return neg(errno.E_INVAL)
+    }
+    var pid: u64 = (kstate.get8(bo + 4) as u64) | ((kstate.get8(bo + 5) as u64) << 8)
+        | ((kstate.get8(bo + 6) as u64) << 16) | ((kstate.get8(bo + 7) as u64) << 24)
+    if pid == 0 {
+        pid = sched.tget(state, me, sched.T_PID)
+    }
+    netlink.nl_set_pid(file.open_off(state, of), pid)
+    return 0
+}
+
+fn nl_sockname(state: u64, me: u64, of: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    if addr == 0 {
+        return neg(errno.E_FAULT)
+    }
+    var room: u64 = NL_SA_BYTES
+    if lenp != 0 {
+        if !proc.user_ok(state, me, lenp, 4) {
+            return neg(errno.E_FAULT)
+        }
+        room = get32(state, me, lenp)
+    }
+    var pid: u64 = 0
+    if !peer {
+        pid = netlink.nl_pid(file.open_off(state, of))
+    }
+    if !nl_name_out(state, me, addr, room, pid) {
+        return neg(errno.E_FAULT)
+    }
+    if lenp != 0 {
+        if !put32(state, me, lenp, NL_SA_BYTES) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return 0
+}
+
+// getsockopt on a netlink socket: the buffer sizes Linux starts with, no pending error; anything else is -ENOPROTOOPT.
+fn nl_getsockopt(state: u64, me: u64, level: u64, name: u64, val: u64, lenp: u64) -> u64 {
+    if !proc.user_ok(state, me, lenp, 4) {
+        return neg(errno.E_FAULT)
+    }
+    if get32(state, me, lenp) < 4 {
+        return neg(errno.E_INVAL)
+    }
+    var v: u64 = 0
+    var known: bool = false
+    if level == SOL_SOCKET {
+        if name == 2 || name == 4 || name == 9 || name == 30 {
+            known = true
+        }
+        if name == 3 {
+            known = true
+            v = 3
+        }
+        if name == 7 || name == 8 {
+            known = true
+            v = 212992
+        }
+    }
+    if !known {
+        return neg(errno.E_NOPROTOOPT)
+    }
+    if !put32(state, me, val, v) || !put32(state, me, lenp, 4) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
 }

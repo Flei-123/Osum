@@ -1,7 +1,10 @@
 # probe script of the proof stones python3 / curl / git (run by `busybox sh /etc/st.sh`; lines "ST <name> <value>")
 B=/bin/busybox
-# python finds its prefix from the executable dir; with the executable directly in /bin the root is never searched (getpath quirk) -> PYTHONHOME
-export PYTHONHOME=/
+# python finds its prefix by walking up from its executable dir (getpath); installed in /usr/bin it finds /usr. No PYTHONHOME (r698).
+# /bin/python3 is a symlink to it (getpath resolves it, like Linux distributions that put python in /usr/bin)
+$B ln -s /usr/bin/python3 /bin/python3
+echo "ST py-nohome $(/usr/bin/python3 -c 'import sys;print(sys.prefix)' 2>&1 | $B tail -n 1)"
+echo "ST py-symlink $(/bin/python3 -c 'import sys;print(sys.prefix)' 2>&1 | $B tail -n 1)"
 echo "ST py-print $(/bin/python3 -c 'print(6*7)' 2>&1 | $B tail -n 1)"
 echo "ST py-os $(/bin/python3 -c 'import os;print(os.getcwd())' 2>&1 | $B tail -n 1)"
 echo "ST py-file $(/bin/python3 -c 'open("/tmp/pf","w").write("hi");print(open("/tmp/pf").read())' 2>&1 | $B tail -n 1)"

@@ -182,6 +182,9 @@ echo "BB mounts $(/bin/busybox cat /proc/mounts >/dev/null 2>&1 && echo ok || ec
 echo "BB mount-cmd $(/bin/busybox mount >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB ip-cmd $(/bin/busybox ip addr >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB ifconfig-cmd $(/bin/busybox ifconfig -a >/dev/null 2>&1 && echo ok || echo FAIL)"
+echo "BB ip-addr $(/bin/busybox ip -4 addr 2>&1 | /bin/busybox grep -c 'inet 10.0.2.15/24 brd 10.0.2.255 scope global eth0')"
+echo "BB ip-link $(/bin/busybox ip link 2>&1 | /bin/busybox grep -c '^1: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP>')"
+echo "BB ip-route $(/bin/busybox ip route 2>&1 | /bin/busybox grep -c -e '^default via 10.0.2.2 dev eth0' -e '^10.0.2.0/24 dev eth0')"
 echo "BB top-cmd $(/bin/busybox top -b -n 1 >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB lsof-cmd $(/bin/busybox timeout 5 /bin/busybox ps -o pid,comm >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB end"
@@ -224,7 +227,7 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
     bbchk head-n 2; bbchk tail drei; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
     bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
     bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
-    bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
+    bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ip-addr 1; bbchk ip-link 1; bbchk ip-route 2; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
     grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
     # with busybox as /bin/sh: system() and popen() of t_proc
     case " $TESTS " in *" t_proc "*)
@@ -237,8 +240,8 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
         } ;;
     esac
     echo "        busybox probes: $BBOK ok / $BBBAD gap"
-    # known open since 13.10.2026: ip (no AF_NETLINK) -> at most 1 gap (ifconfig works since STONES2: /proc/net/dev + SIOCGIF*)
-    [ "$BBBAD" -le "${BBGAP_MAX:-1}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-1} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-1} known)"
+    # since r696 (AF_NETLINK, NETLINK_ROUTE): `ip` works too -> no known gap left
+    [ "$BBBAD" -le "${BBGAP_MAX:-0}" ] && ok "busybox probes: $BBOK ok, $BBBAD gap (<= ${BBGAP_MAX:-0} known)" || bad "busybox probes: $BBBAD gaps (> ${BBGAP_MAX:-0} known)"
     cp "$D/bb.res" "${UB_BB_RESULT:-$D/bb-result.txt}" 2>/dev/null
 fi
 
@@ -246,10 +249,12 @@ fi
 #   STONES=<dir> with: python3, lib/python312.zip, lib/ext/*.so (extension modules for lib-dynload), curl, git (each optional)
 if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " stones "; }; then
     echo "== 3d. proof stones python3 / curl / git (from $STONES) =="
-    SX="/lib/python3.12/ /lib/python3.12/lib-dynload/ /w/"
-    [ -r "$STONES/python3" ] && SX="$SX /bin/python3=$STONES/python3 /lib/python312.zip=$STONES/lib/python312.zip"
-    [ -r "$STONES/lib/os.pyc" ] && SX="$SX /lib/python3.12/os.pyc=$STONES/lib/os.pyc"   # landmark: getpath finds the prefix by it
-    for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
+    # python lives in /usr/bin and its stdlib in /usr/lib (getpath walks up from the executable dir and never tests "/" itself when the
+    # executable is directly in /bin -> that needed PYTHONHOME=/ before r698); stones.sh links /bin/python3 -> /usr/bin/python3
+    SX="/usr/bin/ /usr/lib/python3.12/ /usr/lib/python3.12/lib-dynload/ /w/"
+    [ -r "$STONES/python3" ] && SX="$SX /usr/bin/python3=$STONES/python3 /usr/lib/python312.zip=$STONES/lib/python312.zip"
+    [ -r "$STONES/lib/os.pyc" ] && SX="$SX /usr/lib/python3.12/os.pyc=$STONES/lib/os.pyc"   # landmark: getpath finds the prefix by it
+    for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /usr/lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
     [ -r "$STONES/curl" ] && SX="$SX /bin/curl=$STONES/curl"
     [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git /share/ /share/git-core/ /share/git-core/templates/"   # empty template dir: no "templates not found" warning
     cp "${STSCRIPT:-$HERE/stones.sh}" "$D/st.sh"

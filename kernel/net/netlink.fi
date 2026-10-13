@@ -1,0 +1,458 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/net/netlink.fi -- ROUND NETLINK (roadmap r696): AF_NETLINK, NETLINK_ROUTE, the minimum `ip addr/link/route` needs.
+//
+// The Linux ABI, byte for byte: struct nlmsghdr, struct ifinfomsg / ifaddrmsg / rtmsg and struct rtattr. A request is answered at once,
+// in the same system call that carries it (nothing is asynchronous in this kernel, so there is nothing to wait for):
+//
+//   RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE with NLM_F_DUMP  -> the items, then NLMSG_DONE (all NLM_F_MULTI)
+//   any other request                                         -> NLMSG_ERROR with -EOPNOTSUPP (nothing can be changed this way yet)
+//
+// NOTHING IS INVENTED. The one interface this kernel has is "eth0" (the same one `/proc/net/dev` and SIOCGIF* show, index 1: there is
+// no loopback device here, so there is no "lo" in the dump). Address, mask, gateway, MAC and carrier come from the stack; without a
+// card (or before the stack is up) the dump is empty and ends with NLMSG_DONE. IPv6 is not there: a request for AF_INET6 gets an empty dump.
+//
+// WHERE THE STATE LIVES. One frame per socket (address in the OF_OFF word of the open file, like epoll/inotify; sys.fi owns the descriptor).
+//   +0   read offset into the ring (octets, relative to DATA)
+//   +8   write offset
+//   +16  the port id (nl_pid) of the socket: 0 until `bind`, then the pid the program was given
+//   +64  DATA: records of [u64 length][length octets, padded to 8] -- one record is one datagram, as on Linux
+//
+// The replies of one request together are ONE datagram (they are a few hundred octets; the frame refuses a request with -ENOBUFS when
+// there is less than REPLY_MAX room, instead of cutting a reply in half).
+profile kernel
+
+import lib.kstate
+import mm.mem
+import net.inet
+import fs.file
+
+export {
+    nl_new, nl_pid, nl_set_pid, nl_pending, nl_head_len, nl_head_ptr, nl_pop, nl_request,
+    NLMSG_ERROR, NLMSG_DONE, NLM_F_MULTI, NLM_F_DUMP, RTM_GETLINK, RTM_GETADDR, RTM_GETROUTE,
+    AF_NETLINK, NETLINK_ROUTE, E_NOBUFS, DATA, CAP, REPLY_MAX
+}
+
+const AF_NETLINK: u64 = 16
+const NETLINK_ROUTE: u64 = 0
+
+const NLMSG_NOOP: u64 = 1
+const NLMSG_ERROR: u64 = 2
+const NLMSG_DONE: u64 = 3
+const NLM_F_MULTI: u64 = 2
+const NLM_F_DUMP: u64 = 0x300 // NLM_F_ROOT | NLM_F_MATCH
+
+const RTM_NEWLINK: u64 = 16
+const RTM_GETLINK: u64 = 18
+const RTM_NEWADDR: u64 = 20
+const RTM_GETADDR: u64 = 22
+const RTM_NEWROUTE: u64 = 24
+const RTM_GETROUTE: u64 = 26
+
+const AF_UNSPEC: u64 = 0
+const AF_INET: u64 = 2
+const AF_PACKET: u64 = 17
+
+const IFLA_ADDRESS: u64 = 1
+const IFLA_BROADCAST: u64 = 2
+const IFLA_IFNAME: u64 = 3
+const IFLA_MTU: u64 = 4
+const IFLA_TXQLEN: u64 = 13
+const IFLA_OPERSTATE: u64 = 16
+
+const IFA_ADDRESS: u64 = 1
+const IFA_LOCAL: u64 = 2
+const IFA_LABEL: u64 = 3
+const IFA_BROADCAST: u64 = 4
+
+const RTA_DST: u64 = 1
+const RTA_OIF: u64 = 4
+const RTA_GATEWAY: u64 = 5
+const RTA_PREFSRC: u64 = 7
+const RTA_TABLE: u64 = 15
+
+const IF_INDEX: u64 = 1 // "eth0", the only interface
+const ARPHRD_ETHER: u64 = 1
+const MTU: u64 = 1500
+const RT_TABLE_MAIN: u64 = 254
+const RTPROT_KERNEL: u64 = 2
+const RTPROT_BOOT: u64 = 3
+const RT_SCOPE_UNIVERSE: u64 = 0
+const RT_SCOPE_LINK: u64 = 253
+const RTN_UNICAST: u64 = 1
+
+const E_NOBUFS: u64 = 105
+const E_OPNOTSUPP: u64 = 95
+
+const DATA: u64 = 64
+const CAP: u64 = 4032
+const REPLY_MAX: u64 = 1200 // more than the longest reply this file can build (3 items of ~100 octets, DONE)
+
+fn rd64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn wr64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn rd32(p: u64) -> u64 {
+    return __mmio_read32(p as *mut u32) as u64
+}
+
+fn wr32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, v as u32)
+}
+
+fn rd16(p: u64) -> u64 {
+    return rd8(p) | (rd8(p + 1) << 8)
+}
+
+fn wr16(p: u64, v: u64) {
+    wr8(p, v & 0xFF)
+    wr8(p + 1, (v >> 8) & 0xFF)
+}
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, v as u8)
+}
+
+fn zero_frame(p: u64) {
+    var o: u64 = 0
+    while o < 4096 {
+        wr64(p + o, 0)
+        o = o + 8
+    }
+}
+
+// ================================================================== the socket
+
+// A new netlink socket: the open file, with its frame. `flags` carries only O_NONBLOCK (2048) of what the caller passed.
+fn nl_new(state: u64, flags: u64) -> u64 {
+    let fr: u64 = mem.frame_alloc(state)
+    if fr == 0 {
+        return file.MAX_OPEN
+    }
+    zero_frame(fr)
+    let of: u64 = file.open_alloc(state, file.K_NETLINK, 0, 2 | (flags & 2048))
+    if of >= file.MAX_OPEN {
+        mem.frame_free(state, fr)
+        return of
+    }
+    file.open_set_off(state, of, fr)
+    return of
+}
+
+fn nl_pid(fr: u64) -> u64 {
+    return rd64(fr + 16)
+}
+
+fn nl_set_pid(fr: u64, pid: u64) {
+    wr64(fr + 16, pid)
+}
+
+fn nl_pending(fr: u64) -> bool {
+    return rd64(fr) != rd64(fr + 8)
+}
+
+// Length of the first datagram (0 when there is none).
+fn nl_head_len(fr: u64) -> u64 {
+    if !nl_pending(fr) {
+        return 0
+    }
+    return rd64(fr + DATA + rd64(fr))
+}
+
+// Address of the first octet of the first datagram.
+fn nl_head_ptr(fr: u64) -> u64 {
+    return fr + DATA + rd64(fr) + 8
+}
+
+// Drop the first datagram.
+fn nl_pop(fr: u64) {
+    if !nl_pending(fr) {
+        return
+    }
+    let n: u64 = rd64(fr + DATA + rd64(fr))
+    wr64(fr, rd64(fr) + 8 + ((n + 7) & 0xFFFFFFF8))
+    if rd64(fr) == rd64(fr + 8) {
+        wr64(fr, 0)
+        wr64(fr + 8, 0)
+    }
+}
+
+// Start a datagram: the address its body begins at, or 0 when the frame has no room for a whole reply.
+fn rec_begin(fr: u64) -> u64 {
+    if rd64(fr) == rd64(fr + 8) {
+        wr64(fr, 0)
+        wr64(fr + 8, 0)
+    }
+    let w: u64 = rd64(fr + 8)
+    if w + 8 + REPLY_MAX > CAP {
+        return 0
+    }
+    return fr + DATA + w + 8
+}
+
+// Close the datagram that began at `body` and ended at `end`.
+fn rec_end(fr: u64, body: u64, end: u64) {
+    let n: u64 = end - body
+    wr64(body - 8, n)
+    wr64(fr + 8, rd64(fr + 8) + 8 + ((n + 7) & 0xFFFFFFF8))
+}
+
+// ================================================================== message pieces
+
+// struct nlmsghdr at p; the length is filled in by `msg_end` once the body is there.
+fn put_hdr(p: u64, typ: u64, flags: u64, seq: u64, pid: u64) {
+    wr32(p, 16)
+    wr16(p + 4, typ)
+    wr16(p + 6, flags)
+    wr32(p + 8, seq)
+    wr32(p + 12, pid)
+}
+
+// The message that began at `start` ends at `q`: set its length, return the aligned next position (padding is zero).
+fn msg_end(start: u64, q: u64) -> u64 {
+    wr32(start, q - start)
+    var e: u64 = q
+    while ((e - start) & 3) != 0 {
+        wr8(e, 0)
+        e = e + 1
+    }
+    return e
+}
+
+fn a_u32(p: u64, typ: u64, v: u64) -> u64 {
+    wr16(p, 8)
+    wr16(p + 2, typ)
+    wr32(p + 4, v)
+    return p + 8
+}
+
+fn a_u8(p: u64, typ: u64, v: u64) -> u64 {
+    wr16(p, 5)
+    wr16(p + 2, typ)
+    wr8(p + 4, v)
+    wr8(p + 5, 0)
+    wr8(p + 6, 0)
+    wr8(p + 7, 0)
+    return p + 8
+}
+
+// An IPv4 address, in the byte order of the wire.
+fn a_ip(p: u64, typ: u64, a: u64) -> u64 {
+    wr16(p, 8)
+    wr16(p + 2, typ)
+    wr8(p + 4, (a >> 24) & 0xFF)
+    wr8(p + 5, (a >> 16) & 0xFF)
+    wr8(p + 6, (a >> 8) & 0xFF)
+    wr8(p + 7, a & 0xFF)
+    return p + 8
+}
+
+// A hardware address: the card's MAC, or ff:ff:ff:ff:ff:ff.
+fn a_mac(state: u64, p: u64, typ: u64, bcast: bool) -> u64 {
+    wr16(p, 10)
+    wr16(p + 2, typ)
+    var i: u64 = 0
+    while i < 6 {
+        if bcast {
+            wr8(p + 4 + i, 0xFF)
+        } else {
+            wr8(p + 4 + i, inet.mac_at(state, i) & 0xFF)
+        }
+        i = i + 1
+    }
+    wr16(p + 10, 0)
+    return p + 12
+}
+
+// The string "eth0" with its terminator (rta_len 9, padded to 12).
+fn a_name(p: u64, typ: u64) -> u64 {
+    wr16(p, 9)
+    wr16(p + 2, typ)
+    wr8(p + 4, 101)
+    wr8(p + 5, 116)
+    wr8(p + 6, 104)
+    wr8(p + 7, 48)
+    wr8(p + 8, 0)
+    wr8(p + 9, 0)
+    wr8(p + 10, 0)
+    wr8(p + 11, 0)
+    return p + 12
+}
+
+fn prefix_len(mask: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        if ((mask >> (31 - i)) & 1) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ================================================================== the items
+
+// RTM_NEWLINK for eth0: flags as SIOCGIFFLAGS reports them (UP | BROADCAST | MULTICAST, RUNNING with a carrier).
+fn put_link(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, RTM_NEWLINK, NLM_F_MULTI, seq, pid)
+    var fl: u64 = 0x1003
+    var oper: u64 = 2 // IF_OPER_DOWN
+    if inet.carrier(state) {
+        fl = fl | 0x10040 // IFF_RUNNING | IFF_LOWER_UP
+        oper = 6 // IF_OPER_UP
+    }
+    // struct ifinfomsg: family, pad, type, index, flags, change
+    wr8(p + 16, AF_UNSPEC)
+    wr8(p + 17, 0)
+    wr16(p + 18, ARPHRD_ETHER)
+    wr32(p + 20, IF_INDEX)
+    wr32(p + 24, fl)
+    wr32(p + 28, 0xFFFFFFFF)
+    var q: u64 = p + 32
+    q = a_name(q, IFLA_IFNAME)
+    q = a_mac(state, q, IFLA_ADDRESS, false)
+    q = a_mac(state, q, IFLA_BROADCAST, true)
+    q = a_u32(q, IFLA_MTU, MTU)
+    q = a_u32(q, IFLA_TXQLEN, 1000)
+    q = a_u8(q, IFLA_OPERSTATE, oper)
+    return msg_end(p, q)
+}
+
+// RTM_NEWADDR for the IPv4 address of eth0.
+fn put_addr(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, RTM_NEWADDR, NLM_F_MULTI, seq, pid)
+    let a: u64 = inet.ip(state)
+    let m: u64 = inet.mask(state)
+    // struct ifaddrmsg: family, prefixlen, flags, scope, index
+    wr8(p + 16, AF_INET)
+    wr8(p + 17, prefix_len(m))
+    wr8(p + 18, 0x80) // IFA_F_PERMANENT: no lifetimes are kept, so none are claimed
+    wr8(p + 19, RT_SCOPE_UNIVERSE)
+    wr32(p + 20, IF_INDEX)
+    var q: u64 = p + 24
+    q = a_ip(q, IFA_ADDRESS, a)
+    q = a_ip(q, IFA_LOCAL, a)
+    q = a_ip(q, IFA_BROADCAST, (a | ((~m) & 0xFFFFFFFF)) & 0xFFFFFFFF)
+    // the label: the name again, as IFA_LABEL
+    q = a_name(q, IFA_LABEL)
+    return msg_end(p, q)
+}
+
+// struct rtmsg head at p+16: family, dst_len, src_len, tos, table, protocol, scope, type, flags.
+fn put_rtmsg(p: u64, dst_len: u64, proto: u64, scope: u64) {
+    wr8(p + 16, AF_INET)
+    wr8(p + 17, dst_len)
+    wr8(p + 18, 0)
+    wr8(p + 19, 0)
+    wr8(p + 20, RT_TABLE_MAIN)
+    wr8(p + 21, proto)
+    wr8(p + 22, scope)
+    wr8(p + 23, RTN_UNICAST)
+    wr32(p + 24, 0)
+}
+
+// RTM_NEWROUTE: the default route (when a gateway is configured) and the route of the connected network.
+fn put_default_route(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, RTM_NEWROUTE, NLM_F_MULTI, seq, pid)
+    put_rtmsg(p, 0, RTPROT_BOOT, RT_SCOPE_UNIVERSE)
+    var q: u64 = p + 28
+    q = a_u32(q, RTA_TABLE, RT_TABLE_MAIN)
+    q = a_ip(q, RTA_GATEWAY, inet.gw(state))
+    q = a_u32(q, RTA_OIF, IF_INDEX)
+    return msg_end(p, q)
+}
+
+fn put_net_route(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, RTM_NEWROUTE, NLM_F_MULTI, seq, pid)
+    let a: u64 = inet.ip(state)
+    let m: u64 = inet.mask(state)
+    put_rtmsg(p, prefix_len(m), RTPROT_KERNEL, RT_SCOPE_LINK)
+    var q: u64 = p + 28
+    q = a_u32(q, RTA_TABLE, RT_TABLE_MAIN)
+    q = a_ip(q, RTA_DST, a & m)
+    q = a_ip(q, RTA_PREFSRC, a)
+    q = a_u32(q, RTA_OIF, IF_INDEX)
+    return msg_end(p, q)
+}
+
+fn put_done(p: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, NLMSG_DONE, NLM_F_MULTI, seq, pid)
+    wr32(p + 16, 0)
+    return msg_end(p, p + 20)
+}
+
+// NLMSG_ERROR: the error (negative errno) and the header of the request that caused it.
+fn put_error(p: u64, req: u64, err: u64, seq: u64, pid: u64) -> u64 {
+    put_hdr(p, NLMSG_ERROR, 0, seq, pid)
+    wr32(p + 16, (0 -% err) & 0xFFFFFFFF)
+    var i: u64 = 0
+    while i < 16 {
+        wr8(p + 20 + i, rd8(req + i))
+        i = i + 1
+    }
+    return msg_end(p, p + 36)
+}
+
+// ================================================================== a request
+
+// Answer the netlink messages in `kb` (kernel address, `total` octets): the replies of all of them become ONE datagram. Returns 0 or an
+// errno (positive). A malformed buffer is -EINVAL; nothing is ever read beyond `total`.
+fn nl_request(state: u64, fr: u64, kb: u64, total: u64) -> u64 {
+    let pid: u64 = nl_pid(fr)
+    let body: u64 = rec_begin(fr)
+    if body == 0 {
+        return E_NOBUFS
+    }
+    var q: u64 = body
+    var off: u64 = 0
+    while off + 16 <= total && (q - body) + 400 <= REPLY_MAX {
+        let m: u64 = kb + off
+        let len: u64 = rd32(m)
+        if len < 16 || off + len > total {
+            return 22
+        }
+        let typ: u64 = rd16(m + 4)
+        let flags: u64 = rd16(m + 6)
+        let seq: u64 = rd32(m + 8)
+        var fam: u64 = AF_UNSPEC
+        if len >= 17 {
+            fam = rd8(m + 16)
+        }
+        if typ == NLMSG_NOOP || typ == NLMSG_DONE || typ == NLMSG_ERROR {
+            // nothing to answer
+            off = off + 0
+        } else if (typ == RTM_GETLINK || typ == RTM_GETADDR || typ == RTM_GETROUTE) && (flags & NLM_F_DUMP) == NLM_F_DUMP {
+            let up: bool = inet.ready(state)
+            let has_ip: bool = up && inet.ip(state) != 0
+            // whatever the family asked for (busybox `ip -4 addr` asks for AF_INET and still needs the links to name the addresses)
+            if typ == RTM_GETLINK && up {
+                q = put_link(state, q, seq, pid)
+            }
+            if typ == RTM_GETADDR && has_ip && (fam == AF_UNSPEC || fam == AF_INET) {
+                q = put_addr(state, q, seq, pid)
+            }
+            if typ == RTM_GETROUTE && has_ip && (fam == AF_UNSPEC || fam == AF_INET) {
+                if inet.gw(state) != 0 {
+                    q = put_default_route(state, q, seq, pid)
+                }
+                q = put_net_route(state, q, seq, pid)
+            }
+            q = put_done(q, seq, pid)
+        } else {
+            q = put_error(q, m, E_OPNOTSUPP, seq, pid)
+        }
+        off = off + ((len + 3) & 0xFFFFFFFC)
+    }
+    if q != body {
+        rec_end(fr, body, q)
+    }
+    return 0
+}
