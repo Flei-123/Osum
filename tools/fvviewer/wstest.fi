@@ -1,0 +1,204 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/fvviewer/wstest.fi -- host driver of lib/net/ws.fi against Python's
+// `websockets` (see wstest.py, which starts this program).
+//
+//   wstest <port> [slow]
+//
+// Connects to 127.0.0.1:<port>, upgrades, sends a few messages (7/16/64 bit
+// lengths, one fragmented), answers pings, prints one line per received
+// event: "EV <kind> <len> <sum>" where sum = sum of all payload octets.
+// `slow` reads ONE octet per read call (header split over many reads).
+
+import std.io
+import std.rt
+import std.net
+import net.ws
+
+const RXCAP: u64 = 8192
+const MSGCAP: u64 = 131072
+const OUTCAP: u64 = 131072 + 64
+
+static mut rxbuf: [u8; 8192] = [0 as u8; 8192]
+static mut msgbuf: [u8; 131072] = [0 as u8; 131072]
+static mut outbuf: [u8; 131200] = [0 as u8; 131200]
+static mut payload: [u8; 70000] = [0 as u8; 70000]
+static mut key24: [u8; 24] = [0 as u8; 24]
+static mut mask_ctr: u64 = 0x11223344
+static mut S_HELLO: [u8; 13] = "hello-client\0"
+static mut S_ABC: [u8; 4] = "abc\0"
+static mut S_DEF: [u8; 4] = "def\0"
+static mut S_GHI: [u8; 4] = "ghi\0"
+static mut S_EV: [u8; 4] = "EV \0"
+
+fn pattern(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        payload[i as usize] = ((i * 7 + 3) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn next_mask() -> u64 {
+    mask_ctr = (mask_ctr * 1103515245 + 12345) & 0xFFFFFFFF
+    return mask_ctr
+}
+
+fn send_frame(c: *mut net.Conn, op: u64, fin: bool, p: u64, n: u64) -> bool {
+    let k: u64 = ws.encode(op, fin, p, n, next_mask(), (&outbuf[0]) as u64, OUTCAP)
+    if k == 0 {
+        return false
+    }
+    let w: usize = net.write_all(c, (&outbuf[0]) as u64, k as usize) catch 0
+    return w == k as usize
+}
+
+fn sum_of(p: u64, n: u64) -> u64 {
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        s = s + (*((p + i) as *mut u8)) as u64
+        i = i + 1
+    }
+    return s
+}
+
+fn report(ev: u64, p: u64, n: u64) {
+    var o: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&o, (&S_EV[0]) as u64, 3)
+    rt.buf_push_dec_u64(&o, ev)
+    rt.buf_push(&o, 32 as u8)
+    rt.buf_push_dec_u64(&o, n)
+    rt.buf_push(&o, 32 as u8)
+    rt.buf_push_dec_u64(&o, sum_of(p, n))
+    rt.buf_push(&o, 10 as u8)
+    rt.write_everything(1, o.ptr, o.len)
+    rt.buf_clear(&o)
+}
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 2 {
+        io.print("usage: wstest <port> [slow]\n")
+        return 2
+    }
+    var port: u64 = 0
+    let pa: u64 = rt.arg_ptr(start, 1)
+    var i: u64 = 0
+    while (*((pa + i) as *mut u8)) as u64 != 0 {
+        port = port * 10 + (*((pa + i) as *mut u8)) as u64 - 48
+        i = i + 1
+    }
+    var slow: bool = false
+    if argc > 2 {
+        slow = true
+    }
+    var bad: bool = false
+    var c: net.Conn = net.connect_tcp(net.ipv4(127 as u8, 0 as u8, 0 as u8, 1 as u8), port as u16)
+    catch | e | fail_conn(&bad)
+    if bad {
+        io.print("wstest: no connection\n")
+        return 1
+    }
+    // fixed (not secret) key: 16 octets 0..15
+    var raw: [u8; 16] = [0 as u8; 16]
+    var k: u64 = 0
+    while k < 16 {
+        raw[k as usize] = (k * 11 + 1) as u8
+        k = k + 1
+    }
+    let _b: u64 = ws.b64_encode((&raw[0]) as u64, 16, (&key24[0]) as u64)
+    var host: [u8; 10] = "localhost\0"
+    var path: [u8; 2] = "/\0"
+    let rl: u64 = ws.build_request((&outbuf[0]) as u64, OUTCAP, (&host[0]) as u64, 9,
+        (&path[0]) as u64, 1, (&key24[0]) as u64)
+    let wr: usize = net.write_all(&c, (&outbuf[0]) as u64, rl as usize) catch 0
+    if wr != rl as usize {
+        io.print("wstest: write failed\n")
+        return 1
+    }
+    // read the HTTP answer
+    var have: u64 = 0
+    var hdr: u64 = 0
+    while hdr == 0 {
+        var want: u64 = RXCAP - have
+        if slow {
+            want = 1
+        }
+        let n: usize = net.read(&c, ((&rxbuf[0]) as u64) + have, want as usize) catch 0
+        if n == 0 {
+            io.print("wstest: closed during upgrade\n")
+            return 1
+        }
+        have = have + n as u64
+        hdr = ws.check_response((&rxbuf[0]) as u64, have, (&key24[0]) as u64)
+        if ws.failed(hdr) {
+            io.print("wstest: bad upgrade answer\n")
+            return 1
+        }
+    }
+    io.print("UPGRADED\n")
+    var w: ws.Ws = ws.ws_new()
+    ws.init(&w, (&msgbuf[0]) as u64, MSGCAP)
+
+    // client -> server
+    pattern(70000)
+    let hello: u64 = (&S_HELLO[0]) as u64
+    let ok1: bool = send_frame(&c, ws.OP_TEXT, true, hello, 12)
+    let ok2: bool = send_frame(&c, ws.OP_BINARY, true, (&payload[0]) as u64, 200)
+    let ok3: bool = send_frame(&c, ws.OP_BINARY, true, (&payload[0]) as u64, 70000)
+    let f1: bool = send_frame(&c, ws.OP_TEXT, false, (&S_ABC[0]) as u64, 3)
+    let f2: bool = send_frame(&c, ws.OP_CONT, false, (&S_DEF[0]) as u64, 3)
+    let f3: bool = send_frame(&c, ws.OP_CONT, true, (&S_GHI[0]) as u64, 3)
+    if !(ok1 && ok2 && ok3 && f1 && f2 && f3) {
+        io.print("wstest: send failed\n")
+        return 1
+    }
+
+    // server -> client
+    var off: u64 = hdr
+    var done: bool = false
+    var events: u64 = 0
+    var n_in: u64 = have
+    while !done && events < 64 {
+        while off < n_in && !done {
+            off = off + ws.feed(&w, ((&rxbuf[0]) as u64) + off, n_in - off)
+            let ev: u64 = ws.event(&w)
+            if ev == ws.EV_ERROR {
+                io.print("EV error\n")
+                return 1
+            }
+            if ev != 0 {
+                events = events + 1
+                report(ev, ws.msg_ptr(&w), ws.msg_len(&w))
+                if ev == ws.EV_PING {
+                    let _p: bool = send_frame(&c, ws.OP_PONG, true, ws.msg_ptr(&w), ws.msg_len(&w))
+                }
+                if ev == ws.EV_CLOSE {
+                    let _q: bool = send_frame(&c, ws.OP_CLOSE, true, ws.msg_ptr(&w), ws.msg_len(&w))
+                    done = true
+                }
+                ws.take(&w)
+            }
+        }
+        if !done {
+            var want2: u64 = RXCAP
+            if slow {
+                want2 = 1
+            }
+            let r: usize = net.read(&c, (&rxbuf[0]) as u64, want2 as usize) catch 0
+            if r == 0 {
+                io.print("wstest: eof\n")
+                return 1
+            }
+            n_in = r as u64
+            off = 0
+        }
+    }
+    io.print("DONE\n")
+    return 0
+}
+
+fn fail_conn(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
