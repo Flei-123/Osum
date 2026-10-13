@@ -61,3 +61,16 @@ Bau: `/root/jarvis/bin/heavy bash tools/unterbau/build-stones.sh <outdir>` (musl
 
 Weiter: `STONES_NET=1` startet QEMU mit virtio-net (user) und einem Wegwerf-Webserver des Wirts (10.0.2.2:18765); Kernzeile `nic nip=10.0.2.15/24 ngw=10.0.2.2`.
 Seit STONES2 laufen die Steine standardmaessig aus `/root/stones` (Neubau: `tools/unterbau/build-stones.sh /root/stones`) MIT Netz-Stufe (freier Wirt-Port, `STONES_NET=0` schaltet aus, `STONES=` leer schaltet die Steine aus). Abbild: 28 MB Inhalt belegen 29 MB (Block = 512 Oktette), mkfs.py verschwendet nichts (die Last sind die Testprogramme im vollen Lauf); Stein-Abbild 262144 Bloecke (im vollen Lauf liegen alle Testprogramme aus $D/bin mit im Abbild; 131072 reichte dort nicht).
+
+## 6. Pruefstein foot (Wayland-Terminal) — Machbarkeit (13.10.2026, nur Analyse, nicht gebaut)
+Quellen (SHA256 in /root/fremdquellen/SHA256SUMS.txt, 16/16 ok): foot-1.19.0, fcft-3.1.1 (foot verlangt >=3.0.1,<4), tllist-1.1.0, pixman-0.43.4, libxkbcommon-1.7.0, wayland-1.23.1, freetype-2.13.3, fontconfig-2.15.0. Noch zu holen: expat, libffi (beide fuer wayland/fontconfig), wayland-protocols (Host hat es unter /usr/share/wayland-protocols; Version >=1.32 pruefen), gperf/bison (nur Host-Werkzeug).
+Build: meson (nicht auf dem Host; `pip install meson` geht, Netz da). Alles musl, dynamisch, wie die Stones (build-stones.sh). Kette: expat+libffi -> wayland(client+cursor) ; freetype -> fontconfig ; pixman ; xkbcommon (bison, braucht zur Laufzeit die Tastatur-Daten /usr/share/X11/xkb) ; fcft(freetype, fontconfig, pixman; harfbuzz/utf8proc abschaltbar) ; foot. wayland-scanner laeuft auf dem Host (Protokoll-Code).
+Was foot von wayd verlangt (foot wayland.c 1.19.0):
+| Anforderung | wayd heute | Luecke |
+|---|---|---|
+| wl_compositor v4, wl_shm v1, wl_seat v5, wl_output v2, xdg_wm_base v1 | ja (4/1/5/2/3) | – |
+| **wl_subcompositor** (Pflicht: foot bricht ohne ab, wayland.c:1569) | nein | neu: get_subsurface/set_position, Zeichenreihenfolge |
+| wl_data_device_manager v3 | ja | – |
+| optional: xdg-decoration, xdg-output, primary-selection, viewporter, fractional-scale, cursor-shape, presentation-time, text-input | nein | foot laeuft ohne (CSD statt SSD) |
+Kernel-Seite: epoll/timerfd/signalfd/eventfd (EVENTS, in main), memfd+SCM_RIGHTS (da), AF_UNIX (da). **PTY**: nur `openpty(out)`-Syscall, kein `/dev/ptmx`; foot/musl nutzen posix_openpt -> /dev/ptmx + TIOCGPTN/TIOCSPTLCK/ptsname_r. Noetig: libc-Shim (posix_openpt/grantpt/unlockpt/ptsname_r auf openpty) ODER ptmx-Pfad im Kern; ausserdem setsid/TIOCSCTTY, TIOCSWINSZ, termios. Laufzeit: Schrift (.ttf) + fontconfig-Konfig im Abbild, terminfo (foot bringt eigenes `foot`, Fallback TERM=xterm-256color).
+Bewertung: ~9 Fremdbibliotheken + meson + wl_subcompositor + PTY-Shim = **M–L, nicht in einer Sitzung ueberschaubar**. Empfohlene Reihenfolge: (1) wl_subcompositor in wayd (klein, gate tools/wayland), (2) PTY-Shim + t_pty im Unterbau, (3) Bibliotheken als Stones (Stufe 1 pixman+freetype+expat+libffi, Stufe 2 wayland+fontconfig+xkbcommon, Stufe 3 fcft+foot), (4) foot-Start im Abbild, Test: Fenster zeigt Prompt von busybox sh. Alternative Pruefstein, falls foot haengt: `weston-terminal` ist ebenso GTK-/cairo-lastig, daher keine Erleichterung; `wlclient`-Testprogramme aus tools/wayland decken nur die Basis.
