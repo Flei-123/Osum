@@ -322,9 +322,16 @@ fn pack_unit(v: f32) -> u32 {
     return (x * 255.0f + 0.5f) as u32
 }
 
+fn floor_i32(x: f32) -> i32 {
+    // truncation + correction (math.floor32 is a bit-twiddling soft float function: ~10x slower)
+    var t: i32 = x as i32
+    if (t as f32) > x { t = t - 1 }
+    return t
+}
+
 fn texel(f: *mut Frame, u: f32, v: f32) -> u32 {
-    let tx: i32 = (math.floor32(u * ((*f).tw as f32)) as i32) & ((*f).tw - 1)
-    let ty: i32 = (math.floor32(v * ((*f).th as f32)) as i32) & ((*f).th - 1)
+    let tx: i32 = floor_i32(u * ((*f).tw as f32)) & ((*f).tw - 1)
+    let ty: i32 = floor_i32(v * ((*f).th as f32)) & ((*f).th - 1)
     return rt.ld32((*f).tex, (ty as usize) * ((*f).tw as usize) + (tx as usize))
 }
 
@@ -374,82 +381,68 @@ fn shade_native1(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     }
 }
 
-// batch interpreter: instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
-// ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
-fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
-    let k: f32 = 1.0f / 255.0f
-    var pc: usize = 0
-    var run: bool = true
-    while run {
-        let op: u32 = rt.ld32((*f).prog, pc * 5)
-        let d: usize = rt.ld32((*f).prog, pc * 5 + 1) as usize
-        let a: usize = rt.ld32((*f).prog, pc * 5 + 2) as usize
-        let b: usize = rt.ld32((*f).prog, pc * 5 + 3) as usize
-        let c: usize = rt.ld32((*f).prog, pc * 5 + 4) as usize
-        pc = pc + 1
-        var l: usize = 0
-        if op == 0 as u32 {
-            run = false
-        } else if op == 1 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0)); l = l + 1 }
-        } else if op == 2 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) + ld_f32(rg(base, b, l), 0)); l = l + 1 }
-        } else if op == 3 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) - ld_f32(rg(base, b, l), 0)); l = l + 1 }
-        } else if op == 4 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) * ld_f32(rg(base, b, l), 0)); l = l + 1 }
-        } else if op == 5 as u32 {
-            while l < n {
-                st_f32(rg(base, d, l), 0, ld_f32(rg(base, a, l), 0) * ld_f32(rg(base, b, l), 0) + ld_f32(rg(base, c, l), 0))
-                l = l + 1
-            }
-        } else if op == 6 as u32 {
-            while l < n {
-                let x: f32 = ld_f32(rg(base, a, l), 0)
-                let z: f32 = ld_f32(rg(base, b, l), 0)
-                var m: f32 = z
-                if x < z { m = x }
-                st_f32(rg(base, d, l), 0, m)
-                l = l + 1
-            }
-        } else if op == 7 as u32 {
-            while l < n {
-                let x: f32 = ld_f32(rg(base, a, l), 0)
-                let z: f32 = ld_f32(rg(base, b, l), 0)
-                var m: f32 = z
-                if x > z { m = x }
-                st_f32(rg(base, d, l), 0, m)
-                l = l + 1
-            }
-        } else if op == 8 as u32 {
-            while l < n {
-                var x: f32 = ld_f32(rg(base, a, l), 0)
-                if x < 0.0f { x = 0.0f }
-                if x > 1.0f { x = 1.0f }
-                st_f32(rg(base, d, l), 0, x)
-                l = l + 1
-            }
-        } else if op == 9 as u32 {
-            let imm: f32 = *((&a) as *mut f32)
-            while l < n { st_f32(rg(base, d, l), 0, imm); l = l + 1 }
-        } else if op == 10 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, 1.0f / ld_f32(rg(base, a, l), 0)); l = l + 1 }
-        } else if op == 11 as u32 {
-            while l < n { st_f32(rg(base, d, l), 0, math.sqrt32(ld_f32(rg(base, a, l), 0))); l = l + 1 }
-        } else if op == 12 as u32 {
-            while l < n {
-                let tp: u32 = texel(f, ld_f32(rg(base, a, l), 0), ld_f32(rg(base, b, l), 0))
-                st_f32(rg(base, d, l), 0, ((tp & 255 as u32) as f32) * k)
-                st_f32(rg(base, d + 1, l), 0, (((tp >> 8 as u32) & 255 as u32) as f32) * k)
-                st_f32(rg(base, d + 2, l), 0, (((tp >> 16 as u32) & 255 as u32) as f32) * k)
-                st_f32(rg(base, d + 3, l), 0, ((tp >> 24 as u32) as f32) * k)
-                l = l + 1
-            }
-        } else {
-            run = false
-        }
+// ---- batch interpreter ops: one small function per op (a big switch function compiled ~7x slower: measured)
+fn op_mov(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, ld_f32(pa, l)); l = l + 1 } }
+fn op_add(pd: u64, pa: u64, pb: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, ld_f32(pa, l) + ld_f32(pb, l)); l = l + 1 } }
+fn op_sub(pd: u64, pa: u64, pb: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, ld_f32(pa, l) - ld_f32(pb, l)); l = l + 1 } }
+fn op_mul(pd: u64, pa: u64, pb: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, ld_f32(pa, l) * ld_f32(pb, l)); l = l + 1 } }
+fn op_mad(pd: u64, pa: u64, pb: u64, pc: u64, n: usize) {
+    var l: usize = 0
+    while l < n { st_f32(pd, l, ld_f32(pa, l) * ld_f32(pb, l) + ld_f32(pc, l)); l = l + 1 }
+}
+fn op_min(pd: u64, pa: u64, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n {
+        let x: f32 = ld_f32(pa, l)
+        let z: f32 = ld_f32(pb, l)
+        if x < z { st_f32(pd, l, x) } else { st_f32(pd, l, z) }
+        l = l + 1
     }
-    // output registers r8..r11
+}
+fn op_max(pd: u64, pa: u64, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n {
+        let x: f32 = ld_f32(pa, l)
+        let z: f32 = ld_f32(pb, l)
+        if x > z { st_f32(pd, l, x) } else { st_f32(pd, l, z) }
+        l = l + 1
+    }
+}
+fn op_sat(pd: u64, pa: u64, n: usize) {
+    var l: usize = 0
+    while l < n {
+        var x: f32 = ld_f32(pa, l)
+        if x < 0.0f { x = 0.0f }
+        if x > 1.0f { x = 1.0f }
+        st_f32(pd, l, x)
+        l = l + 1
+    }
+}
+fn op_ldc(pd: u64, bits: u32, n: usize) {
+    var b: u32 = bits
+    let imm: f32 = *((&b) as *mut f32)
+    var l: usize = 0
+    while l < n { st_f32(pd, l, imm); l = l + 1 }
+}
+fn op_rcp(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, 1.0f / ld_f32(pa, l)); l = l + 1 } }
+fn op_sqrt(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sqrt32(ld_f32(pa, l))); l = l + 1 } }
+fn op_sample(f: *mut Frame, pd: u64, pa: u64, pb: u64, n: usize) {
+    let k: f32 = 1.0f / 255.0f
+    let p1: u64 = pd + ((LANES * 4) as u64)
+    let p2: u64 = p1 + ((LANES * 4) as u64)
+    let p3: u64 = p2 + ((LANES * 4) as u64)
+    var l: usize = 0
+    while l < n {
+        let tp: u32 = texel(f, ld_f32(pa, l), ld_f32(pb, l))
+        st_f32(pd, l, ((tp & 255 as u32) as f32) * k)
+        st_f32(p1, l, (((tp >> 8 as u32) & 255 as u32) as f32) * k)
+        st_f32(p2, l, (((tp >> 16 as u32) & 255 as u32) as f32) * k)
+        st_f32(p3, l, ((tp >> 24 as u32) as f32) * k)
+        l = l + 1
+    }
+}
+
+fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     var l: usize = 0
     while l < n {
         let x: usize = rt.ld32(xs, l) as usize
@@ -458,6 +451,41 @@ fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
             | (pack_unit(ld_f32(rg(base, 10, l), 0)) << 16 as u32) | (pack_unit(ld_f32(rg(base, 11, l), 0)) << 24 as u32))
         l = l + 1
     }
+}
+
+// instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
+// ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
+// output registers r8..r11
+fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
+    var pc: usize = 0
+    var run: bool = true
+    let st: u64 = LANES as u64 * (4 as u64)
+    while run {
+        let op: u32 = rt.ld32((*f).prog, pc * 5)
+        let d: u32 = rt.ld32((*f).prog, pc * 5 + 1)
+        let a: u32 = rt.ld32((*f).prog, pc * 5 + 2)
+        let b: u32 = rt.ld32((*f).prog, pc * 5 + 3)
+        let c: u32 = rt.ld32((*f).prog, pc * 5 + 4)
+        pc = pc + 1
+        let pd: u64 = base + (d as u64) * st
+        let pa: u64 = base + (a as u64) * st
+        let pb: u64 = base + (b as u64) * st
+        let pc3: u64 = base + (c as u64) * st
+        if op == 1 as u32 { op_mov(pd, pa, n) }
+        else if op == 2 as u32 { op_add(pd, pa, pb, n) }
+        else if op == 3 as u32 { op_sub(pd, pa, pb, n) }
+        else if op == 4 as u32 { op_mul(pd, pa, pb, n) }
+        else if op == 5 as u32 { op_mad(pd, pa, pb, pc3, n) }
+        else if op == 6 as u32 { op_min(pd, pa, pb, n) }
+        else if op == 7 as u32 { op_max(pd, pa, pb, n) }
+        else if op == 8 as u32 { op_sat(pd, pa, n) }
+        else if op == 9 as u32 { op_ldc(pd, a, n) }
+        else if op == 10 as u32 { op_rcp(pd, pa, n) }
+        else if op == 11 as u32 { op_sqrt(pd, pa, n) }
+        else if op == 12 as u32 { op_sample(f, pd, pa, pb, n) }
+        else { run = false }
+    }
+    out_pack(f, base, xs, y, n)
 }
 
 // ---------------------------------------------------------------- raster
@@ -523,28 +551,44 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, shaded:
         else if n2 <= 0 as i64 { hi = lo - 1 as i64 }
         if lo <= hi {
             let yf: f64 = y as f64
-            let zr: f64 = plane(r, 0, 0) + plane(r, 0, 2) * yf
-            let wr: f64 = plane(r, 1, 0) + plane(r, 1, 2) * yf
+            // per row: base value at x = 0 and step per pixel for z, 1/w, u/w, v/w, r/w, g/w, b/w, a/w
+            let zb: f64 = plane(r, 0, 0) + plane(r, 0, 2) * yf
+            let zd: f64 = plane(r, 0, 1)
+            let wb: f64 = plane(r, 1, 0) + plane(r, 1, 2) * yf
+            let wd: f64 = plane(r, 1, 1)
+            let ub: f64 = plane(r, 2, 0) + plane(r, 2, 2) * yf
+            let ud: f64 = plane(r, 2, 1)
+            let vb: f64 = plane(r, 3, 0) + plane(r, 3, 2) * yf
+            let vd: f64 = plane(r, 3, 1)
+            let rb: f64 = plane(r, 4, 0) + plane(r, 4, 2) * yf
+            let rd: f64 = plane(r, 4, 1)
+            let gb: f64 = plane(r, 5, 0) + plane(r, 5, 2) * yf
+            let gd: f64 = plane(r, 5, 1)
+            let bb: f64 = plane(r, 6, 0) + plane(r, 6, 2) * yf
+            let bd: f64 = plane(r, 6, 1)
+            let ab: f64 = plane(r, 7, 0) + plane(r, 7, 2) * yf
+            let ad: f64 = plane(r, 7, 1)
+            let dt: bool = (*f).depth_test
+            let cnt: bool = (*f).mode == 3
             var x: i64 = lo
             var nl: usize = 0
             while x <= hi {
                 let xf: f64 = x as f64
-                let z: f32 = (zr + plane(r, 0, 1) * xf) as f32
+                let z: f32 = (zb + zd * xf) as f32
                 let idx: usize = (y as usize) * wi + (x as usize)
                 var pass: bool = true
-                if (*f).depth_test {
+                if dt {
                     if z < ld_f32((*f).depth, idx) { st_f32((*f).depth, idx, z) } else { pass = false }
                 }
                 if pass {
-                    let iw: f64 = wr + plane(r, 1, 1) * xf
-                    let rw: f64 = 1.0 / iw
-                    if (*f).mode != 3 {
-                        st_f32(rg(base, 0, nl), 0, ((plane(r, 2, 0) + plane(r, 2, 2) * yf + plane(r, 2, 1) * xf) * rw) as f32)
-                        st_f32(rg(base, 1, nl), 0, ((plane(r, 3, 0) + plane(r, 3, 2) * yf + plane(r, 3, 1) * xf) * rw) as f32)
-                        st_f32(rg(base, 2, nl), 0, ((plane(r, 4, 0) + plane(r, 4, 2) * yf + plane(r, 4, 1) * xf) * rw) as f32)
-                        st_f32(rg(base, 3, nl), 0, ((plane(r, 5, 0) + plane(r, 5, 2) * yf + plane(r, 5, 1) * xf) * rw) as f32)
-                        st_f32(rg(base, 4, nl), 0, ((plane(r, 6, 0) + plane(r, 6, 2) * yf + plane(r, 6, 1) * xf) * rw) as f32)
-                        st_f32(rg(base, 5, nl), 0, ((plane(r, 7, 0) + plane(r, 7, 2) * yf + plane(r, 7, 1) * xf) * rw) as f32)
+                    if !cnt {
+                        let rw: f64 = 1.0 / (wb + wd * xf)
+                        st_f32(rg(base, 0, nl), 0, ((ub + ud * xf) * rw) as f32)
+                        st_f32(rg(base, 1, nl), 0, ((vb + vd * xf) * rw) as f32)
+                        st_f32(rg(base, 2, nl), 0, ((rb + rd * xf) * rw) as f32)
+                        st_f32(rg(base, 3, nl), 0, ((gb + gd * xf) * rw) as f32)
+                        st_f32(rg(base, 4, nl), 0, ((bb + bd * xf) * rw) as f32)
+                        st_f32(rg(base, 5, nl), 0, ((ab + ad * xf) * rw) as f32)
                     }
                     rt.st32(xs, nl, x as u32)
                     nl = nl + 1
