@@ -183,7 +183,7 @@ export {
     AX_BASE, AX_PUSH, AX_READ, AX_EVENT, AX_PERM, AX_INFO, AX_SET, AX_PRESS,
     AX_MAXNR, AP_MINE, AP_GRANT, AP_REVOKE, AP_COUNT, AX_DUMP,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier braucht.
-    copy_in, copy_out, do_jrnl, do_scan, SYS_OSUM_DISPGET,
+    copy_in, copy_out, peek, do_jrnl, do_scan, SYS_OSUM_DISPGET,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier holt.
     WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE, WM_CLOSE, WM_WRITE, WM_STATE, WM_LIST, WM_ACT, WM_STRUT, WM_SIZE, WE_RIGHT, WM_DECO, WM_FORM, WM_APP, WM_MINRECT, WM_FWIN, FW_LIST, FW_KEY, FW_CLICK, FW_CLOSE, FW_RAISE, FW_BYTES, FW_OWNER, FW_KIND, WM_TRUST, TR_ASK, TR_POLL, TR_CANCEL, WM_MAXNR, WM_SETBUF, WM_DAMAGE, WM_TABLE, WM_BUFFD, WM_COMP, CP_ATTACH, CP_WAIT, CP_PRESENT, CP_PAGE, CP_DETACH, CP_STAT, WI_SHARED, shm_of, writable,
     // ---- RUNDE WMPLUGIN ----
@@ -2871,22 +2871,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return cx_result(state, me, do_dup2(state, me, a0, a1), a2)
     }
     if number == UB_PIPE2 {
-        let pr: u64 = do_pipe(state, me, a0)
-        if pr == 0 && (a1 & UB_O_CLOEXEC) != 0 {
-            let _c0: u64 = cx_result(state, me, user_word32(state, me, a0), UB_O_CLOEXEC)
-            let _c1: u64 = cx_result(state, me, user_word32(state, me, a0 + 4), UB_O_CLOEXEC)
-        }
-        if pr == 0 && (a1 & UB_O_NONBLOCK) != 0 {
-            let r0: u64 = of_of(state, me, user_word32(state, me, a0))
-            let r1: u64 = of_of(state, me, user_word32(state, me, a0 + 4))
-            if r0 < file.MAX_OPEN {
-                file.open_set_flags(state, r0, file.open_flags(state, r0) | UB_O_NONBLOCK)
-            }
-            if r1 < file.MAX_OPEN {
-                file.open_set_flags(state, r1, file.open_flags(state, r1) | UB_O_NONBLOCK)
-            }
-        }
-        return pr
+        // TOCTOU (docs/SECURITY-TOCTOU-KERNEL.md K-01): the flags are applied to the descriptors the kernel
+        // allocated, never to numbers read back from the user's int[2] (another thread can rewrite them).
+        return do_pipe_flags(state, me, a0, a1)
     }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
@@ -4907,6 +4894,10 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 }
 
 fn do_pipe(state: u64, me: u64, out: u64) -> u64 {
+    return do_pipe_flags(state, me, out, 0)
+}
+
+fn do_pipe_flags(state: u64, me: u64, out: u64, flags: u64) -> u64 {
     if !proc.user_ok(state, me, out, 8) {
         return neg(errno.E_FAULT)
     }
@@ -4938,6 +4929,14 @@ fn do_pipe(state: u64, me: u64, out: u64) -> u64 {
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd1, wr)
+    if (flags & UB_O_CLOEXEC) != 0 {
+        cx_put(state, me, fd0, true)
+        cx_put(state, me, fd1, true)
+    }
+    if (flags & UB_O_NONBLOCK) != 0 {
+        file.open_set_flags(state, rd, file.open_flags(state, rd) | UB_O_NONBLOCK)
+        file.open_set_flags(state, wr, file.open_flags(state, wr) | UB_O_NONBLOCK)
+    }
     // Two `int`s, four octets each -- the shape Linux writes.
     if !put32(state, me, out, fd0) {
         return neg(errno.E_FAULT)
@@ -6854,7 +6853,8 @@ const MMAP_TOP: u64 = 0x400F0000
 const PAGE: u64 = 4096
 
 fn page_up(v: u64) -> u64 {
-    return (v + PAGE - 1) & 0xFFFFFFFFFFFFF000
+    // wrapping add: a length near 2^64 must not reach the checked `+` (kernel panic from ring 3); it rounds to 0 and the callers reject 0 pages
+    return (v +% (PAGE - 1)) & 0xFFFFFFFFFFFFF000
 }
 
 // THREAD GROUP MEMORY MARKS (r701/w-foot3): break, mmap bottom and big
