@@ -1195,6 +1195,8 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/store.conf=etc/store.conf")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
+    # OpenSSL (python ssl) looks at /etc/ssl/cert.pem by default; curl+mbedtls is built for /etc/ssl/roots.pem
+    ARGS+=("/etc/ssl/cert.pem@/etc/ssl/roots.pem")
 fi
 # ================================ RUNDE MERGE9: DIE GROSSEN MITBRINGSEL
 #
@@ -1221,6 +1223,22 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
         echo "== HINWEIS: $mvar=$mpfad ist leer oder fehlt -- $mziel bleibt weg" >&2
     fi
 done
+# PROOF STONES (optional): STONES=<dir> from tools/unterbau/build-stones.sh (python3, lib/python312.zip, lib/os.pyc, lib/ext/*.so, curl, git).
+# python3 lives in /usr/bin and its stdlib in /usr/lib: getpath walks up from the executable dir and never tests "/" when the binary sits
+# directly in /bin, so a plain /bin/python3 would not find its prefix (r698). /bin/python3 is a SYMLINK to /usr/bin/python3 (getpath resolves it).
+if [ -n "${STONES:-}" ] && [ -r "$STONES/python3" ]; then
+    ARGS+=(/usr/ /usr/bin/ /usr/lib/ /usr/lib/python3.12/ /usr/lib/python3.12/lib-dynload/
+           "/usr/bin/python3=$STONES/python3" "/usr/lib/python312.zip=$STONES/lib/python312.zip"
+           "/usr/lib/python3.12/os.pyc=$STONES/lib/os.pyc" "/bin/python3->/usr/bin/python3")
+    for so in "$STONES"/lib/ext/*.so; do
+        [ -e "$so" ] && ARGS+=("/usr/lib/python3.12/lib-dynload/$(basename "$so")=$so")
+    done
+    sagen "stein        python3 nach /usr/bin, Stdlib /usr/lib, /bin/python3 -> /usr/bin/python3"
+fi
+if [ -n "${STONES:-}" ]; then
+    [ -r "$STONES/curl" ] && ARGS+=("/bin/curl=$STONES/curl")
+    [ -r "$STONES/git" ] && ARGS+=("/bin/git=$STONES/git" /share/ /share/git-core/ /share/git-core/templates/)
+fi
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
 # DAILY-DRIVER: THE ZONE AND THE NETWORK CLOCK. `sntp boot` (started by
 # the desktop) applies /etc/time.conf to the kernel and, with auto=true,

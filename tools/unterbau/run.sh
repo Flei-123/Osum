@@ -261,6 +261,15 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
     # host port of the throw-away web server: a free one (two gate runs at once must not collide); the script names the default 18765
     STPORT=$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 18765)
     sed -i "s/18765/$STPORT/g" "$D/st.sh"
+    # TLS stone (r697): a throw-away CA/server cert for 10.0.2.2 (the host as seen from the guest); the guest trusts it only via /etc/tls-ca.pem
+    TLSPORT=$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 18766)
+    sed -i "s/18766/$TLSPORT/g" "$D/st.sh"
+    TLS_OK=""
+    if [ -n "${STONES_NET:-}" ] && command -v openssl >/dev/null 2>&1 \
+       && openssl req -x509 -newkey rsa:2048 -nodes -keyout "$D/tls-key.pem" -out "$D/tls-ca.pem" -days 30 -subj "/CN=10.0.2.2" \
+            -addext "subjectAltName=IP:10.0.2.2" >/dev/null 2>&1; then
+        TLS_OK=1; SX="$SX /etc/tls-ca.pem=$D/tls-ca.pem"
+    fi
     SX="$SX /etc/st.sh=$D/st.sh"
     EXTRA_SPEC="$SX" UB_BLOCKS=${UB_BLOCKS:-262144} build_image "$ROOT" "$D/stone" && {
         # STONES_NET=1: virtio-net with QEMU user networking; the guest reaches a throw-away http server of the host at 10.0.2.2
@@ -269,17 +278,23 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
             mkdir -p "$D/www"; echo "hello-net" > "$D/www/h.txt"
             python3 -I -m http.server "$STPORT" --bind 127.0.0.1 --directory "$D/www" > "$D/www.log" 2>&1 &
             NETPID=$!
+            TLSPID=""
+            if [ -n "$TLS_OK" ]; then
+                python3 -I "$HERE/tlssrv.py" "$TLSPORT" "$D/tls-ca.pem" "$D/tls-key.pem" "$D/www" > "$D/tls.log" 2>&1 &
+                TLSPID=$!
+            fi
             NETARGS="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"
         fi
         KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2} ${STONES_KARGS:-}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
         [ -z "$NETPID" ] || kill "$NETPID" 2>/dev/null
+        [ -z "${TLSPID:-}" ] || kill "$TLSPID" 2>/dev/null
         grep -a -o -E 'ST [A-Za-z0-9_-]+( .*)?$' "$D/st.ser" | tr -d '\r' | awk '!seen[$2]++' > "$D/st.res" || : > "$D/st.res"
         STOK=0; STBAD=0
         stchk() { # stchk <name> <expected text>
             local line; line=$(grep -a "^ST $1 " "$D/st.res" | head -1)
             if [ "$line" = "ST $1 $2" ]; then STOK=$((STOK+1)); printf '        ST-OK   %s\n' "$1"; else STBAD=$((STBAD+1)); printf '        ST-GAP  %s  (got: %s)\n' "$1" "${line:-nothing}"; fi
         }
-        while read -r n v; do case "$n" in ''|'#'*) continue ;; net-*) [ -n "${STONES_NET:-}" ] || continue ;; esac; stchk "$n" "$v"; done < "$HERE/stones.expect"
+        while read -r n v; do case "$n" in ''|'#'*) continue ;; nettls-*) [ -n "${TLS_OK:-}" ] || continue ;; net-*) [ -n "${STONES_NET:-}" ] || continue ;; esac; stchk "$n" "$v"; done < "$HERE/stones.expect"
         grep -aq '^ST end' "$D/st.res" && ok "stones script ran to the end" || bad "stones script did not reach its end"
         echo "        stones probes: $STOK ok / $STBAD gap"
         [ "$STBAD" -le "${STGAP_MAX:-0}" ] && ok "stones probes: $STOK ok, $STBAD gap" || bad "stones probes: $STBAD gaps (> ${STGAP_MAX:-0})"

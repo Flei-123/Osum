@@ -26,6 +26,15 @@ echo "ST git-commit $(cd /tmp/gt && /bin/git config user.email a@b && /bin/git c
 $B sleep 3
 echo "ST net-curl-http $(/bin/curl -sS --max-time 15 http://10.0.2.2:18765/h.txt 2>&1 | $B tail -n 1)"
 echo "ST net-py-http $(/bin/python3 -c 'import socket;s=socket.create_connection(("10.0.2.2",18765),5);s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(s.recv(300).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
+# TLS stone (curl + mbedtls, r697): needs the throw-away https server of the host at 10.0.2.2:18766 and /etc/tls-ca.pem
+echo "ST nettls-curl-https $(/bin/curl -sS --max-time 30 --cacert /etc/tls-ca.pem https://10.0.2.2:18766/h.txt 2>&1 | $B tail -n 1)"
+echo "ST nettls-curl-k $(/bin/curl -sSk --max-time 30 https://10.0.2.2:18766/h.txt 2>&1 | $B tail -n 1)"
+echo "ST nettls-curl-nocert $(/bin/curl -sS --max-time 30 https://10.0.2.2:18766/h.txt >/dev/null 2>&1 && echo accepted || echo refused)"
+echo "ST nettls-curl-ver $(/bin/curl --version 2>&1 | $B head -n 1 | $B grep -o 'mbedTLS/[0-9.]*')"
+echo "ST nettls-year $([ "$($B date +%Y)" -ge 2026 ] && echo ok)"
+echo "ST nettls-py-ver $(/bin/python3 -c 'import ssl;print(ssl.OPENSSL_VERSION.split()[1])' 2>&1 | $B tail -n 1)"
+echo "ST nettls-py-hashlib $(/bin/python3 -c 'import _hashlib;print(_hashlib.new("sha256",b"a").hexdigest()[:8])' 2>&1 | $B tail -n 1)"
+echo "ST nettls-py-https $(/bin/python3 -c 'import ssl,socket;c=ssl.create_default_context(cafile="/etc/tls-ca.pem");s=c.wrap_socket(socket.create_connection(("10.0.2.2",18766),10),server_hostname="10.0.2.2");s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(s.recv(300).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
 echo "ST net-procdev $($B grep -c eth0 /proc/net/dev)"
 echo "ST net-ifconfig $($B ifconfig eth0 2>&1 | $B grep -o 'inet addr:[0-9.]*')"
 echo "ST end"
