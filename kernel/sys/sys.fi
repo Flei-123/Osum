@@ -7117,7 +7117,7 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     // child and `posix_spawn` of a long-lived program did not return until the program ended (measured: 1607 ms for a 1 s child). The flag
     // lives in a bit mask per task (TCPU table, word 24); `execve` closes the marked descriptors, `fork` copies the mask.
     if cmd == F_GETFD {
-        return (cx_get(state, me) >> fd) & 1
+        return cx_bit(state, me, fd)
     }
     if cmd == F_SETFD {
         cx_put(state, me, fd, (arg & 1) != 0)
@@ -8961,7 +8961,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     // sie je Aufgabe -- also werden sie kopiert. Der Unterschied steht
     // in STATUS-FREMDLAND.md.
     file.inherit_task(state, me, faden)
-    cx_set(state, faden, cx_get(state, me))
+    cx_copy(state, me, faden)
     sched.fpu_inherit(state, me, faden)
     signal.inherit(state, me, faden)
     sched.tset(state, faden, sched.T_CWD,
@@ -9133,7 +9133,7 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
         return neg(errno.E_NOMEM)
     }
     file.inherit_task(state, me, child)
-    cx_set(state, child, cx_get(state, me))
+    cx_copy(state, me, child)
     // RUNDE AVX: und der Vektorzustand. POSIX sagt, ein Kind faengt mit
     // der Gleitkommaumgebung seines Elternteils an -- Rundungsart,
     // Ausnahmemasken und die Register selbst.
@@ -17428,23 +17428,44 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
 }
 
 // FD_CLOEXEC bits: one per descriptor, in word 24 of the task's entry of the TCPU table (the word nobody uses; file.fd_free clears the bit).
-fn cx_get(state: u64, task: u64) -> u64 {
-    return kstate.get(state, kstate.TCPU_OFF + task * kstate.TCPU_BYTES + 24)
+// K-08 (TOCTOU audit): 512 bits per task (kstate.CX_OFF), 8 words of 64 descriptors; it used to be ONE word, so descriptors >= 64 lost the flag.
+fn cx_word(task: u64, w: u64) -> u64 {
+    return kstate.CX_OFF + task * kstate.CX_BYTES + w * 8
 }
 
-fn cx_set(state: u64, task: u64, v: u64) {
-    kstate.set(state, kstate.TCPU_OFF + task * kstate.TCPU_BYTES + 24, v)
+fn cx_bit(state: u64, task: u64, fd: u64) -> u64 {
+    if fd >= file.MAX_FD || task >= kstate.MAX_TASKS {
+        return 0
+    }
+    return (kstate.get(state, cx_word(task, fd >> 6)) >> (fd & 63)) & 1
+}
+
+fn cx_copy(state: u64, from: u64, to: u64) {
+    var w: u64 = 0
+    while w < 8 {
+        kstate.set(state, cx_word(to, w), kstate.get(state, cx_word(from, w)))
+        w = w + 1
+    }
+}
+
+fn cx_clear(state: u64, task: u64) {
+    var w: u64 = 0
+    while w < 8 {
+        kstate.set(state, cx_word(task, w), 0)
+        w = w + 1
+    }
 }
 
 fn cx_put(state: u64, task: u64, fd: u64, on: bool) {
-    if fd >= file.MAX_FD {
+    if fd >= file.MAX_FD || task >= kstate.MAX_TASKS {
         return
     }
-    let m: u64 = cx_get(state, task)
+    let a: u64 = cx_word(task, fd >> 6)
+    let m: u64 = kstate.get(state, a)
     if on {
-        cx_set(state, task, m | (1 << fd))
+        kstate.set(state, a, m | (1 << (fd & 63)))
     } else {
-        cx_set(state, task, m & (0xFFFFFFFFFFFFFFFF -% (1 << fd)))
+        kstate.set(state, a, m & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
     }
 }
 
@@ -17458,13 +17479,9 @@ fn cx_result(state: u64, me: u64, r: u64, flags: u64) -> u64 {
 
 // execve: the marked descriptors close.
 fn cx_close_marked(state: u64, me: u64) {
-    let m: u64 = cx_get(state, me)
-    if m == 0 {
-        return
-    }
     var fd: u64 = 0
     while fd < file.MAX_FD {
-        if ((m >> fd) & 1) != 0 {
+        if cx_bit(state, me, fd) != 0 {
             let of: u64 = of_of(state, me, fd)
             if of < file.MAX_OPEN {
                 file.fd_free(state, me, fd)
@@ -17473,7 +17490,7 @@ fn cx_close_marked(state: u64, me: u64) {
         }
         fd = fd + 1
     }
-    cx_set(state, me, 0)
+    cx_clear(state, me)
 }
 
 // RUNDE UNTERBAU: A READ OR WRITE ON A REGULAR FILE IS NOT CUT AT 4096 OCTETS. `read`/`write` moved one block (MAX_IO) per call and

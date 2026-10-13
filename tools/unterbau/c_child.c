@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "exit7")) return 7;
     if (argc > 1 && !strcmp(argv[1], "cat")) { char b[256]; int n; while ((n = read(0, b, sizeof b)) > 0) write(1, b, n); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "fdscan")) { int lo = 0, hi = 0; for (int fd = 3; fd < 512; fd++) if (fcntl(fd, F_GETFD) >= 0) { if (fd < 64) lo++; else hi++; } printf("fdscan lo=%d hi=%d\n", lo, hi); fflush(stdout); return 0; }
     if (argc > 1 && !strcmp(argv[1], "sleep")) { sleep(1); return 3; }
     if (argc > 1 && !strcmp(argv[1], "count")) { printf("argc=%d last=%s\n", argc, argv[argc - 1]); fflush(stdout); return 0; }
     const char *x = getenv("UB_X");

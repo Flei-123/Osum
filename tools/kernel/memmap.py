@@ -104,6 +104,7 @@ BEREICHE = [
     ("CPU",        "kstate.fi", "CPU_OFF",        "CPU_BYTES * MAX_CPUS"),
     ("LOCK",       "kstate.fi", "LOCK_OFF",       "LOCK_BYTES * LOCK_COUNT"),
     ("TCPU",       "kstate.fi", "TCPU_OFF",       "TCPU_BYTES * MAX_TASKS"),
+    ("CX",         "kstate.fi", "CX_OFF",         "CX_BYTES * MAX_TASKS"),
     ("SMP",        "kstate.fi", "SMP_OFF",        "SMP_MAX"),
     ("OFILE",      "kstate.fi", "OFILE_OFF",      "OFILE_MAX"),
     ("FDTAB",      "kstate.fi", "FDTAB_OFF",      "FDTAB_MAX"),
