@@ -69,6 +69,7 @@ export {
     check_sys, check_trap, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
     do_setpgid, do_getpgid, do_setsid, do_alarm, do_sigpending,
+    do_setitimer, do_getitimer, do_sigaltstack, do_sigsuspend,
     exiting, stopped_count, handler_of, say_name, signal_of, lethal,
     SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE,
     SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM,
@@ -117,6 +118,7 @@ const SIG_SETMASK: u64 = 2
 const SA_NOCLDSTOP: u64 = 1
 const SA_SIGINFO: u64 = 4
 const SA_RESTART: u64 = 0x10000000
+const SA_ONSTACK: u64 = 0x08000000
 const SA_NODEFER: u64 = 0x40000000
 const SA_RESETHAND: u64 = 0x80000000
 
@@ -290,6 +292,8 @@ fn clear_task(state: u64, task: u64) {
     sched.tset(state, task, sched.T_SIGMASK, 0)
     sched.tset(state, task, sched.T_SIGRET, 0)
     sched.tset(state, task, sched.T_ALARM, 0)
+    sched.tset(state, task, sched.T_ITIV, 0)
+    sched.tset(state, task, sched.T_ALTSZ, 0)
     sched.tset(state, task, sched.T_STOPSIG, 0)
 }
 
@@ -456,6 +460,8 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
     }
     sched.irq_restore(flags)
     kstate.add(state, kstate.SIG_SENT, 1)
+    // RUNDE EVENTS: a signalfd poller sleeping between its look and its sleep must not lose this bit: bump the wake sequence for it.
+    sched.poll_kick_one(state, task)
     return true
 }
 
@@ -662,6 +668,15 @@ fn alarm_check(state: u64) -> u64 {
         let due: u64 = sched.tget(state, i, sched.T_ALARM)
         if due != 0 && due <= now {
             sched.tset(state, i, sched.T_ALARM, 0)
+            // setitimer with an interval: the next expiry, counted from the one that fired (no drift)
+            let iv: u64 = sched.tget(state, i, sched.T_ITIV)
+            if iv != 0 {
+                var nx: u64 = due + iv
+                if nx <= now {
+                    nx = now + iv
+                }
+                sched.tset(state, i, sched.T_ALARM, nx)
+            }
             if send_task(state, i, SIGALRM) {
                 fired = fired + 1
             }
@@ -731,7 +746,16 @@ fn greg_off(i: u64) -> u64 {
 fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     let h: u64 = handler_of(state, task, sig)
     let old_rsp: u64 = __mmio_read64((ctx + C_RSP) as *mut u64)
-    let base: u64 = ((old_rsp -% REDZONE) -% SF_BYTES) & 0xFFFFFFFFFFFFFFF0
+    var base: u64 = ((old_rsp -% REDZONE) -% SF_BYTES) & 0xFFFFFFFFFFFFFFF0
+    // RUNDE EVENTS: SA_ONSTACK with an alternate stack (sigaltstack) that is not the one we are on: the frame goes to its top. This is
+    // what lets a program handle SIGSEGV from a stack overflow.
+    let altsz: u64 = sched.tget(state, task, sched.T_ALTSZ)
+    if altsz != 0 && (aget(act(state, task, sig) + A_FLAGS) & SA_ONSTACK) != 0 {
+        let altsp: u64 = sched.tget(state, task, sched.T_ALTSP)
+        if old_rsp < altsp || old_rsp >= altsp +% altsz {
+            base = ((altsp +% altsz) -% SF_BYTES) & 0xFFFFFFFFFFFFFFF0
+        }
+    }
     let ret: u64 = base -% 8
     // Der Rahmen muss vollstaendig im Stapel des Prozesses liegen. Ein
     // Stapel, der dafuer zu klein geworden ist, ist der Fall, in dem
@@ -742,8 +766,13 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
     }
     poke64(state, task, ret, vector(state, V_TRAMP))
     poke64(state, task, base + SF_MAGIC, MAGIC)
-    poke64(state, task, base + SF_MASK,
-        sched.tget(state, task, sched.T_SIGMASK))
+    // after sigsuspend the mask to give back is the one from before it, not the temporary one
+    var frame_mask: u64 = sched.tget(state, task, sched.T_SIGMASK)
+    if sched.tget(state, task, sched.T_SUSP) != 0 {
+        frame_mask = sched.tget(state, task, sched.T_SUSPMASK)
+        sched.tset(state, task, sched.T_SUSP, 0)
+    }
+    poke64(state, task, base + SF_MASK, frame_mask)
     poke64(state, task, base + SF_SIG, sig)
     var i: u64 = 0
     while i < C_WORDS {
@@ -968,6 +997,7 @@ fn check_sys(state: u64, task: u64, frame: u64) {
         return
     }
     if deliverable(state, task) == 0 {
+        suspend_done(state, task)
         return
     }
     let c: u64 = ctx_of(state, task)
@@ -995,6 +1025,7 @@ fn check_sys(state: u64, task: u64, frame: u64) {
     __mmio_write64((c + C_RSP) as *mut u64, __mmio_read64((frame + F_RSP) as *mut u64))
     __mmio_write64((c + C_SS) as *mut u64, USER_SS)
     if !run_pending(state, task, c) {
+        suspend_done(state, task)
         return
     }
     // Zurueck in den Systemaufrufrahmen: nur die vier Woerter, die die
@@ -1268,6 +1299,7 @@ fn do_alarm(state: u64, task: u64, secs: u64) -> u64 {
     if old > now {
         left = (old -% now) / 100
     }
+    sched.tset(state, task, sched.T_ITIV, 0)
     if secs == 0 {
         sched.tset(state, task, sched.T_ALARM, 0)
     } else {
@@ -1326,4 +1358,158 @@ fn do_setsid(state: u64, task: u64) -> u64 {
     sched.tset(state, task, sched.T_PGID, pid)
     sched.tset(state, task, sched.T_TTY, 0)
     return pid
+}
+
+// ======================================================================= RUNDE EVENTS: timers, alternate stack, sigsuspend
+
+// A sigsuspend whose temporary mask was not handed on to a handler frame (nothing was delivered, or the signal was ignored): give the
+// old mask back now.
+fn suspend_done(state: u64, task: u64) {
+    if sched.tget(state, task, sched.T_SUSP) != 0 {
+        sched.tset(state, task, sched.T_SIGMASK, sched.tget(state, task, sched.T_SUSPMASK))
+        sched.tset(state, task, sched.T_SUSP, 0)
+    }
+}
+
+// A timeval (seconds, microseconds) as ticks of 10 ms, rounded up; a nonzero time is at least one tick (zero would mean "off").
+fn tv_ticks(sec: u64, usec: u64) -> u64 {
+    if sec == 0 && usec == 0 {
+        return 0
+    }
+    var s: u64 = sec
+    if s > 100000000 {
+        s = 100000000
+    }
+    let t: u64 = (s * 1000 + (usec + 999) / 1000 + 9) / 10
+    if t == 0 {
+        return 1
+    }
+    return t
+}
+
+fn put_tv(state: u64, task: u64, addr: u64, ticks: u64) {
+    let ms: u64 = ticks * 10
+    poke64(state, task, addr, ms / 1000)
+    poke64(state, task, addr + 8, (ms % 1000) * 1000)
+}
+
+// itimerval at `addr`: it_interval (16 octets), it_value (16 octets). Only ITIMER_REAL (0) exists.
+fn put_itimer(state: u64, task: u64, addr: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let due: u64 = sched.tget(state, task, sched.T_ALARM)
+    var left: u64 = 0
+    if due > now {
+        left = due - now
+    }
+    put_tv(state, task, addr, sched.tget(state, task, sched.T_ITIV))
+    put_tv(state, task, addr + 16, left)
+}
+
+fn do_getitimer(state: u64, task: u64, which: u64, cur: u64) -> u64 {
+    if which != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, task, cur, 32) {
+        return neg(errno.E_FAULT)
+    }
+    put_itimer(state, task, cur)
+    return 0
+}
+
+fn do_setitimer(state: u64, task: u64, which: u64, newp: u64, oldp: u64) -> u64 {
+    if which != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, task, newp, 32) {
+        return neg(errno.E_FAULT)
+    }
+    if oldp != 0 {
+        if !proc.user_ok(state, task, oldp, 32) {
+            return neg(errno.E_FAULT)
+        }
+        put_itimer(state, task, oldp)
+    }
+    let isec: u64 = peek64(state, task, newp)
+    let iusec: u64 = peek64(state, task, newp + 8)
+    let vsec: u64 = peek64(state, task, newp + 16)
+    let vusec: u64 = peek64(state, task, newp + 24)
+    if iusec >= 1000000 || vusec >= 1000000 || isec >= 0x8000000000000000 || vsec >= 0x8000000000000000 {
+        return neg(errno.E_INVAL)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let val: u64 = tv_ticks(vsec, vusec)
+    if val == 0 {
+        sched.tset(state, task, sched.T_ALARM, 0)
+        sched.tset(state, task, sched.T_ITIV, 0)
+        return 0
+    }
+    sched.tset(state, task, sched.T_ITIV, tv_ticks(isec, iusec))
+    sched.tset(state, task, sched.T_ALARM, now +% val)
+    return 0
+}
+
+// sigaltstack(ss, old): stack_t is { void *ss_sp; int ss_flags; size_t ss_size } = 24 octets.
+fn do_sigaltstack(state: u64, task: u64, ss: u64, old: u64) -> u64 {
+    let sp: u64 = sched.tget(state, task, sched.T_ALTSP)
+    let sz: u64 = sched.tget(state, task, sched.T_ALTSZ)
+    if old != 0 {
+        if !proc.user_ok(state, task, old, 24) {
+            return neg(errno.E_FAULT)
+        }
+        var fl: u64 = 0
+        if sz == 0 {
+            fl = 2 // SS_DISABLE
+        } else {
+            let rsp: u64 = sched.tget(state, task, sched.T_SIGRET)
+            if rsp != 0 && rsp >= sp && rsp < sp +% sz {
+                fl = 1 // SS_ONSTACK: a handler frame sits on it
+            }
+        }
+        poke64(state, task, old, sp)
+        poke64(state, task, old + 8, fl)
+        poke64(state, task, old + 16, sz)
+    }
+    if ss != 0 {
+        if !proc.user_ok(state, task, ss, 24) {
+            return neg(errno.E_FAULT)
+        }
+        let nsp: u64 = peek64(state, task, ss)
+        let nfl: u64 = peek64(state, task, ss + 8) & 0xFFFFFFFF
+        let nsz: u64 = peek64(state, task, ss + 16)
+        if (nfl & 2) != 0 {
+            sched.tset(state, task, sched.T_ALTSZ, 0)
+            return 0
+        }
+        if nsz < 2048 {
+            return neg(errno.E_NOMEM) // MINSIGSTKSZ
+        }
+        sched.tset(state, task, sched.T_ALTSP, nsp)
+        sched.tset(state, task, sched.T_ALTSZ, nsz)
+    }
+    return 0
+}
+
+// sigsuspend(mask, size): swap the mask, wait for a signal that is not blocked by it, answer -EINTR. The handler (if any) runs on the
+// way out with the TEMPORARY mask; its frame carries the old one (`deliver`), so `sigreturn` gives it back.
+fn do_sigsuspend(state: u64, task: u64, maskp: u64, size: u64) -> u64 {
+    if size != 8 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, task, maskp, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let tmp: u64 = peek64(state, task, maskp) & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP)))
+    sched.tset(state, task, sched.T_SUSPMASK, sched.tget(state, task, sched.T_SIGMASK))
+    sched.tset(state, task, sched.T_SUSP, 1)
+    sched.tset(state, task, sched.T_SIGMASK, tmp)
+    var rounds: u64 = 0
+    while rounds < 6000 {
+        if deliverable(state, task) != 0 {
+            return neg(errno.E_INTR)
+        }
+        sched.sleep_ticks(state, 1)
+        rounds = rounds + 1
+    }
+    suspend_done(state, task)
+    return neg(errno.E_INTR)
 }

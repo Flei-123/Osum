@@ -178,7 +178,9 @@ int main(void)
     /* ---- TCP loopback socket exists? (needed by many programs even for local IPC) */
     errno = 0; int ts = socket(AF_INET, SOCK_STREAM, 0);
     CHECKC("tcp_socket", ts >= 0);
-    /* ---- inotify (file monitors of toolkits) */
+    /* ---- inotify (file monitors of toolkits). A process has few descriptors here (16): give back what the checks above are done with. */
+    close(ep); close(efd); close(tfd); close(sfd); close(sv[0]); close(sv[1]); close(ls);
+    /* ---- inotify */
     errno = 0; int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     CHECKC("inotify_init", in >= 0);
     /* ---- ppoll with a signal mask, pselect */
