@@ -86,6 +86,7 @@ const AS_MUTE: u64 = 2
 const A_CAPREADY: u64 = 54 // microphone: a path exists
 const A_CAPUSERS: u64 = 55 // programs reading it within 2 s
 const A_CAPMUTE: u64 = 56
+const A_CAPWHO0: u64 = 60 // task index of the 1st program reading the microphone
 const AS_CAPMUTE: u64 = 16
 const K_MICMUTE: u64 = 301
 
@@ -116,6 +117,7 @@ static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
 static mut mic_users: u64 = 0 // STUB source (see the header)
 static mut mic_muted: u64 = 0
+static mut mic_who: u64 = 0 // task index of the first program reading the microphone (0 = none/unknown)
 static mut mic_da: u64 = 0 // 1 = the kernel has a microphone path (SYS_AUDREAD works)
 static mut mic_stub: u64 = 0 // 1 = /etc/tray.items has a `mic|` line (test aid): it overrides the kernel's numbers
 static mut want_sheet: u64 = 0
@@ -612,6 +614,10 @@ fn read_audio() {
         mic_da = 1
         mic_users = ulib.sys(SYS_AUDGET, A_CAPUSERS, 0, 0)
         mic_muted = ulib.sys(SYS_AUDGET, A_CAPMUTE, 0, 0)
+        mic_who = ulib.sys(SYS_AUDGET, A_CAPWHO0, 0, 0)
+        if ulib.bad(mic_who) {
+            mic_who = 0
+        }
     }
 }
 
@@ -661,7 +667,35 @@ fn mic_text() {
     var at: u64 = ulib.strncpy((&txt[0 as usize]) as u64, mg((&k_micuse[0 as usize]) as u64), 90)
     __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
     at = at + 1
-    let _e: u64 = num_into(at, mic_users)
+    at = num_into(at, mic_users)
+    // one reader: say WHO (a camera/mic light that does not name the program is not worth much)
+    if mic_users == 1 && mic_who != 0 && mic_stub == 0 {
+        let n0: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME0, 0)
+        let n1: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME1, 0)
+        if !ulib.bad(n0) && (n0 & 255) != 0 && at < 90 {
+            __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+            __mmio_write8(((&txt[0 as usize]) as u64 + at + 1) as *mut u8, 40 as u8)
+            at = at + 2
+            var k: u64 = 0
+            while k < 16 {
+                var c: u64 = 0
+                if k < 8 {
+                    c = (n0 >> (k * 8)) & 255
+                } else {
+                    c = (n1 >> ((k - 8) * 8)) & 255
+                }
+                if c != 0 {
+                    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, c as u8)
+                    at = at + 1
+                    k = k + 1
+                } else {
+                    k = 16
+                }
+            }
+            __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 41 as u8)
+            __mmio_write8(((&txt[0 as usize]) as u64 + at + 1) as *mut u8, 0 as u8)
+        }
+    }
 }
 
 fn rows_count() -> u64 {

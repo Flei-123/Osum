@@ -14,7 +14,8 @@
 #   (c) mute = silence      stream stopped, ring = pattern 0x11112222: an unmuted reader gets the pattern
 #                           (b_pat = b_n); a muted reader gets zeros in a buffer pre-filled with junk
 #                           (c_zero = c_n, c_pat = 0, c_junk = 0); unmuted again -> pattern (d_pat = d_n)
-#   (d) fifth reader refused   fifth = 1 while four readers are live (users = 4)
+#   (d) fifth reader refused   fifth = 1 while four readers are live (users = 4); who0/who3 name the live readers
+#                           (what AUDGET A_CAPWHO0..3 hands to the tray)
 #   (e) idle stop           after 2.2 s without a read the stream is stopped (idle_run = 0, idle_users = 0)
 #   (f) overruns            only printed (reader 1 may fall behind in the emulator), not claimed
 #
@@ -90,6 +91,8 @@ else
     bad "(b) measurement values missing"
 fi
 num "(d) readers counted while four are live" "$(val "$TMPD/cap.txt" users)" eq 4
+num "(d) the first live reader is named (task index)" "$(val "$TMPD/cap.txt" who0)" eq 1
+num "(d) the fourth live reader is named (task index)" "$(val "$TMPD/cap.txt" who3)" eq 4
 num "(d) the fifth reader is refused (1 = refused)" "$(val "$TMPD/cap.txt" fifth)" eq 1
 num "(e) 2.2 s without a read: users" "$(val "$TMPD/cap.txt" idle_users)" eq 0
 num "(e) 2.2 s without a read: stream running (0 = stopped)" "$(val "$TMPD/cap.txt" idle_run)" eq 0
