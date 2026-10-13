@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/crypto.fi -- the FreeViewer session crypto, Firn side.
+//
+// This is the VIEWER half of src/crypto.rs of the Rust project
+// (/root/projects/freeviewer), byte for byte. docs/ORIENTOS-VIEWER.md
+// section 1.2 of that project is the contract; the test vectors are the
+// proof (tools/fvcrypto/run.sh).
+//
+//   viewer -> host  0x01 || client_pub(32)               X25519, ephemeral
+//   host -> viewer  0x02 || host_pub(32) || salt(16)
+//   key   = HKDF-SHA256(ikm = X25519 shared, salt, info "freeviewer-v1 session") -> 32
+//   pwkey = Argon2id(password, salt)  -- argon2 crate 0.5 DEFAULT parameters:
+//           m = 19456 KiB (19 MiB), t = 2, p = 1, version 0x13, output 32
+//   proof = HMAC-SHA256(pwkey, "fv-auth" || client_pub || host_pub || salt)
+//   code  = SHA256("freeviewer-v1 code" || key)[0..4] BE mod 10000, 4 digits
+//   data  = 0x10 || nonce(12) || AES-256-GCM(ct || tag), no AAD
+//           nonce = dir byte (host 1, viewer 2) || 3 zero octets || counter u64 BE
+//           counter starts at 1 per direction; the receiver rejects counter <= last
+//
+// NOT HERE: the FreeMeet E2E (src/meete2e.rs) -- it has the known nonce
+// reuse bug (roadmap r1) and must not be copied.
+//
+// Memory rules: no profile line is needed for the pure parts; the only
+// runtime users are `random_bytes` (getrandom, syscall 318 -- the Osum
+// kernel implements it) and `password_key` (19 MiB mmap, wiped and freed).
+// Everything else works on memory the caller passes in. All pointers are
+// u64 addresses, like the rest of lib/crypto.
+
+import std.rt
+import std.crypto.random
+import crypto.sha256
+import crypto.hkdf
+import crypto.x25519
+import crypto.argon2
+import crypto.gcm
+
+export { Cipher, cipher_new, cipher_init, seal, open,
+    random_bytes, keypair, session_key, session_code, password_key,
+    auth_proof, proof_matches,
+    TAG_HELLO, TAG_HELLO_ACK, TAG_PROOF, TAG_OK, TAG_FAIL, TAG_ASK, TAG_DATA,
+    FRAME_OVERHEAD, ARGON_M_KIB, ARGON_T, ARGON_P }
+
+const TAG_HELLO: u8 = 1
+const TAG_HELLO_ACK: u8 = 2
+const TAG_PROOF: u8 = 3
+const TAG_OK: u8 = 4
+const TAG_FAIL: u8 = 5
+const TAG_ASK: u8 = 6
+const TAG_DATA: u8 = 16
+
+// 0x10 + nonce(12) + tag(16)
+const FRAME_OVERHEAD: usize = 29
+
+// argon2 crate 0.5.3 Params::DEFAULT_{M,T,P}_COST (checked in
+// ~/.cargo/registry/.../argon2-0.5.3/src/params.rs).
+const ARGON_M_KIB: u64 = 19456
+const ARGON_T: u64 = 2
+const ARGON_P: u64 = 1
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn copy(dst: u64, doff: usize, src: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        st8(dst, doff + i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+// n octets from the kernel RNG. false = no source worked (do not use buf).
+fn random_bytes(p: u64, n: usize) -> bool {
+    return random.random_bytes(p, n)
+}
+
+// Fresh ephemeral X25519 pair. priv_out and pub_out are 32 octets each.
+fn keypair(priv_out: u64, pub_out: u64) -> bool {
+    if !random_bytes(priv_out, 32) {
+        return false
+    }
+    return x25519.x25519_base(priv_out, pub_out)
+}
+
+// Session key. priv = our 32 octet secret, peer_pub = 32, salt = 16.
+// false = the shared secret is all zero (low order peer point): refuse.
+fn session_key(priv: u64, peer_pub: u64, salt: u64, out: u64) -> bool {
+    var shared: [u8; 32] = [0 as u8; 32]
+    if !x25519.x25519(priv, peer_pub, (&shared[0]) as u64) {
+        return false
+    }
+    let info: [u8; 21] = "freeviewer-v1 session"
+    return hkdf.hkdf(salt, 16, (&shared[0]) as u64, 32,
+        (&info[0]) as u64, 21, out, 32)
+}
+
+// The 4 digit code as the number 0..9999; digits (ASCII) go to `digits`
+// (4 octets) when it is not 0.
+fn session_code(key: u64, digits: u64) -> u64 {
+    var s: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&s)
+    let lab: [u8; 18] = "freeviewer-v1 code"
+    sha256.update(&s, (&lab[0]) as u64, 18)
+    sha256.update(&s, key, 32)
+    var d: [u8; 32] = [0 as u8; 32]
+    sha256.finish(&s, (&d[0]) as u64)
+    let n: u64 = (((d[0] as u64) << 24) | ((d[1] as u64) << 16)
+        | ((d[2] as u64) << 8) | (d[3] as u64)) % 10000
+    if digits != 0 {
+        st8(digits, 0, (48 + n / 1000) as u8)
+        st8(digits, 1, (48 + (n / 100) % 10) as u8)
+        st8(digits, 2, (48 + (n / 10) % 10) as u8)
+        st8(digits, 3, (48 + n % 10) as u8)
+    }
+    return n
+}
+
+// Argon2id(password, salt16) -> 32 octets, Rust default parameters.
+// Needs 19 MiB: mapped here and unmapped (after wiping) before return.
+// false = no memory / refused parameters.
+fn password_key(pw: u64, pwlen: usize, salt: u64, out: u64) -> bool {
+    let bytes: usize = (ARGON_M_KIB as usize) * 1024
+    let mem: u64 = rt.heap_alloc(bytes)
+    if mem == 0 {
+        return false
+    }
+    let ok: bool = argon2.argon2id(pw, pwlen, salt, 16, ARGON_T, ARGON_M_KIB,
+        ARGON_P, mem, out, 32)
+    // wipe: the block memory holds values derived from the password
+    var i: usize = 0
+    while i < bytes {
+        *((mem + i as u64) as *mut u64) = 0
+        i = i + 8
+    }
+    rt.heap_free(mem, bytes)
+    return ok
+}
+
+// HMAC-SHA256(pwkey, "fv-auth" || client_pub || host_pub || salt) -> 32
+fn auth_proof(pwkey: u64, client_pub: u64, host_pub: u64, salt: u64,
+    out: u64) {
+    var m: [u8; 87] = [0 as u8; 87]
+    let lab: [u8; 7] = "fv-auth"
+    let mp: u64 = (&m[0]) as u64
+    copy(mp, 0, (&lab[0]) as u64, 7)
+    copy(mp, 7, client_pub, 32)
+    copy(mp, 39, host_pub, 32)
+    copy(mp, 71, salt, 16)
+    sha256.hmac(pwkey, 32, mp, 87, out)
+}
+
+// Constant time compare of a received proof against the expected one.
+fn proof_matches(expected: u64, got: u64, gotlen: usize) -> bool {
+    if gotlen != 32 {
+        return false
+    }
+    var d: u8 = 0
+    var i: usize = 0
+    while i < 32 {
+        d = d | (ld8(expected, i) ^ ld8(got, i))
+        i = i + 1
+    }
+    return d == 0
+}
+
+// ---------------------------------------------------------------- Cipher
+struct Cipher {
+    g: gcm.Gcm,
+    dir_send: u8,
+    dir_recv: u8,
+    ctr_send: u64,
+    last_recv: u64,
+    ok: bool,
+}
+
+fn cipher_new() -> Cipher {
+    return Cipher { g: gcm.gcm_new(), dir_send: 0 as u8, dir_recv: 0 as u8,
+        ctr_send: 0, last_recv: 0, ok: false }
+}
+
+// key = 32 octets. The viewer passes is_host = false: it sends direction
+// byte 2 and accepts direction byte 1.
+fn cipher_init(c: *mut Cipher, key: u64, is_host: bool) -> bool {
+    (*c).ok = false
+    (*c).ctr_send = 0
+    (*c).last_recv = 0
+    if is_host {
+        (*c).dir_send = 1 as u8
+        (*c).dir_recv = 2 as u8
+    } else {
+        (*c).dir_send = 2 as u8
+        (*c).dir_recv = 1 as u8
+    }
+    if !gcm.gcm_init(&(*c).g, key, 32) {
+        return false
+    }
+    (*c).ok = true
+    return true
+}
+
+// Seals `n` octets of `plain` into `out` (capacity n + 29). Returns the
+// frame length, 0 on error (key not set / counter exhausted).
+fn seal(c: *mut Cipher, plain: u64, n: usize, out: u64) -> usize {
+    if !(*c).ok {
+        return 0
+    }
+    // never wrap: a repeated nonce would break AES-GCM
+    if (*c).ctr_send == 18446744073709551615 {
+        return 0
+    }
+    (*c).ctr_send = (*c).ctr_send + 1
+    var nonce: [u8; 12] = [0 as u8; 12]
+    nonce[0] = (*c).dir_send
+    var i: usize = 0
+    while i < 8 {
+        nonce[4 + i] = (((*c).ctr_send >> ((7 - i) as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    st8(out, 0, TAG_DATA)
+    copy(out, 1, (&nonce[0]) as u64, 12)
+    if !gcm.gcm_seal(&(*c).g, (&nonce[0]) as u64, 0, 0, plain, n, out + 13) {
+        return 0
+    }
+    return n + FRAME_OVERHEAD
+}
+
+// Opens a frame (flen >= 29). `out` needs capacity flen - 29. Returns the
+// plaintext length, or -1 for: wrong tag byte / direction / replay /
+// bad tag. The replay counter only moves after the tag verified.
+fn open(c: *mut Cipher, frame: u64, flen: usize, out: u64) -> i64 {
+    if !(*c).ok || flen < FRAME_OVERHEAD {
+        return 0 - 1
+    }
+    if ld8(frame, 0) != TAG_DATA {
+        return 0 - 1
+    }
+    if ld8(frame, 1) != (*c).dir_recv {
+        return 0 - 1
+    }
+    var ctr: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        ctr = (ctr << 8) | (ld8(frame, 5 + i) as u64)
+        i = i + 1
+    }
+    if ctr <= (*c).last_recv {
+        return 0 - 1
+    }
+    if !gcm.gcm_open(&(*c).g, frame + 1, 0, 0, frame + 13, flen - 13, out) {
+        return 0 - 1
+    }
+    (*c).last_recv = ctr
+    return (flen - FRAME_OVERHEAD) as i64
+}

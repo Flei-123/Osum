@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/fvcrypto/fvt.fi -- test driver for lib/fv/crypto.fi (FreeViewer crypto).
+//
+//   fvt x25519 <scalar> <point>              -> hex(32)
+//   fvt pub <scalar>                         -> hex(32)
+//   fvt session <priv> <peer_pub> <salt>     -> hex(32) session key
+//   fvt code <key>                           -> 4 digits
+//   fvt pwkey <pw-hex> <salt>                -> hex(32)   (Argon2id, Rust defaults)
+//   fvt proof <pwkey> <cpub> <hpub> <salt>   -> hex(32)
+//   fvt gcm <key> <iv12> <aad-hex> <pt-hex>  -> hex(ct||tag)    (raw AES-GCM)
+//   fvt seal <key> <host:0|1> <pt-hex>...    -> one frame (hex) per plaintext
+//   fvt open <key> <host:0|1> <frame-hex>... -> "ok:<hex>" or "fail" per frame
+//   fvt bench <bytes>                        -> ms for seal+open of that many octets
+//   fvt selftest                             -> built-in known answers, exit 0 = all ok
+//
+// Hex arguments are lower or upper case; "-" is the empty string.
+import std.io
+import std.rt
+import std.time
+import fv.crypto
+import crypto.gcm
+import crypto.x25519
+
+const MAXB: usize = 70000
+
+fn hexv(c: u8) -> u64 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 97 as u8) as u64 + 10 }
+    if c >= 65 as u8 && c <= 70 as u8 { return (c - 65 as u8) as u64 + 10 }
+    return 255
+}
+
+// hex string (C string at `a`) -> bytes at `dst`; returns length or -1
+fn from_hex(a: u64, dst: u64, cap: usize) -> i64 {
+    return from_hex_n(a, rt.c_length(a), dst, cap)
+}
+
+fn from_hex_n(a: u64, n: usize, dst: u64, cap: usize) -> i64 {
+    if n == 1 && rt.ld8(a, 0) == 45 as u8 { return 0 }
+    if n % 2 != 0 || n / 2 > cap { return 0 - 1 }
+    var i: usize = 0
+    while i < n / 2 {
+        let h: u64 = hexv(rt.ld8(a, 2 * i))
+        let l: u64 = hexv(rt.ld8(a, 2 * i + 1))
+        if h == 255 || l == 255 { return 0 - 1 }
+        rt.st8(dst, i, (h * 16 + l) as u8)
+        i = i + 1
+    }
+    return (n / 2) as i64
+}
+
+fn put_hex(p: u64, n: usize) {
+    let d: [u8; 16] = "0123456789abcdef"
+    var two: [u8; 2] = [0 as u8; 2]
+    var i: usize = 0
+    while i < n {
+        let b: u8 = rt.ld8(p, i)
+        two[0] = d[(b >> 4) as usize]
+        two[1] = d[(b & 15 as u8) as usize]
+        io.print_bytes((&two[0]) as u64, 2)
+        i = i + 1
+    }
+}
+
+fn nl() {
+    io.print("\n")
+}
+
+fn arg(start: u64, i: usize) -> u64 {
+    return rt.arg_ptr(start, i)
+}
+
+fn need(start: u64, n: usize) -> bool {
+    if rt.arg_count(start) < n {
+        io.print("usage error\n")
+        return false
+    }
+    return true
+}
+
+fn hex_to(start: u64, i: usize, dst: u64, want: usize) -> bool {
+    let r: i64 = from_hex(arg(start, i), dst, want)
+    if r != want as i64 {
+        io.print("bad hex argument\n")
+        return false
+    }
+    return true
+}
+
+static mut buf_a: [u8; 70000] = [0; 70000]
+static mut buf_b: [u8; 70000] = [0; 70000]
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 2 {
+        io.print("usage: fvt <cmd> ...\n")
+        return 2
+    }
+    let cmd: u64 = arg(start, 1)
+    let cn: usize = rt.c_length(cmd)
+    var k1: [u8; 32] = [0 as u8; 32]
+    var k2: [u8; 32] = [0 as u8; 32]
+    var k3: [u8; 32] = [0 as u8; 32]
+    var s16: [u8; 16] = [0 as u8; 16]
+    var o32: [u8; 32] = [0 as u8; 32]
+    let p1: u64 = (&k1[0]) as u64
+    let p2: u64 = (&k2[0]) as u64
+    let p3: u64 = (&k3[0]) as u64
+    let ps: u64 = (&s16[0]) as u64
+    let po: u64 = (&o32[0]) as u64
+
+    if is(cmd, cn, "selftest") {
+        return selftest()
+    }
+    if is(cmd, cn, "x25519") {
+        if !need(start, 4) { return 2 }
+        if !hex_to(start, 2, p1, 32) || !hex_to(start, 3, p2, 32) { return 2 }
+        // use the raw primitive through session path would hash; call it via keypair-free API
+        if !x25519.x25519(p1, p2, po) { io.print("zero\n"); return 1 }
+        put_hex(po, 32)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "pub") {
+        if !need(start, 3) { return 2 }
+        if !hex_to(start, 2, p1, 32) { return 2 }
+        if !x25519.x25519_base(p1, po) { return 1 }
+        put_hex(po, 32)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "session") {
+        if !need(start, 5) { return 2 }
+        if !hex_to(start, 2, p1, 32) || !hex_to(start, 3, p2, 32)
+            || !hex_to(start, 4, ps, 16) { return 2 }
+        if !crypto.session_key(p1, p2, ps, po) { io.print("refused\n"); return 1 }
+        put_hex(po, 32)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "code") {
+        if !need(start, 3) { return 2 }
+        if !hex_to(start, 2, p1, 32) { return 2 }
+        var dg: [u8; 4] = [0 as u8; 4]
+        crypto.session_code(p1, (&dg[0]) as u64)
+        io.print_bytes((&dg[0]) as u64, 4)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "pwkey") {
+        if !need(start, 4) { return 2 }
+        let pwl: i64 = from_hex(arg(start, 2), (&buf_a[0]) as u64, 1000)
+        if pwl < 0 { return 2 }
+        if !hex_to(start, 3, ps, 16) { return 2 }
+        if !crypto.password_key((&buf_a[0]) as u64, pwl as usize, ps, po) {
+            io.print("argon2 failed\n")
+            return 1
+        }
+        put_hex(po, 32)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "proof") {
+        if !need(start, 6) { return 2 }
+        if !hex_to(start, 2, p1, 32) || !hex_to(start, 3, p2, 32)
+            || !hex_to(start, 4, p3, 32) || !hex_to(start, 5, ps, 16) { return 2 }
+        crypto.auth_proof(p1, p2, p3, ps, po)
+        put_hex(po, 32)
+        nl()
+        return 0
+    }
+    if is(cmd, cn, "gcm") {
+        if !need(start, 6) { return 2 }
+        var iv: [u8; 12] = [0 as u8; 12]
+        if !hex_to(start, 2, p1, 32) || !hex_to(start, 3, (&iv[0]) as u64, 12) { return 2 }
+        let al: i64 = from_hex(arg(start, 4), (&buf_b[0]) as u64, 1000)
+        let pl: i64 = from_hex(arg(start, 5), (&buf_a[0]) as u64, 60000)
+        if al < 0 || pl < 0 { return 2 }
+        var g: gcm.Gcm = gcm.gcm_new()
+        if !gcm.gcm_init(&g, p1, 32) { return 2 }
+        // out after aad inside buf_b
+        let out: u64 = ((&buf_b[0]) as u64) + 2000
+        gcm.gcm_seal(&g, (&iv[0]) as u64, (&buf_b[0]) as u64, al as usize,
+            (&buf_a[0]) as u64, pl as usize, out)
+        put_hex(out, pl as usize + 16)
+        nl()
+        // and the way back
+        let back: u64 = ((&buf_b[0]) as u64) + 30000
+        if !gcm.gcm_open(&g, (&iv[0]) as u64, (&buf_b[0]) as u64, al as usize,
+            out, pl as usize + 16, back) {
+            io.print("roundtrip failed\n")
+            return 1
+        }
+        return 0
+    }
+    if is(cmd, cn, "seal") || is(cmd, cn, "open") {
+        if !need(start, 5) { return 2 }
+        if !hex_to(start, 2, p1, 32) { return 2 }
+        let host: bool = rt.ld8(arg(start, 3), 0) == 49 as u8
+        var c: crypto.Cipher = crypto.cipher_new()
+        if !crypto.cipher_init(&c, p1, host) { return 2 }
+        var i: usize = 4
+        while i < rt.arg_count(start) {
+            let n: i64 = from_hex(arg(start, i), (&buf_a[0]) as u64, 60000)
+            if n < 0 { return 2 }
+            if is(cmd, cn, "seal") {
+                let fl: usize = crypto.seal(&c, (&buf_a[0]) as u64, n as usize,
+                    (&buf_b[0]) as u64)
+                put_hex((&buf_b[0]) as u64, fl)
+                nl()
+            } else {
+                let r: i64 = crypto.open(&c, (&buf_a[0]) as u64, n as usize,
+                    (&buf_b[0]) as u64)
+                if r < 0 {
+                    io.print("fail\n")
+                } else {
+                    io.print("ok:")
+                    put_hex((&buf_b[0]) as u64, r as usize)
+                    nl()
+                }
+            }
+            i = i + 1
+        }
+        return 0
+    }
+    if is(cmd, cn, "bench") {
+        if !need(start, 3) { return 2 }
+        var n: usize = 0
+        let a: u64 = arg(start, 2)
+        var j: usize = 0
+        while j < rt.c_length(a) {
+            n = n * 10 + (rt.ld8(a, j) - 48 as u8) as usize
+            j = j + 1
+        }
+        if n > 60000 { n = 60000 }
+        var key: [u8; 32] = [7 as u8; 32]
+        var cs: crypto.Cipher = crypto.cipher_new()
+        var cr: crypto.Cipher = crypto.cipher_new()
+        crypto.cipher_init(&cs, (&key[0]) as u64, true)
+        crypto.cipher_init(&cr, (&key[0]) as u64, false)
+        let t0: i64 = time.now_unix_ms()
+        var rep: usize = 0
+        var bad: usize = 0
+        while rep < 20 {
+            let fl: usize = crypto.seal(&cs, (&buf_a[0]) as u64, n, (&buf_b[0]) as u64)
+            let r: i64 = crypto.open(&cr, (&buf_b[0]) as u64, fl,
+                ((&buf_a[0]) as u64) + 0)
+            if r != n as i64 { bad = bad + 1 }
+            rep = rep + 1
+        }
+        let t1: i64 = time.now_unix_ms()
+        io.print("bench: 20 x seal+open of ")
+        put_dec(n as u64)
+        io.print(" octets: ")
+        put_dec((t1 - t0) as u64)
+        io.print(" ms, errors ")
+        put_dec(bad as u64)
+        io.print(", aesni ")
+        var ni: u64 = 0
+        if gcm.gcm_uses_aesni(&cs.g) { ni = 1 }
+        put_dec(ni)
+        nl()
+        return 0
+    }
+    io.print("unknown command\n")
+    return 2
+}
+
+fn put_dec(v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    var n: usize = 0
+    var x: u64 = v
+    if x == 0 {
+        io.print("0")
+        return
+    }
+    while x > 0 {
+        b[n] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var o: [u8; 24] = [0 as u8; 24]
+    var i: usize = 0
+    while i < n {
+        o[i] = b[n - 1 - i]
+        i = i + 1
+    }
+    io.print_bytes((&o[0]) as u64, n)
+}
+
+fn is(cmd: u64, cn: usize, name: str) -> bool {
+    if cn != name.n { return false }
+    var i: usize = 0
+    while i < cn {
+        if rt.ld8(cmd, i) != rt.ld8(name.p as u64, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------ selftest
+// Known answers generated with Python `cryptography` / hmac / the argon2
+// CLI (tools/fvcrypto/vectors.py does the big comparison on the host; this
+// one runs INSIDE OrientOS where python does not exist).
+static mut st_ok: u64 = 0
+static mut st_bad: u64 = 0
+
+fn hexbytes(h: str, dst: u64, cap: usize) -> usize {
+    let r: i64 = from_hex_n(h.p as u64, h.n, dst, cap)
+    if r < 0 { return 0 }
+    return r as usize
+}
+
+fn same(name: str, got: u64, n: usize, want: str) {
+    var w: [u8; 600] = [0 as u8; 600]
+    let wn: usize = hexbytes(want, (&w[0]) as u64, 600)
+    var eq: bool = wn == n
+    var i: usize = 0
+    while eq && i < n {
+        if rt.ld8(got, i) != w[i] { eq = false }
+        i = i + 1
+    }
+    if eq {
+        st_ok = st_ok + 1
+        io.print("  ok    ")
+        io.print(name)
+        nl()
+    } else {
+        st_bad = st_bad + 1
+        io.print("  FAIL  ")
+        io.print(name)
+        io.print(": got ")
+        put_hex(got, n)
+        nl()
+    }
+}
+
+fn selftest() -> i32 {
+    var a: [u8; 32] = [0 as u8; 32]
+    var bp: [u8; 32] = [0 as u8; 32]
+    var ap: [u8; 32] = [0 as u8; 32]
+    var salt: [u8; 16] = [0 as u8; 16]
+    var key: [u8; 32] = [0 as u8; 32]
+    var o: [u8; 32] = [0 as u8; 32]
+    var pt: [u8; 64] = [0 as u8; 64]
+    var out: [u8; 128] = [0 as u8; 128]
+    hexbytes("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", (&a[0]) as u64, 32)
+    hexbytes("5714769d116bf76436ae74bc793d2c30ad1903c59ac5273805c7e2698b410c36", (&bp[0]) as u64, 32)
+    hexbytes("c8c9cacbcccdcecfd0d1d2d3d4d5d6d7", (&salt[0]) as u64, 16)
+    let t0: i64 = time.now_unix_ms()
+    x25519.x25519_base((&a[0]) as u64, (&ap[0]) as u64)
+    same("x25519 public key", (&ap[0]) as u64, 32,
+        "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c")
+    crypto.session_key((&a[0]) as u64, (&bp[0]) as u64, (&salt[0]) as u64, (&key[0]) as u64)
+    same("x25519 + HKDF session key", (&key[0]) as u64, 32,
+        "ebb7b0a8a1ba3de9f51847ec1edbdd4fa3af70c84a376f34c5fefb87ff26c585")
+    var dg: [u8; 4] = [0 as u8; 4]
+    crypto.session_code((&key[0]) as u64, (&dg[0]) as u64)
+    var want: [u8; 4] = "9200"
+    var ceq: bool = true
+    var i: usize = 0
+    while i < 4 {
+        if dg[i] != want[i] { ceq = false }
+        i = i + 1
+    }
+    if ceq { st_ok = st_ok + 1; io.print("  ok    session code 9200\n") } else { st_bad = st_bad + 1; io.print("  FAIL  session code\n") }
+    let t1: i64 = time.now_unix_ms()
+    var pw: [u8; 7] = "hunter2"
+    var s2: [u8; 16] = "fv-salt-ABCDEF12"
+    var pk: [u8; 32] = [0 as u8; 32]
+    let ok: bool = crypto.password_key((&pw[0]) as u64, 7, (&s2[0]) as u64, (&pk[0]) as u64)
+    let t2: i64 = time.now_unix_ms()
+    if !ok { st_bad = st_bad + 1; io.print("  FAIL  argon2 returned false\n") }
+    same("argon2id (m=19456 t=2 p=1) password key", (&pk[0]) as u64, 32,
+        "c1c46c76f056e810a0935a4dafb61bf859cb8c272f2c2e7d3fa0a2687cf9a368")
+    io.print("        timing: x25519+hkdf+code ")
+    put_dec((t1 - t0) as u64)
+    io.print(" ms, argon2id ")
+    put_dec((t2 - t1) as u64)
+    io.print(" ms\n")
+    crypto.auth_proof((&pk[0]) as u64, (&ap[0]) as u64, (&bp[0]) as u64, (&s2[0]) as u64, (&o[0]) as u64)
+    same("auth proof", (&o[0]) as u64, 32,
+        "6a6be3f149eeab16f937b7c8004d0cd9ae9823d12fe4b8b818fb442c5dcd7a42")
+    // AES-256-GCM, NIST test case 15
+    var gk: [u8; 32] = [0 as u8; 32]
+    var giv: [u8; 12] = [0 as u8; 12]
+    hexbytes("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", (&gk[0]) as u64, 32)
+    hexbytes("cafebabefacedbaddecaf888", (&giv[0]) as u64, 12)
+    let n15: usize = hexbytes("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255", (&pt[0]) as u64, 64)
+    var g: gcm.Gcm = gcm.gcm_new()
+    gcm.gcm_init(&g, (&gk[0]) as u64, 32)
+    gcm.gcm_seal(&g, (&giv[0]) as u64, 0, 0, (&pt[0]) as u64, n15, (&out[0]) as u64)
+    same("AES-256-GCM NIST test case 15", (&out[0]) as u64, n15 + 16,
+        "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015adb094dac5d93471bdec1a502270e3cc6c")
+    // frames
+    var cv: crypto.Cipher = crypto.cipher_new()
+    crypto.cipher_init(&cv, (&key[0]) as u64, false)
+    var msg: [u8; 19] = "hello openOS viewer"
+    let fl: usize = crypto.seal(&cv, (&msg[0]) as u64, 19, (&out[0]) as u64)
+    same("viewer frame 1 (dir 2, counter 1)", (&out[0]) as u64, fl,
+        "10020000000000000000000001609f654b4b091451b527c4f42b315f4cdffc1e19c80fe73adf7a282c5303906397c592")
+    var hf: [u8; 80] = [0 as u8; 80]
+    let hl: usize = hexbytes("10010000000000000000000007ccf07d0e9faa39a27eec484d04b62cb19f9af549df1e36ad60f37d64f38cf0", (&hf[0]) as u64, 80)
+    var dec: [u8; 80] = [0 as u8; 80]
+    let r1: i64 = crypto.open(&cv, (&hf[0]) as u64, hl, (&dec[0]) as u64)
+    var mh: [u8; 15] = "frame from host"
+    if r1 == 15 {
+        same("host frame 7 opens", (&dec[0]) as u64, 15,
+            "6672616d652066726f6d20686f7374")
+    } else {
+        st_bad = st_bad + 1
+        io.print("  FAIL  host frame 7 did not open\n")
+    }
+    let r2: i64 = crypto.open(&cv, (&hf[0]) as u64, hl, (&dec[0]) as u64)
+    if r2 < 0 { st_ok = st_ok + 1; io.print("  ok    replay rejected\n") } else { st_bad = st_bad + 1; io.print("  FAIL  replay accepted\n") }
+    hf[20] = hf[20] ^ (1 as u8)
+    var cv2: crypto.Cipher = crypto.cipher_new()
+    crypto.cipher_init(&cv2, (&key[0]) as u64, false)
+    let r3: i64 = crypto.open(&cv2, (&hf[0]) as u64, hl, (&dec[0]) as u64)
+    if r3 < 0 { st_ok = st_ok + 1; io.print("  ok    tampered frame rejected\n") } else { st_bad = st_bad + 1; io.print("  FAIL  tampered frame accepted\n") }
+    var rnd: [u8; 16] = [0 as u8; 16]
+    let rr: bool = crypto.random_bytes((&rnd[0]) as u64, 16)
+    var z: u8 = 0
+    i = 0
+    while i < 16 { z = z | rnd[i]; i = i + 1 }
+    if rr && z != 0 { st_ok = st_ok + 1; io.print("  ok    kernel RNG (getrandom) delivers\n") } else { st_bad = st_bad + 1; io.print("  FAIL  getrandom\n") }
+    var ni: u64 = 0
+    if gcm.gcm_uses_aesni(&cv.g) { ni = 1 }
+    io.print("        aes path: ")
+    if ni == 1 { io.print("AES-NI\n") } else { io.print("software\n") }
+    io.print("FVT: ")
+    put_dec(st_ok)
+    io.print(" ok, ")
+    put_dec(st_bad)
+    io.print(" FAIL\n")
+    if st_bad > 0 { return 1 }
+    return 0
+}
