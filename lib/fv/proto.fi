@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/proto.fi -- FreeViewer session messages (viewer side), no I/O.
+//
+// Mirror of src/proto.rs of the Rust project (/root/projects/freeviewer,
+// docs/ORIENTOS-VIEWER.md section 1.3): 1 type octet + little-endian
+// fields; blobs = u32 length + octets. These are the plaintexts INSIDE the
+// encrypted channel (lib/fv/session.fi seals/opens them).
+//
+// ENCODE (viewer -> host): every `enc_*` writes into the caller's buffer
+// and returns the length. DECODE (host -> viewer): `dec_*` fill small
+// structs that point INTO the input buffer (no copies, no allocation) and
+// return false for anything short or out of limits. Limits as in Rust:
+// MAX_TILES 4096, MAX_CLIP 256 KiB. The viewer never sends Caps{h264:true},
+// so the host only sends JPEG `Frame` and `Tiles`.
+
+export { Frame, Tile, TileIt, Cursor, msg_type, enc_caps, enc_move,
+    enc_button, enc_wheel, enc_key, enc_keyvk, enc_special, enc_clip,
+    enc_ping, enc_pong, enc_needkey, enc_setmon, dec_screen, dec_frame,
+    tiles_begin, tiles_next, dec_cursor, dec_clip, dec_ping, dec_monitors,
+    mon_count, mon_at,
+    T_SCREEN, T_FRAME, T_TILES, T_CURSOR, T_MONS, T_VIDEO, T_CLIP, T_PING,
+    T_PONG, T_RESLIST, MAX_TILES, MAX_CLIP,
+    KEY_BACKSPACE, KEY_ENTER, KEY_TAB, KEY_ESCAPE, KEY_LEFT, KEY_RIGHT,
+    KEY_UP, KEY_DOWN, KEY_DELETE, KEY_HOME, KEY_END, KEY_PAGEUP,
+    KEY_PAGEDOWN, KEY_INSERT, KEY_SPACE, KEY_SHIFT, KEY_CTRL, KEY_ALT,
+    KEY_META, KEY_F1,
+    SPECIAL_CAD, SPECIAL_TASKMGR, SPECIAL_WIN, SPECIAL_ALTTAB,
+    SPECIAL_LOCK, SPECIAL_RELEASE }
+
+const T_SCREEN: u64 = 0x20
+const T_FRAME: u64 = 0x21
+const T_TILES: u64 = 0x22
+const T_CURSOR: u64 = 0x23
+const T_MONS: u64 = 0x24
+const T_VIDEO: u64 = 0x25
+const T_CAPS: u64 = 0x26
+const T_MOVE: u64 = 0x30
+const T_BUTTON: u64 = 0x31
+const T_WHEEL: u64 = 0x32
+const T_KEY: u64 = 0x33
+const T_KEYVK: u64 = 0x35
+const T_SPECIAL: u64 = 0x36
+const T_CLIP: u64 = 0x37
+const T_SETMON: u64 = 0x39
+const T_RESLIST: u64 = 0x3B
+const T_PING: u64 = 0x40
+const T_PONG: u64 = 0x41
+const T_NEEDKEY: u64 = 0x62
+
+const MAX_TILES: u64 = 4096
+const MAX_CLIP: u64 = 262144
+const MAX_MONITORS: u64 = 32
+
+// named keys (proto.rs KEY_*): Key{code,named:true}
+const KEY_BACKSPACE: u64 = 1
+const KEY_ENTER: u64 = 2
+const KEY_TAB: u64 = 3
+const KEY_ESCAPE: u64 = 4
+const KEY_LEFT: u64 = 5
+const KEY_RIGHT: u64 = 6
+const KEY_UP: u64 = 7
+const KEY_DOWN: u64 = 8
+const KEY_DELETE: u64 = 9
+const KEY_HOME: u64 = 10
+const KEY_END: u64 = 11
+const KEY_PAGEUP: u64 = 12
+const KEY_PAGEDOWN: u64 = 13
+const KEY_INSERT: u64 = 14
+const KEY_SPACE: u64 = 15
+const KEY_SHIFT: u64 = 20
+const KEY_CTRL: u64 = 21
+const KEY_ALT: u64 = 22
+const KEY_META: u64 = 23
+const KEY_F1: u64 = 30 // F1..F12 = 30..41
+
+const SPECIAL_CAD: u64 = 1
+const SPECIAL_TASKMGR: u64 = 2
+const SPECIAL_WIN: u64 = 3
+const SPECIAL_ALTTAB: u64 = 4
+const SPECIAL_LOCK: u64 = 5
+const SPECIAL_RELEASE: u64 = 6
+
+struct Frame {
+    w: u64,
+    h: u64,
+    jpeg: u64, // pointer into the message
+    len: u64,
+}
+
+struct Tile {
+    x: u64,
+    y: u64,
+    w: u64,
+    h: u64,
+    jpeg: u64,
+    len: u64,
+}
+
+struct TileIt {
+    p: u64, // message start
+    n: u64, // message length
+    at: u64, // offset of the next tile record
+    left: u64, // tiles still to read
+    w: u64, // full screen size of this update
+    h: u64,
+}
+
+struct Cursor {
+    x: i64,
+    y: i64,
+    visible: bool,
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn le32(p: u64, at: u64) -> u64 {
+    return ld8(p, at) | (ld8(p, at + 1) << 8) | (ld8(p, at + 2) << 16) | (ld8(p, at + 3) << 24)
+}
+
+fn put32(p: u64, at: u64, v: u64) {
+    st8(p, at, v)
+    st8(p, at + 1, v >> 8)
+    st8(p, at + 2, v >> 16)
+    st8(p, at + 3, v >> 24)
+}
+
+// i32 as two's complement octets (v may be negative)
+fn put_i32(p: u64, at: u64, v: i64) {
+    put32(p, at, (v & 0xFFFFFFFF) as u64)
+}
+
+fn get_i32(p: u64, at: u64) -> i64 {
+    let u: u64 = le32(p, at)
+    if u >= 0x80000000 {
+        return (u as i64) - 4294967296
+    }
+    return u as i64
+}
+
+fn msg_type(p: u64, n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    return ld8(p, 0)
+}
+
+// ------------------------------------------------------------ encode
+
+fn enc_caps(out: u64, h264: bool) -> u64 {
+    st8(out, 0, T_CAPS)
+    if h264 {
+        st8(out, 1, 1)
+    } else {
+        st8(out, 1, 0)
+    }
+    return 2
+}
+
+// x,y normalised 0..10000 over the host screen
+fn enc_move(out: u64, x: i64, y: i64) -> u64 {
+    st8(out, 0, T_MOVE)
+    put_i32(out, 1, x)
+    put_i32(out, 5, y)
+    return 9
+}
+
+// button 0 left, 1 right, 2 middle
+fn enc_button(out: u64, button: u64, down: bool) -> u64 {
+    st8(out, 0, T_BUTTON)
+    st8(out, 1, button)
+    if down {
+        st8(out, 2, 1)
+    } else {
+        st8(out, 2, 0)
+    }
+    return 3
+}
+
+fn enc_wheel(out: u64, lines: i64) -> u64 {
+    st8(out, 0, T_WHEEL)
+    put_i32(out, 1, lines)
+    return 5
+}
+
+// named: code is a KEY_* value; else a Unicode scalar
+fn enc_key(out: u64, code: u64, named: bool, down: bool) -> u64 {
+    st8(out, 0, T_KEY)
+    put32(out, 1, code)
+    if named {
+        st8(out, 5, 1)
+    } else {
+        st8(out, 5, 0)
+    }
+    if down {
+        st8(out, 6, 1)
+    } else {
+        st8(out, 6, 0)
+    }
+    return 7
+}
+
+fn enc_keyvk(out: u64, vk: u64, ext: bool, down: bool) -> u64 {
+    st8(out, 0, T_KEYVK)
+    st8(out, 1, vk)
+    st8(out, 2, vk >> 8)
+    if ext {
+        st8(out, 3, 1)
+    } else {
+        st8(out, 3, 0)
+    }
+    if down {
+        st8(out, 4, 1)
+    } else {
+        st8(out, 4, 0)
+    }
+    return 5
+}
+
+fn enc_special(out: u64, code: u64) -> u64 {
+    st8(out, 0, T_SPECIAL)
+    st8(out, 1, code)
+    return 2
+}
+
+// text is cut at MAX_CLIP (as the Rust encoder does); `out` needs n + 5
+fn enc_clip(out: u64, text: u64, n: u64) -> u64 {
+    var m: u64 = n
+    if m > MAX_CLIP {
+        m = MAX_CLIP
+    }
+    st8(out, 0, T_CLIP)
+    put32(out, 1, m)
+    var i: u64 = 0
+    while i < m {
+        st8(out, 5 + i, ld8(text, i))
+        i = i + 1
+    }
+    return 5 + m
+}
+
+fn enc_ping(out: u64, ts: u64) -> u64 {
+    st8(out, 0, T_PING)
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, 1 + i, ts >> (i * 8))
+        i = i + 1
+    }
+    return 9
+}
+
+fn enc_pong(out: u64, ts: u64) -> u64 {
+    st8(out, 0, T_PONG)
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, 1 + i, ts >> (i * 8))
+        i = i + 1
+    }
+    return 9
+}
+
+fn enc_needkey(out: u64) -> u64 {
+    st8(out, 0, T_NEEDKEY)
+    return 1
+}
+
+fn enc_setmon(out: u64, index: u64) -> u64 {
+    st8(out, 0, T_SETMON)
+    st8(out, 1, index)
+    return 2
+}
+
+// ------------------------------------------------------------ decode
+
+// ScreenInfo: out_wh gets w at [0], h at [1] (two u64 slots)
+fn dec_screen(p: u64, n: u64, out_wh: u64) -> bool {
+    if n < 9 || ld8(p, 0) != T_SCREEN {
+        return false
+    }
+    *((out_wh) as *mut u64) = le32(p, 1)
+    *((out_wh + 8) as *mut u64) = le32(p, 5)
+    return true
+}
+
+fn dec_frame(p: u64, n: u64, f: *mut Frame) -> bool {
+    if n < 13 || ld8(p, 0) != T_FRAME {
+        return false
+    }
+    let len: u64 = le32(p, 9)
+    if 13 + len > n {
+        return false
+    }
+    (*f).w = le32(p, 1)
+    (*f).h = le32(p, 5)
+    (*f).jpeg = p + 13
+    (*f).len = len
+    return true
+}
+
+fn tiles_begin(p: u64, n: u64, it: *mut TileIt) -> bool {
+    if n < 13 || ld8(p, 0) != T_TILES {
+        return false
+    }
+    let count: u64 = le32(p, 9)
+    if count > MAX_TILES {
+        return false
+    }
+    (*it).p = p
+    (*it).n = n
+    (*it).at = 13
+    (*it).left = count
+    (*it).w = le32(p, 1)
+    (*it).h = le32(p, 5)
+    return true
+}
+
+// Next tile; false at the end or when the message is cut short.
+fn tiles_next(it: *mut TileIt, t: *mut Tile) -> bool {
+    if (*it).left == 0 {
+        return false
+    }
+    let p: u64 = (*it).p
+    let at: u64 = (*it).at
+    if at + 20 > (*it).n {
+        (*it).left = 0
+        return false
+    }
+    let len: u64 = le32(p, at + 16)
+    if at + 20 + len > (*it).n {
+        (*it).left = 0
+        return false
+    }
+    (*t).x = le32(p, at)
+    (*t).y = le32(p, at + 4)
+    (*t).w = le32(p, at + 8)
+    (*t).h = le32(p, at + 12)
+    (*t).jpeg = p + at + 20
+    (*t).len = len
+    (*it).at = at + 20 + len
+    (*it).left = (*it).left - 1
+    return true
+}
+
+fn dec_cursor(p: u64, n: u64, c: *mut Cursor) -> bool {
+    if n < 10 || ld8(p, 0) != T_CURSOR {
+        return false
+    }
+    (*c).x = get_i32(p, 1)
+    (*c).y = get_i32(p, 5)
+    (*c).visible = ld8(p, 9) != 0
+    return true
+}
+
+// Clipboard text: out[0] = pointer, out[1] = length (into the message)
+fn dec_clip(p: u64, n: u64, out2: u64) -> bool {
+    if n < 5 || ld8(p, 0) != T_CLIP {
+        return false
+    }
+    let len: u64 = le32(p, 1)
+    if len > MAX_CLIP || 5 + len > n {
+        return false
+    }
+    *((out2) as *mut u64) = p + 5
+    *((out2 + 8) as *mut u64) = len
+    return true
+}
+
+fn dec_ping(p: u64, n: u64) -> u64 {
+    // returns the timestamp; a short message gives 0
+    if n < 9 {
+        return 0
+    }
+    var ts: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        ts = ts | (ld8(p, 1 + i) << (i * 8))
+        i = i + 1
+    }
+    return ts
+}
+
+// Monitors: active index and the count; false if malformed/out of limits.
+// out2[0] = active, out2[1] = count
+fn dec_monitors(p: u64, n: u64, out2: u64) -> bool {
+    if n < 6 || ld8(p, 0) != T_MONS {
+        return false
+    }
+    let count: u64 = le32(p, 2)
+    if count > MAX_MONITORS {
+        return false
+    }
+    *((out2) as *mut u64) = ld8(p, 1)
+    *((out2 + 8) as *mut u64) = count
+    return true
+}
+
+fn mon_count(p: u64, n: u64) -> u64 {
+    if n < 6 || ld8(p, 0) != T_MONS {
+        return 0
+    }
+    return le32(p, 2)
+}
+
+// Monitor `idx`: out4 = [w, h, primary, name_len]; name pointer is
+// returned (0 on error). Walks the records from the start.
+fn mon_at(p: u64, n: u64, idx: u64, out4: u64) -> u64 {
+    if n < 6 || ld8(p, 0) != T_MONS {
+        return 0
+    }
+    let count: u64 = le32(p, 2)
+    var at: u64 = 6
+    var i: u64 = 0
+    while i < count && i <= idx {
+        if at + 4 > n {
+            return 0
+        }
+        let nl: u64 = le32(p, at)
+        if at + 4 + nl + 9 > n {
+            return 0
+        }
+        if i == idx {
+            *((out4) as *mut u64) = le32(p, at + 4 + nl)
+            *((out4 + 8) as *mut u64) = le32(p, at + 8 + nl)
+            *((out4 + 16) as *mut u64) = ld8(p, at + 12 + nl)
+            *((out4 + 24) as *mut u64) = nl
+            return p + at + 4
+        }
+        at = at + 4 + nl + 9
+        i = i + 1
+    }
+    return 0
+}

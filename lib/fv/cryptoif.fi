@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/cryptoif.fi -- the ONE seam between the FreeViewer session code
+// (lib/fv/session.fi) and the crypto. MOCK VERSION.
+//
+// Same names and signatures as lib/fv/crypto.fi (worker W2: X25519, HKDF,
+// Argon2id, HMAC, AES-256-GCM). While that module is not on main, this
+// file stands in with PLAINTEXT stand-ins that keep the exact FRAMING of
+// the real protocol (0x10 || nonce(12) || payload || tag(16)) so the whole
+// state machine, the counters and the message layer are testable now.
+//
+//   !!! THIS MOCK IS NOT ENCRYPTION AND NOT A KEY EXCHANGE. !!!
+//   It must never talk to a real host. `IS_MOCK` is true here; the swap is
+//   one file: replace the bodies by calls into fv.crypto (same signatures),
+//   set IS_MOCK to false. The Python mock host (tools/fvviewer/mockrelay.py)
+//   implements the same stand-ins, so the swap also needs its --real flag.
+//
+// Stand-ins: keypair = deterministic bytes (counter), session_key =
+// SHA-256(client_pub || host_pub || salt), password_key = SHA-256(salt ||
+// password), auth_proof = SHA-256("fv-auth" || pwkey || client_pub ||
+// host_pub || salt), seal = frame with 16 zero tag octets.
+
+import crypto.sha256
+
+export { Cipher, cipher_new, cipher_init, seal, open, random_bytes, keypair,
+    session_key, session_code, password_key, auth_proof, proof_matches,
+    TAG_HELLO, TAG_HELLO_ACK, TAG_PROOF, TAG_OK, TAG_FAIL, TAG_ASK, TAG_DATA,
+    FRAME_OVERHEAD, IS_MOCK }
+
+const IS_MOCK: bool = true
+const TAG_HELLO: u8 = 1
+const TAG_HELLO_ACK: u8 = 2
+const TAG_PROOF: u8 = 3
+const TAG_OK: u8 = 4
+const TAG_FAIL: u8 = 5
+const TAG_ASK: u8 = 6
+const TAG_DATA: u8 = 16
+const FRAME_OVERHEAD: usize = 29
+
+static mut rnd: u64 = 0x9E3779B97F4A7C15
+
+struct Cipher {
+    dir_send: u8,
+    dir_recv: u8,
+    ctr_send: u64,
+    last_recv: u64,
+    ok: bool,
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn copy(dst: u64, doff: usize, src: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        st8(dst, doff + i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+fn random_bytes(p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        rnd = rnd ^ (rnd << 13)
+        rnd = rnd ^ (rnd >> 7)
+        rnd = rnd ^ (rnd << 17)
+        st8(p, i, (rnd & 255) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn keypair(priv_out: u64, pub_out: u64) -> bool {
+    let _a: bool = random_bytes(priv_out, 32)
+    copy(pub_out, 0, priv_out, 32)
+    return true
+}
+
+fn session_key(priv: u64, peer_pub: u64, salt: u64, out: u64) -> bool {
+    // own public key == own private key in the mock
+    var buf: [u8; 80] = [0 as u8; 80]
+    copy((&buf[0]) as u64, 0, priv, 32)
+    copy((&buf[0]) as u64, 32, peer_pub, 32)
+    copy((&buf[0]) as u64, 64, salt, 16)
+    sha256.hash((&buf[0]) as u64, 80, out)
+    return true
+}
+
+// 0..9999 from SHA256("freeviewer-v1 code" || key)[0..4] BE mod 10000.
+// This part is REAL (no secret handling beyond the hash) -- the host's
+// Rust code computes the same.
+fn session_code(key: u64, digits: u64) -> u64 {
+    var buf: [u8; 50] = [0 as u8; 50]
+    var lab: [u8; 19] = "freeviewer-v1 code\0"
+    copy((&buf[0]) as u64, 0, (&lab[0]) as u64, 18)
+    copy((&buf[0]) as u64, 18, key, 32)
+    var d: [u8; 32] = [0 as u8; 32]
+    sha256.hash((&buf[0]) as u64, 50, (&d[0]) as u64)
+    let v: u64 = ((d[0] as u64) << 24 | (d[1] as u64) << 16 | (d[2] as u64) << 8 | (d[3] as u64)) % 10000
+    if digits != 0 {
+        st8(digits, 0, (48 + v / 1000) as u8)
+        st8(digits, 1, (48 + (v / 100) % 10) as u8)
+        st8(digits, 2, (48 + (v / 10) % 10) as u8)
+        st8(digits, 3, (48 + v % 10) as u8)
+    }
+    return v
+}
+
+fn password_key(pw: u64, pwlen: usize, salt: u64, out: u64) -> bool {
+    var buf: [u8; 272] = [0 as u8; 272]
+    if pwlen > 256 {
+        return false
+    }
+    copy((&buf[0]) as u64, 0, salt, 16)
+    copy((&buf[0]) as u64, 16, pw, pwlen)
+    sha256.hash((&buf[0]) as u64, 16 + pwlen, out)
+    return true
+}
+
+fn auth_proof(pwkey: u64, client_pub: u64, host_pub: u64, salt: u64, out: u64) {
+    var buf: [u8; 128] = [0 as u8; 128]
+    var lab: [u8; 8] = "fv-auth\0"
+    copy((&buf[0]) as u64, 0, (&lab[0]) as u64, 7)
+    copy((&buf[0]) as u64, 7, pwkey, 32)
+    copy((&buf[0]) as u64, 39, client_pub, 32)
+    copy((&buf[0]) as u64, 71, host_pub, 32)
+    copy((&buf[0]) as u64, 103, salt, 16)
+    sha256.hash((&buf[0]) as u64, 119, out)
+}
+
+fn proof_matches(expected: u64, got: u64, gotlen: usize) -> bool {
+    if gotlen != 32 {
+        return false
+    }
+    var diff: u8 = 0 as u8
+    var i: usize = 0
+    while i < 32 {
+        diff = diff | (ld8(expected, i) ^ ld8(got, i))
+        i = i + 1
+    }
+    return diff == 0 as u8
+}
+
+fn cipher_new() -> Cipher {
+    return Cipher { dir_send: 0 as u8, dir_recv: 0 as u8, ctr_send: 0,
+        last_recv: 0, ok: false }
+}
+
+fn cipher_init(c: *mut Cipher, key: u64, is_host: bool) -> bool {
+    (*c).ctr_send = 0
+    (*c).last_recv = 0
+    if is_host {
+        (*c).dir_send = 1 as u8
+        (*c).dir_recv = 2 as u8
+    } else {
+        (*c).dir_send = 2 as u8
+        (*c).dir_recv = 1 as u8
+    }
+    (*c).ok = true
+    return true
+}
+
+fn seal(c: *mut Cipher, plain: u64, n: usize, out: u64) -> usize {
+    if !(*c).ok {
+        return 0
+    }
+    (*c).ctr_send = (*c).ctr_send + 1
+    st8(out, 0, TAG_DATA)
+    st8(out, 1, (*c).dir_send)
+    st8(out, 2, 0 as u8)
+    st8(out, 3, 0 as u8)
+    st8(out, 4, 0 as u8)
+    var i: usize = 0
+    while i < 8 {
+        st8(out, 5 + i, (((*c).ctr_send >> ((7 - i) as u64 * 8)) & 255) as u8)
+        i = i + 1
+    }
+    copy(out, 13, plain, n)
+    i = 0
+    while i < 16 {
+        st8(out, 13 + n + i, 0 as u8)
+        i = i + 1
+    }
+    return n + FRAME_OVERHEAD
+}
+
+fn open(c: *mut Cipher, frame: u64, flen: usize, out: u64) -> i64 {
+    if !(*c).ok || flen < FRAME_OVERHEAD {
+        return 0 - 1
+    }
+    if ld8(frame, 0) != TAG_DATA || ld8(frame, 1) != (*c).dir_recv {
+        return 0 - 1
+    }
+    var ctr: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        ctr = (ctr << 8) | (ld8(frame, 5 + i) as u64)
+        i = i + 1
+    }
+    if ctr <= (*c).last_recv {
+        return 0 - 1
+    }
+    (*c).last_recv = ctr
+    copy(out, 0, frame + 13, flen - FRAME_OVERHEAD)
+    return (flen - FRAME_OVERHEAD) as i64
+}

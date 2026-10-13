@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/session.fi -- FreeViewer relay JSON + handshake state machine
+// (viewer side), no I/O. Contract: docs/ORIENTOS-VIEWER.md sections 1.1-1.2
+// of /root/projects/freeviewer.
+//
+// RELAY (text frames, JSON): viewer sends {"t":"connect","id":"<9 digits>"};
+// relay answers {"t":"paired"}, {"t":"error","msg":"offline"|"busy"|..},
+// {"t":"peer_gone"}; also "ping"/"bye". `relay_kind` is a tiny scanner for
+// the "t" field, `relay_str` gets a string field (e.g. "msg").
+//
+// HANDSHAKE (binary frames after `paired`):
+//   hello(...)      -> 0x01 || client_pub(32)
+//   on_ack(...)     <- 0x02 || host_pub(32) || salt(16); derives the session
+//                      key + cipher + 4 digit code; answers
+//                      0x03 || proof(32)            (password mode)
+//                      0x06 || device_name(utf8)    (ask mode)
+//   on_result(...)  <- 0x04 OK | 0x05 wrong password / denied
+//   afterwards every message goes through seal_msg / open_msg
+// All crypto goes through lib/fv/cryptoif.fi (the seam to W2's fv.crypto).
+
+import fv.cryptoif
+
+export { Sess, sess_new, hello, on_ack, on_result, seal_msg, open_msg,
+    code_digits, relay_connect, relay_kind, relay_str,
+    ST_IDLE, ST_WAIT_ACK, ST_WAIT_AUTH, ST_OPEN, ST_DENIED, ST_FAILED,
+    R_NONE, R_PAIRED, R_ERROR, R_GONE, R_PING, R_BYE, R_OTHER }
+
+const ST_IDLE: u64 = 0
+const ST_WAIT_ACK: u64 = 1
+const ST_WAIT_AUTH: u64 = 2
+const ST_OPEN: u64 = 3
+const ST_DENIED: u64 = 4
+const ST_FAILED: u64 = 5
+
+const R_NONE: u64 = 0
+const R_PAIRED: u64 = 1
+const R_ERROR: u64 = 2
+const R_GONE: u64 = 3
+const R_PING: u64 = 4
+const R_BYE: u64 = 5
+const R_OTHER: u64 = 9
+
+struct Sess {
+    state: u64,
+    priv: [u8; 32],
+    pub: [u8; 32],
+    hpub: [u8; 32],
+    salt: [u8; 16],
+    key: [u8; 32],
+    pwkey: [u8; 32],
+    code: u64, // 0..9999
+    digits: [u8; 4],
+    cipher: cryptoif.Cipher,
+}
+
+fn sess_new() -> Sess {
+    return Sess { state: 0, priv: [0 as u8; 32], pub: [0 as u8; 32],
+        hpub: [0 as u8; 32], salt: [0 as u8; 16], key: [0 as u8; 32],
+        pwkey: [0 as u8; 32], code: 0, digits: [48 as u8; 4],
+        cipher: cryptoif.cipher_new() }
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn copy_in(dst: u64, doff: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, doff + i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+// ----------------------------------------------------------- handshake
+
+// Step 1: fresh key pair, writes 0x01 || pub (33 octets). Returns 33, 0 on
+// failure.
+fn hello(s: *mut Sess, out: u64) -> u64 {
+    if !cryptoif.keypair((&(*s).priv[0]) as u64, (&(*s).pub[0]) as u64) {
+        (*s).state = ST_FAILED
+        return 0
+    }
+    st8(out, 0, 1)
+    copy_in(out, 1, (&(*s).pub[0]) as u64, 32)
+    (*s).state = ST_WAIT_ACK
+    return 33
+}
+
+// Step 2: the host's answer. `password_mode` true: uses `pw`; false (ask
+// mode): sends `name` (device name shown to the host user). `out` needs
+// 33 + name length octets. Returns the answer length, 0 on failure
+// (state ST_FAILED).
+fn on_ack(s: *mut Sess, p: u64, n: u64, password_mode: bool, pw: u64,
+    pwlen: u64, name: u64, nlen: u64, out: u64) -> u64 {
+    if (*s).state != ST_WAIT_ACK || n != 49 || ld8(p, 0) != 2 {
+        (*s).state = ST_FAILED
+        return 0
+    }
+    copy_in((&(*s).hpub[0]) as u64, 0, p + 1, 32)
+    copy_in((&(*s).salt[0]) as u64, 0, p + 33, 16)
+    if !cryptoif.session_key((&(*s).priv[0]) as u64, (&(*s).hpub[0]) as u64,
+        (&(*s).salt[0]) as u64, (&(*s).key[0]) as u64) {
+        (*s).state = ST_FAILED
+        return 0
+    }
+    if !cryptoif.cipher_init(&(*s).cipher, (&(*s).key[0]) as u64, false) {
+        (*s).state = ST_FAILED
+        return 0
+    }
+    (*s).code = cryptoif.session_code((&(*s).key[0]) as u64, (&(*s).digits[0]) as u64)
+    var len: u64 = 0
+    if password_mode {
+        if !cryptoif.password_key(pw, pwlen as usize, (&(*s).salt[0]) as u64,
+            (&(*s).pwkey[0]) as u64) {
+            (*s).state = ST_FAILED
+            return 0
+        }
+        st8(out, 0, 3)
+        cryptoif.auth_proof((&(*s).pwkey[0]) as u64, (&(*s).pub[0]) as u64,
+            (&(*s).hpub[0]) as u64, (&(*s).salt[0]) as u64, out + 1)
+        len = 33
+    } else {
+        st8(out, 0, 6)
+        copy_in(out, 1, name, nlen)
+        len = 1 + nlen
+    }
+    // the password key is not needed any more: wipe it
+    var i: u64 = 0
+    while i < 32 {
+        (*s).pwkey[i as usize] = 0 as u8
+        i = i + 1
+    }
+    (*s).state = ST_WAIT_AUTH
+    return len
+}
+
+// Step 3: 0x04 -> 1 (open), 0x05 -> 2 (denied), anything else 0.
+fn on_result(s: *mut Sess, p: u64, n: u64) -> u64 {
+    if (*s).state != ST_WAIT_AUTH || n < 1 {
+        return 0
+    }
+    let t: u64 = ld8(p, 0)
+    if t == 4 {
+        (*s).state = ST_OPEN
+        return 1
+    }
+    if t == 5 {
+        (*s).state = ST_DENIED
+        return 2
+    }
+    return 0
+}
+
+// The 4 digit session code (ASCII) -- show it prominently in ask mode: it
+// is the only protection against a relay in the middle (roadmap r5).
+fn code_digits(s: *mut Sess) -> u64 {
+    return (&(*s).digits[0]) as u64
+}
+
+fn seal_msg(s: *mut Sess, plain: u64, n: u64, out: u64) -> u64 {
+    if (*s).state != ST_OPEN {
+        return 0
+    }
+    return cryptoif.seal(&(*s).cipher, plain, n as usize, out) as u64
+}
+
+// Returns the plaintext length or 0xFFFFFFFFFFFFFFFF on any failure.
+fn open_msg(s: *mut Sess, frame: u64, n: u64, out: u64) -> u64 {
+    if (*s).state != ST_OPEN {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let r: i64 = cryptoif.open(&(*s).cipher, frame, n as usize, out)
+    if r < 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return r as u64
+}
+
+// --------------------------------------------------------- relay JSON
+
+static mut J_CONN: [u8; 22] = "{\"t\":\"connect\",\"id\":\"\0"
+static mut J_END: [u8; 3] = "\"}\0"
+
+// {"t":"connect","id":"<id>"}; returns the length, 0 if `cap` is too small
+// or the id is not 1..32 digits.
+fn relay_connect(out: u64, cap: u64, id: u64, idlen: u64) -> u64 {
+    if idlen == 0 || idlen > 32 || 21 + idlen + 2 > cap {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 21 {
+        st8(out, i, J_CONN[i as usize] as u64)
+        i = i + 1
+    }
+    i = 0
+    while i < idlen {
+        let c: u64 = ld8(id, i)
+        if c < 48 || c > 57 {
+            return 0
+        }
+        st8(out, 21 + i, c)
+        i = i + 1
+    }
+    st8(out, 21 + idlen, 34)
+    st8(out, 22 + idlen, 125)
+    return 23 + idlen
+}
+
+// Finds the string value of "key" (key without quotes). Returns the
+// pointer to the first octet of the value and stores its length through
+// `outlen`; 0 if absent.
+fn relay_str(p: u64, n: u64, key: u64, klen: u64, outlen: u64) -> u64 {
+    var i: u64 = 0
+    while i + klen + 2 < n {
+        if ld8(p, i) == 34 && ld8(p, i + klen + 1) == 34 {
+            var k: u64 = 0
+            var same: bool = true
+            while k < klen {
+                if ld8(p, i + 1 + k) != ld8(key, k) {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same {
+                var j: u64 = i + klen + 2
+                while j < n && (ld8(p, j) == 32 || ld8(p, j) == 58) {
+                    j = j + 1
+                }
+                if j < n && ld8(p, j) == 34 {
+                    j = j + 1
+                    var e: u64 = j
+                    while e < n && ld8(p, e) != 34 {
+                        e = e + 1
+                    }
+                    *((outlen) as *mut u64) = e - j
+                    return p + j
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+static mut K_T: [u8; 2] = "t\0"
+
+fn eq_str(p: u64, n: u64, s: u64, sl: u64) -> bool {
+    if n != sl {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if ld8(p, i) != ld8(s, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+static mut V_PAIRED: [u8; 7] = "paired\0"
+static mut V_ERROR: [u8; 6] = "error\0"
+static mut V_GONE: [u8; 10] = "peer_gone\0"
+static mut V_PING: [u8; 5] = "ping\0"
+static mut V_BYE: [u8; 4] = "bye\0"
+
+fn relay_kind(p: u64, n: u64) -> u64 {
+    var vl: u64 = 0
+    let v: u64 = relay_str(p, n, (&K_T[0]) as u64, 1, (&vl) as u64)
+    if v == 0 {
+        return R_NONE
+    }
+    if eq_str(v, vl, (&V_PAIRED[0]) as u64, 6) {
+        return R_PAIRED
+    }
+    if eq_str(v, vl, (&V_ERROR[0]) as u64, 5) {
+        return R_ERROR
+    }
+    if eq_str(v, vl, (&V_GONE[0]) as u64, 9) {
+        return R_GONE
+    }
+    if eq_str(v, vl, (&V_PING[0]) as u64, 4) {
+        return R_PING
+    }
+    if eq_str(v, vl, (&V_BYE[0]) as u64, 3) {
+        return R_BYE
+    }
+    return R_OTHER
+}
