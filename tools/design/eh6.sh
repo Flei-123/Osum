@@ -154,10 +154,13 @@ for p in $progs; do
     fi
     UPROF=""; UCRT="$BUILDD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    # EH_APP_PROGS="fvviewer": ring 3 app profile, linked like pakete/bauen.sh (no crt, no USER_ENTRY)
+    UENTRY="--defsym=USER_ENTRY=_F0.u_start"
+    case " ${EH_APP_PROGS:-} " in *" $p "*) UPROF=--profile=app; UCRT=""; UENTRY="" ;; esac
     vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -30 "$BUILDD/e-$p"; exit 1; }
-    ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
+    ld -T kernel/user/user.ld $UENTRY \
         -o "$BUILDD/$p.elf" $UCRT "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
         || { echo "FEHLGESCHLAGEN beim Binden von $p"; cat "$BUILDD/ld.err"; exit 1; }
     strip --strip-all "$BUILDD/$p.elf"

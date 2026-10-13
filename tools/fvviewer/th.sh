@@ -18,9 +18,9 @@ PW=${FV_TH_PASSWORD:-testpass123}
 mkdir -p "$S/home"
 host_start() {
     # an old host process must be gone (its ID stays registered at the relay, that is fine)
-    ( cd "$S" && HOME="$S/home" FV_RELAY="ws://127.0.0.1:$(cat "$S/relay.port")/fv/ws" FV_ALLOW_INSECURE_RELAY=1 \
+    ( cd "$S"; HOME="$S/home" FV_RELAY="ws://127.0.0.1:$(cat "$S/relay.port")/fv/ws" FV_ALLOW_INSECURE_RELAY=1 \
         FV_TESTHOST=1 FV_AUTOCONFIRM=1 FV_PASSWORD="$PW" FV_TESTHOST_LOG="$S/input.log" \
-        nohup "$FVBIN" --headless >>"$S/host.log" 2>&1 & echo $! > "$S/host.pid" )
+        nohup "$FVBIN" --headless >>"$S/host.log" 2>&1 & echo $! > "$S/host.pid" ) >/dev/null 2>&1 </dev/null
     for _ in $(seq 1 100); do
         id=$(grep -oE '^ID [0-9]{9}' "$S/host.log" | tail -1 | cut -d' ' -f2)
         [ -n "$id" ] && { echo "$id" > "$S/id"; return 0; }
@@ -33,7 +33,7 @@ up)
     RP=${1:?relay port}; TP=${2:-}
     echo "$RP" > "$S/relay.port"
     cp "$FVREPO/relay/relay.js" "$S/relay.cjs"
-    ( cd "$S" && FV_PORT="$RP" FV_DATA="$S/hosts.json" nohup node "$S/relay.cjs" >"$S/relay.log" 2>&1 & echo $! > "$S/relay.pid" )
+    ( cd "$S"; FV_PORT="$RP" FV_DATA="$S/hosts.json" nohup node "$S/relay.cjs" >"$S/relay.log" 2>&1 & echo $! > "$S/relay.pid" ) >/dev/null 2>&1 </dev/null
     for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$RP/fv/health" >/dev/null 2>&1 && break; sleep 0.1; done
     curl -fsS "http://127.0.0.1:$RP/fv/health" >/dev/null || { echo "relay did not start"; exit 1; }
     if [ -n "$TP" ]; then
@@ -47,7 +47,7 @@ up)
             -extfile "$S/ext" -out "$S/srv.pem" 2>/dev/null
         cat "$S/srv.pem" > "$S/chain.pem"
         ( nohup socat OPENSSL-LISTEN:"$TP",reuseaddr,fork,cert="$S/chain.pem",key="$S/srv.key",verify=0 \
-            TCP:127.0.0.1:"$RP" >"$S/socat.log" 2>&1 & echo $! > "$S/socat.pid" )
+            TCP:127.0.0.1:"$RP" >"$S/socat.log" 2>&1 & echo $! > "$S/socat.pid" ) >/dev/null 2>&1 </dev/null
         sleep 0.5
     fi
     host_start || { echo "host did not register"; tail -5 "$S/host.log"; exit 1; }
