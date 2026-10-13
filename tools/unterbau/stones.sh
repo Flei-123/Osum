@@ -25,7 +25,7 @@ echo "ST git-commit $(cd /tmp/gt && /bin/git config user.email a@b && /bin/git c
 # only with STONES_NET=1 (virtio-net + http server of the host at 10.0.2.2:18765)
 $B sleep 3
 echo "ST net-curl-http $(/bin/curl -sS --max-time 15 http://10.0.2.2:18765/h.txt 2>&1 | $B tail -n 1)"
-echo "ST net-py-http $(/bin/python3 -c 'import socket;s=socket.create_connection(("10.0.2.2",18765),5);s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(s.recv(300).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
+echo "ST net-py-http $(/bin/python3 -c 'import socket;s=socket.create_connection(("10.0.2.2",18765),5);s.sendall(b"GET /h.txt HTTP/1.0\r\n\r\n");print(b"".join(iter(lambda:s.recv(300),b"")).split(b"\r\n\r\n")[-1].decode().strip())' 2>&1 | $B tail -n 1)"
 # TLS stone (curl + mbedtls, r697): needs the throw-away https server of the host at 10.0.2.2:18766 and /etc/tls-ca.pem
 echo "ST nettls-curl-https $(/bin/curl -sS --max-time 30 --cacert /etc/tls-ca.pem https://10.0.2.2:18766/h.txt 2>&1 | $B tail -n 1)"
 echo "ST nettls-curl-k $(/bin/curl -sSk --max-time 30 https://10.0.2.2:18766/h.txt 2>&1 | $B tail -n 1)"

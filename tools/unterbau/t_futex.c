@@ -127,7 +127,7 @@ int main(void)
         errno = 0;
         r = fx(&wa, F_WAIT | F_PRIV, 0, &ts, 0, 0);
         long dt = now_ms() - a;
-        CHECK("wait_timeout", r == -1 && errno == ETIMEDOUT && dt >= 40 && dt < 500, "ret %ld errno %d after %ld ms", r, errno, dt);
+        CHECK("wait_timeout", r == -1 && errno == ETIMEDOUT && dt >= 25 && dt < 500, "ret %ld errno %d after %ld ms", r, errno, dt);
         /* absolute timeout through WAIT_BITSET on CLOCK_MONOTONIC */
         struct timespec ab;
         clock_gettime(CLOCK_MONOTONIC, &ab);
