@@ -1,0 +1,304 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/input.fi -- FreeViewer viewer input mapping (pure logic, no I/O).
+//
+//   key_msgs(out, lens, code, mod)   one OrientOS key event -> 0..MAX_MSGS wire messages
+//   view_rect(...)                   where the remote picture sits in its box
+//   map_pointer(...)                 window pixel -> 0..10000 on the remote screen
+//
+// OrientOS delivers key DOWN events only (fuiapp.EV_KEY: wlib key code + wlib.key_mod()),
+// so every key is sent as down followed by up. Code values below are copies of the
+// KEY_* table of kernel/user/wlib.fi (a lib must not import wlib).
+//
+// Rules (Rust contract: proto.rs Key / KeyVk / Special):
+//   * no modifier: named keys -> Key{KEY_*, named}, printable -> Key{unicode}
+//     (AltGr characters such as @ and the euro sign arrive from the OS as the finished
+//     character, so they travel as unicode and need no AltGr state on the host)
+//   * Shift only + printable: the OS already shifted it -> unicode
+//   * any Ctrl/Alt (or Shift + named key): KeyVk with the modifiers around it
+//   * Ctrl+Alt+Del -> Special CAD, Alt+Tab -> Special ALTTAB
+//   * Ctrl+letter arrives as code 1..26 (kernel/kbd.fi) except BS/TAB/ENTER; Ctrl+H and
+//     Ctrl+N have their own codes
+//
+// A message i is written at out + i * SLOT; its length is the octet lens[i].
+
+import fv.proto
+
+export { Rect, rect_new, key_msgs, view_rect, map_pointer, norm_axis, mod_bits,
+    SLOT, MAX_MSGS, NORM_MAX,
+    VK_SHIFT, VK_CTRL, VK_ALT, VK_WIN }
+
+const SLOT: u64 = 16
+const MAX_MSGS: u64 = 12
+const NORM_MAX: u64 = 10000
+
+const VK_SHIFT: u64 = 0x10
+const VK_CTRL: u64 = 0x11
+const VK_ALT: u64 = 0x12
+const VK_WIN: u64 = 0x5B
+
+// modifier bits (xterm number - 1): 1 shift, 2 alt, 4 ctrl
+const M_SHIFT: u64 = 1
+const M_ALT: u64 = 2
+const M_CTRL: u64 = 4
+
+// OrientOS key codes (kernel/user/wlib.fi)
+const OK_BS: u64 = 8
+const OK_TAB: u64 = 9
+const OK_ENTER: u64 = 13
+const OK_ESC: u64 = 27
+const OK_UP: u64 = 0x101
+const OK_DOWN: u64 = 0x102
+const OK_LEFT: u64 = 0x103
+const OK_RIGHT: u64 = 0x104
+const OK_HOME: u64 = 0x105
+const OK_END: u64 = 0x106
+const OK_PGUP: u64 = 0x107
+const OK_PGDN: u64 = 0x108
+const OK_DEL: u64 = 0x109
+const OK_SDEL: u64 = 0x10A
+const OK_BTAB: u64 = 0x10B
+const OK_F1: u64 = 0x110
+const OK_F10: u64 = 0x119
+const OK_OLD_ENTER: u64 = 0x120
+const OK_OLD_LEFT: u64 = 0x121
+const OK_OLD_RIGHT: u64 = 0x122
+const OK_OLD_UP: u64 = 0x123
+const OK_CTRL_H: u64 = 0x130
+const OK_CTRL_N: u64 = 0x131
+
+struct Sink {
+    out: u64,
+    lens: u64,
+    n: u64,
+}
+
+// wlib.key_mod() (xterm: 0 none, 2 shift, 3 alt, 4 alt+shift, 5 ctrl, 6 ctrl+shift,
+// 7 ctrl+alt, 8 ctrl+alt+shift) -> bit set
+fn mod_bits(m: u64) -> u64 {
+    if m < 2 {
+        return 0
+    }
+    return (m - 1) & 7
+}
+
+fn put(k: *mut Sink, len: u64) {
+    *(((*k).lens + (*k).n) as *mut u8) = (len & 255) as u8
+    (*k).n = (*k).n + 1
+}
+
+fn e_vk(k: *mut Sink, vk: u64, ext: bool, down: bool) {
+    if (*k).n < MAX_MSGS {
+        put(k, proto.enc_keyvk((*k).out + (*k).n * SLOT, vk, ext, down))
+    }
+}
+
+fn e_named(k: *mut Sink, code: u64, down: bool) {
+    if (*k).n < MAX_MSGS {
+        put(k, proto.enc_key((*k).out + (*k).n * SLOT, code, true, down))
+    }
+}
+
+fn e_uni(k: *mut Sink, code: u64, down: bool) {
+    if (*k).n < MAX_MSGS {
+        put(k, proto.enc_key((*k).out + (*k).n * SLOT, code, false, down))
+    }
+}
+
+fn e_special(k: *mut Sink, code: u64) {
+    if (*k).n < MAX_MSGS {
+        put(k, proto.enc_special((*k).out + (*k).n * SLOT, code))
+    }
+}
+
+// OrientOS code -> proto KEY_* (0 = not a named key)
+fn named_of(c: u64) -> u64 {
+    if c == OK_BS { return proto.KEY_BACKSPACE }
+    if c == OK_ENTER { return proto.KEY_ENTER }
+    if c == OK_TAB || c == OK_BTAB { return proto.KEY_TAB }
+    if c == OK_ESC { return proto.KEY_ESCAPE }
+    if c == OK_LEFT { return proto.KEY_LEFT }
+    if c == OK_RIGHT { return proto.KEY_RIGHT }
+    if c == OK_UP { return proto.KEY_UP }
+    if c == OK_DOWN { return proto.KEY_DOWN }
+    if c == OK_DEL || c == OK_SDEL { return proto.KEY_DELETE }
+    if c == OK_HOME { return proto.KEY_HOME }
+    if c == OK_END { return proto.KEY_END }
+    if c == OK_PGUP { return proto.KEY_PAGEUP }
+    if c == OK_PGDN { return proto.KEY_PAGEDOWN }
+    if c >= OK_F1 && c <= OK_F10 { return proto.KEY_F1 + (c - OK_F1) }
+    return 0
+}
+
+// proto KEY_* -> Windows virtual key | (extended flag << 8); 0 = none
+fn vk_of_named(k: u64) -> u64 {
+    if k == proto.KEY_BACKSPACE { return 0x08 }
+    if k == proto.KEY_ENTER { return 0x0D }
+    if k == proto.KEY_TAB { return 0x09 }
+    if k == proto.KEY_ESCAPE { return 0x1B }
+    if k == proto.KEY_SPACE { return 0x20 }
+    if k == proto.KEY_LEFT { return 0x125 }
+    if k == proto.KEY_UP { return 0x126 }
+    if k == proto.KEY_RIGHT { return 0x127 }
+    if k == proto.KEY_DOWN { return 0x128 }
+    if k == proto.KEY_PAGEUP { return 0x121 }
+    if k == proto.KEY_PAGEDOWN { return 0x122 }
+    if k == proto.KEY_END { return 0x123 }
+    if k == proto.KEY_HOME { return 0x124 }
+    if k == proto.KEY_INSERT { return 0x12D }
+    if k == proto.KEY_DELETE { return 0x12E }
+    if k >= proto.KEY_F1 && k <= proto.KEY_F1 + 11 { return 0x70 + (k - proto.KEY_F1) }
+    return 0
+}
+
+fn mods_down(k: *mut Sink, m: u64, down: bool) {
+    if (m & M_CTRL) != 0 { e_vk(k, VK_CTRL, false, down) }
+    if (m & M_ALT) != 0 { e_vk(k, VK_ALT, false, down) }
+    if (m & M_SHIFT) != 0 { e_vk(k, VK_SHIFT, false, down) }
+}
+
+fn is_printable(c: u64) -> bool {
+    return (c >= 32 && c < 127) || (c >= 160 && c < 256)
+}
+
+// One OrientOS key event -> wire messages. Returns the number of messages (0 = ignored).
+fn key_msgs(out: u64, lens: u64, code: u64, mod: u64) -> u64 {
+    var sk: Sink = Sink { out: out, lens: lens, n: 0 }
+    let k: *mut Sink = &sk
+    var m: u64 = mod_bits(mod)
+    var c: u64 = code
+    var vk: u64 = 0 // vk | ext << 8
+    var named: u64 = 0
+
+    // combinations that cannot be injected as plain keys
+    if (c == OK_DEL || c == OK_SDEL) && (m & 6) == 6 {
+        e_special(k, proto.SPECIAL_CAD)
+        return sk.n
+    }
+    if c == OK_TAB && (m & M_ALT) != 0 && (m & M_CTRL) == 0 {
+        e_special(k, proto.SPECIAL_ALTTAB)
+        return sk.n
+    }
+
+    if c == OK_SDEL { m = m | M_SHIFT }
+    if c == OK_BTAB { m = m | M_SHIFT }
+    if c == OK_CTRL_H {
+        vk = 0x48
+        m = m | M_CTRL
+    } else if c == OK_CTRL_N {
+        vk = 0x4E
+        m = m | M_CTRL
+    } else if c == OK_OLD_ENTER {
+        vk = 0x0D
+        m = m | M_ALT
+    } else if c == OK_OLD_LEFT {
+        vk = 0x125
+        m = m | M_ALT
+    } else if c == OK_OLD_RIGHT {
+        vk = 0x127
+        m = m | M_ALT
+    } else if c == OK_OLD_UP {
+        vk = 0x126
+        m = m | M_ALT
+    } else if c >= 1 && c <= 26 && c != OK_BS && c != OK_TAB && c != OK_ENTER {
+        vk = 0x40 + c // Ctrl+A .. Ctrl+Z
+        m = m | M_CTRL
+    } else {
+        named = named_of(c)
+        if named != 0 {
+            vk = vk_of_named(named)
+        } else if c == 32 {
+            named = proto.KEY_SPACE
+            vk = 0x20
+        } else if c >= 97 && c <= 122 {
+            vk = c - 32
+        } else if c >= 65 && c <= 90 {
+            vk = c
+        } else if c >= 48 && c <= 57 {
+            vk = c
+        }
+    }
+
+    if m == 0 || (m == M_SHIFT && named == 0 && is_printable(c)) {
+        // plain
+        if named != 0 {
+            e_named(k, named, true)
+            e_named(k, named, false)
+            return sk.n
+        }
+        if is_printable(c) {
+            e_uni(k, c, true)
+            e_uni(k, c, false)
+            return sk.n
+        }
+        return 0
+    }
+
+    // modified: virtual keys
+    if vk != 0 {
+        mods_down(k, m, true)
+        e_vk(k, vk & 255, (vk >> 8) != 0, true)
+        e_vk(k, vk & 255, (vk >> 8) != 0, false)
+        mods_down(k, m, false)
+        return sk.n
+    }
+    if is_printable(c) {
+        // Ctrl/Alt + a character without a virtual key of its own: modifiers + unicode
+        mods_down(k, m, true)
+        e_uni(k, c, true)
+        e_uni(k, c, false)
+        mods_down(k, m, false)
+        return sk.n
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ pointer
+
+// pos relative to the picture origin, size of the picture -> 0..10000 (clamped)
+fn norm_axis(pos: i64, size: u64) -> u64 {
+    if size <= 1 || pos <= 0 {
+        return 0
+    }
+    if pos >= (size as i64) - 1 {
+        return NORM_MAX
+    }
+    return (pos as u64) * NORM_MAX / (size - 1)
+}
+
+struct Rect {
+    x: i64,
+    y: i64,
+    w: u64,
+    h: u64,
+}
+
+fn rect_new() -> Rect {
+    return Rect { x: 0, y: 0, w: 0, h: 0 }
+}
+
+// The remote picture rw x rh shown with zoom percent `zoom` centred in the box
+// (bx, by, bw, bh) (fuiscene.image: ox = x + (w - zw) / 2). Values are window pixels.
+fn view_rect(bx: u64, by: u64, bw: u64, bh: u64, rw: u64, rh: u64, zoom: u64, r: *mut Rect) {
+    let zw: u64 = rw * zoom / 100
+    let zh: u64 = rh * zoom / 100
+    (*r).x = (bx as i64) + ((bw as i64) - (zw as i64)) / 2
+    (*r).y = (by as i64) + ((bh as i64) - (zh as i64)) / 2
+    (*r).w = zw
+    (*r).h = zh
+}
+
+// window pixel (px, py) -> normalized remote position out_xy[0..2]. false = the pointer is
+// outside the picture (nothing to send).
+fn map_pointer(px: u64, py: u64, r: *mut Rect, out_xy: *mut u64) -> bool {
+    if (*r).w == 0 || (*r).h == 0 {
+        return false
+    }
+    let rx: i64 = (px as i64) - (*r).x
+    let ry: i64 = (py as i64) - (*r).y
+    if rx < 0 || ry < 0 || rx >= ((*r).w as i64) || ry >= ((*r).h as i64) {
+        return false
+    }
+    *out_xy = norm_axis(rx, (*r).w)
+    *((out_xy as u64 + 8) as *mut u64) = norm_axis(ry, (*r).h)
+    return true
+}

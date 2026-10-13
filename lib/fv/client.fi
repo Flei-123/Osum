@@ -28,7 +28,7 @@ import fv.session
 import fv.proto
 
 export { Client, client_new, cl_alloc, cl_connect, cl_pair, cl_handshake,
-    cl_handshake_ask, cl_send, cl_recv, cl_close, cl_set_timeout, cl_timed_out, cl_code,
+    cl_handshake_ask, cl_handshake_begin, cl_handshake_poll, cl_send, cl_recv, cl_close, cl_set_timeout, cl_timed_out, cl_code,
     E_OK, E_TCP, E_TLS, E_UPGRADE, E_RELAY, E_AUTH, E_DENIED, E_PROTO, E_IO,
     E_MEM, E_GONE, E_CRYPTO }
 
@@ -72,6 +72,7 @@ struct Client {
     errlen: u64,
     pending: bool, // a ws event is pending (needs ws.take)
     timeout: bool, // the last failed read was only the socket timeout (EAGAIN)
+    askmode: bool,
 }
 
 fn client_new() -> Client {
@@ -79,7 +80,7 @@ fn client_new() -> Client {
         secure: false, t: tls.tls_new(), store: x509.store_new(),
         storebuf: rt.buf_new(), ebuf: rt.buf_new(), w: ws.ws_new(), s: session.sess_new(),
         rbuf: 0, rpos: 0, rlen: 0, wmsg: 0, pbuf: 0, obuf: 0, sbuf: 0,
-        fbuf: 0, err: 0, errtxt: [0 as u8; 64], errlen: 0, pending: false, timeout: false }
+        fbuf: 0, err: 0, errtxt: [0 as u8; 64], errlen: 0, pending: false, timeout: false, askmode: false }
 }
 
 fn ld8(p: u64, i: u64) -> u64 {
@@ -409,7 +410,9 @@ fn cl_pair(cl: *mut Client, id: u64, idlen: u64) -> bool {
 
 // ------------------------------------------------------------ handshake
 
-fn hs_common(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
+// first half of the handshake: hello, ack, answer sent. After it the 4 digit code is known
+// (cl_code) -- the ask mode UI shows it while the host user decides.
+fn hs_begin(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
     name: u64, nlen: u64) -> bool {
     let hl: u64 = session.hello(&(*cl).s, (*cl).obuf)
     if hl == 0 {
@@ -430,7 +433,32 @@ fn hs_common(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
         (*cl).err = E_CRYPTO
         return false
     }
-    if !ws_send(cl, ws.OP_BINARY, (*cl).sbuf, al) {
+    (*cl).askmode = !password_mode
+    return ws_send(cl, ws.OP_BINARY, (*cl).sbuf, al)
+}
+
+// second half: the result message is in the ws object (next_binary returned 1)
+fn hs_result(cl: *mut Client) -> bool {
+    let res: u64 = session.on_result(&(*cl).s, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
+    release(cl)
+    if res == 1 {
+        return true
+    }
+    if res == 2 {
+        if (*cl).askmode {
+            (*cl).err = E_DENIED
+        } else {
+            (*cl).err = E_AUTH
+        }
+        return false
+    }
+    (*cl).err = E_PROTO
+    return false
+}
+
+fn hs_common(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
+    name: u64, nlen: u64) -> bool {
+    if !hs_begin(cl, password_mode, pw, pwlen, name, nlen) {
         return false
     }
     // the host user may take a while to confirm in ask mode
@@ -442,21 +470,29 @@ fn hs_common(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
     if r2 != 1 {
         return false
     }
-    let res: u64 = session.on_result(&(*cl).s, ws.msg_ptr(&(*cl).w), ws.msg_len(&(*cl).w))
-    release(cl)
-    if res == 1 {
-        return true
-    }
-    if res == 2 {
-        if password_mode {
-            (*cl).err = E_AUTH
-        } else {
-            (*cl).err = E_DENIED
+    return hs_result(cl)
+}
+
+// Non-blocking style handshake for a window: cl_handshake_begin sends everything up to the
+// answer, then cl_handshake_poll (socket timeout set by the caller, e.g. 50 ms) is called
+// until it returns 1 (session up) or -1 (failed, (*cl).err). 0 = still waiting.
+fn cl_handshake_begin(cl: *mut Client, password_mode: bool, pw: u64, pwlen: u64,
+    name: u64, nlen: u64) -> bool {
+    return hs_begin(cl, password_mode, pw, pwlen, name, nlen)
+}
+
+fn cl_handshake_poll(cl: *mut Client) -> i64 {
+    let r: u64 = next_binary(cl)
+    if r == 1 {
+        if hs_result(cl) {
+            return 1
         }
-        return false
+        return 0 - 1
     }
-    (*cl).err = E_PROTO
-    return false
+    if cl_timed_out(cl) {
+        return 0
+    }
+    return 0 - 1
 }
 
 fn cl_handshake(cl: *mut Client, pw: u64, pwlen: u64) -> bool {

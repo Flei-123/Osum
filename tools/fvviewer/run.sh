@@ -47,6 +47,14 @@ else
     echo "  SKIP  Rust vectors not found ($RUSTVEC)"
 fi
 
+# ---- 4b: lib/fv/input.fi (key + pointer mapping) against an independent model of the wire format
+vendor/firn/bin/firnc tools/fvviewer/it.fi -o "$D/it" > "$D/it.log" 2>&1 && ok "it (input test driver) builds" || { bad "it build"; head -5 "$D/it.log"; }
+if [ -x "$D/it" ]; then
+    python3 -I tools/fvviewer/inputtest.py "$D/it" > "$D/in.txt" 2>&1 && ok "input.fi: $(tail -1 "$D/in.txt")" || { bad "input.fi mapping"; head -8 "$D/in.txt"; }
+    printf '#!/bin/sh\necho x\n' > "$D/fakeit"; chmod +x "$D/fakeit"
+    python3 -I tools/fvviewer/inputtest.py "$D/fakeit" > /dev/null 2>&1 && bad "counter-check: a wrong mapping was accepted" || ok "counter-check: a wrong mapping is caught"
+fi
+
 # ---- 5+6: the app (kernel/user/fvviewer.fi) against the synthetic Rust test host
 # Needs the Rust test-host binary (FV_BIN, default /root/abbilder/fv-testhost/freeviewer; build:
 #   CARGO_TARGET_DIR=<dir> /root/jarvis/bin/heavy cargo build   in /root/projects/freeviewer) and node.
@@ -82,6 +90,9 @@ if [ -x "$FVBIN" ] && [ -x "$D/fvv" ] && command -v node >/dev/null; then
         sleep 1
         grep -q "TESTHOST input: MouseButton button=0 down=true" "$D/th.log" && grep -q "TESTHOST input: Clipboard len=8 text=fvv-clip" "$D/th.log" \
             && ok "host: the test host logged the click and the clipboard text" || bad "host: input not logged by the test host"
+        for want in "Key code=97 named=false down=true" "Key code=2 named=true down=true" "KeyVk vk=17 ext=false down=true" "KeyVk vk=67 ext=false down=true" "Special code=1" "Key code=34 named=true down=true" "KeyVk vk=37 ext=true down=true" "Special code=4"; do
+            grep -q "TESTHOST input: $want" "$D/th.log" && ok "host: key message logged: $want" || bad "host: key message missing in the test host log: $want"
+        done
         timeout 90 "$D/fvv" -t 127.0.0.1 "$PORT" "$ID" wrong-password > "$D/h2.txt" 2>&1 && bad "host: wrong password was accepted" \
             || { grep -q "FAIL  handshake" "$D/h2.txt" && ok "host: wrong password is refused (counter-check)" || bad "host: wrong password: no clean refusal"; }
         sleep 1
