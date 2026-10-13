@@ -73,7 +73,7 @@ struct Client {
     pending: bool, // a ws event is pending (needs ws.take)
     timeout: bool, // the last failed read was only the socket timeout (EAGAIN)
     askmode: bool,
-    wait_ms: u64, // secure link: how long a read waits for data (poll before tls_read, see xread)
+    wait_ms: u64, // how long a read waits for data (poll before the read, see xread / cl_set_timeout)
 }
 
 fn client_new() -> Client {
@@ -130,12 +130,14 @@ fn cl_timed_out(cl: *mut Client) -> bool {
     return false
 }
 
-// Plain link: SO_RCVTIMEO. TLS link: NEVER a socket timeout -- tls_read treats a failed read as a
-// dead stream (closed = true), so a quiet link would end the session. The wait is done with
-// poll() before tls_read (xread); the socket keeps its long timeout set in cl_connect.
+// Read wait. SO_RCVTIMEO is set as a best effort (works on Linux/Windows), but OrientOS accepts setsockopt
+// as a no-op: a "timed" read there blocks until data arrives, which stalls the GUI loop (r51, picture
+// delay) and, on a TLS link, would be fatal anyway (tls_read treats a failed read as a dead stream,
+// closed = true). So the wait is done with poll() before the read (xread) on BOTH links; the socket
+// keeps its long timeout set in cl_connect (only for a record that stalls half way).
 fn cl_set_timeout(cl: *mut Client, ms: u64) {
+    (*cl).wait_ms = ms
     if (*cl).secure {
-        (*cl).wait_ms = ms
         return
     }
     let ok: bool = net.set_timeout(&(*cl).conn, ms) catch false
@@ -164,12 +166,12 @@ fn sock_ready(cl: *mut Client, ms: u64) -> bool {
 fn xread(cl: *mut Client, p: u64, max: u64) -> u64 {
     var bad: bool = false
     var n: usize = 0
+    if (*cl).wait_ms > 0 && !((*cl).secure && tls_buffered(cl)) && !sock_ready(cl, (*cl).wait_ms) {
+        (*cl).err = E_IO
+        (*cl).timeout = true
+        return 0
+    }
     if (*cl).secure {
-        if (*cl).wait_ms > 0 && !tls_buffered(cl) && !sock_ready(cl, (*cl).wait_ms) {
-            (*cl).err = E_IO
-            (*cl).timeout = true
-            return 0
-        }
         n = tls.tls_read(&(*cl).t, p, max as usize)
         catch | e | tls.tls_fail_len(&(*cl).ebuf, e, &bad)
     } else {

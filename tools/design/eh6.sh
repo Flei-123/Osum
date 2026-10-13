@@ -335,6 +335,8 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 APPEND="osum gfx disp fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
 [ "$tafel" = nein ] && APPEND="${APPEND/ tafel herz/}"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
+# EH_APPEND: extra kernel words from a test runner (e.g. `rtcutc`: QEMU's RTC holds UTC, the kernel default reads it as local time)
+[ -n "${EH_APPEND:-}" ] && APPEND="$APPEND $EH_APPEND"
 [ -n "$SKAL" ] && APPEND="$APPEND $SKAL"
 [ "$halt" != 0 ] && APPEND="$APPEND wighalt=$halt"
 [ -n "$extra" ] && APPEND="$APPEND $extra"

@@ -6,7 +6,7 @@
 #   th.sh <statedir> host-kill                      kill ONLY the Rust test host (the relay stays)
 #   th.sh <statedir> host-start                     start the host again (same HOME => same ID)
 #   th.sh <statedir> down                           stop everything
-#   th.sh <statedir> id                             print the 9 digit host ID
+#   th.sh <statedir> id                             print the host ID (9 or 10 digits)
 #
 # The state dir holds: home/ (host config, keeps the ID), relay.cjs, logs, pids. Needs node, socat, openssl,
 # FV_BIN (Rust binary, default /root/abbilder/fv-testhost/freeviewer) and the freeviewer repo (FVV_RUST_REPO).
@@ -23,7 +23,7 @@ host_start() {
         FV_TESTHOST=1 FV_AUTOCONFIRM=1 FV_PASSWORD="$PW" FV_TESTHOST_LOG="$S/input.log" \
         nohup "$FVBIN" --headless >>"$S/host.log" 2>&1 & echo $! > "$S/host.pid" ) >/dev/null 2>&1 </dev/null
     for _ in $(seq 1 100); do
-        id=$(grep -oE '^ID [0-9]{9}' "$S/host.log" | tail -1 | cut -d' ' -f2)
+        id=$(grep -oE '^ID [0-9]{9,10}' "$S/host.log" | tail -1 | cut -d' ' -f2)
         [ -n "$id" ] && { echo "$id" > "$S/id"; return 0; }
         sleep 0.2
     done

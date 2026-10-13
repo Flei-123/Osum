@@ -546,6 +546,11 @@ static mut t_mark_paints: u64 = 0 // fuiscene.painted() at that moment
 static mut t_click_at: u64 = 0 // when the last button-down went out (0 = none pending)
 static mut t_dec_ms: u64 = 0 // time spent in handle_msg, this second
 static mut t_msgs: u64 = 0
+static mut t_tick_last: u64 = 0 // start of the previous live_tick (gate trace)
+static mut t_gap_max: u64 = 0 // longest gap between two live_ticks this second
+static mut t_to_max: u64 = 0 // longest cl_recv that ended in a timeout this second
+static mut t_to_sum: u64 = 0 // total time spent in timed-out cl_recv this second
+static mut t_ticks: u64 = 0
 static mut t_live_at: u64 = 0
 static mut t_conn_t0: u64 = 0
 static mut t_rects: u64 = 0
@@ -1305,6 +1310,13 @@ fn drain_input(cl: *mut client.Client) {
 // one pass of the live session; false = the connection ended
 fn live_tick(cl: *mut client.Client) -> bool {
     let now: u64 = fuiapp.now_ms()
+    if TEST_ON {
+        if t_tick_last != 0 && now - t_tick_last > t_gap_max {
+            t_gap_max = now - t_tick_last
+        }
+        t_tick_last = now
+        t_ticks = t_ticks + 1
+    }
     drain_input(cl)
     clip_sync(cl, now)
     if now >= ping_at + 2000 {
@@ -1314,9 +1326,17 @@ fn live_tick(cl: *mut client.Client) -> bool {
     }
     var got: u64 = 0
     while got < 8 {
+        let r0: u64 = fuiapp.now_ms()
         let len: i64 = client.cl_recv(cl)
         if len < 0 {
             if client.cl_timed_out(cl) {
+                if TEST_ON {
+                    let dt: u64 = fuiapp.now_ms() - r0
+                    t_to_sum = t_to_sum + dt
+                    if dt > t_to_max {
+                        t_to_max = dt
+                    }
+                }
                 break
             }
             return false
@@ -1346,9 +1366,21 @@ fn live_tick(cl: *mut client.Client) -> bool {
             trn(t_msgs)
             tr(" paints=")
             trn(fuiscene.painted())
+            tr(" ticks=")
+            trn(t_ticks)
+            tr(" gapmax=")
+            trn(t_gap_max)
+            tr(" tomax=")
+            trn(t_to_max)
+            tr(" tosum=")
+            trn(t_to_sum)
             tr("\n")
             t_dec_ms = 0
             t_msgs = 0
+            t_ticks = 0
+            t_gap_max = 0
+            t_to_max = 0
+            t_to_sum = 0
         }
     }
     if TEST_ON && t_clip_state == 0 && now >= t_live_at + 3000 {

@@ -10,6 +10,10 @@
 #   tls      the same over wss:// (socat TLS terminator, own test CA /etc/fvviewer-ca.pem)
 #   tlsold   wss:// with the OLD lib/fv/client.fi ($GUI_OLD_REV, default 4f0aa6ec): informational counter-test
 #            of the "tls_read closes the socket on timeout" finding; never fails the gate
+#   opk      the window starts FROM THE INSTALLED PACKAGE: the image has NO /bin/fvviewer and NO /apps/fvviewer.osp,
+#            only the signed fvviewer-1.0.0.opk in /fv; the script types `opk install` + `opk rebuild` into the
+#            desktop terminal, then starts FreeViewer from the launcher (/apps/fvviewer.osp/start) and runs the
+#            same session checks as plain
 #   wprobe   `fvviewer -w 000000001` against the REAL relay (freeviewer.fleitec.com) from the guest
 # The real Windows host is never touched; everything runs on 127.0.0.1 / the guest at 10.0.2.2.
 # Env: GUI_BUILD=<dir> keeps the build cache (default: mktemp, removed at exit), GUI_RES (default 1280x800).
@@ -17,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-STAGES=${*:-plain tls tlsold wprobe}
+STAGES=${*:-plain tls opk tlsold wprobe}
 D=$(mktemp -d); trap 'for s in "$D"/*/th; do bash tools/fvviewer/th.sh "$s" down 2>/dev/null; done; [ -n "${CLIENT_BAK:-}" ] && cp "$CLIENT_BAK" lib/fv/client.fi; pkill -P $$ 2>/dev/null; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD"
@@ -29,8 +33,8 @@ ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 PW=testpass123
 
-gui_stage() { # name tls(0|1) oldclient(0|1)
-    local name=$1 tls=$2 old=$3
+gui_stage() { # name tls(0|1) oldclient(0|1) [pkg(0|1)]
+    local name=$1 tls=$2 old=$3 pkg=${4:-0}
     local O="$D/$name"; mkdir -p "$O/th"
     local RP=$BASEPORT TP=$((BASEPORT+1)); BASEPORT=$((BASEPORT+2))
     local ID
@@ -50,9 +54,30 @@ gui_stage() { # name tls(0|1) oldclient(0|1)
         rm -f "$B/fvviewer.elf"
     fi
     local TH="bash $ROOT/tools/fvviewer/th.sh $O/th"
+    local HEAD="" MORE=fvviewer EXTRA_APPS="/apps/ /apps/fvviewer.osp/ /apps/fvviewer.osp/INFO=pakete/fvviewer/INFO@0644 /apps/fvviewer.osp/start@/bin/fvviewer"
+    if [ "$pkg" = 1 ]; then
+        local P="$O/pkg"; mkdir -p "$P"
+        bash pakete/bauen.sh "$P/pk" > "$P/bauen.log" 2>&1 && [ -f "$P/pk/fvviewer-1.0.0.opk" ] || { bad "$name: pakete/bauen.sh"; tail -3 "$P/bauen.log"; bash tools/fvviewer/th.sh "$O/th" down; return; }
+        bash tools/install/pakete.sh "$P" > "$P/pak.log" 2>&1 && python3 tools/update/signpak.py "$P/geheim.key" "$P/pk/fvviewer-1.0.0.opk" > /dev/null \
+            || { bad "$name: signing the package"; tail -3 "$P/pak.log"; bash tools/fvviewer/th.sh "$O/th" down; return; }
+        MORE=opk
+        EXTRA_APPS="/apps/ /system/ /store/ /tmp/ /system/schluessel.pub=$P/schluessel.pub /fv/ /fv/fvviewer-1.0.0.opk=$P/pk/fvviewer-1.0.0.opk /fv/fvviewer-1.0.0.opk.sig=$P/pk/fvviewer-1.0.0.opk.sig"
+        HEAD="klick 300,200
+warte 1
+tippe opk install /fv/fvviewer-1.0.0.opk
+taste ret
+warte 8
+foto 03-opk-install
+tippe opk rebuild
+taste ret
+warte 4
+foto 04-opk-rebuild
+"
+    fi
     cat > "$O/script.txt" <<EOF
 warteauf 'launcher: ready' || 90
-warte 2
+warte 4
+$HEAD
 taste meta_l
 warte 2
 tippe fvviewer
@@ -102,9 +127,14 @@ warteneu 'fvviewer: state live' || 120
 warte 6
 foto 40-reconnected
 EOF
-    DESIGNBUILD="$B" EH_APP_PROGS=fvviewer EH_MKFS_EXTRA="/etc/fvviewer.test=$O/fvviewer.test@0644 /etc/fvviewer-ca.pem=$O/ca.pem@0644 /apps/ /apps/fvviewer.osp/ /apps/fvviewer.osp/INFO=pakete/fvviewer/INFO@0644 /apps/fvviewer.osp/start@/bin/fvviewer" \
-        timeout 1500 bash tools/design/eh6.sh "$O/out" "res=$RES" accel=kvm netz=ja moreprogs=fvviewer tafel=nein "drehbuch=$O/script.txt" > "$O/eh6.log" 2>&1
+    DESIGNBUILD="$B" EH_APPEND=rtcutc EH_APP_PROGS=fvviewer EH_MKFS_EXTRA="/etc/fvviewer.test=$O/fvviewer.test@0644 /etc/fvviewer-ca.pem=$O/ca.pem@0644 $EXTRA_APPS" \
+        timeout 1500 bash tools/design/eh6.sh "$O/out" "res=$RES" accel=kvm netz=ja moreprogs=$MORE tafel=nein "drehbuch=$O/script.txt" > "$O/eh6.log" 2>&1
     [ "$old" = 1 ] && { cp "$CLIENT_BAK" lib/fv/client.fi; CLIENT_BAK=""; }
+    if [ "$pkg" = 1 ]; then
+        grep -aq 'launcher: start /apps/fvviewer.osp/start' "$O/out/serial.txt" && ok "$name: launcher started /apps/fvviewer.osp/start (from the installed package)" \
+            || bad "$name: launcher never started /apps/fvviewer.osp/start"
+        python3 tools/osum/mkfs.py list "$O/out/disk.img" 2>/dev/null | grep -aq 'bin/fvviewer' && bad "$name: image already has /bin/fvviewer (not a package test)" || ok "$name: image has no /bin/fvviewer"
+    fi
     # the launcher sometimes drops the Return key on a loaded host: the app never started -> caller retries
     if ! grep -aq 'fvviewer: test mode on' "$O/out/serial.txt" 2>/dev/null; then
         echo "  (fvviewer did not start in the guest, retry)"; bash tools/fvviewer/th.sh "$O/th" down; return 7
@@ -152,6 +182,7 @@ for s in $STAGES; do
     case "$s" in
         plain)   retry gui_stage plain 0 0 ;;
         tls)     retry gui_stage tls 1 0 ;;
+        opk)     retry gui_stage opk 0 0 1 ;;
         tlsold)  retry gui_stage tlsold 1 1 ;;
         wprobe)  wprobe ;;
         *) echo "unknown stage $s"; exit 2 ;;
