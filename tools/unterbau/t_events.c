@@ -4,7 +4,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
@@ -73,6 +75,12 @@ int main(void)
         epoll_wait(ep, out, 4, 100);
         r = epoll_wait(ep, out, 4, 50);
         CHECK("epoll_edge_triggered", r == 0, "edge-triggered fd reported again (%d)", r);
+        /* the edge case: drained and refilled between two waits -- no scan ever saw "not ready", the refill is still a new edge */
+        { char dr[8]; (void)!read(pp[0], dr, 8); (void)!write(pp[1], "b", 1);
+          r = epoll_wait(ep, out, 4, 200);
+          CHECK("epoll_edge_refill", r == 1, "drain + refill between waits gave %d", r);
+          r = epoll_wait(ep, out, 4, 50);
+          CHECK("epoll_edge_refill_once", r == 0, "refill edge reported twice (%d)", r); }
         r = epoll_ctl(ep, EPOLL_CTL_DEL, pp[0], 0);
         CHECKC("epoll_ctl_del", r == 0);
         /* wake from another thread-less source: timer via alarm is in t_signals; here a blocking wait woken by a child writing */
@@ -183,6 +191,44 @@ int main(void)
     /* ---- inotify */
     errno = 0; int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     CHECKC("inotify_init", in >= 0);
+    if (in >= 0) {
+        (void)!mkdir("/tmp/ino", 0755);
+        errno = 0; int wd = inotify_add_watch(in, "/tmp/ino", IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
+        CHECK("inotify_add_watch", wd > 0, "wd=%d errno %d", wd, errno);
+        struct pollfd ip = { in, POLLIN, 0 };
+        r = poll(&ip, 1, 0);
+        CHECK("inotify_idle", r == 0, "poll on an idle inotify -> %d", r);
+        int f = open("/tmp/ino/a", O_CREAT | O_WRONLY, 0644); if (f >= 0) close(f);
+        (void)!mkdir("/tmp/ino/d", 0755);
+        (void)!rename("/tmp/ino/a", "/tmp/ino/b");
+        (void)!unlink("/tmp/ino/b");
+        (void)!rmdir("/tmp/ino/d");
+        r = poll(&ip, 1, 0);
+        CHECK("inotify_poll_ready", r == 1 && (ip.revents & POLLIN), "poll after the file calls -> %d", r);
+        char ib[1024]; ssize_t n = read(in, ib, sizeof ib);
+        struct { uint32_t mask, cookie; char name[16]; int wd; } got[12]; int ng = 0;
+        for (char *q = ib; n > 0 && q < ib + n && ng < 12; ) {
+            struct inotify_event *e = (struct inotify_event *)q;
+            got[ng].mask = e->mask; got[ng].cookie = e->cookie; got[ng].wd = e->wd; got[ng].name[0] = 0;
+            if (e->len) { strncpy(got[ng].name, e->name, 15); got[ng].name[15] = 0; }
+            ng++; q += sizeof *e + e->len;
+        }
+        CHECK("inotify_event_count", ng == 6, "%d events (want 6)", ng);
+        CHECK("inotify_create", ng > 0 && got[0].mask == IN_CREATE && !strcmp(got[0].name, "a") && got[0].wd == wd, "mask %x name '%s'", ng > 0 ? got[0].mask : 0, ng > 0 ? got[0].name : "");
+        CHECK("inotify_mkdir", ng > 1 && got[1].mask == (IN_CREATE | IN_ISDIR) && !strcmp(got[1].name, "d"), "mask %x name '%s'", ng > 1 ? got[1].mask : 0, ng > 1 ? got[1].name : "");
+        CHECK("inotify_rename", ng > 3 && got[2].mask == IN_MOVED_FROM && got[3].mask == IN_MOVED_TO && got[2].cookie == got[3].cookie && got[2].cookie != 0 && !strcmp(got[2].name, "a") && !strcmp(got[3].name, "b"), "rename events wrong");
+        CHECK("inotify_unlink", ng > 4 && got[4].mask == IN_DELETE && !strcmp(got[4].name, "b"), "mask %x name '%s'", ng > 4 ? got[4].mask : 0, ng > 4 ? got[4].name : "");
+        CHECK("inotify_rmdir", ng > 5 && got[5].mask == (IN_DELETE | IN_ISDIR) && !strcmp(got[5].name, "d"), "mask %x name '%s'", ng > 5 ? got[5].mask : 0, ng > 5 ? got[5].name : "");
+        errno = 0; n = read(in, ib, sizeof ib);
+        CHECK("inotify_drained", n == -1 && errno == EAGAIN, "second read -> %zd errno %d", n, errno);
+        r = inotify_rm_watch(in, wd);
+        CHECKC("inotify_rm_watch", r == 0);
+        f = open("/tmp/ino/x", O_CREAT | O_WRONLY, 0644); if (f >= 0) close(f);
+        errno = 0; n = read(in, ib, sizeof ib);
+        CHECK("inotify_rm_silences", n == -1 && errno == EAGAIN, "event after rm_watch (%zd)", n);
+        (void)!unlink("/tmp/ino/x"); (void)!rmdir("/tmp/ino");
+        close(in);
+    }
     /* ---- ppoll with a signal mask, pselect */
     struct timespec z = { 0, 10 * 1000 * 1000 }; struct pollfd none = { -1, 0, 0 };
     errno = 0; r = ppoll(&none, 1, &z, 0);

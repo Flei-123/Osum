@@ -2452,6 +2452,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return file_io_loop(state, me, a0, a1, a2, false)
     }
     if number == SYS_OPEN {
+        if (a1 & 64) != 0 && ev_in_any(state) {
+            return ev_open_create(state, me, a0, a1)
+        }
         return cx_result(state, me, do_open(state, me, a0, a1), a1)
     }
     if number == SYS_CLOSE {
@@ -2485,13 +2488,25 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_getdents(state, me, a0, a1, a2)
     }
     if number == SYS_MKDIR {
-        return do_mkdir(state, me, a0)
+        let r: u64 = do_mkdir(state, me, a0)
+        if r == 0 {
+            ev_in_path(state, me, a0, IN_CREATE | IN_ISDIR, 0)
+        }
+        return r
     }
     if number == SYS_UNLINK {
-        return do_unlink(state, me, a0)
+        let r: u64 = do_unlink(state, me, a0)
+        if r == 0 {
+            ev_in_path(state, me, a0, IN_DELETE, 0)
+        }
+        return r
     }
     if number == SYS_RMDIR {
-        return do_rmdir(state, me, a0)
+        let r: u64 = do_rmdir(state, me, a0)
+        if r == 0 {
+            ev_in_path(state, me, a0, IN_DELETE | IN_ISDIR, 0)
+        }
+        return r
     }
     if number == SYS_GETCWD {
         return do_getcwd(state, me, a0, a1)
@@ -2931,7 +2946,11 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_vfs_umount(state, me, a0)
     }
     if number == SYS_RENAME {
-        return do_rename(state, me, a0, a1)
+        let r: u64 = do_rename(state, me, a0, a1)
+        if r == 0 {
+            ev_in_rename(state, me, a0, a1)
+        }
+        return r
     }
     if number == SYS_OSUM_MNTSTAT {
         return do_mntstat(state, a0, a1)
@@ -17491,6 +17510,8 @@ fn ev_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 // A watch whose descriptor was closed (or reused) since EPOLL_CTL_ADD is dropped here -- Linux drops it at the last close.
 fn ev_ep_scan(state: u64, me: u64, ofep: u64, out: u64, max: u64, report: bool, bad: *mut u64) -> u64 {
     let fr: u64 = file.open_off(state, ofep)
+    // Taken BEFORE the look at the descriptors: a kick that comes later is seen by the next scan as "something changed since the last report".
+    let seq: u64 = sched.poll_seq(state) & 0xFFFFFFFF
     var n: u64 = 0
     var i: u64 = 0
     while i < evfd.EP_MAX && n < max {
@@ -17514,9 +17535,14 @@ fn ev_ep_scan(state: u64, me: u64, ofep: u64, out: u64, max: u64, report: bool, 
                         }
                         var fresh: u64 = got
                         if (ev & evfd.EPOLLET) != 0 && report {
+                            // `last`: low 32 bits = readiness at the last report, high 32 bits = poll_seq at that scan. A descriptor that drained and
+                            // refilled between two epoll_wait calls never showed "not ready" to a scan; the kick of the refill (poll_seq moved) is the edge.
                             let last: u64 = evfd.ep_last(fr, i)
-                            fresh = got & (0xFFFFFFFFFFFFFFFF -% last)
-                            evfd.ep_set_last(fr, i, got)
+                            fresh = got & (0xFFFFFFFF -% (last & 0xFFFFFFFF))
+                            if (last / 4294967296) != seq {
+                                fresh = got
+                            }
+                            evfd.ep_set_last(fr, i, got | (seq * 4294967296))
                         }
                         if fresh != 0 {
                             if report {
@@ -17824,6 +17850,117 @@ fn do_inotify_rm(state: u64, me: u64, fd: u64, wd: u64) -> u64 {
         return neg(errno.E_INVAL)
     }
     return 0
+}
+
+// ---------------------------------------------------------------- inotify events from the file system calls
+
+const IN_CREATE: u64 = 0x100
+const IN_DELETE: u64 = 0x200
+const IN_MOVED_FROM: u64 = 0x40
+const IN_MOVED_TO: u64 = 0x80
+const IN_ISDIR: u64 = 0x40000000
+
+// Is any inotify instance open? (The hooks cost nothing else when nobody watches.)
+fn ev_in_any(state: u64) -> bool {
+    var i: u64 = 0
+    while i < file.MAX_OPEN {
+        if file.open_kind(state, i) == file.K_INOTIFY {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Tell every inotify instance that watches the PARENT directory of `buf` (absolute path in kernel memory, `len` octets) about event `ev`.
+fn ev_in_fire(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
+    var s: u64 = len
+    while s > 0 {
+        if rd8_ev(buf + s - 1) == 47 {
+            break
+        }
+        s = s - 1
+    }
+    if s == 0 || s >= len {
+        return
+    }
+    var dlen: u64 = s - 1
+    if dlen == 0 {
+        dlen = 1
+    }
+    let name: u64 = buf + s
+    let nlen: u64 = len - s
+    var o: u64 = 0
+    while o < file.MAX_OPEN {
+        if file.open_kind(state, o) == file.K_INOTIFY {
+            let fr: u64 = file.open_off(state, o)
+            var i: u64 = 0
+            while i < evfd.IN_WMAX {
+                let mask: u64 = evfd.in_match(fr, i, buf, dlen)
+                if mask != 0 && (mask & ev & 0xFFF) != 0 {
+                    evfd.in_push(state, fr, evfd.in_wd_of(fr, i), ev, cookie, name, nlen)
+                }
+                i = i + 1
+            }
+        }
+        o = o + 1
+    }
+}
+
+fn rd8_ev(a: u64) -> u64 {
+    return kstate.get8(a)
+}
+
+// The path the user pointer names, as the file system call just saw it.
+fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
+    if !ev_in_any(state) {
+        return
+    }
+    let buf: u64 = nameb(state)
+    let len: u64 = fetch_path(state, me, addr, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return
+    }
+    ev_in_fire(state, buf, len, ev, cookie)
+}
+
+fn ev_in_rename(state: u64, me: u64, from: u64, to: u64) {
+    if !ev_in_any(state) {
+        return
+    }
+    let cookie: u64 = sched.poll_seq(state) + 1
+    ev_in_path(state, me, from, IN_MOVED_FROM, cookie)
+    ev_in_path(state, me, to, IN_MOVED_TO, cookie)
+}
+
+fn ev_path_exists(state: u64, buf: u64) -> bool {
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                return vfs.node_for(state, m, buf) != 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return true
+    }
+    return fs.path(state, buf) != 0
+}
+
+// open(path, O_CREAT ...): IN_CREATE only when the file was not there before.
+fn ev_open_create(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+    let buf: u64 = nameb(state)
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    var existed: bool = true
+    if !errno.is_error(len) && len != 0 {
+        existed = ev_path_exists(state, buf)
+    }
+    let r: u64 = do_open(state, me, name, flags)
+    if !existed && !errno.is_error(r) {
+        ev_in_path(state, me, name, IN_CREATE, 0)
+    }
+    return cx_result(state, me, r, flags)
 }
 
 // ---------------------------------------------------------------- dispatch
