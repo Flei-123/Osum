@@ -10,7 +10,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
 for p in test $( [ "${1:-}" = bench ] && echo bench ); do
-    FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
+    OPT=""; [ "$p" = bench ] && OPT="--opt-level=release-fast"; FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app $OPT tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
         || { echo "FAIL  build $p"; grep -v '^warning' "$T/$p.build" | head -30; rc=1; continue; }
     "$T/$p"; prc=$?
     [ "$prc" = 0 ] || rc=1
