@@ -255,7 +255,7 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
     STPORT=$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 18765)
     sed -i "s/18765/$STPORT/g" "$D/st.sh"
     SX="$SX /etc/st.sh=$D/st.sh"
-    EXTRA_SPEC="$SX" UB_BLOCKS=${UB_BLOCKS:-131072} build_image "$ROOT" "$D/stone" && {
+    EXTRA_SPEC="$SX" UB_BLOCKS=${UB_BLOCKS:-262144} build_image "$ROOT" "$D/stone" && {
         # STONES_NET=1: virtio-net with QEMU user networking; the guest reaches a throw-away http server of the host at 10.0.2.2
         NETPID=""
         if [ -n "${STONES_NET:-}" ]; then
