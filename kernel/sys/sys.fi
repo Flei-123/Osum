@@ -1170,6 +1170,13 @@ const SYS_REBOOT: u64 = 169
 const SYS_FCHOWNAT: u64 = 260
 const SYS_FCHMODAT: u64 = 268
 const SYS_FACCESSAT: u64 = 269
+// w-foot3: numbers foot/fcft/libc ask for (seen with fremdtrace).
+// faccessat2 = faccessat plus a flags argument (the flags change nothing
+// here), sendfile is refused with EINVAL (callers fall back to read/write),
+// membarrier answers the QUERY with "no commands" (0).
+const SYS_SENDFILE: u64 = 40
+const SYS_MEMBARRIER: u64 = 324
+const SYS_FACCESSAT2: u64 = 439
 
 // Die eigene Nummer dieser Runde, aus dem zugeteilten Vorrat 1600..1699.
 const SYS_OSUM_USERINFO: u64 = 1600
@@ -3471,6 +3478,10 @@ fn is_k13(number: u64) -> bool {
         || number == SYS_FACCESSAT {
         return true
     }
+    if number == SYS_SENDFILE || number == SYS_MEMBARRIER
+        || number == SYS_FACCESSAT2 {
+        return true
+    }
     // RUNDE MULTIUSER: die drei dieser Runde gehen denselben Weg.
     if number == SYS_GETGROUPS || number == SYS_SETGROUPS {
         return true
@@ -3557,6 +3568,18 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_FACCESSAT {
         return do_access(state, me, a1, a2)
+    }
+    if number == SYS_FACCESSAT2 {
+        return do_access(state, me, a1, a2)
+    }
+    if number == SYS_SENDFILE {
+        return neg(errno.E_INVAL)
+    }
+    if number == SYS_MEMBARRIER {
+        if a0 == 0 {
+            return 0
+        }
+        return neg(errno.E_INVAL)
     }
     if number == SYS_REBOOT {
         return do_reboot(state, me, a0)
@@ -6832,8 +6855,26 @@ fn page_up(v: u64) -> u64 {
     return (v + PAGE - 1) & 0xFFFFFFFFFFFFF000
 }
 
+// THREAD GROUP MEMORY MARKS (r701/w-foot3): break, mmap bottom and big
+// bottom describe ONE address space, so all threads of a group (clone with
+// CLONE_THREAD, T_TGID = leader pid) read and write the LEADER's marks.
+// Copying them at clone time made two threads hand out the same
+// addresses (map_page saw "page there" -> ENOMEM, foot font threads).
+// Falls back to the own slot when the leader is gone.
+fn mem_owner(state: u64, me: u64) -> u64 {
+    let g: u64 = sched.tget(state, me, sched.T_TGID)
+    if g == 0 || g == sched.tget(state, me, sched.T_PID) {
+        return me
+    }
+    let l: u64 = sched.find_pid(state, g)
+    if l >= kstate.MAX_TASKS {
+        return me
+    }
+    return l
+}
+
 fn brk_of(state: u64, me: u64) -> u64 {
-    let b: u64 = sched.tget(state, me, sched.T_BRK)
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_BRK)
     if b == 0 {
         return BRK_BASE
     }
@@ -6841,7 +6882,7 @@ fn brk_of(state: u64, me: u64) -> u64 {
 }
 
 fn map_bottom(state: u64, me: u64) -> u64 {
-    let m: u64 = sched.tget(state, me, sched.T_MMAP)
+    let m: u64 = sched.tget(state, mem_owner(state, me), sched.T_MMAP)
     if m == 0 {
         return MMAP_TOP
     }
@@ -7457,7 +7498,7 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
                     // Abraeumen wird es korrekt freigegeben.
                     oom_handle(state)
                     if p > cur {
-                        sched.tset(state, me, sched.T_BRK, p)
+                        sched.tset(state, mem_owner(state, me), sched.T_BRK, p)
                         return p
                     }
                     return cur
@@ -7473,7 +7514,7 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
             q = q + PAGE
         }
     }
-    sched.tset(state, me, sched.T_BRK, want)
+    sched.tset(state, mem_owner(state, me), sched.T_BRK, want)
     return want
 }
 
@@ -7495,7 +7536,7 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
 // wenn er es nicht tut, hat er sie nie gebraucht und diese Zeilen messen
 // nichts.
 fn big_bottom(state: u64, me: u64) -> u64 {
-    let b: u64 = sched.tget(state, me, sched.T_BIG)
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_BIG)
     if b == 0 {
         return proc.BIG_TOP
     }
@@ -7547,7 +7588,7 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
         kstate.add(state, kstate.MAPS, 1)
         p = p + PAGE
     }
-    sched.tset(state, me, sched.T_BIG, base)
+    sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
     return base
 }
 
@@ -7740,7 +7781,7 @@ fn map_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
         kstate.add(state, kstate.MAPS, 1)
         p = p + PAGE
     }
-    sched.tset(state, me, sched.T_MMAP, base)
+    sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
     return base
 }
 
@@ -7906,9 +7947,9 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     unixsock.shm_ref(state, i)
     let _noted: bool = unixsock.map_note(state, me, i, base, pages)
     if gross {
-        sched.tset(state, me, sched.T_BIG, base)
+        sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
     } else {
-        sched.tset(state, me, sched.T_MMAP, base)
+        sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
     }
     return base
 }
@@ -8765,7 +8806,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     // haelt.
     sched.tset(state, faden, sched.T_BRK, brk_of(state, me))
     sched.tset(state, faden, sched.T_MMAP, map_bottom(state, me))
-    sched.tset(state, faden, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    sched.tset(state, faden, sched.T_BIG, sched.tget(state, mem_owner(state, me), sched.T_BIG))
     sched.tset(state, faden, sched.T_USTACK, stapel)
     netview.inherit(state, me, faden)
     // RUNDE O-CONTAINER: das Kind bleibt im Container seines
@@ -9046,7 +9087,7 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     uio.adopt(state, me, child)
     sched.tset(state, child, sched.T_BRK, brk_of(state, me))
     sched.tset(state, child, sched.T_MMAP, map_bottom(state, me))
-    sched.tset(state, child, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    sched.tset(state, child, sched.T_BIG, sched.tget(state, mem_owner(state, me), sched.T_BIG))
     // RUNDE NETVIEW: das Kind sieht das Netz seines Elternteils, samt
     // dessen Liste erlaubter Ziele. Anders herum waere es ein Loch:
     // `fork` waere dann der Weg aus jeder Sicht heraus.
@@ -16147,7 +16188,7 @@ fn bus_segmap(state: u64, me: u64, id: u64) -> u64 {
         kstate.add(state, kstate.MAPS, 1)
         k = k + 1
     }
-    sched.tset(state, me, sched.T_BIG, base)
+    sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
     return base
 }
 

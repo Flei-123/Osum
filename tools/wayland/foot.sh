@@ -42,24 +42,38 @@ busybox sh /t/launch.sh &
 sleep FOOT_WAIT
 echo ==F-READY==
 busybox cat /tmp/foot.marker
+sleep KEY_WAIT
+echo ==KEYS==
+busybox cat /tmp/key.marker
 sleep 400
 echo ==FERTIG==
 EOS
 cat > "$TMPD/launch.sh" <<'EOS'
 export XDG_RUNTIME_DIR=/tmp HOME=/root TERM=xterm-256color SHELL=/bin/busybox FONTCONFIG_FILE=/etc/fonts/fonts.conf WAYLAND_DISPLAY=/tmp/wayland-0
-exec /usr/bin/foot -d info -f monospace:size=12 /bin/busybox sh /t/child.sh
+# The kernel has 16 descriptors per process (file.MAX_FD): foot needs ~17, so stdin/stdout go (logs stay on stderr).
+exec /usr/bin/foot -d info -f monospace:size=12 /bin/busybox sh /t/child.sh <&- >&-
 EOS
 cat > "$TMPD/child.sh" <<'EOS'
 echo FOOT-CHILD-UP > /tmp/foot.marker
+export PS1='osum# '
 exec /bin/busybox sh
 EOS
+# One SHM object of this kernel holds at most 1 MiB (kernel/fs/unixsock.fi SHM_PAGES_MAX): foot's default is a sparse 512 MiB pool, so ask
+# for one buffer per pool and a window that fits in it.
+cat > "$TMPD/foot.ini" <<'EOS'
+[main]
+initial-window-size-pixels=560x340
+pad=4x4
+[tweak]
+max-shm-pool-size-mb=0
+EOS
 [ -z "${FOOT_GS:-}" ] || cp "$FOOT_GS" "$TMPD/g.sh"
-sed -i "s/FOOT_WAIT/${FOOT_WAIT:-25}/" "$TMPD/g.sh"
+sed -i "s/FOOT_WAIT/${FOOT_WAIT:-25}/; s/KEY_WAIT/${KEY_WAIT:-30}/" "$TMPD/g.sh"
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$TMPD/passwd"; printf '127.0.0.1 localhost\n' > "$TMPD/hosts"
 A=(build "$TMPD/disk.img" ${FOOT_BLOCKS:-98304} --v3 --inodes=1024 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
-   /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ /etc/fonts/ /usr/ /usr/bin/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/wayd/ /usr/share/X11/ /usr/share/X11/xkb/ /root/ /dev/ /proc/ /run/
+   /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ /etc/fonts/ /usr/ /usr/bin/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/wayd/ /usr/share/X11/ /usr/share/X11/xkb/ /root/ /root/.config/ /root/.config/foot/ /dev/ /proc/ /run/
    "/lib/ld-musl-x86_64.so.1=$LDREAL" "/bin/busybox=$STONES/busybox" "/etc/passwd=$TMPD/passwd" "/etc/hosts=$TMPD/hosts"
-   "/usr/share/wayd/keymap-us.xkb=$TMPD/km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$TMPD/km/keymap-de.xkb" "/t/g.sh=$TMPD/g.sh" "/t/child.sh=$TMPD/child.sh" "/t/launch.sh=$TMPD/launch.sh")
+   "/usr/share/wayd/keymap-us.xkb=$TMPD/km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$TMPD/km/keymap-de.xkb" "/t/g.sh=$TMPD/g.sh" "/t/child.sh=$TMPD/child.sh" "/t/launch.sh=$TMPD/launch.sh" "/root/.config/foot/foot.ini=$TMPD/foot.ini")
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 for p in sh sleep echo cat ls wayd; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
@@ -79,14 +93,35 @@ timeout 700 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 768 \
 QPID=$!
 waitfor() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do grep -qaF -- "$1" "$TMPD/ser.txt" 2>/dev/null && return 0; kill -0 "$QPID" 2>/dev/null || return 1; sleep 0.2; i=$((i + 1)); done; return 1; }
 clean() { tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" | tr -d '\r'; }
+shot() { printf 'screendump %s\n' "$1" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; sleep 3; }
+mon()  { printf '%s\n' "$1" | timeout 10 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; sleep 0.15; }
+keys() { local c k; for ((n = 0; n < ${#1}; n++)); do c=${1:n:1}
+    case "$c" in ' ') k=spc ;; '>') k=shift-dot ;; '/') k=slash ;; '.') k=dot ;; '-') k=minus ;; '#') k=shift-3 ;; [a-z0-9]) k=$c ;; [A-Z]) k=shift-${c,,} ;; *) continue ;; esac
+    mon "sendkey $k"; done; mon "sendkey ret"; }
 if waitfor "==F-READY==" 300; then ok "the script got to the end of the wait"; else bad "the script did not get ready"; fi
 sleep 3
 clean > "$TMPD/ser.clean"
-printf 'screendump %s\n' "$TMPD/foot.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
-sleep 3
-if [ -n "${KEEP_OUT:-}" ]; then cp "$TMPD/ser.clean" "$KEEP_OUT.ser"; cp "$TMPD/foot.ppm" "$KEEP_OUT.ppm" 2>/dev/null; fi
+shot "$TMPD/foot.ppm"
+note "foot prompt screen: $(python3 tools/wayland/footpix.py "$TMPD/foot.ppm" 2>&1)"
+P1=$(python3 tools/wayland/footpix.py "$TMPD/foot.ppm" 2>/dev/null)
+pv() { sed -n "s/.*\b$2=\([0-9-]*\).*/\1/p" <<< "$1"; }
+[ "$(pv "$P1" bg)" -ge 20000 ] 2>/dev/null && ok "foot's background (#242424) fills the terminal grid: $(pv "$P1" bg) px" || bad "no foot background in the screenshot"
+[ "$(pv "$P1" text)" -ge 20 ] 2>/dev/null && ok "text pixels in the grid (prompt/cursor): $(pv "$P1" text)" || bad "no text pixels in the foot window"
+[ "$(pv "$P1" dist)" -ge 3 ] 2>/dev/null && ok "the grid is not a flat fill ($(pv "$P1" dist) colours)" || bad "the grid is a flat fill"
+echo "== 3. keyboard echo =="
+keys "echo footkeyok > /tmp/key.marker"
+sleep 4
+shot "$TMPD/foot2.ppm"
+P2=$(python3 tools/wayland/footpix.py "$TMPD/foot2.ppm" 2>/dev/null)
+note "foot after typing:  $P2"
+[ "$(pv "$P2" text)" -gt "$(( $(pv "$P1" text) + 60 ))" ] 2>/dev/null && ok "typed text is drawn: text pixels $(pv "$P1" text) -> $(pv "$P2" text)" || bad "typing changed no pixels ($(pv "$P1" text) -> $(pv "$P2" text))"
+waitfor "==KEYS==" 120 || true
+sleep 2
+clean > "$TMPD/ser.clean"
+grep -aq '^footkeyok' "$TMPD/ser.clean" && ok "the shell inside foot received the keys and ran the command" || bad "the keys did not reach the shell (no footkeyok)"
+if [ -n "${KEEP_OUT:-}" ]; then cp "$TMPD/ser.clean" "$KEEP_OUT.ser"; cp "$TMPD/foot.ppm" "$KEEP_OUT.ppm" 2>/dev/null; cp "$TMPD/foot2.ppm" "$KEEP_OUT.2.ppm" 2>/dev/null; fi
 note "serial lines: $(wc -l < "$TMPD/ser.clean"); foot lines:"
-grep -a -i 'foot\|wayd\|err\|warn' "$TMPD/ser.clean" | head -${FOOT_LOGLINES:-40} | sed 's/^/        | /'
+grep -a -i 'foot\|wayd\|err\|warn\|fault' "$TMPD/ser.clean" | head -${FOOT_LOGLINES:-40} | sed 's/^/        | /'
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
 echo "FOOT: $pass passed, $fail failed"

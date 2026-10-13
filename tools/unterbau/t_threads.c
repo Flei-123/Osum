@@ -9,6 +9,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 static void *ret_arg(void *a) { return (void *)((long)a * 2); }
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -49,6 +50,30 @@ static void *once_thr(void *a) { (void)a; pthread_once(&once, once_f); return 0;
 
 static volatile int g_fd = -1, g_go, g_res;
 static void *fdshare_thr(void *a) { (void)a; while (!g_go) usleep(2000); struct stat sb; g_res = fstat(g_fd, &sb) == 0 ? 1 : 2; return 0; }
+
+
+/* w-foot3: break / mmap marks are ONE per thread group. Two threads that map at the same time
+   (foot's font threads, any allocator) must get distinct addresses, and a thread's mapping
+   must not collide with what the creator maps afterwards. */
+#define MM_N 48
+#define MM_LEN (16 * 4096)
+static void *mm_addr[3][MM_N];
+static int mm_fail[3];
+static pthread_barrier_t mm_bar;
+static void *mm_thr(void *a)
+{
+    long id = (long)a;
+    pthread_barrier_wait(&mm_bar);
+    for (int i = 0; i < MM_N; i++) {
+        char *p = mmap(0, MM_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { mm_fail[id]++; mm_addr[id][i] = 0; continue; }
+        mm_addr[id][i] = p;
+        memset(p, (int)(id * 64 + i), MM_LEN);
+        void *m = malloc(3000 + i * 7);
+        if (!m) mm_fail[id]++; else { memset(m, 0x5a, 3000); free(m); }
+    }
+    return 0;
+}
 
 int main(void)
 {
@@ -132,6 +157,32 @@ int main(void)
     g_go = 1;
     pthread_join(t[0], 0);
     CHECK("fd_table_shared_between_threads", g_fd >= 0 && g_res == 1, "a descriptor opened after the thread started is not valid in the thread (each task has its own copy)");
+
+    /* concurrent mmap + malloc in two threads, then the creator maps more */
+    {
+        pthread_barrier_init(&mm_bar, 0, 2);
+        pthread_create(&t[0], 0, mm_thr, (void *)0);
+        pthread_create(&t[1], 0, mm_thr, (void *)1);
+        pthread_join(t[0], 0); pthread_join(t[1], 0);
+        for (int i = 0; i < MM_N; i++) {
+            char *p = mmap(0, MM_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) { mm_fail[2]++; mm_addr[2][i] = 0; continue; }
+            mm_addr[2][i] = p; memset(p, (int)(128 + i), MM_LEN);
+        }
+        int fails = mm_fail[0] + mm_fail[1] + mm_fail[2], overlap = 0, damaged = 0;
+        for (int x = 0; x < 3; x++) for (int i = 0; i < MM_N; i++) {
+            char *p = mm_addr[x][i]; if (!p) continue;
+            if (p[0] != (char)(x * 64 + i) && !(x == 2 && p[0] == (char)(128 + i))) damaged++;
+            if (p[MM_LEN - 1] != p[0]) damaged++;
+            for (int y = x; y < 3; y++) for (int j = (y == x ? i + 1 : 0); j < MM_N; j++) {
+                char *q = mm_addr[y][j]; if (!q) continue;
+                if (p < q + MM_LEN && q < p + MM_LEN) overlap++;
+            }
+        }
+        CHECK("mmap_two_threads_no_enomem", fails == 0, "%d mmap/malloc calls failed (thread0 %d thread1 %d creator %d)", fails, mm_fail[0], mm_fail[1], mm_fail[2]);
+        CHECK("mmap_threads_disjoint", overlap == 0, "%d overlapping mappings between threads and creator", overlap);
+        CHECK("mmap_threads_content_intact", damaged == 0, "%d mappings were overwritten by another thread", damaged);
+    }
     CHECK("pthread_self_equal", pthread_equal(pthread_self(), pthread_self()), "");
     return 0;
 }
