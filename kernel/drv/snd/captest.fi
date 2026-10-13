@@ -1,0 +1,383 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/snd/captest.fi -- MICROPHONE SELF TEST (W-TRAY6 follow-up, 13.10.2026). Run by the kernel word
+// `audcap`; measured by tools/hda/cap.sh in QEMU (intel-hda + hda-micro, -audiodev none).
+//
+// Every claim is a serial line `aud: <name>=<number>`:
+//   * the capture ring is filled with 0x5A before the stream starts (pre5a = all words), and after about a
+//     second of capture no 0x5A word is left (post5a = 0): the DMA really wrote.
+//   * the stream position never steps back (back = 0) and advances at about 48 kHz (frames/t_first/t_last).
+//   * reader A drains the stream while it runs and never sees a 0x5A frame (a_5a = 0).
+//   * the fifth reader is refused (fifth = 1), four readers are counted (users = 4).
+//   * after 2.2 s without a read the stream stops by itself (idle_run = 0, idle_users = 0).
+//   * pattern test with the stream stopped: the ring holds 0x11112222; an unmuted reader gets exactly that
+//     (b_pat = b_n), a muted reader gets only silence into a buffer pre-filled with junk (c_zero = c_n,
+//     c_pat = 0, c_junk = 0), unmuting brings the pattern back (d_pat = d_n).
+profile kernel
+
+import serial
+import sched.time
+import arch.arch
+import drv.snd.hda
+import drv.snd.mic
+
+export { run }
+
+const PAT: u64 = 0x11112222
+const CHUNK: u64 = 512 // frames per read (2048 octets)
+
+fn p_ready(v: u64) {
+    var s: [u8; 12] = "aud: ready=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_why(v: u64) {
+    var s: [u8; 10] = "aud: why=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_kind(v: u64) {
+    var s: [u8; 11] = "aud: kind=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_pre5a(v: u64) {
+    var s: [u8; 12] = "aud: pre5a=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_ringwords(v: u64) {
+    var s: [u8; 16] = "aud: ringwords=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_a_total(v: u64) {
+    var s: [u8; 14] = "aud: a_total=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_a_5a(v: u64) {
+    var s: [u8; 11] = "aud: a_5a=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_frames_first(v: u64) {
+    var s: [u8; 19] = "aud: frames_first=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_frames_last(v: u64) {
+    var s: [u8; 18] = "aud: frames_last=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_t_first(v: u64) {
+    var s: [u8; 14] = "aud: t_first=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_t_last(v: u64) {
+    var s: [u8; 13] = "aud: t_last=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_back(v: u64) {
+    var s: [u8; 11] = "aud: back=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_post5a(v: u64) {
+    var s: [u8; 13] = "aud: post5a=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_postzero(v: u64) {
+    var s: [u8; 15] = "aud: postzero=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_users(v: u64) {
+    var s: [u8; 12] = "aud: users=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_fifth(v: u64) {
+    var s: [u8; 12] = "aud: fifth=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_b_n(v: u64) {
+    var s: [u8; 10] = "aud: b_n=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_b_pat(v: u64) {
+    var s: [u8; 12] = "aud: b_pat=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_c_n(v: u64) {
+    var s: [u8; 10] = "aud: c_n=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_c_zero(v: u64) {
+    var s: [u8; 13] = "aud: c_zero=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_c_pat(v: u64) {
+    var s: [u8; 12] = "aud: c_pat=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_c_junk(v: u64) {
+    var s: [u8; 13] = "aud: c_junk=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_d_n(v: u64) {
+    var s: [u8; 10] = "aud: d_n=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_d_pat(v: u64) {
+    var s: [u8; 12] = "aud: d_pat=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_idle_users(v: u64) {
+    var s: [u8; 17] = "aud: idle_users=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_idle_run(v: u64) {
+    var s: [u8; 15] = "aud: idle_run=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_overruns(v: u64) {
+    var s: [u8; 15] = "aud: overruns=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_done(v: u64) {
+    var s: [u8; 11] = "aud: done=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn p_muted_set(v: u64) {
+    var s: [u8; 16] = "aud: muted_set=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+
+fn wait_ns(state: u64, ns: u64) {
+    let until: u64 = time.mono_ns(state) +% ns
+    while time.mono_ns(state) < until {
+        arch.pause()
+    }
+}
+
+fn fill_junk(buf: u64, frames: u64) {
+    var i: u64 = 0
+    while i < frames {
+        __mmio_write32((buf + i * 4) as *mut u32, 0x77777777 as u32)
+        i = i + 1
+    }
+}
+
+// number of the first `n` frames of `buf` that equal `v`
+fn count_eq(buf: u64, n: u64, v: u64) -> u64 {
+    var c: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let w: u64 = __mmio_read32((buf + i * 4) as *mut u32) as u64
+        if w == v {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// drain reader `who` with `take` (stream may be stopped); packed result: total<<48 | junk<<32 | zero<<16 | pat
+fn drain(state: u64, who: u64, buf: u64, junk: bool) -> u64 {
+    var total: u64 = 0
+    var pat: u64 = 0
+    var zero: u64 = 0
+    var jk: u64 = 0
+    var go: bool = true
+    var rounds: u64 = 0
+    while go && rounds < 64 {
+        if junk {
+            fill_junk(buf, CHUNK)
+        }
+        let n: u64 = mic.take(state, who, buf, CHUNK)
+        if n == 0 || n == mic.NODEV {
+            go = false
+        } else {
+            total = total + n
+            pat = pat + count_eq(buf, n, PAT)
+            zero = zero + count_eq(buf, n, 0)
+            jk = jk + count_eq(buf, n, 0x77777777)
+        }
+        rounds = rounds + 1
+    }
+    return (total << 48) | (jk << 32) | (zero << 16) | pat
+}
+
+fn run(state: u64) {
+    var buf: [u8; 2048] = [0 as u8; 2048]
+    let b: u64 = (&buf[0]) as u64
+    var ok: u64 = 0
+    if hda.cap_probe(state) {
+        ok = 1
+    }
+    p_ready(ok)
+    p_why(hda.cap_why(state))
+    if ok == 0 {
+        return
+    }
+    p_kind(hda.cap_kind(state))
+    p_ringwords(hda.ring_frames(state))
+    p_pre5a(hda.cap_ring_count(state, 0x5A5A5A5A))
+    // four readers; the first read starts the stream (max 0 only registers the reader)
+    mic.read(state, 1, b, 0)
+    mic.read(state, 2, b, 0)
+    mic.read(state, 3, b, 0)
+    mic.read(state, 4, b, 0)
+    // 1.3 s of capture: reader 1 drains, the position is watched; the rate is taken over the last second
+    // (QEMU's input timer catches up at the start)
+    let t_start: u64 = time.mono_ns(state)
+    let t_end: u64 = t_start +% 1300000000
+    var total: u64 = 0
+    var n5a: u64 = 0
+    var back: u64 = 0
+    var last: u64 = 0
+    var first: bool = true
+    var f_first: u64 = 0
+    var t_first: u64 = 0
+    var f_last: u64 = 0
+    var t_last: u64 = 0
+    while time.mono_ns(state) < t_end {
+        let n: u64 = mic.read(state, 1, b, CHUNK)
+        if n != 0 && n != mic.NODEV {
+            total = total + n
+            n5a = n5a + count_eq(b, n, 0x5A5A5A5A)
+        }
+        let f: u64 = hda.cap_frames(state)
+        let t: u64 = time.mono_ns(state)
+        if f < last {
+            back = back + 1
+        }
+        last = f
+        if first && t > t_start + 300000000 {
+            first = false
+            f_first = f
+            t_first = t
+        }
+        f_last = f
+        t_last = t
+        arch.pause()
+    }
+    p_a_total(total)
+    p_a_5a(n5a)
+    p_back(back)
+    p_frames_first(f_first)
+    p_frames_last(f_last)
+    p_t_first(t_first)
+    p_t_last(t_last)
+    p_users(mic.users(state))
+    var fifth: u64 = 0
+    if mic.read(state, 5, b, CHUNK) == mic.NODEV {
+        fifth = 1
+    }
+    p_fifth(fifth)
+    // idle: nobody reads for 2.2 s -> the policy stops the stream
+    wait_ns(state, 2200000000)
+    mic.tick(state)
+    p_idle_users(mic.users(state))
+    var run_now: u64 = 0
+    if hda.cap_running(state) {
+        run_now = 1
+    }
+    p_idle_run(run_now)
+    p_post5a(hda.cap_ring_count(state, 0x5A5A5A5A))
+    p_postzero(hda.cap_ring_count(state, 0))
+    p_overruns(hda.cap_overruns(state))
+    // pattern tests with the stream stopped
+    hda.cap_ring_fill(state, PAT)
+    let rb: u64 = drain(state, 2, b, false)
+    p_b_n(rb >> 48)
+    p_b_pat(rb & 0xFFFF)
+    mic.set_muted(state, true)
+    p_muted_set(1)
+    let rc: u64 = drain(state, 3, b, true)
+    p_c_n(rc >> 48)
+    p_c_zero((rc >> 16) & 0xFFFF)
+    p_c_pat(rc & 0xFFFF)
+    p_c_junk((rc >> 32) & 0xFFFF)
+    mic.set_muted(state, false)
+    let rd: u64 = drain(state, 4, b, true)
+    p_d_n(rd >> 48)
+    p_d_pat(rd & 0xFFFF)
+    p_done(1)
+}
