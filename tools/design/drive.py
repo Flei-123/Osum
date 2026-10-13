@@ -743,6 +743,12 @@ class Fahrer:
         # Ohne den Fensterknopf gibt es keinen Weg, ein Fenster
         # anzuklicken, das der Schreibtisch selbst gestartet hat -- und
         # ohne den keinen Weg, im Terminal etwas zu tippen.
+        if name == "chevron":
+            m = letzte(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name == "glocke":
             m = letzte(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:

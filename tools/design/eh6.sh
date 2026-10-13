@@ -76,6 +76,8 @@ tafel=ja
 extra=""
 # r5xx: `pins=terminal,explorer` writes the `pins=` key of /etc/taskbar.conf (the stick pins installer,explorer,terminal,settings)
 pins=""
+# W-TRAY6: `tbextra="tray_chevron=1;taskview=1"` adds lines to /etc/taskbar.conf (`;`-separated)
+tbextra=""
 moreprogs=""
 # r545: `tzrule=eu|none` adds the `rule=` line the personal image has in /etc/time.conf (empty = no line, the old test image)
 tzrule=""
@@ -110,6 +112,7 @@ for a in "$@"; do
         window_alpha=*) window_alpha=${a#*=} ;;
         tafel=*) tafel=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        tbextra=*) tbextra=${a#*=} ;;
         pins=*) pins=${a#*=} ;;
         moreprogs=*) moreprogs=${a#*=} ;;
         tzrule=*) tzrule=${a#*=} ;;
@@ -193,6 +196,7 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
     > "$OUT/taskbar.conf"
 [ -n "$pins" ] && printf 'pins=%s\n' "$pins" >> "$OUT/taskbar.conf"
+[ -n "$tbextra" ] && printf '%s\n' "${tbextra//;/$'\n'}" >> "$OUT/taskbar.conf"
 {
   printf '# /etc/theme.conf\nscheme=%s\n' "$scheme"
   [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"

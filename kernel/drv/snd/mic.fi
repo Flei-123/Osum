@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/snd/mic.fi -- MICROPHONE CAPTURE POLICY (W-TRAY6, 13.10.2026).
+//
+// `hda.fi` owns the hardware (one polled input stream into a 16 KiB ring, 48 kHz / 16 bit / stereo).
+// This file decides who may read what, when the stream runs, and whether the microphone is muted:
+//
+//   * a READER is a process (`me` of the system call) that called SYS_OSUM_AUDREAD. Up to four readers
+//     at once; each has its own read position, so two programs hear the same microphone.
+//   * the stream starts with the first read and stops when no reader has asked for 2 seconds
+//     (no process-exit hook needed: silence of the reader IS the release).
+//   * MUTE is a switch of the system (SYS_OSUM_AUDSET AS_CAPMUTE), not of one program: while it is on,
+//     every read returns silence of the right length. The tray shows it and flips it.
+//   * USERS = readers that asked within the last 2 s. The tray's indicator reads it (AUDGET A_CAPUSERS).
+//
+// All calls run under the audio lock (sys.fi: audio.hold). Scalars live in the HDA page, 0x280..0x2F8.
+profile kernel
+
+import lib.kstate
+import sched.time
+import drv.snd.hda
+
+export { read, tick, users, muted, set_muted, ready_for, readers_total, reset, NODEV, SLOTS }
+
+const NODEV: u64 = 0xFFFFFFFFFFFFFFFF
+const SLOTS: u64 = 4
+const R_BASE: u64 = 0x280 // SLOTS x 24 octets: who, next absolute frame, last read (ns)
+const R_SPAN: u64 = 24
+const X_MUTE: u64 = 0x2E8
+const X_TOTAL: u64 = 0x2F0 // readers ever registered
+const IDLE_NS: u64 = 2000000000
+
+fn gg(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.HDA_OFF, off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.HDA_OFF, off, v)
+}
+
+fn slot_who(state: u64, i: u64) -> u64 {
+    return gg(state, R_BASE + i * R_SPAN)
+}
+
+fn live(state: u64, i: u64, now: u64) -> bool {
+    if slot_who(state, i) == 0 {
+        return false
+    }
+    return now -% gg(state, R_BASE + i * R_SPAN + 16) < IDLE_NS
+}
+
+// readers that asked within the last two seconds
+fn users(state: u64) -> u64 {
+    let now: u64 = time.mono_ns(state)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SLOTS {
+        if live(state, i, now) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn readers_total(state: u64) -> u64 {
+    return gg(state, X_TOTAL)
+}
+
+fn muted(state: u64) -> bool {
+    return gg(state, X_MUTE) != 0
+}
+
+fn set_muted(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    ss(state, X_MUTE, v)
+}
+
+// a microphone path exists: the controller is there and an input pin was found (first call probes)
+fn ready_for(state: u64) -> bool {
+    if !hda.ready(state) {
+        return false
+    }
+    return hda.cap_probe(state)
+}
+
+fn reset(state: u64) {
+    var i: u64 = 0
+    while i < SLOTS {
+        ss(state, R_BASE + i * R_SPAN, 0)
+        i = i + 1
+    }
+    hda.cap_resume(state)
+}
+
+// a slot for `who`: its own, else a free or expired one
+fn slot_for(state: u64, who: u64, now: u64) -> u64 {
+    var i: u64 = 0
+    while i < SLOTS {
+        if slot_who(state, i) == who {
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < SLOTS {
+        if !live(state, i, now) {
+            ss(state, R_BASE + i * R_SPAN, who)
+            ss(state, R_BASE + i * R_SPAN + 8, 0xFFFFFFFFFFFFFFFF) // "start at now" marker
+            ss(state, X_TOTAL, gg(state, X_TOTAL) + 1)
+            return i
+        }
+        i = i + 1
+    }
+    return SLOTS
+}
+
+// Copy up to `max` frames the reader `who` has not heard yet to `dst` (a kernel buffer).
+// NODEV = no microphone; 0 = nothing new yet (non-blocking); else the number of frames.
+fn read(state: u64, who: u64, dst: u64, max: u64) -> u64 {
+    if !hda.cap_open(state) {
+        return NODEV
+    }
+    hda.cap_poll(state)
+    let now: u64 = time.mono_ns(state)
+    let i: u64 = slot_for(state, who, now)
+    if i >= SLOTS {
+        return NODEV // five readers: the fifth is refused, not mixed
+    }
+    let b: u64 = R_BASE + i * R_SPAN
+    ss(state, b + 16, now)
+    let abs: u64 = hda.cap_frames(state)
+    var next: u64 = gg(state, b + 8)
+    if next == 0xFFFFFFFFFFFFFFFF || next > abs {
+        next = abs
+    }
+    var behind: u64 = abs - next
+    if behind > hda.ring_frames(state) - 256 {
+        // fell behind by (almost) a whole ring: the oldest part is gone -- skip to half a ring back
+        next = abs - hda.ring_frames(state) / 2
+        behind = abs - next
+    }
+    var n: u64 = behind
+    if n > max {
+        n = max
+    }
+    if n > 0 {
+        if muted(state) {
+            var k: u64 = 0
+            while k < n {
+                __mmio_write32((dst + k * 4) as *mut u32, 0 as u32)
+                k = k + 1
+            }
+        } else {
+            hda.cap_read(state, next, dst, n)
+        }
+    }
+    ss(state, b + 8, next + n)
+    return n
+}
+
+// from the audio tick (under the lock): keep the position counter honest and stop an idle stream
+fn tick(state: u64) {
+    if !hda.cap_running(state) {
+        return
+    }
+    hda.cap_poll(state)
+    if users(state) == 0 {
+        hda.cap_close(state)
+    }
+}

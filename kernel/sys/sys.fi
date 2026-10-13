@@ -112,6 +112,7 @@ import drv.snd.audio
 import drv.snd.ac97
 import drv.snd.hda
 import drv.snd.mix
+import drv.snd.mic
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -1545,6 +1546,7 @@ const AS_SMUTE: u64 = 14 // (Kennung << 8) | 1/0 -- stumm JE STROM
 // den ganzen Rechner an. Deshalb rechnet dieser Weg UNTER der Sperre
 // und schlaeft OHNE sie.
 const AS_WAITSPACE: u64 = 15
+const AS_CAPMUTE: u64 = 16 // W-TRAY6: microphone mute (system wide)
 
 const SYS_OSUM_PMON: u64 = 1830
 
@@ -3163,7 +3165,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_AUDSEND || number == SYS_OSUM_AUDREAD {
         if number == SYS_OSUM_AUDREAD {
-            return neg(errno.E_NODEV)
+            return do_audread(state, me, a0, a1)
         }
         return do_audsend(state, me, a0, a1, a2)
     }
@@ -15338,7 +15340,64 @@ fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
     return r
 }
 
+// W-TRAY6: the microphone. dst, frames -> frames copied (0 = nothing new yet, non-blocking); -ENODEV = no
+// microphone path. 48 kHz, 16 bit, 2 channels, 4 octets per frame. Policy in kernel/drv/snd/cap.fi.
+fn do_audread(state: u64, me: u64, dst: u64, frames: u64) -> u64 {
+    if frames == 0 {
+        return 0
+    }
+    let f: u64 = audio.hold(state)
+    let r: u64 = audread_locked(state, me, dst, frames)
+    audio.drop(state, f)
+    return r
+}
+
+fn audread_locked(state: u64, me: u64, dst: u64, frames: u64) -> u64 {
+    let bounce: u64 = state + kstate.AUDB_OFF
+    var n: u64 = frames
+    let maxn: u64 = kstate.AUDB_MAX / 4
+    if n > maxn {
+        n = maxn
+    }
+    let got: u64 = mic.read(state, me, bounce, n)
+    if got == mic.NODEV {
+        return neg(errno.E_NODEV)
+    }
+    if got == 0 {
+        return 0
+    }
+    if !copy_out(state, me, dst, bounce, got * 4) {
+        return neg(errno.E_FAULT)
+    }
+    return got
+}
+
 fn audget_locked(state: u64, field: u64) -> u64 {
+    if field == audio.A_CAPREADY {
+        if mic.ready_for(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_CAPUSERS {
+        return mic.users(state)
+    }
+    if field == audio.A_CAPMUTE {
+        if mic.muted(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_CAPKIND {
+        return hda.cap_kind(state)
+    }
+    if field == audio.A_CAPFRAMES {
+        hda.cap_poll(state)
+        return hda.cap_frames(state)
+    }
+    if field == audio.A_CAPOVER {
+        return hda.cap_overruns(state)
+    }
     if field == audio.A_READY {
         if audio.ready(state) {
             return 1
@@ -15590,6 +15649,10 @@ fn audset_locked(state: u64, field: u64, value: u64) -> u64 {
     }
     if field == AS_MUTE {
         audio.set_muted(state, value != 0)
+        return 0
+    }
+    if field == AS_CAPMUTE {
+        mic.set_muted(state, value != 0)
         return 0
     }
     if field == AS_SOUNDS {

@@ -8,7 +8,7 @@
 //   network     a VECTOR glyph of the real state + the sentence the bar's tooltip uses
 //   sound       speaker glyph, mute button and a volume slider (SYS_AUDGET / SYS_AUDSET: the same
 //               calls as the quick settings; "no audio device" when the kernel has none)
-//   microphone  glyph + "in use by N programs" / "muted" -- from a STUB source (see below)
+//   microphone  glyph + "in use by N programs" / "muted" + mute button -- real numbers (SYS_AUDGET A_CAPUSERS/A_CAPMUTE)
 //   overflow    one row per item of lib/fui/tray.fi (PLACE_OVERFLOW): glyph, name, a "..." button
 //               that opens the item's context menu (its entries + "Move up" + "Hide")
 //
@@ -83,6 +83,11 @@ const A_VOLUME: u64 = 4
 const A_MUTED: u64 = 21
 const AS_VOLUME: u64 = 0
 const AS_MUTE: u64 = 2
+const A_CAPREADY: u64 = 54 // microphone: a path exists
+const A_CAPUSERS: u64 = 55 // programs reading it within 2 s
+const A_CAPMUTE: u64 = 56
+const AS_CAPMUTE: u64 = 16
+const K_MICMUTE: u64 = 301
 
 // glyph kinds of the network
 const NK_ETH: u64 = 0
@@ -111,6 +116,8 @@ static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
 static mut mic_users: u64 = 0 // STUB source (see the header)
 static mut mic_muted: u64 = 0
+static mut mic_da: u64 = 0 // 1 = the kernel has a microphone path (SYS_AUDREAD works)
+static mut mic_stub: u64 = 0 // 1 = /etc/tray.items has a `mic|` line (test aid): it overrides the kernel's numbers
 static mut want_sheet: u64 = 0
 static mut n_rows: u64 = 0
 static mut row_id: [u64; 8] = [0 as u64; 8]
@@ -157,6 +164,7 @@ static mut s_act: [u8; 9] = " action=\0"
 static mut s_vol: [u8; 14] = "traypop: vol \0"
 static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_mute: [u8; 15] = "traypop: mute \0"
+static mut s_micmute: [u8; 18] = "traypop: micmute \0"
 static mut s_shut: [u8; 15] = "traypop: shut \0"
 static mut s_esc: [u8; 4] = "esc\0"
 static mut s_out: [u8; 8] = "outside\0"
@@ -548,6 +556,7 @@ fn read_items() {
             want_sheet = 1 // "sheet"
         } else if l0 == 3 && __mmio_read8((b + i) as *mut u8) == 109 as u8 && f1 < e {
             // mic|users|muted
+            mic_stub = 1
             mic_users = to_num(b + f1 + 1, f2 - f1 - 1)
             if f2 < e {
                 mic_muted = to_num(b + f2 + 1, e - f2 - 1)
@@ -596,6 +605,13 @@ fn read_audio() {
         if snd_vol > 100 {
             snd_vol = 100
         }
+    }
+    // the microphone: real numbers from the kernel capture path (SYS_OSUM_AUDREAD, W-TRAY6)
+    mic_da = 0
+    if mic_stub == 0 && ulib.sys(SYS_AUDGET, A_CAPREADY, 0, 0) == 1 {
+        mic_da = 1
+        mic_users = ulib.sys(SYS_AUDGET, A_CAPUSERS, 0, 0)
+        mic_muted = ulib.sys(SYS_AUDGET, A_CAPMUTE, 0, 0)
     }
 }
 
@@ -657,7 +673,7 @@ fn rows_count() -> u64 {
 }
 
 fn mic_shown() -> bool {
-    return mic_users != 0 || mic_muted != 0
+    return mic_da != 0 || mic_users != 0 || mic_muted != 0
 }
 
 fn read_rows() {
@@ -750,6 +766,13 @@ fn build() {
         let _gm: usize = fuiscene.canvas2(rm, CK_MIC, ROW_H - 4, ROW_H - 4, draw_cv)
         mic_text()
         let _lm: usize = fuiscene.label(rm, (&txt[0 as usize]) as u64)
+        if mic_da != 0 {
+            var mmk: u64 = (&k_mute[0 as usize]) as u64
+            if mic_muted != 0 {
+                mmk = (&k_unmute[0 as usize]) as u64
+            }
+            let _bmm: usize = fuiscene.button(rm, mg(mmk), K_MICMUTE)
+        }
     }
     // overflow
     let _lc: usize = fuiscene.label_muted(r, mg((&k_more[0 as usize]) as u64))
@@ -949,6 +972,21 @@ fn pos_of(id: u64) -> u64 {
 }
 
 fn on_key(key: u64) -> bool {
+    if key == K_MICMUTE {
+        var nm: u64 = 1
+        if mic_muted != 0 {
+            nm = 0
+        }
+        let rcm: u64 = ulib.sys(SYS_AUDSET, AS_CAPMUTE, nm, 0)
+        say((&s_micmute[0 as usize]) as u64)
+        sayn(nm)
+        say((&s_rc[0 as usize]) as u64)
+        sayn(rcm)
+        nl()
+        read_audio()
+        relayout()
+        return true
+    }
     if key == K_MUTE {
         var neu: u64 = 1
         if snd_mute != 0 {

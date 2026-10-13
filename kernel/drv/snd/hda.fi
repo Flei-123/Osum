@@ -152,6 +152,8 @@ export {
     dac_nid, pin_nid, path_len, path_at, out_stream, stream_tag,
     cmd, cmd_path, cmd_fails, widgets, wstart, node_type, node_caps,
     node_cfg, arm_irq, irq_armed, say_graph,
+    cap_open, cap_close, cap_ready, cap_running, cap_poll, cap_frames, cap_read, cap_why, cap_adc, cap_pin,
+    cap_kind, cap_overruns, cap_resume, cap_probe, CAP_FRAME_OCTETS,
     CHANNELS, BITS, RATE, RATE_OLD, MAX_NODES,
     P_CORB, P_IMMEDIATE,
     W_OK, W_OFF, W_NODEV, W_NOBAR, W_NORING, W_HIGHRING, W_NORESET,
@@ -2599,4 +2601,467 @@ fn resume(state: u64) -> bool {
     let ok: bool = init(state)
     s(state, S_VOL, vol)
     return ok
+}
+
+
+// ====================================================== W-TRAY6: CAPTURE (microphone)
+//
+// The input side of the controller: ONE input stream (stream descriptor 0, the first of the ISS
+// input descriptors), polled -- no interrupt, no IOC. The reader (`kernel/drv/snd/cap.fi`) asks
+// `cap_poll` on every read and from the audio tick, so the 85 ms ring never wraps unseen.
+//
+// Path: ADC (audio input converter) <- [selector/mixer] <- input pin. The pin is chosen by its
+// default configuration: mic-in beats line-in beats any other input pin that has a jack/fixed
+// connection. Found lazily on the first `cap_open` (a machine that never records pays nothing).
+// Format: 48 kHz, 16 bit, 2 channels (the format of the output side); frames are 4 octets.
+// Scalars live in the HDA page at 0x200.. (free above the output scalars, below the codec table).
+const CAP_FRAME_OCTETS: u64 = 4
+const CAP_TAG: u64 = 2
+const CAP_ENTRIES: u64 = 16
+const CAP_ENTRY_OCTETS: u64 = 1024
+const CAP_BDL_OFF: u64 = 0xA00
+const C_STATE: u64 = 0x200 // 0 untried, 1 ready, 2 failed
+const C_WHY: u64 = 0x208 // CW_*
+const C_ADC: u64 = 0x210
+const C_PIN: u64 = 0x218
+const C_PLEN: u64 = 0x220
+const C_PATH: u64 = 0x228 // four nodes, 16 bit each, ADC first
+const C_PIDX: u64 = 0x230 // four connection indices, 16 bit each
+const C_RING: u64 = 0x238
+const C_RUN: u64 = 0x240
+const C_LAST: u64 = 0x248 // last LPIB seen (octets)
+const C_ABS: u64 = 0x250 // octets captured since the start (monotonic)
+const C_OVER: u64 = 0x258 // reads that fell behind the ring
+const C_KIND: u64 = 0x260 // default device of the pin: 0xA mic, 0x8 line-in, 0 other
+const C_STARTS: u64 = 0x268
+const CW_OK: u64 = 0
+const CW_NOHDA: u64 = 1 // no controller / not ready
+const CW_NOISS: u64 = 2 // the controller has no input stream
+const CW_NOADC: u64 = 3 // no input converter with a path to an input pin
+const CW_NORING: u64 = 4
+const CW_NOSTREAM: u64 = 5
+const PINCAP_IN: u64 = 0x20
+const PINCTL_IN: u64 = 0x20
+
+fn cg(state: u64, off: u64) -> u64 {
+    return g(state, off)
+}
+
+fn cs(state: u64, off: u64, v: u64) {
+    s(state, off, v)
+}
+
+fn cap_sd() -> u64 {
+    return SD_BASE // input stream 0
+}
+
+fn cap_ready(state: u64) -> bool {
+    return cg(state, C_STATE) == 1
+}
+
+fn cap_running(state: u64) -> bool {
+    return cg(state, C_RUN) != 0
+}
+
+fn cap_why(state: u64) -> u64 {
+    return cg(state, C_WHY)
+}
+
+fn cap_adc(state: u64) -> u64 {
+    return cg(state, C_ADC)
+}
+
+fn cap_pin(state: u64) -> u64 {
+    return cg(state, C_PIN)
+}
+
+fn cap_kind(state: u64) -> u64 {
+    return cg(state, C_KIND)
+}
+
+fn cap_overruns(state: u64) -> u64 {
+    return cg(state, C_OVER)
+}
+
+// how good is this node as the microphone end of a path (0 = not usable)
+fn cap_pin_score(state: u64, nid: u64) -> u64 {
+    if node_type(state, nid) != T_PIN {
+        return 0
+    }
+    if (node_pincap(state, nid) & PINCAP_IN) == 0 {
+        return 0
+    }
+    let cfg: u64 = node_cfg(state, nid)
+    if ((cfg >> 30) & 3) == 1 {
+        return 0 // no physical connection
+    }
+    let dev: u64 = (cfg >> 20) & 0xF
+    if dev == 0xA {
+        return 3
+    }
+    if dev == 0x8 {
+        return 2
+    }
+    return 1
+}
+
+fn cap_mixsel(state: u64, nid: u64) -> bool {
+    let t: u64 = node_type(state, nid)
+    return t == T_MIXER || t == T_SELECTOR
+}
+
+// remember a candidate when it beats the best one so far
+fn cap_offer(state: u64, score: u64, len: u64, n0: u64, n1: u64, n2: u64, n3: u64, i0: u64, i1: u64, i2: u64) {
+    if score <= cg(state, 0x270) {
+        return
+    }
+    cs(state, 0x270, score)
+    cs(state, C_PLEN, len)
+    cs(state, C_PATH, n0 | (n1 << 16) | (n2 << 32) | (n3 << 48))
+    cs(state, C_PIDX, i0 | (i1 << 16) | (i2 << 32))
+}
+
+// depth-limited search ADC <- (mixer|selector)* <- pin, three levels at most
+fn cap_find(state: u64) -> bool {
+    cs(state, 0x270, 0)
+    cs(state, C_PLEN, 0)
+    let ws: u64 = g(state, S_WSTART)
+    let wc: u64 = g(state, S_WCOUNT)
+    var k: u64 = 0
+    while k < wc {
+        let adc: u64 = ws + k
+        if node_type(state, adc) == T_AUDIO_IN && (node_caps(state, adc) & WCAP_DIGITAL) == 0 {
+            let n0: u64 = node_nconn(state, adc)
+            var a: u64 = 0
+            while a < n0 && a < 8 {
+                let x1: u64 = node_conn(state, adc, a)
+                let s1: u64 = cap_pin_score(state, x1)
+                if s1 > 0 {
+                    cap_offer(state, s1 * 4, 2, adc, x1, 0, 0, a, 0, 0)
+                } else if cap_mixsel(state, x1) {
+                    let n1: u64 = node_nconn(state, x1)
+                    var b: u64 = 0
+                    while b < n1 && b < 8 {
+                        let x2: u64 = node_conn(state, x1, b)
+                        let s2: u64 = cap_pin_score(state, x2)
+                        if s2 > 0 {
+                            cap_offer(state, s2 * 4 - 1, 3, adc, x1, x2, 0, a, b, 0)
+                        } else if cap_mixsel(state, x2) {
+                            let n2: u64 = node_nconn(state, x2)
+                            var c: u64 = 0
+                            while c < n2 && c < 8 {
+                                let x3: u64 = node_conn(state, x2, c)
+                                let s3: u64 = cap_pin_score(state, x3)
+                                if s3 > 0 {
+                                    cap_offer(state, s3 * 4 - 2, 4, adc, x1, x2, x3, a, b, c)
+                                }
+                                c = c + 1
+                            }
+                        }
+                        b = b + 1
+                    }
+                }
+                a = a + 1
+            }
+        }
+        k = k + 1
+    }
+    return cg(state, C_PLEN) != 0
+}
+
+fn cap_path_at(state: u64, i: u64) -> u64 {
+    return (cg(state, C_PATH) >> (i * 16)) & 0xFFFF
+}
+
+fn cap_path_idx(state: u64, i: u64) -> u64 {
+    return (cg(state, C_PIDX) >> (i * 16)) & 0xFFFF
+}
+
+// switch the found path on: power, amplifiers (0 dB, unmuted), selectors, the pin as input, the converter's stream
+fn cap_wire(state: u64) {
+    let cad: u64 = g(state, S_CAD)
+    let len: u64 = cg(state, C_PLEN)
+    var i: u64 = 0
+    while i < len {
+        let nid: u64 = cap_path_at(state, i)
+        let caps: u64 = node_caps(state, nid)
+        if (caps & WCAP_POWER) != 0 {
+            cmd(state, cad, nid, V_SET_PSTATE, 0)
+        }
+        if i + 1 < len {
+            // the converter and every mixer/selector on the way: pass the chosen input only
+            let idx: u64 = cap_path_idx(state, i)
+            if (caps & WCAP_INAMP) != 0 {
+                let ia: u64 = param(state, cad, nid, P_INAMP)
+                var gain: u64 = 0
+                if ia != NO_ANSWER {
+                    gain = amp_offset(ia)
+                }
+                let n: u64 = node_nconn(state, nid)
+                var q: u64 = 0
+                while q < n && q < 8 {
+                    set_in_amp(state, cad, nid, q, gain, true)
+                    q = q + 1
+                }
+                set_in_amp(state, cad, nid, idx, gain, false)
+            }
+            if node_type(state, nid) == T_SELECTOR || node_type(state, nid) == T_AUDIO_IN {
+                cmd(state, cad, nid, V_SET_CONNSEL, idx)
+            }
+        }
+        if (caps & WCAP_OUTAMP) != 0 && node_type(state, nid) != T_PIN {
+            set_out_amp(state, cad, nid, amp_offset(node_amp(state, nid)), false)
+        }
+        i = i + 1
+    }
+    let pin: u64 = cap_path_at(state, len - 1)
+    let pc: u64 = node_pincap(state, pin)
+    var ctl: u64 = PINCTL_IN
+    if cap_kind(state) == 0xA {
+        if (pc & 0x1000) != 0 { // VREF 80 %
+            ctl = ctl | 4
+        } else if (pc & 0x200) != 0 { // VREF 50 %
+            ctl = ctl | 1
+        }
+    }
+    cmd(state, cad, pin, V_SET_PINCTL, ctl)
+    cs(state, C_PIN, pin)
+    cs(state, C_ADC, cap_path_at(state, 0))
+}
+
+fn cap_sd_reset(state: u64) -> bool {
+    let o: u64 = cap_sd()
+    wr8(state, o + SD_CTL, rd8(state, o + SD_CTL) & 0xFD)
+    var n: u64 = 0
+    var aus: bool = false
+    while n < SPIN_LIMIT && !aus {
+        if (rd8(state, o + SD_CTL) & SDCTL_RUN) == 0 {
+            aus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    wr8(state, o + SD_CTL, rd8(state, o + SD_CTL) | SDCTL_SRST)
+    n = 0
+    var drin: bool = false
+    while n < SPIN_LIMIT && !drin {
+        if (rd8(state, o + SD_CTL) & SDCTL_SRST) != 0 {
+            drin = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    udelay(state, 100)
+    wr8(state, o + SD_CTL, rd8(state, o + SD_CTL) & 0xFE)
+    n = 0
+    var raus: bool = false
+    while n < SPIN_LIMIT && !raus {
+        if (rd8(state, o + SD_CTL) & SDCTL_SRST) == 0 {
+            raus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    udelay(state, 100)
+    return drin && raus
+}
+
+// 0x5A everywhere: a DMA that really writes shows as bytes that are no longer 0x5A (self test, see tools/hda/cap.sh)
+fn cap_prefill(state: u64) {
+    let r: u64 = cg(state, C_RING)
+    var i: u64 = 0
+    while i < RING_OCTETS / 8 {
+        kstate.set(r, i * 8, 0x5A5A5A5A5A5A5A5A)
+        i = i + 1
+    }
+}
+
+fn cap_bdl_fill(state: u64) {
+    let ring: u64 = cg(state, C_RING)
+    let b: u64 = state + kstate.HDA_OFF + CAP_BDL_OFF
+    var i: u64 = 0
+    while i < CAP_ENTRIES {
+        let e: u64 = b + i * 16
+        let a: u64 = ring + i * CAP_ENTRY_OCTETS
+        __mmio_write32(e as *mut u32, (a & 0xFFFFFFFF) as u32)
+        __mmio_write32((e + 4) as *mut u32, ((a >> 32) & 0xFFFFFFFF) as u32)
+        __mmio_write32((e + 8) as *mut u32, CAP_ENTRY_OCTETS as u32)
+        __mmio_write32((e + 12) as *mut u32, 0 as u32)
+        i = i + 1
+    }
+    arch.barrier_write()
+}
+
+// find the path and take the ring once; the stream itself starts in cap_open
+fn cap_setup(state: u64) -> bool {
+    if cg(state, C_STATE) == 1 {
+        return true
+    }
+    if !ready(state) {
+        cs(state, C_WHY, CW_NOHDA)
+        return false
+    }
+    if g(state, S_ISS) == 0 {
+        cs(state, C_WHY, CW_NOISS)
+        cs(state, C_STATE, 2)
+        return false
+    }
+    if cg(state, C_STATE) == 2 {
+        return false
+    }
+    if !cap_find(state) {
+        cs(state, C_WHY, CW_NOADC)
+        cs(state, C_STATE, 2)
+        return false
+    }
+    let pin: u64 = cap_path_at(state, cg(state, C_PLEN) - 1)
+    cs(state, C_KIND, (node_cfg(state, pin) >> 20) & 0xF)
+    var ring: u64 = cg(state, C_RING)
+    if ring == 0 {
+        ring = mem.frame_run(state, RING_PAGES)
+    }
+    if ring == 0 {
+        cs(state, C_WHY, CW_NORING)
+        return false
+    }
+    cs(state, C_RING, ring)
+    cap_prefill(state)
+    cap_bdl_fill(state)
+    cap_wire(state)
+    cs(state, C_WHY, CW_OK)
+    cs(state, C_STATE, 1)
+    var say_h: [u8; 20] = "hda: capture path \0\0"
+    var say_a: [u8; 6] = " adc=\0"
+    var say_p: [u8; 6] = " pin=\0"
+    var say_k: [u8; 7] = " kind=\0"
+    var say_l: [u8; 6] = " len=\0"
+    serial.puts((&say_h[0]) as u64)
+    serial.puts((&say_a[0]) as u64)
+    serial.dec(cap_adc(state))
+    serial.puts((&say_p[0]) as u64)
+    serial.dec(cap_pin(state))
+    serial.puts((&say_k[0]) as u64)
+    serial.dec(cap_kind(state))
+    serial.puts((&say_l[0]) as u64)
+    serial.dec(cg(state, C_PLEN))
+    serial.nl()
+    return true
+}
+
+// find the microphone path without starting the stream (the tray asks this to decide whether to show a mic row)
+fn cap_probe(state: u64) -> bool {
+    return cap_setup(state)
+}
+
+// start capturing (idempotent); false = no microphone path or the stream does not start
+fn cap_open(state: u64) -> bool {
+    if !cap_setup(state) {
+        return false
+    }
+    if cg(state, C_RUN) != 0 {
+        return true
+    }
+    if !cap_sd_reset(state) {
+        cs(state, C_WHY, CW_NOSTREAM)
+        return false
+    }
+    let o: u64 = cap_sd()
+    let cad: u64 = g(state, S_CAD)
+    let b: u64 = state + kstate.HDA_OFF + CAP_BDL_OFF
+    cap_prefill(state)
+    wr32(state, o + SD_CBL, CAP_ENTRIES * CAP_ENTRY_OCTETS)
+    wr16(state, o + SD_LVI, CAP_ENTRIES - 1)
+    wr32(state, o + SD_BDPL, b & 0xFFFFFFFF)
+    wr32(state, o + SD_BDPU, (b >> 32) & 0xFFFFFFFF)
+    let f: u64 = fmt_word(RATE)
+    wr16(state, o + SD_FMT, f)
+    wr8(state, o + 0x02, (CAP_TAG & 0xF) << 4)
+    cmd(state, cad, cg(state, C_ADC), V_SET_FORMAT, f)
+    cmd(state, cad, cg(state, C_ADC), V_SET_STREAM, (CAP_TAG << 4) | 0)
+    wr8(state, o + SD_STS, SDSTS_BCIS | SDSTS_FIFOE | SDSTS_DESE)
+    wr32(state, o + SD_LPIB, 0)
+    cs(state, C_LAST, 0)
+    cs(state, C_ABS, 0)
+    wr8(state, o + SD_CTL, rd8(state, o + SD_CTL) | SDCTL_RUN)
+    var n: u64 = 0
+    var laeuft: bool = false
+    while n < SPIN_LIMIT && !laeuft {
+        if (rd8(state, o + SD_CTL) & SDCTL_RUN) != 0 {
+            laeuft = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !laeuft {
+        cs(state, C_WHY, CW_NOSTREAM)
+        return false
+    }
+    cs(state, C_RUN, 1)
+    cs(state, C_STARTS, cg(state, C_STARTS) + 1)
+    return true
+}
+
+fn cap_close(state: u64) {
+    if cg(state, C_RUN) == 0 || !present(state) {
+        return
+    }
+    let o: u64 = cap_sd()
+    wr8(state, o + SD_CTL, rd8(state, o + SD_CTL) & 0xFC)
+    var n: u64 = 0
+    var aus: bool = false
+    while n < SPIN_LIMIT && !aus {
+        if (rd8(state, o + SD_CTL) & SDCTL_RUN) == 0 {
+            aus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    cs(state, C_RUN, 0)
+}
+
+// fold the stream position into the monotonic octet counter
+fn cap_poll(state: u64) {
+    if cg(state, C_RUN) == 0 {
+        return
+    }
+    let lp: u64 = rd32(state, cap_sd() + SD_LPIB) % RING_OCTETS
+    let last: u64 = cg(state, C_LAST)
+    var d: u64 = 0
+    if lp >= last {
+        d = lp - last
+    } else {
+        d = lp + RING_OCTETS - last
+    }
+    cs(state, C_LAST, lp)
+    cs(state, C_ABS, cg(state, C_ABS) + d)
+}
+
+// frames captured since the start
+fn cap_frames(state: u64) -> u64 {
+    return cg(state, C_ABS) / CAP_FRAME_OCTETS
+}
+
+// copy `frames` frames starting at the absolute frame `from` out of the ring to `dst`; the caller
+// checked that they are still in the ring (cap_frames - from <= RING_FRAMES)
+fn cap_read(state: u64, from: u64, dst: u64, frames: u64) {
+    let r: u64 = cg(state, C_RING)
+    var i: u64 = 0
+    while i < frames {
+        let o: u64 = ((from + i) * CAP_FRAME_OCTETS) % RING_OCTETS
+        __mmio_write32((dst + i * 4) as *mut u32, __mmio_read32((r + o) as *mut u32))
+        i = i + 1
+    }
+}
+
+// after S3 the controller lost its registers: the next open starts from scratch
+fn cap_resume(state: u64) {
+    cs(state, C_RUN, 0)
+    if cg(state, C_STATE) == 1 {
+        cs(state, C_STATE, 0)
+    }
 }

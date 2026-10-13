@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/audio/mic.fi -- audio.mic: the microphone of the OrientOS kernel (SYS_OSUM_AUDREAD), no heap, no std.rt.
+//
+// The kernel side is kernel/drv/snd/mic.fi + the HD-Audio input stream (kernel/drv/snd/hda.fi). Format of
+// every read: 48000 Hz, S16LE, 2 channels interleaved (4 octets per frame). The read NEVER blocks:
+// 0 frames = nothing new yet, so poll from your own loop (or sleep a tick between reads).
+//
+//     import audio.mic
+//     var buf: [u8; 4096]
+//     let n: u64 = mic.mic_read((&buf[0]) as u64, 1024)   // frames, or MIC_NODEV
+//
+// POLICY (kernel): the stream starts with the first read and stops 2 s after the last one; up to four programs
+// read at once, each hears the microphone from "now"; the systemwide mute makes every read return silence of
+// the right length; `mic_users` counts the programs that read within the last 2 s (the tray shows it).
+profile kernel
+
+import libc.kcall
+
+export {
+    mic_read, mic_ready, mic_users, mic_muted, mic_set_mute, mic_kind, mic_frames,
+    MIC_NODEV, MIC_RATE, MIC_FRAME_OCTETS
+}
+
+const MIC_NODEV: u64 = 0xFFFFFFFFFFFFFFED // -ENODEV (19) as the kernel returns it
+const MIC_RATE: u64 = 48000
+const MIC_FRAME_OCTETS: u64 = 4
+const A_CAPREADY: u64 = 54
+const A_CAPUSERS: u64 = 55
+const A_CAPMUTE: u64 = 56
+const A_CAPKIND: u64 = 57
+const A_CAPFRAMES: u64 = 58
+const AS_CAPMUTE: u64 = 16
+
+// copy up to `frames` new frames to `dst`; returns the number copied, 0 = nothing new, MIC_NODEV = no microphone
+fn mic_read(dst: u64, frames: u64) -> u64 {
+    return kcall.sys3(kcall.SYS_OSUM_AUDREAD, dst, frames, 0)
+}
+
+// 1 when the kernel found a microphone path (the first call probes the codec)
+fn mic_ready() -> bool {
+    return kcall.sys3(kcall.SYS_OSUM_AUDGET, A_CAPREADY, 0, 0) == 1
+}
+
+fn mic_users() -> u64 {
+    return kcall.sys3(kcall.SYS_OSUM_AUDGET, A_CAPUSERS, 0, 0)
+}
+
+fn mic_muted() -> bool {
+    return kcall.sys3(kcall.SYS_OSUM_AUDGET, A_CAPMUTE, 0, 0) == 1
+}
+
+fn mic_set_mute(on: bool) -> bool {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    return kcall.sys3(kcall.SYS_OSUM_AUDSET, AS_CAPMUTE, v, 0) == 0
+}
+
+// the pin's default device: 10 mic, 8 line-in
+fn mic_kind() -> u64 {
+    return kcall.sys3(kcall.SYS_OSUM_AUDGET, A_CAPKIND, 0, 0)
+}
+
+fn mic_frames() -> u64 {
+    return kcall.sys3(kcall.SYS_OSUM_AUDGET, A_CAPFRAMES, 0, 0)
+}
