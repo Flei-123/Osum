@@ -40,6 +40,7 @@ import fs.ntfs
 // wartet, wird von `pipe_drop` unten geweckt.
 import sched.sched
 import ipc.handle
+import mm.mem
 
 export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
@@ -50,6 +51,8 @@ export {
     pipe_readers,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM,
+    K_EVENT, K_TIMER, K_SIGFD, K_EPOLL, K_INOTIFY,
+    open_x1, open_set_x1, open_x2, open_set_x2, open_addr, of_at, OF_OFF,
     open_mnt, open_set_mnt, open_settle,
     fd_handle, fd_rights, fd_may, fd_check, fd_set_rights, fd_pass,
     rights_of_open,
@@ -137,6 +140,21 @@ const K_VDIR: u64 = 13
 // warum es diese Art gibt.
 const K_USOCK: u64 = 14
 const K_SHM: u64 = 15
+
+// RUNDE EVENTS (r663/r664): the Linux event descriptors. Like K_SHM they carry no inode; the state lives in the open-file entry itself
+// (OF_OFF / OF_MNT / OF_X1 / OF_X2) and, for epoll and inotify, in one frame whose address is in OF_OFF. kernel/fs/evfd.fi owns the meaning.
+//   K_EVENT   eventfd: OF_OFF = counter, OF_X1 = 1 for EFD_SEMAPHORE
+//   K_TIMER   timerfd: OF_OFF = first expiry tick (0 = disarmed), OF_MNT = interval ticks, OF_X1 = expirations already read, OF_X2 = expirations already announced
+//   K_SIGFD   signalfd: OF_OFF = signal mask
+//   K_EPOLL   epoll: OF_OFF = frame with the watch table
+//   K_INOTIFY inotify: OF_OFF = frame with the watches and the event queue
+const K_EVENT: u64 = 20
+const K_TIMER: u64 = 21
+const K_SIGFD: u64 = 22
+const K_EPOLL: u64 = 23
+const K_INOTIFY: u64 = 24
+const OF_X1: u64 = 48
+const OF_X2: u64 = 56
 
 // The three that are there before the first process is.
 const CON_IN: u64 = 0
@@ -524,6 +542,8 @@ fn open_alloc(state: u64, kind: u64, ino: u64, flags: u64) -> u64 {
             // Wert aus einem vorherigen Leben waere ein Deskriptor,
             // der auf einer laengst ausgehaengten Platte liest.
             kstate.set(state, of_at(i) + OF_MNT, 0)
+            kstate.set(state, of_at(i) + OF_X1, 0)
+            kstate.set(state, of_at(i) + OF_X2, 0)
             kstate.add(state, kstate.OPENS, 1)
             return i
         }
@@ -583,6 +603,13 @@ fn open_teardown(state: u64, i: u64) {
     if kind == K_PIPEW {
         pipe_drop(state, p, false)
     }
+    // RUNDE EVENTS: epoll and inotify own one frame (address in OF_OFF).
+    if kind == K_EPOLL || kind == K_INOTIFY {
+        let fr: u64 = kstate.get(state, of_at(i) + OF_OFF)
+        if fr != 0 {
+            mem.frame_free(state, fr)
+        }
+    }
     // ROUNDE K14: DIE EINHAENGUNG GIBT DEN DESKRIPTOR FREI, UND ZWAR
     // HIER. Nicht in `sys.do_close`: ein Prozess, der stirbt, geht
     // durch `close_all`, und ein `dup2`, das einen Deskriptor
@@ -621,6 +648,8 @@ fn open_teardown(state: u64, i: u64) {
     kstate.set(state, of_at(i) + OF_REF, 0)
     kstate.set(state, of_at(i) + OF_FLAGS, 0)
     kstate.set(state, of_at(i) + OF_MNT, 0)
+    kstate.set(state, of_at(i) + OF_X1, 0)
+    kstate.set(state, of_at(i) + OF_X2, 0)
 }
 
 // Der letzte Auftrag auf diesem Eintrag ist fertig. Steht kein
@@ -651,6 +680,37 @@ fn open_refs(state: u64, i: u64) -> u64 {
         return 0
     }
     return kstate.get(state, of_at(i) + OF_REF)
+}
+
+// RUNDE EVENTS: the two spare words of an entry and its absolute address (for atomic updates).
+fn open_x1(state: u64, i: u64) -> u64 {
+    if i >= MAX_OPEN {
+        return 0
+    }
+    return kstate.get(state, of_at(i) + OF_X1)
+}
+
+fn open_set_x1(state: u64, i: u64, v: u64) {
+    if i < MAX_OPEN {
+        kstate.set(state, of_at(i) + OF_X1, v)
+    }
+}
+
+fn open_x2(state: u64, i: u64) -> u64 {
+    if i >= MAX_OPEN {
+        return 0
+    }
+    return kstate.get(state, of_at(i) + OF_X2)
+}
+
+fn open_set_x2(state: u64, i: u64, v: u64) {
+    if i < MAX_OPEN {
+        kstate.set(state, of_at(i) + OF_X2, v)
+    }
+}
+
+fn open_addr(state: u64, i: u64) -> u64 {
+    return state + of_at(i)
 }
 
 fn open_kind(state: u64, i: u64) -> u64 {
