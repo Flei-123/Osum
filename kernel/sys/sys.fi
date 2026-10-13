@@ -51,6 +51,7 @@ import drv.hid.kbd
 import ldr.elf
 import lib.errno
 import fs.file
+import fs.evfd
 import ipc.uio
 import ipc.cap
 import ipc.handle
@@ -2663,6 +2664,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // kernel really is -- a limit that exists, a count of cores it really has, "nothing to do" where there is nothing -- and none of
     // them pretends to an effect it does not have.
     // RUNDE UNTERBAU: select / pselect6 / ppoll -- the other ways to wait for descriptors, on the same readiness test and the same wake-up as `poll`.
+    // RUNDE EVENTS: epoll, eventfd, timerfd, signalfd, inotify (state in fs/evfd.fi, the calls at the end of this file).
+    if ev_number(number) {
+        return do_events(state, me, number, a0, a1, a2, a3, a4)
+    }
     if number == UB_SOCKETPAIR {
         return cx_pair(state, me, do_socketpair(state, me, a0, a1, a2, a3), a3, a1)
     }
@@ -3735,6 +3740,9 @@ fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
 // hat der Aufrufer schon gemacht.
 fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if ev_kind(kind) {
+        return ev_write(state, me, of, buf, len)
+    }
     if kind == file.K_CONOUT {
         // ROUND K9: durch das TERMINAL statt unmittelbar auf die
         // Leitung. Die Konsole hat `OPOST` aus (siehe `tty.init`), also
@@ -3818,6 +3826,9 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 // Wie `write_of`, fuer die Leseseite.
 fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if ev_kind(kind) {
+        return ev_read(state, me, of, buf, len)
+    }
     if kind == file.K_CONIN {
         return console_read(state, me, buf, len)
     }
@@ -4918,8 +4929,16 @@ fn poll_ready(state: u64, me: u64, fd: u64) -> u64 {
     if of >= file.MAX_OPEN {
         return POLLNVAL
     }
+    return poll_of(state, me, of)
+}
+
+// The readiness of one open file (epoll asks by open file, not by descriptor number).
+fn poll_of(state: u64, me: u64, of: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
     var r: u64 = 0
+    if ev_kind(kind) {
+        return ev_poll(state, me, of, kind)
+    }
     // DIE LESESEITE EINES ROHRES. Oktette darin sind POLLIN. Kein
     // Schreiber mehr ist POLLHUP -- und POLLIN steht daneben und nicht
     // statt dessen, solange noch etwas im Rohr liegt: was geschrieben
@@ -9107,6 +9126,16 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
         // GEGENPROBE: `waitfirst` auf der Kommandozeile stellt den alten
         // Weg wieder her. Damit MUSS derselbe Lauf den Zombie
         // stehenlassen.
+        // RUNDE EVENTS: SIGCHLD set to SIG_IGN means children leave no zombie (POSIX): collect the ones that are dead, unseen.
+        if signal.handler_of(state, me, signal.SIGCHLD) == signal.SIG_IGN {
+            var zi: u64 = find_zombie_child(state, me, 0)
+            var zn: u64 = 0
+            while zi < kstate.MAX_TASKS && zn < 64 {
+                proc.reap(state, zi)
+                zn = zn + 1
+                zi = find_zombie_child(state, me, 0)
+            }
+        }
         var child: u64 = kstate.MAX_TASKS
         if kstate.mode_on(state, kstate.M_WAITOLD) {
             child = find_child(state, me, want)
@@ -12599,6 +12628,11 @@ fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
 // work here without a translation table.
 fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     addr: u64, alen: u64) -> u64 {
+    // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
+    let uof: u64 = of_of(state, me, fd)
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
+        return write_of(state, me, uof, buf, want)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -12666,6 +12700,11 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
 
 fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     addr: u64, lenp: u64) -> u64 {
+    // RUNDE EVENTS: recv() on a local socket (socketpair, AF_UNIX) is a read
+    let uof: u64 = of_of(state, me, fd)
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
+        return read_of(state, me, uof, buf, want)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -17101,4 +17140,669 @@ fn cx_pair(state: u64, me: u64, r: u64, sv: u64, kind: u64) -> u64 {
         let _b: u64 = cx_result(state, me, user_word32(state, me, sv + 4), UB_O_CLOEXEC)
     }
     return r
+}
+
+// ======================================================================= RUNDE EVENTS (roadmap r663 / r664)
+//
+// eventfd, timerfd, signalfd, epoll and inotify: the event plumbing of every GUI main loop (glib, Qt, foot, libwayland clients). The STATE
+// and its arithmetic are in fs/evfd.fi; this block is the system calls around it: user memory, blocking, dispatch. Waiting is done the way
+// `poll` waits: `sched.poll_seq` BEFORE the look, `sched.poll_sleep` after it, and every place that makes something ready kicks the pollers.
+
+const EV_EPOLL_CREATE: u64 = 213
+const EV_EPOLL_WAIT: u64 = 232
+const EV_EPOLL_CTL: u64 = 233
+const EV_INOTIFY_INIT: u64 = 253
+const EV_INOTIFY_ADD: u64 = 254
+const EV_INOTIFY_RM: u64 = 255
+const EV_EPOLL_PWAIT: u64 = 281
+const EV_SIGNALFD: u64 = 282
+const EV_TIMERFD_CREATE: u64 = 283
+const EV_EVENTFD: u64 = 284
+const EV_TIMERFD_SETTIME: u64 = 286
+const EV_TIMERFD_GETTIME: u64 = 287
+const EV_SIGNALFD4: u64 = 289
+const EV_EVENTFD2: u64 = 290
+const EV_EPOLL_CREATE1: u64 = 291
+const EV_INOTIFY_INIT1: u64 = 294
+const EV_FLAGS_NONBLOCK: u64 = 2048
+const EV_FLAGS_CLOEXEC: u64 = 524288
+const EV_SFD_SIZE: u64 = 128
+const EV_EPOLL_EVSIZE: u64 = 12
+
+fn ev_kind(kind: u64) -> bool {
+    return kind >= file.K_EVENT && kind <= file.K_INOTIFY
+}
+
+fn ev_number(n: u64) -> bool {
+    // getitimer 36, setitimer 38, rt_sigsuspend 130, sigaltstack 131 (the bodies are in sched/signal.fi)
+    if n == 36 || n == 38 || n == 130 || n == 131 {
+        return true
+    }
+    if n == EV_EPOLL_CREATE || n == EV_EPOLL_WAIT || n == EV_EPOLL_CTL {
+        return true
+    }
+    if n == EV_INOTIFY_INIT || n == EV_INOTIFY_ADD || n == EV_INOTIFY_RM || n == EV_INOTIFY_INIT1 {
+        return true
+    }
+    if n >= EV_EPOLL_PWAIT && n <= EV_EVENTFD {
+        return true
+    }
+    if n == EV_TIMERFD_SETTIME || n == EV_TIMERFD_GETTIME {
+        return true
+    }
+    return n == EV_SIGNALFD4 || n == EV_EVENTFD2 || n == EV_EPOLL_CREATE1
+}
+
+// Put a fresh open file into the descriptor table of the caller. `flags` may carry the close-on-exec bit.
+fn ev_install(state: u64, me: u64, of: u64, flags: u64) -> u64 {
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return cx_result(state, me, fd, flags & EV_FLAGS_CLOEXEC)
+}
+
+// The open file behind `fd` when it is of kind `kind`; MAX_OPEN otherwise (`err` gets the errno).
+fn ev_get(state: u64, me: u64, fd: u64, kind: u64, err: *mut u64) -> u64 {
+    let of: u64 = of_of(state, me, fd & 0xFFFFFFFF)
+    if of >= file.MAX_OPEN {
+        *err = errno.E_BADF
+        return file.MAX_OPEN
+    }
+    if file.open_kind(state, of) != kind {
+        *err = errno.E_INVAL
+        return file.MAX_OPEN
+    }
+    return of
+}
+
+// Readiness bits (POLLIN / POLLOUT ...) of the five kinds.
+fn ev_poll(state: u64, me: u64, of: u64, kind: u64) -> u64 {
+    if kind == file.K_EVENT {
+        return evfd.efd_poll(state, of)
+    }
+    if kind == file.K_TIMER {
+        if evfd.tfd_unread(state, of, kstate.get(state, kstate.TICKS)) != 0 {
+            return POLLIN
+        }
+        return 0
+    }
+    if kind == file.K_SIGFD {
+        if evfd.sfd_ready(state, me, of) != 0 {
+            return POLLIN
+        }
+        return 0
+    }
+    if kind == file.K_INOTIFY {
+        if evfd.in_ready(file.open_off(state, of)) {
+            return POLLIN
+        }
+        return 0
+    }
+    // epoll: readable while at least one watched descriptor is ready (an epoll inside an epoll is refused at EPOLL_CTL_ADD)
+    var bad: u64 = 0
+    if ev_ep_scan(state, me, of, 0, 1, false, &bad) != 0 {
+        return POLLIN
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- read / write
+
+// Try once. 0 = nothing there yet (caller waits), else the octets read, or an errno.
+fn ev_take(state: u64, me: u64, of: u64, kind: u64, buf: u64, len: u64) -> u64 {
+    if kind == file.K_EVENT {
+        let v: u64 = evfd.efd_take(state, of)
+        if v == 0 {
+            return 0
+        }
+        if !put64(state, me, buf, v) {
+            let _r: u64 = evfd.efd_add(state, of, v)
+            return neg(errno.E_FAULT)
+        }
+        sched.poll_kick(state)
+        return 8
+    }
+    if kind == file.K_TIMER {
+        let v: u64 = evfd.tfd_take(state, of, kstate.get(state, kstate.TICKS))
+        if v == 0 {
+            return 0
+        }
+        if !put64(state, me, buf, v) {
+            return neg(errno.E_FAULT)
+        }
+        return 8
+    }
+    if kind == file.K_SIGFD {
+        var cnt: u64 = len / EV_SFD_SIZE
+        if cnt > 8 {
+            cnt = 8
+        }
+        let kb: u64 = blockb(state)
+        var n: u64 = 0
+        while n < cnt {
+            let sig: u64 = evfd.sfd_take(state, me, of)
+            if sig == 0 {
+                cnt = n
+            } else {
+                evfd.sfd_fill(kb + n * EV_SFD_SIZE, sig)
+                n = n + 1
+            }
+        }
+        if n == 0 {
+            return 0
+        }
+        if !copy_out(state, me, buf, kb, n * EV_SFD_SIZE) {
+            return neg(errno.E_FAULT)
+        }
+        return n * EV_SFD_SIZE
+    }
+    // inotify: whole events only
+    let fr: u64 = file.open_off(state, of)
+    let first: u64 = evfd.in_pop_size(fr)
+    if first == 0 {
+        return 0
+    }
+    if len < first {
+        return neg(errno.E_INVAL)
+    }
+    let kb: u64 = blockb(state)
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let sz: u64 = evfd.in_pop_size(fr)
+        if sz == 0 || total + sz > len || total + sz > 2048 {
+            going = false
+        } else {
+            let _n: u64 = evfd.in_pop(fr, kb + total)
+            total = total + sz
+        }
+    }
+    if !copy_out(state, me, buf, kb, total) {
+        return neg(errno.E_FAULT)
+    }
+    return total
+}
+
+fn ev_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_EPOLL {
+        return neg(errno.E_INVAL)
+    }
+    var need: u64 = 8
+    if kind == file.K_SIGFD {
+        need = EV_SFD_SIZE
+    }
+    if kind == file.K_INOTIFY {
+        need = 16
+    }
+    if len < need {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, buf, need) {
+        return neg(errno.E_FAULT)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let r: u64 = ev_take(state, me, of, kind, buf, len)
+        if r != 0 {
+            return r
+        }
+        if (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
+            return neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        var wake: u64 = sched.POLL_FOREVER
+        if kind == file.K_TIMER {
+            let nx: u64 = evfd.tfd_next(state, of, kstate.get(state, kstate.TICKS))
+            if nx != 0 {
+                wake = nx
+            }
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return neg(errno.E_AGAIN)
+}
+
+// Only an eventfd takes a write: it adds to the counter, and waits (or EAGAIN) while the sum would overflow.
+fn ev_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if file.open_kind(state, of) != file.K_EVENT || len < 8 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, buf, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let v: u64 = user_word(state, me, buf)
+    if v == 0xFFFFFFFFFFFFFFFF {
+        return neg(errno.E_INVAL)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if evfd.efd_add(state, of, v) == 0 {
+            return 8
+        }
+        if (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
+            return neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        sched.poll_sleep(state, seen, sched.POLL_FOREVER)
+    }
+    return neg(errno.E_AGAIN)
+}
+
+// ---------------------------------------------------------------- epoll
+
+// One pass over the watch table of epoll `ofep`. With `report`, up to `max` events are written to user memory `out`
+// (struct epoll_event, PACKED, 12 octets: events u32, data u64) and edge / one-shot state is advanced. Returns the number found.
+// A watch whose descriptor was closed (or reused) since EPOLL_CTL_ADD is dropped here -- Linux drops it at the last close.
+fn ev_ep_scan(state: u64, me: u64, ofep: u64, out: u64, max: u64, report: bool, bad: *mut u64) -> u64 {
+    let fr: u64 = file.open_off(state, ofep)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < evfd.EP_MAX && n < max {
+        if evfd.ep_used(fr, i) {
+            let w: u64 = evfd.ep_of(fr, i)
+            if of_of(state, me, evfd.ep_fd(fr, i)) != w {
+                evfd.ep_drop_slot(fr, i)
+            } else {
+                let ev: u64 = evfd.ep_events(fr, i)
+                let live: u64 = ev & 0x3FFFFFFF
+                if (ev & evfd.EPOLLONESHOT) != 0 && live == 0 {
+                    // a one-shot watch that already fired sleeps until EPOLL_CTL_MOD
+                } else {
+                    let rdy: u64 = poll_of(state, me, w)
+                    if (rdy & POLLNVAL) != 0 {
+                        evfd.ep_drop_slot(fr, i)
+                    } else {
+                        var got: u64 = rdy & (live | POLLERR | POLLHUP)
+                        if (live & evfd.EPOLLRDHUP) != 0 && (rdy & POLLHUP) != 0 {
+                            got = got | evfd.EPOLLRDHUP
+                        }
+                        var fresh: u64 = got
+                        if (ev & evfd.EPOLLET) != 0 && report {
+                            let last: u64 = evfd.ep_last(fr, i)
+                            fresh = got & (0xFFFFFFFFFFFFFFFF -% last)
+                            evfd.ep_set_last(fr, i, got)
+                        }
+                        if fresh != 0 {
+                            if report {
+                                let a: u64 = out + n * EV_EPOLL_EVSIZE
+                                if !put32(state, me, a, fresh) || !put64(state, me, a + 4, evfd.ep_data(fr, i)) {
+                                    *bad = 1
+                                    return n
+                                }
+                                if (ev & evfd.EPOLLONESHOT) != 0 {
+                                    evfd.ep_set_events(fr, i, ev & 0xC0000000)
+                                }
+                            }
+                            n = n + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn do_epoll_create(state: u64, me: u64, flags: u64) -> u64 {
+    let of: u64 = evfd.ep_new(state, 0)
+    return ev_install(state, me, of, flags)
+}
+
+fn do_epoll_ctl(state: u64, me: u64, epfd: u64, op: u64, fd: u64, evp: u64) -> u64 {
+    var err: u64 = 0
+    let ofep: u64 = ev_get(state, me, epfd, file.K_EPOLL, &err)
+    if ofep >= file.MAX_OPEN {
+        return neg(err)
+    }
+    let w: u64 = of_of(state, me, fd & 0xFFFFFFFF)
+    if w >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    if w == ofep {
+        return neg(errno.E_INVAL)
+    }
+    let wk: u64 = file.open_kind(state, w)
+    if wk == file.K_EPOLL {
+        return neg(errno.E_INVAL)
+    }
+    // ordinary files and directories are always ready: epoll refuses them (EPERM), as Linux does
+    if wk == file.K_FILE || wk == file.K_DIR || wk == file.K_VFILE || wk == file.K_VDIR {
+        return neg(errno.E_PERM)
+    }
+    let fr: u64 = file.open_off(state, ofep)
+    let wfd: u64 = fd & 0xFFFFFFFF
+    if op == evfd.EP_DEL {
+        if evfd.ep_del(fr, wfd) != 0 {
+            return neg(errno.E_NOENT)
+        }
+        return 0
+    }
+    if op != evfd.EP_ADD && op != evfd.EP_MOD {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, evp, EV_EPOLL_EVSIZE) {
+        return neg(errno.E_FAULT)
+    }
+    let events: u64 = get32(state, me, evp)
+    let data: u64 = user_word(state, me, evp + 4)
+    if op == evfd.EP_ADD {
+        let r: u64 = evfd.ep_add(fr, wfd, w, events, data)
+        if r == 1 {
+            return neg(errno.E_EXIST)
+        }
+        if r == 2 {
+            return neg(errno.E_NOSPC)
+        }
+    } else {
+        if evfd.ep_mod(fr, wfd, events, data) != 0 {
+            return neg(errno.E_NOENT)
+        }
+    }
+    // a thread already waiting on this epoll must look again
+    sched.poll_kick(state)
+    return 0
+}
+
+fn do_epoll_wait(state: u64, me: u64, epfd: u64, out: u64, maxev: u64, tmo: u64) -> u64 {
+    var err: u64 = 0
+    let ofep: u64 = ev_get(state, me, epfd, file.K_EPOLL, &err)
+    if ofep >= file.MAX_OPEN {
+        return neg(err)
+    }
+    var max: u64 = maxev & 0xFFFFFFFF
+    if max == 0 || max >= 0x80000000 {
+        return neg(errno.E_INVAL)
+    }
+    if max > evfd.EP_MAX {
+        max = evfd.EP_MAX
+    }
+    if !proc.user_ok(state, me, out, max * EV_EPOLL_EVSIZE) {
+        return neg(errno.E_FAULT)
+    }
+    let t: u64 = tmo & 0xFFFFFFFF
+    let forever: bool = t >= 0x80000000
+    var ticks: u64 = 0
+    if !forever && t != 0 {
+        // same rounding as poll: never earlier than asked, one extra tick for the tick we are in
+        ticks = (t + 9) / 10 + 1
+    }
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + ticks
+    var bad: u64 = 0
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let n: u64 = ev_ep_scan(state, me, ofep, out, max, true, &bad)
+        if bad != 0 {
+            return neg(errno.E_FAULT)
+        }
+        if n != 0 {
+            return n
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        if !forever && kstate.get(state, kstate.TICKS) >= deadline {
+            return 0
+        }
+        var wake: u64 = deadline
+        if forever {
+            wake = sched.POLL_FOREVER
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- eventfd
+
+fn do_eventfd(state: u64, me: u64, initval: u64, flags: u64) -> u64 {
+    if (flags & (0xFFFFFFFF -% (1 | EV_FLAGS_NONBLOCK | EV_FLAGS_CLOEXEC))) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    let of: u64 = evfd.efd_new(state, initval & 0xFFFFFFFF, flags & 1, flags)
+    return ev_install(state, me, of, flags)
+}
+
+// ---------------------------------------------------------------- timerfd
+
+// A timespec as ticks (10 ms), rounded UP; a nonzero time never becomes zero (zero would mean "disarmed").
+fn ev_ticks(sec: u64, nsec: u64) -> u64 {
+    if sec == 0 && nsec == 0 {
+        return 0
+    }
+    var s: u64 = sec
+    if s > 100000000 {
+        s = 100000000
+    }
+    let t: u64 = (s * 1000 + (nsec + 999999) / 1000000 + 9) / 10
+    if t == 0 {
+        return 1
+    }
+    return t
+}
+
+// A tick count as a timespec at `addr` (two 64-bit words).
+fn ev_put_ts(state: u64, me: u64, addr: u64, ticks: u64) -> bool {
+    let ms: u64 = ticks * 10
+    return put64(state, me, addr, ms / 1000) && put64(state, me, addr + 8, (ms % 1000) * 1000000)
+}
+
+fn do_timerfd_create(state: u64, me: u64, clock: u64, flags: u64) -> u64 {
+    // CLOCK_REALTIME 0, CLOCK_MONOTONIC 1, CLOCK_BOOTTIME 7: all run on the one tick counter here
+    if clock != 0 && clock != 1 && clock != 7 {
+        return neg(errno.E_INVAL)
+    }
+    if (flags & (0xFFFFFFFF -% (EV_FLAGS_NONBLOCK | EV_FLAGS_CLOEXEC))) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    return ev_install(state, me, evfd.tfd_new(state, flags), flags)
+}
+
+fn do_timerfd_settime(state: u64, me: u64, fd: u64, flags: u64, newp: u64, oldp: u64) -> u64 {
+    var err: u64 = 0
+    let of: u64 = ev_get(state, me, fd, file.K_TIMER, &err)
+    if of >= file.MAX_OPEN {
+        return neg(err)
+    }
+    if !proc.user_ok(state, me, newp, 32) {
+        return neg(errno.E_FAULT)
+    }
+    let isec: u64 = user_word(state, me, newp)
+    let insec: u64 = user_word(state, me, newp + 8)
+    let vsec: u64 = user_word(state, me, newp + 16)
+    let vnsec: u64 = user_word(state, me, newp + 24)
+    if insec >= 1000000000 || vnsec >= 1000000000 || isec >= 0x8000000000000000 || vsec >= 0x8000000000000000 {
+        return neg(errno.E_INVAL)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if oldp != 0 {
+        if !proc.user_ok(state, me, oldp, 32) {
+            return neg(errno.E_FAULT)
+        }
+        let _a: bool = ev_put_ts(state, me, oldp, evfd.tfd_interval(state, of))
+        let _b: bool = ev_put_ts(state, me, oldp + 16, evfd.tfd_left(state, of, now))
+    }
+    let iv: u64 = ev_ticks(isec, insec)
+    let val: u64 = ev_ticks(vsec, vnsec)
+    if val == 0 {
+        evfd.tfd_set(state, of, 0, 0)
+        return 0
+    }
+    var first: u64 = now + val
+    if (flags & 1) != 0 {
+        // TFD_TIMER_ABSTIME: the time is on the tick counter's own scale (ticks since boot)
+        first = val
+        if first < now {
+            first = now
+        }
+    }
+    evfd.tfd_set(state, of, first, iv)
+    return 0
+}
+
+fn do_timerfd_gettime(state: u64, me: u64, fd: u64, curp: u64) -> u64 {
+    var err: u64 = 0
+    let of: u64 = ev_get(state, me, fd, file.K_TIMER, &err)
+    if of >= file.MAX_OPEN {
+        return neg(err)
+    }
+    if !proc.user_ok(state, me, curp, 32) {
+        return neg(errno.E_FAULT)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if !ev_put_ts(state, me, curp, evfd.tfd_interval(state, of))
+        || !ev_put_ts(state, me, curp + 16, evfd.tfd_left(state, of, now)) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- signalfd
+
+// signalfd4(fd, mask, sizemask, flags): fd -1 makes a new descriptor, another one changes the mask of an existing signalfd.
+fn do_signalfd(state: u64, me: u64, fd: u64, maskp: u64, size: u64, flags: u64) -> u64 {
+    if size != 8 {
+        return neg(errno.E_INVAL)
+    }
+    if (flags & (0xFFFFFFFF -% (EV_FLAGS_NONBLOCK | EV_FLAGS_CLOEXEC))) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, maskp, 8) {
+        return neg(errno.E_FAULT)
+    }
+    // SIGKILL and SIGSTOP can not be taken
+    let mask: u64 = user_word(state, me, maskp) & (0xFFFFFFFFFFFFFFFF -% ((1 << (signal.SIGKILL - 1)) | (1 << (signal.SIGSTOP - 1))))
+    if (fd & 0xFFFFFFFF) == 0xFFFFFFFF {
+        return ev_install(state, me, evfd.sfd_new(state, mask, flags), flags)
+    }
+    var err: u64 = 0
+    let of: u64 = ev_get(state, me, fd, file.K_SIGFD, &err)
+    if of >= file.MAX_OPEN {
+        return neg(err)
+    }
+    evfd.sfd_set_mask(state, of, mask)
+    sched.poll_kick(state)
+    return fd & 0xFFFFFFFF
+}
+
+// ---------------------------------------------------------------- inotify
+
+fn do_inotify_init(state: u64, me: u64, flags: u64) -> u64 {
+    if (flags & (0xFFFFFFFF -% (EV_FLAGS_NONBLOCK | EV_FLAGS_CLOEXEC))) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    return ev_install(state, me, evfd.in_new(state, flags), flags)
+}
+
+fn do_inotify_add(state: u64, me: u64, fd: u64, path: u64, mask: u64) -> u64 {
+    var err: u64 = 0
+    let of: u64 = ev_get(state, me, fd, file.K_INOTIFY, &err)
+    if of >= file.MAX_OPEN {
+        return neg(err)
+    }
+    if (mask & 0xFFF) == 0 {
+        return neg(errno.E_INVAL)
+    }
+    let buf: u64 = nameb(state)
+    let len: u64 = fetch_path(state, me, path, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if len > evfd.IN_PATHMAX {
+        return neg(errno.E_NAMETOOLONG)
+    }
+    let wd: u64 = evfd.in_add(file.open_off(state, of), buf, len, mask)
+    if wd == 0 {
+        return neg(errno.E_NOSPC)
+    }
+    return wd
+}
+
+fn do_inotify_rm(state: u64, me: u64, fd: u64, wd: u64) -> u64 {
+    var err: u64 = 0
+    let of: u64 = ev_get(state, me, fd, file.K_INOTIFY, &err)
+    if of >= file.MAX_OPEN {
+        return neg(err)
+    }
+    if !evfd.in_rm(file.open_off(state, of), wd & 0xFFFFFFFF) {
+        return neg(errno.E_INVAL)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- dispatch
+
+fn do_events(state: u64, me: u64, n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if n == 36 {
+        return signal.do_getitimer(state, me, a0, a1)
+    }
+    if n == 38 {
+        return signal.do_setitimer(state, me, a0, a1, a2)
+    }
+    if n == 130 {
+        return signal.do_sigsuspend(state, me, a0, a1)
+    }
+    if n == 131 {
+        return signal.do_sigaltstack(state, me, a0, a1)
+    }
+    if n == EV_EPOLL_CREATE {
+        if (a0 & 0xFFFFFFFF) == 0 || (a0 & 0xFFFFFFFF) >= 0x80000000 {
+            return neg(errno.E_INVAL)
+        }
+        return do_epoll_create(state, me, 0)
+    }
+    if n == EV_EPOLL_CREATE1 {
+        if (a0 & 0xFFFFFFFF) != 0 && (a0 & 0xFFFFFFFF) != EV_FLAGS_CLOEXEC {
+            return neg(errno.E_INVAL)
+        }
+        return do_epoll_create(state, me, a0)
+    }
+    if n == EV_EPOLL_CTL {
+        return do_epoll_ctl(state, me, a0, a1 & 0xFFFFFFFF, a2, a3)
+    }
+    if n == EV_EPOLL_WAIT || n == EV_EPOLL_PWAIT {
+        return do_epoll_wait(state, me, a0, a1, a2, a3)
+    }
+    if n == EV_EVENTFD {
+        return do_eventfd(state, me, a0, 0)
+    }
+    if n == EV_EVENTFD2 {
+        return do_eventfd(state, me, a0, a1 & 0xFFFFFFFF)
+    }
+    if n == EV_TIMERFD_CREATE {
+        return do_timerfd_create(state, me, a0 & 0xFFFFFFFF, a1 & 0xFFFFFFFF)
+    }
+    if n == EV_TIMERFD_SETTIME {
+        return do_timerfd_settime(state, me, a0, a1 & 0xFFFFFFFF, a2, a3)
+    }
+    if n == EV_TIMERFD_GETTIME {
+        return do_timerfd_gettime(state, me, a0, a1)
+    }
+    if n == EV_SIGNALFD {
+        return do_signalfd(state, me, a0, a1, a2, 0)
+    }
+    if n == EV_SIGNALFD4 {
+        return do_signalfd(state, me, a0, a1, a2, a3 & 0xFFFFFFFF)
+    }
+    if n == EV_INOTIFY_INIT {
+        return do_inotify_init(state, me, 0)
+    }
+    if n == EV_INOTIFY_INIT1 {
+        return do_inotify_init(state, me, a0 & 0xFFFFFFFF)
+    }
+    if n == EV_INOTIFY_ADD {
+        return do_inotify_add(state, me, a0, a1, a2 & 0xFFFFFFFF)
+    }
+    return do_inotify_rm(state, me, a0, a1)
 }
