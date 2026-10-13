@@ -4,7 +4,7 @@
 #
 #   bash tools/fvviewer/gui.sh [stage ...]        (run it through /root/jarvis/bin/heavy)
 #
-# stages (default: plain tls tlsold wprobe)
+# stages (default: plain tls tlsold wprobe; `opk` is WIP -- see r43, not in the default list)
 #   plain    ws:// to a local relay + Rust test host: window, type ID + password, picture pixel probe,
 #            click + keys in the test host log, clipboard echo, host kill/start => reconnect, fps/latency
 #   tls      the same over wss:// (socat TLS terminator, own test CA /etc/fvviewer-ca.pem)
@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-STAGES=${*:-plain tls opk tlsold wprobe}
+STAGES=${*:-plain tls tlsold wprobe}
 D=$(mktemp -d); trap 'for s in "$D"/*/th; do bash tools/fvviewer/th.sh "$s" down 2>/dev/null; done; [ -n "${CLIENT_BAK:-}" ] && cp "$CLIENT_BAK" lib/fv/client.fi; pkill -P $$ 2>/dev/null; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD"
