@@ -10,6 +10,10 @@ heuristic, paths = their own directory + the area of their name) -- review them.
 
   gen-manifest.py            write tools/qa/gates.tsv
   gen-manifest.py --check    exit 1 if a run.sh has no row or a row has no script
+  gen-manifest.py --by-times re-tier 'auto' rows from measured wall times (gates.sh --times file,
+                             GATES_TIMES): fastest valid run <= 300 s quick, <= 1200 s full, else
+                             nightly. Runs killed by a limit (rc 124/137/143) are not measurements.
+                             Gates without a valid measurement keep their heuristic tier.
 """
 import glob, os, re, sys
 
@@ -91,6 +95,29 @@ def row(g):
     return [g, tier_of(g), ",".join(needs) or "-", ",".join(dict.fromkeys(paths)), "auto", "areas=" + "+".join(areas)]
 
 
+QUICK_MAX_S = 300
+FULL_MAX_S = 1200
+
+
+def measured_tiers():
+    path = os.environ.get("GATES_TIMES") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"), "osum-gates", "times.tsv")
+    best = {}
+    if not os.path.exists(path):
+        return best
+    for ln in open(path, encoding="utf-8").read().splitlines():
+        f = ln.split("\t")
+        if len(f) < 4 or not f[1].isdigit():
+            continue
+        rc = f[3].replace("rc=", "")
+        if rc in ("124", "137", "143"):
+            continue
+        t = int(f[1])
+        if f[0] not in best or t < best[f[0]]:
+            best[f[0]] = t
+    return {g: ("quick" if t <= QUICK_MAX_S else "full" if t <= FULL_MAX_S else "nightly") for g, t in best.items()}
+
+
 def read_old():
     old = {}
     if os.path.exists(OUT):
@@ -113,14 +140,17 @@ def main():
             print(f"gates.tsv: row '{g}' has no tools/{g}/run.sh")
         print(f"gates.tsv: {len(cur)} gates, {len(miss)} missing, {len(gone)} stale")
         sys.exit(1 if miss or gone else 0)
+    meas = measured_tiers() if "--by-times" in sys.argv else {}
     rows = []
     for g in cur:
         if g in old and old[g][4] == "manual":
             rows.append(old[g])
         else:
             r = row(g)
-            if g in old and old[g][4] != "manual":
-                pass
+            if g in meas:
+                r[1] = meas[g]
+            elif g in old and "--by-times" in sys.argv:
+                r[1] = old[g][1]
             rows.append(r)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(HEADER + "\n")
