@@ -336,6 +336,15 @@ fn insw(port: u16, dst: u64, words: u64) {
         clobber("rdi"), clobber("rcx"), clobber("memory"))
 }
 
+// Write counterpart of insw: the whole sector as ONE instruction (one VM exit).
+fn outsw(port: u16, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep outsw", in("dx") port, in("rsi") src, in("rcx") words,
+        clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
 // Wait until the drive is no longer busy and has data. Bounded: a device
 // that never answers must not hang the kernel.
 fn ata_wait(want_drq: bool) -> bool {
@@ -529,11 +538,9 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
         ata_recover(slave)
         return false
     }
-    var i: u64 = 0
-    while i < BLOCK_SIZE / 2 {
-        out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
-        i = i + 1
-    }
+    // One `rep outsw` instead of 256 single `out` instructions: every port
+    // write is a VM exit, which cost about 1 ms per sector written.
+    outsw(ATA_DATA, src, BLOCK_SIZE / 2)
     // RUNDE INSTALL: ERST WARTEN, DANN SPUELEN -- UND DAS IST EIN
     // FEHLER, DER AELTER IST ALS DIESE RUNDE.
     //
@@ -1041,6 +1048,37 @@ fn cache_drop(state: u64, dev: u64, lba: u64) {
     }
 }
 
+// Drop what a write to (dev, lba) must not leave behind, except the run that
+// holds the sector itself (cache_sync handles that one after the write).
+fn cache_drop_other(state: u64, dev: u64, lba: u64) {
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) != dev {
+            ws(state, w, C_VALID, 0)
+        }
+        w = w + 1
+    }
+}
+
+// After the write: a cached run that holds the sector gets the new contents
+// (or is dropped when the write failed).
+fn cache_sync(state: u64, dev: u64, lba: u64, src: u64, ok: bool) {
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
+            let c0: u64 = wg(state, w, C_LBA)
+            if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+                if ok {
+                    copy(src, gone_data(state, w) + (lba - c0) * BLOCK_SIZE)
+                } else {
+                    ws(state, w, C_VALID, 0)
+                }
+            }
+        }
+        w = w + 1
+    }
+}
+
 fn cache_reset(state: u64) {
     cache_invalidate(state)
     cs(state, C_HITS, 0)
@@ -1182,13 +1220,17 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
+    if dev == DEV_ATA || dev == DEV_ATA1 {
+        // Write-through for the read-ahead cache: the cached run that holds
+        // this sector is UPDATED, not dropped. A drop made every read after a
+        // write (journal payload, bitmap, inode) a miss, and a miss is a
+        // 32-sector PIO run: the file-write rate was ~25 KiB/s.
+        cache_drop_other(state, dev, lba)
+        let ok: bool = ata_write_twice(lba, src, dev == DEV_ATA1)
+        cache_sync(state, dev, lba, src, ok)
+        return ok
+    }
     cache_drop(state, dev, lba)
-    if dev == DEV_ATA {
-        return ata_write_twice(lba, src, false)
-    }
-    if dev == DEV_ATA1 {
-        return ata_write_twice(lba, src, true)
-    }
     if dev == DEV_NVME {
         return nvme.write_block(state, lba, src)
     }
