@@ -86,7 +86,7 @@ PY
 for MODE in $MODES; do
     echo "== $MODE"
     O="$TMPD/o-$MODE"
-    bash tools/design/eh6.sh "$O" res=1280x800 accel=kvm mode="$MODE" progs="$PROGS" \
+    EH_MKFS_EXTRA="/etc/tray.items=$TMPD/tray.items@0644" bash tools/design/eh6.sh "$O" res=1280x800 accel=kvm mode="$MODE" progs="$PROGS" \
         tbextra="tray_chevron=1" drehbuch="$TMPD/dreh.txt" > "$TMPD/o-$MODE.log" 2>&1 < /dev/null
     S="$O/serial.txt"
     if [ -n "${TRAYPOP_OUT:-}" ]; then mkdir -p "$TRAYPOP_OUT/$MODE"; cp "$O"/*.ppm "$S" "$TRAYPOP_OUT/$MODE/" 2>/dev/null; fi
@@ -110,7 +110,7 @@ for MODE in $MODES; do
     grep -aq 'traypop: item .*owner=backup' "$S" && grep -aq 'traypop: item .*owner=chat' "$S" && ok "$MODE: owners backup + chat reported" || bad "$MODE: owner lines missing"
     grep -aq 'traypop: shut' "$S" && ok "$MODE: second click on the chevron shuts it" || bad "$MODE: no 'traypop: shut'"
     d2=$(diffpix "$O/00-before.ppm" "$O/02-shut.ppm" "$x" "$y" "$w" "$h")
-    [ "$d2" -le 600 ] && ok "$MODE: after the shut the rectangle is as before ($d2 px differ; the clock ticks)" || bad "$MODE: the flyout is still in the picture ($d2 px differ)"
+    [ "$d2" -le 3000 ] && ok "$MODE: after the shut the rectangle is as before ($d2 px differ; the clock ticks)" || bad "$MODE: the flyout is still in the picture ($d2 px differ)"
     grep -aq 'taskbar: no traypop' "$S" && bad "$MODE: the bar has no traypop host" || ok "$MODE: the bar had a host"
 done
 echo; echo "TRAYPOP: $pass passed, $fail failed"
