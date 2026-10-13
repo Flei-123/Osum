@@ -1,0 +1,483 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/fvviewer/vt.fi -- test driver for lib/fv/{proto,session}.fi against
+// the Rust contract file tests/orientos-vectors.json (driven by vectors.py).
+//
+//   vt enc <kind> [numbers|hex]       -> hex of the encoded message
+//       caps h | move x y | button b d | wheel n | key code named down
+//       keyvk vk ext down | special c | clip <hex> | ping ts | pong ts
+//       needkey | setmon i
+//   vt dec <hex>                      -> one line per decoded item or "reject"
+//   vt hs <client-secret> <ack-hex> pw <pw-hex> | ask <name-hex>
+//       handshake as the viewer with a FIXED secret; prints hello/answer/key/code
+//   vt sess <key> seal <pt-hex>...    -> frame hex per plaintext
+//   vt sess <key> open <frame-hex>... -> "ok:<hex>" or "fail" per frame
+//   vt relay connect <id> | kind <text-hex> | str <text-hex> <key>
+//
+// Hex arguments: "-" is the empty string.
+import std.io
+import std.rt
+import fv.crypto
+import fv.proto
+import fv.session
+import crypto.x25519
+
+fn hexv(c: u8) -> u64 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 97 as u8) as u64 + 10 }
+    if c >= 65 as u8 && c <= 70 as u8 { return (c - 65 as u8) as u64 + 10 }
+    return 255
+}
+
+fn from_hex(a: u64, dst: u64, cap: usize) -> i64 {
+    let n: usize = rt.c_length(a)
+    if n == 1 && rt.ld8(a, 0) == 45 as u8 { return 0 }
+    if n % 2 != 0 || n / 2 > cap { return 0 - 1 }
+    var i: usize = 0
+    while i < n / 2 {
+        let h: u64 = hexv(rt.ld8(a, 2 * i))
+        let l: u64 = hexv(rt.ld8(a, 2 * i + 1))
+        if h == 255 || l == 255 { return 0 - 1 }
+        rt.st8(dst, i, (h * 16 + l) as u8)
+        i = i + 1
+    }
+    return (n / 2) as i64
+}
+
+fn put_hex(p: u64, n: u64) {
+    let d: [u8; 16] = "0123456789abcdef"
+    var two: [u8; 2] = [0 as u8; 2]
+    var i: u64 = 0
+    while i < n {
+        let b: u8 = rt.ld8(p, i as usize)
+        two[0] = d[(b >> 4) as usize]
+        two[1] = d[(b & 15 as u8) as usize]
+        io.print_bytes((&two[0]) as u64, 2)
+        i = i + 1
+    }
+}
+
+fn nl() {
+    io.print("\n")
+}
+
+fn sp() {
+    io.print(" ")
+}
+
+// unsigned decimal
+fn pu(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: usize = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        d[n] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var o: [u8; 24] = [0 as u8; 24]
+    var i: usize = 0
+    while i < n {
+        o[i] = d[n - 1 - i]
+        i = i + 1
+    }
+    io.print_bytes((&o[0]) as u64, n)
+}
+
+fn pi(v: i64) {
+    if v < 0 {
+        io.print("-")
+        pu((0 - v) as u64)
+    } else {
+        pu(v as u64)
+    }
+}
+
+fn arg(start: u64, i: usize) -> u64 {
+    return rt.arg_ptr(start, i)
+}
+
+fn num(start: u64, i: usize) -> i64 {
+    let a: u64 = arg(start, i)
+    let n: usize = rt.c_length(a)
+    var neg: bool = false
+    var k: usize = 0
+    var v: i64 = 0
+    if n > 0 && rt.ld8(a, 0) == 45 as u8 {
+        neg = true
+        k = 1
+    }
+    while k < n {
+        v = v * 10 + ((rt.ld8(a, k) - 48 as u8) as i64)
+        k = k + 1
+    }
+    if neg { return 0 - v }
+    return v
+}
+
+fn is(cmd: u64, cn: usize, name: str) -> bool {
+    if cn != name.n { return false }
+    var i: usize = 0
+    while i < cn {
+        if rt.ld8(cmd, i) != rt.ld8(name.p as u64, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn arg_is(start: u64, i: usize, name: str) -> bool {
+    return is(arg(start, i), rt.c_length(arg(start, i)), name)
+}
+
+static mut buf_a: [u8; 70000] = [0; 70000]
+static mut buf_b: [u8; 70000] = [0; 70000]
+
+// ------------------------------------------------------------ enc
+fn cmd_enc(start: u64) -> i32 {
+    if rt.arg_count(start) < 3 { return 2 }
+    let out: u64 = (&buf_a[0]) as u64
+    let k: u64 = arg(start, 2)
+    let kn: usize = rt.c_length(k)
+    var n: u64 = 0
+    if is(k, kn, "caps") {
+        n = proto.enc_caps(out, num(start, 3) != 0)
+    } else if is(k, kn, "move") {
+        n = proto.enc_move(out, num(start, 3), num(start, 4))
+    } else if is(k, kn, "button") {
+        n = proto.enc_button(out, num(start, 3) as u64, num(start, 4) != 0)
+    } else if is(k, kn, "wheel") {
+        n = proto.enc_wheel(out, num(start, 3))
+    } else if is(k, kn, "key") {
+        n = proto.enc_key(out, num(start, 3) as u64, num(start, 4) != 0, num(start, 5) != 0)
+    } else if is(k, kn, "keyvk") {
+        n = proto.enc_keyvk(out, num(start, 3) as u64, num(start, 4) != 0, num(start, 5) != 0)
+    } else if is(k, kn, "special") {
+        n = proto.enc_special(out, num(start, 3) as u64)
+    } else if is(k, kn, "clip") {
+        let t: u64 = (&buf_b[0]) as u64
+        let tl: i64 = from_hex(arg(start, 3), t, 60000)
+        if tl < 0 { return 2 }
+        n = proto.enc_clip(out, t, tl as u64)
+    } else if is(k, kn, "ping") {
+        n = proto.enc_ping(out, num(start, 3) as u64)
+    } else if is(k, kn, "pong") {
+        n = proto.enc_pong(out, num(start, 3) as u64)
+    } else if is(k, kn, "needkey") {
+        n = proto.enc_needkey(out)
+    } else if is(k, kn, "setmon") {
+        n = proto.enc_setmon(out, num(start, 3) as u64)
+    } else {
+        io.print("unknown enc kind\n")
+        return 2
+    }
+    put_hex(out, n)
+    nl()
+    return 0
+}
+
+// ------------------------------------------------------------ dec
+fn cmd_dec(start: u64) -> i32 {
+    if rt.arg_count(start) < 3 { return 2 }
+    let m: u64 = (&buf_a[0]) as u64
+    let r: i64 = from_hex(arg(start, 2), m, 70000)
+    if r < 0 { return 2 }
+    let n: u64 = r as u64
+    let t: u64 = proto.msg_type(m, n)
+    var two: [u64; 2] = [0; 2]
+    var four: [u64; 4] = [0; 4]
+    if t == proto.T_SCREEN {
+        if !proto.dec_screen(m, n, (&two[0]) as u64) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("screen ")
+        pu(two[0])
+        sp()
+        pu(two[1])
+        nl()
+    } else if t == proto.T_FRAME {
+        var f: proto.Frame = proto.Frame { w: 0, h: 0, jpeg: 0, len: 0 }
+        if !proto.dec_frame(m, n, &f) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("frame ")
+        pu(f.w)
+        sp()
+        pu(f.h)
+        sp()
+        pu(f.len)
+        sp()
+        if f.len == 0 {
+            io.print("-")
+        } else {
+            put_hex(f.jpeg, f.len)
+        }
+        nl()
+    } else if t == proto.T_TILES {
+        var it: proto.TileIt = proto.TileIt { p: 0, n: 0, at: 0, left: 0, w: 0, h: 0 }
+        if !proto.tiles_begin(m, n, &it) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("tiles ")
+        pu(it.w)
+        sp()
+        pu(it.h)
+        sp()
+        pu(it.left)
+        nl()
+        var tl: proto.Tile = proto.Tile { x: 0, y: 0, w: 0, h: 0, jpeg: 0, len: 0 }
+        var got: u64 = 0
+        while proto.tiles_next(&it, &tl) {
+            io.print("tile ")
+            pu(tl.x)
+            sp()
+            pu(tl.y)
+            sp()
+            pu(tl.w)
+            sp()
+            pu(tl.h)
+            sp()
+            pu(tl.len)
+            sp()
+            if tl.len == 0 {
+                io.print("-")
+            } else {
+                put_hex(tl.jpeg, tl.len)
+            }
+            nl()
+            got = got + 1
+        }
+        io.print("tiles-end ")
+        pu(got)
+        nl()
+    } else if t == proto.T_CURSOR {
+        var c: proto.Cursor = proto.Cursor { x: 0, y: 0, visible: false }
+        if !proto.dec_cursor(m, n, &c) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("cursor ")
+        pi(c.x)
+        sp()
+        pi(c.y)
+        sp()
+        if c.visible { io.print("1") } else { io.print("0") }
+        nl()
+    } else if t == proto.T_MONS {
+        if !proto.dec_monitors(m, n, (&two[0]) as u64) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("mons ")
+        pu(two[0])
+        sp()
+        pu(two[1])
+        nl()
+        var i: u64 = 0
+        while i < two[1] {
+            let np: u64 = proto.mon_at(m, n, i, (&four[0]) as u64)
+            if np == 0 {
+                io.print("mon-bad\n")
+                return 0
+            }
+            io.print("mon ")
+            pu(four[0])
+            sp()
+            pu(four[1])
+            sp()
+            pu(four[2])
+            sp()
+            if four[3] == 0 {
+                io.print("-")
+            } else {
+                put_hex(np, four[3])
+            }
+            nl()
+            i = i + 1
+        }
+    } else if t == proto.T_CLIP {
+        if !proto.dec_clip(m, n, (&two[0]) as u64) {
+            io.print("reject\n")
+            return 0
+        }
+        io.print("clip ")
+        if two[1] == 0 {
+            io.print("-")
+        } else {
+            put_hex(two[0], two[1])
+        }
+        nl()
+    } else if t == proto.T_PING || t == proto.T_PONG {
+        if n < 9 {
+            io.print("reject\n")
+            return 0
+        }
+        if t == proto.T_PING { io.print("ping ") } else { io.print("pong ") }
+        pu(proto.dec_ping(m, n))
+        nl()
+    } else if n == 0 {
+        io.print("reject\n")
+    } else {
+        io.print("other ")
+        pu(t)
+        nl()
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ hs
+// vt hs <client-secret> <ack-hex> pw <pw-hex> | ask <name-hex> [result-hex]
+fn cmd_hs(start: u64) -> i32 {
+    if rt.arg_count(start) < 6 { return 2 }
+    var s: session.Sess = session.sess_new()
+    var tmp: [u8; 64] = [0 as u8; 64]
+    // hello() with the real RNG: only the shape is checked
+    let hl: u64 = session.hello(&s, (&tmp[0]) as u64)
+    io.print("hello_len ")
+    pu(hl)
+    io.print(" tag ")
+    pu(rt.ld8((&tmp[0]) as u64, 0) as u64)
+    nl()
+    // fixed secret from here on
+    if from_hex(arg(start, 2), (&s.priv[0]) as u64, 32) != 32 { return 2 }
+    if !x25519.x25519_base((&s.priv[0]) as u64, (&s.pub[0]) as u64) { return 1 }
+    io.print("pub ")
+    put_hex((&s.pub[0]) as u64, 32)
+    nl()
+    let ack: u64 = (&buf_a[0]) as u64
+    let al: i64 = from_hex(arg(start, 3), ack, 200)
+    if al < 0 { return 2 }
+    let out: u64 = (&buf_b[0]) as u64
+    var pwbuf: [u8; 300] = [0 as u8; 300]
+    let pwp: u64 = (&pwbuf[0]) as u64
+    let pl: i64 = from_hex(arg(start, 5), pwp, 290)
+    if pl < 0 { return 2 }
+    var ol: u64 = 0
+    if arg_is(start, 4, "pw") {
+        ol = session.on_ack(&s, ack, al as u64, true, pwp, pl as u64, 0, 0, out)
+    } else {
+        ol = session.on_ack(&s, ack, al as u64, false, 0, 0, pwp, pl as u64, out)
+    }
+    io.print("answer ")
+    if ol == 0 {
+        io.print("-")
+    } else {
+        put_hex(out, ol)
+    }
+    nl()
+    io.print("state ")
+    pu(s.state)
+    nl()
+    if ol == 0 { return 0 }
+    io.print("key ")
+    put_hex((&s.key[0]) as u64, 32)
+    nl()
+    io.print("code ")
+    put_hex(session.code_digits(&s), 4)
+    nl()
+    if rt.arg_count(start) > 6 {
+        let rl: i64 = from_hex(arg(start, 6), ack, 200)
+        if rl < 0 { return 2 }
+        io.print("result ")
+        pu(session.on_result(&s, ack, rl as u64))
+        io.print(" state ")
+        pu(s.state)
+        nl()
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ sess
+fn cmd_sess(start: u64) -> i32 {
+    if rt.arg_count(start) < 4 { return 2 }
+    var s: session.Sess = session.sess_new()
+    if from_hex(arg(start, 2), (&s.key[0]) as u64, 32) != 32 { return 2 }
+    if !crypto.cipher_init(&s.cipher, (&s.key[0]) as u64, false) { return 1 }
+    // sealing/opening is refused until the session is open
+    let a: u64 = (&buf_a[0]) as u64
+    let b: u64 = (&buf_b[0]) as u64
+    let zero: u64 = session.seal_msg(&s, a, 0, b)
+    io.print("closed_seal ")
+    pu(zero)
+    nl()
+    s.state = session.ST_OPEN
+    var i: usize = 4
+    let seal: bool = arg_is(start, 3, "seal")
+    while i < rt.arg_count(start) {
+        let l: i64 = from_hex(arg(start, i), a, 60000)
+        if l < 0 { return 2 }
+        if seal {
+            let r: u64 = session.seal_msg(&s, a, l as u64, b)
+            put_hex(b, r)
+            nl()
+        } else {
+            let r: u64 = session.open_msg(&s, a, l as u64, b)
+            if r == 0xFFFFFFFFFFFFFFFF {
+                io.print("fail\n")
+            } else {
+                io.print("ok:")
+                if r == 0 { io.print("-") } else { put_hex(b, r) }
+                nl()
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ relay
+fn cmd_relay(start: u64) -> i32 {
+    if rt.arg_count(start) < 4 { return 2 }
+    let a: u64 = (&buf_a[0]) as u64
+    let b: u64 = (&buf_b[0]) as u64
+    if arg_is(start, 2, "connect") {
+        let id: u64 = arg(start, 3)
+        let n: u64 = session.relay_connect(b, 200, id, rt.c_length(id) as u64)
+        if n == 0 {
+            io.print("reject\n")
+        } else {
+            io.print_bytes(b, n as usize)
+            nl()
+        }
+        return 0
+    }
+    let l: i64 = from_hex(arg(start, 3), a, 60000)
+    if l < 0 { return 2 }
+    if arg_is(start, 2, "kind") {
+        pu(session.relay_kind(a, l as u64))
+        nl()
+        return 0
+    }
+    if arg_is(start, 2, "str") && rt.arg_count(start) > 4 {
+        let key: u64 = arg(start, 4)
+        var vl: u64 = 0
+        let v: u64 = session.relay_str(a, l as u64, key, rt.c_length(key) as u64, (&vl) as u64)
+        if v == 0 {
+            io.print("none\n")
+        } else {
+            io.print_bytes(v, vl as usize)
+            nl()
+        }
+        return 0
+    }
+    return 2
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 2 {
+        io.print("usage: vt <enc|dec|hs|sess|relay> ...\n")
+        return 2
+    }
+    if arg_is(start, 1, "enc") { return cmd_enc(start) }
+    if arg_is(start, 1, "dec") { return cmd_dec(start) }
+    if arg_is(start, 1, "hs") { return cmd_hs(start) }
+    if arg_is(start, 1, "sess") { return cmd_sess(start) }
+    if arg_is(start, 1, "relay") { return cmd_relay(start) }
+    io.print("unknown command\n")
+    return 2
+}

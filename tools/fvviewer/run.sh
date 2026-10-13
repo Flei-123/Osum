@@ -4,6 +4,8 @@
 #   1. lib/net/ws.fi against Python `websockets` (normal + 1-octet reads)
 #   2. counter-check: a wrong Sec-WebSocket-Accept must be refused
 #   3. compile-check of lib/fv/{crypto,proto,session}.fi (real crypto)
+#   4. vt.fi (lib/fv/proto + session) against the Rust contract file
+#      tests/orientos-vectors.json, byte for byte (tools/fvviewer/vectors.py) + counter-check
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$PWD/lib"
@@ -26,5 +28,23 @@ sys.exit(0 if "bad upgrade answer" in out and "UPGRADED" not in out else 1)
 PY
 printf 'import fv.proto\nimport fv.session\nimport fv.crypto\nimport net.ws\nfn main() -> i32 {\n    var s: session.Sess = session.sess_new()\n    return 0\n}\n' > "$D/c.fi"
 vendor/firn/bin/firnc "$D/c.fi" -o "$D/c" > "$D/c.log" 2>&1 && ok "lib/fv/{proto,session,crypto} compile" || { bad "lib/fv compile"; head -5 "$D/c.log"; }
+RUSTVEC=${FVV_RUST_VECTORS:-/root/projects/freeviewer/tests/orientos-vectors.json}
+if [ -f "$RUSTVEC" ]; then
+    vendor/firn/bin/firnc tools/fvviewer/vt.fi -o "$D/vt" > "$D/vt.log" 2>&1 && ok "vt builds" || { bad "vt build"; head -5 "$D/vt.log"; }
+    python3 -I tools/fvviewer/vectors.py "$D/vt" "$RUSTVEC" > "$D/vec.txt" 2>&1
+    if [ $? -eq 0 ]; then ok "proto+session equal the Rust vectors ($(tail -1 "$D/vec.txt"))"; else bad "vectors differ"; head -12 "$D/vec.txt"; fi
+    # counter-check: a flipped byte in the contract file must make the comparison fail
+    python3 -I - "$RUSTVEC" "$D/bad.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = d["argon2"]["cases"][0]
+c["proof_frame_V_to_H"] = c["proof_frame_V_to_H"][:-2] + ("00" if c["proof_frame_V_to_H"][-2:] != "00" else "01")
+d["proto"][2]["hex"] = d["proto"][2]["hex"][:-2] + "ee"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+    python3 -I tools/fvviewer/vectors.py "$D/vt" "$D/bad.json" > "$D/vec2.txt" 2>&1 && bad "counter-check: a wrong vector was accepted" || ok "counter-check: a flipped byte is caught"
+else
+    echo "  SKIP  Rust vectors not found ($RUSTVEC)"
+fi
 echo "FVVIEWER: $pass ok, $fail fail"
 [ "$fail" = 0 ]
