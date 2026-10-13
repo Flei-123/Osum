@@ -36,6 +36,7 @@ static void *det_thr(void *a) { (void)a; det_flag = 1; return 0; }
 
 static sem_t sem;
 static void *sem_thr(void *a) { (void)a; sem_post(&sem); return 0; }
+static void *sem_late(void *a) { (void)a; sleep(12); sem_post(&sem); return 0; }
 
 static pid_t tids[3];
 static void *tid_thr(void *a) { tids[(long)a] = syscall(SYS_gettid); return 0; }
@@ -111,6 +112,13 @@ int main(void)
     pthread_create(&t[0], 0, sem_thr, 0);
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 5;
     CHECK("semaphore", sem_timedwait(&sem, &dl) == 0, "sem_timedwait: %s", strerror(errno));
+    pthread_join(t[0], 0);
+
+    /* r708: an untimed sem_wait that outlasts the old 10 s futex cap must still return 0 (it returned -1/ETIMEDOUT; foot's idle render worker then died) */
+    sem_init(&sem, 0, 0);
+    pthread_create(&t[0], 0, sem_late, 0);
+    int lw = sem_wait(&sem);
+    CHECK("sem_wait_no_timeout", lw == 0, "sem_wait returned %d (%s) before the post", lw, strerror(errno));
     pthread_join(t[0], 0);
 
     for (long i = 0; i < 3; i++) pthread_create(&t[i], 0, tid_thr, (void *)i);

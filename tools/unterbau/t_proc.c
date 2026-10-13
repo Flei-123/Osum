@@ -39,6 +39,18 @@ int main(void)
     CHECK("exec_args_env_stdout", strcmp(buf, "child argc=3 a1=one a2=two env=envval\n") == 0, "got '%s'", buf);
     CHECK("exec_exit_code", WIFEXITED(st) && WEXITSTATUS(st) == 42, "status 0x%x", st);
 
+    /* many arguments (r711: the kernel took eight words, foot -c <file> and most Linux tools need more) */
+    int pm[2]; (void)!pipe(pm);
+    p = fork();
+    if (p == 0) {
+        char *av[43]; char w[40][4]; av[0] = "c_child"; av[1] = "count";
+        for (int i = 0; i < 40; i++) { w[i][0] = 'a'; w[i][1] = '0' + i / 10; w[i][2] = '0' + i % 10; w[i][3] = 0; av[2 + i] = w[i]; }
+        av[42] = 0;
+        dup2(pm[1], 1); close(pm[0]); close(pm[1]); execve("/bin/c_child", av, 0); _exit(127);
+    }
+    close(pm[1]); read_all(pm[0], buf, sizeof buf); close(pm[0]); waitpid(p, &st, 0);
+    CHECK("exec_many_args", strcmp(buf, "argc=42 last=a39\n") == 0, "got '%s'", buf);
+
     /* exec of something that is not there */
     p = fork();
     if (p == 0) { char *av[] = { "x", 0 }; execv("/bin/gibtesnicht", av); _exit(errno == ENOENT ? 55 : 56); }

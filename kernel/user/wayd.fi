@@ -387,13 +387,95 @@ fn ev_str(c: u64, p: u64, n: u64, iface: u64) -> u64 {
     return 0
 }
 
-// wl_display.error -- der ehrliche Weg, einem Client zu sagen, dass er
-// etwas verlangt hat, das es hier nicht gibt.
+// wl_display.error -- the honest way to tell a client it asked for something that does not exist here.
+// The message must NOT be empty: an empty string (length 0) is a NULL string on the wire, and libwayland-client then prints
+// "NULL string ... error(ous)" and drops the connection. It names the interface and opcode of the request being handled
+// (err_op, set by the packet loop) and the code: "wl_pointer.op0 code 1".
+static mut err_op: u64 = 0
+static mut err_x: u64 = 0 // optional detail numbers appended to the message (0 = none), set by err_note
+static mut err_y: u64 = 0
+static mut err_z: u64 = 0
+static mut emsg: [u8; 96] = [0 as u8; 96]
+static mut emsg_n: u64 = 0
+
+fn emsg_put(ch: u64) {
+    if emsg_n < 90 {
+        emsg[emsg_n as usize] = ch as u8
+        emsg_n = emsg_n + 1
+    }
+}
+
+fn emsg_num(v: u64) {
+    var div: u64 = 1
+    while v / div >= 10 {
+        div = div * 10
+    }
+    var rest: u64 = v
+    while div > 0 {
+        emsg_put(48 + rest / div)
+        rest = rest % div
+        div = div / 10
+    }
+}
+
+fn err_note(x: u64, y: u64, z: u64) {
+    err_x = x
+    err_y = y
+    err_z = z
+}
+
 fn send_error(c: u64, id: u64, code: u64) {
+    emsg_n = 0
+    let iface: u64 = obj_iface(c, id)
+    if iface < wlproto.IF_COUNT {
+        let l: u64 = wlproto.name_len(iface)
+        var k: u64 = 0
+        while k < l {
+            emsg_put(wlproto.name_at(iface, k))
+            k = k + 1
+        }
+    } else {
+        emsg_put(63) // '?'
+    }
+    emsg_put(46) // '.'
+    emsg_put(111) // 'o'
+    emsg_put(112) // 'p'
+    emsg_num(err_op)
+    emsg_put(32)
+    emsg_put(99) // 'c'
+    emsg_put(111) // 'o'
+    emsg_put(100) // 'd'
+    emsg_put(101) // 'e'
+    emsg_put(32)
+    emsg_num(code)
+    if err_x != 0 || err_y != 0 || err_z != 0 {
+        emsg_put(32)
+        emsg_num(err_x)
+        emsg_put(47) // '/'
+        emsg_num(err_y)
+        emsg_put(47)
+        emsg_num(err_z)
+        err_x = 0
+        err_y = 0
+        err_z = 0
+    }
     let p: u64 = ev_begin(c, ID_DISPLAY, 0)
     ev_arg(c, p, 0, id)
     ev_arg(c, p, 1, code)
-    ev_arg(c, p, 2, 0) // die Meldung bleibt leer
+    wr32(p + ev_pos, emsg_n + 1)
+    ev_pos = ev_pos + 4
+    var q: u64 = 0
+    while q < emsg_n {
+        outbuf[(p + ev_pos + q) as usize] = emsg[q as usize]
+        q = q + 1
+    }
+    let ganz: u64 = (emsg_n + 4) & 0xFFFFFFFFFFFFFFFC
+    var f: u64 = emsg_n
+    while f < ganz {
+        outbuf[(p + ev_pos + f) as usize] = 0 as u8
+        f = f + 1
+    }
+    ev_pos = ev_pos + ganz
     ev_end(c, p, 3)
     n_bad = n_bad + 1
 }
@@ -604,6 +686,7 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
             return
         }
         if off > size || (h * stride) > (size - off) {
+            err_note(off, size, h * stride)
             send_error(c, id, 0)
             return
         }
@@ -622,6 +705,28 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
         return
     }
     if op == wlproto.RQ_WL_SHM_POOL_RESIZE {
+        // r707: resize was ignored, so libwayland-cursor's pool (2304 octets, grown to ~22 KiB for the first cursor image) rejected
+        // the next create_buffer and wayd killed the client with an error. The pool only ever grows (wl_shm_pool.resize): map the
+        // larger window of the same descriptor and use it for buffers made from now on. Buffers made earlier keep pointing into the
+        // old mapping, which stays mapped (same pages, same content) -- the same lifetime as every pool mapping in this server.
+        let nsize: u64 = rd32(argp)
+        let osize: u64 = obj_get(c, id, O_B)
+        let fd: u64 = obj_get(c, id, O_C)
+        if nsize <= osize {
+            if nsize < osize {
+                err_note(nsize, osize, 0)
+                send_error(c, id, 1)
+            }
+            return
+        }
+        let naddr: u64 = kcall.map_fd(nsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+        if naddr == 0 || naddr > 0xFFFFFFFFFFFF0000 {
+            err_note(nsize, osize, 0)
+            send_error(c, id, 2)
+            return
+        }
+        obj_set(c, id, O_A, naddr)
+        obj_set(c, id, O_B, nsize)
         return
     }
     send_error(c, id, 1)
@@ -1661,6 +1766,7 @@ fn drain(c: u64, fd: u64) {
             let id0: u64 = rd32(base + at)
             let op0: u64 = rd32(base + at + 4) & 0xFFFF
             let if0: u64 = obj_iface(c, id0)
+            err_op = op0
             var mit: u64 = 0
             if if0 < wlproto.IF_COUNT && wlproto.req_has_fd(if0, op0) {
                 mit = fdq_pop(c)

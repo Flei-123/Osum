@@ -128,6 +128,11 @@ P3=$(python3 tools/wayland/footpix.py "$TMPD/foot3.ppm" 2>/dev/null)
 note "foot after the shell ran it: $P3"
 grep -aq '^footkeyok' "$TMPD/ser.clean" && ok "the shell inside foot received the keys and ran the command" || bad "the keys did not reach the shell (no footkeyok)"
 if [ -n "${KEEP_OUT:-}" ]; then cp "$TMPD/ser.clean" "$KEEP_OUT.ser"; cp "$TMPD/foot.ppm" "$KEEP_OUT.ppm" 2>/dev/null; cp "$TMPD/foot2.ppm" "$KEEP_OUT.2.ppm" 2>/dev/null; cp "$TMPD/foot3.ppm" "$KEEP_OUT.3.ppm" 2>/dev/null; fi
+# r707/r708 regressions: wayd must not send protocol errors to foot (the cursor-theme pool was rejected after wl_shm_pool.resize was ignored),
+# and no thread of foot may die (an untimed sem_wait failed with ETIMEDOUT after 10 s, the idle render worker popped an empty queue: #PF cr2=8).
+! grep -aq 'Protocol error\|: error [0-9]*: wl_' "$TMPD/ser.clean" && ok "wayd sent foot no protocol error" || bad "foot got a wayd protocol error: $(grep -a -m1 ': error [0-9]*: wl_' "$TMPD/ser.clean")"
+NFAULT=$(sed -n '/wayd: window/,$p' "$TMPD/ser.clean" | grep -ac 'user fault')
+[ "$NFAULT" -eq 0 ] && ok "no user fault after the foot window opened (idle render worker survives >10 s)" || bad "$NFAULT user fault(s) after the foot window opened"
 note "serial lines: $(wc -l < "$TMPD/ser.clean"); foot lines:"
 grep -a -i 'foot\|wayd\|err\|warn\|fault' "$TMPD/ser.clean" | head -${FOOT_LOGLINES:-40} | sed 's/^/        | /'
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
