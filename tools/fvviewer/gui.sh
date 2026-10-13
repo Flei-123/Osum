@@ -61,12 +61,19 @@ foto 05-launcher
 taste ret
 warteauf 'fvviewer: rect name=go' || 60
 warte 2
+warte 1
+klickauf fvrectid
+warte 2
 klickauf fvrectid
 warte 1
 tippe $ID
+warte 2
+klickauf fvrectpw
+warte 2
 klickauf fvrectpw
 warte 1
 tippe $PW
+warte 1
 foto 10-form
 klickauf fvrectgo
 warteauf 'fvviewer: state live' || 120
@@ -120,16 +127,18 @@ wprobe() {
     vendor/firn/bin/firnc -c --profile=app -o "$O/fvv.o" kernel/user/fvviewer.fi > "$O/fvv.err" 2>&1 \
         && ld -T kernel/user/user.ld -o "$O/fvv.elf" "$O/fvv.o" 2>>"$O/fvv.err" && strip --strip-all "$O/fvv.elf" \
         || { bad "wprobe: fvviewer build"; head -5 "$O/fvv.err"; return; }
+    printf 'nameserver 10.0.2.3\n' > "$O/resolv.conf"
     python3 tools/hwnet/mkroots.py "$O/roots.pem" > "$O/roots.log" 2>&1 || { bad "wprobe: roots.pem"; return; }
     python3 tools/osum/mkfs.py build "$O/disk.img" 32768 /bin/ \
         /bin/sh="$O/s0/sh.elf" /bin/ls="$O/s0/ls.elf" /bin/cat="$O/s0/cat.elf" /bin/echo="$O/s0/echo.elf" \
-        /bin/dhcp="$O/s0/dhcp.elf" /bin/fvviewer="$O/fvv.elf" /etc/ssl/ "/etc/ssl/roots.pem=$O/roots.pem@0644" > "$O/mkfs.txt" 2>&1 \
+        /bin/dhcp="$O/s0/dhcp.elf" /bin/fvviewer="$O/fvv.elf" /etc/ /etc/ssl/ "/etc/ssl/roots.pem=$O/roots.pem@0644" "/etc/resolv.conf=$O/resolv.conf@0644" > "$O/mkfs.txt" 2>&1 \
         || { bad "wprobe: mkfs"; tail -3 "$O/mkfs.txt"; return; }
     timeout 240 qemu-system-x86_64 -accel kvm -cpu host -kernel "$O/s0/k.mb" -m 512 \
         -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=dhcp;fvviewer -w 000000001;exit" \
         -serial "file:$O/vm.txt" -display none -no-reboot \
         -drive "file=$O/disk.img,format=raw,if=ide,index=0" -netdev user,id=n0 -device e1000,netdev=n0 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    [ -n "${GUI_KEEP:-}" ] && { mkdir -p "$GUI_KEEP/wprobe"; cp "$O/vm.txt" "$GUI_KEEP/wprobe/"; }
     grep -a 'WSS:' "$O/vm.txt" | head -8 | sed 's/^/        /'
     if grep -aq 'WSS: tls + websocket upgrade ok' "$O/vm.txt" && grep -aq 'WSS: relay error\|WSS: paired' "$O/vm.txt"; then
         ok "wprobe: DNS + TLS 1.3 + ws upgrade against the real relay, relay answered for id 000000001"

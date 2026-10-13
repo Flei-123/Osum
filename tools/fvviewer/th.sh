@@ -14,6 +14,7 @@ set -uo pipefail
 S=${1:?statedir}; CMD=${2:?command}; shift 2
 FVBIN=${FV_BIN:-/root/abbilder/fv-testhost/freeviewer}
 FVREPO=${FVV_RUST_REPO:-/root/projects/freeviewer}
+TLSTERM="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tlsterm.py"
 PW=${FV_TH_PASSWORD:-testpass123}
 mkdir -p "$S/home"
 host_start() {
@@ -38,16 +39,8 @@ up)
     curl -fsS "http://127.0.0.1:$RP/fv/health" >/dev/null || { echo "relay did not start"; exit 1; }
     if [ -n "$TP" ]; then
         # test CA + server certificate for "localhost" (ECDSA P-256, SHA-256); the guest trusts only this CA file
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3 -subj "/CN=fvv test CA" \
-            -keyout "$S/ca.key" -out "$S/ca.pem" 2>/dev/null
-        openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=localhost" \
-            -keyout "$S/srv.key" -out "$S/srv.csr" 2>/dev/null
-        printf 'subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n' > "$S/ext"
-        openssl x509 -req -in "$S/srv.csr" -CA "$S/ca.pem" -CAkey "$S/ca.key" -CAcreateserial -days 2 -sha256 \
-            -extfile "$S/ext" -out "$S/srv.pem" 2>/dev/null
-        cat "$S/srv.pem" > "$S/chain.pem"
-        ( nohup socat OPENSSL-LISTEN:"$TP",reuseaddr,fork,cert="$S/chain.pem",key="$S/srv.key",verify=0 \
-            TCP:127.0.0.1:"$RP" >"$S/socat.log" 2>&1 & echo $! > "$S/socat.pid" ) >/dev/null 2>&1 </dev/null
+        python3 -I "$(dirname "$TLSTERM")/mkcerts.py" "$S" || { echo "mkcerts failed"; exit 1; }
+        ( nohup python3 -I "$TLSTERM" "$TP" "$RP" "$S/chain.pem" "$S/srv.key" >"$S/socat.log" 2>&1 & echo $! > "$S/socat.pid" ) >/dev/null 2>&1 </dev/null
         sleep 0.5
     fi
     host_start || { echo "host did not register"; tail -5 "$S/host.log"; exit 1; }

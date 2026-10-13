@@ -476,6 +476,8 @@ const K_DOWN: u64 = 34
 const K_BYE: u64 = 35
 
 const RELAY_HOST: str = "freeviewer.fleitec.com"
+// dns.resolve_a wants a NUL-terminated name; a str literal has no NUL (-> "dns failed" for every name)
+static mut RELAY_HOSTZ: [u8; 23] = "freeviewer.fleitec.com\0"
 const RETRIES: u64 = 3
 const QCAP: u64 = 128
 const CLIPCAP: u64 = 262144
@@ -538,6 +540,9 @@ static mut TEST_TLS: bool = false
 static mut TEST_ADDR: u32 = 0
 static mut TEST_PORT: u64 = 0
 static mut TEST_HOST: [u8; 64] = [0 as u8; 64]
+static mut t_rect_next: u64 = 0 // test mode: next re-trace of the form rects (serial lines can be garbled by other writers)
+static mut t_mark_at: u64 = 0 // when the mark tile was blitted (0 = none pending)
+static mut t_mark_paints: u64 = 0 // fuiscene.painted() at that moment
 static mut t_click_at: u64 = 0 // when the last button-down went out (0 = none pending)
 static mut t_dec_ms: u64 = 0 // time spent in handle_msg, this second
 static mut t_msgs: u64 = 0
@@ -852,7 +857,7 @@ fn do_connect(cl: *mut client.Client) -> bool {
             return false
         }
     } else {
-        let a4: u64 = dns.resolve_a(RELAY_HOST.p as u64)
+        let a4: u64 = dns.resolve_a((&RELAY_HOSTZ[0]) as u64)
         if a4 == 0 {
             st_begin()
             st_str("DNS: freeviewer.fleitec.com nicht aufloesbar (Netz?)")
@@ -924,12 +929,23 @@ fn go_live(cl: *mut client.Client) {
     fuiscene.refresh()
 }
 
+// guest wall clock (diagnosis of TLS "not yet valid": the guest clock can run behind UTC)
+fn wall_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
 fn lose(cl: *mut client.Client, why_err: bool) {
     if TEST_ON {
         tr("lost err=")
         trn((*cl).err)
         tr(" retry_n=")
         trn(retry_n)
+        tr(" verify=")
+        trn((*cl).t.verify as u64)
+        tr(" now=")
+        trn(wall_seconds())
         tr("\n")
     }
     client.cl_close(cl)
@@ -1087,6 +1103,8 @@ fn handle_msg2(cl: *mut client.Client, m: u64, len: u64) {
                         trn(rt.ld32(g_img, ((tl.y + 8) * iw + tl.x + 8) as usize) as u64)
                         tr("\n")
                         t_click_at = 0
+                        t_mark_at = fuiapp.now_ms()
+                        t_mark_paints = fuiscene.painted()
                     }
                 }
             }
@@ -1410,8 +1428,17 @@ fn gui() -> i32 {
     var seen: u64 = 0
     while fuiscene.alive() {
         let key: u64 = fuiscene.pump()
-        if TEST_ON && st == ST_FORM && t_rects == 0 && fuiscene.painted() > 0 {
+        if TEST_ON && t_mark_at != 0 && fuiscene.painted() > t_mark_paints {
+            tr("mark painted ms=")
+            trn(fuiapp.now_ms() - t_mark_at)
+            tr(" paints=")
+            trn(fuiscene.painted() - t_mark_paints)
+            tr("\n")
+            t_mark_at = 0
+        }
+        if TEST_ON && st == ST_FORM && (t_rects == 0 || fuiapp.now_ms() >= t_rect_next) && fuiscene.painted() > 0 {
             t_rects = 1
+            t_rect_next = fuiapp.now_ms() + 1500
             trace_rect("id", K_ID)
             trace_rect("pw", K_PW)
             trace_rect("go", K_GO)
@@ -1497,7 +1524,7 @@ fn run_probe(start: u64) -> i32 {
         say_line("WSS: no memory")
         return 1
     }
-    let a4: u64 = dns.resolve_a(RELAY_HOST.p as u64)
+    let a4: u64 = dns.resolve_a((&RELAY_HOSTZ[0]) as u64)
     if a4 == 0 {
         say_line("WSS: dns failed")
         return 1
