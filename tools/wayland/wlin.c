@@ -13,11 +13,13 @@
  *   wlin[A]: ptr button serial=121 button=272 state=1
  *   wlin[A]: paste=hello      selection=none     source send mime=... wrote=5     source cancelled
  *
- *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat]
+ *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat] [sub]
  *
  *   copy=TEXT   at the FIRST key press: make a wl_data_source, offer text, set_selection(source, the serial of that key)
  *   badserial   at the first key press: set_selection with a serial that was never given (must be refused: `source cancelled`)
  *   paste       when a selection arrives: receive it through a pipe and print paste=...  (the pipe is read without blocking, 3 s)
+ *   sub         bind wl_subcompositor, make two sub-surfaces of the window (16x16 magenta at (150,70), 16x16 green at (-8,-8) =
+ *               partly outside the window), commit, roundtrip; prints `sub: up` / `sub: no wl_subcompositor`
  *   noseat      do not bind the seat (counter-proof: such a client gets no input at all)
  */
 #ifndef _GNU_SOURCE
@@ -50,6 +52,8 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *wmbase;
 static struct wl_seat *seat;
 static struct wl_data_device_manager *ddm;
+static struct wl_subcompositor *subcomp;
+static int do_sub;
 static struct wl_data_device *ddev;
 static struct wl_display *g_dpy;
 static struct wl_surface *surf;
@@ -354,6 +358,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
         shm = wl_registry_bind(r, n, &wl_shm_interface, 1);
     else if (!strcmp(iface, "xdg_wm_base"))
         wmbase = wl_registry_bind(r, n, &xdg_wm_base_interface, 1);
+    else if (!strcmp(iface, "wl_subcompositor"))
+        subcomp = wl_registry_bind(r, n, &wl_subcompositor_interface, 1);
     else if (!strcmp(iface, "wl_data_device_manager"))
         ddm = wl_registry_bind(r, n, &wl_data_device_manager_interface, v < 3 ? v : 3);
     else if (!strcmp(iface, "wl_seat") && !no_seat) {
@@ -364,6 +370,65 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
 }
 static void reg_remove(void *d, struct wl_registry *r, uint32_t n) {}
 static const struct wl_registry_listener reg_l = { reg_global, reg_remove };
+
+/* a w x h buffer of one colour */
+static struct wl_buffer *make_solid(int w, int h, uint32_t colour)
+{
+    int stride = w * 4, size = stride * h, i;
+    int fd = syscall(SYS_memfd_create, "wlsub", 0);
+    uint32_t *px;
+    struct wl_shm_pool *pool;
+    struct wl_buffer *b;
+    if (fd < 0 || ftruncate(fd, size) < 0)
+        return NULL;
+    px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (px == MAP_FAILED)
+        return NULL;
+    for (i = 0; i < w * h; i++)
+        px[i] = colour;
+    pool = wl_shm_create_pool(shm, fd, size);
+    b = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    return b;
+}
+
+static void make_subs(struct wl_display *dpy)
+{
+    struct wl_surface *s1, *s2;
+    struct wl_subsurface *ss1, *ss2;
+    struct wl_buffer *b1, *b2;
+    if (!subcomp) {
+        say("sub: no wl_subcompositor");
+        return;
+    }
+    s1 = wl_compositor_create_surface(comp);
+    s2 = wl_compositor_create_surface(comp);
+    ss1 = wl_subcompositor_get_subsurface(subcomp, s1, surf);
+    ss2 = wl_subcompositor_get_subsurface(subcomp, s2, surf);
+    wl_subsurface_set_position(ss1, 150, 70);
+    wl_subsurface_set_position(ss2, -8, -8);
+    wl_subsurface_set_desync(ss1);
+    wl_subsurface_place_above(ss1, surf);
+    b1 = make_solid(16, 16, 0xFFFF00FF);
+    b2 = make_solid(16, 16, 0xFF00FF00);
+    if (!b1 || !b2) {
+        say("sub: no buffer");
+        return;
+    }
+    wl_surface_attach(s1, b1, 0, 0);
+    wl_surface_commit(s1);
+    wl_surface_attach(s2, b2, 0, 0);
+    wl_surface_commit(s2);
+    /* the parent commits again: its own pixels land first, the children are painted on top again */
+    wl_surface_attach(surf, buf, 0, 0);
+    wl_surface_damage(surf, 0, 0, W, H);
+    wl_surface_commit(surf);
+    if (wl_display_roundtrip(dpy) < 0)
+        say("sub: protocol error %d", wl_display_get_error(dpy));
+    else
+        say("sub: up");
+}
 
 static struct wl_buffer *make_buffer(void)
 {
@@ -406,6 +471,8 @@ int main(int argc, char **argv)
             do_paste = 1;
         } else if (!strcmp(argv[i], "badserial")) {
             do_bad = 1;
+        } else if (!strcmp(argv[i], "sub")) {
+            do_sub = 1;
         } else if (!strcmp(argv[i], "noseat")) {
             no_seat = 1;
         }
@@ -444,6 +511,8 @@ int main(int argc, char **argv)
     wl_surface_commit(surf);
     wl_display_roundtrip(dpy);
     say("window up %dx%d", W, H);
+    if (do_sub)
+        make_subs(dpy);
     while (!done && time(NULL) - t0 < secs) {
         struct pollfd pfd;
         while (wl_display_prepare_read(dpy) != 0)

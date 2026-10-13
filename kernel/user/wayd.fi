@@ -150,18 +150,24 @@ const O_A: u64 = 2 // Zweck je nach Art
 const O_B: u64 = 3
 const O_C: u64 = 4
 const O_D: u64 = 5
-const O_FIELDS: u64 = 6
+const O_E: u64 = 6
+const O_F: u64 = 7
+const O_FIELDS: u64 = 8
 
 // Fuer wl_surface:  A = Fensterhandle des Kerns (0 = noch keines)
 //                   B = angehaengter wl_buffer
 //                   C = xdg_surface, das dazugehoert
 //                   D = 1, sobald ein Puffer festgeschrieben wurde
+//                   E = Eltern-wl_surface, wenn dies eine Unterflaeche ist
+//                   F = der festgehaltene wl_buffer einer Unterflaeche
+// Fuer wl_subsurface: A = die Unterflaeche, B = ihr Elternteil,
+//                   C = x, D = y (rohe 32-Bit-Werte, vorzeichenbehaftet)
 // Fuer wl_shm_pool: A = Adresse der Abbildung, B = Groesse, C = fd
 // Fuer wl_buffer:   A = Adresse, B = Breite, C = Hoehe, D = Zeilenlaenge
 // Fuer xdg_surface: A = die wl_surface darunter
 // Fuer xdg_toplevel:A = das xdg_surface darunter
 
-static mut objs: [u64; 1536] = [0 as u64; 1536] // MAX_CLIENTS * MAX_OBJ * O_FIELD]
+static mut objs: [u64; 2048] = [0 as u64; 2048] // MAX_CLIENTS * MAX_OBJ * O_FIELDS
 
 // Je Client
 static mut c_used: [u64; 4] = [0 as u64; 4]
@@ -259,6 +265,8 @@ fn obj_new(c: u64, id: u64, iface: u64) -> u64 {
             objs[(b + O_B) as usize] = 0
             objs[(b + O_C) as usize] = 0
             objs[(b + O_D) as usize] = 0
+            objs[(b + O_E) as usize] = 0
+            objs[(b + O_F) as usize] = 0
             return i
         }
         i = i + 1
@@ -427,6 +435,7 @@ fn on_display(c: u64, id: u64, op: u64, argp: u64) {
         announce(c, rid, wlproto.IF_WL_OUTPUT)
         announce(c, rid, wlproto.IF_XDG_WM_BASE)
         announce(c, rid, wlproto.IF_WL_DATA_DEVICE_MANAGER)
+        announce(c, rid, wlproto.IF_WL_SUBCOMPOSITOR)
         return
     }
     send_error(c, id, 1)
@@ -687,6 +696,10 @@ fn dbg_win(c: u64, win: u64) {
 }
 
 fn surface_commit(c: u64, sid: u64) {
+    if obj_get(c, sid, O_E) != 0 {
+        sub_commit(c, sid)
+        return
+    }
     let bid: u64 = obj_get(c, sid, O_B)
     if bid == 0 {
         return
@@ -775,6 +788,9 @@ fn surface_commit(c: u64, sid: u64) {
         }
         y = y + 1
     }
+    // sub-surfaces sit on top of the parent: its commit has just
+    // overwritten them, so they are drawn again
+    sub_paint_all(c, sid, win)
     ulib.sys(WM_FLUSH, win, 0, 0)
     n_commits = n_commits + 1
     // Der Puffer ist wieder frei -- der Client darf ihn neu beschreiben.
@@ -797,6 +813,212 @@ fn fill_colour(win: u64, x: u64, y: u64, run: u64, colour: u64) {
 // MAP_SHARED: keine Kopie, kein Systemaufruf je Bildpunkt.
 fn rd32_at(p: u64) -> u64 {
     return (__mmio_read32(p as *mut u32)) as u64
+}
+
+
+// ================================================ ROUND FOOT-1: SUB-SURFACES
+//
+// wl_subcompositor / wl_subsurface, the minimum a toolkit client needs
+// to start (foot aborts without the global). A sub-surface has no window
+// of its own: its pixels are written into the window of its PARENT, at
+// the position the client set, after the parent's pixels.
+//
+// WHAT THIS IS, and what it is not:
+//   - the sub-surface's committed buffer is HELD (not released) until
+//     the next commit or the destroy, so the parent can paint it again
+//     after each of its own commits (the parent overwrites its whole area)
+//   - pixels with alpha 0 are skipped; other alpha is NOT blended
+//   - parts outside the parent window are clipped (foot's client-side
+//     borders at negative offsets are therefore not visible; the window
+//     server draws its own title bar and frame anyway)
+//   - set_position applies at once (no double-buffering), set_sync /
+//     set_desync, place_above / place_below are accepted with no effect:
+//     z-order is the order of creation, commits are always "desync"
+
+// signed 32-bit value of a raw word
+fn s32(v: u64) -> i64 {
+    var x: i64 = (v & 0xFFFFFFFF) as i64
+    if x >= 2147483648 {
+        x = x - 4294967296
+    }
+    return x
+}
+
+// Blit a buffer into window `win` at (ox, oy), clipped to cw x ch.
+fn blit_sub(win: u64, src: u64, w: u64, h: u64, stride: u64, ox: i64, oy: i64, cw: u64, ch: u64) {
+    var y: u64 = 0
+    while y < h {
+        let dy: i64 = oy + (y as i64)
+        if dy >= 0 && (dy as u64) < ch {
+            var x: u64 = 0
+            while x < w {
+                let dx: i64 = ox + (x as i64)
+                let raw: u64 = rd32_at(src + y * stride + x * 4)
+                if dx >= 0 && (dx as u64) < cw && (raw >> 24) != 0 {
+                    let px: u64 = raw & 0xFFFFFF
+                    var run: u64 = 1
+                    while x + run < w && (dx + (run as i64)) < (cw as i64)
+                        && (rd32_at(src + y * stride + (x + run) * 4) & 0xFFFFFF) == px
+                        && (rd32_at(src + y * stride + (x + run) * 4) >> 24) != 0 {
+                        run = run + 1
+                    }
+                    fill_colour(win, dx as u64, dy as u64, run, px)
+                    x = x + run
+                } else {
+                    x = x + 1
+                }
+            }
+        }
+        y = y + 1
+    }
+}
+
+// the wl_subsurface object of a child surface (0 = none)
+fn sub_obj_of(c: u64, child: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SUBSURFACE
+            && objs[(b + O_A) as usize] == child {
+            return objs[(b + O_ID) as usize]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// the window a surface is drawn into: its own, or the root parent's
+fn root_window(c: u64, sid: u64) -> u64 {
+    var cur: u64 = sid
+    var hops: u64 = 0
+    while hops < 8 {
+        let par: u64 = obj_get(c, cur, O_E)
+        if par == 0 {
+            return obj_get(c, cur, O_A)
+        }
+        cur = par
+        hops = hops + 1
+    }
+    return 0
+}
+
+// absolute offset of a sub-surface in its root window (x then y packed in two calls)
+fn sub_abs(c: u64, sid: u64, want_y: u64) -> i64 {
+    var cur: u64 = sid
+    var sum: i64 = 0
+    var hops: u64 = 0
+    while hops < 8 && obj_get(c, cur, O_E) != 0 {
+        let so: u64 = sub_obj_of(c, cur)
+        if so == 0 {
+            return sum
+        }
+        if want_y != 0 {
+            sum = sum + s32(obj_get(c, so, O_D))
+        } else {
+            sum = sum + s32(obj_get(c, so, O_C))
+        }
+        cur = obj_get(c, cur, O_E)
+        hops = hops + 1
+    }
+    return sum
+}
+
+fn sub_paint(c: u64, child: u64, win: u64) {
+    let bid: u64 = obj_get(c, child, O_F)
+    if bid == 0 || win == 0 || win > 0xFFFFFFFFFFFF0000 {
+        return
+    }
+    let src: u64 = obj_get(c, bid, O_A)
+    let w: u64 = obj_get(c, bid, O_B)
+    let h: u64 = obj_get(c, bid, O_C)
+    let stride: u64 = obj_get(c, bid, O_D)
+    if src == 0 || w == 0 || h == 0 {
+        return
+    }
+    let cw: u64 = ulib.sys(WM_INFO, win, 0, 0)
+    let ch: u64 = ulib.sys(WM_INFO, win, 1, 0)
+    blit_sub(win, src, w, h, stride, sub_abs(c, child, 0), sub_abs(c, child, 1), cw, ch)
+}
+
+// paint every sub-surface whose direct parent is `par` (and theirs)
+fn sub_paint_all(c: u64, par: u64, win: u64) {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SUBSURFACE
+            && objs[(b + O_B) as usize] == par {
+            let ch: u64 = objs[(b + O_A) as usize]
+            sub_paint(c, ch, win)
+            sub_paint_all(c, ch, win)
+        }
+        i = i + 1
+    }
+}
+
+fn sub_commit(c: u64, sid: u64) {
+    let bid: u64 = obj_get(c, sid, O_B)
+    if bid == 0 {
+        return
+    }
+    // the new buffer replaces the held one; the old one is released now
+    let old: u64 = obj_get(c, sid, O_F)
+    if old != 0 && old != bid {
+        let p: u64 = ev_begin(c, old, 0)
+        ev_end(c, p, 0)
+    }
+    obj_set(c, sid, O_F, bid)
+    obj_set(c, sid, O_B, 0)
+    obj_set(c, sid, O_D, 1)
+    let win: u64 = root_window(c, sid)
+    if win != 0 {
+        sub_paint(c, sid, win)
+        ulib.sys(WM_FLUSH, win, 0, 0)
+        n_commits = n_commits + 1
+    }
+}
+
+fn on_subcompositor(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_SUBCOMPOSITOR_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_WL_SUBCOMPOSITOR_GET_SUBSURFACE {
+        let nid: u64 = rd32(argp)
+        let child: u64 = rd32(argp + 4)
+        let par: u64 = rd32(argp + 8)
+        if obj_iface(c, child) != wlproto.IF_WL_SURFACE || obj_iface(c, par) != wlproto.IF_WL_SURFACE
+            || child == par || obj_get(c, child, O_E) != 0 || obj_get(c, child, O_A) != 0
+            || obj_get(c, child, O_C) != 0 {
+            send_error(c, id, wlproto.ERR_WL_SUBCOMPOSITOR_BAD_SURFACE)
+            return
+        }
+        if obj_new(c, nid, wlproto.IF_WL_SUBSURFACE) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        obj_set(c, nid, O_A, child)
+        obj_set(c, nid, O_B, par)
+        obj_set(c, child, O_E, par)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+fn on_subsurface(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_SUBSURFACE_SET_POSITION {
+        obj_set(c, id, O_C, rd32(argp))
+        obj_set(c, id, O_D, rd32(argp + 4))
+        return
+    }
+    if op == wlproto.RQ_WL_SUBSURFACE_DESTROY {
+        let child: u64 = obj_get(c, id, O_A)
+        if obj_iface(c, child) == wlproto.IF_WL_SURFACE {
+            obj_set(c, child, O_E, 0)
+        }
+        obj_drop(c, id)
+        return
+    }
+    // place_above, place_below, set_sync, set_desync: accepted, no effect
 }
 
 fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
@@ -823,6 +1045,11 @@ fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
         return
     }
     if op == wlproto.RQ_WL_SURFACE_DESTROY {
+        let held: u64 = obj_get(c, id, O_F)
+        if held != 0 {
+            let ph: u64 = ev_begin(c, held, 0)
+            ev_end(c, ph, 0)
+        }
         let win: u64 = obj_get(c, id, O_A)
         if win != 0 {
             ulib.sys(WM_CLOSE, win, 0, 0)
@@ -986,6 +1213,10 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         on_shm_pool(c, id, op, argp)
     } else if iface == wlproto.IF_WL_SURFACE {
         on_surface(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_SUBCOMPOSITOR {
+        on_subcompositor(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_SUBSURFACE {
+        on_subsurface(c, id, op, argp)
     } else if iface == wlproto.IF_XDG_WM_BASE {
         on_xdg_wm_base(c, id, op, argp)
     } else if iface == wlproto.IF_XDG_SURFACE {

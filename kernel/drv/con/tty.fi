@@ -63,6 +63,7 @@ export {
     SINK_SERIAL, SINK_SCREEN, SINK_PEER, SINK_WINDOW,
     set_window, window_of,
     TCGETS, TCSETS, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ,
+    TIOCSCTTY, TIOCNOTTY, TIOCGSID, TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK, claim,
     MAX_TTY, I_COUNT, I_LFLAG, I_PGRP, I_ROWS, I_COLS, I_QUEUED, I_SIGS,
     // RUNDE BLECH2: ein Terminal, das nur auf die Leitung schreibt.
     alloc_log,
@@ -237,6 +238,14 @@ const TIOCGPGRP: u64 = 0x540F
 const TIOCSPGRP: u64 = 0x5410
 const TIOCGWINSZ: u64 = 0x5413
 const TIOCSWINSZ: u64 = 0x5414
+// ROUND FOOT-1 (PTY ABI): the Linux requests a terminal emulator needs on /dev/ptmx and the slave. TIOCSCTTY, TIOCNOTTY and TIOCGSID
+// act on the CALLING TASK (sys.fi does them); the others work on the tty itself.
+const TIOCSCTTY: u64 = 0x540E
+const TIOCNOTTY: u64 = 0x5422
+const TIOCGSID: u64 = 0x5429
+const TIOCGPTN: u64 = 0x80045430   // master: number N of /dev/pts/N (the slave's tty index)
+const TIOCSPTLCK: u64 = 0x40045431 // lock/unlock the slave: accepted (this kernel never locks it)
+const TIOCGPTLCK: u64 = 0x80045439 // always 0 = unlocked
 
 // Was `SYS_OSUM_TTYINFO` beantwortet.
 const I_COUNT: u64 = 0
@@ -918,6 +927,14 @@ fn info(state: u64, t: u64, what: u64) -> u64 {
 //
 // Die Struktur ist Linux' `termios`: vier Flaggenwoerter zu 32 Bit, ein
 // Oktett `c_line`, dann neunzehn Steuerzeichen.
+// TIOCSCTTY: make `t` the controlling terminal of a session whose leader is calling; the foreground group becomes the caller's
+// group unless one is set already.
+fn claim(state: u64, t: u64, pgid: u64) {
+    if valid(state, t) && g(state, t, T_PGRP) == 0 {
+        s(state, t, T_PGRP, pgid)
+    }
+}
+
 fn do_ioctl(state: u64, t: u64, req: u64, buf: u64) -> u64 {
     if !valid(state, t) {
         return errno.neg(errno.E_NOTTY)
@@ -965,9 +982,34 @@ fn do_ioctl(state: u64, t: u64, req: u64, buf: u64) -> u64 {
         s(state, t, T_PGRP, kstate.get32(buf))
         return 0
     }
+    if req == TIOCGPTN {
+        if g(state, t, T_KIND) != K_PTY_MASTER {
+            return errno.neg(errno.E_NOTTY)
+        }
+        __mmio_write32((buf) as *mut u32, (peer_of(state, t) & 0xFFFFFFFF) as u32)
+        return 0
+    }
+    if req == TIOCSPTLCK {
+        if g(state, t, T_KIND) != K_PTY_MASTER {
+            return errno.neg(errno.E_NOTTY)
+        }
+        return 0
+    }
+    if req == TIOCGPTLCK {
+        if g(state, t, T_KIND) != K_PTY_MASTER {
+            return errno.neg(errno.E_NOTTY)
+        }
+        __mmio_write32((buf) as *mut u32, 0 as u32)
+        return 0
+    }
+    // a pty pair has ONE window size (as on Linux): the master reads and writes the slave's
+    var wt: u64 = t
+    if g(state, t, T_KIND) == K_PTY_MASTER && peer_of(state, t) < MAX_TTY {
+        wt = peer_of(state, t)
+    }
     if req == TIOCGWINSZ {
-        var rows: u64 = g(state, t, T_ROWS)
-        var cols: u64 = g(state, t, T_COLS)
+        var rows: u64 = g(state, wt, T_ROWS)
+        var cols: u64 = g(state, wt, T_COLS)
         // r462: a tty whose output goes to a terminal WINDOW has the size of that window's grid, always the current one.
         // Before, nobody ever set T_ROWS / T_COLS: every program drew an 80 x 24 screen into a window of 72 x 19.
         if g(state, t, T_SINK) == SINK_WINDOW {
@@ -984,12 +1026,12 @@ fn do_ioctl(state: u64, t: u64, req: u64, buf: u64) -> u64 {
         return 0
     }
     if req == TIOCSWINSZ {
-        s(state, t, T_ROWS, kstate.get16(buf + 0))
-        s(state, t, T_COLS, kstate.get16(buf + 2))
+        s(state, wt, T_ROWS, kstate.get16(buf + 0))
+        s(state, wt, T_COLS, kstate.get16(buf + 2))
         // Wer die Groesse aendert, sagt es der Vordergrundgruppe -- das
         // ist der ganze Zweck von SIGWINCH, und ohne ihn zeichnet jeder
         // Editor nach dem Vergroessern falsch.
-        let grp: u64 = g(state, t, T_PGRP)
+        let grp: u64 = g(state, wt, T_PGRP)
         if grp != 0 {
             signal.send_pgid(state, grp, signal.SIGWINCH)
         }

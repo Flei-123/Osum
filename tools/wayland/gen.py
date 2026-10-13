@@ -56,6 +56,8 @@ LIMIT = [
     # ROUND WAYLAND-INPUT: the clipboard (kernel/user/wl_data.fi)
     "wl_data_device_manager", "wl_data_device", "wl_data_source",
     "wl_data_offer",
+    # ROUND FOOT-1: sub-surfaces (foot aborts without wl_subcompositor)
+    "wl_subcompositor", "wl_subsurface",
 ]
 
 # Welche Fassung dieser Server anbietet. Mehr zu behaupten, als gebaut
@@ -67,6 +69,7 @@ VERSION = {
     "wl_seat": 5,
     "wl_data_device_manager": 3,
     "wl_output": 2,
+    "wl_subcompositor": 1,
     "xdg_wm_base": 3,
 }
 

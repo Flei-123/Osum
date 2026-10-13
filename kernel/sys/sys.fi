@@ -5547,6 +5547,13 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         if devfs.is_tty(node) {
             return open_devtty(state, me, flags)
         }
+        // ROUND FOOT-1 (PTY ABI): /dev/ptmx = a new pair, the master; /dev/pts/N = the slave of pair N
+        if devfs.is_ptmx(node) {
+            return open_ptmx(state, me, flags)
+        }
+        if devfs.pts_slot(node) < tty.MAX_TTY {
+            return open_pts(state, me, devfs.pts_slot(node), flags)
+        }
     }
     var kind: u64 = file.K_VFILE
     if art == vfsops.N_DIR {
@@ -8150,7 +8157,9 @@ fn do_getrandom(state: u64, me: u64, buf: u64, want: u64) -> u64 {
 // Puffer und kopiert ihn hin und zurueck -- die Regel von Runde K4, dass
 // der Kernel nie einen Zeiger von Ring 3 haelt, gilt auch fuer eine
 // Struktur, die 36 Oktette gross ist.
-fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
+fn do_ioctl(state: u64, me: u64, fd: u64, req_raw: u64, arg: u64) -> u64 {
+    // the request is a 32-bit number: libc passes TIOCGPTN (0x80045430) as a negative int, sign-extended in the register
+    let req: u64 = req_raw & 0xFFFFFFFF
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
@@ -8194,6 +8203,34 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
     if kind == file.K_TTY {
         t = file.open_ino(state, of)
     }
+    // ROUND FOOT-1 (PTY ABI): requests that act on the CALLING TASK, not on the tty's data
+    if t < tty.MAX_TTY && req == tty.TIOCSCTTY {
+        // the caller must be a session leader (setsid first); the slave becomes its controlling terminal
+        if sched.tget(state, me, sched.T_SID) != sched.tget(state, me, sched.T_PID) {
+            return neg(errno.E_PERM)
+        }
+        sched.tset(state, me, sched.T_TTY, t + 1)
+        tty.claim(state, t, sched.tget(state, me, sched.T_PGID))
+        return 0
+    }
+    if t < tty.MAX_TTY && req == tty.TIOCNOTTY {
+        sched.tset(state, me, sched.T_TTY, 0)
+        return 0
+    }
+    if t < tty.MAX_TTY && req == tty.TIOCGSID {
+        if arg == 0 || !proc.user_ok(state, me, arg, 4) {
+            return neg(errno.E_FAULT)
+        }
+        let sb: u64 = blockb(state)
+        kstate.set8(sb, (sched.tget(state, me, sched.T_SID) & 0xFF) as u8)
+        kstate.set8(sb + 1, ((sched.tget(state, me, sched.T_SID) >> 8) & 0xFF) as u8)
+        kstate.set8(sb + 2, ((sched.tget(state, me, sched.T_SID) >> 16) & 0xFF) as u8)
+        kstate.set8(sb + 3, ((sched.tget(state, me, sched.T_SID) >> 24) & 0xFF) as u8)
+        if !copy_out(state, me, arg, sb, 4) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
+    }
     if t >= tty.MAX_TTY {
         // Was kein Terminal ist, hat keine Terminaleigenschaften. -ENOTTY
         // ist die Antwort, an der jedes Programm merkt, dass seine
@@ -8205,7 +8242,7 @@ fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
     if req == tty.TIOCGWINSZ || req == tty.TIOCSWINSZ {
         size = 8
     }
-    if req == tty.TIOCGPGRP || req == tty.TIOCSPGRP {
+    if req == tty.TIOCGPGRP || req == tty.TIOCSPGRP || req == tty.TIOCGPTN || req == tty.TIOCSPTLCK || req == tty.TIOCGPTLCK {
         size = 4
     }
     if arg == 0 || !proc.user_ok(state, me, arg, size) {
@@ -8354,6 +8391,52 @@ fn do_termnew(state: u64, me: u64) -> u64 {
     TERM_WIN[t as usize] = w + 1
     sched.tset(state, me, sched.T_TTY, t + 1)
     return w
+}
+
+// ROUND FOOT-1 (PTY ABI): open("/dev/ptmx") -- the Linux way to a pty. One call makes a NEW pair and returns the MASTER; the slave
+// is opened later by name (/dev/pts/N, N from TIOCGPTN). The pair is the same one `openpty` makes, so the reaper frees it the same way.
+fn open_ptmx(state: u64, me: u64, flags: u64) -> u64 {
+    pty_reap(state)
+    var sl: u64 = tty.alloc_pair(state)
+    if sl >= tty.MAX_TTY {
+        pty_reap(state)
+        sl = tty.alloc_pair(state)
+    }
+    if sl >= tty.MAX_TTY {
+        return neg(errno.E_NFILE)
+    }
+    let m: u64 = tty.peer_of(state, sl)
+    let ofm: u64 = file.open_alloc(state, file.K_TTY, m, flags)
+    if ofm >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let fdm: u64 = file.fd_alloc(state, me, 0)
+    if fdm >= file.MAX_FD {
+        file.open_unref(state, ofm)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fdm, ofm)
+    kstate.add(state, kstate.OPENS, 1)
+    return fdm
+}
+
+// open("/dev/pts/N"): the slave half of pair N, if that pair is still there.
+fn open_pts(state: u64, me: u64, slot: u64, flags: u64) -> u64 {
+    if !tty.valid(state, slot) || tty.kind_of(state, slot) != tty.K_PTY_SLAVE {
+        return neg(errno.E_NOENT)
+    }
+    let of: u64 = file.open_alloc(state, file.K_TTY, slot, flags)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    kstate.add(state, kstate.OPENS, 1)
+    return fd
 }
 
 // `openpty(out)` -- ein Paar aus Steuer- und Nutzerseite. Zwei

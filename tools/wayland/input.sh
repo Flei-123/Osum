@@ -86,7 +86,7 @@ cat > "$TMPD/g.sh" <<'EOS'
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
 idle 5000 wayd-alone
-wlin /tmp/wayland-0 900 C badserial &
+wlin /tmp/wayland-0 900 C badserial sub &
 sleep 5
 wlin /tmp/wayland-0 900 A copy=hello-from-A &
 sleep 5
@@ -193,6 +193,36 @@ note "$ID0"
 n0=$(num "$ID0" syscalls)
 [ -n "$n0" ] && [ "$n0" -lt 2000 ] && ok "no client, no window: the whole system made $n0 system calls in 5 s (a busy loop makes tens of thousands)" \
     || bad "idle with wayd alone: '$ID0'"
+
+echo "== 2c. sub-surfaces (wl_subcompositor): C made two children of its window =="
+has "$(L C | grep -a 'sub:')" "sub: up" "wlin[C]: wl_subcompositor bound, two get_subsurface + commits + roundtrip -- no protocol error"
+hasnot "$(L C)" "protocol error" "wlin[C]: no protocol error from the server"
+printf 'screendump %s\n' "$TMPD/sub.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
+sleep 3
+CX=$(gx 0 0); CY=$(gy 0 0)
+subpx=$(python3 - "$TMPD/sub.ppm" "$CX" "$CY" <<'PYEOF'
+import sys
+f = open(sys.argv[1], 'rb').read()
+cx, cy = int(sys.argv[2]), int(sys.argv[3])
+# P6 header: magic, width, height, maxval
+parts = f.split(None, 4)
+w, h = int(parts[1]), int(parts[2])
+data = parts[4] if len(parts) > 4 else b''
+off = len(f) - w * h * 3
+def px(x, y):
+    i = off + (y * w + x) * 3
+    return tuple(f[i:i + 3])
+print("magenta", px(cx + 150 + 8, cy + 70 + 8))
+print("green", px(cx + 4, cy + 4))
+print("parent", px(cx + 100, cy + 100))
+print("outside", px(cx + 150 + 20, cy + 70 + 8))
+PYEOF
+)
+note "$(tr '\n' ' ' <<< "$subpx")"
+has "$subpx" "magenta (255, 0, 255)" "the child at (150,70) is on screen inside the parent window (255,0,255)"
+has "$subpx" "green (0, 255, 0)" "the child at (-8,-8) is clipped but its inner part (8x8) shows at the window corner"
+has "$subpx" "parent (242, 242, 242)" "the parent's own pixels are still there where no child is"
+has "$subpx" "outside (242, 242, 242)" "COUNTER-PROOF: right of the 16x16 child the parent shows again (no smear)"
 
 echo "== 3. the keymap =="
 FSIZE_US=$(( $(stat -c%s "$TMPD/km/keymap-us.xkb") + 1 ))
