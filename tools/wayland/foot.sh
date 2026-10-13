@@ -45,6 +45,8 @@ busybox cat /tmp/foot.marker
 sleep KEY_WAIT
 echo ==KEYS==
 busybox cat /tmp/key.marker
+busybox ls /var/crash
+busybox cat /var/crash/*
 sleep 400
 echo ==FERTIG==
 EOS
@@ -68,7 +70,7 @@ pad=4x4
 max-shm-pool-size-mb=0
 EOS
 [ -z "${FOOT_GS:-}" ] || cp "$FOOT_GS" "$TMPD/g.sh"
-sed -i "s/FOOT_WAIT/${FOOT_WAIT:-25}/; s/KEY_WAIT/${KEY_WAIT:-30}/" "$TMPD/g.sh"
+sed -i "s/FOOT_WAIT/${FOOT_WAIT:-25}/; s/KEY_WAIT/${KEY_WAIT:-60}/" "$TMPD/g.sh"
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$TMPD/passwd"; printf '127.0.0.1 localhost\n' > "$TMPD/hosts"
 A=(build "$TMPD/disk.img" ${FOOT_BLOCKS:-98304} --v3 --inodes=1024 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
    /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ /etc/fonts/ /usr/ /usr/bin/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/wayd/ /usr/share/X11/ /usr/share/X11/xkb/ /root/ /root/.config/ /root/.config/foot/ /dev/ /proc/ /run/
@@ -94,13 +96,16 @@ QPID=$!
 waitfor() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do grep -qaF -- "$1" "$TMPD/ser.txt" 2>/dev/null && return 0; kill -0 "$QPID" 2>/dev/null || return 1; sleep 0.2; i=$((i + 1)); done; return 1; }
 clean() { tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" | tr -d '\r'; }
 shot() { printf 'screendump %s\n' "$1" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; sleep 3; }
-mon()  { printf '%s\n' "$1" | timeout 10 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; sleep 0.15; }
-keys() { local c k; for ((n = 0; n < ${#1}; n++)); do c=${1:n:1}
+keys() { local c k; : > "$TMPD/k.txt"; for ((n = 0; n < ${#1}; n++)); do c=${1:n:1}
     case "$c" in ' ') k=spc ;; '>') k=shift-dot ;; '/') k=slash ;; '.') k=dot ;; '-') k=minus ;; '#') k=shift-3 ;; [a-z0-9]) k=$c ;; [A-Z]) k=shift-${c,,} ;; *) continue ;; esac
-    mon "sendkey $k"; done; mon "sendkey ret"; }
+    echo "sendkey $k" >> "$TMPD/k.txt"; done; echo "sendkey ret" >> "$TMPD/k.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" 0.4 > /dev/null 2>&1; }
+klick() { python3 tools/themestore/click.py "$1,$2" > "$TMPD/c.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/c.txt" > /dev/null 2>&1; sleep 2; }
 if waitfor "==F-READY==" 300; then ok "the script got to the end of the wait"; else bad "the script did not get ready"; fi
 sleep 3
 clean > "$TMPD/ser.clean"
+# click into foot's grid: foot gets the keyboard focus (not the boot console) and the pointer sits in the same place in both screenshots
+klick 340 240
 shot "$TMPD/foot.ppm"
 note "foot prompt screen: $(python3 tools/wayland/footpix.py "$TMPD/foot.ppm" 2>&1)"
 P1=$(python3 tools/wayland/footpix.py "$TMPD/foot.ppm" 2>/dev/null)
@@ -118,8 +123,11 @@ note "foot after typing:  $P2"
 waitfor "==KEYS==" 120 || true
 sleep 2
 clean > "$TMPD/ser.clean"
+shot "$TMPD/foot3.ppm"
+P3=$(python3 tools/wayland/footpix.py "$TMPD/foot3.ppm" 2>/dev/null)
+note "foot after the shell ran it: $P3"
 grep -aq '^footkeyok' "$TMPD/ser.clean" && ok "the shell inside foot received the keys and ran the command" || bad "the keys did not reach the shell (no footkeyok)"
-if [ -n "${KEEP_OUT:-}" ]; then cp "$TMPD/ser.clean" "$KEEP_OUT.ser"; cp "$TMPD/foot.ppm" "$KEEP_OUT.ppm" 2>/dev/null; cp "$TMPD/foot2.ppm" "$KEEP_OUT.2.ppm" 2>/dev/null; fi
+if [ -n "${KEEP_OUT:-}" ]; then cp "$TMPD/ser.clean" "$KEEP_OUT.ser"; cp "$TMPD/foot.ppm" "$KEEP_OUT.ppm" 2>/dev/null; cp "$TMPD/foot2.ppm" "$KEEP_OUT.2.ppm" 2>/dev/null; cp "$TMPD/foot3.ppm" "$KEEP_OUT.3.ppm" 2>/dev/null; fi
 note "serial lines: $(wc -l < "$TMPD/ser.clean"); foot lines:"
 grep -a -i 'foot\|wayd\|err\|warn\|fault' "$TMPD/ser.clean" | head -${FOOT_LOGLINES:-40} | sed 's/^/        | /'
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
