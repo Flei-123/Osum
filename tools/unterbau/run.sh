@@ -279,7 +279,7 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
         echo "        stones probes: $STOK ok / $STBAD gap"
         [ "$STBAD" -le "${STGAP_MAX:-0}" ] && ok "stones probes: $STOK ok, $STBAD gap" || bad "stones probes: $STBAD gaps (> ${STGAP_MAX:-0})"
         cp "$D/st.res" "${UB_ST_RESULT:-$D/st-result.txt}" 2>/dev/null
-        [ -n "${KEEP:-}" ] && cp "$D/st.ser" "$D/st.ser.keep"
+        [ -z "${KEEP:-}" ] || cp "$D/st.ser" "$D/st.ser.keep"   # NOT `[ -n ] && cp`: a false test would make the whole &&-group fail and fire the "image does not build" branch
     } || bad "stone image does not build"
 fi
 echo "== 4. the table =="
