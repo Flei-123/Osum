@@ -113,6 +113,7 @@ const WM_CREATE: u64 = 2100
 const WM_FILL: u64 = 2101
 const WM_EVENT: u64 = 2103
 const WM_INFO: u64 = 2104
+const WIG_SCREEN: u64 = 1805
 const WM_FLUSH: u64 = 2105
 const WM_CLOSE: u64 = 2107
 const WM_APP: u64 = 2116
@@ -495,32 +496,42 @@ fn on_registry(c: u64, id: u64, op: u64, argp: u64) {
     }
     if name == wlproto.IF_WL_OUTPUT {
         // geometry, dann mode, dann done -- in dieser Reihenfolge.
-        let sw: u64 = ulib.sys(WM_INFO, 0, 0, 0)
-        var w: u64 = sw & 0xFFFF
-        var h: u64 = (sw >> 16) & 0xFFFF
-        if w == 0 {
+        // the screen size comes from WIG_SCREEN (0 = width, 1 = height); WM_INFO(0, ...) is not a screen query and returned an error
+        // value (65535x65535), which made foot allocate a 17 GB buffer
+        var w: u64 = ulib.sys(WIG_SCREEN, 0, 0, 0)
+        var h: u64 = ulib.sys(WIG_SCREEN, 1, 0, 0)
+        if w == 0 || w > 16384 || h == 0 || h > 16384 {
             w = 1024
             h = 768
         }
-        let pg: u64 = ev_begin(c, nid, 0)
-        ev_arg(c, pg, 0, 0)
-        ev_arg(c, pg, 1, 0)
-        ev_arg(c, pg, 2, 300)
-        ev_arg(c, pg, 3, 200)
-        ev_arg(c, pg, 4, 0)
-        // make und model als LEERE Zeichenketten: im Draht ist das je
-        // ein Wort mit der Laenge 0 -- kein Oktett folgt, keine
-        // Auffuellung. ev_arg schreibt genau dieses eine Wort.
-        ev_arg(c, pg, 5, 0)
-        ev_arg(c, pg, 6, 0)
-        ev_arg(c, pg, 7, 0) // transform
-        ev_end(c, pg, 8)
+        // make and model are real (non-null) strings: libwayland rejects a length-0 string as NULL on a non-nullable argument
+        // (foot then dies with "NULL string received on non-nullable type, message geometry(iiiiissi)").
+        var omk: [u8; 9] = "OrientOS\0"
+        var omd: [u8; 5] = "wayd\0"
+        c_outlen[c as usize] = wl_msg.begin(out_base(c), c_outlen[c as usize], nid, wlproto.EV_WL_OUTPUT_GEOMETRY)
+        wl_msg.arg(0)
+        wl_msg.arg(0)
+        wl_msg.arg(300)
+        wl_msg.arg(200)
+        wl_msg.arg(0)
+        wl_msg.text((&omk[0 as usize]) as u64, 8)
+        wl_msg.text((&omd[0 as usize]) as u64, 4)
+        wl_msg.arg(0) // transform
+        c_outlen[c as usize] = wl_msg.end()
         let pm: u64 = ev_begin(c, nid, 1)
         ev_arg(c, pm, 0, 3) // current | preferred
         ev_arg(c, pm, 1, w)
         ev_arg(c, pm, 2, h)
         ev_arg(c, pm, 3, 60000)
         ev_end(c, pm, 4)
+        // version 2: scale and done close the burst (clients such as foot wait for done before they use the output)
+        if rd32(argp + 8 + skip) >= 2 {
+            let ps: u64 = ev_begin(c, nid, 3)
+            ev_arg(c, ps, 0, 1)
+            ev_end(c, ps, 1)
+            let pd: u64 = ev_begin(c, nid, 2)
+            ev_end(c, pd, 0)
+        }
     }
 }
 
