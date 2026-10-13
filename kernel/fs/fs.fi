@@ -117,7 +117,7 @@ import fs.ofsj
 import sched.time
 
 export {
-    format, mount, path, create_path, unlink_path, entry_at, dir_entries,
+    set_size, format, mount, path, create_path, unlink_path, entry_at, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
     free_blocks, used_inodes, MAGIC, T_FILE, T_DIR, DIRENT,
     NAME_LEN, INODE_COUNT, version, directs, inode_mode, inode_uid,
@@ -1706,6 +1706,53 @@ fn size_write(state: u64, ino: u64, neu: u64, nur_groesser: bool) -> bool {
         nidx.note(state, nidx.OP_SIZE, 0, ino, kind, neu, 0)
     }
     return true
+}
+
+// ROUND UNTERBAU: ftruncate() to any size. Growing leaves a hole (a hole reads as zeros). Shrinking first zeroes what lies beyond the
+// new end in the blocks that exist -- otherwise a later growth (or a write past the end) would show the old content again.
+fn set_size(state: u64, ino: u64, neu: u64) -> bool {
+    let flags: u64 = enter(state)
+    let old: u64 = inode_get(state, ino, I_SIZE)
+    if neu < old {
+        var bi: u64 = neu / BS
+        let inb: u64 = neu % BS
+        let last: u64 = (old + BS - 1) / BS
+        if inb != 0 {
+            let b: u64 = file_block(state, ino, bi, false)
+            if b != 0 {
+                if !ofsj.read(state, b, buf_dt(state)) {
+                    leave(state, flags)
+                    return false
+                }
+                zero(buf_dt(state) + inb, BS - inb)
+                if !ofsj.write(state, b, buf_dt(state)) {
+                    leave(state, flags)
+                    return false
+                }
+            }
+            bi = bi + 1
+        }
+        while bi < last {
+            if ofsj.enabled(state) && ofsj.room(state) < 8 {
+                ofsj.chunk(state)
+            }
+            let b: u64 = file_block(state, ino, bi, false)
+            if b != 0 {
+                zero(buf_dt(state), BS)
+                if !ofsj.write(state, b, buf_dt(state)) {
+                    leave(state, flags)
+                    return false
+                }
+            }
+            bi = bi + 1
+        }
+    }
+    let ok: bool = size_write(state, ino, neu, false)
+    if ok {
+        touch_mtime(state, ino)
+    }
+    leave(state, flags)
+    return ok
 }
 
 fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {

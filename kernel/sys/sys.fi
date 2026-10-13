@@ -16431,6 +16431,14 @@ fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
     if off > 0xFFFFFFFF || len > 0xFFFFFFFF {
         return neg(errno.E_FBIG)
     }
+    // ROUND UNTERBAU: on a plain file the size only GROWS (never shrinks), as posix_fallocate does. The blocks are not reserved:
+    // the file has a hole there and a full disk is found out when the hole is written (documented in docs/RUNDE-UNTERBAU-FIREFOX.md).
+    let of: u64 = of_of(state, me, fd)
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
+        if fs.inode_size(state, file.open_ino(state, of)) >= off + len {
+            return 0
+        }
+    }
     return do_ftruncate(state, me, fd, off + len)
 }
 
@@ -16448,6 +16456,19 @@ fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_FILE {
+        // ROUND UNTERBAU: a plain file of the root file system: any size (growth = hole, shrink = zeroed tail)
+        if (file.open_flags(state, of) & 3) == 0 {
+            return neg(errno.E_INVAL)
+        }
+        if size > 0xFFFFFFFF {
+            return neg(errno.E_FBIG)
+        }
+        if !fs.set_size(state, file.open_ino(state, of), size) {
+            return neg(errno.E_IO)
+        }
+        return 0
     }
     if file.open_kind(state, of) != file.K_SHM {
         // Dateien lassen sich in diesem System nicht abschneiden. Das
