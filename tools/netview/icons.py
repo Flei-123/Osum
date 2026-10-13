@@ -388,7 +388,7 @@ def main(argv):
         return 0
     if len(argv) >= 2 and argv[1] == "pruefe":
         fehler = pruefe_gestaltung()
-        kdatei = os.path.join(WURZEL, "..", "kernel", "netmark.fi")
+        kdatei = os.path.join(WURZEL, "..", "kernel", "net", "netmark.fi")
         if "--kern" in argv:
             kdatei = argv[argv.index("--kern") + 1]
         soll = kernquelle()

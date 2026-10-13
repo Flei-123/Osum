@@ -66,7 +66,7 @@ cleanup() {
     [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
     ip netns del "$NS" 2>/dev/null
     ip link del "$V0" 2>/dev/null
-    rm -rf "$TMPD"
+    if [ -n "${NV_KEEP:-}" ]; then echo "kept: $TMPD"; else rm -rf "$TMPD"; fi
 }
 trap cleanup EXIT
 
@@ -396,13 +396,13 @@ echo "== 5. the symbols: seven drawings, measured before anything is drawn =="
 # shapes still have to differ.
 if python3 tools/netview/icons.py pruefe > "$TMPD/icons.txt" 2>&1; then
     ok "tools/netview/icons.py: every rule of the addendum holds"
-    grep -aE '  (dark|light) ' "$TMPD/icons.txt" | sed 's/^/        /'
+    grep -aE '^  (dark|light) +[a-z]+ +[0-9.]+:1' "$TMPD/icons.txt" | sed 's/^/        /'
     grep -aE 'vs ' "$TMPD/icons.txt" | sed 's/^/        /'
 else
     bad "the icons break a rule of the addendum"
     sed 's/^/        /' "$TMPD/icons.txt" | head -20
 fi
-n=$(grep -acE '  (dark|light) ' "$TMPD/icons.txt")
+n=$(grep -acE '^  (dark|light) +[a-z]+ +[0-9.]+:1' "$TMPD/icons.txt")
 num "roles whose contrast was computed against the panel (4.5:1 or better)" "$n" eq 8
 n=$(grep -ac 'ZU AEHNLICH\|ZU WENIG' "$TMPD/icons.txt")
 num "rules broken" "$n" eq 0
@@ -507,6 +507,8 @@ mk_gimage() { # image theme-file
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
     ARGS+=("/bin/files@/bin/explorer")
     ARGS+=(/etc/ "/etc/theme=$th" "/etc/taskbar.conf=$TMPD/taskbar.conf")
+    # r650: since RUNDE BELEG the bar and the panels only write their `taskbar:`/`qs:` lines when /etc/uitrace exists
+    printf "on\n" > "$TMPD/uitrace"; ARGS+=("/etc/uitrace=$TMPD/uitrace")
     ARGS+=(/etc/netview/)
     for q in state-nocarrier state-noip state-noroute state-online \
              mark-filtered mark-faked mark-none sys-faking \
