@@ -2574,6 +2574,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_SETSOCKOPT {
         return do_setsockopt(state, me, a0, a1, a2)
     }
+    if number == SYS_GETSOCKOPT {
+        return do_getsockopt(state, me, a0, a1, a2, a3, a4)
+    }
     if number == SYS_DUP {
         return do_dup(state, me, a0)
     }
@@ -12984,6 +12987,69 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
+    }
+    return 0
+}
+
+// ROUND STONES2: getsockopt(2). curl asks SO_ERROR after every non-blocking
+// connect (poll says writable, SO_ERROR says whether it worked); without the
+// call the answer was -ENOSYS and curl reported "could not connect". Values
+// are the ones of a plain Linux socket: nothing is buffered beyond the
+// defaults, no keep-alive, no linger. An option this kernel does not know is
+// -ENOPROTOOPT, never a made-up value.
+fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
+    val: u64, lenp: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    let ui: u64 = usock_of(state, me, fd)
+    if si >= inet.SOCK_MAX && ui >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, lenp, 4) {
+        return neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        room = room | (peek(state, me, lenp + k) << (k * 8))
+        k = k + 1
+    }
+    if room < 4 {
+        return neg(errno.E_INVAL)
+    }
+    var v: u64 = 0
+    var known: bool = false
+    if level == 1 {
+        // SOL_SOCKET: 2 REUSEADDR, 3 TYPE, 4 ERROR, 7 SNDBUF, 8 RCVBUF, 9 KEEPALIVE, 30 ACCEPTCONN
+        if name == 2 || name == 9 || name == 30 {
+            known = true
+        }
+        if name == 3 {
+            known = true
+            v = 1
+            if si < inet.SOCK_MAX && inet.sock_kind(state, si) == inet.SK_UDP {
+                v = 2
+            }
+        }
+        if name == 4 {
+            known = true
+            if si < inet.SOCK_MAX {
+                v = inet.sock_error(state, si)
+            }
+        }
+        if name == 7 || name == 8 {
+            known = true
+            v = 65536
+        }
+    }
+    if level == 6 && name == 1 {
+        // IPPROTO_TCP, TCP_NODELAY
+        known = true
+    }
+    if !known {
+        return neg(errno.E_NOPROTOOPT)
+    }
+    if !put32(state, me, val, v) || !put32(state, me, lenp, 4) {
+        return neg(errno.E_FAULT)
     }
     return 0
 }

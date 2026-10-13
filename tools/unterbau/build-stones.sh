@@ -21,6 +21,14 @@ dl https://www.python.org/ftp/python/$PYV/Python-$PYV.tar.xz py.tar.xz
 dl https://curl.se/download/curl-$CURLV.tar.xz curl.tar.xz
 dl https://www.kernel.org/pub/software/scm/git/git-$GITV.tar.xz git.tar.xz
 dl https://github.com/madler/zlib/releases/download/v$ZV/zlib-$ZV.tar.gz zlib.tar.gz
+# pinned sha256 of the downloads (also in /root/fremdquellen/SHA256SUMS.txt); a mismatch stops the build
+( cd "$W/dl" && sha256sum -c - >/dev/null <<'SUMS'
+24887b92e2afd4a2ac602419ad4b596372f67ac9b077190f459aba390faf5550  py.tar.xz
+73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee  curl.tar.xz
+5ee8a1c68536094a4f7f9515edc154b12a275b8a57dda4c21ecfbf1afbae2ca3  git.tar.xz
+9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23  zlib.tar.gz
+SUMS
+) || { echo "build-stones: sha256 mismatch in downloads"; exit 1; }
 for n in py curl git zlib bb; do mkdir -p "$W/x/$n"; done
 tar xJf "$W/dl/py.tar.xz" -C "$W/x/py" --strip-components=1
 tar xJf "$W/dl/curl.tar.xz" -C "$W/x/curl" --strip-components=1

@@ -123,6 +123,9 @@ run_all() { # run_all <kernel> <disk> <tag>
 
 # the busybox probe script (lines "BB <name> ..." are read back from the serial log)
 BBDYN=${BBDYN:-/root/bbdyn/busybox}
+# the proof stones live in /root/stones (rebuild: tools/unterbau/build-stones.sh /root/stones); STONES= (empty) switches them off. They run with the network stage by default (STONES_NET=0 switches that off).
+STONES=${STONES-/root/stones}; [ -r "$STONES/python3" ] || STONES=""
+STONES_NET=${STONES_NET-1}; [ "$STONES_NET" = 0 ] && STONES_NET=""
 printf 'eins\nzwei\ndrei\n' > "$D/pruef.txt"
 cat > "$D/bb.sh" <<'BBS'
 echo "BB echo ok"
@@ -246,19 +249,22 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
     [ -r "$STONES/lib/os.pyc" ] && SX="$SX /lib/python3.12/os.pyc=$STONES/lib/os.pyc"   # landmark: getpath finds the prefix by it
     for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
     [ -r "$STONES/curl" ] && SX="$SX /bin/curl=$STONES/curl"
-    [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git"
+    [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git /share/ /share/git-core/ /share/git-core/templates/"   # empty template dir: no "templates not found" warning
     cp "${STSCRIPT:-$HERE/stones.sh}" "$D/st.sh"
+    # host port of the throw-away web server: a free one (two gate runs at once must not collide); the script names the default 18765
+    STPORT=$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 18765)
+    sed -i "s/18765/$STPORT/g" "$D/st.sh"
     SX="$SX /etc/st.sh=$D/st.sh"
-    EXTRA_SPEC="$SX" build_image "$ROOT" "$D/stone" && {
+    EXTRA_SPEC="$SX" UB_BLOCKS=${UB_BLOCKS:-131072} build_image "$ROOT" "$D/stone" && {
         # STONES_NET=1: virtio-net with QEMU user networking; the guest reaches a throw-away http server of the host at 10.0.2.2
         NETPID=""
         if [ -n "${STONES_NET:-}" ]; then
             mkdir -p "$D/www"; echo "hello-net" > "$D/www/h.txt"
-            python3 -I -m http.server 18765 --bind 127.0.0.1 --directory "$D/www" > "$D/www.log" 2>&1 &
+            python3 -I -m http.server "$STPORT" --bind 127.0.0.1 --directory "$D/www" > "$D/www.log" 2>&1 &
             NETPID=$!
             NETARGS="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"
         fi
-        KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
+        KARGS="${STONES_NET:+nic nip=10.0.2.15/24 ngw=10.0.2.2} ${STONES_KARGS:-}" NETARGS="${NETARGS:-}" boot "$KNEW" "$D/stone/disk.img" "busybox sh /etc/st.sh" "$D/st.ser"
         [ -z "$NETPID" ] || kill "$NETPID" 2>/dev/null
         grep -a -o -E 'ST [A-Za-z0-9_-]+( .*)?$' "$D/st.ser" | tr -d '\r' | awk '!seen[$2]++' > "$D/st.res" || : > "$D/st.res"
         STOK=0; STBAD=0
