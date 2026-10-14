@@ -990,7 +990,7 @@ fn sock_kind(state: u64, i: u64) -> u64 {
     if i >= SOCK_MAX {
         return SK_FREE
     }
-    return kstate.get(state, so_at(i) + SO_KIND)
+    return kstate.get(state, so_at(i) + SO_KIND) & 0xFF
 }
 
 fn sock_handle(state: u64, i: u64) -> u64 {
@@ -1020,10 +1020,12 @@ fn sock_set_nonblock(state: u64, i: u64) {
 }
 
 // ROUND FV-W24: SO_RCVTIMEO / SO_SNDTIMEO. The two timeouts live in the
-// upper bits of the flags word of the slot, in ticks (10 ms): the receive
-// timeout in bits 8..31, the send timeout in bits 32..55. The low byte stays
-// the SF_* bits, `sock_new` clears the whole word, and every other writer
-// ORs its bit in, so nothing else has to know. 0 = no timeout (the default).
+// upper bits of the KIND word of the slot, in ticks (10 ms): the receive
+// timeout in bits 8..31, the send timeout in bits 32..55. The low byte is
+// the SK_* kind. NOT in the flag word: the keepalive values of N-006 use
+// bits 8..44 of it. `sock_new` writes the kind and `sock_free` writes
+// SK_FREE over the whole word, so a slot never carries a timeout over to
+// its next owner. 0 = no timeout (the default).
 const TMO_MASK: u64 = 0xFFFFFF
 const TMO_RCV_SHIFT: u64 = 8
 const TMO_SND_SHIFT: u64 = 32
@@ -1036,7 +1038,7 @@ fn sock_tmo(state: u64, i: u64, snd: bool) -> u64 {
     if snd {
         sh = TMO_SND_SHIFT
     }
-    return (kstate.get(state, so_at(i) + SO_FLAGS) >> sh) & TMO_MASK
+    return (kstate.get(state, so_at(i) + SO_KIND) >> sh) & TMO_MASK
 }
 
 fn sock_set_tmo(state: u64, i: u64, snd: bool, ticks: u64) {
@@ -1051,15 +1053,15 @@ fn sock_set_tmo(state: u64, i: u64, snd: bool, ticks: u64) {
     if t > TMO_MASK {
         t = TMO_MASK
     }
-    let fl: u64 = kstate.get(state, so_at(i) + SO_FLAGS)
-    let keep: u64 = fl - (fl & (TMO_MASK << sh))
-    kstate.set(state, so_at(i) + SO_FLAGS, keep | (t << sh))
+    let w: u64 = kstate.get(state, so_at(i) + SO_KIND)
+    let keep: u64 = w - (w & (TMO_MASK << sh))
+    kstate.set(state, so_at(i) + SO_KIND, keep | (t << sh))
 }
 
 fn sock_new(state: u64, kind: u64) -> u64 {
     var i: u64 = 0
     while i < SOCK_MAX {
-        if kstate.get(state, so_at(i) + SO_KIND) == SK_FREE {
+        if (kstate.get(state, so_at(i) + SO_KIND) & 0xFF) == SK_FREE {
             kstate.set(state, so_at(i) + SO_KIND, kind)
             kstate.set(state, so_at(i) + SO_H, NOHANDLE)
             kstate.set(state, so_at(i) + SO_PORT, 0)
