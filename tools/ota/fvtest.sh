@@ -174,13 +174,20 @@ if grep -qaF "install: fertig" "$OUT/dinst.txt"; then
     hat "$OUT/d1.txt" "READY FOR RESTART" "disk: ota ready for restart"
     lauf_p d2 "sh /start.sh;opk list;exit" 600 > /dev/null
     hat "$OUT/d2.txt" "opk: trial confirmed" "disk: after reboot the update ran and was confirmed"
-    hat "$OUT/d2.txt" "1.0.1" "disk: opk list shows 1.0.1"
-    lauf_p d3 "ota rollback;exit" 600 > /dev/null
-    hat "$OUT/d3.txt" "rollback" "disk: ota rollback accepted"
+    # `opk list` prints generation + content hash per app (no versions): compare by hash.
+    H0=$(grep -a '^  fvviewer -> ' "$OUT/d0.txt" | tail -1 | sed 's/.*-> //' | tr -d '\r ')
+    H1=$(grep -a '^  fvviewer -> ' "$OUT/d2.txt" | tail -1 | sed 's/.*-> //' | tr -d '\r ')
+    [ -n "$H0" ] && [ -n "$H1" ] && [ "$H0" != "$H1" ] && ok "disk: 1.0.1 has another content hash than 1.0.0 ($H0 -> $H1)" || bad "disk: fvviewer hash did not change by the update ('$H0' '$H1')"
+    hat "$OUT/d2.txt" "generation 2" "disk: after the update the active generation is 2 (fvviewer 1.0.1 + hallo)"
+    # One `ota rollback` undoes only the LAST generation (hallo, gen 2 -> 1); the second undoes fvviewer (gen 1 -> 0).
+    lauf_p d3 "ota rollback;ota rollback;exit" 600 > /dev/null
+    hat "$OUT/d3.txt" "rolled back to 1" "disk: first ota rollback -> generation 1"
+    hat "$OUT/d3.txt" "rolled back to 0" "disk: second ota rollback -> generation 0"
     lauf_p d4 "opk rebuild;/apps/fvviewer.osp/start -t;opk list;exit" 600 > /dev/null
     hat "$OUT/d4.txt" "usage: fvviewer -t" "disk: after rollback the app starts"
-    hat "$OUT/d4.txt" "1.0.0" "disk: opk list shows 1.0.0 again"
-    hatnicht "$OUT/d4.txt" "1.0.1" "disk: 1.0.1 is gone after the rollback"
+    hat "$OUT/d4.txt" "generation 0" "disk: generation 0 is active again"
+    hat "$OUT/d4.txt" "fvviewer -> $H0" "disk: fvviewer 1.0.0 (original hash) is back"
+    hatnicht "$OUT/d4.txt" "$H1" "disk: 1.0.1 is gone after the rollback"
 else
     echo "  (disk part skipped: installer failed, see $OUT/dinst.txt)"; tail -5 "$OUT/dinst.txt"
 fi
