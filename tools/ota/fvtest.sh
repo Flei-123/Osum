@@ -179,12 +179,12 @@ if grep -qaF "install: fertig" "$OUT/dinst.txt"; then
     H1=$(grep -a '^  fvviewer -> ' "$OUT/d2.txt" | tail -1 | sed 's/.*-> //' | tr -d '\r ')
     [ -n "$H0" ] && [ -n "$H1" ] && [ "$H0" != "$H1" ] && ok "disk: 1.0.1 has another content hash than 1.0.0 ($H0 -> $H1)" || bad "disk: fvviewer hash did not change by the update ('$H0' '$H1')"
     hat "$OUT/d2.txt" "generation 2" "disk: after the update the active generation is 2 (fvviewer 1.0.1 + hallo)"
-    # One `ota rollback` undoes only the LAST generation (hallo, gen 2 -> 1). Two rollbacks in ONE boot both
-    # report "to 1" (the switch is only taken over by the next boot), so the second one needs its own boot.
+    # One `ota rollback` undoes only the LAST generation (gen 2 -> 1) and marks 1 as its own predecessor, so a
+    # second `ota rollback` stays on 1. Going further back is a manual `opk rollback 0` (own boot).
     lauf_p d3 "ota rollback;exit" 600 > /dev/null
     hat "$OUT/d3.txt" "rolled back to 1" "disk: first ota rollback -> generation 1"
-    lauf_p d3b "ota rollback;exit" 600 > /dev/null
-    hat "$OUT/d3b.txt" "rolled back to 0" "disk: second ota rollback (next boot) -> generation 0"
+    lauf_p d3b "opk rollback 0;exit" 600 > /dev/null
+    hat "$OUT/d3b.txt" "rolled back to 0" "disk: second rollback (opk rollback 0, own boot) -> generation 0"
     lauf_p d4 "opk rebuild;/apps/fvviewer.osp/start -t;opk list;exit" 600 > /dev/null
     hat "$OUT/d4.txt" "usage: fvviewer -t" "disk: after rollback the app starts"
     hat "$OUT/d4.txt" "generation 0" "disk: generation 0 is active again"
