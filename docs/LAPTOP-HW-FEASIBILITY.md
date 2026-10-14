@@ -99,7 +99,10 @@ Steps and rough sizes:
 6. xHCI async bulk IN queue + netdev "usb" kind **M**.
 7. QEMU test: `-device usb-net,netdev=n0` (QEMU 7.2: strings show configurations "CDC", "Subset" and "RNDIS") — both client protocols testable with SLIRP DHCP. No NCM model: NCM stays untested until a real phone.
 
-**Done in this run (protocol half only):** `lib/usbnet/rndis.fi` — RNDIS INIT/QUERY/SET/KEEPALIVE/HALT encoders (golden layout), validating readers for every device reply, PACKET_MSG wrap/unwrap, CDC-ECM MAC-string parser; gate `tools/usbnet/run.sh` (53 promises, 7 negative controls, host only). **No driver, no USB traffic yet** — steps 1, 6 and the netdev kind remain.
+**Done (protocol half):** `lib/usbnet/rndis.fi` -- RNDIS INIT/QUERY/SET/KEEPALIVE/HALT encoders (golden layout), validating readers, PACKET_MSG wrap/unwrap, CDC-ECM MAC-string parser; gate `tools/usbnet/run.sh` (host only).
+
+**Done (CDC-ECM driver, step 1-3 + 6):** `kernel/drv/net/usbnet.fi` (bulk IN/OUT data plane), `kernel/usb/usb.fi` (walks all configurations, class 02:06 -> `DRV_ECM`, union + ethernet functional descriptors, MAC from the string descriptor, SET_INTERFACE to the data alt setting), `kernel/net/netdev.fi` (`KIND_USBNET`, `late_usb` after USB enumeration), `kmain.fi` (second `netsvc.stage` when the USB function is the only NIC). Gate `tools/usbecm/run.sh` (= `tools/usbnet/qemu.sh`): QEMU `qemu-xhci` + `usb-net`, no PCI NIC.
+Not done: RNDIS driver (the messages exist), NCM, interrupt-IN notifications (link is assumed up), halted-bulk-endpoint recovery, hot unplug, a second USB NIC.
 
 Hardware: any Android phone with USB tethering (RNDIS/NCM), or a USB-Ethernet dongle (ASIX/Realtek RTL8152 are vendor-class, not CDC: a **separate** driver each, S-M).
 Why this matters: laptop has WLAN only; this is the cheapest way online (r21 is not coming soon, see 8).
