@@ -161,17 +161,20 @@ F="$TMPD/run0.txt"
 say "$F" udp_ok 1 "UDP socket created"
 say "$F" set_ret 0 "bind and setsockopt succeed (first set_ret = bind)"
 
+# The lower bounds are 10 % under the nominal value on purpose: the guest clock (CLOCK_MONOTONIC,
+# TSC-calibrated) is not exact on a loaded KVM host -- tools/poll/run.sh shows the same skew (poll(300) = 281).
+# What is proven here: it waits in the order of the timeout (not 0, not the 30 s NET_ROUNDS bound).
 echo "   -- receive timeout 200 ms"
 say "$F" r1_get 200000 "getsockopt reads back 200 ms as a timeval (0 s, 200000 us)"
 say "$F" r1_ret -11 "recvfrom on an empty socket returns -EAGAIN after the timeout"
-between "and it really waited 200 ms (not 30 s, not 0)" "$(value_n "$F" r1_ms 1)" 200 280
+between "and it really waited 200 ms (not 30 s, not 0)" "$(value_n "$F" r1_ms 1)" 180 280
 say "$F" r1_ret -11 "the socket is still usable: second recvfrom times out too"
-between "second wait is 200 ms as well" "$(value_n "$F" r1_ms 2)" 200 280
+between "second wait is 200 ms as well" "$(value_n "$F" r1_ms 2)" 180 280
 
 echo "   -- other values"
 say "$F" r2_get 1500000 "1.5 s reads back"
 say "$F" r2_ret -11 "1.5 s: -EAGAIN"
-between "1.5 s wait" "$(value_of "$F" r2_ms)" 1500 1580
+between "1.5 s wait" "$(value_of "$F" r2_ms)" 1350 1580
 say "$F" r3_get 20000 "15 ms is rounded UP to the 10 ms tick: 20 ms"
 say "$F" r3_ret -11 "15 ms: -EAGAIN"
 between "15 ms wait (viewer value)" "$(value_of "$F" r3_ms)" 15 80
@@ -192,7 +195,7 @@ say "$F" nb_ret -11 "non-blocking socket: -EAGAIN"
 between "and it does not wait for the timeout" "$(value_of "$F" nb_ms)" 0 60
 say "$F" lst_ret 0 "listen works"
 say "$F" acc_ret -11 "accept with SO_RCVTIMEO 100 ms: -EAGAIN"
-between "accept waited 100 ms" "$(value_of "$F" acc_ms)" 100 180
+between "accept waited 100 ms" "$(value_of "$F" acc_ms)" 90 180
 
 grep -aq "kernel: done" "$F" && ok "kernel is still alive after all cases" \
                              || bad "'kernel: done' missing"

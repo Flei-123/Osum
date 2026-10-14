@@ -112,6 +112,10 @@ warte 1
 foto 32-click-2s
 warte 2
 foto 30-click
+rad 2
+warte 1
+rad -1
+warte 1
 taste a
 warte 0.5
 taste ret

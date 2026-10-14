@@ -131,6 +131,12 @@ if stage != "tlsidle":
     ok(any(abs(int(a) - 2500) < 400 and abs(int(b) - 5000) < 400 for a, b in mv), "MouseMove near (2500,5000): %s" % (mv[-3:],))
     keys = re.findall(r"^((?:KeyVk|Key|Special) [^\n]*)$", hl, re.M)
     ok(len(keys) >= 3, "test host logged key messages (%d): %s" % (len(keys), keys[:6]))
+    # mouse wheel (drive.py `rad 2`, then `rad -1`): the host must see Wheel messages, 3 lines per notch, both directions
+    wl = [int(x) for x in re.findall(r"Wheel lines=(-?\d+)", hl)]
+    nums.append("wheel_lines=%s" % wl[:8])
+    ok(len(wl) >= 3 and sum(wl) != 0, "test host logged Wheel messages (lines: %s)" % (wl[:8],))
+    ok(any(v < 0 for v in wl) and any(v > 0 for v in wl), "wheel seen in BOTH directions (QEMU dz>0 = down -> negative lines)")
+    ok(sum(1 for v in wl if abs(v) == 3) == len(wl) and bool(wl), "every Wheel message is exactly 3 lines per notch")
     ok("clip echo ok" in ser, "clipboard round trip (put -> host echo -> viewer)")
     ok(re.search(r"Clipboard|Clip", hl) is not None, "test host logged the clipboard message")
     cm = [int(x) for x in re.findall(r"click-to-mark ms=(\d+)", ser)]
