@@ -44,6 +44,8 @@ import xml.etree.ElementTree as ET
 
 WAYLAND_XML = "/usr/share/wayland/wayland.xml"
 XDG_XML = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
+VIEWPORTER_XML = "/usr/share/wayland-protocols/stable/viewporter/viewporter.xml"
+DECORATION_XML = "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"
 
 # Genau die Schnittstellen, die ein einfacher Client braucht. Die Zahlen
 # sind die Reihenfolge, in der dieser Server sie kennt -- sie stehen
@@ -58,6 +60,9 @@ LIMIT = [
     "wl_data_offer",
     # ROUND FOOT-1: sub-surfaces (foot aborts without wl_subcompositor)
     "wl_subcompositor", "wl_subsurface",
+    # ROUND LC3: toolkits probe these (GTK, Qt, weston clients)
+    "wp_viewporter", "wp_viewport",
+    "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
 ]
 
 # Welche Fassung dieser Server anbietet. Mehr zu behaupten, als gebaut
@@ -71,6 +76,8 @@ VERSION = {
     "wl_output": 2,
     "wl_subcompositor": 1,
     "xdg_wm_base": 3,
+    "wp_viewporter": 1,
+    "zxdg_decoration_manager_v1": 1,
 }
 
 ARGCODE = {
@@ -98,6 +105,8 @@ def main():
     w("// Protokolldateien:")
     w("//   %s" % WAYLAND_XML)
     w("//   %s" % XDG_XML)
+    w("//   %s" % VIEWPORTER_XML)
+    w("//   %s" % DECORATION_XML)
     w("//")
     w("// Neu erzeugen:  ./tools/wayland/gen.py > kernel/user/wlproto.fi")
     w("//")
@@ -110,7 +119,7 @@ def main():
     w("profile kernel")
     w("")
 
-    roots = [load(WAYLAND_XML), load(XDG_XML)]
+    roots = [load(WAYLAND_XML), load(XDG_XML), load(VIEWPORTER_XML), load(DECORATION_XML)]
     ifaces = {}
     for r in roots:
         for i in r.findall("interface"):

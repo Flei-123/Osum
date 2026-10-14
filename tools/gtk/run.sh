@@ -63,7 +63,10 @@ A=(build "$TMPD/disk.img" ${GTK_BLOCKS:-131072} --v3 --inodes=2048 /lib/ "/lib/m
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 for p in sh sleep echo cat ls wayd; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 # the foot stones bring fonts.conf + the xkb data; the gtk manifest brings the libraries, the probes and the compiled gsettings schemas
-while IFS== read -r g h; do case $g in /usr/lib/*|/usr/share/X11/*|/etc/*|/usr/share/fonts/*) A+=("$g=$h");; esac; done < "$STONES/foot/manifest.txt" 2>/dev/null
+# a guest path in both manifests (libffi, libxkbcommon ...): the gtk build wins (mkfs refuses a path twice)
+declare -A GTKG=()
+while IFS== read -r g h; do case $g in /usr/lib/*|/usr/bin/*|/usr/share/glib-2.0/*) GTKG[$g]=1;; esac; done < "$GS/gtk/manifest.txt"
+while IFS== read -r g h; do case $g in /usr/lib/*|/usr/share/X11/*|/etc/*|/usr/share/fonts/*) [ -n "${GTKG[$g]:-}" ] || A+=("$g=$h");; esac; done < "$STONES/foot/manifest.txt" 2>/dev/null
 while IFS== read -r g h; do case $g in /usr/lib/*|/usr/bin/*|/usr/share/glib-2.0/*) A+=("$g=$h");; esac; done < "$GS/gtk/manifest.txt"
 python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "the disk: $(stat -c%s "$TMPD/disk.img") octets" \
     || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt" | sed 's/^/        /'; echo "GTK: $pass passed, $fail failed"; exit 1; }

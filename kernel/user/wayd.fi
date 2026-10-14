@@ -589,6 +589,8 @@ fn on_display(c: u64, id: u64, op: u64, argp: u64) {
         announce(c, rid, wlproto.IF_XDG_WM_BASE)
         announce(c, rid, wlproto.IF_WL_DATA_DEVICE_MANAGER)
         announce(c, rid, wlproto.IF_WL_SUBCOMPOSITOR)
+        announce(c, rid, wlproto.IF_WP_VIEWPORTER)
+        announce(c, rid, wlproto.IF_ZXDG_DECORATION_MANAGER_V1)
         return
     }
     send_error(c, id, 1)
@@ -1239,6 +1241,75 @@ fn on_subsurface(c: u64, id: u64, op: u64, argp: u64) {
     // place_above, place_below, set_sync, set_desync: accepted, no effect
 }
 
+// wp_viewporter (ROUND LC3): toolkits bind it to scale video/fractional surfaces. We never offer fractional scale, so a client
+// has no reason to set a destination; the objects exist so the bind and the requests do not kill the connection. The crop /
+// scale itself is NOT applied (roadmap item).
+fn on_viewporter(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WP_VIEWPORTER_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_WP_VIEWPORTER_GET_VIEWPORT {
+        let nid: u64 = rd32(argp)
+        let surf: u64 = rd32(argp + 4)
+        if obj_iface(c, surf) != wlproto.IF_WL_SURFACE {
+            send_error(c, id, wlproto.ERR_WP_VIEWPORT_NO_SURFACE)
+            return
+        }
+        if obj_new(c, nid, wlproto.IF_WP_VIEWPORT) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        return
+    }
+    send_error(c, id, 1)
+}
+
+fn on_viewport(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WP_VIEWPORT_DESTROY {
+        obj_drop(c, id)
+    }
+    // set_source, set_destination: accepted, no effect
+}
+
+// zxdg_decoration_manager_v1: the window server draws the frame (title bar, buttons) around every window, so the answer is always
+// server_side (2) -- whatever the client asks for.
+fn deco_configure(c: u64, id: u64) {
+    let p: u64 = ev_begin(c, id, wlproto.EV_ZXDG_TOPLEVEL_DECORATION_V1_CONFIGURE)
+    ev_arg(c, p, 0, 2)
+    ev_end(c, p, 1)
+}
+
+fn on_deco_manager(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_ZXDG_DECORATION_MANAGER_V1_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_ZXDG_DECORATION_MANAGER_V1_GET_TOPLEVEL_DECORATION {
+        let nid: u64 = rd32(argp)
+        let top: u64 = rd32(argp + 4)
+        if obj_iface(c, top) != wlproto.IF_XDG_TOPLEVEL {
+            send_error(c, id, 0)
+            return
+        }
+        if obj_new(c, nid, wlproto.IF_ZXDG_TOPLEVEL_DECORATION_V1) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        deco_configure(c, nid)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+fn on_deco(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_ZXDG_TOPLEVEL_DECORATION_V1_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    deco_configure(c, id) // set_mode / unset_mode
+}
+
 fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_WL_SURFACE_ATTACH {
         obj_set(c, id, O_B, rd32(argp))
@@ -1435,6 +1506,14 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         on_subcompositor(c, id, op, argp)
     } else if iface == wlproto.IF_WL_SUBSURFACE {
         on_subsurface(c, id, op, argp)
+    } else if iface == wlproto.IF_WP_VIEWPORTER {
+        on_viewporter(c, id, op, argp)
+    } else if iface == wlproto.IF_WP_VIEWPORT {
+        on_viewport(c, id, op, argp)
+    } else if iface == wlproto.IF_ZXDG_DECORATION_MANAGER_V1 {
+        on_deco_manager(c, id, op, argp)
+    } else if iface == wlproto.IF_ZXDG_TOPLEVEL_DECORATION_V1 {
+        on_deco(c, id, op, argp)
     } else if iface == wlproto.IF_XDG_WM_BASE {
         on_xdg_wm_base(c, id, op, argp)
     } else if iface == wlproto.IF_XDG_SURFACE {

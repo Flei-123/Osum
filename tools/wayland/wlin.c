@@ -13,13 +13,15 @@
  *   wlin[A]: ptr button serial=121 button=272 state=1
  *   wlin[A]: paste=hello      selection=none     source send mime=... wrote=5     source cancelled
  *
- *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat] [sub]
+ *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat] [sub] [proto]
  *
  *   copy=TEXT   at the FIRST key press: make a wl_data_source, offer text, set_selection(source, the serial of that key)
  *   badserial   at the first key press: set_selection with a serial that was never given (must be refused: `source cancelled`)
  *   paste       when a selection arrives: receive it through a pipe and print paste=...  (the pipe is read without blocking, 3 s)
  *   sub         bind wl_subcompositor, make two sub-surfaces of the window (16x16 magenta at (150,70), 16x16 green at (-8,-8) =
  *               partly outside the window), commit, roundtrip; prints `sub: up` / `sub: no wl_subcompositor`
+ *   proto       bind wp_viewporter + zxdg_decoration_manager_v1: get_viewport + set_destination, get_toplevel_decoration + set_mode(client side),
+ *               roundtrip; prints `proto: viewport ok deco-mode=<n>` (server must answer 2 = server side) or `proto: no viewporter/decoration`
  *   noseat      do not bind the seat (counter-proof: such a client gets no input at all)
  */
 #ifndef _GNU_SOURCE
@@ -38,6 +40,8 @@
 #include <sys/syscall.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 
 #define W 200
 #define H 120
@@ -53,7 +57,12 @@ static struct xdg_wm_base *wmbase;
 static struct wl_seat *seat;
 static struct wl_data_device_manager *ddm;
 static struct wl_subcompositor *subcomp;
-static int do_sub;
+static int do_sub, do_proto;
+static struct wp_viewporter *vporter;
+static struct zxdg_decoration_manager_v1 *decoman;
+static int deco_mode = -1;
+static void deco_conf(void *d, struct zxdg_toplevel_decoration_v1 *t, uint32_t mode) { deco_mode = (int)mode; }
+static const struct zxdg_toplevel_decoration_v1_listener deco_l = { deco_conf };
 static struct wl_data_device *ddev;
 static struct wl_display *g_dpy;
 static struct wl_surface *surf;
@@ -360,6 +369,10 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
         wmbase = wl_registry_bind(r, n, &xdg_wm_base_interface, 1);
     else if (!strcmp(iface, "wl_subcompositor"))
         subcomp = wl_registry_bind(r, n, &wl_subcompositor_interface, 1);
+    else if (!strcmp(iface, "wp_viewporter"))
+        vporter = wl_registry_bind(r, n, &wp_viewporter_interface, 1);
+    else if (!strcmp(iface, "zxdg_decoration_manager_v1"))
+        decoman = wl_registry_bind(r, n, &zxdg_decoration_manager_v1_interface, 1);
     else if (!strcmp(iface, "wl_data_device_manager"))
         ddm = wl_registry_bind(r, n, &wl_data_device_manager_interface, v < 3 ? v : 3);
     else if (!strcmp(iface, "wl_seat") && !no_seat) {
@@ -473,6 +486,8 @@ int main(int argc, char **argv)
             do_bad = 1;
         } else if (!strcmp(argv[i], "sub")) {
             do_sub = 1;
+        } else if (!strcmp(argv[i], "proto")) {
+            do_proto = 1;
         } else if (!strcmp(argv[i], "noseat")) {
             no_seat = 1;
         }
@@ -498,6 +513,11 @@ int main(int argc, char **argv)
     xdg_toplevel_add_listener(tl, &tl_l, NULL);
     xdg_toplevel_set_title(tl, name);
     xdg_toplevel_set_app_id(tl, "wlin");
+    if (do_proto && decoman) {
+        struct zxdg_toplevel_decoration_v1 *dc = zxdg_decoration_manager_v1_get_toplevel_decoration(decoman, tl);
+        zxdg_toplevel_decoration_v1_add_listener(dc, &deco_l, NULL);
+        zxdg_toplevel_decoration_v1_set_mode(dc, ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+    }
     wl_surface_commit(surf);
     while (!configured && wl_display_dispatch(dpy) != -1)
         ;
@@ -513,6 +533,21 @@ int main(int argc, char **argv)
     say("window up %dx%d", W, H);
     if (do_sub)
         make_subs(dpy);
+    if (do_proto) {
+        if (!vporter || !decoman) {
+            say("proto: no viewporter/decoration");
+        } else {
+            struct wp_viewport *vp = wp_viewporter_get_viewport(vporter, surf);
+            wp_viewport_set_destination(vp, W, H);
+            wp_viewport_set_source(vp, wl_fixed_from_int(0), wl_fixed_from_int(0), wl_fixed_from_int(W), wl_fixed_from_int(H));
+            wl_surface_commit(surf);
+            if (wl_display_roundtrip(dpy) < 0)
+                say("proto: protocol error %d", wl_display_get_error(dpy));
+            else
+                say("proto: viewport ok deco-mode=%d", deco_mode);
+            wp_viewport_destroy(vp);
+        }
+    }
     while (!done && time(NULL) - t0 < secs) {
         struct pollfd pfd;
         while (wl_display_prepare_read(dpy) != 0)

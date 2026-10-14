@@ -61,11 +61,17 @@ else
     bad "the kernel does not build"; tail -5 "$TMPD/k.txt" | sed 's/^/        /'
     echo "WL-INPUT: $pass passed, $fail failed"; exit 1
 fi
+# protocol glue for wp_viewporter + zxdg_decoration_manager_v1 (generated from the installed XML, like xdg-shell in $WLB)
+GEN="$TMPD/gen"; mkdir -p "$GEN"; WPX=/usr/share/wayland-protocols
+for pr in stable/viewporter/viewporter unstable/xdg-decoration/xdg-decoration-unstable-v1; do
+    b=$(basename "$pr"); wayland-scanner client-header "$WPX/$pr.xml" "$GEN/$b-client-protocol.h" 2>>"$TMPD/gen.txt"
+    wayland-scanner private-code "$WPX/$pr.xml" "$GEN/$b-protocol.c" 2>>"$TMPD/gen.txt"
+done
 if [ -f "$WLB/musl-root/lib/libwayland-client.a" ] && musl-gcc -static -O2 -nostartfiles \
         -T tools/foreign/osum.ld -Wl,--build-id=none -D_GNU_SOURCE \
-        -I"$WLB/musl-root/include" -I"$WLB/wayland-1.21.0/gen" -o "$TMPD/wlin" \
+        -I"$WLB/musl-root/include" -I"$WLB/wayland-1.21.0/gen" -I"$GEN" -o "$TMPD/wlin" \
         tools/foreign/start.s tools/foreign/osum_main.c tools/wayland/wlin.c \
-        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" \
+        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" "$GEN/xdg-decoration-unstable-v1-protocol.c" \
         -L"$WLB/musl-root/lib" -lwayland-client -lffi 2>"$TMPD/wl.txt"; then
     ok "wlin: a Wayland program, libwayland-client + xdg-shell, static musl"
 else
@@ -86,7 +92,7 @@ cat > "$TMPD/g.sh" <<'EOS'
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
 idle 5000 wayd-alone
-wlin /tmp/wayland-0 900 C badserial sub &
+wlin /tmp/wayland-0 900 C badserial sub proto &
 sleep 5
 wlin /tmp/wayland-0 900 A copy=hello-from-A &
 sleep 5
@@ -197,6 +203,7 @@ n0=$(num "$ID0" syscalls)
 echo "== 2c. sub-surfaces (wl_subcompositor): C made two children of its window =="
 has "$(L C | grep -a 'sub:')" "sub: up" "wlin[C]: wl_subcompositor bound, two get_subsurface + commits + roundtrip -- no protocol error"
 hasnot "$(L C)" "protocol error" "wlin[C]: no protocol error from the server"
+has "$(L C | grep -a 'proto:')" "proto: viewport ok deco-mode=2" "wlin[C]: wp_viewporter (get_viewport, set_source/destination) accepted; xdg-decoration answers server_side (2) although the client asked client_side"
 printf 'screendump %s\n' "$TMPD/sub.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 sleep 3
 CX=$(gx 0 0); CY=$(gy 0 0)
