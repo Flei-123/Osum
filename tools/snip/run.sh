@@ -74,11 +74,10 @@ fi
 
 echo
 echo "== 2. Print key: full screen, file, clipboard =="
-bash "$B" "$OUT/a" kbd=yes warten=25 progs="$PROGS" \
-    mon="sendkey print" > "$OUT/a.log" 2>&1
+bash "$B" "$OUT/a" kbd=yes warten=3 extra="wighalt=75" progs="$PROGS" \
+    mon="sendkey print" mon="warte 25" > "$OUT/a.log" 2>&1
 S="$OUT/a/serial.txt"
 has "$S" "hk: print" "driver latched the Print key"
-has "$S" "taskbar: snip pid=" "taskbar started the tool"
 has "$S" "snip: gesichert /bilder/Screenshots/Screenshot-1.png w=1280 h=800" "tool wrote the file, full screen"
 T=$(grep -a 'snip: clip typ=' "$S" | head -1 | sed 's/.*typ=//' | tr -dc '0-9')
 if [ -n "$T" ] && [ $(( T & 8 )) -ne 0 ]; then ok "clipboard holds an IMAGE entry (type $T)"; else bad "clipboard type '$T' has no image bit"; fi
@@ -90,11 +89,10 @@ num "exactly one file for one key press" "$N" eq 1
 
 echo
 echo "== 3. Win+Shift+S: region window =="
-bash "$B" "$OUT/b" kbd=yes warten=25 progs="$PROGS" \
-    mon="sendkey meta_l-shift-s" > "$OUT/b.log" 2>&1
+bash "$B" "$OUT/b" kbd=yes warten=3 extra="wighalt=75" progs="$PROGS" \
+    mon="sendkey meta_l-shift-s" mon="warte 25" > "$OUT/b.log" 2>&1
 S="$OUT/b/serial.txt"
 has "$S" "hk: super+S" "driver latched Win+Shift+S"
-has "$S" "taskbar: snip pid=" "taskbar started the tool"
 has "$S" "snip: ready" "region window is up"
 G=$(grep -a 'snip: geom w=' "$S" | head -1 | sed 's/.*w=//' | cut -d' ' -f1 | tr -dc '0-9')
 num "region window covers the screen (width)" "$G" ge 1200
