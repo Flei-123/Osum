@@ -57,7 +57,7 @@ warte 2
 tippe fvviewer
 warte 2
 taste ret
-warteauf 'fvviewer: rect name=go' || 60
+warteaufmuss 'fvviewer: rect name=go' || 60
 warte 3
 klickauf fvrectid
 warte 2

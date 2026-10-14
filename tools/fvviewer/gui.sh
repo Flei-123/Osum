@@ -89,7 +89,7 @@ taste meta_l
 warte 2
 foto 05-launcher
 klickauf start_FreeViewer
-warteauf 'fvviewer: rect name=go' || 60
+warteaufmuss 'fvviewer: rect name=go' || 60
 warte 2
 warte 1
 klickauf fvrectid
@@ -106,6 +106,7 @@ tippe $PW
 warte 1
 foto 10-form
 klickauf fvrectgo
+warteaufmuss 'fvviewer: connect start id_len=${#ID} pw_len=${#PW}' || 20
 warteauf 'fvviewer: state live' || 120
 warte 9
 foto 20-live
