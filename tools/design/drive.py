@@ -977,7 +977,8 @@ def main():
     os.makedirs(out, exist_ok=True)
     f = Fahrer(sock, serial, out)
     fehler = 0
-    tippe_gap = 0.12
+    base_gap = float(os.environ.get("DRIVE_TIPPE_GAP", "0.12"))   # slower typing on loaded hosts
+    tippe_gap = base_gap
     for roh in open(buch, encoding="utf-8"):
         z = roh.strip()
         if not z or z.startswith("#"):
@@ -1023,7 +1024,7 @@ def main():
             print("warteneu %s -> %s" % (muster, "da" if ok else "NICHT DA"))
             if not ok:
                 fehler += 1
-        elif b == "warteauf":
+        elif b in ("warteauf", "warteaufmuss"):
             st = arg.split("||")
             # Die Anfuehrungszeichen gehoeren der Lesbarkeit des
             # Drehbuchs und nicht dem regulaeren Ausdruck.  Der erste
@@ -1036,6 +1037,10 @@ def main():
             print("warteauf %s -> %s" % (muster, "da" if ok else "NICHT DA"))
             if not ok:
                 fehler += 1
+                if b == "warteaufmuss":
+                    # gate precondition failed (e.g. a typed key was lost): stop the script, the wrapper retries
+                    print("ABBRUCH: %s ist Voraussetzung" % muster)
+                    break
         # RUNDE EXPLORER-2, GEMESSEN: DIE RECHTE TASTE IST 2 UND NICHT 4.
         # `mouse_button` des QEMU-Monitors legt links auf Bit 0, RECHTS
         # auf Bit 1 und die Mitte auf Bit 2 -- dieselbe Reihenfolge, die
@@ -1485,7 +1490,7 @@ def main():
             for ch in arg:
                 f.taste(namen.get(ch, ch))
                 time.sleep(tippe_gap)
-            tippe_gap = 0.12
+            tippe_gap = base_gap
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))
         # QA walk (tools/qa/dell_walk.py): `schritt <app> <step>` writes the serial byte offset and
         # the time to <out>/schritte.tsv so the evaluator can cut the serial log per app and step.

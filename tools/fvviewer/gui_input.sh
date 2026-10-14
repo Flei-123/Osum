@@ -23,6 +23,7 @@ D=$(mktemp -d); trap 'bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null; pkill 
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD" "$D/th"
 RES=${GUI_RES:-1280x800}
+export DRIVE_TIPPE_GAP=${DRIVE_TIPPE_GAP:-0.3}   # the guest drops keys at 0.12 s on a loaded host
 PW=testpass123
 TRY=0
 MAXTRY=${GUI_INPUT_TRIES:-3}
@@ -66,7 +67,7 @@ warte 1
 tippe $PW
 warte 1
 klickauf fvrectgo
-warteauf 'fvviewer: connect start id_len=${#ID} pw_len=${#PW}' || 20
+warteaufmuss 'fvviewer: connect start id_len=${#ID} pw_len=${#PW}' || 20
 warteauf 'fvviewer: state live' || 120
 # clipboard scenarios run by themselves (unicode, then the oversize text) -> wait for their echo
 warteauf 'fvviewer: clip unicode echo ok' || 60
