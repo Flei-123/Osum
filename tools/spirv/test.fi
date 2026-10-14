@@ -5,6 +5,7 @@
 // plus a hand-assembled module, negative cases built from it, and a fuzz run (no crash on random / truncated / mutated input).
 import std.rt
 import std.io
+import std.math
 import jobs.jobs
 import gpu.swr.raster
 import gpu.swr.shader
@@ -80,6 +81,57 @@ fn near(a: u32, want: i32) -> bool {
 }
 
 fn ch(px: u32, k: u32) -> u32 { return (px >> (k * 8)) & 255 }
+
+fn cl01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    if x > 1.0 { return 1.0 }
+    return x
+}
+
+fn to8(x: f64) -> i32 { return (cl01(x) * 255.0 + 0.5) as i32 }
+
+// CPU reference of tools/spirv/shaders/ok_math.frag in f64 (independent of the lowering); channel k of the output
+fn ref_math(px: i32, py: i32, k: i32) -> i32 {
+    let u: f64 = ((px as f64) + 0.5) / 320.0
+    let v: f64 = ((py as f64) + 0.5) / 200.0
+    let cr: f64 = 0.6
+    let cg: f64 = 0.4
+    let cb: f64 = 0.8
+    let ca: f64 = 1.0
+    let al: f64 = math.sqrt(u * u + v * v + cr * cr)
+    let dx: f64 = u - cr
+    let dy: f64 = v - cg
+    let dz: f64 = cr - cb
+    let d: f64 = u * cr + v * cg + cr * cb + al + math.sqrt(dx * dx + dy * dy + dz * dz)
+    let ax: f64 = u + 0.1
+    let ay: f64 = v + 0.1
+    let az: f64 = cr + 0.1
+    let nl: f64 = math.sqrt(ax * ax + ay * ay + az * az)
+    let s: f64 = math.sin(u * 3.0) * math.cos(v * 2.0) + cg * cg + math.sqrt(math.fabs(u)) + 1.0 / math.sqrt(cb + 1.0)
+    let sm: f64 = cl01(u) * cl01(u) * (3.0 - 2.0 * cl01(u))
+    var stp: f64 = 0.0
+    if v >= 0.5 { stp = 1.0 }
+    let t: f64 = math.floor(d) + (d - math.floor(d)) + math.ceil(s) + sm + stp + (0.2 + (0.8 - 0.2) * ca)
+    let ki: f64 = math.trunc(u * 7.0) * 3.0 - 2.0
+    var smin: f64 = s
+    if smin > 1.0 { smin = 1.0 }
+    var dmax: f64 = d
+    if dmax < 0.0 { dmax = 0.0 }
+    if k == 0 { return to8(cl01(ax / nl * 0.5 + 0.5) + smin * 0.1) }
+    if k == 1 { return to8(cl01(ay / nl * 0.5 + 0.5) + dmax * 0.1) }
+    if k == 2 { return to8(cl01(az / nl * 0.5 + 0.5) + math.powf(2.0, u) * 0.1) }
+    return to8(cl01(t * 0.01 + ki * 0.01) + math.log2(v + 1.0) * 0.1)
+}
+
+fn near_ref(px: i32, py: i32, got: u32) -> bool {
+    var k: i32 = 0
+    while k < 4 {
+        let d: i32 = (ch(got, k as u32) as i32) - ref_math(px, py, k)
+        if d < -3 || d > 3 { return false }
+        k = k + 1
+    }
+    return true
+}
 
 fn lower_words(code: u64, n: usize, prog: u64, info: *mut lower.LowerInfo) -> u32 {
     var m: parse.Module = parse.module_zero()
@@ -161,6 +213,7 @@ fn main(start: u64) -> i32 {
     var a_flat: [u8; 7] = "ok_flat"
     var a_branch: [u8; 9] = "ok_branch"
     var a_frag: [u8; 12] = "ok_fragcoord"
+    var a_math: [u8; 7] = "ok_math"
     var a_loop: [u8; 4] = "loop"
     var a_disc: [u8; 7] = "discard"
     let tex: u64 = scene.make_texture(256)
@@ -255,6 +308,22 @@ fn main(start: u64) -> i32 {
             if has_name(path, (&a_frag[0]) as u64, 12) {
                 let q: u32 = raster.frame_pixel(f, 160, 100) // (160.5 / 320, 100.5 / 320)
                 check("FragCoord.xy / 320", near(ch(q, 0), 128) && near(ch(q, 1), 80))
+            }
+            if has_name(path, (&a_math[0]) as u64, 7) {
+                var good: i32 = 0
+                var tot: i32 = 0
+                var yy: i32 = 3
+                while yy < 200 {
+                    var xx: i32 = 5
+                    while xx < 320 {
+                        tot = tot + 1
+                        if near_ref(xx, yy, raster.frame_pixel(f, xx, yy)) { good = good + 1 }
+                        xx = xx + 37
+                    }
+                    yy = yy + 29
+                }
+                io.fmt_print(f"      math: {good} of {tot} sampled pixels within 3/255 of the CPU reference\n")
+                check("math shader: GLSL.std.450 functions match the f64 CPU reference", good == tot)
             }
             // fuzz this module
             let acc: i32 = fuzz(code, nw, 3000, 777 as u64 + (i as u64))
