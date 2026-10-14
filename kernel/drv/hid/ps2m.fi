@@ -54,9 +54,10 @@ profile kernel
 
 import lib.kstate
 import serial
+import drv.hid.ptrcfg
 
 export {
-    init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    e2e_selftest, init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
     irqs, polls, spurious, clicks, status, reset_counters, poll_one,
     set_poll, polling,
     set_bounds, set_pos, changed, take_change, usb_packet, adopt,
@@ -402,6 +403,12 @@ fn apply(state: u64, rad: u64) {
     if (b0 & 0xC0) == 0 {
         dx = delta(g(state, S_B1), (b0 & 16) != 0)
         dy = delta(g(state, S_B2), (b0 & 32) != 0)
+        // ROUND LAP1 (L-001): speed + acceleration, one place for every
+        // device. Both axes are computed from the ORIGINAL pair.
+        let sdx: i64 = ptrcfg.scale_x(state, dx, dy)
+        let sdy: i64 = ptrcfg.scale_y(state, dx, dy)
+        dx = sdx
+        dy = sdy
     }
     if dx != 0 || dy != 0 {
         s(state, S_MOVES, g(state, S_MOVES) + 1)
@@ -445,6 +452,8 @@ fn apply(state: u64, rad: u64) {
         if rad == 15 {
             r = 0 - 1
         }
+        // ROUND LAP1: natural scrolling flips the sign.
+        r = ptrcfg.scale_wheel(state, r)
         if r != 0 {
             s(state, S_WHEEL, ((g(state, S_WHEEL) as i64) + r) as u64)
             s(state, S_CHANGED, 1)
@@ -653,4 +662,36 @@ fn selftest(state: u64) -> u64 {
 
 fn selftest_max() -> u64 {
     return 10
+}
+
+// ROUND LAP1 (L-001): END-TO-END. A real packet through `usb_packet` and
+// `apply` with a known config; prints the pointer displacement and the
+// wheel step so tools/ptrcfg/run.sh can compare with the reference.
+// Restores config, position and wheel afterwards.
+fn e2e_selftest(state: u64) {
+    var l_e: [u8; 13] = "ptrcfg: e2e \0"
+    var l_x: [u8; 4] = "x=\0\0"
+    var l_y: [u8; 5] = " y=\0\0"
+    var l_w: [u8; 5] = " w=\0\0"
+    let ox: u64 = g(state, S_X)
+    let oy: u64 = g(state, S_Y)
+    let ow: u64 = g(state, S_WHEEL)
+    ptrcfg.set(state, 200, 0, 1)
+    set_pos(state, 100, 100)
+    // dx=+10, dy=+4 (up), wheel +1 (natural flips it)
+    usb_packet(state, 8, 10, 4, 1, true)
+    let nx: u64 = g(state, S_X)
+    let ny: u64 = g(state, S_Y)
+    let dw: i64 = (g(state, S_WHEEL) as i64) - (ow as i64)
+    serial.puts((&l_e[0]) as u64)
+    serial.puts((&l_x[0]) as u64)
+    serial.dec(nx)
+    serial.puts((&l_y[0]) as u64)
+    serial.dec(ny)
+    serial.puts((&l_w[0]) as u64)
+    ptrcfg.put_signed(dw)
+    serial.nl()
+    ptrcfg.set(state, 100, 0, 0)
+    set_pos(state, ox, oy)
+    s(state, S_WHEEL, ow)
 }
