@@ -13,6 +13,13 @@
 #   3. signed feed (netz2: fvviewer 1.0.1): `ota apply` updates 1.0.0 -> 1.0.1
 #   4. negatives: package with wrong signature, tampered package (hash mismatch),
 #      VERZEICHNIS signed with a foreign key -> nothing is installed
+#   6. DISK: `install /dev/hda` on an empty disk, install 1.0.0 on the installed
+#      disk, `ota apply` 1.0.1 (generation 1), reboot, `ota rollback`, reboot ->
+#      1.0.0 runs again (the real generation switch needs the disk, not the RAM root)
+#
+# Stages (env FVT_STAGES, default "build run disk"): with an out-dir that already
+# holds a build, `FVT_STAGES=disk bash tools/ota/fvtest.sh <out-dir>` repeats only
+# the disk part (for iterating; a reported run builds everything).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -27,6 +34,8 @@ PORT=${OTA_PORT:-$(( 18000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}
 export OPK
+STAGES=${FVT_STAGES:-"build run disk"}
+stage() { case " $STAGES " in *" $1 "*) return 0 ;; esac; return 1; }
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
@@ -53,6 +62,7 @@ lauf() { # name script [limit]
     cat "$OUT/$1.rc" 2>/dev/null
 }
 
+if stage build; then
 echo "== 1. build the packages =="
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || { bad "fetch-firnc"; tail -3 "$OUT/firnc.log"; }
 bash pakete/bauen.sh "$OUT/pk" > "$OUT/bauen.log" 2>&1
@@ -103,6 +113,8 @@ mkfeed netzfv 2
 python3 tools/ota/listing.py "$OUT/netzfv" --fassung 2 --schluessel "$OUT/geheim.key" > /dev/null || bad netzfv
 ok "feeds: netzfv (1.0.1), netzfvman (tampered), netzfvsig (wrong .sig), netzfremd (foreign key)"
 
+fi # stage build
+if stage run; then
 echo "== 3. install fvviewer 1.0.0 from the .opk, app starts =="
 lauf b0 "opk install /fv/fvviewer-1.0.0.opk;opk list;sh /start.sh;exit" 400 > /dev/null
 hat "$OUT/b0.txt" "signature checked" "opk checked the package signature"
@@ -130,5 +142,45 @@ neg() { # name feed expected-text
 neg n1 netzfvsig "SIGNATURE WRONG"
 neg n2 netzfvman "HASH MISMATCH"
 neg n3 netzfremd "SIGNATURE OF THE VERZEICHNIS WRONG"
+fi # stage run
+if stage disk; then
+# the same device, but booted from the installed DISK (no module, via OVMF/ESP)
+lauf_p() { # name script [limit]
+    : > "$OUT/srv.log"
+    OTA_NETZ="$NETZ" OUT="$OUT" bash tools/install/oneshot.sh "$1" platte "$2" "${3:-600}" >/dev/null 2>&1
+    sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
+    cat "$OUT/$1.rc" 2>/dev/null
+}
+echo "== 6. disk: install /dev/hda, update, rollback =="
+[ -s "$OUT/ziel.img" ] || { bad "no ziel.img in $OUT (run stage build first)"; exit 1; }
+ZMIB=$(( $(stat -c%s "$OUT/ziel.img") / 1048576 ))
+rm -f "$OUT/ziel.img"; head -c $((ZMIB * 1048576)) /dev/zero > "$OUT/ziel.img"
+OUT="$OUT" bash tools/install/oneshot.sh dinst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/dinst.txt" 2>/dev/null
+hat "$OUT/dinst.txt" "install: fertig" "install /dev/hda finished"
+hatnicht "$OUT/dinst.txt" "install: FEHLER" "installer reports no error"
+if grep -qaF "install: fertig" "$OUT/dinst.txt"; then
+    lauf_p d0 "opk install /fv/fvviewer-1.0.0.opk;sh /start.sh;opk list;exit" 600 > /dev/null
+    hat "$OUT/d0.txt" "opk: installed fvviewer" "disk: fvviewer 1.0.0 installed"
+    hat "$OUT/d0.txt" "usage: fvviewer -t" "disk: the app starts"
+    hat "$OUT/d0.txt" "opk: trial confirmed" "disk: generation 0 confirmed"
+    dienst "$OUT/netzfv" || bad "server"
+    lauf_p d1 "ota apply;exit" 900 > /dev/null
+    dienst_aus
+    hat "$OUT/d1.txt" "opk: installed fvviewer -> 1" "disk: 1.0.1 staged as generation 1"
+    hat "$OUT/d1.txt" "READY FOR RESTART" "disk: ota ready for restart"
+    lauf_p d2 "sh /start.sh;opk list;exit" 600 > /dev/null
+    hat "$OUT/d2.txt" "opk: trial confirmed" "disk: after reboot the update ran and was confirmed"
+    hat "$OUT/d2.txt" "1.0.1" "disk: opk list shows 1.0.1"
+    lauf_p d3 "ota rollback;exit" 600 > /dev/null
+    hat "$OUT/d3.txt" "rollback" "disk: ota rollback accepted"
+    lauf_p d4 "opk rebuild;/apps/fvviewer.osp/start;opk list;exit" 600 > /dev/null
+    hat "$OUT/d4.txt" "usage: fvviewer -t" "disk: after rollback the app starts"
+    hat "$OUT/d4.txt" "1.0.0" "disk: opk list shows 1.0.0 again"
+    hatnicht "$OUT/d4.txt" "1.0.1" "disk: 1.0.1 is gone after the rollback"
+else
+    echo "  (disk part skipped: installer failed, see $OUT/dinst.txt)"; tail -5 "$OUT/dinst.txt"
+fi
+fi # stage disk
 echo "FVTEST: $pass ok, $fail failed (device output in $OUT/*.txt)"
 [ "$fail" = 0 ]
