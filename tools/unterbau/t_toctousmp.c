@@ -16,7 +16,7 @@
 #define NT 4
 #define MSG 1900
 static volatile int stop;
-static volatile unsigned long bad_scratch, rounds_scratch, bad_mm, rounds_mm, faults_mm;
+static volatile unsigned long bad_scratch, rounds_scratch, bad_mm, rounds_mm, faults_mm, same_va_mm;
 static double now(void);
 
 static void *scratch_worker(void *arg)
@@ -68,6 +68,11 @@ static void *reader(void *arg)
 static void mm_cycle(double secs)
 {
     unsigned rnd = 12345;
+    /* The reader loads `cur` and only then enters read(): a legitimate late copy can land in a NEW mapping that got the same
+     * virtual address as the old page. Rounds whose fresh page q sits at a recently used address of p are therefore not judged
+     * (counted in same_va); only a fresh page at a DIFFERENT address that changed is a write into a frame that was given back. */
+    unsigned char *recent[16] = { 0 };
+    unsigned ri = 0;
     double t0 = now();
     while (now() - t0 < secs) {
         for (int it = 0; it < 200; it++) {
@@ -78,13 +83,17 @@ static void mm_cycle(double secs)
             rnd = rnd * 1103515245u + 12345u;
             for (volatile unsigned d = 0; d < ((rnd >> 8) & 1023); d++) { }
             cur = 0;
+            recent[ri++ & 15] = p;
             munmap(p, 4096);
             unsigned char *q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (q == MAP_FAILED) continue;
             memset(q, 0x55, 4096);
             for (volatile int d = 0; d < 100; d++) { }
+            int reused = 0;
+            for (int r = 0; r < 16; r++) if (recent[r] == q) reused = 1;
+            if (reused) same_va_mm++;
             for (int k = 0; k < 4096; k++)
-                if (q[k] != 0x55) { __sync_fetch_and_add(&bad_mm, 1); break; }
+                if (q[k] != 0x55) { if (!reused) __sync_fetch_and_add(&bad_mm, 1); break; }
             munmap(q, 4096);
             rounds_mm++;
         }
@@ -125,6 +134,6 @@ int main(void)
     if (ok) { pthread_join(b, 0); pthread_join(a, 0); }
     CHECK("mm_threads_started", ok, "ok=%d", ok);
     CHECK("mm_rounds", rounds_mm > 100, "rounds=%lu", rounds_mm);
-    CHECK("mm_no_stale_write", bad_mm == 0, "bad=%lu of %lu rounds (reader faults %lu)", bad_mm, rounds_mm, faults_mm);
+    CHECK("mm_no_stale_write", bad_mm == 0, "bad=%lu of %lu rounds (reader faults %lu, same-address rounds not judged %lu)", bad_mm, rounds_mm, faults_mm, same_va_mm);
     return 0;
 }
