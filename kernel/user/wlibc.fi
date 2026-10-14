@@ -238,6 +238,7 @@ const BUS_RECV_OP: u64 = 4
 const BUS_SUB_OP: u64 = 5
 const BUS_PUB_OP: u64 = 6
 const BUS_CLIPSET_OP: u64 = 10
+const CLIP_BUS_INLINE: u64 = 192 // what one bus clipboard item keeps inline (INLINE_MAX in kernel/bus/bus.fi)
 const BUS_CLIPGET_OP: u64 = 11
 const BUS_CLIPINFO_OP: u64 = 12
 const BUS_DRAGSET_OP: u64 = 15
@@ -2543,6 +2544,17 @@ fn clip_put_typ(typen: u64, p: u64, n: u64) -> u64 {
     if s_noclip != 0 {
         return 0
     }
+    if n > CLIP_BUS_INLINE {
+        // The bus keeps only CLIP_BUS_INLINE octets inline (it cuts longer text SILENTLY). Longer text goes to the
+        // wig clipboard (4096 octets) in full; the bus gets the head so history/typ stay current, and clip_hist_take
+        // sees "full inline item" and then reads the long text from the wig clipboard.
+        let w: u64 = sys3w(WIG_CLIPSET, p, n, 0)
+        bus5(BUS_CLIPSET_OP, typen, p, CLIP_BUS_INLINE, 0)
+        if ulib.bad(w) {
+            return CLIP_BUS_INLINE
+        }
+        return w
+    }
     let r: u64 = bus5(BUS_CLIPSET_OP, typen, p, n, 0)
     if !ulib.bad(r) {
         return n
@@ -2562,6 +2574,35 @@ fn clip_hist_take(back: u64, p: u64, max: u64) -> u64 {
     }
     let n: u64 = bus5(BUS_CLIPGET_OP, back, p, max, 0)
     if !ulib.bad(n) {
+        if n == CLIP_BUS_INLINE && back == 0 && max > CLIP_BUS_INLINE {
+            // a full inline item may be the head of a longer text kept by the wig clipboard: use it only if its
+            // first CLIP_BUS_INLINE octets are exactly what the bus holds (else the wig text is stale)
+            var head: [u8; 192] = [0 as u8; 192]
+            var k: u64 = 0
+            while k < n {
+                head[k as usize] = *((p + k) as *mut u8)
+                k = k + 1
+            }
+            let w: u64 = sys3w(WIG_CLIPGET, p, max, 0)
+            if !ulib.bad(w) && w > n {
+                var same: bool = true
+                k = 0
+                while k < n {
+                    if *((p + k) as *mut u8) != head[k as usize] {
+                        same = false
+                    }
+                    k = k + 1
+                }
+                if same {
+                    return w
+                }
+            }
+            k = 0
+            while k < n {
+                *((p + k) as *mut u8) = head[k as usize]
+                k = k + 1
+            }
+        }
         return n
     }
     if back != 0 {

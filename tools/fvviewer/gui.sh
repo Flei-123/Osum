@@ -143,6 +143,14 @@ EOF
     if ! grep -aq 'fvviewer: test mode on' "$O/out/serial.txt" 2>/dev/null; then
         echo "  (fvviewer did not start in the guest, retry)"; bash tools/fvviewer/th.sh "$O/th" down; return 7
     fi
+    # typing guard (r80): the viewer logs the field lengths when "Verbinden" is pressed. OrientOS drops keys under
+    # load; a length that differs from what was typed means a wrong run (bad ID / password), not a viewer bug -> retry.
+    local first; first=$(grep -a -m1 'fvviewer: connect start' "$O/out/serial.txt" 2>/dev/null)
+    case "$first" in
+        *"id_len=${#ID} pw_len=${#PW}"*) ;;
+        *) echo "  (typing check failed: '${first:-no connect line}', wanted id_len=${#ID} pw_len=${#PW}; retry)"
+           bash tools/fvviewer/th.sh "$O/th" down; return 7 ;;
+    esac
     grep -a 'FEHLGESCHLAGEN\|NICHT DA\|Traceback' "$O/eh6.log" | head -5
     local mode=$name; [ "$name" = tlsold ] && mode=tlsidle
     python3 -I tools/fvviewer/gui_check.py "$O/out" "$O/th" "$mode" | tee "$O/check.txt"

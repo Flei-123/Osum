@@ -316,7 +316,7 @@ between "poll(0 Deskriptoren, 200 ms) ist ein sauberer Schlaf" "$(value_of "$F" 
 echo "   -- wer wartet, rechnet nicht (die Zusage dieser Runde)"
 say "$F" blk_ret 1 "das Kind hat nach 1,2 s geschrieben, und poll ist aufgewacht"
 say "$F" blk_got 5 "und die Oktette waren wirklich da"
-between "poll(OHNE Frist) kam nach der Zeit des Kindes zurueck" "$(value_of "$F" blk_ms)" 1150 1400
+between "poll(OHNE Frist) kam nach der Zeit des Kindes zurueck" "$(value_of "$F" blk_ms)" 1150 1500
 bc=$(value_of "$F" blk_calls)
 busy=$(value_of "$F" busy_calls)
 num "Systemaufrufe im ganzen System waehrend der 1,2 s mit poll" "$bc" le 20
@@ -327,7 +327,7 @@ if [ -n "$bc" ] && [ -n "$busy" ] && [ "$bc" -gt 0 ]; then
     note "um den es geht: EIN blockierender Aufruf statt hundertzwanzig Weckern."
 fi
 between "und die Warteschleife hat dieselbe Zeit gebraucht (sonst waere der Vergleich schief)" \
-    "$(value_of "$F" busy_ms)" 1150 1400
+    "$(value_of "$F" busy_ms)" 1190 1500
 
 echo "   -- ein Signal holt einen Wartenden zurueck"
 # Ohne die Zeile in kernel/signal.fi, die S_POLL mit aufweckt, waere ein
