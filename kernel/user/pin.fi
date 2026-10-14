@@ -1,0 +1,491 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pin.fi -- r253 stage 1: a local, DEVICE-BOUND PIN next to the password.
+//
+// MODEL (docs/PIN.md has the long form)
+//   * The PIN (4..12 digits) never replaces the password. Login and lock screen try the PIN first when the typed text
+//     looks like one, and fall back to the password check. A locked or disabled PIN only closes the PIN path.
+//   * DEVICE BOUND: the stored hash is PBKDF2 (pw.make_hash, `$osum1$`) over HMAC-SHA256(device key, "osum-pin1:" name ":" pin).
+//     The device key is 32 random octets in /device/pinkey (0600, /device is never backed up). A copy of /etc/pin on another
+//     machine verifies nothing.
+//   * /etc/pin (root, 0600): one line per user `name:record:fails:until:seen`. `fails` = wrong tries in a row, `until` = wall
+//     clock second before which the PIN is refused, `seen` = latest wall clock second ever seen (a clock set back does not
+//     shorten a delay).
+//   * LOCKOUT, counter persisted BEFORE the check: verify() writes fails+1 (and the delay for that count) to disk and syncs,
+//     THEN compares. Only a correct PIN writes the counter back to 0. Pulling the power in the middle keeps the penalty.
+//       wrong tries 1..4  no delay | 5: 60 s | 6: 120 s | 7: 240 s | 8: 480 s | 9: 960 s | 10: PIN disabled
+//     A disabled PIN is re-enabled by a successful PASSWORD login (password_ok) or by setting a new PIN.
+//   * No PIN, no record, a corrupt file: the PIN path answers R_NOPIN/R_ERR and the password path stays untouched.
+
+profile kernel
+
+import ulib
+import pw
+
+export {
+    R_OK, R_WRONG, R_LOCKED, R_NOPIN, R_DISABLED, R_ERR, R_FORMAT,
+    PIN_MIN, PIN_MAX, FREE_TRIES, MAX_FAILS,
+    looks_like_pin, format_ok, verify, set, remove, status, password_ok, delay_for, now_s, force,
+}
+
+const R_OK: u64 = 0
+const R_WRONG: u64 = 1
+const R_LOCKED: u64 = 2
+const R_NOPIN: u64 = 3
+const R_DISABLED: u64 = 4
+const R_ERR: u64 = 5
+const R_FORMAT: u64 = 6
+
+const PIN_MIN: u64 = 4
+const PIN_MAX: u64 = 12
+const FREE_TRIES: u64 = 4
+const MAX_FAILS: u64 = 10
+const DB_MAX: u64 = 4096
+
+static mut db: [u8; 4096] = [0 as u8; 4096]
+
+// ------------------------------------------------------------ small helpers
+
+fn digit_count(s: u64) -> u64 {
+    var n: u64 = 0
+    while *((s + n) as *mut u8) >= 48 as u8 && *((s + n) as *mut u8) <= 57 as u8 {
+        n = n + 1
+    }
+    if *((s + n) as *mut u8) != 0 as u8 {
+        return 0
+    }
+    return n
+}
+
+// 4..12 digits and nothing else: worth a PIN attempt (cheap, no state touched).
+fn looks_like_pin(s: u64) -> bool {
+    let n: u64 = digit_count(s)
+    return n >= PIN_MIN && n <= PIN_MAX
+}
+
+// A PIN that may be SET: the right shape and not trivially guessable (all one digit, straight runs 1234 / 4321).
+fn format_ok(s: u64) -> bool {
+    if !looks_like_pin(s) {
+        return false
+    }
+    let n: u64 = digit_count(s)
+    var same: bool = true
+    var up: bool = true
+    var down: bool = true
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = (*((s + i - 1) as *mut u8)) as u64
+        let b: u64 = (*((s + i) as *mut u8)) as u64
+        if a != b {
+            same = false
+        }
+        if b != a + 1 {
+            up = false
+        }
+        if a != b + 1 {
+            down = false
+        }
+        i = i + 1
+    }
+    return !(same || up || down)
+}
+
+// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm, years >= 1970 only).
+fn days_from_civil(y0: u64, m: u64, d: u64) -> u64 {
+    var y: u64 = y0
+    if m <= 2 {
+        y = y - 1
+    }
+    let era: u64 = y / 400
+    let yoe: u64 = y - era * 400
+    var mp: u64 = m + 9
+    if m > 2 {
+        mp = m - 3
+    }
+    let doy: u64 = (153 * mp + 2) / 5 + d - 1
+    let doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// The wall clock in seconds (the clock as the system shows it; the `seen` field keeps it from running backwards).
+fn now_s() -> u64 {
+    let y: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0)
+    let mo: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0)
+    let d: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0)
+    let h: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    let s: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_SEC, 0, 0)
+    if y < 1971 || mo < 1 || mo > 12 || d < 1 {
+        return 0
+    }
+    return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s
+}
+
+// Seconds of delay that follow the n-th wrong try in a row. 10 and more: 0 (the PIN is disabled instead).
+fn delay_for(n: u64) -> u64 {
+    if n <= FREE_TRIES || n >= MAX_FAILS {
+        return 0
+    }
+    var d: u64 = 60
+    var k: u64 = FREE_TRIES + 1
+    while k < n {
+        d = d * 2
+        k = k + 1
+    }
+    return d
+}
+
+fn put_num(out: u64, v: u64) -> u64 {
+    var t: [u8; 26] = [0 as u8; 26]
+    ulib.digits(v, (&t[0]) as u64)
+    return ulib.strcpy(out, (&t[0]) as u64)
+}
+
+// -------------------------------------------------------------- device key
+
+fn key_path(out: u64) {
+    var p: [u8; 15] = "/device/pinkey\0"
+    ulib.strcpy(out, (&p[0]) as u64)
+}
+
+// The device key; made on first use when `make` is true. false = none.
+fn device_key(k: u64, make: bool) -> bool {
+    var path: [u8; 16] = [0 as u8; 16]
+    var dir: [u8; 8] = "/device\0"
+    key_path((&path[0]) as u64)
+    var buf: [u8; 64] = [0 as u8; 64]
+    let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 64)
+    if n == 32 {
+        var i: u64 = 0
+        while i < 32 {
+            __mmio_write8((k + i) as *mut u8, buf[i as usize])
+            i = i + 1
+        }
+        return true
+    }
+    if !make {
+        return false
+    }
+    var key: [u8; 32] = [0 as u8; 32]
+    let got: u64 = ulib.sys(318, (&key[0]) as u64, 32, 0)
+    if ulib.bad(got) || got != 32 {
+        return false
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&dir[0]) as u64, 0, 0)
+    // create empty, lock the mode down, THEN write the secret
+    if !pw.write_all((&path[0]) as u64, (&key[0]) as u64, 0) {
+        return false
+    }
+    ulib.sys(90, (&path[0]) as u64, 384, 0)
+    ulib.sys(92, (&path[0]) as u64, 0, 0)
+    if !pw.write_all((&path[0]) as u64, (&key[0]) as u64, 32) {
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    var i: u64 = 0
+    while i < 32 {
+        __mmio_write8((k + i) as *mut u8, key[i as usize])
+        i = i + 1
+    }
+    return true
+}
+
+// The string the PBKDF2 sees: 64 hex digits of HMAC-SHA256(device key, "osum-pin1:" name ":" pin).
+fn bound(name: u64, pin: u64, out: u64, make: bool) -> bool {
+    var key: [u8; 32] = [0 as u8; 32]
+    if !device_key((&key[0]) as u64, make) {
+        return false
+    }
+    var m: [u8; 160] = [0 as u8; 160]
+    var tag: [u8; 11] = "osum-pin1:\0"
+    var colon: [u8; 2] = ":\0"
+    if ulib.length(name) > 60 || ulib.length(pin) > 32 {
+        return false
+    }
+    var at: u64 = ulib.strcpy((&m[0]) as u64, (&tag[0]) as u64)
+    at = at + ulib.strcpy((&m[at as usize]) as u64, name)
+    at = at + ulib.strcpy((&m[at as usize]) as u64, (&colon[0]) as u64)
+    at = at + ulib.strcpy((&m[at as usize]) as u64, pin)
+    var mac: [u8; 32] = [0 as u8; 32]
+    if !pw.hmac256((&key[0]) as u64, 32, (&m[0]) as u64, at, (&mac[0]) as u64) {
+        return false
+    }
+    pw.hex_out((&mac[0]) as u64, 32, out)
+    return true
+}
+
+// ----------------------------------------------------------------- the file
+
+fn db_path(out: u64) {
+    var p: [u8; 9] = "/etc/pin\0"
+    ulib.strcpy(out, (&p[0]) as u64)
+}
+
+fn load() -> bool {
+    var path: [u8; 9] = [0 as u8; 9]
+    db_path((&path[0]) as u64)
+    let n: u64 = pw.read_all((&path[0]) as u64, (&db[0]) as u64, DB_MAX)
+    if n == ulib.EOF {
+        db[0] = 0 as u8
+        return true
+    }
+    return n + 8 < DB_MAX
+}
+
+// Replace the file in one step: new file with the final mode, then rename over the old one (this kernel's rename does
+// not overwrite, so: old -> .old, new -> name, unlink .old), then sync so the journal holds it.
+fn store(len: u64) -> bool {
+    var path: [u8; 9] = [0 as u8; 9]
+    var tmp: [u8; 13] = "/etc/pin.new\0"
+    var old: [u8; 13] = "/etc/pin.old\0"
+    db_path((&path[0]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, (&tmp[0]) as u64, 0, 0)
+    if !pw.write_all((&tmp[0]) as u64, (&db[0]) as u64, 0) {
+        return false
+    }
+    ulib.sys(90, (&tmp[0]) as u64, 384, 0)
+    ulib.sys(92, (&tmp[0]) as u64, 0, 0)
+    if !pw.write_all((&tmp[0]) as u64, (&db[0]) as u64, len) {
+        ulib.sys(ulib.SYS_UNLINK, (&tmp[0]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&old[0]) as u64, 0, 0)
+    let had: bool = !ulib.bad(ulib.sys(ulib.SYS_RENAME, (&path[0]) as u64, (&old[0]) as u64, 0))
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, (&tmp[0]) as u64, (&path[0]) as u64, 0)) {
+        if had {
+            ulib.sys(ulib.SYS_RENAME, (&old[0]) as u64, (&path[0]) as u64, 0)
+        }
+        ulib.sys(ulib.SYS_UNLINK, (&tmp[0]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&old[0]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return true
+}
+
+// One user's state, parsed from a line.
+static mut st_rec: [u8; 160] = [0 as u8; 160]
+static mut st_fails: u64 = 0
+static mut st_until: u64 = 0
+static mut st_seen: u64 = 0
+
+// Index of the user's line in `db`, or EOF.
+fn find(name: u64) -> u64 {
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    let cnt: u64 = pw.lines_of((&db[0]) as u64)
+    var i: u64 = 0
+    while i < cnt {
+        if pw.line_at((&db[0]) as u64, i, (&line[0]) as u64, 256) != ulib.EOF {
+            pw.field((&line[0]) as u64, 0, (&f[0]) as u64, 64)
+            if ulib.streq((&f[0]) as u64, name) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return ulib.EOF
+}
+
+fn parse(i: u64) -> bool {
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 32] = [0 as u8; 32]
+    if pw.line_at((&db[0]) as u64, i, (&line[0]) as u64, 256) == ulib.EOF {
+        return false
+    }
+    pw.field((&line[0]) as u64, 1, (&st_rec[0]) as u64, 160)
+    pw.field((&line[0]) as u64, 2, (&f[0]) as u64, 32)
+    st_fails = ulib.to_num((&f[0]) as u64)
+    pw.field((&line[0]) as u64, 3, (&f[0]) as u64, 32)
+    st_until = ulib.to_num((&f[0]) as u64)
+    pw.field((&line[0]) as u64, 4, (&f[0]) as u64, 32)
+    st_seen = ulib.to_num((&f[0]) as u64)
+    return st_rec[0] == 36 as u8
+}
+
+// Rewrite the file: the user's line replaced by (rec, fails, until, seen); `rec` = 0 drops the line; the line is appended
+// if the user has none yet. Everything else is copied.
+fn put_state(name: u64, rec: u64, fails: u64, until: u64, seen: u64) -> bool {
+    var out: [u8; 4096] = [0 as u8; 4096]
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    var colon: [u8; 2] = ":\0"
+    var nl: [u8; 2] = "\n\0"
+    let cnt: u64 = pw.lines_of((&db[0]) as u64)
+    var at: u64 = 0
+    var i: u64 = 0
+    var done: bool = false
+    while i < cnt {
+        if pw.line_at((&db[0]) as u64, i, (&line[0]) as u64, 256) != ulib.EOF {
+            pw.field((&line[0]) as u64, 0, (&f[0]) as u64, 64)
+            if ulib.streq((&f[0]) as u64, name) {
+                if rec != 0 && !done {
+                    at = at + fmt_line((&out[at as usize]) as u64, name, rec, fails, until, seen)
+                    done = true
+                }
+            } else if at + 256 < DB_MAX {
+                at = at + ulib.strcpy((&out[at as usize]) as u64, (&line[0]) as u64)
+                at = at + ulib.strcpy((&out[at as usize]) as u64, (&nl[0]) as u64)
+            }
+        }
+        i = i + 1
+    }
+    if rec != 0 && !done {
+        if at + 256 >= DB_MAX {
+            return false
+        }
+        at = at + fmt_line((&out[at as usize]) as u64, name, rec, fails, until, seen)
+    }
+    var k: u64 = 0
+    while k < at {
+        db[k as usize] = out[k as usize]
+        k = k + 1
+    }
+    db[at as usize] = 0 as u8
+    return store(at)
+}
+
+fn fmt_line(out: u64, name: u64, rec: u64, fails: u64, until: u64, seen: u64) -> u64 {
+    var colon: [u8; 2] = ":\0"
+    var nl: [u8; 2] = "\n\0"
+    var at: u64 = ulib.strcpy(out, name)
+    at = at + ulib.strcpy(out + at, (&colon[0]) as u64)
+    at = at + ulib.strcpy(out + at, rec)
+    at = at + ulib.strcpy(out + at, (&colon[0]) as u64)
+    at = at + put_num(out + at, fails)
+    at = at + ulib.strcpy(out + at, (&colon[0]) as u64)
+    at = at + put_num(out + at, until)
+    at = at + ulib.strcpy(out + at, (&colon[0]) as u64)
+    at = at + put_num(out + at, seen)
+    at = at + ulib.strcpy(out + at, (&nl[0]) as u64)
+    return at
+}
+
+// ----------------------------------------------------------------- the API
+
+fn eff_now(seen: u64) -> u64 {
+    let n: u64 = now_s()
+    if n < seen {
+        return seen
+    }
+    return n
+}
+
+// State of the user's PIN: R_NOPIN (none), R_OK (usable), R_LOCKED (delay running, *wait = seconds left), R_DISABLED
+// (too many wrong tries: password login re-enables). `fails_out` / `wait_out` may be 0.
+fn status(name: u64, fails_out: u64, wait_out: u64) -> u64 {
+    if !load() {
+        return R_ERR
+    }
+    let i: u64 = find(name)
+    if i == ulib.EOF || !parse(i) {
+        return R_NOPIN
+    }
+    if fails_out != 0 {
+        *(fails_out as *mut u64) = st_fails
+    }
+    if st_fails >= MAX_FAILS {
+        return R_DISABLED
+    }
+    let now: u64 = eff_now(st_seen)
+    if st_until > now {
+        if wait_out != 0 {
+            *(wait_out as *mut u64) = st_until - now
+        }
+        return R_LOCKED
+    }
+    return R_OK
+}
+
+// Check `pin` for `name`. Counter first, compare second (see the header). `wait_out` (or 0) gets the seconds left on R_LOCKED.
+fn verify(name: u64, pin: u64, wait_out: u64) -> u64 {
+    let s: u64 = status(name, 0, wait_out)
+    if s != R_OK {
+        return s
+    }
+    // status() left the parsed record in st_*; take copies, the file buffer is reused below
+    let fails: u64 = st_fails
+    var rec: [u8; 160] = [0 as u8; 160]
+    ulib.strcpy((&rec[0]) as u64, (&st_rec[0]) as u64)
+    let now: u64 = eff_now(st_seen)
+    let nf: u64 = fails + 1
+    // 1. PERSIST the penalty of "this try is wrong"
+    if !put_state(name, (&rec[0]) as u64, nf, now + delay_for(nf), now) {
+        return R_ERR
+    }
+    // 2. only then compare
+    var b: [u8; 72] = [0 as u8; 72]
+    if !bound(name, pin, (&b[0]) as u64, false) {
+        return R_ERR
+    }
+    if pw.check_hash((&rec[0]) as u64, (&b[0]) as u64) {
+        if !put_state(name, (&rec[0]) as u64, 0, 0, now) {
+            return R_ERR
+        }
+        return R_OK
+    }
+    return R_WRONG
+}
+
+// Set or replace the user's PIN (counter back to 0). R_FORMAT when the PIN is too short/long/trivial.
+fn set(name: u64, pin: u64) -> u64 {
+    if !format_ok(pin) {
+        return R_FORMAT
+    }
+    if !load() {
+        return R_ERR
+    }
+    var b: [u8; 72] = [0 as u8; 72]
+    if !bound(name, pin, (&b[0]) as u64, true) {
+        return R_ERR
+    }
+    var rec: [u8; 160] = [0 as u8; 160]
+    if !pw.make_hash((&b[0]) as u64, (&rec[0]) as u64) {
+        return R_ERR
+    }
+    if !put_state(name, (&rec[0]) as u64, 0, 0, now_s()) {
+        return R_ERR
+    }
+    return R_OK
+}
+
+fn remove(name: u64) -> bool {
+    if !load() {
+        return false
+    }
+    if find(name) == ulib.EOF {
+        return true
+    }
+    return put_state(name, 0, 0, 0, 0)
+}
+
+// A PASSWORD login succeeded: the PIN path is usable again (counter and delay cleared). Cheap when there is no PIN.
+fn password_ok(name: u64) {
+    if !load() {
+        return
+    }
+    let i: u64 = find(name)
+    if i == ulib.EOF || !parse(i) {
+        return
+    }
+    if st_fails == 0 && st_until == 0 {
+        return
+    }
+    var rec: [u8; 160] = [0 as u8; 160]
+    ulib.strcpy((&rec[0]) as u64, (&st_rec[0]) as u64)
+    let _w: bool = put_state(name, (&rec[0]) as u64, 0, 0, eff_now(st_seen))
+}
+
+// Root maintenance / test hook: put the user's counter and delay end to given values (keeps the record). The gate uses it to
+// reach "10 wrong tries" without waiting out the delays; root could edit /etc/pin by hand anyway.
+fn force(name: u64, fails: u64, until: u64) -> bool {
+    if !load() {
+        return false
+    }
+    let i: u64 = find(name)
+    if i == ulib.EOF || !parse(i) {
+        return false
+    }
+    var rec: [u8; 160] = [0 as u8; 160]
+    ulib.strcpy((&rec[0]) as u64, (&st_rec[0]) as u64)
+    return put_state(name, (&rec[0]) as u64, fails, until, eff_now(st_seen))
+}

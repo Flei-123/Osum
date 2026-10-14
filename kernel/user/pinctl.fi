@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pinctl.fi -- r253: command line for the local PIN (kernel/user/pin.fi). Root only in practice (/etc/pin is 0600 root).
+//
+//   pinctl set <user> <pin>      set / replace the PIN
+//   pinctl check <user> <pin>    verify (this COUNTS as a try; the counter is written before the compare)
+//   pinctl status <user>         usable / locked / disabled / none
+//   pinctl remove <user>         delete the PIN
+//   pinctl pwok <user>           what a successful password login does: clear counter and delay
+//   pinctl force <user> <fails> <until>   test hook: set counter and delay end (seconds) of an existing PIN
+//   pinctl now                   the wall clock second pin.fi uses
+//
+// Output: one line `pinctl: <verb> rc=<code> [fails=N] [wait=S]`; rc is pin.R_* (0 ok, 1 wrong, 2 locked, 3 no PIN, 4 disabled,
+// 5 error, 6 bad format). Exit code 0 when rc is 0.
+
+profile kernel
+
+import ulib
+import pin
+
+export { u_start }
+
+fn rep(verb: u64, rc: u64, fails: u64, wait: u64) {
+    var a: [u8; 9] = "pinctl: \0"
+    var b: [u8; 5] = " rc=\0"
+    var c: [u8; 8] = " fails=\0"
+    var d: [u8; 7] = " wait=\0"
+    ulib.say((&a[0]) as u64)
+    ulib.say(verb)
+    ulib.say((&b[0]) as u64)
+    ulib.sayu(rc)
+    ulib.say((&c[0]) as u64)
+    ulib.sayu(fails)
+    ulib.say((&d[0]) as u64)
+    ulib.sayu(wait)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var v_set: [u8; 4] = "set\0"
+    var v_check: [u8; 6] = "check\0"
+    var v_status: [u8; 7] = "status\0"
+    var v_remove: [u8; 7] = "remove\0"
+    var v_pwok: [u8; 5] = "pwok\0"
+    var v_now: [u8; 4] = "now\0"
+    var v_force: [u8; 6] = "force\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        return 2
+    }
+    let verb: u64 = ulib.arg_at(args, 1)
+    var fails: u64 = 0
+    var wait: u64 = 0
+    if ulib.streq(verb, (&v_now[0]) as u64) {
+        ulib.sayu(pin.now_s())
+        ulib.nl()
+        return 0
+    }
+    if argc < 3 {
+        return 2
+    }
+    let name: u64 = ulib.arg_at(args, 2)
+    var rc: u64 = pin.R_ERR
+    if ulib.streq(verb, (&v_set[0]) as u64) && argc >= 4 {
+        rc = pin.set(name, ulib.arg_at(args, 3))
+    } else if ulib.streq(verb, (&v_check[0]) as u64) && argc >= 4 {
+        rc = pin.verify(name, ulib.arg_at(args, 3), (&wait) as u64)
+        let _s: u64 = pin.status(name, (&fails) as u64, 0)
+    } else if ulib.streq(verb, (&v_force[0]) as u64) && argc >= 5 {
+        if pin.force(name, ulib.to_num(ulib.arg_at(args, 3)), ulib.to_num(ulib.arg_at(args, 4))) {
+            rc = pin.R_OK
+        }
+    } else if ulib.streq(verb, (&v_status[0]) as u64) {
+        rc = pin.status(name, (&fails) as u64, (&wait) as u64)
+    } else if ulib.streq(verb, (&v_remove[0]) as u64) {
+        if pin.remove(name) {
+            rc = pin.R_OK
+        }
+    } else if ulib.streq(verb, (&v_pwok[0]) as u64) {
+        pin.password_ok(name)
+        rc = pin.R_OK
+    } else {
+        return 2
+    }
+    rep(verb, rc, fails, wait)
+    if rc == 0 {
+        return 0
+    }
+    return 1
+}

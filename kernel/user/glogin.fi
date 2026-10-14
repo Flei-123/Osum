@@ -63,6 +63,7 @@ import libc.io
 import wlibc
 import wlib
 import pw
+import pin
 import grp
 import icons
 import fuiapp
@@ -341,8 +342,17 @@ fn stimmt() -> bool {
         // setzt vorher `passwd`.
         return false
     }
-    return pw.check_hash((&haben[(0) as usize]) as u64,
-        (&kenn[(0) as usize]) as u64)
+    // r253: PIN-shaped input is tried as the device-bound PIN first; every miss falls through to the password check.
+    if pin.looks_like_pin((&kenn[(0) as usize]) as u64) {
+        if pin.verify(n, (&kenn[(0) as usize]) as u64, 0) == pin.R_OK {
+            return true
+        }
+    }
+    if pw.check_hash((&haben[(0) as usize]) as u64, (&kenn[(0) as usize]) as u64) {
+        pin.password_ok(n)
+        return true
+    }
+    return false
 }
 
 // Die Wartezeit, waehrend das Fenster weiterlebt. In Scheiben von
@@ -1013,10 +1023,53 @@ fn build() {
     let pad: u64 = 8
     let g: u64 = 8
     let ando: bool = f_andere || n_user == 0
+    // the user list is shorter on short screens (under 480 points, e.g. 1280x800 at scale 2) so the column fits
+    var list_h: u64 = 100
+    if bhp < 480 {
+        list_h = 60
+    }
+    var left_h: u64 = signin.FIELD_H
+    if ando && n_user > 1 {
+        left_h = list_h
+    }
+    if !ando {
+        if n_user > 1 {
+            left_h = (list_h + 4 + signin.FIELD_H)
+        } else {
+            left_h = (signin.FIELD_H + 4 + signin.FIELD_H)
+        }
+    }
+    var qa_h: u64 = signin.FIELD_H
+    if qa_offen == 1 {
+        qa_h = qa_h + 44 + 4
+    }
+    if qa_offen == 2 {
+        qa_h = qa_h + 96 + 4
+    }
+    var bot_h: u64 = left_h
+    if qa_h > bot_h {
+        bot_h = qa_h
+    }
+    // column height without the avatar, then the avatar that fits (short screens: 400 points at 1280x800 scale 2)
+    var col_rest: u64 = signin.GAP_N + 36 + 32 + 12 + signin.FIELD_H
+    if ando {
+        col_rest = signin.GAP_N + 24 + signin.FIELD_H + 4 + 32 + 12 + signin.FIELD_H
+    }
+    let other: u64 = 2 * pad + 4 * g + 4 + col_rest + bot_h + (56 + 8) + 12
+    let av: u64 = signin.fit_av(bhp, other)
+    let base: u64 = 2 * pad + 4 * g + av + col_rest + bot_h + (56 + 8)
     var top: u64 = 4
     let want: u64 = bhp * 28 / 100
     if want > pad + g + 4 {
         top = (want - pad - g) / 4 * 4
+    }
+    if bhp > base + 4 {
+        if top > bhp - base {
+            top = (bhp - base) / 4 * 4
+        }
+    }
+    if top < 4 {
+        top = 4
     }
     var left: u64 = 4
     let wantx: u64 = (bwp - signin.COL_W) / 2
@@ -1030,9 +1083,9 @@ fn build() {
     let col: usize = fuiscene.column(rw)
     signin.lay_set_size(col, signin.COL_W, 0)
     fuiscene.set_gap(col, 0)
-    let _av: usize = signin.lay_canvas(col, 0, signin.COL_W, signin.AV_D, p_avatar)
+    let _av: usize = signin.lay_canvas(col, 0, signin.COL_W, av, p_avatar)
     let _s1: usize = signin.lay_space(col, 4, signin.GAP_N)
-    var col_h: u64 = (signin.AV_D + signin.GAP_N)
+    var col_h: u64 = (av + signin.GAP_N)
     if !ando {
         node_of(E_WER, signin.lay_canvas(col, 0, signin.COL_W, 36, p_name))
         col_h = col_h + 36
@@ -1059,28 +1112,6 @@ fn build() {
     col_h = col_h + (32 + 12 + signin.FIELD_H)
     // ---- the bottom strip. NOT in the bottom 56 points: that strip belongs
     // to the task bar's window, which exists (unpainted) behind this screen.
-    var left_h: u64 = signin.FIELD_H
-    if ando && n_user > 1 {
-        left_h = 100
-    }
-    if !ando {
-        if n_user > 1 {
-            left_h = (100 + 4 + signin.FIELD_H)
-        } else {
-            left_h = (signin.FIELD_H + 4 + signin.FIELD_H)
-        }
-    }
-    var qa_h: u64 = signin.FIELD_H
-    if qa_offen == 1 {
-        qa_h = qa_h + 44 + 4
-    }
-    if qa_offen == 2 {
-        qa_h = qa_h + 96 + 4
-    }
-    var bot_h: u64 = left_h
-    if qa_h > bot_h {
-        bot_h = qa_h
-    }
     var rest: u64 = 4
     let sum: u64 = 2 * pad + 4 * g + top + col_h + bot_h + (56 + 8)
     if bhp > sum + 4 {
@@ -1095,7 +1126,7 @@ fn build() {
     fuiscene.set_gap(lc, 4)
     if !ando {
         if n_user > 1 {
-            let l: usize = fuiscene.table_list(lc, E_LIST, 240, 100, 1,
+            let l: usize = fuiscene.table_list(lc, E_LIST, 240, list_h, 1,
                 (&liste[0 as usize]) as u64)
             fuiscene.table_single(E_LIST, true)
             node_of(E_LIST, l)
@@ -1112,7 +1143,7 @@ fn build() {
     } else if n_user > 1 {
         // the name field is open: the known users stay at the bottom left, so
         // that one click goes back to them (like the Windows 11 sign-in)
-        let l2: usize = fuiscene.table_list(lc, E_LIST, 240, 100, 1,
+        let l2: usize = fuiscene.table_list(lc, E_LIST, 240, list_h, 1,
             (&liste[0 as usize]) as u64)
         fuiscene.table_single(E_LIST, true)
         node_of(E_LIST, l2)

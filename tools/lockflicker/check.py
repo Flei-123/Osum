@@ -49,20 +49,32 @@ def main():
     # avatar disc: solid colour 0x4C6A92 (+-3) in the upper 3/4, biggest connected blob approximated by the bounding box of
     # rows with >= 8 * S such pixels (the bottom-left chip of the lock is far smaller and sits in the lower quarter)
     tr, tg, tb = 0x4C, 0x6A, 0x92
+    # the disc = the roundest big blob of the avatar colour in the upper 3/4 (a wallpaper can contain the same colour here and there)
+    import numpy as np
+    from scipy import ndimage
+    arr = np.frombuffer(px, dtype=np.uint8).reshape(h, w, 3).astype(np.int32)
+    msk = (np.abs(arr[:, :, 0] - tr) <= 3) & (np.abs(arr[:, :, 1] - tg) <= 3) & (np.abs(arr[:, :, 2] - tb) <= 3)
+    msk[h * 3 // 4:, :] = False
+    lab, nlab = ndimage.label(msk)
     minx, maxx, miny, maxy = w, -1, h, -1
-    for y in range(0, h * 3 // 4):
-        row = px[y * w * 3:(y + 1) * w * 3]
-        xs = [x for x in range(w) if abs(row[3 * x] - tr) <= 3 and abs(row[3 * x + 1] - tg) <= 3 and abs(row[3 * x + 2] - tb) <= 3]
-        if len(xs) >= 8 * S:
-            minx, maxx = min(minx, xs[0]), max(maxx, xs[-1])
-            miny, maxy = min(miny, y), max(maxy, y)
+    best = 0
+    for i, sl in enumerate(ndimage.find_objects(lab), 1):
+        ys_, xs_ = sl
+        bw, bh = xs_.stop - xs_.start, ys_.stop - ys_.start
+        area = int((lab[sl] == i).sum())
+        if bw >= 24 * S and bh >= 24 * S and 0.8 <= bw / bh <= 1.25 and area > 0.6 * bw * bh and area > best:
+            best = area
+            minx, maxx, miny, maxy = xs_.start, xs_.stop - 1, ys_.start, ys_.stop - 1
     if maxx < 0:
         ok(False, "avatar disc not found in the picture")
         av_bottom = 0
     else:
         dw, dh = maxx - minx + 1, maxy - miny + 1
         av_bottom = maxy
-        ok(abs(dw - 112 * S) <= 6 * S and abs(dh - 112 * S) <= 6 * S, "avatar %dx%d, expected %d" % (dw, dh, 112 * S))
+        if H // S >= 480:
+            ok(abs(dw - 112 * S) <= 6 * S and abs(dh - 112 * S) <= 6 * S, "avatar %dx%d, expected %d" % (dw, dh, 112 * S))
+        else:  # short screen (< 480 points): the avatar shrinks (signin.fit_av, 48..112 points), still a round disc
+            ok(48 * S - 6 * S <= dw <= 112 * S + 6 * S and abs(dw - dh) <= 2 * S, "avatar %dx%d, expected 48..112 points * %d (short screen)" % (dw, dh, S))
         ok(minx >= 0 and maxx < W and miny >= 0 and maxy < H, "avatar completely inside the screen (x %d..%d, y %d..%d)" % (minx, maxx, miny, maxy))
         ok(abs((minx + maxx) // 2 - W // 2) <= 6 * S, "avatar centred (centre %d, screen centre %d)" % ((minx + maxx) // 2, W // 2))
     # name + status text: near-white pixels between the avatar and the entry

@@ -78,6 +78,7 @@ import fuiscene
 // RUNDE 32: nur fuer die Zaehler in `melde_fui`.
 import fuib
 import pw
+import pin
 import nv
 import template
 // ROUND ACTION-BUS-3: the pages "System" and "App rights" and the lock
@@ -488,6 +489,7 @@ const SYS_PIPE: u64 = 22
 
 static mut e_pw1: [u8; 64] = [0 as u8; 64]
 static mut e_pw2: [u8; 64] = [0 as u8; 64]
+static mut e_pin: [u8; 16] = [0 as u8; 16]
 static mut puffer: [u8; 2048] = [0 as u8; 2048]
 static mut e_akzent: [u8; 16] = [0 as u8; 16]
 static mut l_kon: [u8; 96] = [0 as u8; 96]
@@ -835,6 +837,9 @@ static mut k_l_ip2: [u8; 24] = "settings.address.fields\0"
 static mut k_l_kw1: [u8; 22] = "settings.password.new\0"
 static mut k_l_kw2: [u8; 24] = "settings.password.again\0"
 static mut k_b_kw: [u8; 22] = "settings.password.set\0"
+static mut k_l_pin: [u8; 19] = "settings.pin.label\0"
+static mut k_b_pin: [u8; 17] = "settings.pin.set\0"
+static mut k_b_pinx: [u8; 20] = "settings.pin.remove\0"
 // ---- RUNDE KONTO: die Schluessel der Seite "Konten".
 // Nur Schluessel. Kein Satz dieser Seite steht in diesem Quelltext --
 // die Texte liegen in locale/en/messages und locale/de/messages, so
@@ -5681,6 +5686,9 @@ const K_B4J: u64 = 73
 const K_EP1: u64 = 74
 const K_EP2: u64 = 75
 const K_B5: u64 = 76
+const K_EPIN: u64 = 110 // r253: PIN entry
+const K_BPIN: u64 = 111 // r253: set PIN
+const K_BPINX: u64 = 112 // r253: remove PIN
 const K_CSP: u64 = 77
 const K_BSP: u64 = 78
 const K_LV: u64 = 79
@@ -5848,6 +5856,7 @@ fn entries_init() {
     en_add(K_EN3, (&e_gw[0 as usize]) as u64, 20)
     en_add(K_EP1, (&e_pw1[0 as usize]) as u64, 60)
     en_add(K_EP2, (&e_pw2[0 as usize]) as u64, 60)
+    en_add(K_EPIN, (&e_pin[0 as usize]) as u64, 14)
     en_add(K_EKZIEL, (&e_kziel[0 as usize]) as u64, 90)
     en_add(K_EKNAME, (&e_kname[0 as usize]) as u64, 60)
     en_add(K_EKKEN, (&e_kken[0 as usize]) as u64, 60)
@@ -6600,6 +6609,15 @@ fn page_benut(left: usize, right: usize) {
     fuiscene.set_size(n_ep2, 0, 28)
     let n_b5: usize = fuiscene.button(left, msg.get((&k_b_kw[0 as usize]) as u64), K_B5)
     fuiscene.set_size(n_b5, 160, 28)
+    // r253: local PIN (4-12 digits) next to the password; the password stays the fallback
+    let _n_pl: usize = fuiscene.label(left, msg.get((&k_l_pin[0 as usize]) as u64))
+    let n_epin: usize = fuiscene.entry(left, K_EPIN, 0, (&e_pin[0 as usize]) as u64)
+    fuiscene.entry_secret(K_EPIN, true)
+    fuiscene.set_size(n_epin, 0, 28)
+    let n_bpin: usize = fuiscene.button(left, msg.get((&k_b_pin[0 as usize]) as u64), K_BPIN)
+    fuiscene.set_size(n_bpin, 160, 28)
+    let n_bpinx: usize = fuiscene.button(left, msg.get((&k_b_pinx[0 as usize]) as u64), K_BPINX)
+    fuiscene.set_size(n_bpinx, 160, 28)
     let _n_sp1: usize = fuiscene.label(left, msg.get((&k_l_sp[0 as usize]) as u64))
     let n_csp: usize = fuiscene.choice(left, chtext(K_CSP, msg.get((&k_c_sp[0 as usize]) as u64)), K_CSP)
     fuiscene.set_size(n_csp, 0, 28)
@@ -7347,6 +7365,10 @@ fn u_start(args: u64) -> u64 {
     var k_m_kwne: [u8; 28] = "settings.status.pw_mismatch\0"
     var k_m_kwku: [u8; 25] = "settings.status.pw_short\0"
     var k_m_kwno: [u8; 24] = "settings.status.pw_fail\0"
+    var k_m_pinok: [u8; 23] = "settings.status.pin_ok\0"
+    var k_m_pinfmt: [u8; 27] = "settings.status.pin_format\0"
+    var k_m_pinno: [u8; 25] = "settings.status.pin_fail\0"
+    var k_m_pinrm: [u8; 28] = "settings.status.pin_removed\0"
     var k_m_nvok: [u8; 22] = "settings.status.nv_ok\0"
     var k_m_nvno: [u8; 26] = "settings.status.nv_denied\0"
     var k_m_fbok: [u8; 22] = "settings.status.fb_ok\0"
@@ -8353,6 +8375,27 @@ fn u_start(args: u64) -> u64 {
                         }
                     }
                     // (described again)
+                    melde_stand()
+                } else if id == K_BPIN || id == K_BPINX {
+                    // r253: set / remove the local PIN of the account shown on this page (pin.fi, /etc/pin)
+                    var pr: u64 = pin.R_ERR
+                    var pmsg: u64 = msg.get((&k_m_pinno[0 as usize]) as u64)
+                    if id == K_BPIN {
+                        pr = pin.set((&name[0 as usize]) as u64, (&e_pin[0 as usize]) as u64)
+                        if pr == pin.R_OK {
+                            pmsg = msg.get((&k_m_pinok[0 as usize]) as u64)
+                        } else if pr == pin.R_FORMAT {
+                            pmsg = msg.get((&k_m_pinfmt[0 as usize]) as u64)
+                        }
+                    } else if pin.remove((&name[0 as usize]) as u64) {
+                        pmsg = msg.get((&k_m_pinrm[0 as usize]) as u64)
+                    }
+                    let _ps: u64 = text_an((&l_stat[0 as usize]) as u64, 0, pmsg)
+                    var pz: u64 = 0
+                    while pz < 16 {
+                        e_pin[(pz) as usize] = 0 as u8
+                        pz = pz + 1
+                    }
                     melde_stand()
                 } else if id == K_B6 {
                     // ==================================== ROUND NETVIEW
