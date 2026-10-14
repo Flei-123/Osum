@@ -100,7 +100,7 @@ export {
     init, ready, compose, damage, damage_ex, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, tab_publish, shared_ok, sh_stat,
-    cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, valid, count, focus, set_focus, raise_win,
+    cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, valid, count, focus, set_focus, raise_win,
     // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
     close_top, close_term, top_visible, cross_point, term_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
@@ -5817,6 +5817,9 @@ fn damage_rect(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
     }
     let sx: i64 = win_x(state, i) + inx(state, i) as i64 + x as i64
     let sy: i64 = win_y(state, i) + iny(state, i) as i64 + y as i64
+    if gs(state, S_PL_ON) != 0 {
+        pl_damage(state)
+    }
     damage_ex(state, sx, sy, sx + bw as i64, sy + bh as i64, i + 1)
     ss(state, S_SH_DMG, gs(state, S_SH_DMG) + 1)
     ss(state, S_SH_PX, gs(state, S_SH_PX) + bw * bh)
@@ -6332,6 +6335,10 @@ fn cp_flush_locked(state: u64, by_comp: bool) -> u64 {
     ss(state, S_CP_PEND, 0)
     ss(state, S_CP_T0, 0)
     var area: u64 = 0
+    var pl_t0: u64 = 0
+    if gs(state, S_PL_ON) != 0 {
+        pl_t0 = time.tsc()
+    }
     if x1 > x0 && y1 > y0 {
         if gs(state, S_VSYNC) != 0 {
             // the same two ways `present` takes
@@ -6350,6 +6357,13 @@ fn cp_flush_locked(state: u64, by_comp: bool) -> u64 {
         ss(state, S_PXSUM, gs(state, S_PXSUM) +% area)
     }
     ss(state, S_CP_ASEQ, gs(state, S_CP_FSEQ))
+    if pl_t0 != 0 && x1 > x0 && y1 > y0 {
+        var pl_kind: u64 = PL_F_WDOG
+        if by_comp {
+            pl_kind = PL_F_COMP
+        }
+        pl_record(state, pl_kind, x0, y0, x1, y1, pl_t0, t0)
+    }
     if by_comp {
         let kh: u64 = time.khz(state)
         let now: u64 = time.tsc()
@@ -6409,6 +6423,258 @@ fn cp_watch(state: u64) {
             cp_detach_locked(state, 2)
         }
     }
+}
+
+
+// ===========================================================================================================================
+// PRESENT LOG (W-DELLFLICK, 14.10.2026): ONE RECORD PER PRESENT, OFF BY DEFAULT, ONE WORD COMPARED WHEN OFF.
+//
+// Why: on the real Dell (Intel I219, real GPU framebuffer, real timing) the sign-in screen flickered (middle area pale for 1-3 frames every
+// 1-2 s) and no VM reproduces it. This log records, for every rectangle that reaches the card, what the VM cannot show us:
+// which core composed it, which core presented it, which core made the last WM_DAMAGE call (= the core the client painted on), how long the
+// hand-over waited, whether the compositor or the watchdog presented, and whether a CLIENT BUFFER CHANGED WHILE THE FRAME WAS COMPOSED.
+//
+// Switch: WM_COMP / CP_LOG (stride), root only: the program `presentlog` (kernel/user/presentlog.fi) does it and writes the records to
+// /var/log/presentlog.txt. stride 0 = off. With the switch off, every hook is `if gs(state, S_PL_ON) != 0` -- one load, no store.
+//
+// The torn-buffer test: before the desktop is filled and after the last window was copied, a hash of every shared client buffer is taken
+// (every stride-th 64-bit word). When the two hashes differ a client wrote into its buffer WHILE the frame was composed -- the frame holds a mix
+// of two client pictures: flag TORN. Flag DMGMID: a WM_DAMAGE arrived during the compose (the client finished a picture mid-frame).
+//
+// The page (SMF_RO, one frame, u64 words): 0 magic | version << 32, 1 stride (0 = off), 2 head (records written), 3 ring size | words per record << 32,
+// 4 cycles per ms, 5 environment bits (0 double buffered, 1 uncached, 2 page flip, 3 vsync, 4 compositor attached), 6 suspected torn presents (total),
+// 7 presents logged (total). From word 16 a ring of PL_RING records of 8 words (a record is good when word 0 >> 32 == its index + 1 before AND after
+// the read):
+//   0 (index + 1) << 32 | flags   (bit 0 compositor presented, bit 1 watchdog presented, bit 2 TORN, bit 3 DMGMID, bit 4 several composes merged,
+//                                  bit 5 painted straight on the card (no back buffer))
+//   1 time stamp counter when the present began     2 x0 | y0 << 16 | x1 << 32 | y1 << 48
+//   3 compose core | present core << 8 | damage core << 16 | composes << 24 | hand-over to present, microseconds << 32
+//   4 compose duration (us, the longest) | present (copy) duration us << 32
+//   5 hash before | hash after << 32 (of the last compose; 32 bits each)
+//   6 damage calls (total, low 32 bits) | damage-to-present us << 32      7 microseconds since the previous present
+const PL_MAGIC: u64 = 0x474C5250
+const PL_RING: u64 = 60
+const PL_AT: u64 = 16
+const PL_ENT: u64 = 8
+const PL_F_COMP: u64 = 1
+const PL_F_WDOG: u64 = 2
+const PL_F_TORN: u64 = 4
+const PL_F_DMGMID: u64 = 8
+const PL_F_MULTI: u64 = 16
+const PL_F_DIRECT: u64 = 32
+const S_PL_ON: u64 = 0x1E68     // stride in 64-bit words, 0 = off
+const S_PL_PAGEF: u64 = 0x1E70  // the log page (frame address)
+const S_PL_PAGEI: u64 = 0x1E78  // its shared object + 1
+const S_PL_HEAD: u64 = 0x1E80   // records written
+const S_PL_DSEQ: u64 = 0x1E88   // WM_DAMAGE calls (running total)
+const S_PL_DCORE: u64 = 0x1E90  // core of the last WM_DAMAGE call
+const S_PL_DTSC: u64 = 0x1E98   // its time stamp
+const S_PL_FLAGS: u64 = 0x1EA0  // flags collected since the last present
+const S_PL_CCORE: u64 = 0x1EA8  // core of the last compose
+const S_PL_CDUR: u64 = 0x1EB0   // longest compose since the last present (us)
+const S_PL_HASH: u64 = 0x1EB8   // hash before | hash after << 32 of the last compose
+const S_PL_NCOMP: u64 = 0x1EC0  // composes since the last present
+const S_PL_NTORN: u64 = 0x1EC8  // presents flagged TORN (total)
+const S_PL_TPREV: u64 = 0x1ED0  // time stamp of the previous present
+const S_PL_NREC: u64 = 0x1ED8   // presents logged (total)
+
+fn pl_on(state: u64) -> bool {
+    return gs(state, S_PL_ON) != 0
+}
+
+// the APIC id of the core this runs on (cpuid leaf 1, ebx bits 31..24)
+fn pl_core() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 1\ncpuid\nmov eax, ebx\nshr eax, 24\npop rbx",
+        out("rax") & v, clobber("rcx"), clobber("rdx"))
+    return (v >> 0) & 0xFF
+}
+
+// Hash of every shared client buffer (every stride-th word). Reads only; never called with the log off.
+fn pl_hash(state: u64) -> u64 {
+    var stride: u64 = gs(state, S_PL_ON)
+    if stride == 0 {
+        stride = 16
+    }
+    var h: u64 = 0xCBF29CE484222325
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if win_shm(state, i) != 0 && !win_hidden(state, i) {
+            let b: u64 = wg(state, i, W_BUF)
+            let n: u64 = wg(state, i, W_BUFBYTES) / 8
+            if b != 0 {
+                var k: u64 = 0
+                while k < n {
+                    h = (h ^ __mmio_read64((b + k * 8) as *mut u64)) *% 0x100000001B3
+                    k = k + stride
+                }
+            }
+        }
+        i = i + 1
+    }
+    return h
+}
+
+// WM_DAMAGE hook: who finished a picture, on which core, when.
+fn pl_damage(state: u64) {
+    ss(state, S_PL_DSEQ, gs(state, S_PL_DSEQ) + 1)
+    ss(state, S_PL_DCORE, pl_core())
+    ss(state, S_PL_DTSC, time.tsc())
+}
+
+// compose_rect hooks: `pl_compose_begin` returns the hash and the damage counter; `pl_compose_end` compares.
+fn pl_compose_begin(state: u64, outp: u64) {
+    __mmio_write64(outp as *mut u64, pl_hash(state))
+    __mmio_write64((outp + 8) as *mut u64, gs(state, S_PL_DSEQ))
+    __mmio_write64((outp + 16) as *mut u64, time.tsc())
+}
+
+fn pl_compose_end(state: u64, inp: u64) {
+    let hb: u64 = __mmio_read64(inp as *mut u64)
+    let d0: u64 = __mmio_read64((inp + 8) as *mut u64)
+    let t0: u64 = __mmio_read64((inp + 16) as *mut u64)
+    let ha: u64 = pl_hash(state)
+    var fl: u64 = gs(state, S_PL_FLAGS)
+    if ha != hb {
+        fl = fl | PL_F_TORN
+    }
+    if gs(state, S_PL_DSEQ) != d0 {
+        fl = fl | PL_F_DMGMID
+    }
+    if gs(state, S_PL_NCOMP) != 0 {
+        fl = fl | PL_F_MULTI
+    }
+    ss(state, S_PL_FLAGS, fl)
+    ss(state, S_PL_NCOMP, gs(state, S_PL_NCOMP) + 1)
+    ss(state, S_PL_CCORE, pl_core())
+    ss(state, S_PL_HASH, (hb & 0xFFFFFFFF) | (ha << 32))
+    let us: u64 = ph_us(state, t0, time.tsc())
+    if us > gs(state, S_PL_CDUR) {
+        ss(state, S_PL_CDUR, us)
+    }
+}
+
+// the log page: made at the first CP_LOG, read-only for everybody
+fn pl_page_object(state: u64) -> u64 {
+    if gs(state, S_PL_PAGEI) != 0 {
+        return gs(state, S_PL_PAGEI) - 1
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return unixsock.USHM_MAX
+    }
+    var o: u64 = 0
+    while o < mem.FRAME_SIZE / 8 {
+        __mmio_write64((f + o * 8) as *mut u64, 0)
+        o = o + 1
+    }
+    let k: u64 = unixsock.shm_wrap(state, f, 1, unixsock.SMF_RO)
+    if k >= unixsock.USHM_MAX {
+        mem.frame_free(state, f)
+        return unixsock.USHM_MAX
+    }
+    ss(state, S_PL_PAGEF, f)
+    ss(state, S_PL_PAGEI, k + 1)
+    tw(f, 0, PL_MAGIC | (1 << 32))
+    tw(f, 3, PL_RING | (PL_ENT << 32))
+    tw(f, 4, time.khz(state))
+    return k
+}
+
+fn pl_env_bits(state: u64) -> u64 {
+    var e: u64 = 0
+    if fb.double_buffered(state) {
+        e = e | 1
+    }
+    if fb.uncached(state) {
+        e = e | 2
+    }
+    if fb.flip_on(state) {
+        e = e | 4
+    }
+    if gs(state, S_VSYNC) != 0 {
+        e = e | 8
+    }
+    if cp_on(state) {
+        e = e | 16
+    }
+    return e
+}
+
+// WM_COMP / CP_LOG: root (`presentlog`) switches the log on (stride > 0) or off (0) and gets the page. CP_BUSY (0 for the caller) = switched off.
+fn cp_log(state: u64, me: u64, stride: u64) -> u64 {
+    // root only (WM_COMP is root only in sysgui); no compositor needed: the Dell shown the kernel path, `wmd present` is not running there
+    if stride == 0 {
+        ss(state, S_PL_ON, 0)
+        let f0: u64 = gs(state, S_PL_PAGEF)
+        if f0 != 0 {
+            tw(f0, 1, 0)
+        }
+        return CP_BUSY
+    }
+    let k: u64 = pl_page_object(state)
+    if k >= unixsock.USHM_MAX {
+        return k
+    }
+    let f: u64 = gs(state, S_PL_PAGEF)
+    tw(f, 1, stride)
+    tw(f, 5, pl_env_bits(state))
+    ss(state, S_PL_FLAGS, 0)
+    ss(state, S_PL_NCOMP, 0)
+    ss(state, S_PL_CDUR, 0)
+    ss(state, S_PL_TPREV, time.tsc())
+    ss(state, S_PL_ON, stride)
+    return k
+}
+
+// One record, written after the rectangle reached the card. `kind`: PL_F_COMP / PL_F_WDOG / 0 (kernel path); `t0` = the time stamp
+// when the present began; `hand_t0` = when the rectangle was handed over (0 = unknown).
+fn pl_record(state: u64, kind: u64, x0: u64, y0: u64, x1: u64, y1: u64, t0: u64, hand_t0: u64) {
+    let f: u64 = gs(state, S_PL_PAGEF)
+    if f == 0 {
+        return
+    }
+    let t1: u64 = time.tsc()
+    var fl: u64 = gs(state, S_PL_FLAGS) | kind
+    if !fb.double_buffered(state) {
+        fl = fl | PL_F_DIRECT
+    }
+    if (fl & PL_F_TORN) != 0 {
+        ss(state, S_PL_NTORN, gs(state, S_PL_NTORN) + 1)
+    }
+    let idx: u64 = gs(state, S_PL_HEAD)
+    let at: u64 = PL_AT + (idx % PL_RING) * PL_ENT
+    tw(f, at, 0)
+    tw(f, at + 1, t0)
+    tw(f, at + 2, (x0 & 0xFFFF) | ((y0 & 0xFFFF) << 16) | ((x1 & 0xFFFF) << 32) | ((y1 & 0xFFFF) << 48))
+    var hop: u64 = 0
+    if hand_t0 != 0 && t0 > hand_t0 {
+        hop = ph_us(state, hand_t0, t0)
+    }
+    tw(f, at + 3, (gs(state, S_PL_CCORE) & 0xFF) | ((pl_core() & 0xFF) << 8) | ((gs(state, S_PL_DCORE) & 0xFF) << 16)
+        | ((gs(state, S_PL_NCOMP) & 0xFF) << 24) | ((hop & 0xFFFFFFFF) << 32))
+    tw(f, at + 4, (gs(state, S_PL_CDUR) & 0xFFFFFFFF) | ((ph_us(state, t0, t1) & 0xFFFFFFFF) << 32))
+    tw(f, at + 5, gs(state, S_PL_HASH))
+    var dus: u64 = 0
+    if gs(state, S_PL_DTSC) != 0 && t1 > gs(state, S_PL_DTSC) {
+        dus = ph_us(state, gs(state, S_PL_DTSC), t1)
+    }
+    tw(f, at + 6, (gs(state, S_PL_DSEQ) & 0xFFFFFFFF) | ((dus & 0xFFFFFFFF) << 32))
+    var since: u64 = 0
+    if gs(state, S_PL_TPREV) != 0 && t0 > gs(state, S_PL_TPREV) {
+        since = ph_us(state, gs(state, S_PL_TPREV), t0)
+    }
+    tw(f, at + 7, since)
+    tw(f, at, ((idx + 1) << 32) | fl)
+    ss(state, S_PL_HEAD, idx + 1)
+    ss(state, S_PL_NREC, gs(state, S_PL_NREC) + 1)
+    ss(state, S_PL_TPREV, t0)
+    ss(state, S_PL_FLAGS, 0)
+    ss(state, S_PL_NCOMP, 0)
+    ss(state, S_PL_CDUR, 0)
+    tw(f, 2, idx + 1)
+    tw(f, 6, gs(state, S_PL_NTORN))
+    tw(f, 7, gs(state, S_PL_NREC))
 }
 
 // WM_COMP / CP_ATTACH. 0 = attached, 1 = refused (`nocomp`), 2 = another live compositor is attached, 3 = busy.
@@ -7594,6 +7860,9 @@ fn flush_box(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
         fb.flush_region(state, x0, y0, x1 - x0, y1 - y0)
     }
     let t1: u64 = time.tsc()
+    if gs(state, S_PL_ON) != 0 {
+        pl_record(state, 0, x0, y0, x1, y1, t0, 0)
+    }
     fb.flush_note(state, ph_us(state, t0, t1), fb.tx_octets(state) - o0)
     beam.note(state, ph_us(state, t0, t1), fb.tx_octets(state) - o0)
 }
@@ -7682,6 +7951,9 @@ fn flush_many(state: u64, rs: u64, n: u64) {
             let ta: u64 = time.tsc()
             let oa: u64 = fb.tx_octets(state)
             fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+            if gs(state, S_PL_ON) != 0 {
+                pl_record(state, 0, x0, y0, x1, y1, ta, 0)
+            }
             us_sum = us_sum + ph_us(state, ta, time.tsc())
             okt_sum = okt_sum + (fb.tx_octets(state) - oa)
             if y0 < ylo {
@@ -7776,6 +8048,12 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
             }
         }
     }
+    // PRESENT LOG: hash of the shared client buffers before the frame is composed (see pl_compose_begin)
+    var pl_b: [u64; 3] = [0 as u64; 3]
+    let pl_on_here: bool = gs(state, S_PL_ON) != 0
+    if pl_on_here {
+        pl_compose_begin(state, (&pl_b[0]) as u64)
+    }
     let ph_a0: u64 = time.tsc()
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
@@ -7813,6 +8091,9 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
     }
     let ph_c: u64 = time.tsc()
     ph_add(state, S_PH_WIN, ph_b, ph_c)
+    if pl_on_here {
+        pl_compose_end(state, (&pl_b[0]) as u64)
+    }
     // 2a. RUNDE VSYNC: die Signatur der Zerreissprobe, ueber der
     //     Fensterflaeche und unter allem, was darueber liegt. Sie wird
     //     je Fenster gemalt, damit ein Foto sie JE FENSTER vergleichen
