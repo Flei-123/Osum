@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/presentlog.fi -- W-DELLFLICK (14.10.2026): THE PRESENT LOG, WRITTEN TO A FILE.
+//
+// `presentlog [stride=<n>]` (root) switches the window server's present log on (WM_COMP / CP_LOG, see the block "PRESENT LOG" in
+// kernel/ui/wm.fi), maps the log page and appends one text line per present to /var/log/presentlog.txt. `presentlog off` switches it off.
+// It prints NOTHING to the terminal or the console except one line at start. Off by default: the window server pays one compare per hook.
+//
+// A line:  i=<index> t=<ms since boot> r=<x0>,<y0>,<x1>,<y1> fl=<letters> cc=<compose core> pc=<present core> dc=<core of the last WM_DAMAGE>
+//          n=<composes merged> hop=<us handed over -> shown> comp=<us longest compose> copy=<us the copy to the card took>
+//          hb=<hash before> ha=<hash after> (hex; they differ = a client wrote during the compose) dmg=<damage calls total>
+//          d2p=<us last WM_DAMAGE -> present> since=<us since the previous present>
+// Letters in fl: C compositor presented, W watchdog presented, T TORN (client buffer changed during the compose), D WM_DAMAGE arrived
+// during the compose, M several composes merged into this present, F painted straight on the card (no back buffer).
+// Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import libc.io
+
+export { u_start }
+
+const SYS_MMAP: u64 = 9
+const PROT_R: u64 = 1
+const MAP_SH: u64 = 1
+const WM_COMP: u64 = 2144
+const CP_LOG: u64 = 6
+const O_MAKE: u64 = 577
+const RING: u64 = 60
+const AT: u64 = 16
+const ENT: u64 = 8
+const FILE_MAX: u64 = 2097152
+
+static mut l_t: [u8; 4] = " t=\0"
+static mut l_r: [u8; 4] = " r=\0"
+static mut l_c: [u8; 2] = ",\0"
+static mut l_fl: [u8; 5] = " fl=\0"
+static mut l_cc: [u8; 5] = " cc=\0"
+static mut l_pc: [u8; 5] = " pc=\0"
+static mut l_dc: [u8; 5] = " dc=\0"
+static mut l_n: [u8; 4] = " n=\0"
+static mut l_hop: [u8; 6] = " hop=\0"
+static mut l_cu: [u8; 7] = " comp=\0"
+static mut l_pu: [u8; 7] = " copy=\0"
+static mut l_hb: [u8; 5] = " hb=\0"
+static mut l_ha: [u8; 5] = " ha=\0"
+static mut l_dm: [u8; 6] = " dmg=\0"
+static mut l_d2p: [u8; 6] = " d2p=\0"
+static mut l_sn: [u8; 8] = " since=\0"
+static mut l_i: [u8; 3] = "i=\0"
+static mut l_hdr: [u8; 27] = "# presentlog start stride=\0"
+static mut l_env: [u8; 6] = " env=\0"
+static mut l_khz: [u8; 13] = " cyc_per_ms=\0"
+static mut l_lost: [u8; 16] = "# lost records=\0"
+static mut l_full: [u8; 25] = "# file restarted (2 MiB)\0"
+static mut l_nopage: [u8; 68] = "presentlog: cannot map the log page (not root, or no window server)\0"
+static mut l_off: [u8; 16] = "presentlog: off\0"
+static mut l_on: [u8; 48] = "presentlog: on, writing /var/log/presentlog.txt\0"
+static mut l_nof: [u8; 48] = "presentlog: cannot open /var/log/presentlog.txt\0"
+static mut l_offw: [u8; 4] = "off\0"
+static mut l_stride: [u8; 8] = "stride=\0"
+static mut l_path: [u8; 24] = "/var/log/presentlog.txt\0"
+
+static mut ln: [u8; 512] = [0 as u8; 512]
+static mut lnat: u64 = 0
+static mut fsize: u64 = 0
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn rd64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn mmap_fd(fd: u64, bytes: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_R, in("r10") MAP_SH,
+        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn put_c(c: u64) {
+    if lnat < 500 {
+        ln[lnat as usize] = c as u8
+        lnat = lnat + 1
+    }
+}
+
+fn put_s(p: u64) {
+    var k: u64 = 0
+    while rd8(p + k) != 0 {
+        put_c(rd8(p + k))
+        k = k + 1
+    }
+}
+
+fn put_n(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = ulib.digits(v, (&d[0 as usize]) as u64)
+    put_s((&d[0 as usize]) as u64)
+}
+
+fn put_hex(v: u64) {
+    var sh: u64 = 32
+    while sh > 0 {
+        sh = sh - 4
+        let nib: u64 = (v >> sh) & 15
+        if nib < 10 {
+            put_c(48 + nib)
+        } else {
+            put_c(87 + nib)
+        }
+    }
+}
+
+fn open_log() -> u64 {
+    return io.open((&l_path[0 as usize]) as u64, O_MAKE)
+}
+
+fn flush_line(fd: u64) {
+    put_c(10)
+    let _w: u64 = io.write(fd, (&ln[0 as usize]) as u64, lnat)
+    fsize = fsize + lnat
+    lnat = 0
+}
+
+fn has_prefix(p: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while rd8(lit + i) != 0 {
+        if rd8(p + i) != rd8(lit + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var stride: u64 = 16
+    var i: u64 = 1
+    let n: u64 = ulib.arg_count(args)
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if has_prefix(a, (&l_offw[0 as usize]) as u64) {
+            let _o: u64 = ulib.sys(WM_COMP, CP_LOG, 0, 0)
+            ulib.say((&l_off[0 as usize]) as u64)
+            ulib.nl()
+            return 0
+        }
+        if has_prefix(a, (&l_stride[0 as usize]) as u64) {
+            stride = ulib.to_num(a + 7)
+            if stride == 0 {
+                stride = 16
+            }
+        }
+        i = i + 1
+    }
+    let pfd: u64 = ulib.sys(WM_COMP, CP_LOG, stride, 0)
+    var page: u64 = 0
+    if !ulib.bad(pfd) {
+        page = mmap_fd(pfd, 4096)
+        if ulib.bad(page) {
+            page = 0
+        }
+    }
+    if page == 0 {
+        ulib.say((&l_nopage[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var fd: u64 = open_log()
+    if ulib.bad(fd) {
+        ulib.say((&l_nof[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&l_on[0 as usize]) as u64)
+    ulib.nl()
+    let khz: u64 = rd64(page + 32)
+    put_s((&l_hdr[0 as usize]) as u64)
+    put_n(stride)
+    put_s((&l_env[0 as usize]) as u64)
+    put_n(rd64(page + 40))
+    put_s((&l_khz[0 as usize]) as u64)
+    put_n(khz)
+    flush_line(fd)
+    var tail: u64 = rd64(page + 16)
+    var lost: u64 = 0
+    var rounds: u64 = 0
+    while true {
+        let head: u64 = rd64(page + 16)
+        if head > tail + RING {
+            lost = lost + (head - RING - tail)
+            tail = head - RING
+        }
+        while tail < head {
+            let at: u64 = page + (AT + (tail % RING) * ENT) * 8
+            let w0: u64 = rd64(at)
+            let w1: u64 = rd64(at + 8)
+            let w2: u64 = rd64(at + 16)
+            let w3: u64 = rd64(at + 24)
+            let w4: u64 = rd64(at + 32)
+            let w5: u64 = rd64(at + 40)
+            let w6: u64 = rd64(at + 48)
+            let w7: u64 = rd64(at + 56)
+            if (w0 >> 32) != tail + 1 || (rd64(at) >> 32) != tail + 1 {
+                lost = lost + 1
+            } else {
+                let fl: u64 = w0 & 0xFFFFFFFF
+                put_s((&l_i[0 as usize]) as u64)
+                put_n(tail)
+                put_s((&l_t[0 as usize]) as u64)
+                var ms: u64 = 0
+                if khz != 0 {
+                    ms = w1 / khz
+                }
+                put_n(ms)
+                put_s((&l_r[0 as usize]) as u64)
+                put_n(w2 & 0xFFFF)
+                put_s((&l_c[0 as usize]) as u64)
+                put_n((w2 >> 16) & 0xFFFF)
+                put_s((&l_c[0 as usize]) as u64)
+                put_n((w2 >> 32) & 0xFFFF)
+                put_s((&l_c[0 as usize]) as u64)
+                put_n((w2 >> 48) & 0xFFFF)
+                put_s((&l_fl[0 as usize]) as u64)
+                if (fl & 1) != 0 {
+                    put_c(67)
+                }
+                if (fl & 2) != 0 {
+                    put_c(87)
+                }
+                if (fl & 4) != 0 {
+                    put_c(84)
+                }
+                if (fl & 8) != 0 {
+                    put_c(68)
+                }
+                if (fl & 16) != 0 {
+                    put_c(77)
+                }
+                if (fl & 32) != 0 {
+                    put_c(70)
+                }
+                if (fl & 63) == 0 {
+                    put_c(45)
+                }
+                put_s((&l_cc[0 as usize]) as u64)
+                put_n(w3 & 0xFF)
+                put_s((&l_pc[0 as usize]) as u64)
+                put_n((w3 >> 8) & 0xFF)
+                put_s((&l_dc[0 as usize]) as u64)
+                put_n((w3 >> 16) & 0xFF)
+                put_s((&l_n[0 as usize]) as u64)
+                put_n((w3 >> 24) & 0xFF)
+                put_s((&l_hop[0 as usize]) as u64)
+                put_n(w3 >> 32)
+                put_s((&l_cu[0 as usize]) as u64)
+                put_n(w4 & 0xFFFFFFFF)
+                put_s((&l_pu[0 as usize]) as u64)
+                put_n(w4 >> 32)
+                put_s((&l_hb[0 as usize]) as u64)
+                put_hex(w5 & 0xFFFFFFFF)
+                put_s((&l_ha[0 as usize]) as u64)
+                put_hex(w5 >> 32)
+                put_s((&l_dm[0 as usize]) as u64)
+                put_n(w6 & 0xFFFFFFFF)
+                put_s((&l_d2p[0 as usize]) as u64)
+                put_n(w6 >> 32)
+                put_s((&l_sn[0 as usize]) as u64)
+                put_n(w7)
+                flush_line(fd)
+            }
+            tail = tail + 1
+        }
+        if lost != 0 {
+            put_s((&l_lost[0 as usize]) as u64)
+            put_n(lost)
+            flush_line(fd)
+            lost = 0
+        }
+        rounds = rounds + 1
+        if rounds % 10 == 0 {
+            let _f: u64 = io.fsync(fd)
+        }
+        if fsize > FILE_MAX {
+            io.close(fd)
+            fd = open_log()
+            fsize = 0
+            if ulib.bad(fd) {
+                return 1
+            }
+            put_s((&l_full[0 as usize]) as u64)
+            flush_line(fd)
+        }
+        let _s: u64 = ulib.sleep_ms(100)
+    }
+    return 0
+}

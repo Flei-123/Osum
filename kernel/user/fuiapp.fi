@@ -119,14 +119,27 @@ fn copy64(dst: u64, src: u64, n: u64) {
 
 // Copy only what differs: src (private picture) into dst (shared buffer).
 // Returns how many 8-octet words were written (0 = the picture changes nothing).
+//
+// W-DELLFLICK: the first and the last octet offset the copy wrote (`s_dlo`, `s_dhi`) are kept, so that `frame_end` names only the ROWS
+// that changed to the window server (a caret blink changes a few rows; naming the whole screen made the server compose and push the
+// whole 8 MB picture to the card twice a second, and every compose reads the whole buffer while this copy may still be writing it).
+static mut s_dlo: u64 = 0
+static mut s_dhi: u64 = 0
+
 fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
     var i: u64 = 0
     var chg: u64 = 0
+    s_dlo = n
+    s_dhi = 0
     while i + 8 <= n {
         let a: u64 = __mmio_read64((src + i) as *mut u64)
         if a != __mmio_read64((dst + i) as *mut u64) {
             __mmio_write64((dst + i) as *mut u64, a)
             chg = chg + 1
+            if i < s_dlo {
+                s_dlo = i
+            }
+            s_dhi = i + 8
         }
         i = i + 8
     }
@@ -135,6 +148,10 @@ fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
         if a4 != __mmio_read32((dst + i) as *mut u32) {
             __mmio_write32((dst + i) as *mut u32, a4)
             chg = chg + 1
+            if i < s_dlo {
+                s_dlo = i
+            }
+            s_dhi = n
         }
     }
     return chg
@@ -433,6 +450,22 @@ fn frame_end() {
         s_chg = copy_diff(s_shpx, s_px, s_w * s_h * 4)
         if s_chg == 0 {
             // nothing differs from what the window server shows: no damage, no compose, no picture
+            return
+        }
+        if s_w != 0 && s_dhi > s_dlo && !wlib.fulldamage() {
+            // W-DELLFLICK: only the rows that changed are damaged (full width: rows are contiguous, the copy above is row-wise)
+            let rowb: u64 = s_w * 4
+            var ry0: u64 = s_dlo / rowb
+            var ry1: u64 = (s_dhi - 1) / rowb + 1
+            if ry1 > s_h {
+                ry1 = s_h
+            }
+            if ry0 >= ry1 {
+                ry0 = 0
+                ry1 = s_h
+            }
+            wlib.canvas_new_part(s_cv, 0, ry0, s_w, ry1)
+            wlib.draw_all()
             return
         }
     }
