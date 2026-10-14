@@ -91,7 +91,7 @@ export {
     socks_live, shms_live, bytes_moved, fds_moved,
     USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
-    UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, recv_dgram, dgram_room
+    UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, send_dgram_to, recv_dgram, dgram_room, bind_dgram, find_dgram, connect_dgram
 }
 
 // ============================================================ DIE LAGE
@@ -472,9 +472,20 @@ fn sock_free(state: u64, i: u64) {
     // freigegeben: ihr Deskriptor lebt noch, und `recv` darauf muss 0
     // liefern (Dateiende), nicht -EBADF.
     let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
-    if p < USOCK_MAX && kstate.get(state, sk_at(p) + SK_USED) != 0 {
+    if p < USOCK_MAX && kstate.get(state, sk_at(p) + SK_USED) != 0 && kstate.get(state, sk_at(p) + SK_PEER) == i {
         kstate.set(state, sk_at(p) + SK_PEER, USOCK_MAX)
         kstate.set(state, sk_at(p) + SK_STATE, S_CLOSED)
+    }
+    // r731: datagram sockets that connect()ed one-way to this one lose their destination (the slot may be reused)
+    if kstate.get(state, sk_at(i) + SK_KIND) == UK_DGRAM {
+        var j: u64 = 0
+        while j < USOCK_MAX {
+            if j != i && kstate.get(state, sk_at(j) + SK_USED) != 0 && kstate.get(state, sk_at(j) + SK_PEER) == i {
+                kstate.set(state, sk_at(j) + SK_PEER, USOCK_MAX)
+                kstate.set(state, sk_at(j) + SK_STATE, S_OPEN)
+            }
+            j = j + 1
+        }
     }
     kstate.set(state, sk_at(i) + SK_USED, 0)
     kstate.set(state, sk_at(i) + SK_KIND, UK_FREE)
@@ -547,6 +558,50 @@ fn bind_path(state: u64, i: u64, path: u64, len: u64) -> u64 {
         n = n + 1
     }
     return errno.E_NOSPC
+}
+
+// r731: bind a datagram socket to a path. It needs its ring at once: senders write into it before the owner ever calls recv.
+fn bind_dgram(state: u64, i: u64, path: u64, len: u64) -> u64 {
+    if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_KIND) != UK_DGRAM {
+        return errno.E_INVAL
+    }
+    if kstate.get(state, sk_at(i) + SK_NAME) < UNAME_MAX {
+        return errno.E_INVAL // already bound
+    }
+    if ensure_ring(state, i) == 0 {
+        return errno.E_NOMEM
+    }
+    let r: u64 = bind_path(state, i, path, len)
+    if r != 0 {
+        return r
+    }
+    return 0
+}
+
+// r731: the datagram socket bound under `path`, or USOCK_MAX.
+fn find_dgram(state: u64, path: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    while n < UNAME_MAX {
+        if kstate.get(state, nm_at(n) + NM_USED) != 0 && name_eq(state, n, path, len) {
+            let s: u64 = kstate.get(state, nm_at(n) + NM_SOCK)
+            if s < USOCK_MAX && kstate.get(state, sk_at(s) + SK_KIND) == UK_DGRAM && kstate.get(state, sk_at(s) + SK_RING) != 0 {
+                return s
+            }
+            return USOCK_MAX
+        }
+        n = n + 1
+    }
+    return USOCK_MAX
+}
+
+// r731: connect() of a datagram socket only picks the default destination. One-way: the target is not told (its own peer stays as it is).
+fn connect_dgram(state: u64, i: u64, dst: u64) -> u64 {
+    if i >= USOCK_MAX || dst >= USOCK_MAX {
+        return errno.E_INVAL
+    }
+    kstate.set(state, sk_at(i) + SK_PEER, dst)
+    kstate.set(state, sk_at(i) + SK_STATE, S_CONNECTED)
+    return 0
 }
 
 fn find_listener(state: u64, path: u64, len: u64) -> u64 {
@@ -762,6 +817,10 @@ fn peer_gone(state: u64, i: u64) -> bool {
     if i >= USOCK_MAX {
         return true
     }
+    // r731: a bound datagram socket has no peer by design -- it is a mailbox, not half of a connection (never reads as end of file)
+    if kstate.get(state, sk_at(i) + SK_KIND) == UK_DGRAM && kstate.get(state, sk_at(i) + SK_NAME) < UNAME_MAX {
+        return false
+    }
     return kstate.get(state, sk_at(i) + SK_PEER) >= USOCK_MAX
 }
 
@@ -855,6 +914,14 @@ fn send_dgram(state: u64, i: u64, src: u64, len: u64) -> u64 {
     }
     let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
     if p >= USOCK_MAX {
+        return errno.E_PIPE
+    }
+    return send_dgram_to(state, p, src, len)
+}
+
+// r731: one frame into the ring of the socket `p` itself (a bound datagram socket: sendto(path), or the peer a connect() picked).
+fn send_dgram_to(state: u64, p: u64, src: u64, len: u64) -> u64 {
+    if p >= USOCK_MAX || kstate.get(state, sk_at(p) + SK_USED) == 0 {
         return errno.E_PIPE
     }
     let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
