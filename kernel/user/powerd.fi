@@ -2,6 +2,7 @@
 // kernel/user/powerd.fi -- /bin/powerd: the laptop power policy daemon (L-005, L-007).
 //
 //     powerd                       watch lid, mains adapter and idle time, act on /etc/power.conf
+//     powerd status                print lid, mains, battery and the tray item state (what the taskbar shows)
 //     powerd inject L P S A        gate only (needs `evfake`, root): set the fake laptop to lid L (1 open),
 //                                  P percent, battery state S (1 discharging, 2 charging), mains A
 //
@@ -17,6 +18,7 @@ profile kernel
 import ulib
 import libc.io
 import power.policy
+import fui.traypower
 
 export { u_start }
 
@@ -25,6 +27,8 @@ const SYS_PWRSET: u64 = 1751
 const SYS_SPERRE: u64 = 1870
 const PG_BATPRESENT: u64 = 24
 const PG_AC: u64 = 34
+const PG_BATPERCENT: u64 = 25
+const PG_BATSTATE: u64 = 27
 const PG_LIDOK: u64 = 47
 const PG_LID: u64 = 48
 const PS_PROFILE: u64 = 0
@@ -50,6 +54,7 @@ static mut m_hib: [u8; 48] = "powerd: hibernate unavailable, sleeping instead\0"
 static mut m_sby: [u8; 34] = "powerd: standby after idle mains=\0"
 static mut m_rc: [u8; 27] = "powerd: standby result rc=\0"
 static mut m_inj: [u8; 19] = "powerd: inject rc=\0"
+static mut m_stat: [u8; 16] = "powerd: status \0"
 static mut m_use: [u8; 39] = "powerd: usage: powerd [inject L P S A]\0"
 
 fn num(v: u64) {
@@ -191,7 +196,58 @@ fn inject(args: u64) -> u64 {
     return 0
 }
 
+static mut s_lid: [u8; 6] = " lid=\0"
+static mut s_ac: [u8; 5] = " ac=\0"
+static mut s_pct: [u8; 6] = " pct=\0"
+static mut s_chg: [u8; 6] = " chg=\0"
+static mut s_tray: [u8; 7] = " tray=\0"
+static mut s_tip: [u8; 7] = " tip=\"\0"
+
+// One line with the raw kernel values and the tray state/tooltip derived from them (the taskbar model).
+fn status() -> u64 {
+    let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    let pct: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
+    let bs: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
+    let ac: u64 = ulib.sys(SYS_PWRGET, PG_AC, 0, 0)
+    var chg: u64 = 0
+    if !ulib.bad(bs) && (bs & 2) != 0 {
+        chg = 1
+    }
+    var h: u64 = 0
+    if !ulib.bad(have) {
+        h = have
+    }
+    var a: u64 = 0
+    if !ulib.bad(ac) && ac == 1 {
+        a = 1
+    }
+    var p: u64 = 0
+    if !ulib.bad(pct) {
+        p = pct
+    }
+    var tip: [u8; 96] = [0 as u8; 96]
+    let _n: u64 = traypower.tooltip(h, p, chg, a, (&tip[0 as usize]) as u64, 95)
+    ulib.say((&m_stat[0 as usize]) as u64)
+    ulib.say((&s_lid[0 as usize]) as u64)
+    num(lid_now())
+    ulib.say((&s_ac[0 as usize]) as u64)
+    num(a)
+    ulib.say((&s_pct[0 as usize]) as u64)
+    num(p)
+    ulib.say((&s_chg[0 as usize]) as u64)
+    num(chg)
+    ulib.say((&s_tray[0 as usize]) as u64)
+    num(traypower.state(h, p, chg, a))
+    ulib.say((&s_tip[0 as usize]) as u64)
+    ulib.say((&tip[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) == 2 && *(ulib.arg_at(args, 1) as *mut u8) == 115 as u8 {
+        return status()
+    }
     if ulib.arg_count(args) > 1 {
         return inject(args)
     }
