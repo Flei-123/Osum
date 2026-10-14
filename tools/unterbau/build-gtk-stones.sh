@@ -46,6 +46,8 @@ unpack freetype freetype-2.13.3.tar.xz; unpack wayland wayland-1.23.1.tar.xz; un
 unpack fontconfig fontconfig-2.15.0.tar.xz; unpack fribidi fribidi-1.0.16.tar.xz; unpack glib glib-2.82.2.tar.xz; unpack harfbuzz harfbuzz-10.0.1.tar.xz
 unpack cairo cairo-1.18.2.tar.xz; unpack pango pango-1.54.0.tar.xz; unpack pixbuf gdk-pixbuf-2.42.12.tar.xz; unpack graphene graphene-1.10.8.tar.gz
 unpack epoxy libepoxy-1.5.10.tar.gz; unpack gtk gtk-4.16.3.tar.xz
+# cairo 1.18.2 uses FT_Color in cairo-ft-private.h without including FT_COLOR_H (fails with FT_HAS_COLR_V1 on freetype 2.13)
+sed -i 's|^#include "cairo-ft.h"$|#include "cairo-ft.h"\n#include FT_COLOR_H|' "$W/x/cairo/src/cairo-ft-private.h"
 mkdir -p "$W/x/png" "$W/x/jpeg" "$W/x/tiff"
 tar xf "$SRC/gtk-subprojects/libpng-1.6.37.tar.gz" -C "$W/x/png" --strip-components=1
 tar xf "$SRC/gtk-subprojects/libjpeg-turbo-2.1.3.tar.gz" -C "$W/x/jpeg" --strip-components=1
