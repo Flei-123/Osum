@@ -104,9 +104,12 @@ M key-focus; echo "klickauf fvpt50x50"; echo "warte 1"
 for k in a shift-a shift-1 spc ret esc tab backspace left right up down delete home end pgup pgdn f1 f5 \
          alt_r-q alt_r-7 alt_r-8 alt_r-9 alt_r-0 alt_r-minus alt_r-less alt_r-e \
          bracket_left semicolon apostrophe minus shift-bracket_left \
-         ctrl-c ctrl-v ctrl-a alt-tab; do
+         ctrl-c ctrl-v ctrl-a; do
     M "key-$k"; echo "taste $k"; echo "warte 0.6"
 done
+# Alt+Tab as a KEY is taken by the guest window manager (it switches windows, the viewer loses focus and all later
+# input goes elsewhere); the viewer's own Alt+Tab is the toolbar button below. Click into the picture to be sure.
+M key-refocus; echo "klickauf fvpt50x50"; echo "warte 1"
 M key-repeat; echo "taste z 1500"; echo "warte 2"
 M key-done
 echo "foto 30-keys"

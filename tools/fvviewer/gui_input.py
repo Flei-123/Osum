@@ -128,7 +128,7 @@ TAB = {
     # the guest keyboard is US (KB_LAYOUT 0): the OS hands over the US characters and the viewer passes them on
     "bracket_left": key(91), "semicolon": key(59), "apostrophe": key(39), "minus": key(45), "shift-bracket_left": key(123),
     "ctrl-c": vkcombo([17], 67), "ctrl-v": vkcombo([17], 86), "ctrl-a": vkcombo([17], 65),
-    "alt-tab": [r"Special code=4"],
+    # no "alt-tab" key: the guest window manager consumes it (the toolbar button covers Special ALTTAB)
 }
 KEYMAP_NOTE = {}
 for k, want in TAB.items():
