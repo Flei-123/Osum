@@ -92,7 +92,6 @@ chk dev-null "0" 'echo x > /dev/null; echo 0'
 chk dev-zero "16" 'head -c 16 /dev/zero | wc -c'
 chk dev-urandom "16" 'head -c 16 /dev/urandom | wc -c'
 ok dev-tty-stat 'ls -l /dev/tty /dev/null'
-ok ps 'ps'
 ok free 'free'
 ok uptime 'uptime'
 ok mount-list 'mount'
@@ -112,4 +111,6 @@ if [ -f /repo/APKINDEX.tar.gz ]; then
     chk apk-add-local "ok" 'apk add --no-network --allow-untrusted --repository /repo tree >/tmp/apk.out 2>&1 && echo ok || { tail -3 /tmp/apk.out | tr "\n" "|"; }'
     ok apk-add-run 'tree --version'
 fi
+# ps last: busybox ps segfaults (gaps.txt) and must not hide the probes behind it
+ok ps 'ps'
 echo "AL end ok"
