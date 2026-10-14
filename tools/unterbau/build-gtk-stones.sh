@@ -80,7 +80,7 @@ step graphene mesonb graphene -Dtests=false -Dgobject_types=true -Dintrospection
 cp -r /usr/include/EGL /usr/include/KHR "$W/kinc/" || { echo "build-gtk-stones: install libegl-dev (EGL/KHR headers)"; exit 1; }
 step epoxy mesonb epoxy -Dtests=false -Degl=yes -Dglx=no -Dx11=false
 # GTK only wants drm_fourcc.h (fourcc constants) from libdrm, never links it: stub libdrm.pc + the kernel uapi headers (arch-neutral copy, found on the host)
-DRMH=$(ls -d /usr/include/drm /usr/aarch64-linux-gnu/include/drm 2>/dev/null | head -1)
+DRMH=$(ls -d /usr/include/drm /usr/aarch64-linux-gnu/include/drm 2>/dev/null | head -1 || true)
 [ -n "$DRMH" ] || { echo "build-gtk-stones: no drm uapi headers (drm_fourcc.h) on the host"; exit 1; }
 mkdir -p "$P/include/libdrm" && cp "$DRMH"/drm_fourcc.h "$DRMH"/drm.h "$DRMH"/drm_mode.h "$P/include/libdrm/"
 printf 'prefix=%s\nName: libdrm\nDescription: stub (fourcc header only)\nVersion: 2.4.120\nCflags: -I%s/include/libdrm\n' "$P" "$P" > "$P/lib/pkgconfig/libdrm.pc"
