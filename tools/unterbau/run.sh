@@ -103,13 +103,13 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
     spec="$spec /etc/ssl/ /etc/ssl/certs/ /etc/fonts/ /usr/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/zoneinfo/"
     spec="$spec /etc/resolv.conf=$D/resolv.conf /etc/machine-id=$D/machine-id /etc/fonts/fonts.conf=$D/fonts.conf /etc/localtime=$D/localtime"
     spec="$spec ${EXTRA_SPEC:-}"
-    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 $spec > "$O/mkfs.txt" 2>&1
+    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 ${UB_MKFSX:-} $spec > "$O/mkfs.txt" 2>&1
 }
 boot() { # boot <kernel> <disk> <script> <serial-out>
     cp -f "$2" "$2.live"
     timeout "$TMO" $QEMU "${KVM[@]}" -smp "$SMP" -kernel "$1" -m 512 \
         -append "osum vfs nokbd nosched noproc nofs ${KARGS:-} script=$3;exit" -serial "file:$4" -display none -no-reboot \
-        ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+        ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
 }
 run_all() { # run_all <kernel> <disk> <tag>

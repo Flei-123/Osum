@@ -17678,7 +17678,21 @@ fn cx_close_marked(state: u64, me: u64) {
 // "all at once" (`read(fd, buf, st_size)` -- the way config files, fonts and the dynamic loader's headers are read) took the 4096 for the file.
 // For a regular file the call now repeats until the request is done or a block comes back short. Pipes, sockets and terminals keep their
 // short counts (that is their contract).
+// r728: a write() larger than one block is ONE write-behind scope: the 4 KiB steps below share the sector table, so the ATA
+// commands carry long runs instead of one block each. The data is on the drive when the call returns.
 fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    if writing && len > MAX_IO {
+        blk.wb_begin(state)
+        let r: u64 = file_io_loop_steps(state, me, fd, buf, len, writing)
+        if !blk.wb_end(state) {
+            return neg(errno.E_IO)
+        }
+        return r
+    }
+    return file_io_loop_steps(state, me, fd, buf, len, writing)
+}
+
+fn file_io_loop_steps(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
     var first: u64 = 0
     if writing {
         first = do_write(state, me, fd, buf, len)
