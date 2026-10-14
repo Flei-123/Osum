@@ -37,11 +37,12 @@ import drv.blk.ahci
 import arch.arch
 import usb.usb
 import crypto.krypto
+import mm.mem
 
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
     // ---- RUNDE KRYPTO: der rohe Weg, fuer den Kopfsatz und die Abnahme
-    read_raw, write_raw,
+    read_raw, write_raw, write_run, wb_begin, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -288,6 +289,8 @@ const ATA_CTRL: u16 = 0x3F6
 const ATA_READ: u8 = 0x20
 const ATA_WRITE: u8 = 0x30
 const ATA_FLUSH: u8 = 0xE7
+const ATA_SET_MULTIPLE: u8 = 0xC6
+const ATA_WRITE_MULTIPLE: u8 = 0xC5
 // Der Befehl, der die Platte nach ihrer eigenen Groesse fragt. Bis zu
 // den Runden OFS3 und INSTALL hat niemand ihn gestellt; beide haben ihn
 // unabhaengig voneinander eingebaut, OFS3 als `ATA_IDENTIFY`, INSTALL
@@ -334,6 +337,16 @@ fn insw(port: u16, dst: u64, words: u64) {
     }
     asm("cld\nrep insw", in("dx") port, in("rdi") dst, in("rcx") words,
         clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+// Write counterpart of insw: a whole sector as ONE instruction (one VM exit
+// instead of 256).
+fn outsw(port: u16, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep outsw", in("dx") port, in("rsi") src, in("rcx") words,
+        clobber("rsi"), clobber("rcx"), clobber("memory"))
 }
 
 // Wait until the drive is no longer busy and has data. Bounded: a device
@@ -529,11 +542,7 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
         ata_recover(slave)
         return false
     }
-    var i: u64 = 0
-    while i < BLOCK_SIZE / 2 {
-        out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
-        i = i + 1
-    }
+    outsw(ATA_DATA, src, BLOCK_SIZE / 2)
     // RUNDE INSTALL: ERST WARTEN, DANN SPUELEN -- UND DAS IST EIN
     // FEHLER, DER AELTER IST ALS DIESE RUNDE.
     //
@@ -844,6 +853,7 @@ fn probe_ata0(state: u64) -> u64 {
 // Zwischenspeicher und nicht ueber die Platte -- und ein Stromausfall
 // haette recht.
 fn flush(state: u64) -> bool {
+    wb_flush(state)
     // w-disklag: AHCI writes are no longer flushed one by one; the
     // barriers (journal commit, sync, shutdown) arrive here.
     if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
@@ -909,6 +919,67 @@ fn ata_write_twice(lba: u64, src: u64, slave: bool) -> bool {
     }
     ata_recover(slave)
     return ata_write_on(lba, src, slave)
+}
+
+// r728: WRITE SECTORS with a sector count. ONE command carries n sectors
+// (n <= 128): the drive raises DRQ again after each sector, and we wait for
+// it again, exactly like ata_read_run. The command latency (about 17 ms per
+// command in QEMU) is paid once per run instead of once per sector.
+fn ata_write_run(lba: u64, src: u64, n: u64, slave: bool) -> bool {
+    // WRITE MULTIPLE (0xC5) after SET MULTIPLE MODE (0xC6, 16 sectors): the
+    // drive takes a whole block of 16 sectors per DRQ and writes it with ONE
+    // host operation. With plain WRITE SECTORS QEMU does one host write per
+    // sector. If the drive refuses the mode, fall back to WRITE SECTORS.
+    var per: u64 = 1
+    if n > 1 {
+        var top: u64 = 0xE0
+        if slave {
+            top = 0xF0
+        }
+        serial.out8(ATA_DRIVE, top as u8)
+        serial.out8(ATA_COUNT, 16 as u8)
+        serial.out8(ATA_CMD, ATA_SET_MULTIPLE)
+        if ata_wait(false) {
+            per = 16
+        }
+    }
+    ata_select_n(lba, slave, n)
+    if per == 16 {
+        serial.out8(ATA_CMD, ATA_WRITE_MULTIPLE)
+    } else {
+        serial.out8(ATA_CMD, ATA_WRITE)
+    }
+    var k: u64 = 0
+    while k < n {
+        var c: u64 = n - k
+        if c > per {
+            c = per
+        }
+        if !ata_wait(true) {
+            ata_melden(lba + k, true)
+            ata_recover(slave)
+            return false
+        }
+        outsw(ATA_DATA, src + k * BLOCK_SIZE, c * (BLOCK_SIZE / 2))
+        k = k + c
+        if k < n {
+            // 400 ns: the drive needs this long to raise BSY for the
+            // block just sent (same four reads as ata_read_run).
+            serial.in8(ATA_CTRL)
+            serial.in8(ATA_CTRL)
+            serial.in8(ATA_CTRL)
+            serial.in8(ATA_CTRL)
+        }
+    }
+    return ata_wait(false)
+}
+
+fn ata_write_run_twice(lba: u64, src: u64, n: u64, slave: bool) -> bool {
+    if ata_write_run(lba, src, n, slave) {
+        return true
+    }
+    ata_recover(slave)
+    return ata_write_run(lba, src, n, slave)
 }
 
 fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
@@ -1041,6 +1112,128 @@ fn cache_drop(state: u64, dev: u64, lba: u64) {
     }
 }
 
+// ------------------------------------------------------------ r728
+// WRITE-BEHIND for the ATA volume path, scoped to one file-system call.
+//
+// `wb_begin` .. `wb_end` bracket a bulk operation (fs.write_at). While the
+// scope is open, sector writes to an ATA disk land in a direct-mapped RAM
+// table (128 sectors, slot = lba & 127) instead of going to the drive one
+// command per sector. Reads see the table first. Consecutive sectors sit in
+// consecutive slots, so the flush sends them as multi-sector WRITE commands.
+// The table is flushed when the OUTERMOST scope ends, on `flush`, when two
+// sectors collide in one slot, and before any read that must go to the
+// drive (so the drive never holds older data than a reader could see).
+// Nothing stays dirty after the call returns: the crash window is the same
+// system call as before.
+const W_BASE: u64 = 0x240 // address of the region, 0 = none
+const W_DEPTH: u64 = 0x248 // open scopes
+const W_DIRTY: u64 = 0x250 // valid slots
+const WB_SLOTS: u64 = 128
+const WB_VALID: u64 = 0x8000000000000000
+const WB_LBA_MASK: u64 = 0x0000FFFFFFFFFFFF
+
+fn wb_meta(state: u64, slot: u64) -> u64 {
+    return __mmio_read64((cg(state, W_BASE) + slot * 8) as *mut u64)
+}
+
+fn wb_meta_set(state: u64, slot: u64, v: u64) {
+    __mmio_write64((cg(state, W_BASE) + slot * 8) as *mut u64, v)
+}
+
+fn wb_data(state: u64, slot: u64) -> u64 {
+    return cg(state, W_BASE) + 4096 + slot * BLOCK_SIZE
+}
+
+fn wb_key(dev: u64, lba: u64) -> u64 {
+    return WB_VALID | (dev << 48) | lba
+}
+
+fn wb_active(state: u64) -> bool {
+    return cg(state, W_BASE) != 0 && cg(state, W_DEPTH) != 0
+}
+
+fn wb_begin(state: u64) {
+    if cg(state, W_BASE) == 0 && kstate.get(state, kstate.BITMAP) != 0 {
+        // 1 frame of slot keys + 16 frames of sector data
+        let b: u64 = mem.frame_run(state, 17)
+        if b != 0 {
+            var i: u64 = 0
+            while i < WB_SLOTS {
+                __mmio_write64((b + i * 8) as *mut u64, 0)
+                i = i + 1
+            }
+            cs(state, W_BASE, b)
+            cs(state, W_DIRTY, 0)
+        }
+    }
+    cs(state, W_DEPTH, cg(state, W_DEPTH) + 1)
+}
+
+fn wb_flush(state: u64) -> bool {
+    if cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 {
+        return true
+    }
+    var ok: bool = true
+    var sl: u64 = 0
+    while sl < WB_SLOTS {
+        let m: u64 = wb_meta(state, sl)
+        if m == 0 {
+            sl = sl + 1
+        } else {
+            var e: u64 = sl + 1
+            while e < WB_SLOTS && e - sl < 64 && wb_meta(state, e) == m + (e - sl) {
+                e = e + 1
+            }
+            let dv: u64 = (m >> 48) & 0x7FFF
+            if !ata_write_run_twice(m & WB_LBA_MASK, wb_data(state, sl), e - sl, dv == DEV_ATA1) {
+                ok = false
+            }
+            var j: u64 = sl
+            while j < e {
+                wb_meta_set(state, j, 0)
+                j = j + 1
+            }
+            sl = e
+        }
+    }
+    cs(state, W_DIRTY, 0)
+    return ok
+}
+
+fn wb_end(state: u64) -> bool {
+    let d: u64 = cg(state, W_DEPTH)
+    if d == 0 {
+        return true
+    }
+    cs(state, W_DEPTH, d - 1)
+    if d == 1 {
+        return wb_flush(state)
+    }
+    return true
+}
+
+fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    let sl: u64 = lba & (WB_SLOTS - 1)
+    let key: u64 = wb_key(dev, lba)
+    let old: u64 = wb_meta(state, sl)
+    if old != 0 && old != key {
+        if !wb_flush(state) {
+            return false
+        }
+    }
+    if wb_meta(state, sl) == 0 {
+        cs(state, W_DIRTY, cg(state, W_DIRTY) + 1)
+    }
+    let d: u64 = wb_data(state, sl)
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 8 {
+        __mmio_write64((d + i * 8) as *mut u64, __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+    wb_meta_set(state, sl, key)
+    return true
+}
+
 fn cache_reset(state: u64) {
     cache_invalidate(state)
     cs(state, C_HITS, 0)
@@ -1072,6 +1265,13 @@ fn cache_runs(state: u64) -> u64 {
 // dieselbe LBA heisst auf zwei Laufwerken zweierlei.
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
     let slave: bool = dev == DEV_ATA1
+    if cg(state, W_DIRTY) != 0 {
+        let wsl: u64 = lba & (WB_SLOTS - 1)
+        if wb_meta(state, wsl) == wb_key(dev, lba) {
+            copy(wb_data(state, wsl), dst)
+            return true
+        }
+    }
     var w: u64 = 0
     while w < kstate.BLKC_WAYS {
         if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
@@ -1086,6 +1286,8 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
         w = w + 1
     }
     cs(state, C_MISSES, cg(state, C_MISSES) + 1)
+    // r728: the drive must hold everything a reader could see.
+    wb_flush(state)
     // KEINE SPURERKENNUNG -- ACHT PLAETZE STATTDESSEN. GEMESSEN:
     //
     //   1 Weg,  immer vorauslesen   /bin/play kam nicht durch den Lader
@@ -1183,6 +1385,9 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
         return false
     }
     cache_drop(state, dev, lba)
+    if dev == DEV_ATA || dev == DEV_ATA1 {
+        wb_flush(state)
+    }
     if dev == DEV_ATA {
         return ata_write_twice(lba, src, false)
     }
@@ -1305,6 +1510,10 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
     cache_drop(state, kstate.get(state, kstate.DISK_DEV), abs)
+    let wdv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if (wdv == DEV_ATA || wdv == DEV_ATA1) && wb_active(state) {
+        return wb_put(state, wdv, abs, src)
+    }
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
         return ata_write_twice(abs, src, false)
     }
@@ -1322,5 +1531,47 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
         return false
     }
     copy(src, base + abs * BLOCK_SIZE)
+    return true
+}
+
+// r728: write n consecutive sectors (volume-relative lba). Plain ATA gets
+// multi-sector commands (the read-ahead cache is dropped for the range);
+// every other path (encryption, AHCI, NVMe, USB, RAM) stays sector by
+// sector through `write`, so their behaviour does not change at all.
+fn write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    if n == 0 {
+        return true
+    }
+    let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1) {
+        var k: u64 = 0
+        while k < n {
+            if !write(state, lba + k, src + k * BLOCK_SIZE) {
+                return false
+            }
+            k = k + 1
+        }
+        return true
+    }
+    if lba + n > blocks(state) {
+        return false
+    }
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    var done: u64 = 0
+    while done < n {
+        var c: u64 = n - done
+        if c > 64 {
+            c = 64
+        }
+        var j: u64 = 0
+        while j < c {
+            cache_drop(state, dv, abs + done + j)
+            j = j + 1
+        }
+        if !ata_write_run_twice(abs + done, src + done * BLOCK_SIZE, c, dv == DEV_ATA1) {
+            return false
+        }
+        done = done + c
+    }
     return true
 }

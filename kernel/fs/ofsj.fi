@@ -85,11 +85,12 @@ profile kernel
 
 import lib.kstate
 import block.blk
+import mm.mem
 
 export {
     setup, disable, enabled, begin, commit, abort, write, read,
     replay, needed, room, slots, counter, chunk, clear,
-    J_TX, J_REPLAY, J_RBLOCKS, J_CHUNKS, J_WRITES, J_HITS,
+    J_TX, J_REPLAY, J_RBLOCKS, J_CHUNKS, J_WRITES, J_HITS, J_STGRUNS,
     HEAD_MAGIC, COMMIT_MAGIC, MAX_SLOTS, BLOCKS_NEEDED
 }
 
@@ -133,6 +134,13 @@ const J_RBLOCKS: u64 = 80
 const J_CHUNKS: u64 = 88
 const J_WRITES: u64 = 96
 const J_HITS: u64 = 104
+// r728: RAM staging of the payload. The journal payload of a transaction
+// stays in memory (contiguous frames) until commit; commit then writes it
+// to the journal area as ONE run and checkpoints it from memory (no read
+// back). Slots beyond the staging capacity are written through as before.
+const J_STG: u64 = 112 // address of the staging area, 0 = none
+const J_STGCAP: u64 = 120 // slots the staging area holds
+const J_STGRUNS: u64 = 128 // payload/target runs written (counter)
 
 const TGT_OFF: u64 = 0x1000 // 512 Ziele zu acht Oktetten
 const HSH_OFF: u64 = 0x2000 // 512 Streuwerte zu acht Oktetten
@@ -171,6 +179,44 @@ fn hsh(state: u64, i: u64) -> u64 {
 
 fn hsh_set(state: u64, i: u64, v: u64) {
     kstate.set(state, kstate.JR_OFF + HSH_OFF + i * 8, v)
+}
+
+// ------------------------------------------------------------ staging
+fn stg_cap(state: u64) -> u64 {
+    return g(state, J_STGCAP)
+}
+
+fn stg(state: u64, i: u64) -> u64 {
+    return g(state, J_STG) + i * BS
+}
+
+// Word-wise copy of one block (the byte loop `copy` below is far too slow
+// for the hot path).
+fn copy_block(from: u64, to: u64) {
+    var i: u64 = 0
+    while i < BS / 8 {
+        put64(to + i * 8, get64(from + i * 8))
+        i = i + 1
+    }
+}
+
+// Get the staging area once (32 frames = 256 slots, else 8 frames = 64
+// slots, else none: write-through as before). It stays allocated.
+fn stage_init(state: u64) {
+    if g(state, J_STG) != 0 {
+        return
+    }
+    var frames: u64 = 32
+    var base: u64 = mem.frame_run(state, frames)
+    if base == 0 {
+        frames = 8
+        base = mem.frame_run(state, frames)
+    }
+    if base == 0 {
+        return
+    }
+    s(state, J_STGCAP, frames * mem.FRAME_SIZE / BS)
+    s(state, J_STG, base)
 }
 
 // ------------------------------------------------------- die Pruefsumme
@@ -290,6 +336,7 @@ fn setup(state: u64, jstart: u64, jblocks: u64) -> bool {
     s(state, J_START, jstart)
     s(state, J_BLOCKS, jblocks)
     s(state, J_ON, 1)
+    stage_init(state)
     return true
 }
 
@@ -348,7 +395,9 @@ fn write(state: u64, lba: u64, src: u64) -> bool {
     } else {
         s(state, J_HITS, g(state, J_HITS) + 1)
     }
-    if !blk.write(state, pay_blk(state, i), src) {
+    if g(state, J_STG) != 0 && i < stg_cap(state) {
+        copy_block(src, stg(state, i))
+    } else if !blk.write(state, pay_blk(state, i), src) {
         s(state, J_FULL, 1)
         return false
     }
@@ -363,6 +412,10 @@ fn read(state: u64, lba: u64, dst: u64) -> bool {
     if enabled(state) && g(state, J_DEPTH) != 0 {
         let i: u64 = find(state, lba)
         if i != KEIN {
+            if g(state, J_STG) != 0 && i < stg_cap(state) {
+                copy_block(stg(state, i), dst)
+                return true
+            }
             return blk.read(state, pay_blk(state, i), dst)
         }
     }
@@ -405,6 +458,21 @@ fn commit(state: u64) -> bool {
     }
     let seq: u64 = g(state, J_SEQ) + 1
     s(state, J_SEQ, seq)
+
+    // r728: the staged payload goes to the journal area as one run.
+    var m: u64 = 0
+    if g(state, J_STG) != 0 {
+        m = n
+        if m > stg_cap(state) {
+            m = stg_cap(state)
+        }
+    }
+    if m > 0 {
+        s(state, J_STGRUNS, g(state, J_STGRUNS) + 1)
+        if !blk.write_run(state, pay_blk(state, 0), stg(state, 0), m) {
+            return false
+        }
+    }
 
     // 1. Die Zieltafel. Acht Bloecke zu 64 Zahlen; nur die, in denen
     //    etwas steht, werden geschrieben.
@@ -457,15 +525,29 @@ fn commit(state: u64) -> bool {
     s(state, J_TX, g(state, J_TX) + 1)
 
     // 5. Nachtragen: jeder Platz an sein Ziel.
+    // r728: staged slots are checkpointed straight from memory; runs of
+    // consecutive target blocks go out as one command.
     i = 0
     while i < n {
-        if !blk.read(state, pay_blk(state, i), scratch2(state)) {
-            return false
+        if i < m {
+            var e: u64 = i + 1
+            while e < m && tgt(state, e) == tgt(state, e - 1) + 1 {
+                e = e + 1
+            }
+            s(state, J_STGRUNS, g(state, J_STGRUNS) + 1)
+            if !blk.write_run(state, tgt(state, i), stg(state, i), e - i) {
+                return false
+            }
+            i = e
+        } else {
+            if !blk.read(state, pay_blk(state, i), scratch2(state)) {
+                return false
+            }
+            if !blk.write(state, tgt(state, i), scratch2(state)) {
+                return false
+            }
+            i = i + 1
         }
-        if !blk.write(state, tgt(state, i), scratch2(state)) {
-            return false
-        }
-        i = i + 1
     }
     blk.flush(state)
     // 6. Loeschen. Ab hier gibt es nichts mehr nachzutragen.
