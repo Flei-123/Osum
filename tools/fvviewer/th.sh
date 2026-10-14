@@ -34,8 +34,8 @@ up)
     RP=${1:?relay port}; TP=${2:-}
     echo "$RP" > "$S/relay.port"
     cp "$FVREPO/relay/relay.js" "$S/relay.cjs"
-    # relay.js requires its helper module (client IP) next to it
-    for m in clientip.js; do [ -f "$FVREPO/relay/$m" ] && cp "$FVREPO/relay/$m" "$S/$m"; done
+    # relay.js requires its helper modules (client IP, request auth) next to it
+    for m in clientip.js reqauth.js; do [ -f "$FVREPO/relay/$m" ] && cp "$FVREPO/relay/$m" "$S/$m"; done
     ( cd "$S"; FV_PORT="$RP" FV_DATA="$S/hosts.json" nohup node "$S/relay.cjs" >"$S/relay.log" 2>&1 & echo $! > "$S/relay.pid" ) >/dev/null 2>&1 </dev/null
     for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$RP/fv/health" >/dev/null 2>&1 && break; sleep 0.1; done
     curl -fsS "http://127.0.0.1:$RP/fv/health" >/dev/null || { echo "relay did not start"; exit 1; }
