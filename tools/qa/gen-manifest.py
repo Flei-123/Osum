@@ -50,7 +50,7 @@ GATE_AREAS = {
     "fs": "ofs3 fsrobust fremdfs k14 disks storage mem oom hardening",
     "core": "smp multicore execsmp elfsmp kernel osum core freestanding guard kvm hv pci ahci aml arm metal metal2 caps boot "
             "mem oom zreap time vsync suspend",
-    "drv": "hid hidpunkte hidweg hotplug hda s3 s3dev s3smp powermon gpu3d k17 aesni avx",
+    "drv": "hid hidpunkte hidweg hotplug hda s3 s3dev s3smp powermon power gpu3d k17 aesni avx",
     "libc": "posix unix userland dynlader module operation protocol systembus struktur e2e",
     "crypto": "krypto argon vault xtstafel geraetekey codec pdf",
     "bridge": "bridge server",

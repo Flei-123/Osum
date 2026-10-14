@@ -104,7 +104,7 @@ export {
     ac_online, button_pending, button_take, take_change, changed,
     EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
     LID_OPEN, LID_CLOSED, LID_UNKNOWN,
-    report, selftest, wait_loop, ev_fake, fake_all
+    report, selftest, wait_loop, ev_fake, fake_all, inject
 }
 
 // ---------------------------------------------- die Plaetze in `kdata`
@@ -1472,6 +1472,32 @@ fn fake_all(state: u64) {
         let _b: bool = ev_fake(state, meth_bit(state, i))
         i = i + 1
     }
+}
+
+// L-005..L-007: set the fake laptop's values at RUN time and queue its three GPE methods (lid bit 3,
+// battery bit 4, mains+battery bit 5), so the whole chain method -> Notify -> `_LID`/`_BST`/`_PSR` -> value
+// is walked by `pump` in normal operation, exactly like a real SCI. Only with `evfake` on the kernel
+// line (the machine then has the SSDT of tools/acpiev/asl/laptop.asl); never on a real board.
+// `/bin/power inject` (root) is the way in from user space; tools/power/run.sh is the user.
+fn inject(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) -> bool {
+    if !kstate.mode_on(state, kstate.M_EVFAKE) {
+        return false
+    }
+    if !ready(state) {
+        return false
+    }
+    fake_set(state, lid, pct, zust, ac)
+    var bit: u64 = 3
+    while bit <= 5 {
+        let idx: u64 = meth_find(state, bit)
+        if idx != 0xFFFF {
+            let w: u64 = E_PEND + (idx / 64) * 8
+            s(state, w, g(state, w) | (1 << (idx & 63)))
+        }
+        bit = bit + 1
+    }
+    s(state, E_WAKE, g(state, E_WAKE) + 1)
+    return true
 }
 
 // ==================================================================
