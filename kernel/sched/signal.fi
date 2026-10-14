@@ -69,7 +69,7 @@ export {
     check_sys, check_trap, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
     do_setpgid, do_getpgid, do_setsid, do_alarm, do_sigpending,
-    do_setitimer, do_getitimer, do_sigaltstack, do_sigsuspend,
+    do_setitimer, do_getitimer, do_sigaltstack, do_sigsuspend, do_sigtimedwait,
     exiting, stopped_count, handler_of, say_name, signal_of, lethal,
     SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE,
     SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM,
@@ -1495,6 +1495,73 @@ fn do_sigaltstack(state: u64, task: u64, ss: u64, old: u64) -> u64 {
 
 // sigsuspend(mask, size): swap the mask, wait for a signal that is not blocked by it, answer -EINTR. The handler (if any) runs on the
 // way out with the TEMPORARY mask; its frame carries the old one (`deliver`), so `sigreturn` gives it back.
+// rt_sigtimedwait(set, info, timeout, sigsetsize) -- Linux 128 (W-MG3; busybox init waits for its children and signals with it).
+// Takes the lowest pending signal out of `set` (normally blocked ones), returns its number and fills siginfo (si_signo only).
+// timeout == NULL waits for ever, a zero timeout polls. An UNBLOCKED, deliverable signal outside the set ends the wait with -EINTR;
+// no signal in time: -EAGAIN.
+fn do_sigtimedwait(state: u64, task: u64, setp: u64, infop: u64, tsp: u64, size: u64) -> u64 {
+    if size != 8 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, task, setp, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let want: u64 = peek64(state, task, setp) & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP)))
+    var forever: bool = true
+    var left: u64 = 0
+    if tsp != 0 {
+        if !proc.user_ok(state, task, tsp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let sec: u64 = peek64(state, task, tsp)
+        let nsec: u64 = peek64(state, task, tsp + 8)
+        if nsec >= 1000000000 || sec > 0x7FFFFFFFFFFFFFFF {
+            return neg(errno.E_INVAL)
+        }
+        forever = false
+        // 100 ticks per second: round up, cap at one day
+        var s2: u64 = sec
+        if s2 > 86400 {
+            s2 = 86400
+        }
+        left = s2 * 100 + (nsec + 9999999) / 10000000
+    }
+    if infop != 0 && !proc.user_ok(state, task, infop, 128) {
+        return neg(errno.E_FAULT)
+    }
+    while true {
+        let hit: u64 = sched.tget(state, task, sched.T_SIGPEND) & want
+        if hit != 0 {
+            var sig: u64 = 1
+            while sig < NSIG && (hit & bit(sig)) == 0 {
+                sig = sig + 1
+            }
+            sched.tset(state, task, sched.T_SIGPEND,
+                sched.tget(state, task, sched.T_SIGPEND) & (0xFFFFFFFFFFFFFFFF -% bit(sig)))
+            if infop != 0 {
+                var k: u64 = 0
+                while k < 16 {
+                    poke64(state, task, infop + k * 8, 0)
+                    k = k + 1
+                }
+                poke64(state, task, infop, sig)
+            }
+            return sig
+        }
+        if deliverable(state, task) != 0 {
+            return neg(errno.E_INTR)
+        }
+        if !forever {
+            if left == 0 {
+                return neg(errno.E_AGAIN)
+            }
+            left = left - 1
+        }
+        sched.sleep_ticks(state, 1)
+    }
+    return neg(errno.E_AGAIN)
+}
+
 fn do_sigsuspend(state: u64, task: u64, maskp: u64, size: u64) -> u64 {
     if size != 8 {
         return neg(errno.E_INVAL)
