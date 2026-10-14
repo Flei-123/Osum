@@ -1390,6 +1390,23 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
     return R_KEINER
 }
 
+// W-MG3: put the jail root of the running task in front of an interpreter path (PT_INTERP or #! line), in place. The slot holds
+// IPATH_MAX octets; a path that does not fit with the root is refused. A host task passes unchanged.
+fn jail_ipath(state: u64, ip: u64) -> bool {
+    let t: u64 = sched.current(state)
+    if !ctr.jail_needed(state, t) {
+        return true
+    }
+    var n: u64 = 0
+    while n < IPATH_MAX && kstate.get8(ip + n) != 0 {
+        n = n + 1
+    }
+    if n == 0 || n >= IPATH_MAX || kstate.get8(ip) != 47 {
+        return false
+    }
+    return ctr.jail(state, t, ip, n, IPATH_MAX) != 0
+}
+
 fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
     var p: u64 = path
     var a: u64 = args
@@ -1431,7 +1448,8 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
                 at = at + copy_word(na + at, ia, IWORD_MAX)
                 neu = neu + 1
             }
-            at = at + copy_word(na + at, p, IWORD_MAX)
+            // W-MG3: the script path handed to the interpreter is relative to the jail root again (the interpreter jails it itself)
+            at = at + copy_word(na + at, p + ctr.prefix_len(state, sched.current(state), p), IWORD_MAX)
             neu = neu + 1
             var k: u64 = 1
             while k < n {
@@ -1450,6 +1468,11 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
             let z: u64 = kstate.K16_OFF + kstate.FT_SCALARS
                 + kstate.FT_SHEBANGS
             kstate.set(state, z, kstate.get(state, z) + 1)
+            // W-MG3: a #! interpreter of a jailed task is looked up inside the jail
+            if !jail_ipath(state, ip) {
+                fail(state, R_INTERP)
+                return errno.neg(errno.E_NOENT)
+            }
             p = ip
             a = na
             n = neu
@@ -1638,8 +1661,13 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     if braucht_lader {
         // Der Interpreter ist eine ganz gewoehnliche Datei dieses
         // Dateisystems, und er wird wie jede andere gesucht.
+        // W-MG3 (chroot): the interpreter lives INSIDE the jail of the task that starts the program (`ld-musl` of a chroot).
+        var ipj: u64 = 1
+        if !jail_ipath(state, ipath) {
+            ipj = 0
+        }
         let iino: u64 = fs.path(state, ipath)
-        if iino == 0 {
+        if ipj == 0 || iino == 0 {
             proc.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_INOFILE)
