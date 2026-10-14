@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sockt.fi -- ROUND FV-W24: the program that measures
+// SO_RCVTIMEO / SO_SNDTIMEO. It prints lines of the form
+//
+//     sockt: <name> = <number>
+//
+// and `tools/sockopt/run.sh` reads them back. Time is taken from
+// CLOCK_MONOTONIC, not from the tick counter the kernel waits on, so the
+// clock does not measure itself.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.stdio
+import libc.text
+import libc.proc
+
+export { u_start }
+
+static mut lines: u64 = 0
+
+const CLOCK_MONOTONIC: u64 = 1
+const SOL_SOCKET: u64 = 1
+const SO_REUSEADDR: u64 = 2
+const SO_RCVTIMEO: u64 = 20
+const SO_SNDTIMEO: u64 = 21
+const SO_RCVTIMEO_NEW: u64 = 66
+
+fn tell(name: u64, v: u64) {
+    var head: [u8; 8] = "sockt: \0"
+    var mid: [u8; 4] = " = \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(name)
+    stdio.say((&mid[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    lines = lines + 1
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0]) as u64)
+    return (ts[0] *% 1000) +% (ts[1] / 1000000)
+}
+
+// setsockopt has FIVE arguments (fd, level, name, value, length)
+fn sockopt_set(fd: u64, name: u64, val: u64, olen: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") kcall.SYS_SETSOCKOPT, in("rdi") fd,
+        in("rsi") SOL_SOCKET, in("rdx") name, in("r10") val, in("r8") olen,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn sockopt_get(fd: u64, name: u64, val: u64, lenp: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") kcall.SYS_GETSOCKOPT, in("rdi") fd,
+        in("rsi") SOL_SOCKET, in("rdx") name, in("r10") val, in("r8") lenp,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn set_tmo(fd: u64, name: u64, sec: u64, usec: u64) -> u64 {
+    var tv: [u64; 2] = [0 as u64; 2]
+    tv[0] = sec
+    tv[1] = usec
+    return sockopt_set(fd, name, (&tv[0]) as u64, 16)
+}
+
+// microseconds the kernel reports for `name`, or 0xFFFFFFFF on error
+fn get_tmo_us(fd: u64, name: u64) -> u64 {
+    var tv: [u64; 2] = [0 as u64; 2]
+    var len: [u64; 1] = [16 as u64; 1]
+    let r: u64 = sockopt_get(fd, name, (&tv[0]) as u64, (&len[0]) as u64)
+    if net.failed(r) {
+        return 0xFFFFFFFF
+    }
+    return tv[0] * 1000000 + tv[1]
+}
+
+fn recv_ms(fd: u64, ret: *mut u64) -> u64 {
+    var buf: [u8; 64] = [0 as u8; 64]
+    var from: [u64; 1] = [0 as u64; 1]
+    let t0: u64 = mono_ms()
+    *ret = net.recvfrom_ip(fd, (&buf[0]) as u64, 64, &from[0])
+    return mono_ms() -% t0
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_r1: [u8; 8] = "r1_ret\0\0"
+    var n_m1: [u8; 8] = "r1_ms\0\0\0"
+    var n_g1: [u8; 8] = "r1_get\0\0"
+    var n_s: [u8; 8] = "set_ret\0"
+    var n_r2: [u8; 8] = "r2_ret\0\0"
+    var n_m2: [u8; 8] = "r2_ms\0\0\0"
+    var n_g2: [u8; 8] = "r2_get\0\0"
+    var n_r3: [u8; 8] = "r3_ret\0\0"
+    var n_m3: [u8; 8] = "r3_ms\0\0\0"
+    var n_g3: [u8; 8] = "r3_get\0\0"
+    var n_sg: [u8; 8] = "snd_get\0"
+    var n_rg: [u8; 8] = "rcv_kept"
+    var n_i1: [u8; 8] = "inv_us\0\0"
+    var n_i2: [u8; 8] = "inv_len\0"
+    var n_i3: [u8; 8] = "inv_ptr\0"
+    var n_i4: [u8; 8] = "inv_neg\0"
+    var n_ru: [u8; 8] = "reuse\0\0\0"
+    var n_nw: [u8; 8] = "new_get\0"
+    var n_nb: [u8; 8] = "nb_ret\0\0"
+    var n_nm: [u8; 8] = "nb_ms\0\0\0"
+    var n_zg: [u8; 8] = "zero_get"
+    var n_ar: [u8; 8] = "acc_ret\0"
+    var n_am: [u8; 8] = "acc_ms\0\0"
+    var n_lr: [u8; 8] = "lst_ret\0"
+    var n_fd: [u8; 8] = "udp_ok\0\0"
+    var done: [u8; 8] = "lines\0\0\0"
+    var ret: u64 = 0
+
+    let fd: u64 = net.udp_socket()
+    tell((&n_fd[0]) as u64, 1 - (fd >> 63))
+    let bind: u64 = net.bind_port(fd, 7001)
+    tell((&n_s[0]) as u64, bind)
+
+    // 1. 200 ms
+    tell((&n_s[0]) as u64, set_tmo(fd, SO_RCVTIMEO, 0, 200000))
+    tell((&n_g1[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+    let m1: u64 = recv_ms(fd, &ret)
+    tell((&n_r1[0]) as u64, ret)
+    tell((&n_m1[0]) as u64, m1)
+    // the socket is still usable after a timeout: again
+    let m1b: u64 = recv_ms(fd, &ret)
+    tell((&n_r1[0]) as u64, ret)
+    tell((&n_m1[0]) as u64, m1b)
+
+    // 2. 1.5 s
+    set_tmo(fd, SO_RCVTIMEO, 1, 500000)
+    tell((&n_g2[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+    let m2: u64 = recv_ms(fd, &ret)
+    tell((&n_r2[0]) as u64, ret)
+    tell((&n_m2[0]) as u64, m2)
+
+    // 3. 15 ms (what the OrientOS viewer asks for): rounds up to 20 ms
+    set_tmo(fd, SO_RCVTIMEO, 0, 15000)
+    tell((&n_g3[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+    let m3: u64 = recv_ms(fd, &ret)
+    tell((&n_r3[0]) as u64, ret)
+    tell((&n_m3[0]) as u64, m3)
+
+    // 4. the send timeout is its own value and leaves the receive one alone
+    set_tmo(fd, SO_SNDTIMEO, 0, 300000)
+    tell((&n_sg[0]) as u64, get_tmo_us(fd, SO_SNDTIMEO))
+    tell((&n_rg[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+
+    // 5. the 64-bit "_NEW" name takes the same struct
+    set_tmo(fd, SO_RCVTIMEO_NEW, 0, 70000)
+    tell((&n_nw[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+
+    // 6. wrong values
+    tell((&n_i1[0]) as u64, set_tmo(fd, SO_RCVTIMEO, 0, 1000000))
+    var tv: [u64; 2] = [0 as u64; 2]
+    tell((&n_i2[0]) as u64, sockopt_set(fd, SO_RCVTIMEO, (&tv[0]) as u64, 8))
+    tell((&n_i3[0]) as u64, sockopt_set(fd, SO_RCVTIMEO, 0, 16))
+    tell((&n_i4[0]) as u64, set_tmo(fd, SO_RCVTIMEO, 0xFFFFFFFFFFFFFFFF, 0))
+    // an option the kernel does not act on is still taken (curl, nc)
+    var one: [u64; 1] = [1 as u64; 1]
+    tell((&n_ru[0]) as u64, sockopt_set(fd, SO_REUSEADDR, (&one[0]) as u64, 4))
+
+    // 7. 0/0 clears the timeout
+    set_tmo(fd, SO_RCVTIMEO, 0, 0)
+    tell((&n_zg[0]) as u64, get_tmo_us(fd, SO_RCVTIMEO))
+
+    // 8. a non-blocking socket never waits, whatever the timeout says
+    let nbfd: u64 = net.socket(net.AF_INET, net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    net.bind_port(nbfd, 7002)
+    set_tmo(nbfd, SO_RCVTIMEO, 0, 500000)
+    let mnb: u64 = recv_ms(nbfd, &ret)
+    tell((&n_nb[0]) as u64, ret)
+    tell((&n_nm[0]) as u64, mnb)
+
+    // 9. accept honours SO_RCVTIMEO like Linux
+    let lfd: u64 = net.tcp_socket()
+    net.bind_port(lfd, 7003)
+    tell((&n_lr[0]) as u64, net.listen(lfd, 4))
+    set_tmo(lfd, SO_RCVTIMEO, 0, 100000)
+    let t0: u64 = mono_ms()
+    let ac: u64 = net.accept_from(lfd, 0)
+    tell((&n_ar[0]) as u64, ac)
+    tell((&n_am[0]) as u64, mono_ms() -% t0)
+
+    tell((&done[0]) as u64, lines + 1)
+    stdio.flush()
+    return lines
+}

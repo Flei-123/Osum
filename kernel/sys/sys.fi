@@ -12948,6 +12948,7 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     }
     let nb: bool = inet.sock_nonblock(state, si) || (flags & SOCK_NONBLOCK) != 0
     var waited: u64 = 0
+    let adl: u64 = sock_deadline(state, si, false)
     var got: u64 = inet.SOCK_MAX
     while got >= inet.SOCK_MAX {
         let c: u64 = inet.sock_accept(state, si)
@@ -12955,7 +12956,7 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
             got = c
         } else if nb {
             return neg(errno.E_AGAIN)
-        } else if waited >= NET_ROUNDS {
+        } else if sock_gave_up(state, adl, waited) {
             return neg(errno.E_AGAIN)
         } else {
             waited = waited + 1
@@ -13185,6 +13186,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     var port: u64 = 0
     var waited: u64 = 0
     let nb: bool = inet.sock_nonblock(state, si)
+    let rdl: u64 = sock_deadline(state, si, false)
     var n: u64 = 0
     var going: bool = true
     while going {
@@ -13193,7 +13195,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
             going = false
         } else if n != neg(errno.E_AGAIN) {
             return n
-        } else if nb || waited >= NET_ROUNDS {
+        } else if nb || sock_gave_up(state, rdl, waited) {
             return neg(errno.E_AGAIN)
         } else {
             waited = waited + 1
@@ -13222,7 +13224,8 @@ fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
     to: bool) -> u64 {
     var waited: u64 = 0
     let nb: bool = inet.sock_nonblock(state, si)
-    while waited <= NET_ROUNDS {
+    let sdl: u64 = sock_deadline(state, si, true)
+    while !sock_gave_up(state, sdl, waited) {
         var n: u64 = 0
         if to {
             n = inet.sock_sendto(state, si, bounce, len, a, port)
@@ -13324,6 +13327,14 @@ fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
 // (N-006, see below and tcp.fi). Every other option is taken and none is
 // acted on -- and that is said here rather than answered with
 // -ENOPROTOOPT, which would make `curl` and `nc` give up for no reason.
+//
+// ROUND FV-W24: ALSO ACTED ON NOW: SO_RCVTIMEO and SO_SNDTIMEO
+// (SOL_SOCKET 20 and 21, and the 64-bit "_NEW" names 66 and 67, which take
+// the same `struct timeval` here). The value is kept in ticks in the flags
+// word of the socket (`inet.sock_set_tmo`) and read by the waiting loops of
+// recv, accept and send (`sock_deadline`). Until this round the option was
+// taken and thrown away, so a "timed" read blocked until data came (up to
+// NET_ROUNDS = 30 s) and every program that relied on the timeout stalled.
 fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     name: u64, val: u64, optlen: u64) -> u64 {
     if nl_of(state, me, fd) < file.MAX_OPEN {
@@ -13332,6 +13343,33 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
+    }
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) {
+        if optlen < 16 {
+            return neg(errno.E_INVAL)
+        }
+        if !proc.user_ok(state, me, val, 16) {
+            return neg(errno.E_FAULT)
+        }
+        var sec: u64 = 0
+        var usec: u64 = 0
+        var k: u64 = 0
+        while k < 8 {
+            sec = sec | (peek(state, me, val + k) << (k * 8))
+            usec = usec | (peek(state, me, val + 8 + k) << (k * 8))
+            k = k + 1
+        }
+        // a negative or out-of-range value is -EINVAL, as on Linux
+        if sec >= 0x8000000000000000 || usec >= 1000000 {
+            return neg(errno.E_INVAL)
+        }
+        var ticks: u64 = inet.TMO_MASK
+        if sec < 100000 {
+            // rounded UP: a timeout never fires earlier than asked
+            ticks = (sec * 1000000 + usec + 9999) / 10000
+        }
+        inet.sock_set_tmo(state, si, name == 21 || name == 67, ticks)
+        return 0
     }
     // N-006: SO_KEEPALIVE (SOL_SOCKET 9) and TCP_KEEPIDLE / TCP_KEEPINTVL /
     // TCP_KEEPCNT (IPPROTO_TCP 4 / 5 / 6) are acted on; every other option
@@ -13373,6 +13411,27 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
         }
     }
     return inet.sock_ka_set(state, si, which, v)
+}
+
+// The tick at which a blocking call on socket `si` must give up, or 0 when
+// no timeout is set (then the old NET_ROUNDS bound applies). Like `poll`,
+// the running tick counts as one: the wait lies between `timeout` and
+// `timeout + 10 ms`, never below it.
+fn sock_deadline(state: u64, si: u64, snd: bool) -> u64 {
+    let t: u64 = inet.sock_tmo(state, si, snd)
+    if t == 0 {
+        return 0
+    }
+    return kstate.get(state, kstate.TICKS) + t + 1
+}
+
+// True when a waiting loop has to stop: the user timeout passed, or --
+// without one -- the old NET_ROUNDS bound.
+fn sock_gave_up(state: u64, deadline: u64, waited: u64) -> bool {
+    if deadline != 0 {
+        return kstate.get(state, kstate.TICKS) >= deadline
+    }
+    return waited >= NET_ROUNDS
 }
 
 // SIOCGIFCONF: struct ifconf { int ifc_len; char *ifc_buf } -> one ifreq (40 bytes) for "eth0" with its address.
@@ -13554,6 +13613,19 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
     }
     if room < 4 {
         return neg(errno.E_INVAL)
+    }
+    // ROUND FV-W24: SO_RCVTIMEO / SO_SNDTIMEO read back as a `struct timeval`
+    // (the stored ticks, 10 ms each).
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) && si < inet.SOCK_MAX {
+        if room < 16 {
+            return neg(errno.E_INVAL)
+        }
+        let tk: u64 = inet.sock_tmo(state, si, name == 21 || name == 67)
+        let us: u64 = tk * 10000
+        if !put64(state, me, val, us / 1000000) || !put64(state, me, val + 8, us % 1000000) || !put32(state, me, lenp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
     }
     var v: u64 = 0
     var known: bool = false

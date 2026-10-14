@@ -82,7 +82,7 @@ export {
     sock_close, sock_shutdown, sock_state, sock_peer, sock_local,
     sock_readable, sock_writable, sock_error,
     sock_acceptable, sock_hup,
-    sock_nonblock, sock_set_nonblock,
+    sock_nonblock, sock_set_nonblock, sock_tmo, sock_set_tmo, TMO_MASK,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
     SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE,
     sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT
@@ -1017,6 +1017,43 @@ fn sock_set_nonblock(state: u64, i: u64) {
     }
     kstate.set(state, so_at(i) + SO_FLAGS,
         kstate.get(state, so_at(i) + SO_FLAGS) | SF_NONBLOCK)
+}
+
+// ROUND FV-W24: SO_RCVTIMEO / SO_SNDTIMEO. The two timeouts live in the
+// upper bits of the flags word of the slot, in ticks (10 ms): the receive
+// timeout in bits 8..31, the send timeout in bits 32..55. The low byte stays
+// the SF_* bits, `sock_new` clears the whole word, and every other writer
+// ORs its bit in, so nothing else has to know. 0 = no timeout (the default).
+const TMO_MASK: u64 = 0xFFFFFF
+const TMO_RCV_SHIFT: u64 = 8
+const TMO_SND_SHIFT: u64 = 32
+
+fn sock_tmo(state: u64, i: u64, snd: bool) -> u64 {
+    if i >= SOCK_MAX {
+        return 0
+    }
+    var sh: u64 = TMO_RCV_SHIFT
+    if snd {
+        sh = TMO_SND_SHIFT
+    }
+    return (kstate.get(state, so_at(i) + SO_FLAGS) >> sh) & TMO_MASK
+}
+
+fn sock_set_tmo(state: u64, i: u64, snd: bool, ticks: u64) {
+    if i >= SOCK_MAX {
+        return
+    }
+    var sh: u64 = TMO_RCV_SHIFT
+    if snd {
+        sh = TMO_SND_SHIFT
+    }
+    var t: u64 = ticks
+    if t > TMO_MASK {
+        t = TMO_MASK
+    }
+    let fl: u64 = kstate.get(state, so_at(i) + SO_FLAGS)
+    let keep: u64 = fl - (fl & (TMO_MASK << sh))
+    kstate.set(state, so_at(i) + SO_FLAGS, keep | (t << sh))
 }
 
 fn sock_new(state: u64, kind: u64) -> u64 {
