@@ -39,7 +39,7 @@ mesonb() { local n=$1; shift
     ( cd "$W/x/$n" && "$MESON" setup b --prefix="$P" --libdir=lib --buildtype=release -Ddefault_library=shared "$@" && ninja -C b -j"$J" && ninja -C b install ) }
 cmakeb() { local n=$1; shift
     ( cd "$W/x/$n" && cmake -S . -B b -G Ninja -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=musl-gcc \
-        -DCMAKE_C_FLAGS="$CFLAGS" -DM_LIBRARY=-lm -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH="$P/lib" "$@" && ninja -C b -j"$J" && ninja -C b install ) }
+        -DCMAKE_C_FLAGS="$CFLAGS" -DM_LIBRARY= -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH="$P/lib" "$@" && ninja -C b -j"$J" && ninja -C b install ) }
 
 unpack zlib zlib-1.3.1.tar.gz; unpack pcre2 pcre2-10.44.tar.bz2; unpack libffi libffi-3.4.6.tar.gz; unpack expat expat-2.6.3.tar.xz; unpack pixman pixman-0.43.4.tar.gz
 unpack freetype freetype-2.13.3.tar.xz; unpack wayland wayland-1.23.1.tar.xz; unpack wlproto wayland-protocols-1.38.tar.xz; unpack xkbcommon libxkbcommon-1.7.0.tar.xz
@@ -72,12 +72,18 @@ step glib mesonb glib -Dtests=false -Dnls=disabled -Dlibmount=disabled -Dselinux
 step harfbuzz mesonb harfbuzz -Dtests=disabled -Ddocs=disabled -Dbenchmark=disabled -Dglib=enabled -Dgobject=enabled -Dfreetype=enabled -Dcairo=disabled -Dicu=disabled -Dintrospection=disabled -Dutilities=disabled
 step cairo mesonb cairo -Dtests=disabled -Dxlib=disabled -Dxcb=disabled -Dzlib=enabled -Dpng=disabled -Dfreetype=enabled -Dfontconfig=enabled -Dglib=enabled -Dspectre=disabled -Dsymbol-lookup=disabled -Dgtk2-utils=disabled
 step pango mesonb pango -Dintrospection=disabled -Dgtk_doc=false -Dbuild-testsuite=false -Dbuild-examples=false -Dfontconfig=enabled -Dcairo=enabled -Dxft=disabled
-step libpng cmakeb png -DPNG_STATIC=OFF -DPNG_TESTS=OFF -DPNG_EXECUTABLES=OFF -DPNG_ARM_NEON=off
+step libpng cmakeb png -DPNG_TOOLS=OFF -DZLIB_INCLUDE_DIR="$P/include" -DZLIB_LIBRARY="$P/lib/libz.so" -DPNG_STATIC=OFF -DPNG_TESTS=OFF -DPNG_EXECUTABLES=OFF -DPNG_ARM_NEON=off
 step libjpeg cmakeb jpeg -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=OFF -DWITH_JAVA=OFF -DENABLE_SHARED=ON -DCMAKE_ASM_NASM_COMPILER=nasm
-step libtiff cmakeb tiff -Dcxx=OFF -Dlzma=OFF -Dzstd=OFF -Dwebp=OFF -Djbig=OFF -Dold-jpeg=OFF -Djpeg12=OFF -Dpixarlog=OFF -Dlerc=OFF -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF
 step pixbuf mesonb pixbuf -Dpng=enabled -Djpeg=enabled -Dtiff=disabled -Dothers=disabled -Dbuiltin_loaders=all -Dgio_sniffing=false -Dintrospection=disabled -Dman=false -Dtests=false -Dinstalled_tests=false -Drelocatable=false
 step graphene mesonb graphene -Dtests=false -Dgobject_types=true -Dintrospection=disabled -Dinstalled_tests=false -Darm_neon=false
+# EGL/KHR headers are header-only (Khronos, MIT); take them from the host (libegl-dev) -- epoxy needs them to generate its dispatch tables
+cp -r /usr/include/EGL /usr/include/KHR "$W/kinc/" || { echo "build-gtk-stones: install libegl-dev (EGL/KHR headers)"; exit 1; }
 step epoxy mesonb epoxy -Dtests=false -Degl=yes -Dglx=no -Dx11=false
+# GTK only wants drm_fourcc.h (fourcc constants) from libdrm, never links it: stub libdrm.pc + the kernel uapi headers (arch-neutral copy, found on the host)
+DRMH=$(ls -d /usr/include/drm /usr/aarch64-linux-gnu/include/drm 2>/dev/null | head -1)
+[ -n "$DRMH" ] || { echo "build-gtk-stones: no drm uapi headers (drm_fourcc.h) on the host"; exit 1; }
+mkdir -p "$P/include/libdrm" && cp "$DRMH"/drm_fourcc.h "$DRMH"/drm.h "$DRMH"/drm_mode.h "$P/include/libdrm/"
+printf 'prefix=%s\nName: libdrm\nDescription: stub (fourcc header only)\nVersion: 2.4.120\nCflags: -I%s/include/libdrm\n' "$P" "$P" > "$P/lib/pkgconfig/libdrm.pc"
 step gtk mesonb gtk -Dx11-backend=false -Dwayland-backend=true -Dbroadway-backend=false -Dmedia-gstreamer=disabled -Dprint-cups=disabled -Dvulkan=disabled -Dcloudproviders=disabled \
     -Dsysprof=disabled -Dtracker=disabled -Dcolord=disabled -Dintrospection=disabled -Ddocumentation=false -Dman-pages=false -Dbuild-demos=false -Dbuild-testsuite=false \
     -Dbuild-examples=false -Dbuild-tests=false -Df16c=disabled -Dscreenshots=false
