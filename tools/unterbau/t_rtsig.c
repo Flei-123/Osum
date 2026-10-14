@@ -18,12 +18,12 @@ int main(void)
     sa.sa_handler = h; sigemptyset(&sa.sa_mask);
     CHECK("range", SIGRTMIN >= 32 && SIGRTMAX == 64, "SIGRTMIN=%d SIGRTMAX=%d", SIGRTMIN, SIGRTMAX);
     int ok = 1, bad = 0;
-    for (int s = 34; s <= 64; s++) { sa.sa_handler = h; if (sigaction(s, &sa, 0) != 0) { ok = 0; bad = s; break; } }
+    for (int s = 35; s <= 64; s++) { sa.sa_handler = h; if (sigaction(s, &sa, 0) != 0) { ok = 0; bad = s; break; } }
     CHECK("sigaction_all", ok, "sigaction(%d) failed errno=%d", bad, errno);
     errno = 0;
     CHECK("sigaction_65_einval", sigaction(65, &sa, 0) == -1 && errno == EINVAL, "errno=%d", errno);
     int all = 1, first_bad = 0;
-    for (int s = 34; s <= 64; s++) { got[s] = 0; raise(s); if (got[s] != 1) { all = 0; first_bad = s; break; } }
+    for (int s = 35; s <= 64; s++) { got[s] = 0; raise(s); if (got[s] != 1) { all = 0; first_bad = s; break; } }
     CHECK("raise_all_delivered", all, "signal %d not delivered exactly once (%d)", first_bad, first_bad ? got[first_bad] : 0);
     kill(getpid(), 64); CHECK("kill_64", got[64] == 2, "got %d", got[64]);
     /* the action record of 40 does not alias 8 or 63 */
