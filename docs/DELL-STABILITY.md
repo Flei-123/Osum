@@ -106,8 +106,8 @@ there is larger in absolute terms.
   does not show a gain there; the difference is within the 5 s poll back-off
   and run-to-run noise. The gain is in the cases it does not cover (lease loss,
   failed single polls, old back-off after a long good session).
-* Roadmap N-006 (`SO_KEEPALIVE` does nothing) is NOT done: jarvisd over https
-  does not depend on a long-lived TCP connection any more.
+* Roadmap N-006 (`SO_KEEPALIVE`) is done: real TCP keepalive (idle/interval/count,
+  RST after unanswered probes), gate tools/keepalive/run.sh 35/0.
 
 ## Reproduce
 
