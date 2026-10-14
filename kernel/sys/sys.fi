@@ -2728,7 +2728,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // kennt kein nachtraegliches Umschalten. musl ruft es beim Anlegen
     // eines Fadenstapels (Schutzseite) und kommt mit einem Ja zurecht.
     if number == SYS_MPROTECT {
-        return do_mprotect(state, me, a0, a1, a2)
+        unixsock.vm_lock(state, me)
+        let mpr: u64 = do_mprotect(state, me, a0, a1, a2)
+        unixsock.vm_unlock(state, me)
+        return mpr
     }
     // RUNDE UNTERBAU: the small calls a big program makes at start-up (docs/RUNDE-UNTERBAU-FIREFOX.md). Each answers with what this
     // kernel really is -- a limit that exists, a count of cores it really has, "nothing to do" where there is nothing -- and none of
@@ -2771,7 +2774,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_madvise(state, me, a0, a1, a2)
     }
     if number == UB_MREMAP {
-        return do_mremap(state, me, a0, a1, a2, a3)
+        unixsock.vm_lock(state, me)
+        let mrr: u64 = do_mremap(state, me, a0, a1, a2, a3)
+        unixsock.vm_unlock(state, me)
+        return mrr
     }
     if number == UB_MSYNC || number == UB_MLOCK || number == UB_MUNLOCK || number == UB_MLOCKALL || number == UB_MUNLOCKALL {
         // no swap and no file-backed shared mappings: nothing to write back, nothing that could be paged out -- the honest answer is "done"
@@ -2879,10 +2885,22 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
         // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
         // ebenfalls nicht ansieht. Eine Geraeteabbildung braucht ihn.
+        if (a3 & MAP_ANONYMOUS) != 0 {
+            // r721 follow-up: anonymous maps take the address-space lock; a file map may sleep (disk read) and does not
+            unixsock.vm_lock(state, me)
+            let mar: u64 = do_map(state, me, a0, a1, a2, a3, a4, a5)
+            unixsock.vm_unlock(state, me)
+            vm_oom_after(state)
+            return mar
+        }
         return do_map(state, me, a0, a1, a2, a3, a4, a5)
     }
     if number == SYS_MUNMAP {
-        return do_unmap(state, me, a0, a1)
+        // r721 follow-up: one address-space change at a time (see `unixsock.vm_lock`)
+        unixsock.vm_lock(state, me)
+        let umr: u64 = do_unmap(state, me, a0, a1)
+        unixsock.vm_unlock(state, me)
+        return umr
     }
     if number == SYS_GETPID {
         // RUNDE FREMDLAND: DIE FADENGRUPPE, nicht die Aufgabe.
@@ -7578,6 +7596,13 @@ fn big_bottom(state: u64, me: u64) -> u64 {
 }
 
 // The big region is used up: reuse what munmap freed there (see `hole`).
+// After the address-space lock is released: run the out-of-memory handler if a locked path asked for it.
+fn vm_oom_after(state: u64) {
+    if unixsock.vm_oom_take(state) {
+        let _o: u64 = oom_handle(state)
+    }
+}
+
 fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
     let h: u64 = hole(state, me, top, proc.BIG_TOP, pages)
     if h != 0 && map_run(state, me, h, pages, prot) {
@@ -7616,7 +7641,12 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
             // Wichtiger als der Erfolg dieses einen Aufrufs ist, dass
             // das SYSTEM weiterlaeuft -- und dafuer musste der Fresser
             // weg, nicht diese Anfrage bedient werden.
-            oom_handle(state)
+            if unixsock.vm_held(state, me) {
+                // the address-space lock is held: the handler can sleep (disk sync), so the caller runs it after the unlock
+                unixsock.vm_oom_note(state)
+            } else {
+                oom_handle(state)
+            }
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)

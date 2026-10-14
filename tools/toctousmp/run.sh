@@ -8,6 +8,7 @@
 #   fix      every check must PASS (seal rules; no mixed octets in the socket bounce buffer; no write into a freed frame)
 #   counter  same kernel with the words `noscratch nommlock` (locks skipped): scratch_no_mixing must FAIL, otherwise the test
 #            measures nothing. mm_no_stale_write is reported but only warns (the window is a few microseconds wide).
+#   counter2 the word `novmlock`: t_mmaprace must FAIL (shared pages) or die in a user fault.
 # Use /root/jarvis/bin/heavy for the call.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -20,13 +21,13 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 verdict() { awk -v n="$2" '$1 == n {print $2; f=1; exit} END {if (!f) print "MISSING"}' "$1"; }
 
 echo "== fix: $CORES cores =="
-ONLY="t_seal t_toctousmp" SMP=$CORES KARGS="smpfrueh" TMO=300 UB_OUT="$T/fix" KEEP=1 UB_RESULT="$T/fix.res" \
+ONLY="t_seal t_toctousmp t_mmaprace" SMP=$CORES KARGS="smpfrueh" TMO=300 UB_OUT="$T/fix" KEEP=1 UB_RESULT="$T/fix.res" \
     bash tools/unterbau/run.sh > "$T/fix.log" 2>&1
-for n in $(awk '/^(seal|toctousmp)\./ {print $1}' "$T/fix.res" | sort -u); do
+for n in $(awk '/^(seal|toctousmp|mmaprace)\./ {print $1}' "$T/fix.res" | sort -u); do
     v=$(verdict "$T/fix.res" "$n")
     if [ "$v" = PASS ]; then ok "$n"; else bad "$n $v"; fi
 done
-for n in seal.mmap_rw_after_seal_refused seal.seal_write_busy_with_rw_mapping toctousmp.scratch_no_mixing toctousmp.mm_no_stale_write; do
+for n in seal.mmap_rw_after_seal_refused seal.seal_write_busy_with_rw_mapping toctousmp.scratch_no_mixing toctousmp.mm_no_stale_write mmaprace.no_shared_pages; do
     [ "$(verdict "$T/fix.res" "$n")" = MISSING ] && bad "$n missing"
 done
 grep -a "^T toctousmp\.\(scratch\|mm\)" "$T/fix/new-t_toctousmp.ser" 2>/dev/null | sed 's/^/        /' | head -8
@@ -40,6 +41,17 @@ if [ -r "$T/fix/k-new.mb" ]; then
     [ "$(verdict "$T/ctl.res" toctousmp.mm_no_stale_write)" = FAIL ] && ok "counter: MM lock off -> stale write shown" || echo "  WARN  counter: stale write not shown (narrow window)"
 else
     bad "no kernel image from the fix run"
+fi
+echo "== counter: novmlock =="
+if [ -r "$T/fix/k-new.mb" ]; then
+    ONLY="t_mmaprace" SMP=$CORES KARGS="smpfrueh novmlock" TMO=300 KERNEL="$T/fix/k-new.mb" UB_OUT="$T/ctl2" KEEP=1 UB_RESULT="$T/ctl2.res" \
+        bash tools/unterbau/run.sh > "$T/ctl2.log" 2>&1
+    grep -a "^T mmaprace\." "$T/ctl2/new-t_mmaprace.ser" 2>/dev/null | sed 's/^/        /' | head -6
+    v=$(verdict "$T/ctl2.res" mmaprace.no_shared_pages)
+    # the race shows as shared pages (FAIL) or as a user fault that kills the test before it reports (MISSING)
+    # ... or as failed maps (a corrupted bump mark makes mmap return errors): any of the three shows the race
+    vf=$(verdict "$T/ctl2.res" mmaprace.no_failed_maps)
+    if [ "$v" = FAIL ] || [ "$v" = MISSING ] || [ "$vf" = FAIL ]; then ok "counter: address-space lock off -> pages shared or process killed ($v)"; else bad "counter: mmap race not shown"; fi
 fi
 echo "TOCTOUSMP: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
