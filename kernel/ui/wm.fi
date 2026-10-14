@@ -3572,6 +3572,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     // Er steht HIER und nicht in `selftest`, weil der dort mitten in
     // einer Zeile laeuft, die `kgui` schreibt -- siehe `fokus_still`.
     glastest_say(state)
+    damagetest_say(state)
     ss(state, S_GLASSGEN, 1)
     ss(state, S_GLVALID, 0)
     ss(state, S_PANELGROW, 0)
@@ -3791,7 +3792,26 @@ fn damage_ex(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
             }
         }
     }
-    rgn_add(state, a, b, c, d)
+    // r53: THE REGION AND THE BOX ARE UPDATED UNDER ONE LOCK, and `compose_one` takes the box and clears `S_DON` under the same lock.
+    // Before, a `damage` on one core could read `S_DON == 1`, be held up (a vCPU descheduled by the host), while another core ran a whole
+    // `compose_one` (which clears `S_DON`); `damage` then widened the box of a frame that was already taken and never set `S_DON` again:
+    // its rectangle was LOST. The lost rectangle was typically the last repaint of a client window (the FreeViewer picture) after a
+    // terminal repaint had composed it half-drawn -> a dark rectangle (terminal-sized) in the viewer until the viewer drew again.
+    let locked: bool = rgn_lock(state)
+    if locked {
+        region.region_add(state + kstate.WM_OFF + S_RGN, a, b, c, d)
+    } else {
+        ss(state, S_RBAD, 1)
+    }
+    box_add(state, a, b, c, d)
+    if locked {
+        rgn_unlock(state)
+    }
+}
+
+// r53: add one rectangle to the dirty box. The caller holds the region lock (or could not get it). `S_DON == 0` means "the box is empty":
+// the rectangle becomes the box (never widened by a stale box of a frame that was already taken).
+fn box_add(state: u64, a: i64, b: i64, c: i64, d: i64) {
     if gs(state, S_DON) == 0 {
         ss(state, S_DX0, a as u64)
         ss(state, S_DY0, b as u64)
@@ -3812,6 +3832,31 @@ fn damage_ex(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
     if (d as u64) > gs(state, S_DY1) {
         ss(state, S_DY1, d as u64)
     }
+}
+
+// r53: take the dirty box for one frame: its four numbers go to `out` (x0, y0, x1, y1), `S_DON` is cleared. false = no damage pending.
+// Runs under the region lock (the same lock `damage_ex` holds while it adds), so a `damage` is either completely before the take (its
+// rectangle is in the box) or completely after it (it starts a new box). Without the lock the old unlocked way runs; a frame is never skipped.
+fn box_take(state: u64, out: u64) -> bool {
+    if gs(state, S_DON) == 0 {
+        return false
+    }
+    let tk: bool = rgn_lock(state)
+    if gs(state, S_DON) == 0 {
+        if tk {
+            rgn_unlock(state)
+        }
+        return false
+    }
+    __mmio_write64(out as *mut u64, gs(state, S_DX0))
+    __mmio_write64((out + 8) as *mut u64, gs(state, S_DY0))
+    __mmio_write64((out + 16) as *mut u64, gs(state, S_DX1))
+    __mmio_write64((out + 24) as *mut u64, gs(state, S_DY1))
+    ss(state, S_DON, 0)
+    if tk {
+        rgn_unlock(state)
+    }
+    return true
 }
 
 fn damage_all(state: u64) {
@@ -8208,14 +8253,14 @@ fn compose_one(state: u64) -> u64 {
         ss(state, S_MAGLX, 0)
         damage(state, ox as i64, 0, (ox + MAG_W) as i64, MAG_H as i64)
     }
-    if gs(state, S_DON) == 0 {
+    var bt: [u64; 4] = [0 as u64; 4]
+    if !box_take(state, (&bt[0]) as u64) {
         return 0
     }
-    let x0: u64 = gs(state, S_DX0)
-    let y0: u64 = gs(state, S_DY0)
-    let x1: u64 = gs(state, S_DX1)
-    let y1: u64 = gs(state, S_DY1)
-    ss(state, S_DON, 0)
+    let x0: u64 = bt[0]
+    let y0: u64 = bt[1]
+    let x1: u64 = bt[2]
+    let y1: u64 = bt[3]
     if x1 <= x0 || y1 <= y0 {
         return 0
     }
@@ -12348,6 +12393,78 @@ fn glastest_say(state: u64) {
     serial.dec(gs(state, S_GLTEST))
     serial.puts((&gt_b[0]) as u64)
     serial.dec(selftest_glas_max())
+    serial.nl()
+}
+
+// r53: SELF-TEST OF THE DIRTY BOX PROTOCOL (`box_add` / `box_take`, the pair `damage_ex` and `compose_one` use). Pure: it saves the four box
+// words and the flag, runs on them, puts them back; no pixel is touched. The race itself (a `damage` held up between its check of `S_DON`
+// and its stores while another core takes the frame) needs two cores; what this proves is the half that makes the fix work: after a take a
+// new rectangle STARTS a new box (it is never merged into the box of a frame that was already taken, and never lost).
+static mut dt_a: [u8; 16] = "wm: damagetest \0"
+const DT_MAX: u64 = 8
+
+fn selftest_damage(state: u64) -> u64 {
+    let sv0: u64 = gs(state, S_DX0)
+    let sv1: u64 = gs(state, S_DY0)
+    let sv2: u64 = gs(state, S_DX1)
+    let sv3: u64 = gs(state, S_DY1)
+    let svd: u64 = gs(state, S_DON)
+    var n: u64 = 0
+    var o: [u64; 4] = [0 as u64; 4]
+    let op: u64 = (&o[0]) as u64
+    ss(state, S_DON, 0)
+    // 1. nothing pending: no frame
+    if !box_take(state, op) {
+        n = n + 1
+    }
+    // 2. one rectangle: it is the box
+    box_add(state, 10, 20, 30, 40)
+    if gs(state, S_DON) == 1 && gs(state, S_DX0) == 10 && gs(state, S_DY1) == 40 {
+        n = n + 1
+    }
+    // 3. a second one widens it
+    box_add(state, 5, 25, 60, 35)
+    if gs(state, S_DX0) == 5 && gs(state, S_DY0) == 20 && gs(state, S_DX1) == 60 && gs(state, S_DY1) == 40 {
+        n = n + 1
+    }
+    // 4. the take returns the union and clears the flag
+    let t4: bool = box_take(state, op)
+    if t4 && gs(state, S_DON) == 0 && o[0] == 5 && o[1] == 20 && o[2] == 60 && o[3] == 40 {
+        n = n + 1
+    }
+    // 5. a rectangle after the take starts a NEW box: not widened by the old numbers
+    box_add(state, 100, 200, 110, 210)
+    if gs(state, S_DON) == 1 && gs(state, S_DX0) == 100 && gs(state, S_DY0) == 200 && gs(state, S_DX1) == 110 && gs(state, S_DY1) == 210 {
+        n = n + 1
+    }
+    // 6. and the next take gets exactly that rectangle (it was not lost)
+    let t6: bool = box_take(state, op)
+    if t6 && o[0] == 100 && o[1] == 200 && o[2] == 110 && o[3] == 210 {
+        n = n + 1
+    }
+    // 7. a second take finds nothing
+    if !box_take(state, op) {
+        n = n + 1
+    }
+    // 8. the region lock is free again after all of this (no path leaves it taken)
+    if rgn_lock(state) {
+        rgn_unlock(state)
+        n = n + 1
+    }
+    ss(state, S_DX0, sv0)
+    ss(state, S_DY0, sv1)
+    ss(state, S_DX1, sv2)
+    ss(state, S_DY1, sv3)
+    ss(state, S_DON, svd)
+    return n
+}
+
+fn damagetest_say(state: u64) {
+    let r: u64 = selftest_damage(state)
+    serial.puts((&dt_a[0]) as u64)
+    serial.dec(r)
+    serial.puts((&gt_b[0]) as u64)
+    serial.dec(DT_MAX)
     serial.nl()
 }
 
