@@ -3597,8 +3597,10 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
 // switch to it -- it walks the tables and reads the frame through the
 // identity mapping.
 fn peek(state: u64, me: u64, addr: u64) -> u64 {
+    let mmfl: u64 = unixsock.mm_lock(state)
     let phys: u64 = proc.translate(state, me, addr)
     if phys == 0 {
+        unixsock.mm_unlock(state, mmfl)
         return 0
     }
     // ROUND K10: the SMAP window. The frame is reached through the
@@ -3609,17 +3611,21 @@ fn peek(state: u64, me: u64, addr: u64) -> u64 {
     guard.stac(state)
     let v: u64 = kstate.get8(phys)
     guard.clac(state)
+    unixsock.mm_unlock(state, mmfl)
     return v
 }
 
 fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    let mmfl: u64 = unixsock.mm_lock(state)
     let phys: u64 = proc.translate(state, me, addr)
     if phys == 0 {
+        unixsock.mm_unlock(state, mmfl)
         return false
     }
     guard.stac(state)
     kstate.set8(phys, v as u8)
     guard.clac(state)
+    unixsock.mm_unlock(state, mmfl)
     return true
 }
 
@@ -3632,8 +3638,11 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     }
     var n: u64 = 0
     while n < len {
+        // r721: translate + copy of ONE page under the MM lock (see `unixsock.mm_lock`): `munmap` on another core cannot free the frame in between
+        let mmfl: u64 = unixsock.mm_lock(state)
         let phys: u64 = proc.translate(state, me, dst + n)
         if phys == 0 {
+            unixsock.mm_unlock(state, mmfl)
             return false
         }
         var room: u64 = 4096 - ((dst + n) & 4095)
@@ -3651,6 +3660,7 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
             k = k + 1
         }
         guard.clac(state)
+        unixsock.mm_unlock(state, mmfl)
         n = n + room
     }
     return true
@@ -3662,8 +3672,10 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     }
     var n: u64 = 0
     while n < len {
+        let mmfl: u64 = unixsock.mm_lock(state)
         let phys: u64 = proc.translate(state, me, src + n)
         if phys == 0 {
+            unixsock.mm_unlock(state, mmfl)
             return false
         }
         var room: u64 = 4096 - ((src + n) & 4095)
@@ -3677,6 +3689,7 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
             k = k + 1
         }
         guard.clac(state)
+        unixsock.mm_unlock(state, mmfl)
         n = n + room
     }
     return true
@@ -7156,8 +7169,10 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
         if (unixsock.shm_seals(state, i) & F_SEAL_SEAL) != 0 {
             return neg(errno.E_PERM)
         }
-        if unixsock.shm_add_seals(state, i, arg) != 0 {
-            return neg(errno.E_INVAL)
+        // K-07: F_SEAL_WRITE is refused (-EBUSY) while a writable mapping exists, and later writable mappings are refused (`map_shm`)
+        let sr: u64 = unixsock.shm_add_seals(state, i, arg)
+        if sr != 0 {
+            return neg(sr)
         }
         return 0
     }
@@ -7879,7 +7894,25 @@ fn map_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
     return true
 }
 
+// K-07: a writable mapping of a memfd takes a count on the object first (refused with -EPERM once F_SEAL_WRITE is set); the count is
+// given back by `munmap` / exit (`unixsock.map_release*`, record flag UM_WRITE) or here when the mapping fails.
 fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    if (prot & PROT_WRITE) == 0 || file.open_kind(state, of) != file.K_SHM {
+        return map_shm_do(state, me, of, len, prot, off)
+    }
+    let i: u64 = file.open_ino(state, of)
+    if !unixsock.shm_wmap_take(state, i) {
+        return neg(errno.E_PERM)
+    }
+    let r: u64 = map_shm_do(state, me, of, len, prot, off)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        unixsock.shm_wmap_drop(state, i)
+    }
+    return r
+}
+
+fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
     off: u64) -> u64 {
     if off != 0 {
         return neg(errno.E_INVAL)
@@ -7976,9 +8009,9 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     var note_flags: u64 = 0
     if lazy {
         note_flags = unixsock.UM_LAZY
-        if schreiben {
-            note_flags = note_flags | unixsock.UM_WRITE
-        }
+    }
+    if schreiben {
+        note_flags = note_flags | unixsock.UM_WRITE
     }
     let _noted: bool = unixsock.map_note(state, me, i, base, pages, note_flags)
     if lazy {
@@ -16521,6 +16554,38 @@ const MSG_MAX: u64 = 2048
 const WL_SCRATCH: u64 = 0xFE000
 const WL_PATH: u64 = 0xFF000
 
+// r721: the bounce buffer WL_SCRATCH is ONE page for the whole machine; two cores in sendmsg/recvmsg/read/write on sockets used it at the
+// same time and mixed their octets. The pair (copy in + send) / (receive + copy out) now runs under `unixsock.scratch_lock`.
+// A failed copy comes back as -EFAULT (the marker value); everything else is what `send_bytes` / `recv_bytes` said.
+fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
+    let fl: u64 = unixsock.scratch_lock(state)
+    var r: u64 = neg(errno.E_FAULT)
+    if copy_in(state, me, state + WL_SCRATCH, src, n) {
+        if dg {
+            r = unixsock.send_dgram(state, si, WL_SCRATCH, n)
+        } else {
+            r = unixsock.send_bytes(state, si, WL_SCRATCH, n)
+        }
+    }
+    unixsock.scratch_unlock(state, fl)
+    return r
+}
+
+fn wl_recv(state: u64, me: u64, si: u64, dst: u64, n: u64, dg: bool) -> u64 {
+    let fl: u64 = unixsock.scratch_lock(state)
+    var r: u64 = 0
+    if dg {
+        r = unixsock.recv_dgram(state, si, WL_SCRATCH, n)
+    } else {
+        r = unixsock.recv_bytes(state, si, WL_SCRATCH, n)
+    }
+    if !errno.is_error(r) && r != 0 && !copy_out(state, me, dst, state + WL_SCRATCH, r) {
+        r = neg(errno.E_FAULT)
+    }
+    unixsock.scratch_unlock(state, fl)
+    return r
+}
+
 // Acht Oktette aus Ring 3, wie `put64` sie schreibt. `get32` und
 // `get16` gab es seit Runde K8, einen 64-Bit-Leser nicht -- und ein
 // `struct msghdr` besteht fast nur aus Zeigern und Laengen zu acht
@@ -16874,12 +16939,10 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
                 if chunk > free {
                     chunk = free
                 }
-                if !copy_in(state, me, state + WL_SCRATCH, base + off,
-                    chunk) {
-                    return neg(errno.E_FAULT)
+                let w: u64 = wl_send(state, me, si, base + off, chunk, false)
+                if w == neg(errno.E_FAULT) {
+                    return w
                 }
-                let w: u64 = unixsock.send_bytes(state, si, WL_SCRATCH,
-                    chunk)
                 if errno.is_error(w) {
                     return neg(w)
                 }
@@ -17002,17 +17065,16 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
             if chunk > MSG_MAX {
                 chunk = MSG_MAX
             }
-            let r: u64 = unixsock.recv_bytes(state, si, WL_SCRATCH, chunk)
+            let r: u64 = wl_recv(state, me, si, base + off, chunk, false)
+            if r == neg(errno.E_FAULT) {
+                return r
+            }
             if errno.is_error(r) {
                 return neg(r)
             }
             if r == 0 {
                 off = blen
             } else {
-                if !copy_out(state, me, base + off, state + WL_SCRATCH,
-                    r) {
-                    return neg(errno.E_FAULT)
-                }
                 got = got + r
                 off = off + r
             }
@@ -17588,10 +17650,14 @@ fn usock_sendto(state: u64, me: u64, of: u64, buf: u64, len: u64, addr: u64, ale
         return neg(errno.E_CONNREFUSED)
     }
     // the path scratch (WL_PATH) is free again, the data goes through WL_SCRATCH
+    // r721: copy in + send under the bounce-buffer lock (see `wl_send`)
+    let sfl: u64 = unixsock.scratch_lock(state)
     if !copy_in(state, me, state + WL_SCRATCH, buf, len) {
+        unixsock.scratch_unlock(state, sfl)
         return neg(errno.E_FAULT)
     }
     let w: u64 = unixsock.send_dgram_to(state, dst, WL_SCRATCH, len)
+    unixsock.scratch_unlock(state, sfl)
     if errno.is_error(w) {
         return neg(w)
     }
@@ -17648,14 +17714,9 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         if n > free {
             n = free
         }
-        if !copy_in(state, me, state + WL_SCRATCH, buf, n) {
-            return neg(errno.E_FAULT)
-        }
-        var w: u64 = 0
-        if dg {
-            w = unixsock.send_dgram(state, si, WL_SCRATCH, n)
-        } else {
-            w = unixsock.send_bytes(state, si, WL_SCRATCH, n)
+        let w: u64 = wl_send(state, me, si, buf, n, dg)
+        if w == neg(errno.E_FAULT) {
+            return w
         }
         if errno.is_error(w) {
             return neg(w)
@@ -17674,17 +17735,12 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         waited = waited + 1
         sched.sleep_ticks(state, 1)
     }
-    var r: u64 = 0
-    if dg {
-        r = unixsock.recv_dgram(state, si, WL_SCRATCH, n)
-    } else {
-        r = unixsock.recv_bytes(state, si, WL_SCRATCH, n)
+    let r: u64 = wl_recv(state, me, si, buf, n, dg)
+    if r == neg(errno.E_FAULT) {
+        return r
     }
     if errno.is_error(r) {
         return neg(r)
-    }
-    if r != 0 && !copy_out(state, me, buf, state + WL_SCRATCH, r) {
-        return neg(errno.E_FAULT)
     }
     return r
 }
