@@ -1,0 +1,672 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/monitors/layout.fi -- the multi-monitor model (L-003 r757, L-004 r758).
+//
+// WHAT THIS IS
+//   Pure data + arithmetic, no hardware. The window manager asks THIS
+//   module "which output is under (x,y)", "what is the rect of output 1",
+//   "where does the cursor stop at the edge", "what scale does output 2
+//   use", "which HDA pin carries the sound for output 0". The driver side
+//   (virtio-gpu SET_SCANOUT per output, HDA pin sense) only feeds it.
+//
+// WHAT THIS IS NOT (honest)
+//   Nothing in the kernel calls it yet: fb.fi still has ONE framebuffer
+//   and wm.fi composes into one surface (see docs/DISPLAY.md 8.4 and
+//   docs/MONITORS.md). This is the "output object" that 8.4 says has to
+//   be built first. It is measured by tools/monitors/run.sh.
+//
+// COORDINATES
+//   The global desktop is in PHYSICAL pixels. Output i covers
+//   [x, x+w) x [y, y+h). Scale is in percent (100 = 1:1, 200 = 2x) and
+//   only changes the LOGICAL size an output offers to programs
+//   (logical = physical * 100 / scale); it never changes the rects.
+//   Positions may be negative (a monitor left of / above the primary).
+//
+// MODES
+//   MODE_EXTEND  every enabled output has its own rect, no overlap.
+//   MODE_MIRROR  every enabled output shows the primary's content,
+//                letterboxed (aspect kept), all rects start at (0,0).
+//   MODE_SINGLE  only the primary is on.
+
+export {
+    MAX_OUT, MODE_EXTEND, MODE_MIRROR, MODE_SINGLE,
+    SCALE_MIN, SCALE_MAX,
+    E_FULL, E_RANGE, E_OVERLAP, E_DETACHED, E_NOOUT,
+    PS_PRESENCE, PS_ELD_VALID,
+    reset, count, is_used, is_active, active_count,
+    snap_scale, default_scale, set_scale, scale_of, logical_w, logical_h,
+    to_physical, out_w, out_h, rect_x, rect_y,
+    check_layout, add_output, remove_output, pack_row, set_enabled,
+    set_primary, primary, set_mode, mode, set_position, place_beside,
+    bounds_x0, bounds_y0, bounds_x1, bounds_y1,
+    output_at, nearest_output, clamp_x, clamp_y, window_output,
+    local_x, local_y,
+    mirror_fit_pct, mirror_dst_w, mirror_dst_h, mirror_dst_x, mirror_dst_y,
+    edid_has_audio, edid_width_mm, set_audio, audio_pin
+}
+
+const MAX_OUT: u64 = 8
+
+const MODE_EXTEND: u64 = 0
+const MODE_MIRROR: u64 = 1
+const MODE_SINGLE: u64 = 2
+
+const SCALE_MIN: u64 = 100
+const SCALE_MAX: u64 = 300
+
+// Result codes (negative = refused).
+const E_FULL: i64 = -1
+const E_RANGE: i64 = -2
+const E_OVERLAP: i64 = -3
+const E_DETACHED: i64 = -4
+const E_NOOUT: i64 = -5
+
+const PS_PRESENCE: u64 = 0x80000000
+const PS_ELD_VALID: u64 = 0x40000000
+
+static mut o_used: [u64; 8] = [0; 8]
+static mut o_on: [u64; 8] = [0; 8]
+static mut o_w: [u64; 8] = [0; 8]
+static mut o_h: [u64; 8] = [0; 8]
+static mut o_x: [i64; 8] = [0; 8]
+static mut o_y: [i64; 8] = [0; 8]
+static mut o_scale: [u64; 8] = [0; 8]
+static mut o_mm_w: [u64; 8] = [0; 8]
+static mut o_audio: [u64; 8] = [0; 8]   // EDID says: has audio
+static mut o_pin: [u64; 8] = [0; 8]     // HDA pin widget nid, 0 = none
+static mut g_mode: u64 = 0
+static mut g_primary: u64 = 0
+
+fn reset() {
+    var i: u64 = 0
+    while i < MAX_OUT {
+        o_used[i as usize] = 0
+        o_on[i as usize] = 0
+        o_w[i as usize] = 0
+        o_h[i as usize] = 0
+        o_x[i as usize] = 0
+        o_y[i as usize] = 0
+        o_scale[i as usize] = 100
+        o_mm_w[i as usize] = 0
+        o_audio[i as usize] = 0
+        o_pin[i as usize] = 0
+        i = i + 1
+    }
+    g_mode = MODE_EXTEND
+    g_primary = 0
+}
+
+fn count() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if o_used[i as usize] != 0 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+fn is_used(i: u64) -> bool {
+    if i >= MAX_OUT { return false }
+    return o_used[i as usize] != 0
+}
+
+// An output counts as lit when it is enabled and (in SINGLE mode) primary.
+fn is_active(i: u64) -> bool {
+    if !is_used(i) { return false }
+    if o_on[i as usize] == 0 { return false }
+    if g_mode == MODE_SINGLE && i != g_primary { return false }
+    return true
+}
+
+fn active_count() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// ---------------------------------------------------------------- scale
+
+// Snap a DPI-derived percent to the steps a settings page offers.
+fn snap_scale(pct: u64) -> u64 {
+    if pct <= 112 { return 100 }
+    if pct <= 137 { return 125 }
+    if pct <= 162 { return 150 }
+    if pct <= 187 { return 175 }
+    if pct <= 225 { return 200 }
+    if pct <= 275 { return 250 }
+    return 300
+}
+
+// Default scale from the panel's physical width (EDID byte 21, cm).
+// dpi = w_px * 25.4 / mm_w; 96 dpi = 100 %. Unknown size (0 mm) -> 100.
+fn default_scale(w: u64, mm_w: u64) -> u64 {
+    if mm_w == 0 || w == 0 { return 100 }
+    // percent = dpi * 100 / 96 = w * 2540 / (mm_w * 96)
+    let pct: u64 = (w * 2540) / (mm_w * 96)
+    if pct < SCALE_MIN { return 100 }
+    return snap_scale(pct)
+}
+
+fn set_scale(i: u64, pct: u64) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    if pct < SCALE_MIN || pct > SCALE_MAX { return E_RANGE }
+    o_scale[i as usize] = pct
+    return 0
+}
+
+fn scale_of(i: u64) -> u64 {
+    if !is_used(i) { return 100 }
+    return o_scale[i as usize]
+}
+
+fn logical_w(i: u64) -> u64 {
+    if !is_used(i) { return 0 }
+    return (o_w[i as usize] * 100) / o_scale[i as usize]
+}
+
+fn logical_h(i: u64) -> u64 {
+    if !is_used(i) { return 0 }
+    return (o_h[i as usize] * 100) / o_scale[i as usize]
+}
+
+// A logical length on output i in physical pixels (rounded to nearest).
+fn to_physical(i: u64, logical: u64) -> u64 {
+    return (logical * scale_of(i) + 50) / 100
+}
+
+// ------------------------------------------------------------ geometry
+
+fn out_w(i: u64) -> u64 {
+    if !is_used(i) { return 0 }
+    return o_w[i as usize]
+}
+
+fn out_h(i: u64) -> u64 {
+    if !is_used(i) { return 0 }
+    return o_h[i as usize]
+}
+
+fn rect_x(i: u64) -> i64 {
+    if !is_used(i) { return 0 }
+    if g_mode == MODE_MIRROR { return 0 }
+    return o_x[i as usize]
+}
+
+fn rect_y(i: u64) -> i64 {
+    if !is_used(i) { return 0 }
+    if g_mode == MODE_MIRROR { return 0 }
+    return o_y[i as usize]
+}
+
+fn overlap_1d(a0: i64, a1: i64, b0: i64, b1: i64) -> i64 {
+    var lo: i64 = a0
+    if b0 > lo { lo = b0 }
+    var hi: i64 = a1
+    if b1 < hi { hi = b1 }
+    if hi > lo { return hi - lo }
+    return 0
+}
+
+fn rects_overlap(i: u64, j: u64) -> bool {
+    let ix: i64 = overlap_1d(o_x[i as usize], o_x[i as usize] + o_w[i as usize] as i64,
+        o_x[j as usize], o_x[j as usize] + o_w[j as usize] as i64)
+    let iy: i64 = overlap_1d(o_y[i as usize], o_y[i as usize] + o_h[i as usize] as i64,
+        o_y[j as usize], o_y[j as usize] + o_h[j as usize] as i64)
+    return ix > 0 && iy > 0
+}
+
+// Two rects touch along an edge with a non-empty shared stretch.
+fn rects_touch(i: u64, j: u64) -> bool {
+    let xi0: i64 = o_x[i as usize]
+    let xi1: i64 = xi0 + o_w[i as usize] as i64
+    let yi0: i64 = o_y[i as usize]
+    let yi1: i64 = yi0 + o_h[i as usize] as i64
+    let xj0: i64 = o_x[j as usize]
+    let xj1: i64 = xj0 + o_w[j as usize] as i64
+    let yj0: i64 = o_y[j as usize]
+    let yj1: i64 = yj0 + o_h[j as usize] as i64
+    if (xi1 == xj0 || xj1 == xi0) && overlap_1d(yi0, yi1, yj0, yj1) > 0 {
+        return true
+    }
+    if (yi1 == yj0 || yj1 == yi0) && overlap_1d(xi0, xi1, xj0, xj1) > 0 {
+        return true
+    }
+    return false
+}
+
+// Extend layout is valid when no two used outputs overlap and every
+// output is reachable from the primary over shared edges (the mouse
+// must be able to walk to every screen).
+fn check_layout() -> i64 {
+    var i: u64 = 0
+    while i < MAX_OUT {
+        var j: u64 = i + 1
+        while j < MAX_OUT {
+            if is_used(i) && is_used(j) && rects_overlap(i, j) { return E_OVERLAP }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if !is_used(g_primary) { return 0 }
+    var seen: u64 = 1 << g_primary
+    var changed: bool = true
+    while changed {
+        changed = false
+        var a: u64 = 0
+        while a < MAX_OUT {
+            if is_used(a) && (seen & (1 << a)) == 0 {
+                var b: u64 = 0
+                while b < MAX_OUT {
+                    if (seen & (1 << b)) != 0 && rects_touch(a, b) {
+                        seen = seen | (1 << a)
+                        changed = true
+                        b = MAX_OUT
+                    } else {
+                        b = b + 1
+                    }
+                }
+            }
+            a = a + 1
+        }
+    }
+    var k: u64 = 0
+    while k < MAX_OUT {
+        if is_used(k) && (seen & (1 << k)) == 0 { return E_DETACHED }
+        k = k + 1
+    }
+    return 0
+}
+
+// Add a new output (a connector with a monitor). Placed to the right of
+// everything that is already there. Returns the index or a negative code.
+fn add_output(w: u64, h: u64, mm_w: u64) -> i64 {
+    if w == 0 || h == 0 { return E_RANGE }
+    var i: u64 = 0
+    while i < MAX_OUT && o_used[i as usize] != 0 { i = i + 1 }
+    if i >= MAX_OUT { return E_FULL }
+    var right: i64 = 0
+    var j: u64 = 0
+    while j < MAX_OUT {
+        if is_used(j) {
+            let e: i64 = o_x[j as usize] + o_w[j as usize] as i64
+            if e > right { right = e }
+        }
+        j = j + 1
+    }
+    o_used[i as usize] = 1
+    o_on[i as usize] = 1
+    o_w[i as usize] = w
+    o_h[i as usize] = h
+    o_x[i as usize] = right
+    o_y[i as usize] = 0
+    o_mm_w[i as usize] = mm_w
+    o_scale[i as usize] = default_scale(w, mm_w)
+    o_audio[i as usize] = 0
+    o_pin[i as usize] = 0
+    if count() == 1 { g_primary = i }
+    return i as i64
+}
+
+// Re-pack all used outputs in one row, in index order, tops aligned at 0.
+fn pack_row() {
+    var x: i64 = 0
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_used(i) {
+            o_x[i as usize] = x
+            o_y[i as usize] = 0
+            x = x + o_w[i as usize] as i64
+        }
+        i = i + 1
+    }
+}
+
+// Unplug. The primary moves to the lowest remaining output; the rest is
+// re-packed left to right (a hole in the middle would detach the right
+// side).
+fn remove_output(i: u64) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    o_used[i as usize] = 0
+    o_on[i as usize] = 0
+    if g_primary == i {
+        var k: u64 = 0
+        while k < MAX_OUT && o_used[k as usize] == 0 { k = k + 1 }
+        if k < MAX_OUT { g_primary = k }
+    }
+    pack_row()
+    return 0
+}
+
+fn set_enabled(i: u64, on: bool) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    if on {
+        o_on[i as usize] = 1
+    } else {
+        o_on[i as usize] = 0
+    }
+    return 0
+}
+
+fn set_primary(i: u64) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    g_primary = i
+    return 0
+}
+
+fn primary() -> u64 {
+    return g_primary
+}
+
+fn set_mode(m: u64) -> i64 {
+    if m > MODE_SINGLE { return E_RANGE }
+    g_mode = m
+    return 0
+}
+
+fn mode() -> u64 {
+    return g_mode
+}
+
+// Move output i to (x, y). Refused (and rolled back) if it would overlap
+// another output or detach the layout. This is what a drag in the
+// Settings -> Display arrangement canvas ends in.
+fn set_position(i: u64, x: i64, y: i64) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    let ox: i64 = o_x[i as usize]
+    let oy: i64 = o_y[i as usize]
+    o_x[i as usize] = x
+    o_y[i as usize] = y
+    let r: i64 = check_layout()
+    if r < 0 {
+        o_x[i as usize] = ox
+        o_y[i as usize] = oy
+        return r
+    }
+    return 0
+}
+
+// Snap output i against ref_i: side 0 = right of, 1 = left of,
+// 2 = below, 3 = above. align 0 = edges equal, 1 = centred.
+fn place_beside(i: u64, ref_i: u64, side: u64, align: u64) -> i64 {
+    if !is_used(i) || !is_used(ref_i) || i == ref_i { return E_NOOUT }
+    let rx: i64 = o_x[ref_i as usize]
+    let ry: i64 = o_y[ref_i as usize]
+    let rw: i64 = o_w[ref_i as usize] as i64
+    let rh: i64 = o_h[ref_i as usize] as i64
+    let w: i64 = o_w[i as usize] as i64
+    let h: i64 = o_h[i as usize] as i64
+    var x: i64 = rx
+    var y: i64 = ry
+    if side == 0 {
+        x = rx + rw
+        if align == 1 { y = ry + (rh - h) / 2 }
+    } else if side == 1 {
+        x = rx - w
+        if align == 1 { y = ry + (rh - h) / 2 }
+    } else if side == 2 {
+        y = ry + rh
+        if align == 1 { x = rx + (rw - w) / 2 }
+    } else {
+        y = ry - h
+        if align == 1 { x = rx + (rw - w) / 2 }
+    }
+    return set_position(i, x, y)
+}
+
+// Bounding box of everything that is lit.
+fn bounds_x0() -> i64 {
+    var v: i64 = 0
+    var first: bool = true
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            if first || rect_x(i) < v { v = rect_x(i) }
+            first = false
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn bounds_y0() -> i64 {
+    var v: i64 = 0
+    var first: bool = true
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            if first || rect_y(i) < v { v = rect_y(i) }
+            first = false
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn bounds_x1() -> i64 {
+    var v: i64 = 0
+    var first: bool = true
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            let e: i64 = rect_x(i) + o_w[i as usize] as i64
+            if first || e > v { v = e }
+            first = false
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn bounds_y1() -> i64 {
+    var v: i64 = 0
+    var first: bool = true
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            let e: i64 = rect_y(i) + o_h[i as usize] as i64
+            if first || e > v { v = e }
+            first = false
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// Which lit output contains the point? -1 = none (outside / gap).
+// In mirror mode the primary answers (cursor space = primary).
+fn output_at(x: i64, y: i64) -> i64 {
+    if g_mode == MODE_MIRROR {
+        if is_active(g_primary) && x >= 0 && y >= 0
+            && x < o_w[g_primary as usize] as i64
+            && y < o_h[g_primary as usize] as i64 {
+            return g_primary as i64
+        }
+        return -1
+    }
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            let x0: i64 = o_x[i as usize]
+            let y0: i64 = o_y[i as usize]
+            if x >= x0 && y >= y0 && x < x0 + o_w[i as usize] as i64
+                && y < y0 + o_h[i as usize] as i64 {
+                return i as i64
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn dist_axis(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { return lo - v }
+    if v >= hi { return v - (hi - 1) }
+    return 0
+}
+
+fn clamp_axis(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { return lo }
+    if v >= hi { return hi - 1 }
+    return v
+}
+
+// The output whose rect is nearest to the point (manhattan); used to
+// pull a cursor that left the union back in. -1 if nothing is lit.
+fn nearest_output(x: i64, y: i64) -> i64 {
+    var best: i64 = -1
+    var bd: i64 = 0
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            let x0: i64 = rect_x(i)
+            let y0: i64 = rect_y(i)
+            let d: i64 = dist_axis(x, x0, x0 + o_w[i as usize] as i64)
+                + dist_axis(y, y0, y0 + o_h[i as usize] as i64)
+            if best < 0 || d < bd {
+                best = i as i64
+                bd = d
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn clamp_x(x: i64, y: i64) -> i64 {
+    let o: i64 = nearest_output(x, y)
+    if o < 0 { return x }
+    let i: u64 = o as u64
+    return clamp_axis(x, rect_x(i), rect_x(i) + o_w[i as usize] as i64)
+}
+
+fn clamp_y(x: i64, y: i64) -> i64 {
+    let o: i64 = nearest_output(x, y)
+    if o < 0 { return y }
+    let i: u64 = o as u64
+    return clamp_axis(y, rect_y(i), rect_y(i) + o_h[i as usize] as i64)
+}
+
+// A window's home is the output where most of its area is. Ties go to
+// the lower index. -1 if it overlaps no output.
+fn window_output(wx: i64, wy: i64, ww: u64, wh: u64) -> i64 {
+    var best: i64 = -1
+    var ba: i64 = 0
+    var i: u64 = 0
+    while i < MAX_OUT {
+        if is_active(i) {
+            let x0: i64 = rect_x(i)
+            let y0: i64 = rect_y(i)
+            let ox: i64 = overlap_1d(wx, wx + ww as i64, x0, x0 + o_w[i as usize] as i64)
+            let oy: i64 = overlap_1d(wy, wy + wh as i64, y0, y0 + o_h[i as usize] as i64)
+            let a: i64 = ox * oy
+            if a > ba {
+                ba = a
+                best = i as i64
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// Output-local coordinate of a global one.
+fn local_x(i: u64, x: i64) -> i64 {
+    return x - rect_x(i)
+}
+
+fn local_y(i: u64, y: i64) -> i64 {
+    return y - rect_y(i)
+}
+
+// ------------------------------------------------------------- mirror
+
+// In mirror mode output j shows the source (the primary's w x h) scaled
+// by the largest factor that fits, centred (letterbox). Percent: 100 = 1:1.
+fn mirror_fit_pct(j: u64) -> u64 {
+    if !is_used(j) || !is_used(g_primary) { return 0 }
+    let sw: u64 = o_w[g_primary as usize]
+    let sh: u64 = o_h[g_primary as usize]
+    let pw: u64 = (o_w[j as usize] * 100) / sw
+    let ph: u64 = (o_h[j as usize] * 100) / sh
+    if pw < ph { return pw }
+    return ph
+}
+
+fn mirror_dst_w(j: u64) -> u64 {
+    return (o_w[g_primary as usize] * mirror_fit_pct(j)) / 100
+}
+
+fn mirror_dst_h(j: u64) -> u64 {
+    return (o_h[g_primary as usize] * mirror_fit_pct(j)) / 100
+}
+
+fn mirror_dst_x(j: u64) -> u64 {
+    return (o_w[j as usize] - mirror_dst_w(j)) / 2
+}
+
+fn mirror_dst_y(j: u64) -> u64 {
+    return (o_h[j as usize] - mirror_dst_h(j)) / 2
+}
+
+// -------------------------------------------------------------- audio
+//
+// HDMI / DP audio (L-004). Two facts decide whether sound goes to an
+// output:
+//   1. EDID: the CEA-861 extension block (tag 0x02) byte 3 bit 6 is
+//      "basic audio supported". Without a CEA block: no audio (DVI).
+//   2. HDA: the codec's pin widget answers GET_PIN_SENSE (verb 0xF09)
+//      with bit 31 = presence detect, bit 30 = ELD valid.
+// Only when BOTH hold may the mixer route a stream to the pin.
+
+fn rd8(p: u64, off: u64) -> u64 {
+    let q: *mut u8 = (p + off) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+// `edid` points at `len` bytes (128 base + 128 extension).
+fn edid_has_audio(edid: u64, len: u64) -> bool {
+    if len < 256 { return false }
+    if rd8(edid, 0) != 0 || rd8(edid, 7) != 0 { return false }
+    var i: u64 = 1
+    while i < 7 {
+        if rd8(edid, i) != 255 { return false }
+        i = i + 1
+    }
+    if rd8(edid, 126) < 1 { return false }
+    if rd8(edid, 128) != 2 { return false }
+    return (rd8(edid, 131) & 64) != 0
+}
+
+// EDID byte 21 = horizontal size in cm; mm = cm * 10 is good enough for
+// a scale decision.
+fn edid_width_mm(edid: u64, len: u64) -> u64 {
+    if len < 128 { return 0 }
+    return rd8(edid, 21) * 10
+}
+
+fn set_audio(i: u64, edid_audio: bool, pin_nid: u64) -> i64 {
+    if !is_used(i) { return E_NOOUT }
+    if edid_audio {
+        o_audio[i as usize] = 1
+    } else {
+        o_audio[i as usize] = 0
+    }
+    o_pin[i as usize] = pin_nid
+    return 0
+}
+
+// The pin nid sound may be routed to for output i, or 0 for "no sound
+// there". `sense` is the raw GET_PIN_SENSE answer for that pin.
+fn audio_pin(i: u64, sense: u64) -> u64 {
+    if !is_active(i) { return 0 }
+    if o_audio[i as usize] == 0 { return 0 }
+    if o_pin[i as usize] == 0 { return 0 }
+    if (sense & PS_PRESENCE) == 0 { return 0 }
+    if (sense & PS_ELD_VALID) == 0 { return 0 }
+    return o_pin[i as usize]
+}

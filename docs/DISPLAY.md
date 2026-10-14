@@ -459,6 +459,10 @@ steps above are the content; how long they take depends on who does them.
 
 ### 8.4 Multiple monitors
 
+> **Update 14.10.2026:** the missing *output object* now exists as a host-tested model
+> (`lib/monitors/layout.fi`, gate `tools/monitors/run.sh`). The kernel does not use it yet;
+> see `docs/MONITORS.md` for what is wired and what is not.
+
 Not supported, and here is precisely what is missing rather than a
 shrug:
 

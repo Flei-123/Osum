@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/monitors/oracle.fi -- host program that exercises lib/monitors/layout.fi
+// and prints one "OK <name>" or "FAIL <name>" line per promise.
+// Built and run by tools/monitors/run.sh. Same file the kernel will import.
+
+import std.rt
+import std.io
+import monitors.layout
+
+static mut edid: [u8; 256] = [0; 256]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn mk_edid(cm: u8, cea: bool, audio: bool) {
+    var i: usize = 0
+    while i < 256 {
+        edid[i] = 0
+        i = i + 1
+    }
+    i = 1
+    while i < 7 {
+        edid[i] = 255
+        i = i + 1
+    }
+    edid[21] = cm
+    if cea {
+        edid[126] = 1
+        edid[128] = 2
+        edid[129] = 3
+        if audio { edid[131] = 64 }
+    }
+}
+
+fn main() -> i32 {
+    // ---- two outputs, extend, defaults
+    layout.reset()
+    let a: i64 = layout.add_output(1920, 1080, 531)
+    let b: i64 = layout.add_output(1280, 1024, 376)
+    chk("two outputs added (index 0 and 1)", a == 0 && b == 1)
+    chk("count is 2", layout.count() == 2)
+    chk("first output is primary", layout.primary() == 0)
+    chk("second output sits right of the first (x=1920,y=0)",
+        layout.rect_x(1) == 1920 && layout.rect_y(1) == 0)
+    chk("layout valid (no overlap, connected)", layout.check_layout() == 0)
+    chk("bounds 3200x1080", layout.bounds_x0() == 0 && layout.bounds_x1() == 3200
+        && layout.bounds_y0() == 0 && layout.bounds_y1() == 1080)
+
+    // ---- hit test
+    chk("point in output 0", layout.output_at(100, 100) == 0)
+    chk("point in output 1", layout.output_at(2000, 500) == 1)
+    chk("point under the short output is in no output", layout.output_at(2000, 1050) == -1)
+    chk("point right of everything is in no output", layout.output_at(3200, 10) == -1)
+
+    // ---- cursor clamp
+    chk("cursor pulled back from the gap below output 1 (y clamped to 1023)",
+        layout.clamp_y(2000, 1070) == 1023 && layout.clamp_x(2000, 1070) == 2000)
+    chk("cursor beyond the right edge stops at x=3199",
+        layout.clamp_x(5000, 10) == 3199)
+    chk("cursor left of the desktop stops at x=0", layout.clamp_x(-50, 10) == 0)
+
+    // ---- windows
+    chk("window mostly on output 1 belongs to output 1",
+        layout.window_output(1800, 100, 600, 400) == 1)
+    chk("window mostly on output 0 belongs to output 0",
+        layout.window_output(1000, 100, 1000, 400) == 0)
+    chk("window outside everything has no home",
+        layout.window_output(4000, 2000, 100, 100) == -1)
+    chk("local coordinate on output 1", layout.local_x(1, 2000) == 80)
+
+    // ---- arrangement: refuse overlap and detached placement
+    chk("overlap is refused", layout.set_position(1, 1000, 0) == layout.E_OVERLAP)
+    chk("refused move left the old place", layout.rect_x(1) == 1920)
+    chk("detached placement is refused",
+        layout.set_position(1, 2500, 0) == layout.E_DETACHED)
+    chk("move below output 0 is accepted", layout.place_beside(1, 0, 2, 0) == 0
+        && layout.rect_x(1) == 0 && layout.rect_y(1) == 1080)
+    chk("centred below", layout.place_beside(1, 0, 2, 1) == 0
+        && layout.rect_x(1) == 320)
+    chk("above output 0 with negative y", layout.place_beside(1, 0, 3, 0) == 0
+        && layout.rect_y(1) == -1024)
+    chk("bounds with a monitor above", layout.bounds_y0() == -1024
+        && layout.bounds_y1() == 1080)
+    chk("left of output 0 with negative x", layout.place_beside(1, 0, 1, 0) == 0
+        && layout.rect_x(1) == -1280)
+    chk("point in negative space is found", layout.output_at(-10, 10) == 1)
+
+    // ---- modes
+    layout.place_beside(1, 0, 0, 0)
+    layout.set_mode(layout.MODE_SINGLE)
+    chk("single: only the primary is lit", layout.active_count() == 1
+        && layout.output_at(2000, 500) == -1)
+    chk("single: bounds are the primary", layout.bounds_x1() == 1920)
+    layout.set_mode(layout.MODE_MIRROR)
+    chk("mirror: both outputs lit", layout.active_count() == 2)
+    chk("mirror: all rects start at 0,0", layout.rect_x(1) == 0 && layout.rect_y(1) == 0)
+    // 1920x1080 onto 1280x1024: 66 % / 94 % -> 66 %; 1267x712 hmm integer percent
+    chk("mirror: letterbox factor is min of both axes",
+        layout.mirror_fit_pct(1) == 66)
+    chk("mirror: destination fits inside the output",
+        layout.mirror_dst_w(1) <= 1280 && layout.mirror_dst_h(1) <= 1024)
+    chk("mirror: destination is centred",
+        layout.mirror_dst_x(1) == (1280 - layout.mirror_dst_w(1)) / 2
+        && layout.mirror_dst_y(1) == (1024 - layout.mirror_dst_h(1)) / 2)
+    chk("mirror: the primary onto itself is 1:1", layout.mirror_fit_pct(0) == 100)
+    layout.set_mode(layout.MODE_EXTEND)
+    chk("extend again restores output 1 at x=1920", layout.rect_x(1) == 1920)
+    chk("bad mode is refused", layout.set_mode(9) == layout.E_RANGE)
+
+    // ---- enable / disable
+    layout.set_enabled(1, false)
+    chk("disabled output is not lit", layout.active_count() == 1
+        && layout.output_at(2000, 500) == -1)
+    layout.set_enabled(1, true)
+
+    // ---- hotplug
+    chk("unplug the primary", layout.remove_output(0) == 0)
+    chk("primary moved to the remaining output", layout.primary() == 1)
+    chk("remaining output repacked to x=0", layout.rect_x(1) == 0)
+    chk("count is 1", layout.count() == 1)
+    chk("a second unplug of the same index is refused",
+        layout.remove_output(0) == layout.E_NOOUT)
+    chk("replug fills the freed index 0 and sits right of output 1",
+        layout.add_output(800, 600, 0) == 0 && layout.rect_x(0) == 1280)
+    var fill: i64 = 0
+    var n: u64 = 0
+    while n < 7 {
+        fill = layout.add_output(640, 480, 0)
+        n = n + 1
+    }
+    chk("table full after 8 outputs", layout.count() == 8)
+    chk("ninth output is refused", layout.add_output(640, 480, 0) == layout.E_FULL)
+    chk("zero size is refused", layout.add_output(0, 480, 0) == layout.E_RANGE)
+
+    // ---- scale
+    layout.reset()
+    chk("24in 1080p (531 mm): default 100 %", layout.default_scale(1920, 531) == 100)
+    chk("13in 3200x1800 (294 mm): default 300 %", layout.default_scale(3200, 294) == 300)
+    chk("14in 2560x1600 (302 mm): default 200 %", layout.default_scale(2560, 302) == 200)
+    chk("27in 4K (597 mm): default 175 %", layout.default_scale(3840, 597) == 175)
+    chk("unknown size: 100 %", layout.default_scale(1920, 0) == 100)
+    chk("snap 130 -> 125", layout.snap_scale(130) == 125)
+    chk("snap 99 -> 100", layout.snap_scale(99) == 100)
+    layout.add_output(3840, 2160, 597)
+    layout.add_output(1920, 1080, 531)
+    chk("per-output scale: 175 and 100", layout.scale_of(0) == 175 && layout.scale_of(1) == 100)
+    chk("logical size 2194x1234 on the 4K at 175 %",
+        layout.logical_w(0) == 2194 && layout.logical_h(0) == 1234)
+    chk("scale change on one output leaves the other",
+        layout.set_scale(1, 125) == 0 && layout.scale_of(0) == 175
+        && layout.logical_w(1) == 1536)
+    chk("scale does not move the rects", layout.rect_x(1) == 3840)
+    chk("scale out of range refused", layout.set_scale(0, 50) == layout.E_RANGE
+        && layout.set_scale(0, 301) == layout.E_RANGE)
+    chk("scale on a missing output refused", layout.set_scale(5, 100) == layout.E_NOOUT)
+    chk("100 logical px on a 175 % output = 175 physical", layout.to_physical(0, 100) == 175)
+    // the same logical window moved across the border keeps its logical size
+    chk("a 400 px wide logical window is 700 physical on 0 (175 %) and 500 on 1 (125 %)",
+        layout.to_physical(0, 400) == 700 && layout.to_physical(1, 400) == 500)
+
+    // ---- EDID + audio
+    mk_edid(53, true, true)
+    let ep: u64 = (&edid[0]) as u64
+    chk("EDID with CEA audio flag has audio", layout.edid_has_audio(ep, 256))
+    chk("EDID width from byte 21", layout.edid_width_mm(ep, 256) == 530)
+    mk_edid(53, true, false)
+    chk("EDID with CEA but no audio flag has no audio", !layout.edid_has_audio(ep, 256))
+    mk_edid(53, false, false)
+    chk("EDID without CEA block (DVI) has no audio", !layout.edid_has_audio(ep, 128)
+        && !layout.edid_has_audio(ep, 256))
+    mk_edid(53, true, true)
+    edid[3] = 7
+    chk("EDID with a broken header is rejected", !layout.edid_has_audio(ep, 256))
+
+    layout.reset()
+    layout.add_output(1920, 1080, 531)
+    layout.add_output(1920, 1080, 531)
+    layout.set_audio(0, true, 4)
+    layout.set_audio(1, false, 5)
+    let sense_ok: u64 = layout.PS_PRESENCE | layout.PS_ELD_VALID
+    chk("audio goes to pin 4 when plugged, ELD valid, EDID audio",
+        layout.audio_pin(0, sense_ok) == 4)
+    chk("no sound when the cable is out (no presence)",
+        layout.audio_pin(0, layout.PS_ELD_VALID) == 0)
+    chk("no sound when the ELD is not valid yet",
+        layout.audio_pin(0, layout.PS_PRESENCE) == 0)
+    chk("no sound to a monitor without audio", layout.audio_pin(1, sense_ok) == 0)
+    layout.set_enabled(0, false)
+    chk("no sound to a switched-off output", layout.audio_pin(0, sense_ok) == 0)
+    chk("audio on a missing output refused", layout.set_audio(6, true, 1) == layout.E_NOOUT)
+    return 0
+}
