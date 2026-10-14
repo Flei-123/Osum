@@ -32,6 +32,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 PW=testpass123
+export DRIVE_TIPPE_GAP=${DRIVE_TIPPE_GAP:-0.3}
 
 gui_stage() { # name tls(0|1) oldclient(0|1) [pkg(0|1)]
     local name=$1 tls=$2 old=$3 pkg=${4:-0}

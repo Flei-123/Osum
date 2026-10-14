@@ -159,14 +159,16 @@ ok(any(n == "12" and t == "fvv-gui-clip" for n, t in clips), "guest -> host: ASC
 uni = "Grüße € \U0001f600"
 ok(any(n == "16" and t == uni for n, t in clips), "guest -> host: unicode text (umlaut, sharp s, euro, emoji; 16 octets) intact")
 ok("fvviewer: clip unicode echo ok" in ser, "host -> guest: the unicode echo came back byte for byte")
-big = [(int(n), t) for n, t in clips if int(n) > 100000]
+# the OS clipboard keeps 4096 octets at most (wig fallback, CLIP_MAX), so the 150001-octet text arrives cut there,
+# at a character boundary: 'a' + 2047 x U+00FC = 4095 octets
+big = [(int(n), t) for n, t in clips if int(n) > 1000]
 ok(len(big) == 1, "oversize text (150001 octets): sent exactly once (no resend loop), %d message(s)" % len(big))
 if big:
     n, t = big[0]
-    ok(n == 131071, "oversize text cut at the 131072 limit INSIDE a character -> 131071 octets (got %d)" % n)
-    ok(t == "a" + "ü" * 65535, "oversize text: valid UTF-8, no torn character")
+    ok(n == 4095, "oversize text cut at the OS clipboard limit (4096) INSIDE a character -> 4095 octets (got %d)" % n)
+    ok(t == "a" + "\u00fc" * 2047, "oversize text: valid UTF-8, no torn character")
 m = re.search(r"fvviewer: clip big echo n=(\d+) kept=(\d+)", ser)
-ok(bool(m) and int(m.group(2)) <= 131072 and int(m.group(1)) > 131072, "host -> guest oversize echo: n=%s kept=%s (cut at the limit)" % (m.groups() if m else None, ""))
+ok(bool(m) and int(m.group(1)) > 2000 and int(m.group(2)) <= 131072, "host -> guest echo of the cut text: n=%s kept=%s" % (m.groups() if m else None, ""))
 ok(not any(t.startswith("echo:") for n, t in clips), "an echoed text is never sent back to the host (no ping-pong)")
 ok(len(clips) <= 4, "only the 3 test texts went out (%d clipboard messages)" % len(clips))
 
