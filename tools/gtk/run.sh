@@ -38,7 +38,7 @@ else bad "the kernel does not build"; tail -5 "$TMPD/k.txt" | sed 's/^/        /
 cat > "$TMPD/g.sh" <<'EOS'
 echo ==G-START==
 export XDG_RUNTIME_DIR=/tmp HOME=/root FONTCONFIG_FILE=/etc/fonts/fonts.conf
-glib-hello
+/usr/bin/glib-hello
 echo ==G-GLIBDONE==
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
@@ -62,6 +62,13 @@ A=(build "$TMPD/disk.img" ${GTK_BLOCKS:-131072} --v3 --inodes=2048 /lib/ "/lib/m
    "/usr/share/wayd/keymap-us.xkb=$TMPD/km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$TMPD/km/keymap-de.xkb" "/t/g.sh=$TMPD/g.sh" "/t/launch.sh=$TMPD/launch.sh")
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 for p in sh sleep echo cat ls wayd; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
+# xkb data (xkeyboard-config of the host): GDK asks libxkbcommon for rules/evdev + a default keymap by names at start-up; without the data it dereferences NULL
+HXKB=${XKB_DATA:-/usr/share/X11/xkb}
+if [ -r "$HXKB/rules/evdev" ]; then
+    for d in rules compat types keycodes symbols; do A+=("/usr/share/X11/xkb/$d/"); done
+    for d in compat types keycodes symbols; do for f in "$HXKB/$d"/*; do [ -f "$f" ] && A+=("/usr/share/X11/xkb/$d/$(basename "$f")=$f"); done; done
+    A+=("/usr/share/X11/xkb/rules/evdev=$HXKB/rules/evdev")
+fi
 # the foot stones bring fonts.conf + the xkb data; the gtk manifest brings the libraries, the probes and the compiled gsettings schemas
 # a guest path in both manifests (libffi, libxkbcommon ...): the gtk build wins (mkfs refuses a path twice)
 declare -A GTKG=()
