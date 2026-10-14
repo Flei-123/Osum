@@ -1,0 +1,307 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/usbnet/rndis.fi -- RNDIS and CDC-ECM wire formats (L-015 USB tethering), protocol half only.
+//
+// WHAT THIS IS
+//   Pure encode/decode of the messages a USB-tethering client speaks.
+//   No USB, no xHCI, no netdev. It is the part that can be tested on the
+//   host (tools/usbnet/run.sh), like lib/wlan.
+//
+// WHAT THIS IS NOT (honest)
+//   There is NO driver. kernel/usb/usb.fi does not bind class 02 or
+//   EF/04/01 interfaces, xhci.bulk is synchronous, and netdev.fi is
+//   PCI-keyed. See docs/LAPTOP-HW-FEASIBILITY.md section 6 for the steps.
+//
+// RNDIS (MS-RNDIS, "Remote NDIS over USB", as used by Android tethering
+// and by QEMU's usb-net):
+//   control pipe : SEND_ENCAPSULATED_COMMAND (0x21 / 0x00) host -> device
+//                  GET_ENCAPSULATED_RESPONSE (0xA1 / 0x01) device -> host
+//   data pipe    : bulk IN/OUT, every Ethernet frame behind a 44-byte
+//                  REMOTE_NDIS_PACKET_MSG header (little endian).
+//
+// All integers are little endian 32 bit.
+
+export {
+    MSG_PACKET, MSG_INIT, MSG_INIT_C, MSG_HALT, MSG_QUERY, MSG_QUERY_C,
+    MSG_SET, MSG_SET_C, MSG_RESET, MSG_RESET_C, MSG_INDICATE, MSG_KEEPALIVE,
+    MSG_KEEPALIVE_C,
+    STATUS_SUCCESS, STATUS_FAILURE, STATUS_NOT_SUPPORTED,
+    OID_GEN_SUPPORTED_LIST, OID_GEN_MAXIMUM_FRAME_SIZE, OID_GEN_LINK_SPEED,
+    OID_GEN_MEDIA_CONNECT_STATUS, OID_GEN_CURRENT_PACKET_FILTER,
+    OID_802_3_PERMANENT_ADDRESS, OID_802_3_CURRENT_ADDRESS,
+    FILTER_DIRECTED, FILTER_MULTICAST, FILTER_BROADCAST,
+    PACKET_HDR_LEN,
+    le32, put32,
+    build_init, build_query, build_set_filter, build_keepalive, build_keepalive_c,
+    build_halt,
+    msg_type, msg_len, msg_id, msg_status,
+    init_c_ok, init_c_max_transfer, query_c_info_len, query_c_info_off,
+    query_c_ok,
+    wrap_packet, packet_data_off, packet_data_len, packet_ok,
+    cdc_mac_from_string
+}
+
+const MSG_PACKET: u64 = 0x00000001
+const MSG_INIT: u64 = 0x00000002
+const MSG_INIT_C: u64 = 0x80000002
+const MSG_HALT: u64 = 0x00000003
+const MSG_QUERY: u64 = 0x00000004
+const MSG_QUERY_C: u64 = 0x80000004
+const MSG_SET: u64 = 0x00000005
+const MSG_SET_C: u64 = 0x80000005
+const MSG_RESET: u64 = 0x00000006
+const MSG_RESET_C: u64 = 0x80000006
+const MSG_INDICATE: u64 = 0x00000007
+const MSG_KEEPALIVE: u64 = 0x00000008
+const MSG_KEEPALIVE_C: u64 = 0x80000008
+
+const STATUS_SUCCESS: u64 = 0x00000000
+const STATUS_FAILURE: u64 = 0xC0000001
+const STATUS_NOT_SUPPORTED: u64 = 0xC00000BB
+
+const OID_GEN_SUPPORTED_LIST: u64 = 0x00010101
+const OID_GEN_MAXIMUM_FRAME_SIZE: u64 = 0x00010106
+const OID_GEN_LINK_SPEED: u64 = 0x00010107
+const OID_GEN_MEDIA_CONNECT_STATUS: u64 = 0x00010114
+const OID_GEN_CURRENT_PACKET_FILTER: u64 = 0x0001010E
+const OID_802_3_PERMANENT_ADDRESS: u64 = 0x01010101
+const OID_802_3_CURRENT_ADDRESS: u64 = 0x01010102
+
+const FILTER_DIRECTED: u64 = 0x00000001
+const FILTER_MULTICAST: u64 = 0x00000002
+const FILTER_BROADCAST: u64 = 0x00000008
+
+// Offsets inside a message are counted from the byte AFTER the
+// message-type/length pair (byte 8), the classic RNDIS trap.
+const PACKET_HDR_LEN: u64 = 44
+
+fn ld8(p: u64, i: u64) -> u64 {
+    let q: *mut u8 = (p + i) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    let q: *mut u8 = (p + i) as *mut u8
+    *q = (v & 255) as u8
+}
+
+fn le32(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8) | (ld8(p, i + 2) << 16) | (ld8(p, i + 3) << 24)
+}
+
+fn put32(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+    st8(p, i + 2, v >> 16)
+    st8(p, i + 3, v >> 24)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+// REMOTE_NDIS_INITIALIZE_MSG (24 bytes): major 1, minor 0, max transfer.
+fn build_init(dst: u64, id: u64, max_transfer: u64) -> u64 {
+    put32(dst, 0, MSG_INIT)
+    put32(dst, 4, 24)
+    put32(dst, 8, id)
+    put32(dst, 12, 1)
+    put32(dst, 16, 0)
+    put32(dst, 20, max_transfer)
+    return 24
+}
+
+// REMOTE_NDIS_HALT_MSG (12 bytes).
+fn build_halt(dst: u64, id: u64) -> u64 {
+    put32(dst, 0, MSG_HALT)
+    put32(dst, 4, 12)
+    put32(dst, 8, id)
+    return 12
+}
+
+// REMOTE_NDIS_QUERY_MSG (28 bytes, no input buffer).
+fn build_query(dst: u64, id: u64, oid: u64) -> u64 {
+    put32(dst, 0, MSG_QUERY)
+    put32(dst, 4, 28)
+    put32(dst, 8, id)
+    put32(dst, 12, oid)
+    put32(dst, 16, 0)
+    put32(dst, 20, 0)
+    put32(dst, 24, 0)
+    return 28
+}
+
+// REMOTE_NDIS_SET_MSG for OID_GEN_CURRENT_PACKET_FILTER (32 bytes:
+// 28 header + 4 byte value). InformationBufferOffset counts from byte 8.
+fn build_set_filter(dst: u64, id: u64, filter: u64) -> u64 {
+    put32(dst, 0, MSG_SET)
+    put32(dst, 4, 32)
+    put32(dst, 8, id)
+    put32(dst, 12, OID_GEN_CURRENT_PACKET_FILTER)
+    put32(dst, 16, 4)
+    put32(dst, 20, 20)
+    put32(dst, 24, 0)
+    put32(dst, 28, filter)
+    return 32
+}
+
+// KEEPALIVE (12 bytes) and the answer we owe when the device sends one.
+fn build_keepalive(dst: u64, id: u64) -> u64 {
+    put32(dst, 0, MSG_KEEPALIVE)
+    put32(dst, 4, 12)
+    put32(dst, 8, id)
+    return 12
+}
+
+fn build_keepalive_c(dst: u64, id: u64) -> u64 {
+    put32(dst, 0, MSG_KEEPALIVE_C)
+    put32(dst, 4, 16)
+    put32(dst, 8, id)
+    put32(dst, 12, STATUS_SUCCESS)
+    return 16
+}
+
+// ---- reading what the device sent (every reader validates its input)
+
+fn msg_type(p: u64, n: u64) -> u64 {
+    if n < 8 { return 0 }
+    return le32(p, 0)
+}
+
+// The length field must fit into the bytes received; 0 = refuse.
+fn msg_len(p: u64, n: u64) -> u64 {
+    if n < 12 { return 0 }
+    let l: u64 = le32(p, 4)
+    if l < 12 || l > n { return 0 }
+    return l
+}
+
+fn msg_id(p: u64, n: u64) -> u64 {
+    if n < 12 { return 0 }
+    return le32(p, 8)
+}
+
+// Status sits at offset 12 in INIT_C/QUERY_C/SET_C/RESET_C/KEEPALIVE_C.
+fn msg_status(p: u64, n: u64) -> u64 {
+    if n < 16 { return STATUS_FAILURE }
+    return le32(p, 12)
+}
+
+// INITIALIZE_CMPLT (52 bytes): status 12, ver 16/20, medium 24,
+// max packets per transfer 28, max transfer size 32.
+fn init_c_ok(p: u64, n: u64) -> bool {
+    if msg_type(p, n) != MSG_INIT_C { return false }
+    if n < 52 || msg_len(p, n) != 52 { return false }
+    return le32(p, 12) == STATUS_SUCCESS
+}
+
+fn init_c_max_transfer(p: u64, n: u64) -> u64 {
+    if !init_c_ok(p, n) { return 0 }
+    return le32(p, 32)
+}
+
+// QUERY_CMPLT: status 12, info length 16, info offset 20 (from byte 8).
+fn query_c_ok(p: u64, n: u64) -> bool {
+    if msg_type(p, n) != MSG_QUERY_C { return false }
+    let l: u64 = msg_len(p, n)
+    if l < 24 { return false }
+    if le32(p, 12) != STATUS_SUCCESS { return false }
+    let il: u64 = le32(p, 16)
+    let io: u64 = le32(p, 20)
+    // the information buffer must lie fully inside the message
+    if il > l { return false }
+    if io + 8 + il > l { return false }
+    return true
+}
+
+fn query_c_info_len(p: u64, n: u64) -> u64 {
+    if !query_c_ok(p, n) { return 0 }
+    return le32(p, 16)
+}
+
+// Absolute byte offset of the information buffer inside the message.
+fn query_c_info_off(p: u64, n: u64) -> u64 {
+    if !query_c_ok(p, n) { return 0 }
+    return le32(p, 20) + 8
+}
+
+// ---- data path
+
+// Put an Ethernet frame (at src, len bytes) behind a PACKET_MSG header
+// at dst. Returns the total bytes for the bulk-OUT transfer. DataOffset
+// counts from byte 8, so a frame directly behind the 44 byte header has
+// DataOffset 36.
+fn wrap_packet(dst: u64, src: u64, len: u64) -> u64 {
+    zero(dst, PACKET_HDR_LEN)
+    put32(dst, 0, MSG_PACKET)
+    put32(dst, 4, PACKET_HDR_LEN + len)
+    put32(dst, 8, PACKET_HDR_LEN - 8)
+    put32(dst, 12, len)
+    var i: u64 = 0
+    while i < len {
+        st8(dst, PACKET_HDR_LEN + i, ld8(src, i))
+        i = i + 1
+    }
+    return PACKET_HDR_LEN + len
+}
+
+// One PACKET_MSG at the start of a bulk-IN buffer of n bytes (a transfer
+// may hold several back to back; the caller advances by msg_len).
+fn packet_ok(p: u64, n: u64) -> bool {
+    if msg_type(p, n) != MSG_PACKET { return false }
+    let l: u64 = msg_len(p, n)
+    if l < PACKET_HDR_LEN { return false }
+    let off: u64 = le32(p, 8) + 8
+    let dl: u64 = le32(p, 12)
+    // data may not start inside the header
+    if off < PACKET_HDR_LEN { return false }
+    if off + dl > l { return false }
+    // an Ethernet frame is at least 14 bytes; 9216 = jumbo upper bound
+    if dl < 14 || dl > 9216 { return false }
+    return true
+}
+
+fn packet_data_off(p: u64, n: u64) -> u64 {
+    if !packet_ok(p, n) { return 0 }
+    return le32(p, 8) + 8
+}
+
+fn packet_data_len(p: u64, n: u64) -> u64 {
+    if !packet_ok(p, n) { return 0 }
+    return le32(p, 12)
+}
+
+// ---- CDC-ECM
+
+fn hexv(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    return -1
+}
+
+// The ECM functional descriptor names the MAC as a string descriptor
+// index; the string is 12 hex digits in UTF-16LE. `s` points at the
+// string descriptor (bLength, bDescriptorType=3, then UTF-16LE), `n` is
+// the number of bytes received. Writes 6 bytes to `mac`; false on any
+// malformation (wrong type, short, non-hex, non-ASCII high bytes).
+fn cdc_mac_from_string(s: u64, n: u64, mac: u64) -> bool {
+    if n < 26 { return false }
+    if ld8(s, 1) != 3 { return false }
+    if ld8(s, 0) < 26 || ld8(s, 0) > n { return false }
+    var i: u64 = 0
+    while i < 6 {
+        let hi: i64 = hexv(ld8(s, 2 + i * 4))
+        let hi_hi: u64 = ld8(s, 3 + i * 4)
+        let lo: i64 = hexv(ld8(s, 4 + i * 4))
+        let lo_hi: u64 = ld8(s, 5 + i * 4)
+        if hi < 0 || lo < 0 || hi_hi != 0 || lo_hi != 0 { return false }
+        st8(mac, i, ((hi as u64) << 4) | (lo as u64))
+        i = i + 1
+    }
+    return true
+}

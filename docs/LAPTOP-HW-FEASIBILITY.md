@@ -99,6 +99,8 @@ Steps and rough sizes:
 6. xHCI async bulk IN queue + netdev "usb" kind **M**.
 7. QEMU test: `-device usb-net,netdev=n0` (QEMU 7.2: strings show configurations "CDC", "Subset" and "RNDIS") — both client protocols testable with SLIRP DHCP. No NCM model: NCM stays untested until a real phone.
 
+**Done in this run (protocol half only):** `lib/usbnet/rndis.fi` — RNDIS INIT/QUERY/SET/KEEPALIVE/HALT encoders (golden layout), validating readers for every device reply, PACKET_MSG wrap/unwrap, CDC-ECM MAC-string parser; gate `tools/usbnet/run.sh` (53 promises, 7 negative controls, host only). **No driver, no USB traffic yet** — steps 1, 6 and the netdev kind remain.
+
 Hardware: any Android phone with USB tethering (RNDIS/NCM), or a USB-Ethernet dongle (ASIX/Realtek RTL8152 are vendor-class, not CDC: a **separate** driver each, S-M).
 Why this matters: laptop has WLAN only; this is the cheapest way online (r21 is not coming soon, see 8).
 

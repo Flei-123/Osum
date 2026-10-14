@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/usbnet/oracle.fi -- host program for lib/usbnet/rndis.fi.
+// Prints "OK <name>" / "FAIL <name>" per promise; run by tools/usbnet/run.sh.
+
+import std.rt
+import std.io
+import usbnet.rndis
+
+static mut a: [u8; 256] = [0; 256]
+static mut b: [u8; 2048] = [0; 2048]
+static mut c: [u8; 2048] = [0; 2048]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pa() -> u64 {
+    return (&a[0]) as u64
+}
+
+fn pb() -> u64 {
+    return (&b[0]) as u64
+}
+
+fn pc() -> u64 {
+    return (&c[0]) as u64
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return rndis.le32(p, i) & 255
+}
+
+fn clear_a() {
+    var i: usize = 0
+    while i < 256 {
+        a[i] = 0
+        i = i + 1
+    }
+}
+
+// A device-side INITIALIZE_CMPLT as QEMU / Android send it.
+fn make_init_c(status: u64, max_tx: u64) {
+    clear_a()
+    rndis.put32(pa(), 0, rndis.MSG_INIT_C)
+    rndis.put32(pa(), 4, 52)
+    rndis.put32(pa(), 8, 1)
+    rndis.put32(pa(), 12, status)
+    rndis.put32(pa(), 16, 1)
+    rndis.put32(pa(), 20, 0)
+    rndis.put32(pa(), 24, 0)
+    rndis.put32(pa(), 28, 1)
+    rndis.put32(pa(), 32, max_tx)
+    rndis.put32(pa(), 36, 2)
+    rndis.put32(pa(), 40, 0)
+    rndis.put32(pa(), 44, 0)
+}
+
+fn main() -> i32 {
+    // ---- golden encodings (layout from the RNDIS spec, little endian)
+    var n: u64 = rndis.build_init(pa(), 1, 0x4000)
+    chk("INIT is 24 bytes", n == 24)
+    chk("INIT golden bytes: type 2, len 24, id 1, ver 1.0, max 0x4000",
+        rndis.le32(pa(), 0) == 2 && rndis.le32(pa(), 4) == 24
+        && rndis.le32(pa(), 8) == 1 && rndis.le32(pa(), 12) == 1
+        && rndis.le32(pa(), 16) == 0 && rndis.le32(pa(), 20) == 0x4000
+        && byte_at(pa(), 0) == 2 && byte_at(pa(), 4) == 24 && byte_at(pa(), 21) == 0x40)
+    n = rndis.build_query(pa(), 7, rndis.OID_802_3_PERMANENT_ADDRESS)
+    chk("QUERY is 28 bytes with OID 0x01010101",
+        n == 28 && rndis.le32(pa(), 0) == 4 && rndis.le32(pa(), 4) == 28
+        && rndis.le32(pa(), 8) == 7 && rndis.le32(pa(), 12) == 0x01010101
+        && rndis.le32(pa(), 16) == 0 && rndis.le32(pa(), 24) == 0)
+    n = rndis.build_set_filter(pa(), 9, rndis.FILTER_DIRECTED | rndis.FILTER_BROADCAST)
+    chk("SET filter: 32 bytes, buffer 4 long at offset 20 (from byte 8), value 9",
+        n == 32 && rndis.le32(pa(), 0) == 5 && rndis.le32(pa(), 4) == 32
+        && rndis.le32(pa(), 12) == 0x0001010E && rndis.le32(pa(), 16) == 4
+        && rndis.le32(pa(), 20) == 20 && rndis.le32(pa(), 28) == 9)
+    chk("SET info buffer lies at absolute byte 28 = 20 + 8", 20 + 8 == 28)
+    n = rndis.build_keepalive(pa(), 3)
+    chk("KEEPALIVE 12 bytes", n == 12 && rndis.le32(pa(), 0) == 8 && rndis.le32(pa(), 4) == 12)
+    n = rndis.build_keepalive_c(pa(), 3)
+    chk("KEEPALIVE_C 16 bytes with success", n == 16 && rndis.le32(pa(), 0) == 0x80000008
+        && rndis.le32(pa(), 12) == 0)
+    n = rndis.build_halt(pa(), 4)
+    chk("HALT 12 bytes", n == 12 && rndis.le32(pa(), 0) == 3)
+
+    // ---- INITIALIZE_CMPLT
+    make_init_c(0, 0x4000)
+    chk("INIT_C ok is accepted", rndis.init_c_ok(pa(), 52))
+    chk("INIT_C max transfer is read", rndis.init_c_max_transfer(pa(), 52) == 0x4000)
+    make_init_c(rndis.STATUS_FAILURE, 0x4000)
+    chk("INIT_C with failure status is rejected", !rndis.init_c_ok(pa(), 52))
+    make_init_c(0, 0x4000)
+    chk("INIT_C truncated to 51 bytes is rejected", !rndis.init_c_ok(pa(), 51))
+    chk("INIT_C truncated to 7 bytes is rejected", !rndis.init_c_ok(pa(), 7))
+    rndis.put32(pa(), 4, 200)
+    chk("INIT_C claiming a length beyond the transfer is rejected", !rndis.init_c_ok(pa(), 52))
+    make_init_c(0, 0x4000)
+    rndis.put32(pa(), 0, rndis.MSG_QUERY_C)
+    chk("INIT_C with the wrong type is rejected", !rndis.init_c_ok(pa(), 52))
+
+    // ---- QUERY_CMPLT carrying a MAC (info at offset 16 from byte 8 = absolute 24)
+    clear_a()
+    rndis.put32(pa(), 0, rndis.MSG_QUERY_C)
+    rndis.put32(pa(), 4, 30)
+    rndis.put32(pa(), 8, 7)
+    rndis.put32(pa(), 12, 0)
+    rndis.put32(pa(), 16, 6)
+    rndis.put32(pa(), 20, 16)
+    a[24] = 82
+    a[25] = 84
+    a[26] = 0
+    a[27] = 18
+    a[28] = 52
+    a[29] = 86
+    chk("QUERY_C with 6 byte MAC is accepted", rndis.query_c_ok(pa(), 30))
+    chk("QUERY_C info is 6 bytes at absolute 24",
+        rndis.query_c_info_len(pa(), 30) == 6 && rndis.query_c_info_off(pa(), 30) == 24)
+    rndis.put32(pa(), 20, 1000)
+    chk("QUERY_C with an info offset far outside is rejected", !rndis.query_c_ok(pa(), 30))
+    rndis.put32(pa(), 20, 16)
+    rndis.put32(pa(), 16, 0xFFFFFFFF)
+    chk("QUERY_C with an absurd info length is rejected", !rndis.query_c_ok(pa(), 30))
+    rndis.put32(pa(), 16, 6)
+    rndis.put32(pa(), 12, rndis.STATUS_NOT_SUPPORTED)
+    chk("QUERY_C with an error status is rejected", !rndis.query_c_ok(pa(), 30))
+    chk("status is readable from the reply", rndis.msg_status(pa(), 30) == rndis.STATUS_NOT_SUPPORTED)
+
+    // ---- data path
+    var i: usize = 0
+    while i < 60 {
+        c[i] = (i + 1) as u8
+        i = i + 1
+    }
+    let tot: u64 = rndis.wrap_packet(pb(), pc(), 60)
+    chk("wrap: total = 44 + 60", tot == 104)
+    chk("wrap: type 1, length 104, data offset 36, data length 60",
+        rndis.le32(pb(), 0) == 1 && rndis.le32(pb(), 4) == 104
+        && rndis.le32(pb(), 8) == 36 && rndis.le32(pb(), 12) == 60)
+    chk("wrap: header fields beyond the data length are zero (OOB, per-packet info)",
+        rndis.le32(pb(), 16) == 0 && rndis.le32(pb(), 20) == 0 && rndis.le32(pb(), 24) == 0
+        && rndis.le32(pb(), 28) == 0 && rndis.le32(pb(), 32) == 0 && rndis.le32(pb(), 36) == 0
+        && rndis.le32(pb(), 40) == 0)
+    chk("wrap: frame bytes follow the header unchanged",
+        b[44] == 1 && b[45] == 2 && b[103] == 60)
+    chk("our own packet round-trips through packet_ok", rndis.packet_ok(pb(), tot))
+    chk("packet data offset is 44 and length 60",
+        rndis.packet_data_off(pb(), tot) == 44 && rndis.packet_data_len(pb(), tot) == 60)
+    chk("packet cut short is rejected", !rndis.packet_ok(pb(), tot - 1))
+    rndis.put32(pb(), 8, 0)
+    chk("data offset pointing into the header is rejected", !rndis.packet_ok(pb(), tot))
+    rndis.put32(pb(), 8, 36)
+    rndis.put32(pb(), 12, 0xFFFFFFF0)
+    chk("absurd data length is rejected", !rndis.packet_ok(pb(), tot))
+    rndis.put32(pb(), 12, 10)
+    chk("runt frame (10 bytes) is rejected", !rndis.packet_ok(pb(), tot))
+    rndis.put32(pb(), 12, 60)
+    rndis.put32(pb(), 4, 44)
+    chk("length field smaller than the data is rejected", !rndis.packet_ok(pb(), tot))
+    rndis.put32(pb(), 4, 104)
+    // two packets back to back in one transfer
+    let tot2: u64 = rndis.wrap_packet(pb() + tot, pc(), 60)
+    chk("second packet behind the first is found by advancing msg_len",
+        rndis.msg_len(pb(), tot + tot2) == 104 && rndis.packet_ok(pb() + 104, tot2))
+
+    // ---- fuzz-style loop: random-looking garbage must never be accepted as ok
+    // and must never read outside the buffer (reader bounds are checked by
+    // the length arguments; an OOB read would show up as a crash here).
+    var seed: u64 = 12345
+    var accepted: u64 = 0
+    var round: u64 = 0
+    while round < 2000 {
+        var k: usize = 0
+        while k < 64 {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+            a[k] = ((seed >> 16) & 255) as u8
+            k = k + 1
+        }
+        if rndis.packet_ok(pa(), 64) { accepted = accepted + 1 }
+        if rndis.init_c_ok(pa(), 64) { accepted = accepted + 1 }
+        if rndis.query_c_ok(pa(), 64) { accepted = accepted + 1 }
+        round = round + 1
+    }
+    chk("2000 random 64 byte buffers: none accepted as a valid message", accepted == 0)
+
+    // ---- CDC-ECM MAC string descriptor: "525400123456" in UTF-16LE
+    clear_a()
+    a[0] = 26
+    a[1] = 3
+    let hex: [u8; 12] = "525400123456"
+    var h: usize = 0
+    while h < 12 {
+        a[2 + h * 2] = hex[h]
+        h = h + 1
+    }
+    var mac: [u8; 6] = [0; 6]
+    let mp: u64 = (&mac[0]) as u64
+    chk("ECM MAC string parses", rndis.cdc_mac_from_string(pa(), 26, mp)
+        && mac[0] == 0x52 && mac[1] == 0x54 && mac[2] == 0 && mac[3] == 0x12
+        && mac[4] == 0x34 && mac[5] == 0x56)
+    a[8] = 90
+    chk("ECM MAC string with a non-hex digit is rejected", !rndis.cdc_mac_from_string(pa(), 26, mp))
+    a[8] = 48
+    a[9] = 1
+    chk("ECM MAC string with a non-ASCII high byte is rejected", !rndis.cdc_mac_from_string(pa(), 26, mp))
+    a[9] = 0
+    chk("ECM MAC string cut short is rejected", !rndis.cdc_mac_from_string(pa(), 25, mp))
+    a[1] = 2
+    chk("ECM MAC string with the wrong descriptor type is rejected", !rndis.cdc_mac_from_string(pa(), 26, mp))
+    return 0
+}
