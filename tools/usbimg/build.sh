@@ -451,6 +451,18 @@ export FIRNLIB="$ROOT/lib"
 # Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
 # dass er fehlt, und der Rest laeuft weiter.
 FIRNQ=""
+# Fallback: without FIRN_REPO, take the PINNED firn commit (vendor/firn/COMMIT) from a
+# local firn clone via git archive -- NOT the moving ../firn HEAD, which firnc0 may not compile.
+if [ -z "${FIRN_REPO:-}" ] && [ -f vendor/firn/COMMIT ]; then
+    PINC=$(head -n1 vendor/firn/COMMIT | tr -dc '0-9a-f')
+    for g in /root/firn "$ROOT/../firn" "$ROOT/../../firn"; do
+        if [ -n "$PINC" ] && [ -d "$g/.git" ] && git -C "$g" cat-file -e "$PINC^{commit}" 2>/dev/null; then
+            FIRN_REPO="$OUT/firnpin"; mkdir -p "$FIRN_REPO"
+            git -C "$g" archive "$PINC" | tar -x -C "$FIRN_REPO" && break
+            FIRN_REPO=""
+        fi
+    done
+fi
 for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
     [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
 done
