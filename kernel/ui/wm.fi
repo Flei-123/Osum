@@ -13012,15 +13012,32 @@ fn wheel_out(state: u64, x: u64, y: u64) {
     ev_push(state, i, E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
 }
 
+// 0x0B8 in the mouse state (ps2m.S_PRESSED): buttons that went down since the last look
+const MOUSE_PRESSED_OFF: u64 = 0x0B8
+
 fn on_mouse(state: u64) {
     if !ready(state) {
         return
     }
+    // A press AND its release that both landed before this look leave the button state unchanged ("never
+    // pressed"): the click is lost (toolbar buttons that ignored a click under host load). The driver remembers
+    // the press; replay it as its own step, then handle the real state (the release).
+    let pend: u64 = kstate.get(state + kstate.MOUSE_OFF, MOUSE_PRESSED_OFF)
+    kstate.set(state + kstate.MOUSE_OFF, MOUSE_PRESSED_OFF, 0)
+    let now: u64 = ps2m.buttons(state)
+    let seen: u64 = gs(state, S_KEYS) & 7
+    let lost: u64 = pend & ~now & ~seen & 7
+    if lost != 0 {
+        on_mouse_btn(state, seen | lost)
+    }
+    on_mouse_btn(state, now)
+}
+
+fn on_mouse_btn(state: u64, btn: u64) {
     let nx: u64 = ps2m.x(state)
     let ny: u64 = ps2m.y(state)
     let ox: u64 = gs(state, S_CURX)
     let oy: u64 = gs(state, S_CURY)
-    let btn: u64 = ps2m.buttons(state)
     wheel_out(state, nx, ny)
     // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
     if nx != ox || ny != oy {
@@ -13512,6 +13529,26 @@ fn on_mouse(state: u64) {
             return
         }
         if (btn & ps2m.B_RIGHT) == 0 && (alt & ps2m.B_RIGHT) != 0 {
+            if lokal_x >= 0 && lokal_y >= 0 {
+                ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64,
+                    alt)
+            }
+            return
+        }
+        // The MIDDLE button, like the right one: same two events, same local
+        // coordinates, the button mask in the third word. No raise and no focus
+        // change. Without this a remote-desktop viewer never saw a middle
+        // click (gui_input: "mouse-middle" had 0 events); programs that do not
+        // look at bit 4 ignore the event.
+        if (btn & ps2m.B_MIDDLE) != 0 && (alt & ps2m.B_MIDDLE) == 0 {
+            if lokal_x >= 0 && lokal_y >= 0 {
+                ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
+                ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
+                    btn | mods_of(state))
+            }
+            return
+        }
+        if (btn & ps2m.B_MIDDLE) == 0 && (alt & ps2m.B_MIDDLE) != 0 {
             if lokal_x >= 0 && lokal_y >= 0 {
                 ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64,
                     alt)

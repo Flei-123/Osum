@@ -141,7 +141,8 @@ warte 4
 # ---- R3: "Abbrechen" in the countdown, then "Wiederholen"
 marke 'fvviewer: reconnect cancelled'
 extern $TH host-kill
-warteauf 'fvviewer: reconnect attempt=4 wait_s=8' || 120
+# the 16 s wait of try 5 leaves time for the (slow, loaded) click; the 8 s wait of try 4 was too short
+warteauf 'fvviewer: reconnect attempt=5 wait_s=16' || 150
 klickauf fvrectcancel
 warteauf 'fvviewer: reconnect cancelled' || 20
 foto 38-cancelled

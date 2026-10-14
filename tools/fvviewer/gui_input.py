@@ -195,7 +195,7 @@ info("event line: %s" % txt)
 ok(re.search(r"L a1/1 a2/2 L ", txt) is not None, "R1 host away a moment: tries after 1 s and 2 s, then live again")
 ok(re.search(r"L a1/1 a2/2 a3/4 a4/8 a5/16 a6/30 G4\.6\.1 L", txt) is not None,
    "R2 host away for good: 6 tries after 1/2/4/8/16/30 s, then 'host offline' + Wiederholen button, a click on it -> live")
-ok(re.search(r"L a1/1 a2/2 a3/4 a4/8 C L", txt) is not None, "R3 'Abbrechen' in the countdown stops the tries; 'Wiederholen' then connects")
+ok(re.search(r"L a1/1 a2/2 a3/4 a4/8 a5/16 C L", txt) is not None, "R3 'Abbrechen' in the countdown stops the tries; 'Wiederholen' then connects")
 ok(re.search(r"L G6\.0\.0$", txt) is not None, "R4 wrong password after a live session was ended by hand: error at once (kind 6), no tries, no retry button")
 ok(not re.search(r"G6\.\d+\.0 a", txt), "R4: nothing reconnects after the refusal")
 # wall-clock spacing of the 6 tries of R2

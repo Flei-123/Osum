@@ -966,7 +966,7 @@ fn go_live(cl: *mut client.Client) {
     st_begin()
     st_str("Verbunden")
     t_live_at = fuiapp.now_ms()
-    t_clip_state = 0
+    // the clipboard self test runs once per process (t_clip_state starts at 0): a reconnect must not replay it
     t_click_at = 0
     t_rects = 0
     tr("state live after ms=")
@@ -1260,14 +1260,10 @@ fn handle_msg2(cl: *mut client.Client, m: u64, len: u64) {
                 wlibc.clip_put(cp[0], cn)
                 // the OS may keep less than we put (cut at OSCLIP): the snapshot must be what clip_sync will
                 // read back, else the cut text goes to the host as 'new' and the echo loop never ends
-                let kept: u64 = clip_read_local()
-                if kept > 0 {
-                    copy_clip_snapshot(g_clip + CLIPCAP / 2, kept)
-                    g_clip_last = kept
-                } else {
-                    copy_clip_snapshot(cp[0], cn)
-                    g_clip_last = cn
-                }
+                // The snapshot is the text received, whole: the OS may keep less (cut at OSCLIP) or answer late; clip_same
+                // knows the cut head of it. (Snapshotting the read-back raced with the put and re-sent the echo.)
+                copy_clip_snapshot(cp[0], cn)
+                g_clip_last = cn
             }
         }
     }
@@ -1310,7 +1306,11 @@ fn clip_read_local() -> u64 {
 
 fn clip_same(p: u64, n: u64) -> bool {
     if n != g_clip_last {
-        return false
+        // the OS clipboard keeps OSCLIP octets at most: a text received that is longer comes back cut (at a
+        // character boundary, up to 3 octets short). That cut head is the text we already know, not a new copy.
+        if !(g_clip_last > OSCLIP && n + 4 >= OSCLIP && n <= OSCLIP) {
+            return false
+        }
     }
     var i: u64 = 0
     while i < n {
