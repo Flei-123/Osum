@@ -111,6 +111,6 @@ if [ -f /repo/APKINDEX.tar.gz ]; then
     chk apk-add-local "ok" 'apk add --no-network --allow-untrusted --repository /repo tree >/tmp/apk.out 2>&1 && echo ok || { tail -3 /tmp/apk.out | tr "\n" "|"; }'
     ok apk-add-run 'tree --version'
 fi
-# ps last: busybox ps segfaults (gaps.txt) and must not hide the probes behind it
-ok ps 'ps'
+# ps after the end marker: busybox ps segfaults (gaps.txt) and, on the root stage, ends the guest before anything behind it runs
 echo "AL end ok"
+ok ps 'ps'
