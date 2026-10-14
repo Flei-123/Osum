@@ -4,16 +4,16 @@
 #
 #   bash tools/fvviewer/gui.sh [stage ...]        (run it through /root/jarvis/bin/heavy)
 #
-# stages (default: plain tls tlsold wprobe; `opk` is WIP -- see r43, not in the default list)
+# stages (default: plain tls tlsold wprobe opk)
 #   plain    ws:// to a local relay + Rust test host: window, type ID + password, picture pixel probe,
 #            click + keys in the test host log, clipboard echo, host kill/start => reconnect, fps/latency
 #   tls      the same over wss:// (socat TLS terminator, own test CA /etc/fvviewer-ca.pem)
 #   tlsold   wss:// with the OLD lib/fv/client.fi ($GUI_OLD_REV, default 4f0aa6ec): informational counter-test
 #            of the "tls_read closes the socket on timeout" finding; never fails the gate
-#   opk      the window starts FROM THE INSTALLED PACKAGE: the image has NO /bin/fvviewer and NO /apps/fvviewer.osp,
-#            only the signed fvviewer-1.0.0.opk in /fv; the script types `opk install` + `opk rebuild` into the
-#            desktop terminal, then starts FreeViewer from the launcher (/apps/fvviewer.osp/start) and runs the
-#            same session checks as plain
+#   opk      the window starts FROM THE INSTALLED PACKAGE: the image has NO /bin/fvviewer and no hand-copied
+#            /apps/fvviewer.osp; the signed fvviewer-1.0.0.opk is installed with the host tool (opk.py installieren)
+#            into a root tree, and store/ + apps/ + generation 1 of that tree are put into the image. Then the
+#            launcher starts /apps/fvviewer.osp/start and the same session checks as plain run
 #   wprobe   `fvviewer -w 000000001` against the REAL relay (freeviewer.fleitec.com) from the guest
 # The real Windows host is never touched; everything runs on 127.0.0.1 / the guest at 10.0.2.2.
 # Env: GUI_BUILD=<dir> keeps the build cache (default: mktemp, removed at exit), GUI_RES (default 1280x800).
@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-STAGES=${*:-plain tls tlsold wprobe}
+STAGES=${*:-plain tls tlsold wprobe opk}
 D=$(mktemp -d); trap 'for s in "$D"/*/th; do bash tools/fvviewer/th.sh "$s" down 2>/dev/null; done; [ -n "${CLIENT_BAK:-}" ] && cp "$CLIENT_BAK" lib/fv/client.fi; pkill -P $$ 2>/dev/null; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD"
@@ -61,18 +61,19 @@ gui_stage() { # name tls(0|1) oldclient(0|1) [pkg(0|1)]
         bash tools/install/pakete.sh "$P" > "$P/pak.log" 2>&1 && python3 tools/update/signpak.py "$P/geheim.key" "$P/pk/fvviewer-1.0.0.opk" > /dev/null \
             || { bad "$name: signing the package"; tail -3 "$P/pak.log"; bash tools/fvviewer/th.sh "$O/th" down; return; }
         MORE=opk
-        EXTRA_APPS="/apps/ /system/ /store/ /tmp/ /system/schluessel.pub=$P/schluessel.pub /fv/ /fv/fvviewer-1.0.0.opk=$P/pk/fvviewer-1.0.0.opk /fv/fvviewer-1.0.0.opk.sig=$P/pk/fvviewer-1.0.0.opk.sig"
-        HEAD="klick 300,200
-warte 1
-tippe opk install /fv/fvviewer-1.0.0.opk
-taste ret
-warte 8
-foto 03-opk-install
-tippe opk rebuild
-taste ret
-warte 4
-foto 04-opk-rebuild
-"
+        # Install the package into a root tree with the host tool (same format the on-device `opk` reads and
+        # writes, see tools/module/run.sh step 10), then put store/ apps/ and the generation into the image.
+        # Typing `opk install` into the desktop terminal lost keys under load (r43), so nothing is typed.
+        local OPKPY W="$P/wurzel"; OPKPY=${OPK:-$(python3 tools/lib/opkpfad.py)}
+        rm -rf "$W"; mkdir -p "$W"
+        python3 "$OPKPY" installieren --wurzel "$W" "$P/pk/fvviewer-1.0.0.opk" --schluessel "$P/schluessel.pub" > "$P/hostinst.log" 2>&1 \
+            || { bad "$name: host-side opk install"; tail -3 "$P/hostinst.log"; bash tools/fvviewer/th.sh "$O/th" down; return; }
+        EXTRA_APPS="/apps/ /system/ /store/ /tmp/ /system/schluessel.pub=$P/schluessel.pub"
+        local x
+        for x in $(cd "$W" && find store apps system/generations -type d | sort); do EXTRA_APPS="$EXTRA_APPS /$x/"; done
+        for x in $(cd "$W" && find store apps system/generations system/AKTUELL -type f | sort); do
+            EXTRA_APPS="$EXTRA_APPS /$x=$W/$x"
+        done
     fi
     cat > "$O/script.txt" <<EOF
 warteauf 'launcher: ready' || 90
@@ -80,10 +81,8 @@ warte 4
 $HEAD
 taste meta_l
 warte 2
-tippe fvviewer
-warte 2
 foto 05-launcher
-taste ret
+klickauf start_FreeViewer
 warteauf 'fvviewer: rect name=go' || 60
 warte 2
 warte 1
