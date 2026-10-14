@@ -38,6 +38,7 @@ import arch.arch
 import usb.usb
 import crypto.krypto
 import mm.mem
+import bus.pci
 
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
@@ -922,11 +923,163 @@ fn ata_write_twice(lba: u64, src: u64, slave: bool) -> bool {
     return ata_write_on(lba, src, slave)
 }
 
+// ================================== r742: ATA BUS-MASTER DMA (PIIX IDE)
+//
+// MEASURED (r728): PIO costs about 4.4 ms per sector under QEMU -- every
+// 16-bit port access is a VM exit, and the sector loop was the whole cost
+// (strace: the host disk was idle, 725k KVM_RUN returns). Bus-master DMA
+// moves a whole run with ONE command and a handful of port writes.
+//
+// What is used: the PCI IDE controller (class 01:01, programming interface
+// bit 7 = bus master), I/O BAR4 = bus master registers of the PRIMARY
+// channel (+0 command, +2 status, +4 PRD table address), and the legacy
+// ports 0x1F0 the PIO code already uses (interface bit 0 must be 0).
+// The PRD table is one frame; entries never cross a 64 KiB boundary. The
+// kernel maps the first GiB flat (virt == phys), so buffers below 1 GiB can
+// be handed to the controller as they are. Anything else, and any failed
+// transfer, falls back to PIO -- and a failed transfer switches DMA off
+// for good (DMA_BM = 0), so a broken controller costs one retry, not more.
+static mut DMA_BM: u64 = 0
+static mut DMA_PRD: u64 = 0
+static mut DMA_TRIED: bool = false
+static mut DMA_ERRS: u64 = 0
+static mut DMA_CMDS: u64 = 0
+const ATA_READ_DMA: u8 = 0xC8
+const ATA_WRITE_DMA: u8 = 0xCA
+const DMA_LIMIT: u64 = 0x40000000
+const DMA_MAX_SECTORS: u64 = 128
+
+fn dma_up(state: u64) {
+    if DMA_TRIED {
+        return
+    }
+    if kstate.get(state, kstate.BITMAP) == 0 {
+        return
+    }
+    DMA_TRIED = true
+    let i: u64 = pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_IDE, 0x100)
+    if i >= pci.MAX_DEV {
+        return
+    }
+    let pif: u64 = pci.get(state, i, pci.E_PROGIF)
+    if (pif & 0x80) == 0 || (pif & 1) != 0 {
+        return
+    }
+    if !pci.bar_is_io(state, i, 4) {
+        return
+    }
+    let bm: u64 = pci.bar(state, i, 4) & 0xFFFC
+    if bm == 0 {
+        return
+    }
+    // The PRD table lives in the spare half of the read-ahead page (no frame:
+    // a frame held forever would show up as a leak in the posix check). At
+    // most 17 entries of 8 octets; it must not cross a 64 KiB boundary.
+    let prd: u64 = state + kstate.BLKC_OFF + 0x800
+    if prd >= 0x100000000 || ((prd & 0xFFFF) + 0x100) > 0x10000 {
+        return
+    }
+    // I/O space + bus master (PCI command register: bit 0 = I/O, bit 2 = master).
+    let bdf: u64 = pci.get(state, i, pci.E_BDF)
+    pci.cfg_write16(bdf, 4, (pci.cfg_read16(bdf, 4) | 5) & 0xFFFF)
+    DMA_PRD = prd
+    DMA_BM = bm
+}
+
+fn dma_ready(addr: u64, n: u64) -> bool {
+    if DMA_BM == 0 || n == 0 || n > DMA_MAX_SECTORS {
+        return false
+    }
+    if (addr & 1) != 0 {
+        return false
+    }
+    return addr + n * BLOCK_SIZE <= DMA_LIMIT
+}
+
+// ONE DMA command for n sectors at lba. false = nothing trusted, caller
+// falls back to PIO (DMA is switched off after a failure).
+fn dma_run(lba: u64, addr: u64, n: u64, slave: bool, write: bool) -> bool {
+    let bm: u64 = DMA_BM
+    let prd: u64 = DMA_PRD
+    var k: u64 = 0
+    var a: u64 = addr
+    var rest: u64 = n * BLOCK_SIZE
+    while rest > 0 {
+        var chunk: u64 = 0x10000 - (a & 0xFFFF)
+        if chunk > rest {
+            chunk = rest
+        }
+        let e: u64 = prd + k * 8
+        __mmio_write32(e as *mut u32, (a & 0xFFFFFFFF) as u32)
+        __mmio_write16((e + 4) as *mut u16, (chunk & 0xFFFF) as u16)
+        __mmio_write16((e + 6) as *mut u16, 0 as u16)
+        a = a + chunk
+        rest = rest - chunk
+        k = k + 1
+    }
+    // end-of-table bit on the last entry
+    __mmio_write16((prd + (k - 1) * 8 + 6) as *mut u16, 0x8000 as u16)
+
+    serial.out8(bm as u16, 0 as u8)
+    arch.dev_out32((bm + 4) as u16, (prd & 0xFFFFFFFF) as u32)
+    // clear error + interrupt (write 1), keep the two "drive DMA capable" bits
+    let st0: u64 = serial.in8((bm + 2) as u16) as u64
+    serial.out8((bm + 2) as u16, ((st0 & 0x60) | 0x06) as u8)
+    var dir: u64 = 8
+    var cmd: u8 = ATA_READ_DMA
+    if write {
+        dir = 0
+        cmd = ATA_WRITE_DMA
+    }
+    serial.out8(bm as u16, dir as u8)
+    ata_select_n(lba, slave, n)
+    serial.out8(ATA_CMD, cmd)
+    serial.out8(bm as u16, (dir | 1) as u8)
+
+    var done: bool = false
+    var bad: bool = false
+    var spin: u64 = 0
+    while spin < 20000000 {
+        let s: u64 = serial.in8((bm + 2) as u16) as u64
+        if (s & 2) != 0 {
+            bad = true
+            spin = 20000000
+        } else {
+            if (s & 1) == 0 && (s & 4) != 0 {
+                done = true
+                spin = 20000000
+            }
+        }
+        spin = spin + 1
+    }
+    serial.out8(bm as u16, 0 as u8)
+    let st1: u64 = serial.in8((bm + 2) as u16) as u64
+    serial.out8((bm + 2) as u16, ((st1 & 0x60) | 0x06) as u8)
+    var ok: bool = done && !bad
+    if ok {
+        // reading the ATA status also acknowledges the drive interrupt
+        ok = ata_wait(false)
+    }
+    if ok && (serial.in8(ATA_CMD) as u64 & ST_DRQ) != 0 {
+        ok = false
+    }
+    DMA_CMDS = DMA_CMDS + 1
+    if !ok {
+        DMA_ERRS = DMA_ERRS + 1
+        DMA_BM = 0
+        ata_recover(slave)
+    }
+    return ok
+}
+
 // r728: WRITE SECTORS with a sector count. ONE command carries n sectors
 // (n <= 128): the drive raises DRQ again after each sector, and we wait for
 // it again, exactly like ata_read_run. The command latency (about 17 ms per
 // command in QEMU) is paid once per run instead of once per sector.
 fn ata_write_run(lba: u64, src: u64, n: u64, slave: bool) -> bool {
+    if dma_ready(src, n) && dma_run(lba, src, n, slave, true) {
+        return true
+    }
     // WRITE MULTIPLE (0xC5) after SET MULTIPLE MODE (0xC6, 16 sectors): the
     // drive takes a whole block of 16 sectors per DRQ and writes it with ONE
     // host operation. With plain WRITE SECTORS QEMU does one host write per
@@ -1004,6 +1157,9 @@ fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
 // sondern das Aufsetzen: Laufwerkswahl, LBA in vier Register, Befehl,
 // und danach das Warten darauf, dass das Laufwerk ueberhaupt anfaengt.
 fn ata_read_run(lba: u64, dst: u64, n: u64, slave: bool) -> bool {
+    if dma_ready(dst, n) && dma_run(lba, dst, n, slave, false) {
+        return true
+    }
     ata_select_n(lba, slave, n)
     serial.out8(ATA_CMD, ATA_READ)
     var s: u64 = 0
@@ -1171,6 +1327,7 @@ fn wb_begin(state: u64) {
 }
 
 fn wb_flush(state: u64) -> bool {
+    dma_up(state)
     if cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 {
         return true
     }
@@ -1236,6 +1393,7 @@ fn wb_overlap(state: u64, dev: u64, lba: u64, n: u64) -> bool {
 }
 
 fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    dma_up(state)
     let sl: u64 = lba & (WB_SLOTS - 1)
     let key: u64 = wb_key(dev, lba)
     let old: u64 = wb_meta(state, sl)
@@ -1291,6 +1449,7 @@ fn cache_runs(state: u64) -> u64 {
 // einmal von der Platte. `dev` unterscheidet Meister und Sklave:
 // dieselbe LBA heisst auf zwei Laufwerken zweierlei.
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
+    dma_up(state)
     let slave: bool = dev == DEV_ATA1
     if cg(state, W_DIRTY) != 0 {
         let wsl: u64 = lba & (WB_SLOTS - 1)
@@ -1568,6 +1727,7 @@ fn write_raw(state: u64, lba: u64, src: u64) -> bool {
 // every other path (encryption, AHCI, NVMe, USB, RAM) stays sector by
 // sector through `write`, so their behaviour does not change at all.
 fn write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    dma_up(state)
     if n == 0 {
         return true
     }
