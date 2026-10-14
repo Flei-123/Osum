@@ -1,0 +1,694 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/spirv/validate.fi -- validator for the SPIR-V subset the software Vulkan path (docs/GFX-STACK.md, Weg E) can run.
+//
+//     let e: u32 = validate.validate(&m)      // m opened by parse.module_open; 0 = ok, else parse.E_* + m.err_pos
+//
+// Checks (everything else is rejected with E_UNKNOWNOP / E_UNSUPPORTED, never silently ignored):
+//   module: capabilities (Matrix, Shader), Logical + GLSL450/Vulkan memory model, section order, types (32 bit int/float/bool,
+//           vectors, matrices, arrays, structs, pointers, 2D images + samplers), constants, global variables, entry points
+//   function bodies: ids defined before use, labels, one terminator per block, merge instructions, structured control flow
+//           (forward branches only except loop back edges to a loop header, unique merge blocks), result and operand types of the
+//           arithmetic / relational / conversion / composite / memory / GLSL.std.450 / image-sample instructions, OpPhi
+// It is a SUBSET validator, not a replacement for spirv-val: tools/spirv/run.sh cross-checks it against spirv-val on glslang output.
+
+import std.rt
+import spirv.spv
+import spirv.parse
+
+export { validate, gl_nargs }
+
+fn bad(m: *mut parse.Module, e: u32, pos: usize) -> u32 {
+    if (*m).err == 0 {
+        (*m).err = e
+        (*m).err_pos = pos
+    }
+    return e
+}
+
+fn tget(t: u64, i: u32) -> u32 { return rt.ld32(t, i as usize) }
+fn tset(t: u64, i: u32, v: u32) { rt.st32(t, i as usize, v) }
+
+fn is_id(m: *mut parse.Module, id: u32) -> bool { return id != 0 && id < (*m).bound }
+
+// is `id` a defined type of opcode `op`
+fn is_op(m: *mut parse.Module, id: u32, op: u32) -> bool { return parse.def_op(m, id) == op }
+
+fn is_type(m: *mut parse.Module, id: u32) -> bool {
+    let o: u32 = parse.def_op(m, id)
+    return o >= 19 && o <= 33
+}
+
+fn kind_of(m: *mut parse.Module, t: u32) -> u32 { return parse.scalar_kind(m, t) }
+
+// float scalar or float vector
+fn is_fl(m: *mut parse.Module, t: u32) -> bool { return kind_of(m, t) == parse.K_FLOAT && parse.ncomp(m, t) != 0 }
+fn is_int(m: *mut parse.Module, t: u32) -> bool {
+    let k: u32 = kind_of(m, t)
+    return (k == parse.K_SINT || k == parse.K_UINT) && parse.ncomp(m, t) != 0
+}
+fn is_bl(m: *mut parse.Module, t: u32) -> bool { return kind_of(m, t) == parse.K_BOOL && parse.ncomp(m, t) != 0 }
+
+fn ty(m: *mut parse.Module, id: u32) -> u32 { return parse.type_of(m, id) }
+
+// number of operand words GLSL.std.450 instruction `inst` takes (0 = not supported)
+fn gl_nargs(inst: u32) -> u32 {
+    if inst == 1 || inst == 3 || inst == 4 || inst == 6 || inst == 8 || inst == 9 || inst == 10 { return 1 }
+    if inst == 13 || inst == 14 || inst == 27 || inst == 28 || inst == 29 || inst == 30 || inst == 31 || inst == 32 { return 1 }
+    if inst == 26 || inst == 37 || inst == 40 || inst == 48 || inst == 67 || inst == 79 || inst == 80 { return 2 }
+    if inst == 43 || inst == 46 || inst == 49 || inst == 81 { return 3 }
+    if inst == 66 || inst == 69 { return 1 }
+    return 0
+}
+
+// ------------------------------------------------------------------------------------------ module level
+
+fn check_type(m: *mut parse.Module, pos: usize, op: u32, wc: usize) -> u32 {
+    if op == spv.OP_TYPEINT {
+        if parse.w32(m, pos + 2) != 32 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if parse.w32(m, pos + 3) > 1 { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPEFLOAT {
+        if parse.w32(m, pos + 2) != 32 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if wc != 3 { return bad(m, parse.E_WC, pos) }
+    }
+    else if op == spv.OP_TYPEVECTOR {
+        let c: u32 = parse.w32(m, pos + 2)
+        let n: u32 = parse.w32(m, pos + 3)
+        if !parse.is_scalar_type(m, c) || parse.def_pos(m, c) >= pos { return bad(m, parse.E_TYPE, pos) }
+        if n < 2 || n > 4 { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPEMATRIX {
+        let c: u32 = parse.w32(m, pos + 2)
+        let n: u32 = parse.w32(m, pos + 3)
+        if !is_op(m, c, spv.OP_TYPEVECTOR) || parse.def_pos(m, c) >= pos || !is_fl(m, c) { return bad(m, parse.E_TYPE, pos) }
+        if n < 2 || n > 4 { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPEIMAGE {
+        // result, sampled type, dim, depth, arrayed, ms, sampled, format
+        if !is_fl(m, parse.w32(m, pos + 2)) || parse.ncomp(m, parse.w32(m, pos + 2)) != 1 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if parse.w32(m, pos + 3) != spv.DIM_2D || parse.w32(m, pos + 5) != 0 || parse.w32(m, pos + 6) != 0 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if parse.w32(m, pos + 7) > 2 { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPESAMPLEDIMAGE {
+        let it: u32 = parse.w32(m, pos + 2)
+        if !is_op(m, it, spv.OP_TYPEIMAGE) || parse.def_pos(m, it) >= pos { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPEARRAY {
+        let et: u32 = parse.w32(m, pos + 2)
+        let len: u32 = parse.w32(m, pos + 3)
+        if !is_type(m, et) || parse.def_pos(m, et) >= pos { return bad(m, parse.E_TYPE, pos) }
+        if !is_op(m, len, spv.OP_CONSTANT) || parse.def_pos(m, len) >= pos || !is_int(m, ty(m, len)) { return bad(m, parse.E_TYPE, pos) }
+        if parse.const_word(m, len) == 0 || parse.const_word(m, len) > 65536 { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPERUNTIMEARRAY {
+        let et: u32 = parse.w32(m, pos + 2)
+        if !is_type(m, et) || parse.def_pos(m, et) >= pos { return bad(m, parse.E_TYPE, pos) }
+    }
+    else if op == spv.OP_TYPESTRUCT {
+        var k: usize = 2
+        while k < wc {
+            let mt: u32 = parse.w32(m, pos + k)
+            if !is_type(m, mt) || parse.def_pos(m, mt) >= pos { return bad(m, parse.E_TYPE, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_TYPEPOINTER {
+        let sc: u32 = parse.w32(m, pos + 2)
+        let pt: u32 = parse.w32(m, pos + 3)
+        if !(sc == spv.SC_UNIFORMCONSTANT || sc == spv.SC_INPUT || sc == spv.SC_UNIFORM || sc == spv.SC_OUTPUT
+            || sc == spv.SC_PRIVATE || sc == spv.SC_FUNCTION || sc == spv.SC_PUSHCONSTANT) { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if !is_id(m, pt) { return bad(m, parse.E_TYPE, pos) } // forward pointer to a struct is legal: only check the range
+    }
+    else if op == spv.OP_TYPEFUNCTION {
+        var k: usize = 2
+        while k < wc {
+            let pt: u32 = parse.w32(m, pos + k)
+            if !is_type(m, pt) || parse.def_pos(m, pt) >= pos { return bad(m, parse.E_TYPE, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_TYPEBOOL || op == spv.OP_TYPEVOID || op == spv.OP_TYPESAMPLER {
+        if wc != 2 { return bad(m, parse.E_WC, pos) }
+    }
+    else if op == spv.OP_TYPEOPAQUE || op == 34 { return bad(m, parse.E_UNSUPPORTED, pos) }
+    return 0
+}
+
+// members of a composite type: vector n, matrix n, array n (constant), struct n; 0 = not composite
+fn comp_count(m: *mut parse.Module, t: u32) -> u32 {
+    let p: usize = parse.def_pos(m, t)
+    if p == 0 { return 0 }
+    let o: u32 = parse.op_at(m, p)
+    if o == spv.OP_TYPEVECTOR || o == spv.OP_TYPEMATRIX { return parse.w32(m, p + 3) }
+    if o == spv.OP_TYPEARRAY { return parse.const_word(m, parse.w32(m, p + 3)) }
+    if o == spv.OP_TYPESTRUCT { return (parse.wc_at(m, p) - 2) as u32 }
+    return 0
+}
+
+// type of member i of a composite type (0 on error)
+fn comp_member(m: *mut parse.Module, t: u32, i: u32) -> u32 {
+    let p: usize = parse.def_pos(m, t)
+    if p == 0 { return 0 }
+    let o: u32 = parse.op_at(m, p)
+    if i >= comp_count(m, t) { return 0 }
+    if o == spv.OP_TYPEVECTOR || o == spv.OP_TYPEMATRIX || o == spv.OP_TYPEARRAY { return parse.w32(m, p + 2) }
+    if o == spv.OP_TYPESTRUCT { return parse.w32(m, p + 2 + (i as usize)) }
+    return 0
+}
+
+fn check_const(m: *mut parse.Module, pos: usize, op: u32, wc: usize) -> u32 {
+    let t: u32 = parse.w32(m, pos + 1)
+    if !is_type(m, t) || parse.def_pos(m, t) >= pos { return bad(m, parse.E_CONST, pos) }
+    if op == spv.OP_CONSTANTTRUE || op == spv.OP_CONSTANTFALSE {
+        if kind_of(m, t) != parse.K_BOOL || !parse.is_scalar_type(m, t) { return bad(m, parse.E_CONST, pos) }
+    }
+    else if op == spv.OP_CONSTANT {
+        if !parse.is_scalar_type(m, t) || kind_of(m, t) == parse.K_BOOL || wc != 4 { return bad(m, parse.E_CONST, pos) }
+    }
+    else if op == spv.OP_CONSTANTCOMPOSITE {
+        let n: u32 = comp_count(m, t)
+        if n == 0 || (wc as u32) != n + 3 { return bad(m, parse.E_CONST, pos) }
+        var k: u32 = 0
+        while k < n {
+            let c: u32 = parse.w32(m, pos + 3 + (k as usize))
+            let co: u32 = parse.def_op(m, c)
+            if !(co >= 41 && co <= 46) || parse.def_pos(m, c) >= pos { return bad(m, parse.E_CONST, pos) }
+            if ty(m, c) != comp_member(m, t, k) { return bad(m, parse.E_CONST, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_CONSTANTNULL { }
+    else { return bad(m, parse.E_UNSUPPORTED, pos) } // specialization constants, samplers
+    return 0
+}
+
+fn check_global_var(m: *mut parse.Module, pos: usize, wc: usize) -> u32 {
+    let t: u32 = parse.w32(m, pos + 1)
+    let id: u32 = parse.w32(m, pos + 2)
+    let sc: u32 = parse.w32(m, pos + 3)
+    if parse.ptr_class(m, t) != sc { return bad(m, parse.E_VAR, pos) }
+    if sc == spv.SC_FUNCTION { return bad(m, parse.E_VAR, pos) }
+    if wc > 5 { return bad(m, parse.E_WC, pos) }
+    if wc == 5 {
+        let ini: u32 = parse.w32(m, pos + 4)
+        let io: u32 = parse.def_op(m, ini)
+        if !(io >= 41 && io <= 46) || parse.def_pos(m, ini) >= pos || ty(m, ini) != parse.ptr_pointee(m, t) { return bad(m, parse.E_VAR, pos) }
+    }
+    let pointee: u32 = parse.ptr_pointee(m, t)
+    if sc == spv.SC_INPUT || sc == spv.SC_OUTPUT {
+        if parse.loc_of(m, id) == 0 && parse.builtin_of(m, id) == 0 && (parse.flags_of(m, pointee) & parse.F_BLOCK) == 0 { return bad(m, parse.E_VAR, pos) }
+    }
+    if sc == spv.SC_UNIFORMCONSTANT {
+        if parse.binding_of(m, id) == 0 || parse.dset_of(m, id) == 0 { return bad(m, parse.E_VAR, pos) }
+        let po: u32 = parse.def_op(m, pointee)
+        if po != spv.OP_TYPESAMPLEDIMAGE && po != spv.OP_TYPEIMAGE && po != spv.OP_TYPESAMPLER { return bad(m, parse.E_VAR, pos) }
+    }
+    return 0
+}
+
+fn check_entries(m: *mut parse.Module) -> u32 {
+    if (*m).nep == 0 { return bad(m, parse.E_ENTRY, 0) }
+    var i: u32 = 0
+    while i < (*m).nep && i < 16 {
+        let p: usize = rt.ld32((*m).eps, i as usize) as usize
+        let wc: usize = parse.wc_at(m, p)
+        let model: u32 = parse.w32(m, p + 1)
+        let fid: u32 = parse.w32(m, p + 2)
+        if !(model == spv.EM_VERTEX || model == spv.EM_FRAGMENT || model == spv.EM_GLCOMPUTE) { return bad(m, parse.E_ENTRY, p) }
+        if !is_id(m, fid) || !is_op(m, fid, spv.OP_FUNCTION) { return bad(m, parse.E_ENTRY, p) }
+        // entry function: void, no parameters
+        let fp: usize = parse.def_pos(m, fid)
+        let ft: u32 = parse.w32(m, fp + 4)
+        if !is_op(m, ft, spv.OP_TYPEFUNCTION) || parse.wc_at(m, parse.def_pos(m, ft)) != 3 { return bad(m, parse.E_ENTRY, p) }
+        if parse.def_op(m, parse.w32(m, parse.def_pos(m, ft) + 2)) != spv.OP_TYPEVOID { return bad(m, parse.E_ENTRY, p) }
+        if model == spv.EM_FRAGMENT && (parse.flags_of(m, fid) & (parse.F_ORIGIN_UL | parse.F_ORIGIN_LL)) == 0 { return bad(m, parse.E_ENTRY, p) }
+        // interface: ids after the name must be Input/Output variables
+        let sl: usize = parse.str_len_words(m, p + 3, p + wc)
+        var k: usize = p + 3 + sl
+        while k < p + wc {
+            let vid: u32 = parse.w32(m, k)
+            if !is_id(m, vid) || !is_op(m, vid, spv.OP_VARIABLE) { return bad(m, parse.E_ENTRY, p) }
+            let sc: u32 = parse.w32(m, parse.def_pos(m, vid) + 3)
+            if sc != spv.SC_INPUT && sc != spv.SC_OUTPUT { return bad(m, parse.E_ENTRY, p) }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ------------------------------------------------------------------------------------------ function bodies
+
+fn result_ok(m: *mut parse.Module, pos: usize, op: u32, wc: usize) -> u32 {
+    let t: u32 = parse.w32(m, pos + 1)
+    let a: u32 = parse.w32(m, pos + 3)
+    let b: u32 = parse.w32(m, pos + 4)
+    if op == spv.OP_FADD || op == spv.OP_FSUB || op == spv.OP_FMUL || op == spv.OP_FDIV || op == spv.OP_FREM || op == spv.OP_FMOD {
+        if !is_fl(m, t) || ty(m, a) != t || ty(m, b) != t || wc != 5 { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_IADD || op == spv.OP_ISUB || op == spv.OP_IMUL || op == spv.OP_UDIV || op == spv.OP_SDIV || op == spv.OP_UMOD
+        || op == spv.OP_SREM || op == spv.OP_SMOD {
+        if !is_int(m, t) || ty(m, a) != t || ty(m, b) != t || wc != 5 { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_FNEGATE { if !is_fl(m, t) || ty(m, a) != t || wc != 4 { return bad(m, parse.E_OPERAND, pos) } }
+    else if op == spv.OP_SNEGATE { if !is_int(m, t) || ty(m, a) != t || wc != 4 { return bad(m, parse.E_OPERAND, pos) } }
+    else if op == spv.OP_VECTORTIMESSCALAR {
+        if !is_op(m, t, spv.OP_TYPEVECTOR) || !is_fl(m, t) || ty(m, a) != t || ty(m, b) != parse.comp_type(m, t) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_DOT {
+        if !is_op(m, ty(m, a), spv.OP_TYPEVECTOR) || !is_fl(m, ty(m, a)) || ty(m, a) != ty(m, b) || parse.comp_type(m, ty(m, a)) != t { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op >= spv.OP_IEQUAL && op <= spv.OP_SLESSTHANEQUAL {
+        if !is_bl(m, t) || !is_int(m, ty(m, a)) || ty(m, a) != ty(m, b) || parse.ncomp(m, ty(m, a)) != parse.ncomp(m, t) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op >= spv.OP_FORDEQUAL && op <= spv.OP_FUNORDGREATERTHANEQUAL {
+        if !is_bl(m, t) || !is_fl(m, ty(m, a)) || ty(m, a) != ty(m, b) || parse.ncomp(m, ty(m, a)) != parse.ncomp(m, t) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_ANY || op == spv.OP_ALL {
+        if !(kind_of(m, t) == parse.K_BOOL && parse.ncomp(m, t) == 1) || !is_bl(m, ty(m, a)) || !is_op(m, ty(m, a), spv.OP_TYPEVECTOR) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_ISNAN || op == spv.OP_ISINF {
+        if !is_bl(m, t) || !is_fl(m, ty(m, a)) || parse.ncomp(m, ty(m, a)) != parse.ncomp(m, t) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_LOGICALOR || op == spv.OP_LOGICALAND || op == spv.OP_LOGICALEQUAL || op == spv.OP_LOGICALNOTEQUAL {
+        if !is_bl(m, t) || ty(m, a) != t || ty(m, b) != t { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_LOGICALNOT { if !is_bl(m, t) || ty(m, a) != t { return bad(m, parse.E_OPERAND, pos) } }
+    else if op == spv.OP_SELECT {
+        let c: u32 = ty(m, a)
+        if !is_bl(m, c) || parse.ncomp(m, c) != parse.ncomp(m, t) || ty(m, b) != t || ty(m, parse.w32(m, pos + 5)) != t { return bad(m, parse.E_OPERAND, pos) }
+        if parse.ncomp(m, t) == 0 { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_CONVERTFTOU || op == spv.OP_CONVERTFTOS {
+        let want: u32 = parse.K_SINT
+        var wk: u32 = want
+        if op == spv.OP_CONVERTFTOU { wk = parse.K_UINT }
+        if kind_of(m, t) != wk || !is_fl(m, ty(m, a)) || parse.ncomp(m, t) != parse.ncomp(m, ty(m, a)) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_CONVERTSTOF || op == spv.OP_CONVERTUTOF {
+        var sk: u32 = parse.K_SINT
+        if op == spv.OP_CONVERTUTOF { sk = parse.K_UINT }
+        if !is_fl(m, t) || kind_of(m, ty(m, a)) != sk || parse.ncomp(m, t) != parse.ncomp(m, ty(m, a)) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_BITCAST {
+        if parse.ncomp(m, t) == 0 || parse.ncomp(m, t) != parse.ncomp(m, ty(m, a)) || kind_of(m, t) == parse.K_BOOL || kind_of(m, ty(m, a)) == parse.K_BOOL { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_COPYOBJECT { if ty(m, a) != t { return bad(m, parse.E_OPERAND, pos) } }
+    else { return bad(m, parse.E_UNKNOWNOP, pos) }
+    return 0
+}
+
+// the instructions that need more than the generic operand rule
+fn check_special(m: *mut parse.Module, pos: usize, op: u32, wc: usize) -> u32 {
+    let t: u32 = parse.w32(m, pos + 1)
+    if op == spv.OP_LOAD {
+        let p: u32 = parse.w32(m, pos + 3)
+        if parse.ptr_pointee(m, ty(m, p)) != t || t == 0 { return bad(m, parse.E_OPERAND, pos) }
+        if wc > 4 && parse.w32(m, pos + 4) > 3 { return bad(m, parse.E_UNSUPPORTED, pos) } // Volatile|Aligned|Nontemporal only
+        if wc > 5 { return bad(m, parse.E_UNSUPPORTED, pos) }
+    }
+    else if op == spv.OP_STORE {
+        let p: u32 = parse.w32(m, pos + 1)
+        let o: u32 = parse.w32(m, pos + 2)
+        let pc: u32 = parse.ptr_class(m, ty(m, p))
+        if parse.ptr_pointee(m, ty(m, p)) != ty(m, o) || ty(m, o) == 0 { return bad(m, parse.E_OPERAND, pos) }
+        if pc == spv.SC_INPUT || pc == spv.SC_UNIFORMCONSTANT || pc == spv.SC_PUSHCONSTANT { return bad(m, parse.E_OPERAND, pos) }
+        if wc > 3 && parse.w32(m, pos + 3) > 3 { return bad(m, parse.E_UNSUPPORTED, pos) }
+    }
+    else if op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN {
+        let base: u32 = parse.w32(m, pos + 3)
+        var cur: u32 = parse.ptr_pointee(m, ty(m, base))
+        let sc: u32 = parse.ptr_class(m, ty(m, base))
+        if cur == 0 || wc < 5 { return bad(m, parse.E_OPERAND, pos) }
+        var k: usize = 4
+        while k < wc {
+            let ix: u32 = parse.w32(m, pos + k)
+            if !is_int(m, ty(m, ix)) || parse.ncomp(m, ty(m, ix)) != 1 { return bad(m, parse.E_OPERAND, pos) }
+            var mi: u32 = 0
+            if parse.def_op(m, ix) == spv.OP_CONSTANT { mi = parse.const_word(m, ix) }
+            else if parse.def_op(m, cur) == spv.OP_TYPESTRUCT { return bad(m, parse.E_OPERAND, pos) } // struct index must be constant
+            else if parse.def_op(m, cur) != spv.OP_TYPEARRAY && parse.def_op(m, cur) != spv.OP_TYPEVECTOR && parse.def_op(m, cur) != spv.OP_TYPEMATRIX { return bad(m, parse.E_OPERAND, pos) }
+            if parse.def_op(m, ix) == spv.OP_CONSTANT {
+                cur = comp_member(m, cur, mi)
+            } else {
+                cur = comp_member(m, cur, 0)
+            }
+            if cur == 0 { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+        if parse.ptr_pointee(m, t) != cur || parse.ptr_class(m, t) != sc { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_COMPOSITECONSTRUCT {
+        let n: u32 = comp_count(m, t)
+        if n == 0 { return bad(m, parse.E_OPERAND, pos) }
+        if parse.def_op(m, t) == spv.OP_TYPEVECTOR {
+            var sum: u32 = 0
+            var k: usize = 3
+            while k < wc {
+                let o: u32 = parse.w32(m, pos + k)
+                if parse.comp_type(m, ty(m, o)) != parse.comp_type(m, t) || parse.ncomp(m, ty(m, o)) == 0 { return bad(m, parse.E_OPERAND, pos) }
+                sum = sum + parse.ncomp(m, ty(m, o))
+                k = k + 1
+            }
+            if sum != n { return bad(m, parse.E_OPERAND, pos) }
+        } else {
+            if (wc as u32) != n + 3 { return bad(m, parse.E_OPERAND, pos) }
+            var k: u32 = 0
+            while k < n {
+                if ty(m, parse.w32(m, pos + 3 + (k as usize))) != comp_member(m, t, k) { return bad(m, parse.E_OPERAND, pos) }
+                k = k + 1
+            }
+        }
+    }
+    else if op == spv.OP_COMPOSITEEXTRACT {
+        var cur: u32 = ty(m, parse.w32(m, pos + 3))
+        var k: usize = 4
+        while k < wc {
+            cur = comp_member(m, cur, parse.w32(m, pos + k))
+            if cur == 0 { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+        if cur != t || wc < 5 { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_VECTORSHUFFLE {
+        let a: u32 = parse.w32(m, pos + 3)
+        let b: u32 = parse.w32(m, pos + 4)
+        let n1: u32 = parse.ncomp(m, ty(m, a))
+        let n2: u32 = parse.ncomp(m, ty(m, b))
+        if !is_op(m, t, spv.OP_TYPEVECTOR) || !is_op(m, ty(m, a), spv.OP_TYPEVECTOR) || !is_op(m, ty(m, b), spv.OP_TYPEVECTOR) { return bad(m, parse.E_OPERAND, pos) }
+        if parse.comp_type(m, ty(m, a)) != parse.comp_type(m, t) || parse.comp_type(m, ty(m, b)) != parse.comp_type(m, t) { return bad(m, parse.E_OPERAND, pos) }
+        if (wc - 5) as u32 != parse.ncomp(m, t) { return bad(m, parse.E_OPERAND, pos) }
+        var k: usize = 5
+        while k < wc {
+            let c: u32 = parse.w32(m, pos + k)
+            if c != 0xFFFFFFFF && c >= n1 + n2 { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_EXTINST {
+        let inst: u32 = parse.w32(m, pos + 4)
+        let n: u32 = gl_nargs(inst)
+        if parse.w32(m, pos + 3) != (*m).glsl_id || (*m).glsl_id == 0 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if n == 0 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        if (wc as u32) != n + 5 { return bad(m, parse.E_OPERAND, pos) }
+        if !is_fl(m, t) { return bad(m, parse.E_OPERAND, pos) }
+        var k: usize = 5
+        while k < wc {
+            let o: u32 = parse.w32(m, pos + k)
+            if inst == spv.GL_LENGTH || inst == spv.GL_DISTANCE {
+                if parse.comp_type(m, ty(m, o)) != t || !is_fl(m, ty(m, o)) { return bad(m, parse.E_OPERAND, pos) }
+            } else if ty(m, o) != t { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_SAMPLEDIMAGE {
+        if !is_op(m, t, spv.OP_TYPESAMPLEDIMAGE) { return bad(m, parse.E_OPERAND, pos) }
+        if ty(m, parse.w32(m, pos + 3)) != parse.w32(m, parse.def_pos(m, t) + 2) || !is_op(m, ty(m, parse.w32(m, pos + 4)), spv.OP_TYPESAMPLER) { return bad(m, parse.E_OPERAND, pos) }
+    }
+    else if op == spv.OP_IMAGESAMPLEIMPLICITLOD || op == spv.OP_IMAGESAMPLEEXPLICITLOD {
+        if !is_fl(m, t) || parse.ncomp(m, t) != 4 { return bad(m, parse.E_OPERAND, pos) }
+        if !is_op(m, ty(m, parse.w32(m, pos + 3)), spv.OP_TYPESAMPLEDIMAGE) { return bad(m, parse.E_OPERAND, pos) }
+        let ct: u32 = ty(m, parse.w32(m, pos + 4))
+        if !is_fl(m, ct) { return bad(m, parse.E_OPERAND, pos) }
+        if parse.ncomp(m, ct) != 2 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        var mask: u32 = 0
+        if wc > 5 { mask = parse.w32(m, pos + 5) }
+        if (mask & 0xFFFFFFF8) != 0 { return bad(m, parse.E_UNSUPPORTED, pos) }
+        var need: usize = 5
+        if wc > 5 { need = 6 }
+        if (mask & 1) != 0 { need = need + 1 }
+        if (mask & 2) != 0 { need = need + 1 }
+        if (mask & 4) != 0 { need = need + 2 }
+        if wc != need { return bad(m, parse.E_OPERAND, pos) }
+        if op == spv.OP_IMAGESAMPLEEXPLICITLOD && (mask & 6) == 0 { return bad(m, parse.E_OPERAND, pos) }
+        var k: usize = 6
+        while k < wc {
+            if !is_fl(m, ty(m, parse.w32(m, pos + k))) { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+    }
+    else if op == spv.OP_FUNCTIONCALL {
+        let callee: u32 = parse.w32(m, pos + 3)
+        if !is_op(m, callee, spv.OP_FUNCTION) { return bad(m, parse.E_OPERAND, pos) }
+        let ft: usize = parse.def_pos(m, parse.w32(m, parse.def_pos(m, callee) + 4))
+        if ft == 0 || parse.wc_at(m, ft) != wc - 1 { return bad(m, parse.E_OPERAND, pos) }
+        var k: usize = 4
+        while k < wc {
+            if ty(m, parse.w32(m, pos + k)) != parse.w32(m, ft + k - 2) { return bad(m, parse.E_OPERAND, pos) }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+fn is_terminator(op: u32) -> bool { return op >= 249 && op <= 255 }
+
+// ops allowed inside a block besides OpPhi / OpVariable / terminators / merges
+fn body_op_ok(op: u32) -> bool {
+    if op == 0 || op == 1 || op == 8 || op == 317 { return true } // Nop, Undef, Line, NoLine
+    if op == 12 || op == 57 || op == 61 || op == 62 || op == 65 || op == 66 { return true }
+    if op >= 79 && op <= 83 { return true }
+    if op == 86 || op == 87 || op == 88 { return true }
+    if op >= 109 && op <= 112 { return true }
+    if op == 124 { return true }
+    if op >= 126 && op <= 142 { return true }
+    if op == 148 || op == 154 || op == 155 || op == 156 || op == 157 { return true }
+    if op >= 164 && op <= 191 { return true }
+    return false
+}
+
+fn check_function(m: *mut parse.Module, i0: usize, i1: usize, fseq: u32, lblfn: u64, lblord: u64, lblhdr: u64, mrg: u64) -> u32 {
+    // i0 = index of OpFunction, i1 = index of OpFunctionEnd
+    let fp: usize = parse.inst_pos(m, i0)
+    let rt_id: u32 = parse.w32(m, fp + 1)
+    let ftp: u32 = parse.w32(m, fp + 4)
+    if !is_op(m, ftp, spv.OP_TYPEFUNCTION) { return bad(m, parse.E_TYPE, fp) }
+    let ftpos: usize = parse.def_pos(m, ftp)
+    if parse.w32(m, ftpos + 2) != rt_id { return bad(m, parse.E_TYPE, fp) }
+    let nparams: usize = parse.wc_at(m, ftpos) - 3
+    let rvoid: bool = parse.def_op(m, rt_id) == spv.OP_TYPEVOID
+    // pass 1: labels of this function, in layout order
+    var ord: u32 = 0
+    var i: usize = i0 + 1
+    while i < i1 {
+        let pos: usize = parse.inst_pos(m, i)
+        if parse.op_at(m, pos) == spv.OP_LABEL {
+            let l: u32 = parse.w32(m, pos + 1)
+            ord = ord + 1
+            tset(lblfn, l, fseq)
+            tset(lblord, l, ord)
+        }
+        i = i + 1
+    }
+    if ord == 0 { return bad(m, parse.E_BLOCK, fp) }
+    // pass 2: structure and operands
+    var np: usize = 0
+    var in_block: bool = false
+    var cur_ord: u32 = 0
+    var cur_label: u32 = 0
+    var at_start: bool = false // only OpPhi / OpVariable may come
+    var phis_ok: bool = false
+    i = i0 + 1
+    while i < i1 {
+        let pos: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, pos)
+        let wc: usize = parse.wc_at(m, pos)
+        if op == spv.OP_FUNCTIONPARAMETER {
+            if in_block || cur_ord != 0 || np >= nparams { return bad(m, parse.E_BLOCK, pos) }
+            if parse.w32(m, pos + 1) != parse.w32(m, ftpos + 3 + np) { return bad(m, parse.E_TYPE, pos) }
+            np = np + 1
+            i = i + 1
+            continue
+        }
+        if op == spv.OP_LABEL {
+            if in_block || np != nparams { return bad(m, parse.E_BLOCK, pos) }
+            in_block = true
+            cur_label = parse.w32(m, pos + 1)
+            cur_ord = tget(lblord, cur_label)
+            at_start = true
+            phis_ok = true
+            i = i + 1
+            continue
+        }
+        if !in_block { return bad(m, parse.E_BLOCK, pos) }
+        if op == spv.OP_LINE || op == spv.OP_NOLINE || op == spv.OP_NOP { i = i + 1; continue }
+        // generic operand rule
+        var k: usize = 1
+        while k < wc {
+            let kind: u32 = parse.operand_kind(op, k, wc)
+            if kind != 0 {
+                let id: u32 = parse.w32(m, pos + k)
+                if !is_id(m, id) { return bad(m, parse.E_ID, pos) }
+                if kind == 1 && (parse.def_pos(m, id) == 0 || parse.def_pos(m, id) >= pos) { return bad(m, parse.E_UNDEF, pos) }
+                if kind == 3 && parse.def_pos(m, id) == 0 { return bad(m, parse.E_UNDEF, pos) }
+                if kind == 2 && tget(lblfn, id) != fseq { return bad(m, parse.E_CFG, pos) }
+            }
+            k = k + 1
+        }
+        if op == spv.OP_PHI {
+            if !phis_ok || (wc % 2) != 1 || wc < 5 { return bad(m, parse.E_BLOCK, pos) }
+            var q: usize = 3
+            while q < wc {
+                if ty(m, parse.w32(m, pos + q)) != parse.w32(m, pos + 1) { return bad(m, parse.E_OPERAND, pos) }
+                if tget(lblfn, parse.w32(m, pos + q + 1)) != fseq { return bad(m, parse.E_CFG, pos) }
+                q = q + 2
+            }
+            i = i + 1
+            continue
+        }
+        if op == spv.OP_VARIABLE {
+            if cur_ord != 1 || !at_start { return bad(m, parse.E_VAR, pos) }
+            if parse.w32(m, pos + 3) != spv.SC_FUNCTION || parse.ptr_class(m, parse.w32(m, pos + 1)) != spv.SC_FUNCTION { return bad(m, parse.E_VAR, pos) }
+            if wc == 5 {
+                let ini: u32 = parse.w32(m, pos + 4)
+                let io: u32 = parse.def_op(m, ini)
+                if !(io >= 41 && io <= 46) || ty(m, ini) != parse.ptr_pointee(m, parse.w32(m, pos + 1)) { return bad(m, parse.E_VAR, pos) }
+            }
+            if wc > 5 { return bad(m, parse.E_WC, pos) }
+            phis_ok = false
+            i = i + 1
+            continue
+        }
+        phis_ok = false
+        at_start = false
+        if op == spv.OP_SELECTIONMERGE || op == spv.OP_LOOPMERGE {
+            // must be the second to last instruction of the block: next is the matching branch
+            let np2: usize = parse.inst_pos(m, i + 1)
+            let nop: u32 = parse.op_at(m, np2)
+            if op == spv.OP_SELECTIONMERGE && nop != spv.OP_BRANCHCONDITIONAL && nop != spv.OP_SWITCH { return bad(m, parse.E_CFG, pos) }
+            if op == spv.OP_LOOPMERGE && nop != spv.OP_BRANCH && nop != spv.OP_BRANCHCONDITIONAL { return bad(m, parse.E_CFG, pos) }
+            let mb: u32 = parse.w32(m, pos + 1)
+            if tget(lblord, mb) <= cur_ord || tget(mrg, mb) != 0 { return bad(m, parse.E_CFG, pos) }
+            tset(mrg, mb, 1)
+            if op == spv.OP_LOOPMERGE {
+                let ct: u32 = parse.w32(m, pos + 2)
+                if tget(lblord, ct) <= cur_ord || ct == mb || tget(mrg, ct) != 0 { return bad(m, parse.E_CFG, pos) }
+                tset(mrg, ct, 1)
+                tset(lblhdr, cur_label, 1)
+            }
+            i = i + 1
+            continue
+        }
+        if is_terminator(op) {
+            if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL {
+                let t1: u32 = parse.w32(m, pos + 1)
+                var nt: usize = 1
+                if op == spv.OP_BRANCHCONDITIONAL { nt = 2 }
+                if op == spv.OP_BRANCHCONDITIONAL {
+                    let ct: u32 = ty(m, t1)
+                    if !(kind_of(m, ct) == parse.K_BOOL && parse.ncomp(m, ct) == 1) { return bad(m, parse.E_OPERAND, pos) }
+                    if wc != 4 && wc != 6 { return bad(m, parse.E_WC, pos) }
+                }
+                var u: usize = 0
+                while u < nt {
+                    var tgt: u32 = parse.w32(m, pos + 1)
+                    if op == spv.OP_BRANCHCONDITIONAL { tgt = parse.w32(m, pos + 2 + u) }
+                    if tget(lblord, tgt) <= cur_ord && tget(lblhdr, tgt) == 0 { return bad(m, parse.E_CFG, pos) } // back edge to a non-loop block
+                    u = u + 1
+                }
+            }
+            else if op == spv.OP_RETURN { if !rvoid { return bad(m, parse.E_OPERAND, pos) } }
+            else if op == spv.OP_RETURNVALUE { if rvoid || ty(m, parse.w32(m, pos + 1)) != rt_id { return bad(m, parse.E_OPERAND, pos) } }
+            else if op == spv.OP_SWITCH {
+                if (wc % 2) != 1 { return bad(m, parse.E_WC, pos) }
+            }
+            else if op == spv.OP_KILL { if !rvoid { return bad(m, parse.E_OPERAND, pos) } }
+            in_block = false
+            i = i + 1
+            continue
+        }
+        if !body_op_ok(op) { return bad(m, parse.E_UNKNOWNOP, pos) }
+        if parse.res_kind(op) == 2 {
+            let t: u32 = parse.w32(m, pos + 1)
+            if !is_type(m, t) && op != spv.OP_UNDEF { return bad(m, parse.E_TYPE, pos) }
+            if op == spv.OP_UNDEF || op == spv.OP_EXTINST || op == spv.OP_FUNCTIONCALL || op == spv.OP_LOAD || op == spv.OP_STORE
+                || op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN || op == spv.OP_COMPOSITECONSTRUCT || op == spv.OP_COMPOSITEEXTRACT
+                || op == spv.OP_VECTORSHUFFLE || op == spv.OP_SAMPLEDIMAGE || op == spv.OP_IMAGESAMPLEIMPLICITLOD || op == spv.OP_IMAGESAMPLEEXPLICITLOD {
+                if check_special(m, pos, op, wc) != 0 { return (*m).err }
+            } else {
+                if result_ok(m, pos, op, wc) != 0 { return (*m).err }
+            }
+        } else if op == spv.OP_STORE {
+            if check_special(m, pos, op, wc) != 0 { return (*m).err }
+        } else { return bad(m, parse.E_UNKNOWNOP, pos) }
+        i = i + 1
+    }
+    if in_block || np != nparams { return bad(m, parse.E_BLOCK, parse.inst_pos(m, i1)) }
+    return 0
+}
+
+fn validate(m: *mut parse.Module) -> u32 {
+    if (*m).err != 0 { return (*m).err }
+    if (*m).code == 0 { return bad(m, parse.E_TRUNC, 0) }
+    if (*m).has_groups { return bad(m, parse.E_UNSUPPORTED, 0) }
+    var stage: u32 = 0
+    var seen_other: bool = false
+    var i: usize = 0
+    while i < (*m).ninst {
+        let pos: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, pos)
+        let wc: usize = parse.wc_at(m, pos)
+        if op == spv.OP_CAPABILITY {
+            if seen_other { return bad(m, parse.E_ORDER, pos) }
+            let c: u32 = parse.w32(m, pos + 1)
+            if c != spv.CAP_MATRIX && c != spv.CAP_SHADER { return bad(m, parse.E_CAP, pos) }
+        }
+        else {
+            seen_other = true
+            if op == spv.OP_MEMORYMODEL {
+                if (*m).nmm != 1 || (*m).addr_model != 0 || ((*m).mem_model != 1 && (*m).mem_model != 3) { return bad(m, parse.E_MODEL, pos) }
+                if stage != 0 { return bad(m, parse.E_ORDER, pos) }
+            }
+            else if op == spv.OP_FUNCTION { break }
+            else if op == spv.OP_LINE || op == spv.OP_NOLINE || op == spv.OP_MODULEPROCESSED { }
+            else if op == spv.OP_SOURCECONTINUED || op == spv.OP_SOURCE || op == spv.OP_SOURCEEXTENSION || op == spv.OP_NAME
+                || op == spv.OP_MEMBERNAME || op == spv.OP_STRING || op == spv.OP_EXTENSION || op == spv.OP_EXTINSTIMPORT || op == spv.OP_ENTRYPOINT
+                || op == spv.OP_EXECUTIONMODE || op == spv.OP_DECORATE || op == spv.OP_MEMBERDECORATE {
+                if stage != 0 && op != spv.OP_NAME && op != spv.OP_MEMBERNAME && op != spv.OP_STRING { return bad(m, parse.E_ORDER, pos) }
+                if op == spv.OP_EXTENSION { return bad(m, parse.E_UNSUPPORTED, pos) }
+                if op == spv.OP_EXTINSTIMPORT && (*m).glsl_id != parse.w32(m, pos + 1) { return bad(m, parse.E_UNSUPPORTED, pos) }
+            }
+            else if (op >= 19 && op <= 34) || (op >= 41 && op <= 52) || op == spv.OP_VARIABLE || op == spv.OP_UNDEF {
+                stage = 1
+                var r: u32 = 0
+                if op >= 19 && op <= 34 { r = check_type(m, pos, op, wc) }
+                else if op >= 41 && op <= 52 { r = check_const(m, pos, op, wc) }
+                else if op == spv.OP_VARIABLE { r = check_global_var(m, pos, wc) }
+                if r != 0 { return r }
+            }
+            else { return bad(m, parse.E_UNKNOWNOP, pos) }
+        }
+        i = i + 1
+    }
+    if ((*m).caps & 2) == 0 { return bad(m, parse.E_CAP, 0) }
+    if (*m).nmm != 1 { return bad(m, parse.E_MODEL, 0) }
+    if check_entries(m) != 0 { return (*m).err }
+    // function bodies
+    let nb: usize = (*m).bound as usize
+    let lblfn: u64 = rt.heap_alloc(nb * 4)
+    let lblord: u64 = rt.heap_alloc(nb * 4)
+    let lblhdr: u64 = rt.heap_alloc(nb * 4)
+    let mrg: u64 = rt.heap_alloc(nb * 4)
+    rt.mem_set(lblfn, 0 as u8, nb * 4)
+    rt.mem_set(lblord, 0 as u8, nb * 4)
+    rt.mem_set(lblhdr, 0 as u8, nb * 4)
+    rt.mem_set(mrg, 0 as u8, nb * 4)
+    var fseq: u32 = 0
+    var r: u32 = 0
+    while i < (*m).ninst && r == 0 {
+        let pos: usize = parse.inst_pos(m, i)
+        if parse.op_at(m, pos) != spv.OP_FUNCTION { r = bad(m, parse.E_ORDER, pos); break }
+        var j: usize = i + 1
+        while j < (*m).ninst && parse.op_at(m, parse.inst_pos(m, j)) != spv.OP_FUNCTIONEND { j = j + 1 }
+        if j >= (*m).ninst { r = bad(m, parse.E_BLOCK, pos); break }
+        fseq = fseq + 1
+        r = check_function(m, i, j, fseq, lblfn, lblord, lblhdr, mrg)
+        i = j + 1
+    }
+    rt.heap_free(lblfn, nb * 4)
+    rt.heap_free(lblord, nb * 4)
+    rt.heap_free(lblhdr, nb * 4)
+    rt.heap_free(mrg, nb * 4)
+    if r == 0 && fseq == 0 { return bad(m, parse.E_ENTRY, 0) }
+    return r
+}

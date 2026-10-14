@@ -1,0 +1,1202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/spirv/lower.fi -- lowers a validated SPIR-V FRAGMENT shader to the SWR shader VM (lib/gpu/swr/shader.fi, raster.fi shade_vm).
+//
+//     var info: lower.LowerInfo = lower.info_zero()
+//     let e: u32 = lower.lower(&m, prog_words_address, max_instructions, &info)   // 0 = ok, else L_* (info.err_pos = SPIR-V word)
+//     raster.frame_set_program(frame, prog_words_address)                         // mode VM; info.ninstr instructions incl. END
+//
+// Model of the target: straight-line VM, 64 f32 registers per lane (r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5 are INPUTS,
+// r8..r11 OUTPUT rgba, r12..r63 temporaries), no branches, no integer unit, one bound texture.
+//   - interface: Input location 0 (float scalar/vec2) = r0,r1 ; Input location 1 (float up to vec4) = r2..r5 ; BuiltIn FragCoord
+//     (xy = pixel centre, z = 0, w = 1) ; Output location 0 = r8..r11 (missing components: 0,0,0,1) ; sampler2D / texture+sampler
+//     (any set/binding) = THE frame texture ; no uniform blocks / push constants yet (L_UNSUPPORTED; roadmap)
+//   - types: float / int / uint / bool scalars and vectors. int and bool live in f32 registers (exact up to 2^24, bool = 1.0/0.0)
+//   - structured control flow without loops: if / else / ternary / early return are IF-CONVERTED: both sides run for every lane,
+//     stores become SEL under a per-block mask, OpPhi becomes SEL on the edge masks. Loops, switch, OpKill, calls: L_LOOP etc.
+//     (callers can run spirv-opt --inline-entry-points-exhaustive --eliminate-local-multi-store first; roadmap: inliner, unroller)
+//   - swizzles, CompositeConstruct/Extract/CopyObject cost no instruction (registers are aliased with reference counts)
+
+import std.rt
+import spirv.spv
+import spirv.parse
+import spirv.validate
+import gpu.swr.shader
+
+export {
+    lower, lower_err_name, LowerInfo, info_zero,
+    L_UNSUPPORTED, L_REGS, L_LOOP, L_KILL, L_CALL, L_FULL, L_IO, L_TYPE, L_SWITCH, L_COMPLEX, L_STAGE, L_INTERNAL,
+}
+
+const L_UNSUPPORTED: u32 = 100
+const L_REGS: u32 = 101
+const L_LOOP: u32 = 102
+const L_KILL: u32 = 103
+const L_CALL: u32 = 104
+const L_FULL: u32 = 105
+const L_IO: u32 = 106
+const L_TYPE: u32 = 107
+const L_SWITCH: u32 = 108
+const L_COMPLEX: u32 = 109
+const L_STAGE: u32 = 110
+const L_INTERNAL: u32 = 111
+
+const NONE: u32 = 0xFFFF // predicate "always"
+const UNSET: u32 = 0xFFFE
+const NREGS: u32 = 64
+const FIRST_TMP: u32 = 12
+const MAX_EDGES: usize = 512
+
+const VK_NONE: u32 = 0
+const VK_VALUE: u32 = 1 // regs in vreg[id*4 + c]
+const VK_PTR: u32 = 2 // vreg[id*4] = variable id, vreg[id*4+1] = first component
+const VK_HANDLE: u32 = 3 // sampled image / image / sampler: the one frame texture
+const VK_VAR: u32 = 5 // variable: vreg[id*4 + c] registers
+const VK_FRAGCOORD: u32 = 6
+const VK_TEXVAR: u32 = 7
+
+struct LowerInfo {
+    ninstr: usize,
+    err_pos: usize,
+    peak_reg: u32, // highest register used + 1
+    nsample: u32,
+    nsel: u32, // SEL instructions emitted (cost of if-conversion)
+}
+
+fn info_zero() -> LowerInfo {
+    var i: LowerInfo = LowerInfo { ninstr: 0, err_pos: 0, peak_reg: 0, nsample: 0, nsel: 0 }
+    return i
+}
+
+fn lower_err_name(e: u32) -> str {
+    if e == 100 { return "unsupported feature" }
+    if e == 101 { return "out of registers" }
+    if e == 102 { return "loops are not supported" }
+    if e == 103 { return "discard (OpKill) is not supported" }
+    if e == 104 { return "function calls are not supported (inline first)" }
+    if e == 105 { return "program too long" }
+    if e == 106 { return "unsupported shader interface" }
+    if e == 107 { return "unsupported type" }
+    if e == 108 { return "switch is not supported" }
+    if e == 109 { return "too many control flow edges" }
+    if e == 110 { return "no fragment entry point" }
+    if e == 111 { return "internal error" }
+    return parse.err_name(e)
+}
+
+struct Lw {
+    m: *mut parse.Module,
+    prog: u64,
+    pc: usize,
+    maxpc: usize,
+    err: u32,
+    err_pos: usize,
+    rrefs: u64, // u32 [64]
+    vreg: u64, // u32 [bound * 4]
+    vn: u64, // u32 [bound]
+    vk: u64, // u32 [bound]
+    uses: u64, // u32 [bound]
+    bpred: u64, // u32 [bound] by label: block predicate register
+    mpred: u64, // u32 [bound] by label: predicate inherited from the selection header, UNSET = none recorded
+    tmp: u64, // u32 [64] temporaries of the current instruction
+    ntmp: usize,
+    ef: u64, // edges: from label
+    et: u64, // to label
+    ep: u64, // edge predicate register or NONE
+    ed: u64, // consumed
+    ne: usize,
+    cur: u32, // current label
+    cpred: u32, // predicate of the current block
+    skip: bool,
+    peak: u32,
+    nsample: u32,
+    nsel: u32,
+}
+
+fn fail(l: *mut Lw, e: u32, pos: usize) {
+    if (*l).err == 0 {
+        (*l).err = e
+        (*l).err_pos = pos
+    }
+}
+
+fn fbits(v: f32) -> u32 {
+    var x: f32 = v
+    return *((&x) as *mut u32)
+}
+
+fn tab(t: u64, i: u32) -> u32 { return rt.ld32(t, i as usize) }
+fn tset(t: u64, i: u32, v: u32) { rt.st32(t, i as usize, v) }
+
+// ---------------------------------------------------------------- program + registers
+
+fn emit(l: *mut Lw, op: u32, d: u32, a: u32, b: u32, c: u32) {
+    if (*l).pc >= (*l).maxpc {
+        fail(l, L_FULL, 0)
+        return
+    }
+    (*l).pc = shader.prog_emit((*l).prog, (*l).pc, op, d, a, b, c)
+    if op == shader.OP_SEL { (*l).nsel = (*l).nsel + 1 }
+}
+
+fn ldc(l: *mut Lw, d: u32, bits: u32) { emit(l, shader.OP_LDC, d, bits, 0, 0) }
+
+fn alloc1(l: *mut Lw) -> u32 {
+    var r: u32 = FIRST_TMP
+    while r < NREGS {
+        if tab((*l).rrefs, r) == 0 {
+            tset((*l).rrefs, r, 1)
+            if r + 1 > (*l).peak { (*l).peak = r + 1 }
+            return r
+        }
+        r = r + 1
+    }
+    fail(l, L_REGS, 0)
+    return FIRST_TMP
+}
+
+// n consecutive registers
+fn allocn(l: *mut Lw, n: u32) -> u32 {
+    var r: u32 = FIRST_TMP
+    while r + n <= NREGS {
+        var ok: bool = true
+        var k: u32 = 0
+        while k < n {
+            if tab((*l).rrefs, r + k) != 0 { ok = false }
+            k = k + 1
+        }
+        if ok {
+            k = 0
+            while k < n { tset((*l).rrefs, r + k, 1); k = k + 1 }
+            if r + n > (*l).peak { (*l).peak = r + n }
+            return r
+        }
+        r = r + 1
+    }
+    fail(l, L_REGS, 0)
+    return FIRST_TMP
+}
+
+fn ref_reg(l: *mut Lw, r: u32) {
+    if r >= FIRST_TMP && r < NREGS { tset((*l).rrefs, r, tab((*l).rrefs, r) + 1) }
+}
+
+fn unref_reg(l: *mut Lw, r: u32) {
+    if r >= FIRST_TMP && r < NREGS && tab((*l).rrefs, r) > 0 { tset((*l).rrefs, r, tab((*l).rrefs, r) - 1) }
+}
+
+// a temporary that lives until the end of the current SPIR-V instruction
+fn tmp_reg(l: *mut Lw) -> u32 {
+    let r: u32 = alloc1(l)
+    if (*l).ntmp < 64 {
+        rt.st32((*l).tmp, (*l).ntmp, r)
+        (*l).ntmp = (*l).ntmp + 1
+    }
+    return r
+}
+
+fn free_tmps(l: *mut Lw) {
+    var i: usize = 0
+    while i < (*l).ntmp {
+        unref_reg(l, rt.ld32((*l).tmp, i))
+        i = i + 1
+    }
+    (*l).ntmp = 0
+}
+
+fn tmp_const(l: *mut Lw, v: f32) -> u32 {
+    let r: u32 = tmp_reg(l)
+    ldc(l, r, fbits(v))
+    return r
+}
+
+// ---------------------------------------------------------------- values
+
+fn is_const(l: *mut Lw, id: u32) -> bool {
+    let o: u32 = parse.def_op((*l).m, id)
+    return (o >= 41 && o <= 46) || o == spv.OP_UNDEF
+}
+
+fn scalar_const_bits(m: *mut parse.Module, id: u32) -> u32 {
+    let o: u32 = parse.def_op(m, id)
+    if o == spv.OP_CONSTANTTRUE { return 0x3F800000 }
+    if o == spv.OP_CONSTANT {
+        let k: u32 = parse.scalar_kind(m, parse.type_of(m, id))
+        let w: u32 = parse.const_word(m, id)
+        if k == parse.K_SINT {
+            if w >= 0x80000000 { return fbits(0.0f - (((0xFFFFFFFF - w) + 1) as f32)) }
+            return fbits(w as f32)
+        }
+        if k == parse.K_UINT { return fbits(w as f32) }
+        return w
+    }
+    return 0
+}
+
+fn const_bits(l: *mut Lw, id: u32, c: u32) -> u32 {
+    let m: *mut parse.Module = (*l).m
+    if parse.def_op(m, id) == spv.OP_CONSTANTCOMPOSITE {
+        let p: usize = parse.def_pos(m, id)
+        if (c as usize) + 3 < parse.wc_at(m, p) { return scalar_const_bits(m, parse.w32(m, p + 3 + (c as usize))) }
+        return 0
+    }
+    return scalar_const_bits(m, id)
+}
+
+
+fn bound_of(l: *mut Lw) -> u32 { return (*(*l).m).bound }
+
+fn type_n(l: *mut Lw, id: u32) -> u32 { return parse.ncomp((*l).m, parse.type_of((*l).m, id)) }
+
+// register holding component c of value `id`, for reading; constants get a temporary (freed after the instruction)
+fn get(l: *mut Lw, id: u32, c: u32) -> u32 {
+    if id == 0 || id >= bound_of(l) {
+        fail(l, L_INTERNAL, 0)
+        return FIRST_TMP
+    }
+    if tab((*l).vk, id) == VK_VALUE {
+        if c >= tab((*l).vn, id) {
+            fail(l, L_INTERNAL, 0)
+            return FIRST_TMP
+        }
+        return tab((*l).vreg, id * 4 + c)
+    }
+    if is_const(l, id) {
+        let r: u32 = tmp_reg(l)
+        ldc(l, r, const_bits(l, id, c))
+        return r
+    }
+    fail(l, L_INTERNAL, 0)
+    return FIRST_TMP
+}
+
+// like get, but the caller keeps the register (reference taken; constants get a fresh register)
+fn own(l: *mut Lw, id: u32, c: u32) -> u32 {
+    if id != 0 && id < bound_of(l) && tab((*l).vk, id) == VK_VALUE {
+        let r: u32 = get(l, id, c)
+        ref_reg(l, r)
+        return r
+    }
+    if id != 0 && id < bound_of(l) && is_const(l, id) {
+        let r: u32 = alloc1(l)
+        ldc(l, r, const_bits(l, id, c))
+        return r
+    }
+    fail(l, L_INTERNAL, 0)
+    return FIRST_TMP
+}
+
+fn set_reg(l: *mut Lw, id: u32, c: u32, r: u32) { tset((*l).vreg, id * 4 + c, r) }
+
+fn define(l: *mut Lw, id: u32, n: u32) {
+    tset((*l).vk, id, VK_VALUE)
+    tset((*l).vn, id, n)
+}
+
+fn release(l: *mut Lw, id: u32) {
+    if tab((*l).vk, id) == VK_VALUE {
+        var c: u32 = 0
+        while c < tab((*l).vn, id) {
+            unref_reg(l, tab((*l).vreg, id * 4 + c))
+            c = c + 1
+        }
+        tset((*l).vk, id, VK_NONE)
+    }
+}
+
+// defines `id` as the n registers base..base+n-1 (ownership of the references moves to the value)
+fn define_seq(l: *mut Lw, id: u32, base: u32, n: u32) {
+    define(l, id, n)
+    var c: u32 = 0
+    while c < n { set_reg(l, id, c, base + c); c = c + 1 }
+}
+
+fn result_n(l: *mut Lw, pos: usize) -> u32 {
+    let n: u32 = parse.ncomp((*l).m, parse.w32((*l).m, pos + 1))
+    if n == 0 || n > 4 {
+        fail(l, L_TYPE, pos)
+        return 1
+    }
+    return n
+}
+
+// ---------------------------------------------------------------- arithmetic helpers
+
+// d = trunc(a)
+fn emit_trunc(l: *mut Lw, d: u32, a: u32) {
+    let t1: u32 = tmp_reg(l)
+    let t2: u32 = tmp_reg(l)
+    let t3: u32 = tmp_reg(l)
+    let z: u32 = tmp_const(l, 0.0f)
+    emit(l, shader.OP_FLOOR, t1, a, 0, 0)
+    emit(l, shader.OP_NEG, t2, a, 0, 0)
+    emit(l, shader.OP_FLOOR, t2, t2, 0, 0)
+    emit(l, shader.OP_NEG, t2, t2, 0, 0)
+    emit(l, shader.OP_CLT, t3, a, z, 0)
+    emit(l, shader.OP_SEL, d, t2, t1, t3)
+}
+
+// vm op of a plain binary component-wise instruction, 0xFFFF = none
+fn bin_vop(op: u32) -> u32 {
+    if op == spv.OP_FADD || op == spv.OP_IADD { return shader.OP_ADD }
+    if op == spv.OP_FSUB || op == spv.OP_ISUB { return shader.OP_SUB }
+    if op == spv.OP_FMUL || op == spv.OP_IMUL || op == spv.OP_LOGICALAND { return shader.OP_MUL }
+    if op == spv.OP_FDIV { return shader.OP_DIV }
+    if op == spv.OP_LOGICALOR { return shader.OP_MAX }
+    if op == spv.OP_IEQUAL || op == spv.OP_FORDEQUAL || op == spv.OP_FUNORDEQUAL || op == spv.OP_LOGICALEQUAL { return shader.OP_CEQ }
+    if op == spv.OP_ULESSTHAN || op == spv.OP_SLESSTHAN || op == spv.OP_FORDLESSTHAN || op == spv.OP_FUNORDLESSTHAN { return shader.OP_CLT }
+    if op == spv.OP_UGREATERTHAN || op == spv.OP_SGREATERTHAN || op == spv.OP_FORDGREATERTHAN || op == spv.OP_FUNORDGREATERTHAN { return shader.OP_CLT }
+    if op == spv.OP_ULESSTHANEQUAL || op == spv.OP_SLESSTHANEQUAL || op == spv.OP_FORDLESSTHANEQUAL || op == spv.OP_FUNORDLESSTHANEQUAL { return shader.OP_CLE }
+    if op == spv.OP_UGREATERTHANEQUAL || op == spv.OP_SGREATERTHANEQUAL || op == spv.OP_FORDGREATERTHANEQUAL || op == spv.OP_FUNORDGREATERTHANEQUAL { return shader.OP_CLE }
+    return 0xFFFF
+}
+
+fn bin_swap(op: u32) -> bool {
+    return op == spv.OP_UGREATERTHAN || op == spv.OP_SGREATERTHAN || op == spv.OP_FORDGREATERTHAN || op == spv.OP_FUNORDGREATERTHAN
+        || op == spv.OP_UGREATERTHANEQUAL || op == spv.OP_SGREATERTHANEQUAL || op == spv.OP_FORDGREATERTHANEQUAL || op == spv.OP_FUNORDGREATERTHANEQUAL
+}
+
+fn is_notequal(op: u32) -> bool {
+    return op == spv.OP_INOTEQUAL || op == spv.OP_FORDNOTEQUAL || op == spv.OP_FUNORDNOTEQUAL || op == spv.OP_LOGICALNOTEQUAL
+}
+
+fn lower_bin(l: *mut Lw, pos: usize, op: u32) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let a: u32 = parse.w32(m, pos + 3)
+    let b: u32 = parse.w32(m, pos + 4)
+    let n: u32 = result_n(l, pos)
+    let vop: u32 = bin_vop(op)
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        var rb_c: u32 = c
+        if op == spv.OP_VECTORTIMESSCALAR { rb_c = 0 }
+        let ra: u32 = get(l, a, c)
+        let rb: u32 = get(l, b, rb_c)
+        let d: u32 = base + c
+        if vop != 0xFFFF {
+            if bin_swap(op) { emit(l, vop, d, rb, ra, 0) } else { emit(l, vop, d, ra, rb, 0) }
+            if op == spv.OP_SDIV || op == spv.OP_UDIV { emit_trunc(l, d, d) }
+        }
+        else if is_notequal(op) {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_CLT, t, ra, rb, 0)
+            emit(l, shader.OP_CLT, d, rb, ra, 0)
+            emit(l, shader.OP_MAX, d, d, t, 0)
+        }
+        else if op == spv.OP_VECTORTIMESSCALAR { emit(l, shader.OP_MUL, d, ra, rb, 0) }
+        else if op == spv.OP_SDIV || op == spv.OP_UDIV {
+            emit(l, shader.OP_DIV, d, ra, rb, 0)
+            emit_trunc(l, d, d)
+        }
+        else if op == spv.OP_UMOD || op == spv.OP_SMOD || op == spv.OP_FMOD || op == spv.OP_SREM || op == spv.OP_FREM {
+            // a - b * (floor|trunc)(a / b)
+            let q: u32 = tmp_reg(l)
+            emit(l, shader.OP_DIV, q, ra, rb, 0)
+            if op == spv.OP_SREM || op == spv.OP_FREM { emit_trunc(l, q, q) } else { emit(l, shader.OP_FLOOR, q, q, 0, 0) }
+            emit(l, shader.OP_MUL, q, q, rb, 0)
+            emit(l, shader.OP_SUB, d, ra, q, 0)
+        }
+        else { fail(l, L_UNSUPPORTED, pos) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
+fn lower_un(l: *mut Lw, pos: usize, op: u32) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let a: u32 = parse.w32(m, pos + 3)
+    let n: u32 = result_n(l, pos)
+    // pure aliases first: no instruction at all
+    if op == spv.OP_COPYOBJECT || ((op == spv.OP_CONVERTSTOF || op == spv.OP_CONVERTUTOF) && false) {
+        define(l, id, n)
+        var c: u32 = 0
+        while c < n { set_reg(l, id, c, own(l, a, c)); c = c + 1 }
+        return
+    }
+    if op == spv.OP_BITCAST {
+        let ka: u32 = parse.scalar_kind(m, parse.type_of(m, a))
+        let kt: u32 = parse.scalar_kind(m, parse.w32(m, pos + 1))
+        var same: bool = ka == kt
+        if (ka == parse.K_SINT && kt == parse.K_UINT) || (ka == parse.K_UINT && kt == parse.K_SINT) { same = true } // both live as exact floats
+        if !same { fail(l, L_UNSUPPORTED, pos); return }
+        define(l, id, n)
+        var c: u32 = 0
+        while c < n { set_reg(l, id, c, own(l, a, c)); c = c + 1 }
+        return
+    }
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        let ra: u32 = get(l, a, c)
+        let d: u32 = base + c
+        if op == spv.OP_FNEGATE || op == spv.OP_SNEGATE { emit(l, shader.OP_NEG, d, ra, 0, 0) }
+        else if op == spv.OP_CONVERTSTOF || op == spv.OP_CONVERTUTOF { emit(l, shader.OP_MOV, d, ra, 0, 0) }
+        else if op == spv.OP_CONVERTFTOS || op == spv.OP_CONVERTFTOU { emit_trunc(l, d, ra) }
+        else if op == spv.OP_LOGICALNOT {
+            let one: u32 = tmp_const(l, 1.0f)
+            emit(l, shader.OP_SUB, d, one, ra, 0)
+        }
+        else if op == spv.OP_ISNAN {
+            let one: u32 = tmp_const(l, 1.0f)
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_CEQ, t, ra, ra, 0)
+            emit(l, shader.OP_SUB, d, one, t, 0)
+        }
+        else if op == spv.OP_ISINF {
+            let inf: u32 = tmp_reg(l)
+            ldc(l, inf, 0x7F800000)
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_ABS, t, ra, 0, 0)
+            emit(l, shader.OP_CEQ, d, t, inf, 0)
+        }
+        else { fail(l, L_UNSUPPORTED, pos) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
+fn lower_dot(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let a: u32 = parse.w32(m, pos + 3)
+    let b: u32 = parse.w32(m, pos + 4)
+    let nv: u32 = type_n(l, a)
+    let d: u32 = alloc1(l)
+    var c: u32 = 0
+    while c < nv {
+        let ra: u32 = get(l, a, c)
+        let rb: u32 = get(l, b, c)
+        if c == 0 { emit(l, shader.OP_MUL, d, ra, rb, 0) } else { emit(l, shader.OP_MAD, d, ra, rb, d) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, d, 1)
+}
+
+fn lower_anyall(l: *mut Lw, pos: usize, op: u32) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let a: u32 = parse.w32(m, pos + 3)
+    let nv: u32 = type_n(l, a)
+    let d: u32 = alloc1(l)
+    var c: u32 = 0
+    while c < nv {
+        let ra: u32 = get(l, a, c)
+        if c == 0 { emit(l, shader.OP_MOV, d, ra, 0, 0) }
+        else if op == spv.OP_ANY { emit(l, shader.OP_MAX, d, d, ra, 0) }
+        else { emit(l, shader.OP_MUL, d, d, ra, 0) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, d, 1)
+}
+
+fn lower_select(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let n: u32 = result_n(l, pos)
+    let cnd: u32 = parse.w32(m, pos + 3)
+    let a: u32 = parse.w32(m, pos + 4)
+    let b: u32 = parse.w32(m, pos + 5)
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        emit(l, shader.OP_SEL, base + c, get(l, a, c), get(l, b, c), get(l, cnd, c))
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
+fn lower_glsl(l: *mut Lw, pos: usize, wc: usize) {
+    let m: *mut parse.Module = (*l).m
+    let inst: u32 = parse.w32(m, pos + 4)
+    let id: u32 = parse.w32(m, pos + 2)
+    let n: u32 = result_n(l, pos)
+    let a: u32 = parse.w32(m, pos + 5)
+    var b: u32 = 0
+    var c3: u32 = 0
+    if wc > 6 { b = parse.w32(m, pos + 6) }
+    if wc > 7 { c3 = parse.w32(m, pos + 7) }
+    let base: u32 = allocn(l, n)
+    if inst == spv.GL_LENGTH || inst == spv.GL_DISTANCE || inst == spv.GL_NORMALIZE {
+        let nv: u32 = type_n(l, a)
+        let s: u32 = alloc1(l)
+        var c: u32 = 0
+        while c < nv {
+            var x: u32 = get(l, a, c)
+            if inst == spv.GL_DISTANCE {
+                let t: u32 = tmp_reg(l)
+                emit(l, shader.OP_SUB, t, x, get(l, b, c), 0)
+                x = t
+            }
+            if c == 0 { emit(l, shader.OP_MUL, s, x, x, 0) } else { emit(l, shader.OP_MAD, s, x, x, s) }
+            free_tmps(l)
+            c = c + 1
+        }
+        if inst == spv.GL_NORMALIZE {
+            emit(l, shader.OP_RSQ, s, s, 0, 0)
+            c = 0
+            while c < nv {
+                emit(l, shader.OP_MUL, base + c, get(l, a, c), s, 0)
+                free_tmps(l)
+                c = c + 1
+            }
+        } else {
+            emit(l, shader.OP_SQRT, base, s, 0, 0)
+        }
+        unref_reg(l, s)
+        define_seq(l, id, base, n)
+        return
+    }
+    var c: u32 = 0
+    while c < n {
+        let d: u32 = base + c
+        let ra: u32 = get(l, a, c)
+        var rb: u32 = 0
+        var rc: u32 = 0
+        if wc > 6 { rb = get(l, b, c) }
+        if wc > 7 { rc = get(l, c3, c) }
+        if inst == spv.GL_FABS { emit(l, shader.OP_ABS, d, ra, 0, 0) }
+        else if inst == spv.GL_FLOOR { emit(l, shader.OP_FLOOR, d, ra, 0, 0) }
+        else if inst == spv.GL_CEIL {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_NEG, t, ra, 0, 0)
+            emit(l, shader.OP_FLOOR, t, t, 0, 0)
+            emit(l, shader.OP_NEG, d, t, 0, 0)
+        }
+        else if inst == spv.GL_FRACT {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_FLOOR, t, ra, 0, 0)
+            emit(l, shader.OP_SUB, d, ra, t, 0)
+        }
+        else if inst == spv.GL_TRUNC { emit_trunc(l, d, ra) }
+        else if inst == spv.GL_ROUND {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_ADD, t, ra, tmp_const(l, 0.5f), 0)
+            emit(l, shader.OP_FLOOR, d, t, 0, 0)
+        }
+        else if inst == spv.GL_FSIGN {
+            let z: u32 = tmp_const(l, 0.0f)
+            let p: u32 = tmp_reg(l)
+            let q: u32 = tmp_reg(l)
+            emit(l, shader.OP_CLT, p, z, ra, 0)
+            emit(l, shader.OP_CLT, q, ra, z, 0)
+            emit(l, shader.OP_SUB, d, p, q, 0)
+        }
+        else if inst == spv.GL_SIN { emit(l, shader.OP_SIN, d, ra, 0, 0) }
+        else if inst == spv.GL_COS { emit(l, shader.OP_COS, d, ra, 0, 0) }
+        else if inst == spv.GL_EXP2 { emit(l, shader.OP_EXP2, d, ra, 0, 0) }
+        else if inst == spv.GL_LOG2 { emit(l, shader.OP_LOG2, d, ra, 0, 0) }
+        else if inst == spv.GL_EXP {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_MUL, t, ra, tmp_const(l, 1.442695041f), 0)
+            emit(l, shader.OP_EXP2, d, t, 0, 0)
+        }
+        else if inst == spv.GL_LOG {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_LOG2, t, ra, 0, 0)
+            emit(l, shader.OP_MUL, d, t, tmp_const(l, 0.6931471806f), 0)
+        }
+        else if inst == spv.GL_SQRT { emit(l, shader.OP_SQRT, d, ra, 0, 0) }
+        else if inst == spv.GL_INVERSESQRT { emit(l, shader.OP_RSQ, d, ra, 0, 0) }
+        else if inst == spv.GL_POW {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_LOG2, t, ra, 0, 0)
+            emit(l, shader.OP_MUL, t, t, rb, 0)
+            emit(l, shader.OP_EXP2, d, t, 0, 0)
+        }
+        else if inst == spv.GL_FMIN || inst == spv.GL_NMIN { emit(l, shader.OP_MIN, d, ra, rb, 0) }
+        else if inst == spv.GL_FMAX || inst == spv.GL_NMAX { emit(l, shader.OP_MAX, d, ra, rb, 0) }
+        else if inst == spv.GL_FCLAMP || inst == spv.GL_NCLAMP {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_MAX, t, ra, rb, 0)
+            emit(l, shader.OP_MIN, d, t, rc, 0)
+        }
+        else if inst == spv.GL_FMIX {
+            let t: u32 = tmp_reg(l)
+            emit(l, shader.OP_SUB, t, rb, ra, 0)
+            emit(l, shader.OP_MAD, d, t, rc, ra)
+        }
+        else if inst == spv.GL_STEP { emit(l, shader.OP_CLE, d, ra, rb, 0) }
+        else if inst == spv.GL_SMOOTHSTEP {
+            let t: u32 = tmp_reg(l)
+            let u: u32 = tmp_reg(l)
+            emit(l, shader.OP_SUB, t, rc, ra, 0)
+            emit(l, shader.OP_SUB, u, rb, ra, 0)
+            emit(l, shader.OP_DIV, t, t, u, 0)
+            emit(l, shader.OP_SAT, t, t, 0, 0)
+            emit(l, shader.OP_MAD, u, t, tmp_const(l, -2.0f), tmp_const(l, 3.0f))
+            emit(l, shader.OP_MUL, t, t, t, 0)
+            emit(l, shader.OP_MUL, d, t, u, 0)
+        }
+        else { fail(l, L_UNSUPPORTED, pos) }
+        free_tmps(l)
+        c = c + 1
+    }
+    define_seq(l, id, base, n)
+}
+
+// ---------------------------------------------------------------- variables and memory
+
+// registers + initial value for a Function / Private variable
+fn setup_local_var(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let pointee: u32 = parse.ptr_pointee(m, parse.w32(m, pos + 1))
+    let n: u32 = parse.ncomp(m, pointee)
+    if n == 0 || n > 4 || parse.scalar_kind(m, pointee) == 0 {
+        fail(l, L_TYPE, pos)
+        return
+    }
+    let base: u32 = allocn(l, n)
+    var c: u32 = 0
+    while c < n {
+        var bits: u32 = 0
+        if parse.wc_at(m, pos) == 5 { bits = const_bits(l, parse.w32(m, pos + 4), c) }
+        ldc(l, base + c, bits)
+        set_reg(l, id, c, base + c)
+        c = c + 1
+    }
+    tset((*l).vk, id, VK_VAR)
+    tset((*l).vn, id, n)
+}
+
+fn setup_io_var(l: *mut Lw, id: u32) {
+    let m: *mut parse.Module = (*l).m
+    let pos: usize = parse.def_pos(m, id)
+    let sc: u32 = parse.w32(m, pos + 3)
+    let pointee: u32 = parse.ptr_pointee(m, parse.w32(m, pos + 1))
+    let n: u32 = parse.ncomp(m, pointee)
+    if n == 0 || n > 4 || parse.scalar_kind(m, pointee) != parse.K_FLOAT {
+        fail(l, L_IO, pos)
+        return
+    }
+    var base: u32 = 0
+    var cap: u32 = 0
+    if sc == spv.SC_INPUT {
+        if parse.builtin_of(m, id) != 0 {
+            if parse.builtin_of(m, id) - 1 != spv.BI_FRAGCOORD || n != 4 { fail(l, L_IO, pos); return }
+            // FragCoord: x, y = r6, r7 ; z = 0, w = 1 in two permanent registers
+            let zw: u32 = allocn(l, 2)
+            ldc(l, zw, 0)
+            ldc(l, zw + 1, 0x3F800000)
+            set_reg(l, id, 0, 6)
+            set_reg(l, id, 1, 7)
+            set_reg(l, id, 2, zw)
+            set_reg(l, id, 3, zw + 1)
+            tset((*l).vk, id, VK_VAR)
+            tset((*l).vn, id, 4)
+            return
+        }
+        let loc: u32 = parse.loc_of(m, id)
+        if loc == 1 { base = 0; cap = 2 }
+        else if loc == 2 { base = 2; cap = 4 }
+        else { fail(l, L_IO, pos); return }
+    } else {
+        if parse.loc_of(m, id) != 1 || parse.builtin_of(m, id) != 0 { fail(l, L_IO, pos); return }
+        base = 8
+        cap = 4
+        var c: u32 = 0
+        while c < 4 {
+            var bits: u32 = 0
+            if c == 3 { bits = 0x3F800000 }
+            if c < n { bits = 0 }
+            ldc(l, 8 + c, bits)
+            c = c + 1
+        }
+    }
+    if n > cap { fail(l, L_IO, pos); return }
+    var c: u32 = 0
+    while c < n { set_reg(l, id, c, base + c); c = c + 1 }
+    tset((*l).vk, id, VK_VAR)
+    tset((*l).vn, id, n)
+}
+
+// makes sure global variable `id` is usable; false = unsupported (error recorded)
+fn ensure_var(l: *mut Lw, id: u32, pos: usize) -> bool {
+    let m: *mut parse.Module = (*l).m
+    if id == 0 || id >= bound_of(l) { fail(l, L_INTERNAL, pos); return false }
+    let k: u32 = tab((*l).vk, id)
+    if k == VK_VAR || k == VK_PTR || k == VK_TEXVAR { return true }
+    if parse.def_op(m, id) != spv.OP_VARIABLE { fail(l, L_INTERNAL, pos); return false }
+    let dp: usize = parse.def_pos(m, id)
+    let sc: u32 = parse.w32(m, dp + 3)
+    if sc == spv.SC_PRIVATE { setup_local_var(l, dp); return (*l).err == 0 }
+    if sc == spv.SC_UNIFORMCONSTANT { tset((*l).vk, id, VK_TEXVAR); return true }
+    fail(l, L_UNSUPPORTED, pos) // uniform blocks, push constants, storage buffers
+    return false
+}
+
+fn lower_load(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let ptr: u32 = parse.w32(m, pos + 3)
+    if !ensure_var(l, ptr, pos) { return }
+    if tab((*l).vk, ptr) == VK_TEXVAR {
+        tset((*l).vk, id, VK_HANDLE)
+        return
+    }
+    let n: u32 = result_n(l, pos)
+    var vid: u32 = ptr
+    var off: u32 = 0
+    if tab((*l).vk, ptr) == VK_PTR {
+        vid = tab((*l).vreg, ptr * 4)
+        off = tab((*l).vreg, ptr * 4 + 1)
+    }
+    var sc: u32 = parse.ptr_class(m, parse.type_of(m, vid))
+    if off + n > tab((*l).vn, vid) { fail(l, L_INTERNAL, pos); return }
+    define(l, id, n)
+    var c: u32 = 0
+    while c < n {
+        let src: u32 = tab((*l).vreg, vid * 4 + off + c)
+        if sc == spv.SC_INPUT && src < FIRST_TMP { set_reg(l, id, c, src) } // inputs never change: alias
+        else {
+            let d: u32 = alloc1(l)
+            emit(l, shader.OP_MOV, d, src, 0, 0)
+            set_reg(l, id, c, d)
+        }
+        c = c + 1
+    }
+}
+
+fn lower_store(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let ptr: u32 = parse.w32(m, pos + 1)
+    let obj: u32 = parse.w32(m, pos + 2)
+    if !ensure_var(l, ptr, pos) { return }
+    var vid: u32 = ptr
+    var off: u32 = 0
+    var n: u32 = tab((*l).vn, ptr)
+    if tab((*l).vk, ptr) == VK_PTR {
+        vid = tab((*l).vreg, ptr * 4)
+        off = tab((*l).vreg, ptr * 4 + 1)
+    }
+    if tab((*l).vk, vid) != VK_VAR { fail(l, L_UNSUPPORTED, pos); return }
+    n = type_n(l, obj)
+    if off + n > tab((*l).vn, vid) { fail(l, L_INTERNAL, pos); return }
+    var c: u32 = 0
+    while c < n {
+        let dst: u32 = tab((*l).vreg, vid * 4 + off + c)
+        let src: u32 = get(l, obj, c)
+        if (*l).cpred == NONE {
+            if src != dst { emit(l, shader.OP_MOV, dst, src, 0, 0) }
+        } else {
+            emit(l, shader.OP_SEL, dst, src, dst, (*l).cpred)
+        }
+        c = c + 1
+    }
+}
+
+fn lower_access(l: *mut Lw, pos: usize, wc: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let base: u32 = parse.w32(m, pos + 3)
+    if !ensure_var(l, base, pos) { return }
+    if tab((*l).vk, base) != VK_VAR || wc != 5 { fail(l, L_UNSUPPORTED, pos); return }
+    let ix: u32 = parse.w32(m, pos + 4)
+    if parse.def_op(m, ix) != spv.OP_CONSTANT || parse.def_op(m, parse.ptr_pointee(m, parse.type_of(m, base))) != spv.OP_TYPEVECTOR {
+        fail(l, L_UNSUPPORTED, pos) // arrays, structs, dynamic indices
+        return
+    }
+    let c: u32 = parse.const_word(m, ix)
+    if c >= tab((*l).vn, base) { fail(l, L_INTERNAL, pos); return }
+    tset((*l).vk, id, VK_PTR)
+    tset((*l).vreg, id * 4, base)
+    tset((*l).vreg, id * 4 + 1, c)
+    tset((*l).vn, id, 1)
+}
+
+fn lower_composite(l: *mut Lw, pos: usize, op: u32, wc: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let n: u32 = result_n(l, pos)
+    if op == spv.OP_COMPOSITEEXTRACT {
+        if wc != 5 { fail(l, L_UNSUPPORTED, pos); return }
+        define(l, id, 1)
+        set_reg(l, id, 0, own(l, parse.w32(m, pos + 3), parse.w32(m, pos + 4)))
+        return
+    }
+    define(l, id, n)
+    if op == spv.OP_COMPOSITECONSTRUCT {
+        var k: usize = 3
+        var c: u32 = 0
+        while k < wc {
+            let o: u32 = parse.w32(m, pos + k)
+            let on: u32 = type_n(l, o)
+            var j: u32 = 0
+            while j < on {
+                if c < 4 { set_reg(l, id, c, own(l, o, j)) }
+                c = c + 1
+                j = j + 1
+            }
+            k = k + 1
+        }
+        return
+    }
+    // VectorShuffle
+    let a: u32 = parse.w32(m, pos + 3)
+    let b: u32 = parse.w32(m, pos + 4)
+    let n1: u32 = type_n(l, a)
+    var c: u32 = 0
+    while c < n {
+        var s: u32 = parse.w32(m, pos + 5 + (c as usize))
+        if s == 0xFFFFFFFF { s = 0 }
+        if s < n1 { set_reg(l, id, c, own(l, a, s)) } else { set_reg(l, id, c, own(l, b, s - n1)) }
+        c = c + 1
+    }
+}
+
+fn lower_sample(l: *mut Lw, pos: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let h: u32 = parse.w32(m, pos + 3)
+    let coord: u32 = parse.w32(m, pos + 4)
+    if tab((*l).vk, h) != VK_HANDLE { fail(l, L_INTERNAL, pos); return }
+    let d: u32 = allocn(l, 4)
+    emit(l, shader.OP_SAMPLE, d, get(l, coord, 0), get(l, coord, 1), 0)
+    (*l).nsample = (*l).nsample + 1
+    define_seq(l, id, d, 4)
+}
+
+// ---------------------------------------------------------------- control flow
+
+fn add_edge(l: *mut Lw, from: u32, to: u32, pred: u32) {
+    if (*l).ne >= MAX_EDGES { fail(l, L_COMPLEX, 0); return }
+    rt.st32((*l).ef, (*l).ne, from)
+    rt.st32((*l).et, (*l).ne, to)
+    rt.st32((*l).ep, (*l).ne, pred)
+    rt.st32((*l).ed, (*l).ne, 0)
+    ref_reg(l, pred)
+    (*l).ne = (*l).ne + 1
+}
+
+// does a return / discard / unreachable occur between instruction ii and the label `merge`?
+fn scan_exit(l: *mut Lw, ii: usize, merge: u32) -> bool {
+    let m: *mut parse.Module = (*l).m
+    var i: usize = ii + 1
+    while i < (*m).ninst {
+        let p: usize = parse.inst_pos(m, i)
+        let o: u32 = parse.op_at(m, p)
+        if o == spv.OP_LABEL && parse.w32(m, p + 1) == merge { return false }
+        if o == spv.OP_RETURN || o == spv.OP_RETURNVALUE || o == spv.OP_KILL || o == spv.OP_UNREACHABLE || o == spv.OP_SWITCH || o == spv.OP_LOOPMERGE { return true }
+        if o == spv.OP_FUNCTIONEND { return true }
+        i = i + 1
+    }
+    return true
+}
+
+fn begin_block(l: *mut Lw, label: u32, first: bool) {
+    (*l).cur = label
+    (*l).skip = false
+    var pred: u32 = NONE
+    if first {
+        pred = NONE
+    }
+    else if tab((*l).mpred, label) != UNSET {
+        pred = tab((*l).mpred, label)
+    }
+    else {
+        var cnt: u32 = 0
+        var any_none: bool = false
+        var i: usize = 0
+        while i < (*l).ne {
+            if rt.ld32((*l).et, i) == label {
+                cnt = cnt + 1
+                if rt.ld32((*l).ep, i) == NONE { any_none = true }
+            }
+            i = i + 1
+        }
+        if cnt == 0 {
+            (*l).skip = true
+            tset((*l).bpred, label, NONE)
+            (*l).cpred = NONE
+            return
+        }
+        if !any_none {
+            var acc: u32 = NONE
+            var owned: bool = false
+            i = 0
+            while i < (*l).ne {
+                if rt.ld32((*l).et, i) == label {
+                    let e: u32 = rt.ld32((*l).ep, i)
+                    if acc == NONE { acc = e }
+                    else {
+                        let nr: u32 = alloc1(l)
+                        emit(l, shader.OP_MAX, nr, acc, e, 0)
+                        if owned { unref_reg(l, acc) }
+                        acc = nr
+                        owned = true
+                    }
+                }
+                i = i + 1
+            }
+            pred = acc
+            if !owned { ref_reg(l, pred) }
+        }
+    }
+    tset((*l).bpred, label, pred)
+    (*l).cpred = pred
+}
+
+fn end_block(l: *mut Lw) {
+    let label: u32 = (*l).cur
+    var i: usize = 0
+    while i < (*l).ne {
+        if rt.ld32((*l).et, i) == label && rt.ld32((*l).ed, i) == 0 {
+            rt.st32((*l).ed, i, 1)
+            unref_reg(l, rt.ld32((*l).ep, i))
+        }
+        i = i + 1
+    }
+    unref_reg(l, tab((*l).bpred, label))
+    tset((*l).bpred, label, NONE)
+}
+
+fn lower_phi(l: *mut Lw, pos: usize, wc: usize) {
+    let m: *mut parse.Module = (*l).m
+    let id: u32 = parse.w32(m, pos + 2)
+    let n: u32 = result_n(l, pos)
+    let base: u32 = allocn(l, n)
+    var found: u32 = 0
+    var q: usize = wc - 2 // last pair starts at word wc - 2
+    while q >= 3 {
+        let v: u32 = parse.w32(m, pos + q)
+        let par: u32 = parse.w32(m, pos + q + 1)
+        var ei: usize = 0
+        var hit: bool = false
+        var ep: u32 = NONE
+        while ei < (*l).ne {
+            if rt.ld32((*l).ef, ei) == par && rt.ld32((*l).et, ei) == (*l).cur {
+                hit = true
+                ep = rt.ld32((*l).ep, ei)
+            }
+            ei = ei + 1
+        }
+        if hit {
+            var c: u32 = 0
+            while c < n {
+                let rv: u32 = get(l, v, c)
+                if found == 0 || ep == NONE { emit(l, shader.OP_MOV, base + c, rv, 0, 0) }
+                else { emit(l, shader.OP_SEL, base + c, rv, base + c, ep) }
+                free_tmps(l)
+                c = c + 1
+            }
+            found = found + 1
+        }
+        if q < 5 { break }
+        q = q - 2
+    }
+    if found == 0 { fail(l, L_UNSUPPORTED, pos) }
+    define_seq(l, id, base, n)
+}
+
+fn lower_branch(l: *mut Lw, pos: usize, op: u32) {
+    let m: *mut parse.Module = (*l).m
+    if op == spv.OP_BRANCH {
+        add_edge(l, (*l).cur, parse.w32(m, pos + 1), (*l).cpred)
+        return
+    }
+    let cnd: u32 = parse.w32(m, pos + 1)
+    let cr: u32 = get(l, cnd, 0)
+    var mt: u32 = cr
+    var own_t: bool = false
+    if (*l).cpred != NONE {
+        mt = alloc1(l)
+        emit(l, shader.OP_MUL, mt, (*l).cpred, cr, 0)
+        own_t = true
+    }
+    let nr: u32 = alloc1(l)
+    emit(l, shader.OP_SUB, nr, tmp_const(l, 1.0f), cr, 0)
+    var mf: u32 = nr
+    var own_f: bool = true
+    if (*l).cpred != NONE {
+        mf = alloc1(l)
+        emit(l, shader.OP_MUL, mf, (*l).cpred, nr, 0)
+        unref_reg(l, nr)
+    }
+    add_edge(l, (*l).cur, parse.w32(m, pos + 2), mt)
+    add_edge(l, (*l).cur, parse.w32(m, pos + 3), mf)
+    if own_t { unref_reg(l, mt) }
+    if own_f { unref_reg(l, mf) }
+}
+
+// ---------------------------------------------------------------- driver
+
+fn consume(l: *mut Lw, pos: usize, op: u32, wc: usize) {
+    var k: usize = 1
+    while k < wc {
+        let kind: u32 = parse.operand_kind(op, k, wc)
+        if kind == 1 || kind == 3 {
+            let id: u32 = parse.w32((*l).m, pos + k)
+            if id != 0 && id < bound_of(l) && tab((*l).uses, id) > 0 {
+                tset((*l).uses, id, tab((*l).uses, id) - 1)
+                if tab((*l).uses, id) == 0 { release(l, id) }
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
+    let m: *mut parse.Module = (*l).m
+    if op == spv.OP_SELECTIONMERGE {
+        let mb: u32 = parse.w32(m, pos + 1)
+        if !scan_exit(l, ii, mb) {
+            tset((*l).mpred, mb, (*l).cpred)
+            ref_reg(l, (*l).cpred)
+        }
+    }
+    else if op == spv.OP_LOOPMERGE { fail(l, L_LOOP, pos) }
+    else if op == spv.OP_SWITCH { fail(l, L_SWITCH, pos) }
+    else if op == spv.OP_KILL { fail(l, L_KILL, pos) }
+    else if op == spv.OP_FUNCTIONCALL { fail(l, L_CALL, pos) }
+    else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL { lower_branch(l, pos, op) }
+    else if op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE { }
+    else if op == spv.OP_VARIABLE { setup_local_var(l, pos) }
+    else if op == spv.OP_PHI { lower_phi(l, pos, wc) }
+    else if op == spv.OP_LOAD { lower_load(l, pos) }
+    else if op == spv.OP_STORE { lower_store(l, pos) }
+    else if op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN { lower_access(l, pos, wc) }
+    else if op == spv.OP_COMPOSITECONSTRUCT || op == spv.OP_COMPOSITEEXTRACT || op == spv.OP_VECTORSHUFFLE { lower_composite(l, pos, op, wc) }
+    else if op == spv.OP_SAMPLEDIMAGE { tset((*l).vk, parse.w32(m, pos + 2), VK_HANDLE) }
+    else if op == spv.OP_IMAGESAMPLEIMPLICITLOD || op == spv.OP_IMAGESAMPLEEXPLICITLOD { lower_sample(l, pos) }
+    else if op == spv.OP_EXTINST { lower_glsl(l, pos, wc) }
+    else if op == spv.OP_DOT { lower_dot(l, pos) }
+    else if op == spv.OP_ANY || op == spv.OP_ALL { lower_anyall(l, pos, op) }
+    else if op == spv.OP_SELECT { lower_select(l, pos) }
+    else if op == spv.OP_UNDEF { }
+    else if op == spv.OP_LINE || op == spv.OP_NOLINE || op == spv.OP_NOP { }
+    else if bin_vop(op) != 0xFFFF || is_notequal(op) || op == spv.OP_UDIV || op == spv.OP_SDIV || op == spv.OP_UMOD || op == spv.OP_SMOD
+        || op == spv.OP_SREM || op == spv.OP_FREM || op == spv.OP_FMOD || op == spv.OP_VECTORTIMESSCALAR { lower_bin(l, pos, op) }
+    else if op == spv.OP_FNEGATE || op == spv.OP_SNEGATE || op == spv.OP_CONVERTSTOF || op == spv.OP_CONVERTUTOF || op == spv.OP_CONVERTFTOS
+        || op == spv.OP_CONVERTFTOU || op == spv.OP_BITCAST || op == spv.OP_COPYOBJECT || op == spv.OP_LOGICALNOT || op == spv.OP_ISNAN
+        || op == spv.OP_ISINF { lower_un(l, pos, op) }
+    else { fail(l, L_UNSUPPORTED, pos) }
+}
+
+fn lower(m: *mut parse.Module, prog: u64, maxpc: usize, info: *mut LowerInfo) -> u32 {
+    *info = info_zero()
+    if (*m).err != 0 || (*m).code == 0 { return (*m).err }
+    let ep: usize = parse.entry_pos(m, spv.EM_FRAGMENT)
+    if ep == 0 { return L_STAGE }
+    let nb: usize = (*m).bound as usize
+    var lw: Lw = Lw { m: m, prog: prog, pc: 0, maxpc: maxpc, err: 0, err_pos: 0, rrefs: 0, vreg: 0, vn: 0, vk: 0, uses: 0, bpred: 0,
+        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0 }
+    let l: *mut Lw = &lw
+    (*l).rrefs = rt.heap_alloc(64 * 4)
+    (*l).vreg = rt.heap_alloc(nb * 16)
+    (*l).vn = rt.heap_alloc(nb * 4)
+    (*l).vk = rt.heap_alloc(nb * 4)
+    (*l).uses = rt.heap_alloc(nb * 4)
+    (*l).bpred = rt.heap_alloc(nb * 4)
+    (*l).mpred = rt.heap_alloc(nb * 4)
+    (*l).tmp = rt.heap_alloc(64 * 4)
+    (*l).ef = rt.heap_alloc(MAX_EDGES * 4)
+    (*l).et = rt.heap_alloc(MAX_EDGES * 4)
+    (*l).ep = rt.heap_alloc(MAX_EDGES * 4)
+    (*l).ed = rt.heap_alloc(MAX_EDGES * 4)
+    rt.mem_set((*l).rrefs, 0 as u8, 64 * 4)
+    rt.mem_set((*l).vreg, 0 as u8, nb * 16)
+    rt.mem_set((*l).vn, 0 as u8, nb * 4)
+    rt.mem_set((*l).vk, 0 as u8, nb * 4)
+    rt.mem_set((*l).uses, 0 as u8, nb * 4)
+    rt.mem_set((*l).bpred, 0 as u8, nb * 4)
+    var q: usize = 0
+    while q < nb { rt.st32((*l).mpred, q, UNSET); q = q + 1 }
+
+    // locate the entry function body
+    let fid: u32 = parse.w32(m, ep + 2)
+    let fpos: usize = parse.def_pos(m, fid)
+    var i0: usize = 0
+    while i0 < (*m).ninst && parse.inst_pos(m, i0) != fpos { i0 = i0 + 1 }
+    var i1: usize = i0 + 1
+    while i1 < (*m).ninst && parse.op_at(m, parse.inst_pos(m, i1)) != spv.OP_FUNCTIONEND { i1 = i1 + 1 }
+    if i0 >= (*m).ninst || i1 >= (*m).ninst { fail(l, L_INTERNAL, fpos) }
+
+    // interface variables
+    if (*l).err == 0 {
+        let sl: usize = parse.str_len_words(m, ep + 3, ep + parse.wc_at(m, ep))
+        var k: usize = ep + 3 + sl
+        while k < ep + parse.wc_at(m, ep) && (*l).err == 0 {
+            setup_io_var(l, parse.w32(m, k))
+            k = k + 1
+        }
+    }
+    // use counts of the body
+    var i: usize = i0 + 1
+    while i < i1 && (*l).err == 0 {
+        let p: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, p)
+        let wc: usize = parse.wc_at(m, p)
+        var k: usize = 1
+        while k < wc {
+            let kind: u32 = parse.operand_kind(op, k, wc)
+            if kind == 1 || kind == 3 {
+                let id: u32 = parse.w32(m, p + k)
+                if id < (*m).bound { tset((*l).uses, id, tab((*l).uses, id) + 1) }
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    // body
+    var first: bool = true
+    var in_block: bool = false
+    i = i0 + 1
+    while i < i1 && (*l).err == 0 {
+        let p: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, p)
+        let wc: usize = parse.wc_at(m, p)
+        if op == spv.OP_LABEL {
+            begin_block(l, parse.w32(m, p + 1), first)
+            first = false
+            in_block = true
+        }
+        else if op == spv.OP_FUNCTIONPARAMETER { }
+        else if !(*l).skip {
+            lower_inst(l, p, op, wc, i)
+            free_tmps(l)
+            if (*l).err == 0 && op != spv.OP_VARIABLE {
+                let rk: u32 = parse.res_kind(op)
+                consume(l, p, op, wc)
+                if rk == 2 {
+                    let rid: u32 = parse.w32(m, p + 2)
+                    if tab((*l).uses, rid) == 0 { release(l, rid) }
+                }
+            }
+            if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE {
+                end_block(l)
+                in_block = false
+            }
+        }
+        else if op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE {
+            end_block(l)
+        }
+        i = i + 1
+    }
+    if (*l).err == 0 { emit(l, shader.OP_END, 0, 0, 0, 0) }
+    let e: u32 = (*l).err
+    (*info).ninstr = (*l).pc
+    (*info).err_pos = (*l).err_pos
+    (*info).peak_reg = (*l).peak
+    (*info).nsample = (*l).nsample
+    (*info).nsel = (*l).nsel
+    rt.heap_free((*l).rrefs, 64 * 4)
+    rt.heap_free((*l).vreg, nb * 16)
+    rt.heap_free((*l).vn, nb * 4)
+    rt.heap_free((*l).vk, nb * 4)
+    rt.heap_free((*l).uses, nb * 4)
+    rt.heap_free((*l).bpred, nb * 4)
+    rt.heap_free((*l).mpred, nb * 4)
+    rt.heap_free((*l).tmp, 64 * 4)
+    rt.heap_free((*l).ef, MAX_EDGES * 4)
+    rt.heap_free((*l).et, MAX_EDGES * 4)
+    rt.heap_free((*l).ep, MAX_EDGES * 4)
+    rt.heap_free((*l).ed, MAX_EDGES * 4)
+    return e
+}

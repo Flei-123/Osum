@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/spirv/parse.fi -- SPIR-V binary reader: header, instruction decoding, id tables, decorations, entry points, types.
+//
+//     var m: parse.Module = parse.module_zero()
+//     let e: u32 = parse.module_open(&m, words_address, word_count)   // 0 = ok, else E_* (m.err_pos = word offset)
+//     ... parse.def_pos(&m, id), parse.type_of(&m, id), parse.ncomp(&m, type) ...
+//     parse.module_close(&m)
+//
+// The reader NEVER trusts the input: every word count, id and string is bounds checked; random or truncated input
+// yields an error code, not a crash (see tools/spirv/test.fi fuzz). The words are copied, so later changes by the
+// caller cannot race with the checks. Semantic checks live in validate.fi, code generation in lower.fi.
+//
+// Positions are word offsets from the start of the module (header = words 0..4, first instruction at 5).
+
+import std.rt
+import spirv.spv
+
+export {
+    Module, module_zero, module_open, module_close, err_name, fail,
+    E_NONE, E_TRUNC, E_MAGIC, E_VERSION, E_BOUND, E_WC, E_ID, E_REDEF, E_UNDEF, E_ORDER, E_CAP, E_MODEL, E_ENTRY,
+    E_TYPE, E_CONST, E_VAR, E_BLOCK, E_CFG, E_OPERAND, E_UNKNOWNOP, E_DECORATE, E_LITERAL, E_UNSUPPORTED,
+    MAX_BOUND, MAX_WORDS, F_BLOCK, F_BUFFERBLOCK, F_FLAT, F_NOPERSPECTIVE, F_RELAXED, F_CENTROID, F_ORIGIN_UL, F_ORIGIN_LL,
+    F_DEPTHREPLACING,
+    w32, op_at, wc_at, def_pos, def_op, type_of, flags_of, loc_of, binding_of, dset_of, builtin_of, inst_pos,
+    res_kind, operand_kind, min_wc, is_scalar_type, is_numeric_type, scalar_kind, ncomp, comp_type, ptr_class, ptr_pointee,
+    K_FLOAT, K_SINT, K_UINT, K_BOOL, const_word, entry_pos, str_len_words, str_byte,
+}
+
+const E_NONE: u32 = 0
+const E_TRUNC: u32 = 1
+const E_MAGIC: u32 = 2
+const E_VERSION: u32 = 3
+const E_BOUND: u32 = 4
+const E_WC: u32 = 5
+const E_ID: u32 = 6
+const E_REDEF: u32 = 7
+const E_UNDEF: u32 = 8
+const E_ORDER: u32 = 9
+const E_CAP: u32 = 10
+const E_MODEL: u32 = 11
+const E_ENTRY: u32 = 12
+const E_TYPE: u32 = 13
+const E_CONST: u32 = 14
+const E_VAR: u32 = 15
+const E_BLOCK: u32 = 16
+const E_CFG: u32 = 17
+const E_OPERAND: u32 = 18
+const E_UNKNOWNOP: u32 = 19
+const E_DECORATE: u32 = 20
+const E_LITERAL: u32 = 21
+const E_UNSUPPORTED: u32 = 22
+
+const MAX_BOUND: u32 = 262144
+const MAX_WORDS: usize = 4194304 // 16 MiB module
+
+const F_BLOCK: u32 = 1
+const F_BUFFERBLOCK: u32 = 2
+const F_FLAT: u32 = 4
+const F_NOPERSPECTIVE: u32 = 8
+const F_RELAXED: u32 = 16
+const F_CENTROID: u32 = 32
+const F_ORIGIN_UL: u32 = 64
+const F_ORIGIN_LL: u32 = 128
+const F_DEPTHREPLACING: u32 = 256
+
+const K_FLOAT: u32 = 1
+const K_SINT: u32 = 2
+const K_UINT: u32 = 3
+const K_BOOL: u32 = 4
+
+struct Module {
+    code: u64, // u32 [n] private copy
+    n: usize,
+    version: u32,
+    bound: u32,
+    err: u32,
+    err_pos: usize,
+    def: u64, // u32 [bound]: position of the defining instruction, 0 = undefined
+    ty: u64, // u32 [bound]: result type id of the defining instruction (OpVariable: the pointer type)
+    flags: u64, // u32 [bound]: F_* of decorations / execution modes
+    loc: u64, // u32 [bound]: Location + 1 (0 = none)
+    bind: u64, // Binding + 1
+    dset: u64, // DescriptorSet + 1
+    bltin: u64, // BuiltIn + 1
+    ipos: u64, // u32 [ninst]: position of every instruction
+    ninst: usize,
+    caps: u32, // bit 0 Matrix, bit 1 Shader
+    bad_cap: u32, // first capability that is not Matrix/Shader (+1), 0 = none
+    nmm: u32, // number of OpMemoryModel
+    addr_model: u32,
+    mem_model: u32,
+    nep: u32,
+    eps: u64, // u32 [16]: positions of the first 16 OpEntryPoint
+    glsl_id: u32, // id of the "GLSL.std.450" import, 0 = none
+    has_groups: bool, // OpDecorationGroup / OpGroupDecorate seen (unsupported)
+    first_fn: usize, // position of the first OpFunction, 0 = none
+}
+
+fn module_zero() -> Module {
+    var m: Module = Module { code: 0, n: 0, version: 0, bound: 0, err: 0, err_pos: 0, def: 0, ty: 0, flags: 0, loc: 0, bind: 0,
+        dset: 0, bltin: 0, ipos: 0, ninst: 0, caps: 0, bad_cap: 0, nmm: 0, addr_model: 0, mem_model: 0, nep: 0, eps: 0,
+        glsl_id: 0, has_groups: false, first_fn: 0 }
+    return m
+}
+
+fn err_name(e: u32) -> str {
+    if e == 0 { return "ok" }
+    if e == 1 { return "truncated" }
+    if e == 2 { return "bad magic" }
+    if e == 3 { return "bad version" }
+    if e == 4 { return "bad id bound" }
+    if e == 5 { return "bad word count" }
+    if e == 6 { return "id out of range" }
+    if e == 7 { return "id defined twice" }
+    if e == 8 { return "id used before definition" }
+    if e == 9 { return "instruction in wrong module section" }
+    if e == 10 { return "unsupported capability" }
+    if e == 11 { return "bad memory model" }
+    if e == 12 { return "bad entry point" }
+    if e == 13 { return "bad type" }
+    if e == 14 { return "bad constant" }
+    if e == 15 { return "bad variable" }
+    if e == 16 { return "bad block structure" }
+    if e == 17 { return "bad structured control flow" }
+    if e == 18 { return "operand type mismatch" }
+    if e == 19 { return "unknown instruction" }
+    if e == 20 { return "bad decoration" }
+    if e == 21 { return "bad literal string" }
+    if e == 22 { return "unsupported feature" }
+    return "unknown error"
+}
+
+// ---------------------------------------------------------------- raw access (all indices are checked by the callers)
+
+fn w32(m: *mut Module, i: usize) -> u32 {
+    if i >= (*m).n { return 0 }
+    return rt.ld32((*m).code, i)
+}
+
+fn op_at(m: *mut Module, pos: usize) -> u32 { return w32(m, pos) & 0xFFFF }
+fn wc_at(m: *mut Module, pos: usize) -> usize { return (w32(m, pos) >> 16) as usize }
+
+fn tab(m: *mut Module, t: u64, id: u32) -> u32 {
+    if id >= (*m).bound { return 0 }
+    return rt.ld32(t, id as usize)
+}
+
+fn def_pos(m: *mut Module, id: u32) -> usize { return tab(m, (*m).def, id) as usize }
+fn def_op(m: *mut Module, id: u32) -> u32 {
+    let p: usize = def_pos(m, id)
+    if p == 0 { return 0xFFFFFFFF }
+    return op_at(m, p)
+}
+fn type_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).ty, id) }
+fn flags_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).flags, id) }
+fn loc_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).loc, id) } // +1
+fn binding_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).bind, id) } // +1
+fn dset_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).dset, id) } // +1
+fn builtin_of(m: *mut Module, id: u32) -> u32 { return tab(m, (*m).bltin, id) } // +1
+fn inst_pos(m: *mut Module, i: usize) -> usize {
+    if i >= (*m).ninst { return 0 }
+    return rt.ld32((*m).ipos, i) as usize
+}
+
+// string literal at word position p (nul terminated, packed 4 chars per word, little endian); limit = first word after the instruction
+// returns the number of words the string occupies including the terminator, 0 = not terminated inside the limit
+fn str_len_words(m: *mut Module, p: usize, limit: usize) -> usize {
+    var i: usize = p
+    while i < limit && i < (*m).n {
+        let v: u32 = rt.ld32((*m).code, i)
+        if (v & 0xFF) == 0 || ((v >> 8) & 0xFF) == 0 || ((v >> 16) & 0xFF) == 0 || ((v >> 24) & 0xFF) == 0 { return i - p + 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn str_byte(m: *mut Module, p: usize, k: usize) -> u8 {
+    if p + k / 4 >= (*m).n { return 0 as u8 }
+    return rt.ld8((*m).code, p * 4 + k)
+}
+
+// ---------------------------------------------------------------- opcode tables
+
+// 0 = no result id, 1 = result id only, 2 = result type + result id
+fn res_kind(op: u32) -> u32 {
+    if op == 7 || op == 11 || op == 73 || op == 248 { return 1 }
+    if op >= 19 && op <= 34 { return 1 } // OpType*
+    if op == 1 || op == 12 || op == 54 || op == 55 || op == 57 || op == 59 || op == 61 || op == 245 { return 2 }
+    if op >= 41 && op <= 52 { return 2 } // constants
+    if op >= 65 && op <= 68 { return 2 } // access chains, array length
+    if op >= 79 && op <= 86 { return 2 }
+    if op >= 87 && op <= 98 { return 2 } // image sampling / fetch / read
+    if op == 100 { return 2 }
+    if op >= 109 && op <= 191 { return 2 } // conversions, arithmetic, relational
+    if op >= 194 && op <= 230 { return 2 } // shifts, bit ops, derivatives
+    return 0
+}
+
+// minimum word count (including the opcode word) of the instructions we know; others: 1
+fn min_wc(op: u32) -> usize {
+    if op == 3 { return 3 } // Source
+    if op == 5 { return 3 } // Name
+    if op == 6 { return 4 }
+    if op == 7 { return 3 }
+    if op == 11 { return 3 }
+    if op == 12 { return 5 } // ExtInst
+    if op == 14 { return 3 }
+    if op == 15 { return 4 } // EntryPoint
+    if op == 16 { return 3 }
+    if op == 17 { return 2 }
+    if op == 19 || op == 20 || op == 26 { return 2 }
+    if op == 21 { return 4 }
+    if op == 22 { return 3 }
+    if op == 23 || op == 24 { return 4 }
+    if op == 25 { return 9 }
+    if op == 27 || op == 29 { return 3 }
+    if op == 28 { return 4 }
+    if op == 30 { return 2 }
+    if op == 32 { return 4 }
+    if op == 33 { return 3 }
+    if op == 41 || op == 42 || op == 46 { return 3 }
+    if op == 43 { return 4 }
+    if op == 44 { return 3 }
+    if op == 54 { return 5 }
+    if op == 55 { return 3 }
+    if op == 56 { return 1 }
+    if op == 57 { return 4 }
+    if op == 59 { return 4 }
+    if op == 61 { return 4 }
+    if op == 62 { return 3 }
+    if op == 65 || op == 66 { return 4 }
+    if op == 71 { return 3 }
+    if op == 72 { return 4 }
+    if op == 79 { return 5 }
+    if op == 80 { return 3 }
+    if op == 81 { return 5 }
+    if op == 82 { return 6 }
+    if op == 83 || op == 84 { return 4 }
+    if op == 86 { return 5 }
+    if op == 87 { return 5 }
+    if op == 88 { return 7 }
+    if op >= 109 && op <= 127 { return 4 }
+    if op >= 128 && op <= 191 { return 5 }
+    if op == 169 { return 6 }
+    if op == 245 { return 3 }
+    if op == 246 { return 4 }
+    if op == 247 { return 3 }
+    if op == 248 { return 2 }
+    if op == 249 { return 2 }
+    if op == 250 { return 4 }
+    if op == 251 { return 3 }
+    if op == 254 { return 2 }
+    return 1
+}
+
+// Is word k (0 = opcode word) of instruction `op` (word count wc) an id operand?
+//   0 = literal / not an id, 1 = value, type or other id that must be defined EARLIER, 2 = label id (forward references allowed),
+//   3 = value id that may be a forward reference (OpPhi operands, OpFunctionCall callee)
+fn operand_kind(op: u32, k: usize, wc: usize) -> u32 {
+    let rk: u32 = res_kind(op)
+    if op == 12 { // ExtInst: type, result, set, instruction number, operands
+        if k == 1 || k == 3 || k >= 5 { return 1 }
+        return 0
+    }
+    if op == 245 { // Phi: type, result, (value, parent label)*
+        if k == 1 { return 1 }
+        if k >= 3 { return 3 }
+        return 0
+    }
+    if op == 57 { // FunctionCall: type, result, callee, args
+        if k == 1 || k >= 4 { return 1 }
+        if k == 3 { return 3 }
+        return 0
+    }
+    if op == 59 { // Variable: type, result, storage class, [initializer]
+        if k == 1 || k == 4 { return 1 }
+        return 0
+    }
+    if op == 61 { // Load: type, result, pointer, memory access
+        if k == 1 || k == 3 { return 1 }
+        return 0
+    }
+    if op == 81 { // CompositeExtract: type, result, composite, indices
+        if k == 1 || k == 3 { return 1 }
+        return 0
+    }
+    if op == 82 { // CompositeInsert: type, result, object, composite, indices
+        if k == 1 || k == 3 || k == 4 { return 1 }
+        return 0
+    }
+    if op == 79 { // VectorShuffle: type, result, v1, v2, components
+        if k == 1 || k == 3 || k == 4 { return 1 }
+        return 0
+    }
+    if op == 87 || op == 88 { // ImageSample{Implicit,Explicit}Lod: type, result, sampled image, coordinate, operands mask, ids
+        if k == 1 || k == 3 || k == 4 || k >= 6 { return 1 }
+        return 0
+    }
+    if op == 54 { // Function: type, result, control, function type
+        if k == 1 || k == 4 { return 1 }
+        return 0
+    }
+    if op == 43 { // Constant: type, result, literal words
+        if k == 1 { return 1 }
+        return 0
+    }
+    if op == 62 { // Store: pointer, object, memory access
+        if k == 1 || k == 2 { return 1 }
+        return 0
+    }
+    if op == 249 { // Branch
+        if k == 1 { return 2 }
+        return 0
+    }
+    if op == 250 { // BranchConditional: cond, true, false, weights
+        if k == 1 { return 1 }
+        if k == 2 || k == 3 { return 2 }
+        return 0
+    }
+    if op == 247 { // SelectionMerge: merge label, control
+        if k == 1 { return 2 }
+        return 0
+    }
+    if op == 246 { // LoopMerge: merge label, continue label, control
+        if k == 1 || k == 2 { return 2 }
+        return 0
+    }
+    if op == 254 { // ReturnValue
+        if k == 1 { return 1 }
+        return 0
+    }
+    if op == 251 { // Switch: selector, default, (literal, label)*
+        if k == 1 { return 1 }
+        if k == 2 { return 2 }
+        if k >= 4 && (k % 2) == 0 { return 2 }
+        return 0
+    }
+    if op == 15 { // EntryPoint: model, function, name, interface ids (checked in validate.fi)
+        return 0
+    }
+    if rk == 2 { // generic: type, result, ids
+        if k == 1 || k >= 3 { return 1 }
+        return 0
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- type helpers
+
+fn is_scalar_type(m: *mut Module, t: u32) -> bool {
+    let o: u32 = def_op(m, t)
+    return o == spv.OP_TYPEINT || o == spv.OP_TYPEFLOAT || o == spv.OP_TYPEBOOL
+}
+
+// scalar K_* of a scalar type, or of the component type of a vector; 0 otherwise
+fn scalar_kind(m: *mut Module, t: u32) -> u32 {
+    var tt: u32 = t
+    if def_op(m, tt) == spv.OP_TYPEVECTOR { tt = w32(m, def_pos(m, tt) + 2) }
+    let p: usize = def_pos(m, tt)
+    if p == 0 { return 0 }
+    let o: u32 = op_at(m, p)
+    if o == spv.OP_TYPEFLOAT { return K_FLOAT }
+    if o == spv.OP_TYPEBOOL { return K_BOOL }
+    if o == spv.OP_TYPEINT {
+        if w32(m, p + 3) != 0 { return K_SINT }
+        return K_UINT
+    }
+    return 0
+}
+
+fn is_numeric_type(m: *mut Module, t: u32) -> bool {
+    let k: u32 = scalar_kind(m, t)
+    return k == K_FLOAT || k == K_SINT || k == K_UINT
+}
+
+// number of components: scalar 1, vector n, else 0
+fn ncomp(m: *mut Module, t: u32) -> u32 {
+    if is_scalar_type(m, t) { return 1 }
+    if def_op(m, t) == spv.OP_TYPEVECTOR { return w32(m, def_pos(m, t) + 3) }
+    return 0
+}
+
+fn comp_type(m: *mut Module, t: u32) -> u32 {
+    if def_op(m, t) == spv.OP_TYPEVECTOR { return w32(m, def_pos(m, t) + 2) }
+    return t
+}
+
+fn ptr_class(m: *mut Module, t: u32) -> u32 {
+    if def_op(m, t) != spv.OP_TYPEPOINTER { return 0xFFFFFFFF }
+    return w32(m, def_pos(m, t) + 2)
+}
+
+fn ptr_pointee(m: *mut Module, t: u32) -> u32 {
+    if def_op(m, t) != spv.OP_TYPEPOINTER { return 0 }
+    return w32(m, def_pos(m, t) + 3)
+}
+
+// first literal word of an OpConstant (32 bit), 0 if id is not an OpConstant
+fn const_word(m: *mut Module, id: u32) -> u32 {
+    if def_op(m, id) != spv.OP_CONSTANT { return 0 }
+    return w32(m, def_pos(m, id) + 3)
+}
+
+fn entry_pos(m: *mut Module, model: u32) -> usize {
+    var i: u32 = 0
+    while i < (*m).nep && i < 16 {
+        let p: usize = rt.ld32((*m).eps, i as usize) as usize
+        if w32(m, p + 1) == model { return p }
+        i = i + 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- open / close
+
+fn fail(m: *mut Module, e: u32, pos: usize) -> u32 {
+    if (*m).err == 0 {
+        (*m).err = e
+        (*m).err_pos = pos
+    }
+    return e
+}
+
+fn table_new(n: usize) -> u64 {
+    let p: u64 = rt.heap_alloc(n * 4)
+    rt.mem_set(p, 0 as u8, n * 4)
+    return p
+}
+
+fn module_close(m: *mut Module) {
+    if (*m).code != 0 { rt.heap_free((*m).code, (*m).n * 4) }
+    if (*m).bound != 0 && (*m).def != 0 {
+        let nb: usize = ((*m).bound as usize) * 4
+        rt.heap_free((*m).def, nb)
+        rt.heap_free((*m).ty, nb)
+        rt.heap_free((*m).flags, nb)
+        rt.heap_free((*m).loc, nb)
+        rt.heap_free((*m).bind, nb)
+        rt.heap_free((*m).dset, nb)
+        rt.heap_free((*m).bltin, nb)
+    }
+    if (*m).ipos != 0 { rt.heap_free((*m).ipos, (*m).n * 4) }
+    if (*m).eps != 0 { rt.heap_free((*m).eps, 64) }
+    *m = module_zero()
+}
+
+fn set_flag(m: *mut Module, id: u32, f: u32) {
+    if id < (*m).bound { rt.st32((*m).flags, id as usize, rt.ld32((*m).flags, id as usize) | f) }
+}
+
+// copies and decodes `nwords` words at `src`; returns 0 or the first error (the module stays valid for module_close either way)
+fn module_open(m: *mut Module, src: u64, nwords: usize) -> u32 {
+    *m = module_zero()
+    if nwords < 5 { return fail(m, E_TRUNC, 0) }
+    if nwords > MAX_WORDS { return fail(m, E_TRUNC, 0) }
+    (*m).code = rt.heap_alloc(nwords * 4)
+    rt.mem_copy((*m).code, src, nwords * 4)
+    (*m).n = nwords
+    if w32(m, 0) != spv.SPV_MAGIC { return fail(m, E_MAGIC, 0) }
+    let ver: u32 = w32(m, 1)
+    (*m).version = ver
+    if (ver & 0xFF0000FF) != 0 || ver < 0x00010000 || ver > 0x00010600 { return fail(m, E_VERSION, 1) }
+    let bound: u32 = w32(m, 3)
+    if bound < 1 || bound > MAX_BOUND { return fail(m, E_BOUND, 3) }
+    (*m).bound = bound
+    (*m).def = table_new(bound as usize)
+    (*m).ty = table_new(bound as usize)
+    (*m).flags = table_new(bound as usize)
+    (*m).loc = table_new(bound as usize)
+    (*m).bind = table_new(bound as usize)
+    (*m).dset = table_new(bound as usize)
+    (*m).bltin = table_new(bound as usize)
+    (*m).ipos = table_new(nwords)
+    (*m).eps = table_new(16)
+
+    var gl: [u8; 12] = "GLSL.std.450"
+    var pos: usize = 5
+    while pos < nwords {
+        let hw: u32 = w32(m, pos)
+        let wc: usize = (hw >> 16) as usize
+        let op: u32 = hw & 0xFFFF
+        if wc == 0 { return fail(m, E_WC, pos) }
+        if pos + wc > nwords { return fail(m, E_TRUNC, pos) }
+        if wc < min_wc(op) { return fail(m, E_WC, pos) }
+        rt.st32((*m).ipos, (*m).ninst, pos as u32)
+        (*m).ninst = (*m).ninst + 1
+        let rk: u32 = res_kind(op)
+        if rk != 0 {
+            var rid: u32 = w32(m, pos + 1)
+            if rk == 2 { rid = w32(m, pos + 2) }
+            if rid == 0 || rid >= bound { return fail(m, E_ID, pos) }
+            if rt.ld32((*m).def, rid as usize) != 0 { return fail(m, E_REDEF, pos) }
+            rt.st32((*m).def, rid as usize, pos as u32)
+            if rk == 2 { rt.st32((*m).ty, rid as usize, w32(m, pos + 1)) }
+        }
+        if op == spv.OP_DECORATE || op == spv.OP_MEMBERDECORATE {
+            let target: u32 = w32(m, pos + 1)
+            if target == 0 || target >= bound { return fail(m, E_ID, pos) }
+            if op == spv.OP_DECORATE {
+                let dec: u32 = w32(m, pos + 2)
+                if dec == spv.DEC_LOCATION || dec == spv.DEC_BINDING || dec == spv.DEC_DESCRIPTORSET || dec == spv.DEC_BUILTIN {
+                    if wc < 4 { return fail(m, E_WC, pos) }
+                    let v: u32 = w32(m, pos + 3)
+                    if v >= 0xFFFFFFF0 { return fail(m, E_DECORATE, pos) }
+                    if dec == spv.DEC_LOCATION { rt.st32((*m).loc, target as usize, v + 1) }
+                    else if dec == spv.DEC_BINDING { rt.st32((*m).bind, target as usize, v + 1) }
+                    else if dec == spv.DEC_DESCRIPTORSET { rt.st32((*m).dset, target as usize, v + 1) }
+                    else { rt.st32((*m).bltin, target as usize, v + 1) }
+                }
+                else if dec == spv.DEC_BLOCK { set_flag(m, target, F_BLOCK) }
+                else if dec == spv.DEC_BUFFERBLOCK { set_flag(m, target, F_BUFFERBLOCK) }
+                else if dec == spv.DEC_FLAT { set_flag(m, target, F_FLAT) }
+                else if dec == spv.DEC_NOPERSPECTIVE { set_flag(m, target, F_NOPERSPECTIVE) }
+                else if dec == spv.DEC_RELAXEDPRECISION { set_flag(m, target, F_RELAXED) }
+                else if dec == spv.DEC_CENTROID { set_flag(m, target, F_CENTROID) }
+            }
+        }
+        else if op == spv.OP_DECORATIONGROUP || op == spv.OP_GROUPDECORATE || op == spv.OP_GROUPMEMBERDECORATE {
+            (*m).has_groups = true
+        }
+        else if op == spv.OP_CAPABILITY {
+            let c: u32 = w32(m, pos + 1)
+            if c == spv.CAP_MATRIX { (*m).caps = (*m).caps | 1 }
+            else if c == spv.CAP_SHADER { (*m).caps = (*m).caps | 2 }
+            else if (*m).bad_cap == 0 { (*m).bad_cap = c + 1 }
+        }
+        else if op == spv.OP_MEMORYMODEL {
+            (*m).nmm = (*m).nmm + 1
+            (*m).addr_model = w32(m, pos + 1)
+            (*m).mem_model = w32(m, pos + 2)
+        }
+        else if op == spv.OP_ENTRYPOINT {
+            if str_len_words(m, pos + 3, pos + wc) == 0 { return fail(m, E_LITERAL, pos) }
+            if (*m).nep < 16 { rt.st32((*m).eps, (*m).nep as usize, pos as u32) }
+            (*m).nep = (*m).nep + 1
+        }
+        else if op == spv.OP_EXECUTIONMODE {
+            let target: u32 = w32(m, pos + 1)
+            let mode: u32 = w32(m, pos + 2)
+            if target == 0 || target >= bound { return fail(m, E_ID, pos) }
+            if mode == spv.MODE_ORIGINUPPERLEFT { set_flag(m, target, F_ORIGIN_UL) }
+            else if mode == spv.MODE_ORIGINLOWERLEFT { set_flag(m, target, F_ORIGIN_LL) }
+            else if mode == spv.MODE_DEPTHREPLACING { set_flag(m, target, F_DEPTHREPLACING) }
+        }
+        else if op == spv.OP_EXTINSTIMPORT {
+            let sl: usize = str_len_words(m, pos + 2, pos + wc)
+            if sl == 0 { return fail(m, E_LITERAL, pos) }
+            var same: bool = true
+            var k: usize = 0
+            while k < 12 {
+                if str_byte(m, pos + 2, k) != gl[k] { same = false }
+                k = k + 1
+            }
+            if same && str_byte(m, pos + 2, 12) == (0 as u8) { (*m).glsl_id = w32(m, pos + 1) }
+        }
+        else if op == spv.OP_FUNCTION {
+            if (*m).first_fn == 0 { (*m).first_fn = pos }
+        }
+        pos = pos + wc
+    }
+    return 0
+}

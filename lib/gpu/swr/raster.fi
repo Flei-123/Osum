@@ -36,7 +36,7 @@ const MODE_NATIVE0: i32 = 0
 const MODE_VM: i32 = 1
 const MODE_NATIVE1: i32 = 2
 const MODE_COUNT: i32 = 3
-const NREG: usize = 32
+const NREG: usize = 64 // 32 before the SPIR-V lowering (lib/spirv/lower.fi needs room)
 const REC: usize = 48 // words per triangle record
 
 struct Frame {
@@ -467,6 +467,57 @@ fn op_sample(f: *mut Frame, pd: u64, pa: u64, pb: u64, n: usize) {
 }
 
 #[no_inline]
+fn op_div(pd: u64, pa: u64, pb: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, ld_f32(pa, l) / ld_f32(pb, l)); l = l + 1 } }
+#[no_inline]
+fn op_abs(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.fabs32(ld_f32(pa, l))); l = l + 1 } }
+#[no_inline]
+fn op_neg(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, 0.0f - ld_f32(pa, l)); l = l + 1 } }
+#[no_inline]
+fn op_floor(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.floor32(ld_f32(pa, l))); l = l + 1 } }
+#[no_inline]
+fn op_rsq(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, 1.0f / math.sqrt32(ld_f32(pa, l))); l = l + 1 } }
+#[no_inline]
+fn op_clt(pd: u64, pa: u64, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n { if ld_f32(pa, l) < ld_f32(pb, l) { st_f32(pd, l, 1.0f) } else { st_f32(pd, l, 0.0f) }; l = l + 1 }
+}
+#[no_inline]
+fn op_cle(pd: u64, pa: u64, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n { if ld_f32(pa, l) <= ld_f32(pb, l) { st_f32(pd, l, 1.0f) } else { st_f32(pd, l, 0.0f) }; l = l + 1 }
+}
+#[no_inline]
+fn op_ceq(pd: u64, pa: u64, pb: u64, n: usize) {
+    var l: usize = 0
+    while l < n { if ld_f32(pa, l) == ld_f32(pb, l) { st_f32(pd, l, 1.0f) } else { st_f32(pd, l, 0.0f) }; l = l + 1 }
+}
+// d = (mask != 0) ? a : b   (mask register is c)
+#[no_inline]
+fn op_sel(pd: u64, pa: u64, pb: u64, pm: u64, n: usize) {
+    var l: usize = 0
+    while l < n { if ld_f32(pm, l) != 0.0f { st_f32(pd, l, ld_f32(pa, l)) } else { st_f32(pd, l, ld_f32(pb, l)) }; l = l + 1 }
+}
+#[no_inline]
+fn op_exp2(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.powf(2.0, ld_f32(pa, l) as f64) as f32); l = l + 1 } }
+#[no_inline]
+fn op_log2(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.log2(ld_f32(pa, l) as f64) as f32); l = l + 1 } }
+#[no_inline]
+fn op_sin(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.sin(ld_f32(pa, l) as f64) as f32); l = l + 1 } }
+#[no_inline]
+fn op_cos(pd: u64, pa: u64, n: usize) { var l: usize = 0; while l < n { st_f32(pd, l, math.cos(ld_f32(pa, l) as f64) as f32); l = l + 1 } }
+// FragCoord.xy -> r6, r7 (pixel centre)
+#[no_inline]
+fn fill_frag(base: u64, xs: u64, y: i32, n: usize) {
+    let fy: f32 = (y as f32) + 0.5f
+    var l: usize = 0
+    while l < n {
+        st_f32(rg(base, 6, l), 0, ((rt.ld32(xs, l) as i32) as f32) + 0.5f)
+        st_f32(rg(base, 7, l), 0, fy)
+        l = l + 1
+    }
+}
+
+#[no_inline]
 fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     var l: usize = 0
     while l < n {
@@ -480,12 +531,15 @@ fn out_pack(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
 
 // instruction = 5 u32 (op, d, a, b, c); every op runs over n lanes (dispatch cost / n)
 // ops: 0 END 1 MOV 2 ADD 3 SUB 4 MUL 5 MAD 6 MIN 7 MAX 8 SAT 9 LDC(d, bits in a) 10 RCP 11 SQRT 12 SAMPLE(d..d+3 = tex(a, b))
+// 13 DIV 14 ABS 15 FLOOR 16 RSQ 17 CLT 18 CLE 19 CEQ (1.0/0.0) 20 SEL(d = c!=0 ? a : b) 21 NEG 22 EXP2 23 LOG2 24 SIN 25 COS
+// inputs: r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5
 // output registers r8..r11
 #[no_inline]
 fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     var pc: usize = 0
     var run: bool = true
     let st: u64 = LANES as u64 * (4 as u64)
+    fill_frag(base, xs, y, n)
     while run {
         let op: u32 = rt.ld32((*f).prog, pc * 5)
         let d: u32 = rt.ld32((*f).prog, pc * 5 + 1)
@@ -509,6 +563,19 @@ fn shade_vm(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
         else if op == 10 as u32 { op_rcp(pd, pa, n) }
         else if op == 11 as u32 { op_sqrt(pd, pa, n) }
         else if op == 12 as u32 { op_sample(f, pd, pa, pb, n) }
+        else if op == 13 as u32 { op_div(pd, pa, pb, n) }
+        else if op == 14 as u32 { op_abs(pd, pa, n) }
+        else if op == 15 as u32 { op_floor(pd, pa, n) }
+        else if op == 16 as u32 { op_rsq(pd, pa, n) }
+        else if op == 17 as u32 { op_clt(pd, pa, pb, n) }
+        else if op == 18 as u32 { op_cle(pd, pa, pb, n) }
+        else if op == 19 as u32 { op_ceq(pd, pa, pb, n) }
+        else if op == 20 as u32 { op_sel(pd, pa, pb, pc3, n) }
+        else if op == 21 as u32 { op_neg(pd, pa, n) }
+        else if op == 22 as u32 { op_exp2(pd, pa, n) }
+        else if op == 23 as u32 { op_log2(pd, pa, n) }
+        else if op == 24 as u32 { op_sin(pd, pa, n) }
+        else if op == 25 as u32 { op_cos(pd, pa, n) }
         else { run = false }
     }
     out_pack(f, base, xs, y, n)

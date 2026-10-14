@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/spirv/test.fi -- host checks for lib/spirv (parse, validate, lower to the SWR VM) ; files come from run.sh (glslang output)
+//   ok_*.spv       must validate, lower and (flat/tex/early/branch) render right
+//   nolower_*.spv  must validate but lower with the named L_* error
+// plus a hand-assembled module, negative cases built from it, and a fuzz run (no crash on random / truncated / mutated input).
+import std.rt
+import std.io
+import jobs.jobs
+import gpu.swr.raster
+import gpu.swr.shader
+import gpu.swr.scene
+import spirv.parse
+import spirv.validate
+import spirv.lower
+
+static mut passed: i32 = 0
+static mut failed: i32 = 0
+
+fn check(name: str, ok: bool) {
+    if ok { passed = passed + 1; io.fmt_print(f"OK    {name}\n") }
+    else { failed = failed + 1; io.fmt_print(f"FAIL  {name}\n") }
+}
+
+fn __thread_work(kind: u64, arg: u64) -> u64 {
+    if kind == jobs.WORKER_KIND { return jobs.worker_main(arg) }
+    return 0 as u64
+}
+
+// ---- tiny assembler for the hand-written module
+static mut wbuf: u64 = 0
+static mut wn: usize = 0
+
+fn put(v: u32) { rt.st32(wbuf, wn, v); wn = wn + 1 }
+fn ins(op: u32, wc: u32) { put((wc << 16) | op) }
+
+// fragment shader: layout(location=0) out vec4 o; void main() { o = vec4(1.0, 0.5, 0.25, 1.0); }  (ids: 1 main, 2 void, 3 fn type, 4 float, 5 vec4, 6 ptr, 7 o, 8..11 consts, 12 const vec4, 13 label)
+fn build_flat() -> usize {
+    wbuf = rt.heap_alloc(4096)
+    wn = 0
+    put(0x07230203); put(0x00010000); put(0); put(14); put(0)
+    ins(17, 2); put(1) // Capability Shader
+    ins(14, 3); put(0); put(1) // MemoryModel Logical GLSL450
+    ins(15, 6); put(4); put(1); put(0x6E69616D); put(0) // EntryPoint Fragment %1 "main" %7
+    put(7)
+    ins(16, 3); put(1); put(7) // ExecutionMode OriginUpperLeft
+    ins(71, 4); put(7); put(30); put(0) // Decorate %7 Location 0
+    ins(19, 2); put(2)
+    ins(33, 3); put(3); put(2)
+    ins(22, 3); put(4); put(32)
+    ins(23, 4); put(5); put(4); put(4)
+    ins(32, 4); put(6); put(3); put(5)
+    ins(59, 4); put(6); put(7); put(3)
+    ins(43, 4); put(4); put(8); put(0x3F800000)
+    ins(43, 4); put(4); put(9); put(0x3F000000)
+    ins(43, 4); put(4); put(10); put(0x3E800000)
+    ins(44, 7); put(5); put(12); put(8); put(9); put(10); put(8)
+    ins(54, 5); put(2); put(1); put(0); put(3)
+    ins(248, 2); put(13)
+    ins(62, 3); put(7); put(12)
+    ins(253, 1)
+    ins(56, 1)
+    return wn
+}
+
+fn rgba(px: u32) -> u32 { return px }
+
+fn render(f: *mut raster.Frame, prog: u64) {
+    (*f).mode = raster.MODE_VM
+    raster.frame_set_program(f, prog)
+    (*f).depth_test = false
+    raster.frame_clear(f, 0xFF000000 as u32, 1.0f)
+    (*f).ntri = 0
+    scene.add_quad(f, 0, -1.0f, -1.0f, 1.0f, 1.0f, 0.5f, 1.0f, 0.6f, 0.4f, 0.8f)
+    raster.frame_draw(f, 0 as u64)
+}
+
+fn near(a: u32, want: i32) -> bool {
+    let d: i32 = (a as i32) - want
+    return d >= -2 && d <= 2
+}
+
+fn ch(px: u32, k: u32) -> u32 { return (px >> (k * 8)) & 255 }
+
+fn lower_words(code: u64, n: usize, prog: u64, info: *mut lower.LowerInfo) -> u32 {
+    var m: parse.Module = parse.module_zero()
+    var e: u32 = parse.module_open(&m, code, n)
+    if e == 0 { e = validate.validate(&m) }
+    if e == 0 { e = lower.lower(&m, prog, 4000, info) }
+    parse.module_close(&m)
+    return e
+}
+
+fn val_words(code: u64, n: usize) -> u32 {
+    var m: parse.Module = parse.module_zero()
+    var e: u32 = parse.module_open(&m, code, n)
+    if e == 0 { e = validate.validate(&m) }
+    parse.module_close(&m)
+    return e
+}
+
+fn name_starts(p: u64, pre: u64, k: usize) -> bool {
+    // true when the file name part of `p` starts with prefix (length k)
+    var len: usize = rt.c_length(p)
+    var start: usize = 0
+    var i: usize = 0
+    while i < len { if rt.ld8(p, i) == (47 as u8) { start = i + 1 }; i = i + 1 }
+    var j: usize = 0
+    while j < k {
+        if rt.ld8(p, start + j) != rt.ld8(pre, j) { return false }
+        j = j + 1
+    }
+    return true
+}
+
+fn has_name(p: u64, nm: u64, k: usize) -> bool {
+    var len: usize = rt.c_length(p)
+    var i: usize = 0
+    while i + k <= len {
+        var j: usize = 0
+        var same: bool = true
+        while j < k { if rt.ld8(p, i + j) != rt.ld8(nm, j) { same = false }; j = j + 1 }
+        if same { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn fuzz(code: u64, n: usize, rounds: i32, seed: u64) -> i32 {
+    // mutate: random word, truncation, bit flips, huge word count; the library must return an error code, never crash
+    let prog: u64 = rt.heap_alloc(4000 * 20 + 64)
+    let copy: u64 = rt.heap_alloc(n * 4 + 16)
+    var s: u64 = seed
+    var accepted: i32 = 0
+    var r: i32 = 0
+    while r < rounds {
+        rt.mem_copy(copy, code, n * 4)
+        s = scene.rng_next(s)
+        let kind: u64 = s % (4 as u64)
+        s = scene.rng_next(s)
+        let at: usize = 5 + ((s >> 3 as u64) % (((n - 5) as u64))) as usize
+        var len: usize = n
+        s = scene.rng_next(s)
+        if kind == (0 as u64) { rt.st32(copy, at, ((s as u32) << 1) ^ ((s >> 3 as u64) as u32)) }
+        else if kind == (1 as u64) { len = 5 + (((s >> 5 as u64) % ((n - 4) as u64)) as usize) }
+        else if kind == (2 as u64) { rt.st32(copy, at, rt.ld32(copy, at) ^ ((1 as u32) << ((s >> 9 as u64) as u32 & 31 as u32))) }
+        else { rt.st32(copy, at, (rt.ld32(copy, at) & 0xFFFF as u32) | 0xFFFF0000 as u32) }
+        var info: lower.LowerInfo = lower.info_zero()
+        if lower_words(copy, len, prog, &info) == 0 { accepted = accepted + 1 }
+        r = r + 1
+    }
+    rt.heap_free(prog, 4000 * 20 + 64)
+    rt.heap_free(copy, n * 4 + 16)
+    return accepted
+}
+
+fn main(start: u64) -> i32 {
+    let f: *mut raster.Frame = raster.frame_new(320, 200, 64)
+    var a_ok: [u8; 3] = "ok_"
+    var a_tex: [u8; 6] = "ok_tex"
+    var a_early: [u8; 8] = "ok_early"
+    var a_flat: [u8; 7] = "ok_flat"
+    var a_branch: [u8; 9] = "ok_branch"
+    var a_frag: [u8; 12] = "ok_fragcoord"
+    var a_loop: [u8; 4] = "loop"
+    var a_disc: [u8; 7] = "discard"
+    let tex: u64 = scene.make_texture(256)
+    raster.frame_set_texture(f, tex, 256, 256)
+    let prog: u64 = rt.heap_alloc(4000 * 20 + 64)
+    var info: lower.LowerInfo = lower.info_zero()
+
+    // 1. hand-assembled module
+    let hn: usize = build_flat()
+    let hcode: u64 = wbuf
+    check("hand-assembled flat module validates", val_words(hcode, hn) == 0)
+    let le: u32 = lower_words(hcode, hn, prog, &info)
+    check("hand-assembled flat module lowers", le == 0)
+    render(f, prog)
+    let c0: u32 = raster.frame_pixel(f, 160, 100)
+    check("flat module renders (1.0, 0.5, 0.25, 1.0)", ch(c0, 0) == 255 as u32 && near(ch(c0, 1), 127) && near(ch(c0, 2), 63) && ch(c0, 3) == 255 as u32)
+    io.fmt_print(f"      flat: {info.ninstr} instructions\n")
+
+    // 2. negative cases (each mutation of the valid module must give exactly this error class)
+    var bad: u64 = rt.heap_alloc(hn * 4 + 16)
+    rt.mem_copy(bad, hcode, hn * 4)
+    rt.st32(bad, 0, 0x07230204 as u32)
+    check("bad magic -> E_MAGIC", val_words(bad, hn) == parse.E_MAGIC)
+    rt.mem_copy(bad, hcode, hn * 4)
+    check("truncated by 1 word -> error", val_words(bad, hn - 1) != 0)
+    check("fewer than 5 words -> E_TRUNC", val_words(bad, 4) == parse.E_TRUNC)
+    rt.mem_copy(bad, hcode, hn * 4)
+    rt.st32(bad, 3, 5 as u32)
+    check("id bound too small -> error", val_words(bad, hn) != 0)
+    rt.mem_copy(bad, hcode, hn * 4)
+    rt.st32(bad, hn - 2, ((1 as u32) << 16) | 56 as u32) // OpReturn -> OpFunctionEnd: block without terminator
+    check("block without terminator -> E_BLOCK", val_words(bad, hn) == parse.E_BLOCK)
+    rt.mem_copy(bad, hcode, hn * 4)
+    rt.st32(bad, hn - 5, 99 as u32) // store an undefined id
+    check("use of an undefined id -> error", val_words(bad, hn) != 0)
+    rt.mem_copy(bad, hcode, hn * 4)
+    rt.st32(bad, 5, (2 as u32 << 16) | 0 as u32) // first instruction becomes OpNop (no capability)
+    check("missing Shader capability -> error", val_words(bad, hn) != 0)
+    check("empty / zero length input -> error", val_words(bad, 0) != 0)
+
+    // 3. glslang files
+    var nok: i32 = 0
+    var i: usize = 1
+    let argc: usize = rt.arg_count(start)
+    while i < argc {
+        let path: u64 = rt.arg_ptr(start, i)
+        var b: rt.Buf = rt.buf_new()
+        if !rt.read_file(path, &b) { check("read input file", false); i = i + 1; continue }
+        let nw: usize = rt.buf_len(&b) / 4
+        let code: u64 = rt.buf_ptr(&b)
+        let isok: bool = name_starts(path, (&a_ok[0]) as u64, 3)
+        var e: u32 = val_words(code, nw)
+        var le2: u32 = 0
+        if e == 0 { le2 = lower_words(code, nw, prog, &info) }
+        if isok {
+            check("glslang module validates + lowers", e == 0 && le2 == 0)
+            if e != 0 || le2 != 0 { io.fmt_print(f"      {parse.err_name(e)} / {lower.lower_err_name(le2)} at word {info.err_pos}\n") }
+            else { io.fmt_print(f"      {info.ninstr} instr, {info.peak_reg} regs peak, {info.nsel} sel, {info.nsample} sample\n") }
+        } else {
+            var want: u32 = lower.L_UNSUPPORTED
+            if has_name(path, (&a_loop[0]) as u64, 4) { want = lower.L_LOOP }
+            if has_name(path, (&a_disc[0]) as u64, 7) { want = lower.L_KILL }
+            check("unsupported module validates and is rejected by the lowering with the right error", e == 0 && le2 == want)
+            if e != 0 || le2 != want { io.fmt_print(f"      {parse.err_name(e)} / {lower.lower_err_name(le2)} (wanted {lower.lower_err_name(want)})\n") }
+        }
+        if isok && e == 0 && le2 == 0 {
+            nok = nok + 1
+            render(f, prog)
+            if has_name(path, (&a_tex[0]) as u64, 6) {
+                let h: u64 = raster.frame_hash(f)
+                let p0: u64 = shader.prog_new()
+                shader.prog_tex_times_colour(p0)
+                render(f, p0)
+                check("texture * colour: SPIR-V program == hand written VM program (bit identical)", raster.frame_hash(f) == h)
+            }
+            if has_name(path, (&a_early[0]) as u64, 8) {
+                let l: u32 = raster.frame_pixel(f, 20, 100)
+                let r: u32 = raster.frame_pixel(f, 300, 100)
+                check("early return: left half keeps (0.1, 0.2, 0.3), right half uses uv", near(ch(l, 0), 26) && near(ch(l, 1), 51) && near(ch(l, 2), 77) && near(ch(r, 2), 178) && ch(r, 0) > 200 as u32)
+            }
+            if has_name(path, (&a_flat[0]) as u64, 7) {
+                let q: u32 = raster.frame_pixel(f, 5, 5)
+                check("glslang flat colour renders", ch(q, 0) == 255 as u32 && near(ch(q, 1), 127) && near(ch(q, 2), 63))
+            }
+            if has_name(path, (&a_branch[0]) as u64, 9) {
+                // pixel (x, y): u = x / 320, v = y / 200 ; colour attribute (0.6, 0.4, 0.8)
+                let a: u32 = raster.frame_pixel(f, 240, 150) // u .75 v .75: r = 1 - .6, g = 0, b = .8, a: b = true -> k = .9
+                check("branch: nested if / ternary / && select the right lanes", near(ch(a, 0), 102) && ch(a, 1) == 0 as u32 && near(ch(a, 2), 204) && near(ch(a, 3), 229))
+                let c: u32 = raster.frame_pixel(f, 40, 20) // u .125 v .1: else branch: b = .4, r .6, g .4 ; b = false (u < .2) so alpha stays 1
+                check("branch: else side", near(ch(c, 0), 153) && near(ch(c, 1), 102) && near(ch(c, 2), 102) && ch(c, 3) == 255 as u32)
+            }
+            if has_name(path, (&a_frag[0]) as u64, 12) {
+                let q: u32 = raster.frame_pixel(f, 160, 100) // (160.5 / 320, 100.5 / 320)
+                check("FragCoord.xy / 320", near(ch(q, 0), 128) && near(ch(q, 1), 80))
+            }
+            // fuzz this module
+            let acc: i32 = fuzz(code, nw, 3000, 777 as u64 + (i as u64))
+            io.fmt_print(f"      fuzz: 3000 mutations survived, {acc} still valid + lowerable\n")
+            passed = passed + 1
+        }
+        rt.buf_free(&b)
+        i = i + 1
+    }
+    check("at least one glslang module checked or glslang missing", nok > 0 || argc <= 1)
+
+    // 4. random garbage, many shapes
+    var s: u64 = 99 as u64
+    var g: i32 = 0
+    var crashes_free: bool = true
+    let gb: u64 = rt.heap_alloc(8192)
+    while g < 2000 {
+        var k: usize = 0
+        while k < 512 { s = scene.rng_next(s); rt.st32(gb, k, ((s as u32) << 1) ^ ((s >> 5 as u64) as u32)); k = k + 1 }
+        if g % 2 == 0 { rt.st32(gb, 0, 0x07230203 as u32); rt.st32(gb, 1, 0x00010000 as u32); rt.st32(gb, 3, 40 as u32) }
+        s = scene.rng_next(s)
+        let n2: usize = ((s >> 4 as u64) % (512 as u64)) as usize
+        let e: u32 = lower_words(gb, n2, prog, &info)
+        if e == 0 { crashes_free = false }
+        g = g + 1
+    }
+    check("2000 random buffers: no crash, none accepted", crashes_free)
+    let accept: i32 = fuzz(hcode, hn, 4000, 4242 as u64)
+    check("4000 mutations of the hand-assembled module: no crash", true)
+    io.fmt_print(f"      mutated flat module: {accept} stayed valid\n")
+
+    io.fmt_print(f"spirv: {passed} ok, {failed} fail\n")
+    if failed == 0 { return 0 }
+    return 1
+}
