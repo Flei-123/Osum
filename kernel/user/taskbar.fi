@@ -108,6 +108,7 @@ import traypop
 import taskview
 import notifc
 import fuiscene
+import fui.traypower
 import std.rt
 
 export { u_start }
@@ -241,6 +242,8 @@ const PG_BATPERCENT: u64 = 25
 // kernel/sys.fi and kernel/user/power.fi -- the numbers are the
 // interface to ring 3 and this bar does not invent a second one.
 const PG_BATSTATE: u64 = 27
+// L-006 / r782: mains adapter (1 = plugged). Same number as kernel/user/powerd.fi.
+const PG_AC: u64 = 34
 // ============================== RUNDE ACPI-EREIGNISSE
 //
 // DIE LEISTE FRAGT NICHT MEHR NUR AB, SIE ERFAEHRT ES.
@@ -529,6 +532,11 @@ fn bat_icon() -> u64 {
     if bat_have == 0 {
         return icons.BATTERY_ABSENT
     }
+    // r782: the state comes from fui.traypower (the same model `powerd status` prints). On mains and full
+    // (not charging) the item shows the plug; charging keeps the charging battery.
+    if traypower.state(bat_have, bat_pct, bat_chg, bat_ac) == traypower.BV_PLUGGED {
+        return icons.BATTERY_PLUG
+    }
     if bat_chg != 0 {
         return icons.BATTERY_CHARGING
     }
@@ -787,6 +795,10 @@ static mut net_state: u64 = 0
 static mut bat_have: u64 = 0
 static mut bat_pct: u64 = 0
 static mut bat_chg: u64 = 0
+// r782: `PG_AC`, the mains adapter. With bat_have/bat_pct/bat_chg it is the whole input of fui.traypower.
+static mut bat_ac: u64 = 0
+// r782: tooltip text of the battery item (traypower.tooltip, NUL terminated)
+static mut bat_tip: [u8; 96] = [0 as u8; 96]
 // RUNDE ACPI-EREIGNISSE: was schon gewarnt wurde. OHNE DAS WAERE DIE
 // WARNUNG EIN DAUERFEUER -- `status_build` laeuft viermal je Sekunde,
 // und eine Meldung je Durchlauf waere nach einer Minute
@@ -2637,6 +2649,11 @@ fn status_build() -> bool {
     bat_have = 0
     bat_pct = 0
     bat_chg = 0
+    bat_ac = 0
+    let acv: u64 = ulib.sys(SYS_PWRGET, PG_AC, 0, 0)
+    if !ulib.bad(acv) && acv != 0 {
+        bat_ac = 1
+    }
     let bst: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
     if !ulib.bad(bst) && (bst & 2) != 0 {
         bat_chg = 1
@@ -2827,6 +2844,8 @@ fn status_build() -> bool {
     // line the bar would not repaint when the preference changed --
     // the person would set `always` and see nothing happen.
     sum = sum ^ ((nv_faking * 3 + nv_fall) *% 40503)
+    // r782: plugged / charging is not part of the battery text either; without it the plug glyph would lag.
+    sum = sum ^ ((bat_ac * 5 + bat_chg * 11) *% 69069)
     var q: u64 = 0
     while q < F_N {
         let p: u64 = full_of(q)
@@ -6267,7 +6286,7 @@ static mut hk_sagte: u64 = 0
 // nur, OB sich geaendert hat, worauf gedeutet wird; ein Zeiger auf
 // einen Titel waere derselbe, waehrend sich der Titel darunter aendert.
 // 1..n sind die Fensterknoepfe, 900 der Startknopf, 901 das Netzfeld,
-// 902 die Uhr.
+// 902 die Uhr, 903 das Akkufeld (r782).
 fn hover_brand(x: u64, y: u64) -> u64 {
     if x >= st_x && x < st_x + st_w && y >= st_y && y < st_y + st_h {
         return 900
@@ -6285,6 +6304,13 @@ fn hover_brand(x: u64, y: u64) -> u64 {
         && y >= f_y[(F_CLK) as usize]
         && y < f_y[(F_CLK) as usize] + f_h[(F_CLK) as usize] {
         return 902
+    }
+    if bat_have != 0 && f_w[(F_BAT) as usize] != 0
+        && x >= f_x[(F_BAT) as usize]
+        && x < f_x[(F_BAT) as usize] + f_w[(F_BAT) as usize]
+        && y >= f_y[(F_BAT) as usize]
+        && y < f_y[(F_BAT) as usize] + f_h[(F_BAT) as usize] {
+        return 903
     }
     var i: u64 = 0
     while i < nk {
@@ -6312,6 +6338,12 @@ fn hover_text(m: u64) -> u64 {
     }
     if m == 902 {
         return full_of(F_CLK)
+    }
+    if m == 903 {
+        // r782: "Akku 77 %, wird geladen" etc. out of the same model as the glyph
+        let _n: u64 = traypower.tooltip(bat_have, bat_pct, bat_chg, bat_ac,
+            (&bat_tip[0 as usize]) as u64, 96)
+        return (&bat_tip[0 as usize]) as u64
     }
     if m >= 1 && m <= nk {
         // 40 Oktette je Titel, nicht 32 -- `ktit` ist [u8; 400] fuer
