@@ -39,7 +39,7 @@ mesonb() { local n=$1; shift
     ( cd "$W/x/$n" && "$MESON" setup b --prefix="$P" --libdir=lib --buildtype=release -Ddefault_library=shared "$@" && ninja -C b -j"$J" && ninja -C b install ) }
 cmakeb() { local n=$1; shift
     ( cd "$W/x/$n" && cmake -S . -B b -G Ninja -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=musl-gcc \
-        -DCMAKE_C_FLAGS="$CFLAGS" -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH="$P/lib" "$@" && ninja -C b -j"$J" && ninja -C b install ) }
+        -DCMAKE_C_FLAGS="$CFLAGS" -DM_LIBRARY=-lm -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH="$P/lib" "$@" && ninja -C b -j"$J" && ninja -C b install ) }
 
 unpack zlib zlib-1.3.1.tar.gz; unpack pcre2 pcre2-10.44.tar.bz2; unpack libffi libffi-3.4.6.tar.gz; unpack expat expat-2.6.3.tar.xz; unpack pixman pixman-0.43.4.tar.gz
 unpack freetype freetype-2.13.3.tar.xz; unpack wayland wayland-1.23.1.tar.xz; unpack wlproto wayland-protocols-1.38.tar.xz; unpack xkbcommon libxkbcommon-1.7.0.tar.xz
