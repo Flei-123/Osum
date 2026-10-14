@@ -1128,6 +1128,24 @@ def main():
         # `wm: fen ... x= y= w= h=` gerechnet.
         #
         # Kanten: l r o u  und die Ecken lo ro lu ru.
+        # FreeViewer gate: `ziehauf <name> <name>` drags (button held, relative steps) from the middle of one reported
+        # rectangle / `fvptAxB` point to another; `monitor <hmp command>` sends a raw QEMU monitor command
+        # (e.g. `mouse_move 0 0 -1` = wheel).
+        elif b == "ziehauf":
+            t = arg.split()
+            ra, rb = f.rechteck(t[0]), f.rechteck(t[1])
+            if ra is None or rb is None:
+                print("ziehauf %s -> KEIN RECHTECK GEMELDET" % arg)
+                fehler += 1
+                continue
+            xa, ya = ra[0] + ra[2] // 2, ra[1] + ra[3] // 2
+            xb, yb = rb[0] + rb[2] // 2, rb[1] + rb[3] // 2
+            f.ziehe(xa, ya, xb, yb)
+            print("ziehauf %s -> %d,%d to %d,%d" % (arg, xa, ya, xb, yb))
+        elif b == "monitor":
+            f.cmd(arg)
+            time.sleep(0.5)
+            print("monitor %s" % arg)
         elif b == "ziehkante":
             t = arg.split()
             wid = int(t[0])

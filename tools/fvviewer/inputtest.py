@@ -118,6 +118,25 @@ ptr = [
     (639, 479, 0, 0, 640, 480, 640, 480, 100),
     (640, 479, 0, 0, 640, 480, 640, 480, 100),
 ]
+# scaling sweep: viewer area (window sizes) x host resolutions, zoom as fit_image() computes it (min of both axes, 5..400 %)
+def fit_zoom(bw, bh, iw, ih):
+    z = bw * 100 // iw
+    zy = bh * 100 // ih
+    if zy < z:
+        z = zy
+    return max(5, min(400, z))
+
+
+for (bw, bh) in ((836, 530), (640, 400), (400, 300), (1800, 1000)):
+    for (rw, rh) in ((640, 480), (1920, 1080), (2560, 1440), (3440, 1440), (800, 1280), (1366, 768)):
+        z = fit_zoom(bw, bh, rw, rh)
+        zw, zh = rw * z // 100, rh * z // 100
+        ox = 12 + int((bw - zw) / 2)
+        oy = 40 + int((bh - zh) / 2)
+        # first / last picture pixel, the pixel just outside on each side, and the middle
+        for px, py in ((ox, oy), (ox + zw - 1, oy + zh - 1), (ox - 1, oy), (ox, oy - 1), (ox + zw, oy), (ox, oy + zh),
+                       (ox + zw // 2, oy + zh // 2)):
+            ptr.append((px, py, 12, 40, bw, bh, rw, rh, z))
 for a in ptr:
     total += 1
     got = run(["ptr", *a])
