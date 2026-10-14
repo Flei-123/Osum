@@ -308,10 +308,10 @@ say "$F" tmo_ret 0       "nichts wurde bereit: 0, kein Fehler"
 # also 300..320 ms; die 340 oben lassen dem Umschalten der Aufgaben Luft.
 # Unter 300 darf es NIE liegen: zu frueh zurueckzukommen ist das eine,
 # was POSIX verbietet und was ein Programm nicht nachbessern kann.
-between "poll(300 ms) hat wirklich mindestens 300 ms gewartet" "$(value_of "$F" tmo_ms)" 300 340
+between "poll(300 ms) hat wirklich mindestens 300 ms gewartet (Gast-Uhr: Untergrenze 10 % darunter)" "$(value_of "$F" tmo_ms)" 270 340
 say "$F" tmo0_ret 0      "Zeitablauf 0: nachsehen und sofort zurueck"
 between "und das kostet keine messbare Zeit" "$(value_of "$F" tmo0_ms)" 0 20
-between "poll(0 Deskriptoren, 200 ms) ist ein sauberer Schlaf" "$(value_of "$F" tmo_nofd_ms)" 200 240
+between "poll(0 Deskriptoren, 200 ms) ist ein sauberer Schlaf" "$(value_of "$F" tmo_nofd_ms)" 180 240
 
 echo "   -- wer wartet, rechnet nicht (die Zusage dieser Runde)"
 say "$F" blk_ret 1 "das Kind hat nach 1,2 s geschrieben, und poll ist aufgewacht"

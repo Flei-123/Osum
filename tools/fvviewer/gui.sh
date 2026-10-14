@@ -32,7 +32,12 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 PW=testpass123
-export DRIVE_TIPPE_GAP=${DRIVE_TIPPE_GAP:-0.3}
+# the guest drops keys under host load: the busier the host, the slower the typing (r80)
+if [ -z "${DRIVE_TIPPE_GAP:-}" ]; then
+    LOAD1=$(cut -d. -f1 /proc/loadavg)
+    if [ "$LOAD1" -ge 40 ]; then DRIVE_TIPPE_GAP=0.8; elif [ "$LOAD1" -ge 20 ]; then DRIVE_TIPPE_GAP=0.5; else DRIVE_TIPPE_GAP=0.3; fi
+fi
+export DRIVE_TIPPE_GAP
 
 gui_stage() { # name tls(0|1) oldclient(0|1) [pkg(0|1)]
     local name=$1 tls=$2 old=$3 pkg=${4:-0}
@@ -189,7 +194,7 @@ wprobe() {
     fi
 }
 
-retry() { local t; for t in 1 2 3; do "$@"; [ $? != 7 ] && return 0; done; bad "$2: app never started in the guest (3 tries)"; }
+retry() { local t; for t in 1 2 3 4; do "$@"; [ $? != 7 ] && return 0; done; bad "$2: app never started in the guest (4 tries)"; }
 for s in $STAGES; do
     case "$s" in
         plain)   retry gui_stage plain 0 0 ;;

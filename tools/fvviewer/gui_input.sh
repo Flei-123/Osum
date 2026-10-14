@@ -23,10 +23,15 @@ D=$(mktemp -d); trap 'bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null; pkill 
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD" "$D/th"
 RES=${GUI_RES:-1280x800}
-export DRIVE_TIPPE_GAP=${DRIVE_TIPPE_GAP:-0.3}   # the guest drops keys at 0.12 s on a loaded host
+# the guest drops keys under host load: the busier the host, the slower the typing (r80)
+if [ -z "${DRIVE_TIPPE_GAP:-}" ]; then
+    LOAD1=$(cut -d. -f1 /proc/loadavg)
+    if [ "$LOAD1" -ge 40 ]; then DRIVE_TIPPE_GAP=0.8; elif [ "$LOAD1" -ge 20 ]; then DRIVE_TIPPE_GAP=0.5; else DRIVE_TIPPE_GAP=0.3; fi
+fi
+export DRIVE_TIPPE_GAP
 PW=testpass123
 TRY=0
-MAXTRY=${GUI_INPUT_TRIES:-3}
+MAXTRY=${GUI_INPUT_TRIES:-4}
 attempt() {
 BASEPORT=$(( 23000 + (($$ + 7 * TRY) % 1500) * 2 ))
 RP=$BASEPORT; TP=$((BASEPORT+1))
