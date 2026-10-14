@@ -89,6 +89,11 @@ static mut w_pfeil: u64 = 0
 static mut w_pixel: u64 = 0
 static mut w_sichern: u64 = 0
 static mut w_verz: u64 = 0
+static mut region_mode: bool = false
+static mut img_w: u64 = 744
+static mut img_h: u64 = 424
+static mut w_stift: u64 = 0
+static mut w_marker: u64 = 0
 static mut werkzeug: u64 = 0 // 0 keins, 1 Rechteck, 2 Pfeil, 3 Verpixeln
 
 static mut T_TITEL: [u8; 11] = "Ausschnitt\0"
@@ -100,6 +105,10 @@ static mut T_RECHTECK: [u8; 9] = "Rechteck\0"
 static mut T_PFEIL: [u8; 6] = "Pfeil\0"
 static mut T_PIXEL: [u8; 10] = "Verpixeln\0"
 static mut T_SICHERN: [u8; 8] = "Sichern\0"
+static mut T_STIFT: [u8; 6] = "Stift\0"
+static mut T_MARKER: [u8; 7] = "Marker\0"
+static mut T_REGION: [u8; 32] = "Ausschnitt ziehen, dann Sichern\0"
+static mut T_CLIPTYP: [u8; 16] = "snip: clip typ=\0"
 static mut T_VERZ: [u8; 16] = "0 s\n1 s\n3 s\n5 s\0"
 static mut T_BEREIT: [u8; 34] = "Aufnehmen, dann malen und sichern\0"
 static mut T_GESICHERT: [u8; 12] = "gesichert: \0"
@@ -107,7 +116,8 @@ static mut T_FEHL: [u8; 17] = "das ging nicht: \0"
 static mut T_DEV: [u8; 8] = "/dev/fb\0"
 static mut T_VOR: [u8; 6] = "bild:\0"
 static mut T_ORDNER: [u8; 8] = "/bilder\0"
-static mut T_MUSTER: [u8; 19] = "/bilder/schnipsel-\0"
+static mut T_ORDNER2: [u8; 20] = "/bilder/Screenshots\0"
+static mut T_MUSTER: [u8; 32] = "/bilder/Screenshots/Screenshot-\0"
 static mut T_ENDE: [u8; 5] = ".png\0"
 static mut S_X: [u8; 5] = " × \0"
 
@@ -305,6 +315,65 @@ fn pfeil(x0: u64, y0: u64, x1: u64, y1: u64) {
     }
 }
 
+// Pen: a thick line between the two corners of the selection.
+fn stift(x0: u64, y0: u64, x1: u64, y1: u64) {
+    let dx: u64 = x1 -% x0
+    let dy: u64 = y1 -% y0
+    var n: u64 = 0
+    if x1 > x0 {
+        n = x1 - x0
+    } else {
+        n = x0 - x1
+    }
+    var m: u64 = 0
+    if y1 > y0 {
+        m = y1 - y0
+    } else {
+        m = y0 - y1
+    }
+    if m > n {
+        n = m
+    }
+    if n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i <= n {
+        let x: u64 = x0 +% (dx * i / n)
+        let y: u64 = y0 +% (dy * i / n)
+        var a: u64 = 0
+        while a < 3 {
+            var b: u64 = 0
+            while b < 3 {
+                setz(x + a, y + b, ROT)
+                b = b + 1
+            }
+            a = a + 1
+        }
+        i = i + 1
+    }
+}
+
+// Highlighter: the selection is blended 50 % with yellow (255,230,0).
+fn marker(x0: u64, y0: u64, x1: u64, y1: u64) {
+    var y: u64 = y0
+    while y <= y1 {
+        var x: u64 = x0
+        while x <= x1 {
+            let c: u64 = hol(x, y)
+            let r: u64 = (c >> 16) & 255
+            let g: u64 = (c >> 8) & 255
+            let b: u64 = c & 255
+            let nr: u64 = (r + 255) / 2
+            let ng: u64 = (g + 230) / 2
+            let nb: u64 = b / 2
+            setz(x, y, (255 << 24) | (nr << 16) | (ng << 8) | nb)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
 // Verpixeln: Bloecke von acht mal acht auf ihren Mittelwert. Nicht
 // weichzeichnen -- ein Weichzeichner laesst sich zurueckrechnen, ein
 // Mittelwert ueber vierundsechzig Punkte nicht.
@@ -364,6 +433,7 @@ fn num_at(p: u64, v: u64) {
 fn naechster_name() -> u64 {
     let z: u64 = (&ziel[(0) as usize]) as u64
     let _m: u64 = io.make_dir((&T_ORDNER[(0) as usize]) as u64)
+    let _m2: u64 = io.make_dir((&T_ORDNER2[(0) as usize]) as u64)
     var i: u64 = 1
     while i < 10000 {
         ulib.strcpy(z, (&T_MUSTER[(0) as usize]) as u64)
@@ -386,7 +456,12 @@ fn clipboard_image(pfadp: u64) {
     let a: u64 = (&ablage[(0) as usize]) as u64
     ulib.strcpy(a, (&T_VOR[(0) as usize]) as u64)
     ulib.strcat(a, pfadp)
-    wlibc.clip_put(a, ulib.length(a))
+    // The bus knows an image type; the payload stays the path (the clipboard
+    // holds 4 KiB, a PNG does not fit). Text readers still see "bild:<path>".
+    wlibc.clip_put_typ(wlibc.BT_IMAGE | wlibc.BT_TEXT, a, ulib.length(a))
+    say((&T_CLIPTYP[(0) as usize]) as u64)
+    ulib.sayn(wlibc.clip_hist_typ(0))
+    ulib.nl()
 }
 
 fn save(pfadp: u64) -> bool {
@@ -418,10 +493,33 @@ const K_RECHTECK: u64 = 6
 const K_PFEIL: u64 = 7
 const K_PIXEL: u64 = 8
 const K_SICHERN: u64 = 9
+const K_STIFT: u64 = 10
+const K_MARKER: u64 = 11
 
 // The delay chooser: the item texts one after the other (a popup's blob).
 static mut T_VZ: [u8; 16] = "0 s\01 s\03 s\05 s\0"
 static mut verz_sel: u64 = 0
+
+// Cut the image down to the dragged selection.
+fn crop_selection() {
+    let ax: u64 = fuiscene.image_sel_x0(K_IMG)
+    let ay: u64 = fuiscene.image_sel_y0(K_IMG)
+    let aw: u64 = fuiscene.image_sel_x1(K_IMG) - ax + 1
+    let ah: u64 = fuiscene.image_sel_y1(K_IMG) - ay + 1
+    var r: u64 = 0
+    while r < ah {
+        var c: u64 = 0
+        while c < aw {
+            __mmio_write32((pix + (r * aw + c) * 4) as *mut u32,
+                (hol(ax + c, ay + r)) as u32)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    bw = aw
+    bh = ah
+    fuiscene.image_sel_clear(K_IMG)
+}
 
 fn verz_text(i: u64) -> u64 {
     return (&T_VZ[(i * 4) as usize]) as u64
@@ -471,7 +569,7 @@ fn show() {
 fn build() {
     let col: usize = fuiscene.root()
     let _k: usize = fuiscene.label(col, (&kopf[(0) as usize]) as u64)
-    let _b: usize = fuiscene.image(col, K_IMG, 744, 424)
+    let _b: usize = fuiscene.image(col, K_IMG, img_w, img_h)
     let bar1: usize = fuiscene.row(col)
     fuiscene.set_gap(bar1, 8)
     let b1: usize = fuiscene.button(bar1, (&T_NEU[(0) as usize]) as u64, K_NEU)
@@ -496,12 +594,18 @@ fn build() {
     let c3: usize = fuiscene.button(bar2, (&T_PIXEL[(0) as usize]) as u64, K_PIXEL)
     fuiscene.set_size(c3, 120, 36)
     fuiscene.compact(c3)
+    let c5: usize = fuiscene.button(bar2, (&T_STIFT[(0) as usize]) as u64, K_STIFT)
+    fuiscene.set_size(c5, 80, 36)
+    fuiscene.compact(c5)
+    let c6: usize = fuiscene.button(bar2, (&T_MARKER[(0) as usize]) as u64, K_MARKER)
+    fuiscene.set_size(c6, 104, 36)
+    fuiscene.compact(c6)
     let c4: usize = fuiscene.button_main(bar2, (&T_SICHERN[(0) as usize]) as u64, K_SICHERN)
     fuiscene.set_size(c4, 112, 36)
     fuiscene.compact(c4)
 }
 
-fn u_gui() -> u64 {
+fn u_gui(region: bool, delay_s: u64) -> u64 {
     var s_bad: [u8; 20] = "snip: keine Flaeche\0"
     var s_mem: [u8; 20] = "snip: kein Speicher\0"
     var s_go: [u8; 12] = "snip: ready\0"
@@ -518,10 +622,29 @@ fn u_gui() -> u64 {
         return 1
     }
     screen_dims()
-    let bwin: u64 = 760
-    let bhin: u64 = 560
+    var bwin: u64 = 760
+    var bhin: u64 = 560
+    var wx: u64 = 50
+    var wy: u64 = 40
+    region_mode = region
     ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_BEREIT[(0) as usize]) as u64)
-    if !fuiscene.open(50, 40, bwin, bhin, (&T_TITEL[(0) as usize]) as u64,
+    if region {
+        // The screen is taken BEFORE our own window exists, so the shot
+        // never contains this tool. The window then covers the screen and
+        // the user drags the region on the frozen picture.
+        if delay_s > 0 {
+            let _d: u64 = ulib.sleep_ms(delay_s * 1000)
+        }
+        let _ok: bool = aufnehmen(0, 0, scr_w, scr_h)
+        bwin = scr_w - 24
+        bhin = scr_h - 80
+        wx = 0
+        wy = 0
+        img_w = bwin - 16
+        img_h = bhin - 150
+        ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_REGION[(0) as usize]) as u64)
+    }
+    if !fuiscene.open(wx, wy, bwin, bhin, (&T_TITEL[(0) as usize]) as u64,
         build) {
         say((&s_bad[(0) as usize]) as u64)
         ulib.nl()
@@ -530,6 +653,9 @@ fn u_gui() -> u64 {
     fuiscene.set_app((&T_APP[(0) as usize]) as u64)
     let _k0: u64 = fuiscene.pump()
     fuiscene.image_tool(K_IMG, true)
+    if region && bw > 0 {
+        show()
+    }
     say((&s_geom[(0) as usize]) as u64)
     ulib.sayn(bwin)
     say((&s_h[(0) as usize]) as u64)
@@ -588,27 +714,12 @@ fn u_gui() -> u64 {
             // Der Ausschnitt aus dem, was schon aufgenommen
             // ist: der Rahmen, den die Maus gezogen hat.
             if fuiscene.image_sel_present(K_IMG) && bw > 0 {
-                let ax: u64 = fuiscene.image_sel_x0(K_IMG)
-                let ay: u64 = fuiscene.image_sel_y0(K_IMG)
-                let aw: u64 = fuiscene.image_sel_x1(K_IMG) - ax + 1
-                let ah: u64 = fuiscene.image_sel_y1(K_IMG) - ay + 1
-                var r: u64 = 0
-                while r < ah {
-                    var c: u64 = 0
-                    while c < aw {
-                        __mmio_write32((pix + (r * aw + c) * 4) as *mut u32,
-                            (hol(ax + c, ay + r)) as u32)
-                        c = c + 1
-                    }
-                    r = r + 1
-                }
-                bw = aw
-                bh = ah
-                fuiscene.image_sel_clear(K_IMG)
+                crop_selection()
                 show()
                 header_build((&T_BEREIT[(0) as usize]) as u64)
             }
-        } else if id == K_RECHTECK || id == K_PFEIL || id == K_PIXEL {
+        } else if id == K_RECHTECK || id == K_PFEIL || id == K_PIXEL
+            || id == K_STIFT || id == K_MARKER {
             if fuiscene.image_sel_present(K_IMG) && bw > 0 {
                 let bx0: u64 = fuiscene.image_sel_x0(K_IMG)
                 let by0: u64 = fuiscene.image_sel_y0(K_IMG)
@@ -618,6 +729,10 @@ fn u_gui() -> u64 {
                     rechteck(bx0, by0, bx1, by1)
                 } else if id == K_PFEIL {
                     pfeil(bx0, by0, bx1, by1)
+                } else if id == K_STIFT {
+                    stift(bx0, by0, bx1, by1)
+                } else if id == K_MARKER {
+                    marker(bx0, by0, bx1, by1)
                 } else {
                     verpixeln(bx0, by0, bx1, by1)
                 }
@@ -625,6 +740,10 @@ fn u_gui() -> u64 {
                 fuiscene.refresh()
             }
         } else if id == K_SICHERN {
+            let was_region: bool = region_mode && fuiscene.image_sel_present(K_IMG)
+            if was_region && bw > 0 {
+                crop_selection()
+            }
             let p: u64 = naechster_name()
             if save(p) {
                 var t: [u8; 256] = [0 as u8; 256]
@@ -635,6 +754,9 @@ fn u_gui() -> u64 {
                 say((&s_save[(0) as usize]) as u64)
                 say(p)
                 ulib.nl()
+                if was_region {
+                    return 0
+                }
             } else {
                 header_build((&T_FEHL[(0) as usize]) as u64)
             }
@@ -650,7 +772,7 @@ fn u_start(args: u64) -> u64 {
     var s_v: [u8; 3] = "-v\0"
     var s_a: [u8; 3] = "-a\0"
     var a_fenster: [u8; 8] = "fenster\0"
-    var s_use: [u8; 57] = "snip: snip [-v <sek>] [-a voll|fenster] [-o <datei.png>]\0"
+    var s_use: [u8; 80] = "snip: snip [-q] [-r] [-g x y w h] [-v <sek>] [-a voll|fenster] [-o <datei.png>]\0"
     var s_mem: [u8; 20] = "snip: kein Speicher\0"
     var s_kein: [u8; 30] = "snip: die Aufnahme ging nicht\0"
     var s_schr: [u8; 29] = "snip: schreiben ging nicht: \0"
@@ -661,12 +783,34 @@ fn u_start(args: u64) -> u64 {
     var out: u64 = 0
     var sek: u64 = 0
     var nur_fenster: bool = false
+    var quick: bool = false
+    var region: bool = false
+    var geo: bool = false
+    var gx: u64 = 0
+    var gy: u64 = 0
+    var gw: u64 = 0
+    var gh: u64 = 0
+    var s_q: [u8; 3] = "-q\0"
+    var s_r: [u8; 3] = "-r\0"
+    var s_g: [u8; 3] = "-g\0"
     var a: u64 = 1
     while a < argc {
         let p: u64 = ulib.arg_at(args, a)
         if ulib.streq(p, (&s_o[(0) as usize]) as u64) && a + 1 < argc {
             out = ulib.arg_at(args, a + 1)
             a = a + 1
+        } else if ulib.streq(p, (&s_q[(0) as usize]) as u64) {
+            quick = true
+        } else if ulib.streq(p, (&s_r[(0) as usize]) as u64) {
+            region = true
+        } else if ulib.streq(p, (&s_g[(0) as usize]) as u64)
+            && a + 4 < argc {
+            gx = ulib.to_num(ulib.arg_at(args, a + 1))
+            gy = ulib.to_num(ulib.arg_at(args, a + 2))
+            gw = ulib.to_num(ulib.arg_at(args, a + 3))
+            gh = ulib.to_num(ulib.arg_at(args, a + 4))
+            geo = true
+            a = a + 4
         } else if ulib.streq(p, (&s_v[(0) as usize]) as u64)
             && a + 1 < argc {
             sek = ulib.to_num(ulib.arg_at(args, a + 1))
@@ -679,12 +823,15 @@ fn u_start(args: u64) -> u64 {
         }
         a = a + 1
     }
-    if out == 0 {
+    if region && !geo && out == 0 {
+        return u_gui(true, sek)
+    }
+    if out == 0 && !quick && !geo {
         if argc > 1 {
             ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
             return 2
         }
-        return u_gui()
+        return u_gui(false, 0)
     }
     // Ohne Fenster: die Flaeche wird trotzdem gebraucht, denn nur ueber
     // sie kommt dieses Programm an die Masse des Schirms.
@@ -709,6 +856,17 @@ fn u_start(args: u64) -> u64 {
     var y: u64 = 0
     var w: u64 = scr_w
     var h: u64 = scr_h
+    if geo {
+        x = gx
+        y = gy
+        w = gw
+        h = gh
+        if x + w > scr_w || y + h > scr_h {
+            say((&s_kein[(0) as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+    }
     if nur_fenster {
         if !foreign_window(0, (&x) as u64, (&y) as u64, (&w) as u64,
             (&h) as u64) {
@@ -721,6 +879,9 @@ fn u_start(args: u64) -> u64 {
         say((&s_kein[(0) as usize]) as u64)
         ulib.nl()
         return 1
+    }
+    if out == 0 {
+        out = naechster_name()
     }
     if !save(out) {
         ulib.esay_line((&s_schr[(0) as usize]) as u64, out)
