@@ -200,7 +200,7 @@ export {
     evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
-    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS,
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS, E_WHEEL,
     say_mag,
     M_SHIFT, M_CTRL,
     L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_TOAST, L_MAX,
@@ -461,6 +461,13 @@ const E_RESIZE: u64 = 7
 // the accessibility tree (sysgui.ax_call, AX_PRESS), never by input. The
 // widget layer handles it like a click on that control.
 const E_AXPRESS: u64 = 8
+// ROUND FV-W24: THE MOUSE WHEEL REACHES A WINDOW. a = x, b = y (client
+// coordinates, like E_MOVE), c = the notches since the last report as a
+// 16-bit two's complement, POSITIVE = scrolled UP (away from the user, the
+// sign of Linux REL_WHEEL and Windows WM_MOUSEWHEEL). The driver sums with
+// the opposite sign (`ps2m.wheel`: +1 = toward the user), so it is flipped
+// here. Goes to the window under the pointer.
+const E_WHEEL: u64 = 9
 
 // die Skalare
 const S_READY: u64 = 0x000
@@ -12971,6 +12978,39 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
 // Unterbrechungsbehandlung heraus gerufen; alles, was hier passiert,
 // muss ohne Warten auskommen.
 static mut cp_pb: u64 = 0 // COMPOSITOR S5: the buttons of the last report (a change is an event for the compositor)
+static mut wh_seen: u64 = 0 // ROUND FV-W24: the driver's wheel sum as far as it was handed out
+
+// ROUND FV-W24: the wheel notches since the last call, to the window under
+// the pointer. Not while the trusted dialog is up or the screen is locked
+// (`darf`); the sum is taken either way so nothing is replayed later.
+fn wheel_out(state: u64, x: u64, y: u64) {
+    let sum: u64 = ps2m.wheel(state)
+    if sum == wh_seen {
+        return
+    }
+    var d: i64 = (wh_seen as i64) - (sum as i64)
+    wh_seen = sum
+    if d > 127 {
+        d = 127
+    }
+    if d < 0 - 127 {
+        d = 0 - 127
+    }
+    if d == 0 || td_live(state) {
+        return
+    }
+    let i: u64 = hit(state, x as i64, y as i64)
+    if i >= MAX_WIN || !darf(state, i) {
+        return
+    }
+    let lx: i64 = (x as i64) - win_x(state, i) - inx(state, i) as i64
+    let ly: i64 = (y as i64) - win_y(state, i) - iny(state, i) as i64
+    if lx < 0 || ly < 0 {
+        return
+    }
+    input_seen(state)
+    ev_push(state, i, E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
+}
 
 fn on_mouse(state: u64) {
     if !ready(state) {
@@ -12981,6 +13021,7 @@ fn on_mouse(state: u64) {
     let ox: u64 = gs(state, S_CURX)
     let oy: u64 = gs(state, S_CURY)
     let btn: u64 = ps2m.buttons(state)
+    wheel_out(state, nx, ny)
     // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
     if nx != ox || ny != oy {
         if !hwcur_an(state) {
