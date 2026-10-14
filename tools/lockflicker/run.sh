@@ -43,6 +43,8 @@ for c in ${CASES:-lock-1920x1080-s1 glogin-1920x1080-s1 lock-3440x1440-s2 glogin
     case "$c" in *-tcg*) tcg=1 ;; esac
     W=${res%x*}; H=${res#*x}
     px=$((W / 5)); py=$((H * 4 / 5))
+    # short screens (<= 600 design points high): the user chip / list sits bottom left, so click in the empty right middle instead
+    [ $((H / sc)) -le 600 ] && px=$((W * 9 / 10)) && py=$((H / 2))
     smode=click; [ $blink = 1 ] && smode=move
     [ $blink = 1 ] && px=$((W * 3 / 4)) && py=$((H / 2))
     printf 'warte 5\nfoto base\nfahre %d,%d\nwarte 1\nfoto pre\nschritt click\nserie %s 60 c\nwarte 2\nfoto post\n' "$px" "$py" "$smode" > "$TMPD/$c.book"
