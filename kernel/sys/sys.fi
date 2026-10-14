@@ -2881,6 +2881,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // allocated, never to numbers read back from the user's int[2] (another thread can rewrite them).
         return do_pipe_flags(state, me, a0, a1)
     }
+    // RUNDE LC4 (W-LC4): the `*at` family of the x86-64 table (openat 257 ... renameat2 316). glibc, Go and newer musl use these
+    // instead of open/stat/unlink/mkdir/rename/readlink. This kernel has no directory descriptors, so -- like fchmodat/faccessat above --
+    // the directory argument is honoured only as AT_FDCWD or when the path is absolute; a relative path with a real dirfd answers -ENOSYS.
+    if lc_is_at(number) {
+        return lc_at(state, me, number, a0, a1, a2, a3, a4)
+    }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
         // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
@@ -19226,4 +19232,114 @@ fn nl_getsockopt(state: u64, me: u64, level: u64, name: u64, val: u64, lenp: u64
         return neg(errno.E_FAULT)
     }
     return 0
+}
+
+// ---------------------------------------------------------------- RUNDE LC4: the `*at` family
+const LC_OPENAT: u64 = 257
+const LC_MKDIRAT: u64 = 258
+const LC_NEWFSTATAT: u64 = 262
+const LC_UNLINKAT: u64 = 263
+const LC_RENAMEAT: u64 = 264
+const LC_LINKAT: u64 = 265
+const LC_SYMLINKAT: u64 = 266
+const LC_READLINKAT: u64 = 267
+const LC_RENAMEAT2: u64 = 316
+const LC_AT_FDCWD32: u64 = 0xFFFFFF9C // -100 as an int (a caller may or may not sign-extend it to 64 bit)
+const LC_AT_SYMLINK_NOFOLLOW: u64 = 0x100
+const LC_AT_REMOVEDIR: u64 = 0x200
+const LC_AT_EMPTY_PATH: u64 = 0x1000
+
+fn lc_is_at(number: u64) -> bool {
+    if number >= LC_OPENAT && number <= LC_READLINKAT {
+        if number == 259 || number == 260 || number == 261 {
+            return false // mknodat, fchownat (existing), futimesat
+        }
+        return true
+    }
+    return number == LC_RENAMEAT2
+}
+
+// May `path` be resolved without a directory descriptor? AT_FDCWD (low 32 bits) or an absolute path. A bad pointer is let through:
+// the callee reports -EFAULT itself.
+fn lc_dir_ok(state: u64, me: u64, dirfd: u64, path: u64) -> bool {
+    if (dirfd & 0xFFFFFFFF) == LC_AT_FDCWD32 {
+        return true
+    }
+    if !proc.user_ok(state, me, path, 1) {
+        return true
+    }
+    return peek(state, me, path) == 47
+}
+
+fn lc_at(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == LC_SYMLINKAT {
+        // symlinkat(target, newdirfd, linkpath)
+        if !lc_dir_ok(state, me, a1, a2) {
+            return neg(errno.E_NOSYS)
+        }
+        return do_symlink(state, me, a0, a2)
+    }
+    if number == LC_RENAMEAT || number == LC_RENAMEAT2 || number == LC_LINKAT {
+        // (olddirfd, oldpath, newdirfd, newpath [, flags])
+        if !lc_dir_ok(state, me, a0, a1) || !lc_dir_ok(state, me, a2, a3) {
+            return neg(errno.E_NOSYS)
+        }
+        if number == LC_LINKAT {
+            return do_link(state, me, a1, a3)
+        }
+        if number == LC_RENAMEAT2 && a4 != 0 {
+            return neg(errno.E_INVAL) // RENAME_NOREPLACE / EXCHANGE / WHITEOUT are not supported
+        }
+        let r: u64 = do_rename(state, me, a1, a3)
+        if r == 0 {
+            ev_in_rename(state, me, a1, a3)
+        }
+        return r
+    }
+    // the rest: (dirfd, path, ...)
+    if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 {
+        if proc.user_ok(state, me, a1, 1) && peek(state, me, a1) == 0 {
+            return do_fstat(state, me, a0, a2)
+        }
+    }
+    if !lc_dir_ok(state, me, a0, a1) {
+        return neg(errno.E_NOSYS)
+    }
+    if number == LC_OPENAT {
+        if (a2 & 64) != 0 && ev_in_any(state) {
+            return ev_open_create(state, me, a1, a2)
+        }
+        return cx_result(state, me, do_open(state, me, a1, a2), a2)
+    }
+    if number == LC_MKDIRAT {
+        let r: u64 = do_mkdir(state, me, a1)
+        if r == 0 {
+            ev_in_path(state, me, a1, IN_CREATE | IN_ISDIR, 0)
+        }
+        return r
+    }
+    if number == LC_NEWFSTATAT {
+        if (a3 & LC_AT_SYMLINK_NOFOLLOW) != 0 {
+            return do_lstat(state, me, a1, a2)
+        }
+        return do_stat(state, me, a1, a2)
+    }
+    if number == LC_UNLINKAT {
+        if (a2 & LC_AT_REMOVEDIR) != 0 {
+            let rr: u64 = do_rmdir(state, me, a1)
+            if rr == 0 {
+                ev_in_path(state, me, a1, IN_DELETE | IN_ISDIR, 0)
+            }
+            return rr
+        }
+        let ur: u64 = do_unlink(state, me, a1)
+        if ur == 0 {
+            ev_in_path(state, me, a1, IN_DELETE, 0)
+        }
+        return ur
+    }
+    if number == LC_READLINKAT {
+        return do_readlink(state, me, a1, a2, a3)
+    }
+    return neg(errno.E_NOSYS)
 }
