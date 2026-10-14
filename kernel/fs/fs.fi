@@ -1755,7 +1755,19 @@ fn set_size(state: u64, ino: u64, neu: u64) -> bool {
     return ok
 }
 
+// r728: the whole call is one write-behind scope; everything it wrote is on
+// the drive when it returns (blk.wb_end flushes), so the crash window is the
+// same system call as before.
 fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
+    blk.wb_begin(state)
+    let n: u64 = write_at_scoped(state, ino, off, src, len)
+    if !blk.wb_end(state) {
+        return 0
+    }
+    return n
+}
+
+fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     var n: u64 = 0
     // A full disk stops the writing and is REPORTED as the number of
@@ -1802,9 +1814,12 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         if b == 0 {
             stop = true
         } else {
-            if !ofsj.read(state, b, buf_dt(state)) {
-                leave(state, flags)
-                return n
+            // r728: a WHOLE block needs no read of the old contents.
+            if chunk != BS {
+                if !ofsj.read(state, b, buf_dt(state)) {
+                    leave(state, flags)
+                    return n
+                }
             }
             copy(src + n, buf_dt(state) + inb, chunk)
             if !ofsj.write(state, b, buf_dt(state)) {
