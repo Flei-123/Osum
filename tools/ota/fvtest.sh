@@ -26,6 +26,9 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh
 export OSUM_CPU=${OSUM_CPU:-Haswell}
+# The viewer ELF is 2.2 MB and the package is unpacked next to the .opk: the default 16 MiB RAM root
+# is too small ("opk: the archive could not be unpacked"), so use 32 MiB.
+export QUELL_BLOCKS=${QUELL_BLOCKS:-65536}
 OUT=${1:-$(mktemp -d)}
 [ -n "${1:-}" ] || trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
@@ -90,7 +93,7 @@ abstand=3600
 auto=nein
 frist=15
 EOF
-printf 'opk rebuild\n/apps/fvviewer.osp/start\nota confirm\nopk trial\n' > "$OUT/start.sh"
+printf 'opk rebuild\n/apps/fvviewer.osp/start -t\nota confirm\nopk trial\n' > "$OUT/start.sh"
 OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=96 \
     EXTRA="/start.sh=$OUT/start.sh /fv/ /fv/fvviewer-1.0.0.opk=$OUT/pk/fvviewer-1.0.0.opk /fv/fvviewer-1.0.0.opk.sig=$OUT/pk/fvviewer-1.0.0.opk.sig" \
     bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 && ok "image built" || { bad "build.sh"; tail -8 "$OUT/build.log"; exit 1; }
@@ -119,7 +122,7 @@ echo "== 3. install fvviewer 1.0.0 from the .opk, app starts =="
 lauf b0 "opk install /fv/fvviewer-1.0.0.opk;opk list;sh /start.sh;exit" 400 > /dev/null
 hat "$OUT/b0.txt" "signature checked" "opk checked the package signature"
 hat "$OUT/b0.txt" "opk: installed fvviewer" "opk installed fvviewer"
-hat "$OUT/b0.txt" "usage: fvviewer -t" "the app started (headless usage line)"
+hat "$OUT/b0.txt" "usage: fvviewer -t" "the app started (usage line of the -t test mode; the app is a GUI program now)"
 
 echo "== 4. update 1.0.0 -> 1.0.1 over the signed feed =="
 dienst "$OUT/netzfv" || bad "server"
@@ -174,7 +177,7 @@ if grep -qaF "install: fertig" "$OUT/dinst.txt"; then
     hat "$OUT/d2.txt" "1.0.1" "disk: opk list shows 1.0.1"
     lauf_p d3 "ota rollback;exit" 600 > /dev/null
     hat "$OUT/d3.txt" "rollback" "disk: ota rollback accepted"
-    lauf_p d4 "opk rebuild;/apps/fvviewer.osp/start;opk list;exit" 600 > /dev/null
+    lauf_p d4 "opk rebuild;/apps/fvviewer.osp/start -t;opk list;exit" 600 > /dev/null
     hat "$OUT/d4.txt" "usage: fvviewer -t" "disk: after rollback the app starts"
     hat "$OUT/d4.txt" "1.0.0" "disk: opk list shows 1.0.0 again"
     hatnicht "$OUT/d4.txt" "1.0.1" "disk: 1.0.1 is gone after the rollback"
