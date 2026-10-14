@@ -8,10 +8,9 @@
 # frames), wraps/unwraps Ethernet frames, parses the CDC-ECM MAC string.
 # Negative controls: the oracle goes red when a bounds check is removed.
 #
-# DOES NOT MEASURE: any USB traffic. There is NO driver yet (no class bind in
-# kernel/usb/usb.fi, synchronous xhci.bulk, PCI-keyed netdev). The gate says so
-# below by checking that the kernel really has no CDC code, so the claim
-# cannot rot silently: when a driver lands this check flips and must be updated.
+# DOES NOT MEASURE: any USB traffic -- that is tools/usbnet/qemu.sh (CDC-ECM
+# driver, kernel/drv/net/usbnet.fi). RNDIS is still protocol-only; the check
+# at the end keeps that claim from rotting.
 #
 # Usage: bash tools/usbnet/run.sh
 set -uo pipefail
@@ -87,10 +86,17 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         && ok "QEMU has usb-net (RNDIS + CDC for the later end-to-end test)" \
         || bad "QEMU has no usb-net"
 fi
-if grep -rqiE 'rndis|cdc.?ecm' kernel --include=*.fi; then
-    bad "kernel mentions RNDIS/ECM now: a driver exists, update docs/LAPTOP-HW-FEASIBILITY.md section 6 and this gate"
+if [ -f kernel/drv/net/usbnet.fi ] && grep -q 'DRV_ECM' kernel/usb/usb.fi \
+    && grep -q 'KIND_USBNET' kernel/net/netdev.fi; then
+    ok "kernel has the CDC-ECM driver (end-to-end gate: tools/usbnet/qemu.sh)"
 else
-    ok "kernel has no RNDIS/ECM driver yet (this gate is the protocol half only)"
+    bad "kernel CDC-ECM driver is missing (kernel/drv/net/usbnet.fi, DRV_ECM, KIND_USBNET)"
+fi
+# RNDIS is still protocol-only: no kernel code may claim it
+if grep -rqiE 'rndis\.(build_init|wrap_packet)' kernel --include=*.fi; then
+    bad "kernel uses RNDIS messages now: add an RNDIS gate and update this check"
+else
+    ok "kernel has no RNDIS driver yet (protocol half only; ECM covers QEMU usb-net)"
 fi
 
 echo "usbnet: $pass promises, $fail errors"
