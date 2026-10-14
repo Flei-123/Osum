@@ -190,7 +190,9 @@ done
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' \
-              -e '^kernel/user/qs.fi' -e '^kernel/user/launcher.fi' || true)
+              -e '^kernel/user/qs.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
+# `kernel/user/powerd.fi` (L-005/L-007): the power policy daemon reads lid/mains with the same SYS_PWRGET and writes
+# PS_BLANKAFTER with SYS_PWRSET -- one more reader of the same numbers, no second assignment.
 # `kernel/user/launcher.fi` steht seit Runde GRUNDLINIE-2 daneben, aus
 # GENAU demselben Grund wie qs.fi und taskbar.fi davor: der Starter
 # fragt mit `SYS_PWRGET`/`PG_BTN` ab, ob die Einschalttaste gedrueckt

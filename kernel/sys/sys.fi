@@ -185,7 +185,7 @@ export {
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier braucht.
     copy_in, copy_out, peek, do_jrnl, do_scan, SYS_OSUM_DISPGET,
     // RUNDE SERVERBUILD: was `kernel/sysgui.fi` von hier holt.
-    WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE, WM_CLOSE, WM_WRITE, WM_STATE, WM_LIST, WM_ACT, WM_STRUT, WM_SIZE, WE_RIGHT, WM_DECO, WM_FORM, WM_APP, WM_MINRECT, WM_FWIN, FW_LIST, FW_KEY, FW_CLICK, FW_CLOSE, FW_RAISE, FW_BYTES, FW_OWNER, FW_KIND, WM_TRUST, TR_ASK, TR_POLL, TR_CANCEL, WM_MAXNR, WM_SETBUF, WM_DAMAGE, WM_TABLE, WM_BUFFD, WM_COMP, CP_ATTACH, CP_WAIT, CP_PRESENT, CP_PAGE, CP_DETACH, CP_STAT, WI_SHARED, shm_of, writable,
+    WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE, WM_CLOSE, WM_WRITE, WM_STATE, WM_LIST, WM_ACT, WM_STRUT, WM_SIZE, WE_RIGHT, WM_DECO, WM_FORM, WM_APP, WM_MINRECT, WM_FWIN, FW_LIST, FW_KEY, FW_CLICK, FW_CLOSE, FW_RAISE, FW_BYTES, FW_OWNER, FW_KIND, WM_TRUST, TR_ASK, TR_POLL, TR_CANCEL, WM_MAXNR, WM_SETBUF, WM_DAMAGE, WM_TABLE, WM_BUFFD, WM_COMP, CP_ATTACH, CP_WAIT, CP_PRESENT, CP_PAGE, CP_DETACH, CP_STAT, CP_LOG, WI_SHARED, shm_of, writable,
     // ---- RUNDE WMPLUGIN ----
     WM_PLUG_REG, WM_PLUG_UNREG, WM_PLUG_POLL, WM_PLUG_SUB, WM_PLUG_INFO,
     WM_PLUG_ACT, WM_PLUG_KEY, WM_PLUG_BAR, WM_PLUG_BARGET, WM_PLUG_GRANT,
@@ -1873,12 +1873,18 @@ const PG_EVGPE: u64 = 51
 const PG_EVSCI: u64 = 52
 const PG_EVCHANGE: u64 = 53
 const PG_BTN: u64 = 54
-const PG_COUNT: u64 = 55
+// L-007: PG_BLANKAFTER is the seconds of idle time until the screen goes dark (0 = never), PS_BLANKAFTER sets
+// it. /bin/powerd writes it per power source (battery / mains) from /etc/power.conf.
+const PG_BLANKAFTER: u64 = 55
+const PG_COUNT: u64 = 56
 
 // Die Felder von `osum_pwrset`.
 const PS_PROFILE: u64 = 0
 const PS_BRIGHT: u64 = 1
 const PS_BLANK: u64 = 2
+const PS_BLANKAFTER: u64 = 3
+// L-005..L-007 gate only: lid | pct<<8 | state<<16 | mains<<24 into the fake laptop (needs `evfake`)
+const PS_INJECT: u64 = 4
 
 // ------------------------------------------------------- RUNDE TUNNEL
 // Wie `pwr_call`: ein eigener Rahmen, der nur entsteht, wenn wirklich
@@ -4480,6 +4486,7 @@ const CP_PRESENT: u64 = 2 // () -> pixels shown (0 = nothing waited): the card g
 const CP_PAGE: u64 = 3 // () -> a read-only descriptor of the compositor page (state words + the input copy ring)
 const CP_DETACH: u64 = 4 // () -> 0: back to the kernel presenting itself
 const CP_STAT: u64 = 5 // (k) -> a counter (tests): 0 attaches, 1 detaches, 2 misses, 3 shown by the compositor, 4 shown by the kernel, 5 handed over, 6 events, 7 events refused
+const CP_LOG: u64 = 6 // (stride, 0) -> descriptor of the present-log page (stride > 0 switches the log on: sample every stride-th word); stride 0 switches it off and returns 0. Only the attached compositor.
 const WM_MAXNR: u64 = 2144
 // WM_INFO: 1 when the window paints from a shared buffer, else 0
 const WI_SHARED: u64 = 30
@@ -7112,6 +7119,66 @@ fn do_uname(state: u64, me: u64, aus: u64) -> u64 {
 
 // RUNDE FREMDLAND: `prctl`. Nur die Unterbefehle, die dieser Kern
 // wahrheitsgemaess beantworten kann.
+
+// RUNDE LC1: the process name (comm) -- 15 characters in T_COMMA (0..7) and T_COMMB (8..14); `buf` is a kernel buffer of >= 16 octets.
+fn comm_store(state: u64, t: u64, buf: u64) {
+    var a: u64 = 0
+    var b: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        a = a | (kstate.get8(buf + i) << (i * 8))
+        i = i + 1
+    }
+    i = 0
+    while i < 7 {
+        b = b | (kstate.get8(buf + 8 + i) << (i * 8))
+        i = i + 1
+    }
+    sched.tset(state, t, sched.T_COMMA, a)
+    sched.tset(state, t, sched.T_COMMB, b)
+}
+
+fn comm_load(state: u64, t: u64, buf: u64) {
+    let a: u64 = sched.tget(state, t, sched.T_COMMA)
+    let b: u64 = sched.tget(state, t, sched.T_COMMB)
+    var i: u64 = 0
+    while i < 8 {
+        kstate.set8(buf + i, ((a >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+    i = 0
+    while i < 7 {
+        kstate.set8(buf + 8 + i, ((b >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+    kstate.set8(buf + 15, 0 as u8)
+}
+
+fn comm_inherit(state: u64, from: u64, to: u64) {
+    sched.tset(state, to, sched.T_COMMA, sched.tget(state, from, sched.T_COMMA))
+    sched.tset(state, to, sched.T_COMMB, sched.tget(state, from, sched.T_COMMB))
+}
+
+// exec: comm = the last component of the path, cut to 15 characters (what Linux does)
+fn comm_from_path(state: u64, t: u64, path: u64) {
+    var start: u64 = 0
+    var i: u64 = 0
+    while kstate.get8(path + i) != 0 {
+        if kstate.get8(path + i) == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var nb: [u8; 17] = [0 as u8; 17]
+    let np: u64 = (&nb[0]) as u64
+    var k: u64 = 0
+    while k < 15 && kstate.get8(path + start + k) != 0 {
+        kstate.set8(np + k, kstate.get8(path + start + k) as u8)
+        k = k + 1
+    }
+    comm_store(state, t, np)
+}
+
 const PR_SET_NAME: u64 = 15
 const PR_GET_NAME: u64 = 16
 const PR_GET_DUMPABLE: u64 = 3
@@ -7122,11 +7189,36 @@ fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
     // anzunehmen ist richtig -- der Aufrufer verlangt keine Wirkung, die
     // er nachpruefen koennte; `PR_GET_NAME` dagegen MUSS scheitern,
     // sonst laese der Aufrufer einen Puffer, den niemand gefuellt hat.
+    // RUNDE LC1: the name is real now (two words of the task record, 15 characters): SET stores, GET gives back what was stored
+    // (or the name exec gave: the last path component of the program), so `prctl(PR_SET_NAME)` / `PR_GET_NAME` round-trip.
     if was == PR_SET_NAME {
+        var nb: [u8; 17] = [0 as u8; 17]
+        let np: u64 = (&nb[0]) as u64
+        var k: u64 = 0
+        var more: bool = true
+        while k < 15 && more {
+            if !proc.user_ok(state, me, arg + k, 1) {
+                return neg(errno.E_FAULT)
+            }
+            let c: u64 = peek(state, me, arg + k)
+            if c == 0 {
+                more = false
+            } else {
+                kstate.set8(np + k, c as u8)
+                k = k + 1
+            }
+        }
+        comm_store(state, me, np)
         return 0
     }
     if was == PR_GET_NAME {
-        return neg(errno.E_INVAL)
+        var gb: [u8; 17] = [0 as u8; 17]
+        let gp: u64 = (&gb[0]) as u64
+        comm_load(state, me, gp)
+        if !copy_out(state, me, arg, gp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
     }
     // Kernschreiben gibt es nicht, also ist "nicht abbildbar" die
     // Wahrheit und 0 die richtige Antwort auf die Frage.
@@ -9070,6 +9162,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     ctr.inherit(state, me, faden)
     // AB-003: a thread is its process -- same origin.
     origin.inherit(state, me, faden)
+    comm_inherit(state, me, faden)
     // DIE FADENGRUPPE. `CLONE_THREAD` heisst: derselbe Prozess nach
     // aussen. `getpid` muss in jedem Faden dieselbe Zahl geben, `gettid`
     // verschiedene -- deshalb bleibt `T_PID` eigen und `T_TGID` wird die
@@ -9247,6 +9340,7 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     ctr.inherit(state, me, child)
     // AB-003: the origin is sticky -- a fork cannot shed it.
     origin.inherit(state, me, child)
+    comm_inherit(state, me, child)
     // RUNDE K16: das Kind erbt den Boden seines Stapels. Ohne diese
     // Zeile stuende dort null, und `proc.grow_stack` liesse den Stapel
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
@@ -9490,6 +9584,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     // program it exec'd into ever spent, which is the plainest form of
     // the lie this round exists to avoid.
     pmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    comm_from_path(state, me, name)
     pmon.name_set(state, me, name)
     kstate.add(state, kstate.EXECVES, 1)
     // ROUND NETMON: THE SLOT KEPT ITS PID AND CHANGED ITS PROGRAM.
@@ -10993,6 +11088,9 @@ fn do_pwrget(state: u64, field: u64) -> u64 {
         }
         return 0
     }
+    if field == PG_BLANKAFTER {
+        return pwr.value(state, pwr.PW_BLANKAFTER) / 100
+    }
 
     // ---- der Akku
     if field == PG_BATPRESENT {
@@ -11106,6 +11204,20 @@ fn do_pwrset(state: u64, me: u64, field: u64, v: u64) -> u64 {
             return neg(errno.E_NODEV)
         }
         pwr.set_bright(state, v)
+        return 0
+    }
+    if field == PS_INJECT {
+        if !acpiev.inject(state, v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255) {
+            return neg(errno.E_NODEV)
+        }
+        return 0
+    }
+    if field == PS_BLANKAFTER {
+        // seconds -> ticks (100 per second); a day is the longest wait
+        if v > 86400 {
+            return neg(errno.E_INVAL)
+        }
+        pwr.set_blank_after(state, v * 100)
         return 0
     }
     if field == PS_BLANK {

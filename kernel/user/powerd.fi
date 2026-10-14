@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/powerd.fi -- /bin/powerd: the laptop power policy daemon (L-005, L-007).
+//
+//     powerd                       watch lid, mains adapter and idle time, act on /etc/power.conf
+//     powerd status                print lid, mains, battery and the tray item state (what the taskbar shows)
+//     powerd inject L P S A        gate only (needs `evfake`, root): set the fake laptop to lid L (1 open),
+//                                  P percent, battery state S (1 discharging, 2 charging), mains A
+//
+// What it does, all of it decided by lib/power/policy.fi (host-tested in tools/power/host.fi):
+//   * lid closes -> the action chosen for the CURRENT power source (sleep, hibernate, nothing, shutdown)
+//   * the power source changes (mains in/out) or the file changes -> pwr profile, screen-off time
+//     (kernel `PS_BLANKAFTER`) and brightness for that source
+//   * idle time reaches the standby limit of the source -> standby (the same wish as the start menu)
+// Every decision is one line on the console: "powerd: lid closed mains=0 action=sleep".
+// Hibernate (S4) has no user-space entry yet: it is logged and falls back to sleep.
+profile kernel
+
+import ulib
+import libc.io
+import power.policy
+import fui.traypower
+
+export { u_start }
+
+const SYS_PWRGET: u64 = 1750
+const SYS_PWRSET: u64 = 1751
+const SYS_SPERRE: u64 = 1870
+const PG_BATPRESENT: u64 = 24
+const PG_AC: u64 = 34
+const PG_BATPERCENT: u64 = 25
+const PG_BATSTATE: u64 = 27
+const PG_LIDOK: u64 = 47
+const PG_LID: u64 = 48
+const PS_PROFILE: u64 = 0
+const PS_BRIGHT: u64 = 1
+const PS_BLANKAFTER: u64 = 3
+const PS_INJECT: u64 = 4
+const OP_IDLE: u64 = 3
+const OP_WISH: u64 = 11
+const OP_ANSWER: u64 = 12
+
+static mut t_conf: [u8; 16] = "/etc/power.conf\0"
+static mut t_svc: [u8; 13] = "/run/svc.cmd\0"
+static mut t_down: [u8; 10] = "shutdown\n\0"
+static mut m_start: [u8; 18] = "powerd: on, conf \0"
+static mut m_src: [u8; 22] = "powerd: source mains=\0"
+static mut m_prof: [u8; 10] = " profile=\0"
+static mut m_blank: [u8; 15] = " screen_off_s=\0"
+static mut m_bri: [u8; 13] = " brightness=\0"
+static mut m_lidc: [u8; 26] = "powerd: lid closed mains=\0"
+static mut m_lido: [u8; 26] = "powerd: lid opened mains=\0"
+static mut m_act: [u8; 9] = " action=\0"
+static mut m_hib: [u8; 48] = "powerd: hibernate unavailable, sleeping instead\0"
+static mut m_sby: [u8; 34] = "powerd: standby after idle mains=\0"
+static mut m_rc: [u8; 27] = "powerd: standby result rc=\0"
+static mut m_inj: [u8; 19] = "powerd: inject rc=\0"
+static mut m_stat: [u8; 16] = "powerd: status \0"
+static mut m_use: [u8; 39] = "powerd: usage: powerd [inject L P S A]\0"
+
+fn num(v: u64) {
+    ulib.sayn(v)
+}
+
+fn load(c: *mut policy.Conf, buf: u64) {
+    *c = policy.conf_default()
+    let fd: u64 = io.open((&t_conf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read(fd, buf, 1500)
+    io.close(fd)
+    if ulib.bad(n) {
+        return
+    }
+    __mmio_write8((buf + n) as *mut u8, 0 as u8)
+    policy.conf_parse(c, buf)
+}
+
+fn on_mains() -> bool {
+    let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    if ulib.bad(have) || have == 0 {
+        return true
+    }
+    let ac: u64 = ulib.sys(SYS_PWRGET, PG_AC, 0, 0)
+    return !ulib.bad(ac) && ac == 1
+}
+
+fn lid_now() -> u64 {
+    let ok: u64 = ulib.sys(SYS_PWRGET, PG_LIDOK, 0, 0)
+    if ulib.bad(ok) || ok != 1 {
+        return policy.LID_UNKNOWN
+    }
+    let l: u64 = ulib.sys(SYS_PWRGET, PG_LID, 0, 0)
+    if ulib.bad(l) {
+        return policy.LID_UNKNOWN
+    }
+    return l
+}
+
+fn standby_now() {
+    let _w: u64 = ulib.sys(SYS_SPERRE, OP_WISH, 0, 0)
+    var i: u64 = 0
+    var rc: u64 = 0
+    while i < 240 && rc == 0 {
+        let _s: u64 = ulib.sleep_ms(250)
+        rc = ulib.sys(SYS_SPERRE, OP_ANSWER, 0, 0)
+        i = i + 1
+    }
+    ulib.say((&m_rc[0 as usize]) as u64)
+    num(rc)
+    ulib.nl()
+}
+
+fn shutdown_now() {
+    let fd: u64 = io.open((&t_svc[0 as usize]) as u64, 577)
+    if ulib.bad(fd) {
+        return
+    }
+    let _n: u64 = io.write(fd, (&t_down[0 as usize]) as u64, 9)
+    io.close(fd)
+}
+
+fn perform(a: u64) {
+    if a == policy.ACT_HIBERNATE {
+        ulib.say((&m_hib[0 as usize]) as u64)
+        ulib.nl()
+        standby_now()
+    } else if a == policy.ACT_SLEEP {
+        standby_now()
+    } else if a == policy.ACT_SHUTDOWN {
+        shutdown_now()
+    }
+}
+
+static mut ap_src: u64 = 9
+static mut ap_prof: u64 = 9
+static mut ap_blank: u64 = 0xFFFFFFFF
+static mut ap_bri: u64 = 0xFFFFFFFF
+
+// Push profile, screen-off time and brightness of the current source into the kernel -- only what changed.
+fn apply(c: *mut policy.Conf, mains: bool) {
+    var m: u64 = 0
+    if mains {
+        m = 1
+    }
+    let prof: u64 = policy.profile_for(c, mains)
+    let blank: u64 = policy.screen_s(c, mains)
+    let bri: u64 = policy.bright_for(c, mains)
+    if m == ap_src && prof == ap_prof && blank == ap_blank && bri == ap_bri {
+        return
+    }
+    if prof != ap_prof {
+        let _p: u64 = ulib.sys(SYS_PWRSET, PS_PROFILE, prof, 0)
+    }
+    // a profile switch resets the kernel's screen-off time, so it is always written after
+    let _b: u64 = ulib.sys(SYS_PWRSET, PS_BLANKAFTER, blank, 0)
+    if bri <= 100 && bri != ap_bri {
+        let _r: u64 = ulib.sys(SYS_PWRSET, PS_BRIGHT, bri, 0)
+    }
+    ap_src = m
+    ap_prof = prof
+    ap_blank = blank
+    ap_bri = bri
+    ulib.say((&m_src[0 as usize]) as u64)
+    num(m)
+    ulib.say((&m_prof[0 as usize]) as u64)
+    num(prof)
+    ulib.say((&m_blank[0 as usize]) as u64)
+    num(blank)
+    ulib.say((&m_bri[0 as usize]) as u64)
+    num(bri)
+    ulib.nl()
+}
+
+fn inject(args: u64) -> u64 {
+    if ulib.arg_count(args) < 6 {
+        ulib.say((&m_use[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let l: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let p: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let s: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    let a: u64 = ulib.to_num(ulib.arg_at(args, 5))
+    let rc: u64 = ulib.sys(SYS_PWRSET, PS_INJECT, (l & 255) | ((p & 255) << 8) | ((s & 255) << 16) | ((a & 255) << 24), 0)
+    ulib.say((&m_inj[0 as usize]) as u64)
+    if ulib.bad(rc) {
+        ulib.say((&m_use[0 as usize]) as u64)
+    } else {
+        num(rc)
+    }
+    ulib.nl()
+    if ulib.bad(rc) {
+        return 1
+    }
+    return 0
+}
+
+static mut s_lid: [u8; 6] = " lid=\0"
+static mut s_ac: [u8; 5] = " ac=\0"
+static mut s_pct: [u8; 6] = " pct=\0"
+static mut s_chg: [u8; 6] = " chg=\0"
+static mut s_tray: [u8; 7] = " tray=\0"
+static mut s_tip: [u8; 7] = " tip=\"\0"
+
+// One line with the raw kernel values and the tray state/tooltip derived from them (the taskbar model).
+fn status() -> u64 {
+    let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    let pct: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
+    let bs: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
+    let ac: u64 = ulib.sys(SYS_PWRGET, PG_AC, 0, 0)
+    var chg: u64 = 0
+    if !ulib.bad(bs) && (bs & 2) != 0 {
+        chg = 1
+    }
+    var h: u64 = 0
+    if !ulib.bad(have) {
+        h = have
+    }
+    var a: u64 = 0
+    if !ulib.bad(ac) && ac == 1 {
+        a = 1
+    }
+    var p: u64 = 0
+    if !ulib.bad(pct) {
+        p = pct
+    }
+    var tip: [u8; 96] = [0 as u8; 96]
+    let _n: u64 = traypower.tooltip(h, p, chg, a, (&tip[0 as usize]) as u64, 95)
+    ulib.say((&m_stat[0 as usize]) as u64)
+    ulib.say((&s_lid[0 as usize]) as u64)
+    num(lid_now())
+    ulib.say((&s_ac[0 as usize]) as u64)
+    num(a)
+    ulib.say((&s_pct[0 as usize]) as u64)
+    num(p)
+    ulib.say((&s_chg[0 as usize]) as u64)
+    num(chg)
+    ulib.say((&s_tray[0 as usize]) as u64)
+    num(traypower.state(h, p, chg, a))
+    ulib.say((&s_tip[0 as usize]) as u64)
+    ulib.say((&tip[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) == 2 && *(ulib.arg_at(args, 1) as *mut u8) == 115 as u8 {
+        return status()
+    }
+    if ulib.arg_count(args) > 1 {
+        return inject(args)
+    }
+    var cbuf: [u8; 1536] = [0 as u8; 1536]
+    var c: policy.Conf = policy.conf_default()
+    load(&c, (&cbuf[0 as usize]) as u64)
+    ulib.say((&m_start[0 as usize]) as u64)
+    ulib.say((&t_conf[0 as usize]) as u64)
+    ulib.nl()
+    var lid: u64 = lid_now()
+    var armed: u64 = 1
+    var round: u64 = 0
+    while round < 400000000 {
+        round = round + 1
+        if round % 8 == 0 {
+            load(&c, (&cbuf[0 as usize]) as u64)
+        }
+        let mains: bool = on_mains()
+        apply(&c, mains)
+        var mi: u64 = 0
+        if mains {
+            mi = 1
+        }
+        let cur: u64 = lid_now()
+        let edge: u64 = policy.lid_edge(lid, cur)
+        lid = cur
+        if edge == policy.LID_CLOSED_EDGE {
+            let a: u64 = policy.lid_action(&c, mains)
+            ulib.say((&m_lidc[0 as usize]) as u64)
+            num(mi)
+            ulib.say((&m_act[0 as usize]) as u64)
+            ulib.say(policy.action_name(a))
+            ulib.nl()
+            perform(a)
+        } else if edge == policy.LID_OPENED_EDGE {
+            ulib.say((&m_lido[0 as usize]) as u64)
+            num(mi)
+            ulib.nl()
+        }
+        let idle: u64 = ulib.sys(SYS_SPERRE, OP_IDLE, 0, 0)
+        if !ulib.bad(idle) && policy.standby_due(&c, mains, idle, &armed) {
+            ulib.say((&m_sby[0 as usize]) as u64)
+            num(mi)
+            ulib.nl()
+            standby_now()
+        }
+        let _s: u64 = ulib.sleep_ms(250)
+    }
+    return 0
+}

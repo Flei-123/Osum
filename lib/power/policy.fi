@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/power/policy.fi -- power.policy: the laptop power POLICY as pure functions (L-005, L-007).
+//
+// No syscalls, no heap, no clock. `/bin/powerd` reads the sensors (lid, mains adapter, idle time) and
+// asks THIS module what to do; the same module runs on the build host in tools/power/host.fi, so every
+// rule is tested in milliseconds and not only inside a QEMU boot.
+//
+//     import power.policy
+//     var c: policy.Conf = policy.conf_default()
+//     policy.conf_parse(&c, text)                    // text = NUL terminated "key=value\n..." (/etc/power.conf)
+//     let a: u64 = policy.lid_action(&c, on_mains)   // ACT_NOTHING / ACT_SLEEP / ACT_HIBERNATE / ACT_SHUTDOWN
+//
+// Keys of /etc/power.conf (seconds; 0 = never), everything separately for battery (_bat) and mains (_ac):
+//   lid_bat / lid_ac            sleep | hibernate | nothing | shutdown   (what closing the lid does)
+//   screen_bat / screen_ac      seconds without input until the screen goes dark
+//   standby_bat / standby_ac    seconds without input until standby (S3)
+//   profile_bat / profile_ac    save | balanced | performance            (pwr profile on that source)
+//   bright_bat / bright_ac      0..100 screen brightness on that source, 101 = leave as is
+//   testsrc                     1 = powerd also reads /run/power.fake (fake lid / mains / battery for the gate)
+
+export {
+    Conf, conf_default, conf_parse, lid_action, screen_s, standby_s, profile_for, bright_for,
+    action_name, lid_edge, standby_due, parse_action, parse_profile,
+    ACT_NOTHING, ACT_SLEEP, ACT_HIBERNATE, ACT_SHUTDOWN,
+    PROF_SAVE, PROF_BALANCED, PROF_PERFORMANCE, BRIGHT_KEEP,
+    LID_CLOSED_EDGE, LID_OPENED_EDGE, LID_CLOSED, LID_OPEN, LID_UNKNOWN
+}
+
+const ACT_NOTHING: u64 = 0
+const ACT_SLEEP: u64 = 1
+const ACT_HIBERNATE: u64 = 2
+const ACT_SHUTDOWN: u64 = 3
+
+// same numbers as pwr.PROF_* in the kernel
+const PROF_SAVE: u64 = 0
+const PROF_BALANCED: u64 = 1
+const PROF_PERFORMANCE: u64 = 2
+
+const BRIGHT_KEEP: u64 = 101
+
+// same numbers as PG_LID: 1 = open, 0 = closed, 2 = never read
+const LID_CLOSED: u64 = 0
+const LID_OPEN: u64 = 1
+const LID_UNKNOWN: u64 = 2
+
+const LID_NO_EDGE: u64 = 0
+const LID_CLOSED_EDGE: u64 = 1
+const LID_OPENED_EDGE: u64 = 2
+
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct Conf {
+    lid_bat: u64,
+    lid_ac: u64,
+    screen_bat: u64,
+    screen_ac: u64,
+    standby_bat: u64,
+    standby_ac: u64,
+    profile_bat: u64,
+    profile_ac: u64,
+    bright_bat: u64,
+    bright_ac: u64,
+    testsrc: u64,
+}
+
+static mut n_nothing: [u8; 8] = "nothing\0"
+static mut n_sleep: [u8; 6] = "sleep\0"
+static mut n_hibernate: [u8; 10] = "hibernate\0"
+static mut n_shutdown: [u8; 9] = "shutdown\0"
+
+// Defaults: closing the lid sleeps on both sources; the screen goes dark after 5 min on battery and
+// 10 min on mains; standby after 15 min on battery, never on mains; battery saves, mains balances.
+fn conf_default() -> Conf {
+    return Conf {
+        lid_bat: ACT_SLEEP, lid_ac: ACT_SLEEP,
+        screen_bat: 300, screen_ac: 600,
+        standby_bat: 900, standby_ac: 0,
+        profile_bat: PROF_SAVE, profile_ac: PROF_BALANCED,
+        bright_bat: BRIGHT_KEEP, bright_ac: BRIGHT_KEEP,
+        testsrc: 0,
+    }
+}
+
+fn b8(p: u64, i: u64) -> u8 {
+    return *((p + i) as *mut u8)
+}
+
+fn is_digit(c: u8) -> bool {
+    return c >= 48 as u8 && c <= 57 as u8
+}
+
+// does the word at `p` start with the NUL terminated `w`, and end there (space, newline, CR, NUL)?
+fn word_is(p: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while b8(w, i) != 0 as u8 {
+        if b8(p, i) != b8(w, i) {
+            return false
+        }
+        i = i + 1
+    }
+    let e: u8 = b8(p, i)
+    return e == 0 as u8 || e == 10 as u8 || e == 13 as u8 || e == 32 as u8
+}
+
+// all ones = not a known word
+fn parse_action(p: u64) -> u64 {
+    if word_is(p, (&n_nothing[0 as usize]) as u64) {
+        return ACT_NOTHING
+    }
+    if word_is(p, (&n_sleep[0 as usize]) as u64) {
+        return ACT_SLEEP
+    }
+    if word_is(p, (&n_hibernate[0 as usize]) as u64) {
+        return ACT_HIBERNATE
+    }
+    if word_is(p, (&n_shutdown[0 as usize]) as u64) {
+        return ACT_SHUTDOWN
+    }
+    return NOT_FOUND
+}
+
+static mut n_save: [u8; 5] = "save\0"
+static mut n_balanced: [u8; 9] = "balanced\0"
+static mut n_performance: [u8; 12] = "performance\0"
+
+fn parse_profile(p: u64) -> u64 {
+    if word_is(p, (&n_save[0 as usize]) as u64) {
+        return PROF_SAVE
+    }
+    if word_is(p, (&n_balanced[0 as usize]) as u64) {
+        return PROF_BALANCED
+    }
+    if word_is(p, (&n_performance[0 as usize]) as u64) {
+        return PROF_PERFORMANCE
+    }
+    return NOT_FOUND
+}
+
+// decimal number; stops growing at 10^9 instead of overflowing; all ones when there is no digit at all
+fn parse_num(p: u64) -> u64 {
+    if !is_digit(b8(p, 0)) {
+        return NOT_FOUND
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while is_digit(b8(p, i)) {
+        if v < 1000000000 {
+            v = v * 10 + ((b8(p, i) as u64) - 48)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// does the line at `p` start with `key` followed by '='? Returns the value pointer or 0.
+fn line_key(p: u64, key: u64) -> u64 {
+    var i: u64 = 0
+    while b8(key, i) != 0 as u8 {
+        if b8(p, i) != b8(key, i) {
+            return 0
+        }
+        i = i + 1
+    }
+    if b8(p, i) != 61 as u8 {
+        return 0
+    }
+    return p + i + 1
+}
+
+static mut k_lid_bat: [u8; 8] = "lid_bat\0"
+static mut k_lid_ac: [u8; 7] = "lid_ac\0"
+static mut k_scr_bat: [u8; 11] = "screen_bat\0"
+static mut k_scr_ac: [u8; 10] = "screen_ac\0"
+static mut k_sby_bat: [u8; 12] = "standby_bat\0"
+static mut k_sby_ac: [u8; 11] = "standby_ac\0"
+static mut k_prof_bat: [u8; 12] = "profile_bat\0"
+static mut k_prof_ac: [u8; 11] = "profile_ac\0"
+static mut k_bri_bat: [u8; 11] = "bright_bat\0"
+static mut k_bri_ac: [u8; 10] = "bright_ac\0"
+static mut k_testsrc: [u8; 8] = "testsrc\0"
+
+// Reads one line's worth of settings. Unknown keys and unknown words are IGNORED (the old value stays):
+// a typo in the file must not turn "lid closed" into "shutdown".
+fn conf_line(c: *mut Conf, p: u64) {
+    var v: u64 = line_key(p, (&k_lid_bat[0 as usize]) as u64)
+    if v != 0 {
+        let a: u64 = parse_action(v)
+        if a != NOT_FOUND {
+            (*c).lid_bat = a
+        }
+        return
+    }
+    v = line_key(p, (&k_lid_ac[0 as usize]) as u64)
+    if v != 0 {
+        let a: u64 = parse_action(v)
+        if a != NOT_FOUND {
+            (*c).lid_ac = a
+        }
+        return
+    }
+    v = line_key(p, (&k_prof_bat[0 as usize]) as u64)
+    if v != 0 {
+        let a: u64 = parse_profile(v)
+        if a != NOT_FOUND {
+            (*c).profile_bat = a
+        }
+        return
+    }
+    v = line_key(p, (&k_prof_ac[0 as usize]) as u64)
+    if v != 0 {
+        let a: u64 = parse_profile(v)
+        if a != NOT_FOUND {
+            (*c).profile_ac = a
+        }
+        return
+    }
+    v = line_key(p, (&k_scr_bat[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND {
+            (*c).screen_bat = n
+        }
+        return
+    }
+    v = line_key(p, (&k_scr_ac[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND {
+            (*c).screen_ac = n
+        }
+        return
+    }
+    v = line_key(p, (&k_sby_bat[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND {
+            (*c).standby_bat = n
+        }
+        return
+    }
+    v = line_key(p, (&k_sby_ac[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND {
+            (*c).standby_ac = n
+        }
+        return
+    }
+    v = line_key(p, (&k_bri_bat[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND && n <= 101 {
+            (*c).bright_bat = n
+        }
+        return
+    }
+    v = line_key(p, (&k_bri_ac[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n != NOT_FOUND && n <= 101 {
+            (*c).bright_ac = n
+        }
+        return
+    }
+    v = line_key(p, (&k_testsrc[0 as usize]) as u64)
+    if v != 0 {
+        let n: u64 = parse_num(v)
+        if n == 0 || n == 1 {
+            (*c).testsrc = n
+        }
+        return
+    }
+}
+
+// `text` is NUL terminated; lines end with '\n'; a line starting with '#' is a comment.
+fn conf_parse(c: *mut Conf, text: u64) {
+    var i: u64 = 0
+    var guard: u64 = 0
+    while b8(text, i) != 0 as u8 && guard < 4096 {
+        guard = guard + 1
+        if b8(text, i) != 35 as u8 {
+            conf_line(c, text + i)
+        }
+        while b8(text, i) != 0 as u8 && b8(text, i) != 10 as u8 {
+            i = i + 1
+        }
+        if b8(text, i) == 10 as u8 {
+            i = i + 1
+        }
+    }
+}
+
+// What closing the lid does, for the power source the machine is on right now.
+fn lid_action(c: *mut Conf, on_mains: bool) -> u64 {
+    if on_mains {
+        return (*c).lid_ac
+    }
+    return (*c).lid_bat
+}
+
+fn screen_s(c: *mut Conf, on_mains: bool) -> u64 {
+    if on_mains {
+        return (*c).screen_ac
+    }
+    return (*c).screen_bat
+}
+
+fn standby_s(c: *mut Conf, on_mains: bool) -> u64 {
+    if on_mains {
+        return (*c).standby_ac
+    }
+    return (*c).standby_bat
+}
+
+fn profile_for(c: *mut Conf, on_mains: bool) -> u64 {
+    if on_mains {
+        return (*c).profile_ac
+    }
+    return (*c).profile_bat
+}
+
+fn bright_for(c: *mut Conf, on_mains: bool) -> u64 {
+    if on_mains {
+        return (*c).bright_ac
+    }
+    return (*c).bright_bat
+}
+
+fn action_name(a: u64) -> u64 {
+    if a == ACT_SLEEP {
+        return (&n_sleep[0 as usize]) as u64
+    }
+    if a == ACT_HIBERNATE {
+        return (&n_hibernate[0 as usize]) as u64
+    }
+    if a == ACT_SHUTDOWN {
+        return (&n_shutdown[0 as usize]) as u64
+    }
+    return (&n_nothing[0 as usize]) as u64
+}
+
+// A lid EDGE: LID_CLOSED_EDGE when it went from open to closed, LID_OPENED_EDGE for closed to open.
+// An unknown value (2) on either side is no edge: a machine that boots with the lid shut must not
+// sleep the moment powerd starts.
+fn lid_edge(prev: u64, cur: u64) -> u64 {
+    if prev == LID_OPEN && cur == LID_CLOSED {
+        return LID_CLOSED_EDGE
+    }
+    if prev == LID_CLOSED && cur == LID_OPEN {
+        return LID_OPENED_EDGE
+    }
+    return LID_NO_EDGE
+}
+
+// The standby timer. `armed` is the caller's one word of state (start it at 1). It fires ONCE when the
+// idle time first reaches the limit and re-arms only after input made the idle time fall below the limit
+// again -- otherwise a machine that wakes up from S3 (idle time still huge) would go straight back to sleep.
+fn standby_due(c: *mut Conf, on_mains: bool, idle_ms: u64, armed: *mut u64) -> bool {
+    let limit: u64 = standby_s(c, on_mains)
+    if limit == 0 {
+        *armed = 1
+        return false
+    }
+    if idle_ms < limit * 1000 {
+        *armed = 1
+        return false
+    }
+    if *armed == 1 {
+        *armed = 0
+        return true
+    }
+    return false
+}

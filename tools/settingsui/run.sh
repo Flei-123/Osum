@@ -43,7 +43,7 @@ grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 for r in wgy wgz wha; do
   grep -aq "settings: rect name=$r " "$S" && ok "segment $r reported" || bad "segment $r reported"
 done
-grep -aq 'settings: rect name=wgj ' "$S" && ok "search field reported" || bad "search field reported"
+grep -aq 'settings: rect name=wdu ' "$S" && ok "search field reported" || bad "search field reported"
 grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl. search field)" || bad "controls reported"
 c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"

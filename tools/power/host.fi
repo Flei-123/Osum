@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/power/host.fi -- host test of lib/power/policy.fi (lid action per power source, idle timers) and
+// lib/fui/traypower.fi (battery % and mains state of the tray item). Built by tools/power/run.sh.
+import std.rt
+import std.io
+import power.policy
+import fui.traypower
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 1024] = [0 as u8; 1024]
+static mut cslot: usize = 0
+static mut obuf: [u8; 128] = [0 as u8; 128]
+
+// literal -> NUL terminated u64 pointer (rotating slots of 256 octets)
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 4) * 256
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 255 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn same(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.length() {
+        if *((p + i as u64) as *mut u8) != *((s.p as u64 + i as u64) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return *((p + i as u64) as *mut u8) == 0 as u8
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn tip(have: u64, pct: u64, chg: u64, ac: u64) -> u64 {
+    let _n: u64 = traypower.tooltip(have, pct, chg, ac, (&obuf[0 as usize]) as u64, 128)
+    return (&obuf[0 as usize]) as u64
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    var d: policy.Conf = policy.conf_default()
+    // ---- L-005: lid action per power source
+    check(&t, policy.lid_action(&d, false) == policy.ACT_SLEEP && policy.lid_action(&d, true) == policy.ACT_SLEEP, "default: lid sleeps on both sources")
+    var k: policy.Conf = policy.conf_default()
+    policy.conf_parse(&k, c("# comment\nlid_bat=hibernate\nlid_ac=nothing\n"))
+    check(&t, policy.lid_action(&k, false) == policy.ACT_HIBERNATE, "lid on battery = hibernate")
+    check(&t, policy.lid_action(&k, true) == policy.ACT_NOTHING, "lid on mains = nothing")
+    policy.conf_parse(&k, c("lid_bat=shutdown\r\nlid_ac=sleep\n"))
+    check(&t, policy.lid_action(&k, false) == policy.ACT_SHUTDOWN && policy.lid_action(&k, true) == policy.ACT_SLEEP, "shutdown / sleep, CRLF tolerated")
+    policy.conf_parse(&k, c("lid_bat=explode\nlid_ac=\nlid_batx=nothing\n"))
+    check(&t, policy.lid_action(&k, false) == policy.ACT_SHUTDOWN && policy.lid_action(&k, true) == policy.ACT_SLEEP, "unknown words and keys are ignored (old value stays)")
+    check(&t, same(policy.action_name(policy.ACT_HIBERNATE), "hibernate") && same(policy.action_name(policy.ACT_NOTHING), "nothing"), "action names")
+    check(&t, policy.lid_edge(policy.LID_OPEN, policy.LID_CLOSED) == policy.LID_CLOSED_EDGE, "open -> closed is the closing edge")
+    check(&t, policy.lid_edge(policy.LID_CLOSED, policy.LID_OPEN) == policy.LID_OPENED_EDGE, "closed -> open is the opening edge")
+    check(&t, policy.lid_edge(policy.LID_UNKNOWN, policy.LID_CLOSED) == 0 && policy.lid_edge(policy.LID_OPEN, policy.LID_OPEN) == 0, "unknown start and steady lid are no edge")
+    // ---- L-007: timers, profiles, brightness per source
+    var p: policy.Conf = policy.conf_default()
+    policy.conf_parse(&p, c("screen_bat=4\nscreen_ac=9\nstandby_bat=6\nstandby_ac=0\nprofile_bat=save\nprofile_ac=performance\nbright_bat=40\nbright_ac=101\ntestsrc=1\n"))
+    check(&t, policy.screen_s(&p, false) == 4 && policy.screen_s(&p, true) == 9, "screen-off seconds per source")
+    check(&t, policy.standby_s(&p, false) == 6 && policy.standby_s(&p, true) == 0, "standby seconds per source (0 = never)")
+    check(&t, policy.profile_for(&p, false) == policy.PROF_SAVE && policy.profile_for(&p, true) == policy.PROF_PERFORMANCE, "profile per source")
+    check(&t, policy.bright_for(&p, false) == 40 && policy.bright_for(&p, true) == policy.BRIGHT_KEEP && p.testsrc == 1, "brightness per source, testsrc flag")
+    policy.conf_parse(&p, c("bright_bat=150\nscreen_bat=abc\n"))
+    check(&t, policy.bright_for(&p, false) == 40 && policy.screen_s(&p, false) == 4, "out-of-range / non-numeric values are ignored")
+    var armed: u64 = 1
+    check(&t, !policy.standby_due(&p, false, 5999, &armed), "battery: 5.999 s idle -> not yet")
+    check(&t, policy.standby_due(&p, false, 6000, &armed), "battery: 6 s idle -> standby fires")
+    check(&t, !policy.standby_due(&p, false, 7000, &armed) && !policy.standby_due(&p, false, 600000, &armed), "fires ONCE (a machine that wakes with a huge idle time does not sleep again)")
+    check(&t, !policy.standby_due(&p, false, 200, &armed) && policy.standby_due(&p, false, 6500, &armed), "input re-arms the timer")
+    armed = 1
+    check(&t, !policy.standby_due(&p, true, 3600000, &armed), "mains: standby 0 = never, however idle")
+    // ---- L-006: battery % and mains in the tray item
+    check(&t, traypower.state(0, 0, 0, 1) == traypower.BV_NONE && same(tip(0, 0, 0, 1), "Kein Akku"), "no battery: no item, text 'Kein Akku'")
+    check(&t, traypower.state(1, 87, 0, 0) == traypower.BV_DISCHARGING && same(tip(1, 87, 0, 0), "Akku 87 %, im Akkubetrieb"), "87 % on battery")
+    check(&t, traypower.state(1, 55, 1, 1) == traypower.BV_CHARGING && same(tip(1, 55, 1, 1), "Akku 55 %, wird geladen"), "mains plugged in, charging")
+    check(&t, traypower.state(1, 100, 0, 1) == traypower.BV_PLUGGED && same(tip(1, 100, 0, 1), "Akku 100 %, Netzteil angeschlossen"), "mains, full")
+    check(&t, traypower.state(1, 15, 0, 0) == traypower.BV_LOW && traypower.state(1, 5, 0, 0) == traypower.BV_CRITICAL, "low (20 %) and critical (7 %) only on battery")
+    check(&t, traypower.state(1, 5, 0, 1) == traypower.BV_PLUGGED && traypower.state(1, 5, 1, 1) == traypower.BV_CHARGING, "5 % on mains is not an alarm")
+    check(&t, traypower.glyph_plug(traypower.BV_CHARGING) && traypower.glyph_plug(traypower.BV_PLUGGED) && !traypower.glyph_plug(traypower.BV_DISCHARGING), "plug glyph exactly on mains")
+    check(&t, same(tip(1, 7, 0, 0), "Akku 7 %, Akku kritisch!") && same(tip(1, 250, 0, 0), "Akku 100 %, im Akkubetrieb"), "critical text, percentage capped at 100")
+    // AC toggle: the same battery, mains out and in
+    check(&t, traypower.state(1, 62, 0, 1) != traypower.state(1, 62, 0, 0), "AC toggle changes the item state")
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fui/traypower.fi -- fui.traypower: state and tooltip of the battery / mains tray item (L-006).
+//
+//     import fui.traypower
+//     let st: u64 = traypower.state(have, pct, charging, on_mains)    // BV_* below
+//     let n: u64 = traypower.tooltip(have, pct, charging, on_mains, buf, 96)   // NUL terminated, returns the length
+//
+// The four inputs are what the kernel reports (`osum_pwrget`: PG_BATPRESENT, PG_BATPERCENT, bit 1 of
+// PG_BATSTATE, PG_AC) and nothing is worked out beyond them. A machine without battery has NO item (BV_NONE):
+// a symbol stands for something the machine HAS. Texts are German (UI language of OrientOS).
+
+export {
+    state, tooltip, glyph_plug,
+    BV_NONE, BV_DISCHARGING, BV_CHARGING, BV_PLUGGED, BV_LOW, BV_CRITICAL,
+    LOW_PCT, CRITICAL_PCT
+}
+
+const BV_NONE: u64 = 0 // no battery: no item
+const BV_DISCHARGING: u64 = 1 // on battery
+const BV_CHARGING: u64 = 2 // on mains and charging
+const BV_PLUGGED: u64 = 3 // on mains, not charging (full)
+const BV_LOW: u64 = 4 // on battery, 20 % or less
+const BV_CRITICAL: u64 = 5 // on battery, 7 % or less
+
+const LOW_PCT: u64 = 20
+const CRITICAL_PCT: u64 = 7
+
+static mut t_none: [u8; 10] = "Kein Akku\0"
+static mut t_akku: [u8; 6] = "Akku \0"
+static mut t_pct: [u8; 3] = " %\0"
+static mut t_dis: [u8; 17] = ", im Akkubetrieb\0"
+static mut t_chg: [u8; 15] = ", wird geladen\0"
+static mut t_plug: [u8; 25] = ", Netzteil angeschlossen\0"
+static mut t_low: [u8; 22] = ", Akku fast leer\0\0\0\0\0\0"
+static mut t_crit: [u8; 20] = ", Akku kritisch!\0\0\0\0"
+
+fn state(have: u64, pct: u64, charging: u64, on_mains: u64) -> u64 {
+    if have == 0 {
+        return BV_NONE
+    }
+    if charging != 0 {
+        return BV_CHARGING
+    }
+    if on_mains != 0 {
+        return BV_PLUGGED
+    }
+    if pct <= CRITICAL_PCT {
+        return BV_CRITICAL
+    }
+    if pct <= LOW_PCT {
+        return BV_LOW
+    }
+    return BV_DISCHARGING
+}
+
+// Does the item show the plug glyph? Exactly when the machine is on mains.
+fn glyph_plug(st: u64) -> bool {
+    return st == BV_CHARGING || st == BV_PLUGGED
+}
+
+fn put(out: u64, cap: u64, at: u64, c: u8) -> u64 {
+    if at + 1 < cap {
+        *((out + at) as *mut u8) = c
+        return at + 1
+    }
+    return at
+}
+
+fn put_s(out: u64, cap: u64, at: u64, s: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while *((s + i) as *mut u8) != 0 as u8 {
+        a = put(out, cap, a, *((s + i) as *mut u8))
+        i = i + 1
+    }
+    return a
+}
+
+fn put_dec(out: u64, cap: u64, at: u64, v: u64) -> u64 {
+    var a: u64 = at
+    if v >= 100 {
+        a = put(out, cap, a, (48 + (v / 100) % 10) as u8)
+    }
+    if v >= 10 {
+        a = put(out, cap, a, (48 + (v / 10) % 10) as u8)
+    }
+    return put(out, cap, a, (48 + v % 10) as u8)
+}
+
+fn tooltip(have: u64, pct: u64, charging: u64, on_mains: u64, out: u64, cap: u64) -> u64 {
+    if cap == 0 {
+        return 0
+    }
+    let st: u64 = state(have, pct, charging, on_mains)
+    var a: u64 = 0
+    if st == BV_NONE {
+        a = put_s(out, cap, a, (&t_none[0 as usize]) as u64)
+        *((out + a) as *mut u8) = 0 as u8
+        return a
+    }
+    var p: u64 = pct
+    if p > 100 {
+        p = 100
+    }
+    a = put_s(out, cap, a, (&t_akku[0 as usize]) as u64)
+    a = put_dec(out, cap, a, p)
+    a = put_s(out, cap, a, (&t_pct[0 as usize]) as u64)
+    if st == BV_CHARGING {
+        a = put_s(out, cap, a, (&t_chg[0 as usize]) as u64)
+    } else if st == BV_PLUGGED {
+        a = put_s(out, cap, a, (&t_plug[0 as usize]) as u64)
+    } else if st == BV_CRITICAL {
+        a = put_s(out, cap, a, (&t_crit[0 as usize]) as u64)
+    } else if st == BV_LOW {
+        a = put_s(out, cap, a, (&t_low[0 as usize]) as u64)
+    } else {
+        a = put_s(out, cap, a, (&t_dis[0 as usize]) as u64)
+    }
+    *((out + a) as *mut u8) = 0 as u8
+    return a
+}
