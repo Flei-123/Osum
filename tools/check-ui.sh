@@ -78,7 +78,19 @@ ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
 #   lock.fi   malt den Sperrbildschirm mit fUi-Bedienelementen (Stufe 2).
 #   wlib.fi   hat seit Stufe 3 fUi's Textpuffer (`fui.textbuf`) unter jedem
 #             Einzeilenfeld -- der Einzeiler wird dort von fUi bearbeitet.
-ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi"
+#   signin.fi (r71) the sign-in screen is the twin of lock.fi (same frosted
+#             glass plates); it only reads the accent colour of `fui.theme`
+#             for the rim and the focus ring. Same reason as lock.fi.
+#   traypop.fi (r71) the tray flyout is a SHELL surface, not a program: it
+#             paints its glyph vectors and rounded plates through fUi's
+#             painter/icon/render and lays them out with `fui.tray`. There
+#             is no wlib element for a flyout row.
+#   wmd.fi / compdiff.fi (r71) belong to the COMPOSITOR (docs/COMPOSITOR.md),
+#             not to the program layer: wmd is the ring-3 window server that
+#             calls the same row loops as kernel/ui/wm.fi (`fui.comp`,
+#             `fui.core`), compdiff is the differential test of those loops
+#             (a test stand: it measures `fui.comp`, it builds no control).
+ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
 
 # Die rohen Mal-Primitive. VOLLSTAENDIG -- siehe Punkt 1 oben.
 ROH='wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('
@@ -117,8 +129,8 @@ for f in kernel/user/*.fi; do
     done
     [[ $ok == 1 ]] && continue
     # r442: the gallery parts (lib/fui/navnum, navkit, cmdbar, region) are LIBRARY code for programs -- sizes, geometry, the command
-    # bar's model -- not a second surface; every other fUi module stays the host's business
-    n=$(grep -aE '^import fui\.' "$f" 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region|tokens)$' | grep -ac . || true)
+    # bar's model, r71: grid = integer geometry of a tile grid, no widgets (Store) -- not a second surface; every other fUi module stays the host's business
+    n=$(grep -aE '^import fui\.' "$f" 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region|tokens|grid)$' | grep -ac . || true)
     if [[ ${n:-0} -gt 0 ]]; then
         fehler=$((fehler + 1))
         treffer+="  $f: greift direkt auf fUi zu (eigene Oberflaeche daneben)"$'\n'
