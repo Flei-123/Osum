@@ -200,7 +200,7 @@ between "accept waited 100 ms" "$(value_of "$F" acc_ms)" 90 180
 grep -aq "kernel: done" "$F" && ok "kernel is still alive after all cases" \
                              || bad "'kernel: done' missing"
 n=$(value_of "$F" lines)
-num "lines printed by /bin/sockt" "${n:-0}" ge 30
+num "lines printed by /bin/sockt (28 values + this count)" "${n:-0}" ge 29
 
 echo
 echo "SOCKOPT: $pass passed, $fail failed"
