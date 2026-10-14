@@ -12976,6 +12976,9 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
     let uof: u64 = of_of(state, me, fd)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
+        if addr != 0 {
+            return usock_sendto(state, me, uof, buf, want, addr, alen)
+        }
         return write_of(state, me, uof, buf, want)
     }
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_NETLINK {
@@ -16598,16 +16601,18 @@ fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
 
 fn do_usocket(state: u64, me: u64, kind: u64, protocol: u64) -> u64 {
     let base: u64 = kind & 0xFF
-    if base != SOCK_STREAM {
-        // SOCK_DGRAM auf AF_UNIX gibt es hier nicht, und es wird
-        // ehrlich abgewiesen statt stillschweigend zu einem Strom zu
-        // werden.
+    // r731: SOCK_DGRAM on AF_UNIX (bind/sendto/connect by path); everything else is refused honestly
+    if base != SOCK_STREAM && base != SOCK_DGRAM {
         return neg(errno.E_PROTONOSUPPORT)
     }
     if protocol != 0 {
         return neg(errno.E_PROTONOSUPPORT)
     }
-    let si: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    var ukind: u64 = unixsock.UK_STREAM
+    if base == SOCK_DGRAM {
+        ukind = unixsock.UK_DGRAM
+    }
+    let si: u64 = unixsock.sock_new(state, ukind)
     if si >= unixsock.USOCK_MAX {
         return neg(errno.E_NFILE)
     }
@@ -16638,7 +16643,12 @@ fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if errno.is_error(r) {
         return r
     }
-    let b: u64 = unixsock.bind_path(state, si, WL_PATH + 2, plen)
+    var b: u64 = 0
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        b = unixsock.bind_dgram(state, si, WL_PATH + 2, plen)
+    } else {
+        b = unixsock.bind_path(state, si, WL_PATH + 2, plen)
+    }
     if b != 0 {
         return neg(b)
     }
@@ -16666,6 +16676,15 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     let r: u64 = sa_un(state, me, addr, len, &plen)
     if errno.is_error(r) {
         return r
+    }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        // r731: a datagram connect() just picks the default destination
+        let dst: u64 = unixsock.find_dgram(state, WL_PATH + 2, plen)
+        if dst >= unixsock.USOCK_MAX {
+            return neg(errno.E_CONNREFUSED)
+        }
+        unixsock.connect_dgram(state, si, dst)
+        return 0
     }
     let lst: u64 = unixsock.find_listener(state, WL_PATH + 2, plen)
     if lst >= unixsock.USOCK_MAX {
@@ -17533,6 +17552,43 @@ fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool)
         }
     }
     return done
+}
+
+// r731: sendto(fd, buf, len, 0, &sockaddr_un, alen) on a datagram socket: the frame goes into the ring of the socket bound under that path.
+// A stream socket ignores the address (Linux does too once connected).
+fn usock_sendto(state: u64, me: u64, of: u64, buf: u64, len: u64, addr: u64, alen: u64) -> u64 {
+    let si: u64 = file.open_ino(state, of)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    if unixsock.sock_kind(state, si) != unixsock.UK_DGRAM {
+        return write_of(state, me, of, buf, len)
+    }
+    if len > MSG_MAX {
+        return neg(errno.E_MSGSIZE)
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    var plen: u64 = 0
+    let r: u64 = sa_un(state, me, addr, alen, &plen)
+    if errno.is_error(r) {
+        return r
+    }
+    let dst: u64 = unixsock.find_dgram(state, WL_PATH + 2, plen)
+    if dst >= unixsock.USOCK_MAX {
+        return neg(errno.E_CONNREFUSED)
+    }
+    // the path scratch (WL_PATH) is free again, the data goes through WL_SCRATCH
+    if !copy_in(state, me, state + WL_SCRATCH, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    let w: u64 = unixsock.send_dgram_to(state, dst, WL_SCRATCH, len)
+    if errno.is_error(w) {
+        return neg(w)
+    }
+    sched.poll_kick(state)
+    return w
 }
 
 // read/write on a local (AF_UNIX) socket: the same ring as sendmsg/recvmsg, one buffer, no descriptors. O_NONBLOCK on the open file means
