@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/hid/ptrcfg.fi -- ROUND LAP1 (L-001): pointer speed,
+// acceleration curve and scroll direction.
+//
+// ONE place decides how far the pointer moves for a given device delta.
+// Every device (PS/2, USB mouse, I2C-HID touchpad) ends in
+// `ps2m.apply`, which calls `scale_axis` / `scale_wheel` below -- so the
+// curve is NOT per driver.
+//
+// The curve (all integer, no floats, exact and reproducible by the
+// reference in tools/ptrcfg/ref.py):
+//
+//   mag   = max(|dx|, |dy|) of the packet (counts per report)
+//   gain  = 256                               if accel == 0 or mag <= 1
+//           256 + accel * 8 * (min(mag,32)-1) otherwise   (1/256 units)
+//   out   = (v * speed * gain + remainder) / (100 * 256), truncated
+//           toward zero; the remainder is kept PER AXIS so slow motion
+//           never gets lost (speed 50 and v=1 moves every second packet).
+//
+// speed is in percent (10..400, default 100), accel is 0..5 (default 0
+// = flat, so every existing gate that measures exact pointer distances
+// is unchanged), natural flips the wheel sign.
+//
+// Config file /etc/mouse.conf, key=value lines (written by settingsd
+// from the `mouse.*` keys of /etc/settings.schema):
+//   speed=100
+//   accel=0
+//   natural=false
+// The kernel reads it once at start (`load`) and re-reads it when its
+// mtime changes (`poll`, idle task, about once a second).
+
+profile kernel
+
+import lib.kstate
+import serial
+import fs.fs
+
+export {
+    scale_axis, scale_x, scale_y, scale_wheel, magnitude, set, speed, accel, natural,
+    load, poll, selftest, loads, put_signed, P_PATH_LEN
+}
+
+const P_PATH_LEN: u64 = 16 // "/etc/mouse.conf\0"
+
+const O_SPEED: u64 = 0x100 // percent; 0 = never set = 100
+const O_ACCEL: u64 = 0x108
+const O_NAT: u64 = 0x110
+const O_REMX: u64 = 0x118 // signed remainder, 1/25600 units
+const O_REMY: u64 = 0x120
+const O_STAMP: u64 = 0x128 // mtime of the config file at last load
+const O_TICK: u64 = 0x130
+const O_LOADS: u64 = 0x138
+
+const SPEED_MIN: u64 = 10
+const SPEED_MAX: u64 = 400
+const ACCEL_MAX: u64 = 5
+const DENOM: u64 = 25600 // 100 * 256
+const POLL_EVERY: u64 = 100
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.MOUSE_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.MOUSE_OFF, off, v)
+}
+
+fn speed(state: u64) -> u64 {
+    let v: u64 = g(state, O_SPEED)
+    if v == 0 {
+        return 100
+    }
+    return v
+}
+
+fn accel(state: u64) -> u64 {
+    return g(state, O_ACCEL)
+}
+
+fn natural(state: u64) -> u64 {
+    return g(state, O_NAT)
+}
+
+fn loads(state: u64) -> u64 {
+    return g(state, O_LOADS)
+}
+
+// Out-of-range values are clamped, never rejected: a typo in the file
+// must not leave the user with a dead pointer.
+fn set(state: u64, sp: u64, ac: u64, nat: u64) {
+    var a: u64 = sp
+    if a < SPEED_MIN {
+        a = SPEED_MIN
+    }
+    if a > SPEED_MAX {
+        a = SPEED_MAX
+    }
+    var b: u64 = ac
+    if b > ACCEL_MAX {
+        b = ACCEL_MAX
+    }
+    var c: u64 = 0
+    if nat != 0 {
+        c = 1
+    }
+    s(state, O_SPEED, a)
+    s(state, O_ACCEL, b)
+    s(state, O_NAT, c)
+    s(state, O_REMX, 0)
+    s(state, O_REMY, 0)
+}
+
+fn absu(v: i64) -> u64 {
+    if v < 0 {
+        return (0 - v) as u64
+    }
+    return v as u64
+}
+
+// The packet magnitude that drives the gain: the larger axis, so the
+// direction of a diagonal move is kept (both axes get the same gain).
+fn magnitude(dx: i64, dy: i64) -> u64 {
+    let a: u64 = absu(dx)
+    let b: u64 = absu(dy)
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn gain(state: u64, mag: u64) -> u64 {
+    let ac: u64 = accel(state)
+    if ac == 0 || mag <= 1 {
+        return 256
+    }
+    var m: u64 = mag
+    if m > 32 {
+        m = 32
+    }
+    return 256 + ac * 8 * (m - 1)
+}
+
+// One axis. `rem_off` is O_REMX or O_REMY.
+fn scale_axis(state: u64, v: i64, mag: u64, rem_off: u64) -> i64 {
+    let sp: u64 = speed(state)
+    let gn: u64 = gain(state, mag)
+    if sp == 100 && gn == 256 {
+        return v
+    }
+    // total = v * sp * gn + remainder, signed, in 1/25600 units
+    var total: i64 = 0
+    let mv: u64 = absu(v) * sp * gn
+    if v < 0 {
+        total = 0 - (mv as i64)
+    } else {
+        total = mv as i64
+    }
+    total = total + (g(state, rem_off) as i64)
+    var neg: bool = false
+    if total < 0 {
+        neg = true
+    }
+    let at: u64 = absu(total)
+    let q: u64 = at / DENOM
+    let r: u64 = at - q * DENOM
+    if neg {
+        s(state, rem_off, (0 - (r as i64)) as u64)
+        return 0 - (q as i64)
+    }
+    s(state, rem_off, r)
+    return q as i64
+}
+
+fn scale_x(state: u64, dx: i64, dy: i64) -> i64 {
+    return scale_axis(state, dx, magnitude(dx, dy), O_REMX)
+}
+
+fn scale_y(state: u64, dx: i64, dy: i64) -> i64 {
+    return scale_axis(state, dy, magnitude(dx, dy), O_REMY)
+}
+
+// Wheel step (+1 / -1 / 0); natural scrolling flips it.
+fn scale_wheel(state: u64, r: i64) -> i64 {
+    if natural(state) != 0 {
+        return 0 - r
+    }
+    return r
+}
+
+// ------------------------------------------------------ config file
+
+fn get8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+// Parse `name=` at line start `at`; returns the value start or 0.
+fn field_at(buf: u64, n: u64, at: u64, name: u64, nlen: u64) -> u64 {
+    if at + nlen + 1 > n {
+        return 0
+    }
+    var i: u64 = 0
+    while i < nlen {
+        if get8(buf + at + i) != get8(name + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    if get8(buf + at + nlen) != 61 {
+        return 0
+    }
+    return at + nlen + 1
+}
+
+fn number(buf: u64, n: u64, at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    var any: bool = false
+    while i < n {
+        let c: u64 = get8(buf + i)
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        if v > 100000 {
+            v = 100000
+        }
+        any = true
+        i = i + 1
+    }
+    if !any {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return v
+}
+
+// "true" / "1" / "yes" = 1, anything else 0.
+fn truth(buf: u64, at: u64) -> u64 {
+    let c: u64 = get8(buf + at)
+    if c == 116 || c == 49 || c == 121 {
+        return 1
+    }
+    return 0
+}
+
+// Parse a config text of `n` octets at `buf` into the state. Unknown
+// keys and broken lines are skipped; missing keys keep the defaults.
+fn parse(state: u64, buf: u64, n: u64) {
+    var k_speed: [u8; 6] = "speed\0"
+    var k_accel: [u8; 6] = "accel\0"
+    var k_nat: [u8; 8] = "natural\0"
+    var sp: u64 = 100
+    var ac: u64 = 0
+    var nat: u64 = 0
+    var at: u64 = 0
+    while at < n {
+        var v: u64 = field_at(buf, n, at, (&k_speed[0]) as u64, 5)
+        if v != 0 {
+            let x: u64 = number(buf, n, v)
+            if x != 0xFFFFFFFFFFFFFFFF {
+                sp = x
+            }
+        }
+        v = field_at(buf, n, at, (&k_accel[0]) as u64, 5)
+        if v != 0 {
+            let x: u64 = number(buf, n, v)
+            if x != 0xFFFFFFFFFFFFFFFF {
+                ac = x
+            }
+        }
+        v = field_at(buf, n, at, (&k_nat[0]) as u64, 7)
+        if v != 0 {
+            nat = truth(buf, v)
+        }
+        // next line
+        while at < n && get8(buf + at) != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    set(state, sp, ac, nat)
+}
+
+fn conf_path(p: u64) {
+    var t: [u8; 16] = "/etc/mouse.conf\0"
+    var i: u64 = 0
+    while i < P_PATH_LEN {
+        kstate.set8(p + i, t[i as usize])
+        i = i + 1
+    }
+}
+
+// Read /etc/mouse.conf. No file: defaults stay, nothing happens. Task
+// context only (the idle task and the start-up path), never an IRQ.
+fn load(state: u64) -> bool {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return false
+    }
+    var pf: [u8; 16] = [0 as u8; 16]
+    var buf: [u8; 256] = [0 as u8; 256]
+    conf_path((&pf[0]) as u64)
+    let ino: u64 = fs.path(state, (&pf[0]) as u64)
+    if ino == 0 {
+        return false
+    }
+    var n: u64 = fs.inode_size(state, ino)
+    if n > 255 {
+        n = 255
+    }
+    let b: u64 = (&buf[0]) as u64
+    let got: u64 = fs.read_at(state, ino, 0, b, n)
+    if got != n {
+        return false
+    }
+    parse(state, b, n)
+    s(state, O_STAMP, fs.inode_mtime(state, ino) + 1)
+    s(state, O_LOADS, g(state, O_LOADS) + 1)
+    return true
+}
+
+// About once a second from the idle task: has the file changed?
+fn poll(state: u64) {
+    let t: u64 = g(state, O_TICK) + 1
+    s(state, O_TICK, t)
+    if t % POLL_EVERY != 0 {
+        return
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return
+    }
+    var pf: [u8; 16] = [0 as u8; 16]
+    conf_path((&pf[0]) as u64)
+    let ino: u64 = fs.path(state, (&pf[0]) as u64)
+    if ino == 0 {
+        return
+    }
+    if fs.inode_mtime(state, ino) + 1 != g(state, O_STAMP) {
+        let _l: bool = load(state)
+    }
+}
+
+// ------------------------------------------------------ self test
+//
+// Prints one line per case for tools/ptrcfg/run.sh, which compares
+// them with the independent Python reference. No file, no device.
+
+fn put_signed(v: i64) {
+    var m: [u8; 2] = "-\0"
+    if v < 0 {
+        serial.puts((&m[0]) as u64)
+    }
+    serial.dec(absu(v))
+}
+
+// Feed a fixed sequence of (dx, dy) packets and print the sums.
+fn run_case(state: u64, idx: u64, sp: u64, ac: u64, nat: u64) {
+    var l_case: [u8; 14] = "ptrcfg: case \0"
+    var l_sp: [u8; 5] = " sp=\0"
+    var l_ac: [u8; 5] = " ac=\0"
+    var l_x: [u8; 4] = " x=\0"
+    var l_y: [u8; 4] = " y=\0"
+    var l_w: [u8; 4] = " w=\0"
+    set(state, sp, ac, nat)
+    var sx: i64 = 0
+    var sy: i64 = 0
+    var i: u64 = 0
+    while i < 24 {
+        // deterministic pattern: magnitudes 1..24, mixed signs
+        var dx: i64 = ((i % 12) + 1) as i64
+        var dy: i64 = ((i * 5) % 7) as i64
+        if i % 3 == 1 {
+            dx = 0 - dx
+        }
+        if i % 4 == 2 {
+            dy = 0 - dy
+        }
+        let mg: u64 = magnitude(dx, dy)
+        sx = sx + scale_axis(state, dx, mg, O_REMX)
+        sy = sy + scale_axis(state, dy, mg, O_REMY)
+        i = i + 1
+    }
+    let w: i64 = scale_wheel(state, 1)
+    serial.puts((&l_case[0]) as u64)
+    serial.dec(idx)
+    serial.puts((&l_sp[0]) as u64)
+    serial.dec(speed(state))
+    serial.puts((&l_ac[0]) as u64)
+    serial.dec(accel(state))
+    serial.puts((&l_x[0]) as u64)
+    put_signed(sx)
+    serial.puts((&l_y[0]) as u64)
+    put_signed(sy)
+    serial.puts((&l_w[0]) as u64)
+    put_signed(w)
+    serial.nl()
+}
+
+fn selftest(state: u64) {
+    run_case(state, 0, 100, 0, 0)
+    run_case(state, 1, 200, 0, 0)
+    run_case(state, 2, 50, 0, 0)
+    run_case(state, 3, 100, 2, 0)
+    run_case(state, 4, 150, 3, 1)
+    run_case(state, 5, 400, 5, 0)
+    run_case(state, 6, 10, 1, 1)
+    run_case(state, 7, 9999, 99, 0)
+    // leave the state at the defaults: the live pointer is not touched
+    set(state, 100, 0, 0)
+}
