@@ -32,7 +32,9 @@ OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}   # the old /root/orientos-install f
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 mkdir -p "$OUT"
 
-CRT=$(mktemp -d)/crt.o
+CRTDIR=$(mktemp -d)
+trap 'rm -rf "$CRTDIR"' EXIT
+CRT="$CRTDIR/crt.o"
 as --64 -o "$CRT" kernel/user/crt.s || exit 1
 
 # ein Ring-3-Programm uebersetzen: quelle, paketverzeichnis, name
