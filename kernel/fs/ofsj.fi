@@ -109,6 +109,7 @@ const COMMIT_MAGIC: u64 = 0x4D4D4F434A53464F
 // jedes Stueck ist fuer sich unteilbar.
 const MAX_SLOTS: u64 = 512
 const TGT_BLOCKS: u64 = 8 // 512 Ziele * 8 Oktette / 512
+const HDR_BLOCKS: u64 = 9 // head + target table, contiguous on disk
 const BLOCKS_NEEDED: u64 = 522 // 1 Kopf + 8 Ziele + 512 Nutzlast + 1 Bestaetigung
 
 // Die Zahlen im Kopf- und im Bestaetigungsblock.
@@ -206,17 +207,33 @@ fn stage_init(state: u64) {
     if g(state, J_STG) != 0 {
         return
     }
+    // r742: two spare frames in FRONT of the payload hold head + target table
+    // (1 + TGT_BLOCKS = 9 blocks) in on-disk order, so head, targets and the
+    // payload go out as ONE contiguous run (see `commit`).
     var frames: u64 = 32
-    var base: u64 = mem.frame_run(state, frames)
+    var base: u64 = mem.frame_run(state, frames + 2)
     if base == 0 {
         frames = 8
-        base = mem.frame_run(state, frames)
+        base = mem.frame_run(state, frames + 2)
     }
     if base == 0 {
         return
     }
     s(state, J_STGCAP, frames * mem.FRAME_SIZE / BS)
-    s(state, J_STG, base)
+    s(state, J_STG, base + HDR_BLOCKS * BS)
+}
+
+// r742: the 9 blocks (head + 8 target blocks) right before the staged payload.
+fn hdr(state: u64) -> u64 {
+    return g(state, J_STG) - HDR_BLOCKS * BS
+}
+
+fn zero_words(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        put64(p + i * 8, 0)
+        i = i + 1
+    }
 }
 
 // ------------------------------------------------------- die Pruefsumme
@@ -467,35 +484,55 @@ fn commit(state: u64) -> bool {
             m = stg_cap(state)
         }
     }
-    if m > 0 {
+    if m > 0 && m == n {
+        // r742: head + target table + payload as one run (one DMA command
+        // for up to 128 sectors instead of payload run + two metadata
+        // writes). The order inside this batch does not matter: the flush
+        // below is the barrier before the confirmation block.
+        let h: u64 = hdr(state)
+        zero_words(h, HDR_BLOCKS * BS)
+        put64(h + H_MAGIC, HEAD_MAGIC)
+        put64(h + H_SEQ, seq)
+        put64(h + H_COUNT, n)
+        var q: u64 = 0
+        while q < n {
+            put64(h + BS + q * 8, tgt(state, q))
+            q = q + 1
+        }
         s(state, J_STGRUNS, g(state, J_STGRUNS) + 1)
-        if !blk.write_run(state, pay_blk(state, 0), stg(state, 0), m) {
+        if !blk.write_run(state, head_blk(state), h, HDR_BLOCKS + n) {
             return false
         }
-    }
-
-    // 1. Die Zieltafel. Acht Bloecke zu 64 Zahlen; nur die, in denen
-    //    etwas steht, werden geschrieben.
-    var k: u64 = 0
-    while k * 64 < n {
+    } else {
+        if m > 0 {
+            s(state, J_STGRUNS, g(state, J_STGRUNS) + 1)
+            if !blk.write_run(state, pay_blk(state, 0), stg(state, 0), m) {
+                return false
+            }
+        }
+        // 1. Die Zieltafel. Acht Bloecke zu 64 Zahlen; nur die, in denen
+        //    etwas steht, werden geschrieben.
+        var k: u64 = 0
+        while k * 64 < n {
+            zero(scratch(state), BS)
+            var j: u64 = 0
+            while j < 64 && k * 64 + j < n {
+                put64(scratch(state) + j * 8, tgt(state, k * 64 + j))
+                j = j + 1
+            }
+            if !blk.write(state, tgt_blk(state, k), scratch(state)) {
+                return false
+            }
+            k = k + 1
+        }
+        // 2. Der Kopf.
         zero(scratch(state), BS)
-        var j: u64 = 0
-        while j < 64 && k * 64 + j < n {
-            put64(scratch(state) + j * 8, tgt(state, k * 64 + j))
-            j = j + 1
-        }
-        if !blk.write(state, tgt_blk(state, k), scratch(state)) {
+        put64(scratch(state) + H_MAGIC, HEAD_MAGIC)
+        put64(scratch(state) + H_SEQ, seq)
+        put64(scratch(state) + H_COUNT, n)
+        if !blk.write(state, head_blk(state), scratch(state)) {
             return false
         }
-        k = k + 1
-    }
-    // 2. Der Kopf.
-    zero(scratch(state), BS)
-    put64(scratch(state) + H_MAGIC, HEAD_MAGIC)
-    put64(scratch(state) + H_SEQ, seq)
-    put64(scratch(state) + H_COUNT, n)
-    if !blk.write(state, head_blk(state), scratch(state)) {
-        return false
     }
     // 3. Alles auf die Platte, BEVOR die Bestaetigung hingeht. Ohne
     //    dieses Spuelen duerfte eine Platte mit eigenem Schreibpuffer
@@ -553,7 +590,12 @@ fn commit(state: u64) -> bool {
     // 6. Loeschen. Ab hier gibt es nichts mehr nachzutragen.
     zero(scratch(state), BS)
     blk.write(state, commit_blk(state), scratch(state))
-    blk.flush(state)
+    // r742: no FLUSH CACHE after the clearing write. A stale (not yet
+    // cleared) confirmation can only replay content that is already on the
+    // drive (the checkpoint above was flushed); the next transaction either
+    // overwrites it or breaks its checksum (replay compares seq, targets and
+    // payload hashes -> falls back to "nothing to replay"). sync/unmount
+    // flush as before.
     s(state, J_COUNT, 0)
     s(state, J_FULL, 0)
     return true
