@@ -250,6 +250,67 @@ gleich "kein Bericht ging verloren" "0" "$WEG"
 
 # ----------------------------------------------------------------------
 echo
+echo "== 4b. Gesten (L-002 r797): Wort hidgest, Standard AUS"
+# WITHOUT the word nothing of the gesture section plays and no gesture
+# line appears -- the pad path measured above is unchanged.
+G0=$(python3 tools/hid/descs.py nr "gest: tap aufsetzen")
+gleich "ohne hidgest: kein Gestenbericht wird abgespielt" "0" \
+    "$(grep -ac "^hidb: nr=$G0 " "$B")"
+gleich "ohne hidgest: keine Gestenzeile" "0" "$(grep -ac '^hidin: geste' "$B")"
+gleich "ohne hidgest: genau die Berichte vor dem Gestenteil" "$G0" \
+    "$(grep -a '^hidin: ende n=' "$B" | sed 's/.*n=//')"
+
+RC=$(lauf gesten "hidpad hidgest nokbd noring3 nofs")
+zusage "hidgest: Lauf endet sauber (Code 21, bekommen $RC)" \
+    "$([ "$RC" = 21 ] && echo 0 || echo 1)"
+G="$TMPD/gesten.txt"
+GE=$(python3 tools/hid/descs.py nr "gest: ende")
+gleich "hidgest: alle Berichte laufen durch" "ok=1" \
+    "$(grep -a "^hidb: nr=$GE " "$G" | sed 's/.* \(ok=[01]\)$/\1/')"
+seg() { # events (hidev lines) of the reports [from, to)
+    local a b
+    a=$(python3 tools/hid/descs.py nr "$1"); b=$(python3 tools/hid/descs.py nr "$2")
+    sed -n "/^hidb: nr=$((a-1)) /,/^hidb: nr=$((b-1)) /p" "$G" | grep -a '^hidev: '
+}
+CL0='hidev: maus 0x0 x=0x0 y=0x0 r=0x0'
+gleich "Tipp mit einem Finger: Linksklick (druecken + loslassen)" \
+    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(seg "gest: tap aufsetzen" "gest: zwei tap aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Tipp mit zwei Fingern: Rechtsklick" \
+    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(seg "gest: zwei tap aufsetzen" "gest: drei tap aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Tipp mit drei Fingern: Mittelklick" \
+    "hidev: maus 0x4 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(seg "gest: drei tap aufsetzen" "gest: rand aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Randstreifen rechts: +300 Einheiten = genau eine Radrastung" \
+    "hidev: maus 0x0 x=0x0 y=0x0 r=0x1" \
+    "$(seg "gest: rand aufsetzen" "gest: rollen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "zwei Finger rollen: genau eine Radrastung (nicht beim Entscheiden)" \
+    "hidev: maus 0x0 x=0x0 y=0x0 r=0x1" \
+    "$(seg "gest: rollen aufsetzen" "gest: kneifen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Kneifen: Abstand +200, kein Zeigerpaket" \
+    "hidev: geste zoom d=0xc8" \
+    "$(seg "gest: kneifen aufsetzen" "gest: wisch aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Drei-Finger-Wisch nach links: EIN Wisch (Richtung 1, 3 Finger)" \
+    "hidev: geste wisch 1 n=3" \
+    "$(seg "gest: wisch aufsetzen" "gest: handballen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "Handballen allein (Zuversicht 0): kein Klick, keine Bewegung" "0" \
+    "$(seg "gest: handballen aufsetzen" "gest: ballen+finger aufsetzen" | wc -l)"
+gleich "Handballen + Finger: der Finger tippt, der Ballen zaehlt nicht" \
+    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "$(seg "gest: ballen+finger aufsetzen" "gest: ende" | tr '\n' '|' | sed 's/|$//')"
+GL=$(grep -a '^hidin: geste an=1' "$G")
+gleich "Zaehler: 4 Tipps" "4" "$(echo "$GL" | sed 's/.* tipp=\([0-9]*\).*/\1/')"
+gleich "Zaehler: 2 Rollen" "2" "$(echo "$GL" | sed 's/.* rollen=\([0-9]*\).*/\1/')"
+gleich "Zaehler: 1 Wisch, 1 Kneifen" "1/1" \
+    "$(echo "$GL" | sed 's/.* wisch=\([0-9]*\).* zoom=\([0-9]*\).*/\1\/\2/')"
+gleich "Zaehler: letzter Wisch = Richtung 1, 3 Finger (259)" "259" \
+    "$(echo "$GL" | sed 's/.* letzt=\([0-9]*\).*/\1/')"
+gleich "hidgest: kein Bericht ging verloren" "0" \
+    "$(grep -a 'hidin: ta=' "$G" | sed 's/.*weg=\([0-9]*\).*/\1/')"
+
+# ----------------------------------------------------------------------
+echo
 echo "== 5. QEMU mit echten Geraeten"
 XHCI="-device qemu-xhci"
 RC=$(lauf gkbd "usb hidgen nofs noring3" $XHCI -device usb-kbd)
