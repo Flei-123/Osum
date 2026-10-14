@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/fv/retry.fi -- FreeViewer viewer: when to reconnect by itself, and what an error means to a person.
+//
+// Same rules as the Rust viewer (src/viewer.rs: MAX_RECONNECTS, backoff, next_retry, Fail):
+//   * only a session that was LIVE gets rebuilt; a first connect that fails shows its error at once
+//   * wait before attempt n (1-based): 1, 2, 4, 8, 16, 30 s; at most 6 attempts in a row
+//   * a wrong password, a "no" from the host and protocol errors never retry
+//   * ask mode never reconnects silently (every try would pop a question on the host screen)
+// Pure logic, no I/O: tools/fvviewer/it.fi drives it from the host.
+
+import std.rt
+import fv.client
+
+export { MAX_RECONNECTS, backoff_s, retryable, next_retry_s, kind_of, relay_kind,
+    KIND_NETWORK, KIND_TLS, KIND_UPGRADE, KIND_OFFLINE, KIND_BUSY, KIND_WRONGPW, KIND_DECLINED,
+    KIND_GONE, KIND_PROTOCOL, KIND_MEM, KIND_DNS, KIND_RELAY }
+
+const MAX_RECONNECTS: u64 = 6
+
+const KIND_NETWORK: u64 = 1
+const KIND_TLS: u64 = 2
+const KIND_UPGRADE: u64 = 3
+const KIND_OFFLINE: u64 = 4
+const KIND_BUSY: u64 = 5
+const KIND_WRONGPW: u64 = 6
+const KIND_DECLINED: u64 = 7
+const KIND_GONE: u64 = 8
+const KIND_PROTOCOL: u64 = 9
+const KIND_MEM: u64 = 10
+const KIND_DNS: u64 = 11
+const KIND_RELAY: u64 = 12 // the relay said something we have no sentence for (text stays visible)
+
+// seconds to wait before reconnect number `attempt` (1-based): 1, 2, 4, 8, 16, 30
+fn backoff_s(attempt: u64) -> u64 {
+    var a: u64 = attempt
+    if a == 0 { a = 1 }
+    if a > 6 { a = 6 }
+    let s: u64 = 1 << (a - 1)
+    if s > 30 { return 30 }
+    return s
+}
+
+// relay error text: "offline" -> 1, "busy" -> 2, anything else -> 0
+fn relay_kind(p: u64, n: u64) -> u64 {
+    if n == 7 && rt.ld8(p, 0) == 111 as u8 && rt.ld8(p, 1) == 102 as u8 && rt.ld8(p, 2) == 102 as u8
+        && rt.ld8(p, 3) == 108 as u8 && rt.ld8(p, 4) == 105 as u8 && rt.ld8(p, 5) == 110 as u8
+        && rt.ld8(p, 6) == 101 as u8 {
+        return 1
+    }
+    if n == 4 && rt.ld8(p, 0) == 98 as u8 && rt.ld8(p, 1) == 117 as u8 && rt.ld8(p, 2) == 115 as u8
+        && rt.ld8(p, 3) == 121 as u8 {
+        return 2
+    }
+    return 0
+}
+
+// client error code (+ relay text) -> person-level kind
+fn kind_of(err: u64, txt: u64, txtlen: u64) -> u64 {
+    if err == client.E_TCP { return KIND_NETWORK }
+    if err == client.E_IO { return KIND_NETWORK }
+    if err == client.E_TLS { return KIND_TLS }
+    if err == client.E_UPGRADE { return KIND_UPGRADE }
+    if err == client.E_AUTH { return KIND_WRONGPW }
+    if err == client.E_DENIED { return KIND_DECLINED }
+    if err == client.E_GONE { return KIND_GONE }
+    if err == client.E_PROTO { return KIND_PROTOCOL }
+    if err == client.E_CRYPTO { return KIND_PROTOCOL }
+    if err == client.E_MEM { return KIND_MEM }
+    if err == client.E_DNS { return KIND_DNS }
+    if err == client.E_RELAY {
+        let rk: u64 = relay_kind(txt, txtlen)
+        if rk == 1 { return KIND_OFFLINE }
+        if rk == 2 { return KIND_BUSY }
+        return KIND_RELAY
+    }
+    return KIND_NETWORK
+}
+
+// worth trying again by itself? A wrong password, a "no" and a protocol mismatch never are.
+fn retryable(kind: u64) -> bool {
+    return kind != KIND_WRONGPW && kind != KIND_DECLINED && kind != KIND_PROTOCOL && kind != KIND_MEM
+}
+
+// seconds to wait before the next automatic attempt; 0 = do not retry. `attempt` = attempts already made
+// since the last live session.
+fn next_retry_s(kind: u64, ever_live: bool, ask: bool, attempt: u64) -> u64 {
+    if ask || !ever_live || !retryable(kind) || attempt >= MAX_RECONNECTS {
+        return 0
+    }
+    return backoff_s(attempt + 1)
+}

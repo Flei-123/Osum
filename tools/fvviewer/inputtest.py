@@ -39,7 +39,7 @@ CTRL, ALT, SHIFT = 0x11, 0x12, 0x10
 cases = [
     ("a", 97, 0, tap_uni(97)),
     ("A (shift)", 65, 2, tap_uni(65)),
-    ("a-umlaut (Latin-1 228)", 228, 0, tap_uni(228)),
+    ("ASCII tilde stays unicode", 126, 0, tap_uni(126)),
     ("space -> named SPACE 15", 32, 0, tap_named(15)),
     ("Enter -> KEY_ENTER 2", 13, 0, tap_named(2)),
     ("Backspace -> 1", 8, 0, tap_named(1)),
@@ -76,6 +76,7 @@ cases = [
     ("Alt+a", 97, 3, combo([ALT], 0x41)),
     ("Alt+5", 53, 3, combo([ALT], 0x35)),
     ("Ctrl+Alt+q (AltGr as modifiers)", 113, 7, combo([CTRL, ALT], 0x51)),
+    ("Ctrl+Shift+Q: shift+ctrl on a letter", 17, 6, combo([CTRL, SHIFT], 0x51)),
     ("unknown 0x7777 ignored", 0x7777, 0, []),
     ("NUL ignored", 0, 0, []),
 ]
@@ -124,6 +125,85 @@ for a in ptr:
     if got != want:
         fails += 1
         print(f"  FAIL  ptr {a}: got '{got}' want '{want}'")
+
+
+def seq(items):
+    out = subprocess.run([IT, "seq"] + [f"{c}:{m}" for c, m in items], capture_output=True, text=True, timeout=20).stdout.split("\n")
+    return out[:len(items)]
+
+
+def hx(msgs):
+    return " ".join(m.hex() for m in msgs)
+
+
+# UTF-8: the OrientOS keyboard sends the OCTETS of a character one key event at a time (decoder state is kept)
+utf = [
+    ("a-umlaut C3 A4 -> U+00E4", [(0xC3, 0), (0xA4, 0)], [hx([]), hx(tap_uni(0xE4))]),
+    ("sharp-s C3 9F -> U+00DF", [(0xC3, 0), (0x9F, 0)], [hx([]), hx(tap_uni(0xDF))]),
+    ("euro E2 82 AC -> U+20AC (AltGr+E)", [(0xE2, 0), (0x82, 0), (0xAC, 0)], [hx([]), hx([]), hx(tap_uni(0x20AC))]),
+    ("emoji F0 9F 98 80 -> U+1F600", [(0xF0, 0), (0x9F, 0), (0x98, 0), (0x80, 0)], [hx([]), hx([]), hx([]), hx(tap_uni(0x1F600))]),
+    ("AltGr+Q arrives as @ (64)", [(64, 0)], [hx(tap_uni(64))]),
+    ("AltGr+7 arrives as { (123)", [(123, 0)], [hx(tap_uni(123))]),
+    ("shift+a-umlaut: shift only stays unicode", [(0xC3, 0), (0x84, 2)], [hx([]), hx(tap_uni(0xC4))]),
+    ("Ctrl+a-umlaut: modifier + unicode", [(0xC3, 0), (0xA4, 5)], [hx([]), hx([vk(CTRL, 0, 1), key(0xE4, 0, 1), key(0xE4, 0, 0), vk(CTRL, 0, 0)])]),
+    ("lone continuation 0xA4 dropped", [(0xA4, 0), (97, 0)], [hx([]), hx(tap_uni(97))]),
+    ("broken sequence: lead then ASCII", [(0xC3, 0), (97, 0)], [hx([]), hx(tap_uni(97))]),
+    ("lead then lead: second one wins", [(0xE2, 0), (0xC3, 0), (0xA4, 0)], [hx([]), hx([]), hx(tap_uni(0xE4))]),
+    ("overlong C0 80 refused", [(0xC0, 0), (0x80, 0), (97, 0)], [hx([]), hx([]), hx(tap_uni(97))]),
+    ("overlong E0 80 80 refused", [(0xE0, 0), (0x80, 0), (0x80, 0)], [hx([]), hx([]), hx([])]),
+    ("surrogate ED A0 80 refused", [(0xED, 0), (0xA0, 0), (0x80, 0)], [hx([]), hx([]), hx([])]),
+    ("above U+10FFFF F4 90 80 80 refused", [(0xF4, 0), (0x90, 0), (0x80, 0), (0x80, 0)], [hx([]), hx([]), hx([]), hx([])]),
+    ("named key during an open sequence", [(0xC3, 0), (13, 0)], [hx([]), hx(tap_named(2))]),
+    ("repeat: 5x z", [(122, 0)] * 5, [hx(tap_uni(122))] * 5),
+]
+for name, items, exp in utf:
+    total += 1
+    got = seq(items)
+    if got != exp:
+        fails += 1
+        print(f"  FAIL  utf8 {name}: got {got} want {exp}")
+
+# reconnect rules == Rust viewer (src/viewer.rs backoff/next_retry/Fail::retryable); E_* ids of lib/fv/client.fi
+E = dict(TCP=1, TLS=2, UPGRADE=3, RELAY=4, AUTH=5, DENIED=6, PROTO=7, IO=8, MEM=9, GONE=10, CRYPTO=11, DNS=12)
+BO = [1, 2, 4, 8, 16, 30, 30, 30]
+for n, w in enumerate(BO, 1):
+    total += 1
+    got = subprocess.run([IT, "backoff", str(n)], capture_output=True, text=True, timeout=20).stdout.strip()
+    if got != str(w):
+        fails += 1
+        print(f"  FAIL  backoff({n}): got {got} want {w}")
+# (err, ever_live, ask, attempt) -> seconds ; 0 = no retry
+rules = []
+for att in range(0, 8):
+    w = BO[att] if att < 6 else 0
+    rules.append(("IO", 1, 0, att, w))
+    rules.append(("GONE", 1, 0, att, w))
+    rules.append(("TCP", 1, 0, att, w))
+    rules.append(("TLS", 1, 0, att, w))
+    rules.append(("UPGRADE", 1, 0, att, w))
+for e in ("AUTH", "DENIED", "PROTO", "CRYPTO", "MEM"):
+    rules.append((e, 1, 0, 0, 0))               # never, even in a live session
+for e in ("IO", "GONE", "TCP", "RELAY", "DNS"):
+    rules.append((e, 0, 0, 0, 0))               # no session was ever live -> error at once
+    rules.append((e, 1, 1, 0, 0))               # ask mode never reconnects silently
+rules.append(("RELAY", 1, 0, 0, 1))              # relay "offline" text is checked in the gate (kind needs the text)
+for e, live, ask, att, want in rules:
+    if e == "RELAY":
+        continue                                  # text-dependent: kind_of(RELAY, text) is covered by the gate
+    total += 1
+    got = subprocess.run([IT, "retry", str(E[e]), str(live), str(ask), str(att)], capture_output=True, text=True, timeout=20).stdout.strip()
+    if got != str(want):
+        fails += 1
+        print(f"  FAIL  retry({e}, live={live}, ask={ask}, attempt={att}): got {got} want {want}")
+
+# clipboard cut: never tear a UTF-8 sequence
+trims = [("41", 1), ("c3a4", 2), ("c3", 0), ("41c3", 1), ("e282ac", 3), ("e282", 0), ("41e282", 1), ("f09f9880", 4), ("f09f98", 0), ("c3a4e2", 2), ("80", 1)]
+for h, want in trims:
+    total += 1
+    got = subprocess.run([IT, "trim", h], capture_output=True, text=True, timeout=20).stdout.strip()
+    if got != str(want):
+        fails += 1
+        print(f"  FAIL  utf8_trim({h}): got {got} want {want}")
 
 print(f"INPUTTEST {total - fails}/{total} ok")
 sys.exit(1 if fails else 0)

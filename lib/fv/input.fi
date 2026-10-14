@@ -19,11 +19,18 @@
 //   * Ctrl+letter arrives as code 1..26 (kernel/kbd.fi) except BS/TAB/ENTER; Ctrl+H and
 //     Ctrl+N have their own codes
 //
+// UTF-8: the OrientOS keyboard delivers every character above 0x7F as its UTF-8 OCTETS,
+// one key event per octet (kernel/drv/hid/kbd.fi, "IN DEN RING GEHT WEITER EIN OKTETT").
+// key_msgs() therefore keeps a small decoder: lead octet -> wait, continuation octets ->
+// collect, last octet -> ONE Key{unicode} (a-umlaut = C3 A4 -> 228, euro = E2 82 AC -> 8364).
+// A broken sequence is dropped; the key that broke it is handled normally.
+//
 // A message i is written at out + i * SLOT; its length is the octet lens[i].
 
 import fv.proto
+import std.rt
 
-export { Rect, rect_new, key_msgs, view_rect, map_pointer, norm_axis, mod_bits,
+export { Rect, rect_new, key_msgs, utf8_trim, utf8_reset, view_rect, map_pointer, norm_axis, mod_bits,
     SLOT, MAX_MSGS, NORM_MAX,
     VK_SHIFT, VK_CTRL, VK_ALT, VK_WIN }
 
@@ -65,6 +72,10 @@ const OK_OLD_RIGHT: u64 = 0x122
 const OK_OLD_UP: u64 = 0x123
 const OK_CTRL_H: u64 = 0x130
 const OK_CTRL_N: u64 = 0x131
+
+static mut u8_acc: u64 = 0
+static mut u8_need: u64 = 0 // continuation octets still missing (0 = no sequence open)
+static mut u8_len: u64 = 0 // total octets of the open sequence
 
 struct Sink {
     out: u64,
@@ -157,7 +168,83 @@ fn mods_down(k: *mut Sink, m: u64, down: bool) {
 }
 
 fn is_printable(c: u64) -> bool {
-    return (c >= 32 && c < 127) || (c >= 160 && c < 256)
+    return c >= 32 && c < 127
+}
+
+fn utf8_reset() {
+    u8_acc = 0
+    u8_need = 0
+    u8_len = 0
+}
+
+// one octet 0x80..0xFF -> finished code point, or 0 (sequence still open / octet dropped).
+// A lead octet always starts a new sequence (an open one was broken).
+fn utf8_feed(b: u64) -> u64 {
+    if b >= 0xC2 && b <= 0xF4 {
+        if b < 0xE0 {
+            u8_need = 1
+            u8_acc = b & 0x1F
+        } else if b < 0xF0 {
+            u8_need = 2
+            u8_acc = b & 0x0F
+        } else {
+            u8_need = 3
+            u8_acc = b & 0x07
+        }
+        u8_len = u8_need + 1
+        return 0
+    }
+    if b >= 0x80 && b < 0xC0 && u8_need > 0 {
+        u8_acc = (u8_acc << 6) | (b & 0x3F)
+        u8_need = u8_need - 1
+        if u8_need > 0 {
+            return 0
+        }
+        let cp: u64 = u8_acc
+        let tl: u64 = u8_len
+        utf8_reset()
+        // overlong forms, surrogates and values above U+10FFFF are not characters
+        if u8_len_of(cp) != tl || (cp >= 0xD800 && cp < 0xE000) || cp > 0x10FFFF {
+            return 0
+        }
+        return cp
+    }
+    utf8_reset()
+    return 0
+}
+
+fn u8_len_of(cp: u64) -> u64 {
+    if cp < 0x80 { return 1 }
+    if cp < 0x800 { return 2 }
+    if cp < 0x10000 { return 3 }
+    return 4
+}
+
+// text of n octets cut at n: step back so no UTF-8 sequence is torn in two (clipboard limit)
+fn utf8_trim(p: u64, n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    var i: u64 = n
+    var back: u64 = 0
+    while i > 0 && back < 4 {
+        let b: u64 = rt.ld8(p, (i - 1) as usize) as u64
+        if b < 0x80 {
+            return n // ends in ASCII: whole
+        }
+        if b >= 0xC0 {
+            // lead octet at i-1: complete when the tail has all its octets
+            var want: u64 = 2
+            if b >= 0xF0 { want = 4 } else if b >= 0xE0 { want = 3 }
+            if n - (i - 1) >= want {
+                return n
+            }
+            return i - 1
+        }
+        i = i - 1
+        back = back + 1
+    }
+    return n
 }
 
 // One OrientOS key event -> wire messages. Returns the number of messages (0 = ignored).
@@ -168,6 +255,18 @@ fn key_msgs(out: u64, lens: u64, code: u64, mod: u64) -> u64 {
     var c: u64 = code
     var vk: u64 = 0 // vk | ext << 8
     var named: u64 = 0
+    var uni: bool = false // c is a decoded code point (printable by construction)
+
+    if c >= 0x80 && c < 0x100 {
+        let cp: u64 = utf8_feed(c)
+        if cp == 0 {
+            return 0
+        }
+        c = cp
+        uni = true
+    } else {
+        utf8_reset()
+    }
 
     // combinations that cannot be injected as plain keys
     if (c == OK_DEL || c == OK_SDEL) && (m & 6) == 6 {
@@ -218,14 +317,15 @@ fn key_msgs(out: u64, lens: u64, code: u64, mod: u64) -> u64 {
         }
     }
 
-    if m == 0 || (m == M_SHIFT && named == 0 && is_printable(c)) {
+    let printable: bool = uni || is_printable(c)
+    if m == 0 || (m == M_SHIFT && named == 0 && printable) {
         // plain
         if named != 0 {
             e_named(k, named, true)
             e_named(k, named, false)
             return sk.n
         }
-        if is_printable(c) {
+        if printable {
             e_uni(k, c, true)
             e_uni(k, c, false)
             return sk.n
@@ -241,7 +341,7 @@ fn key_msgs(out: u64, lens: u64, code: u64, mod: u64) -> u64 {
         mods_down(k, m, false)
         return sk.n
     }
-    if is_printable(c) {
+    if printable {
         // Ctrl/Alt + a character without a virtual key of its own: modifiers + unicode
         mods_down(k, m, true)
         e_uni(k, c, true)
