@@ -2622,7 +2622,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_sockname(state, me, a0, a1, a2, true)
     }
     if number == SYS_SETSOCKOPT {
-        return do_setsockopt(state, me, a0, a1, a2)
+        return do_setsockopt(state, me, a0, a1, a2, a3, a4)
     }
     if number == SYS_GETSOCKOPT {
         return do_getsockopt(state, me, a0, a1, a2, a3, a4)
@@ -13290,14 +13290,12 @@ fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     return sa_out(state, me, addr, lenp, a, port)
 }
 
-// There is exactly one option this kernel could act on and it is the
-// default: a listening socket may be bound again after the connection
-// before it went through TIME_WAIT, because the slot is held by
-// `tcp.fi` and freed by it. So every option is taken and none is acted
-// on -- and that is said here rather than answered with -ENOPROTOOPT,
-// which would make `curl` and `nc` give up for no reason.
+// Options: SO_KEEPALIVE and TCP_KEEPIDLE/KEEPINTVL/KEEPCNT are acted on
+// (N-006, see below and tcp.fi). Every other option is taken and none is
+// acted on -- and that is said here rather than answered with
+// -ENOPROTOOPT, which would make `curl` and `nc` give up for no reason.
 fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
-    name: u64) -> u64 {
+    name: u64, val: u64, optlen: u64) -> u64 {
     if nl_of(state, me, fd) < file.MAX_OPEN {
         return 0
     }
@@ -13305,7 +13303,46 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
     }
-    return 0
+    // N-006: SO_KEEPALIVE (SOL_SOCKET 9) and TCP_KEEPIDLE / TCP_KEEPINTVL /
+    // TCP_KEEPCNT (IPPROTO_TCP 4 / 5 / 6) are acted on; every other option
+    // stays accepted and ignored, as above.
+    var which: u64 = 99
+    if level == 1 && name == 9 {
+        which = inet.KA_ON
+    }
+    if level == 6 && name >= 4 && name <= 6 {
+        which = name - 3
+        if inet.sock_kind(state, si) != inet.SK_TCP {
+            return neg(errno.E_NOPROTOOPT)
+        }
+    }
+    if which == 99 {
+        return 0
+    }
+    if optlen < 4 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, val, 4) {
+        return neg(errno.E_FAULT)
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        v = v | (peek(state, me, val + k) << (k * 8))
+        k = k + 1
+    }
+    // the value is an int: a negative one is out of range, as on Linux
+    if which == inet.KA_IDLE || which == inet.KA_INTVL {
+        if v < 1 || v > 32767 {
+            return neg(errno.E_INVAL)
+        }
+    }
+    if which == inet.KA_CNT {
+        if v < 1 || v > 127 {
+            return neg(errno.E_INVAL)
+        }
+    }
+    return inet.sock_ka_set(state, si, which, v)
 }
 
 // SIOCGIFCONF: struct ifconf { int ifc_len; char *ifc_buf } -> one ifreq (40 bytes) for "eth0" with its address.
@@ -13492,8 +13529,14 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
     var known: bool = false
     if level == 1 {
         // SOL_SOCKET: 2 REUSEADDR, 3 TYPE, 4 ERROR, 7 SNDBUF, 8 RCVBUF, 9 KEEPALIVE, 30 ACCEPTCONN
-        if name == 2 || name == 9 || name == 30 {
+        if name == 2 || name == 30 {
             known = true
+        }
+        if name == 9 {
+            known = true
+            if si < inet.SOCK_MAX {
+                v = inet.sock_ka_get(state, si, inet.KA_ON)
+            }
         }
         if name == 3 {
             known = true
@@ -13516,6 +13559,12 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
     if level == 6 && name == 1 {
         // IPPROTO_TCP, TCP_NODELAY
         known = true
+    }
+    if level == 6 && name >= 4 && name <= 6 && si < inet.SOCK_MAX
+        && inet.sock_kind(state, si) == inet.SK_TCP {
+        // N-006: TCP_KEEPIDLE (4), TCP_KEEPINTVL (5), TCP_KEEPCNT (6)
+        known = true
+        v = inet.sock_ka_get(state, si, name - 3)
     }
     if !known {
         return neg(errno.E_NOPROTOOPT)

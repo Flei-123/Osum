@@ -84,7 +84,8 @@ export {
     sock_acceptable, sock_hup,
     sock_nonblock, sock_set_nonblock,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
-    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED
+    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE,
+    sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT
 , dhcp_set, dhcp_get}
 
 // ------------------------------------------- the K8 part of the scalars
@@ -147,6 +148,20 @@ const SK_ICMP: u64 = 3
 const SF_LISTEN: u64 = 1
 const SF_NONBLOCK: u64 = 2
 const SF_CONNECTED: u64 = 4
+// N-006: SO_KEEPALIVE and the three TCP_KEEP* values live in the flag word of
+// the socket so that they survive until the connection exists (a program sets
+// them between socket() and connect()). Bits 8..22 idle seconds, 23..37
+// interval seconds, 38..44 probe count; 0 in a field = the Linux default.
+// Linux limits: TCP_KEEPIDLE/INTVL 1..32767, TCP_KEEPCNT 1..127.
+const SF_KEEPALIVE: u64 = 8
+const KA_MASK: u64 = 0x1FFFFFFFFF08 // SF_KEEPALIVE + all three values
+const KA_IDLE_DEF: u64 = 7200
+const KA_INTVL_DEF: u64 = 75
+const KA_CNT_DEF: u64 = 9
+const KA_ON: u64 = 0
+const KA_IDLE: u64 = 1
+const KA_INTVL: u64 = 2
+const KA_CNT: u64 = 3
 
 const NOHANDLE: u64 = 0xFFFFFFFF
 
@@ -1117,7 +1132,9 @@ fn sock_accept(state: u64, i: u64) -> u64 {
         return errno.neg(errno.E_NFILE)
     }
     kstate.set(state, so_at(n) + SO_H, h as u64)
-    kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED)
+    // N-006: an accepted connection inherits keepalive from its listener (as on Linux).
+    kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED | (sock_flags(state, i) & KA_MASK))
+    ka_apply(state, n)
     // ROUND NETMON: the accepted connection carries the port of the
     // listener and the address of whoever called. `sys.do_accept` is
     // what gives it an owner; the numbers belong here, where the handle
@@ -1133,6 +1150,76 @@ fn sock_accept(state: u64, i: u64) -> u64 {
     netmon.sset(state, n, netmon.S_RADDR, aip)
     netmon.sset(state, n, netmon.S_RPORT, apt)
     return n
+}
+
+// N-006: the keepalive setting of a socket (which: KA_ON / KA_IDLE / KA_INTVL /
+// KA_CNT), with the defaults filled in.
+fn sock_ka_get(state: u64, i: u64, which: u64) -> u64 {
+    let f: u64 = sock_flags(state, i)
+    if which == KA_ON {
+        if (f & SF_KEEPALIVE) != 0 {
+            return 1
+        }
+        return 0
+    }
+    var v: u64 = 0
+    if which == KA_IDLE {
+        v = (f >> 8) & 0x7FFF
+        if v == 0 {
+            v = KA_IDLE_DEF
+        }
+    } else if which == KA_INTVL {
+        v = (f >> 23) & 0x7FFF
+        if v == 0 {
+            v = KA_INTVL_DEF
+        }
+    } else {
+        v = (f >> 38) & 0x7F
+        if v == 0 {
+            v = KA_CNT_DEF
+        }
+    }
+    return v
+}
+
+// Hand the setting of socket `i` to its connection, if it has one yet.
+fn ka_apply(state: u64, i: u64) {
+    let h: u64 = sock_handle(state, i)
+    if sock_kind(state, i) != SK_TCP || h == NOHANDLE {
+        return
+    }
+    var on: bool = false
+    if sock_ka_get(state, i, KA_ON) == 1 {
+        on = true
+    }
+    let idle: u64 = sock_ka_get(state, i, KA_IDLE) * 1000000
+    let intvl: u64 = sock_ka_get(state, i, KA_INTVL) * 1000000
+    let cnt: u64 = sock_ka_get(state, i, KA_CNT)
+    let flags: u64 = hold(state)
+    stack.net_keepalive(st(state), h as i32, on, idle, intvl, cnt as u32,
+        now_us(state))
+    drop_lock(state, flags)
+}
+
+// Set one value (the range is checked by the caller). Returns 0.
+fn sock_ka_set(state: u64, i: u64, which: u64, v: u64) -> u64 {
+    var f: u64 = sock_flags(state, i)
+    if which == KA_ON {
+        if v != 0 {
+            f = f | SF_KEEPALIVE
+        } else {
+            f = f & ~SF_KEEPALIVE
+        }
+    } else if which == KA_IDLE {
+        f = (f & ~(0x7FFF << 8)) | (v << 8)
+    } else if which == KA_INTVL {
+        f = (f & ~(0x7FFF << 23)) | (v << 23)
+    } else {
+        f = (f & ~(0x7F << 38)) | (v << 38)
+    }
+    kstate.set(state, so_at(i) + SO_FLAGS, f)
+    ka_apply(state, i)
+    return 0
 }
 
 fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
@@ -1158,6 +1245,7 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
         return errno.neg(errno.E_NFILE)
     }
     kstate.set(state, so_at(i) + SO_H, h as u64)
+    ka_apply(state, i)
     // ROUND NETMON: THE LOCAL PORT, NOW AND NOT LATER. An outgoing
     // connection has no port until the stack picks one, and after this
     // call it has. Every frame of this connection carries that number,

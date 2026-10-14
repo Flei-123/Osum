@@ -43,7 +43,7 @@ GATE_AREAS = {
           "region clip2 umlaut i18n english rtl guieditor dmodul progsize disklag",
     "apps": "k11 k13 k16 k18 account actionbus presence social store update ota install usbimg stick init logind svclog multiuser "
             "clip2 print handle async entry loader",
-    "net": "net netzplus netzui netview netmon hwnet tunnel sshd wlan sync poll ebpf",
+    "net": "net keepalive netzplus netzui netview netmon hwnet tunnel sshd wlan sync poll ebpf",
     "fs": "ofs3 fsrobust fremdfs k14 disks storage mem oom hardening",
     "core": "smp multicore execsmp elfsmp kernel osum core freestanding guard kvm hv pci ahci aml arm metal metal2 caps boot "
             "mem oom zreap time vsync suspend",

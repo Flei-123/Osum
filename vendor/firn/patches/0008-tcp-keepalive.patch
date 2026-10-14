@@ -1,0 +1,189 @@
+# vendor/firn/patches/0008-tcp-keepalive.patch
+#
+# OSUM N-006 (14.10.2026) -- REAL TCP KEEPALIVE (RFC 1122 4.2.3.6).
+#
+# WHY. SO_KEEPALIVE was accepted and did nothing: a connection whose peer
+# vanished (cable pulled, host crashed, NAT entry gone) stayed ESTABLISHED
+# for ever, because an idle connection sends nothing and so nothing times out.
+#
+# WHAT. Per connection: ka_on, ka_idle, ka_intvl, ka_cnt, ka_last (time of
+# the last segment received), ka_sent. tcp.emit sends an empty ACK with
+# seq = snd_nxt - 1 after ka_idle of silence and then every ka_intvl; the peer
+# must answer it with an ACK. After ka_cnt unanswered probes the connection is
+# reset (RST out) and its owner reads E_TIMEOUT. Any received segment resets
+# the count. Counters ST_KEEPALIVE / ST_KA_DEAD. API: tcp_set_keepalive,
+# tcp_keepalive_get (stack.net_keepalive, net_keepalive_get).
+#
+# WHY A PATCH AND NOT FIRN: see 0006 -- the pin stays the pin.
+#
+--- a/net/stack.fi
++++ b/net/stack.fi
+@@ -39,6 +39,7 @@
+     net_size, net_init, net_input, net_output, net_poll,
+     net_listen, net_accept, net_connect, net_send, net_recv, net_close,
+     net_abort, net_state, net_error, net_readable, net_writable,
++    net_keepalive, net_keepalive_get,
+     net_tcp, net_ip, net_mac_at, net_set_arp_ttl, net_stat,
+     net_arp_find, net_arp_learn, net_arp_valid, net_pending,
+     udp_bind, udp_send, udp_recv, udp_close,
+@@ -652,6 +653,13 @@
+     return tcp.tcp_recv(&(*s).t, h, p, n)
+ }
+ 
++fn net_keepalive(s: *mut Stack, h: i32, on: bool, idle_us: u64, intvl_us: u64,
++    cnt: u32, now: u64) {
++    tcp.tcp_set_keepalive(&(*s).t, h, on, idle_us, intvl_us, cnt, now)
++}
++fn net_keepalive_get(s: *mut Stack, h: i32, which: u32) -> u64 {
++    return tcp.tcp_keepalive_get(&(*s).t, h, which)
++}
+ fn net_close(s: *mut Stack, h: i32) { tcp.tcp_close(&(*s).t, h) }
+ fn net_abort(s: *mut Stack, h: i32) { tcp.tcp_abort(&(*s).t, h) }
+ fn net_state(s: *mut Stack, h: i32) -> u32 { return tcp.tcp_state(&(*s).t, h) }
+--- a/net/tcp.fi
++++ b/net/tcp.fi
+@@ -61,6 +61,7 @@
+     ST_RX, ST_TX, ST_REXMIT, ST_CSUM, ST_UNACCEPTABLE, ST_OOO, ST_RST_TX,
+     ST_BAD_ACK, ST_FAST_REXMIT, ST_PROBE, ST_DELACK, ST_DUPACK,
+     ST_PAWS, ST_SACK_RX, ST_SACK_TX, ST_REXMIT_SACK, ST_MTU_DOWN, ST_TW_REUSE,
++    ST_KEEPALIVE, ST_KA_DEAD, tcp_set_keepalive, tcp_keepalive_get,
+ }
+ 
+ // ===================================================================
+@@ -187,7 +188,9 @@
+ const ST_REXMIT_SACK: u32 = 15 // Wiederholungen, die SACK ausgewaehlt hat
+ const ST_MTU_DOWN: u32 = 16    // "fragmentation needed" hat die MSS gesenkt
+ const ST_TW_REUSE: u32 = 17    // a TIME_WAIT slot handed to a new connection
+-const ST_COUNT: usize = 18
++const ST_KEEPALIVE: u32 = 18  // keepalive probes sent
++const ST_KA_DEAD: u32 = 19    // connections reset because the peer stayed silent
++const ST_COUNT: usize = 20
+ 
+ // ===================================================================
+ // 2. the state of one connection
+@@ -268,6 +271,20 @@
+     in_recovery: u32,
+     recover: u32,
+ 
++    // OSUM N-006: TCP keepalive (RFC 1122 4.2.3.6). `ka_last` is the time of
++    // the last segment RECEIVED on this connection; with `ka_on` set, a
++    // connection that has been silent for `ka_idle` gets an empty ACK with
++    // sequence number snd_nxt - 1 every `ka_intvl`, at most `ka_cnt`
++    // times. Any segment that comes back resets `ka_sent`; if none does,
++    // the connection is reset and its owner sees E_TIMEOUT.
++    ka_on: u32,
++    ka_cnt: u32,
++    ka_sent: u32,
++    ka_idle: u64,
++    ka_intvl: u64,
++    ka_last: u64,
++    ka_at: u64,
++
+     // congestion control and the round trip time
+     mss: u32,
+     cwnd: u32,
+@@ -336,7 +353,7 @@
+     // bounds in '[u64; 12]' at net/tcp.fi:384` -- der Kern blieb beim
+     // ersten `tcp_init` stehen. Die Sprachpruefung hat den Fehler
+     // gefunden, nicht der Mensch.
+-    stat: [u64; 18],
++    stat: [u64; 20],
+ 
+     // Every state any connection of this stack has ever ENTERED, one
+     // bit per state. A claim that a state machine has eleven states is
+@@ -505,6 +522,13 @@
+     (*c).rexmit_ptr = 0
+     (*c).in_recovery = 0
+     (*c).recover = 0
++    (*c).ka_on = 0
++    (*c).ka_cnt = 9
++    (*c).ka_sent = 0
++    (*c).ka_idle = 7200000000
++    (*c).ka_intvl = 75000000
++    (*c).ka_last = 0
++    (*c).ka_at = 0
+ }
+ 
+ // A free slot. When all MAXCONN slots are taken, the TIME_WAIT slot
+@@ -642,6 +666,37 @@
+     if on { (*t).c[h as usize].nodelay = 1 } else { (*t).c[h as usize].nodelay = 0 }
+ }
+ 
++// N-006: SO_KEEPALIVE / TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT of one
++// connection, in microseconds. The caller has checked the ranges.
++fn tcp_set_keepalive(t: *mut Tcp, h: i32, on: bool, idle_us: u64, intvl_us: u64,
++    cnt: u32, now: u64) {
++    if h < 0 { return }
++    let c: *mut Tcb = tcb(t, h as usize)
++    if (*c).used == 0 { return }
++    (*c).ka_idle = idle_us
++    (*c).ka_intvl = intvl_us
++    (*c).ka_cnt = cnt
++    if on {
++        if (*c).ka_on == 0 { (*c).ka_sent = 0 }
++        (*c).ka_on = 1
++        if (*c).ka_last == 0 { (*c).ka_last = now }
++    } else {
++        (*c).ka_on = 0
++        (*c).ka_sent = 0
++    }
++}
++
++// which: 0 on, 1 idle us, 2 intvl us, 3 cnt, 4 probes sent so far
++fn tcp_keepalive_get(t: *mut Tcp, h: i32, which: u32) -> u64 {
++    if h < 0 { return 0 }
++    let c: *mut Tcb = tcb(t, h as usize)
++    if which == 0 { return (*c).ka_on as u64 }
++    if which == 1 { return (*c).ka_idle }
++    if which == 2 { return (*c).ka_intvl }
++    if which == 3 { return (*c).ka_cnt as u64 }
++    return (*c).ka_sent as u64
++}
++
+ fn tcp_set_time_wait(t: *mut Tcp, us: u64) { (*t).time_wait_us = us }
+ fn tcp_set_rto_min(t: *mut Tcp, us: u64) { (*t).rto_min = us }
+ fn tcp_set_no_rexmit(t: *mut Tcp, on: bool) {
+@@ -1471,6 +1526,9 @@
+     let st0: u32 = (*c).state
+ 
+     if st0 == S_CLOSED { return }
++    // N-006: whatever arrives, even a refused probe's ACK, proves the peer lives.
++    (*c).ka_last = now
++    (*c).ka_sent = 0
+     if st0 == S_SYN_SENT {
+         syn_sent_step(t, c, seg, now)
+         return
+@@ -2193,6 +2251,33 @@
+         (*c).seg_since_ack = 0
+         return seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 0, false, now)
+     }
++
++    // N-006: KEEPALIVE. Only an idle connection is probed: nothing unacked
++    // (the retransmission timer already kills a dead peer then) and no
++    // zero-window probe running (it elicits an answer itself).
++    if (*c).ka_on == 1 && (st == S_ESTABLISHED || st == S_CLOSE_WAIT)
++    && (*c).rt_on == 0 && (*c).persist_on == 0 {
++        var due: u64 = (*c).ka_last + (*c).ka_idle
++        if (*c).ka_sent > 0 { due = (*c).ka_at }
++        if now >= due {
++            if (*c).ka_sent >= (*c).ka_cnt {
++                // every probe went unanswered: reset it, the owner reads E_TIMEOUT
++                let rn: usize = seg_build(t, c, buf, cap, wire.F_RST, (*c).snd_nxt, 0, false, now)
++                bump(t, ST_KA_DEAD)
++                if rn > 0 { bump(t, ST_RST_TX) }
++                dead(t, c, E_TIMEOUT)
++                return rn
++            }
++            // an empty segment one octet BEFORE snd_nxt is outside the peer's
++            // window, so it must answer with an ACK (RFC 1122 4.2.3.6)
++            let kn: usize = seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt -% 1, 0, false, now)
++            if kn == 0 { return 0 }
++            (*c).ka_sent = (*c).ka_sent + 1
++            (*c).ka_at = now + (*c).ka_intvl
++            bump(t, ST_KEEPALIVE)
++            return kn
++        }
++    }
+     return 0
+ }
+ 
