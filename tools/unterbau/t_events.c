@@ -169,7 +169,20 @@ int main(void)
     }
     errno = 0; r = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
     CHECKC("socketpair_dgram", r == 0);
-    if (r == 0) { (void)!send(sv[0], "d1", 2, 0); (void)!send(sv[0], "d2", 2, 0); char b[8]; ssize_t a = recv(sv[1], b, sizeof b, 0), c = recv(sv[1], b, sizeof b, 0); CHECK("dgram_boundaries", a == 2 && c == 2, "message boundaries lost: %zd %zd", a, c); }
+    if (r == 0) { (void)!send(sv[0], "d1", 2, 0); (void)!send(sv[0], "d2", 2, 0); char b[8]; ssize_t a = recv(sv[1], b, sizeof b, 0), c = recv(sv[1], b, sizeof b, 0); CHECK("dgram_boundaries", a == 2 && c == 2, "message boundaries lost: %zd %zd", a, c);
+        /* a short buffer takes the head of ONE datagram, the rest of that datagram is dropped (no stream leftovers) */
+        (void)!send(sv[0], "abcdef", 6, 0); (void)!send(sv[0], "xy", 2, 0); char sb[3] = { 0 }; ssize_t t1 = recv(sv[1], sb, 3, 0); char nb[8] = { 0 }; ssize_t t2 = recv(sv[1], nb, sizeof nb, 0);
+        CHECK("dgram_short_buffer", t1 == 3 && !memcmp(sb, "abc", 3) && t2 == 2 && !memcmp(nb, "xy", 2), "short read: %zd then %zd", t1, t2);
+        /* both directions, and a big datagram arrives whole */
+        char big[1500], bo[1600]; memset(big, 'q', sizeof big); ssize_t sw = send(sv[1], big, sizeof big, 0); (void)!send(sv[1], "z", 1, 0); ssize_t br = recv(sv[0], bo, sizeof bo, 0); char zb[2]; ssize_t zr = recv(sv[0], zb, sizeof zb, 0);
+        CHECK("dgram_big_both_ways", sw == (ssize_t)sizeof big && br == (ssize_t)sizeof big && !memcmp(bo, big, sizeof big) && zr == 1 && zb[0] == 'z', "big dgram: sent %zd got %zd then %zd", sw, br, zr);
+        /* nonblocking read of an empty datagram socket */
+        int fl = fcntl(sv[1], F_GETFL); (void)!fcntl(sv[1], F_SETFL, fl | O_NONBLOCK); errno = 0; ssize_t er = recv(sv[1], nb, sizeof nb, 0);
+        CHECK("dgram_empty_eagain", er < 0 && errno == EAGAIN, "empty nonblocking recv: %zd errno %d", er, errno);
+        /* poll sees a pending datagram */
+        (void)!send(sv[0], "p", 1, 0); struct pollfd dp = { sv[1], POLLIN, 0 }; int pr = poll(&dp, 1, 100);
+        CHECK("dgram_poll_in", pr == 1 && (dp.revents & POLLIN), "poll on pending dgram: %d rev 0x%x", pr, dp.revents);
+        close(sv[0]); close(sv[1]); }
 
     /* ---- named AF_UNIX socket in the file system: bind/listen/accept/connect */
     int ls = socket(AF_UNIX, SOCK_STREAM, 0); struct sockaddr_un sa = { .sun_family = AF_UNIX }; strcpy(sa.sun_path, "/tmp/ub.sock"); unlink(sa.sun_path);

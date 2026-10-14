@@ -91,7 +91,7 @@ export {
     socks_live, shms_live, bytes_moved, fds_moved,
     USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
-    UK_FREE, UK_STREAM
+    UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, recv_dgram, dgram_room
 }
 
 // ============================================================ DIE LAGE
@@ -206,6 +206,8 @@ const RING_USABLE: u64 = 4032 // RING_CAP - RING_DATA
 
 const UK_FREE: u64 = 0
 const UK_STREAM: u64 = 1
+const UK_DGRAM: u64 = 2 // socketpair(SOCK_DGRAM): ring of frames, each = 4-byte length + payload (message boundaries kept)
+const DGRAM_HDR: u64 = 4
 
 const S_FREE: u64 = 0
 const S_OPEN: u64 = 1 // angelegt, weder gebunden noch verbunden
@@ -822,6 +824,105 @@ fn recv_bytes(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     while o < n {
         kstate.set8(state + dst + o,
             rd8(r + RING_DATA + h) as u8)
+        h = h + 1
+        if h >= RING_USABLE {
+            h = 0
+        }
+        o = o + 1
+    }
+    kstate.set(state, sk_at(i) + SK_HEAD, h)
+    return n
+}
+
+// ------------------------------------------- SOCK_DGRAM (socketpair only)
+//
+// A datagram socket uses the same ring as a stream socket, but every message is stored as a frame: 4 length bytes (little endian), then the
+// payload. A frame is written whole or not at all (-EAGAIN when the ring has no room, -EMSGSIZE when it can never fit); a read takes exactly one
+// frame and drops what does not fit into the caller's buffer (Linux does the same without MSG_TRUNC).
+
+// Largest payload that fits into an empty ring.
+fn dgram_room(state: u64, i: u64) -> u64 {
+    let r: u64 = room(state, i)
+    if r <= DGRAM_HDR {
+        return 0
+    }
+    return r - DGRAM_HDR
+}
+
+fn send_dgram(state: u64, i: u64, src: u64, len: u64) -> u64 {
+    if i >= USOCK_MAX {
+        return errno.E_BADF
+    }
+    let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
+    if p >= USOCK_MAX {
+        return errno.E_PIPE
+    }
+    let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
+    if r == 0 {
+        return errno.E_PIPE
+    }
+    if len + DGRAM_HDR + 1 >= RING_USABLE {
+        return errno.E_MSGSIZE
+    }
+    if room(state, p) < len + DGRAM_HDR {
+        return errno.E_AGAIN
+    }
+    var t: u64 = kstate.get(state, sk_at(p) + SK_TAIL)
+    var o: u64 = 0
+    while o < DGRAM_HDR {
+        wr8(r + RING_DATA + t, (len >> (o * 8)) & 0xFF)
+        t = t + 1
+        if t >= RING_USABLE {
+            t = 0
+        }
+        o = o + 1
+    }
+    o = 0
+    while o < len {
+        wr8(r + RING_DATA + t, kstate.get8(state + src + o))
+        t = t + 1
+        if t >= RING_USABLE {
+            t = 0
+        }
+        o = o + 1
+    }
+    kstate.set(state, sk_at(p) + SK_TAIL, t)
+    kstate.add(state, UCNT_OFF + C_BYTES, len)
+    return len
+}
+
+// Take ONE frame from the own ring. Returns the bytes copied (at most `len`); the rest of the frame is dropped. 0 when nothing is waiting.
+fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
+    if i >= USOCK_MAX {
+        return errno.E_BADF
+    }
+    let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
+    if r == 0 {
+        return 0
+    }
+    if waiting(state, i) < DGRAM_HDR {
+        return 0
+    }
+    var h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
+    var mlen: u64 = 0
+    var o: u64 = 0
+    while o < DGRAM_HDR {
+        mlen = mlen | (rd8(r + RING_DATA + h) << (o * 8))
+        h = h + 1
+        if h >= RING_USABLE {
+            h = 0
+        }
+        o = o + 1
+    }
+    var n: u64 = mlen
+    if n > len {
+        n = len
+    }
+    o = 0
+    while o < mlen {
+        if o < n {
+            kstate.set8(state + dst + o, rd8(r + RING_DATA + h) as u8)
+        }
         h = h + 1
         if h >= RING_USABLE {
             h = 0
