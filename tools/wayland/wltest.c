@@ -143,8 +143,8 @@ int main(int argc, char **argv, char **envp)
     long bad = sysc(SYS_socket, 99, SOCK_STREAM, 0, 0, 0, 0);
     ok("GEGENPROBE: AF_99 wird abgewiesen", bad < 0);
 
-    long dg = sysc(SYS_socket, AF_UNIX, 2, 0, 0, 0, 0);
-    ok("GEGENPROBE: AF_UNIX+SOCK_DGRAM wird abgewiesen", dg < 0);
+    long dg = sysc(SYS_socket, AF_UNIX, 5, 0, 0, 0, 0);
+    ok("GEGENPROBE: AF_UNIX+SOCK_SEQPACKET wird abgewiesen", dg < 0);
 
     outs("\n2. binden und lauschen\n");
     struct sockaddr_un sa;
