@@ -17551,8 +17551,12 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         return neg(errno.E_BADF)
     }
     let nonblock: bool = (file.open_flags(state, of) & UB_O_NONBLOCK) != 0
+    let dg: bool = unixsock.sock_kind(state, si) == unixsock.UK_DGRAM
     var n: u64 = len
     if n > MSG_MAX {
+        if dg && writing {
+            return neg(errno.E_MSGSIZE)
+        }
         n = MSG_MAX
     }
     if !proc.user_ok(state, me, buf, n) {
@@ -17564,7 +17568,14 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         }
         var waitw: u64 = 0
         var free: u64 = unixsock.room(state, unixsock.sock_peer(state, si))
-        while free == 0 {
+        if dg {
+            // a datagram goes in whole: wait until the frame (4 length bytes + payload) fits, never cut it
+            if n + 5 >= unixsock.RING_CAP - 64 {
+                return neg(errno.E_MSGSIZE)
+            }
+            free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
+        }
+        while free == 0 || (dg && free < n) {
             if nonblock {
                 return neg(errno.E_AGAIN)
             }
@@ -17574,6 +17585,9 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
             waitw = waitw + 1
             sched.sleep_ticks(state, 1)
             free = unixsock.room(state, unixsock.sock_peer(state, si))
+            if dg {
+                free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
+            }
         }
         if n > free {
             n = free
@@ -17581,7 +17595,12 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         if !copy_in(state, me, state + WL_SCRATCH, buf, n) {
             return neg(errno.E_FAULT)
         }
-        let w: u64 = unixsock.send_bytes(state, si, WL_SCRATCH, n)
+        var w: u64 = 0
+        if dg {
+            w = unixsock.send_dgram(state, si, WL_SCRATCH, n)
+        } else {
+            w = unixsock.send_bytes(state, si, WL_SCRATCH, n)
+        }
         if errno.is_error(w) {
             return neg(w)
         }
@@ -17599,7 +17618,12 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         waited = waited + 1
         sched.sleep_ticks(state, 1)
     }
-    let r: u64 = unixsock.recv_bytes(state, si, WL_SCRATCH, n)
+    var r: u64 = 0
+    if dg {
+        r = unixsock.recv_dgram(state, si, WL_SCRATCH, n)
+    } else {
+        r = unixsock.recv_bytes(state, si, WL_SCRATCH, n)
+    }
     if errno.is_error(r) {
         return neg(r)
     }
@@ -17727,17 +17751,21 @@ fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv:
     if domain != AF_UNIX {
         return neg(errno.E_AFNOSUPPORT)
     }
-    if (kind & 0xFF) != SOCK_STREAM || protocol != 0 {
+    if ((kind & 0xFF) != SOCK_STREAM && (kind & 0xFF) != SOCK_DGRAM) || protocol != 0 {
         return neg(errno.E_PROTONOSUPPORT)
     }
     if !proc.user_ok(state, me, sv, 8) {
         return neg(errno.E_FAULT)
     }
-    let a: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    var uk: u64 = unixsock.UK_STREAM
+    if (kind & 0xFF) == SOCK_DGRAM {
+        uk = unixsock.UK_DGRAM
+    }
+    let a: u64 = unixsock.sock_new(state, uk)
     if a >= unixsock.USOCK_MAX {
         return neg(errno.E_NFILE)
     }
-    let b: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    let b: u64 = unixsock.sock_new(state, uk)
     if b >= unixsock.USOCK_MAX {
         unixsock.sock_free(state, a)
         return neg(errno.E_NFILE)
