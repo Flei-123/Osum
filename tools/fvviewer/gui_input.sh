@@ -23,10 +23,14 @@ D=$(mktemp -d); trap 'bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null; pkill 
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD" "$D/th"
 RES=${GUI_RES:-1280x800}
-BASEPORT=$(( 23000 + ($$ % 1500) * 2 ))
-RP=$BASEPORT; TP=$((BASEPORT+1))
 PW=testpass123
+TRY=0
+MAXTRY=${GUI_INPUT_TRIES:-3}
+attempt() {
+BASEPORT=$(( 23000 + (($$ + 7 * TRY) % 1500) * 2 ))
+RP=$BASEPORT; TP=$((BASEPORT+1))
 TLS=0; [ "$MODE" = tls ] && TLS=1
+rm -rf "$D/th" "$D/out" "$D/script.txt"; mkdir -p "$D/th"
 ID=$(bash tools/fvviewer/th.sh "$D/th" up "$RP" "$([ "$TLS" = 1 ] && echo "$TP")") || { echo "  FAIL  test host stack did not start"; exit 1; }
 echo "== gui_input ($MODE): relay $RP host id $ID =="
 if [ "$TLS" = 1 ]; then
@@ -62,6 +66,7 @@ warte 1
 tippe $PW
 warte 1
 klickauf fvrectgo
+warteauf 'fvviewer: connect start id_len=${#ID} pw_len=${#PW}' || 20
 warteauf 'fvviewer: state live' || 120
 # clipboard scenarios run by themselves (unicode, then the oversize text) -> wait for their echo
 warteauf 'fvviewer: clip unicode echo ok' || 60
@@ -155,6 +160,20 @@ EOF
 DESIGNBUILD="$BUILD" EH_APPEND=rtcutc EH_APP_PROGS=fvviewer \
     EH_MKFS_EXTRA="/etc/fvviewer.test=$D/fvviewer.test@0644 /etc/fvviewer-ca.pem=$D/ca.pem@0644 /apps/ /apps/fvviewer.osp/ /apps/fvviewer.osp/INFO=pakete/fvviewer/INFO@0644 /apps/fvviewer.osp/start@/bin/fvviewer" \
     timeout 1700 bash tools/design/eh6.sh "$D/out" "res=$RES" accel=kvm netz=ja moreprogs=fvviewer tafel=nein "drehbuch=$D/script.txt" > "$D/eh6.log" 2>&1
+}
+while :; do
+    attempt
+    # guard: the viewer logs the field lengths when "Verbinden" is pressed. A lost key press while typing the
+    # ID or the password (OrientOS drops keys under load) makes the length differ -> wrong run, type again.
+    first=$(grep -a -m1 'fvviewer: connect start' "$D/out/serial.txt" 2>/dev/null)
+    case "$first" in
+        *"id_len=${#ID} pw_len=${#PW}"*) break ;;
+    esac
+    TRY=$((TRY+1))
+    echo "  INFO  typing check failed ('${first:-no connect line}', wanted id_len=${#ID} pw_len=${#PW}) -> try $TRY/$MAXTRY"
+    bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null
+    [ "$TRY" -ge "$MAXTRY" ] && { echo "  FAIL  typing check: id/password never typed completely in $MAXTRY runs"; break; }
+done
 grep -a 'FEHLGESCHLAGEN\|NICHT DA\|Traceback\|KEIN RECHTECK' "$D/eh6.log" | head -12
 if [ -n "${GUI_KEEP:-}" ]; then mkdir -p "$GUI_KEEP"; cp "$D"/out/*.ppm "$D"/out/serial.txt "$D"/th/input.log "$D"/th/host.log "$D"/script.txt "$D"/eh6.log "$GUI_KEEP/" 2>/dev/null; fi
 python3 -I tools/fvviewer/gui_input.py "$D/out/serial.txt" "$D/th/input.log"

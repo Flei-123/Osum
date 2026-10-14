@@ -1479,6 +1479,9 @@ def main():
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "?": "shift-slash",
                      "&": "shift-7", "%": "shift-5"}
+            # a doubled letter ("ss" in testpass123) is lost at 0.12 s (measured, FreeViewer gui_input gate)
+            if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):
+                tippe_gap = max(tippe_gap, 0.4)
             for ch in arg:
                 f.taste(namen.get(ch, ch))
                 time.sleep(tippe_gap)
