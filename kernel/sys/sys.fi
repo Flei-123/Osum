@@ -7109,6 +7109,66 @@ fn do_uname(state: u64, me: u64, aus: u64) -> u64 {
 
 // RUNDE FREMDLAND: `prctl`. Nur die Unterbefehle, die dieser Kern
 // wahrheitsgemaess beantworten kann.
+
+// RUNDE LC1: the process name (comm) -- 15 characters in T_COMMA (0..7) and T_COMMB (8..14); `buf` is a kernel buffer of >= 16 octets.
+fn comm_store(state: u64, t: u64, buf: u64) {
+    var a: u64 = 0
+    var b: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        a = a | (kstate.get8(buf + i) << (i * 8))
+        i = i + 1
+    }
+    i = 0
+    while i < 7 {
+        b = b | (kstate.get8(buf + 8 + i) << (i * 8))
+        i = i + 1
+    }
+    sched.tset(state, t, sched.T_COMMA, a)
+    sched.tset(state, t, sched.T_COMMB, b)
+}
+
+fn comm_load(state: u64, t: u64, buf: u64) {
+    let a: u64 = sched.tget(state, t, sched.T_COMMA)
+    let b: u64 = sched.tget(state, t, sched.T_COMMB)
+    var i: u64 = 0
+    while i < 8 {
+        kstate.set8(buf + i, ((a >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+    i = 0
+    while i < 7 {
+        kstate.set8(buf + 8 + i, ((b >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+    kstate.set8(buf + 15, 0 as u8)
+}
+
+fn comm_inherit(state: u64, from: u64, to: u64) {
+    sched.tset(state, to, sched.T_COMMA, sched.tget(state, from, sched.T_COMMA))
+    sched.tset(state, to, sched.T_COMMB, sched.tget(state, from, sched.T_COMMB))
+}
+
+// exec: comm = the last component of the path, cut to 15 characters (what Linux does)
+fn comm_from_path(state: u64, t: u64, path: u64) {
+    var start: u64 = 0
+    var i: u64 = 0
+    while kstate.get8(path + i) != 0 {
+        if kstate.get8(path + i) == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var nb: [u8; 17] = [0 as u8; 17]
+    let np: u64 = (&nb[0]) as u64
+    var k: u64 = 0
+    while k < 15 && kstate.get8(path + start + k) != 0 {
+        kstate.set8(np + k, kstate.get8(path + start + k) as u8)
+        k = k + 1
+    }
+    comm_store(state, t, np)
+}
+
 const PR_SET_NAME: u64 = 15
 const PR_GET_NAME: u64 = 16
 const PR_GET_DUMPABLE: u64 = 3
@@ -7119,11 +7179,36 @@ fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
     // anzunehmen ist richtig -- der Aufrufer verlangt keine Wirkung, die
     // er nachpruefen koennte; `PR_GET_NAME` dagegen MUSS scheitern,
     // sonst laese der Aufrufer einen Puffer, den niemand gefuellt hat.
+    // RUNDE LC1: the name is real now (two words of the task record, 15 characters): SET stores, GET gives back what was stored
+    // (or the name exec gave: the last path component of the program), so `prctl(PR_SET_NAME)` / `PR_GET_NAME` round-trip.
     if was == PR_SET_NAME {
+        var nb: [u8; 17] = [0 as u8; 17]
+        let np: u64 = (&nb[0]) as u64
+        var k: u64 = 0
+        var more: bool = true
+        while k < 15 && more {
+            if !proc.user_ok(state, me, arg + k, 1) {
+                return neg(errno.E_FAULT)
+            }
+            let c: u64 = peek(state, me, arg + k)
+            if c == 0 {
+                more = false
+            } else {
+                kstate.set8(np + k, c as u8)
+                k = k + 1
+            }
+        }
+        comm_store(state, me, np)
         return 0
     }
     if was == PR_GET_NAME {
-        return neg(errno.E_INVAL)
+        var gb: [u8; 17] = [0 as u8; 17]
+        let gp: u64 = (&gb[0]) as u64
+        comm_load(state, me, gp)
+        if !copy_out(state, me, arg, gp, 16) {
+            return neg(errno.E_FAULT)
+        }
+        return 0
     }
     // Kernschreiben gibt es nicht, also ist "nicht abbildbar" die
     // Wahrheit und 0 die richtige Antwort auf die Frage.
@@ -9067,6 +9152,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     ctr.inherit(state, me, faden)
     // AB-003: a thread is its process -- same origin.
     origin.inherit(state, me, faden)
+    comm_inherit(state, me, faden)
     // DIE FADENGRUPPE. `CLONE_THREAD` heisst: derselbe Prozess nach
     // aussen. `getpid` muss in jedem Faden dieselbe Zahl geben, `gettid`
     // verschiedene -- deshalb bleibt `T_PID` eigen und `T_TGID` wird die
@@ -9244,6 +9330,7 @@ fn do_fork(state: u64, me: u64, frame: u64, stapel: u64) -> u64 {
     ctr.inherit(state, me, child)
     // AB-003: the origin is sticky -- a fork cannot shed it.
     origin.inherit(state, me, child)
+    comm_inherit(state, me, child)
     // RUNDE K16: das Kind erbt den Boden seines Stapels. Ohne diese
     // Zeile stuende dort null, und `proc.grow_stack` liesse den Stapel
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
@@ -9487,6 +9574,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     // program it exec'd into ever spent, which is the plainest form of
     // the lie this round exists to avoid.
     pmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    comm_from_path(state, me, name)
     pmon.name_set(state, me, name)
     kstate.add(state, kstate.EXECVES, 1)
     // ROUND NETMON: THE SLOT KEPT ITS PID AND CHANGED ITS PROGRAM.
