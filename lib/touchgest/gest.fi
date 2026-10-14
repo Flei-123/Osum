@@ -1,0 +1,524 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/touchgest/gest.fi -- touchpad gesture state machine (L-002 r756).
+//
+// WHAT THIS IS
+//   Pure arithmetic over finger states, no hardware, no kernel. A driver
+//   (kernel/drv/hid/hidin.fi) feeds one FRAME per HID report:
+//
+//       gest.begin(dev, now_ms)
+//       gest.add_contact(id, x, y, size)      // once per finger on the pad
+//       gest.end(dev, buttons)                // runs the machine
+//
+//   and then reads the EVENTS this frame produced:
+//
+//       n = gest.ev_count();  gest.ev_kind(i) / ev_a(i) / ev_b(i)
+//
+//   Events (a, b):
+//     EV_MOVE   (dx, dy)   pointer motion in pad units (one finger)
+//     EV_CLICK  (btn, 0)   a tap: 1 left (one finger), 2 right (two),
+//                          4 middle (three)
+//     EV_SCROLL (dx, dy)   pad units; two fingers, or a finger that
+//                          started in the right (vertical) / bottom
+//                          (horizontal) edge strip
+//     EV_SWIPE  (dir, n)   n >= 3 fingers travelled far enough, ONCE per
+//                          touch phase; dir: 1 left, 2 right, 3 up, 4 down
+//     EV_ZOOM   (d, 0)     pinch: change of the finger distance in pad
+//                          units (positive = spreading)
+//
+// PALM REJECTION (a contact flagged palm never counts as a finger)
+//   * its reported size is >= the palm size threshold (cfg, 0 = off)
+//   * it lands within TYPING_MS of the last key press (note_key)
+//   A palm stays a palm until it lifts.
+//
+// TAP RULE
+//   A touch (first finger down until last finger up) is a tap when it
+//   lasted at most tap_ms, no finger left the slop circle, no scroll /
+//   pinch / swipe / pointer motion happened and no physical button was
+//   down. The click goes out when the last finger lifts.
+//
+// HONEST LIMITS
+//   No tap-and-drag, no inertial scrolling, no per-finger pressure curve.
+//   Thresholds are relative to the pad size (configure) and tuned on
+//   synthetic reports only; the numbers need a real pad (Boss test).
+//   Measured by tools/touchgest/run.sh.
+
+export {
+    MAX_DEV, MAX_CONTACT, MAX_EV,
+    EV_MOVE, EV_CLICK, EV_SCROLL, EV_SWIPE, EV_ZOOM,
+    reset, configure, set_edge, set_palm_size, set_tap_ms, note_key,
+    slop, swipe_len,
+    begin, add_contact, end,
+    ev_count, ev_kind, ev_a, ev_b, fingers, palms, in_touch
+}
+
+const MAX_DEV: u64 = 4
+const MAX_CONTACT: u64 = 5
+const MAX_EV: u64 = 8
+
+const EV_MOVE: u64 = 1
+const EV_CLICK: u64 = 2
+const EV_SCROLL: u64 = 3
+const EV_SWIPE: u64 = 4
+const EV_ZOOM: u64 = 5
+
+const TYPING_MS: u64 = 300
+
+// ---- per device configuration
+static mut d_w: [i64; 4] = [1000; 4]
+static mut d_h: [i64; 4] = [700; 4]
+static mut d_edge: [i64; 4] = [10; 4]       // strip width in percent, 0 = off
+static mut d_palm: [u64; 4] = [0; 4]        // size threshold, 0 = off
+static mut d_tapms: [u64; 4] = [250; 4]
+
+// ---- per device state
+static mut d_last_key: [u64; 4] = [0; 4]
+static mut d_have_key: [u64; 4] = [0; 4]
+static mut d_sess: [u64; 4] = [0; 4]        // 1 = a touch is running
+static mut d_t0: [u64; 4] = [0; 4]
+static mut d_maxn: [u64; 4] = [0; 4]
+static mut d_moved: [u64; 4] = [0; 4]
+static mut d_btn: [u64; 4] = [0; 4]         // a physical button was down
+static mut d_phase: [u64; 4] = [0; 4]       // finger count of the phase
+static mut d_lock: [u64; 4] = [0; 4]        // 0 undecided, 1 scroll, 2 pinch
+static mut d_fired: [u64; 4] = [0; 4]
+static mut d_ax: [i64; 4] = [0; 4]          // centroid anchor of the phase
+static mut d_ay: [i64; 4] = [0; 4]
+static mut d_px: [i64; 4] = [0; 4]          // centroid of the last frame
+static mut d_py: [i64; 4] = [0; 4]
+static mut d_dist0: [i64; 4] = [0; 4]
+static mut d_distl: [i64; 4] = [0; 4]
+static mut d_nact: [u64; 4] = [0; 4]
+static mut d_npalm: [u64; 4] = [0; 4]
+
+// ---- contact slots, index dev * 5 + slot
+static mut c_used: [u64; 20] = [0; 20]
+static mut c_id: [u64; 20] = [0; 20]
+static mut c_x: [i64; 20] = [0; 20]
+static mut c_y: [i64; 20] = [0; 20]
+static mut c_lx: [i64; 20] = [0; 20]
+static mut c_ly: [i64; 20] = [0; 20]
+static mut c_palmf: [u64; 20] = [0; 20]
+static mut c_edge: [u64; 20] = [0; 20]      // 1 right strip, 2 bottom strip
+static mut c_armed: [u64; 20] = [0; 20]
+static mut c_seen: [u64; 20] = [0; 20]
+
+// ---- the frame being built
+static mut f_dev: u64 = 0
+static mut f_now: u64 = 0
+static mut f_n: u64 = 0
+static mut f_id: [u64; 5] = [0; 5]
+static mut f_x: [i64; 5] = [0; 5]
+static mut f_y: [i64; 5] = [0; 5]
+static mut f_sz: [u64; 5] = [0; 5]
+
+// ---- the events of the last end()
+static mut e_n: u64 = 0
+static mut e_k: [u64; 8] = [0; 8]
+static mut e_a: [i64; 8] = [0; 8]
+static mut e_b: [i64; 8] = [0; 8]
+
+fn absv(v: i64) -> i64 {
+    if v < 0 { return 0 - v }
+    return v
+}
+
+// integer square root (Newton), for finger distances
+fn isqrt(v: i64) -> i64 {
+    if v <= 0 { return 0 }
+    var x: i64 = v
+    var y: i64 = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + v / x) / 2
+    }
+    return x
+}
+
+fn reset(dev: u64) {
+    if dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    d_sess[d] = 0
+    d_maxn[d] = 0
+    d_moved[d] = 0
+    d_btn[d] = 0
+    d_phase[d] = 0
+    d_lock[d] = 0
+    d_fired[d] = 0
+    d_nact[d] = 0
+    d_npalm[d] = 0
+    d_have_key[d] = 0
+    d_last_key[d] = 0
+    var s: u64 = 0
+    while s < MAX_CONTACT {
+        c_used[(dev * MAX_CONTACT + s) as usize] = 0
+        s = s + 1
+    }
+    e_n = 0
+}
+
+// pad size in pad units
+fn configure(dev: u64, w: u64, h: u64) {
+    if dev >= MAX_DEV { return }
+    if w < 16 || h < 16 { return }
+    d_w[dev as usize] = w as i64
+    d_h[dev as usize] = h as i64
+}
+
+fn set_edge(dev: u64, pct: u64) {
+    if dev >= MAX_DEV { return }
+    if pct > 40 { return }
+    d_edge[dev as usize] = pct as i64
+}
+
+fn set_palm_size(dev: u64, size: u64) {
+    if dev >= MAX_DEV { return }
+    d_palm[dev as usize] = size
+}
+
+fn set_tap_ms(dev: u64, ms: u64) {
+    if dev >= MAX_DEV { return }
+    d_tapms[dev as usize] = ms
+}
+
+// a key was pressed: contacts landing in the next TYPING_MS are palms
+fn note_key(dev: u64, now: u64) {
+    if dev >= MAX_DEV { return }
+    d_last_key[dev as usize] = now
+    d_have_key[dev as usize] = 1
+}
+
+// the radius (pad units) a finger may wobble before it counts as moving
+fn slop(dev: u64) -> i64 {
+    if dev >= MAX_DEV { return 8 }
+    var s: i64 = d_w[dev as usize] / 64
+    if s < 2 { s = 2 }
+    return s
+}
+
+// how far three fingers must travel for a swipe
+fn swipe_len(dev: u64) -> i64 {
+    if dev >= MAX_DEV { return 100 }
+    return d_w[dev as usize] / 6
+}
+
+fn begin(dev: u64, now: u64) {
+    f_dev = dev
+    f_now = now
+    f_n = 0
+    e_n = 0
+}
+
+fn add_contact(id: u64, x: i64, y: i64, size: u64) {
+    if f_n >= MAX_CONTACT { return }
+    let i: usize = f_n as usize
+    f_id[i] = id
+    f_x[i] = x
+    f_y[i] = y
+    f_sz[i] = size
+    f_n = f_n + 1
+}
+
+fn emit(kind: u64, a: i64, b: i64) {
+    if e_n >= MAX_EV { return }
+    let i: usize = e_n as usize
+    e_k[i] = kind
+    e_a[i] = a
+    e_b[i] = b
+    e_n = e_n + 1
+}
+
+fn ev_count() -> u64 { return e_n }
+fn ev_kind(i: u64) -> u64 {
+    if i >= e_n { return 0 }
+    return e_k[i as usize]
+}
+fn ev_a(i: u64) -> i64 {
+    if i >= e_n { return 0 }
+    return e_a[i as usize]
+}
+fn ev_b(i: u64) -> i64 {
+    if i >= e_n { return 0 }
+    return e_b[i as usize]
+}
+
+fn fingers(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    return d_nact[dev as usize]
+}
+fn palms(dev: u64) -> u64 {
+    if dev >= MAX_DEV { return 0 }
+    return d_npalm[dev as usize]
+}
+fn in_touch(dev: u64) -> bool {
+    if dev >= MAX_DEV { return false }
+    return d_sess[dev as usize] != 0
+}
+
+// find the slot of contact id (MAX_CONTACT when none)
+fn slot_of(dev: u64, id: u64) -> u64 {
+    var s: u64 = 0
+    while s < MAX_CONTACT {
+        let k: usize = (dev * MAX_CONTACT + s) as usize
+        if c_used[k] != 0 && c_id[k] == id { return s }
+        s = s + 1
+    }
+    return MAX_CONTACT
+}
+
+fn free_slot(dev: u64) -> u64 {
+    var s: u64 = 0
+    while s < MAX_CONTACT {
+        if c_used[(dev * MAX_CONTACT + s) as usize] == 0 { return s }
+        s = s + 1
+    }
+    return MAX_CONTACT
+}
+
+// a new contact: palm and edge classification
+fn land(dev: u64, s: u64, id: u64, x: i64, y: i64, size: u64) {
+    let d: usize = dev as usize
+    let k: usize = (dev * MAX_CONTACT + s) as usize
+    c_used[k] = 1
+    c_id[k] = id
+    c_x[k] = x
+    c_y[k] = y
+    c_lx[k] = x
+    c_ly[k] = y
+    c_armed[k] = 0
+    c_edge[k] = 0
+    c_palmf[k] = 0
+    if d_palm[d] != 0 && size >= d_palm[d] {
+        c_palmf[k] = 1
+    }
+    if d_have_key[d] != 0 && f_now >= d_last_key[d] && f_now - d_last_key[d] < TYPING_MS {
+        c_palmf[k] = 1
+    }
+    if d_edge[d] > 0 {
+        if x >= d_w[d] - d_w[d] * d_edge[d] / 100 {
+            c_edge[k] = 1
+        } else if y >= d_h[d] - d_h[d] * d_edge[d] / 100 {
+            c_edge[k] = 2
+        }
+    }
+}
+
+// start a new phase (the finger count changed): anchors, locks, fired
+fn rephase(dev: u64, n: u64, cx: i64, cy: i64, dist: i64) {
+    let d: usize = dev as usize
+    d_phase[d] = n
+    d_lock[d] = 0
+    d_fired[d] = 0
+    d_ax[d] = cx
+    d_ay[d] = cy
+    d_px[d] = cx
+    d_py[d] = cy
+    d_dist0[d] = dist
+    d_distl[d] = dist
+    var s: u64 = 0
+    while s < MAX_CONTACT {
+        let k: usize = (dev * MAX_CONTACT + s) as usize
+        if c_used[k] != 0 {
+            c_lx[k] = c_x[k]
+            c_ly[k] = c_y[k]
+            c_armed[k] = 0
+        }
+        s = s + 1
+    }
+}
+
+fn end(dev: u64, buttons: u64) {
+    if dev != f_dev || dev >= MAX_DEV { return }
+    let d: usize = dev as usize
+    let now: u64 = f_now
+
+    // 1. match the frame's contacts with the slots
+    var s: u64 = 0
+    while s < MAX_CONTACT {
+        c_seen[(dev * MAX_CONTACT + s) as usize] = 0
+        s = s + 1
+    }
+    var i: u64 = 0
+    while i < f_n {
+        let sl: u64 = slot_of(dev, f_id[i as usize])
+        if sl < MAX_CONTACT {
+            let k: usize = (dev * MAX_CONTACT + sl) as usize
+            c_x[k] = f_x[i as usize]
+            c_y[k] = f_y[i as usize]
+            c_seen[k] = 1
+        } else {
+            let fs: u64 = free_slot(dev)
+            if fs < MAX_CONTACT {
+                land(dev, fs, f_id[i as usize], f_x[i as usize], f_y[i as usize], f_sz[i as usize])
+                c_seen[(dev * MAX_CONTACT + fs) as usize] = 1
+            }
+        }
+        i = i + 1
+    }
+    s = 0
+    while s < MAX_CONTACT {
+        let k: usize = (dev * MAX_CONTACT + s) as usize
+        if c_used[k] != 0 && c_seen[k] == 0 {
+            c_used[k] = 0
+        }
+        s = s + 1
+    }
+
+    // 2. the live fingers (palms do not count)
+    var n: u64 = 0
+    var np: u64 = 0
+    var sumx: i64 = 0
+    var sumy: i64 = 0
+    var fx0: i64 = 0
+    var fy0: i64 = 0
+    var fx1: i64 = 0
+    var fy1: i64 = 0
+    var first: u64 = MAX_CONTACT
+    s = 0
+    while s < MAX_CONTACT {
+        let k: usize = (dev * MAX_CONTACT + s) as usize
+        if c_used[k] != 0 {
+            if c_palmf[k] != 0 {
+                np = np + 1
+            } else {
+                if n == 0 {
+                    fx0 = c_x[k]
+                    fy0 = c_y[k]
+                    first = s
+                } else if n == 1 {
+                    fx1 = c_x[k]
+                    fy1 = c_y[k]
+                }
+                sumx = sumx + c_x[k]
+                sumy = sumy + c_y[k]
+                n = n + 1
+            }
+        }
+        s = s + 1
+    }
+    d_nact[d] = n
+    d_npalm[d] = np
+
+    // 3. nothing on the pad: the touch is over; was it a tap?
+    if n == 0 {
+        if d_sess[d] != 0 {
+            d_sess[d] = 0
+            let dur: u64 = now - d_t0[d]
+            if d_moved[d] == 0 && d_btn[d] == 0 && dur <= d_tapms[d]
+                && d_maxn[d] >= 1 && d_maxn[d] <= 3 {
+                if d_maxn[d] == 1 {
+                    emit(EV_CLICK, 1, 0)
+                } else if d_maxn[d] == 2 {
+                    emit(EV_CLICK, 2, 0)
+                } else {
+                    emit(EV_CLICK, 4, 0)
+                }
+            }
+        }
+        d_phase[d] = 0
+        return
+    }
+
+    let cx: i64 = sumx / n as i64
+    let cy: i64 = sumy / n as i64
+    var dist: i64 = 0
+    if n == 2 {
+        let ddx: i64 = fx1 - fx0
+        let ddy: i64 = fy1 - fy0
+        dist = isqrt(ddx * ddx + ddy * ddy)
+    }
+
+    if d_sess[d] == 0 {
+        d_sess[d] = 1
+        d_t0[d] = now
+        d_maxn[d] = 0
+        d_moved[d] = 0
+        d_btn[d] = 0
+        d_phase[d] = 0
+    }
+    if n > d_maxn[d] { d_maxn[d] = n }
+    if buttons != 0 { d_btn[d] = 1 }
+    if d_phase[d] != n {
+        rephase(dev, n, cx, cy, dist)
+        return
+    }
+
+    let sl2: i64 = slop(dev)
+
+    // 4. one finger: pointer, or an edge strip scrolls
+    if n == 1 {
+        let k: usize = (dev * MAX_CONTACT + first) as usize
+        let x: i64 = c_x[k]
+        let y: i64 = c_y[k]
+        if c_armed[k] == 0 {
+            if absv(x - c_lx[k]) + absv(y - c_ly[k]) > sl2 {
+                c_armed[k] = 1
+                d_moved[d] = 1
+                c_lx[k] = x
+                c_ly[k] = y
+            }
+            return
+        }
+        let dx: i64 = x - c_lx[k]
+        let dy: i64 = y - c_ly[k]
+        c_lx[k] = x
+        c_ly[k] = y
+        if c_edge[k] == 1 {
+            if dy != 0 { emit(EV_SCROLL, 0, dy) }
+        } else if c_edge[k] == 2 {
+            if dx != 0 { emit(EV_SCROLL, dx, 0) }
+        } else {
+            if dx != 0 || dy != 0 { emit(EV_MOVE, dx, dy) }
+        }
+        return
+    }
+
+    // 5. two fingers: scroll or pinch, decided once
+    if n == 2 {
+        if d_lock[d] == 0 {
+            let tr: i64 = absv(cx - d_ax[d]) + absv(cy - d_ay[d])
+            let dd: i64 = absv(dist - d_dist0[d])
+            if tr > sl2 * 2 || dd > sl2 * 2 {
+                if dd > tr {
+                    d_lock[d] = 2
+                } else {
+                    d_lock[d] = 1
+                }
+                d_moved[d] = 1
+                d_px[d] = cx
+                d_py[d] = cy
+                d_distl[d] = dist
+            }
+            return
+        }
+        if d_lock[d] == 1 {
+            let sx: i64 = cx - d_px[d]
+            let sy: i64 = cy - d_py[d]
+            d_px[d] = cx
+            d_py[d] = cy
+            if sx != 0 || sy != 0 { emit(EV_SCROLL, sx, sy) }
+        } else {
+            let zd: i64 = dist - d_distl[d]
+            d_distl[d] = dist
+            if zd != 0 { emit(EV_ZOOM, zd, 0) }
+        }
+        return
+    }
+
+    // 6. three or more fingers: one swipe per phase
+    if d_fired[d] == 0 {
+        let gx: i64 = cx - d_ax[d]
+        let gy: i64 = cy - d_ay[d]
+        let lim: i64 = swipe_len(dev)
+        if absv(gx) >= lim || absv(gy) >= lim {
+            d_fired[d] = 1
+            d_moved[d] = 1
+            var dir: i64 = 0
+            if absv(gx) >= absv(gy) {
+                if gx < 0 { dir = 1 } else { dir = 2 }
+            } else {
+                if gy < 0 { dir = 3 } else { dir = 4 }
+            }
+            emit(EV_SWIPE, dir, n as i64)
+        }
+    }
+}
