@@ -140,6 +140,7 @@ export {
     init, ready, on, unlock, lock_down, format, active,
     encrypt_sector, decrypt_sector,
     header_read, header_valid, slots_used, slot_add, slot_kill,
+    header_at, unlock_at, base_of,
     reads, writes, fails, slot_of, selftest,
     tree_write, tree_check, TREE_FILES,
     CIPHER_XTS, KDF_ARGON2ID, KDF_PBKDF2,
@@ -322,6 +323,7 @@ fn init(state: u64) {
     s(state, kstate.CRY_ARGMEM, 0)
     s(state, kstate.CRY_ARGKIB, 0)
     s(state, kstate.CRY_DEV, 0)
+    s(state, kstate.CRY_BASE, 0)
     zero(kstate.CRY_KEY + state, KEY_LEN)
 }
 
@@ -489,7 +491,7 @@ fn header_read(state: u64, dev: u64) -> bool {
     let hdr: u64 = state + kstate.CRY_HDR
     var i: u64 = 0
     while i < HDR_SECTORS {
-        if !blk.read_on(state, dev, i, hdr + i * SECTOR) {
+        if !blk.read_on(state, dev, g(state, kstate.CRY_BASE) + i, hdr + i * SECTOR) {
             return false
         }
         i = i + 1
@@ -509,7 +511,7 @@ fn header_write(state: u64, dev: u64) -> bool {
     }
     i = 0
     while i < HDR_SECTORS {
-        if !blk.write_on(state, dev, i, hdr + i * SECTOR) {
+        if !blk.write_on(state, dev, g(state, kstate.CRY_BASE) + i, hdr + i * SECTOR) {
             return false
         }
         i = i + 1
@@ -624,7 +626,8 @@ fn unlock(state: u64, dev: u64, pw: u64, pwlen: u64) -> bool {
     s(state, kstate.CRY_SECTORS, le64(hdr, H_COUNT))
     s(state, kstate.CRY_CIPHER, le32(hdr, H_CIPHER))
     s(state, kstate.CRY_KDF, kdf)
-    wurzel_setzen(state, dev, le64(hdr, H_FIRST), le64(hdr, H_COUNT))
+    wurzel_setzen(state, dev, g(state, kstate.CRY_BASE) + le64(hdr, H_FIRST),
+        le64(hdr, H_COUNT))
     return true
 }
 
@@ -696,6 +699,36 @@ fn slot_kill(state: u64, dev: u64, i: u64) -> bool {
     }
     zero(slot_at(state, i), SLOT_SIZE)
     return header_write(state, dev)
+}
+
+// ============================ K-019: THE HEADER INSIDE A PARTITION
+//
+// An installed disk has a GPT: the ESP in front, the root partition behind it.
+// The installer (kernel/user/dcrypt.fi) writes the key header into the FIRST
+// sectors of the root partition and the encrypted file system after it. The
+// header sector offset is kept in CRY_BASE; header_read/header_write and the
+// root offset (`blk.use_at`) add it. Base 0 = the old whole-disk layout.
+fn base_of(state: u64) -> u64 {
+    return g(state, kstate.CRY_BASE)
+}
+
+// Is there a valid key header at sector `at` of `dev`? Reads, does not unlock.
+fn header_at(state: u64, dev: u64, at: u64) -> bool {
+    s(state, kstate.CRY_BASE, at)
+    let ok: bool = header_read(state, dev)
+    if !ok {
+        s(state, kstate.CRY_BASE, 0)
+    }
+    return ok
+}
+
+fn unlock_at(state: u64, dev: u64, at: u64, pw: u64, pwlen: u64) -> bool {
+    s(state, kstate.CRY_BASE, at)
+    let ok: bool = unlock(state, dev, pw, pwlen)
+    if !ok {
+        s(state, kstate.CRY_BASE, 0)
+    }
+    return ok
 }
 
 // ==================================================== DAS ANLEGEN
