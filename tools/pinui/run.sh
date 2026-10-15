@@ -47,7 +47,7 @@ grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 for r in weg wej weh wei; do
   grep -aq "settings: rect name=$r " "$S" && ok "entry/button $r reported" || bad "entry/button $r reported"
 done
-grep -a 'settings: stand reiter=4' "$S" | grep -aE 'PIN' | sed 's/.*status=\[//; s/\].*//' > "$OUT.seq"
+grep -a 'settings: stand reiter=4' "$S" | grep -aE 'PIN' | sed 's/.*status=\[//; s/\].*//' | uniq > "$OUT.seq"
 echo "  status sequence:"; sed 's/^/        /' "$OUT.seq"
 want=("PIN set|PIN gesetzt" "Current PIN is wrong|Aktuelle PIN falsch" "PIN set|PIN gesetzt" "Current PIN is wrong|Aktuelle PIN falsch" "PIN removed|PIN entfernt")
 names=("first PIN set without a current PIN" "change with a WRONG current PIN refused" "change with the right current PIN" "remove with a WRONG current PIN refused" "remove with the right current PIN")
