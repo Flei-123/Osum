@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/hwcheck/check.fi -- E2: THE HARDWARE CHECK (display, keyboard, audio, wlan) from /proc text.
+//
+// Input is what the kernel lists: /proc/pci ("bb:dd.f cccc vvvv:dddd irq=N"), /proc/usb (one line
+// per device, "driver=keyboard" for a keyboard) and /proc/firmware ("framebuffer: WxH..."). The caller
+// reads the three files and calls feed_pci / feed_usb / feed_fw; `report()` builds the text.
+//
+//   display   a PCI display controller (class 03xx) OR a framebuffer line in /proc/firmware
+//   keyboard  a USB device whose driver is "keyboard". PS/2 and I2C-HID keyboards are NOT listed in
+//             /proc yet, so without a USB keyboard the answer is `unknown`, never a guessed `missing`
+//   audio     a PCI audio controller (class 0403 HD audio or 0401 multimedia audio)
+//   wlan      a PCI network controller of class 0280 (wireless) OR the USB AR9271 stick (0cf3:9271)
+//
+// HONEST MEANING OF "ok": the kernel LISTS the hardware. It does not say that a driver works (WLAN has
+// drivers only for the AR9271; AX201 is probe-only). The report says so in its last lines. Nothing in
+// this lib or its callers sends anything anywhere: the report is a text, "export" writes a local file.
+
+export { reset, feed_pci, feed_usb, feed_fw, item_state, item_detail, report, report_ptr,
+    DISPLAY, KEYBOARD, AUDIO, WLAN, MISSING, OK, UNKNOWN }
+
+const DISPLAY: u64 = 0
+const KEYBOARD: u64 = 1
+const AUDIO: u64 = 2
+const WLAN: u64 = 3
+const MISSING: u64 = 0
+const OK: u64 = 1
+const UNKNOWN: u64 = 2
+const DET: u64 = 40
+
+static mut st: [u8; 4] = [0 as u8; 4]
+static mut det: [u8; 160] = [0 as u8; 160]
+static mut out: [u8; 1024] = [0 as u8; 1024]
+static mut out_n: u64 = 0
+
+fn ld(p: u64, i: u64) -> u64 {
+    let b: u8 = *((p + i) as *mut u8)
+    return b as u64
+}
+
+fn set_state(item: u64, v: u64) {
+    st[item as usize] = v as u8
+}
+
+fn set_detail(item: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n && i + 1 < DET {
+        det[(item * DET + i) as usize] = ld(src, i) as u8
+        i = i + 1
+    }
+    det[(item * DET + i) as usize] = 0 as u8
+}
+
+fn reset() {
+    var i: u64 = 0
+    while i < 4 {
+        st[i as usize] = MISSING as u8
+        det[(i * DET) as usize] = 0 as u8
+        i = i + 1
+    }
+    st[KEYBOARD as usize] = UNKNOWN as u8
+    out_n = 0
+}
+
+fn item_state(item: u64) -> u64 {
+    return st[item as usize] as u64
+}
+
+fn item_detail(item: u64) -> u64 {
+    return (&det[(item * DET) as usize]) as u64
+}
+
+// does the text [p, p+n) contain the zero-terminated word w?
+fn contains(p: u64, n: u64, w: u64) -> bool {
+    var wl: u64 = 0
+    while ld(w, wl) != 0 {
+        wl = wl + 1
+    }
+    if wl == 0 || wl > n {
+        return false
+    }
+    var i: u64 = 0
+    while i + wl <= n {
+        var j: u64 = 0
+        while j < wl && ld(p, i + j) == ld(w, j) {
+            j = j + 1
+        }
+        if j == wl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// "cccc" at offset 8 of a PCI line, as a number of four hex-ish digits (letters stay letters)
+fn same4(l: u64, a: u64, b: u64, c: u64, d: u64) -> bool {
+    return ld(l, 8) == a && ld(l, 9) == b && ld(l, 10) == c && ld(l, 11) == d
+}
+
+fn pci_line(l: u64, n: u64) {
+    // "00:02.0 0300 1234:1111 irq=11": 22 octets at least, ':' at 2, '.' at 5
+    if n < 22 || ld(l, 2) != 58 || ld(l, 5) != 46 {
+        return
+    }
+    if ld(l, 8) == 48 && ld(l, 9) == 51 && item_state(DISPLAY) != OK {
+        set_state(DISPLAY, OK)
+        set_detail(DISPLAY, l + 8, 14)
+    }
+    if (same4(l, 48, 52, 48, 51) || same4(l, 48, 52, 48, 49)) && item_state(AUDIO) != OK {
+        set_state(AUDIO, OK)
+        set_detail(AUDIO, l + 8, 14)
+    }
+    if same4(l, 48, 50, 56, 48) && item_state(WLAN) != OK {
+        set_state(WLAN, OK)
+        set_detail(WLAN, l + 8, 14)
+    }
+}
+
+fn each_line(p: u64, n: u64, kind: u64) {
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && ld(p, e) != 10 {
+            e = e + 1
+        }
+        if kind == 0 {
+            pci_line(p + at, e - at)
+        } else if kind == 1 {
+            usb_line(p + at, e - at)
+        } else {
+            fw_line(p + at, e - at)
+        }
+        at = e + 1
+    }
+}
+
+fn usb_line(l: u64, n: u64) {
+    var w_kbd: [u8; 16] = "driver=keyboard\0"
+    var w_ar: [u8; 10] = "0cf3:9271\0"
+    if contains(l, n, (&w_kbd[0]) as u64) && item_state(KEYBOARD) != OK {
+        var d: [u8; 4] = "usb\0"
+        set_state(KEYBOARD, OK)
+        set_detail(KEYBOARD, (&d[0]) as u64, 3)
+    }
+    if contains(l, n, (&w_ar[0]) as u64) && item_state(WLAN) != OK {
+        var d2: [u8; 14] = "usb 0cf3:9271\0"
+        set_state(WLAN, OK)
+        set_detail(WLAN, (&d2[0]) as u64, 13)
+    }
+}
+
+fn fw_line(l: u64, n: u64) {
+    // "framebuffer: 1024x768..." -- a digit right behind the colon and blank
+    var w_fb: [u8; 14] = "framebuffer: \0"
+    if n > 13 && contains(l, 13, (&w_fb[0]) as u64) && ld(l, 13) >= 48 && ld(l, 13) <= 57
+        && item_state(DISPLAY) != OK {
+        set_state(DISPLAY, OK)
+        set_detail(DISPLAY, l + 13, n - 13)
+    }
+}
+
+fn feed_pci(p: u64, n: u64) {
+    each_line(p, n, 0)
+}
+
+fn feed_usb(p: u64, n: u64) {
+    each_line(p, n, 1)
+}
+
+fn feed_fw(p: u64, n: u64) {
+    each_line(p, n, 2)
+}
+
+// ---------------------------------------------------------------- the text
+
+fn put_s(s: u64) {
+    var i: u64 = 0
+    while ld(s, i) != 0 && out_n + 1 < 1024 {
+        out[out_n as usize] = ld(s, i) as u8
+        out_n = out_n + 1
+        i = i + 1
+    }
+}
+
+fn line_for(name: u64, item: u64) {
+    var s_ok: [u8; 5] = ": ok\0"
+    var s_miss: [u8; 10] = ": missing\0"
+    var s_unk: [u8; 10] = ": unknown\0"
+    var s_nl: [u8; 2] = "\n\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_kb: [u8; 71] = " (no USB keyboard listed; PS/2 and I2C keyboards are not in /proc yet)\0"
+    put_s(name)
+    let s: u64 = item_state(item)
+    if s == OK {
+        put_s((&s_ok[0]) as u64)
+        put_s((&s_sp[0]) as u64)
+        put_s(item_detail(item))
+    } else if s == UNKNOWN {
+        put_s((&s_unk[0]) as u64)
+        put_s((&s_kb[0]) as u64)
+    } else {
+        put_s((&s_miss[0]) as u64)
+    }
+    put_s((&s_nl[0]) as u64)
+}
+
+// build the report; returns its length. Layout is fixed (one line per item) so a test can read it.
+fn report() -> u64 {
+    var h: [u8; 24] = "OrientOS hardware check\0"
+    var n_d: [u8; 8] = "display\0"
+    var n_k: [u8; 9] = "keyboard\0"
+    var n_a: [u8; 6] = "audio\0"
+    var n_w: [u8; 5] = "wlan\0"
+    var s_nl: [u8; 2] = "\n\0"
+    var f1: [u8; 69] = "ok = the kernel lists the hardware; it does not say a driver works.\n\0"
+    var f2: [u8; 60] = "local only: this check sends nothing anywhere (no upload).\n\0"
+    out_n = 0
+    put_s((&h[0]) as u64)
+    put_s((&s_nl[0]) as u64)
+    line_for((&n_d[0]) as u64, DISPLAY)
+    line_for((&n_k[0]) as u64, KEYBOARD)
+    line_for((&n_a[0]) as u64, AUDIO)
+    line_for((&n_w[0]) as u64, WLAN)
+    put_s((&f1[0]) as u64)
+    put_s((&f2[0]) as u64)
+    out[out_n as usize] = 0 as u8
+    return out_n
+}
+
+fn report_ptr() -> u64 {
+    return (&out[0]) as u64
+}

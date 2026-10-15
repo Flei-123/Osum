@@ -1,0 +1,538 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/stickwr.fi -- D7: WRITE AN IMAGE FILE TO A USB STICK.
+//
+//   stickwr <image.img|image.iso> /dev/usbN --yes [--dry]
+//   stickwr serve [ticks]          the bus service `a.stickwr` (docs/ACTION-BUS.md)
+//
+// This is the one program that overwrites a whole block device, so it is built around refusing:
+//   * the target is ONLY /dev/usb0..3 (lib/stickwr/guard.fi) -- never hda, nvme, sda, ram0;
+//   * the source must be a .img/.iso FILE, not a device or a table;
+//   * nothing happens without `--yes` (the bus service relies on the broker: `stickwr.write` is
+//     level `critical`, so the broker asks the user BEFORE the call reaches this program);
+//   * the image must fit the stick (size by SEEK_END) -- checked BEFORE the first write;
+//   * a mounted stick (/medien/usbN) is EJECTED first (WX_EJECT: sync + unmount, and "no"
+//     while a file on it is open: then NOTHING is written);
+//   * the image goes out in 64 KiB blocks, then the stick is READ BACK and compared octet for
+//     octet. Only a good comparison says "verified".
+// HONEST LIMIT: the read-back goes through the same USB driver, so it proves the octets reached
+// the medium's answer, not that the medium keeps them (no cache flush command is sent beyond
+// what the driver does on write).
+// Exit codes: 0 done, 1 refused (usage/guard), 2 I/O failure (stick, write, verify).
+
+profile kernel
+
+import ulib
+import actwire
+import stickwr.guard
+
+export { u_start }
+
+const R_OK: u64 = 0
+const R_NOSRC: u64 = 5
+const R_NOSTICK: u64 = 6
+const R_TOOBIG: u64 = 7
+const R_BUSY: u64 = 8
+const R_WRITE: u64 = 9
+const R_VERIFY: u64 = 10
+const R_EJECT: u64 = 11
+const R_READ: u64 = 12
+const R_NOSIZE: u64 = 13
+
+static mut buf_a: [u8; 65536] = [0 as u8; 65536]
+static mut buf_b: [u8; 65536] = [0 as u8; 65536]
+static mut mnt_path: [u8; 24] = [0 as u8; 24]
+static mut pch: [u8; 24] = [0 as u8; 24]
+static mut res_bytes: u64 = 0
+static mut res_blocks: u64 = 0
+static mut res_at: u64 = 0
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut evt_no: u64 = 1
+
+fn say(p: u64) {
+    actwire.out(p)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    say((&s[0 as usize]) as u64)
+}
+
+// ---------------------------------------------------------------- unmount first
+
+// "/medien/usbN" for the stick N
+fn mnt_name(n: u64) {
+    var base: [u8; 13] = "/medien/usb0\0"
+    var i: u64 = 0
+    while i < 12 {
+        mnt_path[i as usize] = base[i as usize]
+        i = i + 1
+    }
+    mnt_path[11] = (48 + n) as u8
+    mnt_path[12] = 0 as u8
+}
+
+fn path_of(i: u64) -> u64 {
+    var n: u64 = 0
+    while n < 23 {
+        let c: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_PATHCH, i, n)
+        if c == 0 {
+            pch[n as usize] = 0 as u8
+            return n
+        }
+        pch[n as usize] = c as u8
+        n = n + 1
+    }
+    pch[23] = 0 as u8
+    return 23
+}
+
+// eject the stick `n` if it is mounted. R_OK when it was not mounted or is now out.
+fn unmount(n: u64) -> u64 {
+    mnt_name(n)
+    var i: u64 = 0
+    while i < ulib.WX_MAX {
+        let l: u64 = path_of(i)
+        if l != 0 && ulib.streq((&mnt_path[0 as usize]) as u64, (&pch[0 as usize]) as u64) {
+            let rc: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_EJECT, i, 0)
+            if rc == 0 {
+                return R_OK
+            }
+            if rc == 16 {
+                return R_BUSY
+            }
+            return R_EJECT
+        }
+        i = i + 1
+    }
+    return R_OK
+}
+
+// ---------------------------------------------------------------- I/O
+
+fn fill(fd: u64, dst: u64, n: u64) -> bool {
+    var got: u64 = 0
+    while got < n {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, dst + got, n - got)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        got = got + r
+    }
+    return true
+}
+
+fn put_all(fd: u64, src: u64, n: u64) -> bool {
+    var done: u64 = 0
+    while done < n {
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, src + done, n - done)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        done = done + r
+    }
+    return true
+}
+
+fn same(n: u64) -> u64 {
+    var i: u64 = 0
+    let a: u64 = (&buf_a[0 as usize]) as u64
+    let b: u64 = (&buf_b[0 as usize]) as u64
+    while i < n {
+        if (*((a + i) as *mut u8)) != (*((b + i) as *mut u8)) {
+            return i
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// the whole job. `yes` = confirmed (flag or broker), `dry` = check everything, change nothing.
+fn write_image(src: u64, dst: u64, yes: bool, dry: bool) -> u64 {
+    res_bytes = 0
+    res_blocks = 0
+    res_at = 0
+    let g: u64 = guard.check(src, dst, yes)
+    if g != 0 {
+        return g
+    }
+    let total: u64 = ulib.size_of(src)
+    if ulib.bad(total) || total == 0 {
+        return R_NOSRC
+    }
+    res_bytes = total
+    res_blocks = guard.blocks(total)
+    let sfd: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(sfd) {
+        return R_NOSRC
+    }
+    let dfd: u64 = ulib.sys(ulib.SYS_OPEN, dst, 0, 0)
+    if ulib.bad(dfd) {
+        ulib.sys(ulib.SYS_CLOSE, sfd, 0, 0)
+        return R_NOSTICK
+    }
+    var rc: u64 = R_OK
+    let cap: u64 = ulib.sys(ulib.SYS_SEEK, dfd, 0, ulib.SEEK_END)
+    if ulib.bad(cap) || cap == 0 {
+        rc = R_NOSIZE
+        res_at = cap
+    } else if total > cap {
+        rc = R_TOOBIG
+    }
+    if rc == R_OK && !dry {
+        rc = unmount(guard.target_index(dst))
+    }
+    if rc == R_OK && !dry {
+        // --- write
+        var done: u64 = 0
+        let a: u64 = (&buf_a[0 as usize]) as u64
+        while done < total && rc == R_OK {
+            let n: u64 = guard.chunk(total, done)
+            if !fill(sfd, a, n) {
+                rc = R_READ
+                res_at = done
+            } else if ulib.bad(ulib.sys(ulib.SYS_SEEK, dfd, done, ulib.SEEK_SET))
+                || !put_all(dfd, a, n) {
+                rc = R_WRITE
+                res_at = done
+            } else {
+                done = done + n
+            }
+        }
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        // --- read back and compare
+        if rc == R_OK {
+            ulib.sys(ulib.SYS_SEEK, sfd, 0, ulib.SEEK_SET)
+            ulib.sys(ulib.SYS_SEEK, dfd, 0, ulib.SEEK_SET)
+            let b: u64 = (&buf_b[0 as usize]) as u64
+            var at: u64 = 0
+            while at < total && rc == R_OK {
+                let n2: u64 = guard.chunk(total, at)
+                if !fill(sfd, a, n2) {
+                    rc = R_READ
+                    res_at = at
+                } else if !fill(dfd, b, n2) {
+                    rc = R_VERIFY
+                    res_at = at
+                } else {
+                    let s: u64 = same(n2)
+                    if s != n2 {
+                        rc = R_VERIFY
+                        res_at = at + s
+                    } else {
+                        at = at + n2
+                    }
+                }
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, sfd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, dfd, 0, 0)
+    return rc
+}
+
+// ---------------------------------------------------------------- texts
+
+// the word the bus replies with (`err <word>`)
+fn word_of(rc: u64) -> u64 {
+    var w1: [u8; 15] = "refused_source\0"
+    var w2: [u8; 15] = "refused_target\0"
+    var w3: [u8; 9] = "need_yes\0"
+    var w4: [u8; 19] = "refused_source_dev\0"
+    var w5: [u8; 10] = "no_source\0"
+    var w6: [u8; 9] = "no_stick\0"
+    var w7: [u8; 8] = "too_big\0"
+    var w8: [u8; 5] = "busy\0"
+    var w9: [u8; 13] = "write_failed\0"
+    var w10: [u8; 14] = "verify_failed\0"
+    var w11: [u8; 13] = "eject_failed\0"
+    var w12: [u8; 12] = "read_failed\0"
+    var w0: [u8; 8] = "unknown\0"
+    var w13: [u8; 8] = "no_size\0"
+    if rc == guard.E_SOURCE {
+        return copy_word((&w1[0 as usize]) as u64)
+    }
+    if rc == guard.E_TARGET {
+        return copy_word((&w2[0 as usize]) as u64)
+    }
+    if rc == guard.E_NOYES {
+        return copy_word((&w3[0 as usize]) as u64)
+    }
+    if rc == guard.E_SRCDEV {
+        return copy_word((&w4[0 as usize]) as u64)
+    }
+    if rc == R_NOSRC {
+        return copy_word((&w5[0 as usize]) as u64)
+    }
+    if rc == R_NOSTICK {
+        return copy_word((&w6[0 as usize]) as u64)
+    }
+    if rc == R_TOOBIG {
+        return copy_word((&w7[0 as usize]) as u64)
+    }
+    if rc == R_BUSY {
+        return copy_word((&w8[0 as usize]) as u64)
+    }
+    if rc == R_WRITE {
+        return copy_word((&w9[0 as usize]) as u64)
+    }
+    if rc == R_VERIFY {
+        return copy_word((&w10[0 as usize]) as u64)
+    }
+    if rc == R_EJECT {
+        return copy_word((&w11[0 as usize]) as u64)
+    }
+    if rc == R_READ {
+        return copy_word((&w12[0 as usize]) as u64)
+    }
+    if rc == R_NOSIZE {
+        return copy_word((&w13[0 as usize]) as u64)
+    }
+    return copy_word((&w0[0 as usize]) as u64)
+}
+
+static mut wordbuf: [u8; 24] = [0 as u8; 24]
+fn copy_word(p: u64) -> u64 {
+    ulib.strncpy((&wordbuf[0 as usize]) as u64, p, 24)
+    return (&wordbuf[0 as usize]) as u64
+}
+
+fn cli_fail(rc: u64) -> u64 {
+    var p: [u8; 10] = "stickwr: \0"
+    var s_dry: [u8; 23] = " (nothing was written)\0"
+    say((&p[0 as usize]) as u64)
+    say(word_of(rc))
+    if rc == guard.E_NOYES {
+        var h: [u8; 30] = " -- add --yes to really write\0"
+        say((&h[0 as usize]) as u64)
+    }
+    if rc == R_WRITE || rc == R_VERIFY || rc == R_READ || rc == R_NOSIZE {
+        var h2: [u8; 12] = " at offset \0"
+        say((&h2[0 as usize]) as u64)
+        actwire.outnum(res_at)
+    } else {
+        say((&s_dry[0 as usize]) as u64)
+    }
+    nl()
+    if rc <= guard.E_SRCDEV {
+        return 1
+    }
+    return 2
+}
+
+// ---------------------------------------------------------------- command line
+
+fn cli(args: u64) -> u64 {
+    var f_yes: [u8; 6] = "--yes\0"
+    var f_dry: [u8; 6] = "--dry\0"
+    var s_use: [u8; 56] = "usage: stickwr <image.img|.iso> /dev/usbN --yes [--dry]\0"
+    var src: u64 = 0
+    var dst: u64 = 0
+    var yes: bool = false
+    var dry: bool = false
+    var i: u64 = 1
+    let argc: u64 = ulib.arg_count(args)
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if actwire.str_eq(a, (&f_yes[0 as usize]) as u64) {
+            yes = true
+        } else if actwire.str_eq(a, (&f_dry[0 as usize]) as u64) {
+            dry = true
+        } else if src == 0 {
+            src = a
+        } else if dst == 0 {
+            dst = a
+        } else {
+            say((&s_use[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        i = i + 1
+    }
+    if src == 0 || dst == 0 {
+        say((&s_use[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    let rc: u64 = write_image(src, dst, yes, dry)
+    if rc != R_OK {
+        return cli_fail(rc)
+    }
+    if dry {
+        var s_d: [u8; 20] = "stickwr: dry run ok\0"
+        say((&s_d[0 as usize]) as u64)
+        nl()
+        return 0
+    }
+    var s_ok: [u8; 16] = "stickwr: wrote \0"
+    var s_by: [u8; 11] = " bytes in \0"
+    var s_bl: [u8; 21] = " blocks, verified ok\0"
+    say((&s_ok[0 as usize]) as u64)
+    actwire.outnum(res_bytes)
+    say((&s_by[0 as usize]) as u64)
+    actwire.outnum(res_blocks)
+    say((&s_bl[0 as usize]) as u64)
+    nl()
+    return 0
+}
+
+// ---------------------------------------------------------------- bus service
+
+fn event() {
+    var s_ev: [u8; 31] = "event stickwr.written\nwritten=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ev[0 as usize]) as u64)
+    actwire.ob_num(res_bytes)
+    actwire.ob_ch(10)
+    actwire.send_msg(svc_bus, actwire.K_EVT, evt_no, actwire.ob_ptr(), actwire.ob_len())
+    evt_no = evt_no + 1
+}
+
+fn reply_err(rc: u64) {
+    var s_e: [u8; 5] = "err \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_e[0 as usize]) as u64)
+    actwire.ob_line(word_of(rc))
+}
+
+// one call; true when something was written (-> event)
+fn handle(msg: u64) -> bool {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var k_dry: [u8; 5] = "@dry\0"
+    var dv: [u8; 4] = [0 as u8; 4]
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, (&dv[0 as usize]) as u64, 4)
+    var k_ping: [u8; 5] = "ping\0"
+    var a_write: [u8; 14] = "stickwr.write\0"
+    var a_wfile: [u8; 18] = "stickwr.writefile\0"
+    var k_image: [u8; 6] = "image\0"
+    var k_target: [u8; 7] = "target\0"
+    var k_path: [u8; 5] = "path\0"
+    var s_first: [u8; 10] = "/dev/usb0\0"
+    var img: [u8; 128] = [0 as u8; 128]
+    var tgt: [u8; 32] = [0 as u8; 32]
+    var s_ok: [u8; 4] = "ok\n\0"
+    actwire.ob_reset()
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        var s_pong: [u8; 6] = "pong\n\0"
+        actwire.ob_str((&s_pong[0 as usize]) as u64)
+        return false
+    }
+    let is_w: bool = actwire.str_eq(np, (&a_write[0 as usize]) as u64)
+    let is_f: bool = actwire.str_eq(np, (&a_wfile[0 as usize]) as u64)
+    if is_w || is_f {
+        if is_f {
+            actwire.kv_find(msg, (&k_path[0 as usize]) as u64, (&img[0 as usize]) as u64, 128)
+            ulib.strncpy((&tgt[0 as usize]) as u64, (&s_first[0 as usize]) as u64, 32)
+        } else {
+            actwire.kv_find(msg, (&k_image[0 as usize]) as u64, (&img[0 as usize]) as u64, 128)
+            actwire.kv_find(msg, (&k_target[0 as usize]) as u64, (&tgt[0 as usize]) as u64, 32)
+        }
+        // the broker has already asked the user (level critical): the call IS the confirmation
+        let rc: u64 = write_image((&img[0 as usize]) as u64, (&tgt[0 as usize]) as u64, true, dry)
+        if rc != R_OK {
+            reply_err(rc)
+            return false
+        }
+        var s_w: [u8; 9] = "written=\0"
+        var s_b: [u8; 8] = "blocks=\0"
+        var s_v: [u8; 12] = "verified=1\n\0"
+        var s_dr: [u8; 7] = "dry=1\n\0"
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+        if dry {
+            actwire.ob_str((&s_dr[0 as usize]) as u64)
+        }
+        actwire.ob_str((&s_w[0 as usize]) as u64)
+        actwire.ob_num(res_bytes)
+        actwire.ob_ch(10)
+        actwire.ob_str((&s_b[0 as usize]) as u64)
+        actwire.ob_num(res_blocks)
+        actwire.ob_ch(10)
+        if !dry {
+            actwire.ob_str((&s_v[0 as usize]) as u64)
+        }
+        return !dry
+    }
+    var e3: [u8; 19] = "err unknown_action\0"
+    actwire.ob_line((&e3[0 as usize]) as u64)
+    return false
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_me: [u8; 10] = "a.stickwr\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        var e: [u8; 28] = "stickwr: a.stickwr is taken\0"
+        say((&e[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        var e2: [u8; 28] = "stickwr: no orient.bus here\0"
+        say((&e2[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var s_hello: [u8; 15] = "hello stickwr\n\0"
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 14)
+    var s_ready: [u8; 27] = "stickwr: serving a.stickwr\0"
+    say((&s_ready[0 as usize]) as u64)
+    nl()
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    var last_check: u64 = t1
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    let changed: bool = handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+                    if changed {
+                        event()
+                    }
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            if actwire.ticks() - last_check > 100 {
+                last_check = actwire.ticks()
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    var s_by: [u8; 29] = "stickwr: orient-bus is gone\n\0"
+                    say((&s_by[0 as usize]) as u64)
+                    return 0
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_serve: [u8; 6] = "serve\0"
+    if ulib.arg_count(args) >= 2
+        && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if ulib.arg_count(args) >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    return cli(args)
+}

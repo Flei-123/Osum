@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/hwcheck/check.fi -- host test of lib/hwcheck/check.fi (E2 hardware check).
+// Prints "OK name" / "FAIL name"; exit 0 = ran through.
+
+import std.rt
+import std.io
+import hwcheck.check
+
+static mut bufs: [u8; 4096] = [0 as u8; 4096]
+static mut bufn: u64 = 0
+
+fn lit(s: str) -> u64 {
+    if bufn + (s.n as u64) + 1 > 4096 {
+        bufn = 0
+    }
+    let at: u64 = (&bufs[0 as usize]) as u64 + bufn
+    var i: usize = 0
+    while i < s.n {
+        *((at + i as u64) as *mut u8) = rt.ld8(s.p as u64, i) as u8
+        i = i + 1
+    }
+    *((at + s.n as u64) as *mut u8) = 0 as u8
+    bufn = bufn + (s.n as u64) + 1
+    return at
+}
+
+fn len(p: u64) -> u64 {
+    var n: u64 = 0
+    while *((p + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn feed(pci: str, usb: str, fw: str) {
+    check.reset()
+    let a: u64 = lit(pci)
+    let b: u64 = lit(usb)
+    let c: u64 = lit(fw)
+    check.feed_pci(a, len(a))
+    check.feed_usb(b, len(b))
+    check.feed_fw(c, len(c))
+}
+
+fn eqs(p: u64, s: str) -> bool {
+    let q: u64 = lit(s)
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 || *((q + i) as *mut u8) != 0 as u8 {
+        if *((p + i) as *mut u8) != *((q + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn has(s: str) -> bool {
+    check.report()
+    let p: u64 = check.report_ptr()
+    let w: u64 = lit(s)
+    let n: u64 = len(p)
+    let wl: u64 = len(w)
+    var i: u64 = 0
+    while i + wl <= n {
+        var j: u64 = 0
+        while j < wl && *((p + i + j) as *mut u8) == *((w + j) as *mut u8) {
+            j = j + 1
+        }
+        if j == wl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn main() -> i32 {
+    // 1. the QEMU machine: VGA + host bridge, a USB keyboard, a framebuffer
+    feed("00:00.0 0600 8086:1237 irq=0\n00:02.0 0300 1234:1111 irq=11\n",
+        "0627:0001 1 0 full 03 0 driver=keyboard\n", "boot_mode: BIOS\nframebuffer: 1024x768x32\n")
+    chk("qemu: display ok", check.item_state(check.DISPLAY) == check.OK)
+    chk("qemu: display detail is the pci class + id", eqs(check.item_detail(check.DISPLAY), "0300 1234:1111"))
+    chk("qemu: keyboard ok (usb)", check.item_state(check.KEYBOARD) == check.OK)
+    chk("qemu: audio missing", check.item_state(check.AUDIO) == check.MISSING)
+    chk("qemu: wlan missing", check.item_state(check.WLAN) == check.MISSING)
+    chk("report: display line", has("display: ok 0300 1234:1111\n"))
+    chk("report: keyboard line", has("keyboard: ok usb\n"))
+    chk("report: audio line", has("audio: missing\n"))
+    chk("report: wlan line", has("wlan: missing\n"))
+    chk("report: says ok is only 'listed'", has("it does not say a driver works"))
+    chk("report: says nothing is sent", has("sends nothing anywhere"))
+    // 2. a laptop: GPU 0380, HDA 0403, WLAN 0280, no USB keyboard
+    feed("00:02.0 0380 8086:9a49 irq=16\n00:1f.3 0403 8086:a0c8 irq=17\n00:14.3 0280 8086:a0f0 irq=18\n",
+        "1234:5678 2 0 high 09 0 driver=hub\n", "framebuffer: 1920x1080x32\n")
+    chk("laptop: display ok via class 0380", eqs(check.item_detail(check.DISPLAY), "0380 8086:9a49"))
+    chk("laptop: audio ok 0403", check.item_state(check.AUDIO) == check.OK
+        && eqs(check.item_detail(check.AUDIO), "0403 8086:a0c8"))
+    chk("laptop: wlan ok 0280", check.item_state(check.WLAN) == check.OK
+        && eqs(check.item_detail(check.WLAN), "0280 8086:a0f0"))
+    chk("laptop: keyboard is UNKNOWN, not missing", check.item_state(check.KEYBOARD) == check.UNKNOWN)
+    chk("laptop: report names the PS/2 / I2C limit", has("keyboard: unknown (no USB keyboard listed; PS/2 and I2C"))
+    // 3. audio class 0401 counts, a USB AR9271 counts as wlan
+    feed("00:05.0 0401 8086:2415 irq=10\n", "0cf3:9271 3 0 high ff 0 driver=none\n", "")
+    chk("0401 is audio", check.item_state(check.AUDIO) == check.OK)
+    chk("AR9271 usb stick is wlan", check.item_state(check.WLAN) == check.OK
+        && eqs(check.item_detail(check.WLAN), "usb 0cf3:9271"))
+    chk("no pci display, no framebuffer: display missing", check.item_state(check.DISPLAY) == check.MISSING)
+    // 4. empty input: everything missing, keyboard unknown
+    feed("", "", "")
+    chk("empty: display missing", check.item_state(check.DISPLAY) == check.MISSING)
+    chk("empty: audio missing", check.item_state(check.AUDIO) == check.MISSING)
+    chk("empty: wlan missing", check.item_state(check.WLAN) == check.MISSING)
+    chk("empty: keyboard unknown", check.item_state(check.KEYBOARD) == check.UNKNOWN)
+    // 5. look-alikes are not hits
+    feed("00:03.0 0300 1:1\n00:1f.3 0402 8086:a0c8 irq=17\n00:14.3 0200 8086:15f3 irq=18\n",
+        "0627:0001 1 0 full 03 0 driver=mouse\n", "framebuffer: none\n")
+    chk("malformed pci line (too short) ignored", check.item_state(check.DISPLAY) == check.MISSING)
+    chk("class 0402 is not audio", check.item_state(check.AUDIO) == check.MISSING)
+    chk("class 0200 (wired nic) is not wlan", check.item_state(check.WLAN) == check.MISSING)
+    chk("a mouse is not a keyboard", check.item_state(check.KEYBOARD) == check.UNKNOWN)
+    chk("'framebuffer: none' is no display", check.item_state(check.DISPLAY) == check.MISSING)
+    // 6. reset really resets
+    feed("00:02.0 0300 1234:1111 irq=11\n", "", "")
+    check.reset()
+    chk("reset clears", check.item_state(check.DISPLAY) == check.MISSING)
+    return 0
+}

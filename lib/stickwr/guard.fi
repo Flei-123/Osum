@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/stickwr/guard.fi -- D7: the GUARDS of the USB stick writer (no file system, no device).
+//
+// Writing an image onto a block device is the one action in this system that can destroy a
+// disk in one call. Every decision "may this run?" therefore lives HERE, in plain functions
+// that a host test and a mutation can hit -- kernel/user/stickwr.fi only does the I/O.
+//
+// RULES
+//   target   exactly "/dev/usb" + ONE digit 0..3 (the four USB mass storage slots of blk.fi).
+//            Nothing else: not "/dev/hda", "/dev/nvme0", "/dev/sda", not "/dev/usb" alone,
+//            not "/dev/usb0/", "/dev/usb00", "/dev/usb4", not a path with "..", not a
+//            relative name, not a file (a file target would be `cp`, not a stick writer).
+//   source   a file ending in ".img" or ".iso" (case-insensitive), NOT under "/dev/" and NOT
+//            under "/proc/" (a device or a table is no image).
+//   confirm  the caller must have been given `--yes` (or the bus confirmation, which the
+//            broker enforces for the `critical` level); without it nothing is touched.
+//
+// `check(src, dst, yes)` returns 0 or the FIRST reason (E_*), in this order: source, target,
+// confirmation -- so a wrong target is reported even when `--yes` is there.
+//
+// BLOCK GEOMETRY: `chunk(total, done)` is the size of the next write: BLOCK octets, the last
+// one shorter. `blocks(total)` is how many writes an image needs.
+
+export { check, target_ok, source_ok, target_index, chunk, blocks, BLOCK,
+    E_SOURCE, E_TARGET, E_NOYES, E_SRCDEV }
+
+const BLOCK: u64 = 65536
+const E_SOURCE: u64 = 1
+const E_TARGET: u64 = 2
+const E_NOYES: u64 = 3
+const E_SRCDEV: u64 = 4
+
+fn ld(p: u64, i: u64) -> u64 {
+    let b: u8 = *((p + i) as *mut u8)
+    return b as u64
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// "/dev/" (no `str` here: this lib is imported by the kernel-profile program)
+fn starts_dev(p: u64) -> bool {
+    return ld(p, 0) == 47 && ld(p, 1) == 100 && ld(p, 2) == 101 && ld(p, 3) == 118 && ld(p, 4) == 47
+}
+
+// "/dev/usb"
+fn starts_devusb(p: u64) -> bool {
+    return starts_dev(p) && ld(p, 5) == 117 && ld(p, 6) == 115 && ld(p, 7) == 98
+}
+
+// "/proc/"
+fn starts_proc(p: u64) -> bool {
+    return ld(p, 0) == 47 && ld(p, 1) == 112 && ld(p, 2) == 114 && ld(p, 3) == 111
+        && ld(p, 4) == 99 && ld(p, 5) == 47
+}
+
+// contains ".." as a path part or anywhere (the safe side: refuse any "..")
+fn has_dots(p: u64) -> bool {
+    var i: u64 = 0
+    while ld(p, i) != 0 {
+        if ld(p, i) == 46 && ld(p, i + 1) == 46 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// 0..3 for "/dev/usb0".."/dev/usb3", 99 for everything else
+fn target_index(p: u64) -> u64 {
+    if !starts_devusb(p) {
+        return 99
+    }
+    if has_dots(p) {
+        return 99
+    }
+    let d: u64 = ld(p, 8)
+    if d < 48 || d > 51 {
+        return 99
+    }
+    if ld(p, 9) != 0 {
+        return 99
+    }
+    return d - 48
+}
+
+fn target_ok(p: u64) -> bool {
+    return target_index(p) != 99
+}
+
+fn source_ok(p: u64) -> bool {
+    let n: u64 = slen(p)
+    if n < 5 {
+        return false
+    }
+    if has_dots(p) {
+        return false
+    }
+    let a: u64 = lower(ld(p, n - 4))
+    let b: u64 = lower(ld(p, n - 3))
+    let c: u64 = lower(ld(p, n - 2))
+    let d: u64 = lower(ld(p, n - 1))
+    // ".img" = 46 105 109 103, ".iso" = 46 105 115 111
+    if a != 46 || b != 105 {
+        return false
+    }
+    if !((c == 109 && d == 103) || (c == 115 && d == 111)) {
+        return false
+    }
+    return true
+}
+
+fn source_is_dev(p: u64) -> bool {
+    return starts_dev(p) || starts_proc(p)
+}
+
+fn check(src: u64, dst: u64, yes: bool) -> u64 {
+    if source_is_dev(src) {
+        return E_SRCDEV
+    }
+    if !source_ok(src) {
+        return E_SOURCE
+    }
+    if !target_ok(dst) {
+        return E_TARGET
+    }
+    if !yes {
+        return E_NOYES
+    }
+    return 0
+}
+
+fn chunk(total: u64, done: u64) -> u64 {
+    if done >= total {
+        return 0
+    }
+    let left: u64 = total - done
+    if left < BLOCK {
+        return left
+    }
+    return BLOCK
+}
+
+fn blocks(total: u64) -> u64 {
+    return (total + BLOCK - 1) / BLOCK
+}

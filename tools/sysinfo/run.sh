@@ -75,6 +75,11 @@ cat /proc/firmware
 echo ==FILE==
 sysinfo > /tmp/report.txt
 cat /tmp/report.txt
+echo ==HW==
+sysinfo --hwcheck
+echo ==HWF==
+sysinfo --hwcheck --export /tmp/hw.txt > /dev/null
+cat /tmp/hw.txt
 echo ==END==
 EOS
 python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 /lib/ \
@@ -93,7 +98,9 @@ timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
 tr -cd '\11\12\15\40-\176' < "$TMPD/o.txt" > "$TMPD/o.klar"
 part "$TMPD/o.klar" REPORT HWID > "$TMPD/rep.txt"
 part "$TMPD/o.klar" HWID PCI > "$TMPD/hw.txt"
-part "$TMPD/o.klar" FILE END > "$TMPD/file.txt"
+part "$TMPD/o.klar" FILE HW > "$TMPD/file.txt"
+part "$TMPD/o.klar" HW HWF > "$TMPD/hwc.txt"
+part "$TMPD/o.klar" HWF END > "$TMPD/hwf.txt"
 part "$TMPD/o.klar" PCI USB > "$TMPD/pci.txt"
 part "$TMPD/o.klar" USB FW > "$TMPD/usb.txt"
 part "$TMPD/o.klar" FW FILE > "$TMPD/fw.txt"
@@ -121,5 +128,13 @@ awk '/^== gpu ==/{f=1;next} /^== pci ==/{f=0} f' "$TMPD/rep.txt" | grep -v '^$' 
 has "$TMPD/gpu.txt" "0300 1234:1111" "report gpu section: the display adapter"
 hasnot "$TMPD/gpu.txt" "0600 8086:1237" "report gpu section: ONLY display controllers (no host bridge)"
 has "$TMPD/rep.txt" "boot_mode: BIOS" "report: firmware section shows the boot mode"
+has "$TMPD/hwc.txt" "OrientOS hardware check" "hwcheck: header"
+has "$TMPD/hwc.txt" "display: ok 0300 1234:1111" "hwcheck: the QEMU VGA is the display"
+has "$TMPD/hwc.txt" "keyboard: ok usb" "hwcheck: the usb-kbd is the keyboard"
+has "$TMPD/hwc.txt" "audio: missing" "hwcheck: no audio device in this VM -> missing (not invented)"
+has "$TMPD/hwc.txt" "wlan: missing" "hwcheck: no wlan device in this VM -> missing"
+has "$TMPD/hwc.txt" "sends nothing anywhere" "hwcheck: says it sends nothing"
+has "$TMPD/hwf.txt" "display: ok 0300 1234:1111" "hwcheck --export: the local file has the same report"
+hasnot "$TMPD/hwc.txt" "SECRET-SERIAL-4711" "hwcheck: no serial number"
 echo "SYSINFO: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
