@@ -47,7 +47,7 @@ import sched.time
 import sched.ctr
 
 export {
-    reset, adopt, set_atbase, atbase,
+    reset, adopt, set_atbase, atbase, set_atbase2, next_base,
     resolve, chdir_to, cwd_len, cwd_at, sysinfo, pstat, kill_pid,
     SLOT, CWD_MAX, PATH_MAX,
     I_TICKS, I_UPTIME, I_FRAMES_FREE, I_FRAMES_ALL, I_BLOCKS, I_BFREE,
@@ -71,6 +71,11 @@ const CWD_MAX: u64 = 462 // what a path here may be, minus the zero
 // r807: *at calls with a real directory descriptor. While one runs, this word holds the address of the frame that carries the
 // directory's path; `resolve` then completes a relative name against it instead of against the working directory. 0 = none.
 const O_ATBASE: u64 = 480
+// r821: the second directory of a two-path *at call (renameat, linkat) when the two directory arguments differ. 0 = none,
+// 1 = "the working directory / an absolute path" (frames are page addresses, so 1 cannot be one), else a path frame.
+// `next_base` swaps it with O_ATBASE, so the worker function can resolve its first path against the first directory and
+// its second path against the second one; calling it a second time swaps back.
+const O_ATBASE2: u64 = 488
 
 // RUNDE OFS3: `fs.parent_of` traegt einen Pfad jetzt in 1024 Oktetten in
 // `kdata` statt in 96 auf dem Stapel (siehe dort). Diese Zahl war der
@@ -105,7 +110,38 @@ fn atbase(state: u64, t: u64) -> u64 {
 fn set_atbase(state: u64, t: u64, fr: u64) {
     if t < kstate.MAX_TASKS {
         kstate.set(state, slot_off(t, O_ATBASE), fr)
+        if fr == 0 {
+            kstate.set(state, slot_off(t, O_ATBASE2), 0)
+        }
     }
+}
+
+// `other` is a path frame, or 1 for "no directory frame" (cwd / absolute), see O_ATBASE2. Call after set_atbase.
+fn set_atbase2(state: u64, t: u64, other: u64) {
+    if t < kstate.MAX_TASKS {
+        kstate.set(state, slot_off(t, O_ATBASE2), other)
+    }
+}
+
+// Swap the current base with the other one (no-op when the call has only one base).
+fn next_base(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    let other: u64 = kstate.get(state, slot_off(t, O_ATBASE2))
+    if other == 0 {
+        return
+    }
+    var cur: u64 = kstate.get(state, slot_off(t, O_ATBASE))
+    if cur == 0 {
+        cur = 1
+    }
+    var nb: u64 = other
+    if nb == 1 {
+        nb = 0
+    }
+    kstate.set(state, slot_off(t, O_ATBASE), nb)
+    kstate.set(state, slot_off(t, O_ATBASE2), cur)
 }
 
 fn cwd_addr(state: u64, t: u64) -> u64 {

@@ -338,6 +338,8 @@ const SYS_GETCWD: u64 = 79
 // per process, and `getcwd` above answers out of it now instead of
 // answering "/".
 const SYS_CHDIR: u64 = 80
+const SYS_FCHDIR: u64 = 81
+const SYS_EXECVEAT: u64 = 322
 const SYS_MKDIR: u64 = 83
 const SYS_RMDIR: u64 = 84 // RUNDE ALLTAG
 const SYS_UNLINK: u64 = 87
@@ -2448,6 +2450,9 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
                 var s_eb: [u8; 5] = " fl \0"
                 serial.puts((&s_eb[0]) as u64)
                 serial.dec(fget(frame, F_R10))
+                var s_ed: [u8; 7] = " addr \0"
+                serial.puts((&s_ed[0]) as u64)
+                serial.dec(fget(frame, F_RDI))
                 var s_ec: [u8; 5] = " fd \0"
                 serial.puts((&s_ec[0]) as u64)
                 serial.dec(fget(frame, F_R8) & 0xFFFFFFFF)
@@ -2953,6 +2958,21 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_EXECVE {
         return do_execve(state, me, frame, a0, a1, a2)
     }
+    if number == SYS_EXECVEAT {
+        // r820: execveat(dirfd, path, argv, envp, flags). A relative path is completed against the directory descriptor (or the
+        // cwd); an empty path with AT_EMPTY_PATH (fexecve) needs the path of a FILE descriptor, which is not kept -> -ENOSYS
+        // (musl then falls back to /proc/self/fd/N, which does not exist either: ENOENT, the same as before).
+        if proc.user_ok(state, me, a1, 1) && peek(state, me, a1) == 0 {
+            return neg(errno.E_NOSYS)
+        }
+        let xe: u64 = at_enter1(state, me, a0, a1)
+        if errno.is_error(xe) {
+            return xe
+        }
+        let xr: u64 = do_execve(state, me, frame, a1, a2, a3)
+        uio.set_atbase(state, me, 0)
+        return xr
+    }
     if number == SYS_WAIT4 {
         return do_wait4(state, me, a0, a1, a2)
     }
@@ -3052,6 +3072,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // ROUND K6.
     if number == SYS_CHDIR {
         return do_chdir(state, me, a0)
+    }
+    if number == SYS_FCHDIR {
+        return do_fchdir(state, me, a0)
     }
     if number == SYS_OSUM_SYSINFO {
         return uio.sysinfo(state, a0)
@@ -6638,25 +6661,39 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
+    var ino: u64 = 0
     if name == 0 {
-        return neg(errno.E_INVAL)
-    }
-    let buf: u64 = nameb(state)
-    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
-    if errno.is_error(len) {
-        return len
-    }
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
-    }
-    let ino: u64 = fs.path(state, buf)
-    if ino == 0 {
-        return neg(errno.E_NOENT)
+        // r820: futimens(fd, times) = utimensat(fd, NULL, times, 0)
+        let ofd: u64 = of_of(state, me, fd)
+        if ofd >= file.MAX_OPEN {
+            return neg(errno.E_BADF)
+        }
+        let kd: u64 = file.open_kind(state, ofd)
+        if kd != file.K_FILE && kd != file.K_DIR {
+            return neg(errno.E_PERM) // pipes, consoles and virtual files carry no times
+        }
+        ino = file.open_ino(state, ofd)
+        if ino == 0 {
+            return neg(errno.E_BADF)
+        }
+    } else {
+        let buf: u64 = nameb(state)
+        let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+        if errno.is_error(len) {
+            return len
+        }
+        // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+        // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+        // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+        // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+        // stehen in `kernel/perm.fi`.
+        if !perm.walk(state, me, buf) {
+            return neg(errno.E_ACCES)
+        }
+        ino = fs.path(state, buf)
+        if ino == 0 {
+            return neg(errno.E_NOENT)
+        }
     }
     // Wer die Zeiten setzen will, muss schreiben duerfen. Das ist
     // strenger als POSIX (dort reicht Eigentum fuer "auf jetzt"), und
@@ -10135,6 +10172,7 @@ fn do_link(state: u64, me: u64, from: u64, to: u64) -> u64 {
     if errno.is_error(la) {
         return la
     }
+    uio.next_base(state, me) // r821: the second path may belong to another directory descriptor
     let lb: u64 = fetch_path(state, me, to, b, MAX_NAME)
     if errno.is_error(lb) {
         return lb
@@ -10343,6 +10381,7 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
     if errno.is_error(la) {
         return la
     }
+    uio.next_base(state, me) // r821: the second path may belong to another directory descriptor
     let lb: u64 = fetch_path(state, me, to, b, MAX_NAME)
     if errno.is_error(lb) {
         return lb
@@ -11620,6 +11659,39 @@ fn do_chdir(state: u64, me: u64, name: u64) -> u64 {
     // nicht betreten darf, soll nicht einmal erfahren, ob der Name
     // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
     // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino != 0 {
+        if !perm.may(state, me, ino, perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
+    }
+    return uio.chdir_to(state, me, buf)
+}
+
+// r820: `fchdir(fd)`. The directory descriptor remembers its path (`dirpath_remember`, jail prefix cut); `uio.resolve` puts the
+// jail root in front again, then the same checks as `chdir` run.
+fn do_fchdir(state: u64, me: u64, fd: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let fr: u64 = at_dir_frame(state, me, fd)
+    if errno.is_error(fr) {
+        return fr
+    }
+    let buf: u64 = nameb(state)
+    var n: u64 = 0
+    while n < uio.PATH_MAX && kstate.get8(fr + n) != 0 {
+        kstate.set8(buf + n, kstate.get8(fr + n) as u8)
+        n = n + 1
+    }
+    kstate.set8(buf + n, 0 as u8)
+    let len: u64 = uio.resolve(state, me, buf, n)
+    if errno.is_error(len) {
+        return len
+    }
     if !perm.walk(state, me, buf) {
         return neg(errno.E_ACCES)
     }
@@ -19012,7 +19084,9 @@ fn ev_in_rename(state: u64, me: u64, from: u64, to: u64) {
         return
     }
     let cookie: u64 = sched.poll_seq(state) + 1
+    uio.next_base(state, me) // r821: do_rename left the second base current; back to the first for the source
     ev_in_path(state, me, from, IN_MOVED_FROM, cookie)
+    uio.next_base(state, me)
     ev_in_path(state, me, to, IN_MOVED_TO, cookie)
 }
 
@@ -19534,38 +19608,37 @@ fn at_same_path(a: u64, b: u64) -> bool {
     return false
 }
 
-// Two paths with a directory argument each (renameat, linkat). There is ONE base slot, so both relative names must use the same
-// directory (two different real directories, or one cwd-relative name next to a dirfd-relative one, answer -ENOSYS).
+// Two paths with a directory argument each (renameat, linkat). r821: the two directories may differ (a real descriptor next to
+// the cwd, or two different descriptors). The worker function takes its first path from the first base and calls
+// `uio.next_base` before the second fetch (`do_link`, `do_rename`, `ev_in_rename`).
 fn at_enter2(state: u64, me: u64, d1: u64, p1: u64, d2: u64, p2: u64) -> u64 {
     let c1: u64 = at_class(state, me, d1, p1)
     let c2: u64 = at_class(state, me, d2, p2)
     if c1 != AT_REL_DIR && c2 != AT_REL_DIR {
         return 0
     }
-    var fr: u64 = 0
+    var f1: u64 = 0
+    var f2: u64 = 0
     if c1 == AT_REL_DIR {
-        fr = at_dir_frame(state, me, d1)
-        if errno.is_error(fr) {
-            return fr
-        }
-        if c2 == AT_REL_CWD {
-            return neg(errno.E_NOSYS)
+        f1 = at_dir_frame(state, me, d1)
+        if errno.is_error(f1) {
+            return f1
         }
     }
     if c2 == AT_REL_DIR {
-        let f2: u64 = at_dir_frame(state, me, d2)
+        f2 = at_dir_frame(state, me, d2)
         if errno.is_error(f2) {
             return f2
         }
-        if c1 == AT_REL_CWD {
-            return neg(errno.E_NOSYS)
-        }
-        if fr != 0 && !at_same_path(fr, f2) {
-            return neg(errno.E_NOSYS)
-        }
-        fr = f2
     }
-    uio.set_atbase(state, me, fr)
+    uio.set_atbase(state, me, f1)
+    if f1 != f2 && !(f1 != 0 && f2 != 0 && at_same_path(f1, f2)) {
+        if f2 == 0 {
+            uio.set_atbase2(state, me, 1)
+        } else {
+            uio.set_atbase2(state, me, f2)
+        }
+    }
     return 0
 }
 
