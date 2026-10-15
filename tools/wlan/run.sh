@@ -207,6 +207,37 @@ pass=$((pass + VWP))
 fail=$((fail + VWF))
 
 echo
+echo "== 12. AR9271 (USB, ath9k_htc): Firmware-Pin, Download, HTC/WMI gegen simulierten Stick =="
+# =====================================================================
+#
+# lib/wlan/htc.fi + lib/wlan/ar9271.fi (REAL driver code) talk through a
+# transport table to a simulated firmware (tools/wlan/ar9271.fi).
+# tools/wlan/ar9271.py re-derives every frame with struct.pack. A real
+# linux-firmware blob (htc_9271-1.4.0.fw) is used if $WLAN_FW points at
+# it; otherwise only the synthetic blob runs. Not real hardware (M1).
+if $FIRNC tools/wlan/ar9271.fi -o .probe/war9271 2> "$OUT/ar9271.err"; then
+    ok "tools/wlan/ar9271.fi baut gegen lib/wlan/ar9271.fi + htc.fi"
+    SYN="$OUT/ar9271-syn.bin"
+    python3 -c "
+import random
+r = random.Random(7)
+open('$SYN', 'wb').write(bytes(r.randrange(256) for _ in range(9000)))"
+    python3 -I tools/wlan/ar9271.py .probe/war9271 "$SYN" 2>&1 | tee "$OUT/ar9271.txt"
+    if [ -n "${WLAN_FW:-}" ] && [ -f "$WLAN_FW" ]; then
+        python3 -I tools/wlan/ar9271.py .probe/war9271 "$WLAN_FW" 2>&1 | tee -a "$OUT/ar9271.txt"
+    else
+        echo "  (WLAN_FW nicht gesetzt: echte Firmware nicht geprueft)"
+    fi
+    AP=$(grep -c '^  OK    ' "$OUT/ar9271.txt" || true)
+    AF=$(grep -c '^  FAIL  ' "$OUT/ar9271.txt" || true)
+    pass=$((pass + AP))
+    fail=$((fail + AF))
+else
+    bad "tools/wlan/ar9271.fi laesst sich nicht bauen"
+    head -20 "$OUT/ar9271.err"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then
     echo "WLAN: $pass Zusagen, 0 Fehler"
     exit 0

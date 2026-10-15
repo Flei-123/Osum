@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/htc.fi -- wire codec for the Atheros HTC/WMI firmware protocol
+// (AR9271 / AR7010 "ath9k_htc" family). Pure byte shuffling: no allocator,
+// no system call, no import, all state at the caller (same rule as the
+// rest of lib/wlan). Layouts are taken from the Linux sources
+// drivers/net/wireless/ath/ath9k/{htc_hst.h,htc_hst.c,wmi.h,wmi.c,hif_usb.h,
+// hif_usb.c} (read 15.10.2026) -- nothing here is guessed, but nothing has
+// been run against a real stick yet (see docs/WLAN-TREIBER.md, milestone M1).
+//
+// Frame on the wire (all multi-byte fields BIG endian unless noted):
+//
+//   HTC frame  = hdr[8] + payload
+//   hdr        = endpoint_id u8 | flags u8 | payload_len be16 | control[4]
+//   endpoint 0 carries HTC control messages (first be16 of payload = msg id)
+//   other endpoints carry services; WMI payload = wmi_hdr[4] + body
+//   wmi_hdr    = command_id be16 | seq_no be16   (event ids have bit 0x1000)
+//
+// USB "stream mode" (bulk pipes only, LITTLE endian): len le16 | 0x4e00 le16
+// (rx) or 0x697e (tx), payload, padded to 4 bytes.
+
+export {
+    HDR_LEN, MSG_READY, MSG_CONNECT, MSG_CONN_RSP, MSG_SETUP_COMPLETE,
+    MSG_CONFIG_PIPE, MSG_CONFIG_PIPE_RSP,
+    SVC_WMI_CONTROL, SVC_WMI_BEACON, SVC_WMI_MGMT, SVC_WMI_DATA_BE,
+    PIPE_TX, PIPE_RX, PIPE_REG_IN, PIPE_REG_OUT, EP_MAX,
+    WMI_ECHO, WMI_GET_FW_VERSION, WMI_REG_READ, WMI_REG_WRITE, WMI_REG_RMW,
+    WMI_EVENT_BIT, WMI_TGT_RDY_EVENT,
+    CONN_OK, TAG_RX, TAG_TX, MAX_CTRL_MSG,
+    put16, get16, put32, get32, le16_get, le16_put,
+    svc_ul_pipe, svc_dl_pipe,
+    hdr_put, hdr_check, hdr_payload_len,
+    build_conn, build_config_pipe, build_setup_complete,
+    parse_ready, parse_conn_rsp,
+    build_wmi, parse_wmi,
+    stream_put, stream_next
+}
+
+const HDR_LEN: usize = 8
+const EP_MAX: u64 = 22
+const MAX_CTRL_MSG: usize = 255
+
+const MSG_READY: u64 = 1
+const MSG_CONNECT: u64 = 2
+const MSG_CONN_RSP: u64 = 3
+const MSG_SETUP_COMPLETE: u64 = 4
+const MSG_CONFIG_PIPE: u64 = 5
+const MSG_CONFIG_PIPE_RSP: u64 = 6
+
+// service id = (group << 8) | index; group 1 = WMI
+const SVC_WMI_CONTROL: u64 = 0x0100
+const SVC_WMI_BEACON: u64 = 0x0101
+const SVC_WMI_MGMT: u64 = 0x0104
+const SVC_WMI_DATA_BE: u64 = 0x0107
+
+// USB pipe numbers (hif_usb.h)
+const PIPE_TX: u64 = 1
+const PIPE_RX: u64 = 2
+const PIPE_REG_IN: u64 = 3
+const PIPE_REG_OUT: u64 = 4
+
+const CONN_OK: u64 = 0
+
+const WMI_ECHO: u64 = 1
+const WMI_GET_FW_VERSION: u64 = 3
+const WMI_REG_READ: u64 = 20
+const WMI_REG_WRITE: u64 = 21
+const WMI_REG_RMW: u64 = 32
+const WMI_EVENT_BIT: u64 = 0x1000
+const WMI_TGT_RDY_EVENT: u64 = 0x1001
+
+const TAG_RX: u64 = 0x4e00
+const TAG_TX: u64 = 0x697e
+
+fn ld(p: u64, i: usize) -> u64 {
+    let b: u8 = *((p + i as u64) as *mut u8)
+    return b as u64
+}
+fn st(p: u64, i: usize, v: u64) { *((p + i as u64) as *mut u8) = (v & 255) as u8 }
+
+fn put16(p: u64, i: usize, v: u64) {
+    st(p, i, v >> 8)
+    st(p, i + 1, v)
+}
+fn get16(p: u64, i: usize) -> u64 { return (ld(p, i) << 8) | ld(p, i + 1) }
+fn put32(p: u64, i: usize, v: u64) {
+    put16(p, i, v >> 16)
+    put16(p, i + 2, v)
+}
+fn get32(p: u64, i: usize) -> u64 { return (get16(p, i) << 16) | get16(p, i + 2) }
+fn le16_get(p: u64, i: usize) -> u64 { return ld(p, i) | (ld(p, i + 1) << 8) }
+fn le16_put(p: u64, i: usize, v: u64) {
+    st(p, i, v)
+    st(p, i + 1, v >> 8)
+}
+
+// Pipes a service uses (htc_hst.c service_to_ulpipe / service_to_dlpipe).
+// Control service: interrupt pipes 4 (out) / 3 (in); all data services:
+// bulk pipes 1 (out) / 2 (in). Unknown service -> 0.
+fn svc_ul_pipe(svc: u64) -> u64 {
+    if svc == SVC_WMI_CONTROL { return PIPE_REG_OUT }
+    if svc >= 0x0101 && svc <= 0x0108 { return PIPE_TX }
+    return 0
+}
+fn svc_dl_pipe(svc: u64) -> u64 {
+    if svc == SVC_WMI_CONTROL { return PIPE_REG_IN }
+    if svc >= 0x0101 && svc <= 0x0108 { return PIPE_RX }
+    return 0
+}
+
+// ---- HTC frame header -------------------------------------------------
+
+fn hdr_put(out: u64, epid: u64, flags: u64, plen: usize) {
+    st(out, 0, epid)
+    st(out, 1, flags)
+    put16(out, 2, plen as u64)
+    st(out, 4, 0)
+    st(out, 5, 0)
+    st(out, 6, 0)
+    st(out, 7, 0)
+}
+
+// Validates the 8-byte header against the received length. Returns the
+// endpoint id (>= 0), or -1 = too short / bad endpoint / length lies,
+// -2 = firmware panic marker (endpoint 0x99).
+fn hdr_check(p: u64, len: usize) -> i64 {
+    if len < HDR_LEN { return -1 }
+    let ep: u64 = ld(p, 0)
+    if ep == 0x99 { return -2 }
+    if ep >= EP_MAX { return -1 }
+    let pl: usize = get16(p, 2) as usize
+    if pl > len - HDR_LEN { return -1 }
+    return ep as i64
+}
+
+fn hdr_payload_len(p: u64) -> usize { return get16(p, 2) as usize }
+
+// ---- HTC control messages (endpoint 0), return the whole frame length ----
+
+// connect-service request: msg_id, service_id, con_flags (be16), dl_pipe,
+// ul_pipe, svc_meta_len = 0, pad = 0  -> 10 payload bytes
+fn build_conn(out: u64, svc: u64, flags: u64, dl: u64, ul: u64) -> usize {
+    hdr_put(out, 0, 0, 10)
+    let b: u64 = out + 8
+    put16(b, 0, MSG_CONNECT)
+    put16(b, 2, svc)
+    put16(b, 4, flags)
+    st(b, 6, dl)
+    st(b, 7, ul)
+    st(b, 8, 0)
+    st(b, 9, 0)
+    return 18
+}
+
+// config-pipe: msg_id, pipe_id, credits -> 4 payload bytes
+fn build_config_pipe(out: u64, pipe: u64, credits: u64) -> usize {
+    hdr_put(out, 0, 0, 4)
+    put16(out + 8, 0, MSG_CONFIG_PIPE)
+    st(out + 8, 2, pipe)
+    st(out + 8, 3, credits)
+    return 12
+}
+
+fn build_setup_complete(out: u64) -> usize {
+    hdr_put(out, 0, 0, 2)
+    put16(out + 8, 0, MSG_SETUP_COMPLETE)
+    return 10
+}
+
+// READY (target -> host): msg_id, credits be16, credit_size be16,
+// max_endpoints u8, pad. Layout is htc_ready_msg; Linux reads credit_size
+// from the HTC header offset, which looks like an upstream quirk -- this
+// parser uses the documented struct after the header. UNVERIFIED on real
+// hardware (r21 / M1).
+fn parse_ready(p: u64, len: usize, credits: *mut u64, credit_size: *mut u64,
+    max_ep: *mut u64) -> bool {
+    if hdr_check(p, len) != 0 { return false }
+    if hdr_payload_len(p) < 8 { return false }
+    if get16(p, 8) != MSG_READY { return false }
+    *credits = get16(p, 10)
+    *credit_size = get16(p, 12)
+    *max_ep = ld(p, 14)
+    return true
+}
+
+// connect response: msg_id, service_id be16, status, endpoint_id,
+// max_msg_len be16, svc_meta_len, pad  -> 10 payload bytes
+fn parse_conn_rsp(p: u64, len: usize, svc: *mut u64, status: *mut u64,
+    epid: *mut u64, maxlen: *mut u64) -> bool {
+    if hdr_check(p, len) != 0 { return false }
+    if hdr_payload_len(p) < 10 { return false }
+    if get16(p, 8) != MSG_CONN_RSP { return false }
+    *svc = get16(p, 10)
+    *status = ld(p, 12)
+    *epid = ld(p, 13)
+    *maxlen = get16(p, 14)
+    return true
+}
+
+// ---- WMI over HTC ----------------------------------------------------------
+
+// HTC hdr (endpoint epid) + wmi hdr (cmd, seq) + body. Returns frame length.
+fn build_wmi(out: u64, epid: u64, cmd: u64, seq: u64, body: u64,
+    blen: usize) -> usize {
+    hdr_put(out, epid, 0, 4 + blen)
+    put16(out + 8, 0, cmd)
+    put16(out + 8, 2, seq)
+    var i: usize = 0
+    while i < blen {
+        st(out + 12, i, ld(body, i))
+        i = i + 1
+    }
+    return 12 + blen
+}
+
+// Reads the WMI header of a received HTC frame on `want_ep`. Returns the
+// body length (>= 0) and fills cmd/seq (body starts at p + 12), or -1.
+fn parse_wmi(p: u64, len: usize, want_ep: u64, cmd: *mut u64,
+    seq: *mut u64) -> i64 {
+    let ep: i64 = hdr_check(p, len)
+    if ep < 0 { return -1 }
+    if ep as u64 != want_ep { return -1 }
+    let pl: usize = hdr_payload_len(p)
+    if pl < 4 { return -1 }
+    *cmd = get16(p, 8)
+    *seq = get16(p, 10)
+    return (pl - 4) as i64
+}
+
+// ---- USB stream mode (bulk pipes) -------------------------------------
+
+// Wraps `n` payload bytes at `src` into `dst` with the 4-byte tag header
+// and pad to a multiple of 4. Returns the total length written.
+fn stream_put(dst: u64, src: u64, n: usize, tag: u64) -> usize {
+    le16_put(dst, 0, n as u64)
+    le16_put(dst, 2, tag)
+    var i: usize = 0
+    while i < n {
+        st(dst, 4 + i, ld(src, i))
+        i = i + 1
+    }
+    var tot: usize = 4 + n
+    while (tot & 3) != 0 {
+        st(dst, tot, 0)
+        tot = tot + 1
+    }
+    return tot
+}
+
+// Next packet of an rx transfer starting at `*at`. On success sets
+// `*off` (payload offset) and `*plen`, advances `*at` past the padding and
+// returns true. Bad tag / length beyond the buffer -> false and the rest of
+// the transfer must be dropped (hif_usb.c does the same).
+fn stream_next(p: u64, len: usize, at: *mut usize, off: *mut usize,
+    plen: *mut usize) -> bool {
+    let a: usize = *at
+    if a + 4 > len { return false }
+    let n: usize = le16_get(p, a) as usize
+    if le16_get(p, a + 2) != TAG_RX { return false }
+    if n > 32768 { return false }
+    let pad: usize = (4 - (n & 3)) & 3
+    if a + 4 + n > len { return false }
+    *off = a + 4
+    *plen = n
+    *at = a + 4 + n + pad
+    return true
+}
