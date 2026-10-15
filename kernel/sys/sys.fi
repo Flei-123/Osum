@@ -82,6 +82,7 @@ import bus.bus
 import ipc.perm
 import sched.ctr
 import sched.origin
+import apprights.policy
 import sched.futex
 import ui.ax
 import klog
@@ -978,6 +979,11 @@ const SYS_OSUM_CTRGET: u64 = 1330
 const SYS_OSUM_ORIGIN: u64 = 1990
 const OG_GET: u64 = 0
 const OG_SET: u64 = 1
+// W-APPRIGHTS stage 1 (docs/APP-RECHTE-ENERGIE.md): per-app grants.
+//   ORIGIN(3, name, 0)     -> grant mask of app <name> (anyone may read)
+//   ORIGIN(2, name, mask)  -> 0; set the mask. ONLY an unlabelled caller (the person's own tools)
+const OG_RGET: u64 = 3
+const OG_RSET: u64 = 2
 const SYS_OSUM_CTRSET: u64 = 1331
 const SYS_OSUM_CTRNEW: u64 = 1332
 const SYS_OSUM_CTRENTER: u64 = 1333
@@ -14106,7 +14112,33 @@ fn ctr_admin(state: u64, me: u64) -> bool {
 // AB-003. GET is open to everyone -- the label is not a secret, it is the
 // thing a broker needs to know about its caller. SET only ever narrows
 // (kernel/sched/origin.fi).
+fn do_rights(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
+    let buf: u64 = nameb(state)
+    let n: u64 = fetch_name(state, me, a1, buf, policy.NAME_MAX + 1)
+    if errno.is_error(n) {
+        return n
+    }
+    if op == OG_RGET {
+        return policy.get_mask(buf)
+    }
+    // a labelled process (an app, or anything an app started) can never widen its own rights
+    if !origin.is_empty(state, me) {
+        return neg(errno.E_PERM)
+    }
+    let r: u64 = policy.set_mask(buf, a2)
+    if r == policy.E_FULL {
+        return neg(errno.E_NOMEM)
+    }
+    if r != policy.E_OK {
+        return neg(errno.E_INVAL)
+    }
+    return 0
+}
+
 fn do_origin(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
+    if op == OG_RGET || op == OG_RSET {
+        return do_rights(state, me, op, a1, a2)
+    }
     if op == OG_GET {
         var t: u64 = me
         if a1 != 0 {
@@ -16399,6 +16431,10 @@ fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
 fn do_audread(state: u64, me: u64, dst: u64, frames: u64) -> u64 {
     if frames == 0 {
         return 0
+    }
+    // W-APPRIGHTS: an app (sticky label "app:<name>") needs the `mic` grant; the person's own tools are not gated
+    if !policy.label_allows(origin.at(state, me), policy.P_MIC) {
+        return neg(errno.E_ACCES)
     }
     let f: u64 = audio.hold(state)
     let r: u64 = audread_locked(state, me, dst, frames)

@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/apprights.fi -- /bin/apprights: per-app right grants (W-APPRIGHTS stage 1).
+//
+//     apprights get <app>                    print the grant mask and the right names
+//     apprights set <app> [right ...]        replace the grants (no right = revoke all)
+//     apprights trymic <app>                 test: a child labelled app:<app> reads the microphone
+//     apprights trygrant <app>               test: a child labelled app:<app> tries to grant itself `mic`
+//
+// The table lives in the kernel (lib/apprights/policy.fi, SYS_OSUM_ORIGIN ops 2/3). Only an unlabelled
+// caller (this tool run by the person) can change it. docs/APP-RECHTE-ENERGIE.md.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.kcall
+import apprights.policy
+
+export { u_start }
+
+static mut mic_buf: [u8; 256] = [0 as u8; 256]
+
+fn code_of(r: u64) -> u64 {
+    return 0 -% r
+}
+
+fn do_get(app: u64) -> u64 {
+    var s_pre: [u8; 12] = "apprights: \0"
+    var s_mask: [u8; 7] = " mask=\0"
+    var s_sp: [u8; 2] = " \0"
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 3, app, 0)
+    if ulib.failed(r) {
+        var s_bad: [u8; 20] = "apprights: bad name\0"
+        ulib.say((&s_bad[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_pre[0]) as u64)
+    ulib.say(app)
+    ulib.say((&s_mask[0]) as u64)
+    ulib.sayu(r)
+    var b: u64 = 1
+    var i: u64 = 0
+    while i < 11 {
+        if (r & b) != 0 {
+            ulib.say((&s_sp[0]) as u64)
+            ulib.say(policy.name_of_bit(b))
+        }
+        b = b << 1
+        i = i + 1
+    }
+    ulib.nl()
+    return 0
+}
+
+fn do_set(args: u64, argc: u64) -> u64 {
+    var s_unk: [u8; 21] = "apprights: unknown: \0"
+    var s_ok: [u8; 19] = "apprights: set ok \0"
+    var s_fail: [u8; 21] = "apprights: set fail \0"
+    let app: u64 = ulib.arg_at(args, 2)
+    var mask: u64 = 0
+    var i: u64 = 3
+    while i < argc {
+        let bit: u64 = policy.bit_of(ulib.arg_at(args, i))
+        if bit == 0 {
+            ulib.say((&s_unk[0]) as u64)
+            ulib.say(ulib.arg_at(args, i))
+            ulib.nl()
+            return 1
+        }
+        mask = mask | bit
+        i = i + 1
+    }
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, app, mask)
+    if ulib.failed(r) {
+        ulib.say((&s_fail[0]) as u64)
+        ulib.sayu(code_of(r))
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_ok[0]) as u64)
+    ulib.sayu(mask)
+    ulib.nl()
+    return 0
+}
+
+// Label MYSELF as app:<name> (sticky, cannot be undone) -- what the kernel does for a started app bundle.
+fn label_self(app: u64) -> bool {
+    var lab: [u8; 32] = [0 as u8; 32]
+    lab[0 as usize] = 97 as u8
+    lab[1 as usize] = 112 as u8
+    lab[2 as usize] = 112 as u8
+    lab[3 as usize] = 58 as u8
+    let n: u64 = ulib.length(app)
+    if n == 0 || n > 19 {
+        return false
+    }
+    ulib.copy((&lab[4 as usize]) as u64, app, n)
+    return !ulib.failed(ulib.sys(kcall.SYS_OSUM_ORIGIN, 1, (&lab[0]) as u64, n + 4))
+}
+
+fn child_trymic(app: u64) -> u64 {
+    var s_lab: [u8; 19] = "trymic: label fail\0"
+    var s_den: [u8; 19] = "trymic: DENIED\0\0\0\0\0"
+    var s_nod: [u8; 24] = "trymic: ALLOWED nodev\0\0\0"
+    var s_ok: [u8; 20] = "trymic: ALLOWED ok\0\0"
+    var s_oth: [u8; 24] = "trymic: other error \0\0\0\0"
+    // app "-" = do not label: the person's own process (control: must never be gated)
+    var unlabelled: bool = false
+    if ulib.length(app) == 1 && *(app as *mut u8) == 45 as u8 {
+        unlabelled = true
+    }
+    if !unlabelled && !label_self(app) {
+        ulib.say((&s_lab[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_AUDREAD, (&mic_buf[0]) as u64, 16, 0)
+    if ulib.failed(r) {
+        let c: u64 = code_of(r)
+        if c == 13 {
+            ulib.say((&s_den[0]) as u64)
+            ulib.nl()
+            return 13
+        }
+        if c == 19 {
+            ulib.say((&s_nod[0]) as u64)
+            ulib.nl()
+            return 0
+        }
+        ulib.say((&s_oth[0]) as u64)
+        ulib.sayu(c)
+        ulib.nl()
+        return 2
+    }
+    ulib.say((&s_ok[0]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn child_trygrant(app: u64) -> u64 {
+    var s_lab: [u8; 21] = "trygrant: label fail\0"
+    var s_ref: [u8; 22] = "trygrant: REFUSED\0\0\0\0\0"
+    var s_all: [u8; 28] = "trygrant: GRANTED ITSELF\0\0\0\0"
+    if !label_self(app) {
+        ulib.say((&s_lab[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, app, policy.P_ALL)
+    if ulib.failed(r) {
+        ulib.say((&s_ref[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_all[0]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn run_child(app: u64, which: u64) -> u64 {
+    var s_nofork: [u8; 19] = "apprights: no fork\0"
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.failed(pid) {
+        ulib.say((&s_nofork[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if pid == 0 {
+        var rc: u64 = 0
+        if which == 0 {
+            rc = child_trymic(app)
+        } else {
+            rc = child_trygrant(app)
+        }
+        let _e: u64 = ulib.sys(ulib.SYS_EXIT, rc, 0, 0)
+        return rc
+    }
+    return ulib.wait_code(pid)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use1: [u8; 40] = "usage: apprights get <app>\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_use2: [u8; 39] = "       apprights set <app> [right ...]\0"
+    var s_use3: [u8; 39] = "       apprights trymic|trygrant <app>\0"
+    var s_get: [u8; 4] = "get\0"
+    var s_set: [u8; 4] = "set\0"
+    var s_trymic: [u8; 7] = "trymic\0"
+    var s_trygrant: [u8; 10] = "trygrant\0\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 3 {
+        ulib.say((&s_use1[0]) as u64)
+        ulib.nl()
+        ulib.say((&s_use2[0]) as u64)
+        ulib.nl()
+        ulib.say((&s_use3[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let app: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(cmd, (&s_get[0]) as u64) {
+        return do_get(app)
+    }
+    if ulib.streq(cmd, (&s_set[0]) as u64) {
+        return do_set(args, argc)
+    }
+    if ulib.streq(cmd, (&s_trymic[0]) as u64) {
+        return run_child(app, 0)
+    }
+    if ulib.streq(cmd, (&s_trygrant[0]) as u64) {
+        return run_child(app, 1)
+    }
+    ulib.say((&s_use1[0]) as u64)
+    ulib.nl()
+    return 1
+}
