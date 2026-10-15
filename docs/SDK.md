@@ -1,7 +1,7 @@
 # OrientOS SDK -- app manifest v2, project template, `osdk`
 
 Status: **host tool built and tested** (`bash tools/sdk/run.sh`). Runtime enforcement of
-permissions: `net notify clipboard.read clipboard.write audio.play mic` are enforced by the kernel (docs/APP-RECHTE-ENERGIE.md, grant by the person, default deny); `fs.home` is declared only (S-010).
+permissions: see "Permissions" below (AR-2).
 
 ## Tool
 
@@ -28,5 +28,13 @@ service outside the app namespace or >16 octets, unknown/duplicate permission,
 
 ## Permissions
 
-`net` enforced (netview). `notify clipboard.read clipboard.write fs.home audio.play`: **declared only**
-(lint warns). `min_os` declared only (the OS has no version number yet).
+State of AR-2 (docs/APP-RECHTE-ENERGIE.md). The manifest `perm=` (INFO file) is the CEILING of an app: the kernel never grants more
+than the app declared. The kernel table of 16 apps (`lib/apprights/policy.fi`), `/bin/apprights` and `/etc/apprights.conf` hold what
+the person actually granted (default deny).
+
+- **Enforced by the kernel:** `net notify clipboard.read clipboard.write audio.play mic`.
+- **Declared only:** `fs.home` (S-010, no sandbox yet).
+- **In the rights table, not yet in the manifest vocabulary:** camera, location, contacts, phone (bits `P_CAMERA P_LOCATION P_CONTACTS P_PHONE`).
+- **Planned (docs/APP-WINDOW-OPTS.md):** `window.float` (a window above the normal ones, layer `L_FLOAT`, never `L_TOP`) and `hotkey`
+  (a named action with a preferred key). Both are granted by the person like the microphone.
+- `min_os` is declared only (the OS has no version number yet).
