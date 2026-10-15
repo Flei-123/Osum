@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/usbnet/ncm.fi -- CDC-NCM (Network Control Model) wire formats, 16 bit NTB, protocol half only.
+//
+// WHAT THIS IS
+//   Pure encode/decode of what a NCM tethering function speaks (USB CDC
+//   NCM 1.0, NTB16 format, no CRC). No USB, no xHCI, no netdev. Testable on
+//   the host (tools/ncm/run.sh), like lib/usbnet/rndis.fi.
+//     * GET_NTB_PARAMETERS answer (28 bytes) -> sizes / alignment
+//     * SET_NTB_INPUT_SIZE / SET_NTB_FORMAT control payloads
+//     * TX: wrap ONE Ethernet frame into an NTB (NTH16 + datagram + NDP16)
+//     * RX: validate an NTB and hand out its datagrams (bounds-checked)
+//
+// WHAT THIS IS NOT (honest)
+//   There is NO NCM driver: kernel/usb/usb.fi does not bind class 02/0D/00,
+//   and QEMU 7.2 has no NCM device (usb-net offers RNDIS/ECM only), so no
+//   end-to-end gate exists. See docs/USBNET.md.
+//
+// NTB16 layout (all little endian):
+//   NTH16 (12) : "NCMH" | wHeaderLength=12 | wSequence | wBlockLength | wNdpIndex
+//   NDP16      : "NCM0" | wLength | wNextNdpIndex | { wDatagramIndex, wDatagramLength }* | 0,0
+
+export {
+    NTH_SIG, NDP_SIG, NTH_LEN, NDP_ENTRY_MAX, DG_MIN, DG_MAX,
+    REQ_GET_NTB_PARAMETERS, REQ_SET_NTB_FORMAT, REQ_SET_NTB_INPUT_SIZE,
+    REQT_GET, REQT_SET, PARAMS_LEN,
+    le16, le32, put16, put32,
+    params_ok, params_in_max, params_out_max, params_out_div, params_out_rem,
+    params_out_align, params_out_max_dg, params_supports_ntb16,
+    build_set_input_size, build_set_format16,
+    wrap_frame, ntb_ok, ntb_count, ntb_dg_off, ntb_dg_len, ntb_sequence
+}
+
+const NTH_SIG: u64 = 0x484D434E     // "NCMH"
+const NDP_SIG: u64 = 0x304D434E     // "NCM0" (NDP without CRC)
+const NTH_LEN: u64 = 12
+const NDP_ENTRY_MAX: u64 = 64
+const DG_MIN: u64 = 14
+const DG_MAX: u64 = 9216
+
+const REQ_GET_NTB_PARAMETERS: u64 = 0x80
+const REQ_SET_NTB_FORMAT: u64 = 0x84
+const REQ_SET_NTB_INPUT_SIZE: u64 = 0x86
+const REQT_GET: u64 = 0xA1      // device -> host, class, interface
+const REQT_SET: u64 = 0x21      // host -> device, class, interface
+const PARAMS_LEN: u64 = 28
+
+fn ld8(p: u64, i: u64) -> u64 {
+    let q: *mut u8 = (p + i) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    let q: *mut u8 = (p + i) as *mut u8
+    *q = (v & 255) as u8
+}
+
+fn le16(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8)
+}
+
+fn le32(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8) | (ld8(p, i + 2) << 16) | (ld8(p, i + 3) << 24)
+}
+
+fn put16(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+}
+
+fn put32(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+    st8(p, i + 2, v >> 16)
+    st8(p, i + 3, v >> 24)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------ NTB parameters
+
+// GET_NTB_PARAMETERS answer: 28 bytes, wLength must say 28, sizes sane.
+// Alignment values must be powers of two (or 0), dividers non-zero.
+fn params_ok(p: u64, n: u64) -> bool {
+    if n < PARAMS_LEN { return false }
+    if le16(p, 0) != PARAMS_LEN { return false }
+    let inmax: u64 = le32(p, 4)
+    let outmax: u64 = le32(p, 16)
+    if inmax < 128 || inmax > 0x100000 { return false }
+    if outmax < 128 || outmax > 0x100000 { return false }
+    let odiv: u64 = le16(p, 20)
+    if odiv == 0 { return false }
+    let oal: u64 = le16(p, 24)
+    if oal == 0 || (oal & (oal - 1)) != 0 { return false }
+    if le16(p, 22) >= odiv { return false }
+    return true
+}
+
+fn params_supports_ntb16(p: u64) -> bool { return (le16(p, 2) & 1) != 0 }
+fn params_in_max(p: u64) -> u64 { return le32(p, 4) }
+fn params_out_max(p: u64) -> u64 { return le32(p, 16) }
+fn params_out_div(p: u64) -> u64 { return le16(p, 20) }
+fn params_out_rem(p: u64) -> u64 { return le16(p, 22) }
+fn params_out_align(p: u64) -> u64 { return le16(p, 24) }
+fn params_out_max_dg(p: u64) -> u64 { return le16(p, 26) }
+
+// SET_NTB_INPUT_SIZE data stage: dwNtbInMaxSize (4 bytes).
+fn build_set_input_size(dst: u64, size: u64) -> u64 {
+    put32(dst, 0, size)
+    return 4
+}
+
+// SET_NTB_FORMAT carries the format in wValue (0 = NTB16); no data stage.
+// The helper returns the wValue so the caller does not hard-code it.
+fn build_set_format16() -> u64 {
+    return 0
+}
+
+// ---------------------------------------------------------------- TX wrap
+
+fn align_up(v: u64, a: u64) -> u64 {
+    return (v + a - 1) / a * a
+}
+
+// Wrap ONE Ethernet frame (`n` bytes at `src`) into an NTB16 at `dst` (cap
+// bytes) using the device's OUT divisor/remainder/alignment. Returns the NTB
+// length, 0 when it does not fit or the frame length is outside 14..9216.
+// Layout: NTH (12) | padding | datagram at index = k*div + rem | padding |
+// NDP at an `align` boundary with entries [datagram], [0,0].
+fn wrap_frame(dst: u64, cap: u64, seq: u64, src: u64, n: u64,
+    div: u64, rem: u64, align: u64) -> u64 {
+    if n < DG_MIN || n > DG_MAX { return 0 }
+    if div == 0 || align == 0 || (align & (align - 1)) != 0 || rem >= div { return 0 }
+    // first datagram index >= 12 with index % div == rem
+    var dg: u64 = align_up(NTH_LEN, 1)
+    if dg % div != rem {
+        dg = dg + ((rem + div - (dg % div)) % div)
+    }
+    let ndp: u64 = align_up(dg + n, align)
+    let total: u64 = ndp + 16
+    if total > cap || total > 0xFFFF { return 0 }
+    zero(dst, total)
+    put32(dst, 0, NTH_SIG)
+    put16(dst, 4, NTH_LEN)
+    put16(dst, 6, seq)
+    put16(dst, 8, total)
+    put16(dst, 10, ndp)
+    var i: u64 = 0
+    while i < n {
+        st8(dst, dg + i, ld8(src, i))
+        i = i + 1
+    }
+    put32(dst, ndp, NDP_SIG)
+    put16(dst, ndp + 4, 16)
+    put16(dst, ndp + 6, 0)
+    put16(dst, ndp + 8, dg)
+    put16(dst, ndp + 10, n)
+    return total
+}
+
+// ---------------------------------------------------------------- RX parse
+
+fn ndp_at(p: u64, n: u64) -> u64 {
+    // returns the NDP index or 0 when the NTB is not valid
+    if n < NTH_LEN { return 0 }
+    if le32(p, 0) != NTH_SIG { return 0 }
+    if le16(p, 4) != NTH_LEN { return 0 }
+    let bl: u64 = le16(p, 8)
+    if bl != 0 && bl > n { return 0 }
+    let ndp: u64 = le16(p, 10)
+    if ndp < NTH_LEN || ndp + 16 > n { return 0 }
+    if (ndp & 3) != 0 { return 0 }
+    if le32(p, ndp) != NDP_SIG { return 0 }
+    let nl: u64 = le16(p, ndp + 4)
+    if nl < 16 || (nl & 3) != 0 || ndp + nl > n { return 0 }
+    return ndp
+}
+
+fn ntb_ok(p: u64, n: u64) -> bool {
+    return ndp_at(p, n) != 0
+}
+
+fn ntb_sequence(p: u64) -> u64 {
+    return le16(p, 6)
+}
+
+// Number of datagram entries (the list ends at the first (0,0) entry).
+fn ntb_count(p: u64, n: u64) -> u64 {
+    let ndp: u64 = ndp_at(p, n)
+    if ndp == 0 { return 0 }
+    let nl: u64 = le16(p, ndp + 4)
+    let slots: u64 = (nl - 8) / 4
+    var i: u64 = 0
+    while i < slots && i < NDP_ENTRY_MAX {
+        let at: u64 = ndp + 8 + i * 4
+        if le16(p, at) == 0 && le16(p, at + 2) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Start of datagram `i` inside the NTB, 0 when absent, outside the NTB, inside
+// the NTH or not an Ethernet-sized frame.
+fn ntb_dg_off(p: u64, n: u64, i: u64) -> u64 {
+    if i >= ntb_count(p, n) { return 0 }
+    let ndp: u64 = ndp_at(p, n)
+    let at: u64 = ndp + 8 + i * 4
+    let off: u64 = le16(p, at)
+    let len: u64 = le16(p, at + 2)
+    if off < NTH_LEN { return 0 }
+    if len < DG_MIN || len > DG_MAX { return 0 }
+    if off + len > n { return 0 }
+    return off
+}
+
+fn ntb_dg_len(p: u64, n: u64, i: u64) -> u64 {
+    if ntb_dg_off(p, n, i) == 0 { return 0 }
+    return le16(p, ndp_at(p, n) + 8 + i * 4 + 2)
+}

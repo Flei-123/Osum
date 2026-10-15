@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/ncm/oracle.fi -- host program for lib/usbnet/ncm.fi.
+// Prints "OK <name>" / "FAIL <name>" per promise; run by tools/ncm/run.sh.
+
+import std.rt
+import std.io
+import usbnet.ncm
+
+static mut a: [u8; 2048] = [0; 2048]
+static mut f: [u8; 2048] = [0; 2048]
+static mut o: [u8; 2048] = [0; 2048]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pa() -> u64 { return (&a[0]) as u64 }
+fn pf() -> u64 { return (&f[0]) as u64 }
+fn po() -> u64 { return (&o[0]) as u64 }
+
+fn clear(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let q: *mut u8 = (p + i) as *mut u8
+        *q = 0
+        i = i + 1
+    }
+}
+
+// A typical device answer (values of a common Android/Linux gadget).
+fn make_params() {
+    clear(pa(), 64)
+    ncm.put16(pa(), 0, 28)
+    ncm.put16(pa(), 2, 1)
+    ncm.put32(pa(), 4, 16384)
+    ncm.put16(pa(), 8, 4)
+    ncm.put16(pa(), 10, 0)
+    ncm.put16(pa(), 12, 4)
+    ncm.put32(pa(), 16, 16384)
+    ncm.put16(pa(), 20, 4)
+    ncm.put16(pa(), 22, 0)
+    ncm.put16(pa(), 24, 4)
+    ncm.put16(pa(), 26, 32)
+}
+
+fn main() -> i32 {
+    // ---- constants (golden)
+    chk("signatures are NCMH / NCM0 (little endian words)",
+        ncm.NTH_SIG == 0x484D434E && ncm.NDP_SIG == 0x304D434E)
+    chk("class request numbers: GET_NTB_PARAMETERS 0x80, SET_NTB_FORMAT 0x84, SET_NTB_INPUT_SIZE 0x86",
+        ncm.REQ_GET_NTB_PARAMETERS == 0x80 && ncm.REQ_SET_NTB_FORMAT == 0x84
+        && ncm.REQ_SET_NTB_INPUT_SIZE == 0x86 && ncm.REQT_GET == 0xA1 && ncm.REQT_SET == 0x21)
+
+    // ---- NTB parameters
+    make_params()
+    chk("parameters of a normal device are accepted", ncm.params_ok(pa(), 28))
+    chk("parameters: NTB16 supported, sizes and OUT geometry read",
+        ncm.params_supports_ntb16(pa()) && ncm.params_in_max(pa()) == 16384
+        && ncm.params_out_max(pa()) == 16384 && ncm.params_out_div(pa()) == 4
+        && ncm.params_out_rem(pa()) == 0 && ncm.params_out_align(pa()) == 4
+        && ncm.params_out_max_dg(pa()) == 32)
+    chk("parameters shorter than 28 bytes are rejected", !ncm.params_ok(pa(), 27))
+    ncm.put16(pa(), 0, 24)
+    chk("parameters with wLength != 28 are rejected", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put32(pa(), 16, 0)
+    chk("parameters with OUT size 0 are rejected", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put32(pa(), 4, 0x7FFFFFFF)
+    chk("parameters with an absurd IN size are rejected", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put16(pa(), 20, 0)
+    chk("parameters with OUT divisor 0 are rejected (divide by zero later)", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put16(pa(), 24, 3)
+    chk("parameters with OUT alignment 3 (not a power of two) are rejected", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put16(pa(), 22, 9)
+    chk("parameters with remainder >= divisor are rejected", !ncm.params_ok(pa(), 28))
+    make_params()
+    ncm.put16(pa(), 2, 2)
+    chk("a device without NTB16 is recognised", !ncm.params_supports_ntb16(pa()))
+
+    // ---- control payloads
+    var n: u64 = ncm.build_set_input_size(po(), 16384)
+    chk("SET_NTB_INPUT_SIZE data stage is 4 bytes 00 40 00 00",
+        n == 4 && o[0] == 0 && o[1] == 0x40 && o[2] == 0 && o[3] == 0)
+    chk("SET_NTB_FORMAT value for NTB16 is 0", ncm.build_set_format16() == 0)
+
+    // ---- TX: wrap one 60 byte frame
+    var i: u64 = 0
+    while i < 60 {
+        f[i as usize] = (i + 1) as u8
+        i = i + 1
+    }
+    n = ncm.wrap_frame(po(), 2048, 7, pf(), 60, 4, 0, 4)
+    // NTH 12, datagram at 12..72, NDP at 72 (aligned 4), NDP length 16 -> 88
+    chk("wrap: total 88 bytes (NTH 12 + 60 + NDP 16)", n == 88)
+    chk("wrap golden NTH: NCMH, hdrlen 12, seq 7, blocklen 88, ndp 72",
+        ncm.le32(po(), 0) == 0x484D434E && ncm.le16(po(), 4) == 12 && ncm.le16(po(), 6) == 7
+        && ncm.le16(po(), 8) == 88 && ncm.le16(po(), 10) == 72)
+    chk("wrap golden bytes: 4E 43 4D 48 0C 00",
+        o[0] == 0x4E && o[1] == 0x43 && o[2] == 0x4D && o[3] == 0x48 && o[4] == 0x0C && o[5] == 0)
+    chk("wrap golden NDP: NCM0, len 16, next 0, [12,60], [0,0]",
+        ncm.le32(po(), 72) == 0x304D434E && ncm.le16(po(), 76) == 16 && ncm.le16(po(), 78) == 0
+        && ncm.le16(po(), 80) == 12 && ncm.le16(po(), 82) == 60
+        && ncm.le16(po(), 84) == 0 && ncm.le16(po(), 86) == 0)
+    chk("wrap: datagram bytes are copied at index 12", o[12] == 1 && o[71] == 60)
+    chk("wrap output validates as an NTB with exactly one datagram",
+        ncm.ntb_ok(po(), n) && ncm.ntb_count(po(), n) == 1
+        && ncm.ntb_dg_off(po(), n, 0) == 12 && ncm.ntb_dg_len(po(), n, 0) == 60
+        && ncm.ntb_sequence(po()) == 7)
+    // odd length frame: NDP must be aligned
+    n = ncm.wrap_frame(po(), 2048, 8, pf(), 61, 4, 0, 4)
+    chk("wrap of 61 bytes: NDP lands on a 4 byte boundary (76)", n == 92 && ncm.le16(po(), 10) == 76)
+    // device with remainder
+    n = ncm.wrap_frame(po(), 2048, 9, pf(), 60, 8, 2, 8)
+    let ndp8: u64 = ncm.le16(po(), 10)
+    chk("wrap with divisor 8 remainder 2: datagram index % 8 == 2, NDP % 8 == 0",
+        n != 0 && (ncm.le16(po(), ndp8 + 8) % 8) == 2 && (ndp8 % 8) == 0)
+    chk("wrap rejects a frame that does not fit the buffer", ncm.wrap_frame(po(), 80, 1, pf(), 60, 4, 0, 4) == 0)
+    chk("wrap rejects a runt (13 bytes)", ncm.wrap_frame(po(), 2048, 1, pf(), 13, 4, 0, 4) == 0)
+    chk("wrap rejects a giant (9217 bytes)", ncm.wrap_frame(po(), 2048, 1, pf(), 9217, 4, 0, 4) == 0)
+    chk("wrap rejects divisor 0", ncm.wrap_frame(po(), 2048, 1, pf(), 60, 0, 0, 4) == 0)
+    chk("wrap rejects alignment 3", ncm.wrap_frame(po(), 2048, 1, pf(), 60, 4, 0, 3) == 0)
+
+    // ---- RX: validate hostile NTBs
+    n = ncm.wrap_frame(po(), 2048, 1, pf(), 60, 4, 0, 4)
+    chk("a good NTB is ok", ncm.ntb_ok(po(), n))
+    chk("NTB cut to 11 bytes is rejected", !ncm.ntb_ok(po(), 11))
+    chk("NTB cut inside the NDP (80 bytes) is rejected", !ncm.ntb_ok(po(), 80))
+    o[0] = 0x4F
+    chk("NTB with a bad NTH signature is rejected", !ncm.ntb_ok(po(), n))
+    o[0] = 0x4E
+    ncm.put16(po(), 4, 16)
+    chk("NTB with wHeaderLength != 12 is rejected", !ncm.ntb_ok(po(), n))
+    ncm.put16(po(), 4, 12)
+    ncm.put16(po(), 8, 1500)
+    chk("NTB claiming a block length beyond the transfer is rejected", !ncm.ntb_ok(po(), n))
+    ncm.put16(po(), 8, 88)
+    ncm.put16(po(), 10, 4)
+    chk("NTB with the NDP inside the header is rejected", !ncm.ntb_ok(po(), n))
+    ncm.put16(po(), 10, 73)
+    chk("NTB with an unaligned NDP index is rejected", !ncm.ntb_ok(po(), n))
+    // a VALID NDP (signature, length) at an unaligned index must still be refused
+    n = ncm.wrap_frame(po(), 2048, 1, pf(), 60, 4, 0, 4)
+    var mv: u64 = 88
+    while mv > 72 {
+        o[mv as usize] = o[(mv - 1) as usize]
+        mv = mv - 1
+    }
+    ncm.put16(po(), 10, 73)
+    ncm.put16(po(), 8, 89)
+    chk("a well formed NDP at the unaligned index 73 is rejected", !ncm.ntb_ok(po(), 89))
+    n = ncm.wrap_frame(po(), 2048, 1, pf(), 60, 4, 0, 4)
+    ncm.put16(po(), 10, 2040)
+    chk("NTB with the NDP beyond the transfer is rejected", !ncm.ntb_ok(po(), n))
+    ncm.put16(po(), 10, 72)
+    ncm.put32(po(), 72, 0x314D434E)
+    chk("NTB with a CRC NDP signature (NCM1) is rejected (CRC mode is never enabled)", !ncm.ntb_ok(po(), n))
+    ncm.put32(po(), 72, 0x304D434E)
+    ncm.put16(po(), 76, 400)
+    chk("NDP claiming a length beyond the transfer is rejected", !ncm.ntb_ok(po(), n))
+    ncm.put16(po(), 76, 16)
+    ncm.put16(po(), 80, 4)
+    chk("datagram index inside the NTH is refused (not handed out)", ncm.ntb_dg_off(po(), n, 0) == 0)
+    ncm.put16(po(), 80, 12)
+    ncm.put16(po(), 82, 5000)
+    chk("datagram reaching beyond the NTB is refused", ncm.ntb_dg_off(po(), n, 0) == 0)
+    ncm.put16(po(), 82, 10)
+    chk("datagram shorter than an Ethernet header is refused", ncm.ntb_dg_off(po(), n, 0) == 0)
+    ncm.put16(po(), 82, 60)
+    chk("restored NTB is fine again", ncm.ntb_dg_off(po(), n, 0) == 12)
+    chk("datagram index out of range returns nothing", ncm.ntb_dg_off(po(), n, 1) == 0
+        && ncm.ntb_dg_len(po(), n, 5) == 0)
+
+    // ---- RX: two datagrams in one NTB (hand built, as a device packs them)
+    clear(po(), 256)
+    ncm.put32(po(), 0, 0x484D434E)
+    ncm.put16(po(), 4, 12)
+    ncm.put16(po(), 6, 3)
+    ncm.put16(po(), 8, 160)
+    ncm.put16(po(), 10, 136)
+    ncm.put32(po(), 136, 0x304D434E)
+    ncm.put16(po(), 140, 24)
+    ncm.put16(po(), 144, 12)
+    ncm.put16(po(), 146, 60)
+    ncm.put16(po(), 148, 72)
+    ncm.put16(po(), 150, 60)
+    chk("two datagrams: both are found",
+        ncm.ntb_ok(po(), 160) && ncm.ntb_count(po(), 160) == 2
+        && ncm.ntb_dg_off(po(), 160, 0) == 12 && ncm.ntb_dg_off(po(), 160, 1) == 72
+        && ncm.ntb_dg_len(po(), 160, 1) == 60)
+    // list without terminator must stop at the NDP length
+    ncm.put16(po(), 152, 1)
+    ncm.put16(po(), 154, 60)
+    chk("entries are bounded by wLength of the NDP", ncm.ntb_count(po(), 160) <= 4)
+
+    // ---- random buffers are never taken for valid NTBs
+    var seed: u64 = 4242
+    var accepted: u64 = 0
+    var round: u64 = 0
+    while round < 2000 {
+        var q: u64 = 0
+        while q < 128 {
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            o[q as usize] = ((seed >> 8) & 255) as u8
+            q = q + 1
+        }
+        if ncm.ntb_ok(po(), 128) {
+            accepted = accepted + 1
+        }
+        round = round + 1
+    }
+    chk("2000 random 128 byte buffers: none accepted as a valid NTB", accepted == 0)
+    return 0
+}

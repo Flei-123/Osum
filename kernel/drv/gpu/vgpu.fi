@@ -118,6 +118,8 @@ import arch.arch
 
 export {
     init, bereit, present, scanout_w, scanout_h, scanouts,
+    head_edid_ok, head_mm_w, head_scale,
+    head_count, head_mirrored, head_mirror_errors, head_connected, head_w, head_h,
     transfers, flushes, oktette, fehler, bdf, idx,
     ereignis_pruefen, ereignis_erzwingen, ereignisse, neu_w, neu_h, umgestellt,
     say, shut_down,
@@ -171,6 +173,32 @@ const S_NEUW: u64 = 0x0C0 // die Groesse, die das Geraet zuletzt nannte
 const S_NEUH: u64 = 0x0C8
 const S_UMGESTELLT: u64 = 0x0D0 // wie oft wir darauf umgestellt haben
 const S_LASTERR: u64 = 0x0D8 // der letzte Antwortcode, der nicht OK war
+
+// r808 multi-monitor, step 1: the OUTPUT TABLE. The device reports up to 16
+// scanouts; the table keeps the first OUT_MAX (8, like lib/monitors/layout.fi)
+// with connected flag, rect and size exactly as GET_DISPLAY_INFO said it.
+// Head 0 is the primary (the one the compositor draws into); every further
+// connected head is MIRRORED from the same resource (SET_SCANOUT with the
+// same RES_ID) -- extend needs a per-output compositor and is a later step.
+const S_HEADS: u64 = 0x180 // connected heads seen in the table
+const S_MIRRORED: u64 = 0x188 // extra heads that now show the primary resource
+const S_MIRERR: u64 = 0x190 // SET_SCANOUT refusals for extra heads
+const S_OUTTAB: u64 = 0x200 // OUT_MAX entries of OUT_STRIDE bytes
+const OUT_MAX: u64 = 8
+const OUT_STRIDE: u64 = 0x60
+// r808 step 2: what GET_EDID said about the head (VIRTIO_GPU_F_EDID). O_EDID 1 = a valid base block was read.
+const O_EDID: u64 = 0x28
+const O_MMW: u64 = 0x30 // physical width in mm (EDID byte 21 is cm); 0 = unknown
+const O_MMH: u64 = 0x38
+const O_PW: u64 = 0x40 // preferred mode (first detailed timing)
+const O_PH: u64 = 0x48
+const O_MFR: u64 = 0x50 // three letters packed 'A'..'Z' as bytes (l0 | l1<<8 | l2<<16)
+const O_SCALE: u64 = 0x58 // suggested UI scale in percent (same rule as lib/monitors layout.default_scale)
+const O_CONN: u64 = 0x00
+const O_X: u64 = 0x08
+const O_Y: u64 = 0x10
+const O_W: u64 = 0x18
+const O_H: u64 = 0x20
 
 // ======================= RUNDE GPU (G-012): DER ZEIGER IN DER HARDWARE
 // Die zweite Warteschlange (`cursorq`) und die Ressource, die den
@@ -298,6 +326,8 @@ const CMD_MOVE_CURSOR: u64 = 0x0301
 
 const RESP_OK_NODATA: u64 = 0x1100
 const RESP_OK_DISPLAY_INFO: u64 = 0x1101
+const RESP_OK_EDID: u64 = 0x1104
+const CMD_GET_EDID: u64 = 0x010A
 
 // Das Format. B8G8R8X8 ist das, was `fb.fi` in den Zweitpuffer malt:
 // vier Oktette je Bildpunkt, blau im niedrigsten. Ein falsches Format
@@ -528,7 +558,8 @@ fn negotiate(state: u64) -> bool {
     // waere 3D und `EDID` (Bit 1) die Tafelkennung -- beides braucht
     // dieser Treiber nicht, und was man nicht braucht, lehnt man ab,
     // statt es mitzunehmen und zu ignorieren.
-    let lo: u64 = 0
+    // r808: EDID (bit 1) IS taken now -- the per-head panel data feeds the output table.
+    let lo: u64 = dev_lo & (1 << F_EDID)
     let hi: u64 = 1 << F_VERSION_1
 
     wr32(b, C_GFSELECT, 0)
@@ -834,22 +865,174 @@ fn display_info(state: u64) -> bool {
     // (x, y, breite, hoehe, angeschlossen, flags).
     let n: u64 = kstate.get(state, s(S_SCANOUTS))
     var i: u64 = 0
+    var found: bool = false
+    var heads: u64 = 0
+    let forced: bool = kstate.mode_on(state, kstate.M_VGPUHEADS)
     while i < n && i < 16 {
         let e: u64 = rsp + 24 + i * 24
         let angeschlossen: u64 = rd32(e, 16)
-        if angeschlossen != 0 {
-            let w: u64 = rd32(e, 8)
-            let h: u64 = rd32(e, 12)
-            // TOCTOU audit F-08: the size is the device's word; anything above 16384 is not a display (and w * 4 * h must not wrap)
-            if w != 0 && h != 0 && w <= 16384 && h <= 16384 {
-                kstate.set(state, s(S_SW), w)
-                kstate.set(state, s(S_SH), h)
-                return true
+        let w: u64 = rd32(e, 8)
+        let h: u64 = rd32(e, 12)
+        // TOCTOU audit F-08: the size is the device's word; anything above 16384 is not a display (and w * 4 * h must not wrap)
+        var ok: bool = angeschlossen != 0 && w != 0 && h != 0 && w <= 16384 && h <= 16384
+        // Test bed word `vgpuheads`: QEMU without a GUI backend never flags head >= 1 as enabled.
+        var w2: u64 = w
+        var h2: u64 = h
+        if !ok && i >= 1 && i < OUT_MAX && forced && found {
+            w2 = kstate.get(state, s(S_SW))
+            h2 = kstate.get(state, s(S_SH))
+            ok = true
+        }
+        if i < OUT_MAX {
+            let o: u64 = S_OUTTAB + i * OUT_STRIDE
+            if ok {
+                kstate.set(state, s(o + O_CONN), 1)
+                kstate.set(state, s(o + O_X), rd32(e, 0))
+                kstate.set(state, s(o + O_Y), rd32(e, 4))
+                kstate.set(state, s(o + O_W), w2)
+                kstate.set(state, s(o + O_H), h2)
+                heads = heads + 1
+            } else {
+                kstate.set(state, s(o + O_CONN), 0)
+                kstate.set(state, s(o + O_W), 0)
+                kstate.set(state, s(o + O_H), 0)
             }
+        }
+        if ok && !found {
+            kstate.set(state, s(S_SW), w)
+            kstate.set(state, s(S_SH), h)
+            found = true
         }
         i = i + 1
     }
-    return false
+    kstate.set(state, s(S_HEADS), heads)
+    return found
+}
+
+// Snap a DPI-derived percent to the steps a settings page offers
+// (same table as lib/monitors/layout.fi snap_scale).
+fn snap_scale(pct: u64) -> u64 {
+    if pct <= 112 { return 100 }
+    if pct <= 137 { return 125 }
+    if pct <= 162 { return 150 }
+    if pct <= 187 { return 175 }
+    if pct <= 225 { return 200 }
+    if pct <= 275 { return 250 }
+    return 300
+}
+
+// GET_EDID for one head, parse the 128-byte base block into the table.
+// Reply: header (24), size u32, padding u32, edid[1024]; only the base block is read.
+// Nothing here may fail the driver: a head without a usable EDID keeps O_EDID = 0.
+fn read_edid(state: u64, head: u64) {
+    let o: u64 = S_OUTTAB + head * OUT_STRIDE
+    kstate.set(state, s(o + O_EDID), 0)
+    kstate.set(state, s(o + O_SCALE), 100)
+    if (kstate.get(state, s(S_FEAT)) & (1 << F_EDID)) == 0 {
+        return
+    }
+    let r: u64 = kstate.get(state, s(S_RING))
+    let cmd: u64 = r + CMD_OFF
+    let rsp: u64 = r + RSP_OFF
+    kopf(cmd, CMD_GET_EDID)
+    wr32(cmd, 24, head)
+    if !befehl(state, 32, RESP_OK_EDID) {
+        return
+    }
+    let size: u64 = rd32(rsp, 24)
+    if size < 128 {
+        return
+    }
+    let e: u64 = rsp + 32
+    // Header 00 FF FF FF FF FF FF 00 and a base block that sums to 0 (mod 256).
+    if rd8(e, 0) != 0 || rd8(e, 7) != 0 {
+        return
+    }
+    var k: u64 = 1
+    while k < 7 {
+        if rd8(e, k) != 255 { return }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < 128 {
+        sum = sum + rd8(e, k)
+        k = k + 1
+    }
+    if (sum % 256) != 0 {
+        return
+    }
+    // Manufacturer id: bytes 8..9, three 5-bit letters (1 = 'A').
+    let m: u64 = (rd8(e, 8) << 8) | rd8(e, 9)
+    let l0: u64 = ((m >> 10) & 31) + 64
+    let l1: u64 = ((m >> 5) & 31) + 64
+    let l2: u64 = (m & 31) + 64
+    kstate.set(state, s(o + O_MFR), l0 | (l1 << 8) | (l2 << 16))
+    // Physical size in cm (bytes 21, 22); 0 = unknown (projector / variable).
+    let mmw: u64 = rd8(e, 21) * 10
+    let mmh: u64 = rd8(e, 22) * 10
+    kstate.set(state, s(o + O_MMW), mmw)
+    kstate.set(state, s(o + O_MMH), mmh)
+    // Preferred mode: first detailed timing descriptor at byte 54 (pixel clock != 0).
+    var pw: u64 = 0
+    var ph: u64 = 0
+    if (rd8(e, 54) | rd8(e, 55)) != 0 {
+        pw = rd8(e, 56) | ((rd8(e, 58) & 240) << 4)
+        ph = rd8(e, 59) | ((rd8(e, 61) & 240) << 4)
+    }
+    kstate.set(state, s(o + O_PW), pw)
+    kstate.set(state, s(o + O_PH), ph)
+    // Suggested scale from the head's real width in pixels.
+    var sc: u64 = 100
+    let wpx: u64 = kstate.get(state, s(o + O_W))
+    if mmw != 0 && wpx != 0 {
+        let pct: u64 = (wpx * 2540) / (mmw * 96)
+        if pct >= 100 {
+            sc = snap_scale(pct)
+        }
+    }
+    kstate.set(state, s(o + O_SCALE), sc)
+    kstate.set(state, s(o + O_EDID), 1)
+}
+
+fn read_all_edid(state: u64) {
+    var i: u64 = 0
+    while i < OUT_MAX {
+        if head_connected(state, i) {
+            read_edid(state, i)
+        }
+        i = i + 1
+    }
+}
+
+fn head_edid_ok(state: u64, i: u64) -> bool {
+    if i >= OUT_MAX { return false }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_EDID)) != 0
+}
+fn head_mm_w(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_MMW))
+}
+fn head_scale(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 100 }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_SCALE))
+}
+
+// Output table accessors (r808). `i` >= OUT_MAX reads as "not connected".
+fn head_count(state: u64) -> u64 { return kstate.get(state, s(S_HEADS)) }
+fn head_mirrored(state: u64) -> u64 { return kstate.get(state, s(S_MIRRORED)) }
+fn head_mirror_errors(state: u64) -> u64 { return kstate.get(state, s(S_MIRERR)) }
+fn head_connected(state: u64, i: u64) -> bool {
+    if i >= OUT_MAX { return false }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_CONN)) != 0
+}
+fn head_w(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_W))
+}
+fn head_h(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_H))
 }
 
 // EINE BILDFLAECHE ANLEGEN, wie das Geraet sie sieht.
@@ -888,13 +1071,17 @@ fn attach_backing(state: u64, phys: u64, bytes: u64) -> bool {
 
 // DER SCHIRM ZEIGT AB JETZT DIESE FLAECHE.
 fn set_scanout(state: u64, w: u64, h: u64) -> bool {
+    return set_scanout_id(state, 0, w, h)
+}
+
+fn set_scanout_id(state: u64, id: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     kopf(cmd, CMD_SET_SCANOUT)
     wr32(cmd, 24, 0) // r.x
     wr32(cmd, 28, 0) // r.y
     wr32(cmd, 32, w)
     wr32(cmd, 36, h)
-    wr32(cmd, 40, 0) // scanout_id
+    wr32(cmd, 40, id) // scanout_id
     wr32(cmd, 44, RES_ID)
     return befehl(state, 48, RESP_OK_NODATA)
 }
@@ -1480,6 +1667,9 @@ fn init(state: u64) -> bool {
     // Das ist der klassische Fehler bei genau diesem Schritt, und er
     // sieht aus wie ein Treppenmuster -- also wird es geprueft und
     // nicht gehofft.
+    // r808 step 2: panel data of every connected head (never fatal).
+    read_all_edid(state)
+
     let back: u64 = fb.back(state)
     if back == 0 {
         return false // ohne Zweitpuffer gibt es nichts anzuhaengen
@@ -1511,6 +1701,20 @@ fn init(state: u64) -> bool {
     }
     if !set_scanout(state, bw, bh) {
         return false
+    }
+
+    // r808: every further connected head shows the same resource (mirror).
+    // A refusal is counted, never fatal: head 0 already works.
+    var hd: u64 = 1
+    while hd < OUT_MAX {
+        if head_connected(state, hd) {
+            if set_scanout_id(state, hd, bw, bh) {
+                kstate.add(state, s(S_MIRRORED), 1)
+            } else {
+                kstate.add(state, s(S_MIRERR), 1)
+            }
+        }
+        hd = hd + 1
     }
 
     // Das erste Bild ganz hinaustragen: die Ressource ist noch leer,
@@ -1571,6 +1775,9 @@ fn say(state: u64) {
     var s_h: [u8; 8] = "  neu=\0\0"
     var s_i: [u8; 2] = "x\0"
     var s_j: [u8; 9] = "  umst=\0\0"
+    var s_k: [u8; 9] = "  heads=\0"
+    var s_l: [u8; 9] = "  mirr=\0\0"
+    var s_m: [u8; 9] = "  merr=\0\0"
     if !bereit(state) {
         serial.puts((&s_no[0]) as u64)
         serial.nl()
@@ -1599,5 +1806,55 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_NEUH)))
     serial.puts((&s_j[0]) as u64)
     serial.dec(kstate.get(state, s(S_UMGESTELLT)))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(kstate.get(state, s(S_HEADS)))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(kstate.get(state, s(S_MIRRORED)))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kstate.get(state, s(S_MIRERR)))
     serial.nl()
+    var h_a: [u8; 12] = "vgpu: head \0"
+    var h_b: [u8; 8] = " edid=\0\0"
+    var h_c: [u8; 6] = " pref\0"
+    var h_d: [u8; 5] = " mm=\0"
+    var h_e: [u8; 8] = " scale=\0"
+    var h_f: [u8; 7] = " noedid"
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        if head_connected(state, hd) {
+            let o: u64 = S_OUTTAB + hd * OUT_STRIDE
+            serial.puts((&h_a[0]) as u64)
+            serial.dec(hd)
+            serial.put(32)
+            serial.dec(head_w(state, hd))
+            serial.put(120)
+            serial.dec(head_h(state, hd))
+            if head_edid_ok(state, hd) {
+                let mf: u64 = kstate.get(state, s(o + O_MFR))
+                serial.puts((&h_b[0]) as u64)
+                serial.put((mf & 255) as u8)
+                serial.put(((mf >> 8) & 255) as u8)
+                serial.put(((mf >> 16) & 255) as u8)
+                serial.puts((&h_c[0]) as u64)
+                serial.put(61)
+                serial.dec(kstate.get(state, s(o + O_PW)))
+                serial.put(120)
+                serial.dec(kstate.get(state, s(o + O_PH)))
+                serial.puts((&h_d[0]) as u64)
+                serial.dec(kstate.get(state, s(o + O_MMW)))
+                serial.put(120)
+                serial.dec(kstate.get(state, s(o + O_MMH)))
+                serial.puts((&h_e[0]) as u64)
+                serial.dec(kstate.get(state, s(o + O_SCALE)))
+            } else {
+                var i2: u64 = 0
+                while i2 < 7 {
+                    serial.put((h_f[i2 as usize]))
+                    i2 = i2 + 1
+                }
+            }
+            serial.nl()
+        }
+        hd = hd + 1
+    }
 }
