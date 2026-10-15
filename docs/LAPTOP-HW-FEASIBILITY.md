@@ -150,3 +150,8 @@ Required hardware: the exact chip (PCI ID from the boot table prints `wifi, need
 | L-014 IR face | L | 6 |
 | L-018 GPU KMS | L Intel display-only, XL AMD | 7 |
 | L-017 WLAN | L (USB family) / not planned (Intel PCIe) | 8 |
+
+## 11. Hibernate (S4) and I2C-HID touchpad (15.10.2026)
+
+- **S4**: see `docs/HIBERNATE-S4.md` (concept, risks, order). Image format `lib/power/hibimg.fi` is done and host-tested; page export, raw writer and boot restore are not.
+- **I2C-HID**: `kernel/drv/hid/i2chid.fi` now runs end to end against a *simulated* DesignWare controller + precision touchpad (`tools/i2csim/run.sh`, 18/0): probe with a decoy slave, SET_POWER + RESET, report descriptor parse, input reports through `poll` into `hidin` (same events as the direct replay). The GUI loop polls every 8 ms (`i2chid.poll_tick`). **[unverified]** on silicon: LPSS controller found by PCI class + IC_COMP_TYPE, clock counts, power-on/reset timing (no delay after SET_POWER yet), `_DSM` descriptor register (tries 0x0001 then 0x0020), polling instead of the ACPI GpioInt interrupt.
