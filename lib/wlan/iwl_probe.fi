@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/iwl_probe.fi -- Intel iwlwifi (gen2: Qu/QuZ/AX200/AX201/AX210), milestone M1.
+//
+// M1 = IDENTIFY ONLY. This file decides "is this PCI function an Intel gen2
+// WLAN MAC we know", checks the BAR, and reads two read-only CSRs
+// (CSR_HW_REV, CSR_HW_RF_ID) to name the silicon. It NEVER WRITES a
+// register: reset / init is M2 (docs/WLAN-AX201.md).
+//
+// MMIO goes through a two-function table the caller fills (kernel glue maps
+// it to the mapped BAR0, tests map it to a register array), same idea as
+// `Xport` in ar9271.fi. No allocator, no syscall.
+//
+// Facts come from the Linux sources drivers/net/wireless/intel/iwlwifi/
+// (iwl-csr.h, pcie/drv.c, cfg/22000.c) and linux-firmware, read 15.10.2026.
+// NOT measured on the machine: nobody has read these registers on HOLO-LAPTOP-3
+// from OrientOS yet (no kernel glue in M1; see docs).
+
+export {
+    Mmio, Probe, mmio_set, probe_new, probe_run,
+    family_of, family_name_get, rev_type, rev_dash, rev_step, rev_name_get,
+    rf_type, rf_name_get, is_target, fw_digest_pinned, fw_header_ok, fw_ver_get,
+    fw_tlv_count, fw_tlv_find, fw_name_quz,
+    FAM_NONE, FAM_QU, FAM_AX200, FAM_AX210,
+    E_VENDOR, E_UNSUPPORTED, E_BAR, E_DEAD, E_XPORT,
+    CSR_HW_IF_CONFIG, CSR_INT, CSR_RESET, CSR_GP_CNTRL, CSR_HW_REV, CSR_HW_RF_ID,
+    CSR_MBOX_SET, CSR_DRAM_INT_TBL, CSR_UCODE_DRV_GP1, CSR_MIN_BAR,
+    FW_MAGIC, FW_HDR_LEN, VENDOR_INTEL
+}
+
+const VENDOR_INTEL: u64 = 0x8086
+
+// iwl-csr.h offsets inside BAR0 (all 32 bit).
+const CSR_HW_IF_CONFIG: u64 = 0x000
+const CSR_INT: u64 = 0x008
+const CSR_RESET: u64 = 0x020
+const CSR_GP_CNTRL: u64 = 0x024
+const CSR_HW_REV: u64 = 0x028
+const CSR_UCODE_DRV_GP1: u64 = 0x054
+const CSR_MBOX_SET: u64 = 0x088
+const CSR_HW_RF_ID: u64 = 0x09c
+const CSR_DRAM_INT_TBL: u64 = 0x0A0
+// The CSR block ends below 0x400; the interrupt (MSI-X) block starts at 0x2000.
+// M1 only needs the CSR block mapped.
+const CSR_MIN_BAR: u64 = 0x1000
+
+const FAM_NONE: u64 = 0
+const FAM_QU: u64 = 1     // Qu / QuZ MAC in the PCH (CNVi): AX201 = 8086:a0f0
+const FAM_AX200: u64 = 2  // discrete M.2 card, 8086:2723
+const FAM_AX210: u64 = 3  // "Ty" (8086:2725), gen3 context info, not a target
+
+const E_VENDOR: i64 = -2
+const E_UNSUPPORTED: i64 = -3
+const E_BAR: i64 = -4
+const E_DEAD: i64 = -5
+const E_XPORT: i64 = -6
+
+// rd32(ctx, offset) -> value; wr32(ctx, offset, value). M1 never calls wr32.
+struct Mmio {
+    rd32: fn(u64, u64) -> u64,
+    wr32: fn(u64, u64, u64)
+}
+
+fn m_rd(ctx: u64, off: u64) -> u64 { return 0xFFFFFFFF }
+fn m_wr(ctx: u64, off: u64, v: u64) { }
+
+struct Probe {
+    m: Mmio,
+    ctx: u64,
+    fam: u64,
+    dev: u64,
+    hw_rev: u64,
+    rf_id: u64,
+    gp_cntrl: u64,
+    if_config: u64,
+    reads: u64,
+    writes: u64
+}
+
+fn probe_new() -> Probe {
+    var p: Probe = Probe {
+        m: Mmio { rd32: m_rd, wr32: m_wr },
+        ctx: 0, fam: FAM_NONE, dev: 0, hw_rev: 0, rf_id: 0, gp_cntrl: 0,
+        if_config: 0, reads: 0, writes: 0
+    }
+    return p
+}
+
+fn mmio_set(p: *mut Probe, ctx: u64, rd: fn(u64, u64) -> u64, wr: fn(u64, u64, u64)) {
+    (*p).m.rd32 = rd
+    (*p).m.wr32 = wr
+    (*p).ctx = ctx
+}
+
+// ---- PCI id table (pcie/drv.c iwl_dev_info / pci_device_id, Qu block + AX200/AX210) ----
+
+fn family_of(vid: u64, dev: u64) -> u64 {
+    if vid != VENDOR_INTEL { return FAM_NONE }
+    // `/* Qu devices */`: medium latency 34F0 3DF0 4DF0, long latency 43F0 A0F0,
+    // plain Qu 02F0 06F0.
+    if dev == 0xA0F0 || dev == 0x43F0 { return FAM_QU }
+    if dev == 0x34F0 || dev == 0x3DF0 || dev == 0x4DF0 { return FAM_QU }
+    if dev == 0x02F0 || dev == 0x06F0 { return FAM_QU }
+    if dev == 0x2723 { return FAM_AX200 }
+    if dev == 0x2725 { return FAM_AX210 }
+    return FAM_NONE
+}
+
+// Only Qu (AX201) and AX200 are targets of this work item; AX210 is named, not driven.
+fn is_target(fam: u64) -> bool { return fam == FAM_QU || fam == FAM_AX200 }
+
+fn put(out: u64, s: *u8) -> usize {
+    var i: usize = 0
+    while *((s as u64 + i as u64) as *mut u8) != 0 as u8 {
+        *((out + i as u64) as *mut u8) = *((s as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    *((out + i as u64) as *mut u8) = 0 as u8
+    return i
+}
+
+fn family_name_get(fam: u64, out: u64) -> usize {
+    if fam == FAM_QU { let n: [u8; 23] = "Intel Qu (CNVi, AX201)\0"; return put(out, (&n[0]) as *u8) }
+    if fam == FAM_AX200 { let n: [u8; 17] = "Intel AX200 card\0"; return put(out, (&n[0]) as *u8) }
+    if fam == FAM_AX210 { let n: [u8; 17] = "Intel AX210 (Ty)\0"; return put(out, (&n[0]) as *u8) }
+    let n: [u8; 8] = "unknown\0"
+    return put(out, (&n[0]) as *u8)
+}
+
+// ---- CSR_HW_REV (iwl-csr.h) ----
+// type = (rev & 0x000FFF0) >> 4, dash = rev & 3, step = (rev >> 2) & 3
+// (CSR_HW_IF_CONFIG_REG_MSK_MAC_DASH 0x3, MAC_STEP 0xC; the dash/step split is from
+// memory of the header, only CSR_HW_REV_STEP_DASH = rev & 0xF was re-read).
+
+fn rev_type(rev: u64) -> u64 { return (rev & 0xFFF0) >> 4 }
+fn rev_dash(rev: u64) -> u64 { return rev & 3 }
+fn rev_step(rev: u64) -> u64 { return (rev >> 2) & 3 }
+
+// MAC type byte -> name. Types: 0x33 Qu, 0x35 QuZ, 0x36 QnJ, 0x34 HR-CDB, 0x37 So, 0x42 Ty
+// (CSR_HW_REV_TYPE_QU_B0 0x331, _QU_C0 0x332, _QUZ 0x351, _QNJ 0x360, _HR_CDB 0x340,
+// _SO 0x370, _TY 0x420 are full-register values; TYPE() drops the low nibble).
+fn rev_name_get(rev: u64, out: u64) -> usize {
+    let t: u64 = rev_type(rev)
+    if t == 0x33 { let n: [u8; 3] = "Qu\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x35 { let n: [u8; 4] = "QuZ\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x36 { let n: [u8; 4] = "QnJ\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x34 { let n: [u8; 7] = "HR-CDB\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x37 { let n: [u8; 3] = "So\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x42 { let n: [u8; 3] = "Ty\0"; return put(out, (&n[0]) as *u8) }
+    let n: [u8; 8] = "unknown\0"
+    return put(out, (&n[0]) as *u8)
+}
+
+// CSR_HW_RF_ID_TYPE_*: JF 0x00105100, HR 0x0010A000, HR1 0x0010C100, HRCDB 0x00109F00,
+// GF 0x0010D000. rf_type masks off the low 12 bits (flavor/dash/step).
+fn rf_type(rf: u64) -> u64 { return rf & 0xFFFFF000 }
+
+fn rf_name_get(rf: u64, out: u64) -> usize {
+    let t: u64 = rf_type(rf)
+    if t == 0x00105000 { let n: [u8; 3] = "JF\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x0010A000 { let n: [u8; 3] = "HR\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x0010C000 { let n: [u8; 4] = "HR1\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x00109000 { let n: [u8; 7] = "HR-CDB\0"; return put(out, (&n[0]) as *u8) }
+    if t == 0x0010D000 { let n: [u8; 3] = "GF\0"; return put(out, (&n[0]) as *u8) }
+    let n: [u8; 8] = "unknown\0"
+    return put(out, (&n[0]) as *u8)
+}
+
+// ---- the probe ----
+// vid/dev: PCI config; bar_size: bytes of BAR0 (0 = absent); bar_is_io: BAR0 is I/O space.
+// Order matters: nothing is read from the BAR before vendor, device and BAR are sane,
+// and an all-ones HW_REV (device in D3 / link down / BAR not decoding) is E_DEAD.
+fn probe_run(p: *mut Probe, vid: u64, dev: u64, bar_size: u64, bar_is_io: bool) -> i64 {
+    if vid != VENDOR_INTEL { return E_VENDOR }
+    let fam: u64 = family_of(vid, dev)
+    if fam == FAM_NONE { return E_UNSUPPORTED }
+    if bar_is_io || bar_size < CSR_MIN_BAR { return E_BAR }
+    (*p).dev = dev
+    (*p).fam = fam
+    let m: Mmio = (*p).m
+    let rev: u64 = m.rd32((*p).ctx, CSR_HW_REV) & 0xFFFFFFFF
+    (*p).reads = (*p).reads + 1
+    if rev == 0xFFFFFFFF { return E_DEAD }
+    (*p).hw_rev = rev
+    (*p).rf_id = m.rd32((*p).ctx, CSR_HW_RF_ID) & 0xFFFFFFFF
+    (*p).gp_cntrl = m.rd32((*p).ctx, CSR_GP_CNTRL) & 0xFFFFFFFF
+    (*p).if_config = m.rd32((*p).ctx, CSR_HW_IF_CONFIG) & 0xFFFFFFFF
+    (*p).reads = (*p).reads + 3
+    return 0
+}
+
+// ---- firmware file (linux-firmware, NOT in the repo: Intel licence allows
+// redistribution of the unmodified binary only; we pin the digest instead) ----
+//
+// iwlwifi-QuZ-a0-hr-b0-77.ucode, 1406720 bytes, SHA-256 measured 15.10.2026 from
+// git.kernel.org linux-firmware (header: zero, magic "IWL\n", name "release/core74::563a6e92").
+fn fw_name_quz(out: u64) -> usize {
+    let n: [u8; 44] = "intel/iwlwifi/iwlwifi-QuZ-a0-hr-b0-77.ucode\0"
+    return put(out, (&n[0]) as *u8)
+}
+
+fn fw_digest_pinned(digest: u64) -> bool {
+    let pin: [u8; 32] = [0x39, 0xd7, 0x95, 0x87, 0xdd, 0x03, 0x5b, 0xc8,
+        0x41, 0x72, 0xb6, 0xbc, 0xf6, 0xde, 0x81, 0x21,
+        0x75, 0x60, 0x08, 0x8b, 0x0c, 0xeb, 0x06, 0x30,
+        0x4d, 0x51, 0x21, 0xba, 0x56, 0xdb, 0x8d, 0x83]
+    var i: usize = 0
+    var diff: u64 = 0
+    while i < 32 {
+        let b: u8 = *((digest + i as u64) as *mut u8)
+        diff = diff | ((b ^ pin[i]) as u64)
+        i = i + 1
+    }
+    return diff == 0
+}
+
+const FW_MAGIC: u64 = 0x0A4C5749 // "IWL\n" little endian
+const FW_HDR_LEN: usize = 80     // zero(4) magic(4) human[64] ver(4) build(4)
+
+fn ld8(p: u64, o: usize) -> u64 {
+    let b: u8 = *((p + o as u64) as *mut u8)
+    return b as u64
+}
+
+fn ld32(p: u64, o: usize) -> u64 {
+    return ld8(p, o) | (ld8(p, o + 1) << 8) | (ld8(p, o + 2) << 16) | (ld8(p, o + 3) << 24)
+}
+
+fn fw_header_ok(blob: u64, len: usize) -> bool {
+    if len < FW_HDR_LEN { return false }
+    if ld32(blob, 0) != 0 { return false }
+    return ld32(blob, 4) == FW_MAGIC
+}
+
+fn fw_ver_get(blob: u64, len: usize) -> u64 {
+    if !fw_header_ok(blob, len) { return 0 }
+    return ld32(blob, 72)
+}
+
+// TLV area: {type u32, len u32, data[len] padded to 4}. Returns the number of TLVs, or
+// -1 if one runs past the end (truncated / hostile length). Never reads beyond len.
+fn fw_tlv_count(blob: u64, len: usize) -> i64 {
+    if !fw_header_ok(blob, len) { return -1 }
+    var o: usize = FW_HDR_LEN
+    var n: i64 = 0
+    while o < len {
+        if len - o < 8 { return -1 }
+        let l: u64 = ld32(blob, o + 4)
+        let padded: u64 = (l + 3) & 0xFFFFFFFC
+        if padded > (len - o - 8) as u64 { return -1 }
+        o = o + 8 + padded as usize
+        n = n + 1
+    }
+    return n
+}
+
+// Offset of the data of the first TLV of `ty`, or -1 (not found / malformed).
+// Length of the data goes to *dlen.
+fn fw_tlv_find(blob: u64, len: usize, ty: u64, dlen: *mut u64) -> i64 {
+    if !fw_header_ok(blob, len) { return -1 }
+    var o: usize = FW_HDR_LEN
+    while o < len {
+        if len - o < 8 { return -1 }
+        let t: u64 = ld32(blob, o)
+        let l: u64 = ld32(blob, o + 4)
+        let padded: u64 = (l + 3) & 0xFFFFFFFC
+        if padded > (len - o - 8) as u64 { return -1 }
+        if t == ty {
+            *dlen = l
+            return (o + 8) as i64
+        }
+        o = o + 8 + padded as usize
+    }
+    return -1
+}

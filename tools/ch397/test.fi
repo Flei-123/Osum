@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/ch397/test.fi -- host test of lib/usbnet/ch397.fi (framing is a HYPOTHESIS, see the lib header).
+import std.rt
+import std.io
+import usbnet.ch397
+
+static mut fr: [u8; 1600] = [0; 1600]
+static mut ob: [u8; 4096] = [0; 4096]
+static mut nm: [u8; 16] = [0; 16]
+static mut tb: [u8; 200] = [0; 200]
+static mut tl: usize = 0
+static mut passn: u64 = 0
+static mut failn: u64 = 0
+
+fn lit(w: str) {
+    var i: usize = 0
+    while i < w.n && tl < 190 { tb[tl] = rt.ld8(w.p as u64, i) as u8; tl = tl + 1; i = i + 1 }
+}
+fn num(v: u64) {
+    if v >= 10 { num(v / 10) }
+    tb[tl] = (48 + (v % 10)) as u8
+    tl = tl + 1
+}
+fn emit() { io.print_line_bytes((&tb[0]) as u64, tl); tl = 0 }
+fn check(name: str, ok: bool) {
+    if ok { passn = passn + 1; lit("  OK    ") } else { failn = failn + 1; lit("  FAIL  ") }
+    lit(name)
+    emit()
+}
+
+fn main() -> i32 {
+    let f: u64 = (&fr[0]) as u64
+    let o: u64 = (&ob[0]) as u64
+    check("A1 1a86:5394 supported", ch397.supported(0x1A86, 0x5394))
+    check("A2 5395/5396/5397 supported", ch397.supported(0x1A86, 0x5395) && ch397.supported(0x1A86, 0x5396) && ch397.supported(0x1A86, 0x5397))
+    check("A3 other pid / other vendor rejected", !ch397.supported(0x1A86, 0x7523) && !ch397.supported(0x0BDA, 0x5394))
+    ch397.chip_name_get(0x5394, (&nm[0]) as u64)
+    check("A4 5394 named CH336", nm[0] == 67 && nm[1] == 72 && nm[2] == 51 && nm[3] == 51 && nm[4] == 54 && nm[5] == 0)
+
+    var i: usize = 0
+    while i < 1600 { fr[i] = (i & 255) as u8; i = i + 1 }
+    let t100: usize = ch397.tx_wrap(f, 100, o)
+    check("B1 100-octet frame -> 108, multiple of 4", t100 == 108)
+    check("B2 length prefix LE 100, 4 zero octets", ob[0] == 100 && ob[1] == 0 && ob[2] == 0 && ob[3] == 0 && ob[4] == 0 && ob[7] == 0)
+    check("B3 payload copied", ob[8] == 0 && ob[9] == 1 && ob[107] == 99)
+    let t20: usize = ch397.tx_wrap(f, 20, o)
+    check("B4 runt padded to 60 -> 68", t20 == 68 && ob[0] == 60 && ob[8 + 19] == 19 && ob[8 + 20] == 0 && ob[8 + 59] == 0)
+    check("B5 oversize and empty rejected", ch397.tx_wrap(f, 1519, o) == 0 && ch397.tx_wrap(f, 0, o) == 0)
+    check("B6 1518 -> 1528", ch397.tx_wrap(f, 1518, o) == 1528)
+    // total 512 -> +4: fl = 504 -> 8 + 504 = 512 -> 516
+    check("B7 total of 512 grows by 4", ch397.tx_wrap(f, 504, o) == 516)
+    check("B8 total of 1024 grows by 4", ch397.tx_wrap(f, 1016, o) == 1028)
+    check("B9 padding bytes zero", ch397.tx_wrap(f, 101, o) == 112 && ob[8 + 101] == 0 && ob[111] == 0)
+
+    // RX: two frames (61 -> padded to 64, then 60) in one transfer
+    var k: usize = 0
+    while k < 4096 { ob[k] = 0; k = k + 1 }
+    ob[0] = 61
+    k = 0
+    while k < 61 { ob[8 + k] = (k + 1) as u8; k = k + 1 }
+    let p2: usize = 8 + 64
+    ob[p2] = 60
+    k = 0
+    while k < 60 { ob[p2 + 8 + k] = 200; k = k + 1 }
+    let total: usize = p2 + 8 + 60
+    check("C1 frame 0 length 61", ch397.rx_frame_len(o, total, 0) == 61 && ch397.rx_frame_off(0) == 8)
+    check("C2 next header after padding at 72", ch397.rx_next(o, total, 0) == 72)
+    check("C3 frame 1 length 60, last", ch397.rx_frame_len(o, total, 72) == 60)
+    check("C4 truncated transfer -> 0", ch397.rx_next(o, total - 1, 72) == 0)
+    ob[72] = 59
+    check("C5 length below 60 -> 0", ch397.rx_next(o, total, 72) == 0)
+    ob[72] = 255
+    ob[73] = 255
+    check("C6 hostile length -> 0", ch397.rx_next(o, total, 72) == 0)
+    check("C7 header cut off -> 0", ch397.rx_frame_len(o, 3, 0) == 0)
+
+    lit("RESULT pass=")
+    num(passn)
+    lit(" fail=")
+    num(failn)
+    emit()
+    if failn > 0 { return 1 }
+    return 0
+}
