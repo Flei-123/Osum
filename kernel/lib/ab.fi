@@ -69,8 +69,12 @@ profile kernel
 import lib.kstate
 import serial
 import fs.fs
+import fs.vfs
+import fs.vfsops
+import fs.mnt
+import block.part
 
-export { ab_boot, GRENZE, LEN }
+export { ab_boot, esp_flip, GRENZE, LEN }
 
 // Wieviele Startversuche eine Generation bekommt, bevor zurueckgefallen
 // wird. Drei: einer fuer den Fehlversuch, einer fuer den Fall, dass es
@@ -139,6 +143,148 @@ fn commit_write(state: u64, pfad: u64, puffer: u64, len: u64) -> bool {
         return false
     }
     return fs.write_at(state, ino, 0, puffer, len) == len
+}
+
+// ==================================================================
+// r104, KERNEL A/B (option 2 of docs/AB-KERNEL.md): when the trial
+// attempts are used up, the kernel also puts the boot loader back on slot
+// A. The ESP of the boot disk is mounted on /mnt, `default_entry: N` in
+// /limine.conf is rewritten to `default_entry: 1` (ONE byte, so one
+// sector, never a size change), the mount is released.
+//
+// Return: 0 = nothing to do (no GPT / no ESP / no default_entry line),
+//         1 = flipped, 2 = error, 3 = it already said 1.
+// A system that never armed a slot B has no `default_entry: 2`, so this
+// is a no-op there. It only covers kernels that reach ab_boot (see doc).
+fn esp_flip(state: u64) -> u64 {
+    var p_mnt: [u8; 5] = "/mnt\0"
+    var p_cfg: [u8; 17] = "/mnt/limine.conf\0"
+    var pat: [u8; 16] = "default_entry: \0"
+    var s_none: [u8; 17] = "ab: esp: no gpt\0\0"
+    var s_nomnt: [u8; 24] = "ab: esp: mount failed\0\0\0"
+    var s_nocfg: [u8; 25] = "ab: esp: no limine.conf\0\0"
+    var s_flip: [u8; 32] = "ab: esp: default_entry set to 1\0"
+    var s_already: [u8; 29] = "ab: esp: default_entry is 1\0\0"
+    var s_noline: [u8; 28] = "ab: esp: no default_entry\0\0\0"
+    var s_werr: [u8; 24] = "ab: esp: write failed\0\0\0"
+    var buf: [u8; 256] = [0 as u8; 256]
+    let b: u64 = (&buf[0]) as u64
+
+    if !vfs.ready(state) {
+        return 0
+    }
+    let dev: u64 = mnt.dev(state, 0)
+    let nparts: u64 = part.scan(state, dev)
+    if nparts == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return 0
+    }
+    var pick: u64 = part.find_kind(state, dev, part.T_EFI)
+    if pick >= part.MAX_PARTS {
+        pick = part.find_kind(state, dev, part.T_FAT32)
+    }
+    if pick >= part.MAX_PARTS {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return 0
+    }
+    let m: u64 = vfs.mount_at(state, vfsops.FS_FAT, dev, part.start(state, pick),
+        part.blocks(state, pick), (&p_mnt[0]) as u64, 0)
+    if m >= vfs.MAX_MNT {
+        serial.puts((&s_nomnt[0]) as u64)
+        serial.nl()
+        return 2
+    }
+    var res: u64 = 0
+    let node: u64 = vfs.node_for(state, m, (&p_cfg[0]) as u64)
+    if node == 0 {
+        serial.puts((&s_nocfg[0]) as u64)
+        serial.nl()
+    } else {
+        let size: u64 = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+        var off: u64 = 0
+        var stop: bool = false
+        while off < size && !stop && res == 0 {
+            let n: u64 = vfs.v_read(state, m, node, off, b, 256)
+            if n == 0 {
+                stop = true
+            } else {
+                var i: u64 = 0
+                while i + 16 <= n && res == 0 {
+                    var hit: bool = true
+                    var k: u64 = 0
+                    while k < 15 && hit {
+                        if g8(b + i + k) != (pat[k as usize] as u64) {
+                            hit = false
+                        }
+                        k = k + 1
+                    }
+                    // Only at a line start; i == 0 of a later chunk was
+                    // already judged by the chunk before (overlap 32).
+                    if hit {
+                        var bol: bool = false
+                        if i == 0 && off == 0 {
+                            bol = true
+                        }
+                        if i > 0 && g8(b + i - 1) == 10 {
+                            bol = true
+                        }
+                        var term: bool = false
+                        if i + 16 < n {
+                            let t: u64 = g8(b + i + 16)
+                            if t == 10 || t == 13 {
+                                term = true
+                            }
+                        } else {
+                            if off + n >= size {
+                                term = true
+                            }
+                        }
+                        if bol && term {
+                            let c: u64 = g8(b + i + 15)
+                            if c == 49 {
+                                res = 3
+                            } else {
+                                if c >= 50 && c <= 57 {
+                                    p8(b + i + 15, 49)
+                                    let w: u64 = vfs.v_write(state, m, node,
+                                        off + i + 15, b + i + 15, 1)
+                                    if w == 1 {
+                                        res = 1
+                                        serial.puts((&s_flip[0]) as u64)
+                                        serial.nl()
+                                    } else {
+                                        res = 2
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+                if n < 256 {
+                    stop = true
+                } else {
+                    off = off + 224
+                }
+            }
+        }
+        if res == 0 {
+            serial.puts((&s_noline[0]) as u64)
+            serial.nl()
+        }
+        if res == 3 {
+            serial.puts((&s_already[0]) as u64)
+            serial.nl()
+        }
+        if res == 2 {
+            serial.puts((&s_werr[0]) as u64)
+            serial.nl()
+        }
+    }
+    vfs.umount_path(state, (&p_mnt[0]) as u64)
+    return res
 }
 
 // ==================================================================
@@ -215,6 +361,8 @@ fn ab_boot(state: u64) {
         serial.puts((&s_zur[0]) as u64)
         serial.dec(before)
         serial.nl()
+        // r104: the same decision for the boot loader (slot A again).
+        let _flip: u64 = esp_flip(state)
         return
     }
 

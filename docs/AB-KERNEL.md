@@ -17,3 +17,8 @@ Needs a boot counter that lives OUTSIDE the kernel being tried. Checked 15.10.20
 
 Recommendation: 2 first (small, KVM-testable: broken kernel that panics after ab_boot), 1 for the early-death case.
 Not started: both need ESP writes from the running system and a two-slot installer layout.
+
+## Status 15.10.2026 (W-UPDATE2): option 2 built
+- `ab.esp_flip` (kernel/lib/ab.fi): when `ab_boot` rolls the generation back (attempts used up), the kernel mounts the ESP of its boot disk on `/mnt` (first GPT EFI/FAT32 partition of the root device), looks for a line `default_entry: N` at a line start in `/limine.conf` and rewrites the digit to `1` (ONE byte = one sector write), then unmounts (FAT sync). Serial: `ab: esp: default_entry set to 1`; other outcomes: `no gpt`, `mount failed`, `no limine.conf`, `no default_entry`, `default_entry is 1`.
+- Arming a slot B is NOT automated yet: nothing writes `osum-b.mb` / `default_entry: 2` / the matching `/system/ERPROBUNG` (that is the OTA kernel-update path, ring 3 needs an ESP write). The kernel half is measured with a hand-armed disk: `tools/abkern/run.sh`.
+- Limits unchanged: only kernels that reach `ab_boot` are caught (a kernel that dies earlier still needs option 1, the EFI selector). Single-digit `default_entry` only.
