@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/net/iwl.fi -- W-AX201 milestone M1b: kernel glue for lib/wlan/iwl_probe.fi.
+//
+// WHAT THIS DOES: walk the PCI table `pci.scan` built, pick every function
+// that `iwl_probe.family_of` knows (AX201 = 8086:a0f0), map BAR0 and READ
+// CSR_HW_REV / CSR_HW_RF_ID / CSR_GP_CNTRL / CSR_HW_IF_CONFIG. One serial
+// line per device:
+//
+//     iwl: hw_rev=0x00000351 rf_id=0x0010a110 id=8086:a0f0 mac=QuZ rf=HR bdf=00:14.3
+//
+// and the same facts in /proc/wlan (procfs.fi) and the `wlan` section of
+// /bin/sysinfo. Without a device the answer is "iwl: no device" and
+// nothing is mapped (QEMU path).
+//
+// WHAT THIS NEVER DOES: write a device register (the Mmio write hook is an
+// empty function, `Probe.writes` stays 0) and bring the chip up. The one
+// write is on the PCI side: if the firmware left Memory Space decode OFF,
+// the command register gets the MEM bit, otherwise BAR0 cannot be read.
+// That is logged ("iwl: memory space was off").
+//
+// NOT MEASURED on real hardware yet: this file exists so that ONE boot of
+// HOLO-LAPTOP-3 returns real numbers for M2/M3 (docs/WLAN-AX201.md).
+
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import arch.x86_64.apic
+import wlan.iwl_probe
+
+export {
+    boot, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP
+}
+
+const CFG_COMMAND: u64 = 0x04
+const CMD_MEM: u64 = 0x2
+
+// Extra error codes next to iwl_probe.E_*.
+const ERR_NODEV: i64 = -20 // index is not a target function
+const ERR_MAP: i64 = -21 // apic.map_device found no window
+
+fn rd(ctx: u64, off: u64) -> u64 {
+    return __mmio_read32((ctx + off) as *mut u32) as u64
+}
+
+// The probe is read-only: this hook must never be reached.
+fn wr(ctx: u64, off: u64, v: u64) { }
+
+// How many PCI functions in the table are Intel gen2 WLAN we know.
+fn count_targets(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    let c: u64 = pci.count(state)
+    while i < c {
+        if iwl_probe.family_of(pci.get(state, i, pci.E_VENDOR), pci.get(state, i, pci.E_DEVICE)) != iwl_probe.FAM_NONE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// PCI table index of the k-th target function, MAX_DEV when there is none.
+fn target_at(state: u64, k: u64) -> u64 {
+    var seen: u64 = 0
+    var i: u64 = 0
+    let c: u64 = pci.count(state)
+    while i < c {
+        if iwl_probe.family_of(pci.get(state, i, pci.E_VENDOR), pci.get(state, i, pci.E_DEVICE)) != iwl_probe.FAM_NONE {
+            if seen == k {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// Probe PCI table entry `i`. 0 = ok (p filled), else an iwl_probe.E_* / ERR_* code.
+fn probe_at(state: u64, i: u64, p: *mut iwl_probe.Probe, log: bool) -> i64 {
+    var s_off: [u8; 26] = "iwl: memory space was off\0"
+    let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+    let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+    if iwl_probe.family_of(ven, dev) == iwl_probe.FAM_NONE {
+        return ERR_NODEV
+    }
+    let bdf: u64 = pci.get(state, i, pci.E_BDF)
+    let phys: u64 = pci.bar(state, i, 0)
+    let size: u64 = pci.bar_size(state, i, 0)
+    let io: bool = pci.bar_is_io(state, i, 0)
+    // Refuse before mapping anything: probe_run checks the same, but a
+    // wrong BAR must not cost a mapping window.
+    if phys == 0 || io || size < iwl_probe.CSR_MIN_BAR {
+        let r0: i64 = iwl_probe.probe_run(p, ven, dev, 0, io)
+        if r0 == 0 {
+            return iwl_probe.E_BAR
+        }
+        return r0
+    }
+    let cmd: u64 = pci.cfg_read16(bdf, CFG_COMMAND)
+    if (cmd & CMD_MEM) == 0 {
+        pci.cfg_write16(bdf, CFG_COMMAND, (cmd | CMD_MEM) & 0xFFFF)
+        if log {
+            serial.puts((&s_off[0]) as u64)
+            serial.nl()
+        }
+    }
+    let base: u64 = apic.map_device(state, phys)
+    if base == 0 {
+        return ERR_MAP
+    }
+    iwl_probe.mmio_set(p, base, rd, wr)
+    return iwl_probe.probe_run(p, ven, dev, size, io)
+}
+
+fn put_bdf(bdf: u64) {
+    pci.hexn(pci.bdf_bus(bdf), 2)
+    serial.put(58 as u8)
+    pci.hexn(pci.bdf_dev(bdf), 2)
+    serial.put(46 as u8)
+    pci.hexn(pci.bdf_fn(bdf), 1)
+}
+
+fn err_print(r: i64) {
+    var e_dead: [u8; 5] = "dead\0"
+    var e_bar: [u8; 4] = "bar\0"
+    var e_map: [u8; 4] = "map\0"
+    var e_uns: [u8; 12] = "unsupported\0"
+    var e_oth: [u8; 6] = "other\0"
+    if r == iwl_probe.E_DEAD {
+        serial.puts((&e_dead[0]) as u64)
+    } else if r == iwl_probe.E_BAR {
+        serial.puts((&e_bar[0]) as u64)
+    } else if r == ERR_MAP {
+        serial.puts((&e_map[0]) as u64)
+    } else if r == iwl_probe.E_UNSUPPORTED {
+        serial.puts((&e_uns[0]) as u64)
+    } else {
+        serial.puts((&e_oth[0]) as u64)
+    }
+}
+
+// Boot stage (after `pci.scan`): one serial line per target, or "no device".
+fn boot(state: u64) {
+    var s_none: [u8; 15] = "iwl: no device\0"
+    var s_hw: [u8; 15] = "iwl: hw_rev=0x\0"
+    var s_rf: [u8; 11] = " rf_id=0x\0\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_mac: [u8; 6] = " mac=\0"
+    var s_rfn: [u8; 5] = " rf=\0"
+    var s_bdf: [u8; 6] = " bdf=\0"
+    var s_gp: [u8; 5] = " gp=\0"
+    var s_ifc: [u8; 5] = " if=\0"
+    var s_err: [u8; 11] = "iwl: err=\0\0"
+    var s_at: [u8; 6] = " at \0\0"
+    var name: [u8; 24] = [0 as u8; 24]
+    let n: u64 = count_targets(state)
+    if n == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        let i: u64 = target_at(state, k)
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        var p: iwl_probe.Probe = iwl_probe.probe_new()
+        let r: i64 = probe_at(state, i, &p, true)
+        if r != 0 {
+            serial.puts((&s_err[0]) as u64)
+            err_print(r)
+            serial.puts((&s_id[0]) as u64)
+            pci.hexn(pci.get(state, i, pci.E_VENDOR), 4)
+            serial.put(58 as u8)
+            pci.hexn(pci.get(state, i, pci.E_DEVICE), 4)
+            serial.puts((&s_at[0]) as u64)
+            put_bdf(bdf)
+            serial.nl()
+        } else {
+            serial.puts((&s_hw[0]) as u64)
+            pci.hexn(p.hw_rev, 8)
+            serial.puts((&s_rf[0]) as u64)
+            pci.hexn(p.rf_id, 8)
+            serial.puts((&s_id[0]) as u64)
+            pci.hexn(pci.get(state, i, pci.E_VENDOR), 4)
+            serial.put(58 as u8)
+            pci.hexn(pci.get(state, i, pci.E_DEVICE), 4)
+            serial.puts((&s_mac[0]) as u64)
+            let _a: usize = iwl_probe.rev_name_get(p.hw_rev, (&name[0]) as u64)
+            serial.puts((&name[0]) as u64)
+            serial.puts((&s_rfn[0]) as u64)
+            let _b: usize = iwl_probe.rf_name_get(p.rf_id, (&name[0]) as u64)
+            serial.puts((&name[0]) as u64)
+            serial.puts((&s_bdf[0]) as u64)
+            put_bdf(bdf)
+            serial.puts((&s_gp[0]) as u64)
+            pci.hexn(p.gp_cntrl, 8)
+            serial.puts((&s_ifc[0]) as u64)
+            pci.hexn(p.if_config, 8)
+            serial.nl()
+        }
+        k = k + 1
+    }
+}

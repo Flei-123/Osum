@@ -75,3 +75,12 @@ device in D0, and whether the BIOS has CNVi enabled in the OS-visible form.
 * Done: `lib/usbnet/ch397.fi` (id table, request codes, TX wrap / RX walk) + `tools/ch397/run.sh`
   (20 checks, host only). Not done: xHCI glue in `usb.fi` (vendor-class attach, config 1, MAC read, bulk pipes
   into `usbnet`), plus a USB capture with the real dongle to confirm the framing. Needs the dongle plugged in.
+
+## M1b -- kernel glue (15.10.2026, W-IWL)
+- `kernel/drv/net/iwl.fi`: after `pci.scan`/APIC init (`kmain`, right after `hw.stage`) every PCI function that
+  `iwl_probe.family_of` knows gets BAR0 mapped (`apic.map_device`) and the four CSRs READ. No device register is written;
+  the only write is the PCI command Memory-Space bit if the firmware left it off (logged `iwl: memory space was off`).
+- Serial: `iwl: hw_rev=0x.. rf_id=0x.. id=8086:a0f0 mac=.. rf=.. bdf=.. gp=.. if=..`, or `iwl: no device`, or `iwl: err=<dead|bar|map> ...`.
+- `/proc/wlan` (procfs `G_WLAN`) and the `wlan` section of `/bin/sysinfo` show the same without gp/if.
+- Gate `tools/wlan-ax201-glue/run.sh` (QEMU): no-device and foreign-device (edu) paths. The path "device present, values read" is NOT
+  testable in QEMU (no Intel a0f0); it runs for the first time on HOLO-LAPTOP-3. Test steps: reports/TESTANLEITUNG-LAPTOP.md.
