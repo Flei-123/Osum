@@ -90,7 +90,7 @@ PYEOF
 
 echo "== two heads (max_outputs=2)"
 run_case two 2 vgpuheads
-L=$(grep -a '^vgpu:' "$T/two.txt" | tail -1)
+L=$(grep -a '^vgpu: bdf' "$T/two.txt" | tail -1)
 echo "   $L"
 echo "$L" | grep -aq 'scanout=2' && ok "device reports 2 scanouts" || bad "device scanout count != 2"
 echo "$L" | grep -aq 'heads=2' && ok "output table: 2 connected heads" || bad "heads != 2"
@@ -122,7 +122,7 @@ fi
 
 echo "== one head (control, max_outputs=1)"
 run_case one 1 vgpuheads
-L=$(grep -a '^vgpu:' "$T/one.txt" | tail -1)
+L=$(grep -a '^vgpu: bdf' "$T/one.txt" | tail -1)
 echo "   $L"
 grep -aE "^vgpu: head 0 [0-9]+x[0-9]+ $EDRE" "$T/one.txt" >/dev/null && ok "control: head 0 EDID read" || bad "control: head 0 has no EDID"
 grep -aq '^vgpu: head 1 ' "$T/one.txt" && bad "control: a head 1 line exists" || ok "control: no head 1 line"
