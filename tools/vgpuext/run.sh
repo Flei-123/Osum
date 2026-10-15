@@ -32,10 +32,12 @@ python3 tools/osum/mkfs.py build "$T/d.img" 4096 /lib/ \
 
 run_case() { # run_case <tag> <max_outputs> <res> [extra kernel words]
     local tag=$1 mo=$2 res=$3 words=${4:-}
+    local resarg="fbres=$res"
+    [ "$res" = "auto" ] && resarg=""
     cp -f "$T/d.img" "$T/$tag.img"
     local S="$T/$tag.sock"
     timeout 150 $QEMU_X86 -kernel "$K" -m 256 \
-        -append "gfx disp nocursor fbtest fbhold fbres=$res $words nokbd nosched noproc nofs" \
+        -append "gfx disp nocursor fbtest fbhold $resarg $words nokbd nosched noproc nofs" \
         -serial "file:$T/$tag.txt" -display none -no-reboot \
         -vga std -device virtio-gpu-pci,id=vg,max_outputs=$mo,xres=640,yres=480 -global VGA.edid=off \
         -monitor "unix:$S,server,nowait" \
@@ -139,6 +141,13 @@ if [ -s "$T/mir.h0.ppm" ] && [ -s "$T/mir.h1.ppm" ]; then
 else
     bad "mirror screendumps missing"
 fi
+
+echo "== r827: desktop size derived from the heads (no fbres=)"
+run_case auto 2 auto "vgpuheads vgpuextend"
+L=$(grep -a '^vgpu: bdf' "$T/auto.txt" | tail -1); echo "   $L"
+grep -aq '^fb: heads desk=1280x480$' "$T/auto.txt" && ok "fb sized 1280x480 from two 640x480 heads" || bad "no derived desk line"
+echo "$L" | grep -aq 'ext=1  extp=2  exte=0  extc=0' && ok "derived size: extend active, nothing cut" || bad "derived size: extend counters wrong"
+echo "$L" | grep -aq 'schirm=1280x480' && ok "resource is 1280x480" || bad "resource size wrong"
 
 echo "== control: one head + vgpuextend"
 run_case one 1 1280x480 "vgpuheads vgpuextend"

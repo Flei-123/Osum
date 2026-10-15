@@ -121,6 +121,7 @@ export {
     head_edid_ok, head_mm_w, head_scale,
     head_count, head_mirrored, head_mirror_errors, head_connected, head_w, head_h,
     ext_active, ext_placed, ext_errors, ext_clipped, ext_x, ext_y, ext_w, ext_h, ext_head_at, ext_testimage,
+    probe_desktop, relayout, hot_toggle, hot_count, hot_gen,
     transfers, flushes, oktette, fehler, bdf, idx,
     ereignis_pruefen, ereignis_erzwingen, ereignisse, neu_w, neu_h, umgestellt,
     say, shut_down,
@@ -194,6 +195,13 @@ const S_EXTON: u64 = 0x198 // 1 = extend layout is active
 const S_EXTPLACED: u64 = 0x1A0 // heads that now scan out their own rect
 const S_EXTERR: u64 = 0x1A8 // SET_SCANOUT refusals while placing
 const S_EXTCLIP: u64 = 0x1B0 // heads whose rect was cut because the fb is smaller than the layout
+// r816 hotplug / r827 probe: S_HOTMASK = heads the test bed (`hdhot`) forced to look unplugged (bit n = head n);
+// S_HOTS = how many times the extend layout was re-laid out; S_HOTGEN = generation counter the window server compares;
+// S_UP = 1 once the device is up to and including GET_DISPLAY_INFO (probe_desktop may run before the fb exists).
+const S_HOTMASK: u64 = 0x1B8
+const S_HOTS: u64 = 0x1C0
+const S_HOTGEN: u64 = 0x1C8
+const S_UP: u64 = 0x1D0
 const S_EXTTAB: u64 = 0x500 // OUT_MAX entries of 32 bytes: x, y, w, h (0 w = head unused)
 const EXT_STRIDE: u64 = 0x20
 const OUT_MAX: u64 = 8
@@ -895,6 +903,10 @@ fn display_info(state: u64) -> bool {
             h2 = kstate.get(state, s(S_SH))
             ok = true
         }
+        // r816 test bed: a head the `hdhot` demo unplugged looks disconnected.
+        if i < OUT_MAX && ((kstate.get(state, s(S_HOTMASK)) >> i) & 1) != 0 {
+            ok = false
+        }
         if i < OUT_MAX {
             let o: u64 = S_OUTTAB + i * OUT_STRIDE
             if ok {
@@ -1135,6 +1147,71 @@ fn ext_place(state: u64, bw: u64, bh: u64) -> u64 {
     kstate.set(state, s(S_EXTPLACED), placed)
     return placed
 }
+
+// SET_SCANOUT with resource 0 = switch the head off (virtio spec 5.7.6.8).
+fn scanout_off(state: u64, id: u64) -> bool {
+    let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
+    kopf(cmd, CMD_SET_SCANOUT)
+    wr32(cmd, 24, 0)
+    wr32(cmd, 28, 0)
+    wr32(cmd, 32, 0)
+    wr32(cmd, 36, 0)
+    wr32(cmd, 40, id)
+    wr32(cmd, 44, 0)
+    return befehl(state, 48, RESP_OK_NODATA)
+}
+
+// r816 HOTPLUG RE-LAYOUT (extend only). The device told us (EVENT_DISPLAY) or the test bed flipped a head:
+// read the table again, switch the scanouts of heads that went away off, lay the connected ones out again
+// (pack_row, inside the SAME desktop resource: the fb cannot grow at run time, a head that does not fit is
+// cut or skipped and counted in extc) and push the whole picture once. Bumps the generation the window
+// server compares. Returns false when nothing could be done.
+fn relayout(state: u64) -> bool {
+    if !bereit(state) || kstate.get(state, s(S_EXTON)) == 0 {
+        return false
+    }
+    let bw: u64 = kstate.get(state, s(S_SW))
+    let bh: u64 = kstate.get(state, s(S_SH))
+    if !display_info(state) {
+        kstate.set(state, s(S_SW), bw)
+        kstate.set(state, s(S_SH), bh)
+        return false
+    }
+    kstate.set(state, s(S_SW), bw)
+    kstate.set(state, s(S_SH), bh)
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        if ext_w(state, hd) != 0 && !head_connected(state, hd) {
+            if !scanout_off(state, hd) {
+                kstate.add(state, s(S_EXTERR), 1)
+            }
+        }
+        hd = hd + 1
+    }
+    kstate.set(state, s(S_EXTCLIP), 0)
+    let placed: u64 = ext_place(state, bw, bh)
+    kstate.add(state, s(S_HOTS), 1)
+    kstate.add(state, s(S_HOTGEN), 1)
+    if placed == 0 {
+        return false
+    }
+    if !transfer(state, 0, 0, bw, bh, 0) {
+        return false
+    }
+    return resource_flush(state, 0, 0, bw, bh)
+}
+
+// Test bed: flip "head hd looks unplugged" and re-lay out. Head 0 is never flipped (it is the primary).
+fn hot_toggle(state: u64, hd: u64) -> bool {
+    if hd == 0 || hd >= OUT_MAX {
+        return false
+    }
+    let m: u64 = kstate.get(state, s(S_HOTMASK))
+    kstate.set(state, s(S_HOTMASK), m ^ (1 << hd))
+    return relayout(state)
+}
+fn hot_count(state: u64) -> u64 { return kstate.get(state, s(S_HOTS)) }
+fn hot_gen(state: u64) -> u64 { return kstate.get(state, s(S_HOTGEN)) }
 
 // Test image for the gates (word fbtest + vgpuextend): one solid box per head, a different
 // colour per head, so a screendump of head N can tell its own rect from the others.
@@ -1680,6 +1757,10 @@ fn ereignis_pruefen(state: u64) -> bool {
     // ein zweites Ereignis, wuerde die Loeschung es verschlucken.
     wr32(cfg, G_EVENTS_CLEAR, EVENT_DISPLAY)
     kstate.add(state, s(S_EREIG), 1)
+    // r816: in extend the event re-lays the heads out (a head came or went) instead of comparing one size.
+    if kstate.get(state, s(S_EXTON)) != 0 {
+        return relayout(state)
+    }
     let altw: u64 = kstate.get(state, s(S_SW))
     let alth: u64 = kstate.get(state, s(S_SH))
     if display_info(state) {
@@ -1705,8 +1786,11 @@ fn ereignis_pruefen(state: u64) -> bool {
 // DAS AUFSETZEN
 // ===================================================================
 
-fn init(state: u64) -> bool {
-    kstate.set(state, s(S_READY), 0)
+// Bring the device up to and including GET_DISPLAY_INFO + EDID. Idempotent (S_UP). Needs no framebuffer.
+fn bring_up(state: u64) -> bool {
+    if kstate.get(state, s(S_UP)) != 0 {
+        return true
+    }
     let i: u64 = find(state)
     if i >= pci.MAX_DEV {
         return false // kein virtio-gpu: der alte Weg bleibt, unveraendert
@@ -1790,7 +1874,42 @@ fn init(state: u64) -> bool {
     // nicht gehofft.
     // r808 step 2: panel data of every connected head (never fatal).
     read_all_edid(state)
+    kstate.set(state, s(S_UP), 1)
+    return true
+}
 
+// r827: how big must the desktop be so that every connected head fits side by side (pack_row)?
+// Result w << 16 | h of the bounding box, 0 when fewer than two heads are connected or the device is absent.
+// Called BEFORE the framebuffer exists (kgui sizes the fb with it when `vgpuextend` is on and no `fbres=` is given).
+fn probe_desktop(state: u64) -> u64 {
+    if !bring_up(state) {
+        return 0
+    }
+    var sw: u64 = 0
+    var mh: u64 = 0
+    var n: u64 = 0
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        if head_connected(state, hd) {
+            sw = sw + head_w(state, hd)
+            if head_h(state, hd) > mh {
+                mh = head_h(state, hd)
+            }
+            n = n + 1
+        }
+        hd = hd + 1
+    }
+    if n < 2 || sw == 0 || mh == 0 || sw > 8192 || mh > 4608 {
+        return 0
+    }
+    return (sw << 16) | mh
+}
+
+fn init(state: u64) -> bool {
+    kstate.set(state, s(S_READY), 0)
+    if !bring_up(state) {
+        return false
+    }
     let back: u64 = fb.back(state)
     if back == 0 {
         return false // ohne Zweitpuffer gibt es nichts anzuhaengen
@@ -1955,6 +2074,9 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_EXTERR)))
     serial.puts((&s_q[0]) as u64)
     serial.dec(kstate.get(state, s(S_EXTCLIP)))
+    var s_hot: [u8; 8] = "  hot=\0\0"
+    serial.puts((&s_hot[0]) as u64)
+    serial.dec(kstate.get(state, s(S_HOTS)))
     serial.nl()
     var x_a: [u8; 16] = "vgpu: ext head \0"
     var x_b: [u8; 8] = " rect=\0\0"
