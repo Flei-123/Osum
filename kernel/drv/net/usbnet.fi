@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/drv/net/usbnet.fi -- USB CDC-ECM network interface (L-015, USB tethering).
+// kernel/drv/net/usbnet.fi -- USB CDC-ECM and RNDIS network interface (L-015, USB tethering; RNDIS = r811).
 //
 // WHAT THIS IS
 //   The data plane of ONE CDC-ECM function behind xHCI. kernel/usb/usb.fi
@@ -19,16 +19,21 @@
 //   The interrupt-IN (NETWORK_CONNECTION / SPEED_CHANGE) endpoint is not
 //   used: the link is assumed up while the device is attached.
 //
-// NOT HERE: hot unplug, NCM, RNDIS (lib/usbnet/rndis.fi has the messages),
-//   halted-endpoint recovery on the bulk pipes.
+// RNDIS (r811): same pipes, but every frame sits behind a 44 byte PACKET_MSG header
+//   (lib/usbnet/rndis.fi wrap_packet / packet_ok). usb.fi brings the function up on the control
+//   pipe (INITIALIZE, permanent MAC, packet filter) and calls `attach_rndis`. One bulk-IN transfer may
+//   carry several packets: the transfer stays "in use" (not re-queued) until the last packet is taken.
+//
+// NOT HERE: hot unplug, NCM, halted-endpoint recovery on the bulk pipes, RNDIS keepalive/indications.
 
 import lib.kstate
 import serial
 import mm.mem
 import drv.usb.xhci
+import usbnet.rndis
 
 export {
-    attach, detach, exists, present_on, ready_on, up_on, mac_at_on,
+    attach, attach_rndis, detach, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
     errors, MAX_UNITS, FRAME_MAX
@@ -57,6 +62,9 @@ const C_RXB: u64 = 0x50
 const C_TXB: u64 = 0x58
 const C_DROP: u64 = 0x60
 const C_ERR: u64 = 0x68
+const C_MODE: u64 = 0x70 // 0 = CDC-ECM, 1 = RNDIS
+const C_RXOFF: u64 = 0x78 // RNDIS: next packet inside the RX transfer
+const C_RXLEN: u64 = 0x80 // RNDIS: octets of the RX transfer still being unpacked (0 = none)
 const RXA_OFF: u64 = 0x800
 const HOLD_OFF: u64 = 0x1000
 const TX_OFF: u64 = 0x1800
@@ -100,6 +108,16 @@ fn exists(state: u64) -> bool {
 // Called by usb.fi once the function is configured. `mac` has the six
 // octets little-endian in one word (octet 0 = lowest byte).
 fn attach(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
+    return attach_mode(state, slot, indci, outdci, mps, mac, 0)
+}
+
+// r811: the RNDIS function (already initialised by usb.fi).
+fn attach_rndis(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
+    return attach_mode(state, slot, indci, outdci, mps, mac, 1)
+}
+
+fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64,
+    mode: u64) -> bool {
     var b: u64 = blk(state)
     if b == 0 {
         b = mem.frame_run(state, 2)
@@ -120,6 +138,9 @@ fn attach(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) ->
     cs(state, C_TXB, 0)
     cs(state, C_DROP, 0)
     cs(state, C_ERR, 0)
+    cs(state, C_MODE, mode)
+    cs(state, C_RXOFF, 0)
+    cs(state, C_RXLEN, 0)
     let i: u64 = xhci.ep_find(state, slot, indci)
     if i >= xhci.MAX_EP {
         return false
@@ -162,11 +183,17 @@ fn poll_on(state: u64, u: u64) -> bool {
         return false
     }
     xhci.drain(state)
+    if cg(state, C_HOLD) != 0 {
+        return false
+    }
+    if cg(state, C_RXLEN) != 0 {
+        return true
+    }
     let i: u64 = xhci.ep_find(state, cg(state, C_SLOT), cg(state, C_IN))
     if i >= xhci.MAX_EP {
         return false
     }
-    return xhci.ep_seq(state, i) != cg(state, C_SEQ) && cg(state, C_HOLD) == 0
+    return xhci.ep_seq(state, i) != cg(state, C_SEQ)
 }
 
 fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
@@ -175,6 +202,9 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     }
     if cg(state, C_HOLD) != 0 {
         return 0
+    }
+    if cg(state, C_RXLEN) != 0 {
+        return rndis_next(state, frame, slot)
     }
     xhci.drain(state)
     let i: u64 = xhci.ep_find(state, cg(state, C_SLOT), cg(state, C_IN))
@@ -198,6 +228,11 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         return 0
     }
     let n: u64 = RXBUF - resid
+    if cg(state, C_MODE) == 1 {
+        cs(state, C_RXOFF, 0)
+        cs(state, C_RXLEN, n)
+        return rndis_next(state, frame, slot)
+    }
     if n < 14 || n > FRAME_MAX {
         cs(state, C_ERR, cg(state, C_ERR) + 1)
         requeue(state)
@@ -212,6 +247,46 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     *frame = b + HOLD_OFF
     *slot = 0
     return n
+}
+
+// r811: take the next PACKET_MSG out of the RNDIS transfer in the RX buffer. A malformed packet drops the rest
+// of the transfer. The transfer is re-queued after the last packet.
+fn rndis_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    let off: u64 = cg(state, C_RXOFF)
+    let len: u64 = cg(state, C_RXLEN)
+    if off >= len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let p: u64 = b + RXA_OFF + off
+    let left: u64 = len - off
+    if !rndis.packet_ok(p, left) {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let l: u64 = rndis.msg_len(p, left)
+    let dl: u64 = rndis.packet_data_len(p, left)
+    let doff: u64 = rndis.packet_data_off(p, left)
+    cs(state, C_RXOFF, off + l)
+    if off + l >= len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+    }
+    if dl > FRAME_MAX {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        return 0
+    }
+    copy(b + HOLD_OFF, p + doff, dl)
+    cs(state, C_HOLD, 1)
+    cs(state, C_RXP, cg(state, C_RXP) + 1)
+    cs(state, C_RXB, cg(state, C_RXB) + dl)
+    *frame = b + HOLD_OFF
+    *slot = 0
+    return dl
 }
 
 fn rx_recycle_on(state: u64, u: u64, id: u64) {
@@ -230,16 +305,21 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
         return false
     }
     let b: u64 = blk(state)
-    copy(b + TX_OFF, src, n)
+    var tn: u64 = n
+    if cg(state, C_MODE) == 1 {
+        tn = rndis.wrap_packet(b + TX_OFF, src, n)
+    } else {
+        copy(b + TX_OFF, src, n)
+    }
     let slot: u64 = cg(state, C_SLOT)
     let dci: u64 = cg(state, C_OUT)
-    let r: i64 = xhci.bulk(state, slot, dci, b + TX_OFF, n)
+    let r: i64 = xhci.bulk(state, slot, dci, b + TX_OFF, tn)
     if r < 0 {
         cs(state, C_DROP, cg(state, C_DROP) + 1)
         return false
     }
     let mps: u64 = cg(state, C_MPS)
-    if mps != 0 && (n % mps) == 0 {
+    if mps != 0 && (tn % mps) == 0 {
         // terminate the transfer with a zero-length packet
         xhci.bulk(state, slot, dci, b + TX_OFF, 0)
     }

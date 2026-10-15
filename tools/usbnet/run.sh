@@ -92,11 +92,12 @@ if [ -f kernel/drv/net/usbnet.fi ] && grep -q 'DRV_ECM' kernel/usb/usb.fi \
 else
     bad "kernel CDC-ECM driver is missing (kernel/drv/net/usbnet.fi, DRV_ECM, KIND_USBNET)"
 fi
-# RNDIS is still protocol-only: no kernel code may claim it
-if grep -rqiE 'rndis\.(build_init|wrap_packet)' kernel --include=*.fi; then
-    bad "kernel uses RNDIS messages now: add an RNDIS gate and update this check"
+# RNDIS driver (r811): the kernel binds RNDIS (DRV_RNDIS) and the end-to-end gate exists
+if [ -f tools/usbrndis/run.sh ] && grep -q 'DRV_RNDIS' kernel/usb/usb.fi \
+    && grep -q 'attach_rndis' kernel/drv/net/usbnet.fi; then
+    ok "kernel has the RNDIS driver (end-to-end gate: tools/usbrndis/run.sh)"
 else
-    ok "kernel has no RNDIS driver yet (protocol half only; ECM covers QEMU usb-net)"
+    bad "kernel RNDIS driver or its gate is missing (DRV_RNDIS, attach_rndis, tools/usbrndis/run.sh)"
 fi
 
 echo "usbnet: $pass promises, $fail errors"
