@@ -589,7 +589,8 @@ hat "$OUT/ein1.txt" "quelle   https://10.0.2.2:$PORT" "mit der Quelle"
 hat "$OUT/ein1.txt" "ota: set abstand is now 900" "und sie laesst sich umstellen"
 hat "$OUT/ein1.txt" "abstand  900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
-rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 200)
+# ota service never returns (rounds == 0), the VM is killed by the limit; boot under load needs headroom
+rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 420)
 hat "$OUT/ein2.txt" "ota: not a key" "ein unbekannter Schluessel wird abgelehnt"
 hat "$OUT/ein2.txt" "ota: service, interval 900" "und der Dienst nimmt den eingestellten Abstand"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
