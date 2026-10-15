@@ -380,9 +380,11 @@ def ptp(finger, knopf=0, zeit=0):
     """
     b = bytearray(29)
     b[0] = 1
-    for k, (cid, x, y) in enumerate(finger[:5]):
+    for k, f in enumerate(finger[:5]):
+        cid, x, y = f[0], f[1], f[2]
+        conf = f[3] if len(f) > 3 else 1   # 0 = "palm" (not confident)
         o = 8 + k * 40          # +8, weil Oktett 0 die Nummer ist
-        bitset(b, o + 0, 1)     # Zuversicht
+        bitset(b, o + 0, conf)  # Zuversicht
         bitset(b, o + 1, 1)     # Spitzenschalter
         bitset(b, o + 4, cid, 4)
         bitset(b, o + 8, x, 16)
@@ -443,6 +445,43 @@ BERICHTE = [
     (3, ptp([(1, 1300, 1070), (2, 1800, 1070)]), "pad: rollen"),
     #     abheben
     (3, ptp([]), "pad: abheben"),
+    # --- L-002 r797: GESTURES. Played only with `hidgest` (gbase).
+    #     Pad 3616 x 2184: slop = 56, edge strip x >= 3255, swipe >= 602.
+    #     The replay clock runs 20 ms per report (tap limit 250 ms).
+    (3, ptp([(1, 1500, 1000)]), "gest: tap aufsetzen"),
+    (3, ptp([(1, 1500, 1000)]), "gest: tap halten"),
+    (3, ptp([]), "gest: tap ende"),                     # left click
+    (3, ptp([(1, 1500, 1000), (2, 2000, 1000)]), "gest: zwei tap aufsetzen"),
+    (3, ptp([(1, 1500, 1000), (2, 2000, 1000)]), "gest: zwei tap halten"),
+    (3, ptp([]), "gest: zwei tap ende"),                # right click
+    (3, ptp([(1, 1000, 1000), (2, 1500, 1000), (3, 2000, 1000)]),
+     "gest: drei tap aufsetzen"),
+    (3, ptp([]), "gest: drei tap ende"),                # middle click
+    (3, ptp([(1, 3400, 500)]), "gest: rand aufsetzen"),
+    (3, ptp([(1, 3400, 520)]), "gest: rand zittern"),   # inside slop
+    (3, ptp([(1, 3400, 700)]), "gest: rand scharf"),    # arms, no event
+    (3, ptp([(1, 3400, 1000)]), "gest: rand rollen"),   # +300 -> 1 detent
+    (3, ptp([]), "gest: rand ende"),
+    (3, ptp([(1, 1000, 1000), (2, 1500, 1000)]), "gest: rollen aufsetzen"),
+    (3, ptp([(1, 1000, 1200), (2, 1500, 1200)]), "gest: rollen entscheiden"),
+    (3, ptp([(1, 1000, 1400), (2, 1500, 1400)]), "gest: rollen rollen"),
+    (3, ptp([]), "gest: rollen ende"),
+    (3, ptp([(1, 1000, 1000), (2, 1600, 1000)]), "gest: kneifen aufsetzen"),
+    (3, ptp([(1, 900, 1000), (2, 1700, 1000)]), "gest: kneifen entscheiden"),
+    (3, ptp([(1, 800, 1000), (2, 1800, 1000)]), "gest: kneifen weiter"),
+    (3, ptp([]), "gest: kneifen ende"),
+    (3, ptp([(1, 2400, 1000), (2, 2800, 1000), (3, 3200, 1000)]),
+     "gest: wisch aufsetzen"),
+    (3, ptp([(1, 1700, 1000), (2, 2100, 1000), (3, 2500, 1000)]),
+     "gest: wisch links"),                              # dir 1, n 3
+    (3, ptp([]), "gest: wisch ende"),
+    (3, ptp([(1, 1500, 1000, 0)]), "gest: handballen aufsetzen"),
+    (3, ptp([(1, 1500, 1000, 0)]), "gest: handballen halten"),
+    (3, ptp([]), "gest: handballen ende"),              # no click
+    (3, ptp([(1, 1500, 1000, 0), (2, 2000, 1200)]), "gest: ballen+finger aufsetzen"),
+    (3, ptp([(1, 1500, 1000, 0), (2, 2000, 1200)]), "gest: ballen+finger halten"),
+    (3, ptp([]), "gest: ballen+finger ende"),           # ONE left click
+    (3, ptp([]), "gest: ende"),
 ]
 
 
@@ -765,10 +804,10 @@ def firn():
     a("")
     a("profile kernel")
     a("")
-    a("import kstate")
+    a("import lib.kstate")
     a("")
     a("export { count, len_of, name_of, load, GUTE,")
-    a("    bcount, bdesc, blen, bload, alen, aload }")
+    a("    bcount, bdesc, blen, bload, alen, aload, gbase }")
     a("")
     a("const N: u64 = %d" % len(ALLE))
     a("// Die ersten GUTE Beschreibungen muessen durchgehen, die uebrigen")
@@ -859,6 +898,13 @@ def firn():
     a("")
     a("fn bcount() -> u64 {")
     a("    return NB")
+    a("}")
+    a("")
+    a("// First report of the gesture section (L-002 r797). The replay plays")
+    a("// them only with the kernel word `hidgest`: the pad path of the older")
+    a("// reports must stay exactly as it was measured.")
+    a("fn gbase() -> u64 {")
+    a("    return %d" % nr_von("gest: tap aufsetzen"))
     a("}")
     a("")
     a("// Zu welcher Beschreibung dieser Bericht gehoert.")

@@ -63,6 +63,7 @@ import gfx.gfx
 import drv.hid.hidrep
 import drv.hid.hidtest
 import sched.time
+import touchgest.gest
 
 export {
     stage, report, press, release, scancode, is_ext, bits,
@@ -70,7 +71,9 @@ export {
     keys, releases, moves, wheels, touches, drops, reports, overruns,
     kbd_report_boot, mouse_report_boot,
     pad_x, pad_y, pad_fingers, pad_scrolls, pad_clicks,
-    down_count, is_down, reset_dev, selftest, say
+    down_count, is_down, reset_dev, selftest, say,
+    gest_on, gest_taps, gest_scrolls, gest_sideways, gest_swipes, gest_zooms,
+    gest_last_swipe, gest_say
 }
 
 // Eine Seite. Je Geraet 256 Oktett Zustand, danach die Zaehler.
@@ -113,6 +116,22 @@ const C_CLICKS: u64 = 0x60
 // Nur fuer die Wiedergabe (Modus `hidpad`) -- im Betrieb waere das eine
 // Zeile je Mausbewegung.
 const C_TRACE: u64 = 0x68
+// L-002 r797: touchpad gestures (lib/touchgest) on the generic pad path.
+// C_GEST 1 = on (kernel word `hidgest`, default OFF), C_VCLK = virtual
+// clock in ms used by the replay (0 = real clock).
+const C_GEST: u64 = 0x70
+const C_VCLK: u64 = 0x78
+const C_GTAPS: u64 = 0x80
+const C_GSCRL: u64 = 0x88
+const C_GSIDE: u64 = 0x90
+const C_GSWIPE: u64 = 0x98
+const C_GZOOM: u64 = 0xA0
+const C_GLAST: u64 = 0xA8 // last swipe: (dir << 8) | fingers
+
+// A contact the pad flags as "not confident" (HID digitizer usage 0x47,
+// a palm) is reported to the gesture machine with this size; the palm
+// threshold of the machine is set to the same value.
+const GEST_PALM: u64 = 0x10000
 
 // So viele Finger werden auseinandergehalten. Zeiger braucht einen,
 // Zwei-Finger-Rollen zwei; der Rest wird gezaehlt und sonst nicht
@@ -210,6 +229,50 @@ fn stage(state: u64) {
         reset_dev(state, d)
         d = d + 1
     }
+    cs(state, C_GEST, 0)
+    if kstate.mode_on(state, kstate.M_HIDGEST) {
+        cs(state, C_GEST, 1)
+    }
+}
+
+// Gestures on/off (kernel word `hidgest`; later also a setting).
+fn gest_on(state: u64) -> bool {
+    return cg(state, C_GEST) == 1
+}
+
+fn gest_taps(state: u64) -> u64 {
+    return cg(state, C_GTAPS)
+}
+
+fn gest_scrolls(state: u64) -> u64 {
+    return cg(state, C_GSCRL)
+}
+
+fn gest_sideways(state: u64) -> u64 {
+    return cg(state, C_GSIDE)
+}
+
+fn gest_swipes(state: u64) -> u64 {
+    return cg(state, C_GSWIPE)
+}
+
+fn gest_zooms(state: u64) -> u64 {
+    return cg(state, C_GZOOM)
+}
+
+fn gest_last_swipe(state: u64) -> u64 {
+    return cg(state, C_GLAST)
+}
+
+// The clock of the gesture machine in ms. The replay sets a virtual
+// clock so that a recorded session does not depend on how fast the
+// kernel chews through the reports.
+fn gest_now(state: u64) -> u64 {
+    let v: u64 = cg(state, C_VCLK)
+    if v != 0 {
+        return v
+    }
+    return time.mono_ns(state) / 1000000
 }
 
 fn reset_dev(state: u64, dev: u64) {
@@ -221,6 +284,7 @@ fn reset_dev(state: u64, dev: u64) {
         ds(state, dev, i * 8, 0)
         i = i + 1
     }
+    gest.reset(dev)
 }
 
 // ------------------------------------------------------- die Bitfelder
@@ -513,6 +577,15 @@ fn press(state: u64, u: u64) {
     kbd.on_code(state, code)
     cadd(state, C_KEYS, 1)
     trace_key(state, 1, u, code)
+    if gest_on(state) {
+        // typing: a contact landing right after is a palm
+        let now: u64 = gest_now(state)
+        var gd: u64 = 0
+        while gd < MAX_DEV {
+            gest.note_key(gd, now)
+            gd = gd + 1
+        }
+    }
 }
 
 // Loslassen ist derselbe Abtastcode mit gesetztem obersten Bit -- so
@@ -810,6 +883,7 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
     var cid: [u64; 5] = [0 as u64; 5]
     var cx: [u64; 5] = [0 as u64; 5]
     var cy: [u64; 5] = [0 as u64; 5]
+    var conf: [u64; 5] = [1 as u64; 5]
     var nc: u64 = 0 // wie viele Kontaktplaetze der Bericht hat
     var gemeldet: u64 = 0 // was das Feld Kontaktzahl sagt
     var hat_zahl: bool = false
@@ -838,6 +912,12 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
                     if nc < MAX_CONTACTS {
                         tip[nc as usize] = bits(p, off, sz)
                         nc = nc + 1
+                    }
+                }
+                if geb == hidrep.US_CONFIDENCE {
+                    // comes BEFORE the tip switch of its own finger
+                    if nc < MAX_CONTACTS {
+                        conf[nc as usize] = bits(p, off, sz)
                     }
                 }
                 if geb == hidrep.US_CONTACTID {
@@ -922,6 +1002,30 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
         ds(state, dev, D_SY, sy)
     }
 
+    // L-002 r797: with the kernel word `hidgest` the whole frame goes to
+    // the gesture machine (also the empty one: the tap is decided when
+    // the last finger lifts). Without it the path below is unchanged.
+    if gest_on(state) && maxx > 0 && maxy > 0 {
+        gest.configure(dev, maxx, maxy)
+        gest.set_palm_size(dev, GEST_PALM)
+        gest.begin(dev, gest_now(state))
+        var q: u64 = 0
+        while q < grenze {
+            if tip[q as usize] != 0 {
+                var psz: u64 = 0
+                if conf[q as usize] == 0 {
+                    psz = GEST_PALM
+                }
+                gest.add_contact(cid[q as usize], cx[q as usize] as i64,
+                    cy[q as usize] as i64, psz)
+            }
+            q = q + 1
+        }
+        gest.end(dev, btn)
+        gest_apply(state, dev, btn)
+        return true
+    }
+
     if n == 0 {
         ds(state, dev, D_VALID, 0)
         ds(state, dev, D_SCROLL, 0)
@@ -973,6 +1077,85 @@ fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
     }
     show(state, dev, ddx, ddy, btn)
     return true
+}
+
+// What the gesture machine decided for one frame, turned into the same
+// packets a mouse would send. Physical button changes the frame carried
+// go out too (a pointer move carries them; otherwise `button`).
+fn gest_apply(state: u64, dev: u64, btn: u64) {
+    var s_w: [u8; 20] = "hidev: geste wisch \0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_z: [u8; 21] = "hidev: geste zoom d=\0"
+    var s_h: [u8; 28] = "hidev: geste seitwaerts dx=\0"
+    let n: u64 = gest.ev_count()
+    var moved: bool = false
+    var i: u64 = 0
+    while i < n {
+        let k: u64 = gest.ev_kind(i)
+        let a: i64 = gest.ev_a(i)
+        let b: i64 = gest.ev_b(i)
+        if k == gest.EV_MOVE {
+            show(state, dev, a as u64, b as u64, btn)
+            moved = true
+        } else if k == gest.EV_CLICK {
+            gest_tap(state, dev, a as u64, btn)
+        } else if k == gest.EV_SCROLL {
+            if b != 0 {
+                cadd(state, C_GSCRL, 1)
+                rollen(state, dev, b as u64, btn)
+            }
+            if a != 0 {
+                // no horizontal wheel in the pointer packet yet: counted
+                cadd(state, C_GSIDE, 1)
+                if spur_an(state) {
+                    serial.puts((&s_h[0]) as u64)
+                    serial.hex(a as u64)
+                    serial.nl()
+                }
+            }
+        } else if k == gest.EV_SWIPE {
+            cadd(state, C_GSWIPE, 1)
+            cs(state, C_GLAST, ((a as u64) << 8) | (b as u64))
+            if spur_an(state) {
+                serial.puts((&s_w[0]) as u64)
+                serial.dec(a as u64)
+                serial.puts((&s_n[0]) as u64)
+                serial.dec(b as u64)
+                serial.nl()
+            }
+        } else if k == gest.EV_ZOOM {
+            cadd(state, C_GZOOM, 1)
+            if spur_an(state) {
+                serial.puts((&s_z[0]) as u64)
+                serial.hex(a as u64)
+                serial.nl()
+            }
+        }
+        i = i + 1
+    }
+    if !moved {
+        button(state, dev, btn)
+    }
+    if gest.fingers(dev) == 0 {
+        // lifted: the wheel remainder does not carry over to the next touch
+        ds(state, dev, D_SCROLL, 0)
+    }
+}
+
+// A tap: press and release as two packets, `b` = 1 left, 2 right,
+// 4 middle. Physical buttons stay as they are.
+fn gest_tap(state: u64, dev: u64, b: u64, btn: u64) {
+    gfx.mouse_packet(state, 8 | ((btn | b) & 7), 0, 0, 0, false)
+    gfx.mouse_now(state)
+    trace_mouse(state, btn | b, 0, 0, 0)
+    gfx.mouse_packet(state, 8 | (btn & 7), 0, 0, 0, false)
+    gfx.mouse_now(state)
+    trace_mouse(state, btn, 0, 0, 0)
+    cadd(state, C_GTAPS, 1)
+    if b == 1 {
+        cadd(state, C_CLICKS, 1)
+    }
+    ds(state, dev, D_BTN, btn)
 }
 
 // Ein Finger: der Zeiger. Geteilt durch den Teiler der Achse, der Rest
@@ -1163,6 +1346,36 @@ fn say(state: u64) {
     serial.puts((&s_k[0]) as u64)
     serial.dec(pad_clicks(state))
     serial.nl()
+    gest_say(state)
+}
+
+// One line with the gesture counters; only when gestures are on.
+fn gest_say(state: u64) {
+    var s_a: [u8; 17] = "hidin: geste an=\0"
+    var s_b: [u8; 7] = " tipp=\0"
+    var s_c: [u8; 9] = " rollen=\0"
+    var s_d: [u8; 7] = " seit=\0"
+    var s_e: [u8; 8] = " wisch=\0"
+    var s_f: [u8; 7] = " zoom=\0"
+    var s_g: [u8; 8] = " letzt=\0"
+    if !gest_on(state) {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(1)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(gest_taps(state))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(gest_scrolls(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(gest_sideways(state))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gest_swipes(state))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(gest_zooms(state))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gest_last_swipe(state))
+    serial.nl()
 }
 
 // Ein paar Rechnungen, die keinen Bus brauchen -- die Bitzieherei und
@@ -1315,11 +1528,23 @@ fn wiedergabe(state: u64) {
     let scratch: u64 = state + IN_OFF + 0x800
     var vorher: u64 = 999
     var i: u64 = 0
-    let n: u64 = hidtest.bcount()
+    // The gesture reports (from gbase on) only play with `hidgest`.
+    var n: u64 = hidtest.bcount()
+    if !gest_on(state) {
+        n = hidtest.gbase()
+    }
     set_trace(state, true)
+    // Virtual clock for the gesture machine: 20 ms per report, one
+    // second of quiet when a new device description is loaded (so keys
+    // of the previous device are no palm trigger for the next one).
+    var vtime: u64 = 100000
     while i < n {
+        vtime = vtime + 20
+        cs(state, C_VCLK, vtime)
         let d: u64 = hidtest.bdesc(i)
         if d != vorher {
+            vtime = vtime + 1000
+            cs(state, C_VCLK, vtime)
             // Neue Beschreibung: laden, zerlegen, Zustand zuruecksetzen.
             let dl: u64 = hidtest.load(d, hidrep.raw_of(state, 0))
             hidrep.parse(state, 0, hidrep.raw_of(state, 0), dl)
@@ -1344,6 +1569,7 @@ fn wiedergabe(state: u64) {
         i = i + 1
     }
     set_trace(state, false)
+    cs(state, C_VCLK, 0)
     serial.puts((&s_e[0]) as u64)
     serial.dec(n)
     serial.nl()

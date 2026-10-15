@@ -964,8 +964,10 @@ def main(argv):
         # angabe hat nur Ziffern und Doppelpunkte. Beide Formen aus den
         # Runden davor gelten Zeichen fuer Zeichen weiter.
         mode, uid, gid = None, 0, 0
-        if "@" in spec:
-            head, _, meta = spec.partition("@")
+        # w-lc2: the LAST '@' separates the mode (Alpine key files are called alpine-devel@lists.alpinelinux.org-*.rsa.pub);
+        # a '@' followed by '=', or in a symlink spec, belongs to the name/target and there is no mode suffix.
+        head, _, meta = spec.rpartition("@")
+        if "@" in spec and "->" not in spec and "=" not in meta:
             if "/" in meta:
                 # <neuer pfad>@<vorhandener pfad> -- ein zweiter NAME fuer
                 # dieselbe Datei, kein zweites Exemplar.

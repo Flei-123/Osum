@@ -101,6 +101,7 @@ import serial
 import lib.kstate
 import klog
 import sched.sched
+import sched.ctr
 import block.blk
 import sync.atomic
 import arch.cpu
@@ -2208,6 +2209,54 @@ fn seq(state: u64, w: u64, von: u64, bis: u64, link: u64) -> bool {
     kstate.set8(ziel + n, 0 as u8)
     let b: u64 = p_build(state)
     var at: u64 = 0
+    // W-MG3 (chroot): a jailed task resolves symlink targets from ITS root. `w` starts with the jail root (it went through
+    // `ctr.jail`), the target is folded inside the jail (so `..` stops at the root) and the root goes in front again.
+    let jt: u64 = sched.current(state)
+    let jrl: u64 = ctr.prefix_len(state, jt, w)
+    if jrl > 0 && von > jrl && jrl + n + von + 4 < PATHBUF {
+        var q: u64 = 0
+        while q < jrl {
+            kstate.set8(b + q, kstate.get8(w + q) as u8)
+            q = q + 1
+        }
+        var m: u64 = 0
+        if kstate.get8(ziel) != 47 {
+            while jrl + m < von {
+                kstate.set8(b + jrl + m, kstate.get8(w + jrl + m) as u8)
+                m = m + 1
+            }
+        }
+        var z: u64 = 0
+        while z < n {
+            kstate.set8(b + jrl + m + z, kstate.get8(ziel + z) as u8)
+            z = z + 1
+        }
+        m = m + n
+        if m == 0 || kstate.get8(b + jrl) != 47 {
+            // not reachable for a valid path; keep the fold's precondition (leading slash)
+            return false
+        }
+        let fl: u64 = ctr.fold(b + jrl, m)
+        at = jrl + fl
+        var rest2: u64 = bis
+        if kstate.get8(w + rest2) != 0 {
+            if kstate.get8(b + at - 1) != 47 {
+                kstate.set8(b + at, 47 as u8)
+                at = at + 1
+            }
+            while kstate.get8(w + rest2) == 47 {
+                rest2 = rest2 + 1
+            }
+            while kstate.get8(w + rest2) != 0 && at + 1 < PATHBUF {
+                kstate.set8(b + at, kstate.get8(w + rest2) as u8)
+                at = at + 1
+                rest2 = rest2 + 1
+            }
+        }
+        kstate.set8(b + at, 0 as u8)
+        strcopy(b, w, PATHBUF)
+        return true
+    }
     if kstate.get8(ziel) != 47 {
         var k: u64 = 0
         while k < von && at + 1 < PATHBUF {

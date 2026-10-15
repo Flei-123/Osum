@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/net/usbnet.fi -- USB CDC-ECM network interface (L-015, USB tethering).
+//
+// WHAT THIS IS
+//   The data plane of ONE CDC-ECM function behind xHCI. kernel/usb/usb.fi
+//   enumerates the device, picks the ECM configuration, reads the MAC from
+//   the string descriptor, selects the data alternate setting and hands the
+//   slot + bulk endpoints to `attach` below. kernel/net/netdev.fi routes the
+//   card calls (rx_take, tx_frame, ...) here as KIND_USBNET.
+//
+// DESIGN
+//   ECM frames are raw Ethernet on the bulk pipes (no header).
+//   RX: exactly ONE bulk-IN transfer is outstanding (ep_seq tells when it is
+//       done, ep_resid how short). A finished frame is copied to a hold
+//       buffer and the transfer is re-queued at once; the stack owns the hold
+//       buffer until rx_recycle.
+//   TX: synchronous xhci.bulk on the bulk-OUT pipe, plus a zero-length packet
+//       when the frame is a multiple of the endpoint packet size.
+//   The interrupt-IN (NETWORK_CONNECTION / SPEED_CHANGE) endpoint is not
+//   used: the link is assumed up while the device is attached.
+//
+// NOT HERE: hot unplug, NCM, RNDIS (lib/usbnet/rndis.fi has the messages),
+//   halted-endpoint recovery on the bulk pipes.
+
+import lib.kstate
+import serial
+import mm.mem
+import drv.usb.xhci
+
+export {
+    attach, detach, exists, present_on, ready_on, up_on, mac_at_on,
+    rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
+    rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
+    errors, MAX_UNITS, FRAME_MAX
+}
+
+const MAX_UNITS: u64 = 1
+const FRAME_MAX: u64 = 1536
+const RXBUF: u64 = 2048
+
+// Pointer to the control block lives in the free tail of the netdev page
+// (0x388..0x400, see kernel/net/netdev.fi).
+const PTR_OFF: u64 = 0x388
+
+// Control block cells (offsets into the frame run)
+const C_SLOT: u64 = 0x00
+const C_IN: u64 = 0x08
+const C_OUT: u64 = 0x10
+const C_MPS: u64 = 0x18
+const C_MAC: u64 = 0x20
+const C_READY: u64 = 0x28
+const C_SEQ: u64 = 0x30
+const C_HOLD: u64 = 0x38
+const C_RXP: u64 = 0x40
+const C_TXP: u64 = 0x48
+const C_RXB: u64 = 0x50
+const C_TXB: u64 = 0x58
+const C_DROP: u64 = 0x60
+const C_ERR: u64 = 0x68
+const RXA_OFF: u64 = 0x800
+const HOLD_OFF: u64 = 0x1000
+const TX_OFF: u64 = 0x1800
+
+fn blk(state: u64) -> u64 {
+    return kstate.get(state, kstate.NETDEV_OFF + PTR_OFF)
+}
+
+fn cg(state: u64, off: u64) -> u64 {
+    let b: u64 = blk(state)
+    if b == 0 {
+        return 0
+    }
+    let p: *mut u64 = (b + off) as *mut u64
+    return *p
+}
+
+fn cs(state: u64, off: u64, v: u64) {
+    let b: u64 = blk(state)
+    if b == 0 {
+        return
+    }
+    let p: *mut u64 = (b + off) as *mut u64
+    *p = v
+}
+
+fn copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let s: *mut u8 = (src + i) as *mut u8
+        let d: *mut u8 = (dst + i) as *mut u8
+        *d = *s
+        i = i + 1
+    }
+}
+
+fn exists(state: u64) -> bool {
+    return blk(state) != 0 && cg(state, C_READY) != 0
+}
+
+// Called by usb.fi once the function is configured. `mac` has the six
+// octets little-endian in one word (octet 0 = lowest byte).
+fn attach(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
+    var b: u64 = blk(state)
+    if b == 0 {
+        b = mem.frame_run(state, 2)
+        if b == 0 {
+            return false
+        }
+        kstate.set(state, kstate.NETDEV_OFF + PTR_OFF, b)
+    }
+    cs(state, C_SLOT, slot)
+    cs(state, C_IN, indci)
+    cs(state, C_OUT, outdci)
+    cs(state, C_MPS, mps)
+    cs(state, C_MAC, mac)
+    cs(state, C_HOLD, 0)
+    cs(state, C_RXP, 0)
+    cs(state, C_TXP, 0)
+    cs(state, C_RXB, 0)
+    cs(state, C_TXB, 0)
+    cs(state, C_DROP, 0)
+    cs(state, C_ERR, 0)
+    let i: u64 = xhci.ep_find(state, slot, indci)
+    if i >= xhci.MAX_EP {
+        return false
+    }
+    cs(state, C_SEQ, xhci.ep_seq(state, i))
+    cs(state, C_READY, 1)
+    return xhci.int_queue(state, slot, indci, b + RXA_OFF, RXBUF)
+}
+
+fn detach(state: u64) {
+    cs(state, C_READY, 0)
+}
+
+fn present_on(state: u64, u: u64) -> bool {
+    return u == 0 && blk(state) != 0
+}
+
+fn ready_on(state: u64, u: u64) -> bool {
+    return u == 0 && exists(state)
+}
+
+fn up_on(state: u64, u: u64) -> bool {
+    return ready_on(state, u)
+}
+
+fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
+    if i >= 6 {
+        return 0
+    }
+    return (cg(state, C_MAC) >> (i * 8)) & 0xFF
+}
+
+fn requeue(state: u64) {
+    xhci.int_queue(state, cg(state, C_SLOT), cg(state, C_IN),
+        blk(state) + RXA_OFF, RXBUF)
+}
+
+fn poll_on(state: u64, u: u64) -> bool {
+    if !ready_on(state, u) {
+        return false
+    }
+    xhci.drain(state)
+    let i: u64 = xhci.ep_find(state, cg(state, C_SLOT), cg(state, C_IN))
+    if i >= xhci.MAX_EP {
+        return false
+    }
+    return xhci.ep_seq(state, i) != cg(state, C_SEQ) && cg(state, C_HOLD) == 0
+}
+
+fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if !ready_on(state, u) {
+        return 0
+    }
+    if cg(state, C_HOLD) != 0 {
+        return 0
+    }
+    xhci.drain(state)
+    let i: u64 = xhci.ep_find(state, cg(state, C_SLOT), cg(state, C_IN))
+    if i >= xhci.MAX_EP {
+        return 0
+    }
+    let seq: u64 = xhci.ep_seq(state, i)
+    if seq == cg(state, C_SEQ) {
+        return 0
+    }
+    cs(state, C_SEQ, seq)
+    let code: u64 = xhci.ep_code(state, i)
+    let resid: u64 = xhci.ep_resid(state, i)
+    if code != xhci.CC_SUCCESS && code != xhci.CC_SHORT {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        requeue(state)
+        return 0
+    }
+    if resid >= RXBUF {
+        requeue(state)
+        return 0
+    }
+    let n: u64 = RXBUF - resid
+    if n < 14 || n > FRAME_MAX {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        requeue(state)
+        return 0
+    }
+    let b: u64 = blk(state)
+    copy(b + HOLD_OFF, b + RXA_OFF, n)
+    requeue(state)
+    cs(state, C_HOLD, 1)
+    cs(state, C_RXP, cg(state, C_RXP) + 1)
+    cs(state, C_RXB, cg(state, C_RXB) + n)
+    *frame = b + HOLD_OFF
+    *slot = 0
+    return n
+}
+
+fn rx_recycle_on(state: u64, u: u64, id: u64) {
+    cs(state, C_HOLD, 0)
+}
+
+fn tx_room_on(state: u64, u: u64) -> u64 {
+    if !ready_on(state, u) {
+        return 0
+    }
+    return 1
+}
+
+fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
+    if !ready_on(state, u) || n == 0 || n > FRAME_MAX {
+        return false
+    }
+    let b: u64 = blk(state)
+    copy(b + TX_OFF, src, n)
+    let slot: u64 = cg(state, C_SLOT)
+    let dci: u64 = cg(state, C_OUT)
+    let r: i64 = xhci.bulk(state, slot, dci, b + TX_OFF, n)
+    if r < 0 {
+        cs(state, C_DROP, cg(state, C_DROP) + 1)
+        return false
+    }
+    let mps: u64 = cg(state, C_MPS)
+    if mps != 0 && (n % mps) == 0 {
+        // terminate the transfer with a zero-length packet
+        xhci.bulk(state, slot, dci, b + TX_OFF, 0)
+    }
+    cs(state, C_TXP, cg(state, C_TXP) + 1)
+    cs(state, C_TXB, cg(state, C_TXB) + n)
+    return true
+}
+
+fn rx_frames_on(state: u64, u: u64) -> u64 { return cg(state, C_RXP) }
+fn tx_frames_on(state: u64, u: u64) -> u64 { return cg(state, C_TXP) }
+fn tx_drops_on(state: u64, u: u64) -> u64 { return cg(state, C_DROP) }
+fn rx_octets_on(state: u64, u: u64) -> u64 { return cg(state, C_RXB) }
+fn tx_octets_on(state: u64, u: u64) -> u64 { return cg(state, C_TXB) }
+fn errors(state: u64) -> u64 { return cg(state, C_ERR) }

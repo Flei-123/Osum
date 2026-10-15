@@ -2876,6 +2876,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         }
         return do_statfs(state, me, a1)
     }
+    if number == LC_CHROOT {
+        return do_chroot(state, me, a0)
+    }
     if number == UB_DUP3 {
         if a0 == a1 {
             return neg(errno.E_INVAL)
@@ -17512,6 +17515,72 @@ const UB_SCHED_SETAFFINITY: u64 = 203
 const UB_SCHED_GETAFFINITY: u64 = 204
 const UB_FDATASYNC: u64 = 75
 const UB_DUP3: u64 = 292
+const LC_CHROOT: u64 = 161
+
+// chroot(2) (W-MG3), built on the container jail (`ctr`): the root of a jail is a STRING put in front of every absolute path
+// (`uio.jailed`), so the calling task simply moves into a container slot whose root is the folded path. Same root = same slot.
+// A nested chroot gets a new slot whose root is longer (the path already carries the old root), so it can only go deeper.
+// The cwd becomes "/" (Linux keeps it; every user of chroot calls chdir("/") next, and a cwd outside the root must not survive).
+fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    let buf: u64 = nameb(state)
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_DIR {
+        return neg(errno.E_NOTDIR)
+    }
+    // fold `.`/`..` so that no `..` can sit inside the stored root, then drop trailing slashes
+    var n: u64 = len
+    if n == 0 || kstate.get8(buf) != 47 {
+        return neg(errno.E_INVAL)
+    }
+    n = ctr.fold(buf, n)
+    while n > 1 && kstate.get8(buf + n - 1) == 47 {
+        n = n - 1
+        kstate.set8(buf + n, 0 as u8)
+    }
+    if n <= 1 {
+        return 0 // chroot("/") of a host task: nothing to do
+    }
+    if n >= ctr.ROOT_MAX - 1 {
+        return neg(errno.E_NAMETOOLONG)
+    }
+    let old: u64 = ctr.ctr_of(state, me)
+    var i: u64 = ctr.find_root(state, buf)
+    if i == 0 {
+        i = ctr.alloc(state)
+        if i == 0 {
+            return neg(errno.E_NOSPC)
+        }
+        if !ctr.root_set(state, i, buf) {
+            ctr.free_slot(state, i)
+            return neg(errno.E_INVAL)
+        }
+        var nm: [u8; 8] = "chroot\0\0"
+        ctr.name_set(state, i, (&nm[0]) as u64)
+        if old != 0 {
+            ctr.netview_set(state, i, ctr.netview_of(state, old))
+        }
+    }
+    ctr.set_ctr(state, me, i)
+    ctr.set_state(state, i, ctr.C_RUN)
+    // cwd = the new root: `chdir_to` stores the path relative to the (now active) jail root, i.e. "/"
+    return uio.chdir_to(state, me, buf)
+}
 const UB_FLOCK: u64 = 73
 const UB_STATFS: u64 = 137
 const UB_FSTATFS: u64 = 138
@@ -18265,8 +18334,8 @@ fn ev_kind(kind: u64) -> bool {
 }
 
 fn ev_number(n: u64) -> bool {
-    // getitimer 36, setitimer 38, rt_sigsuspend 130, sigaltstack 131 (the bodies are in sched/signal.fi)
-    if n == 36 || n == 38 || n == 130 || n == 131 {
+    // getitimer 36, setitimer 38, rt_sigtimedwait 128, rt_sigsuspend 130, sigaltstack 131 (the bodies are in sched/signal.fi)
+    if n == 36 || n == 38 || n == 128 || n == 130 || n == 131 {
         return true
     }
     if n == EV_EPOLL_CREATE || n == EV_EPOLL_WAIT || n == EV_EPOLL_CTL {
@@ -18958,6 +19027,9 @@ fn do_events(state: u64, me: u64, n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4
     }
     if n == 38 {
         return signal.do_setitimer(state, me, a0, a1, a2)
+    }
+    if n == 128 {
+        return signal.do_sigtimedwait(state, me, a0, a1, a2, a3)
     }
     if n == 130 {
         return signal.do_sigsuspend(state, me, a0, a1)
