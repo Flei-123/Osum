@@ -120,6 +120,7 @@ export {
     init, bereit, present, scanout_w, scanout_h, scanouts,
     head_edid_ok, head_mm_w, head_scale,
     head_count, head_mirrored, head_mirror_errors, head_connected, head_w, head_h,
+    ext_active, ext_placed, ext_errors, ext_clipped, ext_x, ext_y, ext_w, ext_h, ext_head_at, ext_testimage,
     transfers, flushes, oktette, fehler, bdf, idx,
     ereignis_pruefen, ereignis_erzwingen, ereignisse, neu_w, neu_h, umgestellt,
     say, shut_down,
@@ -184,6 +185,17 @@ const S_HEADS: u64 = 0x180 // connected heads seen in the table
 const S_MIRRORED: u64 = 0x188 // extra heads that now show the primary resource
 const S_MIRERR: u64 = 0x190 // SET_SCANOUT refusals for extra heads
 const S_OUTTAB: u64 = 0x200 // OUT_MAX entries of OUT_STRIDE bytes
+// r815 EXTEND: with word `vgpuextend` and >= 2 connected heads the desktop is ONE wide
+// resource (the fb back buffer, size = bounding box of the heads) and every head scans out
+// its own RECT of it (SET_SCANOUT r.x/r.y/r.w/r.h). Zero copy: TRANSFER/FLUSH of the dirty
+// rect is unchanged, the host refreshes every scanout the rect touches. Placement is
+// lib/monitors/layout.fi pack_row (left to right in head order, tops at 0).
+const S_EXTON: u64 = 0x198 // 1 = extend layout is active
+const S_EXTPLACED: u64 = 0x1A0 // heads that now scan out their own rect
+const S_EXTERR: u64 = 0x1A8 // SET_SCANOUT refusals while placing
+const S_EXTCLIP: u64 = 0x1B0 // heads whose rect was cut because the fb is smaller than the layout
+const S_EXTTAB: u64 = 0x500 // OUT_MAX entries of 32 bytes: x, y, w, h (0 w = head unused)
+const EXT_STRIDE: u64 = 0x20
 const OUT_MAX: u64 = 8
 const OUT_STRIDE: u64 = 0x60
 // r808 step 2: what GET_EDID said about the head (VIRTIO_GPU_F_EDID). O_EDID 1 = a valid base block was read.
@@ -1035,6 +1047,115 @@ fn head_h(state: u64, i: u64) -> u64 {
     return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_H))
 }
 
+// ---------------------------------------------------------------- r815 extend
+fn ext_active(state: u64) -> bool { return kstate.get(state, s(S_EXTON)) != 0 }
+fn ext_placed(state: u64) -> u64 { return kstate.get(state, s(S_EXTPLACED)) }
+fn ext_errors(state: u64) -> u64 { return kstate.get(state, s(S_EXTERR)) }
+fn ext_clipped(state: u64) -> u64 { return kstate.get(state, s(S_EXTCLIP)) }
+fn ext_x(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_EXTTAB + i * EXT_STRIDE))
+}
+fn ext_y(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_EXTTAB + i * EXT_STRIDE + 8))
+}
+fn ext_w(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_EXTTAB + i * EXT_STRIDE + 16))
+}
+fn ext_h(state: u64, i: u64) -> u64 {
+    if i >= OUT_MAX { return 0 }
+    return kstate.get(state, s(S_EXTTAB + i * EXT_STRIDE + 24))
+}
+// Which head shows desktop pixel (x, y)? 8 = none (outside every rect).
+fn ext_head_at(state: u64, x: u64, y: u64) -> u64 {
+    var i: u64 = 0
+    while i < OUT_MAX {
+        let w: u64 = ext_w(state, i)
+        if w != 0 && x >= ext_x(state, i) && x < ext_x(state, i) + w && y >= ext_y(state, i) && y < ext_y(state, i) + ext_h(state, i) {
+            return i
+        }
+        i = i + 1
+    }
+    return OUT_MAX
+}
+
+// SET_SCANOUT with an explicit rect of the (single) desktop resource.
+fn set_scanout_rect(state: u64, id: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
+    kopf(cmd, CMD_SET_SCANOUT)
+    wr32(cmd, 24, x)
+    wr32(cmd, 28, y)
+    wr32(cmd, 32, w)
+    wr32(cmd, 36, h)
+    wr32(cmd, 40, id)
+    wr32(cmd, 44, RES_ID)
+    return befehl(state, 48, RESP_OK_NODATA)
+}
+
+// Lay the connected heads out left to right (pack_row) inside the desktop resource of
+// size bw x bh and switch every head to its rect. Heads that do not fit are cut or skipped
+// (counted in S_EXTCLIP), a refusal is counted in S_EXTERR. Returns the number placed.
+fn ext_place(state: u64, bw: u64, bh: u64) -> u64 {
+    var x: u64 = 0
+    var placed: u64 = 0
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        let tb: u64 = S_EXTTAB + hd * EXT_STRIDE
+        kstate.set(state, s(tb + 16), 0)
+        if head_connected(state, hd) {
+            var w: u64 = head_w(state, hd)
+            var h: u64 = head_h(state, hd)
+            if x < bw && w != 0 && h != 0 {
+                if x + w > bw {
+                    w = bw - x
+                    kstate.add(state, s(S_EXTCLIP), 1)
+                }
+                if h > bh {
+                    h = bh
+                    kstate.add(state, s(S_EXTCLIP), 1)
+                }
+                if set_scanout_rect(state, hd, x, 0, w, h) {
+                    kstate.set(state, s(tb), x)
+                    kstate.set(state, s(tb + 8), 0)
+                    kstate.set(state, s(tb + 16), w)
+                    kstate.set(state, s(tb + 24), h)
+                    placed = placed + 1
+                } else {
+                    kstate.add(state, s(S_EXTERR), 1)
+                }
+                x = x + head_w(state, hd)
+            } else {
+                kstate.add(state, s(S_EXTCLIP), 1)
+            }
+        }
+        hd = hd + 1
+    }
+    kstate.set(state, s(S_EXTPLACED), placed)
+    return placed
+}
+
+// Test image for the gates (word fbtest + vgpuextend): one solid box per head, a different
+// colour per head, so a screendump of head N can tell its own rect from the others.
+fn ext_testimage(state: u64) {
+    if !ext_active(state) { return }
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        let w: u64 = ext_w(state, hd)
+        if w >= 160 && ext_h(state, hd) >= 160 {
+            var r: u64 = 0xFF
+            var g: u64 = 0
+            var b: u64 = 0xFF
+            if hd == 1 { r = 0; g = 0xFF; b = 0xFF }
+            if hd == 2 { r = 0xFF; g = 0xFF; b = 0 }
+            if hd >= 3 { r = 0x80; g = 0x80; b = 0xFF }
+            fb.fill(state, ext_x(state, hd) + 100, 120, 160, 160, fb.rgb(state, r, g, b))
+        }
+        hd = hd + 1
+    }
+}
+
 // EINE BILDFLAECHE ANLEGEN, wie das Geraet sie sieht.
 fn resource_create(state: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
@@ -1699,22 +1820,32 @@ fn init(state: u64) -> bool {
     if !attach_backing(state, back, bytes) {
         return false
     }
-    if !set_scanout(state, bw, bh) {
-        return false
-    }
-
-    // r808: every further connected head shows the same resource (mirror).
-    // A refusal is counted, never fatal: head 0 already works.
-    var hd: u64 = 1
-    while hd < OUT_MAX {
-        if head_connected(state, hd) {
-            if set_scanout_id(state, hd, bw, bh) {
-                kstate.add(state, s(S_MIRRORED), 1)
-            } else {
-                kstate.add(state, s(S_MIRERR), 1)
-            }
+    // r815: word `vgpuextend` + at least two heads -> every head scans out its own rect of the
+    // wide desktop resource. Otherwise (or if no head could be placed) the old path below.
+    var extended: bool = false
+    if kstate.mode_on(state, kstate.M_VGPUEXT) && kstate.get(state, s(S_HEADS)) >= 2 {
+        if ext_place(state, bw, bh) >= 1 {
+            extended = true
+            kstate.set(state, s(S_EXTON), 1)
         }
-        hd = hd + 1
+    }
+    if !extended {
+        if !set_scanout(state, bw, bh) {
+            return false
+        }
+        // r808: every further connected head shows the same resource (mirror).
+        // A refusal is counted, never fatal: head 0 already works.
+        var hd: u64 = 1
+        while hd < OUT_MAX {
+            if head_connected(state, hd) {
+                if set_scanout_id(state, hd, bw, bh) {
+                    kstate.add(state, s(S_MIRRORED), 1)
+                } else {
+                    kstate.add(state, s(S_MIRERR), 1)
+                }
+            }
+            hd = hd + 1
+        }
     }
 
     // Das erste Bild ganz hinaustragen: die Ressource ist noch leer,
@@ -1778,6 +1909,10 @@ fn say(state: u64) {
     var s_k: [u8; 9] = "  heads=\0"
     var s_l: [u8; 9] = "  mirr=\0\0"
     var s_m: [u8; 9] = "  merr=\0\0"
+    var s_n: [u8; 8] = "  ext=\0\0"
+    var s_o: [u8; 9] = "  extp=\0\0"
+    var s_p: [u8; 9] = "  exte=\0\0"
+    var s_q: [u8; 9] = "  extc=\0\0"
     if !bereit(state) {
         serial.puts((&s_no[0]) as u64)
         serial.nl()
@@ -1812,7 +1947,36 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_MIRRORED)))
     serial.puts((&s_m[0]) as u64)
     serial.dec(kstate.get(state, s(S_MIRERR)))
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(kstate.get(state, s(S_EXTON)))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(kstate.get(state, s(S_EXTPLACED)))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(kstate.get(state, s(S_EXTERR)))
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(kstate.get(state, s(S_EXTCLIP)))
     serial.nl()
+    var x_a: [u8; 16] = "vgpu: ext head \0"
+    var x_b: [u8; 8] = " rect=\0\0"
+    if kstate.get(state, s(S_EXTON)) != 0 {
+        var eh: u64 = 0
+        while eh < OUT_MAX {
+            if ext_w(state, eh) != 0 {
+                serial.puts((&x_a[0]) as u64)
+                serial.dec(eh)
+                serial.puts((&x_b[0]) as u64)
+                serial.dec(ext_x(state, eh))
+                serial.put(44)
+                serial.dec(ext_y(state, eh))
+                serial.put(32)
+                serial.dec(ext_w(state, eh))
+                serial.put(120)
+                serial.dec(ext_h(state, eh))
+                serial.nl()
+            }
+            eh = eh + 1
+        }
+    }
     var h_a: [u8; 12] = "vgpu: head \0"
     var h_b: [u8; 8] = " edid=\0\0"
     var h_c: [u8; 6] = " pref\0"
