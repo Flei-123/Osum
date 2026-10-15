@@ -187,7 +187,18 @@ OK=$((OK+1)); echo "  ok    alle acht Gebraeuche 0x4..0xb sind einzeln da"
 grep -aq '^hidev: druck 0xe1 code=0x2a' "$B"
 zusage "Umschalt kommt als eigener Abtastcode 0x2a" $?
 ZEICHEN=$(grep -ao 'key: .' "$B" | sed 's/key: //' | tr -d '\n')
-gleich "die Zeichen, die in der Zeilendisziplin ankommen" "abcdefghija" "$ZEICHEN"
+gleich "die Zeichen, die in der Zeilendisziplin ankommen" "abcdefghIJaxzy^" "$ZEICHEN"
+# r157 (H-001): order of the events inside ONE report.
+ev_order() { # report name -> usages of the "druck" events of that report
+    local n v
+    n=$(python3 tools/hid/descs.py nr "$1"); v=$((n-1))
+    sed -n "/^hidb: nr=$v /,/^hidb: nr=$n /p" "$B" | grep -a '^hidev: druck ' \
+        | awk '{printf "%s ", $3}'
+}
+gleich "r157: Boot-Tastatur: Tasten in Berichtsreihenfolge (x z y)" \
+    "0x1b 0x1d 0x1c " "$(ev_order 'boot: Reihenfolge xzy')"
+gleich "r157: Zusatztasten vor der Taste im selben Bericht" \
+    "0xe0 0xe1 0x4 " "$(ev_order 'boot: Strg+Umschalt+a')"
 LOS=$(grep -ac '^hidev: los ' "$B")
 zusage "es gibt ueberhaupt ein Loslassen ($LOS Ereignisse)" \
     "$([ "$LOS" -ge 14 ] && echo 0 || echo 1)"

@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/power/hibimg.fi -- hibernate (S4) image format: header, extent list, CRC32.
+//
+// Pure data code (no kernel access): the writer side builds the header and the extent
+// list from a used-page bitmap, the resume side validates them BEFORE it restores a
+// single page. Not wired into the kernel yet (docs/HIBERNATE-S4.md): the page-restore
+// and the CPU-state capture are the hard parts, this is the part a host test can pin.
+//
+// Layout (all little endian), header = 1 sector (512 bytes):
+//   +0   magic "OSUMHIB1"            8
+//   +8   version                      4   (1)
+//   +12  flags                        4   (bit0 = data is zero-run compressed, reserved)
+//   +16  page size                    4   (4096)
+//   +20  extent count                 4
+//   +24  page count (saved pages)     8
+//   +32  build id of the kernel       8   (resume refuses an image of another kernel)
+//   +40  CPU-state offset (sector)    8
+//   +48  data offset (sector)         8
+//   +56  data CRC32                   4   (over all saved page bytes)
+//   +60  header CRC32                 4   (over bytes 0..59 and 64..511)
+//   +64  extents: (first page frame u64, page count u64) x extent count, max 28
+// Used image: the resume code writes the magic to zero (hdr_invalidate) FIRST, then
+// restores -- a crash during restore must never boot the same image twice.
+profile any
+
+export {
+    hdr_init, hdr_check, hdr_invalidate, hdr_pages, hdr_extents, hdr_data_crc,
+    ext_add, ext_get, crc32, crc32_update,
+    E_OK, E_MAGIC, E_VERSION, E_HDR_CRC, E_BUILD, E_EXTENTS, E_PAGESIZE,
+    HDR_SIZE, MAX_EXTENTS
+}
+
+const HDR_SIZE: u64 = 512
+const MAX_EXTENTS: u64 = 28
+const E_OK: u64 = 0
+const E_MAGIC: u64 = 1
+const E_VERSION: u64 = 2
+const E_HDR_CRC: u64 = 3
+const E_BUILD: u64 = 4
+const E_EXTENTS: u64 = 5
+const E_PAGESIZE: u64 = 6
+
+fn rd8(p: u64, i: u64) -> u64 {
+    let v: u8 = *((p + i) as *mut u8)
+    return v as u64
+}
+
+fn wr8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 0xFF) as u8
+}
+
+fn rd32(p: u64, i: u64) -> u64 {
+    return rd8(p, i) | (rd8(p, i + 1) << 8) | (rd8(p, i + 2) << 16) | (rd8(p, i + 3) << 24)
+}
+
+fn wr32(p: u64, i: u64, v: u64) {
+    wr8(p, i, v)
+    wr8(p, i + 1, v >> 8)
+    wr8(p, i + 2, v >> 16)
+    wr8(p, i + 3, v >> 24)
+}
+
+fn rd64(p: u64, i: u64) -> u64 {
+    return rd32(p, i) | (rd32(p, i + 4) << 32)
+}
+
+fn wr64(p: u64, i: u64, v: u64) {
+    wr32(p, i, v & 0xFFFFFFFF)
+    wr32(p, i + 4, v >> 32)
+}
+
+// CRC-32 (IEEE, reflected 0xEDB88320), bitwise: slow but tiny; resume reads the disk
+// anyway. crc32_update takes and returns the RUNNING value (start 0, no inversion
+// outside): crc32(p, n) = crc32_update(0, p, n).
+fn crc32_update(crc: u64, p: u64, n: u64) -> u64 {
+    var c: u64 = (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        c = c ^ rd8(p, i)
+        var k: u64 = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = (c >> 1) ^ 0xEDB88320
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+fn crc32(p: u64, n: u64) -> u64 {
+    return crc32_update(0, p, n)
+}
+
+fn hdr_crc(h: u64) -> u64 {
+    let a: u64 = crc32_update(0, h, 60)
+    return crc32_update(a, h + 64, HDR_SIZE - 64)
+}
+
+// Write an empty header (no extents yet) into the 512-byte buffer h.
+fn hdr_init(h: u64, build_id: u64, cpu_sector: u64, data_sector: u64) {
+    var i: u64 = 0
+    while i < HDR_SIZE {
+        wr8(h, i, 0)
+        i = i + 1
+    }
+    wr8(h, 0, 0x4F) // O
+    wr8(h, 1, 0x53) // S
+    wr8(h, 2, 0x55) // U
+    wr8(h, 3, 0x4D) // M
+    wr8(h, 4, 0x48) // H
+    wr8(h, 5, 0x49) // I
+    wr8(h, 6, 0x42) // B
+    wr8(h, 7, 0x31) // 1
+    wr32(h, 8, 1)
+    wr32(h, 16, 4096)
+    wr64(h, 32, build_id)
+    wr64(h, 40, cpu_sector)
+    wr64(h, 48, data_sector)
+}
+
+// Append the run [frame, frame+count) of saved page frames; a run that continues the
+// previous one is merged. Returns false when the 28 slots are full (the writer then
+// has to give up: hibernate refuses instead of writing a truncated image).
+fn ext_add(h: u64, frame: u64, count: u64) -> bool {
+    if count == 0 {
+        return true
+    }
+    let n: u64 = rd32(h, 20)
+    if n > 0 {
+        let lf: u64 = rd64(h, 64 + (n - 1) * 16)
+        let lc: u64 = rd64(h, 64 + (n - 1) * 16 + 8)
+        if lf + lc == frame {
+            wr64(h, 64 + (n - 1) * 16 + 8, lc + count)
+            wr64(h, 24, rd64(h, 24) + count)
+            return true
+        }
+    }
+    if n >= MAX_EXTENTS {
+        return false
+    }
+    wr64(h, 64 + n * 16, frame)
+    wr64(h, 64 + n * 16 + 8, count)
+    wr32(h, 20, n + 1)
+    wr64(h, 24, rd64(h, 24) + count)
+    return true
+}
+
+// Seal the header after the data CRC is known.
+fn hdr_seal(h: u64, data_crc: u64) {
+    wr32(h, 56, data_crc)
+    wr32(h, 60, hdr_crc(h))
+}
+
+export { hdr_seal }
+
+// Validate a header read from disk. Order matters: magic first (cheap, the common
+// "no image" case), then version, CRC, page size, build id, extent sanity.
+fn hdr_check(h: u64, build_id: u64) -> u64 {
+    let m0: u64 = rd32(h, 0)
+    let m1: u64 = rd32(h, 4)
+    if m0 != 0x4D55534F || m1 != 0x31424948 {
+        return E_MAGIC
+    }
+    if rd32(h, 8) != 1 {
+        return E_VERSION
+    }
+    if rd32(h, 60) != hdr_crc(h) {
+        return E_HDR_CRC
+    }
+    if rd32(h, 16) != 4096 {
+        return E_PAGESIZE
+    }
+    if rd64(h, 32) != build_id {
+        return E_BUILD
+    }
+    let n: u64 = rd32(h, 20)
+    if n == 0 || n > MAX_EXTENTS {
+        return E_EXTENTS
+    }
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = rd64(h, 64 + i * 16 + 8)
+        if c == 0 {
+            return E_EXTENTS
+        }
+        total = total + c
+        i = i + 1
+    }
+    if total != rd64(h, 24) {
+        return E_EXTENTS
+    }
+    return E_OK
+}
+
+// Resume step 1: kill the image so a crash while restoring cannot loop.
+fn hdr_invalidate(h: u64) {
+    wr64(h, 0, 0)
+}
+
+fn hdr_pages(h: u64) -> u64 {
+    return rd64(h, 24)
+}
+
+fn hdr_extents(h: u64) -> u64 {
+    return rd32(h, 20)
+}
+
+fn hdr_data_crc(h: u64) -> u64 {
+    return rd32(h, 56)
+}
+
+// Extent i: field 0 = first frame, 1 = count.
+fn ext_get(h: u64, i: u64, field: u64) -> u64 {
+    return rd64(h, 64 + i * 16 + field * 8)
+}
