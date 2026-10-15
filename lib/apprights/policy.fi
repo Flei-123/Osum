@@ -10,9 +10,10 @@
 
 export {
     P_MIC, P_CAMERA, P_NET, P_FS_HOME, P_NOTIFY, P_CLIP_READ, P_CLIP_WRITE, P_AUDIO_PLAY,
-    P_LOCATION, P_CONTACTS, P_PHONE, P_ALL, NAME_MAX, MAX_APPS,
+    P_LOCATION, P_CONTACTS, P_PHONE, P_ALL, P_SAFE, NAME_MAX, MAX_APPS,
     E_OK, E_FULL, E_BADNAME, E_CEIL, CEIL_NONE,
     set_ceiling, get_ceiling, has_ceiling,
+    A_CPU, A_WAKE, A_TX, A_RX, acct_addr, acct_get, acct_clear, slot_used, slot_name,
     name_ok, label_app, app_slot, set_mask, get_mask, grant, revoke, label_allows, reset, count, bit_of, name_of_bit,
 }
 
@@ -28,6 +29,11 @@ const P_LOCATION: u64 = 256
 const P_CONTACTS: u64 = 512
 const P_PHONE: u64 = 1024
 const P_ALL: u64 = 2047
+// AR-3: the NON-SENSITIVE rights. A package installed from a signed source gets those it declares in perm= granted
+// automatically (like Android's "normal" permissions); everything else (mic, camera, fs.home, location, contacts,
+// phone) stays default deny until the person allows it. net 4 + notify 16 + clipboard.read 32 + clipboard.write 64 +
+// audio.play 128.
+const P_SAFE: u64 = 244
 
 const NAME_MAX: u64 = 19 // "app:" + 19 = the 23 characters of a label (origin.LABEL_MAX)
 const MAX_APPS: u64 = 16
@@ -48,6 +54,17 @@ static mut masks: [u64; 16] = [0 as u64; 16]
 static mut used: [u64; 16] = [0 as u64; 16]
 static mut ceils: [u64; 16] = [0 as u64; 16]
 static mut ceilset: [u64; 16] = [0 as u64; 16]
+
+// PER-APP COUNTERS (AR-2b). Four words per table slot, booked by the kernel at the places where the work happens:
+// A_CPU timer ticks charged to a task of the app, A_WAKE blocked->ready transitions of its tasks (wakeups),
+// A_TX / A_RX payload octets its sockets handed to / took from the stack. Children inherit the label, so they count
+// for the app. Callers add through acct_addr() with an atomic add (several cores book at once). The slot is
+// zeroed when it is allocated; an app without a slot (table full, never registered) is not counted.
+const A_CPU: u64 = 0
+const A_WAKE: u64 = 1
+const A_TX: u64 = 2
+const A_RX: u64 = 3
+static mut acct: [u64; 64] = [0 as u64; 64]
 
 fn rd(p: u64, i: u64) -> u64 {
     let c: u8 = *((p + i) as *mut u8)
@@ -151,7 +168,55 @@ fn slot_for(name: u64) -> u64 {
     masks[s as usize] = 0
     ceils[s as usize] = 0
     ceilset[s as usize] = 0
+    acct_clear(s)
     return s
+}
+
+fn acct_clear(slot: u64) {
+    if slot >= MAX_APPS {
+        return
+    }
+    var f: u64 = 0
+    while f < 4 {
+        acct[(slot * 4 + f) as usize] = 0
+        f = f + 1
+    }
+}
+
+// Address of one counter of the app that `label` ("app:<name>") names; 0 = not an app label or no slot.
+// Hot path (timer tick): an unlabelled task costs one byte compare.
+fn acct_addr(label: u64, field: u64) -> u64 {
+    if rd(label, 0) != 97 {
+        return 0
+    }
+    let app: u64 = label_app(label)
+    if app == 0 || field >= 4 {
+        return 0
+    }
+    let s: u64 = app_slot(app)
+    if s >= MAX_APPS {
+        return 0
+    }
+    return ((&acct[0]) as u64) + (s * 4 + field) * 8
+}
+
+fn acct_get(slot: u64, field: u64) -> u64 {
+    if slot >= MAX_APPS || field >= 4 {
+        return 0
+    }
+    return acct[(slot * 4 + field) as usize]
+}
+
+fn slot_used(slot: u64) -> bool {
+    return slot < MAX_APPS && used[slot as usize] != 0
+}
+
+// Zero-terminated name of a used slot (pointer into the table), 0 when free.
+fn slot_name(slot: u64) -> u64 {
+    if !slot_used(slot) {
+        return 0
+    }
+    return ((&names[0]) as u64) + slot * SLOT
 }
 
 fn set_ceiling(name: u64, ceil: u64) -> u64 {
@@ -211,6 +276,7 @@ fn set_mask(name: u64, mask: u64) -> u64 {
         used[s as usize] = 1
         ceilset[s as usize] = 0
         ceils[s as usize] = 0
+        acct_clear(s)
     }
     masks[s as usize] = mask & P_ALL
     return E_OK
@@ -248,6 +314,7 @@ fn reset() {
         masks[s as usize] = 0
         ceils[s as usize] = 0
         ceilset[s as usize] = 0
+        acct_clear(s)
         s = s + 1
     }
 }

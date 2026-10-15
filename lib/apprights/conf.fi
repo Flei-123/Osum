@@ -13,7 +13,7 @@ import apprights.policy
 
 export {
     END, BAD_RIGHT, parse_rights, manifest_perm, conf_next, cur_name, cur_mask, bad_lines, reset_bad,
-    update, fmt_rights,
+    update, fmt_rights, find, plan_next, auto_new,
 }
 
 const END: u64 = 4294967295 // conf_next(): no more lines
@@ -257,4 +257,65 @@ fn put_line(out: u64, n0: u64, outmax: u64, name: u64, mask: u64) -> u64 {
     }
     wr(out, n, 10)
     return n + 1
+}
+
+// Mask recorded for `app` in a conf-format text (0 = no line).
+fn find(buf: u64, len: u64, app: u64) -> u64 {
+    var pos: u64 = 0
+    while true {
+        pos = conf_next(buf, len, pos)
+        if pos == END {
+            break
+        }
+        if same_name(cur_name(), app) {
+            return cur_mask()
+        }
+    }
+    return 0
+}
+
+// Next app name of an opk PLAN text ("<name>\t<hash>\n" per line) at or after `pos`: cur_name() is set, the position
+// after the line is returned, END when there is none. Lines with an illegal name are skipped.
+fn plan_next(buf: u64, len: u64, pos: u64) -> u64 {
+    var at: u64 = pos
+    while at < len {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        var q: u64 = at
+        while q < e && rd(buf, q) != 9 {
+            q = q + 1
+        }
+        let nl: u64 = q - at
+        if q < e && nl > 0 && nl <= policy.NAME_MAX {
+            var ok: bool = true
+            var i: u64 = 0
+            while i < nl {
+                let c: u64 = rd(buf, at + i)
+                let good: bool = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
+                    || c == 46 || c == 95 || c == 45
+                if !good {
+                    ok = false
+                }
+                wr((&name_buf[0]) as u64, i, c)
+                i = i + 1
+            }
+            if ok {
+                wr((&name_buf[0]) as u64, nl, 0)
+                return e + 1
+            }
+        }
+        at = e + 1
+    }
+    return END
+}
+
+// AUTO-GRANT (AR-3). `ceil` = what the manifest declares, `offered` = the safe rights that were already offered to
+// this app before (recorded in /etc/apprights.seen). The result is what is NEW and safe: it is granted once. A right
+// that was offered and later revoked by the person is in `offered` and is never granted again; sensitive rights
+// (mic, camera, ...) are never in the result.
+fn auto_new(ceil: u64, offered: u64) -> u64 {
+    let safe: u64 = ceil & policy.P_SAFE
+    return safe - (safe & offered)
 }

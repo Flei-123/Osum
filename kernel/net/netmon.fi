@@ -85,6 +85,8 @@ import sched.sched
 import serial
 import net.wire
 import arch.x86_64.apic
+import sync.atomic
+import apprights.policy
 
 export {
     init, parse, on, set_on, mode_word, set_mode_word,
@@ -666,7 +668,24 @@ fn sock_gone(state: u64, i: u64) {
 
 // Octets a process handed to the wire. `n` is what the stack really
 // took, not what was offered -- a short write is not usage.
+// AR-2b: payload octets are also booked to the APP that owns the socket (label app:<name>). Independent of `on`:
+// the per-app page must not depend on the netmon boot switch.
+fn app_book(state: u64, i: u64, n: u64, field: u64) {
+    if n == 0 || i >= NSOCK {
+        return
+    }
+    let t: u64 = sock_owner(state, i)
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    let ap: u64 = policy.acct_addr(sched.task_at(state, t) + sched.T_ORIGIN, field)
+    if ap != 0 {
+        atomic.fetch_add(ap, n)
+    }
+}
+
 fn pay_out(state: u64, i: u64, n: u64) {
+    app_book(state, i, n, policy.A_TX)
     if !on(state) || n == 0 || i >= NSOCK {
         return
     }
@@ -678,6 +697,7 @@ fn pay_out(state: u64, i: u64, n: u64) {
 }
 
 fn pay_in(state: u64, i: u64, n: u64) {
+    app_book(state, i, n, policy.A_RX)
     if !on(state) || n == 0 || i >= NSOCK {
         return
     }

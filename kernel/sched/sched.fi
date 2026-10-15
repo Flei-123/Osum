@@ -36,6 +36,7 @@ import arch.msr
 // RUNDE BLECHEINGABE: der Zyklenzaehler, um einen STEHENDEN Zeitgeber
 // zu erkennen. `apic.fi` bindet nur serial/kstate/pci ein -- kein Kreis.
 import arch.x86_64.apic
+import apprights.policy
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
@@ -662,7 +663,15 @@ fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
     if i >= kstate.MAX_TASKS {
         return false
     }
-    return atomic.cas(task_at(state, i) + T_STATE, from, to) == from
+    let won: bool = atomic.cas(task_at(state, i) + T_STATE, from, to) == from
+    if won && to == S_READY {
+        // AR-2b: a blocked task of an app became ready again = one wakeup of that app.
+        let ap_wake: u64 = policy.acct_addr(task_at(state, i) + T_ORIGIN, policy.A_WAKE)
+        if ap_wake != 0 {
+            atomic.fetch_add(ap_wake, 1)
+        }
+    }
+    return won
 }
 
 // `kill_pid` could not end the task at once because it was running on
@@ -2261,6 +2270,11 @@ fn on_tick(state: u64) {
         }
     }
     tset(state, tick_to, T_TICKS, tget(state, tick_to, T_TICKS) + 1)
+    // AR-2b: the same tick, booked to the app whose label the task carries (unlabelled: one byte compare).
+    let ap_cpu: u64 = policy.acct_addr(task_at(state, tick_to) + T_ORIGIN, policy.A_CPU)
+    if ap_cpu != 0 {
+        atomic.fetch_add(ap_cpu, 1)
+    }
     // RUNDE WERKZEUGE: DERSELBE SCHLAG, EIN ZWEITES MAL GEZAEHLT --
     // aber nur, wenn ihn die Leerlaufaufgabe bekommen hat. `C_TICKS`
     // (drei Zeilen weiter oben, derselbe Kern, dieselbe Unterbrechung)
