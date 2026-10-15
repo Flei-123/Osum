@@ -36,6 +36,9 @@ sub(r'static mut kc_gr: \[u64; \d+\] = \[0 as u64; \d+\]', 'static mut kc_gr: [u
 if "F_NO:" not in s:
     sub(r'(const F_WARTEN: u64 = 8\n)', r'\1const F_NO: u64 = 9       // forbidden: ring with a slash\n')
     sub(r'F_CROSS, F_WARTEN,', 'F_CROSS, F_WARTEN, F_NO,')
+if "F_COPY:" not in s:
+    sub(r'(const F_NO: u64 = 9[^\n]*\n)', r'\1const F_COPY: u64 = 10    // drag and drop with Ctrl: a plus sign\nconst F_MOVE: u64 = 11    // drag and drop: a down arrow (drop here)\n')
+    sub(r'F_CROSS, F_WARTEN, F_NO,', 'F_CROSS, F_WARTEN, F_NO, F_COPY, F_MOVE,')
 if "--check" in sys.argv:
     sys.exit(0 if s == o else 1)
 open(path, "w", encoding="utf-8").write(s)
