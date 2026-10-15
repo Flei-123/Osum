@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/usbnet/ch397.fi -- WCH CH336/CH339/CH396/CH397 USB 2.0 Ethernet (vendor class 0xFF), protocol half.
+//
+// Justin's dongle "USB2.0 Ethernet Adapter" 1A86:5394 is NOT ECM/NCM/RNDIS: Windows binds WCH's own
+// `WCHUSBNICA64` (compatible ids Class_FF/SubClass_FF/Prot_FF). The only open source found is the
+// MIT-licensed out-of-tree `ch397.c` (gitee.com/ydong08/ch397), which lists
+//   1a86:5397 CH397, 1a86:5396 CH396, 1a86:5395 CH339, 1a86:5394 CH336
+// and drives the chip with vendor control requests plus 4-byte-length-prefixed bulk frames.
+// EVERYTHING BELOW IS FROM THAT ONE SOURCE (read 15.10.2026) AND HAS NOT BEEN TRIED ON A REAL CHIP.
+// The framing is therefore a hypothesis until a USB capture of the real dongle confirms it.
+//
+// No allocator, no syscall: callers pass buffers.
+
+export {
+    supported, chip_name_get, tx_wrap, rx_next, rx_frame_off, rx_frame_len,
+    VID_WCH, REQ_INFO, REQ_READ_REG, REQ_WRITE_REG, REQ_PHY_READ, REQ_PHY_WRITE,
+    REG_MAC_L, REG_MAC_H, REG_MAC_CFG, FRAME_MIN, FRAME_MAX, OVERHEAD
+}
+
+const VID_WCH: u64 = 0x1A86
+// vendor requests, bmRequestType 0xC0 (read) / 0x40 (write), device recipient;
+// register address = wValue (low 16) | wIndex << 16.
+const REQ_INFO: u64 = 0x10      // 8 bytes: chiptype, hwver, fwver, sta, 4 reserved
+const REQ_READ_REG: u64 = 0x11
+const REQ_WRITE_REG: u64 = 0x12
+const REQ_PHY_READ: u64 = 0x15
+const REQ_PHY_WRITE: u64 = 0x16
+const REG_MAC_L: u64 = 0x40000714 // 4 bytes
+const REG_MAC_H: u64 = 0x40000710 // 2 bytes
+const REG_MAC_CFG: u64 = 0x40000700
+
+const FRAME_MIN: usize = 60
+const FRAME_MAX: usize = 1518
+const OVERHEAD: usize = 8 // 4 length octets + 4 octets whose meaning is unknown (TX: zero)
+
+fn supported(vid: u64, pid: u64) -> bool {
+    if vid != VID_WCH { return false }
+    return pid == 0x5394 || pid == 0x5395 || pid == 0x5396 || pid == 0x5397
+}
+
+fn chip_name_get(pid: u64, out: u64) -> usize {
+    var s: u64 = 0
+    var n: usize = 0
+    if pid == 0x5394 { let t: [u8; 6] = "CH336\0"; n = cp(out, (&t[0]) as u64); return n }
+    if pid == 0x5395 { let t: [u8; 6] = "CH339\0"; n = cp(out, (&t[0]) as u64); return n }
+    if pid == 0x5396 { let t: [u8; 6] = "CH396\0"; n = cp(out, (&t[0]) as u64); return n }
+    if pid == 0x5397 { let t: [u8; 6] = "CH397\0"; n = cp(out, (&t[0]) as u64); return n }
+    let t: [u8; 8] = "unknown\0"
+    return cp(out, (&t[0]) as u64)
+}
+
+fn cp(out: u64, s: u64) -> usize {
+    var i: usize = 0
+    while *((s + i as u64) as *mut u8) != 0 as u8 {
+        *((out + i as u64) as *mut u8) = *((s + i as u64) as *mut u8)
+        i = i + 1
+    }
+    *((out + i as u64) as *mut u8) = 0 as u8
+    return i
+}
+
+fn st8(p: u64, o: usize, v: u64) { *((p + o as u64) as *mut u8) = (v & 255) as u8 }
+fn ld8(p: u64, o: usize) -> u64 {
+    let b: u8 = *((p + o as u64) as *mut u8)
+    return b as u64
+}
+
+// Wrap one Ethernet frame for the bulk-OUT pipe. out must hold n + 16 octets.
+// Layout: [len u32 LE][4 zero octets][frame][zero pad]; frames below 60 octets are
+// zero-padded to 60; the total is rounded up to a multiple of 4 and, if it is then 512
+// or 1024, grown by 4 (avoids a total that is a multiple of the bulk packet size).
+// Returns the transfer length, or 0 if the frame is empty or longer than FRAME_MAX.
+fn tx_wrap(frame: u64, n: usize, out: u64) -> usize {
+    if n == 0 || n > FRAME_MAX { return 0 }
+    var fl: usize = n
+    if fl < FRAME_MIN { fl = FRAME_MIN }
+    st8(out, 0, fl as u64)
+    st8(out, 1, (fl as u64) >> 8)
+    st8(out, 2, 0)
+    st8(out, 3, 0)
+    var i: usize = 4
+    while i < OVERHEAD { st8(out, i, 0); i = i + 1 }
+    i = 0
+    while i < n { st8(out, OVERHEAD + i, ld8(frame, i)); i = i + 1 }
+    while i < fl { st8(out, OVERHEAD + i, 0); i = i + 1 }
+    var total: usize = (OVERHEAD + fl + 3) & 0xFFFFFFFC
+    if total == 512 || total == 1024 { total = total + 4 }
+    i = OVERHEAD + fl
+    while i < total { st8(out, i, 0); i = i + 1 }
+    return total
+}
+
+// Walk a bulk-IN transfer of `len` octets holding several frames. `pos` is the offset of the
+// next header. rx_next returns the offset of the next header after the frame at `pos`, or
+// 0 if the frame at `pos` is malformed (length outside 60..1518 or running past `len`).
+fn rx_frame_len(buf: u64, len: usize, pos: usize) -> usize {
+    if pos + 4 > len { return 0 }
+    let l: usize = (ld8(buf, pos) | (ld8(buf, pos + 1) << 8) | (ld8(buf, pos + 2) << 16) | (ld8(buf, pos + 3) << 24)) as usize
+    if l < FRAME_MIN || l > FRAME_MAX { return 0 }
+    if pos + OVERHEAD + l > len { return 0 }
+    return l
+}
+
+fn rx_frame_off(pos: usize) -> usize { return pos + OVERHEAD }
+
+fn rx_next(buf: u64, len: usize, pos: usize) -> usize {
+    let l: usize = rx_frame_len(buf, len, pos)
+    if l == 0 { return 0 }
+    return pos + OVERHEAD + ((l + 3) & 0xFFFFFFFC)
+}

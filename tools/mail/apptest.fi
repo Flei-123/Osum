@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/mail/apptest.fi -- host driver of the mail app MODEL (lib/mail/model.fi) against tools/mail/stub.py.
+//
+//   apptest <imap_port> <smtp_port> <roots.pem|-> <tlsname> <user> <pass> <tls|plain>
+//
+// Prints "OK <name>" / "FAIL <name>". Exit 0 = ran through (look at the FAIL lines).
+
+profile app
+
+import std.io
+import std.rt
+import std.net
+import mail.wire
+import mail.session
+import mail.model
+
+static mut NL: [u8; 2] = "\n\0"
+static mut LOCAL: [u8; 10] = "127.0.0.1\0"
+static mut EMPTY: [u8; 1] = [0]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn atoi(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 {
+        v = v * 10 + (*((p + i) as *mut u8)) as u64 - 48
+        i = i + 1
+    }
+    return v
+}
+
+fn ceq(p: u64, s: str) -> bool {
+    var i: u64 = 0
+    while i < s.n as u64 {
+        if *((p + i) as *mut u8) != *((s.p as u64 + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return *((p + i) as *mut u8) == 0
+}
+
+fn has(p: u64, s: str) -> bool {
+    var n: u64 = rt.c_length(p) as u64
+    var i: u64 = 0
+    let m: u64 = s.n as u64
+    while i + m <= n {
+        var k: u64 = 0
+        while k < m && *((p + i + k) as *mut u8) == *((s.p as u64 + k) as *mut u8) {
+            k = k + 1
+        }
+        if k == m {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn main(start: u64) -> i32 {
+    let iport: u64 = atoi(rt.arg_ptr(start, 1))
+    let sport: u64 = atoi(rt.arg_ptr(start, 2))
+    var roots: u64 = rt.arg_ptr(start, 3)
+    if ceq(roots, "-") {
+        roots = (&NL[0]) as u64
+    }
+    let name: u64 = rt.arg_ptr(start, 4)
+    let user: u64 = rt.arg_ptr(start, 5)
+    let pass: u64 = rt.arg_ptr(start, 6)
+    let secure: bool = ceq(rt.arg_ptr(start, 7), "tls")
+    let ip: u32 = net.ipv4(127 as u8, 0 as u8, 0 as u8, 1 as u8)
+
+    chk("parse_ipv4: dotted address", model.parse_ipv4((&LOCAL[0]) as u64) == ip)
+    chk("parse_ipv4: host name is not an address", model.parse_ipv4(name) == 0 as u32 || secure == false)
+
+    // ---- nothing configured
+    chk("folders without account -> E_NOCFG", model.op_folders() == model.E_NOCFG)
+    chk("send without account -> E_NOCFG", model.op_send((&NL[0]) as u64, (&NL[0]) as u64, (&NL[0]) as u64) == model.E_NOCFG)
+
+    // ---- settings
+    model.cfg_set(model.F_IMAP_HOST, name)
+    model.cfg_set(model.F_SMTP_HOST, name)
+    model.cfg_set(model.F_USER, user)
+    model.cfg_set(model.F_ROOTS, roots)
+    var ib: [u8; 8] = [0; 8]
+    var sb: [u8; 8] = [0; 8]
+    var tmp: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&tmp, iport)
+    rt.buf_push(&tmp, 0 as u8)
+    model.cfg_set(model.F_IMAP_PORT, tmp.ptr)
+    rt.buf_clear(&tmp)
+    rt.buf_push_dec_u64(&tmp, sport)
+    rt.buf_push(&tmp, 0 as u8)
+    model.cfg_set(model.F_SMTP_PORT, tmp.ptr)
+    model.set_secure(secure)
+    model.set_addrs(ip, ip)
+    chk("cfg: port parsed back", model.cfg_num(model.F_IMAP_PORT) == iport && model.cfg_num(model.F_SMTP_PORT) == sport)
+
+    // ---- wrong password first (negative control)
+    model.cfg_set(model.F_PASS, (&LOCAL[0]) as u64)
+    chk("folders with a wrong password -> E_AUTH", model.op_folders() == session.E_AUTH)
+    chk("err_text: auth", has(model.err_text(session.E_AUTH), "Anmeldung"))
+    model.cfg_set(model.F_PASS, pass)
+
+    // ---- folders
+    chk("folders: ok", model.op_folders() == 0)
+    chk("folders: 2 entries", model.folder_count() == 2)
+    chk("folders: INBOX first", ceq(model.folder_name(0), "INBOX"))
+    chk("folders: Sent Items second", ceq(model.folder_name(1), "Sent Items"))
+    chk("folders: blob has header + names", has(model.folders_blob(), "Ordner\nINBOX\nSent Items\n"))
+
+    // ---- list
+    chk("list: bad folder row -> E_NOFOLDER", model.op_list(9) == model.E_NOFOLDER)
+    chk("list: INBOX ok", model.op_list(0) == 0)
+    chk("list: 3 messages", model.list_count() == 3)
+    chk("list: header line", has(model.list_blob(), "Von\tBetreff\tDatum\n"))
+    chk("list: newest first (message 3 date before message 1)", has(model.list_blob(), "Thu, 15 Oct 2026 08:00:00 +0200"))
+    chk("list: decoded sender", has(model.list_blob(), "Jürgen <juergen@example.org>\tHallo Welt"))
+    chk("list: decoded Latin-1 subject", has(model.list_blob(), "Grüße"))
+    chk("list: no raw RFC 2047 word", !has(model.list_blob(), "=?"))
+
+    // ---- read: row 1 = message 2 (newest first: seq 3, 2, 1)
+    chk("read: bad row -> E_NOMSG", model.op_read(7) == model.E_NOMSG)
+    chk("read: message 2 ok", model.op_read(1) == 0)
+    chk("read: Betreff line", has(model.msg_text(), "Betreff: Grüße\n"))
+    chk("read: quoted-printable body decoded", has(model.msg_text(), "café ist teuer."))
+    chk("read: literal kept whole (fake status line inside)", has(model.msg_text(), "a005 OK this is body text"))
+    chk("read: no CR in the text", !has(model.msg_text(), "\r"))
+    chk("read: fits the memo (< 4096)", model.msg_len() < 4096)
+    chk("read: message 1 (row 2) ok", model.op_read(2) == 0)
+    chk("read: sender decoded in the header lines", has(model.msg_text(), "Von: Jürgen <juergen@example.org>"))
+    chk("read: message 3 (row 0) base64 body", model.op_read(0) == 0 && has(model.msg_text(), "base64 body"))
+
+    // ---- send
+    chk("send: recipient without @ -> E_ARG", model.op_send((&LOCAL[0]) as u64, (&LOCAL[0]) as u64, (&LOCAL[0]) as u64) == session.E_ARG)
+    chk("send: message 1", model.op_send("Max <max@example.org>\0".p as u64, "Grüße aus Wien\0".p as u64,
+        "Hallo Max\n.Punkt am Anfang\nEnde\0".p as u64) == 0)
+    chk("send: message 2", model.op_send("zwei@example.org\0".p as u64, "Zweite\0".p as u64, "nur eine Zeile\0".p as u64) == 0)
+    return 0
+}

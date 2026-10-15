@@ -1,0 +1,544 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mail.fi -- Mail for OrientOS (ring 3, --profile=app, fUi scene tree).
+//
+//   mail        window: account setup -> folders + message list + reading pane -> compose
+//
+// Everything that talks to a server lives in lib/mail/model.fi (+ session.fi, wire.fi); this file
+// is only the window. States:
+//   SETUP     IMAP/SMTP host + port, user, password, "TLS" check, button "Verbinden". Settings
+//             (not the password) are kept in /etc/mail.conf.
+//   MAIN      folder table (left), message table (top right), reading pane (memo, bottom right),
+//             buttons Abrufen (reload the open folder), Neu (compose), Konto (back to SETUP).
+//   COMPOSE   To, Subject, text (memo) -> Senden (SMTP) / Abbrechen.
+// Every server step is blocking: the status line says "Lade..." first, the step runs after that
+// text was painted (a second or two on a slow link; the window does not answer meanwhile).
+//
+// GATE-ONLY test entry (tools/mail/app.sh, stage gui): only when the file /etc/mail.test exists:
+//   "<ipv4> <imap-port> <smtp-port> <plain|tls> <user> <password> <tls-name>"
+// The window then connects to <ipv4> (no DNS), pre-fills the account, trusts /etc/mail-ca.pem and
+// prints "mail: ..." lines on the serial console. A normal install has no such file.
+//
+// HONEST: implicit TLS only (993/465), text mails only, 64 newest messages per folder, no
+// attachments, no address book, the password is typed again after every start.
+
+profile app
+
+import ulib
+import wlib
+import wlibc
+import fuiapp
+import fuiscene
+import std.rt
+import libc.dns
+import mail.session
+import mail.model
+
+const K_IH: u64 = 1
+const K_IP: u64 = 2
+const K_SH: u64 = 3
+const K_SP: u64 = 4
+const K_US: u64 = 5
+const K_PW: u64 = 6
+const K_TLS: u64 = 7
+const K_GO: u64 = 8
+const K_FOLD: u64 = 10
+const K_LIST: u64 = 11
+const K_BODY: u64 = 12
+const K_FETCH: u64 = 13
+const K_NEW: u64 = 14
+const K_ACCT: u64 = 15
+const K_TO: u64 = 20
+const K_SUBJ: u64 = 21
+const K_TXT: u64 = 22
+const K_SEND: u64 = 23
+const K_CANCEL: u64 = 24
+
+const ST_SETUP: u64 = 0
+const ST_MAIN: u64 = 1
+const ST_COMPOSE: u64 = 2
+
+const OP_NONE: u64 = 0
+const OP_CONNECT: u64 = 1
+const OP_LIST: u64 = 2
+const OP_READ: u64 = 3
+const OP_SEND: u64 = 4
+
+static mut POOL: [u8; 4096] = [0 as u8; 4096]
+static mut STATUS: [u8; 192] = [0 as u8; 192]
+static mut EMPTY: [u8; 4] = [0 as u8; 4]
+static mut IHB: [u8; 128] = [0 as u8; 128]
+static mut IPB: [u8; 16] = [0 as u8; 16]
+static mut SHB: [u8; 128] = [0 as u8; 128]
+static mut SPB: [u8; 16] = [0 as u8; 16]
+static mut USB: [u8; 128] = [0 as u8; 128]
+static mut PWB: [u8; 128] = [0 as u8; 128]
+
+static mut st: u64 = 0
+static mut pending: u64 = 0
+static mut pend_arg: u64 = 0
+static mut pend_paint: u64 = 0
+static mut pend_ms: u64 = 0
+static mut cur_folder: u64 = 0
+static mut tls_on: bool = true
+
+static mut TEST_ON: bool = false
+static mut TEST_ADDR: u32 = 0
+static mut TEST_CA: [u8; 17] = "/etc/mail-ca.pem\0"
+static mut t_rect_next: u64 = 0
+static mut t_traced_state: u64 = 99
+
+fn say(s: str) {
+    rt.write_everything(1, s.p as u64, s.n)
+}
+
+fn pn(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn tr(s: str) {
+    if TEST_ON {
+        say("mail: ")
+        say(s)
+    }
+}
+
+fn pool(slot: u64, s: str) -> u64 {
+    let base: u64 = (&POOL[0]) as u64 + slot * 96
+    var i: u64 = 0
+    while i < (s.n as u64) && i < 95 {
+        rt.st8(base, i as usize, rt.ld8(s.p as u64, i as usize))
+        i = i + 1
+    }
+    rt.st8(base, i as usize, 0 as u8)
+    return base
+}
+
+fn copy_c(dst: u64, cap: u64, src: u64) {
+    var i: u64 = 0
+    if src != 0 {
+        while i < cap - 1 && rt.ld8(src, i as usize) != 0 as u8 {
+            rt.st8(dst, i as usize, rt.ld8(src, i as usize))
+            i = i + 1
+        }
+    }
+    rt.st8(dst, i as usize, 0 as u8)
+}
+
+fn status_text(s: str) {
+    var i: u64 = 0
+    while i < (s.n as u64) && i < 190 {
+        rt.st8((&STATUS[0]) as u64, i as usize, rt.ld8(s.p as u64, i as usize))
+        i = i + 1
+    }
+    rt.st8((&STATUS[0]) as u64, i as usize, 0 as u8)
+}
+
+// "<prefix><text at p>" into the status line
+fn status_cat(s: str, p: u64) {
+    var i: u64 = 0
+    while i < (s.n as u64) && i < 100 {
+        rt.st8((&STATUS[0]) as u64, i as usize, rt.ld8(s.p as u64, i as usize))
+        i = i + 1
+    }
+    var k: u64 = 0
+    while i < 190 && rt.ld8(p, k as usize) != 0 as u8 {
+        rt.st8((&STATUS[0]) as u64, i as usize, rt.ld8(p, k as usize))
+        i = i + 1
+        k = k + 1
+    }
+    rt.st8((&STATUS[0]) as u64, i as usize, 0 as u8)
+}
+
+fn status_err(rc: u64) {
+    status_cat("Fehler: ", model.err_text(rc))
+}
+
+// ------------------------------------------------------------ test target (gate only)
+fn parse_u(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while true {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+// next space-separated token of the NUL-terminated line at `p` from `*at`; copies it to `dst`
+fn token(p: u64, at: *mut u64, dst: u64, cap: u64) {
+    var k: u64 = 0
+    while rt.ld8(p, (*at) as usize) == 32 as u8 {
+        *at = *at + 1
+    }
+    while rt.ld8(p, (*at) as usize) != 32 as u8 && rt.ld8(p, (*at) as usize) != 0 as u8 && k < cap - 1 {
+        rt.st8(dst, k as usize, rt.ld8(p, (*at) as usize))
+        *at = *at + 1
+        k = k + 1
+    }
+    rt.st8(dst, k as usize, 0 as u8)
+}
+
+fn load_test_target() {
+    TEST_ON = false
+    var b: rt.Buf = rt.buf_new()
+    var path: [u8; 15] = "/etc/mail.test\0"
+    if !rt.read_file((&path[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return
+    }
+    rt.buf_push(&b, 0 as u8)
+    var line: [u8; 256] = [0 as u8; 256]
+    copy_c((&line[0]) as u64, 256, b.ptr)
+    rt.buf_free(&b)
+    var at: u64 = 0
+    var ip: [u8; 24] = [0 as u8; 24]
+    var ipt: [u8; 16] = [0 as u8; 16]
+    var spt: [u8; 16] = [0 as u8; 16]
+    var mode: [u8; 8] = [0 as u8; 8]
+    var host: [u8; 64] = [0 as u8; 64]
+    token((&line[0]) as u64, &at, (&ip[0]) as u64, 24)
+    token((&line[0]) as u64, &at, (&ipt[0]) as u64, 16)
+    token((&line[0]) as u64, &at, (&spt[0]) as u64, 16)
+    token((&line[0]) as u64, &at, (&mode[0]) as u64, 8)
+    token((&line[0]) as u64, &at, (&USB[0]) as u64, 128)
+    token((&line[0]) as u64, &at, (&PWB[0]) as u64, 128)
+    token((&line[0]) as u64, &at, (&host[0]) as u64, 64)
+    TEST_ADDR = model.parse_ipv4((&ip[0]) as u64)
+    if TEST_ADDR == 0 as u32 {
+        return
+    }
+    copy_c((&IPB[0]) as u64, 16, (&ipt[0]) as u64)
+    copy_c((&SPB[0]) as u64, 16, (&spt[0]) as u64)
+    tls_on = rt.ld8((&mode[0]) as u64, 0) == 116 as u8
+    if tls_on {
+        copy_c((&IHB[0]) as u64, 128, (&host[0]) as u64)
+        model.cfg_set(model.F_ROOTS, (&TEST_CA[0]) as u64)
+    } else {
+        copy_c((&IHB[0]) as u64, 128, (&ip[0]) as u64)
+    }
+    copy_c((&SHB[0]) as u64, 128, (&IHB[0]) as u64)
+    TEST_ON = true
+}
+
+fn trace_rect(name: str, key: u64) {
+    if !TEST_ON {
+        return
+    }
+    let ni: usize = fuiscene.node_of_key(key)
+    if ni == fuiscene.NONE {
+        return
+    }
+    say("mail: rect name=")
+    say(name)
+    say(" x=")
+    pn(fuiscene.node_x(ni))
+    say(" y=")
+    pn(fuiscene.node_y(ni))
+    say(" w=")
+    pn(fuiscene.node_w(ni))
+    say(" h=")
+    pn(fuiscene.node_h(ni))
+    say("\n")
+}
+
+fn trace_state() {
+    if st == ST_SETUP {
+        tr("state setup\n")
+        trace_rect("go", K_GO)
+        trace_rect("pw", K_PW)
+    } else if st == ST_MAIN {
+        tr("state main\n")
+        trace_rect("fold", K_FOLD)
+        trace_rect("list", K_LIST)
+        trace_rect("body", K_BODY)
+        trace_rect("fetch", K_FETCH)
+        trace_rect("new", K_NEW)
+        trace_rect("acct", K_ACCT)
+    } else {
+        tr("state compose\n")
+        trace_rect("to", K_TO)
+        trace_rect("subj", K_SUBJ)
+        trace_rect("txt", K_TXT)
+        trace_rect("send", K_SEND)
+        trace_rect("cancel", K_CANCEL)
+    }
+}
+
+// ------------------------------------------------------------ window
+fn field(col: usize, label: u64, key: u64, w: u64, text: u64) {
+    let _l: usize = fuiscene.label(col, label)
+    let _e: usize = fuiscene.entry(col, key, w, text)
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    if st == ST_SETUP {
+        let _t: usize = fuiscene.label(col, pool(0, "Mail - Konto einrichten"))
+        let r1: usize = fuiscene.row(col)
+        fuiscene.set_gap(r1, 12)
+        let c1: usize = fuiscene.column(r1)
+        field(c1, pool(1, "IMAP-Server (Host)"), K_IH, 300, (&IHB[0]) as u64)
+        let c2: usize = fuiscene.column(r1)
+        field(c2, pool(2, "IMAP-Port (993 = TLS)"), K_IP, 140, (&IPB[0]) as u64)
+        let r2: usize = fuiscene.row(col)
+        fuiscene.set_gap(r2, 12)
+        let c3: usize = fuiscene.column(r2)
+        field(c3, pool(3, "SMTP-Server (Host)"), K_SH, 300, (&SHB[0]) as u64)
+        let c4: usize = fuiscene.column(r2)
+        field(c4, pool(4, "SMTP-Port (465 = TLS)"), K_SP, 140, (&SPB[0]) as u64)
+        field(col, pool(5, "Benutzer (E-Mail-Adresse)"), K_US, 300, (&USB[0]) as u64)
+        field(col, pool(6, "Passwort"), K_PW, 300, (&PWB[0]) as u64)
+        fuiscene.entry_secret(K_PW, true)
+        let _c: usize = fuiscene.check(col, pool(7, "Verschluesselt (TLS, empfohlen)"), K_TLS, tls_on)
+        let _g: usize = fuiscene.button_main(col, pool(8, "Verbinden"), K_GO)
+        let _s: usize = fuiscene.label(col, (&STATUS[0]) as u64)
+        return
+    }
+    if st == ST_COMPOSE {
+        let _t: usize = fuiscene.label(col, pool(9, "Neue Nachricht"))
+        field(col, pool(10, "An"), K_TO, 600, (&EMPTY[0]) as u64)
+        field(col, pool(11, "Betreff"), K_SUBJ, 600, (&EMPTY[0]) as u64)
+        let _m: usize = fuiscene.memo(col, K_TXT, 800, 360, (&EMPTY[0]) as u64)
+        let bar: usize = fuiscene.row(col)
+        fuiscene.set_gap(bar, 8)
+        let _b1: usize = fuiscene.button_main(bar, pool(12, "Senden"), K_SEND)
+        let _b2: usize = fuiscene.button(bar, pool(13, "Abbrechen"), K_CANCEL)
+        let _s: usize = fuiscene.label(col, (&STATUS[0]) as u64)
+        return
+    }
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let _b1: usize = fuiscene.button(bar, pool(14, "Abrufen"), K_FETCH)
+    let _b2: usize = fuiscene.button(bar, pool(15, "Neu"), K_NEW)
+    let _b3: usize = fuiscene.button(bar, pool(16, "Konto"), K_ACCT)
+    let body: usize = fuiscene.row(col)
+    fuiscene.set_gap(body, 8)
+    let _f: usize = fuiscene.table_blob(body, K_FOLD, 170, 470, 1, model.folders_blob())
+    let right: usize = fuiscene.column(body)
+    fuiscene.set_gap(right, 8)
+    let _l: usize = fuiscene.table_blob(right, K_LIST, 690, 230, 3, model.list_blob())
+    fuiscene.table_colw(K_LIST, 0, 220)
+    fuiscene.table_colw(K_LIST, 1, 300)
+    fuiscene.table_colw(K_LIST, 2, 160)
+    let _m: usize = fuiscene.memo(right, K_BODY, 690, 232, model.msg_text())
+    let _s: usize = fuiscene.label(col, (&STATUS[0]) as u64)
+}
+
+// ------------------------------------------------------------ actions
+fn resolve(host: u64) -> u32 {
+    if TEST_ON {
+        return TEST_ADDR
+    }
+    let a: u32 = model.parse_ipv4(host)
+    if a != 0 as u32 {
+        return a
+    }
+    return dns.resolve_a(host) as u32
+}
+
+fn start_op(op: u64, arg: u64, text: str) {
+    pending = op
+    pend_arg = arg
+    pend_paint = fuiscene.painted()
+    pend_ms = fuiapp.now_ms()
+    status_text(text)
+    fuiscene.refresh()
+}
+
+fn take_account() {
+    model.cfg_set(model.F_IMAP_HOST, fuiscene.entry_text(K_IH))
+    model.cfg_set(model.F_IMAP_PORT, fuiscene.entry_text(K_IP))
+    model.cfg_set(model.F_SMTP_HOST, fuiscene.entry_text(K_SH))
+    model.cfg_set(model.F_SMTP_PORT, fuiscene.entry_text(K_SP))
+    model.cfg_set(model.F_USER, fuiscene.entry_text(K_US))
+    model.cfg_set(model.F_PASS, fuiscene.entry_text(K_PW))
+    tls_on = fuiscene.value_of(K_TLS) != 0
+    model.set_secure(tls_on)
+}
+
+fn show_list() {
+    fuiscene.table_set_blob(K_LIST, model.list_blob())
+    fuiscene.memo_set(K_BODY, (&EMPTY[0]) as u64)
+}
+
+fn run_pending() {
+    let op: u64 = pending
+    pending = OP_NONE
+    if op == OP_CONNECT {
+        take_account()
+        let ia: u32 = resolve(model.cfg_ptr(model.F_IMAP_HOST))
+        let sa: u32 = resolve(model.cfg_ptr(model.F_SMTP_HOST))
+        if ia == 0 as u32 || sa == 0 as u32 {
+            status_text("Fehler: Servername nicht aufloesbar (DNS)")
+            fuiscene.refresh()
+            return
+        }
+        model.set_addrs(ia, sa)
+        let rc: u64 = model.op_folders()
+        if TEST_ON {
+            say("mail: folders rc=")
+            pn(rc)
+            say(" n=")
+            pn(model.folder_count())
+            say("\n")
+        }
+        if rc != 0 {
+            status_err(rc)
+            fuiscene.refresh()
+            return
+        }
+        let saved: bool = model.save_conf()
+        st = ST_MAIN
+        cur_folder = 0
+        status_text("Ordner geladen")
+        fuiscene.refresh()
+        fuiscene.table_set_sel(K_FOLD, 0)
+        start_op(OP_LIST, 0, "Lade Nachrichten...")
+    } else if op == OP_LIST {
+        let rc: u64 = model.op_list(pend_arg)
+        if TEST_ON {
+            say("mail: list rc=")
+            pn(rc)
+            say(" n=")
+            pn(model.list_count())
+            say("\n")
+        }
+        if rc != 0 {
+            status_err(rc)
+            fuiscene.refresh()
+            return
+        }
+        cur_folder = pend_arg
+        show_list()
+        status_text("Nachrichten geladen")
+        fuiscene.refresh()
+    } else if op == OP_READ {
+        let rc: u64 = model.op_read(pend_arg)
+        if TEST_ON {
+            say("mail: read rc=")
+            pn(rc)
+            say(" len=")
+            pn(model.msg_len())
+            say("\n")
+        }
+        if rc != 0 {
+            status_err(rc)
+            fuiscene.refresh()
+            return
+        }
+        fuiscene.memo_set(K_BODY, model.msg_text())
+        status_text("Nachricht gelesen")
+        fuiscene.refresh()
+    } else if op == OP_SEND {
+        let to: u64 = fuiscene.entry_text(K_TO)
+        let subj: u64 = fuiscene.entry_text(K_SUBJ)
+        let txt: u64 = fuiscene.memo_text(K_TXT)
+        if TEST_ON {
+            say("mail: send start to_len=")
+            pn(rt.c_length(to) as u64)
+            say(" subj_len=")
+            pn(rt.c_length(subj) as u64)
+            say(" body_len=")
+            pn(rt.c_length(txt) as u64)
+            say("\n")
+        }
+        let rc: u64 = model.op_send(to, subj, txt)
+        if TEST_ON {
+            say("mail: send rc=")
+            pn(rc)
+            say("\n")
+        }
+        if rc != 0 {
+            status_err(rc)
+            fuiscene.refresh()
+            return
+        }
+        st = ST_MAIN
+        status_text("Gesendet")
+        fuiscene.refresh()
+    }
+}
+
+fn gui() -> i32 {
+    load_test_target()
+    if !TEST_ON {
+        // defaults + the saved account (never the password)
+        model.cfg_set(model.F_IMAP_PORT, pool(20, "993"))
+        model.cfg_set(model.F_SMTP_PORT, pool(21, "465"))
+        model.load_conf()
+        copy_c((&IHB[0]) as u64, 128, model.cfg_ptr(model.F_IMAP_HOST))
+        copy_c((&IPB[0]) as u64, 16, model.cfg_ptr(model.F_IMAP_PORT))
+        copy_c((&SHB[0]) as u64, 128, model.cfg_ptr(model.F_SMTP_HOST))
+        copy_c((&SPB[0]) as u64, 16, model.cfg_ptr(model.F_SMTP_PORT))
+        copy_c((&USB[0]) as u64, 128, model.cfg_ptr(model.F_USER))
+        tls_on = model.secure()
+    }
+    status_text("Bereit")
+    st = ST_SETUP
+    if !fuiscene.open(70, 40, 900, 640, pool(22, "Mail"), build) {
+        return 2
+    }
+    if TEST_ON {
+        tr("test mode on (gate only)\n")
+        say("mail: geom x=70 y=40 w=900 h=640\n")
+    }
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if TEST_ON && fuiscene.painted() > 0 && (t_traced_state != st || fuiapp.now_ms() >= t_rect_next) {
+            t_traced_state = st
+            t_rect_next = fuiapp.now_ms() + 2000
+            trace_state()
+        }
+        if pending != OP_NONE {
+            // the "Lade..." text first, then the blocking step
+            if fuiscene.painted() > pend_paint || fuiapp.now_ms() >= pend_ms + 400 {
+                run_pending()
+            }
+            continue
+        }
+        if st == ST_SETUP {
+            if key == K_GO || key == K_IH || key == K_IP || key == K_SH || key == K_SP || key == K_US || key == K_PW {
+                start_op(OP_CONNECT, 0, "Verbinde...")
+            }
+        } else if st == ST_MAIN {
+            if key == K_FOLD {
+                start_op(OP_LIST, fuiscene.table_sel(K_FOLD), "Lade Nachrichten...")
+            } else if key == K_FETCH {
+                start_op(OP_LIST, cur_folder, "Rufe ab...")
+            } else if key == K_LIST {
+                let row: u64 = fuiscene.table_sel(K_LIST)
+                if row < model.list_count() {
+                    start_op(OP_READ, row, "Lade Nachricht...")
+                }
+            } else if key == K_NEW {
+                st = ST_COMPOSE
+                status_text("")
+                fuiscene.refresh()
+            } else if key == K_ACCT {
+                st = ST_SETUP
+                status_text("Bereit")
+                fuiscene.refresh()
+            }
+        } else {
+            if key == K_SEND {
+                start_op(OP_SEND, 0, "Sende...")
+            } else if key == K_CANCEL {
+                st = ST_MAIN
+                status_text("Abgebrochen")
+                fuiscene.refresh()
+            }
+        }
+    }
+    return 0
+}
+
+fn main(start: u64) -> i32 {
+    return gui()
+}
