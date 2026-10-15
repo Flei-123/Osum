@@ -20,13 +20,13 @@ PW=geheim123
 run_window() { # <name> <extra wigapp args>
     local n=$1 extra=$2
     dd if=/dev/zero of="$OUT/$n.img" bs=1M count=0 seek=320 status=none
-    timeout 1500 $QEMU_X86 -m 512 -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" \
-        -append "modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now$extra" \
+    timeout 3200 $QEMU_X86 -m 512 -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" \
+        -append "modfs osum vfs gfx wm wig wmhold wmdauer wighalt=3000 nokbd nosched noproc nofs lang=de uiscale=1 wigapp=/bin/installer,now$extra" \
         -serial "file:$OUT/$n.txt" -display none -no-reboot \
         -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
         -drive "file=$OUT/$n.img,format=raw,if=ide,index=0" > /dev/null 2>&1 &
     local qp=$! i=0
-    while [ $i -lt 1400 ]; do
+    while [ $i -lt 3100 ]; do
         grep -aq 'installer: done\|installer: ERROR' "$OUT/$n.txt" 2>/dev/null && break
         kill -0 "$qp" 2>/dev/null || break
         sleep 1; i=$((i+1))
