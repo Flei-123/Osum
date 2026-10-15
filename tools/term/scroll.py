@@ -62,6 +62,28 @@ def judge(path):
         ibk = [i for i, r in enumerate(recs) if r["v"] > 0]
         down = [r for r in recs[ibk[0]:] if r["v"] == 0]
         check(len(down) > 0, "wheel down returns to the live screen")
+        # r839: Shift+PageUp / Shift+PageDown (last two steps of scroll.txt): after the Esc snap-back one key = one page
+        # (rows - 1 lines), the second key = back on the live screen. The jump is exactly one page, unlike the wheel steps.
+        rows = [int(k) for k in re.findall(r"wm: termgeo .*? rows=(\d+)", txt)]
+        page = (rows[-1] - 1) if rows else 0
+        runs = []  # maximal runs of dumps with view > 0
+        for i, r in enumerate(recs):
+            if r["v"] > 0:
+                if runs and runs[-1][-1] == i - 1:
+                    runs[-1].append(i)
+                else:
+                    runs.append([i])
+        last_run = runs[-1]
+        pv = sorted(set(recs[i]["v"] for i in last_run))
+        check(page > 0 and pv == [page], "Shift+PageUp moved the view back by exactly one page (view %s, page = rows-1 = %d)" % (pv, page))
+        pview = [m for i in last_run for m in recs[i]["view"]]
+        before = [r for r in recs[:last_run[0]] if r["v"] == 0 and r["live"]][-1:]
+        lo = min(before[0]["live"]) if before else 999
+        check(bool(pview) and min(pview) < lo, "the paged view shows OLDER markers than the live screen (%s < %d)"
+              % (min(pview) if pview else "-", lo))
+        check(last_run[-1] < len(recs) - 1 and all(r["v"] == 0 for r in recs[last_run[-1] + 1:]),
+              "Shift+PageDown returned the view to the live screen (view 0 after the page phase)")
+        check(last_run[0] > 0 and recs[last_run[0] - 1]["v"] == 0, "the page phase starts from the live screen (Esc snapped back first)")
     return 0 if bad == 0 else 1
 
 
