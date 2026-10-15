@@ -272,7 +272,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1351,6 +1351,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
 /bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
+/bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 [ "${ROOT_SLIM:-0}" = 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}

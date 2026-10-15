@@ -329,6 +329,8 @@ ARGS=(build "$OUT/disk.img" 49152 --v3 --inodes=512 "--time=$(date +%s)" /lib/
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
+# MINT4: extra image files for one gate (e.g. /etc/welcome.conf=<host file>); unset = unchanged image
+[ -n "${AUDIT_MKFS_EXTRA:-}" ] && ARGS+=(${AUDIT_MKFS_EXTRA})
 # RUNDE FREMDFS: ein leeres /mnt. Ein Einhaengepunkt muss ein
 # Verzeichnis sein, DAS ES GIBT (vfs.mount_at) -- ohne diese Zeile
 # laesst sich auf dieser Platte nichts einhaengen, und der
