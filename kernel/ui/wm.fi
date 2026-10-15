@@ -5299,6 +5299,73 @@ fn hd_say_win(state: u64, i: u64, tag: u64) {
 
 // TEST BED for `hdtest` / `hdhot` (tools/wmheads): windows and struts on two heads, printed as `hd:` lines.
 // Needs an extended desktop (vgpuextend with two heads). With `hot` it also unplugs head 1 and plugs it back.
+// r828: edge docking on head 1 (floating halves): right/top/bottom of head 1, a seam edge (no docking), a drop
+// in the middle (no docking). Needs the docking switch on; restored afterwards.
+fn hd_demo_snap(state: u64, w: u64) {
+    var t_r: [u8; 7] = "snapR1\0"
+    var t_t: [u8; 7] = "snapT1\0"
+    var t_b: [u8; 7] = "snapB1\0"
+    var s_e: [u8; 11] = "hd: drope=\0"
+    var s_p: [u8; 6] = " pos=\0"
+    var t_s: [u8; 5] = "seam\0"
+    var t_m: [u8; 7] = "middle\0"
+    var t_k: [u8; 4] = "off\0"
+    let old: u64 = gs(state, S_TILE)
+    let hx: i64 = hd_x(state, 1) as i64
+    let hy: i64 = hd_y(state, 1) as i64
+    let hw: i64 = hd_w(state, 1) as i64
+    let p: u64 = head_work(state, 1)
+    let wy: i64 = hw_y(p) as i64
+    let wh: i64 = hw_h(p) as i64
+    ss(state, S_TILE, 1)
+    // right edge of head 1 = outer edge of the desktop
+    drag_hover(state, w, hx + hw - 1, hy + 100)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_DROPE))
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&t_r[0]) as u64)
+    serial.nl()
+    drag_end(state, w, hx + hw - 1, hy + 100)
+    hd_say_win(state, w, (&t_r[0]) as u64)
+    drag_hover(state, w, hx + hw - 100, hy)
+    drag_end(state, w, hx + hw - 100, hy)
+    hd_say_win(state, w, (&t_t[0]) as u64)
+    drag_hover(state, w, hx + hw - 100, wy + wh - 1)
+    drag_end(state, w, hx + hw - 100, wy + wh - 1)
+    hd_say_win(state, w, (&t_b[0]) as u64)
+    // the seam between the heads (left edge of head 1): not an docking edge
+    drag_hover(state, w, hx, hy + 100)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_DROPE))
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&t_s[0]) as u64)
+    serial.nl()
+    drag_end(state, w, hx, hy + 100)
+    // the middle of the head: nothing
+    drag_hover(state, w, hx + hw / 2, hy + 150)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_DROPE))
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&t_m[0]) as u64)
+    serial.nl()
+    drag_end(state, w, hx + hw / 2, hy + 150)
+    // docking switched off: no docking on head 1 either
+    ss(state, S_TILE, 0)
+    drag_hover(state, w, hx + hw - 1, hy + 100)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_DROPE))
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&t_k[0]) as u64)
+    serial.nl()
+    ss(state, S_TILE, old)
+    ss(state, S_DROPE, 0)
+    // leave the window where the later steps expect it (a plain window on head 1)
+    let _a: bool = resize_win(state, w, 300, 200)
+    move_win(state, w, hx + 60, 60)
+    var t_l2: [u8; 6] = "reset\0"
+    hd_say_win(state, w, (&t_l2[0]) as u64)
+}
+
 fn hd_demo(state: u64, hot: bool) {
     var t_bar: [u8; 4] = "bar\0"
     var t_a: [u8; 6] = "win-a\0"
@@ -5346,6 +5413,7 @@ fn hd_demo(state: u64, hot: bool) {
     let _f: bool = fullscreen(state, wa, true)
     hd_say_win(state, wa, (&t_f1[0]) as u64)
     let _f2: bool = fullscreen(state, wa, false)
+    hd_demo_snap(state, wa)
     // 6. pointer clamp with heads of different height: head 1 only 240 high -> a point below it goes back onto it
     let h1x: u64 = ps2m.head_x(state, 1)
     let h1y: u64 = ps2m.head_y(state, 1)
@@ -17874,6 +17942,80 @@ fn drag_begin(state: u64, i: u64) {
     ss(state, S_DRAGT, 1)
 }
 
+// r828: EDGE DOCKING ON A NON-PRIMARY HEAD. The tile tree is one tree for the primary head (a tree per head is a
+// separate step), so on another head a window dropped at an outer edge of its work area just takes the half of that
+// work area -- floating, outside the tree. S_DROPE 5..8 = left/right/top/bottom half of the head under the pointer.
+// An edge shared with another head (the seam between two monitors) is not a docking edge.
+fn snap_part(p: u64, e: u64) -> u64 {
+    var x: u64 = hw_x(p)
+    var y: u64 = hw_y(p)
+    var w: u64 = hw_w(p)
+    var h: u64 = hw_h(p)
+    if e == 1 {
+        w = w / 2
+    } else if e == 2 {
+        x = x + w - w / 2
+        w = w / 2
+    } else if e == 3 {
+        h = h / 2
+    } else if e == 4 {
+        y = y + h - h / 2
+        h = h / 2
+    }
+    return (x << 48) | (y << 32) | (w << 16) | h
+}
+
+fn head_hover(state: u64, hd: u64, x: i64, y: i64) {
+    let p: u64 = head_work(state, hd)
+    let wx0: i64 = hw_x(p) as i64
+    let wy0: i64 = hw_y(p) as i64
+    let ww: i64 = hw_w(p) as i64
+    let wh: i64 = hw_h(p) as i64
+    let hx: i64 = hd_x(state, hd) as i64
+    let hy: i64 = hd_y(state, hd) as i64
+    let hw: i64 = hd_w(state, hd) as i64
+    let hh: i64 = hd_h(state, hd) as i64
+    var rand: i64 = 2 * uisc(state) as i64
+    if fb.winfix_aus(state) {
+        rand = 16
+    }
+    var e: u64 = 0
+    if x < wx0 + rand && hd_at(state, hx - 1, y) == HD_MAX {
+        e = 1
+    } else if x >= wx0 + ww - rand && hd_at(state, hx + hw, y) == HD_MAX {
+        e = 2
+    } else if y < wy0 + rand && hd_at(state, x, hy - 1) == HD_MAX {
+        e = 3
+    } else if y >= wy0 + wh - rand && hd_at(state, x, hy + hh) == HD_MAX {
+        e = 4
+    }
+    if e == 0 {
+        return
+    }
+    ss(state, S_DROPE, e + 4)
+    let r: u64 = snap_part(p, e)
+    set_preview(state, hw_x(r), hw_y(r), hw_w(r), hw_h(r))
+    preview_damage(state)
+}
+
+// Put window `i` on the packed rect (outer size, like `fit_work` does for the work area).
+fn fit_rect(state: u64, i: u64, r: u64) -> bool {
+    var iw: u64 = hw_w(r)
+    var ih: u64 = hw_h(r)
+    if deko(state, i) {
+        if iw <= border(state) * 2 || ih <= iny(state, i) + border(state) {
+            return false
+        }
+        iw = iw - border(state) * 2
+        ih = ih - iny(state, i) - border(state)
+    }
+    if !resize_win(state, i, iw, ih) {
+        return false
+    }
+    move_win(state, i, hw_x(r) as i64, hw_y(r) as i64)
+    return true
+}
+
 fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     if gs(state, S_TILE) == 0 {
         return
@@ -17884,6 +18026,10 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     ss(state, S_DROPE, 0)
     // r826: edge docking works on the primary head's work area only; on another head there is no preview and no drop.
     if hd_multi(state) && hd_at(state, x, y) != hd_primary(state) {
+        let hd: u64 = hd_at(state, x, y)
+        if hd < HD_MAX {
+            head_hover(state, hd, x, y)
+        }
         return
     }
     // ================================================== RUNDE VOLLBILD
@@ -18155,6 +18301,21 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     rumpf_neu(state, i)
     if gs(state, S_TILE) == 0 {
         ss(state, S_DRAGT, 0)
+        return
+    }
+    let e0: u64 = gs(state, S_DROPE)
+    if e0 >= 5 {
+        // r828: floating half of a non-primary head (see head_hover)
+        let hd: u64 = hd_at(state, x, y)
+        if hd < HD_MAX {
+            if gs(state, S_DRAGT) != 0 {
+                tile_take(state, i)
+            }
+            let _f: bool = fit_rect(state, i, snap_part(head_work(state, hd), e0 - 4))
+            damage_all(state)
+        }
+        ss(state, S_DRAGT, 0)
+        ss(state, S_DROPE, 0)
         return
     }
     let e: u64 = gs(state, S_DROPE)

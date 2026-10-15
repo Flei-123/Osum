@@ -78,3 +78,13 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - `heads_sync`: windows on no head come to the primary head, others keep their title bar reachable, fullscreen windows refit, maximized ones refit via `recalc_work`, pointer re-clamped.
 - Gate: `tools/wmheads/run.sh` (words `hdtest`, `hdhot`; test bed `wm.hd_demo`).
 - Open: taskbar instance per head (`--head` in taskbar.fi), tile tree per head, real hardware.
+
+## r828 taskbar per head (taskbar.fi) + docking on other heads (wm.fi)
+
+- Window server answers the head geometry to ring 3: `WIG_SCREEN` `WS_HEADS` (7, number of heads) and `WS_HEAD` (8; a1 = head, a2 = 0 x / 1 y / 2 w / 3 h / 4 present). `wlibc.head_count/head_field/head_present`; `WI_WORKX..H` of a window now answer the work area of the window's HOME head (identical on one head).
+- `/bin/taskbar` serves ONE head: no argument = the first head that exists, `--head N` = head N. `sw/sh` are the head's size, `hx/hy` its origin; `rect_for`, `nearest_edge`, `touches_edge` (auto-hide), tooltip and toast placement work relative to the head. On a machine without a head table nothing changes (hx = hy = 0, sw/sh = screen).
+- The first bar starts `/bin/taskbar --head N` for every other head that exists (`heads_step`, polled every 8 loop rounds); a `--head` bar ends when its head is gone; a replug starts a new one; a changed head rectangle moves the bar there. Each bar has its own strut, so each head gets its own work area.
+- `wlibc.set_head_bounds` keeps popups of the bar (`traypop` chevron card, `taskview`) inside the head of the bar that opened them.
+- Docking on a non-primary head: dropping a dragged window at an OUTER edge of the head's work area makes it the half of that work area (floating, no tile tree; `S_DROPE` 5..8, `head_hover`, `snap_part`, `fit_rect`). The seam between two heads is no docking edge.
+- Gates: `tools/barheads/run.sh` (real taskbar, QEMU 2 heads + 1-head control), `tools/wmheads/run.sh` (docking lines).
+- Open: start menu (`/bin/launcher`) still opens on the primary head; notification bell/toasts exist per bar; tile TREE per head; hot-plug path of the bars only compiled (no way to unplug a head in QEMU from a running userland).
