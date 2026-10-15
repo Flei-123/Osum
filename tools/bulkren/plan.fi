@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/bulkren/plan.fi -- host test of lib/bulkren/plan.fi (D3 mass rename plan).
+// Prints "OK name" / "FAIL name"; exit 0 = ran through.
+
+import std.rt
+import std.io
+import bulkren.plan
+
+static mut bufs: [u8; 2048] = [0 as u8; 2048]
+static mut bufn: u64 = 0
+
+// Copy a literal into a rotating NUL-terminated buffer and return its address.
+fn lit(s: str) -> u64 {
+    if bufn + (s.n as u64) + 1 > 2048 {
+        bufn = 0
+    }
+    let at: u64 = (&bufs[0 as usize]) as u64 + bufn
+    var i: usize = 0
+    while i < s.n {
+        *((at + i as u64) as *mut u8) = rt.ld8(s.p as u64, i) as u8
+        i = i + 1
+    }
+    *((at + s.n as u64) as *mut u8) = 0 as u8
+    bufn = bufn + (s.n as u64) + 1
+    return at
+}
+
+fn eqs(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.n {
+        let a: u8 = *((p + i as u64) as *mut u8)
+        if a as u64 != (rt.ld8(s.p as u64, i) as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    let z: u8 = *((p + s.n as u64) as *mut u8)
+    return z == 0
+}
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn fresh() {
+    plan.reset()
+}
+
+fn main() -> i32 {
+    // 1. default pattern keeps every name
+    fresh()
+    let _a: u64 = plan.add(lit("a.txt"), false)
+    let _b: u64 = plan.add(lit("Photo 1.JPG"), false)
+    let _c: u64 = plan.add(lit("noext"), false)
+    let _d: u64 = plan.add(lit(".hidden"), false)
+    let _e: u64 = plan.add(lit("dir.d"), true)
+    chk("default: build ok", plan.build() == 0)
+    chk("default: a.txt", eqs(plan.new_name(0), "a.txt"))
+    chk("default: Photo 1.JPG", eqs(plan.new_name(1), "Photo 1.JPG"))
+    chk("default: noext", eqs(plan.new_name(2), "noext"))
+    chk("default: .hidden", eqs(plan.new_name(3), ".hidden"))
+    chk("default: dir.d (folder keeps its dot)", eqs(plan.new_name(4), "dir.d"))
+    chk("default: nothing changed", !plan.changed(0) && !plan.changed(4))
+
+    // 2. counter with zero padding, start, step
+    fresh()
+    let _a1: u64 = plan.add(lit("x.jpg"), false)
+    let _a2: u64 = plan.add(lit("y.png"), false)
+    let _a3: u64 = plan.add(lit("z"), false)
+    plan.set_pattern(lit("holiday-[C][E]"))
+    plan.set_counter(7, 3, 4)
+    chk("counter: build ok", plan.build() == 0)
+    chk("counter: 0007", eqs(plan.new_name(0), "holiday-0007.jpg"))
+    chk("counter: 0010", eqs(plan.new_name(1), "holiday-0010.png"))
+    chk("counter: no ext", eqs(plan.new_name(2), "holiday-0013"))
+    chk("counter: changed", plan.changed(0))
+
+    // 3. find/replace on the base only
+    fresh()
+    let _f1: u64 = plan.add(lit("my photo.photo"), false)
+    let _f2: u64 = plan.add(lit("photo_photo.txt"), false)
+    plan.set_find(lit("photo"), lit("pic"))
+    chk("find: build ok", plan.build() == 0)
+    chk("find: base replaced, ext kept", eqs(plan.new_name(0), "my pic.photo"))
+    chk("find: all occurrences", eqs(plan.new_name(1), "pic_pic.txt"))
+
+    // 4. tokens: [F], literal brackets, unknown token
+    fresh()
+    let _g1: u64 = plan.add(lit("n.md"), false)
+    plan.set_pattern(lit("[F]-[N]-[Q]-[x"))
+    chk("tokens: build ok", plan.build() == 0)
+    chk("tokens: [F] [N] unknown literal", eqs(plan.new_name(0), "n.md-n-[Q]-[x"))
+
+    // 5. case modes
+    fresh()
+    let _h1: u64 = plan.add(lit("MiXed.TxT"), false)
+    plan.set_case(1)
+    chk("case lower: build", plan.build() == 0)
+    chk("case lower: mixed.txt", eqs(plan.new_name(0), "mixed.txt"))
+    plan.set_case(2)
+    chk("case upper: build", plan.build() == 0)
+    chk("case upper: MIXED.TXT", eqs(plan.new_name(0), "MIXED.TXT"))
+
+    // 6. conflicts
+    fresh()
+    let _i1: u64 = plan.add(lit("a.txt"), false)
+    let _i2: u64 = plan.add(lit("b.txt"), false)
+    plan.set_pattern(lit("same[E]"))
+    chk("dup: E_DUP", plan.build() == plan.E_DUP)
+    chk("dup: culprit is the later item", plan.bad_index() == 1 && plan.err_of(0) == 0 && plan.err_of(1) == plan.E_DUP)
+    plan.set_pattern(lit("Same[C][E]"))
+    plan.set_counter(1, 1, 1)
+    chk("dup: counter resolves it", plan.build() == 0)
+    fresh()
+    let _j1: u64 = plan.add(lit("Abc.txt"), false)
+    let _j2: u64 = plan.add(lit("abc.TXT"), false)
+    plan.set_case(1)
+    chk("dup: case-blind (Abc.txt vs abc.TXT -> same)", plan.build() == plan.E_DUP)
+    fresh()
+    let _k1: u64 = plan.add(lit("a.txt"), false)
+    plan.set_pattern(lit(""))
+    chk("empty pattern: E_EMPTY", plan.build() == plan.E_EMPTY)
+    plan.set_pattern(lit("sub/[N]"))
+    chk("slash: E_BADCH", plan.build() == plan.E_BADCH)
+    plan.set_pattern(lit(".."))
+    chk("dotdot: E_BADCH", plan.build() == plan.E_BADCH)
+    plan.set_pattern(lit("."))
+    chk("dot: E_BADCH", plan.build() == plan.E_BADCH)
+    plan.set_pattern(lit("[N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N][N]"))
+    let _k2: u64 = plan.add(lit("0123456789.txt"), false)
+    chk("long: E_LONG", plan.build() == plan.E_LONG)
+
+    // 7. is_old_name (chain / swap detection by the caller), case-blind
+    fresh()
+    let _l1: u64 = plan.add(lit("1.jpg"), false)
+    let _l2: u64 = plan.add(lit("2.jpg"), false)
+    chk("is_old_name: yes", plan.is_old_name(lit("2.jpg")))
+    chk("is_old_name: case-blind", plan.is_old_name(lit("2.JPG")))
+    chk("is_old_name: no", !plan.is_old_name(lit("3.jpg")))
+    chk("old_index: 2.jpg is item 1, 9.jpg is none", plan.old_index(lit("2.jpg")) == 1 && plan.old_index(lit("9.jpg")) == 2)
+    plan.set_pattern(lit("[C][E]"))
+    plan.set_counter(2, 1, 1)
+    chk("chain 1->2, 2->3: build ok (caller must go two-phase)", plan.build() == 0)
+    chk("chain: new names", eqs(plan.new_name(0), "2.jpg") && eqs(plan.new_name(1), "3.jpg"))
+
+    // 8. capacity and counter edge
+    fresh()
+    var n: u64 = 0
+    while n < 300 {
+        let r: u64 = plan.add(lit("f.txt"), false)
+        if r == plan.MAXITEMS {
+            n = 1000
+        } else {
+            n = n + 1
+        }
+    }
+    chk("capacity: 257th add refused, 256 kept", n == 1000 && plan.count() == 256)
+    plan.set_pattern(lit("[C][E]"))
+    plan.set_counter(0, 0, 0)
+    chk("counter step 0 -> 1, width 0 -> 1: build ok", plan.build() == 0)
+    chk("counter: first 0, last 255", eqs(plan.new_name(0), "0.txt") && eqs(plan.new_name(255), "255.txt"))
+    return 0
+}

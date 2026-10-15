@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/massren.fi -- D3: the mass rename of the file manager, from the command line.
+//
+//     massren <folder> <rule> <name> [<name> ...] [--undo]
+//
+// The SAME engine as the file manager's "rename several" (kernel/user/expakt.fi mass_prepare /
+// mass_apply, lib/bulkren/plan.fi): the rule text, the all-or-nothing checks, the two phases and
+// the undo step. `--undo` takes the rename back right after it (the undo step lives in the memory
+// of the process that did the rename, so both happen in one run). The gate tools/bulkren/run.sh
+// drives it in a guest.
+//
+// Output (one line each): "explorer: massren rc=<n> n=<changed>" from expakt, then
+// "massren: preview <old > new, ...>" and "massren: apply rc=<n>" / "massren: undo rc=<n>".
+// rc is the kernel error number as an unsigned 64-bit number (0 = fine).
+
+profile app
+
+import ulib
+import libc.io
+import libc.errno
+import expakt
+
+export { u_start }
+
+static mut s_use: [u8; 51] = "usage: massren <folder> <rule> <name>... [--undo]\n\0"
+static mut s_prev: [u8; 18] = "massren: preview \0"
+static mut s_apply: [u8; 19] = "massren: apply rc=\0"
+static mut s_undo: [u8; 18] = "massren: undo rc=\0"
+static mut s_prep: [u8; 18] = "massren: stop rc=\0"
+static mut s_flag: [u8; 7] = "--undo\0"
+static mut path: [u8; 320] = [0 as u8; 320]
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 4 {
+        ulib.say((&s_use[0 as usize]) as u64)
+        return 1
+    }
+    let dir: u64 = ulib.arg_at(args, 1)
+    let rule: u64 = ulib.arg_at(args, 2)
+    var undo: bool = false
+    expakt.list_clear()
+    var i: u64 = 3
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&s_flag[0 as usize]) as u64) {
+            undo = true
+        } else {
+            let p: u64 = (&path[0 as usize]) as u64
+            ulib.strncpy(p, dir, 250)
+            var n: u64 = ulib.length(p)
+            if n > 0 && (__mmio_read8((p + n - 1) as *mut u8)) != 47 as u8 {
+                __mmio_write8((p + n) as *mut u8, 47 as u8)
+                n = n + 1
+            }
+            ulib.strncpy(p + n, a, 60)
+            let _ok: bool = expakt.list_add(p)
+        }
+        i = i + 1
+    }
+    let rc: u64 = expakt.mass_prepare(rule)
+    if rc != 0 {
+        ulib.say((&s_prep[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        return 2
+    }
+    ulib.say((&s_prev[0 as usize]) as u64)
+    ulib.say(expakt.mass_preview())
+    ulib.nl()
+    let rc2: u64 = expakt.mass_apply()
+    ulib.say((&s_apply[0 as usize]) as u64)
+    ulib.sayn(rc2)
+    ulib.nl()
+    if undo && rc2 == 0 {
+        let rc3: u64 = expakt.rueckgaengig()
+        ulib.say((&s_undo[0 as usize]) as u64)
+        ulib.sayn(rc3)
+        ulib.nl()
+    }
+    return 0
+}
+
+// profile app: the runtime's _start ends in `call main` and hands the argument block over
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
