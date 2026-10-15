@@ -60,7 +60,7 @@ if [[ "$FL" == *"$PINA"* ]]; then bad "the PIN stands in /etc/pin in clear"; els
 chk 16 'remove rc=0' "remove of a user without PIN is fine"
 chk 17 'status rc=3' "other user: no PIN"
 
-B2='pinctl status root;pinctl check root '$PINA';pinctl pwok root;pinctl status root;pinctl check root '$PINA';pinctl force root 9 0;pinctl check root 000111;pinctl status root;pinctl check root '$PINA';pinctl pwok root;pinctl check root '$PINA';rm /device/pinkey;pinctl check root '$PINA';pinctl set root 735190;pinctl check root 735190;exit'
+B2='pinctl status root;pinctl check root '$PINA';pinctl pwok root;pinctl status root;pinctl check root '$PINA';pinctl force root 9 0;pinctl check root 000111;pinctl status root;pinctl check root '$PINA';pinctl pwok root;pinctl check root '$PINA';rm /device/pinkey;pinctl check root '$PINA';pinctl set root 735190;pinctl check root 735190;pinctl has root;pinctl has justin;pinctl change root 000111 482916;pinctl change root 735190 12;pinctl change root 735190 482916;pinctl check root 735190;pinctl check root 482916;pinctl rmchk root 000111;pinctl rmchk root 482916;pinctl status root;pinctl has root;pinctl change root 000000 590813;pinctl status root;exit'
 echo "== boot B: a fresh boot on the same disk =="
 cp "$TMPD/a/disk.img" "$TMPD/disk-a.img"
 OSUM_ACCEL=kvm bash $B "$TMPD/b" script="$B2" progs="pinctl sh echo cat rm ls" passwdfile="$TMPD/passwd" bloecke=16384 platte="$TMPD/disk-a.img" > "$TMPD/b.log" 2>&1
@@ -82,5 +82,19 @@ chk 10 'check rc=0' "the right PIN works after re-enable"
 if [[ "${L[11]:-}" =~ check\ rc=[1-5] ]] && [[ ! "${L[11]:-}" =~ rc=0 ]]; then ok "DEVICE BOUND: without /device/pinkey the old record verifies nothing (${L[11]})"; else bad "device key missing but PIN accepted: ${L[11]:-none}"; fi
 chk 12 'set rc=0' "a new PIN makes a new device key"
 chk 13 'check rc=0' "the new PIN works with the new key"
+# r805 stage 2: the old PIN is required to change / remove
+chk 14 'has rc=0' "has: a user with a PIN"
+chk 15 'has rc=3' "has: a user without a PIN"
+chk 16 'change rc=1 fails=1' "change with a WRONG old PIN is refused (counts as a try)"
+chk 17 'change rc=6' "change to a bad-format new PIN is refused (format, no old check needed)"
+chk 18 'change rc=0 fails=0' "change with the right old PIN works"
+chk 19 'check rc=1' "COUNTER-PROOF: the replaced PIN no longer verifies"
+chk 20 'check rc=0' "the new PIN verifies"
+chk 21 'rmchk rc=1' "remove with a WRONG old PIN is refused"
+chk 22 'rmchk rc=0' "remove with the right old PIN works"
+chk 23 'status rc=3' "after the checked remove: no PIN"
+chk 24 'has rc=3' "has: no PIN any more"
+chk 25 'change rc=0' "a user without a PIN may set a first one (no old PIN to ask for)"
+chk 26 'status rc=0' "and it is usable"
 echo "PIN: $pass passed, $fail failed"
 [ "$fail" = 0 ]

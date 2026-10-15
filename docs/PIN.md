@@ -21,12 +21,19 @@ A Windows-Hello-like PIN next to the password. Requirements: `docs/LAPTOP-HW-FEA
 | Re-enable | a successful **password** login (`pin.password_ok`) clears counter and delay; setting a new PIN too. |
 | Masking | the field is the existing secret field (masked, eye toggle as for the password). |
 
-## Not in stage 1 (open)
-- No PIN-only screen mode (digits pad) and no "PIN" hint in the placeholder; the single field takes both.
+## Stage 2 (r805, done)
+- **Old PIN required**: `pin.change(user, old, new)` / `pin.remove_checked(user, old)` verify the old PIN first when the user has one (counts as a try:
+  delay and 10-try lockout apply). A bad-format new PIN is refused before a try is spent. No PIN yet = a first one can be set freely.
+  CLI: `pinctl change <user> <old> <new>`, `pinctl rmchk <user> <old>`, `pinctl has <user>`.
+- **Hint in the field**: for a user with a PIN the empty secret field of the sign-in and lock screens shows "Kennwort oder PIN" (no PIN: no hint, look unchanged).
+- Gate: `tools/pin/run.sh` rows 14-26 of boot B.
+
+## Not done yet (open)
+- No PIN-only screen mode (digits pad); the single field takes both.
 - Not sealed by a TPM (L-011 TPM part, X7): root on the running device can read the key (same limit as `ksiegel`).
 - The wall clock can be set forward by root; a physical attacker with the disk but without the key cannot verify any PIN guess offline
   at all (the key file is required), a root attacker on the running device is out of scope.
-- Settings does not ask for the old PIN/password before changing it (same as the password page today).
+- Settings page still calls `pin.set`/`pin.remove` WITHOUT the old PIN (needs an extra "old PIN" field; API is ready: `pin.change` / `pin.remove_checked`).
 - Biometric unlock (L-013) builds on this (releases the PIN-equivalent key).
 
 ## Tests
