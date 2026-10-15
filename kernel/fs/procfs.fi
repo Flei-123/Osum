@@ -79,6 +79,10 @@ import block.blk
 import diag.hwid
 import sched.rand
 import net.inet
+import bus.pci
+import usb.usb
+import diag.hwdiag
+import gfx.gfx
 
 export { ops, node_root }
 
@@ -146,7 +150,11 @@ const G_KLOG: u64 = 8
 const G_LOADAVG: u64 = 9
 const G_SYSDIR: u64 = 10
 const G_NETDIR: u64 = 11
-const G_LAST: u64 = 11
+// ROUND MINT2 (E1): hardware tables for the system report.
+const G_PCI: u64 = 12
+const G_USB: u64 = 13
+const G_FIRMWARE: u64 = 14
+const G_LAST: u64 = 14
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1188,6 +1196,190 @@ fn make_loadavg(state: u64) -> u64 {
     return w_nl(state, p)
 }
 
+// ---------------------------------------------------------------- E1 tables
+// /proc/pci, /proc/usb, /proc/firmware: what the kernel FOUND, one line per
+// device, no serial numbers (the system report must be safe to send).
+
+fn w_hexn(state: u64, at: u64, v: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            p = w_ch(state, p, d + 48)
+        } else {
+            p = w_ch(state, p, d + 87)
+        }
+    }
+    return p
+}
+
+// "bb:dd.f cccc vvvv:dddd irq=N" -- class and subclass are the two digit pairs
+// of lspci -n; the line ends with the interrupt line the firmware assigned.
+fn make_pci(state: u64) -> u64 {
+    var l_irq: [u8; 6] = " irq=\0"
+    var p: u64 = 0
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        p = w_hexn(state, p, pci.bdf_bus(bdf), 2)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.bdf_dev(bdf), 2)
+        p = w_ch(state, p, 46)
+        p = w_hexn(state, p, pci.bdf_fn(bdf), 1)
+        p = w_ch(state, p, 32)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_CLASS), 2)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_SUBCLASS), 2)
+        p = w_ch(state, p, 32)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_VENDOR), 4)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_DEVICE), 4)
+        p = w_str(state, p, (&l_irq[0]) as u64)
+        p = w_num(state, p, pci.get(state, i, pci.E_IRQLINE))
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_speed(state: u64, at: u64, sp: u64) -> u64 {
+    var s_lo: [u8; 4] = "low\0"
+    var s_fu: [u8; 5] = "full\0"
+    var s_hi: [u8; 5] = "high\0"
+    var s_su: [u8; 6] = "super\0"
+    var s_un: [u8; 8] = "unknown\0"
+    if sp == 1 {
+        return w_str(state, at, (&s_fu[0]) as u64)
+    }
+    if sp == 2 {
+        return w_str(state, at, (&s_lo[0]) as u64)
+    }
+    if sp == 3 {
+        return w_str(state, at, (&s_hi[0]) as u64)
+    }
+    if sp >= 4 {
+        return w_str(state, at, (&s_su[0]) as u64)
+    }
+    return w_str(state, at, (&s_un[0]) as u64)
+}
+
+fn w_driver(state: u64, at: u64, k: u64) -> u64 {
+    var d0: [u8; 5] = "none\0"
+    var d1: [u8; 9] = "keyboard\0"
+    var d2: [u8; 6] = "mouse\0"
+    var d3: [u8; 8] = "storage\0"
+    var d4: [u8; 7] = "hidgen\0"
+    var d5: [u8; 4] = "hub\0"
+    var d6: [u8; 4] = "ecm\0"
+    var d7: [u8; 6] = "rndis\0"
+    var d8: [u8; 5] = "isoc\0"
+    var d9: [u8; 4] = "ncm\0"
+    if k == usb.DRV_KBD {
+        return w_str(state, at, (&d1[0]) as u64)
+    }
+    if k == usb.DRV_MOUSE {
+        return w_str(state, at, (&d2[0]) as u64)
+    }
+    if k == usb.DRV_MSC {
+        return w_str(state, at, (&d3[0]) as u64)
+    }
+    if k == usb.DRV_HIDGEN {
+        return w_str(state, at, (&d4[0]) as u64)
+    }
+    if k == usb.DRV_HUB {
+        return w_str(state, at, (&d5[0]) as u64)
+    }
+    if k == usb.DRV_ECM {
+        return w_str(state, at, (&d6[0]) as u64)
+    }
+    if k == usb.DRV_RNDIS {
+        return w_str(state, at, (&d7[0]) as u64)
+    }
+    if k == 8 {
+        return w_str(state, at, (&d8[0]) as u64)
+    }
+    if k == usb.DRV_NCM {
+        return w_str(state, at, (&d9[0]) as u64)
+    }
+    return w_str(state, at, (&d0[0]) as u64)
+}
+
+// "vvvv:pppp port=N [hub=M] speed=S class=cc/ss/pp if=cc/ss/pp driver=NAME"
+// (port = root port, hub = port on the hub in front of it, if any).
+fn make_usb(state: u64) -> u64 {
+    var l_port: [u8; 7] = " port=\0"
+    var l_hub: [u8; 6] = " hub=\0"
+    var l_sp: [u8; 8] = " speed=\0"
+    var l_cl: [u8; 8] = " class=\0"
+    var l_if: [u8; 5] = " if=\0"
+    var l_dr: [u8; 9] = " driver=\0"
+    var p: u64 = 0
+    let n: u64 = usb.fund_count(state)
+    var i: u64 = 0
+    while i < n {
+        p = w_hexn(state, p, usb.fund_vid(state, i), 4)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, usb.fund_pid(state, i), 4)
+        p = w_str(state, p, (&l_port[0]) as u64)
+        p = w_num(state, p, usb.fund_port(state, i))
+        if usb.fund_hub(state, i) != 0 {
+            p = w_str(state, p, (&l_hub[0]) as u64)
+            p = w_num(state, p, usb.fund_hub(state, i))
+        }
+        p = w_str(state, p, (&l_sp[0]) as u64)
+        p = w_speed(state, p, usb.fund_speed(state, i))
+        p = w_str(state, p, (&l_cl[0]) as u64)
+        p = w_hexn(state, p, usb.fund_dcls(state, i), 2)
+        p = w_ch(state, p, 47)
+        p = w_hexn(state, p, usb.fund_dsub(state, i), 2)
+        p = w_ch(state, p, 47)
+        p = w_hexn(state, p, usb.fund_dpro(state, i), 2)
+        p = w_str(state, p, (&l_if[0]) as u64)
+        p = w_hexn(state, p, usb.fund_icls(state, i), 2)
+        p = w_ch(state, p, 47)
+        p = w_hexn(state, p, usb.fund_isub(state, i), 2)
+        p = w_ch(state, p, 47)
+        p = w_hexn(state, p, usb.fund_ipro(state, i), 2)
+        p = w_str(state, p, (&l_dr[0]) as u64)
+        p = w_driver(state, p, usb.fund_driver(state, i))
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+// boot_mode: measured by hwdiag (traces a UEFI firmware does not leave).
+// secure_boot: honest "unknown" -- the loader leaves no variable behind
+// after the boot services are gone, so the kernel cannot read it.
+fn make_firmware(state: u64) -> u64 {
+    var l_bm: [u8; 12] = "boot_mode: \0"
+    var v_bios: [u8; 5] = "BIOS\0"
+    var v_uefi: [u8; 5] = "UEFI\0"
+    var l_sb: [u8; 14] = "secure_boot: \0"
+    var v_unk: [u8; 8] = "unknown\0"
+    var l_fb: [u8; 14] = "framebuffer: \0"
+    var l_bpp: [u8; 6] = " bpp=\0"
+    var p: u64 = w_str(state, 0, (&l_bm[0]) as u64)
+    if hwdiag.firmware_bios() {
+        p = w_str(state, p, (&v_bios[0]) as u64)
+    } else {
+        p = w_str(state, p, (&v_uefi[0]) as u64)
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_sb[0]) as u64)
+    p = w_str(state, p, (&v_unk[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_fb[0]) as u64)
+    p = w_num(state, p, gfx.fb_cols(state))
+    p = w_ch(state, p, 120)
+    p = w_num(state, p, gfx.fb_rows(state))
+    p = w_str(state, p, (&l_bpp[0]) as u64)
+    p = w_num(state, p, gfx.fb_bpp(state))
+    return w_nl(state, p)
+}
+
 fn make_cgroup(state: u64) -> u64 {
     var z: [u8; 5] = "0::/\0"
     let p: u64 = w_str(state, 0, (&z[0]) as u64)
@@ -1420,6 +1612,15 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_LOADAVG {
             return make_loadavg(state)
         }
+        if sub == G_PCI {
+            return make_pci(state)
+        }
+        if sub == G_USB {
+            return make_usb(state)
+        }
+        if sub == G_FIRMWARE {
+            return make_firmware(state)
+        }
         return 0
     }
     if art == K_SYS {
@@ -1517,6 +1718,18 @@ fn global_of(name: u64) -> u64 {
     var g: [u8; 5] = "hwid\0"
     var k: [u8; 5] = "klog\0"
     var la: [u8; 8] = "loadavg\0"
+    var gp: [u8; 4] = "pci\0"
+    var gu: [u8; 4] = "usb\0"
+    var gf: [u8; 9] = "firmware\0"
+    if streq(name, (&gp[0]) as u64) {
+        return G_PCI
+    }
+    if streq(name, (&gu[0]) as u64) {
+        return G_USB
+    }
+    if streq(name, (&gf[0]) as u64) {
+        return G_FIRMWARE
+    }
     if streq(name, (&la[0]) as u64) {
         return G_LOADAVG
     }
@@ -1724,8 +1937,17 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var la2: [u8; 8] = "loadavg\0"
     var sy2: [u8; 4] = "sys\0"
     var ne2: [u8; 4] = "net\0"
+    var pc2: [u8; 4] = "pci\0"
+    var us2: [u8; 4] = "usb\0"
+    var fw2: [u8; 9] = "firmware\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_LOADAVG {
+    if sub == G_PCI {
+        src = (&pc2[0]) as u64
+    } else if sub == G_USB {
+        src = (&us2[0]) as u64
+    } else if sub == G_FIRMWARE {
+        src = (&fw2[0]) as u64
+    } else if sub == G_LOADAVG {
         src = (&la2[0]) as u64
     } else if sub == G_SYSDIR {
         src = (&sy2[0]) as u64

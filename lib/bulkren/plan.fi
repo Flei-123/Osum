@@ -1,0 +1,451 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/bulkren/plan.fi -- D3: the PLAN of a mass rename (no file system, no window).
+//
+// The caller adds the old names of the selection, sets a pattern and calls `build()`; the module
+// computes every new name and finds the conflicts that can be seen from the names alone. What it
+// cannot see (a new name that already exists in the folder) is asked by the caller with
+// `is_old_name()` + the file system -- see kernel/user/expakt.fi `mass_rename`.
+//
+// PATTERN TOKENS (everything else is literal text):
+//   [N]  base name of the old name (without extension; find/replace is applied to it)
+//   [E]  extension WITH the dot (".jpg"), empty for none, for folders and for ".hidden" names
+//   [C]  counter: start + index * step, zero-padded to `width` digits
+//   [F]  the full old name
+// An unknown "[x]" or a lone "[" stays literal. Case mode (ASCII only) is applied to the result.
+// The default pattern "[N][E]" with nothing else set leaves every name as it was.
+//
+// CONFLICTS (per item, `err_of(i)`; `build()` returns the first, 0 = all fine):
+//   E_EMPTY  the new name is empty
+//   E_BADCH  it contains "/" or is "." / ".."
+//   E_LONG   it is 120 octets or longer
+//   E_DUP    another item gets the same new name (compared WITHOUT case: a case-insensitive disk
+//            would treat "A" and "a" as one name, and refusing is the safe side everywhere)
+//
+// HONEST LIMITS: ASCII case only, at most 256 items, names of at most 255 octets, find/replace is
+// literal (no wildcard), one counter per plan.
+
+export { reset, add, count, old_name, new_name, set_pattern, set_counter, set_find, set_case,
+    build, err_of, bad_index, is_old_name, old_index, changed, eq_nocase, MAXITEMS, NAMEB, NAMELIM,
+    E_EMPTY, E_BADCH, E_LONG, E_DUP, pattern_ptr }
+
+const MAXITEMS: u64 = 256
+const NAMEB: u64 = 256
+const NAMELIM: u64 = 120
+const E_EMPTY: u64 = 1
+const E_BADCH: u64 = 2
+const E_LONG: u64 = 3
+const E_DUP: u64 = 4
+
+static mut olds: [u8; 65536] = [0 as u8; 65536]
+static mut news: [u8; 65536] = [0 as u8; 65536]
+static mut isdir: [u8; 256] = [0 as u8; 256]
+static mut errs: [u8; 256] = [0 as u8; 256]
+static mut n_items: u64 = 0
+static mut pat: [u8; 256] = [0 as u8; 256]
+static mut find_s: [u8; 128] = [0 as u8; 128]
+static mut repl_s: [u8; 128] = [0 as u8; 128]
+static mut dflt: [u8; 7] = "[N][E]\0"
+static mut c_start: u64 = 1
+static mut c_step: u64 = 1
+static mut c_width: u64 = 1
+static mut c_case: u64 = 0
+static mut bad_at: u64 = 0
+static mut baseb: [u8; 256] = [0 as u8; 256]
+
+fn ld(p: u64, i: u64) -> u64 {
+    let b: u8 = *((p + i) as *mut u8)
+    return b as u64
+}
+
+fn st(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn copy_cap(dst: u64, src: u64, cap: u64) {
+    var i: u64 = 0
+    while i + 1 < cap && ld(src, i) != 0 {
+        st(dst, i, ld(src, i))
+        i = i + 1
+    }
+    st(dst, i, 0)
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn upper(c: u64) -> u64 {
+    if c >= 97 && c <= 122 {
+        return c - 32
+    }
+    return c
+}
+
+fn eq_nocase(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = lower(ld(a, i))
+        let y: u64 = lower(ld(b, i))
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn slot(base: u64, i: u64) -> u64 {
+    return base + i * NAMEB
+}
+
+fn reset() {
+    n_items = 0
+    bad_at = 0
+    copy_cap((&pat[0 as usize]) as u64, (&dflt[0 as usize]) as u64, 256)
+    st((&find_s[0 as usize]) as u64, 0, 0)
+    st((&repl_s[0 as usize]) as u64, 0, 0)
+    c_start = 1
+    c_step = 1
+    c_width = 1
+    c_case = 0
+}
+
+fn add(name: u64, dir: bool) -> u64 {
+    if n_items >= MAXITEMS {
+        return MAXITEMS
+    }
+    let i: u64 = n_items
+    copy_cap(slot((&olds[0 as usize]) as u64, i), name, NAMEB)
+    st((&isdir[0 as usize]) as u64, i, 0)
+    if dir {
+        st((&isdir[0 as usize]) as u64, i, 1)
+    }
+    n_items = n_items + 1
+    return i
+}
+
+fn count() -> u64 {
+    return n_items
+}
+
+fn old_name(i: u64) -> u64 {
+    return slot((&olds[0 as usize]) as u64, i)
+}
+
+fn new_name(i: u64) -> u64 {
+    return slot((&news[0 as usize]) as u64, i)
+}
+
+fn pattern_ptr() -> u64 {
+    return (&pat[0 as usize]) as u64
+}
+
+fn set_pattern(p: u64) {
+    copy_cap((&pat[0 as usize]) as u64, p, 256)
+}
+
+fn set_counter(start: u64, step: u64, width: u64) {
+    c_start = start
+    c_step = step
+    if step == 0 {
+        c_step = 1
+    }
+    c_width = width
+    if width == 0 {
+        c_width = 1
+    }
+    if width > 9 {
+        c_width = 9
+    }
+}
+
+fn set_find(find: u64, repl: u64) {
+    copy_cap((&find_s[0 as usize]) as u64, find, 128)
+    copy_cap((&repl_s[0 as usize]) as u64, repl, 128)
+}
+
+// 0 keep, 1 lower, 2 upper
+fn set_case(mode: u64) {
+    c_case = mode
+}
+
+// Position of the extension dot in `name` (len when there is none). A leading dot and a trailing
+// dot do not start an extension.
+fn dot_of(name: u64, len: u64) -> u64 {
+    var i: u64 = len
+    while i > 1 {
+        i = i - 1
+        if ld(name, i) == 46 {
+            if i + 1 < len {
+                return i
+            }
+            return len
+        }
+    }
+    return len
+}
+
+// Append one octet to `out` (capacity NAMEB); returns the new length. An overflow keeps counting
+// but writes nothing, so the length check sees "too long".
+fn put(out: u64, n: u64, c: u64) -> u64 {
+    if n + 1 < NAMEB {
+        st(out, n, c)
+        st(out, n + 1, 0)
+    }
+    return n + 1
+}
+
+fn put_str(out: u64, n: u64, s: u64) -> u64 {
+    var k: u64 = n
+    var i: u64 = 0
+    while ld(s, i) != 0 {
+        k = put(out, k, ld(s, i))
+        i = i + 1
+    }
+    return k
+}
+
+fn put_num(out: u64, n: u64, v: u64, width: u64) -> u64 {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var d: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0] = 48
+        d = 1
+    }
+    while x > 0 {
+        digits[(d) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        d = d + 1
+    }
+    var k: u64 = n
+    var pad: u64 = 0
+    if width > d {
+        pad = width - d
+    }
+    while pad > 0 {
+        k = put(out, k, 48)
+        pad = pad - 1
+    }
+    while d > 0 {
+        d = d - 1
+        let dg: u8 = digits[(d) as usize]
+        k = put(out, k, dg as u64)
+    }
+    return k
+}
+
+// The base name of item `i` after find/replace, into `baseb`.
+fn make_base(i: u64) -> u64 {
+    let old: u64 = old_name(i)
+    let len: u64 = slen(old)
+    var end: u64 = len
+    if ld((&isdir[0 as usize]) as u64, i) == 0 {
+        end = dot_of(old, len)
+    }
+    let out: u64 = (&baseb[0 as usize]) as u64
+    let f: u64 = (&find_s[0 as usize]) as u64
+    let r: u64 = (&repl_s[0 as usize]) as u64
+    let fl: u64 = slen(f)
+    var n: u64 = 0
+    st(out, 0, 0)
+    var p: u64 = 0
+    while p < end {
+        var hit: bool = false
+        if fl > 0 && p + fl <= end {
+            var k: u64 = 0
+            while k < fl && ld(old, p + k) == ld(f, k) {
+                k = k + 1
+            }
+            hit = k == fl
+        }
+        if hit {
+            n = put_str(out, n, r)
+            p = p + fl
+        } else {
+            n = put(out, n, ld(old, p))
+            p = p + 1
+        }
+    }
+    return n
+}
+
+fn build_one(i: u64) -> u64 {
+    let old: u64 = old_name(i)
+    let out: u64 = new_name(i)
+    let len: u64 = slen(old)
+    var ext: u64 = len
+    if ld((&isdir[0 as usize]) as u64, i) == 0 {
+        ext = dot_of(old, len)
+    }
+    let _b: u64 = make_base(i)
+    let p: u64 = (&pat[0 as usize]) as u64
+    var n: u64 = 0
+    st(out, 0, 0)
+    var q: u64 = 0
+    while ld(p, q) != 0 {
+        let c: u64 = ld(p, q)
+        if c == 91 && ld(p, q + 1) != 0 && ld(p, q + 2) == 93 {
+            let t: u64 = ld(p, q + 1)
+            if t == 78 {
+                n = put_str(out, n, (&baseb[0 as usize]) as u64)
+                q = q + 3
+            } else if t == 69 {
+                var e: u64 = ext
+                while e < len {
+                    n = put(out, n, ld(old, e))
+                    e = e + 1
+                }
+                q = q + 3
+            } else if t == 67 {
+                n = put_num(out, n, c_start + i * c_step, c_width)
+                q = q + 3
+            } else if t == 70 {
+                n = put_str(out, n, old)
+                q = q + 3
+            } else {
+                n = put(out, n, c)
+                q = q + 1
+            }
+        } else {
+            n = put(out, n, c)
+            q = q + 1
+        }
+    }
+    if c_case != 0 {
+        var k: u64 = 0
+        while ld(out, k) != 0 {
+            if c_case == 1 {
+                st(out, k, lower(ld(out, k)))
+            } else {
+                st(out, k, upper(ld(out, k)))
+            }
+            k = k + 1
+        }
+    }
+    if n == 0 {
+        return E_EMPTY
+    }
+    if n >= NAMELIM {
+        return E_LONG
+    }
+    var has_slash: bool = false
+    var k2: u64 = 0
+    while ld(out, k2) != 0 {
+        if ld(out, k2) == 47 {
+            has_slash = true
+        }
+        k2 = k2 + 1
+    }
+    if has_slash {
+        return E_BADCH
+    }
+    if n == 1 && ld(out, 0) == 46 {
+        return E_BADCH
+    }
+    if n == 2 && ld(out, 0) == 46 && ld(out, 1) == 46 {
+        return E_BADCH
+    }
+    return 0
+}
+
+// Compute all new names. Returns 0 or the first conflict; `bad_index()` says which item.
+fn build() -> u64 {
+    var first: u64 = 0
+    bad_at = 0
+    var i: u64 = 0
+    while i < n_items {
+        let e: u64 = build_one(i)
+        st((&errs[0 as usize]) as u64, i, e)
+        if e != 0 && first == 0 {
+            first = e
+            bad_at = i
+        }
+        i = i + 1
+    }
+    // duplicates: the later one of a pair is the culprit
+    var a: u64 = 1
+    while a < n_items {
+        var b: u64 = 0
+        while b < a {
+            if eq_nocase(new_name(a), new_name(b)) {
+                if ld((&errs[0 as usize]) as u64, a) == 0 {
+                    st((&errs[0 as usize]) as u64, a, E_DUP)
+                }
+                if first == 0 {
+                    first = E_DUP
+                    bad_at = a
+                }
+                b = a
+            } else {
+                b = b + 1
+            }
+        }
+        a = a + 1
+    }
+    return first
+}
+
+fn err_of(i: u64) -> u64 {
+    return ld((&errs[0 as usize]) as u64, i)
+}
+
+fn bad_index() -> u64 {
+    return bad_at
+}
+
+// true when `name` is the old name of ANY item of the plan (case-blind): such a target frees up
+// when that item moves away, so the caller applies in two phases.
+fn is_old_name(name: u64) -> bool {
+    var i: u64 = 0
+    while i < n_items {
+        if eq_nocase(name, old_name(i)) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// index of the item whose OLD name equals `name` (case-blind), or count() when there is none
+fn old_index(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_items {
+        if eq_nocase(name, old_name(i)) {
+            return i
+        }
+        i = i + 1
+    }
+    return n_items
+}
+
+// true when item `i` really changes (new name differs from the old one, case-sensitive)
+fn changed(i: u64) -> bool {
+    let a: u64 = old_name(i)
+    let b: u64 = new_name(i)
+    var k: u64 = 0
+    while true {
+        if ld(a, k) != ld(b, k) {
+            return true
+        }
+        if ld(a, k) == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    return false
+}
