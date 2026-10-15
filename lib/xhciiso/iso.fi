@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/xhciiso/iso.fi -- xHCI isochronous transfers: pure arithmetic (r813).
+//
+// WHAT THIS IS
+//   The numbers an xHCI driver needs for an isochronous endpoint, without any
+//   hardware access, so they can be checked on the host (tools/xhciiso/run.sh):
+//     * endpoint context words: type (ISOC OUT = 1, ISOC IN = 5), interval,
+//       Mult, Max Burst Size, Max ESIT Payload, CErr = 0 (mandatory for isoc)
+//     * wMaxPacketSize split: bits 10..0 packet size, bits 12..11 additional
+//       transactions per microframe (high speed) -> Max Burst Size
+//     * the Isoch TRB (type 5): TRB length, TD size, TBC, TLBPC, SIA, IOC, ISP
+//     * the completion-code classes of an isoc event (ok / underrun / missed / error)
+//   kernel/drv/usb/xhci.fi uses these functions; it keeps the rings and counters.
+//
+// SPEED CODES are the xHCI port speed ids: 1 full, 2 low, 3 high, 4 super.
+
+export {
+    EPT_ISOC_OUT, EPT_ISOC_IN, TRB_ISOCH, CLS_OK, CLS_UNDER, CLS_MISSED, CLS_ERR,
+    ep_type, mps_of, burst_of, mult_of, max_esit, interval_of,
+    ctx_dw0, ctx_dw1, ctx_dw4, packets, td_fits, tbc, tlbpc,
+    trb_status, trb_control, cc_class
+}
+
+const EPT_ISOC_OUT: u64 = 1
+const EPT_ISOC_IN: u64 = 5
+const TRB_ISOCH: u64 = 5
+
+const CLS_OK: u64 = 0
+const CLS_UNDER: u64 = 1
+const CLS_MISSED: u64 = 2
+const CLS_ERR: u64 = 3
+
+fn ep_type(in_dir: bool) -> u64 {
+    if in_dir {
+        return EPT_ISOC_IN
+    }
+    return EPT_ISOC_OUT
+}
+
+// Packet size: bits 10..0 of wMaxPacketSize.
+fn mps_of(raw: u64) -> u64 {
+    return raw & 0x7FF
+}
+
+// Max Burst Size field. High speed: bits 12..11 of wMaxPacketSize (extra
+// transactions per microframe). Super speed: bMaxBurst of the SuperSpeed
+// endpoint companion descriptor (`ss_burst`). Full speed: 0.
+fn burst_of(speed: u64, raw: u64, ss_burst: u64) -> u64 {
+    if speed == 3 {
+        return (raw >> 11) & 3
+    }
+    if speed >= 4 {
+        if ss_burst > 15 {
+            return 15
+        }
+        return ss_burst
+    }
+    return 0
+}
+
+// Mult field: only super speed isoc has it (bmAttributes bits 1..0 of the companion).
+fn mult_of(speed: u64, ss_attrs: u64) -> u64 {
+    if speed >= 4 {
+        var m: u64 = ss_attrs & 3
+        if m > 2 {
+            m = 2
+        }
+        return m
+    }
+    return 0
+}
+
+// Bytes the endpoint may move per service interval.
+fn max_esit(mps: u64, burst: u64, mult: u64) -> u64 {
+    return mps * (burst + 1) * (mult + 1)
+}
+
+// Interval field (exponent, 125 us units). Full speed: bInterval is 2^(n-1)
+// frames (1 ms = 8 units), so field = n - 1 + 3. High/super: field = n - 1.
+fn interval_of(speed: u64, binterval: u64) -> u64 {
+    var n: u64 = binterval
+    if n < 1 {
+        n = 1
+    }
+    if n > 16 {
+        n = 16
+    }
+    if speed >= 3 {
+        return n - 1
+    }
+    var v: u64 = n - 1 + 3
+    if v > 15 {
+        v = 15
+    }
+    return v
+}
+
+// Endpoint context dword 0: Interval (23..16), Mult (9..8), Max ESIT Payload Hi (31..24).
+fn ctx_dw0(interval: u64, mult: u64, esit: u64) -> u64 {
+    return (interval << 16) | (mult << 8) | (((esit >> 16) & 0xFF) << 24)
+}
+
+// Dword 1: CErr (2..1) = 0 for isoc, EP type (5..3), Max Burst (15..8), Max Packet (31..16).
+fn ctx_dw1(art: u64, mps: u64, burst: u64) -> u64 {
+    return (art << 3) | (burst << 8) | (mps << 16)
+}
+
+// Dword 4: Average TRB Length (15..0), Max ESIT Payload Lo (31..16).
+fn ctx_dw4(avg: u64, esit: u64) -> u64 {
+    return avg | ((esit & 0xFFFF) << 16)
+}
+
+// Packets needed for `len` bytes (zero-length TD still sends one packet).
+fn packets(len: u64, mps: u64) -> u64 {
+    if mps == 0 {
+        return 0
+    }
+    if len == 0 {
+        return 1
+    }
+    return (len + mps - 1) / mps
+}
+
+// One TD must fit into one service interval.
+fn td_fits(len: u64, mps: u64, burst: u64, mult: u64) -> bool {
+    if mps == 0 || len > 0x1FFFF {
+        return false
+    }
+    return len <= max_esit(mps, burst, mult)
+}
+
+// Transfer Burst Count (TRB bits 8..7): number of bursts - 1. Super speed only.
+fn tbc(speed: u64, npk: u64, burst: u64) -> u64 {
+    if speed < 4 || npk == 0 {
+        return 0
+    }
+    return (npk + burst) / (burst + 1) - 1
+}
+
+// Transfer Last Burst Packet Count (TRB bits 19..16). Super speed: packets in
+// the last burst - 1. High speed: packets in the microframe - 1. Full speed: 0.
+fn tlbpc(speed: u64, npk: u64, burst: u64) -> u64 {
+    if npk == 0 || speed < 3 {
+        return 0
+    }
+    if speed == 3 {
+        return npk - 1
+    }
+    let r: u64 = npk % (burst + 1)
+    if r == 0 {
+        return burst
+    }
+    return r - 1
+}
+
+// TRB dword 2: TRB Transfer Length (16..0), TD Size (21..17, remaining packets
+// after this TRB; 0 for a TD of one TRB), interrupter target 0.
+fn trb_status(len: u64, td_size: u64) -> u64 {
+    var t: u64 = td_size
+    if t > 31 {
+        t = 31
+    }
+    return (len & 0x1FFFF) | (t << 17)
+}
+
+// TRB dword 3 without the cycle bit: type 5, IOC (5), ISP (2), TBC (8..7),
+// TLBPC (19..16), SIA (31). The frame id field (30..20) stays 0: SIA = 1 means
+// "start with the next service opportunity".
+fn trb_control(tbc_v: u64, tlbpc_v: u64, sia: bool, ioc: bool, isp: bool) -> u64 {
+    var c: u64 = (TRB_ISOCH << 10) | ((tbc_v & 3) << 7) | ((tlbpc_v & 15) << 16)
+    if sia {
+        c = c | (1 << 31)
+    }
+    if ioc {
+        c = c | (1 << 5)
+    }
+    if isp {
+        c = c | (1 << 2)
+    }
+    return c
+}
+
+// Completion code -> class. 1 success and 13 short packet are fine; 14 ring
+// underrun and 15 ring overrun mean the host queue ran dry / the xHC was late;
+// 23 missed service error: the TD's interval passed. Anything else is an error.
+fn cc_class(code: u64) -> u64 {
+    if code == 1 || code == 13 {
+        return CLS_OK
+    }
+    if code == 14 || code == 15 {
+        return CLS_UNDER
+    }
+    if code == 23 {
+        return CLS_MISSED
+    }
+    return CLS_ERR
+}

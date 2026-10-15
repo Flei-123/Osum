@@ -456,9 +456,17 @@ const DRV_ECM: u64 = 6
 // r811: RNDIS network function (Android tethering, QEMU usb-net RNDIS configuration). Used ONLY when the device
 // offers no CDC-ECM configuration (ECM is preferred), or when the kernel word `rndisonly` forces it (test gate).
 const DRV_RNDIS: u64 = 7
+const DRV_ISOTEST: u64 = 8
 // Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
 const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
 const S_NOECM: u64 = 0x1E8 // 1 = CDC-ECM is refused (word `rndisonly`)
+// r813: isochronous test bed (word `isoctest`). One audio streaming alt setting is remembered here (packed, see `iso_data`).
+const S_ISOOK: u64 = 0x1F0 // 1 = the audio control interface may be picked in `wanted`
+const S_ISOA: u64 = 0x1F8 // dci | iface << 8 | alt << 16 | binterval << 24 | wMaxPacketSize << 32 (0 = none found)
+const ISO_BUF_OFF: u64 = 0x56A00 // 8 packet buffers of 192 bytes (48 kHz, 16 bit, stereo, 1 ms)
+const ISO_BUFS: u64 = 8
+const ISO_PKT: u64 = 192
+const ISO_TDS: u64 = 200
 const CLS_CDC: u64 = 2
 const D_NCFG: u64 = 352 // bNumConfigurations of the device descriptor
 const D_MACSTR: u64 = 360 // ECM: string index of the MAC address
@@ -627,6 +635,10 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_USBRNDIS) {
         s(state, S_RNDISOK, 1)
         s(state, S_NOECM, 1)
+    }
+    // r813: `isoctest` lets the audio control interface through `wanted`.
+    if kstate.mode_on(state, kstate.M_USBISOC) {
+        s(state, S_ISOOK, 1)
     }
     // RUNDE HID: der generische Weg. `nohidrep` ist die GEGENPROBE --
     // damit laeuft alles wie vor dieser Runde, im Boot-Protokoll, und
@@ -1191,6 +1203,11 @@ fn drv_name(k: u64) {
     var s_h: [u8; 4] = "hub\0"
     var s_e: [u8; 4] = "ecm\0"
     var s_r: [u8; 6] = "rndis\0"
+    var s_i: [u8; 5] = "isoc\0"
+    if k == DRV_ISOTEST {
+        serial.puts((&s_i[0]) as u64)
+        return
+    }
     if k == DRV_ECM {
         serial.puts((&s_e[0]) as u64)
         return
@@ -1400,6 +1417,9 @@ fn configure(state: u64, d: u64) -> bool {
     }
     if dg(state, d, D_DRIVER) == DRV_RNDIS {
         rndis_data(state, d, buf, total)
+    }
+    if dg(state, d, D_DRIVER) == DRV_ISOTEST {
+        iso_data(state, d, buf, total)
     }
     // RUNDE BLECHEINGABE: die Klasse der GEWAEHLTEN Schnittstelle steht
     // auf dem Schirm -- und wenn keine gewaehlt wurde, die der ersten.
@@ -1694,6 +1714,10 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         }
         return sub == 6 && pro == 0x50
     }
+    // r813: audio control interface (class 01, subclass 01), test bed only.
+    if cls == 1 && sub == 1 {
+        return g(state, S_ISOOK) != 0
+    }
     if cls == CLS_CDC {
         if sub == 2 && pro == 0xFF {
             return g(state, S_RNDISOK) != 0
@@ -1722,6 +1746,9 @@ fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
     }
     if cls == CLS_MSC {
         return DRV_MSC
+    }
+    if cls == 1 && sub == 1 {
+        return DRV_ISOTEST
     }
     if cls == CLS_CDC && sub == 6 {
         return DRV_ECM
@@ -1871,6 +1898,20 @@ fn endpoints(state: u64, d: u64) -> bool {
             top = outdci
         }
     }
+    // r813: the isochronous endpoint of the test driver.
+    if dg(state, d, D_DRIVER) == DRV_ISOTEST && g(state, S_ISOA) != 0 {
+        let a: u64 = g(state, S_ISOA)
+        let adci: u64 = a & 0xFF
+        let i: u64 = xhci.isoc_open(state, slot, adci, false, dg(state, d, D_SPEED),
+            (a >> 32) & 0xFFFF, 0, 0, (a >> 24) & 0xFF)
+        if i >= xhci.MAX_EP || !xhci.isoc_fill_ctx(state, slot, adci) {
+            return false
+        }
+        add = add | (1 << adci)
+        if adci > top {
+            top = adci
+        }
+    }
     build_slot(state, d, top)
     wr32(ic, 0)
     wr32(ic + 4, add)
@@ -2012,7 +2053,131 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_RNDIS {
         rndis_start(state, d)
+        return
     }
+    if k == DRV_ISOTEST {
+        iso_start(state, d)
+    }
+}
+
+// ============================================================ r813: isoc test bed
+//
+// Scan the configuration for the first audio STREAMING interface (class 01,
+// subclass 02) alternate setting >= 1 that has an isochronous OUT endpoint, and
+// remember it packed in S_ISOA. QEMU `usb-audio` offers exactly that (alt 1,
+// 192 bytes per 1 ms frame, full speed).
+fn iso_data(state: u64, d: u64, buf: u64, total: u64) {
+    s(state, S_ISOA, 0)
+    var at: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                mine = b8(buf, at + 5) == 1 && b8(buf, at + 6) == 2 && alt != 0
+                    && g(state, S_ISOA) == 0
+            } else if kind == 5 && len >= 7 && mine {
+                let addr: u64 = b8(buf, at + 2)
+                if (b8(buf, at + 3) & 3) == 1 && (addr & 0x80) == 0 {
+                    let dci: u64 = (addr & 0xF) * 2
+                    s(state, S_ISOA, dci | (iface << 8) | (alt << 16)
+                        | (b8(buf, at + 6) << 24) | (b16(buf, at + 4) << 32))
+                    mine = false
+                }
+            }
+            at = at + len
+        }
+    }
+}
+
+// Fill one packet buffer with a 1 kHz square wave (48 frames per period, 16 bit stereo).
+fn iso_fill(state: u64, n: u64) {
+    let p: u64 = state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT
+    var f: u64 = 0
+    while f < 48 {
+        var v: u64 = 0x1F40
+        if f >= 24 {
+            v = 0xE0C0
+        }
+        wr32(p + f * 4, v | (v << 16))
+        f = f + 1
+    }
+}
+
+// Select the streaming alt setting, then feed ISO_TDS TDs (one per frame) and
+// count what the controller reports. One status line on the serial port.
+fn iso_start(state: u64, d: u64) {
+    var s_head: [u8; 16] = "usb: isoc alt=\0\0"
+    var s_fail: [u8; 18] = "usb: isoc failed\0\0"
+    var s_q: [u8; 9] = " queued=\0"
+    var s_e: [u8; 9] = " events=\0"
+    var s_b: [u8; 8] = " bytes=\0"
+    var s_u: [u8; 8] = " under=\0"
+    var s_m: [u8; 9] = " missed=\0"
+    var s_x: [u8; 6] = " err=\0"
+    var s_mps: [u8; 6] = " mps=\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    let a: u64 = g(state, S_ISOA)
+    if a == 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    let dci: u64 = a & 0xFF
+    if xhci.control(state, slot, 0x01, 0x0B, (a >> 16) & 0xFF, (a >> 8) & 0xFF,
+        0, 0, false) < 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    var n: u64 = 0
+    var spin: u64 = 0
+    while n < ISO_BUFS {
+        iso_fill(state, n)
+        if xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + n * ISO_PKT, ISO_PKT) {
+            n = n + 1
+        } else {
+            n = ISO_BUFS
+        }
+    }
+    n = xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED)
+    while spin < 4000 && xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS) < ISO_TDS {
+        xhci.drain(state)
+        while n < ISO_TDS && xhci.isoc_pending(state, slot, dci) < ISO_BUFS {
+            iso_fill(state, n)
+            if !xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT, ISO_PKT) {
+                break
+            }
+            n = n + 1
+        }
+        xhci.udelay(state, 500)
+        spin = spin + 1
+    }
+    xhci.drain(state)
+    serial.puts((&s_head[0]) as u64)
+    serial.dec((a >> 16) & 0xFF)
+    serial.puts((&s_mps[0]) as u64)
+    serial.dec((a >> 32) & 0x7FF)
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_BYTES))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_UNDER))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_MISSED))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_ERR))
+    serial.nl()
 }
 
 // L-015: bring a CDC-ECM function up. MAC from the string descriptor,
