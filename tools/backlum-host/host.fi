@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/backlum-host/host.fi -- host test of lib/fui/backlum.fi (luminance table, contrast, text colour decider, scrim).
+// Built by tools/backlum-host/run.sh, which also mutates the lib and expects this test to go red for every mutation.
+import std.rt
+import std.io
+import fui.backlum
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn absdiff(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a - b
+    }
+    return b - a
+}
+
+static mut st: [u64; 4] = [0 as u64; 4]
+
+fn stp() -> u64 {
+    return (&st[0 as usize]) as u64
+}
+
+// a tiny deterministic noise source
+static mut seed: u64 = 12345
+fn rnd() -> u64 {
+    seed = seed *% 6364136223846793005 +% 1442695040888963407
+    return (seed >> 33)
+}
+
+// run the machine over `n` steps of `dt` ms with luminance `base + noise` (noise in +-amp, Q16); returns the flips
+fn run_noise(base: u64, amp: u64, n: u64, dt: u64, band: u64, hold: u64) -> u64 {
+    tc_init_at(base)
+    var k: u64 = 1
+    while k <= n {
+        let r: u64 = rnd() % (2 * amp + 1)
+        let l: u64 = base + r - amp
+        let _c: u64 = backlum.tc_update_ex(stp(), k * dt, l, band, hold)
+        k = k + 1
+    }
+    return backlum.tc_flips(stp())
+}
+
+fn tc_init_at(base: u64) {
+    backlum.tc_init(stp(), 0, base)
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    let tp: *mut T = &t
+
+    // 1. table and luminance
+    check(tp, backlum.lin_q16(0) == 0, "lin(0) = 0")
+    check(tp, backlum.lin_q16(255) == 65536, "lin(255) = 1.0")
+    check(tp, absdiff(backlum.lin_q16(128), 14146) <= 2, "lin(128) = 0.2159 (sRGB curve, not gamma 2.2 or linear)")
+    check(tp, absdiff(backlum.lin_q16(10), 197) <= 2, "lin(10) = 0.00304 (the linear toe below 0.04045)")
+    check(tp, backlum.lin_q16(117) > backlum.lin_q16(116), "the table rises")
+    check(tp, backlum.lum_q16(0x000000) == 0, "lum(black) = 0")
+    check(tp, backlum.lum_q16(0xFFFFFF) == 65536, "lum(white) = 1.0")
+    check(tp, absdiff(backlum.lum_q16(0xFF0000), 13933) <= 3, "lum(red) = 0.2126")
+    check(tp, absdiff(backlum.lum_q16(0x00FF00), 46869) <= 3, "lum(green) = 0.7152")
+    check(tp, absdiff(backlum.lum_q16(0x0000FF), 4732) <= 3, "lum(blue) = 0.0722")
+    check(tp, absdiff(backlum.lum_q16(0x808080), 14150) <= 3, "lum(grey 128) = 0.2159")
+    check(tp, backlum.lum_q16(0x1234AB) == backlum.lum_q16(0xFF1234AB), "the alpha byte is ignored")
+
+    // 2. contrast
+    check(tp, absdiff(backlum.contrast_x100(0, 65536), 2100) <= 1, "black on white = 21:1")
+    check(tp, backlum.contrast_x100(65536, 0) == backlum.contrast_x100(0, 65536) && backlum.contrast_x100(65536, 0) > 2000, "contrast is symmetric")
+    check(tp, backlum.contrast_x100(14150, 14150) == 100, "equal luminance = 1:1")
+    check(tp, absdiff(backlum.contrast_x100(backlum.L_SWITCH, 0), backlum.contrast_x100(65536, backlum.L_SWITCH)) <= 2,
+        "THE SWITCH POINT: black and white text have the same contrast at L_SWITCH")
+    check(tp, backlum.contrast_x100(backlum.L_SWITCH, 0) >= 457 && backlum.contrast_x100(backlum.L_SWITCH, 0) <= 459,
+        "the best possible contrast at the switch point is 4.58:1")
+
+    // 3. plain choice
+    check(tp, backlum.text_for(0) == backlum.TXT_WHITE, "black background -> white text")
+    check(tp, backlum.text_for(65536) == backlum.TXT_BLACK, "white background -> black text")
+    check(tp, backlum.text_for(14150) == backlum.TXT_BLACK, "grey 128 -> black text (5.3:1; white would give 3.9:1)")
+    check(tp, backlum.text_for(backlum.L_SWITCH) == backlum.TXT_WHITE, "exactly the switch point -> white (ties go to white)")
+    check(tp, backlum.text_for(backlum.L_SWITCH + 1) == backlum.TXT_BLACK, "one above -> black")
+
+    // 4. the decider: start, band, hold
+    backlum.tc_init(stp(), 1000, 0)
+    check(tp, backlum.tc_color(stp()) == backlum.TXT_WHITE && backlum.tc_flips(stp()) == 0, "init on black: white text, 0 flips")
+    backlum.tc_init(stp(), 5, 65536)
+    check(tp, backlum.tc_color(stp()) == backlum.TXT_BLACK, "init on white: black text at once")
+    backlum.tc_init(stp(), 1000, 0)
+    check(tp, backlum.tc_update(stp(), 1100, 65536) == backlum.TXT_WHITE, "HOLD: a jump to white right after the start is not followed before 250 ms")
+    check(tp, backlum.tc_update(stp(), 1249, 65536) == backlum.TXT_WHITE, "HOLD: 249 ms is still too early")
+    check(tp, backlum.tc_update(stp(), 1250, 65536) == backlum.TXT_BLACK && backlum.tc_flips(stp()) == 1,
+        "HOLD: at 250 ms the colour follows (1 flip)")
+    check(tp, backlum.tc_update(stp(), 2000, backlum.L_SWITCH + backlum.BAND) == backlum.TXT_BLACK, "BAND: exactly at the upper edge black text stays")
+    check(tp, backlum.tc_update(stp(), 3000, backlum.L_SWITCH - 1) == backlum.TXT_BLACK, "BAND: just under the switch point black text stays (no flip)")
+    check(tp, backlum.tc_update(stp(), 4000, backlum.L_SWITCH - backlum.BAND) == backlum.TXT_BLACK, "BAND: exactly at the lower edge black text stays")
+    check(tp, backlum.tc_update(stp(), 5000, backlum.L_SWITCH - backlum.BAND - 1) == backlum.TXT_WHITE && backlum.tc_flips(stp()) == 2,
+        "BAND: one under the lower edge flips to white (2 flips)")
+    check(tp, backlum.tc_update(stp(), 6000, backlum.L_SWITCH + backlum.BAND) == backlum.TXT_WHITE, "BAND: white text stays at the upper edge")
+    check(tp, backlum.tc_update(stp(), 7000, backlum.L_SWITCH + backlum.BAND + 1) == backlum.TXT_BLACK && backlum.tc_flips(stp()) == 3,
+        "BAND: one above the upper edge flips to black (3 flips)")
+    check(tp, backlum.tc_last_ms(stp()) == 7000, "the time of the last switch is kept")
+
+    // 5. noise around the switch point
+    check(tp, run_noise(backlum.L_SWITCH, 1200, 400, 50, backlum.BAND, backlum.HOLD_MS) == 0, "NOISE inside the band: 0 flips in 400 steps")
+    check(tp, run_noise(backlum.L_SWITCH, 1200, 400, 50, 0, 0) > 50, "COUNTER-PROOF: the plain threshold flips a lot on the same noise")
+    check(tp, run_noise(backlum.L_SWITCH, 6000, 400, 50, backlum.BAND, backlum.HOLD_MS) > 0, "COUNTER-PROOF: noise far over the band does flip (the band is not a mute button)")
+    // hold alone: a big alternation faster than the hold time
+    check(tp, run_noise(backlum.L_SWITCH, 6000, 400, 20, backlum.BAND, backlum.HOLD_MS) < run_noise(backlum.L_SWITCH, 6000, 400, 20, backlum.BAND, 0),
+        "HOLD: the hold time reduces the flips on fast big noise")
+    // a real change
+    backlum.tc_init(stp(), 0, 0)
+    var k: u64 = 1
+    while k <= 100 {
+        let l: u64 = if_step(k)
+        let _c: u64 = backlum.tc_update(stp(), k * 50, l)
+        k = k + 1
+    }
+    check(tp, backlum.tc_flips(stp()) == 1 && backlum.tc_color(stp()) == backlum.TXT_BLACK, "A REAL CHANGE (black -> white at step 50): exactly 1 flip")
+
+    // 6. scrim
+    check(tp, backlum.scrim_alpha(0, 0, backlum.TXT_WHITE) == 0, "white text on black: no scrim")
+    check(tp, backlum.scrim_alpha(65536, 65536, backlum.TXT_BLACK) == 0, "black text on white: no scrim")
+    check(tp, backlum.scrim_alpha(0, 14150, backlum.TXT_WHITE) > 0, "white text over a brightest sample of 0.216: scrim needed")
+    let a: u64 = backlum.scrim_alpha(0, 14150, backlum.TXT_WHITE)
+    check(tp, backlum.contrast_x100(14150 * (255 - a) / 255, 65536) >= 450, "  and that scrim brings it to >= 4.5:1")
+    check(tp, backlum.contrast_x100(14150 * (255 - a + 4) / 255, 65536) < 450 || a >= 250, "  and it is not much stronger than needed")
+    let b: u64 = backlum.scrim_alpha(8000, 65536, backlum.TXT_BLACK)
+    check(tp, b > 0, "black text over a darkest sample of 0.12: scrim needed")
+    check(tp, backlum.contrast_x100(8000 + (65536 - 8000) * b / 255, 0) >= 450, "  and that scrim brings it to >= 4.5:1")
+
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}
+
+// 0 for the first 50 steps, white after
+fn if_step(k: u64) -> u64 {
+    if k < 50 {
+        return 0
+    }
+    return 65536
+}

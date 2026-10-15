@@ -92,6 +92,7 @@ import drv.snd.audio
 import fui.core
 import fui.region
 import fui.comp // docs/COMPOSITOR.md S2: the row loops (copy, mix, blur line) live in lib/fui/comp.fi
+import fui.backlum // W-WINOPTS S4: sRGB -> linear luminance table (Q16) for the brightness behind a window
 import sched.sched // docs/COMPOSITOR.md S5: the compositor's wake-up (poll_kick_one / poll_sleep) and the watchdog's look at its task
 import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
 
@@ -132,7 +133,7 @@ export {
     FM_BLUR, FM_BLURTINT, FM_BLURNOISE,
     BLUR_MAX, TINT_MAX, NOISE_MAX,
     blur_an, blur_radius, blurs, blur_cached, blur_px, blur_us,
-    win_opac, set_opac, win_durch,
+    win_opac, set_opac, win_durch, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
     set_blur_cache, blur_cache_on,
     blur_treffer, blur_fehl, blur_quote, blur_reset,
     blur_frn, blur_frus, blur_frmax,
@@ -1754,6 +1755,17 @@ const W_DRAGX: u64 = 0x1B0
 const W_SHM: u64 = 0x1B8
 // W-CURSOR: the pointer shape this window's program asked for (WIG_CURSOR), 0 = arrow. Used only while the pointer is over the client area.
 const W_CURSOR: u64 = 0x1C0
+// W-WINOPTS S4 (docs/APP-WINDOW-OPTS.md): THE BRIGHTNESS BEHIND THIS WINDOW, measured on demand and cached in the window's own slot
+// (0x1C8 .. 0x200 is the end of the 512 octets). W_BL_MEAN is the mean linear luminance (Q16) + 1; 0 = no valid measurement.
+const W_BL_MEAN: u64 = 0x1C8
+const W_BL_HI: u64 = 0x1D0 // the second brightest of the 32 samples (a robust "worst case" for white text)
+const W_BL_LO: u64 = 0x1D8 // the second darkest sample (the worst case for black text)
+const W_BL_XY: u64 = 0x1E0 // the rectangle the measurement was made for: (x + 32768) << 32 | (y + 32768)
+const W_BL_WH: u64 = 0x1E8 // w << 32 | h
+const W_BL_RUNS: u64 = 0x1F0 // how many times the 32 points were really measured
+const W_BL_HITS: u64 = 0x1F8 // how many answers came from the cache
+const BL_NX: u64 = 8
+const BL_NY: u64 = 4
 // COMPOSITOR S3 scalars (far from the others on purpose)
 const S_TABF: u64 = 0x1E00   // the window table page (frame address), 0 = not made yet
 const S_TABI: u64 = 0x1E08   // its shared object + 1
@@ -3746,6 +3758,8 @@ fn damage_ex(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
     // Deshalb steht der Ruf HIER und nicht in `compose` -- in `compose`
     // waere schon zusammengefasst, was hier noch einzeln ankommt.
     blur_touch(state, a, b, c, d, skip)
+    // W-WINOPTS S4: the same rule for the brightness behind a window
+    bl_touch(state, a, b, c, d, skip)
     // ================================================= RUNDE GLAS
     //
     // DIE SCHLIERENREGEL, UND WARUM ES OHNE SIE WIRKLICH SCHLIEREN GIBT.
@@ -4043,6 +4057,9 @@ fn create_ex(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
             wsv(state, i, W_SHM, 0)
             wsv(state, i, W_CURSOR, 0)
+            wsv(state, i, W_BL_MEAN, 0)
+            wsv(state, i, W_BL_RUNS, 0)
+            wsv(state, i, W_BL_HITS, 0)
             if sbase != 0 {
                 unixsock.shm_ref(state, sidx)
                 wsv(state, i, W_SHM, sidx + 1)
@@ -4255,6 +4272,9 @@ fn destroy(state: u64, i: u64) -> bool {
     wsv(state, i, W_CY, 0)
     wsv(state, i, W_KIND, 0)
     wsv(state, i, W_CURSOR, 0)
+    wsv(state, i, W_BL_MEAN, 0)
+    wsv(state, i, W_BL_RUNS, 0)
+    wsv(state, i, W_BL_HITS, 0)
     wsv(state, i, W_EHEAD, 0)
     wsv(state, i, W_ETAIL, 0)
     if hatte_strut {
@@ -10419,6 +10439,184 @@ fn set_opac(state: u64, i: u64, v: u64) -> bool {
     wsv(state, i, W_OPAC, w + 1)
     damage_win(state, i)
     return true
+}
+
+
+// ================================================================== W-WINOPTS S4: THE BRIGHTNESS BEHIND A WINDOW
+//
+// An app that floats over other windows (the Mini) wants its text black on a light background and white on a dark one. The server knows
+// what lies behind the window; the app does not. `backlum` measures the 8 x 4 points of the window's outer rectangle on the picture
+// of everything BELOW the window in the stacking order (never the window itself, never what lies above): the desktop colour, then
+// every visible window bottom up, each mixed in with its own opacity. A point in the frame of a window with decoration takes the
+// frame colours; windows that blur are taken as their buffer (the glass key colour), which is the honest limit of this measurement.
+// The result is the mean of the LINEAR luminance (Q16, `fui.backlum`) plus the second brightest and the second darkest sample.
+//
+// Measured only when asked, and only again when something under the window changed: `bl_touch` (called from `damage_ex`, next to
+// `blur_touch`, with the same `skip` rule) clears the cache of every window the changed rectangle touches. The window's own contents
+// (skip = itself) and the pointer (BT_ALL) never spoil it. The window moving or growing changes the key and measures again.
+const BL_MEAN: u64 = 0
+const BL_HI: u64 = 1
+const BL_LO: u64 = 2
+const BL_RUNS: u64 = 3
+const BL_HITS: u64 = 4
+
+fn bl_touch(state: u64, x0: i64, y0: i64, x1: i64, y1: i64, skip: u64) {
+    if skip == BT_ALL {
+        return
+    }
+    var skipz: u64 = 0
+    var haveskip: bool = false
+    if skip != 0 && skip - 1 < MAX_WIN {
+        skipz = wg(state, skip - 1, W_Z)
+        haveskip = true
+    }
+    var j: u64 = 0
+    while j < MAX_WIN {
+        if wg(state, j, W_USED) != 0 && wg(state, j, W_BL_MEAN) != 0 {
+            var spoil: bool = true
+            if haveskip && (j == skip - 1 || wg(state, j, W_Z) <= skipz) {
+                spoil = false
+            }
+            if spoil {
+                let bx0: i64 = win_x(state, j)
+                let by0: i64 = win_y(state, j)
+                let bx1: i64 = bx0 + outer_w(state, j) as i64
+                let by1: i64 = by0 + outer_h(state, j) as i64
+                if x1 > bx0 && x0 < bx1 && y1 > by0 && y0 < by1 {
+                    wsv(state, j, W_BL_MEAN, 0)
+                }
+            }
+        }
+        j = j + 1
+    }
+}
+
+// the colour of ONE point as it looks with everything below window `i` painted (0x00RRGGBB)
+fn bl_pixel(state: u64, i: u64, px: i64, py: i64) -> u64 {
+    var c: u64 = gs(state, S_DESK) & 0xFFFFFF
+    let zi: u64 = win_z(state, i)
+    var z: u64 = 0
+    while z < zi {
+        let j: u64 = at_z(state, z)
+        z = z + 1
+        if j >= MAX_WIN || j == i {
+            continue
+        }
+        if (wg(state, j, W_FLAGS) & (F_HIDDEN | F_TABBED)) != 0 || !darf(state, j) {
+            continue
+        }
+        let ox: i64 = win_x(state, j)
+        let oy: i64 = win_y(state, j)
+        if px < ox || py < oy || px >= ox + outer_w(state, j) as i64 || py >= oy + outer_h(state, j) as i64 {
+            continue
+        }
+        var p: u64 = 0
+        let cx: i64 = px - ox - inx(state, j) as i64
+        let cy: i64 = py - oy - iny(state, j) as i64
+        if cx >= 0 && cy >= 0 && cx < win_w(state, j) as i64 && cy < win_h(state, j) as i64 {
+            p = wget(state, j, cx as u64, cy as u64) & 0xFFFFFF
+        } else if cy < 0 || (py - oy) < iny(state, j) as i64 {
+            p = deco_rgb(state, DK_TITLE) & 0xFFFFFF
+        } else {
+            p = deco_rgb(state, DK_FRAME) & 0xFFFFFF
+        }
+        let a: u64 = win_opac(state, j)
+        if a >= 255 {
+            c = p
+        } else {
+            let r: u64 = (((c >> 16) & 0xFF) * (255 - a) + ((p >> 16) & 0xFF) * a) / 255
+            let g: u64 = (((c >> 8) & 0xFF) * (255 - a) + ((p >> 8) & 0xFF) * a) / 255
+            let b: u64 = ((c & 0xFF) * (255 - a) + (p & 0xFF) * a) / 255
+            c = (r << 16) | (g << 8) | b
+        }
+    }
+    return c
+}
+
+// measure the 8 x 4 points and fill the cache slots of window `i`
+fn bl_measure(state: u64, i: u64, x0: i64, y0: i64, w: u64, h: u64) {
+    var sum: u64 = 0
+    var hi1: u64 = 0
+    var hi2: u64 = 0
+    var lo1: u64 = 65536
+    var lo2: u64 = 65536
+    var iy: u64 = 0
+    while iy < BL_NY {
+        var ix: u64 = 0
+        while ix < BL_NX {
+            let px: i64 = x0 + ((2 * ix + 1) * w / (2 * BL_NX)) as i64
+            let py: i64 = y0 + ((2 * iy + 1) * h / (2 * BL_NY)) as i64
+            let l: u64 = backlum.lum_q16(bl_pixel(state, i, px, py))
+            sum = sum + l
+            if l > hi1 {
+                hi2 = hi1
+                hi1 = l
+            } else if l > hi2 {
+                hi2 = l
+            }
+            if l < lo1 {
+                lo2 = lo1
+                lo1 = l
+            } else if l < lo2 {
+                lo2 = l
+            }
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+    wsv(state, i, W_BL_MEAN, sum / (BL_NX * BL_NY) + 1)
+    wsv(state, i, W_BL_HI, hi2)
+    wsv(state, i, W_BL_LO, lo2)
+    wsv(state, i, W_BL_RUNS, wg(state, i, W_BL_RUNS) + 1)
+}
+
+// What lies behind window `i`. which: BL_MEAN / BL_HI / BL_LO (Q16 linear luminance, 65536 = white), BL_RUNS / BL_HITS (the counters
+// of the cache; they never trigger a measurement). 0 for a window that does not exist.
+fn backlum(state: u64, i: u64, which: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    if which == BL_RUNS {
+        return wg(state, i, W_BL_RUNS)
+    }
+    if which == BL_HITS {
+        return wg(state, i, W_BL_HITS)
+    }
+    var x0: i64 = win_x(state, i)
+    var y0: i64 = win_y(state, i)
+    var x1: i64 = x0 + outer_w(state, i) as i64
+    var y1: i64 = y0 + outer_h(state, i) as i64
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    if x1 > gs(state, S_SW) as i64 {
+        x1 = gs(state, S_SW) as i64
+    }
+    if y1 > gs(state, S_SH) as i64 {
+        y1 = gs(state, S_SH) as i64
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    let kxy: u64 = (((x0 + 32768) as u64) << 32) | ((y0 + 32768) as u64)
+    let kwh: u64 = (((x1 - x0) as u64) << 32) | ((y1 - y0) as u64)
+    if wg(state, i, W_BL_MEAN) != 0 && wg(state, i, W_BL_XY) == kxy && wg(state, i, W_BL_WH) == kwh {
+        wsv(state, i, W_BL_HITS, wg(state, i, W_BL_HITS) + 1)
+    } else {
+        bl_measure(state, i, x0, y0, (x1 - x0) as u64, (y1 - y0) as u64)
+        wsv(state, i, W_BL_XY, kxy)
+        wsv(state, i, W_BL_WH, kwh)
+    }
+    if which == BL_HI {
+        return wg(state, i, W_BL_HI)
+    }
+    if which == BL_LO {
+        return wg(state, i, W_BL_LO)
+    }
+    return wg(state, i, W_BL_MEAN) - 1
 }
 
 // Scheint dieses Fenster durch? Nur dann muss die teurere Zeile her.

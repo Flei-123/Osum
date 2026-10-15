@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/backlum.fi -- W-WINOPTS S4 (docs/APP-WINDOW-OPTS.md): THE BRIGHTNESS BEHIND A WINDOW (WI_BACKLUM) AND THE TEXT COLOUR DECIDER.
+// GENERATED from tools/backlum/backlum.tpl by tools/backlum/gen.py (the name arrays need exact lengths) -- edit the template.
+//
+// Started by the kernel word `wigapp=/bin/backlum` (tools/backlum/run.sh). Every result is one serial line `backlum: <name> <a> <b>`.
+//
+// Cast (all windows frameless, shared buffer, solid fills):
+//   B  400 x 300 at (100,100)   the background window the probe floats over
+//   P  160 x  80 at (220,160)   the probe, painted RED (so a measurement that includes the window itself would show it)
+//   T  100 x  60 at (300,200)   created AFTER P, so it lies OVER P: what lies above must not count
+//   U   60 x  60 at (800,600)   far away from P: a change there must not touch P's cache
+// Steps: 1. static backgrounds (black, white, grey, red, green, blue, left black / right white, gradient): WI_BACKLUM / _HI / _LO and the contrast
+// of the chosen text colour on the worst sample   2. T above P does not count   3. the cache: repeat = hit, P's own repaint = hit, B repaint = run,
+// far window repaint = hit   4. the decider: noisy constant grey (with and without hysteresis), one real change, a slow ramp.
+// Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import wlibc
+import fui.backlum
+
+export { u_start }
+
+const BW: u64 = 400
+const BH: u64 = 300
+const PW: u64 = 160
+const PH: u64 = 80
+const PX0: u64 = 120 // P's left edge inside B (220 - 100)
+
+static mut s_t: [u8; 10] = "backlum: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_title: [u8; 8] = "backlum\0"
+//--NAMES--
+static mut g_p: u64 = 0
+static mut g_seed: u64 = 777
+static mut g_ta: [u64; 4] = [0 as u64; 4]
+static mut g_tb: [u64; 4] = [0 as u64; 4]
+
+fn line(name: u64, a: u64, b: u64) {
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(a)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(b)
+    ulib.nl()
+}
+
+fn rnd() -> u64 {
+    g_seed = g_seed *% 6364136223846793005 +% 1442695040888963407
+    return g_seed >> 33
+}
+
+fn grey(v: u64) -> u64 {
+    return (v << 16) | (v << 8) | v
+}
+
+fn fill_solid(p: u64, n: u64, color: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write32((p + i * 4) as *mut u32, color as u32)
+        i = i + 1
+    }
+}
+
+// left half black, right half white (split at x = 200)
+fn fill_two(p: u64) {
+    var y: u64 = 0
+    while y < BH {
+        var x: u64 = 0
+        while x < BW {
+            var c: u64 = 0
+            if x >= 200 {
+                c = 0xFFFFFF
+            }
+            __mmio_write32((p + (y * BW + x) * 4) as *mut u32, c as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// horizontal ramp black -> white over the full width of B
+fn fill_grad(p: u64) {
+    var y: u64 = 0
+    while y < BH {
+        var x: u64 = 0
+        while x < BW {
+            __mmio_write32((p + (y * BW + x) * 4) as *mut u32, grey(x * 255 / (BW - 1)) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// a grey level with a global offset (the frame's own flicker) and a per-point noise of +-pn
+fn fill_noise(p: u64, level: u64, pn: u64) {
+    var y: u64 = 0
+    while y < BH {
+        var x: u64 = 0
+        while x < BW {
+            let v: u64 = level + (rnd() % (2 * pn + 1)) - pn
+            __mmio_write32((p + (y * BW + x) * 4) as *mut u32, grey(v) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// A frameless shared-buffer window at (x, y), w x h, solid colour. Returns the handle (0 = failed); the buffer is left in g_p.
+fn mkwin(x: u64, y: u64, w: u64, h: u64, color: u64) -> u64 {
+    let bytes: u64 = w * h * 4
+    let p: u64 = wlibc.shm_buffer(bytes)
+    if p == 0 || ulib.bad(p) {
+        return 0
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let hd: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h, (&s_title[0 as usize]) as u64, wlibc.win_opts(true, false, 256), fd + 1)
+    wlibc.shm_close(fd)
+    if ulib.bad(hd) || hd == 0 {
+        return 0
+    }
+    fill_solid(p, w * h, color)
+    let _d: u64 = wlibc.win_damage(hd, 0, 0, w, h)
+    g_p = p
+    return hd
+}
+
+fn mean_of(h: u64) -> u64 {
+    return wlibc.win_backlum(h, wlibc.WI_BACKLUM)
+}
+
+fn hi_of(h: u64) -> u64 {
+    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_HI)
+}
+
+fn lo_of(h: u64) -> u64 {
+    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_LO)
+}
+
+fn runs_of(h: u64) -> u64 {
+    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_RUNS)
+}
+
+fn hits_of(h: u64) -> u64 {
+    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_HITS)
+}
+
+// the contrast (x100) of the text colour the mean decides for, on the WORST of the two robust samples; the tint repairs what is left
+fn worst_contrast(h: u64) -> u64 {
+    let col: u64 = backlum.text_for(mean_of(h))
+    if col == backlum.TXT_WHITE {
+        return backlum.contrast_x100(65536, hi_of(h))
+    }
+    return backlum.contrast_x100(lo_of(h), 0)
+}
+
+// the contrast after the tint
+fn scrim_contrast(h: u64) -> u64 {
+    let col: u64 = backlum.text_for(mean_of(h))
+    let lo: u64 = lo_of(h)
+    let hi: u64 = hi_of(h)
+    let a: u64 = backlum.scrim_alpha(lo, hi, col)
+    if col == backlum.TXT_WHITE {
+        return backlum.contrast_x100(65536, hi * (255 - a) / 255)
+    }
+    return backlum.contrast_x100(lo + (65536 - lo) * a / 255, 0)
+}
+
+// repaint B and read the probe's answers: one line `<name> mean hi`, one `<name>-lo lo contrast`
+fn probe(hp: u64, hb: u64, pb: u64, name: u64, nlo: u64) {
+    let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+    let _s: u64 = ulib.sleep_ms(30)
+    line(name, mean_of(hp), hi_of(hp))
+    line(nlo, lo_of(hp), worst_contrast(hp))
+}
+
+fn solid_case(hp: u64, hb: u64, pb: u64, color: u64, name: u64, nlo: u64) {
+    fill_solid(pb, BW * BH, color)
+    probe(hp, hb, pb, name, nlo)
+}
+
+fn noise_run(hp: u64, hb: u64, pb: u64) {
+    // constant grey at the switch point (sRGB 117 = L 0.178), a frame flicker of +-5 levels and a point noise of +-4: 100 frames, 50 ms apart
+    var i: u64 = 0
+    backlum.tc_init((&g_ta[0 as usize]) as u64, 0, backlum.L_SWITCH)
+    backlum.tc_init((&g_tb[0 as usize]) as u64, 0, backlum.L_SWITCH)
+    var lo_seen: u64 = 65536
+    var hi_seen: u64 = 0
+    while i < 100 {
+        let level: u64 = 117 + (rnd() % 11) - 5
+        fill_noise(pb, level, 4)
+        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+        let m: u64 = mean_of(hp)
+        if m < lo_seen {
+            lo_seen = m
+        }
+        if m > hi_seen {
+            hi_seen = m
+        }
+        let _a: u64 = backlum.tc_update((&g_ta[0 as usize]) as u64, (i + 1) * 50, m)
+        let _b: u64 = backlum.tc_update_ex((&g_tb[0 as usize]) as u64, (i + 1) * 50, m, 0, 0)
+        i = i + 1
+    }
+    line(@noise-range@, lo_seen, hi_seen)
+    line(@noise-flips@, backlum.tc_flips((&g_ta[0 as usize]) as u64), backlum.tc_color((&g_ta[0 as usize]) as u64))
+    line(@noise-flips-plain@, backlum.tc_flips((&g_tb[0 as usize]) as u64), backlum.tc_color((&g_tb[0 as usize]) as u64))
+}
+
+fn step_run(hp: u64, hb: u64, pb: u64) {
+    // a real change: black for 40 frames, then white for 60
+    var i: u64 = 0
+    backlum.tc_init((&g_ta[0 as usize]) as u64, 0, 0)
+    backlum.tc_init((&g_tb[0 as usize]) as u64, 0, 0)
+    while i < 100 {
+        var c: u64 = 0
+        if i >= 40 {
+            c = 0xFFFFFF
+        }
+        fill_solid(pb, BW * BH, c)
+        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+        let m: u64 = mean_of(hp)
+        let _a: u64 = backlum.tc_update((&g_ta[0 as usize]) as u64, (i + 1) * 50, m)
+        let _b: u64 = backlum.tc_update_ex((&g_tb[0 as usize]) as u64, (i + 1) * 50, m, 0, 0)
+        i = i + 1
+    }
+    line(@step-flips@, backlum.tc_flips((&g_ta[0 as usize]) as u64), backlum.tc_color((&g_ta[0 as usize]) as u64))
+    line(@step-flips-plain@, backlum.tc_flips((&g_tb[0 as usize]) as u64), backlum.tc_color((&g_tb[0 as usize]) as u64))
+}
+
+fn ramp_run(hp: u64, hb: u64, pb: u64) {
+    // a slow ramp black -> white over 128 frames (2 levels per frame), the same grey everywhere
+    var i: u64 = 0
+    backlum.tc_init((&g_ta[0 as usize]) as u64, 0, 0)
+    backlum.tc_init((&g_tb[0 as usize]) as u64, 0, 0)
+    while i < 128 {
+        fill_solid(pb, BW * BH, grey(i * 2))
+        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+        let m: u64 = mean_of(hp)
+        let _a: u64 = backlum.tc_update((&g_ta[0 as usize]) as u64, (i + 1) * 50, m)
+        let _b: u64 = backlum.tc_update_ex((&g_tb[0 as usize]) as u64, (i + 1) * 50, m, 0, 0)
+        i = i + 1
+    }
+    line(@ramp-flips@, backlum.tc_flips((&g_ta[0 as usize]) as u64), backlum.tc_color((&g_ta[0 as usize]) as u64))
+    line(@ramp-flips-plain@, backlum.tc_flips((&g_tb[0 as usize]) as u64), backlum.tc_color((&g_tb[0 as usize]) as u64))
+}
+
+fn u_start(args: u64) -> u64 {
+    wlibc.start(false)
+    line(@begin@, 1, 0)
+    let hb: u64 = mkwin(100, 100, BW, BH, 0)
+    let pb: u64 = g_p
+    let hp: u64 = mkwin(220, 160, PW, PH, 0xFF0000)
+    let pp: u64 = g_p
+    line(@make@, ulib_yes(hb != 0 && hp != 0), ulib_yes(pb != 0 && pp != 0))
+    if hb == 0 || hp == 0 {
+        return 5
+    }
+    // 1. static backgrounds. P is red all the time: it must never show in the measurement.
+    solid_case(hp, hb, pb, 0x000000, @k-black@, @k-black-lo@)
+    solid_case(hp, hb, pb, 0xFFFFFF, @k-white@, @k-white-lo@)
+    solid_case(hp, hb, pb, 0x808080, @k-grey@, @k-grey-lo@)
+    solid_case(hp, hb, pb, 0xFF0000, @k-red@, @k-red-lo@)
+    solid_case(hp, hb, pb, 0x00FF00, @k-green@, @k-green-lo@)
+    solid_case(hp, hb, pb, 0x0000FF, @k-blue@, @k-blue-lo@)
+    fill_two(pb)
+    probe(hp, hb, pb, @k-two@, @k-two-lo@)
+    fill_grad(pb)
+    probe(hp, hb, pb, @k-grad@, @k-grad-lo@)
+    line(@k-grad-scrim@, backlum.scrim_alpha(lo_of(hp), hi_of(hp), backlum.text_for(mean_of(hp))), scrim_contrast(hp))
+    // the background window itself: behind B lies only the desktop (P and T do not count)
+    line(@b-self@, mean_of(hb), 0)
+
+    // 2. a window ABOVE the probe does not count: T (white) is created after P and lies over it
+    solid_case(hp, hb, pb, 0x000000, @pre-above@, @pre-above-lo@)
+    let ht: u64 = mkwin(300, 200, 100, 60, 0xFFFFFF)
+    let _s2: u64 = ulib.sleep_ms(30)
+    line(@above@, mean_of(hp), hi_of(hp))
+    // a window BELOW B... is B itself: now put a white window UNDER nothing -- instead check that T (above P) has P and B behind it
+    line(@t-behind@, mean_of(ht), hi_of(ht))
+
+    // 3. the cache
+    let hu: u64 = mkwin(800, 600, 60, 60, 0x00FF00)
+    let pu: u64 = g_p
+    solid_case(hp, hb, pb, 0x000000, @c-base@, @c-base-lo@)
+    let r0: u64 = runs_of(hp)
+    let h0: u64 = hits_of(hp)
+    let _m1: u64 = mean_of(hp)
+    let _m2: u64 = mean_of(hp)
+    line(@c-repeat@, runs_of(hp) - r0, hits_of(hp) - h0)
+    // P repaints itself (its own contents): the cache stays
+    fill_solid(pp, PW * PH, 0x0000FF)
+    let _d1: u64 = wlibc.win_damage(hp, 0, 0, PW, PH)
+    let r1: u64 = runs_of(hp)
+    let h1: u64 = hits_of(hp)
+    let m3: u64 = mean_of(hp)
+    line(@c-own@, runs_of(hp) - r1, hits_of(hp) - h1)
+    line(@c-own-mean@, m3, 0)
+    // a window far away repaints: the cache stays
+    fill_solid(pu, 60 * 60, 0xFF00FF)
+    let _d2: u64 = wlibc.win_damage(hu, 0, 0, 60, 60)
+    let r2: u64 = runs_of(hp)
+    let h2: u64 = hits_of(hp)
+    let _m4: u64 = mean_of(hp)
+    line(@c-far@, runs_of(hp) - r2, hits_of(hp) - h2)
+    // B repaints white: the cache is spoiled, one new run, the new value
+    fill_solid(pb, BW * BH, 0xFFFFFF)
+    let _d3: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+    let r3: u64 = runs_of(hp)
+    let h3: u64 = hits_of(hp)
+    let m5: u64 = mean_of(hp)
+    line(@c-below@, runs_of(hp) - r3, hits_of(hp) - h3)
+    line(@c-below-mean@, m5, 0)
+    // the cache is back
+    let _m6: u64 = mean_of(hp)
+    line(@c-after@, runs_of(hp) - r3, hits_of(hp) - h3)
+
+    // 4. the decider
+    noise_run(hp, hb, pb)
+    step_run(hp, hb, pb)
+    ramp_run(hp, hb, pb)
+    line(@final@, 1, 0)
+    return 0
+}
+
+fn ulib_yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}

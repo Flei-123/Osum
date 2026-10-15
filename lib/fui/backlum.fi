@@ -1,0 +1,153 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/fui/backlum.fi -- BACKGROUND BRIGHTNESS AND THE TEXT COLOUR THAT FOLLOWS IT (W-WINOPTS stage S4, docs/APP-WINDOW-OPTS.md).
+//
+// Two jobs, integers only (no heap, no floating point), so the window server (profile kernel) and a program (ring 3) share ONE source:
+//
+//   1. LUMINANCE. `lin_q16(c)` is the sRGB -> linear table (256 entries, Q16, 65536 = 1.0), `lum_q16(rgb)` the relative luminance
+//      of a 0x00RRGGBB colour (weights 0.2126 / 0.7152 / 0.0722) in Q16. `contrast_x100(l1, l2)` is the WCAG contrast ratio times 100.
+//   2. THE TEXT COLOUR DECIDER. A pure state machine over a caller buffer of `TC_WORDS` words:
+//        - switch point `L_SWITCH` = 0.179 (black text and white text have the SAME contrast there: (L + 0.05) / 0.05 = 1.05 / (L + 0.05))
+//        - hysteresis: away from black text only above L_SWITCH + band, away from white text only below L_SWITCH - band
+//        - hold time: after a switch the colour stays at least `HOLD_MS` (250 ms), whatever the measurement says
+//      so a noisy or slowly moving background never makes the text flicker. `tc_update_ex` takes band and hold as arguments so the
+//      tests can run the same machine WITHOUT them (the counter-proof: it flickers).
+//   3. `scrim_alpha(lo, hi, colour)`: how strong a tint (0..255) behind the text must be so the worst sample reaches 4.5:1 with the
+//      chosen colour. Near L_SWITCH no text colour reaches 4.5:1 on its own (the best possible there is 4.58:1) -- the tint is the repair.
+
+export {
+    LUM_ONE, L_SWITCH, BAND, HOLD_MS, TXT_BLACK, TXT_WHITE, TC_WORDS, lin_q16, lum_q16, contrast_x100, text_for, tc_init, tc_update,
+    tc_update_ex, tc_color, tc_flips, tc_last_ms, scrim_alpha,
+}
+
+const LUM_ONE: u64 = 65536
+const L_SWITCH: u64 = 11731 // 0.179 * 65536
+const BAND: u64 = 1500 // 0.023 each side of the switch point
+const HOLD_MS: u64 = 250
+const TXT_BLACK: u64 = 0 // the TEXT is black (the background is light)
+const TXT_WHITE: u64 = 1 // the TEXT is white (the background is dark)
+const TC_WORDS: u64 = 4 // 0 colour, 1 time of the last switch, 2 number of switches, 3 initialised
+const HALF_OF_FIVE: u64 = 3277 // 0.05 * 65536
+
+static mut LIN: [u32; 256] = [
+    0, 20, 40, 60, 80, 99, 119, 139, 159, 179, 199, 219, 241, 264, 288, 313,
+    340, 367, 396, 427, 458, 491, 526, 562, 599, 637, 677, 718, 761, 805, 851, 898,
+    947, 997, 1048, 1101, 1156, 1212, 1270, 1330, 1391, 1453, 1517, 1583, 1651, 1720, 1791, 1863,
+    1937, 2013, 2090, 2170, 2250, 2333, 2418, 2504, 2592, 2681, 2773, 2866, 2961, 3058, 3157, 3258,
+    3360, 3464, 3570, 3678, 3788, 3900, 4014, 4129, 4247, 4366, 4488, 4611, 4736, 4864, 4993, 5124,
+    5257, 5392, 5530, 5669, 5810, 5953, 6099, 6246, 6395, 6547, 6701, 6856, 7014, 7174, 7336, 7500,
+    7666, 7834, 8004, 8177, 8352, 8529, 8708, 8889, 9072, 9258, 9446, 9636, 9828, 10022, 10219, 10418,
+    10619, 10822, 11028, 11236, 11446, 11658, 11873, 12090, 12309, 12531, 12754, 12981, 13209, 13440, 13673, 13909,
+    14147, 14387, 14629, 14874, 15122, 15372, 15624, 15878, 16135, 16394, 16656, 16920, 17187, 17456, 17727, 18001,
+    18278, 18556, 18838, 19121, 19408, 19696, 19988, 20281, 20578, 20876, 21178, 21481, 21788, 22096, 22408, 22722,
+    23038, 23357, 23679, 24003, 24329, 24659, 24991, 25325, 25662, 26002, 26344, 26689, 27036, 27387, 27739, 28095,
+    28453, 28813, 29177, 29543, 29911, 30283, 30657, 31033, 31413, 31795, 32180, 32567, 32957, 33350, 33746, 34144,
+    34545, 34949, 35355, 35765, 36177, 36591, 37009, 37429, 37852, 38278, 38707, 39138, 39572, 40009, 40449, 40892,
+    41337, 41786, 42237, 42691, 43147, 43607, 44069, 44534, 45003, 45474, 45947, 46424, 46904, 47386, 47871, 48360,
+    48851, 49345, 49842, 50342, 50844, 51350, 51859, 52370, 52884, 53402, 53922, 54445, 54972, 55501, 56033, 56568,
+    57106, 57647, 58191, 58738, 59288, 59841, 60397, 60956, 61518, 62083, 62651, 63222, 63796, 64373, 64953, 65536,
+]
+
+// sRGB 8 bit -> linear light, Q16
+fn lin_q16(c: u64) -> u64 {
+    return LIN[(c & 0xFF) as usize] as u64
+}
+
+// relative luminance of 0x00RRGGBB, Q16 (0 = black, 65536 = white)
+fn lum_q16(rgb: u64) -> u64 {
+    let r: u64 = lin_q16((rgb >> 16) & 0xFF)
+    let g: u64 = lin_q16((rgb >> 8) & 0xFF)
+    let b: u64 = lin_q16(rgb & 0xFF)
+    return (r * 2126 + g * 7152 + b * 722) / 10000
+}
+
+// WCAG contrast ratio of two luminances (Q16), times 100: 21:1 = 2100, 4.5:1 = 450
+fn contrast_x100(l1: u64, l2: u64) -> u64 {
+    var hi: u64 = l1
+    var lo: u64 = l2
+    if lo > hi {
+        hi = l2
+        lo = l1
+    }
+    return ((hi + HALF_OF_FIVE) * 100) / (lo + HALF_OF_FIVE)
+}
+
+// the colour with the better contrast on a background of luminance `lum` (no memory, no hysteresis)
+fn text_for(lum: u64) -> u64 {
+    if lum > L_SWITCH {
+        return TXT_BLACK
+    }
+    return TXT_WHITE
+}
+
+fn tget(st: u64, w: u64) -> u64 {
+    return *((st + w * 8) as *mut u64)
+}
+
+fn tput(st: u64, w: u64, v: u64) {
+    *((st + w * 8) as *mut u64) = v
+}
+
+// start: the first measurement decides at once (no hold), and the switch count starts at 0
+fn tc_init(st: u64, now_ms: u64, lum: u64) {
+    tput(st, 0, text_for(lum))
+    tput(st, 1, now_ms)
+    tput(st, 2, 0)
+    tput(st, 3, 1)
+}
+
+fn tc_color(st: u64) -> u64 {
+    return tget(st, 0)
+}
+
+fn tc_flips(st: u64) -> u64 {
+    return tget(st, 2)
+}
+
+fn tc_last_ms(st: u64) -> u64 {
+    return tget(st, 1)
+}
+
+// feed one measurement; returns the colour to use now. `band` is the dead band on each side of L_SWITCH, `hold` the minimum time
+// between two switches in ms. (band = 0, hold = 0 is the plain threshold: the counter-proof.)
+fn tc_update_ex(st: u64, now_ms: u64, lum: u64, band: u64, hold: u64) -> u64 {
+    if tget(st, 3) == 0 {
+        tc_init(st, now_ms, lum)
+        return tget(st, 0)
+    }
+    let cur: u64 = tget(st, 0)
+    var want: u64 = cur
+    if cur == TXT_WHITE && lum > L_SWITCH + band {
+        want = TXT_BLACK
+    }
+    if cur == TXT_BLACK && lum + band < L_SWITCH {
+        want = TXT_WHITE
+    }
+    if want != cur && now_ms - tget(st, 1) >= hold {
+        tput(st, 0, want)
+        tput(st, 1, now_ms)
+        tput(st, 2, tget(st, 2) + 1)
+        return want
+    }
+    return cur
+}
+
+fn tc_update(st: u64, now_ms: u64, lum: u64) -> u64 {
+    return tc_update_ex(st, now_ms, lum, BAND, HOLD_MS)
+}
+
+// the tint behind the text, 0..255 (0 = none needed). `colour` is the text colour. A black tint under white text (a white tint under
+// black text) scales the distance to the extreme: white text needs hi' <= 0.183, black text needs lo' >= 0.175 (4.5:1). Linear blend.
+fn scrim_alpha(lo: u64, hi: u64, colour: u64) -> u64 {
+    if colour == TXT_WHITE {
+        // white text on a tint of black over the brightest sample: hi * (255 - a) / 255 <= 12000 (L = 0.1833 -> 1.05 / 0.2333 = 4.5)
+        if hi <= 12012 {
+            return 0
+        }
+        return 255 - (12012 * 255) / hi
+    }
+    // black text on a tint of white over the darkest sample: lo + (65536 - lo) * a / 255 >= 11469 (L = 0.175 -> 0.225 / 0.05 = 4.5)
+    if lo >= 11469 {
+        return 0
+    }
+    return ((11469 - lo) * 255) / (65536 - lo) + 1
+}
