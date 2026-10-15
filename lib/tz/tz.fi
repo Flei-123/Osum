@@ -1,0 +1,353 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/tz/tz.fi -- time zones for OrientOS (N-004, r20).
+//
+// WHAT THIS IS
+//   Pure arithmetic + a small generated table (`zonedata.fi`, 79 zones). One
+//   function answers "what is the offset from UTC at this instant" for a zone
+//   described by a STANDARD offset and a summer-time RULE; the kernel
+//   (`kernel/sched/time.fi`), the file times (`expmodell.fi`) and the settings
+//   picker all use it, so there is one reading of the rules.
+//
+// OFFSETS ARE "WRAPPED SIGNED MINUTES"
+//   A zone west of Greenwich has a negative offset. The kernel works on u64
+//   with wrapping operators, so a negative number of minutes is stored as
+//   `0 -% n` (two's complement) and added with `+%`: `utc +% (off *% 60)`
+//   is then correct for both signs. `to_wrapped` / `magnitude` / `is_west`
+//   convert from and to the (magnitude, west flag) pair that crosses the
+//   system call boundary (`SYS_OSUM_SETTZ`, rule argument bit 8 = west).
+//
+// RULES (the instants are those of the CURRENT law; no history before 2007)
+//   0 none    1 EU   last Sun Mar 01:00 UTC -> last Sun Oct 01:00 UTC
+//   2 US/CA   2nd Sun Mar 02:00 standard -> 1st Sun Nov 02:00 daylight (01:00 standard)
+//   3 AU(S)   1st Sun Oct 02:00 standard -> 1st Sun Apr 03:00 daylight (southern)
+//   4 NZ      last Sun Sep 02:00 standard -> 1st Sun Apr 03:00 daylight (southern)
+//
+// HONEST
+//   * Only zones whose offsets the four rules reproduce for 2024..2040 are in the
+//     table (tools/tz/gen.py classifies every candidate against IANA tzdata and
+//     refuses the rest: Santiago, Havana, Jerusalem, Cairo, Casablanca).
+//   * No history (a file from 2005 uses today's rule) and no leap-second or
+//     "permanent DST" legislation that is not yet in force.
+//   * Measured by tools/tz/run.sh against Python's zoneinfo (IANA tzdata).
+
+export {
+    R_NONE, R_EU, R_US, R_AU, R_NZ, RULE_MAX, NONE_ZONE,
+    to_wrapped, magnitude, is_west, rule_of_arg, west_bit,
+    dst_active, offset_min,
+    zone_count, zone_region, zone_name, zone_base, zone_rule,
+    region_n, zone_in_region, zone_find, zone_by_name,
+}
+import tz.zonedata
+
+const R_NONE: u64 = 0
+const R_EU: u64 = 1
+const R_US: u64 = 2
+const R_AU: u64 = 3
+const R_NZ: u64 = 4
+const RULE_MAX: u64 = 4
+const NONE_ZONE: u64 = 0xffffffff
+
+// ---------------------------------------------------------------- signed minutes
+fn to_wrapped(mag: u64, west: u64) -> u64 {
+    if west != 0 {
+        return 0 -% mag
+    }
+    return mag
+}
+
+// 1 if the wrapped value is negative (top bit)
+fn is_west(w: u64) -> u64 {
+    if (w >> 63) != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn magnitude(w: u64) -> u64 {
+    if (w >> 63) != 0 {
+        return 0 -% w
+    }
+    return w
+}
+
+// the system call passes rule | (west << 8)
+fn rule_of_arg(arg: u64) -> u64 {
+    return arg & 255
+}
+
+fn west_bit(arg: u64) -> u64 {
+    return (arg >> 8) & 1
+}
+
+// ---------------------------------------------------------------- calendar
+fn days_from_civil(y0: u64, m: u64, d: u64) -> u64 {
+    var y: u64 = y0
+    if m <= 2 {
+        y = y -% 1
+    }
+    let era: u64 = y / 400
+    let yoe: u64 = y -% (era *% 400)
+    var mp: u64 = 0
+    if m > 2 {
+        mp = m -% 3
+    } else {
+        mp = m +% 9
+    }
+    let doy: u64 = (((153 *% mp) +% 2) / 5) +% (d -% 1)
+    let doe: u64 = ((yoe *% 365) +% (yoe / 4) -% (yoe / 100)) +% doy
+    return ((era *% 146097) +% doe) -% 719468
+}
+
+// the civil year of a day count since 1970
+fn year_of_days(days: u64) -> u64 {
+    let z: u64 = days +% 719468
+    let era: u64 = z / 146097
+    let doe: u64 = z -% (era *% 146097)
+    let yoe: u64 = (((doe -% (doe / 1460)) +% (doe / 36524)) -% (doe / 146096)) / 365
+    let y: u64 = yoe +% (era *% 400)
+    let doy: u64 = doe -% (((365 *% yoe) +% (yoe / 4)) -% (yoe / 100))
+    let mp: u64 = ((5 *% doy) +% 2) / 153
+    if mp >= 10 {
+        return y +% 1
+    }
+    return y
+}
+
+// 0 = Sunday (1 Jan 1970 was a Thursday)
+fn weekday(days: u64) -> u64 {
+    return (days +% 4) % 7
+}
+
+// the last Sunday of a month that has `mlen` days, as a day count
+fn last_sunday(y: u64, m: u64, mlen: u64) -> u64 {
+    let last: u64 = days_from_civil(y, m, mlen)
+    return last -% weekday(last)
+}
+
+// the n-th Sunday (1 = first) of a month
+fn nth_sunday(y: u64, m: u64, n: u64) -> u64 {
+    let first: u64 = days_from_civil(y, m, 1)
+    let w: u64 = weekday(first)
+    var s: u64 = first
+    if w != 0 {
+        s = first +% (7 -% w)
+    }
+    return s +% (7 *% (n -% 1))
+}
+
+// ---------------------------------------------------------------- the rules
+// Is summer time in force at this instant (UTC seconds)? `base` = wrapped
+// standard offset in minutes (the US/AU/NZ changeovers are local times).
+fn dst_active(utc: u64, base: u64, rule: u64) -> bool {
+    if rule == R_NONE || rule > RULE_MAX {
+        return false
+    }
+    if rule == R_EU {
+        let y: u64 = year_of_days(utc / 86400)
+        let a: u64 = (last_sunday(y, 3, 31) *% 86400) +% 3600
+        let b: u64 = (last_sunday(y, 10, 31) *% 86400) +% 3600
+        return utc >= a && utc < b
+    }
+    let ls: u64 = utc +% (base *% 60) // local standard time
+    let y: u64 = year_of_days(ls / 86400)
+    if rule == R_US {
+        let a: u64 = (nth_sunday(y, 3, 2) *% 86400) +% 7200
+        let b: u64 = (nth_sunday(y, 11, 1) *% 86400) +% 3600
+        return ls >= a && ls < b
+    }
+    let end: u64 = (nth_sunday(y, 4, 1) *% 86400) +% 7200
+    if rule == R_AU {
+        let a: u64 = (nth_sunday(y, 10, 1) *% 86400) +% 7200
+        return ls >= a || ls < end
+    }
+    let a: u64 = (last_sunday(y, 9, 30) *% 86400) +% 7200
+    return ls >= a || ls < end
+}
+
+// the total offset (wrapped signed minutes) at the instant
+fn offset_min(utc: u64, base: u64, rule: u64) -> u64 {
+    if dst_active(utc, base, rule) {
+        return base +% 60
+    }
+    return base
+}
+
+// ---------------------------------------------------------------- the table
+// "<region><name>,<offset>,<rule>\n" per zone (zonedata.fi).
+fn zline(i: u64) -> u64 {
+    let p: u64 = zonedata.zdata()
+    let n: u64 = zonedata.zdata_len()
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < i {
+        while at < n && *((p + at) as *mut u8) != 10 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+        if at >= n {
+            return NONE_ZONE
+        }
+        k = k + 1
+    }
+    if at >= n {
+        return NONE_ZONE
+    }
+    return at
+}
+
+fn zone_count() -> u64 {
+    let p: u64 = zonedata.zdata()
+    let n: u64 = zonedata.zdata_len()
+    var c: u64 = 0
+    var at: u64 = 0
+    while at < n {
+        if *((p + at) as *mut u8) == 10 as u8 {
+            c = c + 1
+        }
+        at = at + 1
+    }
+    return c
+}
+
+// the region letter of a zone: U utc, E europe west/central, G europe north/east,
+// A north america, L latin america, S asia, F africa, P australia/pacific
+fn zone_region(i: u64) -> u64 {
+    let at: u64 = zline(i)
+    if at == NONE_ZONE {
+        return 0
+    }
+    return (*((zonedata.zdata() + at) as *mut u8)) as u64
+}
+
+// copies the display name (NUL-terminated) to `out` (max 31 chars); its length
+fn zone_name(i: u64, out: u64) -> u64 {
+    let at: u64 = zline(i)
+    if at == NONE_ZONE {
+        *(out as *mut u8) = 0 as u8
+        return 0
+    }
+    let p: u64 = zonedata.zdata() + at + 1
+    var k: u64 = 0
+    while k < 31 {
+        let c: u8 = *((p + k) as *mut u8)
+        if c == 44 as u8 || c == 10 as u8 || c == 0 as u8 {
+            break
+        }
+        *((out + k) as *mut u8) = c
+        k = k + 1
+    }
+    *((out + k) as *mut u8) = 0 as u8
+    return k
+}
+
+// the field after the first (field 1) or second (field 2) comma, as a number
+fn zfield(i: u64, field: u64) -> u64 {
+    let at: u64 = zline(i)
+    if at == NONE_ZONE {
+        return 0
+    }
+    var p: u64 = zonedata.zdata() + at
+    var commas: u64 = 0
+    while commas < field {
+        if *(p as *mut u8) == 44 as u8 {
+            commas = commas + 1
+        }
+        p = p + 1
+    }
+    var west: bool = false
+    if *(p as *mut u8) == 45 as u8 {
+        west = true
+        p = p + 1
+    }
+    var v: u64 = 0
+    while *(p as *mut u8) >= 48 as u8 && *(p as *mut u8) <= 57 as u8 {
+        v = (v *% 10) +% ((*(p as *mut u8)) as u64 -% 48)
+        p = p + 1
+    }
+    if west {
+        return 0 -% v
+    }
+    return v
+}
+
+// the standard offset in wrapped signed minutes
+fn zone_base(i: u64) -> u64 {
+    return zfield(i, 1)
+}
+
+fn zone_rule(i: u64) -> u64 {
+    return zfield(i, 2)
+}
+
+fn region_n(reg: u64) -> u64 {
+    var c: u64 = 0
+    let n: u64 = zone_count()
+    var i: u64 = 0
+    while i < n {
+        if zone_region(i) == reg {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// the k-th zone (0-based) of a region as a global index, NONE_ZONE if there is none
+fn zone_in_region(reg: u64, k: u64) -> u64 {
+    var c: u64 = 0
+    let n: u64 = zone_count()
+    var i: u64 = 0
+    while i < n {
+        if zone_region(i) == reg {
+            if c == k {
+                return i
+            }
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return NONE_ZONE
+}
+
+// the first zone with this standard offset and rule
+fn zone_find(base: u64, rule: u64) -> u64 {
+    let n: u64 = zone_count()
+    var i: u64 = 0
+    while i < n {
+        if zone_base(i) == base && zone_rule(i) == rule {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE_ZONE
+}
+
+// a zone by its display name (the text of a NUL-terminated string at `name`)
+fn zone_by_name(name: u64) -> u64 {
+    var buf: [u8; 32] = [0 as u8; 32]
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = zone_count()
+    var i: u64 = 0
+    while i < n {
+        let _l: u64 = zone_name(i, b)
+        var k: u64 = 0
+        var same: bool = true
+        while k < 32 {
+            let x: u8 = *((b + k) as *mut u8)
+            let y: u8 = *((name + k) as *mut u8)
+            if x != y {
+                same = false
+                break
+            }
+            if x == 0 as u8 {
+                break
+            }
+            k = k + 1
+        }
+        if same {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE_ZONE
+}

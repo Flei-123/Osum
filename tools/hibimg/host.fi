@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/hibimg/host.fi -- host test of lib/power/hibimg.fi (S4 image header, extents, CRC32).
+import std.rt
+import std.io
+import power.hibimg
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut hb: [u8; 512] = [0 as u8; 512]
+static mut db: [u8; 16] = [0 as u8; 16]
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn hp() -> u64 {
+    return (&hb[0 as usize]) as u64
+}
+
+fn build(extra: u64) {
+    hibimg.hdr_init(hp(), 0xB16B00B5, 8, 16)
+    hibimg.ext_add(hp(), 256, 100)
+    hibimg.ext_add(hp(), 356, 4)     // continues the first run -> merged
+    hibimg.ext_add(hp(), 1024, 10 + extra)
+    hibimg.hdr_seal(hp(), 0xDEADBEEF)
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    // CRC32 known answer: "123456789" -> 0xCBF43926
+    db[0] = 0x31 as u8
+    db[1] = 0x32 as u8
+    db[2] = 0x33 as u8
+    db[3] = 0x34 as u8
+    db[4] = 0x35 as u8
+    db[5] = 0x36 as u8
+    db[6] = 0x37 as u8
+    db[7] = 0x38 as u8
+    db[8] = 0x39 as u8
+    let dp: u64 = (&db[0 as usize]) as u64
+    check(&t, hibimg.crc32(dp, 9) == 0xCBF43926, "crc32(123456789) = 0xCBF43926")
+    check(&t, hibimg.crc32_update(hibimg.crc32(dp, 4), dp + 4, 5) == 0xCBF43926, "crc32 can be fed in two pieces")
+    build(0)
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_OK, "good header validates")
+    check(&t, hibimg.hdr_extents(hp()) == 2 && hibimg.hdr_pages(hp()) == 114, "adjacent run merged: 2 extents, 114 pages")
+    check(&t, hibimg.ext_get(hp(), 0, 0) == 256 && hibimg.ext_get(hp(), 0, 1) == 104 && hibimg.ext_get(hp(), 1, 0) == 1024, "extent values")
+    check(&t, hibimg.hdr_data_crc(hp()) == 0xDEADBEEF, "data crc stored")
+    check(&t, hibimg.hdr_check(hp(), 0x1234) == hibimg.E_BUILD, "image of another kernel build is refused")
+    hb[300] = (hb[300] ^ 1) as u8
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_HDR_CRC, "one flipped bit in the tail -> header crc error")
+    build(0)
+    hb[70] = (hb[70] ^ 0x80) as u8
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_HDR_CRC, "one flipped bit in an extent -> header crc error")
+    build(0)
+    hb[2] = 0 as u8
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_MAGIC, "bad magic")
+    build(0)
+    hb[8] = 2 as u8
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_VERSION, "unknown version")
+    build(0)
+    hibimg.hdr_invalidate(hp())
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_MAGIC, "invalidated header is 'no image' (no resume loop)")
+    // page count that does not match the extents (valid crc!)
+    build(0)
+    hb[24] = 99 as u8
+    hibimg.hdr_seal(hp(), 1)
+    check(&t, hibimg.hdr_check(hp(), 0xB16B00B5) == hibimg.E_EXTENTS, "page count vs extent sum mismatch is refused")
+    // zero-length extent (valid crc)
+    hibimg.hdr_init(hp(), 7, 8, 16)
+    hibimg.ext_add(hp(), 5, 1)
+    hb[72] = 0 as u8
+    hibimg.hdr_seal(hp(), 1)
+    check(&t, hibimg.hdr_check(hp(), 7) == hibimg.E_EXTENTS, "zero-length extent is refused")
+    // header with no extent at all
+    hibimg.hdr_init(hp(), 7, 8, 16)
+    hibimg.hdr_seal(hp(), 1)
+    check(&t, hibimg.hdr_check(hp(), 7) == hibimg.E_EXTENTS, "no extents is refused")
+    // 28 slots full, the 29th (non-adjacent) run is refused
+    hibimg.hdr_init(hp(), 7, 8, 16)
+    var i: u64 = 0
+    var okall: bool = true
+    while i < 28 {
+        if !hibimg.ext_add(hp(), i * 100, 10) {
+            okall = false
+        }
+        i = i + 1
+    }
+    check(&t, okall && hibimg.hdr_extents(hp()) == 28, "28 extents fit")
+    check(&t, !hibimg.ext_add(hp(), 99999, 1) && hibimg.hdr_extents(hp()) == 28, "29th run refused, header unchanged")
+    hibimg.hdr_seal(hp(), 1)
+    check(&t, hibimg.hdr_check(hp(), 7) == hibimg.E_OK && hibimg.hdr_pages(hp()) == 280, "full header validates, 280 pages")
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

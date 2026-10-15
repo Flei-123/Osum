@@ -55,6 +55,8 @@ hd max0 two | grep -aq 'x=0 y=0 w=640 h=452 head=0' && ok "maximize on head 0 fi
 hd unmax1 two | grep -aq 'head=1' && ok "un-maximize keeps the window on head 1" || bad "unmax1: $(hd unmax1 two)"
 hd full1 two | grep -aq 'x=640 y=0 w=640 h=480 head=1' && ok "fullscreen on head 1 = head 1 (640,0 640x480)" || bad "full1: $(hd full1 two)"
 has '^hd: clamp x=700 y=239$' two && ok "pointer below the 240-high head 1 is pulled onto it (700,239)" || bad "clamp: $(grep -a '^hd: clamp' $T/two.txt)"
+grep -aqE '^wm: hscale 0=(100|125|150|175|200|250|300) u=[1-4]$' $T/two.txt && grep -aqE '^wm: hscale 1=(100|125|150|175|200|250|300) u=[1-4]$' $T/two.txt && ok "r815: every head reports its EDID scale suggestion (percent) next to the UI scale in use" || bad "hscale lines: $(grep -a '^wm: hscale' $T/two.txt | head -3)"
+grep -aq '^wm: hscale 0=100 u=1$' $T/two.txt && ok "r815: QEMU EDID (100 dpi) suggests 100 %, UI scale stays 1 (no regression of the VM gates)" || bad "hscale 0 not 100/1"
 # r839: tile tree per head (hdtest tile section: bar and old windows gone, tiling on, head work areas = head rects)
 has '^hd: trees start nodes=0 leaves=0$' two && ok "r839: clean slate, no tiled window" || bad "tile start"
 hd tile-c1 two | grep -aq 'x=640 y=0 w=640 h=480 head=1' && ok "r839: first window on head 1 fills head 1 (own tree)" || bad "tile-c1: $(hd tile-c1 two)"

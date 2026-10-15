@@ -42,12 +42,13 @@ G = 24.0
 #   0 Pfeil, 1 Textmarke, 2 Hand, 3 Breite, 4 Hoehe,
 #   5 Diagonale NW-SO, 6 Diagonale NO-SW, 7 Verschieben, 8 Warten,
 #   9 Verboten (Ring mit Schraegstrich, EIN einfacher Umriss)
+#   10 Kopie (Plus, drag and drop mit Ctrl), 11 Ziel (Pfeil nach unten, drag and drop verschieben)
 #
 # Je Form: (Name, Griffpunkt, Umriss).  Der Griffpunkt ist die Stelle
 # im Entwurfsraster, die auf der Mausposition liegt -- beim Pfeil die
 # Spitze, bei allen anderen die Mitte.
 NAMEN = ["pfeil", "text", "hand", "breite", "hoehe",
-         "diag1", "diag2", "kreuz", "warten", "verboten"]
+         "diag1", "diag2", "kreuz", "warten", "verboten", "kopie", "ziel"]
 
 
 def _dreh(pts, grad, cx=12.0, cy=12.0):
@@ -156,6 +157,9 @@ def _verboten():
 
 VERBOTEN = _verboten()
 
+KOPIE = [(10, 3), (14, 3), (14, 10), (21, 10), (21, 14), (14, 14), (14, 21), (10, 21), (10, 14), (3, 14), (3, 10), (10, 10)]
+ZIEL = [(10, 2.5), (14, 2.5), (14, 12.5), (17.5, 12.5), (12, 19), (6.5, 12.5), (10, 12.5)]
+
 FORMEN = [
     ("pfeil",  (2.0, 2.0),   PFEIL),
     ("text",   (12.0, 12.0), TEXT),
@@ -167,6 +171,8 @@ FORMEN = [
     ("kreuz",  (12.0, 12.0), KREUZ),
     ("warten", (12.0, 12.0), WARTEN),
     ("verboten", (12.0, 12.0), VERBOTEN),
+    ("kopie", (12.0, 12.0), KOPIE),
+    ("ziel", (12.0, 12.0), ZIEL),
 ]
 
 

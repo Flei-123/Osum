@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/monitors/eld.fi -- parser for the HDA "ELD" (EDID-Like Data) block that an HDMI/DP codec pin
+// hands out for the monitor behind it (Intel HDA spec 1.0a section 7.3.3.34, CEA-861 short audio descriptors).
+//
+// Pure arithmetic on a byte buffer, no hardware: the HDA driver reads the bytes with verb GET_HDMI_ELDD (0xF2F),
+// this file decides "can this monitor play 2 channel PCM at 48 kHz", "how many audio formats does it list", "what is it called".
+//
+// ELD layout (bytes):
+//   0      bits 7:3 ELD version (2 = CEA-861 based)
+//   2      baseline block length in 4-byte units
+//   4      bits 7:3 CEA EDID version, bits 4:0 MNL (monitor name length)
+//   5      bits 7:4 SAD_Count, bits 3:2 connection type (0 HDMI, 1 DP), bit 1 S_AI, bit 0 HDCP
+//   6      audio synch delay (2 ms units)
+//   7      speaker allocation (CEA bit field)
+//   8..15  port id, 16..17 manufacturer, 18..19 product
+//   20..   monitor name (MNL bytes), then SAD_Count short audio descriptors of 3 bytes
+// SAD: byte 0 bits 6:3 format code (1 = LPCM), bits 2:0 = max channels - 1; byte 1 bits = sample rates
+//   (bit0 32k, bit1 44.1k, bit2 48k, bit3 88.2k, bit4 96k, bit5 176.4k, bit6 192k); byte 2 (LPCM) bits 2:0 = 16/20/24 bit.
+
+export {
+    ELD_MIN, RATE_32K, RATE_44K, RATE_48K, RATE_96K, RATE_192K,
+    eld_valid, eld_version, eld_sad_count, eld_name_len, eld_name_at, eld_is_dp, eld_speakers,
+    eld_sad_format, eld_sad_channels, eld_sad_rates,
+    eld_pcm_ok, eld_best_pcm_rate
+}
+
+const ELD_MIN: u64 = 20
+
+const RATE_32K: u64 = 1
+const RATE_44K: u64 = 2
+const RATE_48K: u64 = 4
+const RATE_96K: u64 = 16
+const RATE_192K: u64 = 64
+
+fn rd8(p: u64, off: u64) -> u64 {
+    let q: *mut u8 = (p + off) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+fn eld_version(e: u64) -> u64 {
+    return rd8(e, 0) >> 3
+}
+
+fn eld_name_len(e: u64) -> u64 {
+    return rd8(e, 4) & 31
+}
+
+fn eld_sad_count(e: u64) -> u64 {
+    return rd8(e, 5) >> 4
+}
+
+fn eld_is_dp(e: u64) -> bool {
+    return ((rd8(e, 5) >> 2) & 3) == 1
+}
+
+fn eld_speakers(e: u64) -> u64 {
+    return rd8(e, 7)
+}
+
+// Byte `i` of the monitor name (0 beyond its length).
+fn eld_name_at(e: u64, i: u64) -> u64 {
+    if i >= eld_name_len(e) {
+        return 0
+    }
+    return rd8(e, 20 + i)
+}
+
+// A usable ELD: `len` bytes read, version 2 (CEA-861), the baseline block fits in what was read, the name and the SADs fit in the baseline block.
+fn eld_valid(e: u64, len: u64) -> bool {
+    if len < ELD_MIN {
+        return false
+    }
+    if eld_version(e) != 2 {
+        return false
+    }
+    let base: u64 = rd8(e, 2) * 4
+    if base < 16 || 4 + base > len {
+        return false
+    }
+    let need: u64 = 16 + eld_name_len(e) + eld_sad_count(e) * 3
+    return need <= base
+}
+
+fn sad_at(e: u64, i: u64) -> u64 {
+    return 20 + eld_name_len(e) + i * 3
+}
+
+fn eld_sad_format(e: u64, i: u64) -> u64 {
+    return (rd8(e, sad_at(e, i)) >> 3) & 15
+}
+
+fn eld_sad_channels(e: u64, i: u64) -> u64 {
+    return (rd8(e, sad_at(e, i)) & 7) + 1
+}
+
+fn eld_sad_rates(e: u64, i: u64) -> u64 {
+    return rd8(e, sad_at(e, i) + 1) & 127
+}
+
+// Does a SAD list LPCM with at least `ch` channels at the rate bit `rate`?
+fn eld_pcm_ok(e: u64, len: u64, ch: u64, rate: u64) -> bool {
+    if !eld_valid(e, len) {
+        return false
+    }
+    var i: u64 = 0
+    while i < eld_sad_count(e) {
+        if eld_sad_format(e, i) == 1 && eld_sad_channels(e, i) >= ch && (eld_sad_rates(e, i) & rate) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The highest LPCM rate bit (2 channels) the monitor lists, 0 if none. 48 kHz is what the HDA stream format of this kernel uses; every HDMI sink must take
+// 32/44.1/48 kHz 2 ch LPCM, so a valid ELD without LPCM SAD is treated as "basic audio only": that is 48 kHz.
+fn eld_best_pcm_rate(e: u64, len: u64) -> u64 {
+    if !eld_valid(e, len) {
+        return 0
+    }
+    var best: u64 = 0
+    var i: u64 = 0
+    while i < eld_sad_count(e) {
+        if eld_sad_format(e, i) == 1 && eld_sad_channels(e, i) >= 2 {
+            let r: u64 = eld_sad_rates(e, i)
+            var b: u64 = 64
+            while b > 0 {
+                if (r & b) != 0 && b > best {
+                    best = b
+                }
+                b = b >> 1
+            }
+        }
+        i = i + 1
+    }
+    if best == 0 {
+        return RATE_48K
+    }
+    return best
+}

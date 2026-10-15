@@ -48,6 +48,7 @@ import arch.cpu
 import sched.proc
 import drv.hid.ps2m
 import drv.hid.ptrcfg
+import drv.hid.i2chid
 import pwr.pwr
 import pwr.s3
 import sched.sched
@@ -78,7 +79,7 @@ import lib.ksymtab
 
 export {
     stage_graphics, stage_surface, stage_hold, tafel_tick, beat_tick,
-    leser_tick,
+    leser_tick, dnd_pump,
     // RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` ruft sie.
     absturz,
     // RUNDE GLYPHE: die drei Tueren des Zeichen-Nachweises.
@@ -427,6 +428,13 @@ fn graphics(state: u64, mbi: u64) {
         let ds: u64 = vmode.dpi_scale(state, fb.width(state))
         if ds != 0 {
             let _sc: bool = fb.set_uiscale(state, ds)
+        } else if vgpu.bereit(state) && vgpu.head_edid_ok(state, 0) {
+            // r815: no table EDID (vmode) but the virtual GPU gave one for head 0: its suggested percent
+            // (100/125/150/175/200/250/300) rounded to the integer UI scale this kernel has (150 -> 2).
+            let vs: u64 = (vgpu.head_scale(state, 0) + 50) / 100
+            if vs >= 2 && vs <= 4 {
+                let _sv: bool = fb.set_uiscale(state, vs)
+            }
         }
     }
     // ============================================ RUNDE ECHTHARDWARE-1
@@ -2967,6 +2975,20 @@ fn leser_tick(state: u64) {
     wm.leser_tick(state)
 }
 
+// W-DND: a path dropped on a terminal window is typed into its tty (the window server cannot see the tty module).
+// Called from the window server's poll (`gfx.wm_poll`); nothing waits -> one comparison.
+static mut dnd_buf: [u8; 232] = [0 as u8; 232]
+
+fn dnd_pump(state: u64) {
+    let r: u64 = wm.dnd_take_paste(state, (&dnd_buf[0]) as u64, 230)
+    if r == 0 {
+        return
+    }
+    let t: u64 = r >> 32
+    let n: u64 = r & 0xFFFFFFFF
+    let _s: u64 = tty.push_text(state, t, (&dnd_buf[0]) as u64, n)
+}
+
 // RUNDE VSYNC: DIE ZAHLEN DER BILDGRENZE UND DER BEWEGUNG.
 //
 // Eine Zeile, und jede Zahl darin beantwortet eine Frage, die man sonst
@@ -5495,6 +5517,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         mausflut_schritt(state)
         st(32)
         usb.poll(state)
+        i2chid.poll_tick(state)
         // RUNDE BLECHEINGABE: HIER wird aufgezaehlt und nicht im
         // Zeitgeberbehandler. `attach` wartet in `port_reset` bis zu
         // einer halben Sekunde -- das gehoert in Aufgabenkontext, wo es

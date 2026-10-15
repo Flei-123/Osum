@@ -89,3 +89,25 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - Gates: `tools/barheads/run.sh` (real taskbar, QEMU 2 heads + 1-head control), `tools/wmheads/run.sh` (docking lines).
 - Start menu on the clicked head (r831): window-server value `WS_STARTHEAD` (WIG_SCREEN sub-call 9; a1=0 read, a1=1 set to a2; `wlibc.start_head_set/get`). The bar sets its own head before it toggles/starts the launcher (`startmenue_um`); the launcher reads it at start and again whenever it is shown (`launcher: head to=N`, moves the window to that head's work area). `launcher --head N` does the same at start. The Super key: with several heads only the bar of the head under the pointer answers (`hotkey_mine`), otherwise both bars would toggle the menu twice. Gate `tools/startheads/run.sh`. Not done: a head of another height gets the old window size (only the place moves).
 - Open: notification bell/toasts exist per bar; tile TREE per head; hot-plug path of the bars only compiled (no way to unplug a head in QEMU from a running userland).
+
+## r815 round 3 (15.10.2026) — EDID scale reaches the desktop, HDMI pin probe, ELD model
+
+- **UI scale from the virtual GPU's EDID** (`kernel/ui/kgui.fi`): when the table EDID (`vmode`) gave no suggestion, the percent of head 0
+  (`vgpu.head_scale`, 100/125/150/175/200/250/300) is rounded to the integer UI scale this kernel has (`(pct+50)/100`: 150 % -> 2, 250 % -> 3);
+  `uiscale=<n>` on the command line still wins. A true fractional UI scale (125 %, 150 %) is NOT there: `fb.uiscale` is 1..4 and wlib/fUi multiply
+  integers. Per-head scale (a window moving between a 100 % and a 200 % head changes size) is not there either: ONE scale for the whole desktop.
+- **Scale per head to ring 3:** window-server `WS_HEAD` field 5 = suggested percent of head N (`wlibc.head_scale(hd)`, 100 when unknown). Serial witness
+  `wm: hscale N=P u=U` (P = EDID percent of head N, U = UI scale in use); gate `tools/wmheads/run.sh`.
+  QEMU's EDID is 100 dpi -> 100 % -> UI scale 1 (no change for the VM gates).
+- **HDMI/DP audio, step 1 = look** (`kernel/drv/snd/hda.fi` `hdmi_probe`, read only, runs once at driver init): for every codec on the link and every digital
+  output pin (`PINCAP` HDMI bit 7 or DP bit 24) it prints `hda: hdmi cad=C nid=N pincap=0x.. sense=0x.. eld=LEN [mon=NAME dp=0|1 sad=N rate=R]`.
+  `sense` = GET_PIN_SENSE (bit 31 monitor plugged, bit 30 ELD valid); the ELD is read byte by byte with verb 0xF2F after the size (0xF2E, param 8).
+  `lib/monitors/eld.fi` parses it (pure, host-tested in `tools/monitors/run.sh`, 4 negative controls): version, monitor name, DP/HDMI, SADs, "LPCM n channels at rate".
+  QEMU's intel-hda codecs have NO digital pins -> the line cannot appear in a VM: **only the Dell can show it** (boot log, `dmesg`-style serial or the
+  bridge). That log tells what the real HDMI codec is (cad, nid, ELD) before routing is written.
+- **Still open for HDMI sound:** digital converter format (IEC958 bits, `SET_DIGI_CONVERT_1`), stream/channel on the digital converter, pin widget control (output enable,
+  `SET_PINCTL` bit 6), InfoFrame (audio DIP) for HDMI, hotplug via unsolicited response; then `layout.audio_pin` decides, `choose_path` takes the digital pin when the
+  decision says yes. Not VM-testable (no HDMI codec in QEMU) -> needs the Dell.
+- **Extend is a BOOT choice:** `vgpuextend` is a kernel command-line word, read before the file system exists; the boot entry is written by the installer.
+  Settings therefore cannot switch extend/mirror at run time (the framebuffer is one wide resource, sized at boot). Open product decision: default for >= 2 heads.
+- Open (unchanged): a head of another height gets the old window size for the start menu (it only moves); tile tree per head exists (r839).
