@@ -1567,12 +1567,13 @@ def main():
                      # der Doppelpunkt liegt auf Umschalt+Semikolon.
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "?": "shift-slash",
-                     "&": "shift-7", "%": "shift-5"}
+                     "&": "shift-7", "%": "shift-5", "@": "shift-2"}
             # a doubled letter ("ss" in testpass123) is lost at 0.12 s (measured, FreeViewer gui_input gate)
             if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):
                 tippe_gap = max(tippe_gap, 0.4)
             for ch in arg:
-                f.taste(namen.get(ch, ch))
+                # an upper-case letter is Shift + the letter (a bare "H" is no QEMU key name: it was dropped)
+                f.taste(namen.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
                 time.sleep(tippe_gap)
             tippe_gap = base_gap
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))

@@ -35,7 +35,7 @@ run() { # name moreprogs extra-mkfs
     fi
 }
 
-NOTES_X="/apps/ /apps/notes.prog/ /apps/notes.prog/ACTIONS=pakete/notes/ACTIONS@0644"
+NOTES_X="/var/ /var/log/ /apps/ /apps/notes.prog/ /apps/notes.prog/ACTIONS=pakete/notes/ACTIONS@0644"
 run A "orientbus notes act" "$NOTES_X"
 SA="$TMPD/A/serial.txt"
 if [ ! -s "$SA" ]; then bad "A: no serial output"; tail -5 "$TMPD/A.log"; echo "ACTMENU-CLICK: $pass passed, $fail failed"; exit 1; fi
