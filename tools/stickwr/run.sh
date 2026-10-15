@@ -209,8 +209,10 @@ EOF
         && ok "HOST: the first 200003 octets of the stick equal the image" || bad "HOST: the stick does not equal the image"
     cmp -n 4096 "$T/stick1.orig" "$T/stick1.img" > /dev/null 2>&1 \
         && bad "HOST (control): the stick head did not change at all" || ok "HOST (control): the stick head did change"
-    cmp -i 200003 "$T/stick1.orig" "$T/stick1.img" > /dev/null 2>&1 \
-        && ok "HOST: everything behind the image is untouched" || bad "HOST: octets behind the image changed"
+    # behind the image up to the FAT partition (1 MiB): untouched. The partition itself may change:
+    # the ejected FAT mount legitimately writes its clean flag / FSInfo.
+    cmp -i 200003 -n $((1048576 - 200003)) "$T/stick1.orig" "$T/stick1.img" > /dev/null 2>&1 \
+        && ok "HOST: everything behind the image (up to the partition) is untouched" || bad "HOST: octets behind the image changed"
     local after; after=$(count_marker "$T/live.img" "$MAGIC")
     [ "$after" = "$before" ] && ok "HOST: hda has no extra copy of the image marker ($before before, $after after)" \
         || bad "HOST: hda marker count $before -> $after (something was written to hda)"
