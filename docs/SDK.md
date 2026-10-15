@@ -32,9 +32,9 @@ State of AR-2 (docs/APP-RECHTE-ENERGIE.md). The manifest `perm=` (INFO file) is 
 than the app declared. The kernel table of 16 apps (`lib/apprights/policy.fi`), `/bin/apprights` and `/etc/apprights.conf` hold what
 the person actually granted (default deny).
 
-- **Enforced by the kernel:** `net notify clipboard.read clipboard.write audio.play mic window.float`.
+- **Enforced by the kernel:** `net notify clipboard.read clipboard.write audio.play mic window.float hotkey`.
 - **Declared only:** `fs.home` (S-010, no sandbox yet).
 - **In the rights table, not yet in the manifest vocabulary:** camera, location, contacts, phone (bits `P_CAMERA P_LOCATION P_CONTACTS P_PHONE`).
 - **`window.float`** (S2 built): a window above the normal ones, layer `L_FLOAT`, never `L_TOP`; without the right `WS_LAYER` returns `E_RIGHTS`, revoking it drops the window back to `L_NORMAL`.
-- **Planned (docs/APP-WINDOW-OPTS.md):** `hotkey` (a named action with a preferred key), granted by the person like the microphone.
+- **`hotkey`** (S3 built, `docs/HOTKEYS.md`): the helper `hotkeyd` owns the key and calls the app's named bus action (e.g. `jarvismini.toggle`); a line in `/etc/hotkeys.conf` for an app without the right is refused, never bound. Granted by the person like the microphone, NOT in the automatic grant.
 - `min_os` is declared only (the OS has no version number yet).

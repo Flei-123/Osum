@@ -1,0 +1,414 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/hotkeyd.fi -- W-S3 (docs/HOTKEYS.md): THE GLOBAL HOTKEY HELPER.
+//
+// Portal model (like xdg GlobalShortcuts / RegisterHotKey): an app never sees the keys. It owns a NAMED bus action
+// (`jarvismini.toggle`); this helper owns the KEY and calls the action through the bus when the key is pressed.
+//
+//   hotkeyd [config]          default config: /etc/hotkeys.conf; run it through `wmplug enable hotkeyd`
+//
+// /etc/hotkeys.conf, one binding per line, `#` starts a comment:
+//
+//     ctrl+alt+j  jarvismini.toggle
+//
+// RULES (each one prints a line `hotkeyd: ...` on the serial line, nothing is dropped silently):
+//   * the app (text before the first `.` of the action) needs the manifest right `hotkey` (policy bit 4096), asked from the
+//     kernel table when the line is read AND again each time the key fires (a revoked right stops the key at once);
+//   * a binding must contain Ctrl+Alt -- every plain Alt key belongs to the system (tiling, Alt+Tab, Alt+F4);
+//     the kernel also refuses a key that the tile tree binds (`system-key`);
+//   * a key that is already bound is a CONFLICT (second line of the file, or another plugin) -- reported, never overwritten;
+//   * while the screen is locked the kernel drops every shortcut before any plugin hears it (wm.fi `wm: hot gesperrt`).
+// Lines: `bound`, `conflict`, `refused ... reason=`, `fired`, `denied`, `ok`/`failed`.
+
+profile kernel
+
+import ulib
+import actwire
+import actcli
+
+export { u_start }
+
+const WM_PLUG_REG: u64 = 2117
+const WM_PLUG_UNREG: u64 = 2118
+const WM_PLUG_POLL: u64 = 2119
+const WM_PLUG_KEY: u64 = 2123
+const WMP_ABI: u64 = 1
+const E_KEY: u64 = 6
+const KF_ADD: u64 = 0x100
+const SYS_OSUM_ORIGIN: u64 = 1990
+const OG_RGET: u64 = 3
+const P_HOTKEY: u64 = 4096
+const MAX_BIND: u64 = 8
+const ACT_MAX: u64 = 40
+const CONF_MAX: u64 = 2048
+
+static mut conf_buf: [u8; 2048] = [0 as u8; 2048]
+static mut b_key: [u64; 8] = [0 as u64; 8]
+static mut b_mods: [u64; 8] = [0 as u64; 8]
+static mut b_act: [u8; 320] = [0 as u8; 320]
+static mut n_bind: u64 = 0
+static mut p_key: u64 = 0
+static mut p_mods: u64 = 0
+
+fn code_of(r: u64) -> u64 {
+    return 0 -% r
+}
+
+fn act_at(i: u64) -> u64 {
+    return (&b_act[0]) as u64 + i * ACT_MAX
+}
+
+fn is_blank(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+// the right `hotkey` of the app that owns `action` (text up to the first `.`)
+fn has_right(action: u64) -> bool {
+    var app: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    var c: u64 = actwire.ld8(action, 0)
+    while c != 0 && c != 46 && i < 19 {
+        app[i as usize] = c as u8
+        i = i + 1
+        c = actwire.ld8(action + i, 0)
+    }
+    if i == 0 || c != 46 {
+        return false
+    }
+    app[i as usize] = 0 as u8
+    let m: u64 = ulib.sys(SYS_OSUM_ORIGIN, OG_RGET, (&app[0]) as u64, 0)
+    if ulib.failed(m) {
+        return false
+    }
+    return (m & P_HOTKEY) != 0
+}
+
+fn say2(a: u64, b: u64) {
+    ulib.say(a)
+    ulib.say(b)
+}
+
+// "hotkeyd: <verb> <spec> <action>" then the caller adds the tail
+fn head(verb: u64, spec: u64, action: u64) {
+    var s_h: [u8; 10] = "hotkeyd: \0"
+    var s_sp: [u8; 2] = " \0"
+    ulib.say((&s_h[0]) as u64)
+    ulib.say(verb)
+    ulib.say((&s_sp[0]) as u64)
+    ulib.say(spec)
+    ulib.say((&s_sp[0]) as u64)
+    ulib.say(action)
+}
+
+fn tail_reason(r: u64) {
+    var s_r: [u8; 9] = " reason=\0"
+    ulib.say((&s_r[0]) as u64)
+    ulib.say(r)
+    ulib.nl()
+}
+
+// parse "ctrl+alt+j": mods into *mods, key into *key; false = syntax
+fn parse_spec(spec: u64) -> bool {
+    var k: u64 = 0
+    var m: u64 = 0
+    var at: u64 = 0
+    var seg: [u8; 12] = [0 as u8; 12]
+    var more: bool = true
+    var c_ctrl: [u8; 5] = "ctrl\0"
+    var c_alt: [u8; 4] = "alt\0"
+    var c_shift: [u8; 6] = "shift\0"
+    while more {
+        var n: u64 = 0
+        var c: u64 = actwire.ld8(spec + at, 0)
+        while c != 0 && c != 43 && n < 10 {
+            if c >= 65 && c <= 90 {
+                c = c + 32
+            }
+            seg[n as usize] = c as u8
+            n = n + 1
+            at = at + 1
+            c = actwire.ld8(spec + at, 0)
+        }
+        seg[n as usize] = 0 as u8
+        if n == 0 {
+            return false
+        }
+        if c == 43 {
+            at = at + 1
+            if ulib.streq((&seg[0]) as u64, (&c_ctrl[0]) as u64) {
+                m = m | 4
+            } else if ulib.streq((&seg[0]) as u64, (&c_alt[0]) as u64) {
+                m = m | 1
+            } else if ulib.streq((&seg[0]) as u64, (&c_shift[0]) as u64) {
+                m = m | 2
+            } else {
+                return false
+            }
+        } else {
+            // last segment = the key: one character a-z or 0-9
+            if n != 1 || k != 0 {
+                return false
+            }
+            let ch: u64 = seg[0 as usize] as u64
+            if !((ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57)) {
+                return false
+            }
+            k = ch
+            more = false
+        }
+    }
+    if (m & 2) != 0 && k >= 97 && k <= 122 {
+        k = k - 32 // the keyboard delivers the capital with Shift
+    }
+    p_key = k
+    p_mods = m
+    return true
+}
+
+// one line [s, e) of the file
+fn do_line(s: u64, e: u64) {
+    var spec: [u8; 32] = [0 as u8; 32]
+    var act: [u8; 40] = [0 as u8; 40]
+    var s_syn: [u8; 15] = "line syntax ok\0"
+    var s_bad: [u8; 7] = "syntax\0"
+    var s_sys: [u8; 11] = "system-key\0"
+    var s_nor: [u8; 9] = "no-right\0"
+    var s_pr: [u8; 14] = "plugin-right\0\0"
+    var s_full: [u8; 11] = "table-full\0"
+    var s_bound: [u8; 6] = "bound\0"
+    var s_conf: [u8; 9] = "conflict\0"
+    var s_ref: [u8; 8] = "refused\0"
+    var s_held: [u8; 10] = " held-by=\0"
+    var s_oth: [u8; 14] = "other-plugin\0\0"
+    var s_kc: [u8; 6] = " key=\0"
+    var s_md: [u8; 7] = " mods=\0"
+    var s_app: [u8; 7] = " app=\0\0"
+    var p: u64 = s
+    // cut a comment
+    var end: u64 = e
+    var q: u64 = s
+    while q < e {
+        if actwire.ld8(q, 0) == 35 {
+            end = q
+            q = e
+        } else {
+            q = q + 1
+        }
+    }
+    while p < end && is_blank(actwire.ld8(p, 0)) {
+        p = p + 1
+    }
+    if p >= end {
+        return
+    }
+    var n: u64 = 0
+    while p < end && !is_blank(actwire.ld8(p, 0)) && n < 31 {
+        spec[n as usize] = actwire.ld8(p, 0) as u8
+        n = n + 1
+        p = p + 1
+    }
+    while p < end && is_blank(actwire.ld8(p, 0)) {
+        p = p + 1
+    }
+    var a: u64 = 0
+    while p < end && !is_blank(actwire.ld8(p, 0)) && a < 39 {
+        act[a as usize] = actwire.ld8(p, 0) as u8
+        a = a + 1
+        p = p + 1
+    }
+    let sp: u64 = (&spec[0]) as u64
+    let ap: u64 = (&act[0]) as u64
+    if a == 0 || !parse_spec(sp) {
+        head((&s_ref[0]) as u64, sp, ap)
+        tail_reason((&s_bad[0]) as u64)
+        return
+    }
+    let key: u64 = p_key
+    let mods: u64 = p_mods
+    // system keys: only Ctrl+Alt combinations may be bound here
+    if (mods & 5) != 5 {
+        head((&s_ref[0]) as u64, sp, ap)
+        tail_reason((&s_sys[0]) as u64)
+        return
+    }
+    if !has_right(ap) {
+        head((&s_ref[0]) as u64, sp, ap)
+        tail_reason((&s_nor[0]) as u64)
+        return
+    }
+    // conflict inside this file
+    var i: u64 = 0
+    while i < n_bind {
+        if b_key[i as usize] == key && b_mods[i as usize] == mods {
+            head((&s_conf[0]) as u64, sp, ap)
+            ulib.say((&s_held[0]) as u64)
+            ulib.say(act_at(i))
+            ulib.nl()
+            return
+        }
+        i = i + 1
+    }
+    if n_bind >= MAX_BIND {
+        head((&s_ref[0]) as u64, sp, ap)
+        tail_reason((&s_full[0]) as u64)
+        return
+    }
+    let r: u64 = ulib.sys(WM_PLUG_KEY, key, mods | KF_ADD, 0)
+    if ulib.failed(r) {
+        let c: u64 = code_of(r)
+        if c == 6 {
+            head((&s_conf[0]) as u64, sp, ap)
+            ulib.say((&s_held[0]) as u64)
+            ulib.say((&s_oth[0]) as u64)
+            ulib.nl()
+        } else if c == 9 {
+            head((&s_ref[0]) as u64, sp, ap)
+            tail_reason((&s_sys[0]) as u64)
+        } else if c == 5 {
+            head((&s_ref[0]) as u64, sp, ap)
+            tail_reason((&s_full[0]) as u64)
+        } else {
+            head((&s_ref[0]) as u64, sp, ap)
+            tail_reason((&s_pr[0]) as u64)
+        }
+        return
+    }
+    b_key[n_bind as usize] = key
+    b_mods[n_bind as usize] = mods
+    ulib.strncpy(act_at(n_bind), ap, ACT_MAX - 1)
+    n_bind = n_bind + 1
+    head((&s_bound[0]) as u64, sp, ap)
+    ulib.say((&s_kc[0]) as u64)
+    ulib.sayu(key)
+    ulib.say((&s_md[0]) as u64)
+    ulib.sayu(mods)
+    ulib.nl()
+}
+
+fn load_conf(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going && at < CONF_MAX - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&conf_buf[0]) as u64 + at, CONF_MAX - 1 - at)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            at = at + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    conf_buf[at as usize] = 0 as u8
+    return at
+}
+
+// run the bound action through the bus (the same door as `act call`)
+fn fire(i: u64) {
+    var s_fired: [u8; 6] = "fired\0"
+    var s_den: [u8; 7] = "denied\0"
+    var s_ok: [u8; 3] = "ok\0"
+    var s_fail: [u8; 7] = "failed\0"
+    var s_call: [u8; 6] = "call \0"
+    var s_nob: [u8; 8] = "no-bus\0\0"
+    var s_rev: [u8; 8] = "revoked\0"
+    var s_rc: [u8; 5] = " rc=\0"
+    var s_dash: [u8; 2] = "-\0"
+    var line: [u8; 64] = [0 as u8; 64]
+    let ap: u64 = act_at(i)
+    let dash: u64 = (&s_dash[0]) as u64
+    if !has_right(ap) {
+        head((&s_den[0]) as u64, dash, ap)
+        tail_reason((&s_rev[0]) as u64)
+        return
+    }
+    head((&s_fired[0]) as u64, dash, ap)
+    ulib.nl()
+    if !actcli.open() {
+        head((&s_fail[0]) as u64, dash, ap)
+        tail_reason((&s_nob[0]) as u64)
+        return
+    }
+    ulib.strncpy((&line[0]) as u64, (&s_call[0]) as u64, 8)
+    ulib.strncpy((&line[0]) as u64 + 5, ap, 50)
+    actcli.req((&line[0]) as u64)
+    let r: u64 = actcli.send(300)
+    if r == actcli.R_OK {
+        head((&s_ok[0]) as u64, dash, ap)
+        ulib.nl()
+    } else {
+        head((&s_fail[0]) as u64, dash, ap)
+        ulib.say((&s_rc[0]) as u64)
+        ulib.sayu(r)
+        ulib.nl()
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var name: [u8; 16] = [0 as u8; 16]
+    var s_nm: [u8; 7] = "hotkey\0"
+    var s_def: [u8; 19] = "/etc/hotkeys.conf\0\0"
+    var s_noreg: [u8; 25] = "hotkeyd: no plugin slot \0"
+    var s_up: [u8; 20] = "hotkeyd: up platz=\0\0"
+    var s_nofile: [u8; 26] = "hotkeyd: no config file\0\0\0"
+    var s_n: [u8; 15] = "hotkeyd: bound\0"
+    var s_cnt: [u8; 9] = " count=\0\0"
+    ulib.strncpy((&name[0]) as u64, (&s_nm[0]) as u64, 15)
+    var path: u64 = (&s_def[0]) as u64
+    if ulib.arg_count(args) >= 2 {
+        path = ulib.arg_at(args, 1)
+    }
+    let platz: u64 = ulib.sys(WM_PLUG_REG, WMP_ABI, (&name[0]) as u64, 1 << E_KEY)
+    if ulib.bad(platz) {
+        ulib.say((&s_noreg[0]) as u64)
+        ulib.sayn(platz)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_up[0]) as u64)
+    ulib.sayu(platz)
+    ulib.nl()
+    let n: u64 = load_conf(path)
+    if n == 0 {
+        ulib.say((&s_nofile[0]) as u64)
+        ulib.nl()
+    }
+    // lines
+    var at: u64 = 0
+    var ls: u64 = 0
+    let base: u64 = (&conf_buf[0]) as u64
+    while at <= n {
+        if at == n || conf_buf[at as usize] == 10 {
+            do_line(base + ls, base + at)
+            ls = at + 1
+        }
+        at = at + 1
+    }
+    ulib.say((&s_n[0]) as u64)
+    ulib.say((&s_cnt[0]) as u64)
+    ulib.sayu(n_bind)
+    ulib.nl()
+    // the loop: pick up the events (the kernel kicks a plugin that does not), fire the action of a known key
+    var ev: [u64; 2] = [0 as u64; 2]
+    let ep: u64 = (&ev[0]) as u64
+    while true {
+        var w: u64 = 0
+        while w < 8 && ulib.sys(WM_PLUG_POLL, ep, 0, 0) == 1 {
+            if ev[0 as usize] == E_KEY {
+                let key: u64 = (ev[1 as usize] >> 32) & 0xFFFF
+                let mods: u64 = (ev[1 as usize] >> 16) & 0xFFFF
+                var i: u64 = 0
+                while i < n_bind {
+                    if b_key[i as usize] == key && b_mods[i as usize] == mods {
+                        fire(i)
+                    }
+                    i = i + 1
+                }
+            }
+            w = w + 1
+        }
+        let _z: u64 = ulib.sleep_ms(40)
+    }
+    return 0
+}

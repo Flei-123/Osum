@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jarvismini.fi -- W-S3 test target for the global hotkey helper (docs/HOTKEYS.md).
+//
+// Minimal bus provider `a.jarvismini` with ONE action, `jarvismini.toggle` (etc/actions.d/jarvismini.actions): every call
+// flips a state 0/1 and prints `jarvismini: toggle=<state>`. The real JARVIS Mini window (S5) will answer the same action.
+//
+//   jarvismini serve [ticks]
+
+profile kernel
+
+import ulib
+import actwire
+
+export { u_start }
+
+static mut state: u64 = 0
+static mut svc_bus: u64 = 0xFFFFFFFF
+
+fn handle(msg: u64) {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    var k_ping: [u8; 5] = "ping\0"
+    var a_tog: [u8; 18] = "jarvismini.toggle\0"
+    var e_unk: [u8; 19] = "err unknown_action\0"
+    var s_ok: [u8; 10] = "ok\nstate=\0"
+    var s_p: [u8; 20] = "jarvismini: toggle=\0"
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let np: u64 = (&name[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    actwire.ob_reset()
+    if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
+        actwire.ob_str((&k_ping[0 as usize]) as u64)
+        return
+    }
+    if !actwire.str_eq(np, (&a_tog[0 as usize]) as u64) {
+        actwire.ob_str((&e_unk[0 as usize]) as u64)
+        actwire.ob_ch(10)
+        return
+    }
+    state = 1 - state
+    ulib.say((&s_p[0 as usize]) as u64)
+    ulib.sayu(state)
+    ulib.nl()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_num(state)
+    actwire.ob_ch(10)
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_me: [u8; 13] = "a.jarvismini\0"
+    var n_bus: [u8; 11] = "orient.bus\0"
+    var s_hello: [u8; 17] = "hello jarvismini\n"
+    var s_up: [u8; 33] = "jarvismini: serving a.jarvismini\0"
+    let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
+    if ulib.bad(me) {
+        return 1
+    }
+    let t0: u64 = actwire.ticks()
+    svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(svc_bus) && actwire.ticks() - t0 < 500 {
+        actwire.yield_now()
+        svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    if ulib.bad(svc_bus) {
+        return 1
+    }
+    actwire.send_msg(svc_bus, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF, (&s_hello[0 as usize]) as u64, 16)
+    ulib.say((&s_up[0 as usize]) as u64)
+    ulib.nl()
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fpp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t1: u64 = actwire.ticks()
+    while limit == 0 || actwire.ticks() - t1 < limit {
+        let n: u64 = actwire.bus_wait(fpp, mp, 100)
+        if !ulib.bad(n) && n > 0 {
+            let s: u64 = actwire.asm_feed(fpp, mp)
+            if s != actwire.NONE {
+                if actwire.asm_kind(s) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(s)
+                    handle(actwire.asm_buf(s))
+                    actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+                }
+                actwire.asm_free(s)
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_serve: [u8; 6] = "serve\0"
+    if ulib.arg_count(args) >= 2 && actwire.str_eq(ulib.arg_at(args, 1), (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if ulib.arg_count(args) >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    return 1
+}

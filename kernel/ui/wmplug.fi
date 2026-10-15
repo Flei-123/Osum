@@ -61,7 +61,7 @@ export {
     subscribe, notify, pop, pending, lost_at, grund_at,
     touch, sweep, sweep_at, set_frist, frist, frist_at, denys_at, last_at,
     owner_lebt, reap, farewell_slot, zombie,
-    set_key, key_at, key_owner, bar_set, bar_same, bar_ptr, bar_len,
+    set_key, add_key, key_holder, key_at, key_owner, KF_ADD, AK_OK, AK_RIGHTS, AK_BUSY, AK_FULL, AK_BAD, bar_set, bar_same, bar_ptr, bar_len,
     plugs, events_in, events_out, kicks, denials, deny,
     desk_set, desk_of, desk_cur, desk_go, desk_dirty, desk_clear,
     selftest, selftest_max, failbits,
@@ -96,6 +96,12 @@ const S_OFF: u64 = 0x0600
 const G_OFF: u64 = 0x0800
 const D_OFF: u64 = 0x0A00
 const R_OFF: u64 = 0x1000
+// W-S3 (hotkey helper): EXTRA key table, 0x0C00..0x0D00 (free before): MAX_PLUG * KEYS_MORE words of (mods << 32) | key.
+// A plugin owns its first key in P_KEY (WM_PLUG_KEY without flag) and up to KEYS_MORE more through `add_key`
+// (WM_PLUG_KEY with mods bit KF_ADD). One helper (hotkeyd) can so own several shortcuts.
+const K_OFF: u64 = 0x0C00
+const KEYS_MORE: u64 = 4
+const KF_ADD: u64 = 0x100 // in the `mods` argument of WM_PLUG_KEY: add one more key, report conflicts as codes
 
 // die Felder eines Platzes
 const P_USED: u64 = 0x00
@@ -266,6 +272,28 @@ fn pat(state: u64, i: u64, off: u64) -> u64 {
 fn evat(state: u64, i: u64, k: u64) -> u64 {
     return state + kstate.WMP_OFF + R_OFF + i * EV_RING
         + (k % EV_SLOTS) * EV_BYTES
+}
+
+fn kget(state: u64, i: u64, j: u64) -> u64 {
+    if i >= MAX_PLUG || j >= KEYS_MORE {
+        return 0
+    }
+    return kstate.get(state + kstate.WMP_OFF, K_OFF + (i * KEYS_MORE + j) * 8)
+}
+
+fn kset(state: u64, i: u64, j: u64, v: u64) {
+    if i >= MAX_PLUG || j >= KEYS_MORE {
+        return
+    }
+    kstate.set(state + kstate.WMP_OFF, K_OFF + (i * KEYS_MORE + j) * 8, v)
+}
+
+fn kclear(state: u64, i: u64) {
+    var j: u64 = 0
+    while j < KEYS_MORE {
+        kset(state, i, j, 0)
+        j = j + 1
+    }
 }
 
 fn gat(state: u64, k: u64) -> u64 {
@@ -448,6 +476,7 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
             ps(state, i, P_CALLS, 0)
             ps(state, i, P_GRUND, G_OK)
             ps(state, i, P_KEY, 0)
+            kclear(state, i)
             ps(state, i, P_BARLEN, 0)
             ps(state, i, P_GEN, pg(state, i, P_GEN) + 1)
             ps(state, i, P_ZEND, 0)
@@ -560,6 +589,7 @@ fn unreg(state: u64, i: u64, grund: u64) -> bool {
     ps(state, i, P_MASK, 0)
     ps(state, i, P_RIGHTS, 0)
     ps(state, i, P_KEY, 0)
+    kclear(state, i)
     ps(state, i, P_BARLEN, 0)
     ps(state, i, P_GRUND, grund)
     if sg(state, S_PLUGS) != 0 {
@@ -856,6 +886,27 @@ fn sweep_at(state: u64, jetzt: u64) -> u64 {
 
 // ------------------------------------------------- Kuerzel und Leiste
 
+// Who holds this key word? MAX_PLUG = nobody. Looks at the first key AND the extra table, skips plugin `skip`.
+fn key_holder(state: u64, w: u64, skip: u64) -> u64 {
+    var k: u64 = 0
+    while k < MAX_PLUG {
+        if k != skip && pg(state, k, P_USED) == U_LEBT {
+            if pg(state, k, P_KEY) == w {
+                return k
+            }
+            var j: u64 = 0
+            while j < KEYS_MORE {
+                if kget(state, k, j) == w {
+                    return k
+                }
+                j = j + 1
+            }
+        }
+        k = k + 1
+    }
+    return MAX_PLUG
+}
+
 fn set_key(state: u64, i: u64, taste: u64, mods: u64) -> bool {
     if !valid(state, i) {
         return false
@@ -864,18 +915,47 @@ fn set_key(state: u64, i: u64, taste: u64, mods: u64) -> bool {
         deny(state, i)
         return false
     }
-    // Kein zweiter Besitzer fuer dasselbe Kuerzel: wer zuerst kommt.
+    // No second owner for the same shortcut: first come, first served.
     let w: u64 = (mods << 32) | (taste & 0xFFFFFFFF)
-    var k: u64 = 0
-    while k < MAX_PLUG {
-        if k != i && pg(state, k, P_USED) == U_LEBT
-            && pg(state, k, P_KEY) == w {
-            return false
-        }
-        k = k + 1
+    if key_holder(state, w, i) < MAX_PLUG {
+        return false
     }
     ps(state, i, P_KEY, w)
     return true
+}
+
+// W-S3: one MORE key for the plugin. Result codes (never a silent overwrite):
+//   0 ok  1 no right (R_ACT_KEY)  2 already held (by another plugin or by this one)  3 table full  4 bad plugin
+const AK_OK: u64 = 0
+const AK_RIGHTS: u64 = 1
+const AK_BUSY: u64 = 2
+const AK_FULL: u64 = 3
+const AK_BAD: u64 = 4
+fn add_key(state: u64, i: u64, taste: u64, mods: u64) -> u64 {
+    if !valid(state, i) {
+        return AK_BAD
+    }
+    if (pg(state, i, P_RIGHTS) & R_ACT_KEY) == 0 {
+        deny(state, i)
+        return AK_RIGHTS
+    }
+    let w: u64 = (mods << 32) | (taste & 0xFFFFFFFF)
+    if key_holder(state, w, MAX_PLUG) < MAX_PLUG {
+        return AK_BUSY
+    }
+    if pg(state, i, P_KEY) == 0 {
+        ps(state, i, P_KEY, w)
+        return AK_OK
+    }
+    var j: u64 = 0
+    while j < KEYS_MORE {
+        if kget(state, i, j) == 0 {
+            kset(state, i, j, w)
+            return AK_OK
+        }
+        j = j + 1
+    }
+    return AK_FULL
 }
 
 fn key_at(state: u64, i: u64) -> u64 {
@@ -885,14 +965,7 @@ fn key_at(state: u64, i: u64) -> u64 {
 // Wem gehoert dieses Kuerzel? MAX_PLUG = niemandem.
 fn key_owner(state: u64, taste: u64, mods: u64) -> u64 {
     let w: u64 = (mods << 32) | (taste & 0xFFFFFFFF)
-    var i: u64 = 0
-    while i < MAX_PLUG {
-        if pg(state, i, P_USED) == U_LEBT && pg(state, i, P_KEY) == w {
-            return i
-        }
-        i = i + 1
-    }
-    return MAX_PLUG
+    return key_holder(state, w, MAX_PLUG)
 }
 
 // Der Leistenbereich: TEXT, nicht Bildpunkte. Ein Plugin malt NICHT --

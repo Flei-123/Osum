@@ -50,6 +50,7 @@ PERMS = {
     "mic": (True, "record from the microphone (SYS_OSUM_AUDREAD)"),
     "fs.home": (False, "read/write the user's home"),
     "audio.play": (True, "play sound"),
+    "hotkey": (True, "a global shortcut: hotkeyd binds a key (from /etc/hotkeys.conf) to one of the app's named bus actions; the app never sees the keys"),
     "window.float": (True, "a window above the normal ones (layer L_FLOAT, never above the lock screen or task bar)"),
 }
 
