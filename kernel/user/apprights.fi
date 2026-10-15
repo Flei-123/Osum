@@ -5,6 +5,7 @@
 //     apprights set <app> [right ...]        replace the grants (no right = revoke all)
 //     apprights ceil <app> [right ...]       register the CEILING of an app (normally `load` does this from the manifest)
 //     apprights load                         boot: ceilings from /apps/*/INFO `perm=`, grants from /etc/apprights.conf
+//     apprights forget <app>                 package removed: drop its grants and its auto-grant record
 //     apprights trymic|trygrant <app>        test: a child labelled app:<app> reads the microphone / grants itself `mic`
 //     apprights try <what> <app>             test: a child labelled app:<app> uses clipr clipw notify audio net
 //
@@ -157,15 +158,38 @@ fn read_conf() -> u64 {
     return n
 }
 
+static mut seen_in: [u8; 4096] = [0 as u8; 4096]
+static mut plan_buf: [u8; 8192] = [0 as u8; 8192]
+
+// Read a small text file into buf (zero-terminated); the length, 0 = missing or empty.
+fn read_into(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, buf, max - 1)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    *((buf + n) as *mut u8) = 0 as u8
+    return n
+}
+
 // Replace the line of `app` in /etc/apprights.conf (mask 0 = remove it). false = the file could not be written.
 fn save_conf(app: u64, mask: u64) -> bool {
     var path: [u8; 20] = "/etc/apprights.conf\0"
-    let n: u64 = read_conf()
+    return save_file((&path[0]) as u64, app, mask)
+}
+
+// Same for any file in conf format. /etc/apprights.seen uses it: `<app> <safe rights already offered>`.
+fn save_file(path: u64, app: u64, mask: u64) -> bool {
+    let n: u64 = read_into(path, (&conf_in[0]) as u64, 4096)
     let m: u64 = conf.update((&conf_in[0]) as u64, n, app, mask, (&conf_out[0]) as u64, 4096)
     if m == 0 && n == 0 {
         return true
     }
-    let fd: u64 = io.create((&path[0]) as u64)
+    let fd: u64 = io.create(path)
     if ulib.bad(fd) {
         return false
     }
@@ -238,6 +262,83 @@ fn load_bundle(nm: u64, ext_len: u64) -> u64 {
     return 1
 }
 
+// The text of the PLAN of the current opk generation (= the packages that came in through the signature check) into
+// plan_buf. Length 0 = no opk state (image without packages, test guest): nothing is auto-granted then.
+fn read_plan() -> u64 {
+    var p_akt: [u8; 16] = "/system/AKTUELL\0"
+    var p_gen: [u8; 21] = "/system/generations/\0"
+    var p_plan: [u8; 6] = "/PLAN\0"
+    var path: [u8; 96] = [0 as u8; 96]
+    var num: [u8; 32] = [0 as u8; 32]
+    var dg: [u8; 24] = [0 as u8; 24]
+    let n: u64 = read_into((&p_akt[0]) as u64, (&num[0]) as u64, 32)
+    if n == 0 {
+        return 0
+    }
+    ulib.digits(ulib.to_num((&num[0]) as u64), (&dg[0]) as u64)
+    ulib.strcpy((&path[0]) as u64, (&p_gen[0]) as u64)
+    ulib.strcat((&path[0]) as u64, (&dg[0]) as u64)
+    ulib.strcat((&path[0]) as u64, (&p_plan[0]) as u64)
+    return read_into((&path[0]) as u64, (&plan_buf[0]) as u64, 8192)
+}
+
+// AR-3: every package of the signed plan gets the NON-SENSITIVE rights it declares (perm= ceiling & P_SAFE) granted
+// once; what was offered is recorded in /etc/apprights.seen, so a right the person revoked is not granted again, a
+// right added by an update is. mic, camera, fs.home, location, contacts, phone are never granted here. Returns how
+// many apps got something.
+fn do_autogrant() -> u64 {
+    var p_seen: [u8; 20] = "/etc/apprights.seen\0"
+    var app: [u8; 32] = [0 as u8; 32]
+    var granted: u64 = 0
+    let pl: u64 = read_plan()
+    if pl == 0 {
+        return 0
+    }
+    var pos: u64 = conf.plan_next((&plan_buf[0]) as u64, pl, 0)
+    while pos != conf.END {
+        ulib.copy((&app[0]) as u64, conf.cur_name(), 24)
+        let ceil: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 5, (&app[0]) as u64, 0)
+        if !ulib.failed(ceil) && ceil != policy.CEIL_NONE {
+            let sn: u64 = read_into((&p_seen[0]) as u64, (&seen_in[0]) as u64, 4096)
+            let offered: u64 = conf.find((&seen_in[0]) as u64, sn, (&app[0]) as u64)
+            let fresh: u64 = conf.auto_new(ceil, offered)
+            if fresh != 0 {
+                let cur: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 3, (&app[0]) as u64, 0)
+                if !ulib.failed(cur) {
+                    let want: u64 = cur | fresh
+                    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, (&app[0]) as u64, want)
+                    if !ulib.failed(r) {
+                        let _a: bool = save_conf((&app[0]) as u64, want)
+                        let _b: bool = save_file((&p_seen[0]) as u64, (&app[0]) as u64, offered | fresh)
+                        granted = granted + 1
+                    }
+                }
+            }
+        }
+        pos = conf.plan_next((&plan_buf[0]) as u64, pl, pos)
+    }
+    return granted
+}
+
+// A package was removed: its grants and its auto-grant record go, so a later reinstall starts clean.
+fn do_forget(app: u64) -> u64 {
+    var p_seen: [u8; 20] = "/etc/apprights.seen\0"
+    var s_ok: [u8; 19] = "apprights: forgot \0"
+    if !policy.name_ok(app) {
+        return 1
+    }
+    let cur: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 3, app, 0)
+    if !ulib.failed(cur) && cur != 0 {
+        let _r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, app, 0)
+    }
+    let _a: bool = save_conf(app, 0)
+    let _b: bool = save_file((&p_seen[0]) as u64, app, 0)
+    ulib.say((&s_ok[0]) as u64)
+    ulib.say(app)
+    ulib.nl()
+    return 0
+}
+
 fn do_load() -> u64 {
     var s_osp: [u8; 5] = ".osp\0"
     var s_prog: [u8; 6] = ".prog\0"
@@ -307,6 +408,9 @@ fn do_load() -> u64 {
     ulib.sayu(clamped)
     ulib.say((&s_bd[0]) as u64)
     ulib.sayu(conf.bad_lines())
+    var s_au: [u8; 7] = " auto=\0"
+    ulib.say((&s_au[0]) as u64)
+    ulib.sayu(do_autogrant())
     ulib.nl()
     return 0
 }
@@ -479,8 +583,12 @@ fn u_start(args: u64) -> u64 {
     var s_load: [u8; 5] = "load\0"
     var s_ceil: [u8; 5] = "ceil\0"
     var s_try: [u8; 4] = "try\0"
+    var s_forget: [u8; 7] = "forget\0"
     if ulib.streq(cmd, (&s_load[0]) as u64) {
         return do_load()
+    }
+    if ulib.streq(cmd, (&s_forget[0]) as u64) && argc >= 3 {
+        return do_forget(ulib.arg_at(args, 2))
     }
     if argc < 3 {
         ulib.say((&s_use1[0]) as u64)

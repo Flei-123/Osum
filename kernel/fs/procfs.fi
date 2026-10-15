@@ -82,6 +82,7 @@ import net.inet
 import bus.pci
 import drv.net.iwl
 import wlan.iwl_probe
+import apprights.policy
 import usb.usb
 import diag.hwdiag
 import gfx.gfx
@@ -158,7 +159,9 @@ const G_USB: u64 = 13
 const G_FIRMWARE: u64 = 14
 // ROUND W-IWL (M1b): /proc/wlan, what iwl.fi read from the Intel WLAN MAC.
 const G_WLAN: u64 = 15
-const G_LAST: u64 = 15
+// ROUND W-AR3 (AR-2b): /proc/apps, the per-app counters of lib/apprights/policy.fi.
+const G_APPS: u64 = 16
+const G_LAST: u64 = 16
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1418,6 +1421,36 @@ fn make_wlan(state: u64) -> u64 {
     return p
 }
 
+// /proc/apps: one header line, then one line per app that has a slot in the rights table:
+//   "# app cpu_ticks wakeups tx_bytes rx_bytes"
+//   "mail 412 96 20480 1048576"
+// cpu_ticks = timer ticks charged to tasks that carry the label app:<name> (children included, the label is sticky),
+// wakeups = blocked->ready transitions of those tasks, tx/rx_bytes = payload octets of their sockets.
+// Counted since boot (an app that is not in the table, because it was never registered or the table is full, is not
+// counted). Unlabelled tasks (the person's own tools, system bundles) have no line.
+fn make_apps(state: u64) -> u64 {
+    var l_head: [u8; 42] = "# app cpu_ticks wakeups tx_bytes rx_bytes\0"
+    var p: u64 = w_str(state, 0, (&l_head[0]) as u64)
+    p = w_nl(state, p)
+    var s: u64 = 0
+    while s < policy.MAX_APPS {
+        if policy.slot_used(s) {
+            p = w_str(state, p, policy.slot_name(s))
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, policy.acct_get(s, policy.A_CPU))
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, policy.acct_get(s, policy.A_WAKE))
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, policy.acct_get(s, policy.A_TX))
+            p = w_ch(state, p, 32)
+            p = w_num(state, p, policy.acct_get(s, policy.A_RX))
+            p = w_nl(state, p)
+        }
+        s = s + 1
+    }
+    return p
+}
+
 // boot_mode: measured by hwdiag (traces a UEFI firmware does not leave).
 // secure_boot: honest "unknown" -- the loader leaves no variable behind
 // after the boot services are gone, so the kernel cannot read it.
@@ -1692,6 +1725,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_WLAN {
             return make_wlan(state)
         }
+        if sub == G_APPS {
+            return make_apps(state)
+        }
         return 0
     }
     if art == K_SYS {
@@ -1793,6 +1829,10 @@ fn global_of(name: u64) -> u64 {
     var gu: [u8; 4] = "usb\0"
     var gf: [u8; 9] = "firmware\0"
     var gw: [u8; 5] = "wlan\0"
+    var ga: [u8; 5] = "apps\0"
+    if streq(name, (&ga[0]) as u64) {
+        return G_APPS
+    }
     if streq(name, (&gp[0]) as u64) {
         return G_PCI
     }
@@ -2016,8 +2056,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var us2: [u8; 4] = "usb\0"
     var fw2: [u8; 9] = "firmware\0"
     var wl2: [u8; 5] = "wlan\0"
+    var ap2: [u8; 5] = "apps\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_PCI {
+    if sub == G_APPS {
+        src = (&ap2[0]) as u64
+    } else if sub == G_PCI {
         src = (&pc2[0]) as u64
     } else if sub == G_USB {
         src = (&us2[0]) as u64

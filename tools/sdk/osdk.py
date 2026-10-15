@@ -50,6 +50,7 @@ PERMS = {
     "mic": (True, "record from the microphone (SYS_OSUM_AUDREAD)"),
     "fs.home": (False, "read/write the user's home"),
     "audio.play": (True, "play sound"),
+    "window.float": (True, "a window above the normal ones (layer L_FLOAT, never above the lock screen or task bar)"),
 }
 
 SYSTEM_APPS_DIR = os.path.join(ROOT, "assets", "apps")

@@ -81,5 +81,26 @@ mutate update-no-append conf.fi "    if mask != 0 {
         n = put_line(out, n, outmax, app, mask)" "    if false {
         n = put_line(out, n, outmax, app, mask)"
 
+mutate safe-includes-mic policy.fi "const P_SAFE: u64 = 244" "const P_SAFE: u64 = 245"
+mutate safe-drops-net policy.fi "const P_SAFE: u64 = 244" "const P_SAFE: u64 = 240"
+mutate auto-ignores-offered conf.fi "return safe - (safe & offered)" "return safe"
+mutate auto-ignores-ceiling conf.fi "let safe: u64 = ceil & policy.P_SAFE" "let safe: u64 = policy.P_SAFE"
+mutate auto-all-rights conf.fi "let safe: u64 = ceil & policy.P_SAFE" "let safe: u64 = ceil"
+mutate find-first-line conf.fi "        if same_name(cur_name(), app) {
+            return cur_mask()" "        if true {
+            return cur_mask()"
+mutate plan-no-tab conf.fi "while q < e && rd(buf, q) != 9 {" "while q < e {"
+mutate acct-field-shared policy.fi "return ((&acct[0]) as u64) + (s * 4 + field) * 8" "return ((&acct[0]) as u64) + (s * 4) * 8"
+mutate acct-slot-shared policy.fi "return ((&acct[0]) as u64) + (s * 4 + field) * 8" "return ((&acct[0]) as u64) + field * 8"
+mutate acct-unbound-app policy.fi "    let s: u64 = app_slot(app)
+    if s >= MAX_APPS {
+        return 0
+    }
+    return ((&acct[0]) as u64)" "    var s: u64 = app_slot(app)
+    if s >= MAX_APPS {
+        s = 0
+    }
+    return ((&acct[0]) as u64)"
+
 echo "APPRIGHTS-HOST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

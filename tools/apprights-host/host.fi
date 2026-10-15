@@ -122,6 +122,51 @@ fn main() -> i32 {
     n = conf.update(c("x mic\n"), 6, c("x"), 0, o, 512)
     check(&t, n == 0, "removing the only line leaves an empty file")
 
+    // ---- AR-3: auto-grant of the non-sensitive rights
+    check(&t, policy.P_SAFE == (policy.P_NET | policy.P_NOTIFY | policy.P_CLIP_READ | policy.P_CLIP_WRITE | policy.P_AUDIO_PLAY), "P_SAFE = net notify clipboard.read clipboard.write audio.play")
+    check(&t, (policy.P_SAFE & (policy.P_MIC | policy.P_CAMERA | policy.P_FS_HOME | policy.P_LOCATION | policy.P_CONTACTS | policy.P_PHONE)) == 0, "no sensitive right is safe")
+    let all: u64 = policy.P_ALL
+    check(&t, conf.auto_new(all, 0) == policy.P_SAFE, "ceiling = everything: only the safe rights are new")
+    check(&t, (conf.auto_new(all, 0) & policy.P_MIC) == 0, "mic is never auto-granted")
+    check(&t, conf.auto_new(policy.P_MIC | policy.P_CAMERA, 0) == 0, "only sensitive rights declared: nothing auto-granted")
+    check(&t, conf.auto_new(policy.P_NET | policy.P_MIC, 0) == policy.P_NET, "net + mic declared: net only")
+    check(&t, conf.auto_new(policy.P_NET | policy.P_NOTIFY, policy.P_NET | policy.P_NOTIFY) == 0, "already offered: nothing new (a revoked right stays revoked)")
+    check(&t, conf.auto_new(policy.P_NET | policy.P_NOTIFY | policy.P_AUDIO_PLAY, policy.P_NET | policy.P_NOTIFY) == policy.P_AUDIO_PLAY, "an update that declares a new safe right: just that one")
+    check(&t, conf.auto_new(0, 0) == 0, "no perm= line: nothing")
+    let sn: u64 = c("mail net,notify\nplayer audio.play\n")
+    check(&t, conf.find(sn, len_of(sn), c("mail")) == (policy.P_NET | policy.P_NOTIFY), "find: recorded offer of mail")
+    check(&t, conf.find(sn, len_of(sn), c("player")) == policy.P_AUDIO_PLAY, "find: second line")
+    check(&t, conf.find(sn, len_of(sn), c("mai")) == 0 && conf.find(sn, len_of(sn), c("nobody")) == 0, "find: prefix and unknown name give 0")
+    let pl: u64 = c("mail\tabc123\nfvviewer\tdef456\nbad/name\t00\nnotab\nnotes\t9\n")
+    var pp: u64 = conf.plan_next(pl, len_of(pl), 0)
+    check(&t, pp != conf.END && is_s(conf.cur_name(), "mail"), "plan line 1: mail")
+    pp = conf.plan_next(pl, len_of(pl), pp)
+    check(&t, pp != conf.END && is_s(conf.cur_name(), "fvviewer"), "plan line 2: fvviewer")
+    pp = conf.plan_next(pl, len_of(pl), pp)
+    check(&t, pp != conf.END && is_s(conf.cur_name(), "notes"), "plan: bad name and line without tab are skipped")
+    pp = conf.plan_next(pl, len_of(pl), pp)
+    check(&t, pp == conf.END, "plan: end")
+
+    // ---- AR-2b: per-app counters
+    policy.reset()
+    check(&t, policy.set_mask(c("clock"), 0) == policy.E_OK, "clock gets a slot")
+    check(&t, policy.set_mask(c("mail"), 0) == policy.E_OK, "mail gets a slot")
+    let a_cpu: u64 = policy.acct_addr(c("app:mail"), policy.A_CPU)
+    check(&t, a_cpu != 0, "label app:mail -> counter address")
+    check(&t, policy.acct_addr(c("jarvis"), policy.A_CPU) == 0 && policy.acct_addr(c(""), policy.A_CPU) == 0, "unlabelled / other labels have no counter")
+    check(&t, policy.acct_addr(c("app:nobody"), policy.A_CPU) == 0, "app without a slot is not counted")
+    check(&t, policy.acct_addr(c("app:mail"), policy.A_CPU) == policy.acct_addr(c("app:mail"), policy.A_CPU), "same label, same address")
+    check(&t, policy.acct_addr(c("app:mail"), policy.A_CPU) != policy.acct_addr(c("app:clock"), policy.A_CPU), "different apps, different counters")
+    check(&t, policy.acct_addr(c("app:mail"), policy.A_WAKE) != policy.acct_addr(c("app:mail"), policy.A_CPU), "different fields, different counters")
+    *(a_cpu as *mut u64) = 7
+    *(policy.acct_addr(c("app:mail"), policy.A_RX) as *mut u64) = 99
+    let ms: u64 = policy.app_slot(c("mail"))
+    check(&t, policy.acct_get(ms, policy.A_CPU) == 7 && policy.acct_get(ms, policy.A_RX) == 99 && policy.acct_get(ms, policy.A_TX) == 0, "acct_get reads what was booked, fields stay apart")
+    check(&t, policy.acct_get(policy.app_slot(c("clock")), policy.A_CPU) == 0, "the other app stays at 0")
+    check(&t, policy.slot_used(ms) && is_s(policy.slot_name(ms), "mail") && policy.slot_name(policy.MAX_APPS) == 0, "slot_name / slot_used")
+    policy.reset()
+    check(&t, policy.set_mask(c("mail"), 0) == policy.E_OK && policy.acct_get(policy.app_slot(c("mail")), policy.A_CPU) == 0, "a re-allocated slot starts at 0")
+
     io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
     if t.fails != 0 {
         return 1
