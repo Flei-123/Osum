@@ -51,6 +51,8 @@ for t in "right:$PW:crypt: unlocked" "wrong:falsch:crypt: locked"; do
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     grep -aq "$want" "$OUT/b-$n.txt" && ok "boot $n passphrase: $want" || bad "boot $n passphrase: $want"
 done
+# counter-check (slow, a second full install): CRYPTGUI_PLAIN=1; the plain GUI install is covered by tools/install/abnahme.sh
+if [ -n "${CRYPTGUI_PLAIN:-}" ]; then
 run_window p ""
 grep -aq 'installer: done' "$OUT/p.txt" && ok "plain install finished" || bad "plain install finished"
 grep -aq 'installer: encrypted root' "$OUT/p.txt" && bad "plain install must not encrypt" || ok "plain install is not encrypted"
@@ -58,5 +60,6 @@ python3 - "$OUT/p.img" <<'PY' && ok "host: plain disk has no OSUMCRYPT header" |
 import sys
 assert b'OSUMCRYPT' not in open(sys.argv[1],'rb').read()
 PY
+fi
 echo "CRYPTGUI: $pass ok, $fail fail"
 [ "$fail" = 0 ]
