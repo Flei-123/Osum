@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/tz/oracle.fi -- host program around lib/tz/tz.fi for tools/tz/run.sh.
+//   stdin line "table"          -> one line per zone: "<index> <region> <name>|<base>|<rule>"
+//   stdin line "<zone> <utc>"   -> one line: the signed offset in minutes at that instant
+//   stdin line "raw <base> <rule> <utc>" with <base> unsigned magnitude and sign letter:
+//                                  "raw w300 2 <utc>" (w = west) -> offset for an explicit zone
+import std.rt
+import std.io
+import tz.tz
+
+fn push_signed(out: *mut rt.Buf, v: u64) {
+    if tz.is_west(v) != 0 {
+        rt.buf_push(out, 45 as u8)
+    }
+    rt.buf_push_dec_u64(out, tz.magnitude(v))
+}
+
+// parses an unsigned decimal at p[at..], advances `at`
+fn num(p: u64, n: usize, at: *mut usize) -> u64 {
+    var v: u64 = 0
+    var a: usize = *at
+    while a < n && *((p + a as u64) as *mut u8) == 32 as u8 {
+        a = a + 1
+    }
+    while a < n && *((p + a as u64) as *mut u8) >= 48 as u8 && *((p + a as u64) as *mut u8) <= 57 as u8 {
+        v = v * 10 + ((*((p + a as u64) as *mut u8)) as u64 - 48)
+        a = a + 1
+    }
+    *at = a
+    return v
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    let _r: bool = io.read_stdin(&inp)
+    var out: rt.Buf = rt.buf_new()
+    var nm: [u8; 32] = [0 as u8; 32]
+    var at: usize = 0
+    let p: u64 = inp.ptr
+    let n: usize = inp.len
+    while at < n {
+        let c: u8 = *((p + at as u64) as *mut u8)
+        if c == 116 as u8 { // "table"
+            let cnt: u64 = tz.zone_count()
+            var i: u64 = 0
+            while i < cnt {
+                let _l: u64 = tz.zone_name(i, (&nm[0 as usize]) as u64)
+                rt.buf_push_dec_u64(&out, i)
+                rt.buf_push(&out, 32 as u8)
+                rt.buf_push(&out, tz.zone_region(i) as u8)
+                rt.buf_push(&out, 32 as u8)
+                rt.buf_push_bytes(&out, (&nm[0 as usize]) as u64, _l as usize)
+                rt.buf_push(&out, 124 as u8)
+                push_signed(&out, tz.zone_base(i))
+                rt.buf_push(&out, 124 as u8)
+                rt.buf_push_dec_u64(&out, tz.zone_rule(i))
+                rt.buf_push(&out, 10 as u8)
+                i = i + 1
+            }
+            while at < n && *((p + at as u64) as *mut u8) != 10 as u8 {
+                at = at + 1
+            }
+        } else if c == 114 as u8 { // "raw w300 2 utc"
+            at = at + 3
+            while at < n && *((p + at as u64) as *mut u8) == 32 as u8 {
+                at = at + 1
+            }
+            var west: u64 = 0
+            if *((p + at as u64) as *mut u8) == 119 as u8 {
+                west = 1
+                at = at + 1
+            }
+            let mag: u64 = num(p, n, &at)
+            let rule: u64 = num(p, n, &at)
+            let utc: u64 = num(p, n, &at)
+            push_signed(&out, tz.offset_min(utc, tz.to_wrapped(mag, west), rule))
+            rt.buf_push(&out, 10 as u8)
+        } else if c >= 48 as u8 && c <= 57 as u8 {
+            let z: u64 = num(p, n, &at)
+            let utc: u64 = num(p, n, &at)
+            push_signed(&out, tz.offset_min(utc, tz.zone_base(z), tz.zone_rule(z)))
+            rt.buf_push(&out, 10 as u8)
+        }
+        while at < n && *((p + at as u64) as *mut u8) != 10 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    io.print_bytes(out.ptr, out.len)
+    return 0
+}
