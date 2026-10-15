@@ -80,6 +80,8 @@ import diag.hwid
 import sched.rand
 import net.inet
 import bus.pci
+import drv.net.iwl
+import wlan.iwl_probe
 import usb.usb
 import diag.hwdiag
 import gfx.gfx
@@ -154,7 +156,9 @@ const G_NETDIR: u64 = 11
 const G_PCI: u64 = 12
 const G_USB: u64 = 13
 const G_FIRMWARE: u64 = 14
-const G_LAST: u64 = 14
+// ROUND W-IWL (M1b): /proc/wlan, what iwl.fi read from the Intel WLAN MAC.
+const G_WLAN: u64 = 15
+const G_LAST: u64 = 15
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1350,6 +1354,70 @@ fn make_usb(state: u64) -> u64 {
     return p
 }
 
+// /proc/wlan: one line per Intel gen2 WLAN function found on the bus, read
+// read-only by drv/net/iwl.fi (M1b). No MAC address, no serial number.
+//   "00:14.3 8086:a0f0 hw_rev=0x00000351 rf_id=0x0010a110 mac=QuZ rf=HR"
+//   "00:14.3 8086:a0f0 err=dead"      (device did not answer)
+//   "none"                            (no such device on the bus)
+fn make_wlan(state: u64) -> u64 {
+    var l_none: [u8; 5] = "none\0"
+    var l_hw: [u8; 12] = " hw_rev=0x\0\0"
+    var l_rf: [u8; 10] = " rf_id=0x\0"
+    var l_mac: [u8; 6] = " mac=\0"
+    var l_rfn: [u8; 5] = " rf=\0"
+    var l_err: [u8; 6] = " err=\0"
+    var l_dead: [u8; 5] = "dead\0"
+    var l_bar: [u8; 4] = "bar\0"
+    var l_oth: [u8; 6] = "other\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var p: u64 = 0
+    let n: u64 = iwl.count_targets(state)
+    if n == 0 {
+        p = w_str(state, p, (&l_none[0]) as u64)
+        return w_nl(state, p)
+    }
+    var k: u64 = 0
+    while k < n {
+        let i: u64 = iwl.target_at(state, k)
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        p = w_hexn(state, p, pci.bdf_bus(bdf), 2)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.bdf_dev(bdf), 2)
+        p = w_ch(state, p, 46)
+        p = w_hexn(state, p, pci.bdf_fn(bdf), 1)
+        p = w_ch(state, p, 32)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_VENDOR), 4)
+        p = w_ch(state, p, 58)
+        p = w_hexn(state, p, pci.get(state, i, pci.E_DEVICE), 4)
+        var pr: iwl_probe.Probe = iwl_probe.probe_new()
+        let r: i64 = iwl.probe_at(state, i, &pr, false)
+        if r != 0 {
+            p = w_str(state, p, (&l_err[0]) as u64)
+            if r == iwl_probe.E_DEAD {
+                p = w_str(state, p, (&l_dead[0]) as u64)
+            } else if r == iwl_probe.E_BAR {
+                p = w_str(state, p, (&l_bar[0]) as u64)
+            } else {
+                p = w_str(state, p, (&l_oth[0]) as u64)
+            }
+        } else {
+            p = w_str(state, p, (&l_hw[0]) as u64)
+            p = w_hexn(state, p, pr.hw_rev, 8)
+            p = w_str(state, p, (&l_rf[0]) as u64)
+            p = w_hexn(state, p, pr.rf_id, 8)
+            p = w_str(state, p, (&l_mac[0]) as u64)
+            let _a: usize = iwl_probe.rev_name_get(pr.hw_rev, (&nm[0]) as u64)
+            p = w_str(state, p, (&nm[0]) as u64)
+            p = w_str(state, p, (&l_rfn[0]) as u64)
+            let _b: usize = iwl_probe.rf_name_get(pr.rf_id, (&nm[0]) as u64)
+            p = w_str(state, p, (&nm[0]) as u64)
+        }
+        p = w_nl(state, p)
+        k = k + 1
+    }
+    return p
+}
+
 // boot_mode: measured by hwdiag (traces a UEFI firmware does not leave).
 // secure_boot: honest "unknown" -- the loader leaves no variable behind
 // after the boot services are gone, so the kernel cannot read it.
@@ -1621,6 +1689,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_FIRMWARE {
             return make_firmware(state)
         }
+        if sub == G_WLAN {
+            return make_wlan(state)
+        }
         return 0
     }
     if art == K_SYS {
@@ -1721,6 +1792,7 @@ fn global_of(name: u64) -> u64 {
     var gp: [u8; 4] = "pci\0"
     var gu: [u8; 4] = "usb\0"
     var gf: [u8; 9] = "firmware\0"
+    var gw: [u8; 5] = "wlan\0"
     if streq(name, (&gp[0]) as u64) {
         return G_PCI
     }
@@ -1729,6 +1801,9 @@ fn global_of(name: u64) -> u64 {
     }
     if streq(name, (&gf[0]) as u64) {
         return G_FIRMWARE
+    }
+    if streq(name, (&gw[0]) as u64) {
+        return G_WLAN
     }
     if streq(name, (&la[0]) as u64) {
         return G_LOADAVG
@@ -1940,6 +2015,7 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var pc2: [u8; 4] = "pci\0"
     var us2: [u8; 4] = "usb\0"
     var fw2: [u8; 9] = "firmware\0"
+    var wl2: [u8; 5] = "wlan\0"
     var src: u64 = (&a[0]) as u64
     if sub == G_PCI {
         src = (&pc2[0]) as u64
@@ -1947,6 +2023,8 @@ fn global_name(state: u64, sub: u64, out: u64) {
         src = (&us2[0]) as u64
     } else if sub == G_FIRMWARE {
         src = (&fw2[0]) as u64
+    } else if sub == G_WLAN {
+        src = (&wl2[0]) as u64
     } else if sub == G_LOADAVG {
         src = (&la2[0]) as u64
     } else if sub == G_SYSDIR {
