@@ -2530,7 +2530,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_readlink(state, me, a0, a1, a2)
     }
     if number == SYS_UTIMENSAT {
-        return do_utimensat(state, me, a0, a1, a2, a3)
+        let ue: u64 = at_enter1(state, me, a0, a1)
+        if errno.is_error(ue) {
+            return ue
+        }
+        let ur: u64 = do_utimensat(state, me, a0, a1, a2, a3)
+        uio.set_atbase(state, me, 0)
+        return ur
     }
     if number == SYS_STAT {
         return do_stat(state, me, a0, a1)
@@ -3583,7 +3589,13 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     // und AT_FDCWD ist der einzige Wert, den sie annehmen. Der Pfad steht
     // im ZWEITEN Argument, alles andere ist wie bei der kurzen Form.
     if number == SYS_FCHMODAT {
-        return do_chmod(state, me, a1, a2)
+        let e1: u64 = at_enter1(state, me, a0, a1)
+        if errno.is_error(e1) {
+            return e1
+        }
+        let r1: u64 = do_chmod(state, me, a1, a2)
+        uio.set_atbase(state, me, 0)
+        return r1
     }
     if number == SYS_CHOWN || number == SYS_LCHOWN {
         return do_chown(state, me, a0, a1, a2)
@@ -3592,16 +3604,25 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return do_fchown(state, me, a0, a1, a2)
     }
     if number == SYS_FCHOWNAT {
-        return do_chown(state, me, a1, a2, a3)
+        let e2: u64 = at_enter1(state, me, a0, a1)
+        if errno.is_error(e2) {
+            return e2
+        }
+        let r2: u64 = do_chown(state, me, a1, a2, a3)
+        uio.set_atbase(state, me, 0)
+        return r2
     }
     if number == SYS_ACCESS {
         return do_access(state, me, a0, a1)
     }
-    if number == SYS_FACCESSAT {
-        return do_access(state, me, a1, a2)
-    }
-    if number == SYS_FACCESSAT2 {
-        return do_access(state, me, a1, a2)
+    if number == SYS_FACCESSAT || number == SYS_FACCESSAT2 {
+        let e3: u64 = at_enter1(state, me, a0, a1)
+        if errno.is_error(e3) {
+            return e3
+        }
+        let r3: u64 = do_access(state, me, a1, a2)
+        uio.set_atbase(state, me, 0)
+        return r3
     }
     if number == SYS_SENDFILE {
         return neg(errno.E_INVAL)
@@ -5699,6 +5720,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
+    if kind == file.K_VDIR {
+        dirpath_remember(state, me, of, path)
+    }
     // DIE ZAHL, WEGEN DER `umount` NEIN SAGEN KANN. Sie geht hier
     // hoch und in `unref_of` wieder herunter, und zwar an genau diesen
     // zwei Stellen.
@@ -5917,6 +5941,9 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64) -> u64 {
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
+    if kind == file.K_DIR {
+        dirpath_remember(state, me, of, buf)
+    }
     // RUNDE OFS3: DIE ZUGRIFFSZEIT, EINMAL JE `open` UND NICHT EINMAL JE
     // `read`. Warum an dieser Stelle und nicht in `fs.read_at`, steht bei
     // `fs.touch_atime`: `read_at` laeuft in der Schleife jedes Programms,
@@ -19443,31 +19470,153 @@ fn lc_is_at(number: u64) -> bool {
     return number == LC_RENAMEAT2
 }
 
-// May `path` be resolved without a directory descriptor? AT_FDCWD (low 32 bits) or an absolute path. A bad pointer is let through:
-// the callee reports -EFAULT itself.
-fn lc_dir_ok(state: u64, me: u64, dirfd: u64, path: u64) -> bool {
-    if (dirfd & 0xFFFFFFFF) == LC_AT_FDCWD32 {
-        return true
-    }
+// r807: directory descriptors. An *at call whose path is relative and whose dirfd is a real descriptor is resolved against the
+// path that the directory descriptor remembered at open time (`dirpath_remember`); `uio.resolve` reads it from the task slot
+// (`uio.set_atbase`). The base is set before the worker function runs and cleared after it.
+const AT_REL_NONE: u64 = 0 // absolute path (or a pointer the callee will reject): the directory argument is not used
+const AT_REL_CWD: u64 = 1 // relative to AT_FDCWD
+const AT_REL_DIR: u64 = 2 // relative to a real directory descriptor
+
+fn at_class(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
     if !proc.user_ok(state, me, path, 1) {
-        return true
+        return AT_REL_NONE
     }
-    return peek(state, me, path) == 47
+    if peek(state, me, path) == 47 {
+        return AT_REL_NONE
+    }
+    if (dirfd & 0xFFFFFFFF) == LC_AT_FDCWD32 {
+        return AT_REL_CWD
+    }
+    return AT_REL_DIR
+}
+
+// The frame with the path of a directory descriptor, or a negative errno.
+fn at_dir_frame(state: u64, me: u64, dirfd: u64) -> u64 {
+    let of: u64 = of_of(state, me, dirfd & 0xFFFFFFFF)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    let k: u64 = file.open_kind(state, of)
+    if k != file.K_DIR && k != file.K_VDIR {
+        return neg(errno.E_NOTDIR)
+    }
+    let fr: u64 = file.open_x1(state, of)
+    if fr == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    return fr
+}
+
+fn at_enter1(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
+    if at_class(state, me, dirfd, path) != AT_REL_DIR {
+        return 0
+    }
+    let fr: u64 = at_dir_frame(state, me, dirfd)
+    if errno.is_error(fr) {
+        return fr
+    }
+    uio.set_atbase(state, me, fr)
+    return 0
+}
+
+fn at_same_path(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < uio.PATH_MAX {
+        let x: u64 = kstate.get8(a + i)
+        if x != kstate.get8(b + i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Two paths with a directory argument each (renameat, linkat). There is ONE base slot, so both relative names must use the same
+// directory (two different real directories, or one cwd-relative name next to a dirfd-relative one, answer -ENOSYS).
+fn at_enter2(state: u64, me: u64, d1: u64, p1: u64, d2: u64, p2: u64) -> u64 {
+    let c1: u64 = at_class(state, me, d1, p1)
+    let c2: u64 = at_class(state, me, d2, p2)
+    if c1 != AT_REL_DIR && c2 != AT_REL_DIR {
+        return 0
+    }
+    var fr: u64 = 0
+    if c1 == AT_REL_DIR {
+        fr = at_dir_frame(state, me, d1)
+        if errno.is_error(fr) {
+            return fr
+        }
+        if c2 == AT_REL_CWD {
+            return neg(errno.E_NOSYS)
+        }
+    }
+    if c2 == AT_REL_DIR {
+        let f2: u64 = at_dir_frame(state, me, d2)
+        if errno.is_error(f2) {
+            return f2
+        }
+        if c1 == AT_REL_CWD {
+            return neg(errno.E_NOSYS)
+        }
+        if fr != 0 && !at_same_path(fr, f2) {
+            return neg(errno.E_NOSYS)
+        }
+        fr = f2
+    }
+    uio.set_atbase(state, me, fr)
+    return 0
+}
+
+// A directory descriptor remembers the absolute path it was opened with (in a frame of its own, address in OF_X1; freed by
+// `file.open_teardown`). Inside a chroot / container the jail prefix is cut off, like for the working directory.
+fn dirpath_remember(state: u64, me: u64, of: u64, path: u64) {
+    let fr: u64 = mem.frame_alloc(state)
+    if fr == 0 {
+        return
+    }
+    var skip: u64 = ctr.prefix_len(state, me, path)
+    var n: u64 = 0
+    while n < uio.PATH_MAX && kstate.get8(path + skip + n) != 0 {
+        kstate.set8(fr + n, kstate.get8(path + skip + n) as u8)
+        n = n + 1
+    }
+    if n == 0 {
+        kstate.set8(fr, 47 as u8)
+        n = 1
+    }
+    kstate.set8(fr + n, 0 as u8)
+    file.open_set_x1(state, of, fr)
 }
 
 fn lc_at(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    var en: u64 = 0
+    if number == LC_SYMLINKAT {
+        en = at_enter1(state, me, a1, a2)
+    } else if number == LC_RENAMEAT || number == LC_RENAMEAT2 || number == LC_LINKAT {
+        en = at_enter2(state, me, a0, a1, a2, a3)
+    } else if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 && proc.user_ok(state, me, a1, 1)
+        && peek(state, me, a1) == 0 {
+        en = 0 // fstat(dirfd) itself: no base
+    } else {
+        en = at_enter1(state, me, a0, a1)
+    }
+    if errno.is_error(en) {
+        return en
+    }
+    let r: u64 = lc_at_inner(state, me, number, a0, a1, a2, a3, a4)
+    uio.set_atbase(state, me, 0)
+    return r
+}
+
+fn lc_at_inner(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     if number == LC_SYMLINKAT {
         // symlinkat(target, newdirfd, linkpath)
-        if !lc_dir_ok(state, me, a1, a2) {
-            return neg(errno.E_NOSYS)
-        }
         return do_symlink(state, me, a0, a2)
     }
     if number == LC_RENAMEAT || number == LC_RENAMEAT2 || number == LC_LINKAT {
         // (olddirfd, oldpath, newdirfd, newpath [, flags])
-        if !lc_dir_ok(state, me, a0, a1) || !lc_dir_ok(state, me, a2, a3) {
-            return neg(errno.E_NOSYS)
-        }
         if number == LC_LINKAT {
             return do_link(state, me, a1, a3)
         }
@@ -19485,9 +19634,6 @@ fn lc_at(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a
         if proc.user_ok(state, me, a1, 1) && peek(state, me, a1) == 0 {
             return do_fstat(state, me, a0, a2)
         }
-    }
-    if !lc_dir_ok(state, me, a0, a1) {
-        return neg(errno.E_NOSYS)
     }
     if number == LC_OPENAT {
         if (a2 & 64) != 0 && ev_in_any(state) {

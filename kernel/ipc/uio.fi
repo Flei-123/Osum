@@ -47,7 +47,7 @@ import sched.time
 import sched.ctr
 
 export {
-    reset, adopt,
+    reset, adopt, set_atbase, atbase,
     resolve, chdir_to, cwd_len, cwd_at, sysinfo, pstat, kill_pid,
     SLOT, CWD_MAX, PATH_MAX,
     I_TICKS, I_UPTIME, I_FRAMES_FREE, I_FRAMES_ALL, I_BLOCKS, I_BFREE,
@@ -68,6 +68,9 @@ const O_CWD: u64 = 0 // the working directory, zero terminated
 // die Seite `UIO_OFF` traegt damit 32 * 512 = 16384 Oktette statt 4096:
 // vier Seiten statt einer.
 const CWD_MAX: u64 = 462 // what a path here may be, minus the zero
+// r807: *at calls with a real directory descriptor. While one runs, this word holds the address of the frame that carries the
+// directory's path; `resolve` then completes a relative name against it instead of against the working directory. 0 = none.
+const O_ATBASE: u64 = 480
 
 // RUNDE OFS3: `fs.parent_of` traegt einen Pfad jetzt in 1024 Oktetten in
 // `kdata` statt in 96 auf dem Stapel (siehe dort). Diese Zahl war der
@@ -90,6 +93,19 @@ fn err(e: u64) -> u64 {
 
 fn slot_off(t: u64, extra: u64) -> u64 {
     return kstate.UIO_OFF + t * SLOT + extra
+}
+
+fn atbase(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, slot_off(t, O_ATBASE))
+}
+
+fn set_atbase(state: u64, t: u64, fr: u64) {
+    if t < kstate.MAX_TASKS {
+        kstate.set(state, slot_off(t, O_ATBASE), fr)
+    }
 }
 
 fn cwd_addr(state: u64, t: u64) -> u64 {
@@ -189,12 +205,24 @@ fn resolve(state: u64, t: u64, buf: u64, len: u64) -> u64 {
         // durch diese Funktion gibt, der an ihr vorbeifuehrt.
         return jailed(state, t, buf, len)
     }
-    let n: u64 = cwd_len(state, t)
+    let base: u64 = atbase(state, t)
+    var n: u64 = cwd_len(state, t)
+    if base != 0 {
+        // r807: the directory of an *at call (a zero terminated path in a kernel frame, relative to the jail root like the cwd)
+        n = 0
+        while n < PATH_MAX && kstate.get8(base + n) != 0 {
+            n = n + 1
+        }
+    }
     let s: u64 = buf + 2048
     var at: u64 = 0
     var i: u64 = 0
     while i < n {
-        kstate.set8(s + at, cwd_at(state, t, i) as u8)
+        if base != 0 {
+            kstate.set8(s + at, kstate.get8(base + i) as u8)
+        } else {
+            kstate.set8(s + at, cwd_at(state, t, i) as u8)
+        }
         at = at + 1
         i = i + 1
     }
