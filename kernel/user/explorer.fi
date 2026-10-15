@@ -82,6 +82,7 @@ import libc.io
 import libc.errno
 import wlibc
 import bstore
+import actcli
 import wlib
 import fuiscene
 import fui.navnum
@@ -3079,6 +3080,7 @@ fn zip_starten(full: u64, packen: bool, baum: u64, tab: u64, stat: u64,
 //   9  Konfliktdialog              `explorer.conflict.buttons` 4
 //  10  "Oeffnen mit"               aus `expdlg.oeffnenmit_ptr`
 //  11  Kontextmenue der Seitenleiste `explorer.context.backup` 5
+//  14  D1: Aktionen aus dem Bus (Untermenue von `explorer.context` Zeile 14)
 //
 // DIE INDIZES SIND EIN VERTRAG mit dem Katalog (PLAN.md, Abschnitt 4):
 // die Reihenfolge der Zeilen dort ist die Reihenfolge der Zweige hier.
@@ -3141,6 +3143,10 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
         sag_sortierung()
         view_refresh(baum, tab)
         return 0
+    }
+    if welches == 14 {
+        // D1: the actions of other programs (bus), see actions_menu
+        return actions_run(idx)
     }
     if welches == 13 {
         // explorer.context.drive: 0 Open, 1 Eject, 2 Disk management
@@ -3277,6 +3283,139 @@ fn ctx_wahl(idx: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
     if idx == 13 { // Eigenschaften
         return props_show(tab, tab) << 8
     }
+    if idx == 14 { // D1: actions of other programs, asked from the bus
+        return actions_menu() << 8
+    }
+    return 0
+}
+
+// ===== D1: ACTIONS FROM THE ACTION BUS IN THE CONTEXT MENU ============
+//
+// Every program declares in its ACTIONS manifest which verbs want to be
+// in a file's context menu (`menu file|dir|any "label"`, optional
+// `menuext img iso`). The file manager asks the broker --
+// `list --menu file <name>` -- and shows the answer as a sub menu
+// (menu number 14). A pick is `call <action> path=<full path>` through
+// the same broker: levels, confirmation, audit log and undo apply as
+// for every other caller. Contract for the app: a menu action takes ONE
+// string argument named `path`.
+static mut bm_names: [u8; 512] = [0 as u8; 512] // 8 x 64: action names
+static mut bm_lbl: [u8; 1100] = [0 as u8; 1100] // labels, one per line
+static mut bm_n: u64 = 0
+static mut bm_path: [u8; 200] = [0 as u8; 200]
+static mut bm_line: [u8; 300] = [0 as u8; 300]
+static mut bm_tmp: [u8; 240] = [0 as u8; 240]
+static mut k_noacts: [u8; 22] = "explorer.actions.none\0"
+
+// append `src` to `dst` at `at` (at most `max` bytes in all); the new end
+fn bm_cat(dst: u64, at: u64, src: u64, max: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while __mmio_read8((src + i) as *mut u8) != 0 as u8 && o + 1 < max {
+        __mmio_write8((dst + o) as *mut u8,
+            __mmio_read8((src + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((dst + o) as *mut u8, 0 as u8)
+    return o
+}
+
+// Ask the bus for the entries of the selected row and open the sub menu.
+// Returns the menu number (14) or 0 when nothing could be opened.
+fn actions_menu() -> u64 {
+    var s_lf: [u8; 17] = "list --menu file\0"
+    var s_ld: [u8; 16] = "list --menu dir\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_nl: [u8; 2] = "\n\0"
+    let z: u64 = cur_row()
+    bm_n = 0
+    if z >= m_anzahl() {
+        return 0
+    }
+    let e: u64 = m_ord(z)
+    ulib.strncpy((&bm_path[0 as usize]) as u64, full_from(z), 190)
+    var at: u64 = 0
+    if m_art(e) != 0 {
+        at = bm_cat((&bm_line[0 as usize]) as u64, 0, (&s_ld[0 as usize]) as u64, 290)
+    } else {
+        at = bm_cat((&bm_line[0 as usize]) as u64, 0, (&s_lf[0 as usize]) as u64, 290)
+    }
+    at = bm_cat((&bm_line[0 as usize]) as u64, at, (&s_sp[0 as usize]) as u64, 290)
+    at = bm_cat((&bm_line[0 as usize]) as u64, at, m_name(e), 290)
+    var la: u64 = 0
+    __mmio_write8(((&bm_lbl[0 as usize]) as u64) as *mut u8, 0 as u8)
+    if actcli.open() {
+        actcli.req((&bm_line[0 as usize]) as u64)
+        if actcli.send(300) == actcli.R_OK {
+            var k: u64 = 1
+            while bm_n < 8 && actcli.line(k, (&bm_tmp[0 as usize]) as u64, 230) {
+                // action TAB label TAB level
+                let t: u64 = (&bm_tmp[0 as usize]) as u64
+                var a: u64 = 0
+                var nm: u64 = (&bm_names[0 as usize]) as u64 + bm_n * 64
+                while __mmio_read8((t + a) as *mut u8) != 0 as u8
+                    && __mmio_read8((t + a) as *mut u8) != 9 as u8 && a < 62 {
+                    __mmio_write8((nm + a) as *mut u8, __mmio_read8((t + a) as *mut u8))
+                    a = a + 1
+                }
+                __mmio_write8((nm + a) as *mut u8, 0 as u8)
+                if __mmio_read8((t + a) as *mut u8) == 9 as u8 {
+                    a = a + 1
+                }
+                var lb: [u8; 80] = [0 as u8; 80]
+                var b: u64 = 0
+                while __mmio_read8((t + a) as *mut u8) != 0 as u8
+                    && __mmio_read8((t + a) as *mut u8) != 9 as u8 && b < 78 {
+                    lb[b as usize] = __mmio_read8((t + a) as *mut u8)
+                    a = a + 1
+                    b = b + 1
+                }
+                if la + 80 < 1090 {
+                    la = bm_cat((&bm_lbl[0 as usize]) as u64, la,
+                        (&lb[0 as usize]) as u64, 1090)
+                    la = bm_cat((&bm_lbl[0 as usize]) as u64, la,
+                        (&s_nl[0 as usize]) as u64, 1090)
+                    bm_n = bm_n + 1
+                }
+                k = k + 1
+            }
+        }
+    }
+    if bm_n == 0 {
+        // nobody offers anything for this entry: say so instead of nothing
+        la = bm_cat((&bm_lbl[0 as usize]) as u64, 0,
+            msg.get((&k_noacts[0 as usize]) as u64), 1090)
+    }
+    let _n: u64 = popup_at(fuiscene.menu_x(), fuiscene.menu_y(),
+        (&bm_lbl[0 as usize]) as u64)
+    return 14
+}
+
+// A pick of the sub menu: `call <action> path=<full path>`.
+fn actions_run(idx: u64) -> u64 {
+    var s_call: [u8; 6] = "call \0"
+    var k_path: [u8; 5] = "path\0"
+    var s_ac: [u8; 18] = "explorer: action \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    if idx >= bm_n {
+        return 0
+    }
+    let nm: u64 = (&bm_names[0 as usize]) as u64 + idx * 64
+    var at: u64 = bm_cat((&bm_line[0 as usize]) as u64, 0,
+        (&s_call[0 as usize]) as u64, 290)
+    at = bm_cat((&bm_line[0 as usize]) as u64, at, nm, 290)
+    if !actcli.open() {
+        return 0
+    }
+    actcli.req((&bm_line[0 as usize]) as u64)
+    actcli.arg((&k_path[0 as usize]) as u64, (&bm_path[0 as usize]) as u64)
+    let rc: u64 = actcli.send(600)
+    say((&s_ac[0 as usize]) as u64)
+    say(nm)
+    say((&s_rc[0 as usize]) as u64)
+    sayn(rc)
+    nl()
     return 0
 }
 
