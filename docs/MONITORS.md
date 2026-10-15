@@ -16,13 +16,28 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
   `audio_pin` (HDA `GET_PIN_SENSE` presence bit 31 **and** ELD-valid bit 30 **and** EDID audio).
   No sound to a monitor without audio, with the cable out, with ELD not yet valid, or switched off.
 
+## Kernel wiring, round 1 (r808, 15.10.2026) — vgpu output table, EDID, mirror
+- `kernel/drv/gpu/vgpu.fi` keeps an **output table** (8 heads, like `layout.fi` MAX_OUT): connected flag, rect, size from
+  `GET_DISPLAY_INFO` for **all** heads (before: only the first one was read).
+- **EDID per head:** `VIRTIO_GPU_F_EDID` is negotiated; `GET_EDID` (0x010A) per connected head, base block checked
+  (header + checksum) and parsed: maker letters, preferred mode (first DTD), physical size in mm (bytes 21/22, cm),
+  suggested UI scale (same rule and snap table as `layout.default_scale`). Never fatal: a bad EDID leaves the head at 100 %.
+- **Mirror:** every further connected head gets `SET_SCANOUT` (scanout_id = head) with the **same resource** as head 0.
+  `RESOURCE_FLUSH` of that resource then refreshes all heads. Serial: `vgpu: ... heads=2 mirr=1 merr=0`,
+  one `vgpu: head N WxH edid=XXX pref=WxH mm=WxH scale=P` line per head.
+- Test bed word `vgpuheads` (default OFF): QEMU **without a GUI backend** (no gtk/sdl module here) never flags head >= 1 as
+  `enabled`, so with the word the driver treats every scanout the device has as connected. Without the word only
+  heads the device reports as enabled are used (what real hardware / a GUI QEMU gives).
+- Gate: `tools/vgpuheads/run.sh` (QEMU `max_outputs=2` + control `max_outputs=1`; `screendump` of head 0 and head 1 are
+  non-black and byte-identical).
+- Not wired yet: `lib/monitors/layout.fi` itself (extend/arrangement) — the kernel has no per-output compositor.
+
 ## What is NOT done (honest)
 1. **Kernel still has one framebuffer.** `fb.fi` = one address/geometry/back buffer; `wm.fi`
    (17.8k lines) composes into one surface at (0,0) and uses `fb.width()` ~20 times for "the screen".
    Wiring = every such call must name an output; the compose pass runs per output rect.
-2. **vgpu.fi** reads `num_scanouts` and `GET_DISPLAY_INFO` but takes the **first connected** scanout
-   only and issues `SET_SCANOUT` with scanout_id 0. Needs: per-scanout resource, `SET_SCANOUT` per id,
-   EVENT_DISPLAY per output. QEMU side is ready (`-device virtio-gpu-pci,max_outputs=2`, measured by the gate).
+2. **vgpu.fi**: table + EDID + mirror done (see above). Still needs: a per-scanout resource for EXTEND, hotplug
+   (EVENT_DISPLAY re-reads the table but does not re-run `SET_SCANOUT` for new heads). QEMU side is ready (`-device virtio-gpu-pci,max_outputs=2`, measured by the gate).
 3. **Settings → Display arrangement canvas** (drag rectangles → `set_position`) is not built; the model
    API for it is.
 4. **HDA HDMI:** `hda.fi` skips digital pins by design. Needs: digital converter + IEC958 format,
