@@ -22,8 +22,8 @@
 import os
 import sys
 
-VALW = 96  # muss mit kernel/user/msg.fi uebereinstimmen
-KEYW = 40
+VALW = 192  # must match kernel/user/msg.fi
+KEYW = 48  # must match kernel/user/msg.fi
 
 
 def lies(pfad):
