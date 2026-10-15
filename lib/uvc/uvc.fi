@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/uvc/uvc.fi -- USB Video Class (UVC 1.x) protocol half (r809), no USB traffic.
+//
+// WHAT THIS IS
+//   Pure parsing/encoding of what a UVC camera speaks, testable on the host
+//   (tools/uvc/run.sh), like lib/usbnet:
+//     * parse_config : configuration descriptor -> streaming interface,
+//                      formats (MJPEG / uncompressed), frames, alternate
+//                      settings with their isochronous/bulk IN endpoints
+//     * pick_frame / pick_alt : choose a frame size and an endpoint setting
+//     * build_probe / probe_ok : the 26 byte VS_PROBE / VS_COMMIT control block
+//     * asm_*        : payload-header parser + frame assembler (FID toggle,
+//                      EOF, ERR, overflow), works for isoc packets and bulk
+//     * jpeg_ok, yuy2_to_xrgb : frame validation / conversion for the app
+//
+// WHAT THIS IS NOT (honest)
+//   There is NO camera driver yet: xhci.fi has no isochronous transfers and
+//   QEMU 7.2 has no UVC device (usb-camera arrived in QEMU 10), so no
+//   end-to-end gate exists. See docs/UVC.md for the missing steps.
+//
+// All integers are little endian. Memory is addressed as raw u64 pointers;
+// the caller owns every buffer. Result record "r" has R_SIZE bytes, the
+// assembler state "st" has S_SIZE bytes (both zeroed by the init functions).
+
+export {
+    R_SIZE, S_SIZE, MAX_FMT, MAX_FRAME, MAX_ALT, NO_ALT,
+    FOURCC_YUY2, FOURCC_MJPG,
+    SET_CUR, GET_CUR, GET_MIN, GET_MAX, GET_DEF,
+    REQT_SET, REQT_GET, VS_PROBE, VS_COMMIT, PROBE_LEN,
+    le16, le32, put16, put32,
+    r_init, parse_config,
+    r_vs_if, r_vc_if, r_nfmt, r_nframes, r_nalt,
+    fmt_idx, fmt_kind, fmt_fourcc, fmt_nframes,
+    frame_fmt, frame_idx, frame_w, frame_h, frame_max, frame_interval,
+    alt_num, alt_ep, alt_mps, alt_type,
+    pick_frame, pick_alt,
+    build_probe, probe_ok, probe_max_payload, probe_max_frame, probe_interval,
+    asm_init, asm_feed, asm_frame_len, asm_frames, asm_dropped, asm_errors,
+    jpeg_ok, yuy2_to_xrgb
+}
+
+const MAX_FMT: u64 = 4
+const MAX_FRAME: u64 = 8
+const MAX_ALT: u64 = 8
+const NO_ALT: u64 = 0xFF
+
+// result record layout (8 byte cells)
+const R_VC_IF: u64 = 0x00
+const R_VS_IF: u64 = 0x08
+const R_NFMT: u64 = 0x10
+const R_NFRAME: u64 = 0x18
+const R_NALT: u64 = 0x20
+const R_HAVE_VS: u64 = 0x28
+const FMT_OFF: u64 = 0x40      // MAX_FMT * 32  : idx, subtype, fourcc, nframes
+const FRAME_OFF: u64 = 0xC0    // MAX_FRAME * 48: fmt, idx, w, h, max size, interval
+const ALT_OFF: u64 = 0x240     // MAX_ALT * 32  : alt, ep addr, eff. mps, type
+const R_SIZE: u64 = 0x340
+
+// assembler state layout
+const S_FID: u64 = 0x00
+const S_STARTED: u64 = 0x08
+const S_LEN: u64 = 0x10
+const S_BAD: u64 = 0x18
+const S_DONE: u64 = 0x20
+const S_FRAMES: u64 = 0x28
+const S_DROPPED: u64 = 0x30
+const S_ERRORS: u64 = 0x38
+const S_CAP: u64 = 0x40
+const S_DST: u64 = 0x48
+const S_SIZE: u64 = 0x50
+
+const FOURCC_YUY2: u64 = 0x32595559
+const FOURCC_MJPG: u64 = 0x47504A4D
+
+// class requests (UVC 1.5 section 4.2)
+const SET_CUR: u64 = 0x01
+const GET_CUR: u64 = 0x81
+const GET_MIN: u64 = 0x82
+const GET_MAX: u64 = 0x83
+const GET_DEF: u64 = 0x87
+const REQT_SET: u64 = 0x21   // host -> device, class, interface
+const REQT_GET: u64 = 0xA1   // device -> host, class, interface
+const VS_PROBE: u64 = 0x01   // wValue = selector << 8, wIndex = VS interface
+const VS_COMMIT: u64 = 0x02
+const PROBE_LEN: u64 = 26
+
+fn ld8(p: u64, i: u64) -> u64 {
+    let q: *mut u8 = (p + i) as *mut u8
+    let v: u8 = *q
+    return v as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    let q: *mut u8 = (p + i) as *mut u8
+    *q = (v & 255) as u8
+}
+
+fn le16(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8)
+}
+
+fn le32(p: u64, i: u64) -> u64 {
+    return ld8(p, i) | (ld8(p, i + 1) << 8) | (ld8(p, i + 2) << 16) | (ld8(p, i + 3) << 24)
+}
+
+fn put16(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+}
+
+fn put32(p: u64, i: u64, v: u64) {
+    st8(p, i, v)
+    st8(p, i + 1, v >> 8)
+    st8(p, i + 2, v >> 16)
+    st8(p, i + 3, v >> 24)
+}
+
+fn cg(r: u64, off: u64) -> u64 {
+    let q: *mut u64 = (r + off) as *mut u64
+    return *q
+}
+
+fn cs(r: u64, off: u64, v: u64) {
+    let q: *mut u64 = (r + off) as *mut u64
+    *q = v
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+fn r_init(r: u64) {
+    zero(r, R_SIZE)
+}
+
+fn r_vs_if(r: u64) -> u64 { return cg(r, R_VS_IF) }
+fn r_vc_if(r: u64) -> u64 { return cg(r, R_VC_IF) }
+fn r_nfmt(r: u64) -> u64 { return cg(r, R_NFMT) }
+fn r_nframes(r: u64) -> u64 { return cg(r, R_NFRAME) }
+fn r_nalt(r: u64) -> u64 { return cg(r, R_NALT) }
+
+fn fmt_idx(r: u64, i: u64) -> u64 { return cg(r, FMT_OFF + i * 32) }
+fn fmt_kind(r: u64, i: u64) -> u64 { return cg(r, FMT_OFF + i * 32 + 8) }
+fn fmt_fourcc(r: u64, i: u64) -> u64 { return cg(r, FMT_OFF + i * 32 + 16) }
+fn fmt_nframes(r: u64, i: u64) -> u64 { return cg(r, FMT_OFF + i * 32 + 24) }
+
+fn frame_fmt(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48) }
+fn frame_idx(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48 + 8) }
+fn frame_w(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48 + 16) }
+fn frame_h(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48 + 24) }
+fn frame_max(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48 + 32) }
+fn frame_interval(r: u64, i: u64) -> u64 { return cg(r, FRAME_OFF + i * 48 + 40) }
+
+fn alt_num(r: u64, i: u64) -> u64 { return cg(r, ALT_OFF + i * 32) }
+fn alt_ep(r: u64, i: u64) -> u64 { return cg(r, ALT_OFF + i * 32 + 8) }
+fn alt_mps(r: u64, i: u64) -> u64 { return cg(r, ALT_OFF + i * 32 + 16) }
+fn alt_type(r: u64, i: u64) -> u64 { return cg(r, ALT_OFF + i * 32 + 24) }
+
+// Walk a configuration descriptor. Returns true when a VideoStreaming
+// interface with at least one frame and one IN endpoint setting was found.
+// Only the FIRST VideoStreaming interface is described (a camera with
+// several streams is served on its first one). Every length is checked
+// against `total`: bLength is chosen by the device.
+fn parse_config(cfg: u64, total: u64, r: u64) -> bool {
+    r_init(r)
+    var at: u64 = 0
+    var cur_if: u64 = 0
+    var cur_alt: u64 = 0
+    var mine: bool = false      // inside the chosen VS interface
+    var cur_fmt: u64 = 0        // 1-based record number of the current format
+    while at + 2 <= total {
+        let len: u64 = ld8(cfg, at)
+        let kind: u64 = ld8(cfg, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                cur_if = ld8(cfg, at + 2)
+                cur_alt = ld8(cfg, at + 3)
+                let cls: u64 = ld8(cfg, at + 5)
+                let sub: u64 = ld8(cfg, at + 6)
+                mine = false
+                if cls == 0x0E && sub == 1 {
+                    cs(r, R_VC_IF, cur_if)
+                }
+                if cls == 0x0E && sub == 2 {
+                    if cg(r, R_HAVE_VS) == 0 {
+                        cs(r, R_HAVE_VS, 1)
+                        cs(r, R_VS_IF, cur_if)
+                    }
+                    mine = cur_if == cg(r, R_VS_IF)
+                }
+            } else if kind == 0x24 && len >= 5 && mine {
+                let sub: u64 = ld8(cfg, at + 2)
+                if sub == 4 || sub == 6 {
+                    let n: u64 = cg(r, R_NFMT)
+                    cur_fmt = 0
+                    if n < MAX_FMT {
+                        let o: u64 = FMT_OFF + n * 32
+                        cs(r, o, ld8(cfg, at + 3))
+                        cs(r, o + 8, sub)
+                        if sub == 6 {
+                            cs(r, o + 16, FOURCC_MJPG)
+                        } else if len >= 21 {
+                            cs(r, o + 16, le32(cfg, at + 5))
+                        }
+                        cs(r, o + 24, ld8(cfg, at + 4))
+                        cs(r, R_NFMT, n + 1)
+                        cur_fmt = n + 1
+                    }
+                } else if (sub == 5 || sub == 7) && len >= 26 && cur_fmt != 0 {
+                    let n: u64 = cg(r, R_NFRAME)
+                    if n < MAX_FRAME {
+                        let o: u64 = FRAME_OFF + n * 48
+                        cs(r, o, fmt_idx(r, cur_fmt - 1))
+                        cs(r, o + 8, ld8(cfg, at + 3))
+                        cs(r, o + 16, le16(cfg, at + 5))
+                        cs(r, o + 24, le16(cfg, at + 7))
+                        cs(r, o + 32, le32(cfg, at + 17))
+                        cs(r, o + 40, le32(cfg, at + 21))
+                        cs(r, R_NFRAME, n + 1)
+                    }
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                // endpoint of the VS interface: only IN (bit 7) is a video pipe
+                let addr: u64 = ld8(cfg, at + 2)
+                let attr: u64 = ld8(cfg, at + 3) & 3
+                let wmax: u64 = le16(cfg, at + 4)
+                if (addr & 0x80) != 0 && (attr == 1 || attr == 2) {
+                    let n: u64 = cg(r, R_NALT)
+                    if n < MAX_ALT {
+                        let o: u64 = ALT_OFF + n * 32
+                        cs(r, o, cur_alt)
+                        cs(r, o + 8, addr)
+                        cs(r, o + 16, (wmax & 0x7FF) * (1 + ((wmax >> 11) & 3)))
+                        cs(r, o + 24, attr)
+                        cs(r, R_NALT, n + 1)
+                    }
+                }
+            }
+            at = at + len
+        }
+    }
+    return cg(r, R_HAVE_VS) != 0 && cg(r, R_NFRAME) > 0 && cg(r, R_NALT) > 0
+}
+
+// Index of the frame record that fits `w` x `h` best: exact match, else the
+// largest frame not bigger than the request, else the smallest frame.
+// `fourcc` selects the format (0 = any). Returns 0xFF when nothing fits.
+fn pick_frame(r: u64, w: u64, h: u64, fourcc: u64) -> u64 {
+    var best: u64 = 0xFF
+    var best_area: u64 = 0
+    var small: u64 = 0xFF
+    var small_area: u64 = 0xFFFFFFFFFFFF
+    let want: u64 = w * h
+    var i: u64 = 0
+    let n: u64 = cg(r, R_NFRAME)
+    while i < n {
+        var okf: bool = fourcc == 0
+        var k: u64 = 0
+        while k < cg(r, R_NFMT) {
+            if fmt_idx(r, k) == frame_fmt(r, i) && fmt_fourcc(r, k) == fourcc {
+                okf = true
+            }
+            k = k + 1
+        }
+        if okf {
+            let area: u64 = frame_w(r, i) * frame_h(r, i)
+            if frame_w(r, i) == w && frame_h(r, i) == h {
+                return i
+            }
+            if area <= want && area > best_area {
+                best = i
+                best_area = area
+            }
+            if area < small_area {
+                small = i
+                small_area = area
+            }
+        }
+        i = i + 1
+    }
+    if best != 0xFF {
+        return best
+    }
+    return small
+}
+
+// Index of the endpoint setting to select for a payload of `need` bytes per
+// (micro)frame: a bulk endpoint is always taken as is (it lives in alt 0);
+// otherwise the isochronous setting with the smallest effective packet size
+// that still fits. NO_ALT when none is big enough.
+fn pick_alt(r: u64, need: u64) -> u64 {
+    var best: u64 = NO_ALT
+    var best_mps: u64 = 0xFFFFFFFF
+    var i: u64 = 0
+    let n: u64 = cg(r, R_NALT)
+    while i < n {
+        if alt_type(r, i) == 2 {
+            return i
+        }
+        if alt_mps(r, i) >= need && alt_mps(r, i) < best_mps {
+            best = i
+            best_mps = alt_mps(r, i)
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// VS_PROBE / VS_COMMIT block (UVC 1.0 layout, 26 bytes). bmHint bit 0 =
+// "dwFrameInterval is fixed", the rest is left to the device.
+fn build_probe(dst: u64, fmt: u64, frame: u64, interval: u64) -> u64 {
+    zero(dst, PROBE_LEN)
+    put16(dst, 0, 1)
+    st8(dst, 2, fmt)
+    st8(dst, 3, frame)
+    put32(dst, 4, interval)
+    return PROBE_LEN
+}
+
+// A device answer to GET_CUR(PROBE) is only taken when it echoes the request
+// and states sane sizes (the later transfers are sized from these numbers).
+fn probe_ok(p: u64, n: u64, fmt: u64, frame: u64) -> bool {
+    if n < PROBE_LEN { return false }
+    if ld8(p, 2) != fmt { return false }
+    if ld8(p, 3) != frame { return false }
+    let mp: u64 = le32(p, 22)
+    if mp == 0 || mp > 0x10000 { return false }
+    let mf: u64 = le32(p, 18)
+    if mf == 0 || mf > 0x4000000 { return false }
+    return true
+}
+
+fn probe_max_payload(p: u64) -> u64 { return le32(p, 22) }
+fn probe_max_frame(p: u64) -> u64 { return le32(p, 18) }
+fn probe_interval(p: u64) -> u64 { return le32(p, 4) }
+
+// ---------------------------------------------------------------- assembler
+
+fn asm_init(st: u64, dst: u64, cap: u64) {
+    zero(st, S_SIZE)
+    cs(st, S_DST, dst)
+    cs(st, S_CAP, cap)
+}
+
+fn asm_frame_len(st: u64) -> u64 { return cg(st, S_DONE) }
+fn asm_frames(st: u64) -> u64 { return cg(st, S_FRAMES) }
+fn asm_dropped(st: u64) -> u64 { return cg(st, S_DROPPED) }
+fn asm_errors(st: u64) -> u64 { return cg(st, S_ERRORS) }
+
+fn copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+// Feed ONE transfer (isoc packet or bulk payload): header + data. Returns
+// true when it completed a frame; the frame is then at S_DST with length
+// asm_frame_len and stays valid until the next feed.
+//   header : [0] bHeaderLength (2..12, within the packet)
+//            [1] bit0 FID, bit1 EOF, bit6 ERR
+fn asm_feed(st: u64, p: u64, n: u64) -> bool {
+    if n < 2 {
+        cs(st, S_ERRORS, cg(st, S_ERRORS) + 1)
+        return false
+    }
+    let hle: u64 = ld8(p, 0)
+    if hle < 2 || hle > 12 || hle > n {
+        cs(st, S_ERRORS, cg(st, S_ERRORS) + 1)
+        return false
+    }
+    let info: u64 = ld8(p, 1)
+    let fid: u64 = info & 1
+    if (info & 0x40) != 0 {
+        cs(st, S_BAD, 1)
+        cs(st, S_ERRORS, cg(st, S_ERRORS) + 1)
+    }
+    if cg(st, S_STARTED) != 0 && fid != cg(st, S_FID) && cg(st, S_LEN) > 0 {
+        // FID toggled without EOF: the previous frame never ended
+        cs(st, S_DROPPED, cg(st, S_DROPPED) + 1)
+        cs(st, S_LEN, 0)
+        cs(st, S_BAD, 0)
+        if (info & 0x40) != 0 {
+            cs(st, S_BAD, 1)
+        }
+    }
+    cs(st, S_STARTED, 1)
+    cs(st, S_FID, fid)
+    let k: u64 = n - hle
+    if k > 0 {
+        if cg(st, S_LEN) + k > cg(st, S_CAP) {
+            cs(st, S_BAD, 1)
+        } else if cg(st, S_BAD) == 0 {
+            copy(cg(st, S_DST) + cg(st, S_LEN), p + hle, k)
+            cs(st, S_LEN, cg(st, S_LEN) + k)
+        }
+    }
+    if (info & 2) != 0 {
+        let l: u64 = cg(st, S_LEN)
+        let bad: u64 = cg(st, S_BAD)
+        cs(st, S_LEN, 0)
+        cs(st, S_BAD, 0)
+        if bad != 0 || l == 0 {
+            cs(st, S_DROPPED, cg(st, S_DROPPED) + 1)
+            return false
+        }
+        cs(st, S_DONE, l)
+        cs(st, S_FRAMES, cg(st, S_FRAMES) + 1)
+        return true
+    }
+    return false
+}
+
+// A frame is a JPEG when it starts with SOI (FFD8) and ends with EOI (FFD9).
+fn jpeg_ok(p: u64, n: u64) -> bool {
+    if n < 4 { return false }
+    if ld8(p, 0) != 0xFF || ld8(p, 1) != 0xD8 { return false }
+    if ld8(p, n - 2) != 0xFF || ld8(p, n - 1) != 0xD9 { return false }
+    return true
+}
+
+fn clamp8(v: i64) -> u64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    return v as u64
+}
+
+fn put_px(dst: u64, at: u64, y: u64, u: u64, v: u64) {
+    // BT.601 limited range, fixed point /256; bias keeps the shift positive
+    let c: i64 = (y as i64) - 16
+    let d: i64 = (u as i64) - 128
+    let e: i64 = (v as i64) - 128
+    let bias: i64 = 131072
+    let r: i64 = ((298 * c + 409 * e + 128 + bias) >> 8) - 512
+    let g: i64 = ((298 * c - 100 * d - 208 * e + 128 + bias) >> 8) - 512
+    let b: i64 = ((298 * c + 516 * d + 128 + bias) >> 8) - 512
+    st8(dst, at, clamp8(b))
+    st8(dst, at + 1, clamp8(g))
+    st8(dst, at + 2, clamp8(r))
+    st8(dst, at + 3, 0)
+}
+
+// YUY2 (Y0 U Y1 V per two pixels) -> 32 bit XRGB (bytes B G R 0).
+// `w` must be even. Returns the number of output bytes (0 on bad input).
+fn yuy2_to_xrgb(src: u64, w: u64, h: u64, dst: u64) -> u64 {
+    if w == 0 || h == 0 || (w & 1) != 0 { return 0 }
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let s: u64 = (y * w + x) * 2
+            let o: u64 = (y * w + x) * 4
+            let y0: u64 = ld8(src, s)
+            let u: u64 = ld8(src, s + 1)
+            let y1: u64 = ld8(src, s + 2)
+            let v: u64 = ld8(src, s + 3)
+            put_px(dst, o, y0, u, v)
+            put_px(dst, o + 4, y1, u, v)
+            x = x + 2
+        }
+        y = y + 1
+    }
+    return w * h * 4
+}
