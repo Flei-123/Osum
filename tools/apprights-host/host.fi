@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/apprights-host/host.fi -- host test of lib/apprights/policy.fi (grant table + ceiling) and lib/apprights/conf.fi
+// (apprights.conf parser, manifest perm= ceiling, rewrite). Built by tools/apprights-host/run.sh, which also mutates
+// the libs and expects this test to go red for every mutation.
+import std.rt
+import std.io
+import apprights.policy
+import apprights.conf
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 2048] = [0 as u8; 2048]
+static mut cslot: usize = 0
+static mut outb: [u8; 512] = [0 as u8; 512]
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 16) * 128
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 127 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn len_of(p: u64) -> u64 {
+    var n: u64 = 0
+    while rt.ld8(p, n as usize) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_s(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.length() {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, i) == 0 as u8
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    policy.reset()
+
+    // ---- grant table: default deny
+    check(&t, !policy.label_allows(c("app:probe"), policy.P_MIC), "default deny: app without grant")
+    check(&t, policy.label_allows(c(""), policy.P_MIC), "empty label (the person) is never gated")
+    check(&t, policy.label_allows(c("jarvis"), policy.P_MIC), "non-app label is never gated")
+    check(&t, policy.set_mask(c("probe"), policy.P_MIC | policy.P_NOTIFY) == policy.E_OK, "grant mic+notify")
+    check(&t, policy.label_allows(c("app:probe"), policy.P_MIC), "granted right is allowed")
+    check(&t, policy.label_allows(c("app:probe"), policy.P_NOTIFY), "second granted right is allowed")
+    check(&t, !policy.label_allows(c("app:probe"), policy.P_NET), "ungranted right of the same app stays denied")
+    check(&t, !policy.label_allows(c("app:other"), policy.P_MIC), "grants are per app")
+    check(&t, policy.revoke(c("probe"), policy.P_MIC) == policy.E_OK, "revoke mic")
+    check(&t, !policy.label_allows(c("app:probe"), policy.P_MIC) && policy.label_allows(c("app:probe"), policy.P_NOTIFY), "revoke takes only that bit")
+    check(&t, policy.set_mask(c("bad/name"), 1) == policy.E_BADNAME, "bad app name refused")
+    check(&t, policy.set_mask(c("0123456789012345678901"), 1) == policy.E_BADNAME, "too long app name refused")
+    check(&t, policy.bit_of(c("clipboard.read")) == policy.P_CLIP_READ && policy.bit_of(c("nonsense")) == 0, "right names")
+
+    // ---- ceiling (manifest perm=)
+    policy.reset()
+    check(&t, policy.get_ceiling(c("mail")) == policy.CEIL_NONE && !policy.has_ceiling(c("mail")), "no ceiling registered yet")
+    check(&t, policy.set_ceiling(c("mail"), policy.P_NET | policy.P_NOTIFY) == policy.E_OK, "register ceiling net+notify")
+    check(&t, policy.get_ceiling(c("mail")) == (policy.P_NET | policy.P_NOTIFY), "ceiling readable")
+    check(&t, policy.set_mask(c("mail"), policy.P_NET) == policy.E_OK, "grant inside the ceiling")
+    check(&t, policy.set_mask(c("mail"), policy.P_NET | policy.P_MIC) == policy.E_CEIL, "grant above the ceiling refused")
+    check(&t, policy.get_mask(c("mail")) == policy.P_NET, "refused grant changed nothing")
+    check(&t, policy.grant(c("mail"), policy.P_CLIP_READ) == policy.E_CEIL, "grant() above the ceiling refused")
+    check(&t, policy.set_ceiling(c("mail"), policy.P_NOTIFY) == policy.E_OK, "lower the ceiling")
+    check(&t, policy.get_mask(c("mail")) == 0, "lowering the ceiling removes the grant at once")
+    check(&t, policy.set_ceiling(c("nodecl"), 0) == policy.E_OK, "manifest without perm= -> ceiling 0")
+    check(&t, policy.set_mask(c("nodecl"), policy.P_NOTIFY) == policy.E_CEIL, "ceiling 0 app can receive nothing")
+    check(&t, policy.set_mask(c("nodecl"), 0) == policy.E_OK, "ceiling 0 app: empty grant is fine")
+    check(&t, policy.set_mask(c("free"), policy.P_ALL) == policy.E_OK, "app without registered ceiling is only limited by default deny")
+
+    // ---- manifest perm= parser
+    let ip: u64 = c("name=Mail\ninfo=x\nperm=net, notify,clipboard.read\nnet=real\n")
+    check(&t, conf.manifest_perm(ip, len_of(ip)) == (policy.P_NET | policy.P_NOTIFY | policy.P_CLIP_READ), "perm= line -> ceiling")
+    let ip0: u64 = c("name=Plain\ninfo=no permission line\nnet=none\n")
+    check(&t, conf.manifest_perm(ip0, len_of(ip0)) == 0, "no perm= line -> ceiling 0")
+    let ip2: u64 = c("#perm=net\nxperm=net\npermfoo,net\nperm=bogus,mic\n")
+    check(&t, conf.manifest_perm(ip2, len_of(ip2)) == policy.P_MIC, "comment / prefix lines ignored, unknown name ignored")
+
+    // ---- conf parser
+    let cp: u64 = c("# comment\nmail net,notify\n\nbad/name mic\nweird frobnicate\nplayer  audio.play , mic\nempty\n")
+    conf.reset_bad()
+    var pos: u64 = conf.conf_next(cp, len_of(cp), 0)
+    check(&t, pos != conf.END && is_s(conf.cur_name(), "mail") && conf.cur_mask() == (policy.P_NET | policy.P_NOTIFY), "line 1: mail net,notify")
+    pos = conf.conf_next(cp, len_of(cp), pos)
+    check(&t, pos != conf.END && is_s(conf.cur_name(), "player") && conf.cur_mask() == (policy.P_AUDIO_PLAY | policy.P_MIC), "bad lines skipped, player audio.play,mic")
+    pos = conf.conf_next(cp, len_of(cp), pos)
+    check(&t, pos == conf.END, "end of file")
+    check(&t, conf.bad_lines() == 3, "three bad lines counted (bad name, unknown right, no right)")
+
+    // ---- rewrite
+    var o: u64 = (&outb[0 as usize]) as u64
+    var n: u64 = conf.update(cp, len_of(cp), c("mail"), policy.P_CLIP_WRITE, o, 512)
+    check(&t, is_s(o, "player mic,audio.play\nmail clipboard.write\n"), "update replaces the line of that app, keeps the others")
+    n = conf.update(o, len_of(o), c("mail"), 0, o + 256, 256)
+    check(&t, is_s(o + 256, "player mic,audio.play\n"), "update with empty mask removes the line")
+    n = conf.update(c(""), 0, c("new"), policy.P_NET, o, 512)
+    check(&t, is_s(o, "new net\n") && n == 8, "update on an empty file")
+    n = conf.update(c("x mic\n"), 6, c("x"), 0, o, 512)
+    check(&t, n == 0, "removing the only line leaves an empty file")
+
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

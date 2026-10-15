@@ -3,8 +3,12 @@
 //
 //     apprights get <app>                    print the grant mask and the right names
 //     apprights set <app> [right ...]        replace the grants (no right = revoke all)
-//     apprights trymic <app>                 test: a child labelled app:<app> reads the microphone
-//     apprights trygrant <app>               test: a child labelled app:<app> tries to grant itself `mic`
+//     apprights ceil <app> [right ...]       register the CEILING of an app (normally `load` does this from the manifest)
+//     apprights load                         boot: ceilings from /apps/*/INFO `perm=`, grants from /etc/apprights.conf
+//     apprights trymic|trygrant <app>        test: a child labelled app:<app> reads the microphone / grants itself `mic`
+//     apprights try <what> <app>             test: a child labelled app:<app> uses clipr clipw notify audio net
+//
+// `set` also writes the grant to /etc/apprights.conf (only apps with a grant), `load` applies it at the next start.
 //
 // The table lives in the kernel (lib/apprights/policy.fi, SYS_OSUM_ORIGIN ops 2/3). Only an unlabelled
 // caller (this tool run by the person) can change it. docs/APP-RECHTE-ENERGIE.md.
@@ -15,6 +19,7 @@ import ulib
 import libc.io
 import libc.kcall
 import apprights.policy
+import apprights.conf
 
 export { u_start }
 
@@ -49,6 +54,15 @@ fn do_get(app: u64) -> u64 {
         b = b << 1
         i = i + 1
     }
+    var s_ceil: [u8; 7] = " ceil=\0"
+    var s_none: [u8; 5] = "none\0"
+    ulib.say((&s_ceil[0]) as u64)
+    let c: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 5, app, 0)
+    if ulib.failed(c) || c == policy.CEIL_NONE {
+        ulib.say((&s_none[0]) as u64)
+    } else {
+        ulib.sayu(c)
+    }
     ulib.nl()
     return 0
 }
@@ -76,10 +90,223 @@ fn do_set(args: u64, argc: u64) -> u64 {
         ulib.say((&s_fail[0]) as u64)
         ulib.sayu(code_of(r))
         ulib.nl()
+        if code_of(r) == 1 {
+            var s_ceil: [u8; 40] = "apprights: above the manifest ceiling\0\0\0"
+            ulib.say((&s_ceil[0]) as u64)
+            ulib.nl()
+        }
         return 1
     }
     ulib.say((&s_ok[0]) as u64)
     ulib.sayu(mask)
+    ulib.nl()
+    if !save_conf(app, mask) {
+        var s_ns: [u8; 37] = "apprights: not saved (no /etc write)\0"
+        ulib.say((&s_ns[0]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
+
+fn do_ceil(args: u64, argc: u64) -> u64 {
+    var s_unk: [u8; 21] = "apprights: unknown: \0"
+    var s_ok: [u8; 21] = "apprights: ceil ok \0\0"
+    var s_fail: [u8; 22] = "apprights: ceil fail \0"
+    let app: u64 = ulib.arg_at(args, 2)
+    var mask: u64 = 0
+    var i: u64 = 3
+    while i < argc {
+        let bit: u64 = policy.bit_of(ulib.arg_at(args, i))
+        if bit == 0 {
+            ulib.say((&s_unk[0]) as u64)
+            ulib.say(ulib.arg_at(args, i))
+            ulib.nl()
+            return 1
+        }
+        mask = mask | bit
+        i = i + 1
+    }
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 4, app, mask)
+    if ulib.failed(r) {
+        ulib.say((&s_fail[0]) as u64)
+        ulib.sayu(code_of(r))
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_ok[0]) as u64)
+    ulib.sayu(mask)
+    ulib.nl()
+    return 0
+}
+
+static mut conf_in: [u8; 4096] = [0 as u8; 4096]
+static mut conf_out: [u8; 4096] = [0 as u8; 4096]
+
+// Read /etc/apprights.conf into conf_in; returns the length (0 = missing or empty).
+fn read_conf() -> u64 {
+    var path: [u8; 20] = "/etc/apprights.conf\0"
+    let fd: u64 = io.open((&path[0]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&conf_in[0]) as u64, 4095)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// Replace the line of `app` in /etc/apprights.conf (mask 0 = remove it). false = the file could not be written.
+fn save_conf(app: u64, mask: u64) -> bool {
+    var path: [u8; 20] = "/etc/apprights.conf\0"
+    let n: u64 = read_conf()
+    let m: u64 = conf.update((&conf_in[0]) as u64, n, app, mask, (&conf_out[0]) as u64, 4096)
+    if m == 0 && n == 0 {
+        return true
+    }
+    let fd: u64 = io.create((&path[0]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    var ok: bool = true
+    if m > 0 {
+        ok = !ulib.bad(io.write_all(fd, (&conf_out[0]) as u64, m))
+    }
+    io.close(fd)
+    return ok
+}
+
+fn ends_with(p: u64, e: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    let k: u64 = ulib.length(e)
+    if n < k + 1 {
+        return false
+    }
+    var i: u64 = 0
+    while i < k {
+        if (*((p + n - k + i) as *mut u8)) != (*((e + i) as *mut u8)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+static mut info_buf: [u8; 2048] = [0 as u8; 2048]
+
+// One bundle dir name "<n>.osp" / "<n>.prog": register the ceiling from its INFO `perm=`. 1 = registered.
+// System bundles (root file SYSTEM) are the person's own tools, run unlabelled: no table slot for them.
+fn load_bundle(nm: u64, ext_len: u64) -> u64 {
+    var base: [u8; 8] = "/apps/\0\0"
+    var s_info: [u8; 6] = "/INFO\0"
+    var s_sys: [u8; 8] = "/SYSTEM\0"
+    var path: [u8; 128] = [0 as u8; 128]
+    var app: [u8; 32] = [0 as u8; 32]
+    let n: u64 = ulib.length(nm)
+    if n <= ext_len || n - ext_len > policy.NAME_MAX || n > 80 {
+        return 0
+    }
+    ulib.copy((&app[0]) as u64, nm, n - ext_len)
+    if !policy.name_ok((&app[0]) as u64) {
+        return 0
+    }
+    ulib.strcpy((&path[0]) as u64, (&base[0]) as u64)
+    ulib.strcat((&path[0]) as u64, nm)
+    ulib.strcat((&path[0]) as u64, (&s_sys[0]) as u64)
+    let sfd: u64 = io.open((&path[0]) as u64, 0)
+    if !ulib.bad(sfd) {
+        io.close(sfd)
+        return 0
+    }
+    ulib.strcpy((&path[0]) as u64, (&base[0]) as u64)
+    ulib.strcat((&path[0]) as u64, nm)
+    ulib.strcat((&path[0]) as u64, (&s_info[0]) as u64)
+    var ceil: u64 = 0
+    let fd: u64 = io.open((&path[0]) as u64, 0)
+    if !ulib.bad(fd) {
+        let got: u64 = io.read(fd, (&info_buf[0]) as u64, 2047)
+        io.close(fd)
+        if !ulib.bad(got) {
+            ceil = conf.manifest_perm((&info_buf[0]) as u64, got)
+        }
+    }
+    let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 4, (&app[0]) as u64, ceil)
+    if ulib.failed(r) {
+        return 0
+    }
+    return 1
+}
+
+fn do_load() -> u64 {
+    var s_osp: [u8; 5] = ".osp\0"
+    var s_prog: [u8; 6] = ".prog\0"
+    var s_dir: [u8; 7] = "/apps/\0"
+    var s_sum: [u8; 18] = "apprights: load \0\0"
+    var s_ce: [u8; 10] = " ceilings\0"
+    var s_ap: [u8; 10] = " applied=\0"
+    var s_cl: [u8; 10] = " clamped=\0"
+    var s_bd: [u8; 6] = " bad=\0"
+    var ents: [u8; 1024] = [0 as u8; 1024]
+    var ceilings: u64 = 0
+    let fd: u64 = io.dir_open((&s_dir[0]) as u64)
+    if !ulib.bad(fd) {
+        var more: bool = true
+        while more {
+            let n: u64 = io.dir_read(fd, (&ents[0]) as u64, 1024)
+            if ulib.bad(n) || n == 0 {
+                more = false
+            } else {
+                var at: u64 = 0
+                while at < n {
+                    let rec: u64 = (&ents[0]) as u64 + at
+                    let rl: u64 = io.dir_reclen(rec)
+                    if rl == 0 {
+                        at = n
+                    } else {
+                        let nm: u64 = io.dir_name(rec)
+                        if ends_with(nm, (&s_osp[0]) as u64) {
+                            ceilings = ceilings + load_bundle(nm, 4)
+                        } else if ends_with(nm, (&s_prog[0]) as u64) {
+                            ceilings = ceilings + load_bundle(nm, 5)
+                        }
+                        at = at + rl
+                    }
+                }
+            }
+        }
+        io.close(fd)
+    }
+    // grants
+    var applied: u64 = 0
+    var clamped: u64 = 0
+    let cn: u64 = read_conf()
+    conf.reset_bad()
+    var pos: u64 = conf.conf_next((&conf_in[0]) as u64, cn, 0)
+    while pos != conf.END {
+        var want: u64 = conf.cur_mask()
+        let c: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 5, conf.cur_name(), 0)
+        if !ulib.failed(c) && c != policy.CEIL_NONE {
+            if (want & (policy.P_ALL - c)) != 0 {
+                want = want & c
+                clamped = clamped + 1
+            }
+        }
+        let r: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, conf.cur_name(), want)
+        if !ulib.failed(r) {
+            applied = applied + 1
+        }
+        pos = conf.conf_next((&conf_in[0]) as u64, cn, pos)
+    }
+    ulib.say((&s_sum[0]) as u64)
+    ulib.sayu(ceilings)
+    ulib.say((&s_ce[0]) as u64)
+    ulib.say((&s_ap[0]) as u64)
+    ulib.sayu(applied)
+    ulib.say((&s_cl[0]) as u64)
+    ulib.sayu(clamped)
+    ulib.say((&s_bd[0]) as u64)
+    ulib.sayu(conf.bad_lines())
     ulib.nl()
     return 0
 }
@@ -158,6 +385,54 @@ fn child_trygrant(app: u64) -> u64 {
     return 0
 }
 
+// which: 2 clipboard.read, 3 clipboard.write, 4 notify, 5 audio.play, 6 net (prints the network view of the child)
+fn child_try(app: u64, which: u64) -> u64 {
+    var s_lab: [u8; 11] = "try: label\0"
+    var s_den: [u8; 12] = "try: DENIED\0"
+    var s_ok: [u8; 13] = "try: ALLOWED\0"
+    var s_oth: [u8; 12] = "try: other \0"
+    var s_view: [u8; 11] = "try: view=\0"
+    var buf: [u8; 16] = "abcdefghijklmno\0"
+    // app "-" = do not label: the person's own process (control: must never be gated)
+    var unlabelled: bool = false
+    if ulib.length(app) == 1 && *(app as *mut u8) == 45 as u8 {
+        unlabelled = true
+    }
+    if !unlabelled && !label_self(app) {
+        ulib.say((&s_lab[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    if which == 6 {
+        let v: u64 = ulib.sys(kcall.SYS_OSUM_NETVGET, 0, 0, 0)
+        ulib.say((&s_view[0]) as u64)
+        ulib.sayu(v)
+        ulib.nl()
+        return 0
+    }
+    var r: u64 = 0
+    if which == 2 {
+        r = ulib.bus5(11, 0, (&buf[0]) as u64, 16, 0)
+    }
+    if which == 3 {
+        r = ulib.bus5(10, 1, (&buf[0]) as u64, 4, 0)
+    }
+    if which == 4 {
+        r = ulib.bus5(19, 1, (&buf[0]) as u64, 4, 0)
+    }
+    if which == 5 {
+        r = ulib.sys(kcall.SYS_OSUM_AUDWRITE, (&mic_buf[0]) as u64, 1, 0)
+    }
+    if ulib.failed(r) && code_of(r) == 13 {
+        ulib.say((&s_den[0]) as u64)
+        ulib.nl()
+        return 13
+    }
+    ulib.say((&s_ok[0]) as u64)
+    ulib.nl()
+    return 0
+}
+
 fn run_child(app: u64, which: u64) -> u64 {
     var s_nofork: [u8; 19] = "apprights: no fork\0"
     let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
@@ -170,8 +445,10 @@ fn run_child(app: u64, which: u64) -> u64 {
         var rc: u64 = 0
         if which == 0 {
             rc = child_trymic(app)
-        } else {
+        } else if which == 1 {
             rc = child_trygrant(app)
+        } else {
+            rc = child_try(app, which)
         }
         let _e: u64 = ulib.sys(ulib.SYS_EXIT, rc, 0, 0)
         return rc
@@ -189,7 +466,7 @@ fn u_start(args: u64) -> u64 {
     var s_trygrant: [u8; 10] = "trygrant\0\0"
 
     let argc: u64 = ulib.arg_count(args)
-    if argc < 3 {
+    if argc < 2 {
         ulib.say((&s_use1[0]) as u64)
         ulib.nl()
         ulib.say((&s_use2[0]) as u64)
@@ -199,7 +476,49 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     let cmd: u64 = ulib.arg_at(args, 1)
+    var s_load: [u8; 5] = "load\0"
+    var s_ceil: [u8; 5] = "ceil\0"
+    var s_try: [u8; 4] = "try\0"
+    if ulib.streq(cmd, (&s_load[0]) as u64) {
+        return do_load()
+    }
+    if argc < 3 {
+        ulib.say((&s_use1[0]) as u64)
+        ulib.nl()
+        return 1
+    }
     let app: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(cmd, (&s_ceil[0]) as u64) {
+        return do_ceil(args, argc)
+    }
+    if ulib.streq(cmd, (&s_try[0]) as u64) {
+        if argc < 4 {
+            return 1
+        }
+        let what: u64 = ulib.arg_at(args, 2)
+        let tapp: u64 = ulib.arg_at(args, 3)
+        var w_clipr: [u8; 6] = "clipr\0"
+        var w_clipw: [u8; 6] = "clipw\0"
+        var w_notify: [u8; 7] = "notify\0"
+        var w_audio: [u8; 6] = "audio\0"
+        var w_net: [u8; 4] = "net\0"
+        if ulib.streq(what, (&w_clipr[0]) as u64) {
+            return run_child(tapp, 2)
+        }
+        if ulib.streq(what, (&w_clipw[0]) as u64) {
+            return run_child(tapp, 3)
+        }
+        if ulib.streq(what, (&w_notify[0]) as u64) {
+            return run_child(tapp, 4)
+        }
+        if ulib.streq(what, (&w_audio[0]) as u64) {
+            return run_child(tapp, 5)
+        }
+        if ulib.streq(what, (&w_net[0]) as u64) {
+            return run_child(tapp, 6)
+        }
+        return 1
+    }
     if ulib.streq(cmd, (&s_get[0]) as u64) {
         return do_get(app)
     }

@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/apprights/conf.fi -- /etc/apprights.conf and the manifest ceiling (W-APPRIGHTS AR-2, docs/APP-RECHTE-ENERGIE.md).
+//
+// No profile line: importable from the kernel, from user programs and from host tests. No heap, no str.
+//
+//   /etc/apprights.conf   one line per app, only apps with at least one grant:
+//                             <app> <right>[,<right>...]
+//                         '#' starts a comment line. A line with a bad app name or an unknown right is skipped (and
+//                         counted), never half-applied.
+//   INFO of a bundle      `perm=a,b,c` is the CEILING: what the app may ever be granted. No `perm=` line = ceiling 0.
+
+import apprights.policy
+
+export {
+    END, BAD_RIGHT, parse_rights, manifest_perm, conf_next, cur_name, cur_mask, bad_lines, reset_bad,
+    update, fmt_rights,
+}
+
+const END: u64 = 4294967295 // conf_next(): no more lines
+const BAD_RIGHT: u64 = 1099511627776 // 1 << 40: parse_rights() met an unknown right name
+
+static mut name_buf: [u8; 32] = [0 as u8; 32]
+static mut right_buf: [u8; 32] = [0 as u8; 32]
+static mut line_mask: u64 = 0
+static mut bad_count: u64 = 0
+
+fn rd(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn is_blank(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+fn cur_name() -> u64 {
+    return (&name_buf[0]) as u64
+}
+
+fn cur_mask() -> u64 {
+    return line_mask
+}
+
+fn bad_lines() -> u64 {
+    return bad_count
+}
+
+fn reset_bad() {
+    bad_count = 0
+}
+
+// "mic,notify,clipboard.read" in p[0..n) -> mask; BAD_RIGHT is or-ed in when a name is unknown or too long.
+fn parse_rights(p: u64, n: u64) -> u64 {
+    var mask: u64 = 0
+    var i: u64 = 0
+    var k: u64 = 0
+    while i <= n {
+        var c: u64 = 0
+        if i < n {
+            c = rd(p, i)
+        }
+        if c == 44 || i == n || is_blank(c) {
+            if k > 0 {
+                wr((&right_buf[0]) as u64, k, 0)
+                let b: u64 = policy.bit_of((&right_buf[0]) as u64)
+                if b == 0 {
+                    mask = mask | BAD_RIGHT
+                } else {
+                    mask = mask | b
+                }
+                k = 0
+            }
+        } else {
+            if k < 30 {
+                wr((&right_buf[0]) as u64, k, c)
+                k = k + 1
+            } else {
+                mask = mask | BAD_RIGHT
+            }
+        }
+        i = i + 1
+    }
+    return mask
+}
+
+// The `perm=` line of an INFO text -> ceiling. No line = 0. Unknown names (e.g. a future right) are ignored here:
+// a right this system does not know can never be granted anyway.
+fn manifest_perm(buf: u64, len: u64) -> u64 {
+    var at: u64 = 0
+    var ceil: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        if e - at >= 5 && rd(buf, at) == 112 && rd(buf, at + 1) == 101 && rd(buf, at + 2) == 114
+            && rd(buf, at + 3) == 109 && rd(buf, at + 4) == 61 {
+            ceil = ceil | (parse_rights(buf + at + 5, e - at - 5) & policy.P_ALL)
+        }
+        at = e + 1
+    }
+    return ceil
+}
+
+// Next valid line at or after `pos`: cur_name()/cur_mask() are set, the position after the line is returned.
+// END when there is none. Bad lines are skipped and counted.
+fn conf_next(buf: u64, len: u64, pos: u64) -> u64 {
+    var at: u64 = pos
+    while at < len {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        var s: u64 = at
+        while s < e && is_blank(rd(buf, s)) {
+            s = s + 1
+        }
+        if s < e && rd(buf, s) != 35 {
+            var q: u64 = s
+            while q < e && !is_blank(rd(buf, q)) {
+                q = q + 1
+            }
+            let nl: u64 = q - s
+            var ok: bool = nl > 0 && nl <= policy.NAME_MAX
+            if ok {
+                var i: u64 = 0
+                while i < nl {
+                    wr((&name_buf[0]) as u64, i, rd(buf, s + i))
+                    i = i + 1
+                }
+                wr((&name_buf[0]) as u64, nl, 0)
+                var r: u64 = q
+                while r < e && is_blank(rd(buf, r)) {
+                    r = r + 1
+                }
+                let m: u64 = parse_rights(buf + r, e - r)
+                if (m & BAD_RIGHT) != 0 || m == 0 {
+                    ok = false
+                } else {
+                    line_mask = m
+                }
+            }
+            if ok {
+                // the name must be a legal app name (same rule as the kernel table)
+                var j: u64 = 0
+                while j < nl {
+                    let c: u64 = rd((&name_buf[0]) as u64, j)
+                    let good: bool = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
+                        || c == 46 || c == 95 || c == 45
+                    if !good {
+                        ok = false
+                    }
+                    j = j + 1
+                }
+            }
+            if ok {
+                return e + 1
+            }
+            bad_count = bad_count + 1
+        }
+        at = e + 1
+    }
+    return END
+}
+
+// "mic,notify" for a mask into out (zero-terminated); returns the length. Mask 0 -> "".
+fn fmt_rights(mask: u64, out: u64) -> u64 {
+    var n: u64 = 0
+    var b: u64 = 1
+    var i: u64 = 0
+    while i < 11 {
+        if (mask & b) != 0 {
+            if n > 0 {
+                wr(out, n, 44)
+                n = n + 1
+            }
+            let nm: u64 = policy.name_of_bit(b)
+            var k: u64 = 0
+            while rd(nm, k) != 0 {
+                wr(out, n, rd(nm, k))
+                n = n + 1
+                k = k + 1
+            }
+        }
+        b = b << 1
+        i = i + 1
+    }
+    wr(out, n, 0)
+    return n
+}
+
+fn same_name(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < 40 {
+        let x: u64 = rd(a, i)
+        if x != rd(b, i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// New conf text: every valid line of `buf` except the one for `app`, plus "<app> <rights>\n" when mask != 0.
+// Comments and bad lines are dropped (the file is rewritten by a machine). Returns the new length (<= outmax - 1).
+fn update(buf: u64, len: u64, app: u64, mask: u64, out: u64, outmax: u64) -> u64 {
+    var n: u64 = 0
+    var pos: u64 = 0
+    while true {
+        pos = conf_next(buf, len, pos)
+        if pos == END {
+            break
+        }
+        if !same_name(cur_name(), app) {
+            n = put_line(out, n, outmax, cur_name(), cur_mask())
+        }
+    }
+    if mask != 0 {
+        n = put_line(out, n, outmax, app, mask)
+    }
+    wr(out, n, 0)
+    return n
+}
+
+static mut tmp_rights: [u8; 160] = [0 as u8; 160]
+
+fn put_line(out: u64, n0: u64, outmax: u64, name: u64, mask: u64) -> u64 {
+    let rl: u64 = fmt_rights(mask, (&tmp_rights[0]) as u64)
+    var nl: u64 = 0
+    while rd(name, nl) != 0 {
+        nl = nl + 1
+    }
+    if n0 + nl + 1 + rl + 1 + 1 > outmax {
+        return n0
+    }
+    var n: u64 = n0
+    var i: u64 = 0
+    while i < nl {
+        wr(out, n, rd(name, i))
+        n = n + 1
+        i = i + 1
+    }
+    wr(out, n, 32)
+    n = n + 1
+    i = 0
+    while i < rl {
+        wr(out, n, rd((&tmp_rights[0]) as u64, i))
+        n = n + 1
+        i = i + 1
+    }
+    wr(out, n, 10)
+    return n + 1
+}

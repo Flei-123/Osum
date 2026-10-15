@@ -984,6 +984,12 @@ const OG_SET: u64 = 1
 //   ORIGIN(2, name, mask)  -> 0; set the mask. ONLY an unlabelled caller (the person's own tools)
 const OG_RGET: u64 = 3
 const OG_RSET: u64 = 2
+// W-APPRIGHTS AR-2: the CEILING of an app = what its manifest (`perm=`) declares it may ever get.
+//   ORIGIN(5, name, 0)     -> ceiling mask, or policy.CEIL_NONE (4096) when none is registered (anyone may read)
+//   ORIGIN(4, name, mask)  -> 0; register the ceiling (lowering it also clamps the grants). ONLY an unlabelled caller.
+//   ORIGIN(2, ...) above a registered ceiling -> -EPERM
+const OG_CSET: u64 = 4
+const OG_CGET: u64 = 5
 const SYS_OSUM_CTRSET: u64 = 1331
 const SYS_OSUM_CTRNEW: u64 = 1332
 const SYS_OSUM_CTRENTER: u64 = 1333
@@ -14121,13 +14127,24 @@ fn do_rights(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
     if op == OG_RGET {
         return policy.get_mask(buf)
     }
-    // a labelled process (an app, or anything an app started) can never widen its own rights
+    if op == OG_CGET {
+        return policy.get_ceiling(buf)
+    }
+    // a labelled process (an app, or anything an app started) can never widen its own rights or its own ceiling
     if !origin.is_empty(state, me) {
         return neg(errno.E_PERM)
     }
-    let r: u64 = policy.set_mask(buf, a2)
+    var r: u64 = 0
+    if op == OG_CSET {
+        r = policy.set_ceiling(buf, a2)
+    } else {
+        r = policy.set_mask(buf, a2)
+    }
     if r == policy.E_FULL {
         return neg(errno.E_NOMEM)
+    }
+    if r == policy.E_CEIL {
+        return neg(errno.E_PERM)
     }
     if r != policy.E_OK {
         return neg(errno.E_INVAL)
@@ -14136,7 +14153,7 @@ fn do_rights(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
 }
 
 fn do_origin(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
-    if op == OG_RGET || op == OG_RSET {
+    if op == OG_RGET || op == OG_RSET || op == OG_CGET || op == OG_CSET {
         return do_rights(state, me, op, a1, a2)
     }
     if op == OG_GET {
@@ -16029,6 +16046,17 @@ fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
     if kstate.mode_on(state, kstate.M_NOBUS) {
         return neg(errno.E_NODEV)
     }
+    // W-APPRIGHTS AR-2: clipboard write / read and notification post need the grant for an app (label app:<name>);
+    // the person's own tools and system bundles (no label) are not gated. Checked HERE, at the kernel door.
+    if op == BUS_CLIPSET && !policy.label_allows(origin.at(state, me), policy.P_CLIP_WRITE) {
+        return neg(errno.E_ACCES)
+    }
+    if op == BUS_CLIPGET && !policy.label_allows(origin.at(state, me), policy.P_CLIP_READ) {
+        return neg(errno.E_ACCES)
+    }
+    if op == BUS_NOTIPOST && !policy.label_allows(origin.at(state, me), policy.P_NOTIFY) {
+        return neg(errno.E_ACCES)
+    }
     // ---- Namen: hoechstens sechzehn Oktette, zwei Woerter.
     if op == BUS_REG || op == BUS_FIND {
         var nm: [u8; 16] = [0 as u8; 16]
@@ -16402,6 +16430,10 @@ fn do_audwait(state: u64, value: u64) -> u64 {
 }
 
 fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
+    // W-APPRIGHTS AR-2: playing sound needs the `audio.play` grant for an app; the person's own tools are not gated
+    if !policy.label_allows(origin.at(state, me), policy.P_AUDIO_PLAY) {
+        return neg(errno.E_ACCES)
+    }
     let f: u64 = audio.hold(state)
     let t: u64 = audio.mark_write(state)
     let r: u64 = audwrite_locked(state, me, src, frames)

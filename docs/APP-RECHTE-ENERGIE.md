@@ -107,3 +107,19 @@ Rough total after stage 1: 4-6 weeks of focused work, of which stages 3 and 5 ar
 - Kernel: `SYS_OSUM_ORIGIN` ops `2 = RIGHTS_SET` (unlabelled caller only) and `3 = RIGHTS_GET`; `do_audread` returns `-EACCES`
   for a labelled `app:<n>` task without `mic`.
 - `/bin/apprights set|get|trymic|trygrant` (`kernel/user/apprights.fi`). Gate `tools/apprights/run.sh`.
+
+## 7. Status AR-1b / AR-2 (15.10.2026)
+
+- `/bin/apprights` is in the usbimg PROGS (62 KiB). `apprights load` runs at desktop start (kgui `desk_start`, right after `sntp boot`).
+- **Ceiling** = `perm=` of `/apps/<n>.osp|.prog/INFO`. `load` registers it per app (ORIGIN op 4); no `perm=` line = ceiling 0;
+  SYSTEM bundles (root file `SYSTEM`) are the person's own tools and get no table slot. A grant above the ceiling is refused
+  (`set fail 1`, nothing changes); lowering a ceiling clamps the grants at once. Only an unlabelled caller can set a ceiling.
+- **Persistence** `/etc/apprights.conf`: `<app> <right>[,<right>]`, only apps with a grant. `apprights set` rewrites it; `load`
+  applies it, clamps lines above the ceiling and skips (counts) bad lines.
+- **Enforced in the kernel** (label `app:<name>`, unlabelled never gated): `mic` (AUDREAD), `audio.play` (AUDWRITE),
+  `clipboard.write` / `clipboard.read` / `notify` (do_bus: CLIPSET / CLIPGET / NOTIPOST), `net` (netview.view_of: no grant = view none,
+  in force at the next call, revoke too). Not gated: CLIPINFO (metadata), drag-and-drop, reading notifications.
+- Declared-only: `camera fs.home location contacts phone` (no service / no isolation yet).
+- Gates: `apprights` (stage 1), `apprights-host` (lib + 12 mutations), `apprights2` (QEMU, restart over the same disk, ceiling, enforcement, 3 counter-probes).
+- Known limits: `load` runs asynchronously after the desktop starts, an app started in the first moments runs at default deny; the conf is
+  rewritten in place (no atomic rename); the table holds 16 apps.

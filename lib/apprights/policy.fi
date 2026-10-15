@@ -11,8 +11,9 @@
 export {
     P_MIC, P_CAMERA, P_NET, P_FS_HOME, P_NOTIFY, P_CLIP_READ, P_CLIP_WRITE, P_AUDIO_PLAY,
     P_LOCATION, P_CONTACTS, P_PHONE, P_ALL, NAME_MAX, MAX_APPS,
-    E_OK, E_FULL, E_BADNAME,
-    label_app, app_slot, set_mask, get_mask, grant, revoke, label_allows, reset, count, bit_of, name_of_bit,
+    E_OK, E_FULL, E_BADNAME, E_CEIL, CEIL_NONE,
+    set_ceiling, get_ceiling, has_ceiling,
+    name_ok, label_app, app_slot, set_mask, get_mask, grant, revoke, label_allows, reset, count, bit_of, name_of_bit,
 }
 
 const P_MIC: u64 = 1
@@ -35,10 +36,18 @@ const SLOT: u64 = 24 // octets per name in the table (19 + zero, padded)
 const E_OK: u64 = 0
 const E_FULL: u64 = 1
 const E_BADNAME: u64 = 2
+const E_CEIL: u64 = 3 // the grant asks for a right the manifest did not declare
+
+// CEILING (AR-2). The manifest of an installed app declares what it MAY ever get (`perm=`). A loader registers that
+// set per app; a grant above it is refused (E_CEIL). An app with NO registered ceiling (never looked at) is only
+// limited by the default deny of the grant table. An app whose manifest has no `perm=` is registered with ceiling 0.
+const CEIL_NONE: u64 = 4096 // get_ceiling(): "no ceiling registered" (outside P_ALL)
 
 static mut names: [u8; 384] = [0 as u8; 384]
 static mut masks: [u64; 16] = [0 as u64; 16]
 static mut used: [u64; 16] = [0 as u64; 16]
+static mut ceils: [u64; 16] = [0 as u64; 16]
+static mut ceilset: [u64; 16] = [0 as u64; 16]
 
 fn rd(p: u64, i: u64) -> u64 {
     let c: u8 = *((p + i) as *mut u8)
@@ -120,11 +129,72 @@ fn app_slot(name: u64) -> u64 {
     return MAX_APPS
 }
 
+// Slot of `name`, allocated when it has none. MAX_APPS = table full (or bad name).
+fn slot_for(name: u64) -> u64 {
+    var s: u64 = app_slot(name)
+    if s < MAX_APPS {
+        return s
+    }
+    s = 0
+    while s < MAX_APPS && used[s as usize] != 0 {
+        s = s + 1
+    }
+    if s >= MAX_APPS {
+        return MAX_APPS
+    }
+    var i: u64 = 0
+    while i <= NAME_MAX {
+        names[(s * SLOT + i) as usize] = rd(name, i) as u8
+        i = i + 1
+    }
+    used[s as usize] = 1
+    masks[s as usize] = 0
+    ceils[s as usize] = 0
+    ceilset[s as usize] = 0
+    return s
+}
+
+fn set_ceiling(name: u64, ceil: u64) -> u64 {
+    if !name_ok(name) {
+        return E_BADNAME
+    }
+    let s: u64 = slot_for(name)
+    if s >= MAX_APPS {
+        return E_FULL
+    }
+    ceils[s as usize] = ceil & P_ALL
+    ceilset[s as usize] = 1
+    // a lowered ceiling takes rights away at once
+    masks[s as usize] = masks[s as usize] & ceils[s as usize]
+    return E_OK
+}
+
+fn has_ceiling(name: u64) -> bool {
+    let s: u64 = app_slot(name)
+    if s >= MAX_APPS {
+        return false
+    }
+    return ceilset[s as usize] != 0
+}
+
+fn get_ceiling(name: u64) -> u64 {
+    let s: u64 = app_slot(name)
+    if s >= MAX_APPS || ceilset[s as usize] == 0 {
+        return CEIL_NONE
+    }
+    return ceils[s as usize]
+}
+
 fn set_mask(name: u64, mask: u64) -> u64 {
     if !name_ok(name) {
         return E_BADNAME
     }
     var s: u64 = app_slot(name)
+    if s < MAX_APPS && ceilset[s as usize] != 0 {
+        if ((mask & P_ALL) & (P_ALL - ceils[s as usize])) != 0 {
+            return E_CEIL
+        }
+    }
     if s >= MAX_APPS {
         s = 0
         while s < MAX_APPS && used[s as usize] != 0 {
@@ -139,6 +209,8 @@ fn set_mask(name: u64, mask: u64) -> u64 {
             i = i + 1
         }
         used[s as usize] = 1
+        ceilset[s as usize] = 0
+        ceils[s as usize] = 0
     }
     masks[s as usize] = mask & P_ALL
     return E_OK
@@ -174,6 +246,8 @@ fn reset() {
     while s < MAX_APPS {
         used[s as usize] = 0
         masks[s as usize] = 0
+        ceils[s as usize] = 0
+        ceilset[s as usize] = 0
         s = s + 1
     }
 }

@@ -44,11 +44,12 @@ REQUIRED = ["name", "info", "fassung", "manifest", "id", "version"]
 # permission -> (enforced by the system today?, what it means)
 PERMS = {
     "net": (True, "network access; build writes net=real, else net=none (netview, docs/NETVIEW.md)"),
-    "notify": (False, "post notifications (bus NOTIPOST)"),
-    "clipboard.read": (False, "read the clipboard (bus CLIPGET)"),
-    "clipboard.write": (False, "write the clipboard (bus CLIPSET)"),
+    "notify": (True, "post notifications (bus NOTIPOST)"),
+    "clipboard.read": (True, "read the clipboard (bus CLIPGET)"),
+    "clipboard.write": (True, "write the clipboard (bus CLIPSET)"),
+    "mic": (True, "record from the microphone (SYS_OSUM_AUDREAD)"),
     "fs.home": (False, "read/write the user's home"),
-    "audio.play": (False, "play sound"),
+    "audio.play": (True, "play sound"),
 }
 
 SYSTEM_APPS_DIR = os.path.join(ROOT, "assets", "apps")

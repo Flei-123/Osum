@@ -1,7 +1,7 @@
 # OrientOS SDK -- app manifest v2, project template, `osdk`
 
 Status: **host tool built and tested** (`bash tools/sdk/run.sh`). Runtime enforcement of
-permissions is NOT built (S-010); only `net` is enforced today (via `net=` of netview).
+permissions: `net notify clipboard.read clipboard.write audio.play mic` are enforced by the kernel (docs/APP-RECHTE-ENERGIE.md, grant by the person, default deny); `fs.home` is declared only (S-010).
 
 ## Tool
 
