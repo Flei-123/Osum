@@ -34,7 +34,8 @@ PY="python3 -I tools/exfat/exfat.py"
 EXF=$ROOT/tools/exfat/exfat.py
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+# EXFAT_OUT=dir keeps the serial outputs for debugging
+trap 'if [ -n "${EXFAT_OUT:-}" ]; then mkdir -p "$EXFAT_OUT"; cp "$TMPD"/*.out "$TMPD"/*.sums "$TMPD"/*.cmp "$TMPD"/*.fsck1 "$EXFAT_OUT"/ 2>/dev/null; fi; rm -rf "$TMPD"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
@@ -135,6 +136,8 @@ run_case() { # cluster_bytes
         # sums of every file in the baseline, in batches
         grep -v '^-' "$TMPD/$N.base" | sed -E 's/^[0-9a-f]{64} [0-9]+ /"\/mnt/; s/$/"/' \
             | awk 'NR%5==1{printf "shasum"} {printf " %s", $0} NR%5==0{print ""} END{if (NR%5) print ""}'
+        echo 'shasum "/mnt/sub/Mixed Case Name.dat"'
+        echo 'echo "@@mixed-rc=$?"'
         echo 'echo @@write'
         echo 'mkdir /mnt/w'
         echo 'echo hello > /mnt/w/new.txt'
