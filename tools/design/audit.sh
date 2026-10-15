@@ -69,7 +69,11 @@ fs=aus
 # `hidweg` OHNE die zwei Zeilen dieser Runde haengt genauso.  Das ist
 # also eine Regression des Zweiges und keine dieses Werkzeugs -- sie
 # steht in docs/RUNDE-OBERFLAECHE.md, damit sie nicht verlorengeht.
-accel=tcg
+# r831 (15.10.2026): THE REGRESSION ABOVE IS GONE -- main boots under KVM (settingsui, powerui/mouseui click tests, 16 pictures). The
+# default stays TCG-free: kvm when /dev/kvm is usable (the QEMU call below falls back to TCG by itself when it is not). Under TCG
+# on a loaded server the machine needs minutes for `launcher: ready`: the default drehbuch waited 40 s for it and the whole run was
+# "the audit machine does not boot" (r831). Slow machine: `halt=` and the `warteauf ... || <seconds>` limits are the knobs.
+accel=kvm
 halt=300
 extra=""
 nurbau=nein
@@ -426,7 +430,8 @@ if [ -z "$drehbuch" ]; then
 # `wig wigstart` laesst den Starter mit hochkommen -- das Startmenue ist
 # also schon offen.  Zuerst wird es zugemacht, damit der Schreibtisch der
 # Schreibtisch ist und nicht der Schreibtisch mit einem Fenster darauf.
-warteauf 'launcher: ready' || 40
+warteauf 'launcher: ready' || 240
+warteauf 'taskbar: start x=' || 60
 warte 1
 klickauf start
 warte 2
@@ -464,9 +469,8 @@ foto 02-startmenue
 #
 # Also: klicken, ohne dazwischen zu warten.
 # --- der Dateimanager: erste Zeile der Trefferliste, dann Ausfuehren
-klickauf lzeile0
-klickauf lrect3
-warteauf 'explorer: ready' || 60
+klickauf start_File Explorer
+warteauf 'explorer: ready' || 150
 warte 3
 # ================================================== RUNDE MERGE-10
 # DAS STARTMENUE MUSS ZU SEIN, BEVOR EINE TASTE AN DEN DATEIMANAGER
@@ -509,7 +513,7 @@ warte 3
 foto 05-kontrollzentrum
 # --- die Einstellungen ueber die unterste Zeile des Kontrollzentrums
 klickauf qsalle
-warteauf 'settings: ready' || 60
+warteauf 'settings: ready' || 150
 warte 3
 foto 06-einstellungen
 DREH
