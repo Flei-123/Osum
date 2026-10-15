@@ -32,6 +32,25 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
   non-black and byte-identical).
 - Not wired yet: `lib/monitors/layout.fi` itself (extend/arrangement) — the kernel has no per-output compositor.
 
+## Kernel wiring, round 2 (r815 + r819, 15.10.2026) — EXTEND over several heads
+- Word `vgpuextend` (default OFF, M_VGPUEXT) + at least 2 connected heads: the desktop stays **ONE wide resource** (the fb back
+  buffer, `fbres=` = bounding box of the heads) and **every head scans out its own rect of it** (`SET_SCANOUT` with r.x/r.y/r.w/r.h,
+  `vgpu.ext_place`). Zero copy: `TRANSFER_TO_HOST_2D`/`RESOURCE_FLUSH` of the dirty rect are unchanged, the host refreshes every
+  scanout the rect touches. Why not one resource per head: `TRANSFER` uses the resource stride, a head-sized resource could not read a
+  sub-rect of the wide back buffer without a copy per frame (or a scatter list per scanline, 512-byte command limit).
+- Placement = `lib/monitors/layout.fi` `pack_row` (left to right in head order, tops at 0). A head that does not fit the fb is cut
+  (`extc`) or skipped; a refusal is counted in `exte`. One head + the word -> old path (whole desktop on the head), `ext=0`.
+- Serial: `... ext=1  extp=2  exte=0  extc=0` and `vgpu: ext head N rect=X,Y WxH`. Accessors: `vgpu.ext_active/ext_x/ext_y/ext_w/ext_h/ext_head_at`.
+- **wm today = SPAN:** `fb.width()` is the whole desktop, so windows can sit/move on any head; taskbar and maximize still span ALL heads
+  (not per output). The real per-output compositor step (taskbar per head, maximize/snap to the window's head via `ext_head_at`,
+  cursor clamp to the rect union) is open (roadmap).
+- Desktop size is still taken from `fbres=`/the boot mode, not from the heads: nothing sizes the fb to the bounding box yet.
+- **r819 bug found and fixed:** with a virtio-gpu `fb.flush` returns at once; only `vgpu.present` (via `gfx.bild_fertig`) sends dirty
+  rects to the host. `gfx_hold` (fbtest harness) never called it, so every vgpu screendump of the harness was BLACK (also the mirrored heads of r808).
+  Now `gfx_hold` calls `gfx.bild_fertig` after its last flush.
+- Gate `tools/vgpuext/run.sh` (22/0): extend counters + rects, screendump pixel checks (head 0 red square + magenta box, head 1 ONLY
+  its cyan box, not black, differs), mirror not black + identical + red square on head 1, controls (1 head, desktop too small).
+
 ## What is NOT done (honest)
 1. **Kernel still has one framebuffer.** `fb.fi` = one address/geometry/back buffer; `wm.fi`
    (17.8k lines) composes into one surface at (0,0) and uses `fb.width()` ~20 times for "the screen".
