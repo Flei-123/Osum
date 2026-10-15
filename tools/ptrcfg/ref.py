@@ -75,3 +75,4 @@ if __name__ == "__main__":
     for i, (sp, ac, nat) in enumerate(CASES):
         print(case(i, sp, ac, nat))
     print(e2e())
+    print("ptrcfg: e2e hw=%d" % Ptr(200, 0, 1).wheel(1))

@@ -153,6 +153,11 @@ done
 # RUNDE LEISTE-RECHTS: `battfake=ja` taeuscht dem Kern einen Akku vor,
 # damit sich Symbol und Prozentzahl UEBERHAUPT fotografieren lassen --
 # dieses QEMU kann keinen Akku nachbilden.
+# r831: the programs report their rectangles ("taskbar: start x=", "launcher: ready", "settings: rect ...") only when /etc/uitrace exists
+# (RUNDE 32 switched the trace off by default). The built-in drehbuch waits for and clicks exactly those lines, so without the trace
+# every `warteauf` timed out and every `klickauf` said KEIN RECHTECK -- "the audit machine does not boot". A run with the built-in
+# drehbuch therefore turns the trace on; a run with its own drehbuch keeps `uitrace=` as given.
+[ -z "$drehbuch" ] && uitrace=yes
 [ "${battfake:-}" = ja ] && extra="$extra battfake"
 XRES=${res%x*}
 YRES=${res#*x}

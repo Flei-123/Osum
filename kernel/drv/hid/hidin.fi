@@ -74,7 +74,7 @@ export {
     pad_x, pad_y, pad_fingers, pad_scrolls, pad_clicks,
     down_count, is_down, reset_dev, selftest, say,
     gest_on, gest_taps, gest_scrolls, gest_sideways, gest_swipes, gest_zooms,
-    gest_last_swipe, gest_say
+    gest_last_swipe, gest_hwheels, gest_say
 }
 
 // Eine Seite. Je Geraet 256 Oktett Zustand, danach die Zaehler.
@@ -97,6 +97,7 @@ const D_RX: u64 = 0x78 // Restbetrag der Zeigerbewegung, x
 const D_RY: u64 = 0x80
 const D_SX: u64 = 0x88 // Teiler je Achse, aus dem logischen Maximum
 const D_SY: u64 = 0x90
+const D_HSCROLL: u64 = 0x98 // r804: remainder of the sideways two-finger scroll
 
 // Die Zaehler.
 const C_KEYS: u64 = 0x00
@@ -128,6 +129,7 @@ const C_GSIDE: u64 = 0x90
 const C_GSWIPE: u64 = 0x98
 const C_GZOOM: u64 = 0xA0
 const C_GLAST: u64 = 0xA8 // last swipe: (dir << 8) | fingers
+const C_GHWHL: u64 = 0xB0 // r804: horizontal wheel steps handed to the pointer layer (gesture or AC Pan)
 
 // A contact the pad flags as "not confident" (HID digitizer usage 0x47,
 // a palm) is reported to the gesture machine with this size; the palm
@@ -260,6 +262,10 @@ fn gest_swipes(state: u64) -> u64 {
 
 fn gest_zooms(state: u64) -> u64 {
     return cg(state, C_GZOOM)
+}
+
+fn gest_hwheels(state: u64) -> u64 {
+    return cg(state, C_GHWHL)
 }
 
 fn gest_last_swipe(state: u64) -> u64 {
@@ -652,6 +658,7 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
     var dx: u64 = 0
     var dy: u64 = 0
     var rad: u64 = 0
+    var hpan: u64 = 0 // r804: AC Pan (consumer page 0x238), signed
     var hat_taste: bool = false
     var hat_maus: bool = false
     var vier: bool = false
@@ -717,6 +724,16 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
                     c3 = c3 + 1
                 }
             }
+            if page == hidrep.UP_CONSUMER && (flags & hidrep.FL_VAR) != 0 {
+                var c5: u64 = 0
+                while c5 < cnt {
+                    if geb + c5 == hidrep.US_ACPAN {
+                        hat_maus = true
+                        hpan = sbits(p, off + c5 * sz, sz)
+                    }
+                    c5 = c5 + 1
+                }
+            }
             if page == hidrep.UP_DESKTOP {
                 var c4: u64 = 0
                 while c4 < cnt {
@@ -751,6 +768,13 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
     }
     if hat_maus {
         mouse_report(state, dev, btn, dx, dy, rad, vier)
+        if hpan != 0 {
+            if ist_neg(hpan) {
+                hwheel_step(state, 0 - 1)
+            } else {
+                hwheel_step(state, 1)
+            }
+        }
     }
     return true
 }
@@ -1107,17 +1131,19 @@ fn gest_apply(state: u64, dev: u64, btn: u64) {
                 rollen(state, dev, b as u64, btn)
             }
             if a != 0 {
-                // no horizontal wheel in the pointer packet yet: counted
+                // r804: sideways scroll -> horizontal wheel (own sum next to the vertical one)
                 cadd(state, C_GSIDE, 1)
                 if spur_an(state) {
                     serial.puts((&s_h[0]) as u64)
                     serial.hex(a as u64)
                     serial.nl()
                 }
+                hrollen(state, dev, a as u64)
             }
         } else if k == gest.EV_SWIPE {
             cadd(state, C_GSWIPE, 1)
             cs(state, C_GLAST, ((a as u64) << 8) | (b as u64))
+            let _sw: bool = gfx.mouse_swipe(state, a as u64, b as u64)
             if spur_an(state) {
                 serial.puts((&s_w[0]) as u64)
                 serial.dec(a as u64)
@@ -1141,6 +1167,7 @@ fn gest_apply(state: u64, dev: u64, btn: u64) {
     if gest.fingers(dev) == 0 {
         // lifted: the wheel remainder does not carry over to the next touch
         ds(state, dev, D_SCROLL, 0)
+        ds(state, dev, D_HSCROLL, 0)
     }
 }
 
@@ -1203,6 +1230,30 @@ fn rollen(state: u64, dev: u64, ddy: u64, btn: u64) {
     cadd(state, C_WHEEL, 1)
     cadd(state, C_SCROLLS, 1)
     ds(state, dev, D_BTN, btn)
+}
+
+// r804: two fingers sideways. Same detent rule as `rollen` (SCROLL_STEP units per step); finger right = scroll
+// right (+1). Goes to the pointer layer's own horizontal sum (the PS/2 packet has no room for it).
+fn hrollen(state: u64, dev: u64, ddx: u64) {
+    let acc: u64 = add(dg(state, dev, D_HSCROLL), ddx)
+    if betrag(acc) < SCROLL_STEP {
+        ds(state, dev, D_HSCROLL, acc)
+        return
+    }
+    if ist_neg(acc) {
+        ds(state, dev, D_HSCROLL, add(acc, SCROLL_STEP))
+        hwheel_step(state, 0 - 1)
+    } else {
+        ds(state, dev, D_HSCROLL, sub(acc, SCROLL_STEP))
+        hwheel_step(state, 1)
+    }
+}
+
+// One horizontal step (+1 right / -1 left): counted, traced, handed to the pointer layer.
+fn hwheel_step(state: u64, r: i64) {
+    gfx.mouse_hwheel(state, r)
+    cadd(state, C_GHWHL, 1)
+    trace_hwheel(state, r as u64)
 }
 
 // Nur der Knopf hat sich geaendert: ein Paket ohne Bewegung.
@@ -1360,6 +1411,7 @@ fn gest_say(state: u64) {
     var s_e: [u8; 8] = " wisch=\0"
     var s_f: [u8; 7] = " zoom=\0"
     var s_g: [u8; 8] = " letzt=\0"
+    var s_h: [u8; 7] = " hrad=\0"
     if !gest_on(state) {
         return
     }
@@ -1377,6 +1429,8 @@ fn gest_say(state: u64) {
     serial.dec(gest_zooms(state))
     serial.puts((&s_g[0]) as u64)
     serial.dec(gest_last_swipe(state))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(gest_hwheels(state))
     serial.nl()
 }
 
@@ -1493,6 +1547,16 @@ fn trace_key(state: u64, art: u64, u: u64, code: u64) {
     serial.hex(u)
     serial.puts((&s_c[0]) as u64)
     serial.hex(code)
+    serial.nl()
+}
+
+fn trace_hwheel(state: u64, r: u64) {
+    var s_a: [u8; 13] = "hidev: hrad  "
+    if !spur_an(state) {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(r)
     serial.nl()
 }
 
