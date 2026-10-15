@@ -1,0 +1,1841 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/fs/exfat.fi -- exFAT read + write (W-FS, 15.10.2026).
+//
+// exFAT is what USB disks, SD cards and cameras above 32 GB carry. This
+// driver plugs into the VFS exactly like fat.fi (same Ops table), is
+// verified against the host tools (mkfs.exfat / fsck.exfat) and a Python
+// reference reader (tools/exfat/exfat.py).
+//
+// FORMAT, as far as this driver needs it:
+//   boot sector   "EXFAT   " at 3, FAT offset (80), FAT length (84),
+//                 cluster heap offset (88), cluster count (92), root
+//                 cluster (96), shifts (108 sector, 109 cluster), one FAT.
+//   FAT           32-bit entries; 0xFFFFFFFF = end of chain.
+//   bitmap        one bit per cluster (cluster 2 = bit 0), in the root
+//                 directory as entry 0x81. Assumed contiguous.
+//   directory     32-byte entries. A file is an ENTRY SET: 0x85 file
+//                 (attr, times, secondary count, checksum), 0xC0 stream
+//                 (flags, name length, name hash, valid length, first
+//                 cluster, data length), 0xC1 name parts (15 UTF-16
+//                 units each). 0x00 ends the directory; bit 7 clear =
+//                 deleted.
+//   NoFatChain    stream flag 0x02: the file is contiguous and the FAT
+//                 is NOT used. Read as such; converted to a FAT chain
+//                 the moment such a file has to grow.
+//
+// CAN:    read (UTF-16 names shown as UTF-8, NoFatChain, valid data
+//         length), write/append/overwrite, create file/dir, delete,
+//         rename (also across directories), truncate, grow a directory.
+// CANNOT: sector size != 512; two FATs (TexFAT); a NEW name with chars
+//         outside printable ASCII (existing names are read fine);
+//         growing a NoFatChain DIRECTORY (ENOSPC); a bitmap that is not
+//         contiguous; names longer than 63 bytes; timestamps in attr.
+//
+// STATE: kstate.EXFAT_OFF, 3 pages: mount values, node table (24 nodes,
+// recycled when no descriptor holds them), work sectors.
+
+profile kernel
+
+import lib.kstate
+import serial
+import block.blk
+import fs.mnt
+import fs.vfsops
+import sched.time
+import sched.sched
+import sync.atomic
+import arch.cpu
+
+export { ops, mount_probe, release, sync, node_hold, node_drop, MAX_NODES }
+
+const BS: u64 = 512
+
+const SB_OFF: u64 = 0x000 // 8 mounts x 128 bytes
+const SB_BYTES: u64 = 128
+const NODE_OFF: u64 = 0x400 // 24 nodes x 96 bytes -> 0xD00
+const NODE_BYTES: u64 = 96
+const MAX_NODES: u64 = 24
+const FATBUF: u64 = 0xD00
+const DIRBUF: u64 = 0xF00
+const DATBUF: u64 = 0x1100
+const BMPBUF: u64 = 0x1300
+const SETBUF: u64 = 0x1500 // one entry set, up to 19 x 32 = 608 bytes
+const CMPBUF: u64 = 0x1800 // the name searched for (UTF-8)
+const NAMBUF: u64 = 0x1880 // the name of the entry being looked at (UTF-8)
+const CACHE_OFF: u64 = 0x1900 // 4 chain-cache slots x 32 bytes
+const CACHE_RR: u64 = 0x1980 // round robin counter
+
+const S_VALID: u64 = 0
+const S_SPC: u64 = 8
+const S_FATLBA: u64 = 16
+const S_FATSEC: u64 = 24
+const S_DATALBA: u64 = 32
+const S_CLUSTERS: u64 = 40
+const S_ROOT: u64 = 48
+const S_BMP: u64 = 56
+const S_BMPLEN: u64 = 64
+const S_NEXT: u64 = 72
+const S_CSIZE: u64 = 80
+const S_ROOTSZ: u64 = 88
+
+const N_MNT: u64 = 0
+const N_FIRST: u64 = 8
+const N_SIZE: u64 = 16
+const N_VDL: u64 = 24
+const N_FLAGS: u64 = 32 // attr in bits 0..15, bit 16 NoFatChain, bit 17 root
+const N_PFIRST: u64 = 40 // first cluster of the parent directory
+const N_PINFO: u64 = 48 // bit 0 parent NoFatChain, bits 1.. parent size
+const N_IDX: u64 = 56 // entry index of the 0x85 entry in the parent
+const N_USE: u64 = 64
+
+const A_RDONLY: u64 = 0x01
+const A_DIR: u64 = 0x10
+const F_NOFAT: u64 = 0x10000
+const F_ROOT: u64 = 0x20000
+
+const EOC: u64 = 0xFFFFFFFF
+
+fn sb(state: u64, m: u64) -> u64 {
+    return state + kstate.EXFAT_OFF + SB_OFF + m * SB_BYTES
+}
+
+fn sget(state: u64, m: u64, f: u64) -> u64 {
+    return __mmio_read64((sb(state, m) + f) as *mut u64)
+}
+
+fn sset(state: u64, m: u64, f: u64, v: u64) {
+    __mmio_write64((sb(state, m) + f) as *mut u64, v)
+}
+
+fn nd(state: u64, i: u64) -> u64 {
+    return state + kstate.EXFAT_OFF + NODE_OFF + (i - 1) * NODE_BYTES
+}
+
+fn nget(state: u64, i: u64, f: u64) -> u64 {
+    if i == 0 || i > MAX_NODES {
+        return 0
+    }
+    return __mmio_read64((nd(state, i) + f) as *mut u64)
+}
+
+fn nset(state: u64, i: u64, f: u64, v: u64) {
+    if i == 0 || i > MAX_NODES {
+        return
+    }
+    __mmio_write64((nd(state, i) + f) as *mut u64, v)
+}
+
+fn buf(state: u64, which: u64) -> u64 {
+    return state + kstate.EXFAT_OFF + which
+}
+
+fn cget(state: u64, f: u64) -> u64 {
+    return __mmio_read64((state + kstate.EXFAT_OFF + f) as *mut u64)
+}
+
+fn cset(state: u64, f: u64, v: u64) {
+    __mmio_write64((state + kstate.EXFAT_OFF + f) as *mut u64, v)
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+// Same lock as OFS / FAT: one disk, one lock. Re-entrant on one core.
+const NESTED: u64 = 0x8000000000000000
+
+fn enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        return flags | NESTED
+    }
+    atomic.lock_take(state, atomic.L_FS, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & NESTED) == 0 {
+        atomic.lock_give(state, atomic.L_FS)
+    }
+    sched.irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
+}
+
+// ------------------------------------------------------------ small helpers
+
+fn le16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn put16(p: u64, v: u64) {
+    kstate.set8(p, (v & 0xFF) as u8)
+    kstate.set8(p + 1, ((v >> 8) & 0xFF) as u8)
+}
+
+fn put32(p: u64, v: u64) {
+    put16(p, v & 0xFFFF)
+    put16(p + 2, (v >> 16) & 0xFFFF)
+}
+
+fn put64(p: u64, v: u64) {
+    put32(p, v & 0xFFFFFFFF)
+    put32(p + 4, (v >> 32) & 0xFFFFFFFF)
+}
+
+fn le64(p: u64) -> u64 {
+    return le32(p) | (le32(p + 4) << 32)
+}
+
+fn upper(c: u64) -> u64 {
+    if c >= 97 && c <= 122 {
+        return c - 32
+    }
+    return c
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn copyn(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- sector and cluster
+
+fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
+    return blk.read_on(state, mnt.dev(state, m), lba, dst)
+}
+
+fn wr(state: u64, m: u64, lba: u64, src: u64) -> bool {
+    return blk.write_on(state, mnt.dev(state, m), lba, src)
+}
+
+fn clus_lba(state: u64, m: u64, c: u64) -> u64 {
+    return sget(state, m, S_DATALBA) + (c - 2) * sget(state, m, S_SPC)
+}
+
+// One-sector caches for FAT / directory / bitmap work buffers. A tag is
+// (mount+1, lba+1); it is dropped whenever a buffer is used for anything
+// else. Writes are write-through, so the disk is never behind.
+static mut tag_fat_m: u64 = 0
+static mut tag_fat_lba: u64 = 0
+static mut tag_dir_m: u64 = 0
+static mut tag_dir_lba: u64 = 0
+static mut tag_bmp_m: u64 = 0
+static mut tag_bmp_lba: u64 = 0
+
+fn tags_drop() {
+    tag_fat_m = 0
+    tag_fat_lba = 0
+    tag_dir_m = 0
+    tag_dir_lba = 0
+    tag_bmp_m = 0
+    tag_bmp_lba = 0
+}
+
+fn fat_load(state: u64, m: u64, lba: u64) -> bool {
+    if tag_fat_m == m + 1 && tag_fat_lba == lba + 1 {
+        return true
+    }
+    tag_fat_m = 0
+    if !rd(state, m, lba, buf(state, FATBUF)) {
+        return false
+    }
+    tag_fat_m = m + 1
+    tag_fat_lba = lba + 1
+    return true
+}
+
+fn fat_get(state: u64, m: u64, c: u64) -> u64 {
+    let off: u64 = c * 4
+    if off / BS >= sget(state, m, S_FATSEC) {
+        return 0
+    }
+    if !fat_load(state, m, sget(state, m, S_FATLBA) + off / BS) {
+        return 0
+    }
+    return le32(buf(state, FATBUF) + (off % BS))
+}
+
+fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
+    let off: u64 = c * 4
+    if off / BS >= sget(state, m, S_FATSEC) {
+        return false
+    }
+    let lba: u64 = sget(state, m, S_FATLBA) + off / BS
+    if !fat_load(state, m, lba) {
+        return false
+    }
+    put32(buf(state, FATBUF) + (off % BS), v)
+    if !wr(state, m, lba, buf(state, FATBUF)) {
+        tag_fat_m = 0
+        return false
+    }
+    return true
+}
+
+// Allocation bitmap. Bit = cluster - 2; contiguous from S_BMP.
+fn bmp_load(state: u64, m: u64, sec: u64) -> u64 {
+    let lba: u64 = clus_lba(state, m, sget(state, m, S_BMP)) + sec
+    if tag_bmp_m == m + 1 && tag_bmp_lba == lba + 1 {
+        return lba
+    }
+    tag_bmp_m = 0
+    if !rd(state, m, lba, buf(state, BMPBUF)) {
+        return 0
+    }
+    tag_bmp_m = m + 1
+    tag_bmp_lba = lba + 1
+    return lba
+}
+
+fn bmp_get(state: u64, m: u64, c: u64) -> u64 {
+    let bit: u64 = c - 2
+    let byte: u64 = bit / 8
+    if byte >= sget(state, m, S_BMPLEN) {
+        return 1
+    }
+    if bmp_load(state, m, byte / BS) == 0 {
+        return 1
+    }
+    return (kstate.get8(buf(state, BMPBUF) + (byte % BS)) >> (bit % 8)) & 1
+}
+
+fn bmp_set(state: u64, m: u64, c: u64, v: u64) -> bool {
+    let bit: u64 = c - 2
+    let byte: u64 = bit / 8
+    if byte >= sget(state, m, S_BMPLEN) {
+        return false
+    }
+    let lba: u64 = bmp_load(state, m, byte / BS)
+    if lba == 0 {
+        return false
+    }
+    let p: u64 = buf(state, BMPBUF) + (byte % BS)
+    let old: u64 = kstate.get8(p)
+    var nv: u64 = old
+    if v != 0 {
+        nv = old | (1 << (bit % 8))
+    } else {
+        nv = old & (0xFF ^ (1 << (bit % 8)))
+    }
+    kstate.set8(p, nv as u8)
+    if !wr(state, m, lba, buf(state, BMPBUF)) {
+        tag_bmp_m = 0
+        return false
+    }
+    return true
+}
+
+// A free cluster, marked used in the bitmap and as end of chain in the FAT.
+// `fat` = 1: also write the FAT entry (always for chained data).
+fn clus_alloc(state: u64, m: u64) -> u64 {
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    var start: u64 = sget(state, m, S_NEXT)
+    if start < 2 || start >= total + 2 {
+        start = 2
+    }
+    var c: u64 = start
+    var found: u64 = 0
+    var round: u64 = 0
+    while round < 2 && found == 0 {
+        var end: u64 = total + 2
+        if round == 1 {
+            c = 2
+            end = start
+        }
+        while c < end && found == 0 {
+            if bmp_get(state, m, c) == 0 {
+                found = c
+            } else {
+                c = c + 1
+            }
+        }
+        round = round + 1
+    }
+    if found == 0 {
+        return 0
+    }
+    if !bmp_set(state, m, found, 1) {
+        return 0
+    }
+    if !fat_set(state, m, found, EOC) {
+        bmp_set(state, m, found, 0)
+        return 0
+    }
+    sset(state, m, S_NEXT, found + 1)
+    return found
+}
+
+fn clus_zero(state: u64, m: u64, c: u64) -> bool {
+    zero(buf(state, DATBUF), BS)
+    tag_dir_m = 0
+    let spc: u64 = sget(state, m, S_SPC)
+    var i: u64 = 0
+    while i < spc {
+        if !wr(state, m, clus_lba(state, m, c) + i, buf(state, DATBUF)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------- chain cache
+// 4 slots: (mount+1, first, index, cluster). Alternating between two files
+// (copy!) must not throw the position away.
+
+fn cache_drop(state: u64) {
+    var i: u64 = 0
+    while i < 4 {
+        cset(state, CACHE_OFF + i * 32, 0)
+        i = i + 1
+    }
+}
+
+fn cache_put(state: u64, m: u64, first: u64, n: u64, clus: u64, slot0: u64) {
+    var slot: u64 = slot0
+    if slot == 99 {
+        slot = cget(state, CACHE_RR) % 4
+        cset(state, CACHE_RR, slot + 1)
+    }
+    let b2: u64 = CACHE_OFF + slot * 32
+    cset(state, b2, m + 1)
+    cset(state, b2 + 8, first)
+    cset(state, b2 + 16, n)
+    cset(state, b2 + 24, clus)
+}
+
+// Number of clusters of a file: ceil(size / csize).
+fn nclus_of(state: u64, m: u64, size: u64) -> u64 {
+    let cs: u64 = sget(state, m, S_CSIZE)
+    return (size + cs - 1) / cs
+}
+
+// Cluster number of index `n` of a chain. Existing chain only (no growth).
+// nf != 0: contiguous (NoFatChain).
+fn chain_at(state: u64, m: u64, first: u64, nf: u64, n: u64) -> u64 {
+    if first < 2 {
+        return 0
+    }
+    if nf != 0 {
+        if first + n >= sget(state, m, S_CLUSTERS) + 2 {
+            return 0
+        }
+        return first + n
+    }
+    var cur: u64 = first
+    var k: u64 = 0
+    var slot: u64 = 99
+    var i: u64 = 0
+    while i < 4 {
+        let base: u64 = CACHE_OFF + i * 32
+        if cget(state, base) == m + 1 && cget(state, base + 8) == first {
+            slot = i
+            if cget(state, base + 16) <= n {
+                cur = cget(state, base + 24)
+                k = cget(state, base + 16)
+            }
+        }
+        i = i + 1
+    }
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    while k < n {
+        let next: u64 = fat_get(state, m, cur)
+        if next < 2 || next >= total + 2 {
+            return 0
+        }
+        cur = next
+        k = k + 1
+    }
+    cache_put(state, m, first, n, cur, slot)
+    return cur
+}
+
+// Last cluster of a chained file / directory (0 if broken).
+fn chain_last(state: u64, m: u64, first: u64) -> u64 {
+    var cur: u64 = first
+    var guard: u64 = 0
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    while guard < 4000000 {
+        let next: u64 = fat_get(state, m, cur)
+        if next < 2 || next >= total + 2 {
+            return cur
+        }
+        cur = next
+        guard = guard + 1
+    }
+    return 0
+}
+
+// Free a whole chain: bitmap bits and (for chained data) FAT entries.
+fn chain_free(state: u64, m: u64, first: u64, nf: u64, size: u64) {
+    cache_drop(state)
+    if first < 2 {
+        return
+    }
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    if nf != 0 {
+        let n: u64 = nclus_of(state, m, size)
+        var i: u64 = 0
+        while i < n && first + i < total + 2 {
+            bmp_set(state, m, first + i, 0)
+            i = i + 1
+        }
+        return
+    }
+    var cur: u64 = first
+    var guard: u64 = 0
+    while cur >= 2 && cur < total + 2 && guard < 4000000 {
+        let next: u64 = fat_get(state, m, cur)
+        fat_set(state, m, cur, 0)
+        bmp_set(state, m, cur, 0)
+        if sget(state, m, S_NEXT) > cur {
+            sset(state, m, S_NEXT, cur)
+        }
+        cur = next
+        guard = guard + 1
+    }
+}
+
+// Count the clusters of a FAT chain.
+fn chain_len(state: u64, m: u64, first: u64) -> u64 {
+    var cur: u64 = first
+    var n: u64 = 0
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    while cur >= 2 && cur < total + 2 && n < 4000000 {
+        n = n + 1
+        cur = fat_get(state, m, cur)
+    }
+    return n
+}
+
+// --------------------------------------------------------------- node table
+
+fn node_find(state: u64, m: u64, pfirst: u64, idx: u64, first: u64) -> u64 {
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 && nget(state, i, N_PFIRST) == pfirst
+            && nget(state, i, N_IDX) == idx && nget(state, i, N_FIRST) == first {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn node_fill(state: u64, i: u64, m: u64, first: u64, size: u64, vdl: u64,
+    flags: u64, pfirst: u64, pinfo: u64, idx: u64) {
+    nset(state, i, N_MNT, m + 1)
+    nset(state, i, N_FIRST, first)
+    nset(state, i, N_SIZE, size)
+    nset(state, i, N_VDL, vdl)
+    nset(state, i, N_FLAGS, flags)
+    nset(state, i, N_PFIRST, pfirst)
+    nset(state, i, N_PINFO, pinfo)
+    nset(state, i, N_IDX, idx)
+}
+
+// Get (or make) the node of an entry set. When the table is full the first
+// node nobody holds open is recycled; if every node is held, 0.
+fn node_get(state: u64, m: u64, first: u64, size: u64, vdl: u64, flags: u64,
+    pfirst: u64, pinfo: u64, idx: u64) -> u64 {
+    let have: u64 = node_find(state, m, pfirst, idx, first)
+    if have != 0 {
+        nset(state, have, N_SIZE, size)
+        nset(state, have, N_VDL, vdl)
+        nset(state, have, N_FLAGS, flags)
+        nset(state, have, N_PINFO, pinfo)
+        return have
+    }
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == 0 {
+            node_fill(state, i, m, first, size, vdl, flags, pfirst, pinfo, idx)
+            nset(state, i, N_USE, 0)
+            return i
+        }
+        i = i + 1
+    }
+    var k: u64 = 1
+    while k <= MAX_NODES {
+        if nget(state, k, N_USE) == 0 {
+            node_fill(state, k, m, first, size, vdl, flags, pfirst, pinfo, idx)
+            return k
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn node_hold(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    nset(state, node, N_USE, nget(state, node, N_USE) + 1)
+}
+
+fn node_drop(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    let n: u64 = nget(state, node, N_USE)
+    if n != 0 {
+        nset(state, node, N_USE, n - 1)
+    }
+}
+
+fn root_node(state: u64, m: u64) -> u64 {
+    return node_get(state, m, sget(state, m, S_ROOT), sget(state, m, S_ROOTSZ),
+        sget(state, m, S_ROOTSZ), A_DIR | F_ROOT, 0, 0, 0)
+}
+
+fn release(state: u64, m: u64) {
+    tags_drop()
+    cache_drop(state)
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 {
+            zero(nd(state, i), NODE_BYTES)
+        }
+        i = i + 1
+    }
+}
+
+fn sync(state: u64, m: u64) -> u64 {
+    // Write-through: nothing is pending.
+    return 0
+}
+
+// ------------------------------------------------------- directory entries
+// A directory stream is (df, dnf, dsz): first cluster, NoFatChain, size.
+
+fn ent_lba(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64) -> u64 {
+    let cs: u64 = sget(state, m, S_CSIZE)
+    let boff: u64 = idx * 32
+    var c: u64 = 0
+    if dnf != 0 {
+        if boff >= dsz {
+            return 0
+        }
+        c = chain_at(state, m, df, 1, boff / cs)
+    } else {
+        c = chain_at(state, m, df, 0, boff / cs)
+    }
+    if c == 0 {
+        return 0
+    }
+    return clus_lba(state, m, c) + (boff % cs) / BS
+}
+
+fn dsec_load(state: u64, m: u64, lba: u64) -> bool {
+    if tag_dir_m == m + 1 && tag_dir_lba == lba + 1 {
+        return true
+    }
+    tag_dir_m = 0
+    if !rd(state, m, lba, buf(state, DIRBUF)) {
+        return false
+    }
+    tag_dir_m = m + 1
+    tag_dir_lba = lba + 1
+    return true
+}
+
+fn dsec_store(state: u64, m: u64, lba: u64) -> bool {
+    if !wr(state, m, lba, buf(state, DIRBUF)) {
+        tag_dir_m = 0
+        return false
+    }
+    return true
+}
+
+fn ent_read(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64,
+    dst: u64) -> bool {
+    let lba: u64 = ent_lba(state, m, df, dnf, dsz, idx)
+    if lba == 0 {
+        return false
+    }
+    if !dsec_load(state, m, lba) {
+        return false
+    }
+    copyn(dst, buf(state, DIRBUF) + ((idx * 32) % BS), 32)
+    return true
+}
+
+// Entry-set checksum over `count` entries at SETBUF (skips bytes 2, 3).
+fn set_sum(state: u64, count: u64) -> u64 {
+    let p: u64 = buf(state, SETBUF)
+    var cs: u64 = 0
+    var i: u64 = 0
+    while i < count * 32 {
+        if i != 2 && i != 3 {
+            cs = (((cs << 15) | (cs >> 1)) & 0xFFFF) + kstate.get8(p + i)
+            cs = cs & 0xFFFF
+        }
+        i = i + 1
+    }
+    return cs
+}
+
+// Load the entry set that starts at `idx` into SETBUF. Returns the number of
+// entries (0 = not a valid file entry set).
+fn set_read(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64) -> u64 {
+    let p: u64 = buf(state, SETBUF)
+    if !ent_read(state, m, df, dnf, dsz, idx, p) {
+        return 0
+    }
+    if kstate.get8(p) != 0x85 {
+        return 0
+    }
+    let n: u64 = kstate.get8(p + 1)
+    if n < 2 || n > 18 {
+        return 0
+    }
+    var k: u64 = 1
+    while k <= n {
+        if !ent_read(state, m, df, dnf, dsz, idx + k, p + k * 32) {
+            return 0
+        }
+        k = k + 1
+    }
+    return n + 1
+}
+
+// Write SETBUF back (checksum recomputed), one write per touched sector.
+fn set_store(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64,
+    count: u64) -> bool {
+    let p: u64 = buf(state, SETBUF)
+    put16(p + 2, set_sum(state, count))
+    var cur: u64 = 0
+    var k: u64 = 0
+    while k < count {
+        let lba: u64 = ent_lba(state, m, df, dnf, dsz, idx + k)
+        if lba == 0 {
+            return false
+        }
+        if lba != cur {
+            if cur != 0 {
+                if !dsec_store(state, m, cur) {
+                    return false
+                }
+            }
+            if !dsec_load(state, m, lba) {
+                return false
+            }
+            cur = lba
+        }
+        copyn(buf(state, DIRBUF) + (((idx + k) * 32) % BS), p + k * 32, 32)
+        k = k + 1
+    }
+    if cur != 0 {
+        if !dsec_store(state, m, cur) {
+            return false
+        }
+    }
+    return true
+}
+
+// ------------------------------------------------------------ names
+
+// Entry-set name (UTF-16 in the C1 entries of SETBUF) -> UTF-8 in `out`.
+fn set_name(state: u64, count: u64, out: u64) -> u64 {
+    let p: u64 = buf(state, SETBUF)
+    let len: u64 = kstate.get8(p + 32 + 3)
+    var o: u64 = 0
+    var i: u64 = 0
+    while i < len && i < 255 {
+        let e: u64 = 2 + i
+        let ent: u64 = e / 15 + 2
+        let w: u64 = i % 15
+        if ent >= count {
+            kstate.set8(out + o, 0 as u8)
+            return o
+        }
+        let c: u64 = le16(p + ent * 32 + 2 + w * 2)
+        if c < 0x80 {
+            if o < 62 {
+                kstate.set8(out + o, c as u8)
+                o = o + 1
+            }
+        } else if c < 0x800 {
+            if o < 61 {
+                kstate.set8(out + o, (0xC0 | (c >> 6)) as u8)
+                kstate.set8(out + o + 1, (0x80 | (c & 0x3F)) as u8)
+                o = o + 2
+            }
+        } else {
+            if o < 60 {
+                kstate.set8(out + o, (0xE0 | (c >> 12)) as u8)
+                kstate.set8(out + o + 1, (0x80 | ((c >> 6) & 0x3F)) as u8)
+                kstate.set8(out + o + 2, (0x80 | (c & 0x3F)) as u8)
+                o = o + 3
+            }
+        }
+        i = i + 1
+    }
+    kstate.set8(out + o, 0 as u8)
+    return o
+}
+
+fn name_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if upper(kstate.get8(a + i)) != upper(kstate.get8(b + i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+// A name this driver is willing to CREATE: 1..63 printable ASCII, none of
+// the characters exFAT forbids.
+fn name_ok(name: u64) -> bool {
+    var n: u64 = 0
+    while kstate.get8(name + n) != 0 {
+        let c: u64 = kstate.get8(name + n)
+        if c < 32 || c > 126 {
+            return false
+        }
+        if c == 34 || c == 42 || c == 47 || c == 58 || c == 60 || c == 62
+            || c == 63 || c == 92 || c == 124 {
+            return false
+        }
+        n = n + 1
+        if n > 63 {
+            return false
+        }
+    }
+    if n == 0 {
+        return false
+    }
+    if n == 1 && kstate.get8(name) == 46 {
+        return false
+    }
+    if n == 2 && kstate.get8(name) == 46 && kstate.get8(name + 1) == 46 {
+        return false
+    }
+    return true
+}
+
+// exFAT name hash over the up-cased UTF-16 name (ASCII here).
+fn name_hash(name: u64, len: u64) -> u64 {
+    var h: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        let c: u64 = upper(kstate.get8(name + i))
+        h = (((h << 15) | (h >> 1)) & 0xFFFF) + c
+        h = h & 0xFFFF
+        h = (((h << 15) | (h >> 1)) & 0xFFFF) + 0
+        h = h & 0xFFFF
+        i = i + 1
+    }
+    return h
+}
+
+// ------------------------------------------------------- time
+
+fn dos_stamp(state: u64) -> u64 {
+    let y: u64 = time.rtc_field(time.R_YEAR)
+    let mo: u64 = time.rtc_field(time.R_MONTH)
+    let d: u64 = time.rtc_field(time.R_DAY)
+    let h: u64 = time.rtc_field(time.R_HOUR)
+    let mi: u64 = time.rtc_field(time.R_MIN)
+    let se: u64 = time.rtc_field(time.R_SEC)
+    if y < 1980 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59
+        || se > 59 {
+        return (1 << 21) | (1 << 16)
+    }
+    return ((((y - 1980) << 9) | (mo << 5) | d) << 16) | (h << 11) | (mi << 5)
+        | (se / 2)
+}
+
+// ---------------------------------------------------- walking directories
+
+// Build the node of the entry set loaded in SETBUF.
+fn node_from_set(state: u64, m: u64, df: u64, dnf: u64, dsz: u64,
+    idx: u64) -> u64 {
+    let p: u64 = buf(state, SETBUF)
+    let attr: u64 = le16(p + 4)
+    let sflags: u64 = kstate.get8(p + 33)
+    var flags: u64 = attr
+    if (sflags & 2) != 0 {
+        flags = flags | F_NOFAT
+    }
+    let vdl: u64 = le64(p + 32 + 8)
+    let first: u64 = le32(p + 32 + 20)
+    let size: u64 = le64(p + 32 + 24)
+    return node_get(state, m, first, size, vdl, flags, df,
+        dnf | (dsz << 1), idx)
+}
+
+// want == 0: find the entry whose name equals CMPBUF. want >= 1: the
+// want-th visible entry; its name goes to `out_name`. Returns the node, 0 at
+// the end. `out_idx` receives the entry index of the 0x85 entry.
+fn dir_walk(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, want: u64,
+    out_name: u64, out_idx: u64) -> u64 {
+    var idx: u64 = 0
+    var seen: u64 = 0
+    let p: u64 = buf(state, SETBUF)
+    var guard: u64 = 0
+    while guard < 1000000 {
+        guard = guard + 1
+        if !ent_read(state, m, df, dnf, dsz, idx, p) {
+            return 0
+        }
+        let t: u64 = kstate.get8(p)
+        if t == 0 {
+            return 0
+        }
+        if t == 0x85 {
+            let k: u64 = set_read(state, m, df, dnf, dsz, idx)
+            if k == 0 {
+                idx = idx + 1
+            } else {
+                set_name(state, k, buf(state, NAMBUF))
+                var hit: bool = false
+                if want == 0 {
+                    hit = name_eq(buf(state, NAMBUF), buf(state, CMPBUF))
+                } else {
+                    seen = seen + 1
+                    if seen == want {
+                        hit = true
+                    }
+                }
+                if hit {
+                    if want != 0 {
+                        copyn(out_name, buf(state, NAMBUF), 64)
+                    }
+                    __mmio_write64(out_idx as *mut u64, idx)
+                    return node_from_set(state, m, df, dnf, dsz, idx)
+                }
+                idx = idx + k
+            }
+        } else {
+            idx = idx + 1
+        }
+    }
+    return 0
+}
+
+fn dir_df(state: u64, d: u64) -> u64 {
+    return nget(state, d, N_FIRST)
+}
+
+fn dir_dnf(state: u64, d: u64) -> u64 {
+    return (nget(state, d, N_FLAGS) >> 16) & 1
+}
+
+fn dir_find(state: u64, m: u64, d: u64, name: u64) -> u64 {
+    var junk: [u8; 72] = [0 as u8; 72]
+    var idx: u64 = 0
+    copyn(buf(state, CMPBUF), name, 64)
+    kstate.set8(buf(state, CMPBUF) + 63, 0 as u8)
+    return dir_walk(state, m, dir_df(state, d), dir_dnf(state, d),
+        nget(state, d, N_SIZE), 0, (&junk[0]) as u64, (&idx) as u64)
+}
+
+// ------------------------------------------------------ resolving paths
+
+fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == 47 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
+        if n + 1 < max {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+fn f_lookup(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_lookup__inner(state, m, path)
+    leave(state, __f)
+    return __r
+}
+
+fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    var seg: [u8; 72] = [0 as u8; 72]
+    var at: u64 = 0
+    var node: u64 = root_node(state, m)
+    var going: bool = true
+    while going && node != 0 {
+        at = segment(path, at, (&seg[0]) as u64, 72)
+        if kstate.get8((&seg[0]) as u64) == 0 {
+            going = false
+        } else {
+            if (nget(state, node, N_FLAGS) & A_DIR) == 0 {
+                return 0
+            }
+            node = dir_find(state, m, node, (&seg[0]) as u64)
+        }
+    }
+    return node
+}
+
+// The directory node of a path and its last component.
+fn parent_of(state: u64, m: u64, path: u64, out_name: u64) -> u64 {
+    var buffer: [u8; 128] = [0 as u8; 128]
+    var n: u64 = 0
+    while kstate.get8(path + n) != 0 && n < 127 {
+        buffer[n as usize] = kstate.get8(path + n) as u8
+        n = n + 1
+    }
+    buffer[n as usize] = 0 as u8
+    if n == 0 {
+        return 0
+    }
+    var cut: u64 = n
+    var found: bool = false
+    while cut > 0 && !found {
+        cut = cut - 1
+        if buffer[cut as usize] == 47 as u8 {
+            found = true
+        }
+    }
+    var start: u64 = 0
+    var dir: u64 = root_node(state, m)
+    if found {
+        buffer[cut as usize] = 0 as u8
+        start = cut + 1
+        if cut > 0 {
+            dir = f_lookup(state, m, (&buffer[0]) as u64)
+            if dir == 0 {
+                return 0
+            }
+        }
+    }
+    var k: u64 = 0
+    while buffer[(start + k) as usize] != 0 as u8 && k < 71 {
+        kstate.set8(out_name + k, buffer[(start + k) as usize])
+        k = k + 1
+    }
+    kstate.set8(out_name + k, 0 as u8)
+    if k == 0 {
+        return 0
+    }
+    if (nget(state, dir, N_FLAGS) & A_DIR) == 0 {
+        return 0
+    }
+    return dir
+}
+
+// ---------------------------------------------------------------- reading
+
+fn f_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_read__inner(state, m, node, off, dst, len)
+    leave(state, __f)
+    return __r
+}
+
+fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    if (nget(state, node, N_FLAGS) & A_DIR) != 0 {
+        return 0
+    }
+    let size: u64 = nget(state, node, N_SIZE)
+    let vdl: u64 = nget(state, node, N_VDL)
+    let first: u64 = nget(state, node, N_FIRST)
+    let nf: u64 = (nget(state, node, N_FLAGS) >> 16) & 1
+    if off >= size {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > size {
+        want = size - off
+    }
+    let csize: u64 = sget(state, m, S_CSIZE)
+    var done: u64 = 0
+    while done < want {
+        let pos: u64 = off + done
+        let c: u64 = chain_at(state, m, first, nf, pos / csize)
+        if c == 0 {
+            return done
+        }
+        let inc: u64 = pos % csize
+        let lba: u64 = clus_lba(state, m, c) + inc / BS
+        let inb: u64 = inc % BS
+        var chunk: u64 = BS - inb
+        if chunk > want - done {
+            chunk = want - done
+        }
+        if pos >= vdl {
+            zero(dst + done, chunk)
+        } else if chunk == BS && pos + BS <= vdl {
+            if !rd(state, m, lba, dst + done) {
+                return done
+            }
+        } else {
+            if !rd(state, m, lba, buf(state, DATBUF)) {
+                return done
+            }
+            var i: u64 = 0
+            while i < chunk {
+                if pos + i < vdl {
+                    kstate.set8(dst + done + i,
+                        kstate.get8(buf(state, DATBUF) + inb + i) as u8)
+                } else {
+                    kstate.set8(dst + done + i, 0 as u8)
+                }
+                i = i + 1
+            }
+        }
+        done = done + chunk
+    }
+    return done
+}
+
+// ---------------------------------------------------------- entry updates
+
+// Write the node's attributes, first cluster, sizes and times back to its
+// entry set.
+fn entry_update(state: u64, m: u64, node: u64) -> bool {
+    let fl: u64 = nget(state, node, N_FLAGS)
+    if (fl & F_ROOT) != 0 {
+        return true
+    }
+    let pf: u64 = nget(state, node, N_PFIRST)
+    let pinfo: u64 = nget(state, node, N_PINFO)
+    let idx: u64 = nget(state, node, N_IDX)
+    let k: u64 = set_read(state, m, pf, pinfo & 1, pinfo >> 1, idx)
+    if k == 0 {
+        return false
+    }
+    let p: u64 = buf(state, SETBUF)
+    let now: u64 = dos_stamp(state)
+    put16(p + 4, fl & 0xFFFF)
+    put32(p + 12, now)
+    put32(p + 16, now)
+    var sf: u64 = 1
+    if (fl & F_NOFAT) != 0 {
+        sf = 3
+    }
+    kstate.set8(p + 33, sf as u8)
+    put64(p + 32 + 8, nget(state, node, N_VDL))
+    put32(p + 32 + 20, nget(state, node, N_FIRST))
+    put64(p + 32 + 24, nget(state, node, N_SIZE))
+    return set_store(state, m, pf, pinfo & 1, pinfo >> 1, idx, k)
+}
+
+// ---------------------------------------------------------------- writing
+
+// A NoFatChain file that has to grow becomes an ordinary FAT chain first.
+fn to_fat(state: u64, m: u64, node: u64) -> bool {
+    let fl: u64 = nget(state, node, N_FLAGS)
+    if (fl & F_NOFAT) == 0 {
+        return true
+    }
+    let first: u64 = nget(state, node, N_FIRST)
+    let n: u64 = nclus_of(state, m, nget(state, node, N_SIZE))
+    var i: u64 = 0
+    while i < n {
+        var v: u64 = first + i + 1
+        if i + 1 == n {
+            v = EOC
+        }
+        if !fat_set(state, m, first + i, v) {
+            return false
+        }
+        i = i + 1
+    }
+    cache_drop(state)
+    nset(state, node, N_FLAGS, fl & (0xFFFFFFFF ^ F_NOFAT))
+    return true
+}
+
+// Make sure the file owns cluster index `n`; returns its cluster, 0 if the
+// disk is full. Growth is always one cluster at a time (the caller writes
+// sequentially; holes are filled with zeros first).
+fn chain_grow(state: u64, m: u64, node: u64, n: u64) -> u64 {
+    var first: u64 = nget(state, node, N_FIRST)
+    if first < 2 {
+        if n != 0 {
+            return 0
+        }
+        first = clus_alloc(state, m)
+        if first == 0 {
+            return 0
+        }
+        nset(state, node, N_FIRST, first)
+        nset(state, node, N_FLAGS,
+            nget(state, node, N_FLAGS) & (0xFFFFFFFF ^ F_NOFAT))
+        return first
+    }
+    let nf: u64 = (nget(state, node, N_FLAGS) >> 16) & 1
+    if nf != 0 {
+        if n < nclus_of(state, m, nget(state, node, N_SIZE)) {
+            return chain_at(state, m, first, 1, n)
+        }
+        if !to_fat(state, m, node) {
+            return 0
+        }
+    }
+    let have: u64 = chain_at(state, m, first, 0, n)
+    if have != 0 {
+        return have
+    }
+    if n == 0 {
+        return 0
+    }
+    let cur: u64 = chain_at(state, m, first, 0, n - 1)
+    if cur == 0 {
+        return 0
+    }
+    let fresh: u64 = clus_alloc(state, m)
+    if fresh == 0 {
+        return 0
+    }
+    if !fat_set(state, m, cur, fresh) {
+        return 0
+    }
+    cache_put(state, m, first, n, fresh, 99)
+    return fresh
+}
+
+// Write `len` bytes at `pos`; src == 0 writes zeros. Returns bytes done.
+fn put_range(state: u64, m: u64, node: u64, pos0: u64, src: u64,
+    len: u64) -> u64 {
+    let csize: u64 = sget(state, m, S_CSIZE)
+    var done: u64 = 0
+    while done < len {
+        let pos: u64 = pos0 + done
+        let c: u64 = chain_grow(state, m, node, pos / csize)
+        if c == 0 {
+            return done
+        }
+        let inc: u64 = pos % csize
+        let lba: u64 = clus_lba(state, m, c) + inc / BS
+        let inb: u64 = inc % BS
+        var chunk: u64 = BS - inb
+        if chunk > len - done {
+            chunk = len - done
+        }
+        if src != 0 && chunk == BS {
+            if !wr(state, m, lba, src + done) {
+                return done
+            }
+        } else {
+            if chunk != BS && pos < nget(state, node, N_SIZE) {
+                if !rd(state, m, lba, buf(state, DATBUF)) {
+                    return done
+                }
+            } else {
+                zero(buf(state, DATBUF), BS)
+            }
+            if src != 0 {
+                copyn(buf(state, DATBUF) + inb, src + done, chunk)
+            } else if chunk != BS {
+                zero(buf(state, DATBUF) + inb, chunk)
+            }
+            if !wr(state, m, lba, buf(state, DATBUF)) {
+                return done
+            }
+        }
+        // keep size / valid length ahead of the data so the next
+        // chain_grow sees the clusters it owns
+        done = done + chunk
+        if pos + chunk > nget(state, node, N_SIZE) {
+            nset(state, node, N_SIZE, pos + chunk)
+        }
+    }
+    return done
+}
+
+fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_write__inner(state, m, node, off, src, len)
+    leave(state, __f)
+    return __r
+}
+
+fn f_write__inner(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == 0 || sget(state, m, S_VALID) == 0 || len == 0 {
+        return 0
+    }
+    if (nget(state, node, N_FLAGS) & A_DIR) != 0 {
+        return 0
+    }
+    let size0: u64 = nget(state, node, N_SIZE)
+    var vdl: u64 = nget(state, node, N_VDL)
+    // A hole between the end of the data and `off` must read as zeros.
+    if off > vdl {
+        let gstart: u64 = vdl
+        let got: u64 = put_range(state, m, node, gstart, 0, off - gstart)
+        if got != off - gstart {
+            entry_update(state, m, node)
+            return 0
+        }
+        vdl = off
+    }
+    let done: u64 = put_range(state, m, node, off, src, len)
+    // size is the max of the old size and the end of this write
+    var size: u64 = size0
+    if off + done > size {
+        size = off + done
+    }
+    nset(state, node, N_SIZE, size)
+    if off + done > vdl {
+        vdl = off + done
+    }
+    nset(state, node, N_VDL, vdl)
+    entry_update(state, m, node)
+    return done
+}
+
+// ------------------------------------------------------------ readdir/attr
+
+fn f_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_readdir__inner(state, m, dir, index, out)
+    leave(state, __f)
+    return __r
+}
+
+fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    tick(state)
+    if dir == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    if (nget(state, dir, N_FLAGS) & A_DIR) == 0 {
+        return 0
+    }
+    // exFAT directories have no `.` and `..`; they are made up here.
+    if index == 0 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return dir
+    }
+    if index == 1 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 46 as u8)
+        kstate.set8(out + 2, 0 as u8)
+        return dir
+    }
+    var idx: u64 = 0
+    return dir_walk(state, m, dir_df(state, dir), dir_dnf(state, dir),
+        nget(state, dir, N_SIZE), index - 1, out, (&idx) as u64)
+}
+
+fn f_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_attr__inner(state, m, node, what)
+    leave(state, __f)
+    return __r
+}
+
+fn f_attr__inner(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    tick(state)
+    if node == 0 {
+        return 0
+    }
+    let fl: u64 = nget(state, node, N_FLAGS)
+    if what == vfsops.A_TYPE {
+        if (fl & A_DIR) != 0 {
+            return vfsops.N_DIR
+        }
+        return vfsops.N_FILE
+    }
+    if what == vfsops.A_SIZE {
+        return nget(state, node, N_SIZE)
+    }
+    if what == vfsops.A_MODE {
+        if (fl & A_DIR) != 0 {
+            return 493
+        }
+        if (fl & A_RDONLY) != 0 {
+            return 292
+        }
+        return 420
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return sget(state, m, S_CSIZE)
+    }
+    return 0
+}
+
+// ------------------------------------------------------- create / remove
+
+// Add a directory to the chain of directory node `d` (FAT-chained only).
+fn dir_grow(state: u64, m: u64, d: u64) -> bool {
+    if ((nget(state, d, N_FLAGS) >> 16) & 1) != 0 {
+        return false
+    }
+    let first: u64 = nget(state, d, N_FIRST)
+    let last: u64 = chain_last(state, m, first)
+    if last == 0 {
+        return false
+    }
+    let fresh: u64 = clus_alloc(state, m)
+    if fresh == 0 {
+        return false
+    }
+    if !clus_zero(state, m, fresh) {
+        return false
+    }
+    if !fat_set(state, m, last, fresh) {
+        return false
+    }
+    let cs: u64 = sget(state, m, S_CSIZE)
+    nset(state, d, N_SIZE, nget(state, d, N_SIZE) + cs)
+    nset(state, d, N_VDL, nget(state, d, N_VDL) + cs)
+    if (nget(state, d, N_FLAGS) & F_ROOT) != 0 {
+        sset(state, m, S_ROOTSZ, sget(state, m, S_ROOTSZ) + cs)
+    }
+    entry_update(state, m, d)
+    return true
+}
+
+// Build and store the entry set for a new name in directory node `d`.
+// Returns the node, 0 on failure (no space).
+fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
+    vdl: u64, flags: u64) -> u64 {
+    var len: u64 = 0
+    while kstate.get8(name + len) != 0 {
+        len = len + 1
+    }
+    let nname: u64 = (len + 14) / 15
+    let k: u64 = 2 + nname
+    let df: u64 = dir_df(state, d)
+    let dnf: u64 = dir_dnf(state, d)
+    let dsz: u64 = nget(state, d, N_SIZE)
+    let p: u64 = buf(state, SETBUF)
+    // 1. find a place: a run of k free entries, or the end marker.
+    var idx: u64 = 0
+    var runstart: u64 = 0xFFFFFFFF
+    var place: u64 = 0xFFFFFFFF
+    var guard: u64 = 0
+    while place == 0xFFFFFFFF && guard < 1000000 {
+        guard = guard + 1
+        var t: u64 = 0
+        if ent_read(state, m, df, dnf, dsz, idx, p) {
+            t = kstate.get8(p)
+        }
+        if t == 0 {
+            if runstart != 0xFFFFFFFF {
+                place = runstart
+            } else {
+                place = idx
+            }
+        } else if t < 0x80 {
+            if runstart == 0xFFFFFFFF {
+                runstart = idx
+            }
+            if idx - runstart + 1 >= k {
+                place = runstart
+            }
+            idx = idx + 1
+        } else {
+            runstart = 0xFFFFFFFF
+            idx = idx + 1
+        }
+    }
+    if place == 0xFFFFFFFF {
+        return 0
+    }
+    // 2. room for all k entries? otherwise grow the directory.
+    var tries: u64 = 0
+    while ent_lba(state, m, dir_df(state, d), dnf, nget(state, d, N_SIZE),
+        place + k - 1) == 0 && tries < 4 {
+        if !dir_grow(state, m, d) {
+            return 0
+        }
+        tries = tries + 1
+    }
+    let dsz2: u64 = nget(state, d, N_SIZE)
+    if ent_lba(state, m, df, dnf, dsz2, place + k - 1) == 0 {
+        return 0
+    }
+    // 3. the entry set
+    zero(p, k * 32)
+    let now: u64 = dos_stamp(state)
+    kstate.set8(p, 0x85 as u8)
+    kstate.set8(p + 1, (k - 1) as u8)
+    put16(p + 4, flags & 0xFFFF)
+    put32(p + 8, now)
+    put32(p + 12, now)
+    put32(p + 16, now)
+    kstate.set8(p + 32, 0xC0 as u8)
+    var sf: u64 = 1
+    if (flags & F_NOFAT) != 0 {
+        sf = 3
+    }
+    kstate.set8(p + 33, sf as u8)
+    kstate.set8(p + 32 + 3, len as u8)
+    put16(p + 32 + 4, name_hash(name, len))
+    put64(p + 32 + 8, vdl)
+    put32(p + 32 + 20, first)
+    put64(p + 32 + 24, size)
+    var i: u64 = 0
+    while i < nname {
+        kstate.set8(p + 64 + i * 32, 0xC1 as u8)
+        i = i + 1
+    }
+    i = 0
+    while i < len {
+        put16(p + 64 + (i / 15) * 32 + 2 + (i % 15) * 2,
+            kstate.get8(name + i))
+        i = i + 1
+    }
+    if !set_store(state, m, df, dnf, dsz2, place, k) {
+        return 0
+    }
+    return node_get(state, m, first, size, vdl, flags, df,
+        dnf | (dsz2 << 1), place)
+}
+
+// Mark the entry set at `idx` deleted.
+fn dir_remove_at(state: u64, m: u64, df: u64, dnf: u64, dsz: u64,
+    idx: u64) -> bool {
+    let k: u64 = set_read(state, m, df, dnf, dsz, idx)
+    if k == 0 {
+        return false
+    }
+    let p: u64 = buf(state, SETBUF)
+    var i: u64 = 0
+    while i < k {
+        kstate.set8(p + i * 32, (kstate.get8(p + i * 32) & 0x7F) as u8)
+        i = i + 1
+    }
+    return set_store(state, m, df, dnf, dsz, idx, k)
+}
+
+fn f_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_create__inner(state, m, path, art)
+    leave(state, __f)
+    return __r
+}
+
+fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    var name: [u8; 72] = [0 as u8; 72]
+    let dir: u64 = parent_of(state, m, path, (&name[0]) as u64)
+    if dir == 0 {
+        return 0
+    }
+    if !name_ok((&name[0]) as u64) {
+        return 0
+    }
+    if dir_find(state, m, dir, (&name[0]) as u64) != 0 {
+        return 0
+    }
+    if art == vfsops.N_DIR {
+        let fresh: u64 = clus_alloc(state, m)
+        if fresh == 0 {
+            return 0
+        }
+        if !clus_zero(state, m, fresh) {
+            return 0
+        }
+        let cs: u64 = sget(state, m, S_CSIZE)
+        let made: u64 = dir_add(state, m, dir, (&name[0]) as u64, fresh, cs,
+            cs, A_DIR)
+        if made == 0 {
+            chain_free(state, m, fresh, 0, cs)
+        }
+        return made
+    }
+    return dir_add(state, m, dir, (&name[0]) as u64, 0, 0, 0, 0x20)
+}
+
+fn dir_empty(state: u64, m: u64, df: u64, dnf: u64, dsz: u64) -> bool {
+    var junk: [u8; 72] = [0 as u8; 72]
+    var idx: u64 = 0
+    return dir_walk(state, m, df, dnf, dsz, 1, (&junk[0]) as u64,
+        (&idx) as u64) == 0
+}
+
+fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_unlink__inner(state, m, path)
+    leave(state, __f)
+    return __r
+}
+
+fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 5
+    }
+    var name: [u8; 72] = [0 as u8; 72]
+    let dir: u64 = parent_of(state, m, path, (&name[0]) as u64)
+    if dir == 0 {
+        return 2
+    }
+    let node: u64 = dir_find(state, m, dir, (&name[0]) as u64)
+    if node == 0 {
+        return 2
+    }
+    // copy everything first: dir_empty may recycle this very node slot
+    let fl: u64 = nget(state, node, N_FLAGS)
+    let first: u64 = nget(state, node, N_FIRST)
+    let size: u64 = nget(state, node, N_SIZE)
+    let pf: u64 = nget(state, node, N_PFIRST)
+    let pinfo: u64 = nget(state, node, N_PINFO)
+    let idx: u64 = nget(state, node, N_IDX)
+    if (fl & A_DIR) != 0 {
+        if !dir_empty(state, m, first, (fl >> 16) & 1, size) {
+            return 39
+        }
+    }
+    if !dir_remove_at(state, m, pf, pinfo & 1, pinfo >> 1, idx) {
+        return 5
+    }
+    chain_free(state, m, first, (fl >> 16) & 1, size)
+    return 0
+}
+
+fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_rename__inner(state, m, from, to)
+    leave(state, __f)
+    return __r
+}
+
+fn f_rename__inner(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 5
+    }
+    var a: [u8; 72] = [0 as u8; 72]
+    var b: [u8; 72] = [0 as u8; 72]
+    let dira: u64 = parent_of(state, m, from, (&a[0]) as u64)
+    if dira == 0 {
+        return 2
+    }
+    let node: u64 = dir_find(state, m, dira, (&a[0]) as u64)
+    if node == 0 {
+        return 2
+    }
+    let dirb: u64 = parent_of(state, m, to, (&b[0]) as u64)
+    if dirb == 0 {
+        return 2
+    }
+    if !name_ok((&b[0]) as u64) {
+        return 22
+    }
+    if dir_find(state, m, dirb, (&b[0]) as u64) != 0 {
+        return 17
+    }
+    // the first lookup may have been recycled by the second; look again
+    let node2: u64 = dir_find(state, m, dira, (&a[0]) as u64)
+    if node2 == 0 {
+        return 2
+    }
+    let fl: u64 = nget(state, node2, N_FLAGS)
+    let first: u64 = nget(state, node2, N_FIRST)
+    let size: u64 = nget(state, node2, N_SIZE)
+    let vdl: u64 = nget(state, node2, N_VDL)
+    let pf: u64 = nget(state, node2, N_PFIRST)
+    let pinfo: u64 = nget(state, node2, N_PINFO)
+    let idx: u64 = nget(state, node2, N_IDX)
+    if dir_add(state, m, dirb, (&b[0]) as u64, first, size, vdl, fl) == 0 {
+        return 28
+    }
+    if !dir_remove_at(state, m, pf, pinfo & 1, pinfo >> 1, idx) {
+        return 5
+    }
+    return 0
+}
+
+fn f_trunc(state: u64, m: u64, node: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_trunc__inner(state, m, node)
+    leave(state, __f)
+    return __r
+}
+
+fn f_trunc__inner(state: u64, m: u64, node: u64) -> u64 {
+    tick(state)
+    if node == 0 {
+        return 9
+    }
+    let fl: u64 = nget(state, node, N_FLAGS)
+    if (fl & A_DIR) != 0 {
+        return 21
+    }
+    chain_free(state, m, nget(state, node, N_FIRST), (fl >> 16) & 1,
+        nget(state, node, N_SIZE))
+    nset(state, node, N_FIRST, 0)
+    nset(state, node, N_SIZE, 0)
+    nset(state, node, N_VDL, 0)
+    nset(state, node, N_FLAGS, fl & (0xFFFFFFFF ^ F_NOFAT))
+    entry_update(state, m, node)
+    return 0
+}
+
+// --------------------------------------------------------------- mounting
+
+fn mount_probe(state: u64, m: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = mount_probe__inner(state, m)
+    leave(state, __f)
+    return __r
+}
+
+fn mount_probe__inner(state: u64, m: u64) -> u64 {
+    var s_no: [u8; 20] = "exfat: refused (\0\0\0\0"
+    var s_ok: [u8; 14] = "exfat: spc=\0\0\0"
+    var s_c: [u8; 12] = " clusters=\0\0"
+    var s_r: [u8; 8] = " root=\0\0"
+    let base: u64 = mnt.first(state, m)
+    tags_drop()
+    cache_drop(state)
+    sset(state, m, S_VALID, 0)
+    if !rd(state, m, base, buf(state, DIRBUF)) {
+        return 0
+    }
+    let b: u64 = buf(state, DIRBUF)
+    if kstate.get8(b + 510) != 0x55 || kstate.get8(b + 511) != 0xAA {
+        return 0
+    }
+    // "EXFAT   " at byte 3, and the 53 bytes after it must be zero.
+    var sig: [u8; 9] = "EXFAT   \0"
+    var i: u64 = 0
+    while i < 8 {
+        if kstate.get8(b + 3 + i) != kstate.get8(((&sig[0]) as u64) + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    i = 11
+    while i < 64 {
+        if kstate.get8(b + i) != 0 {
+            serial.puts((&s_no[0]) as u64)
+            serial.dec(1)
+            serial.nl()
+            return 0
+        }
+        i = i + 1
+    }
+    let ssh: u64 = kstate.get8(b + 108)
+    let csh: u64 = kstate.get8(b + 109)
+    let nfats: u64 = kstate.get8(b + 110)
+    if ssh != 9 || csh > 16 || nfats != 1 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(2)
+        serial.nl()
+        return 0
+    }
+    let fatoff: u64 = le32(b + 80)
+    let fatlen: u64 = le32(b + 84)
+    let heap: u64 = le32(b + 88)
+    let clusters: u64 = le32(b + 92)
+    let root: u64 = le32(b + 96)
+    if clusters == 0 || root < 2 || root >= clusters + 2 || fatlen == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(3)
+        serial.nl()
+        return 0
+    }
+    let spc: u64 = 1 << csh
+    sset(state, m, S_SPC, spc)
+    sset(state, m, S_CSIZE, spc * BS)
+    sset(state, m, S_FATLBA, base + fatoff)
+    sset(state, m, S_FATSEC, fatlen)
+    sset(state, m, S_DATALBA, base + heap)
+    sset(state, m, S_CLUSTERS, clusters)
+    sset(state, m, S_ROOT, root)
+    sset(state, m, S_NEXT, 2)
+    sset(state, m, S_BMP, 0)
+    sset(state, m, S_BMPLEN, 0)
+    let rootsz: u64 = chain_len(state, m, root) * spc * BS
+    sset(state, m, S_ROOTSZ, rootsz)
+    // The allocation bitmap entry (0x81) in the root directory.
+    var idx: u64 = 0
+    var found: bool = false
+    var scanning: bool = true
+    let p: u64 = buf(state, SETBUF)
+    while scanning {
+        if !ent_read(state, m, root, 0, rootsz, idx, p) {
+            scanning = false
+        } else {
+            let t: u64 = kstate.get8(p)
+            if t == 0 {
+                scanning = false
+            } else if t == 0x81 && (kstate.get8(p + 1) & 1) == 0 {
+                sset(state, m, S_BMP, le32(p + 20))
+                sset(state, m, S_BMPLEN, le32(p + 24))
+                found = true
+                scanning = false
+            }
+            idx = idx + 1
+        }
+    }
+    if !found || sget(state, m, S_BMP) < 2 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(4)
+        serial.nl()
+        return 0
+    }
+    if sget(state, m, S_BMPLEN) * 8 < clusters {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(5)
+        serial.nl()
+        return 0
+    }
+    sset(state, m, S_VALID, 1)
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(spc)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(clusters)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(root)
+    serial.nl()
+    return root_node(state, m)
+}
+
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: f_lookup,
+        readdir: f_readdir,
+        attr: f_attr,
+        read: f_read,
+        write: f_write,
+        create: f_create,
+        unlink: f_unlink,
+        rename: f_rename,
+        trunc: f_trunc,
+        mask: vfsops.OP_ALL,
+        tag: 6715493 // "exf\0"
+    }
+}
