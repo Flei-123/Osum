@@ -74,7 +74,7 @@ else
         bash tools/hwnet/build.sh "$W/img" 0 > "$W/img.txt" 2>&1; then
         ok "ein Abbild mit /bin/wlan darin baut"
         timeout 150 qemu-system-x86_64 -kernel "$W/img/k.mb" -m 256 \
-            -append "osum script=wlan status;mkdir /etc;wlan verbinden MeinNetz geheim12345;cat /etc/wlan.conf;wlan verbinden X kurz;wlan vergessen;exit" \
+            -append "osum script=wlan status;mkdir /etc;wlan verbinden MeinNetz geheim12345;cat /etc/wlan.conf;wlan verbinden X kurz;wlan vergessen;wlan fw;exit" \
             -serial "file:$W/lauf.txt" -display none -no-reboot \
             -drive "file=$W/img/disk.img,format=raw,if=ide,index=0" \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
@@ -91,6 +91,9 @@ else
         grep -qa 'wlan: /etc/wlan.conf geschrieben für Netz MeinNetz' "$L" \
             && ok "'wlan verbinden' legt /etc/wlan.conf wirklich an" \
             || bad "/etc/wlan.conf wird im Lauf nicht angelegt"
+        grep -qa 'wlan fw: Datei fehlt' "$L" \
+            && ok "'wlan fw' meldet im LAUF ehrlich: Firmware-Datei fehlt (kein Absturz)" \
+            || bad "'wlan fw' sagt im Lauf nichts Passendes"
         grep -qa '^ssid MeinNetz' "$L" && grep -qa '^psk geheim12345' "$L" \
             && ok "in /etc/wlan.conf stehen wirklich ssid und psk" \
             || bad "der Inhalt von /etc/wlan.conf stimmt nicht"
