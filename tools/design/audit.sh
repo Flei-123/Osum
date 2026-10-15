@@ -432,16 +432,17 @@ fi
 if [ -z "$drehbuch" ]; then
     drehbuch="$OUT/drehbuch.txt"
     cat > "$drehbuch" <<'DREH'
-# `wig wigstart` laesst den Starter mit hochkommen -- das Startmenue ist
-# also schon offen.  Zuerst wird es zugemacht, damit der Schreibtisch der
-# Schreibtisch ist und nicht der Schreibtisch mit einem Fenster darauf.
+# r835: the start menu is NOT open after boot any more (the launcher comes up hidden; `wigstart` is gone). The old
+# script clicked Start twice -- the first click OPENED the menu, the second CLOSED it, and `klickauf start_File Explorer`
+# then hit the empty desktop ("explorer: ready" never came). Now state-independent: Esc closes an open menu (a closed
+# one ignores it), then ONE click on Start opens it.
 warteauf 'launcher: ready' || 240
 warteauf 'taskbar: start x=' || 60
 warte 1
-klickauf start
+taste esc
 warte 2
 foto 01-schreibtisch
-# --- das Startmenue wieder auf
+# --- das Startmenue auf
 klickauf start
 warte 2
 foto 02-startmenue
