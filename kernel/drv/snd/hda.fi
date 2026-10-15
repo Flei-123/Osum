@@ -138,6 +138,7 @@ import mm.mem
 import sched.time
 import arch.arch
 import arch.x86_64.apic
+import monitors.eld
 
 export {
     resume, kill, init, present, ready, why, bdf, base,
@@ -151,7 +152,7 @@ export {
     codec_ready, codec_addr, vendor, device, revision,
     dac_nid, pin_nid, path_len, path_at, out_stream, stream_tag,
     cmd, cmd_path, cmd_fails, widgets, wstart, node_type, node_caps,
-    node_cfg, arm_irq, irq_armed, say_graph,
+    node_cfg, arm_irq, irq_armed, say_graph, hdmi_probe, hdmi_pins,
     cap_open, cap_close, cap_ready, cap_running, cap_poll, cap_frames, cap_read, cap_why, cap_adc, cap_pin,
     cap_kind, cap_overruns, cap_resume, cap_probe, CAP_FRAME_OCTETS,
     cap_ring_count, cap_ring_fill,
@@ -406,6 +407,10 @@ const V_SET_PSTATE: u64 = 0x705
 const V_SET_STREAM: u64 = 0x706
 const V_SET_PINCTL: u64 = 0x707
 const V_GET_PINSENSE: u64 = 0xF09
+const V_GET_DIPSIZE: u64 = 0xF2E // HDMI: size of a data buffer (param 8 = ELD)
+const V_GET_ELDD: u64 = 0xF2F // HDMI: one ELD byte (bit 31 = valid, 7:0 = data)
+const PINCAP_HDMI: u64 = 0x80
+const PINCAP_DP: u64 = 0x1000000
 const V_SET_EAPD: u64 = 0x70C
 const V_GET_CFGDEF: u64 = 0xF1C
 const V_SET_FORMAT: u64 = 0x2 // Vierbitverb, 16 Bit Nutzlast
@@ -2437,6 +2442,9 @@ fn init(state: u64) -> bool {
         return false
     }
 
+    // r815: report the digital (HDMI/DP) pins of all codecs and what the monitors say (read only).
+    hdmi_probe(state)
+
     // 8. DER RINGPUFFER. Vier Rahmen aus dem Rahmenverwalter, wie bei
     //    AC97 und aus demselben Grund: seitenausgerichtet, physisch
     //    zusammenhaengend, und in kdata waeren 16 KiB Verschwendung.
@@ -2569,6 +2577,142 @@ fn say_graph(state: u64) {
         }
         serial.nl()
         k = k + 1
+    }
+}
+
+// ===================================================== r815: HDMI / DISPLAYPORT PIN PROBE (read only)
+//
+// The sound driver above skips digital pins on purpose (pin_score = 0): it plays through the analog jacks. This
+// probe only LOOKS at the digital output pins of every codec on the link and prints what the monitor behind
+// each of them says, so that a real board (Dell: the HDMI codec is usually the second codec) can be judged from
+// the boot log before any stream is routed there:
+//   hda: hdmi cad=C nid=N pincap=0x.. sense=0x.. eld=LEN [mon=NAME dp=0|1 sad=N rate=R]
+// `sense` is GET_PIN_SENSE (bit 31 = a monitor is plugged, bit 30 = its ELD is valid). `rate` is the best 2 ch
+// LPCM rate bit of lib/monitors/eld.fi (4 = 48 kHz). Routing (digital converter + IEC958 + stream) is the next step,
+// see docs/MONITORS.md "HDMI audio"; the decision "may sound go to this monitor" is lib/monitors layout.audio_pin.
+static mut eld_buf: [u8; 128] = [0 as u8; 128]
+static mut hdmi_found: u64 = 0
+
+fn hdmi_pins() -> u64 {
+    return hdmi_found
+}
+
+// ELD of pin `nid` into eld_buf. Returns the number of bytes read, 0 when the pin has none (no monitor / not valid yet).
+fn read_eld(state: u64, cad: u64, nid: u64) -> u64 {
+    let sz: u64 = cmd(state, cad, nid, V_GET_DIPSIZE, 0x08)
+    if sz == NO_ANSWER {
+        return 0
+    }
+    var n: u64 = sz & 0xFF
+    if n > 128 {
+        n = 128
+    }
+    var i: u64 = 0
+    while i < n {
+        let v: u64 = cmd(state, cad, nid, V_GET_ELDD, i)
+        if v == NO_ANSWER || (v & 0x80000000) == 0 {
+            return 0
+        }
+        eld_buf[i as usize] = (v & 0xFF) as u8
+        i = i + 1
+    }
+    return n
+}
+
+fn probe_pin(state: u64, cad: u64, nid: u64, pc: u64) {
+    var s_h: [u8; 15] = "hda: hdmi cad=\0"
+    var s_n: [u8; 6] = " nid=\0"
+    var s_p: [u8; 9] = " pincap=\0"
+    var s_s: [u8; 8] = " sense=\0"
+    var s_e: [u8; 6] = " eld=\0"
+    var s_m: [u8; 6] = " mon=\0"
+    var s_d: [u8; 5] = " dp=\0"
+    var s_a: [u8; 6] = " sad=\0"
+    var s_r: [u8; 7] = " rate=\0"
+    var sense: u64 = cmd(state, cad, nid, V_GET_PINSENSE, 0)
+    if sense == NO_ANSWER {
+        sense = 0
+    }
+    var n: u64 = 0
+    if (sense & 0x80000000) != 0 {
+        n = read_eld(state, cad, nid)
+    }
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(cad)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(nid)
+    serial.puts((&s_p[0]) as u64)
+    serial.hex(pc)
+    serial.puts((&s_s[0]) as u64)
+    serial.hex(sense)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(n)
+    let e: u64 = (&eld_buf[0]) as u64
+    if n != 0 && eld.eld_valid(e, n) {
+        serial.puts((&s_m[0]) as u64)
+        var k: u64 = 0
+        while k < eld.eld_name_len(e) {
+            let ch: u64 = eld.eld_name_at(e, k)
+            if ch >= 32 && ch < 127 {
+                serial.put(ch as u8)
+            }
+            k = k + 1
+        }
+        serial.puts((&s_d[0]) as u64)
+        if eld.eld_is_dp(e) {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_a[0]) as u64)
+        serial.dec(eld.eld_sad_count(e))
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(eld.eld_best_pcm_rate(e, n))
+    }
+    serial.nl()
+}
+
+// Every codec in STATESTS: its function groups, their widgets; each digital output pin is reported. Never changes any state of the codecs
+// (no SET verb) and never fails: a codec that does not answer is skipped.
+fn hdmi_probe(state: u64) {
+    hdmi_found = 0
+    let st: u64 = g(state, S_STATESTS)
+    var cad: u64 = 0
+    while cad < 15 {
+        if (st & (1 << cad)) != 0 {
+            let nc: u64 = param(state, cad, 0, P_NODECOUNT)
+            if nc != NO_ANSWER {
+                let fg0: u64 = (nc >> 16) & 0xFF
+                let fgn: u64 = nc & 0xFF
+                var f: u64 = 0
+                while f < fgn && f < 4 {
+                    let fg: u64 = fg0 + f
+                    let ft: u64 = param(state, cad, fg, P_FGTYPE)
+                    if ft != NO_ANSWER && (ft & 0x7F) == 1 {
+                        let wn: u64 = param(state, cad, fg, P_NODECOUNT)
+                        if wn != NO_ANSWER {
+                            let w0: u64 = (wn >> 16) & 0xFF
+                            let wc: u64 = wn & 0xFF
+                            var k: u64 = 0
+                            while k < wc && k < 64 {
+                                let nid: u64 = w0 + k
+                                let caps: u64 = param(state, cad, nid, P_WCAP)
+                                if caps != NO_ANSWER && ((caps >> 20) & 0xF) == T_PIN && (caps & WCAP_DIGITAL) != 0 {
+                                    let pc: u64 = param(state, cad, nid, P_PINCAP)
+                                    if pc != NO_ANSWER && (pc & PINCAP_OUT) != 0 && (pc & (PINCAP_HDMI | PINCAP_DP)) != 0 {
+                                        hdmi_found = hdmi_found + 1
+                                        probe_pin(state, cad, nid, pc)
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                    }
+                    f = f + 1
+                }
+            }
+        }
+        cad = cad + 1
     }
 }
 

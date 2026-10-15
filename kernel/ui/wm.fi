@@ -75,6 +75,7 @@ import utf8
 // Quelle, aus der Ring 3 sie uebersetzt.
 import ecke
 import drv.hid.ps2m
+import bus.bus // W-DND: the drag slot (a drag runs while the slot holds a payload)
 import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import ui.tile
@@ -112,7 +113,7 @@ export {
     panel_win, measure_lines,
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
     work_h, work_say, recalc_work, maximize, is_max, struts, workcalcs,
-    hd_multi, hd_present, hd_primary, hd_count, hd_x, hd_y, hd_w, hd_h, hd_at, win_head, head_work, hw_x, hw_y, hw_w, hw_h,
+    hd_multi, hd_present, hd_scale, hd_primary, hd_count, hd_x, hd_y, hd_w, hd_h, hd_at, win_head, head_work, hw_x, hw_y, hw_w, hw_h,
     heads_sync, head_syncs, hd_say, hd_demo,
     fullscreen, is_full, F_FULL, L_FULL,
     set_nostrut, nostrut,
@@ -166,6 +167,7 @@ export {
     zieh_frn, zieh_frus, zieh_frmax, zieh_frueber,
     ohne_frn, ohne_frus, ohne_frmax,
     drag_begin_pub, drag_end_pub,
+    dnd_take_paste, dnd_live_pub, dnd_nraise_pub, dnd_ncancel_pub, // W-DND
     win_x_pub, win_y_pub,
     set_sig, sig_on, frame_no, sig_colour, plugkeys,
     set_leser, leser_tick, liest, risse, tear_top, tear_bottom, without_sig,
@@ -4981,6 +4983,14 @@ fn hd_y(state: u64, hd: u64) -> u64 {
     return ps2m.head_y(state, hd)
 }
 
+// r815: suggested UI scale of a head in percent (100..300) from its EDID (vgpu output table); 100 when unknown.
+fn hd_scale(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return vgpu.head_scale(state, 0)
+    }
+    return vgpu.head_scale(state, hd)
+}
+
 fn hd_w(state: u64, hd: u64) -> u64 {
     if !hd_multi(state) {
         return gs(state, S_SW)
@@ -5186,6 +5196,20 @@ fn hd_say(state: u64, hd: u64) {
     serial.nl()
 }
 
+// r815: "wm: hscale N=P" -- the EDID scale suggestion (percent) of head N next to the UI scale the desktop really uses.
+fn hd_say_scale(state: u64, hd: u64) {
+    var s_h: [u8; 12] = "wm: hscale \0"
+    var s_e: [u8; 2] = "=\0"
+    var s_u: [u8; 4] = " u=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(hd)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(hd_scale(state, hd))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(fb.uiscale(state))
+    serial.nl()
+}
+
 // THE HEAD TABLE FOLLOWS THE OUTPUTS. Called after the window server is up and from `gfx.gpu_ereignis` after every
 // successful re-layout (hot-plug): copy the extend rects of the vgpu driver into the pointer driver's table, bring
 // windows that sit on no head any more to the primary head, keep the others in sight (title bar reachable), refit
@@ -5268,6 +5292,7 @@ fn heads_sync(state: u64) {
     while hd < HD_MAX {
         if hd_present(state, hd) {
             hd_say(state, hd)
+            hd_say_scale(state, hd)
         }
         hd = hd + 1
     }
@@ -7879,6 +7904,18 @@ fn margin_cursor(state: u64, i: u64, x: i64, y: i64) {
     if gs(state, S_DRAG) != 0 {
         // a window is carried by its title bar: the move cross
         shape_intern(state, cursor.F_CROSS)
+        return
+    }
+    if dnd_forbidden(state, i) { // W-DND: nobody takes a drop here
+        shape_intern(state, cursor.F_NO)
+        return
+    }
+    if dh_live != 0 { // W-DND: Ctrl = copy (plus), otherwise move (drop arrow)
+        if (mods_of(state) & M_CTRL) != 0 {
+            shape_intern(state, cursor.F_COPY)
+        } else {
+            shape_intern(state, cursor.F_MOVE)
+        }
         return
     }
     var will: u64 = cursor.F_PFEIL
@@ -14190,6 +14227,186 @@ fn hwheel_out(state: u64, x: u64, y: u64) {
 // 0x0B8 in the mouse state (ps2m.S_PRESSED): buttons that went down since the last look
 const MOUSE_PRESSED_OFF: u64 = 0x0B8
 
+// ============================================================ W-DND
+// DRAG AND DROP IN THE WINDOW SERVER. The payload lives on the bus (`bus.drag_*`: the source puts it there when a
+// drag starts, a target takes it on release). A drag RUNS while the left button is down and the slot is full. What the
+// server adds:
+//   - hover-raise: ~600 ms over a background window raises it (and gives it the focus), so one can drop there; the
+//     taskbar does the same for its window buttons (taskbar.fi `dnd_bar_step`).
+//   - Esc cancels: the slot is emptied, the release then drops nothing.
+//   - the pointer shows "forbidden" over the desktop (nobody takes a drop there).
+//   - a K_TERM window with a tty takes a PATH as typed text (`dnd_take_paste`, pumped by kgui).
+//   - a fresh left press empties a stale slot (a drag nobody took).
+// Witness lines on the serial port: `wm: dndraise id=N`, `wm: dndcancel`, `wm: dndterm tty=T`.
+static mut dh_win: u64 = 0     // window under the pointer + 1 while a drag runs, 0 = none / not raisable
+static mut dh_t: u64 = 0       // mono_ns when the pointer came to that window
+static mut dh_raised: u64 = 0  // window + 1 raised for the current hover
+static mut dh_live: u64 = 0    // 1 = a drag runs (left down, slot full)
+static mut dh_prev: u64 = 0    // left button of the last look
+static mut dh_tty: u64 = 0     // tty + 1 waiting to be typed a dropped path, 0 = none
+static mut dh_src: u64 = 0     // window + 1 under the pointer at the left press (the drag source), 0 = none
+static mut dh_nraise: u64 = 0
+static mut dh_ncancel: u64 = 0
+const DH_DELAY_NS: u64 = 600000000
+
+fn dnd_say(state: u64, which: u64, v: u64) {
+    var s_r: [u8; 17] = "wm: dndraise id=\0"
+    var s_c: [u8; 14] = "wm: dndcancel\0"
+    var s_t: [u8; 17] = "wm: dndterm tty=\0"
+    var s_s: [u8; 16] = "wm: dndsrc id=\0\0"
+    if which == 3 {
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(v)
+    } else if which == 0 {
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(v)
+    } else if which == 1 {
+        serial.puts((&s_c[0]) as u64)
+    } else {
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(v)
+    }
+    serial.nl()
+}
+
+// Called with every pointer look (`i` = window under the pointer, MAX_WIN = none).
+fn dnd_hover(state: u64, i: u64, btn: u64) {
+    let left: u64 = btn & ps2m.B_LEFT
+    let was: u64 = dh_prev
+    dh_prev = left
+    if left != 0 && was == 0 {
+        // a new press: a payload nobody took is stale
+        if bus.drag_active(state) != 0 {
+            let _c: u64 = bus.drag_clear(state)
+        }
+        dh_live = 0
+        dh_win = 0
+        dh_raised = 0
+        dh_src = 0
+        if i < MAX_WIN && valid(state, i) {
+            dh_src = i + 1
+        }
+        return
+    }
+    if left == 0 {
+        // The release goes to the window under the pointer. The SOURCE of a live drag never sees it otherwise and
+        // keeps its drag chip; tell it with a release far outside its own area (nothing there to hit).
+        if was != 0 && dh_live != 0 && dh_src != 0 && dh_src != i + 1 && valid(state, dh_src - 1) {
+            ev_push(state, dh_src - 1, E_UP, 0x7FFF, 0x7FFF, ps2m.B_LEFT)
+            dnd_say(state, 3, wg(state, dh_src - 1, W_ID))
+        }
+        dh_src = 0
+        if was != 0 && dh_live != 0 && i < MAX_WIN && valid(state, i) && darf(state, i)
+            && wg(state, i, W_KIND) == K_TERM && bus.drag_active(state) != 0
+            && (bus.drag_types(state) & bus.T_PATH) != 0 {
+            let t: u64 = tty_of(state, i)
+            if t != NO_TTY {
+                dh_tty = t + 1
+                dnd_say(state, 2, t)
+            }
+        }
+        dh_live = 0
+        dh_win = 0
+        dh_raised = 0
+        return
+    }
+    if bus.drag_active(state) == 0 {
+        dh_live = 0
+        dh_win = 0
+        dh_raised = 0
+        return
+    }
+    dh_live = 1
+    if i >= MAX_WIN || !valid(state, i) || !darf(state, i) || wg(state, i, W_LAYER) != L_NORMAL {
+        dh_win = 0
+        return
+    }
+    if dh_win != i + 1 {
+        dh_win = i + 1
+        dh_t = time.mono_ns(state)
+        if dh_raised != i + 1 {
+            dh_raised = 0
+        }
+    }
+}
+
+// Every tick: has the pointer rested long enough on a background window?
+fn dnd_tick(state: u64) {
+    if dh_live == 0 || dh_win == 0 || dh_raised == dh_win {
+        return
+    }
+    if time.mono_ns(state) - dh_t < DH_DELAY_NS {
+        return
+    }
+    let i: u64 = dh_win - 1
+    dh_raised = dh_win
+    if i >= MAX_WIN || !valid(state, i) || focus(state) == i {
+        return
+    }
+    raise_win(state, i)
+    set_focus(state, i)
+    dh_nraise = dh_nraise + 1
+    dnd_say(state, 0, wg(state, i, W_ID))
+}
+
+// Esc while a drag runs: the payload goes, the release drops nothing. True = the key is consumed.
+fn dnd_cancel(state: u64) -> bool {
+    if dh_prev == 0 || bus.drag_active(state) == 0 {
+        return false
+    }
+    let _c: u64 = bus.drag_clear(state)
+    dh_live = 0
+    dh_win = 0
+    dh_raised = 0
+    dh_ncancel = dh_ncancel + 1
+    dnd_say(state, 1, 0)
+    return true
+}
+
+// kgui pumps this: a path dropped on a terminal window. Copies "<path> " to `out` (max bytes), returns
+// (tty << 32) | length, 0 = nothing waits. The slot is emptied.
+fn dnd_take_paste(state: u64, out: u64, max: u64) -> u64 {
+    if dh_tty == 0 {
+        return 0
+    }
+    let t: u64 = dh_tty - 1
+    dh_tty = 0
+    if max < 4 {
+        return 0
+    }
+    var n: u64 = bus.drag_get(state, out, max - 2, 0)
+    let _c: u64 = bus.drag_clear(state)
+    if n == 0 || n >= max - 2 {
+        return 0
+    }
+    kstate.set8(out + n, 32)
+    n = n + 1
+    return (t << 32) | n
+}
+
+fn dnd_live_pub() -> u64 {
+    return dh_live
+}
+
+fn dnd_nraise_pub() -> u64 {
+    return dh_nraise
+}
+
+fn dnd_ncancel_pub() -> u64 {
+    return dh_ncancel
+}
+
+// "forbidden" shape wanted? A drag runs and the pointer is over the desktop (or no window).
+fn dnd_forbidden(state: u64, i: u64) -> bool {
+    if dh_live == 0 {
+        return false
+    }
+    if i >= MAX_WIN || !valid(state, i) {
+        return true
+    }
+    return wg(state, i, W_LAYER) == L_DESK
+}
+
 fn on_mouse(state: u64) {
     if !ready(state) {
         return
@@ -14486,6 +14703,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
     // hat.
     cap_track(state, i, x, y)
+    dnd_hover(state, i, btn) // W-DND
     if gs(state, S_CAPDOWN) != 0 && (btn & ps2m.B_LEFT) == 0 {
         cap_release(state, i, x, y)
     }
@@ -15107,6 +15325,11 @@ fn on_key(state: u64, c: u64) {
         return
     }
     input_seen(state)
+    // W-DND: Esc cancels a running drag
+    if c == 27 && dnd_cancel(state) {
+        ss(state, S_KSWAL, 1)
+        return
+    }
     // ROUND ACTION-BUS-5 (AB-004): the trusted dialog takes the key
     // FIRST -- before a plugin, before the focus, and not for the
     // terminal either
@@ -15219,6 +15442,7 @@ fn poll(state: u64) -> bool {
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
     // HOLT sie ab, statt dass die Tastatur ihn kennt.
     hotkeys(state)
+    dnd_tick(state) // W-DND: hover-raise after the delay
     // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
     //
     // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser

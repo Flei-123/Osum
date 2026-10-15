@@ -67,6 +67,7 @@ profile app
 
 import ulib
 import libc.io
+import tz.tz
 // RUNDE O-NETZUI: der Ping-Socket fuer die Antwortzeit zum Gateway.
 // Derselbe Weg, den `/bin/ping` geht -- und dieselbe Schicht wie
 // `libc.io` daneben, also kein Griff nach oben.
@@ -5591,44 +5592,110 @@ fn ri_jarvis() {
     ri_answer(actcli.send(300))
 }
 
-// DAILY-DRIVER: THE ZONE CHOICE SHOWS WHAT THE KERNEL HAS.
-// 0 UTC+0 | 1 Central Europe, summer time by rule (60 min + rule 1) |
-// 2 UTC+1 fixed | 3 UTC+2 fixed. It used to start on "UTC+2" whatever the
-// kernel said, and writing it never reached the kernel.
-fn zone_index() -> u64 {
+// N-004: THE ZONE PICKER (region choice K_CZ + city choice K_CZC, 79 zones of lib/tz).
+// The region choice is the old zone choice (key 64) with new items; the city list is
+// built from lib/tz/zonedata.fi for the region picked. What the kernel has is shown:
+// `/etc/time.conf` carries `zone=<city>`; it is used when the kernel's standard offset
+// and rule agree with that city, otherwise the first city with that offset and rule.
+const K_CZC: u64 = 99 // the city choice (free key below 110: ch_buf slots are key % 110)
+static mut zc_items: [u8; 480] = [0 as u8; 480]
+static mut zc_letters: [u8; 9] = "UEGALSFP\0" // the region letters in the order of the first choice
+static mut zc_conf: [u8; 15] = "/etc/time.conf\0"
+static mut zc_zbuf: [u8; 200] = [0 as u8; 200]
+
+fn zc_letter(r: u64) -> u64 {
+    if r >= 8 {
+        return 85
+    }
+    return (zc_letters[(r) as usize]) as u64
+}
+
+fn zc_region_index(letter: u64) -> u64 {
+    var r: u64 = 0
+    while r < 8 {
+        if zc_letter(r) == letter {
+            return r
+        }
+        r = r + 1
+    }
+    return 0
+}
+
+// the cities of region `r`, '\n' between them (what chtext wants)
+fn zc_list(r: u64) -> u64 {
+    let reg: u64 = zc_letter(r)
+    let n: u64 = tz.zone_count()
+    var nm: [u8; 32] = [0 as u8; 32]
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < n && at < 440 {
+        if tz.zone_region(i) == reg {
+            let l: u64 = tz.zone_name(i, (&nm[0 as usize]) as u64)
+            if at > 0 {
+                zc_items[(at) as usize] = 10 as u8
+                at = at + 1
+            }
+            var k: u64 = 0
+            while k < l {
+                zc_items[(at) as usize] = nm[(k) as usize]
+                at = at + 1
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    zc_items[(at) as usize] = 0 as u8
+    return (&zc_items[0 as usize]) as u64
+}
+
+// the zone the two choices stand on (a global index in lib/tz, or NONE_ZONE)
+fn zc_zone() -> u64 {
+    return tz.zone_in_region(zc_letter(kval[(K_CZ) as usize]), kval[(K_CZC) as usize])
+}
+
+// start state: the kernel's zone, the saved city name if it fits
+fn zone_init() {
+    kval[(K_CZ) as usize] = 0
+    kval[(K_CZC) as usize] = 0
     let base: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZBASE, 0, 0)
     let rule: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZRULE, 0, 0)
-    if ulib.bad(base) {
-        return 0
+    if ulib.bad(base) || ulib.bad(rule) {
+        return
     }
-    if rule == 1 && base == 60 {
-        return 1
+    let bw: u64 = tz.to_wrapped(base, tz.west_bit(rule))
+    let rl: u64 = tz.rule_of_arg(rule)
+    var z: u64 = tz.NONE_ZONE
+    let n: u64 = file_read((&zc_conf[0 as usize]) as u64, (&zc_zbuf[0 as usize]) as u64, 200)
+    var i: u64 = 0
+    while i + 5 < n {
+        // "zone=" at the start of a line
+        if zc_zbuf[(i) as usize] == 122 as u8 && zc_zbuf[((i + 1)) as usize] == 111 as u8
+            && zc_zbuf[((i + 2)) as usize] == 110 as u8 && zc_zbuf[((i + 3)) as usize] == 101 as u8
+            && zc_zbuf[((i + 4)) as usize] == 61 as u8 && (i == 0 || zc_zbuf[((i - 1)) as usize] == 10 as u8) {
+            var nm: [u8; 32] = [0 as u8; 32]
+            var k: u64 = 0
+            while k < 31 && i + 5 + k < n && zc_zbuf[((i + 5 + k)) as usize] != 10 as u8 {
+                nm[(k) as usize] = zc_zbuf[((i + 5 + k)) as usize]
+                k = k + 1
+            }
+            z = tz.zone_by_name((&nm[0 as usize]) as u64)
+            break
+        }
+        i = i + 1
     }
-    if base == 60 {
-        return 2
+    if z == tz.NONE_ZONE || tz.zone_base(z) != bw || tz.zone_rule(z) != rl {
+        z = tz.zone_find(bw, rl)
     }
-    if base == 120 {
-        return 3
+    if z == tz.NONE_ZONE {
+        return
     }
-    return 0
-}
-
-// the minutes and the rule of a choice index
-fn zone_minutes(i: u64) -> u64 {
-    if i == 1 || i == 2 {
-        return 60
+    let r: u64 = zc_region_index(tz.zone_region(z))
+    kval[(K_CZ) as usize] = r
+    var c: u64 = 0
+    while tz.zone_in_region(zc_letter(r), c) != z && c < 40 {
+        c = c + 1
     }
-    if i == 3 {
-        return 120
-    }
-    return 0
-}
-
-fn zone_rule(i: u64) -> u64 {
-    if i == 1 {
-        return 1
-    }
-    return 0
+    kval[(K_CZC) as usize] = c
 }
 
 // ====================================================================
@@ -5774,7 +5841,7 @@ static mut en_max: [u64; 24] = [0 as u64; 24]
 static mut en_n: u64 = 0
 
 fn is_choice(k: u64) -> bool {
-    return k == K_CM || k == K_CSH || k == K_ZS1 || k == K_ZS2 || k == K_ZS3 || k == K_BS1 || k == K_BS2 || k == K_CE || k == K_CAL || k == K_CK || k == K_CD || k == K_CH || k == K_CC || k == K_CG || k == K_CQ || k == K_CZ || k == K_CN || k == K_CSP || k == K_CV || k == K_CF || k == K_CL || k == K_CK2 || k == K_CKANB
+    return k == K_CM || k == K_CSH || k == K_ZS1 || k == K_ZS2 || k == K_ZS3 || k == K_BS1 || k == K_BS2 || k == K_CE || k == K_CAL || k == K_CK || k == K_CD || k == K_CH || k == K_CC || k == K_CG || k == K_CQ || k == K_CZ || k == K_CZC || k == K_CN || k == K_CSP || k == K_CV || k == K_CF || k == K_CL || k == K_CK2 || k == K_CKANB
         || k == K_PW_LB || k == K_PW_LA || k == K_PW_PB || k == K_PW_PA
 }
 
@@ -7022,6 +7089,8 @@ fn page_time(left: usize, right: usize) {
     let _n_z2: usize = fuiscene.label(left, msg.get((&k_l_zone[0 as usize]) as u64))
     let n_cz: usize = fuiscene.choice(left, chtext(K_CZ, msg.get((&k_c_zone[0 as usize]) as u64)), K_CZ)
     fuiscene.set_size(n_cz, 0, 28)
+    let n_czc: usize = fuiscene.choice(left, chtext(K_CZC, zc_list(kval[(K_CZ) as usize])), K_CZC)
+    fuiscene.set_size(n_czc, 0, 28)
     let _n_z3: usize = fuiscene.label(left, msg.get((&k_l_ehr3[0 as usize]) as u64))
     let _n_z4: usize = fuiscene.label(left, msg.get((&k_l_ehr4[0 as usize]) as u64))
     let n_b3: usize = fuiscene.button(left, msg.get((&k_b_uber[0 as usize]) as u64), K_B3)
@@ -7767,7 +7836,7 @@ fn init_values() {
     kval[(K_CC) as usize] = 2
     kval[(K_CG) as usize] = 2
     kval[(K_CQ) as usize] = 2
-    kval[(K_CZ) as usize] = zone_index()
+    zone_init()
     kval[(K_CN) as usize] = 1
     kval[(K_CSP) as usize] = sperre_stufe()
     kval[(K_CV) as usize] = 0
@@ -8214,6 +8283,9 @@ fn u_start(args: u64) -> u64 {
             } else if kind == wlib.K_MENUBAR {
                 if is_choice(id) {
                     kval[(id) as usize] = idx
+                    if id == K_CZ {
+                        kval[(K_CZC) as usize] = 0 // a new region starts at its first city
+                    }
                     if id == K_CE {
                         tb_edge = idx
                         tb_show_size()
@@ -8668,26 +8740,51 @@ fn u_start(args: u64) -> u64 {
                     // (described again)
                     melde_stand()
                 } else if id == K_B3 {
-                    var buf2: [u8; 32] = [0 as u8; 32]
+                    var buf2: [u8; 96] = [0 as u8; 96]
+                    var zn: [u8; 32] = [0 as u8; 32]
                     var a4: u64 = text_an((&buf2[0 as usize]) as u64, 0,
                         (&k_off[0 as usize]) as u64)
-                    a4 = num_at((&buf2[0 as usize]) as u64, a4,
-                        zone_minutes(kval[(K_CZ) as usize]))
+                    // N-004: the picked city -> standard offset (signed), rule, name
+                    let zi: u64 = zc_zone()
+                    var zmag: u64 = 0
+                    var zwest: u64 = 0
+                    var zrule: u64 = 0
+                    if zi != tz.NONE_ZONE {
+                        zmag = tz.magnitude(tz.zone_base(zi))
+                        zwest = tz.is_west(tz.zone_base(zi))
+                        zrule = tz.zone_rule(zi)
+                        let _zl: u64 = tz.zone_name(zi, (&zn[0 as usize]) as u64)
+                    }
+                    var k_minus: [u8; 2] = "-\0"
+                    if zwest != 0 {
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_minus[0 as usize]) as u64)
+                    }
+                    a4 = num_at((&buf2[0 as usize]) as u64, a4, zmag)
                     a4 = text_an((&buf2[0 as usize]) as u64, a4,
                         (&k_nl[0 as usize]) as u64)
-                    // DAILY-DRIVER: the rule line (`eu` = summer time by the
-                    // European rule), and the kernel is told at once
+                    // the rule line (`eu|us|au|nz` = summer time by that law) and the city name;
+                    // the kernel is told at once
                     var k_rule_eu: [u8; 9] = "rule=eu\n\0"
+                    var k_rule_us: [u8; 9] = "rule=us\n\0"
+                    var k_rule_au: [u8; 9] = "rule=au\n\0"
+                    var k_rule_nz: [u8; 9] = "rule=nz\n\0"
                     var k_rule_no: [u8; 11] = "rule=none\n\0"
-                    if zone_rule(kval[(K_CZ) as usize]) == 1 {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4,
-                            (&k_rule_eu[0 as usize]) as u64)
+                    var k_zone_eq: [u8; 6] = "zone=\0"
+                    if zrule == 1 {
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_eu[0 as usize]) as u64)
+                    } else if zrule == 2 {
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_us[0 as usize]) as u64)
+                    } else if zrule == 3 {
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_au[0 as usize]) as u64)
+                    } else if zrule == 4 {
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_nz[0 as usize]) as u64)
                     } else {
-                        a4 = text_an((&buf2[0 as usize]) as u64, a4,
-                            (&k_rule_no[0 as usize]) as u64)
+                        a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_rule_no[0 as usize]) as u64)
                     }
-                    let _tz: u64 = ulib.sys(1971, zone_minutes(kval[(K_CZ) as usize]),
-                        zone_rule(kval[(K_CZ) as usize]), 0)
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_zone_eq[0 as usize]) as u64)
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, (&zn[0 as usize]) as u64)
+                    a4 = text_an((&buf2[0 as usize]) as u64, a4, (&k_nl[0 as usize]) as u64)
+                    let _tz: u64 = ulib.sys(1971, zmag, zrule | (zwest << 8), 0)
                     let _w4: bool = file_write(
                         (&t_time[0 as usize]) as u64,
                         (&buf2[0 as usize]) as u64, a4)

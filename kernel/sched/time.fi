@@ -46,6 +46,7 @@
 import serial
 import lib.kstate
 import sync.atomic
+import tz.tz
 
 export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
@@ -391,7 +392,11 @@ fn now_sec(state: u64) -> u64 {
 // Vorgabe ist NULL, und das ist Absicht: alles, was in diesem Baum eine
 // Zeit vergleicht (Dateizeiten, die Regressionslaeufe), rechnet dann
 // genau wie vorher. Der Versatz betrifft die ANZEIGE.
-static mut tz_offset: u64 = 0
+static mut tz_offset: u64 = 0 // the MAGNITUDE of the standard offset in minutes
+// N-004: zones west of Greenwich. `tz_west` = 1 makes the standard offset negative;
+// all arithmetic goes through `base_w()`, the offset as wrapped signed minutes
+// (lib/tz/tz.fi), so `utc +% (off *% 60)` is right for both signs.
+static mut tz_west: u64 = 0
 
 // ============================================ RUNDE ECHTHARDWARE-1
 // STEHT DIE ECHTZEITUHR AUF UTC ODER AUF ORTSZEIT?
@@ -444,16 +449,24 @@ fn set_tz(state: u64, minuten: u64) {
 // summer time of the European Union is in force: from 01:00 UTC on the
 // last Sunday of March until 01:00 UTC on the last Sunday of October --
 // the same instant for every zone of the Union.
-static mut tz_rule: u64 = 0 // 0 = fixed offset, 1 = EU summer time
+static mut tz_rule: u64 = 0 // 0 = fixed offset, 1 EU, 2 US/CA, 3 AU (south), 4 NZ (lib/tz/tz.fi)
 
-fn set_tz_rule(state: u64, rule: u64) {
-    if rule <= 1 {
-        tz_rule = rule
+fn base_w() -> u64 {
+    return tz.to_wrapped(tz_offset, tz_west)
+}
+
+// `arg` = rule | (west << 8), the same word SYS_OSUM_SETTZ carries. A bad rule is ignored.
+fn set_tz_rule(state: u64, arg: u64) {
+    let r: u64 = tz.rule_of_arg(arg)
+    if r <= tz.RULE_MAX {
+        tz_rule = r
+        tz_west = tz.west_bit(arg)
     }
 }
 
+// the rule as the sysinfo word: rule | (west << 8)
 fn tz_rule_get(state: u64) -> u64 {
-    return tz_rule
+    return tz_rule | (tz_west << 8)
 }
 
 // the standard offset, without summer time
@@ -473,24 +486,21 @@ fn last_sunday(y: u64, m: u64) -> u64 {
 }
 
 fn eu_dst(utc: u64) -> bool {
-    var f: [u64; 6] = [0 as u64; 6]
-    split(utc, (&f[0 as usize]) as u64)
-    let y: u64 = f[(R_YEAR) as usize]
-    let start: u64 = (last_sunday(y, 3) *% 86400) +% 3600
-    let end: u64 = (last_sunday(y, 10) *% 86400) +% 3600
-    return utc >= start && utc < end
+    return tz.dst_active(utc, base_w(), tz_rule)
 }
 
 // the extra minutes (0 or 60) at this instant (UTC seconds)
 fn dst_min(utc: u64) -> u64 {
-    if tz_rule == 1 && eu_dst(utc) {
+    if eu_dst(utc) {
         return 60
     }
     return 0
 }
 
+// the total offset NOW as a magnitude (callers only test it for 0 or show it; the
+// sign is `tz_rule_get(..) >> 8`). tz_offset stays the magnitude of the STANDARD offset.
 fn tz_min(state: u64) -> u64 {
-    return tz_offset +% dst_min(now_sec(state))
+    return tz.magnitude(tz.offset_min(now_sec(state), base_w(), tz_rule))
 }
 
 // `rtcutc` auf der Kommandozeile: die Uhr im Baustein ist UTC.
@@ -506,7 +516,7 @@ fn rtc_utc(state: u64) -> u64 {
 // Versatz -- das ist die Zahl, aus der die Tafel ihre Uhr macht.
 fn now_local(state: u64) -> u64 {
     let u: u64 = now_sec(state)
-    return u +% ((tz_offset +% dst_min(u)) *% 60)
+    return u +% (tz.offset_min(u, base_w(), tz_rule) *% 60)
 }
 
 // RUNDE ECHTHARDWARE-1: DIE EINMALIGE KORREKTUR, nachdem die
@@ -535,13 +545,14 @@ fn tz_anwenden(state: u64) {
     }
     var utc: u64 = roh
     if rtc_ist_utc == 0 {
-        let ab: u64 = tz_offset *% 60
-        if roh > ab {
+        // wrapped signed seconds: east of Greenwich subtracts, west adds
+        let ab: u64 = base_w() *% 60
+        if tz_west != 0 || roh > ab {
             utc = roh -% ab
         }
-        // with the summer-time rule the wall clock may be an hour ahead:
+        // with a summer-time rule the wall clock may be an hour ahead:
         // try that reading first and keep it if it is summer time then
-        if tz_rule == 1 && roh > ab +% 3600 {
+        if tz_rule != 0 && roh > 1000000 {
             let u1: u64 = roh -% (ab +% 3600)
             if eu_dst(u1) {
                 utc = u1
@@ -552,7 +563,7 @@ fn tz_anwenden(state: u64) {
     // A zone that is not known yet (no `tz=` on the boot line; it comes
     // later from /etc/time.conf through SETTZ) leaves the door open: the
     // next call with a zone does the one conversion.
-    if tz_offset != 0 || tz_rule != 0 || rtc_ist_utc != 0 {
+    if tz_offset != 0 || tz_west != 0 || tz_rule != 0 || rtc_ist_utc != 0 {
         tz_done = 1
     }
 }
@@ -599,7 +610,7 @@ fn rtc_write(state: u64) -> bool {
     }
     var t: u64 = now_sec(state)
     if rtc_ist_utc == 0 {
-        t = t +% ((tz_offset +% dst_min(t)) *% 60)
+        t = t +% (tz.offset_min(t, base_w(), tz_rule) *% 60)
     }
     var f: [u64; 6] = [0 as u64; 6]
     split(t, (&f[0 as usize]) as u64)

@@ -385,6 +385,36 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    # W-DND: press at (x0,y0), move in steps to (x1,y1), HOLD there `halt` seconds (no mouse events: a hover timer in the
+    # window server / taskbar must fire by itself), optional photo during the hold, optional Esc during the hold, release.
+    def ziehe_halt(self, x0, y0, x1, y1, halt, foto=None, esc=False, schritte=8):
+        self.fahre(x0, y0)
+        time.sleep(0.35)
+        self.cmd("mouse_button 1")
+        time.sleep(0.25)
+        cx, cy = x0, y0
+        for k in range(1, schritte + 1):
+            zx = x0 + (x1 - x0) * k // schritte
+            zy = y0 + (y1 - y0) * k // schritte
+            ddx, ddy = zx - cx, zy - cy
+            while ddx or ddy:
+                sx = max(-120, min(120, ddx))
+                sy = max(-120, min(120, ddy))
+                self.cmd("mouse_move %d %d" % (sx, sy))
+                ddx -= sx
+                ddy -= sy
+            cx, cy = zx, zy
+            time.sleep(0.15)
+        self.x, self.y = cx, cy
+        time.sleep(halt)
+        if foto:
+            self.foto(foto)
+        if esc:
+            self.cmd("sendkey esc")
+            time.sleep(0.5)
+        self.cmd("mouse_button 0")
+        time.sleep(1.2)
+
     def taste(self, name):
         self.cmd("sendkey %s" % name)
         time.sleep(0.4)
@@ -1462,6 +1492,25 @@ def main():
             f.ziehe(x0, y0, x1, y1)
             print("ziehvon %s(%d,%d) -> %s(%d,%d)"
                   % (t[0], x0, y0, t[1], x1, y1))
+        # W-DND: `ziehhalt <srect|x,y> <x1>,<y1> <seconds> [esc] [foto=<name>]` -- drag with a hold before the release
+        elif b == "ziehhalt":
+            t = arg.split()
+            if "," in t[0]:
+                x0, y0 = (int(v) for v in t[0].split(","))
+            else:
+                r0 = f.rechteck(t[0])
+                if r0 is None:
+                    print("ziehhalt %s -> KEIN RECHTECK GEMELDET" % t[0])
+                    fehler += 1
+                    continue
+                x0, y0 = r0[0] + r0[2] // 2, r0[1] + r0[3] // 2
+            x1, y1 = (int(v) for v in t[1].split(","))
+            fo = None
+            for extra in t[3:]:
+                if extra.startswith("foto="):
+                    fo = extra[5:]
+            f.ziehe_halt(x0, y0, x1, y1, float(t[2]), foto=fo, esc=("esc" in t[3:]))
+            print("ziehhalt (%d,%d) -> (%d,%d) halt %s" % (x0, y0, x1, y1, t[2]))
         elif b == "ziehespur":
             t = arg.split()
             r = f.rechteck(t[0])

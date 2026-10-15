@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/cptempo.fi -- copy one file like /bin/cp (512-byte blocks,
+// alternating read and write) and report how long it took.
+//
+//     cptempo SRC DST
+//     -> cptempo: ms = <n>
+//        cptempo: bytes = <n>
+//
+// Why it exists (r208): copying INSIDE one FAT volume ran at 3.5 KB/s
+// because the single chain cache was thrown away on every block (source
+// and target take turns). tools/fat/cptempo.sh measures before / after.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+fn now_ms() -> u64 {
+    var ts: [u8; 16] = [0 as u8; 16]
+    let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    let s: u64 = __mmio_read64(((&ts[0 as usize]) as u64) as *mut u64)
+    let ns: u64 = __mmio_read64((((&ts[0 as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn line(name: u64, v: u64) {
+    var s_pre: [u8; 10] = "cptempo: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ms: [u8; 3] = "ms\0"
+    var n_bytes: [u8; 6] = "bytes\0"
+    var s_use: [u8; 24] = "usage: cptempo SRC DST\0\0"
+    if ulib.arg_count(args) < 3 {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    let src: u64 = ulib.arg_at(args, 1)
+    let dst: u64 = ulib.arg_at(args, 2)
+    let in_fd: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(in_fd) {
+        line((&n_ms[0 as usize]) as u64, 0)
+        return 1
+    }
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    let out_fd: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(out_fd) {
+        line((&n_ms[0 as usize]) as u64, 0)
+        return 1
+    }
+    var buf: [u8; 512] = [0 as u8; 512]
+    let t0: u64 = now_ms()
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, in_fd, (&buf[0 as usize]) as u64, 512)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            let w: u64 = ulib.sys(ulib.SYS_WRITE, out_fd, (&buf[0 as usize]) as u64, n)
+            if ulib.bad(w) || w != n {
+                going = false
+            } else {
+                total = total + n
+            }
+        }
+    }
+    let t1: u64 = now_ms()
+    ulib.sys(ulib.SYS_CLOSE, in_fd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, out_fd, 0, 0)
+    line((&n_ms[0 as usize]) as u64, t1 - t0)
+    line((&n_bytes[0 as usize]) as u64, total)
+    return 0
+}

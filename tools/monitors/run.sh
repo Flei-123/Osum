@@ -50,21 +50,22 @@ if [ -x "$T/oracle" ]; then
     nbad=$(grep -c '^FAIL' "$T/out.txt")
     sed -n 's/^FAIL /  FAIL  oracle: /p' "$T/out.txt"
     [ "$nbad" = 0 ] && ok "oracle: no FAIL line" || bad "oracle: $nbad FAIL lines"
-    [ "$nok" -ge 70 ] && ok "oracle: $nok promises OK (>= 70)" || bad "oracle: only $nok OK (< 70)"
+    [ "$nok" -ge 80 ] && ok "oracle: $nok promises OK (>= 80)" || bad "oracle: only $nok OK (< 80)"
     pass=$((pass+nok))
 fi
 
 # 3. negative controls: break one rule at a time in a copy of the lib
-mutate() { # name sed-expression
-    local name=$1 expr=$2
+mutate() { # name sed-expression [lib file, default layout.fi]
+    local name=$1 expr=$2 file=${3:-layout.fi}
     local L="$T/lib-$name"
     mkdir -p "$L"
     for d in lib/*; do
         [ "$(basename "$d")" = monitors ] || ln -s "$ROOT/$d" "$L/$(basename "$d")"
     done
     mkdir -p "$L/monitors"
-    sed -e "$expr" lib/monitors/layout.fi > "$L/monitors/layout.fi"
-    if cmp -s lib/monitors/layout.fi "$L/monitors/layout.fi"; then
+    cp lib/monitors/*.fi "$L/monitors/"
+    sed -e "$expr" lib/monitors/$file > "$L/monitors/$file"
+    if cmp -s lib/monitors/$file "$L/monitors/$file"; then
         bad "control $name: the mutation did not change the file"
         return
     fi
@@ -83,6 +84,10 @@ mutate noeld     's/if (sense \& PS_ELD_VALID) == 0 { return 0 }//'
 mutate nopresence 's/if (sense \& PS_PRESENCE) == 0 { return 0 }//'
 mutate dpi       's/(w \* 2540) \/ (mm_w \* 96)/(w * 2540) \/ (mm_w * 48)/'
 mutate mirrorpos 's/if g_mode == MODE_MIRROR { return 0 }//'
+mutate eldver    's/if eld_version(e) != 2 {/if false {/' eld.fi
+mutate eldlen    's/if base < 16 || 4 + base > len {/if base < 16 {/' eld.fi
+mutate eldpcm    's/eld_sad_format(e, i) == 1 \&\& eld_sad_channels(e, i) >= ch/eld_sad_channels(e, i) >= ch/' eld.fi
+mutate eldfit    's/return need <= base/return true/' eld.fi
 
 # 4. test-bed facts
 if command -v qemu-system-x86_64 >/dev/null 2>&1; then
