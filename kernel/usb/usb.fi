@@ -68,6 +68,7 @@ import lib.kstate
 import klog
 import wlan.usbchip
 import usbnet.rndis
+import usbnet.ncm
 import drv.net.usbnet
 import drv.usb.xhci
 import drv.hid.kbd
@@ -96,7 +97,7 @@ export {
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, wahl,
-    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM,
     // ============================== RUNDE BLECHEINGABE
     // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
     // Justin kann nur fotografieren; eine Diagnose auf der seriellen
@@ -457,6 +458,10 @@ const DRV_ECM: u64 = 6
 // offers no CDC-ECM configuration (ECM is preferred), or when the kernel word `rndisonly` forces it (test gate).
 const DRV_RNDIS: u64 = 7
 const DRV_ISOTEST: u64 = 8
+// r811: CDC-NCM network function (class 02/0D; many Android phones and every modern USB LAN dongle with NTB framing).
+// Last resort like RNDIS (pass 2 of `configure`): ECM is preferred. No QEMU model exists: only the host gate
+// tools/ncm covers the framing, the bring-up path is verified on real hardware.
+const DRV_NCM: u64 = 9
 // Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
 const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
 const S_NOECM: u64 = 0x1E8 // 1 = CDC-ECM is refused (word `rndisonly`)
@@ -1204,8 +1209,13 @@ fn drv_name(k: u64) {
     var s_e: [u8; 4] = "ecm\0"
     var s_r: [u8; 6] = "rndis\0"
     var s_i: [u8; 5] = "isoc\0"
+    var s_c: [u8; 4] = "ncm\0"
     if k == DRV_ISOTEST {
         serial.puts((&s_i[0]) as u64)
+        return
+    }
+    if k == DRV_NCM {
+        serial.puts((&s_c[0]) as u64)
         return
     }
     if k == DRV_ECM {
@@ -1417,6 +1427,10 @@ fn configure(state: u64, d: u64) -> bool {
     }
     if dg(state, d, D_DRIVER) == DRV_RNDIS {
         rndis_data(state, d, buf, total)
+    }
+    if dg(state, d, D_DRIVER) == DRV_NCM {
+        // NCM data interface = same layout as ECM: class 0A, bulk pipes in alternate setting >= 1.
+        ecm_data(state, d, buf, total)
     }
     if dg(state, d, D_DRIVER) == DRV_ISOTEST {
         iso_data(state, d, buf, total)
@@ -1722,6 +1736,10 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         if sub == 2 && pro == 0xFF {
             return g(state, S_RNDISOK) != 0
         }
+        // r811: CDC-NCM (subclass 0D) is a last resort like RNDIS: only in pass 2.
+        if sub == 0x0D {
+            return g(state, S_RNDISOK) != 0
+        }
         return sub == 6 && g(state, S_NOECM) == 0
     }
     // r811: RNDIS control interface of Android (E0/01/03) and of Windows-compatible gadgets (EF/04/01).
@@ -1752,6 +1770,9 @@ fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
     }
     if cls == CLS_CDC && sub == 6 {
         return DRV_ECM
+    }
+    if cls == CLS_CDC && sub == 0x0D {
+        return DRV_NCM
     }
     if (cls == CLS_CDC && sub == 2 && pro == 0xFF) || (cls == 0xE0 && sub == 1 && pro == 3)
         || (cls == 0xEF && sub == 4 && pro == 1) {
@@ -2055,6 +2076,10 @@ fn bind(state: u64, d: u64) {
         rndis_start(state, d)
         return
     }
+    if k == DRV_NCM {
+        ncm_start(state, d)
+        return
+    }
     if k == DRV_ISOTEST {
         iso_start(state, d)
     }
@@ -2342,6 +2367,77 @@ fn rndis_start(state: u64, d: u64) {
         return
     }
     serial.puts((&s_mac[0]) as u64)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// r811: bring a CDC-NCM function up (NTB16, no CRC): MAC from the string descriptor, GET_NTB_PARAMETERS,
+// SET_NTB_INPUT_SIZE (2048: the RX buffer of the network driver), SET_INTERFACE to the data alternate setting,
+// then hand the slot, the bulk pipes and the device's TX framing rules to the network driver (mode NCM).
+// Failure prints `usb: ncm failed step=N` (1 MAC, 2 parameters, 3 input size, 4 interface, 5 attach).
+fn ncm_start(state: u64, d: u64) {
+    var s_bad: [u8; 16] = "usb: ncm failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_mac: [u8; 9] = "usb: ncm\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    let iface: u64 = dg(state, d, D_IFACE)
+    let buf: u64 = state + DESC_OFF
+    var step: u64 = 1
+    zero(buf, 64)
+    let n: i64 = xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (3 << 8) | dg(state, d, D_MACSTR), 0x0409, 64, buf, true)
+    var macb: u64 = state + DESC_OFF + 128
+    zero(macb, 8)
+    var ok: bool = n >= 26 && dg(state, d, D_MACSTR) != 0
+        && rndis.cdc_mac_from_string(buf, n as u64, macb)
+    let par: u64 = state + DESC_OFF + 192
+    if ok {
+        step = 2
+        zero(par, 32)
+        let got: i64 = xhci.control(state, slot, ncm.REQT_GET, ncm.REQ_GET_NTB_PARAMETERS, 0, iface,
+            ncm.PARAMS_LEN, par, true)
+        ok = got >= 28 && ncm.params_ok(par, got as u64) && ncm.params_supports_ntb16(par)
+    }
+    if ok {
+        step = 3
+        // A device may refuse this request; its default input size could then exceed our buffer, which the
+        // host controller truncates (babble error, counted and dropped) instead of overflowing.
+        let sz: u64 = state + DESC_OFF + 160
+        zero(sz, 8)
+        let m: u64 = ncm.build_set_input_size(sz, 2048)
+        xhci.control(state, slot, ncm.REQT_SET, ncm.REQ_SET_NTB_INPUT_SIZE, 0, iface, m, sz, false)
+        step = 4
+        ok = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+            dg(state, d, D_DATAIF), 0, 0, false) >= 0
+    }
+    var mac: u64 = 0
+    if ok {
+        step = 5
+        var i: u64 = 0
+        while i < 6 {
+            mac = mac | (b8(macb, i) << (i * 8))
+            i = i + 1
+        }
+        ok = usbnet.attach_ncm(state, slot, dg(state, d, D_INDCI), dg(state, d, D_OUTDCI),
+            dg(state, d, D_BULKMPS), mac, ncm.params_out_div(par), ncm.params_out_rem(par),
+            ncm.params_out_align(par), ncm.params_out_max(par))
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.put(32 as u8)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
     hex2(mac & 0xFF)
     var k: u64 = 1
     while k < 6 {

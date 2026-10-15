@@ -1,0 +1,971 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/mail/wire.fi -- mail wire formats (IMAP4rev1 client side, SMTP client side,
+// RFC 5322 messages, MIME words), no I/O.
+//
+// WHAT THIS IS. Pure functions over octet buffers: build commands, parse replies,
+// find the end of an IMAP response (literals!), decode/encode header words, base64,
+// quoted-printable, dot-stuffing. It never opens a socket; lib/mail/session.fi moves
+// the octets (TCP or TLS). The same file runs in the ring-3 `mail` app on OrientOS
+// and in the host gate (tools/mail/run.sh) against a Python IMAP/SMTP stub.
+//
+// RULES: no allocator, no system call. All memory belongs to the caller. Every
+// function that writes takes an `Out` (pointer, capacity, length); when the capacity
+// is too small `Out.over` is set and nothing is written past the end.
+//
+// WHAT IT DOES NOT: MIME multipart trees beyond "first text/plain part", attachments,
+// IMAP IDLE/UIDs, SMTP pipelining, SASL other than PLAIN.
+
+export { Out, out_new, out_str, out_bytes, out_num, out_over,
+    b64_encode, b64_decode, qp_decode,
+    imap_tag, imap_login, imap_list, imap_select, imap_fetch_head, imap_fetch_body,
+    imap_fetch_full, imap_logout, imap_store_seen,
+    imap_response_end, imap_status, imap_exists_count, imap_list_name,
+    imap_literal_at, imap_line_end,
+    smtp_reply, smtp_ehlo, smtp_auth_plain, smtp_mail_from, smtp_rcpt, smtp_data,
+    smtp_body, smtp_quit,
+    hdr_get, words_decode, words_encode, body_start, body_decode, compose,
+    addr_only,
+    ST_NONE, ST_OK, ST_NO, ST_BAD, BAD }
+
+const BAD: u64 = 0xFFFFFFFFFFFFFFFF
+
+const ST_NONE: u64 = 0
+const ST_OK: u64 = 1
+const ST_NO: u64 = 2
+const ST_BAD: u64 = 3
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// ------------------------------------------------------------------ Out
+
+struct Out {
+    p: u64,
+    cap: u64,
+    len: u64,
+    over: bool,
+}
+
+fn out_new(p: u64, cap: u64) -> Out {
+    return Out { p: p, cap: cap, len: 0, over: false }
+}
+
+fn out_over(o: *mut Out) -> bool {
+    return (*o).over
+}
+
+fn out_bytes(o: *mut Out, s: u64, n: u64) {
+    if (*o).len + n > (*o).cap {
+        (*o).over = true
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        st8((*o).p, (*o).len + i, ld8(s, i))
+        i = i + 1
+    }
+    (*o).len = (*o).len + n
+}
+
+fn out_c(o: *mut Out, c: u64) {
+    if (*o).len + 1 > (*o).cap {
+        (*o).over = true
+        return
+    }
+    st8((*o).p, (*o).len, c)
+    (*o).len = (*o).len + 1
+}
+
+fn out_str(o: *mut Out, s: str) {
+    out_bytes(o, s.p as u64, s.n as u64)
+}
+
+fn out_num(o: *mut Out, v: u64) {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        out_c(o, 48)
+        return
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        out_c(o, tmp[n as usize] as u64)
+    }
+}
+
+// ----------------------------------------------------------------- base64
+
+static mut B64: [u8; 65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0"
+
+fn b64_at(v: u64) -> u64 {
+    return B64[(v & 63) as usize] as u64
+}
+
+// Standard base64 with padding; returns the number of octets written.
+fn b64_encode(src: u64, n: u64, dst: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = 0
+    while i + 3 <= n {
+        let v: u64 = (ld8(src, i) << 16) | (ld8(src, i + 1) << 8) | ld8(src, i + 2)
+        st8(dst, o, b64_at(v >> 18))
+        st8(dst, o + 1, b64_at(v >> 12))
+        st8(dst, o + 2, b64_at(v >> 6))
+        st8(dst, o + 3, b64_at(v))
+        i = i + 3
+        o = o + 4
+    }
+    let rest: u64 = n - i
+    if rest == 1 {
+        let v1: u64 = ld8(src, i) << 16
+        st8(dst, o, b64_at(v1 >> 18))
+        st8(dst, o + 1, b64_at(v1 >> 12))
+        st8(dst, o + 2, 61)
+        st8(dst, o + 3, 61)
+        o = o + 4
+    } else if rest == 2 {
+        let v2: u64 = (ld8(src, i) << 16) | (ld8(src, i + 1) << 8)
+        st8(dst, o, b64_at(v2 >> 18))
+        st8(dst, o + 1, b64_at(v2 >> 12))
+        st8(dst, o + 2, b64_at(v2 >> 6))
+        st8(dst, o + 3, 61)
+        o = o + 4
+    }
+    return o
+}
+
+fn b64_val(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c - 65
+    }
+    if c >= 97 && c <= 122 {
+        return c - 97 + 26
+    }
+    if c >= 48 && c <= 57 {
+        return c - 48 + 52
+    }
+    if c == 43 || c == 45 {
+        return 62
+    }
+    if c == 47 || c == 95 {
+        return 63
+    }
+    return BAD
+}
+
+// Decodes base64; CR, LF and blanks are skipped, padding ends the data. Returns the
+// number of octets written or BAD on a foreign character.
+fn b64_decode(src: u64, n: u64, dst: u64) -> u64 {
+    var acc: u64 = 0
+    var bits: u64 = 0
+    var o: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld8(src, i)
+        i = i + 1
+        if c == 13 || c == 10 || c == 32 || c == 9 {
+            continue
+        }
+        if c == 61 {
+            break
+        }
+        let v: u64 = b64_val(c)
+        if v == BAD {
+            return BAD
+        }
+        acc = ((acc << 6) | v) & 0xFFFFFF
+        bits = bits + 6
+        if bits >= 8 {
+            bits = bits - 8
+            st8(dst, o, (acc >> bits) & 255)
+            o = o + 1
+        }
+    }
+    return o
+}
+
+fn hexv(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return BAD
+}
+
+// Quoted-printable (RFC 2045). `word` = true is the RFC 2047 "Q" flavour (_ = blank).
+// Returns octets written.
+fn qp_decode(src: u64, n: u64, dst: u64, word: bool) -> u64 {
+    var i: u64 = 0
+    var o: u64 = 0
+    while i < n {
+        let c: u64 = ld8(src, i)
+        if c == 61 {
+            if i + 1 < n && ld8(src, i + 1) == 10 {
+                i = i + 2
+                continue
+            }
+            if i + 2 < n && ld8(src, i + 1) == 13 && ld8(src, i + 2) == 10 {
+                i = i + 3
+                continue
+            }
+            if i + 2 < n {
+                let a: u64 = hexv(ld8(src, i + 1))
+                let b: u64 = hexv(ld8(src, i + 2))
+                if a != BAD && b != BAD {
+                    st8(dst, o, a * 16 + b)
+                    o = o + 1
+                    i = i + 3
+                    continue
+                }
+            }
+            st8(dst, o, c)
+            o = o + 1
+            i = i + 1
+            continue
+        }
+        if word && c == 95 {
+            st8(dst, o, 32)
+        } else {
+            st8(dst, o, c)
+        }
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+// ------------------------------------------------------------------- IMAP
+
+// "a001" for n = 1. The tag is always 4 octets.
+fn imap_tag(o: *mut Out, n: u64) {
+    out_c(o, 97)
+    out_c(o, 48 + (n / 100) % 10)
+    out_c(o, 48 + (n / 10) % 10)
+    out_c(o, 48 + n % 10)
+}
+
+// IMAP quoted string: " and \ escaped, CR/LF dropped (cannot be quoted).
+fn quoted(o: *mut Out, s: u64, n: u64) {
+    out_c(o, 34)
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld8(s, i)
+        if c == 13 || c == 10 {
+            i = i + 1
+            continue
+        }
+        if c == 34 || c == 92 {
+            out_c(o, 92)
+        }
+        out_c(o, c)
+        i = i + 1
+    }
+    out_c(o, 34)
+}
+
+fn crlf(o: *mut Out) {
+    out_c(o, 13)
+    out_c(o, 10)
+}
+
+fn imap_login(o: *mut Out, tag: u64, user: u64, ul: u64, pass: u64, pl: u64) {
+    imap_tag(o, tag)
+    out_str(o, " LOGIN ")
+    quoted(o, user, ul)
+    out_c(o, 32)
+    quoted(o, pass, pl)
+    crlf(o)
+}
+
+fn imap_list(o: *mut Out, tag: u64) {
+    imap_tag(o, tag)
+    out_str(o, " LIST \"\" \"*\"\r\n")
+}
+
+fn imap_select(o: *mut Out, tag: u64, box: u64, bl: u64) {
+    imap_tag(o, tag)
+    out_str(o, " SELECT ")
+    quoted(o, box, bl)
+    crlf(o)
+}
+
+// Headers FROM/SUBJECT/DATE of messages first..last (sequence numbers).
+fn imap_fetch_head(o: *mut Out, tag: u64, first: u64, last: u64) {
+    imap_tag(o, tag)
+    out_str(o, " FETCH ")
+    out_num(o, first)
+    out_c(o, 58)
+    out_num(o, last)
+    out_str(o, " (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])\r\n")
+}
+
+fn imap_fetch_body(o: *mut Out, tag: u64, n: u64) {
+    imap_tag(o, tag)
+    out_str(o, " FETCH ")
+    out_num(o, n)
+    out_str(o, " (BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT])\r\n")
+}
+
+fn imap_fetch_full(o: *mut Out, tag: u64, n: u64) {
+    imap_tag(o, tag)
+    out_str(o, " FETCH ")
+    out_num(o, n)
+    out_str(o, " (BODY.PEEK[])\r\n")
+}
+
+fn imap_store_seen(o: *mut Out, tag: u64, n: u64) {
+    imap_tag(o, tag)
+    out_str(o, " STORE ")
+    out_num(o, n)
+    out_str(o, " +FLAGS (\\Seen)\r\n")
+}
+
+fn imap_logout(o: *mut Out, tag: u64) {
+    imap_tag(o, tag)
+    out_str(o, " LOGOUT\r\n")
+}
+
+// Index of the LF ending the line that starts at `from`, or BAD.
+fn imap_line_end(p: u64, n: u64, from: u64) -> u64 {
+    var i: u64 = from
+    while i < n {
+        if ld8(p, i) == 10 {
+            return i
+        }
+        i = i + 1
+    }
+    return BAD
+}
+
+// If the line [from, lf] ends with "{N}" (before CRLF), returns N, else BAD.
+fn imap_literal_at(p: u64, from: u64, lf: u64) -> u64 {
+    var e: u64 = lf
+    if e > from && ld8(p, e - 1) == 13 {
+        e = e - 1
+    }
+    if e <= from || ld8(p, e - 1) != 125 {
+        return BAD
+    }
+    var i: u64 = e - 1
+    var v: u64 = 0
+    var scale: u64 = 1
+    var digits: u64 = 0
+    while i > from {
+        i = i - 1
+        let c: u64 = ld8(p, i)
+        if c == 123 {
+            if digits == 0 {
+                return BAD
+            }
+            return v
+        }
+        if c < 48 || c > 57 {
+            return BAD
+        }
+        v = v + (c - 48) * scale
+        scale = scale * 10
+        digits = digits + 1
+        if digits > 9 {
+            return BAD
+        }
+    }
+    return BAD
+}
+
+fn starts_tag(p: u64, i: u64, n: u64, tag: u64) -> bool {
+    // "a001" followed by a blank
+    if i + 5 > n {
+        return false
+    }
+    if ld8(p, i) != 97 {
+        return false
+    }
+    if ld8(p, i + 1) != 48 + (tag / 100) % 10 {
+        return false
+    }
+    if ld8(p, i + 2) != 48 + (tag / 10) % 10 {
+        return false
+    }
+    if ld8(p, i + 3) != 48 + tag % 10 {
+        return false
+    }
+    return ld8(p, i + 4) == 32
+}
+
+// Scans the buffer for the END of the response to command `tag`: untagged lines,
+// literals {N} (their octets are skipped, whatever they contain) and the tagged
+// status line. Returns the offset just after the tagged line, or BAD if the response
+// is not complete yet. *statline = offset of the tagged line.
+fn imap_response_end(p: u64, n: u64, tag: u64, statline: *mut u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let lf: u64 = imap_line_end(p, n, i)
+        if lf == BAD {
+            return BAD
+        }
+        if starts_tag(p, i, n, tag) {
+            *statline = i
+            return lf + 1
+        }
+        var cur: u64 = i
+        var end: u64 = lf
+        while true {
+            let lit: u64 = imap_literal_at(p, cur, end)
+            if lit == BAD {
+                break
+            }
+            if end + 1 + lit > n {
+                return BAD
+            }
+            // literal octets, then the rest of the line they sit in
+            cur = end + 1 + lit
+            end = imap_line_end(p, n, cur)
+            if end == BAD {
+                return BAD
+            }
+        }
+        i = end + 1
+    }
+    return BAD
+}
+
+// OK / NO / BAD of the tagged line at `at` ("a001 OK ...").
+fn imap_status(p: u64, at: u64) -> u64 {
+    let a: u64 = lower(ld8(p, at + 5))
+    let b: u64 = lower(ld8(p, at + 6))
+    if a == 111 && b == 107 {
+        return ST_OK
+    }
+    if a == 110 && b == 111 {
+        return ST_NO
+    }
+    if a == 98 && b == 97 {
+        return ST_BAD
+    }
+    return ST_NONE
+}
+
+// "* 23 EXISTS": the number of messages, or BAD if there is no such line.
+fn imap_exists_count(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let lf: u64 = imap_line_end(p, n, i)
+        if lf == BAD {
+            return BAD
+        }
+        if ld8(p, i) == 42 && ld8(p, i + 1) == 32 {
+            var j: u64 = i + 2
+            var v: u64 = 0
+            var d: u64 = 0
+            while j < lf && ld8(p, j) >= 48 && ld8(p, j) <= 57 {
+                v = v * 10 + ld8(p, j) - 48
+                d = d + 1
+                j = j + 1
+            }
+            if d > 0 && j + 7 <= lf && ld8(p, j) == 32 && lower(ld8(p, j + 1)) == 101
+                && lower(ld8(p, j + 2)) == 120 && lower(ld8(p, j + 3)) == 105 {
+                return v
+            }
+        }
+        i = lf + 1
+    }
+    return BAD
+}
+
+// Parses the LIST line at `from` ("* LIST (\X) "/" Name"; the name may be quoted).
+// Writes the mailbox name to dst (NUL-terminated); returns the offset of the next
+// line, or BAD if the line at `from` is not a LIST line. *namelen = octets.
+fn imap_list_name(p: u64, n: u64, from: u64, dst: u64, cap: u64, namelen: *mut u64) -> u64 {
+    let lf: u64 = imap_line_end(p, n, from)
+    if lf == BAD {
+        return BAD
+    }
+    if lf < from + 9 || ld8(p, from) != 42 || lower(ld8(p, from + 2)) != 108
+        || lower(ld8(p, from + 3)) != 105 || lower(ld8(p, from + 4)) != 115 {
+        return BAD
+    }
+    var e: u64 = lf
+    if e > from && ld8(p, e - 1) == 13 {
+        e = e - 1
+    }
+    var i: u64 = from + 6
+    while i < e && ld8(p, i) != 41 {
+        i = i + 1
+    }
+    i = i + 2
+    if i < e && ld8(p, i) == 34 {
+        i = i + 1
+        while i < e && ld8(p, i) != 34 {
+            if ld8(p, i) == 92 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+        i = i + 2
+    } else {
+        i = i + 4
+    }
+    var o: u64 = 0
+    if i < e && ld8(p, i) == 34 {
+        i = i + 1
+        while i < e && ld8(p, i) != 34 && o + 1 < cap {
+            if ld8(p, i) == 92 {
+                i = i + 1
+            }
+            st8(dst, o, ld8(p, i))
+            o = o + 1
+            i = i + 1
+        }
+    } else {
+        while i < e && o + 1 < cap {
+            st8(dst, o, ld8(p, i))
+            o = o + 1
+            i = i + 1
+        }
+    }
+    st8(dst, o, 0)
+    *namelen = o
+    return lf + 1
+}
+
+// ------------------------------------------------------------------- SMTP
+
+// Parses one reply line at `from` ("250-text" / "250 text"). *code = number, *last =
+// true for the final line of a reply. Returns the offset after the line, BAD if the
+// line is incomplete, BAD - 1 if it is malformed.
+fn smtp_reply(p: u64, n: u64, from: u64, code: *mut u64, last: *mut bool) -> u64 {
+    let lf: u64 = imap_line_end(p, n, from)
+    if lf == BAD {
+        return BAD
+    }
+    if lf < from + 3 {
+        return BAD - 1
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 3 {
+        let c: u64 = ld8(p, from + i)
+        if c < 48 || c > 57 {
+            return BAD - 1
+        }
+        v = v * 10 + c - 48
+        i = i + 1
+    }
+    let sep: u64 = ld8(p, from + 3)
+    *code = v
+    *last = !(sep == 45)
+    return lf + 1
+}
+
+fn smtp_ehlo(o: *mut Out, name: u64, nl: u64) {
+    out_str(o, "EHLO ")
+    out_bytes(o, name, nl)
+    crlf(o)
+}
+
+// AUTH PLAIN <base64(\0user\0pass)>; user + password together up to 598 octets.
+fn smtp_auth_plain(o: *mut Out, user: u64, ul: u64, pass: u64, pl: u64) {
+    var raw: [u8; 600] = [0 as u8; 600]
+    var enc: [u8; 840] = [0 as u8; 840]
+    if ul + pl + 2 > 600 {
+        (*o).over = true
+        return
+    }
+    var k: u64 = 1
+    var i: u64 = 0
+    while i < ul {
+        raw[k as usize] = ld8(user, i) as u8
+        k = k + 1
+        i = i + 1
+    }
+    raw[k as usize] = 0
+    k = k + 1
+    i = 0
+    while i < pl {
+        raw[k as usize] = ld8(pass, i) as u8
+        k = k + 1
+        i = i + 1
+    }
+    let m: u64 = b64_encode((&raw[0]) as u64, k, (&enc[0]) as u64)
+    out_str(o, "AUTH PLAIN ")
+    out_bytes(o, (&enc[0]) as u64, m)
+    crlf(o)
+}
+
+// Locates the address inside "Name <x@y>": [*s, *e).
+fn addr_span(a: u64, n: u64, s: *mut u64, e: *mut u64) {
+    *s = 0
+    *e = n
+    var i: u64 = 0
+    var st: u64 = 0
+    while i < n {
+        if ld8(a, i) == 60 {
+            st = i + 1
+        }
+        if ld8(a, i) == 62 && st > 0 {
+            *s = st
+            *e = i
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn path_only(o: *mut Out, a: u64, n: u64) {
+    var s: u64 = 0
+    var e: u64 = n
+    addr_span(a, n, &s, &e)
+    out_c(o, 60)
+    out_bytes(o, a + s, e - s)
+    out_c(o, 62)
+}
+
+// "Name <x@y>" -> "x@y" into dst (NUL-terminated). Returns the length.
+fn addr_only(a: u64, n: u64, dst: u64, cap: u64) -> u64 {
+    var s: u64 = 0
+    var e: u64 = n
+    addr_span(a, n, &s, &e)
+    var o: u64 = 0
+    var i: u64 = s
+    while i < e && o + 1 < cap {
+        let c: u64 = ld8(a, i)
+        if c != 13 && c != 10 && c != 32 {
+            st8(dst, o, c)
+            o = o + 1
+        }
+        i = i + 1
+    }
+    st8(dst, o, 0)
+    return o
+}
+
+fn smtp_mail_from(o: *mut Out, a: u64, n: u64) {
+    out_str(o, "MAIL FROM:")
+    path_only(o, a, n)
+    crlf(o)
+}
+
+fn smtp_rcpt(o: *mut Out, a: u64, n: u64) {
+    out_str(o, "RCPT TO:")
+    path_only(o, a, n)
+    crlf(o)
+}
+
+fn smtp_data(o: *mut Out) {
+    out_str(o, "DATA\r\n")
+}
+
+fn smtp_quit(o: *mut Out) {
+    out_str(o, "QUIT\r\n")
+}
+
+// The DATA payload: bare LF becomes CRLF, a line starting with "." gets a second ".",
+// and ".\r\n" ends it.
+fn smtp_body(o: *mut Out, msg: u64, n: u64) {
+    var i: u64 = 0
+    var bol: bool = true
+    while i < n {
+        let c: u64 = ld8(msg, i)
+        if bol && c == 46 {
+            out_c(o, 46)
+        }
+        bol = false
+        if c == 13 {
+            if i + 1 < n && ld8(msg, i + 1) == 10 {
+                i = i + 1
+            }
+            crlf(o)
+            bol = true
+        } else if c == 10 {
+            crlf(o)
+            bol = true
+        } else {
+            out_c(o, c)
+        }
+        i = i + 1
+    }
+    if !bol {
+        crlf(o)
+    }
+    out_str(o, ".\r\n")
+}
+
+// --------------------------------------------------------- RFC 5322 header
+
+fn is_ws(c: u64) -> bool {
+    return c == 32 || c == 9
+}
+
+// Finds header `name` (case-insensitive, e.g. "subject") in the header block of
+// `msg` and writes its UNFOLDED value (leading blanks stripped) to dst, NUL-
+// terminated. Returns the length, or BAD if the header does not exist. The block
+// ends at the first empty line.
+fn hdr_get(msg: u64, n: u64, name: str, dst: u64, cap: u64) -> u64 {
+    var i: u64 = 0
+    let nl: u64 = name.n as u64
+    let np: u64 = name.p as u64
+    while i < n {
+        if ld8(msg, i) == 13 && i + 1 < n && ld8(msg, i + 1) == 10 {
+            return BAD
+        }
+        if ld8(msg, i) == 10 {
+            return BAD
+        }
+        var k: u64 = 0
+        var hit: bool = true
+        while k < nl {
+            if i + k >= n || lower(ld8(msg, i + k)) != lower(ld8(np, k)) {
+                hit = false
+                break
+            }
+            k = k + 1
+        }
+        if hit && i + k < n && ld8(msg, i + k) == 58 {
+            var j: u64 = i + k + 1
+            while j < n && is_ws(ld8(msg, j)) {
+                j = j + 1
+            }
+            var o: u64 = 0
+            while j < n {
+                let c: u64 = ld8(msg, j)
+                if c == 13 {
+                    j = j + 1
+                    continue
+                }
+                if c == 10 {
+                    if j + 1 < n && is_ws(ld8(msg, j + 1)) {
+                        j = j + 1
+                        while j < n && is_ws(ld8(msg, j)) {
+                            j = j + 1
+                        }
+                        if o + 1 < cap {
+                            st8(dst, o, 32)
+                            o = o + 1
+                        }
+                        continue
+                    }
+                    break
+                }
+                if o + 1 < cap {
+                    st8(dst, o, c)
+                    o = o + 1
+                }
+                j = j + 1
+            }
+            st8(dst, o, 0)
+            return o
+        }
+        while i < n && ld8(msg, i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return BAD
+}
+
+// Offset of the first octet after the empty line that ends the header block, or n.
+fn body_start(msg: u64, n: u64) -> u64 {
+    if n > 0 && ld8(msg, 0) == 10 {
+        return 1
+    }
+    if n > 1 && ld8(msg, 0) == 13 && ld8(msg, 1) == 10 {
+        return 2
+    }
+    var i: u64 = 0
+    while i < n {
+        if ld8(msg, i) == 10 {
+            if i + 1 < n && ld8(msg, i + 1) == 10 {
+                return i + 2
+            }
+            if i + 2 < n && ld8(msg, i + 1) == 13 && ld8(msg, i + 2) == 10 {
+                return i + 3
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// RFC 2047: "=?utf-8?B?...?=" and "=?utf-8?Q?...?=" words become UTF-8 (utf-8,
+// us-ascii and iso-8859-x are handled; Latin-1 is re-encoded). Plain text passes
+// through; blanks between two encoded words are dropped. NUL-terminated.
+fn words_decode(src: u64, n: u64, dst: u64, cap: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = 0
+    var prev_enc: bool = false
+    while i < n && o + 4 < cap {
+        let c: u64 = ld8(src, i)
+        if c == 61 && i + 1 < n && ld8(src, i + 1) == 63 {
+            var q1: u64 = i + 2
+            while q1 < n && ld8(src, q1) != 63 {
+                q1 = q1 + 1
+            }
+            var q2: u64 = q1 + 1
+            while q2 < n && ld8(src, q2) != 63 {
+                q2 = q2 + 1
+            }
+            var q3: u64 = q2 + 1
+            while q3 + 1 < n && !(ld8(src, q3) == 63 && ld8(src, q3 + 1) == 61) {
+                q3 = q3 + 1
+            }
+            if q3 + 1 < n && q2 == q1 + 2 {
+                let enc: u64 = lower(ld8(src, q1 + 1))
+                let latin: bool = lower(ld8(src, i + 2)) == 105
+                var tmp: [u8; 512] = [0 as u8; 512]
+                var m: u64 = 0
+                let tl: u64 = q3 - (q2 + 1)
+                if tl < 512 {
+                    if enc == 98 {
+                        m = b64_decode(src + q2 + 1, tl, (&tmp[0]) as u64)
+                    } else {
+                        m = qp_decode(src + q2 + 1, tl, (&tmp[0]) as u64, true)
+                    }
+                    if m != BAD {
+                        var k: u64 = 0
+                        while k < m && o + 3 < cap {
+                            let b: u64 = tmp[k as usize] as u64
+                            if latin && b >= 128 {
+                                st8(dst, o, 192 | (b >> 6))
+                                st8(dst, o + 1, 128 | (b & 63))
+                                o = o + 2
+                            } else {
+                                st8(dst, o, b)
+                                o = o + 1
+                            }
+                            k = k + 1
+                        }
+                        i = q3 + 2
+                        prev_enc = true
+                        continue
+                    }
+                }
+            }
+        }
+        if prev_enc && is_ws(c) {
+            var j: u64 = i
+            while j < n && is_ws(ld8(src, j)) {
+                j = j + 1
+            }
+            if j + 1 < n && ld8(src, j) == 61 && ld8(src, j + 1) == 63 {
+                i = j
+                continue
+            }
+        }
+        prev_enc = false
+        st8(dst, o, c)
+        o = o + 1
+        i = i + 1
+    }
+    st8(dst, o, 0)
+    return o
+}
+
+// Encodes a header value: pure ASCII is copied, anything else becomes one
+// "=?utf-8?B?...?=" word (values up to 300 octets; longer ones are cut).
+fn words_encode(o: *mut Out, s: u64, n: u64) {
+    var ascii: bool = true
+    var i: u64 = 0
+    while i < n {
+        if ld8(s, i) >= 128 {
+            ascii = false
+        }
+        i = i + 1
+    }
+    if ascii {
+        out_bytes(o, s, n)
+        return
+    }
+    var m: u64 = n
+    if m > 300 {
+        m = 300
+        while m > 0 && (ld8(s, m) & 192) == 128 {
+            m = m - 1
+        }
+    }
+    var enc: [u8; 420] = [0 as u8; 420]
+    let k: u64 = b64_encode(s, m, (&enc[0]) as u64)
+    out_str(o, "=?utf-8?B?")
+    out_bytes(o, (&enc[0]) as u64, k)
+    out_str(o, "?=")
+}
+
+// Decodes a message body according to Content-Transfer-Encoding text `cte`
+// ("base64", "quoted-printable", other = as is). Returns octets written.
+fn body_decode(src: u64, n: u64, cte: u64, cl: u64, dst: u64) -> u64 {
+    var kind: u64 = 0
+    if cl >= 6 && lower(ld8(cte, 0)) == 98 && lower(ld8(cte, 1)) == 97 {
+        kind = 1
+    }
+    if cl >= 6 && lower(ld8(cte, 0)) == 113 && lower(ld8(cte, 1)) == 117 {
+        kind = 2
+    }
+    if kind == 1 {
+        let m: u64 = b64_decode(src, n, dst)
+        if m == BAD {
+            return 0
+        }
+        return m
+    }
+    if kind == 2 {
+        return qp_decode(src, n, dst, false)
+    }
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+    return n
+}
+
+// Composes a plain-text message (CRLF line ends, UTF-8, 8bit).
+fn compose(o: *mut Out, from: u64, fl: u64, to: u64, tl: u64, subj: u64, sl: u64,
+    date: u64, dl: u64, msgid: u64, ml: u64, body: u64, bl: u64) {
+    out_str(o, "From: ")
+    out_bytes(o, from, fl)
+    out_str(o, "\r\nTo: ")
+    out_bytes(o, to, tl)
+    out_str(o, "\r\nSubject: ")
+    words_encode(o, subj, sl)
+    out_str(o, "\r\nDate: ")
+    out_bytes(o, date, dl)
+    out_str(o, "\r\nMessage-ID: <")
+    out_bytes(o, msgid, ml)
+    out_str(o, ">\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
+    var i: u64 = 0
+    while i < bl {
+        let c: u64 = ld8(body, i)
+        if c == 13 {
+            i = i + 1
+            continue
+        }
+        if c == 10 {
+            crlf(o)
+        } else {
+            out_c(o, c)
+        }
+        i = i + 1
+    }
+    crlf(o)
+}
