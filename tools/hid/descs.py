@@ -426,6 +426,13 @@ BERICHTE = [
     (0, bootkbd([], []), "boot: los"),
     #     UEBERLAUF: sechs Plaetze mit 0x01 heisst "zu viele Tasten"
     (0, bootkbd([], [1, 1, 1, 1, 1, 1]), "boot: Ueberlauf"),
+    #     r157 (H-001): three keys in ONE report, slots in the order they
+    #     went down: x z y. The bitmap used to give x y z.
+    (0, bootkbd([], [0x1B, 0x1D, 0x1C]), "boot: Reihenfolge xzy"),
+    (0, bootkbd([], []), "boot: Reihenfolge los"),
+    #     r157: modifiers and a key in ONE report: modifiers first.
+    (0, bootkbd([0xE1, 0xE0], [4]), "boot: Strg+Umschalt+a"),
+    (0, bootkbd([], []), "boot: Strg+Umschalt los"),
     # --- die Boot-Maus
     (1, bootmaus(1, 10, 250), "maus: links, +10, -6"),
     (1, bootmaus(0, 0, 0), "maus: losgelassen"),
