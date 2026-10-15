@@ -68,6 +68,7 @@ import acpi.aml
 import arch.x86_64.apic
 import sync.atomic
 import mm.mem
+import xhciiso.iso
 
 export {
     kill, present, init, ready, base_of, bdf, ctx_size, slots, ports,
@@ -80,6 +81,9 @@ export {
     devctx, inctx, in_control, in_slot, in_ep, dev_slot_ctx, dev_ep_ctx,
     ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
     control, bulk, int_queue, doorbell, dcbaa_set,
+    // r813: isochronous transfers
+    isoc_open, isoc_fill_ctx, isoc_queue, isoc_pending, isoc_stat, isoc_registered,
+    I_MPS, I_ESIT, ISO_QUEUED, ISO_EVENTS, ISO_BYTES, ISO_UNDER, ISO_MISSED, ISO_ERR,
     MAX_SLOT, max_slot, MAX_EP,
     CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
     // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
@@ -209,6 +213,27 @@ const E_CYC: u64 = 32
 const E_SEQ: u64 = 40
 const E_CODE: u64 = 48
 const E_RESID: u64 = 56
+
+// r813: isochronous bookkeeping. The 64 byte endpoint slots are full, so the
+// counters of up to ISO_SLOTS isochronous endpoints live in the free upper half
+// of the scalar page (SCAL_OFF + 0x200 .. 0x400). One record per endpoint.
+const ISO_TAB_AT: u64 = 0x200
+const ISO_SLOTS: u64 = 4
+const ISO_REC: u64 = 128
+const I_EP: u64 = 0 // endpoint table index + 1, 0 = record free
+const I_DIR: u64 = 8 // 1 = IN
+const ISO_QUEUED: u64 = 16 // TDs put on the ring
+const ISO_EVENTS: u64 = 24 // TD completions seen (one per TD, IOC is always set; underrun/overrun events excluded)
+const ISO_BYTES: u64 = 32 // bytes moved (TRB length - residue)
+const ISO_UNDER: u64 = 40 // ring underrun / overrun events (queue ran dry, xHC late)
+const ISO_MISSED: u64 = 48 // missed service errors
+const ISO_ERR: u64 = 56 // every other bad completion code
+const I_SPEED: u64 = 64 // xHCI port speed id
+const I_MPS: u64 = 72 // packet size (wMaxPacketSize bits 10..0)
+const I_BURST: u64 = 80 // Max Burst Size
+const I_MULT: u64 = 88 // Mult
+const I_ESIT: u64 = 96 // Max ESIT Payload
+const I_IVL: u64 = 104 // Interval field
 
 // --------------------------------------------------------- die Register
 
@@ -538,6 +563,7 @@ fn forget_slot(state: u64, slot: u64) {
     var i: u64 = 0
     while i < n {
         if eg(state, i, E_SLOT) == slot {
+            iso_release(state, i)
             es(state, i, E_SLOT, 0)
             es(state, i, E_DCI, 0)
             es(state, i, E_SEQ, 0)
@@ -659,13 +685,21 @@ fn handle(state: u64, here: u64, c3: u64) {
         let dci: u64 = (c3 >> 16) & 0x1F
         let code: u64 = (st >> 24) & 0xFF
         s(state, S_XFERS, g(state, S_XFERS) + 1)
-        if code != CC_SUCCESS && code != CC_SHORT {
+        let i: u64 = ep_find(state, slot, dci)
+        var k: u64 = ISO_SLOTS
+        if i < MAX_EP {
+            k = iso_find(state, i)
+        }
+        if k < ISO_SLOTS {
+            // r813: an isochronous endpoint. Underrun / missed service are
+            // normal stream events, not controller errors: own counters.
+            iso_event(state, i, k, here, code, st & 0xFFFFFF)
+        } else if code != CC_SUCCESS && code != CC_SHORT {
             s(state, S_ERRORS, g(state, S_ERRORS) + 1)
             if code == 6 {
                 s(state, S_STALLS, g(state, S_STALLS) + 1)
             }
         }
-        let i: u64 = ep_find(state, slot, dci)
         if i < MAX_EP {
             es(state, i, E_CODE, code)
             es(state, i, E_RESID, st & 0xFFFFFF)
@@ -677,6 +711,211 @@ fn handle(state: u64, here: u64, c3: u64) {
         s(state, S_PORTEV, g(state, S_PORTEV) + 1)
         return
     }
+}
+
+// ============================================================ r813: isochronous
+//
+// An isochronous endpoint has no handshake and no retry: every TD (here one
+// Isoch TRB with IOC) is sent in its service interval or reported as missed.
+// The driver keeps the ring filled; when the queue runs dry the xHC reports a
+// Ring Underrun (OUT) / Ring Overrun (IN). Counters per endpoint, see ISO_*.
+// The arithmetic (context words, TBC/TLBPC, TRB words) is lib/xhciiso/iso.fi.
+
+fn iso_at(state: u64, k: u64) -> u64 {
+    return state + SCAL_OFF + ISO_TAB_AT + k * ISO_REC
+}
+
+fn ig(state: u64, k: u64, f: u64) -> u64 {
+    return __mmio_read64((iso_at(state, k) + f) as *mut u64)
+}
+
+fn iset(state: u64, k: u64, f: u64, v: u64) {
+    __mmio_write64((iso_at(state, k) + f) as *mut u64, v)
+}
+
+fn iso_find(state: u64, ep: u64) -> u64 {
+    var k: u64 = 0
+    while k < ISO_SLOTS {
+        if ig(state, k, I_EP) == ep + 1 {
+            return k
+        }
+        k = k + 1
+    }
+    return ISO_SLOTS
+}
+
+fn iso_release(state: u64, ep: u64) {
+    let k: u64 = iso_find(state, ep)
+    if k < ISO_SLOTS {
+        zero(iso_at(state, k), ISO_REC)
+    }
+}
+
+fn iso_clear_all(state: u64) {
+    zero(state + SCAL_OFF + ISO_TAB_AT, ISO_SLOTS * ISO_REC)
+}
+
+// Mark an endpoint table slot as isochronous (a fresh ring and zero counters).
+// Call BEFORE the Configure Endpoint command, with the ring address in the
+// endpoint context. Returns the endpoint table index, MAX_EP when full.
+fn isoc_open(state: u64, slot: u64, dci: u64, in_dir: bool, speed: u64,
+    raw_mps: u64, ss_burst: u64, ss_attrs: u64, binterval: u64) -> u64 {
+    let i: u64 = ep_open(state, slot, dci)
+    if i >= MAX_EP {
+        return MAX_EP
+    }
+    var k: u64 = iso_find(state, i)
+    if k >= ISO_SLOTS {
+        var j: u64 = 0
+        while j < ISO_SLOTS && k >= ISO_SLOTS {
+            if ig(state, j, I_EP) == 0 {
+                k = j
+            }
+            j = j + 1
+        }
+    }
+    if k >= ISO_SLOTS {
+        return MAX_EP
+    }
+    zero(iso_at(state, k), ISO_REC)
+    iset(state, k, I_EP, i + 1)
+    if in_dir {
+        iset(state, k, I_DIR, 1)
+    }
+    let mps: u64 = iso.mps_of(raw_mps)
+    let burst: u64 = iso.burst_of(speed, raw_mps, ss_burst)
+    let mult: u64 = iso.mult_of(speed, ss_attrs)
+    iset(state, k, I_SPEED, speed)
+    iset(state, k, I_MPS, mps)
+    iset(state, k, I_BURST, burst)
+    iset(state, k, I_MULT, mult)
+    iset(state, k, I_ESIT, iso.max_esit(mps, burst, mult))
+    iset(state, k, I_IVL, iso.interval_of(speed, binterval))
+    return i
+}
+
+// Write the endpoint context of an opened isochronous endpoint into the input
+// context (usb.fi calls this, then Configure Endpoint). CErr stays 0.
+fn isoc_fill_ctx(state: u64, slot: u64, dci: u64) -> bool {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return false
+    }
+    let k: u64 = iso_find(state, i)
+    if k >= ISO_SLOTS {
+        return false
+    }
+    let ec: u64 = in_ep(state, dci)
+    zero(ec, ctx_size(state))
+    let esit: u64 = ig(state, k, I_ESIT)
+    wr32(ec, 0, iso.ctx_dw0(ig(state, k, I_IVL), ig(state, k, I_MULT), esit))
+    wr32(ec, 4, iso.ctx_dw1(iso.ep_type(ig(state, k, I_DIR) != 0),
+        ig(state, k, I_MPS), ig(state, k, I_BURST)))
+    wr64(ec, 8, eg(state, i, E_RING) | 1)
+    wr32(ec, 16, iso.ctx_dw4(esit, esit))
+    return true
+}
+
+fn isoc_registered(state: u64, slot: u64, dci: u64) -> bool {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return false
+    }
+    return iso_find(state, i) < ISO_SLOTS
+}
+
+// One isochronous event: classify it, count it, add the bytes moved. The event
+// points at the TRB (param); its length field gives the bytes asked for.
+fn iso_event(state: u64, i: u64, k: u64, here: u64, code: u64, resid: u64) {
+    let cls: u64 = iso.cc_class(code)
+    // Ring underrun / overrun is NOT the completion of a TD (the ring ran dry or
+    // the xHC was late): it only bumps its own counter. Measured in QEMU: one
+    // underrun event follows the last TD of every stream.
+    if cls == iso.CLS_UNDER {
+        iset(state, k, ISO_UNDER, ig(state, k, ISO_UNDER) + 1)
+        return
+    }
+    iset(state, k, ISO_EVENTS, ig(state, k, ISO_EVENTS) + 1)
+    if cls == iso.CLS_MISSED {
+        iset(state, k, ISO_MISSED, ig(state, k, ISO_MISSED) + 1)
+        return
+    }
+    if cls == iso.CLS_ERR {
+        iset(state, k, ISO_ERR, ig(state, k, ISO_ERR) + 1)
+        return
+    }
+    let ptr: u64 = rd64(here, 0)
+    let ring: u64 = eg(state, i, E_RING)
+    if ptr >= ring && ptr + 16 <= ring + RING_BYTES {
+        let want: u64 = rd32(ptr, 8) & 0x1FFFF
+        if resid <= want {
+            iset(state, k, ISO_BYTES, ig(state, k, ISO_BYTES) + want - resid)
+        }
+    }
+}
+
+// TDs queued and not yet reported (one event per TD).
+fn isoc_pending(state: u64, slot: u64, dci: u64) -> u64 {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return 0
+    }
+    let k: u64 = iso_find(state, i)
+    if k >= ISO_SLOTS {
+        return 0
+    }
+    let q: u64 = ig(state, k, ISO_QUEUED)
+    let e: u64 = ig(state, k, ISO_EVENTS)
+    if q < e {
+        return 0
+    }
+    return q - e
+}
+
+fn isoc_stat(state: u64, slot: u64, dci: u64, which: u64) -> u64 {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return 0
+    }
+    let k: u64 = iso_find(state, i)
+    if k >= ISO_SLOTS {
+        return 0
+    }
+    return ig(state, k, which)
+}
+
+// Queue ONE TD (one Isoch TRB, IOC set, start at the next service opportunity)
+// of `len` bytes at `buf`. Speed, packet size, burst and mult come from the
+// record `isoc_open` filled. Refuses (false)
+// when the TD does not fit one service interval or the ring is full. Does NOT
+// wait: the event arrives on the event ring like any other.
+fn isoc_queue(state: u64, slot: u64, dci: u64, buf: u64, len: u64) -> bool {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return false
+    }
+    let k: u64 = iso_find(state, i)
+    if k >= ISO_SLOTS {
+        return false
+    }
+    let speed: u64 = ig(state, k, I_SPEED)
+    let mps: u64 = ig(state, k, I_MPS)
+    let burst: u64 = ig(state, k, I_BURST)
+    let mult: u64 = ig(state, k, I_MULT)
+    if !iso.td_fits(len, mps, burst, mult) {
+        return false
+    }
+    if isoc_pending(state, slot, dci) >= RING_TRBS - 3 {
+        return false
+    }
+    let in_dir: bool = ig(state, k, I_DIR) != 0
+    let npk: u64 = iso.packets(len, mps)
+    let ctl: u64 = iso.trb_control(iso.tbc(speed, npk, burst),
+        iso.tlbpc(speed, npk, burst), true, true, in_dir)
+    ring_push(state, i, buf, iso.trb_status(len, 0), ctl)
+    iset(state, k, ISO_QUEUED, ig(state, k, ISO_QUEUED) + 1)
+    doorbell(state, slot, dci)
+    return true
 }
 
 // ------------------------------------------------------ die Kommandos
@@ -1564,6 +1803,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     zero(state + INCTX_OFF, 4096)
     zero(state + DEVCTX_OFF, 4096)
     zero(state + RING_OFF, MAX_EP * RING_BYTES)
+    iso_clear_all(state)
     s(state, S_NEP, 0)
     s(state, S_CMD_ENQ, 0)
     s(state, S_CMD_CYC, 1)

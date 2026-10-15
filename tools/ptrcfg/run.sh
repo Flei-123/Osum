@@ -42,11 +42,11 @@ c3=$(grep -a 'case 3 ' "$TMPD/ref.txt" | sed 's/.*x=\([-0-9]*\) y=.*/\1/')
     || bad "counter-probe: accel changes nothing"
 
 echo "== 2. schema =="
-for k in mouse.speed mouse.accel mouse.natural; do
+for k in mouse.speed mouse.accel mouse.natural mouse.gestures; do
     grep -q "^setting $k " etc/settings.schema && ok "$k in settings.schema" || bad "$k missing"
 done
-[ "$(grep -c 'store /etc/mouse.conf' etc/settings.schema)" = 3 ] \
-    && ok "three keys stored in /etc/mouse.conf" || bad "store lines wrong"
+[ "$(grep -c 'store /etc/mouse.conf' etc/settings.schema)" = 4 ] \
+    && ok "four keys stored in /etc/mouse.conf (speed accel natural gestures)" || bad "store lines wrong"
 
 echo "== 3. kernel =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1

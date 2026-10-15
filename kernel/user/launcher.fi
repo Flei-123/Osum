@@ -845,14 +845,29 @@ fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
 // die Leiste rechnet dasselbe, und wenn beide dieselbe Datei lesen,
 // stehen sie an derselben Stelle.
 fn anker_x(bw: u64) -> u64 {
-    let sw: u64 = wlibc.screen_w()
+    // r831: relative to the output the menu opens on (head_bx/head_bw are 0 / the whole screen on one output)
+    let sw: u64 = wlibc.head_bw()
+    let hx0: u64 = wlibc.head_bx()
     if l_align == 1 {
         if sw > bw {
-            return (sw - bw) / 2
+            return hx0 + (sw - bw) / 2
         }
-        return 0
+        return hx0
     }
-    return 8
+    return hx0 + 8
+}
+
+// r831: THE OUTPUT THE MENU OPENS ON. The taskbar of the clicked output sets it (wlibc.start_head_set) before it toggles the menu;
+// the menu follows it. `g_head` is the output the window stands on now. With one output (or an absent one) the head rectangle
+// stays "the whole screen", exactly as before.
+static mut g_head: u64 = 0
+
+fn head_follow(hd: u64) {
+    if wlibc.head_count() > 1 && wlibc.head_present(hd) {
+        wlibc.set_head_bounds(wlibc.head_field(hd, 0), wlibc.head_field(hd, 1), wlibc.head_field(hd, 2), wlibc.head_field(hd, 3))
+    } else {
+        wlibc.set_head_bounds(0, 0, 0, 0)
+    }
 }
 
 // Senkrecht: unmittelbar ueber der Leiste, und nie ueber den oberen
@@ -903,7 +918,8 @@ fn anker_y(bh: u64) -> u64 {
     // Fenster gleich an der richtigen Stelle ANGELEGT wird, und nach
     // dem Anlegen rueckt `an_arbeitsflaeche()` es auf den Wert, den
     // der Fensterserver wirklich fuehrt.
-    let sh2: u64 = wlibc.screen_h()
+    // r831: the bottom of the output the menu opens on
+    let sh2: u64 = wlibc.head_by() + wlibc.head_bh()
     let bar: u64 = l_bar * wlibc.ui_scale()
     if sh2 > bar {
         let unten: u64 = sh2 - bar
@@ -1326,6 +1342,7 @@ fn u_start(args: u64) -> u64 {
     var s_nk: [u8; 8] = "nokeys\0\0"
     var s_ni: [u8; 8] = "noidx\0\0\0"
     var s_li: [u8; 6] = "liste\0"
+    var s_hd: [u8; 7] = "--head\0"
     // RUNDE ECHTHARDWARE-4: `versteckt` -- der Starter legt sein
     // Fenster an, malt es einmal und MINIMIERT es sofort.
     var s_vs: [u8; 11] = "versteckt\0\0"
@@ -1337,6 +1354,7 @@ fn u_start(args: u64) -> u64 {
     // unsichtbar hochgekommen ist -- ein Bild allein koennte auch
     // heissen, dass er gar nicht erst startete.
     var s_vers: [u8; 21] = "launcher: versteckt\0\0"
+    var s_hd_mv: [u8; 19] = "launcher: head to=\0"
     var s_geo: [u8; 21] = "launcher: geom \0\0\0\0\0\0"
     var sx: [u8; 4] = "x=\0\0"
     var sy: [u8; 4] = "y=\0\0"
@@ -1372,6 +1390,14 @@ fn u_start(args: u64) -> u64 {
         } else if ulib.streq(p, (&s_li[0 as usize]) as u64) {
             // r402: the old list window (see the block at `g_w11`)
             g_w11 = false
+        } else if ulib.streq(p, (&s_hd[0 as usize]) as u64) && a + 1 < argc {
+            // r831: `--head N` = open on output N (the same as the taskbar of output N asking for the menu)
+            let dp: *mut u8 = ulib.arg_at(args, a + 1) as *mut u8
+            let d: u64 = (*dp) as u64
+            if d >= 48 && d < 56 {
+                wlibc.start_head_set(d - 48)
+            }
+            a = a + 1
         } else if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
             // GEGENPROBE: derselbe Starter ohne Namensindex. Dann findet
             // "blau" das Programm nicht (es heisst nicht so) und die
@@ -1523,7 +1549,7 @@ fn u_start(args: u64) -> u64 {
         // r402: the height follows the work area (and what there is to show); the power menu
         // stands on the button at the right of the footer
         var avail_d: u64 = 640
-        let shh: u64 = wlibc.screen_h()
+        let shh: u64 = wlibc.head_bh()
         let barr: u64 = l_bar * sk
         if shh > barr + 2 * AIR {
             avail_d = (shh - barr - 2 * AIR) / sk
@@ -1535,6 +1561,8 @@ fn u_start(args: u64) -> u64 {
         pmx = W11_W - 20 - 220
     }
     let sbh: u64 = sbh_d * sk
+    g_head = wlibc.start_head_get()
+    head_follow(g_head)
     let anker: u64 = anker_x(sbw)
     let ay: u64 = anker_y(sbh)
     // RUNDE ECHTHARDWARE-3: das Startmenue liegt auf SEINER eigenen
@@ -1740,6 +1768,20 @@ fn u_start(args: u64) -> u64 {
             zumachen()
         }
         if !g_offen && fuiscene.has_focus() {
+            // r831: shown again -> stand on the output of the taskbar that was clicked
+            let hd_now: u64 = wlibc.start_head_get()
+            if hd_now != g_head {
+                g_head = hd_now
+                head_follow(hd_now)
+                let hh_m: u64 = fuiscene.handle()
+                if hh_m != 0 {
+                    let _mv: u64 = wlibc.win_move(hh_m, anker_x(sbw), anker_y(sbh))
+                    an_arbeitsflaeche(g_win, sbw, sbh)
+                }
+                say((&s_hd_mv[0 as usize]) as u64)
+                sayn(hd_now)
+                nl()
+            }
             g_offen = true
             g_gnade = nun + GNADE_TICKS
             let _tn: bool = wlib.theme_now()

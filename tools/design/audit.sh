@@ -69,7 +69,11 @@ fs=aus
 # `hidweg` OHNE die zwei Zeilen dieser Runde haengt genauso.  Das ist
 # also eine Regression des Zweiges und keine dieses Werkzeugs -- sie
 # steht in docs/RUNDE-OBERFLAECHE.md, damit sie nicht verlorengeht.
-accel=tcg
+# r831 (15.10.2026): THE REGRESSION ABOVE IS GONE -- main boots under KVM (settingsui, powerui/mouseui click tests, 16 pictures). The
+# default stays TCG-free: kvm when /dev/kvm is usable (the QEMU call below falls back to TCG by itself when it is not). Under TCG
+# on a loaded server the machine needs minutes for `launcher: ready`: the default drehbuch waited 40 s for it and the whole run was
+# "the audit machine does not boot" (r831). Slow machine: `halt=` and the `warteauf ... || <seconds>` limits are the knobs.
+accel=kvm
 halt=300
 extra=""
 nurbau=nein
@@ -149,6 +153,11 @@ done
 # RUNDE LEISTE-RECHTS: `battfake=ja` taeuscht dem Kern einen Akku vor,
 # damit sich Symbol und Prozentzahl UEBERHAUPT fotografieren lassen --
 # dieses QEMU kann keinen Akku nachbilden.
+# r831: the programs report their rectangles ("taskbar: start x=", "launcher: ready", "settings: rect ...") only when /etc/uitrace exists
+# (RUNDE 32 switched the trace off by default). The built-in drehbuch waits for and clicks exactly those lines, so without the trace
+# every `warteauf` timed out and every `klickauf` said KEIN RECHTECK -- "the audit machine does not boot". A run with the built-in
+# drehbuch therefore turns the trace on; a run with its own drehbuch keeps `uitrace=` as given.
+[ -z "$drehbuch" ] && uitrace=yes
 [ "${battfake:-}" = ja ] && extra="$extra battfake"
 XRES=${res%x*}
 YRES=${res#*x}
@@ -423,15 +432,17 @@ fi
 if [ -z "$drehbuch" ]; then
     drehbuch="$OUT/drehbuch.txt"
     cat > "$drehbuch" <<'DREH'
-# `wig wigstart` laesst den Starter mit hochkommen -- das Startmenue ist
-# also schon offen.  Zuerst wird es zugemacht, damit der Schreibtisch der
-# Schreibtisch ist und nicht der Schreibtisch mit einem Fenster darauf.
-warteauf 'launcher: ready' || 40
+# r835: the start menu is NOT open after boot any more (the launcher comes up hidden; `wigstart` is gone). The old
+# script clicked Start twice -- the first click OPENED the menu, the second CLOSED it, and `klickauf start_File Explorer`
+# then hit the empty desktop ("explorer: ready" never came). Now state-independent: Esc closes an open menu (a closed
+# one ignores it), then ONE click on Start opens it.
+warteauf 'launcher: ready' || 240
+warteauf 'taskbar: start x=' || 60
 warte 1
-klickauf start
+taste esc
 warte 2
 foto 01-schreibtisch
-# --- das Startmenue wieder auf
+# --- das Startmenue auf
 klickauf start
 warte 2
 foto 02-startmenue
@@ -464,9 +475,8 @@ foto 02-startmenue
 #
 # Also: klicken, ohne dazwischen zu warten.
 # --- der Dateimanager: erste Zeile der Trefferliste, dann Ausfuehren
-klickauf lzeile0
-klickauf lrect3
-warteauf 'explorer: ready' || 60
+klickauf start_File Explorer
+warteauf 'explorer: ready' || 150
 warte 3
 # ================================================== RUNDE MERGE-10
 # DAS STARTMENUE MUSS ZU SEIN, BEVOR EINE TASTE AN DEN DATEIMANAGER
@@ -509,7 +519,7 @@ warte 3
 foto 05-kontrollzentrum
 # --- die Einstellungen ueber die unterste Zeile des Kontrollzentrums
 klickauf qsalle
-warteauf 'settings: ready' || 60
+warteauf 'settings: ready' || 150
 warte 3
 foto 06-einstellungen
 DREH
@@ -572,6 +582,8 @@ python3 -u tools/design/drive.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drehbuch" \
 wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
+# r837: kernel stack guard hits are never allowed; print the count so callers (tools/kstack/run.sh) can assert it.
+echo "kernstapel: $(grep -ac 'KERNSTAPEL UEBERGELAUFEN' "$OUT/serial.txt" 2>/dev/null) Waechterbrueche"
 
 # ------------------------------------------------------------ 4. PNG
 python3 - "$OUT" <<'PY'

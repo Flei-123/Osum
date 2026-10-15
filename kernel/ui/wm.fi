@@ -112,6 +112,8 @@ export {
     panel_win, measure_lines,
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
     work_h, work_say, recalc_work, maximize, is_max, struts, workcalcs,
+    hd_multi, hd_present, hd_primary, hd_count, hd_x, hd_y, hd_w, hd_h, hd_at, win_head, head_work, hw_x, hw_y, hw_w, hw_h,
+    heads_sync, head_syncs, hd_say, hd_demo,
     fullscreen, is_full, F_FULL, L_FULL,
     set_nostrut, nostrut,
     set_deco_colour, deco_rgb, deco_writes, DECO_SLOTS,
@@ -190,7 +192,7 @@ export {
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
-    on_screen_resize, win_tabbed, tiled,
+    term_page, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
     title_clipped, title_missing,
     set_uiscale, uisc, messleiste,
@@ -200,7 +202,7 @@ export {
     evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
-    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS, E_WHEEL,
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS, E_WHEEL, E_HWHEEL, swipe_do, swipes_done, hw_demo,
     say_mag,
     M_SHIFT, M_CTRL,
     L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_TOAST, L_MAX,
@@ -468,6 +470,10 @@ const E_AXPRESS: u64 = 8
 // the opposite sign (`ps2m.wheel`: +1 = toward the user), so it is flipped
 // here. Goes to the window under the pointer.
 const E_WHEEL: u64 = 9
+// r804: THE HORIZONTAL WHEEL (two-finger sideways scroll, AC Pan). Same layout as E_WHEEL, c = notches as a 16-bit
+// two's complement, POSITIVE = scrolled RIGHT (Linux REL_HWHEEL, Windows WM_MOUSEHWHEEL). The driver sum
+// (`ps2m.hwheel`) already has this sign, so it is NOT flipped.
+const E_HWHEEL: u64 = 10
 
 // die Skalare
 const S_READY: u64 = 0x000
@@ -4178,6 +4184,7 @@ fn destroy(state: u64, i: u64) -> bool {
         mem.frame_free_run(state, wg(state, i, W_GRID), TG_FRAMES)
         wsv(state, i, W_GRID, 0)
     }
+    sb_free(state, i)
     // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
     // Fenster lag, rutscht eine Stufe herunter. Ohne das entstehen
     // Luecken, und `compose` findet auf einer Stufe kein Fenster mehr.
@@ -4909,11 +4916,742 @@ fn win_strut_size(state: u64, i: u64) -> u64 {
     return wg(state, i, W_STRUT) >> 8
 }
 
+// ================================================== r826 WINDOW SERVER PER OUTPUT
+// An extended desktop is ONE wide framebuffer; each output (head) shows one rect of it. The head rects live in
+// ONE place, the pointer driver's head table (ps2m.set_head), fed by `heads_sync` from the vgpu extend table. With
+// fewer than two heads in that table nothing below changes anything: `hd_x/y/w/h` answer with the whole screen,
+// `win_head` is 0 and `head_work` is the old work area.
+//
+// THE RULES. (1) A window's HOME head is the head its outer rect overlaps most (none: the first existing head).
+// (2) The work area is per head: a strut counts for a head only if the strut window overlaps that head's rect.
+// (3) Maximize, fullscreen and the drag clamp use the home head's rect/work area. (4) The tile tree and the
+// `work_*` scalars stay on the primary head. No new WM scalars (the page is full): the work area of a head is
+// computed from scratch and returned packed (x, y, w, h as four 16-bit fields).
+const HD_MAX: u64 = 8
+const S_HD_SYNCS: u64 = 0x1FF0 // how often `heads_sync` ran
+const S_HD_GEN: u64 = 0x1FF8 // hot-plug generation (vgpu.hot_gen) seen by the last `heads_sync`
+
+fn hd_multi(state: u64) -> bool {
+    return ps2m.heads(state) >= 2
+}
+
+fn hd_present(state: u64, hd: u64) -> bool {
+    return hd < HD_MAX && ps2m.head_w(state, hd) != 0
+}
+
+// The first head that exists (the primary one); 0 when there is none.
+fn hd_primary(state: u64) -> u64 {
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        if ps2m.head_w(state, hd) != 0 {
+            return hd
+        }
+        hd = hd + 1
+    }
+    return 0
+}
+
+// Number of heads that exist (1 on a plain screen).
+fn hd_count(state: u64) -> u64 {
+    if !hd_multi(state) {
+        return 1
+    }
+    var n: u64 = 0
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        if ps2m.head_w(state, hd) != 0 {
+            n = n + 1
+        }
+        hd = hd + 1
+    }
+    return n
+}
+
+fn hd_x(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return 0
+    }
+    return ps2m.head_x(state, hd)
+}
+
+fn hd_y(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return 0
+    }
+    return ps2m.head_y(state, hd)
+}
+
+fn hd_w(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return gs(state, S_SW)
+    }
+    return ps2m.head_w(state, hd)
+}
+
+fn hd_h(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) {
+        return gs(state, S_SH)
+    }
+    return ps2m.head_h(state, hd)
+}
+
+// Overlap area (px) of head `hd` with the rect [x0,x1) x [y0,y1).
+fn hd_overlap(state: u64, hd: u64, x0: i64, y0: i64, x1: i64, y1: i64) -> u64 {
+    if !hd_present(state, hd) {
+        return 0
+    }
+    let hx: i64 = ps2m.head_x(state, hd) as i64
+    let hy: i64 = ps2m.head_y(state, hd) as i64
+    let hx1: i64 = hx + ps2m.head_w(state, hd) as i64
+    let hy1: i64 = hy + ps2m.head_h(state, hd) as i64
+    var ax: i64 = x0
+    if hx > ax {
+        ax = hx
+    }
+    var ay: i64 = y0
+    if hy > ay {
+        ay = hy
+    }
+    var bx: i64 = x1
+    if hx1 < bx {
+        bx = hx1
+    }
+    var by: i64 = y1
+    if hy1 < by {
+        by = hy1
+    }
+    if bx <= ax || by <= ay {
+        return 0
+    }
+    return ((bx - ax) as u64) * ((by - ay) as u64)
+}
+
+// The head that shows point (x, y); HD_MAX when none.
+fn hd_at(state: u64, x: i64, y: i64) -> u64 {
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        if hd_overlap(state, hd, x, y, x + 1, y + 1) != 0 {
+            return hd
+        }
+        hd = hd + 1
+    }
+    return HD_MAX
+}
+
+// HOME HEAD of a window: the head its outer rect overlaps most; with no overlap at all the primary head.
+fn win_head(state: u64, i: u64) -> u64 {
+    if !hd_multi(state) || !valid(state, i) {
+        return 0
+    }
+    let x0: i64 = win_x(state, i)
+    let y0: i64 = win_y(state, i)
+    let x1: i64 = x0 + outer_w(state, i) as i64
+    let y1: i64 = y0 + outer_h(state, i) as i64
+    var best: u64 = HD_MAX
+    var ba: u64 = 0
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        let a: u64 = hd_overlap(state, hd, x0, y0, x1, y1)
+        if a > ba {
+            ba = a
+            best = hd
+        }
+        hd = hd + 1
+    }
+    if best == HD_MAX {
+        return hd_primary(state)
+    }
+    return best
+}
+
+fn hw_x(p: u64) -> u64 {
+    return (p >> 48) & 0xFFFF
+}
+
+fn hw_y(p: u64) -> u64 {
+    return (p >> 32) & 0xFFFF
+}
+
+fn hw_w(p: u64) -> u64 {
+    return (p >> 16) & 0xFFFF
+}
+
+fn hw_h(p: u64) -> u64 {
+    return p & 0xFFFF
+}
+
+// THE WORK AREA OF ONE HEAD, from scratch (see `recalc_work` for why nothing is cached). Packed x|y|w|h, 16 bits each.
+// On a plain screen this is exactly the old rectangle; with several heads a strut counts only on the heads its window
+// overlaps, and the measuring band only on the head at the desktop origin.
+fn head_work(state: u64, hd: u64) -> u64 {
+    let multi: bool = hd_multi(state)
+    let hx: u64 = hd_x(state, hd)
+    let hy: u64 = hd_y(state, hd)
+    let hw: u64 = hd_w(state, hd)
+    let hh: u64 = hd_h(state, hd)
+    var x0: u64 = hx
+    var y0: u64 = hy
+    var x1: u64 = hx + hw
+    var y1: u64 = hy + hh
+    if gs(state, S_NOSTRUT) == 0 {
+        if hx == 0 && hy == 0 {
+            let band: u64 = fb.band(state)
+            if band > y0 {
+                y0 = band
+            }
+        }
+        var i: u64 = 0
+        while i < MAX_WIN {
+            if wg(state, i, W_USED) != 0 && wg(state, i, W_STRUT) != 0
+                && (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
+                var on: bool = true
+                if multi {
+                    let sx: i64 = win_x(state, i)
+                    let sy: i64 = win_y(state, i)
+                    on = hd_overlap(state, hd, sx, sy, sx + outer_w(state, i) as i64,
+                        sy + outer_h(state, i) as i64) != 0
+                }
+                if on {
+                    let e: u64 = (wg(state, i, W_STRUT) & 0xFF) - 1
+                    let n: u64 = wg(state, i, W_STRUT) >> 8
+                    if e == EDGE_TOP {
+                        if hy + n > y0 {
+                            y0 = hy + n
+                        }
+                    } else if e == EDGE_BOTTOM {
+                        if n < hh && hy + hh - n < y1 {
+                            y1 = hy + hh - n
+                        }
+                    } else if e == EDGE_LEFT {
+                        if hx + n > x0 {
+                            x0 = hx + n
+                        }
+                    } else {
+                        if n < hw && hx + hw - n < x1 {
+                            x1 = hx + hw - n
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    // a strut that eats the head is refused, same rule as the plain work area
+    if x1 < x0 + 64 || y1 < y0 + 64 {
+        x0 = hx
+        y0 = hy
+        x1 = hx + hw
+        y1 = hy + hh
+    }
+    return ((x0 & 0xFFFF) << 48) | ((y0 & 0xFFFF) << 32) | (((x1 - x0) & 0xFFFF) << 16) | ((y1 - y0) & 0xFFFF)
+}
+
+// The work area a window is maximized to: that of its home head (the primary work area on a plain screen).
+fn win_work(state: u64, i: u64) -> u64 {
+    if !hd_multi(state) {
+        return ((gs(state, S_WORK_X) & 0xFFFF) << 48) | ((gs(state, S_WORK_Y) & 0xFFFF) << 32)
+            | ((gs(state, S_WORK_W) & 0xFFFF) << 16) | (gs(state, S_WORK_H) & 0xFFFF)
+    }
+    return head_work(state, win_head(state, i))
+}
+
+
+// r826: show one head line on the serial port (the gate parses these): `wm: head N rect=X,Y WxH work=X,Y WxH`.
+fn hd_say(state: u64, hd: u64) {
+    var s_h: [u8; 10] = "wm: head \0"
+    var s_r: [u8; 7] = " rect=\0"
+    var s_c: [u8; 2] = ",\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_w: [u8; 7] = " work=\0"
+    var s_s: [u8; 2] = " \0"
+    let p: u64 = head_work(state, hd)
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(hd)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(hd_x(state, hd))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(hd_y(state, hd))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(hd_w(state, hd))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(hd_h(state, hd))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(hw_x(p))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(hw_y(p))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(hw_w(p))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(hw_h(p))
+    serial.nl()
+}
+
+// THE HEAD TABLE FOLLOWS THE OUTPUTS. Called after the window server is up and from `gfx.gpu_ereignis` after every
+// successful re-layout (hot-plug): copy the extend rects of the vgpu driver into the pointer driver's table, bring
+// windows that sit on no head any more to the primary head, keep the others in sight (title bar reachable), refit
+// fullscreen windows to their home head, recompute the work areas (this refits maximized windows and the tile
+// tree) and put the pointer back onto a head. With extend off the table is empty and the model is off.
+fn heads_sync(state: u64) {
+    if !ready(state) {
+        return
+    }
+    let act: bool = vgpu.ext_active(state)
+    var n: u64 = 0
+    var hd: u64 = 0
+    while hd < HD_MAX {
+        var w: u64 = 0
+        if act {
+            w = vgpu.ext_w(state, hd)
+        }
+        ps2m.set_head(state, hd, vgpu.ext_x(state, hd), vgpu.ext_y(state, hd), w, vgpu.ext_h(state, hd))
+        if w != 0 {
+            n = hd + 1
+        }
+        hd = hd + 1
+    }
+    if act && n < 2 {
+        n = 2
+    }
+    if !act {
+        n = 0
+    }
+    ps2m.set_heads(state, n)
+    if n >= 2 {
+        let p0: u64 = head_work(state, hd_primary(state))
+        var i: u64 = 0
+        while i < MAX_WIN {
+            let f: u64 = wg(state, i, W_FLAGS)
+            if wg(state, i, W_USED) != 0 && (f & F_HIDDEN) == 0 {
+                if (f & F_FULL) != 0 {
+                    let fh: u64 = win_head(state, i)
+                    if resize_win(state, i, hd_w(state, fh), hd_h(state, fh)) {
+                        move_win(state, i, hd_x(state, fh) as i64, hd_y(state, fh) as i64)
+                    }
+                } else if deko(state, i) && (f & F_MAXIMIZED) == 0 {
+                    var ov: u64 = 0
+                    let ox: i64 = win_x(state, i)
+                    let oy: i64 = win_y(state, i)
+                    var h2: u64 = 0
+                    while h2 < HD_MAX {
+                        ov = ov + hd_overlap(state, h2, ox, oy, ox + outer_w(state, i) as i64,
+                            oy + outer_h(state, i) as i64)
+                        h2 = h2 + 1
+                    }
+                    if ov == 0 {
+                        move_win(state, i, (hw_x(p0) + 24) as i64, (hw_y(p0) + 24) as i64)
+                    }
+                    drag_klemmen(state, i)
+                }
+            }
+            i = i + 1
+        }
+        ps2m.set_pos(state, ps2m.x(state), ps2m.y(state))
+    }
+    tl_heads_changed(state)
+    recalc_work(state)
+    ss(state, S_HD_SYNCS, gs(state, S_HD_SYNCS) + 1)
+    ss(state, S_HD_GEN, vgpu.hot_gen(state))
+    var s_n: [u8; 13] = "wm: heads n=\0"
+    var s_p: [u8; 10] = " present=\0"
+    var s_g: [u8; 6] = " gen=\0"
+    var s_y: [u8; 8] = " syncs=\0"
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(hd_count(state))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gs(state, S_HD_GEN))
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(gs(state, S_HD_SYNCS))
+    serial.nl()
+    hd = 0
+    while hd < HD_MAX {
+        if hd_present(state, hd) {
+            hd_say(state, hd)
+        }
+        hd = hd + 1
+    }
+}
+
+fn head_syncs(state: u64) -> u64 {
+    return gs(state, S_HD_SYNCS)
+}
+
+// One `hd:` line: a window's outer rect.
+fn hd_say_win(state: u64, i: u64, tag: u64) {
+    var s_a: [u8; 5] = "hd: \0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_k: [u8; 7] = " head=\0"
+    var s_f: [u8; 5] = " fl=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(win_x(state, i) as u64)
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(win_y(state, i) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(outer_w(state, i))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(outer_h(state, i))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(win_head(state, i))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wg(state, i, W_FLAGS))
+    serial.nl()
+}
+
+// TEST BED for `hdtest` / `hdhot` (tools/wmheads): windows and struts on two heads, printed as `hd:` lines.
+// Needs an extended desktop (vgpuextend with two heads). With `hot` it also unplugs head 1 and plugs it back.
+// r828: edge docking on head 1 (floating halves): right/top/bottom of head 1, a seam edge (no docking), a drop
+// in the middle (no docking). Needs the docking switch on; restored afterwards.
+// r804 TEST BED for `hwheeltest`: horizontal wheel steps to the window under a point (event type + notches in the
+// window ring), a miss over the empty desktop, and 3-finger swipes as window switch. Prints `hw:` lines.
+static mut hw_out: [u64; 2] = [0 as u64; 2]
+
+fn hw_drain(state: u64, i: u64) {
+    var n: u64 = 0
+    while n < 64 && ev_pop(state, i, (&hw_out[0 as usize]) as u64) {
+        n = n + 1
+    }
+}
+
+fn hw_say_ev(state: u64, i: u64, tag: u64) {
+    var s_p: [u8; 5] = "hw: \0"
+    var s_t: [u8; 7] = " type=\0"
+    var s_c: [u8; 4] = " c=\0"
+    var s_n: [u8; 7] = " empty\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(tag)
+    if !ev_pop(state, i, (&hw_out[0 as usize]) as u64) {
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(hw_out[0 as usize])
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(hw_out[1 as usize] & 0xFFFF)
+    serial.nl()
+}
+
+fn hw_say_sw(state: u64, tag: u64, moved: bool, fc: u64, wa: u64, wb: u64) {
+    var s_p: [u8; 5] = "hw: \0"
+    var s_m: [u8; 8] = " moved=\0"
+    var s_f: [u8; 8] = " focus=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_m[0]) as u64)
+    if moved {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_f[0]) as u64)
+    if fc == wa {
+        serial.put(97 as u8)
+    } else if fc == wb {
+        serial.put(98 as u8)
+    } else {
+        serial.put(63 as u8)
+    }
+    serial.nl()
+}
+
+fn hw_demo(state: u64) {
+    var t_a: [u8; 5] = "hw-a\0"
+    var t_b: [u8; 5] = "hw-b\0"
+    var g_r: [u8; 12] = "right2 on-a\0"
+    var g_l: [u8; 11] = "left1 on-a\0"
+    var g_g: [u8; 11] = "gap no-win\0"
+    var g_b: [u8; 12] = "right1 on-b\0"
+    var g_a2: [u8; 12] = "on-a after \0"
+    var g_s1: [u8; 11] = "swipe left\0"
+    var g_s2: [u8; 12] = "swipe right\0"
+    var g_s3: [u8; 12] = "swipe 2 fin\0"
+    var g_s4: [u8; 9] = "swipe up\0"
+    if !ready(state) {
+        return
+    }
+    let wa: u64 = create(state, 0, 40, 40, 300, 200, K_RAW, (&t_a[0]) as u64)
+    let wb: u64 = create(state, 0, 400, 40, 300, 200, K_RAW, (&t_b[0]) as u64)
+    if wa >= MAX_WIN || wb >= MAX_WIN {
+        return
+    }
+    hw_drain(state, wa)
+    hw_drain(state, wb)
+    wh_seen = ps2m.wheel(state)
+    hwh_seen = ps2m.hwheel(state)
+    // two steps right over window a: ONE event, c = 2
+    ps2m.hwheel_add(state, 1)
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 150, 150)
+    hw_say_ev(state, wa, (&g_r[0]) as u64)
+    // one step left: c = 0xFFFF (-1)
+    ps2m.hwheel_add(state, 0 - 1)
+    hwheel_out(state, 150, 150)
+    hw_say_ev(state, wa, (&g_l[0]) as u64)
+    // over the gap between the windows: the sum is taken, nobody gets an event
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 370, 150)
+    hw_say_ev(state, wa, (&g_g[0]) as u64)
+    hw_say_ev(state, wb, (&g_g[0]) as u64)
+    // over window b: b gets it, a does not
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 500, 150)
+    hw_say_ev(state, wb, (&g_b[0]) as u64)
+    hw_say_ev(state, wa, (&g_a2[0]) as u64)
+    // swipes: with two windows left = the other window, right = back, 2 fingers and up = nothing
+    raise_win(state, wa)
+    set_focus(state, wa)
+    let m1: bool = swipe_do(state, 1, 3)
+    hw_say_sw(state, (&g_s1[0]) as u64, m1, focus(state), wa, wb)
+    let m2: bool = swipe_do(state, 2, 3)
+    hw_say_sw(state, (&g_s2[0]) as u64, m2, focus(state), wa, wb)
+    let m3: bool = swipe_do(state, 1, 2)
+    hw_say_sw(state, (&g_s3[0]) as u64, m3, focus(state), wa, wb)
+    let m4: bool = swipe_do(state, 3, 3)
+    hw_say_sw(state, (&g_s4[0]) as u64, m4, focus(state), wa, wb)
+}
+
+fn hd_say_tree(state: u64, i: u64, tag: u64) {
+    var s_a: [u8; 10] = "hd: tree \0"
+    var s_t: [u8; 7] = " tree=\0"
+    var s_n: [u8; 8] = " tiled=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(tile_tree_tag(state, i))
+    serial.puts((&s_n[0]) as u64)
+    if tiled(state, i) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn hd_say_drop(state: u64, pos: u64) {
+    var s_e: [u8; 11] = "hd: drope=\0"
+    var s_p: [u8; 6] = " pos=\0"
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(gs(state, S_DROPE))
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(pos)
+    serial.nl()
+}
+
+fn hd_say_trees(state: u64, tag: u64) {
+    var s_a: [u8; 11] = "hd: trees \0"
+    var s_n: [u8; 8] = " nodes=\0"
+    var s_l: [u8; 9] = " leaves=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(tile_nodes_all(state))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(tile_leaves_all(state))
+    serial.nl()
+}
+
+// r839: tile tree per head. Tiling is switched on WITHOUT taking the windows that exist (ss, not set_tile_on).
+fn hd_demo_tile(state: u64, hot: bool, wa: u64, wb: u64, bar: u64) {
+    var t_c1: [u8; 8] = "tile-c1\0"
+    var t_c0: [u8; 8] = "tile-c0\0"
+    var t_c2: [u8; 8] = "tile-c2\0"
+    var t_c1b: [u8; 9] = "split-c1\0"
+    var t_c2b: [u8; 9] = "split-c2\0"
+    var t_c0t: [u8; 7] = "top-c0\0"
+    var t_c1t: [u8; 7] = "top-c1\0"
+    var t_c2t: [u8; 7] = "top-c2\0"
+    var t_top: [u8; 5] = "top1\0"
+    var t_sm: [u8; 5] = "seam\0"
+    var t_mid: [u8; 7] = "middle\0"
+    var t_off: [u8; 4] = "off\0"
+    var t_u0: [u8; 10] = "unplug-c0\0"
+    var t_u1: [u8; 10] = "unplug-c1\0"
+    var t_u2: [u8; 10] = "unplug-c2\0"
+    var t_c3: [u8; 10] = "replug-c3\0"
+    var t_n0: [u8; 6] = "start\0"
+    var t_n1: [u8; 5] = "full\0"
+    var t_n2: [u8; 7] = "unplug\0"
+    var t_n3: [u8; 7] = "replug\0"
+    var t_n4: [u8; 4] = "end\0"
+    var t_f: [u8; 5] = "tile\0"
+    if !hd_multi(state) {
+        return
+    }
+    // a clean slate: nothing tiled, no strut, the full head rects are the work areas
+    set_tile_on(state, false)
+    let _d1: bool = destroy(state, wa)
+    let _d2: bool = destroy(state, wb)
+    let _d3: bool = destroy(state, bar)
+    let h1x: i64 = hd_x(state, 1) as i64
+    let hw: i64 = hd_w(state, 1) as i64
+    ss(state, S_TILE, 1)
+    hd_say_trees(state, (&t_n0[0]) as u64)
+    // a new window lands on the head it is on: its own tree, filling that head's work area
+    let c1: u64 = create(state, 0, h1x + 60, 60, 300, 200, K_RAW, (&t_f[0]) as u64)
+    hd_say_win(state, c1, (&t_c1[0]) as u64)
+    hd_say_tree(state, c1, (&t_c1[0]) as u64)
+    let c0: u64 = create(state, 0, 60, 60, 300, 200, K_RAW, (&t_f[0]) as u64)
+    hd_say_win(state, c0, (&t_c0[0]) as u64)
+    hd_say_tree(state, c0, (&t_c0[0]) as u64)
+    hd_say_trees(state, (&t_n1[0]) as u64)
+    // the second window on head 1 splits ONLY head 1's tree
+    let c2: u64 = create(state, 0, h1x + 100, 100, 300, 200, K_RAW, (&t_f[0]) as u64)
+    hd_say_win(state, c1, (&t_c1b[0]) as u64)
+    hd_say_win(state, c2, (&t_c2b[0]) as u64)
+    hd_say_win(state, c0, (&t_c0[0]) as u64)
+    hd_say_tree(state, c2, (&t_c2[0]) as u64)
+    // drag c0 over to the top edge of head 1: tiled as the upper half of head 1's tree
+    drag_begin(state, c0)
+    hd_say_tree(state, c0, (&t_c0t[0]) as u64)
+    drag_hover(state, c0, h1x + hw / 2, 0)
+    hd_say_drop(state, (&t_top[0]) as u64)
+    drag_end(state, c0, h1x + hw / 2, 0)
+    hd_say_win(state, c0, (&t_c0t[0]) as u64)
+    hd_say_win(state, c1, (&t_c1t[0]) as u64)
+    hd_say_win(state, c2, (&t_c2t[0]) as u64)
+    hd_say_tree(state, c0, (&t_c0t[0]) as u64)
+    hd_say_trees(state, (&t_n2[0]) as u64)
+    // the seam between the heads is no docking edge; the middle of a tile: no edge either; switch off: nothing
+    drag_hover(state, c0, h1x, 100)
+    hd_say_drop(state, (&t_sm[0]) as u64)
+    drag_hover(state, c0, h1x + hw / 2, 300)
+    hd_say_drop(state, (&t_mid[0]) as u64)
+    ss(state, S_DROPN, 0)
+    ss(state, S_DROPE, 0)
+    ss(state, S_PVON, 0)
+    ss(state, S_TILE, 0)
+    drag_hover(state, c0, h1x + hw - 1, 100)
+    hd_say_drop(state, (&t_off[0]) as u64)
+    ss(state, S_TILE, 1)
+    if hot {
+        let _t1: bool = vgpu.hot_toggle(state, 1)
+        heads_sync(state)
+        hd_say_win(state, c0, (&t_u0[0]) as u64)
+        hd_say_win(state, c1, (&t_u1[0]) as u64)
+        hd_say_win(state, c2, (&t_u2[0]) as u64)
+        hd_say_tree(state, c0, (&t_u0[0]) as u64)
+        hd_say_tree(state, c1, (&t_u1[0]) as u64)
+        hd_say_tree(state, c2, (&t_u2[0]) as u64)
+        hd_say_trees(state, (&t_n2[0]) as u64)
+        let _t2: bool = vgpu.hot_toggle(state, 1)
+        heads_sync(state)
+        let c3: u64 = create(state, 0, h1x + 80, 80, 300, 200, K_RAW, (&t_f[0]) as u64)
+        hd_say_win(state, c3, (&t_c3[0]) as u64)
+        hd_say_tree(state, c3, (&t_c3[0]) as u64)
+        hd_say_trees(state, (&t_n3[0]) as u64)
+    }
+    set_tile_on(state, false)
+    hd_say_trees(state, (&t_n4[0]) as u64)
+}
+
+fn hd_demo(state: u64, hot: bool) {
+    var t_bar: [u8; 4] = "bar\0"
+    var t_a: [u8; 6] = "win-a\0"
+    var t_b: [u8; 6] = "win-b\0"
+    var t_m1: [u8; 5] = "max1\0"
+    var t_m0: [u8; 5] = "max0\0"
+    var t_f1: [u8; 6] = "full1\0"
+    var t_un: [u8; 7] = "unmax1\0"
+    var t_u1: [u8; 9] = "unplug-a\0"
+    var t_u2: [u8; 11] = "unplug-bar\0"
+    var t_pl: [u8; 9] = "replug-a\0"
+    var t_pb: [u8; 11] = "replug-bar\0"
+    var s_no: [u8; 14] = "hd: no extend\0"
+    var s_cl: [u8; 13] = "hd: clamp x=\0"
+    var s_cy: [u8; 4] = " y=\0"
+    var s_wk: [u8; 24] = "hd: after unplug work0 \0"
+    if !hd_multi(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let sw: u64 = gs(state, S_SW)
+    let sh: u64 = gs(state, S_SH)
+    // 1. a 28 px bar over the bottom edge of the whole desktop: one strut per head it touches
+    var s_sc: [u8; 12] = "hd: screen \0"
+    serial.puts((&s_sc[0]) as u64)
+    serial.dec(sw)
+    serial.put(120 as u8)
+    serial.dec(sh)
+    serial.nl()
+    let bar: u64 = create(state, 0, 0, (sh - 28) as i64, sw, 28, K_RAW, (&t_bar[0]) as u64)
+    if bar >= MAX_WIN {
+        return
+    }
+    set_deco(state, bar, false)
+    let _s: bool = set_strut(state, bar, EDGE_BOTTOM, 28)
+    hd_say(state, 0)
+    hd_say(state, 1)
+    // 2. a window on head 1, maximized: fills the work area of head 1
+    let wa: u64 = create(state, 0, (hd_x(state, 1) + 60) as i64, 60, 300, 200, K_RAW, (&t_a[0]) as u64)
+    let _m1: bool = maximize(state, wa, true)
+    hd_say_win(state, wa, (&t_m1[0]) as u64)
+    // 3. a window on head 0, maximized: fills the work area of head 0
+    let wb: u64 = create(state, 0, 40, 50, 300, 200, K_RAW, (&t_b[0]) as u64)
+    let _m0: bool = maximize(state, wb, true)
+    hd_say_win(state, wb, (&t_m0[0]) as u64)
+    // 4. back to normal: the saved rect is restored on the head it came from
+    let _u: bool = maximize(state, wa, false)
+    hd_say_win(state, wa, (&t_un[0]) as u64)
+    // 5. fullscreen of the window on head 1: exactly head 1, not the desktop
+    let _f: bool = fullscreen(state, wa, true)
+    hd_say_win(state, wa, (&t_f1[0]) as u64)
+    let _f2: bool = fullscreen(state, wa, false)
+    // 6. pointer clamp with heads of different height: head 1 only 240 high -> a point below it goes back onto it
+    let h1x: u64 = ps2m.head_x(state, 1)
+    let h1y: u64 = ps2m.head_y(state, 1)
+    let h1w: u64 = ps2m.head_w(state, 1)
+    let h1h: u64 = ps2m.head_h(state, 1)
+    ps2m.set_head(state, 1, h1x, h1y, h1w, 240)
+    ps2m.set_pos(state, h1x + 60, 250)
+    serial.puts((&s_cl[0]) as u64)
+    serial.dec(ps2m.x(state))
+    serial.puts((&s_cy[0]) as u64)
+    serial.dec(ps2m.y(state))
+    serial.nl()
+    ps2m.set_head(state, 1, h1x, h1y, h1w, h1h)
+    if !hot {
+        hd_demo_tile(state, hot, wa, wb, bar)
+        return
+    }
+    let _m2: bool = maximize(state, wa, true)
+    // 7. unplug head 1: the window on it comes to head 0 (and is maximized there if it was), head 1's strut is gone
+    let _t1: bool = vgpu.hot_toggle(state, 1)
+    heads_sync(state)
+    hd_say_win(state, wa, (&t_u1[0]) as u64)
+    hd_say_win(state, bar, (&t_u2[0]) as u64)
+    // 8. plug it back: head 1 is there again with its work area
+    let _t2: bool = vgpu.hot_toggle(state, 1)
+    heads_sync(state)
+    hd_say_win(state, wa, (&t_pl[0]) as u64)
+    hd_say_win(state, bar, (&t_pb[0]) as u64)
+    hd_demo_tile(state, hot, wa, wb, bar)
+}
+
 // THE WORK AREA, recomputed from scratch. Not incrementally: an
 // incremental work area is a cache, and a cache of four numbers that
 // three modules write is the kind of thing that is right in every test
 // and wrong on the machine.
 fn recalc_work(state: u64) {
+    if hd_multi(state) {
+        // r826: several heads -- the work_* scalars (and with them the tile tree) belong to the primary head.
+        let p: u64 = head_work(state, hd_primary(state))
+        ss(state, S_WORK_X, hw_x(p))
+        ss(state, S_WORK_Y, hw_y(p))
+        ss(state, S_WORK_W, hw_w(p))
+        ss(state, S_WORK_H, hw_h(p))
+        ss(state, S_WORKCALC, gs(state, S_WORKCALC) + 1)
+        refit_max(state)
+        tile_area_work(state)
+        tile_apply(state)
+        return
+    }
     let sw: u64 = gs(state, S_SW)
     let sh: u64 = gs(state, S_SH)
     var x0: u64 = 0
@@ -5023,8 +5761,9 @@ fn is_max(state: u64, i: u64) -> bool {
 // decoration (desktop, taskbar) has no such difference, which is why
 // this goes through `deko` and not through BORDER and TITLE_H.
 fn fit_work(state: u64, i: u64) -> bool {
-    var iw: u64 = gs(state, S_WORK_W)
-    var ih: u64 = gs(state, S_WORK_H)
+    let hwk: u64 = win_work(state, i)
+    var iw: u64 = hw_w(hwk)
+    var ih: u64 = hw_h(hwk)
     if deko(state, i) {
         if iw <= border(state) * 2 || ih <= iny(state, i) + border(state) {
             return false
@@ -5035,8 +5774,7 @@ fn fit_work(state: u64, i: u64) -> bool {
     if !resize_win(state, i, iw, ih) {
         return false
     }
-    move_win(state, i, gs(state, S_WORK_X) as i64,
-        gs(state, S_WORK_Y) as i64)
+    move_win(state, i, hw_x(hwk) as i64, hw_y(hwk) as i64)
     return true
 }
 
@@ -5140,8 +5878,10 @@ fn fullscreen(state: u64, i: u64, on: bool) -> bool {
         // nicht getauscht.
         let hatte_deko: bool = deko(state, i)
         wsv(state, i, W_FLAGS, f | F_FULL | F_NODECO)
-        let sw: u64 = gs(state, S_SW)
-        let sh: u64 = gs(state, S_SH)
+        // r826: the whole HOME head (the whole screen on a plain one)
+        let fh: u64 = win_head(state, i)
+        let sw: u64 = hd_w(state, fh)
+        let sh: u64 = hd_h(state, fh)
         if !resize_win(state, i, sw, sh) {
             // Passt nicht -- dann ist es NICHT im Vollbild, und das
             // zu sagen ist der Unterschied zwischen einer Messung und
@@ -5153,7 +5893,7 @@ fn fullscreen(state: u64, i: u64, on: bool) -> bool {
             wsv(state, i, W_FLAGS, back)
             return false
         }
-        move_win(state, i, 0, 0)
+        move_win(state, i, hd_x(state, fh) as i64, hd_y(state, fh) as i64)
         // UEBER die Leiste. Die Ebene ist die einzige Stelle, an der
         // "vor der Leiste" ueberhaupt ausgedrueckt werden kann.
         set_layer(state, i, L_FULL)
@@ -5339,7 +6079,8 @@ fn set_focus(state: u64, i: u64) {
     // Fenster nicht das ANGEKLICKTE, sondern das zuletzt angelegte -- ein
     // Fehler, der aussieht wie ein kaputter Baum und keiner ist.
     if wg(state, i, W_NODE) != 0 {
-        tile.set_focus(state, wg(state, i, W_NODE) - 1)
+        tl_sel(state, nd_tag(wg(state, i, W_NODE)))
+        tile.set_focus(tt(state), nd_node(wg(state, i, W_NODE)))
     }
     damage_win(state, i)
 }
@@ -13407,7 +14148,43 @@ fn wheel_out(state: u64, x: u64, y: u64) {
         return
     }
     input_seen(state)
+    if wg(state, i, W_KIND) == K_TERM {
+        sb_wheel(state, i, d)
+        return
+    }
     ev_push(state, i, E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
+}
+
+static mut hwh_seen: u64 = 0 // r804: the driver's horizontal wheel sum as far as it was handed out
+
+// r804: horizontal wheel notches since the last call, to the window under the pointer (same rules as wheel_out).
+fn hwheel_out(state: u64, x: u64, y: u64) {
+    let sum: u64 = ps2m.hwheel(state)
+    if sum == hwh_seen {
+        return
+    }
+    var d: i64 = (sum as i64) - (hwh_seen as i64)
+    hwh_seen = sum
+    if d > 127 {
+        d = 127
+    }
+    if d < 0 - 127 {
+        d = 0 - 127
+    }
+    if d == 0 || td_live(state) {
+        return
+    }
+    let i: u64 = hit(state, x as i64, y as i64)
+    if i >= MAX_WIN || !darf(state, i) {
+        return
+    }
+    let lx: i64 = (x as i64) - win_x(state, i) - inx(state, i) as i64
+    let ly: i64 = (y as i64) - win_y(state, i) - iny(state, i) as i64
+    if lx < 0 || ly < 0 {
+        return
+    }
+    input_seen(state)
+    ev_push(state, i, E_HWHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
 }
 
 // 0x0B8 in the mouse state (ps2m.S_PRESSED): buttons that went down since the last look
@@ -13437,6 +14214,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     let ox: u64 = gs(state, S_CURX)
     let oy: u64 = gs(state, S_CURY)
     wheel_out(state, nx, ny)
+    hwheel_out(state, nx, ny)
     // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
     if nx != ox || ny != oy {
         if !hwcur_an(state) {
@@ -14500,6 +15278,9 @@ fn term_setup(state: u64, i: u64) {
     if ch == 0 {
         ch = 16
     }
+    if i < 32 {
+        tp_sbv[(i) as usize] = 0
+    }
     let alt_cols: u64 = wg(state, i, W_COLS)
     let alt_rows: u64 = wg(state, i, W_ROWS)
     let alt_cy: u64 = wg(state, i, W_CY)
@@ -14519,6 +15300,7 @@ fn term_setup(state: u64, i: u64) {
         let g0: u64 = mem.frame_run(state, TG_FRAMES)
         wsv(state, i, W_GRID, g0)
         tp_reset(i)
+        sb_free(state, i)
     }
     let g: u64 = wg(state, i, W_GRID)
     // ================================================== RUNDE ECHT
@@ -14831,6 +15613,7 @@ fn term_dump(state: u64, i: u64) {
         }
         r = r + 1
     }
+    sb_dump(state, i)
 }
 
 // r5xx: ONE LINE PER TERMINAL WINDOW plus the text of its cells, for the multi-terminal check (tools/term/multi.sh).
@@ -14934,15 +15717,19 @@ fn term_color(state: u64, k: u64) -> u64 {
 }
 
 fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
+    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), cell_attr(state, i, c, r), cell_col(state, i, c, r))
+}
+
+// r838: paint the cell at screen position (c, r) with the given character / attribute / colour octets (the scrollback view
+// paints history cells here, the live grid goes through `cell_paint`)
+fn cell_paint_v(state: u64, i: u64, c: u64, r: u64, z: u64, at: u64, co: u64) {
     let cw: u64 = wg(state, i, W_CELLW)
     let ch: u64 = wg(state, i, W_CELLH)
     let f: u64 = gs(state, S_FONT_MONO)
     // r400: reverse video swaps the two colours of the cell
     var cbg: u64 = wg(state, i, W_BG)
     var cfg: u64 = wg(state, i, W_FG)
-    let at: u64 = cell_attr(state, i, c, r)
     // r462: colours (the nibbles of the colour octet), bright forms by bold / the 9x and 10x codes, underline
-    let co: u64 = cell_col(state, i, c, r)
     if (co & 15) != 0 {
         var kf: u64 = (co & 15) - 1
         if (at & 10) != 0 {
@@ -14963,7 +15750,6 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
         cfg = sw
     }
     fill(state, i, c * cw, r * ch, cw, ch, cbg)
-    let z: u64 = cell_get(state, i, c, r)
     if (at & 4) != 0 && ch > 2 {
         fill(state, i, c * cw, r * ch + ch - 2, cw, 1, cfg)
     }
@@ -14993,6 +15779,10 @@ fn term_redraw(state: u64, i: u64) {
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return
     }
+    if i < 32 && tp_sbv[(i) as usize] != 0 {
+        sb_redraw(state, i)
+        return
+    }
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
     var r: u64 = 0
@@ -15001,6 +15791,206 @@ fn term_redraw(state: u64, i: u64) {
         while c < cols {
             cell_paint(state, i, c, r)
             c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ============================================ r838: TERMINAL SCROLLBACK
+// Lines that scroll off the top of a full-screen scroll (main screen, region = whole screen) go into a ring of SB_LINES lines
+// per terminal window (kernel frames, taken on the first scrolled line, given back when the window closes). Each line holds
+// the three planes (character, attribute, colour) for SB_W columns. The mouse wheel over the window moves the view
+// (`tp_sbv` = lines scrolled back, SB_STEP per notch); any output or key snaps back to the live screen.
+const SB_LINES: u64 = 256
+const SB_W: u64 = 256
+const SB_STRIDE: u64 = 768 // 3 planes x SB_W
+const SB_FRAMES: u64 = 48  // SB_LINES * SB_STRIDE / 4096
+const SB_STEP: u64 = 3
+static mut tp_sb: [u64; 32] = [0 as u64; 32]  // base of the ring (0 = none yet)
+static mut tp_sbn: [u64; 32] = [0 as u64; 32] // lines stored
+static mut tp_sbh: [u64; 32] = [0 as u64; 32] // next slot to write
+static mut tp_sbv: [u64; 32] = [0 as u64; 32] // lines the view is scrolled back (0 = live)
+
+fn sb_free(state: u64, i: u64) {
+    if i >= 32 {
+        return
+    }
+    if tp_sb[(i) as usize] != 0 {
+        mem.frame_free_run(state, tp_sb[(i) as usize], SB_FRAMES)
+    }
+    tp_sb[(i) as usize] = 0
+    tp_sbn[(i) as usize] = 0
+    tp_sbh[(i) as usize] = 0
+    tp_sbv[(i) as usize] = 0
+}
+
+// push grid row r (about to scroll off the top) into the ring
+fn sb_push(state: u64, i: u64, r: u64) {
+    if i >= 32 {
+        return
+    }
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return
+    }
+    var b: u64 = tp_sb[(i) as usize]
+    if b == 0 {
+        b = mem.frame_run(state, SB_FRAMES)
+        if b == 0 {
+            return
+        }
+        tp_sb[(i) as usize] = b
+        tp_sbn[(i) as usize] = 0
+        tp_sbh[(i) as usize] = 0
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let dst: u64 = b + tp_sbh[(i) as usize] * SB_STRIDE
+    var c: u64 = 0
+    while c < SB_W {
+        var z: u64 = 32
+        var at: u64 = 0
+        var co: u64 = 0
+        if c < cols && r * cols + c < TG {
+            let k: u64 = r * cols + c
+            z = kstate.get8(g + k)
+            at = kstate.get8(g + TG + k)
+            co = kstate.get8(g + 2 * TG + k)
+        }
+        kstate.set8(dst + c, z as u8)
+        kstate.set8(dst + SB_W + c, at as u8)
+        kstate.set8(dst + 2 * SB_W + c, co as u8)
+        c = c + 1
+    }
+    tp_sbh[(i) as usize] = (tp_sbh[(i) as usize] + 1) % SB_LINES
+    if tp_sbn[(i) as usize] < SB_LINES {
+        tp_sbn[(i) as usize] = tp_sbn[(i) as usize] + 1
+    }
+}
+
+// address of history line h (0 = oldest stored)
+fn sb_line(i: u64, h: u64) -> u64 {
+    let slot: u64 = (tp_sbh[(i) as usize] + SB_LINES - tp_sbn[(i) as usize] + h) % SB_LINES
+    return tp_sb[(i) as usize] + slot * SB_STRIDE
+}
+
+// the character shown at screen cell (c, r) while the view is scrolled back
+fn sb_view_char(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let v: u64 = tp_sbv[(i) as usize]
+    if r >= v {
+        return cell_get(state, i, c, r - v)
+    }
+    if c >= SB_W {
+        return 32
+    }
+    return kstate.get8(sb_line(i, tp_sbn[(i) as usize] - v + r) + c)
+}
+
+fn sb_redraw(state: u64, i: u64) {
+    let v: u64 = tp_sbv[(i) as usize]
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            if r >= v {
+                cell_paint_v(state, i, c, r, cell_get(state, i, c, r - v), cell_attr(state, i, c, r - v), cell_col(state, i, c, r - v))
+            } else if c >= SB_W {
+                cell_paint_v(state, i, c, r, 32, 0, 0)
+            } else {
+                let ln: u64 = sb_line(i, tp_sbn[(i) as usize] - v + r)
+                cell_paint_v(state, i, c, r, kstate.get8(ln + c), kstate.get8(ln + SB_W + c), kstate.get8(ln + 2 * SB_W + c))
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// back to the live screen (called before any output, on a key, on a resize)
+fn sb_snap(state: u64, i: u64) {
+    if i >= 32 || tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    tp_sbv[(i) as usize] = 0
+    term_redraw(state, i)
+}
+
+// wheel notches over a terminal window: d > 0 = wheel up = older lines
+fn sb_wheel(state: u64, i: u64, d: i64) {
+    if i >= 32 || !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    sb_move(state, i, d * (SB_STEP as i64))
+}
+
+// Move the view by `dl` lines (+ = back into the history), clamped to what is stored.
+fn sb_move(state: u64, i: u64, dl: i64) {
+    if i >= 32 || !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let n: u64 = tp_sbn[(i) as usize]
+    var v: i64 = (tp_sbv[(i) as usize] as i64) + dl
+    if v < 0 {
+        v = 0
+    }
+    if v > (n as i64) {
+        v = n as i64
+    }
+    if (v as u64) == tp_sbv[(i) as usize] {
+        return
+    }
+    tp_sbv[(i) as usize] = v as u64
+    term_redraw(state, i)
+    damage_win(state, i)
+}
+
+// serial witness for tools/term/scroll.sh
+fn sb_dump(state: u64, i: u64) {
+    var s_a: [u8; 18] = "wm: termsb lines=\0"
+    var s_b: [u8; 7] = " view=\0"
+    var s_c: [u8; 14] = "wm: termview \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    if i >= 32 {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(tp_sbn[(i) as usize])
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(tp_sbv[(i) as usize])
+    serial.nl()
+    if tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var last: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if sb_view_char(state, i, c0, r) > 32 {
+                last = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if last != 0 {
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < last {
+                let z: u64 = sb_view_char(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
         }
         r = r + 1
     }
@@ -15180,6 +16170,14 @@ fn term_scroll_region(state: u64, i: u64, top: u64, bot: u64, n: u64, up: bool) 
     var k: u64 = n
     if k > bot - top + 1 {
         k = bot - top + 1
+    }
+    // r838: lines that leave the top of the whole screen go to the scrollback (not on the alternate screen)
+    if up && top == 0 && bot + 1 == rows && i < 32 && tp_alt[(i) as usize] == 0 {
+        var q: u64 = 0
+        while q < k {
+            sb_push(state, i, q)
+            q = q + 1
+        }
     }
     // the cells
     if up {
@@ -15946,6 +16944,7 @@ fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return 0
     }
+    sb_snap(state, i)
     var k: u64 = 0
     while k < n {
         term_putc(state, i, kstate.get8(p + k))
@@ -15981,6 +16980,28 @@ fn tty_of(state: u64, i: u64) -> u64 {
 // Eingabefokus, wenn das ein Terminalfenster ist -- sonst an gar keines.
 // Das ist die eine Zeile, die aus einem Bildschirm eine BEDIENBARE
 // Oberflaeche macht.
+// Shift+PageUp / Shift+PageDown on a focused terminal window: one page (rows - 1 lines) through the history. True: the
+// key was consumed (kbd.fi then does not send it to the shell).
+fn term_page(state: u64, up: bool) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let f: u64 = focus(state)
+    if f >= MAX_WIN || wg(state, f, W_KIND) != K_TERM || !darf(state, f) {
+        return false
+    }
+    var page: i64 = (wg(state, f, W_ROWS) as i64) - 1
+    if page < 1 {
+        page = 1
+    }
+    if up {
+        sb_move(state, f, page)
+    } else {
+        sb_move(state, f, 0 - page)
+    }
+    return true
+}
+
 fn key_tty(state: u64) -> u64 {
     if !ready(state) {
         return NO_TTY
@@ -16005,6 +17026,7 @@ fn key_tty(state: u64) -> u64 {
     if !darf(state, f) {
         return NO_TTY
     }
+    sb_snap(state, f)
     return tty_of(state, f)
 }
 
@@ -16015,6 +17037,7 @@ fn term_out(state: u64, i: u64, c: u64) {
         return
     }
     ss(state, S_TPUT, gs(state, S_TPUT) + 1)
+    sb_snap(state, i)
     term_putc(state, i, c)
     damage_win(state, i)
 }
@@ -16778,6 +17801,226 @@ fn selftest_max() -> u64 {
 // zurueck; die schwebende Lage wird dabei in W_SAVXY/W_SAVWH aufgehoben,
 // sonst steht der Dialog nach dem Zurueckholen in der Ecke.
 
+// ===================================================== r839 TILE TREE PER HEAD
+// One tree per head. The tree of the primary head is the old tree (the pages at kstate.TILE_OFF, `state` itself is
+// its "tile state"). Every other head gets its own 4-frame tree the first time a window is tiled onto it; the tile
+// module only ever computes `state + kstate.TILE_OFF + ...`, so a tree is addressed by the fake state
+// `frames - TILE_OFF` (`tl_state`). `W_NODE` = (node + 1) | (tree tag << 8); tag 0 = the main tree, tag h >= 1 = the
+// tree of head h. The CURRENT tree (`tl_cur`, answered by `tt(state)`) is a plain global: every entry point selects
+// it first (`tl_use` may allocate the tree, `tl_sel` only selects an existing one), every `tile.*` call below uses
+// `tt(state)`. With fewer than two heads tag 0 is the only one and nothing changes.
+static mut tl_cur: u64 = 0
+static mut tl_alt: [u64; 8] = [0 as u64; 8]
+static mut tl_mask: u64 = 1
+static mut tl_prim: u64 = 0
+static mut tl_drop_tag: u64 = 0
+static mut tl_re: [u8; 32] = [0 as u8; 32]
+
+fn nd_node(v: u64) -> u64 {
+    return (v & 0xFF) - 1
+}
+
+fn nd_tag(v: u64) -> u64 {
+    return v >> 8
+}
+
+fn nd_val(n: u64) -> u64 {
+    return (n + 1) | (tl_cur << 8)
+}
+
+fn tl_state(state: u64, tag: u64) -> u64 {
+    if tag == 0 || tag >= HD_MAX {
+        return state
+    }
+    let b: u64 = tl_alt[tag as usize]
+    if b == 0 {
+        return state
+    }
+    return b - kstate.TILE_OFF
+}
+
+fn tt(state: u64) -> u64 {
+    return tl_state(state, tl_cur)
+}
+
+// Select an EXISTING tree (tag 0 when there is none).
+fn tl_sel(state: u64, tag: u64) {
+    if tag != 0 && (tag >= HD_MAX || tl_alt[tag as usize] == 0) {
+        tl_cur = 0
+        return
+    }
+    tl_cur = tag
+}
+
+// Tree tag of a head: 0 for the primary head (and always on a single screen).
+fn tl_tag_head(state: u64, hd: u64) -> u64 {
+    if !hd_multi(state) || hd >= HD_MAX || hd == hd_primary(state) {
+        return 0
+    }
+    return hd
+}
+
+// Select the tree of `tag`, making it first when it does not exist yet. False: no such head / no memory (then the
+// main tree is selected).
+fn tl_use(state: u64, tag: u64) -> bool {
+    tl_cur = 0
+    if tag == 0 {
+        return true
+    }
+    if tag >= HD_MAX || !hd_present(state, tag) {
+        return false
+    }
+    if tl_alt[tag as usize] == 0 {
+        let b: u64 = mem.frame_run(state, 4)
+        if b == 0 {
+            return false
+        }
+        if b <= kstate.TILE_OFF {
+            mem.frame_free_run(state, b, 4)
+            return false
+        }
+        var o: u64 = 0
+        while o < kstate.TILE_MAX {
+            kstate.set(b, o, 0)
+            o = o + 8
+        }
+        let p: u64 = head_work(state, tag)
+        if !tile.init(b - kstate.TILE_OFF, hw_x(p), hw_y(p), hw_w(p), hw_h(p)) {
+            mem.frame_free_run(state, b, 4)
+            return false
+        }
+        tl_alt[tag as usize] = b
+    }
+    tl_cur = tag
+    return true
+}
+
+fn tl_use_win(state: u64, i: u64) {
+    let v: u64 = wg(state, i, W_NODE)
+    if v == 0 {
+        tl_cur = 0
+        return
+    }
+    tl_sel(state, nd_tag(v))
+}
+
+fn tl_free(state: u64, tag: u64) {
+    if tag == 0 || tag >= HD_MAX {
+        return
+    }
+    let b: u64 = tl_alt[tag as usize]
+    if b != 0 {
+        mem.frame_free_run(state, b, 4)
+        tl_alt[tag as usize] = 0
+    }
+}
+
+// Tree state of the focused window's tree (for the ring-3 queries); the main tree when it is not tiled.
+fn tile_focus_state(state: u64) -> u64 {
+    let f: u64 = focus(state)
+    if f < MAX_WIN && valid(state, f) && wg(state, f, W_NODE) != 0 {
+        return tl_state(state, nd_tag(wg(state, f, W_NODE)))
+    }
+    return state
+}
+
+fn tile_nodes_all(state: u64) -> u64 {
+    var n: u64 = tile.nodes(state)
+    var h: u64 = 1
+    while h < HD_MAX {
+        if tl_alt[h as usize] != 0 {
+            n = n + tile.nodes(tl_state(state, h))
+        }
+        h = h + 1
+    }
+    return n
+}
+
+fn tile_leaves_all(state: u64) -> u64 {
+    var n: u64 = tile.leaves(state)
+    var h: u64 = 1
+    while h < HD_MAX {
+        if tl_alt[h as usize] != 0 {
+            n = n + tile.leaves(tl_state(state, h))
+        }
+        h = h + 1
+    }
+    return n
+}
+
+// Heads came or went (called from heads_sync, after the windows were moved onto heads that exist): a tree whose head
+// is gone gives its windows back (they are tiled again onto the head they are on now); when the PRIMARY head
+// changed, the main tree changed owner, so every tiled window is re-tiled. Trees of new heads need nothing: they
+// are made when the first window lands there.
+fn tl_heads_changed(state: u64) {
+    var mask: u64 = 1
+    var prim: u64 = 0
+    if hd_multi(state) {
+        mask = 0
+        var hd: u64 = 0
+        while hd < HD_MAX {
+            if hd_present(state, hd) {
+                let bit: u64 = 1
+                mask = mask | (bit << hd)
+            }
+            hd = hd + 1
+        }
+        prim = hd_primary(state)
+    }
+    let full: bool = prim != tl_prim
+    var gone: u64 = 0
+    var h: u64 = 1
+    while h < HD_MAX {
+        let bit2: u64 = 1
+        if tl_alt[h as usize] != 0 && (mask & (bit2 << h)) == 0 {
+            gone = gone | (bit2 << h)
+        }
+        h = h + 1
+    }
+    tl_mask = mask
+    if !full && gone == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < MAX_WIN {
+        tl_re[i as usize] = 0
+        let v: u64 = wg(state, i, W_NODE)
+        if wg(state, i, W_USED) != 0 && v != 0 {
+            let t: u64 = nd_tag(v)
+            let bit3: u64 = 1
+            if full || (t != 0 && (gone & (bit3 << t)) != 0) {
+                tile_release(state, i)
+                tl_re[i as usize] = 1
+            }
+        }
+        i = i + 1
+    }
+    h = 1
+    while h < HD_MAX {
+        let bit4: u64 = 1
+        if full || (gone & (bit4 << h)) != 0 {
+            tl_free(state, h)
+        }
+        h = h + 1
+    }
+    tl_prim = prim
+    tl_cur = 0
+    i = 0
+    while i < MAX_WIN {
+        if tl_re[i as usize] != 0 {
+            let _t: bool = tile_take(state, i)
+        }
+        i = i + 1
+    }
+}
+
+fn tile_tree_tag(state: u64, i: u64) -> u64 {
+    if !valid(state, i) || wg(state, i, W_NODE) == 0 {
+        return 0
+    }
+    return nd_tag(wg(state, i, W_NODE))
+}
+
 fn tile_on(state: u64) -> bool {
     return gs(state, S_TILE) != 0
 }
@@ -16797,7 +18040,7 @@ fn tile_node(state: u64, i: u64) -> u64 {
     if nd == 0 {
         return tile.NONE
     }
-    return nd - 1
+    return nd_node(nd)
 }
 
 // RUNDE TILING: LIEGT DIESES FENSTER HINTER EINEM REITER. Diese
@@ -16827,10 +18070,10 @@ fn plugkeys(state: u64) -> u64 {
 // Der Bereich, den die letzte Baumoperation angefasst hat -- und NUR
 // der. Das ist die Zahl, die `notiledirty` kaputt macht.
 fn damage_tile(state: u64) {
-    let x: u64 = tile.last_x(state)
-    let y: u64 = tile.last_y(state)
-    let w: u64 = tile.last_w(state)
-    let h: u64 = tile.last_h(state)
+    let x: u64 = tile.last_x(tt(state))
+    let y: u64 = tile.last_y(tt(state))
+    let w: u64 = tile.last_w(tt(state))
+    let h: u64 = tile.last_h(tt(state))
     if w == 0 || h == 0 {
         return
     }
@@ -16957,8 +18200,8 @@ fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
 // AEUSSERE Rechteck (mit Rahmen und Titelleiste) -- die Malflaeche ist
 // das, was davon uebrigbleibt.
 fn place_win(state: u64, i: u64, n: u64) {
-    let ow: u64 = tile.n_w(state, n)
-    let oh: u64 = tile.n_h(state, n)
+    let ow: u64 = tile.n_w(tt(state), n)
+    let oh: u64 = tile.n_h(tt(state), n)
     var w: u64 = 32
     if ow > border(state) * 2 + 32 {
         w = ow - border(state) * 2
@@ -16980,8 +18223,8 @@ fn place_win(state: u64, i: u64, n: u64) {
     if h > MAX_H_HARD {
         h = MAX_H_HARD
     }
-    wsv(state, i, W_X, tile.n_x(state, n))
-    wsv(state, i, W_Y, tile.n_y(state, n))
+    wsv(state, i, W_X, tile.n_x(tt(state), n))
+    wsv(state, i, W_Y, tile.n_y(tt(state), n))
     if w == wg(state, i, W_W) && h == wg(state, i, W_H) {
         return
     }
@@ -17001,17 +18244,17 @@ fn place_win(state: u64, i: u64, n: u64) {
 // Den ganzen Baum auf die Fenster uebertragen. Ohne `damage` -- der
 // Rufer beschmutzt EINMAL den Bereich, den der Baum als geaendert
 // meldet, und genau das ist der Unterschied, den diese Runde misst.
-fn tile_apply(state: u64) {
-    let r: u64 = tile.root(state)
+fn tile_apply_one(state: u64) -> bool {
+    let r: u64 = tile.root(tt(state))
     if r == tile.NONE {
-        return
+        return false
     }
     var n: u64 = r
     var guard: u64 = 0
     while n != tile.NONE && guard <= tile.MAX_NODES {
         guard = guard + 1
-        if tile.n_kind(state, n) == tile.K_LEAF {
-            let cl: u64 = tile.n_client(state, n)
+        if tile.n_kind(tt(state), n) == tile.K_LEAF {
+            let cl: u64 = tile.n_client(tt(state), n)
             if cl != 0 && cl <= MAX_WIN {
                 let i: u64 = cl - 1
                 if wg(state, i, W_USED) != 0 {
@@ -17021,7 +18264,7 @@ fn tile_apply(state: u64) {
                     // sonst zuckt das Fenster beim Umschalten einmal
                     // durch, weil erst dann neu gerechnet wird.
                     place_win(state, i, n)
-                    if tile.visible(state, n) {
+                    if tile.visible(tt(state), n) {
                         wsv(state, i, W_FLAGS,
                             wg(state, i, W_FLAGS) & ~F_TABBED)
                     } else {
@@ -17031,7 +18274,7 @@ fn tile_apply(state: u64) {
                 }
             }
         }
-        n = tile.dfs_next(state, n, r)
+        n = tile.dfs_next(tt(state), n, r)
     }
     // ================================================ RUNDE WMPLUGIN
     // DER KACHELBAUM HAT SICH BEWEGT. Diese eine Stelle meldet es, und
@@ -17043,23 +18286,30 @@ fn tile_apply(state: u64) {
     // ist ein Fenster dazugekommen" von "die Kante wurde gezogen" zu
     // unterscheiden, und sie kosten den Kern zwei Ablesungen.
     // NICHT aus `compose` gerufen -- der Bildpfad bleibt frei davon.
-    wmplug.notify(state, wmplug.E_TILE, tile.nodes(state),
-        tile.leaves(state), 0)
+    return true
 }
 
-// ==================================================== RUNDE ECHTHARDWARE-3
-// WER UEBERHAUPT GEKACHELT WERDEN DARF.
-//
-// Die Regel steht HIER und nicht bei den Rufern: `tile_take` hat vier
-// davon (2444 neues Fenster, 6919 Kachelmodus an, 7119 und 7128), und
-// eine Regel an vier Stellen ist vier Gelegenheiten, sie zu vergessen.
-// Genau so ist die Taskleiste in den Baum geraten.
-//
-// Eine Kachel ist ein Fenster, das ein Mensch benutzt: normale Ebene,
-// keine reservierte Bildschirmkante, nicht minimiert. Schreibtisch,
-// Leiste, Startmenue, Klappmenue und Blase sind Teile der Oberflaeche
-// selbst -- sie haben ihren Platz, und der Baum darf ihn nicht neu
-// verteilen.
+fn tile_apply(state: u64) {
+    let keep: u64 = tl_cur
+    tl_cur = 0
+    var did: bool = tile_apply_one(state)
+    var h: u64 = 1
+    while h < HD_MAX {
+        if tl_alt[h as usize] != 0 {
+            tl_cur = h
+            if tile_apply_one(state) {
+                did = true
+            }
+        }
+        h = h + 1
+    }
+    tl_cur = keep
+    if did {
+        wmplug.notify(state, wmplug.E_TILE, tile_nodes_all(state),
+            tile_leaves_all(state), 0)
+    }
+}
+
 fn kachelbar(state: u64, i: u64) -> bool {
     if !valid(state, i) {
         return false
@@ -17096,11 +18346,13 @@ fn tile_take(state: u64, i: u64) -> bool {
     if !kachelbar(state, i) {
         return false
     }
-    let n: u64 = tile.insert(state, i + 1)
+    // r839: the tree of the head the window is on (the main tree on a single screen or when that tree cannot be made)
+    let _u: bool = tl_use(state, tl_tag_head(state, win_head(state, i)))
+    let n: u64 = tile.insert(tt(state), i + 1)
     if n == tile.NONE {
         return false // kein Platz im Baum -- das Fenster schwebt weiter
     }
-    wsv(state, i, W_NODE, n + 1)
+    wsv(state, i, W_NODE, nd_val(n))
     tile_apply(state)
     damage_tile(state)
     return true
@@ -17116,7 +18368,8 @@ fn tile_release(state: u64, i: u64) -> bool {
     }
     wsv(state, i, W_NODE, 0)
     wsv(state, i, W_FLAGS, wg(state, i, W_FLAGS) & ~F_TABBED)
-    tile.remove(state, nd - 1)
+    tl_sel(state, nd_tag(nd))
+    tile.remove(tt(state), nd_node(nd))
     tile_apply(state)
     damage_tile(state)
     return true
@@ -17151,7 +18404,8 @@ fn tile_snap(state: u64, i: u64, where: u64) -> bool {
     if nd == 0 {
         return false
     }
-    tile.snap(state, nd - 1, where)
+    tl_sel(state, nd_tag(nd))
+    tile.snap(tt(state), nd_node(nd), where)
     tile_apply(state)
     damage_tile(state)
     return true
@@ -17189,6 +18443,15 @@ fn on_screen_resize(state: u64, w: u64, h: u64) -> bool {
 fn tile_area_work(state: u64) {
     let _a: bool = tile.set_area(state, gs(state, S_WORK_X),
         gs(state, S_WORK_Y), gs(state, S_WORK_W), gs(state, S_WORK_H))
+    // r839: the trees of the other heads follow the work area of their head
+    var h: u64 = 1
+    while h < HD_MAX {
+        if tl_alt[h as usize] != 0 && hd_multi(state) && hd_present(state, h) {
+            let p: u64 = head_work(state, h)
+            let _b: bool = tile.set_area(tl_state(state, h), hw_x(p), hw_y(p), hw_w(p), hw_h(p))
+        }
+        h = h + 1
+    }
 }
 
 // ------------------------------------------------ die Reiterzeilen
@@ -17202,13 +18465,13 @@ fn paint_bar_of(state: u64, n: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let f: u64 = gs(state, S_FONT_UI)
     let px: u64 = gs(state, S_PX_UI)
     var idx: u64 = 0
-    var c: u64 = tile.n_first(state, n)
+    var c: u64 = tile.n_first(tt(state), n)
     while c != tile.NONE && idx <= tile.MAX_NODES {
-        let tx: i64 = tile.tab_x(state, n, idx) as i64
-        let ty: i64 = tile.tab_y(state, n, idx) as i64
-        let tw: i64 = tile.tab_w(state, n, idx) as i64
-        let th: i64 = tile.tab_h(state, n, idx) as i64
-        let aktiv: bool = tile.n_active(state, n) == c
+        let tx: i64 = tile.tab_x(tt(state), n, idx) as i64
+        let ty: i64 = tile.tab_y(tt(state), n, idx) as i64
+        let tw: i64 = tile.tab_w(tt(state), n, idx) as i64
+        let th: i64 = tile.tab_h(tt(state), n, idx) as i64
+        let aktiv: bool = tile.n_active(tt(state), n) == c
         // ROUND MERGE: THESE WERE FIVE RAW COLOURS. Round TILING wrote
         // the tab bar with the values that stood in the drawing code
         // BEFORE round THEME, and round THEME's whole promise is that no
@@ -17242,9 +18505,9 @@ fn paint_bar_of(state: u64, n: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                     (ax1 - ax0) as u64, 1, rand)
             }
             if f < ttf.MAX_FONTS {
-                let l: u64 = tile.first_leaf(state, c)
+                let l: u64 = tile.first_leaf(tt(state), c)
                 if l != tile.NONE {
-                    let cl: u64 = tile.n_client(state, l)
+                    let cl: u64 = tile.n_client(tt(state), l)
                     if cl != 0 && cl <= MAX_WIN {
                         title_text(state, cl - 1, f, tx + 6,
                             ty + 3 + ttf.ascent(state, f, px), schrift,
@@ -17254,12 +18517,27 @@ fn paint_bar_of(state: u64, n: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             }
         }
         idx = idx + 1
-        c = tile.n_next(state, c)
+        c = tile.n_next(tt(state), c)
     }
 }
 
 fn paint_bars(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let r: u64 = tile.root(state)
+    let keep: u64 = tl_cur
+    tl_cur = 0
+    paint_bars_one(state, cx0, cy0, cx1, cy1)
+    var h: u64 = 1
+    while h < HD_MAX {
+        if tl_alt[h as usize] != 0 {
+            tl_cur = h
+            paint_bars_one(state, cx0, cy0, cx1, cy1)
+        }
+        h = h + 1
+    }
+    tl_cur = keep
+}
+
+fn paint_bars_one(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let r: u64 = tile.root(tt(state))
     if r == tile.NONE {
         return
     }
@@ -17267,12 +18545,12 @@ fn paint_bars(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     var guard: u64 = 0
     while n != tile.NONE && guard <= tile.MAX_NODES {
         guard = guard + 1
-        if tile.n_kind(state, n) == tile.K_BOX {
-            if tile.n_layout(state, n) != tile.LAY_SPLIT {
+        if tile.n_kind(tt(state), n) == tile.K_BOX {
+            if tile.n_layout(tt(state), n) != tile.LAY_SPLIT {
                 paint_bar_of(state, n, cx0, cy0, cx1, cy1)
             }
         }
-        n = tile.dfs_next(state, n, r)
+        n = tile.dfs_next(tt(state), n, r)
     }
 }
 
@@ -17342,7 +18620,7 @@ fn set_preview(state: u64, x: u64, y: u64, w: u64, h: u64) {
 // die Stapelreihenfolge -- er kennt auch die Stellen, an denen KEIN
 // Fenster liegt, weil dort eine Reiterzeile ist.
 fn leaf_at(state: u64, x: i64, y: i64) -> u64 {
-    let r: u64 = tile.root(state)
+    let r: u64 = tile.root(tt(state))
     if r == tile.NONE {
         return tile.NONE
     }
@@ -17350,18 +18628,18 @@ fn leaf_at(state: u64, x: i64, y: i64) -> u64 {
     var guard: u64 = 0
     while n != tile.NONE && guard <= tile.MAX_NODES {
         guard = guard + 1
-        if tile.n_kind(state, n) == tile.K_LEAF && tile.visible(state, n) {
-            let nx: i64 = tile.n_x(state, n) as i64
-            let ny: i64 = tile.n_y(state, n) as i64
+        if tile.n_kind(tt(state), n) == tile.K_LEAF && tile.visible(tt(state), n) {
+            let nx: i64 = tile.n_x(tt(state), n) as i64
+            let ny: i64 = tile.n_y(tt(state), n) as i64
             if x >= nx && y >= ny {
-                if x < nx + tile.n_w(state, n) as i64 {
-                    if y < ny + tile.n_h(state, n) as i64 {
+                if x < nx + tile.n_w(tt(state), n) as i64 {
+                    if y < ny + tile.n_h(tt(state), n) as i64 {
                         return n
                     }
                 }
             }
         }
-        n = tile.dfs_next(state, n, r)
+        n = tile.dfs_next(tt(state), n, r)
     }
     return tile.NONE
 }
@@ -17393,6 +18671,48 @@ fn drag_begin(state: u64, i: u64) {
     ss(state, S_DRAGT, 1)
 }
 
+// r828: EDGE DOCKING ON A NON-PRIMARY HEAD. The tile tree is one tree for the primary head (a tree per head is a
+// separate step), so on another head a window dropped at an outer edge of its work area just takes the half of that
+// work area -- floating, outside the tree. S_DROPE 5..8 = left/right/top/bottom half of the head under the pointer.
+// An edge shared with another head (the seam between two monitors) is not a docking edge.
+fn snap_part(p: u64, e: u64) -> u64 {
+    var x: u64 = hw_x(p)
+    var y: u64 = hw_y(p)
+    var w: u64 = hw_w(p)
+    var h: u64 = hw_h(p)
+    if e == 1 {
+        w = w / 2
+    } else if e == 2 {
+        x = x + w - w / 2
+        w = w / 2
+    } else if e == 3 {
+        h = h / 2
+    } else if e == 4 {
+        y = y + h - h / 2
+        h = h / 2
+    }
+    return (x << 48) | (y << 32) | (w << 16) | h
+}
+
+
+// Put window `i` on the packed rect (outer size, like `fit_work` does for the work area).
+fn fit_rect(state: u64, i: u64, r: u64) -> bool {
+    var iw: u64 = hw_w(r)
+    var ih: u64 = hw_h(r)
+    if deko(state, i) {
+        if iw <= border(state) * 2 || ih <= iny(state, i) + border(state) {
+            return false
+        }
+        iw = iw - border(state) * 2
+        ih = ih - iny(state, i) - border(state)
+    }
+    if !resize_win(state, i, iw, ih) {
+        return false
+    }
+    move_win(state, i, hw_x(r) as i64, hw_y(r) as i64)
+    return true
+}
+
 fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     if gs(state, S_TILE) == 0 {
         return
@@ -17401,24 +18721,36 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     ss(state, S_PVON, 0)
     ss(state, S_DROPN, 0)
     ss(state, S_DROPE, 0)
-    // ================================================== RUNDE VOLLBILD
-    // DIE VORSCHAU DES ANDOCKENS ZEIGT DIE ARBEITSFLAECHE, NICHT DEN
-    // SCHIRM.
-    //
-    // Hier stand `S_SW`/`S_SH`, also der ganze Bildschirm. Ein Fenster,
-    // das nach links angedockt wurde, bekam damit
-    // `0,0,1720x1440` -- volle Schirmhoehe, und die unteren 80
-    // Bildpunkte lagen UNTER der Taskleiste. Windows dockt an die
-    // Arbeitsflaeche an; Justins Vorgabe sagt dasselbe.
-    //
-    // Die Vorschau und die Ablage muessen dieselbe Flaeche nennen,
-    // sonst zeigt der Umriss etwas anderes an, als hinterher
-    // herauskommt -- deshalb steht die Rechnung hier UND in
-    // `tile_apply` auf derselben Quelle.
-    let wx0: i64 = gs(state, S_WORK_X) as i64
-    let wy0: i64 = gs(state, S_WORK_Y) as i64
-    let sw: i64 = gs(state, S_WORK_W) as i64
-    let sh: i64 = gs(state, S_WORK_H) as i64
+    // r826: edge docking works on the primary head's work area only; on another head there is no preview and no drop.
+    var wx0: i64 = gs(state, S_WORK_X) as i64
+    var wy0: i64 = gs(state, S_WORK_Y) as i64
+    var sw: i64 = gs(state, S_WORK_W) as i64
+    var sh: i64 = gs(state, S_WORK_H) as i64
+    // r839: with several heads the head under the pointer is the drop target (its work area, its tree); an edge that
+    // touches the next head (the seam) is no docking edge
+    var nl: bool = true
+    var nr: bool = true
+    var nt: bool = true
+    var nb: bool = true
+    tl_drop_tag = 0
+    if hd_multi(state) {
+        let hd: u64 = hd_at(state, x, y)
+        if hd >= HD_MAX {
+            return
+        }
+        let hp: u64 = head_work(state, hd)
+        wx0 = hw_x(hp) as i64
+        wy0 = hw_y(hp) as i64
+        sw = hw_w(hp) as i64
+        sh = hw_h(hp) as i64
+        let hx: i64 = hd_x(state, hd) as i64
+        let hy: i64 = hd_y(state, hd) as i64
+        nl = hd_at(state, hx - 1, y) == HD_MAX
+        nr = hd_at(state, hx + hd_w(state, hd) as i64, y) == HD_MAX
+        nt = hd_at(state, x, hy - 1) == HD_MAX
+        nb = hd_at(state, x, hy + hd_h(state, hd) as i64) == HD_MAX
+        tl_drop_tag = tl_tag_head(state, hd)
+    }
     // DELL ROUND (04.10.2026): the snap strip was 16 px, so a window that
     // was only pushed a little over the edge snapped to half the screen
     // (or jumped back). Now 2 px at scale 1: the pointer must be AT the
@@ -17429,28 +18761,28 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     }
     // 1. AM BILDSCHIRMRAND: die Windows-artige Schnellablage. Sie ist
     //    ein Sonderfall des Baumes und kein zweites System.
-    if x < wx0 + rand {
+    if x < wx0 + rand && nl {
         ss(state, S_DROPE, 1)
         set_preview(state, wx0 as u64, wy0 as u64, (sw / 2) as u64,
             sh as u64)
         preview_damage(state)
         return
     }
-    if x >= wx0 + sw - rand {
+    if x >= wx0 + sw - rand && nr {
         ss(state, S_DROPE, 2)
         set_preview(state, (wx0 + sw - sw / 2) as u64, wy0 as u64,
             (sw / 2) as u64, sh as u64)
         preview_damage(state)
         return
     }
-    if y < wy0 + rand {
+    if y < wy0 + rand && nt {
         ss(state, S_DROPE, 3)
         set_preview(state, wx0 as u64, wy0 as u64, sw as u64,
             (sh / 2) as u64)
         preview_damage(state)
         return
     }
-    if y >= wy0 + sh - rand {
+    if y >= wy0 + sh - rand && nb {
         ss(state, S_DROPE, 4)
         set_preview(state, wx0 as u64, (wy0 + sh - sh / 2) as u64,
             sw as u64, (sh / 2) as u64)
@@ -17459,14 +18791,19 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     }
     // 2. AUF EINEM ANDEREN FENSTER: das Viertel, in dem der Zeiger
     //    steht, sagt die Seite. Die Mitte heisst REITER.
+    // the tree of that head (none yet: nothing to drop onto)
+    if tl_drop_tag != 0 && tl_alt[tl_drop_tag as usize] == 0 {
+        return
+    }
+    tl_sel(state, tl_drop_tag)
     let n: u64 = leaf_at(state, x, y)
     if n == tile.NONE {
         return
     }
-    let nx: u64 = tile.n_x(state, n)
-    let ny: u64 = tile.n_y(state, n)
-    let w: u64 = tile.n_w(state, n)
-    let h: u64 = tile.n_h(state, n)
+    let nx: u64 = tile.n_x(tt(state), n)
+    let ny: u64 = tile.n_y(tt(state), n)
+    let w: u64 = tile.n_w(tt(state), n)
+    let h: u64 = tile.n_h(tt(state), n)
     let fx: u64 = (x - nx as i64) as u64
     let fy: u64 = (y - ny as i64) as u64
     var page: u64 = 4
@@ -17532,10 +18869,12 @@ fn drag_klemmen(state: u64, i: u64) {
     let wy0: i64 = win_y(state, i)
     let aw: i64 = outer_w(state, i) as i64
     let ah: i64 = outer_h(state, i) as i64
-    let ax0: i64 = work_x(state) as i64
-    let ay0: i64 = work_y(state) as i64
-    let ax1: i64 = ax0 + work_w(state) as i64
-    let ay1: i64 = ay0 + work_h(state) as i64
+    // r826: the work area of the window's HOME head (the plain one on a single screen)
+    let kwk: u64 = win_work(state, i)
+    let ax0: i64 = hw_x(kwk) as i64
+    let ay0: i64 = hw_y(kwk) as i64
+    let ax1: i64 = ax0 + hw_w(kwk) as i64
+    let ay1: i64 = ay0 + hw_h(kwk) as i64
     // DELL ROUND (04.10.2026, Justin): "a window pushed a little over the
     // screen edge jumps right back". The old rule kept the WHOLE window
     // on the work area. Now it may stick out on the left, right and
@@ -17672,9 +19011,10 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     }
     let e: u64 = gs(state, S_DROPE)
     if e != 0 {
-        let n: u64 = tile.insert(state, i + 1)
+        let _u: bool = tl_use(state, tl_drop_tag)
+        let n: u64 = tile.insert(tt(state), i + 1)
         if n != tile.NONE {
-            wsv(state, i, W_NODE, n + 1)
+            wsv(state, i, W_NODE, nd_val(n))
             var wo: u64 = tile.SNAP_LEFT
             if e == 2 {
                 wo = tile.SNAP_RIGHT
@@ -17685,7 +19025,7 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
             if e == 4 {
                 wo = tile.SNAP_BOTTOM
             }
-            tile.snap(state, n, wo)
+            tile.snap(tt(state), n, wo)
             tile_apply(state)
             damage_all(state)
         }
@@ -17697,17 +19037,18 @@ fn drag_end(state: u64, i: u64, x: i64, y: i64) {
     if d != 0 {
         let ziel: u64 = d - 1
         let page: u64 = gs(state, S_DROPS)
+        tl_sel(state, tl_drop_tag)
         var n: u64 = tile.NONE
         if page == 4 {
-            n = tile.insert_at(state, ziel, tile.D_RIGHT, i + 1)
+            n = tile.insert_at(tt(state), ziel, tile.D_RIGHT, i + 1)
             if n != tile.NONE {
-                tile.set_layout(state, n, tile.LAY_TABBED)
+                tile.set_layout(tt(state), n, tile.LAY_TABBED)
             }
         } else {
-            n = tile.insert_at(state, ziel, page, i + 1)
+            n = tile.insert_at(tt(state), ziel, page, i + 1)
         }
         if n != tile.NONE {
-            wsv(state, i, W_NODE, n + 1)
+            wsv(state, i, W_NODE, nd_val(n))
             tile_apply(state)
             damage_all(state)
         }
@@ -17729,18 +19070,19 @@ fn tile_drag_resize(state: u64, i: u64, x: i64, y: i64) {
     if nd == 0 {
         return
     }
-    let n: u64 = nd - 1
-    let p: u64 = tile.n_parent(state, n)
-    if p == tile.NONE || tile.n_layout(state, p) != tile.LAY_SPLIT {
+    tl_sel(state, nd_tag(nd))
+    let n: u64 = nd_node(nd)
+    let p: u64 = tile.n_parent(tt(state), n)
+    if p == tile.NONE || tile.n_layout(tt(state), p) != tile.LAY_SPLIT {
         return
     }
-    var total: u64 = tile.n_h(state, p)
-    var will: i64 = y - tile.n_y(state, n) as i64
-    var ist: i64 = tile.n_h(state, n) as i64
-    if tile.n_dir(state, p) == tile.DIR_H {
-        total = tile.n_w(state, p)
-        will = x - tile.n_x(state, n) as i64
-        ist = tile.n_w(state, n) as i64
+    var total: u64 = tile.n_h(tt(state), p)
+    var will: i64 = y - tile.n_y(tt(state), n) as i64
+    var ist: i64 = tile.n_h(tt(state), n) as i64
+    if tile.n_dir(tt(state), p) == tile.DIR_H {
+        total = tile.n_w(tt(state), p)
+        will = x - tile.n_x(tt(state), n) as i64
+        ist = tile.n_w(tt(state), n) as i64
     }
     if total == 0 {
         return
@@ -17753,7 +19095,7 @@ fn tile_drag_resize(state: u64, i: u64, x: i64, y: i64) {
     if d == 0 {
         return
     }
-    if tile.resize_at(state, n, d) {
+    if tile.resize_at(tt(state), n, d) {
         tile_apply(state)
         damage_tile(state)
     }
@@ -17902,6 +19244,46 @@ fn next_window(state: u64, von: u64) -> bool {
     return false
 }
 
+fn prev_window(state: u64, von: u64) -> bool {
+    var k: u64 = 1
+    while k <= MAX_WIN {
+        let j: u64 = (von + MAX_WIN - (k % MAX_WIN)) % MAX_WIN
+        if wechselbar(state, j) && j != von {
+            raise_win(state, j)
+            set_focus(state, j)
+            damage_win(state, j)
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// r804: the touchpad swipe (lib/touchgest, via hidin -> gfx.mouse_swipe) as a window switch. dir: 1 left, 2 right,
+// 3 up, 4 down; n = fingers (>= 3). Left = next window, right = previous (like Alt+Tab / Alt+Shift+Tab). Up/down
+// have no consumer yet. Never while the screen is locked or the trusted dialog is up. Returns true if the focus moved.
+static mut sw_done: u64 = 0 // swipes that moved the focus
+fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
+    if n < 3 || !ready(state) || sperre_an(state) || td_live(state) {
+        return false
+    }
+    let i: u64 = focus(state)
+    var moved: bool = false
+    if dir == 1 {
+        moved = next_window(state, i)
+    } else if dir == 2 {
+        moved = prev_window(state, i)
+    }
+    if moved {
+        sw_done = sw_done + 1
+    }
+    return moved
+}
+
+fn swipes_done() -> u64 {
+    return sw_done
+}
+
 // EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
 // NICHT hier, sondern in der Tabelle, die aus
 // /users/<name>/config/tiling.conf gelesen wurde. Hier steht nur, was
@@ -17991,14 +19373,15 @@ fn tile_action(state: u64, act: u64) -> bool {
     if nd == 0 {
         return false
     }
-    let n: u64 = nd - 1
+    tl_sel(state, nd_tag(nd))
+    let n: u64 = nd_node(nd)
     if act <= tile.A_FOCUS_DOWN {
-        let z: u64 = tile.dir_search(state, n, act - tile.A_FOCUS_LEFT)
+        let z: u64 = tile.dir_search(tt(state), n, act - tile.A_FOCUS_LEFT)
         if z == tile.NONE {
             return false
         }
-        tile.set_focus(state, z)
-        let cl: u64 = tile.n_client(state, z)
+        tile.set_focus(tt(state), z)
+        let cl: u64 = tile.n_client(tt(state), z)
         if cl != 0 && cl <= MAX_WIN {
             raise_win(state, cl - 1)
             set_focus(state, cl - 1)
@@ -18008,7 +19391,7 @@ fn tile_action(state: u64, act: u64) -> bool {
         return true
     }
     if act <= tile.A_MOVE_DOWN {
-        if tile.move_dir(state, n, act - tile.A_MOVE_LEFT) {
+        if tile.move_dir(tt(state), n, act - tile.A_MOVE_LEFT) {
             tile_apply(state)
             damage_tile(state)
             return true
@@ -18016,15 +19399,15 @@ fn tile_action(state: u64, act: u64) -> bool {
         return false
     }
     if act == tile.A_SPLIT_H {
-        tile.set_next_split(state, 1)
+        tile.set_next_split(tt(state), 1)
         return true
     }
     if act == tile.A_SPLIT_V {
-        tile.set_next_split(state, 2)
+        tile.set_next_split(tt(state), 2)
         return true
     }
     if act >= tile.A_LAYOUT_SPLIT && act <= tile.A_LAYOUT_STACKED {
-        if tile.set_layout(state, n, act - tile.A_LAYOUT_SPLIT) {
+        if tile.set_layout(tt(state), n, act - tile.A_LAYOUT_SPLIT) {
             tile_apply(state)
             damage_tile(state)
             return true
@@ -18032,19 +19415,19 @@ fn tile_action(state: u64, act: u64) -> bool {
         return false
     }
     if act == tile.A_ROTATE {
-        tile.rotate(state, tile.root(state), 1)
+        tile.rotate(tt(state), tile.root(tt(state)), 1)
         tile_apply(state)
         damage_tile(state)
         return true
     }
     if act == tile.A_MIRROR {
-        tile.mirror(state, tile.root(state), 0)
+        tile.mirror(tt(state), tile.root(tt(state)), 0)
         tile_apply(state)
         damage_tile(state)
         return true
     }
     if act == tile.A_BALANCE {
-        tile.balance(state, tile.root(state))
+        tile.balance(tt(state), tile.root(tt(state)))
         tile_apply(state)
         damage_tile(state)
         return true
@@ -18054,7 +19437,7 @@ fn tile_action(state: u64, act: u64) -> bool {
         if act == tile.A_SHRINK {
             d = 0 - d
         }
-        if tile.resize_at(state, n, d) {
+        if tile.resize_at(tt(state), n, d) {
             tile_apply(state)
             damage_tile(state)
             return true

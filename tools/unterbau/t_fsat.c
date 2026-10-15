@@ -68,7 +68,7 @@ int main(void)
     if (fd >= 0) close((int)fd);
 
     errno = 0; fd = syscall(N_OPENAT, 12345L, "relative-name", (long)O_RDONLY, 0L);
-    CHECK("openat_relative_with_dirfd_enosys", fd < 0 && errno == ENOSYS, "fd=%ld errno=%d", fd, errno);
+    CHECK("openat_relative_with_bad_dirfd_ebadf", fd < 0 && errno == EBADF, "fd=%ld errno=%d", fd, errno);
 
     errno = 0; fd = syscall(N_OPENAT, CWD, "/tmp/fat/none", (long)O_RDONLY, 0L);
     CHECK("openat_missing_enoent", fd < 0 && errno == ENOENT, "fd=%ld errno=%d", fd, errno);

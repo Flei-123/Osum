@@ -57,10 +57,11 @@ import serial
 import drv.hid.ptrcfg
 
 export {
-    e2e_selftest, init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    e2e_selftest, init, present, irq, id, x, y, buttons, wheel, hwheel, hwheel_add, packets, drops, moves,
     irqs, polls, spurious, clicks, status, reset_counters, poll_one,
     set_poll, polling,
     set_bounds, set_pos, changed, take_change, usb_packet, adopt,
+    set_heads, set_head, heads, head_clamp, head_x, head_y, head_w, head_h,
     B_LEFT, B_RIGHT, B_MIDDLE, selftest, selftest_max
 }
 
@@ -94,6 +95,14 @@ const S_SPURIOUS: u64 = 0x0B0 // wie oft Vektor 44 wirklich gelaufen ist
 // see wm.on_mouse). Under host load the interrupt path applies a press and the release before the server runs;
 // the state alone then shows 'never pressed' and the click is lost.
 const S_PRESSED: u64 = 0x0B8
+// r804: horizontal wheel sum, + = to the right (Linux REL_HWHEEL sign); written by hwheel_add, read by wm.hwheel_out
+const S_HWHEEL: u64 = 0x0C0
+
+// r826: head rects of an EXTENDED desktop (heads may differ in height, so the pointer must not roam the bounding box).
+// S_HN = number of heads (< 2 = off, plain MAXX/MAXY box); S_HT + i*32 = x, y, w, h of head i (w = 0: not there).
+const S_HN: u64 = 0x200
+const S_HT: u64 = 0x208
+const HEAD_MAX: u64 = 8
 
 const B_LEFT: u64 = 1
 const B_RIGHT: u64 = 2
@@ -190,12 +199,14 @@ fn init_inner(state: u64, w: u64, h: u64) -> bool {
     s(state, S_PHASE, 0)
     s(state, S_BTN, 0)
     s(state, S_WHEEL, 0)
+    s(state, S_HWHEEL, 0)
     s(state, S_PACKETS, 0)
     s(state, S_DROPS, 0)
     s(state, S_MOVES, 0)
     s(state, S_CHANGED, 0)
     s(state, S_CLICKS, 0)
     s(state, S_PRESSED, 0)
+    s(state, S_HN, 0)
     set_bounds(state, w, h)
     s(state, S_X, w / 2)
     s(state, S_Y, h / 2)
@@ -246,6 +257,111 @@ fn init_inner(state: u64, w: u64, h: u64) -> bool {
     return true
 }
 
+// r826: set the head table. n < 2 switches the head clamp off.
+fn set_heads(state: u64, n: u64) {
+    var k: u64 = n
+    if k > HEAD_MAX {
+        k = HEAD_MAX
+    }
+    s(state, S_HN, k)
+}
+
+fn set_head(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64) {
+    if i >= HEAD_MAX {
+        return
+    }
+    s(state, S_HT + i * 32, x)
+    s(state, S_HT + i * 32 + 8, y)
+    s(state, S_HT + i * 32 + 16, w)
+    s(state, S_HT + i * 32 + 24, h)
+}
+
+fn heads(state: u64) -> u64 {
+    return g(state, S_HN)
+}
+
+// r826: read the head table back (the window server keeps no second copy). A slot >= HEAD_MAX reads as 0 (= not there).
+fn head_x(state: u64, i: u64) -> u64 {
+    if i >= HEAD_MAX {
+        return 0
+    }
+    return g(state, S_HT + i * 32)
+}
+
+fn head_y(state: u64, i: u64) -> u64 {
+    if i >= HEAD_MAX {
+        return 0
+    }
+    return g(state, S_HT + i * 32 + 8)
+}
+
+fn head_w(state: u64, i: u64) -> u64 {
+    if i >= HEAD_MAX {
+        return 0
+    }
+    return g(state, S_HT + i * 32 + 16)
+}
+
+fn head_h(state: u64, i: u64) -> u64 {
+    if i >= HEAD_MAX {
+        return 0
+    }
+    return g(state, S_HT + i * 32 + 24)
+}
+
+fn axis_dist(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo {
+        return lo - v
+    }
+    if v >= hi {
+        return v - (hi - 1)
+    }
+    return 0
+}
+
+// Pull a point that is in no head (a gap, or outside) back onto the NEAREST head (manhattan, like
+// lib/monitors/layout.fi clamp_x/clamp_y). Result: x << 32 | y. A point inside a head is returned as is.
+fn head_clamp(state: u64, px: i64, py: i64) -> u64 {
+    var best: u64 = HEAD_MAX
+    var bd: i64 = 0
+    var i: u64 = 0
+    while i < HEAD_MAX {
+        let w: u64 = g(state, S_HT + i * 32 + 16)
+        if w != 0 {
+            let x0: i64 = g(state, S_HT + i * 32) as i64
+            let y0: i64 = g(state, S_HT + i * 32 + 8) as i64
+            let d: i64 = axis_dist(px, x0, x0 + w as i64)
+                + axis_dist(py, y0, y0 + g(state, S_HT + i * 32 + 24) as i64)
+            if best == HEAD_MAX || d < bd {
+                best = i
+                bd = d
+            }
+        }
+        i = i + 1
+    }
+    var rx: i64 = px
+    var ry: i64 = py
+    if best < HEAD_MAX {
+        let x0: i64 = g(state, S_HT + best * 32) as i64
+        let y0: i64 = g(state, S_HT + best * 32 + 8) as i64
+        let x1: i64 = x0 + g(state, S_HT + best * 32 + 16) as i64
+        let y1: i64 = y0 + g(state, S_HT + best * 32 + 24) as i64
+        if rx < x0 {
+            rx = x0
+        }
+        if rx >= x1 {
+            rx = x1 - 1
+        }
+        if ry < y0 {
+            ry = y0
+        }
+        if ry >= y1 {
+            ry = y1 - 1
+        }
+    }
+    return ((rx as u64) << 32) | ((ry as u64) & 0xFFFFFFFF)
+}
+
 fn set_bounds(state: u64, w: u64, h: u64) {
     var mx: u64 = 0
     var my: u64 = 0
@@ -274,6 +390,11 @@ fn set_pos(state: u64, nx: u64, ny: u64) {
     if vy > g(state, S_MAXY) {
         vy = g(state, S_MAXY)
     }
+    if g(state, S_HN) >= 2 {
+        let hc: u64 = head_clamp(state, vx as i64, vy as i64)
+        vx = hc >> 32
+        vy = hc & 0xFFFFFFFF
+    }
     s(state, S_X, vx)
     s(state, S_Y, vy)
     s(state, S_CHANGED, 1)
@@ -301,6 +422,20 @@ fn buttons(state: u64) -> u64 {
 
 fn wheel(state: u64) -> u64 {
     return g(state, S_WHEEL)
+}
+
+fn hwheel(state: u64) -> u64 {
+    return g(state, S_HWHEEL)
+}
+
+// r804: one horizontal wheel step (+1 right, -1 left, as a gesture or an AC Pan report says). Natural scrolling
+// flips it like the vertical wheel. The sum is what the window server hands out (wm.hwheel_out).
+fn hwheel_add(state: u64, r: i64) {
+    let v: i64 = ptrcfg.scale_wheel(state, r)
+    if v != 0 {
+        s(state, S_HWHEEL, ((g(state, S_HWHEEL) as i64) + v) as u64)
+        s(state, S_CHANGED, 1)
+    }
 }
 
 fn packets(state: u64) -> u64 {
@@ -426,6 +561,11 @@ fn apply(state: u64, rad: u64) {
         }
         if py > g(state, S_MAXY) as i64 {
             py = g(state, S_MAXY) as i64
+        }
+        if g(state, S_HN) >= 2 {
+            let hc: u64 = head_clamp(state, px, py)
+            px = (hc >> 32) as i64
+            py = (hc & 0xFFFFFFFF) as i64
         }
         s(state, S_X, px as u64)
         s(state, S_Y, py as u64)
@@ -572,6 +712,7 @@ fn reset_counters(state: u64) {
     s(state, S_POLLS, 0)
     s(state, S_SPURIOUS, 0)
     s(state, S_WHEEL, 0)
+    s(state, S_HWHEEL, 0)
 }
 
 fn clicks(state: u64) -> u64 {
@@ -691,6 +832,15 @@ fn e2e_selftest(state: u64) {
     serial.puts((&l_w[0]) as u64)
     ptrcfg.put_signed(dw)
     serial.nl()
+    // r804: the horizontal wheel obeys natural scrolling too (+1 right becomes -1)
+    var l_h: [u8; 17] = "ptrcfg: e2e hw=\0\0"
+    let oh: u64 = g(state, S_HWHEEL)
+    hwheel_add(state, 1)
+    let dh: i64 = (g(state, S_HWHEEL) as i64) - (oh as i64)
+    serial.puts((&l_h[0]) as u64)
+    ptrcfg.put_signed(dh)
+    serial.nl()
+    s(state, S_HWHEEL, oh)
     ptrcfg.set(state, 100, 0, 0)
     set_pos(state, ox, oy)
     s(state, S_WHEEL, ow)

@@ -68,6 +68,7 @@ import lib.kstate
 import klog
 import wlan.usbchip
 import usbnet.rndis
+import usbnet.ncm
 import drv.net.usbnet
 import drv.usb.xhci
 import drv.hid.kbd
@@ -96,7 +97,7 @@ export {
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, wahl,
-    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC, DRV_HIDGEN, DRV_HUB, DRV_ECM, DRV_RNDIS, DRV_NCM,
     // ============================== RUNDE BLECHEINGABE
     // Was der Kern WIRKLICH sieht -- fuer den Bericht auf dem Schirm.
     // Justin kann nur fotografieren; eine Diagnose auf der seriellen
@@ -453,6 +454,24 @@ const DRV_HIDGEN: u64 = 4
 const DRV_HUB: u64 = 5
 // L-015: CDC-ECM network function (USB tethering, QEMU usb-net CDC config).
 const DRV_ECM: u64 = 6
+// r811: RNDIS network function (Android tethering, QEMU usb-net RNDIS configuration). Used ONLY when the device
+// offers no CDC-ECM configuration (ECM is preferred), or when the kernel word `rndisonly` forces it (test gate).
+const DRV_RNDIS: u64 = 7
+const DRV_ISOTEST: u64 = 8
+// r811: CDC-NCM network function (class 02/0D; many Android phones and every modern USB LAN dongle with NTB framing).
+// Last resort like RNDIS (pass 2 of `configure`): ECM is preferred. No QEMU model exists: only the host gate
+// tools/ncm covers the framing, the bring-up path is verified on real hardware.
+const DRV_NCM: u64 = 9
+// Scratch cells of the USB state page (inside the 0x200 bytes that `stage` clears).
+const S_RNDISOK: u64 = 0x1E0 // 1 = RNDIS control interfaces may be picked in `wanted`
+const S_NOECM: u64 = 0x1E8 // 1 = CDC-ECM is refused (word `rndisonly`)
+// r813: isochronous test bed (word `isoctest`). One audio streaming alt setting is remembered here (packed, see `iso_data`).
+const S_ISOOK: u64 = 0x1F0 // 1 = the audio control interface may be picked in `wanted`
+const S_ISOA: u64 = 0x1F8 // dci | iface << 8 | alt << 16 | binterval << 24 | wMaxPacketSize << 32 (0 = none found)
+const ISO_BUF_OFF: u64 = 0x56A00 // 8 packet buffers of 192 bytes (48 kHz, 16 bit, stereo, 1 ms)
+const ISO_BUFS: u64 = 8
+const ISO_PKT: u64 = 192
+const ISO_TDS: u64 = 200
 const CLS_CDC: u64 = 2
 const D_NCFG: u64 = 352 // bNumConfigurations of the device descriptor
 const D_MACSTR: u64 = 360 // ECM: string index of the MAC address
@@ -616,6 +635,15 @@ fn stage(state: u64) {
     zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
     if kstate.mode_on(state, kstate.M_NOHID) {
         s(state, S_NOHID, 1)
+    }
+    // r811: `rndisonly` forces the RNDIS configuration of a device that offers both (test bed of the RNDIS driver).
+    if kstate.mode_on(state, kstate.M_USBRNDIS) {
+        s(state, S_RNDISOK, 1)
+        s(state, S_NOECM, 1)
+    }
+    // r813: `isoctest` lets the audio control interface through `wanted`.
+    if kstate.mode_on(state, kstate.M_USBISOC) {
+        s(state, S_ISOOK, 1)
     }
     // RUNDE HID: der generische Weg. `nohidrep` ist die GEGENPROBE --
     // damit laeuft alles wie vor dieser Runde, im Boot-Protokoll, und
@@ -1179,8 +1207,23 @@ fn drv_name(k: u64) {
     var s_g: [u8; 7] = "hidgen\0"
     var s_h: [u8; 4] = "hub\0"
     var s_e: [u8; 4] = "ecm\0"
+    var s_r: [u8; 6] = "rndis\0"
+    var s_i: [u8; 5] = "isoc\0"
+    var s_c: [u8; 4] = "ncm\0"
+    if k == DRV_ISOTEST {
+        serial.puts((&s_i[0]) as u64)
+        return
+    }
+    if k == DRV_NCM {
+        serial.puts((&s_c[0]) as u64)
+        return
+    }
     if k == DRV_ECM {
         serial.puts((&s_e[0]) as u64)
+        return
+    }
+    if k == DRV_RNDIS {
+        serial.puts((&s_r[0]) as u64)
         return
     }
     if k == DRV_KBD {
@@ -1315,12 +1358,10 @@ fn describe(state: u64, d: u64) -> bool {
 // erste Schnittstelle mit einer bekannten Klasse gewinnt, und alles, was
 // danach an Endpunkten kommt, gehoert ihr -- bis die naechste
 // Schnittstelle anfaengt.
-fn configure(state: u64, d: u64) -> bool {
+// Walk the configurations of the device until one has an interface this kernel serves (a device with one
+// configuration behaves as before). Returns the length of the last configuration read, 0 on a transfer error.
+fn walk_configs(state: u64, d: u64, buf: u64) -> u64 {
     let slot: u64 = dg(state, d, D_SLOT)
-    let buf: u64 = state + DESC_OFF
-    // L-015: a device may offer several configurations (QEMU usb-net has
-    // RNDIS, CDC-ECM and Subset). Walk them until one has an interface this
-    // kernel serves; a device with one configuration behaves as before.
     var ncfg: u64 = dg(state, d, D_NCFG)
     if ncfg < 1 {
         ncfg = 1
@@ -1334,11 +1375,11 @@ fn configure(state: u64, d: u64) -> bool {
         zero(buf, 512)
         if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
             (D_CONFIGURATION << 8) | ci, 0, 9, buf, true) < 9 {
-            return false
+            return 0
         }
         total = b16(buf, 2)
         if total < 9 {
-            return false
+            return 0
         }
         if total > 512 {
             total = 512
@@ -1352,7 +1393,7 @@ fn configure(state: u64, d: u64) -> bool {
         zero(buf, 512)
         if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
             (D_CONFIGURATION << 8) | ci, 0, total, buf, true) < (total as i64) {
-            return false
+            return 0
         }
         parse(state, d, buf, total)
         if dg(state, d, D_DRIVER) != DRV_NONE {
@@ -1361,8 +1402,38 @@ fn configure(state: u64, d: u64) -> bool {
             ci = ci + 1
         }
     }
+    return total
+}
+
+fn configure(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let buf: u64 = state + DESC_OFF
+    // L-015: a device may offer several configurations (QEMU usb-net has RNDIS, CDC-ECM and Subset).
+    // r811: first pass WITHOUT RNDIS (ECM is preferred); a second pass accepts RNDIS when nothing else matched.
+    var total: u64 = walk_configs(state, d, buf)
+    if total == 0 {
+        return false
+    }
+    if dg(state, d, D_DRIVER) == DRV_NONE && g(state, S_RNDISOK) == 0 {
+        s(state, S_RNDISOK, 1)
+        total = walk_configs(state, d, buf)
+        s(state, S_RNDISOK, 0)
+        if total == 0 {
+            return false
+        }
+    }
     if dg(state, d, D_DRIVER) == DRV_ECM {
         ecm_data(state, d, buf, total)
+    }
+    if dg(state, d, D_DRIVER) == DRV_RNDIS {
+        rndis_data(state, d, buf, total)
+    }
+    if dg(state, d, D_DRIVER) == DRV_NCM {
+        // NCM data interface = same layout as ECM: class 0A, bulk pipes in alternate setting >= 1.
+        ecm_data(state, d, buf, total)
+    }
+    if dg(state, d, D_DRIVER) == DRV_ISOTEST {
+        iso_data(state, d, buf, total)
     }
     // RUNDE BLECHEINGABE: die Klasse der GEWAEHLTEN Schnittstelle steht
     // auf dem Schirm -- und wenn keine gewaehlt wurde, die der ersten.
@@ -1657,8 +1728,23 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         }
         return sub == 6 && pro == 0x50
     }
+    // r813: audio control interface (class 01, subclass 01), test bed only.
+    if cls == 1 && sub == 1 {
+        return g(state, S_ISOOK) != 0
+    }
     if cls == CLS_CDC {
-        return sub == 6
+        if sub == 2 && pro == 0xFF {
+            return g(state, S_RNDISOK) != 0
+        }
+        // r811: CDC-NCM (subclass 0D) is a last resort like RNDIS: only in pass 2.
+        if sub == 0x0D {
+            return g(state, S_RNDISOK) != 0
+        }
+        return sub == 6 && g(state, S_NOECM) == 0
+    }
+    // r811: RNDIS control interface of Android (E0/01/03) and of Windows-compatible gadgets (EF/04/01).
+    if (cls == 0xE0 && sub == 1 && pro == 3) || (cls == 0xEF && sub == 4 && pro == 1) {
+        return g(state, S_RNDISOK) != 0
     }
     return false
 }
@@ -1679,8 +1765,18 @@ fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
     if cls == CLS_MSC {
         return DRV_MSC
     }
+    if cls == 1 && sub == 1 {
+        return DRV_ISOTEST
+    }
     if cls == CLS_CDC && sub == 6 {
         return DRV_ECM
+    }
+    if cls == CLS_CDC && sub == 0x0D {
+        return DRV_NCM
+    }
+    if (cls == CLS_CDC && sub == 2 && pro == 0xFF) || (cls == 0xE0 && sub == 1 && pro == 3)
+        || (cls == 0xEF && sub == 4 && pro == 1) {
+        return DRV_RNDIS
     }
     return DRV_NONE
 }
@@ -1823,6 +1919,20 @@ fn endpoints(state: u64, d: u64) -> bool {
             top = outdci
         }
     }
+    // r813: the isochronous endpoint of the test driver.
+    if dg(state, d, D_DRIVER) == DRV_ISOTEST && g(state, S_ISOA) != 0 {
+        let a: u64 = g(state, S_ISOA)
+        let adci: u64 = a & 0xFF
+        let i: u64 = xhci.isoc_open(state, slot, adci, false, dg(state, d, D_SPEED),
+            (a >> 32) & 0xFFFF, 0, 0, (a >> 24) & 0xFF)
+        if i >= xhci.MAX_EP || !xhci.isoc_fill_ctx(state, slot, adci) {
+            return false
+        }
+        add = add | (1 << adci)
+        if adci > top {
+            top = adci
+        }
+    }
     build_slot(state, d, top)
     wr32(ic, 0)
     wr32(ic + 4, add)
@@ -1960,7 +2070,139 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_ECM {
         ecm_start(state, d)
+        return
     }
+    if k == DRV_RNDIS {
+        rndis_start(state, d)
+        return
+    }
+    if k == DRV_NCM {
+        ncm_start(state, d)
+        return
+    }
+    if k == DRV_ISOTEST {
+        iso_start(state, d)
+    }
+}
+
+// ============================================================ r813: isoc test bed
+//
+// Scan the configuration for the first audio STREAMING interface (class 01,
+// subclass 02) alternate setting >= 1 that has an isochronous OUT endpoint, and
+// remember it packed in S_ISOA. QEMU `usb-audio` offers exactly that (alt 1,
+// 192 bytes per 1 ms frame, full speed).
+fn iso_data(state: u64, d: u64, buf: u64, total: u64) {
+    s(state, S_ISOA, 0)
+    var at: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                mine = b8(buf, at + 5) == 1 && b8(buf, at + 6) == 2 && alt != 0
+                    && g(state, S_ISOA) == 0
+            } else if kind == 5 && len >= 7 && mine {
+                let addr: u64 = b8(buf, at + 2)
+                if (b8(buf, at + 3) & 3) == 1 && (addr & 0x80) == 0 {
+                    let dci: u64 = (addr & 0xF) * 2
+                    s(state, S_ISOA, dci | (iface << 8) | (alt << 16)
+                        | (b8(buf, at + 6) << 24) | (b16(buf, at + 4) << 32))
+                    mine = false
+                }
+            }
+            at = at + len
+        }
+    }
+}
+
+// Fill one packet buffer with a 1 kHz square wave (48 frames per period, 16 bit stereo).
+fn iso_fill(state: u64, n: u64) {
+    let p: u64 = state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT
+    var f: u64 = 0
+    while f < 48 {
+        var v: u64 = 0x1F40
+        if f >= 24 {
+            v = 0xE0C0
+        }
+        wr32(p + f * 4, v | (v << 16))
+        f = f + 1
+    }
+}
+
+// Select the streaming alt setting, then feed ISO_TDS TDs (one per frame) and
+// count what the controller reports. One status line on the serial port.
+fn iso_start(state: u64, d: u64) {
+    var s_head: [u8; 16] = "usb: isoc alt=\0\0"
+    var s_fail: [u8; 18] = "usb: isoc failed\0\0"
+    var s_q: [u8; 9] = " queued=\0"
+    var s_e: [u8; 9] = " events=\0"
+    var s_b: [u8; 8] = " bytes=\0"
+    var s_u: [u8; 8] = " under=\0"
+    var s_m: [u8; 9] = " missed=\0"
+    var s_x: [u8; 6] = " err=\0"
+    var s_mps: [u8; 6] = " mps=\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    let a: u64 = g(state, S_ISOA)
+    if a == 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    let dci: u64 = a & 0xFF
+    if xhci.control(state, slot, 0x01, 0x0B, (a >> 16) & 0xFF, (a >> 8) & 0xFF,
+        0, 0, false) < 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    var n: u64 = 0
+    var spin: u64 = 0
+    while n < ISO_BUFS {
+        iso_fill(state, n)
+        if xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + n * ISO_PKT, ISO_PKT) {
+            n = n + 1
+        } else {
+            n = ISO_BUFS
+        }
+    }
+    n = xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED)
+    while spin < 4000 && xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS) < ISO_TDS {
+        xhci.drain(state)
+        while n < ISO_TDS && xhci.isoc_pending(state, slot, dci) < ISO_BUFS {
+            iso_fill(state, n)
+            if !xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT, ISO_PKT) {
+                break
+            }
+            n = n + 1
+        }
+        xhci.udelay(state, 500)
+        spin = spin + 1
+    }
+    xhci.drain(state)
+    serial.puts((&s_head[0]) as u64)
+    serial.dec((a >> 16) & 0xFF)
+    serial.puts((&s_mps[0]) as u64)
+    serial.dec((a >> 32) & 0x7FF)
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_BYTES))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_UNDER))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_MISSED))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_ERR))
+    serial.nl()
 }
 
 // L-015: bring a CDC-ECM function up. MAC from the string descriptor,
@@ -2003,6 +2245,199 @@ fn ecm_start(state: u64, d: u64) {
         return
     }
     serial.puts((&s_mac[0]) as u64)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// r811: RNDIS. The bulk pipes live in the DATA interface (class 0A), normally in alternate setting 0 (QEMU, Android);
+// an alternate setting >= 1 is taken when that is where the pipes are. The data interface comes from the union
+// descriptor, else it is the interface behind the control interface. The notification endpoint is not used
+// (responses are fetched by polling GET_ENCAPSULATED_RESPONSE).
+fn rndis_data(state: u64, d: u64, buf: u64, total: u64) {
+    ds(state, d, D_INTDCI, 0)
+    ds(state, d, D_INDCI, 0)
+    ds(state, d, D_OUTDCI, 0)
+    ds(state, d, D_DATAALT, 0)
+    var dif: u64 = dg(state, d, D_DATAIF)
+    if dif == 0 {
+        dif = dg(state, d, D_IFACE) + 1
+    }
+    ds(state, d, D_DATAIF, dif)
+    var at: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = b8(buf, at + 2) == dif && b8(buf, at + 5) == 0x0A
+                    && dg(state, d, D_INDCI) == 0 && b8(buf, at + 4) >= 2
+                if mine {
+                    ds(state, d, D_DATAALT, b8(buf, at + 3))
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+// One RNDIS control exchange: SEND_ENCAPSULATED_COMMAND with `n` bytes at `cmd`, then poll
+// GET_ENCAPSULATED_RESPONSE until the answer of type `want` (completion type) arrives. Indications and
+// keepalives in between are skipped. Returns the answer length (0 = none/invalid); the answer is at `rsp`.
+fn rndis_exchange(state: u64, d: u64, cmd: u64, n: u64, rsp: u64, want: u64) -> u64 {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let iface: u64 = dg(state, d, D_IFACE)
+    if xhci.control(state, slot, 0x21, 0x00, 0, iface, n, cmd, false) < 0 {
+        return 0
+    }
+    var tries: u64 = 0
+    while tries < 64 {
+        zero(rsp, 128)
+        let got: i64 = xhci.control(state, slot, 0xA1, 0x01, 0, iface, 128, rsp, true)
+        if got >= 12 && rndis.msg_type(rsp, got as u64) == want {
+            return rndis.msg_len(rsp, got as u64)
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+// r811: bring an RNDIS function up: INITIALIZE, QUERY permanent MAC, SET packet filter, then hand the slot and
+// the bulk pipes to the network driver (mode RNDIS).
+fn rndis_start(state: u64, d: u64) {
+    var s_bad: [u8; 19] = "usb: rndis failed \0"
+    var s_mac: [u8; 12] = "usb: rndis \0"
+    var s_step: [u8; 7] = "step=\0\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    let cmd: u64 = state + DESC_OFF
+    let rsp: u64 = state + DESC_OFF + 192
+    var step: u64 = 0
+    zero(cmd, 160)
+    var n: u64 = rndis.build_init(cmd, 1, 2048)
+    var l: u64 = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_INIT_C)
+    step = 1
+    var ok: bool = l != 0 && rndis.init_c_ok(rsp, l)
+    if ok {
+        step = 2
+        zero(cmd, 64)
+        n = rndis.build_query(cmd, 2, rndis.OID_802_3_PERMANENT_ADDRESS)
+        l = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_QUERY_C)
+        ok = l != 0 && rndis.query_c_info_len(rsp, l) == 6
+    }
+    var mac: u64 = 0
+    if ok {
+        let off: u64 = rndis.query_c_info_off(rsp, l)
+        var i: u64 = 0
+        while i < 6 {
+            mac = mac | (b8(rsp, off + i) << (i * 8))
+            i = i + 1
+        }
+        step = 3
+        zero(cmd, 64)
+        n = rndis.build_set_filter(cmd, 3,
+            rndis.FILTER_DIRECTED | rndis.FILTER_MULTICAST | rndis.FILTER_BROADCAST)
+        l = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_SET_C)
+        ok = l != 0 && rndis.msg_status(rsp, l) == rndis.STATUS_SUCCESS
+    }
+    if ok && dg(state, d, D_DATAALT) != 0 {
+        step = 4
+        ok = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+            dg(state, d, D_DATAIF), 0, 0, false) >= 0
+    }
+    if ok {
+        step = 5
+        ok = usbnet.attach_rndis(state, slot, dg(state, d, D_INDCI), dg(state, d, D_OUTDCI),
+            dg(state, d, D_BULKMPS), mac)
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// r811: bring a CDC-NCM function up (NTB16, no CRC): MAC from the string descriptor, GET_NTB_PARAMETERS,
+// SET_NTB_INPUT_SIZE (2048: the RX buffer of the network driver), SET_INTERFACE to the data alternate setting,
+// then hand the slot, the bulk pipes and the device's TX framing rules to the network driver (mode NCM).
+// Failure prints `usb: ncm failed step=N` (1 MAC, 2 parameters, 3 input size, 4 interface, 5 attach).
+fn ncm_start(state: u64, d: u64) {
+    var s_bad: [u8; 16] = "usb: ncm failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_mac: [u8; 9] = "usb: ncm\0"
+    let slot: u64 = dg(state, d, D_SLOT)
+    let iface: u64 = dg(state, d, D_IFACE)
+    let buf: u64 = state + DESC_OFF
+    var step: u64 = 1
+    zero(buf, 64)
+    let n: i64 = xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (3 << 8) | dg(state, d, D_MACSTR), 0x0409, 64, buf, true)
+    var macb: u64 = state + DESC_OFF + 128
+    zero(macb, 8)
+    var ok: bool = n >= 26 && dg(state, d, D_MACSTR) != 0
+        && rndis.cdc_mac_from_string(buf, n as u64, macb)
+    let par: u64 = state + DESC_OFF + 192
+    if ok {
+        step = 2
+        zero(par, 32)
+        let got: i64 = xhci.control(state, slot, ncm.REQT_GET, ncm.REQ_GET_NTB_PARAMETERS, 0, iface,
+            ncm.PARAMS_LEN, par, true)
+        ok = got >= 28 && ncm.params_ok(par, got as u64) && ncm.params_supports_ntb16(par)
+    }
+    if ok {
+        step = 3
+        // A device may refuse this request; its default input size could then exceed our buffer, which the
+        // host controller truncates (babble error, counted and dropped) instead of overflowing.
+        let sz: u64 = state + DESC_OFF + 160
+        zero(sz, 8)
+        let m: u64 = ncm.build_set_input_size(sz, 2048)
+        xhci.control(state, slot, ncm.REQT_SET, ncm.REQ_SET_NTB_INPUT_SIZE, 0, iface, m, sz, false)
+        step = 4
+        ok = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+            dg(state, d, D_DATAIF), 0, 0, false) >= 0
+    }
+    var mac: u64 = 0
+    if ok {
+        step = 5
+        var i: u64 = 0
+        while i < 6 {
+            mac = mac | (b8(macb, i) << (i * 8))
+            i = i + 1
+        }
+        ok = usbnet.attach_ncm(state, slot, dg(state, d, D_INDCI), dg(state, d, D_OUTDCI),
+            dg(state, d, D_BULKMPS), mac, ncm.params_out_div(par), ncm.params_out_rem(par),
+            ncm.params_out_align(par), ncm.params_out_max(par))
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.put(32 as u8)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
     hex2(mac & 0xFF)
     var k: u64 = 1
     while k < 6 {

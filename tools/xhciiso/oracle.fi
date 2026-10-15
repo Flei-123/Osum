@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/xhciiso/oracle.fi -- host program for lib/xhciiso/iso.fi.
+// Prints "OK <name>" / "FAIL <name>" per promise; run by tools/xhciiso/run.sh.
+
+import std.rt
+import std.io
+import xhciiso.iso
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn main() -> i32 {
+    // endpoint type
+    chk("ep_type out = 1", iso.ep_type(false) == 1)
+    chk("ep_type in = 5", iso.ep_type(true) == 5)
+
+    // wMaxPacketSize split
+    chk("mps_of masks bits 12..11", iso.mps_of(0x1400) == 0x400)
+    chk("mps_of plain", iso.mps_of(192) == 192)
+    chk("burst hs: bits 12..11", iso.burst_of(3, 0x1400, 7) == 2)
+    chk("burst hs: 0 extra", iso.burst_of(3, 0x0400, 7) == 0)
+    chk("burst fs: always 0", iso.burst_of(1, 0x1400, 7) == 0)
+    chk("burst ss: companion", iso.burst_of(4, 1024, 5) == 5)
+    chk("burst ss: clamp 15", iso.burst_of(4, 1024, 40) == 15)
+    chk("mult ss: attrs & 3", iso.mult_of(4, 2) == 2)
+    chk("mult ss: clamp 2", iso.mult_of(4, 3) == 2)
+    chk("mult hs: 0", iso.mult_of(3, 2) == 0)
+
+    // ESIT payload
+    chk("esit plain", iso.max_esit(192, 0, 0) == 192)
+    chk("esit hs 3 per uframe", iso.max_esit(1024, 2, 0) == 3072)
+    chk("esit ss burst*mult", iso.max_esit(1024, 3, 2) == 12288)
+
+    // interval
+    chk("interval fs bInterval 1 -> 3", iso.interval_of(1, 1) == 3)
+    chk("interval fs bInterval 4 -> 6", iso.interval_of(1, 4) == 6)
+    chk("interval fs clamps at 15", iso.interval_of(1, 16) == 15)
+    chk("interval hs bInterval 1 -> 0", iso.interval_of(3, 1) == 0)
+    chk("interval hs bInterval 4 -> 3", iso.interval_of(3, 4) == 3)
+    chk("interval ss bInterval 0 treated as 1", iso.interval_of(4, 0) == 0)
+
+    // context words (golden)
+    chk("dw0 interval 3 mult 0", iso.ctx_dw0(3, 0, 192) == 0x00030000)
+    chk("dw0 mult 2", iso.ctx_dw0(0, 2, 1024) == 0x00000200)
+    chk("dw0 esit hi", iso.ctx_dw0(0, 0, 0x30000) == 0x03000000)
+    chk("dw1 isoc out fs", iso.ctx_dw1(1, 192, 0) == 0x00C00008)
+    chk("dw1 isoc in hs burst 2", iso.ctx_dw1(5, 1024, 2) == 0x04000228)
+    chk("dw1 cerr is 0", (iso.ctx_dw1(5, 1024, 2) & 6) == 0)
+    chk("dw4 avg + esit lo", iso.ctx_dw4(192, 192) == 0x00C000C0)
+    chk("dw4 esit lo only 16 bits", iso.ctx_dw4(0, 0x30000) == 0)
+    chk("dw4 esit lo 16 bit value", iso.ctx_dw4(0, 0x1234) == 0x12340000)
+
+    // packets / fit
+    chk("packets exact", iso.packets(192, 192) == 1)
+    chk("packets round up", iso.packets(193, 192) == 2)
+    chk("packets zero length = 1", iso.packets(0, 192) == 1)
+    chk("packets mps 0 = 0", iso.packets(10, 0) == 0)
+    chk("td fits one packet", iso.td_fits(192, 192, 0, 0))
+    chk("td too big for fs", !iso.td_fits(193, 192, 0, 0))
+    chk("td fits hs 3 packets", iso.td_fits(3072, 1024, 2, 0))
+    chk("td 17 bit limit", !iso.td_fits(0x20000, 2047, 15, 9))
+
+    // TBC / TLBPC
+    chk("tbc fs 0", iso.tbc(1, 1, 0) == 0)
+    chk("tbc hs 0", iso.tbc(3, 7, 1) == 0)
+    chk("tbc ss 7 packets burst 3 -> 1", iso.tbc(4, 7, 3) == 1)
+    chk("tbc ss 8 packets burst 3 -> 1", iso.tbc(4, 8, 3) == 1)
+    chk("tbc ss 9 packets burst 3 -> 2", iso.tbc(4, 9, 3) == 2)
+    chk("tlbpc fs 0", iso.tlbpc(1, 1, 0) == 0)
+    chk("tlbpc hs packets-1", iso.tlbpc(3, 3, 2) == 2)
+    chk("tlbpc ss 7 packets burst 3 -> 2", iso.tlbpc(4, 7, 3) == 2)
+    chk("tlbpc ss 8 packets burst 3 -> 3", iso.tlbpc(4, 8, 3) == 3)
+    chk("tlbpc ss 1 packet -> 0", iso.tlbpc(4, 1, 3) == 0)
+
+    // TRB words
+    chk("status len", iso.trb_status(192, 0) == 192)
+    chk("status td size", iso.trb_status(192, 3) == (192 | (3 << 17)))
+    chk("status len 17 bit mask", iso.trb_status(0x20005, 0) == 5)
+    chk("status td size clamp 31", iso.trb_status(1, 99) == (1 | (31 << 17)))
+    chk("control out sia ioc", iso.trb_control(0, 0, true, true, false) == 0x80001420)
+    chk("control in isp", iso.trb_control(0, 0, true, true, true) == 0x80001424)
+    chk("control tbc tlbpc", iso.trb_control(2, 3, false, true, false) == (0x1420 | (2 << 7) | (3 << 16)))
+    chk("control no sia", (iso.trb_control(0, 0, false, true, false) >> 31) == 0)
+    chk("control type is 5", ((iso.trb_control(1, 1, true, true, true) >> 10) & 0x3F) == 5)
+
+    // completion classes
+    chk("cc success ok", iso.cc_class(1) == 0)
+    chk("cc short ok", iso.cc_class(13) == 0)
+    chk("cc ring underrun", iso.cc_class(14) == 1)
+    chk("cc ring overrun", iso.cc_class(15) == 1)
+    chk("cc missed service", iso.cc_class(23) == 2)
+    chk("cc stall is error", iso.cc_class(6) == 3)
+    chk("cc babble is error", iso.cc_class(3) == 3)
+    chk("cc buffer error is error", iso.cc_class(2) == 3)
+    return 0
+}

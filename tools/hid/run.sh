@@ -287,7 +287,10 @@ gleich "Randstreifen rechts: +300 Einheiten = genau eine Radrastung" \
     "$(seg "gest: rand aufsetzen" "gest: rollen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "zwei Finger rollen: genau eine Radrastung (nicht beim Entscheiden)" \
     "hidev: maus 0x0 x=0x0 y=0x0 r=0x1" \
-    "$(seg "gest: rollen aufsetzen" "gest: kneifen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+    "$(seg "gest: rollen aufsetzen" "gest: seit aufsetzen" | tr '\n' '|' | sed 's/|$//')"
+gleich "zwei Finger seitwaerts: genau eine waagrechte Radrastung nach rechts, kein Zeigerpaket" \
+    "hidev: geste seitwaerts dx=0xc8|hidev: hrad 0x1" \
+    "$(seg "gest: seit aufsetzen" "gest: kneifen aufsetzen" | grep -v 'geste seitwaerts dx=0x0' | tr '\n' '|' | sed 's/|$//')"
 gleich "Kneifen: Abstand +200, kein Zeigerpaket" \
     "hidev: geste zoom d=0xc8" \
     "$(seg "gest: kneifen aufsetzen" "gest: wisch aufsetzen" | tr '\n' '|' | sed 's/|$//')"
@@ -302,6 +305,8 @@ gleich "Handballen + Finger: der Finger tippt, der Ballen zaehlt nicht" \
 GL=$(grep -a '^hidin: geste an=1' "$G")
 gleich "Zaehler: 4 Tipps" "4" "$(echo "$GL" | sed 's/.* tipp=\([0-9]*\).*/\1/')"
 gleich "Zaehler: 2 Rollen" "2" "$(echo "$GL" | sed 's/.* rollen=\([0-9]*\).*/\1/')"
+gleich "Zaehler: 1 Seitwaerts-Rollen, 1 waagrechte Rastung" "1/1" \
+    "$(echo "$GL" | sed 's/.* seit=\([0-9]*\).*/\1/')/$(echo "$GL" | sed 's/.* hrad=\([0-9]*\).*/\1/')"
 gleich "Zaehler: 1 Wisch, 1 Kneifen" "1/1" \
     "$(echo "$GL" | sed 's/.* wisch=\([0-9]*\).* zoom=\([0-9]*\).*/\1\/\2/')"
 gleich "Zaehler: letzter Wisch = Richtung 1, 3 Finger (259)" "259" \

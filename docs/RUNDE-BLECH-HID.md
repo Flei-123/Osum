@@ -488,3 +488,9 @@ taskbar: STEHT x=0 y=<Höhe-28> w=<Breite> h=28
 stehen. Steht sie da und ist unten trotzdem nichts zu sehen, ist es ein
 Zeichenfehler und kein Startfehler — dann bitte diese Zeile
 fotografieren.
+
+## r804: horizontal wheel + swipe (15.10.2026)
+- Sum `ps2m.S_HWHEEL` (0x0C0, + = right) via `ps2m.hwheel_add` (honours natural scrolling). Sources: two-finger sideways scroll (`hidin.hrollen`, D_HSCROLL 0x98, one step per SCROLL_STEP) and HID AC Pan (consumer 0x238). Counter C_GHWHL 0xB0, trace `hidev: hrad`.
+- wm: `E_HWHEEL` = 10 (`hwheel_out`, same layout as E_WHEEL, + = right, not flipped); wlibc `EV_HWHEEL` 10, wlib `LE_HWHEEL` 6 (canvas ring), fuiapp `EV_HWHEEL` 7.
+- Swipe: `hidin` -> `gfx.mouse_swipe` -> `wm.swipe_do` (3+ fingers: left = next window, right = previous; up/down no consumer). Zoom gesture: no consumer yet.
+- Gates: `tools/hid/run.sh` (gesture replay incl. sideways case), `tools/ptrcfg/run.sh` (e2e hw), `tools/hidwheel/run.sh` (word `hwheeltest`, wm.hw_demo).

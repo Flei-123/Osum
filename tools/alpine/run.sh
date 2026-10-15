@@ -49,6 +49,10 @@ if [ -r "$SRC/SHA256SUMS.txt" ]; then
 fi
 python3 -I "$HERE/mkspec.py" "$TARBALL" "$D/ex" "$D/spec.txt" > "$D/mkspec.txt" && ok "$(cat "$D/mkspec.txt")" || { bad "mkspec failed"; cat "$D/mkspec.txt"; }
 python3 -I "$HERE/mkspec.py" "$TARBALL" "$D/ex" "$D/spec-alpine.txt" --prefix=/alpine > /dev/null
+# r822: a tiny local apk repository (one package) that the probes install with `apk add --repository /repo`
+python3 -I "$HERE/mkapk.py" "$D/repo" > "$D/repo.list" && ok "local apk repository built ($(wc -l < "$D/repo.list") files)" || bad "mkapk failed"
+REPO_ROOT=(/repo/ /repo/x86_64/); REPO_ALPINE=(/alpine/repo/ /alpine/repo/x86_64/)
+while IFS= read -r l; do REPO_ROOT+=("/repo$l"); REPO_ALPINE+=("/alpine/repo$l"); done < "$D/repo.list"
 
 echo "== 1. kernel =="
 KNEW=${KERNEL:-$D/k.mb}
@@ -104,7 +108,7 @@ for ST in $STAGES; do
     root)
         grep -v '^/etc/inittab' "$D/spec.txt" > "$D/spec-root.txt"
         printf '::sysinit:/bin/sh /etc/probe.sh\n::shutdown:/bin/true\n' > "$D/inittab-root"
-        mkimage "$D/root.img" "$D/spec-root.txt" /proc/ /sys/ /run/ /w/ "/etc/probe.sh=$HERE/probe.sh" "/etc/inittab=$D/inittab-root" \
+        mkimage "$D/root.img" "$D/spec-root.txt" /proc/ /sys/ /run/ /w/ "/etc/probe.sh=$HERE/probe.sh" "/etc/inittab=$D/inittab-root" "${REPO_ROOT[@]}" \
             && ok "[root] image built" || { bad "[root] image does not build"; tail -3 "$D/mkfs.log"; continue; }
         boot "$D/root.img" "$D/root.ser"; rc=$?
         echo "        qemu rc=$rc"
@@ -116,7 +120,7 @@ for ST in $STAGES; do
         LD=$D/ex/$(grep -o '^/alpine/lib/ld-musl-x86_64.so.1=[^@]*' "$D/spec-alpine.txt" | sed 's|.*/ex/||')
         printf '::sysinit:/bin/chroot /alpine /usr/bin/env CHROOTED=1 /bin/sh /etc/probe.sh\n::shutdown:/bin/true\n' > "$D/inittab-ch"
         printf '::sysinit:/bin/true\n' > /dev/null
-        mkimage "$D/ch.img" "$D/spec-ch.txt" /bin/@755 /lib/@755 /etc/@755 /proc/ /dev/ /tmp/ /sbin/ /alpine/proc/ /alpine/sys/ /alpine/run/ \
+        mkimage "$D/ch.img" "$D/spec-ch.txt" /bin/@755 /lib/@755 /etc/@755 /proc/ /dev/ /tmp/ /sbin/ /alpine/proc/ /alpine/sys/ /alpine/run/ "${REPO_ALPINE[@]}" \
             "/bin/busybox=$BB@755" "/lib/ld-musl-x86_64.so.1=$LD@755" "/bin/sh->/bin/busybox" "/bin/chroot->/bin/busybox" "/bin/true->/bin/busybox" \
             "/sbin/init->/bin/busybox" "/etc/inittab=$D/inittab-ch" "/alpine/etc/probe.sh=$HERE/probe.sh" \
             && ok "[chroot] image built" || { bad "[chroot] image does not build"; tail -3 "$D/mkfs.log"; continue; }

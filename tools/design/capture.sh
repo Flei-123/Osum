@@ -425,15 +425,15 @@ fi
 if [ -z "$drehbuch" ]; then
     drehbuch="$OUT/drehbuch.txt"
     cat > "$drehbuch" <<'DREH'
-# `wig wigstart` laesst den Starter mit hochkommen -- das Startmenue ist
-# also schon offen.  Zuerst wird es zugemacht, damit der Schreibtisch der
-# Schreibtisch ist und nicht der Schreibtisch mit einem Fenster darauf.
+# r837: the start menu is CLOSED after boot (no `wigstart` any more, r835). Esc closes an
+# open menu and does nothing otherwise, so the desktop is the desktop either way; then ONE
+# click on Start opens the menu (two clicks closed it again).
 warteauf 'launcher: ready' || 40
 warte 1
-klickauf start
+taste esc
 warte 2
 foto 01-schreibtisch
-# --- das Startmenue wieder auf
+# --- open the start menu
 klickauf start
 warte 2
 foto 02-startmenue

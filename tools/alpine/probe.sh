@@ -100,16 +100,20 @@ ok hostname 'hostname'
 chk apk-version "apk-tools 3" 'apk --version | cut -c1-11'
 ok apk-info 'apk info'
 ok apk-info-v 'apk info -v'
-chk apk-info-musl "musl" 'apk info | grep -x musl'
+chk apk-info-musl "musl" 'apk info 2>/dev/null | grep -x musl'
 ok apk-list-installed 'apk list -I'
 ok apk-stats 'apk stats'
 chk apk-who "/lib/ld-musl-x86_64.so.1" 'apk info -W /lib/ld-musl-x86_64.so.1 | tr -d "\n" | sed "s/.* owned by .*/\/lib\/ld-musl-x86_64.so.1/"'
 ok apk-verify 'apk verify'
 ok apk-policy 'apk policy busybox'
-# --- apk add from a local mirror (only when run.sh packed one under /repo)
-if [ -f /repo/APKINDEX.tar.gz ]; then
-    chk apk-add-local "ok" 'apk add --no-network --allow-untrusted --repository /repo tree >/tmp/apk.out 2>&1 && echo ok || { tail -3 /tmp/apk.out | tr "\n" "|"; }'
-    ok apk-add-run 'tree --version'
+# --- apk add from a local mirror (r822: run.sh packs a one-package repository under /repo)
+if [ -f /repo/x86_64/APKINDEX.tar.gz ]; then
+    chk apk-add-local "ok" 'apk add --no-network --allow-untrusted --repository /repo osumhello >/tmp/apk.out 2>&1 && echo ok || { tail -3 /tmp/apk.out | tr "\n" "|"; }'
+    chk apk-add-run "osumhello 1.0" 'osumhello'
+    chk apk-add-data "hello from the local mirror" 'cat /usr/share/osumhello/data.txt'
+    ok apk-info-e 'apk info -e osumhello'
+    ok apk-info-files 'apk info --no-network -L osumhello 2>/dev/null | grep -q usr/bin/osumhello'
+    chk apk-del "ok" 'apk del --no-network osumhello >/tmp/apk2.out 2>&1 && [ ! -e /usr/bin/osumhello ] && echo ok || { tail -3 /tmp/apk2.out | tr "\n" "|"; }'
 fi
 # ps after the end marker: busybox ps segfaults (gaps.txt) and, on the root stage, ends the guest before anything behind it runs
 echo "AL end ok"

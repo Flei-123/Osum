@@ -904,36 +904,80 @@ fn make_status(state: u64, t: u64) -> u64 {
     return p
 }
 
+// r823: ` <number>` -- one more field of the stat line.
+fn st_num(state: u64, at: u64, v: u64) -> u64 {
+    let p: u64 = w_ch(state, at, 32)
+    return w_num(state, p, v)
+}
+
+// `/proc/<pid>/stat` in the Linux layout: 52 fields (proc(5)). busybox `ps`, procps and htop skip a fixed number of fields to find
+// utime/start_time/vsize; with the old 10-field line the skip ran past the end of the buffer (busybox ps: SIGSEGV).
+// Fields 1-4 are what `tools/k14` compares with SYS_OSUM_PSTAT (pid, (name), state, ppid). The kernel has no per-process
+// time split, no tty and no signal masks: those fields are 0, which is a valid value for each of them.
 fn make_pstat(state: u64, t: u64) -> u64 {
     var name: [u8; 12] = [0 as u8; 12]
+    var cm: [u8; 17] = [0 as u8; 17]
     var p: u64 = 0
     kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
+    let ca: u64 = sched.tget(state, t, sched.T_COMMA)
+    let cb: u64 = sched.tget(state, t, sched.T_COMMB)
+    var ci: u64 = 0
+    while ci < 8 {
+        kstate.set8(((&cm[0]) as u64) + ci, ((ca >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < 7 {
+        kstate.set8(((&cm[0]) as u64) + 8 + ci, ((cb >> (ci * 8)) & 255) as u8)
+        ci = ci + 1
+    }
     p = w_num(state, p, sched.tget(state, t, sched.T_PID))
     p = w_ch(state, p, 32)
     p = w_ch(state, p, 40) // '('
-    p = w_str(state, p, (&name[0]) as u64)
+    if ca != 0 {
+        p = w_str(state, p, (&cm[0]) as u64)
+    } else {
+        p = w_str(state, p, (&name[0]) as u64)
+    }
     p = w_ch(state, p, 41) // ')'
     p = w_ch(state, p, 32)
     p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
-    p = w_ch(state, p, 32)
     let par: u64 = sched.tget(state, t, sched.T_PARENT)
     var ppid: u64 = 0
     if par < kstate.MAX_TASKS {
         ppid = sched.tget(state, par, sched.T_PID)
     }
-    p = w_num(state, p, ppid)
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_PGID))
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_SID))
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_PRIO))
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_TICKS))
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_RUNS))
-    p = w_ch(state, p, 32)
-    p = w_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = st_num(state, p, ppid) // 4
+    p = st_num(state, p, sched.tget(state, t, sched.T_PGID)) // 5 pgrp
+    p = st_num(state, p, sched.tget(state, t, sched.T_SID)) // 6 session
+    p = st_num(state, p, 0) // 7 tty_nr
+    p = st_num(state, p, 0) // 8 tpgid
+    p = st_num(state, p, 0) // 9 flags
+    p = st_num(state, p, sched.tget(state, t, sched.T_FAULTS)) // 10 minflt
+    p = st_num(state, p, 0) // 11 cminflt
+    p = st_num(state, p, 0) // 12 majflt
+    p = st_num(state, p, 0) // 13 cmajflt
+    p = st_num(state, p, sched.tget(state, t, sched.T_TICKS)) // 14 utime
+    p = st_num(state, p, 0) // 15 stime
+    p = st_num(state, p, 0) // 16 cutime
+    p = st_num(state, p, 0) // 17 cstime
+    p = st_num(state, p, sched.tget(state, t, sched.T_PRIO)) // 18 priority
+    p = st_num(state, p, 0) // 19 nice
+    p = st_num(state, p, 1) // 20 num_threads
+    p = st_num(state, p, 0) // 21 itrealvalue
+    p = st_num(state, p, 0) // 22 starttime
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4096) // 23 vsize
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES)) // 24 rss
+    p = st_num(state, p, 0 -% 1) // 25 rsslim
+    var f: u64 = 26
+    while f <= 52 {
+        if f == 38 {
+            p = st_num(state, p, 17) // exit_signal = SIGCHLD
+        } else {
+            p = st_num(state, p, 0)
+        }
+        f = f + 1
+    }
     p = w_nl(state, p)
     return p
 }
