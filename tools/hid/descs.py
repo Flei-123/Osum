@@ -466,6 +466,11 @@ BERICHTE = [
     (3, ptp([(1, 1000, 1200), (2, 1500, 1200)]), "gest: rollen entscheiden"),
     (3, ptp([(1, 1000, 1400), (2, 1500, 1400)]), "gest: rollen rollen"),
     (3, ptp([]), "gest: rollen ende"),
+    # r804: two fingers sideways -> one horizontal wheel step to the right (hidev: hrad)
+    (3, ptp([(1, 1000, 1000), (2, 1500, 1000)]), "gest: seit aufsetzen"),
+    (3, ptp([(1, 1200, 1000), (2, 1700, 1000)]), "gest: seit entscheiden"),
+    (3, ptp([(1, 1400, 1000), (2, 1900, 1000)]), "gest: seit rollen"),
+    (3, ptp([]), "gest: seit ende"),
     (3, ptp([(1, 1000, 1000), (2, 1600, 1000)]), "gest: kneifen aufsetzen"),
     (3, ptp([(1, 900, 1000), (2, 1700, 1000)]), "gest: kneifen entscheiden"),
     (3, ptp([(1, 800, 1000), (2, 1800, 1000)]), "gest: kneifen weiter"),

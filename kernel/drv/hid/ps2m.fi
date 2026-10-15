@@ -57,7 +57,7 @@ import serial
 import drv.hid.ptrcfg
 
 export {
-    e2e_selftest, init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    e2e_selftest, init, present, irq, id, x, y, buttons, wheel, hwheel, hwheel_add, packets, drops, moves,
     irqs, polls, spurious, clicks, status, reset_counters, poll_one,
     set_poll, polling,
     set_bounds, set_pos, changed, take_change, usb_packet, adopt,
@@ -95,6 +95,8 @@ const S_SPURIOUS: u64 = 0x0B0 // wie oft Vektor 44 wirklich gelaufen ist
 // see wm.on_mouse). Under host load the interrupt path applies a press and the release before the server runs;
 // the state alone then shows 'never pressed' and the click is lost.
 const S_PRESSED: u64 = 0x0B8
+// r804: horizontal wheel sum, + = to the right (Linux REL_HWHEEL sign); written by hwheel_add, read by wm.hwheel_out
+const S_HWHEEL: u64 = 0x0C0
 
 // r826: head rects of an EXTENDED desktop (heads may differ in height, so the pointer must not roam the bounding box).
 // S_HN = number of heads (< 2 = off, plain MAXX/MAXY box); S_HT + i*32 = x, y, w, h of head i (w = 0: not there).
@@ -197,6 +199,7 @@ fn init_inner(state: u64, w: u64, h: u64) -> bool {
     s(state, S_PHASE, 0)
     s(state, S_BTN, 0)
     s(state, S_WHEEL, 0)
+    s(state, S_HWHEEL, 0)
     s(state, S_PACKETS, 0)
     s(state, S_DROPS, 0)
     s(state, S_MOVES, 0)
@@ -419,6 +422,20 @@ fn buttons(state: u64) -> u64 {
 
 fn wheel(state: u64) -> u64 {
     return g(state, S_WHEEL)
+}
+
+fn hwheel(state: u64) -> u64 {
+    return g(state, S_HWHEEL)
+}
+
+// r804: one horizontal wheel step (+1 right, -1 left, as a gesture or an AC Pan report says). Natural scrolling
+// flips it like the vertical wheel. The sum is what the window server hands out (wm.hwheel_out).
+fn hwheel_add(state: u64, r: i64) {
+    let v: i64 = ptrcfg.scale_wheel(state, r)
+    if v != 0 {
+        s(state, S_HWHEEL, ((g(state, S_HWHEEL) as i64) + v) as u64)
+        s(state, S_CHANGED, 1)
+    }
 }
 
 fn packets(state: u64) -> u64 {
@@ -695,6 +712,7 @@ fn reset_counters(state: u64) {
     s(state, S_POLLS, 0)
     s(state, S_SPURIOUS, 0)
     s(state, S_WHEEL, 0)
+    s(state, S_HWHEEL, 0)
 }
 
 fn clicks(state: u64) -> u64 {
@@ -814,6 +832,15 @@ fn e2e_selftest(state: u64) {
     serial.puts((&l_w[0]) as u64)
     ptrcfg.put_signed(dw)
     serial.nl()
+    // r804: the horizontal wheel obeys natural scrolling too (+1 right becomes -1)
+    var l_h: [u8; 17] = "ptrcfg: e2e hw=\0\0"
+    let oh: u64 = g(state, S_HWHEEL)
+    hwheel_add(state, 1)
+    let dh: i64 = (g(state, S_HWHEEL) as i64) - (oh as i64)
+    serial.puts((&l_h[0]) as u64)
+    ptrcfg.put_signed(dh)
+    serial.nl()
+    s(state, S_HWHEEL, oh)
     ptrcfg.set(state, 100, 0, 0)
     set_pos(state, ox, oy)
     s(state, S_WHEEL, ow)

@@ -202,7 +202,7 @@ export {
     evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, title_old,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
-    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS, E_WHEEL,
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE, E_AXPRESS, E_WHEEL, E_HWHEEL, swipe_do, swipes_done, hw_demo,
     say_mag,
     M_SHIFT, M_CTRL,
     L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_TOAST, L_MAX,
@@ -470,6 +470,10 @@ const E_AXPRESS: u64 = 8
 // the opposite sign (`ps2m.wheel`: +1 = toward the user), so it is flipped
 // here. Goes to the window under the pointer.
 const E_WHEEL: u64 = 9
+// r804: THE HORIZONTAL WHEEL (two-finger sideways scroll, AC Pan). Same layout as E_WHEEL, c = notches as a 16-bit
+// two's complement, POSITIVE = scrolled RIGHT (Linux REL_HWHEEL, Windows WM_MOUSEHWHEEL). The driver sum
+// (`ps2m.hwheel`) already has this sign, so it is NOT flipped.
+const E_HWHEEL: u64 = 10
 
 // die Skalare
 const S_READY: u64 = 0x000
@@ -5301,6 +5305,115 @@ fn hd_say_win(state: u64, i: u64, tag: u64) {
 // Needs an extended desktop (vgpuextend with two heads). With `hot` it also unplugs head 1 and plugs it back.
 // r828: edge docking on head 1 (floating halves): right/top/bottom of head 1, a seam edge (no docking), a drop
 // in the middle (no docking). Needs the docking switch on; restored afterwards.
+// r804 TEST BED for `hwheeltest`: horizontal wheel steps to the window under a point (event type + notches in the
+// window ring), a miss over the empty desktop, and 3-finger swipes as window switch. Prints `hw:` lines.
+static mut hw_out: [u64; 2] = [0 as u64; 2]
+
+fn hw_drain(state: u64, i: u64) {
+    var n: u64 = 0
+    while n < 64 && ev_pop(state, i, (&hw_out[0 as usize]) as u64) {
+        n = n + 1
+    }
+}
+
+fn hw_say_ev(state: u64, i: u64, tag: u64) {
+    var s_p: [u8; 5] = "hw: \0"
+    var s_t: [u8; 7] = " type=\0"
+    var s_c: [u8; 4] = " c=\0"
+    var s_n: [u8; 7] = " empty\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(tag)
+    if !ev_pop(state, i, (&hw_out[0 as usize]) as u64) {
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(hw_out[0 as usize])
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(hw_out[1 as usize] & 0xFFFF)
+    serial.nl()
+}
+
+fn hw_say_sw(state: u64, tag: u64, moved: bool, fc: u64, wa: u64, wb: u64) {
+    var s_p: [u8; 5] = "hw: \0"
+    var s_m: [u8; 8] = " moved=\0"
+    var s_f: [u8; 8] = " focus=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(tag)
+    serial.puts((&s_m[0]) as u64)
+    if moved {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_f[0]) as u64)
+    if fc == wa {
+        serial.put(97 as u8)
+    } else if fc == wb {
+        serial.put(98 as u8)
+    } else {
+        serial.put(63 as u8)
+    }
+    serial.nl()
+}
+
+fn hw_demo(state: u64) {
+    var t_a: [u8; 5] = "hw-a\0"
+    var t_b: [u8; 5] = "hw-b\0"
+    var g_r: [u8; 12] = "right2 on-a\0"
+    var g_l: [u8; 11] = "left1 on-a\0"
+    var g_g: [u8; 11] = "gap no-win\0"
+    var g_b: [u8; 12] = "right1 on-b\0"
+    var g_a2: [u8; 12] = "on-a after \0"
+    var g_s1: [u8; 11] = "swipe left\0"
+    var g_s2: [u8; 12] = "swipe right\0"
+    var g_s3: [u8; 12] = "swipe 2 fin\0"
+    var g_s4: [u8; 9] = "swipe up\0"
+    if !ready(state) {
+        return
+    }
+    let wa: u64 = create(state, 0, 40, 40, 300, 200, K_RAW, (&t_a[0]) as u64)
+    let wb: u64 = create(state, 0, 400, 40, 300, 200, K_RAW, (&t_b[0]) as u64)
+    if wa >= MAX_WIN || wb >= MAX_WIN {
+        return
+    }
+    hw_drain(state, wa)
+    hw_drain(state, wb)
+    wh_seen = ps2m.wheel(state)
+    hwh_seen = ps2m.hwheel(state)
+    // two steps right over window a: ONE event, c = 2
+    ps2m.hwheel_add(state, 1)
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 150, 150)
+    hw_say_ev(state, wa, (&g_r[0]) as u64)
+    // one step left: c = 0xFFFF (-1)
+    ps2m.hwheel_add(state, 0 - 1)
+    hwheel_out(state, 150, 150)
+    hw_say_ev(state, wa, (&g_l[0]) as u64)
+    // over the gap between the windows: the sum is taken, nobody gets an event
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 370, 150)
+    hw_say_ev(state, wa, (&g_g[0]) as u64)
+    hw_say_ev(state, wb, (&g_g[0]) as u64)
+    // over window b: b gets it, a does not
+    ps2m.hwheel_add(state, 1)
+    hwheel_out(state, 500, 150)
+    hw_say_ev(state, wb, (&g_b[0]) as u64)
+    hw_say_ev(state, wa, (&g_a2[0]) as u64)
+    // swipes: with two windows left = the other window, right = back, 2 fingers and up = nothing
+    raise_win(state, wa)
+    set_focus(state, wa)
+    let m1: bool = swipe_do(state, 1, 3)
+    hw_say_sw(state, (&g_s1[0]) as u64, m1, focus(state), wa, wb)
+    let m2: bool = swipe_do(state, 2, 3)
+    hw_say_sw(state, (&g_s2[0]) as u64, m2, focus(state), wa, wb)
+    let m3: bool = swipe_do(state, 1, 2)
+    hw_say_sw(state, (&g_s3[0]) as u64, m3, focus(state), wa, wb)
+    let m4: bool = swipe_do(state, 3, 3)
+    hw_say_sw(state, (&g_s4[0]) as u64, m4, focus(state), wa, wb)
+}
+
 fn hd_demo_snap(state: u64, w: u64) {
     var t_r: [u8; 7] = "snapR1\0"
     var t_t: [u8; 7] = "snapT1\0"
@@ -13959,6 +14072,38 @@ fn wheel_out(state: u64, x: u64, y: u64) {
     ev_push(state, i, E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
 }
 
+static mut hwh_seen: u64 = 0 // r804: the driver's horizontal wheel sum as far as it was handed out
+
+// r804: horizontal wheel notches since the last call, to the window under the pointer (same rules as wheel_out).
+fn hwheel_out(state: u64, x: u64, y: u64) {
+    let sum: u64 = ps2m.hwheel(state)
+    if sum == hwh_seen {
+        return
+    }
+    var d: i64 = (sum as i64) - (hwh_seen as i64)
+    hwh_seen = sum
+    if d > 127 {
+        d = 127
+    }
+    if d < 0 - 127 {
+        d = 0 - 127
+    }
+    if d == 0 || td_live(state) {
+        return
+    }
+    let i: u64 = hit(state, x as i64, y as i64)
+    if i >= MAX_WIN || !darf(state, i) {
+        return
+    }
+    let lx: i64 = (x as i64) - win_x(state, i) - inx(state, i) as i64
+    let ly: i64 = (y as i64) - win_y(state, i) - iny(state, i) as i64
+    if lx < 0 || ly < 0 {
+        return
+    }
+    input_seen(state)
+    ev_push(state, i, E_HWHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
+}
+
 // 0x0B8 in the mouse state (ps2m.S_PRESSED): buttons that went down since the last look
 const MOUSE_PRESSED_OFF: u64 = 0x0B8
 
@@ -13986,6 +14131,7 @@ fn on_mouse_btn(state: u64, btn: u64) {
     let ox: u64 = gs(state, S_CURX)
     let oy: u64 = gs(state, S_CURY)
     wheel_out(state, nx, ny)
+    hwheel_out(state, nx, ny)
     // COMPOSITOR S5: the input-to-picture clock starts at the interrupt, and the compositor gets a copy of the pointer (not while locked)
     if nx != ox || ny != oy {
         if !hwcur_an(state) {
@@ -18548,6 +18694,46 @@ fn next_window(state: u64, von: u64) -> bool {
         k = k + 1
     }
     return false
+}
+
+fn prev_window(state: u64, von: u64) -> bool {
+    var k: u64 = 1
+    while k <= MAX_WIN {
+        let j: u64 = (von + MAX_WIN - (k % MAX_WIN)) % MAX_WIN
+        if wechselbar(state, j) && j != von {
+            raise_win(state, j)
+            set_focus(state, j)
+            damage_win(state, j)
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// r804: the touchpad swipe (lib/touchgest, via hidin -> gfx.mouse_swipe) as a window switch. dir: 1 left, 2 right,
+// 3 up, 4 down; n = fingers (>= 3). Left = next window, right = previous (like Alt+Tab / Alt+Shift+Tab). Up/down
+// have no consumer yet. Never while the screen is locked or the trusted dialog is up. Returns true if the focus moved.
+static mut sw_done: u64 = 0 // swipes that moved the focus
+fn swipe_do(state: u64, dir: u64, n: u64) -> bool {
+    if n < 3 || !ready(state) || sperre_an(state) || td_live(state) {
+        return false
+    }
+    let i: u64 = focus(state)
+    var moved: bool = false
+    if dir == 1 {
+        moved = next_window(state, i)
+    } else if dir == 2 {
+        moved = prev_window(state, i)
+    }
+    if moved {
+        sw_done = sw_done + 1
+    }
+    return moved
+}
+
+fn swipes_done() -> u64 {
+    return sw_done
 }
 
 // EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
