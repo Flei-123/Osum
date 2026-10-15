@@ -4,10 +4,10 @@
 #
 #   bash tools/stickwr/run.sh [stage ...]      (stages: host hot bus; default all; use heavy)
 #
-# host  the guards against tools/stickwr/guard.fi (target only /dev/usb0..3, source .img/.iso, --yes,
+# host  the guards against tools/stickwr/guard.fi (target only /dev/usb, source .img/.iso, --yes,
 #       64 KiB geometry) + two MUTATIONS (usb range opened, --yes ignored) that must turn it red
 # hot   QEMU, a FAT32 stick plugged in WHILE RUNNING and mounted at /medien/usb0 (tools/hotplug):
-#       refusals (hda, hdb, nvme0, "/dev/usb", no --yes, bad source, device as source, missing source)
+#       refusals (hda, hdb, nvme0, "/dev/usb1", no --yes, bad source, device as source, missing source)
 #       change NOTHING (the stick still lists its host file, hda has no second copy of the image
 #       marker); --dry writes nothing; the real write ejects the mount first (ls fails afterwards),
 #       prints "verified ok"; THE HOST then compares the stick image octet for octet with the source
@@ -61,12 +61,12 @@ stage_host() {
     local d
     for d in lib/*; do [ "$(basename "$d")" = stickwr ] || ln -sfn "$ROOT/$d" "$T/lib-mut/$(basename "$d")"; done
     mkdir -p "$T/lib-mut/stickwr"
-    # mutation 1: the usb range is opened (usb4..usb9 and ':' etc. pass)
-    sed 's/    if d < 48 || d > 51 {/    if d < 48 {/' lib/stickwr/guard.fi > "$T/lib-mut/stickwr/guard.fi"
+    # mutation 1: the target check is opened (usb1, usb4 etc. pass)
+    sed 's/    if ld(p, 8) != 0 {/    if false {/' lib/stickwr/guard.fi > "$T/lib-mut/stickwr/guard.fi"
     cmp -s lib/stickwr/guard.fi "$T/lib-mut/stickwr/guard.fi" && bad "mutation 1 did not change the lib"
     if FIRNLIB="$T/lib-mut" $FIRNC tools/stickwr/guard.fi -o "$T/g-mut1" 2>/dev/null; then
         local m; m=$("$T/g-mut1" 2>&1 | grep -c '^FAIL')
-        [ "$m" -gt 0 ] && ok "mutation (usb range opened) -> $m red checks" || bad "mutation 1 stayed green"
+        [ "$m" -gt 0 ] && ok "mutation (target check opened) -> $m red checks" || bad "mutation 1 stayed green"
     else bad "mutation 1 build failed"; fi
     # mutation 2: --yes is ignored
     sed 's/    if !yes {/    if false {/' lib/stickwr/guard.fi > "$T/lib-mut/stickwr/guard.fi"
@@ -131,22 +131,22 @@ stickwr /t/boot.img /dev/hdb --yes
 echo rc=$?
 stickwr /t/boot.img /dev/nvme0 --yes
 echo rc=$?
-stickwr /t/boot.img /dev/usb --yes
+stickwr /t/boot.img /dev/usb1 --yes
 echo rc=$?
-stickwr /t/boot.img /dev/usb0
+stickwr /t/boot.img /dev/usb
 echo rc=$?
-stickwr /t/note.txt /dev/usb0 --yes
+stickwr /t/note.txt /dev/usb --yes
 echo rc=$?
-stickwr /dev/hda /dev/usb0 --yes
+stickwr /dev/hda /dev/usb --yes
 echo rc=$?
-stickwr /t/missing.img /dev/usb0 --yes
+stickwr /t/missing.img /dev/usb --yes
 echo rc=$?
-stickwr /t/boot.img /dev/usb0 --dry --yes
+stickwr /t/boot.img /dev/usb --dry --yes
 echo rc=$?
 echo ==B==
 ls /medien/usb0
 echo ==C==
-stickwr /t/boot.img /dev/usb0 --yes
+stickwr /t/boot.img /dev/usb --yes
 echo rc=$?
 echo ==D==
 ls /medien/usb0
@@ -191,8 +191,8 @@ EOF
     part "$T/h.klar" C D > "$T/pc.txt"
     part "$T/h.klar" D END > "$T/pd.txt"
     has "$T/pa.txt" "host.txt" "before: the stick is mounted and lists the host file"
-    has "$T/pr.txt" "refused_target" "hda / hdb / nvme0 / '/dev/usb': refused_target"
-    [ "$(grep -ac 'refused_target' "$T/pr.txt")" -ge 4 ] && ok "all four wrong targets refused (hda, hdb, nvme0, /dev/usb)" || bad "fewer than four refused_target lines"
+    has "$T/pr.txt" "refused_target" "hda / hdb / nvme0 / '/dev/usb1': refused_target"
+    [ "$(grep -ac 'refused_target' "$T/pr.txt")" -ge 4 ] && ok "all four wrong targets refused (hda, hdb, nvme0, /dev/usb1)" || bad "fewer than four refused_target lines"
     has "$T/pr.txt" "need_yes" "no --yes: nothing happens"
     has "$T/pr.txt" "refused_source" "a .txt file is not an image"
     has "$T/pr.txt" "refused_source_dev" "a device as source is refused"
@@ -241,7 +241,7 @@ echo ==MENU==
 act list --menu file x.iso
 act list --menu file x.txt
 echo ==DRY==
-act call stickwr.write image=/t/boot.img target=/dev/usb0 --dry
+act call stickwr.write image=/t/boot.img target=/dev/usb --dry
 echo rc=$?
 echo ==HDA==
 act call stickwr.write image=/t/boot.img target=/dev/hda
@@ -249,11 +249,11 @@ echo rc=$?
 act confirm last
 echo rc=$?
 echo ==BIG==
-act call stickwr.write image=/t/big.img target=/dev/usb0
+act call stickwr.write image=/t/big.img target=/dev/usb
 act confirm last
 echo rc=$?
 echo ==W1==
-act call stickwr.write image=/t/boot.img target=/dev/usb0
+act call stickwr.write image=/t/boot.img target=/dev/usb
 echo rc=$?
 act confirm last
 echo rc=$?
