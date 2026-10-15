@@ -10,7 +10,14 @@ Gate: `bash tools/mail/run.sh` -- oracle 50 promises, TLS + plain sessions again
 sent mails compared byte-exact, negative controls (wrong name / empty trust store -> E_CERT, wrong password -> E_AUTH,
 literal-blind mutation -> oracle red). 123/0.
 
-NOT DONE (next): the fUi window `kernel/user/mail.fi` (account setup, folder list `table_blob`, message list, read pane
-`memo` (4096 octet cap), compose), launcher/store registration, STARTTLS, multipart/attachments, config persistence,
-password storage. Pattern for the app: `kernel/user/fvviewer.fi` (profile app + TLS + fuiscene), `libc.dns.resolve_a` for
-host names, entries via `fuiscene.entry`, tables via blob text (rows `\n`, cells `\t`).
+## Mail app (15.10.2026)
+
+`lib/mail/model.fi` (no window): settings, folders, newest-64 list, reading (text, RFC 2047 headers, QP/base64
+body, cut at 4000 octets for the 4096 memo), sending (From = user or user@imap-host, Date UTC, Message-ID).
+`kernel/user/mail.fi` (fUi window, profile app): setup form -> folder table + message table + reading pane
+-> compose. Package `pakete/mail` (net=real), built by `pakete/bauen.sh`. Settings (no password) in /etc/mail.conf.
+Gate: `bash tools/mailapp/run.sh` (= `tools/mail/app.sh`: model vs stub over TLS + plain, mutation control, build +
+package); `bash tools/mail/app.sh gui` = QEMU session (opt-in, `tools/mail/gui.sh`, test file /etc/mail.test).
+
+NOT DONE: STARTTLS, multipart/attachments, reply/forward, address book, password storage, IDLE/push,
+paging beyond 64 messages, search.
