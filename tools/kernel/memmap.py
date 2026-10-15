@@ -474,6 +474,7 @@ K17_STUECKE = [
     ("usb.fi",  "CSW_OFF",    0x40),
     ("usb.fi",  "BLK_OFF",    0x200),
     ("usb.fi",  "HUB_OFF",    0x100),
+    ("usb.fi",  "ISO_BUF_OFF", 0x600),
 ]
 
 # RUNDE FREMDFS: dieselbe Buchfuehrung fuer die zwei fremden
