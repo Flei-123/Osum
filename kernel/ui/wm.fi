@@ -4184,6 +4184,7 @@ fn destroy(state: u64, i: u64) -> bool {
         mem.frame_free_run(state, wg(state, i, W_GRID), TG_FRAMES)
         wsv(state, i, W_GRID, 0)
     }
+    sb_free(state, i)
     // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
     // Fenster lag, rutscht eine Stufe herunter. Ohne das entstehen
     // Luecken, und `compose` findet auf einer Stufe kein Fenster mehr.
@@ -14069,6 +14070,10 @@ fn wheel_out(state: u64, x: u64, y: u64) {
         return
     }
     input_seen(state)
+    if wg(state, i, W_KIND) == K_TERM {
+        sb_wheel(state, i, d)
+        return
+    }
     ev_push(state, i, E_WHEEL, lx as u64, ly as u64, (d as u64) & 0xFFFF)
 }
 
@@ -15195,6 +15200,9 @@ fn term_setup(state: u64, i: u64) {
     if ch == 0 {
         ch = 16
     }
+    if i < 32 {
+        tp_sbv[(i) as usize] = 0
+    }
     let alt_cols: u64 = wg(state, i, W_COLS)
     let alt_rows: u64 = wg(state, i, W_ROWS)
     let alt_cy: u64 = wg(state, i, W_CY)
@@ -15214,6 +15222,7 @@ fn term_setup(state: u64, i: u64) {
         let g0: u64 = mem.frame_run(state, TG_FRAMES)
         wsv(state, i, W_GRID, g0)
         tp_reset(i)
+        sb_free(state, i)
     }
     let g: u64 = wg(state, i, W_GRID)
     // ================================================== RUNDE ECHT
@@ -15526,6 +15535,7 @@ fn term_dump(state: u64, i: u64) {
         }
         r = r + 1
     }
+    sb_dump(state, i)
 }
 
 // r5xx: ONE LINE PER TERMINAL WINDOW plus the text of its cells, for the multi-terminal check (tools/term/multi.sh).
@@ -15629,15 +15639,19 @@ fn term_color(state: u64, k: u64) -> u64 {
 }
 
 fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
+    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), cell_attr(state, i, c, r), cell_col(state, i, c, r))
+}
+
+// r838: paint the cell at screen position (c, r) with the given character / attribute / colour octets (the scrollback view
+// paints history cells here, the live grid goes through `cell_paint`)
+fn cell_paint_v(state: u64, i: u64, c: u64, r: u64, z: u64, at: u64, co: u64) {
     let cw: u64 = wg(state, i, W_CELLW)
     let ch: u64 = wg(state, i, W_CELLH)
     let f: u64 = gs(state, S_FONT_MONO)
     // r400: reverse video swaps the two colours of the cell
     var cbg: u64 = wg(state, i, W_BG)
     var cfg: u64 = wg(state, i, W_FG)
-    let at: u64 = cell_attr(state, i, c, r)
     // r462: colours (the nibbles of the colour octet), bright forms by bold / the 9x and 10x codes, underline
-    let co: u64 = cell_col(state, i, c, r)
     if (co & 15) != 0 {
         var kf: u64 = (co & 15) - 1
         if (at & 10) != 0 {
@@ -15658,7 +15672,6 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
         cfg = sw
     }
     fill(state, i, c * cw, r * ch, cw, ch, cbg)
-    let z: u64 = cell_get(state, i, c, r)
     if (at & 4) != 0 && ch > 2 {
         fill(state, i, c * cw, r * ch + ch - 2, cw, 1, cfg)
     }
@@ -15688,6 +15701,10 @@ fn term_redraw(state: u64, i: u64) {
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return
     }
+    if i < 32 && tp_sbv[(i) as usize] != 0 {
+        sb_redraw(state, i)
+        return
+    }
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
     var r: u64 = 0
@@ -15696,6 +15713,198 @@ fn term_redraw(state: u64, i: u64) {
         while c < cols {
             cell_paint(state, i, c, r)
             c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ============================================ r838: TERMINAL SCROLLBACK
+// Lines that scroll off the top of a full-screen scroll (main screen, region = whole screen) go into a ring of SB_LINES lines
+// per terminal window (kernel frames, taken on the first scrolled line, given back when the window closes). Each line holds
+// the three planes (character, attribute, colour) for SB_W columns. The mouse wheel over the window moves the view
+// (`tp_sbv` = lines scrolled back, SB_STEP per notch); any output or key snaps back to the live screen.
+const SB_LINES: u64 = 256
+const SB_W: u64 = 256
+const SB_STRIDE: u64 = 768 // 3 planes x SB_W
+const SB_FRAMES: u64 = 48  // SB_LINES * SB_STRIDE / 4096
+const SB_STEP: u64 = 3
+static mut tp_sb: [u64; 32] = [0 as u64; 32]  // base of the ring (0 = none yet)
+static mut tp_sbn: [u64; 32] = [0 as u64; 32] // lines stored
+static mut tp_sbh: [u64; 32] = [0 as u64; 32] // next slot to write
+static mut tp_sbv: [u64; 32] = [0 as u64; 32] // lines the view is scrolled back (0 = live)
+
+fn sb_free(state: u64, i: u64) {
+    if i >= 32 {
+        return
+    }
+    if tp_sb[(i) as usize] != 0 {
+        mem.frame_free_run(state, tp_sb[(i) as usize], SB_FRAMES)
+    }
+    tp_sb[(i) as usize] = 0
+    tp_sbn[(i) as usize] = 0
+    tp_sbh[(i) as usize] = 0
+    tp_sbv[(i) as usize] = 0
+}
+
+// push grid row r (about to scroll off the top) into the ring
+fn sb_push(state: u64, i: u64, r: u64) {
+    if i >= 32 {
+        return
+    }
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return
+    }
+    var b: u64 = tp_sb[(i) as usize]
+    if b == 0 {
+        b = mem.frame_run(state, SB_FRAMES)
+        if b == 0 {
+            return
+        }
+        tp_sb[(i) as usize] = b
+        tp_sbn[(i) as usize] = 0
+        tp_sbh[(i) as usize] = 0
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let dst: u64 = b + tp_sbh[(i) as usize] * SB_STRIDE
+    var c: u64 = 0
+    while c < SB_W {
+        var z: u64 = 32
+        var at: u64 = 0
+        var co: u64 = 0
+        if c < cols && r * cols + c < TG {
+            let k: u64 = r * cols + c
+            z = kstate.get8(g + k)
+            at = kstate.get8(g + TG + k)
+            co = kstate.get8(g + 2 * TG + k)
+        }
+        kstate.set8(dst + c, z as u8)
+        kstate.set8(dst + SB_W + c, at as u8)
+        kstate.set8(dst + 2 * SB_W + c, co as u8)
+        c = c + 1
+    }
+    tp_sbh[(i) as usize] = (tp_sbh[(i) as usize] + 1) % SB_LINES
+    if tp_sbn[(i) as usize] < SB_LINES {
+        tp_sbn[(i) as usize] = tp_sbn[(i) as usize] + 1
+    }
+}
+
+// address of history line h (0 = oldest stored)
+fn sb_line(i: u64, h: u64) -> u64 {
+    let slot: u64 = (tp_sbh[(i) as usize] + SB_LINES - tp_sbn[(i) as usize] + h) % SB_LINES
+    return tp_sb[(i) as usize] + slot * SB_STRIDE
+}
+
+// the character shown at screen cell (c, r) while the view is scrolled back
+fn sb_view_char(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let v: u64 = tp_sbv[(i) as usize]
+    if r >= v {
+        return cell_get(state, i, c, r - v)
+    }
+    if c >= SB_W {
+        return 32
+    }
+    return kstate.get8(sb_line(i, tp_sbn[(i) as usize] - v + r) + c)
+}
+
+fn sb_redraw(state: u64, i: u64) {
+    let v: u64 = tp_sbv[(i) as usize]
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            if r >= v {
+                cell_paint_v(state, i, c, r, cell_get(state, i, c, r - v), cell_attr(state, i, c, r - v), cell_col(state, i, c, r - v))
+            } else if c >= SB_W {
+                cell_paint_v(state, i, c, r, 32, 0, 0)
+            } else {
+                let ln: u64 = sb_line(i, tp_sbn[(i) as usize] - v + r)
+                cell_paint_v(state, i, c, r, kstate.get8(ln + c), kstate.get8(ln + SB_W + c), kstate.get8(ln + 2 * SB_W + c))
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// back to the live screen (called before any output, on a key, on a resize)
+fn sb_snap(state: u64, i: u64) {
+    if i >= 32 || tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    tp_sbv[(i) as usize] = 0
+    term_redraw(state, i)
+}
+
+// wheel notches over a terminal window: d > 0 = wheel up = older lines
+fn sb_wheel(state: u64, i: u64, d: i64) {
+    if i >= 32 || !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let n: u64 = tp_sbn[(i) as usize]
+    var v: i64 = (tp_sbv[(i) as usize] as i64) + d * (SB_STEP as i64)
+    if v < 0 {
+        v = 0
+    }
+    if v > (n as i64) {
+        v = n as i64
+    }
+    if (v as u64) == tp_sbv[(i) as usize] {
+        return
+    }
+    tp_sbv[(i) as usize] = v as u64
+    term_redraw(state, i)
+    damage_win(state, i)
+}
+
+// serial witness for tools/term/scroll.sh
+fn sb_dump(state: u64, i: u64) {
+    var s_a: [u8; 18] = "wm: termsb lines=\0"
+    var s_b: [u8; 7] = " view=\0"
+    var s_c: [u8; 14] = "wm: termview \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    if i >= 32 {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(tp_sbn[(i) as usize])
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(tp_sbv[(i) as usize])
+    serial.nl()
+    if tp_sbv[(i) as usize] == 0 {
+        return
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var last: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if sb_view_char(state, i, c0, r) > 32 {
+                last = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if last != 0 {
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < last {
+                let z: u64 = sb_view_char(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
         }
         r = r + 1
     }
@@ -15875,6 +16084,14 @@ fn term_scroll_region(state: u64, i: u64, top: u64, bot: u64, n: u64, up: bool) 
     var k: u64 = n
     if k > bot - top + 1 {
         k = bot - top + 1
+    }
+    // r838: lines that leave the top of the whole screen go to the scrollback (not on the alternate screen)
+    if up && top == 0 && bot + 1 == rows && i < 32 && tp_alt[(i) as usize] == 0 {
+        var q: u64 = 0
+        while q < k {
+            sb_push(state, i, q)
+            q = q + 1
+        }
     }
     // the cells
     if up {
@@ -16641,6 +16858,7 @@ fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return 0
     }
+    sb_snap(state, i)
     var k: u64 = 0
     while k < n {
         term_putc(state, i, kstate.get8(p + k))
@@ -16700,6 +16918,7 @@ fn key_tty(state: u64) -> u64 {
     if !darf(state, f) {
         return NO_TTY
     }
+    sb_snap(state, f)
     return tty_of(state, f)
 }
 
@@ -16710,6 +16929,7 @@ fn term_out(state: u64, i: u64, c: u64) {
         return
     }
     ss(state, S_TPUT, gs(state, S_TPUT) + 1)
+    sb_snap(state, i)
     term_putc(state, i, c)
     damage_win(state, i)
 }
