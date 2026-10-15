@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/mail/nettest.fi -- host driver of lib/mail/session.fi against tools/mail/stub.py.
+//
+//   nettest <imap_port> <smtp_port> <roots.pem|-> <tlsname> <user> <pass> <tls|plain>
+//
+// Prints "OK <name>" / "FAIL <name>". Negative controls end early with one line:
+//   "OPEN imap <code>"   connection / TLS / certificate error (E_* of session.fi)
+//   "LOGIN imap <code>"  login refused (E_AUTH = 6)
+//   "LOGIN smtp <code>"
+// Exit 0 = ran through (look at the FAIL lines), 2 = open failed, 3 = login failed.
+
+profile app
+
+import std.io
+import std.rt
+import std.net
+import mail.wire
+import mail.session
+
+static mut ZNAME: [u8; 8] = "INBOX\0\0\0"
+static mut ZNOPE: [u8; 8] = "Nope\0\0\0\0"
+
+static mut SL: [u8; 8192] = [0; 8192]
+static mut SLOT: [u8; 1] = [0]
+
+// Copies a string literal into a rotating slot (512 octets, 16 slots); returns its address.
+fn lit(s: str) -> u64 {
+    let slot: usize = (SLOT[0] as usize) % 16
+    SLOT[0] = SLOT[0] + 1
+    let base: usize = slot * 512
+    var i: usize = 0
+    while i < s.n {
+        SL[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    SL[base + s.n] = 0
+    return (&SL[base]) as u64
+}
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn atoi(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 {
+        v = v * 10 + (*((p + i) as *mut u8)) as u64 - 48
+        i = i + 1
+    }
+    return v
+}
+
+fn ceq(p: u64, s: str) -> bool {
+    var i: u64 = 0
+    while i < s.n as u64 {
+        if *((p + i) as *mut u8) != *((s.p as u64 + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return *((p + i) as *mut u8) == 0
+}
+
+fn has(p: u64, n: u64, s: str) -> bool {
+    var i: u64 = 0
+    let m: u64 = s.n as u64
+    while i + m <= n {
+        var k: u64 = 0
+        while k < m && *((p + i + k) as *mut u8) == *((s.p as u64 + k) as *mut u8) {
+            k = k + 1
+        }
+        if k == m {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+static mut NL: [u8; 2] = "\n\0"
+static mut ZHOST: [u8; 8] = "osum.lan"
+
+fn main(start: u64) -> i32 {
+    let iport: u64 = atoi(rt.arg_ptr(start, 1))
+    let sport: u64 = atoi(rt.arg_ptr(start, 2))
+    var roots: u64 = rt.arg_ptr(start, 3)
+    if ceq(roots, "-") {
+        roots = (&NL[0]) as u64
+    }
+    let name: u64 = rt.arg_ptr(start, 4)
+    let namelen: usize = rt.c_length(name)
+    let user: u64 = rt.arg_ptr(start, 5)
+    let pass: u64 = rt.arg_ptr(start, 6)
+    let secure: bool = ceq(rt.arg_ptr(start, 7), "tls")
+    let ul: u64 = rt.c_length(user) as u64
+    let pl: u64 = rt.c_length(pass) as u64
+    let addr: u32 = net.ipv4(127 as u8, 0 as u8, 0 as u8, 1 as u8)
+
+    // ------------------------------------------------------------ IMAP
+    var lk: session.Link = session.link_new()
+    var rc: u64 = session.link_open(&lk, addr, iport as u16, secure, roots, name, namelen, 15000)
+    if rc != 0 {
+        io.print("OPEN imap ")
+        var b: rt.Buf = rt.buf_new()
+        rt.buf_push_dec_u64(&b, rc)
+        rt.buf_push(&b, 10 as u8)
+        rt.write_everything(1, b.ptr, b.len)
+        return 2
+    }
+    chk("imap: connect (+TLS handshake and certificate check)", true)
+    chk("imap: greeting", session.imap_greet(&lk) == 0)
+    rc = session.imap_login(&lk, user, ul, pass, pl)
+    if rc != 0 {
+        io.print("LOGIN imap ")
+        var b2: rt.Buf = rt.buf_new()
+        rt.buf_push_dec_u64(&b2, rc)
+        rt.buf_push(&b2, 10 as u8)
+        rt.write_everything(1, b2.ptr, b2.len)
+        session.link_close(&lk)
+        return 3
+    }
+    chk("imap: login", true)
+
+    rc = session.imap_list(&lk)
+    chk("imap: LIST ok", rc == 0)
+    var nm: [u8; 64] = [0; 64]
+    var nl: u64 = 0
+    var at: u64 = wire.imap_list_name(session.rx_ptr(&lk), session.rx_len(&lk), 0, (&nm[0]) as u64, 64, &nl)
+    chk("imap: mailbox 1 = INBOX", at != wire.BAD && ceq((&nm[0]) as u64, "INBOX"))
+    at = wire.imap_list_name(session.rx_ptr(&lk), session.rx_len(&lk), at, (&nm[0]) as u64, 64, &nl)
+    chk("imap: mailbox 2 = Sent Items", at != wire.BAD && ceq((&nm[0]) as u64, "Sent Items"))
+    session.rx_drop(&lk)
+
+    var count: u64 = 0
+    rc = session.imap_select(&lk, (&ZNOPE[0]) as u64, 4, &count)
+    chk("imap: SELECT of a missing mailbox is refused (E_REJECT)", rc == session.E_REJECT)
+    rc = session.imap_select(&lk, (&ZNAME[0]) as u64, 5, &count)
+    chk("imap: SELECT INBOX -> 3 messages", rc == 0 && count == 3)
+
+    rc = session.imap_heads(&lk, 1, 3)
+    chk("imap: FETCH headers 1:3", rc == 0)
+    var hl: session.HeadList = session.headlist_new()
+    let nh: u64 = session.parse_heads(&lk, &hl, session.MAX_HEADS)
+    chk("imap: 3 header entries parsed", nh == 3)
+    chk("imap: message 1 subject unfolded", ceq((&hl.items[0].subj[0]) as u64, "Hallo Welt"))
+    chk("imap: message 1 from decoded (RFC 2047 B)", ceq((&hl.items[0].from[0]) as u64, "Jürgen <juergen@example.org>"))
+    chk("imap: message 2 subject decoded (Latin-1 Q)", ceq((&hl.items[1].subj[0]) as u64, "Grüße"))
+    chk("imap: message 3 date", ceq((&hl.items[2].date[0]) as u64, "Thu, 15 Oct 2026 08:00:00 +0200"))
+    chk("imap: sequence numbers", hl.items[0].seq == 1 && hl.items[2].seq == 3)
+    session.rx_drop(&lk)
+
+    rc = session.imap_body(&lk, 2)
+    chk("imap: FETCH message 2 (body contains a status-looking line)", rc == 0)
+    var off: u64 = 0
+    var len: u64 = 0
+    chk("imap: literal found", session.parse_body(&lk, &off, &len))
+    let m: u64 = session.rx_ptr(&lk) + off
+    var cte: [u8; 64] = [0; 64]
+    let cl: u64 = wire.hdr_get(m, len, "content-transfer-encoding", (&cte[0]) as u64, 64)
+    let bs: u64 = wire.body_start(m, len)
+    var dec: [u8; 512] = [0; 512]
+    let dn: u64 = wire.body_decode(m + bs, len - bs, (&cte[0]) as u64, cl, (&dec[0]) as u64)
+    chk("imap: body decoded (quoted-printable)", has((&dec[0]) as u64, dn, "café ist teuer."))
+    chk("imap: literal kept whole (fake tagged line inside)", has((&dec[0]) as u64, dn, "a005 OK this is body text"))
+    session.rx_drop(&lk)
+
+    rc = session.imap_body(&lk, 3)
+    var off3: u64 = 0
+    var len3: u64 = 0
+    chk("imap: FETCH message 3", rc == 0 && session.parse_body(&lk, &off3, &len3))
+    let m3: u64 = session.rx_ptr(&lk) + off3
+    let cl3: u64 = wire.hdr_get(m3, len3, "content-transfer-encoding", (&cte[0]) as u64, 64)
+    let bs3: u64 = wire.body_start(m3, len3)
+    let dn3: u64 = wire.body_decode(m3 + bs3, len3 - bs3, (&cte[0]) as u64, cl3, (&dec[0]) as u64)
+    chk("imap: body decoded (base64)", has((&dec[0]) as u64, dn3, "base64 body"))
+    session.rx_drop(&lk)
+    chk("imap: STORE \\Seen", session.imap_seen(&lk, 1) == 0)
+    chk("imap: LOGOUT", session.imap_logout(&lk) == 0)
+    session.link_close(&lk)
+
+    // ------------------------------------------------------------ SMTP
+    var sk: session.Link = session.link_new()
+    rc = session.link_open(&sk, addr, sport as u16, secure, roots, name, namelen, 15000)
+    chk("smtp: connect", rc == 0)
+    chk("smtp: greeting", session.smtp_greet(&sk) == 0)
+    chk("smtp: EHLO", session.smtp_hello(&sk, (&ZHOST[0]) as u64, 8) == 0)
+    rc = session.smtp_login(&sk, user, ul, pass, pl)
+    if rc != 0 {
+        io.print("LOGIN smtp ")
+        var b3: rt.Buf = rt.buf_new()
+        rt.buf_push_dec_u64(&b3, rc)
+        rt.buf_push(&b3, 10 as u8)
+        rt.write_everything(1, b3.ptr, b3.len)
+        session.link_close(&sk)
+        return 3
+    }
+    chk("smtp: AUTH PLAIN", true)
+    var mbuf: [u8; 2048] = [0; 2048]
+    var o: wire.Out = wire.out_new((&mbuf[0]) as u64, 2048)
+    wire.compose(&o, lit("justin@example.org"), 18, lit("Max <max@example.org>"), 21, lit("Grüße aus Wien"), 16,
+        lit("Thu, 15 Oct 2026 10:30:00 +0200"), 31, lit("t1.osum@example.org"), 19, lit("Hallo Max\n.Punkt am Anfang\nEnde"), 31)
+    rc = session.smtp_send(&sk, lit("justin@example.org"), 18, lit("Max <max@example.org>"), 21, o.p, o.len)
+    chk("smtp: message 1 accepted", rc == 0)
+    o = wire.out_new((&mbuf[0]) as u64, 2048)
+    wire.compose(&o, lit("justin@example.org"), 18, lit("zwei@example.org"), 16, lit("Zweite"), 6,
+        lit("Thu, 15 Oct 2026 10:31:00 +0200"), 31, lit("t2.osum@example.org"), 19, lit("nur eine Zeile"), 14)
+    rc = session.smtp_send(&sk, lit("justin@example.org"), 18, lit("zwei@example.org"), 16, o.p, o.len)
+    chk("smtp: message 2 accepted (same session)", rc == 0)
+    chk("smtp: QUIT", session.smtp_quit(&sk) == 0)
+    session.link_close(&sk)
+    return 0
+}
