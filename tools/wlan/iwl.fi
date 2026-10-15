@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/iwl.fi -- host test for lib/wlan/iwl_probe.fi (M1: identify AX201, no writes).
+// stdin: optional firmware blob (iwlwifi-QuZ-a0-hr-b0-77.ucode). Empty stdin = synthetic only.
+import std.rt
+import std.io
+import crypto.sha256
+import wlan.iwl_probe
+
+static mut regs: [u64; 64] = [0; 64]
+static mut nwr: u64 = 0
+static mut nrd: u64 = 0
+static mut txtb: [u8; 300] = [0; 300]
+static mut tlen: usize = 0
+static mut passn: u64 = 0
+static mut failn: u64 = 0
+
+fn tch(c: u64) {
+    if tlen < 290 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+fn check(name: str, ok: bool) {
+    if ok {
+        passn = passn + 1
+        tlit("  OK    ")
+    } else {
+        failn = failn + 1
+        tlit("  FAIL  ")
+    }
+    tlit(name)
+    temit()
+}
+
+// register slot = offset / 4 (CSR block only; 0x9c -> 39, 0xa0 -> 40)
+fn s_rd(ctx: u64, off: u64) -> u64 {
+    nrd = nrd + 1
+    if off >= 256 { return 0xFFFFFFFF }
+    return regs[(off / 4) as usize]
+}
+fn s_wr(ctx: u64, off: u64, v: u64) { nwr = nwr + 1 }
+
+fn sim(rev: u64, rf: u64) {
+    var i: usize = 0
+    while i < 64 { regs[i] = 0; i = i + 1 }
+    regs[(iwl_probe.CSR_HW_REV / 4) as usize] = rev
+    regs[(iwl_probe.CSR_HW_RF_ID / 4) as usize] = rf
+    regs[(iwl_probe.CSR_GP_CNTRL / 4) as usize] = 0x40000
+    nwr = 0
+    nrd = 0
+}
+
+fn new_probe() -> iwl_probe.Probe {
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    iwl_probe.mmio_set(&p, 0, s_rd, s_wr)
+    return p
+}
+
+// minimal TLV blob: header + n TLVs
+static mut sb: [u8; 256] = [0; 256]
+fn put32(o: usize, v: u64) {
+    sb[o] = (v & 255) as u8
+    sb[o + 1] = ((v >> 8) & 255) as u8
+    sb[o + 2] = ((v >> 16) & 255) as u8
+    sb[o + 3] = ((v >> 24) & 255) as u8
+}
+fn build_syn() -> usize {
+    var i: usize = 0
+    while i < 256 { sb[i] = 0; i = i + 1 }
+    put32(4, 0x0A4C5749)
+    put32(72, 77)
+    put32(80, 1)     // TLV 1: type 1, len 5 -> padded 8
+    put32(84, 5)
+    put32(96, 7)     // TLV 2 at 80+8+8 = 96: type 7, len 4
+    put32(100, 4)
+    return 108
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    rt.read_stdin(&inp)
+    let blob: u64 = rt.buf_ptr(&inp)
+    let blen: usize = rt.buf_len(&inp)
+    var name: [u8; 40] = [0; 40]
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    var r: i64 = 0
+
+    // A: id table
+    check("A1 a0f0 is Qu (AX201)", iwl_probe.family_of(0x8086, 0xA0F0) == iwl_probe.FAM_QU)
+    check("A2 2723 is AX200", iwl_probe.family_of(0x8086, 0x2723) == iwl_probe.FAM_AX200)
+    check("A3 2725 is AX210, not a target", iwl_probe.family_of(0x8086, 0x2725) == iwl_probe.FAM_AX210 && !iwl_probe.is_target(iwl_probe.FAM_AX210))
+    check("A4 other Qu ids", iwl_probe.family_of(0x8086, 0x43F0) == iwl_probe.FAM_QU && iwl_probe.family_of(0x8086, 0x34F0) == iwl_probe.FAM_QU && iwl_probe.family_of(0x8086, 0x02F0) == iwl_probe.FAM_QU)
+    check("A5 wrong vendor / unknown dev -> none", iwl_probe.family_of(0x10EC, 0xA0F0) == iwl_probe.FAM_NONE && iwl_probe.family_of(0x8086, 0x1234) == iwl_probe.FAM_NONE)
+
+    // B: HW_REV decode
+    check("B1 type of 0x354 = 0x35 (QuZ)", iwl_probe.rev_type(0x354) == 0x35)
+    check("B2 dash/step of 0x354", iwl_probe.rev_dash(0x354) == 0 && iwl_probe.rev_step(0x354) == 1)
+    iwl_probe.rev_name_get(0x354, (&name[0]) as u64)
+    check("B3 name QuZ", name[0] == 81 && name[1] == 117 && name[2] == 90 && name[3] == 0)
+    iwl_probe.rev_name_get(0x331, (&name[0]) as u64)
+    check("B4 0x331 = Qu", name[0] == 81 && name[1] == 117 && name[2] == 0)
+    iwl_probe.rf_name_get(0x0010A100, (&name[0]) as u64)
+    check("B5 rf HR", name[0] == 72 && name[1] == 82 && name[2] == 0)
+
+    // C: probe of an AX201 with simulated CSRs
+    sim(0x354, 0x0010A100)
+    p = new_probe()
+    r = iwl_probe.probe_run(&p, 0x8086, 0xA0F0, 0x4000, false)
+    check("C1 probe ok", r == 0)
+    check("C2 family Qu", p.fam == iwl_probe.FAM_QU)
+    check("C3 hw_rev + rf_id read", p.hw_rev == 0x354 && p.rf_id == 0x0010A100)
+    check("C4 gp_cntrl read", p.gp_cntrl == 0x40000)
+    check("C5 M1 never writes a register", nwr == 0 && p.writes == 0)
+    check("C6 exactly 4 reads", nrd == 4)
+
+    // D: refusals
+    sim(0x354, 0)
+    p = new_probe()
+    check("D1 wrong vendor -> E_VENDOR, no read", iwl_probe.probe_run(&p, 0x10EC, 0xA0F0, 0x4000, false) == iwl_probe.E_VENDOR && nrd == 0)
+    check("D2 unknown device -> E_UNSUPPORTED, no read", iwl_probe.probe_run(&p, 0x8086, 0x1234, 0x4000, false) == iwl_probe.E_UNSUPPORTED && nrd == 0)
+    check("D3 no BAR -> E_BAR, no read", iwl_probe.probe_run(&p, 0x8086, 0xA0F0, 0, false) == iwl_probe.E_BAR && nrd == 0)
+    check("D4 I/O BAR -> E_BAR", iwl_probe.probe_run(&p, 0x8086, 0xA0F0, 0x4000, true) == iwl_probe.E_BAR && nrd == 0)
+    check("D5 tiny BAR -> E_BAR", iwl_probe.probe_run(&p, 0x8086, 0xA0F0, 0x100, false) == iwl_probe.E_BAR && nrd == 0)
+    sim(0xFFFFFFFF, 0)
+    p = new_probe()
+    check("D6 HW_REV all ones -> E_DEAD", iwl_probe.probe_run(&p, 0x8086, 0xA0F0, 0x4000, false) == iwl_probe.E_DEAD && nwr == 0)
+
+    // E: firmware container (synthetic)
+    let n: usize = build_syn()
+    let sp: u64 = (&sb[0]) as u64
+    var dl: u64 = 0
+    check("E1 header ok", iwl_probe.fw_header_ok(sp, n))
+    check("E2 ver 77", iwl_probe.fw_ver_get(sp, n) == 77)
+    check("E3 two TLVs", iwl_probe.fw_tlv_count(sp, n) == 2)
+    check("E4 find type 7 -> offset 104 len 4", iwl_probe.fw_tlv_find(sp, n, 7, &dl) == 104 && dl == 4)
+    check("E5 type 9 not found", iwl_probe.fw_tlv_find(sp, n, 9, &dl) == -1)
+    check("E6 truncated blob -> -1", iwl_probe.fw_tlv_count(sp, n - 1) == -1)
+    put32(84, 0xFFFFFFF0)
+    check("E7 hostile TLV length -> -1", iwl_probe.fw_tlv_count(sp, n) == -1)
+    sb[4] = 0
+    check("E8 bad magic rejected", !iwl_probe.fw_header_ok(sp, n) && iwl_probe.fw_ver_get(sp, n) == 0)
+    check("E9 short blob rejected", !iwl_probe.fw_header_ok(sp, 40))
+
+    // F: real firmware (only when a blob came in on stdin)
+    if blen > 0 {
+        var d: [u8; 32] = [0; 32]
+        sha256.hash(blob, blen, (&d[0]) as u64)
+        check("F1 real blob matches the pin", iwl_probe.fw_digest_pinned((&d[0]) as u64))
+        check("F2 real header ok, ver 77", iwl_probe.fw_header_ok(blob, blen) && iwl_probe.fw_ver_get(blob, blen) == 77)
+        let c: i64 = iwl_probe.fw_tlv_count(blob, blen)
+        check("F3 TLV walk reaches end exactly", c > 0)
+        tlit("TLVCOUNT ")
+        tnum(c as u64)
+        temit()
+        d[0] = d[0] ^ 1
+        check("F4 flipped digest rejected", !iwl_probe.fw_digest_pinned((&d[0]) as u64))
+    }
+    tlit("RESULT pass=")
+    tnum(passn)
+    tlit(" fail=")
+    tnum(failn)
+    temit()
+    if failn > 0 { return 1 }
+    return 0
+}
