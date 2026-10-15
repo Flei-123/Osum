@@ -80,6 +80,19 @@ static mut W_REFRESH: [u8; 8] = "refresh\0"
 static mut W_INSTALL: [u8; 8] = "install\0"
 static mut W_UPDATE: [u8; 7] = "update\0"
 static mut W_REMOVE: [u8; 7] = "remove\0"
+static mut W_AUTO: [u8; 11] = "autoupdate\0"
+static mut P_NEED: [u8; 16] = "/tmp/store/NEED\0"
+static mut F_FILE: [u8; 5] = "file\0"
+static mut F_AUTO: [u8; 5] = "auto\0"
+static mut F_AUTOINT: [u8; 14] = "autointervall\0"
+static mut V_JA: [u8; 3] = "ja\0"
+static mut V_TRUE: [u8; 5] = "true\0"
+static mut T_DONE_A: [u8; 25] = "automatisch aktualisiert\0"
+static mut T_NODEP: [u8; 29] = "Abhaengigkeit nicht zu holen\0"
+static mut need: [u8; 128] = [0 as u8; 128]
+static mut nm: [u8; 64] = [0 as u8; 64]
+static mut tried: [u8; 1024] = [0 as u8; 1024]
+static mut gotf: [u8; 1024] = [0 as u8; 1024]
 
 static mut rbuf: [u8; 8192] = [0 as u8; 8192]
 static mut rlen: u64 = 0
@@ -710,6 +723,30 @@ fn handle(msg: u64) -> bool {
     return false
 }
 
+// r178 helpers: is the background update switched on, and how often
+fn auto_on() -> bool {
+    var v: [u8; 24] = [0 as u8; 24]
+    if !actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&F_AUTO[0 as usize]) as u64,
+        (&v[0 as usize]) as u64, 24) {
+        return false
+    }
+    return actwire.str_eq((&v[0 as usize]) as u64, (&V_JA[0 as usize]) as u64)
+        || actwire.str_eq((&v[0 as usize]) as u64, (&V_TRUE[0 as usize]) as u64)
+}
+
+fn auto_interval() -> u64 {
+    var v: [u8; 24] = [0 as u8; 24]
+    if !actwire.kvfile_get((&P_CONF[0 as usize]) as u64, (&F_AUTOINT[0 as usize]) as u64,
+        (&v[0 as usize]) as u64, 24) {
+        return 21600
+    }
+    let n: u64 = ulib.to_num((&v[0 as usize]) as u64)
+    if n < 10 {
+        return 21600
+    }
+    return n
+}
+
 fn serve(limit: u64) -> u64 {
     var n_me: [u8; 8] = "a.store\0"
     let me: u64 = actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)
@@ -743,6 +780,14 @@ fn serve(limit: u64) -> u64 {
     let mp: u64 = (&meta[0 as usize]) as u64
     let t1: u64 = actwire.ticks()
     var last_check: u64 = t1
+    // r178: first background run 60 s after start (or one interval, if shorter), then every `autointervall`
+    // seconds (/etc/store.conf, default 21600 = 6 h, minimum 10), only while
+    // /etc/ota.conf says `auto=ja` (the same switch as the system update).
+    var first_auto: u64 = auto_interval() * 100
+    if first_auto > 6000 {
+        first_auto = 6000
+    }
+    var next_auto: u64 = t1 + first_auto
     while limit == 0 || actwire.ticks() - t1 < limit {
         let n: u64 = actwire.bus_wait(fp, mp, 100)
         if !ulib.bad(n) && n > 0 {
@@ -759,6 +804,12 @@ fn serve(limit: u64) -> u64 {
         } else {
             if u_pid != 0 {
                 alive()
+            }
+            if u_pid == 0 && actwire.ticks() >= next_auto {
+                next_auto = actwire.ticks() + auto_interval() * 100
+                if auto_on() {
+                    spawn_work((&W_AUTO[0 as usize]) as u64, 0)
+                }
             }
             if actwire.ticks() - last_check > 100 {
                 last_check = actwire.ticks()
@@ -831,6 +882,9 @@ fn work(verb: u64, name: u64) -> u64 {
         stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_R[0 as usize]) as u64)
         return 0
     }
+    if actwire.str_eq(verb, (&W_AUTO[0 as usize]) as u64) {
+        return auto_work(verb)
+    }
     let r: u64 = refresh_catalog(verb, name)
     if r != 0 {
         return r
@@ -840,7 +894,49 @@ fn work(verb: u64, name: u64) -> u64 {
         stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_C[0 as usize]) as u64)
         return 0
     }
-    // install | update: the file name comes from the VERIFIED catalog
+    return install_one(verb, name)
+}
+
+// one package file + its signature from the source into /tmp/store; 0 = ok
+fn fetch_pkg(file: u64) -> u64 {
+    let tp: u64 = (&tmpn[0 as usize]) as u64
+    ulib.strcpy(tp, (&P_TMP[0 as usize]) as u64)
+    ulib.strcat(tp, (&SL[0 as usize]) as u64)
+    ulib.strcat(tp, file)
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, file, tp, 0, 4) != 0 {
+        return 1
+    }
+    // the package's own signature (`<file>.sig`, 64 octets): `opk update` checks it with the
+    // trusted key before it believes a single octet of the package
+    let sp: u64 = (&tmpn2[0 as usize]) as u64
+    ulib.strcpy(sp, file)
+    ulib.strcat(sp, (&SIGEXT[0 as usize]) as u64)
+    let tsp: u64 = (&tmpn3[0 as usize]) as u64
+    ulib.strcpy(tsp, tp)
+    ulib.strcat(tsp, (&SIGEXT[0 as usize]) as u64)
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, sp, tsp, 0, 4) != 0 {
+        ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
+        return 1
+    }
+    return 0
+}
+
+fn drop_pkg(file: u64) {
+    let tp: u64 = (&tmpn[0 as usize]) as u64
+    ulib.strcpy(tp, (&P_TMP[0 as usize]) as u64)
+    ulib.strcat(tp, (&SL[0 as usize]) as u64)
+    ulib.strcat(tp, file)
+    ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
+    ulib.strcat(tp, (&SIGEXT[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
+}
+
+// install | update of ONE program from the (already verified, fresh) catalog.
+// r105: when the package names dependencies that are not installed, `opk update`
+// stops with exit 4 and `<source>/NEED` names the file it wants next; fetch it
+// (signature included) and call again. The chain is capped at 8 files.
+fn install_one(verb: u64, name: u64) -> u64 {
+    // the file name comes from the VERIFIED catalog
     if kat_read() == 0 {
         return fail(verb, name, (&T_NOKAT[0 as usize]) as u64)
     }
@@ -851,40 +947,112 @@ fn work(verb: u64, name: u64) -> u64 {
     if !kat_field(at, 3, (&DT[0 as usize]) as u64, 128) || ld((&DT[0 as usize]) as u64, 0) == 0 {
         return fail(verb, name, (&T_NOKAT[0 as usize]) as u64)
     }
-    // /tmp/store/<file>
-    let tp: u64 = (&tmpn[0 as usize]) as u64
-    ulib.strcpy(tp, (&P_TMP[0 as usize]) as u64)
-    ulib.strcat(tp, (&SL[0 as usize]) as u64)
-    ulib.strcat(tp, (&DT[0 as usize]) as u64)
     pct_set(30)
-    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&DT[0 as usize]) as u64, tp, 0, 4) != 0 {
+    if fetch_pkg((&DT[0 as usize]) as u64) != 0 {
         return fail(verb, name, (&T_PKG[0 as usize]) as u64)
     }
     pct_set(62)
-    // the package's own signature (`<file>.sig`, 64 octets): `opk update` checks it with the
-    // trusted key before it believes a single octet of the package
-    let sp: u64 = (&tmpn2[0 as usize]) as u64
-    ulib.strcpy(sp, (&DT[0 as usize]) as u64)
-    ulib.strcat(sp, (&SIGEXT[0 as usize]) as u64)
-    let tsp: u64 = (&tmpn3[0 as usize]) as u64
-    ulib.strcpy(tsp, tp)
-    ulib.strcat(tsp, (&SIGEXT[0 as usize]) as u64)
-    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, sp, tsp, 0, 4) != 0 {
-        ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
-        return fail(verb, name, (&T_PKG[0 as usize]) as u64)
+    var ngot: u64 = 0
+    var rc: u64 = 4
+    var why: u64 = (&T_INST[0 as usize]) as u64
+    while rc == 4 && ngot < 8 {
+        pct_set(70)
+        rc = run((&P_OPK[0 as usize]) as u64, (&A_AKT[0 as usize]) as u64, name,
+            (&A_QUELLE[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64, 5)
+        if rc == 4 {
+            if !actwire.kvfile_get((&P_NEED[0 as usize]) as u64, (&F_FILE[0 as usize]) as u64,
+                (&need[0 as usize]) as u64, 128) || !name_ok((&need[0 as usize]) as u64) {
+                why = (&T_NODEP[0 as usize]) as u64
+                rc = 1
+            } else {
+                ulib.sys(ulib.SYS_UNLINK, (&P_NEED[0 as usize]) as u64, 0, 0)
+                if fetch_pkg((&need[0 as usize]) as u64) != 0 {
+                    why = (&T_NODEP[0 as usize]) as u64
+                    rc = 1
+                } else {
+                    ulib.strcpy((&gotf[0 as usize]) as u64 + ngot * 128, (&need[0 as usize]) as u64)
+                    ngot = ngot + 1
+                }
+            }
+        }
     }
-    pct_set(70)
-    let rc: u64 = run((&P_OPK[0 as usize]) as u64, (&A_AKT[0 as usize]) as u64, name,
-        (&A_QUELLE[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64, 5)
-    ulib.sys(ulib.SYS_UNLINK, tp, 0, 0)
-    ulib.sys(ulib.SYS_UNLINK, tsp, 0, 0)
+    if rc == 4 {
+        why = (&T_NODEP[0 as usize]) as u64
+    }
+    drop_pkg((&DT[0 as usize]) as u64)
+    var g: u64 = 0
+    while g < ngot {
+        drop_pkg((&gotf[0 as usize]) as u64 + g * 128)
+        g = g + 1
+    }
     if rc != 0 {
-        return fail(verb, name, (&T_INST[0 as usize]) as u64)
+        return fail(verb, name, why)
     }
     run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
         (&P_KAT[0 as usize]) as u64, 0, 4)
     pct_set(100)
     stat_set((&M_OK[0 as usize]) as u64, verb, name, (&T_DONE_I[0 as usize]) as u64)
+    return 0
+}
+
+// r178: the background job. Fresh verified catalog, then every program that is
+// installed but not current goes through the SAME path as a click on "update"
+// (signature of the package, hash against the signed INDEX, new generation).
+// A program that fails is not tried again in this run.
+fn auto_work(verb: u64) -> u64 {
+    var fi: [u8; 8] = [0 as u8; 8]
+    var fa: [u8; 8] = [0 as u8; 8]
+    var ntried: u64 = 0
+    var again: bool = true
+    var done: u64 = 0
+    let r: u64 = refresh_catalog(verb, 0)
+    if r != 0 {
+        return r
+    }
+    while again && ntried < 16 {
+        again = false
+        if kat_read() != 0 {
+            let p: u64 = (&kbuf[0 as usize]) as u64
+            var at: u64 = 0
+            var found: bool = false
+            while ld(p, at) != 0 && !found {
+                if kat_field(at, 0, (&nm[0 as usize]) as u64, 64)
+                    && kat_field(at, 4, (&fi[0 as usize]) as u64, 8)
+                    && kat_field(at, 5, (&fa[0 as usize]) as u64, 8)
+                    && ld((&fi[0 as usize]) as u64, 0) == 49 && ld((&fa[0 as usize]) as u64, 0) == 48 {
+                    var seen: bool = false
+                    var t: u64 = 0
+                    while t < ntried {
+                        if actwire.str_eq((&tried[0 as usize]) as u64 + t * 64, (&nm[0 as usize]) as u64) {
+                            seen = true
+                        }
+                        t = t + 1
+                    }
+                    if !seen && name_ok((&nm[0 as usize]) as u64) {
+                        found = true
+                    }
+                }
+                if !found {
+                    while ld(p, at) != 10 && ld(p, at) != 0 {
+                        at = at + 1
+                    }
+                    if ld(p, at) == 10 {
+                        at = at + 1
+                    }
+                }
+            }
+            if found {
+                ulib.strcpy((&tried[0 as usize]) as u64 + ntried * 64, (&nm[0 as usize]) as u64)
+                ntried = ntried + 1
+                again = true
+                if install_one((&W_UPDATE[0 as usize]) as u64, (&nm[0 as usize]) as u64) == 0 {
+                    done = done + 1
+                }
+            }
+        }
+    }
+    pct_set(100)
+    stat_set((&M_OK[0 as usize]) as u64, verb, 0, (&T_DONE_A[0 as usize]) as u64)
     return 0
 }
 
