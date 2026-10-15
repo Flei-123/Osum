@@ -809,6 +809,12 @@ class Fahrer:
             # (`qs: open x= y= w= h=`); die Zeile darin steht als
             # Konstante in kernel/user/qs.fi -- PAD=10, FH=22, und sie
             # sitzt unten, also H - PAD - FH.
+            # r837: the Windows-11 control centre has no "All settings" row any more; the
+            # footer carries a gear button (`qs: zeile set y= x= h=`, absolute screen
+            # position, square h x h). Prefer it; the old row stays as the fallback.
+            g = letzte(r"qs: zeile set y=(\d+) x=(\d+) h=(\d+)")
+            if g is not None:
+                return (int(g.group(2)), int(g.group(1)), int(g.group(3)), int(g.group(3)))
             m = letzte(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 # RUNDE O-NETZUI: `qs: open` kommt nur, wenn das
@@ -1103,6 +1109,13 @@ def main():
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
         elif b in ("klickauf", "doppelauf", "rklickauf", "mklickauf"):
             r = f.rechteck(arg)
+            # r837: under load the window needs a moment after the opening click to report its
+            # rectangles (the foto before this line already costs ~1 s); poll up to 6 s before giving up.
+            for _try in range(24):
+                if r is not None:
+                    break
+                time.sleep(0.25)
+                r = f.rechteck(arg)
             if r is None:
                 print("klickauf %s -> KEIN RECHTECK GEMELDET" % arg)
                 fehler += 1
