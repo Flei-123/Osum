@@ -69,3 +69,12 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 3. wm: compose per output; cursor uses `clamp_x/clamp_y`; windows get their home output.
 4. Settings canvas; persistence of the arrangement (key=value like other settings).
 5. HDA HDMI pin + ELD.
+
+## r826 window server per output (wm.fi)
+
+- Head rects live in ONE place: the pointer driver's head table (`ps2m.set_head`); `wm.heads_sync` fills it from the vgpu extend table (after `wm.init` when extend is on, and from `gfx.gpu_ereignis` after every successful `vgpu.relayout`). Fewer than two heads = model off, behaviour identical to a single screen.
+- Home head of a window = head its outer rect overlaps most (`win_head`); none = primary. `head_work(hd)` = work area of one head, computed from scratch (packed x|y|w|h, 16 bit each); a strut counts only for heads its window overlaps, the measuring band only for the head at the desktop origin.
+- `maximize`/`fit_work`, `fullscreen` and `drag_klemmen` use the home head; `recalc_work` feeds `work_*` and the tile tree from the primary head; edge docking works on the primary head only.
+- `heads_sync`: windows on no head come to the primary head, others keep their title bar reachable, fullscreen windows refit, maximized ones refit via `recalc_work`, pointer re-clamped.
+- Gate: `tools/wmheads/run.sh` (words `hdtest`, `hdhot`; test bed `wm.hd_demo`).
+- Open: taskbar instance per head (`--head` in taskbar.fi), tile tree per head, real hardware.
