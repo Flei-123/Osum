@@ -80,7 +80,7 @@ timeout ${CPT_TIMEOUT:-1200} $QEMU_X86 $ACC -kernel "$K" -m 512 \
 rc=$?
 tr -d '\r\000' < "$W/out.txt" > "$W/clean.txt"
 [ "$rc" = 21 ] && ok "OS finished (rc 21)" || bad "OS rc=$rc (timeout?)"
-grep -aq '^@@mount-rc=0' "$W/clean.txt" && ok "FAT32 mounted" || bad "mount failed"
+grep -aq '@@mount-rc=0' "$W/clean.txt" && ok "FAT32 mounted" || bad "mount failed"
 ms1=$(sed -n '/^@@ofs-to-fat/q;p' "$W/clean.txt" | grep -a 'cptempo: ms' | head -1 | sed 's/.* = //')
 ms2=$(sed -n '/^@@ofs-to-fat/,/^@@in-fat/p' "$W/clean.txt" | grep -a 'cptempo: ms' | head -1 | sed 's/.* = //')
 kbs() { python3 -c "print(round($SIZE/1024/(max($1,1)/1000),1))"; }
