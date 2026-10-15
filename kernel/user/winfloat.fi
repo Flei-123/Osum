@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/winfloat.fi -- W-WINOPTS stage 2 (docs/APP-WINDOW-OPTS.md): THE LAYER L_FLOAT AND THE RIGHT `window.float`, from ring 3.
+//
+// Started by the kernel word `wigapp=/bin/winfloat` (tools/winfloat/run.sh). Every result is one serial line `winfloat: <name> <a> <b>`.
+//
+// Cast (all windows frameless, solid colour, so the host can sample the screen):
+//   N  root, L_NORMAL, red,   (100,100)   the ordinary window
+//   T  root, L_TOP,    green, (300,250)   stands for the task bar / lock screen (both are L_TOP windows)
+//   F  child labelled app:fprobe, uid 1000, WO_KEYS, blue, (200,150), asks for L_FLOAT
+// Order on the screen must be N < F < T. Steps:
+//   1. c1 = app:fprobe WITHOUT the right: L_FLOAT -> E_RIGHTS (2), L_TOP -> E_RIGHTS, L_NORMAL ok
+//   2. the person grants `window.float` (unlabelled root, ceiling first); c2 = app:fprobe asks for L_FLOAT -> ok, WI_LAYER = 8
+//   3. the right is taken away -> the kernel puts the window back on L_NORMAL (c2 sees WI_LAYER = 1), a new request is E_RIGHTS
+//   4. the right is granted again -> the request works again; the window stays on L_FLOAT for the host (screenshot, typed key)
+// Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import wlibc
+import libc.kcall
+import apprights.policy
+
+export { u_start }
+
+const SYS_SETUID: u64 = 105
+const W: u64 = 300
+const H: u64 = 200
+const C_RED: u64 = 0xCC0000
+const C_GREEN: u64 = 0x00CC00
+const C_BLUE: u64 = 0x0000CC
+
+static mut s_t: [u8; 11] = "winfloat: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_app: [u8; 7] = "fprobe\0"
+static mut s_tn: [u8; 10] = "wf-normal\0"
+static mut s_tt: [u8; 7] = "wf-top\0"
+static mut s_tf: [u8; 9] = "wf-float\0"
+static mut s_tc: [u8; 8] = "wf-deny\0"
+
+fn line(name: u64, a: u64, b: u64) {
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(a)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(b)
+    ulib.nl()
+}
+
+fn yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn fill(p: u64, color: u64) {
+    var i: u64 = 0
+    while i < W * H {
+        __mmio_write32((p + i * 4) as *mut u32, color as u32)
+        i = i + 1
+    }
+}
+
+// A frameless shared-buffer window at (x, y), W x H, solid colour. Returns the handle (0 = failed).
+fn mkwin(x: u64, y: u64, color: u64, keys: bool, title: u64) -> u64 {
+    let bytes: u64 = W * H * 4
+    let p: u64 = wlibc.shm_buffer(bytes)
+    if p == 0 || ulib.bad(p) {
+        return 0
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (W << 16) | H, title, wlibc.win_opts(true, keys, 256), fd + 1)
+    wlibc.shm_close(fd)
+    if ulib.bad(h) || h == 0 {
+        return 0
+    }
+    fill(p, color)
+    let _d: u64 = wlibc.win_damage(h, 0, 0, W, H)
+    return h
+}
+
+fn layer_of(h: u64) -> u64 {
+    return wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_LAYER, 0)
+}
+
+// Give this process the label app:<app> (once; a label can only be narrowed).
+fn label_self(app: u64) -> bool {
+    var lab: [u8; 32] = [0 as u8; 32]
+    lab[0 as usize] = 97 as u8
+    lab[1 as usize] = 112 as u8
+    lab[2 as usize] = 112 as u8
+    lab[3 as usize] = 58 as u8
+    let n: u64 = ulib.length(app)
+    if n == 0 || n > 19 {
+        return false
+    }
+    ulib.copy((&lab[4 as usize]) as u64, app, n)
+    return !ulib.failed(ulib.sys(kcall.SYS_OSUM_ORIGIN, 1, (&lab[0]) as u64, n + 4))
+}
+
+// c1: the app WITHOUT the right.
+fn child_denied() -> u64 {
+    var n_lab: [u8; 7] = "c1-lab\0"
+    var n_make: [u8; 8] = "c1-make\0"
+    var n_float: [u8; 9] = "c1-float\0"
+    var n_top: [u8; 7] = "c1-top\0"
+    var n_norm: [u8; 8] = "c1-norm\0"
+    var n_lay: [u8; 9] = "c1-layer\0"
+    if !label_self((&s_app[0 as usize]) as u64) {
+        line((&n_lab[0 as usize]) as u64, 0, 0)
+        return 3
+    }
+    line((&n_lab[0 as usize]) as u64, 1, 0)
+    let su: u64 = ulib.sys(SYS_SETUID, 1000, 0, 0)
+    if ulib.bad(su) {
+        return 4
+    }
+    wlibc.start(false)
+    let h: u64 = mkwin(200, 150, C_BLUE, true, (&s_tc[0 as usize]) as u64)
+    line((&n_make[0 as usize]) as u64, yes(h != 0), 0)
+    if h == 0 {
+        return 5
+    }
+    let rf: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_FLOAT)
+    line((&n_float[0 as usize]) as u64, 0 -% rf, layer_of(h))
+    let rt: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_TOP)
+    line((&n_top[0 as usize]) as u64, 0 -% rt, layer_of(h))
+    let rn: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_NORMAL)
+    line((&n_norm[0 as usize]) as u64, rn, layer_of(h))
+    line((&n_lay[0 as usize]) as u64, layer_of(h), 0)
+    return 0
+}
+
+// c2: the app WITH the right; it stays alive, reports every change of its layer, asks again while it is not on L_FLOAT, and reports
+// every key it gets (WO_KEYS).
+fn child_float() -> u64 {
+    var n_lab: [u8; 7] = "c2-lab\0"
+    var n_make: [u8; 8] = "c2-make\0"
+    var n_float: [u8; 9] = "c2-float\0"
+    var n_lay: [u8; 9] = "c2-layer\0"
+    var n_retry: [u8; 9] = "c2-retry\0"
+    var n_key: [u8; 8] = "c2-key\0\0"
+    var n_ready: [u8; 9] = "c2-ready\0"
+    var ev: [u8; 32] = [0 as u8; 32]
+    if !label_self((&s_app[0 as usize]) as u64) {
+        line((&n_lab[0 as usize]) as u64, 0, 0)
+        return 3
+    }
+    line((&n_lab[0 as usize]) as u64, 1, 0)
+    let su: u64 = ulib.sys(SYS_SETUID, 1000, 0, 0)
+    if ulib.bad(su) {
+        return 4
+    }
+    wlibc.start(false)
+    let h: u64 = mkwin(200, 150, C_BLUE, true, (&s_tf[0 as usize]) as u64)
+    line((&n_make[0 as usize]) as u64, yes(h != 0), 0)
+    if h == 0 {
+        return 5
+    }
+    let rf: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_FLOAT)
+    line((&n_float[0 as usize]) as u64, 0 -% rf, layer_of(h))
+    var last: u64 = layer_of(h)
+    line((&n_lay[0 as usize]) as u64, last, 0)
+    line((&n_ready[0 as usize]) as u64, 1, 0)
+    var lastrc: u64 = 0xFFFF
+    var t: u64 = 0
+    while t < 20000 {
+        // keys first (the window got the keyboard because of WO_KEYS)
+        let b: u64 = (&ev[0 as usize]) as u64
+        var n: u64 = 0
+        while n < 16 && wlibc.sys3w(wlibc.WM_EVENT, h, b, 0) == 1 {
+            n = n + 1
+            let typ: u64 = __mmio_read64((b) as *mut u64)
+            let d: u64 = __mmio_read64((b + 8) as *mut u64)
+            if typ == wlibc.EV_KEY {
+                line((&n_key[0 as usize]) as u64, (d >> 32) & 0xFFFF, 1)
+            }
+        }
+        let l: u64 = layer_of(h)
+        if l != last {
+            last = l
+            line((&n_lay[0 as usize]) as u64, l, 0)
+        }
+        // not on L_FLOAT: ask again about once a second; the answer is reported when it changes
+        if l != wlibc.L_FLOAT && t % 20 == 0 {
+            let r: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_FLOAT)
+            let rc: u64 = 0 -% r
+            if rc != lastrc {
+                lastrc = rc
+                line((&n_retry[0 as usize]) as u64, rc, layer_of(h))
+            }
+        }
+        let _z: u64 = ulib.sleep_ms(50)
+        t = t + 1
+    }
+    return 0
+}
+
+fn run_child(which: u64) -> u64 {
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.failed(pid) {
+        return 1
+    }
+    if pid == 0 {
+        var rc: u64 = 0
+        if which == 1 {
+            rc = child_denied()
+        } else {
+            rc = child_float()
+        }
+        let _e: u64 = ulib.sys(ulib.SYS_EXIT, rc, 0, 0)
+        return rc
+    }
+    return pid
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_begin: [u8; 6] = "begin\0"
+    var n_n: [u8; 7] = "p-norm\0"
+    var n_top: [u8; 6] = "p-top\0"
+    var n_ceil: [u8; 7] = "p-ceil\0"
+    var n_c1: [u8; 6] = "p-c1\0\0"
+    var n_gr: [u8; 8] = "p-grant\0"
+    var n_rootf: [u8; 9] = "p-rootfl\0"
+    var n_rev: [u8; 9] = "p-revoke\0"
+    var n_reg: [u8; 10] = "p-regrant\0"
+    var n_fin: [u8; 6] = "final\0"
+    var n_max: [u8; 7] = "p-maxl\0"
+    var n_back: [u8; 7] = "p-back\0"
+    wlibc.start(false)
+    line((&n_begin[0 as usize]) as u64, 1, 0)
+
+    // the cast: N (ordinary), T (L_TOP, as root)
+    let hn: u64 = mkwin(100, 100, C_RED, false, (&s_tn[0 as usize]) as u64)
+    line((&n_n[0 as usize]) as u64, yes(hn != 0), layer_of(hn))
+    let ht: u64 = mkwin(300, 250, C_GREEN, false, (&s_tt[0 as usize]) as u64)
+    let rt: u64 = wlibc.win_state(ht, wlibc.WS_LAYER, wlibc.L_TOP)
+    line((&n_top[0 as usize]) as u64, rt, layer_of(ht))
+    // root may use L_FLOAT without the right (control); an unknown layer is refused
+    let rr: u64 = wlibc.win_state(hn, wlibc.WS_LAYER, wlibc.L_FLOAT)
+    line((&n_rootf[0 as usize]) as u64, rr, layer_of(hn))
+    let rb: u64 = wlibc.win_state(hn, wlibc.WS_LAYER, 9)
+    line((&n_max[0 as usize]) as u64, 0 -% rb, layer_of(hn))
+    let rn: u64 = wlibc.win_state(hn, wlibc.WS_LAYER, wlibc.L_NORMAL)
+    line((&n_back[0 as usize]) as u64, rn, layer_of(hn))
+
+    // the manifest ceiling allows the right; nothing is granted yet
+    let rc: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 4, (&s_app[0 as usize]) as u64, policy.P_WINDOW_FLOAT)
+    line((&n_ceil[0 as usize]) as u64, yes(!ulib.failed(rc)), 0)
+
+    // 1. without the right
+    let p1: u64 = run_child(1)
+    let c1: u64 = ulib.wait_code(p1)
+    line((&n_c1[0 as usize]) as u64, c1, 0)
+
+    // 2. the person grants it
+    let rg: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, (&s_app[0 as usize]) as u64, policy.P_WINDOW_FLOAT)
+    line((&n_gr[0 as usize]) as u64, yes(!ulib.failed(rg)), 0)
+    let p2: u64 = run_child(2)
+    var t: u64 = 0
+    while t < 30 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+
+    // 3. the person takes it away again
+    let rv: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, (&s_app[0 as usize]) as u64, 0)
+    line((&n_rev[0 as usize]) as u64, yes(!ulib.failed(rv)), 0)
+    t = 0
+    while t < 40 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+
+    // 4. and gives it back: the window returns to L_FLOAT and stays there
+    let rg2: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, (&s_app[0 as usize]) as u64, policy.P_WINDOW_FLOAT)
+    line((&n_reg[0 as usize]) as u64, yes(!ulib.failed(rg2)), 0)
+    t = 0
+    while t < 30 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    line((&n_fin[0 as usize]) as u64, 1, p2)
+    t = 0
+    while t < 1800 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    return 0
+}

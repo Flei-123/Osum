@@ -59,12 +59,13 @@ import fs.unixsock
 import mm.mem
 import ui.wm
 import ui.wmplug
+import apprights.policy
 import ui.ax
 import serial
 
 import sys.sys
 
-export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call }
+export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call, float_check }
 
 
 // The copy page of THIS system call: one page per core for ring 3 callers,
@@ -1499,7 +1500,14 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             // und alles darueber liegt UEBER dem Sperrbildschirm; das
             // bleibt der Wurzel vorbehalten, und genau daran haengt
             // die Zusage des Sperrbildschirms.
-            if a2 != wm.L_NORMAL && a2 != wm.L_DESK {
+            // W-WINOPTS S2: L_FLOAT (always on top, but BELOW the task bar and the lock screen) is the one upper layer an app may
+            // have -- with the right `window.float`, granted by the person like the microphone. Root may always. L_TOP and
+            // everything above stays root only.
+            if a2 == wm.L_FLOAT {
+                if !perm.is_root(state, me) && !policy.label_allows(origin.at(state, me), policy.P_WINDOW_FLOAT) {
+                    return cap.err(cap.E_RIGHTS)
+                }
+            } else if a2 != wm.L_NORMAL && a2 != wm.L_DESK {
                 if !perm.is_root(state, me) {
                     return cap.err(cap.E_RIGHTS)
                 }
@@ -3250,4 +3258,26 @@ fn ax_dump(state: u64) {
         serial.nl()
         i = i + 1
     }
+}
+
+// W-WINOPTS S2: a window on L_FLOAT lives only as long as its owner HAS the right `window.float`. Called after every change of the
+// rights table (grant, revoke, ceiling): a float window whose owner lost the right goes back to L_NORMAL at once (root and
+// unlabelled processes are never gated, see policy.label_allows). Returns how many windows were put back.
+fn float_check(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        if wm.valid(state, i) && wm.win_layer(state, i) == wm.L_FLOAT {
+            let t: u64 = wm.win_owner(state, i)
+            if !policy.label_allows(origin.at(state, t), policy.P_WINDOW_FLOAT) {
+                wm.set_layer(state, i, wm.L_NORMAL)
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    if n != 0 {
+        wm.compose(state)
+    }
+    return n
 }
