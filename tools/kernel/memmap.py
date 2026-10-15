@@ -592,6 +592,7 @@ KEINE_KDATA = {
     ("part.fi", "SECT_OFF"),    # in K14_OFF
     ("fat.fi", "SB_OFF"),       # in FAT_OFF
     ("fat.fi", "NODE_OFF"),     # in FAT_OFF
+    ("fat.fi", "CACHE_OFF"),    # in FAT_OFF (r208 chain cache)
 }
 # Die K17-Stuecke sind ebenfalls kein eigenes kdata -- sie liegen alle in
 # K17_OFF.  Eingetragen wird das mechanisch, damit die beiden Listen
