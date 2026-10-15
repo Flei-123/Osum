@@ -96,3 +96,38 @@ Firmware wird **nie erfunden und nie ungeprüft aus dem Netz geladen**: Quelle i
 Kein Treibercode: ohne bekannten Chip wäre er nicht prüfbar und nicht begründbar (§2). Die
 Entscheidung steht in der Projektliste („Welcher WLAN-Chip?"). Sobald die Antwort da ist,
 beginnt M1 mit dem passenden Zweig der Tabelle in §3.
+
+## 8. Stand 15.10.2026 -- erster Chip-Treiber (M1, AR9271), gegen Simulation
+
+**Laptop HOLO-LAPTOP-3 war offline** (`list_devices`: nur Dell, Desktop) -> Chip bleibt
+**[unbekannt]** (M0 offen). Gebaut wurde deshalb der kleinste, freie, ohne Laptop
+pruefbare Weg aus §3/§4: **Atheros AR9271 (USB, `ath9k_htc`)**.
+
+* **[Quelle, Linux ath9k, gelesen 15.10.]** Protokoll: Firmware per Vendor-Control-Request
+  `0x30` (Chunks <= 4096, `wValue = Adresse >> 8`, ab `0x501000`), dann `0x31`
+  (`wValue = 0x903000 >> 8`). Danach HTC auf Interrupt-Pipes 3 (ein) / 4 (aus): READY ->
+  Connect-Service (WMI-Control `0x0100`) -> Config-Pipe + Setup-Complete; WMI
+  `REG_READ`(20)/`REG_WRITE`(21) sind Big-Endian. Bulk-Pipes 1/2 tragen Rahmen im
+  Stream-Format (`len le16 | 0x697e/0x4e00 le16`, auf 4 aufgefuellt).
+* **[gemessen]** Firmware `htc_9271-1.4.0.fw` (linux-firmware, 51008 Bytes) hat
+  SHA-256 `78f7d592...173eb0`; der Treiber laedt **nur** diese Datei (Pin).
+* `lib/wlan/htc.fi` (Codec), `lib/wlan/ar9271.fi` (Treiber ueber eine Transporttafel
+  `Xport`: Control/Interrupt-aus/Interrupt-ein), `kernel/user/wlan.fi` neu: `wlan fw`
+  (Datei auf Platte suchen, Pin pruefen).
+* **[gemessen]** `tools/wlan/run.sh` Abschnitt 12: simulierter Stick (Firn) + unabhaengige
+  `struct.pack`-Gegenrechnung (Python); Gegenproben (falsche Adresse, falsche Service-ID)
+  schlagen rot an. Siehe Bericht W-WLAN.
+* **Nicht gemacht (ehrlich):** M2 (ath9k-Hardware-Init-Tabellen, Tx-/Rx-Deskriptoren,
+  Scan, Schluessel) -> `attach_board` gibt bewusst `false`; die vier Funktionen aus
+  `device.fi` bleiben ungefuellt. Der Kern bindet den Treiber noch nicht
+  (`kernel/usb/usb.fi` gehoert einem anderen Worker): die `wifi-usb:`-Zeile sagt
+  weiter "kein Treiber". Ob ein echter AR9271 sich wie die Simulation verhaelt, ist
+  **[unbekannt]** bis ein Stick steckt.
+
+### Befehle fuer den Boss (Chip bestimmen, M0)
+
+1. Windows-Laptop, PowerShell: `Get-PnpDevice -Class Net | Format-List FriendlyName,InstanceId`
+   -> Zeile mit `PCI\VEN_xxxx&DEV_xxxx` (intern) oder `USB\VID_xxxx&PID_xxxx` (Stick).
+2. OrientOS (Stick/Dell mit USB-WLAN): Terminal `wlan chips` (Liste), `wlan fw` (Firmware-
+   Datei + Pin); beim Einstecken erscheint `wifi-usb: <Name> (<vid>:<pid>), kein Treiber`.
+3. `0cf3:9271` / `0cf3:1006` = AR9271 -> genau dieser Treiber (M1 ruft den Chip an).

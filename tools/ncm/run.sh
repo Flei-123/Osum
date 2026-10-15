@@ -96,11 +96,19 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         ok "QEMU has no NCM device (protocol half only)"
     fi
 fi
-if grep -rqiE 'ncm\.(wrap_frame|ntb_ok|params_ok)' kernel --include=*.fi; then
-    bad "kernel uses lib/usbnet/ncm now: add an end-to-end gate and update this check"
-else
-    ok "kernel has no NCM driver yet (protocol half only)"
-fi
+# r811: the driver exists (no QEMU model, so the wiring is checked statically; the framing is covered above).
+# usb.fi binds class 02/0D as a LAST RESORT (same pass as RNDIS), runs the NCM bring-up and hands over to usbnet.fi (mode 2).
+U=kernel/usb/usb.fi; N=kernel/drv/net/usbnet.fi
+chk() { # description file regex
+    if grep -qE "$3" "$2"; then ok "$1"; else bad "$1"; fi
+}
+chk "usb.fi: DRV_NCM exists and driver_for maps class 02/0D to it" $U 'return DRV_NCM'
+chk "usb.fi: NCM is a last resort (wanted only with S_RNDISOK, i.e. pass 2)" $U 'sub == 0x0D \{'
+chk "usb.fi: ncm_start does GET_NTB_PARAMETERS + SET_NTB_INPUT_SIZE" $U 'ncm\.REQ_SET_NTB_INPUT_SIZE'
+chk "usb.fi: ncm_start hands the TX rules to the net driver" $U 'usbnet\.attach_ncm'
+chk "usbnet.fi: mode 2 wraps TX with ncm.wrap_frame" $N 'ncm\.wrap_frame'
+chk "usbnet.fi: mode 2 unpacks RX with ncm.ntb_dg_off" $N 'ncm\.ntb_dg_off'
+chk "usbnet.fi: RX validates the NTB before use" $N 'ncm\.ntb_ok'
 
 echo "ncm: $pass promises, $fail errors"
 [ "$fail" = 0 ]

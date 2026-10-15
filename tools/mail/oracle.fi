@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/mail/oracle.fi -- host program for lib/mail/wire.fi.
+// Prints "OK <name>" / "FAIL <name>" per promise; run by tools/mail/run.sh.
+
+import std.rt
+import std.io
+import mail.wire
+
+static mut A: [u8; 4096] = [0; 4096]
+static mut B: [u8; 4096] = [0; 4096]
+static mut S: [u8; 8192] = [0; 8192]
+static mut SLOT: [u8; 1] = [0]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pa() -> u64 {
+    return (&A[0]) as u64
+}
+
+fn pb() -> u64 {
+    return (&B[0]) as u64
+}
+
+// Copies a string literal into a rotating slot of S (512 octets each, 16 slots) and
+// returns its address, so several lit() calls can live in one expression.
+fn lit(s: str) -> u64 {
+    let slot: usize = (SLOT[0] as usize) % 16
+    SLOT[0] = SLOT[0] + 1
+    let base: usize = slot * 512
+    var i: usize = 0
+    while i < s.n {
+        S[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    S[base + s.n] = 0
+    return (&S[base]) as u64
+}
+
+fn eq(p: u64, n: u64, s: str) -> bool {
+    if n != s.n as u64 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if *((p + i) as *mut u8) != *((s.p as u64 + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn main() -> i32 {
+    // ---------------------------------------------------------- base64
+    var o: wire.Out = wire.out_new(pa(), 4096)
+    var n: u64 = wire.b64_encode(lit("foob"), 4, pa())
+    chk("b64 encode foob", eq(pa(), n, "Zm9vYg=="))
+    n = wire.b64_encode(lit("fo"), 2, pa())
+    chk("b64 encode fo", eq(pa(), n, "Zm8="))
+    n = wire.b64_encode(lit(""), 0, pa())
+    chk("b64 encode empty", n == 0)
+    n = wire.b64_decode(lit("Zm9vYg=="), 8, pb())
+    chk("b64 decode foob", eq(pb(), n, "foob"))
+    n = wire.b64_decode(lit("Zm9v\r\nYg=="), 10, pb())
+    chk("b64 decode skips CRLF", eq(pb(), n, "foob"))
+    n = wire.b64_decode(lit("Zm9v!g=="), 8, pb())
+    chk("b64 decode refuses foreign octet", n == wire.BAD)
+
+    // ------------------------------------------------ quoted-printable
+    n = wire.qp_decode(lit("caf=C3=A9 =\r\nfoo=3Dbar"), 22, pb(), false)
+    chk("qp decode (utf-8, soft break, =3D)", eq(pb(), n, "café foo=bar"))
+    n = wire.qp_decode(lit("a_b=20c"), 7, pb(), true)
+    chk("qp word flavour: _ is a blank", eq(pb(), n, "a b c"))
+    n = wire.qp_decode(lit("100=%"), 5, pb(), false)
+    chk("qp decode keeps a stray =", eq(pb(), n, "100=%"))
+
+    // ------------------------------------------------------------ IMAP
+    o = wire.out_new(pa(), 4096)
+    wire.imap_login(&o, 1, lit("jus\"tin"), 7, lit("pa\\ss"), 5)
+    chk("imap login quotes and escapes", eq(pa(), o.len, "a001 LOGIN \"jus\\\"tin\" \"pa\\\\ss\"\r\n"))
+    o = wire.out_new(pa(), 4096)
+    wire.imap_fetch_head(&o, 12, 3, 9)
+    chk("imap fetch head", eq(pa(), o.len, "a012 FETCH 3:9 (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])\r\n"))
+    o = wire.out_new(pa(), 4096)
+    wire.imap_select(&o, 2, lit("INBOX"), 5)
+    chk("imap select", eq(pa(), o.len, "a002 SELECT \"INBOX\"\r\n"))
+    o = wire.out_new(pa(), 20)
+    wire.imap_login(&o, 1, lit("user"), 4, lit("secret"), 6)
+    chk("Out overflow is flagged, nothing written past cap", wire.out_over(&o) && o.len <= 20)
+
+    // response end with a literal that contains a fake tagged line
+    // literal "From: a@b\r\nA002 OK fake\r\n" = 11 + 14 = not exact; compute below
+    var resp: [u8; 512] = [0; 512]
+    var r: wire.Out = wire.out_new((&resp[0]) as u64, 512)
+    wire.out_str(&r, "* 4 EXISTS\r\n* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)] {26}\r\nSubject: x\r\na002 OK fake\r\n)\r\na002 OK Fetch completed\r\n")
+    var st: u64 = 0
+    var full: u64 = r.len
+    var e: u64 = wire.imap_response_end((&resp[0]) as u64, full, 2, &st)
+    chk("response end: literal containing a tagged-looking line is skipped", e == full)
+    chk("response end: status is OK", wire.imap_status((&resp[0]) as u64, st) == wire.ST_OK)
+    chk("EXISTS count", wire.imap_exists_count((&resp[0]) as u64, full) == 4)
+    var k: u64 = 0
+    var early: bool = false
+    while k < full {
+        var st2: u64 = 0
+        if wire.imap_response_end((&resp[0]) as u64, k, 2, &st2) != wire.BAD {
+            early = true
+        }
+        k = k + 1
+    }
+    chk("response end: no prefix of the response is complete", !early)
+    e = wire.imap_response_end((&resp[0]) as u64, full, 3, &st)
+    chk("response end: other tag is never found", e == wire.BAD)
+
+    var r2: wire.Out = wire.out_new((&resp[0]) as u64, 512)
+    wire.out_str(&r2, "a007 NO [AUTHENTICATIONFAILED] Invalid credentials\r\n")
+    e = wire.imap_response_end((&resp[0]) as u64, r2.len, 7, &st)
+    chk("tagged NO", e == r2.len && wire.imap_status((&resp[0]) as u64, st) == wire.ST_NO)
+    var r3: wire.Out = wire.out_new((&resp[0]) as u64, 512)
+    wire.out_str(&r3, "a008 BAD parse error\r\n")
+    e = wire.imap_response_end((&resp[0]) as u64, r3.len, 8, &st)
+    chk("tagged BAD", e == r3.len && wire.imap_status((&resp[0]) as u64, st) == wire.ST_BAD)
+    chk("literal parser: {12} at end of line", wire.imap_literal_at(lit("x {12}\r\n"), 0, 7) == 12)
+    chk("literal parser: no literal", wire.imap_literal_at(lit("x 12\r\n"), 0, 5) == wire.BAD)
+    chk("literal parser: {} is refused", wire.imap_literal_at(lit("x {}\r\n"), 0, 5) == wire.BAD)
+
+    // LIST
+    var lst: [u8; 256] = [0; 256]
+    var l: wire.Out = wire.out_new((&lst[0]) as u64, 256)
+    wire.out_str(&l, "* LIST (\\HasNoChildren) \"/\" INBOX\r\n* LIST (\\Sent) \"/\" \"Sent Items\"\r\n* LIST () NIL Archiv\r\na003 OK done\r\n")
+    var nm: [u8; 64] = [0; 64]
+    var nl: u64 = 0
+    var at: u64 = wire.imap_list_name((&lst[0]) as u64, l.len, 0, (&nm[0]) as u64, 64, &nl)
+    chk("list name 1: INBOX", at != wire.BAD && eq((&nm[0]) as u64, nl, "INBOX"))
+    at = wire.imap_list_name((&lst[0]) as u64, l.len, at, (&nm[0]) as u64, 64, &nl)
+    chk("list name 2: quoted with blank", at != wire.BAD && eq((&nm[0]) as u64, nl, "Sent Items"))
+    at = wire.imap_list_name((&lst[0]) as u64, l.len, at, (&nm[0]) as u64, 64, &nl)
+    chk("list name 3: NIL delimiter", at != wire.BAD && eq((&nm[0]) as u64, nl, "Archiv"))
+    at = wire.imap_list_name((&lst[0]) as u64, l.len, at, (&nm[0]) as u64, 64, &nl)
+    chk("list name 4: tagged line is not a LIST line", at == wire.BAD)
+
+    // ------------------------------------------------------------ SMTP
+    var code: u64 = 0
+    var last: bool = false
+    var rep: [u8; 128] = [0; 128]
+    var rp: wire.Out = wire.out_new((&rep[0]) as u64, 128)
+    wire.out_str(&rp, "250-mail.example\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n")
+    var q: u64 = wire.smtp_reply((&rep[0]) as u64, rp.len, 0, &code, &last)
+    chk("smtp reply 250- continues", q != wire.BAD && code == 250 && !last)
+    q = wire.smtp_reply((&rep[0]) as u64, rp.len, q, &code, &last)
+    q = wire.smtp_reply((&rep[0]) as u64, rp.len, q, &code, &last)
+    chk("smtp reply 250 final", code == 250 && last && q == rp.len)
+    chk("smtp reply: incomplete line", wire.smtp_reply(lit("250 OK"), 6, 0, &code, &last) == wire.BAD)
+    chk("smtp reply: malformed", wire.smtp_reply(lit("2x0 OK\r\n"), 8, 0, &code, &last) == wire.BAD - 1)
+    o = wire.out_new(pa(), 4096)
+    wire.smtp_auth_plain(&o, lit("user"), 4, lit("pass"), 4)
+    chk("smtp AUTH PLAIN golden", eq(pa(), o.len, "AUTH PLAIN AHVzZXIAcGFzcw==\r\n"))
+    o = wire.out_new(pa(), 4096)
+    wire.smtp_mail_from(&o, lit("Justin <j@x.org>"), 16)
+    chk("smtp MAIL FROM strips the name", eq(pa(), o.len, "MAIL FROM:<j@x.org>\r\n"))
+    o = wire.out_new(pa(), 4096)
+    wire.smtp_rcpt(&o, lit("a@b.c"), 5)
+    chk("smtp RCPT bare address", eq(pa(), o.len, "RCPT TO:<a@b.c>\r\n"))
+    o = wire.out_new(pa(), 4096)
+    wire.smtp_body(&o, lit("hi\n.dot\r\n..two\nlast"), 19)
+    chk("smtp data: CRLF, dot-stuffing, terminator", eq(pa(), o.len, "hi\r\n..dot\r\n...two\r\nlast\r\n.\r\n"))
+    n = wire.addr_only(lit("Max Muster <max@ex.at>"), 22, pb(), 64)
+    chk("addr_only", eq(pb(), n, "max@ex.at"))
+
+    // ---------------------------------------------------------- headers
+    var msg: u64 = lit("From: =?utf-8?B?SsO8cmdlbg==?= <j@x.at>\r\nSubject: Hello\r\n World\r\n\tagain\r\nDate: Thu, 15 Oct 2026 10:00:00 +0200\r\n\r\nSubject: not a header\r\n")
+    var mlen: u64 = 0
+    while *((msg + mlen) as *mut u8) != 0 {
+        mlen = mlen + 1
+    }
+    n = wire.hdr_get(msg, mlen, "subject", pb(), 256)
+    chk("hdr_get unfolds continuation lines", n != wire.BAD && eq(pb(), n, "Hello World again"))
+    n = wire.hdr_get(msg, mlen, "FROM", pb(), 256)
+    var m: u64 = wire.words_decode(pb(), n, pa(), 256)
+    chk("words_decode B (Jürgen)", eq(pa(), m, "Jürgen <j@x.at>"))
+    chk("hdr_get stops at the empty line", wire.hdr_get(msg, mlen, "x-none", pb(), 256) == wire.BAD)
+    n = wire.hdr_get(msg, mlen, "date", pb(), 256)
+    chk("hdr_get date", eq(pb(), n, "Thu, 15 Oct 2026 10:00:00 +0200"))
+    var bs: u64 = wire.body_start(msg, mlen)
+    chk("body_start after the empty line", eq(msg + bs, mlen - bs, "Subject: not a header\r\n"))
+    m = wire.words_decode(lit("=?iso-8859-1?Q?Gr=FC=DFe?= und =?UTF-8?Q?caf=C3=A9_x?= =?utf-8?B?w6Q=?="), 71, pa(), 256)
+    chk("words_decode Q latin1 + Q utf-8 + adjacent words", eq(pa(), m, "Grüße und café xä"))
+    m = wire.words_decode(lit("=?utf-8?B?%%%?= x"), 17, pa(), 256)
+    chk("words_decode: broken word passes through", eq(pa(), m, "=?utf-8?B?%%%?= x"))
+
+    // ---------------------------------------------------------- compose
+    o = wire.out_new(pa(), 4096)
+    wire.compose(&o, lit("me@x.at"), 7, lit("you@y.at"), 8, lit("Grüße"), 7, lit("Thu, 15 Oct 2026 10:00:00 +0200"), 31,
+        lit("1.2@x.at"), 8, lit("line1\nline2"), 11)
+    n = wire.hdr_get(pa(), o.len, "subject", pb(), 256)
+    var sub2: u64 = wire.words_decode(pb(), n, pb() + 512, 256)
+    chk("compose: subject encoded, decodes back", eq(pb() + 512, sub2, "Grüße"))
+    n = wire.hdr_get(pa(), o.len, "to", pb(), 256)
+    chk("compose: To", eq(pb(), n, "you@y.at"))
+    var cb: u64 = wire.body_start(pa(), o.len)
+    chk("compose: body CRLF + final CRLF", eq(pa() + cb, o.len - cb, "line1\r\nline2\r\n"))
+    n = wire.hdr_get(pa(), o.len, "content-type", pb(), 256)
+    chk("compose: content-type utf-8", eq(pb(), n, "text/plain; charset=utf-8"))
+    n = wire.body_decode(lit("SGk="), 4, lit("base64"), 6, pb())
+    chk("body_decode base64", eq(pb(), n, "Hi"))
+    n = wire.body_decode(lit("a=3Db"), 5, lit("quoted-printable"), 16, pb())
+    chk("body_decode qp", eq(pb(), n, "a=b"))
+    n = wire.body_decode(lit("raw"), 3, lit("8bit"), 4, pb())
+    chk("body_decode 8bit as is", eq(pb(), n, "raw"))
+    return 0
+}

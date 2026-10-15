@@ -1,0 +1,423 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/ar9271.fi -- host test for lib/wlan/ar9271.fi + lib/wlan/htc.fi.
+//
+// A simulated AR9271 "firmware" sits behind the Xport table: it checks the
+// download protocol (vendor requests 0x30/0x31, address progression), then
+// answers HTC/WMI like the Linux sources say the real firmware does. The
+// host side is the REAL driver code (same files the kernel will bind).
+//
+// stdin = the firmware blob (synthetic, or the real htc_9271-1.4.0.fw).
+// Output: "OK name" / "FAIL name" lines plus "CTRL ..." / "TX ..." logs
+// that tools/wlan/ar9271.py re-derives independently with struct.pack.
+//
+// NOT real hardware: whether a real AR9271 behaves like this simulation is
+// exactly milestone M1's open question (docs/WLAN-TREIBER.md).
+
+import std.rt
+import std.io
+import crypto.sha256
+import wlan.htc
+import wlan.ar9271
+
+static mut sbuf: [u8; 65536] = [0; 65536]
+static mut slen: usize = 0
+static mut frames: [u8; 1024] = [0; 1024]
+static mut flen: [usize; 16] = [0; 16]
+static mut fq_head: usize = 0
+static mut fq_tail: usize = 0
+static mut txtb: [u8; 600] = [0; 600]
+static mut tlen: usize = 0
+
+// simulation state
+static mut s_next_addr: u64 = 0
+static mut s_booted: u64 = 0
+static mut s_ready_wait: u64 = 0
+static mut s_setup: u64 = 0
+static mut s_cfg_pipe: u64 = 0
+static mut s_cfg_credits: u64 = 0
+static mut s_ctrl_n: u64 = 0
+static mut s_bad_ctrl: u64 = 0
+static mut s_regs: [u64; 8] = [0; 8]
+static mut s_regaddr: [u64; 8] = [0; 8]
+static mut s_nregs: usize = 0
+// modes
+static mut m_delay: u64 = 0
+static mut m_noready: u64 = 0
+static mut m_svc_status: u64 = 0
+static mut m_inject: u64 = 0
+static mut m_log: u64 = 0
+static mut passn: u64 = 0
+static mut failn: u64 = 0
+
+const SIM_SREV: u64 = 0x5A5A0140
+const SIM_EP: u64 = 2
+
+fn tch(c: u64) {
+    if tlen < 590 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+fn check(name: str, ok: bool) {
+    if ok {
+        passn = passn + 1
+        tlit("OK ")
+    } else {
+        failn = failn + 1
+        tlit("FAIL ")
+    }
+    tlit(name)
+    temit()
+}
+
+// ---- frame queue (device -> host) ----------------------------------------
+
+fn fq_push(p: u64, n: usize) {
+    let slot: usize = fq_tail & 15
+    var i: usize = 0
+    while i < n && i < 64 {
+        frames[slot * 64 + i] = rt.ld8(p, i)
+        i = i + 1
+    }
+    flen[slot] = i
+    fq_tail = fq_tail + 1
+}
+
+fn sim_reset() {
+    s_next_addr = 0x501000
+    s_booted = 0
+    s_ready_wait = 0
+    s_setup = 0
+    s_cfg_pipe = 0
+    s_cfg_credits = 0
+    s_ctrl_n = 0
+    s_bad_ctrl = 0
+    s_nregs = 0
+    slen = 0
+    fq_head = 0
+    fq_tail = 0
+    m_delay = 0
+    m_noready = 0
+    m_svc_status = 0
+    m_inject = 0
+}
+
+fn reg_find(a: u64) -> usize {
+    var i: usize = 0
+    while i < s_nregs {
+        if s_regaddr[i] == a { return i }
+        i = i + 1
+    }
+    return 99
+}
+
+fn queue_ready() {
+    var f: [u8; 32] = [0; 32]
+    let b: u64 = (&f[0]) as u64
+    htc.hdr_put(b, 0, 0, 8)
+    htc.put16(b, 8, htc.MSG_READY)
+    htc.put16(b, 10, 8)
+    htc.put16(b, 12, 1664)
+    rt.st8(b, 14, 22 as u8)
+    rt.st8(b, 15, 0 as u8)
+    fq_push(b, 16)
+}
+
+fn sim_ctrl(ctx: u64, req: u64, val: u64, idx: u64, buf: u64, n: usize) -> i64 {
+    s_ctrl_n = s_ctrl_n + 1
+    if m_log != 0 {
+        tlit("CTRL ")
+        tnum(req)
+        tch(32)
+        tnum(val)
+        tch(32)
+        tnum(idx)
+        tch(32)
+        tnum(n as u64)
+        temit()
+    }
+    if req == 0x30 {
+        if val != (s_next_addr >> 8) { s_bad_ctrl = s_bad_ctrl + 1 }
+        if n > 4096 || n == 0 { s_bad_ctrl = s_bad_ctrl + 1 }
+        if slen + n > 65536 { return -1 }
+        var i: usize = 0
+        while i < n {
+            sbuf[slen + i] = rt.ld8(buf, i)
+            i = i + 1
+        }
+        slen = slen + n
+        s_next_addr = s_next_addr + n as u64
+        return n as i64
+    }
+    if req == 0x31 {
+        if val != 0x9030 { s_bad_ctrl = s_bad_ctrl + 1 }
+        s_booted = 1
+        if m_noready == 0 {
+            if m_delay == 0 { queue_ready() } else { s_ready_wait = m_delay }
+        }
+        return 0
+    }
+    s_bad_ctrl = s_bad_ctrl + 1
+    return -1
+}
+
+fn sim_in(ctx: u64, pipe: u64, buf: u64, cap: usize) -> i64 {
+    if pipe != 3 { return -1 }
+    if s_ready_wait > 0 {
+        s_ready_wait = s_ready_wait - 1
+        if s_ready_wait == 0 { queue_ready() }
+        return 0
+    }
+    if fq_head == fq_tail { return 0 }
+    let slot: usize = fq_head & 15
+    fq_head = fq_head + 1
+    let n: usize = flen[slot]
+    if n > cap { return -1 }
+    var i: usize = 0
+    while i < n {
+        rt.st8(buf, i, frames[slot * 64 + i])
+        i = i + 1
+    }
+    return n as i64
+}
+
+fn queue_wmi(cmd: u64, seq: u64, body: u64, blen: usize) {
+    var f: [u8; 64] = [0; 64]
+    let n: usize = htc.build_wmi((&f[0]) as u64, SIM_EP, cmd, seq, body, blen)
+    fq_push((&f[0]) as u64, n)
+}
+
+fn sim_out(ctx: u64, pipe: u64, buf: u64, n: usize) -> i64 {
+    if pipe != 4 { return -1 }
+    if m_log != 0 {
+        tlit("TX ")
+        thex(buf, n)
+        temit()
+    }
+    let ep: i64 = htc.hdr_check(buf, n)
+    if ep < 0 { return -1 }
+    if ep == 0 {
+        let msg: u64 = htc.get16(buf, 8)
+        if msg == htc.MSG_CONNECT {
+            var r: [u8; 24] = [0; 24]
+            let b: u64 = (&r[0]) as u64
+            htc.hdr_put(b, 0, 0, 10)
+            htc.put16(b, 8, htc.MSG_CONN_RSP)
+            htc.put16(b, 10, htc.get16(buf, 10))
+            rt.st8(b, 12, m_svc_status as u8)
+            rt.st8(b, 13, SIM_EP as u8)
+            htc.put16(b, 14, 0x0100)
+            fq_push(b, 18)
+            return n as i64
+        }
+        if msg == htc.MSG_CONFIG_PIPE {
+            s_cfg_pipe = rt.ld8(buf, 10) as u64
+            s_cfg_credits = rt.ld8(buf, 11) as u64
+            return n as i64
+        }
+        if msg == htc.MSG_SETUP_COMPLETE {
+            s_setup = 1
+            return n as i64
+        }
+        return n as i64
+    }
+    // WMI on the connected endpoint
+    if ep as u64 != SIM_EP { return -1 }
+    let cmd: u64 = htc.get16(buf, 8)
+    let seq: u64 = htc.get16(buf, 10)
+    if m_inject != 0 {
+        // an event and a stale response first; the driver must skip both
+        var ev: [u8; 4] = [0; 4]
+        queue_wmi(htc.WMI_TGT_RDY_EVENT, 0, (&ev[0]) as u64, 0)
+        queue_wmi(cmd, (seq + 7) & 0xffff, (&ev[0]) as u64, 4)
+    }
+    var rb: [u8; 8] = [0; 8]
+    if cmd == htc.WMI_REG_READ {
+        let reg: u64 = htc.get32(buf, 12)
+        var v: u64 = 0
+        let k: usize = reg_find(reg)
+        if k != 99 { v = s_regs[k] } else if reg == 0x4020 { v = SIM_SREV }
+        htc.put32((&rb[0]) as u64, 0, v)
+        queue_wmi(cmd, seq, (&rb[0]) as u64, 4)
+        return n as i64
+    }
+    if cmd == htc.WMI_REG_WRITE {
+        let reg: u64 = htc.get32(buf, 12)
+        let val: u64 = htc.get32(buf, 16)
+        var k: usize = reg_find(reg)
+        if k == 99 && s_nregs < 8 {
+            k = s_nregs
+            s_nregs = s_nregs + 1
+            s_regaddr[k] = reg
+        }
+        if k != 99 { s_regs[k] = val }
+        queue_wmi(cmd, seq, (&rb[0]) as u64, 4)
+        return n as i64
+    }
+    return -1
+}
+
+fn new_ar(a: *mut ar9271.Ar) {
+    *a = ar9271.ar_new()
+    ar9271.xport_set(a, 0, sim_ctrl, sim_out, sim_in)
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let blob: u64 = rt.buf_ptr(&inp)
+    let blen: usize = rt.buf_len(&inp)
+    var a: ar9271.Ar = ar9271.ar_new()
+    var v: u64 = 0
+
+    // -- A: pin rejects an unpinned blob, nothing reaches the chip ----------
+    sim_reset()
+    new_ar(&a)
+    if ar9271.fw_pinned(blob, blen) {
+        // real firmware piped in: the pin accepts it, so test the reject
+        // with one flipped byte instead.
+        var c: [u8; 4096] = [0; 4096]
+        check("pin accepts the real blob", true)
+        check("pin rejects truncated blob", !ar9271.fw_pinned(blob, blen - 1))
+        if blen > 0 { c[0] = 1 }
+    } else {
+        check("pin rejects a synthetic blob", true)
+        let r: i64 = ar9271.boot(&a, blob, blen)
+        check("boot with unpinned blob -> E_PIN", r == ar9271.E_PIN)
+        check("no transfer reached the chip", s_ctrl_n == 0)
+        check("state FAILED after pin reject", ar9271.state_get(&a) == ar9271.S_FAILED)
+    }
+
+    // -- B: full M1 boot ----------------------------------------------------
+    sim_reset()
+    new_ar(&a)
+    m_log = 1
+    if !ar9271.fw_pinned(blob, blen) { ar9271.pin_set(&a, false) }
+    let rb: i64 = ar9271.boot(&a, blob, blen)
+    m_log = 0
+    check("boot returns 0", rb == 0)
+    check("state UP", ar9271.state_get(&a) == ar9271.S_UP)
+    check("firmware bytes arrived complete", slen == blen)
+    var d1: [u8; 32] = [0; 32]
+    sha256.hash((&sbuf[0]) as u64, slen, (&d1[0]) as u64)
+    tlit("FWHASH ")
+    thex((&d1[0]) as u64, 32)
+    temit()
+    check("no malformed control transfer", s_bad_ctrl == 0)
+    check("chunk count", (a.fw_chunks as usize) == (blen + 4095) / 4096)
+    check("config-pipe: tx pipe 1", s_cfg_pipe == 1)
+    check("config-pipe: credits from READY (8)", s_cfg_credits == 8)
+    check("setup-complete seen", s_setup == 1)
+    check("READY credit_size parsed", a.credit_size == 1664)
+    check("READY max endpoints parsed", a.max_ep == 22)
+    check("WMI endpoint from connect response", a.wmi_ep == SIM_EP)
+    check("AR_SREV read through WMI", ar9271.srev_get(&a) == SIM_SREV)
+    check("board stays unattached (M2 not done)", !ar9271.attach_board(&a))
+
+    // -- C: READY arrives late / never --------------------------------------
+    sim_reset()
+    new_ar(&a)
+    ar9271.pin_set(&a, false)
+    m_delay = 5
+    check("late READY still boots", ar9271.boot(&a, blob, blen) == 0)
+    sim_reset()
+    new_ar(&a)
+    ar9271.pin_set(&a, false)
+    m_noready = 1
+    check("no READY -> E_READY", ar9271.boot(&a, blob, blen) == ar9271.E_READY)
+    check("state FAILED without READY", ar9271.state_get(&a) == ar9271.S_FAILED)
+
+    // -- D: service refused -------------------------------------------------
+    sim_reset()
+    new_ar(&a)
+    ar9271.pin_set(&a, false)
+    m_svc_status = 1
+    check("refused service -> E_CONNECT", ar9271.boot(&a, blob, blen) == ar9271.E_CONNECT)
+
+    // -- E: WMI: events and stale replies are skipped, write then read ------
+    sim_reset()
+    new_ar(&a)
+    ar9271.pin_set(&a, false)
+    m_inject = 1
+    check("boot with injected events", ar9271.boot(&a, blob, blen) == 0)
+    check("srev survives injected events", ar9271.srev_get(&a) == SIM_SREV)
+    check("reg_write ok", ar9271.reg_write(&a, 0x4000, 0xA5A5F00D) == 0)
+    v = 0
+    check("reg_read ok", ar9271.reg_read(&a, 0x4000, &v) == 0)
+    check("reg_read returns the written value", v == 0xA5A5F00D)
+
+    // -- F: garbage frames never confuse the codec --------------------------
+    var g: [u8; 24] = [0; 24]
+    let gp: u64 = (&g[0]) as u64
+    var cr: u64 = 0
+    var cs: u64 = 0
+    var me: u64 = 0
+    check("short frame rejected", htc.hdr_check(gp, 7) == -1)
+    htc.hdr_put(gp, 0, 0, 200)
+    check("lying payload length rejected", htc.hdr_check(gp, 16) == -1)
+    htc.hdr_put(gp, 30, 0, 0)
+    check("bad endpoint rejected", htc.hdr_check(gp, 16) == -1)
+    htc.hdr_put(gp, 0x99, 0, 0)
+    check("panic endpoint flagged", htc.hdr_check(gp, 16) == -2)
+    htc.hdr_put(gp, 0, 0, 4)
+    htc.put16(gp, 8, htc.MSG_READY)
+    check("READY with short payload rejected", !htc.parse_ready(gp, 12, &cr, &cs, &me))
+
+    // -- G: USB stream mode -------------------------------------------------
+    var sp: [u8; 64] = [0; 64]
+    var src: [u8; 5] = [1, 2, 3, 4, 5]
+    let tot: usize = htc.stream_put((&sp[0]) as u64, (&src[0]) as u64, 5, htc.TAG_RX)
+    check("stream_put pads to 4", tot == 12)
+    var at: usize = 0
+    var off: usize = 0
+    var pl: usize = 0
+    check("stream_next finds the packet", htc.stream_next((&sp[0]) as u64, tot, &at, &off, &pl))
+    check("stream payload offset/len", off == 4 && pl == 5 && at == 12)
+    check("stream_next stops at the end", !htc.stream_next((&sp[0]) as u64, tot, &at, &off, &pl))
+    let t2: usize = htc.stream_put((&sp[0]) as u64, (&src[0]) as u64, 5, htc.TAG_TX)
+    at = 0
+    check("wrong tag rejected", !htc.stream_next((&sp[0]) as u64, t2, &at, &off, &pl))
+
+    // -- H: stick table -----------------------------------------------------
+    check("0cf3:9271 supported", ar9271.supported(0x0cf3, 0x9271))
+    check("0cf3:1006 supported", ar9271.supported(0x0cf3, 0x1006))
+    check("0cf3:7015 (AR7010) not claimed", !ar9271.supported(0x0cf3, 0x7015))
+    check("0bda:8812 (Realtek) not claimed", !ar9271.supported(0x0bda, 0x8812))
+
+    tlit("AR9271: ")
+    tnum(passn)
+    tlit(" ok, ")
+    tnum(failn)
+    tlit(" fail")
+    temit()
+    rt.buf_free(&inp)
+    if failn > 0 { return 1 }
+    return 0
+}
