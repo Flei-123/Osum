@@ -19,4 +19,6 @@ fi
 tail -2 "$TMPD/run.log"
 python3 tools/dnd/dnd.py "$S"; rc=$?
 echo "DND-GATE: exit $rc"
+# second part: a drop onto a background nedit window (own boot)
+bash tools/dnd/nedit.sh || rc=1
 exit $rc
