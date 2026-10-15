@@ -10,6 +10,7 @@
 #      a window on head 0 fills head 0; un-maximize keeps the window on its head;
 #   3. fullscreen of a window on head 1 = exactly head 1 (640,0 640x480);
 #   4. pointer clamp with heads of different height: a point below the short head goes back onto it;
+#   4b. r828 edge docking on head 1 (floating halves at the outer edges, not at the seam, not with docking off);
 #   5. word `hdhot`: unplug head 1 -> the window comes to head 0 (maximized = head 0 work area), only head 0 left;
 #      replug -> head 1 is back with its strut.
 # COUNTER-CONTROLS: a plain single-head machine prints "hd: no extend" and no head lines (model off);
@@ -54,6 +55,13 @@ hd max0 two | grep -aq 'x=0 y=0 w=640 h=452 head=0' && ok "maximize on head 0 fi
 hd unmax1 two | grep -aq 'head=1' && ok "un-maximize keeps the window on head 1" || bad "unmax1: $(hd unmax1 two)"
 hd full1 two | grep -aq 'x=640 y=0 w=640 h=480 head=1' && ok "fullscreen on head 1 = head 1 (640,0 640x480)" || bad "full1: $(hd full1 two)"
 has '^hd: clamp x=700 y=239$' two && ok "pointer below the 240-high head 1 is pulled onto it (700,239)" || bad "clamp: $(grep -a '^hd: clamp' $T/two.txt)"
+has '^hd: drope=6 pos=snapR1$' two && ok "r828: pointer at the outer right edge of head 1 -> docking edge 6 (right half)" || bad "snapR1 hover"
+hd snapR1 two | grep -aq 'x=960 y=0 w=320 h=452 head=1' && ok "r828: drop -> right half of the head 1 work area (960,0 320x452), floating" || bad "snapR1: $(hd snapR1 two)"
+hd snapT1 two | grep -aq 'x=640 y=0 w=640 h=226 head=1' && ok "r828: top edge of head 1 -> upper half" || bad "snapT1: $(hd snapT1 two)"
+hd snapB1 two | grep -aq 'x=640 y=226 w=640 h=226 head=1' && ok "r828: bottom edge of head 1 -> lower half" || bad "snapB1: $(hd snapB1 two)"
+has '^hd: drope=0 pos=seam$' two && ok "r828: the seam between the heads is no docking edge" || bad "seam"
+has '^hd: drope=0 pos=middle$' two && ok "r828: the middle of a head: no docking" || bad "middle"
+has '^hd: drope=0 pos=off$' two && ok "r828: docking switch off: no docking on head 1" || bad "off"
 hd unplug-a two | grep -aq 'x=0 y=0 w=640 h=452 head=0' && ok "unplug head 1: maximized window refit to head 0 work area" || bad "unplug-a: $(hd unplug-a two)"
 has '^wm: heads n=2 present=1 ' two && ok "unplug: one head present" || bad "unplug: present count"
 hd replug-bar two | grep -aq 'head=' && ok "replug ran" || bad "replug missing"

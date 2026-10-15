@@ -623,6 +623,16 @@ fn glyphs_ok() -> bool {
 static mut w_h: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
+// r828 BAR PER HEAD. `sw`/`sh` are the size of the HEAD this instance serves (the whole screen on a plain machine),
+// `hx`/`hy` its origin in desktop pixels. `my_head` is the output index (0 = the first head that exists, also when
+// no `--head` was given); `head_on` is 1 once the window server answered with a head rectangle. The first instance
+// (no `--head`) starts the others (`heads_step`); `spawned` is a bit mask of heads that already got a bar.
+static mut hx: u64 = 0
+static mut hy: u64 = 0
+static mut my_head: u64 = 0
+static mut head_arg: u64 = 0
+static mut head_on: u64 = 0
+static mut spawned: u64 = 0
 static mut asc: u64 = 0
 
 // the configuration, and nothing else in this file decides these five
@@ -1796,24 +1806,32 @@ static mut r_y: u64 = 0
 static mut r_w: u64 = 0
 static mut r_h: u64 = 0
 
+// r828: desktop pixel -> head-local pixel (0 left of / above the head)
+fn loc(v: u64, o: u64) -> u64 {
+    if v < o {
+        return 0
+    }
+    return v - o
+}
+
 fn rect_for(edge: u64, thickness: u64) {
     if edge == wlibc.WE_LEFT || edge == wlibc.WE_RIGHT {
         r_w = thickness
         r_h = sh
-        r_y = 0
+        r_y = hy
         if edge == wlibc.WE_LEFT {
-            r_x = 0
+            r_x = hx
         } else {
-            r_x = sw - thickness
+            r_x = hx + sw - thickness
         }
     } else {
         r_w = sw
         r_h = thickness
-        r_x = 0
+        r_x = hx
         if edge == wlibc.WE_TOP {
-            r_y = 0
+            r_y = hy
         } else {
-            r_y = sh - thickness
+            r_y = hy + sh - thickness
         }
     }
 }
@@ -5824,7 +5842,22 @@ fn preview_show(edge: u64) {
 // THE NEAREST EDGE TO A POINT. Plain distance to the four sides; the
 // same rule Windows 10 used, and the reason a drag towards a corner
 // picks the side you were heading for and not the one you started on.
-fn nearest_edge(mx: u64, my: u64) -> u64 {
+fn nearest_edge(mx0: u64, my0: u64) -> u64 {
+    // r828: relative to this bar's head (a pointer on another head counts as that head's edge)
+    var mx: u64 = 0
+    var my: u64 = 0
+    if mx0 > hx {
+        mx = mx0 - hx
+    }
+    if my0 > hy {
+        my = my0 - hy
+    }
+    if mx > sw - 1 {
+        mx = sw - 1
+    }
+    if my > sh - 1 {
+        my = sh - 1
+    }
     var best: u64 = wlibc.WE_LEFT
     var d: u64 = mx
     if sw - 1 - mx < d {
@@ -6049,7 +6082,13 @@ static mut s_hd: [u8; 14] = "taskbar: hide\0"
 static mut s_sh2: [u8; 14] = "taskbar: show\0"
 static mut s_ms: [u8; 5] = " ms=\0"
 
-fn touches_edge(mx: u64, my: u64) -> bool {
+fn touches_edge(mx0: u64, my0: u64) -> bool {
+    // r828: the edge of THIS head -- a pointer on another head, or outside it, never reveals this bar
+    if mx0 < hx || my0 < hy || mx0 >= hx + sw || my0 >= hy + sh {
+        return false
+    }
+    let mx: u64 = mx0 - hx
+    let my: u64 = my0 - hy
     if cf_edge == wlibc.WE_BOTTOM {
         return my + 1 + REVEAL >= sh
     }
@@ -6620,8 +6659,15 @@ fn tip_open(text: u64, sx: u64, sy: u64) {
         ax0 = bar_x + f_x[(F_CLK) as usize]
         ax1 = ax0 + f_w[(F_CLK) as usize]
     }
-    fuib.tip_place(sx, sy, bw, bh, wlibc.screen_w(), wlibc.screen_h(),
-        bar_y, bar_y + bar_h, ax0, ax1, luft, &x, &y)
+    // r828: the placement rule works in head-local pixels; this head's origin is added back afterwards
+    if ax1 != 0 {
+        ax0 = loc(ax0, hx)
+        ax1 = loc(ax1, hx)
+    }
+    fuib.tip_place(loc(sx, hx), loc(sy, hy), bw, bh, sw, sh,
+        loc(bar_y, hy), loc(bar_y + bar_h, hy), ax0, ax1, luft, &x, &y)
+    x = x + hx
+    y = y + hy
     // r: since 05.10.2026 the bubble is the one tooltip window of the scene host
     // (barpop.fi): text, WM_SIZE, repaint, WM_MOVE, show.
     let i: u64 = barpop.tip_show(x, y, bw, bh, text)
@@ -6788,19 +6834,19 @@ fn toast_auf(text: u64, prio: u64) {
     if bw < 240 * sc {
         bw = 240 * sc
     }
-    if bw > wlibc.screen_w() / 2 {
-        bw = wlibc.screen_w() / 2
+    if bw > sw / 2 {
+        bw = sw / 2
     }
     let bh: u64 = wlibc.text_h(wlibc.px_ui()) + 2 * pad
     let luft: u64 = 12 * sc
-    var x: u64 = 0
-    if wlibc.screen_w() > bw + luft {
-        x = wlibc.screen_w() - bw - luft
+    var x: u64 = hx
+    if sw > bw + luft {
+        x = hx + sw - bw - luft
     }
-    var y: u64 = luft
+    var y: u64 = hy + luft
     // Liegt die Leiste OBEN, geht die Einblendung unter sie.
-    if bar_y == 0 && bar_h != 0 {
-        y = bar_h + luft
+    if bar_y == hy && bar_h != 0 {
+        y = hy + bar_h + luft
     }
     let i: u64 = barpop.toast_show(x, y, bw, bh, text, prio)
     if i != 0 {
@@ -7804,6 +7850,112 @@ fn bar_size(w: u64, h: u64) -> u64 {
     return 1
 }
 
+static mut a_head: [u8; 7] = "--head\0"
+static mut p_bar: [u8; 13] = "/bin/taskbar\0"
+static mut s_hd1: [u8; 22] = "taskbar: head my=\0\0\0\0\0"
+static mut s_hd2: [u8; 5] = " on=\0"
+static mut s_hd3: [u8; 7] = " spawn\0"
+static mut quit_req: u64 = 0
+
+// r828: find out which output this instance serves and how big it is. The first instance (no `--head`) serves the
+// first head that exists; `--head N` serves head N. On a machine without a head table (one screen) nothing changes:
+// hx = hy = 0, sw/sh = the screen. Returns true when the rectangle differs from what was set before.
+fn head_setup() -> bool {
+    var nx: u64 = 0
+    var ny: u64 = 0
+    var nw: u64 = wlibc.screen_w()
+    var nh: u64 = wlibc.screen_h()
+    var on: u64 = 0
+    var hd: u64 = my_head
+    if head_arg == 0 {
+        hd = 0
+        while hd < 8 && !wlibc.head_present(hd) {
+            hd = hd + 1
+        }
+        if hd >= 8 {
+            hd = 0
+        }
+    }
+    if hd < 8 && wlibc.head_present(hd) {
+        let w: u64 = wlibc.head_field(hd, 2)
+        let h: u64 = wlibc.head_field(hd, 3)
+        if !ulib.bad(w) && !ulib.bad(h) && w != 0 && h != 0 {
+            nx = wlibc.head_field(hd, 0)
+            ny = wlibc.head_field(hd, 1)
+            nw = w
+            nh = h
+            on = 1
+            my_head = hd
+        }
+    }
+    var changed: bool = false
+    if nx != hx || ny != hy || nw != sw || nh != sh || on != head_on {
+        changed = true
+    }
+    hx = nx
+    hy = ny
+    sw = nw
+    sh = nh
+    head_on = on
+    wlibc.set_head_bounds(hx, hy, sw, sh)
+    return changed
+}
+
+// Start one more bar for output `hd`: /bin/taskbar --head N
+fn spawn_bar(hd: u64) {
+    var num: [u8; 2] = [48 as u8, 0 as u8]
+    num[0 as usize] = (48 + hd) as u8
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[0 as usize] = (&p_bar[0 as usize]) as u64
+    argv[1 as usize] = (&a_head[0 as usize]) as u64
+    argv[2 as usize] = (&num[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_bar[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 3)
+    say((&s_hd1[0 as usize]) as u64)
+    sayn(hd)
+    say((&s_hd3[0 as usize]) as u64)
+    sayn(pid)
+    nl()
+}
+
+// Polled a few times a second. The first instance starts a bar for every other head that appears (and forgets it when
+// the head goes, so a replug starts a new one); a `--head` instance ends when its head is gone; a head whose rectangle
+// changed (new mode, replug) moves the bar there.
+fn heads_step() {
+    if head_arg != 0 && !wlibc.head_present(my_head) {
+        quit_req = 1
+        return
+    }
+    if head_arg == 0 {
+        var hd: u64 = 0
+        while hd < 8 {
+            let bit: u64 = 1 << hd
+            if hd != my_head && wlibc.head_present(hd) {
+                if (spawned & bit) == 0 {
+                    spawned = spawned | bit
+                    spawn_bar(hd)
+                }
+            } else {
+                spawned = spawned & (0xFF ^ bit)
+            }
+            hd = hd + 1
+        }
+    }
+    if head_setup() {
+        geometry()
+        shown = 1
+        apply()
+        layout()
+        paint(true)
+        say((&s_hd1[0 as usize]) as u64)
+        sayn(my_head)
+        say((&s_hd2[0 as usize]) as u64)
+        sayn(head_on)
+        nl()
+        geom_say()
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     // DELL ROUND: this program never waits for what it starts.
     ulib.ignore_children()
@@ -7814,6 +7966,14 @@ fn u_start(args: u64) -> u64 {
     while a < argc {
         if ulib.streq(ulib.arg_at(args, a), (&a_once[0 as usize]) as u64) {
             once = true
+        }
+        if ulib.streq(ulib.arg_at(args, a), (&a_head[0 as usize]) as u64) && a + 1 < argc {
+            let dp: *mut u8 = ulib.arg_at(args, a + 1) as *mut u8
+            let d: u64 = (*dp) as u64
+            if d >= 48 && d < 56 {
+                head_arg = 1
+                my_head = d - 48
+            }
         }
         a = a + 1
     }
@@ -7871,6 +8031,7 @@ fn u_start(args: u64) -> u64 {
     icons_load()
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
+    let _hs: bool = head_setup()
     asc = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
     cf_height = def_h()
     cf_width = DEF_V
@@ -8100,6 +8261,12 @@ fn u_start(args: u64) -> u64 {
         }
         autohide_step()
         round = round + 1
+        if (round % 8) == 0 {
+            heads_step()
+            if quit_req != 0 {
+                alive = false
+            }
+        }
         var fresh: bool = false
         // ROUND NETVIEW, addendum. Every poll, because the pointer
         // moves between polls and a sentence that appears half a second
