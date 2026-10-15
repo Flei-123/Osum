@@ -89,7 +89,7 @@ PYEOF
 }
 
 echo "== two heads (max_outputs=2)"
-run_case two 2 vgpuheads
+run_case two 2 "vgpuheads vgpumirror"
 L=$(grep -a '^vgpu: bdf' "$T/two.txt" | tail -1)
 echo "   $L"
 echo "$L" | grep -aq 'scanout=2' && ok "device reports 2 scanouts" || bad "device scanout count != 2"

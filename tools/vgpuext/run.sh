@@ -128,7 +128,7 @@ else
 fi
 
 echo "== mirror (r819), same machine without vgpuextend"
-run_case mir 2 1280x480 "vgpuheads"
+run_case mir 2 1280x480 "vgpuheads vgpumirror"
 L=$(grep -a '^vgpu: bdf' "$T/mir.txt" | tail -1); echo "   $L"
 echo "$L" | grep -aq 'ext=0' && ok "mirror: extend off" || bad "mirror: ext != 0"
 if [ -s "$T/mir.h0.ppm" ] && [ -s "$T/mir.h1.ppm" ]; then

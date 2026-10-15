@@ -33,7 +33,7 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - Not wired yet: `lib/monitors/layout.fi` itself (extend/arrangement) — the kernel has no per-output compositor.
 
 ## Kernel wiring, round 2 (r815 + r819, 15.10.2026) — EXTEND over several heads
-- Word `vgpuextend` (default OFF, M_VGPUEXT) + at least 2 connected heads: the desktop stays **ONE wide resource** (the fb back
+- Extend is the DEFAULT (W-OTA2, 15.10.2026; M_VGPUEXT is set unless word `vgpumirror` is on the command line; `vgpuextend` stays as a no-op alias) with at least 2 connected heads: the desktop stays **ONE wide resource** (the fb back
   buffer, `fbres=` = bounding box of the heads) and **every head scans out its own rect of it** (`SET_SCANOUT` with r.x/r.y/r.w/r.h,
   `vgpu.ext_place`). Zero copy: `TRANSFER_TO_HOST_2D`/`RESOURCE_FLUSH` of the dirty rect are unchanged, the host refreshes every
   scanout the rect touches. Why not one resource per head: `TRANSFER` uses the resource stride, a head-sized resource could not read a
@@ -109,5 +109,5 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
   `SET_PINCTL` bit 6), InfoFrame (audio DIP) for HDMI, hotplug via unsolicited response; then `layout.audio_pin` decides, `choose_path` takes the digital pin when the
   decision says yes. Not VM-testable (no HDMI codec in QEMU) -> needs the Dell.
 - **Extend is a BOOT choice:** `vgpuextend` is a kernel command-line word, read before the file system exists; the boot entry is written by the installer.
-  Settings therefore cannot switch extend/mirror at run time (the framebuffer is one wide resource, sized at boot). Open product decision: default for >= 2 heads.
+  Settings therefore cannot switch extend/mirror at run time (the framebuffer is one wide resource, sized at boot). Default for >= 2 heads: extend (decided by the boss); `vgpumirror` opts out.
 - Open (unchanged): a head of another height gets the old window size for the start menu (it only moves); tile tree per head exists (r839).
