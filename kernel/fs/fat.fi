@@ -84,6 +84,11 @@ const DIRBUF: u64 = 0x900 // ein Verzeichnissektor
 const DATBUF: u64 = 0xB00 // ein Datensektor
 const LFNBUF: u64 = 0xD00 // der Zusammenbau eines langen Namens
 const CMPBUF: u64 = 0xE00 // der Name, gegen den verglichen wird
+// r208: the chain cache, shared by all mounts: 4 slots x 32 bytes
+// (mount+1, first cluster, index, cluster) and a round-robin counter.
+const CACHE_OFF: u64 = 0xF00
+const CACHE_RR: u64 = 0xF80
+const CACHE_SLOTS: u64 = 4
 
 // die Felder je Einhaengung
 const S_VALID: u64 = 0
@@ -438,15 +443,37 @@ fn clus_zero(state: u64, m: u64, c: u64) -> bool {
     return true
 }
 
+// ------------------------------------------------ the chain cache (r208)
+//
+// One cache entry per chain that is being walked: `cp` inside one volume
+// reads the source and writes the target in turns, and with ONE entry
+// every block threw the position of the other chain away and walked it
+// again from its first cluster -- O(n^2) over PIO, 3.5 KB/s on the Dell.
+// Four entries hold source, target, the directory and one more.
+fn cget(state: u64, f: u64) -> u64 {
+    return __mmio_read64((state + kstate.FAT_OFF + f) as *mut u64)
+}
+
+fn cset(state: u64, f: u64, v: u64) {
+    __mmio_write64((state + kstate.FAT_OFF + f) as *mut u64, v)
+}
+
+// Forget everything (a chain was freed or a mount came or went).
+fn cache_drop(state: u64) {
+    var i: u64 = 0
+    while i < CACHE_SLOTS {
+        cset(state, CACHE_OFF + i * 32, 0)
+        i = i + 1
+    }
+}
+
 // Die ganze Kette ab `c` freigeben.
 fn chain_free(state: u64, m: u64, c: u64) {
     // Was hier verschwindet, darf der Zwischenspeicher nicht mehr
     // kennen. Er wird verworfen und nicht nachgefuehrt -- eine
     // Nachfuehrung waere eine zweite Stelle, an der dieselbe Kette
     // beschrieben ist.
-    sset(state, m, S_CFIRST, 0)
-    sset(state, m, S_CIDX, 0)
-    sset(state, m, S_CCLUS, 0)
+    cache_drop(state)
     var cur: u64 = c
     var guard: u64 = 0
     while cur >= 2 && cur < MASK28 && !is_eoc(cur) && guard < 1000000 {
@@ -465,13 +492,20 @@ fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
     }
     var cur: u64 = first
     var k: u64 = 0
-    // RUNDE INSTALL: den Zwischenspeicher benutzen, wenn er passt.
-    if sget(state, m, S_CFIRST) == first && sget(state, m, S_CCLUS) >= 2 {
-        let idx: u64 = sget(state, m, S_CIDX)
-        if idx <= n {
-            cur = sget(state, m, S_CCLUS)
-            k = idx
+    // RUNDE INSTALL / r208: use the cache when an entry of this chain
+    // lies at or before the wanted index (4 entries, one per chain).
+    var slot: u64 = 99
+    var ci: u64 = 0
+    while ci < CACHE_SLOTS {
+        let cb: u64 = CACHE_OFF + ci * 32
+        if cget(state, cb) == m + 1 && cget(state, cb + 8) == first {
+            slot = ci
+            if cget(state, cb + 16) <= n && cget(state, cb + 24) >= 2 {
+                cur = cget(state, cb + 24)
+                k = cget(state, cb + 16)
+            }
         }
+        ci = ci + 1
     }
     while k < n {
         let next: u64 = fat_get(state, m, cur)
@@ -495,9 +529,15 @@ fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
         }
         k = k + 1
     }
-    sset(state, m, S_CFIRST, first)
-    sset(state, m, S_CIDX, n)
-    sset(state, m, S_CCLUS, cur)
+    if slot == 99 {
+        slot = cget(state, CACHE_RR) % CACHE_SLOTS
+        cset(state, CACHE_RR, slot + 1)
+    }
+    let cb2: u64 = CACHE_OFF + slot * 32
+    cset(state, cb2, m + 1)
+    cset(state, cb2 + 8, first)
+    cset(state, cb2 + 16, n)
+    cset(state, cb2 + 24, cur)
     return cur
 }
 
@@ -603,6 +643,7 @@ fn sync__inner(state: u64, m: u64) -> u64 {
 
 fn release(state: u64, m: u64) {
     fat_tag_drop()
+    cache_drop(state)
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
@@ -706,9 +747,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     sset(state, m, S_KNOWN, 0)
     sset(state, m, S_DIRTY, 0)
     sset(state, m, S_NEXT, 2)
-    sset(state, m, S_CFIRST, 0)
-    sset(state, m, S_CIDX, 0)
-    sset(state, m, S_CCLUS, 0)
+    cache_drop(state)
     fsinfo_load(state, m)
     serial.puts((&s_ok[0]) as u64)
     serial.dec(spc)
