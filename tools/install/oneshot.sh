@@ -132,7 +132,8 @@ else
         # misst etwas anderes, als er behauptet.
         :
     }
-    if true; then
+    # ESP_KEEP=1: the caller already wrote /limine.conf on the ESP (tools/abkern)
+    if [ -z "${ESP_KEEP:-}" ]; then
         {
             echo "timeout: 0"
             echo "verbose: yes"
