@@ -142,6 +142,14 @@ static mut T_CACHE: [u8; 6] = "cache\0"
 
 static mut M_NAME: [u8; 6] = "name=\0"
 static mut M_FASS: [u8; 9] = "fassung=\0"
+static mut N_NEED: [u8; 5] = "NEED\0"
+static mut M_FILE: [u8; 6] = "file=\0"
+static mut NLZ: [u8; 2] = "\n\0"
+static mut M_DEPS: [u8; 6] = "deps=\0"
+static mut E_DEPMISS: [u8; 26] = "opk: missing dependency: \0"
+static mut E_DEPREQ: [u8; 23] = "opk: still needed by: \0"
+static mut E_DEPDEEP: [u8; 45] = "opk: dependency chain too deep or circular: \0"
+static mut S_DEPINST: [u8; 29] = "opk: installing dependency: \0"
 
 static mut E_ARG: [u8; 22] = "opk: missing argument\0"
 static mut E_OPEN: [u8; 20] = "opk: not readable: \0"
@@ -1215,6 +1223,115 @@ fn umschalten(name: u64, hash: u64, grund: u64) -> u64 {
     return neu
 }
 
+// ------------------------------------------------- r105: dependencies
+//
+// A package may carry `deps=a,b` in its (signed, hashed) metadata: names of
+// packages that must already be in the CURRENT generation. Names only, no
+// version ranges -- a name is one slot in the PLAN, so "the newest one" is
+// the only version there is. Install is strict (`opk install <file>` refuses
+// when a dependency is missing, nothing is written); `opk update <name>
+// --source <dir>` resolves: it installs the missing ones from the same
+// signed source first (each through the full signature + hash chain), depth
+// limited so a cycle ends in an error instead of a loop. Remove refuses
+// while another installed package still names the package in its `deps=`.
+
+// Next comma/space separated token of `list` from `at` into `out` (max 63).
+// Returns the position after the token, or all-ones when none is left.
+fn dep_token(list: u64, at: u64, out: u64) -> u64 {
+    var i: u64 = at
+    while g8(list + i) == 44 || g8(list + i) == 32 {
+        i = i + 1
+    }
+    if g8(list + i) == 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var k: u64 = 0
+    while g8(list + i) != 0 && g8(list + i) != 44 && g8(list + i) != 32 {
+        if k < 63 {
+            p8(out + k, g8(list + i))
+            k = k + 1
+        }
+        i = i + 1
+    }
+    p8(out + k, 0)
+    return i
+}
+
+// First dependency of the package in PKT (metadata length `ml`) that is not
+// in the current generation -> copied to `miss`. false = all present.
+fn dep_first_missing(ml: u64, miss: u64) -> bool {
+    var dv: [u8; 256] = [0 as u8; 256]
+    if !meta_value((&PKT[0 as usize]) as u64 + HEADER, ml,
+        (&M_DEPS[0 as usize]) as u64, (&dv[0 as usize]) as u64, 255) {
+        return false
+    }
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    let jetzt: u64 = aktuell()
+    if jetzt == 0xFFFFFFFFFFFFFFFF {
+        p8(plan, 0)
+    } else {
+        plan_read(jetzt, plan)
+    }
+    var tok: [u8; 64] = [0 as u8; 64]
+    var hs: [u8; 72] = [0 as u8; 72]
+    var at: u64 = 0
+    var found: bool = false
+    var more: bool = true
+    while more {
+        at = dep_token((&dv[0 as usize]) as u64, at, (&tok[0 as usize]) as u64)
+        if at == 0xFFFFFFFFFFFFFFFF {
+            more = false
+        } else if !ulib.streq((&tok[0 as usize]) as u64, (&NAME[0 as usize]) as u64)
+            && !plan_hash(plan, (&tok[0 as usize]) as u64, (&hs[0 as usize]) as u64) {
+            ulib.strcpy(miss, (&tok[0 as usize]) as u64)
+            found = true
+            more = false
+        }
+    }
+    return found
+}
+
+// Is some OTHER installed package depending on `name`? -> its name in `who`.
+// Reads the current PLAN (caller has it in PLAN already).
+fn dep_required_by(name: u64, who: u64) -> bool {
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    let n: u64 = plan_lines(plan)
+    var nm: [u8; 64] = [0 as u8; 64]
+    var h2: [u8; 72] = [0 as u8; 72]
+    var meta: [u8; 4096] = [0 as u8; 4096]
+    var dv: [u8; 256] = [0 as u8; 256]
+    var tok: [u8; 64] = [0 as u8; 64]
+    var k: u64 = 0
+    var hit: bool = false
+    while k < n && !hit {
+        if plan_line(plan, k, (&nm[0 as usize]) as u64, (&h2[0 as usize]) as u64)
+            && !ulib.streq((&nm[0 as usize]) as u64, name) {
+            store_path((&PFAD2[0 as usize]) as u64, (&h2[0 as usize]) as u64,
+                (&N_PAKET[0 as usize]) as u64)
+            let m: u64 = file_read((&PFAD2[0 as usize]) as u64,
+                (&meta[0 as usize]) as u64, 4095)
+            if m != 0xFFFFFFFFFFFFFFFF && m != 0
+                && meta_value((&meta[0 as usize]) as u64, m,
+                    (&M_DEPS[0 as usize]) as u64, (&dv[0 as usize]) as u64, 255) {
+                var at: u64 = 0
+                var more: bool = true
+                while more {
+                    at = dep_token((&dv[0 as usize]) as u64, at, (&tok[0 as usize]) as u64)
+                    if at == 0xFFFFFFFFFFFFFFFF {
+                        more = false
+                    } else if ulib.streq((&tok[0 as usize]) as u64, name) {
+                        ulib.strcpy(who, (&nm[0 as usize]) as u64)
+                        hit = true
+                        more = false
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+    return hit
+}
+
 // ------------------------------------------------------- die Befehle
 
 fn cmd_list() -> u64 {
@@ -1306,6 +1423,10 @@ fn cmd_installieren(datei: u64, grund: u64) -> u64 {
     if ml == 0 {
         return 1
     }
+    var miss: [u8; 64] = [0 as u8; 64]
+    if dep_first_missing(ml, (&miss[0 as usize]) as u64) {
+        return err((&E_DEPMISS[0 as usize]) as u64, (&miss[0 as usize]) as u64)
+    }
     if !store_write(ml, len) {
         return err((&E_SCHRB[0 as usize]) as u64, (&HEX[0 as usize]) as u64)
     }
@@ -1333,6 +1454,10 @@ fn cmd_entfernen(name: u64, grund: u64) -> u64 {
     plan_read(jetzt, plan)
     if !plan_hash(plan, name, (&hs[0 as usize]) as u64) {
         return err((&E_KEIN[0 as usize]) as u64, name)
+    }
+    var who: [u8; 64] = [0 as u8; 64]
+    if dep_required_by(name, (&who[0 as usize]) as u64) {
+        return err((&E_DEPREQ[0 as usize]) as u64, (&who[0 as usize]) as u64)
     }
     let g: u64 = umschalten(name, 0, grund)
     if g == 0xFFFFFFFFFFFFFFFF {
@@ -1572,7 +1697,26 @@ fn index_line(name: u64, hash: u64, datei: u64) -> bool {
     return false
 }
 
+// r178: a dependency's package file is not in the source directory (the store
+// fetches files one by one). Leave a note for the caller -- `file=<name>` in
+// `<source>/NEED` -- and exit 4, so it can fetch that file and call again.
+fn need_write(quelle: u64, datei: u64) {
+    var pf: [u8; 256] = [0 as u8; 256]
+    var buf: [u8; 192] = [0 as u8; 192]
+    ulib.strcpy((&pf[0 as usize]) as u64, quelle)
+    slash((&pf[0 as usize]) as u64)
+    ulib.strcat((&pf[0 as usize]) as u64, (&N_NEED[0 as usize]) as u64)
+    ulib.strcpy((&buf[0 as usize]) as u64, (&M_FILE[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, datei)
+    ulib.strcat((&buf[0 as usize]) as u64, (&NLZ[0 as usize]) as u64)
+    file_write((&pf[0 as usize]) as u64, (&buf[0 as usize]) as u64, len((&buf[0 as usize]) as u64))
+}
+
 fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
+    return aktu(name, quelle, grund, 0)
+}
+
+fn aktu(name: u64, quelle: u64, grund: u64, depth: u64) -> u64 {
     var hs: [u8; 72] = [0 as u8; 72]
     var dt: [u8; 128] = [0 as u8; 128]
     ulib.strcpy((&PFAD[0 as usize]) as u64, quelle)
@@ -1612,8 +1756,12 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
     let len: u64 = file_read((&PFAD[0 as usize]) as u64,
         (&PKT[0 as usize]) as u64, PKT_MAX)
     if len == 0xFFFFFFFFFFFFFFFF {
-        return err((&E_OPEN[0 as usize]) as u64,
-            (&PFAD[0 as usize]) as u64)
+        err((&E_OPEN[0 as usize]) as u64, (&PFAD[0 as usize]) as u64)
+        if depth > 0 {
+            need_write(quelle, (&dt[0 as usize]) as u64)
+            return 4
+        }
+        return 1
     }
     if !paket_signatur((&PFAD[0 as usize]) as u64, len) {
         return 1
@@ -1629,6 +1777,22 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
     }
     if !ulib.streq((&NAME[0 as usize]) as u64, name) {
         return err((&E_NIX[0 as usize]) as u64, name)
+    }
+    // r105: install missing dependencies first, each from the same signed
+    // source, then start over for this package (the buffers are reused).
+    var miss: [u8; 64] = [0 as u8; 64]
+    if dep_first_missing(ml, (&miss[0 as usize]) as u64) {
+        if depth >= 8 {
+            return err((&E_DEPDEEP[0 as usize]) as u64, name)
+        }
+        ulib.say((&S_DEPINST[0 as usize]) as u64)
+        ulib.say((&miss[0 as usize]) as u64)
+        ulib.nl()
+        let r: u64 = aktu((&miss[0 as usize]) as u64, quelle, grund, depth + 1)
+        if r != 0 {
+            return r
+        }
+        return aktu(name, quelle, grund, depth)
     }
     if !store_write(ml, len) {
         return 1
