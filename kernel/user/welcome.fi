@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/welcome.fi -- E3 (Mint round): THE WELCOME WINDOW (/bin/welcome).
+//
+//   welcome            the window (fUi): three hints, a check box "show at start",
+//                      buttons "Open settings" and "Close"
+//   welcome -a         autostart mode: exit at once (no window) unless
+//                      /etc/welcome.conf says show=ja
+//   welcome status     print "welcome: show=ja|nein" (what the file says)
+//   welcome show on|off  write the switch (same as the check box)
+//
+// THE SWITCH lives in /etc/welcome.conf as one line `show=ja` or `show=nein`.
+// A MISSING FILE MEANS NO: only the installer (kernel/user/instkonto.fi) writes
+// `show=ja`, so a new installed system greets its owner once and every test image
+// and live stick starts without an extra window in the way of the clicks. The
+// desktop starts `/bin/welcome -a` after the autostart list (kernel/user/desktop.fi).
+//
+// NOTHING IS SENT ANYWHERE and the text says so (see /bin/privacy).
+
+profile app
+
+import ulib
+import fuiscene
+import msg
+
+export { u_start }
+
+const K_SHOW: u64 = 1
+const K_SET: u64 = 2
+const K_CLOSE: u64 = 3
+
+static mut P_CONF: [u8; 18] = "/etc/welcome.conf\0"
+static mut P_SET: [u8; 14] = "/bin/settings\0"
+static mut A_SET: [u8; 9] = "settings\0"
+
+static mut k_title: [u8; 14] = "welcome.title\0"
+static mut k_head: [u8; 13] = "welcome.head\0"
+static mut k_t1: [u8; 11] = "welcome.t1\0"
+static mut k_t2: [u8; 11] = "welcome.t2\0"
+static mut k_t3: [u8; 11] = "welcome.t3\0"
+static mut k_show: [u8; 13] = "welcome.show\0"
+static mut k_set: [u8; 13] = "welcome.sett\0"
+static mut k_close: [u8; 14] = "welcome.close\0"
+
+static mut show_now: bool = false
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+// does the file say show=ja?
+fn conf_on() -> bool {
+    var buf: [u8; 128] = [0 as u8; 128]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 127)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n < 7 {
+        return false
+    }
+    // "show=ja" at the start of a line
+    var i: u64 = 0
+    while i + 7 <= n {
+        let at_line: bool = i == 0 || buf[(i - 1) as usize] == 10 as u8
+        if at_line && buf[(i) as usize] == 115 as u8 && buf[(i + 1) as usize] == 104 as u8
+            && buf[(i + 2) as usize] == 111 as u8 && buf[(i + 3) as usize] == 119 as u8
+            && buf[(i + 4) as usize] == 61 as u8 && buf[(i + 5) as usize] == 106 as u8
+            && buf[(i + 6) as usize] == 97 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn conf_write(on: bool) -> bool {
+    var yes: [u8; 9] = "show=ja\n\0"
+    var no: [u8; 11] = "show=nein\n\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, ulib.O_MAKE, 420)
+    if ulib.bad(fd) {
+        return false
+    }
+    var w: u64 = 0
+    if on {
+        w = ulib.sys(ulib.SYS_WRITE, fd, (&yes[0 as usize]) as u64, 8)
+    } else {
+        w = ulib.sys(ulib.SYS_WRITE, fd, (&no[0 as usize]) as u64, 10)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return !ulib.bad(w)
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    let _h: usize = fuiscene.label(col, msg.get((&k_head[0 as usize]) as u64))
+    let _a: usize = fuiscene.label_wrap(col, msg.get((&k_t1[0 as usize]) as u64), 3)
+    let _b: usize = fuiscene.label_wrap(col, msg.get((&k_t2[0 as usize]) as u64), 3)
+    let _c: usize = fuiscene.label_wrap(col, msg.get((&k_t3[0 as usize]) as u64), 3)
+    let _ck: usize = fuiscene.check(col, msg.get((&k_show[0 as usize]) as u64), K_SHOW, show_now)
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let b1: usize = fuiscene.button_main(bar, msg.get((&k_set[0 as usize]) as u64), K_SET)
+    fuiscene.set_size(b1, 180, 36)
+    let b2: usize = fuiscene.button(bar, msg.get((&k_close[0 as usize]) as u64), K_CLOSE)
+    fuiscene.set_size(b2, 120, 36)
+}
+
+fn u_gui() -> u64 {
+    var s_bad: [u8; 23] = "welcome: no surface\0\0\0\0"
+    var s_go: [u8; 15] = "welcome: ready\0"
+    var s_set: [u8; 16] = "welcome: show=\0\0"
+    var s_ja: [u8; 3] = "ja\0"
+    var s_nein: [u8; 5] = "nein\0"
+    var s_nm: [u8; 8] = "welcome\0"
+    let _mi: u64 = msg.init()
+    show_now = conf_on()
+    if !fuiscene.open(160, 120, 520, 330, msg.get((&k_title[0 as usize]) as u64), build) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var first: bool = true
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            fuiscene.say_rects((&s_nm[0 as usize]) as u64)
+            say((&s_go[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if key == K_SHOW {
+            let on: bool = fuiscene.value_of(K_SHOW) != 0
+            let _w: bool = conf_write(on)
+            show_now = on
+            say((&s_set[0 as usize]) as u64)
+            if on {
+                say((&s_ja[0 as usize]) as u64)
+            } else {
+                say((&s_nein[0 as usize]) as u64)
+            }
+            ulib.nl()
+        } else if key == K_SET {
+            var argv: [u64; 1] = [0 as u64; 1]
+            argv[(0) as usize] = (&A_SET[0 as usize]) as u64
+            let _p: u64 = ulib.sys(ulib.SYS_EXEC, (&P_SET[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
+            fuiscene.quit()
+        } else if key == K_CLOSE {
+            fuiscene.quit()
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var a_auto: [u8; 3] = "-a\0"
+    var a_stat: [u8; 7] = "status\0"
+    var a_show: [u8; 5] = "show\0"
+    var a_on: [u8; 3] = "on\0"
+    var a_off: [u8; 4] = "off\0"
+    var s_st: [u8; 15] = "welcome: show=\0"
+    var s_ja: [u8; 3] = "ja\0"
+    var s_nein: [u8; 5] = "nein\0"
+    var s_use: [u8; 44] = "usage: welcome [-a | status | show on|off]\0\0"
+    var s_fail: [u8; 28] = "welcome: cannot write conf\0\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 {
+        let c: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(c, (&a_auto[0 as usize]) as u64) {
+            if !conf_on() {
+                return 0
+            }
+            return u_gui()
+        }
+        if ulib.streq(c, (&a_stat[0 as usize]) as u64) {
+            say((&s_st[0 as usize]) as u64)
+            if conf_on() {
+                say((&s_ja[0 as usize]) as u64)
+            } else {
+                say((&s_nein[0 as usize]) as u64)
+            }
+            ulib.nl()
+            return 0
+        }
+        if ulib.streq(c, (&a_show[0 as usize]) as u64) && argc >= 3 {
+            let v: u64 = ulib.arg_at(args, 2)
+            if ulib.streq(v, (&a_on[0 as usize]) as u64) || ulib.streq(v, (&a_off[0 as usize]) as u64) {
+                if !conf_write(ulib.streq(v, (&a_on[0 as usize]) as u64)) {
+                    say((&s_fail[0 as usize]) as u64)
+                    ulib.nl()
+                    return 1
+                }
+                return 0
+            }
+        }
+        say((&s_use[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    return u_gui()
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

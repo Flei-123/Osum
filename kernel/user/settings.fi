@@ -285,7 +285,9 @@ const R_UPDATE: u64 = 14
 const R_MAUS: u64 = 15
 // ROUND R783 (L-007c): the page "Energie" (power: lid, screen off, standby, profile per source), at the END.
 const R_ENERGIE: u64 = 16
-const R_ANZ: u64 = 17
+// ROUND MINT4 (E1): the page "Info" (hardware report + export), at the END.
+const R_INFO: u64 = 17
+const R_ANZ: u64 = 18
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -887,6 +889,12 @@ static mut k_ms_nobus: [u8; 21] = "settings.mouse.nobus\0"
 static mut k_ms_saved: [u8; 21] = "settings.mouse.saved\0"
 // ROUND R783: texts of the page Energie
 static mut k_pw_title: [u8; 21] = "settings.power.title\0"
+static mut k_in_title: [u8; 20] = "settings.info.title\0"
+static mut k_in_note: [u8; 19] = "settings.info.note\0"
+static mut k_in_bexp: [u8; 19] = "settings.info.bexp\0"
+static mut k_in_ok: [u8; 17] = "settings.info.ok\0"
+static mut k_in_fail: [u8; 19] = "settings.info.fail\0"
+static mut l_instat: [u8; 120] = [0 as u8; 120]
 static mut k_pw_note: [u8; 20] = "settings.power.note\0"
 static mut k_pw_bat: [u8; 23] = "settings.power.battery\0"
 static mut k_pw_ac: [u8; 21] = "settings.power.mains\0"
@@ -4297,6 +4305,10 @@ fn bus_rects() {
         rect_say((&e7[0 as usize]) as u64, K_PW_PB)
         rect_say((&e8[0 as usize]) as u64, K_PW_PA)
     }
+    if reiter == R_INFO {
+        var i1: [u8; 6] = "ibexp\0"
+        rect_say((&i1[0 as usize]) as u64, K_IN_BEXP)
+    }
     if reiter == R_MAUS {
         var m1: [u8; 7] = "mspeed\0"
         var m2: [u8; 7] = "maccel\0"
@@ -5742,6 +5754,7 @@ const K_PW_SB: u64 = 107 // screen-off minutes on battery (slider)
 const K_PW_SA: u64 = 108 // screen-off minutes on mains
 const K_PW_YB: u64 = 109 // standby minutes on battery
 const K_PW_YA: u64 = 114 // standby minutes on mains
+const K_IN_BEXP: u64 = 116 // MINT4: Info page, export button
 const K_CAL: u64 = 16
 const K_SL_RAD: u64 = 17
 const K_SL_TBA: u64 = 18
@@ -5833,7 +5846,7 @@ static mut ch_items: [u64; 200] = [0 as u64; 200] // its items (text, '\n' betwe
 static mut ch_buf: [u8; 4400] = [0 as u8; 4400] // the shown item of each
 static mut it_buf: [u8; 480] = [0 as u8; 480] // the items of the open popup
 static mut ch_pend: u64 = 0 // the choice whose popup is open
-static mut tab_buf: [u8; 720] = [0 as u8; 720] // the 17 tab names, 40 each
+static mut tab_buf: [u8; 720] = [0 as u8; 720] // the 18 tab names, 40 each
 static mut rep_due: u64 = 0 // the rectangles must be reported again
 static mut en_key: [u64; 24] = [0 as u64; 24]
 static mut en_buf: [u64; 24] = [0 as u64; 24]
@@ -7001,6 +7014,61 @@ fn page_energie(left: usize, right: usize) {
 }
 
 
+// ROUND MINT4 (E1): run /bin/sysinfo with its output going to /tmp/osum-report.txt
+// (same descriptor dance as konto_lauf). Returns the exit code, 255 on exec failure.
+fn info_export() -> u64 {
+    var t_bin: [u8; 13] = "/bin/sysinfo\0"
+    var t_tmp: [u8; 5] = "/tmp\0"
+    var t_out: [u8; 23] = "/tmp/osum-report.txt\0\0\0"
+    var argv: [u64; 1] = [0 as u64; 1]
+    argv[(0) as usize] = (&t_bin[0 as usize]) as u64
+    let _md: u64 = ulib.sys(ulib.SYS_MKDIR, (&t_tmp[0 as usize]) as u64, 448, 0)
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    let afd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_out[0 as usize]) as u64, ulib.O_MAKE, 384)
+    if ulib.bad(afd) {
+        if !ulib.bad(s1) {
+            ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+        }
+        return 254
+    }
+    ulib.sys(ulib.SYS_DUP2, afd, 1, 0)
+    ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&t_bin[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
+    if !ulib.bad(s1) {
+        ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    }
+    if ulib.bad(pid) {
+        return 255
+    }
+    return ulib.wait_code(pid)
+}
+
+// how many bytes the exported report has (first 4095 read; 0 = missing/empty)
+fn info_size() -> u64 {
+    var t_out: [u8; 23] = "/tmp/osum-report.txt\0\0\0"
+    var buf: [u8; 4096] = [0 as u8; 4096]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_out[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 4095)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// page R_INFO
+fn page_info(left: usize, right: usize) {
+    let _n_in1: usize = fuiscene.label(left, msg.get((&k_in_title[0 as usize]) as u64))
+    let _n_in2: usize = fuiscene.label(left, msg.get((&k_in_note[0 as usize]) as u64))
+    let n_in_bexp: usize = fuiscene.button(left, msg.get((&k_in_bexp[0 as usize]) as u64), K_IN_BEXP)
+    fuiscene.set_size(n_in_bexp, 260, 28)
+    let _n_in_stat: usize = fuiscene.label(left, (&l_instat[0 as usize]) as u64)
+}
+
 // page R_PROTO
 fn page_proto(left: usize, right: usize) {
     let _n_pr1: usize = fuiscene.label(left, msg.get((&k_pr_title[0 as usize]) as u64))
@@ -7311,7 +7379,7 @@ static mut kwkey: [u8; 16] = "settings.kw\0\0\0\0\0"
 static mut e_srch: [u8; 48] = [0 as u8; 48]
 static mut srch_prev: [u8; 48] = [0 as u8; 48]
 static mut srch_word: [u8; 48] = [0 as u8; 48]
-static mut nav_vis: [u64; 17] = [0 as u64; 17]
+static mut nav_vis: [u64; 18] = [0 as u64; 18]
 static mut nav_n: u64 = 0
 static mut cat_buf: [u8; 320] = [0 as u8; 320]
 static mut seg_buf: [u8; 120] = [0 as u8; 120]
@@ -7796,6 +7864,8 @@ fn build() {
             page_maus(cl, cr)
         } else if reiter == R_ENERGIE {
             page_energie(cl, cr)
+        } else if reiter == R_INFO {
+            page_info(cl, cr)
         } else if reiter == R_PROTO {
             page_proto(cl, cr)
         } else {
@@ -8898,6 +8968,21 @@ fn u_start(args: u64) -> u64 {
                         sys_confirm()
                     }
                     upd_show()
+                    // (described again)
+                } else if id == K_IN_BEXP {
+                    let rc_in: u64 = info_export()
+                    var s_ie: [u8; 26] = "settings: info export rc=\0"
+                    let _pie: u64 = ulib.put((&s_ie[0 as usize]) as u64, 25)
+                    ulib.sayn(rc_in)
+                    var s_ib: [u8; 8] = " bytes=\0"
+                    let _pib: u64 = ulib.put((&s_ib[0 as usize]) as u64, 7)
+                    ulib.sayn(info_size())
+                    ulib.nl()
+                    if rc_in == 0 && info_size() > 0 {
+                        let _si: u64 = text_an((&l_instat[0 as usize]) as u64, 0, msg.get((&k_in_ok[0 as usize]) as u64))
+                    } else {
+                        let _sf: u64 = text_an((&l_instat[0 as usize]) as u64, 0, msg.get((&k_in_fail[0 as usize]) as u64))
+                    }
                     // (described again)
                 } else if id == K_PR_BREF {
                     proto_load()
