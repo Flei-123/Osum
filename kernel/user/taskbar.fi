@@ -2255,6 +2255,79 @@ fn hover_step() -> bool {
         (&hover_txt[0 as usize]) as u64)
 }
 
+// ============================================================ W-DND
+// HOVER-RAISE OVER A WINDOW BUTTON. While a drag runs (left button down, the bus drag slot full) and the pointer rests
+// ~600 ms on a window button or a pinned launcher of a running program, that window is raised (shown if minimised) --
+// so a file can be dropped there. Same delay as the window server's own hover-raise (wm.fi `dnd_tick`).
+static mut dnd_k: u64 = 0       // the button under the pointer while a drag runs: 1 + window button, 100 + pin, 0 = none
+static mut dnd_k_t: u64 = 0     // ticks (10 ms) when the pointer came to it
+static mut dnd_k_done: u64 = 0   // the key already raised
+static mut s_dndr: [u8; 24] = "taskbar: dndraise id=\0\0\0"
+
+fn dnd_bar_step() -> bool {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    if (wlibc.mouse_btn() & 1) == 0 || !wlibc.drag_an() || !inside_bar(mx, my) {
+        dnd_k = 0
+        dnd_k_done = 0
+        return false
+    }
+    let lx: u64 = mx - bar_x
+    let ly: u64 = my - bar_y
+    var key: u64 = 0
+    var wnd: u64 = MAXK
+    var i: u64 = 0
+    while i < nk {
+        if kw[(i) as usize] != 0 && lx >= kx[(i) as usize] && lx < kx[(i) as usize] + kw[(i) as usize]
+            && ly >= ky[(i) as usize] && ly < ky[(i) as usize] + kh[(i) as usize] {
+            key = 1 + i
+            wnd = i
+            i = nk
+        } else {
+            i = i + 1
+        }
+    }
+    if key == 0 {
+        var pk: u64 = 0
+        while pk < npin {
+            if pw_[(pk) as usize] != 0 && lx >= px_[(pk) as usize] && lx < px_[(pk) as usize] + pw_[(pk) as usize]
+                && ly >= py_[(pk) as usize] && ly < py_[(pk) as usize] + ph_[(pk) as usize]
+                && pinwin[(pk) as usize] < MAXK {
+                key = 100 + pk
+                wnd = pinwin[(pk) as usize]
+                pk = npin
+            } else {
+                pk = pk + 1
+            }
+        }
+    }
+    if key == 0 {
+        dnd_k = 0
+        dnd_k_done = 0
+        return false
+    }
+    if key != dnd_k {
+        dnd_k = key
+        dnd_k_t = ticks_now()
+        dnd_k_done = 0
+        return false
+    }
+    if dnd_k_done == key || ticks_now() - dnd_k_t < 60 {
+        return false
+    }
+    dnd_k_done = key
+    let rc: u64 = wlibc.win_act(kid[(wnd) as usize], wlibc.WA_RAISE)
+    say((&s_dndr[0 as usize]) as u64)
+    sayn(kid[(wnd) as usize])
+    say((&s_rc[0 as usize]) as u64)
+    sayn(rc)
+    nl()
+    let _a: bool = list_read()
+    layout()
+    paint(true)
+    return true
+}
+
 // ================================================== the status fields
 //
 // Three strings out of three system calls, and then the only
@@ -8310,6 +8383,9 @@ fn u_start(args: u64) -> u64 {
         // after the pointer arrived is a sentence nobody waits for. It
         // costs a comparison unless something changed.
         if hover_step() {
+            fresh = true
+        }
+        if dnd_bar_step() { // W-DND
             fresh = true
         }
         if (round % 5) == 0 {
