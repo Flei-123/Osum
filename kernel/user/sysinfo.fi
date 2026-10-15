@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sysinfo.fi -- E1 (Mint round): ONE TEXT REPORT ABOUT THIS MACHINE.
+//
+//     sysinfo             the report on standard output
+//     sysinfo > file      the report as a file (the "export report" button
+//                         of the settings page does exactly this)
+//
+// Linux Mint's "System Information" page collects system, reports, USB,
+// GPU, PCI, BIOS in one place so a bug report needs one attachment. This
+// is that attachment for OrientOS: kernel version, machine (SMBIOS names),
+// CPU, memory, load, mounts and the crash reports of /var/crash.
+//
+// WHAT NEVER GOES IN: any line whose key mentions a serial number, a UUID
+// or a MAC address, and the device fingerprint. The report is meant to be
+// sent to somebody; the identity of the machine is not part of a bug.
+// (`hwid -r` still prints them for the owner.) A line that is cut for this
+// reason is counted at the end, so the reader knows something was left out.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const BUF: u64 = 4096
+
+static mut file: [u8; 4096] = [0 as u8; 4096]
+static mut cut_lines: u64 = 0
+
+fn slurp(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going && at < BUF - 1 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&file[0]) as u64 + at,
+            BUF - 1 - at)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            at = at + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    file[at as usize] = 0 as u8
+    return at
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn low(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// does the KEY of the line [s, e) (the part before the first ':') contain `w`?
+fn key_has(s: u64, e: u64, w: u64) -> bool {
+    var k: u64 = s
+    while k < e && ld8(s, k - s) != 58 {
+        k = k + 1
+    }
+    let wl: u64 = ulib.length(w)
+    var i: u64 = s
+    while i + wl <= k {
+        var j: u64 = 0
+        var same: bool = true
+        while j < wl {
+            if low(ld8(i, j)) != ld8(w, j) {
+                same = false
+            }
+            j = j + 1
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn secret(s: u64, e: u64) -> bool {
+    var w1: [u8; 7] = "serial\0"
+    var w2: [u8; 5] = "uuid\0"
+    var w3: [u8; 4] = "mac\0"
+    var w4: [u8; 12] = "fingerprint\0"
+    return key_has(s, e, (&w1[0]) as u64) || key_has(s, e, (&w2[0]) as u64)
+        || key_has(s, e, (&w3[0]) as u64) || key_has(s, e, (&w4[0]) as u64)
+}
+
+// "== title ==", then the file line by line; `filter` drops the identity
+fn section(title: u64, path: u64, filter: bool) {
+    var s_a: [u8; 4] = "== \0"
+    var s_b: [u8; 4] = " ==\0"
+    var s_none: [u8; 29] = "(not available on this boot)\0"
+    ulib.say((&s_a[0]) as u64)
+    ulib.say(title)
+    ulib.say((&s_b[0]) as u64)
+    ulib.nl()
+    let n: u64 = slurp(path)
+    if n == 0 {
+        ulib.say((&s_none[0]) as u64)
+        ulib.nl()
+        ulib.nl()
+        return
+    }
+    let base: u64 = (&file[0]) as u64
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && ld8(base, e) != 10 {
+            e = e + 1
+        }
+        if filter && secret(base + at, base + e) {
+            cut_lines = cut_lines + 1
+        } else {
+            ulib.put(base + at, e - at)
+            ulib.nl()
+        }
+        at = e + 1
+    }
+    ulib.nl()
+}
+
+fn crashes() {
+    var s_t: [u8; 22] = "== crash reports ==\0\0\0"
+    var dir: [u8; 11] = "/var/crash\0"
+    var none: [u8; 8] = "(none)\0\0"
+    var rec: [u8; 512] = [0 as u8; 512]
+    ulib.say((&s_t[0]) as u64)
+    ulib.nl()
+    let fd: u64 = io.dir_open((&dir[0]) as u64)
+    var n: u64 = 0
+    if !errno.failed(fd) {
+        var going: bool = true
+        while going {
+            let m: u64 = io.dir_read(fd, (&rec[0]) as u64, 512)
+            if m == 0 || ulib.bad(m) {
+                going = false
+            } else {
+                var at: u64 = 0
+                while at < m {
+                    let r: u64 = (&rec[0]) as u64 + at
+                    let name: u64 = io.dir_name(r)
+                    if ld8(name, 0) != 46 {
+                        ulib.say(name)
+                        ulib.nl()
+                        n = n + 1
+                    }
+                    at = at + io.dir_reclen(r)
+                }
+            }
+        }
+        let _x: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    if n == 0 {
+        ulib.say((&none[0]) as u64)
+        ulib.nl()
+    }
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_h: [u8; 24] = "OrientOS system report\0\0"
+    var t_ver: [u8; 7] = "system\0"
+    var p_ver: [u8; 14] = "/proc/version\0"
+    var t_hw: [u8; 8] = "machine\0"
+    var p_hw: [u8; 11] = "/proc/hwid\0"
+    var t_cpu: [u8; 4] = "cpu\0"
+    var p_cpu: [u8; 14] = "/proc/cpuinfo\0"
+    var t_mem: [u8; 7] = "memory\0"
+    var p_mem: [u8; 14] = "/proc/meminfo\0"
+    var t_up: [u8; 7] = "uptime\0"
+    var p_up: [u8; 13] = "/proc/uptime\0"
+    var t_ld: [u8; 5] = "load\0"
+    var p_ld: [u8; 14] = "/proc/loadavg\0"
+    var t_mnt: [u8; 7] = "mounts\0"
+    var p_mnt: [u8; 13] = "/proc/mounts\0"
+    var s_cut: [u8; 41] = "identity lines left out of this report: \0"
+    ulib.say((&s_h[0]) as u64)
+    ulib.nl()
+    ulib.nl()
+    section((&t_ver[0]) as u64, (&p_ver[0]) as u64, false)
+    section((&t_hw[0]) as u64, (&p_hw[0]) as u64, true)
+    section((&t_cpu[0]) as u64, (&p_cpu[0]) as u64, false)
+    section((&t_mem[0]) as u64, (&p_mem[0]) as u64, false)
+    section((&t_up[0]) as u64, (&p_up[0]) as u64, false)
+    section((&t_ld[0]) as u64, (&p_ld[0]) as u64, false)
+    section((&t_mnt[0]) as u64, (&p_mnt[0]) as u64, false)
+    crashes()
+    ulib.say((&s_cut[0]) as u64)
+    ulib.sayu(cut_lines)
+    ulib.nl()
+    return 0
+}

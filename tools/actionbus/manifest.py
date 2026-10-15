@@ -136,6 +136,16 @@ def parse(text, path="<manifest>", wrapper=False):
                 cur["private"] = True
             else:
                 raise Bad("%s: 'private' belongs under an event" % where)
+        elif k == "menu":
+            # D1: `menu <file|dir|any> "label"` -- a context-menu entry
+            if cur is None or "args" not in cur or len(w) < 2 \
+                    or w[1] not in ("file", "dir", "any") or not quoted(line):
+                raise Bad('%s: menu <file|dir|any> "label" belongs under an action'
+                          % where)
+            cur["menu"] = {"kind": w[1], "label": quoted(line), "ext": []}
+        elif k == "menuext":
+            if cur is not None and "menu" in cur:
+                cur["menu"]["ext"] = [x.lower() for x in w[1:]]
         elif k == "dryrun":
             if cur is not None and "dry_run" in cur:
                 cur["dry_run"] = True
@@ -155,9 +165,36 @@ def parse(text, path="<manifest>", wrapper=False):
     return {"app": app, "title": title}, actions, events, warnings
 
 
+def menu_entries(kind, name, acts):
+    """D1: what `act list --menu <kind> <name>` answers (host reader)."""
+    out = []
+    for a in acts:
+        m = a.get("menu")
+        if not m or m["kind"] not in (kind, "any"):
+            continue
+        if kind == "file" and m["ext"]:
+            ext = name.rsplit(".", 1)[1].lower() if "." in name else None
+            if ext not in m["ext"]:
+                continue
+        out.append("%s\t%s\t%s" % (a["name"], m["label"], a["level"]))
+    return out
+
+
+def menu_cmd(kind, name, paths):
+    acts = []
+    for p in paths:
+        acts += parse(open(p, encoding="utf-8").read(), p)[1]
+    for l in menu_entries(kind, name, acts):
+        print(l)
+    return 0
+
+
 def main(argv):
+    if argv[1:2] == ["menu"] and len(argv) >= 5:
+        return menu_cmd(argv[2], argv[3], argv[4:])
     if len(argv) < 3 or argv[1] not in ("check", "json"):
-        print(__doc__ if False else "usage: manifest.py check|json <ACTIONS> [...]")
+        print(__doc__ if False else "usage: manifest.py check|json <ACTIONS> [...]"
+              "  |  menu <file|dir> <name> <ACTIONS> [...]")
         return 2
     cat = {"bus": "orient-bus", "version": 1, "actions": [], "events": []}
     rc = 0

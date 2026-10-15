@@ -57,7 +57,7 @@ static mut apps: [u8; 1152] = [0 as u8; 1152]
 static mut n_apps: u64 = 0
 
 const ACT_MAX: u64 = 64
-const ACT_B: u64 = 112
+const ACT_B: u64 = 136
 const AC_NAME: u64 = 0 // 32 octets
 const AC_APP: u64 = 32
 const AC_LEVEL: u64 = 40
@@ -69,6 +69,12 @@ const AC_UNDO: u64 = 80 // pool offset of the inverse action's name
 const AC_CALLS: u64 = 88
 const AC_ADKIND: u64 = 96 // AB-008: AD_* below, 0 = a provider answers
 const AC_ADCMD: u64 = 104 // pool offset of the adapter's rest of line
+const AC_MENU: u64 = 112 // D1: pool offset of the context-menu label, 0 = none
+const AC_MKIND: u64 = 120 // D1: MK_* below
+const AC_MEXT: u64 = 128 // D1: pool offset of `menuext` (lower-case words), 0 = any
+const MK_FILE: u64 = 1
+const MK_DIR: u64 = 2
+const MK_ANY: u64 = 3
 const FL_DRY: u64 = 1
 const FL_EVENT: u64 = 2
 const FL_KEYED: u64 = 4 // AB-005: arg `key` names a setting of the schema
@@ -80,7 +86,7 @@ const AD_FILE: u64 = 2
 const AD_DBUS: u64 = 3
 const AD_UI: u64 = 4
 const AD_KEYS: u64 = 5
-static mut acts: [u8; 7168] = [0 as u8; 7168]
+static mut acts: [u8; 8704] = [0 as u8; 8704]
 static mut n_acts: u64 = 0
 
 const ARG_MAX: u64 = 256
@@ -632,6 +638,11 @@ fn load_manifest(path: u64, compat: u64) -> bool {
     var k_keys: [u8; 5] = "keys\0"
     var k_exe: [u8; 4] = "exe\0"
     var k_window: [u8; 7] = "window\0"
+    var k_menu: [u8; 5] = "menu\0"
+    var k_menuext: [u8; 8] = "menuext\0"
+    var k_dirw: [u8; 4] = "dir\0"
+    var k_anyw: [u8; 4] = "any\0"
+    var e_menu: [u8; 52] = "menu <file|dir|any> \"label\" belongs under an action\0"
     var e_ad: [u8; 42] = "adapter kind: cli, file, dbus, ui or keys\0"
     var e_adnat: [u8; 37] = "adapters are for wrapper manifests\0\0\0"
 
@@ -820,6 +831,34 @@ fn load_manifest(path: u64, compat: u64) -> bool {
                     st(ac(m_cur), AC_ADKIND, kind)
                     st(ac(m_cur), AC_ADCMD, pool_add(p + r, actwire.slen(p + r)))
                     st(ap(m_app), AP_ADAPT, 1)
+                }
+            } else if actwire.str_eq(p1, (&k_menu[0 as usize]) as u64) {
+                // D1: `menu <file|dir|any> "label"` under an action -- the
+                // action appears in the file manager's context menu
+                var mk: u64 = 0
+                if actwire.str_eq(p2, (&k_file[0 as usize]) as u64) {
+                    mk = MK_FILE
+                } else if actwire.str_eq(p2, (&k_dirw[0 as usize]) as u64) {
+                    mk = MK_DIR
+                } else if actwire.str_eq(p2, (&k_anyw[0 as usize]) as u64) {
+                    mk = MK_ANY
+                }
+                if m_cur == actwire.NONE || mk == 0 || ld8(pq, 0) == 0
+                    || (ld(ac(m_cur), AC_FLAGS) & FL_EVENT) != 0 {
+                    m_fail(line, (&e_menu[0 as usize]) as u64)
+                    ok = false
+                } else {
+                    st(ac(m_cur), AC_MENU, pool_add(pq, actwire.slen(pq)))
+                    st(ac(m_cur), AC_MKIND, mk)
+                }
+            } else if actwire.str_eq(p1, (&k_menuext[0 as usize]) as u64) {
+                // D1: `menuext img iso` -- only files with these endings
+                if m_cur != actwire.NONE {
+                    var rx: u64 = actwire.word_copy(p, s, p4x, 8)
+                    while ld8(p, rx) == 32 {
+                        rx = rx + 1
+                    }
+                    st(ac(m_cur), AC_MEXT, pool_add(p + rx, actwire.slen(p + rx)))
                 }
             } else if actwire.str_eq(p1, (&k_dry[0 as usize]) as u64) {
                 if m_cur != actwire.NONE {
@@ -1467,6 +1506,93 @@ fn do_list(pid: u64, id: u64) {
             actwire.ob_str((&s_off[0 as usize]) as u64)
         }
         actwire.ob_ch(10)
+        i = i + 1
+    }
+    reply_ob(pid, id)
+}
+
+// ===================================================== list --menu (D1)
+//
+// `list --menu <file|dir> <name>`: the actions that want to be in the
+// context menu of THIS entry, one per line: action TAB label TAB level.
+// A file is matched by its ending (`menuext`, case does not matter);
+// an action without `menuext` takes every file.
+
+fn low(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// does the ending of `name` occur in the word list `exts`? An empty list
+// takes everything; a name without a dot matches nothing but that.
+fn ext_match(exts: u64, name: u64) -> bool {
+    if ld8(exts, 0) == 0 {
+        return true
+    }
+    var dot: u64 = actwire.NONE
+    var i: u64 = 0
+    while ld8(name, i) != 0 {
+        if ld8(name, i) == 46 {
+            dot = i
+        }
+        i = i + 1
+    }
+    if dot == actwire.NONE {
+        return false
+    }
+    let en: u64 = i - dot - 1
+    var w: u64 = 0
+    while ld8(exts, w) != 0 {
+        while ld8(exts, w) == 32 {
+            w = w + 1
+        }
+        var n: u64 = 0
+        while ld8(exts, w + n) != 0 && ld8(exts, w + n) != 32 {
+            n = n + 1
+        }
+        if n == en && n > 0 {
+            var k: u64 = 0
+            var same: bool = true
+            while k < n {
+                if low(ld8(exts, w + k)) != low(ld8(name, dot + 1 + k)) {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same {
+                return true
+            }
+        }
+        w = w + n
+    }
+    return false
+}
+
+fn do_list_menu(pid: u64, id: u64, kindw: u64, name: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var k_d: [u8; 4] = "dir\0"
+    var want: u64 = MK_FILE
+    if actwire.str_eq(kindw, (&k_d[0 as usize]) as u64) {
+        want = MK_DIR
+    }
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n_acts {
+        let c: u64 = ac(i)
+        let mk: u64 = ld(c, AC_MKIND)
+        if (ld(c, AC_FLAGS) & FL_EVENT) == 0 && ld(c, AC_MENU) != 0
+            && (mk == want || mk == MK_ANY)
+            && (want == MK_DIR || ext_match(pl(ld(c, AC_MEXT)), name)) {
+            actwire.ob_str(c + AC_NAME)
+            actwire.ob_ch(9)
+            actwire.ob_str(pl(ld(c, AC_MENU)))
+            actwire.ob_ch(9)
+            actwire.ob_str(level_name(ld(c, AC_LEVEL)))
+            actwire.ob_ch(10)
+        }
         i = i + 1
     }
     reply_ob(pid, id)
@@ -4141,7 +4267,31 @@ fn on_request(s: u64) {
     if actwire.str_eq(vp, (&k_call[0 as usize]) as u64) {
         do_call(msg, pid, uid, id, false, false)
     } else if actwire.str_eq(vp, (&k_list[0 as usize]) as u64) {
-        do_list(pid, id)
+        // D1: `list --menu <file|dir> <name>` -- the context-menu entries
+        var o_menu: [u8; 7] = "--menu\0"
+        var m1: [u8; 12] = [0 as u8; 12]
+        var m2: [u8; 12] = [0 as u8; 12]
+        var m3: [u8; 160] = [0 as u8; 160]
+        let m1p: u64 = (&m1[0 as usize]) as u64
+        let m2p: u64 = (&m2[0 as usize]) as u64
+        let m3p: u64 = (&m3[0 as usize]) as u64
+        var mx: u64 = actwire.word_copy(msg, nx, m1p, 12)
+        if actwire.str_eq(m1p, (&o_menu[0 as usize]) as u64) {
+            mx = actwire.word_copy(msg, mx, m2p, 12)
+            while ld8(msg, mx) == 32 {
+                mx = mx + 1
+            }
+            var mn: u64 = 0
+            while ld8(msg, mx) != 0 && ld8(msg, mx) != 10 && mn < 158 {
+                st8(m3p, mn, ld8(msg, mx))
+                mn = mn + 1
+                mx = mx + 1
+            }
+            st8(m3p, mn, 0)
+            do_list_menu(pid, id, m2p, m3p)
+        } else {
+            do_list(pid, id)
+        }
     } else if actwire.str_eq(vp, (&k_desc[0 as usize]) as u64) {
         var f: [u8; 40] = [0 as u8; 40]
         let fp: u64 = (&f[0 as usize]) as u64

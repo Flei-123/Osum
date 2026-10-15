@@ -154,6 +154,7 @@ static mut a_kname: [u8; 9] = "account=\0"
 static mut a_kpw: [u8; 10] = "password=\0"
 static mut m_konto: [u8; 20] = "installer: account=\0"
 static mut m_kstate: [u8; 23] = "installer: account ks=\0"
+static mut m_crypt: [u8; 26] = "installer: encrypted root\0"
 static mut m_kgo: [u8; 5] = " go=\0"
 static mut a_nam: [u8; 64] = [0 as u8; 64]
 static mut a_pw1: [u8; 128] = [0 as u8; 128]
@@ -166,6 +167,21 @@ static mut konto_noroot: u64 = 0
 const K_KNAME: u64 = 21
 const K_KPW1: u64 = 22
 const K_KPW2: u64 = 23
+// K-019: optional disk encryption (whole-disk way only): check box + passphrase twice.
+const K_CRYPT: u64 = 24
+const K_CPW1: u64 = 25
+const K_CPW2: u64 = 26
+static mut k_c_check: [u8; 19] = "installer.crypt.on\0"
+static mut k_c_pw1: [u8; 20] = "installer.crypt.pw1\0"
+static mut k_c_pw2: [u8; 20] = "installer.crypt.pw2\0"
+static mut k_c_hshort: [u8; 27] = "installer.crypt.hint.short\0"
+static mut k_c_hsame: [u8; 26] = "installer.crypt.hint.same\0"
+static mut k_c_hok: [u8; 24] = "installer.crypt.hint.ok\0"
+static mut k_c_hkey: [u8; 25] = "installer.crypt.hint.key\0"
+static mut a_cpw: [u8; 9] = "cryptpw=\0"
+static mut a_cpwv: [u8; 128] = [0 as u8; 128]
+static mut crypt_ks: u64 = 0
+static mut crypt_zeile: [u8; 200] = [0 as u8; 200]
 static mut zeile: [u8; 200] = [0 as u8; 200]
 static mut schrittzeile: [u8; 200] = [0 as u8; 200]
 
@@ -964,6 +980,77 @@ fn konto_schreiben() -> bool {
 }
 static mut a_leer: [u8; 4] = [0 as u8; 4]
 
+// ---- K-019: disk encryption options (whole-disk way only) ----
+fn crypt_on() -> bool {
+    return welcher_weg == 0 && fuiscene.value_of(K_CRYPT) != 0
+}
+
+fn cp1() -> u64 {
+    return fuiscene.entry_text(K_CPW1)
+}
+
+fn cp2() -> u64 {
+    return fuiscene.entry_text(K_CPW2)
+}
+
+// The boot prompt reads a US keyboard map: only printable ASCII is accepted.
+fn crypt_ascii(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    var i: u64 = 0
+    while i < n {
+        let v: u8 = *((p + i) as *mut u8)
+        if (v as u64) < 32 || (v as u64) > 126 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// 0 = encryption off, 1 = passphrase missing/short/not ASCII, 2 = not equal, 3 = ok.
+fn crypt_stufe() -> u64 {
+    if !crypt_on() {
+        return 0
+    }
+    if cp1() == 0 || ulib.length(cp1()) < 8 || ulib.length(cp1()) > 100 {
+        return 1
+    }
+    if !crypt_ascii(cp1()) {
+        return 4
+    }
+    if cp2() == 0 || !ulib.streq(cp1(), cp2()) {
+        return 2
+    }
+    return 3
+}
+
+fn crypt_gueltig() -> bool {
+    if !crypt_on() {
+        return true
+    }
+    return crypt_stufe() == 3
+}
+
+fn crypt_zeile_bauen() {
+    b_start((&crypt_zeile[0 as usize]) as u64, 200)
+    let st: u64 = crypt_stufe()
+    if st == 1 {
+        b_s(msg.get(ptr((&k_c_hshort[0 as usize]) as u64)))
+    } else if st == 4 {
+        b_s(msg.get(ptr((&k_c_hkey[0 as usize]) as u64)))
+    } else if st == 2 {
+        b_s(msg.get(ptr((&k_c_hsame[0 as usize]) as u64)))
+    } else if st == 3 {
+        b_s(msg.get(ptr((&k_c_hok[0 as usize]) as u64)))
+    }
+    b_ende()
+}
+
+fn crypt_wipe() {
+    fuiscene.entry_set(K_CPW1, (&a_leer[0 as usize]) as u64)
+    fuiscene.entry_set(K_CPW2, (&a_leer[0 as usize]) as u64)
+}
+
 // `account=NAME` / `password=SECRET` of the test runner: copies the value
 // behind the prefix into `out`; false when the argument is not there.
 fn arg_wert(args: u64, pre: u64, out: u64, max: u64) -> bool {
@@ -996,6 +1083,9 @@ fn weg_moeglich() -> bool {
         return false
     }
     if !konto_gueltig() {
+        return false
+    }
+    if !crypt_gueltig() {
         return false
     }
     if welcher_weg == 1 {
@@ -1164,8 +1254,27 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 3. das System kopieren. Der lange Teil.
     melde_schritt(wschritt, instkern.S_KOPIE)
-    if !instkern.wurzel_kopieren(zfd, qfd, espsek, qsekt) {
+    let ofs_start: u64 = instkern.plan_ofs_start(espsek)
+    let ofs_bloecke: u64 = instkern.plan_ofs_ende(sekt) - ofs_start + 1
+    // K-019: the root partition gets the OSUMCRYPT header first; the copy and the
+    // grow below then run through the encrypting layer (same as `install --crypt`).
+    var cry_off: u64 = 0
+    if crypt_on() {
+        if !instkern.crypt_begin(zfd, ofs_start, ofs_bloecke, cp1(), ulib.length(cp1())) {
+            wo(3)
+            crypt_wipe()
+            ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+            ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+            return false
+        }
+        say(ptr((&m_crypt[0 as usize]) as u64))
+        ulib.nl()
+        cry_off = instkern.crypt_off()
+    }
+    if !instkern.wurzel_kopieren_ab(zfd, qfd, ofs_start + cry_off, qsekt) {
         wo(3)
+        instkern.crypt_end()
+        crypt_wipe()
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
@@ -1173,14 +1282,16 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
 
     // ---- 4. das Dateisystem auf die Partition vergroessern
     melde_schritt(wschritt, instkern.S_WACHSEN)
-    let ofs_start: u64 = instkern.plan_ofs_start(espsek)
-    let ofs_bloecke: u64 = instkern.plan_ofs_ende(sekt) - ofs_start + 1
-    if instkern.wachsen(zfd, ofs_start, ofs_bloecke) == 0 {
+    if instkern.wachsen(zfd, ofs_start + cry_off, ofs_bloecke - cry_off) == 0 {
         wo(4)
+        instkern.crypt_end()
+        crypt_wipe()
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
+    instkern.crypt_end()
+    crypt_wipe()
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
@@ -1762,6 +1873,27 @@ fn build() {
         fuiscene.entry_secret(K_KPW1, true)
         fuiscene.entry_secret(K_KPW2, true)
     }
+    if welcher_weg == 0 {
+        let _cc: usize = fuiscene.check(col, msg.get(ptr((&k_c_check[0 as usize]) as u64)),
+            K_CRYPT, fuiscene.value_of(K_CRYPT) != 0)
+        if fuiscene.value_of(K_CRYPT) != 0 {
+            let clw: u64 = 220
+            let cfw: u64 = BW - 16 - clw - 8
+            let cr1: usize = fuiscene.row(col)
+            fuiscene.set_gap(cr1, 8)
+            let cl1: usize = fuiscene.label(cr1, msg.get(ptr((&k_c_pw1[0 as usize]) as u64)))
+            fuiscene.set_size(cl1, clw, 24)
+            let _ce1: usize = fuiscene.entry(cr1, K_CPW1, cfw, 0)
+            let cr2: usize = fuiscene.row(col)
+            fuiscene.set_gap(cr2, 8)
+            let cl2: usize = fuiscene.label(cr2, msg.get(ptr((&k_c_pw2[0 as usize]) as u64)))
+            fuiscene.set_size(cl2, clw, 24)
+            let _ce2: usize = fuiscene.entry(cr2, K_CPW2, cfw, 0)
+            fuiscene.entry_secret(K_CPW1, true)
+            fuiscene.entry_secret(K_CPW2, true)
+            let _ch: usize = fuiscene.label(col, (&crypt_zeile[0 as usize]) as u64)
+        }
+    }
     let _kh: usize = fuiscene.label(col, (&a_zeile[0 as usize]) as u64)
     // DIE KNOPFREIHE STEHT RECHTS UNTEN -- dieselbe Stelle, an der der
     // Dialog seine Antwortknoepfe hat.
@@ -1875,6 +2007,16 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     fuiscene.set_app(ptr((&m_self[0 as usize]) as u64))
+    // Test runner: `cryptpw=SECRET` ticks the box and fills both passphrase fields.
+    if sofort && arg_wert(args, ptr((&a_cpw[0 as usize]) as u64), (&a_cpwv[0 as usize]) as u64, 127) {
+        // the value slot of the box exists only after the first tree was described
+        let _k1: u64 = fuiscene.pump()
+        fuiscene.set_value(K_CRYPT, 1)
+        let _kc: u64 = fuiscene.pump()
+        fuiscene.entry_set(K_CPW1, (&a_cpwv[0 as usize]) as u64)
+        fuiscene.entry_set(K_CPW2, (&a_cpwv[0 as usize]) as u64)
+        ulib.fill((&a_cpwv[0 as usize]) as u64, 0, 128)
+    }
     if konto_an != 0 && sofort {
         fuiscene.entry_set(K_KNAME, (&a_nam[0 as usize]) as u64)
         fuiscene.entry_set(K_KPW1, (&a_pw1[0 as usize]) as u64)
@@ -2025,6 +2167,17 @@ fn u_start(args: u64) -> u64 {
                 }
                 ulib.nl()
                 konto_zeile_bauen()
+                fuiscene.refresh()
+            }
+        }
+        if laeuft == 0 && fertig == 0 {
+            var cs: u64 = crypt_stufe()
+            if fuiscene.value_of(K_CRYPT) != 0 {
+                cs = cs + 10
+            }
+            if cs != crypt_ks {
+                crypt_ks = cs
+                crypt_zeile_bauen()
                 fuiscene.refresh()
             }
         }

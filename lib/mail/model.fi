@@ -1,0 +1,756 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/mail/model.fi -- the mail app's MODEL (no window): account, folders, message list, reading,
+// composing + sending. Blocking steps over lib/mail/session.fi; one fresh connection per step
+// (open -> greet -> login -> work -> logout), so no half-open session survives an error.
+//
+// The window (kernel/user/mail.fi) only shows what this module holds:
+//   folders_blob()   "Ordner\n<name>\n..."                       -> fuiscene.table_blob
+//   list_blob()      "Von\tBetreff\tDatum\n<row>\n..." newest first -> fuiscene.table_blob
+//   msg_text()       NUL-terminated text of the open message (<= MSG_CAP-1 octets) -> fuiscene.memo
+// Host test: tools/mail/apptest.fi against tools/mail/stub.py (tools/mail/app.sh).
+//
+// HONEST LIMITS: text only (multipart is shown raw, no attachments), newest 64 messages per
+// folder, message text cut at 4000 octets (the fuiscene memo cap is 4096), no STARTTLS (implicit
+// TLS ports 993/465 or plain for tests/LAN), the password is never written to disk.
+
+profile app
+
+import std.rt
+import std.net
+import mail.wire
+import mail.session
+
+export { cfg_ptr, cfg_set, cfg_num, set_secure, secure, set_addrs, parse_ipv4, load_conf, save_conf,
+    op_folders, op_list, op_read, op_send, folders_blob, folder_count, folder_name, list_blob,
+    list_count, msg_text, msg_len, last_error, err_text,
+    F_IMAP_HOST, F_IMAP_PORT, F_SMTP_HOST, F_SMTP_PORT, F_USER, F_PASS, F_ROOTS, F_COUNT,
+    E_NOCFG, E_NOFOLDER, E_NOMSG }
+
+const F_IMAP_HOST: u64 = 0
+const F_IMAP_PORT: u64 = 1
+const F_SMTP_HOST: u64 = 2
+const F_SMTP_PORT: u64 = 3
+const F_USER: u64 = 4
+const F_PASS: u64 = 5
+const F_ROOTS: u64 = 6
+const F_COUNT: u64 = 7
+const F_STRIDE: u64 = 128
+
+const E_NOCFG: u64 = 20 // a required setting is empty
+const E_NOFOLDER: u64 = 21 // no such folder row
+const E_NOMSG: u64 = 22 // no such message row
+
+const MSG_CAP: u64 = 4096
+const BODY_MAX: u64 = 60000
+const FOLDER_MAX: u64 = 24
+const NAME_STRIDE: u64 = 64
+const IO_MS: u64 = 15000
+
+static mut CFG: [u8; 896] = [0; 896]
+static mut SECURE: bool = true
+static mut IMAP_ADDR: u32 = 0
+static mut SMTP_ADDR: u32 = 0
+
+static mut FNAMES: [u8; 1536] = [0; 1536]
+static mut FBLOB: [u8; 2048] = [0; 2048]
+static mut FN_N: u64 = 0
+static mut CUR_FOLDER: u64 = 0
+
+static mut LBLOB: [u8; 24576] = [0; 24576]
+static mut SEQS: [u64; 64] = [0; 64]
+static mut LN: u64 = 0
+
+static mut MSG: [u8; 4096] = [0; 4096]
+static mut MSGLEN: u64 = 0
+static mut TMPB: [u8; 65536] = [0; 65536]
+static mut OUTB: [u8; 16384] = [0; 16384]
+static mut LAST_ERR: u64 = 0
+static mut HELO: [u8; 8] = "osum.lan"
+static mut SEL_BOX: [u8; 64] = [0; 64]
+static mut MSGID: [u8; 64] = [0; 64]
+static mut DATEB: [u8; 40] = [0; 40]
+static mut FROMB: [u8; 160] = [0; 160]
+static mut INBOX0: [u8; 6] = "INBOX\0"
+static mut DEFROOTS: [u8; 19] = "/etc/ssl/roots.pem\0"
+static mut CONFPATH: [u8; 15] = "/etc/mail.conf\0"
+static mut ONE: [u8; 1] = [0]
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn clen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld8(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// ---------------------------------------------------------------- settings
+fn cfg_ptr(i: u64) -> u64 {
+    return (&CFG[0]) as u64 + i * F_STRIDE
+}
+
+// Copies the NUL-terminated text at `src` into field `i` (cut at 127 octets).
+fn cfg_set(i: u64, src: u64) {
+    let d: u64 = cfg_ptr(i)
+    var k: u64 = 0
+    while k < F_STRIDE - 1 && ld8(src, k) != 0 {
+        st8(d, k, ld8(src, k))
+        k = k + 1
+    }
+    st8(d, k, 0)
+}
+
+fn cfg_num(i: u64) -> u64 {
+    let p: u64 = cfg_ptr(i)
+    var v: u64 = 0
+    var k: u64 = 0
+    while ld8(p, k) >= 48 && ld8(p, k) <= 57 {
+        v = v * 10 + ld8(p, k) - 48
+        k = k + 1
+        if v > 65535 {
+            return 0
+        }
+    }
+    return v
+}
+
+fn set_secure(on: bool) {
+    SECURE = on
+}
+
+fn secure() -> bool {
+    return SECURE
+}
+
+fn set_addrs(imap: u32, smtp: u32) {
+    IMAP_ADDR = imap
+    SMTP_ADDR = smtp
+}
+
+// "a.b.c.d" -> address (0 when it is not a dotted IPv4, e.g. a host name).
+fn parse_ipv4(p: u64) -> u32 {
+    var parts: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    var digits: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = ld8(p, i)
+        if c == 0 {
+            break
+        }
+        if c == 46 {
+            if digits == 0 || k >= 3 {
+                return 0 as u32
+            }
+            k = k + 1
+            digits = 0
+        } else if c >= 48 && c <= 57 {
+            parts[k as usize] = parts[k as usize] * 10 + c - 48
+            digits = digits + 1
+            if parts[k as usize] > 255 || digits > 3 {
+                return 0 as u32
+            }
+        } else {
+            return 0 as u32
+        }
+        i = i + 1
+    }
+    if k != 3 || digits == 0 {
+        return 0 as u32
+    }
+    return net.ipv4(parts[0] as u8, parts[1] as u8, parts[2] as u8, parts[3] as u8)
+}
+
+// /etc/mail.conf: one "key=value" line per field (no password).
+fn conf_line(p: u64, n: u64) {
+    var eq: u64 = 0
+    while eq < n && ld8(p, eq) != 61 {
+        eq = eq + 1
+    }
+    if eq >= n {
+        return
+    }
+    var f: u64 = F_COUNT
+    if eq == 2 && ld8(p, 0) == 105 && ld8(p, 1) == 104 {
+        f = F_IMAP_HOST
+    } else if eq == 2 && ld8(p, 0) == 105 && ld8(p, 1) == 112 {
+        f = F_IMAP_PORT
+    } else if eq == 2 && ld8(p, 0) == 115 && ld8(p, 1) == 104 {
+        f = F_SMTP_HOST
+    } else if eq == 2 && ld8(p, 0) == 115 && ld8(p, 1) == 112 {
+        f = F_SMTP_PORT
+    } else if eq == 2 && ld8(p, 0) == 117 && ld8(p, 1) == 115 {
+        f = F_USER
+    } else if eq == 2 && ld8(p, 0) == 116 && ld8(p, 1) == 108 {
+        SECURE = ld8(p, 3) != 48
+        return
+    }
+    if f == F_COUNT {
+        return
+    }
+    let d: u64 = cfg_ptr(f)
+    var k: u64 = 0
+    while k < F_STRIDE - 1 && eq + 1 + k < n {
+        st8(d, k, ld8(p, eq + 1 + k))
+        k = k + 1
+    }
+    st8(d, k, 0)
+}
+
+fn load_conf() -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&CONFPATH[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var s: u64 = 0
+    var i: u64 = 0
+    while i <= b.len as u64 {
+        if i == b.len as u64 || ld8(b.ptr, i) == 10 {
+            if i > s {
+                conf_line(b.ptr + s, i - s)
+            }
+            s = i + 1
+        }
+        i = i + 1
+    }
+    rt.buf_free(&b)
+    return true
+}
+
+fn put_kv(o: *mut wire.Out, k: str, f: u64) {
+    wire.out_str(o, k)
+    wire.out_bytes(o, cfg_ptr(f), clen(cfg_ptr(f)))
+    wire.out_str(o, "\n")
+}
+
+fn save_conf() -> bool {
+    var o: wire.Out = wire.out_new((&OUTB[0]) as u64, 2048)
+    put_kv(&o, "ih=", F_IMAP_HOST)
+    put_kv(&o, "ip=", F_IMAP_PORT)
+    put_kv(&o, "sh=", F_SMTP_HOST)
+    put_kv(&o, "sp=", F_SMTP_PORT)
+    put_kv(&o, "us=", F_USER)
+    if SECURE {
+        wire.out_str(&o, "tl=1\n")
+    } else {
+        wire.out_str(&o, "tl=0\n")
+    }
+    if wire.out_over(&o) {
+        return false
+    }
+    return rt.write_file((&CONFPATH[0]) as u64, o.p, o.len as usize)
+}
+
+// ---------------------------------------------------------------- errors
+fn last_error() -> u64 {
+    return LAST_ERR
+}
+
+fn fail(code: u64) -> u64 {
+    LAST_ERR = code
+    return code
+}
+
+// German one-liner for an error code (NUL-terminated, static).
+static mut ERRB: [u8; 96] = [0; 96]
+fn err_text(code: u64) -> u64 {
+    var s: str = "Unbekannter Fehler"
+    if code == 0 {
+        s = "OK"
+    } else if code == session.E_CONNECT {
+        s = "Server nicht erreichbar"
+    } else if code == session.E_TLS {
+        s = "TLS-Verbindung fehlgeschlagen"
+    } else if code == session.E_CERT {
+        s = "Zertifikat nicht vertrauenswuerdig"
+    } else if code == session.E_IO {
+        s = "Verbindung verloren / Zeitueberschreitung"
+    } else if code == session.E_PROTO {
+        s = "Unerwartete Serverantwort"
+    } else if code == session.E_AUTH {
+        s = "Anmeldung abgelehnt (Benutzer/Passwort)"
+    } else if code == session.E_REJECT {
+        s = "Server hat den Befehl abgelehnt"
+    } else if code == session.E_TOOBIG {
+        s = "Antwort zu gross"
+    } else if code == session.E_ARG {
+        s = "Ungueltige Eingabe"
+    } else if code == E_NOCFG {
+        s = "Konto unvollstaendig (Server, Port, Benutzer, Passwort)"
+    } else if code == E_NOFOLDER {
+        s = "Kein Ordner gewaehlt"
+    } else if code == E_NOMSG {
+        s = "Keine Nachricht gewaehlt"
+    }
+    var i: u64 = 0
+    while i < s.n as u64 && i < 95 {
+        st8((&ERRB[0]) as u64, i, ld8(s.p as u64, i))
+        i = i + 1
+    }
+    st8((&ERRB[0]) as u64, i, 0)
+    return (&ERRB[0]) as u64
+}
+
+// ---------------------------------------------------------------- sessions
+fn cfg_ready(smtp: bool) -> bool {
+    if clen(cfg_ptr(F_USER)) == 0 || clen(cfg_ptr(F_PASS)) == 0 {
+        return false
+    }
+    if smtp {
+        return clen(cfg_ptr(F_SMTP_HOST)) > 0 && cfg_num(F_SMTP_PORT) > 0
+    }
+    return clen(cfg_ptr(F_IMAP_HOST)) > 0 && cfg_num(F_IMAP_PORT) > 0
+}
+
+fn roots_path() -> u64 {
+    if clen(cfg_ptr(F_ROOTS)) > 0 {
+        return cfg_ptr(F_ROOTS)
+    }
+    return (&DEFROOTS[0]) as u64
+}
+
+// Opens LINK to the IMAP server, reads the greeting, logs in.
+fn imap_up(lk: *mut session.Link) -> u64 {
+    if !cfg_ready(false) {
+        return E_NOCFG
+    }
+    *lk = session.link_new()
+    var rc: u64 = session.link_open(lk, IMAP_ADDR, cfg_num(F_IMAP_PORT) as u16, SECURE, roots_path(),
+        cfg_ptr(F_IMAP_HOST), clen(cfg_ptr(F_IMAP_HOST)) as usize, IO_MS)
+    if rc != 0 {
+        return rc
+    }
+    rc = session.imap_greet(lk)
+    if rc == 0 {
+        rc = session.imap_login(lk, cfg_ptr(F_USER), clen(cfg_ptr(F_USER)), cfg_ptr(F_PASS), clen(cfg_ptr(F_PASS)))
+    }
+    if rc != 0 {
+        session.link_close(lk)
+    }
+    return rc
+}
+
+fn imap_down(lk: *mut session.Link) {
+    let rc: u64 = session.imap_logout(lk)
+    session.link_close(lk)
+}
+
+// ---------------------------------------------------------------- folders
+fn folder_count() -> u64 {
+    return FN_N
+}
+
+fn folder_name(i: u64) -> u64 {
+    return (&FNAMES[0]) as u64 + i * NAME_STRIDE
+}
+
+fn folders_blob() -> u64 {
+    return (&FBLOB[0]) as u64
+}
+
+fn blob_put(o: *mut wire.Out, p: u64, n: u64) {
+    // cells must not contain TAB / NL
+    var i: u64 = 0
+    while i < n {
+        var c: u64 = ld8(p, i)
+        if c == 9 || c == 10 || c == 13 {
+            c = 32
+        }
+        ONE[0] = c as u8
+        wire.out_bytes(o, (&ONE[0]) as u64, 1)
+        i = i + 1
+    }
+}
+
+fn op_folders() -> u64 {
+    var lkv: session.Link = session.link_new()
+    let lk: *mut session.Link = &lkv
+    var rc: u64 = imap_up(lk)
+    if rc != 0 {
+        return fail(rc)
+    }
+    rc = session.imap_list(lk)
+    if rc != 0 {
+        imap_down(lk)
+        return fail(rc)
+    }
+    FN_N = 0
+    var o: wire.Out = wire.out_new((&FBLOB[0]) as u64, 2048)
+    wire.out_str(&o, "Ordner\n")
+    var at: u64 = 0
+    var nl: u64 = 0
+    while FN_N < FOLDER_MAX {
+        at = wire.imap_list_name(session.rx_ptr(lk), session.rx_len(lk), at,
+            folder_name(FN_N), NAME_STRIDE - 1, &nl)
+        if at == wire.BAD {
+            break
+        }
+        st8(folder_name(FN_N), nl, 0)
+        blob_put(&o, folder_name(FN_N), nl)
+        wire.out_str(&o, "\n")
+        FN_N = FN_N + 1
+    }
+    session.rx_drop(lk)
+    imap_down(lk)
+    st8((&FBLOB[0]) as u64, o.len, 0)
+    if wire.out_over(&o) {
+        return fail(session.E_TOOBIG)
+    }
+    LAST_ERR = 0
+    return 0
+}
+
+// ---------------------------------------------------------------- list
+fn list_blob() -> u64 {
+    return (&LBLOB[0]) as u64
+}
+
+fn list_count() -> u64 {
+    return LN
+}
+
+fn open_folder(lk: *mut session.Link, row: u64, count: *mut u64) -> u64 {
+    if row >= FN_N {
+        return E_NOFOLDER
+    }
+    let rc: u64 = imap_up(lk)
+    if rc != 0 {
+        return rc
+    }
+    let r2: u64 = session.imap_select(lk, folder_name(row), clen(folder_name(row)), count)
+    if r2 != 0 {
+        imap_down(lk)
+    }
+    return r2
+}
+
+fn op_list(row: u64) -> u64 {
+    var lkv: session.Link = session.link_new()
+    let lk: *mut session.Link = &lkv
+    var count: u64 = 0
+    var rc: u64 = open_folder(lk, row, &count)
+    if rc != 0 {
+        return fail(rc)
+    }
+    CUR_FOLDER = row
+    LN = 0
+    var o: wire.Out = wire.out_new((&LBLOB[0]) as u64, 24576)
+    wire.out_str(&o, "Von\tBetreff\tDatum\n")
+    if count > 0 {
+        var first: u64 = 1
+        if count > session.MAX_HEADS {
+            first = count - session.MAX_HEADS + 1
+        }
+        rc = session.imap_heads(lk, first, count)
+        if rc != 0 {
+            imap_down(lk)
+            return fail(rc)
+        }
+        var hl: session.HeadList = session.headlist_new()
+        let nh: u64 = session.parse_heads(lk, &hl, session.MAX_HEADS)
+        session.rx_drop(lk)
+        var k: u64 = nh
+        while k > 0 {
+            k = k - 1
+            let h: *mut session.Head = &hl.items[k as usize]
+            blob_put(&o, (&(*h).from[0]) as u64, clen((&(*h).from[0]) as u64))
+            wire.out_str(&o, "\t")
+            blob_put(&o, (&(*h).subj[0]) as u64, clen((&(*h).subj[0]) as u64))
+            wire.out_str(&o, "\t")
+            blob_put(&o, (&(*h).date[0]) as u64, clen((&(*h).date[0]) as u64))
+            wire.out_str(&o, "\n")
+            SEQS[LN as usize] = (*h).seq
+            LN = LN + 1
+        }
+    }
+    imap_down(lk)
+    st8((&LBLOB[0]) as u64, o.len, 0)
+    if wire.out_over(&o) {
+        return fail(session.E_TOOBIG)
+    }
+    LAST_ERR = 0
+    return 0
+}
+
+// ---------------------------------------------------------------- reading
+fn msg_text() -> u64 {
+    return (&MSG[0]) as u64
+}
+
+fn msg_len() -> u64 {
+    return MSGLEN
+}
+
+// Appends `n` octets of text to MSG (LF only, CR dropped, NUL replaced), never past MSG_CAP-1.
+// Returns false when the text was cut.
+fn msg_add(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld8(p, i)
+        i = i + 1
+        if c == 13 {
+            continue
+        }
+        if MSGLEN >= MSG_CAP - 1 {
+            // do not leave half a UTF-8 sequence at the end
+            while MSGLEN > 0 && (ld8((&MSG[0]) as u64, MSGLEN - 1) & 192) == 128 {
+                MSGLEN = MSGLEN - 1
+            }
+            if MSGLEN > 0 && ld8((&MSG[0]) as u64, MSGLEN - 1) >= 192 {
+                MSGLEN = MSGLEN - 1
+            }
+            st8((&MSG[0]) as u64, MSGLEN, 0)
+            return false
+        }
+        var ch: u64 = c
+        if ch == 0 {
+            ch = 32
+        }
+        st8((&MSG[0]) as u64, MSGLEN, ch)
+        MSGLEN = MSGLEN + 1
+    }
+    st8((&MSG[0]) as u64, MSGLEN, 0)
+    return true
+}
+
+fn msg_hdr(m: u64, n: u64, label: str, name: str) {
+    var v: [u8; 200] = [0; 200]
+    let vl: u64 = wire.hdr_get(m, n, name, (&v[0]) as u64, 190)
+    msg_add(label.p as u64, label.n as u64)
+    var dec: [u8; 400] = [0; 400]
+    var dl: u64 = vl
+    if dl > 0 {
+        dl = wire.words_decode((&v[0]) as u64, vl, (&dec[0]) as u64, 399)
+        msg_add((&dec[0]) as u64, dl)
+    }
+    msg_add("\n".p as u64, 1)
+}
+
+fn op_read(row: u64) -> u64 {
+    var lkv: session.Link = session.link_new()
+    let lk: *mut session.Link = &lkv
+    if row >= LN {
+        return fail(E_NOMSG)
+    }
+    var count: u64 = 0
+    var rc: u64 = open_folder(lk, CUR_FOLDER, &count)
+    if rc != 0 {
+        return fail(rc)
+    }
+    let seq: u64 = SEQS[row as usize]
+    rc = session.imap_body(lk, seq)
+    if rc != 0 {
+        imap_down(lk)
+        return fail(rc)
+    }
+    var off: u64 = 0
+    var len: u64 = 0
+    if !session.parse_body(lk, &off, &len) {
+        session.rx_drop(lk)
+        imap_down(lk)
+        return fail(session.E_PROTO)
+    }
+    let m: u64 = session.rx_ptr(lk) + off
+    MSGLEN = 0
+    st8((&MSG[0]) as u64, 0, 0)
+    msg_hdr(m, len, "Von: ", "from")
+    msg_hdr(m, len, "An: ", "to")
+    msg_hdr(m, len, "Betreff: ", "subject")
+    msg_hdr(m, len, "Datum: ", "date")
+    msg_add("\n".p as u64, 1)
+    var cte: [u8; 64] = [0; 64]
+    let cl: u64 = wire.hdr_get(m, len, "content-transfer-encoding", (&cte[0]) as u64, 64)
+    var ct: [u8; 96] = [0; 96]
+    let ctl: u64 = wire.hdr_get(m, len, "content-type", (&ct[0]) as u64, 96)
+    let bs: u64 = wire.body_start(m, len)
+    var bl: u64 = len - bs
+    if bl > BODY_MAX {
+        bl = BODY_MAX
+    }
+    let dn: u64 = wire.body_decode(m + bs, bl, (&cte[0]) as u64, cl, (&TMPB[0]) as u64)
+    if ctl >= 9 && ld8((&ct[0]) as u64, 0) == 109 && ld8((&ct[0]) as u64, 1) == 117 && ld8((&ct[0]) as u64, 2) == 108 {
+        msg_add("[MIME-Multipart: Rohansicht]\n".p as u64, 28)
+    }
+    if !msg_add((&TMPB[0]) as u64, dn) {
+        // cut: mark it (room was kept free by the cut itself being at the cap; overwrite the tail)
+        var tail: str = "\n[gekuerzt]"
+        var cut: u64 = MSGLEN
+        if cut > MSG_CAP - 1 - 11 {
+            cut = MSG_CAP - 1 - 11
+            while cut > 0 && (ld8((&MSG[0]) as u64, cut) & 192) == 128 {
+                cut = cut - 1
+            }
+        }
+        MSGLEN = cut
+        msg_add(tail.p as u64, tail.n as u64)
+    }
+    session.rx_drop(lk)
+    let rs: u64 = session.imap_seen(lk, seq)
+    imap_down(lk)
+    LAST_ERR = 0
+    return 0
+}
+
+// ---------------------------------------------------------------- sending
+fn put_dec2(d: u64, v: u64) {
+    st8(d, 0, 48 + (v / 10) % 10)
+    st8(d, 1, 48 + v % 10)
+}
+
+fn put_str(d: u64, at: u64, s: str) -> u64 {
+    var i: u64 = 0
+    while i < s.n as u64 {
+        st8(d, at + i, ld8(s.p as u64, i))
+        i = i + 1
+    }
+    return at + s.n as u64
+}
+
+fn now_epoch() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// "Thu, 15 Oct 2026 10:30:00 +0000" (UTC) from a Unix time; returns the length (31).
+fn make_date(t: u64, d: u64) -> u64 {
+    let days: u64 = t / 86400
+    let sec: u64 = t % 86400
+    let wd: u64 = (days + 4) % 7 // 1970-01-01 was a Thursday
+    // civil from days (Howard Hinnant)
+    let z: u64 = days + 719468
+    let era: u64 = z / 146097
+    let doe: u64 = z - era * 146097
+    let yoe: u64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    var y: u64 = yoe + era * 400
+    let doy: u64 = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp: u64 = (5 * doy + 2) / 153
+    let dd: u64 = doy - (153 * mp + 2) / 5 + 1
+    var mo: u64 = mp + 3
+    if mo > 12 {
+        mo = mo - 12
+    }
+    if mo <= 2 {
+        y = y + 1
+    }
+    var at: u64 = 0
+    let wds: str = "SunMonTueWedThuFriSat"
+    let mos: str = "JanFebMarAprMayJunJulAugSepOctNovDec"
+    var k: u64 = 0
+    while k < 3 {
+        st8(d, at + k, ld8(wds.p as u64, wd * 3 + k))
+        k = k + 1
+    }
+    at = at + 3
+    at = put_str(d, at, ", ")
+    put_dec2(d + at, dd)
+    at = at + 2
+    at = put_str(d, at, " ")
+    k = 0
+    while k < 3 {
+        st8(d, at + k, ld8(mos.p as u64, (mo - 1) * 3 + k))
+        k = k + 1
+    }
+    at = at + 3
+    at = put_str(d, at, " ")
+    put_dec2(d + at, y / 100)
+    put_dec2(d + at + 2, y % 100)
+    at = at + 4
+    at = put_str(d, at, " ")
+    put_dec2(d + at, sec / 3600)
+    at = at + 2
+    at = put_str(d, at, ":")
+    put_dec2(d + at, (sec / 60) % 60)
+    at = at + 2
+    at = put_str(d, at, ":")
+    put_dec2(d + at, sec % 60)
+    at = at + 2
+    at = put_str(d, at, " +0000")
+    st8(d, at, 0)
+    return at
+}
+
+fn has_at(p: u64) -> bool {
+    var i: u64 = 0
+    while ld8(p, i) != 0 {
+        if ld8(p, i) == 64 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Sends one mail. `to` = "a@b" or "Name <a@b>" (NUL-terminated), `subj` and `body` NUL-terminated
+// UTF-8 (body as typed in the memo, LF lines). From = the user name (or user@imap-host when it has no @).
+fn op_send(to: u64, subj: u64, body: u64) -> u64 {
+    if !cfg_ready(true) {
+        return fail(E_NOCFG)
+    }
+    if clen(to) == 0 || !has_at(to) {
+        return fail(session.E_ARG)
+    }
+    // from address
+    var fl: u64 = 0
+    fl = put_str((&FROMB[0]) as u64, 0, "")
+    let us: u64 = cfg_ptr(F_USER)
+    var k: u64 = 0
+    while k < clen(us) && k < 100 {
+        st8((&FROMB[0]) as u64, fl + k, ld8(us, k))
+        k = k + 1
+    }
+    fl = fl + k
+    if !has_at(us) {
+        fl = put_str((&FROMB[0]) as u64, fl, "@")
+        k = 0
+        while k < clen(cfg_ptr(F_IMAP_HOST)) && k < 50 {
+            st8((&FROMB[0]) as u64, fl + k, ld8(cfg_ptr(F_IMAP_HOST), k))
+            k = k + 1
+        }
+        fl = fl + k
+    }
+    st8((&FROMB[0]) as u64, fl, 0)
+    let t: u64 = now_epoch()
+    let dl: u64 = make_date(t, (&DATEB[0]) as u64)
+    // Message-ID <epoch.osum@helo>
+    var o2: wire.Out = wire.out_new((&MSGID[0]) as u64, 60)
+    wire.out_num(&o2, t)
+    wire.out_str(&o2, ".osum@osum.lan")
+    var mo: wire.Out = wire.out_new((&OUTB[0]) as u64, 16384)
+    wire.compose(&mo, (&FROMB[0]) as u64, fl, to, clen(to), subj, clen(subj),
+        (&DATEB[0]) as u64, dl, (&MSGID[0]) as u64, o2.len, body, clen(body))
+    if wire.out_over(&mo) {
+        return fail(session.E_TOOBIG)
+    }
+    var sk: session.Link = session.link_new()
+    var rc: u64 = session.link_open(&sk, SMTP_ADDR, cfg_num(F_SMTP_PORT) as u16, SECURE, roots_path(),
+        cfg_ptr(F_SMTP_HOST), clen(cfg_ptr(F_SMTP_HOST)) as usize, IO_MS)
+    if rc != 0 {
+        return fail(rc)
+    }
+    rc = session.smtp_greet(&sk)
+    if rc == 0 {
+        rc = session.smtp_hello(&sk, (&HELO[0]) as u64, 8)
+    }
+    if rc == 0 {
+        rc = session.smtp_login(&sk, us, clen(us), cfg_ptr(F_PASS), clen(cfg_ptr(F_PASS)))
+    }
+    if rc == 0 {
+        rc = session.smtp_send(&sk, (&FROMB[0]) as u64, fl, to, clen(to), mo.p, mo.len)
+    }
+    let q: u64 = session.smtp_quit(&sk)
+    session.link_close(&sk)
+    if rc != 0 {
+        return fail(rc)
+    }
+    LAST_ERR = 0
+    return 0
+}

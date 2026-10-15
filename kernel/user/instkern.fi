@@ -40,8 +40,10 @@
 profile kernel
 
 import ulib
+import dcrypt
 
 export {
+    crypt_begin, crypt_end, crypt_off, crypt_active,
     BS, AUSRICHT, ESP_STD,
     lese, schreibe, ist_ofs, wachsen, kopiere,
     gpt_schreiben, bios_laden, bios_da, fat32_create, wurzel_kopieren, wurzel_kopieren_ab,
@@ -218,7 +220,7 @@ fn crc_of(p: u64, len: u64) -> u64 {
 
 // --------------------------------------------------------- die Platte
 
-fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn raw_lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
     if ulib.bad(w) {
         st_fehler = F_LESEN
@@ -236,7 +238,7 @@ fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     return true
 }
 
-fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+fn raw_schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
     let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
     if ulib.bad(w) {
         st_fehler = F_SCHREIBEN
@@ -255,6 +257,100 @@ fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
 }
 
 
+
+// ============================================ K-019: ENCRYPTED ROOT PARTITION
+//
+// When `crypt_begin` has run, every access to sectors [cry_data, cry_end) goes
+// through XTS-AES-256 (tweak = sector number relative to cry_data). Everything
+// above (copy loop, grow, read-back compare) is unchanged: it sees plaintext.
+// The 8 header sectors in front of cry_data are written raw by `crypt_begin`.
+static mut cry_on: u64 = 0
+static mut cry_data: u64 = 0
+static mut cry_end: u64 = 0
+static mut CRYSC: [u8; 8192] = [0 as u8; 8192]
+
+fn crypt_active() -> bool {
+    return cry_on == 1
+}
+
+// Number of sectors the header takes in front of the file system (0 = no encryption).
+fn crypt_off() -> u64 {
+    if cry_on == 1 {
+        return dcrypt.HDR_SECTORS
+    }
+    return 0
+}
+
+// Switch the layer off again (a second install in the same window must not inherit it).
+fn crypt_end() {
+    cry_on = 0
+}
+
+// Start encryption for the partition [start, start+count). Writes the header,
+// proves slot 0 opens with the passphrase, then switches the layer on.
+fn crypt_begin(fd: u64, start: u64, count: u64, pw: u64, pwlen: u64) -> bool {
+    if !dcrypt.setup(pw, pwlen, dcrypt.DEF_T, dcrypt.DEF_M, dcrypt.DEF_P, count) {
+        st_fehler = F_SCHREIBEN
+        return false
+    }
+    if !dcrypt.verify_pass(pw, pwlen) {
+        st_fehler = F_SCHREIBEN
+        return false
+    }
+    if !raw_schreibe(fd, start, dcrypt.header_ptr(), dcrypt.HDR_SECTORS * BS) {
+        return false
+    }
+    cry_data = start + dcrypt.HDR_SECTORS
+    cry_end = start + count
+    cry_on = 1
+    return true
+}
+
+fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    if cry_on == 1 && lba >= cry_data && lba < cry_end {
+        let sc: u64 = (&CRYSC[0 as usize]) as u64
+        var done: u64 = 0
+        while done < n {
+            var c: u64 = n - done
+            if c > 8192 {
+                c = 8192
+            }
+            if !raw_lese(fd, lba + done / BS, sc, c) {
+                return false
+            }
+            if !dcrypt.dec_sectors(lba + done / BS - cry_data, sc, at + done, c / BS) {
+                st_fehler = F_LESEN
+                return false
+            }
+            done = done + c
+        }
+        return true
+    }
+    return raw_lese(fd, lba, at, n)
+}
+
+fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    if cry_on == 1 && lba >= cry_data && lba < cry_end {
+        let sc: u64 = (&CRYSC[0 as usize]) as u64
+        var done: u64 = 0
+        while done < n {
+            var c: u64 = n - done
+            if c > 8192 {
+                c = 8192
+            }
+            if !dcrypt.enc_sectors(lba + done / BS - cry_data, at + done, sc, c / BS) {
+                st_fehler = F_SCHREIBEN
+                return false
+            }
+            if !raw_schreibe(fd, lba + done / BS, sc, c) {
+                return false
+            }
+            done = done + c
+        }
+        return true
+    }
+    return raw_schreibe(fd, lba, at, n)
+}
 
 // ============================================= WRITE, READ BACK, COMPARE
 //
