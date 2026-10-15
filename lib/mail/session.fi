@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/mail/session.fi -- IMAP + SMTP client sessions over TCP or TLS (profile app).
+//
+// Moves the octets for lib/mail/wire.fi. One `Link` = one connection (plain or TLS 1.3
+// with certificate check against a PEM trust file; `insecure` is NOT offered). A Link
+// must not be copied or moved after `link_open` (the TLS state points into it): keep
+// it in a `static mut` or on the stack of the caller.
+//
+// IMAP flow:   link_open -> imap_greet -> imap_login -> imap_list / imap_select /
+//              imap_heads / imap_body -> imap_logout -> link_close
+// SMTP flow:   link_open -> smtp_greet -> smtp_hello -> smtp_login -> smtp_send ->
+//              smtp_quit -> link_close
+// Every step returns 0 = ok, otherwise an E_* code (see below). The response of the
+// last IMAP command stays in `l.rx` until `rx_drop` is called.
+//
+// HONEST: no STARTTLS (use the implicit-TLS ports 993/465; plain ports are for tests
+// and LAN only), no OAuth, no IDLE. TLS has the limits listed in lib/tls/tls.fi.
+
+import std.rt
+import std.net
+import tls.tls
+import tls.x509
+import mail.wire
+
+export { Link, link_new, link_open, link_close, link_send, rx_drop, rx_ptr, rx_len,
+    imap_greet, imap_login, imap_list, imap_select, imap_heads, imap_body, imap_seen,
+    imap_logout, smtp_greet, smtp_hello, smtp_login, smtp_send, smtp_quit, Head, HeadList, headlist_new, MAX_HEADS,
+    head_new, parse_heads, parse_body,
+    E_OK, E_CONNECT, E_TLS, E_CERT, E_IO, E_PROTO, E_AUTH, E_REJECT, E_TOOBIG, E_ARG }
+
+const E_OK: u64 = 0
+const E_CONNECT: u64 = 1 // TCP did not connect
+const E_TLS: u64 = 2 // TLS handshake failed (not the certificate)
+const E_CERT: u64 = 3 // certificate not trusted / wrong name / expired
+const E_IO: u64 = 4 // connection lost or timed out
+const E_PROTO: u64 = 5 // the server said something we do not understand
+const E_AUTH: u64 = 6 // login refused
+const E_REJECT: u64 = 7 // command refused (NO/BAD, SMTP 4xx/5xx)
+const E_TOOBIG: u64 = 8 // response larger than the buffer limit
+const E_ARG: u64 = 9 // bad argument (empty address, too long ...)
+
+const RX_MAX: usize = 8388608 // 8 MiB: biggest response we keep
+
+struct Link {
+    conn: net.Conn,
+    t: tls.Tls,
+    store: x509.Store,
+    secure: bool,
+    open: bool,
+    rx: rt.Buf,
+    tag: u64, // IMAP tag counter
+    stat_at: u64, // offset of the tagged status line in rx
+    resp_end: u64, // end of the last complete IMAP response in rx
+    last_code: u64, // last SMTP reply code
+    cert_reason: u32,
+}
+
+fn link_new() -> Link {
+    return Link { conn: net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 },
+        t: tls.tls_new(), store: x509.store_new(), secure: false, open: false,
+        rx: rt.buf_new(), tag: 0, stat_at: 0, resp_end: 0, last_code: 0, cert_reason: 0 as u32 }
+}
+
+fn rx_ptr(l: *mut Link) -> u64 {
+    return (*l).rx.ptr
+}
+
+fn rx_len(l: *mut Link) -> u64 {
+    return (*l).rx.len as u64
+}
+
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn conn_failed(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+// Opens the connection. `secure` = TLS (then `roots` = NUL-terminated path of a PEM
+// trust file and `name` the host name for SNI + certificate check). `ms` = I/O timeout.
+fn link_open(l: *mut Link, addr: u32, port: u16, secure: bool, roots: u64,
+    name: u64, namelen: usize, ms: u64) -> u64 {
+    var bad: bool = false
+    (*l).conn = net.connect_tcp(addr, port) catch | e | conn_failed(&bad)
+    if bad {
+        return E_CONNECT
+    }
+    let okt: bool = net.set_timeout(&(*l).conn, ms) catch false
+    (*l).open = true
+    (*l).secure = secure
+    rt.buf_clear(&(*l).rx)
+    if !secure {
+        return E_OK
+    }
+    var pem: rt.Buf = rt.buf_new()
+    var taken: usize = 0
+    if rt.read_file(roots, &pem) {
+        taken = x509.store_load_pem(&(*l).store, pem.ptr, pem.len)
+    }
+    rt.buf_free(&pem)
+    if taken == 0 {
+        net.close(&(*l).conn)
+        (*l).open = false
+        return E_CERT
+    }
+    let oki: bool = tls.tls_init(&(*l).t, &(*l).conn, &(*l).store, name, namelen, now_seconds())
+    var failed: bool = false
+    var dummy: rt.Buf = rt.buf_new()
+    let ok: bool = tls.tls_handshake(&(*l).t) catch | e | tls.tls_fail_into(&dummy, e, &failed)
+    rt.buf_free(&dummy)
+    if failed {
+        (*l).cert_reason = tls.tls_verify_reason(&(*l).t)
+        net.close(&(*l).conn)
+        (*l).open = false
+        if (*l).cert_reason != x509.V_OK {
+            return E_CERT
+        }
+        return E_TLS
+    }
+    return E_OK
+}
+
+fn link_close(l: *mut Link) {
+    if !(*l).open {
+        return
+    }
+    if (*l).secure {
+        tls.tls_close(&(*l).t)
+        tls.tls_free(&(*l).t)
+    }
+    net.close(&(*l).conn)
+    x509.store_free(&(*l).store)
+    rt.buf_free(&(*l).rx)
+    (*l).open = false
+}
+
+fn io_fail_n(bad: *mut bool) -> usize {
+    *bad = true
+    return 0
+}
+
+fn link_send(l: *mut Link, p: u64, n: u64) -> bool {
+    if !(*l).open {
+        return false
+    }
+    var bad: bool = false
+    if (*l).secure {
+        let ok: bool = tls.tls_write(&(*l).t, p, n as usize) catch | e | tls_bad(&bad)
+        return !bad
+    }
+    let w: usize = net.write_all(&(*l).conn, p, n as usize) catch io_fail_n(&bad)
+    return !bad
+}
+
+fn tls_bad(bad: *mut bool) -> bool {
+    *bad = true
+    return false
+}
+
+// Reads one chunk into rx. false on EOF / error / timeout / limit.
+fn fill(l: *mut Link) -> bool {
+    var chunk: [u8; 4096] = [0; 4096]
+    var bad: bool = false
+    var n: usize = 0
+    if (*l).secure {
+        var dummy: rt.Buf = rt.buf_new()
+        n = tls.tls_read(&(*l).t, (&chunk[0]) as u64, 4096) catch | e | tls.tls_fail_len(&dummy, e, &bad)
+        rt.buf_free(&dummy)
+    } else {
+        n = net.read(&(*l).conn, (&chunk[0]) as u64, 4096) catch io_fail_n(&bad)
+    }
+    if bad || n == 0 {
+        return false
+    }
+    if (*l).rx.len + n > RX_MAX {
+        return false
+    }
+    rt.buf_push_bytes(&(*l).rx, (&chunk[0]) as u64, n)
+    return true
+}
+
+// Drops the first `n` octets of rx (a consumed response).
+fn rx_shift(l: *mut Link, n: u64) {
+    let len: u64 = (*l).rx.len as u64
+    var i: u64 = n
+    var o: u64 = 0
+    while i < len {
+        wire_set((*l).rx.ptr, o, wire_get((*l).rx.ptr, i))
+        i = i + 1
+        o = o + 1
+    }
+    rt.buf_set_len(&(*l).rx, o as usize)
+}
+
+fn rx_drop(l: *mut Link) {
+    rx_shift(l, (*l).resp_end)
+    (*l).resp_end = 0
+    (*l).stat_at = 0
+}
+
+fn wire_get(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn wire_set(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// ------------------------------------------------------------------- IMAP
+
+// Waits for the "* OK" greeting line.
+fn imap_greet(l: *mut Link) -> u64 {
+    while true {
+        let lf: u64 = wire.imap_line_end((*l).rx.ptr, (*l).rx.len as u64, 0)
+        if lf != wire.BAD {
+            if wire_get((*l).rx.ptr, 0) == 42 && wire_get((*l).rx.ptr, 2) == 79 {
+                rx_shift(l, lf + 1)
+                return E_OK
+            }
+            return E_PROTO
+        }
+        if !fill(l) {
+            return E_IO
+        }
+    }
+    return E_IO
+}
+
+// Sends the command in `cmd` (built with tag (*l).tag) and waits for its response.
+fn imap_exec(l: *mut Link, cmd: u64, n: u64) -> u64 {
+    if !link_send(l, cmd, n) {
+        return E_IO
+    }
+    var st: u64 = 0
+    while true {
+        let e: u64 = wire.imap_response_end((*l).rx.ptr, (*l).rx.len as u64, (*l).tag, &st)
+        if e != wire.BAD {
+            (*l).stat_at = st
+            (*l).resp_end = e
+            let s: u64 = wire.imap_status((*l).rx.ptr, st)
+            if s == wire.ST_OK {
+                return E_OK
+            }
+            return E_REJECT
+        }
+        if !fill(l) {
+            if (*l).rx.len as usize >= RX_MAX {
+                return E_TOOBIG
+            }
+            return E_IO
+        }
+    }
+    return E_IO
+}
+
+fn imap_login(l: *mut Link, user: u64, ul: u64, pass: u64, pl: u64) -> u64 {
+    var buf: [u8; 1200] = [0; 1200]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 1200)
+    wire.imap_login(&o, (*l).tag, user, ul, pass, pl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    let r: u64 = imap_exec(l, (&buf[0]) as u64, o.len)
+    if r == E_REJECT {
+        rx_drop(l)
+        return E_AUTH
+    }
+    if r == E_OK {
+        rx_drop(l)
+    }
+    return r
+}
+
+// LIST of all mailboxes; the response stays in rx for parse by wire.imap_list_name.
+fn imap_list(l: *mut Link) -> u64 {
+    var buf: [u8; 64] = [0; 64]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 64)
+    wire.imap_list(&o, (*l).tag)
+    return imap_exec(l, (&buf[0]) as u64, o.len)
+}
+
+// SELECT; *count = number of messages. Response is dropped.
+fn imap_select(l: *mut Link, box: u64, bl: u64, count: *mut u64) -> u64 {
+    var buf: [u8; 400] = [0; 400]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 400)
+    wire.imap_select(&o, (*l).tag, box, bl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    let r: u64 = imap_exec(l, (&buf[0]) as u64, o.len)
+    if r != E_OK {
+        if r == E_REJECT {
+            rx_drop(l)
+        }
+        return r
+    }
+    let c: u64 = wire.imap_exists_count((*l).rx.ptr, (*l).resp_end)
+    if c == wire.BAD {
+        *count = 0
+    } else {
+        *count = c
+    }
+    rx_drop(l)
+    return E_OK
+}
+
+// Header list entry.
+struct Head {
+    seq: u64,
+    from: [u8; 96],
+    subj: [u8; 160],
+    date: [u8; 48],
+}
+
+fn head_new() -> Head {
+    return Head { seq: 0, from: [0; 96], subj: [0; 160], date: [0; 48] }
+}
+
+const MAX_HEADS: u64 = 64
+
+struct HeadList {
+    items: [Head; 64],
+}
+
+fn headlist_new() -> HeadList {
+    return HeadList { items: [head_new(); 64] }
+}
+
+// FETCH headers of first..last; the response stays in rx (call parse_heads, rx_drop).
+fn imap_heads(l: *mut Link, first: u64, last: u64) -> u64 {
+    var buf: [u8; 160] = [0; 160]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 160)
+    wire.imap_fetch_head(&o, (*l).tag, first, last)
+    return imap_exec(l, (&buf[0]) as u64, o.len)
+}
+
+// Parses "* N FETCH (BODY[...] {len}\r\n<headers>)" blocks of the last response into
+// `out[0..max)`; returns the number of entries.
+fn parse_heads(l: *mut Link, hl: *mut HeadList, max: u64) -> u64 {
+    let p: u64 = (*l).rx.ptr
+    let n: u64 = (*l).resp_end
+    var i: u64 = 0
+    var cnt: u64 = 0
+    var tmp: [u8; 300] = [0; 300]
+    while i < n && cnt < max {
+        let lf: u64 = wire.imap_line_end(p, n, i)
+        if lf == wire.BAD {
+            break
+        }
+        let lit: u64 = wire.imap_literal_at(p, i, lf)
+        if lit != wire.BAD && wire_get(p, i) == 42 {
+            // "* N FETCH ..."
+            var seq: u64 = 0
+            var j: u64 = i + 2
+            while j < lf && wire_get(p, j) >= 48 && wire_get(p, j) <= 57 {
+                seq = seq * 10 + wire_get(p, j) - 48
+                j = j + 1
+            }
+            let h: *mut Head = &(*hl).items[cnt as usize]
+            (*h).seq = seq
+            var m: u64 = wire.hdr_get(p + lf + 1, lit, "from", (&tmp[0]) as u64, 300)
+            if m == wire.BAD {
+                (*h).from[0] = 0
+            } else {
+                wire.words_decode((&tmp[0]) as u64, m, ((&(*h).from[0]) as u64), 96)
+            }
+            m = wire.hdr_get(p + lf + 1, lit, "subject", (&tmp[0]) as u64, 300)
+            if m == wire.BAD {
+                (*h).subj[0] = 0
+            } else {
+                wire.words_decode((&tmp[0]) as u64, m, ((&(*h).subj[0]) as u64), 160)
+            }
+            m = wire.hdr_get(p + lf + 1, lit, "date", (&tmp[0]) as u64, 300)
+            if m == wire.BAD {
+                (*h).date[0] = 0
+            } else {
+                var k: u64 = 0
+                while k < m && k + 1 < 48 {
+                    (*h).date[k as usize] = tmp[k as usize]
+                    k = k + 1
+                }
+                (*h).date[k as usize] = 0
+            }
+            cnt = cnt + 1
+        }
+        // advance like imap_response_end: over literals
+        var cur: u64 = i
+        var end: u64 = lf
+        while true {
+            let l2: u64 = wire.imap_literal_at(p, cur, end)
+            if l2 == wire.BAD {
+                break
+            }
+            cur = end + 1 + l2
+            end = wire.imap_line_end(p, n, cur)
+            if end == wire.BAD {
+                return cnt
+            }
+        }
+        i = end + 1
+    }
+    return cnt
+}
+
+// FETCH one message (headers + text); response stays in rx (call parse_body).
+fn imap_body(l: *mut Link, seq: u64) -> u64 {
+    var buf: [u8; 220] = [0; 220]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 220)
+    wire.imap_fetch_full(&o, (*l).tag, seq)
+    return imap_exec(l, (&buf[0]) as u64, o.len)
+}
+
+// The message itself (the first literal of the response): offset/length inside rx.
+// Returns false if there is none.
+fn parse_body(l: *mut Link, off: *mut u64, len: *mut u64) -> bool {
+    let p: u64 = (*l).rx.ptr
+    let n: u64 = (*l).resp_end
+    var i: u64 = 0
+    while i < n {
+        let lf: u64 = wire.imap_line_end(p, n, i)
+        if lf == wire.BAD {
+            return false
+        }
+        let lit: u64 = wire.imap_literal_at(p, i, lf)
+        if lit != wire.BAD {
+            *off = lf + 1
+            *len = lit
+            return true
+        }
+        i = lf + 1
+    }
+    return false
+}
+
+fn imap_seen(l: *mut Link, seq: u64) -> u64 {
+    var buf: [u8; 80] = [0; 80]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 80)
+    wire.imap_store_seen(&o, (*l).tag, seq)
+    let r: u64 = imap_exec(l, (&buf[0]) as u64, o.len)
+    if r == E_OK || r == E_REJECT {
+        rx_drop(l)
+    }
+    return r
+}
+
+fn imap_logout(l: *mut Link) -> u64 {
+    var buf: [u8; 32] = [0; 32]
+    (*l).tag = (*l).tag + 1
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 32)
+    wire.imap_logout(&o, (*l).tag)
+    let r: u64 = imap_exec(l, (&buf[0]) as u64, o.len)
+    rx_drop(l)
+    return r
+}
+
+// ------------------------------------------------------------------- SMTP
+
+// Reads one complete reply (all continuation lines); *code = its number. The reply
+// text is dropped from rx. Returns E_OK or E_IO / E_PROTO.
+fn smtp_reply(l: *mut Link, code: *mut u64) -> u64 {
+    var at: u64 = 0
+    while true {
+        var c: u64 = 0
+        var last: bool = false
+        let nx: u64 = wire.smtp_reply((*l).rx.ptr, (*l).rx.len as u64, at, &c, &last)
+        if nx == wire.BAD {
+            if !fill(l) {
+                return E_IO
+            }
+            continue
+        }
+        if nx == wire.BAD - 1 {
+            return E_PROTO
+        }
+        at = nx
+        if last {
+            *code = c
+            (*l).last_code = c
+            rx_shift(l, at)
+            return E_OK
+        }
+    }
+    return E_IO
+}
+
+fn smtp_cmd(l: *mut Link, p: u64, n: u64, want: u64) -> u64 {
+    if !link_send(l, p, n) {
+        return E_IO
+    }
+    var code: u64 = 0
+    let r: u64 = smtp_reply(l, &code)
+    if r != E_OK {
+        return r
+    }
+    if code != want {
+        if code == 535 || code == 534 || code == 530 {
+            return E_AUTH
+        }
+        return E_REJECT
+    }
+    return E_OK
+}
+
+fn smtp_greet(l: *mut Link) -> u64 {
+    var code: u64 = 0
+    let r: u64 = smtp_reply(l, &code)
+    if r != E_OK {
+        return r
+    }
+    if code != 220 {
+        return E_REJECT
+    }
+    return E_OK
+}
+
+fn smtp_hello(l: *mut Link, name: u64, nl: u64) -> u64 {
+    var buf: [u8; 300] = [0; 300]
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 300)
+    wire.smtp_ehlo(&o, name, nl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    return smtp_cmd(l, (&buf[0]) as u64, o.len, 250)
+}
+
+fn smtp_login(l: *mut Link, user: u64, ul: u64, pass: u64, pl: u64) -> u64 {
+    var buf: [u8; 1000] = [0; 1000]
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 1000)
+    wire.smtp_auth_plain(&o, user, ul, pass, pl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    return smtp_cmd(l, (&buf[0]) as u64, o.len, 235)
+}
+
+// Sends one message (RFC 5322 text in `msg`, e.g. from wire.compose) from `from` to
+// ONE recipient `to` (call again for more; "Name <addr>" forms are accepted).
+fn smtp_send(l: *mut Link, from: u64, fl: u64, to: u64, tl: u64, msg: u64, ml: u64) -> u64 {
+    var buf: [u8; 600] = [0; 600]
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 600)
+    wire.smtp_mail_from(&o, from, fl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    var r: u64 = smtp_cmd(l, (&buf[0]) as u64, o.len, 250)
+    if r != E_OK {
+        return r
+    }
+    o = wire.out_new((&buf[0]) as u64, 600)
+    wire.smtp_rcpt(&o, to, tl)
+    if wire.out_over(&o) {
+        return E_ARG
+    }
+    r = smtp_cmd(l, (&buf[0]) as u64, o.len, 250)
+    if r != E_OK {
+        return r
+    }
+    o = wire.out_new((&buf[0]) as u64, 600)
+    wire.smtp_data(&o)
+    r = smtp_cmd(l, (&buf[0]) as u64, o.len, 354)
+    if r != E_OK {
+        return r
+    }
+    var body: rt.Buf = rt.buf_new()
+    let cap: u64 = ml * 2 + 16
+    rt.buf_reserve(&body, cap as usize)
+    var bo: wire.Out = wire.out_new(body.ptr, cap)
+    wire.smtp_body(&bo, msg, ml)
+    if wire.out_over(&bo) {
+        rt.buf_free(&body)
+        return E_ARG
+    }
+    r = smtp_cmd(l, bo.p, bo.len, 250)
+    rt.buf_free(&body)
+    return r
+}
+
+fn smtp_quit(l: *mut Link) -> u64 {
+    var buf: [u8; 8] = [0; 8]
+    var o: wire.Out = wire.out_new((&buf[0]) as u64, 8)
+    wire.smtp_quit(&o)
+    return smtp_cmd(l, (&buf[0]) as u64, o.len, 221)
+}
