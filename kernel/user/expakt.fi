@@ -33,6 +33,7 @@ import libc.errno
 import wlib
 import fileop
 import trash
+import bulkren.plan
 
 export {
     MAXLIST, MAXUNDO,
@@ -40,7 +41,8 @@ export {
     copy_remember, schnitt_an, einfuegen, clipboard_num, ablage_at,
     umbenennen, in_korb, endgueltig,
     rueckgaengig, undo_num, undo_art, undo_name,
-    U_UMBENANNT, U_VERSCHOBEN, U_KORB,
+    U_UMBENANNT, U_VERSCHOBEN, U_KORB, U_MASSE,
+    mass_prepare, mass_preview, mass_apply, mass_count,
     konflikt_da, conflict_path, conflict_reply,
     K_ERSETZEN, K_UMBENENNEN, K_UEBERSPRINGEN, K_ABBRUCH,
     error_key, letzter_rc, getan_dateien, getan_oktette,
@@ -66,6 +68,7 @@ const K_ABBRUCH: u64 = 3
 const U_UMBENANNT: u64 = 1
 const U_VERSCHOBEN: u64 = 2
 const U_KORB: u64 = 3
+const U_MASSE: u64 = 4
 
 static mut liste: [u8; 81920] = [0 as u8; 81920]   // MAXLIST * PFADB
 static mut n_liste: u64 = 0
@@ -795,6 +798,9 @@ fn rueckgaengig() -> u64 {
             rc = 0 -% errno.E_IO
         }
     }
+    if art == U_MASSE {
+        rc = mr_undo()
+    }
     ulib.say((&s_undo[(0) as usize]) as u64)
     ulib.sayn(art)
     ulib.say((&s_lz[(0) as usize]) as u64)
@@ -808,6 +814,419 @@ fn rueckgaengig() -> u64 {
     }
     n_undo = n_undo - 1
     return 0
+}
+
+// ------------------------------------------------ mass rename (D3)
+//
+// Many files, one rule: `mass_prepare` turns the selection (the list) and a rule text into a plan
+// (lib/bulkren/plan.fi), `mass_preview` says what would happen, `mass_apply` does it.
+//
+// RULE TEXT: fields separated by "|":  pattern | find | replace | start,step,width | l or u
+//   "[N]_[C][E]"            pattern (tokens [N] [E] [C] [F], see lib/bulkren/plan.fi)
+//   "[N][E]|IMG|Holiday"    replace "IMG" by "Holiday" in the base name
+//   "[C][E]||| 10,5,3"      counter 010, 015, 020 ...   (default: 1,1, width = digits of the count)
+//   "[N][E]||||l"           lower case
+//
+// ALL OR NOTHING. Every conflict is checked BEFORE the first rename (new name taken, too long,
+// duplicate, source gone). The renames then run in TWO PHASES (old -> hidden temporary name ->
+// new name), so chains and swaps (1.jpg -> 2.jpg, 2.jpg -> 3.jpg) never overwrite anything; if a
+// rename still fails half way, everything done so far goes back. A rename onto an existing name is
+// never issued (some disks drop the target silently).
+//
+// UNDO is ONE step (U_MASSE): the names of the LAST mass rename are kept (256 pairs); a new mass
+// rename forgets the undo of the previous one. Undo uses the same checks and the same two phases.
+
+static mut pp_dir: [u8; 320] = [0 as u8; 320]
+static mut mr_dir: [u8; 320] = [0 as u8; 320]
+static mut mr_old: [u8; 65536] = [0 as u8; 65536]
+static mut mr_new: [u8; 65536] = [0 as u8; 65536]
+static mut mr_n: u64 = 0
+static mut mr_state: [u8; 256] = [0 as u8; 256]
+static mut mr_txt: [u8; 256] = [0 as u8; 256]
+static mut mr_pa: [u8; 320] = [0 as u8; 320]
+static mut mr_pb: [u8; 320] = [0 as u8; 320]
+static mut mr_prev: [u8; 400] = [0 as u8; 400]
+static mut mr_changed: u64 = 0
+static mut mr_pos: u64 = 0
+static mut s_mass: [u8; 24] = "explorer: massren rc=\0\0\0"
+static mut s_masn: [u8; 4] = " n=\0"
+static mut s_arrow: [u8; 4] = " > \0"
+static mut s_comma: [u8; 3] = ", \0"
+static mut s_more: [u8; 6] = "... +\0"
+
+fn mr_slot(base: u64, i: u64) -> u64 {
+    return base + i * 256
+}
+
+fn mr_differs(fromb: u64, tob: u64, i: u64) -> bool {
+    return !ulib.streq(mr_slot(fromb, i), mr_slot(tob, i))
+}
+
+fn mr_path(out: u64, dir: u64, base: u64, i: u64) {
+    fuege(out, dir, mr_slot(base, i))
+}
+
+// ".bren~NNN" in the folder: the hidden parking name of item i during the two phases
+fn mr_tmp(out: u64, dir: u64, i: u64) {
+    var nm: [u8; 12] = [0 as u8; 12]
+    nm[0] = 46
+    nm[1] = 98
+    nm[2] = 114
+    nm[3] = 101
+    nm[4] = 110
+    nm[5] = 126
+    nm[6] = (48 + i / 100) as u8
+    nm[7] = (48 + (i / 10) % 10) as u8
+    nm[8] = (48 + i % 10) as u8
+    nm[9] = 0
+    fuege(out, dir, (&nm[0 as usize]) as u64)
+}
+
+fn mr_too_long(dir: u64, name: u64) -> bool {
+    return ulib.length(dir) + ulib.length(name) + 2 >= PFADB - 4
+}
+
+// Everything that can be seen before the first rename. 0 = go.
+fn mr_precheck(dir: u64, n: u64, fromb: u64, tob: u64) -> u64 {
+    let pa: u64 = (&mr_pa[0 as usize]) as u64
+    let pb: u64 = (&mr_pb[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        if mr_differs(fromb, tob, i) {
+            if mr_too_long(dir, mr_slot(fromb, i)) || mr_too_long(dir, mr_slot(tob, i)) {
+                return 0 -% errno.E_NAMETOOLONG
+            }
+            mr_path(pa, dir, fromb, i)
+            mr_path(pb, dir, tob, i)
+            if !fileop.gibt_es(pa) {
+                return 0 -% errno.E_NOENT
+            }
+            if fileop.gibt_es(pb) {
+                // taken -- fine only when the owner of that name moves away in this very run
+                // (exact name, or the same item changing only its case)
+                var freed: bool = false
+                var j: u64 = 0
+                while j < n {
+                    if mr_differs(fromb, tob, j) {
+                        if j == i {
+                            if plan.eq_nocase(mr_slot(fromb, j), mr_slot(tob, i)) {
+                                freed = true
+                            }
+                        } else if ulib.streq(mr_slot(fromb, j), mr_slot(tob, i)) {
+                            freed = true
+                        }
+                    }
+                    j = j + 1
+                }
+                if !freed {
+                    return 0 -% errno.E_EXIST
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Best effort: put everything that moved back where it was.
+fn mr_rollback(dir: u64, n: u64, fromb: u64, tob: u64) {
+    let pa: u64 = (&mr_pa[0 as usize]) as u64
+    let pb: u64 = (&mr_pb[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        if mr_state[(i) as usize] == 2 {
+            mr_path(pa, dir, tob, i)
+            mr_tmp(pb, dir, i)
+            let _r: u64 = io.rename(pa, pb)
+            mr_state[(i) as usize] = 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if mr_state[(i) as usize] == 1 {
+            mr_tmp(pa, dir, i)
+            mr_path(pb, dir, fromb, i)
+            let _r2: u64 = io.rename(pa, pb)
+            mr_state[(i) as usize] = 0
+        }
+        i = i + 1
+    }
+}
+
+fn mr_run(dir: u64, n: u64, fromb: u64, tob: u64) -> u64 {
+    let pa: u64 = (&mr_pa[0 as usize]) as u64
+    let pb: u64 = (&mr_pb[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        mr_state[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if mr_differs(fromb, tob, i) {
+            mr_path(pa, dir, fromb, i)
+            mr_tmp(pb, dir, i)
+            let rc: u64 = io.rename(pa, pb)
+            if ulib.bad(rc) {
+                mr_rollback(dir, n, fromb, tob)
+                return rc
+            }
+            mr_state[(i) as usize] = 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if mr_state[(i) as usize] == 1 {
+            mr_tmp(pa, dir, i)
+            mr_path(pb, dir, tob, i)
+            let rc2: u64 = io.rename(pa, pb)
+            if ulib.bad(rc2) {
+                mr_rollback(dir, n, fromb, tob)
+                return rc2
+            }
+            mr_state[(i) as usize] = 2
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Remove the older U_MASSE entries from the stack (their names are about to be overwritten).
+fn mr_purge() {
+    var w: u64 = 0
+    var r: u64 = 0
+    while r < n_undo {
+        if u_art[(r) as usize] != U_MASSE {
+            if w != r {
+                u_art[(w) as usize] = u_art[(r) as usize]
+                u_id[(w) as usize] = u_id[(r) as usize]
+                ulib.strncpy(p_at((&u_alt[(0) as usize]) as u64, w),
+                    p_at((&u_alt[(0) as usize]) as u64, r), PFADB - 1)
+                ulib.strncpy(p_at((&u_neu[(0) as usize]) as u64, w),
+                    p_at((&u_neu[(0) as usize]) as u64, r), PFADB - 1)
+            }
+            w = w + 1
+        }
+        r = r + 1
+    }
+    n_undo = w
+}
+
+// Digits at mr_txt[mr_pos..]; moves mr_pos behind them.
+fn mr_atou() -> u64 {
+    var v: u64 = 0
+    while mr_txt[(mr_pos) as usize] >= 48 && mr_txt[(mr_pos) as usize] <= 57 && mr_pos < 250 {
+        v = v * 10 + (mr_txt[(mr_pos) as usize] as u64) - 48
+        mr_pos = mr_pos + 1
+    }
+    return v
+}
+
+fn mr_digits(v: u64) -> u64 {
+    var d: u64 = 1
+    var x: u64 = v
+    while x >= 10 {
+        x = x / 10
+        d = d + 1
+    }
+    return d
+}
+
+// The selection + the rule text -> plan. 0 or a kernel-style error number:
+// E_INVAL (empty / forbidden / too long name), E_EXIST (two files get one name, or a name is taken).
+fn mass_prepare(text: u64) -> u64 {
+    let n: u64 = list_num()
+    mr_changed = 0
+    if n == 0 {
+        return 0 -% errno.E_INVAL
+    }
+    let pd: u64 = (&pp_dir[0 as usize]) as u64
+    ulib.strncpy(pd, list_at(0), PFADB - 1)
+    __mmio_write8((last_part(pd)) as *mut u8, 0 as u8)
+    plan.reset()
+    var i: u64 = 0
+    while i < n {
+        let _a: u64 = plan.add(last_part(list_at(i)), fileop.is_dir(list_at(i)))
+        i = i + 1
+    }
+    // split the rule text at "|"
+    var f: [u64; 5] = [0 as u64; 5]
+    var nf: u64 = 1
+    ulib.strncpy((&mr_txt[0 as usize]) as u64, text, 255)
+    f[0] = 0
+    var k: u64 = 0
+    while mr_txt[(k) as usize] != 0 && k < 254 {
+        if mr_txt[(k) as usize] == 124 && nf < 5 {
+            mr_txt[(k) as usize] = 0
+            f[(nf) as usize] = k + 1
+            nf = nf + 1
+        }
+        k = k + 1
+    }
+    let base: u64 = (&mr_txt[0 as usize]) as u64
+    if mr_txt[(f[0]) as usize] != 0 {
+        plan.set_pattern(base + f[0])
+    }
+    if nf >= 2 {
+        var rp: u64 = 0
+        if nf >= 3 {
+            rp = f[2]
+        } else {
+            rp = k
+        }
+        plan.set_find(base + f[1], base + rp)
+    }
+    var start: u64 = 1
+    var step: u64 = 1
+    var width: u64 = mr_digits(n)
+    if nf >= 4 && mr_txt[(f[3]) as usize] != 0 {
+        mr_pos = f[3]
+        while mr_txt[(mr_pos) as usize] == 32 {
+            mr_pos = mr_pos + 1
+        }
+        start = mr_atou()
+        if mr_txt[(mr_pos) as usize] == 44 {
+            mr_pos = mr_pos + 1
+            step = mr_atou()
+            if mr_txt[(mr_pos) as usize] == 44 {
+                mr_pos = mr_pos + 1
+                width = mr_atou()
+            }
+        }
+    }
+    plan.set_counter(start, step, width)
+    if nf >= 5 {
+        if mr_txt[(f[4]) as usize] == 108 {
+            plan.set_case(1)
+        } else if mr_txt[(f[4]) as usize] == 117 {
+            plan.set_case(2)
+        }
+    }
+    let e: u64 = plan.build()
+    var rc: u64 = 0
+    if e == plan.E_DUP {
+        rc = 0 -% errno.E_EXIST
+    } else if e != 0 {
+        rc = 0 -% errno.E_INVAL
+    }
+    if rc == 0 {
+        i = 0
+        while i < n {
+            if plan.changed(i) {
+                mr_changed = mr_changed + 1
+            }
+            i = i + 1
+        }
+    }
+    ulib.say((&s_mass[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.say((&s_masn[0 as usize]) as u64)
+    ulib.sayn(mr_changed)
+    ulib.nl()
+    rc_letzt = rc
+    return rc
+}
+
+fn mr_cat(s: u64) {
+    let d: u64 = (&mr_prev[0 as usize]) as u64
+    let at: u64 = ulib.length(d)
+    if at + ulib.length(s) < 380 {
+        ulib.strncpy(d + at, s, 380 - at)
+    }
+}
+
+// "a.jpg > 001.jpg, b.jpg > 002.jpg, ... +5": the first three changes.
+fn mass_preview() -> u64 {
+    let d: u64 = (&mr_prev[0 as usize]) as u64
+    __mmio_write8((d) as *mut u8, 0 as u8)
+    let n: u64 = plan.count()
+    var shown: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if plan.changed(i) {
+            if shown < 3 {
+                if shown > 0 {
+                    mr_cat((&s_comma[0 as usize]) as u64)
+                }
+                mr_cat(plan.old_name(i))
+                mr_cat((&s_arrow[0 as usize]) as u64)
+                mr_cat(plan.new_name(i))
+            }
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+    if shown > 3 {
+        mr_cat((&s_comma[0 as usize]) as u64)
+        mr_cat((&s_more[0 as usize]) as u64)
+        var nb: [u8; 12] = [0 as u8; 12]
+        let cnt: u64 = shown - 3
+        let dg: u64 = mr_digits(cnt)
+        var q: u64 = 0
+        var x: u64 = cnt
+        while q < dg {
+            nb[(dg - 1 - q) as usize] = (48 + x % 10) as u8
+            x = x / 10
+            q = q + 1
+        }
+        nb[(dg) as usize] = 0
+        mr_cat((&nb[0 as usize]) as u64)
+    }
+    return d
+}
+
+fn mass_count() -> u64 {
+    return mr_changed
+}
+
+// Do the prepared plan. 0 or the first error; on error nothing stays renamed.
+fn mass_apply() -> u64 {
+    let n: u64 = plan.count()
+    let dir: u64 = (&pp_dir[0 as usize]) as u64
+    if n == 0 || mr_changed == 0 {
+        rc_letzt = 0
+        return 0
+    }
+    var rc: u64 = mr_precheck(dir, n, plan.old_name(0), plan.new_name(0))
+    if rc == 0 {
+        mr_purge()
+        var i: u64 = 0
+        while i < n {
+            ulib.strncpy(mr_slot((&mr_old[0 as usize]) as u64, i), plan.old_name(i), 255)
+            ulib.strncpy(mr_slot((&mr_new[0 as usize]) as u64, i), plan.new_name(i), 255)
+            i = i + 1
+        }
+        mr_n = n
+        ulib.strncpy((&mr_dir[0 as usize]) as u64, dir, PFADB - 1)
+        rc = mr_run(dir, n, (&mr_old[0 as usize]) as u64, (&mr_new[0 as usize]) as u64)
+        if rc == 0 {
+            undo_push(U_MASSE, (&mr_dir[0 as usize]) as u64, (&mr_dir[0 as usize]) as u64, 0)
+        } else {
+            mr_n = 0
+        }
+    }
+    ulib.say((&s_mass[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.say((&s_masn[0 as usize]) as u64)
+    ulib.sayn(mr_changed)
+    ulib.nl()
+    rc_letzt = 0
+    if ulib.bad(rc) {
+        rc_letzt = rc
+    }
+    return rc_letzt
+}
+
+// Undo of the last mass rename (called from rueckgaengig).
+fn mr_undo() -> u64 {
+    let dir: u64 = (&mr_dir[0 as usize]) as u64
+    var rc: u64 = mr_precheck(dir, mr_n, (&mr_new[0 as usize]) as u64, (&mr_old[0 as usize]) as u64)
+    if rc == 0 {
+        rc = mr_run(dir, mr_n, (&mr_new[0 as usize]) as u64, (&mr_old[0 as usize]) as u64)
+    }
+    return rc
 }
 
 // ------------------------------------------------ Fehler -> Schluessel

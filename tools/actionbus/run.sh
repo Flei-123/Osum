@@ -278,7 +278,7 @@ assert add["level"] == "write" and add["dry_run"] and add["undo"] == "notes.remo
 assert add["available"] is True
 assert add["args"] == [{"name": "text", "type": "string", "required": True,
                         "description": "The text of the note, one line"}], add["args"]
-clear = d["actions"][4]
+clear = d["actions"][5]  # notes.addfile (D1) sits at index 1
 assert clear["needs_confirmation"] is True
 assert [e["name"] for e in d["events"]] == ["notes.changed"]
 # the two readers of one format agree on everything they both state
