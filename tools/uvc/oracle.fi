@@ -1,0 +1,462 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/uvc/oracle.fi -- host program for lib/uvc/uvc.fi.
+// Prints "OK <name>" / "FAIL <name>" per promise; run by tools/uvc/run.sh.
+
+import std.rt
+import std.io
+import uvc.uvc
+
+static mut cfg: [u8; 512] = [0; 512]
+static mut rec: [u8; 832] = [0; 832]
+static mut stt: [u8; 80] = [0; 80]
+static mut frm: [u8; 4096] = [0; 4096]
+static mut pkt: [u8; 256] = [0; 256]
+static mut blk: [u8; 64] = [0; 64]
+static mut pix: [u8; 64] = [0; 64]
+static mut rgb: [u8; 64] = [0; 64]
+static mut pos: u64 = 0
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pc() -> u64 { return (&cfg[0]) as u64 }
+fn pr() -> u64 { return (&rec[0]) as u64 }
+fn ps() -> u64 { return (&stt[0]) as u64 }
+fn pf() -> u64 { return (&frm[0]) as u64 }
+fn pp() -> u64 { return (&pkt[0]) as u64 }
+fn pb() -> u64 { return (&blk[0]) as u64 }
+fn px() -> u64 { return (&pix[0]) as u64 }
+fn pg() -> u64 { return (&rgb[0]) as u64 }
+
+fn b(v: u64) {
+    cfg[pos as usize] = (v & 255) as u8
+    pos = pos + 1
+}
+
+fn w16(v: u64) {
+    b(v)
+    b(v >> 8)
+}
+
+fn w32(v: u64) {
+    b(v)
+    b(v >> 8)
+    b(v >> 16)
+    b(v >> 24)
+}
+
+fn iface(num: u64, alt: u64, neps: u64, cls: u64, sub: u64) {
+    b(9)
+    b(4)
+    b(num)
+    b(alt)
+    b(neps)
+    b(cls)
+    b(sub)
+    b(0)
+    b(0)
+}
+
+fn ep(addr: u64, attr: u64, wmax: u64) {
+    b(7)
+    b(5)
+    b(addr)
+    b(attr)
+    w16(wmax)
+    b(1)
+}
+
+// format descriptor, 27 bytes for uncompressed (YUY2 guid), 11 for MJPEG
+fn fmt_yuy2(idx: u64, nframes: u64) {
+    b(27)
+    b(0x24)
+    b(4)
+    b(idx)
+    b(nframes)
+    w32(0x32595559)
+    w32(0x00100000)
+    w32(0xAA000080)
+    w32(0x719B3800)
+    b(16)
+    b(1)
+    b(0)
+    b(0)
+    b(0)
+    b(0)
+}
+
+fn fmt_mjpg(idx: u64, nframes: u64) {
+    b(11)
+    b(0x24)
+    b(6)
+    b(idx)
+    b(nframes)
+    b(1)
+    b(1)
+    b(0)
+    b(0)
+    b(0)
+    b(0)
+}
+
+// frame descriptor (subtype 5 or 7), 30 bytes with one discrete interval
+fn frame_d(sub: u64, idx: u64, wd: u64, ht: u64, maxbuf: u64, interval: u64) {
+    b(30)
+    b(0x24)
+    b(sub)
+    b(idx)
+    b(0)
+    w16(wd)
+    w16(ht)
+    w32(wd * ht * 16)
+    w32(wd * ht * 16 * 30)
+    w32(maxbuf)
+    w32(interval)
+    b(1)
+    w32(interval)
+}
+
+// A realistic camera: VC interface, VS interface with YUY2 (2 frames) +
+// MJPEG (2 frames), alt 0 without endpoint, alt 1..3 isoc with 128/512/1024
+// (1024 = 2 transactions of 512 per microframe via the multiplier bits).
+fn build_iso_camera() {
+    pos = 0
+    b(9)
+    b(2)
+    w16(0)
+    b(2)
+    b(1)
+    b(0)
+    b(0x80)
+    b(250)
+    iface(0, 0, 0, 0x0E, 1)
+    iface(1, 0, 0, 0x0E, 2)
+    fmt_yuy2(1, 2)
+    frame_d(5, 1, 640, 480, 640 * 480 * 2, 333333)
+    frame_d(5, 2, 160, 120, 160 * 120 * 2, 333333)
+    fmt_mjpg(2, 2)
+    frame_d(7, 1, 1280, 720, 1280 * 720 * 2, 333333)
+    frame_d(7, 2, 640, 480, 640 * 480 * 2, 333333)
+    iface(1, 1, 1, 0x0E, 2)
+    ep(0x81, 5, 128)
+    iface(1, 2, 1, 0x0E, 2)
+    ep(0x81, 5, 512)
+    iface(1, 3, 1, 0x0E, 2)
+    ep(0x81, 5, 0x0400 | 0x0800)
+    // total length
+    cfg[2] = (pos & 255) as u8
+    cfg[3] = (pos >> 8) as u8
+}
+
+fn build_bulk_camera() {
+    pos = 0
+    b(9)
+    b(2)
+    w16(0)
+    b(2)
+    b(1)
+    b(0)
+    b(0x80)
+    b(250)
+    iface(0, 0, 0, 0x0E, 1)
+    iface(1, 0, 1, 0x0E, 2)
+    fmt_mjpg(1, 1)
+    frame_d(7, 1, 640, 480, 640 * 480 * 2, 333333)
+    ep(0x82, 2, 512)
+    cfg[2] = (pos & 255) as u8
+    cfg[3] = (pos >> 8) as u8
+}
+
+// 12 frames in one format: the record keeps MAX_FRAME and ignores the rest
+fn build_many_frames() {
+    pos = 0
+    b(9)
+    b(2)
+    w16(0)
+    b(2)
+    b(1)
+    b(0)
+    b(0x80)
+    b(250)
+    iface(1, 0, 1, 0x0E, 2)
+    fmt_mjpg(1, 12)
+    var i: u64 = 1
+    while i <= 12 {
+        frame_d(7, i, 100 + i * 10, 100, 1000, 333333)
+        i = i + 1
+    }
+    ep(0x82, 2, 512)
+    cfg[2] = (pos & 255) as u8
+    cfg[3] = (pos >> 8) as u8
+}
+
+fn pkt_clear() {
+    var i: usize = 0
+    while i < 256 {
+        pkt[i] = 0
+        i = i + 1
+    }
+}
+
+// one payload packet: 2 byte header (len 2, info) + `n` data bytes of value `v`
+fn make_pkt(info: u64, n: u64, v: u64) -> u64 {
+    pkt_clear()
+    pkt[0] = 2
+    pkt[1] = (info & 255) as u8
+    var i: u64 = 0
+    while i < n {
+        pkt[(2 + i) as usize] = (v & 255) as u8
+        i = i + 1
+    }
+    return 2 + n
+}
+
+fn main() -> i32 {
+    // ---- descriptor parse: isochronous camera
+    build_iso_camera()
+    let total: u64 = uvc.le16(pc(), 2)
+    chk("iso camera config parses", uvc.parse_config(pc(), total, pr()))
+    chk("VC interface 0, VS interface 1", uvc.r_vc_if(pr()) == 0 && uvc.r_vs_if(pr()) == 1)
+    chk("2 formats, 4 frames", uvc.r_nfmt(pr()) == 2 && uvc.r_nframes(pr()) == 4)
+    chk("format 1 is YUY2 (fourcc from the GUID), format 2 is MJPG",
+        uvc.fmt_idx(pr(), 0) == 1 && uvc.fmt_fourcc(pr(), 0) == uvc.FOURCC_YUY2
+        && uvc.fmt_idx(pr(), 1) == 2 && uvc.fmt_fourcc(pr(), 1) == uvc.FOURCC_MJPG)
+    chk("frame 0 is 640x480 of format 1, interval 333333",
+        uvc.frame_fmt(pr(), 0) == 1 && uvc.frame_idx(pr(), 0) == 1
+        && uvc.frame_w(pr(), 0) == 640 && uvc.frame_h(pr(), 0) == 480
+        && uvc.frame_interval(pr(), 0) == 333333
+        && uvc.frame_max(pr(), 0) == 640 * 480 * 2)
+    chk("frame 2 is 1280x720 MJPG (format 2, frame index 1)",
+        uvc.frame_fmt(pr(), 2) == 2 && uvc.frame_idx(pr(), 2) == 1
+        && uvc.frame_w(pr(), 2) == 1280 && uvc.frame_h(pr(), 2) == 720)
+    chk("3 isoc IN alternate settings (alt 1..3, ep 0x81)",
+        uvc.r_nalt(pr()) == 3 && uvc.alt_num(pr(), 0) == 1 && uvc.alt_num(pr(), 2) == 3
+        && uvc.alt_ep(pr(), 0) == 0x81 && uvc.alt_type(pr(), 0) == 1)
+    chk("effective packet size: 128, 512, 1024 * 2 (multiplier bits)",
+        uvc.alt_mps(pr(), 0) == 128 && uvc.alt_mps(pr(), 1) == 512
+        && uvc.alt_mps(pr(), 2) == 1024 * 2)
+
+    // ---- picking
+    chk("pick_frame exact 640x480 MJPG -> record 3",
+        uvc.pick_frame(pr(), 640, 480, uvc.FOURCC_MJPG) == 3)
+    chk("pick_frame 1920x1080 MJPG -> largest not bigger = 1280x720",
+        uvc.pick_frame(pr(), 1920, 1080, uvc.FOURCC_MJPG) == 2)
+    chk("pick_frame 100x100 YUY2 -> smallest (160x120)",
+        uvc.pick_frame(pr(), 100, 100, uvc.FOURCC_YUY2) == 1)
+    chk("pick_frame any format 640x480 -> first match",
+        uvc.pick_frame(pr(), 640, 480, 0) == 0)
+    chk("pick_frame with an unknown fourcc -> nothing",
+        uvc.pick_frame(pr(), 640, 480, 0x12345678) == 0xFF)
+    chk("pick_alt 100 -> alt entry 0 (128 is the smallest that fits)",
+        uvc.pick_alt(pr(), 100) == 0)
+    chk("pick_alt 300 -> alt entry 1 (512)", uvc.pick_alt(pr(), 300) == 1)
+    chk("pick_alt 1500 -> alt entry 2 (2048)", uvc.pick_alt(pr(), 1500) == 2)
+    chk("pick_alt 3000 -> none fits", uvc.pick_alt(pr(), 3000) == uvc.NO_ALT)
+
+    // ---- bulk camera
+    build_bulk_camera()
+    chk("bulk camera parses", uvc.parse_config(pc(), uvc.le16(pc(), 2), pr()))
+    chk("bulk endpoint 0x82 / 512 in alt 0",
+        uvc.r_nalt(pr()) == 1 && uvc.alt_num(pr(), 0) == 0 && uvc.alt_ep(pr(), 0) == 0x82
+        && uvc.alt_type(pr(), 0) == 2 && uvc.alt_mps(pr(), 0) == 512)
+    chk("pick_alt on a bulk camera takes the bulk endpoint whatever the size",
+        uvc.pick_alt(pr(), 99999) == 0)
+
+    build_many_frames()
+    chk("12 frame descriptors: record keeps exactly MAX_FRAME (8)",
+        uvc.parse_config(pc(), uvc.le16(pc(), 2), pr()) && uvc.r_nframes(pr()) == uvc.MAX_FRAME
+        && uvc.frame_idx(pr(), 7) == 8)
+
+    // ---- parse robustness
+    build_iso_camera()
+    chk("truncated config (cut inside a descriptor) does not parse as a camera or crash",
+        !uvc.parse_config(pc(), 40, pr()) || uvc.r_nalt(pr()) <= 3)
+    chk("a config of 5 bytes is rejected", !uvc.parse_config(pc(), 5, pr()))
+    cfg[9 + 9 + 9] = 0
+    chk("bLength 0 in the chain stops the walk (no endless loop)",
+        !uvc.parse_config(pc(), uvc.le16(pc(), 2), pr()) || uvc.r_nalt(pr()) <= 3)
+    build_iso_camera()
+    var k: u64 = 0
+    var bad_ok: u64 = 0
+    var seed: u64 = 12345
+    while k < 3000 {
+        build_iso_camera()
+        let t: u64 = uvc.le16(pc(), 2)
+        var j: u64 = 0
+        while j < 6 {
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            let at: u64 = (seed >> 4) % t
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            cfg[at as usize] = ((seed >> 8) & 255) as u8
+            j = j + 1
+        }
+        uvc.parse_config(pc(), t, pr())
+        if uvc.r_nalt(pr()) <= uvc.MAX_ALT && uvc.r_nframes(pr()) <= uvc.MAX_FRAME
+            && uvc.r_nfmt(pr()) <= uvc.MAX_FMT {
+            bad_ok = bad_ok + 1
+        }
+        k = k + 1
+    }
+    chk("3000 corrupted configs: counts never exceed the record capacity", bad_ok == 3000)
+
+    // ---- probe / commit
+    var n: u64 = uvc.build_probe(pb(), 2, 1, 333333)
+    chk("probe block is 26 bytes: hint 1, fmt 2, frame 1, interval 333333",
+        n == 26 && uvc.le16(pb(), 0) == 1 && blk[2] == 2 && blk[3] == 1
+        && uvc.le32(pb(), 4) == 333333 && uvc.probe_interval(pb()) == 333333)
+    chk("probe golden bytes: 01 00 02 01 15 16 05 00",
+        blk[0] == 1 && blk[1] == 0 && blk[2] == 2 && blk[3] == 1
+        && blk[4] == 0x15 && blk[5] == 0x16 && blk[6] == 5 && blk[7] == 0)
+    chk("request constants: SET_CUR 0x01 / 0x21, GET_CUR 0x81 / 0xA1, probe 1, commit 2",
+        uvc.SET_CUR == 1 && uvc.REQT_SET == 0x21 && uvc.GET_CUR == 0x81
+        && uvc.REQT_GET == 0xA1 && uvc.VS_PROBE == 1 && uvc.VS_COMMIT == 2)
+    uvc.put32(pb(), 18, 1843200)
+    uvc.put32(pb(), 22, 3072)
+    chk("device answer echoing fmt/frame with sane sizes is accepted",
+        uvc.probe_ok(pb(), 26, 2, 1) && uvc.probe_max_payload(pb()) == 3072
+        && uvc.probe_max_frame(pb()) == 1843200)
+    chk("answer with another format index is rejected", !uvc.probe_ok(pb(), 26, 1, 1))
+    chk("answer with another frame index is rejected", !uvc.probe_ok(pb(), 26, 2, 2))
+    chk("answer shorter than 26 bytes is rejected", !uvc.probe_ok(pb(), 25, 2, 1))
+    uvc.put32(pb(), 22, 0)
+    chk("answer with payload size 0 is rejected", !uvc.probe_ok(pb(), 26, 2, 1))
+    uvc.put32(pb(), 22, 0x7FFFFFFF)
+    chk("answer with an absurd payload size is rejected", !uvc.probe_ok(pb(), 26, 2, 1))
+    uvc.put32(pb(), 22, 3072)
+    uvc.put32(pb(), 18, 0)
+    chk("answer with frame size 0 is rejected", !uvc.probe_ok(pb(), 26, 2, 1))
+
+    // ---- frame assembler
+    uvc.asm_init(ps(), pf(), 4096)
+    var m: u64 = make_pkt(0x00, 100, 0xAA)
+    chk("first packet of a frame completes nothing", !uvc.asm_feed(ps(), pp(), m))
+    m = make_pkt(0x00, 100, 0xBB)
+    chk("middle packet completes nothing", !uvc.asm_feed(ps(), pp(), m))
+    m = make_pkt(0x02, 50, 0xCC)
+    chk("EOF packet completes the frame", uvc.asm_feed(ps(), pp(), m))
+    chk("frame length is 250", uvc.asm_frame_len(ps()) == 250 && uvc.asm_frames(ps()) == 1)
+    chk("frame content: 100x AA, 100x BB, 50x CC",
+        frm[0] == 0xAA && frm[99] == 0xAA && frm[100] == 0xBB && frm[199] == 0xBB
+        && frm[200] == 0xCC && frm[249] == 0xCC)
+    // second frame with FID = 1
+    m = make_pkt(0x01, 30, 0x11)
+    uvc.asm_feed(ps(), pp(), m)
+    m = make_pkt(0x03, 20, 0x22)
+    chk("second frame (FID 1) completes", uvc.asm_feed(ps(), pp(), m) && uvc.asm_frame_len(ps()) == 50)
+    chk("second frame starts at offset 0 again (50 bytes: 30x 11, 20x 22)",
+        frm[0] == 0x11 && frm[29] == 0x11 && frm[30] == 0x22 && frm[49] == 0x22)
+    // lost EOF: FID toggles with data pending -> old frame dropped
+    m = make_pkt(0x00, 40, 0x33)
+    uvc.asm_feed(ps(), pp(), m)
+    m = make_pkt(0x01, 10, 0x44)
+    uvc.asm_feed(ps(), pp(), m)
+    m = make_pkt(0x03, 10, 0x44)
+    chk("lost EOF: next frame still completes", uvc.asm_feed(ps(), pp(), m))
+    chk("lost EOF: old fragments are NOT glued in (length 20)", uvc.asm_frame_len(ps()) == 20
+        && frm[0] == 0x44 && frm[19] == 0x44)
+    chk("lost EOF: one drop counted", uvc.asm_dropped(ps()) == 1)
+    // error flag
+    m = make_pkt(0x40, 10, 0x55)
+    uvc.asm_feed(ps(), pp(), m)
+    m = make_pkt(0x02, 10, 0x55)
+    chk("ERR bit: the frame is dropped at EOF", !uvc.asm_feed(ps(), pp(), m))
+    chk("ERR bit: counted as error + drop", uvc.asm_errors(ps()) >= 1 && uvc.asm_dropped(ps()) == 2)
+    m = make_pkt(0x01, 10, 0x66)
+    chk("frame after an error assembles clean", !uvc.asm_feed(ps(), pp(), m))
+    m = make_pkt(0x03, 10, 0x66)
+    chk("frame after an error completes", uvc.asm_feed(ps(), pp(), m) && uvc.asm_frame_len(ps()) == 20)
+    // overflow
+    uvc.asm_init(ps(), pf(), 100)
+    frm[100] = 0x5A
+    m = make_pkt(0x00, 60, 0x77)
+    uvc.asm_feed(ps(), pp(), m)
+    m = make_pkt(0x02, 60, 0x77)
+    chk("frame bigger than the buffer is dropped, not written past it", !uvc.asm_feed(ps(), pp(), m)
+        && frm[100] == 0x5A && uvc.asm_dropped(ps()) == 1)
+    // header only / empty payload
+    uvc.asm_init(ps(), pf(), 4096)
+    m = make_pkt(0x02, 0, 0)
+    chk("EOF with no data is no frame", !uvc.asm_feed(ps(), pp(), m) && uvc.asm_frames(ps()) == 0)
+    // header length checks
+    pkt_clear()
+    pkt[0] = 1
+    pkt[1] = 2
+    chk("bHeaderLength 1 is rejected", !uvc.asm_feed(ps(), pp(), 20) && uvc.asm_errors(ps()) == 1)
+    pkt[0] = 13
+    chk("bHeaderLength 13 is rejected", !uvc.asm_feed(ps(), pp(), 20))
+    pkt[0] = 12
+    chk("bHeaderLength beyond the packet is rejected", !uvc.asm_feed(ps(), pp(), 8))
+    chk("a 1 byte packet is rejected", !uvc.asm_feed(ps(), pp(), 1))
+    // header with PTS+SCR (12 bytes) is skipped properly
+    pkt_clear()
+    pkt[0] = 12
+    pkt[1] = 0x82
+    pkt[12] = 0x99
+    pkt[13] = 0x98
+    chk("12 byte header (PTS+SCR): payload starts behind it",
+        uvc.asm_feed(ps(), pp(), 14) && uvc.asm_frame_len(ps()) == 2 && frm[0] == 0x99 && frm[1] == 0x98)
+    // random packets never write beyond the capacity and never panic
+    uvc.asm_init(ps(), pf(), 512)
+    frm[512] = 0x5B
+    var rnd: u64 = 0
+    var seed2: u64 = 99
+    while rnd < 5000 {
+        var q: u64 = 0
+        while q < 64 {
+            seed2 = (seed2 * 1103515245 + 12345) % 2147483648
+            pkt[q as usize] = ((seed2 >> 8) & 255) as u8
+            q = q + 1
+        }
+        uvc.asm_feed(ps(), pp(), (seed2 >> 6) % 70)
+        rnd = rnd + 1
+    }
+    chk("5000 random packets: assembled length never above the capacity",
+        uvc.asm_frame_len(ps()) <= 512 && frm[512] == 0x5B)
+
+    // ---- JPEG check
+    frm[0] = 0xFF
+    frm[1] = 0xD8
+    frm[2] = 1
+    frm[3] = 2
+    frm[4] = 0xFF
+    frm[5] = 0xD9
+    chk("JPEG with SOI and EOI is ok", uvc.jpeg_ok(pf(), 6))
+    chk("JPEG cut before EOI is rejected", !uvc.jpeg_ok(pf(), 5))
+    frm[0] = 0
+    chk("no SOI is rejected", !uvc.jpeg_ok(pf(), 6))
+    chk("3 bytes are rejected", !uvc.jpeg_ok(pf(), 3))
+
+    // ---- YUY2 -> XRGB
+    // two pixels: white (Y 235, U 128, V 128) and black (Y 16)
+    pix[0] = 235
+    pix[1] = 128
+    pix[2] = 16
+    pix[3] = 128
+    chk("yuy2 2x1 returns 8 output bytes", uvc.yuy2_to_xrgb(px(), 2, 1, pg()) == 8)
+    chk("yuy2 white pixel -> 255,255,255", rgb[0] == 255 && rgb[1] == 255 && rgb[2] == 255 && rgb[3] == 0)
+    chk("yuy2 black pixel -> 0,0,0", rgb[4] == 0 && rgb[5] == 0 && rgb[6] == 0)
+    // pure red-ish: Y 81, U 90, V 240 -> R high, G/B low
+    pix[0] = 81
+    pix[1] = 90
+    pix[2] = 81
+    pix[3] = 240
+    uvc.yuy2_to_xrgb(px(), 2, 1, pg())
+    chk("yuy2 red (81,90,240) -> R>240, G<10, B<10 (B,G,R order)",
+        rgb[2] > 240 && rgb[1] < 10 && rgb[0] < 10)
+    // pure blue: Y 41, U 240, V 110
+    pix[0] = 41
+    pix[1] = 240
+    pix[2] = 41
+    pix[3] = 110
+    uvc.yuy2_to_xrgb(px(), 2, 1, pg())
+    chk("yuy2 blue (41,240,110) -> B>240, R<10 (clamped, no wrap)", rgb[0] > 240 && rgb[2] < 10)
+    chk("yuy2 odd width is rejected", uvc.yuy2_to_xrgb(px(), 3, 1, pg()) == 0)
+    chk("yuy2 zero height is rejected", uvc.yuy2_to_xrgb(px(), 2, 0, pg()) == 0)
+    return 0
+}
