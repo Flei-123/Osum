@@ -919,6 +919,10 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return cap.err(cap.E_UNSUPPORTED)
     }
     if number == sys.WM_CREATE {
+        // W-WINOPTS stage 1: an unknown option bit refuses the whole call, before a window exists
+        if (a3 & ~sys.WO_KNOWN) != 0 {
+            return cap.err(cap.E_INVALID)
+        }
         // Ein Fenster anlegen. Der Titel kommt aus Ring 3 und wird
         // KOPIERT -- der Server folgt keinem fremden Zeiger, er holt
         // sich zweiunddreissig Oktette in seinen eigenen Puffer.
@@ -971,6 +975,19 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if hh == cap.HANDLE_NONE {
             wm.destroy(state, i)
             return cap.err(cap.E_EXHAUSTED)
+        }
+        // W-WINOPTS stage 1: the options word, applied before the window opens (no frame flash, no opaque first picture)
+        if (a3 & sys.WO_FRAMELESS) != 0 {
+            wm.set_deco(state, i, false)
+        }
+        if (a3 & sys.WO_KEYS) != 0 {
+            wm.set_keys(state, i, true)
+        }
+        if (a3 & sys.WO_OPAC) != 0 {
+            let _po: bool = wm.set_opac(state, i, (a3 >> sys.WO_SHIFT) & 0xFF)
+        }
+        if (a3 & (sys.WO_FRAMELESS | sys.WO_OPAC)) != 0 {
+            wm.compose(state)
         }
         // RUNDE OBERFLAECHE: ES WAECHST AUF. Erst JETZT -- ein Fenster,
         // das keinen Handle bekommen hat, wird gleich wieder
@@ -1366,6 +1383,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a1 == sys.WI_CAPW {
             return wm.cap_strip_w(state)
         }
+        if a1 == sys.WI_OPAC {
+            return wm.win_opac(state, i)
+        }
         if a1 == sys.WI_SHARED {
             if wm.win_shm(state, i) != 0 {
                 return 1
@@ -1508,6 +1528,17 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         // r454: tabs in the title bar -- the program asks for its own strip, and declares its empty part
         if a1 == sys.WS_CAPSTRIP {
             if !wm.set_cap_client(state, i, a2 != 0) {
+                return cap.err(cap.E_INVALID)
+            }
+            wm.compose(state)
+            return 0
+        }
+        // W-WINOPTS stage 1: the window's own opacity. Above 255 is refused, not clamped.
+        if a1 == sys.WS_OPAC {
+            if a2 > 255 {
+                return cap.err(cap.E_INVALID)
+            }
+            if !wm.set_opac(state, i, a2) {
                 return cap.err(cap.E_INVALID)
             }
             wm.compose(state)
