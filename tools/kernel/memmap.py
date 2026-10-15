@@ -56,6 +56,7 @@ BEREICHE = [
     ("PT",         "kstate.fi", "PT_OFF",         "0x2000"),
     ("EXT4",       "kstate.fi", "EXT4_OFF",       "EXT4_MAX"),
     ("NTFS",       "kstate.fi", "NTFS_OFF",       "NTFS_MAX"),
+    ("EXFAT",      "kstate.fi", "EXFAT_OFF",      "EXFAT_MAX"),
     ("TASK",       "kstate.fi", "TASK_OFF",       "TASK_BYTES * MAX_TASKS"),
     ("BLOCK",      "kstate.fi", "BLOCK_OFF",      "BLOCK_MAX"),
     ("NAME",       "kstate.fi", "NAME_OFF",       "NAME_MAX"),
@@ -504,6 +505,20 @@ NTFS_STUECKE = [
     ("ntfs.fi", "CNVBUF",   0x100),
 ]
 
+EXFAT_STUECKE = [
+    ("exfat.fi", "SB_OFF",    0x400),
+    ("exfat.fi", "NODE_OFF",  0x900),
+    ("exfat.fi", "FATBUF",    0x200),
+    ("exfat.fi", "DIRBUF",    0x200),
+    ("exfat.fi", "DATBUF",    0x200),
+    ("exfat.fi", "BMPBUF",    0x200),
+    ("exfat.fi", "SETBUF",    0x300),
+    ("exfat.fi", "CMPBUF",    0x80),
+    ("exfat.fi", "NAMBUF",    0x80),
+    ("exfat.fi", "CACHE_OFF", 0x80),
+    ("exfat.fi", "CACHE_RR",  0x8),
+]
+
 # RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
 # Stueck liegt INNERHALB von ehci.EHCI_OFF; Punkt 5b unten rechnet nach,
 # dass keines herauslaeuft und keines ein anderes ueberschneidet.  Die
@@ -668,7 +683,7 @@ def main():
               # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
               # RUNDE FREMDFS -- ext4 und NTFS, je drei Seiten.
-              "ext4.fi", "ntfs.fi",
+              "ext4.fi", "ntfs.fi", "exfat.fi",
               "part.fi", "ofs.fi",
               # RUNDE OFS3 -- die Geometriewoerter stehen hier.
               "fs.fi",
@@ -743,6 +758,7 @@ def main():
     # sind oben (Punkt 5c) nachgerechnet und gelten damit als benannt.
     benannt |= {(d, k) for d, k, _ in EXT4_STUECKE}
     benannt |= {(d, k) for d, k, _ in NTFS_STUECKE}
+    benannt |= {(d, k) for d, k, _ in EXFAT_STUECKE}
     benannt |= {(datei, anf) for _, datei, anf, _ in BEREICHE}
     for datei, w in dateien.items():
         for k in w:
@@ -848,7 +864,8 @@ def main():
 
     # 5c. RUNDE FREMDFS: die Untergliederung der zwei fremden
     #     Dateisysteme, nach demselben Muster wie K17 und EHCI.
-    for name, liste in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE)):
+    for name, liste in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE),
+                        ("EXFAT", EXFAT_STUECKE)):
         datei0 = liste[0][0]
         if datei0 not in dateien:
             continue
