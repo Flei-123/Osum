@@ -989,6 +989,20 @@ class Fahrer:
                 fa, fb = name[4:].split("x")
                 return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
             return (o[0] + rx, o[1] + ry, rw_, rh_)
+        # Mail window (kernel/user/mail.fi, test mode): `mailrect<name>` = a widget the app reports
+        # ("mail: rect name=go|pw|fold|list|body|fetch|new|acct|to|subj|txt|send|cancel x= y= w= h="); `mailpt<A>x<B>` =
+        # the point A % / B % into the message table ("list"), so a click lands on a known row.
+        if name.startswith("mailrect") or name.startswith("mailpt"):
+            nm = name[8:] if name.startswith("mailrect") else "list"
+            m = letzte(r"mail: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
+            o = self.fenster("mail")
+            if m is None or o is None:
+                return None
+            rx, ry, rw_, rh_ = (int(m.group(i)) for i in (1, 2, 3, 4))
+            if name.startswith("mailpt"):
+                fa, fb = name[6:].split("x")
+                return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
+            return (o[0] + rx, o[1] + ry, rw_, rh_)
         if name.startswith("frect"):
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
