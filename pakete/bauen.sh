@@ -87,6 +87,7 @@ elf kernel/user/pluguhr.fi  pakete/wmplug-uhr      pluguhr
 elf kernel/user/plugregel.fi pakete/wmplug-regel   plugregel
 elf kernel/user/notes.fi    pakete/notes           notes
 app kernel/user/fvviewer.fi pakete/fvviewer        fvviewer
+app kernel/user/mail.fi     pakete/mail            mail
 # every package carries an action manifest (docs/ACTION-BUS.md, section 3)
 for d in pakete/*/; do
     [ -f "$d/ACTIONS" ] || continue
@@ -94,7 +95,7 @@ for d in pakete/*/; do
 done
 
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/fvviewer; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/fvviewer pakete/mail; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else
