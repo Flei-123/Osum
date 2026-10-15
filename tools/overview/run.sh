@@ -34,7 +34,12 @@ g = re.findall(r"explorer: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
 gx, gy = int(g[-1][0]), int(g[-1][1])
 rects = {int(m.group(1)): tuple(int(m.group(k)) for k in (3, 4, 5, 6)) for m in
          re.finditer(r"explorer: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)}
-ox, oy = gx + 1, gy + 33
+# the window frame/title height changed over the rounds (Win11 tab strip in the title bar), so a fixed "title 33 + header 32"
+# offset went stale and the gate looked 12 px below the bar (r804 follow-up, W-OLD). The check is now: somewhere in the list's
+# own rectangle (padded 40 px above for the header, from the window origin) is a ROW of the picture that has both the
+# accent-coloured fill and the grey track of a bar. That is still what "a bar is in the Used cell" means, and it does not
+# depend on the chrome height.
+ox, oy = gx, gy
 best = None
 for rid, (x, y, w, h) in rects.items():
     if w > 300 and h > 200:
@@ -42,18 +47,20 @@ for rid, (x, y, w, h) in rects.items():
 if best is None:
     print("no list rectangle"); sys.exit(1)
 x, y, w, h = best
-# the first data row is the second row of the list (the header is the first): 32 px each; a bar lies in the lower part of the Used cell
 accent = (37, 99, 235)
 fill = 0
 track = 0
-for yy in range(oy + y + 32, oy + y + 32 + 32):
-    for xx in range(ox + x, ox + x + w):
+for yy in range(max(0, oy + y - 40), min(im.size[1], oy + y + h)):
+    f = t = 0
+    for xx in range(max(0, ox + x), min(im.size[0], ox + x + w)):
         p = im.getpixel((xx, yy))
         if sum(abs(a - b) for a, b in zip(p, accent)) < 40:
-            fill += 1
+            f += 1
         if abs(p[0] - 203) < 6 and abs(p[1] - 213) < 6 and abs(p[2] - 225) < 6:
-            track += 1
-print("accent pixels in the first row: %d, track pixels: %d" % (fill, track))
+            t += 1
+    if f > 20 and t > 20:
+        fill, track = max(fill, f), max(track, t)
+print("accent pixels in the bar row: %d, track pixels: %d" % (fill, track))
 sys.exit(0 if fill > 20 and track > 20 else 1)
 PY
 
