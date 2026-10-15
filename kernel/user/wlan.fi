@@ -60,6 +60,8 @@ profile kernel
 
 import ulib
 import wlan.usbchip
+import wlan.ar9271
+import crypto.sha256
 
 // Der Einstieg eines Ring-3-Programms heisst `u_start` und gibt u64
 // zurueck -- nicht `main`. Wer `main` schreibt, bekommt von firnc ein
@@ -292,6 +294,55 @@ fn vergessen() -> u64 {
     return 0
 }
 
+// ------------------------------------------------------------------
+// wlan fw -- is the AR9271 firmware on disk, and is it the pinned one?
+// ------------------------------------------------------------------
+// Streams the file through SHA-256 (no big buffer) and compares with the
+// digest pinned in lib/wlan/ar9271.fi. Loading it into a chip is the
+// kernel USB glue's job (not wired yet, roadmap r21 / M1).
+
+fn fw_check() -> u64 {
+    var path: [u8; 44] = "/lib/firmware/ath9k_htc/htc_9271-1.4.0.fw\0\0\0"
+    var s_none: [u8; 59] = "wlan fw: Datei fehlt (/lib/firmware/ath9k_htc/htc_9271...)\0"
+    var s_ok: [u8; 40] = "wlan fw: Firmware gefunden, Pin STIMMT\0\0"
+    var s_bad: [u8; 56] = "wlan fw: Datei da, aber Pin STIMMT NICHT -- nicht laden\0"
+    var s_sz: [u8; 16] = "wlan fw: Bytes \0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        ulib.say((&s_none[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var h: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&h)
+    var chunk: [u8; 1024] = [0; 1024]
+    var total: u64 = 0
+    var go: bool = true
+    while go {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&chunk[0 as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            go = false
+        } else {
+            sha256.update(&h, (&chunk[0 as usize]) as u64, n as usize)
+            total = total + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    var d: [u8; 32] = [0; 32]
+    sha256.finish(&h, (&d[0 as usize]) as u64)
+    ulib.say((&s_sz[0 as usize]) as u64)
+    ulib.sayu(total)
+    ulib.nl()
+    if ar9271.digest_pinned((&d[0 as usize]) as u64) {
+        ulib.say((&s_ok[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&s_bad[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
+
 fn hilfe() -> u64 {
     var h1: [u8; 40] = "wlan -- WLAN einrichten und nachsehen\0\0\0"
     var h2: [u8; 40] = "  wlan status            Stand\0\0\0\0\0\0\0\0\0\0"
@@ -318,6 +369,7 @@ fn u_start(args: u64) -> u64 {
     var c_status: [u8; 7] = "status\0"
     var c_chips: [u8; 6] = "chips\0"
     var c_scan: [u8; 5] = "scan\0"
+    var c_fw: [u8; 3] = "fw\0"
     var c_verb: [u8; 10] = "verbinden\0"
     var c_verg: [u8; 10] = "vergessen\0"
 
@@ -331,6 +383,9 @@ fn u_start(args: u64) -> u64 {
     }
     if ulib.streq(b, (&c_chips[0 as usize]) as u64) {
         return chips()
+    }
+    if ulib.streq(b, (&c_fw[0 as usize]) as u64) {
+        return fw_check()
     }
     if ulib.streq(b, (&c_scan[0 as usize]) as u64) {
         return scan()

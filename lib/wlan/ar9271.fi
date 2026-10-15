@@ -1,0 +1,385 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/ar9271.fi -- first real chip driver stage: Atheros AR9271 (USB,
+// "ath9k_htc" firmware). Milestone M1 of docs/WLAN-TREIBER.md:
+//
+//   1. check the firmware blob against a pinned SHA-256 (never load unknown
+//      bytes into a chip),
+//   2. download it (vendor control requests 0x30 chunks + 0x31 "complete"),
+//   3. wait for the HTC READY message on the interrupt-in pipe,
+//   4. connect the WMI control service, finish HTC setup,
+//   5. read a chip register through WMI (REG_READ) -> "the chip answers".
+//
+// Not done yet (M2+): ath9k hardware init tables, tx descriptors, rx status,
+// scan, keys. So this driver does NOT fill lib/wlan/device.fi's four-function
+// board yet: `attach_board` refuses (returns false) until `ar_tx_ready` is
+// implemented -- no half driver pretends to be a radio.
+//
+// The USB side is a transport table (`Xport`) the caller fills: the kernel
+// glue maps it to xHCI control / interrupt transfers, tests map it to a
+// simulated firmware (tools/wlan/ar9271.fi). Protocol facts come from the
+// Linux sources ath9k/hif_usb.[ch], htc_hst.[ch], wmi.[ch] (read 15.10.2026).
+
+import crypto.sha256
+import wlan.htc
+
+export {
+    Ar, Xport, ar_new, xport_set, pin_set, supported, fw_pinned, digest_pinned, fw_name,
+    download, wait_ready, connect_svc, htc_setup, wmi_cmd,
+    reg_read, reg_write, boot, srev_get, state_get, attach_board,
+    S_IDLE, S_FW_SENT, S_READY, S_HTC_UP, S_UP, S_FAILED,
+    E_PIN, E_DOWNLOAD, E_READY, E_CONNECT, E_SETUP, E_WMI, E_XPORT,
+    FW_ADDR, FW_TEXT_ADDR, AR_SREV_REG, FW_MAX
+}
+
+const FW_ADDR: u64 = 0x501000
+const FW_TEXT_ADDR: u64 = 0x903000
+const FW_CHUNK: usize = 4096
+const FW_MAX: usize = 131072
+const REQ_DOWNLOAD: u64 = 0x30
+const REQ_DOWNLOAD_COMP: u64 = 0x31
+// ath9k reg.h: AR_SREV is 0x4020 for everything except AR9100/AR9340.
+const AR_SREV_REG: u64 = 0x4020
+
+const S_IDLE: u64 = 0
+const S_FW_SENT: u64 = 1
+const S_READY: u64 = 2
+const S_HTC_UP: u64 = 3
+const S_UP: u64 = 4
+const S_FAILED: u64 = 9
+
+const E_PIN: i64 = -2
+const E_DOWNLOAD: i64 = -3
+const E_READY: i64 = -4
+const E_CONNECT: i64 = -5
+const E_SETUP: i64 = -6
+const E_WMI: i64 = -7
+const E_XPORT: i64 = -8
+
+// ctrl_out(ctx, request, value, index, buf, len) -> bytes or < 0
+// int_out(ctx, pipe, buf, len) -> bytes or < 0
+// int_in(ctx, pipe, buf, cap) -> bytes, 0 = nothing pending, < 0 error
+struct Xport {
+    ctrl_out: fn(u64, u64, u64, u64, u64, usize) -> i64,
+    int_out: fn(u64, u64, u64, usize) -> i64,
+    int_in: fn(u64, u64, u64, usize) -> i64
+}
+
+fn x_ctrl(ctx: u64, r: u64, v: u64, i: u64, b: u64, n: usize) -> i64 { return -1 }
+fn x_out(ctx: u64, p: u64, b: u64, n: usize) -> i64 { return -1 }
+fn x_in(ctx: u64, p: u64, b: u64, n: usize) -> i64 { return -1 }
+
+struct Ar {
+    x: Xport,
+    ctx: u64,
+    state: u64,
+    credits: u64,
+    credit_size: u64,
+    max_ep: u64,
+    wmi_ep: u64,
+    seq: u64,
+    srev: u64,
+    fw_chunks: u64,
+    pin_on: bool,
+    tx: [u8; 288],
+    rx: [u8; 288]
+}
+
+fn ar_new() -> Ar {
+    var a: Ar = Ar {
+        x: Xport { ctrl_out: x_ctrl, int_out: x_out, int_in: x_in },
+        ctx: 0, state: 0, credits: 0, credit_size: 0, max_ep: 0,
+        wmi_ep: 0, seq: 0, srev: 0, fw_chunks: 0, pin_on: true,
+        tx: [0; 288], rx: [0; 288]
+    }
+    return a
+}
+
+fn xport_set(a: *mut Ar, ctx: u64,
+    ctrl: fn(u64, u64, u64, u64, u64, usize) -> i64,
+    out: fn(u64, u64, u64, usize) -> i64,
+    inn: fn(u64, u64, u64, usize) -> i64) {
+    (*a).x.ctrl_out = ctrl
+    (*a).x.int_out = out
+    (*a).x.int_in = inn
+    (*a).ctx = ctx
+}
+
+// Tests with synthetic blobs switch the pin off; the kernel glue never does.
+fn pin_set(a: *mut Ar, on: bool) { (*a).pin_on = on }
+fn state_get(a: *mut Ar) -> u64 { return (*a).state }
+fn srev_get(a: *mut Ar) -> u64 { return (*a).srev }
+
+// ---- which sticks (Linux hif_usb.c ath9k_hif_usb_ids, AR9271 only) --------
+
+fn supported(vid: u64, pid: u64) -> bool {
+    if vid == 0x0cf3 {
+        if pid == 0x9271 || pid == 0x1006 || pid == 0xb003 || pid == 0xb002 {
+            return true
+        }
+    }
+    if vid == 0x0846 && pid == 0x9030 { return true }
+    if vid == 0x07b8 && pid == 0x9271 { return true }
+    if vid == 0x07d1 && pid == 0x3a10 { return true }
+    if vid == 0x13d3 {
+        if pid == 0x3327 || pid == 0x3328 || pid == 0x3346 || pid == 0x3348
+            || pid == 0x3349 || pid == 0x3350 { return true }
+    }
+    if vid == 0x04ca && pid == 0x4605 { return true }
+    if vid == 0x040d && pid == 0x3801 { return true }
+    if vid == 0x057c && pid == 0x8403 { return true }
+    if vid == 0x0471 && pid == 0x209e { return true }
+    if vid == 0x1eda && pid == 0x2315 { return true }
+    return false
+}
+
+// ---- firmware pin ---------------------------------------------------------
+
+// linux-firmware ath9k_htc/htc_9271-1.4.0.fw (51008 bytes), redistributable.
+// SHA-256 measured 15.10.2026 from git.kernel.org linux-firmware.
+fn fw_name(out: u64) -> usize {
+    let n: [u8; 28] = "ath9k_htc/htc_9271-1.4.0.fw\0"
+    var i: usize = 0
+    while n[i] != 0 as u8 {
+        *((out + i as u64) as *mut u8) = n[i]
+        i = i + 1
+    }
+    *((out + i as u64) as *mut u8) = 0 as u8
+    return i
+}
+
+// True if `digest` (32 bytes, SHA-256) is the pinned firmware digest.
+fn digest_pinned(digest: u64) -> bool {
+    let pin: [u8; 32] = [120, 247, 213, 146, 169, 91, 65, 154, 2, 253, 231,
+        68, 15, 48, 198, 6, 252, 49, 168, 113, 207, 12, 225, 80, 206, 212,
+        13, 72, 87, 23, 62, 176]
+    var i: usize = 0
+    var diff: u64 = 0
+    while i < 32 {
+        let b: u8 = *((digest + i as u64) as *mut u8)
+        diff = diff | ((b ^ pin[i]) as u64)
+        i = i + 1
+    }
+    return diff == 0
+}
+
+fn fw_pinned(blob: u64, len: usize) -> bool {
+    if len < 1024 || len > FW_MAX { return false }
+    var d: [u8; 32] = [0; 32]
+    sha256.hash(blob, len, (&d[0]) as u64)
+    return digest_pinned((&d[0]) as u64)
+}
+
+// ---- step 2: download -----------------------------------------------------
+
+// hif_usb.c ath9k_hif_usb_download_fw: 4096-byte chunks, wValue = addr >> 8,
+// request type 0x40 (vendor, host-to-device), then request 0x31 with
+// wValue = text address >> 8 and no data.
+fn download(a: *mut Ar, blob: u64, len: usize) -> i64 {
+    if (*a).pin_on && !fw_pinned(blob, len) {
+        (*a).state = S_FAILED
+        return E_PIN
+    }
+    let x: Xport = (*a).x
+    var addr: u64 = FW_ADDR
+    var off: usize = 0
+    while off < len {
+        var n: usize = len - off
+        if n > FW_CHUNK { n = FW_CHUNK }
+        let r: i64 = x.ctrl_out((*a).ctx, REQ_DOWNLOAD, addr >> 8, 0,
+            blob + off as u64, n)
+        if r < 0 {
+            (*a).state = S_FAILED
+            return E_DOWNLOAD
+        }
+        off = off + n
+        addr = addr + n as u64
+        (*a).fw_chunks = (*a).fw_chunks + 1
+    }
+    let c: i64 = x.ctrl_out((*a).ctx, REQ_DOWNLOAD_COMP, FW_TEXT_ADDR >> 8,
+        0, 0, 0)
+    if c < 0 {
+        (*a).state = S_FAILED
+        return E_DOWNLOAD
+    }
+    (*a).state = S_FW_SENT
+    return 0
+}
+
+// ---- step 3: READY --------------------------------------------------------
+
+fn rx_poll(a: *mut Ar) -> i64 {
+    let x: Xport = (*a).x
+    return x.int_in((*a).ctx, htc.PIPE_REG_IN, (&(*a).rx[0]) as u64, 288)
+}
+
+fn wait_ready(a: *mut Ar, tries: u64) -> i64 {
+    var t: u64 = 0
+    while t < tries {
+        let n: i64 = rx_poll(a)
+        if n < 0 {
+            (*a).state = S_FAILED
+            return E_XPORT
+        }
+        if n > 0 {
+            var cr: u64 = 0
+            var cs: u64 = 0
+            var me: u64 = 0
+            if htc.parse_ready((&(*a).rx[0]) as u64, n as usize, &cr, &cs, &me) {
+                (*a).credits = cr
+                (*a).credit_size = cs
+                (*a).max_ep = me
+                (*a).state = S_READY
+                return 0
+            }
+        }
+        t = t + 1
+    }
+    (*a).state = S_FAILED
+    return E_READY
+}
+
+// ---- step 4: services -----------------------------------------------------
+
+fn send_ctrl(a: *mut Ar, n: usize) -> i64 {
+    let x: Xport = (*a).x
+    return x.int_out((*a).ctx, htc.PIPE_REG_OUT, (&(*a).tx[0]) as u64, n)
+}
+
+// Connect one service; returns its endpoint id (> 0) or E_CONNECT.
+fn connect_svc(a: *mut Ar, svc: u64, tries: u64) -> i64 {
+    let n: usize = htc.build_conn((&(*a).tx[0]) as u64, svc, 0,
+        htc.svc_dl_pipe(svc), htc.svc_ul_pipe(svc))
+    if send_ctrl(a, n) < 0 { return E_XPORT }
+    var t: u64 = 0
+    while t < tries {
+        let r: i64 = rx_poll(a)
+        if r < 0 { return E_XPORT }
+        if r > 0 {
+            var s: u64 = 0
+            var st: u64 = 0
+            var ep: u64 = 0
+            var ml: u64 = 0
+            if htc.parse_conn_rsp((&(*a).rx[0]) as u64, r as usize, &s, &st,
+                &ep, &ml) {
+                if s == svc {
+                    if st != htc.CONN_OK { return E_CONNECT }
+                    if ep == 0 || ep >= htc.EP_MAX { return E_CONNECT }
+                    return ep as i64
+                }
+            }
+        }
+        t = t + 1
+    }
+    return E_CONNECT
+}
+
+// config-pipe credits for the tx bulk pipe, then setup-complete. Linux waits
+// for a CONFIG_PIPE_RESPONSE; this stage sends both and does not wait
+// (reply handling is untested against real firmware).
+fn htc_setup(a: *mut Ar) -> i64 {
+    var c: u64 = (*a).credits
+    if c > 255 { c = 255 }
+    var n: usize = htc.build_config_pipe((&(*a).tx[0]) as u64, htc.PIPE_TX, c)
+    if send_ctrl(a, n) < 0 { return E_SETUP }
+    n = htc.build_setup_complete((&(*a).tx[0]) as u64)
+    if send_ctrl(a, n) < 0 { return E_SETUP }
+    (*a).state = S_HTC_UP
+    return 0
+}
+
+// ---- step 5: WMI ----------------------------------------------------------
+
+// Send one WMI command on the control endpoint and wait for the response
+// with the same sequence number. Events (id & 0x1000) are skipped.
+// Returns response body length (copied to `rsp`) or E_WMI / E_XPORT.
+fn wmi_cmd(a: *mut Ar, cmd: u64, body: u64, blen: usize, rsp: u64,
+    rcap: usize, tries: u64) -> i64 {
+    if blen > 200 { return E_WMI }
+    (*a).seq = ((*a).seq + 1) & 0xffff
+    let want: u64 = (*a).seq
+    let n: usize = htc.build_wmi((&(*a).tx[0]) as u64, (*a).wmi_ep, cmd,
+        want, body, blen)
+    if send_ctrl(a, n) < 0 { return E_XPORT }
+    var t: u64 = 0
+    while t < tries {
+        let r: i64 = rx_poll(a)
+        if r < 0 { return E_XPORT }
+        if r > 0 {
+            var c: u64 = 0
+            var s: u64 = 0
+            let bl: i64 = htc.parse_wmi((&(*a).rx[0]) as u64, r as usize,
+                (*a).wmi_ep, &c, &s)
+            if bl >= 0 && (c & htc.WMI_EVENT_BIT) == 0 && s == want {
+                var m: usize = bl as usize
+                if m > rcap { m = rcap }
+                var i: usize = 0
+                while i < m {
+                    *((rsp + i as u64) as *mut u8) =
+                        *(((&(*a).rx[0]) as u64 + 12 + i as u64) as *mut u8)
+                    i = i + 1
+                }
+                return bl
+            }
+        }
+        t = t + 1
+    }
+    return E_WMI
+}
+
+fn reg_read(a: *mut Ar, reg: u64, out: *mut u64) -> i64 {
+    var q: [u8; 4] = [0; 4]
+    var r: [u8; 4] = [0; 4]
+    htc.put32((&q[0]) as u64, 0, reg)
+    let n: i64 = wmi_cmd(a, htc.WMI_REG_READ, (&q[0]) as u64, 4,
+        (&r[0]) as u64, 4, 64)
+    if n < 4 { return E_WMI }
+    *out = htc.get32((&r[0]) as u64, 0)
+    return 0
+}
+
+fn reg_write(a: *mut Ar, reg: u64, val: u64) -> i64 {
+    var q: [u8; 8] = [0; 8]
+    var r: [u8; 4] = [0; 4]
+    htc.put32((&q[0]) as u64, 0, reg)
+    htc.put32((&q[0]) as u64, 4, val)
+    let n: i64 = wmi_cmd(a, htc.WMI_REG_WRITE, (&q[0]) as u64, 8,
+        (&r[0]) as u64, 4, 64)
+    if n < 0 { return E_WMI }
+    return 0
+}
+
+// The whole M1 sequence. On success state == S_UP and srev holds the raw
+// AR_SREV register (decoding it needs a real chip; not interpreted here).
+fn boot(a: *mut Ar, blob: u64, len: usize) -> i64 {
+    var r: i64 = download(a, blob, len)
+    if r < 0 { return r }
+    r = wait_ready(a, 200)
+    if r < 0 { return r }
+    let ep: i64 = connect_svc(a, htc.SVC_WMI_CONTROL, 64)
+    if ep < 0 {
+        (*a).state = S_FAILED
+        return ep
+    }
+    (*a).wmi_ep = ep as u64
+    r = htc_setup(a)
+    if r < 0 {
+        (*a).state = S_FAILED
+        return r
+    }
+    var v: u64 = 0
+    r = reg_read(a, AR_SREV_REG, &v)
+    if r < 0 {
+        (*a).state = S_FAILED
+        return r
+    }
+    (*a).srev = v
+    (*a).state = S_UP
+    return 0
+}
+
+// The radio path (tx descriptors, rx status, scan, keys) is M2. Until then
+// the four-function board stays unset: the caller sees a driver that talks
+// to the chip but is honest that it is not a network device.
+fn attach_board(a: *mut Ar) -> bool {
+    return false
+}
