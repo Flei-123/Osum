@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/crypto/cryptboot.fi -- K-019: unlock an encrypted ROOT PARTITION at boot.
+//
+// Called by the two places that mount the root from a partition table
+// (`rootsel.try_mount_on` for NVMe/AHCI/IDE/USB and `kmain.root_from_part`).
+// `boot_unlock(state, dev, first)` looks at the first sector of the root
+// partition:
+//
+//   * no valid "OSUMCRYPT" header      -> R_PLAIN: mount as before, nothing changes.
+//   * header, passphrase accepted      -> R_OPEN: the key is loaded and the root offset
+//                                         is set to (first + header sectors); the caller
+//                                         mounts WITHOUT calling `blk.use_at` again.
+//   * header, passphrase refused       -> R_FAIL: the caller must not mount.
+//
+// WHERE THE PASSPHRASE COMES FROM
+//   1. `kryptopw=...` on the command line (test beds only: it shows up in the boot log).
+//      A wrong one is refused at once (no prompt) so a gate cannot hang.
+//   2. Otherwise the boot prompt: typed on the PS/2 keyboard (the port is polled, so no
+//      interrupt is needed), echoed as `*`, Enter to confirm, Backspace to correct,
+//      MAX_TRY attempts. A USB-only keyboard is not read here (firmware USB emulation
+//      ends when the kernel takes over; open item in docs/CRYPTO-ERASE.md).
+profile kernel
+
+import serial
+import lib.kstate
+import block.blk
+import crypto.krypto
+import drv.hid.kbd
+
+export { boot_unlock, R_PLAIN, R_OPEN, R_FAIL, MAX_TRY }
+
+const R_PLAIN: u64 = 0
+const R_OPEN: u64 = 1
+const R_FAIL: u64 = 2
+const MAX_TRY: u64 = 5
+const PW_MAX: u64 = 120
+
+fn say(p: u64) {
+    serial.puts(p)
+}
+
+// Read one line from the keyboard into `buf` (octets, no terminator). Returns the length.
+fn read_line(state: u64, buf: u64) -> u64 {
+    var n: u64 = 0
+    while true {
+        // Poll the 8042 like the interrupt handler does (it checks the status bits itself).
+        kbd.irq(state)
+        while kbd.waiting(state) > 0 {
+            let c: u64 = kbd.take(state)
+            if c == 13 || c == 10 {
+                serial.nl()
+                return n
+            }
+            if c == 8 || c == 127 {
+                if n > 0 {
+                    n = n - 1
+                    kstate.set8(buf + n, 0)
+                    serial.put(8 as u8)
+                    serial.put(32 as u8)
+                    serial.put(8 as u8)
+                }
+            } else if c >= 32 && n < PW_MAX {
+                kstate.set8(buf + n, c as u8)
+                n = n + 1
+                serial.put(42 as u8)
+            }
+        }
+    }
+    return n
+}
+
+fn wipe(buf: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(buf + i, 0)
+        i = i + 1
+    }
+}
+
+fn boot_unlock(state: u64, dev: u64, first: u64) -> u64 {
+    var m_enc: [u8; 35] = "crypt: root partition is encrypted\0"
+    var m_pw: [u8; 20] = "crypt: passphrase: \0"
+    var m_ok: [u8; 22] = "crypt: unlocked slot=\0"
+    var m_bad: [u8; 32] = "crypt: wrong passphrase, fails=\0"
+    var m_cmd: [u8; 44] = "crypt: using kryptopw from the command line\0"
+    var m_lock: [u8; 32] = "crypt: locked, root not mounted\0"
+    if !krypto.header_at(state, dev, first) {
+        return R_PLAIN
+    }
+    say((&m_enc[0]) as u64)
+    serial.nl()
+    // 1. the command line (test beds)
+    let cl: u64 = kstate.get(state, kstate.CRY_WORK + 0x100)
+    if cl != 0 {
+        say((&m_cmd[0]) as u64)
+        serial.nl()
+        if krypto.unlock_at(state, dev, first, state + kstate.CRY_WORK, cl) {
+            say((&m_ok[0]) as u64)
+            serial.dec(krypto.slot_of(state))
+            serial.nl()
+            return R_OPEN
+        }
+        say((&m_bad[0]) as u64)
+        serial.dec(krypto.fails(state))
+        serial.nl()
+        say((&m_lock[0]) as u64)
+        serial.nl()
+        return R_FAIL
+    }
+    // 2. the boot prompt
+    var buf: [u8; 128] = [0 as u8; 128]
+    let bp: u64 = (&buf[0]) as u64
+    var tries: u64 = 0
+    while tries < MAX_TRY {
+        say((&m_pw[0]) as u64)
+        let n: u64 = read_line(state, bp)
+        if krypto.unlock_at(state, dev, first, bp, n) {
+            wipe(bp, 128)
+            say((&m_ok[0]) as u64)
+            serial.dec(krypto.slot_of(state))
+            serial.nl()
+            return R_OPEN
+        }
+        wipe(bp, 128)
+        say((&m_bad[0]) as u64)
+        serial.dec(krypto.fails(state))
+        serial.nl()
+        tries = tries + 1
+    }
+    say((&m_lock[0]) as u64)
+    serial.nl()
+    return R_FAIL
+}

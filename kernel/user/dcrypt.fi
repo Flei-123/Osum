@@ -1,0 +1,244 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/dcrypt.fi -- ring-3 half of K-019 (disk encryption): the installer
+// writes an ENCRYPTED root partition.
+//
+// The on-disk format is exactly the one `kernel/crypto/krypto.fi` reads at boot
+// (header "OSUMCRYPT", 8 sectors, key slots, XTS-AES-256, Argon2id). This file
+// only WRITES it: it draws the master key from getrandom, wraps it in slot 0
+// with a key derived from the passphrase, builds the header and then encrypts
+// sectors for the caller. Tweak = sector number relative to the first DATA
+// sector (the kernel decrypts with the same number: `blk.use_at` hides the
+// header, `krypto.decrypt_sector(lba)` gets the file system block number).
+//
+// Memory: Argon2 works in a 32 MiB anonymous mmap (m_cost is capped to it).
+
+profile kernel
+
+import ulib
+import crypto.sha256
+import crypto.xts
+import crypto.argon2
+
+export {
+    setup, ready, header_ptr, enc_sectors, dec_sectors, forget_key,
+    verify_pass, HDR_SECTORS, DEF_T, DEF_M, DEF_P
+}
+
+const HDR_SECTORS: u64 = 8
+const SECTOR: u64 = 512
+const HDR_BYTES: u64 = 4096
+const KEY_LEN: u64 = 64
+const WRAP_LEN: u64 = 96
+const SALT_LEN: u64 = 32
+const SYS_GETRANDOM: u64 = 318
+
+// Same defaults as the kernel (t=2, m=32 MiB, p=4).
+const DEF_T: u64 = 2
+const DEF_M: u64 = 32768
+const DEF_P: u64 = 4
+
+static mut HDR: [u8; 4096] = [0 as u8; 4096]
+static mut KEY: [u8; 64] = [0 as u8; 64]
+static mut WRAP: [u8; 96] = [0 as u8; 96]
+static mut TWK: [u8; 16] = [0 as u8; 16]
+static mut SUM: [u8; 32] = [0 as u8; 32]
+static mut SCR: [u8; 8192] = [0 as u8; 8192]
+static mut st_argmem: u64 = 0
+
+// Argon2 memory: anonymous mmap (a program image has only ~1 MiB below the
+// private region limit, so a 32 MiB static buffer cannot work).
+fn argmem() -> u64 {
+    if st_argmem != 0 {
+        return st_argmem
+    }
+    let no: u64 = 0 -% 1
+    let p: u64 = asm("syscall", out("rax"), in("rax") 9, in("rdi") 0,
+        in("rsi") 33554432, in("rdx") 3, in("r10") 34,
+        in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+    if ulib.bad(p) {
+        return 0
+    }
+    st_argmem = p
+    return p
+}
+static mut st_ready: u64 = 0
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn put32(p: u64, off: u64, v: u64) {
+    st8(p, off, v)
+    st8(p, off + 1, v >> 8)
+    st8(p, off + 2, v >> 16)
+    st8(p, off + 3, v >> 24)
+}
+
+fn put64(p: u64, off: u64, v: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        st8(p, off + i, v >> (i * 8))
+        i = i + 1
+    }
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(p, i, 0)
+        i = i + 1
+    }
+}
+
+fn rnd(out: u64, n: u64) -> bool {
+    return !ulib.bad(ulib.sys(SYS_GETRANDOM, out, n, 0))
+}
+
+fn ready() -> bool {
+    return st_ready == 1
+}
+
+fn header_ptr() -> u64 {
+    return (&HDR[0 as usize]) as u64
+}
+
+// Build header + slot 0 for a partition of `total` sectors. After this the key is
+// held in memory and `enc_sectors` works. The caller writes `header_ptr()` (8 sectors)
+// to the first sector of the partition.
+fn setup(pw: u64, pwlen: u64, t: u64, m: u64, p: u64, total: u64) -> bool {
+    if total <= HDR_SECTORS || pwlen == 0 || m > DEF_M || m == 0 || t == 0 || p == 0 {
+        return false
+    }
+    let hdr: u64 = (&HDR[0 as usize]) as u64
+    let key: u64 = (&KEY[0 as usize]) as u64
+    zero(hdr, HDR_BYTES)
+    // "OSUMCRYPT"
+    st8(hdr, 0, 79)
+    st8(hdr, 1, 83)
+    st8(hdr, 2, 85)
+    st8(hdr, 3, 77)
+    st8(hdr, 4, 67)
+    st8(hdr, 5, 82)
+    st8(hdr, 6, 89)
+    st8(hdr, 7, 80)
+    st8(hdr, 8, 84)
+    put32(hdr, 0x10, 1) // version
+    put32(hdr, 0x14, 1) // XTS-AES-256
+    put32(hdr, 0x18, 1) // Argon2id
+    put32(hdr, 0x1C, SECTOR)
+    put64(hdr, 0x20, HDR_SECTORS)
+    put64(hdr, 0x28, total - HDR_SECTORS)
+    if !rnd(key, KEY_LEN) {
+        return false
+    }
+    var same: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        same = same | (ld8(key, i) ^ ld8(key, i + 32))
+        i = i + 1
+    }
+    if same == 0 {
+        return false
+    }
+    // slot 0
+    let sl: u64 = hdr + 0x100
+    if !rnd(sl + 0x10, SALT_LEN) {
+        return false
+    }
+    put32(sl, 0x04, t)
+    put32(sl, 0x08, m)
+    put32(sl, 0x0C, p)
+    let wrap: u64 = (&WRAP[0 as usize]) as u64
+    if !argon2.argon2id(pw, pwlen as usize, sl + 0x10, SALT_LEN as usize,
+        t, m, p, argmem(), wrap, WRAP_LEN as usize) {
+        return false
+    }
+    let tw: u64 = (&TWK[0 as usize]) as u64
+    zero(tw, 16)
+    if !xts.encrypt(wrap, tw, key, sl + 0x30, KEY_LEN as usize) {
+        return false
+    }
+    sha256.hmac(wrap + 64, 32, sl + 0x30, KEY_LEN as usize, sl + 0x70)
+    put32(sl, 0x00, 1)
+    zero(wrap, WRAP_LEN)
+    // header checksum: SHA-256 over all 4096 octets with the sum field as zeros
+    let sum: u64 = (&SUM[0 as usize]) as u64
+    sha256.hash(hdr, HDR_BYTES as usize, sum)
+    i = 0
+    while i < 32 {
+        st8(hdr, 0x30 + i, ld8(sum, i))
+        i = i + 1
+    }
+    st_ready = 1
+    return true
+}
+
+// Encrypt `n` sectors from `src` into `dst`; `first` is the sector number
+// relative to the first data sector (the XTS tweak).
+fn enc_sectors(first: u64, src: u64, dst: u64, n: u64) -> bool {
+    if st_ready != 1 {
+        return false
+    }
+    let key: u64 = (&KEY[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        if !xts.sector_encrypt(key, first + i, src + i * SECTOR,
+            dst + i * SECTOR, SECTOR as usize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn dec_sectors(first: u64, src: u64, dst: u64, n: u64) -> bool {
+    if st_ready != 1 {
+        return false
+    }
+    let key: u64 = (&KEY[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        if !xts.sector_decrypt(key, first + i, src + i * SECTOR,
+            dst + i * SECTOR, SECTOR as usize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Re-open slot 0 of the header we built with a passphrase (self check for the
+// installer: proves the header can be unlocked before the disk is declared done).
+fn verify_pass(pw: u64, pwlen: u64) -> bool {
+    let hdr: u64 = (&HDR[0 as usize]) as u64
+    let sl: u64 = hdr + 0x100
+    let wrap: u64 = (&WRAP[0 as usize]) as u64
+    let t: u64 = ld8(sl, 4) | (ld8(sl, 5) << 8)
+    let m: u64 = ld8(sl, 8) | (ld8(sl, 9) << 8) | (ld8(sl, 10) << 16)
+    let p: u64 = ld8(sl, 12)
+    if !argon2.argon2id(pw, pwlen as usize, sl + 0x10, SALT_LEN as usize,
+        t, m, p, argmem(), wrap, WRAP_LEN as usize) {
+        return false
+    }
+    var mac: [u8; 32] = [0 as u8; 32]
+    let mp: u64 = (&mac[0 as usize]) as u64
+    sha256.hmac(wrap + 64, 32, sl + 0x30, KEY_LEN as usize, mp)
+    var diff: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        diff = diff | (ld8(mp, i) ^ ld8(sl, 0x70 + i))
+        i = i + 1
+    }
+    zero(wrap, WRAP_LEN)
+    return diff == 0
+}
+
+fn forget_key() {
+    zero((&KEY[0 as usize]) as u64, KEY_LEN)
+    st_ready = 0
+}

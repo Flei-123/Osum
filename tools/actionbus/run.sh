@@ -256,7 +256,7 @@ if ! grep -qa '==FERTIG==' "$A"; then
 fi
 
 echo "== 2. the catalogue =="
-has "$A" "orientbus: ready apps=2 actions=8 rejected_manifests=1" "broker: 2 apps (notes + a wrapper), 8 actions/events, 1 manifest refused"
+has "$A" "orientbus: ready apps=2 actions=9 rejected_manifests=1" "broker: 2 apps (notes + a wrapper), 9 actions/events, 1 manifest refused"
 part "$A" LIST DESC > "$TMPD/list.txt"
 has "$TMPD/list.txt" "notes.add write Add a note at the end of the list" "list: action, level, description"
 has "$TMPD/list.txt" "notes.clear critical" "list: the critical action says so"
@@ -272,7 +272,7 @@ d = json.load(open(sys.argv[1]))
 h = json.load(open(sys.argv[2]))
 assert d["bus"] == "orient-bus" and d["version"] == 1
 names = [a["name"] for a in d["actions"]]
-assert names == ["notes.add", "notes.remove", "notes.count", "notes.list", "notes.clear"], names
+assert names == ["notes.add", "notes.addfile", "notes.remove", "notes.count", "notes.list", "notes.clear"], names
 add = d["actions"][0]
 assert add["level"] == "write" and add["dry_run"] and add["undo"] == "notes.remove"
 assert add["available"] is True
