@@ -82,7 +82,11 @@ export FIRNLIB="$ROOT/lib"
 # der Fehlliste, weil ein Rechner mit AVX-512 auf dem Tisch steht und
 # nicht in QEMU.
 export OSUM_CPU=${OSUM_CPU:-Haswell}
-OUT=${OUT:-/tmp/ota-run}
+# W-OTA2 15.10.2026: a fixed /tmp/ota-run was deleted by a foreign process in
+# the middle of a run (srv.log / gutN.txt vanished -> 7 false FAILs). Own
+# private dir per run unless OUT is given; removed at exit (OTA_KEEP=1 keeps).
+OWN_OUT=0
+if [ -z "${OUT:-}" ]; then OUT=$(mktemp -d "${TMPDIR:-/tmp}/ota-run.XXXXXX"); OWN_OUT=1; fi
 mkdir -p "$OUT" .probe
 # A-041: two rounds ran this file at the same time on /tmp/ota-run on
 # 24.09.2026 and overwrote each other's k.mb/quelle.img mid-run.
@@ -133,7 +137,7 @@ dienst() { # <wurzel> [weitere Schalter...]
     done
     return 1
 }
-aufraeumen() { dienst_aus; }
+aufraeumen() { dienst_aus; if [ "$OWN_OUT" = 1 ] && [ -z "${OTA_KEEP:-}" ]; then rm -rf "$OUT"; fi; }
 trap aufraeumen EXIT
 
 # Ein Lauf von der PLATTE, ueber OVMF, mit Netz. Gibt den
