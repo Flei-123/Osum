@@ -159,6 +159,11 @@ phase("idle", a_idle)
 phase("desktop", a_desktop)
 phase("bar", a_bar)
 phase("slow", a_slow)
+# final picture (pointer parked at a fixed place): the A/B proof compares it between a normal and a `nodiff` run
+cmd("mouse_move -2000 -2000")
+cmd("mouse_move 700 300")
+time.sleep(1.5)
+cmd("screendump %s/final.ppm" % outdir, 1.0)
 print("RESULT login=1 ready=1")
 for r in results:
     print(r)

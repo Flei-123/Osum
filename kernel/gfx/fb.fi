@@ -111,6 +111,8 @@ export {
     // RUNDE BLECHZWEI: nur ein Rechteck uebertragen, und die
     // Abbildungsart aus der Seitentafel selbst ablesen.
     flush_rect, pat_roh, pde_roh, stripe_slots,
+    // vboxlag: diff flush (shadow copy of what the card shows)
+    set_shadow, shadow_inval, diff_skipped, nodiff_an, M_NODIFF, nohidskip_an, M_NOHIDSKIP,
     // RUNDE BLECHDREI: das reservierte Band am oberen Rand.
     set_band, band, band_lo, band_open,
     // RUNDE VIRTIOGPU: die Uebertragungswaage und das Schmutzrechteck.
@@ -409,6 +411,15 @@ const S_BM_MHZF: u64 = 0x8F8 // refresh rate in millihertz, from the frame count
 const S_BM_COPY: u64 = 0x900 // copies of rectangles since boot (the denominator of the wait counters)
 const S_RM_IN: u64 = 0x908 // rectangles painted in frames that were merged (before the merge)
 const S_RM_OUT: u64 = 0x910 // ... and what was left after the merge
+// vboxlag: DIFF FLUSH. A shadow copy of what was last written to the card; `flush_rect` writes only the words that differ from it.
+const S_PATVAL: u64 = 0x938 // the PAT value the boot core set (WC at index 4); every other core copies it in `sched.on_tick`
+const S_PATDONE: u64 = 0x940 // bit per core: this core has the value (bit 0 = the boot core)
+const S_SHADOW: u64 = 0x918 // shadow buffer (same layout as the back buffer), 0 = none
+const S_SHVALID: u64 = 0x920 // 1 = the shadow equals what the card shows
+const S_SHBYTES: u64 = 0x928 // size of the shadow buffer
+const S_DIFFSKIP: u64 = 0x930 // octets the diff did NOT write (sum)
+const M_NOHIDSKIP: u64 = 8589934592 // "nohidskip" -- a hidden window's repaint damages the screen again, as before (counter-proof)
+const M_NODIFF: u64 = 4294967296 // "nodiff" -- write whole rectangles to the card, as before (counter-proof of tools/vboxlag)
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -847,7 +858,15 @@ fn pat_setup(state: u64) -> bool {
     }
     let c: u64 = asm("mov rax, cr3", out("rax"))
     asm("mov cr3, rax", in("rax") c)
-    return msr.rd0(state, IA32_PAT) == neu
+    let ok: bool = msr.rd0(state, IA32_PAT) == neu
+    if ok {
+        // vboxlag: PAT is PER CORE. The other cores were started before the screen (smp.stage) and still have the power-on value
+        // (index 4 = write-back): a write to the card from core 1 or 2 would go through a write-back mapping of the same pages.
+        // They pick the value up in their next timer tick (`sched.pat_here`).
+        kstate.set(state, FB_OFF + S_PATDONE, 1)
+        kstate.set(state, FB_OFF + S_PATVAL, neu)
+    }
+    return ok
 }
 
 // Die Seitenbits fuer den Rahmenpuffer, an EINER Stelle. `map_run` und
@@ -2381,6 +2400,14 @@ fn zreap_aus(state: u64) -> bool {
     return (mode(state) & M_NOZREAP) != 0
 }
 
+fn nohidskip_an(state: u64) -> bool {
+    return (mode(state) & M_NOHIDSKIP) != 0
+}
+
+fn nodiff_an(state: u64) -> bool {
+    return (mode(state) & M_NODIFF) != 0
+}
+
 fn phases_an(state: u64) -> bool {
     return (mode(state) & M_PHASES) != 0
 }
@@ -2878,6 +2905,7 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
         }
         arch.barrier_write()
         arch.irq_restore(fl)
+        shadow_copy(state, off, n)
         // RUNDE VIRTIOGPU: der Streifenweg wiegt jeden Block.
         tx_add(state, n)
         off = off +% n
@@ -3005,6 +3033,7 @@ fn flush(state: u64) {
     // RUNDE VIRTIOGPU: DER ALTE WEG WIEGT SICH SELBST. `n` ist, was
     // wirklich kopiert wurde -- ganze Bildzeilen, weil dieser Weg
     // keine Spalten kann.
+    shadow_copy(state, von, n)
     tx_add(state, n)
     // ============ RUNDE BLECHZWEI: HIER FEHLTE DAS `sfence`.
     //
@@ -3073,6 +3102,9 @@ fn write_bytes(state: u64, off: u64, src: u64, n: u64) -> u64 {
     var basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
         basis = kstate.get(state, FB_OFF + S_DRAW)
+    } else {
+        // vboxlag: this write goes to the card behind the shadow's back
+        kstate.set(state, FB_OFF + S_SHVALID, 0)
     }
     let dst: u64 = basis +% off
     let worte: u64 = len / 8
@@ -3454,6 +3486,8 @@ fn parse(state: u64, cmd: u64) {
     var w_nzr: [u8; 9] = "nozreap\0\0"
     var w_nrg: [u8; 6] = "norgn\0"
     var w_nph: [u8; 7] = "phases\0"
+    var w_ndf: [u8; 7] = "nodiff\0"
+    var w_nhs: [u8; 10] = "nohidskip\0"
     var w_nst: [u8; 8] = "nostrip\0"
     var w_nsh: [u8; 8] = "noshare\0"
     var w_ncp: [u8; 7] = "nocomp\0"
@@ -3503,6 +3537,12 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_nph[0]) as u64, 6) != 0 {
             m = m | M_PHASES
+        }
+        if find(cmd, (&w_ndf[0]) as u64, 6) != 0 {
+            m = m | M_NODIFF
+        }
+        if find(cmd, (&w_nhs[0]) as u64, 9) != 0 {
+            m = m | M_NOHIDSKIP
         }
         if find(cmd, (&w_nst[0]) as u64, 7) != 0 {
             m = m | M_NOSTRIP
@@ -3706,6 +3746,11 @@ fn want(state: u64, bit: u64) -> bool {
 // Zahl kann `logical_ok` nicht mehr sagen, ob eine Drehung noch
 // hineinpasst.
 fn set_backbuf(state: u64, b: u64, n: u64) {
+    // vboxlag: a new back buffer of another size: the shadow no longer fits (a mode change leaves the diff off)
+    if kstate.get(state, FB_OFF + S_SHBYTES) < n {
+        kstate.set(state, FB_OFF + S_SHADOW, 0)
+    }
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
     kstate.set(state, FB_OFF + S_BACK, b)
     kstate.set(state, FB_OFF + S_BACKBYTES, n)
     relayout(state)
@@ -3716,6 +3761,7 @@ fn back_bytes(state: u64) -> u64 {
 }
 
 fn set_back(state: u64, b: u64) {
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
     // RUNDE SCHIRM: im Streifenbetrieb gibt es kein "ohne Zweitpuffer".
     // Der Rahmenpuffer haengt dann nur SCHEIBENWEISE im Fenster, und
     // wer direkt in S_ADDR malt, schreibt nach 2 MiB in fremden
@@ -4195,6 +4241,7 @@ fn transformed(state: u64) -> bool {
 // Masse des Zweitpuffers aus und stellt Zeilenlaenge, Zeichenraster und
 // Zeichenziel darauf ein.
 fn relayout(state: u64) {
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
     let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
     let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
     let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
@@ -4428,6 +4475,7 @@ fn sat_color(state: u64, c: u64, s: u64) -> u64 {
 // eine Addition. Eine Division je Bildpunkt waere bei 786432
 // Bildpunkten der ganze Messwert.
 fn present(state: u64) {
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     if b == 0 {
         return
@@ -5140,6 +5188,7 @@ fn flush_rows(state: u64, lo: u64, hi: u64) {
     let src: u64 = b +% von
     copy_words(dst, src, n / 8)
     arch.barrier_write()
+    shadow_copy(state, von, n)
     tx_add(state, n)
     nachspuelen(state)
 }
@@ -5236,6 +5285,133 @@ fn beat(state: u64, feld: u64, an: u64) {
 //
 // Der Text der Tafel ist 30 Zeichen breit. Das Rechteck ist damit rund
 // ein Fuenftel der Bildbreite, und der Anstrich kostet ein Fuenftel.
+// ============ vboxlag: DIFF FLUSH
+//
+// Measured (tools/vboxlag): an idle desktop copied 1.27 MB per frame to the card and the pointer 1.1 MB, where the pixels that really
+// change are a few KB. A rectangle that the damage rules grow (glass bar, blur window) is painted again in the back buffer, but
+// most of its pixels come out the same. Writing them anyway costs every write-combined page; a virtual card (VirtualBox) tracks
+// each written page. So: keep a shadow copy of what the card shows, compare each row of the rectangle word by word and write only
+// the span from the first to the last changed word (into the card AND the shadow, from the same word read once, so the two cannot
+// differ).
+//
+// The shadow is valid only after one full copy (`shadow_sync_all`). Everything that writes the card behind the back buffer's
+// back (rotation, /dev/fb direct write, mode change, page flip) calls `shadow_inval`; the next rectangle then copies the whole
+// frame once and the shadow is valid again. Writers that copy back-buffer rows to the card (`flush`, `flush_stripe`, `flush_rows`)
+// keep the shadow in step with `shadow_copy`.
+fn set_shadow(state: u64, addr: u64, bytes: u64) {
+    kstate.set(state, FB_OFF + S_SHADOW, addr)
+    kstate.set(state, FB_OFF + S_SHBYTES, bytes)
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
+}
+
+fn shadow_inval(state: u64) {
+    kstate.set(state, FB_OFF + S_SHVALID, 0)
+}
+
+fn diff_skipped(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_DIFFSKIP)
+}
+
+// keep the shadow in step with a span the card just received from the back buffer
+fn shadow_copy(state: u64, off: u64, n: u64) {
+    let sh: u64 = kstate.get(state, FB_OFF + S_SHADOW)
+    if sh == 0 || kstate.get(state, FB_OFF + S_SHVALID) == 0 {
+        return
+    }
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 || flip_on(state) || off + n > kstate.get(state, FB_OFF + S_SHBYTES) {
+        kstate.set(state, FB_OFF + S_SHVALID, 0)
+        return
+    }
+    copy_words(sh +% off, b +% off, n / 8)
+    var k: u64 = (n / 8) * 8
+    while k + 4 <= n {
+        __mmio_write32((sh +% off +% k) as *mut u32, __mmio_read32((b +% off +% k) as *mut u32))
+        k = k + 4
+    }
+}
+
+// the first and last (exclusive) differing byte of one row of `n` bytes, packed as (first << 32) | last; 0 = rows equal
+fn row_diff(a: u64, b: u64, n: u64) -> u64 {
+    let words: u64 = n / 8
+    var i: u64 = 0
+    var go: bool = true
+    while go {
+        if i >= words {
+            go = false
+        } else if __mmio_read64((a +% i *% 8) as *mut u64) != __mmio_read64((b +% i *% 8) as *mut u64) {
+            go = false
+        } else {
+            i = i + 1
+        }
+    }
+    var tail_diff: bool = false
+    if n - words * 8 >= 4 {
+        if __mmio_read32((a +% words *% 8) as *mut u32) != __mmio_read32((b +% words *% 8) as *mut u32) {
+            tail_diff = true
+        }
+    }
+    if i >= words && !tail_diff {
+        return 0
+    }
+    let first: u64 = i * 8
+    var last: u64 = n
+    if !tail_diff {
+        var j: u64 = words
+        var go2: bool = true
+        while go2 {
+            if j <= i {
+                go2 = false
+            } else if __mmio_read64((a +% (j - 1) *% 8) as *mut u64) != __mmio_read64((b +% (j - 1) *% 8) as *mut u64) {
+                go2 = false
+            } else {
+                j = j - 1
+            }
+        }
+        last = j * 8
+    }
+    return (first << 32) | last
+}
+
+// write n bytes (multiple of 4) from the back buffer to the card and the shadow, every word read ONCE
+fn span_put(card: u64, shadow: u64, back: u64, n: u64) {
+    var k: u64 = 0
+    while k + 8 <= n {
+        let v: u64 = __mmio_read64((back +% k) as *mut u64)
+        __mmio_write64((card +% k) as *mut u64, v)
+        __mmio_write64((shadow +% k) as *mut u64, v)
+        k = k + 8
+    }
+    if k + 4 <= n {
+        let v4: u32 = __mmio_read32((back +% k) as *mut u32)
+        __mmio_write32((card +% k) as *mut u32, v4)
+        __mmio_write32((shadow +% k) as *mut u32, v4)
+    }
+}
+
+// the whole back buffer to the card and the shadow once; afterwards the shadow is valid
+fn shadow_sync_all(state: u64) {
+    let sh: u64 = kstate.get(state, FB_OFF + S_SHADOW)
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    if sh == 0 || b == 0 || h *% pt > kstate.get(state, FB_OFF + S_SHBYTES) {
+        return
+    }
+    // shadow first: if the back buffer changes meanwhile, the card gets the newer word and the shadow the older (the diff then
+    // writes it again); the other order could leave the shadow newer than the card
+    copy_words(sh, b, (h *% pt) / 8)
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        flush_stripe(state, 0, h)
+    } else {
+        let basis: u64 = draw_base(state)
+        copy_words(basis, b, (h *% pt) / 8)
+        arch.barrier_write()
+        tx_add(state, h *% pt)
+    }
+    kstate.set(state, FB_OFF + S_SHVALID, 1)
+}
+
 fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     if b == 0 {
@@ -5273,6 +5449,74 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
     }
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let n: u64 = ww *% 4
+    // vboxlag: the diff path (needs a shadow, no page flip, no word `nodiff`)
+    let shd: u64 = kstate.get(state, FB_OFF + S_SHADOW)
+    if shd != 0 && !flip_on(state) && !nodiff_an(state) && (y + hh) *% pt <= kstate.get(state, FB_OFF + S_SHBYTES) {
+        if kstate.get(state, FB_OFF + S_SHVALID) == 0 {
+            shadow_sync_all(state)
+            nachspuelen(state)
+            return
+        }
+        var wrote: u64 = 0
+        let stripe: bool = kstate.get(state, FB_OFF + S_STRIPE) != 0
+        let basis_s: u64 = kstate.get(state, FB_OFF + S_SLOTV)
+        let uc_s: bool = kstate.get(state, FB_OFF + S_UNCACHED) != 0
+        let phys_s: u64 = kstate.get(state, FB_OFF + S_PHYS)
+        let draw_s: u64 = draw_base(state)
+        var rr: u64 = 0
+        while rr < hh {
+            let roff: u64 = (y + rr) *% pt +% x *% 4
+            let d: u64 = row_diff(b +% roff, shd +% roff, n)
+            let first: u64 = d >> 32
+            let last: u64 = d & 0xFFFFFFFF
+            if last > first {
+                let f4: u64 = first & (~3)
+                let l4: u64 = last & (~3)
+                var cnt: u64 = l4 - f4
+                if cnt == 0 {
+                    cnt = 4
+                }
+                let goff: u64 = roff +% f4
+                if stripe {
+                    var rest: u64 = cnt
+                    var off: u64 = goff
+                    while rest > 0 {
+                        let p: u64 = phys_s +% off
+                        let blk: u64 = p & (~(HUGE_SIZE - 1))
+                        let inner: u64 = p - blk
+                        var seg: u64 = HUGE_SIZE - inner
+                        if seg > rest {
+                            seg = rest
+                        }
+                        let fl: u64 = arch.irq_save()
+                        if slot_remap(state, basis_s, blk, uc_s) {
+                            span_put(basis_s +% inner, shd +% off, b +% off, seg)
+                            tx_add(state, seg)
+                            wrote = wrote + seg
+                        }
+                        arch.irq_restore(fl)
+                        off = off +% seg
+                        rest = rest - seg
+                    }
+                } else {
+                    span_put(draw_s +% goff, shd +% goff, b +% goff, cnt)
+                    tx_add(state, cnt)
+                    wrote = wrote + cnt
+                }
+            }
+            rr = rr + 1
+        }
+        arch.barrier_write()
+        if wrote < n *% hh {
+            kstate.add(state, FB_OFF + S_DIFFSKIP, n *% hh - wrote)
+        }
+        nachspuelen(state)
+        return
+    }
+    // the old whole-rectangle copy below does not keep the shadow in step
+    if shd != 0 {
+        kstate.set(state, FB_OFF + S_SHVALID, 0)
+    }
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
         let basis: u64 = kstate.get(state, FB_OFF + S_SLOTV)
         let uc: bool = kstate.get(state, FB_OFF + S_UNCACHED) != 0

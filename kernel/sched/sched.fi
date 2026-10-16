@@ -2238,9 +2238,34 @@ fn yield_now(state: u64) {
 // over.
 // Called out of the interrupt handler, on EVERY core, with interrupts
 // already off -- which is why the lock may be taken here at all.
+// vboxlag: the PAT register is per core. The boot core sets index 4 to write-combining when the screen comes up (`fb.pat_setup`), the
+// other cores were started earlier and still have write-back there. Every core copies the value in its next tick (once; bit per core).
+// The offsets are `fb.FB_OFF + S_PATVAL / S_PATDONE`.
+fn pat_here(state: u64, me: u64) {
+    if me >= 63 {
+        return
+    }
+    let patv: u64 = kstate.get(state, 0x3C000 + 0x938)
+    if patv == 0 {
+        return
+    }
+    let bit: u64 = 1 << me
+    if (kstate.get(state, 0x3C000 + 0x940) & bit) != 0 {
+        return
+    }
+    if msr.wr(state, 0x277, patv) {
+        // the mappings were made under the old value on this core: drop its translations and its cache lines once
+        let c: u64 = asm("mov rax, cr3", out("rax"))
+        asm("mov cr3, rax", in("rax") c)
+        asm("wbinvd")
+    }
+    atomic.fetch_add(state + 0x3C000 + 0x940, bit)
+}
+
 fn on_tick(state: u64) {
     let me: u64 = cpu.here(state)
     cpu.add(state, me, cpu.C_TICKS, 1)
+    pat_here(state, me)
     atomic.lock_take(state, atomic.L_SCHED, me)
     let now: u64 = kstate.get(state, kstate.TICKS)
     let n: u64 = kstate.get(state, kstate.TASKS)
