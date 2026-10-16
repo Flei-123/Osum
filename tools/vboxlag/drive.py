@@ -62,11 +62,29 @@ def f12():
     cmd("sendkey f12", 0.6)
 
 
+# The serial lines of several CPUs tear into each other (worst under host load and with the `phases` rect log), so a marker
+# line like `glogin: bereit n=` may arrive without its prefix or not at all. Match the tolerant tails and fall back on the
+# earlier `glogin: fUi Szenenbaum` line plus a settle time.
+READY_MARKS = ("glogin: bereit", "bereit n=")
+LOGIN_MARKS = ("angemeldet als", "gemeldet als justin", "glogin: autostart", "glogin: desktop pid", "glogin: uid=")
+
+
+def seen(marks):
+    t = read()
+    return any(m in t for m in marks)
+
+
 t0 = time.time()
 ready = 0
+fui_at = None
 while time.time() - t0 < tmo:
-    if "glogin: bereit" in read():
+    if seen(READY_MARKS):
         ready = 1
+        break
+    if fui_at is None and "Szenenbaum" in read():
+        fui_at = time.time()
+    if fui_at is not None and time.time() - fui_at > 12:
+        ready = 1          # screen is up, ready line lost to torn serial output
         break
     time.sleep(1)
 if not ready:
@@ -87,7 +105,7 @@ def try_login():
     cmd("sendkey ret")
     t1 = time.time()
     while time.time() - t1 < 15:
-        if "glogin: angemeldet als" in read():
+        if seen(LOGIN_MARKS):
             return True
         time.sleep(1)
     return False

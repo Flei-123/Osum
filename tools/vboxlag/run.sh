@@ -42,7 +42,7 @@ qemu-system-x86_64 -m 2048 "${accel[@]}" -smp 3 -M pc -vga std \
     -nic user,model=e1000 -serial file:"$OUT/serial.txt" -display none -no-reboot \
     -monitor unix:"$D/mon",server,nowait &
 qp=$!
-python3 -I "$HERE/drive.py" "$D/mon" "$OUT/serial.txt" "$OUT" 180 | tee "$OUT/result.txt"
+python3 -I "$HERE/drive.py" "$D/mon" "$OUT/serial.txt" "$OUT" 300 | tee "$OUT/result.txt"
 kill $qp 2>/dev/null; wait $qp 2>/dev/null
 rm -f "$D/s.img"
 # verdict (thresholds of the 16.10.2026 diff-flush round): pointer phases <= 64 KB per frame, idle < 100 KB/s. With `nodiff` in EXTRA the
