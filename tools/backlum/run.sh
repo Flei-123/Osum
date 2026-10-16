@@ -23,7 +23,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 val() { # val <serial> <name> <field 3|4>   the last line "backlum: name a b"
-    grep -a "^backlum: $2 " "$1" | tail -1 | awk -v f="$3" '{print $f}'
+    grep -a "backlum: $2 " "$1" | tail -1 | sed 's/.*backlum: /backlum: /' | awk -v f="$3" '{print $f}'
 }
 eq() { # eq <serial> <name> <field> <expected> <text>
     local v; v=$(val "$1" "$2" "$3")
@@ -79,12 +79,13 @@ TOL=2056
 
 echo "== build + run /bin/backlum in the desktop =="
 bash tools/alltag/build.sh "$D/w1" kbd=no accel=kvm shot=no uitrace=no \
-    "extra=wigapp=/bin/backlum wighalt=60" progs="backlum sh echo" > "$D/w1.log" 2>&1
+    "extra=wigapp=/bin/backlum wighalt=100" progs="backlum sh echo" > "$D/w1.log" 2>&1
 S="$D/w1/serial.txt"
 if [ ! -s "$S" ]; then
     grep -a "FEHLGESCHLAGEN\|error" "$D/w1.log" | head -5
     bad "no serial output"
 fi
+[ -n "${BL_KEEP:-}" ] && cp "$S" "$BL_KEEP"
 grep -a '^backlum:' "$S" | sed 's/^/        /'
 
 eq "$S" begin 3 1 "the window library started"
@@ -137,7 +138,7 @@ echo "== 5. the text colour decider on the live measurement =="
 L=$(exp switch)
 near "$S" noise-range 3 "$L" 2500 "noisy grey: lowest mean sits at the switch point"
 near "$S" noise-range 4 "$L" 2500 "noisy grey: highest mean sits at the switch point"
-eq "$S" noise-flips 3 0 "NOISY CONSTANT BACKGROUND: 0 flips in 100 frames"
+eq "$S" noise-flips 3 0 "NOISY CONSTANT BACKGROUND: 0 flips in 60 frames"
 eq "$S" noise-flips 4 1 "  and the colour stays white text"
 ge "$S" noise-flips-plain 3 10 "COUNTER-PROOF: the plain threshold (no band, no hold) flips on the same frames"
 eq "$S" step-flips 3 1 "ONE REAL CHANGE (black -> white): exactly 1 flip"

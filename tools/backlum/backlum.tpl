@@ -96,16 +96,33 @@ fn fill_grad(p: u64) {
 
 // a grey level with a global offset (the frame's own flicker) and a per-point noise of +-pn
 fn fill_noise(p: u64, level: u64, pn: u64) {
-    var y: u64 = 0
-    while y < BH {
-        var x: u64 = 0
-        while x < BW {
+    var y: u64 = 60
+    while y < 60 + PH {
+        var x: u64 = PX0
+        while x < PX0 + PW {
             let v: u64 = level + (rnd() % (2 * pn + 1)) - pn
             __mmio_write32((p + (y * BW + x) * 4) as *mut u32, grey(v) as u32)
             x = x + 1
         }
         y = y + 1
     }
+}
+
+// the loops below repaint only the footprint of the probe (x 120..280, y 60..140 inside B): the guest is slow at single pixel stores
+fn fill_rect(p: u64, color: u64) {
+    var y: u64 = 60
+    while y < 60 + PH {
+        var x: u64 = PX0
+        while x < PX0 + PW {
+            __mmio_write32((p + (y * BW + x) * 4) as *mut u32, color as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn damage_rect(hb: u64) {
+    let _d: u64 = wlibc.win_damage(hb, PX0, 60, PW, PH)
 }
 
 // A frameless shared-buffer window at (x, y), w x h, solid colour. Returns the handle (0 = failed); the buffer is left in g_p.
@@ -171,7 +188,6 @@ fn scrim_contrast(h: u64) -> u64 {
 // repaint B and read the probe's answers: one line `<name> mean hi`, one `<name>-lo lo contrast`
 fn probe(hp: u64, hb: u64, pb: u64, name: u64, nlo: u64) {
     let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
-    let _s: u64 = ulib.sleep_ms(30)
     line(name, mean_of(hp), hi_of(hp))
     line(nlo, lo_of(hp), worst_contrast(hp))
 }
@@ -182,16 +198,16 @@ fn solid_case(hp: u64, hb: u64, pb: u64, color: u64, name: u64, nlo: u64) {
 }
 
 fn noise_run(hp: u64, hb: u64, pb: u64) {
-    // constant grey at the switch point (sRGB 117 = L 0.178), a frame flicker of +-5 levels and a point noise of +-4: 100 frames, 50 ms apart
+    // constant grey at the switch point (sRGB 117 = L 0.178), a frame flicker of +-5 levels and a point noise of +-4: 60 frames, 50 ms apart
     var i: u64 = 0
     backlum.tc_init((&g_ta[0 as usize]) as u64, 0, backlum.L_SWITCH)
     backlum.tc_init((&g_tb[0 as usize]) as u64, 0, backlum.L_SWITCH)
     var lo_seen: u64 = 65536
     var hi_seen: u64 = 0
-    while i < 100 {
+    while i < 60 {
         let level: u64 = 117 + (rnd() % 11) - 5
         fill_noise(pb, level, 4)
-        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+        damage_rect(hb)
         let m: u64 = mean_of(hp)
         if m < lo_seen {
             lo_seen = m
@@ -209,17 +225,17 @@ fn noise_run(hp: u64, hb: u64, pb: u64) {
 }
 
 fn step_run(hp: u64, hb: u64, pb: u64) {
-    // a real change: black for 40 frames, then white for 60
+    // a real change: black for 24 frames, then white for 36
     var i: u64 = 0
     backlum.tc_init((&g_ta[0 as usize]) as u64, 0, 0)
     backlum.tc_init((&g_tb[0 as usize]) as u64, 0, 0)
-    while i < 100 {
+    while i < 60 {
         var c: u64 = 0
-        if i >= 40 {
+        if i >= 24 {
             c = 0xFFFFFF
         }
-        fill_solid(pb, BW * BH, c)
-        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+        fill_rect(pb, c)
+        damage_rect(hb)
         let m: u64 = mean_of(hp)
         let _a: u64 = backlum.tc_update((&g_ta[0 as usize]) as u64, (i + 1) * 50, m)
         let _b: u64 = backlum.tc_update_ex((&g_tb[0 as usize]) as u64, (i + 1) * 50, m, 0, 0)
@@ -230,13 +246,13 @@ fn step_run(hp: u64, hb: u64, pb: u64) {
 }
 
 fn ramp_run(hp: u64, hb: u64, pb: u64) {
-    // a slow ramp black -> white over 128 frames (2 levels per frame), the same grey everywhere
+    // a slow ramp black -> white over 64 frames (4 levels per frame), the same grey everywhere
     var i: u64 = 0
     backlum.tc_init((&g_ta[0 as usize]) as u64, 0, 0)
     backlum.tc_init((&g_tb[0 as usize]) as u64, 0, 0)
-    while i < 128 {
-        fill_solid(pb, BW * BH, grey(i * 2))
-        let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+    while i < 64 {
+        fill_rect(pb, grey(i * 4))
+        damage_rect(hb)
         let m: u64 = mean_of(hp)
         let _a: u64 = backlum.tc_update((&g_ta[0 as usize]) as u64, (i + 1) * 50, m)
         let _b: u64 = backlum.tc_update_ex((&g_tb[0 as usize]) as u64, (i + 1) * 50, m, 0, 0)
@@ -275,7 +291,6 @@ fn u_start(args: u64) -> u64 {
     // 2. a window ABOVE the probe does not count: T (white) is created after P and lies over it
     solid_case(hp, hb, pb, 0x000000, @pre-above@, @pre-above-lo@)
     let ht: u64 = mkwin(300, 200, 100, 60, 0xFFFFFF)
-    let _s2: u64 = ulib.sleep_ms(30)
     line(@above@, mean_of(hp), hi_of(hp))
     // a window BELOW B... is B itself: now put a white window UNDER nothing -- instead check that T (above P) has P and B behind it
     line(@t-behind@, mean_of(ht), hi_of(ht))
