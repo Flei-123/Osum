@@ -8,6 +8,9 @@
 //     apprights forget <app>                 package removed: drop its grants and its auto-grant record
 //     apprights trymic|trygrant <app>        test: a child labelled app:<app> reads the microphone / grants itself `mic`
 //     apprights try <what> <app>             test: a child labelled app:<app> uses clipr clipw notify audio net
+//     apprights list                         one line per app of /proc/apps: app <name> <mask> <ceil> <cpu> <wakeups> <tx> <rx> <data>
+//     apprights stop <app>                   force stop: kill every task labelled app:<app>
+//     apprights burn cpu|spin|net <app>      test: a child labelled app:<app> burns CPU (cpu: 0.4 s, spin: until stopped) / pings the gateway
 //
 // `set` also writes the grant to /etc/apprights.conf (only apps with a grant), `load` applies it at the next start.
 //
@@ -47,7 +50,7 @@ fn do_get(app: u64) -> u64 {
     ulib.sayu(r)
     var b: u64 = 1
     var i: u64 = 0
-    while i < 12 {
+    while i < 13 {
         if (r & b) != 0 {
             ulib.say((&s_sp[0]) as u64)
             ulib.say(policy.name_of_bit(b))
@@ -560,6 +563,196 @@ fn run_child(app: u64, which: u64) -> u64 {
     return ulib.wait_code(pid)
 }
 
+// ---- AR-6: app info page helpers -------------------------------------------------------------------------
+
+static mut apps_buf: [u8; 2048] = [0 as u8; 2048]
+static mut lab_buf: [u8; 32] = [0 as u8; 32]
+
+fn app_data_dir_exists(name: u64) -> bool {
+    var pre: [u8; 7] = "/data/\0"
+    var path: [u8; 40] = [0 as u8; 40]
+    ulib.copy((&path[0]) as u64, (&pre[0]) as u64, 6)
+    let n: u64 = ulib.length(name)
+    if n == 0 || n > 19 {
+        return false
+    }
+    ulib.copy((&path[6]) as u64, name, n)
+    let fd: u64 = io.open((&path[0]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    io.close(fd)
+    return true
+}
+
+// `list`: one line per row of /proc/apps. Fields after the name are the mask and the ceiling (8192 = none), then the
+// counters exactly as the kernel prints them, then data=0|1 (does /data/<name> exist).
+fn do_list() -> u64 {
+    var s_app: [u8; 5] = "app \0"
+    var s_data: [u8; 7] = " data=\0"
+    var p_apps: [u8; 11] = "/proc/apps\0"
+    var s_sp: [u8; 2] = " \0"
+    let n: u64 = read_into((&p_apps[0]) as u64, (&apps_buf[0]) as u64, 2048)
+    var i: u64 = 0
+    var first: bool = true
+    while i < n {
+        // one line: [i, e)
+        var e: u64 = i
+        while e < n && apps_buf[e as usize] != 10 as u8 {
+            e = e + 1
+        }
+        if first {
+            first = false // header line
+        } else if e > i {
+            var nm: [u8; 24] = [0 as u8; 24]
+            var k: u64 = 0
+            while i + k < e && k < 20 && apps_buf[(i + k) as usize] != 32 as u8 {
+                nm[k as usize] = apps_buf[(i + k) as usize]
+                k = k + 1
+            }
+            ulib.say((&s_app[0]) as u64)
+            ulib.say((&nm[0]) as u64)
+            ulib.say((&s_sp[0]) as u64)
+            let m: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 3, (&nm[0]) as u64, 0)
+            if ulib.failed(m) {
+                ulib.sayu(0)
+            } else {
+                ulib.sayu(m)
+            }
+            ulib.say((&s_sp[0]) as u64)
+            let c: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 5, (&nm[0]) as u64, 0)
+            if ulib.failed(c) {
+                ulib.sayu(policy.CEIL_NONE)
+            } else {
+                ulib.sayu(c)
+            }
+            // the rest of the line (counters)
+            var j: u64 = i + k
+            while j < e {
+                var one: [u8; 2] = [0 as u8; 2]
+                one[0] = apps_buf[j as usize]
+                ulib.say((&one[0]) as u64)
+                j = j + 1
+            }
+            ulib.say((&s_data[0]) as u64)
+            if app_data_dir_exists((&nm[0]) as u64) {
+                ulib.sayu(1)
+            } else {
+                ulib.sayu(0)
+            }
+            ulib.nl()
+        }
+        i = e + 1
+    }
+    return 0
+}
+
+// `stop`: force stop = SYS_KILL for every task whose attested label is exactly app:<name>.
+fn do_stop(app: u64) -> u64 {
+    var s_n: [u8; 18] = "apprights: stop \0\0"
+    var s_bad: [u8; 20] = "apprights: bad name\0"
+    let nl: u64 = ulib.length(app)
+    if nl == 0 || nl > 19 {
+        ulib.say((&s_bad[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var want: [u8; 32] = [0 as u8; 32]
+    want[0] = 97 as u8
+    want[1] = 112 as u8
+    want[2] = 112 as u8
+    want[3] = 58 as u8
+    ulib.copy((&want[4]) as u64, app, nl)
+    var killed: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 {
+            let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+            if !ulib.bad(pid) && pid != 0 {
+                let ln: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 0, pid, (&lab_buf[0]) as u64)
+                if !ulib.failed(ln) && ln == nl + 4 {
+                    var same: bool = true
+                    var q: u64 = 0
+                    while q < ln {
+                        if lab_buf[q as usize] != want[q as usize] {
+                            same = false
+                        }
+                        q = q + 1
+                    }
+                    if same {
+                        let r: u64 = ulib.sys(ulib.SYS_KILL, pid, 137, 0)
+                        if !ulib.bad(r) {
+                            killed = killed + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    ulib.say((&s_n[0]) as u64)
+    ulib.sayu(killed)
+    ulib.nl()
+    return 0
+}
+
+// test child: label as app:<app>, then burn CPU for ~40 ticks (kind 0) or ping the gateway (kind 1)
+fn child_burn(app: u64, kind: u64) -> u64 {
+    var s_lab: [u8; 12] = "burn: label\0"
+    var s_ping: [u8; 11] = "/bin/ping\0\0"
+    var a_c: [u8; 3] = "-c\0"
+    var a_n: [u8; 2] = "3\0"
+    var a_ip: [u8; 9] = "10.0.2.2\0"
+    if !label_self(app) {
+        ulib.say((&s_lab[0]) as u64)
+        ulib.nl()
+        return 3
+    }
+    if kind == 1 {
+        var argv: [u64; 4] = [0 as u64; 4]
+        argv[0] = (&s_ping[0]) as u64
+        argv[1] = (&a_c[0]) as u64
+        argv[2] = (&a_n[0]) as u64
+        argv[3] = (&a_ip[0]) as u64
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&s_ping[0]) as u64, (&argv[0]) as u64, 4)
+        if ulib.bad(pid) {
+            return 255
+        }
+        return ulib.wait_code(pid)
+    }
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var acc: u64 = 1
+    var span: u64 = 40
+    if kind == 2 {
+        span = 6000 // `spin`: runs until `apprights stop` ends it (the limit only keeps a failed test from hanging)
+    }
+    while ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) < t0 + span {
+        var j: u64 = 0
+        while j < 20000 {
+            acc = acc *% 6364136223846793005 +% 1442695040888963407
+            j = j + 1
+        }
+    }
+    if acc == 12345 {
+        return 7
+    }
+    return 0
+}
+
+fn run_burn(app: u64, kind: u64) -> u64 {
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.failed(pid) {
+        return 1
+    }
+    if pid == 0 {
+        let rc: u64 = child_burn(app, kind)
+        let _e: u64 = ulib.sys(ulib.SYS_EXIT, rc, 0, 0)
+        return rc
+    }
+    return ulib.wait_code(pid)
+}
+
 fn u_start(args: u64) -> u64 {
     var s_use1: [u8; 40] = "usage: apprights get <app>\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
     var s_use2: [u8; 39] = "       apprights set <app> [right ...]\0"
@@ -584,8 +777,28 @@ fn u_start(args: u64) -> u64 {
     var s_ceil: [u8; 5] = "ceil\0"
     var s_try: [u8; 4] = "try\0"
     var s_forget: [u8; 7] = "forget\0"
+    var s_list: [u8; 5] = "list\0"
+    var s_stop: [u8; 5] = "stop\0"
+    var s_burn: [u8; 5] = "burn\0"
+    var w_cpu: [u8; 4] = "cpu\0"
+    var w_spin: [u8; 5] = "spin\0"
     if ulib.streq(cmd, (&s_load[0]) as u64) {
         return do_load()
+    }
+    if ulib.streq(cmd, (&s_list[0]) as u64) {
+        return do_list()
+    }
+    if ulib.streq(cmd, (&s_stop[0]) as u64) && argc >= 3 {
+        return do_stop(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(cmd, (&s_burn[0]) as u64) && argc >= 4 {
+        if ulib.streq(ulib.arg_at(args, 2), (&w_cpu[0]) as u64) {
+            return run_burn(ulib.arg_at(args, 3), 0)
+        }
+        if ulib.streq(ulib.arg_at(args, 2), (&w_spin[0]) as u64) {
+            return run_burn(ulib.arg_at(args, 3), 2)
+        }
+        return run_burn(ulib.arg_at(args, 3), 1)
     }
     if ulib.streq(cmd, (&s_forget[0]) as u64) && argc >= 3 {
         return do_forget(ulib.arg_at(args, 2))

@@ -63,11 +63,16 @@ mutate allow-all policy.fi "    let app: u64 = label_app(label)
 mutate no-ceiling-check policy.fi "        if ((mask & P_ALL) & (P_ALL - ceils[s as usize])) != 0 {
             return E_CEIL
         }" ""
-mutate float-not-in-all policy.fi "const P_ALL: u64 = 4095" "const P_ALL: u64 = 2047"
+mutate float-not-in-all policy.fi "const P_ALL: u64 = 8191" "const P_ALL: u64 = 2047"
 mutate float-in-safe policy.fi "const P_SAFE: u64 = 244" "const P_SAFE: u64 = 2292"
-mutate float-name-lost policy.fi "    while i < 12 {
+mutate float-name-lost policy.fi "    while i < 13 {
         if eq(name, name_at(i)) {" "    while i < 11 {
         if eq(name, name_at(i)) {"
+mutate hotkey-in-safe policy.fi "const P_SAFE: u64 = 244" "const P_SAFE: u64 = 4340"
+mutate hotkey-name-lost policy.fi "    while i < 13 {
+        if eq(name, name_at(i)) {" "    while i < 12 {
+        if eq(name, name_at(i)) {"
+mutate hotkey-not-in-all policy.fi "const P_ALL: u64 = 8191" "const P_ALL: u64 = 4095"
 mutate ceiling-no-clamp policy.fi "    masks[s as usize] = masks[s as usize] & ceils[s as usize]" "    masks[s as usize] = masks[s as usize]"
 mutate ceiling-ignored policy.fi "    return ceils[s as usize]
 }
