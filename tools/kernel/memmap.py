@@ -122,6 +122,8 @@ BEREICHE = [
     ("SIG",        "kstate.fi", "SIG_OFF",        "SIGCTX_OFF - SIG_OFF"),
     ("SIGCTX",     "kstate.fi", "SIGCTX_OFF",     "SIGCTX_BYTES * MAX_TASKS"),
     ("SIGRT",      "kstate.fi", "SIGRT_OFF",      "SIGRT_MAX"),
+    ("EXE",        "kstate.fi", "EXE_OFF",        "EXE_MAX"),
+    ("SHMN",       "kstate.fi", "SHMN_OFF",       "SHMN_MAX"),
     ("TTY",        "kstate.fi", "TTY_OFF",        "TTY_MAX"),
     ("TTY2",       "kstate.fi", "TTY2_OFF",       "TTY2_MAX"),
     ("RAND",       "kstate.fi", "RAND_OFF",       "RAND_MAX"),

@@ -171,7 +171,9 @@ const F_MAPS: u64 = 4
 const F_FD: u64 = 5 // das VERZEICHNIS fd/
 const F_LIMITS: u64 = 6
 const F_CGROUP: u64 = 7
-const F_LAST: u64 = 7
+const F_EXE: u64 = 8 // symlink: the program the task was started from
+const F_CWD: u64 = 9 // symlink: its working directory
+const F_LAST: u64 = 9
 
 const BUF_MAX: u64 = 4000 // von 4096; der Rest ist Luft fuer die letzte Zeile
 
@@ -1129,6 +1131,27 @@ fn map_line(state: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     return p
 }
 
+// LC-PROC: the targets of the symlinks /proc/<pid>/exe and /proc/<pid>/cwd (the text is the link target, no newline)
+fn make_exe(state: u64, t: u64) -> u64 {
+    let n: u64 = uio.exe_len(state, t)
+    var i: u64 = 0
+    while i < n && i < BUF_MAX {
+        w_ch(state, i, uio.exe_at(state, t, i))
+        i = i + 1
+    }
+    return i
+}
+
+fn make_cwd(state: u64, t: u64) -> u64 {
+    let n: u64 = uio.cwd_len(state, t)
+    var i: u64 = 0
+    while i < n && i < BUF_MAX {
+        w_ch(state, i, uio.cwd_at(state, t, i))
+        i = i + 1
+    }
+    return i
+}
+
 fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
     var k_file: [u8; 6] = "file \0"
     var k_dir: [u8; 5] = "dir \0"
@@ -1755,6 +1778,12 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == F_CGROUP {
             return make_cgroup(state)
         }
+        if sub == F_EXE {
+            return make_exe(state, slot)
+        }
+        if sub == F_CWD {
+            return make_cwd(state, slot)
+        }
         return 0
     }
     if art == K_FDFILE {
@@ -1883,6 +1912,14 @@ fn pidfile_of(name: u64) -> u64 {
     var e: [u8; 3] = "fd\0"
     var lm: [u8; 7] = "limits\0"
     var cg: [u8; 7] = "cgroup\0"
+    var ex: [u8; 4] = "exe\0"
+    var cw: [u8; 4] = "cwd\0"
+    if streq(name, (&ex[0]) as u64) {
+        return F_EXE
+    }
+    if streq(name, (&cw[0]) as u64) {
+        return F_CWD
+    }
     if streq(name, (&lm[0]) as u64) {
         return F_LIMITS
     }
@@ -2105,8 +2142,14 @@ fn pidfile_name(state: u64, sub: u64, out: u64) {
     var e: [u8; 3] = "fd\0"
     var lm2: [u8; 7] = "limits\0"
     var cg2: [u8; 7] = "cgroup\0"
+    var ex2: [u8; 4] = "exe\0"
+    var cw2: [u8; 4] = "cwd\0"
     var src: u64 = (&a[0]) as u64
-    if sub == F_LIMITS {
+    if sub == F_EXE {
+        src = (&ex2[0]) as u64
+    } else if sub == F_CWD {
+        src = (&cw2[0]) as u64
+    } else if sub == F_LIMITS {
         src = (&lm2[0]) as u64
     } else if sub == F_CGROUP {
         src = (&cg2[0]) as u64
@@ -2235,6 +2278,9 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
             }
             return vfsops.N_FILE
         }
+        if art == K_PIDFILE && (n_sub(n) == F_EXE || n_sub(n) == F_CWD) {
+            return vfsops.N_LNK
+        }
         if art == K_GLOBAL || art == K_PIDFILE || art == K_FDFILE {
             return vfsops.N_FILE
         }
@@ -2257,6 +2303,9 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
     if what == vfsops.A_MODE {
         if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && sys_is_dir(n_sub(n))) {
             return 365 // 0o555 -- lesen und betreten, nicht schreiben
+        }
+        if art == K_PIDFILE && (n_sub(n) == F_EXE || n_sub(n) == F_CWD) {
+            return 511 // 0o777: a symlink
         }
         return 292 // 0o444
     }
