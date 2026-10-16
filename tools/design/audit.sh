@@ -168,6 +168,8 @@ echo "uiscale ${uiscale:-1 (Vorgabe)}"
 mkdir -p "$OUT"
 BUILDD=${DESIGNBUILD:-/tmp/osum-designbuild-$(pwd | md5sum | cut -c1-12)}
 mkdir -p "$BUILDD"
+OUT=$(cd "$OUT" && pwd)
+BUILDD=$(cd "$BUILDD" && pwd)
 
 # ---------------------------------------------------------- 1. bauen
 bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
@@ -557,15 +559,19 @@ if [ -n "$zweite" ]; then
     cp "$zweite" "$OUT/zweite.img"
     ZWEITE=(-drive "file=$OUT/zweite.img,format=raw,if=ide,index=1")
 fi
-timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc $FSFLAG lang=$lang $SKAL $extra" \
+# r16.10 (visC): the kernel searches its command line by SUBSTRING, and QEMU puts the kernel PATH in front of it. A path with `data`
+# switched on the word `ata` (formats the audit disk -> no fonts -> "ttf: keine Schrift gefunden", never `wm: hold`), and a path
+# WITHOUT `osum` lacked the word `osum` the user land needs. So: boot with the RELATIVE name k0.mb from inside the build dir, and say
+# `osum` explicitly. (Worktrees under /root/jarvis/data/staff_wt/... never booted before this.)
+( cd "$BUILDD" && exec timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m 512 \
+    -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt nokbd nosched noproc $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
     "${ZWEITE[@]}" \
     "${TONDEV[@]}" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 ) &
 PID=$!
 i=0
 while [ $i -lt 2400 ]; do
