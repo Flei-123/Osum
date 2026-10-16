@@ -31,7 +31,7 @@ export {
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
     updates, update_octets, verify_bad, width, height, fifo_full,
-    fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
+    safety_updates, fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
     VMSVGA_OFF, VMSVGA_MAX
 }
 
@@ -85,6 +85,9 @@ const S_SEENN: u64 = 0x150 // consecutive polls that saw S_SEEN
 const S_HANDLED: u64 = 0x158 // host size already tried (do not retry the same one every poll)
 const S_NEXTPOLL: u64 = 0x160 // earliest next host poll (ms)
 const S_HOSTRSZ: u64 = 0x168 // resizes that followed a host request
+const S_LASTUPD: u64 = 0x170 // ms of the last UPDATE sent
+const S_SAFETY: u64 = 0x178 // safety-net full UPDATEs (writers that bypass fb.vms_note, e.g. /dev/fb)
+const SAFETY_MS: u64 = 10000
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
 // ---- PCI
@@ -457,7 +460,16 @@ fn send_update(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     fifo_commit(state)
     kstate.add(state, s(S_UPDATES), 1)
     kstate.add(state, s(S_UPOKT), w *% h *% 4)
+    kstate.set(state, s(S_LASTUPD), now_ms(state))
     return true
+}
+
+fn now_ms(state: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    return apic.tsc() / (hz / 1000)
 }
 
 // Take the box the copy sites noted (and clear it) with interrupts off.
@@ -530,6 +542,14 @@ fn present(state: u64) -> bool {
     var x1: u64 = 0
     var y1: u64 = 0
     if !acc_take(state, &x0, &y0, &x1, &y1) {
+        // safety net: a writer that does not go through fb.vms_note (/dev/fb) would never be shown. After SAFETY_MS without any
+        // UPDATE tell the host the whole picture once (cost at 1920x1080: 8 MB per 10 s, nothing while frames flow).
+        let last: u64 = kstate.get(state, s(S_LASTUPD))
+        let nm: u64 = now_ms(state)
+        if nm != 0 && last != 0 && nm > last + SAFETY_MS {
+            kstate.add(state, s(S_SAFETY), 1)
+            return send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
+        }
         return true
     }
     let sw: u64 = kstate.get(state, s(S_W))
@@ -805,6 +825,7 @@ fn size_ok(state: u64, w: u64, h: u64) -> bool {
 
 fn vram_bytes(state: u64) -> u64 { return kstate.get(state, s(S_VRAMSZ)) }
 fn pitch(state: u64) -> u64 { return kstate.get(state, s(S_PITCH)) }
+fn safety_updates(state: u64) -> u64 { return kstate.get(state, s(S_SAFETY)) }
 fn host_resizes(state: u64) -> u64 { return kstate.get(state, s(S_HOSTRSZ)) }
 // Physical address of the scan-out start (VRAM + FB_OFFSET)
 fn fb_phys(state: u64) -> u64 { return kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF)) }
@@ -919,6 +940,7 @@ fn say(state: u64) {
     var s_rz: [u8; 6] = " rsz=\0"
     var s_rh: [u8; 7] = " host=\0"
     var s_re: [u8; 6] = " err=\0"
+    var s_sf: [u8; 7] = " safe=\0"
     var s_vf: [u8; 20] = "vmsvga: verify bad=\0"
     var s_vn: [u8; 9] = " frames=\0"
     if kstate.get(state, s(S_UP)) == 0 {
@@ -958,6 +980,8 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_HOSTRSZ)))
     serial.puts((&s_re[0]) as u64)
     serial.dec(kstate.get(state, s(S_RSZERR)))
+    serial.puts((&s_sf[0]) as u64)
+    serial.dec(kstate.get(state, s(S_SAFETY)))
     serial.nl()
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         serial.puts((&s_vf[0]) as u64)

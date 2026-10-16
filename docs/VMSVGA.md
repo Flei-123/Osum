@@ -128,3 +128,17 @@ Everything marked [VBOX?] is from memory of the VirtualBox device and MUST be ch
   `hwcur_moeglich`/`hwcur_bewegen` (~14055..14103); vmode.fi `switch_to` (`ready()`, `vbe_set`, `S_LFB` are Bochs-only; `check_custom`/`karte_nimmt`
   probe Bochs registers) -> needs `backend_set`/`backend_lfb` and `ready()` true when VMSVGA is active.
 - Verify idea (debug word): keep a "presented copy" of VRAM, at `present` compare everything OUTSIDE the sent box with it (count `bad`), then copy the box.
+
+## 10. Third/fourth pass 16.10. night (worker vmsvga4): resize, gate, what is proven
+- vmode backend switch: `vmode.probe` calls `probe_vmsvga` when `vmsvga.bereit` (candidate list >= 640x480 filtered by device limits, VRAM and the
+  kernel map limit, no EDID, no Bochs registers touched); `backend_set` = `vmsvga.resize` or `vbe_set`; `switch_to` and its two fallbacks use it;
+  `karte_nimmt` checks limits only. After the switch `vmsvga.resized` drops the dirty box, rebuilds the verify copy and sends one full UPDATE.
+- Host-resize poll (`vmsvga.host_pending`, called from `gfx.gpu_ereignis` in the idle task, max every 250 ms): with CAP_DISPLAY_TOPOLOGY select
+  DISPLAY_ID 0 and read DISPLAY_WIDTH/HEIGHT (regs 39/40). Acts only when the size differs from the mode, is >= 640x480 inside the device limits, was
+  seen twice in a row and was not tried before; then `vmode.follow_host`. [VBOX?, UNVERIFIED: nobody has seen VirtualBox put a hint there.]
+  QEMU 7.2 has no hint, so the poll is NOT exercised by the gate; the gate drives the same `follow_host` call from the test bed.
+- Safety net: after 10 s without any UPDATE the next frame boundary sends one full UPDATE (writers that bypass `fb.vms_note`, e.g. /dev/fb).
+- Cursor: QEMU takes DEFINE_CURSOR as xor image + and-mask; a VNC client receives a 32x32 RichCursor with 359 opaque / 665 transparent pixels
+  (an arrow, not inverted). Alpha cursor (`DEFINE_ALPHA_CURSOR`) and CURSOR_BYPASS_3 FIFO position are code paths QEMU never takes: [VBOX?].
+- Gate `tools/vmsvga/run.sh` (word `vmsvgahw` test bed in kgui.fi): see its header. Screendump of every mode is byte-identical to the Bochs-VBE run of
+  the same kernel; a VNC client that applies ONLY the UPDATE rectangles ends up equal to the screendump (end-to-end proof that the rects are complete).

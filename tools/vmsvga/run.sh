@@ -91,6 +91,7 @@ chk "idle 2 s: < 100 KB/s" '[ "$(grep -a "^vmsvga: idle okt=" "$M" | tail -1 | s
 chk "verify: bad=0 over frames > 10" \
     'l=$(grep -a "^vmsvga: verify bad=" "$M" | tail -1); echo "$l" | grep -q "bad=0 " && [ "$(echo "$l" | sed -n "s/.* frames=\([0-9]*\).*/\1/p")" -gt 10 ]'
 chk "4 resizes, 0 errors" 'l=$(grep -a "^vmsvga: bdf=" "$M" | tail -1); echo "$l" | grep -q " rsz=4 " && echo "$l" | grep -q " err=0"'
+chk "safety net: one full UPDATE after 10 s without any" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -qE " safe=[1-9]"'
 chk "no FIFO overflow (full=0)" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -q " full=0 "'
 
 # controls: the same measurements must FAIL

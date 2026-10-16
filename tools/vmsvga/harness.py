@@ -230,6 +230,7 @@ def main():
                 diff += sum(1 for a, c in zip(g, body[1::3]) if a != c)
                 diff += sum(1 for a, c in zip(b, body[2::3]) if a != c)
             open("%s.p%d.vncdiff" % (base, i), "w").write(str(diff))
+    wait_for(lambda t: "vmsvga: end" in t, 40)
     if vnc is not None and vnc.cursor is not None:
         open("%s.cursor" % base, "w").write("%d %d %d %d" % vnc.cursor)
     if vnc is not None:
