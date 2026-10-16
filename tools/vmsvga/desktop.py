@@ -40,36 +40,34 @@ def wait_for(pred, timeout):
 
 
 def compare(mon, vnc, tag):
-    """diff pixel count between the VNC picture and a stable screendump; -1 if the picture never stood still."""
-    for attempt in range(4):
-        # the VNC picture is read FIRST (before the slow screendumps), so a trailing keep-alive UPDATE cannot repair it meanwhile
-        with vnc.lock:
-            vw, vh = vnc.w, vnc.h
-            buf = bytes(vnc.buf)
-        f1 = mon.dump("%s.a.ppm" % base)
-        try:
-            w, h, b1 = ppm_rgb(f1)
-        except Exception:
-            continue
-        same = (vw == w and vh == h)
-        f2 = mon.dump("%s.b.ppm" % base)
-        try:
-            _, _, b2 = ppm_rgb(f2)
-        except Exception:
-            continue
-        if b1 != b2:
-            time.sleep(0.4)
-            continue
-        if not same:
-            return -2
-        v = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[:, :, [2, 1, 0]]
-        d = np.frombuffer(b1, dtype=np.uint8).reshape(h, w, 3)
-        diff = int(np.count_nonzero(np.any(v != d, axis=2)))
-        if diff:
-            np.save("%s.%s.vnc.npy" % (base, tag), v)
-            np.save("%s.%s.dump.npy" % (base, tag), d)
-        return diff
-    return -1
+    """Count pixels where the VNC picture differs from the screendump, ignoring pixels that change by themselves
+    (clock seconds): those differ between two screendumps taken in a row. -1 = too many unstable pixels, -2 = size mismatch."""
+    # the VNC picture is read FIRST (before the slow screendumps), so a trailing keep-alive UPDATE cannot repair it meanwhile
+    with vnc.lock:
+        vw, vh = vnc.w, vnc.h
+        buf = bytes(vnc.buf)
+    f1 = mon.dump("%s.a.ppm" % base)
+    f2 = mon.dump("%s.b.ppm" % base)
+    try:
+        w, h, b1 = ppm_rgb(f1)
+        w2, h2, b2 = ppm_rgb(f2)
+    except Exception:
+        return -1
+    if (vw, vh) != (w, h) or (w2, h2) != (w, h):
+        return -2
+    v = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[:, :, [2, 1, 0]]
+    d1 = np.frombuffer(b1, dtype=np.uint8).reshape(h, w, 3)
+    d2 = np.frombuffer(b2, dtype=np.uint8).reshape(h, w, 3)
+    unstable = np.any(d1 != d2, axis=2)
+    if int(unstable.sum()) > (w * h) // 50:
+        return -1
+    bad = np.any(v != d1, axis=2) & ~unstable
+    diff = int(bad.sum())
+    if diff:
+        np.save("%s.%s.vnc.npy" % (base, tag), v)
+        np.save("%s.%s.dump.npy" % (base, tag), d1)
+        np.save("%s.%s.bad.npy" % (base, tag), bad)
+    return diff
 
 
 def main():
