@@ -227,8 +227,10 @@ printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\n
 # W3: `bar=win11` measures the bar the IMAGE ships (tools/usbimg/build.sh): 48 points,
 # centred, tray with chevron / language / capsule. Opt-in: gates that click the bar by
 # coordinates keep the left-aligned bar (the start button moves when the bar is centred).
-if [ "${bar:-}" = win11 ]; then
-    printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\nhide_missing=1\nclock_year4=1\ntray_language=1\ntray_chevron=1\ntray_group=1\n' \
+if [ "${bar:-}" = win11 ] || [ "${bar:-}" = win11left ]; then
+    # win11left: the same bar left-aligned, for drehbuecher that click the start button at 24,780
+    BAR_ALIGN=center; [ "$bar" = win11left ] && BAR_ALIGN=left
+    printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\nalign=%s\nlabels=never\nhide_missing=1\nclock_year4=1\ntray_language=1\ntray_chevron=1\ntray_group=1\n' "$BAR_ALIGN" \
         > "$OUT/taskbar.conf"
 fi
 # RUNDE MERGE-11: die Uhr wie in Justins Windows-Vorlage -- Uhrzeit
