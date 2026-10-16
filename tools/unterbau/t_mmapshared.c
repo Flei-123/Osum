@@ -104,7 +104,7 @@ int main(void)
         unsigned char *me = mmap(0, 2 * PG, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0);
         CHECKC("short_file_map", me != MAP_FAILED);
         if (me != MAP_FAILED) {
-            CHECK("short_tail_zero", me[5000] == 0 && me[PG + 100] == 0, "bytes past the end are not zero");
+            CHECK("short_tail_zero", me[5000] == 0 && me[2 * PG - 1] == 0, "bytes past the end are not zero");
             me[6000] = 1; me[4999] = 9;
             msync(me, 2 * PG, MS_SYNC);
             struct stat sb;
