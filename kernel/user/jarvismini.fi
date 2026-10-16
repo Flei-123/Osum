@@ -128,7 +128,23 @@ fn lb_begin() {
     lb_str("jarvismini: ")
 }
 
+// r923: the trace lines (beat, geometry, text colour, ...) go to the console ONLY when /etc/jarvismini.debug exists (the gate sets it)
+static mut dbg_on: bool = false
+
+fn dbg_init() {
+    var p: [u8; 22] = "/etc/jarvismini.debug\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p[0 as usize]) as u64, 0, 0)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        dbg_on = true
+    }
+}
+
 fn lb_end() {
+    if !dbg_on {
+        lb_n = 0
+        return
+    }
     LB[lb_n as usize] = 10 as u8
     lb_n = lb_n + 1
     rt.write_everything(1, (&LB[0 as usize]) as u64, lb_n as usize)
@@ -430,6 +446,7 @@ fn parse_conf() {
     var path: [u8; 21] = "/etc/jarvismini.conf\0"
     if !rt.read_file((&path[0]) as u64, &b) {
         rt.buf_free(&b)
+        link_mode = true
         return
     }
     var parts: [u32; 4] = [0 as u32; 4]
@@ -467,6 +484,8 @@ fn parse_conf() {
     if k == 3 && port > 0 && phase == 1 {
         conf_ip = net.ipv4(parts[0 as usize] as u8, parts[1 as usize] as u8, parts[2 as usize] as u8, parts[3 as usize] as u8)
         conf_port = port
+    } else {
+        link_mode = true
     }
     rt.buf_free(&b)
 }
@@ -541,6 +560,9 @@ fn rx_lines() {
 
 // returns true when something new arrived
 fn net_poll(now: u64) -> bool {
+    if link_mode {
+        return link_poll(now)
+    }
     if sock < 0 {
         try_connect(now)
         return false
@@ -581,6 +603,271 @@ fn net_send(p: u64) {
 
 static mut OFFLINE: [u8; 18] = "(no connection)\0\0\0"
 
+// ------------------------------------------------------------------ link mode: the network helper /bin/jmlink (AF_UNIX datagrams)
+// Mini -> jmlink: HELLO | LOGIN <name> <password> | LOGOUT | NEW | MSG <text> | UP <path> <text>
+// jmlink -> Mini: S <status> | R <reply line> | E <error>
+static mut lsock: i64 = -1
+static mut link_mode: bool = false
+static mut linked: bool = false
+static mut next_hello: u64 = 0
+static mut spawned: u64 = 0
+static mut SA: [u8; 32] = [0 as u8; 32]
+static mut P_ME: [u8; 16] = "/tmp/jmini.sock\0"
+static mut P_LK: [u8; 17] = "/tmp/jmlink.sock\0"
+static mut OUTM: [u8; 600] = [0 as u8; 600]
+static mut out_n: u64 = 0
+static mut LIN: [u8; 1100] = [0 as u8; 1100]
+static mut SHOT: [u8; 96] = [0 as u8; 96]
+static mut shot_n: u64 = 0
+
+fn sa_fill(path: u64, n: u64) {
+    var i: u64 = 0
+    while i < 32 {
+        SA[i as usize] = 0 as u8
+        i = i + 1
+    }
+    SA[0 as usize] = 1 as u8
+    i = 0
+    while i < n {
+        SA[(2 + i) as usize] = rt.ld8(path, i as usize)
+        i = i + 1
+    }
+}
+
+fn link_open() -> bool {
+    if lsock >= 0 {
+        return true
+    }
+    let fd: i64 = syscall(41, 1, 2, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    syscall(87, (&P_ME[0 as usize]) as i64, 0, 0, 0, 0, 0)
+    sa_fill((&P_ME[0 as usize]) as u64, 15)
+    let r: i64 = syscall(49, fd, (&SA[0 as usize]) as i64, 18, 0, 0, 0)
+    if r < 0 {
+        syscall(3, fd, 0, 0, 0, 0, 0)
+        return false
+    }
+    lsock = fd
+    return true
+}
+
+fn out_begin(s: str) {
+    out_n = 0
+    var i: u64 = 0
+    while i < (s.n as u64) && out_n < 580 {
+        OUTM[out_n as usize] = rt.ld8(s.p as u64, i as usize)
+        out_n = out_n + 1
+        i = i + 1
+    }
+}
+
+fn out_cstr(p: u64) {
+    var i: u64 = 0
+    while rt.ld8(p, i as usize) != 0 as u8 && out_n < 580 {
+        OUTM[out_n as usize] = rt.ld8(p, i as usize)
+        out_n = out_n + 1
+        i = i + 1
+    }
+}
+
+fn out_ch(c: u8) {
+    if out_n < 580 {
+        OUTM[out_n as usize] = c
+        out_n = out_n + 1
+    }
+}
+
+fn link_send() -> bool {
+    if lsock < 0 {
+        return false
+    }
+    sa_fill((&P_LK[0 as usize]) as u64, 16)
+    let r: i64 = syscall(44, lsock, (&OUTM[0 as usize]) as i64, out_n as i64, 0, (&SA[0 as usize]) as i64, 19)
+    return r >= 0
+}
+
+fn spawn_link() {
+    var pth: [u8; 12] = "/bin/jmlink\0"
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[0 as usize] = (&pth[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&pth[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
+    lb_begin()
+    lb_str("jmlink spawn pid=")
+    lb_num(pid)
+    lb_end()
+}
+
+fn link_ready() -> bool {
+    var pfd: [u32; 2] = [0 as u32; 2]
+    pfd[0 as usize] = lsock as u32
+    pfd[1 as usize] = 1 as u32
+    let r: i64 = syscall(7, (&pfd[0 as usize]) as i64, 1, 0, 0, 0, 0)
+    return r > 0
+}
+
+static mut OFFL2: [u8; 33] = "(helper not running - try again)\0"
+
+fn link_poll(now: u64) -> bool {
+    if !link_open() {
+        return false
+    }
+    if !linked && now >= next_hello {
+        next_hello = now + 2000
+        out_begin("HELLO")
+        if !link_send() && spawned < 3 {
+            spawned = spawned + 1
+            spawn_link()
+        }
+    }
+    var got: bool = false
+    var rounds: u64 = 0
+    while rounds < 6 && link_ready() {
+        let r: i64 = syscall(45, lsock, (&LIN[0 as usize]) as i64, 1000, 0, 0, 0)
+        if r <= 0 {
+            return got
+        }
+        LIN[r as usize] = 0 as u8
+        let tag: u8 = LIN[0 as usize]
+        linked = true
+        if r > 2 {
+            if tag == 82 as u8 {
+                add_text(1, (&LIN[2 as usize]) as u64)
+            } else {
+                add_text(2, (&LIN[2 as usize]) as u64)
+            }
+            got = true
+        }
+        rounds = rounds + 1
+    }
+    return got
+}
+
+fn has_prefix(t: u64, s: str) -> bool {
+    var i: u64 = 0
+    while i < (s.n as u64) {
+        if rt.ld8(t, i as usize) != rt.ld8(s.p as u64, i as usize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn cmd_send(ok_text: u64) {
+    if !link_send() {
+        linked = false
+        add_text(2, (&OFFL2[0 as usize]) as u64)
+    } else if ok_text != 0 {
+        add_text(2, ok_text)
+    }
+}
+
+// screenshot: /bin/snip -q -o <dir>/shot<ms>.png  (dir = /home/Bilder, else /tmp)
+fn do_shot() {
+    var dir: [u8; 13] = "/home/Bilder\0"
+    var home: [u8; 6] = "/home\0"
+    var tmp: [u8; 5] = "/tmp\0"
+    var snip: [u8; 10] = "/bin/snip\0"
+    var a_q: [u8; 3] = "-q\0"
+    var a_o: [u8; 3] = "-o\0"
+    var argv: [u64; 5] = [0 as u64; 5]
+    var d: u64 = (&tmp[0 as usize]) as u64
+    if ulib.is_dir((&home[0 as usize]) as u64) {
+        ulib.sys(ulib.SYS_MKDIR, (&dir[0 as usize]) as u64, 493, 0)
+        d = (&dir[0 as usize]) as u64
+    }
+    var n: u64 = 0
+    while rt.ld8(d, n as usize) != 0 as u8 && n < 60 {
+        SHOT[n as usize] = rt.ld8(d, n as usize)
+        n = n + 1
+    }
+    SHOT[n as usize] = 47 as u8
+    n = n + 1
+    SHOT[n as usize] = 115 as u8
+    n = n + 1
+    var digits: [u8; 20] = [0 as u8; 20]
+    var dn: u64 = 0
+    var x: u64 = fuiapp.now_ms()
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        dn = 1
+    }
+    while x > 0 && dn < 20 {
+        digits[dn as usize] = (48 + x % 10) as u8
+        x = x / 10
+        dn = dn + 1
+    }
+    while dn > 0 {
+        dn = dn - 1
+        SHOT[n as usize] = digits[dn as usize]
+        n = n + 1
+    }
+    SHOT[n as usize] = 46 as u8
+    SHOT[(n + 1) as usize] = 112 as u8
+    SHOT[(n + 2) as usize] = 110 as u8
+    SHOT[(n + 3) as usize] = 103 as u8
+    SHOT[(n + 4) as usize] = 0 as u8
+    shot_n = n + 4
+    argv[0 as usize] = (&snip[0 as usize]) as u64
+    argv[1 as usize] = (&a_q[0 as usize]) as u64
+    argv[2 as usize] = (&a_o[0 as usize]) as u64
+    argv[3 as usize] = (&SHOT[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&snip[0 as usize]) as u64, (&argv[0 as usize]) as u64, 4)
+    lb_begin()
+    lb_str("shot pid=")
+    lb_num(pid)
+    lb_end()
+    out_begin("shot: ")
+    out_cstr((&SHOT[0 as usize]) as u64)
+    out_ch(0 as u8)
+    add_text(2, (&OUTM[0 as usize]) as u64)
+}
+
+// one typed line (link mode): commands start with a slash, everything else is chat text
+fn submit(t: u64) {
+    if !link_mode {
+        add_text(0, t)
+        net_send(t)
+        return
+    }
+    if has_prefix(t, "/login ") {
+        out_begin("LOGIN ")
+        out_cstr(t + 7)
+        var w: [u8; 16] = "logging in ...  "
+        cmd_send((&w[0 as usize]) as u64)
+    } else if has_prefix(t, "/logout") {
+        out_begin("LOGOUT")
+        cmd_send(0)
+    } else if has_prefix(t, "/new") {
+        out_begin("NEW")
+        cmd_send(0)
+    } else if has_prefix(t, "/shot") {
+        do_shot()
+    } else if has_prefix(t, "/send") {
+        if shot_n == 0 {
+            var w: [u8; 24] = "no screenshot yet       "
+            add_text(2, (&w[0 as usize]) as u64)
+        } else {
+            out_begin("UP ")
+            out_cstr((&SHOT[0 as usize]) as u64)
+            out_ch(32 as u8)
+            out_cstr(t + 5)
+            cmd_send(0)
+        }
+    } else if has_prefix(t, "/help") {
+        var w: [u8; 56] = "/login name pass /logout /new /shot /send [text]        "
+        add_text(2, (&w[0 as usize]) as u64)
+    } else {
+        add_text(0, t)
+        out_begin("MSG ")
+        out_cstr(t)
+        cmd_send(0)
+    }
+}
+
+
 // ------------------------------------------------------------------ the bus (a.jarvismini, never blocks in box mode)
 fn handle(msg: u64) {
     var verb: [u8; 16] = [0 as u8; 16]
@@ -589,6 +876,7 @@ fn handle(msg: u64) {
     var a_tog: [u8; 18] = "jarvismini.toggle\0"
     var e_unk: [u8; 19] = "err unknown_action\0"
     var s_ok: [u8; 10] = "ok\nstate=\0"
+    var s_shot: [u8; 10] = "ok\nshot=1\0"
     let vp: u64 = (&verb[0 as usize]) as u64
     let np: u64 = (&name[0 as usize]) as u64
     let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
@@ -596,6 +884,14 @@ fn handle(msg: u64) {
     actwire.ob_reset()
     if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
         actwire.ob_str((&k_ping[0 as usize]) as u64)
+        return
+    }
+    var a_shot: [u8; 16] = "jarvismini.shot\0"
+    if actwire.str_eq(np, (&a_shot[0 as usize]) as u64) {
+        if app_mode {
+            do_shot()
+        }
+        actwire.ob_str((&s_shot[0 as usize]) as u64)
         return
     }
     if !actwire.str_eq(np, (&a_tog[0 as usize]) as u64) {
@@ -666,6 +962,7 @@ fn bus_step(wait_ms: u64) {
 
 // serve mode (the hotkey gate's test target): only the bus, blocks in the kernel while idle
 fn serve(limit: u64) -> u64 {
+    dbg_init()
     var n_me: [u8; 13] = "a.jarvismini\0"
     var n_bus: [u8; 11] = "orient.bus\0"
     var s_hello: [u8; 17] = "hello jarvismini\n"
@@ -725,6 +1022,7 @@ fn drop_to_app() -> bool {
 
 fn run_box(hidden: bool, as_app: bool) -> u64 {
     app_mode = true
+    dbg_init()
     if as_app {
         if !drop_to_app() {
             lb_begin()
@@ -780,7 +1078,10 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
     }
     set_shown(state)
     tr(5)
-    if conf_port == 0 {
+    if link_mode {
+        var w: [u8; 26] = "/login name pass  (/help)\0"
+        add_text(2, (&w[0 as usize]) as u64)
+    } else if conf_port == 0 {
         add_text(2, (&OFFLINE[0 as usize]) as u64)
     }
     lb_begin()
@@ -802,8 +1103,7 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
         if key == K_IN {
             let t: u64 = fuiscene.entry_text(K_IN)
             if t != 0 && ulib.length(t) > 0 {
-                add_text(0, t)
-                net_send(t)
+                submit(t)
                 lb_begin()
                 lb_str("sent len=")
                 lb_num(ulib.length(t))
@@ -813,6 +1113,10 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
             }
         }
         bus_step(0)
+        if shown == 0 {
+            // r925: a hidden box has nothing to draw -- sleep between rounds (the hotkey answer waits at most this long)
+            let _z: u64 = ulib.sleep_ms(25)
+        }
         if net_poll(now) {
             dirty = true
         }

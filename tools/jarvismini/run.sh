@@ -15,6 +15,11 @@
 #   2. a typed line goes to the stub; the three answer lines come back and the box GROWS (lines, height, y moves up)
 #   3. Ctrl+Alt+J (QEMU sendkey -> window server -> hotkeyd -> bus -> jarvismini.toggle): the box hides (pixels differ), again: it shows
 #   4. the text colour: white on the black background; the background turns white -> ONE change to black (flips=1), no flicker before
+# Boot C (quiet, r923): no /etc/jarvismini.debug -> no 'jarvismini:' console line at all, the box still works (hotkey hides it).
+# Boot D (link mode, W-MINI2): /etc/jarvismini.conf without an "ip port" line -> the Mini talks to /bin/jmlink (AF_UNIX datagrams); jmlink
+#   speaks TLS to a FAKE server on the host (tools/jarvismini/fakesrv.py, certificates from tools/hwnet/mkcerts.py, root in /etc/ssl/roots.pem):
+#   /login with a wrong password is refused, with the right one the WebSocket opens, a chat line arrives and is answered, /shot writes a PNG
+#   and /send uploads it (server sees an image attachment with the PNG signature). The password is never written to a file.
 # Boot B (COUNTER-PROOF, no grants): the float request is refused (E_RIGHTS), the box is an ordinary window on layer 1; hotkeyd refuses the
 #   binding (reason=no-right); Ctrl+Alt+J does nothing.
 set -uo pipefail
@@ -44,6 +49,7 @@ printf '10.0.2.2 %s\n' "$PORT" > "$D/jarvismini.conf"
 printf '# test: the hotkey helper\nhotkey\n' > "$D/autostart"
 printf 'jarvismini window.float,hotkey,net\n' > "$D/rights.yes"
 printf '# no grants\n' > "$D/rights.no"
+printf 'trace on\n' > "$D/debug"
 MORE="orientbus act wmplug hotkeyd jarvismini apprights mbg"
 EXTRA_COMMON="/etc/jarvismini.conf=$D/jarvismini.conf@0644 /etc/hotkeys.conf=etc/hotkeys.conf@0644 /etc/wmplug.conf=etc/wmplug.conf@0644 /etc/wmplug.autostart=$D/autostart@0644 /etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644 /apps/ /apps/jarvismini.osp/ /apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644 /apps/jarvismini.osp/start@/bin/jarvismini"
 
@@ -54,10 +60,12 @@ start_stub() { # $1 = name
 }
 stop_stubs() { for p in $STUBPIDS; do kill "$p" 2>/dev/null; done; STUBPIDS=""; sleep 0.3; }
 
-run_boot() { # $1 = name, $2 = rights file
+run_boot() { # $1 = name, $2 = rights file, $3 = extra mkfs spec (the debug switch /etc/jarvismini.debug unless given as "-")
     local O="$D/$1"
-    EH_APPEND=rtcutc EH_MKFS_EXTRA="$EXTRA_COMMON /etc/apprights.conf=$2@0644" \
-        DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$O" "res=$RES" accel=kvm netz=ja tafel=nein "moreprogs=$MORE" \
+    local DBG="/etc/jarvismini.debug=$D/debug@0644"
+    [ "${3:-}" = "-" ] && DBG=""
+    EH_APPEND=rtcutc APPS="${RB_APPS:-fetch}" EH_MKFS_EXTRA="$EXTRA_COMMON $DBG ${RB_EXTRA:-} /etc/apprights.conf=$2@0644" \
+        DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$O" "res=$RES" accel=kvm netz=ja tafel=nein "moreprogs=${RB_MORE:-$MORE}" \
             "extra=wmplug wigapp=/bin/mbg" "drehbuch=$D/$1.book" > "$D/$1.log" 2>&1
 }
 
@@ -109,6 +117,56 @@ run_boot A "$D/rights.yes"
 stop_stubs
 SA="$D/A/serial.txt"
 [ -s "$SA" ] || { bad "boot A: no serial output"; tail -15 "$D/A.log"; }
+cat > "$D/C.book" <<EOF
+warteauf '(?m)^mbg: up' || 150
+warte 70
+foto 01-up
+taste ctrl-alt-j
+warte 6
+foto 02-key
+EOF
+echo "== boot C (quiet: no debug switch) =="
+start_stub C
+run_boot C "$D/rights.yes" -
+stop_stubs
+SC="$D/C/serial.txt"
+[ -s "$SC" ] || { bad "boot C: no serial output"; tail -15 "$D/C.log"; }
+# ---------------------------------------------------------------- boot D: link mode against the fake server
+PORT_D=$(( PORT + 1 ))
+python3 tools/hwnet/mkcerts.py "$D/certs" osum.test > "$D/certs.txt" 2>&1 || { bad "mkcerts.py failed"; cat "$D/certs.txt"; }
+printf 'server osum.test\nip 10.0.2.2\nport %s\nroots /etc/ssl/roots.pem\n' "$PORT_D" > "$D/jarvismini.conf"
+: > "$D/D.fake"
+python3 -u tools/jarvismini/fakesrv.py "$PORT_D" "$D/certs/good.pem" "$D/certs/good.key" "$D/D.fake" > "$D/D.fakeout" 2>&1 &
+STUBPIDS="$STUBPIDS $!"
+cat > "$D/D.book" <<EOF
+warteauf '(?m)^mbg: up' || 150
+warteauf 'jarvismini: up float=1' || 120
+warte 4
+klick $S_IN
+warte 1
+tippe /login justin wrong
+taste ret
+warte 30
+tippe /login justin geheim
+taste ret
+warteauf 'jmlink: online' || 120
+warte 3
+tippe hello fake
+taste ret
+warte 15
+tippe /shot
+taste ret
+warte 25
+tippe /send look
+taste ret
+warte 25
+foto 01-end
+EOF
+echo "== boot D (link mode, fake JARVIS server) =="
+RB_APPS="jmlink" RB_MORE="$MORE snip" RB_EXTRA="/etc/ssl/ /etc/ssl/roots.pem=$D/certs/ca.pem@0644 /tmp/" run_boot D "$D/rights.yes"
+stop_stubs
+SD="$D/D/serial.txt"
+[ -s "$SD" ] || { bad "boot D: no serial output"; tail -15 "$D/D.log"; }
 echo "== boot B (no grants, counter-proof) =="
 start_stub B
 run_boot B "$D/rights.no"
@@ -146,6 +204,31 @@ def lum(c):
 def region(img, x, y, w, h):
     return [px(img, i, j) for j in range(y, y + h) for i in range(x, x + w)]
 
+# C: r923 -- without /etc/jarvismini.debug the box prints NOTHING, but it still works (the hotkey hides it)
+rc_ = clean(rd(f"{d}/C/serial.txt"))
+res("C: quiet: no 'jarvismini:' line on the console without the debug switch", not re.search(r"(?m)^jarvismini: ", rc_), "")
+res("C: the hotkey helper still bound the key", "hotkeyd: bound ctrl+alt+j jarvismini.toggle" in rd(f"{d}/C/serial.txt"), "")
+try:
+    c1, c2 = ppm(f"{d}/C/01-up.ppm"), ppm(f"{d}/C/02-key.ppm")
+    rx, ry, rw, rh = SW // 2, SH // 3, SW // 2 - 4, SH * 2 // 3 - 40
+    R1, R2c = region(c1, rx, ry, rw, rh), region(c2, rx, ry, rw, rh)
+    dc = sum(1 for a, b in zip(R1, R2c) if max(abs(a[k] - b[k]) for k in range(3)) > 24)
+    res("C: quiet but alive: Ctrl+Alt+J changes the lower right (box hid)", dc > 500, f"{dc} px differ")
+except Exception as e:
+    res("C: photos readable", False, repr(e))
+# D: link mode
+rd_ = clean(rd(f"{d}/D/serial.txt"))
+fk = rd(f"{d}/D.fake")
+res("D: the Mini started in link mode and jmlink answered (status line)", "jmlink: " in rd_, "")
+res("D: wrong password: the server saw ONE bad login", fk.count("login bad user=justin") == 1, "")
+res("D: right password: the server saw the login", "login ok user=justin" in fk, "")
+res("D: the WebSocket opened only after the good login", "ws open" in fk and fk.index("ws open") > fk.index("login ok"), "")
+res("D: no WebSocket before the good login (bad login does not connect)", fk.count("ws open") >= 1 and fk.find("ws open") > fk.find("login bad"), "")
+res("D: the server got the chat line", "msg hello fake images=0 files=0" in fk, "")
+res("D: the answer came back into the Mini (lines grew after the chat line)", bool(re.search(r"jarvismini: lines=\d+ h=\d+", rd_)), "")
+res("D: /shot ran snip", bool(re.search(r"jarvismini: shot pid=\d+", rd_)), "")
+res("D: /send uploaded an IMAGE attachment with the PNG signature", bool(re.search(r"msg look images=1 files=0 imgmagic=iVBORw0KGgo", fk)), fk[-300:])
+res("D: the password is nowhere on the console", "geheim" not in rd(f"{d}/D/serial.txt"), "")
 for tag in ("A", "B"):
     raw = rd(f"{d}/{tag}/serial.txt")
     t = clean(raw)
@@ -211,6 +294,6 @@ PYEOF
 cat "$OUTP"
 pass=$((pass + $(grep -c '^OK' "$OUTP")))
 fail=$((fail + $(grep -c '^FAIL' "$OUTP")))
-if [ -n "${JM_KEEP:-}" ]; then rm -rf "$JM_KEEP"; mkdir -p "$JM_KEEP"; cp -r "$D/A" "$D/B" "$JM_KEEP"/ 2>/dev/null; cp "$D"/*.log "$D"/*.stub "$OUTP" "$JM_KEEP"/ 2>/dev/null; rm -f "$JM_KEEP"/*/disk.img; fi
+if [ -n "${JM_KEEP:-}" ]; then rm -rf "$JM_KEEP"; mkdir -p "$JM_KEEP"; cp -r "$D/A" "$D/B" "$D/C" "$D/D" "$JM_KEEP"/ ; cp "$D/D.fake" "$JM_KEEP"/ 2>/dev/null; cp "$D"/*.log "$D"/*.stub "$OUTP" "$JM_KEEP"/ 2>/dev/null; rm -f "$JM_KEEP"/*/disk.img; fi
 echo "JARVISMINI: $pass passed, $fail failed"
 [ "$fail" = 0 ]
