@@ -16,6 +16,8 @@
 #   FULL WAY      default WITHOUT word `vmsvgarect` (since the VirtualBox failure of image 54db5a98): every frame = ONE whole-screen UPDATE,
 #                 SYNC/BUSY handshake, no diff flush; the same pixel/VNC checks run again (case `fullw`), maxframe >= a whole frame.
 #                 The cases above (main, ruhe) run with `vmsvgarect` = the rectangle path.
+#   IDLE/HEAL    3 s idle after the trailing UPDATE: port I/O <= 16 (`pio=`), traces=0, heal stages ran (>= 12 for 4 mode changes).
+#   Real desktop (stick image, Limine, 4 cores, random input, VNC rects only == screendump): tools/vmsvga/desktop.sh.
 #   Controls (each MUST be detected):
 #      novmsvga  -> no detection line, no panel lines (the driver is off, `-kernel` has no other framebuffer)
 #      wmruhe    -> whole screen dirty every frame: the 64 KB per frame check must fail
@@ -93,6 +95,11 @@ chk "VNC client received a cursor shape (opaque and transparent pixels)" \
 chk "frames with a 48x48 rect: every frame <= 64 KB" \
     '[ "$(grep -a "^vmsvga: frames hw=" "$M" | tail -1 | sed -n "s/.* maxframe=\([0-9]*\).*/\1/p")" -le 65536 ]'
 chk "idle 2 s: < 100 KB/s" '[ "$(grep -a "^vmsvga: idle okt=" "$M" | tail -1 | sed -n "s/.* okt=\([0-9]*\).*/\1/p")" -lt 200000 ]'
+chk "idle 3 s (after the trailing UPDATE): port I/O <= 16 (host-hint poll only; QEMU has none)" \
+    '[ "$(grep -a "^vmsvga: idle okt=" "$M" | tail -1 | sed -n "s/.* pio=\([0-9]*\).*/\1/p")" -le 16 ]'
+chk "TRACES register written: traces=0 in the report line" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -q " traces=0"'
+chk "mode-change self-heal ran (4 modes x 3 stages: heal >= 12)" \
+    '[ "$(grep -a "^vmsvga: bdf=" "$M" | tail -1 | sed -n "s/.* heal=\([0-9]*\).*/\1/p")" -ge 12 ]'
 chk "verify: bad=0 over frames > 10" \
     'l=$(grep -a "^vmsvga: verify bad=" "$M" | tail -1); echo "$l" | grep -q "bad=0 " && [ "$(echo "$l" | sed -n "s/.* frames=\([0-9]*\).*/\1/p")" -gt 10 ]'
 chk "4 resizes, 0 errors" 'l=$(grep -a "^vmsvga: bdf=" "$M" | tail -1); echo "$l" | grep -q " rsz=4 " && echo "$l" | grep -q " err=0"'
@@ -110,6 +117,10 @@ for i in 0 1 2 3 4; do
 done
 chk "full way: every frame is a whole-screen UPDATE (maxframe >= 800x600x4)" \
     '[ "$(grep -a "^vmsvga: frames hw=" "$F" | tail -1 | sed -n "s/.* maxframe=\([0-9]*\).*/\1/p")" -ge 1920000 ]'
+chk "full way: idle 3 s: port I/O <= 16 and no picture data" \
+    'l=$(grep -a "^vmsvga: idle okt=" "$F" | tail -1); [ "$(echo "$l" | sed -n "s/.* pio=\([0-9]*\).*/\1/p")" -le 16 ] && [ "$(echo "$l" | sed -n "s/.* okt=\([0-9]*\).*/\1/p")" -lt 200000 ]'
+chk "full way: mode-change self-heal ran (heal >= 12)" \
+    '[ "$(grep -a "^vmsvga: bdf=" "$F" | tail -1 | sed -n "s/.* heal=\([0-9]*\).*/\1/p")" -ge 12 ]'
 chk "full way: no FIFO overflow (full=0), no resize error" 'l=$(grep -a "^vmsvga: bdf=" "$F" | tail -1); echo "$l" | grep -q " full=0 " && echo "$l" | grep -q " err=0"'
 
 # controls: the same measurements must FAIL
