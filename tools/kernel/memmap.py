@@ -539,6 +539,7 @@ EHCI_STUECKE = [
 KEINE_KDATA = {
     ("fb.fi", "FB_OFF"),        # Spiegel von kstate.FB_OFF, s. u.
     ("fb.fi", "FONT_OFF"),      # liegt IN FB_OFF
+    ("fb.fi", "VMS_OFF"),       # Spiegel von kstate.VMSVGA_OFF (vmsvga.fi)
     ("inet.fi", "SOCK_OFF"),    # Offsets im Netzbereich von netsvc.fi
     ("inet.fi", "ARP_OFF"),
     ("inet.fi", "ICMP_OFF"),
