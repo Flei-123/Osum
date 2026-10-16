@@ -36,7 +36,7 @@ for l in de en; do
     n=$(grep -c '^welcome\.\(title\|head\|t1\|t2\|t3\|show\|sett\|close\) = ' locale/$l/messages)
     [ "$n" = 8 ] && ok "locale $l: 8 welcome.* keys" || bad "locale $l: $n of 8 welcome.* keys"
 done
-grep -q 'privacy welcome"}' tools/usbimg/build.sh && ok "usbimg PROGS has welcome" || bad "usbimg PROGS"
+grep -q 'privacy welcome[ "]' tools/usbimg/build.sh && ok "usbimg PROGS has welcome" || bad "usbimg PROGS"
 grep -q '/apps/welcome.osp/start' tools/usbimg/build.sh && ok "usbimg PFLICHT has the bundle" || bad "usbimg PFLICHT"
 grep -q 'welcome_start()' kernel/user/desktop.fi && ok "desktop starts the welcome window" || bad "desktop hook"
 grep -q 'welcome.conf' kernel/user/instkonto.fi && ok "installer writes /etc/welcome.conf" || bad "installer hook"
