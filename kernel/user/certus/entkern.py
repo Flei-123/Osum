@@ -39,6 +39,9 @@ extern fn osum_sys4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64;
 extern fn osum_sys5(n: u64, a0: u64, a1: u64, a2: u64, a3: u64,
     a4: u64) -> u64;
 extern fn osum_map_anon(len: u64, prot: u64, flags: u64) -> u64;
+extern fn osum_bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64;
+extern fn osum_rdtsc() -> u64;
+extern fn osum_map_fd(len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64;
 extern fn osum_sock_send(fd: u64, buf: u64, len: u64, addr: u64,
     alen: u64) -> u64;
 extern fn osum_sock_recv(fd: u64, buf: u64, len: u64, addr: u64,
@@ -104,6 +107,10 @@ def kcall(s):
                '''fn sock_recv(fd: u64, buf: u64, len: u64, addr: u64, lenp: u64) -> u64 {
     return osum_sock_recv(fd, buf, len, addr, lenp)
 }''', s, count=1, flags=re.S)
+    s = re.sub(r'fn map_fd\(len: u64, prot: u64, flags: u64, fd: u64, off: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
+               '''fn map_fd(len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    return osum_map_fd(len, prot, flags, fd, off)
+}''', s, count=1, flags=re.S)
     s = re.sub(r'fn map_anon\(len: u64, prot: u64, flags: u64\) -> u64 \{\n    let no_fd: u64 = 0 -% 1\n    return asm\([^}]*?\n\}',
                '''fn map_anon(len: u64, prot: u64, flags: u64) -> u64 {
     return osum_map_anon(len, prot, flags)
@@ -128,16 +135,31 @@ def wlibc(s):
                '''fn map_surface(bytes: u64) -> u64 {
     return osum_map_anon(bytes, PROT_RW, MAP_ANON_PRIV)
 }''', s, count=1, flags=re.S)
+    s = re.sub(r'fn bus5\(op: u64, a1: u64, a2: u64, a3: u64, a4: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
+               '''fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return osum_bus5(op, a1, a2, a3, a4)
+}''', s, count=1, flags=re.S)
+    s = re.sub(r'let p: u64 = asm\("syscall", out\("rax"\), in\("rax"\) SYS_MMAP, in\("rdi"\) 0,\n.*?clobber\("memory"\)\)',
+               'let p: u64 = osum_map_fd(bytes, PROT_RW, MAP_SHARED_FLAG, fd, 0)', s, count=1, flags=re.S)
     if 'asm(' in s:
         print('wlibc: es steht noch asm( darin', file=sys.stderr)
         sys.exit(1)
     return s + EXT
 
 
-def schlicht(s):
-    s = profil_weg(s, '?')
+def schlicht(s, name='?'):
+    s = profil_weg(s, name)
+    if name == 'ulib.fi':
+        s = re.sub(r'fn bus5\(op: u64, a1: u64, a2: u64, a3: u64, a4: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
+                   '''fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return osum_bus5(op, a1, a2, a3, a4)
+}''', s, count=1, flags=re.S)
+        s += '\nextern fn osum_bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64;\n'
+    if name == 'wlib.fi':
+        s = s.replace('return asm("rdtsc\\nshl rdx, 32\\nor rax, rdx", out("rax"))', 'return osum_rdtsc()', 1)
+        s += '\nextern fn osum_rdtsc() -> u64;\n'
     if 'asm(' in s:
-        print('unerwartetes asm(', file=sys.stderr)
+        print('unexpected asm( in ' + name, file=sys.stderr)
         sys.exit(1)
     return s
 
@@ -151,7 +173,14 @@ def main():
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):
         p = os.path.join(bau, name)
         if os.path.exists(p):
-            schreib(p, schlicht(lies(p)))
+            schreib(p, schlicht(lies(p), name))
+    # the other copied Osum modules (fuiglyph, fuib, ecke, ...): profile only
+    done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
+    for f in sorted(os.listdir(bau)):
+        p = os.path.join(bau, f)
+        if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \
+                and f not in ('certus_main.fi',):
+            schreib(p, schlicht(lies(p), f))
     # der Rest der libc: nur das Profil
     d = os.path.join(bau, 'libc')
     for f in sorted(os.listdir(d)):

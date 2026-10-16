@@ -107,6 +107,36 @@ osum_map_anon:
     syscall
     ret
 
+/* osum_map_fd(len, prot, flags, fd, off) -> mmap(0, len, prot, flags, fd, off) */
+    .globl osum_map_fd
+osum_map_fd:
+    movq %r8,  %r9                  /* off */
+    movq %rcx, %r8                  /* fd */
+    movq %rdx, %r10                 /* flags */
+    movq %rsi, %rdx                 /* prot */
+    movq %rdi, %rsi                 /* len */
+    xorq %rdi, %rdi                 /* no address wish */
+    movq $9, %rax                   /* mmap */
+    syscall
+    ret
+
+/* osum_bus5(op, a1, a2, a3, a4) -> syscall 1960 (system bus), a5 = 0 */
+    .globl osum_bus5
+osum_bus5:
+    movq %rcx, %r10                 /* a3 */
+    xorq %r9, %r9
+    movq $1960, %rax
+    syscall
+    ret
+
+/* osum_rdtsc() -> rdx:rax combined */
+    .globl osum_rdtsc
+osum_rdtsc:
+    rdtsc
+    shlq $32, %rdx
+    orq  %rdx, %rax
+    ret
+
 /* osum_sock_send(fd, buf, len, addr, alen) -> sendto(fd,buf,len,0,addr,alen) */
     .globl osum_sock_send
 osum_sock_send:
