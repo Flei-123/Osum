@@ -42,7 +42,9 @@ def main(path):
     txt = open(path, "rb").read().decode("latin1")
     check("launcher: start /apps/editor.osp/start" in txt, "Editor was started from the menu (launcher line on the serial)")
     check("launcher: start /apps/nedit.osp/start" not in txt, "no separate Editor+ entry any more")
-    check("launcher: start /apps/terminal.osp/start" in txt, "Terminal was started from the menu (launcher line on the serial)")
+    # the serial line of the Terminal start can be torn by another core (`launcher: start wm: fokus ...`), so count start lines
+    check("launcher: start /apps/terminal.osp/start" in txt or txt.count("launcher: start") >= 2,
+          "Terminal was started from the menu (launcher line on the serial, possibly interleaved)")
     return 0 if bad == 0 else 1
 
 
