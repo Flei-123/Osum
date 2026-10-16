@@ -272,7 +272,9 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome apprights"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome apprights wmplug hotkeyd jarvismini"}
+# the public image has no chat server to reach: no JARVIS Mini binary there
+[ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -1313,6 +1315,28 @@ while read -r z; do
     ARGS+=("$z")
 done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
+# W-IMG2 (r921): JARVIS Mini + the global hotkey helper. Personal stick only (the box needs the chat server).
+#   /bin/hotkeyd   started by the desktop autostart line `hotkey` (only when /etc/hotkeys.conf exists)
+#   /bin/jarvismini  started hidden at login by the autostart line `jmini` (/etc/wmplug.conf: prog=/bin/jarvismini);
+#                    --as-app labels it app:jarvismini and drops to uid 1000, so /etc/apprights.conf is REALLY checked
+#   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
+if [ "$IMAGE_PROFILE" = personal ]; then
+    printf '10.0.2.2 7700\n' > "$OUT/jarvismini.conf"
+    printf 'jarvismini window.float,hotkey,net\n' > "$OUT/apprights.conf"
+    { cat etc/wmplug.conf
+      printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n'
+      printf 'jmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$OUT/wmplug.conf"
+    printf 'hotkey\njmini --hidden --as-app\n' > "$OUT/wmplug.autostart"
+    ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
+           "/etc/hotkeys.conf=etc/hotkeys.conf@0644"
+           "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
+           "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
+           "/etc/apprights.conf=$OUT/apprights.conf@0644"
+           "/etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644"
+           /apps/jarvismini.osp/
+           "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
+           "/apps/jarvismini.osp/start@/bin/jarvismini")
+fi
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
@@ -1354,6 +1378,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
+PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions"
 [ "${ROOT_SLIM:-0}" = 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
@@ -1590,6 +1616,11 @@ for l in body:
 lines[j:j] = inst
 open(path, 'w').write('\n'.join(lines))
 PYVFS
+fi
+# W-IMG2: the boot word `wmplug` opens the plugin board; the hotkey helper (autostart line `hotkey`) and the hidden JARVIS Mini need it.
+# Desktop entries only (those with `wmshell`), personal stick only.
+if [ "$IMAGE_PROFILE" = personal ]; then
+    sed -i '/^[[:space:]]*cmdline:.* wmshell /{/ wmplug /!s/ wmshell / wmplug wmshell /}' "$OUT/limine.conf"
 fi
 # ROUND LIVE: THE PUBLIC MENU SAYS WHAT THE STICK IS. Entry 1 is the
 # live system ("try without installing" -- nothing is written to a disk),
