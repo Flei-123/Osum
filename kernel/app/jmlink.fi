@@ -1,0 +1,1320 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/jmlink.fi -- W-MINI2: the network half of JARVIS Mini (kernel/user/jarvismini.fi).
+//
+//   jmlink            runs in the background, started by the Mini when it cannot reach it
+//
+// WHY A SECOND PROGRAM. The Mini is a fUi window whose loop must never block. TLS (lib/tls) is blocking: a handshake takes up to
+// seconds, a read waits for the record. So the connection to the JARVIS server lives HERE, and the Mini talks to this program with
+// small text datagrams over local (AF_UNIX, SOCK_DGRAM) sockets by path: /tmp/jmini.sock (the Mini listens) and /tmp/jmlink.sock
+// (this program listens). One datagram = one message, nothing to frame.
+//
+//   Mini -> jmlink                          jmlink -> Mini
+//   HELLO                                   S <status text>      status line (offline / login needed / online / ...)
+//   LOGIN <user> <password>                 R <text>             one line of the answer
+//   LOGOUT                                  E <text>             error from the server
+//   MSG <text>
+//   UP <path> <text>   file as attachment (png/jpg = image)
+//   NEW                new chat
+//
+// THE SERVER (public/mini.html is the model): POST /api/login {"username","password"} -> {"token"}; then WebSocket
+// wss://<host>/?role=ui&dev=<id>&token=<token>; messages are JSON text frames: {"type":"message","text",...,"images":[{"mediaType",
+// "data"(base64)}],"files":[...]} out; "token" (content), "done", "error", "system", "conversation", "info" in.
+//
+// THE LOGIN is typed ONCE in the Mini (/login name password). The PASSWORD IS NEVER STORED: it is used for the one POST and then
+// overwritten. What stays is the session token (valid 30 days on the server), in /etc/jarvismini.login with mode 0600
+// ("user" line, "token" line). `LOGOUT` deletes it. Nothing about the account is in the image.
+//
+// The certificate is checked against /etc/ssl/roots.pem for the NAME in /etc/jarvismini.conf (`server jarvis.fleitec.com`);
+// an optional `ip a.b.c.d` skips DNS (the gate), `port N` (default 443), `roots <path>`. No `server` line -> the default.
+
+import std.io
+import std.rt
+import std.net
+import tls.tls
+import tls.x509
+import libc.dns
+import net.ws
+
+const SYS_OPEN2: i64 = 2
+const SYS_CLOSE2: i64 = 3
+const SYS_POLL: i64 = 7
+const SYS_UNLINK2: i64 = 87
+const O_WRITE_TRUNC: i64 = 577 // O_WRONLY | O_CREAT | O_TRUNC
+const MODE_SECRET: i64 = 384 // 0600
+const CMDCAP: usize = 3000
+const MSGCAP: u64 = 4000000
+
+// ------------------------------------------------------------------ state
+static mut CONF_HOST: [u8; 96] = [0; 96]
+static mut CONF_ROOTS: [u8; 96] = [0; 96]
+static mut conf_hostlen: usize = 0
+static mut conf_ip: u32 = 0
+static mut conf_port: u64 = 443
+static mut debug_on: bool = false
+
+static mut USER: [u8; 64] = [0; 64]
+static mut TOKEN: [u8; 600] = [0; 600]
+static mut have_token: bool = false
+static mut PASS: [u8; 128] = [0; 128]
+static mut have_pass: bool = false
+static mut login_dead: bool = false // the server said no: wait for a new /login
+
+static mut CMD: [u8; 3008] = [0; 3008]
+static mut LOCAL_FD: i64 = -1
+static mut CID: [u8; 80] = [0; 80]
+static mut cid_len: usize = 0
+static mut G_T: u64 = 0 // *mut tls.Tls while a WebSocket session runs, else 0
+static mut G_W: u64 = 0 // *mut ws.Ws
+static mut online: bool = false
+static mut ACC: [u8; 2048] = [0; 2048]
+static mut acc_n: usize = 0
+static mut last_status: [u8; 120] = [0; 120]
+static mut last_status_n: usize = 0
+static mut seq: u64 = 0
+static mut logout_req: bool = false
+
+// ------------------------------------------------------------------ small helpers
+fn say(s: str) {
+    if debug_on {
+        io.print("jmlink: ")
+        io.print(s)
+        io.print("\n")
+    }
+}
+
+fn say_num(s: str, v: u64) {
+    if debug_on {
+        var b: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&b, s.p as u64, s.n as usize)
+        rt.buf_push_dec_u64(&b, v)
+        rt.buf_push(&b, 10 as u8)
+        io.print("jmlink: ")
+        rt.write_everything(1, b.ptr, b.len)
+        rt.buf_free(&b)
+    }
+}
+
+fn push_str(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n as usize)
+}
+
+// JSON text is built from bytes: no quote or backslash inside a Firn literal
+fn q(b: *mut rt.Buf) {
+    rt.buf_push(b, 34 as u8)
+}
+
+// "k":
+fn kq(b: *mut rt.Buf, k: str) {
+    q(b)
+    push_str(b, k)
+    q(b)
+    rt.buf_push(b, 58 as u8)
+}
+
+// "k":"v",
+fn kvs(b: *mut rt.Buf, k: str, v: str) {
+    kq(b, k)
+    q(b)
+    push_str(b, v)
+    q(b)
+}
+
+fn crlf(b: *mut rt.Buf) {
+    rt.buf_push(b, 13 as u8)
+    rt.buf_push(b, 10 as u8)
+}
+
+fn cstr_len(p: u64) -> usize {
+    var n: usize = 0
+    while rt.ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn fail_conn(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+fn fail_flag(bad: *mut bool) -> bool {
+    *bad = true
+    return false
+}
+
+fn fail_len(bad: *mut bool) -> usize {
+    *bad = true
+    return 0 as usize
+}
+
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn now_ms() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 1, (&ts[0]) as i64, 0, 0, 0, 0)
+    return (ts[0] as u64) * 1000 + (ts[1] as u64) / 1000000
+}
+
+fn rand_into(p: u64, n: u64) {
+    syscall(318, p as i64, n as i64, 0, 0, 0, 0)
+}
+
+// does the text at p (n octets) start with the str?
+fn starts(p: u64, n: usize, s: str) -> bool {
+    if n < (s.n as usize) {
+        return false
+    }
+    var i: usize = 0
+    while i < (s.n as usize) {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// index just after the first occurrence of the str in p[0..n), or n + 1 when absent
+fn find_after(p: u64, n: usize, s: str) -> usize {
+    var i: usize = 0
+    let m: usize = s.n as usize
+    while i + m <= n {
+        var j: usize = 0
+        while j < m && rt.ld8(p, i + j) == rt.ld8(s.p as u64, j) {
+            j = j + 1
+        }
+        if j == m {
+            return i + m
+        }
+        i = i + 1
+    }
+    return n + 1
+}
+
+// ------------------------------------------------------------------ JSON
+// append one UTF-8 code point
+fn utf8_push(b: *mut rt.Buf, cp: u64) {
+    if cp < 128 {
+        rt.buf_push(b, cp as u8)
+    } else if cp < 2048 {
+        rt.buf_push(b, (192 + (cp >> 6)) as u8)
+        rt.buf_push(b, (128 + (cp & 63)) as u8)
+    } else if cp < 65536 {
+        rt.buf_push(b, (224 + (cp >> 12)) as u8)
+        rt.buf_push(b, (128 + ((cp >> 6) & 63)) as u8)
+        rt.buf_push(b, (128 + (cp & 63)) as u8)
+    } else {
+        rt.buf_push(b, (240 + (cp >> 18)) as u8)
+        rt.buf_push(b, (128 + ((cp >> 12) & 63)) as u8)
+        rt.buf_push(b, (128 + ((cp >> 6) & 63)) as u8)
+        rt.buf_push(b, (128 + (cp & 63)) as u8)
+    }
+}
+
+fn hexv(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 0
+}
+
+fn hex4(p: u64, at: usize, n: usize) -> u64 {
+    if at + 4 > n {
+        return 63
+    }
+    return hexv(rt.ld8(p, at) as u64) * 4096 + hexv(rt.ld8(p, at + 1) as u64) * 256
+        + hexv(rt.ld8(p, at + 2) as u64) * 16 + hexv(rt.ld8(p, at + 3) as u64)
+}
+
+// decode the JSON string that starts at p[at] (just after the opening quote) into out; returns the index after the closing quote
+fn json_unescape(p: u64, n: usize, at: usize, out: *mut rt.Buf) -> usize {
+    var i: usize = at
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c == 34 {
+            return i + 1
+        }
+        if c == 92 && i + 1 < n {
+            let d: u64 = rt.ld8(p, i + 1) as u64
+            i = i + 2
+            if d == 110 {
+                rt.buf_push(out, 10 as u8)
+            } else if d == 116 {
+                rt.buf_push(out, 32 as u8)
+            } else if d == 114 {
+                // dropped
+            } else if d == 117 {
+                var cp: u64 = hex4(p, i, n)
+                i = i + 4
+                if cp >= 55296 && cp < 56320 && i + 6 <= n && rt.ld8(p, i) == 92 as u8 && rt.ld8(p, i + 1) == 117 as u8 {
+                    let lo: u64 = hex4(p, i + 2, n)
+                    if lo >= 56320 && lo < 57344 {
+                        cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+                        i = i + 6
+                    }
+                }
+                utf8_push(out, cp)
+            } else {
+                rt.buf_push(out, d as u8)
+            }
+        } else {
+            rt.buf_push(out, c as u8)
+            i = i + 1
+        }
+    }
+    return n
+}
+
+// the string value of "key":"..." (first occurrence) -> out; false when absent
+fn json_get(p: u64, n: usize, key: str, out: *mut rt.Buf) -> bool {
+    var pat: rt.Buf = rt.buf_new()
+    kq(&pat, key)
+    q(&pat)
+    var i: usize = 0
+    var found: usize = n + 1
+    let m: usize = pat.len
+    while i + m <= n {
+        var j: usize = 0
+        while j < m && rt.ld8(p, i + j) == rt.ld8(pat.ptr, j) {
+            j = j + 1
+        }
+        if j == m {
+            found = i + m
+            break
+        }
+        i = i + 1
+    }
+    rt.buf_free(&pat)
+    if found > n {
+        return false
+    }
+    let _e: usize = json_unescape(p, n, found, out)
+    return true
+}
+
+// append p[0..n) as JSON string content (no quotes)
+fn json_push(b: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c == 34 || c == 92 {
+            rt.buf_push(b, 92 as u8)
+            rt.buf_push(b, c as u8)
+        } else if c < 32 {
+            rt.buf_push(b, 92 as u8)
+            push_str(b, "u00")
+            rt.buf_push(b, (48 + (c >> 4)) as u8)
+            var lo: u64 = c & 15
+            if lo < 10 {
+                lo = 48 + lo
+            } else {
+                lo = 87 + lo
+            }
+            rt.buf_push(b, lo as u8)
+        } else {
+            rt.buf_push(b, c as u8)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------------ the local socket (datagrams to the Mini)
+fn local_open() -> bool {
+    var path: [u8; 16] = "/tmp/jmlink.sock"
+    let fd: i64 = syscall(41, 1, 2, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    var sa: [u8; 32] = [0; 32]
+    sa[0 as usize] = 1 as u8
+    var i: usize = 0
+    while i < 16 {
+        sa[2 + i] = path[i]
+        i = i + 1
+    }
+    let r: i64 = syscall(49, fd, (&sa[0]) as i64, 19, 0, 0, 0)
+    if r < 0 {
+        syscall(SYS_CLOSE2, fd, 0, 0, 0, 0, 0)
+        return false
+    }
+    LOCAL_FD = fd
+    return true
+}
+
+// one datagram to the Mini: "<tag> <text>"
+fn tell(tag: u8, p: u64, n: usize) {
+    if LOCAL_FD < 0 {
+        return
+    }
+    var sa: [u8; 32] = [0; 32]
+    var path: [u8; 15] = "/tmp/jmini.sock"
+    sa[0 as usize] = 1 as u8
+    var i: usize = 0
+    while i < 15 {
+        sa[2 + i] = path[i]
+        i = i + 1
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push(&b, tag)
+    rt.buf_push(&b, 32 as u8)
+    var k: usize = n
+    if k > 1200 {
+        k = 1200
+    }
+    rt.buf_push_bytes(&b, p, k)
+    syscall(44, LOCAL_FD, b.ptr as i64, b.len as i64, 0, (&sa[0]) as i64, 18)
+    rt.buf_free(&b)
+}
+
+fn tell_s(tag: u8, s: str) {
+    tell(tag, s.p as u64, s.n as usize)
+}
+
+fn set_status(s: str) {
+    var i: usize = 0
+    while i < (s.n as usize) && i < 118 {
+        last_status[i] = rt.ld8(s.p as u64, i)
+        i = i + 1
+    }
+    last_status_n = i
+    tell(83 as u8, s.p as u64, s.n as usize)
+    say(s)
+}
+
+// ------------------------------------------------------------------ files
+fn secret_write(path: u64, p: u64, n: usize) -> bool {
+    let fd: i64 = syscall(SYS_OPEN2, path as i64, O_WRITE_TRUNC, MODE_SECRET, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    let ok: bool = rt.write_everything(fd, p, n)
+    syscall(SYS_CLOSE2, fd, 0, 0, 0, 0, 0)
+    return ok
+}
+
+// /etc/jarvismini.login : line 1 = user, line 2 = token
+fn login_load() {
+    var path: [u8; 22] = "/etc/jarvismini.login\0"
+    var b: rt.Buf = rt.buf_new()
+    have_token = false
+    if !rt.read_file((&path[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return
+    }
+    var i: usize = 0
+    var k: usize = 0
+    while i < b.len && rt.ld8(b.ptr, i) != 10 as u8 && k < 60 {
+        USER[k] = rt.ld8(b.ptr, i)
+        k = k + 1
+        i = i + 1
+    }
+    USER[k] = 0 as u8
+    i = i + 1
+    var t: usize = 0
+    while i < b.len && rt.ld8(b.ptr, i) != 10 as u8 && t < 590 {
+        TOKEN[t] = rt.ld8(b.ptr, i)
+        t = t + 1
+        i = i + 1
+    }
+    TOKEN[t] = 0 as u8
+    if t > 20 && k > 0 {
+        have_token = true
+    }
+    rt.buf_free(&b)
+}
+
+fn login_save() {
+    var path: [u8; 22] = "/etc/jarvismini.login\0"
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, (&USER[0]) as u64, cstr_len((&USER[0]) as u64))
+    rt.buf_push(&b, 10 as u8)
+    rt.buf_push_bytes(&b, (&TOKEN[0]) as u64, cstr_len((&TOKEN[0]) as u64))
+    rt.buf_push(&b, 10 as u8)
+    let ok: bool = secret_write((&path[0]) as u64, b.ptr, b.len)
+    if !ok {
+        say("could not save the login")
+    }
+    rt.buf_free(&b)
+}
+
+fn login_forget() {
+    var path: [u8; 22] = "/etc/jarvismini.login\0"
+    syscall(SYS_UNLINK2, (&path[0]) as i64, 0, 0, 0, 0, 0)
+    have_token = false
+    TOKEN[0 as usize] = 0 as u8
+}
+
+// /etc/jarvismini.conf : server <name> | ip <a.b.c.d> | port <n> | roots <path> | debug
+fn conf_load() {
+    var pz: [u8; 21] = "/etc/jarvismini.conf\0"
+    var dbg: [u8; 22] = "/etc/jarvismini.debug\0"
+    var b: rt.Buf = rt.buf_new()
+    var d: rt.Buf = rt.buf_new()
+    debug_on = rt.read_file((&dbg[0]) as u64, &d)
+    rt.buf_free(&d)
+    var dn: [u8; 18] = "jarvis.fleitec.com"
+    var i: usize = 0
+    while i < 18 {
+        CONF_HOST[i] = dn[i]
+        i = i + 1
+    }
+    conf_hostlen = 18
+    conf_ip = 0 as u32
+    conf_port = 443
+    CONF_ROOTS[0 as usize] = 0 as u8
+    if !rt.read_file((&pz[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return
+    }
+    var at: usize = 0
+    while at < b.len {
+        var e: usize = at
+        while e < b.len && rt.ld8(b.ptr, e) != 10 as u8 {
+            e = e + 1
+        }
+        let lp: u64 = b.ptr + at as u64
+        let ln: usize = e - at
+        if starts(lp, ln, "server ") {
+            var k: usize = 0
+            var j: usize = 7
+            while j < ln && k < 90 && rt.ld8(lp, j) > 32 as u8 {
+                CONF_HOST[k] = rt.ld8(lp, j)
+                k = k + 1
+                j = j + 1
+            }
+            conf_hostlen = k
+        } else if starts(lp, ln, "port ") {
+            var v: u64 = 0
+            var j: usize = 5
+            while j < ln && rt.ld8(lp, j) >= 48 as u8 && rt.ld8(lp, j) <= 57 as u8 {
+                v = v * 10 + (rt.ld8(lp, j) - 48 as u8) as u64
+                j = j + 1
+            }
+            if v > 0 {
+                conf_port = v
+            }
+        } else if starts(lp, ln, "roots ") {
+            var k: usize = 0
+            var j: usize = 6
+            while j < ln && k < 90 && rt.ld8(lp, j) > 32 as u8 {
+                CONF_ROOTS[k] = rt.ld8(lp, j)
+                k = k + 1
+                j = j + 1
+            }
+            CONF_ROOTS[k] = 0 as u8
+        } else if starts(lp, ln, "ip ") {
+            var parts: [u32; 4] = [0 as u32; 4]
+            var pk: usize = 0
+            var v: u32 = 0 as u32
+            var j: usize = 3
+            while j < ln && rt.ld8(lp, j) > 32 as u8 {
+                let ch: u8 = rt.ld8(lp, j)
+                if ch == 46 as u8 {
+                    if pk < 3 {
+                        parts[pk] = v
+                    }
+                    pk = pk + 1
+                    v = 0 as u32
+                } else if ch >= 48 as u8 && ch <= 57 as u8 {
+                    v = v * 10 as u32 + (ch - 48 as u8) as u32
+                }
+                j = j + 1
+            }
+            if pk == 3 {
+                parts[3 as usize] = v
+                conf_ip = net.ipv4(parts[0 as usize] as u8, parts[1 as usize] as u8, parts[2 as usize] as u8, parts[3 as usize] as u8)
+            }
+        }
+        at = e + 1
+    }
+    rt.buf_free(&b)
+}
+
+// ------------------------------------------------------------------ TLS connection
+// resolve + connect + handshake. 0 = ok, else a short reason code (1 dns, 2 tcp, 3 roots, 4 handshake)
+fn open_tls(c: *mut net.Conn, t: *mut tls.Tls, store: *mut x509.Store) -> u64 {
+    var addr: u32 = conf_ip
+    if addr == 0 as u32 {
+        CONF_HOST[conf_hostlen] = 0 as u8
+        let a4: u64 = dns.resolve_a((&CONF_HOST[0]) as u64)
+        if a4 == 0 {
+            return 1
+        }
+        addr = a4 as u32
+    }
+    var bad: bool = false
+    var cc: net.Conn = net.connect_tcp(addr, conf_port as u16)
+    catch | e | fail_conn(&bad)
+    if bad {
+        return 2
+    }
+    *c = cc
+    let okt: bool = net.set_timeout(c, 20000 as u64) catch false
+    var rootpath: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    var rp: u64 = (&rootpath[0]) as u64
+    if CONF_ROOTS[0 as usize] != 0 as u8 {
+        rp = (&CONF_ROOTS[0]) as u64
+    }
+    var sb: rt.Buf = rt.buf_new()
+    var taken: usize = 0
+    if rt.read_file(rp, &sb) {
+        taken = x509.store_load_pem(store, sb.ptr, sb.len)
+    }
+    rt.buf_free(&sb)
+    if taken == 0 {
+        net.close(c)
+        return 3
+    }
+    *t = tls.tls_new()
+    let oki: bool = tls.tls_init(t, c, store, (&CONF_HOST[0]) as u64, conf_hostlen, now_seconds())
+    var hs: bool = false
+    let okh: bool = tls.tls_handshake(t)
+    catch | e | fail_flag(&hs)
+    if hs || !tls.tls_established(t) {
+        say_num("TLS handshake failed, reason ", tls.tls_verify_reason(t) as u64)
+        tls.tls_free(t)
+        net.close(c)
+        return 4
+    }
+    return 0
+}
+
+fn close_tls(c: *mut net.Conn, t: *mut tls.Tls, store: *mut x509.Store) {
+    tls.tls_close(t)
+    tls.tls_free(t)
+    net.close(c)
+    x509.store_free(store)
+}
+
+fn status_code(p: u64, n: usize) -> u64 {
+    var i: usize = 0
+    while i < n && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    i = i + 1
+    var v: u64 = 0
+    var d: usize = 0
+    while i < n && d < 3 {
+        let ch: u8 = rt.ld8(p, i)
+        if ch < 48 as u8 || ch > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (ch - 48 as u8) as u64
+        i = i + 1
+        d = d + 1
+    }
+    return v
+}
+
+fn tls_send(t: *mut tls.Tls, p: u64, n: usize) -> bool {
+    var werr: bool = false
+    let ok: bool = tls.tls_write(t, p, n)
+    catch | e | fail_flag(&werr)
+    return !werr && ok
+}
+
+fn tls_recv(t: *mut tls.Tls, p: u64, cap: usize) -> usize {
+    var rerr: bool = false
+    let n: usize = tls.tls_read(t, p, cap)
+    catch | e | fail_len(&rerr)
+    if rerr {
+        return 0 as usize
+    }
+    return n
+}
+
+// POST /api/login with the typed name + password. 0 = token stored, else: 1 network, 2 refused (401/403/429...), 3 answer without token
+fn do_login() -> u64 {
+    var c: net.Conn = net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+    var t: tls.Tls = tls.tls_new()
+    var store: x509.Store = x509.store_new()
+    let why: u64 = open_tls(&c, &t, &store)
+    if why != 0 {
+        x509.store_free(&store)
+        say_num("login: no connection, code ", why)
+        return 1
+    }
+    var body: rt.Buf = rt.buf_new()
+    push_str(&body, "{")
+    kq(&body, "username")
+    q(&body)
+    json_push(&body, (&USER[0]) as u64, cstr_len((&USER[0]) as u64))
+    q(&body)
+    push_str(&body, ",")
+    kq(&body, "password")
+    q(&body)
+    json_push(&body, (&PASS[0]) as u64, cstr_len((&PASS[0]) as u64))
+    q(&body)
+    push_str(&body, "}")
+    var req: rt.Buf = rt.buf_new()
+    push_str(&req, "POST /api/login HTTP/1.1")
+    crlf(&req)
+    push_str(&req, "Host: ")
+    rt.buf_push_bytes(&req, (&CONF_HOST[0]) as u64, conf_hostlen)
+    crlf(&req)
+    push_str(&req, "User-Agent: orientos-jarvismini")
+    crlf(&req)
+    push_str(&req, "Content-Type: application/json")
+    crlf(&req)
+    push_str(&req, "Connection: close")
+    crlf(&req)
+    push_str(&req, "Content-Length: ")
+    rt.buf_push_dec_u64(&req, body.len as u64)
+    crlf(&req)
+    crlf(&req)
+    rt.buf_push_bytes(&req, body.ptr, body.len)
+    let sent: bool = tls_send(&t, req.ptr, req.len)
+    // overwrite the secrets at once
+    var z: usize = 0
+    while z < body.len {
+        __mmio_write8((body.ptr + z as u64) as *mut u8, 0 as u8)
+        z = z + 1
+    }
+    z = 0
+    while z < req.len {
+        __mmio_write8((req.ptr + z as u64) as *mut u8, 0 as u8)
+        z = z + 1
+    }
+    rt.buf_free(&body)
+    rt.buf_free(&req)
+    var k: usize = 0
+    while k < 128 {
+        PASS[k] = 0 as u8
+        k = k + 1
+    }
+    have_pass = false
+    if !sent {
+        close_tls(&c, &t, &store)
+        return 1
+    }
+    var roh: rt.Buf = rt.buf_new()
+    var chunk: [u8; 4096] = [0; 4096]
+    while roh.len < 60000 {
+        let n: usize = tls_recv(&t, (&chunk[0]) as u64, 4096 as usize)
+        if n == 0 {
+            break
+        }
+        rt.buf_push_bytes(&roh, (&chunk[0]) as u64, n)
+    }
+    close_tls(&c, &t, &store)
+    let code: u64 = status_code(roh.ptr, roh.len)
+    say_num("login: HTTP ", code)
+    if code != 200 {
+        rt.buf_free(&roh)
+        return 2
+    }
+    var tok: rt.Buf = rt.buf_new()
+    let got: bool = json_get(roh.ptr, roh.len, "token", &tok)
+    rt.buf_free(&roh)
+    if !got || tok.len < 20 || tok.len > 590 {
+        rt.buf_free(&tok)
+        return 3
+    }
+    var i: usize = 0
+    while i < tok.len {
+        TOKEN[i] = rt.ld8(tok.ptr, i)
+        i = i + 1
+    }
+    TOKEN[i] = 0 as u8
+    rt.buf_free(&tok)
+    have_token = true
+    login_save()
+    return 0
+}
+
+// ------------------------------------------------------------------ the chat session
+static mut MSGBUF: [u8; 262144] = [0; 262144]
+static mut OUTF: [u8; 1100] = [0; 1100]
+
+fn ws_send_text(p: u64, n: usize) -> bool {
+    if G_T == 0 {
+        return false
+    }
+    var mask: [u8; 4] = [0; 4]
+    rand_into((&mask[0]) as u64, 4)
+    let mk: u64 = (mask[0 as usize] as u64) | ((mask[1 as usize] as u64) << 8) | ((mask[2 as usize] as u64) << 16) | ((mask[3 as usize] as u64) << 24)
+    let cap: usize = n + 16
+    var mem: u64 = rt.heap_alloc(cap) as u64
+    if mem == 0 {
+        return false
+    }
+    let flen: u64 = ws.encode(ws.OP_TEXT, true, p, n as u64, mk, mem, cap as u64)
+    var ok: bool = false
+    if flen > 0 {
+        ok = tls_send(G_T as *mut tls.Tls, mem, flen as usize)
+    }
+    rt.heap_free(mem, cap)
+    return ok
+}
+
+fn ws_send_ctl(op: u64) {
+    if G_T == 0 {
+        return
+    }
+    var mask: [u8; 4] = [0; 4]
+    rand_into((&mask[0]) as u64, 4)
+    let mk: u64 = (mask[0 as usize] as u64) | ((mask[1 as usize] as u64) << 8) | ((mask[2 as usize] as u64) << 16) | ((mask[3 as usize] as u64) << 24)
+    var fr: [u8; 32] = [0; 32]
+    let flen: u64 = ws.encode(op, true, (&fr[0]) as u64, 0, mk, (&fr[0]) as u64, 32)
+    if flen > 0 {
+        let ok: bool = tls_send(G_T as *mut tls.Tls, (&fr[0]) as u64, flen as usize)
+    }
+}
+
+fn b64_into(b: *mut rt.Buf, p: u64, n: usize) {
+    let cap: usize = (n / 3 + 2) * 4 + 8
+    let mem: u64 = rt.heap_alloc(cap) as u64
+    if mem == 0 {
+        return
+    }
+    let w: u64 = ws.b64_encode(p, n as u64, mem)
+    rt.buf_push_bytes(b, mem, w as usize)
+    rt.heap_free(mem, cap)
+}
+
+fn next_msgid(b: *mut rt.Buf) {
+    seq = seq + 1
+    push_str(b, "mini")
+    rt.buf_push_dec_u64(b, now_seconds())
+    rt.buf_push_dec_u64(b, seq)
+}
+
+// MSG <text>   /   UP <path> <text>
+fn send_chat(text: u64, tn: usize, path: u64, pn: usize) {
+    if !online {
+        tell_s(69 as u8, "not connected")
+        return
+    }
+    var o: rt.Buf = rt.buf_new()
+    push_str(&o, "{")
+    kvs(&o, "type", "message")
+    push_str(&o, ",")
+    kvs(&o, "mode", "text")
+    push_str(&o, ",")
+    kq(&o, "jarvisMode")
+    push_str(&o, "true,")
+    kq(&o, "text")
+    q(&o)
+    json_push(&o, text, tn)
+    q(&o)
+    push_str(&o, ",")
+    kq(&o, "msgId")
+    q(&o)
+    next_msgid(&o)
+    q(&o)
+    if cid_len > 0 {
+        push_str(&o, ",")
+        kq(&o, "cid")
+        q(&o)
+        rt.buf_push_bytes(&o, (&CID[0]) as u64, cid_len)
+        q(&o)
+    }
+    var imgs: rt.Buf = rt.buf_new()
+    var files: rt.Buf = rt.buf_new()
+    if pn > 0 {
+        var pz: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&pz, path, pn)
+        rt.buf_push(&pz, 0 as u8)
+        var fb: rt.Buf = rt.buf_new()
+        if !rt.read_file(pz.ptr, &fb) || fb.len == 0 || (fb.len as u64) > 15000000 {
+            tell_s(69 as u8, "attachment could not be read")
+            rt.buf_free(&fb)
+            rt.buf_free(&pz)
+            rt.buf_free(&imgs)
+            rt.buf_free(&files)
+            rt.buf_free(&o)
+            return
+        }
+        // the name: after the last '/'
+        var nm: usize = 0
+        var q: usize = 0
+        while q < pn {
+            if rt.ld8(path, q) == 47 as u8 {
+                nm = q + 1
+            }
+            q = q + 1
+        }
+        let is_png: bool = pn > 4 && rt.ld8(path, pn - 4) == 46 as u8 && rt.ld8(path, pn - 3) == 112 as u8
+            && rt.ld8(path, pn - 2) == 110 as u8 && rt.ld8(path, pn - 1) == 103 as u8
+        if is_png {
+            push_str(&imgs, "{")
+            kvs(&imgs, "mediaType", "image/png")
+            push_str(&imgs, ",")
+            kq(&imgs, "data")
+            q(&imgs)
+            b64_into(&imgs, fb.ptr, fb.len)
+            q(&imgs)
+            push_str(&imgs, "}")
+        } else {
+            push_str(&files, "{")
+            kq(&files, "name")
+            q(&files)
+            json_push(&files, path + nm as u64, pn - nm)
+            q(&files)
+            push_str(&files, ",")
+            kvs(&files, "mime", "application/octet-stream")
+            push_str(&files, ",")
+            kq(&files, "data")
+            q(&files)
+            b64_into(&files, fb.ptr, fb.len)
+            q(&files)
+            push_str(&files, "}")
+        }
+        rt.buf_free(&fb)
+        rt.buf_free(&pz)
+    }
+    push_str(&o, ",")
+    kq(&o, "images")
+    push_str(&o, "[")
+    rt.buf_push_bytes(&o, imgs.ptr, imgs.len)
+    push_str(&o, "],")
+    kq(&o, "files")
+    push_str(&o, "[")
+    rt.buf_push_bytes(&o, files.ptr, files.len)
+    push_str(&o, "]}")
+    rt.buf_free(&imgs)
+    rt.buf_free(&files)
+    let ok: bool = ws_send_text(o.ptr, o.len)
+    say_num("sent bytes ", o.len as u64)
+    rt.buf_free(&o)
+    if !ok {
+        tell_s(69 as u8, "send failed")
+    }
+}
+
+// lines of the answer: everything up to a newline goes out at once, the rest waits for "done"
+fn acc_push(p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        if acc_n >= 2000 {
+            flush_acc(true)
+        }
+        ACC[acc_n] = rt.ld8(p, i)
+        acc_n = acc_n + 1
+        i = i + 1
+    }
+}
+
+fn flush_acc(all: bool) {
+    let ap: u64 = (&ACC[0]) as u64
+    var start: usize = 0
+    var i: usize = 0
+    while i < acc_n {
+        if ACC[i] == 10 as u8 {
+            if i > start {
+                tell(82 as u8, ap + start as u64, i - start)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if (all || acc_n >= 1000) && acc_n > start {
+        tell(82 as u8, ap + start as u64, acc_n - start)
+        start = acc_n
+    }
+    if start > 0 {
+        let rest: usize = acc_n - start
+        if rest > 0 {
+            rt.mem_copy(ap, ap + start as u64, rest)
+        }
+        acc_n = rest
+    }
+}
+
+// one complete text message from the server
+fn on_server_json(p: u64, n: usize) {
+    var ty: rt.Buf = rt.buf_new()
+    if !json_get(p, n, "type", &ty) {
+        rt.buf_free(&ty)
+        return
+    }
+    // a message of another chat is not for us
+    var cidm: rt.Buf = rt.buf_new()
+    var other: bool = false
+    if json_get(p, n, "cid", &cidm) && cid_len > 0 && cidm.len > 0 {
+        if cidm.len != cid_len {
+            other = true
+        } else {
+            var q: usize = 0
+            while q < cid_len {
+                if rt.ld8(cidm.ptr, q) != CID[q] {
+                    other = true
+                }
+                q = q + 1
+            }
+        }
+    }
+    rt.buf_free(&cidm)
+    if starts(ty.ptr, ty.len, "info") && ty.len == 4 {
+        set_status("online")
+    } else if starts(ty.ptr, ty.len, "conversation") {
+        var idb: rt.Buf = rt.buf_new()
+        if json_get(p, n, "id", &idb) && idb.len > 0 && idb.len < 78 && cid_len == 0 {
+            var q: usize = 0
+            while q < idb.len {
+                CID[q] = rt.ld8(idb.ptr, q)
+                q = q + 1
+            }
+            cid_len = idb.len
+        }
+        rt.buf_free(&idb)
+    } else if other {
+        // not ours
+    } else if starts(ty.ptr, ty.len, "token") {
+        var cb: rt.Buf = rt.buf_new()
+        if json_get(p, n, "content", &cb) {
+            acc_push(cb.ptr, cb.len)
+            flush_acc(false)
+        }
+        rt.buf_free(&cb)
+    } else if starts(ty.ptr, ty.len, "done") {
+        flush_acc(true)
+    } else if starts(ty.ptr, ty.len, "error") {
+        var eb: rt.Buf = rt.buf_new()
+        if json_get(p, n, "message", &eb) {
+            tell(69 as u8, eb.ptr, eb.len)
+        }
+        rt.buf_free(&eb)
+    } else if starts(ty.ptr, ty.len, "system") {
+        var sb: rt.Buf = rt.buf_new()
+        if json_get(p, n, "content", &sb) {
+            tell(83 as u8, sb.ptr, sb.len)
+        }
+        rt.buf_free(&sb)
+    } else if starts(ty.ptr, ty.len, "confirm_request") {
+        // the Mini has no dialog yet: refuse, say so
+        var idb: rt.Buf = rt.buf_new()
+        if json_get(p, n, "id", &idb) {
+            var o: rt.Buf = rt.buf_new()
+            push_str(&o, "{")
+            kvs(&o, "type", "confirm_result")
+            push_str(&o, ",")
+            kq(&o, "id")
+            q(&o)
+            rt.buf_push_bytes(&o, idb.ptr, idb.len)
+            q(&o)
+            push_str(&o, ",")
+            kq(&o, "allow")
+            push_str(&o, "false}")
+            let ok: bool = ws_send_text(o.ptr, o.len)
+            rt.buf_free(&o)
+        }
+        rt.buf_free(&idb)
+        tell_s(83 as u8, "a confirmation was asked - answer it in the main chat (refused here)")
+    } else if starts(ty.ptr, ty.len, "ask_request") {
+        tell_s(83 as u8, "a question is open - answer it in the main chat")
+    }
+    rt.buf_free(&ty)
+}
+
+// ------------------------------------------------------------------ commands from the Mini
+// returns true when the session must end (logout)
+fn on_command(n: usize) -> bool {
+    let p: u64 = (&CMD[0]) as u64
+    if starts(p, n, "HELLO") {
+        tell(83 as u8, (&last_status[0]) as u64, last_status_n)
+    } else if starts(p, n, "NEW") {
+        cid_len = 0
+        acc_n = 0
+        tell_s(83 as u8, "new chat")
+    } else if starts(p, n, "LOGOUT") {
+        login_forget()
+        login_dead = true
+        logout_req = true
+        return true
+    } else if starts(p, n, "LOGIN ") {
+        // LOGIN <user> <password...>
+        var k: usize = 0
+        var i: usize = 6
+        while i < n && rt.ld8(p, i) > 32 as u8 && k < 60 {
+            USER[k] = rt.ld8(p, i)
+            k = k + 1
+            i = i + 1
+        }
+        USER[k] = 0 as u8
+        i = i + 1
+        var m: usize = 0
+        while i < n && m < 120 {
+            PASS[m] = rt.ld8(p, i)
+            m = m + 1
+            i = i + 1
+        }
+        PASS[m] = 0 as u8
+        // clear the datagram copy of the password
+        var z: usize = 6
+        while z < n {
+            CMD[z] = 0 as u8
+            z = z + 1
+        }
+        if k == 0 || m == 0 {
+            tell_s(69 as u8, "usage: /login <name> <password>")
+        } else {
+            have_pass = true
+            have_token = false
+            login_dead = false
+            return true
+        }
+    } else if starts(p, n, "MSG ") {
+        send_chat(p + 4, n - 4, 0, 0)
+    } else if starts(p, n, "UP ") {
+        var e: usize = 3
+        while e < n && rt.ld8(p, e) > 32 as u8 {
+            e = e + 1
+        }
+        var tx: usize = e
+        if tx < n {
+            tx = tx + 1
+        }
+        send_chat(p + tx as u64, n - tx, p + 3, e - 3)
+    }
+    return false
+}
+
+// poll the local socket (and the TCP socket when fd >= 0); returns bit 1 = local readable, bit 2 = tcp readable
+fn wait_io(tcp_fd: i64, ms: u64) -> u64 {
+    var pfd: [u32; 4] = [0 as u32; 4]
+    var nf: u64 = 0
+    pfd[0 as usize] = LOCAL_FD as u32
+    pfd[1 as usize] = 1 as u32
+    nf = 1
+    if tcp_fd >= 0 {
+        pfd[2 as usize] = tcp_fd as u32
+        pfd[3 as usize] = 1 as u32
+        nf = 2
+    }
+    let r: i64 = syscall(SYS_POLL, (&pfd[0]) as i64, nf as i64, ms as i64, 0, 0, 0)
+    var res: u64 = 0
+    if r > 0 {
+        if (pfd[1 as usize] >> 16) != 0 as u32 {
+            res = res | 1
+        }
+        if nf == 2 && (pfd[3 as usize] >> 16) != 0 as u32 {
+            res = res | 2
+        }
+    }
+    return res
+}
+
+// one command from the local socket; true = end the session
+fn local_step() -> bool {
+    let r: i64 = syscall(45, LOCAL_FD, (&CMD[0]) as i64, 3000, 0, 0, 0)
+    if r <= 0 {
+        return false
+    }
+    CMD[r as usize] = 0 as u8
+    return on_command(r as usize)
+}
+
+// connect the WebSocket and run until it ends. returns: 0 = ended / dropped (retry), 1 = token refused, 2 = end for a command, 3 = network
+#[allow_escape]
+fn session() -> u64 {
+    var c: net.Conn = net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+    var t: tls.Tls = tls.tls_new()
+    var store: x509.Store = x509.store_new()
+    let why: u64 = open_tls(&c, &t, &store)
+    if why != 0 {
+        x509.store_free(&store)
+        if why == 4 {
+            set_status("offline: TLS failed (certificate/name)")
+        } else if why == 3 {
+            set_status("offline: no trust store")
+        } else {
+            set_status("offline: server unreachable")
+        }
+        return 3
+    }
+    // upgrade
+    var rnd: [u8; 16] = [0; 16]
+    rand_into((&rnd[0]) as u64, 16)
+    var key: [u8; 32] = [0; 32]
+    let kl: u64 = ws.b64_encode((&rnd[0]) as u64, 16, (&key[0]) as u64)
+    var path: rt.Buf = rt.buf_new()
+    push_str(&path, "/?role=ui&dev=mini&token=")
+    rt.buf_push_bytes(&path, (&TOKEN[0]) as u64, cstr_len((&TOKEN[0]) as u64))
+    var req: [u8; 1400] = [0; 1400]
+    let rl: u64 = ws.build_request((&req[0]) as u64, 1400, (&CONF_HOST[0]) as u64, conf_hostlen as u64, path.ptr, path.len as u64, (&key[0]) as u64)
+    rt.buf_free(&path)
+    if rl == 0 || !tls_send(&t, (&req[0]) as u64, rl as usize) {
+        close_tls(&c, &t, &store)
+        return 3
+    }
+    var head: [u8; 8200] = [0; 8200]
+    var hn: usize = 0
+    var hdr: u64 = 0
+    var status_seen: u64 = 0
+    while hdr == 0 {
+        if hn >= 8192 {
+            break
+        }
+        let n: usize = tls_recv(&t, ((&head[0]) as u64) + hn as u64, 8192 - hn)
+        if n == 0 {
+            break
+        }
+        hn = hn + n
+        status_seen = status_code((&head[0]) as u64, hn)
+        hdr = ws.check_response((&head[0]) as u64, hn as u64, (&key[0]) as u64)
+        if ws.failed(hdr) {
+            break
+        }
+    }
+    if hdr == 0 || ws.failed(hdr) {
+        say_num("upgrade failed, HTTP ", status_seen)
+        close_tls(&c, &t, &store)
+        if status_seen == 401 || status_seen == 403 {
+            return 1
+        }
+        return 3
+    }
+    var w: ws.Ws = ws.ws_new()
+    ws.init(&w, (&MSGBUF[0]) as u64, 262144)
+    G_T = (&t) as u64
+    G_W = (&w) as u64
+    online = true
+    set_status("connecting...")
+    cid_len = 0
+    acc_n = 0
+    var result: u64 = 0
+    var off: u64 = hdr
+    var last_ping: u64 = now_ms()
+    var dead: bool = false
+    var chunk: [u8; 16400] = [0; 16400]
+    // the bytes that came behind the header
+    var have: u64 = hn as u64
+    var feedp: u64 = (&head[0]) as u64
+    while !dead {
+        // feed what we have
+        while off < have {
+            let used: u64 = ws.feed(&w, feedp + off, have - off)
+            off = off + used
+            let ev: u64 = ws.event(&w)
+            if ev == ws.EV_TEXT {
+                on_server_json(ws.msg_ptr(&w), ws.msg_len(&w) as usize)
+                ws.take(&w)
+            } else if ev == ws.EV_PING {
+                ws.take(&w)
+                ws_send_ctl(ws.OP_PONG)
+            } else if ev == ws.EV_CLOSE || ev == ws.EV_ERROR {
+                dead = true
+                break
+            } else if ev != 0 {
+                ws.take(&w)
+            } else if used == 0 {
+                break
+            }
+        }
+        off = 0
+        have = 0
+        if dead {
+            break
+        }
+        let io_ready: u64 = wait_io(c.fd as i64, 1000)
+        if (io_ready & 1) != 0 {
+            if local_step() {
+                result = 2
+                break
+            }
+        }
+        if (io_ready & 2) != 0 {
+            let n: usize = tls_recv(&t, (&chunk[0]) as u64, 16384 as usize)
+            if n == 0 {
+                dead = true
+            } else {
+                feedp = (&chunk[0]) as u64
+                have = n as u64
+            }
+        }
+        let nw: u64 = now_ms()
+        if nw - last_ping > 25000 {
+            last_ping = nw
+            ws_send_ctl(ws.OP_PING)
+        }
+    }
+    online = false
+    G_T = 0
+    G_W = 0
+    close_tls(&c, &t, &store)
+    return result
+}
+
+fn main(start: u64) -> i32 {
+    conf_load()
+    if !local_open() {
+        say("already running (or no local socket)")
+        return 0
+    }
+    login_load()
+    say("up")
+    if have_token {
+        set_status("connecting...")
+    } else {
+        set_status("login needed: /login <name> <password>")
+    }
+    var next_try: u64 = 0
+    var fails: u64 = 0
+    while true {
+        let now: u64 = now_ms()
+        if have_pass {
+            set_status("logging in...")
+            let r: u64 = do_login()
+            if r == 0 {
+                fails = 0
+                next_try = 0
+                set_status("connecting...")
+            } else if r == 2 {
+                login_dead = true
+                set_status("login failed: name or password refused")
+            } else if r == 3 {
+                login_dead = true
+                set_status("login failed: unexpected answer")
+            } else {
+                set_status("offline: server unreachable")
+                have_token = false
+                login_dead = true
+            }
+        } else if have_token && !login_dead && now >= next_try {
+            let r: u64 = session()
+            if r == 1 {
+                login_forget()
+                login_dead = true
+                set_status("login expired: /login <name> <password>")
+            } else if r == 2 {
+                if logout_req {
+                    logout_req = false
+                    set_status("logged out: /login <name> <password>")
+                }
+                next_try = 0
+            } else {
+                fails = fails + 1
+                var back: u64 = fails * 3000
+                if back > 30000 {
+                    back = 30000
+                }
+                next_try = now_ms() + back
+                if r == 0 {
+                    set_status("offline: connection lost, retrying")
+                }
+            }
+        } else {
+            let io_ready: u64 = wait_io(-1, 500)
+            if (io_ready & 1) != 0 {
+                if local_step() {
+                    if logout_req {
+                        logout_req = false
+                        set_status("logged out: /login <name> <password>")
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
