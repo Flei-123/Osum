@@ -39,6 +39,11 @@ def wait_for(pred, timeout):
     return False
 
 
+def stats(vnc):
+    with vnc.lock:
+        return "upd=%d rects=%d area=%d alive=%d %s" % (vnc.updates, vnc.rects, vnc.area, int(vnc.t.is_alive()), vnc.why.replace(" ", "_"))
+
+
 def compare(mon, vnc, tag):
     """Count pixels where the VNC picture differs from the screendump, ignoring pixels that change by themselves
     (clock seconds): those differ between two screendumps taken in a row. -1 = too many unstable pixels, -2 = size mismatch."""
@@ -89,7 +94,7 @@ def main():
         return
     time.sleep(settle)  # desktop comes up, heal stages and the trailing UPDATE are over
     out = open(base + ".rounds", "w")
-    out.write("0 %d\n" % compare(mon, vnc, "r0"))
+    out.write("0 %d %s\n" % (compare(mon, vnc, "r0"), stats(vnc)))
     out.flush()
     keys = list("abcdefghijklmnopqrstuvwxyz") + ["spc", "tab", "esc", "meta_l", "ret", "backspace"]
     for i in range(1, rounds + 1):
@@ -103,7 +108,7 @@ def main():
             else:
                 mon.cmd("sendkey " + rng.choice(keys), 0.1)
         time.sleep(0.7)  # shorter than the 2 s trailing UPDATE: a lost rectangle must still be visible here
-        out.write("%d %d\n" % (i, compare(mon, vnc, "r%d" % i)))
+        out.write("%d %d %s\n" % (i, compare(mon, vnc, "r%d" % i), stats(vnc)))
         out.flush()
     out.close()
     with vnc.lock:

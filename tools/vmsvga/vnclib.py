@@ -15,6 +15,9 @@ class Vnc:
         self.buf = bytearray()
         self.cursor = None  # (w, h, opaque, transparent)
         self.updates = 0
+        self.rects = 0
+        self.area = 0
+        self.why = ""
         self.stop = False
         self.s = socket.socket(socket.AF_UNIX)
         deadline = time.time() + 20
@@ -76,6 +79,7 @@ class Vnc:
                         (n,) = struct.unpack(">I", self.rx(4))
                         self.rx(n)
                         continue
+                    self.why = "unknown message %d" % t
                     return
                 self.rx(1)
                 (nr,) = struct.unpack(">H", self.rx(2))
@@ -83,6 +87,8 @@ class Vnc:
                 for _ in range(nr):
                     x, y, w, h, enc = struct.unpack(">HHHHi", self.rx(12))
                     if enc == 0:
+                        self.rects += 1
+                        self.area += w * h
                         data = self.rx(w * h * 4)
                         with self.lock:
                             if x + w <= self.w and y + h <= self.h:
@@ -101,10 +107,12 @@ class Vnc:
                         self.resize(w, h)
                         resized = True
                     else:
+                        self.why = "unknown encoding %d" % enc
                         return
                 self.updates += 1
                 self.request(0 if resized else 1)
-        except (EOFError, OSError):
+        except (EOFError, OSError) as e:
+            self.why = "io: %r" % (e,)
             return
 
 
