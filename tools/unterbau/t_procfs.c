@@ -106,6 +106,36 @@ int main(void)
         }
         close(fd); unlink("/dev/shm/ub_shm");
     }
+    /* LC-002: names, listing, reopen, O_EXCL, unlink drops the name, no create elsewhere in /dev */
+    {
+        errno = 0; int f1 = open("/dev/shm/ub_n1", O_RDWR | O_CREAT | O_EXCL, 0600);
+        CHECKC("shm_name_create_excl", f1 >= 0);
+        if (f1 >= 0) {
+            (void)!ftruncate(f1, 4096);
+            char *m1 = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, f1, 0);
+            if (m1 != MAP_FAILED) m1[7] = 77;
+            errno = 0; int dup = open("/dev/shm/ub_n1", O_RDWR | O_CREAT | O_EXCL, 0600);
+            CHECK("shm_name_excl_eexist", dup < 0 && errno == EEXIST, "dup=%d errno=%d", dup, errno);
+            close(f1);
+            int f2 = open("/dev/shm/ub_n1", O_RDWR);
+            char *m2 = f2 >= 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, f2, 0) : MAP_FAILED;
+            CHECK("shm_name_reopen_same_object", m2 != MAP_FAILED && m2[7] == 77, "reopen sees %d", m2 != MAP_FAILED ? m2[7] : -1);
+            struct stat st; int sr = f2 >= 0 ? fstat(f2, &st) : -1;
+            CHECK("shm_name_size", sr == 0 && st.st_size == 4096, "size=%ld", sr == 0 ? (long)st.st_size : -1L);
+            int seen = 0; DIR *d = opendir("/dev/shm");
+            if (d) { struct dirent *e; while ((e = readdir(d))) if (!strcmp(e->d_name, "ub_n1")) seen = 1; closedir(d); }
+            CHECK("shm_name_listed", seen, "ub_n1 not in readdir(/dev/shm)");
+            errno = 0; int ur = unlink("/dev/shm/ub_n1");
+            CHECKC("shm_name_unlink", ur == 0);
+            errno = 0; int f3 = open("/dev/shm/ub_n1", O_RDWR);
+            CHECK("shm_name_gone_after_unlink", f3 < 0 && errno == ENOENT, "f3=%d errno=%d", f3, errno);
+            CHECK("shm_unlinked_object_lives", m2 != MAP_FAILED && m2[7] == 77, "mapping lost its data");
+            if (f2 >= 0) close(f2);
+        }
+        errno = 0; int bad = open("/dev/ub_nope", O_RDWR | O_CREAT, 0600);
+        CHECK("dev_create_elsewhere_eperm", bad < 0 && errno == EPERM, "bad=%d errno=%d", bad, errno);
+        if (bad >= 0) { close(bad); unlink("/dev/ub_nope"); }
+    }
     errno = 0; fd = memfd_create("ub", 0);
     CHECKC("memfd_create", fd >= 0);
     if (fd >= 0) { errno = 0; CHECKC("memfd_ftruncate", ftruncate(fd, 4096) == 0); char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); CHECKC("memfd_mmap", m != MAP_FAILED); }

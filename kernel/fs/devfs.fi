@@ -60,6 +60,7 @@ import sync.atomic
 import arch.cpu
 import klog
 import drv.con.tty
+import fs.unixsock
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot }
 
@@ -117,7 +118,11 @@ const D_PTS: u64 = 16
 // W-MG3: /dev/tty1../dev/tty6 -- virtual console names (busybox init / getty open them); all of them are the console tty
 const D_TTY1: u64 = 17
 const D_TTY6: u64 = 22
-const D_LAST: u64 = 22
+const D_SHM: u64 = 23
+const D_LAST: u64 = 23
+// /dev/shm/NAME: node SHM_BASE + i is the paged shm object i (unixsock), its name lives in kstate.SHMN_OFF + i * SHMN_SLOT.
+// The name owns one reference of the object; unlink drops it. Only the USHM_PAGED paged objects can be named.
+const SHM_BASE: u64 = 300
 // the nodes of /dev/pts/N are PTS_BASE + N (above D_ROOT, so they are never taken for a device number)
 const PTS_BASE: u64 = 200
 const D_ROOT: u64 = 100
@@ -163,6 +168,59 @@ fn rdev_of(node: u64) -> u64 {
     return node
 }
 
+// Object index of a /dev/shm file node, MAX (USHM_PAGED) when the node is not one.
+fn shm_slot(node: u64) -> u64 {
+    if node >= SHM_BASE && node < SHM_BASE + unixsock.USHM_PAGED {
+        return node - SHM_BASE
+    }
+    return unixsock.USHM_PAGED
+}
+
+fn shm_name_addr(state: u64, i: u64) -> u64 {
+    return state + kstate.SHMN_OFF + i * kstate.SHMN_SLOT
+}
+
+fn shm_named(state: u64, i: u64) -> bool {
+    return i < unixsock.USHM_PAGED && kstate.get8(shm_name_addr(state, i)) != 0 && unixsock.shm_used(state, i) != 0
+}
+
+// Slot of the object named `name` (NUL-terminated), USHM_PAGED when there is none.
+fn shm_find(state: u64, name: u64) -> u64 {
+    var i: u64 = 0
+    while i < unixsock.USHM_PAGED {
+        if shm_named(state, i) && streq(name, shm_name_addr(state, i)) {
+            return i
+        }
+        i = i + 1
+    }
+    return unixsock.USHM_PAGED
+}
+
+// Path "[/]shm/NAME" -> address of NAME, 0 if the path is not below shm/ (NAME may be empty).
+fn shm_rest(path: u64) -> u64 {
+    var p: u64 = path
+    while kstate.get8(p) == 47 {
+        p = p + 1
+    }
+    if kstate.get8(p) == 115 && kstate.get8(p + 1) == 104 && kstate.get8(p + 2) == 109 && kstate.get8(p + 3) == 47 {
+        return p + 4
+    }
+    return 0
+}
+
+// Does a FULL path (e.g. "/dev/shm/x") have a "/shm/" component? Used to pick EPERM vs ENOSPC when create failed.
+fn full_path_in_shm(path: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(path + i) != 0 {
+        if kstate.get8(path + i) == 47 && kstate.get8(path + i + 1) == 115 && kstate.get8(path + i + 2) == 104
+            && kstate.get8(path + i + 3) == 109 && kstate.get8(path + i + 4) == 47 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn streq(a: u64, b: u64) -> bool {
     var i: u64 = 0
     while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
@@ -194,6 +252,7 @@ fn name_at(node: u64, out: u64) -> bool {
     var n_sda: [u8; 4] = "sda\0"
     var n_ptmx: [u8; 5] = "ptmx\0"
     var n_pts: [u8; 4] = "pts\0"
+    var n_shm: [u8; 4] = "shm\0"
     var src: u64 = 0
     if node >= D_TTY1 && node <= D_TTY6 {
         kstate.set8(out, 116 as u8)
@@ -235,6 +294,8 @@ fn name_at(node: u64, out: u64) -> bool {
         src = (&n_ptmx[0]) as u64
     } else if node == D_PTS {
         src = (&n_pts[0]) as u64
+    } else if node == D_SHM {
+        src = (&n_shm[0]) as u64
     } else {
         return false
     }
@@ -303,6 +364,18 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
             return 0
         }
         return PTS_BASE + num
+    }
+    // /dev/shm/NAME
+    let shm_n: u64 = shm_rest(p)
+    if shm_n != 0 {
+        if kstate.get8(shm_n) == 0 {
+            return D_SHM
+        }
+        let si: u64 = shm_find(state, shm_n)
+        if si >= unixsock.USHM_PAGED {
+            return 0
+        }
+        return SHM_BASE + si
     }
     // Ein Geraeteverzeichnis hat keine Unterverzeichnisse; ein
     // Schraegstrich im Rest ist deshalb ein Fehler und keine Suche.
@@ -386,10 +459,46 @@ fn pts_readdir(state: u64, index: u64, out: u64) -> u64 {
     return 0
 }
 
+// /dev/shm: ".", "..", then every named object
+fn shm_readdir(state: u64, index: u64, out: u64) -> u64 {
+    if index == 0 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return D_SHM
+    }
+    if index == 1 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 46 as u8)
+        kstate.set8(out + 2, 0 as u8)
+        return D_SHM
+    }
+    var want: u64 = index - 2
+    var i: u64 = 0
+    while i < unixsock.USHM_PAGED {
+        if shm_named(state, i) {
+            if want == 0 {
+                var k: u64 = 0
+                while k + 1 < kstate.SHMN_SLOT && kstate.get8(shm_name_addr(state, i) + k) != 0 {
+                    kstate.set8(out + k, kstate.get8(shm_name_addr(state, i) + k) as u8)
+                    k = k + 1
+                }
+                kstate.set8(out + k, 0 as u8)
+                return SHM_BASE + i
+            }
+            want = want - 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     tick(state)
     if dir == D_PTS {
         return pts_readdir(state, index, out)
+    }
+    if dir == D_SHM {
+        return shm_readdir(state, index, out)
     }
     if dir != D_ROOT {
         return 0
@@ -423,8 +532,11 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
 fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     tick(state)
     if what == vfsops.A_TYPE {
-        if node == D_ROOT || node == D_PTS {
+        if node == D_ROOT || node == D_PTS || node == D_SHM {
             return vfsops.N_DIR
+        }
+        if shm_slot(node) < unixsock.USHM_PAGED {
+            return vfsops.N_FILE
         }
         if pts_slot(node) < tty.MAX_TTY {
             return vfsops.N_CHR
@@ -446,11 +558,20 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         if is_block(node) {
             return blk.blocks_on(state, block_of(node)) * BS
         }
+        if shm_slot(node) < unixsock.USHM_PAGED {
+            return unixsock.shm_size(state, shm_slot(node))
+        }
         return 0
     }
     if what == vfsops.A_MODE {
+        if node == D_SHM {
+            return 1023 // 0o1777
+        }
         if node == D_ROOT || node == D_PTS {
             return 493 // 0o755
+        }
+        if shm_slot(node) < unixsock.USHM_PAGED {
+            return 438 // 0o666
         }
         if node == D_NULL || node == D_ZERO || node == D_TTY
             || node == D_CONSOLE || node == D_PTMX || pts_slot(node) < tty.MAX_TTY {
@@ -686,14 +807,53 @@ fn block_write_inner(state: u64, dev: u64, off: u64, src: u64,
     return done
 }
 
+// Only regular files below /dev/shm can be created: shm_open() = open(O_CREAT) + ftruncate + mmap.
 fn d_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
     tick(state)
-    return 0
+    if art != vfsops.N_FILE {
+        return 0
+    }
+    let nm: u64 = shm_rest(path)
+    if nm == 0 || kstate.get8(nm) == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    while kstate.get8(nm + n) != 0 {
+        if kstate.get8(nm + n) == 47 {
+            return 0
+        }
+        n = n + 1
+    }
+    if n + 1 >= kstate.SHMN_SLOT {
+        return 0
+    }
+    let i: u64 = unixsock.shm_new(state)
+    if i >= unixsock.USHM_PAGED {
+        return 0
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(shm_name_addr(state, i) + k, kstate.get8(nm + k) as u8)
+        k = k + 1
+    }
+    kstate.set8(shm_name_addr(state, i) + n, 0 as u8)
+    return SHM_BASE + i
 }
 
+// unlink("/dev/shm/NAME"): the name goes, the object lives on until the last descriptor/mapping lets go.
 fn d_unlink(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
-    return 1 // EPERM
+    let nm: u64 = shm_rest(path)
+    if nm == 0 {
+        return 1 // EPERM
+    }
+    let i: u64 = shm_find(state, nm)
+    if i >= unixsock.USHM_PAGED {
+        return 2 // ENOENT
+    }
+    kstate.set8(shm_name_addr(state, i), 0 as u8)
+    unixsock.shm_unref(state, i)
+    return 0
 }
 
 fn d_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
@@ -722,7 +882,7 @@ fn ops() -> vfsops.Ops {
         unlink: d_unlink,
         rename: d_rename,
         trunc: d_trunc,
-        mask: 287, // LOOKUP|READDIR|ATTR|READ|WRITE|TRUNC
+        mask: 383, // LOOKUP|READDIR|ATTR|READ|WRITE|CREATE|UNLINK|TRUNC (create/unlink only below shm/)
         tag: 7759204 // "dev\0"
     }
 }

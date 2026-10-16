@@ -3957,8 +3957,73 @@ fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
 // in eine Deskriptornummer zurueckzuuebersetzen -- die Nummer ist ja die
 // Umgebungsautoritaet, die das Handle ersetzt. Laenge und Zeigerpruefung
 // hat der Aufrufer schon gemacht.
+// read()/write() on a shm object (memfd, /dev/shm/NAME): copies through the frames of the object, within its ftruncate() size.
+// Offset in the open file; a read at/after the end gives 0, a write at/after the end gives -ENOSPC (the size only changes by ftruncate).
+fn shm_io(state: u64, me: u64, of: u64, buf: u64, len: u64, wr: bool) -> u64 {
+    let i: u64 = file.open_ino(state, of)
+    let size: u64 = unixsock.shm_size(state, i)
+    if wr && (unixsock.shm_seals(state, i) & 8) != 0 {
+        return neg(errno.E_PERM) // F_SEAL_WRITE
+    }
+    var off: u64 = file.open_off(state, of)
+    if off >= size {
+        if wr && len != 0 {
+            return neg(errno.E_NOSPC)
+        }
+        return 0
+    }
+    var want: u64 = len
+    if want > size - off {
+        want = size - off
+    }
+    var done: u64 = 0
+    while done < want {
+        let pg: u64 = off / 4096
+        let po: u64 = off & 4095
+        var chunk: u64 = 4096 - po
+        if chunk > want - done {
+            chunk = want - done
+        }
+        let fr: u64 = unixsock.shm_frame_demand(state, i, pg)
+        if fr == 0 {
+            if done != 0 {
+                file.open_set_off(state, of, off)
+                return done
+            }
+            return neg(errno.E_NOMEM)
+        }
+        let bounce: u64 = blockb(state)
+        if wr {
+            if !copy_in(state, me, bounce, buf + done, chunk) {
+                return neg(errno.E_FAULT)
+            }
+            var k: u64 = 0
+            while k < chunk {
+                kstate.set8(fr + po + k, kstate.get8(bounce + k) as u8)
+                k = k + 1
+            }
+        } else {
+            var k: u64 = 0
+            while k < chunk {
+                kstate.set8(bounce + k, kstate.get8(fr + po + k) as u8)
+                k = k + 1
+            }
+            if !copy_out(state, me, buf + done, bounce, chunk) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        done = done + chunk
+        off = off + chunk
+    }
+    file.open_set_off(state, of, off)
+    return done
+}
+
 fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_SHM {
+        return shm_io(state, me, of, buf, len, true)
+    }
     if ev_kind(kind) {
         return ev_write(state, me, of, buf, len)
     }
@@ -4048,6 +4113,9 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 // Wie `write_of`, fuer die Leseseite.
 fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_SHM {
+        return shm_io(state, me, of, buf, len, false)
+    }
     if ev_kind(kind) {
         return ev_read(state, me, of, buf, len)
     }
@@ -5689,6 +5757,26 @@ fn vfs_on_create(state: u64, me: u64, m: u64, node: u64, mode: u64) {
     perm.on_create(state, me, node, mode)
 }
 
+// open("/dev/shm/NAME"): a descriptor on the named paged shm object (like memfd, but the object outlives it by the name's reference)
+fn open_devshm(state: u64, me: u64, i: u64, flags: u64) -> u64 {
+    unixsock.shm_ref(state, i)
+    let of: u64 = file.open_alloc(state, file.K_SHM, i, flags)
+    if of >= file.MAX_OPEN {
+        unixsock.shm_unref(state, i)
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    if (flags & O_TRUNC) != 0 && (flags & 3) != 0 {
+        do_ftruncate(state, me, fd, 0)
+    }
+    return fd
+}
+
 fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
     // RUNDE K17: dieselbe Frage wie beim Lesen und Schreiben, nur
     // frueher. Ohne diese drei Zeilen antwortet ein abgezogener Stick
@@ -5718,6 +5806,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         }
         node = vfs.v_create(state, m, path, vfsops.N_FILE)
         if node == 0 {
+            if vfs.type_of(state, m) == vfsops.FS_DEV && !devfs.full_path_in_shm(path) {
+                return neg(errno.E_PERM)
+            }
             return neg(errno.E_NOSPC)
         }
         // 0o666 abzueglich der Maske, und sie gehoert dem, der sie
@@ -5760,6 +5851,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         }
         if devfs.pts_slot(node) < tty.MAX_TTY {
             return open_pts(state, me, devfs.pts_slot(node), flags)
+        }
+        if devfs.shm_slot(node) < unixsock.USHM_PAGED {
+            return open_devshm(state, me, devfs.shm_slot(node), flags)
         }
     }
     var kind: u64 = file.K_VFILE
@@ -6812,6 +6906,11 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
     var mode: u64 = S_IFCHR | 438 // 0o666
     if kind == file.K_PIPER || kind == file.K_PIPEW {
         mode = S_IFIFO | 438
+    }
+    if kind == file.K_SHM {
+        // memfd / /dev/shm object: a regular file whose size is the ftruncate() size
+        mode = S_IFREG | 438
+        __mmio_write64((s + ST_SIZE) as *mut u64, unixsock.shm_size(state, file.open_ino(state, of)))
     }
     __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
     __mmio_write64((s + ST_NLINK) as *mut u64, 1)

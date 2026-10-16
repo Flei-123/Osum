@@ -86,8 +86,9 @@ import apprights.policy
 import usb.usb
 import diag.hwdiag
 import gfx.gfx
+import arch.x86_64.fpu
 
-export { ops, node_root }
+export { ops, node_root, sfs_root }
 
 // ------------------------------------------------------------ die Knoten
 //
@@ -107,6 +108,25 @@ const K_FDDIR: u64 = 5
 const K_FDFILE: u64 = 6
 // ROUND UNTERBAU: /proc/sys/... (sub = which entry)
 const K_SYS: u64 = 7
+// ROUND LC-004: /sys (second procfs mount, mnt.dev == 1): node(K_SFS, cpu, sub). Only what is measured: the CPU set and the
+// first cache level from CPUID leaf 4. Nothing else of sysfs exists yet (no class/, no fs/).
+const K_SFS: u64 = 8
+const SF_ROOT: u64 = 1
+const SF_DEVICES: u64 = 2
+const SF_SYSTEM: u64 = 3
+const SF_CPU: u64 = 4
+const SF_ONLINE: u64 = 5
+const SF_POSSIBLE: u64 = 6
+const SF_PRESENT: u64 = 7
+const SF_CPUN: u64 = 8
+const SF_CACHE: u64 = 9
+const SF_IDX0: u64 = 10
+const SF_C_LEVEL: u64 = 11
+const SF_C_TYPE: u64 = 12
+const SF_C_SIZE: u64 = 13
+const SF_C_LINE: u64 = 14
+const SF_C_SETS: u64 = 15
+const SF_C_WAYS: u64 = 16
 const S_SYS: u64 = 1
 const S_KERNEL: u64 = 2
 const S_VM: u64 = 3
@@ -195,6 +215,11 @@ fn n_sub(n: u64) -> u64 {
 
 fn node_root(state: u64) -> u64 {
     return node(K_ROOT, 0, 0)
+}
+
+// root node of the /sys mount (mnt.dev == 1)
+fn sfs_root(state: u64) -> u64 {
+    return node(K_SFS, 0, SF_ROOT)
 }
 
 fn tick(state: u64) {
@@ -1708,6 +1733,9 @@ fn build(state: u64, n: u64) -> u64 {
     let art: u64 = n_art(n)
     let slot: u64 = n_slot(n)
     let sub: u64 = n_sub(n)
+    if art == K_SFS {
+        return sfs_build(state, sub)
+    }
     if art == K_GLOBAL {
         if sub == G_MEMINFO {
             return make_meminfo(state)
@@ -1946,6 +1974,9 @@ fn pidfile_of(name: u64) -> u64 {
 
 fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
+    if mnt.dev(state, m) == 1 {
+        return sfs_lookup(state, path)
+    }
     var seg: [u8; 24] = [0 as u8; 24]
     var at: u64 = segment(path, 0, (&seg[0]) as u64, 24)
     if kstate.get8((&seg[0]) as u64) == 0 {
@@ -2202,6 +2233,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         return dir
     }
     let i: u64 = index - 2
+    if art == K_SFS {
+        return sfs_readdir(state, dir, i, out)
+    }
     if art == K_ROOT {
         if i < G_LAST {
             global_name(state, i + 1, out)
@@ -2268,6 +2302,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
 fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
     tick(state)
     let art: u64 = n_art(n)
+    if art == K_SFS {
+        return sfs_attr(state, n, what)
+    }
     if what == vfsops.A_TYPE {
         if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
             return vfsops.N_DIR
@@ -2327,6 +2364,280 @@ fn lock(state: u64) -> u64 {
 fn unlock(state: u64, flags: u64) {
     atomic.lock_give(state, atomic.L_PROC)
     sched.irq_restore(flags)
+}
+
+// ------------------------------------------------------------ /sys (LC-004)
+
+fn sfs_ncpu(state: u64) -> u64 {
+    let n: u64 = cpu.count(state)
+    if n == 0 {
+        return 1
+    }
+    return n
+}
+
+fn sfs_nonline(state: u64) -> u64 {
+    let n: u64 = cpu.online_count(state)
+    if n == 0 {
+        return 1
+    }
+    return n
+}
+
+// CPUID leaf 4, sub-leaf 0: type 0 means "no cache information" -- then index0 does not exist (nothing is invented).
+fn sfs_cache_type(state: u64) -> u64 {
+    return fpu.cpuid_a(4, 0) & 31
+}
+
+fn sfs_is_dir(sub: u64) -> bool {
+    return sub == SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM || sub == SF_CPU || sub == SF_CPUN || sub == SF_CACHE || sub == SF_IDX0
+}
+
+// number of children of directory node (sub, slot)
+fn sfs_count(state: u64, sub: u64) -> u64 {
+    if sub == SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM {
+        return 1
+    }
+    if sub == SF_CPU {
+        return 3 + sfs_ncpu(state)
+    }
+    if sub == SF_CPUN {
+        return 1
+    }
+    if sub == SF_CACHE {
+        if sfs_cache_type(state) == 0 {
+            return 0
+        }
+        return 1
+    }
+    if sub == SF_IDX0 {
+        return 6
+    }
+    return 0
+}
+
+// the i-th child (node), 0 = none
+fn sfs_child(state: u64, sub: u64, slot: u64, i: u64) -> u64 {
+    if i >= sfs_count(state, sub) {
+        return 0
+    }
+    if sub == SF_ROOT {
+        return node(K_SFS, 0, SF_DEVICES)
+    }
+    if sub == SF_DEVICES {
+        return node(K_SFS, 0, SF_SYSTEM)
+    }
+    if sub == SF_SYSTEM {
+        return node(K_SFS, 0, SF_CPU)
+    }
+    if sub == SF_CPU {
+        if i < 3 {
+            return node(K_SFS, 0, SF_ONLINE + i)
+        }
+        return node(K_SFS, i - 3, SF_CPUN)
+    }
+    if sub == SF_CPUN {
+        return node(K_SFS, slot, SF_CACHE)
+    }
+    if sub == SF_CACHE {
+        return node(K_SFS, slot, SF_IDX0)
+    }
+    if sub == SF_IDX0 {
+        return node(K_SFS, slot, SF_C_LEVEL + i)
+    }
+    return 0
+}
+
+fn sfs_name(state: u64, n: u64, out: u64) {
+    var a1: [u8; 8] = "devices\0"
+    var a2: [u8; 7] = "system\0"
+    var a3: [u8; 4] = "cpu\0"
+    var a4: [u8; 7] = "online\0"
+    var a5: [u8; 9] = "possible\0"
+    var a6: [u8; 8] = "present\0"
+    var a7: [u8; 6] = "cache\0"
+    var a8: [u8; 7] = "index0\0"
+    var a9: [u8; 6] = "level\0"
+    var a10: [u8; 5] = "type\0"
+    var a11: [u8; 5] = "size\0"
+    var a12: [u8; 20] = "coherency_line_size\0"
+    var a13: [u8; 15] = "number_of_sets\0"
+    var a14: [u8; 22] = "ways_of_associativity\0"
+    let sub: u64 = n_sub(n)
+    if sub == SF_DEVICES {
+        copy_z(out, (&a1[0]) as u64)
+    } else if sub == SF_SYSTEM {
+        copy_z(out, (&a2[0]) as u64)
+    } else if sub == SF_CPU {
+        copy_z(out, (&a3[0]) as u64)
+    } else if sub == SF_ONLINE {
+        copy_z(out, (&a4[0]) as u64)
+    } else if sub == SF_POSSIBLE {
+        copy_z(out, (&a5[0]) as u64)
+    } else if sub == SF_PRESENT {
+        copy_z(out, (&a6[0]) as u64)
+    } else if sub == SF_CPUN {
+        kstate.set8(out, 99 as u8)
+        kstate.set8(out + 1, 112 as u8)
+        kstate.set8(out + 2, 117 as u8)
+        num_name(state, n_slot(n), out + 3)
+    } else if sub == SF_CACHE {
+        copy_z(out, (&a7[0]) as u64)
+    } else if sub == SF_IDX0 {
+        copy_z(out, (&a8[0]) as u64)
+    } else if sub == SF_C_LEVEL {
+        copy_z(out, (&a9[0]) as u64)
+    } else if sub == SF_C_TYPE {
+        copy_z(out, (&a10[0]) as u64)
+    } else if sub == SF_C_SIZE {
+        copy_z(out, (&a11[0]) as u64)
+    } else if sub == SF_C_LINE {
+        copy_z(out, (&a12[0]) as u64)
+    } else if sub == SF_C_SETS {
+        copy_z(out, (&a13[0]) as u64)
+    } else if sub == SF_C_WAYS {
+        copy_z(out, (&a14[0]) as u64)
+    } else {
+        kstate.set8(out, 0 as u8)
+    }
+}
+
+fn sfs_lookup(state: u64, path: u64) -> u64 {
+    var seg: [u8; 32] = [0 as u8; 32]
+    var nm: [u8; 32] = [0 as u8; 32]
+    var cur: u64 = node(K_SFS, 0, SF_ROOT)
+    var at: u64 = 0
+    var guard: u64 = 0
+    while guard < 8 {
+        at = segment(path, at, (&seg[0]) as u64, 32)
+        if kstate.get8((&seg[0]) as u64) == 0 {
+            return cur
+        }
+        if !sfs_is_dir(n_sub(cur)) {
+            return 0
+        }
+        var found: u64 = 0
+        var i: u64 = 0
+        let cnt: u64 = sfs_count(state, n_sub(cur))
+        while i < cnt && found == 0 {
+            let c: u64 = sfs_child(state, n_sub(cur), n_slot(cur), i)
+            sfs_name(state, c, (&nm[0]) as u64)
+            if streq((&seg[0]) as u64, (&nm[0]) as u64) {
+                found = c
+            }
+            i = i + 1
+        }
+        if found == 0 {
+            return 0
+        }
+        cur = found
+        guard = guard + 1
+    }
+    return 0
+}
+
+fn sfs_readdir(state: u64, dir: u64, i: u64, out: u64) -> u64 {
+    let c: u64 = sfs_child(state, n_sub(dir), n_slot(dir), i)
+    if c == 0 {
+        return 0
+    }
+    sfs_name(state, c, out)
+    return c
+}
+
+fn sfs_attr(state: u64, n: u64, what: u64) -> u64 {
+    let sub: u64 = n_sub(n)
+    if what == vfsops.A_TYPE {
+        if sfs_is_dir(sub) {
+            return vfsops.N_DIR
+        }
+        return vfsops.N_FILE
+    }
+    if what == vfsops.A_SIZE {
+        if sfs_is_dir(sub) {
+            return 0
+        }
+        let flags: u64 = lock(state)
+        let len: u64 = build(state, n)
+        unlock(state, flags)
+        return len
+    }
+    if what == vfsops.A_MODE {
+        if sfs_is_dir(sub) {
+            return 365 // 0o555
+        }
+        return 292 // 0o444
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return 4096
+    }
+    return 0
+}
+
+// "0" for one CPU, "0-N" for N+1
+fn sfs_range(state: u64, n: u64) -> u64 {
+    var p: u64 = w_num(state, 0, 0)
+    if n > 1 {
+        p = w_ch(state, p, 45)
+        p = w_num(state, p, n - 1)
+    }
+    return w_nl(state, p)
+}
+
+fn sfs_build(state: u64, sub: u64) -> u64 {
+    var p: u64 = 0
+    if sub == SF_ONLINE {
+        return sfs_range(state, sfs_nonline(state))
+    }
+    if sub == SF_POSSIBLE || sub == SF_PRESENT {
+        return sfs_range(state, sfs_ncpu(state))
+    }
+    let a: u64 = fpu.cpuid_a(4, 0)
+    let b: u64 = fpu.cpuid_b(4, 0)
+    let c: u64 = fpu.cpuid_c(4, 0)
+    let ways: u64 = (b >> 22) + 1
+    let parts: u64 = ((b >> 12) & 1023) + 1
+    let line: u64 = (b & 4095) + 1
+    let sets: u64 = c + 1
+    if sub == SF_C_LEVEL {
+        p = w_num(state, p, (a >> 5) & 7)
+        return w_nl(state, p)
+    }
+    if sub == SF_C_TYPE {
+        var t1: [u8; 5] = "Data\0"
+        var t2: [u8; 12] = "Instruction\0"
+        var t3: [u8; 8] = "Unified\0"
+        let ty: u64 = a & 31
+        if ty == 1 {
+            p = w_str(state, p, (&t1[0]) as u64)
+        } else if ty == 2 {
+            p = w_str(state, p, (&t2[0]) as u64)
+        } else {
+            p = w_str(state, p, (&t3[0]) as u64)
+        }
+        return w_nl(state, p)
+    }
+    if sub == SF_C_SIZE {
+        p = w_num(state, p, ways * parts * line * sets / 1024)
+        p = w_ch(state, p, 75)
+        return w_nl(state, p)
+    }
+    if sub == SF_C_LINE {
+        p = w_num(state, p, line)
+        return w_nl(state, p)
+    }
+    if sub == SF_C_SETS {
+        p = w_num(state, p, sets)
+        return w_nl(state, p)
+    }
+    if sub == SF_C_WAYS {
+        p = w_num(state, p, ways)
+        return w_nl(state, p)
+    }
+    return 0
 }
 
 fn p_read(state: u64, m: u64, n: u64, off: u64, dst: u64, len: u64) -> u64 {
