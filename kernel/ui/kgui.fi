@@ -1724,6 +1724,9 @@ fn vmsvga_run(state: u64) {
     var s_x: [u8; 2] = "x\0"
     var s_en: [u8; 12] = "vmsvga: end\0"
     var s_no: [u8; 17] = "vmsvga: novmsvga\0"
+    var s_id: [u8; 18] = "vmsvga: idle okt=\0"
+    var s_mx: [u8; 11] = " maxframe=\0"
+    var s_ma: [u8; 8] = " maxat=\0"
     var hw: bool = false
     let on: bool = vmsvga.bereit(state)
     let y0: u64 = 300
@@ -1755,15 +1758,28 @@ fn vmsvga_run(state: u64) {
         serial.puts((&s_ok[0]) as u64)
         serial.dec(vmsvga.update_octets(state) - o1)
         serial.nl()
+        // warm-up: the first frame after the test picture carries everything that was dirty before
+        fb.dirty_all(state)
+        fb.flush(state)
+        gfx.bild_fertig(state)
         let o2: u64 = vmsvga.update_octets(state)
         i = 0
+        var mx: u64 = 0
+        var mxat: u64 = 0
         while i < 60 {
+            let ob: u64 = vmsvga.update_octets(state)
             if kstate.mode_on(state, kstate.M_WMRUHE) {
                 fb.dirty_all(state)
+                fb.flush(state)
             } else {
                 fb.flush_rect(state, x0 + i * 3 - 8, y0 - 8, 48, 48)
             }
             gfx.bild_fertig(state)
+            let dd: u64 = vmsvga.update_octets(state) - ob
+            if dd > mx {
+                mx = dd
+                mxat = i
+            }
             i = i + 1
         }
         let d2: u64 = vmsvga.update_octets(state) - o2
@@ -1777,6 +1793,16 @@ fn vmsvga_run(state: u64) {
         serial.dec(d2)
         serial.puts((&s_pf[0]) as u64)
         serial.dec(d2 / 60)
+        serial.puts((&s_mx[0]) as u64)
+        serial.dec(mx)
+        serial.puts((&s_ma[0]) as u64)
+        serial.dec(mxat)
+        serial.nl()
+        // idle: two seconds without drawing (host polls only) must not send picture data
+        let o3: u64 = vmsvga.update_octets(state)
+        vmsvga_pause(state, 2)
+        serial.puts((&s_id[0]) as u64)
+        serial.dec(vmsvga.update_octets(state) - o3)
         serial.nl()
         vmsvga.say(state)
     } else {
@@ -1809,15 +1835,17 @@ fn vmsvga_run(state: u64) {
         if k != 0 {
             let _f: u64 = vmode.follow_host(state, nw, nh)
         }
-        vmsvga_pic(state)
+        // every line of text goes out BEFORE the picture: the serial echo paints into the frame buffer, and the picture
+        // (which clears the screen first) must be the same with and without the driver
+        if on {
+            vmsvga.say(state)
+        }
         serial.puts((&s_pn[0]) as u64)
         serial.dec(fb.panel_w(state))
         serial.puts((&s_x[0]) as u64)
         serial.dec(fb.panel_h(state))
         serial.nl()
-        if on {
-            vmsvga.say(state)
-        }
+        vmsvga_pic(state)
         vmsvga_pause(state, 4)
         k = k + 1
     }
