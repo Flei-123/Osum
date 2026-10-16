@@ -4,7 +4,7 @@
 #
 #   /root/jarvis/bin/heavy bash tools/explorer3/run.sh
 #
-# 1. The root folder "/" hides the kernel's mount points (dev, proc, sys): `explorer: modell ... kdirs=3 kvis=0`.
+# 1. The root folder "/" hides the kernel mount points (dev, proc, sys): `explorer: modell ... kdirs=N kvis=0`.
 #    Counter-proof: `explorer / hidden` (the old behaviour: everything shown) must report kvis == kdirs.
 # 2. The drive overview and the pane list no pseudo file system as a drive (`explorer: overview` rows are real drives).
 set -uo pipefail
@@ -22,7 +22,7 @@ SA="$TMPD/a/serial.txt"
 la=$(grep -aE 'explorer: modell n=[0-9]+ .*kdirs=' "$SA" | tail -1)
 kd=$(echo "$la" | grep -oE 'kdirs=[0-9]+' | grep -oE '[0-9]+')
 kv=$(echo "$la" | grep -oE 'kvis=[0-9]+' | grep -oE '[0-9]+')
-[ "${kd:-0}" -ge 3 ] && ok "the root holds the kernel mount points (kdirs=$kd)" || bad "kdirs=${kd:-?} (expected >= 3): $la"
+[ "${kd:-0}" -ge 1 ] && ok "the root holds the kernel mount points (kdirs=$kd)" || bad "kdirs=${kd:-?} (expected >= 1; the test image has no proc/sys mounts): $la"
 [ "${kv:-9}" = 0 ] && ok "none of them is shown (kvis=0)" || bad "kvis=${kv:-?} should be 0: $la"
 
 echo "== 2. root folder, counter-proof (hidden shown = old behaviour) =="
@@ -39,6 +39,19 @@ if grep -aE 'explorer: traeger i=[0-9]+ .*' "$SA" | grep -aqE '/(proc|dev|sys)';
 else
     ok "no /proc /dev /sys drive row"
 fi
+
+echo "== 4. file types and drive count: catalog (de + en) and source =="
+for k in explorer.type.pdf explorer.type.archive explorer.type.audio explorer.type.video explorer.count.drives explorer.count.drive1; do
+    grep -qE "^$k =" locale/de/messages && grep -qE "^$k =" locale/en/messages \
+        && ok "catalog key $k in de and en" || bad "catalog key $k missing"
+done
+for e in .pdf .zip .mp3 .mp4 .ppm; do
+    grep -aq -- "\"[^\"]*$e[ \\\\\"]" kernel/user/expmodell.fi \
+        && ok "ending $e is a known file type" || bad "ending $e is not in expmodell.fi"
+done
+# the kinds are told apart: five new words and five new symbols in the model
+n=$(grep -acE 'k == [5-8] \{' kernel/user/expmodell.fi)
+[ "${n:-0}" -ge 8 ] && ok "kinds 5-8 have a type word and a symbol ($n branches)" || bad "kinds 5-8: only $n branches"
 
 echo "EXPLORER3: $pass passed, $fail failed"
 [ "$fail" = 0 ]
