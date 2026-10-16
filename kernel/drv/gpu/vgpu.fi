@@ -127,6 +127,7 @@ export {
     say, shut_down,
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
+    resize, host_pending, resizes, resize_errors, say_hw,
     VGPU_OFF, VGPU_MAX
 }
 
@@ -201,6 +202,8 @@ const S_EXTCLIP: u64 = 0x1B0 // heads whose rect was cut because the fb is small
 const S_HOTMASK: u64 = 0x1B8
 const S_HOTS: u64 = 0x1C0
 const S_HOTGEN: u64 = 0x1C8
+const S_RESIZES: u64 = 0x1D8 // how often the scan-out was rebuilt for a new size (host drag or mode switch)
+const S_RSZERR: u64 = 0x1E0 // rebuilds that failed
 const S_UP: u64 = 0x1D0
 const S_EXTTAB: u64 = 0x500 // OUT_MAX entries of 32 bytes: x, y, w, h (0 w = head unused)
 const EXT_STRIDE: u64 = 0x20
@@ -1780,6 +1783,114 @@ fn ereignis_pruefen(state: u64) -> bool {
         return true
     }
     return false
+}
+
+
+// ===================================================================
+// FOLLOWING A NEW SIZE (host window drag, or a guest mode switch)
+// ===================================================================
+//
+// The resource, its backing and the scan-out all have the size of the back buffer. When the back buffer changes
+// size (vmode.switch_to, or the host asked for another size and vmode followed it), the old resource is dropped and
+// a new one of the right size is attached to the SAME back buffer and scanned out again, mirrors included.
+// Not done in extend mode (the head layout owns the scan-outs there; `relayout` handles that case).
+fn resizes(state: u64) -> u64 { return kstate.get(state, s(S_RESIZES)) }
+fn resize_errors(state: u64) -> u64 { return kstate.get(state, s(S_RSZERR)) }
+
+// The size the host asked for as w * 65536 + h when it differs from what is scanned out (single head only), else 0.
+fn host_pending(state: u64) -> u64 {
+    if !bereit(state) {
+        return 0
+    }
+    if kstate.get(state, s(S_EXTON)) != 0 {
+        return 0
+    }
+    let w: u64 = kstate.get(state, s(S_NEUW))
+    let h: u64 = kstate.get(state, s(S_NEUH))
+    if w == 0 || h == 0 {
+        return 0
+    }
+    if w == kstate.get(state, s(S_SW)) && h == kstate.get(state, s(S_SH)) {
+        return 0
+    }
+    return w * 65536 + h
+}
+
+fn resize(state: u64, w: u64, h: u64) -> bool {
+    if !bereit(state) {
+        return false
+    }
+    if kstate.get(state, s(S_EXTON)) != 0 {
+        return false
+    }
+    if w == kstate.get(state, s(S_SW)) && h == kstate.get(state, s(S_SH)) {
+        return true
+    }
+    let back: u64 = fb.back(state)
+    let bytes: u64 = w *% h *% 4
+    if back == 0 || w == 0 || h == 0 || fb.pitch(state) != w *% 4 || fb.back_bytes(state) < bytes {
+        kstate.add(state, s(S_RSZERR), 1)
+        return false
+    }
+    // present() skips while the driver is not ready: nothing runs against the half-built resource
+    kstate.set(state, s(S_READY), 0)
+    let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
+    kopf(cmd, CMD_RESOURCE_UNREF)
+    wr32(cmd, 24, RES_ID)
+    wr32(cmd, 28, 0)
+    let _un: bool = befehl(state, 32, RESP_OK_NODATA)
+    if !resource_create(state, w, h) || !attach_backing(state, back, bytes) || !set_scanout(state, w, h) {
+        kstate.add(state, s(S_RSZERR), 1)
+        return false // driver stays off: fb falls back to the firmware framebuffer copy
+    }
+    var hd: u64 = 1
+    while hd < OUT_MAX {
+        if head_connected(state, hd) {
+            if set_scanout_id(state, hd, w, h) {
+                kstate.add(state, s(S_MIRRORED), 1)
+            } else {
+                kstate.add(state, s(S_MIRERR), 1)
+            }
+        }
+        hd = hd + 1
+    }
+    kstate.set(state, s(S_SW), w)
+    kstate.set(state, s(S_SH), h)
+    kstate.set(state, s(S_BACK), back)
+    kstate.set(state, s(S_BACKBYTES), bytes)
+    if !transfer(state, 0, 0, w, h, 0) || !resource_flush(state, 0, 0, w, h) {
+        kstate.add(state, s(S_RSZERR), 1)
+        return false
+    }
+    kstate.add(state, s(S_RESIZES), 1)
+    kstate.set(state, s(S_READY), 1)
+    return true
+}
+
+// One line for the gates (tools/vgpuhw): rebuilds, bytes carried out, device-cursor counters.
+fn say_hw(state: u64) {
+    var a: [u8; 14] = "vgpu: hw rsz=\0"
+    var b: [u8; 10] = " rszerr=\0\0"
+    var c: [u8; 7] = " okt=\0\0"
+    var d: [u8; 9] = " curdef=\0"
+    var e: [u8; 10] = " curmove=\0"
+    var f: [u8; 9] = " curerr=\0"
+    var g: [u8; 7] = " cur=\0\0"
+    serial.puts((&a[0]) as u64)
+    serial.dec(kstate.get(state, s(S_RESIZES)))
+    serial.puts((&b[0]) as u64)
+    serial.dec(kstate.get(state, s(S_RSZERR)))
+    serial.puts((&c[0]) as u64)
+    serial.dec(kstate.get(state, s(S_OKT)))
+    serial.puts((&d[0]) as u64)
+    serial.dec(kstate.get(state, s(S_CURDEF)))
+    serial.puts((&e[0]) as u64)
+    serial.dec(kstate.get(state, s(S_CURMOVE)))
+    serial.puts((&f[0]) as u64)
+    serial.dec(kstate.get(state, s(S_CURERR)))
+    serial.puts((&g[0]) as u64)
+    serial.dec(kstate.get(state, s(S_CURON)))
+    serial.nl()
 }
 
 // ===================================================================

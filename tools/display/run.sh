@@ -149,7 +149,8 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
-              -e '^kernel/user/snip.fi' || true)
+              -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' || true)
+# wmd.fi (compositor S6) only READS the mode through SYS_DISPGET, like qs.fi and snip.fi.
 # `kernel/user/qs.fi` (Runde GLYPHE) und `kernel/user/snip.fi` (Runde
 # ALLTAG) stehen aus demselben Grund daneben wie powermon.fi in
 # tools/k18/run.sh: sie LESEN ueber genau diesen Aufruf. Das

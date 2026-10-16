@@ -51,6 +51,7 @@ profile kernel
 
 import lib.kstate
 import gfx.fb
+import drv.gpu.vgpu
 import mm.mem
 import arch.x86_64.apic
 import lib.errno
@@ -63,7 +64,7 @@ export {
     // RUNDE SCHIRM: die Tafel fragen, BEVOR es einen Rahmenpuffer gibt.
     native, edid_mm_w, edid_mm_h, dpi_scale,
     vendor_at, model_at,
-    set_mode, set_custom, check_custom, switch_to, current, revert,
+    set_mode, set_custom, check_custom, switch_to, follow_host, current, revert,
     confirm, pending, deadline, remaining,
     cust_w, cust_h, cust_bpp, cust_why, cust_num, customs, need_bytes,
     why_to_e, list_insert, list_remove,
@@ -1567,6 +1568,8 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
         mem.frame_free_run(state, alt_back, alt_n)
     }
     fb.set_rotation(state, alt_rot)
+    // virtio-gpu scans out a resource of the back buffer's size: rebuild it for the new size (no-op without the driver)
+    let _vg: bool = vgpu.resize(state, fb.width(state), fb.height(state))
     fb.clear(state, 0)
     fb.dirty_all(state)
     fb.flush(state)
@@ -1596,6 +1599,25 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
 // Der Grund steht bei `switch_to`: der alte Modus muss nicht in der
 // Liste stehen, um zurueckgestellt werden zu koennen -- er stand gerade
 // auf dem Bildschirm, und das ist der bessere Nachweis als eine Liste.
+// The HOST asked for another size (virtio-gpu config-change event, e.g. the VM window was dragged): follow it like a
+// custom mode, but without a confirmation deadline -- the host's size is not a guess the user has to approve.
+// Too small (< 640x480) or beyond what the card takes -> refused with the usual reason code, screen unchanged.
+fn follow_host(state: u64, w: u64, h: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return E_NOCARD
+    }
+    if w < 640 || h < 480 {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return E_NOMODE
+    }
+    let why: u64 = check_custom(state, w, h, 32)
+    if why != CW_OK {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return why_to_e(why)
+    }
+    return switch_to(state, w, h, false)
+}
+
 fn revert(state: u64) -> u64 {
     if g(state, S_PEND) == 0 {
         return E_NOMODE

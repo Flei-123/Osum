@@ -1506,6 +1506,9 @@ fn gfx_hold(state: u64) {
     }
     serial.puts((&s_hold[0]) as u64)
     serial.nl()
+    if kstate.mode_on(state, kstate.M_VGPUHW) {
+        vgpuhw_run(state)
+    }
     // Rund vier Sekunden. Der Testlaeufer draussen sieht die Zeile oben,
     // ruft `screendump` und prueft das Bild, waehrend es noch steht.
     let hz: u64 = apic.tsc_hz(state)
@@ -1543,6 +1546,121 @@ fn gfx_hold(state: u64) {
 // dasselbe im seriellen Protokoll wie auf dem Bildschirm, und der
 // Testlaeufer kann beides gegeneinander halten statt nur das eine gegen
 // sich selbst.
+// `vgpuhw` test bed (tools/vgpuhw/run.sh): what virtio-gpu does for the pointer, the dirty rects and a host resize.
+//   phase 1  pointer moves only: with the device cursor (cursorq) NO bytes may leave through the resource; without it
+//            (control `nohwcur`) the pointer is painted into the frame buffer and every move costs rects.
+//   phase 2  60 frames with one 48x48 dirty rect each (a pointer-sized update): octets per frame.
+//            Control `wmruhe`: the whole screen is dirty every frame.
+//   phase 3  poll for the host-resize event (the harness asks QEMU via VNC SetDesktopSize); gfx.gpu_ereignis follows it.
+fn vgpuhw_run(state: u64) {
+    var s_p1: [u8; 17] = "vgpuhw: move hw=\0"
+    var s_p2: [u8; 19] = "vgpuhw: frames hw=\0"
+    var s_fr: [u8; 9] = " moves=\0\0"
+    var s_ok: [u8; 7] = " okt=\0\0"
+    var s_pf: [u8; 11] = " perframe=\0"
+    var s_rd: [u8; 14] = "vgpuhw: ready\0"
+    var s_pn: [u8; 15] = "vgpuhw: panel=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_en: [u8; 12] = "vgpuhw: end\0"
+    var s_no: [u8; 15] = "vgpuhw: novgpu\0"
+    if !vgpu.bereit(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let hw: bool = vgpu.cursor_bereit(state) && !kstate.mode_on(state, kstate.M_NOHWCUR)
+    let y0: u64 = 300
+    let x0: u64 = 300
+    if hw {
+        let _z: bool = vgpu.cursor_zeigen(state, 0, 32, x0, y0, 0, 0)
+    }
+    let white: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+    // phase 1: moves only
+    let o1: u64 = vgpu.oktette(state)
+    let m1: u64 = vgpu.cursor_moves(state)
+    var i: u64 = 0
+    while i < 60 {
+        let nx: u64 = x0 + i * 3
+        if hw {
+            let _m: bool = vgpu.cursor_bewegen(state, nx, y0)
+        } else {
+            fb.fill(state, nx, y0, 12, 12, white)
+            fb.flush_rect(state, nx, y0, 12, 12)
+            gfx.bild_fertig(state)
+        }
+        i = i + 1
+    }
+    serial.puts((&s_p1[0]) as u64)
+    if hw {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(vgpu.cursor_moves(state) - m1)
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(vgpu.oktette(state) - o1)
+    serial.nl()
+    // phase 2: 60 frames, one pointer-sized dirty rect (or the whole screen under wmruhe)
+    let o2: u64 = vgpu.oktette(state)
+    i = 0
+    while i < 60 {
+        let nx: u64 = x0 + i * 3
+        if kstate.mode_on(state, kstate.M_WMRUHE) {
+            fb.dirty_all(state)
+        } else {
+            fb.flush_rect(state, nx - 8, y0 - 8, 48, 48)
+        }
+        gfx.bild_fertig(state)
+        i = i + 1
+    }
+    let d2: u64 = vgpu.oktette(state) - o2
+    serial.puts((&s_p2[0]) as u64)
+    if hw {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(d2)
+    serial.puts((&s_pf[0]) as u64)
+    serial.dec(d2 / 60)
+    serial.nl()
+    vgpu.say_hw(state)
+    serial.puts((&s_rd[0]) as u64)
+    serial.nl()
+    // phase 3: wait for the host resize
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    var until: u64 = apic.tsc() + hz * 30
+    var lw: u64 = fb.panel_w(state)
+    var lh: u64 = fb.panel_h(state)
+    while apic.tsc() < until {
+        let _e: bool = gfx.gpu_ereignis(state)
+        let pw: u64 = fb.panel_w(state)
+        let ph: u64 = fb.panel_h(state)
+        if pw != lw || ph != lh {
+            lw = pw
+            lh = ph
+            // the switch cleared the screen: paint the red square again so the harness has something to find
+            fb.fill(state, 0, 0, 100, 100, fb.rgb(state, 0xFF, 0, 0))
+            fb.flush_rect(state, 0, 0, 100, 100)
+            gfx.bild_fertig(state)
+            serial.puts((&s_pn[0]) as u64)
+            serial.dec(pw)
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(ph)
+            serial.nl()
+            vgpu.say_hw(state)
+            until = apic.tsc() + hz * 6
+        }
+    }
+    serial.puts((&s_en[0]) as u64)
+    serial.nl()
+}
+
 fn pattern(state: u64, eine: u64, zwei: u64) {
     fb.set_cursor(state, false)
     fb.clear(state, 0)
