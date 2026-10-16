@@ -2809,8 +2809,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         unixsock.vm_unlock(state, me)
         return mrr
     }
-    if number == UB_MSYNC || number == UB_MLOCK || number == UB_MUNLOCK || number == UB_MLOCKALL || number == UB_MUNLOCKALL {
-        // no swap and no file-backed shared mappings: nothing to write back, nothing that could be paged out -- the honest answer is "done"
+    if number == UB_MSYNC {
+        // LCSH: write back the file pages of every shared file mapping that overlaps [a0, a0 + a1)
+        file_shm_flush_maps(state, me, a0, a1, false)
+        return 0
+    }
+    if number == UB_MLOCK || number == UB_MUNLOCK || number == UB_MLOCKALL || number == UB_MUNLOCKALL {
+        // no swap: nothing that could be paged out -- the honest answer is "done"
         return 0
     }
     if number == UB_GETRLIMIT {
@@ -7959,6 +7964,7 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     if !in_alt && !in_gross {
         return neg(errno.E_NOMEM)
     }
+    file_shm_flush_maps(state, me, addr, pages * PAGE, true)
     let _released: bool = unixsock.map_release(state, me, addr, pages * PAGE)
     var p: u64 = addr
     while p < end {
@@ -7972,6 +7978,179 @@ fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     return addr
 }
 
+// ---------------------------------------------------------------- LCSH: mmap(MAP_SHARED + PROT_WRITE) of a regular file
+//
+// There is no page cache, so the "page cache" of a shared file mapping is a shared page object (the K_SHM machinery of memfd/Wayland):
+// ONE object per (file, first file page), the frames belong to the object, every mapper gets the same frames -> a store of one process is
+// seen by the others at once. The pages are filled from the file when the object is made (what is beyond the end of the file is zero).
+// They are written BACK to the file by msync, by munmap and by the end of the process (only the pages that differ from the file, and
+// never beyond the file size). NOT done (documented in docs/LINUX-COMPAT-OPEN.md #5): a write(2) to the file after the mapping is made is
+// not seen by the mapping (and a changed mapped page overwrites it at the next write-back); no MAP_FIXED; at most 256 pages (1 MiB) per
+// mapping; two mappings of one file that start at different offsets and overlap are two objects (not coherent with each other); the
+// pages are written back only at msync/munmap/exit, not by a timer; a mapping that a fork child inherited is written back by the parent.
+const FSHM_MAX_PAGES: u64 = 256
+
+// Pages [from, to) of object `i` get the bytes of the file (page `first_pg + p`); the frames are zero already, a short read leaves the rest zero.
+fn file_shm_fill(state: u64, i: u64, ino: u64, first_pg: u64, from: u64, to: u64) -> bool {
+    let bounce: u64 = blockb(state)
+    var p: u64 = from
+    while p < to {
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame == 0 {
+            return false
+        }
+        var n: u64 = fs.read_at(state, ino, (first_pg + p) * PAGE, bounce, PAGE)
+        if n > PAGE {
+            n = 0
+        }
+        var o: u64 = 0
+        while o + 8 <= n {
+            *((frame + o) as *mut u64) = *((bounce + o) as *mut u64)
+            o = o + 8
+        }
+        while o < n {
+            *((frame + o) as *mut u8) = *((bounce + o) as *mut u8)
+            o = o + 1
+        }
+        p = p + 1
+    }
+    return true
+}
+
+// Write the pages of file object `i` back to the file: only those that differ from what the file holds, clipped to the file size.
+fn file_shm_flush(state: u64, i: u64) {
+    let key: u64 = unixsock.shm_file_key(state, i)
+    if key == 0 {
+        return
+    }
+    let ino: u64 = (key & 0xFFFFFFFF) - 1
+    let first_pg: u64 = key >> 32
+    let pages: u64 = unixsock.shm_pages(state, i)
+    let bounce: u64 = blockb(state)
+    var p: u64 = 0
+    while p < pages {
+        let fo: u64 = (first_pg + p) * PAGE
+        let size: u64 = fs.inode_size(state, ino)
+        if fo >= size {
+            return
+        }
+        var n: u64 = size - fo
+        if n > PAGE {
+            n = PAGE
+        }
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame != 0 {
+            let got: u64 = fs.read_at(state, ino, fo, bounce, n)
+            var same: bool = got == n
+            var o: u64 = 0
+            while same && o < n {
+                if *((frame + o) as *mut u8) != *((bounce + o) as *mut u8) {
+                    same = false
+                }
+                o = o + 1
+            }
+            if !same {
+                o = 0
+                while o + 8 <= n {
+                    *((bounce + o) as *mut u64) = *((frame + o) as *mut u64)
+                    o = o + 8
+                }
+                while o < n {
+                    *((bounce + o) as *mut u8) = *((frame + o) as *mut u8)
+                    o = o + 1
+                }
+                let _w: u64 = fs.write_at(state, ino, fo, bounce, n)
+            }
+        }
+        p = p + 1
+    }
+}
+
+// msync / munmap / exit: write back every file object that a mapping record of this task overlaps with [addr, addr + len)
+// (len == 0xFFFFFFFFFFFFFFFF = all of the task's records, for the end of the process). `exact` = munmap: only the record that starts at addr.
+fn file_shm_flush_maps(state: u64, me: u64, addr: u64, len: u64, exact: bool) {
+    var k: u64 = 0
+    while k < unixsock.UMAP_MAX {
+        let base: u64 = unixsock.map_rec_base(state, k)
+        if base != 0 {
+            let w: u64 = unixsock.map_rec_word(state, k)
+            let pages: u64 = (w >> 32) & unixsock.UM_PAGES_MASK
+            var hit: bool = false
+            if (w & 0xFFFF) == me {
+                if len == 0xFFFFFFFFFFFFFFFF {
+                    hit = true
+                } else if exact {
+                    hit = (base == addr) && (pages * PAGE <= len)
+                } else {
+                    hit = (base < addr + len) && (addr < base + pages * PAGE)
+                }
+            }
+            if hit {
+                file_shm_flush(state, (w >> 16) & 0xFFFF)
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN || !readable(state, of) || !writable(state, of) {
+        return neg(errno.E_ACCES)
+    }
+    if (flags & MAP_FIXED) != 0 || len > FSHM_MAX_PAGES * PAGE || off >= 0x7FFFFFFF000 {
+        return neg(errno.E_NODEV)
+    }
+    let ino: u64 = file.open_ino(state, of)
+    if ino >= 0xFFFFFFFE {
+        return neg(errno.E_NODEV)
+    }
+    let first_pg: u64 = off / PAGE
+    let npages: u64 = page_up(len) / PAGE
+    var i: u64 = unixsock.shm_file_find(state, ino, first_pg)
+    var made: bool = false
+    if i >= unixsock.USHM_MAX {
+        i = unixsock.shm_new(state)
+        if i >= unixsock.USHM_PAGED {
+            if i < unixsock.USHM_MAX {
+                unixsock.shm_free(state, i)
+            }
+            return neg(errno.E_NOMEM)
+        }
+        made = true
+    }
+    let have: u64 = unixsock.shm_pages(state, i)
+    if npages > have {
+        let g: u64 = unixsock.shm_grow(state, i, npages)
+        // the pages that exist now are filled in any case: a zero page inside the file that stays unfilled would be written over it later
+        let ok: bool = file_shm_fill(state, i, ino, first_pg, have, unixsock.shm_pages(state, i))
+        if g != 0 || !ok {
+            if made {
+                unixsock.shm_unref(state, i)
+            }
+            return neg(errno.E_NOMEM)
+        }
+    }
+    if !unixsock.shm_wmap_take(state, i) {
+        if made {
+            unixsock.shm_unref(state, i)
+        }
+        return neg(errno.E_PERM)
+    }
+    let r: u64 = map_shm_obj(state, me, i, true, len, prot)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        unixsock.shm_wmap_drop(state, i)
+    }
+    if made {
+        if r < 0xFFFFFFFFFFFFF000 {
+            unixsock.shm_file_mark(state, i, ino, first_pg)
+        }
+        // the reference of the creation goes: from here on only the mappings hold the object
+        unixsock.shm_unref(state, i)
+    }
+    return r
+}
+
 // RUNDE UNTERBAU: mmap of a regular file. There is no page cache and no demand paging in this kernel, so the pages are made now
 // (zeroed) and filled with a read of the file -- what is beyond the end of the file stays zero. MAP_PRIVATE is exact (a copy the process
 // may change). MAP_SHARED is a snapshot only: it is allowed read-only, and refused (-ENODEV, the old answer for "no file mapping") when
@@ -7981,7 +8160,7 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
         return neg(errno.E_INVAL)
     }
     if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && (prot & PROT_WRITE) != 0 {
-        return neg(errno.E_NODEV)
+        return map_file_shared(state, me, len, flags, fd, off, prot)
     }
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN || !readable(state, of) {
@@ -8166,7 +8345,11 @@ fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
     if off != 0 {
         return neg(errno.E_INVAL)
     }
-    let i: u64 = file.open_ino(state, of)
+    return map_shm_obj(state, me, file.open_ino(state, of), writable(state, of), len, prot)
+}
+
+// The mapping of shared object `i` (a memfd, or since LCSH the shared pages of a file); `wok` = the caller may write the object.
+fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u64 {
     if unixsock.shm_used(state, i) == 0 {
         return neg(errno.E_NODEV)
     }
@@ -8175,7 +8358,7 @@ fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
         return neg(errno.E_INVAL)
     }
     // COMPOSITOR S3: a read-only object (the window table page) is never mapped writable
-    if (prot & PROT_WRITE) != 0 && ((unixsock.shm_flags(state, i) & unixsock.SMF_RO) != 0 || !writable(state, of)) {
+    if (prot & PROT_WRITE) != 0 && ((unixsock.shm_flags(state, i) & unixsock.SMF_RO) != 0 || !wok) {
         return neg(errno.E_ACCES)
     }
     // ... and the table of mappings must have room, so that the reference of this mapping can be given back
@@ -8480,7 +8663,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     if !in_alt && !in_gross && !in_arena {
         return neg(errno.E_INVAL)
     }
-    // COMPOSITOR S3: a mapping of a shared object gives its reference back
+    // COMPOSITOR S3: a mapping of a shared object gives its reference back (LCSH: a file mapping writes back first)
+    file_shm_flush_maps(state, me, addr, page_up(len), true)
     let _released: bool = unixsock.map_release(state, me, addr, page_up(len))
     var p: u64 = addr
     let end: u64 = addr + page_up(len)
@@ -12941,6 +13125,7 @@ fn unref_of(state: u64, of: u64) {
 // machine of round K3 walks through TIME_WAIT on its own afterwards.
 fn sock_close_all(state: u64, me: u64, last_use: bool) {
     // COMPOSITOR S3: the end of a task gives back the references of its mappings of shared objects (before, they stayed for good)
+    file_shm_flush_maps(state, me, 0, 0xFFFFFFFFFFFFFFFF, false)
     let _maps: u64 = unixsock.map_release_all(state, me)
     if !last_use {
         return

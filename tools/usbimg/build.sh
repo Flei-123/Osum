@@ -155,6 +155,27 @@ case "$IMAGE_PROFILE" in
     personal|public) ;;
     *) fehler "IMAGE_PROFILE=$IMAGE_PROFILE (personal oder public)" ;;
 esac
+# LCSH (LC-006): busybox as /bin/sh. musl's system() and popen() run "/bin/sh -c ..." and Osum's own shell has no -c, so a
+# Linux program that starts a command (Firefox helpers, git, make, scripts with #!/bin/sh) needs a POSIX sh at that path.
+#   BBSH=1     /bin/sh = busybox (dynamic musl, hard link of /bin/busybox) + /lib/ld-musl-x86_64.so.1; the Osum shell moves to /bin/osh
+#              (login shell in /etc/passwd, Terminal window via /bin/term, inittab console, initsh/netlauf boot entries)
+#   BBSH=0     /bin/sh stays the Osum shell (the public image, test images)
+#   BBSH=auto  (default) 1 for IMAGE_PROFILE=personal when BBDYN and the musl libc exist, else 0
+# Cost on the stick: busybox + musl libc, measured in the report (about 1.7 MiB of the free space).
+BBDYN=${BBDYN:-/root/bbdyn/busybox}
+BBLIBC=${BBLIBC:-$(readlink -f /lib/ld-musl-x86_64.so.1 2>/dev/null || true)}
+[ -r "$BBLIBC" ] || BBLIBC=/usr/lib/x86_64-linux-musl/libc.so
+BBSH=${BBSH:-auto}
+if [ "$BBSH" = auto ]; then
+    BBSH=0
+    [ "$IMAGE_PROFILE" = personal ] && [ -r "$BBDYN" ] && [ -r "$BBLIBC" ] && BBSH=1
+fi
+if [ "$BBSH" = 1 ]; then
+    [ -r "$BBDYN" ] && [ -r "$BBLIBC" ] || { echo "== BBSH=1 but busybox ($BBDYN) or musl libc ($BBLIBC) is missing" >&2; exit 1; }
+    LOGIN_SHELL=/bin/osh
+else
+    LOGIN_SHELL=/bin/sh
+fi
 if [ "$IMAGE_PROFILE" = public ]; then
     [ -z "${JARVIS_CONF:-}" ] \
         || fehler "JARVIS_CONF gehoert nicht in das oeffentliche Abbild"
@@ -497,8 +518,8 @@ sagen "symbole     $(echo $SYMBOLE | wc -w) Stueck nach /etc/netview/"
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 \
     || fehler "tools/k15/tree.py fehlgeschlagen"
 
-printf 'root:x:0:0:root:/:/bin/sh\n%s:x:1000:1000:%s:/users/%s:/bin/sh\n' \
-    "$KONTO" "$KONTO_NAME" "$KONTO" > "$OUT/passwd"
+printf 'root:x:0:0:root:/:%s\n%s:x:1000:1000:%s:/users/%s:%s\n' \
+    "$LOGIN_SHELL" "$KONTO" "$KONTO_NAME" "$KONTO" "$LOGIN_SHELL" > "$OUT/passwd"
 
 # ============================================== RUNDE ANMELDUNG
 # /etc/shadow, /etc/group, /etc/login.conf, /etc/sperre.conf
@@ -956,7 +977,15 @@ ARGS+=(/lib/
        "/lib/serifb.ttf=assets/osum-serif-bold.ttf"
        "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
-for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
+for p in $gebaut; do
+    if [ "$BBSH" = 1 ] && [ "$p" = sh ]; then ARGS+=("/bin/osh=$OUT/sh.elf"); continue; fi
+    ARGS+=("/bin/$p=$OUT/$p.elf")
+done
+if [ "$BBSH" = 1 ]; then
+    # /bin/sh is a second name (hard link) of /bin/busybox: one copy on the stick; applet = basename of argv[0] = "sh" -> ash
+    ARGS+=("/lib/ld-musl-x86_64.so.1=$BBLIBC" "/bin/busybox=$BBDYN" "/bin/sh@/bin/busybox")
+    sagen "busybox     /bin/sh = busybox ($(stat -c%s "$BBDYN") + musl $(stat -c%s "$BBLIBC") Oktette), Osum-Shell = /bin/osh"
+fi
 ARGS+=("/bin/files@/bin/explorer")
 # ============================================ RUNDE ECHTHARDWARE-1
 # /etc/theme WIRD NICHT MEHR MITGELIEFERT -- UND DAS IST DER ZWEITE
@@ -1168,6 +1197,7 @@ cat > "$OUT/inittab" <<'EOFTAB'
 # die Tafel.
 sh:konsole:ctrl:/bin/sh
 EOFTAB
+[ "$BBSH" = 1 ] && sed -i 's|^sh:konsole:ctrl:/bin/sh$|sh:konsole:ctrl:/bin/osh|' "$OUT/inittab"
 printf 'grafik
 ' > "$OUT/ziel"
 ARGS+=("/etc/inittab=$OUT/inittab" "/etc/ziel=$OUT/ziel")
@@ -1339,6 +1369,9 @@ if [ "$IMAGE_PROFILE" = personal ]; then
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
            "/apps/jarvismini.osp/start@/bin/jarvismini")
 fi
+# LCSH: extra mkfs specs for gates (`<path>=<host file>` words, no blanks inside) -- e.g. tools/usbimg/bbsh.sh puts a musl test program on the stick
+# shellcheck disable=SC2206
+[ -n "${USBIMG_EXTRA:-}" ] && ARGS+=($USBIMG_EXTRA)
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
