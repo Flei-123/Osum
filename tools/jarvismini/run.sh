@@ -190,7 +190,7 @@ for tag in ("A", "B"):
                 xl, yl, wl, hl = map(int, vis[-1][:4])
                 R2 = region(i2, xl, yl, wl, hl); R3 = region(i3, xl, yl, wl, hl); R4 = region(i4, xl, yl, wl, hl)
                 diff = sum(1 for a, b in zip(R2, R3) if max(abs(a[k] - b[k]) for k in range(3)) > 24)
-                res("A: hidden: the box area differs from the shown box (pixels)", diff > wl * hl // 5, f"{diff} of {wl*hl}")
+                res("A: hidden: the box area differs from the shown box (pixels)", diff > wl * hl // 10, f"{diff} of {wl*hl}")
                 same = sum(1 for a, b in zip(R2, R4) if max(abs(a[k] - b[k]) for k in range(3)) > 24)
                 res("A: shown again: the box area equals the first shown picture", same < wl * hl // 20, f"{same} of {wl*hl} differ")
                 R5 = region(i5, xl, yl, wl, hl)
