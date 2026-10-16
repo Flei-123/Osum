@@ -63,7 +63,8 @@ export {
     // RUNDE BLECHVIER: die Gegenprobe mit dem ACPI-Zeitgeber.
     tsc_gegen_pm, win_pde, pde_at,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
-    timer_running,
+    timer_running, timer_diag, pit_route, nosrc, cpuid_max, c15_eax, c15_ebx, c15_ecx, c16_eax,
+    S_CLK, S_HPET, S_PMPORT, S_PMBITS, S_NOSRC,
     spurious, spurious_hit, tsc, tsc_hz, VEC_SPURIOUS,
     window, core_init, ipi,
     // K-004: what S3 takes away and has to be put back.
@@ -82,6 +83,13 @@ const S_SPURIOUS: u64 = 0x028 // spurious interrupts seen
 const S_LAPIC_PHYS: u64 = 0x030 // its address on the BUS, which is not its address
 const S_DIVISOR: u64 = 0x038 // what was written into the initial count
 const S_TSCHZ: u64 = 0x040 // cycles of the processor's own counter per second
+// ROUND TICKFIX: where the clock came from and what the fallbacks saw.
+const S_CLK: u64 = 0x048 // calibration source: 0 none, 1 PIT, 2 PM timer, 3 CPUID 0x15, 4 HPET
+const S_HPET: u64 = 0x050 // physical address of the HPET block, 0 = none
+const S_PMPORT: u64 = 0x058 // ACPI PM timer port, 0 = none
+const S_PMBITS: u64 = 0x060 // its width, 24 or 32
+const S_NOSRC: u64 = 0x068 // test switches: 1 nopit, 2 nopm, 4 nocpuid, 8 nohpet
+const S_PITSEEN: u64 = 0x070 // port 0x61 as last read by the PIT calibration
 
 // ----------------------------------------------------------- registers
 
@@ -396,6 +404,65 @@ fn calibrate(state: u64) -> u64 {
     let base: u64 = lapic(state)
     lwrite(base, R_TIMER_DIV, DIV_16)
     lwrite(base, R_LVT_TIMER, LVT_MASKED)
+    // ROUND TICKFIX: a fallback chain instead of "PIT or nothing". The
+    // boss's Tiger Lake laptop has no usable PIT channel 2 behind port
+    // 0x61 as far as we know; `calibrate` used to answer 0 there, the
+    // APIC stayed off, and the boot stood still. Order of trust:
+    //   1 PIT channel 2   (the classic, read through port 0x61 bit 5)
+    //   2 ACPI PM timer   (fixed 3.579545 MHz by the specification)
+    //   3 CPUID 0x15/0x16 (crystal ratio; the local timer runs on the
+    //                      crystal on every Intel core since Skylake)
+    //   4 HPET            (main counter, period from the capabilities)
+    // Each source writes the two scalars itself through `cal_done`; the
+    // first one that gives a sane number wins and is named in S_CLK.
+    // Test words `nopit nopm nocpuid nohpet` skip a source.
+    kstate.set(state, pci.K2_SCALARS + S_CLK, 0)
+    var per_sec: u64 = 0
+    if !nosrc(state, 1) {
+        per_sec = cal_pit(state, base)
+        if per_sec != 0 {
+            kstate.set(state, pci.K2_SCALARS + S_CLK, 1)
+        }
+    }
+    if per_sec == 0 && !nosrc(state, 2) {
+        per_sec = cal_pm(state, base)
+        if per_sec != 0 {
+            kstate.set(state, pci.K2_SCALARS + S_CLK, 2)
+        }
+    }
+    if per_sec == 0 && !nosrc(state, 4) {
+        per_sec = cal_cpuid(state)
+        if per_sec != 0 {
+            kstate.set(state, pci.K2_SCALARS + S_CLK, 3)
+        }
+    }
+    if per_sec == 0 && !nosrc(state, 8) {
+        per_sec = cal_hpet(state, base)
+        if per_sec != 0 {
+            kstate.set(state, pci.K2_SCALARS + S_CLK, 4)
+        }
+    }
+    return per_sec
+}
+
+// A measured pair is only believed when it is physically plausible: the
+// local timer between 100 kHz and 4 GHz, the cycle counter between
+// 100 MHz and 10 GHz. A broken source (SMI inside the window, a counter
+// that does not count) lands outside and the next source is tried.
+fn cal_done(state: u64, per_sec: u64, tsc_per_sec: u64) -> u64 {
+    if per_sec < 100000 || per_sec > 4000000000 {
+        return 0
+    }
+    if tsc_per_sec != 0 && (tsc_per_sec < 100000000 || tsc_per_sec > 10000000000) {
+        return 0
+    }
+    kstate.set(state, pci.K2_SCALARS + S_HZ, per_sec)
+    kstate.set(state, pci.K2_SCALARS + S_TSCHZ, tsc_per_sec)
+    return per_sec
+}
+
+// 1: the PIT, as before.
+fn cal_pit(state: u64, base: u64) -> u64 {
     // Both counters are read across the SAME 10 ms window: the local
     // timer, which this kernel is about to run on, and the processor's
     // own cycle counter, which every measurement in this round is given
@@ -408,17 +475,124 @@ fn calibrate(state: u64) -> u64 {
     let left: u64 = lread(base, R_TIMER_CUR)
     let t1: u64 = tsc()
     lwrite(base, R_TIMER_INIT, 0)
-    if !done {
-        return 0 // no PIT, no calibration, no APIC timer
+    kstate.set(state, pci.K2_SCALARS + S_PITSEEN, serial.in8(0x61 as u16) as u64)
+    if !done || t1 <= t0 {
+        return 0 // no PIT, no calibration from it
     }
     var elapsed: u64 = 0
     if left <= 0xFFFFFFFF {
         elapsed = 0xFFFFFFFF - left
     }
-    let per_sec: u64 = elapsed * 100
-    kstate.set(state, pci.K2_SCALARS + S_HZ, per_sec)
-    kstate.set(state, pci.K2_SCALARS + S_TSCHZ, (t1 - t0) * 100)
-    return per_sec
+    return cal_done(state, elapsed * 100, (t1 - t0) * 100)
+}
+
+// 2: the ACPI PM timer. 10 ms = PM_HZ / 100 timer ticks; the 24/32-bit
+// difference is taken modulo the width WITHOUT a u64 underflow (see
+// `tsc_gegen_pm`).
+fn cal_pm(state: u64, base: u64) -> u64 {
+    let port: u64 = kstate.get(state, pci.K2_SCALARS + S_PMPORT)
+    if port == 0 || port > 0xFFFC {
+        return 0
+    }
+    var bits: u64 = kstate.get(state, pci.K2_SCALARS + S_PMBITS)
+    if bits != 32 {
+        bits = 24
+    }
+    let maske: u64 = (1 << bits) - 1
+    let spanne: u64 = PM_HZ / 100
+    lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+    let a0: u64 = pm_read(port, bits)
+    let t0: u64 = tsc()
+    var vergangen: u64 = 0
+    var wache: u64 = 0
+    while vergangen < spanne && wache < 20000000 {
+        let a: u64 = pm_read(port, bits)
+        vergangen = (a + (maske + 1) - a0) & maske
+        wache = wache + 1
+    }
+    let left: u64 = lread(base, R_TIMER_CUR)
+    let t1: u64 = tsc()
+    lwrite(base, R_TIMER_INIT, 0)
+    if vergangen < spanne || t1 <= t0 || left > 0xFFFFFFFF {
+        return 0
+    }
+    let elapsed: u64 = 0xFFFFFFFF - left
+    return cal_done(state, (elapsed * PM_HZ) / vergangen,
+        ((t1 - t0) * PM_HZ) / vergangen)
+}
+
+// 3: CPUID leaf 0x15: TSC_Hz = crystal * ebx / eax. The local timer
+// counts at the crystal clock (divided by the DIV_16 programmed above).
+// ecx = 0 happens (Skylake client family): then leaf 0x16 gives the base
+// MHz, which fixes the crystal as base * eax / ebx; without that the
+// Intel SDM value of 24 MHz is assumed. This is a FALLBACK: no way to
+// measure the result, which is why the PIT and the PM timer come first.
+fn cal_cpuid(state: u64) -> u64 {
+    let top: u64 = cpuid_max()
+    if top < 0x15 {
+        return 0
+    }
+    let den: u64 = c15_eax()
+    let num: u64 = c15_ebx()
+    if den == 0 || num == 0 {
+        return 0
+    }
+    var crystal: u64 = c15_ecx()
+    if crystal == 0 {
+        if top >= 0x16 && c16_eax() != 0 {
+            crystal = (c16_eax() * 1000000 * den) / num
+        } else {
+            crystal = 24000000
+        }
+    }
+    return cal_done(state, crystal / DIV_VALUE, (crystal * num) / den)
+}
+
+// 4: the HPET. Its block address came from the ACPI "HPET" table (hw.fi
+// stores it in S_HPET before `init`). CLK_PERIOD (bits 63:32 of the
+// capabilities) is in femtoseconds, at most 100 ns by the specification.
+// The counter is read as its low 32 bits, which every HPET answers.
+fn cal_hpet(state: u64, base: u64) -> u64 {
+    let phys: u64 = kstate.get(state, pci.K2_SCALARS + S_HPET)
+    if phys == 0 {
+        return 0
+    }
+    let h: u64 = map_device(state, phys)
+    if h == 0 {
+        return 0
+    }
+    let period: u64 = __mmio_read32((h + 4) as *mut u32) as u64 // femtoseconds per count
+    if period == 0 || period > 100000000 {
+        return 0
+    }
+    // Counting on: bit 0 of the general configuration register.
+    let cfg: u64 = __mmio_read32((h + 0x10) as *mut u32) as u64
+    __mmio_write32((h + 0x10) as *mut u32, ((cfg | 1) & 0xFFFFFFFF) as u32)
+    let spanne: u64 = 10000000000000 / period // 10 ms in counts
+    lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+    let a0: u64 = __mmio_read32((h + 0xF0) as *mut u32) as u64
+    let t0: u64 = tsc()
+    var vergangen: u64 = 0
+    var wache: u64 = 0
+    while vergangen < spanne && wache < 20000000 {
+        let a: u64 = __mmio_read32((h + 0xF0) as *mut u32) as u64
+        vergangen = (a + 0x100000000 - a0) & 0xFFFFFFFF
+        wache = wache + 1
+    }
+    let left: u64 = lread(base, R_TIMER_CUR)
+    let t1: u64 = tsc()
+    lwrite(base, R_TIMER_INIT, 0)
+    __mmio_write32((h + 0x10) as *mut u32, (cfg & 0xFFFFFFFF) as u32)
+    if vergangen < spanne || t1 <= t0 || left > 0xFFFFFFFF {
+        return 0
+    }
+    let ns: u64 = (vergangen * period) / 1000000 // nanoseconds elapsed
+    if ns == 0 {
+        return 0
+    }
+    let elapsed: u64 = 0xFFFFFFFF - left
+    return cal_done(state, (elapsed * 1000000000) / ns,
+        ((t1 - t0) * 1000000000) / ns)
 }
 
 // =====================================================================
@@ -521,6 +695,119 @@ fn tsc_hz(state: u64) -> u64 {
     return kstate.get(state, pci.K2_SCALARS + S_TSCHZ)
 }
 
+// ROUND TICKFIX: CPUID leaves 0x15 (TSC / crystal ratio) and 0x16 (base
+// MHz). Each helper answers ONE register of ONE fixed leaf, because
+// `cpuid` clobbers four registers and rbx is never handed out by the
+// language. `cpuid_max` guards them: a leaf above the highest one is
+// answered with the data of the highest basic leaf, which is garbage.
+fn cpuid_max() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nxor eax, eax\ncpuid\npop rbx", out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn c15_eax() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 0x15\nxor ecx, ecx\ncpuid\npop rbx", out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn c15_ebx() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 0x15\nxor ecx, ecx\ncpuid\nmov eax, ebx\npop rbx", out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn c15_ecx() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 0x15\nxor ecx, ecx\ncpuid\nmov eax, ecx\npop rbx", out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn c16_eax() -> u64 {
+    var v: u64 = 0
+    asm("push rbx\nmov eax, 0x16\nxor ecx, ecx\ncpuid\npop rbx", out("rax") & v,
+        clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFF
+}
+
+// ROUND TICKFIX: last resort when the local timer never fires. The PIT
+// (channel 0) has counted at 100 Hz since `pit_init`; its output reaches
+// the I/O APIC on pin 2 (the usual ISA override) or pin 0. Both entries
+// are pointed at the timer vector, edge-triggered, active high. The
+// handler's EOI goes to the local APIC, which is right for I/O APIC lines.
+fn pit_route(state: u64) {
+    route(state, 2, VEC_TIMER, id(state), false, false)
+    route(state, 0, VEC_TIMER, id(state), false, false)
+}
+
+// True when the test word for `bit` (see hw.clock_words) is on.
+fn nosrc(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, pci.K2_SCALARS + S_NOSRC) & bit) != 0
+}
+
+// One line with everything the clock fallbacks look at, on the serial
+// line AND the screen (the console is mirrored), so that a photo of a
+// stuck boot is enough. Nothing in here may wait or fault.
+fn timer_diag(state: u64) {
+    var d0: [u8; 12] = "timer: src=\0"
+    var d1: [u8; 7] = " apic=\0"
+    var d2: [u8; 5] = " hz=\0"
+    var d3: [u8; 9] = " tsc_hz=\0"
+    var d4: [u8; 8] = " pit61=\0"
+    var d5: [u8; 6] = " lvt=\0"
+    var d6: [u8; 6] = " cur=\0"
+    var d7: [u8; 6] = " c15=\0"
+    var d8: [u8; 2] = "/\0"
+    var d9: [u8; 6] = " c16=\0"
+    var d10: [u8; 5] = " pm=\0"
+    var d11: [u8; 7] = " hpet=\0"
+    serial.puts((&d0[0]) as u64)
+    serial.dec(kstate.get(state, pci.K2_SCALARS + S_CLK))
+    serial.puts((&d1[0]) as u64)
+    serial.dec(kstate.get(state, pci.K2_SCALARS + S_ACTIVE))
+    serial.puts((&d2[0]) as u64)
+    serial.dec(hz(state))
+    serial.puts((&d3[0]) as u64)
+    serial.dec(tsc_hz(state))
+    serial.puts((&d4[0]) as u64)
+    serial.hex(serial.in8(0x61 as u16) as u64)
+    serial.puts((&d5[0]) as u64)
+    if kstate.get(state, pci.K2_SCALARS + S_ACTIVE) != 0 {
+        let base: u64 = lapic(state)
+        serial.hex(lread(base, R_LVT_TIMER))
+        serial.puts((&d6[0]) as u64)
+        serial.dec(lread(base, R_TIMER_CUR))
+    } else {
+        serial.hex(0)
+        serial.puts((&d6[0]) as u64)
+        serial.dec(0)
+    }
+    serial.puts((&d7[0]) as u64)
+    if cpuid_max() >= 0x16 {
+        serial.dec(c15_eax())
+        serial.puts((&d8[0]) as u64)
+        serial.dec(c15_ebx())
+        serial.puts((&d8[0]) as u64)
+        serial.dec(c15_ecx())
+        serial.puts((&d9[0]) as u64)
+        serial.dec(c16_eax())
+    } else {
+        serial.dec(0)
+        serial.puts((&d9[0]) as u64)
+        serial.dec(0)
+    }
+    serial.puts((&d10[0]) as u64)
+    serial.hex(kstate.get(state, pci.K2_SCALARS + S_PMPORT))
+    serial.puts((&d11[0]) as u64)
+    serial.hex(kstate.get(state, pci.K2_SCALARS + S_HPET))
+    serial.nl()
+}
+
 // ------------------------------------------------------------- bring-up
 
 // Returns true when the APIC is the controller from here on. Everything
@@ -571,6 +858,7 @@ fn init(state: u64, want_hz: u64) -> bool {
 
     let per_sec: u64 = calibrate(state)
     if per_sec == 0 {
+        wire_back(state)
         return false
     }
     kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 1)
@@ -595,9 +883,25 @@ fn init(state: u64, want_hz: u64) -> bool {
         lwrite(base, R_LVT_TIMER, LVT_MASKED)
         lwrite(base, R_TIMER_INIT, 0)
         kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 0)
+        wire_back(state)
         return false
     }
     return true
+}
+
+// ROUND TICKFIX -- THE REAL CAUSE OF THE TIGER LAKE HANG (found in QEMU
+// with `nopit nopm nocpuid nohpet`: ticks=0 on the old PIC path).
+// `init` masks LINT0 early. With the PIC in charge (the virtual wire),
+// the 8259's INTR reaches the processor ONLY through LINT0 -- a masked
+// LINT0 swallows every PIC interrupt. The comment above `init` promised
+// "everything that can go wrong is answered with false and the PIC keeps
+// running", but after a failed calibration the PIC was mute: no timer
+// tick, no keyboard, `hlt` forever. Whenever `init` gives up it now puts
+// LINT0 back as ExtINT (delivery mode 7, unmasked), the standard virtual
+// wire. LINT1 stays masked.
+fn wire_back(state: u64) {
+    let base: u64 = lapic(state)
+    lwrite(base, R_LVT_LINT0, 0x700)
 }
 
 // Laeuft der Zaehler des oertlichen Zeitgebers wirklich? Zwei Blicke,

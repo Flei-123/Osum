@@ -199,6 +199,7 @@ const DISK2_BLOCKS: u64 = 163840
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
 const TICKS_WANTED: u64 = 20 // 200 ms at 100 Hz
+const TICKS_PASS_LIMIT: u64 = 150000000 // `pause` passes when no cycle counter is calibrated (about 5 s)
 const KEYS_WANTED: u64 = 4
 const KEY_TIMEOUT: u64 = 250 // 2.5 s, then it goes on regardless
 
@@ -1367,6 +1368,13 @@ fn ticks(state: u64) {
         return
     }
 
+    // ROUND TICKFIX test word `notick`: silence the timer so that the
+    // wait below has to give up on its own (the stuck-laptop case).
+    // `noapict` silences only the local APIC timer (the PIT reroute below
+    // has to rescue it); `notick` silences everything.
+    if apic.nosrc(state, 16) || apic.nosrc(state, 32) {
+        hw.timer_off(state)
+    }
     idt.enable()
     serial.puts((&s_wait[0]) as u64)
     serial.nl()
@@ -1380,20 +1388,52 @@ fn ticks(state: u64) {
     // beim Start, mit bereits abgeschaltetem alten Regler. Trotzdem
     // gehoert eine Grenze hierher -- ein Kern, der an einer Zeile
     // haengt, kann nicht einmal sagen, an welcher.
-    var s_keine: [u8; 30] = "ticks: KEINE MARKE, weiter!!!\0"
+    // ROUND TICKFIX (16.10.2026, the boss's Tiger Lake laptop stood here
+    // forever): the old loop slept in `hlt` and looked at its time limit
+    // only AFTER a wake-up -- with no timer interrupt at all it never woke
+    // up and the limit never fired. Now the loop polls with `pause`
+    // (no `hlt`), so the limit is checked on every pass, with two
+    // independent bounds: the cycle counter (5 s, when it is calibrated)
+    // and a plain pass counter (when it is not).
+    var s_noirq: [u8; 42] = "ticks: NO TIMER IRQ after 5 s, continuing\0"
     let start: u64 = kstate.get(state, kstate.TICKS)
     let thz: u64 = apic.tsc_hz(state)
     let t0: u64 = apic.tsc()
+    var limit_tsc: u64 = 0
+    if thz != 0 {
+        limit_tsc = thz * 5
+    }
+    var s_reroute: [u8; 48] = "ticks: no APIC timer IRQ, trying PIT via IOAPIC\0"
+    var rerouted: bool = false
+    var passes: u64 = 0
     var warte: bool = true
     while warte {
         if kstate.get(state, kstate.TICKS) - start >= TICKS_WANTED {
             warte = false
-        } else if thz != 0 && apic.tsc() - t0 > thz * 3 {
+        } else if limit_tsc != 0 && apic.tsc() - t0 > limit_tsc {
             warte = false
-            serial.puts((&s_keine[0]) as u64)
+            serial.puts((&s_noirq[0]) as u64)
             serial.nl()
+            apic.timer_diag(state)
+        } else if passes >= TICKS_PASS_LIMIT {
+            warte = false
+            serial.puts((&s_noirq[0]) as u64)
+            serial.nl()
+            apic.timer_diag(state)
+        } else if !rerouted && !apic.nosrc(state, 16) && apic.active(state) && (
+                (limit_tsc != 0 && apic.tsc() - t0 > limit_tsc / 5)
+                || (limit_tsc == 0 && passes >= TICKS_PASS_LIMIT / 5)) {
+            // One second without a tick although the local APIC timer
+            // is supposed to run: the PIT (channel 0, still counting
+            // since `pit_init`) is wired to the I/O APIC instead.
+            rerouted = true
+            serial.puts((&s_reroute[0]) as u64)
+            serial.nl()
+            apic.timer_diag(state)
+            apic.pit_route(state)
         } else {
-            idt.halt()
+            asm("pause")
+            passes = passes + 1
         }
     }
     serial.puts((&s_got[0]) as u64)

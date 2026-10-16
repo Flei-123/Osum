@@ -212,6 +212,7 @@ fn on(state: u64, bit: u64) -> bool {
 // turned into a number.
 fn parse(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + S_MODE, mode_of(cmd))
+    clock_words(state, cmd)
     save_cmd(state, cmd)
     net_parse(state, cmd)
 }
@@ -248,6 +249,44 @@ fn save_cmd(state: u64, cmd: u64) {
     }
     kstate.set8(pci.K2_SCALARS + S_CMD + i, 0 as u8)
 }
+
+
+// ROUND TICKFIX: test words that take clock sources away one by one, so
+// that every fallback of `apic.calibrate` can be walked in a VM:
+//   nopit nopm nocpuid nohpet  -- that calibration source is skipped
+//   notick                     -- ALL timers are silenced right before the
+//                                 tick wait (the stuck-laptop case)
+//   lapicmute                    -- only the local APIC timer is silenced;
+//                                 the PIT-via-IOAPIC reroute rescues it
+fn clock_words(state: u64, cmd: u64) {
+    var w_pit: [u8; 6] = "nopit\0"
+    var w_pm: [u8; 5] = "nopm\0"
+    var w_cpuid: [u8; 8] = "nocpuid\0"
+    var w_hpet: [u8; 7] = "nohpet\0"
+    var w_tick: [u8; 7] = "notick\0"
+    var w_apict: [u8; 10] = "lapicmute\0"
+    var bits: u64 = 0
+    if find(cmd, (&w_pit[0]) as u64, 5) != 0 {
+        bits = bits | 1
+    }
+    if find(cmd, (&w_pm[0]) as u64, 4) != 0 {
+        bits = bits | 2
+    }
+    if find(cmd, (&w_cpuid[0]) as u64, 7) != 0 {
+        bits = bits | 4
+    }
+    if find(cmd, (&w_hpet[0]) as u64, 6) != 0 {
+        bits = bits | 8
+    }
+    if find(cmd, (&w_tick[0]) as u64, 6) != 0 {
+        bits = bits | 16
+    }
+    if find(cmd, (&w_apict[0]) as u64, 9) != 0 {
+        bits = bits | 32
+    }
+    kstate.set(state, pci.K2_SCALARS + apic.S_NOSRC, bits)
+}
+
 
 fn cmd_copy(state: u64) -> u64 {
     if kstate.get8(pci.K2_SCALARS + S_CMD) == 0 {
@@ -419,6 +458,31 @@ fn net_fallback(state: u64) -> u64 {
 
 // ---------------------------------------------------------- stage one
 
+// ROUND TICKFIX: the two clocks `apic.calibrate` may fall back on, read
+// from the ACPI tables BEFORE `apic.init` (blech_stage runs after it and
+// reads the FADT again for the cross-check; same values).
+// The HPET table keeps the block address as a generic address structure
+// at offset 40; the address itself is the 8 bytes at offset 44.
+fn clock_info(state: u64) {
+    var w_facp: [u8; 5] = "FACP\0"
+    var w_hpet: [u8; 5] = "HPET\0"
+    let facp: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if facp != 0 {
+        let port: u64 = kstate.get32(facp + F_PM_TMR)
+        kstate.set(state, pci.K2_SCALARS + apic.S_PMPORT, port)
+        var bits: u64 = 24
+        if (kstate.get32(facp + F_FLAGS) & 0x100) != 0 {
+            bits = 32
+        }
+        kstate.set(state, pci.K2_SCALARS + apic.S_PMBITS, bits)
+    }
+    let hpet: u64 = acpi.table(state, (&w_hpet[0]) as u64)
+    if hpet != 0 && kstate.get32(hpet + 4) >= 56 {
+        kstate.set(state, pci.K2_SCALARS + apic.S_HPET,
+            __mmio_read64((hpet + 44) as *mut u64))
+    }
+}
+
 fn stage(state: u64) {
     var s_off: [u8; 13] = "pci: skipped\0"
     var s_none: [u8; 16] = "apic: not there\0"
@@ -450,7 +514,12 @@ fn stage(state: u64) {
         serial.nl()
         return
     }
-    if !apic.init(state, TIMER_HZ) {
+    clock_info(state)
+    let up: bool = apic.init(state, TIMER_HZ)
+    // ROUND TICKFIX: always say which clock was found and what the
+    // fallbacks saw -- one line, enough for a photo of a laptop screen.
+    apic.timer_diag(state)
+    if !up {
         serial.puts((&s_none[0]) as u64)
         serial.nl()
         return
