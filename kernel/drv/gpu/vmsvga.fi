@@ -88,9 +88,22 @@ const S_HOSTRSZ: u64 = 0x168 // resizes that followed a host request
 const S_LASTUPD: u64 = 0x170 // ms of the last UPDATE sent
 const S_SAFETY: u64 = 0x178 // safety-net full UPDATEs (writers that bypass fb.vms_note, e.g. /dev/fb)
 const SAFETY_MS: u64 = 10000
-const SAFETY_FULL_MS: u64 = 1000 // full-update mode: whole picture again after 1 s without an UPDATE (cheap, repairs any host-side loss)
+const SAFETY_FULL_MS: u64 = 10000 // full-update mode: same long net as the rectangle path (host-side loss is repaired by the heal stages)
 const BUSY_SPIN: u64 = 20000 // bounded wait for BUSY == 0 after a full UPDATE
 const S_REDRAW: u64 = 0x180 // full-update mode: periodic whole-picture rewrites of VRAM
+const S_PIO: u64 = 0x188 // port I/O operations issued by the driver (outl/inl count; idle must stay ~0)
+const S_HEAL_T0: u64 = 0x190 // ms of the last mode change / ENABLE (0 = none)
+const S_HEAL_STAGE: u64 = 0x198 // mode-change self-heal stages left (3 = +100 ms, 2 = +500 ms, 1 = +2000 ms, 0 = done)
+const S_HEALS: u64 = 0x1A0 // self-heal whole-picture UPDATEs sent (mode-change stages + trailing)
+const S_LOCK: u64 = 0x1A8 // spin lock word of the dirty box (fb.vms_note and acc_take)
+const S_DROPN: u64 = 0x1B0 // notes seen (word vmsvgadrop swallows every 7th: gate negative control)
+const S_TRAIL: u64 = 0x1B8 // ms at which the trailing whole-picture UPDATE is due (0 = none): set when a frame painted
+const S_TRACES: u64 = 0x1C0 // TRACES register read back after the write (0 = host does not watch VRAM)
+const HEAL_1_MS: u64 = 100
+const HEAL_2_MS: u64 = 500
+const HEAL_3_MS: u64 = 2000
+const TRAIL_MS: u64 = 2000 // keep-alive: one whole-picture UPDATE this long after the last painted frame (nothing while idle)
+const POLL_MS: u64 = 1000 // host display hint poll period (only with CAP_DISPLAY_TOPOLOGY)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
 // ---- PCI
@@ -126,6 +139,7 @@ const R_MEM_REGS: u64 = 30
 const R_DISPLAY_ID: u64 = 35
 const R_DISPLAY_W: u64 = 39
 const R_DISPLAY_H: u64 = 40
+const R_TRACES: u64 = 45 // 0 = the host does not write-protect VRAM pages to watch the guest (vmwgfx writes 0)
 
 // ---- capabilities
 const CAP_RECT_COPY: u64 = 0x2
@@ -185,12 +199,14 @@ fn resize_errors(state: u64) -> u64 { return kstate.get(state, s(S_RSZERR)) }
 
 fn reg_w(state: u64, idx: u64, v: u64) {
     let io: u64 = kstate.get(state, s(S_IO))
+    kstate.add(state, s(S_PIO), 2)
     arch.dev_out32(io as u16, idx as u32)
     arch.dev_out32((io + 1) as u16, v as u32)
 }
 
 fn reg_r(state: u64, idx: u64) -> u64 {
     let io: u64 = kstate.get(state, s(S_IO))
+    kstate.add(state, s(S_PIO), 2)
     arch.dev_out32(io as u16, idx as u32)
     return arch.dev_in32((io + 1) as u16) as u64
 }
@@ -386,7 +402,16 @@ fn fifo_setup(state: u64) -> bool {
     }
     reg_w(state, R_GUEST_ID, 0x5010) // "Other 64-bit" guest id; informational
     reg_w(state, R_CONFIG_DONE, 1)
+    traces_off(state)
     return true
+}
+
+// TRACES = 0 (like vmwgfx). VirtualBox defaults to 1 and then write-protects the WHOLE VRAM to catch guest writes (a dirty-page
+// handler on every store: the host CPU load of the rectangle path); the driver tells the host explicitly with UPDATE anyway.
+// Written after CONFIG_DONE and again after every mode change.
+fn traces_off(state: u64) {
+    reg_w(state, R_TRACES, 0)
+    kstate.set(state, s(S_TRACES), reg_r(state, R_TRACES))
 }
 
 fn sync_wait(state: u64) {
@@ -489,7 +514,7 @@ fn now_ms(state: u64) -> u64 {
 
 // Take the box the copy sites noted (and clear it) with interrupts off.
 fn acc_take(state: u64, x0: *mut u64, y0: *mut u64, x1: *mut u64, y1: *mut u64) -> bool {
-    let fl: u64 = arch.irq_save()
+    let fl: u64 = box_lock(state)
     let ok: bool = kstate.get(state, s(S_ACC_VALID)) != 0
     if ok {
         __mmio_write64(x0, kstate.get(state, s(S_ACC_X0)))
@@ -498,8 +523,34 @@ fn acc_take(state: u64, x0: *mut u64, y0: *mut u64, x1: *mut u64, y1: *mut u64) 
         __mmio_write64(y1, kstate.get(state, s(S_ACC_Y1)))
         kstate.set(state, s(S_ACC_VALID), 0)
     }
-    arch.irq_restore(fl)
+    box_unlock(state, fl)
     return ok
+}
+
+// The dirty box is written by fb.vms_note on every core and taken here: interrupts off AND a spin lock (cmpxchg), because
+// irq_save alone only excludes the same core (SMP lost notes).
+fn box_lock(state: u64) -> u64 {
+    let fl: u64 = arch.irq_save()
+    let lk: *mut u64 = (state + VMSVGA_OFF + S_LOCK) as *mut u64
+    var got: u64 = __atomic_swap(lk, 0, 1)
+    while got != 0 {
+        arch.pause()
+        got = __atomic_swap(lk, 0, 1)
+    }
+    return fl
+}
+
+fn box_unlock(state: u64, fl: u64) {
+    let lk: *mut u64 = (state + VMSVGA_OFF + S_LOCK) as *mut u64
+    __mmio_write64(lk, 0)
+    arch.irq_restore(fl)
+}
+
+// Forget the dirty box (under the lock).
+fn box_clear(state: u64) {
+    let fl: u64 = box_lock(state)
+    kstate.set(state, s(S_ACC_VALID), 0)
+    box_unlock(state, fl)
 }
 
 // verify (word vmsvgahw): the host may only be told what changed. Compare VRAM with the copy of what the host was told,
@@ -558,16 +609,43 @@ fn present(state: u64) -> bool {
     var y1: u64 = 0
     let rect_way: bool = kstate.mode_on(state, kstate.M_VMSVGARECT)
     if !acc_take(state, &x0, &y0, &x1, &y1) {
-        // safety net: a writer that does not go through fb.vms_note (/dev/fb) would never be shown. After SAFETY_MS without any
-        // UPDATE tell the host the whole picture once (cost at 1920x1080: 8 MB per 10 s, nothing while frames flow).
-        // Full-update way: every SAFETY_FULL_MS, and VRAM is rewritten completely from the back buffer first.
-        let last: u64 = kstate.get(state, s(S_LASTUPD))
+        // Nothing painted. The idle path costs a time read and compares and NO port I/O unless something is due.
         let nm: u64 = now_ms(state)
+        if nm == 0 {
+            return true
+        }
+        // 1. self-heal after a mode change: VirtualBox rebuilds its host framebuffer asynchronously after ENABLE/WIDTH/HEIGHT/BPP,
+        //    so the whole-picture UPDATE right after it can be lost -> again at +100 / +500 / +2000 ms.
+        let st: u64 = kstate.get(state, s(S_HEAL_STAGE))
+        if st != 0 {
+            let t0: u64 = kstate.get(state, s(S_HEAL_T0))
+            var due: u64 = t0 + HEAL_3_MS
+            if st == 3 {
+                due = t0 + HEAL_1_MS
+            }
+            if st == 2 {
+                due = t0 + HEAL_2_MS
+            }
+            if nm >= due {
+                kstate.set(state, s(S_HEAL_STAGE), st - 1)
+                return heal(state, rect_way)
+            }
+            return true
+        }
+        // 2. keep-alive: one whole-picture UPDATE TRAIL_MS after the last painted frame (repairs a lost UPDATE of the last frame)
+        let tr: u64 = kstate.get(state, s(S_TRAIL))
+        if tr != 0 && nm >= tr {
+            kstate.set(state, s(S_TRAIL), 0)
+            return heal(state, rect_way)
+        }
+        // 3. safety net: a writer that does not go through fb.vms_note (/dev/fb) would never be shown. After SAFETY_MS without any
+        //    UPDATE tell the host the whole picture once (8 MB per 10 s at 1920x1080, nothing while frames flow).
+        let last: u64 = kstate.get(state, s(S_LASTUPD))
         var lim: u64 = SAFETY_MS
         if !rect_way {
             lim = SAFETY_FULL_MS
         }
-        if nm != 0 && last != 0 && nm > last + lim {
+        if last != 0 && nm > last + lim {
             kstate.add(state, s(S_SAFETY), 1)
             if !rect_way {
                 redraw_all(state)
@@ -587,6 +665,11 @@ fn present(state: u64) -> bool {
     if x1 <= x0 || y1 <= y0 {
         return true
     }
+    // something was painted: a trailing whole-picture UPDATE follows when the picture stays quiet
+    let nw: u64 = now_ms(state)
+    if nw != 0 {
+        kstate.set(state, s(S_TRAIL), nw + TRAIL_MS)
+    }
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         verify_frame(state, x0, y0, x1, y1)
     }
@@ -596,13 +679,33 @@ fn present(state: u64) -> bool {
     return send_update(state, x0, y0, x1 - x0, y1 - y0)
 }
 
+// A self-heal UPDATE: the whole picture again (full-update way: VRAM rewritten from the back buffer first, because ENABLE 0 -> 1
+// zeroes the VRAM). Never arms the trailing UPDATE again, so an idle screen goes silent.
+fn heal(state: u64, rect_way: bool) -> bool {
+    kstate.add(state, s(S_HEALS), 1)
+    if !rect_way {
+        redraw_all(state)
+    }
+    return send_full(state)
+}
+
+// Arm the three heal stages from now (after ENABLE / a mode change).
+fn heal_arm(state: u64) {
+    let nm: u64 = now_ms(state)
+    if nm == 0 {
+        return
+    }
+    kstate.set(state, s(S_HEAL_T0), nm)
+    kstate.set(state, s(S_HEAL_STAGE), 3)
+}
+
 // Full-update way: rewrite VRAM completely from the back buffer (no diff, no shadow), then the caller sends the full UPDATE.
 // The box fb.flush notes again is dropped here, so an idle screen stays idle.
 fn redraw_all(state: u64) {
     kstate.add(state, s(S_REDRAW), 1)
     fb.dirty_all(state)
     fb.flush(state)
-    kstate.set(state, s(S_ACC_VALID), 0)
+    box_clear(state)
 }
 
 // ONE UPDATE for the whole picture, then the SYNC/BUSY handshake.
@@ -804,7 +907,7 @@ fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 // Host-requested size. QEMU has NO host hint at all (always 0). On VirtualBox/VMware the hint would come through the display
 // topology registers (CAP_DISPLAY_TOPOLOGY: select DISPLAY_ID 0, read DISPLAY_WIDTH/HEIGHT) [VBOX?, UNVERIFIED: untested on the real
 // device]. Defensive: only a sane size (>= 640x480, inside the device limits) that DIFFERS from the current mode, was seen on two
-// polls in a row and was not tried before counts. Polled at most every 250 ms. Returns w << 16 | h, 0 = none.
+// polls in a row and was not tried before counts. Polled at most every POLL_MS (1 s). Returns w << 16 | h, 0 = none.
 fn host_pending(state: u64) -> u64 {
     if !bereit(state) || !has_cap(state, CAP_DISPLAY_TOPOLOGY) {
         return 0
@@ -817,7 +920,7 @@ fn host_pending(state: u64) -> u64 {
     if now < kstate.get(state, s(S_NEXTPOLL)) {
         return 0
     }
-    kstate.set(state, s(S_NEXTPOLL), now + 250)
+    kstate.set(state, s(S_NEXTPOLL), now + POLL_MS)
     reg_w(state, R_DISPLAY_ID, 0)
     let w: u64 = reg_r(state, R_DISPLAY_W)
     let h: u64 = reg_r(state, R_DISPLAY_H)
@@ -898,9 +1001,11 @@ fn resized(state: u64) {
         kstate.set(state, s(S_PRES), 0)
         kstate.set(state, s(S_PRESSZ), 0)
     }
-    kstate.set(state, s(S_ACC_VALID), 0)
+    box_clear(state)
     alloc_verify(state)
+    traces_off(state)
     let _u: bool = send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
+    heal_arm(state)
 }
 
 // ------------------------------------------------------------ bring-up
@@ -969,7 +1074,8 @@ fn init(state: u64) -> bool {
     alloc_verify(state)
     let _u: bool = send_update(state, 0, 0, w, h)
     busy_wait(state)
-    kstate.set(state, s(S_ACC_VALID), 0)
+    box_clear(state)
+    heal_arm(state)
     return true
 }
 
@@ -996,6 +1102,9 @@ fn say(state: u64) {
     var s_rh: [u8; 7] = " host=\0"
     var s_re: [u8; 6] = " err=\0"
     var s_sf: [u8; 7] = " safe=\0"
+    var s_pio: [u8; 6] = " pio=\0"
+    var s_hl: [u8; 7] = " heal=\0"
+    var s_tr: [u8; 9] = " traces=\0"
     var s_vf: [u8; 20] = "vmsvga: verify bad=\0"
     var s_vn: [u8; 9] = " frames=\0"
     if kstate.get(state, s(S_UP)) == 0 {
@@ -1037,6 +1146,12 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_RSZERR)))
     serial.puts((&s_sf[0]) as u64)
     serial.dec(kstate.get(state, s(S_SAFETY)))
+    serial.puts((&s_pio[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PIO)))
+    serial.puts((&s_hl[0]) as u64)
+    serial.dec(kstate.get(state, s(S_HEALS)))
+    serial.puts((&s_tr[0]) as u64)
+    serial.dec(kstate.get(state, s(S_TRACES)))
     serial.nl()
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         serial.puts((&s_vf[0]) as u64)

@@ -2727,14 +2727,30 @@ const VMS_OFF: u64 = 0x170000
 const VMS_READY: u64 = 0x08
 const VMS_ACC_VALID: u64 = 0x100
 const VMS_ACC_X0: u64 = 0x108
+const VMS_LOCK: u64 = 0x1A8 // spin lock word (vmsvga.fi S_LOCK)
+const VMS_DROPN: u64 = 0x1B0 // notes seen (word vmsvgadrop swallows every 7th)
 
 fn vms_note(state: u64, x: u64, y: u64, w: u64, h: u64) {
     if kstate.get(state, VMS_OFF + VMS_READY) == 0 || w == 0 || h == 0 {
         return
     }
+    if kstate.mode_on(state, kstate.M_VMSVGADROP) {
+        // gate negative control: lose every 7th note (the rectangle way must then show wrong pictures)
+        kstate.add(state, VMS_OFF + VMS_DROPN, 1)
+        if kstate.get(state, VMS_OFF + VMS_DROPN) % 7 == 0 {
+            return
+        }
+    }
     let x1: u64 = x + w
     let y1: u64 = y + h
+    // irq_save only excludes this core: with several cores two notes (or a note and the driver's take) could lose a box.
     let fl: u64 = arch.irq_save()
+    let lk: *mut u64 = (state + VMS_OFF + VMS_LOCK) as *mut u64
+    var got: u64 = __atomic_swap(lk, 0, 1)
+    while got != 0 {
+        arch.pause()
+        got = __atomic_swap(lk, 0, 1)
+    }
     if kstate.get(state, VMS_OFF + VMS_ACC_VALID) == 0 {
         kstate.set(state, VMS_OFF + VMS_ACC_X0, x)
         kstate.set(state, VMS_OFF + VMS_ACC_X0 + 8, y)
@@ -2755,6 +2771,7 @@ fn vms_note(state: u64, x: u64, y: u64, w: u64, h: u64) {
             kstate.set(state, VMS_OFF + VMS_ACC_X0 + 24, y1)
         }
     }
+    __mmio_write64(lk, 0)
     arch.irq_restore(fl)
 }
 
