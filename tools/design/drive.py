@@ -1138,6 +1138,15 @@ def main():
                 f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
+        # `wische <n> <dx>,<dy>` -- n small relative pointer moves back to back (reverses every 20 steps so it
+        # stays on screen). The workload of the pointer lag gate (tools/vboxlag): many events, no pause.
+        elif b == "wische":
+            t = arg.split()
+            n = int(t[0])
+            sdx, sdy = (int(v) for v in t[1].split(","))
+            for k in range(n):
+                sg = 1 if (k // 20) % 2 == 0 else -1
+                f.cmd("mouse_move %d %d" % (sg * sdx, sg * sdy))
         # `fahreauf <name>` -- only HOVER over the middle of the reported
         # rectangle (relative moves from the last known point, no click, no
         # detour through the corner). Needed for hover pixel checks.
