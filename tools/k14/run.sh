@@ -332,7 +332,7 @@ hat "$H" "k14: root=1" "die Wurzel ist ein Eintrag der Einhaengetafel"
 hat "$H" "part: mbr=1" "die MBR-Tafel wurde gelesen"
 hat "$H" "fat: spc=1" "der FAT32-Kopf wurde angenommen"
 
-sagt "$H" mount_count 4 "vier Dateisysteme sind eingehaengt"
+sagt "$H" mount_count 5 "fuenf Dateisysteme sind eingehaengt (vier wie bisher plus /sys)"
 sagt "$H" root_type 1 "auf / liegt OFS"
 sagt "$H" proc_type 2 "auf /proc liegt procfs"
 sagt "$H" dev_type 3 "auf /dev liegt devfs"
@@ -356,7 +356,7 @@ sagt "$H" back_is_err 0 "und sie ist wieder da"
 # AB-003 (docs/ACTION-BUS.md 5.2): the `Origin:` line (kernel/sched/origin.fi) is part of status. Since the UNTERBAU round status also
 # carries Threads/Vm*/ctxt lines: 14 lines in total (control run on main 7b760f08 gave 14 as well).
 sagt "$H" status_lines 14 "/proc/<pid>/status has fourteen lines (incl. Origin)"
-sagt "$H" mounts_lines 4 "/proc/mounts hat eine Zeile je Einhaengung"
+sagt "$H" mounts_lines 5 "/proc/mounts hat eine Zeile je Einhaengung"
 sagt "$H" maps_grew 1 "/proc/<pid>/maps waechst mit einer neuen Abbildung"
 sagt "$H" cmdline_len 4 "/proc/<pid>/cmdline ist 'k14' plus Null"
 sagt "$H" null_read 0 "/dev/null liest null Oktette"
