@@ -1398,7 +1398,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/permissions.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
-/bin/nedit /apps/nedit.osp/start /apps/nedit.osp/INFO \
+/bin/nedit /apps/editor.osp/INFO \
 /bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
 /apps/trashbin.osp/symbol /etc/papierkorb.conf \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \

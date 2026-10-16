@@ -111,9 +111,9 @@ else
     bad "kernel/user/nedit.fi uebersetzt"; head -12 "$OUT/e-nedit"
 fi
 rm -f "$OUT/nedit.o"
-[ -f assets/apps/nedit.osp/INFO ] && ok "das Buendel assets/apps/nedit.osp ist da" \
-    || bad "das Buendel assets/apps/nedit.osp fehlt"
-if python3 tools/k15/icon.py assets/apps/nedit.osp/symbol.txt \
+[ -f assets/apps/editor.osp/INFO ] && ok "das Buendel assets/apps/editor.osp ist da" \
+    || bad "das Buendel assets/apps/editor.osp fehlt"
+if python3 tools/k15/icon.py assets/apps/editor.osp/symbol.txt \
         "$OUT/sym.bin" > /dev/null 2>&1; then
     ok "sein Symbol laesst sich in ein Bild wandeln"
 else
@@ -125,9 +125,12 @@ fi
 grep -qa '^import wlib$' kernel/user/edit.fi \
     && bad "kernel/user/edit.fi zieht auf einmal wlib herein -- das ist der TERMINAL-Editor" \
     || ok "kernel/user/edit.fi ist unveraendert ein Terminalprogramm (kein wlib)"
-grep -qa '/bin/edit' assets/apps/editor.osp/start.txt \
-    && ok "assets/apps/editor.osp zeigt weiter auf /bin/edit" \
-    || bad "assets/apps/editor.osp zeigt nicht mehr auf /bin/edit"
+grep -qa '^/bin/nedit' assets/apps/editor.osp/start.txt \
+    && ok "assets/apps/editor.osp (the merged Editor) starts /bin/nedit" \
+    || bad "assets/apps/editor.osp does not start /bin/nedit"
+[ -e assets/apps/nedit.osp ] \
+    && bad "assets/apps/nedit.osp is back: two Editor entries in the start menu" \
+    || ok "no second Editor+ bundle (merged into editor.osp)"
 
 echo "== 2. die Bibliothek malt nicht an fUi vorbei =="
 if bash tools/check-ui.sh > "$OUT/checkui.txt" 2>&1; then
