@@ -88,6 +88,9 @@ const S_HOSTRSZ: u64 = 0x168 // resizes that followed a host request
 const S_LASTUPD: u64 = 0x170 // ms of the last UPDATE sent
 const S_SAFETY: u64 = 0x178 // safety-net full UPDATEs (writers that bypass fb.vms_note, e.g. /dev/fb)
 const SAFETY_MS: u64 = 10000
+const SAFETY_FULL_MS: u64 = 1000 // full-update mode: whole picture again after 1 s without an UPDATE (cheap, repairs any host-side loss)
+const BUSY_SPIN: u64 = 20000 // bounded wait for BUSY == 0 after a full UPDATE
+const S_REDRAW: u64 = 0x180 // full-update mode: periodic whole-picture rewrites of VRAM
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
 // ---- PCI
@@ -371,6 +374,7 @@ fn fifo_setup(state: u64) -> bool {
     if sz < mn + 0x2800 {
         return false
     }
+    reg_w(state, R_CONFIG_DONE, 0) // order (vmwgfx): ENABLE, CONFIG_DONE=0, FIFO header, CONFIG_DONE=1
     wr32(f, F_MIN * 4, mn)
     wr32(f, F_MAX * 4, sz)
     wr32(f, F_NEXT * 4, mn)
@@ -389,6 +393,17 @@ fn sync_wait(state: u64) {
     reg_w(state, R_SYNC, 1)
     var k: u64 = 0
     while k < SPIN {
+        if reg_r(state, R_BUSY) == 0 {
+            return
+        }
+        k = k + 1
+    }
+}
+
+// After a command: wait (bounded) until the host is no longer busy, so it never falls behind with whole-picture UPDATEs.
+fn busy_wait(state: u64) {
+    var k: u64 = 0
+    while k < BUSY_SPIN {
         if reg_r(state, R_BUSY) == 0 {
             return
         }
@@ -541,14 +556,23 @@ fn present(state: u64) -> bool {
     var y0: u64 = 0
     var x1: u64 = 0
     var y1: u64 = 0
+    let rect_way: bool = kstate.mode_on(state, kstate.M_VMSVGARECT)
     if !acc_take(state, &x0, &y0, &x1, &y1) {
         // safety net: a writer that does not go through fb.vms_note (/dev/fb) would never be shown. After SAFETY_MS without any
         // UPDATE tell the host the whole picture once (cost at 1920x1080: 8 MB per 10 s, nothing while frames flow).
+        // Full-update way: every SAFETY_FULL_MS, and VRAM is rewritten completely from the back buffer first.
         let last: u64 = kstate.get(state, s(S_LASTUPD))
         let nm: u64 = now_ms(state)
-        if nm != 0 && last != 0 && nm > last + SAFETY_MS {
+        var lim: u64 = SAFETY_MS
+        if !rect_way {
+            lim = SAFETY_FULL_MS
+        }
+        if nm != 0 && last != 0 && nm > last + lim {
             kstate.add(state, s(S_SAFETY), 1)
-            return send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
+            if !rect_way {
+                redraw_all(state)
+            }
+            return send_full(state)
         }
         return true
     }
@@ -566,7 +590,26 @@ fn present(state: u64) -> bool {
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         verify_frame(state, x0, y0, x1, y1)
     }
+    if !rect_way {
+        return send_full(state)
+    }
     return send_update(state, x0, y0, x1 - x0, y1 - y0)
+}
+
+// Full-update way: rewrite VRAM completely from the back buffer (no diff, no shadow), then the caller sends the full UPDATE.
+// The box fb.flush notes again is dropped here, so an idle screen stays idle.
+fn redraw_all(state: u64) {
+    kstate.add(state, s(S_REDRAW), 1)
+    fb.dirty_all(state)
+    fb.flush(state)
+    kstate.set(state, s(S_ACC_VALID), 0)
+}
+
+// ONE UPDATE for the whole picture, then the SYNC/BUSY handshake.
+fn send_full(state: u64) -> bool {
+    let ok: bool = send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
+    busy_wait(state)
+    return ok
 }
 
 // ------------------------------------------------------------ cursor
@@ -897,6 +940,14 @@ fn init(state: u64) -> bool {
             return false
         }
     }
+    // the device may publish stride and scan-out offset a moment after ENABLE: read them again before they are used
+    settle()
+    var pt0: u64 = reg_r(state, R_BYTES_PER_LINE)
+    if pt0 < w * 4 {
+        pt0 = w * 4
+    }
+    kstate.set(state, s(S_PITCH), pt0)
+    kstate.set(state, s(S_FBOFF), reg_r(state, R_FB_OFFSET))
     let ph: u64 = kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF))
     let pt: u64 = kstate.get(state, s(S_PITCH))
     // fb.fi may point at the firmware LFB: a different address or stride -> map the VRAM the device scans out
@@ -910,10 +961,14 @@ fn init(state: u64) -> bool {
     }
     kstate.set(state, s(S_ACC_VALID), 0)
     kstate.set(state, s(S_READY), 1)
+    if !kstate.mode_on(state, kstate.M_VMSVGARECT) {
+        fb.nodiff_force(state) // full-update way: whole rectangles to VRAM, no shadow comparison
+    }
     fb.dirty_all(state)
     fb.flush(state)
     alloc_verify(state)
     let _u: bool = send_update(state, 0, 0, w, h)
+    busy_wait(state)
     kstate.set(state, s(S_ACC_VALID), 0)
     return true
 }

@@ -13,6 +13,9 @@
 #                  (RichCursor) with both opaque and transparent pixels. The screendump has no pointer (pixel equality in 2).
 #   5. OCTETS      60 frames with a 48x48 dirty rect: <= 64 KB per frame; 2 s idle: < 100 KB/s.
 #   6. VERIFY      kernel-side check (`vmsvga: verify bad=0 frames=N`, N > 0): nothing changed outside the sent rectangle.
+#   FULL WAY      default WITHOUT word `vmsvgarect` (since the VirtualBox failure of image 54db5a98): every frame = ONE whole-screen UPDATE,
+#                 SYNC/BUSY handshake, no diff flush; the same pixel/VNC checks run again (case `fullw`), maxframe >= a whole frame.
+#                 The cases above (main, ruhe) run with `vmsvgarect` = the rectangle path.
 #   Controls (each MUST be detected):
 #      novmsvga  -> no detection line, no panel lines (the driver is off, `-kernel` has no other framebuffer)
 #      wmruhe    -> whole screen dirty every frame: the 64 KB per frame check must fail
@@ -56,13 +59,15 @@ run_case() {
 }
 
 echo "== main: -vga vmware (driver on)"
-run_case main vmware "" full
+run_case main vmware "vmsvgarect" full
 echo "== reference: -vga std (Bochs VBE, same kernel, same picture)"
-run_case ref std "" full
+run_case ref std "vmsvgarect" full
+echo "== full-update way (default, no vmsvgarect): same pictures, whole-screen UPDATEs"
+run_case fullw vmware "" full
 echo "== control: novmsvga"
 run_case nov vmware "novmsvga" short
 echo "== control: wmruhe"
-run_case ruhe vmware "wmruhe" frames
+run_case ruhe vmware "vmsvgarect wmruhe" frames
 
 M=$T/main.txt
 chk "detected: id=0x90000002, hardware cursor reported" 'grep -aqE "^vmsvga: bdf=0x[0-9a-f]+ id=0x90000002 .* hc=1" "$M"'
@@ -93,6 +98,19 @@ chk "verify: bad=0 over frames > 10" \
 chk "4 resizes, 0 errors" 'l=$(grep -a "^vmsvga: bdf=" "$M" | tail -1); echo "$l" | grep -q " rsz=4 " && echo "$l" | grep -q " err=0"'
 chk "safety net: one full UPDATE after 10 s without any" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -qE " safe=[1-9]"'
 chk "no FIFO overflow (full=0)" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -q " full=0 "'
+
+# full-update way (default): QEMU cannot show the VirtualBox failure, but the pictures must stay right and the cost must be a full frame
+F=$T/fullw.txt
+chk "full way: detected, mode 800x600 at boot" 'grep -aqE "^vmsvga: bdf=.* mode=800x600 " "$F"'
+for i in 1 2 3 4; do
+    chk "full way: mode $i pixel-identical to the Bochs reference" '[ -s "$T/fullw.p$i.ppm" ] && cmp -s "$T/fullw.p$i.ppm" "$T/ref.p$i.ppm"'
+done
+for i in 0 1 2 3 4; do
+    chk "full way: VNC picture (UPDATE rects only) == screendump, mode $i" '[ "$(cat "$T/fullw.p$i.vncdiff" 2>/dev/null)" = "0" ]'
+done
+chk "full way: every frame is a whole-screen UPDATE (maxframe >= 800x600x4)" \
+    '[ "$(grep -a "^vmsvga: frames hw=" "$F" | tail -1 | sed -n "s/.* maxframe=\([0-9]*\).*/\1/p")" -ge 1920000 ]'
+chk "full way: no FIFO overflow (full=0), no resize error" 'l=$(grep -a "^vmsvga: bdf=" "$F" | tail -1); echo "$l" | grep -q " full=0 " && echo "$l" | grep -q " err=0"'
 
 # controls: the same measurements must FAIL
 chk "control novmsvga: no detection line" '! grep -aq "^vmsvga: bdf=" "$T/nov.txt"'
