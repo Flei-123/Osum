@@ -631,7 +631,13 @@ fi
 #                   nicht gibt. Das "kein Akku" auf einem Tischrechner
 #                   war keine Auskunft.
 #   height=40       28 war auf 3440x1440 ein Strich.
-printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
+# W3 polish run: THE WINDOWS 11 BAR IS THE DEFAULT OF THE IMAGE.
+#   height=48        Windows 11 height (buttons 40, symbols 24)
+#   align=center     pinned programs and windows centred
+#   clock_lines=2    time over date, NO seconds (clock_seconds=0), four digit year
+#   tray_*           chevron, language (keyboard + DEU/DE), network/sound/battery
+#                    as one capsule with icons only (battery keeps its percentage)
+printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\nclock_seconds=0\nclock_date=1\nclock_weekday=0\nclock_lines=2\nclock_year4=1\ntray_language=1\ntray_chevron=1\ntray_group=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
 # ROUND LIVE: on the public stick "Install OrientOS" is pinned first --
 # the one thing a live stick is for, visible without opening a menu.

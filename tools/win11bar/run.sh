@@ -25,9 +25,9 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 cat > "$T/win11.conf" <<'CONF'
-# taskbar.conf -- the Windows 11 layout (r384)
+# taskbar.conf -- the Windows 11 layout (r384; W3: 48 points high like Windows 11)
 edge=bottom
-height=40
+height=48
 width=104
 autohide=0
 ontop=1
@@ -57,10 +57,23 @@ grep -aq 'taskbar: field lang .* lines=2' "$W" && ok "the language field is ther
 grep -aq 'taskbar: text lang .* t=DEU' "$W" && grep -aq 'taskbar: text lang .* t=DE$' "$W" && ok "it says DEU over DE" || bad "wrong language text"
 grep -aq 'taskbar: text clock .* t=[0-9][0-9]:[0-9][0-9]$' "$W" && grep -aqE 'taskbar: text clock .* t=[0-9]{2}\.[0-9]{2}\.[0-9]{4}$' "$W" \
     && ok "clock: time over date, four digit year" || bad "clock text"
+# W3 polish run: 48 points high, 40 point buttons, the keyboard symbol before DEU/DE
+grep -aqE 'taskbar: geom .* h=48 ' "$W" && ok "the bar is 48 points high (Windows 11)" || bad "bar height: $(grep -a 'taskbar: geom ' "$W" | tail -1)"
+grep -aqE 'taskbar: pin explorer .* w=40 h=40 ' "$W" && ok "the buttons are 40x40 (Windows 11)" || bad "button size: $(grep -a 'taskbar: pin explorer ' "$W" | head -1)"
+grep -aqE 'taskbar: icon field=kbd ' "$W" && ok "the keyboard symbol stands in front of the language" || bad "no keyboard symbol"
+grep -aqE 'taskbar: text clock .* t=[0-9]{2}:[0-9]{2}:[0-9]{2}$' "$W" && bad "the clock shows seconds" || ok "no seconds in the clock"
+echo "== A2. the IMAGE's own taskbar.conf is the Windows 11 layout (tools/usbimg/build.sh)"
+IMGC=$(grep -a "printf '# taskbar.conf" tools/usbimg/build.sh | head -1)
+for k in 'height=48' 'align=center' 'clock_lines=2' 'clock_seconds=0' 'clock_year4=1' 'tray_language=1' 'tray_chevron=1' 'tray_group=1'; do
+    case "$IMGC" in *"$k"*) ok "image conf has $k" ;; *) bad "image conf lacks $k" ;; esac
+done
+case "$IMGC" in *'clock_seconds=1'*|*'clock_lines=1'*) bad "image conf still has the old one-line clock with seconds" ;; *) ok "image conf: no seconds, no one-line clock" ;; esac
 echo "== B. COUNTER-PROOF: the default conf"
 grep -aq 'taskbar: field lang' "$D" && bad "the default bar has a language field" || ok "no language field without tray_language=1"
 grep -aqE 'taskbar: text clock .* t=[0-9]{2}:[0-9]{2}$' "$D" && ok "the default clock is one line, time only" || bad "default clock changed"
 grep -aqE 'taskbar: text clock .* t=[0-9]{2}\.[0-9]{2}\.[0-9]{4}$' "$D" && bad "default bar shows a four digit year" || ok "no four digit year by default"
+grep -aq 'taskbar: icon field=kbd' "$D" && bad "the default bar has a keyboard symbol" || ok "no keyboard symbol without tray_language=1"
+grep -aqE 'taskbar: geom .* h=48 ' "$D" && bad "the default bar is 48 high" || ok "the default bar keeps its height (not 48)"
 echo "== C. the picture"
 if [ -s "$T/w/desktop.png" ]; then
     mkdir -p docs/shots/win11bar; cp "$T/w/desktop.png" docs/shots/win11bar/desktop.png

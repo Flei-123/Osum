@@ -84,9 +84,9 @@ act stop
 echo ==FERTIG==
 EOS
 cat > "$TMPD/taskbar.conf" <<'CONF'
-# taskbar.conf -- the Windows 11 layout (r387) for the scene test
+# taskbar.conf -- the Windows 11 layout (r387, 48 points since W3) for the scene test
 edge=bottom
-height=40
+height=48
 width=104
 autohide=0
 ontop=1

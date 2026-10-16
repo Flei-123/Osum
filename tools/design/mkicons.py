@@ -39,6 +39,7 @@ APPS = {
     "taskmgr":   ("activity",         "06b6d4", "0e7490"),
     "certus":    ("globe",            "6366f1", "4338ca"),
     "widgets":   ("layout-grid",      "a855f7", "7e22ce"),
+    "welcome":   ("smile",            "ec4899", "be185d"),
 }
 
 

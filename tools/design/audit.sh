@@ -129,6 +129,7 @@ for a in "$@"; do
         pins=*) pins=${a#*=} ;;
         battfake=*) battfake=${a#*=} ;;
         clock_seconds=*) clock_seconds=${a#*=} ;;
+        bar=*) bar=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         startstyle=*) startstyle=${a#*=} ;;
         shadow=*) shadow=${a#*=} ;;
@@ -223,6 +224,13 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 # SENKRECHTEN Leiste und die haengt an der Breite der Beschriftungen.
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
+# W3: `bar=win11` measures the bar the IMAGE ships (tools/usbimg/build.sh): 48 points,
+# centred, tray with chevron / language / capsule. Opt-in: gates that click the bar by
+# coordinates keep the left-aligned bar (the start button moves when the bar is centred).
+if [ "${bar:-}" = win11 ]; then
+    printf '# taskbar.conf\nedge=bottom\nheight=48\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\nhide_missing=1\nclock_year4=1\ntray_language=1\ntray_chevron=1\ntray_group=1\n' \
+        > "$OUT/taskbar.conf"
+fi
 # RUNDE MERGE-11: die Uhr wie in Justins Windows-Vorlage -- Uhrzeit
 # oben, Datum darunter. `clock_lines` KANN das seit Runde STARTKNOPF
 # (taskbar.fi, `clock_build`); es stand nur auf 1. Ohne Sekunden, weil

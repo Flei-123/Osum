@@ -7,5 +7,5 @@ cd "$(dirname "$0")/../.."
 OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT-build"' EXIT; fi
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
-bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=420 drehbuch="$(pwd)/tools/design/explorer.txt" > "$OUT.log" 2>&1
+bash tools/design/audit.sh "$OUT" accel=kvm bar=win11 uitrace=yes halt=420 drehbuch="$(pwd)/tools/design/explorer.txt" > "$OUT.log" 2>&1
 python3 tools/midline/check.py "$OUT"
