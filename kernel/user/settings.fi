@@ -80,6 +80,7 @@ import fuiscene
 import fuib
 import pw
 import pin
+import apprights.policy
 import nv
 import template
 // ROUND ACTION-BUS-3: the pages "System" and "App rights" and the lock
@@ -287,7 +288,9 @@ const R_MAUS: u64 = 15
 const R_ENERGIE: u64 = 16
 // ROUND MINT4 (E1): the page "Info" (hardware report + export), at the END.
 const R_INFO: u64 = 17
-const R_ANZ: u64 = 18
+const R_ANZ: u64 = 19
+// W-AR6B (r919): the page "Apps" (per app: counters, rights, force stop, uninstall), at the END.
+const R_APPS: u64 = 18
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -895,6 +898,33 @@ static mut k_in_bexp: [u8; 19] = "settings.info.bexp\0"
 static mut k_in_ok: [u8; 17] = "settings.info.ok\0"
 static mut k_in_fail: [u8; 19] = "settings.info.fail\0"
 static mut l_instat: [u8; 120] = [0 as u8; 120]
+// W-AR6B: message keys of the page Apps
+static mut k_ap_title: [u8; 20] = "settings.apps.title\0"
+static mut k_ap_note: [u8; 19] = "settings.apps.note\0"
+static mut k_ap_none: [u8; 19] = "settings.apps.none\0"
+static mut k_ap_ref: [u8; 18] = "settings.apps.ref\0"
+static mut k_ap_back: [u8; 19] = "settings.apps.back\0"
+static mut k_ap_lcpu: [u8; 19] = "settings.apps.lcpu\0"
+static mut k_ap_lnet: [u8; 19] = "settings.apps.lnet\0"
+static mut k_ap_lbat: [u8; 19] = "settings.apps.lbat\0"
+static mut k_ap_lwake: [u8; 20] = "settings.apps.lwake\0"
+static mut k_ap_lsent: [u8; 20] = "settings.apps.lsent\0"
+static mut k_ap_data0: [u8; 20] = "settings.apps.data0\0"
+static mut k_ap_data1: [u8; 20] = "settings.apps.data1\0"
+static mut k_ap_rights: [u8; 21] = "settings.apps.rights\0"
+static mut k_ap_nodecl: [u8; 21] = "settings.apps.nodecl\0"
+static mut k_ap_noman: [u8; 20] = "settings.apps.noman\0"
+static mut k_ap_noti: [u8; 19] = "settings.apps.noti\0"
+static mut k_ap_stop: [u8; 19] = "settings.apps.stop\0"
+static mut k_ap_uninst: [u8; 21] = "settings.apps.uninst\0"
+static mut k_ap_uninst2: [u8; 22] = "settings.apps.uninst2\0"
+static mut k_ap_clear: [u8; 20] = "settings.apps.clear\0"
+static mut k_ap_clearnote: [u8; 24] = "settings.apps.clearnote\0"
+static mut k_ap_energy: [u8; 21] = "settings.apps.energy\0"
+static mut k_ap_pause: [u8; 20] = "settings.apps.pause\0"
+static mut k_ap_ok: [u8; 17] = "settings.apps.ok\0"
+static mut k_ap_fail: [u8; 19] = "settings.apps.fail\0"
+static mut k_ap_nosave: [u8; 21] = "settings.apps.nosave\0"
 static mut k_pw_note: [u8; 20] = "settings.power.note\0"
 static mut k_pw_bat: [u8; 23] = "settings.power.battery\0"
 static mut k_pw_ac: [u8; 21] = "settings.power.mains\0"
@@ -4229,6 +4259,12 @@ fn konto_kennung(k: u64, aus: u64, max: u64) -> bool {
 
 // ROUND ACTION-BUS-3: the two bus pages read the broker when shown
 fn bus_page(r: u64) {
+    if r == R_APPS {
+        ap_sel = AP_NONE
+        ap_arm = 0
+        __mmio_write8((&l_apstat[0 as usize]) as u64 as *mut u8, 0 as u8)
+        ap_load()
+    }
     if r == R_ENERGIE {
         pw_load()
     }
@@ -4304,6 +4340,9 @@ fn bus_rects() {
         rect_say((&e6[0 as usize]) as u64, K_PW_YA)
         rect_say((&e7[0 as usize]) as u64, K_PW_PB)
         rect_say((&e8[0 as usize]) as u64, K_PW_PA)
+    }
+    if reiter == R_APPS {
+        ap_rects()
     }
     if reiter == R_INFO {
         var i1: [u8; 6] = "ibexp\0"
@@ -5846,7 +5885,7 @@ static mut ch_items: [u64; 200] = [0 as u64; 200] // its items (text, '\n' betwe
 static mut ch_buf: [u8; 4400] = [0 as u8; 4400] // the shown item of each
 static mut it_buf: [u8; 480] = [0 as u8; 480] // the items of the open popup
 static mut ch_pend: u64 = 0 // the choice whose popup is open
-static mut tab_buf: [u8; 720] = [0 as u8; 720] // the 18 tab names, 40 each
+static mut tab_buf: [u8; 760] = [0 as u8; 760] // the 19 tab names, 40 each
 static mut rep_due: u64 = 0 // the rectangles must be reported again
 static mut en_key: [u64; 24] = [0 as u64; 24]
 static mut en_buf: [u64; 24] = [0 as u64; 24]
@@ -7060,6 +7099,611 @@ fn info_size() -> u64 {
     return n
 }
 
+// ==========================================================================================================
+// R_APPS -- THE APP INFO PAGE (W-AR6B, r919). One row per app (counters), a click opens the detail view.
+//
+// Data and actions go through /bin/apprights (list / set / stop) and /bin/opk (remove) as child processes whose
+// stdout lands in a /tmp file (same pattern as info_export). The kernel table only accepts a change from an
+// UNLABELLED caller (sys.fi do_rights), not from a certain uid, and /etc/apprights.conf is written the way Settings
+// writes its other /etc/*.conf files -- so the smallest correct way is a plain child process of Settings, no new
+// settingsd area. If the file cannot be written, the grant still holds for this session and the page says so.
+// Only rights the manifest declared (ceiling = perm=) are switches; the rest is text. "Battery share" is the CPU
+// share among all apps: there is no per-app power meter and the label says so.
+// ==========================================================================================================
+const AP_MAX: u64 = 16
+const AP_NONE: u64 = 255
+const AP_CEIL_NONE: u64 = 8192 // `apprights list`: no manifest ceiling registered
+const AP_NRIGHTS: u64 = 13
+const AP_BIT_NOTIFY: u64 = 4
+const K_AP_LIST0: u64 = 400 // 400 .. 415: one button per app
+const K_AP_BACK: u64 = 416
+const K_AP_REF: u64 = 417
+const K_AP_RIGHT0: u64 = 420 // 420 .. 432: one switch per right (bit number)
+const K_AP_STOP: u64 = 440
+const K_AP_UNINST: u64 = 441
+const K_AP_CLEAR: u64 = 442
+const K_AP_ENERGY: u64 = 443
+const K_AP_PAUSE: u64 = 444
+
+static mut ap_sel: u64 = 255
+static mut ap_selname: [u8; 24] = [0 as u8; 24]
+static mut ap_arm: u64 = 0 // "Uninstall" was clicked once
+static mut ap_n: u64 = 0
+static mut ap_name: [u8; 384] = [0 as u8; 384] // 16 x 24
+static mut ap_mask: [u64; 16] = [0 as u64; 16]
+static mut ap_ceil: [u64; 16] = [0 as u64; 16]
+static mut ap_man: [u64; 16] = [0 as u64; 16] // 1 = the manifest ceiling is known
+static mut ap_cpu: [u64; 16] = [0 as u64; 16]
+static mut ap_wake: [u64; 16] = [0 as u64; 16]
+static mut ap_tx: [u64; 16] = [0 as u64; 16]
+static mut ap_rx: [u64; 16] = [0 as u64; 16]
+static mut ap_data: [u64; 16] = [0 as u64; 16]
+static mut ap_cpu_total: u64 = 0
+static mut ap_raw: [u8; 2048] = [0 as u8; 2048]
+static mut ap_line: [u8; 1536] = [0 as u8; 1536] // 16 x 96: the button texts of the list
+static mut ap_txt: [u8; 2048] = [0 as u8; 2048] // 8 x 256: the lines of the detail view
+static mut l_apstat: [u8; 160] = [0 as u8; 160]
+
+fn ap_name_ptr(k: u64) -> u64 {
+    return ((&ap_name[0 as usize]) as u64) + k * 24
+}
+
+// run `path` with argv (argc pointers); its stdout goes to /tmp/osum-apps.out; returns the exit code (254/255 = could not start)
+fn ap_run(path: u64, argv: u64, argc: u64) -> u64 {
+    var t_tmp: [u8; 5] = "/tmp\0"
+    var t_out: [u8; 19] = "/tmp/osum-apps.out\0"
+    let _md: u64 = ulib.sys(ulib.SYS_MKDIR, (&t_tmp[0 as usize]) as u64, 448, 0)
+    let _ul: u64 = ulib.sys(ulib.SYS_UNLINK, (&t_out[0 as usize]) as u64, 0, 0)
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    let afd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_out[0 as usize]) as u64, ulib.O_MAKE, 384)
+    if ulib.bad(afd) {
+        if !ulib.bad(s1) {
+            ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+        }
+        return 254
+    }
+    ulib.sys(ulib.SYS_DUP2, afd, 1, 0)
+    ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, path, argv, argc)
+    if !ulib.bad(s1) {
+        ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    }
+    if ulib.bad(pid) {
+        return 255
+    }
+    return ulib.wait_code(pid)
+}
+
+// the child's output into ap_raw; returns the length (0 = nothing)
+fn ap_read() -> u64 {
+    var t_out: [u8; 19] = "/tmp/osum-apps.out\0"
+    let base: u64 = (&ap_raw[0 as usize]) as u64
+    __mmio_write8(base as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_out[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var tot: u64 = 0
+    var go: bool = true
+    while go && tot < 2040 {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, base + tot, 2040 - tot)
+        if ulib.bad(n) || n == 0 {
+            go = false
+        } else {
+            tot = tot + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((base + tot) as *mut u8, 0 as u8)
+    return tot
+}
+
+// does ap_raw contain `pat` (zero-terminated)?
+fn ap_raw_has(pat: u64) -> bool {
+    let base: u64 = (&ap_raw[0 as usize]) as u64
+    let pl: u64 = ulib.length(pat)
+    var i: u64 = 0
+    while rb(base, i) != 0 {
+        var k: u64 = 0
+        while k < pl && rb(base, i + k) == rb(pat, k) {
+            k = k + 1
+        }
+        if k == pl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn ap_set_field(k: u64, f: u64, v: u64) {
+    if f == 0 {
+        ap_mask[(k) as usize] = v
+    } else if f == 1 {
+        if v >= AP_CEIL_NONE {
+            ap_ceil[(k) as usize] = 0
+            ap_man[(k) as usize] = 0
+        } else {
+            ap_ceil[(k) as usize] = v
+            ap_man[(k) as usize] = 1
+        }
+    } else if f == 2 {
+        ap_cpu[(k) as usize] = v
+    } else if f == 3 {
+        ap_wake[(k) as usize] = v
+    } else if f == 4 {
+        ap_tx[(k) as usize] = v
+    } else if f == 5 {
+        ap_rx[(k) as usize] = v
+    } else {
+        ap_data[(k) as usize] = v
+    }
+}
+
+// one line of `apprights list` after the word "app ": name mask ceil cpu wakeups tx rx data=N
+fn ap_parse_line(base: u64, start: u64, e: u64, k: u64) {
+    var p: u64 = start
+    var q: u64 = 0
+    while p < e && rb(base, p) != 32 {
+        if q < 19 {
+            ap_name[(k * 24 + q) as usize] = rb(base, p) as u8
+            q = q + 1
+        }
+        p = p + 1
+    }
+    ap_name[(k * 24 + q) as usize] = 0 as u8
+    var f: u64 = 0
+    while f < 7 && p < e {
+        while p < e && rb(base, p) == 32 {
+            p = p + 1
+        }
+        var v: u64 = 0
+        if rb(base, p) == 100 {
+            v = num_from(base + p + 5)
+        } else {
+            v = num_from(base + p)
+        }
+        ap_set_field(k, f, v)
+        while p < e && rb(base, p) != 32 {
+            p = p + 1
+        }
+        f = f + 1
+    }
+}
+
+fn ap_pct(k: u64) -> u64 {
+    if ap_cpu_total == 0 {
+        return 0
+    }
+    return ap_cpu[(k) as usize] * 100 / ap_cpu_total
+}
+
+// the button text of row k: name, CPU share, network bytes
+fn ap_fmt_line(k: u64) {
+    var s_sep: [u8; 4] = " - \0"
+    var s_pc: [u8; 2] = "%\0"
+    var s_sl: [u8; 2] = "/\0"
+    var s_sp: [u8; 2] = " \0"
+    let d: u64 = ((&ap_line[0 as usize]) as u64) + k * 96
+    var a: u64 = text_an(d, 0, ap_name_ptr(k))
+    a = text_an(d, a, (&s_sep[0 as usize]) as u64)
+    a = text_an(d, a, msg.get((&k_ap_lcpu[0 as usize]) as u64))
+    a = text_an(d, a, (&s_sp[0 as usize]) as u64)
+    a = num_at(d, a, ap_pct(k))
+    a = text_an(d, a, (&s_pc[0 as usize]) as u64)
+    a = text_an(d, a, (&s_sep[0 as usize]) as u64)
+    a = text_an(d, a, msg.get((&k_ap_lnet[0 as usize]) as u64))
+    a = text_an(d, a, (&s_sp[0 as usize]) as u64)
+    a = num_at(d, a, ap_tx[(k) as usize])
+    a = text_an(d, a, (&s_sl[0 as usize]) as u64)
+    a = num_at(d, a, ap_rx[(k) as usize])
+}
+
+// (re)read the table; keeps the selected app by name
+fn ap_load() {
+    var t_bin: [u8; 15] = "/bin/apprights\0"
+    var t_list: [u8; 5] = "list\0"
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[(0) as usize] = (&t_bin[0 as usize]) as u64
+    argv[(1) as usize] = (&t_list[0 as usize]) as u64
+    ap_n = 0
+    ap_cpu_total = 0
+    let _rc: u64 = ap_run((&t_bin[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+    let n: u64 = ap_read()
+    let base: u64 = (&ap_raw[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n && ap_n < AP_MAX {
+        var e: u64 = i
+        while e < n && rb(base, e) != 10 {
+            e = e + 1
+        }
+        if e > i + 4 && rb(base, i) == 97 && rb(base, i + 1) == 112 && rb(base, i + 2) == 112 && rb(base, i + 3) == 32 {
+            ap_parse_line(base, i + 4, e, ap_n)
+            ap_cpu_total = ap_cpu_total + ap_cpu[(ap_n) as usize]
+            ap_n = ap_n + 1
+        }
+        i = e + 1
+    }
+    var k: u64 = 0
+    while k < ap_n {
+        ap_fmt_line(k)
+        k = k + 1
+    }
+    if ap_sel != AP_NONE {
+        var found: u64 = AP_NONE
+        k = 0
+        while k < ap_n {
+            if ulib.streq(ap_name_ptr(k), (&ap_selname[0 as usize]) as u64) {
+                found = k
+            }
+            k = k + 1
+        }
+        ap_sel = found
+        if found == AP_NONE {
+            ap_arm = 0
+        }
+    }
+}
+
+// the lines of the detail view of app k
+fn ap_prep_detail(k: u64) {
+    var s_sp: [u8; 2] = " \0"
+    var s_pc: [u8; 2] = "%\0"
+    var s_sl: [u8; 4] = " / \0"
+    let b: u64 = (&ap_txt[0 as usize]) as u64
+    // 0 name
+    let _a0: u64 = text_an(b, 0, ap_name_ptr(k))
+    // 1 battery share (= CPU share)
+    var a: u64 = text_an(b + 256, 0, msg.get((&k_ap_lbat[0 as usize]) as u64))
+    a = text_an(b + 256, a, (&s_sp[0 as usize]) as u64)
+    a = num_at(b + 256, a, ap_pct(k))
+    a = text_an(b + 256, a, (&s_pc[0 as usize]) as u64)
+    // 2 wakeups
+    a = text_an(b + 512, 0, msg.get((&k_ap_lwake[0 as usize]) as u64))
+    a = text_an(b + 512, a, (&s_sp[0 as usize]) as u64)
+    a = num_at(b + 512, a, ap_wake[(k) as usize])
+    // 3 network
+    a = text_an(b + 768, 0, msg.get((&k_ap_lsent[0 as usize]) as u64))
+    a = text_an(b + 768, a, (&s_sp[0 as usize]) as u64)
+    a = num_at(b + 768, a, ap_tx[(k) as usize])
+    a = text_an(b + 768, a, (&s_sl[0 as usize]) as u64)
+    a = num_at(b + 768, a, ap_rx[(k) as usize])
+    // 4 data folder
+    if ap_data[(k) as usize] != 0 {
+        let _a4: u64 = text_an(b + 1024, 0, msg.get((&k_ap_data1[0 as usize]) as u64))
+    } else {
+        let _a4b: u64 = text_an(b + 1024, 0, msg.get((&k_ap_data0[0 as usize]) as u64))
+    }
+    // 5 not declared (text only); without a manifest: the one-line explanation
+    if ap_man[(k) as usize] == 0 {
+        let _a5: u64 = text_an(b + 1280, 0, msg.get((&k_ap_noman[0 as usize]) as u64))
+    } else {
+        a = text_an(b + 1280, 0, msg.get((&k_ap_nodecl[0 as usize]) as u64))
+        var bit: u64 = 0
+        while bit < AP_NRIGHTS {
+            if bit != AP_BIT_NOTIFY && (ap_ceil[(k) as usize] & (1 << bit)) == 0 {
+                a = text_an(b + 1280, a, (&s_sp[0 as usize]) as u64)
+                a = text_an(b + 1280, a, policy.name_of_bit(1 << bit))
+            }
+            bit = bit + 1
+        }
+    }
+}
+
+fn ap_toggle_state(k: u64, bit: u64) -> bool {
+    return (ap_mask[(k) as usize] & (1 << bit)) != 0
+}
+
+// page R_APPS
+fn page_apps(left: usize, right: usize) {
+    let _t1: usize = fuiscene.label(left, msg.get((&k_ap_title[0 as usize]) as u64))
+    let _t2: usize = fuiscene.label(left, msg.get((&k_ap_note[0 as usize]) as u64))
+    if ap_sel == AP_NONE || ap_sel >= ap_n {
+        if ap_n == 0 {
+            let _t3: usize = fuiscene.label(left, msg.get((&k_ap_none[0 as usize]) as u64))
+        }
+        var ki: u64 = 0
+        while ki < ap_n {
+            let nbl: usize = fuiscene.button(left, (((&ap_line[0 as usize]) as u64) + ki * 96), K_AP_LIST0 + ki)
+            fuiscene.set_size(nbl, 0, 28)
+            ki = ki + 1
+        }
+        let nr: usize = fuiscene.button(left, msg.get((&k_ap_ref[0 as usize]) as u64), K_AP_REF)
+        fuiscene.set_size(nr, 0, 28)
+        let _ts: usize = fuiscene.label(left, (&l_apstat[0 as usize]) as u64)
+        return
+    }
+    let k: u64 = ap_sel
+    ap_prep_detail(k)
+    let b: u64 = (&ap_txt[0 as usize]) as u64
+    let nb: usize = fuiscene.button(left, msg.get((&k_ap_back[0 as usize]) as u64), K_AP_BACK)
+    fuiscene.set_size(nb, 0, 28)
+    let _l0: usize = fuiscene.label(left, b)
+    let _l1: usize = fuiscene.label(left, b + 256)
+    let _l2: usize = fuiscene.label(left, b + 512)
+    let _l3: usize = fuiscene.label(left, b + 768)
+    let _l4: usize = fuiscene.label(left, b + 1024)
+    let _lr: usize = fuiscene.label(left, msg.get((&k_ap_rights[0 as usize]) as u64))
+    var bit: u64 = 0
+    while bit < AP_NRIGHTS {
+        if bit != AP_BIT_NOTIFY && (ap_ceil[(k) as usize] & (1 << bit)) != 0 {
+            let _sw: usize = fuiscene.toggle(left, policy.name_of_bit(1 << bit), K_AP_RIGHT0 + bit, ap_toggle_state(k, bit))
+        }
+        bit = bit + 1
+    }
+    let _l5: usize = fuiscene.label(left, b + 1280)
+    // right card: notifications = the right `notify`, the actions, the not yet possible switches (greyed out)
+    let nn: usize = fuiscene.toggle(right, msg.get((&k_ap_noti[0 as usize]) as u64), K_AP_RIGHT0 + AP_BIT_NOTIFY,
+        ap_toggle_state(k, AP_BIT_NOTIFY))
+    if (ap_ceil[(k) as usize] & (1 << AP_BIT_NOTIFY)) == 0 {
+        fuiscene.set_enabled(nn, false)
+    }
+    let ns: usize = fuiscene.button(right, msg.get((&k_ap_stop[0 as usize]) as u64), K_AP_STOP)
+    fuiscene.set_size(ns, 0, 28)
+    var u_key: u64 = 0
+    if ap_arm != 0 {
+        u_key = (&k_ap_uninst2[0 as usize]) as u64
+    } else {
+        u_key = (&k_ap_uninst[0 as usize]) as u64
+    }
+    let nu: usize = fuiscene.button(right, msg.get(u_key), K_AP_UNINST)
+    fuiscene.set_size(nu, 0, 28)
+    let nc: usize = fuiscene.button(right, msg.get((&k_ap_clear[0 as usize]) as u64), K_AP_CLEAR)
+    fuiscene.set_size(nc, 0, 28)
+    // there is no clear-data action before AR-3 (no recursive remove, no /data/<app> yet): always greyed out
+    fuiscene.set_enabled(nc, false)
+    let _lc: usize = fuiscene.label(right, msg.get((&k_ap_clearnote[0 as usize]) as u64))
+    let ne: usize = fuiscene.button(right, msg.get((&k_ap_energy[0 as usize]) as u64), K_AP_ENERGY)
+    fuiscene.set_size(ne, 0, 28)
+    fuiscene.set_enabled(ne, false)
+    let np: usize = fuiscene.button(right, msg.get((&k_ap_pause[0 as usize]) as u64), K_AP_PAUSE)
+    fuiscene.set_size(np, 0, 28)
+    fuiscene.set_enabled(np, false)
+    let _ts2: usize = fuiscene.label(right, (&l_apstat[0 as usize]) as u64)
+}
+
+fn ap_status(key: u64) {
+    let _s: u64 = text_an((&l_apstat[0 as usize]) as u64, 0, msg.get(key))
+}
+
+fn ap_redraw() {
+    fuiscene.refresh()
+    rep_due = 1
+}
+
+// `apprights set <app> <rights of newmask>`; true = the kernel table now holds newmask
+fn ap_set(k: u64, newmask: u64) {
+    var s_set: [u8; 4] = "set\0"
+    var t_bin: [u8; 15] = "/bin/apprights\0"
+    var s_l1: [u8; 20] = "settings: apps set \0"
+    var s_l2: [u8; 7] = " mask=\0"
+    var s_l3: [u8; 5] = " rc=\0"
+    var s_l4: [u8; 8] = " saved=\0"
+    var argv: [u64; 20] = [0 as u64; 20]
+    argv[(0) as usize] = (&t_bin[0 as usize]) as u64
+    argv[(1) as usize] = (&s_set[0 as usize]) as u64
+    argv[(2) as usize] = ap_name_ptr(k)
+    var argc: u64 = 3
+    var bit: u64 = 0
+    while bit < AP_NRIGHTS {
+        if (newmask & (1 << bit)) != 0 && argc < 19 {
+            argv[(argc) as usize] = policy.name_of_bit(1 << bit)
+            argc = argc + 1
+        }
+        bit = bit + 1
+    }
+    let rc: u64 = ap_run((&t_bin[0 as usize]) as u64, (&argv[0 as usize]) as u64, argc)
+    let _n: u64 = ap_read()
+    var saved: u64 = 1
+    var s_ns: [u8; 10] = "not saved\0"
+    if ap_raw_has((&s_ns[0 as usize]) as u64) {
+        saved = 0
+    }
+    var name: [u8; 24] = [0 as u8; 24]
+    let _c: u64 = text_an((&name[0 as usize]) as u64, 0, ap_name_ptr(k))
+    ap_load()
+    var now: u64 = 0
+    var j: u64 = 0
+    while j < ap_n {
+        if ulib.streq(ap_name_ptr(j), (&name[0 as usize]) as u64) {
+            now = ap_mask[(j) as usize]
+        }
+        j = j + 1
+    }
+    ulib.say((&s_l1[0 as usize]) as u64)
+    ulib.say((&name[0 as usize]) as u64)
+    ulib.say((&s_l2[0 as usize]) as u64)
+    ulib.sayn(now)
+    ulib.say((&s_l3[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.say((&s_l4[0 as usize]) as u64)
+    ulib.sayn(saved)
+    ulib.nl()
+    if now != newmask {
+        ap_status((&k_ap_fail[0 as usize]) as u64)
+    } else if saved == 0 {
+        ap_status((&k_ap_nosave[0 as usize]) as u64)
+    } else {
+        ap_status((&k_ap_ok[0 as usize]) as u64)
+    }
+}
+
+// force stop: every task labelled app:<name> gets killed
+fn ap_stop(k: u64) {
+    var s_stop: [u8; 5] = "stop\0"
+    var t_bin: [u8; 15] = "/bin/apprights\0"
+    var s_l1: [u8; 21] = "settings: apps stop \0"
+    var s_l2: [u8; 5] = " rc=\0"
+    var s_l3: [u8; 9] = " killed=\0"
+    var s_w: [u8; 16] = "apprights: stop\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+    argv[(0) as usize] = (&t_bin[0 as usize]) as u64
+    argv[(1) as usize] = (&s_stop[0 as usize]) as u64
+    argv[(2) as usize] = ap_name_ptr(k)
+    let rc: u64 = ap_run((&t_bin[0 as usize]) as u64, (&argv[0 as usize]) as u64, 3)
+    let n: u64 = ap_read()
+    var killed: u64 = 0
+    if n > 16 {
+        killed = num_from((&ap_raw[0 as usize]) as u64 + 16)
+    }
+    ulib.say((&s_l1[0 as usize]) as u64)
+    ulib.say(ap_name_ptr(k))
+    ulib.say((&s_l2[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.say((&s_l3[0 as usize]) as u64)
+    ulib.sayn(killed)
+    ulib.nl()
+    if rc == 0 {
+        ap_status((&k_ap_ok[0 as usize]) as u64)
+    } else {
+        ap_status((&k_ap_fail[0 as usize]) as u64)
+    }
+    ap_load()
+}
+
+// uninstall: `opk remove <app>` (it forgets the grants itself)
+fn ap_uninstall(k: u64) {
+    var s_rm: [u8; 7] = "remove\0"
+    var t_bin: [u8; 9] = "/bin/opk\0"
+    var s_l1: [u8; 26] = "settings: apps uninstall \0"
+    var s_l2: [u8; 5] = " rc=\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+    argv[(0) as usize] = (&t_bin[0 as usize]) as u64
+    argv[(1) as usize] = (&s_rm[0 as usize]) as u64
+    argv[(2) as usize] = ap_name_ptr(k)
+    let rc: u64 = ap_run((&t_bin[0 as usize]) as u64, (&argv[0 as usize]) as u64, 3)
+    ulib.say((&s_l1[0 as usize]) as u64)
+    ulib.say(ap_name_ptr(k))
+    ulib.say((&s_l2[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+    ap_sel = AP_NONE
+    ap_arm = 0
+    ap_load()
+    if rc == 0 {
+        ap_status((&k_ap_ok[0 as usize]) as u64)
+    } else {
+        ap_status((&k_ap_fail[0 as usize]) as u64)
+    }
+}
+
+fn ap_click(id: u64) {
+    var s_op: [u8; 21] = "settings: apps open \0"
+    __mmio_write8((&l_apstat[0 as usize]) as u64 as *mut u8, 0 as u8)
+    if id >= K_AP_LIST0 && id < K_AP_LIST0 + AP_MAX {
+        let pk: u64 = id - K_AP_LIST0
+        if pk < ap_n {
+            ap_sel = pk
+            ap_arm = 0
+            let _c: u64 = text_an((&ap_selname[0 as usize]) as u64, 0, ap_name_ptr(pk))
+            ulib.say((&s_op[0 as usize]) as u64)
+            ulib.say(ap_name_ptr(pk))
+            ulib.nl()
+        }
+    } else if id == K_AP_BACK {
+        ap_sel = AP_NONE
+        ap_arm = 0
+        ap_load()
+    } else if id == K_AP_REF {
+        ap_load()
+    } else if ap_sel != AP_NONE && ap_sel < ap_n {
+        let k: u64 = ap_sel
+        if id >= K_AP_RIGHT0 && id < K_AP_RIGHT0 + AP_NRIGHTS {
+            let bit: u64 = id - K_AP_RIGHT0
+            if (ap_ceil[(k) as usize] & (1 << bit)) == 0 {
+                // above the ceiling: refused here (the kernel would refuse it too)
+                var s_rf: [u8; 24] = "settings: apps refused \0"
+                ulib.say((&s_rf[0 as usize]) as u64)
+                ulib.say(ap_name_ptr(k))
+                ulib.nl()
+                ap_status((&k_ap_fail[0 as usize]) as u64)
+            } else {
+                ap_set(k, ap_mask[(k) as usize] ^ (1 << bit))
+            }
+            ap_arm = 0
+        } else if id == K_AP_STOP {
+            ap_arm = 0
+            ap_stop(k)
+        } else if id == K_AP_UNINST {
+            if ap_arm == 0 {
+                ap_arm = 1
+            } else {
+                ap_uninstall(k)
+            }
+        }
+        // K_AP_CLEAR / K_AP_ENERGY / K_AP_PAUSE: greyed out, nothing to do
+    }
+    ap_redraw()
+}
+
+// the rectangles and report lines for the acceptance runs (tools/appinfo)
+fn ap_rects() {
+    var s_ls: [u8; 23] = "settings: apps list n=\0"
+    var s_rw: [u8; 20] = "settings: apps row \0"
+    var s_m: [u8; 7] = " mask=\0"
+    var s_c: [u8; 7] = " ceil=\0"
+    var s_p: [u8; 6] = " cpu=\0"
+    var s_d: [u8; 23] = "settings: apps detail \0"
+    var s_da: [u8; 7] = " data=\0"
+    var s_ar: [u8; 6] = " arm=\0"
+    if ap_sel == AP_NONE || ap_sel >= ap_n {
+        ulib.say((&s_ls[0 as usize]) as u64)
+        ulib.sayn(ap_n)
+        ulib.nl()
+        var ri: u64 = 0
+        while ri < ap_n {
+            var nm: [u8; 5] = "apl?\0"
+            nm[(3) as usize] = (97 + ri) as u8
+            rect_say((&nm[0 as usize]) as u64, K_AP_LIST0 + ri)
+            ulib.say((&s_rw[0 as usize]) as u64)
+            ulib.say(ap_name_ptr(ri))
+            ulib.say((&s_m[0 as usize]) as u64)
+            ulib.sayn(ap_mask[(ri) as usize])
+            ulib.say((&s_c[0 as usize]) as u64)
+            ulib.sayn(ap_ceil[(ri) as usize])
+            ulib.say((&s_p[0 as usize]) as u64)
+            ulib.sayn(ap_cpu[(ri) as usize])
+            ulib.nl()
+            ri = ri + 1
+        }
+        var n1: [u8; 5] = "apfr\0"
+        rect_say((&n1[0 as usize]) as u64, K_AP_REF)
+        return
+    }
+    let k: u64 = ap_sel
+    ulib.say((&s_d[0 as usize]) as u64)
+    ulib.say(ap_name_ptr(k))
+    ulib.say((&s_m[0 as usize]) as u64)
+    ulib.sayn(ap_mask[(k) as usize])
+    ulib.say((&s_c[0 as usize]) as u64)
+    ulib.sayn(ap_ceil[(k) as usize])
+    ulib.say((&s_da[0 as usize]) as u64)
+    ulib.sayn(ap_data[(k) as usize])
+    ulib.say((&s_ar[0 as usize]) as u64)
+    ulib.sayn(ap_arm)
+    ulib.nl()
+    var bit: u64 = 0
+    while bit < AP_NRIGHTS {
+        var nr: [u8; 5] = "apr?\0"
+        nr[(3) as usize] = (97 + bit) as u8
+        rect_say((&nr[0 as usize]) as u64, K_AP_RIGHT0 + bit)
+        bit = bit + 1
+    }
+    var n2: [u8; 5] = "apbk\0"
+    var n3: [u8; 5] = "apsp\0"
+    var n4: [u8; 5] = "apun\0"
+    var n5: [u8; 5] = "apcl\0"
+    var n6: [u8; 5] = "apen\0"
+    var n7: [u8; 5] = "appa\0"
+    rect_say((&n2[0 as usize]) as u64, K_AP_BACK)
+    rect_say((&n3[0 as usize]) as u64, K_AP_STOP)
+    rect_say((&n4[0 as usize]) as u64, K_AP_UNINST)
+    rect_say((&n5[0 as usize]) as u64, K_AP_CLEAR)
+    rect_say((&n6[0 as usize]) as u64, K_AP_ENERGY)
+    rect_say((&n7[0 as usize]) as u64, K_AP_PAUSE)
+}
+
 // page R_INFO
 fn page_info(left: usize, right: usize) {
     let _n_in1: usize = fuiscene.label(left, msg.get((&k_in_title[0 as usize]) as u64))
@@ -7379,7 +8023,7 @@ static mut kwkey: [u8; 16] = "settings.kw\0\0\0\0\0"
 static mut e_srch: [u8; 48] = [0 as u8; 48]
 static mut srch_prev: [u8; 48] = [0 as u8; 48]
 static mut srch_word: [u8; 48] = [0 as u8; 48]
-static mut nav_vis: [u64; 18] = [0 as u64; 18]
+static mut nav_vis: [u64; 19] = [0 as u64; 19]
 static mut nav_n: u64 = 0
 static mut cat_buf: [u8; 320] = [0 as u8; 320]
 static mut seg_buf: [u8; 120] = [0 as u8; 120]
@@ -7494,7 +8138,7 @@ fn shell_texts() {
 // which category a page lives in (0 System, 1 Anzeige, 2 Netzwerk, 3 Konten,
 // 4 Personalisierung, 5 Zeit & Sprache, 6 Update, 7 Info)
 fn cat_of(p: u64) -> u64 {
-    if p == R_SYSTEM || p == R_BRUECKE || p == R_MAUS || p == R_ENERGIE {
+    if p == R_SYSTEM || p == R_BRUECKE || p == R_MAUS || p == R_ENERGIE || p == R_APPS {
         return 0
     } else if p == R_SCREEN {
         return 1
@@ -7577,7 +8221,7 @@ fn nav_compute() {
 // the visible page after / before `cur` in sidebar order (categories, then
 // page numbers); `cur` itself when there is none
 fn nav_step(cur: u64, down: bool) -> u64 {
-    var order: [u64; 17] = [0 as u64; 17]
+    var order: [u64; 24] = [0 as u64; 24]
     var n: u64 = 0
     var c: u64 = 0
     while c < NCAT {
@@ -7753,11 +8397,52 @@ fn tab_names() {
 
 fn two_cols(r: u64) -> bool {
     return r == R_DARST || r == R_VORL || r == R_SCREEN || r == R_NETZ
-        || r == R_KONTO
+        || r == R_KONTO || (r == R_APPS && ap_sel != AP_NONE)
 }
 
 // The whole window: sidebar (search + pages by category) and the page in
 // glass-header + cards, the status line below.
+// the entry height at which the sidebar (search field, category heads, `nav_n` entries) still fits the window
+fn side_fit(item_h: u64, compact: bool) -> u64 {
+    var heads: u64 = 0
+    var c: u64 = 0
+    while c < NCAT {
+        var p: u64 = 0
+        var any: bool = false
+        while p < R_ANZ {
+            if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
+                any = true
+            }
+            p = p + 1
+        }
+        if any {
+            heads = heads + 1
+        }
+        c = c + 1
+    }
+    if nav_n == 0 {
+        return item_h
+    }
+    var gap: u64 = 2
+    if compact {
+        gap = 0
+    }
+    // search field 30 + space 6 + status line and margins ~70 + about 20 per category head
+    let used: u64 = 106 + heads * 20
+    let h: u64 = fuiscene.height()
+    if h <= used + nav_n * 18 {
+        return 18
+    }
+    let fit: u64 = (h - used) / nav_n - gap
+    if fit < item_h {
+        if fit < 18 {
+            return 18
+        }
+        return fit
+    }
+    return item_h
+}
+
 fn build() {
     let col: usize = fuiscene.root()
     tab_names()
@@ -7783,6 +8468,8 @@ fn build() {
     } else {
         fuiscene.set_gap(side, 2)
     }
+    // W-AR6B: 19 pages. The sidebar has no scrolling, so the entries shrink until the whole list ends inside the window
+    item_h = side_fit(item_h, compact)
     let n_sr: usize = fuiscene.entry(side, K_SRCH, 0, (&e_srch[0 as usize]) as u64)
     fuiscene.set_size(n_sr, 0, 30)
     fuiscene.entry_hint(K_SRCH, msg.get((&k_settings_search[0 as usize]) as u64))
@@ -7864,6 +8551,8 @@ fn build() {
             page_maus(cl, cr)
         } else if reiter == R_ENERGIE {
             page_energie(cl, cr)
+        } else if reiter == R_APPS {
+            page_apps(cl, cr)
         } else if reiter == R_INFO {
             page_info(cl, cr)
         } else if reiter == R_PROTO {
@@ -8969,6 +9658,8 @@ fn u_start(args: u64) -> u64 {
                     }
                     upd_show()
                     // (described again)
+                } else if reiter == R_APPS && id >= K_AP_LIST0 && id <= K_AP_PAUSE {
+                    ap_click(id)
                 } else if id == K_IN_BEXP {
                     let rc_in: u64 = info_export()
                     var s_ie: [u8; 26] = "settings: info export rc=\0"
