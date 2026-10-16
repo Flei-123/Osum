@@ -47,6 +47,7 @@ class Vnc:
         encs = [0, -239, -223]
         self.s.sendall(struct.pack(">BxH", 2, len(encs)) + b"".join(struct.pack(">i", e) for e in encs))
         self.request(0)
+        self.s.settimeout(None)  # an idle screen is silent for a long time: a read timeout must not kill the client
         self.t = threading.Thread(target=self.loop, daemon=True)
         self.t.start()
 
