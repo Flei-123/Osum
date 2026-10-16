@@ -207,6 +207,7 @@ BEREICHE = [
     # RUNDE HOTPLUG -- die Tafel der Wechseldatentraeger (wechsel.fi).
     ("WECHSEL",    "kstate.fi", "WECHSEL_OFF",    "WECHSEL_MAX"),
     ("VGPU",       "kstate.fi", "VGPU_OFF",       "VGPU_MAX"),
+    ("VMSVGA",     "kstate.fi", "VMSVGA_OFF",     "VMSVGA_MAX"),
     # ---- Runde WAYLAND: der lokale Socket und der geteilte Speicher ----
     ("USOCK",      "unixsock.fi", "USOCK_OFF",   "USOCK_MAX * USOCK_BYTES"),
     ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),

@@ -57,6 +57,7 @@ import sched.signal
 import ui.tile
 import ui.wmplug
 import drv.gpu.vgpu
+import drv.gpu.vmsvga
 import gfx.gfx
 import sched.time
 import arch.x86_64.trap
@@ -361,11 +362,20 @@ fn graphics(state: u64, mbi: u64) {
     // bestimmt der LADER die Aufloesung, und ein Puffer, der fuer 800x600
     // gerechnet wurde, wird bei 1920x1080 stillschweigend verworfen --
     // gemessen als "back=none" in JEDEM Start ueber Limine.
+    // r-vmsvga, Weg 3: no loader framebuffer (qemu -kernel -vga vmware) -> VMSVGA sets the mode itself and hands fb.init a
+    // synthetic multiboot info. Skipped with `novmsvga` or when the loader gave a framebuffer.
+    var mbi_use: u64 = mbi
+    if mbi == 0 || (kstate.get32(mbi) & 0x1000) == 0 {
+        let m3: u64 = vmsvga.boot_mbi(state, w, h)
+        if m3 != 0 {
+            mbi_use = m3
+        }
+    }
     var back: u64 = 0
     var back_bytes: u64 = 0
     var shadow: u64 = 0
     if !fb.want(state, fb.M_NODBL) {
-        var noetig: u64 = fb.need_bytes(mbi, w, h)
+        var noetig: u64 = fb.need_bytes(mbi_use, w, h)
         if noetig == 0 {
             noetig = w * h * 4
         }
@@ -377,7 +387,7 @@ fn graphics(state: u64, mbi: u64) {
             shadow = mem.frame_run(state, rahmen)
         }
     }
-    if !fb.init(state, mbi, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
+    if !fb.init(state, mbi_use, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
         serial.puts((&s_none[0]) as u64)
         serial.nl()
         return
@@ -417,7 +427,12 @@ fn graphics(state: u64, mbi: u64) {
             fb.set_vgpu(state, true)
         }
     }
+    // r-vmsvga: virtio-gpu > VMSVGA > Bochs VBE > firmware framebuffer. Counter-proof word `novmsvga`.
+    if !fb.on_vgpu(state) && !kstate.mode_on(state, kstate.M_NOVMSVGA) {
+        let _v: bool = vmsvga.init(state)
+    }
     vgpu.say(state)
+    vmsvga.say(state)
 
     shot.init(state)
 

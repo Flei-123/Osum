@@ -1,0 +1,859 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/gpu/vmsvga.fi -- VMware SVGA II driver ("VMSVGA", PCI 15ad:0405).
+//
+// WHY: VirtualBox 7 uses this device as its default graphics controller. Without guest additions the
+// firmware framebuffer (Bochs VBE style) has no update rectangles, no hardware cursor and no resolution change.
+// This driver gives all three, on top of the same back buffer / framebuffer code in `fb.fi`.
+//
+// HOW (docs/VMSVGA.md has the register tables):
+//   1. probe      find 15ad:0405, enable IO + MEM, negotiate ID 0x90000002, read caps / VRAM size.
+//   2. set_mode   WIDTH / HEIGHT / BPP=32 / ENABLE; BYTES_PER_LINE and FB_OFFSET come back from the device.
+//   3. FIFO       BAR2: header {MIN, MAX, NEXT_CMD, STOP}, then CONFIG_DONE = 1.
+//   4. present    the copy into VRAM stays `fb.flush*` (VRAM is device memory); the copy sites note the box they
+//                 really wrote (`fb.vms_note`), and ONE `UPDATE {x,y,w,h}` per frame tells the host about it.
+//   5. cursor     DEFINE_ALPHA_CURSOR (cap ALPHA_CURSOR) or DEFINE_CURSOR (1 bit and-mask + 32 bit xor image),
+//                 position through CURSOR_X/Y/ON registers or, with FIFO cap CURSOR_BYPASS_3, through the FIFO header.
+//
+// Only QEMU 7.2 (`-vga vmware`) was measured. Everything about VirtualBox is from the documented device model.
+
+import lib.kstate
+import bus.pci
+import serial
+import gfx.fb
+import gfx.cursor
+import mm.mem
+import arch.x86_64.apic
+import arch.arch
+
+export {
+    probe, boot_mbi, init, bereit, present, say, shut_down,
+    set_mode, resize, host_pending, resizes, resize_errors,
+    cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
+    cursor_defs, cursor_moves, cursor_fehler,
+    updates, update_octets, verify_bad, width, height, fifo_full,
+    VMSVGA_OFF, VMSVGA_MAX
+}
+
+// ---- state page (a mirror of kstate.fi VMSVGA_OFF; memmap.py checks the real one)
+const VMSVGA_OFF: u64 = 0x170000
+const VMSVGA_MAX: u64 = 0x1000
+
+const S_UP: u64 = 0x00 // 1 = probe succeeded
+const S_READY: u64 = 0x08 // 1 = the driver carries the picture (fb.fi reads this word: keep the offset)
+const S_BDF: u64 = 0x10
+const S_IDX: u64 = 0x18
+const S_IO: u64 = 0x20 // I/O port base (BAR0)
+const S_FIFO: u64 = 0x28 // virtual address of the FIFO (BAR2)
+const S_FIFOSZ: u64 = 0x30
+const S_VRAM: u64 = 0x38 // physical address of VRAM (BAR1 / FB_START)
+const S_VRAMSZ: u64 = 0x40
+const S_CAPS: u64 = 0x48
+const S_W: u64 = 0x50
+const S_H: u64 = 0x58
+const S_PITCH: u64 = 0x60
+const S_UPDATES: u64 = 0x68
+const S_UPOKT: u64 = 0x70 // pixels * 4 the host was told about
+const S_FULL: u64 = 0x78 // FIFO waits that ran out
+const S_CURON: u64 = 0x80
+const S_CURFORM: u64 = 0x88
+const S_CURGR: u64 = 0x90
+const S_CURDEF: u64 = 0x98
+const S_CURMOVE: u64 = 0xA0
+const S_CURX: u64 = 0xA8
+const S_CURY: u64 = 0xB0
+const S_CURERR: u64 = 0xB8
+const S_FCAPS: u64 = 0xC0 // FIFO capabilities word (0 without CAP_EXTENDED_FIFO)
+const S_ID: u64 = 0xC8
+const S_BAD: u64 = 0xD0 // verify: pixels that changed outside the sent rectangle
+const S_RESIZES: u64 = 0xD8
+const S_RSZERR: u64 = 0xE0
+const S_MAXW: u64 = 0xE8
+const S_MAXH: u64 = 0xF0
+const S_WNEXT: u64 = 0xF8 // write cursor inside the FIFO while a command is built
+const S_ACC_VALID: u64 = 0x100 // dirty box accumulated by fb.vms_note (fb.fi mirrors these offsets)
+const S_ACC_X0: u64 = 0x108
+const S_ACC_Y0: u64 = 0x110
+const S_ACC_X1: u64 = 0x118
+const S_ACC_Y1: u64 = 0x120
+const S_PRES: u64 = 0x128 // verify: copy of what the host was told (physical = virtual address)
+const S_PRESSZ: u64 = 0x130
+const S_VERIFYN: u64 = 0x138 // verify: frames compared
+const S_FBOFF: u64 = 0x140 // FB_OFFSET register
+const S_SEEN: u64 = 0x148 // last host-requested size seen (w << 16 | h)
+const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
+
+// ---- PCI
+const VENDOR_VMWARE: u64 = 0x15AD
+const DEVICE_SVGA2: u64 = 0x0405
+const ID_2: u64 = 0x90000002
+const CFG_COMMAND: u64 = 4
+
+// ---- registers
+const R_ID: u64 = 0
+const R_ENABLE: u64 = 1
+const R_WIDTH: u64 = 2
+const R_HEIGHT: u64 = 3
+const R_MAX_W: u64 = 4
+const R_MAX_H: u64 = 5
+const R_BPP: u64 = 7
+const R_BYTES_PER_LINE: u64 = 12
+const R_FB_START: u64 = 13
+const R_FB_OFFSET: u64 = 14
+const R_VRAM_SIZE: u64 = 15
+const R_FB_SIZE: u64 = 16
+const R_CAPS: u64 = 17
+const R_MEM_SIZE: u64 = 19
+const R_CONFIG_DONE: u64 = 20
+const R_SYNC: u64 = 21
+const R_BUSY: u64 = 22
+const R_GUEST_ID: u64 = 23
+const R_CURSOR_ID: u64 = 24
+const R_CURSOR_X: u64 = 25
+const R_CURSOR_Y: u64 = 26
+const R_CURSOR_ON: u64 = 27
+const R_MEM_REGS: u64 = 30
+
+// ---- capabilities
+const CAP_RECT_COPY: u64 = 0x2
+const CAP_CURSOR: u64 = 0x20
+const CAP_CURSOR_BYPASS: u64 = 0x40
+const CAP_ALPHA_CURSOR: u64 = 0x200
+const CAP_EXTENDED_FIFO: u64 = 0x8000
+
+const FC_CURSOR_BYPASS_3: u64 = 0x10
+
+// ---- FIFO header words (index in u32 words)
+const F_MIN: u64 = 0
+const F_MAX: u64 = 1
+const F_NEXT: u64 = 2
+const F_STOP: u64 = 3
+const F_CAPS: u64 = 4
+const F_CURSOR_ON: u64 = 9
+const F_CURSOR_X: u64 = 10
+const F_CURSOR_Y: u64 = 11
+const F_CURSOR_COUNT: u64 = 12
+
+const CMD_UPDATE: u64 = 1
+const CMD_DEFINE_CURSOR: u64 = 19
+const CMD_DEFINE_ALPHA_CURSOR: u64 = 22
+
+const CUR_W: u64 = 64
+const FIFO_CAP: u64 = 0x10000 // use at most 64 KiB of the FIFO (QEMU has exactly that)
+const SPIN: u64 = 2000000
+
+fn s(off: u64) -> u64 {
+    return VMSVGA_OFF + off
+}
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+fn wr32(b: u64, off: u64, v: u64) {
+    __mmio_write32((b + off) as *mut u32, v as u32)
+}
+
+fn bereit(state: u64) -> bool {
+    return kstate.get(state, s(S_READY)) != 0
+}
+
+fn width(state: u64) -> u64 { return kstate.get(state, s(S_W)) }
+fn height(state: u64) -> u64 { return kstate.get(state, s(S_H)) }
+fn updates(state: u64) -> u64 { return kstate.get(state, s(S_UPDATES)) }
+fn update_octets(state: u64) -> u64 { return kstate.get(state, s(S_UPOKT)) }
+fn verify_bad(state: u64) -> u64 { return kstate.get(state, s(S_BAD)) }
+fn fifo_full(state: u64) -> u64 { return kstate.get(state, s(S_FULL)) }
+fn resizes(state: u64) -> u64 { return kstate.get(state, s(S_RESIZES)) }
+fn resize_errors(state: u64) -> u64 { return kstate.get(state, s(S_RSZERR)) }
+
+// ------------------------------------------------------------ register access
+
+fn reg_w(state: u64, idx: u64, v: u64) {
+    let io: u64 = kstate.get(state, s(S_IO))
+    arch.dev_out32(io as u16, idx as u32)
+    arch.dev_out32((io + 1) as u16, v as u32)
+}
+
+fn reg_r(state: u64, idx: u64) -> u64 {
+    let io: u64 = kstate.get(state, s(S_IO))
+    arch.dev_out32(io as u16, idx as u32)
+    return arch.dev_in32((io + 1) as u16) as u64
+}
+
+fn has_cap(state: u64, c: u64) -> bool {
+    return (kstate.get(state, s(S_CAPS)) & c) != 0
+}
+
+// ------------------------------------------------------------ finding + probing
+
+fn find(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_VENDOR) == VENDOR_VMWARE {
+            if pci.get(state, i, pci.E_DEVICE) == DEVICE_SVGA2 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// Find the device, switch on IO + MEM decoding, negotiate the version, read the capabilities and sizes.
+// Does NOT change the mode. Safe to call twice.
+fn probe(state: u64) -> bool {
+    if kstate.get(state, s(S_UP)) != 0 {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_NOVMSVGA) {
+        return false
+    }
+    let i: u64 = find(state)
+    if i >= pci.MAX_DEV {
+        return false
+    }
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    if !pci.bar_is_io(state, i, 0) || pci.bar_is_io(state, i, 1) {
+        return false
+    }
+    let io: u64 = pci.bar(state, i, 0)
+    let vram: u64 = pci.bar(state, i, 1)
+    let fifo_phys: u64 = pci.bar(state, i, 2)
+    if io == 0 || io > 0xFFF0 || vram == 0 || fifo_phys == 0 {
+        return false
+    }
+    // IO space (bit 0) and memory space (bit 1)
+    let cmd: u64 = pci.cfg_read16(d, CFG_COMMAND)
+    pci.cfg_write16(d, CFG_COMMAND, cmd | 3)
+    kstate.set(state, s(S_BDF), d)
+    kstate.set(state, s(S_IDX), i)
+    kstate.set(state, s(S_IO), io)
+
+    reg_w(state, R_ID, ID_2)
+    let id: u64 = reg_r(state, R_ID)
+    kstate.set(state, s(S_ID), id)
+    if id != ID_2 {
+        return false
+    }
+    kstate.set(state, s(S_CAPS), reg_r(state, R_CAPS))
+    kstate.set(state, s(S_VRAM), vram)
+    kstate.set(state, s(S_VRAMSZ), reg_r(state, R_VRAM_SIZE))
+    kstate.set(state, s(S_MAXW), reg_r(state, R_MAX_W))
+    kstate.set(state, s(S_MAXH), reg_r(state, R_MAX_H))
+    let fv: u64 = apic.map_device(state, fifo_phys)
+    if fv == 0 {
+        return false
+    }
+    kstate.set(state, s(S_FIFO), fv)
+    var fsz: u64 = reg_r(state, R_MEM_SIZE)
+    if fsz > FIFO_CAP || fsz == 0 {
+        fsz = FIFO_CAP
+    }
+    kstate.set(state, s(S_FIFOSZ), fsz)
+    kstate.set(state, s(S_UP), 1)
+    return true
+}
+
+// ------------------------------------------------------------ mode
+
+fn settle() {
+    // QEMU applies WIDTH / HEIGHT lazily; a register read round trip per step is enough for real hardware.
+    var k: u64 = 0
+    while k < 2000 {
+        arch.dev_io_wait()
+        k = k + 1
+    }
+}
+
+// Set WxH at 32 bpp, enable, read back what the device really granted. Returns false when the device refuses.
+fn set_mode(state: u64, w: u64, h: u64) -> bool {
+    if kstate.get(state, s(S_UP)) == 0 || w == 0 || h == 0 {
+        return false
+    }
+    let maxw: u64 = kstate.get(state, s(S_MAXW))
+    let maxh: u64 = kstate.get(state, s(S_MAXH))
+    if (maxw != 0 && w > maxw) || (maxh != 0 && h > maxh) {
+        return false
+    }
+    let vsz: u64 = kstate.get(state, s(S_VRAMSZ))
+    if vsz != 0 && w *% h *% 4 > vsz {
+        return false
+    }
+    reg_w(state, R_WIDTH, w)
+    reg_w(state, R_HEIGHT, h)
+    reg_w(state, R_BPP, 32)
+    reg_w(state, R_ENABLE, 1)
+    var tries: u64 = 0
+    while tries < 200 {
+        if reg_r(state, R_WIDTH) == w && reg_r(state, R_HEIGHT) == h {
+            break
+        }
+        settle()
+        tries = tries + 1
+    }
+    if reg_r(state, R_WIDTH) != w || reg_r(state, R_HEIGHT) != h {
+        return false
+    }
+    var pitch: u64 = reg_r(state, R_BYTES_PER_LINE)
+    if pitch < w * 4 {
+        pitch = w * 4
+    }
+    kstate.set(state, s(S_W), w)
+    kstate.set(state, s(S_H), h)
+    kstate.set(state, s(S_PITCH), pitch)
+    kstate.set(state, s(S_FBOFF), reg_r(state, R_FB_OFFSET))
+    return true
+}
+
+// ------------------------------------------------------------ Weg 3: the mode without any loader framebuffer
+
+// `-vga vmware -kernel` has no Bochs VBE and no multiboot framebuffer. Set the mode here and hand `fb.init` a synthetic
+// multiboot info. Returns its address, 0 when VMSVGA cannot do it.
+fn boot_mbi(state: u64, w: u64, h: u64) -> u64 {
+    if !probe(state) {
+        return 0
+    }
+    if !set_mode(state, w, h) {
+        return 0
+    }
+    let m: u64 = state + s(S_MBI)
+    var z: u64 = 0
+    while z < 128 {
+        __mmio_write8((m + z) as *mut u8, 0)
+        z = z + 1
+    }
+    let ph: u64 = kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF))
+    wr32(m, 0, 0x1000)
+    __mmio_write64((m + 88) as *mut u64, ph)
+    wr32(m, 96, kstate.get(state, s(S_PITCH)))
+    wr32(m, 100, w)
+    wr32(m, 104, h)
+    __mmio_write8((m + 108) as *mut u8, 32)
+    __mmio_write8((m + 109) as *mut u8, 1)
+    __mmio_write8((m + 110) as *mut u8, 16)
+    __mmio_write8((m + 112) as *mut u8, 8)
+    __mmio_write8((m + 114) as *mut u8, 0)
+    return m
+}
+
+// ------------------------------------------------------------ FIFO
+
+fn fifo(state: u64) -> u64 {
+    return kstate.get(state, s(S_FIFO))
+}
+
+fn fifo_setup(state: u64) -> bool {
+    let f: u64 = fifo(state)
+    if f == 0 {
+        return false
+    }
+    let sz: u64 = kstate.get(state, s(S_FIFOSZ))
+    var mn: u64 = 16
+    if has_cap(state, CAP_EXTENDED_FIFO) {
+        let regs: u64 = reg_r(state, R_MEM_REGS)
+        if regs * 4 > mn {
+            mn = regs * 4
+        }
+    }
+    if sz < mn + 0x2800 {
+        return false
+    }
+    wr32(f, F_MIN * 4, mn)
+    wr32(f, F_MAX * 4, sz)
+    wr32(f, F_NEXT * 4, mn)
+    wr32(f, F_STOP * 4, mn)
+    if has_cap(state, CAP_EXTENDED_FIFO) {
+        kstate.set(state, s(S_FCAPS), rd32(f, F_CAPS * 4))
+    } else {
+        kstate.set(state, s(S_FCAPS), 0)
+    }
+    reg_w(state, R_GUEST_ID, 0x5010) // "Other 64-bit" guest id; informational
+    reg_w(state, R_CONFIG_DONE, 1)
+    return true
+}
+
+fn sync_wait(state: u64) {
+    reg_w(state, R_SYNC, 1)
+    var k: u64 = 0
+    while k < SPIN {
+        if reg_r(state, R_BUSY) == 0 {
+            return
+        }
+        k = k + 1
+    }
+}
+
+// Make room for `words` u32 words and remember the write position. false = FIFO stayed full.
+fn fifo_begin(state: u64, words: u64) -> bool {
+    let f: u64 = fifo(state)
+    let need: u64 = words * 4 + 4
+    var tries: u64 = 0
+    while tries < 4 {
+        let mn: u64 = rd32(f, F_MIN * 4)
+        let mx: u64 = rd32(f, F_MAX * 4)
+        let nx: u64 = rd32(f, F_NEXT * 4)
+        let st: u64 = rd32(f, F_STOP * 4)
+        if nx < mn || nx >= mx || st < mn || st >= mx {
+            return false
+        }
+        var free: u64 = 0
+        if nx >= st {
+            free = (mx - nx) + (st - mn)
+        } else {
+            free = st - nx
+        }
+        if free > need {
+            kstate.set(state, s(S_WNEXT), nx)
+            return true
+        }
+        sync_wait(state)
+        tries = tries + 1
+    }
+    kstate.add(state, s(S_FULL), 1)
+    return false
+}
+
+fn fifo_put(state: u64, v: u64) {
+    let f: u64 = fifo(state)
+    var nx: u64 = kstate.get(state, s(S_WNEXT))
+    wr32(f, nx, v)
+    nx = nx + 4
+    if nx >= rd32(f, F_MAX * 4) {
+        nx = rd32(f, F_MIN * 4)
+    }
+    kstate.set(state, s(S_WNEXT), nx)
+}
+
+// Publish the command: NEXT_CMD last, then wake the device.
+fn fifo_commit(state: u64) {
+    let f: u64 = fifo(state)
+    arch.barrier_write()
+    wr32(f, F_NEXT * 4, kstate.get(state, s(S_WNEXT)))
+    arch.barrier_write()
+    reg_w(state, R_SYNC, 1)
+}
+
+// ------------------------------------------------------------ the update
+
+fn send_update(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    if !fifo_begin(state, 5) {
+        return false
+    }
+    fifo_put(state, CMD_UPDATE)
+    fifo_put(state, x)
+    fifo_put(state, y)
+    fifo_put(state, w)
+    fifo_put(state, h)
+    fifo_commit(state)
+    kstate.add(state, s(S_UPDATES), 1)
+    kstate.add(state, s(S_UPOKT), w *% h *% 4)
+    return true
+}
+
+// Take the box the copy sites noted (and clear it) with interrupts off.
+fn acc_take(state: u64, x0: *mut u64, y0: *mut u64, x1: *mut u64, y1: *mut u64) -> bool {
+    let fl: u64 = arch.irq_save()
+    let ok: bool = kstate.get(state, s(S_ACC_VALID)) != 0
+    if ok {
+        __mmio_write64(x0, kstate.get(state, s(S_ACC_X0)))
+        __mmio_write64(y0, kstate.get(state, s(S_ACC_Y0)))
+        __mmio_write64(x1, kstate.get(state, s(S_ACC_X1)))
+        __mmio_write64(y1, kstate.get(state, s(S_ACC_Y1)))
+        kstate.set(state, s(S_ACC_VALID), 0)
+    }
+    arch.irq_restore(fl)
+    return ok
+}
+
+// verify (word vmsvgahw): the host may only be told what changed. Compare VRAM with the copy of what the host was told,
+// everywhere OUTSIDE the box; then copy the box into the "told" copy. Counts differing pixels in `bad`.
+fn verify_frame(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    let pres: u64 = kstate.get(state, s(S_PRES))
+    let vr: u64 = fb.addr(state)
+    if pres == 0 || vr == 0 {
+        return
+    }
+    let w: u64 = kstate.get(state, s(S_W))
+    let h: u64 = kstate.get(state, s(S_H))
+    let pt: u64 = fb.panel_pitch(state)
+    var bad: u64 = 0
+    var y: u64 = 0
+    while y < h {
+        let row: u64 = y * pt
+        var x: u64 = 0
+        while x < w {
+            var inside: bool = false
+            if y >= y0 && y < y1 && x >= x0 && x < x1 {
+                inside = true
+            }
+            if inside {
+                x = x1 // the whole box part of this row is inside
+            } else {
+                if rd32(vr, row + x * 4) != rd32(pres, row + x * 4) {
+                    bad = bad + 1
+                }
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+    // the box now counts as told
+    y = y0
+    while y < y1 && y < h {
+        var x2: u64 = x0
+        while x2 < x1 && x2 < w {
+            wr32(pres, y * pt + x2 * 4, rd32(vr, y * pt + x2 * 4))
+            x2 = x2 + 1
+        }
+        y = y + 1
+    }
+    kstate.add(state, s(S_BAD), bad)
+    kstate.add(state, s(S_VERIFYN), 1)
+}
+
+fn present(state: u64) -> bool {
+    if !bereit(state) {
+        return false
+    }
+    var x0: u64 = 0
+    var y0: u64 = 0
+    var x1: u64 = 0
+    var y1: u64 = 0
+    if !acc_take(state, &x0, &y0, &x1, &y1) {
+        return true
+    }
+    let sw: u64 = kstate.get(state, s(S_W))
+    let sh: u64 = kstate.get(state, s(S_H))
+    if x1 > sw {
+        x1 = sw
+    }
+    if y1 > sh {
+        y1 = sh
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_VMSVGAHW) {
+        verify_frame(state, x0, y0, x1, y1)
+    }
+    return send_update(state, x0, y0, x1 - x0, y1 - y0)
+}
+
+// ------------------------------------------------------------ cursor
+
+fn cursor_hw(state: u64) -> bool {
+    if has_cap(state, CAP_CURSOR) && has_cap(state, CAP_CURSOR_BYPASS) {
+        return true
+    }
+    return (kstate.get(state, s(S_FCAPS)) & FC_CURSOR_BYPASS_3) != 0
+        && has_cap(state, CAP_EXTENDED_FIFO)
+}
+
+fn cursor_bereit(state: u64) -> bool {
+    return bereit(state) && cursor_hw(state)
+}
+
+// ARGB of one pointer pixel from the coverage word `cursor.deck` returns (same maths as vgpu.cursor_bild_fuellen).
+fn cursor_argb(v: u64) -> u64 {
+    if v == 0 {
+        return 0
+    }
+    let ak: u64 = (v >> 16) & 255
+    let ar: u64 = (v >> 8) & 255
+    let asch: u64 = v & 255
+    var rr: u64 = 0
+    var aa: u64 = 0
+    if asch != 0 && ak == 0 && ar == 0 {
+        aa = asch * 90 / 255
+    }
+    if ar != 0 {
+        rr = 255 * ar / 255
+        aa = aa + (255 - aa) * ar / 255
+    }
+    if ak != 0 {
+        rr = rr - rr * ak / 255
+        aa = aa + (255 - aa) * ak / 255
+    }
+    if aa > 255 {
+        aa = 255
+    }
+    return (aa << 24) | (rr << 16) | (rr << 8) | rr
+}
+
+fn cursor_define(state: u64, form: u64, g: u64, hx: u64, hy: u64) -> bool {
+    if g == 0 || g > CUR_W {
+        return false
+    }
+    cursor.karte_bauen(form, g)
+    if has_cap(state, CAP_ALPHA_CURSOR) {
+        if !fifo_begin(state, 6 + g * g) {
+            return false
+        }
+        fifo_put(state, CMD_DEFINE_ALPHA_CURSOR)
+        fifo_put(state, 1)
+        fifo_put(state, hx)
+        fifo_put(state, hy)
+        fifo_put(state, g)
+        fifo_put(state, g)
+        var r: u64 = 0
+        while r < g {
+            var c: u64 = 0
+            while c < g {
+                fifo_put(state, cursor_argb(cursor.deck(g, c, r)))
+                c = c + 1
+            }
+            r = r + 1
+        }
+        fifo_commit(state)
+        return true
+    }
+    // legacy: and-mask 1 bit per pixel (1 = keep the screen), 32 bit xor image; rows padded to 32 bits
+    let mw: u64 = (g + 31) / 32
+    if !fifo_begin(state, 8 + mw * g + g * g) {
+        return false
+    }
+    fifo_put(state, CMD_DEFINE_CURSOR)
+    fifo_put(state, 1)
+    fifo_put(state, hx)
+    fifo_put(state, hy)
+    fifo_put(state, g)
+    fifo_put(state, g)
+    fifo_put(state, 1)
+    fifo_put(state, 32)
+    var r2: u64 = 0
+    while r2 < g {
+        var wd: u64 = 0
+        while wd < mw {
+            var bits: u64 = 0
+            var b: u64 = 0
+            while b < 32 {
+                let c2: u64 = wd * 32 + b
+                var keep: u64 = 1
+                if c2 < g {
+                    if (cursor_argb(cursor.deck(g, c2, r2)) >> 24) >= 128 {
+                        keep = 0
+                    }
+                }
+                bits = bits | (keep << b)
+                b = b + 1
+            }
+            fifo_put(state, bits)
+            wd = wd + 1
+        }
+        r2 = r2 + 1
+    }
+    r2 = 0
+    while r2 < g {
+        var c3: u64 = 0
+        while c3 < g {
+            let p: u64 = cursor_argb(cursor.deck(g, c3, r2))
+            if (p >> 24) >= 128 {
+                fifo_put(state, p & 0xFFFFFF)
+            } else {
+                fifo_put(state, 0)
+            }
+            c3 = c3 + 1
+        }
+        r2 = r2 + 1
+    }
+    fifo_commit(state)
+    return true
+}
+
+fn cursor_pos(state: u64, x: u64, y: u64, on: u64) {
+    if (kstate.get(state, s(S_FCAPS)) & FC_CURSOR_BYPASS_3) != 0 && has_cap(state, CAP_EXTENDED_FIFO) {
+        let f: u64 = fifo(state)
+        wr32(f, F_CURSOR_ON * 4, on)
+        wr32(f, F_CURSOR_X * 4, x)
+        wr32(f, F_CURSOR_Y * 4, y)
+        wr32(f, F_CURSOR_COUNT * 4, rd32(f, F_CURSOR_COUNT * 4) + 1)
+        return
+    }
+    reg_w(state, R_CURSOR_ID, 1)
+    reg_w(state, R_CURSOR_X, x)
+    reg_w(state, R_CURSOR_Y, y)
+    reg_w(state, R_CURSOR_ON, on)
+}
+
+fn cursor_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64) -> bool {
+    if !cursor_bereit(state) {
+        return false
+    }
+    if kstate.get(state, s(S_CURFORM)) != form + 1 || kstate.get(state, s(S_CURGR)) != g {
+        if !cursor_define(state, form, g, hx, hy) {
+            kstate.add(state, s(S_CURERR), 1)
+            return false
+        }
+        kstate.set(state, s(S_CURFORM), form + 1)
+        kstate.set(state, s(S_CURGR), g)
+        kstate.add(state, s(S_CURDEF), 1)
+    }
+    cursor_pos(state, x, y, 1)
+    kstate.set(state, s(S_CURON), 1)
+    kstate.set(state, s(S_CURX), x)
+    kstate.set(state, s(S_CURY), y)
+    return true
+}
+
+fn cursor_bewegen(state: u64, x: u64, y: u64) -> bool {
+    if !cursor_bereit(state) || kstate.get(state, s(S_CURON)) == 0 {
+        return false
+    }
+    if kstate.get(state, s(S_CURX)) == x && kstate.get(state, s(S_CURY)) == y {
+        return true
+    }
+    cursor_pos(state, x, y, 1)
+    kstate.add(state, s(S_CURMOVE), 1)
+    kstate.set(state, s(S_CURX), x)
+    kstate.set(state, s(S_CURY), y)
+    return true
+}
+
+fn cursor_aus(state: u64) -> bool {
+    if !cursor_bereit(state) || kstate.get(state, s(S_CURON)) == 0 {
+        return false
+    }
+    cursor_pos(state, kstate.get(state, s(S_CURX)), kstate.get(state, s(S_CURY)), 0)
+    kstate.set(state, s(S_CURON), 0)
+    return true
+}
+
+fn cursor_an(state: u64) -> bool {
+    return kstate.get(state, s(S_CURON)) != 0
+}
+
+fn cursor_defs(state: u64) -> u64 { return kstate.get(state, s(S_CURDEF)) }
+fn cursor_moves(state: u64) -> u64 { return kstate.get(state, s(S_CURMOVE)) }
+fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
+
+// ------------------------------------------------------------ resize
+
+// Host-requested size: not available on QEMU, and the VirtualBox topology path is unverified (docs/VMSVGA.md 6). 0 = none.
+fn host_pending(state: u64) -> u64 {
+    return 0
+}
+
+// Change the mode on a running system. The caller (vmode) re-points `fb` afterwards.
+fn resize(state: u64, w: u64, h: u64) -> bool {
+    if !bereit(state) {
+        return false
+    }
+    if !set_mode(state, w, h) {
+        kstate.add(state, s(S_RSZERR), 1)
+        return false
+    }
+    kstate.add(state, s(S_RESIZES), 1)
+    return true
+}
+
+// ------------------------------------------------------------ bring-up
+
+fn alloc_verify(state: u64) {
+    if !kstate.mode_on(state, kstate.M_VMSVGAHW) {
+        return
+    }
+    let bytes: u64 = kstate.get(state, s(S_H)) * fb.panel_pitch(state)
+    let fr: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let p: u64 = mem.frame_run(state, fr)
+    if p == 0 {
+        return
+    }
+    var z: u64 = 0
+    while z < bytes {
+        wr32(p, z, rd32(fb.addr(state), z))
+        z = z + 4
+    }
+    kstate.set(state, s(S_PRES), p)
+    kstate.set(state, s(S_PRESSZ), bytes)
+}
+
+// After `fb.init`: bring the device in line with the framebuffer `fb` uses and start carrying the picture.
+fn init(state: u64) -> bool {
+    kstate.set(state, s(S_READY), 0)
+    if !fb.ready(state) || fb.back(state) == 0 {
+        return false
+    }
+    if !probe(state) {
+        return false
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if kstate.get(state, s(S_W)) != w || kstate.get(state, s(S_H)) != h {
+        if !set_mode(state, w, h) {
+            return false
+        }
+    }
+    let ph: u64 = kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF))
+    let pt: u64 = kstate.get(state, s(S_PITCH))
+    // fb.fi may point at the firmware LFB: a different address or stride -> map the VRAM the device scans out
+    if fb.phys(state) != ph || fb.panel_pitch(state) != pt {
+        if !fb.remap(state, ph, w, h, pt, fb.uncached(state)) {
+            return false
+        }
+    }
+    if !fifo_setup(state) {
+        return false
+    }
+    kstate.set(state, s(S_ACC_VALID), 0)
+    kstate.set(state, s(S_READY), 1)
+    fb.dirty_all(state)
+    fb.flush(state)
+    alloc_verify(state)
+    let _u: bool = send_update(state, 0, 0, w, h)
+    kstate.set(state, s(S_ACC_VALID), 0)
+    return true
+}
+
+fn shut_down(state: u64) {
+    kstate.set(state, s(S_READY), 0)
+}
+
+// ------------------------------------------------------------ report
+
+fn say(state: u64) {
+    var s_a: [u8; 13] = "vmsvga: bdf=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_c: [u8; 7] = " caps=\0"
+    var s_f: [u8; 7] = " fifo=\0"
+    var s_v: [u8; 7] = " vram=\0"
+    var s_m: [u8; 7] = " mode=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_p: [u8; 8] = " pitch=\0"
+    var s_u: [u8; 6] = " upd=\0"
+    var s_o: [u8; 6] = " okt=\0"
+    var s_hc: [u8; 5] = " hc=\0"
+    var s_fl: [u8; 7] = " full=\0"
+    if kstate.get(state, s(S_UP)) == 0 {
+        return // silent without the device: other boots keep their serial output
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(kstate.get(state, s(S_BDF)))
+    serial.puts((&s_id[0]) as u64)
+    serial.hex(kstate.get(state, s(S_ID)))
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(kstate.get(state, s(S_CAPS)))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(kstate.get(state, s(S_FIFOSZ)))
+    serial.puts((&s_v[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VRAMSZ)))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kstate.get(state, s(S_W)))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(kstate.get(state, s(S_H)))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PITCH)))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(kstate.get(state, s(S_UPDATES)))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(kstate.get(state, s(S_UPOKT)))
+    serial.puts((&s_hc[0]) as u64)
+    if cursor_hw(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(kstate.get(state, s(S_FULL)))
+    serial.nl()
+}

@@ -119,7 +119,7 @@ export {
     tx_octets, tx_rects, frames, tx_add, frame_done, tx_reset,
     dirty_rect, rect_valid, rect_x0, rect_y0, rect_x1, rect_y1,
     rect_take, dirty_x, S_TXOCT, S_TXRECT, S_FRAMES,
-    set_vgpu, on_vgpu,
+    set_vgpu, on_vgpu, vms_note, VMS_OFF,
     // W-PRESENT: one copy per frame, only the dirty rectangle, and its cost counters.
     flush_region, flush_note, flush_reset, fullrows_an, M_FULLROWS, flush_us_sum, flush_us_max, flush_us_n, flush_okt,
     // W-VBLANK: copy several rectangles of one frame in one pass, and the beam-sync state words
@@ -2713,6 +2713,45 @@ fn tx_add(state: u64, oktette: u64) {
     kstate.add(state, FB_OFF + S_TXRECT, 1)
 }
 
+// ================================================ RUNDE VMSVGA
+// The VMware SVGA II driver (drv/gpu/vmsvga.fi) tells the host ONE update rectangle per frame. The copy sites of this file note
+// the box they really wrote here. The state page and the words below mirror vmsvga.fi (S_READY, S_ACC_*); memmap.py checks
+// the page. Without a ready driver this is a single compare and nothing else.
+const VMS_OFF: u64 = 0x170000
+const VMS_READY: u64 = 0x08
+const VMS_ACC_VALID: u64 = 0x100
+const VMS_ACC_X0: u64 = 0x108
+
+fn vms_note(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if kstate.get(state, VMS_OFF + VMS_READY) == 0 || w == 0 || h == 0 {
+        return
+    }
+    let x1: u64 = x + w
+    let y1: u64 = y + h
+    let fl: u64 = arch.irq_save()
+    if kstate.get(state, VMS_OFF + VMS_ACC_VALID) == 0 {
+        kstate.set(state, VMS_OFF + VMS_ACC_X0, x)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 8, y)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 16, x1)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 24, y1)
+        kstate.set(state, VMS_OFF + VMS_ACC_VALID, 1)
+    } else {
+        if x < kstate.get(state, VMS_OFF + VMS_ACC_X0) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0, x)
+        }
+        if y < kstate.get(state, VMS_OFF + VMS_ACC_X0 + 8) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 8, y)
+        }
+        if x1 > kstate.get(state, VMS_OFF + VMS_ACC_X0 + 16) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 16, x1)
+        }
+        if y1 > kstate.get(state, VMS_OFF + VMS_ACC_X0 + 24) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 24, y1)
+        }
+    }
+    arch.irq_restore(fl)
+}
+
 // EINE BILDGRENZE. Nicht jede Uebertragung ist ein Bild: der
 // Fensterserver malt ein Bild aus vielen Zeichenschritten, und erst
 // `present`/`flip` sagt "fertig". Wer Oktette JE BILD ausrechnen will,
@@ -2852,6 +2891,9 @@ fn dirty(state: u64, y0: u64, y1: u64) {
 // Platz schieben. Die Schleife rechnet in Oktetten und nicht in Zeilen,
 // weil eine Scheibengrenze mitten in einer Bildzeile liegen darf.
 fn flush_stripe(state: u64, lo: u64, hi: u64) {
+    if hi > lo {
+        vms_note(state, 0, lo, kstate.get(state, FB_OFF + S_WIDTH), hi - lo)
+    }
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     let basis: u64 = kstate.get(state, FB_OFF + S_SLOTV)
     if b == 0 || basis == 0 {
@@ -3017,6 +3059,7 @@ fn flush(state: u64) {
         return
     }
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    vms_note(state, 0, lo, kstate.get(state, FB_OFF + S_WIDTH), hi - lo)
     let von: u64 = lo *% pt
     let n: u64 = (hi - lo) *% pt
     // RUNDE VSYNC: dieselbe Weiche wie in `flush_rect`.
@@ -4476,6 +4519,7 @@ fn sat_color(state: u64, c: u64, s: u64) -> u64 {
 // Bildpunkten der ganze Messwert.
 fn present(state: u64) {
     kstate.set(state, FB_OFF + S_SHVALID, 0)
+    vms_note(state, 0, 0, kstate.get(state, FB_OFF + S_PWIDTH), kstate.get(state, FB_OFF + S_PHEIGHT))
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     if b == 0 {
         return
@@ -5181,6 +5225,7 @@ fn flush_rows(state: u64, lo: u64, hi: u64) {
     if u <= o {
         return
     }
+    vms_note(state, 0, o, kstate.get(state, FB_OFF + S_WIDTH), u - o)
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
         flush_stripe(state, o, u)
         return
@@ -5411,6 +5456,7 @@ fn shadow_sync_all(state: u64) {
     if sh == 0 || b == 0 || h *% pt > kstate.get(state, FB_OFF + S_SHBYTES) {
         return
     }
+    vms_note(state, 0, 0, kstate.get(state, FB_OFF + S_WIDTH), h)
     // shadow first: if the back buffer changes meanwhile, the card gets the newer word and the shadow the older (the diff then
     // writes it again); the other order could leave the shadow newer than the card
     copy_words(sh, b, (h *% pt) / 8)
@@ -5460,6 +5506,7 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
     if ww == 0 || hh == 0 {
         return
     }
+    vms_note(state, x, y, ww, hh)
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let n: u64 = ww *% 4
     // vboxlag: the diff path (needs a shadow, no page flip, no word `nodiff`)
