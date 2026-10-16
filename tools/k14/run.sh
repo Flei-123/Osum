@@ -497,7 +497,7 @@ fi
 # gesucht -- dort steht die TAFEL. Es MUSS fehlschlagen.
 rc=$(lauf nopart "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs nopart script=mount")
-hat "$TMPD/nopart.txt" "k14: mounts=3" "GEGENPROBE nopart: nur drei Einhaengungen"
+hat "$TMPD/nopart.txt" "k14: mounts=4" "GEGENPROBE nopart: nur vier Einhaengungen (mit /sys)"
 hat_nicht "$TMPD/nopart.txt" "on /mnt type vfat" \
     "GEGENPROBE nopart: ohne Partitionstafel wird kein FAT32 gefunden"
 
@@ -518,7 +518,7 @@ hat "$TMPD/freigabe.txt" "hallo aus linux" "und der Prozess hat davon wirklich g
 rc=$(lauf keineplatte "$TMPD/k0.mb" "$TMPD/root.img" "" \
     "osum nokbd vfs script=mount")
 num "ohne zweite Platte laeuft der Kernel weiter (21)" "$rc" eq 21
-hat "$TMPD/keineplatte.txt" "k14: mounts=3" "ohne zweite Platte: drei Einhaengungen"
+hat "$TMPD/keineplatte.txt" "k14: mounts=4" "ohne zweite Platte: vier Einhaengungen (mit /sys)"
 
 # ------------------------------------------------ 8. die Gegenproben
 
@@ -542,7 +542,9 @@ hat "$TMPD/novfs.txt" "osum: bin" "GEGENPROBE novfs: OFS traegt weiter das Userl
 for w in noprocfs nodevfs nofat; do
     rc=$(lauf "$w" "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
         "osum nokbd vfs $w script=mount")
-    hat "$TMPD/$w.txt" "k14: mounts=3" "GEGENPROBE $w: eine Einhaengung weniger"
+    # /sys hangs on procfs: without /proc it is gone as well (two fewer), otherwise one fewer than the five
+    want=4; [ "$w" = noprocfs ] && want=3
+    hat "$TMPD/$w.txt" "k14: mounts=$want" "GEGENPROBE $w: weniger Einhaengungen"
 done
 hat_nicht "$TMPD/noprocfs.txt" "on /proc type proc" "GEGENPROBE noprocfs: kein /proc"
 hat_nicht "$TMPD/nodevfs.txt" "on /dev type devfs" "GEGENPROBE nodevfs: kein /dev"
