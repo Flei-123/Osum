@@ -1,0 +1,367 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/iwlpwr.fi -- host test for lib/wlan/iwl_pwr.fi + iwl_ctxt.fi (+ iwl_fw section mapping)
+// against a CSR MODEL that enforces the handshakes (delayed MASTER_DISABLED / CLOCK_READY, PRPH only
+// while MAC access is granted, reset clears the clock). stdin = synthetic ucode (iwlfw_ref.py gen: good.bin).
+// The model encodes my reading of the Linux sequence; it proves ORDER and handshake handling of the
+// library, not that Intel's silicon uses these exact bits (needs the laptop).
+import std.rt
+import std.io
+import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_pwr
+import wlan.iwl_ctxt
+
+static mut passn: u64 = 0
+static mut failn: u64 = 0
+static mut txtb: [u8; 200] = [0; 200]
+static mut tlen: usize = 0
+
+fn tch(c: u64) {
+    if tlen < 190 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+fn tlit(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        tch(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+fn check(name: str, ok: bool) {
+    if ok {
+        passn = passn + 1
+        tlit("  OK    ")
+    } else {
+        failn = failn + 1
+        tlit("  FAIL  ")
+    }
+    tlit(name)
+    temit()
+}
+
+// ---------------- CSR model ----------------
+static mut regs: [u64; 512] = [0; 512]
+static mut mode: u64 = 0          // 0 normal, 1 master never stops, 2 clock never ready, 3 sleep stuck, 4 sleepy then ok
+static mut dis_arm: u64 = 0       // reads left until MASTER_DISABLED shows
+static mut clk_arm: u64 = 0       // reads left until MAC_CLOCK_READY shows (0 = not armed)
+static mut init_done: u64 = 0
+static mut acc_req: u64 = 0
+static mut acc_arm: u64 = 0
+static mut access: u64 = 0
+static mut sleepy: u64 = 0
+static mut resets: u64 = 0
+static mut viol: u64 = 0
+static mut waddr: u64 = 0
+static mut raddr: u64 = 0
+static mut pkey: [u64; 16] = [0; 16]
+static mut pval: [u64; 16] = [0; 16]
+static mut np: u64 = 0
+static mut nrd: u64 = 0
+static mut oplog: [u64; 128] = [0; 128]    // (off << 32) | low 32 bits of value; writes only
+static mut nop: u64 = 0
+
+fn m_reset() {
+    var i: usize = 0
+    while i < 512 { regs[i] = 0
+        i = i + 1 }
+    dis_arm = 0; clk_arm = 0; init_done = 0; acc_req = 0; acc_arm = 0; access = 0; sleepy = 0
+    resets = 0; viol = 0; np = 0; nrd = 0; nop = 0
+    i = 0
+    while i < 16 { pkey[i] = 0
+        pval[i] = 0
+        i = i + 1 }
+}
+
+fn prph_find(a: u64) -> i64 {
+    var i: u64 = 0
+    while i < np {
+        if pkey[i as usize] == a { return i as i64 }
+        i = i + 1
+    }
+    return -1
+}
+
+fn m_wr(ctx: u64, off: u64, v: u64) {
+    if nop < 128 {
+        oplog[nop as usize] = (off << 32) | (v & 0xFFFFFFFF)
+        nop = nop + 1
+    }
+    regs[(off / 4) as usize] = v
+    if off == 0x020 {
+        if v & 0x200 != 0 && mode != 1 { dis_arm = 3 }
+        if v & 0x80 != 0 {
+            resets = resets + 1
+            init_done = 0; clk_arm = 0; acc_req = 0; access = 0
+            regs[0x024 / 4] = 0
+        }
+    } else if off == 0x024 {
+        if v & 0x4 != 0 && init_done == 0 {
+            init_done = 1
+            if mode != 2 { clk_arm = 5 }
+        }
+        if v & 0x8 != 0 && acc_req == 0 {
+            acc_req = 1
+            acc_arm = 4
+            if mode == 4 { acc_arm = 12 }
+        }
+        if v & 0x8 == 0 { acc_req = 0; access = 0; acc_arm = 0 }
+    } else if off == 0x444 {
+        waddr = v
+    } else if off == 0x448 {
+        raddr = v
+    } else if off == 0x44C {
+        if access == 0 || (waddr >> 24) != 3 { viol = viol + 1 } else {
+            let a: u64 = waddr & 0xFFFFF
+            var k: i64 = prph_find(a)
+            if k < 0 && np < 16 {
+                pkey[np as usize] = a
+                k = np as i64
+                np = np + 1
+            }
+            if k >= 0 { pval[k as usize] = v }
+        }
+    }
+}
+
+fn m_rd(ctx: u64, off: u64) -> u64 {
+    nrd = nrd + 1
+    if off >= 2048 { return 0xFFFFFFFF }
+    if off == 0x020 {
+        if dis_arm > 0 {
+            dis_arm = dis_arm - 1
+            if dis_arm == 0 { regs[0x020 / 4] = regs[0x020 / 4] | 0x100 }
+        }
+    } else if off == 0x024 {
+        var g: u64 = regs[0x024 / 4] & 0xFFFFFFE0
+        if init_done == 1 && clk_arm > 0 {
+            clk_arm = clk_arm - 1
+            if clk_arm == 0 { init_done = 2 }
+        }
+        if init_done == 2 { g = g | 0x1 }
+        if acc_req == 1 && init_done == 2 && access == 0 {
+            if acc_arm > 0 { acc_arm = acc_arm - 1 }
+            if acc_arm == 0 && mode != 3 { access = 1 }
+        }
+        if acc_req == 1 && access == 0 { g = g | 0x10 }
+        g = g | (regs[0x024 / 4] & 0xC)
+        return g
+    } else if off == 0x450 {
+        if access == 0 {
+            viol = viol + 1
+            return 0xA5A5A5A1
+        }
+        let k: i64 = prph_find(raddr & 0xFFFFF)
+        if k < 0 { return 0 }
+        return pval[k as usize]
+    }
+    return regs[(off / 4) as usize]
+}
+
+fn new_probe() -> iwl_probe.Probe {
+    var p: iwl_probe.Probe = iwl_probe.probe_new()
+    iwl_probe.mmio_set(&p, 0, m_rd, m_wr)
+    return p
+}
+
+// index of the first logged write (off, any value matching mask/want), or 9999
+fn find_w(off: u64, mask: u64, want: u64) -> u64 {
+    var i: u64 = 0
+    while i < nop {
+        let e: u64 = oplog[i as usize]
+        if (e >> 32) == off && (e & mask) == want { return i }
+        i = i + 1
+    }
+    return 9999
+}
+
+// ---------------- buffers ----------------
+static mut page: [u8; 1776] = [0; 1776]
+static mut ring: [u8; 4096] = [0; 4096]
+static mut tfdb: [u8; 128] = [0; 128]
+static mut busl: [u64; 64] = [0; 64]
+
+fn rd64(a: u64, o: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        v = v | (rt.ld8(a, o + i) as u64) << ((i * 8) as u64)
+        i = i + 1
+    }
+    return v
+}
+fn rd16(a: u64, o: usize) -> u64 { return (rt.ld8(a, o) as u64) | ((rt.ld8(a, o + 1) as u64) << 8) }
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    rt.read_stdin(&inp)
+    let blob: u64 = rt.buf_ptr(&inp)
+    let blen: usize = rt.buf_len(&inp)
+    var p: iwl_probe.Probe = new_probe()
+    var r: i64 = 0
+
+    // ---- P: power_up ----
+    m_reset()
+    mode = 0
+    p = new_probe()
+    r = iwl_pwr.power_up(&p)
+    check("P1 power_up ok on a well-behaved device", r == 0)
+    check("P2 clock ready + INIT_DONE at the end", (regs[0x024 / 4] & 4) != 0 && init_done == 2)
+    check("P3 exactly one SW reset", resets == 1)
+    check("P4 interrupts masked and acked", regs[0x00C / 4] == 0 && regs[0x008 / 4] == 0xFFFFFFFF && regs[0x010 / 4] == 0xFFFFFFFF)
+    let i_stop: u64 = find_w(0x020, 0x200, 0x200)
+    let i_sw: u64 = find_w(0x020, 0x80, 0x80)
+    let i_init: u64 = find_w(0x024, 0x4, 0x4)
+    let i_int: u64 = find_w(0x00C, 0xFFFFFFFF, 0)
+    check("P5 order: mask irq < stop master < SW reset < INIT_DONE", i_int < i_stop && i_stop < i_sw && i_sw < i_init && i_init < 9999)
+    check("P6 no PRPH traffic, no violation", viol == 0 && find_w(0x444, 0, 0) == 9999)
+    check("P7 writes counted in Probe", p.writes == nop && p.writes > 5)
+
+    m_reset()
+    mode = 1
+    p = new_probe()
+    r = iwl_pwr.power_up(&p)
+    check("P8 master never stops -> E_PWR_MASTER", r == iwl_pwr.E_PWR_MASTER)
+    check("P9 ... and NO SW reset was issued (device left alone)", resets == 0 && find_w(0x020, 0x80, 0x80) == 9999)
+    check("P10 poll is bounded", nrd <= iwl_pwr.POLL_MAX + 40)
+
+    m_reset()
+    mode = 2
+    p = new_probe()
+    r = iwl_pwr.power_up(&p)
+    check("P11 clock never ready -> E_PWR_CLOCK", r == iwl_pwr.E_PWR_CLOCK)
+
+    // ---- A: mac access + PRPH ----
+    m_reset()
+    mode = 0
+    p = new_probe()
+    r = iwl_pwr.power_up(&p)
+    r = iwl_pwr.mac_access_get(&p)
+    check("A1 mac_access_get ok", r == 0 && access == 1)
+    iwl_pwr.prph_wr(&p, 0xA05C44, 0x1234)
+    iwl_pwr.prph_wr(&p, 0xA05C48, 0x77)
+    check("A2 PRPH write/read round trip", iwl_pwr.prph_rd(&p, 0xA05C44) == 0x1234 && iwl_pwr.prph_rd(&p, 0xA05C48) == 0x77)
+    check("A3 address masked to 20 bits, dword flag in bits 24-25", (regs[0x444 / 4] >> 24) == 3 && (regs[0x444 / 4] & 0xFFFFF) == 0x05C48)
+    iwl_pwr.mac_access_put(&p)
+    check("A4 mac access released, no violation", access == 0 && (regs[0x024 / 4] & 8) == 0 && viol == 0)
+    check("A5 model enforces: PRPH read without access = dead value + violation", iwl_pwr.prph_rd(&p, 0xA05C44) == 0xA5A5A5A1 && viol == 1)
+    iwl_pwr.prph_wr(&p, 0xA05C44, 5)
+    check("A6 model enforces: PRPH write without access is a violation", viol == 2 && iwl_pwr.prph_rd(&p, 0xA05C44) == 0xA5A5A5A1)
+
+    m_reset()
+    mode = 3
+    p = new_probe()
+    r = iwl_pwr.apm_init(&p)
+    r = iwl_pwr.mac_access_get(&p)
+    check("A7 device stuck going-to-sleep -> E_PWR_ACCESS", r == iwl_pwr.E_PWR_ACCESS)
+    m_reset()
+    mode = 4
+    p = new_probe()
+    r = iwl_pwr.apm_init(&p)
+    r = iwl_pwr.mac_access_get(&p)
+    check("A8 sleepy device: access granted after waiting", r == 0 && access == 1)
+
+    // ---- K: fw_kick ----
+    m_reset()
+    mode = 0
+    p = new_probe()
+    r = iwl_pwr.power_up(&p)
+    let n0: u64 = nop
+    r = iwl_pwr.fw_kick(&p, 0x123456000)
+    check("K1 fw_kick ok", r == 0)
+    check("K2 CTXT_INFO_BA lo/hi written", regs[0x040 / 4] == 0x23456000 && regs[0x044 / 4] == 1)
+    check("K3 ALIVE|WAKEUP unmasked", regs[0x00C / 4] == 3)
+    check("K4 UREG_CPU_INIT_RUN got 1 via PRPH", prph_find(0x05C44) >= 0 && pval[prph_find(0x05C44) as usize] == 1 && viol == 0)
+    check("K5 order: BA lo < BA hi < irq mask < access req < CPU run", find_w(0x040, 0, 0) < find_w(0x044, 0, 0) && find_w(0x044, 0, 0) < find_w(0x00C, 0xFFFFFFFF, 3) && find_w(0x00C, 0xFFFFFFFF, 3) < find_w(0x444, 0, 0) && find_w(0x040, 0, 0) >= n0)
+    check("K6 access released after kick", access == 0)
+    m_reset()
+    mode = 3
+    p = new_probe()
+    r = iwl_pwr.apm_init(&p)
+    r = iwl_pwr.fw_kick(&p, 0x123456000)
+    check("K7 no mac access -> E_PWR_ACCESS and CPU NOT started", r == iwl_pwr.E_PWR_ACCESS && find_w(0x44C, 0, 0) == 9999)
+
+    // ---- C: context info ----
+    iwl_ctxt.ctxt_init((&page[0]) as u64, 0x354, 8)
+    let pg: u64 = (&page[0]) as u64
+    check("C1 size word = 1776/4", rd16(pg, 4) == 444 && iwl_ctxt.CTXT_SIZE == 1776)
+    check("C2 mac_id = low 16 bits of hw_rev, version 0", rd16(pg, 0) == 0x354 && rd16(pg, 2) == 0)
+    check("C3 control flags = TFD_LONG | RB4K<<9 | cb 8<<4", (rt.ld8(pg, 8) as u64) == 0x80 && (rt.ld8(pg, 9) as u64) == 0x09)
+    check("C4 layout: dram table ends where the tail pad starts", iwl_ctxt.CTXT_OFF_DRAM + 3 * iwl_ctxt.CTXT_DRAM_N * 8 + 64 == iwl_ctxt.CTXT_SIZE)
+    check("C5 rbd needs 4K rings + 16-aligned status", iwl_ctxt.ctxt_set_rbd(pg, 0x1001, 0x2000, 0x3000) == iwl_ctxt.E_CT_ALIGN && iwl_ctxt.ctxt_set_rbd(pg, 0x1000, 0x2000, 0x3008) == iwl_ctxt.E_CT_ALIGN)
+    check("C6 rbd stored", iwl_ctxt.ctxt_set_rbd(pg, 0x100000000, 0x2000, 0x3010) == 0 && rd64(pg, 24) == 0x100000000 && rd64(pg, 32) == 0x2000 && rd64(pg, 40) == 0x3010)
+    check("C7 hcmd stored", iwl_ctxt.ctxt_set_hcmd(pg, 0x5000, 2) == 0 && rd64(pg, 48) == 0x5000 && (rt.ld8(pg, 56) as u64) == 2)
+    check("C8 dram index/alignment guarded", iwl_ctxt.ctxt_dram_add(pg, 0, 64, 0x1000) == iwl_ctxt.E_CT_FULL && iwl_ctxt.ctxt_dram_add(pg, 0, 0, 0x1010) == iwl_ctxt.E_CT_ALIGN)
+    check("C9 incomplete page fails ctxt_check", !iwl_ctxt.ctxt_check(pg, 0x354))
+
+    // ---- F: sections of the synthetic blob -> dram lists ----
+    var f: iwl_fw.FwInfo = iwl_fw.fwinfo_new()
+    let pr: i64 = iwl_fw.fw_parse(blob, blen, &f)
+    check("F1 synthetic ucode parses", pr == 0)
+    var k: usize = 0
+    while k < 64 { busl[k] = 0x10000000 + (k as u64) * 0x1000
+        k = k + 1 }
+    iwl_ctxt.ctxt_init(pg, 0x354, 8)
+    iwl_ctxt.ctxt_set_rbd(pg, 0x1000, 0x2000, 0x3010)
+    iwl_ctxt.ctxt_set_hcmd(pg, 0x5000, 2)
+    check("F2 fill_dram ok", iwl_ctxt.ctxt_fill_dram(pg, &f, iwl_fw.IMG_RT, (&busl[0]) as u64) == 0)
+    // sections: 0,1 = lmac; 2,3,4 = umac; 5,6 = paging. lists: umac@176, lmac@688, virtual@1200
+    check("F3 lmac list = sections 0,1", rd64(pg, 688) == busl[0] && rd64(pg, 696) == busl[1] && rd64(pg, 704) == 0)
+    check("F4 umac list = sections 2,3,4", rd64(pg, 176) == busl[2] && rd64(pg, 184) == busl[3] && rd64(pg, 192) == busl[4] && rd64(pg, 200) == 0)
+    check("F5 virtual (paging) list = sections 5,6", rd64(pg, 1200) == busl[5] && rd64(pg, 1208) == busl[6] && rd64(pg, 1216) == 0)
+    check("F6 ctxt_check ok on the complete page", iwl_ctxt.ctxt_check(pg, 0x354))
+    check("F7 ctxt_check rejects another hw_rev", !iwl_ctxt.ctxt_check(pg, 0x331))
+    busl[3] = 0x10000010
+    iwl_ctxt.ctxt_init(pg, 0x354, 8)
+    check("F8 unaligned section bus address refused", iwl_ctxt.ctxt_fill_dram(pg, &f, iwl_fw.IMG_RT, (&busl[0]) as u64) == iwl_ctxt.E_CT_ALIGN)
+
+    // ---- T: TFD + queue ----
+    let tf: u64 = (&tfdb[0]) as u64
+    iwl_ctxt.tfd_clear(tf)
+    check("T1 first tb index 0, second 1", iwl_ctxt.tfd_add_tb(tf, 0x9BCDEF000, 100) == 0 && iwl_ctxt.tfd_add_tb(tf, 0x1000, 4095) == 1)
+    check("T2 readback: 36-bit addr + len", iwl_ctxt.tfd_num_tbs(tf) == 2 && iwl_ctxt.tfd_tb_addr(tf, 0) == 0x9BCDEF000 && iwl_ctxt.tfd_tb_len(tf, 0) == 100 && iwl_ctxt.tfd_tb_len(tf, 1) == 4095)
+    check("T3 byte layout: num_tbs at 3, tb0.lo at 4..8 LE, hi_n_len at 8..10", (rt.ld8(tf, 3) as u64) == 2 && (rt.ld8(tf, 4) as u64) == 0x00 && (rt.ld8(tf, 5) as u64) == 0xF0 && rd16(tf, 8) == (0x9 | (100 << 4)))
+    check("T4 len 0 / 4096 / 37-bit addr refused", iwl_ctxt.tfd_add_tb(tf, 0x1000, 0) == iwl_ctxt.E_TQ_TB && iwl_ctxt.tfd_add_tb(tf, 0x1000, 4096) == iwl_ctxt.E_TQ_TB && iwl_ctxt.tfd_add_tb(tf, 0x1000000000, 8) == iwl_ctxt.E_TQ_TB)
+    var tn: u64 = 2
+    while tn < 20 { iwl_ctxt.tfd_add_tb(tf, 0x1000, 8)
+        tn = tn + 1 }
+    check("T5 21st tb refused, count stays 20", iwl_ctxt.tfd_add_tb(tf, 0x1000, 8) == iwl_ctxt.E_TQ_TB && iwl_ctxt.tfd_num_tbs(tf) == 20)
+
+    var q: iwl_ctxt.Txq = iwl_ctxt.txq_new((&ring[0]) as u64, 32, 0)
+    var s: i64 = 0
+    var pushed: u64 = 0
+    while pushed < 31 {
+        s = iwl_ctxt.txq_push(&q, 0x20000 + pushed * 0x1000, 64)
+        if s != (pushed as i64) { pushed = 999 } else { pushed = pushed + 1 }
+    }
+    check("T6 31 pushes fill slots 0..30 in order", pushed == 31 && iwl_ctxt.txq_used(&q) == 31)
+    check("T7 32nd push -> E_TQ_FULL (one slot stays free)", iwl_ctxt.txq_push(&q, 0x40000, 64) == iwl_ctxt.E_TQ_FULL)
+    check("T8 wrptr register = wr | qid<<8", iwl_ctxt.txq_wrptr_reg(&q) == 31)
+    check("T9 slot 5 holds the 6th buffer", iwl_ctxt.tfd_tb_addr((&ring[0]) as u64 + 5 * 128, 0) == 0x25000)
+    check("T10 reclaim to 10 frees slots, clears TFDs", iwl_ctxt.txq_reclaim(&q, 10) == 0 && iwl_ctxt.txq_used(&q) == 21 && iwl_ctxt.tfd_num_tbs((&ring[0]) as u64 + 9 * 128) == 0 && iwl_ctxt.tfd_num_tbs((&ring[0]) as u64 + 10 * 128) == 1)
+    check("T11 reclaim beyond used / out of range refused", iwl_ctxt.txq_reclaim(&q, 5) == iwl_ctxt.E_TQ_EMPTY && iwl_ctxt.txq_reclaim(&q, 40) == iwl_ctxt.E_TQ_EMPTY)
+    check("T12 ring wraps: next push lands in slot 31 then 0", iwl_ctxt.txq_push(&q, 0x50000, 8) == 31 && iwl_ctxt.txq_push(&q, 0x51000, 8) == 0 && iwl_ctxt.txq_wrptr_reg(&q) == 1)
+    var q2: iwl_ctxt.Txq = iwl_ctxt.txq_new((&ring[0]) as u64, 32, 7)
+    check("T13 queue id goes into bits 8+", iwl_ctxt.txq_wrptr_reg(&q2) == 0x700)
+
+    // ---- H: host command header ----
+    iwl_ctxt.cmd_hdr_put(tf, 1, 0x1C, 0, 9)
+    check("H1 cmd header: cmd, group, seq = qid<<8|slot", (rt.ld8(tf, 0) as u64) == 0x1C && (rt.ld8(tf, 1) as u64) == 1 && rd16(tf, 2) == 9 && iwl_ctxt.cmd_wide_id(1, 0x1C) == 0x011C)
+
+    tlit("RESULT pass=")
+    tnum(passn)
+    tlit(" fail=")
+    tnum(failn)
+    temit()
+    if failn > 0 { return 1 }
+    return 0
+}

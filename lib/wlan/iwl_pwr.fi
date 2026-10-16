@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/iwl_pwr.fi -- iwlwifi gen2 (Qu/QuZ/AX200) power/reset/PRPH sequences, milestone M2.
+//
+// Every register access goes through the Mmio table of iwl_probe.fi, so the host gate runs the
+// REAL sequence against a CSR model that enforces the hardware handshakes (tools/wlan/iwlpwr.fi).
+// Bit values and the order are from memory of iwl-csr.h + pcie/trans.c (iwl_pcie_apm_stop_master,
+// iwl_pcie_apm_init, iwl_trans_grab_nic_access, iwl_read/write_prph_no_grab) and are NOT yet
+// confirmed on the laptop -- the model proves ORDER and handshake logic, not Intel's numbering.
+// Polling is bounded by a read count (POLL_MAX); the kernel glue's rd32 hook is expected to add
+// the real udelay (the library has no clock).
+
+import wlan.iwl_probe
+
+export {
+    stop_master, sw_reset, apm_init, mac_access_get, mac_access_put,
+    prph_rd, prph_wr, int_disable, power_up, fw_kick,
+    E_PWR_MASTER, E_PWR_CLOCK, E_PWR_ACCESS, POLL_MAX,
+    CSR_INT_MASK, CSR_FH_INT_STATUS, CSR_CTXT_INFO_BA, CSR_CTXT_INFO_BA_HI,
+    HBUS_WADDR, HBUS_WDAT, HBUS_RADDR, HBUS_RDAT, HBUS_WRPTR, UREG_CPU_INIT_RUN,
+    RESET_SW, RESET_STOP_MASTER, RESET_MASTER_DISABLED,
+    GP_CLOCK_READY, GP_INIT_DONE, GP_ACCESS_REQ, GP_SLEEP
+}
+
+const CSR_INT_MASK: u64 = 0x00C
+const CSR_FH_INT_STATUS: u64 = 0x010
+const CSR_CTXT_INFO_BA: u64 = 0x040
+const CSR_CTXT_INFO_BA_HI: u64 = 0x044
+
+const HBUS_WADDR: u64 = 0x444
+const HBUS_RADDR: u64 = 0x448
+const HBUS_WDAT: u64 = 0x44C
+const HBUS_RDAT: u64 = 0x450
+const HBUS_WRPTR: u64 = 0x460
+
+const UREG_CPU_INIT_RUN: u64 = 0xA05C44
+
+const RESET_SW: u64 = 0x80
+const RESET_STOP_MASTER: u64 = 0x200
+const RESET_MASTER_DISABLED: u64 = 0x100
+
+const GP_CLOCK_READY: u64 = 0x1
+const GP_INIT_DONE: u64 = 0x4
+const GP_ACCESS_REQ: u64 = 0x8
+const GP_SLEEP: u64 = 0x10
+
+const INT_ALIVE: u64 = 0x1
+const INT_WAKEUP: u64 = 0x2
+const PRPH_MASK: u64 = 0xFFFFF
+const PRPH_DWORD: u64 = 0x03000000   // 4-octet access: (3 << 24)
+
+const POLL_MAX: u64 = 25000
+
+const E_PWR_MASTER: i64 = -20
+const E_PWR_CLOCK: i64 = -21
+const E_PWR_ACCESS: i64 = -22
+
+fn rd(p: *mut iwl_probe.Probe, off: u64) -> u64 {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).reads = (*p).reads + 1
+    return m.rd32((*p).ctx, off) & 0xFFFFFFFF
+}
+
+fn wr(p: *mut iwl_probe.Probe, off: u64, v: u64) {
+    let m: iwl_probe.Mmio = (*p).m
+    (*p).writes = (*p).writes + 1
+    m.wr32((*p).ctx, off, v & 0xFFFFFFFF)
+}
+
+fn set_bits(p: *mut iwl_probe.Probe, off: u64, bits: u64) {
+    wr(p, off, rd(p, off) | bits)
+}
+
+fn clr_bits(p: *mut iwl_probe.Probe, off: u64, bits: u64) {
+    wr(p, off, rd(p, off) & (0xFFFFFFFF ^ bits))
+}
+
+// Poll `off` until (value & mask) == want. true = reached, false = POLL_MAX reads used.
+fn poll(p: *mut iwl_probe.Probe, off: u64, mask: u64, want: u64) -> bool {
+    var i: u64 = 0
+    while i < POLL_MAX {
+        if rd(p, off) & mask == want { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Mask all interrupts and ack whatever is pending (iwl_disable_interrupts).
+fn int_disable(p: *mut iwl_probe.Probe) {
+    wr(p, CSR_INT_MASK, 0)
+    wr(p, iwl_probe.CSR_INT, 0xFFFFFFFF)
+    wr(p, CSR_FH_INT_STATUS, 0xFFFFFFFF)
+}
+
+// Stop bus-master DMA before a reset; the device must report MASTER_DISABLED.
+fn stop_master(p: *mut iwl_probe.Probe) -> i64 {
+    set_bits(p, iwl_probe.CSR_RESET, RESET_STOP_MASTER)
+    if !poll(p, iwl_probe.CSR_RESET, RESET_MASTER_DISABLED, RESET_MASTER_DISABLED) { return E_PWR_MASTER }
+    return 0
+}
+
+fn sw_reset(p: *mut iwl_probe.Probe) {
+    set_bits(p, iwl_probe.CSR_RESET, RESET_SW)
+}
+
+// Request the clock: INIT_DONE, then wait for MAC_CLOCK_READY.
+fn apm_init(p: *mut iwl_probe.Probe) -> i64 {
+    set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_INIT_DONE)
+    if !poll(p, iwl_probe.CSR_GP_CNTRL, GP_CLOCK_READY, GP_CLOCK_READY) { return E_PWR_CLOCK }
+    return 0
+}
+
+// PRPH (periphery) registers are only reachable while MAC_ACCESS_REQ is granted:
+// clock ready AND not going to sleep.
+fn mac_access_get(p: *mut iwl_probe.Probe) -> i64 {
+    set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_ACCESS_REQ)
+    if !poll(p, iwl_probe.CSR_GP_CNTRL, GP_CLOCK_READY | GP_SLEEP, GP_CLOCK_READY) { return E_PWR_ACCESS }
+    return 0
+}
+
+fn mac_access_put(p: *mut iwl_probe.Probe) {
+    clr_bits(p, iwl_probe.CSR_GP_CNTRL, GP_ACCESS_REQ)
+}
+
+// Caller MUST hold mac access (mac_access_get). 20-bit address, 4-octet access.
+fn prph_rd(p: *mut iwl_probe.Probe, addr: u64) -> u64 {
+    wr(p, HBUS_RADDR, (addr & PRPH_MASK) | PRPH_DWORD)
+    return rd(p, HBUS_RDAT)
+}
+
+fn prph_wr(p: *mut iwl_probe.Probe, addr: u64, v: u64) {
+    wr(p, HBUS_WADDR, (addr & PRPH_MASK) | PRPH_DWORD)
+    wr(p, HBUS_WDAT, v)
+}
+
+// Full M2 bring-up: interrupts off, master stop, reset, clock. Leaves the device clocked, quiet,
+// mac access released. Returns 0 or E_PWR_*.
+fn power_up(p: *mut iwl_probe.Probe) -> i64 {
+    int_disable(p)
+    var r: i64 = stop_master(p)
+    if r != 0 { return r }
+    sw_reset(p)
+    r = apm_init(p)
+    if r != 0 { return r }
+    int_disable(p)
+    return 0
+}
+
+// Hand the context-info DMA address to the device, unmask ALIVE, start the CPU(s).
+// `ba` is the (64-bit) bus address of the context info page.
+fn fw_kick(p: *mut iwl_probe.Probe, ba: u64) -> i64 {
+    wr(p, CSR_CTXT_INFO_BA, ba & 0xFFFFFFFF)
+    wr(p, CSR_CTXT_INFO_BA_HI, ba >> 32)
+    wr(p, CSR_INT_MASK, INT_ALIVE | INT_WAKEUP)
+    let r: i64 = mac_access_get(p)
+    if r != 0 { return r }
+    prph_wr(p, UREG_CPU_INIT_RUN, 1)
+    mac_access_put(p)
+    return 0
+}

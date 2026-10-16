@@ -44,9 +44,9 @@ Status 15.10.2026 (W-AX201): analysis + milestone M1 (identify only). No radio w
 |---|---|---|---|
 | M1 | PCI id table, BAR0 sanity, read `CSR_HW_REV`/`CSR_HW_RF_ID`/`GP_CNTRL`, firmware container + digest pin (no register writes) | `tools/wlan/iwl.sh` (31 checks, +4 with the real blob) | **done (library + host gate)** |
 | M1b | kernel glue: `pci.scan` -> `iwl_probe.probe_run` on the mapped BAR0, serial line `wifi-pci: Intel Qu ... rev=0x.. rf=0x..`, Dell-style `pci.list` naming | real laptop, one boot | open (needs laptop) |
-| M2 | power/reset: `CSR_GP_CNTRL` INIT_DONE / MAC_ACCESS_REQ handshake, `CSR_RESET` SW_RESET, `CSR_FUNC_SCRATCH` / HW_IF_CONFIG, PRPH access via HBUS target regs, interrupts masked | CSR simulation + laptop | open |
-| M3 | firmware load: parse TLVs (SEC_RT/SEC_INIT/CSCHEME, API flags), DRAM copies, **context info** (`prph_scratch` + `prph_info` + IML for gen2, `CSR_CTXT_INFO_BA`, `CSR_IML_*`), start ROM, wait for ALIVE | laptop | open |
-| M4 | command queue (TFD ring in DMA memory), `INIT_COMPLETE`, NVM / MAC address, regulatory | laptop | open |
+| M2 | power/reset: `CSR_GP_CNTRL` INIT_DONE / MAC_ACCESS_REQ handshake, `CSR_RESET` SW_RESET, `CSR_FUNC_SCRATCH` / HW_IF_CONFIG, PRPH access via HBUS target regs, interrupts masked | CSR simulation + laptop | **library + host gate done** (`lib/wlan/iwl_pwr.fi`, `tools/wlan/iwlm2.sh`); kernel glue + laptop open |
+| M3 | firmware load: parse TLVs (SEC_RT/SEC_INIT/CSCHEME, API flags), DRAM copies, **context info** (see correction below), start ROM, wait for ALIVE | laptop | **TLV/section parser, context-info page, fw-kick sequence: library + host gate done**; DRAM copy in kernel + ALIVE wait open (laptop) |
+| M4 | command queue (TFD ring in DMA memory), `INIT_COMPLETE`, NVM / MAC address, regulatory | laptop | TFD + ring codec (`lib/wlan/iwl_ctxt.fi`) host-tested; commands/notifications open (laptop) |
 | M5 | RX queue, interrupts (MSI-X), scan (passive then active), beacon parse via `lib/wlan` | laptop + any AP | open |
 | M6 | MAC/PHY/binding contexts, station add, auth+assoc commands, TX path | laptop | open |
 | M7 | WPA2-PSK: key install (CCMP via firmware or `lib/wlan/ccmp.fi`), 4-way handshake already in `lib/wlan/wpa.fi` | laptop + AP | open |
@@ -84,3 +84,27 @@ device in D0, and whether the BIOS has CNVi enabled in the OS-visible form.
 - `/proc/wlan` (procfs `G_WLAN`) and the `wlan` section of `/bin/sysinfo` show the same without gp/if.
 - Gate `tools/wlan-ax201-glue/run.sh` (QEMU): no-device and foreign-device (edu) paths. The path "device present, values read" is NOT
   testable in QEMU (no Intel a0f0); it runs for the first time on HOLO-LAPTOP-3. Test steps: reports/TESTANLEITUNG-LAPTOP.md.
+
+## M2/M3 prep without hardware (16.10.2026, W-LCWIFI)
+Gate `tools/wlan-ax201-m2/run.sh` (-> `tools/wlan/iwlm2.sh`, host only, 27 checks + 9 counter-probes, no QEMU).
+- `lib/wlan/iwl_fw.fi`: TLV walk into `FwInfo` (flags, phy_sku, num_cpu, api/capa words index 0, paging size, IML) and the SEC_RT / SEC_INIT
+  section lists split LMAC (CPU1) / UMAC (CPU2) / PAGING by the two separator markers (0xFFFFCCCC, 0xAAAABBBB). Cross-checked
+  byte for byte against an independent Python parser (`tools/wlan/iwlfw_ref.py`) on a synthetic blob, 8 hostile blobs, and the real
+  blob when `WLAN_AX201_FW` is set (not available on the server yet -> **real-blob run is open**).
+- `lib/wlan/iwl_pwr.fi` (M2): int mask/ack, STOP_MASTER wait, SW reset, INIT_DONE + CLOCK_READY wait, MAC_ACCESS_REQ grab/put
+  (CLOCK_READY and not GOING_TO_SLEEP), PRPH read/write through HBUS, `fw_kick` (CTXT_INFO_BA lo/hi, ALIVE unmask, UREG_CPU_INIT_RUN).
+  Tested against a CSR model with delayed handshakes that also flags PRPH access without MAC access. A stuck master never leads to a reset.
+- `lib/wlan/iwl_ctxt.fi` (M3/M4): context-info page (1776 octets), `ctxt_fill_dram` maps the parsed sections to umac/lmac/virtual lists,
+  TFD (128 octets, 20 TBs, 36-bit address, 12-bit length), TFD ring `Txq` (wrap, full/empty, reclaim, HBUS_WRPTR value), command header.
+  Found + fixed while testing: ring index math underflowed (u64 panic) on wrap.
+- `lib/wlan/scanfmt.fi`: scan results as lines `ssid ch=N sec=... rssi=-NN` from `connect.Sitzung` (real beacons from the Wireshark capture);
+  SSID sanitised, whole lines only. Not yet wired into `/proc/wlan` (needs a running driver that fills a Sitzung).
+- Already existing and gated before (tools/wlan/run.sh): 802.11 frame codec, beacon/RSN parser, CCMP, WPA2-PSK 4-way handshake (real capture), `device.Geraet` seam.
+
+**Correction to the M3 row text above:** for Qu/QuZ/AX200 (device family < AX210) Linux uses the *old* `struct iwl_context_info`
+(`pcie/ctxt-info.c`), NOT the gen3 `prph_scratch/prph_info/IML` variant (`ctxt-info-gen3.c`, AX210+). The layout in `iwl_ctxt.fi` follows that old struct.
+
+**Unconfirmed (from memory, needs the Linux source or the laptop):** TLV type numbers, separator values, context-info field offsets and
+control-flag bits, TFD layout, CSR/HBUS/UREG register numbers and bit values, the exact init order. The gates prove internal consistency,
+bounds and handshake handling -- NOT that the silicon agrees. **Needs laptop:** everything past `fw_kick` (ALIVE, INIT_COMPLETE, NVM, scan, assoc).
+Not done: iwl host-command codecs (scan/MAC-context/station/TX-cmd) and the RX descriptor -- layouts are too uncertain without the headers.

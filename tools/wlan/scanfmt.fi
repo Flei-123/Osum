@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/scanfmt.fi -- host driver for lib/wlan/scanfmt.fi.
+// stdin: lines "<rssi dBm, signed> <frame hex>", capacity as the first line "cap <n>".
+// Feeds each frame to connect.beacon_aufnehmen (the real library), prints scan_lines output.
+import std.rt
+import std.io
+import wlan.connect
+import wlan.device
+import wlan.testdevice
+import wlan.scanfmt
+
+static mut fr: [u8; 600] = [0; 600]
+static mut outb: [u8; 2048] = [0; 2048]
+
+fn hexv(c: u64) -> u64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return 0
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    rt.read_stdin(&inp)
+    let b: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var pr: testdevice.Check = testdevice.check_new()
+    var g: device.Geraet = device.geraet_new()
+    let _a: bool = testdevice.anhaengen(&g, &pr, false)
+    var s: connect.Sitzung = connect.sitzung_new()
+    let _s: bool = connect.suchlauf_beginnen(&s, &g)
+    var cap: usize = 2048
+    var i: usize = 0
+    while i < n {
+        // one line
+        var e: usize = i
+        while e < n && rt.ld8(b, e) != 10 { e = e + 1 }
+        if e - i > 4 && rt.ld8(b, i) == 99 {                 // "cap N"
+            var v: usize = 0
+            var k: usize = i + 4
+            while k < e { v = v * 10 + (hexv(rt.ld8(b, k) as u64) as usize)
+                k = k + 1 }
+            cap = v
+        } else if e > i {
+            var k2: usize = i
+            var neg: bool = false
+            if rt.ld8(b, k2) == 45 { neg = true
+                k2 = k2 + 1 }
+            var r: i64 = 0
+            while k2 < e && rt.ld8(b, k2) != 32 { r = r * 10 + (hexv(rt.ld8(b, k2) as u64) as i64)
+                k2 = k2 + 1 }
+            if neg { r = 0 - r }
+            k2 = k2 + 1
+            var fl: usize = 0
+            while k2 + 1 < e && fl < 600 {
+                fr[fl] = (hexv(rt.ld8(b, k2) as u64) * 16 + hexv(rt.ld8(b, k2 + 1) as u64)) as u8
+                fl = fl + 1
+                k2 = k2 + 2
+            }
+            let _r: bool = connect.beacon_aufnehmen(&s, (&fr[0]) as u64, fl, r)
+        }
+        i = e + 1
+    }
+    if cap > 2048 { cap = 2048 }
+    let w: usize = scanfmt.scan_lines(&s, (&outb[0]) as u64, cap)
+    io.print_bytes((&outb[0]) as u64, w)
+    return 0
+}
