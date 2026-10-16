@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mbg.fi -- gate driver of tools/jarvismini/run.sh (W-S5B): the background that JARVIS Mini floats over.
+//
+// Started by the kernel word `wigapp=/bin/mbg`. What it does:
+//   1. a frameless solid-colour window (shared buffer) over the right-bottom part of the screen, BLACK; `mbg: up x= y= w= h=`
+//   2. after a pause (the desktop, the bus and the hotkey helper need time) it starts `/bin/jarvismini <arg>` (one argument, from the
+//      kernel line is not possible, so the argument is fixed: "--as-app" unless the file /etc/mbg.plain exists); `mbg: exec rc=`
+//   3. every pointer press on the window switches black <-> white (`mbg: flip 1|0`); the host presses once, the box has to follow with ONE
+//      text colour change. Only the pause before the start is timing (room for the desktop); the gate checks ORDER, never durations.
+
+profile kernel
+
+import ulib
+import wlibc
+
+export { u_start }
+
+static mut s_t: [u8; 6] = "mbg: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_title: [u8; 4] = "mbg\0"
+static mut s_up: [u8; 4] = "up\0\0"
+static mut s_exec: [u8; 5] = "exec\0"
+static mut s_flip: [u8; 5] = "flip\0"
+static mut p_jm: [u8; 18] = "/bin/jarvismini\0\0\0"
+static mut a_jm: [u8; 12] = "jarvismini\0\0"
+static mut a_asapp: [u8; 9] = "--as-app\0"
+static mut p_plain: [u8; 15] = "/etc/mbg.plain\0"
+static mut argv: [u64; 4] = [0 as u64; 4]
+
+fn line(name: u64, a: u64, b: u64) {
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(a)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(b)
+    ulib.nl()
+}
+
+fn fill(p: u64, n: u64, color: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write32((p + i * 4) as *mut u32, color as u32)
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    wlibc.start(false)
+    let sw: u64 = wlibc.screen_w()
+    let sh: u64 = wlibc.screen_h()
+    let x: u64 = sw / 2
+    let y: u64 = (sh * 3) / 8
+    let w: u64 = sw - x
+    let h: u64 = sh - y
+    let bytes: u64 = w * h * 4
+    let p: u64 = wlibc.shm_buffer(bytes)
+    if p == 0 || ulib.bad(p) {
+        line((&s_up[0 as usize]) as u64, 0, 1)
+        return 5
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let hd: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h, (&s_title[0 as usize]) as u64, wlibc.win_opts(true, false, 256), fd + 1)
+    wlibc.shm_close(fd)
+    if ulib.bad(hd) || hd == 0 {
+        line((&s_up[0 as usize]) as u64, 0, 2)
+        return 6
+    }
+    fill(p, w * h, 0x000000)
+    let _d: u64 = wlibc.win_damage(hd, 0, 0, w, h)
+    line((&s_up[0 as usize]) as u64, (x << 16) | y, (w << 16) | h)
+
+    // give the desktop, the bus and the hotkey helper time (timing only)
+    let _s1: u64 = ulib.sleep_ms(14000)
+    var argc: u64 = 2
+    argv[(0) as usize] = (&a_jm[0 as usize]) as u64
+    argv[(1) as usize] = (&a_asapp[0 as usize]) as u64
+    let fd2: u64 = ulib.sys(ulib.SYS_OPEN, (&p_plain[0 as usize]) as u64, 0, 0)
+    if !ulib.bad(fd2) {
+        ulib.sys(ulib.SYS_CLOSE, fd2, 0, 0)
+        argc = 1
+    }
+    let rc: u64 = ulib.sys(ulib.SYS_EXEC, (&p_jm[0 as usize]) as u64, (&argv[0 as usize]) as u64, argc)
+    line((&s_exec[0 as usize]) as u64, rc, argc)
+
+    // event loop: every pointer press on this window switches the colour (black <-> white); the host clicks once
+    var ev: [u8; 32] = [0 as u8; 32]
+    var white: u64 = 0
+    var t: u64 = 0
+    while t < 200000 {
+        let b: u64 = (&ev[0 as usize]) as u64
+        var n: u64 = 0
+        while n < 16 && wlibc.sys3w(wlibc.WM_EVENT, hd, b, 0) == 1 {
+            n = n + 1
+            let typ: u64 = __mmio_read64((b) as *mut u64)
+            if typ == wlibc.EV_DOWN {
+                white = 1 - white
+                if white == 1 {
+                    fill(p, w * h, 0xFFFFFF)
+                } else {
+                    fill(p, w * h, 0x000000)
+                }
+                let _d2: u64 = wlibc.win_damage(hd, 0, 0, w, h)
+                line((&s_flip[0 as usize]) as u64, white, 0)
+            }
+        }
+        let _s3: u64 = ulib.sleep_ms(50)
+        t = t + 1
+    }
+    return 0
+}

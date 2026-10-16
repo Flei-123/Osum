@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# pakete/bauen.sh -- DIE PAKETE DIESES BAUMS BAUEN (wmplug x3, notes).
+# pakete/bauen.sh -- DIE PAKETE DIESES BAUMS BAUEN (wmplug x3, notes, stickwr, fvviewer, mail, jarvismini).
 #
 # Die Kette ist dieselbe wie bei tools/module/paket.sh, nur ohne Kern:
 #
@@ -89,6 +89,7 @@ elf kernel/user/notes.fi    pakete/notes           notes
 elf kernel/user/stickwr.fi  pakete/stickwr         stickwr
 app kernel/user/fvviewer.fi pakete/fvviewer        fvviewer
 app kernel/user/mail.fi     pakete/mail            mail
+app kernel/user/jarvismini.fi pakete/jarvismini    jarvismini
 # every package carries an action manifest (docs/ACTION-BUS.md, section 3)
 for d in pakete/*/; do
     [ -f "$d/ACTIONS" ] || continue
@@ -96,7 +97,7 @@ for d in pakete/*/; do
 done
 
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail pakete/jarvismini; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else
