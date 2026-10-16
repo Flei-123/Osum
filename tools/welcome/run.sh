@@ -17,6 +17,7 @@
 # the desktop starts `/bin/welcome -a` by itself:
 #   - "welcome: ready", the window has a check box and two buttons (3 rects)
 #   (the GUI toggle is NOT measured yet -- see the note near the end)
+# Part C: window sizes 300x200 / 520x330 (+ old layout as counter-proof), overlap measured by the program.
 # Static: the string keys exist in de + en, the bundle is in the stick list.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -109,5 +110,27 @@ n=$(grep -ac '^welcome: rect ' "$S" 2>/dev/null; true)
 # reach the box (focus is not on it); the switch itself is covered by part A (`welcome show on|off`).
 c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
+# ---- part C (16.10.2026, boss: "small window: the text overlaps"): the layout at 3 window sizes, measured by the program itself.
+# `welcome: layout win=<height> bottom=<end of the button bar> tier=<paragraphs dropped> overlap=<neighbouring boxes that overlap>`.
+# /etc/welcome.conf keys of the gate: w=/h= window size, l=1 the OLD layout (fixed one-line paragraph height, squeezing) = counter-proof.
+run_size() { # tag w h legacy -> prints the last layout line
+    local V="$W-$1"
+    printf 'show=ja\nw=%s\nh=%s\nl=%s\n' "$2" "$3" "$4" > "$V.conf"
+    printf 'warte 18\nfoto 00\n' > "$V.book"
+    DESIGNBUILD="$V-build" AUDIT_MKFS_EXTRA="/etc/ /etc/welcome.conf=$V.conf" \
+        bash tools/design/audit.sh "$V" accel=kvm uitrace=yes halt=300 \
+        progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme welcome" drehbuch="$V.book" > "$V.log" 2>&1
+    grep -a '^welcome: layout' "$V/serial.txt" | tail -1
+    rm -rf "$V" "$V-build" "$V.conf" "$V.book" "$V.log"
+}
+lay_num() { echo "$1" | sed -n "s/.* $2=\([0-9]*\).*/\1/p"; }
+L1=$(run_size small 300 200 0); L2=$(run_size normal 520 330 0); L3=$(run_size old 520 330 1)
+echo "  small : $L1"; echo "  normal: $L2"; echo "  old   : $L3"
+[ -n "$L1" ] && [ "$(lay_num "$L1" overlap)" = 0 ] && ok "300x200: no box overlaps another" || bad "300x200: overlap ($L1)"
+[ -n "$L1" ] && [ "$(lay_num "$L1" bottom)" -le "$(lay_num "$L1" win)" ] 2>/dev/null && ok "300x200: the button bar ends inside the window" || bad "300x200: bar outside ($L1)"
+[ -n "$L1" ] && [ "$(lay_num "$L1" tier)" -ge 1 ] 2>/dev/null && ok "300x200: paragraphs are dropped instead of squeezed" || bad "300x200: nothing dropped ($L1)"
+[ -n "$L2" ] && [ "$(lay_num "$L2" overlap)" = 0 ] && [ "$(lay_num "$L2" tier)" = 0 ] && ok "520x330: all three paragraphs, no overlap" || bad "520x330 ($L2)"
+[ -n "$L2" ] && [ "$(lay_num "$L2" bottom)" -le "$(lay_num "$L2" win)" ] 2>/dev/null && ok "520x330: the button bar ends inside the window" || bad "520x330: bar outside ($L2)"
+[ -n "$L3" ] && [ "$(lay_num "$L3" overlap)" -ge 1 ] 2>/dev/null && ok "COUNTER-PROOF: the old layout (l=1) overlaps at 520x330" || bad "counter-proof: old layout did not overlap ($L3)"
 echo "WELCOME: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

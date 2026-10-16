@@ -11,6 +11,7 @@ field: <dir> holds `desktop.ppm` and `serial.txt` (the program's `rect` lines, t
             plate has 0.
   soft      ... and it is smooth, not noise: the mean difference of horizontal neighbours is <= 3.0 levels.
   border    a defined rim: the mean luminance of the top edge rows differs by >= 3 levels from the row 5 px inside (light rim on dark glass, focus-accent rim on milk glass).
+  transparent the plate covers <= 0.62 of the picture beneath it (see cmd_field); `flat` must turn it red too.
   surround  the plate is visible against the picture around it (luminance ratio >= 1.3).
   With `flat` (the control run /etc/noglass) the variance check must FAIL: the script then prints
   `GLASS <label>: control red` and exits 0; if it does not turn red it exits 1 (the check is blind).
@@ -75,10 +76,18 @@ def cmd_field(a):
     res.append((abs(m["rim"] - m["inner"]) >= 3.0, "border: rim %.1f vs inside %.1f (need |diff| >= 3: light rim on dark glass, accent/dark rim on milk glass)" % (m["rim"], m["inner"])))
     ratio = (max(m["face"], m["out"]) + 12.0) / (min(m["face"], m["out"]) + 12.0)
     res.append((ratio >= 1.3, "surround: plate %.1f vs picture around %.1f (ratio %.2f, need >= 1.3)" % (m["face"], m["out"], ratio)))
+    # transparency (Justin, 16.10.2026: field + buttons looked solid grey): how much of the plate is tint. A white plate
+    # over the picture: face = a*255 + (1-a)*around -> a = (face-around)/(255-around); a dark plate: a = (around-face)/around.
+    if m["face"] >= m["out"]:
+        cover = (m["face"] - m["out"]) / max(1.0, 255.0 - m["out"])
+    else:
+        cover = (m["out"] - m["face"]) / max(1.0, m["out"])
+    res.append((cover <= 0.62, "transparent: the plate covers %.2f of the picture beneath (need <= 0.62: glass, not a solid fill)" % cover))
     if flat:
-        red = not res[0][0]
+        red = (not res[0][0]) and (not res[-1][0])
         print("  %s  control %s: the variance check %s (std %.2f)" % ("OK  " if red else "FAIL", label,
               "turned red" if red else "stayed green -- blind", m["sd"]))
+        print("  %s  control %s: coverage %.2f" % ("OK  " if red else "FAIL", label, cover))
         print("GLASS %s: control %s" % (label, "red" if red else "NOT red"))
         return 0 if red else 1
     for good, text in res:

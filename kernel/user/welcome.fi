@@ -74,6 +74,36 @@ fn conf_on() -> bool {
     return false
 }
 
+// A number after `key` (e.g. "w=") at the start of a line of /etc/welcome.conf; 0 when absent.
+// Test hook for the gate: it opens the window at a small size (the owner gets the default).
+fn conf_num(key0: u8, key1: u8) -> u64 {
+    var buf: [u8; 128] = [0 as u8; 128]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CONF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, 127)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    var i: u64 = 0
+    while i + 3 <= n {
+        let at_line: bool = i == 0 || buf[(i - 1) as usize] == 10 as u8
+        if at_line && buf[(i) as usize] == key0 && buf[(i + 1) as usize] == key1 {
+            var v: u64 = 0
+            var j: u64 = i + 2
+            while j < n && buf[(j) as usize] >= 48 as u8 && buf[(j) as usize] <= 57 as u8 {
+                v = v * 10 + (buf[(j) as usize] as u64 - 48)
+                j = j + 1
+            }
+            return v
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn conf_write(on: bool) -> bool {
     var yes: [u8; 9] = "show=ja\n\0"
     var no: [u8; 11] = "show=nein\n\0"
@@ -91,19 +121,107 @@ fn conf_write(on: bool) -> bool {
     return !ulib.bad(w)
 }
 
+// Paragraphs dropped from the end (0 = all three shown). A small window shows fewer hints instead of squeezing
+// the lines of the paragraphs into each other; a bigger window brings them back (`resized`).
+static mut tier: u64 = 0
+static mut nd_head: usize = 0
+static mut nd_bar: usize = 0
+
+// The boxes of the root column in order (the overlap check of `say_layout` walks them).
+static mut col_nodes: [usize; 8] = [0 as usize; 8]
+static mut col_n: u64 = 0
+
+// Counter-proof switch of the gate (`l=1` in /etc/welcome.conf): the old layout (fixed one-line paragraph heights, squeezing).
+static mut legacy: bool = false
+
+fn keep(i: usize) -> usize {
+    if !legacy {
+        fuiscene.set_noshrink(i)
+    }
+    if col_n < 8 {
+        col_nodes[(col_n) as usize] = i
+        col_n = col_n + 1
+    }
+    return i
+}
+
+// A paragraph: label_wrap gives it a fixed height of ONE line (24); two or more lines then ran into the next
+// box. Height 0 = the height of its lines (it follows the width the column gives it).
+fn para(col: usize, key: u64) -> usize {
+    if legacy {
+        return keep(fuiscene.label_wrap(col, msg.get(key), 3))
+    }
+    let i: usize = fuiscene.label_wrap(col, msg.get(key), 12)
+    fuiscene.set_size(i, 0, 0)
+    return keep(i)
+}
+
 fn build() {
     let col: usize = fuiscene.root()
-    let _h: usize = fuiscene.label(col, msg.get((&k_head[0 as usize]) as u64))
-    let _a: usize = fuiscene.label_wrap(col, msg.get((&k_t1[0 as usize]) as u64), 3)
-    let _b: usize = fuiscene.label_wrap(col, msg.get((&k_t2[0 as usize]) as u64), 3)
-    let _c: usize = fuiscene.label_wrap(col, msg.get((&k_t3[0 as usize]) as u64), 3)
-    let _ck: usize = fuiscene.check(col, msg.get((&k_show[0 as usize]) as u64), K_SHOW, show_now)
-    let bar: usize = fuiscene.row(col)
+    col_n = 0
+    nd_head = keep(fuiscene.label(col, msg.get((&k_head[0 as usize]) as u64)))
+    if tier < 3 {
+        let _a: usize = para(col, (&k_t1[0 as usize]) as u64)
+    }
+    if tier < 2 {
+        let _b: usize = para(col, (&k_t2[0 as usize]) as u64)
+    }
+    if tier < 1 {
+        let _c: usize = para(col, (&k_t3[0 as usize]) as u64)
+    }
+    let _ck: usize = keep(fuiscene.check(col, msg.get((&k_show[0 as usize]) as u64), K_SHOW, show_now))
+    // narrow window: the two buttons stand on top of each other instead of running out of the window
+    var bar: usize = 0
+    if fuiscene.width() < 360 {
+        bar = fuiscene.column(col)
+    } else {
+        bar = fuiscene.row(col)
+    }
+    nd_bar = keep(bar)
     fuiscene.set_gap(bar, 8)
     let b1: usize = fuiscene.button_main(bar, msg.get((&k_set[0 as usize]) as u64), K_SET)
+    fuiscene.set_noshrink(b1)
     fuiscene.set_size(b1, 180, 36)
     let b2: usize = fuiscene.button(bar, msg.get((&k_close[0 as usize]) as u64), K_CLOSE)
+    fuiscene.set_noshrink(b2)
     fuiscene.set_size(b2, 120, 36)
+}
+
+// The line `welcome: layout ...` (gate): window height, bottom of the button bar, hidden paragraphs, overlaps of
+// neighbouring boxes of the column (0 = none).
+fn say_layout() {
+    var s_l: [u8; 22] = "welcome: layout win=\0\0"
+    var s_b: [u8; 9] = " bottom=\0"
+    var s_t: [u8; 7] = " tier=\0"
+    var s_o: [u8; 10] = " overlap=\0"
+    var ov: u64 = 0
+    var k: u64 = 1
+    while k < col_n {
+        let p: usize = col_nodes[(k - 1) as usize]
+        let q: usize = col_nodes[(k) as usize]
+        if fuiscene.node_y(p) + fuiscene.node_h(p) > fuiscene.node_y(q) {
+            ov = ov + 1
+        }
+        k = k + 1
+    }
+    // a paragraph whose box is lower than its lines (16 px each at least): the text is painted over the next box
+    k = 0
+    while k < col_n {
+        let p2: usize = col_nodes[(k) as usize]
+        if fuiscene.node_lines(p2) * 16 > fuiscene.node_h(p2) {
+            ov = ov + 1
+        }
+        k = k + 1
+    }
+    say((&s_l[0 as usize]) as u64)
+    ulib.sayu(fuiscene.height())
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayu(fuiscene.node_y(nd_bar) + fuiscene.node_h(nd_bar))
+    say((&s_t[0 as usize]) as u64)
+    ulib.sayu(tier)
+    say((&s_o[0 as usize]) as u64)
+    ulib.sayu(ov)
+    ulib.nl()
 }
 
 fn u_gui() -> u64 {
@@ -115,14 +233,39 @@ fn u_gui() -> u64 {
     var s_nm: [u8; 8] = "welcome\0"
     let _mi: u64 = msg.init()
     show_now = conf_on()
-    if !fuiscene.open(160, 120, 520, 330, msg.get((&k_title[0 as usize]) as u64), build) {
+    legacy = conf_num(108 as u8, 61 as u8) == 1
+    var ww: u64 = conf_num(119 as u8, 61 as u8)
+    var wh: u64 = conf_num(104 as u8, 61 as u8)
+    if ww < 120 {
+        ww = 520
+    }
+    if wh < 80 {
+        wh = 330
+    }
+    if !fuiscene.open(160, 120, ww, wh, msg.get((&k_title[0 as usize]) as u64), build) {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
         return 1
     }
     var first: bool = true
+    var seen_rs: u64 = fuiscene.resized()
+    var seen_tier: u64 = 99
+    var settle: u64 = 0
     while fuiscene.alive() {
         let key: u64 = fuiscene.pump()
+        // the window got another size: try all the paragraphs again, drop from the end while the bar does not fit
+        if fuiscene.resized() != seen_rs {
+            seen_rs = fuiscene.resized()
+            tier = 0
+            settle = 0
+            fuiscene.refresh()
+        } else if !first && !legacy && fuiscene.node_y(nd_bar) + fuiscene.node_h(nd_bar) + 8 > fuiscene.height() && tier < 3 {
+            tier = tier + 1
+            fuiscene.refresh()
+        } else if !first && (tier != seen_tier) {
+            seen_tier = tier
+            say_layout()
+        }
         if first {
             first = false
             fuiscene.say_rects((&s_nm[0 as usize]) as u64)
