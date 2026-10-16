@@ -74,15 +74,28 @@ int main(void)
     errno = 0; n = slurp("/sys/devices/system/cpu/possible", b, sizeof b); CHECKC("sys_cpu_possible", n > 0);
     errno = 0; n = slurp("/sys/devices/system/cpu/cpu0/cache/index0/size", b, sizeof b); CHECKC("sys_cpu_cache", n > 0);
     {
-        /* diagnostics for the cache check: what the CPU says and what the directories list */
-        unsigned ea = 0, eb = 0, ec = 0, ed = 0, ma = 0, xa = 0, xc = 0, la = 0;
+        /* /sys cache view must say what the CPU says: leaf 4 (Intel) or 0x8000001D (AMD, TOPOEXT); no cache info = no index0 (nothing invented) */
+        unsigned ma = 0, ea = 0, eb = 0, ec = 0, ed = 0, xa = 0, xc = 0, lf = 0;
         __asm__ volatile("cpuid" : "=a"(ma), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(0), "c"(0));
-        __asm__ volatile("cpuid" : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(4), "c"(0));
-        __asm__ volatile("cpuid" : "=a"(xa), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000000u), "c"(0));
-        __asm__ volatile("cpuid" : "=a"(la), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000001u), "c"(0));
-        DIR *dd = opendir("/sys/devices/system/cpu/cpu0/cache"); int cnt = 0;
-        if (dd) { while (readdir(dd)) cnt++; closedir(dd); }
-        GAP("diag_cache", "max=%x leaf4.eax=%x extmax=%x ext1.ecx=%x cache_dir_entries=%d", ma, ea, xa, xc, cnt);
+        if (ma >= 4) { __asm__ volatile("cpuid" : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(4), "c"(0)); if (ea & 31) lf = 4; }
+        if (!lf) {
+            __asm__ volatile("cpuid" : "=a"(xa), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000000u), "c"(0));
+            unsigned x1 = 0;
+            __asm__ volatile("cpuid" : "=a"(x1), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000001u), "c"(0));
+            if (xa >= 0x8000001Du && ((xc >> 22) & 1)) { __asm__ volatile("cpuid" : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(0x8000001Du), "c"(0)); if (ea & 31) lf = 0x8000001Du; }
+        }
+        struct stat cs; int has = stat("/sys/devices/system/cpu/cpu0/cache/index0", &cs) == 0;
+        if (lf) {
+            unsigned long sz = (unsigned long)((eb >> 22) + 1) * (((eb >> 12) & 1023) + 1) * ((eb & 4095) + 1) * (ec + 1ul);
+            char exp[32]; snprintf(exp, sizeof exp, "%luK\n", sz / 1024);
+            int m = slurp("/sys/devices/system/cpu/cpu0/cache/index0/size", b, sizeof b);
+            CHECK("sys_cpu_cache_honest", m > 0 && !strcmp(b, exp), "size file '%s' expected '%s'", m > 0 ? b : "(none)", exp);
+        } else {
+            CHECK("sys_cpu_cache_honest", !has, "index0 exists but the CPU reports no cache info");
+        }
+        /* online: "0" or "0-N", matches the number of CPUs of /proc/cpuinfo */
+        int m2 = slurp("/sys/devices/system/cpu/online", b, sizeof b);
+        CHECK("sys_cpu_online_format", m2 > 0 && b[0] == '0' && (b[1] == '\n' || b[1] == '-'), "online='%s'", m2 > 0 ? b : "");
     }
     errno = 0; n = slurp("/sys/class/drm/card0/device/vendor", b, sizeof b); CHECKC("sys_drm", n > 0);
 
