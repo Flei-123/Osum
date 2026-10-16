@@ -13,7 +13,7 @@ The reply to a message: one `token` frame ("pong from fake") + `done`.
 import base64, hashlib, json, re, socket, ssl, struct, sys, threading, time
 
 port, cert, key, logf = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-TOKEN = "tok-fake-123"
+TOKEN = "tok-fake-" + "x" * 40  # the real one is a JWT (long); jmlink wants >= 20 characters
 lock = threading.Lock()
 
 
@@ -97,7 +97,7 @@ def handle(c):
                 j = {}
             if j.get("username") == "justin" and j.get("password") == "geheim":
                 log("login ok user=justin")
-                out = json.dumps({"token": TOKEN}).encode()
+                out = json.dumps({"token": TOKEN}, separators=(",", ":")).encode()
                 c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
             else:
                 log("login bad user=%s" % j.get("username", "?"))
@@ -113,7 +113,7 @@ def handle(c):
             acc = base64.b64encode(hashlib.sha1((hd["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
             c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + acc + b"\r\n\r\n")
             log("ws open")
-            c.sendall(ws_frame(1, json.dumps({"type": "info", "version": "fake"}).encode()))
+            c.sendall(ws_frame(1, json.dumps({"type": "info", "version": "fake"}, separators=(",", ":")).encode()))
             st = {"b": rest}
             while True:
                 op, data, fin = ws_read(c, st)
@@ -131,8 +131,8 @@ def handle(c):
                         imgs, files = j.get("images") or [], j.get("files") or []
                         magic = (imgs[0]["data"][:12] if imgs else (files[0]["data"][:12] if files else "-"))
                         log("msg %s images=%d files=%d imgmagic=%s" % (j.get("text", "").replace("\n", " "), len(imgs), len(files), magic))
-                        c.sendall(ws_frame(1, json.dumps({"type": "token", "content": "pong from fake\n"}).encode()))
-                        c.sendall(ws_frame(1, json.dumps({"type": "done"}).encode()))
+                        c.sendall(ws_frame(1, json.dumps({"type": "token", "content": "pong from fake\n"}, separators=(",", ":")).encode()))
+                        c.sendall(ws_frame(1, json.dumps({"type": "done"}, separators=(",", ":")).encode()))
             return
         c.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     except (EOFError, ConnectionError, ssl.SSLError, OSError):

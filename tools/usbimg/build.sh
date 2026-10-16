@@ -298,6 +298,8 @@ glogin lock login passwd su chown idlelock powerd init svc term termfull shasum 
 orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome apprights wmplug hotkeyd jarvismini"}
 # the public image has no chat server to reach: no JARVIS Mini binary there
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
+# W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
+if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; fi
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -358,6 +360,8 @@ orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysi
 # ROUND ROADMAP-5 (K-008): `ipprint` prints over IPP -- same build path
 # (profile app, TrueType reader from the library), see kernel/app/ipprint.fi.
 APPS=${APPS:-"fetch jarvisd ipprint"}
+# W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
+if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s laesst sich nicht assemblieren"
 gebaut=""
@@ -1353,7 +1357,8 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 #                    --as-app labels it app:jarvismini and drops to uid 1000, so /etc/apprights.conf is REALLY checked
 #   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
 if [ "$IMAGE_PROFILE" = personal ]; then
-    printf '10.0.2.2 7700\n' > "$OUT/jarvismini.conf"
+    # W-MINI2: link mode (no "ip port" line): the Mini talks to /bin/jmlink, which reaches the real server over TLS
+    printf 'server jarvis.fleitec.com\n' > "$OUT/jarvismini.conf"
     printf 'jarvismini window.float,hotkey,net\n' > "$OUT/apprights.conf"
     { cat etc/wmplug.conf
       printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n'
@@ -1414,7 +1419,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
-[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions"
+[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip"
 [ "${ROOT_SLIM:-0}" = 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
