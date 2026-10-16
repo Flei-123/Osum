@@ -121,6 +121,8 @@ static mut s_blob: [u8; 8] = "blob=\0\0\0"
 static mut s_ueb: [u8; 12] = "ueberlauf=\0\0"
 static mut s_off: [u8; 12] = "tzoff=\0\0\0\0\0\0"
 static mut s_lz: [u8; 2] = " \0"
+static mut s_kd: [u8; 8] = "kdirs=\0\0"
+static mut s_kv: [u8; 8] = "kvis=\0\0\0"
 
 // Die Zahl der ANGEZEIGTEN Zeilen -- das ist es, was der Rahmen fuer
 // Auswahl, Statuszeile und Tabellenhoehe braucht.
@@ -441,12 +443,37 @@ fn passt(name: u64) -> bool {
     return false
 }
 
+// W4: the kernel's own mount points in "/" ("proc", "dev", "sys") are no folders of the user: Windows 11 shows none of them.
+// They appear again with "show hidden" (Ctrl+H). `at_root` is set by `lade` for the folder "/" only.
+static mut at_root: bool = false
+
+fn kernel_dir(name: u64) -> bool {
+    let a: u64 = (__mmio_read8(name as *mut u8)) as u64
+    let b: u64 = (__mmio_read8((name + 1) as *mut u8)) as u64
+    let c: u64 = (__mmio_read8((name + 2) as *mut u8)) as u64
+    let d: u64 = (__mmio_read8((name + 3) as *mut u8)) as u64
+    let e: u64 = (__mmio_read8((name + 4) as *mut u8)) as u64
+    if a == 100 && b == 101 && c == 118 && d == 0 {
+        return true
+    }
+    if a == 115 && b == 121 && c == 115 && d == 0 {
+        return true
+    }
+    if a == 112 && b == 114 && c == 111 && d == 99 && e == 0 {
+        return true
+    }
+    return false
+}
+
 // Steht der Eintrag in der Ansicht? Versteckt (Strg+H) und Filter
 // (Strg+F) entscheiden hier und NICHT beim Einlesen -- sonst muesste
 // jeder Tastendruck im Filterfeld das Verzeichnis neu lesen.
 fn sichtbar(e: u64) -> bool {
     let p: u64 = name_at(e)
     if zeig_versteckt == 0 && versteckt_name(p) {
+        return false
+    }
+    if zeig_versteckt == 0 && at_root && kernel_dir(p) {
         return false
     }
     return passt(p)
@@ -531,6 +558,7 @@ fn lade(dir: u64) -> u64 {
     t_weg = 0
     bp = 0
     tp = 0
+    at_root = (__mmio_read8(dir as *mut u8)) == 47 as u8 && (__mmio_read8((dir + 1) as *mut u8)) == 0 as u8
     let fd: u64 = io.dir_open(dir)
     if ulib.bad(fd) {
         return fd
@@ -751,6 +779,36 @@ fn ends_with(p: u64, e: u64) -> bool {
     return true
 }
 
+// W4: file types by ending, one space-separated list per kind (case does not matter). Windows 11 gives each its own
+// symbol and its own word in the "Type" column.
+static mut x_imgs: [u8; 40] = ".ppm .gif .webp .svg .ico .tga .tif\0\0\0\0\0"
+static mut x_pdfs: [u8; 6] = ".pdf\0\0"
+static mut x_arch: [u8; 40] = ".zip .tar .gz .xz .7z .bz2 .rar .opk\0\0\0\0"
+static mut x_audio: [u8; 40] = ".mp3 .wav .ogg .flac .m4a .opus\0\0\0\0\0\0\0\0\0"
+static mut x_video: [u8; 40] = ".mp4 .mkv .avi .webm .mov .m4v\0\0\0\0\0\0\0\0\0\0"
+
+// Does the name end in one of the endings of the list (".zip .tar ...")?
+fn ends_list(p: u64, list: u64) -> bool {
+    var at: u64 = 0
+    while (__mmio_read8((list + at) as *mut u8)) != 0 as u8 {
+        var tok: [u8; 12] = [0 as u8; 12]
+        var tn: u64 = 0
+        while (__mmio_read8((list + at) as *mut u8)) != 0 as u8
+                && (__mmio_read8((list + at) as *mut u8)) != 32 as u8 && tn < 10 {
+            tok[(tn) as usize] = __mmio_read8((list + at) as *mut u8)
+            tn = tn + 1
+            at = at + 1
+        }
+        if tn > 0 && ends_with(p, (&tok[(0) as usize]) as u64) {
+            return true
+        }
+        if (__mmio_read8((list + at) as *mut u8)) == 32 as u8 {
+            at = at + 1
+        }
+    }
+    return false
+}
+
 // r442: THE KIND of an entry, once -- the symbol and the "Type" column both ask it.
 // 0 file, 1 folder, 2 program, 3 image, 4 text.
 fn kind_of(e: u64) -> u64 {
@@ -782,6 +840,21 @@ fn kind_of(e: u64) -> u64 {
         || ends_with(p, (&x_bmp[(0) as usize]) as u64) {
         return 3
     }
+    if ends_list(p, (&x_imgs[(0) as usize]) as u64) {
+        return 3
+    }
+    if ends_list(p, (&x_pdfs[(0) as usize]) as u64) {
+        return 5
+    }
+    if ends_list(p, (&x_arch[(0) as usize]) as u64) {
+        return 6
+    }
+    if ends_list(p, (&x_audio[(0) as usize]) as u64) {
+        return 7
+    }
+    if ends_list(p, (&x_video[(0) as usize]) as u64) {
+        return 8
+    }
     if ends_with(p, (&x_fi[(0) as usize]) as u64)
         || ends_with(p, (&x_sh[(0) as usize]) as u64)
         || ends_with(p, (&x_osp[(0) as usize]) as u64) {
@@ -799,6 +872,10 @@ static mut k_ty_dir: [u8; 22] = "explorer.type.folder\0\0"
 static mut k_ty_prog: [u8; 24] = "explorer.type.program\0\0\0"
 static mut k_ty_img: [u8; 22] = "explorer.type.image\0\0\0"
 static mut k_ty_text: [u8; 22] = "explorer.type.text\0\0\0\0"
+static mut k_ty_pdf: [u8; 20] = "explorer.type.pdf\0\0\0"
+static mut k_ty_arch: [u8; 24] = "explorer.type.archive\0\0\0"
+static mut k_ty_audio: [u8; 22] = "explorer.type.audio\0\0\0"
+static mut k_ty_video: [u8; 22] = "explorer.type.video\0\0\0"
 static mut sizebuf: [u8; 24] = [0 as u8; 24]
 
 fn type_text(e: u64) -> u64 {
@@ -814,6 +891,18 @@ fn type_text(e: u64) -> u64 {
     }
     if k == 4 {
         return msg.get((&k_ty_text[(0) as usize]) as u64)
+    }
+    if k == 5 {
+        return msg.get((&k_ty_pdf[(0) as usize]) as u64)
+    }
+    if k == 6 {
+        return msg.get((&k_ty_arch[(0) as usize]) as u64)
+    }
+    if k == 7 {
+        return msg.get((&k_ty_audio[(0) as usize]) as u64)
+    }
+    if k == 8 {
+        return msg.get((&k_ty_video[(0) as usize]) as u64)
     }
     return msg.get((&k_ty_file[(0) as usize]) as u64)
 }
@@ -833,6 +922,19 @@ fn icon_for(e: u64) -> u64 {
     }
     if k == 2 {
         return wlib.icon_tint(wlib.icon_id(icons.FILE_PROGRAM), 8141549)
+    }
+    // W4: PDF red, archives amber, audio violet, video pink (tints of the file symbols)
+    if k == 5 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_TEXT), 14423100)
+    }
+    if k == 6 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 15105570)
+    }
+    if k == 7 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 9133302)
+    }
+    if k == 8 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 14431557)
     }
     return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 9741240)
 }
@@ -966,5 +1068,24 @@ fn melde() {
     ulib.say((&s_lz[(0) as usize]) as u64)
     ulib.say((&s_off[(0) as usize]) as u64)
     ulib.sayn(time_offset())
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    // W4: how many kernel mount points ("dev", "proc", "sys") the folder holds and how many of them the view shows
+    var kd: u64 = 0
+    var kv: u64 = 0
+    var ki: u64 = 0
+    while ki < n_all {
+        if at_root && kernel_dir(name_at(ki)) {
+            kd = kd + 1
+            if sichtbar(ki) {
+                kv = kv + 1
+            }
+        }
+        ki = ki + 1
+    }
+    ulib.say((&s_kd[(0) as usize]) as u64)
+    ulib.sayn(kd)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_kv[(0) as usize]) as u64)
+    ulib.sayn(kv)
     ulib.nl()
 }
