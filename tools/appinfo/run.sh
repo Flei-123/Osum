@@ -38,6 +38,12 @@ else bad "kernel does not build"; tail -5 "$TMPD/k.txt" | sed 's/^/        /'; e
 printf 'name=alpha\nperm=net,notify,mic\nnet=real\n' > "$TMPD/bd/alpha.info"
 printf 'name=spinner\nperm=notify\n' > "$TMPD/bd/spinner.info"
 printf 'name=gone\nperm=net\nnet=real\n' > "$TMPD/bd/gone.info"
+# a real generation (plan + store), so `opk remove` works like on an installed system; the seen file marks the safe
+# rights as already offered, so `apprights load` grants nothing (mask=0 at the start)
+HA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; HS=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; HG=cccccccccccccccccccccccccccccccc
+printf '00000001\n' > "$TMPD/bd/AKTUELL"
+printf 'alpha\t%s\nspinner\t%s\ngone\t%s\n' "$HA" "$HS" "$HG" > "$TMPD/bd/PLAN"
+printf 'alpha net notify\nspinner notify\ngone net\n' > "$TMPD/bd/seen"
 printf 'leerlauf=300\n' > "$TMPD/sperre.conf"
 printf 'scheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
@@ -49,8 +55,8 @@ printf 'lang=de\n' > "$TMPD/locale.conf"
   echo "apprights burn spin spinner &"
   echo "sleep 2"
   echo "settings debug page=18 &"
-  for i in $(seq 1 90); do
-      echo "echo ==T$i=="; echo "cat /etc/apprights.conf"; echo "apprights list"; echo "sleep 3"
+  for i in $(seq 1 60); do
+      echo "echo ==T$i=="; echo "cat /etc/apprights.conf"; echo "apprights list"; echo "ls /apps"; echo "sleep 3"
   done
   echo "echo ==G-CEIL=="
   echo "apprights set alpha camera"
@@ -62,8 +68,10 @@ printf 'lang=de\n' > "$TMPD/locale.conf"
 
 mkimg() { # out.img script
   local A=(build "$1" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
-     /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ /apps/ /data/
+     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /var/ /var/log/ /etc/ /apps/ /data/
      "/etc/sperre.conf=$TMPD/sperre.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/passwd=$TMPD/passwd"
+     "/etc/apprights.seen=$TMPD/bd/seen" /system/generations/ /system/generations/1/
+     "/system/AKTUELL=$TMPD/bd/AKTUELL" "/system/generations/1/PLAN=$TMPD/bd/PLAN" /store/
      "/etc/locale.conf=$TMPD/locale.conf" "/etc/uitrace=$TMPD/locale.conf"
      /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
      "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages"
@@ -73,6 +81,8 @@ mkimg() { # out.img script
   A+=(/etc/schemas/)
   for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
   for a in alpha spinner gone; do A+=("/apps/$a.osp/" "/apps/$a.osp/INFO=$TMPD/bd/$a.info"); done
+  A+=("/store/${HA:0:20}/" "/store/${HA:0:20}/INFO=$TMPD/bd/alpha.info" "/store/${HS:0:20}/" "/store/${HS:0:20}/INFO=$TMPD/bd/spinner.info"
+      "/store/${HG:0:20}/" "/store/${HG:0:20}/INFO=$TMPD/bd/gone.info")
   for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
   python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
@@ -185,6 +195,9 @@ sleep 3
 last=$(clean "$SER" | grep -a 'settings: apps list n=' | tail -1)
 echo "        $last"
 echo "$last" | grep -aq 'n=2' && ok "list is back with 2 apps" || bad "list after uninstall: $last"
+sleep 4
+ft=$(full_tick)
+{ echo "$ft" | grep -aq 'spinner.osp' && ! echo "$ft" | grep -aq 'gone.osp'; } && ok "/apps/gone.osp is gone from the disk, the others stay" || bad "ls /apps after uninstall: $(echo "$ft" | grep -a 'osp' | head -1)"
 
 echo "== 7. ceiling from the shell =="
 waitfor "==FERTIG==" 400 || true

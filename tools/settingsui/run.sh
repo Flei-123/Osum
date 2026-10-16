@@ -5,9 +5,9 @@
 #   /root/jarvis/bin/heavy bash tools/settingsui/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings,
-# clicks every sidebar page (rect names taba..tao), types into the search field
+# clicks every sidebar page (rect names taba..tas), types into the search field
 # (Ctrl+F), and takes a picture each time. Checks (serial log):
-#   1. the sidebar tiles are reported (15 `tab?` rects);
+#   1. the sidebar tiles are reported (19 `tab?` rects);
 #   2. the search field is reported and the window is up;
 #   3. a search that matches nothing leaves the sidebar empty ("Keine Treffer");
 #   4. no crash lines.
@@ -37,7 +37,7 @@ ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 S="$OUT/serial.txt"
 n=$(grep -ac 'settings: rect name=tab' "$S" 2>/dev/null; true)
-[ "$n" -ge 15 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
+[ "$n" -ge 19 ] && ok "sidebar pages reported ($n)" || bad "sidebar pages reported ($n)"
 grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 # the segmented control (K_SEG0 = 180..182 -> wgy wgz wha) and the eight swatches (183..190) are real nodes
 for r in wgy wgz wha; do
