@@ -110,6 +110,8 @@ def main():
         time.sleep(0.7)  # shorter than the 2 s trailing UPDATE: a lost rectangle must still be visible here
         out.write("%d %d %s\n" % (i, compare(mon, vnc, "r%d" % i), stats(vnc)))
         out.flush()
+        with vnc.lock:
+            open(base + ".updates", "w").write(str(vnc.updates))  # kept current: a cut-off run still reports it
     out.close()
     with vnc.lock:
         n = vnc.updates
