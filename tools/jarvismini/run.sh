@@ -57,11 +57,12 @@ stop_stubs() { for p in $STUBPIDS; do kill "$p" 2>/dev/null; done; STUBPIDS=""; 
 run_boot() { # $1 = name, $2 = rights file
     local O="$D/$1"
     EH_APPEND=rtcutc EH_MKFS_EXTRA="$EXTRA_COMMON /etc/apprights.conf=$2@0644" \
-        DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$O" "res=$RES" accel=kvm netz=ja "moreprogs=$MORE" \
+        DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$O" "res=$RES" accel=kvm netz=ja tafel=nein "moreprogs=$MORE" \
             "extra=wmplug wigapp=/bin/mbg" "drehbuch=$D/$1.book" > "$D/$1.log" 2>&1
 }
 
 S_CLK="$(( SW / 2 + 40 )),$(( SH * 3 / 8 + 40 ))"
+S_IN="$(( SW - 150 )),$(( 760 - 12 - 24 ))"
 
 # ---------------------------------------------------------------- boot A script
 cat > "$D/A.book" <<EOF
@@ -69,6 +70,8 @@ warteauf '(?m)^mbg: up' || 150
 warteauf 'jarvismini: up float=1' || 120
 warte 4
 foto 01-up
+klick $S_IN
+warte 1
 tippe hello
 taste ret
 warteauf 'jarvismini: sent len=5' || 30
