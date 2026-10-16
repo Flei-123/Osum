@@ -73,6 +73,17 @@ int main(void)
     errno = 0; n = slurp("/sys/devices/system/cpu/online", b, sizeof b); CHECKC("sys_cpu_online", n > 0);
     errno = 0; n = slurp("/sys/devices/system/cpu/possible", b, sizeof b); CHECKC("sys_cpu_possible", n > 0);
     errno = 0; n = slurp("/sys/devices/system/cpu/cpu0/cache/index0/size", b, sizeof b); CHECKC("sys_cpu_cache", n > 0);
+    {
+        /* diagnostics for the cache check: what the CPU says and what the directories list */
+        unsigned ea = 0, eb = 0, ec = 0, ed = 0, ma = 0, xa = 0, xc = 0, la = 0;
+        __asm__ volatile("cpuid" : "=a"(ma), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(0), "c"(0));
+        __asm__ volatile("cpuid" : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(4), "c"(0));
+        __asm__ volatile("cpuid" : "=a"(xa), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000000u), "c"(0));
+        __asm__ volatile("cpuid" : "=a"(la), "=b"(eb), "=c"(xc), "=d"(ed) : "a"(0x80000001u), "c"(0));
+        DIR *dd = opendir("/sys/devices/system/cpu/cpu0/cache"); int cnt = 0;
+        if (dd) { while (readdir(dd)) cnt++; closedir(dd); }
+        GAP("diag_cache", "max=%x leaf4.eax=%x extmax=%x ext1.ecx=%x cache_dir_entries=%d", ma, ea, xa, xc, cnt);
+    }
     errno = 0; n = slurp("/sys/class/drm/card0/device/vendor", b, sizeof b); CHECKC("sys_drm", n > 0);
 
     /* paths */
