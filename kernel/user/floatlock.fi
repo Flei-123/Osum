@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/floatlock.fi -- W-WINOPTS stage 2 follow-up (tools/winfloatlock/run.sh): A FLOAT WINDOW LIES BEHIND THE LOCK SCREEN.
+//
+// One labelled app (app:fprobe, uid 1000) with the right `window.float` makes a frameless solid red window on L_FLOAT at (700,100) and
+// stays alive. 12 s later the parent starts the `lock` program (SYS_EXEC), the host takes photos and checks that nothing of the window shows through.
+// Every result is one serial line `floatlock: <name> <a> <b>`.
+// Integer only, no heap: the program runs in the kernel profile.
+
+profile kernel
+
+import ulib
+import wlibc
+import libc.kcall
+import apprights.policy
+
+export { u_start }
+
+const SYS_SETUID: u64 = 105
+const W: u64 = 300
+const H: u64 = 200
+const C_RED: u64 = 0xCC0000
+
+static mut s_t: [u8; 12] = "floatlock: \0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_app: [u8; 7] = "fprobe\0"
+static mut s_title: [u8; 11] = "float-lock\0"
+
+fn line(name: u64, a: u64, b: u64) {
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(a)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayu(b)
+    ulib.nl()
+}
+
+fn yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn fill(p: u64, color: u64) {
+    var i: u64 = 0
+    while i < W * H {
+        __mmio_write32((p + i * 4) as *mut u32, color as u32)
+        i = i + 1
+    }
+}
+
+fn mkwin(x: u64, y: u64, color: u64, title: u64) -> u64 {
+    let bytes: u64 = W * H * 4
+    let p: u64 = wlibc.shm_buffer(bytes)
+    if p == 0 || ulib.bad(p) {
+        return 0
+    }
+    let fd: u64 = wlibc.shm_last_fd()
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (W << 16) | H, title, wlibc.win_opts(true, false, 256), fd + 1)
+    wlibc.shm_close(fd)
+    if ulib.bad(h) || h == 0 {
+        return 0
+    }
+    fill(p, color)
+    let _d: u64 = wlibc.win_damage(h, 0, 0, W, H)
+    return h
+}
+
+fn layer_of(h: u64) -> u64 {
+    return wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_LAYER, 0)
+}
+
+// Give this process the label app:<app> (once; a label can only be narrowed).
+fn label_self(app: u64) -> bool {
+    var lab: [u8; 32] = [0 as u8; 32]
+    lab[0 as usize] = 97 as u8
+    lab[1 as usize] = 112 as u8
+    lab[2 as usize] = 112 as u8
+    lab[3 as usize] = 58 as u8
+    let n: u64 = ulib.length(app)
+    if n == 0 || n > 19 {
+        return false
+    }
+    ulib.copy((&lab[4 as usize]) as u64, app, n)
+    return !ulib.failed(ulib.sys(kcall.SYS_OSUM_ORIGIN, 1, (&lab[0]) as u64, n + 4))
+}
+
+fn child_float() -> u64 {
+    var n_lab: [u8; 8] = "c-label\0"
+    var n_make: [u8; 7] = "c-make\0"
+    var n_float: [u8; 8] = "c-float\0"
+    var n_lay: [u8; 8] = "c-layer\0"
+    if !label_self((&s_app[0 as usize]) as u64) {
+        line((&n_lab[0 as usize]) as u64, 0, 0)
+        return 3
+    }
+    line((&n_lab[0 as usize]) as u64, 1, 0)
+    let su: u64 = ulib.sys(SYS_SETUID, 1000, 0, 0)
+    if ulib.bad(su) {
+        return 4
+    }
+    wlibc.start(false)
+    let h: u64 = mkwin(700, 100, C_RED, (&s_title[0 as usize]) as u64)
+    line((&n_make[0 as usize]) as u64, yes(h != 0), 0)
+    if h == 0 {
+        return 5
+    }
+    let rf: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_FLOAT)
+    line((&n_float[0 as usize]) as u64, 0 -% rf, layer_of(h))
+    line((&n_lay[0 as usize]) as u64, layer_of(h), 0)
+    var last: u64 = layer_of(h)
+    var t: u64 = 0
+    while t < 20000 {
+        let l: u64 = layer_of(h)
+        if l != last {
+            last = l
+            line((&n_lay[0 as usize]) as u64, l, 0)
+        }
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ceil: [u8; 7] = "p-ceil\0"
+    var n_gr: [u8; 8] = "p-grant\0"
+    wlibc.start(false)
+    // the manifest ceiling allows the right, then the person grants it
+    let rc: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 4, (&s_app[0 as usize]) as u64, policy.P_WINDOW_FLOAT)
+    line((&n_ceil[0 as usize]) as u64, yes(!ulib.failed(rc)), 0)
+    let rg: u64 = ulib.sys(kcall.SYS_OSUM_ORIGIN, 2, (&s_app[0 as usize]) as u64, policy.P_WINDOW_FLOAT)
+    line((&n_gr[0 as usize]) as u64, yes(!ulib.failed(rg)), 0)
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.failed(pid) {
+        return 1
+    }
+    if pid == 0 {
+        let rc2: u64 = child_float()
+        let _e: u64 = ulib.sys(ulib.SYS_EXIT, rc2, 0, 0)
+        return rc2
+    }
+    // 12 s later the screen is locked (the host takes the baseline photo before)
+    var n_lk: [u8; 7] = "p-lock\0"
+    var p_lock: [u8; 10] = "/bin/lock\0"
+    var t: u64 = 0
+    while t < 500 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    let lp: u64 = ulib.sys(ulib.SYS_EXEC, (&p_lock[0 as usize]) as u64, 0, 0)
+    line((&n_lk[0 as usize]) as u64, yes(!ulib.failed(lp)), 0)
+    t = 0
+    while t < 20000 {
+        let _z: u64 = ulib.sleep_ms(100)
+        t = t + 1
+    }
+    return 0
+}
