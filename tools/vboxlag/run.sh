@@ -45,3 +45,23 @@ qp=$!
 python3 -I "$HERE/drive.py" "$D/mon" "$OUT/serial.txt" "$OUT" 180 | tee "$OUT/result.txt"
 kill $qp 2>/dev/null; wait $qp 2>/dev/null
 rm -f "$D/s.img"
+# verdict (thresholds of the 16.10.2026 diff-flush round): pointer phases <= 64 KB per frame, idle < 100 KB/s. With `nodiff` in EXTRA the
+# numbers are the counter-proof and the verdict is expected to FAIL.
+python3 -I - "$OUT/result.txt" <<'PY'
+import re, sys
+bad = 0; n = 0
+for l in open(sys.argv[1]):
+    m = re.match(r"PH (\w+)\s+secs=([\d.]+) frames=(\d+).*okt=(\d+) okt_per_frame=(\d+)", l)
+    if not m:
+        continue
+    n += 1
+    name, secs, okt, opf = m.group(1), float(m.group(2)), int(m.group(4)), int(m.group(5))
+    if name == "idle":
+        ok = okt / max(secs, 0.1) < 100 * 1024
+        print("CHECK idle %.0f KB/s (< 100) %s" % (okt / max(secs, 0.1) / 1024, "OK" if ok else "FAIL"))
+    else:
+        ok = opf <= 64 * 1024
+        print("CHECK %s %.1f KB/frame (<= 64) %s" % (name, opf / 1024, "OK" if ok else "FAIL"))
+    bad += 0 if ok else 1
+print("VERDICT %d phases, %d FAIL" % (n, bad))
+PY
