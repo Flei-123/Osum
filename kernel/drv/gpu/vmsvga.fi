@@ -26,7 +26,7 @@ import arch.x86_64.apic
 import arch.arch
 
 export {
-    probe, boot_mbi, init, bereit, present, say, shut_down,
+    probe, boot_mbi, init, bereit, present, panic_present, say, shut_down,
     set_mode, resize, host_pending, resizes, resize_errors,
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
@@ -744,6 +744,35 @@ fn send_full(state: u64) -> bool {
     let ok: bool = send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
     busy_wait(state)
     return ok
+}
+
+// Panic path (r967): trap.fi calls this AFTER it stopped every other core. The panic picture is already in VRAM (kgui.panikbild ends
+// with fb.flush), but the only present() caller is the desktop loop, so VirtualBox (TRACES=0: it does not watch VRAM) never showed
+// the picture. A stopped core may have died inside present(): open the box lock and the port-pair lock (nobody is left to release
+// them), let the stop NMI land first, then send ONE whole-picture UPDATE with the SYNC/BUSY handshake. Never waits for another core.
+fn panic_present(state: u64) {
+    var s_p: [u8; 31] = "vmsvga: panic picture sent ok=\0"
+    if !bereit(state) {
+        return
+    }
+    var hz: u64 = apic.tsc_hz(state)
+    if hz < 100000000 || hz > 10000000000 {
+        hz = 4000000000
+    }
+    let t0: u64 = apic.tsc()
+    while apic.tsc() - t0 < hz / 500 {
+        arch.pause()
+    }
+    kstate.set(state, s(S_LOCK), 0)
+    kstate.set(state, s(S_PLOCK), 0)
+    let ok: bool = send_full(state)
+    serial.puts((&s_p[0]) as u64)
+    if ok {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
 }
 
 // ------------------------------------------------------------ cursor
