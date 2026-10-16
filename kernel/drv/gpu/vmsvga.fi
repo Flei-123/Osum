@@ -31,7 +31,7 @@ export {
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
     updates, update_octets, verify_bad, width, height, fifo_full,
-    safety_updates, pio_count, heal_count, fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
+    safety_updates, pio_count, heal_count, present_calls, present_frames, pulse_say, fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
     VMSVGA_OFF, VMSVGA_MAX
 }
 
@@ -104,6 +104,9 @@ const HEAL_2_MS: u64 = 500
 const HEAL_3_MS: u64 = 2000
 const TRAIL_MS: u64 = 2000 // keep-alive: one whole-picture UPDATE this long after the last painted frame (nothing while idle)
 const S_IDSET: u64 = 0x1C8 // DISPLAY_ID already selected (the idle poll then only READS the size: 2 reads, not a select + 2 reads)
+const S_PCALLS: u64 = 0x1D0 // calls of present() (the desktop loop must call it every round: gate + report)
+const S_PFRAMES: u64 = 0x1D8 // calls of present() that found a painted box (= frames that reached the driver)
+const S_PLOCK: u64 = 0x1E0 // spin lock word of the INDEX/VALUE port pair (reg_w / reg_r run on every core)
 const POLL_MS: u64 = 1000 // host display hint poll period (only with CAP_DISPLAY_TOPOLOGY)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
@@ -198,18 +201,43 @@ fn resize_errors(state: u64) -> u64 { return kstate.get(state, s(S_RSZERR)) }
 
 // ------------------------------------------------------------ register access
 
+// INDEX and VALUE are ONE register pair: two cores that interleave outl(INDEX), outl(INDEX), outl(VALUE) write the value into the wrong
+// register (the desktop loop presents on one core while the idle task of another core polls the host hint). Leaf lock, interrupts
+// off while it is held, so it can neither nest nor be held by an interrupted core.
+fn pair_lock(state: u64) -> u64 {
+    let fl: u64 = arch.irq_save()
+    let lk: *mut u64 = (state + VMSVGA_OFF + S_PLOCK) as *mut u64
+    var got: u64 = __atomic_swap(lk, 0, 1)
+    while got != 0 {
+        arch.pause()
+        got = __atomic_swap(lk, 0, 1)
+    }
+    return fl
+}
+
+fn pair_unlock(state: u64, fl: u64) {
+    let lk: *mut u64 = (state + VMSVGA_OFF + S_PLOCK) as *mut u64
+    __mmio_write64(lk, 0)
+    arch.irq_restore(fl)
+}
+
 fn reg_w(state: u64, idx: u64, v: u64) {
     let io: u64 = kstate.get(state, s(S_IO))
+    let fl: u64 = pair_lock(state)
     kstate.add(state, s(S_PIO), 2)
     arch.dev_out32(io as u16, idx as u32)
     arch.dev_out32((io + 1) as u16, v as u32)
+    pair_unlock(state, fl)
 }
 
 fn reg_r(state: u64, idx: u64) -> u64 {
     let io: u64 = kstate.get(state, s(S_IO))
+    let fl: u64 = pair_lock(state)
     kstate.add(state, s(S_PIO), 2)
     arch.dev_out32(io as u16, idx as u32)
-    return arch.dev_in32((io + 1) as u16) as u64
+    let v: u64 = arch.dev_in32((io + 1) as u16) as u64
+    pair_unlock(state, fl)
+    return v
 }
 
 fn has_cap(state: u64, c: u64) -> bool {
@@ -604,6 +632,7 @@ fn present(state: u64) -> bool {
     if !bereit(state) {
         return false
     }
+    kstate.add(state, s(S_PCALLS), 1)
     var x0: u64 = 0
     var y0: u64 = 0
     var x1: u64 = 0
@@ -655,6 +684,7 @@ fn present(state: u64) -> bool {
         }
         return true
     }
+    kstate.add(state, s(S_PFRAMES), 1)
     let sw: u64 = kstate.get(state, s(S_W))
     let sh: u64 = kstate.get(state, s(S_H))
     if x1 > sw {
@@ -978,6 +1008,8 @@ fn pitch(state: u64) -> u64 { return kstate.get(state, s(S_PITCH)) }
 fn safety_updates(state: u64) -> u64 { return kstate.get(state, s(S_SAFETY)) }
 fn pio_count(state: u64) -> u64 { return kstate.get(state, s(S_PIO)) }
 fn heal_count(state: u64) -> u64 { return kstate.get(state, s(S_HEALS)) }
+fn present_calls(state: u64) -> u64 { return kstate.get(state, s(S_PCALLS)) }
+fn present_frames(state: u64) -> u64 { return kstate.get(state, s(S_PFRAMES)) }
 fn host_resizes(state: u64) -> u64 { return kstate.get(state, s(S_HOSTRSZ)) }
 // Physical address of the scan-out start (VRAM + FB_OFFSET)
 fn fb_phys(state: u64) -> u64 { return kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF)) }
@@ -1112,6 +1144,8 @@ fn say(state: u64) {
     var s_pio: [u8; 6] = " pio=\0"
     var s_hl: [u8; 7] = " heal=\0"
     var s_tr: [u8; 9] = " traces=\0"
+    var s_pc: [u8; 6] = " prs=\0"
+    var s_pf: [u8; 6] = " pfr=\0"
     var s_vf: [u8; 20] = "vmsvga: verify bad=\0"
     var s_vn: [u8; 9] = " frames=\0"
     if kstate.get(state, s(S_UP)) == 0 {
@@ -1159,6 +1193,10 @@ fn say(state: u64) {
     serial.dec(kstate.get(state, s(S_HEALS)))
     serial.puts((&s_tr[0]) as u64)
     serial.dec(kstate.get(state, s(S_TRACES)))
+    serial.puts((&s_pc[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PCALLS)))
+    serial.puts((&s_pf[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PFRAMES)))
     serial.nl()
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         serial.puts((&s_vf[0]) as u64)
@@ -1167,4 +1205,34 @@ fn say(state: u64) {
         serial.dec(kstate.get(state, s(S_VERIFYN)))
         serial.nl()
     }
+}
+
+// One short line for the desktop pulse (every 5 s, kgui.wait_wm): how often the loop called present() (prs), how many of those
+// found a painted box (pfr), and what reached the host. The line that proves the desktop loop presents. Silent without the device.
+fn pulse_say(state: u64) {
+    var s_a: [u8; 19] = "vmsvga: pulse prs=\0"
+    var s_f: [u8; 6] = " pfr=\0"
+    var s_u: [u8; 6] = " upd=\0"
+    var s_o: [u8; 6] = " okt=\0"
+    var s_h: [u8; 7] = " heal=\0"
+    var s_sf: [u8; 7] = " safe=\0"
+    var s_pio: [u8; 6] = " pio=\0"
+    if kstate.get(state, s(S_UP)) == 0 || kstate.get(state, s(S_READY)) == 0 {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PCALLS)))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PFRAMES)))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(kstate.get(state, s(S_UPDATES)))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(kstate.get(state, s(S_UPOKT)))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(kstate.get(state, s(S_HEALS)))
+    serial.puts((&s_sf[0]) as u64)
+    serial.dec(kstate.get(state, s(S_SAFETY)))
+    serial.puts((&s_pio[0]) as u64)
+    serial.dec(kstate.get(state, s(S_PIO)))
+    serial.nl()
 }
