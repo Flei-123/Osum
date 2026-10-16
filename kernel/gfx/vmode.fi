@@ -52,6 +52,7 @@ profile kernel
 import lib.kstate
 import gfx.fb
 import drv.gpu.vgpu
+import drv.gpu.vmsvga
 import mm.mem
 import arch.x86_64.apic
 import lib.errno
@@ -701,6 +702,76 @@ fn probe_depths() -> u64 {
     return m
 }
 
+// VMSVGA backend of `probe`: the same candidate list, filtered by what the SVGA II device takes (limits, VRAM) and what this
+// kernel can map. The scan-out address is VRAM + FB_OFFSET. No EDID (QEMU/VirtualBox SVGA II have none). Only 640x480 and up.
+fn probe_vmsvga(state: u64) -> u64 {
+    s(state, S_LFB, vmsvga.fb_phys(state))
+    s(state, S_VRAM, vmsvga.vram_bytes(state))
+    s(state, S_MMIO, 0)
+    s(state, S_DEPTHS, 1 << 32)
+    s(state, S_EDID, 0)
+    s(state, S_NATW, 0)
+    s(state, S_NATH, 0)
+    s(state, S_EDIDWHY, 1)
+    let lauf: u64 = fb.longest_run(state)
+    let versatz: u64 = g(state, S_LFB) & (fb.huge_size() - 1)
+    var limit: u64 = 0
+    if lauf * fb.huge_size() > versatz {
+        limit = lauf * fb.huge_size() - versatz
+    }
+    s(state, S_MAPLIMIT, limit)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < cand_count() && n < MAX_MODES {
+        let c: u64 = cand(i)
+        let w: u64 = (c >> 16) & 0xFFFF
+        let h: u64 = c & 0xFFFF
+        s(state, S_PROBED, g(state, S_PROBED) + 1)
+        var grund: u64 = 0
+        var ok: bool = true
+        if w < 640 || h < 480 || !vmsvga.size_ok(state, w, h) {
+            s(state, S_REFUSED, g(state, S_REFUSED) + 1)
+            grund = 1
+            ok = false
+        }
+        if ok {
+            if limit == 0 || w * h * 4 > limit {
+                s(state, S_UNMAPPABLE, g(state, S_UNMAPPABLE) + 1)
+                grund = 3
+                ok = false
+            }
+        }
+        if ok {
+            kstate.set(state, kstate.DISP_OFF + LIST_OFF + n * 8, (w << 32) | (h << 16) | 32)
+            n = n + 1
+        }
+        kstate.set8(state + kstate.DISP_OFF + WHY_OFF + i, grund as u8)
+        i = i + 1
+    }
+    s(state, S_COUNT, n)
+    let cur: u64 = find_mode(state, fb.panel_w(state), fb.panel_h(state), 32)
+    if cur < MAX_MODES {
+        s(state, S_CUR, cur + 1)
+    } else {
+        s(state, S_CUR, 0)
+    }
+    s(state, S_READY, 1)
+    build_lut(state)
+    return n
+}
+
+// Set the mode through the active backend (VMSVGA or Bochs VBE). Returns the stride, 0 = refused.
+fn backend_set(state: u64, w: u64, h: u64) -> u64 {
+    if vmsvga.bereit(state) {
+        if !vmsvga.resize(state, w, h) {
+            return 0
+        }
+        s(state, S_LFB, vmsvga.fb_phys(state))
+        return vmsvga.pitch(state)
+    }
+    return vbe_set(w, h, 32)
+}
+
 // Die Karte fragen, welche Modi es gibt, und die Liste bauen.
 // Gibt die Zahl der gefundenen Modi zurueck.
 fn probe(state: u64) -> u64 {
@@ -713,6 +784,10 @@ fn probe(state: u64) -> u64 {
     s(state, S_BRIGHT, 100)
     s(state, S_CONTRAST, 100)
     s(state, S_GAMMA, 100)
+    // VMSVGA carries the picture: its own mode list, no Bochs registers touched
+    if vmsvga.bereit(state) {
+        return probe_vmsvga(state)
+    }
     if !find_card(state) {
         return 0
     }
@@ -881,6 +956,13 @@ fn again_to(state: u64, a_x: u64, a_y: u64, a_b: u64, a_e: u64) {
 // Der laufende Bildschirm bleibt unberuehrt -- gerettet, gefragt,
 // zurueckgestellt, ueber `wieder_hin`.
 fn karte_nimmt(state: u64, w: u64, h: u64) -> u64 {
+    if vmsvga.bereit(state) {
+        // limits only: nothing is written to the device
+        if vmsvga.size_ok(state, w, h) {
+            return 0
+        }
+        return 640
+    }
     let a_x: u64 = vbe_read(VBE_XRES)
     let a_y: u64 = vbe_read(VBE_YRES)
     let a_b: u64 = vbe_read(VBE_BPP)
@@ -1521,15 +1603,16 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
     fb.set_logical(state, 0, 0)
 
     // 3. Den Modus setzen.
-    let pt: u64 = vbe_set(w, h, 32)
+    let pt: u64 = backend_set(state, w, h)
     if pt == 0 {
-        vbe_set(alt_w, alt_h, 32)
+        backend_set(state, alt_w, alt_h)
         if geholt != 0 {
             mem.frame_free_run(state, geholt, geholt_n)
         }
         fb.set_rotation(state, alt_rot)
         fb.dirty_all(state)
         fb.flush(state)
+        vmsvga.resized(state)
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return E_SETFAIL
     }
@@ -1538,7 +1621,7 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
     //    nicht -- sie steht in BAR0 und BAR0 ist ein Adressbereich, kein
     //    Modus. Was sich aendert, ist, WIE VIELE Kacheln er beruehrt.
     if !fb.remap(state, g(state, S_LFB), w, h, pt, uc) {
-        vbe_set(alt_w, alt_h, 32)
+        backend_set(state, alt_w, alt_h)
         fb.remap(state, alt_p, alt_w, alt_h, alt_pt, uc)
         if geholt != 0 {
             mem.frame_free_run(state, geholt, geholt_n)
@@ -1546,6 +1629,7 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
         fb.set_rotation(state, alt_rot)
         fb.dirty_all(state)
         fb.flush(state)
+        vmsvga.resized(state)
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return E_MAPFAIL
     }
@@ -1573,6 +1657,7 @@ fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
     fb.clear(state, 0)
     fb.dirty_all(state)
     fb.flush(state)
+    vmsvga.resized(state) // (no-op without the driver)
     let idx: u64 = find_mode(state, w, h, 32)
     if idx < MAX_MODES {
         s(state, S_CUR, idx + 1)

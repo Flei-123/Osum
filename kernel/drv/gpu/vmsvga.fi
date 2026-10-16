@@ -31,6 +31,7 @@ export {
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
     updates, update_octets, verify_bad, width, height, fifo_full,
+    fb_phys, vram_bytes, size_ok, pitch, resized, host_resizes,
     VMSVGA_OFF, VMSVGA_MAX
 }
 
@@ -80,6 +81,10 @@ const S_PRESSZ: u64 = 0x130
 const S_VERIFYN: u64 = 0x138 // verify: frames compared
 const S_FBOFF: u64 = 0x140 // FB_OFFSET register
 const S_SEEN: u64 = 0x148 // last host-requested size seen (w << 16 | h)
+const S_SEENN: u64 = 0x150 // consecutive polls that saw S_SEEN
+const S_HANDLED: u64 = 0x158 // host size already tried (do not retry the same one every poll)
+const S_NEXTPOLL: u64 = 0x160 // earliest next host poll (ms)
+const S_HOSTRSZ: u64 = 0x168 // resizes that followed a host request
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
 // ---- PCI
@@ -112,6 +117,9 @@ const R_CURSOR_X: u64 = 25
 const R_CURSOR_Y: u64 = 26
 const R_CURSOR_ON: u64 = 27
 const R_MEM_REGS: u64 = 30
+const R_DISPLAY_ID: u64 = 35
+const R_DISPLAY_W: u64 = 39
+const R_DISPLAY_H: u64 = 40
 
 // ---- capabilities
 const CAP_RECT_COPY: u64 = 0x2
@@ -119,6 +127,7 @@ const CAP_CURSOR: u64 = 0x20
 const CAP_CURSOR_BYPASS: u64 = 0x40
 const CAP_ALPHA_CURSOR: u64 = 0x200
 const CAP_EXTENDED_FIFO: u64 = 0x8000
+const CAP_DISPLAY_TOPOLOGY: u64 = 0x80000
 
 const FC_CURSOR_BYPASS_3: u64 = 0x10
 
@@ -729,10 +738,76 @@ fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 
 // ------------------------------------------------------------ resize
 
-// Host-requested size: not available on QEMU, and the VirtualBox topology path is unverified (docs/VMSVGA.md 6). 0 = none.
+// Host-requested size. QEMU has NO host hint at all (always 0). On VirtualBox/VMware the hint would come through the display
+// topology registers (CAP_DISPLAY_TOPOLOGY: select DISPLAY_ID 0, read DISPLAY_WIDTH/HEIGHT) [VBOX?, UNVERIFIED: untested on the real
+// device]. Defensive: only a sane size (>= 640x480, inside the device limits) that DIFFERS from the current mode, was seen on two
+// polls in a row and was not tried before counts. Polled at most every 250 ms. Returns w << 16 | h, 0 = none.
 fn host_pending(state: u64) -> u64 {
+    if !bereit(state) || !has_cap(state, CAP_DISPLAY_TOPOLOGY) {
+        return 0
+    }
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    let now: u64 = apic.tsc() / (hz / 1000)
+    if now < kstate.get(state, s(S_NEXTPOLL)) {
+        return 0
+    }
+    kstate.set(state, s(S_NEXTPOLL), now + 250)
+    reg_w(state, R_DISPLAY_ID, 0)
+    let w: u64 = reg_r(state, R_DISPLAY_W)
+    let h: u64 = reg_r(state, R_DISPLAY_H)
+    if w == kstate.get(state, s(S_W)) && h == kstate.get(state, s(S_H)) {
+        kstate.set(state, s(S_SEEN), 0)
+        kstate.set(state, s(S_SEENN), 0)
+        kstate.set(state, s(S_HANDLED), 0)
+        return 0
+    }
+    if w < 640 || h < 480 || w > 8192 || h > 8192 || !size_ok(state, w, h) {
+        return 0
+    }
+    let v: u64 = (w << 16) | h
+    if v == kstate.get(state, s(S_HANDLED)) {
+        return 0
+    }
+    if v == kstate.get(state, s(S_SEEN)) {
+        kstate.add(state, s(S_SEENN), 1)
+    } else {
+        kstate.set(state, s(S_SEEN), v)
+        kstate.set(state, s(S_SEENN), 1)
+    }
+    if kstate.get(state, s(S_SEENN)) >= 2 {
+        kstate.set(state, s(S_HANDLED), v)
+        kstate.set(state, s(S_SEENN), 0)
+        kstate.add(state, s(S_HOSTRSZ), 1)
+        return v
+    }
     return 0
 }
+
+// Does the device take this size (limits only, nothing is written)?
+fn size_ok(state: u64, w: u64, h: u64) -> bool {
+    if kstate.get(state, s(S_UP)) == 0 || w == 0 || h == 0 {
+        return false
+    }
+    let maxw: u64 = kstate.get(state, s(S_MAXW))
+    let maxh: u64 = kstate.get(state, s(S_MAXH))
+    if (maxw != 0 && w > maxw) || (maxh != 0 && h > maxh) {
+        return false
+    }
+    let vsz: u64 = kstate.get(state, s(S_VRAMSZ))
+    if vsz != 0 && w *% h *% 4 > vsz {
+        return false
+    }
+    return true
+}
+
+fn vram_bytes(state: u64) -> u64 { return kstate.get(state, s(S_VRAMSZ)) }
+fn pitch(state: u64) -> u64 { return kstate.get(state, s(S_PITCH)) }
+fn host_resizes(state: u64) -> u64 { return kstate.get(state, s(S_HOSTRSZ)) }
+// Physical address of the scan-out start (VRAM + FB_OFFSET)
+fn fb_phys(state: u64) -> u64 { return kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF)) }
 
 // Change the mode on a running system. The caller (vmode) re-points `fb` afterwards.
 fn resize(state: u64, w: u64, h: u64) -> bool {
@@ -745,6 +820,23 @@ fn resize(state: u64, w: u64, h: u64) -> bool {
     }
     kstate.add(state, s(S_RESIZES), 1)
     return true
+}
+
+// After vmode re-pointed `fb` at the new mode: forget the old dirty box, rebuild the verify copy, tell the host the whole picture.
+fn resized(state: u64) {
+    if !bereit(state) {
+        return
+    }
+    let pres: u64 = kstate.get(state, s(S_PRES))
+    let psz: u64 = kstate.get(state, s(S_PRESSZ))
+    if pres != 0 {
+        mem.frame_free_run(state, pres, (psz + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE)
+        kstate.set(state, s(S_PRES), 0)
+        kstate.set(state, s(S_PRESSZ), 0)
+    }
+    kstate.set(state, s(S_ACC_VALID), 0)
+    alloc_verify(state)
+    let _u: bool = send_update(state, 0, 0, kstate.get(state, s(S_W)), kstate.get(state, s(S_H)))
 }
 
 // ------------------------------------------------------------ bring-up
@@ -824,6 +916,11 @@ fn say(state: u64) {
     var s_o: [u8; 6] = " okt=\0"
     var s_hc: [u8; 5] = " hc=\0"
     var s_fl: [u8; 7] = " full=\0"
+    var s_rz: [u8; 6] = " rsz=\0"
+    var s_rh: [u8; 7] = " host=\0"
+    var s_re: [u8; 6] = " err=\0"
+    var s_vf: [u8; 20] = "vmsvga: verify bad=\0"
+    var s_vn: [u8; 9] = " frames=\0"
     if kstate.get(state, s(S_UP)) == 0 {
         return // silent without the device: other boots keep their serial output
     }
@@ -855,5 +952,18 @@ fn say(state: u64) {
     }
     serial.puts((&s_fl[0]) as u64)
     serial.dec(kstate.get(state, s(S_FULL)))
+    serial.puts((&s_rz[0]) as u64)
+    serial.dec(kstate.get(state, s(S_RESIZES)))
+    serial.puts((&s_rh[0]) as u64)
+    serial.dec(kstate.get(state, s(S_HOSTRSZ)))
+    serial.puts((&s_re[0]) as u64)
+    serial.dec(kstate.get(state, s(S_RSZERR)))
     serial.nl()
+    if kstate.mode_on(state, kstate.M_VMSVGAHW) {
+        serial.puts((&s_vf[0]) as u64)
+        serial.dec(kstate.get(state, s(S_BAD)))
+        serial.puts((&s_vn[0]) as u64)
+        serial.dec(kstate.get(state, s(S_VERIFYN)))
+        serial.nl()
+    }
 }

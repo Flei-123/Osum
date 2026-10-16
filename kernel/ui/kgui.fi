@@ -1524,6 +1524,9 @@ fn gfx_hold(state: u64) {
     if kstate.mode_on(state, kstate.M_VGPUHW) {
         vgpuhw_run(state)
     }
+    if kstate.mode_on(state, kstate.M_VMSVGAHW) {
+        vmsvga_run(state)
+    }
     // Rund vier Sekunden. Der Testlaeufer draussen sieht die Zeile oben,
     // ruft `screendump` und prueft das Bild, waehrend es noch steht.
     let hz: u64 = apic.tsc_hz(state)
@@ -1671,6 +1674,152 @@ fn vgpuhw_run(state: u64) {
             vgpu.say_hw(state)
             until = apic.tsc() + hz * 6
         }
+    }
+    serial.puts((&s_en[0]) as u64)
+    serial.nl()
+}
+
+// `vmsvgahw` test bed (tools/vmsvga/run.sh): the VMSVGA hardware cursor, the size of the UPDATE rectangles, and mode switches
+// through the host-resize path (vmode.follow_host = what the topology poll calls). The same mode sequence also runs on the
+// Bochs path (reference for the pixel comparison; `novmsvga` or `-vga std`).
+//   phase 1  pointer moves only: 60 moves, nothing may travel as picture data (update octets difference 0)
+//   phase 2  60 frames with one 48x48 dirty rect: octets the host was told per frame
+//   phase 3  four mode switches, each with a fixed test picture and a pause for the harness screendump
+fn vmsvga_pic(state: u64) {
+    let w: u64 = fb.panel_w(state)
+    let h: u64 = fb.panel_h(state)
+    fb.set_cursor(state, false)
+    fb.clear(state, 0)
+    fb.fill(state, 0, 0, 100, 100, fb.rgb(state, 0xFF, 0, 0))
+    fb.fill(state, 100, 0, 100, 100, fb.rgb(state, 0, 0xFF, 0))
+    fb.fill(state, 200, 0, 100, 100, fb.rgb(state, 0, 0, 0xFF))
+    fb.fill(state, 300, 0, 100, 100, fb.rgb(state, 0xFF, 0xFF, 0xFF))
+    fb.line(state, 0, 110, 399, 210, fb.rgb(state, 0xFF, 0xFF, 0))
+    fb.fill(state, w - 50, h - 50, 50, 50, fb.rgb(state, 0xFF, 0, 0xFF))
+    fb.dirty_all(state)
+    fb.flush(state)
+    gfx.bild_fertig(state)
+}
+
+fn vmsvga_pause(state: u64, secs: u64) {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    let until: u64 = apic.tsc() + hz * secs
+    while apic.tsc() < until {
+        let _e: bool = gfx.gpu_ereignis(state)
+    }
+}
+
+fn vmsvga_run(state: u64) {
+    var s_p1: [u8; 18] = "vmsvga: move hw=\0\0"
+    var s_p2: [u8; 20] = "vmsvga: frames hw=\0\0"
+    var s_mv: [u8; 9] = " moves=\0\0"
+    var s_df: [u8; 7] = " defs=\0"
+    var s_ok: [u8; 7] = " okt=\0\0"
+    var s_pf: [u8; 11] = " perframe=\0"
+    var s_rd: [u8; 14] = "vmsvga: ready\0"
+    var s_pn: [u8; 15] = "vmsvga: panel=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_en: [u8; 12] = "vmsvga: end\0"
+    var s_no: [u8; 17] = "vmsvga: novmsvga\0"
+    var hw: bool = false
+    let on: bool = vmsvga.bereit(state)
+    let y0: u64 = 300
+    let x0: u64 = 300
+    if on {
+        hw = vmsvga.cursor_bereit(state)
+        if hw {
+            let _z: bool = vmsvga.cursor_zeigen(state, 0, 32, x0, y0, 0, 0)
+        }
+        let o1: u64 = vmsvga.update_octets(state)
+        let m1: u64 = vmsvga.cursor_moves(state)
+        var i: u64 = 0
+        while i < 60 {
+            if hw {
+                let _m: bool = vmsvga.cursor_bewegen(state, x0 + i * 3, y0)
+            }
+            i = i + 1
+        }
+        serial.puts((&s_p1[0]) as u64)
+        if hw {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_mv[0]) as u64)
+        serial.dec(vmsvga.cursor_moves(state) - m1)
+        serial.puts((&s_df[0]) as u64)
+        serial.dec(vmsvga.cursor_defs(state))
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(vmsvga.update_octets(state) - o1)
+        serial.nl()
+        let o2: u64 = vmsvga.update_octets(state)
+        i = 0
+        while i < 60 {
+            if kstate.mode_on(state, kstate.M_WMRUHE) {
+                fb.dirty_all(state)
+            } else {
+                fb.flush_rect(state, x0 + i * 3 - 8, y0 - 8, 48, 48)
+            }
+            gfx.bild_fertig(state)
+            i = i + 1
+        }
+        let d2: u64 = vmsvga.update_octets(state) - o2
+        serial.puts((&s_p2[0]) as u64)
+        if hw {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(d2)
+        serial.puts((&s_pf[0]) as u64)
+        serial.dec(d2 / 60)
+        serial.nl()
+        vmsvga.say(state)
+    } else {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+    }
+    serial.puts((&s_rd[0]) as u64)
+    serial.nl()
+    // phase 3: mode switches, same sequence with and without the driver
+    var k: u64 = 0
+    while k < 5 {
+        var nw: u64 = fb.panel_w(state)
+        var nh: u64 = fb.panel_h(state)
+        if k == 1 {
+            nw = 1024
+            nh = 768
+        }
+        if k == 2 {
+            nw = 1280
+            nh = 720
+        }
+        if k == 3 {
+            nw = 640
+            nh = 480
+        }
+        if k == 4 {
+            nw = 800
+            nh = 600
+        }
+        if k != 0 {
+            let _f: u64 = vmode.follow_host(state, nw, nh)
+        }
+        vmsvga_pic(state)
+        serial.puts((&s_pn[0]) as u64)
+        serial.dec(fb.panel_w(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.panel_h(state))
+        serial.nl()
+        if on {
+            vmsvga.say(state)
+        }
+        vmsvga_pause(state, 4)
+        k = k + 1
     }
     serial.puts((&s_en[0]) as u64)
     serial.nl()
