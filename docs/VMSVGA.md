@@ -106,3 +106,25 @@ Everything marked [VBOX?] is from memory of the VirtualBox device and MUST be ch
    rectangle at `present` and prints `vmsvga: verify bad=N` (expect 0).
 6. Counter-proof: word `novmsvga` -> old path, the same measurement must FAIL (more octets / no UPDATE counters).
 7. Regress, one at a time: tools/vgpuheads, tools/vgpuext, tools/vboxlag unchanged green.
+
+## 9. Second pass 16.10. evening (worker vmsvga2) -- findings only, NO driver code yet
+- QEMU 7.2 facts (vmware_vga.c): FIFO needs max >= min + 10 KiB, max <= 64 KiB, min >= 16; cursor defs/CAP_CURSOR* exist only if a display
+  listener supports cursor define (VNC/GTK/SDL, NOT plain `-display none`) -> the gate must run with `-vnc`; BPP != 32 clears CONFIG_DONE;
+  a SYNC write runs the FIFO at once; WIDTH/HEIGHT apply lazily in `vmsvga_check_size` (display refresh).
+- QEMU's VNC server copies only the dirty rects into its server surface, while `screendump` reads VRAM directly: a tiny VNC client that applies
+  ONLY received updates and is compared with `screendump` CAN prove UPDATE-rect completeness end to end (screendump alone cannot).
+- LFB discovery: `fb.find_lfb()` takes BAR0 of the first class-03 device and skips I/O BARs, so VMSVGA (BAR0 = I/O) is never found by "Weg 2".
+  `-vga vmware -kernel` has no Bochs VBE and no multiboot fb, so `fb.init` fails. Needs "Weg 3": VMSVGA sets the mode (WIDTH/HEIGHT/BPP/ENABLE) and
+  hands `fb.init`/`fb.need_bytes` a synthetic multiboot info (flags bit 12, MB_FB_ADDR=88 u64, PITCH=96, WIDTH=100, HEIGHT=104, BPP=108,
+  TYPE=109 (=1), RPOS/GPOS/BPOS=110/112/114) built in a kdata scratch page. Alternative for the gate: `-vga std -device vmware-svga` + `fb.remap` onto BAR1.
+- Copy sites into the LFB (each calls `tx_add`; put the dirty-box accumulator exactly there): fb.fi `flush` (rows lo..hi), `flush_stripe`,
+  `flush_rows` (non-stripe), `present` (rotation, 2 sites), `shadow_sync_all` (full), `flush_rect` (diff path: per row x+f4/4 .. +cnt/4 where
+  `last > first`; stripe and non-diff branches: whole rect). The `dirty_rect` box (S_RX0..S_RVALID) is cleared ONLY by `rect_take` (vgpu), so
+  vmsvga needs its own accumulator. Writers that bypass `tx_add` (no back buffer, /dev/fb users): keep a rate-limited full UPDATE as a safety net and count it.
+- Free kdata gap for a state page: 0x170000..0x1C0000 (`python3 tools/kernel/memmap.py kernel -v`); free mode bits from 1101 (word 17, bit 13;
+  MODE_WORDS = 18 -> up to 1151); word parser next to `hd_words` in kmain.fi (~6286); port I/O = `arch.dev_out32/dev_in32` (u16 port), VALUE port = BAR0+1;
+  `apic.map_device(phys)` maps a 2 MiB uncached window -> cap the FIFO at 64 KiB.
+- Hooks still virtio-only: gfx.fi `bild_fertig`/`gpu_ereignis`; kgui.fi `graphics()` after the `vgpu.init` block (~416) + `say`; wm.fi
+  `hwcur_moeglich`/`hwcur_bewegen` (~14055..14103); vmode.fi `switch_to` (`ready()`, `vbe_set`, `S_LFB` are Bochs-only; `check_custom`/`karte_nimmt`
+  probe Bochs registers) -> needs `backend_set`/`backend_lfb` and `ready()` true when VMSVGA is active.
+- Verify idea (debug word): keep a "presented copy" of VRAM, at `present` compare everything OUTSIDE the sent box with it (count `bad`), then copy the box.
