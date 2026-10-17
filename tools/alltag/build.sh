@@ -68,6 +68,10 @@ xdirs=""
 desk_on=yes
 moncmds=""
 kbd_on=no
+hold_on=yes  # hold=no: no wmhold/wiglong (the desktop keeps running, pulses and halts never); pair with waitfor=<regex>
+waitfor=""
+qargs=""   # qemu=<args>: extra QEMU arguments (e.g. -device qemu-xhci -device usb-tablet -qmp ...)
+hook=""    # hook=<cmd>: run once after the desktop is up (env OUT, SOCK), before warten=/mon=
 warten=0
 # w-lock: `res=WxH` boots a VGA device of that size (+ `disp fbres=`), `uiscale=N` the UI scale,
 # `drive=<script>` runs tools/design/drive.py with that script instead of the plain `mon=` list.
@@ -105,6 +109,10 @@ for a in "$@"; do
         mon=*) moncmds="$moncmds
 ${a#*=}" ;;
         kbd=*) kbd_on=${a#*=} ;;
+        qemu=*) qargs="$qargs ${a#*=}" ;;
+        hook=*) hook="${a#*=}" ;;
+        hold=*) hold_on=${a#*=} ;;
+        waitfor=*) waitfor="${a#*=}" ;;
         warten=*) warten=${a#*=} ;;
         res=*) res=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
@@ -346,10 +354,12 @@ else
     # Aufnahme und einer Aufnahme mit dem Startmenue davor.
     if [ "$desk_on" = yes ]; then
         APPEND="gfx wm wig wigicons desk wmhold wiglong $KBW nosched noproc nofs $extra"
+        [ "$hold_on" = no ] && APPEND="gfx wm wig wigicons desk $KBW nosched noproc nofs $extra"
     else
         APPEND="gfx wm wig wigicons wmhold wiglong $KBW nosched noproc nofs $extra"
     fi
     WAITFOR='^wm: hold'
+    [ -n "$waitfor" ] && WAITFOR="$waitfor"
 fi
 VGAARG=(-vga std)
 if [ -n "$res" ]; then
@@ -362,7 +372,7 @@ timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 -smp "
     -append "$APPEND" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot "${VGAARG[@]}" \
     -monitor "unix:$SOCK,server,nowait" \
-    -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
+    -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" $qargs \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
 i=0
@@ -386,6 +396,7 @@ fi
 # RUNDE ALLTAG: dem Gast Zeit lassen. Ein Programm, das eine Aufnahme
 # macht und eine Datei schreibt, ist nicht fertig, wenn der
 # Fensterserver "hold" sagt.
+[ -n "$hook" ] && OUT="$OUT" SOCK="$SOCK" bash -c "$hook"
 [ "$warten" != 0 ] && sleep "$warten"
 if [ -n "$moncmds" ]; then
     printf '%s\n' "$moncmds" | grep -v '^$' > "$OUT/mon2.txt"
