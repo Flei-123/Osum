@@ -1062,6 +1062,8 @@ const VMMREQ_SET_GUEST_CAPS: u64 = 56
 const VMMREQ_REPORT_GUEST_INFO2: u64 = 58
 const VMMREQ_REPORT_GUEST_STATUS: u64 = 59
 const VMM_CAP_GRAPHICS: u64 = 4
+const VMM_EVENT_DISPLAY: u64 = 4
+const VMMREQ_CTL_FILTER: u64 = 42
 const VMM_FAC_DRIVER: u64 = 20
 const VMM_FAC_GRAPHICS: u64 = 1100
 const VMM_ST_ACTIVE: u64 = 50
@@ -1174,6 +1176,11 @@ fn vmm_init(state: u64) {
     let _i2: bool = vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 144)
     // 3. the driver is up, the graphics capability makes the VM window send resize hints
     let _s1: bool = vmm_status(state, VMM_FAC_DRIVER)
+    // event filter: we want the display change event bit (we poll, but the host keeps the event pending only for filtered bits)
+    vmm_zero_body(state, 8)
+    wr32(p, 24, VMM_EVENT_DISPLAY)
+    wr32(p, 28, 0)
+    let _f: bool = vmm_call(state, VMMREQ_CTL_FILTER, 32)
     vmm_zero_body(state, 8)
     wr32(p, 24, VMM_CAP_GRAPHICS)
     wr32(p, 28, 0)
@@ -1202,9 +1209,14 @@ fn vmm_hint(state: u64) -> u64 {
     wr32(rq, 24, 0) // xres
     wr32(rq, 28, 0) // yres
     wr32(rq, 32, 0) // bpp
-    wr32(rq, 36, 0) // event_ack = 0: always the most recent request, no event handshake
+    // event_ack = VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST (4): the host returns the CURRENT request and marks it as read. With 0 it answers
+    // with the last request the guest "read" through an event ack (VMMDev.cpp: lastReadDisplayChangeRequest), i.e. 0x0 forever.
+    wr32(rq, 36, VMM_EVENT_DISPLAY)
     wr32(rq, 40, 0) // display 0
     if !vmm_call(state, VMMREQ_GET_DISPLAY_CHANGE2, 44) {
+        if kstate.get(state, s(S_VMM_ERR)) < 4 {
+            vmm_say(state)
+        }
         return 0
     }
     kstate.add(state, s(S_VMM_POLLS), 1)
@@ -1214,7 +1226,11 @@ fn vmm_hint(state: u64) -> u64 {
         return 0
     }
     let v: u64 = (w << 16) | h
+    let changed: bool = v != kstate.get(state, s(S_VMM_HINT))
     kstate.set(state, s(S_VMM_HINT), v)
+    if changed {
+        vmm_say(state) // the hint changed: one serial line (hint=WxH) for the lab
+    }
     return v
 }
 
