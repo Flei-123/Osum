@@ -25,11 +25,18 @@
 //   * An UNKNOWN line word or an unknown field type is skipped and counted (warn_count()): a newer manifest on an older
 //     Settings app still shows what it understands.
 //   * Names (ids, keys, symbol, group, catalogue keys) are [a-z0-9._-], 1..40 octets (app: 24).
+//   * CATALOGUE (r143): load() reads ONE manifest (the tables are emptied first). add() / add_pkg() append another one
+//     (the built-in page + /apps/<app>.prog/SETTINGS of the packages). A rejected add() leaves the catalogue exactly as
+//     it was. An app name exists once (E_DUP_APP: no package speaks for "settings"); add_pkg() also needs the `app` line
+//     to equal the package directory (E_MISMATCH). Page ids and field keys are per app. Limits: per manifest 80 items,
+//     8 pages, 3072 octets; catalogue 8 apps, 24 pages, 240 items, 8192 octets.
 
 export {
     ERR, NONE, K_LABEL, K_NOTE, K_FIELD, T_BOOL, T_CHOICE, T_TEXT, T_SECRET, T_ACTION, T_STATUS, T_LIST,
     E_HEADER, E_APP, E_PAGE, E_DUP_PAGE, E_NO_PAGE, E_ITEM, E_NAME, E_FULL, E_POOL, E_COLUMN, E_DUP_FIELD,
-    load, reset, err_code, err_line, warn_count, app_name,
+    E_DUP_APP, E_MISMATCH,
+    load, add, add_pkg, reset, err_code, err_line, warn_count, app_name,
+    app_count, app_at, app_find, app_first_page, app_page_count, page_app, page_find_in,
     page_count, page_id, page_title, page_symbol, page_group, page_find, page_first, page_len,
     names_index, item_count, item_kind, item_type, item_col, item_key, item_label, item_def, item_num,
 }
@@ -57,28 +64,46 @@ const E_FULL: u64 = 8 // too many items or pages
 const E_POOL: u64 = 9 // the string pool is full
 const E_COLUMN: u64 = 10
 const E_DUP_FIELD: u64 = 11
+const E_DUP_APP: u64 = 12 // a second manifest with an app name that is already in the catalogue
+const E_MISMATCH: u64 = 13 // add_pkg(): the `app` line differs from the package directory name
 
+// limits PER manifest (one file)
 const MAX_ITEMS: u64 = 80
 const MAX_PAGES: u64 = 8
 const POOL_MAX: u64 = 3072
+// limits of the whole catalogue (the built-in page + the packages)
+const MAX_APPS: u64 = 8
+const CAT_PAGES: u64 = 24
+const CAT_ITEMS: u64 = 240
+const CAT_POOL: u64 = 8192
 
-static mut pool: [u8; 3072] = [0 as u8; 3072]
+static mut pool: [u8; 8192] = [0 as u8; 8192]
 static mut pool_n: u64 = 0
-static mut it_kind: [u64; 80] = [0 as u64; 80]
-static mut it_type: [u64; 80] = [0 as u64; 80]
-static mut it_col: [u64; 80] = [0 as u64; 80]
-static mut it_key: [u64; 80] = [0 as u64; 80]
-static mut it_label: [u64; 80] = [0 as u64; 80]
-static mut it_def: [u64; 80] = [0 as u64; 80]
-static mut it_num: [u64; 80] = [0 as u64; 80]
+static mut it_kind: [u64; 240] = [0 as u64; 240]
+static mut it_type: [u64; 240] = [0 as u64; 240]
+static mut it_col: [u64; 240] = [0 as u64; 240]
+static mut it_key: [u64; 240] = [0 as u64; 240]
+static mut it_label: [u64; 240] = [0 as u64; 240]
+static mut it_def: [u64; 240] = [0 as u64; 240]
+static mut it_num: [u64; 240] = [0 as u64; 240]
 static mut n_items: u64 = 0
-static mut pg_id: [u64; 8] = [0 as u64; 8]
-static mut pg_title: [u64; 8] = [0 as u64; 8]
-static mut pg_symbol: [u64; 8] = [0 as u64; 8]
-static mut pg_group: [u64; 8] = [0 as u64; 8]
-static mut pg_first: [u64; 8] = [0 as u64; 8]
-static mut pg_len: [u64; 8] = [0 as u64; 8]
+static mut pg_id: [u64; 24] = [0 as u64; 24]
+static mut pg_title: [u64; 24] = [0 as u64; 24]
+static mut pg_symbol: [u64; 24] = [0 as u64; 24]
+static mut pg_group: [u64; 24] = [0 as u64; 24]
+static mut pg_first: [u64; 24] = [0 as u64; 24]
+static mut pg_len: [u64; 24] = [0 as u64; 24]
+static mut pg_app: [u64; 24] = [0 as u64; 24]
 static mut n_pages: u64 = 0
+static mut ap_name: [u64; 8] = [0 as u64; 8]
+static mut ap_first: [u64; 8] = [0 as u64; 8]
+static mut n_apps: u64 = 0
+// start of the manifest being added (rollback point and base of the per-manifest limits)
+static mut base_items: u64 = 0
+static mut base_pages: u64 = 0
+static mut base_pool: u64 = 0
+static mut base_apps: u64 = 0
+static mut expect_app: u64 = 0 // add_pkg(): the 0-terminated directory name the `app` line must equal
 static mut app_off: u64 = 0
 static mut st: u64 = 0 // 0 nothing, 1 `manifest` seen, 2 `app` seen
 static mut cur_col: u64 = 0
@@ -122,6 +147,12 @@ fn reset() {
     pool_n = 0
     n_items = 0
     n_pages = 0
+    n_apps = 0
+    base_items = 0
+    base_pages = 0
+    base_pool = 0
+    base_apps = 0
+    expect_app = 0
     app_off = 0
     st = 0
     cur_col = 0
@@ -193,7 +224,7 @@ fn name_ok(w: u64, max: u64) -> bool {
 // the word into the pool, 0-terminated; returns pool index + 1, 0 when the pool is full
 fn put_word(w: u64) -> u64 {
     let n: u64 = wlen[(w) as usize]
-    if pool_n + n + 1 > POOL_MAX {
+    if pool_n - base_pool + n + 1 > POOL_MAX || pool_n + n + 1 > CAT_POOL {
         return 0
     }
     let off: u64 = pool_n
@@ -226,6 +257,18 @@ fn text_eq(a: u64, b: u64) -> bool {
         i = i + 1
     }
     return same
+}
+
+// a 0-terminated app name -> app index, NONE when the catalogue has no such app
+fn app_find(name: u64) -> u64 {
+    var a: u64 = 0
+    while a < n_apps {
+        if text_eq(pool_ptr(ap_name[(a) as usize]), name) {
+            return a
+        }
+        a = a + 1
+    }
+    return NONE
 }
 
 fn fail(code: u64, line: u64) -> u64 {
@@ -262,7 +305,7 @@ fn type_of(w: u64) -> u64 {
 }
 
 fn add_item(kind: u64, ty: u64, key: u64, label: u64, def: u64, num: u64, line: u64) -> u64 {
-    if n_items >= MAX_ITEMS {
+    if n_items - base_items >= MAX_ITEMS || n_items >= CAT_ITEMS {
         return fail(E_FULL, line)
     }
     let i: usize = n_items as usize
@@ -285,7 +328,7 @@ fn do_page(nw: u64, line: u64) -> u64 {
     if !name_ok(1, 40) || !name_ok(2, 40) || !name_ok(3, 40) || !name_ok(4, 40) {
         return fail(E_NAME, line)
     }
-    if n_pages >= MAX_PAGES {
+    if n_pages - base_pages >= MAX_PAGES || n_pages >= CAT_PAGES {
         return fail(E_FULL, line)
     }
     let id: u64 = put_word(1)
@@ -295,7 +338,7 @@ fn do_page(nw: u64, line: u64) -> u64 {
     if id == 0 || title == 0 || symbol == 0 || group == 0 {
         return fail(E_POOL, line)
     }
-    var p: u64 = 0
+    var p: u64 = base_pages
     while p < n_pages {
         if text_eq(pool_ptr(pg_id[(p) as usize]), pool_ptr(id)) {
             return fail(E_DUP_PAGE, line)
@@ -309,6 +352,7 @@ fn do_page(nw: u64, line: u64) -> u64 {
     pg_group[i] = group
     pg_first[i] = n_items
     pg_len[i] = 0
+    pg_app[i] = n_apps - 1
     n_pages = n_pages + 1
     cur_col = 0
     return 1
@@ -388,6 +432,18 @@ fn do_line(nw: u64, line: u64) -> u64 {
         if app_off == 0 {
             return fail(E_POOL, line)
         }
+        if expect_app != 0 && !text_eq(pool_ptr(app_off), expect_app) {
+            return fail(E_MISMATCH, line)
+        }
+        if app_find(pool_ptr(app_off)) != NONE {
+            return fail(E_DUP_APP, line)
+        }
+        if n_apps >= MAX_APPS {
+            return fail(E_FULL, line)
+        }
+        ap_name[(n_apps) as usize] = app_off
+        ap_first[(n_apps) as usize] = n_pages
+        n_apps = n_apps + 1
         st = 2
         return 1
     }
@@ -398,7 +454,7 @@ fn do_line(nw: u64, line: u64) -> u64 {
         return do_page(nw, line)
     }
     if word_eq(0, (&kw_column[0]) as u64, 6) {
-        if n_pages == 0 {
+        if n_pages == base_pages {
             return fail(E_NO_PAGE, line)
         }
         if nw != 2 {
@@ -415,7 +471,7 @@ fn do_line(nw: u64, line: u64) -> u64 {
         return fail(E_COLUMN, line)
     }
     if word_eq(0, (&kw_label[0]) as u64, 5) {
-        if n_pages == 0 {
+        if n_pages == base_pages {
             return fail(E_NO_PAGE, line)
         }
         if nw != 2 {
@@ -431,7 +487,7 @@ fn do_line(nw: u64, line: u64) -> u64 {
         return add_item(K_LABEL, 0, 0, lab, 0, 0, line)
     }
     if word_eq(0, (&kw_note[0]) as u64, 4) {
-        if n_pages == 0 {
+        if n_pages == base_pages {
             return fail(E_NO_PAGE, line)
         }
         if nw < 2 || nw > 3 {
@@ -455,7 +511,7 @@ fn do_line(nw: u64, line: u64) -> u64 {
         return add_item(K_NOTE, 0, 0, lab, 0, lines, line)
     }
     if word_eq(0, (&kw_field[0]) as u64, 5) {
-        if n_pages == 0 {
+        if n_pages == base_pages {
             return fail(E_NO_PAGE, line)
         }
         return do_field(nw, line)
@@ -465,9 +521,22 @@ fn do_line(nw: u64, line: u64) -> u64 {
     return 1
 }
 
-// Parses buf[0..len). Returns the number of items, or ERR (tables empty, err_code()/err_line() say why).
-fn load(buf: u64, len: u64) -> u64 {
-    reset()
+// Adds the manifest buf[0..len) to the catalogue (earlier manifests stay). Returns the number of items of THIS
+// manifest, or ERR: then the catalogue is exactly as before (nothing of the file stays), err_code()/err_line() say why.
+// The limits (80 items, 8 pages, 3072 octets of text) count per manifest; the catalogue has its own (8 apps, 24 pages,
+// 240 items, 8192 octets). An app name can be in the catalogue once; page ids and field keys are per app.
+fn add_man(buf: u64, len: u64) -> u64 {
+    base_items = n_items
+    base_pages = n_pages
+    base_pool = pool_n
+    base_apps = n_apps
+    app_off = 0
+    st = 0
+    cur_col = 0
+    err = 0
+    err_ln = 0
+    warns = 0
+    too_many = 0
     cur_buf = buf
     var at: u64 = 0
     var line: u64 = 0
@@ -512,11 +581,34 @@ fn load(buf: u64, len: u64) -> u64 {
         fail(E_HEADER, line)
     }
     if err != 0 {
-        n_items = 0
-        n_pages = 0
+        n_items = base_items
+        n_pages = base_pages
+        pool_n = base_pool
+        n_apps = base_apps
         return ERR
     }
-    return n_items
+    return n_items - base_items
+}
+
+// One manifest, nothing else: the catalogue is emptied first. Rejected -> the tables are EMPTY.
+fn load(buf: u64, len: u64) -> u64 {
+    reset()
+    return add_man(buf, len)
+}
+
+// Adds another manifest (the built-in page was load()ed or add()ed first).
+fn add(buf: u64, len: u64) -> u64 {
+    expect_app = 0
+    return add_man(buf, len)
+}
+
+// Adds the SETTINGS file of the package /apps/<dir>.prog/: its `app` line must be <dir> (0-terminated), so a package can only
+// speak for itself -- not for "settings" or another package.
+fn add_pkg(buf: u64, len: u64, dir: u64) -> u64 {
+    expect_app = dir
+    let n: u64 = add_man(buf, len)
+    expect_app = 0
+    return n
 }
 
 // ---- accessors (strings are 0-terminated pool text; 0 = none) ----
@@ -566,7 +658,59 @@ fn page_len(p: u64) -> u64 {
     return pg_len[(p) as usize]
 }
 
-// a 0-terminated id -> page index, NONE when absent
+fn app_count() -> u64 {
+    return n_apps
+}
+
+// the 0-terminated name of app a (the app index is the order of load()/add())
+fn app_at(a: u64) -> u64 {
+    if a >= n_apps {
+        return 0
+    }
+    return pool_ptr(ap_name[(a) as usize])
+}
+
+fn app_first_page(a: u64) -> u64 {
+    if a >= n_apps {
+        return 0
+    }
+    return ap_first[(a) as usize]
+}
+
+fn app_page_count(a: u64) -> u64 {
+    if a >= n_apps {
+        return 0
+    }
+    if a + 1 < n_apps {
+        return ap_first[(a + 1) as usize] - ap_first[(a) as usize]
+    }
+    return n_pages - ap_first[(a) as usize]
+}
+
+fn page_app(p: u64) -> u64 {
+    if p >= n_pages {
+        return NONE
+    }
+    return pg_app[(p) as usize]
+}
+
+// a page id inside ONE app (page ids are per app) -> page index, NONE when absent
+fn page_find_in(a: u64, id: u64) -> u64 {
+    if a >= n_apps {
+        return NONE
+    }
+    let e: u64 = ap_first[(a) as usize] + app_page_count(a)
+    var p: u64 = ap_first[(a) as usize]
+    while p < e {
+        if text_eq(pool_ptr(pg_id[(p) as usize]), id) {
+            return p
+        }
+        p = p + 1
+    }
+    return NONE
+}
+
+// a 0-terminated id -> page index (the first app that has it), NONE when absent
 fn page_find(id: u64) -> u64 {
     var p: u64 = 0
     while p < n_pages {

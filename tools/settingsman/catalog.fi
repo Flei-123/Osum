@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/settingsman/catalog.fi -- r143: reads SEVERAL manifests from stdin into one catalogue and prints it in a fixed text
+// form. Sections start with a line `%% add` (manifest.add), `%% pkg <dir>` (manifest.add_pkg with the package directory
+// name) or `%% load` (manifest.load: the catalogue is emptied first); the lines after it, up to the next `%%` line, are the SETTINGS file. tools/settingsman/manifest.py --catalog (a
+// second, independent reader) prints the same form; run.sh compares them.
+import std.rt
+import std.io
+import settingsman.manifest
+
+static mut dirbuf: [u8; 64] = [0 as u8; 64]
+static mut s_accounts: [u8; 9] = "accounts\0"
+static mut s_privacy: [u8; 8] = "privacy\0"
+static mut s_settings: [u8; 9] = "settings\0"
+static mut s_melder: [u8; 7] = "melder\0"
+
+fn rd(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn tname(t: u64) -> str {
+    if t == manifest.T_BOOL {
+        return "bool"
+    }
+    if t == manifest.T_CHOICE {
+        return "choice"
+    }
+    if t == manifest.T_TEXT {
+        return "text"
+    }
+    if t == manifest.T_SECRET {
+        return "secret"
+    }
+    if t == manifest.T_ACTION {
+        return "action"
+    }
+    if t == manifest.T_STATUS {
+        return "status"
+    }
+    if t == manifest.T_LIST {
+        return "list"
+    }
+    return "?"
+}
+
+fn pc(p: u64) {
+    if p == 0 {
+        io.print("-")
+    } else {
+        io.print_c(p)
+    }
+}
+
+// one section: buf[at..e) is the SETTINGS file; mode 0 add, 1 add_pkg (dir in dirbuf), 2 load (empties the catalogue first)
+fn run_section(buf: u64, at: u64, e: u64, mode: u64, num: u64) {
+    var n: u64 = 0
+    if mode == 1 {
+        n = manifest.add_pkg(buf + at, e - at, (&dirbuf[0]) as u64)
+    } else if mode == 2 {
+        n = manifest.load(buf + at, e - at)
+    } else {
+        n = manifest.add(buf + at, e - at)
+    }
+    if n == manifest.ERR {
+        let code: u64 = manifest.err_code()
+        let line: u64 = manifest.err_line()
+        io.fmt_print_line(f"add {num} error {code} line {line}")
+        return
+    }
+    let w: u64 = manifest.warn_count()
+    io.fmt_print(f"add {num} ok app=")
+    pc(manifest.app_name())
+    io.fmt_print_line(f" items={n} warns={w}")
+}
+
+fn main() -> i32 {
+    var b: rt.Buf = rt.buf_new()
+    io.read_stdin(&b)
+    let buf: u64 = b.ptr as u64
+    let len: u64 = b.len as u64
+    manifest.reset()
+    var at: u64 = 0
+    var sec_at: u64 = 0
+    var in_sec: bool = false
+    var mode: u64 = 0
+    var num: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        if rd(buf, at) == 37 && at + 1 < len && rd(buf, at + 1) == 37 {
+            if in_sec {
+                run_section(buf, sec_at, at, mode, num)
+            }
+            num = num + 1
+            mode = 0
+            // `%% pkg <dir>`: the directory name is the word after "pkg"
+            if e - at > 7 && rd(buf, at + 3) == 112 && rd(buf, at + 4) == 107 && rd(buf, at + 5) == 103 {
+                mode = 1
+                var k: u64 = 0
+                var q: u64 = at + 7
+                while q < e && k < 63 && rd(buf, q) != 32 && rd(buf, q) != 13 {
+                    dirbuf[(k) as usize] = (rd(buf, q) & 255) as u8
+                    k = k + 1
+                    q = q + 1
+                }
+                dirbuf[(k) as usize] = 0 as u8
+            }
+            if e - at >= 7 && rd(buf, at + 3) == 108 && rd(buf, at + 4) == 111 && rd(buf, at + 5) == 97 && rd(buf, at + 6) == 100 {
+                mode = 2
+            }
+            in_sec = true
+            sec_at = e + 1
+            if sec_at > len {
+                sec_at = len
+            }
+        }
+        at = e + 1
+    }
+    if in_sec {
+        run_section(buf, sec_at, len, mode, num)
+    }
+    let na: u64 = manifest.app_count()
+    let np: u64 = manifest.page_count()
+    let ni: u64 = manifest.item_count()
+    io.fmt_print_line(f"catalog apps={na} pages={np} items={ni}")
+    var a: u64 = 0
+    while a < na {
+        let af: u64 = manifest.app_first_page(a)
+        let ac: u64 = manifest.app_page_count(a)
+        io.print("app ")
+        pc(manifest.app_at(a))
+        io.fmt_print_line(f" first={af} pages={ac}")
+        a = a + 1
+    }
+    var p: u64 = 0
+    while p < np {
+        let pa: u64 = manifest.page_app(p)
+        io.print("page ")
+        pc(manifest.app_at(pa))
+        io.print(" ")
+        pc(manifest.page_id(p))
+        io.print(" ")
+        pc(manifest.page_title(p))
+        io.print(" ")
+        pc(manifest.page_symbol(p))
+        io.print(" ")
+        pc(manifest.page_group(p))
+        let first: u64 = manifest.page_first(p)
+        let plen: u64 = manifest.page_len(p)
+        io.fmt_print_line(f" first={first} len={plen}")
+        var i: u64 = first
+        while i < first + plen {
+            let k: u64 = manifest.item_kind(i)
+            var cn: str = "left"
+            if manifest.item_col(i) == 1 {
+                cn = "right"
+            }
+            if k == manifest.K_LABEL {
+                io.fmt_print(f"  label {cn} ")
+                pc(manifest.item_label(i))
+                io.print("\n")
+            } else if k == manifest.K_NOTE {
+                let lines: u64 = manifest.item_num(i)
+                io.fmt_print(f"  note {cn} ")
+                pc(manifest.item_label(i))
+                io.fmt_print_line(f" {lines}")
+            } else {
+                let tn: str = tname(manifest.item_type(i))
+                io.fmt_print(f"  field {cn} ")
+                pc(manifest.item_key(i))
+                io.fmt_print(f" {tn} ")
+                pc(manifest.item_label(i))
+                io.print(" ")
+                pc(manifest.item_def(i))
+                io.print("\n")
+            }
+            i = i + 1
+        }
+        p = p + 1
+    }
+    // lookups: page_find_in is per app (the first app's "accounts" is not the second's); page_find takes the first app
+    a = 0
+    while a < na {
+        let l1: u64 = manifest.page_find_in(a, (&s_accounts[0]) as u64)
+        let l2: u64 = manifest.page_find_in(a, (&s_privacy[0]) as u64)
+        io.print("lookup ")
+        pc(manifest.app_at(a))
+        io.fmt_print_line(f" accounts={l1} privacy={l2}")
+        a = a + 1
+    }
+    let f1: u64 = manifest.page_find((&s_accounts[0]) as u64)
+    let f2: u64 = manifest.page_find((&s_privacy[0]) as u64)
+    io.fmt_print_line(f"find accounts={f1} privacy={f2}")
+    let g1: u64 = manifest.app_find((&s_settings[0]) as u64)
+    let g2: u64 = manifest.app_find((&s_melder[0]) as u64)
+    io.fmt_print_line(f"appfind settings={g1} melder={g2}")
+    return 0
+}

@@ -10,7 +10,10 @@
 # 2. limits (80 items, 8 pages, string pool) -- both readers agree and say the expected code;
 # 3. the accounts page is WIRED: every field key of the manifest is bound in kernel/user/settings.fi (ab_names), every
 #    label is a catalogue key in en AND de, the Konten page no longer builds the book button by hand;
-# 4. MUTATIONS: each broken copy of the parser must turn step 1/2 red.
+# 4. the CATALOGUE (r143): several manifests (built-in page + packages /apps/<app>.prog/SETTINGS) in one catalogue --
+#    tools/settingsman/catalog.fi and `manifest.py --catalog` agree on every case in tools/settingsman/catalog/ and
+#    on the catalogue limits; a rejected file leaves the catalogue as it was; no package can speak for another app;
+# 5. MUTATIONS: each broken copy of the parser must turn step 1-4 red.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -108,6 +111,7 @@ for f in fields:
 for b in bound:
     if b not in fields: bad("binding %s is not a field of the manifest" % b)
 if len(set(fields)) != len(fields): bad("duplicate field keys")
+if not re.search(r"^field password secret ", man, re.M): bad("the password field of the accounts page is not type secret (shown in clear text)")
 for k in sorted(set(labels)):
     for nm, cat in (("en", en), ("de", de)):
         if not re.search(r"^" + re.escape(k) + r" = ", cat, re.M): bad("catalogue key %s missing in %s" % (k, nm))
@@ -133,7 +137,57 @@ print("unknown=4294967295 prefix=4294967295 longer=4294967295")
 PY
 if cmp -s "$T/bind.out" "$T/bind.exp"; then ok "names_index (fn acct_bind) gives every key its line number; unknown/prefix/longer keys are refused"; else bad "binding numbers differ: $(diff "$T/bind.out" "$T/bind.exp" | head -3 | tr '\n' ' ')"; fi
 
-echo "== 4. mutations of the parser =="
+echo "== 4. catalogue: several manifests (r143) =="
+build_cat() { # libdir out
+    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/settingsman/catalog.fi -o "$2" > "$2.build" 2>&1
+}
+if build_cat "$ROOT/lib" "$T/cat"; then ok "catalog.fi builds against lib/settingsman"; else
+    bad "catalog.fi does not build"; grep -v '^warning' "$T/cat.build" | head; fi
+nd=0; ng=0; nc=0
+for f in tools/settingsman/catalog/*.txt; do
+    nc=$((nc+1))
+    "$T/cat" < "$f" > "$T/c.fi" 2>/dev/null; python3 -I tools/settingsman/manifest.py --catalog < "$f" > "$T/c.py"
+    cmp -s "$T/c.fi" "$T/c.py" || { nd=$((nd+1)); echo "    differs: $f"; }
+    cmp -s "$T/c.fi" "${f%.txt}.expect" || { ng=$((ng+1)); echo "    golden differs: $f"; }
+    case "$(basename "$f")" in
+        ok_*) grep -q ' error ' "${f%.txt}.expect" && bad "$(basename "$f") should have no rejected file" ;;
+        rej_*) grep -q ' error ' "${f%.txt}.expect" || bad "$(basename "$f") should reject a file" ;;
+    esac
+done
+[ "$nd" = 0 ] && ok "second reader agrees on all $nc catalogue cases" || bad "python and Firn reader differ on $nd catalogue cases"
+[ "$ng" = 0 ] && ok "catalogue output matches the golden file for all $nc cases" || bad "catalogue output differs from golden in $ng cases"
+python3 -I - "$T" <<'PY'
+import sys
+t = sys.argv[1]
+def sec(kind, app, body): return "%% " + kind + "\nmanifest 1\napp " + app + "\n" + body
+def w(name, parts): open(f"{t}/cl_{name}.txt", "w").write("".join(parts))
+one = "page p t s g\n"
+w("apps8", [sec("add", f"a{i}", one) for i in range(8)])
+w("apps9", [sec("add", f"a{i}", one) for i in range(9)])
+p8 = lambda i: sec("add", f"a{i}", "".join(f"page p{j} t s g\n" for j in range(8)))
+w("pages24", [p8(i) for i in range(3)])
+w("pages25", [p8(i) for i in range(3)] + [sec("add", "a3", one)])
+i80 = lambda i: sec("add", f"a{i}", one + "".join(f"field k{j} text\n" for j in range(80)))
+w("items240", [i80(i) for i in range(3)])
+w("items241", [i80(i) for i in range(3)] + [sec("add", "a3", one + "field k text\n")])
+big = lambda i, tail="": sec("add", f"a{i}", one + "".join(f"field {'k%02d' % j + 'x' * 36} text {'l%02d' % j + 'y' * 36}\n" for j in range(34)) + tail)
+w("pool_cat", [big(0), big(1), big(2)])
+w("pool_leak", [big(0), big(1, "field Bad text\n"), big(2)])
+PY
+clim() { # name expected-line-pattern
+    python3 -I tools/settingsman/manifest.py --catalog < "$T/cl_$1.txt" > "$T/cl_$1.py"; "$T/cat" < "$T/cl_$1.txt" > "$T/cl_$1.fi" 2>/dev/null
+    if cmp -s "$T/cl_$1.py" "$T/cl_$1.fi" && grep -q "$2" "$T/cl_$1.fi"; then ok "catalogue $1: $(grep -m1 "$2" "$T/cl_$1.fi")"; else bad "catalogue $1: expected '$2' (Firn '$(grep -m1 -e ' error ' "$T/cl_$1.fi")', python '$(grep -m1 -e ' error ' "$T/cl_$1.py")')"; fi
+}
+clim apps8 "^catalog apps=8 pages=8 items=0"
+clim apps9 "^add 9 error 8 line 2"
+clim pages24 "^catalog apps=3 pages=24 items=0"
+clim pages25 "^add 4 error 8 "
+clim items240 "^catalog apps=3 pages=3 items=240"
+clim items241 "^add 4 error 8 "
+clim pool_cat "^add 3 error 9 "
+clim pool_leak "^add 3 ok "
+
+echo "== 5. mutations of the parser =="
 mutate() { # name old new
     local d="$T/m_$1"
     rm -rf "$d"; mkdir -p "$d"; cp -r lib "$d/lib"
@@ -159,6 +213,15 @@ PY
     if FIRNLIB="$d/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.fi -o "$d/bind" > /dev/null 2>&1; then
         timeout 10 "$d/bind" > "$d/b.txt" 2>/dev/null; cmp -s "$d/b.txt" "$T/bind.exp" || n=$((n+1))
     else n=$((n+1)); fi
+    if build_cat "$d/lib" "$d/cat"; then
+        for f in tools/settingsman/catalog/*.txt "$T"/cl_*.txt; do
+            timeout 10 "$d/cat" < "$f" > "$d/c.txt" 2>/dev/null
+            case "$f" in
+                */catalog/*) cmp -s "$d/c.txt" "${f%.txt}.expect" || n=$((n+1)) ;;
+                *) b=$(basename "$f" .txt); cmp -s "$d/c.txt" "$T/$b.py" || n=$((n+1)) ;;
+            esac
+        done
+    else n=$((n+1)); fi
     if [ "$n" -gt 0 ]; then ok "mutation '$1' is caught ($n files differ)"; else bad "mutation '$1' SURVIVED"; fi
 }
 mutate version-any '!word_eq(1, (&kw_one[0]) as u64, 1)' 'false'
@@ -174,9 +237,8 @@ mutate unknown-type-rejects '        warns = warns + 1
 mutate unknown-word-rejects '    // unknown line word: skipped, counted
     warns = warns + 1
     return 1' '    return fail(E_ITEM, line)'
-mutate reject-keeps-tables '        n_items = 0
-        n_pages = 0
-        return ERR' '        return ERR'
+mutate reject-keeps-tables '        n_items = base_items
+        n_pages = base_pages' '        n_pages = base_pages'
 mutate action-without-label 'if ty == T_ACTION && label == 0 {' 'if false {'
 mutate note-lines-unchecked 'if wlen[2] != 1 || c < 49 || c > 57 {' 'if false {'
 mutate column-sticks 'n_pages = n_pages + 1
@@ -190,9 +252,9 @@ mutate page-len-wrong 'pg_len[(n_pages - 1) as usize] = pg_len[(n_pages - 1) as 
 mutate two-apps 'if st != 1 || nw != 2 {
             return fail(E_APP, line)' 'if nw != 2 {
             return fail(E_APP, line)'
-mutate item-limit 'if n_items >= MAX_ITEMS {' 'if n_items >= MAX_ITEMS + 1 {'
-mutate page-limit 'if n_pages >= MAX_PAGES {' 'if n_pages >= MAX_PAGES + 1 {'
-mutate pool-limit 'if pool_n + n + 1 > POOL_MAX {' 'if pool_n + n + 1 > POOL_MAX + 1000 {'
+mutate item-limit 'if n_items - base_items >= MAX_ITEMS ||' 'if n_items - base_items >= MAX_ITEMS + 1 ||'
+mutate page-limit 'if n_pages - base_pages >= MAX_PAGES ||' 'if n_pages - base_pages >= MAX_PAGES + 1 ||'
+mutate pool-limit 'if pool_n - base_pool + n + 1 > POOL_MAX ||' 'if pool_n - base_pool + n + 1 > POOL_MAX + 1000 ||'
 mutate default-lost 'def = put_word(4)' 'def = 0'
 mutate bind-longer-key 'if same && e > at && rd(key, e - at) == 0 {' 'if same && e > at {'
 mutate bind-index-skips '        ix = ix + 1
@@ -201,6 +263,56 @@ mutate bind-index-skips '        ix = ix + 1
     }
     return NONE'
 mutate col-ignored 'it_col[i] = cur_col' 'it_col[i] = 0'
+# the catalogue (r143)
+mutate dup-app-ok 'if app_find(pool_ptr(app_off)) != NONE {' 'if false {'
+mutate pkg-name-unchecked 'if expect_app != 0 && !text_eq(pool_ptr(app_off), expect_app) {' 'if false {'
+mutate rollback-items 'n_items = base_items
+        n_pages = base_pages' 'n_pages = base_pages'
+mutate rollback-pages '        n_pages = base_pages
+        pool_n = base_pool' '        pool_n = base_pool'
+mutate rollback-pool '        pool_n = base_pool
+        n_apps = base_apps' '        n_apps = base_apps'
+mutate rollback-apps '        n_apps = base_apps
+        return ERR' '        return ERR'
+mutate field-before-page-global 'if n_pages == base_pages {
+            return fail(E_NO_PAGE, line)
+        }
+        return do_field(nw, line)' 'if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        return do_field(nw, line)'
+mutate column-before-page-global 'if n_pages == base_pages {
+            return fail(E_NO_PAGE, line)
+        }
+        if nw != 2 {
+            return fail(E_COLUMN, line)' 'if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        if nw != 2 {
+            return fail(E_COLUMN, line)'
+mutate dup-page-across-apps 'var p: u64 = base_pages
+    while p < n_pages {
+        if text_eq(pool_ptr(pg_id' 'var p: u64 = 0
+    while p < n_pages {
+        if text_eq(pool_ptr(pg_id'
+mutate page-app-wrong 'pg_app[i] = n_apps - 1' 'pg_app[i] = 0'
+mutate app-first-wrong 'ap_first[(n_apps) as usize] = n_pages' 'ap_first[(n_apps) as usize] = 0'
+mutate app-page-count-last 'return n_pages - ap_first[(a) as usize]' 'return n_pages'
+mutate app-page-count-mid 'if a + 1 < n_apps {' 'if false {'
+mutate lookup-all-apps 'var p: u64 = ap_first[(a) as usize]
+    while p < e {' 'var p: u64 = 0
+    while p < e {'
+mutate cat-apps-limit 'if n_apps >= MAX_APPS {' 'if n_apps >= MAX_APPS + 1 {'
+mutate cat-pages-limit '|| n_pages >= CAT_PAGES {' '|| n_pages >= CAT_PAGES + 1 {'
+mutate cat-items-limit '|| n_items >= CAT_ITEMS {' '|| n_items >= CAT_ITEMS + 1 {'
+mutate cat-pool-limit '|| pool_n + n + 1 > CAT_POOL {' '|| pool_n + n + 1 > CAT_POOL + 1000 {'
+mutate load-keeps-catalogue 'reset()
+    return add_man(buf, len)' 'return add_man(buf, len)'
+mutate warns-carry 'warns = 0
+    too_many = 0
+    cur_buf = buf' 'too_many = 0
+    cur_buf = buf'
+mutate app-find-prefix 'if text_eq(pool_ptr(ap_name[(a) as usize]), name) {' 'if rd(pool_ptr(ap_name[(a) as usize]), 0) == rd(name, 0) {'
 
 echo "SETTINGSMAN: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

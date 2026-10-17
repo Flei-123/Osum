@@ -5,16 +5,22 @@
 The first reader is lib/settingsman/manifest.fi (the Settings app). This one is written from the SPEC, not
 copied from the Firn code; tools/settingsman/run.sh feeds both the same files and compares the output
 (and a golden file per case). Usage: manifest.py < SETTINGS   -> the same text form as dump.fi.
+       manifest.py --catalog < SECTIONS   -> the form of catalog.fi: several manifests in one catalogue (r143), sections
+                                             `%% add` / `%% pkg <dir>` / `%% load` like catalog.fi.
 """
 import sys
 
-MAX_ITEMS = 80
+MAX_ITEMS = 80      # per manifest
 MAX_PAGES = 8
 POOL_MAX = 3072
+MAX_APPS = 8        # whole catalogue
+CAT_PAGES = 24
+CAT_ITEMS = 240
+CAT_POOL = 8192
 TYPES = ["bool", "choice", "text", "secret", "action", "status", "list"]
 NAME_CHARS = set(b"abcdefghijklmnopqrstuvwxyz0123456789._-")
 
-E_HEADER, E_APP, E_PAGE, E_DUP_PAGE, E_NO_PAGE, E_ITEM, E_NAME, E_FULL, E_POOL, E_COLUMN, E_DUP_FIELD = range(1, 12)
+E_HEADER, E_APP, E_PAGE, E_DUP_PAGE, E_NO_PAGE, E_ITEM, E_NAME, E_FULL, E_POOL, E_COLUMN, E_DUP_FIELD, E_DUP_APP, E_MISMATCH = range(1, 14)
 
 
 class Reject(Exception):
@@ -51,7 +57,20 @@ def name_ok(w, maxlen):
     return 0 < len(w) <= maxlen and all(c in NAME_CHARS for c in w)
 
 
-def parse(data):
+class Catalog:
+    """What the readers have accepted so far: apps, pages (each knows its app), items, octets of text."""
+    def __init__(self):
+        self.apps = []
+        self.pages = []
+        self.items = []
+        self.pool = 0
+        self.app_first = []
+
+
+def parse(data, cat=None, expect=None):
+    """Parses ONE manifest into the catalogue cat (a new one when None). On Reject nothing of the file is added."""
+    if cat is None:
+        cat = Catalog()
     st = 0
     pool = 0
     app = None
@@ -62,7 +81,7 @@ def parse(data):
 
     def put(w):
         nonlocal pool
-        if pool + len(w) + 1 > POOL_MAX:
+        if pool + len(w) + 1 > POOL_MAX or cat.pool + pool + len(w) + 1 > CAT_POOL:
             raise Reject(E_POOL, line)
         pool += len(w) + 1
         return w.decode("latin-1")
@@ -93,6 +112,12 @@ def parse(data):
             if not name_ok(w[1], 24):
                 raise Reject(E_NAME, line)
             app = put(w[1])
+            if expect is not None and app != expect:
+                raise Reject(E_MISMATCH, line)
+            if app in cat.apps:
+                raise Reject(E_DUP_APP, line)
+            if len(cat.apps) >= MAX_APPS:
+                raise Reject(E_FULL, line)
             st = 2
             continue
         if st < 2:
@@ -102,13 +127,13 @@ def parse(data):
                 raise Reject(E_PAGE, line)
             if not all(name_ok(x, 40) for x in w[1:5]):
                 raise Reject(E_NAME, line)
-            if len(pages) >= MAX_PAGES:
+            if len(pages) >= MAX_PAGES or len(cat.pages) + len(pages) >= CAT_PAGES:
                 raise Reject(E_FULL, line)
             vals = [put(x) for x in w[1:5]]
             if any(p["id"] == vals[0] for p in pages):
                 raise Reject(E_DUP_PAGE, line)
             pages.append({"id": vals[0], "title": vals[1], "symbol": vals[2], "group": vals[3],
-                          "first": len(items), "len": 0})
+                          "first": len(cat.items) + len(items), "len": 0, "app": app})
             col = 0
             continue
         if kw == b"column":
@@ -125,7 +150,7 @@ def parse(data):
             continue
 
         def add(item):
-            if len(items) >= MAX_ITEMS:
+            if len(items) >= MAX_ITEMS or len(cat.items) + len(items) >= CAT_ITEMS:
                 raise Reject(E_FULL, line)
             item["col"] = "right" if col else "left"
             items.append(item)
@@ -176,7 +201,7 @@ def parse(data):
             if ty == "action" and label is None:
                 raise Reject(E_ITEM, line)
             key = put(w[1])
-            first = pages[-1]["first"]
+            first = pages[-1]["first"] - len(cat.items)
             if any(it["kind"] == "field" and it["key"] == key for it in items[first:]):
                 raise Reject(E_DUP_FIELD, line)
             add({"kind": "field", "key": key, "type": ty, "label": label, "def": default})
@@ -184,26 +209,88 @@ def parse(data):
         warns += 1
     if st < 2:
         raise Reject(E_HEADER, line)
+    cat.apps.append(app)
+    cat.app_first.append(len(cat.pages))
+    cat.pages += pages
+    cat.items += items
+    cat.pool += pool
     return app, pages, items, warns
 
 
+def show_items(cat, p, out):
+    for it in cat.items[p["first"]:p["first"] + p["len"]]:
+        if it["kind"] == "label":
+            out.append("  label %s %s" % (it["col"], it["label"]))
+        elif it["kind"] == "note":
+            out.append("  note %s %s %d" % (it["col"], it["label"], it["num"]))
+        else:
+            out.append("  field %s %s %s %s %s" % (it["col"], it["key"], it["type"], it["label"] or "-", it["def"] or "-"))
+
+
 def dump(data):
+    cat = Catalog()
     try:
-        app, pages, items, warns = parse(data)
+        app, pages, items, warns = parse(data, cat)
     except Reject as r:
         return "error %d line %d\ntables items=0 pages=0\n" % (r.code, r.line)
     out = ["ok app=%s items=%d pages=%d warns=%d" % (app, len(items), len(pages), warns)]
     for p in pages:
         out.append("page %s %s %s %s first=%d len=%d" % (p["id"], p["title"], p["symbol"], p["group"], p["first"], p["len"]))
-        for it in items[p["first"]:p["first"] + p["len"]]:
-            if it["kind"] == "label":
-                out.append("  label %s %s" % (it["col"], it["label"]))
-            elif it["kind"] == "note":
-                out.append("  note %s %s %d" % (it["col"], it["label"], it["num"]))
-            else:
-                out.append("  field %s %s %s %s %s" % (it["col"], it["key"], it["type"], it["label"] or "-", it["def"] or "-"))
+        show_items(cat, p, out)
+    return "\n".join(out) + "\n"
+
+
+def dump_catalog(data):
+    """Sections `%% add` / `%% pkg <dir>`; the text between two `%%` lines is one SETTINGS file."""
+    cat = Catalog()
+    secs = []
+    for raw in data.split(b"\n"):
+        if raw.startswith(b"%%"):
+            ws = raw.split()
+            secs.append([ws[1] if len(ws) > 1 else b"", ws[2].decode("latin-1")[:63] if len(ws) > 2 else None, []])
+        elif secs:
+            secs[-1][2].append(raw)
+    out = []
+    for n, (kind, d, lines) in enumerate(secs, 1):
+        body = b"\n".join(lines)
+        # the last section runs to the end of the input, like catalog.fi (a trailing newline of the input is part of it)
+        if kind == b"load":
+            cat = Catalog()  # load(): the catalogue is emptied first, whatever happens next
+        try:
+            app, pages, items, warns = parse(body, cat, d if kind == b"pkg" else None)
+            out.append("add %d ok app=%s items=%d warns=%d" % (n, app, len(items), warns))
+        except Reject as r:
+            out.append("add %d error %d line %d" % (n, r.code, r.line))
+    out.append("catalog apps=%d pages=%d items=%d" % (len(cat.apps), len(cat.pages), len(cat.items)))
+    for ai, a in enumerate(cat.apps):
+        mine = sum(1 for p in cat.pages if p["app"] == a)
+        out.append("app %s first=%d pages=%d" % (a, cat.app_first[ai], mine))
+    for p in cat.pages:
+        out.append("page %s %s %s %s %s first=%d len=%d" % (p["app"], p["id"], p["title"], p["symbol"], p["group"], p["first"], p["len"]))
+        show_items(cat, p, out)
+    none = 4294967295
+    def find_in(ai, pid):
+        a = cat.apps[ai]
+        for i, p in enumerate(cat.pages):
+            if p["app"] == a and p["id"] == pid:
+                return i
+        return none
+    for ai, a in enumerate(cat.apps):
+        out.append("lookup %s accounts=%d privacy=%d" % (a, find_in(ai, "accounts"), find_in(ai, "privacy")))
+    def find(pid):
+        for i, p in enumerate(cat.pages):
+            if p["id"] == pid:
+                return i
+        return none
+    out.append("find accounts=%d privacy=%d" % (find("accounts"), find("privacy")))
+    def appfind(n):
+        return cat.apps.index(n) if n in cat.apps else none
+    out.append("appfind settings=%d melder=%d" % (appfind("settings"), appfind("melder")))
     return "\n".join(out) + "\n"
 
 
 if __name__ == "__main__":
-    sys.stdout.write(dump(sys.stdin.buffer.read()))
+    if sys.argv[1:] == ["--catalog"]:
+        sys.stdout.write(dump_catalog(sys.stdin.buffer.read()))
+    else:
+        sys.stdout.write(dump(sys.stdin.buffer.read()))
