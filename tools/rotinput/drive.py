@@ -62,6 +62,15 @@ class Qmp:
             {"type": "abs", "data": {"axis": "y", "value": ay}}])
         time.sleep(0.25)
 
+    def rel_push(self, sx, sy, n=60):
+        # many relative steps in ONE call: far more than the panel is wide, so the pointer ends clamped at a screen edge/corner
+        ev = []
+        for _ in range(n):
+            ev.append({"type": "rel", "data": {"axis": "x", "value": 100 * sx}})
+            ev.append({"type": "rel", "data": {"axis": "y", "value": 100 * sy}})
+        self.call("input-send-event", events=ev)
+        time.sleep(1.0)
+
     def button(self, down):
         self.call("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
         time.sleep(0.25)
@@ -160,6 +169,28 @@ def main():
     fact("hits_start", 1 if re.search(r"taskbar: click x=\d+ y=\d+[^\n]*\n[^\n]*hits=start", serial_text(ser)[mark:]) or re.search(r"hits=start", serial_text(ser)[mark:]) else 0)
     time.sleep(1.0)
     shot(mon, os.path.join(out, "after.ppm"))
+    # --- relative mouse: push the pointer PHYSICALLY toward the panel corner that shows the LOGICAL bottom-right corner (inside the
+    # taskbar). Clamping makes it independent of pointer acceleration. The click must land at the end of the bar.
+    gw = re.findall(r"taskbar: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", serial_text(ser))
+    bw, bh = (int(gw[-1][2]), int(gw[-1][3])) if gw else (0, 0)
+    lw, lh = (pw, ph) if rot in (0, 180) else (ph, pw)
+    cxp, cyp = logical_to_panel(rot, lw - 1, lh - 1, pw, ph)
+    sgx = 1 if cxp > pw // 2 else -1
+    sgy = 1 if cyp > ph // 2 else -1
+    q.abs_move(pw // 2, ph // 2, pw, ph)
+    q.rel_push(sgx, sgy)
+    mark2 = len(serial_text(ser))
+    q.button(True)
+    q.button(False)
+    _, mr = wait_for(ser, r"taskbar: click x=(\d+) y=(\d+)[^\n]*", mark2, 8)
+    if mr:
+        rx, ry = int(mr.group(1)), int(mr.group(2))
+        fact("rel_click_local", f"{rx},{ry}")
+        fact("rel_ok", 1 if (rx >= bw - 3 and ry >= bh - 3) else 0)
+    else:
+        fact("rel_click_local", "none")
+        fact("rel_ok", 0)
+    fact("rel_push", f"{sgx},{sgy}")
     open(os.path.join(out, "scenes.txt"), "w").write("\n".join(facts) + "\n")
 
 
