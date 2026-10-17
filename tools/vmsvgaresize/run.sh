@@ -101,7 +101,9 @@ while read -r i er; do
     [ "$er" -ge 20 ] && ok "step $i: taskbar visible 2 s after the switch (rows $er)" || bad "step $i: taskbar missing 2 s after the switch (rows $er)"
 done < "$D/o.early"
 # r1061: the floating probe window (kgui hint player) shrinks on a smaller screen and gets its size back when the screen grows again;
-# the line is printed after each hint: `wm: refit probe WxH`. Only judged when the run prints probe lines (vmsvgahints).
+# the line is printed right after each hint, BEFORE the window server has composed the new size, so each line shows the state after the
+# PREVIOUS hint: hints 1280x720, 800x600, 1024x768 give `full full small full` (small = shrunk by the 800x600 screen, full again at 1024x768).
+# `wm: refit probe WxH`. Only judged when the run prints probe lines (vmsvgahints).
 if grep -aq '^wm: refit probe' "$D/serial.txt"; then
     prev=""
     while read -r pw ph; do

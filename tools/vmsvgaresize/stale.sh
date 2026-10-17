@@ -19,7 +19,7 @@ export IMG STICK_DIR
 export SIZES=1280x720,800x600,1024x768,800x600
 pass=0; fail=0
 echo "== current set_mode (vmsvgastale)"
-PROBE_EXPECT="full small full small" EXTRA_WORDS="vmsvgastale" bash tools/vmsvgaresize/run.sh >"$T/new.txt" 2>&1; rc=$?
+PROBE_EXPECT="full full small full" EXTRA_WORDS="vmsvgastale" bash tools/vmsvgaresize/run.sh >"$T/new.txt" 2>&1; rc=$?
 grep -aE '^  (OK|FAIL)  .*(800x600|login|probe|2 s after)' "$T/new.txt" | head -20
 if [ "$rc" = 0 ]; then pass=$((pass+1)); echo "  OK    stale register: all resize checks green incl. 800x600"; else fail=$((fail+1)); echo "  FAIL  stale register: run.sh rc=$rc"; tail -5 "$T/new.txt"; fi
 echo "== counter-proof (vmsvgaold + vmsvgastale)"
