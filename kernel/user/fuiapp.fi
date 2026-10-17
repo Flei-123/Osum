@@ -96,6 +96,8 @@ static mut s_ring: [u64; 4] = [0 as u64; 4]
 // picture that changes nothing (caret blink aside) writes nothing.
 static mut s_atomic_want: u64 = 0
 static mut s_shpx: u64 = 0
+// X2: set by a private-picture resize; the next frame_end names the whole window
+static mut s_force_full: u64 = 0
 
 // Ask for the private picture; call before `open_plain` / `open_window`.
 // `/etc/paintdirect` (counter-proof) switches it off.
@@ -188,7 +190,7 @@ static mut m_h: [u8; 4] = " h=\0"
 
 fn win() -> u64 { return s_win }
 
-// SEVERAL WINDOWS: the per-window state is these eight words. fuiscene keeps a
+// SEVERAL WINDOWS: the per-window state is these ten words. fuiscene keeps a
 // saved copy of them with every window and swaps them in on a window switch.
 // `win_load` also points fUi's canvas at the window's pixels again.
 fn win_save(dst: u64) {
@@ -200,6 +202,8 @@ fn win_save(dst: u64) {
     __mmio_write64((dst + 40) as *mut u64, s_h)
     __mmio_write64((dst + 48) as *mut u64, s_bound)
     __mmio_write64((dst + 56) as *mut u64, s_box)
+    __mmio_write64((dst + 64) as *mut u64, s_shpx)
+    __mmio_write64((dst + 72) as *mut u64, s_force_full)
 }
 
 fn win_load(src: u64) {
@@ -211,6 +215,8 @@ fn win_load(src: u64) {
     s_h = __mmio_read64((src + 40) as *mut u64)
     s_bound = __mmio_read64((src + 48) as *mut u64)
     s_box = __mmio_read64((src + 56) as *mut u64)
+    s_shpx = __mmio_read64((src + 64) as *mut u64)
+    s_force_full = __mmio_read64((src + 72) as *mut u64)
     if s_bound != 0 {
         // fUi paints into ONE canvas; it is this window's pixels from now on
         let _b: bool = fuib.app_bind(s_px, s_w, s_h)
@@ -310,6 +316,56 @@ fn attach(w: u64, bw: u64, bh: u64) -> bool {
     return true
 }
 
+// X2: resize of a window with a PRIVATE picture (set_atomic). The server hands out a new shared buffer of the new size (win_reshare),
+// the private picture is re-allocated to match; the canvas shows the shared buffer, fUi paints the private one. The next frame_end
+// names the whole window (s_force_full), because the new shared buffer is not known to match the new private picture.
+fn resize_private(nw: u64, nh: u64) -> bool {
+    let n: u64 = nw * nh * 4
+    let old: u64 = s_px
+    let oldn: u64 = s_w * s_h * 4
+    let sh: u64 = wlib.win_reshare(s_win, nw, nh)
+    if sh == 0 {
+        return false
+    }
+    let pv: u64 = rt.heap_alloc(n as usize) as u64
+    if pv == 0 {
+        // no memory for a private picture: the shared buffer is already the new one, so paint in place from now on
+        s_shpx = 0
+        wlib.box_at(s_box, 0, 0, nw, nh)
+        wlib.set_size(s_cv, nw, nh)
+        wlib.canvas_set(s_cv, sh, nw, nh, nw)
+        if !fuib.app_bind(sh, nw, nh) {
+            return false
+        }
+        s_px = sh
+        s_w = nw
+        s_h = nh
+        s_force_full = 1
+        wlib.relayout()
+        if old != 0 {
+            rt.heap_free(old, oldn as usize)
+        }
+        return true
+    }
+    wlib.box_at(s_box, 0, 0, nw, nh)
+    wlib.set_size(s_cv, nw, nh)
+    wlib.canvas_set(s_cv, sh, nw, nh, nw)
+    if !fuib.app_bind(pv, nw, nh) {
+        rt.heap_free(pv, n as usize)
+        return false
+    }
+    s_shpx = sh
+    s_px = pv
+    s_w = nw
+    s_h = nh
+    s_force_full = 1
+    wlib.relayout()
+    if old != 0 {
+        rt.heap_free(old, oldn as usize)
+    }
+    return true
+}
+
 // The window changed its size (the user dragged a border): a new pixel
 // buffer of the new size, the box and the canvas of the same size, fUi bound
 // to the new buffer. false when the size is what it was (or no memory).
@@ -325,8 +381,7 @@ fn resize() -> bool {
         return false
     }
     if s_shpx != 0 {
-        // a private-picture window (lock / sign-in screen) is the whole screen and never resized
-        return false
+        return resize_private(nw, nh)
     }
     let n: u64 = nw * nh * 4
     let old: u64 = s_px
@@ -482,6 +537,16 @@ fn frame_end() {
     }
     if s_shpx != 0 {
         s_chg = copy_diff(s_shpx, s_px, s_w * s_h * 4)
+        if s_force_full != 0 {
+            // first picture after a resize: the whole window is damaged
+            s_force_full = 0
+            if s_chg == 0 {
+                s_chg = 1
+            }
+            wlib.canvas_new(s_cv)
+            wlib.draw_all()
+            return
+        }
         if s_chg == 0 {
             // nothing differs from what the window server shows: no damage, no compose, no picture
             return
