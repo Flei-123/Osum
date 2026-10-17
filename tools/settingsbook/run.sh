@@ -11,7 +11,7 @@
 #   `konto: <key> = <value>` lines but needs no network and no identity provider:
 #     1st call -> state device, code, url, continue token, exit 11
 #     2nd call (--continue=, --exchange) -> state ok, `exchange = offline`
-#   The drehbuch opens Settings, clicks the tab "Konten" (rect `tabi`), clicks the button (rect
+#   The drehbuch opens Settings, clicks the tab "Konten" (rect `tabi` (driver name srecttabi)), clicks the button (rect
 #   `kbook`, reported by settings since r126) twice, takes a picture after each step.
 #   settings prints `settings: stand reiter=8 ... konto=[<status line>] book=[<book line>]`.
 #
@@ -58,11 +58,11 @@ DREH="$OUT-drehbuch.txt"
   echo "warte 12"
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
-  echo "klickauf tabi"; echo "warte 3"
+  echo "klickauf srecttabi"; echo "warte 3"
   echo "foto 1-konten-page"
-  echo "klickauf kbook"; echo "warte 4"
+  echo "klickauf srectkbook"; echo "warte 4"
   echo "foto 2-after-click-1"
-  echo "klickauf kbook"; echo "warte 4"
+  echo "klickauf srectkbook"; echo "warte 4"
   echo "foto 3-after-click-2"
 } > "$DREH"
 AUDIT_MKFS_EXTRA="/bin/konto=$OUT-stub/konto.elf" \
@@ -71,7 +71,7 @@ S="$OUT/serial.txt"
 
 grep -aq 'settings: rect name=kbook ' "$S" && ok "the Konten page reports the button rect kbook" || bad "no rect kbook (tab Konten not open?)"
 grep -aq 'settings: rect name=kdev ' "$S" && ok "... and kdev" || bad "no rect kdev"
-grep -aq 'klickauf kbook -> ' "$OUT/fahren.log" 2>/dev/null && ok "the runner clicked kbook" || bad "the runner found no kbook"
+grep -aq 'klickauf srectkbook -> ' "$OUT/fahren.log" 2>/dev/null && ok "the runner clicked kbook" || bad "the runner found no kbook"
 
 # the lines of the Konten page, in order
 grep -a 'settings: stand reiter=8 .* konto=\[' "$S" | sed 's/.* konto=\[//; s/\] book=\[.*//' > "$OUT.konto"
