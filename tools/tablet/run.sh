@@ -31,7 +31,7 @@ run_tree() { # tree out
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=3 \
         extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$PROGS" \
         qemu="-device qemu-xhci -device usb-tablet -qmp unix:$2/qmp.sock,server,nowait" \
-        hook="python3 $ROOT/tools/tablet/qmp.py $2/qmp.sock sleep:1 abs:16384,16384 down:right up:right wheel:up:3 wheel:down:2 abs:8192,24576 sleep:14" ) > "$2.log" 2>&1
+        hook="python3 $ROOT/tools/tablet/qmp.py $2/qmp.sock sleep:1 abs:16384,16384 down:left sleep:0.7 up:left sleep:0.7 down:right sleep:0.7 up:right sleep:0.7 wheel:up:3 wheel:down:2 abs:8192,24576 sleep:14" ) > "$2.log" 2>&1
 }
 # the desktop pulse line ("... eingabe: ber=N ... bew=N pk=N xy=X,Y wm=N kl=N ...") comes every few guest seconds; the LAST one
 # carries the pointer position and the counters. field <dir> <name> -> number

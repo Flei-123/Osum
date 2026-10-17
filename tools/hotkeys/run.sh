@@ -33,7 +33,7 @@ run_tree() { # tree out
     mkdir -p "$2"
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=6 \
-        extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$PROGS" qemu="-device qemu-xhci -device usb-kbd" \
+        extra="modfs osum wmshell wmdauer usb hidgen" hold=no uitrace=yes waitfor="eingabe: ber=" progs="$PROGS" qemu="-device qemu-xhci -device usb-kbd" \
         "${KEYS[@]}" ) > "$2.log" 2>&1
 }
 
