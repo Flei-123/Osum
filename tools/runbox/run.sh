@@ -20,12 +20,13 @@ has() { grep -qaF -- "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' missing
 hasnt() { grep -qaF -- "$2" "$1" 2>/dev/null && bad "$3 -- '$2' present" || ok "$3"; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "RUNBOX: skipped, no qemu"; exit 0; }
 
-KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-r" mon="warte 12"
-      mon="sendkey e" mon="sendkey c" mon="sendkey h" mon="sendkey o" mon="sendkey spc" mon="sendkey h" mon="sendkey i"
-      mon="warte 2" mon="sendkey ret" mon="warte 8"
-      mon="sendkey meta_l-r" mon="warte 12"
-      mon="sendkey n" mon="sendkey o" mon="sendkey p" mon="sendkey e" mon="warte 2" mon="sendkey ret" mon="warte 6"
-      mon="sendkey esc" mon="warte 4")
+# keys are paced (0.4 s): back-to-back sendkeys lost letters under load (n,o,p of "nope" never reached the field)
+typed() { local c; for c in "$@"; do KEYS+=(mon="sendkey $c" mon="warte 0.4"); done; }
+KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-r" mon="warte 12")
+typed e c h o spc h i
+KEYS+=(mon="warte 2" mon="sendkey ret" mon="warte 8" mon="sendkey meta_l-r" mon="warte 12")
+typed n o p e
+KEYS+=(mon="warte 2" mon="sendkey ret" mon="warte 6" mon="sendkey esc" mon="warte 4")
 
 run_tree() { # tree out progs
     mkdir -p "$2"
