@@ -72,11 +72,19 @@ Everything marked [VBOX?] is from memory of the VirtualBox device and MUST be ch
 ## 6. Resize
 - Guest driven (works in QEMU and VirtualBox): new WIDTH/HEIGHT/BPP + ENABLE, read BYTES_PER_LINE, `fb.remap`.
   The VRAM address (BAR1) never changes, only the number of 2 MiB windows (`vmode.switch_to` does the same for VBE).
-- Host driven (VirtualBox window resize / "Auto-resize") [VBOX?, UNVERIFIED]: without guest additions VirtualBox does NOT
-  resize on its own; the hint arrives through display topology registers (CAP_DISPLAY_TOPOLOGY, regs 34..40) and the
-  SVGA_REG_MSHINT/IRQ path of newer devices. Read Linux `vmwgfx_ldu.c` / `vmwgfx_kms.c` (`vmw_du_connector_detect`,
-  `vmw_du_update_layout`) before writing the poll. QEMU has NO host resize hint at all.
-
+- Host driven (VirtualBox window resize / full screen / Windows scaling), FOUND 17.10.2026 (worker x4, from the VirtualBox source in
+  reports/vmsvga-ref): the VMSVGA registers carry NO hint. `vbox-DevVGA-SVGA.cpp` does not offer SVGA_CAP_DISPLAY_TOPOLOGY (nor MULTIMON),
+  and SVGA_REG_DISPLAY_WIDTH/HEIGHT just return the CURRENT mode (`pThis->svga.uWidth/uHeight`), DISPLAY_ID reads 0. The old poll
+  (regs 39/40) could therefore never fire on VirtualBox. `Display::setVideoModeHint` (DisplayImpl.cpp) sends the hint (a) to the VGA device's
+  VBVA/HGSMI mode-hint list (needs the HGSMI protocol, not implemented) and (b) to the guest device VMMDev
+  (`pfnRequestDisplayChange`), always. The Qt window only sends a hint when the guest announced the graphics capability.
+  => Implemented: `vmsvga.vmm_init` finds PCI 80ee:cafe, port BAR0, request page below 4 GiB; REPORT_GUEST_INFO(50), REPORT_GUEST_INFO2(58, name
+  "OrientOS", version 7.2.20), REPORT_GUEST_STATUS(59) driver(20) + graphics(1100) Active(50), SET_GUEST_CAPABILITIES(56) graphics (bit 2).
+  `vmm_hint` = VMMDevReq_GetDisplayChangeRequest2 (54, body xres,yres,bpp,eventAck,display; event_ack = 0 returns the most recent
+  request without any handshake). Layouts: Linux `drivers/virt/vboxguest/vmmdev.h`, VirtualBox `include/VBox/VMMDev.h` (copies in
+  data/vmmdev-ref). `host_pending` uses it when the device is up, else the topology registers (VMware/other).
+- Too large hints (4K full screen, 150 % scaling: bigger than the card memory or the kernel's 16 MiB map window) are shrunk in
+  `vmode.follow_host` by 1/16 steps with the same aspect ratio (host scales the view).
 ## 7. Integration map (where the code goes) -- found by reading the tree
 - Detect+init: `kernel/ui/kgui.fi` `graphics()` right after `fb.init`/`fb.set_shadow` and the `vgpu.init` block:
   `if !novgpu && !vgpu.bereit && !novmsvga { vmsvga.init }`. Order: virtio-gpu > vmsvga > Bochs VBE > firmware LFB
@@ -142,3 +150,11 @@ Everything marked [VBOX?] is from memory of the VirtualBox device and MUST be ch
   (an arrow, not inverted). Alpha cursor (`DEFINE_ALPHA_CURSOR`) and CURSOR_BYPASS_3 FIFO position are code paths QEMU never takes: [VBOX?].
 - Gate `tools/vmsvga/run.sh` (word `vmsvgahw` test bed in kgui.fi): see its header. Screendump of every mode is byte-identical to the Bochs-VBE run of
   the same kernel; a VNC client that applies ONLY the UPDATE rectangles ends up equal to the screendump (end-to-end proof that the rects are complete).
+
+## 11. X4 (17.10.2026): host resize on VirtualBox
+- Root cause of "VM window resize does nothing": see section 6 (no hint in the VMSVGA registers, VMMDev was never talked to).
+- Test bed: QEMU has no VMMDev, so `vmsvga.vmm_fake` injects the hint and the real poll code (`host_pending`: two polls, sane size, differs
+  from the mode) + `follow_host` run (gate `tools/vmsvga/run.sh`, lines `vmsvga: hint in=WxH p1= pend= rc= mode= dev= bad=`): 1137x683, 1280x721,
+  4096x2304 (shrunk), 1920x1080, 1024x768. The VMMDev transport itself: laptop, `VBoxManage controlvm OrientOS setvideomodehint W H 32`.
+- Serial line `vmmdev: io=0x.. up=1 ack=3 polls=N hint=WxH err=0 rc=0x0` (printed with the vmsvga report): ack bit 0 = capability accepted,
+  bit 1 = graphics facility accepted.

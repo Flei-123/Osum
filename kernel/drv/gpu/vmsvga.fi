@@ -27,7 +27,7 @@ import arch.arch
 
 export {
     probe, boot_mbi, init, bereit, present, panic_present, say, shut_down,
-    set_mode, resize, host_pending, resizes, resize_errors,
+    set_mode, resize, host_pending, vmm_init, vmm_say, vmm_fake, vmm_up, resizes, resize_errors,
     cursor_bereit, cursor_zeigen, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_fehler,
     updates, update_octets, verify_bad, width, height, fifo_full,
@@ -108,6 +108,15 @@ const S_PCALLS: u64 = 0x1D0 // calls of present() (the desktop loop must call it
 const S_PFRAMES: u64 = 0x1D8 // calls of present() that found a painted box (= frames that reached the driver)
 const S_PLOCK: u64 = 0x1E0 // spin lock word of the INDEX/VALUE port pair (reg_w / reg_r run on every core)
 const POLL_MS: u64 = 1000 // host display hint poll period (only with CAP_DISPLAY_TOPOLOGY)
+const S_VMM_IO: u64 = 0x1E8 // VirtualBox guest device (VMMDev, PCI 80ee:cafe) I/O port base (0 = none)
+const S_VMM_REQ: u64 = 0x1F0 // physical = virtual address of the request page (below 4 GiB: the port takes 32 bits)
+const S_VMM_UP: u64 = 0x1F8 // 1 = the guest was announced to the host (info + capabilities), hints can be read
+const S_VMM_ERR: u64 = 0x200 // requests the host answered with an error
+const S_VMM_POLLS: u64 = 0x208 // display-change requests read
+const S_VMM_HINT: u64 = 0x210 // last hint read (w << 16 | h)
+const S_VMM_RC: u64 = 0x218 // rc of the last failed request
+const S_VMM_FAKE: u64 = 0x220 // test bed: hint injected instead of the device answer (w << 16 | h), 0 = use the device
+const S_VMM_ACK: u64 = 0x228 // requests that reported the graphics capability (bit mask of steps that worked)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
 // ---- PCI
@@ -969,31 +978,48 @@ fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 // device]. Defensive: only a sane size (>= 640x480, inside the device limits) that DIFFERS from the current mode, was seen on two
 // polls in a row and was not tried before counts. Polled at most every POLL_MS (1 s). Returns w << 16 | h, 0 = none.
 fn host_pending(state: u64) -> u64 {
-    if !bereit(state) || !has_cap(state, CAP_DISPLAY_TOPOLOGY) {
+    let vmm: bool = kstate.get(state, s(S_VMM_UP)) != 0
+    if !bereit(state) || (!vmm && !has_cap(state, CAP_DISPLAY_TOPOLOGY)) {
         return 0
     }
-    let hz: u64 = apic.tsc_hz(state)
-    if hz == 0 {
-        return 0
+    if kstate.get(state, s(S_VMM_FAKE)) == 0 {
+        let hz: u64 = apic.tsc_hz(state)
+        if hz == 0 {
+            return 0
+        }
+        let now: u64 = apic.tsc() / (hz / 1000)
+        if now < kstate.get(state, s(S_NEXTPOLL)) {
+            return 0
+        }
+        kstate.set(state, s(S_NEXTPOLL), now + POLL_MS)
     }
-    let now: u64 = apic.tsc() / (hz / 1000)
-    if now < kstate.get(state, s(S_NEXTPOLL)) {
-        return 0
+    var w: u64 = 0
+    var h: u64 = 0
+    if vmm {
+        // VirtualBox: the hint comes from the guest device (VMMDev), NOT from the VMSVGA registers (they only echo the current mode)
+        let hv: u64 = vmm_hint(state)
+        w = hv / 65536
+        h = hv % 65536
+        if w == 0 || h == 0 {
+            return 0 // the host never sent a hint
+        }
+    } else {
+        if kstate.get(state, s(S_IDSET)) == 0 {
+            reg_w(state, R_DISPLAY_ID, 0)
+            kstate.set(state, s(S_IDSET), 1)
+        }
+        w = reg_r(state, R_DISPLAY_W)
+        h = reg_r(state, R_DISPLAY_H)
     }
-    kstate.set(state, s(S_NEXTPOLL), now + POLL_MS)
-    if kstate.get(state, s(S_IDSET)) == 0 {
-        reg_w(state, R_DISPLAY_ID, 0)
-        kstate.set(state, s(S_IDSET), 1)
-    }
-    let w: u64 = reg_r(state, R_DISPLAY_W)
-    let h: u64 = reg_r(state, R_DISPLAY_H)
     if w == kstate.get(state, s(S_W)) && h == kstate.get(state, s(S_H)) {
         kstate.set(state, s(S_SEEN), 0)
         kstate.set(state, s(S_SEENN), 0)
         kstate.set(state, s(S_HANDLED), 0)
         return 0
     }
-    if w < 640 || h < 480 || w > 8192 || h > 8192 || !size_ok(state, w, h) {
+    // Sane sizes only. NOT checked against the device limits here: a hint beyond VRAM or the kernel map window (a 4K host screen)
+    // is shrunk to fit by vmode.follow_host, which keeps the aspect ratio.
+    if w < 640 || h < 480 || w > 8192 || h > 8192 {
         return 0
     }
     let v: u64 = (w << 16) | h
@@ -1013,6 +1039,210 @@ fn host_pending(state: u64) -> u64 {
         return v
     }
     return 0
+}
+
+// ------------------------------------------------------------ VirtualBox host hint (VMMDev, PCI 80ee:cafe)
+//
+// WHY: the host asks for a new size (VM window dragged / full screen / Windows scaling) through the guest device, not through the
+// VMSVGA registers: VirtualBox's SVGA_REG_DISPLAY_WIDTH/HEIGHT only echo the CURRENT mode and it does not offer
+// SVGA_CAP_DISPLAY_TOPOLOGY at all (reports/vmsvga-ref/vbox-DevVGA-SVGA.cpp, svgaReadPort). Display::setVideoModeHint stores the
+// hint in the VMMDev (VMMDevReq_GetDisplayChangeRequest2); the VM window only sends one when the guest announced the graphics capability.
+// HOW: announce (REPORT_GUEST_INFO, REPORT_GUEST_INFO2, driver + graphics facility, SET_GUEST_CAPABILITIES graphics), then read the
+// last hint with event_ack = 0 once per poll (a request is: write its physical address to the I/O port, the host fills `rc`).
+// Layouts: Linux drivers/virt/vboxguest/vmmdev.h and VirtualBox include/VBox/VMMDev.h (copies in data/vmmdev-ref).
+const VENDOR_VBOX: u64 = 0x80EE
+const DEVICE_VMMDEV: u64 = 0xCAFE
+const VMM_HDR_VERSION: u64 = 0x10001
+const VMM_VERSION: u64 = 0x10004
+const VMMREQ_REPORT_GUEST_INFO: u64 = 50
+const VMMREQ_GET_DISPLAY_CHANGE2: u64 = 54
+const VMMREQ_SET_GUEST_CAPS: u64 = 56
+const VMMREQ_REPORT_GUEST_INFO2: u64 = 58
+const VMMREQ_REPORT_GUEST_STATUS: u64 = 59
+const VMM_CAP_GRAPHICS: u64 = 4
+const VMM_FAC_DRIVER: u64 = 20
+const VMM_FAC_GRAPHICS: u64 = 1100
+const VMM_ST_ACTIVE: u64 = 50
+
+fn vmm_up(state: u64) -> bool {
+    return kstate.get(state, s(S_VMM_UP)) != 0
+}
+
+// Test bed: answer hints from this value instead of the device (w << 16 | h; 0 = back to the device).
+fn vmm_fake(state: u64, v: u64) {
+    kstate.set(state, s(S_VMM_FAKE), v)
+    if v != 0 {
+        kstate.set(state, s(S_VMM_UP), 1)
+    }
+}
+
+fn vmm_find(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_VENDOR) == VENDOR_VBOX && pci.get(state, i, pci.E_DEVICE) == DEVICE_VMMDEV {
+            return i
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// One request: header (size, version, type, rc, 2 reserved words), body already written at +24. True when the host answered rc >= 0.
+fn vmm_call(state: u64, ty: u64, size: u64) -> bool {
+    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
+    let io: u64 = kstate.get(state, s(S_VMM_IO))
+    if rq == 0 || io == 0 {
+        return false
+    }
+    wr32(rq, 0, size)
+    wr32(rq, 4, VMM_HDR_VERSION)
+    wr32(rq, 8, ty)
+    wr32(rq, 12, 0x80000000) // "not processed" marker: the host overwrites it
+    wr32(rq, 16, 0)
+    wr32(rq, 20, 0)
+    arch.dev_out32(io as u16, rq as u32)
+    let rc: u64 = rd32(rq, 12)
+    if rc >= 0x80000000 {
+        kstate.add(state, s(S_VMM_ERR), 1)
+        kstate.set(state, s(S_VMM_RC), rc)
+        return false
+    }
+    return true
+}
+
+fn vmm_zero_body(state: u64, bytes: u64) {
+    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
+    var k: u64 = 24
+    while k < 24 + bytes {
+        wr32(rq, k, 0)
+        k = k + 4
+    }
+}
+
+fn vmm_status(state: u64, facility: u64) -> bool {
+    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
+    vmm_zero_body(state, 12)
+    wr32(rq, 24, facility)
+    wr32(rq, 28, VMM_ST_ACTIVE)
+    wr32(rq, 32, 0)
+    return vmm_call(state, VMMREQ_REPORT_GUEST_STATUS, 36)
+}
+
+// Find the VirtualBox guest device and announce a graphics capable guest. Safe to call twice; silent and cheap without the device
+// (QEMU, VMware, real hardware).
+fn vmm_init(state: u64) {
+    if kstate.get(state, s(S_VMM_UP)) != 0 {
+        return
+    }
+    let i: u64 = vmm_find(state)
+    if i >= pci.MAX_DEV || !pci.bar_is_io(state, i, 0) {
+        return
+    }
+    let io: u64 = pci.bar(state, i, 0)
+    if io == 0 || io > 0xFFF0 {
+        return
+    }
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    pci.cfg_write16(d, CFG_COMMAND, pci.cfg_read16(d, CFG_COMMAND) | 3)
+    let p: u64 = mem.frame_run(state, 1)
+    if p == 0 || p >= 0x100000000 {
+        return
+    }
+    kstate.set(state, s(S_VMM_IO), io)
+    kstate.set(state, s(S_VMM_REQ), p)
+    // 1. who we are (interface version 1.4, OS type "other, 64 bit")
+    vmm_zero_body(state, 8)
+    wr32(p, 24, VMM_VERSION)
+    wr32(p, 28, 0x100)
+    if !vmm_call(state, VMMREQ_REPORT_GUEST_INFO, 32) {
+        kstate.set(state, s(S_VMM_IO), 0)
+        return
+    }
+    // 2. additions version 7.2.20 (the host compares it with its own and complains about an older one) + name
+    vmm_zero_body(state, 144)
+    wr32(p, 24, (2 << 16) | 7)
+    wr32(p, 28, 20)
+    wr32(p, 32, 0)
+    wr32(p, 36, 0)
+    wr32(p, 40, 0x6569724F) // "Orie"
+    wr32(p, 44, 0x534F746E) // "ntOS"
+    let _i2: bool = vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 144)
+    // 3. the driver is up, the graphics capability makes the VM window send resize hints
+    let _s1: bool = vmm_status(state, VMM_FAC_DRIVER)
+    vmm_zero_body(state, 8)
+    wr32(p, 24, VMM_CAP_GRAPHICS)
+    wr32(p, 28, 0)
+    let c: bool = vmm_call(state, VMMREQ_SET_GUEST_CAPS, 32)
+    let g: bool = vmm_status(state, VMM_FAC_GRAPHICS)
+    var ok: u64 = 0
+    if c {
+        ok = ok + 1
+    }
+    if g {
+        ok = ok + 2
+    }
+    kstate.set(state, s(S_VMM_ACK), ok)
+    kstate.set(state, s(S_VMM_UP), 1)
+}
+
+// The last size the host asked for (w << 16 | h), 0 = none or the request failed.
+fn vmm_hint(state: u64) -> u64 {
+    let fk: u64 = kstate.get(state, s(S_VMM_FAKE))
+    if fk != 0 {
+        kstate.set(state, s(S_VMM_HINT), fk)
+        return fk
+    }
+    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
+    vmm_zero_body(state, 20)
+    wr32(rq, 24, 0) // xres
+    wr32(rq, 28, 0) // yres
+    wr32(rq, 32, 0) // bpp
+    wr32(rq, 36, 0) // event_ack = 0: always the most recent request, no event handshake
+    wr32(rq, 40, 0) // display 0
+    if !vmm_call(state, VMMREQ_GET_DISPLAY_CHANGE2, 44) {
+        return 0
+    }
+    kstate.add(state, s(S_VMM_POLLS), 1)
+    let w: u64 = rd32(rq, 24)
+    let h: u64 = rd32(rq, 28)
+    if w > 65535 || h > 65535 {
+        return 0
+    }
+    let v: u64 = (w << 16) | h
+    kstate.set(state, s(S_VMM_HINT), v)
+    return v
+}
+
+fn vmm_say(state: u64) {
+    var s_a: [u8; 12] = "vmmdev: io=\0"
+    var s_u: [u8; 5] = " up=\0"
+    var s_k: [u8; 6] = " ack=\0"
+    var s_p: [u8; 8] = " polls=\0"
+    var s_h: [u8; 7] = " hint=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_e: [u8; 6] = " err=\0"
+    var s_r: [u8; 5] = " rc=\0"
+    if kstate.get(state, s(S_VMM_UP)) == 0 {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(kstate.get(state, s(S_VMM_IO)))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_UP)))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_ACK)))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_POLLS)))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_HINT)) / 65536)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_HINT)) % 65536)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_ERR)))
+    serial.puts((&s_r[0]) as u64)
+    serial.hex(kstate.get(state, s(S_VMM_RC)))
+    serial.nl()
 }
 
 // Does the device take this size (limits only, nothing is written)?
@@ -1144,6 +1374,7 @@ fn init(state: u64) -> bool {
     busy_wait(state)
     box_clear(state)
     heal_arm(state)
+    vmm_init(state)
     return true
 }
 
@@ -1227,6 +1458,7 @@ fn say(state: u64) {
     serial.puts((&s_pf[0]) as u64)
     serial.dec(kstate.get(state, s(S_PFRAMES)))
     serial.nl()
+    vmm_say(state)
     if kstate.mode_on(state, kstate.M_VMSVGAHW) {
         serial.puts((&s_vf[0]) as u64)
         serial.dec(kstate.get(state, s(S_BAD)))
