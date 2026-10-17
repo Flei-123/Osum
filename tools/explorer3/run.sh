@@ -40,6 +40,16 @@ else
     ok "no /proc /dev /sys drive row"
 fi
 
+echo "== 3b. drive label percent (W6): the label built a second time must not double the text =="
+pp=$(grep -aE 'explorer: pctprobe ' "$SA" | tail -1 | sed 's/.*pctprobe //' | tr -d '\r')
+[ -n "$pp" ] && ok "the pane built its labels and ran the self-check ($pp)" || bad "no 'explorer: pctprobe' line in the serial output"
+[ "$pp" = "/ 92%" ] && ok "second build over stale bytes reads '/ 92%' (not '/ 92%92%')" || bad "second build reads '$pp' (expected '/ 92%')"
+if grep -aE 'explorer: traeger i=[0-9]+ .*lbl=' "$SA" | grep -aqE 'lbl=.*%.*%'; then
+    bad "a real drive label carries two percent signs"
+else
+    ok "no real drive label has two percent signs"
+fi
+
 echo "== 4. file types and drive count: catalog (de + en) and source =="
 for k in explorer.type.pdf explorer.type.archive explorer.type.audio explorer.type.video explorer.count.drives explorer.count.drive1; do
     grep -qE "^$k =" locale/de/messages && grep -qE "^$k =" locale/en/messages \

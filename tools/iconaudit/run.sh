@@ -16,6 +16,7 @@
 #   4. every installable GUI package (pakete/*/rezept with `datei=start`) ships
 #      `datei=symbol` and has its symbol.txt source
 #   5. the programs pinned by the image's taskbar.conf have a bundle with an icon
+#   5b. every GUI program of a bundle calls set_app (WM_APP), else its taskbar button has no icon
 #   6. COUNTER-PROOF: a copy of the tree with one symbol removed / one flat
 #      square / one 16x16 drawing must make this audit FAIL
 set -uo pipefail
@@ -66,6 +67,20 @@ for r in sorted(glob.glob(os.path.join(root, "pakete/*/rezept"))):
     if re.search(r"^datei=start\s", t, re.M):
         say(re.search(r"^datei=symbol\s", t, re.M) is not None, "package %s: ships datei=symbol" % n)
         say(os.path.isfile(os.path.join(os.path.dirname(r), "symbol.txt")), "package %s: symbol.txt source" % n)
+# 7. A window only gets its icon in the taskbar when the program itself says which bundle it belongs
+#    to (WM_APP = fuiscene.set_app). welcome.fi never did: its button was an empty plate (W2c, laptop).
+for a in apps:
+    n = os.path.basename(a)[:-4]
+    st = os.path.join(a, "start.txt")
+    if not os.path.isfile(st): continue
+    ex = [l.strip() for l in open(st, errors="replace") if l.strip() and not l.startswith("#")]
+    m2 = re.match(r"/bin/([a-z0-9_]+)$", ex[0]) if ex else None
+    if not m2 or m2.group(1) == "sh": continue
+    src = os.path.join(root, "kernel/user", m2.group(1) + ".fi")
+    if not os.path.isfile(src): continue
+    t = open(src, "rb").read().decode("latin1")
+    if not re.search(r"fuiscene\.open|open_window|wlib\.window\(", t): continue
+    say(re.search(r"set_app\(|window_app\(|win_app\(", t) is not None, "%s: %s.fi sets its bundle name (WM_APP), else no taskbar icon" % (n, m2.group(1)))
 tb = open(os.path.join(root, "tools/usbimg/build.sh"), errors="replace").read()
 m = re.search(r"pins=([a-z0-9_,]+)", tb)
 if m:
@@ -88,7 +103,7 @@ D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 mkcopy() { rm -rf "$D/t"; mkdir -p "$D/t/assets" "$D/t/tools/design" "$D/t/tools/usbimg" "$D/t/pakete"
     cp -r "$ROOT/assets/apps" "$D/t/assets/apps"
     cp "$ROOT/tools/design/mkicons.py" "$D/t/tools/design/"; cp "$ROOT/tools/usbimg/build.sh" "$D/t/tools/usbimg/"
-    cp -r "$ROOT/pakete/." "$D/t/pakete/"; }
+    cp -r "$ROOT/pakete/." "$D/t/pakete/"; mkdir -p "$D/t/kernel"; cp -r "$ROOT/kernel/user" "$D/t/kernel/user"; }
 expect_red() {  # expect_red <name>
     r=$(audit "$D/t" | grep -c '^FAIL'); [ "$r" -ge 1 ] && ok "counter-proof '$1': $r red" || bad "counter-proof '$1' stayed green"; }
 mkcopy; rm "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "icon file removed"
@@ -98,6 +113,7 @@ mkcopy; head -c 1036 "$ROOT/assets/apps/explorer.osp/symbol.osym" > "$D/t/assets
 mkcopy; mkdir -p "$D/t/assets/apps/newapp.osp"; echo "name=New" > "$D/t/assets/apps/newapp.osp/INFO"; echo /bin/new > "$D/t/assets/apps/newapp.osp/start.txt"; expect_red "new program without icon"
 mkcopy; sed -i '/"welcome":/d' "$D/t/tools/design/mkicons.py"; expect_red "program not in mkicons.py"
 mkcopy; sed -i 's/^datei=symbol .*//' "$D/t/pakete/mail/rezept"; expect_red "package without symbol"
+mkcopy; sed -i '/set_app(/d' "$D/t/kernel/user/welcome.fi"; expect_red "program without set_app (empty taskbar plate)"
 
 echo
 echo "ICONAUDIT: $PASS passed, $FAIL failed"
