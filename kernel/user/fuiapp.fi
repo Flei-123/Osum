@@ -126,12 +126,22 @@ fn copy64(dst: u64, src: u64, n: u64) {
 // whole 8 MB picture to the card twice a second, and every compose reads the whole buffer while this copy may still be writing it).
 static mut s_dlo: u64 = 0
 static mut s_dhi: u64 = 0
+// FLICKER FIX (17.10.2026): the first and the last COLUMN (octet offset inside a row) that changed, so the damage is a rectangle and
+// not the full rows of the span (a hover on one start-menu tile damaged 640 px of every row between two tiles).
+static mut s_dxlo: u64 = 0
+static mut s_dxhi: u64 = 0
 
 fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
     var i: u64 = 0
     var chg: u64 = 0
     s_dlo = n
     s_dhi = 0
+    var rb: u64 = s_w * 4
+    if rb == 0 {
+        rb = n
+    }
+    s_dxlo = rb
+    s_dxhi = 0
     while i + 8 <= n {
         let a: u64 = __mmio_read64((src + i) as *mut u64)
         if a != __mmio_read64((dst + i) as *mut u64) {
@@ -141,6 +151,13 @@ fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
                 s_dlo = i
             }
             s_dhi = i + 8
+            let cx: u64 = i % rb
+            if cx < s_dxlo {
+                s_dxlo = cx
+            }
+            if cx + 8 > s_dxhi {
+                s_dxhi = cx + 8
+            }
         }
         i = i + 8
     }
@@ -153,6 +170,8 @@ fn copy_diff(dst: u64, src: u64, n: u64) -> u64 {
                 s_dlo = i
             }
             s_dhi = n
+            s_dxlo = 0
+            s_dxhi = rb
         }
     }
     return chg
@@ -479,7 +498,17 @@ fn frame_end() {
                 ry0 = 0
                 ry1 = s_h
             }
-            wlib.canvas_new_part(s_cv, 0, ry0, s_w, ry1)
+            // columns: whole pixels (4 octets) of the span of changed columns, clipped to the row
+            var rx0: u64 = s_dxlo / 4
+            var rx1: u64 = (s_dxhi + 3) / 4
+            if rx1 > s_w {
+                rx1 = s_w
+            }
+            if rx0 >= rx1 {
+                rx0 = 0
+                rx1 = s_w
+            }
+            wlib.canvas_new_part(s_cv, rx0, ry0, rx1, ry1)
             wlib.draw_all()
             return
         }
