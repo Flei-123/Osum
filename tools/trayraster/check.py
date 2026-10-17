@@ -34,8 +34,10 @@ def load_ppm(path):
     return f[0], f[1], d[at+1:]
 
 ser = open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1")
+# geometry belongs to the picture 00-bar (taken before the first click): later reports (tray popup open) re-lay the bar
+ser_bar = ser[:ser.find("taskbar: click")] if "taskbar: click" in ser else ser
 def last(pat):
-    m = re.findall(pat, ser)
+    m = re.findall(pat, ser_bar)
     return [int(v) for v in m[-1]] if m else None
 geom = last(r"taskbar: geom edge=0 x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 F = {}
