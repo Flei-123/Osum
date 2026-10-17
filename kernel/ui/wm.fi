@@ -14126,12 +14126,12 @@ fn hw_an(state: u64) -> bool {
     return vmsvga.cursor_an(state)
 }
 
-fn hw_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64) {
+fn hw_zeigen(state: u64, form: u64, g: u64, x: u64, y: u64, hx: u64, hy: u64, rq: u64) {
     if vgpu.cursor_bereit(state) {
-        let _a: bool = vgpu.cursor_zeigen(state, form, g, x, y, hx, hy)
+        let _a: bool = vgpu.cursor_zeigen(state, form, g, x, y, hx, hy, rq)
         return
     }
-    let _b: bool = vmsvga.cursor_zeigen(state, form, g, x, y, hx, hy)
+    let _b: bool = vmsvga.cursor_zeigen(state, form, g, x, y, hx, hy, rq)
 }
 
 fn hw_bewegen(state: u64, x: u64, y: u64) {
@@ -14168,21 +14168,26 @@ fn hwcur_bewegen(state: u64) {
     }
     let g: u64 = cur_w(state)
     let form: u64 = gs(state, S_SHAPE)
-    let x: u64 = gs(state, S_CURX)
-    let y: u64 = gs(state, S_CURY)
+    // INPUT FOLLOWS THE OUTPUT: the device draws the pointer on the PANEL, so the position goes through the output rotation
+    // (fb.logical_to_panel) and the picture + hotspot are turned by the same quarter turns (`rq`).
+    let pp: u64 = fb.logical_to_panel(state, gs(state, S_CURX), gs(state, S_CURY))
+    let x: u64 = pp >> 32
+    let y: u64 = pp & 0xFFFFFFFF
+    let rq: u64 = fb.rotation(state) / 90
+    let hkey: u64 = gs(state, S_SHAPE) + (rq << 16)
     if !hw_an(state) {
-        ss(state, S_HWSHAPE, gs(state, S_SHAPE))
+        ss(state, S_HWSHAPE, hkey)
         hw_zeigen(state, form, g, x, y,
-            cur_ox(state), cur_oy(state))
+            cur_ox(state), cur_oy(state), rq)
         return
     }
     // Die Form kann sich geaendert haben (Pfeil -> Hand -> Groesse).
     // `cursor_zeigen` merkt das selbst und traegt das Bild nur dann
     // neu hinaus; sonst ist es ein reiner Ortswechsel.
-    if gs(state, S_SHAPE) != gs(state, S_HWSHAPE) {
-        ss(state, S_HWSHAPE, gs(state, S_SHAPE))
+    if hkey != gs(state, S_HWSHAPE) {
+        ss(state, S_HWSHAPE, hkey)
         hw_zeigen(state, form, g, x, y,
-            cur_ox(state), cur_oy(state))
+            cur_ox(state), cur_oy(state), rq)
         return
     }
     hw_bewegen(state, x, y)
@@ -19573,6 +19578,11 @@ fn screen_follow(state: u64) {
     }
     if fw != gs(state, S_SW) || fh != gs(state, S_SH) {
         let _r: bool = on_screen_resize(state, fw, fh)
+    }
+    // INPUT FOLLOWS THE OUTPUT: the hardware pointer sits in PANEL pixels, so a rotation / scale change moves it even when the
+    // pointer itself did not (hwcur_bewegen only talks to the device when form, rotation or panel position changed).
+    if hwcur_moeglich(state) && hw_an(state) {
+        hwcur_bewegen(state)
     }
 }
 

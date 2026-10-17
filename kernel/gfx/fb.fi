@@ -92,6 +92,7 @@ export {
     win_slots, huge_size,
     set_backbuf, back_bytes,
     set_lut, lut, set_saturation, saturation, set_rotation, rotation,
+    fit_dims, panel_to_logical, logical_to_panel,
     set_logical, logical_ok, set_scale, scale, transformed, present,
     presents, get_panel, SCALE_FULL, SCALE_ASPECT, SCALE_NONE, LUT_BYTES,
     selftest2, selftest2_max,
@@ -4398,6 +4399,169 @@ fn set_rotation(state: u64, rot: u64) -> bool {
     kstate.set(state, FB_OFF + S_ROT, rot)
     relayout(state)
     return true
+}
+
+// ------------------------------------------------------------------
+// INPUT FOLLOWS THE OUTPUT (rotation 0/90/180/270 + scale mode).
+// `present` maps a logical pixel (lx, ly) to a panel pixel; a tablet or
+// touch screen reports PANEL positions, and the hardware cursor is
+// placed in PANEL pixels. These two functions are the same maths as
+// `present`, forwards and backwards, so a click lands on the button
+// that is drawn. Results are packed: x << 32 | y.
+// ------------------------------------------------------------------
+
+// Size of the rotated image on the panel (dw << 32 | dh) -- the same
+// rules as the head of `present`.
+fn fit_dims(state: u64) -> u64 {
+    let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let lh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+    let art: u64 = kstate.get(state, FB_OFF + S_SCALE)
+    var dw: u64 = pw
+    var dh: u64 = ph
+    if art == SCALE_NONE {
+        dw = min2(rw, pw)
+        dh = min2(rh, ph)
+    } else if art == SCALE_ASPECT && rw != 0 && rh != 0 {
+        if rw * ph <= pw * rh {
+            dh = ph
+            dw = rw * ph / rh
+        } else {
+            dw = pw
+            dh = rh * pw / rw
+        }
+        if dw == 0 {
+            dw = 1
+        }
+        if dh == 0 {
+            dh = 1
+        }
+        if dw > pw {
+            dw = pw
+        }
+        if dh > ph {
+            dh = ph
+        }
+    }
+    return (dw << 32) | dh
+}
+
+// A panel pixel -> the logical pixel drawn there.
+fn panel_to_logical(state: u64, px: u64, py: u64) -> u64 {
+    let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let lh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
+    let fd: u64 = fit_dims(state)
+    let dw: u64 = fd >> 32
+    let dh: u64 = fd & 0xFFFFFFFF
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 || dw == 0 || dh == 0 {
+        return (px << 32) | py
+    }
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+    var ix: u64 = 0
+    if px > dx0 {
+        ix = px - dx0
+    }
+    var iy: u64 = 0
+    if py > dy0 {
+        iy = py - dy0
+    }
+    if ix >= dw {
+        ix = dw - 1
+    }
+    if iy >= dh {
+        iy = dh - 1
+    }
+    var ux: u64 = (ix * ((rw << 16) / dw)) >> 16
+    var uy: u64 = (iy * ((rh << 16) / dh)) >> 16
+    if ux >= rw {
+        ux = rw - 1
+    }
+    if uy >= rh {
+        uy = rh - 1
+    }
+    var lx: u64 = ux
+    var ly: u64 = uy
+    if rot == 180 {
+        lx = lw - 1 - ux
+        ly = lh - 1 - uy
+    } else if rot == 90 {
+        lx = uy
+        ly = lh - 1 - ux
+    } else if rot == 270 {
+        lx = lw - 1 - uy
+        ly = ux
+    }
+    return (lx << 32) | ly
+}
+
+// A logical pixel -> the panel pixel it is drawn on (centre of the cell).
+fn logical_to_panel(state: u64, lx0: u64, ly0: u64) -> u64 {
+    let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let lh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
+    let fd: u64 = fit_dims(state)
+    let dw: u64 = fd >> 32
+    let dh: u64 = fd & 0xFFFFFFFF
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 || dw == 0 || dh == 0 {
+        return (lx0 << 32) | ly0
+    }
+    var lx: u64 = lx0
+    var ly: u64 = ly0
+    if lx >= lw {
+        lx = lw - 1
+    }
+    if ly >= lh {
+        ly = lh - 1
+    }
+    var rw: u64 = lw
+    var rh: u64 = lh
+    var ux: u64 = lx
+    var uy: u64 = ly
+    if rot == 180 {
+        ux = lw - 1 - lx
+        uy = lh - 1 - ly
+    } else if rot == 90 {
+        rw = lh
+        rh = lw
+        ux = lh - 1 - ly
+        uy = lx
+    } else if rot == 270 {
+        rw = lh
+        rh = lw
+        ux = ly
+        uy = lw - 1 - lx
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+    var px: u64 = dx0 + ((2 * ux + 1) * dw) / (2 * rw)
+    var py: u64 = dy0 + ((2 * uy + 1) * dh) / (2 * rh)
+    if px >= dx0 + dw {
+        px = dx0 + dw - 1
+    }
+    if py >= dy0 + dh {
+        py = dy0 + dh - 1
+    }
+    return (px << 32) | py
 }
 
 // Das Bild ausdruecklich anders gross machen als die Tafel. 0/0 heisst
