@@ -6181,6 +6181,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             if feuern {
                 input_pulse(state, tw, neustarts)
                 vmsvga.pulse_say(state)
+                if fb.phases_an(state) {
+                    sect_say(state)
+                }
                 tafel_seriell_an()
                 if fb.termdump_an(state) {
                     wm.term_dump(state, wm.term_win(state))
@@ -8444,10 +8447,71 @@ static mut stufe: u64 = 0
 static mut stufe_hoch: u64 = 0
 static mut wmrunden: u64 = 0
 
+// W-L (17.10.2026): per-section clock of the desktop round. `st(n)` closes the section of the previous level: the TSC distance since the
+// last `st` is charged to that level (31..38 = the sections of wait_wm). Printed with the pulse (`wm: sect`, word `phases`).
+static mut sect_sum: [u64; 40] = [0 as u64; 40]
+static mut sect_max: [u64; 40] = [0 as u64; 40]
+static mut sect_n: [u64; 40] = [0 as u64; 40]
+static mut sect_last: u64 = 0
+
 fn st(n: u64) {
+    if stufe >= 31 && stufe <= 38 {
+        let now: u64 = time.tsc()
+        if sect_last != 0 && now > sect_last {
+            let d: u64 = now - sect_last
+            sect_sum[stufe as usize] = sect_sum[stufe as usize] + d
+            sect_n[stufe as usize] = sect_n[stufe as usize] + 1
+            if d > sect_max[stufe as usize] {
+                sect_max[stufe as usize] = d
+            }
+        }
+        sect_last = now
+    } else if n >= 31 && n <= 38 {
+        sect_last = time.tsc()
+    }
     stufe = n
     if n > stufe_hoch {
         stufe_hoch = n
+    }
+}
+
+// `wm: sect s31=<mean us>/<max us> ...` over the rounds since the last line; then the counters restart.
+fn sect_say(state: u64) {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return
+    }
+    let per_us: u64 = kh / 1000
+    var s_h: [u8; 10] = "wm: sect \0"
+    var s_s: [u8; 3] = " s\0"
+    var s_e: [u8; 2] = "=\0"
+    var s_m: [u8; 2] = "/\0"
+    var s_n: [u8; 4] = " n=\0"
+    serial.puts((&s_h[0]) as u64)
+    var k: u64 = 31
+    while k <= 38 {
+        let n: u64 = sect_n[k as usize]
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_e[0]) as u64)
+        if n != 0 {
+            serial.dec(sect_sum[k as usize] / n / per_us)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_m[0]) as u64)
+        serial.dec(sect_max[k as usize] / per_us)
+        k = k + 1
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(sect_n[31])
+    serial.nl()
+    k = 0
+    while k < 40 {
+        sect_sum[k as usize] = 0
+        sect_max[k as usize] = 0
+        sect_n[k as usize] = 0
+        k = k + 1
     }
 }
 
