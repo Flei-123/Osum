@@ -133,5 +133,7 @@ alive = [tx for g, rws, t in blocks[-2:] for tx in rws.values() if tx.strip() ==
 chk(len(alive) >= 1, 'the shell still answers after Ctrl+Shift+C without a selection (echo ALIVE printed ALIVE)')
 chk(not any('sh: bye' in tx for g, rws, t in blocks for tx in rws.values()), 'no "sh: bye" in any dump (the shell never exited)')
 
+print('  INFO  %s' % ([ln for ln in ser if 'launcher: uid=' in ln][:2],))
+
 print('TERMSEL: %d ok, %d fail' % (ok, bad))
 sys.exit(1 if bad else 0)
