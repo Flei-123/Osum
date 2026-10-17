@@ -47,7 +47,19 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 [ "$(cat "$D/o.login" 2>/dev/null)" = 1 ] && ok "logged in" || { bad "login"; tail -5 "$D/py.txt"; }
 cat "$D/o.res" 2>/dev/null
 n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
+
 [ "$n" -ge 3 ] && ok "$n hint steps measured" || bad "only $n hint steps measured"
+# r1011: a resize takes the SHARED buffer of a window away (detach: the old row length no longer fits) and the client must hang a new one
+# on (attach, WM_SETBUF). Per resize step the serial line `wm: shared ... attach=A detach=D` must not show more detaches than attaches,
+# and in total attach >= detach: a window that stays on a private buffer is painted by a kernel copy again for good.
+shd=$(grep -a '^wm: shared' "$D/serial.txt" | grep -oE 'attach=[0-9]+ detach=[0-9]+' | uniq | sed 's/attach=//; s/detach=//')
+if [ -n "$shd" ]; then
+    echo "$shd" | awk -v OFS=' ' 'BEGIN{pa=-1} {if (pa>=0 && ($2-pd)>($1-pa)) {worse++; print "  NOTE  step attach +" ($1-pa) ", detach +" ($2-pd)} pa=$1; pd=$2} END{exit worse>0}' && ok "shared buffers: every resize step re-attached at least as many windows as it detached" || bad "shared buffers: a resize step detached more windows than were re-attached"
+    la=$(echo "$shd" | tail -1 | cut -d' ' -f1); ld=$(echo "$shd" | tail -1 | cut -d' ' -f2)
+    [ "$la" -ge "$ld" ] && ok "shared buffers: attach $la >= detach $ld" || bad "shared buffers: attach $la < detach $ld"
+else
+    bad "shared buffers: no 'wm: shared' line in the serial log"
+fi
 while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
