@@ -374,10 +374,28 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     let pitch1: u64 = reg_r(state, R_BYTES_PER_LINE)
     var pitch: u64 = pitch1
     var waited: u64 = 0
-    while waited < 100 && pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) {
-        settle()
-        pitch = reg_r(state, R_BYTES_PER_LINE)
-        waited = waited + 1
+    // z10c measured on VirtualBox: the register stayed at the OLD stride (4096 for 800x600, true 3200) for 100 settle rounds. Kick the
+    // host FIFO thread (SYNC + BUSY) and wait by TIME (400 ms) -- if it still shows the old value (or one below width*4), the host
+    // scans out width*4 bytes per row (VirtualBox rounds the row to 4 bytes), so use that.
+    let stale: bool = pitch != w * 4 && (pitch == pitch0 || pitch < w * 4)
+    if stale {
+        reg_w(state, R_SYNC, 1)
+        busy_wait(state)
+        let hz: u64 = apic.tsc_hz(state)
+        let t0: u64 = apic.tsc()
+        var span: u64 = 0
+        if hz > 0 {
+            span = hz / 1000 * 400
+        }
+        while waited < 400 && pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) && apic.tsc() - t0 < span {
+            settle()
+            pitch = reg_r(state, R_BYTES_PER_LINE)
+            waited = waited + 1
+        }
+    }
+    let pitch_reg: u64 = pitch
+    if pitch != w * 4 && kstate.get(state, s(S_VMM_UP)) != 0 && (pitch == pitch0 || pitch < w * 4) {
+        pitch = w * 4
     }
     if pitch < w * 4 {
         pitch = w * 4
@@ -388,6 +406,7 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     var s_p2: [u8; 9] = " pitch2=\0"
     var s_wt: [u8; 7] = " wait=\0"
     var s_of: [u8; 6] = " off=\0"
+    var s_pr: [u8; 7] = " preg=\0"
     serial.puts((&s_m[0]) as u64)
     serial.dec(w)
     serial.put(120 as u8)
@@ -398,6 +417,8 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     serial.dec(pitch1)
     serial.puts((&s_p2[0]) as u64)
     serial.dec(pitch)
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(pitch_reg)
     serial.puts((&s_wt[0]) as u64)
     serial.dec(waited)
     serial.puts((&s_of[0]) as u64)
