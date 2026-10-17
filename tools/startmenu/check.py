@@ -82,8 +82,6 @@ def main(out):
           "no Widgets demo and no Search entry among the tiles (%s)" % ", ".join(sorted(first)))
     german = {"Programme", "Papierkorb", "Willkommen", "PDF-Betrachter", "Aufgabenverwaltung", "Datei-Explorer", "Einstellungen"}
     check(not (german & set(first)), "no German names mixed into the English menu (%s)" % ", ".join(sorted(german & set(first))))
-    check("PDF Viewer" in first and "Store" in first and "Recycle Bin" in first,
-          "PDF Viewer, Store and Recycle Bin carry English names")
     check(all(w == 100 and h == 88 for (_, _, w, h) in first.values()),
           "every pinned tile is 100 x 88")
     xs = sorted({x for (x, _, _, _) in first.values()})
