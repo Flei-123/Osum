@@ -46,16 +46,13 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 [ -n "${KEEP:-}" ] && mkdir -p "$KEEP" && cp -f "$D"/o.*.ppm "$D"/o.res "$D"/serial.txt "$KEEP"/ 2>/dev/null
 [ "$(cat "$D/o.login" 2>/dev/null)" = 1 ] && ok "logged in" || { bad "login"; tail -5 "$D/py.txt"; }
 cat "$D/o.res" 2>/dev/null
-i=1
-IFS=, read -ra SZ <<<"$SIZES"
-for s in "${SZ[@]}"; do
-    w=${s%x*}; h=${s#*x}
-    line=$(awk -v n=$i '$1==n' "$D/o.res")
-    set -- $line
-    [ "${2:-0}" = "$w" ] && [ "${3:-0}" = "$h" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${2:-?}x${3:-?})"
-    awk -v b="${4:-1}" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share ${4:-?})" || bad "$s: desktop black (black share ${4:-?})"
-    [ "${5:-0}" -ge 20 ] && ok "$s: taskbar at the bottom (rows ${5:-0})" || bad "$s: no taskbar at the bottom (rows ${5:-0})"
-    i=$((i+1))
-done
+n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
+[ "$n" -ge 3 ] && ok "$n hint steps measured" || bad "only $n hint steps measured"
+while read -r i rw rh black rows lastb ew eh; do
+    s=${ew}x${eh}
+    [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
+    awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
+    [ "$rows" -ge 20 ] && ok "$s: taskbar at the bottom (rows $rows)" || bad "$s: no taskbar at the bottom (rows $rows)"
+done < "$D/o.res"
 echo "resize: $pass ok, $fail fail"
 [ "$fail" = 0 ]

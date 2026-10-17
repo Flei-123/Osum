@@ -66,17 +66,21 @@ def main():
         return
     time.sleep(settle)
     out = open(base + ".res", "w")
-    n = 1
-    for sz in sizes.split(","):
-        w, h = [int(x) for x in sz.split("x")]
-        # the kernel word `vmsvgahints` plays the hint itself (serial: `vmsvga: testhint WxH rc=N`); wait for that line
-        wait_for(lambda t: t.count("vmsvga: testhint ") >= n, 60)
-        # the poll is rate limited to 1 s and wants two equal polls in a row; then the desktop needs a moment to redraw
+    import re
+    # the kernel plays the hints from its own clock (serial `vmsvga: testhint WxH rc=N`), also before the login: every step waits
+    # for the NEXT line, lets the desktop settle and expects exactly the size of the newest line
+    last = read_serial().count("vmsvga: testhint ")
+    steps = len(sizes.split(","))
+    for n in range(1, steps + 1):
+        wait_for(lambda t: t.count("vmsvga: testhint ") > last, 60)
         time.sleep(settle)
+        t = read_serial()
+        last = t.count("vmsvga: testhint ")
+        m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
+        ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
         r = measure(mon, str(n))
-        out.write("%d %d %d %.3f %d %d\n" % ((n, r[0], r[1], r[2], r[3], r[4])))
+        out.write("%d %d %d %.3f %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh))
         out.flush()
-        n += 1
     out.close()
     mon.quit()
 
