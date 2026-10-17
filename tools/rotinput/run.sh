@@ -20,28 +20,28 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "ROTINPUT: skipped, no qemu"; exit 0; }
 PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat"
 
-run_tree() { # tree out rot
+run_tree() { # tree out rot mode(abs|rel)
     mkdir -p "$2"
-    local word=""
+    local word="" dev="usb-tablet"
+    [ "${4:-abs}" = rel ] && dev="usb-mouse"
     [ "$3" != 0 ] && word="deskrot$3"
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=1 \
         extra="modfs osum wmshell wmdauer usb hidgen $word" hold=no uitrace=yes waitfor="taskbar: start x=" progs="$PROGS" \
-        qemu="-device qemu-xhci -device usb-tablet -device usb-mouse -qmp unix:$2/qmp.sock,server,nowait" \
-        hook="python3 $ROOT/tools/rotinput/drive.py $2/qmp.sock \$SOCK $2/serial.txt $2 $3" ) > "$2.log" 2>&1
+        qemu="-device qemu-xhci -device $dev -qmp unix:$2/qmp.sock,server,nowait" \
+        hook="python3 $ROOT/tools/rotinput/drive.py $2/qmp.sock \$SOCK $2/serial.txt $2 $3 ${4:-abs}" ) > "$2.log" 2>&1
 }
 fact() { sed -n "s/^$2=//p" "$1/scenes.txt" 2>/dev/null | tail -1; }
 
 echo "== 1. new tree =="
 for R in 0 90 180 270; do
-    run_tree "$ROOT" "$OUT/new$R" "$R" || true
+    # boot A: absolute tablet click on the Start button
+    run_tree "$ROOT" "$OUT/new$R" "$R" abs || true
     N="$OUT/new$R"
     if [ ! -s "$N/scenes.txt" ] || [ "$(fact $N desktop)" != 1 ]; then bad "rot $R: no desktop / driver wrote nothing"; tail -5 "$N.log"; continue; fi
     [ "$(fact $N click_in_start)" = 1 ] && ok "rot $R: the tablet click at panel $(fact $N panel_target) landed in the Start rectangle (local $(fact $N click_local), start $(fact $N start))" \
         || bad "rot $R: click local '$(fact $N click_local)' outside start '$(fact $N start)' (panel target $(fact $N panel_target))"
-    [ "$(fact $N rel_ok)" = 1 ] && ok "rot $R: a relative mouse pushed toward the physical corner $(fact $N rel_push) ends at the bar's logical corner (click local $(fact $N rel_click_local))" \
-        || bad "rot $R: relative mouse push $(fact $N rel_push) -> click local '$(fact $N rel_click_local)' (want the end of the bar)"
-    [ "$(fact $N menu_open)" = 1 ] && ok "rot $R: the start menu opened" || bad "rot $R: the start menu did not open"
+    [ "$(fact $N menu_open)" = 1 ] && ok "rot $R: the Start button click toggled the start menu" || bad "rot $R: the start menu did not toggle"
     [ -s "$N/before.ppm" ] && [ -s "$N/after.ppm" ] && python3 - "$N/before.ppm" "$N/after.ppm" <<'PY' && ok "rot $R: the picture changed after the click (menu drawn)" || bad "rot $R: before/after pictures are equal"
 import sys
 def ppm(p):
@@ -50,6 +50,12 @@ a,b=ppm(sys.argv[1]),ppm(sys.argv[2])
 n=sum(1 for i in range(0,min(len(a),len(b)),3) if a[i:i+3]!=b[i:i+3])
 sys.exit(0 if n>=5000 else 1)
 PY
+    # boot B: relative mouse (only a usb-mouse, QEMU routes buttons to the first pointing device)
+    run_tree "$ROOT" "$OUT/newr$R" "$R" rel || true
+    N="$OUT/newr$R"
+    if [ ! -s "$N/scenes.txt" ] || [ "$(fact $N desktop)" != 1 ]; then bad "rot $R (rel): no desktop / driver wrote nothing"; tail -5 "$N.log"; continue; fi
+    [ "$(fact $N rel_ok)" = 1 ] && ok "rot $R: a relative mouse pushed toward the physical corner $(fact $N rel_push) ends at the bar's logical corner (click local $(fact $N rel_click_local))" \
+        || bad "rot $R: relative mouse push $(fact $N rel_push) -> click local '$(fact $N rel_click_local)' (want the end of the bar)"
 done
 
 echo
@@ -58,10 +64,13 @@ if [ -n "$BASE_COMMIT" ] && git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/
     BT="$OUT/basetree"
     git worktree add -q --detach "$BT" "$BASE_COMMIT" 2>/dev/null
     for R in 90 180 270; do
-        run_tree "$BT" "$OUT/old$R" "$R" || true
+        run_tree "$BT" "$OUT/old$R" "$R" abs || true
         O="$OUT/old$R"
         [ -s "$O/scenes.txt" ] && [ "$(fact $O desktop)" = 1 ] || { bad "old rot $R: no desktop"; continue; }
         [ "$(fact $O click_in_start)" = 0 ] && ok "old rot $R: the same click MISSES the Start button (local $(fact $O click_local))" || bad "old rot $R: the click still hit the button"
+        run_tree "$BT" "$OUT/oldr$R" "$R" rel || true
+        O="$OUT/oldr$R"
+        [ -s "$O/scenes.txt" ] && [ "$(fact $O desktop)" = 1 ] || { bad "old rot $R (rel): no desktop"; continue; }
         [ "$(fact $O rel_ok)" = 0 ] && ok "old rot $R: the relative push ends elsewhere (click local $(fact $O rel_click_local))" || bad "old rot $R: relative push still correct"
     done
     git worktree remove --force "$BT" >/dev/null 2>&1
