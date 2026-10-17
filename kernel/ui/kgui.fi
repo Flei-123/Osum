@@ -5819,6 +5819,57 @@ fn shell_start(state: u64) -> u64 {
     return elf.spawn(state, p_run, abuf, 1, 2)
 }
 
+// r1014 TERMINAL TABS: Ctrl+Shift+T / the '+' ask the window server (`wm.tt_request`); the desktop loop starts /bin/term, which opens
+// the new terminal window and its shell (like the start menu does); `gfx.term_new` joins it to the group of the asking window.
+// The started tasks are children of the desktop: finished ones are reaped here (slot + pid, a reused slot is never reaped).
+static mut tab_kid: [u64; 8] = [0 as u64; 8]
+static mut tab_kpid: [u64; 8] = [0 as u64; 8]
+
+fn tabs_spawn(state: u64) {
+    var p_t: [u8; 10] = "/bin/term\0"
+    var a_t: [u8; 5] = "term\0"
+    let abuf: u64 = state + kstate.EARG_OFF
+    var k: u64 = 0
+    while k < 5 {
+        kstate.set8(abuf + k, a_t[k as usize])
+        k = k + 1
+    }
+    let slot: u64 = elf.spawn(state, (&p_t[0]) as u64, abuf, 1, 2)
+    var s_ts: [u8; 24] = "wm: tab shell started: \0"
+    serial.puts((&s_ts[0]) as u64)
+    serial.dec(slot)
+    serial.nl()
+    if slot == 0 {
+        wm.tt_cancel(state)
+        return
+    }
+    var j: u64 = 0
+    while j < 8 {
+        if tab_kid[j as usize] == 0 {
+            tab_kid[j as usize] = slot
+            tab_kpid[j as usize] = sched.tget(state, slot, sched.T_PID)
+            return
+        }
+        j = j + 1
+    }
+}
+
+fn tabs_reap(state: u64) {
+    var j: u64 = 0
+    while j < 8 {
+        let sl: u64 = tab_kid[j as usize]
+        if sl != 0 {
+            if sched.tget(state, sl, sched.T_PID) != tab_kpid[j as usize] {
+                tab_kid[j as usize] = 0
+            } else if sched.tget(state, sl, sched.T_STATE) == sched.S_ZOMBIE {
+                proc.reap(state, sl)
+                tab_kid[j as usize] = 0
+            }
+        }
+        j = j + 1
+    }
+}
+
 // ===================================================== RUNDE HIDWEG
 //
 // DIESE SCHLEIFE IST DER SCHREIBTISCH. Sie holt den Zeiger ab
@@ -6108,6 +6159,10 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 shell_next = kstate.get(state, kstate.TICKS) + shell_back
             }
         }
+        if wm.tt_want_spawn(state) {
+            tabs_spawn(state)
+        }
+        tabs_reap(state)
         // RUNDE HIDWEG, MESSPUNKT: der zweite Weg zu denselben
         // Berichten. Steht die Meldung, findet er nichts mehr vor --
         // steht sie nicht, ist er der Weg. Der Unterschied ist an
