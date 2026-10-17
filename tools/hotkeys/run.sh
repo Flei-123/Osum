@@ -14,7 +14,8 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
 mkdir -p "$OUT"
-BASE_COMMIT=${HOTKEYS_BASE:-b73db113}
+# the tree BEFORE the input change = the commit that added the alltag options this gate needs
+BASE_COMMIT=${HOTKEYS_BASE:-$(git log --format=%H --grep="^alltag: qemu=<args>" -1)}
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
@@ -32,7 +33,7 @@ run_tree() { # tree out
     mkdir -p "$2"
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=6 \
-        extra="usb hidgen wmdauer wighalt=60" progs="$PROGS" qemu="-device qemu-xhci -device usb-kbd" \
+        extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$PROGS" qemu="-device qemu-xhci -device usb-kbd" \
         "${KEYS[@]}" ) > "$2.log" 2>&1
 }
 
