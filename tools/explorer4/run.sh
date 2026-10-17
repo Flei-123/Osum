@@ -53,6 +53,13 @@ warte 2
 klickauf emenue4
 warte 3
 foto 13-sorted
+# --- right click: the context menu of the file list
+rklickauf ftab
+warteauf explorer: menurect || 60
+warte 2
+foto 16-context
+taste esc
+warte 3
 # --- 3. Alt+P
 klickauf ftab
 warte 2
@@ -85,25 +92,43 @@ echo "== 3. Alt+P preview pane =="
 hat "$S" 'explorer: preview on=1' "Alt+P switches the preview pane on"
 hat "$S" 'explorer: preview on=0' "Alt+P again switches it off"
 
+echo "== 3b. context menu =="
+n=$(grep -ac 'explorer: menurect' "$S")
+[ "$n" -ge 4 ] && ok "the right click opened a fourth menu ($n menurect lines)" || bad "right click: only $n menurect lines"
+wh=$(grep -aoE 'explorer: menurect wx=[0-9]+ wy=[0-9]+ wh=[0-9]+' "$S" | tail -1 | grep -oE '[0-9]+$')
+[ "${wh:-0}" -ge 100 ] 2>/dev/null && ok "the context menu has ${wh} px of rows" || bad "context menu height ${wh:-none}"
+
 echo "== 4. column resize by header drag =="
-read -r a b <<<"$(python3 - "$S" <<'PY'
+# before the drag: `explorer: rect id=26 kind=6 x=` (table) and `explorer: spalten x0 x1 ..` (x1 - 10 = right edge of column 0)
+w0=$(python3 - "$S" <<'PY'
 import re, sys
 t = open(sys.argv[1], 'rb').read().decode('latin1')
+r = re.findall(r'explorer: rect id=26 kind=6 x=(\d+) ', t)
 sp = re.findall(r'explorer: spalten (\d+) (\d+) (\d+) (\d+)', t)
-print(sp[0][1] if sp else 0, sp[-1][1] if sp else 0)
+print(int(sp[0][1]) - 10 - int(r[0]) if sp and r else 0)
 PY
-)"
+)
 cr=$(grep -aoE 'explorer: colresize a=[0-9]+' "$S" | tail -1 | grep -oE '[0-9]+$')
 hat "$S" 'explorer: colresize a=[0-9]+' "the drag reports the new column widths"
-[ "${cr:-0}" -gt 0 ] 2>/dev/null && ok "column 0 has a user width (a=$cr)" || bad "no user width for column 0"
-d=$((b - a))
-[ "$d" -ge 24 ] && [ "$d" -le 56 ] && ok "column 1 moved right by $d px for a 40 px drag" || bad "column 1 moved by $d px (first $a, last $b), expected 24..56"
+d=$(( ${cr:-0} - ${w0:-0} ))
+[ "${w0:-0}" -gt 0 ] && [ "$d" -ge 24 ] && [ "$d" -le 56 ] \
+    && ok "column 0 grew from $w0 to $cr px for a 40 px drag (+$d)" || bad "column 0: before ${w0:-?}, after ${cr:-?} (+$d), expected +24..56"
 
 echo "== 5. catalog =="
 for k in explorer.cmd explorer.menu.new explorer.menu.sort explorer.menu.show explorer.preview.none explorer.preview.title; do
     grep -qE "^$k =" locale/de/messages && grep -qE "^$k =" locale/en/messages \
         && ok "catalog key $k in de and en" || bad "catalog key $k missing"
 done
+
+echo "== 6. file type symbols (source): every kind has its own symbol + tint =="
+python3 - <<'PY' && ok "9 kinds, 9 different (symbol, tint) pairs in icon_for" || bad "icon_for: kinds share a symbol+tint pair or a kind is missing"
+import re, sys
+t = open("kernel/user/expmodell.fi", encoding="latin1").read()
+b = t[t.index("fn icon_for("):]
+b = b[:b.index("\n}\n")]
+pairs = re.findall(r"icon_tint\(wlib\.icon_id\(icons\.(\w+)\), (\d+)\)", b)
+sys.exit(0 if len(pairs) == 9 and len(set(pairs)) == 9 else 1)
+PY
 
 echo "EXPLORER4: $pass passed, $fail failed"
 [ "$fail" = 0 ]
