@@ -799,6 +799,43 @@ grep -qa "no such path" "$TMPD/wo9.txt" \
     && ok "und auch kein Siegelschluessel -- nichts davon entsteht auf Vorrat" \
     || hin "der Siegelschluessel entstand ohne Anmeldung: $(cat "$TMPD/wo9.txt")"
 
+# ======================================================================
+echo "== 15. Einstellungen -> Konten: 'Adressbuch verbinden' (r125) =="
+# ======================================================================
+# Die Seite kennt keinen Anbieter: sie reicht `--tauschen` durch, liest die
+# Zeile `konto: tausch = <wort>` und waehlt daraus einen Katalogschluessel.
+# Gemessen wird die VERDRAHTUNG: Knopf, Flagge, jedes Wort, jeder Schluessel
+# in beiden Sprachen, und dass die Woerter dieselben sind, die konto sagt.
+SF=kernel/user/settings.fi
+num "Knopf K_BKBUCH in der Konten-Seite" "$(grep -c 'fuiscene.button(left, msg.get((&k_k_buch' $SF)" eq 1
+num "der Knopf loest den Gerätefluss aus (selber Zweig wie 'Mit Code anmelden')" "$(grep -c 'id == K_BKDEV || id == K_BKBUCH' $SF)" eq 1
+num "nur der neue Knopf haengt --tauschen an" "$(grep -c 'if id == K_BKBUCH {' $SF)" ge 2
+num "Schalter --tauschen wird als Argument gesetzt" "$(grep -c '"--tauschen' $SF)" eq 1
+for W in ok keinnetz abgelehnt; do
+    num "Wort '$W' wird von konto ausgegeben" "$(grep -c "return \"$W\"" kernel/app/account.fi)" ge 1
+    num "Wort '$W' wird von der Seite ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
+done
+for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off konto.ui.book.ok \
+         konto.ui.book.offline konto.ui.book.refused konto.ui.book.noscope konto.ui.book.failed; do
+    D=$(grep -a "^$K = " locale/de/messages | sed 's/^[^=]*= //'); E=$(grep -a "^$K = " locale/en/messages | sed 's/^[^=]*= //')
+    if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "Meldung $K fehlt oder ist unuebersetzt"; fi
+    num "Schluessel $K wird von der Seite benutzt" "$(grep -c "\"$K\\\\0" $SF)" ge 1
+done
+# dieselbe Hinweis-Meldung wie im Ruecken (Vergleich Text gegen Text)
+HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
+num "Scope-fehlt erkennt die Seite am gleichen Schluessel wie der Ruecken" "$((HS * HB))" ge 1
+# kein Anbietername in den neuen Texten und im Seitencode der neuen Funktionen
+if grep -ai '^konto\.ui\.book' locale/de/messages locale/en/messages | grep -aqi 'fleitec\|xoffi\|jarvis'; then
+    bad "ein Anbietername steht in den neuen Meldungen"
+else
+    ok "die neuen Meldungen nennen keinen Anbieter (Adressbuch, nicht Dienst)"
+fi
+# (das Buch-Programm /bin/socfleitec selbst darf stehen: die Seite fragt es, nur dort)
+SEG=$(sed -n '/^fn buch_gleich/,/^fn accounts_read/p' $SF | sed 's#/bin/socfleitec##')
+if printf '%s' "$SEG" | grep -qi 'fleitec\|xoffi\|jarvis'; then bad "Anbietername in buch_key/buch_stand"; else ok "buch_key/buch_stand kennen keinen Anbieter"; fi
+# das Token wird nie angezeigt: der Status liest nur 'account<TAB>' aus `hello`
+num "der Status liest nie die Konfiguration (nur 'hello')" "$(printf '%s' "$SEG" | grep -c 'fleitec.conf\|token=')" eq 0
+
 server_zu
 netz_zu
 

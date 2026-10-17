@@ -60,9 +60,21 @@ Nichts ist gemockt: OrientOS-Gast (`konto`, `socfleitec`) → `proxy.py` (TLS 1.
 - `--tauschen` ohne `--geraet` wird abgelehnt (Rückgabe 2). `url=`/`name=`/`roots=` müssen in der Conf stehen (wie bei `login broker`).
 - Ein Token wird genau EINMAL getauscht: der Tausch läuft einmal pro Anmeldung, es gibt keinen Wiederholversuch und kein Zwischenspeichern des Access-Tokens (wichtig für die jti-Sperre am FirnChat-Endpunkt).
 - Test: `interop.sh` Section 8d (ein Schritt ohne Datei; abgelehnter Tausch auf demselben Abbild lässt Sitzung und altes fkt1 stehen; Buch offline; `--tauschen` ohne `--geraet`).
-- Einstellungen → Konten: kein Knopf. Der Dialog reicht `--tauschen` nicht durch, weil er jeden Rückgabecode ≠ 0 als Fehlschlag der Anmeldung zeigt; das braucht eine eigene Meldung (siehe Offen).
+- Einstellungen → Konten: siehe nächster Abschnitt (Knopf „Mit Code anmelden und Adressbuch verbinden“).
+
+## Einstellungen → Konten: „Mit Code anmelden und Adressbuch verbinden“ (r125)
+- Zweiter Knopf unter „Mit Code anmelden“ (`K_BKBUCH` in `kernel/user/settings.fi`). Gleicher Gerätefluss (erster Klick: Code + Adresse, weitere Klicks fragen einmal ab), nur wird bei jedem Aufruf `--tauschen` angehängt. Die Seite kennt keinen Anbieter und reicht nur das Flag durch (Trennungswache grün).
+- Ergebnis aus `konto: tausch = <wort>` (die Zeile heißt: Anmeldung hat geklappt). Die reine Funktion `buch_key(wort, hinweis)` wählt den Katalogschlüssel:
+  - `ok` → `konto.ui.book.ok` (Angemeldet, Adressbuch verbunden)
+  - `keinnetz` → `konto.ui.book.offline` (Buch nicht erreichbar)
+  - `abgelehnt` → `konto.ui.book.refused`; ist der `hinweis` der Text von `konto.hint.noscope`, stattdessen `konto.ui.book.noscope` (Scope fehlt)
+  - alles andere (`fehler`, Anbieter ohne Übergabe) → `konto.ui.book.failed`
+  - Alle Meldungen beginnen mit „Angemeldet.“ und sagen, dass die Anmeldung bleibt. Gibt es KEINE `tausch`-Zeile, gilt die alte Logik (0 = angemeldet, sonst Anmeldefehler + Text).
+- Statusanzeige „Adressbuch: verbunden / nicht verbunden“ (rechte Spalte unter der Statuszeile): die Seite startet `/bin/socfleitec v1 hello`; es druckt eine `account`-Zeile nur, wenn ein Token der richtigen Form gespeichert ist. Die Seite liest weder die Conf noch das Token, kein Netz. Aktualisiert beim Öffnen und nach Anmelden/Abmelden/Tausch. Sagt nichts über die GÜLTIGKEIT des Tokens (nur: es ist da).
+- `prog_lauf(bin, argv, argc, geheim)` ist der verallgemeinerte Läufer; `konto_lauf` ruft ihn mit `/bin/konto`.
+- Tests: `tools/account/run.sh` Section 15 (Verdrahtung: Knopf, Flag, Wörter gleich wie `konto` sie ausgibt, alle 9 Schlüssel de+en verschieden, kein Anbietername in den neuen Texten); Section 2 prüft die Schlüssel ohnehin automatisch. `interop.sh` Section 8: `hello` ohne Login ohne `account`-Zeile, nach dem Tausch genau eine, nie das Token.
 
 ## Offen
 - Client `orientos-device` mit `aud` `orientos` im echten Dienst registrieren (device_code-Grant) — vor Live, nur mit Boss-Ja.
 - Live-Schaltung der Brücke (siehe oben, Boss-Ja).
-- Einstellungen → Konten: Knopf bzw. Haken „Adressbuch verbinden“ (`--tauschen`) mit eigener Meldung für `tausch = …`.
+- Einstellungen → Konten: Knopf ist gebaut (r125), aber nur per Wiring-Test und `hello`-Interop gemessen, nicht per Mausklick im Fenster (kein GUI-Gate für die Konten-Seite).

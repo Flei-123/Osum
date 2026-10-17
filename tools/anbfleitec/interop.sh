@@ -483,6 +483,14 @@ PY
     FKT=$(cat "$TMPD/ctl/issued" 2>/dev/null)
     echo "$FKT" | grep -qE "^fkt1\.$UIDC\.[0-9a-f]{64}$" && ok "the book issued fkt1.<uid>.<64 hex>" || bad "issued: '$FKT'"
     has "$TMPD/o_soc1.txt" "token=$FKT" "the fkt1 (and only it) is in the configuration"
+    # r125: the settings page shows "address book: connected" from `hello` alone (no token read there)
+    cp "$TMPD/soc_base.img" "$TMPD/d_soch.img"
+    lauf "$TMPD/d_soch.img" "echo MARK1;socfleitec v1 hello;echo MARK2" "$TMPD/o_soch0.txt"
+    num "hello before any login prints no account line (page shows 'not connected')" "$(sed -n '/^MARK1/,/^MARK2/p' "$TMPD/o_soch0.txt" | grep -ac "^account")" eq 0
+    num "hello before any login still answers (provider line)" "$(sed -n '/^MARK1/,/^MARK2/p' "$TMPD/o_soch0.txt" | grep -ac "^provider")" eq 1
+    lauf "$TMPD/d_soc.img" "echo MARK3;socfleitec v1 hello;echo MARK4" "$TMPD/o_soch1.txt"
+    num "hello after the swap prints exactly one account line (page shows 'connected')" "$(sed -n '/^MARK3/,/^MARK4/p' "$TMPD/o_soch1.txt" | grep -ac "^account.$UIDC")" eq 1
+    num "hello never prints the token" "$(sed -n '/^MARK3/,/^MARK4/p' "$TMPD/o_soch1.txt" | grep -ac "fkt1")" eq 0
     num "socfleitec accepts the fkt1: contacts answered 'ok 1' (before and after a refused token)" "$(grep -ac '^ok.1' "$TMPD/o_soc1.txt")" eq 2
     num "refused tokens (foreign signature; three kinds of malformed input) leave the fkt1 in place" "$(grep -ac '^err.\(denied\|bad\)' "$TMPD/o_soc1.txt")" eq 4
     num "the JWT never shows in the output" "$(grep -acF "${ST%%.*}" "$TMPD/o_soc1.txt")" eq 0

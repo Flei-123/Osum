@@ -881,6 +881,19 @@ static mut dev_zw: [u8; 120] = [0 as u8; 120]
 static mut kf_code: [u8; 5] = "code\0"
 static mut kf_url: [u8; 4] = "url\0"
 static mut kf_zw: [u8; 9] = "zwischen\0"
+static mut k_k_buch: [u8; 14] = "konto.ui.book\0"
+static mut k_k_bstat: [u8; 20] = "konto.ui.book.state\0"
+static mut k_k_bon: [u8; 17] = "konto.ui.book.on\0"
+static mut k_k_boff: [u8; 18] = "konto.ui.book.off\0"
+static mut k_m_bok: [u8; 17] = "konto.ui.book.ok\0"
+static mut k_m_bnet: [u8; 22] = "konto.ui.book.offline\0"
+static mut k_m_bref: [u8; 22] = "konto.ui.book.refused\0"
+static mut k_m_bscope: [u8; 22] = "konto.ui.book.noscope\0"
+static mut k_m_bfail: [u8; 21] = "konto.ui.book.failed\0"
+static mut k_m_nscope: [u8; 19] = "konto.hint.noscope\0"
+static mut kf_tausch: [u8; 7] = "tausch\0"
+static mut kf_hint: [u8; 8] = "hinweis\0"
+static mut l_kbuch: [u8; 96] = [0 as u8; 96]
 // RUNDE ALLTAG: der Leerlaufzaehler des Sperrbildschirms. Er gehoert
 // auf die Seite BENUTZER -- die Sperre ist eine Sache des Kontos und
 // nicht der Darstellung.
@@ -3970,6 +3983,12 @@ fn opt_word(ziel: u64, max: u64, vorsatz: u64, wert: u64) -> bool {
 
 fn konto_lauf(argv: u64, argc: u64, geheim: u64) -> u64 {
     var t_bin: [u8; 11] = "/bin/konto\0"
+    return prog_lauf((&t_bin[0 as usize]) as u64, argv, argc, geheim)
+}
+
+// Run `bin` with argv, its stdout into k_aus (same descriptor dance for
+// every helper program this page asks something).
+fn prog_lauf(bin: u64, argv: u64, argc: u64, geheim: u64) -> u64 {
     var t_tmp: [u8; 5] = "/tmp\0"
     var t_aus: [u8; 16] = "/tmp/konto.aus\0\0"
     var nlz: [u8; 2] = "\n\0"
@@ -4001,7 +4020,7 @@ fn konto_lauf(argv: u64, argc: u64, geheim: u64) -> u64 {
         ulib.sys(ulib.SYS_DUP2, afd, 1, 0)
         ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
     }
-    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&t_bin[0 as usize]) as u64,
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, bin,
         argv, argc)
     if !ulib.bad(s0) {
         ulib.sys(ulib.SYS_DUP2, s0, 0, 0)
@@ -4151,6 +4170,78 @@ fn provider_read() {
 // gewoehnliche Textdatei ohne ein einziges Geheimnis darin. Angezeigt
 // wird "<anbieter>  <anzeige>", und die Kennung steht dahinter, weil
 // der Abmeldeknopf sie braucht.
+// Two NUL-terminated texts equal?
+fn buch_gleich(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while __mmio_read8((a + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((a + i) as *mut u8) != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((b + i) as *mut u8) == 0 as u8
+}
+
+// The message KEY for the result of `konto anmelden ... --tauschen`
+// (the line `konto: tausch = <word>`; the sign-in itself stands in every
+// case, only the swap with the address book differs). Pure: the word and
+// the hint text in, a catalogue key out -- the page never sees a provider.
+//   ok -> .ok, keinnetz -> .offline, abgelehnt -> .refused (or .noscope when
+//   the hint is the missing-scope one), anything else -> .failed
+fn buch_key(word: u64, hint: u64) -> u64 {
+    var w_ok: [u8; 3] = "ok\0"
+    var w_net: [u8; 9] = "keinnetz\0"
+    var w_ab: [u8; 10] = "abgelehnt\0"
+    if buch_gleich(word, (&w_ok[0 as usize]) as u64) {
+        return (&k_m_bok[0 as usize]) as u64
+    }
+    if buch_gleich(word, (&w_net[0 as usize]) as u64) {
+        return (&k_m_bnet[0 as usize]) as u64
+    }
+    if buch_gleich(word, (&w_ab[0 as usize]) as u64) {
+        if hint != 0 && buch_gleich(hint, msg.get((&k_m_nscope[0 as usize]) as u64)) {
+            return (&k_m_bscope[0 as usize]) as u64
+        }
+        return (&k_m_bref[0 as usize]) as u64
+    }
+    return (&k_m_bfail[0 as usize]) as u64
+}
+
+// "Address book: connected / not connected". Asked of the helper program
+// that owns the book (`hello` prints an `account` line only when a token
+// of the right shape is stored; the token itself is never printed or read
+// here). No network is touched.
+fn buch_stand() {
+    var b_bin: [u8; 16] = "/bin/socfleitec\0"
+    var b_v1: [u8; 3] = "v1\0"
+    var b_he: [u8; 6] = "hello\0"
+    var bargv: [u64; 4] = [0 as u64; 4]
+    bargv[0] = (&b_bin[0 as usize]) as u64
+    bargv[1] = (&b_v1[0 as usize]) as u64
+    bargv[2] = (&b_he[0 as usize]) as u64
+    let rc: u64 = prog_lauf((&b_bin[0 as usize]) as u64, (&bargv[0 as usize]) as u64, 3, 0)
+    var da: bool = false
+    if rc == 0 {
+        var i: u64 = 0
+        while i + 8 <= k_ausn {
+            if (i == 0 || k_aus[((i - 1)) as usize] == 10 as u8)
+                && k_aus[(i) as usize] == 97 as u8 && k_aus[((i + 1)) as usize] == 99 as u8
+                && k_aus[((i + 2)) as usize] == 99 as u8 && k_aus[((i + 3)) as usize] == 111 as u8
+                && k_aus[((i + 4)) as usize] == 117 as u8 && k_aus[((i + 5)) as usize] == 110 as u8
+                && k_aus[((i + 6)) as usize] == 116 as u8 && k_aus[((i + 7)) as usize] == 9 as u8 {
+                da = true
+            }
+            i = i + 1
+        }
+    }
+    var at: u64 = text_an((&l_kbuch[0 as usize]) as u64, 0, msg.get((&k_k_bstat[0 as usize]) as u64))
+    if da {
+        let _x: u64 = text_an((&l_kbuch[0 as usize]) as u64, at, msg.get((&k_k_bon[0 as usize]) as u64))
+    } else {
+        let _x: u64 = text_an((&l_kbuch[0 as usize]) as u64, at, msg.get((&k_k_boff[0 as usize]) as u64))
+    }
+}
+
 fn accounts_read() {
     var pfad: [u8; 12] = "/etc/konten\0"
     var roh: [u8; 1024] = [0 as u8; 1024]
@@ -5889,6 +5980,7 @@ const K_BKOUT: u64 = 94
 const K_EKGEH: u64 = 95
 const K_EKBER: u64 = 96
 const K_BKDEV: u64 = 97 // 'Mit Code anmelden' (device flow, RFC 8628)
+const K_BKBUCH: u64 = 117 // same flow + `--tauschen`: also connect the address book
 
 static mut kval: [u64; 200] = [0 as u64; 200] // the value of every choice
 static mut ch_items: [u64; 200] = [0 as u64; 200] // its items (text, '\n' between)
@@ -7969,11 +8061,14 @@ fn page_konto(left: usize, right: usize) {
     fuiscene.set_size(n_bkadd, 160, 28)
     let n_bkdev: usize = fuiscene.button(left, msg.get((&k_k_dev[0 as usize]) as u64), K_BKDEV)
     fuiscene.set_size(n_bkdev, 160, 28)
+    let n_bkbuch: usize = fuiscene.button(left, msg.get((&k_k_buch[0 as usize]) as u64), K_BKBUCH)
+    fuiscene.set_size(n_bkbuch, 160, 28)
     let _n_kt10: usize = fuiscene.label(right, msg.get((&k_k_list[0 as usize]) as u64))
     let _n_lkonten: usize = fuiscene.table_list(right, K_LKONTEN, 0, 150, 1, (&k_liste[0 as usize]) as u64)
     let n_bkout: usize = fuiscene.button(right, msg.get((&k_k_out[0 as usize]) as u64), K_BKOUT)
     fuiscene.set_size(n_bkout, 160, 28)
     let _n_lkstat: usize = fuiscene.label(right, (&l_kstat[0 as usize]) as u64)
+    let _n_lkbuch: usize = fuiscene.label(right, (&l_kbuch[0 as usize]) as u64)
     let _n_kt6: usize = fuiscene.label(right, msg.get((&k_k_geh[0 as usize]) as u64))
     let n_ekgeh: usize = fuiscene.entry(right, K_EKGEH, 0, (&e_kgeh[0 as usize]) as u64)
     fuiscene.set_size(n_ekgeh, 0, 28)
@@ -8616,6 +8711,7 @@ fn init_values() {
     nv_read()
     provider_read()
     accounts_read()
+    buch_stand()
     kval[(K_CM) as usize] = 2
     kval[(K_CSH) as usize] = wlibc.shape_id()
     kval[(K_ZS1) as usize] = zieh_stufe(wlibc.zieh_lift(), 40, 50)
@@ -9987,11 +10083,12 @@ fn u_start(args: u64) -> u64 {
                             at, (&txt[0 as usize]) as u64)
                     }
                     accounts_read()
+                    buch_stand()
                     // (described again)
                     // (described again)
                     // (described again)
                     melde_stand()
-                } else if id == K_BKDEV {
+                } else if id == K_BKDEV || id == K_BKBUCH {
                     // SIGN IN WITH A CODE (device flow). First click: start,
                     // show code + URL. Next clicks: ask ONCE whether the
                     // human has confirmed. No password on this device; the
@@ -10006,6 +10103,7 @@ fn u_start(args: u64) -> u64 {
                     var dzw: [u8; 140] = [0 as u8; 140]
                     var dargv: [u64; 8] = [0 as u64; 8]
                     var dv_anb: [u8; 12] = "--anbieter=\0"
+                    var d_ta: [u8; 11] = "--tauschen\0"
                     var dn: u64 = 0
                     var dopen: u64 = 0
                     while dv_anb[(dopen) as usize] != 0 as u8 {
@@ -10042,6 +10140,13 @@ fn u_start(args: u64) -> u64 {
                         dargv[(dn) as usize] = (&dzw[0 as usize]) as u64
                         dn = dn + 1
                     }
+                    if id == K_BKBUCH {
+                        // also hand the access token to the address book
+                        // (the back end does it; a failed swap never
+                        // undoes the sign-in)
+                        dargv[(dn) as usize] = (&d_ta[0 as usize]) as u64
+                        dn = dn + 1
+                    }
                     let drc: u64 = konto_lauf((&dargv[0 as usize]) as u64, dn, 0)
                     var dtxt: [u8; 96] = [0 as u8; 96]
                     var dcode: [u8; 24] = [0 as u8; 24]
@@ -10072,19 +10177,37 @@ fn u_start(args: u64) -> u64 {
                             dev_zw[(dg) as usize] = 0 as u8
                             dg = dg + 1
                         }
-                        if drc == 0 {
+                        var dtau: [u8; 24] = [0 as u8; 24]
+                        var dhin: [u8; 160] = [0 as u8; 160]
+                        var dsw: bool = false
+                        if id == K_BKBUCH {
+                            // a `tausch` line means the sign-in worked
+                            dsw = account_field((&kf_tausch[0 as usize]) as u64,
+                                (&dtau[0 as usize]) as u64, 24)
+                        }
+                        if dsw {
+                            let dh: bool = account_field((&kf_hint[0 as usize]) as u64,
+                                (&dhin[0 as usize]) as u64, 160)
+                            var hp: u64 = 0
+                            if dh {
+                                hp = (&dhin[0 as usize]) as u64
+                            }
+                            dat = text_an((&l_kstat[0 as usize]) as u64, 0,
+                                msg.get(buch_key((&dtau[0 as usize]) as u64, hp)))
+                        } else if drc == 0 {
                             dat = text_an((&l_kstat[0 as usize]) as u64, 0,
                                 msg.get((&k_m_kok[0 as usize]) as u64))
                         } else {
                             dat = text_an((&l_kstat[0 as usize]) as u64, 0,
                                 msg.get((&k_m_kbad[0 as usize]) as u64))
                         }
-                        if dhat {
+                        if dhat && !dsw {
                             let _t3: u64 = text_an((&l_kstat[0 as usize]) as u64,
                                 dat, (&dtxt[0 as usize]) as u64)
                         }
                     }
                     accounts_read()
+                    buch_stand()
                     melde_stand()
                 } else if id == K_BKOUT {
                     // ABMELDEN. Es wird nur abgemeldet, was AUSGEWAEHLT
@@ -10109,6 +10232,7 @@ fn u_start(args: u64) -> u64 {
                         let _s2: u64 = text_an((&l_kstat[0 as usize]) as u64,
                             0, msg.get((&k_m_kout[0 as usize]) as u64))
                         accounts_read()
+                        buch_stand()
                         // (described again)
                     }
                     // (described again)
