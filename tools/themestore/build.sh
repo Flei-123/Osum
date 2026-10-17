@@ -207,6 +207,8 @@ printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=
 # Stuende hier weiter `taskbar_blur=`, bekaeme jeder Lauf dieser
 # Abnahme ein Milchglas von 0, egal was er bestellt hat.
 [ -n "$blur" ]     && printf 'blur=%s\n' "$blur" >> "$OUT/theme.conf"
+# W-S: the master switch defaults to `subtle` (nearly opaque); this gate judges the slider-driven pipeline, so it runs in `strong`
+printf 'transparency=strong\n' >> "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
 if [ "$account" = yes ]; then
