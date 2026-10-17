@@ -8,7 +8,7 @@
 # of the right-click menu (and of the other popups) are pixelated.
 #
 # CAUSE (measured, serial + pictures): the window server cuts every frameless
-# window to the window radius (`wm.nodeco_radius`, 12 points in the osum
+# window to the window radius (`wm.nodeco_radius`, 8 points in the osum
 # shape) with coverage alpha -- but the CLIENTS painted something else under
 # that cut:
 #   * the menu (`wlib.paint_menu`) a SQUARE accent frame on the window edge --

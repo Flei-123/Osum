@@ -50,7 +50,7 @@ def tup(c):
 
 print("== 1. radii, spacing, type: values and scale 1 = scale 2 / 2 ==")
 for s in (1, 2):
-    chk("radius s=%d 4/8/12" % s, [rows[(1, i, s)] for i in range(3)] == [4 * s, 8 * s, 12 * s])
+    chk("radius s=%d 4/8/8 (Windows 11 window/menu/popup = 8)" % s, [rows[(1, i, s)] for i in range(3)] == [4 * s, 8 * s, 8 * s])
     chk("spacing s=%d 0,4,8,12,16,24,32" % s,
         [rows[(2, i, s)] for i in range(7)] == [0] + [v * s for v in (4, 8, 12, 16, 24, 32)])
     chk("type s=%d 12/15/15/18/24" % s, [rows[(6, i, s)] for i in range(5)] == [v * s for v in (12, 15, 15, 18, 24)])
@@ -58,7 +58,7 @@ for s in (1, 2):
 for g in (1, 2, 3, 4, 6):
     n = 4 if g in (1, 3, 4) else 7 if g == 2 else 5
     chk("group %d scales exactly x2" % g, all(rows[(g, i, 2)] == 2 * rows[(g, i, 1)] for i in range(n)))
-chk("radius order small < medium < large", rows[(1, 0, 1)] < rows[(1, 1, 1)] < rows[(1, 2, 1)])
+chk("radius order small < medium <= large", rows[(1, 0, 1)] < rows[(1, 1, 1)] <= rows[(1, 2, 1)])
 
 print("== 2. elevation: three levels, growing, stronger in dark ==")
 chk("dy grows", rows[(3, 0, 1)] == 0 < rows[(3, 1, 1)] < rows[(3, 2, 1)] < rows[(3, 3, 1)])

@@ -599,9 +599,9 @@ printf '# /etc/login.conf -- die Anmeldung.\n# verzoegerung_ms: die erste Wartez
     "$PW_RUNDEN" > "$OUT/login.conf"
 
 # /etc/sperre.conf -- der Leerlauf, nach dem von selbst gesperrt wird.
-# 300 Sekunden sind fuenf Minuten; 0 hiesse "nie von selbst".
+# 600 Sekunden sind zehn Minuten (W-D: vorher 300); 0 hiesse "nie von selbst".
 printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=%s\n' \
-    "${SPERRE_LEERLAUF:-$([ "$IMAGE_PROFILE" = public ] && echo 0 || echo 300)}" > "$OUT/sperre.conf"
+    "${SPERRE_LEERLAUF:-$([ "$IMAGE_PROFILE" = public ] && echo 0 || echo 600)}" > "$OUT/sperre.conf"
 # ROUND LIVE: /etc/autologin -- ONLY on the public image. glogin signs
 # the user named there in once per boot (kernel/user/glogin.fi,
 # auto_anmelden).
@@ -689,7 +689,7 @@ printf '# /etc/papierkorb.conf -- die Grenze des Papierkorbs.\n# grenze=<MiB>: w
 #
 #     /etc/theme.conf   scheme=, mode=, shape=
 #     /etc/schemas/     die Farbschemata
-#     /etc/shapes/      die Formsaetze (osum.shape: radius_window=12)
+#     /etc/shapes/      die Formsaetze (osum.shape: radius_window=8)
 #     /etc/themes/      die fertigen Voreinstellungen
 #
 # OHNE /etc/shapes/ UND OHNE `shape=` BLEIBT `wlibc.met` AUF `classic`,

@@ -91,6 +91,10 @@ def contrast100(a, b):
     return ((la + SCALE // 20) * 100) // (lb + SCALE // 20)
 
 
+HOVER_PCT_LIGHT = 6   # kernel/user/wlibc.fi, round W-D
+HOVER_PCT_DARK = 8
+
+
 def mix(a, b, p):
     """p percent of b into a, per sRGB channel.
 
@@ -281,7 +285,8 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
             put("control", neutral[N_200])
-            put("control-hover", neutral[N_300])
+            # ROUND W-D (r1002): subtle hover, see kernel/user/wlibc.fi HOVER_PCT_*
+            put("control-hover", mix(neutral[N_200], neutral[N_900], HOVER_PCT_LIGHT))
             put("control-pressed", neutral[N_400])
             put("field", neutral[N_100])
             put("text-primary", neutral[N_900])
@@ -330,10 +335,10 @@ def resolve(scheme, dark, accent_override=None):
             # N_700.  Four steps now: base 900, surface 800, hover 700,
             # pressed 600.  kernel/user/wlibc.fi:3006 is the truth here;
             # this file was simply never pulled after that commit.
-            put("surface-hover", neutral[N_700])
+            put("surface-hover", mix(neutral[N_800], neutral[N_0], HOVER_PCT_DARK))
             put("surface-pressed", neutral[N_600])
             put("control", neutral[N_700])
-            put("control-hover", neutral[N_600])
+            put("control-hover", mix(neutral[N_700], neutral[N_0], HOVER_PCT_DARK))
             put("control-pressed", neutral[N_500])
             put("field", neutral[N_950])
             put("text-primary", neutral[N_50])
