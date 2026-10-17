@@ -8903,7 +8903,7 @@ fn compose_rect(state: u64, bx0: u64, by0: u64, bx1: u64, by1: u64, outr: u64) -
             rounds = rounds + 1
             var wi: u64 = 0
             while wi < MAX_WIN {
-                if blur_will(state, wi) {
+                if blur_will(state, wi) && !blur_hit_ok(state, wi) {
                     var qx0: i64 = win_x(state, wi)
                     var qy0: i64 = win_y(state, wi)
                     var qx1: i64 = qx0 + outer_w(state, wi) as i64
@@ -10783,8 +10783,40 @@ fn blur_leeren(state: u64) {
 // Ablauf: pruefen, ob der Zwischenspeicher passt -> wenn ja, NUR
 // kopieren. Sonst: den Hintergrund aus dem Zweitpuffer holen, zweimal
 // Kasten darueber, toenen, koernen, ablegen und ausgeben.
+// FLICKER FIX (17.10.2026): is the blur of window `i` a cache hit right now (same slot, same rectangle, nothing spoiled it)? The
+// rectangle is built exactly as `blur_flaeche` builds it. Then `compose_rect` need not grow a dirty rectangle over the window.
+fn blur_hit_ok(state: u64, i: u64) -> bool {
+    if gs(state, S_BC_AUS) != 0 {
+        return false
+    }
+    var x0: i64 = win_x(state, i)
+    var y0: i64 = win_y(state, i)
+    var x1: i64 = x0 + outer_w(state, i) as i64
+    var y1: i64 = y0 + outer_h(state, i) as i64
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < fb.band_lo(state) as i64 {
+        y0 = fb.band_lo(state) as i64
+    }
+    if x1 > gs(state, S_SW) as i64 {
+        x1 = gs(state, S_SW) as i64
+    }
+    if y1 > gs(state, S_SH) as i64 {
+        y1 = gs(state, S_SH) as i64
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return false
+    }
+    let tr: u64 = blur_slot(state, i, x0 as u64, y0 as u64, (x1 - x0) as u64, (y1 - y0) as u64)
+    if tr >= BC_N {
+        return false
+    }
+    return gs(state, S_BC_HIT + tr * 8) == gs(state, S_BC_GEN + tr * 8)
+}
+
 fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
-    by1: i64, ton: u64) {
+    by1: i64, ton: u64, kx0: i64, ky0: i64, kx1: i64, ky1: i64) {
     let r: u64 = form(state, FM_BLUR)
     if r == 0 {
         return
@@ -10829,11 +10861,36 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     if tr < BC_N && gs(state, S_BC_AUS) == 0
         && gs(state, S_BC_HIT + tr * 8) == gs(state, S_BC_GEN + tr * 8) {
         let bq: u64 = gs(state, S_BC_BUF) +% tr *% ein
-        var yy: u64 = 0
-        while yy < h {
-            fb_row(state, x0 as u64, y0 as u64 + yy,
-                bq +% yy *% w *% 4, w)
-            yy = yy + 1
+        // FLICKER FIX (17.10.2026): a hit copies ONLY the part inside the clip (the dirty rectangle). The cached picture is the
+        // blurred backdrop of the whole window and stays right outside the clip too, but the window's own contents are painted
+        // only inside the clip -- so copying more would smear the old picture over the rest of the window. `compose_rect` no
+        // longer grows a dirty rectangle over a window whose blur is a cache hit (`blur_hit_ok`).
+        var cx0: i64 = x0
+        var cy0: i64 = y0
+        var cx1: i64 = x1
+        var cy1: i64 = y1
+        if kx0 > cx0 {
+            cx0 = kx0
+        }
+        if ky0 > cy0 {
+            cy0 = ky0
+        }
+        if kx1 < cx1 {
+            cx1 = kx1
+        }
+        if ky1 < cy1 {
+            cy1 = ky1
+        }
+        if cx1 > cx0 && cy1 > cy0 {
+            let cw: u64 = (cx1 - cx0) as u64
+            let off: u64 = (cx0 - x0) as u64
+            var yy: u64 = (cy0 - y0) as u64
+            let ye: u64 = (cy1 - y0) as u64
+            while yy < ye {
+                fb_row(state, cx0 as u64, y0 as u64 + yy,
+                    bq +% yy *% w *% 4 +% off *% 4, cw)
+                yy = yy + 1
+            }
         }
         ss(state, S_BLURCACHE, gs(state, S_BLURCACHE) + 1)
         return
@@ -11228,7 +11285,8 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     if blur_will(state, i) {
         let ph_t: u64 = time.tsc()
         blur_flaeche(state, i, wx, wy, wx + ow, wy + oh,
-            deco(state, DK_TITLE))
+            deco(state, DK_TITLE), cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
         ph_add(state, S_PH_BLUR, ph_t, time.tsc())
     }
     // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
