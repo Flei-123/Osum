@@ -76,6 +76,7 @@
 #    Bau auf und nicht erst beim Durchklicken.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
@@ -400,7 +401,7 @@ for p in $PROGS; do
         echo "== $p: der Uebersetzer sagt nein" >&2; head -20 "$OUT/$p.err" >&2
         rc=1; continue
     fi
-    if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
+    if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
             -o "$OUT/$p.elf" $CRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein" >&2; head -12 "$OUT/$p.lderr" >&2
         rc=1; continue
@@ -435,7 +436,7 @@ for p in $APPS; do
         head -20 "$OUT/app-$p.err" >&2
         fehler "die Apps lassen sich nicht bauen"
     fi
-    if ! ld -T kernel/user/user.ld -o "$OUT/$p.elf" "$OUT/app-$p.o" \
+    if ! ld $GCS -T kernel/user/user.ld -o "$OUT/$p.elf" "$OUT/app-$p.o" \
             2> "$OUT/app-$p.lderr"; then
         echo "== $p (app): der Binder sagt nein" >&2
         head -12 "$OUT/app-$p.lderr" >&2
@@ -498,7 +499,7 @@ done
 if [ -n "$FIRNQ" ]; then
     if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$CC" -c \
             -o "$OUT/firnc-osum.o" bin/firnc1.fi ) > "$OUT/firnc-osum.err" 2>&1 \
-       && ld -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
+       && ld $GCS -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
             2>> "$OUT/firnc-osum.err"; then
         strip --strip-all "$OUT/firnc.elf"
         gebaut="$gebaut firnc"

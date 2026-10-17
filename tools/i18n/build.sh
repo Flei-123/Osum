@@ -19,6 +19,7 @@
 # und danach nichts mehr findet.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRNLIB="$(pwd)/lib"
 
 OUT=/tmp/i18n
@@ -51,7 +52,7 @@ for p in $PROGS; do
         echo "== $p: der Uebersetzer sagt nein"; head -25 "$OUT/$p.err"
         rc=1; continue
     fi
-    if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
+    if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
             -o "$OUT/$p.elf" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein"; head -12 "$OUT/$p.lderr"
         rc=1; continue

@@ -7,6 +7,7 @@
 #   bash tools/sync/build.sh <zielverzeichnis> [stufe] [programm ...]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 # FIRNLIB darf von aussen gesetzt sein: die Gegenproben (j) bauen gegen
 # eine KOPIE des Bibliotheksbaums, damit kein Test je die echten Quellen
@@ -41,7 +42,7 @@ for p in $PROGS; do
         rc=1
         continue
     fi
-    if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
+    if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
         -o "$OUT/$p.elf" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "FEHLER: ld scheitert an $p"
         sed 's/^/    /' "$OUT/$p.lderr" | head -8

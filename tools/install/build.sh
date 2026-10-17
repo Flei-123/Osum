@@ -23,6 +23,7 @@
 # Verwendung:  bash tools/install/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
@@ -86,7 +87,7 @@ for p in $PROGS; do
         rc=1
         continue
     fi
-    if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
+    if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
             -o "$OUT/bin/$p" "$OUT/crt.o" "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein"
         head -12 "$OUT/$p.lderr"
@@ -134,7 +135,7 @@ for p in $APPS; do
         exit 1
     fi
     # KEIN crt.o: Firns eigenes `_start` ist der Eintrittspunkt.
-    if ! ld -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \
+    if ! ld $GCS -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \
             2> "$OUT/app-$p.lderr"; then
         echo "== $p (app): der Binder sagt nein"
         head -12 "$OUT/app-$p.lderr"

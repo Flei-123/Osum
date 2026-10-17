@@ -47,6 +47,7 @@
 # Verwendung:  bash tools/k15/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
@@ -189,7 +190,7 @@ baue() { # stufe
             rc=1
             continue
         }
-        ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$s.u_start" \
+        ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F$s.u_start" \
             -o "$TMPD/$p$s.elf" $UCRT "$TMPD/$p$s.o" \
             2>"$TMPD/ld$s.err" || { bad "firnc$s: ld scheitert an $p"; rc=1; continue; }
         strip --strip-all "$TMPD/$p$s.elf"
@@ -304,7 +305,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # two-line lists (Start menu) set the NAME in the bold cut, and without
 # the file fUi quietly falls back to the regular one -- then this runner
 # would measure a picture no user ever sees.
-ARGS=(build "$TMPD/disk.img" 32768 /lib/
+ARGS=(build "$TMPD/disk.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS"
       "/lib/bold.ttf=assets/osum-sans-bold.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
@@ -1146,7 +1147,7 @@ sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
 # MERGE-8: beide Runden haben aus demselben Grund vergroessert;
 # 8192 (ALLTAG) deckt 6144 (MERGE-7) mit ab.
 # RUNDE BAUFEHLER: dieselbe Erhoehung wie oben, gleicher Grund.
-ARGS2=(build "$TMPD/disk2.img" 32768 /lib/
+ARGS2=(build "$TMPD/disk2.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")

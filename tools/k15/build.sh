@@ -7,6 +7,7 @@
 #   bash tools/k15/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRNLIB="$(pwd)/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/k15}
@@ -30,7 +31,7 @@ for p in $PROGS; do
         rc=1
         continue
     fi
-    if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
+    if ! ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
             -o "$OUT/$p.elf" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein"
         head -12 "$OUT/$p.lderr"

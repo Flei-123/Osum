@@ -51,6 +51,7 @@
 # `wm:` line the run reported.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRN_REPO=${FIRN_REPO:-/root/jarvis/projects/u_DiS4in7esMF1/firn}
 export FIRNLIB="$(pwd)/lib"
 
@@ -222,7 +223,7 @@ for p in $progs; do
     if grep -qa '^profile app' "kernel/user/$p.fi"; then
         CRT=""
     fi
-    ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
+    ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
         -o "$BUILDD/$p.elf" $CRT "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
         || { echo "FAILED to link $p"; cat "$BUILDD/ld.err"; exit 1; }
     strip --strip-all "$BUILDD/$p.elf"

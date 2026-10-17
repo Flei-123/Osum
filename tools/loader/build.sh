@@ -15,6 +15,7 @@
 #   bash tools/loader/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
@@ -57,7 +58,7 @@ eins() { # <name>
     grep -qa '^profile app' "kernel/user/$q.fi" && { UPROF=--profile=app; UCRT=""; }
     "$CC" $UPROF -c "kernel/user/$q.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
         echo "FEHLER-UEBERSETZER $p"; return 1; }
-    ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
+    ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
        -o "$OUT/bin/$p" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr" || {
         echo "FEHLER-BINDER $p"; return 1; }
     strip --strip-all "$OUT/bin/$p"
@@ -85,7 +86,7 @@ for p in $APPS; do
     "$CC" -c --profile=app -o "$OUT/app-$p.o" "kernel/app/$p.fi" \
         > "$OUT/app-$p.err" 2>&1 || {
         echo "== $p (app): der Uebersetzer sagt nein"; head -20 "$OUT/app-$p.err"; exit 1; }
-    ld -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \
+    ld $GCS -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \
         2> "$OUT/app-$p.lderr" || {
         echo "== $p (app): der Binder sagt nein"; head -12 "$OUT/app-$p.lderr"; exit 1; }
     strip --strip-all "$OUT/bin/$p"
