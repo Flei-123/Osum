@@ -120,6 +120,7 @@ const S_VMM_FTY: u64 = 0x230 // request type of the last failed request
 const S_VMM_FMASK: u64 = 0x238 // bit mask of request types (type mod 64) that ever failed
 const S_HP_CALLS: u64 = 0x240 // host_pending calls (lab counter)
 const S_HP_RUN: u64 = 0x248 // host_pending calls that passed the rate limit
+const S_VMM_BUSY: u64 = 0x250 // 1 while a core is inside vmm_hint (the request page is shared by the idle task and the desktop loop)
 const S_VMM_ACK: u64 = 0x228 // requests that reported the graphics capability (bit mask of steps that worked)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
@@ -1173,7 +1174,7 @@ fn vmm_init(state: u64) {
     vmm_zero_body(state, 144)
     wr32(p, 24, (2 << 16) | 7)
     wr32(p, 28, 20)
-    wr32(p, 32, 0)
+    wr32(p, 32, 175154) // SVN revision of the 7.2.20 release (r0 made the host answer rc = -2)
     wr32(p, 36, 0)
     wr32(p, 40, 0x6569724F) // "Orie"
     wr32(p, 44, 0x534F746E) // "ntOS"
@@ -1208,6 +1209,18 @@ fn vmm_hint(state: u64) -> u64 {
         kstate.set(state, s(S_VMM_HINT), fk)
         return fk
     }
+    // one core at a time: the idle task and the desktop loop both poll; the loser simply skips this poll
+    let bz: *mut u64 = (state + VMSVGA_OFF + S_VMM_BUSY) as *mut u64
+    let was: u64 = __atomic_swap(bz, 0, 1)
+    if was != 0 {
+        return 0
+    }
+    let r: u64 = vmm_hint_locked(state)
+    __mmio_write64(bz, 0)
+    return r
+}
+
+fn vmm_hint_locked(state: u64) -> u64 {
     let rq: u64 = kstate.get(state, s(S_VMM_REQ))
     vmm_zero_body(state, 20)
     wr32(rq, 24, 0) // xres
