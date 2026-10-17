@@ -19,6 +19,7 @@
 //     socfleitec v1 presence <online|away|dnd|invisible> [text ...]
 //     socfleitec v1 activity [-j] [name ...]     (no name = clear; -j: friends may join)
 //     socfleitec v1 alive
+//     socfleitec v1 games                        (the list of games -> /etc/social/games.tsv, see GAMES)
 //     socfleitec v1 login [token <fkz1|fkm1|fkt1...>]      (pair this device, see LOGIN)
 //     socfleitec v1 send <id> <text ...>         (end to end, see CHAT)
 //     socfleitec v1 inbox                        (what came since the last call)
@@ -77,6 +78,15 @@
 // what was written here. `inbox` fetches the own box from the relay and
 // opens what it can: from a person in the book an `in` line, an own
 // device's copy an `out` line; read marks and strangers are dropped.
+//
+// GAMES. `games` asks fleikontakte for its list of games ("GET
+// /api/kontakte/spiele?os=l": the rows for OrientOS' program names, a server
+// that does not know `os` sends all rows) and writes /etc/social/games.tsv --
+// the file the Melder (/bin/melder) matches the running programs against.
+// Only rows the Melder can use are kept: os `l`, an executable, a name and
+// NO command-line text (OrientOS does not report one yet); the icon column
+// goes. Prints `ok <n>` (n = rows written). The service runs it from time to
+// time (caps `games`).
 //
 // NO FLOATING POINT anywhere (kernel/app/kjson.fi says why: ring 3 has
 // no SSE here), NO COOKIES (kernel/app/knetz.fi says why).
@@ -615,6 +625,90 @@ fn v_alive(c: *mut Conf) -> i32 {
     return r
 }
 
+// ------------------------------------------------------------------ GAMES
+
+// the first TAB in p[from..end), or end
+fn tab_at(p: u64, from: usize, end: usize) -> usize {
+    var i: usize = from
+    while i < end && rt.ld8(p, i) != 9 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+// one list row p[0..end) -> "l<TAB>exe<TAB>name<LF>" in o, when the Melder can use it
+fn game_row(p: u64, end: usize, o: *mut rt.Buf) -> bool {
+    let t1: usize = tab_at(p, 0, end)
+    if t1 != 1 || end < 6 || rt.ld8(p, 0) != 108 as u8 {
+        return false
+    }
+    let t2: usize = tab_at(p, t1 + 1, end)
+    if t2 >= end || t2 == t1 + 1 {
+        return false
+    }
+    let t3: usize = tab_at(p, t2 + 1, end)
+    if t3 == t2 + 1 {
+        return false
+    }
+    let name_end: usize = t3
+    if t3 < end {
+        // column 4 (command-line text) must be empty
+        let t4: usize = tab_at(p, t3 + 1, end)
+        if t4 != t3 + 1 {
+            return false
+        }
+    }
+    if name_end - t2 > 100 || t2 - t1 > 40 {
+        return false
+    }
+    rt.buf_push_bytes(o, p, name_end)
+    rt.buf_push(o, 10 as u8)
+    return true
+}
+
+fn v_games(c: *mut Conf) -> i32 {
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "GET", "/api/kontakte/spiele?os=l".p as u64, 25, 0, 0, &a)
+    if r != 0 {
+        let e: i32 = failed(r, &a)
+        knetz.reply_free(&a)
+        return e
+    }
+    var o: rt.Buf = rt.buf_new()
+    var n: u64 = 0
+    let bp: u64 = a.koerper.ptr
+    let bl: usize = a.koerper.len
+    var i: usize = 0
+    while i < bl {
+        var e2: usize = i
+        while e2 < bl && rt.ld8(bp, e2) != 10 as u8 {
+            e2 = e2 + 1
+        }
+        var le: usize = e2 - i
+        if le > 0 && rt.ld8(bp, i + le - 1) == 13 as u8 {
+            le = le - 1
+        }
+        if le > 0 && game_row(bp + i as u64, le, &o) {
+            n = n + 1
+        }
+        i = e2 + 1
+    }
+    knetz.reply_free(&a)
+    // world-readable: the Melder runs as another user than the service
+    let ok: bool = write_file_mode("/etc/social/games.tsv\0".p as u64, o.ptr, o.len, 420)
+    rt.buf_free(&o)
+    if !ok {
+        return fin(1, "io", "cannot write /etc/social/games.tsv")
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, "ok\t".p as u64, 3)
+    rt.buf_push_dec_u64(&b, n)
+    rt.buf_push(&b, 10 as u8)
+    outb(&b)
+    rt.buf_free(&b)
+    return 0
+}
+
 // ---------------------------------------------------------- the arguments
 
 static mut g_args: u64 = 0
@@ -650,7 +744,7 @@ fn main(start: u64) -> i32 {
         roots: rt.buf_new(), token: rt.buf_new(), relay: rt.buf_new() }
     let have: bool = conf_read(&c)
     if eqc(verb, "hello") {
-        outs("provider\tfleitec\t1\ncaps\tcontacts search relation presence activity alive login send inbox invite invites answer join\n")
+        outs("provider\tfleitec\t1\ncaps\tcontacts search relation presence activity alive login send inbox invite invites answer join games\n")
         account_line(&c)
         return fin(0, "", "")
     }
@@ -724,6 +818,9 @@ fn main(start: u64) -> i32 {
     if eqc(verb, "alive") {
         return v_alive(&c)
     }
+    if eqc(verb, "games") {
+        return v_games(&c)
+    }
     return fin(1, "bad", "unknown verb")
 }
 
@@ -767,8 +864,12 @@ fn side(b: *mut rt.Buf, suffix: str) {
 }
 
 fn write_all_file(path: u64, p: u64, n: usize) -> bool {
-    // O_WRONLY | O_CREAT | O_TRUNC, 0600
-    let fd: i64 = syscall(S_OPEN, path as i64, 1 | 64 | 512, 384, 0, 0, 0)
+    return write_file_mode(path, p, n, 384)
+}
+
+// O_WRONLY | O_CREAT | O_TRUNC with the mode (384 = 0600, 420 = 0644)
+fn write_file_mode(path: u64, p: u64, n: usize, mode: i64) -> bool {
+    let fd: i64 = syscall(S_OPEN, path as i64, 1 | 64 | 512, mode, 0, 0, 0)
     if fd < 0 {
         return false
     }

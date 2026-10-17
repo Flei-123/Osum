@@ -76,6 +76,9 @@ const POLL_TICKS: u64 = 500 // 5 s: messages and invites
 const CALL_TICKS: u64 = 400 // 4 s: inside the broker's 5 s
 const ALIVE_TICKS: u64 = 12000 // 120 s
 const ACT_TICKS: u64 = 6000 // 60 s
+const GAMES_TICKS: u64 = 360000 // 1 h: the list of games for the Melder
+const GAMES_RETRY: u64 = 60000 // 10 min after a failure
+const GAMES_CALL: u64 = 1500 // 15 s for one fetch
 const PAGE_MAX: usize = 1700 // octets of contact lines in one reply
 
 // ----------------------------------------------------------------- state
@@ -1058,6 +1061,27 @@ fn all_providers(w1: u64, w2: u64, w3: u64) -> bool {
         let code: i64 = run(i, w1, w2, w3, &out, CALL_TICKS)
         if code == 0 {
             any = true
+        }
+        i = i + 1
+    }
+    return any
+}
+
+// GAMES: ask every provider that says `games` to refresh /etc/social/games.tsv
+// (the list the Melder matches the running programs against). True when at
+// least one did it. A bus call waits at most 5 s, so this runs only from the
+// timer, not from a request.
+fn sync_games() -> bool {
+    var out: SB = sb((&st_out[0]) as u64, 16383)
+    var any: bool = false
+    var i: usize = 0
+    while i < n_prov {
+        if has_cap(i, "games") {
+            var w1: [u8; 6] = "games\0"
+            let code: i64 = run(i, (&w1[0]) as u64, 0, 0, &out, GAMES_CALL)
+            if code == 0 {
+                any = true
+            }
         }
         i = i + 1
     }
@@ -2430,6 +2454,8 @@ fn serve(limit: u64) -> u64 {
     var next_alive: u64 = t1 + 60
     var next_act: u64 = t1 + ACT_TICKS
     var next_poll: u64 = t1 + 80
+    // the first list of games once the first book is in (4 s in)
+    var next_games: u64 = t1 + 400
     while limit == 0 || actwire.ticks() - t1 < limit {
         // AB-002: wait in the kernel (at most 100 ms, for the timers below)
         let n: u64 = actwire.bus_wait(fp, mp, 100)
@@ -2482,6 +2508,12 @@ fn serve(limit: u64) -> u64 {
                 poll_messages()
                 poll_invites()
                 next_poll = actwire.ticks() + POLL_TICKS
+            } else if now >= next_games {
+                if sync_games() {
+                    next_games = actwire.ticks() + GAMES_TICKS
+                } else {
+                    next_games = actwire.ticks() + GAMES_RETRY
+                }
             }
         }
     }

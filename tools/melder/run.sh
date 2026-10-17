@@ -295,4 +295,10 @@ echo "== 7. the audit log =="
 part "$A" LOG FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "social.activity.set" "the audit log names the activity calls"
 has "$TMPD/p.txt" "social.privacy.set" "... and the privacy call"
+echo "== 8. a screen image (tools/melder/screen.sh, r140) =="
+bash tools/melder/screen.sh > "$TMPD/screen.txt" 2>&1
+sed 's/^/    /' "$TMPD/screen.txt"
+sp=$(sed -n 's/^MELDER-SCREEN: \([0-9]*\) passed, \([0-9]*\) failed.*/\1/p' "$TMPD/screen.txt" | tail -1)
+sf=$(sed -n 's/^MELDER-SCREEN: \([0-9]*\) passed, \([0-9]*\) failed.*/\2/p' "$TMPD/screen.txt" | tail -1)
+if [ -n "$sp" ]; then pass=$((pass + sp)); fail=$((fail + sf)); else bad "screen.sh gave no result line"; fi
 fin
