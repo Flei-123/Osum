@@ -81,6 +81,8 @@ const IMAGE_MAX_H: u64 = 300
 
 static mut w_h: u64 = 0 // das Handle des Fensters
 static mut w_shared: u64 = 0 // COMPOSITOR r486: 1 = the window paints from a shared buffer (no WIG_BLIT)
+static mut w_shp: u64 = 0 // r1004: the shared buffer of the window (kept to remake it after a resolution change)
+static mut w_shb: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
 static mut image: u64 = 0 // die Bildpunkte, oder 0
@@ -748,6 +750,57 @@ fn welcome_start() {
     let _rc: u64 = ulib.sys(ulib.SYS_EXEC, (&p_w[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
 }
 
+// r1004: THE HOST / SETTINGS CHANGED THE RESOLUTION. The wallpaper window is as big as the screen was; a window never grows past its
+// buffer, so a new window with a new shared buffer is made, put at the back, painted, and only then the old one goes. False = nothing
+// changed (no shared buffer to remake, or the server refused): the old window stays and the check tries again.
+fn desk_rebuild() -> bool {
+    var s_rb: [u8; 20] = "desktop: rebuilt w=\0"
+    var s_rh: [u8; 4] = " h=\0"
+    if w_shared == 0 {
+        return false
+    }
+    let nw: u64 = wlibc.screen_w()
+    let nh: u64 = wlibc.screen_h()
+    let shb: u64 = nw * nh * 4
+    let shp: u64 = wlibc.shm_buffer(shb)
+    if shp == 0 {
+        return false
+    }
+    let fd1: u64 = wlibc.shm_last_fd() + 1
+    let nhnd: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (nw << 16) | nh,
+        msg.get((&k_title[0 as usize]) as u64), 0, fd1)
+    wlibc.shm_close(fd1 - 1)
+    if ulib.bad(nhnd) || nhnd == 0 {
+        wlibc.shm_unmap(shp, shb)
+        return false
+    }
+    if !wlibc.win_shared(nhnd) || ulib.bad(wlibc.win_state(nhnd, wlibc.WS_DECO, 0))
+        || ulib.bad(wlibc.win_state(nhnd, wlibc.WS_LAYER, wlibc.L_DESK)) {
+        let _c0: u64 = wlibc.sys3w(wlibc.WM_CLOSE, nhnd, 0, 0)
+        wlibc.shm_unmap(shp, shb)
+        return false
+    }
+    let _c1: u64 = wlibc.sys3w(wlibc.WM_CLOSE, w_h, 0, 0)
+    wlibc.shm_unmap(w_shp, w_shb)
+    w_h = nhnd
+    w_shp = shp
+    w_shb = shb
+    sw = nw
+    sh = nh
+    wlibc.surf_wide(shp, nw, nh)
+    cv_step = 0
+    all_paint()
+    modul.schirm_setzen(sw, sh)
+    modul.messen()
+    module_malen()
+    say((&s_rb[0 as usize]) as u64)
+    sayn(sw)
+    say((&s_rh[0 as usize]) as u64)
+    sayn(sh)
+    nl()
+    return true
+}
+
 fn u_start(args: u64) -> u64 {
     dbg_setup(args)
     var s_nb: [u8; 7] = "nobild\0"
@@ -826,6 +879,8 @@ fn u_start(args: u64) -> u64 {
         if wlibc.win_shared(h) {
             wlibc.surf_use(shp, sh)
             w_shared = 1
+            w_shp = shp
+            w_shb = shb
         } else {
             wlibc.shm_unmap(shp, shb)
         }
@@ -964,7 +1019,7 @@ fn u_start(args: u64) -> u64 {
     var lebt: bool = true
     while lebt {
         var n: u64 = 0
-        while n < 32 && wlibc.sys3w(wlibc.WM_EVENT, h,
+        while n < 32 && wlibc.sys3w(wlibc.WM_EVENT, w_h,
             (&ev[0 as usize]) as u64, 0) == 1 {
             let typ: u64 = __mmio_read64(((&ev[0 as usize]) as u64)
                 as *mut u64)
@@ -1147,6 +1202,12 @@ fn u_start(args: u64) -> u64 {
             if modul.werte_holen() {
                 modul.texte_bauen()
                 module_malen()
+            }
+        }
+        if (runde % 10) == 5 && !modul.zieht() {
+            let _sr: bool = wlibc.screen_refresh()
+            if wlibc.screen_w() != sw || wlibc.screen_h() != sh {
+                let _rb: bool = desk_rebuild()
             }
         }
         if (runde % 10) == 0 {

@@ -1688,6 +1688,51 @@ fn vgpuhw_run(state: u64) {
 // Host-hint stage of the vmsvga test bed: the hint a VirtualBox window drag would deliver is injected (vmsvga.vmm_fake) and the REAL
 // poll code (host_pending: two polls in a row, sane size, differs from the mode) and vmode.follow_host run. Odd sizes, an odd height
 // and a screen bigger than the card/map window (4096x2304 -> shrunk, same aspect) must all end in a working mode.
+// r1004 gate (tools/vmsvga/resize.sh, kernel word `vmsvgahints`): the real desktop plays host resolution hints by itself, because QEMU's
+// vmware card never sends one. 45 s after the first call, then every 25 s: 1280x720, 1024x768, 1600x900, 1024x768 (repeating) go
+// through vmode.follow_host, the very call the VirtualBox hint poll makes. Serial: `vmsvga: testhint WxH rc=N`.
+static mut hint_next_ms: u64 = 0
+static mut hint_step: u64 = 0
+
+fn hint_player(state: u64) {
+    var s_a: [u8; 20] = "vmsvga: testhint \0\0\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_r: [u8; 5] = " rc=\0"
+    let hz: u64 = apic.tsc_hz(state)
+    if hz < 1000 {
+        return
+    }
+    let now: u64 = apic.tsc() / (hz / 1000)
+    if hint_next_ms == 0 {
+        hint_next_ms = now + 45000
+        return
+    }
+    if now < hint_next_ms {
+        return
+    }
+    hint_next_ms = now + 25000
+    var w: u64 = 1280
+    var h: u64 = 720
+    let k: u64 = hint_step % 4
+    if k == 1 || k == 3 {
+        w = 1024
+        h = 768
+    }
+    if k == 2 {
+        w = 1600
+        h = 900
+    }
+    hint_step = hint_step + 1
+    let rc: u64 = vmode.follow_host(state, w, h)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(rc)
+    serial.nl()
+}
+
 fn vmsvga_hint_one(state: u64, w: u64, h: u64) {
     var s_a: [u8; 17] = "vmsvga: hint in=\0"
     var s_x: [u8; 2] = "x\0"
@@ -5967,6 +6012,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             if hp != 0 {
                 let _hf: u64 = vmode.follow_host(state, hp / 65536, hp % 65536)
             }
+        }
+        if kstate.mode_on(state, kstate.M_VMSVGAHINTS) && (rounds & 63) == 0 {
+            hint_player(state)
         }
         zombie_sweep(state)
         st(35)

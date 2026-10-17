@@ -8724,6 +8724,7 @@ fn compose(state: u64) -> u64 {
     if alt != 0 {
         return 0
     }
+    screen_follow(state)
     cp_watch(state)
     tab_publish(state)
     let r: u64 = compose_one(state)
@@ -19018,8 +19019,74 @@ fn on_screen_resize(state: u64, w: u64, h: u64) -> bool {
     recalc_work(state)
     tile_area_work(state)
     tile_apply(state)
+    // r1004: the pointer limits, the maximized windows and every window that now sticks out of the screen follow the new size
+    ps2m.set_bounds(state, w, h)
+    screen_fit_windows(state, w, h)
     damage_all(state)
     return true
+}
+
+// r1004: after a resolution change a maximized window gets the new work area; every other normal-layer window is pulled back
+// inside the screen (moved first, shrunk only when it is bigger than the screen). Desk, bar (strut) and hidden windows stay alone.
+fn screen_fit_windows(state: u64, w: u64, h: u64) {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if valid(state, i) && wg(state, i, W_STRUT) == 0 {
+            let f: u64 = wg(state, i, W_FLAGS)
+            let lay: u64 = win_layer(state, i)
+            if (f & F_MAXIMIZED) != 0 {
+                let _fw: bool = fit_work(state, i)
+            } else if lay == L_NORMAL {
+                var ow: u64 = outer_w(state, i)
+                var oh: u64 = outer_h(state, i)
+                var x: i64 = win_x(state, i)
+                var y: i64 = win_y(state, i)
+                if ow > w || oh > h {
+                    var nw: u64 = wg(state, i, W_W)
+                    var nh: u64 = wg(state, i, W_H)
+                    if ow > w && nw > ow - w {
+                        nw = nw - (ow - w)
+                    }
+                    if oh > h && nh > oh - h {
+                        nh = nh - (oh - h)
+                    }
+                    let _rs: bool = resize_win(state, i, nw, nh)
+                    ow = outer_w(state, i)
+                    oh = outer_h(state, i)
+                }
+                if x + (ow as i64) > (w as i64) {
+                    x = (w as i64) - (ow as i64)
+                }
+                if y + (oh as i64) > (h as i64) {
+                    y = (h as i64) - (oh as i64)
+                }
+                if x < 0 {
+                    x = 0
+                }
+                if y < 0 {
+                    y = 0
+                }
+                if x != win_x(state, i) || y != win_y(state, i) {
+                    move_win(state, i, x, y)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// r1004: THE WINDOW SERVER FOLLOWS THE SCREEN. Nobody called `on_screen_resize`: a host resize hint switched the card (vmode), the window
+// server went on with the old size (work area, tile tree, damage box), and the desktop stayed black. One check at the head of every
+// compose covers every path that switches the mode (host hint, Settings, dispctl). Several heads keep their own tables: left alone.
+fn screen_follow(state: u64) {
+    let fw: u64 = fb.width(state)
+    let fh: u64 = fb.height(state)
+    if fw == 0 || fh == 0 || hd_multi(state) {
+        return
+    }
+    if fw != gs(state, S_SW) || fh != gs(state, S_SH) {
+        let _r: bool = on_screen_resize(state, fw, fh)
+    }
 }
 
 // ================================================== RUNDE VOLLBILD
