@@ -4,7 +4,7 @@
 # Sizes 1280x720 -> 1024x768 -> 1600x900 -> 1024x768 are requested through the VNC SetDesktopSize message (same kernel path as a
 # VirtualBox hint). After each one: the screen has the new size, the upper part is NOT black (wallpaper / windows), the taskbar sits at
 # the bottom (rows differ from the plain wallpaper), and the first screenshot and the last one (same size) look alike.
-# Usage: [STICK_DIR=<dir with orientos-usb.img>] [IMG=<file>] [SETTLE=14] bash tools/vmsvgaresize/run.sh
+# Usage: [STICK_DIR=<dir with orientos-usb.img>] [IMG=<file>] [SETTLE=9] bash tools/vmsvgaresize/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 HERE=$(pwd)/tools/vmsvgaresize
@@ -12,7 +12,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-SETTLE=${SETTLE:-14}
+SETTLE=${SETTLE:-9}
 if [ -n "${IMG:-}" ]; then
     IMAGE=$IMG
 elif [ -n "${STICK_DIR:-}" ] && [ -f "$STICK_DIR/orientos-usb.img" ]; then
@@ -48,7 +48,7 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 cat "$D/o.res" 2>/dev/null
 n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
 [ "$n" -ge 3 ] && ok "$n hint steps measured" || bad "only $n hint steps measured"
-while read -r i rw rh black rows lastb ew eh dup mcx mbot; do
+while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
     awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
@@ -57,12 +57,14 @@ while read -r i rw rh black rows lastb ew eh dup mcx mbot; do
     awk -v b="$dup" 'BEGIN{exit !(b<0.5)}' && ok "$s: bar not repeated by a stale stride (dup share $dup)" || bad "$s: bar repeated (dup share $dup)"
     # r1010: the start menu follows a screen size change at once (also while hidden), so the FIRST opening after every resize stands centred
     # above the bar of the NEW size. Before the fix QEMU opened it one step late (centre / bottom of the previous size).
+    # The hints come every 25 s on the kernel's clock; the menu screendump can fall on the NEXT hint, so the menu is judged against the size
+    # of ITS OWN screendump (mw x mh), not against the size of the earlier bar screenshot.
     if [ "$mcx" -ge 0 ]; then
-        d=$(( mcx - rw / 2 )); [ "$d" -lt 0 ] && d=$(( -d ))
-        if [ "$d" -le 8 ] && [ "$mbot" -le $(( rh - 40 )) ] && [ "$mbot" -ge $(( rh - 120 )) ]; then
-            ok "$s: start menu centred and above the bar (centre $mcx, bottom $mbot)"
+        d=$(( mcx - mw / 2 )); [ "$d" -lt 0 ] && d=$(( -d ))
+        if [ "$d" -le 8 ] && [ "$mbot" -le $(( mh - 40 )) ] && [ "$mbot" -ge $(( mh - 120 )) ]; then
+            ok "$s: start menu centred and above the bar (centre $mcx of $mw, bottom $mbot of $mh)"
         else
-            bad "$s: start menu stale (centre $mcx of $rw, bottom $mbot of $rh)"
+            bad "$s: start menu stale (centre $mcx of $mw, bottom $mbot of $mh)"
         fi
     else
         bad "$s: start menu not found"
