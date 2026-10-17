@@ -352,6 +352,7 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     if vsz != 0 && w *% h *% 4 > vsz {
         return false
     }
+    let pitch0: u64 = reg_r(state, R_BYTES_PER_LINE)
     reg_w(state, R_WIDTH, w)
     reg_w(state, R_HEIGHT, h)
     reg_w(state, R_BPP, 32)
@@ -367,26 +368,38 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     if reg_r(state, R_WIDTH) != w || reg_r(state, R_HEIGHT) != h {
         return false
     }
-    // The stride (and scan-out offset) can be published a moment AFTER the size reads back (VirtualBox): read it
-    // right away, let the device settle, read again and trust the later value.
+    // The stride is published ASYNCHRONOUSLY by VirtualBox: right after the size reads back, BYTES_PER_LINE still holds the OLD
+    // mode's value (800x600 got 4096 instead of 3200 -> every row shifted, "line garbage"). Wait (bounded) until it left the old
+    // value or equals width*4; a value below width*4 can never be right.
     let pitch1: u64 = reg_r(state, R_BYTES_PER_LINE)
-    settle()
-    var pitch: u64 = reg_r(state, R_BYTES_PER_LINE)
+    var pitch: u64 = pitch1
+    var waited: u64 = 0
+    while waited < 100 && pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) {
+        settle()
+        pitch = reg_r(state, R_BYTES_PER_LINE)
+        waited = waited + 1
+    }
     if pitch < w * 4 {
         pitch = w * 4
     }
     var s_m: [u8; 14] = "vmsvga: mode \0"
+    var s_p0: [u8; 9] = " pitch0=\0"
     var s_p1: [u8; 9] = " pitch1=\0"
     var s_p2: [u8; 9] = " pitch2=\0"
+    var s_wt: [u8; 7] = " wait=\0"
     var s_of: [u8; 6] = " off=\0"
     serial.puts((&s_m[0]) as u64)
     serial.dec(w)
     serial.put(120 as u8)
     serial.dec(h)
+    serial.puts((&s_p0[0]) as u64)
+    serial.dec(pitch0)
     serial.puts((&s_p1[0]) as u64)
     serial.dec(pitch1)
     serial.puts((&s_p2[0]) as u64)
     serial.dec(pitch)
+    serial.puts((&s_wt[0]) as u64)
+    serial.dec(waited)
     serial.puts((&s_of[0]) as u64)
     serial.dec(reg_r(state, R_FB_OFFSET))
     serial.nl()
