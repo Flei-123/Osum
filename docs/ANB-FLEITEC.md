@@ -52,7 +52,17 @@ Nichts ist gemockt: OrientOS-Gast (`konto`, `socfleitec`) → `proxy.py` (TLS 1.
 - Schutz (r121) am gleichen Pfad: Sperrliste (`jti`, `konto`; wirkt ohne Neustart, ein Block verbraucht das Token nicht), Bremse (Garbage-Stoß → 401, ab dem Limit 429 mit `Retry-After`, auch für ein GÜLTIGES Token, das nach dem Fenster noch tauscht), Audit-Datei (`swap`/`deny replay`/`deny blocked`, kein Token darin).
 - FUND (nicht behoben): der Zertifikatsprüfer von Firn (`lib/tls/x509.fi`) kennt nur `dNSName`-Einträge, keinen `iPAddress`. `firnchat-web` lehnt ein Zertifikat, das nur für die IP gilt, ab (`unreachable`); gemessen im ersten Lauf (mkcerts-Zertifikat mit IP-SAN). Der Test setzt deshalb im Zertifikat zusätzlich den TEXT `10.9.0.1` als `dNSName`. Der Gast kann umgekehrt nur IPv4-Ziele (`knetz.target_read`), also muss sein Issuer-Text die IP sein — beides zusammen heißt: ein echter Broker mit DNS-Namen als Issuer braucht Namensauflösung im Gast (r34), und ein IP-Issuer braucht IP-SAN-Unterstützung in Firn.
 
+## Übergabe `konto` → `socfleitec`: Anmelden + Tausch in einem Schritt (`--tauschen`)
+- `konto anmelden --anbieter=fleitec --geraet --warten --tauschen` (auch mit `--zwischen=<code> --tauschen`): nach erfolgreicher Anmeldung und gespeicherter Sitzung ruft `konto` den Hook `anbieter.tu_uebergeben` des Rückens; `anb_fleitec` startet `/bin/socfleitec v1 login broker -s` (fork + Röhre + execve). Der allgemeine Teil (`account.fi`) kennt weder `socfleitec` noch das Ziel (Trennungswache `tools/account/split.py`); Rücken ohne Übergabe (jarvis, xoffi, eigen) melden `fehler` und schreibt das Access-Token in dessen stdin. `socfleitec` tauscht es (siehe Brücke) und schreibt NUR das fkt1 in `/etc/social/fleitec.conf`.
+- Das JWT steht nie in einer Datei, nie in argv (Prozessliste), nie in der Ausgabe oder im Log. Beide Seiten überschreiben ihren Puffer (konto: `s.zugriff` und Lesepuffer, socfleitec: Lesepuffer + Bearer-Kopie). `socfleitec v1 login broker -s` liest nur die erste Zeile von stdin (bis 4096 Zeichen).
+- Reihenfolge: ERST Sitzung siegeln, DANN tauschen. Ein Fehlschlag beim Tausch macht die Anmeldung nicht rückgängig und lässt ein vorhandenes `token=` in der Conf unberührt.
+- Ausgabe: `konto: tausch = ok|keinnetz|abgelehnt|fehler` (dazu die Zeilen `account <uid>` / `ok` bzw. `err ...` von `socfleitec`). Rückgabecode: ok 0, keinnetz 5 (`RC_KEINNETZ`), abgelehnt 6 (`RC_ABGELEHNT`), sonst 8. Fehlt dem Token die `uid` (Scope `fleitec.account` fehlt), meldet `anb_fleitec` `abgelehnt` mit `hinweis` (`konto.hint.noscope`) schon VOR dem Senden: es geht nichts ins Netz.
+- `--tauschen` ohne `--geraet` wird abgelehnt (Rückgabe 2). `url=`/`name=`/`roots=` müssen in der Conf stehen (wie bei `login broker`).
+- Ein Token wird genau EINMAL getauscht: der Tausch läuft einmal pro Anmeldung, es gibt keinen Wiederholversuch und kein Zwischenspeichern des Access-Tokens (wichtig für die jti-Sperre am FirnChat-Endpunkt).
+- Test: `interop.sh` Section 8d (ein Schritt ohne Datei; abgelehnter Tausch auf demselben Abbild lässt Sitzung und altes fkt1 stehen; Buch offline; `--tauschen` ohne `--geraet`).
+- Einstellungen → Konten: kein Knopf. Der Dialog reicht `--tauschen` nicht durch, weil er jeden Rückgabecode ≠ 0 als Fehlschlag der Anmeldung zeigt; das braucht eine eigene Meldung (siehe Offen).
+
 ## Offen
 - Client `orientos-device` mit `aud` `orientos` im echten Dienst registrieren (device_code-Grant) — vor Live, nur mit Boss-Ja.
 - Live-Schaltung der Brücke (siehe oben, Boss-Ja).
-- Optional später: ein Knopf „Konto anmelden“, der nach der Anmeldung den Tausch gleich selbst auslöst (heute zwei Schritte).
+- Einstellungen → Konten: Knopf bzw. Haken „Adressbuch verbinden“ (`--tauschen`) mit eigener Meldung für `tausch = …`.

@@ -123,7 +123,7 @@ const DEFAULT_INTERVAL: u64 = 5
 
 fn push() -> anbieter.Push {
     return anbieter.Push { name: (&nm[0]) as u64, anmelden: anmelden,
-        erneuern: erneuern, abmelden: abmelden, pruefen: check }
+        erneuern: erneuern, abmelden: abmelden, pruefen: check, uebergeben: uebergeben }
 }
 
 // ------------------------------------------------------------------ tools
@@ -580,4 +580,135 @@ fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     knetz.reply_free(&a)
     (*s).stand = st
     return st
+}
+
+// ------------------------------------------------------------- hand-over
+//
+// konto --tauschen: the access token (a JWT, longer than the 255 octets of a
+// shell line) goes to `socfleitec v1 login broker -s` through a PIPE (its
+// stdin) and is swapped there for the address-book token (fkt1), which only
+// lands in socfleitec's configuration. Never a file, never argv, never the
+// output. `socfleitec` prints `account <uid>` / `ok` / `err ...` itself
+// (inherited stdout); the exit code says: 0 ok, 2 offline, 3 refused.
+const SC_WRITE: i64 = 1
+const SC_CLOSE: i64 = 3
+const SC_PIPE: i64 = 22
+const SC_DUP2: i64 = 33
+const SC_FORK: i64 = 57
+const SC_EXECVE: i64 = 59
+const SC_WAIT4: i64 = 61
+
+static mut h_noscope: [u8; 19] = "konto.hint.noscope\0"
+
+// Does the JWT carry a `uid` claim? Without scope fleitec.account the book
+// does not know the account: then nothing is sent at all.
+fn token_has_uid(tok: u64, tl: usize) -> bool {
+    var d1: usize = 0
+    var d2: usize = 0
+    var i: usize = 0
+    var dots: usize = 0
+    while i < tl {
+        if rt.ld8(tok, i) == 46 as u8 {
+            dots = dots + 1
+            if dots == 1 {
+                d1 = i
+            } else if dots == 2 {
+                d2 = i
+            }
+        }
+        i = i + 1
+    }
+    if dots != 2 || d2 <= d1 + 1 {
+        return false
+    }
+    var pay: rt.Buf = rt.buf_new()
+    var found: bool = false
+    if kjwt.b64u_strict(tok + (d1 + 1) as u64, d2 - d1 - 1, &pay) {
+        var k: usize = 0
+        while k + 5 <= pay.len {
+            if rt.ld8(pay.ptr, k) == 34 as u8
+                && rt.ld8(pay.ptr, k + 1) == 117 as u8
+                && rt.ld8(pay.ptr, k + 2) == 105 as u8
+                && rt.ld8(pay.ptr, k + 3) == 100 as u8
+                && rt.ld8(pay.ptr, k + 4) == 34 as u8 {
+                found = true
+                break
+            }
+            k = k + 1
+        }
+    }
+    rt.mem_set(pay.ptr, 0 as u8, pay.len)
+    rt.buf_free(&pay)
+    return found
+}
+
+fn fd_at(b: u64, at: usize) -> i64 {
+    return (rt.ld8(b, at) as i64) | ((rt.ld8(b, at + 1) as i64) << 8)
+        | ((rt.ld8(b, at + 2) as i64) << 16) | ((rt.ld8(b, at + 3) as i64) << 24)
+}
+
+fn uebergeben(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    let tok: u64 = (*s).zugriff.ptr
+    let tl: usize = (*s).zugriff.len
+    if tl == 0 || !token_has_uid(tok, tl) {
+        hint(s, (&h_noscope[0]) as u64)
+        return anbieter.S_ABGELEHNT
+    }
+    var fds: [u8; 8] = [0; 8]
+    if syscall(SC_PIPE, (&fds[0]) as i64, 0, 0, 0, 0, 0) < 0 {
+        return anbieter.S_ERROR
+    }
+    let rfd: i64 = fd_at((&fds[0]) as u64, 0)
+    let wfd: i64 = fd_at((&fds[0]) as u64, 4)
+    let pid: i64 = syscall(SC_FORK, 0, 0, 0, 0, 0, 0)
+    if pid < 0 {
+        syscall(SC_CLOSE, rfd, 0, 0, 0, 0, 0)
+        syscall(SC_CLOSE, wfd, 0, 0, 0, 0, 0)
+        return anbieter.S_ERROR
+    }
+    if pid == 0 {
+        syscall(SC_DUP2, rfd, 0, 0, 0, 0, 0)
+        syscall(SC_CLOSE, rfd, 0, 0, 0, 0, 0)
+        syscall(SC_CLOSE, wfd, 0, 0, 0, 0, 0)
+        var p0: [u8; 16] = "/bin/socfleitec\0"
+        var a1: [u8; 3] = "v1\0"
+        var a2: [u8; 6] = "login\0"
+        var a3: [u8; 7] = "broker\0"
+        var a4: [u8; 3] = "-s\0"
+        var zeiger: [u64; 6] = [0; 6]
+        zeiger[0] = (&p0[0]) as u64
+        zeiger[1] = (&a1[0]) as u64
+        zeiger[2] = (&a2[0]) as u64
+        zeiger[3] = (&a3[0]) as u64
+        zeiger[4] = (&a4[0]) as u64
+        syscall(SC_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        rt.finish(127)
+    }
+    syscall(SC_CLOSE, rfd, 0, 0, 0, 0, 0)
+    var at: usize = 0
+    while at < tl {
+        let w: i64 = syscall(SC_WRITE, wfd, (tok + at as u64) as i64,
+            (tl - at) as i64, 0, 0, 0)
+        if w <= 0 {
+            break
+        }
+        at = at + w as usize
+    }
+    syscall(SC_CLOSE, wfd, 0, 0, 0, 0, 0)
+    var status: i32 = 0
+    syscall(SC_WAIT4, pid, (&status) as i64, 0, 0, 0, 0)
+    var code: i32 = 255
+    if (status & 127) == 0 {
+        code = (status >> 8) & 255
+    }
+    if code == 0 {
+        return anbieter.S_OK
+    }
+    if code == 2 {
+        return anbieter.S_KEINNETZ
+    }
+    if code == 3 {
+        return anbieter.S_ABGELEHNT
+    }
+    return anbieter.S_ERROR
 }

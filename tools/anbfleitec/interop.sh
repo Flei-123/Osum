@@ -30,6 +30,10 @@
 #     works, the fkt1 opens the book, the JWT is never echoed nor stored;
 #     wrong aud, expired, foreign signature, unknown account, id_token,
 #     garbage are refused and leave the stored fkt1 alone.
+#  8d. `konto anmelden --geraet --warten --tauschen`: sign-in and swap in ONE
+#     step, the access token goes konto -> socfleitec through a pipe (no file,
+#     no argv, no output); refused swap / book offline keep the session and the
+#     old fkt1.
 #
 # Usage: bash tools/anbfleitec/interop.sh    (heavy: ~20 guest boots)
 # Env: FLEITEC_ID=<dir of fleitec-id> (default: the JARVIS project folder)
@@ -203,7 +207,7 @@ lauf() { # <image> <script> <out>
 lauf_warten() { # <image> <out> <allow|deny> [extra konto args]
     local img=$1 out=$2 dec=$3; shift 3
     : > "$out"
-    lauf "$img" "konto anmelden --anbieter=fleitec --geraet --warten $*" "$out" & GPID=$!
+    lauf "$img" "konto anmelden --anbieter=fleitec --geraet --warten $*${LW_AFTER:+;$LW_AFTER}" "$out" & GPID=$!
     local i uc=""
     for i in $(seq 1 150); do
         uc=$(kv "$out" code); [ -n "$uc" ] && break
@@ -518,6 +522,41 @@ PY
     lauf "$TMPD/d_socj.img" "socfleitec v1 login token eyJhbGciOiJFZERTQSJ9.e30.c2ln;socfleitec v1 login token fkt1.u_TEST.$(printf '0%.0s' $(seq 1 64))" "$TMPD/o_socj.txt"
     num "login token still refuses a JWT (only fkz1/fkm1/fkt1 are tokens)" "$(grep -ac '^err.bad' "$TMPD/o_socj.txt")" eq 1
     num "control: a fkt1-shaped token is accepted by login token" "$(grep -ac '^ok' "$TMPD/o_socj.txt")" eq 1
+
+    # --- 8d. sign-in AND swap in one step (konto --tauschen), no file for the JWT
+    echo "$UIDC" > "$TMPD/ctl/accounts"; echo orientos > "$TMPD/ctl/aud"; echo 0 > "$TMPD/ctl/clock"
+    : > "$TMPD/ctl/book.log"; : > "$TMPD/w/s2c.log"
+    cp "$TMPD/soc_base.img" "$TMPD/d_one.img"
+    LW_AFTER="socfleitec v1 contacts;cat /etc/social/fleitec.conf" lauf_warten "$TMPD/d_one.img" "$TMPD/o_one.txt" allow --tauschen
+    is "one step: sign-in" "$(kv "$TMPD/o_one.txt" stand)" "ok"
+    is "one step: swap reported" "$(kv "$TMPD/o_one.txt" tausch)" "ok"
+    JW1=$(wire_tokens access_token | head -1)
+    grep -aq "^account.$UIDC" "$TMPD/o_one.txt" && ok "one step: socfleitec reports account $UIDC" || bad "one step: no 'account $UIDC' line"
+    FKT1=$(cat "$TMPD/ctl/issued" 2>/dev/null)
+    has "$TMPD/o_one.txt" "token=$FKT1" "one step: the fkt1 is in the configuration"
+    num "one step: socfleitec accepts the fkt1 (contacts answered 'ok 1')" "$(grep -ac '^ok.1' "$TMPD/o_one.txt")" eq 1
+    is "one step: book log" "$(grep -a 'swap ok' "$TMPD/ctl/book.log" | head -1)" "swap ok uid=$UIDC"
+    num "one step: the JWT never shows in the output" "$(grep -acF "${JW1%%.*}" "$TMPD/o_one.txt")" eq 0
+    num "one step: no copy of the JWT on the disk (neither the file nor a log)" "$(grep -aoF -- "$JW1" "$TMPD/d_one.img" | wc -l)" eq 0
+    num "one step: the book got swap calls" "$(grep -ac 'POST /api/kontakte/zugang-broker' "$TMPD/w/book-c2s.log")" ge 1
+    # refused swap on the same image: session stands, old fkt1 untouched
+    echo other-product > "$TMPD/ctl/aud"; : > "$TMPD/ctl/book.log"
+    LW_AFTER="konto liste;cat /etc/social/fleitec.conf" lauf_warten "$TMPD/d_one.img" "$TMPD/o_one2.txt" allow --tauschen
+    echo orientos > "$TMPD/ctl/aud"
+    is "refused swap: sign-in still ok" "$(kv "$TMPD/o_one2.txt" stand)" "ok"
+    is "refused swap: reported" "$(kv "$TMPD/o_one2.txt" tausch)" "abgelehnt"
+    is "refused swap: reason at the book" "$(grep -a 'swap' "$TMPD/ctl/book.log" | head -1)" "swap refused aud"
+    has "$TMPD/o_one2.txt" "token=$FKT1" "refused swap: the old fkt1 stays in the configuration"
+    num "refused swap: still one account entry" "$(kv "$TMPD/o_one2.txt" konten)" eq 1
+    # book offline (address nobody answers): session stands, conf untouched
+    printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "https://10.9.0.77:8443" > "$TMPD/fl_off.conf"
+    ABB_EXTRA=("/etc/social/fleitec.conf=$TMPD/fl_off.conf"); abbild "$TMPD/off_base.img" || bad "image for the offline case"; ABB_EXTRA=()
+    cp "$TMPD/off_base.img" "$TMPD/d_off.img"
+    LW_AFTER="cat /etc/social/fleitec.conf;konto anmelden --anbieter=fleitec --tauschen" lauf_warten "$TMPD/d_off.img" "$TMPD/o_off.txt" allow --tauschen
+    is "book offline: sign-in still ok" "$(kv "$TMPD/o_off.txt" stand)" "ok"
+    is "book offline: reported" "$(kv "$TMPD/o_off.txt" tausch)" "keinnetz"
+    num "book offline: no token= written" "$(grep -ac '^token=' "$TMPD/o_off.txt")" eq 0
+    has "$TMPD/o_off.txt" "tauschen geht nur mit --geraet" "--tauschen without --geraet is refused"
     # the book saw no browser header, and the proxy routed only /api/kontakte to it
     num "the broker never saw an /api/kontakte call" "$(grep -ac 'POST /api/kontakte' "$TMPD/w/c2s.log")" eq 0
     num "the book got the swap calls" "$(grep -ac 'POST /api/kontakte/zugang-broker' "$TMPD/w/book-c2s.log")" ge 6

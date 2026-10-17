@@ -37,6 +37,14 @@
 //        an einem Terminal wird gefragt und das Echo abgeschaltet, an
 //        einer Roehre wird eine Zeile gelesen. Ein Passwort in `argv`
 //        stuende in jeder Prozessliste.
+//        --tauschen (nur mit --geraet, Anbieter fleitec): nach der
+//        Anmeldung gleich das Adressbuch-Token holen. Das Zugriffs-Token
+//        geht durch eine ROEHRE an `socfleitec v1 login broker -s`
+//        (stdin); es steht nie in einer Datei, nie in argv, nie in der
+//        Ausgabe. Ausgabe danach: `konto: tausch = ok|offline|abgelehnt|
+//        keinnetz|abgelehnt|fehler`. Die Sitzung bleibt in jedem Fall
+//        bestehen. Wohin das Token geht, weiss nur der Ruecken
+//        (`anbieter.tu_uebergeben`); Ruecken ohne Uebergabe melden fehler.
 //   konto liste            welche Konten es gibt (aus /etc/konten)
 //   konto status           je Konto: gueltig, wie lange noch, mit Netz
 //   konto erneuern         Token erneuern, wenn es bald ablaeuft
@@ -510,6 +518,7 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     var o_wa: [u8; 9] = "--warten\0"
     var o_cl: [u8; 9] = "--client\0"
     var o_au: [u8; 6] = "--aud\0"
+    var o_ta: [u8; 11] = "--tauschen\0"
 
     let anb: u64 = opt(start, argc, (&o_anb[0]) as u64)
     var ziel: u64 = opt(start, argc, (&o_ziel[0]) as u64)
@@ -521,6 +530,9 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     // an empty login name and says "wrong".
     let geraet: bool = schalter(start, argc, (&o_gt[0]) as u64)
     let warten: bool = schalter(start, argc, (&o_wa[0]) as u64)
+    // --tauschen: after the sign-in hand the access token to socfleitec
+    // (pipe) and get the address-book token. Only with the device flow.
+    let tauschen: bool = schalter(start, argc, (&o_ta[0]) as u64)
     if geraet && kenn == 0 {
         kenn = (&leer_text[0]) as u64
     }
@@ -528,6 +540,11 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     var konf: rt.Buf = rt.buf_new()
     if anb != 0 {
         let _k: bool = conf_read(anb, &konf, &ziel, &zname, &wurzeln)
+    }
+    if tauschen && !geraet {
+        line_c("hinweis", "--tauschen geht nur mit --geraet\0".p as u64)
+        rt.buf_free(&konf)
+        return RC_AUFRUF
     }
     if anb == 0 || ziel == 0 || kenn == 0 {
         io.eprint_line("konto: anmelden braucht --anbieter, --kennung und ein Ziel (--ziel oder /etc/konten.conf)")
@@ -697,11 +714,29 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     } else {
         line_n("gesiegelt", 0)
     }
+    // the sign-in stands whatever the swap says (the session is saved)
+    var rc: i32 = RC_OK
+    if tauschen {
+        // the back end hands the token on (pipe), the general part only
+        // reports the state and never sees where it goes
+        let ust: u32 = anbieter.tu_uebergeben(i as usize, &z, &s)
+        rt.mem_set(s.zugriff.ptr, 0 as u8, s.zugriff.len)
+        let usn: str = stand_name(ust)
+        line("tausch", usn.p as u64, usn.n)
+        if ust != anbieter.S_OK && s.hinweis.len > 0 {
+            var uh: rt.Buf = rt.buf_new()
+            rt.buf_push_bytes(&uh, s.hinweis.ptr, s.hinweis.len)
+            rt.buf_push(&uh, 0 as u8)
+            line_c("hinweis", kmsg.get(uh.ptr))
+            rt.buf_free(&uh)
+        }
+        rc = stand_rc(ust)
+    }
     anbieter.session_free(&s)
     rt.buf_free(&ken)
     rt.buf_free(&berc)
     rt.buf_free(&konf)
-    return RC_OK
+    return rc
 }
 
 // --------------------------------------------------------------- liste
@@ -1048,6 +1083,7 @@ fn hilfe() {
     io.print("               [--name=<zertifikatsname>] [--wurzeln=<pem>]\n")
     io.print("               [--bereich=<mandant>] [--code=<faktor>]\n")
     io.print("               [--zwischen=<token>] [--lokal=<benutzer>]\n")
+    io.print("               [--geraet [--warten] [--tauschen]]\n")
     io.print("               ohne --ziel gilt die Zeile aus /etc/konten.conf\n")
     io.print("konto liste | status [--ohne-netz] | erneuern | abmelden\n")
     io.print("konto anbieter | übergabe --kennung <k> | --text <key>\n")
