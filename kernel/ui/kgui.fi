@@ -6025,9 +6025,13 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // Also auch hier. Zweimal `pump` schadet nicht -- die Funktion
         // arbeitet ein Bitfeld ab und ist leer, wenn nichts anliegt;
         // ihr erster Vergleich ist ein Wort aus `kdata` gegen null.
+        sub(1)
         acpiev.pump(state)
+        sub(2)
         jarvis_watch(state)
+        sub(3)
         svc_flush(state)
+        sub(4)
         // `cur == 0` heisst: es laeuft gerade keine Shell. Dann gibt es
         // auch keinen Zustand abzufragen -- gefragt wird erst wieder,
         // wenn der Puls unten eine neue gestartet hat.
@@ -6057,7 +6061,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // Berichten. Steht die Meldung, findet er nichts mehr vor --
         // steht sie nicht, ist er der Weg. Der Unterschied ist an
         // `irq=` und `ber=` im Puls abzulesen.
+        sub(5)
         mausflut_schritt(state)
+        sub(6)
         st(32)
         usb.poll(state)
         i2chid.poll_tick(state)
@@ -6079,7 +6085,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // Adresse hat.
         wechsel_schritt(state)
         st(34)
+        sub(7)
         wm.poll(state)
+        sub(8)
         wm.lj_round(state)
         // ==================================== RUNDE ALLTAG: DIE SPERRE
         //
@@ -6107,7 +6115,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         if kstate.mode_on(state, kstate.M_VMSVGAHINTS) && (rounds & 63) == 0 {
             hint_player(state)
         }
+        sub(9)
         zombie_sweep(state)
+        sub(10)
         st(35)
         // 24.09.2026: THE WINDOW MOVEMENTS TICK HERE TOO. `anim_tick`
         // stood only in the hold loop of `surface`; on the desktop every
@@ -6118,6 +6128,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // in `compose`: the login window carried W_ANK=1 for as long as
         // it existed.
         let _an: u64 = wm.anim_tick(state)
+        sub(11)
         if wm.lj_may_compose(state) {
             wm.compose(state)
         }
@@ -6127,9 +6138,11 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // UPDATE ever followed the first picture -- invisible in QEMU (it scans the VRAM itself), a frozen / patchy screen in VirtualBox
         // once TRACES=0 stopped the host from watching the VRAM. One call per round, on this one core: with nothing painted it costs a
         // time read and compares (no port I/O). tools/vmsvga/desktop.sh is the gate.
+        sub(12)
         wm.cadence_note(state, vmsvga.bereit(state) && vmsvga.pending(state))
         gfx.bild_fertig(state)
         wm.lj_done(state)
+        sub(13)
         st(36)
         // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
         // RUNDE. Vorher stand die Zeile nur im Puls und war beim
@@ -6137,6 +6150,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // RUNDE TAFEL: und die Tafel erfaehrt, ob eine Shell laeuft.
         tafel_shell(cur)
         header_paint(state)
+        sub(14)
         st(37)
         if dauer {
             let jetzt: u64 = kstate.get(state, kstate.TICKS)
@@ -6252,6 +6266,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 close_say(state)
             }
         }
+        sub(15)
         st(38)
         if dauer && lj_wait(state) {
             // W-J: active stretch -> ~1 ms rounds (input is polled in this loop)
@@ -8453,6 +8468,22 @@ static mut sect_sum: [u64; 40] = [0 as u64; 40]
 static mut sect_max: [u64; 40] = [0 as u64; 40]
 static mut sect_n: [u64; 40] = [0 as u64; 40]
 static mut sect_last: u64 = 0
+// finer marks inside the sections: `sub(k)` charges the time since the previous mark to mark k (k = 1..39)
+static mut sub_sum: [u64; 40] = [0 as u64; 40]
+static mut sub_max: [u64; 40] = [0 as u64; 40]
+static mut sub_last: u64 = 0
+
+fn sub(k: u64) {
+    let now: u64 = time.tsc()
+    if sub_last != 0 && now > sub_last && k < 40 {
+        let d: u64 = now - sub_last
+        sub_sum[k as usize] = sub_sum[k as usize] + d
+        if d > sub_max[k as usize] {
+            sub_max[k as usize] = d
+        }
+    }
+    sub_last = now
+}
 
 fn st(n: u64) {
     if stufe >= 31 && stufe <= 38 {
@@ -8506,11 +8537,36 @@ fn sect_say(state: u64) {
     serial.puts((&s_n[0]) as u64)
     serial.dec(sect_n[31])
     serial.nl()
+    var s_u: [u8; 10] = "wm: sub \0\0"
+    var s_k: [u8; 2] = "k\0"
+    serial.puts((&s_u[0]) as u64)
+    k = 1
+    while k < 40 {
+        if sub_sum[k as usize] != 0 {
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(k)
+            serial.puts((&s_e[0]) as u64)
+            let nn: u64 = sect_n[31]
+            if nn != 0 {
+                serial.dec(sub_sum[k as usize] / nn / per_us)
+            } else {
+                serial.dec(0)
+            }
+            serial.puts((&s_m[0]) as u64)
+            serial.dec(sub_max[k as usize] / per_us)
+            serial.puts((&s_s[0]) as u64)
+            serial.puts((&s_s[1]) as u64)
+        }
+        k = k + 1
+    }
+    serial.nl()
     k = 0
     while k < 40 {
         sect_sum[k as usize] = 0
         sect_max[k as usize] = 0
         sect_n[k as usize] = 0
+        sub_sum[k as usize] = 0
+        sub_max[k as usize] = 0
         k = k + 1
     }
 }
