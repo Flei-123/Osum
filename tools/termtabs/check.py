@@ -58,28 +58,53 @@ kinds = [t[0] for t in tt]
 
 print('== witnesses ==')
 chk(len(spawn) >= 2 and all(not l.endswith(': 0') for l in spawn), 'every new tab started /bin/term (%d spawns, none failed)' % len(spawn))
-chk(kinds.count('new') >= 2, 'Ctrl+Shift+T and the plus button each made a tab (%d new)' % kinds.count('new'))
+chk(kinds.count('new') == 2, 'Ctrl+Shift+T and the plus button each made a tab (%d new)' % kinds.count('new'))
 chk(any(t[0] == 'new' and t[3] == 2 for t in tt), 'the first new tab makes a group of 2')
 chk(any(t[0] == 'new' and t[3] == 3 for t in tt), 'the second new tab makes a group of 3')
-chk(kinds.count('switch') >= 3, 'Ctrl+Tab / Ctrl+Shift+Tab / a click on a tab switched (%d switches)' % kinds.count('switch'))
-chk(any(t[0] == 'close' and t[3] >= 1 for t in tt), 'closing a tab leaves the group alive (tabs>=1 after close)')
-chk(kinds.count('close') >= 2, 'Ctrl+Shift+W and the x button each closed a tab (%d closes)' % kinds.count('close'))
+chk(kinds.count('switch') >= 2, 'a click on a tab and Ctrl+Tab switched (%d switches)' % kinds.count('switch'))
+chk(kinds.count('close') == 2, 'the x button and Ctrl+Shift+W each closed a tab (%d closes)' % kinds.count('close'))
+chk(any(t[0] == 'close' and t[3] == 3 for t in tt) and any(t[0] == 'close' and t[3] == 2 for t in tt), 'closes happen at 3 tabs, then at 2 tabs (the group survives the first)')
 chk(len({t[2] for t in tt}) == 1, 'all tabs stay in one group (%s)' % sorted({t[2] for t in tt}))
 wins = {t[1] for t in tt if t[0] == 'new'}
 chk(len(wins) == kinds.count('new'), 'every new tab is a different window')
-last = tt[-1] if tt else None
-chk(last is not None and last[3] == 1, 'the end state is one terminal again')
+chk(kinds[:2] == ['new', 'switch'] and kinds[-2:] == ['close', 'close'], 'order of events: new, switch ... close, close (%s)' % ','.join(kinds))
 
 print('== pictures ==')
-names = ['t0-single', 't1-two', 't2-typed', 't3-switched', 't4-three', 't5-switch-click', 't6-plus-click', 't7-x-click', 't8-closed']
+names = ['t0-single', 't1-two', 't2-typed', 't3-click1', 't4-switched', 't5-plus', 't6-x', 't7-closed']
 img = {n: load(n) for n in names}
 chk(all(img[n] is not None for n in names), 'all %d pictures exist' % len(names))
-# the strip: title bar of the terminal window, x 24..585 (window at 24,420), y 422..452
+if any(img[n] is None for n in names):
+    print('  FAIL  no pictures, cannot measure the strip')
+    print('== result ==')
+    print('  %d ok, %d fail' % (ok, bad + 1))
+    sys.exit(1)
 STRIP = (30, 424, 560, 452)
+DARK, GREY = (9, 9, 11), (72, 72, 75)
+
+
+def tabs(n, xs):
+    # which tabs look active (dark like the terminal body) / inactive (grey), probed at y=448 inside each tab
+    r = []
+    for x in xs:
+        p = px(img[n], x, 448)
+        r.append('A' if max(abs(p[i] - DARK[i]) for i in range(3)) < 12 else ('i' if max(abs(p[i] - GREY[i]) for i in range(3)) < 12 else '?'))
+    return ''.join(r)
+
+
+X2, X3 = (45, 200), (45, 170, 295)
 chk(differs(img['t0-single'], img['t1-two'], STRIP) > 400, 'the title strip changes when the second tab opens (%d px)' % differs(img['t0-single'], img['t1-two'], STRIP))
-chk(differs(img['t1-two'], img['t4-three'], STRIP) > 400, 'the strip changes when the third tab opens')
-chk(differs(img['t2-typed'], img['t3-switched'], (26, 456, 580, 830)) > 300, 'switching tabs changes the terminal content')
-chk(differs(img['t0-single'], img['t8-closed'], STRIP) < 200, 'back to one terminal: the strip looks like the start again (%d px)' % differs(img['t0-single'], img['t8-closed'], STRIP))
+chk(tabs('t1-two', X2) == 'iA', 'new tab is the active one (tab2) [%s]' % tabs('t1-two', X2))
+chk(differs(img['t1-two'], img['t2-typed'], (26, 456, 580, 830)) > 300, 'typing shows in the new tab')
+chk(tabs('t3-click1', X2) == 'Ai', 'a click on tab1 makes it active [%s]' % tabs('t3-click1', X2))
+chk(differs(img['t2-typed'], img['t3-click1'], (26, 456, 580, 830)) > 300, 'the click switches the terminal content (%d px)' % differs(img['t2-typed'], img['t3-click1'], (26, 456, 580, 830)))
+chk(tabs('t4-switched', X2) == 'iA', 'Ctrl+Tab goes on to tab2 [%s]' % tabs('t4-switched', X2))
+chk(tabs('t5-plus', X3) == 'iiA', 'the plus button opens tab3 and it is active [%s]' % tabs('t5-plus', X3))
+chk(differs(img['t4-switched'], img['t5-plus'], STRIP) > 400, 'the strip changes when the third tab opens')
+t6 = tabs('t6-x', X2)
+chk(sorted(t6) == ['A', 'i'], 'the x on tab3 closes it: two tabs, one active [%s]' % t6)
+chk(differs(img['t5-plus'], img['t6-x'], STRIP) > 300, 'the strip changes when tab3 closes (%d px)' % differs(img['t5-plus'], img['t6-x'], STRIP))
+chk(differs(img['t0-single'], img['t7-closed'], STRIP) < 200, 'back to one terminal: the strip looks like the start again (%d px)' % differs(img['t0-single'], img['t7-closed'], STRIP))
+chk(differs(img['t6-x'], img['t7-closed'], STRIP) > 300, 'Ctrl+Shift+W took the strip away (%d px)' % differs(img['t6-x'], img['t7-closed'], STRIP))
 print('== result ==')
 print('  %d ok, %d fail' % (ok, bad))
 sys.exit(1 if bad else 0)
