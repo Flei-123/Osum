@@ -48,6 +48,6 @@ grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl.
 c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 ls "$OUT"/*.ppm >/dev/null 2>&1 && ok "pictures taken: $(ls "$OUT"/*.ppm | wc -l)" || bad "no pictures"
-bash tools/settingsui/fit.sh >/dev/null && ok "pages fit 1024x768 (fit.sh)" || bad "pages fit 1024x768 (fit.sh)"
+bash tools/settingsfit/run.sh >/dev/null && ok "pages fit 1024x768 (settingsfit)" || bad "pages fit 1024x768 (settingsfit)"
 echo "SETTINGSUI: $pass passed, $fail failed"
 [ "$fail" = 0 ]

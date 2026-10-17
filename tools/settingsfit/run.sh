@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/settingsui/fit.sh -- Settings pages must fit a 1024x768 screen (host only, no VM, <1 s).
+# tools/settingsfit/run.sh -- Settings pages must fit a 1024x768 screen (host only, no VM, <1 s).
 #
-#   bash tools/settingsui/fit.sh [<git-rev>]     (rev = read the files from that commit; the control run)
+#   bash tools/settingsfit/run.sh [<git-rev>]     (rev = read the files from that commit; the control run)
 #
 # Checks (found in the 1024x768 pictures of tools/settingsui/run.sh, window 984 wide, right column ~366):
 #   1. the fixed column widths of the two Network tables (usage, connections) sum to <= 366
