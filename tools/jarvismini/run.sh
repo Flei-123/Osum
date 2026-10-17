@@ -183,6 +183,36 @@ SB="$D/B/serial.txt"
 [ -s "$SB" ] || { bad "boot B: no serial output"; tail -15 "$D/B.log"; }
 fi
 
+# ---------------------------------------------------------------- boot E: the REAL image autostart (hotkey + `jmini --hidden --as-app`), no mbg driver
+if want E; then
+{ cat etc/wmplug.conf; printf '\njmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$D/E.wmplug.conf"
+printf 'hotkey\njmini --hidden %s\n' "${JM_E_ASAPP---as-app}" > "$D/E.autostart"
+cat > "$D/E.book" <<EOF2
+warteauf 'jarvismini: up float=1' || 200
+warte 6
+foto 01-up
+marke 'jarvismini: toggle='
+taste ctrl-alt-j
+warteneu 'jarvismini: toggle=' || 30
+warte 5
+foto 02-shown
+marke 'jarvismini: toggle='
+taste ctrl-alt-j
+warteneu 'jarvismini: toggle=' || 30
+warte 4
+EOF2
+echo "== boot E (real autostart, hidden) =="
+start_stub E
+O="$D/E"
+EXTRA_E="${EXTRA_COMMON/\/etc\/wmplug.conf=etc\/wmplug.conf@0644/\/etc\/wmplug.conf=$D\/E.wmplug.conf@0644}"
+EXTRA_E="${EXTRA_E/\/etc\/wmplug.autostart=$D\/autostart@0644/\/etc\/wmplug.autostart=$D\/E.autostart@0644}"
+EH_APPEND=rtcutc APPS="fetch" EH_MKFS_EXTRA="$EXTRA_E /etc/jarvismini.debug=$D/debug@0644 /etc/apprights.conf=$D/rights.yes@0644" \
+    DESIGNBUILD="$BUILD" bash tools/design/eh6.sh "$O" "res=$RES" accel=kvm netz=ja tafel=nein "moreprogs=$MORE" "extra=wmplug" "drehbuch=$D/E.book" > "$D/E.log" 2>&1
+stop_stubs
+SE="$D/E/serial.txt"
+[ -s "$SE" ] || { bad "boot E: no serial output"; tail -15 "$D/E.log"; }
+fi
+
 # ---------------------------------------------------------------- checks (python reads the serial lines tolerantly and the photos)
 OUTP="$D/checks.txt"
 python3 - "$D" "$SW" "$SH" > "$OUTP" 2>&1 <<'PYEOF'
@@ -242,6 +272,21 @@ if re.search(r"msg look images=1 files=0 imgmagic=iVBORw0KGgo", fk):
 else:
     print("OPEN  D: /send upload (snip cannot write as uid 1000, r931)")
 res("D: the password is nowhere on the console", "geheim" not in rd(f"{d}/D/serial.txt"), "")
+# E: the REAL image autostart (hotkey + `jmini --hidden --as-app`): the answer reaches hotkeyd (W-I: used to be `hotkeyd: failed ... rc=3`)
+se = rd(f"{d}/E/serial.txt")
+if se:
+    te = clean(se)
+    res("E: autostart started the Mini hidden through wmplug (jmini ... --hidden --as-app)", "wmplug: jmini rechte=0x1" in se and "wmplug: start /bin/jarvismini" in se, "")
+    res("E: the box came up on the float layer, bus registered", bool(re.search(r"jarvismini: up float=1 bus=1", te)), "")
+    tg = re.findall(r"jarvismini: toggle=(\d)", te)
+    res("E: Ctrl+Alt+J toggled twice (1 then 0)", tg[:2] == ["1", "0"], f"toggles={tg}")
+    n_ok = len(re.findall(r"hotkeyd: ok - jarvismini\.toggle", se))
+    n_bad = len(re.findall(r"hotkeyd: failed - jarvismini\.toggle", se))
+    res("E: hotkeyd got the Mini's answer both times (ok)", n_ok >= 2, f"ok={n_ok}")
+    res("E: no `hotkeyd: failed` (was rc=3: the Mini never looked up the broker)", n_bad == 0, f"failed={n_bad}")
+sa_ = rd(f"{d}/A/serial.txt")
+if sa_:
+    res("A: hotkeyd got the Mini's answer (ok, no rc=3)", "hotkeyd: ok - jarvismini.toggle" in sa_ and "hotkeyd: failed - jarvismini.toggle" not in sa_, "")
 for tag in ("A", "B"):
     raw = rd(f"{d}/{tag}/serial.txt")
     t = clean(raw)
@@ -307,6 +352,6 @@ PYEOF
 cat "$OUTP"
 pass=$((pass + $(grep -c '^OK' "$OUTP")))
 fail=$((fail + $(grep -c '^FAIL' "$OUTP")))
-if [ -n "${JM_KEEP:-}" ]; then rm -rf "$JM_KEEP"; mkdir -p "$JM_KEEP"; cp -r "$D/A" "$D/B" "$D/C" "$D/D" "$JM_KEEP"/ ; cp "$D/D.fake" "$JM_KEEP"/ 2>/dev/null; cp "$D"/*.log "$D"/*.stub "$OUTP" "$JM_KEEP"/ 2>/dev/null; rm -f "$JM_KEEP"/*/disk.img; fi
+if [ -n "${JM_KEEP:-}" ]; then rm -rf "$JM_KEEP"; mkdir -p "$JM_KEEP"; for k in A B C D E; do [ -d "$D/$k" ] && cp -r "$D/$k" "$JM_KEEP"/; done ; cp "$D/D.fake" "$JM_KEEP"/ 2>/dev/null; cp "$D"/*.log "$D"/*.stub "$OUTP" "$JM_KEEP"/ 2>/dev/null; rm -f "$JM_KEEP"/*/disk.img; fi
 echo "JARVISMINI: $pass passed, $fail failed"
 [ "$fail" = 0 ]

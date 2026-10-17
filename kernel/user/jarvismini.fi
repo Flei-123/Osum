@@ -85,6 +85,9 @@ static mut rx_n: u64 = 0
 // bus
 static mut state: u64 = 0 // the toggle state (serve mode: flips 0/1; box mode: 1 = shown)
 static mut svc_bus: u64 = 0xFFFFFFFF
+// the sentinel 0xFFFFFFFF is NOT an error value for ulib.bad(): remember the lookup in a flag (W-I: the broker was never looked up,
+// hello and every reply went to service 4294967295 -> E_INVAL, hotkeyd saw rc=3 although the toggle itself worked)
+static mut svc_bus_ok: bool = false
 static mut bus_reg_ok: bool = false
 static mut bus_hello: bool = false
 static mut FR: [u8; 64] = [0 as u8; 64]
@@ -932,11 +935,12 @@ fn bus_step(wait_ms: u64) {
     if !bus_reg_ok {
         return
     }
-    if ulib.bad(svc_bus) {
+    if !svc_bus_ok {
         svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
         if ulib.bad(svc_bus) {
             return
         }
+        svc_bus_ok = true
     }
     if !bus_hello {
         bus_hello = true
@@ -958,7 +962,18 @@ fn bus_step(wait_ms: u64) {
             if actwire.asm_kind(s) == actwire.K_REQ {
                 let id: u64 = actwire.asm_id(s)
                 handle(actwire.asm_buf(s))
-                actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+                let rr: u64 = actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+                if ulib.bad(rr) {
+                    // the broker may have been restarted: look it up once more and answer again
+                    var n_bus2: [u8; 11] = "orient.bus\0"
+                    svc_bus = actwire.bus_find((&n_bus2[0 as usize]) as u64)
+                    if !ulib.bad(svc_bus) {
+                        actwire.send_msg(svc_bus, actwire.K_REP, id, actwire.ob_ptr(), actwire.ob_len())
+                    }
+                    lb_begin()
+                    lb_str("reply failed once, rebound")
+                    lb_end()
+                }
             }
             actwire.asm_free(s)
         }
