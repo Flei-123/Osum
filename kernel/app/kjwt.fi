@@ -1,0 +1,391 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/kjwt.fi -- a slim EdDSA (Ed25519) JWT verifier for /bin/konto.
+//
+// Same rules as the shared vectors `docs/fleitec-id/vectors_v2.json`
+// (group jwt_eddsa, 34 cases; the reason names are the shared ones):
+//
+//   1. exactly three parts, at most two dots, header and payload not empty
+//   2. STRICT base64url: no '=', no '+' or '/', no length 4n+1, no
+//      non-zero spare bits (a token has ONE spelling)
+//   3. THE VERIFIER decides the algorithm: the header must say "EdDSA"
+//      -- none, HS256, RS256, ES256, "eddsa", "Ed25519" are all `alg`.
+//      There is NO code path that reads a key as an HMAC secret.
+//      `kid` is required and names the key in the JWKS (no kid, no
+//      guessing); a kid that is not in the set is `kid`.
+//   4. the signature is checked by lib/crypto/ed25519.fi (RFC 8032,
+//      canonical S); a signature that is not 64 octets is `sig`
+//   5. `exp` is required (a JSON number) and must lie in the future
+//      (exp + leeway <= now is `expired`)
+//   6. `nbf` may not lie in the future (nbf - leeway > now is `nbf`)
+//   7. `iss` must equal the expected issuer octet for octet (a trailing
+//      slash is a different issuer); `aud` must equal the expected
+//      audience, or be an array that contains it. Both are MANDATORY: an
+//      empty expectation refuses every token.
+//   8. `sub` must be a non-empty string (`claims`)
+//   9. claims are read by PARSING the payload, never by searching text
+//
+// Nothing is trusted before the signature: the payload is parsed only
+// after step 4. The expected `iss`/`aud` come from the CALLER (device
+// config), never from the token.
+
+import std.rt
+import std.str
+import crypto.ed25519
+import kjson
+
+export {
+    Claims, claims_new, claims_free, verify, reason_name, b64u_strict,
+    R_OK, R_MALFORMED, R_ALG, R_SIG, R_EXPIRED, R_CLAIMS, R_ISS, R_AUD,
+    R_NBF, R_KID,
+}
+
+const R_OK: u32 = 0
+const R_MALFORMED: u32 = 1
+const R_ALG: u32 = 2
+const R_SIG: u32 = 3
+const R_EXPIRED: u32 = 4
+const R_CLAIMS: u32 = 5
+const R_ISS: u32 = 7
+const R_AUD: u32 = 8
+const R_NBF: u32 = 9
+const R_KID: u32 = 10
+
+const TOKEN_MAX: usize = 8192
+
+static mut f_alg: [u8; 4] = "alg\0"
+static mut f_kid: [u8; 4] = "kid\0"
+static mut f_keys: [u8; 5] = "keys\0"
+static mut f_kty: [u8; 4] = "kty\0"
+static mut f_crv: [u8; 4] = "crv\0"
+static mut f_x: [u8; 2] = "x\0"
+static mut f_exp: [u8; 4] = "exp\0"
+static mut f_nbf: [u8; 4] = "nbf\0"
+static mut f_iss: [u8; 4] = "iss\0"
+static mut f_aud: [u8; 4] = "aud\0"
+static mut f_sub: [u8; 4] = "sub\0"
+static mut f_acc: [u8; 4] = "acc\0"
+static mut f_name: [u8; 5] = "name\0"
+
+static mut v_eddsa: [u8; 6] = "EdDSA\0"
+static mut v_okp: [u8; 4] = "OKP\0"
+static mut v_ed: [u8; 8] = "Ed25519\0"
+
+struct Claims {
+    sub: rt.Buf,
+    acc: rt.Buf,
+    name: rt.Buf,
+    exp: u64,
+}
+
+fn claims_new() -> Claims {
+    return Claims { sub: rt.buf_new(), acc: rt.buf_new(),
+        name: rt.buf_new(), exp: 0 }
+}
+
+fn claims_free(c: *mut Claims) {
+    rt.buf_free(&(*c).sub)
+    rt.buf_free(&(*c).acc)
+    rt.buf_free(&(*c).name)
+}
+
+fn reason_name(r: u32) -> str {
+    if r == R_OK { return "ok" }
+    if r == R_ALG { return "alg" }
+    if r == R_SIG { return "sig" }
+    if r == R_EXPIRED { return "expired" }
+    if r == R_CLAIMS { return "claims" }
+    if r == R_ISS { return "iss" }
+    if r == R_AUD { return "aud" }
+    if r == R_NBF { return "nbf" }
+    if r == R_KID { return "kid" }
+    return "malformed"
+}
+
+// ------------------------------------------------------------ base64url
+
+fn b64u_val(c: u8) -> i32 {
+    if c >= 65 as u8 && c <= 90 as u8 { return (c - 65 as u8) as i32 }
+    if c >= 97 as u8 && c <= 122 as u8 { return (c - 97 as u8) as i32 + 26 }
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as i32 + 52 }
+    if c == 45 as u8 { return 62 }
+    if c == 95 as u8 { return 63 }
+    return -1
+}
+
+// Strict: the alphabet of RFC 4648 section 5 WITHOUT padding, canonical
+// spare bits. `n == 0` decodes to nothing (and is true).
+fn b64u_strict(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
+    if n % 4 == 1 {
+        return false
+    }
+    var acc: u32 = 0
+    var bits: u32 = 0
+    var i: usize = 0
+    while i < n {
+        let v: i32 = b64u_val(rt.ld8(p, i))
+        if v < 0 {
+            return false
+        }
+        acc = (acc << 6 as u32) | (v as u32)
+        bits = bits + 6 as u32
+        if bits >= 8 as u32 {
+            bits = bits - 8 as u32
+            rt.buf_push(aus, ((acc >> bits) & 255 as u32) as u8)
+            acc = acc & (((1 as u32) << bits) - 1 as u32)
+        }
+        i = i + 1
+    }
+    if acc != 0 as u32 {
+        return false
+    }
+    return true
+}
+
+// -------------------------------------------------------------- helpers
+
+fn is_obj(d: *mut kjson.Json, w: u32) -> bool {
+    return w != kjson.JSON_NONE && kjson.json_kind(d, w) == kjson.JSON_OBJECT
+}
+
+fn span_is(d: *mut kjson.Json, nd: u32, want: u64) -> bool {
+    if nd == kjson.JSON_NONE || kjson.json_kind(d, nd) != kjson.JSON_STRING {
+        return false
+    }
+    let s: str.Span = kjson.json_string(d, nd)
+    if s.n != rt.c_length(want) {
+        return false
+    }
+    return rt.mem_eq(s.p as u64, want, s.n)
+}
+
+// Looks `kid` up in a JWKS text. `false` = not found or the key is not a
+// usable Ed25519 key; `pubk` receives the 32 octets.
+fn jwks_key(jwks: u64, jl: usize, kid: u64, kl: usize, pubk: u64) -> bool {
+    var d: kjson.Json = kjson.json_new()
+    var found: bool = false
+    var ok: bool = kjson.json_parse(&d, jwks, jl)
+    if ok && kjson.json_valid(&d) {
+        let root: u32 = kjson.json_root(&d)
+        if is_obj(&d, root) {
+            let arr: u32 = kjson.json_get_c(&d, root, (&f_keys[0]) as u64)
+            if arr != kjson.JSON_NONE
+                && kjson.json_kind(&d, arr) == kjson.JSON_ARRAY {
+                var k: u32 = kjson.json_child(&d, arr)
+                while k != kjson.JSON_NONE && !found {
+                    if is_obj(&d, k) {
+                        let kn: u32 = kjson.json_get_c(&d, k, (&f_kid[0]) as u64)
+                        var same: bool = false
+                        if kn != kjson.JSON_NONE
+                            && kjson.json_kind(&d, kn) == kjson.JSON_STRING {
+                            let ks: str.Span = kjson.json_string(&d, kn)
+                            same = ks.n == kl && rt.mem_eq(ks.p as u64, kid, kl)
+                        }
+                        if same {
+                            let t1: u32 = kjson.json_get_c(&d, k, (&f_kty[0]) as u64)
+                            let t2: u32 = kjson.json_get_c(&d, k, (&f_crv[0]) as u64)
+                            let t3: u32 = kjson.json_get_c(&d, k, (&f_alg[0]) as u64)
+                            let xn: u32 = kjson.json_get_c(&d, k, (&f_x[0]) as u64)
+                            var fine: bool = span_is(&d, t1, (&v_okp[0]) as u64)
+                                && span_is(&d, t2, (&v_ed[0]) as u64)
+                            if t3 != kjson.JSON_NONE
+                                && !span_is(&d, t3, (&v_eddsa[0]) as u64) {
+                                fine = false
+                            }
+                            if fine && xn != kjson.JSON_NONE
+                                && kjson.json_kind(&d, xn) == kjson.JSON_STRING {
+                                let xs: str.Span = kjson.json_string(&d, xn)
+                                var raw: rt.Buf = rt.buf_new()
+                                if b64u_strict(xs.p as u64, xs.n, &raw)
+                                    && raw.len == 32 {
+                                    rt.mem_copy(pubk, raw.ptr, 32)
+                                    found = true
+                                }
+                                rt.buf_free(&raw)
+                            }
+                            // A kid names ONE key. A second entry with the
+                            // same kid is not consulted.
+                            k = kjson.JSON_NONE
+                        } else {
+                            k = kjson.json_next(&d, k)
+                        }
+                    } else {
+                        k = kjson.json_next(&d, k)
+                    }
+                }
+            }
+        }
+    }
+    kjson.json_free(&d)
+    return found
+}
+
+fn aud_ok(d: *mut kjson.Json, root: u32, aud: u64) -> bool {
+    let nd: u32 = kjson.json_get_c(d, root, (&f_aud[0]) as u64)
+    if nd == kjson.JSON_NONE {
+        return false
+    }
+    let kind: u8 = kjson.json_kind(d, nd)
+    if kind == kjson.JSON_STRING {
+        return span_is(d, nd, aud)
+    }
+    if kind == kjson.JSON_ARRAY {
+        var c: u32 = kjson.json_child(d, nd)
+        while c != kjson.JSON_NONE {
+            if span_is(d, c, aud) {
+                return true
+            }
+            c = kjson.json_next(d, c)
+        }
+    }
+    return false
+}
+
+fn num_node(d: *mut kjson.Json, root: u32, key: u64, nd: *mut u32) -> bool {
+    *nd = kjson.json_get_c(d, root, key)
+    return *nd != kjson.JSON_NONE && kjson.json_kind(d, *nd) == kjson.JSON_NUMBER
+}
+
+// ---------------------------------------------------------------- verify
+//
+// `tok` is the compact token (`tl` octets, NOT a C string), `jwks` the
+// key set text, `iss` and `aud` C strings, `now` unix seconds. Returns a
+// reason (R_OK = good). `out` is filled only on R_OK.
+fn verify(tok: u64, tl: usize, jwks: u64, jl: usize, iss: u64, aud: u64,
+    now: i64, leeway: i64, out: *mut Claims) -> u32 {
+    if tl < 8 || tl > TOKEN_MAX {
+        return R_MALFORMED
+    }
+    var d1: usize = tl
+    var d2: usize = tl
+    var nd: usize = 0
+    var i: usize = 0
+    while i < tl {
+        if rt.ld8(tok, i) == 46 as u8 {
+            if nd == 0 {
+                d1 = i
+            } else if nd == 1 {
+                d2 = i
+            }
+            nd = nd + 1
+        }
+        i = i + 1
+    }
+    if nd != 2 || d1 == 0 || d2 <= d1 + 1 {
+        return R_MALFORMED
+    }
+    var hdr: rt.Buf = rt.buf_new()
+    var pay: rt.Buf = rt.buf_new()
+    var sig: rt.Buf = rt.buf_new()
+    var rc: u32 = R_MALFORMED
+    var go: bool = b64u_strict(tok, d1, &hdr)
+        && b64u_strict(tok + (d1 + 1) as u64, d2 - d1 - 1, &pay)
+        && b64u_strict(tok + (d2 + 1) as u64, tl - d2 - 1, &sig)
+    if go {
+        // ---- header
+        var hd: kjson.Json = kjson.json_new()
+        var kid: rt.Buf = rt.buf_new()
+        var alg_ok: bool = false
+        var have_alg: bool = false
+        let pok: bool = kjson.json_parse(&hd, hdr.ptr, hdr.len)
+        if pok && kjson.json_valid(&hd) && is_obj(&hd, kjson.json_root(&hd)) {
+            let hr: u32 = kjson.json_root(&hd)
+            let an: u32 = kjson.json_get_c(&hd, hr, (&f_alg[0]) as u64)
+            if an != kjson.JSON_NONE
+                && kjson.json_kind(&hd, an) == kjson.JSON_STRING {
+                have_alg = true
+                alg_ok = span_is(&hd, an, (&v_eddsa[0]) as u64)
+            }
+            let _k: bool = kjson.text(&hd, hr, (&f_kid[0]) as u64, &kid)
+        }
+        kjson.json_free(&hd)
+        if !have_alg {
+            rc = R_MALFORMED
+        } else if !alg_ok {
+            rc = R_ALG
+        } else if sig.len == 0 {
+            rc = R_MALFORMED
+        } else if kid.len == 0 {
+            rc = R_KID
+        } else {
+            var pubk: [u8; 32] = [0 as u8; 32]
+            if !jwks_key(jwks, jl, kid.ptr, kid.len, (&pubk[0]) as u64) {
+                rc = R_KID
+            } else if sig.len != 64 {
+                rc = R_SIG
+            } else {
+                var sok: bool = false
+                var cx: ed25519.Ctx = ed25519.ctx_new()
+                if ed25519.ctx_init(&cx) {
+                    sok = ed25519.ed25519_verify(&cx, (&pubk[0]) as u64, tok,
+                        d2, sig.ptr)
+                }
+                if !sok {
+                    rc = R_SIG
+                } else {
+                    rc = claims_check(&pay, iss, aud, now, leeway, out)
+                }
+            }
+        }
+        rt.buf_free(&kid)
+    }
+    rt.buf_free(&hdr)
+    rt.buf_free(&pay)
+    rt.buf_free(&sig)
+    return rc
+}
+
+fn claims_check(pay: *mut rt.Buf, iss: u64, aud: u64, now: i64,
+    leeway: i64, out: *mut Claims) -> u32 {
+    var d: kjson.Json = kjson.json_new()
+    var rc: u32 = R_OK
+    let pok: bool = kjson.json_parse(&d, (*pay).ptr, (*pay).len)
+    if !pok || !kjson.json_valid(&d) || !is_obj(&d, kjson.json_root(&d)) {
+        kjson.json_free(&d)
+        return R_MALFORMED
+    }
+    let root: u32 = kjson.json_root(&d)
+    var en: u32 = kjson.JSON_NONE
+    var bn: u32 = kjson.JSON_NONE
+    var exp: i64 = 0
+    if !num_node(&d, root, (&f_exp[0]) as u64, &en) {
+        rc = R_EXPIRED
+    } else {
+        exp = kjson.json_int(&d, en)
+        if exp + leeway <= now {
+            rc = R_EXPIRED
+        }
+    }
+    if rc == R_OK && num_node(&d, root, (&f_nbf[0]) as u64, &bn) {
+        if kjson.json_int(&d, bn) - leeway > now {
+            rc = R_NBF
+        }
+    }
+    if rc == R_OK {
+        if rt.c_length(iss) == 0 || !span_is(&d,
+            kjson.json_get_c(&d, root, (&f_iss[0]) as u64), iss) {
+            rc = R_ISS
+        }
+    }
+    if rc == R_OK {
+        if rt.c_length(aud) == 0 || !aud_ok(&d, root, aud) {
+            rc = R_AUD
+        }
+    }
+    if rc == R_OK {
+        var sub: rt.Buf = rt.buf_new()
+        let hat: bool = kjson.text(&d, root, (&f_sub[0]) as u64, &sub)
+        if !hat || sub.len == 0 {
+            rc = R_CLAIMS
+        } else {
+            rt.buf_push_bytes(&(*out).sub, sub.ptr, sub.len)
+            let _a: bool = kjson.text(&d, root, (&f_acc[0]) as u64,
+                &(*out).acc)
+            let _n: bool = kjson.text(&d, root, (&f_name[0]) as u64,
+                &(*out).name)
+            (*out).exp = exp as u64
+        }
+        rt.buf_free(&sub)
+    }
+    kjson.json_free(&d)
+    return rc
+}

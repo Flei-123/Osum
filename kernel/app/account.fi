@@ -71,6 +71,7 @@ import kgegen
 import anb_jarvis
 import anb_xoffi
 import anb_eigen
+import anb_fleitec
 
 // Wie lange VOR dem Ablauf erneuert wird. Ein Tag, und die Zahl hat
 // einen Grund: ein Geraet, das eine Woche im Schrank lag, soll beim
@@ -89,6 +90,7 @@ const RC_ABGELAUFEN: i32 = 7
 const RC_ERROR: i32 = 8
 const RC_GEBREMST: i32 = 9
 const RC_TLS: i32 = 10
+const RC_GERAET: i32 = 11
 
 static mut geheim: [u8; 256] = [0; 256]
 
@@ -123,6 +125,7 @@ fn stand_name(st: u32) -> str {
     if st == anbieter.S_ABGELEHNT { return "abgelehnt" }
     if st == anbieter.S_ABGELAUFEN { return "abgelaufen" }
     if st == anbieter.S_GEBREMST { return "gebremst" }
+    if st == anbieter.S_GERAET { return "geraet" }
     return "fehler"
 }
 
@@ -133,6 +136,7 @@ fn stand_rc(st: u32) -> i32 {
     if st == anbieter.S_MEHRDEUTIG { return RC_MEHRDEUTIG }
     if st == anbieter.S_KEINNETZ { return RC_KEINNETZ }
     if st == anbieter.S_TLS { return RC_TLS }
+    if st == anbieter.S_GERAET { return RC_GERAET }
     if st == anbieter.S_ABGELEHNT { return RC_ABGELEHNT }
     if st == anbieter.S_ABGELAUFEN { return RC_ABGELAUFEN }
     if st == anbieter.S_GEBREMST { return RC_GEBREMST }
@@ -152,6 +156,7 @@ static mut k_ab: [u8; 23] = "konto.state.refused\0\0\0\0"
 static mut k_al: [u8; 23] = "konto.state.expired\0\0\0\0"
 static mut k_ge: [u8; 24] = "konto.state.throttled\0\0\0"
 static mut k_fe: [u8; 20] = "konto.state.error\0\0\0"
+static mut k_dv: [u8; 19] = "konto.state.device\0"
 
 fn stand_schluessel(st: u32) -> u64 {
     if st == anbieter.S_OK { return (&k_ok[0]) as u64 }
@@ -160,6 +165,7 @@ fn stand_schluessel(st: u32) -> u64 {
     if st == anbieter.S_MEHRDEUTIG { return (&k_me[0]) as u64 }
     if st == anbieter.S_KEINNETZ { return (&k_kn[0]) as u64 }
     if st == anbieter.S_TLS { return (&k_tl[0]) as u64 }
+    if st == anbieter.S_GERAET { return (&k_dv[0]) as u64 }
     if st == anbieter.S_ABGELEHNT { return (&k_ab[0]) as u64 }
     if st == anbieter.S_ABGELAUFEN { return (&k_al[0]) as u64 }
     if st == anbieter.S_GEBREMST { return (&k_ge[0]) as u64 }
@@ -427,6 +433,65 @@ fn push_login(tab: u64) {
     let _1: bool = anbieter.eintragen(anb_jarvis.push())
     let _2: bool = anbieter.eintragen(anb_xoffi.push())
     let _3: bool = anbieter.eintragen(anb_eigen.push())
+    let _4: bool = anbieter.eintragen(anb_fleitec.push())
+}
+
+// ------------------------------------------------- Geraeteanmeldung
+//
+// RFC 8628, provider-neutral: a backend that answers S_GERAET wants its
+// human to do something on ANOTHER device. This program prints what to
+// show (`code`, `url`, `urlkomplett`), the opaque `zwischen` to come back
+// with, and -- with --warten -- asks again itself: every `intervall`
+// seconds, +5 s after each S_GEBREMST (slow_down), until the answer is
+// final or `gueltig` seconds are over.
+static mut leer_text: [u8; 1] = "\0"
+
+fn sleep_secs(n: u64) {
+    var ts: [i64; 2] = [0; 2]
+    ts[0] = n as i64
+    syscall(35, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+fn dev_show(s: *mut anbieter.Sitzung) {
+    line("code", s.gcode.ptr, s.gcode.len)
+    line("url", s.gurl.ptr, s.gurl.len)
+    if s.gurlk.len > 0 {
+        line("urlkomplett", s.gurlk.ptr, s.gurlk.len)
+    }
+    line("zwischen", s.temp.ptr, s.temp.len)
+    line_n("intervall", s.intervall)
+    line_n("gueltig", s.gueltig)
+}
+
+fn dev_wait(i: usize, z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var dc: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&dc, s.temp.ptr, s.temp.len)
+    rt.buf_push(&dc, 0 as u8)
+    var iv: u64 = s.intervall
+    if iv < 1 {
+        iv = 5
+    }
+    let ende: u64 = now() + s.gueltig
+    var n: u64 = 0
+    var st: u32 = anbieter.S_GERAET
+    while st == anbieter.S_GERAET || st == anbieter.S_GEBREMST {
+        if now() + iv > ende {
+            st = anbieter.S_ABGELAUFEN
+            break
+        }
+        sleep_secs(iv)
+        z.temp = dc.ptr
+        st = anbieter.tu_anmelden(i, z, s)
+        n = n + 1
+        if st == anbieter.S_GEBREMST {
+            iv = iv + 5
+        }
+    }
+    line_n("abfragen", n)
+    line_n("intervall", iv)
+    rt.mem_set(dc.ptr, 0 as u8, dc.len)
+    rt.buf_free(&dc)
+    return st
 }
 
 // ------------------------------------------------------------- anmelden
@@ -441,12 +506,24 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     var o_code: [u8; 7] = "--code\0"
     var o_zw: [u8; 11] = "--zwischen\0"
     var o_lok: [u8; 8] = "--lokal\0"
+    var o_gt: [u8; 9] = "--geraet\0"
+    var o_wa: [u8; 9] = "--warten\0"
+    var o_cl: [u8; 9] = "--client\0"
+    var o_au: [u8; 6] = "--aud\0"
 
     let anb: u64 = opt(start, argc, (&o_anb[0]) as u64)
     var ziel: u64 = opt(start, argc, (&o_ziel[0]) as u64)
     var zname: u64 = opt(start, argc, (&o_name[0]) as u64)
     var wurzeln: u64 = opt(start, argc, (&o_wu[0]) as u64)
-    let kenn: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    var kenn: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    // DEVICE FLOW: no login name and no password on this device -- the
+    // human signs in elsewhere. A backend that has no such flow just sees
+    // an empty login name and says "wrong".
+    let geraet: bool = schalter(start, argc, (&o_gt[0]) as u64)
+    let warten: bool = schalter(start, argc, (&o_wa[0]) as u64)
+    if geraet && kenn == 0 {
+        kenn = (&leer_text[0]) as u64
+    }
     // Was die Befehlszeile nicht sagt, sagt vielleicht /etc/konten.conf.
     var konf: rt.Buf = rt.buf_new()
     if anb != 0 {
@@ -482,14 +559,32 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     z.bereich = opt(start, argc, (&o_ber[0]) as u64)
     z.code = opt(start, argc, (&o_code[0]) as u64)
     z.temp = opt(start, argc, (&o_zw[0]) as u64)
+    z.klient = opt(start, argc, (&o_cl[0]) as u64)
+    z.zielgruppe = opt(start, argc, (&o_au[0]) as u64)
 
-    var ask: [u8; 12] = "Kennwort: \0\0"
-    let gl: usize = secret_read((&ask[0]) as u64)
-    z.geheim = (&geheim[0]) as u64
+    if geraet {
+        z.modus = 1
+        z.geheim = (&leer_text[0]) as u64
+    } else {
+        var ask: [u8; 12] = "Kennwort: \0\0"
+        let gl: usize = secret_read((&ask[0]) as u64)
+        z.geheim = (&geheim[0]) as u64
+    }
 
     var s: anbieter.Sitzung = anbieter.session_new()
-    let st: u32 = anbieter.tu_anmelden(i as usize, &z, &s)
+    var st: u32 = anbieter.tu_anmelden(i as usize, &z, &s)
     geheim_vergessen()
+
+    if st == anbieter.S_GERAET {
+        say(st)
+        dev_show(&s)
+        if !warten {
+            anbieter.session_free(&s)
+            rt.buf_free(&konf)
+            return RC_GERAET
+        }
+        st = dev_wait(i as usize, &z, &s)
+    }
 
     say(st)
     if st == anbieter.S_MEHRDEUTIG {

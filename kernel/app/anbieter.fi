@@ -68,7 +68,7 @@ export {
     tu_anmelden, tu_erneuern, tu_abmelden, do_check,
     kennung,
     S_OK, S_WRONG, S_ZWEITFAKTOR, S_MEHRDEUTIG, S_KEINNETZ, S_TLS,
-    S_ABGELEHNT, S_ABGELAUFEN, S_ERROR, S_GEBREMST,
+    S_ABGELEHNT, S_ABGELAUFEN, S_ERROR, S_GEBREMST, S_GERAET,
     MAX_PUSH,
 }
 
@@ -91,6 +91,14 @@ const S_GEBREMST: u32 = 8        // der Server bremst (zu viele Versuche)
 // beides gleich meldet, schickt den Nutzer WLAN suchen, waehrend in
 // Wahrheit jemand dazwischensitzt.
 const S_TLS: u32 = 9             // der Handschlag/das Zertifikat war faul
+// GERAETEANMELDUNG (RFC 8628): die Anmeldung laeuft auf einem ANDEREN
+// Geraet (Telefon, Rechner). Dieses Geraet zeigt einen Code und eine
+// Adresse (`gcode`, `gurl`, `gurlk`), haelt den Geraetecode in `temp` und
+// fragt in `intervall` Sekunden wieder -- derselbe Aufruf von `anmelden`
+// mit gesetztem `Zugang.temp`. `S_GERAET` heisst "noch nicht entschieden,
+// frag spaeter nochmal"; `S_GEBREMST` beim Nachfragen heisst "langsamer"
+// (der Aufrufer addiert 5 s, wie RFC 8628 3.5 es verlangt).
+const S_GERAET: u32 = 10
 
 // Was ein Ruecken zum Anmelden bekommt. Alles Zeiger auf Text, der den
 // Aufruf ueberlebt; `geheim` zeigt in einen Puffer, den der Aufrufer
@@ -106,6 +114,13 @@ struct Zugang {
     temp: u64,
     zugriff: u64,
     erneuerung: u64,
+    // Geraeteanmeldung: `modus` 1 = ohne Geheimnis, der Ruecken startet
+    // (temp == 0) oder fragt nach (temp = Geraetecode). `klient` und
+    // `zielgruppe` ueberschreiben die Voreinstellungen des Ruecken
+    // (Client-Kennung, erwartetes `aud`); 0 = Voreinstellung.
+    modus: u64,
+    klient: u64,
+    zielgruppe: u64,
 }
 
 // Was ein Ruecken zurueckgibt.
@@ -121,6 +136,13 @@ struct Sitzung {
     auswahl: rt.Buf,
     hinweis: rt.Buf,
     ablauf: u64,
+    // Nur bei S_GERAET: Code zum Abtippen, Adresse, Adresse mit Code,
+    // Sekunden zwischen zwei Nachfragen, Gueltigkeit des Geraetecodes.
+    gcode: rt.Buf,
+    gurl: rt.Buf,
+    gurlk: rt.Buf,
+    intervall: u64,
+    gueltig: u64,
 }
 
 struct Push {
@@ -134,7 +156,7 @@ struct Push {
 fn access_new() -> Zugang {
     return Zugang { ziel: 0, zielname: 0, wurzeln: 0, kennung: 0,
         geheim: 0, bereich: 0, code: 0, temp: 0, zugriff: 0,
-        erneuerung: 0 }
+        erneuerung: 0, modus: 0, klient: 0, zielgruppe: 0 }
 }
 
 fn session_new() -> Sitzung {
@@ -142,7 +164,9 @@ fn session_new() -> Sitzung {
         anzeige: rt.buf_new(), bereich: rt.buf_new(),
         datenort: rt.buf_new(), zugriff: rt.buf_new(),
         erneuerung: rt.buf_new(), temp: rt.buf_new(),
-        auswahl: rt.buf_new(), hinweis: rt.buf_new(), ablauf: 0 }
+        auswahl: rt.buf_new(), hinweis: rt.buf_new(), ablauf: 0,
+        gcode: rt.buf_new(), gurl: rt.buf_new(), gurlk: rt.buf_new(),
+        intervall: 0, gueltig: 0 }
 }
 
 fn sitzung_leeren(s: *mut Sitzung) {
@@ -157,6 +181,11 @@ fn sitzung_leeren(s: *mut Sitzung) {
     rt.buf_clear(&(*s).temp)
     rt.buf_clear(&(*s).auswahl)
     rt.buf_clear(&(*s).hinweis)
+    rt.buf_clear(&(*s).gcode)
+    rt.buf_clear(&(*s).gurl)
+    rt.buf_clear(&(*s).gurlk)
+    (*s).intervall = 0
+    (*s).gueltig = 0
 }
 
 fn session_free(s: *mut Sitzung) {
@@ -169,6 +198,9 @@ fn session_free(s: *mut Sitzung) {
     rt.buf_free(&(*s).temp)
     rt.buf_free(&(*s).auswahl)
     rt.buf_free(&(*s).hinweis)
+    rt.buf_free(&(*s).gcode)
+    rt.buf_free(&(*s).gurl)
+    rt.buf_free(&(*s).gurlk)
 }
 
 // ------------------------------------------------------------ die Tafel

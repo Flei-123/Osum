@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/anbfleitec/jwtvec.fi -- guest program for tools/anbfleitec/run.sh.
+//
+// Reads /vec.tsv (id TAB now TAB token, one case per line; the token may
+// be empty) and /jwks.json, runs every case through kernel/app/kjwt.fi
+// and prints `jwt: <id> = <reason>`. The host compares the reasons with
+// the `expect` column of docs/fleitec-id/vectors_v2.json (group jwt_eddsa).
+// Issuer and audience are the ones of the shared verifier block.
+
+import std.io
+import std.rt
+import kjwt
+
+static mut p_vec: [u8; 9] = "/vec.tsv\0"
+static mut p_jwks: [u8; 12] = "/jwks.json\0\0"
+static mut c_iss: [u8; 24] = "https://id.fleitec.test\0"
+static mut c_aud: [u8; 18] = "chat.fleitec.test\0"
+
+fn num_of(p: u64, n: usize) -> i64 {
+    var v: i64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c >= 48 as u8 && c <= 57 as u8 {
+            v = v * 10 + (c - 48 as u8) as i64
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn main(start: u64) -> i32 {
+    var vec: rt.Buf = rt.buf_new()
+    var jw: rt.Buf = rt.buf_new()
+    if !rt.read_file((&p_vec[0]) as u64, &vec) || !rt.read_file((&p_jwks[0]) as u64, &jw) {
+        io.eprint_line("jwtvec: files missing")
+        return 2
+    }
+    let p: u64 = rt.buf_ptr(&vec)
+    let n: usize = rt.buf_len(&vec)
+    var i: usize = 0
+    var cases: u64 = 0
+    while i < n {
+        var e: usize = i
+        while e < n && rt.ld8(p, e) != 10 as u8 {
+            e = e + 1
+        }
+        // fields: id, now, token
+        var t1: usize = i
+        while t1 < e && rt.ld8(p, t1) != 9 as u8 {
+            t1 = t1 + 1
+        }
+        var t2: usize = t1 + 1
+        while t2 < e && rt.ld8(p, t2) != 9 as u8 {
+            t2 = t2 + 1
+        }
+        if t1 < e && t2 <= e {
+            let now: i64 = num_of(p + (t1 + 1) as u64, t2 - t1 - 1)
+            var tl: usize = 0
+            if e > t2 + 1 {
+                tl = e - t2 - 1
+            }
+            var cl: kjwt.Claims = kjwt.claims_new()
+            let r: u32 = kjwt.verify(p + (t2 + 1) as u64, tl, rt.buf_ptr(&jw),
+                rt.buf_len(&jw), (&c_iss[0]) as u64, (&c_aud[0]) as u64, now,
+                0, &cl)
+            io.print("jwt: ")
+            rt.write_everything(1, p + i as u64, t1 - i)
+            io.print(" = ")
+            io.print(kjwt.reason_name(r))
+            io.print("\n")
+            kjwt.claims_free(&cl)
+            cases = cases + 1
+        }
+        i = e + 1
+    }
+    io.print("jwt: done\n")
+    return 0
+}

@@ -1,0 +1,582 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/anb_fleitec.fi -- the backend (Ruecken) for the Fleitec-ID
+// OIDC service: sign in by DEVICE FLOW (RFC 8628), no password on this
+// device.
+//
+// Service: /root/jarvis/projects/u_DiS4in7esMF1/fleitec-id (README, the
+// report 20261017-085919_l3-l4). Everything this device knows about it:
+//
+//   POST /oidc/device_authorization   client_id, scope
+//        -> { device_code, user_code "ABCD-EFGH", verification_uri,
+//             verification_uri_complete, expires_in, interval }
+//   POST /oidc/token  grant_type=urn:ietf:params:oauth:grant-type:device_code
+//        -> 200 { access_token, id_token, refresh_token, expires_in }
+//        -> 400 { error: authorization_pending | slow_down |
+//                        expired_token | access_denied | invalid_grant }
+//   POST /oidc/token  grant_type=refresh_token   (the refresh token ROTATES:
+//        the answer carries the new one, the old one is dead; using an old
+//        one kills the whole family)
+//   POST /oidc/revoke, GET /oidc/userinfo, GET /oidc/jwks.json
+//   All bodies are application/x-www-form-urlencoded (knetz.sende_form).
+//
+// THE STEPS (account.fi drives them; this file is one call each):
+//   1. anmelden with Zugang.temp == 0     -> S_GERAET + gcode/gurl/temp
+//      (temp = the device code; show gcode + gurl to the human)
+//   2. anmelden with Zugang.temp = code   -> S_GERAET (pending) / S_GEBREMST
+//      (slow_down: caller adds 5 s) / S_ABGELAUFEN (expired_token) /
+//      S_ABGELEHNT (access_denied) / S_OK with the session
+//
+// WHAT IS CHECKED BEFORE A SESSION EXISTS (kernel/app/kjwt.fi, the rules
+// of docs/fleitec-id/vectors_v2.json): the access token is EdDSA, signed
+// by a key from THIS issuer's JWKS, `iss` == the configured target (octet
+// for octet), `aud` == the configured audience, `exp`/`nbf`, `sub` set.
+// An id_token, if present, must verify too (aud = client id) and name the
+// same `sub`. Anything else is S_ABGELEHNT with a hint naming the reason;
+// nothing reaches the disk.
+//
+// ISSUER = the target URL without a trailing slash. The expected issuer
+// and audience come from the DEVICE (target, --aud), never from a token or
+// a discovery document. Endpoint paths are fixed; a discovery document
+// that pointed elsewhere would be a way to redirect the device.
+//
+// NO SECRET HERE: there is no password on this device. The refresh token
+// is sealed by kspeicher/ksiegel like every other session (never in clear
+// on the disk). Client id and audience defaults are placeholders until
+// the client is registered at the service (open item in the report).
+
+import std.rt
+import std.io
+import knetz
+import kjson
+import kjwt
+import anbieter
+
+export { push }
+
+static mut p_dev: [u8; 27] = "/oidc/device_authorization\0"
+static mut p_tok: [u8; 12] = "/oidc/token\0"
+static mut p_jwks: [u8; 16] = "/oidc/jwks.json\0"
+static mut p_rev: [u8; 13] = "/oidc/revoke\0"
+static mut p_me: [u8; 15] = "/oidc/userinfo\0"
+
+static mut m_post: [u8; 5] = "POST\0"
+static mut m_get: [u8; 4] = "GET\0"
+
+static mut f_dcode: [u8; 12] = "device_code\0"
+static mut f_ucode: [u8; 10] = "user_code\0"
+static mut f_uri: [u8; 17] = "verification_uri\0"
+static mut f_urik: [u8; 26] = "verification_uri_complete\0"
+static mut f_expin: [u8; 11] = "expires_in\0"
+static mut f_interval: [u8; 9] = "interval\0"
+static mut f_acc: [u8; 13] = "access_token\0"
+static mut f_idt: [u8; 9] = "id_token\0"
+static mut f_ref: [u8; 14] = "refresh_token\0"
+static mut f_ttype: [u8; 11] = "token_type\0"
+static mut f_error: [u8; 6] = "error\0"
+static mut f_sub: [u8; 4] = "sub\0"
+static mut f_name: [u8; 5] = "name\0"
+
+static mut k_clientid: [u8; 10] = "client_id\0"
+static mut k_scope: [u8; 6] = "scope\0"
+static mut k_grant: [u8; 11] = "grant_type\0"
+static mut k_devcode: [u8; 12] = "device_code\0"
+static mut k_refresh: [u8; 14] = "refresh_token\0"
+static mut k_token: [u8; 6] = "token\0"
+static mut k_hint: [u8; 16] = "token_type_hint\0"
+
+static mut v_scope: [u8; 30] = "openid profile offline_access\0"
+static mut v_gdev: [u8; 45] = "urn:ietf:params:oauth:grant-type:device_code\0"
+static mut v_gref: [u8; 14] = "refresh_token\0"
+static mut v_hintref: [u8; 14] = "refresh_token\0"
+static mut v_bearer: [u8; 7] = "Bearer\0"
+
+static mut e_pending: [u8; 22] = "authorization_pending\0"
+static mut e_slow: [u8; 10] = "slow_down\0"
+static mut e_expired: [u8; 14] = "expired_token\0"
+static mut e_denied: [u8; 14] = "access_denied\0"
+
+// placeholders until the client is registered (see header)
+static mut d_client: [u8; 16] = "orientos-device\0"
+static mut d_aud: [u8; 9] = "orientos\0"
+
+static mut h_form: [u8; 19] = "konto.hint.badjson\0"
+static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
+static mut h_denied: [u8; 22] = "konto.hint.dev_denied\0"
+static mut h_expired: [u8; 23] = "konto.hint.dev_expired\0"
+static mut h_subj: [u8; 23] = "konto.hint.jwt_subject\0"
+static mut h_norefresh: [u8; 22] = "konto.hint.no_refresh\0"
+static mut h_jwt_malformed: [u8; 25] = "konto.hint.jwt_malformed\0"
+static mut h_jwt_alg: [u8; 19] = "konto.hint.jwt_alg\0"
+static mut h_jwt_sig: [u8; 19] = "konto.hint.jwt_sig\0"
+static mut h_jwt_expired: [u8; 23] = "konto.hint.jwt_expired\0"
+static mut h_jwt_claims: [u8; 22] = "konto.hint.jwt_claims\0"
+static mut h_jwt_iss: [u8; 19] = "konto.hint.jwt_iss\0"
+static mut h_jwt_aud: [u8; 19] = "konto.hint.jwt_aud\0"
+static mut h_jwt_nbf: [u8; 19] = "konto.hint.jwt_nbf\0"
+static mut h_jwt_kid: [u8; 19] = "konto.hint.jwt_kid\0"
+
+static mut nm: [u8; 8] = "fleitec\0"
+
+const LEEWAY: i64 = 30
+const DEFAULT_INTERVAL: u64 = 5
+
+fn push() -> anbieter.Push {
+    return anbieter.Push { name: (&nm[0]) as u64, anmelden: anmelden,
+        erneuern: erneuern, abmelden: abmelden, pruefen: check }
+}
+
+// ------------------------------------------------------------------ tools
+
+fn target_from(z: *mut anbieter.Zugang, zl: *mut knetz.Target) -> bool {
+    return knetz.target_read((*z).ziel, rt.c_length((*z).ziel),
+        (*z).zielname, (*z).wurzeln, zl)
+}
+
+fn hint(s: *mut anbieter.Sitzung, k: u64) {
+    rt.buf_clear(&(*s).hinweis)
+    rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
+}
+
+fn net_state(a: *mut knetz.Antw) -> u32 {
+    if (*a).fehler == knetz.F_TLS {
+        return anbieter.S_TLS
+    }
+    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_READ {
+        return anbieter.S_KEINNETZ
+    }
+    return anbieter.S_ERROR
+}
+
+fn unreserved(c: u8) -> bool {
+    return (c >= 48 as u8 && c <= 57 as u8) || (c >= 65 as u8 && c <= 90 as u8)
+        || (c >= 97 as u8 && c <= 122 as u8) || c == 45 as u8
+        || c == 46 as u8 || c == 95 as u8 || c == 126 as u8
+}
+
+// key=value for a form body, value percent-encoded (every octet outside
+// the RFC 3986 unreserved set).
+fn form_add(b: *mut rt.Buf, key: u64, val: u64, vl: usize) {
+    if (*b).len > 0 {
+        rt.buf_push(b, 38 as u8)
+    }
+    rt.buf_push_bytes(b, key, rt.c_length(key))
+    rt.buf_push(b, 61 as u8)
+    var hx: [u8; 17] = "0123456789ABCDEF\0"
+    var i: usize = 0
+    while i < vl {
+        let c: u8 = rt.ld8(val, i)
+        if unreserved(c) {
+            rt.buf_push(b, c)
+        } else {
+            rt.buf_push(b, 37 as u8)
+            rt.buf_push(b, hx[(c >> 4 as u8) as usize])
+            rt.buf_push(b, hx[(c & 15 as u8) as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn form_add_c(b: *mut rt.Buf, key: u64, val: u64) {
+    form_add(b, key, val, rt.c_length(val))
+}
+
+fn client_of(z: *mut anbieter.Zugang) -> u64 {
+    if (*z).klient != 0 {
+        return (*z).klient
+    }
+    return (&d_client[0]) as u64
+}
+
+fn aud_of(z: *mut anbieter.Zugang) -> u64 {
+    if (*z).zielgruppe != 0 {
+        return (*z).zielgruppe
+    }
+    return (&d_aud[0]) as u64
+}
+
+// The expected issuer as a C string: the target without trailing slashes.
+fn issuer_of(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+    var n: usize = rt.c_length((*z).ziel)
+    while n > 0 && rt.ld8((*z).ziel, n - 1) == 47 as u8 {
+        n = n - 1
+    }
+    rt.buf_push_bytes(aus, (*z).ziel, n)
+    rt.buf_push(aus, 0 as u8)
+}
+
+fn now_secs() -> i64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0]
+}
+
+// POST a form body (secrets in it are wiped right after the call).
+fn post_form(zl: *mut knetz.Target, pfad: u64, body: *mut rt.Buf,
+    a: *mut knetz.Antw) -> bool {
+    let da: bool = knetz.sende_form(zl, (&m_post[0]) as u64, 4, pfad,
+        rt.c_length(pfad), (*body).ptr, (*body).len, 0, 0, a)
+    rt.mem_set((*body).ptr, 0 as u8, (*body).len)
+    rt.buf_free(body)
+    return da
+}
+
+// error field of an OAuth error answer ("" when there is none)
+fn error_of(a: *mut knetz.Antw, aus: *mut rt.Buf) {
+    var d: kjson.Json = kjson.json_new()
+    if kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len)
+        && kjson.json_valid(&d) {
+        let _t: bool = kjson.text(&d, kjson.json_root(&d),
+            (&f_error[0]) as u64, aus)
+    }
+    kjson.json_free(&d)
+}
+
+fn is_text(b: *mut rt.Buf, want: u64) -> bool {
+    return (*b).len == rt.c_length(want)
+        && rt.mem_eq((*b).ptr, want, (*b).len)
+}
+
+fn jwt_hint(r: u32) -> u64 {
+    if r == kjwt.R_ALG { return (&h_jwt_alg[0]) as u64 }
+    if r == kjwt.R_SIG { return (&h_jwt_sig[0]) as u64 }
+    if r == kjwt.R_EXPIRED { return (&h_jwt_expired[0]) as u64 }
+    if r == kjwt.R_CLAIMS { return (&h_jwt_claims[0]) as u64 }
+    if r == kjwt.R_ISS { return (&h_jwt_iss[0]) as u64 }
+    if r == kjwt.R_AUD { return (&h_jwt_aud[0]) as u64 }
+    if r == kjwt.R_NBF { return (&h_jwt_nbf[0]) as u64 }
+    if r == kjwt.R_KID { return (&h_jwt_kid[0]) as u64 }
+    return (&h_jwt_malformed[0]) as u64
+}
+
+// ------------------------------------------------------------- the tokens
+//
+// A 200 answer of the token endpoint -> a session. Every refusal sets the
+// state and a hint and leaves `s` without tokens.
+fn tokens_take(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
+    a: *mut knetz.Antw, s: *mut anbieter.Sitzung, subject_known: bool) -> u32 {
+    var d: kjson.Json = kjson.json_new()
+    var accb: rt.Buf = rt.buf_new()
+    var idb: rt.Buf = rt.buf_new()
+    var refb: rt.Buf = rt.buf_new()
+    var ttype: rt.Buf = rt.buf_new()
+    var st: u32 = anbieter.S_OK
+    if !(kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len)
+        && kjson.json_valid(&d)) {
+        st = anbieter.S_ERROR
+        hint(s, (&h_form[0]) as u64)
+    } else {
+        let w: u32 = kjson.json_root(&d)
+        let _1: bool = kjson.text(&d, w, (&f_acc[0]) as u64, &accb)
+        let _2: bool = kjson.text(&d, w, (&f_idt[0]) as u64, &idb)
+        let _3: bool = kjson.text(&d, w, (&f_ref[0]) as u64, &refb)
+        let _4: bool = kjson.text(&d, w, (&f_ttype[0]) as u64, &ttype)
+        var got: bool = false
+        let ei: i64 = kjson.int(&d, w, (&f_expin[0]) as u64, &got)
+        if accb.len == 0 {
+            st = anbieter.S_ERROR
+            hint(s, (&h_form[0]) as u64)
+        } else if ttype.len > 0 && !is_text(&ttype, (&v_bearer[0]) as u64) {
+            st = anbieter.S_ERROR
+            hint(s, (&h_form[0]) as u64)
+        } else if subject_known && refb.len == 0 {
+            // a rotation that returns no new refresh token is not one
+            st = anbieter.S_ERROR
+            hint(s, (&h_norefresh[0]) as u64)
+        } else {
+            st = verify_into(z, zl, s, &accb, &idb)
+        }
+        if st == anbieter.S_OK {
+            rt.buf_push_bytes(&(*s).zugriff, accb.ptr, accb.len)
+            rt.buf_push_bytes(&(*s).erneuerung, refb.ptr, refb.len)
+            if got && ei > 0 && (*s).ablauf == 0 {
+                (*s).ablauf = (now_secs() + ei) as u64
+            }
+        }
+    }
+    kjson.json_free(&d)
+    rt.mem_set(accb.ptr, 0 as u8, accb.len)
+    rt.mem_set(refb.ptr, 0 as u8, refb.len)
+    rt.buf_free(&accb)
+    rt.buf_free(&idb)
+    rt.buf_free(&refb)
+    rt.buf_free(&ttype)
+    (*s).stand = st
+    return st
+}
+
+// JWKS fetch + the checks. S_OK fills subject/display/datenort/ablauf.
+fn verify_into(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
+    s: *mut anbieter.Sitzung, accb: *mut rt.Buf, idb: *mut rt.Buf) -> u32 {
+    var ja: knetz.Antw = knetz.reply_new()
+    let da: bool = knetz.sende(zl, (&m_get[0]) as u64, 3,
+        (&p_jwks[0]) as u64, rt.c_length((&p_jwks[0]) as u64), 0, 0, 0, 0, 0,
+        0, &ja)
+    if !da {
+        let st: u32 = net_state(&ja)
+        knetz.reply_free(&ja)
+        return st
+    }
+    if ja.code != 200 as u32 {
+        knetz.reply_free(&ja)
+        hint(s, (&h_status[0]) as u64)
+        return anbieter.S_ERROR
+    }
+    var iss: rt.Buf = rt.buf_new()
+    issuer_of(z, &iss)
+    var cl: kjwt.Claims = kjwt.claims_new()
+    let now: i64 = now_secs()
+    var st: u32 = anbieter.S_OK
+    let r: u32 = kjwt.verify(accb.ptr, accb.len, ja.koerper.ptr,
+        ja.koerper.len, iss.ptr, aud_of(z), now, LEEWAY, &cl)
+    if r != kjwt.R_OK {
+        st = anbieter.S_ABGELEHNT
+        hint(s, jwt_hint(r))
+    } else if (*idb).len > 0 {
+        // the id_token must verify too (aud = client id) and be the
+        // SAME subject; otherwise two tokens would disagree about who
+        // signed in.
+        var ci: kjwt.Claims = kjwt.claims_new()
+        let r2: u32 = kjwt.verify(idb.ptr, idb.len, ja.koerper.ptr,
+            ja.koerper.len, iss.ptr, client_of(z), now, LEEWAY, &ci)
+        if r2 != kjwt.R_OK {
+            st = anbieter.S_ABGELEHNT
+            hint(s, jwt_hint(r2))
+        } else if ci.sub.len != cl.sub.len
+            || !rt.mem_eq(ci.sub.ptr, cl.sub.ptr, cl.sub.len) {
+            st = anbieter.S_ABGELEHNT
+            hint(s, (&h_subj[0]) as u64)
+        }
+        kjwt.claims_free(&ci)
+    }
+    if st == anbieter.S_OK {
+        rt.buf_clear(&(*s).subjekt)
+        rt.buf_push_bytes(&(*s).subjekt, cl.sub.ptr, cl.sub.len)
+        rt.buf_clear(&(*s).anzeige)
+        if cl.name.len > 0 {
+            rt.buf_push_bytes(&(*s).anzeige, cl.name.ptr, cl.name.len)
+        } else {
+            rt.buf_push_bytes(&(*s).anzeige, cl.sub.ptr, cl.sub.len)
+        }
+        rt.buf_clear(&(*s).datenort)
+        rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+        (*s).ablauf = cl.exp
+    }
+    kjwt.claims_free(&cl)
+    rt.buf_free(&iss)
+    knetz.reply_free(&ja)
+    return st
+}
+
+// ------------------------------------------------------------------ steps
+
+// Step 1: ask the service for a device code.
+fn start(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var body: rt.Buf = rt.buf_new()
+    form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
+    form_add_c(&body, (&k_scope[0]) as u64, (&v_scope[0]) as u64)
+    var a: knetz.Antw = knetz.reply_new()
+    let da: bool = post_form(zl, (&p_dev[0]) as u64, &body, &a)
+    if !da {
+        (*s).stand = net_state(&a)
+        knetz.reply_free(&a)
+        return (*s).stand
+    }
+    if a.code == 429 as u32 {
+        knetz.reply_free(&a)
+        (*s).stand = anbieter.S_GEBREMST
+        return (*s).stand
+    }
+    if a.code != 200 as u32 {
+        knetz.reply_free(&a)
+        (*s).stand = anbieter.S_ERROR
+        hint(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    var d: kjson.Json = kjson.json_new()
+    var ok: bool = kjson.json_parse(&d, a.koerper.ptr, a.koerper.len)
+        && kjson.json_valid(&d)
+    if ok {
+        let w: u32 = kjson.json_root(&d)
+        ok = kjson.text(&d, w, (&f_dcode[0]) as u64, &(*s).temp)
+            && kjson.text(&d, w, (&f_ucode[0]) as u64, &(*s).gcode)
+            && kjson.text(&d, w, (&f_uri[0]) as u64, &(*s).gurl)
+        let _k: bool = kjson.text(&d, w, (&f_urik[0]) as u64, &(*s).gurlk)
+        var g1: bool = false
+        var g2: bool = false
+        let ex: i64 = kjson.int(&d, w, (&f_expin[0]) as u64, &g1)
+        let iv: i64 = kjson.int(&d, w, (&f_interval[0]) as u64, &g2)
+        if g1 && ex > 0 {
+            (*s).gueltig = ex as u64
+        } else {
+            (*s).gueltig = 600
+        }
+        if g2 && iv > 0 {
+            (*s).intervall = iv as u64
+        } else {
+            (*s).intervall = DEFAULT_INTERVAL
+        }
+    }
+    kjson.json_free(&d)
+    knetz.reply_free(&a)
+    if !ok || (*s).temp.len == 0 || (*s).gcode.len == 0 {
+        rt.buf_clear(&(*s).temp)
+        rt.buf_clear(&(*s).gcode)
+        rt.buf_clear(&(*s).gurl)
+        rt.buf_clear(&(*s).gurlk)
+        (*s).stand = anbieter.S_ERROR
+        hint(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    (*s).stand = anbieter.S_GERAET
+    return (*s).stand
+}
+
+// Step 2: ask once whether the human has decided.
+fn poll(z: *mut anbieter.Zugang, zl: *mut knetz.Target,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var body: rt.Buf = rt.buf_new()
+    form_add_c(&body, (&k_grant[0]) as u64, (&v_gdev[0]) as u64)
+    form_add_c(&body, (&k_devcode[0]) as u64, (*z).temp)
+    form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
+    var a: knetz.Antw = knetz.reply_new()
+    let da: bool = post_form(zl, (&p_tok[0]) as u64, &body, &a)
+    if !da {
+        (*s).stand = net_state(&a)
+        knetz.reply_free(&a)
+        return (*s).stand
+    }
+    if a.code == 200 as u32 {
+        let st: u32 = tokens_take(z, zl, &a, s, false)
+        knetz.reply_free(&a)
+        return st
+    }
+    var err: rt.Buf = rt.buf_new()
+    error_of(&a, &err)
+    var st: u32 = anbieter.S_ERROR
+    if is_text(&err, (&e_pending[0]) as u64) {
+        // keep the code: the caller asks again after `intervall`
+        rt.buf_push_bytes(&(*s).temp, (*z).temp, rt.c_length((*z).temp))
+        st = anbieter.S_GERAET
+    } else if is_text(&err, (&e_slow[0]) as u64) || a.code == 429 as u32 {
+        rt.buf_push_bytes(&(*s).temp, (*z).temp, rt.c_length((*z).temp))
+        st = anbieter.S_GEBREMST
+    } else if is_text(&err, (&e_expired[0]) as u64) {
+        st = anbieter.S_ABGELAUFEN
+        hint(s, (&h_expired[0]) as u64)
+    } else if is_text(&err, (&e_denied[0]) as u64) {
+        st = anbieter.S_ABGELEHNT
+        hint(s, (&h_denied[0]) as u64)
+    } else {
+        hint(s, (&h_status[0]) as u64)
+    }
+    rt.buf_free(&err)
+    knetz.reply_free(&a)
+    (*s).stand = st
+    return st
+}
+
+fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    anbieter.sitzung_leeren(s)
+    var zl: knetz.Target = knetz.target_new()
+    if !target_from(z, &zl) {
+        (*s).stand = anbieter.S_ERROR
+        hint(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    if (*z).temp == 0 || rt.c_length((*z).temp) == 0 {
+        return start(z, &zl, s)
+    }
+    return poll(z, &zl, s)
+}
+
+fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    anbieter.sitzung_leeren(s)
+    var zl: knetz.Target = knetz.target_new()
+    if !target_from(z, &zl) {
+        (*s).stand = anbieter.S_ERROR
+        hint(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    if (*z).erneuerung == 0 || rt.c_length((*z).erneuerung) == 0 {
+        hint(s, (&h_norefresh[0]) as u64)
+        (*s).stand = anbieter.S_ABGELAUFEN
+        return (*s).stand
+    }
+    var body: rt.Buf = rt.buf_new()
+    form_add_c(&body, (&k_grant[0]) as u64, (&v_gref[0]) as u64)
+    form_add_c(&body, (&k_refresh[0]) as u64, (*z).erneuerung)
+    form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
+    var a: knetz.Antw = knetz.reply_new()
+    let da: bool = post_form(&zl, (&p_tok[0]) as u64, &body, &a)
+    if !da {
+        (*s).stand = net_state(&a)
+        knetz.reply_free(&a)
+        return (*s).stand
+    }
+    var st: u32 = anbieter.S_ERROR
+    if a.code == 200 as u32 {
+        st = tokens_take(z, &zl, &a, s, true)
+    } else if a.code == 429 as u32 {
+        st = anbieter.S_GEBREMST
+    } else if a.code == 400 as u32 || a.code == 401 as u32 {
+        // invalid_grant: dead, replayed or revoked refresh token
+        st = anbieter.S_ABGELAUFEN
+        hint(s, (&h_expired[0]) as u64)
+    } else {
+        hint(s, (&h_status[0]) as u64)
+    }
+    knetz.reply_free(&a)
+    (*s).stand = st
+    return st
+}
+
+fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Target = knetz.target_new()
+    if !target_from(z, &zl) {
+        (*s).stand = anbieter.S_ERROR
+        return (*s).stand
+    }
+    if (*z).erneuerung == 0 || rt.c_length((*z).erneuerung) == 0 {
+        (*s).stand = anbieter.S_OK
+        return (*s).stand
+    }
+    var body: rt.Buf = rt.buf_new()
+    form_add_c(&body, (&k_token[0]) as u64, (*z).erneuerung)
+    form_add_c(&body, (&k_hint[0]) as u64, (&v_hintref[0]) as u64)
+    form_add_c(&body, (&k_clientid[0]) as u64, client_of(z))
+    var a: knetz.Antw = knetz.reply_new()
+    let da: bool = post_form(&zl, (&p_rev[0]) as u64, &body, &a)
+    var st: u32 = anbieter.S_OK
+    if !da {
+        st = net_state(&a)
+    } else if a.code != 200 as u32 {
+        st = anbieter.S_ERROR
+    }
+    knetz.reply_free(&a)
+    (*s).stand = st
+    return st
+}
+
+fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Target = knetz.target_new()
+    if !target_from(z, &zl) {
+        (*s).stand = anbieter.S_ERROR
+        return (*s).stand
+    }
+    var a: knetz.Antw = knetz.reply_new()
+    let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
+        (&p_me[0]) as u64, rt.c_length((&p_me[0]) as u64), 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), 0, 0, &a)
+    var st: u32 = anbieter.S_OK
+    if !da {
+        st = net_state(&a)
+    } else if a.code == 401 as u32 {
+        st = anbieter.S_ABGELAUFEN
+    } else if a.code != 200 as u32 {
+        st = anbieter.S_ERROR
+    }
+    knetz.reply_free(&a)
+    (*s).stand = st
+    return st
+}
