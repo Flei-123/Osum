@@ -433,6 +433,8 @@ rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
 # nicht mehr.
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$progs" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
+# r126: AUDIT_MKFS_EXTRA="/bin/x=/path/x.elf ..." puts extra files on the disk (a stub program for a click test)
+for ex in ${AUDIT_MKFS_EXTRA:-}; do ARGS+=("$ex"); done
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
 echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
