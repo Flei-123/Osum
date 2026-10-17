@@ -146,16 +146,16 @@ HWNET_PROGS="sh ls cat echo" bash tools/hwnet/build.sh "$TMPD/s0" 0 > "$TMPD/b0.
 ok "kernel and userland built"
 K="$TMPD/s0/k.mb"
 # Own CA + one certificate for the terminator. The name list carries konto.test (what the
-# guest checks) AND the TEXT 10.9.0.1 as a dNSName: firnchat-web is a Firn client whose
-# certificate check (lib/tls/x509.fi) looks at dNSName entries only -- it does not know the
-# iPAddress entry, so a certificate valid only for the IP is refused by it as `unreachable`
-# (measured: a first run with mkcerts' IP SAN failed at every call to the issuer).
+# guest checks) and the IP 10.9.0.1 as an iPAddress entry: firnchat-web (Firn
+# lib/tls/x509.fi, since r124) compares an IP issuer with iPAddress entries only. The old
+# workaround (the IP text as an extra dNSName) is gone; with a Firn without r124 this run
+# fails at every call to the issuer (`unreachable`).
 mkdir -p "$TMPD/certs"
 ( cd "$TMPD/certs" \
   && openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -subj "/CN=ANB Real Test Root" -days 30 \
          -addext "basicConstraints=critical,CA:TRUE" \
   && openssl req -newkey rsa:2048 -nodes -keyout good.key -out good.csr -subj "/CN=konto.test" \
-  && printf 'subjectAltName=DNS:konto.test,DNS:10.9.0.1,IP:10.9.0.1\nbasicConstraints=critical,CA:FALSE\n' > ext \
+  && printf 'subjectAltName=DNS:konto.test,IP:10.9.0.1\nbasicConstraints=critical,CA:FALSE\n' > ext \
   && openssl x509 -req -in good.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out leaf.pem -days 30 -sha256 -extfile ext \
   && cat leaf.pem ca.pem > good.pem ) > "$TMPD/certs.txt" 2>&1 \
     && ok "test certificates (CA + leaf for konto.test and 10.9.0.1)" || bad "certificates: $(tail -2 "$TMPD/certs.txt")"
