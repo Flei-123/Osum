@@ -4,7 +4,8 @@
 #
 #   bash tools/social/run.sh
 #   FLEIKONTAKTE=/path/to/bin/fleikontakte   (default: the FirnChat repo)
-#   SOCIAL_TOKEN_FORMAT=fkt1                 (the host mints an fkt1 token; default fkz1)
+#   SOCIAL_TOKEN_FORMAT=fkt1                 (default; the host mints an fkt1 token)
+#   SOCIAL_TOKEN_FORMAT=fkz1                 (legacy run: the host mints an fkz1 token)
 #
 # A real Osum guest under QEMU with the broker /bin/orientbus, the social
 # service /bin/social (kernel/user/social.fi) and two providers behind
@@ -126,9 +127,10 @@ fi
 ( cd "$TMPD" && "$FCBIN/firnchat" id "$TMPD/anna.id" ) > /dev/null 2>&1
 export SOCIAL_RELAY_PORT=$RP SOCIAL_FCBIN=$FCBIN SOCIAL_ANNA_ID=$TMPD/anna.id
 SECRET=$(cat "$TMPD/jarvis.secret")
+SOCIAL_TOKEN_FORMAT=${SOCIAL_TOKEN_FORMAT:-fkt1}
 export SOCIAL_TOKEN_FORMAT
-TOKEN=$(SOCIAL_TOKEN_FORMAT=${SOCIAL_TOKEN_FORMAT:-fkz1} python3 tools/social/host.py setup "$PORT" "$SECRET")
-TFMT=${SOCIAL_TOKEN_FORMAT:-fkz1}
+TOKEN=$(SOCIAL_TOKEN_FORMAT=${SOCIAL_TOKEN_FORMAT:-fkt1} python3 tools/social/host.py setup "$PORT" "$SECRET")
+TFMT=${SOCIAL_TOKEN_FORMAT:-fkt1}
 case "$TOKEN" in "$TFMT".u_JUSTIN.*) ok "justin's device access token made on the host ($TFMT)";;
     *) bad "no device access token: '$TOKEN'"; fin;; esac
 
