@@ -70,6 +70,14 @@ taste backspace
 warteneu explorer: colmem hit=1 || 60
 warte 4
 foto 15-back
+# --- right click first (before the picture steps): the context menu of the file list
+marke explorer: menurect
+rklickauf ftab
+warteneu explorer: menurect || 60
+warte 2
+foto 16-context
+taste esc
+warte 3
 # --- 3. preview pane with the first bytes of a text file: row 1 is brief.txt (row 0 is the folder config)
 klickauf ftabzeile1
 warte 2
@@ -88,30 +96,26 @@ foto 19-preview-ppm
 taste alt-p
 warte 3
 # --- 2. sort menu: Size (row 1), Type (row 3), Reversed (row 4)
+marke explorer: menurect
 klickauf frect41
-warteauf explorer: menurect || 60
+warteneu explorer: menurect || 60
 warte 2
 foto 12-sortmenu
 klickauf emenue1
 warte 3
+marke explorer: menurect
 klickauf frect41
-warteauf explorer: menurect || 60
+warteneu explorer: menurect || 60
 warte 2
 klickauf emenue3
 warte 3
+marke explorer: menurect
 klickauf frect41
-warteauf explorer: menurect || 60
+warteneu explorer: menurect || 60
 warte 2
 klickauf emenue4
 warte 3
 foto 13-sorted
-# --- right click: the context menu of the file list
-rklickauf ftab
-warteauf explorer: menurect || 60
-warte 2
-foto 16-context
-taste esc
-warte 3
 DREH
 bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de \
     extra='nostart wigapp=/bin/explorer,/users/justin' drehbuch="$OUT/dreh.txt" > "$OUT/lauf.log" 2>&1
@@ -161,7 +165,7 @@ PY
 echo "== 3b. context menu =="
 n=$(grep -ac 'explorer: menurect' "$S")
 [ "$n" -ge 4 ] && ok "the right click opened a fourth menu ($n menurect lines)" || bad "right click: only $n menurect lines"
-wh=$(grep -aoE 'explorer: menurect wx=[0-9]+ wy=[0-9]+ wh=[0-9]+' "$S" | tail -1 | grep -oE '[0-9]+$')
+wh=$(grep -aoE 'explorer: menurect wx=[0-9]+ wy=[0-9]+ wh=[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
 [ "${wh:-0}" -ge 100 ] 2>/dev/null && ok "the context menu has ${wh} px of rows" || bad "context menu height ${wh:-none}"
 
 echo "== 4. column resize by header drag =="
