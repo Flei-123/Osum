@@ -196,7 +196,7 @@ export {
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     kachelbar,
-    term_page, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
+    term_page, term_key, term_copy_take, term_paste_take, tcur_toggles_pub, tcur_shown_pub, tcopies_pub, tpastes_pub, on_screen_resize, win_tabbed, tiled, tile_focus_state, tile_nodes_all, tile_leaves_all, tile_tree_tag,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
     title_clipped, title_missing,
     set_uiscale, uisc, messleiste,
@@ -15250,6 +15250,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
                 // Kante, die untere Kante und die Ecke dazwischen.
                 // Das ist die Bedienung, die jedes andere System hat.
             }
+            if wg(state, i, W_KIND) == K_TERM && lokal_x >= 0 && lokal_y >= 0 {
+                term_mouse(state, i, 0, lokal_x as u64, lokal_y as u64, btn)
+            }
             ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
             // RUNDE TON: der Klickton. HIER, im Fensterserver, weil
             // hier JEDER Druck der linken Taste vorbeikommt -- kein
@@ -15261,6 +15264,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
             return
         }
         if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
+            if wg(state, i, W_KIND) == K_TERM && lokal_x >= 0 && lokal_y >= 0 {
+                term_mouse(state, i, 1, lokal_x as u64, lokal_y as u64, btn)
+            }
             ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64, alt)
             return
         }
@@ -15274,6 +15280,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
         // sondern nur fragen.
         if (btn & ps2m.B_RIGHT) != 0 && (alt & ps2m.B_RIGHT) == 0 {
             if lokal_x >= 0 && lokal_y >= 0 {
+                if wg(state, i, W_KIND) == K_TERM {
+                    term_mouse(state, i, 3, lokal_x as u64, lokal_y as u64, btn)
+                }
                 ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
                 ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
                     btn | mods_of(state))
@@ -15294,6 +15303,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
         // look at bit 4 ignore the event.
         if (btn & ps2m.B_MIDDLE) != 0 && (alt & ps2m.B_MIDDLE) == 0 {
             if lokal_x >= 0 && lokal_y >= 0 {
+                if wg(state, i, W_KIND) == K_TERM {
+                    term_mouse(state, i, 4, lokal_x as u64, lokal_y as u64, btn)
+                }
                 ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
                 ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
                     btn | mods_of(state))
@@ -15309,6 +15321,9 @@ fn on_mouse_btn(state: u64, btn: u64) {
         }
     }
     if lokal_x >= 0 && lokal_y >= 0 {
+        if (btn & ps2m.B_LEFT) != 0 && wg(state, i, W_KIND) == K_TERM {
+            term_mouse(state, i, 2, lokal_x as u64, lokal_y as u64, btn)
+        }
         ev_push(state, i, E_MOVE, lokal_x as u64, lokal_y as u64, btn)
     }
 }
@@ -15803,6 +15818,7 @@ fn poll(state: u64) -> bool {
     if jetzt != gs(state, S_SWTICK) {
         ss(state, S_SWTICK, jetzt)
         wmplug.sweep(state)
+        tcur_tick(state) // r1014: terminal cursor blink
     }
     // RUNDE TILING: erst die Tastenkuerzel. Sie liegen im Ring, den
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
@@ -15854,6 +15870,7 @@ fn poll(state: u64) -> bool {
 // ohne von Schriften etwas zu wissen.
 
 fn term_setup(state: u64, i: u64) {
+    tc_reset(i)
     let f: u64 = gs(state, S_FONT_MONO)
     var cw: u64 = 8
     var ch: u64 = 16
@@ -16204,6 +16221,35 @@ fn term_dump(state: u64, i: u64) {
         }
         r = r + 1
     }
+    // r1014 witness: the cursor / selection / clipboard state of this window
+    if i < 32 {
+        var s_tc: [u8; 14] = "wm: tcur win=\0"
+        var s_on: [u8; 5] = " on=\0"
+        var s_tg: [u8; 9] = " toggle=\0"
+        var s_hd: [u8; 7] = " hide=\0"
+        var s_se: [u8; 6] = " sel=\0"
+        var s_cp: [u8; 9] = " copies=\0"
+        var s_ps: [u8; 9] = " pastes=\0"
+        serial.puts((&s_tc[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_on[0]) as u64)
+        serial.dec(tc_on[(i) as usize])
+        serial.puts((&s_tg[0]) as u64)
+        serial.dec(tc_toggles[0])
+        serial.puts((&s_hd[0]) as u64)
+        serial.dec(tc_hide[(i) as usize])
+        serial.puts((&s_se[0]) as u64)
+        if tsel_shown(i) {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_cp[0]) as u64)
+        serial.dec(tc_copies[0])
+        serial.puts((&s_ps[0]) as u64)
+        serial.dec(tc_pastes[0])
+        serial.nl()
+    }
     sb_dump(state, i)
 }
 
@@ -16307,9 +16353,433 @@ fn term_color(state: u64, k: u64) -> u64 {
     return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
 }
 
-fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
-    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), cell_attr(state, i, c, r), cell_col(state, i, c, r))
+// ==================================================== r1014: TERMINAL CURSOR, SELECTION, COPY, PASTE
+// The cursor is a block (the cell with reverse video). It is drawn only in the focused terminal window and blinks with
+// BLINK_TICKS (the timer runs in `poll`, once per tick; an idle desktop costs one compare per tick and one cell repaint per
+// half second). `tc_on` says which cell shows the cursor right now, `cell_paint` reads it, so every repaint path agrees.
+// Selection: left press + drag in the live grid marks a stream of cells (tc_sa .. tc_sb, row-major); Ctrl+Shift+C (or
+// Ctrl+C while a selection stands) copies it, Ctrl+Shift+V / right click without selection / middle click paste. The
+// system clipboard itself lives in kgui (`termclip_pump`: this module cannot see wig).
+const BLINK_TICKS: u64 = 53
+const TC_BUF: u64 = 4096
+static mut tc_on: [u64; 32] = [0 as u64; 32]    // 1 = the cursor is painted at (tc_cc, tc_cr)
+static mut tc_cc: [u64; 32] = [0 as u64; 32]
+static mut tc_cr: [u64; 32] = [0 as u64; 32]
+static mut tc_hide: [u64; 32] = [0 as u64; 32]  // 1 = the program hid the cursor (CSI ? 25 l)
+static mut tc_sel: [u64; 32] = [0 as u64; 32]   // 0 none, 1 dragging, 2 set
+static mut tc_sa: [u64; 32] = [0 as u64; 32]    // anchor cell (row * cols + col)
+static mut tc_sb: [u64; 32] = [0 as u64; 32]    // moving end
+static mut tc_phase: [u64; 1] = [1 as u64; 1]   // 1 = visible half of the blink
+static mut tc_next: [u64; 1] = [0 as u64; 1]    // tick of the next toggle
+static mut tc_toggles: [u64; 1] = [0 as u64; 1]
+static mut tc_buf: [u8; 4104] = [0 as u8; 4104] // the copied text, waiting for kgui
+static mut tc_cn: [u64; 1] = [0 as u64; 1]      // its length (0 = nothing waits)
+static mut tc_paste: [u64; 1] = [0 as u64; 1]   // tty + 1 that waits for a paste, 0 = none
+static mut tc_copies: [u64; 1] = [0 as u64; 1]
+static mut tc_pastes: [u64; 1] = [0 as u64; 1]
+
+fn tc_reset(i: u64) {
+    if i >= 32 {
+        return
+    }
+    tc_on[(i) as usize] = 0
+    tc_hide[(i) as usize] = 0
+    tc_sel[(i) as usize] = 0
 }
+
+fn tsel_lo(i: u64) -> u64 {
+    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
+        return tc_sa[(i) as usize]
+    }
+    return tc_sb[(i) as usize]
+}
+
+fn tsel_hi(i: u64) -> u64 {
+    if tc_sa[(i) as usize] < tc_sb[(i) as usize] {
+        return tc_sb[(i) as usize]
+    }
+    return tc_sa[(i) as usize]
+}
+
+// a selection that is visible: set, or dragged over at least two cells
+fn tsel_shown(i: u64) -> bool {
+    if i >= 32 || tc_sel[(i) as usize] == 0 {
+        return false
+    }
+    if tc_sel[(i) as usize] == 2 {
+        return true
+    }
+    return tc_sa[(i) as usize] != tc_sb[(i) as usize]
+}
+
+fn tsel_has(state: u64, i: u64, c: u64, r: u64) -> bool {
+    if !tsel_shown(i) {
+        return false
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    return k >= tsel_lo(i) && k <= tsel_hi(i)
+}
+
+fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
+    var at: u64 = cell_attr(state, i, c, r)
+    if i < 32 {
+        if tsel_has(state, i, c, r) {
+            at = at ^ 1
+        }
+        if tc_on[(i) as usize] != 0 && tc_cc[(i) as usize] == c && tc_cr[(i) as usize] == r {
+            at = at ^ 1
+        }
+    }
+    cell_paint_v(state, i, c, r, cell_get(state, i, c, r), at, cell_col(state, i, c, r))
+}
+
+fn tcur_dmg(state: u64, i: u64, c: u64, r: u64) {
+    let cw: u64 = wg(state, i, W_CELLW)
+    let ch: u64 = wg(state, i, W_CELLH)
+    let _d: u64 = damage_rect(state, i, c * cw, r * ch, cw, ch)
+}
+
+// take the cursor off the grid (before output moves things under it)
+fn tcur_off(state: u64, i: u64) {
+    if i >= 32 || tc_on[(i) as usize] == 0 {
+        return
+    }
+    tc_on[(i) as usize] = 0
+    cell_paint(state, i, tc_cc[(i) as usize], tc_cr[(i) as usize])
+    tcur_dmg(state, i, tc_cc[(i) as usize], tc_cr[(i) as usize])
+}
+
+fn tcur_want(state: u64, i: u64) -> bool {
+    if tc_hide[(i) as usize] != 0 || tc_phase[0] == 0 || gs(state, S_FOCUS) != i + 1 {
+        return false
+    }
+    if tp_sbv[(i) as usize] != 0 || wg(state, i, W_GRID) == 0 {
+        return false
+    }
+    return wg(state, i, W_CX) < wg(state, i, W_COLS) && wg(state, i, W_CY) < wg(state, i, W_ROWS)
+}
+
+// bring the painted cursor in line with the wanted one
+fn tcur_sync(state: u64, i: u64) {
+    if i >= 32 || !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let want: bool = tcur_want(state, i)
+    let cx: u64 = wg(state, i, W_CX)
+    let cy: u64 = wg(state, i, W_CY)
+    if tc_on[(i) as usize] != 0 && (!want || tc_cc[(i) as usize] != cx || tc_cr[(i) as usize] != cy) {
+        tcur_off(state, i)
+    }
+    if want && tc_on[(i) as usize] == 0 {
+        tc_on[(i) as usize] = 1
+        tc_cc[(i) as usize] = cx
+        tc_cr[(i) as usize] = cy
+        cell_paint(state, i, cx, cy)
+        tcur_dmg(state, i, cx, cy)
+    }
+}
+
+// once per tick from `poll`
+fn tcur_tick(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < tc_next[0] {
+        return
+    }
+    tc_next[0] = now + BLINK_TICKS
+    if tc_phase[0] == 0 {
+        tc_phase[0] = 1
+    } else {
+        tc_phase[0] = 0
+    }
+    tc_toggles[0] = tc_toggles[0] + 1
+    var i: u64 = 0
+    while i < 32 && i < MAX_WIN {
+        tcur_sync(state, i)
+        i = i + 1
+    }
+}
+
+// output or a key: the cursor shows solid again for a whole period
+fn tcur_solid(state: u64) {
+    tc_phase[0] = 1
+    tc_next[0] = kstate.get(state, kstate.TICKS) + BLINK_TICKS
+}
+
+fn tcur_toggles_pub() -> u64 {
+    return tc_toggles[0]
+}
+
+fn tcur_shown_pub(i: u64) -> u64 {
+    if i >= 32 {
+        return 0
+    }
+    return tc_on[(i) as usize]
+}
+
+// repaint the cells k0 .. k1 (row-major indices)
+fn tsel_paint(state: u64, i: u64, k0: u64, k1: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    if cols == 0 {
+        return
+    }
+    var k: u64 = k0
+    while k <= k1 && k < cols * rows {
+        cell_paint(state, i, k % cols, k / cols)
+        k = k + 1
+    }
+    damage_win(state, i)
+}
+
+fn tsel_clear(state: u64, i: u64) {
+    if i >= 32 || tc_sel[(i) as usize] == 0 {
+        return
+    }
+    let lo: u64 = tsel_lo(i)
+    let hi: u64 = tsel_hi(i)
+    let was: bool = tsel_shown(i)
+    tc_sel[(i) as usize] = 0
+    if was {
+        tsel_paint(state, i, lo, hi)
+    }
+}
+
+// the selected text -> tc_buf (UTF-8, trailing blanks of a row cut, rows joined by LF). Returns the length.
+fn tsel_text(state: u64, i: u64) -> u64 {
+    let cols: u64 = wg(state, i, W_COLS)
+    if cols == 0 || !tsel_shown(i) {
+        return 0
+    }
+    let lo: u64 = tsel_lo(i)
+    let hi: u64 = tsel_hi(i)
+    let r0: u64 = lo / cols
+    let r1: u64 = hi / cols
+    var n: u64 = 0
+    var r: u64 = r0
+    while r <= r1 {
+        var c0: u64 = 0
+        var c1: u64 = cols - 1
+        if r == r0 {
+            c0 = lo % cols
+        }
+        if r == r1 {
+            c1 = hi % cols
+        }
+        // cut the trailing blanks
+        var e: u64 = c1 + 1
+        while e > c0 && cell_get(state, i, e - 1, r) <= 32 {
+            e = e - 1
+        }
+        var c: u64 = c0
+        while c < e && n + 3 < TC_BUF {
+            var z: u64 = cell_get(state, i, c, r)
+            if z < 32 {
+                z = 32
+            }
+            if z < 128 {
+                tc_buf[(n) as usize] = z as u8
+                n = n + 1
+            } else if z < 256 {
+                tc_buf[(n) as usize] = (0xC0 | (z >> 6)) as u8
+                tc_buf[(n + 1) as usize] = (0x80 | (z & 63)) as u8
+                n = n + 2
+            } else {
+                tc_buf[(n) as usize] = 63
+                n = n + 1
+            }
+            c = c + 1
+        }
+        if r < r1 && n + 1 < TC_BUF {
+            tc_buf[(n) as usize] = 10
+            n = n + 1
+        }
+        r = r + 1
+    }
+    return n
+}
+
+fn tsel_copy(state: u64, i: u64) {
+    let n: u64 = tsel_text(state, i)
+    if n == 0 {
+        return
+    }
+    tc_cn[0] = n
+    tc_copies[0] = tc_copies[0] + 1
+    var s_c: [u8; 14] = "wm: tcopy n=\0\0"
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(n)
+    serial.put(32 as u8)
+    serial.put(91 as u8)
+    var q: u64 = 0
+    while q < n && q < 80 {
+        let ch: u64 = tc_buf[(q) as usize] as u64
+        if ch == 10 {
+            serial.put(124 as u8)
+        } else if ch >= 32 && ch < 127 {
+            serial.put(ch as u8)
+        } else {
+            serial.put(63 as u8)
+        }
+        q = q + 1
+    }
+    serial.put(93 as u8)
+    serial.nl()
+}
+
+// kgui pumps: the copied text waits here. Copies it to `out`, returns the length (0 = nothing), empties the slot.
+fn term_copy_take(state: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = tc_cn[0]
+    if n == 0 {
+        return 0
+    }
+    tc_cn[0] = 0
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, tc_buf[(k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+// kgui pumps: a paste waits for tty T (returns T + 1, 0 = none)
+fn term_paste_take(state: u64) -> u64 {
+    let t: u64 = tc_paste[0]
+    tc_paste[0] = 0
+    return t
+}
+
+fn tcopies_pub() -> u64 {
+    return tc_copies[0]
+}
+
+fn tpastes_pub() -> u64 {
+    return tc_pastes[0]
+}
+
+fn tpaste_ask(state: u64, i: u64) {
+    let t: u64 = tty_of(state, i)
+    if t == NO_TTY {
+        return
+    }
+    tc_paste[0] = t + 1
+    tc_pastes[0] = tc_pastes[0] + 1
+    var s_p: [u8; 14] = "wm: tpaste t=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(t)
+    serial.nl()
+}
+
+// the mouse over a terminal window. kind: 0 left press, 1 left release, 2 move, 3 right press, 4 middle press.
+// lx / ly are window-local pixels (>= 0).
+fn term_mouse(state: u64, i: u64, kind: u64, lx: u64, ly: u64, btn: u64) {
+    if i >= 32 || !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let cw: u64 = wg(state, i, W_CELLW)
+    let ch: u64 = wg(state, i, W_CELLH)
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    if cw == 0 || ch == 0 || cols == 0 || rows == 0 {
+        return
+    }
+    var c: u64 = lx / cw
+    var r: u64 = ly / ch
+    if c >= cols {
+        c = cols - 1
+    }
+    if r >= rows {
+        r = rows - 1
+    }
+    let k: u64 = r * cols + c
+    if kind == 0 {
+        if tp_sbv[(i) as usize] != 0 {
+            return
+        }
+        tsel_clear(state, i)
+        tc_sel[(i) as usize] = 1
+        tc_sa[(i) as usize] = k
+        tc_sb[(i) as usize] = k
+        return
+    }
+    if kind == 2 {
+        if tc_sel[(i) as usize] != 1 || (btn & ps2m.B_LEFT) == 0 {
+            return
+        }
+        let old: u64 = tc_sb[(i) as usize]
+        if old == k {
+            return
+        }
+        tc_sb[(i) as usize] = k
+        var a: u64 = old
+        var b: u64 = k
+        if k < old {
+            a = k
+            b = old
+        }
+        tsel_paint(state, i, a, b)
+        return
+    }
+    if kind == 1 {
+        if tc_sel[(i) as usize] != 1 {
+            return
+        }
+        if tc_sa[(i) as usize] == tc_sb[(i) as usize] {
+            tc_sel[(i) as usize] = 0
+        } else {
+            tc_sel[(i) as usize] = 2
+        }
+        return
+    }
+    if kind == 3 {
+        if tsel_shown(i) {
+            tsel_copy(state, i)
+            tsel_clear(state, i)
+        } else {
+            tpaste_ask(state, i)
+        }
+        return
+    }
+    if kind == 4 {
+        tpaste_ask(state, i)
+    }
+}
+
+// a key with Ctrl held, from the keyboard layer. True = consumed (the shell does not see it).
+//   Ctrl+Shift+C  copy the selection        Ctrl+Shift+V  paste        Ctrl+C with a selection standing: copy
+fn term_key(state: u64, c: u64, shift: bool) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let f: u64 = focus(state)
+    if f >= MAX_WIN || f >= 32 || wg(state, f, W_KIND) != K_TERM || !darf(state, f) {
+        return false
+    }
+    let is_c: bool = c == 67 || c == 99
+    let is_v: bool = c == 86 || c == 118
+    if shift {
+        if is_c {
+            if tsel_shown(f) {
+                tsel_copy(state, f)
+            }
+            return true
+        }
+        if is_v {
+            tpaste_ask(state, f)
+            return true
+        }
+        return false
+    }
+    if is_c && tsel_shown(f) {
+        tsel_copy(state, f)
+        tsel_clear(state, f)
+        return true
+    }
+    return false
+}
+
 
 // r838: paint the cell at screen position (c, r) with the given character / attribute / colour octets (the scrollback view
 // paints history cells here, the live grid goes through `cell_paint`)
@@ -16907,6 +17377,8 @@ fn term_blank_screen(state: u64, i: u64) {
 
 // ESC c: back to the state of a new window
 fn term_full_reset(state: u64, i: u64) {
+    tcur_off(state, i)
+    tc_hide[(i) as usize] = 0
     term_blank_screen(state, i)
     tp_reset(i)
     wsv(state, i, W_CX, 0)
@@ -16974,8 +17446,15 @@ fn term_mode(state: u64, i: u64, on: bool) {
             } else {
                 tp_nowrap[(i) as usize] = 1
             }
+        } else if m == 25 {
+            // r1014: the text cursor (DECTCEM)
+            if on {
+                tc_hide[(i) as usize] = 0
+            } else {
+                tc_hide[(i) as usize] = 1
+            }
         }
-        // 25 (the text cursor: the terminal draws none), 1, 12, 2004 ...: accepted and dropped
+        // 1, 12, 2004 ...: accepted and dropped
         k = k + 1
     }
 }
@@ -17536,11 +18015,15 @@ fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
         return 0
     }
     sb_snap(state, i)
+    tsel_clear(state, i)
+    tcur_off(state, i)
     var k: u64 = 0
     while k < n {
         term_putc(state, i, kstate.get8(p + k))
         k = k + 1
     }
+    tcur_solid(state)
+    tcur_sync(state, i)
     damage_win(state, i)
     return n
 }
@@ -17629,7 +18112,11 @@ fn term_out(state: u64, i: u64, c: u64) {
     }
     ss(state, S_TPUT, gs(state, S_TPUT) + 1)
     sb_snap(state, i)
+    tsel_clear(state, i)
+    tcur_off(state, i)
     term_putc(state, i, c)
+    tcur_solid(state)
+    tcur_sync(state, i)
     damage_win(state, i)
 }
 

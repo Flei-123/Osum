@@ -69,6 +69,7 @@ import fs.vfs
 import block.wechsel
 import gfx.vmode
 import ui.wig
+import bus.bus
 import ui.wm
 import lib.version
 // RUNDE MARKE: der Produktname kommt aus EINER Quelle.
@@ -80,7 +81,7 @@ import lib.ksymtab
 
 export {
     stage_graphics, stage_surface, stage_hold, tafel_tick, beat_tick,
-    leser_tick, dnd_pump,
+    leser_tick, dnd_pump, termclip_pump,
     // RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` ruft sie.
     absturz,
     // RUNDE GLYPHE: die drei Tueren des Zeichen-Nachweises.
@@ -3428,6 +3429,63 @@ fn dnd_pump(state: u64) {
     let t: u64 = r >> 32
     let n: u64 = r & 0xFFFFFFFF
     let _s: u64 = tty.push_text(state, t, (&dnd_buf[0]) as u64, n)
+}
+
+// r1014: terminal copy / paste against the system clipboard. Copy: the text goes to the wig clipboard in full (4096) and its
+// head (192 inline) to the bus, like `wlibc.clip_put_typ`. Paste: the bus head, or the wig text when it starts with exactly
+// that head, is typed into the tty. Called from `gfx.wm_poll`; nothing waits -> two loads.
+static mut tclip_a: [u8; 4104] = [0 as u8; 4104]
+static mut tclip_b: [u8; 4104] = [0 as u8; 4104]
+
+fn termclip_pump(state: u64) {
+    let pa: u64 = (&tclip_a[0]) as u64
+    let pb: u64 = (&tclip_b[0]) as u64
+    let n: u64 = wm.term_copy_take(state, pa, 4096)
+    if n != 0 {
+        let _w: u64 = wig.clip_set_k(state, pa, n)
+        var bn: u64 = n
+        if bn > 192 {
+            bn = 192
+        }
+        let _b: u64 = bus.clip_set(state, sched.current(state), 1, bn, 0, pa)
+    }
+    let t1: u64 = wm.term_paste_take(state)
+    if t1 == 0 {
+        return
+    }
+    let t: u64 = t1 - 1
+    var len: u64 = bus.clip_get(state, sched.current(state), 0, pa, 4096, 0)
+    if len > 4096 {
+        len = 0
+    }
+    if len == 192 {
+        let w: u64 = wig.clip_get_k(state, pb, 4096)
+        if w > len {
+            var same: bool = true
+            var q: u64 = 0
+            while q < len {
+                if kstate.get8(pa + q) != kstate.get8(pb + q) {
+                    same = false
+                }
+                q = q + 1
+            }
+            if same {
+                var z: u64 = 0
+                while z < w {
+                    kstate.set8(pa + z, kstate.get8(pb + z) as u8)
+                    z = z + 1
+                }
+                len = w
+            }
+        }
+    } else if len == 0 {
+        let w2: u64 = wig.clip_get_k(state, pa, 4096)
+        len = w2
+    }
+    if len == 0 {
+        return
+    }
+    let _s: u64 = tty.push_text(state, t, pa, len)
 }
 
 // RUNDE VSYNC: DIE ZAHLEN DER BILDGRENZE UND DER BEWEGUNG.
