@@ -186,7 +186,7 @@ python3 - "$S" <<'PY' && ok "after the way there and back the columns are as wid
 import re, sys
 t = open(sys.argv[1], 'rb').read().decode('latin1')
 i = t.index('explorer: colresize')
-after = re.findall(r'explorer: colw a=(\d+) b=(\d+) c=(\d+) d=(\d+)', t[i:])
+after = re.findall(r'explorer: colw a=(\d+) b=(\d+) c=(\d+) d=(\d+)', t[:i])[-1:]
 j = t.rindex('explorer: colmem hit=1')
 back = re.findall(r'explorer: colw a=(\d+) b=(\d+) c=(\d+) d=(\d+)', t[j:])
 print("  after drag", after[0] if after else None, "back", back[0] if back else None)
