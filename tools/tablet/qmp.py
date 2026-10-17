@@ -19,13 +19,20 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    for _ in range(200):
+    s = None
+    for _ in range(300):
+        # a fresh socket per attempt: re-connecting a socket whose connect() failed gives EINVAL later
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             s.connect(sys.argv[1])
             break
         except OSError:
+            s.close()
+            s = None
             time.sleep(0.1)
+    if s is None:
+        print("qmp: cannot connect")
+        return 1
     buf = b""
 
     def readline():

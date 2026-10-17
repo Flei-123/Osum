@@ -28,7 +28,7 @@ run_tree() { # tree out
     mkdir -p "$2"
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=3 \
-        extra="usb hidgen wighalt=40" progs="$PROGS" \
+        extra="usb hidgen wmdauer wighalt=40" progs="$PROGS" \
         qemu="-device qemu-xhci -device usb-tablet -qmp unix:$2/qmp.sock,server,nowait" \
         hook="python3 $ROOT/tools/tablet/qmp.py $2/qmp.sock sleep:1 abs:16384,16384 down:right up:right wheel:up:3 wheel:down:2 abs:8192,24576 sleep:1" ) > "$2.log" 2>&1
 }
