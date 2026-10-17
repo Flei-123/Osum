@@ -1266,6 +1266,7 @@ printf 'url=https://chat.fleitec.com\n' > "$OUT/social.fleitec.conf"
 : > "$OUT/social.games.tsv"
 ARGS+=(/etc/social/ /apps/social.prog/
        "/apps/social.prog/ACTIONS=pakete/social/ACTIONS@0644"
+       "/apps/social.prog/SETTINGS=pakete/social/SETTINGS@0644"
        "/etc/social/providers=$OUT/social.providers@0644"
        "/etc/social/fleitec.conf=$OUT/social.fleitec.conf@0644"
        "/etc/social/games.tsv=$OUT/social.games.tsv@0644")
@@ -1441,7 +1442,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
 /bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
-/bin/social /bin/soclocal /bin/melder /bin/socfleitec /apps/social.prog/ACTIONS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol \
+/bin/social /bin/soclocal /bin/melder /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"

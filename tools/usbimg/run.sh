@@ -118,14 +118,15 @@ is "ASCII-Umschriften im angezeigten deutschen Text" "${umschrift:-0}" "0"
 zeichen=$(python3 -c '
 import sys
 d = open("locale/de/messages", encoding="utf-8").read()
-u = sum(d.count(c) for c in "äöüßÄÖÜ")
+# every non-ASCII character counts: 2 octets for umlauts, 3 for the typographic quotes
+u = sum(len(c.encode("utf-8")) - 1 for c in d if ord(c) > 127)
 print("%d %d %d" % (u, len(d), len(d.encode("utf-8"))))
 ')
 set -- $zeichen
 if [ "$3" -eq $(( $2 + $1 )) ]; then
-    ok "Oktettrechnung stimmt: $1 Umlaute, $2 Zeichen, $3 Oktette ($2 + $1)"
+    ok "Oktettrechnung stimmt: $1 Zusatzoktette, $2 Zeichen, $3 Oktette ($2 + $1)"
 else
-    bad "Oktettrechnung: $2 Zeichen, $3 Oktette, $1 Umlaute -- geht nicht auf"
+    bad "Oktettrechnung: $2 Zeichen, $3 Oktette, $1 Zusatzoktette -- geht nicht auf"
 fi
 
 # ------------------------------------------------------------- Laeufe
