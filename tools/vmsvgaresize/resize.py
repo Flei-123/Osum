@@ -4,7 +4,7 @@
 # Boots nothing itself. Logs in, waits for the desktop, then asks QEMU for each size through the VNC SetDesktopSize message (the same
 # kernel path as a VirtualBox hint: vmsvga.host_pending -> vmode.follow_host). After every size the screendump is saved
 # (<base>.<n>.ppm) and measured; one line per size is written to <base>.res:
-#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share>
+#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share> <start menu centre x or -1> <start menu bottom row or -1>
 import os
 import sys
 import time
@@ -60,6 +60,22 @@ def measure(mon, tag):
     return w, h, black, rows, lastblack, dup
 
 
+def menu_probe(mon, tag):
+    # r1007: open the start menu (Super key) and measure where its panel stands: horizontal centre and bottom edge. The panel colour
+    # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar.
+    mon.cmd("sendkey meta_l", 3.0)
+    f = mon.dump("%s.m.ppm" % (base + "." + tag))
+    w, h, b = ppm_rgb(f)
+    img = np.frombuffer(b, dtype=np.uint8).reshape(h, w, 3).astype(np.int16)
+    mon.cmd("sendkey meta_l", 1.5)
+    m = np.all(np.abs(img[: h - 40] - np.array([248, 249, 251])) <= 3, axis=2)
+    rows = np.where(m.sum(axis=1) >= 300)[0]
+    if len(rows) < 100:
+        return -1, -1
+    cols = np.where(m[rows[0] : rows[-1] + 1].sum(axis=0) >= 100)[0]
+    return int((cols[0] + cols[-1]) // 2), int(rows[-1])
+
+
 def main():
     mon = Mon(mon_sock)
     if not wait_for(lambda t: "glogin: bereit" in t, 200):
@@ -90,7 +106,8 @@ def main():
         m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
         ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
         r = measure(mon, str(n))
-        out.write("%d %d %d %.3f %d %.3f %d %d %.3f\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5]))
+        mcx, mbot = menu_probe(mon, str(n))
+        out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot))
         out.flush()
     out.close()
     mon.quit()
