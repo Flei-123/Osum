@@ -363,7 +363,7 @@ echo "== 5. das Zeigegeraet: PS/2 am zweiten Anschluss des 8042 =="
 ms=$(zahl "$TMPD/dump.txt" 'mouse: id=[0-9]+')
 num "die Kennung nach dem Radgriff (3 = mit Rad, vier Oktette je Paket)" "$ms" eq 3
 mst=$(zahl "$TMPD/dump.txt" 'mouse: .*selftest [0-9]+')
-num "die Zusagen des Treibers ueber sich selbst" "$mst" eq 10
+num "die Zusagen des Treibers ueber sich selbst" "$mst" eq 13
 # Der Eintrag der Umleitungstabelle steht im Bericht am Ende eines
 # Laufes mit `wmhold` -- er wird in Abschnitt 6 geholt.
 
