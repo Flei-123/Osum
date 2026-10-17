@@ -25,7 +25,8 @@ if [ -z "${TRAYLAYOUT_NOCP:-}" ]; then
     (cd "$OLDWT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1; bash tools/traylayout/shot.sh "$D/old" light > "$D/old.log" 2>&1)
     python3 -I tools/traylayout/check.py "$D/old" > "$D/old.res"; cat "$D/old.res" | grep FAIL | sed 's/^/  (old) /'
     fo=$(grep -c '^  FAIL' "$D/old.res")
-    [ "$fo" -ge 4 ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }
+    need=4; [ -n "${TRAYLAYOUT_OLD:-}" ] && need=1   # an explicit near ref differs by one change (Z9: volume field)
+    [ "$fo" -ge "$need" ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }
     if [ -n "$KEEP" ]; then mkdir -p "$KEEP/old"; cp "$D"/old/* "$KEEP/old/"; fi
 fi
 echo; echo "TRAYLAYOUT: $pass passed, $fail failed"

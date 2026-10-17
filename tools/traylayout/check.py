@@ -45,9 +45,14 @@ if not all(v is not None for v in (geom, chev, lang, net, clk)):
 bx, by, bw, bh = geom
 # 1. tray fields
 seq = [("chevron", chev), ("language", lang), ("network", net), ("clock", clk)]
-ordered = all(seq[i][1][0] + seq[i][1][2] <= seq[i + 1][1][0] for i in range(3))
-say(ordered, "fields in order chevron < language < network < clock, no overlap")
-gaps = [seq[i + 1][1][0] - (seq[i][1][0] + seq[i][1][2]) for i in range(3)]
+snd0 = last(r"taskbar: field snd x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+if snd0 is not None:
+    seq.insert(3, ("volume", snd0))   # the volume field sits in the group right after the network field
+ordered = all(seq[i][1][0] + seq[i][1][2] <= seq[i + 1][1][0] for i in range(len(seq) - 1))
+say(ordered, "fields in order chevron < language < network < [volume <] clock, no overlap")
+# the network + volume pair is one group (no gap needed between them); every other neighbour pair has the one gap
+gaps = [seq[i + 1][1][0] - (seq[i][1][0] + seq[i][1][2]) for i in range(len(seq) - 1)
+        if not (seq[i][0] == "network" and seq[i + 1][0] == "volume")]
 say(max(gaps) - min(gaps) <= 4 and min(gaps) >= 4, "one gap between the tray fields (gaps %s)" % gaps)
 say(bw - (clk[0] + clk[2]) >= 8, "right margin of the clock >= 8 (%d)" % (bw - (clk[0] + clk[2])))
 say(chev[2] <= 32, "chevron button <= 32 points wide (%d)" % chev[2])
@@ -102,5 +107,24 @@ else:
             if max(abs(px[o + c] - bgp[c]) for c in range(3)) > 70:
                 strong += 1
     say(strong * 100 <= tot * 55, "program icon '%s' in the bar is a glyph, not a filled tile (%d %% strongly different)" % (sym[-1][0], strong * 100 // tot))
+# 5. Z9: the volume field has room for its symbol AND its text ("100 %" was clipped when the bar was not compact)
+events = []
+for m in re.finditer(r"taskbar: field snd x=(\d+) y=\d+ w=(\d+) h=\d+", ser):
+    events.append((m.start(), "f", int(m.group(1)), int(m.group(2))))
+for m in re.finditer(r"taskbar: text snd x=(\d+) base=\d+ fg=\d+ bg=\d+ tw=(\d+) t=", ser):
+    events.append((m.start(), "t", int(m.group(1)), int(m.group(2))))
+events.sort()
+pend = None; pairs = []   # the bar reports a field's text BEFORE the field line itself
+for _, kind, a, b in events:
+    if kind == "t": pend = (a, b)
+    elif pend:
+        pairs.append((a, b, pend[0], pend[1])); pend = None
+if not pairs:
+    say(False, "the bar reports the volume field and its text (taskbar: field snd / text snd)")
+else:
+    worst_r = min(fx + fw - (tx + tw) for fx, fw, tx, tw in pairs)
+    worst_l = min(tx - fx for fx, fw, tx, tw in pairs)
+    say(worst_r >= 0, "volume text ends inside its field in all %d reports (worst right margin %d px)" % (len(pairs), worst_r))
+    say(worst_l >= 10, "volume field leaves room for its symbol in front of the text (worst left room %d px, need >= 10)" % worst_l)
 print("RESULT ok=%d fail=%d" % (ok, fail))
 sys.exit(1 if fail else 0)
