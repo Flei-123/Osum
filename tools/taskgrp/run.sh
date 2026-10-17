@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/taskgrp/run.sh -- taskbar grouping: two Explorer windows + Settings = TWO buttons, the Explorer one with `taskbar: grp i= n=2`.
-# COUNTER-PROBE: the tree before the grouping commit shows THREE buttons and no grp line.
+# tools/taskgrp/run.sh -- taskbar grouping: terminal + two Explorer windows + Settings = THREE buttons, the Explorer one with `taskbar: grp i= n=2`.
+# COUNTER-PROBE: the tree before the grouping commit shows FOUR buttons and no grp line.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -27,7 +27,7 @@ echo "== 1. new tree =="
 run_tree "$ROOT" "$OUT/new" || true
 [ -s "$OUT/new/scenes.txt" ] || { bad "driver wrote no scenes.txt"; tail -15 "$OUT/new.log"; echo "== TASKGRP: $pass green, $fail red =="; exit 1; }
 N="$OUT/new"
-[ "$(fact $N buttons)" = 2 ] && ok "two Explorer windows + Settings = 2 buttons" || bad "buttons=$(fact $N buttons), want 2"
+[ "$(fact $N buttons)" = 3 ] && ok "terminal + two Explorer windows + Settings = 3 buttons" || bad "buttons=$(fact $N buttons), want 3"
 [ "$(fact $N grp_max)" = 2 ] && ok "the Explorer button reports n=2" || bad "grp_max=$(fact $N grp_max), want 2"
 echo
 echo "== 2. COUNTER-PROBE: tree before the grouping =="
@@ -39,7 +39,7 @@ if [ -n "$BASE_COMMIT" ] && git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/
     git worktree remove --force "$BT" >/dev/null 2>&1
     O="$OUT/old"
     [ -s "$O/scenes.txt" ] && ok "old tree booted and was driven" || bad "old run wrote no scenes.txt"
-    [ "$(fact $O buttons)" = 3 ] && ok "old: 3 buttons (no grouping)" || bad "old: buttons=$(fact $O buttons), want 3"
+    [ "$(fact $O buttons)" = 4 ] && ok "old: 4 buttons (no grouping)" || bad "old: buttons=$(fact $O buttons), want 4"
     [ "$(fact $O grp_lines)" = 0 ] && ok "old: no grp lines" || bad "old: grp lines present"
 else
     echo "  (skipped: base commit '$BASE_COMMIT' not in this clone)"
