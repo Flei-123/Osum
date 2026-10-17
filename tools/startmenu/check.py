@@ -77,6 +77,13 @@ def main(out):
         if int(k) < 130 and name in valid and name not in first:
             first[name] = (int(x), int(y), int(w), int(h))
     check(len(first) >= 3, "the pinned tiles are reported (%d)" % len(first))
+    # r973 menu clean-up: the developer demo and the start menu's own entry are not tiles; one language in the names
+    check("Widgets" not in first and "Search" not in first and "Suchen" not in first,
+          "no Widgets demo and no Search entry among the tiles (%s)" % ", ".join(sorted(first)))
+    german = {"Programme", "Papierkorb", "Willkommen", "PDF-Betrachter", "Aufgabenverwaltung", "Datei-Explorer", "Einstellungen"}
+    check(not (german & set(first)), "no German names mixed into the English menu (%s)" % ", ".join(sorted(german & set(first))))
+    check("PDF Viewer" in first and "Store" in first and "Recycle Bin" in first,
+          "PDF Viewer, Store and Recycle Bin carry English names")
     check(all(w == 100 and h == 88 for (_, _, w, h) in first.values()),
           "every pinned tile is 100 x 88")
     xs = sorted({x for (x, _, _, _) in first.values()})
