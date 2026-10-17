@@ -1492,19 +1492,19 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe graphics)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (no network)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
 
 /Command line
     protocol: multiboot1
@@ -1524,7 +1524,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
 
 //@MARKE_PRODUKT@ (measuring board)
     protocol: multiboot1
