@@ -127,7 +127,9 @@ service enforces itself, where the data leaves the device:
    url=https://chat.fleitec.com
    # (a number works too: url=https://<IPv4> plus name=chat.fleitec.com;
    #  a NAME in url= is resolved through /etc/resolv.conf, IPv4 only)
-   relay=<IPv4 of the relay>:7771
+   # relay= takes a number or a NAME (r126): chat.fleitec.com:7771 is resolved
+   # through /etc/resolv.conf like url= (IPv4/A only; no answer -> `err dns`)
+   relay=<IPv4 or name of the relay>:7771
    ```
 3. `act call social.accounts.login provider=fleitec` → a code; type it in
    at chat.fleitec.com (profile → MEINE GERÄTE → "Gerät hinzufügen");
