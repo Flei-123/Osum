@@ -830,7 +830,7 @@ for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off ko
          konto.ui.book.offline konto.ui.book.refused konto.ui.book.noscope konto.ui.book.failed; do
     D=$(grep -a "^$K = " locale/de/messages | sed 's/^[^=]*= //'); E=$(grep -a "^$K = " locale/en/messages | sed 's/^[^=]*= //')
     if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "Meldung $K fehlt oder ist unuebersetzt"; fi
-    num "Schluessel $K wird von der Seite benutzt" "$(grep -c "\"$K\\\\0" $SF)" ge 1
+    num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/accounts.settings) ))" ge 1
 done
 # dieselbe Hinweis-Meldung wie im Ruecken (Vergleich Text gegen Text)
 HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
