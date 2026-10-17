@@ -90,7 +90,7 @@ export {
     dialog_open, dialog_is_open, dialog_result, dialog_default, KEY_DIALOG,
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
-    tip, tip_hide, say_tips, cmd_begin, cmd_item, cmd_end, cmd_hidden_n, cmd_hidden_labels, cmd_hidden_key, cmd_width,
+    tip, tip_hide, say_tips, cmd_begin, cmd_item, cmd_item_t, cmd_label_mode, table_resize_seq, table_resizable, table_colw_get, cmd_end, cmd_hidden_n, cmd_hidden_labels, cmd_hidden_key, cmd_width,
     table_heads, table_indent, table_align_right, table_hover, set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb, cv_round_a, cv_ring_a, cv_round_raw, cv_ring_raw, ftile_quiet, plate_node, glass_plates, glass_tile,
     cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
@@ -2840,6 +2840,7 @@ fn pump() -> u64 {
             S.s_ct_dn = NO_SLOT
             S.s_ct_dragged = false
             S.s_ct_sbk = NO_SLOT
+            rs_end()
             S.s_ed_down = NO_SLOT
             if S.s_hov_k != NO_SLOT {
                 S.s_hov_k = NO_SLOT
@@ -3540,6 +3541,11 @@ static mut cb_cp: [u64; 16] = [0 as u64; 16]
 static mut cb_key: [u64; 16] = [0 as u64; 16]
 static mut cb_lab: [u64; 16] = [0 as u64; 16]
 static mut cb_sep: [u8; 16] = [0 as u8; 16]
+// W4b: 0 = icon only, 1 = the word is shown beside the icon when the bar has room for the words of tier 1,
+// 2 = ... only when the bar has room for ALL words
+static mut cb_tier: [u8; 16] = [0 as u8; 16]
+static mut cb_wide: [u64; 16] = [0 as u64; 16]
+static mut cb_mode: u64 = 0
 static mut cb_tip: [u8; 1280] = [0 as u8; 1280]
 static mut cb_hid: [u8; 640] = [0 as u8; 640]
 static mut cb_n: u64 = 0
@@ -3549,6 +3555,70 @@ static mut cb_ovf: [u8; 8] = "More\0\0\0\0"
 fn cmd_begin() {
     cb_n = 0
     cb_vis = 0
+    cb_mode = 0
+}
+
+// W4b: a command that may show its WORD beside the icon (Windows 11 command bar). `tier` 1 = the word is
+// shown as soon as the words of all tier-1 commands fit, 2 = only when the words of all commands fit.
+fn cmd_item_t(cp: u64, key: u64, label: u64, shortcut: u64, sep: u64, tier: u64) {
+    if cb_n >= CB_MAX {
+        return
+    }
+    cmd_item(cp, key, label, shortcut, sep)
+    if cb_n > 0 {
+        cb_tier[(cb_n - 1) as usize] = tier as u8
+        cb_wide[(cb_n - 1) as usize] = cmd_lw(cb_n - 1)
+    }
+}
+
+// The width of a command button WITH its word, in points: 8 + glyph 18 + 6 + the text + 10, on a 4 grid.
+fn cmd_lw(i: u64) -> u64 {
+    let lp: u64 = cb_lab[(i) as usize]
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), lp, ulib.length(lp)) / S.s_S
+    return (8 + 18 + 6 + tw + 10 + 3) / 4 * 4
+}
+
+// The width of the first `k` commands when the commands whose tier is <= `mode` show their word.
+fn cmd_w_mode(k: u64, mode: u64) -> u64 {
+    var w: u64 = 0
+    var i: u64 = 0
+    while i < k {
+        if i > 0 {
+            w = w + cmdbar.GAP
+            if cb_sep[(i) as usize] != 0 as u8 {
+                w = w + cmdbar.SEP_W - cmdbar.GAP
+            }
+        }
+        if cb_tier[(i) as usize] != 0 as u8 && (cb_tier[(i) as usize] as u64) <= mode {
+            w = w + cb_wide[(i) as usize]
+        } else {
+            w = w + cmdbar.ITEM_W
+        }
+        i = i + 1
+    }
+    return w
+}
+
+// Draw a command button with the word: face, glyph at the left, the word behind it.
+fn draw_lbtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let p: u64 = widget.w_text(e)
+    let n: usize = widget.w_text_len(e)
+    widget.w_set_text(e, p, 0 as usize)
+    render.draw_widget(c, e)
+    widget.w_set_text(e, p, n)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    var col: u32 = (*t).text
+    if widget.w_is_disabled(e) {
+        col = (*t).text_disabled
+    }
+    let bw: u64 = widget.w_w(e) as u64
+    let bh: u64 = widget.w_h(e) as u64
+    let sz: u64 = sp(18)
+    let gx: u64 = (widget.w_x(e) as u64) + sp(8)
+    fuiapp.glyph(widget.w_value(e) as u64, gx, (widget.w_y(e) as u64) + (bh - sz) / 2, sz, col | 4278190080 as u32)
+    let lx: u64 = gx + sz + sp(6)
+    let lw: u64 = (widget.w_x(e) as u64) + bw - lx
+    fuiapp.label(lx, (widget.w_y(e) as u64) + (bh - fuiapp.lbl_h()) / 2, lw, p)
 }
 
 // One command. `sep` = 1 starts a new group at it (a space before the button).
@@ -3560,19 +3630,35 @@ fn cmd_item(cp: u64, key: u64, label: u64, shortcut: u64, sep: u64) {
     cb_key[(cb_n) as usize] = key
     cb_lab[(cb_n) as usize] = label
     cb_sep[(cb_n) as usize] = sep as u8
+    cb_tier[(cb_n) as usize] = 0 as u8
+    cb_wide[(cb_n) as usize] = cmdbar.ITEM_W
     let _t: u64 = cmdbar.tip_text(label, shortcut, ((&cb_tip[(cb_n * 80) as usize]) as u64), 80)
     cb_n = cb_n + 1
 }
 
 // The width the whole bar needs, in points (for a caller that wants to know before it asks for room).
 fn cmd_width() -> u64 {
+    if cb_n > 0 {
+        return cmd_w_mode(cb_n, 2)
+    }
     return cmdbar.bar_width(cb_n, ((&cb_sep[0 as usize]) as u64), cmdbar.ITEM_W, cmdbar.GAP, cmdbar.SEP_W)
 }
 
 // Make the buttons in `parent` (a row). Returns how many commands are visible; the rest are hidden.
 fn cmd_end(parent: usize, avail: u64, ovf_key: u64) -> u64 {
-    let vis: u64 = cmdbar.fit_count(cb_n, ((&cb_sep[0 as usize]) as u64), avail, cmdbar.ITEM_W, cmdbar.GAP,
+    // W4b: the words beside the icons when the whole bar still fits: all words, else the words of tier 1
+    // (the commands that matter most), else icons only (and the overflow button for what does not fit)
+    cb_mode = 0
+    if cmd_w_mode(cb_n, 2) <= avail {
+        cb_mode = 2
+    } else if cmd_w_mode(cb_n, 1) <= avail {
+        cb_mode = 1
+    }
+    var vis: u64 = cmdbar.fit_count(cb_n, ((&cb_sep[0 as usize]) as u64), avail, cmdbar.ITEM_W, cmdbar.GAP,
         cmdbar.SEP_W)
+    if cb_mode != 0 {
+        vis = cb_n
+    }
     cb_vis = vis
     var i: u64 = 0
     while i < vis {
@@ -3581,7 +3667,12 @@ fn cmd_end(parent: usize, avail: u64, ovf_key: u64) -> u64 {
         }
         let b: usize = icon_button(parent, cb_cp[(i) as usize], cb_lab[(i) as usize], cb_key[(i) as usize])
         flat(b)
-        set_size(b, cmdbar.ITEM_W, cmdbar.ITEM_W)
+        if cb_tier[(i) as usize] != 0 as u8 && (cb_tier[(i) as usize] as u64) <= cb_mode {
+            scene.node_set_draw(sc(), b, 0, draw_lbtn)
+            set_size(b, cb_wide[(i) as usize], cmdbar.ITEM_W)
+        } else {
+            set_size(b, cmdbar.ITEM_W, cmdbar.ITEM_W)
+        }
         tip(cb_key[(i) as usize], ((&cb_tip[(i * 80) as usize]) as u64))
         i = i + 1
     }
@@ -3608,6 +3699,11 @@ fn cmd_end(parent: usize, avail: u64, ovf_key: u64) -> u64 {
         tip(ovf_key, ((&cb_ovf[0 as usize]) as u64))
     }
     return vis
+}
+
+// How the last `cmd_end` drew the bar: 0 icons only, 1 the words of tier 1, 2 all words (for a gate).
+fn cmd_label_mode() -> u64 {
+    return cb_mode
 }
 
 fn cmd_hidden_n() -> u64 {
@@ -4808,6 +4904,81 @@ fn table_head_col() -> u64 {
 
 // A pointer press inside a table: returns the key when something
 // happened the program must hear about (activation / header click).
+// ---- W4b: RESIZING A COLUMN BY DRAGGING THE EDGE OF ITS HEADER. The widths of the column and of its right
+// neighbour change by the same amount (the table keeps its width); at least 48 points stay in each.
+// `table_resizable(key, true)` switches it on for a table; `table_resize_seq` counts the finished drags and
+// `table_colw_get` tells the program the widths (it keeps them over a rebuild).
+static mut rs_k: u64 = 4294967295
+static mut rs_col: u64 = 0
+static mut rs_x0: u64 = 0
+static mut rs_w0: u64 = 0
+static mut rs_w1: u64 = 0
+static mut rs_seq: u64 = 0
+static mut rs_on: [u8; 8] = [0 as u8; 8]
+
+fn rs_drag(x: u64) {
+    let k: u64 = rs_k
+    var w0: u64 = rs_w0
+    var w1: u64 = rs_w1
+    let lo: u64 = sp(48)
+    if x >= rs_x0 {
+        var d: u64 = x - rs_x0
+        if w1 < lo + d {
+            d = 0
+            if w1 > lo {
+                d = w1 - lo
+            }
+        }
+        w0 = w0 + d
+        w1 = w1 - d
+    } else {
+        var d2: u64 = rs_x0 - x
+        if w0 < lo + d2 {
+            d2 = 0
+            if w0 > lo {
+                d2 = w0 - lo
+            }
+        }
+        w0 = w0 - d2
+        w1 = w1 + d2
+    }
+    S.s_ct_colw[(k * CT_COLS + rs_col) as usize] = w0
+    S.s_ct_colw[(k * CT_COLS + rs_col + 1) as usize] = w1
+    touch()
+}
+
+fn rs_end() {
+    if rs_k != NO_SLOT {
+        rs_k = NO_SLOT
+        rs_seq = rs_seq + 1
+    }
+}
+
+fn table_resize_seq() -> u64 {
+    return rs_seq
+}
+
+fn table_resizable(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT {
+        return
+    }
+    if on {
+        rs_on[(k) as usize] = 1 as u8
+    } else {
+        rs_on[(k) as usize] = 0 as u8
+    }
+}
+
+// The width of a column in points as the table has it now (0 when unknown).
+fn table_colw_get(key: u64, col: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == NO_SLOT || col >= CT_COLS {
+        return 0
+    }
+    return S.s_ct_colw[(k * CT_COLS + col) as usize] / S.s_S
+}
+
 fn ct_press(k: u64, x: u64, y: u64, btn: u64) -> u64 {
     let i: usize = S.s_ct_node[(k) as usize]
     let nx: u64 = node_x(i)
@@ -4833,6 +5004,22 @@ fn ct_press(k: u64, x: u64, y: u64, btn: u64) -> u64 {
             var col: u64 = 0
             while col < S.s_ct_cols[(k) as usize] {
                 let cw: u64 = colw_of(k, col, node_w(i))
+                // W4b: the edge between two columns (4 points either side) is a handle: drag it to resize
+                if col + 1 < S.s_ct_cols[(k) as usize] && rs_on[(k) as usize] != 0 as u8
+                    && x + sp(4) >= cx + cw && x <= cx + cw + sp(4) {
+                    rs_k = k
+                    rs_col = col
+                    rs_x0 = x
+                    rs_w0 = cw
+                    rs_w1 = colw_of(k, col + 1, node_w(i))
+                    // all columns get explicit widths from now on, so a move changes just the two
+                    var cc: u64 = 0
+                    while cc < S.s_ct_cols[(k) as usize] {
+                        S.s_ct_colw[(k * CT_COLS + cc) as usize] = colw_of(k, cc, node_w(i))
+                        cc = cc + 1
+                    }
+                    return 0
+                }
                 if x >= cx && x < cx + cw {
                     S.s_ct_headcol = col
                     return S.s_ct_key[(k) as usize]
@@ -4989,6 +5176,14 @@ fn ct_sb_set(k: u64, y: u64) {
 // The pointer moves with the button down. Returns KEY_DRAG when a drag
 // starts (the pointer left the row it pressed on).
 fn ct_move(x: u64, y: u64, btn: u64) -> u64 {
+    if rs_k != NO_SLOT {
+        if (btn & 1) == 0 {
+            rs_end()
+        } else {
+            rs_drag(x)
+        }
+        return 0
+    }
     if S.s_ct_sbk != NO_SLOT {
         if (btn & 1) == 0 {
             S.s_ct_sbk = NO_SLOT

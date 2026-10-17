@@ -234,6 +234,9 @@ static mut k_cols: [u8; 17] = "explorer.columns\0"
 static mut k_ctx: [u8; 17] = "explorer.context\0"
 static mut k_mfile: [u8; 19] = "explorer.menu.file\0"
 static mut k_mview: [u8; 19] = "explorer.menu.view\0"
+static mut k_mnew: [u8; 18] = "explorer.menu.new\0"
+static mut k_msort: [u8; 19] = "explorer.menu.sort\0"
+static mut k_mshow: [u8; 19] = "explorer.menu.show\0"
 static mut k_rename: [u8; 16] = "explorer.rename\0"
 static mut k_massren: [u8; 17] = "explorer.massren\0"
 static mut t_massdef: [u8; 11] = "[N]_[C][E]\0"
@@ -1614,7 +1617,28 @@ fn columns_set(tbreite: u64) {
     spalten[(1) as usize] = w_date
     spalten[(2) as usize] = w_type
     spalten[(3) as usize] = w_size
+    if cols_user != 0 {
+        // W4b: the widths the person dragged (Date, Type, Size) stay; the name takes the rest
+        let ud: u64 = ucol[(1) as usize]
+        let ut: u64 = ucol[(2) as usize]
+        let us: u64 = ucol[(3) as usize]
+        var nm: u64 = 0
+        if tbreite > ud + ut + us {
+            nm = tbreite - ud - ut - us
+        }
+        if nm >= 48 {
+            spalten[(0) as usize] = nm
+            spalten[(1) as usize] = ud
+            spalten[(2) as usize] = ut
+            spalten[(3) as usize] = us
+        }
+    }
 }
+
+// W4b: the column widths the person dragged (points), and whether there are any
+static mut cols_user: u64 = 0
+static mut ucol: [u64; 4] = [0 as u64; 4]
+static mut rs_seen: u64 = 0
 
 // ============================ RUNDE EXPLORER-2: DIE ZWEITE ANSICHT
 //
@@ -3204,6 +3228,41 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
         view_refresh(baum, tab)
         return 0
     }
+    if welches == 15 {
+        // explorer.menu.new: 0 Folder, 1 File
+        if idx == 0 {
+            return menue_wahl(2, 0, tab, baum, stat, fpfad)
+        }
+        return menue_wahl(2, 1, tab, baum, stat, fpfad)
+    }
+    if welches == 17 {
+        // explorer.menu.sort: 0 Name, 1 Size, 2 Time, 3 Type, 4 Reversed
+        if idx == 4 {
+            sortrev = 1 - sortrev
+        } else {
+            var sk: u64 = idx
+            if idx == 3 {
+                sk = 4
+            }
+            if sortby != sk {
+                sortrev = 0
+            }
+            sortby = sk
+        }
+        sag_sortierung()
+        view_refresh(baum, tab)
+        return 0
+    }
+    if welches == 18 {
+        // explorer.menu.show: 0 List, 1 Icons, 2 Preview pane, 3 Hidden files
+        if idx == 0 || idx == 1 {
+            return menue_wahl(3, idx, tab, baum, stat, fpfad)
+        }
+        if idx == 3 {
+            return menue_wahl(3, 7, tab, baum, stat, fpfad)
+        }
+        return preview_toggle(baum, tab, stat, fpfad)
+    }
     if welches == 14 {
         // D1: the actions of other programs (bus), see actions_menu
         return actions_run(idx)
@@ -3915,7 +3974,8 @@ const K_STRIPDRAG: u64 = 58 // r454: the empty part of the title strip: a press 
 const K_OVF: u64 = 79 // r442: the overflow button of the command bar
 const K_SEARCH: u64 = 16 // r442: the search field of the address row
 const K_SEP: u64 = 100 // r442: the chevrons between crumbs (100..111), nobody listens
-const K_CMD: u64 = 80 // r402: the command bar, 80..85 (new folder, cut, copy, paste, rename, delete)
+const K_CMD: u64 = 80 // r402: the command bar, 80..85 (new, cut, copy, paste, rename, delete)
+const K_SORT: u64 = 86 // W4b: the sort button of the command bar (opens the sort menu)
 
 const MBH: u64 = 28
 const CH: u64 = 32
@@ -4141,6 +4201,55 @@ fn dlg_wahl(title: u64, text: u64, btns: u64, n: u64) -> u64 {
 
 // ------------------------------------------------------------ the picture
 
+// ---- W4b: THE PREVIEW PANE (Alt+P, "View" menu): the name, kind, size and date of the selected item in a card
+// right of the list. A text or picture preview of the content is not drawn yet; the pane is the place for it.
+const K_PREV: u64 = 87
+const PREV_W: u64 = 232
+static mut prev_on: u64 = 0
+static mut g_prev: u64 = 0
+static mut pv_size: [u8; 40] = [0 as u8; 40]
+static mut pv_date: [u8; 48] = [0 as u8; 48]
+static mut k_pvnone: [u8; 22] = "explorer.preview.none\0"
+static mut k_pvtitle: [u8; 23] = "explorer.preview.title\0"
+static mut s_pvon: [u8; 20] = "explorer: preview \0"
+static mut s_pvon_a: [u8; 4] = "on=\0"
+
+fn preview_toggle(baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    if prev_on == 0 {
+        prev_on = 1
+    } else {
+        prev_on = 0
+    }
+    masse()
+    say(((&s_pvon[0 as usize]) as u64))
+    kv(((&s_pvon_a[0 as usize]) as u64), prev_on)
+    kv(((&s_pvon_a[0 as usize]) as u64), g_prev)
+    nl()
+    rfr()
+    return 0
+}
+
+fn preview_build(cr: usize) {
+    let cd: usize = fuiscene.card(cr)
+    fuiscene.set_size(cd, g_prev, g_hinh)
+    fuiscene.set_key(cd, K_PREV)
+    let _h: usize = fuiscene.label_muted(cd, msg.get(((&k_pvtitle[0 as usize]) as u64)))
+    let z: u64 = cur_row()
+    if vmodus != 0 || z >= m_anzahl() {
+        let _n: usize = fuiscene.label(cd, msg.get(((&k_pvnone[0 as usize]) as u64)))
+        return
+    }
+    let e: u64 = m_ord(z)
+    let _t: usize = fuiscene.label_wrap(cd, m_name(e), 3)
+    let _k: usize = fuiscene.label_muted(cd, expmodell.type_text(e))
+    if m_art(e) == 0 {
+        let _sz: usize = navnum.size_text(m_size(e), ((&pv_size[0 as usize]) as u64), 40)
+        let _s: usize = fuiscene.label(cd, ((&pv_size[0 as usize]) as u64))
+    }
+    let _tz: u64 = expmodell.time_text(expmodell.mtime_at(e), ((&pv_date[0 as usize]) as u64))
+    let _d: usize = fuiscene.label_muted(cd, ((&pv_date[0 as usize]) as u64))
+}
+
 fn masse() {
     let bw: u64 = fuiscene.width()
     var bh: u64 = fuiscene.height()
@@ -4163,6 +4272,8 @@ fn masse() {
     if reiter_n > 1 && !fuiscene.strip_on() {
         nrows = 2
     }
+    // W4b: the command bar has a row of its own under the address row (Windows 11)
+    nrows = nrows + 1
     let fix: u64 = nrows * CH + STH + (nrows + 1) * 8 + 16
     g_hinh = 0
     if bh > fix + 40 {
@@ -4179,6 +4290,12 @@ fn masse() {
     g_binh = 0
     if g_innen > g_bbaum + 8 {
         g_binh = g_innen - g_bbaum - 8
+    }
+    // W4b: the preview pane (Alt+P) takes a strip at the right of the list
+    g_prev = 0
+    if prev_on != 0 && vmodus == 0 && g_binh > PREV_W + 8 + 200 {
+        g_prev = PREV_W
+        g_binh = g_binh - PREV_W - 8
     }
     g_horte = g_hinh
     g_hbaum = 0
@@ -4197,9 +4314,10 @@ static mut sc_copy: [u8; 7] = "Ctrl+C\0"
 static mut sc_paste: [u8; 7] = "Ctrl+V\0"
 static mut sc_rename: [u8; 3] = "F2\0"
 static mut sc_del: [u8; 4] = "Del\0"
+static mut sc_preview: [u8; 6] = "Alt+P\0"
 static mut k_tabnew: [u8; 17] = "explorer.tab.new\0"
 static mut tipbuf: [u8; 960] = [0 as u8; 960]
-static mut cmd_words: [u8; 160] = [0 as u8; 160]
+static mut cmd_words: [u8; 200] = [0 as u8; 160]
 
 // A tooltip + accessibility name "<word> (<shortcut>)" for `key`, built into slot `slot` of `tipbuf`.
 fn set_tip(key: u64, word: u64, shortcut: u64, slot: u64) {
@@ -4214,17 +4332,20 @@ fn set_tip(key: u64, word: u64, shortcut: u64, slot: u64) {
 // The commands, in the order of their importance. Returns the width of the whole bar in points.
 fn cmd_room() -> u64 {
     let mt: u64 = ((&cmd_words[0 as usize]) as u64)
-    let nm: u64 = split_items(msg.get(((&k_cmd[0 as usize]) as u64)), mt, 150)
+    let nm: u64 = split_items(msg.get(((&k_cmd[0 as usize]) as u64)), mt, 190)
     fuiscene.cmd_begin()
-    if nm >= 8 {
-        fuiscene.cmd_item(icons.CMD_NEW_FOLDER, K_CMD, item_at(mt, 0), ((&sc_newdir[0 as usize]) as u64), 0)
-        fuiscene.cmd_item(icons.CMD_CUT, K_CMD + 1, item_at(mt, 1), ((&sc_cut[0 as usize]) as u64), 1)
-        fuiscene.cmd_item(icons.CMD_COPY, K_CMD + 2, item_at(mt, 2), ((&sc_copy[0 as usize]) as u64), 0)
-        fuiscene.cmd_item(icons.CMD_PASTE, K_CMD + 3, item_at(mt, 3), ((&sc_paste[0 as usize]) as u64), 0)
-        fuiscene.cmd_item(icons.CMD_RENAME, K_CMD + 4, item_at(mt, 4), ((&sc_rename[0 as usize]) as u64), 0)
-        fuiscene.cmd_item(icons.TRASH, K_CMD + 5, item_at(mt, 5), ((&sc_del[0 as usize]) as u64), 0)
-        fuiscene.cmd_item(icons.CMD_VIEW, K_MB + 2, item_at(mt, 6), 0, 1)
-        fuiscene.cmd_item(icons.CMD_MORE, K_MB, item_at(mt, 7), 0, 0)
+    if nm >= 9 {
+        // W4b: Windows 11 command bar: New (word), the five editing commands (words when the row has room
+        // for all of them), Sort and View (words), More (icon only)
+        fuiscene.cmd_item_t(icons.CMD_NEW_FOLDER, K_CMD, item_at(mt, 0), ((&sc_newdir[0 as usize]) as u64), 0, 1)
+        fuiscene.cmd_item_t(icons.CMD_CUT, K_CMD + 1, item_at(mt, 1), ((&sc_cut[0 as usize]) as u64), 1, 2)
+        fuiscene.cmd_item_t(icons.CMD_COPY, K_CMD + 2, item_at(mt, 2), ((&sc_copy[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_PASTE, K_CMD + 3, item_at(mt, 3), ((&sc_paste[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_RENAME, K_CMD + 4, item_at(mt, 4), ((&sc_rename[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.TRASH, K_CMD + 5, item_at(mt, 5), ((&sc_del[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_SORT, K_SORT, item_at(mt, 6), 0, 1, 1)
+        fuiscene.cmd_item_t(icons.CMD_VIEW, K_MB + 2, item_at(mt, 7), ((&sc_preview[0 as usize]) as u64), 0, 1)
+        fuiscene.cmd_item(icons.CMD_MORE, K_MB, item_at(mt, 8), 0, 0)
     }
     return fuiscene.cmd_width()
 }
@@ -4336,14 +4457,17 @@ fn build() {
         fuiscene.set_size(b5, CH, CH)
         fixed = fixed + CH + 4
     }
+    // W4b: the commands have a row of their own (below); the crumbs get all the room the address row has left
     var cmd_avail: u64 = 0
-    if g_innen > fixed + 8 {
-        cmd_avail = g_innen - fixed - 8
+    if g_innen > 8 {
+        cmd_avail = g_innen - 8
     }
     var room: u64 = 140
-    if cm < cmd_avail {
-        // all commands fit: the crumbs get what is left over
-        room = 140 + cmd_avail - cm
+    if g_innen > fixed + 8 {
+        room = g_innen - fixed - 8
+    }
+    if cm == 0 {
+        room = room + 0
     }
     if pfadfeld_an {
         let _fe: usize = fuiscene.entry(tr, K_PFAD, room, ((&pfad[0 as usize]) as u64))
@@ -4385,7 +4509,6 @@ fn build() {
     fuiscene.entry_hint(K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)))
     set_tip(K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)), ((&sc_find[0 as usize]) as u64), 10)
     let _sep0: usize = fuiscene.space(tr, 4, 4)
-    let _vis: u64 = fuiscene.cmd_end(tr, cmd_avail, K_OVF)
     if reiter_n == 1 && reiter_n < REITER_MAX && !fuiscene.strip_on() {
         let pb1: usize = fuiscene.icon_button(tr, icons.CMD_PLUS,
             msg.get(((&k_tabnew[0 as usize]) as u64)), K_RPLUS)
@@ -4428,6 +4551,10 @@ fn build() {
             fuiscene.compact(pb)
         }
     }
+    // ---- W4b: the command bar in a row of its own (Windows 11): New, Cut ... Delete, Sort, View, More
+    let cmr: usize = fuiscene.row(col)
+    fuiscene.set_gap(cmr, 4)
+    let _vis: u64 = fuiscene.cmd_end(cmr, cmd_avail, K_OVF)
     // ---- the content: ONE navigation pane (groups, places, the folder tree) and the files
     let cr: usize = fuiscene.row(col)
     fuiscene.set_gap(cr, 8)
@@ -4450,6 +4577,9 @@ fn build() {
             c = c + 1
         }
     }
+    if g_prev > 0 {
+        preview_build(cr)
+    }
     // ---- the status line
     var sp: u64 = stat_msg
     if sp == 0 {
@@ -4466,6 +4596,7 @@ fn tabellen_einrichten() {
     // r442: rows of 32 points, the row under the pointer lights up, sizes end at the column's right edge
     fuiscene.table_row_height(K_ORTE, ROWH)
     fuiscene.table_row_height(K_TAB, ROWH)
+    fuiscene.table_resizable(K_TAB, true)
     fuiscene.table_hover(K_ORTE, true)
     fuiscene.table_hover(K_TAB, true)
     fuiscene.table_align_right(K_TAB, 3, true)
@@ -4920,6 +5051,8 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
     // r454: the empty part of the title strip (the drag region)
     say_node(60, 1, K_STRIPDRAG)
     say_node(36, 2, K_MB + 2)
+    say_node(41, 2, K_SORT)
+    say_node(42, 1, K_PREV)
     say_node(37, 2, K_MB)
     say_node(38, 2, K_OVF)
     say_node(39, 2, K_RPLUS)
@@ -5059,6 +5192,11 @@ fn sort_header(col0: u64, baum: u64, tab: u64) {
     sag_sortierung()
 }
 
+static mut s_colres: [u8; 21] = "explorer: colresize \0"
+static mut s_colres_a: [u8; 3] = "a=\0"
+static mut s_colres_b: [u8; 3] = "b=\0"
+static mut s_colres_c: [u8; 3] = "c=\0"
+static mut s_colres_d: [u8; 3] = "d=\0"
 static mut s_op: [u8; 14] = "explorer: op \0"
 static mut s_rows_w: [u8; 3] = "w=\0"
 static mut s_rows_hh: [u8; 3] = "h=\0"
@@ -5255,13 +5393,31 @@ fn behandeln(key: u64) {
             mtxt = msg.get(((&k_medit[0 as usize]) as u64))
             s_offen = 6
         } else if m == 2 {
-            mtxt = msg.get(((&k_mview[0 as usize]) as u64))
-            s_offen = 3
+            mtxt = msg.get(((&k_mshow[0 as usize]) as u64))
+            s_offen = 18
         } else if m == 3 {
             mtxt = msg.get(((&k_mgo[0 as usize]) as u64))
             s_offen = 7
         }
         let _n: u64 = popup_at(x, y, mtxt)
+        return
+    }
+    if key == K_SORT || key == K_CMD {
+        // W4b: Sort and New open a small menu under their button
+        let n2: usize = fuiscene.node_of_key(key)
+        var x2: u64 = 8
+        var y2: u64 = 40
+        if n2 != fuiscene.NONE {
+            x2 = fuiscene.node_x(n2)
+            y2 = fuiscene.node_y(n2) + fuiscene.node_h(n2)
+        }
+        var mt2: u64 = msg.get(((&k_msort[0 as usize]) as u64))
+        s_offen = 17
+        if key == K_CMD {
+            mt2 = msg.get(((&k_mnew[0 as usize]) as u64))
+            s_offen = 15
+        }
+        let _n2: u64 = popup_at(x2, y2, mt2)
         return
     }
     if key >= K_CMD && key < K_CMD + 6 {
@@ -5519,6 +5675,24 @@ fn u_start(args: u64) -> u64 {
                 say_strip_rects()
             }
         }
+        if fuiscene.table_resize_seq() != rs_seen {
+            // W4b: a column edge was dragged: keep the four widths over rebuilds
+            rs_seen = fuiscene.table_resize_seq()
+            var uc: u64 = 0
+            while uc < 4 {
+                ucol[(uc) as usize] = fuiscene.table_colw_get(K_TAB, uc)
+                uc = uc + 1
+            }
+            cols_user = 1
+            columns_set(g_binh)
+            say(((&s_colres[0 as usize]) as u64))
+            kv(((&s_colres_a[0 as usize]) as u64), ucol[(0) as usize])
+            kv(((&s_colres_b[0 as usize]) as u64), ucol[(1) as usize])
+            kv(((&s_colres_c[0 as usize]) as u64), ucol[(2) as usize])
+            kv(((&s_colres_d[0 as usize]) as u64), ucol[(3) as usize])
+            nl()
+            rfr()
+        }
         if fuiscene.table_frames() != rahmen_zahl {
             rahmen_zahl = fuiscene.table_frames()
             sag_auswahl(K_TAB)
@@ -5567,6 +5741,8 @@ fn u_start(args: u64) -> u64 {
                     reiter_neu(K_BAUM, K_TAB, K_STAT, K_PFAD)
                 } else if taste == T_STRG_W {
                     reiter_zu(K_BAUM, K_TAB, K_STAT, K_PFAD)
+                } else if taste == wlib.KEY_OLD_P {
+                    let _pv: u64 = preview_toggle(K_BAUM, K_TAB, K_STAT, K_PFAD)
                 } else {
                     let r: u64 = key_block(taste, K_BAUM, K_TAB, K_STAT, K_PFAD)
                     s_wartet = r & 255
