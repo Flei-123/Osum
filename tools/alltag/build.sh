@@ -63,6 +63,7 @@ uitrace=no
 clicks=""
 xscheme=""
 xfiles=""
+themeline=""   # W-S: one extra line appended to /etc/theme.conf (e.g. transparency=strong)
 passwdfile=""
 xdirs=""
 desk_on=yes
@@ -124,6 +125,7 @@ ${a#*=}" ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
         passwdfile=*) passwdfile="${a#*=}" ;;
+        themeline=*) themeline="${a#*=}" ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
         xdir=*) xdirs="$xdirs ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
@@ -199,6 +201,7 @@ printf '# taskbar.conf -- written by tools/themestore/build.sh\nedge=%s\nheight=
 [ -n "$tbconf" ] && cp "$tbconf" "$OUT/taskbar.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$scheme" "$mode" "$accent" "$shape" > "$OUT/theme.conf"
+[ -n "$themeline" ] && printf '%s\n' "$themeline" >> "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
 if [ "$account" = yes ]; then
