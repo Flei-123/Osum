@@ -133,8 +133,8 @@ export {
     FM_LIFT, FM_TILT, FM_SWING,
     // RUNDE BLUR: die Weichzeichnung hinter Leiste, Startmenue und
     // Menues -- Staerke, Toenung, Rauschen.
-    FM_BLUR, FM_BLURTINT, FM_BLURNOISE,
-    BLUR_MAX, TINT_MAX, NOISE_MAX,
+    FM_BLUR, FM_BLURTINT, FM_BLURNOISE, FM_BLURRIM,
+    BLUR_MAX, TINT_MAX, NOISE_MAX, RIM_MAX,
     blur_an, blur_radius, blurs, blur_cached, blur_px, blur_us,
     win_opac, set_opac, win_durch, backlum, BL_MEAN, BL_HI, BL_LO, BL_RUNS, BL_HITS,
     set_blur_cache, blur_cache_on,
@@ -1257,7 +1257,7 @@ const SHMASK_SIDE: u64 = 40
 // vorgesehen -- der faellt weg, weil `FM_BLUR` dieses Systems der eine
 // Weichzeichner ist. Wer hier etwas aendert, aendert `wlibc.FORM_SLOTS`
 // mit -- die beiden Listen halten `tools/paint/run.sh` gegeneinander.
-const FORM_SLOTS: u64 = 21
+const FORM_SLOTS: u64 = 22
 // r402 (DECO): THE THREE MEASURES OF THE WINDOW CHROME ARE SHAPE NUMBERS NOW.
 //
 // Until here the title bar (22), the frame (2) and the caption button (30) were three
@@ -1273,6 +1273,10 @@ const FORM_SLOTS: u64 = 21
 const FM_TITLE_BAR: u64 = 18
 const FM_CAP_W: u64 = 19
 const FM_FRAME: u64 = 20
+// W-S: edge highlight of a blurred surface (start menu, menus, popups): percent of white mixed into the outermost top row and the
+// two side columns, 0..RIM_MAX. 0 = none. Stored in the blur cache together with the picture.
+const FM_BLURRIM: u64 = 21
+const RIM_MAX: u64 = 60
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -2037,6 +2041,9 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     }
     if i == FM_BLURNOISE && w > NOISE_MAX {
         w = NOISE_MAX
+    }
+    if i == FM_BLURRIM && w > RIM_MAX {
+        w = RIM_MAX
     }
     // RUNDE GLAS: die drei neuen Plaetze werden hier geklemmt und nicht
     // beim Aufrufer. Ring 3 darf jede Zahl schicken; was hier ankommt,
@@ -11039,6 +11046,14 @@ fn blur_hit_ok(state: u64, i: u64) -> bool {
     return gs(state, S_BC_HIT + tr * 8) == gs(state, S_BC_GEN + tr * 8)
 }
 
+// W-S: mixes `pct` percent white into one 0xAARRGGBB pixel (the edge highlight of a blurred surface).
+fn rim_mix(c: u64, pct: u64) -> u64 {
+    let r: u64 = (((c >> 16) & 255) *% (100 - pct) + 255 *% pct) / 100
+    let g: u64 = (((c >> 8) & 255) *% (100 - pct) + 255 *% pct) / 100
+    let b: u64 = ((c & 255) *% (100 - pct) + 255 *% pct) / 100
+    return (c & 0xFF000000) | (r << 16) | (g << 8) | b
+}
+
 fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     by1: i64, ton: u64, kx0: i64, ky0: i64, kx1: i64, ky1: i64) {
     let r: u64 = form(state, FM_BLUR)
@@ -11163,6 +11178,7 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
     //    geschrieben, aus dem der naechste Treffer kopiert.
     let tint: u64 = form(state, FM_BLURTINT)
     let amp: u64 = form(state, FM_BLURNOISE)
+    let rim: u64 = form(state, FM_BLURRIM)
     // r399 (design audit): THE FROSTING FOLLOWS THE ROUNDED SHAPE. The filter
     // ran over the whole outer rectangle, so a window with rounded corners
     // (the start menu, tooltips) showed a grey blurred square behind each
@@ -11312,6 +11328,29 @@ fn blur_flaeche(state: u64, i: u64, bx0: i64, by0: i64, bx1: i64,
                             y0 as u64 + ry) as u32)
                 }
                 rx = rx + 1
+            }
+        }
+        // W-S edge highlight: white is mixed into the outermost top row (between the corner arcs) and the two side columns of the
+        // window, inside the cached picture, so a cache hit brings it along.
+        if rim > 0 {
+            if py == wt {
+                var hx: i64 = wl + crad as i64
+                while hx < wr - crad as i64 {
+                    if hx >= x0 && hx < x1 {
+                        let hp: u64 = zz +% (hx - x0) as u64 *% 4
+                        __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
+                    }
+                    hx = hx + 1
+                }
+            } else if py > wt + crad as i64 && py < wb - crad as i64 {
+                if wl >= x0 && wl < x1 {
+                    let hp: u64 = zz +% (wl - x0) as u64 *% 4
+                    __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
+                }
+                if wr - 1 >= x0 && wr - 1 < x1 {
+                    let hp: u64 = zz +% (wr - 1 - x0) as u64 *% 4
+                    __mmio_write32(hp as *mut u32, rim_mix(__mmio_read32(hp as *mut u32) as u64, rim) as u32)
+                }
             }
         }
         fb_row(state, x0 as u64, y0 as u64 + ry, zz, w)
