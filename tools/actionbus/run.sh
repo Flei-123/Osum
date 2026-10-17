@@ -747,7 +747,7 @@ grep -qa '==FERTIG==' "$E" || { bad "settings/compat guest did not finish"; tail
 echo "  -- 13. settings"
 has "$E" "orientbus: provider settings bound" "settingsd is a provider like any app (bound by the kernel-routed ping)"
 part "$E" S-CHECK S-LIST > "$TMPD/p.txt"
-has "$TMPD/p.txt" "settingsd: schema ok keys=27" "the shipped schema: 27 settings"
+has "$TMPD/p.txt" "settingsd: schema ok keys=28" "the shipped schema: 28 settings"
 has "$TMPD/p.txt" "risk must be harmless or critical" "a broken schema is refused, with the reason"
 part "$E" S-LIST S-DESC > "$TMPD/p.txt"
 has "$TMPD/p.txt" "count=4" "settings.list area=display: 4 settings"
