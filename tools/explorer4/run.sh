@@ -11,6 +11,7 @@
 #  4. a drag on the right edge of the header cell of column 0 widens it: `explorer: colresize a=` and the
 #     text start of column 1 (`explorer: spalten`) moves right by about the drag
 #  5. catalog keys (de + en) of the new words
+#  3b. preview content: row 1 of /users/justin (brief.txt) -> `explorer: preview txt n=21`
 # Counter-proof: run it on the tree before W4b (git worktree of the old main + this directory): every claim is red.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -35,6 +36,14 @@ foto 10-base
 ziehnach fkante0 40,0
 warte 3
 foto 11-resized
+# --- 3. preview pane with the first bytes of a text file: row 1 is brief.txt (row 0 is the folder config)
+klickauf ftabzeile1
+warte 2
+taste alt-p
+warte 4
+foto 17-preview-text
+taste alt-p
+warte 3
 # --- 2. sort menu: Size (row 1), Type (row 3), Reversed (row 4)
 klickauf frect41
 warteauf explorer: menurect || 60
@@ -60,18 +69,9 @@ warte 2
 foto 16-context
 taste esc
 warte 3
-# --- 3. Alt+P
-klickauf ftab
-warte 2
-taste alt-p
-warte 4
-foto 14-preview
-taste alt-p
-warte 3
-foto 15-nopreview
 DREH
 bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de \
-    extra='nostart wigapp=/bin/explorer' drehbuch="$OUT/dreh.txt" > "$OUT/lauf.log" 2>&1
+    extra='nostart wigapp=/bin/explorer,/users/justin' drehbuch="$OUT/dreh.txt" > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"
 if [ ! -s "$S" ]; then echo "FAILED: no serial output"; tail -20 "$OUT/lauf.log"; exit 1; fi
 hat "$S" 'explorer: ready' "the explorer came up"
@@ -88,9 +88,10 @@ hat "$S" 'explorer: sort spalte=1 rev=0' "By size -> sort spalte=1"
 hat "$S" 'explorer: sort spalte=4 rev=0' "By type -> sort spalte=4"
 hat "$S" 'explorer: sort spalte=4 rev=1' "Reversed -> rev=1"
 
-echo "== 3. Alt+P preview pane =="
+echo "== 3. Alt+P preview pane, text content =="
 hat "$S" 'explorer: preview on=1' "Alt+P switches the preview pane on"
 hat "$S" 'explorer: preview on=0' "Alt+P again switches it off"
+hat "$S" 'explorer: preview txt n=21' "the preview reads the 21 bytes of brief.txt (\"Ein Brief an Justin.\")"
 
 echo "== 3b. context menu =="
 n=$(grep -ac 'explorer: menurect' "$S")
