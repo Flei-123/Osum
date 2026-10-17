@@ -19638,6 +19638,82 @@ fn hot_take_raw(state: u64) -> u64 {
     return (m << 8) | c
 }
 
+// W1 (hotkeys): put a floating window on the left/right half of its work area. The way back (position + size) is saved
+// the way `maximize` saves it and the window carries F_MAXIMIZED, so Win+Down (maximize off) restores it.
+fn snap_half(state: u64, i: u64, right: bool) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    if (f & F_MAXIMIZED) == 0 {
+        let sx: u64 = ((win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((win_y(state, i) + 4096) as u64) & 0xFFFF
+        wsv(state, i, W_SAVE, (sx << 48) | (sy << 32)
+            | ((wg(state, i, W_W) & 0xFFFF) << 16)
+            | (wg(state, i, W_H) & 0xFFFF))
+        wsv(state, i, W_FLAGS, f | F_MAXIMIZED)
+    }
+    let hwk: u64 = win_work(state, i)
+    let half: u64 = hw_w(hwk) / 2
+    var iw: u64 = half
+    var ih: u64 = hw_h(hwk)
+    if deko(state, i) {
+        if iw <= border(state) * 2 || ih <= iny(state, i) + border(state) {
+            wsv(state, i, W_FLAGS, f)
+            return false
+        }
+        iw = iw - border(state) * 2
+        ih = ih - iny(state, i) - border(state)
+    }
+    if !resize_win(state, i, iw, ih) {
+        wsv(state, i, W_FLAGS, f)
+        return false
+    }
+    var nx: u64 = hw_x(hwk)
+    if right {
+        nx = nx + half
+    }
+    move_win(state, i, nx as i64, hw_y(hwk) as i64)
+    return true
+}
+
+// W1 (hotkeys): Win+Left/Right = snap to a half, Win+Up = maximize, Win+Down = restore (tiled/maximized) or minimize.
+fn win_arrow(state: u64, key: u64) -> bool {
+    let i: u64 = focus(state)
+    if i >= MAX_WIN {
+        return false
+    }
+    if !deko(state, i) || wg(state, i, W_LAYER) != L_NORMAL || !darf(state, i) {
+        return false
+    }
+    if key == 0x81 || key == 0x82 {
+        if wg(state, i, W_NODE) != 0 {
+            let _t: bool = tile_float(state, i)
+        }
+        return snap_half(state, i, key == 0x82)
+    }
+    if key == 0x83 {
+        if wg(state, i, W_NODE) != 0 {
+            let _f: bool = tile_float(state, i)
+        }
+        if !maximize(state, i, true) {
+            return false
+        }
+        // a half-snapped window carries F_MAXIMIZED too (it saves the way back there): grow it to the whole work area
+        return fit_work(state, i)
+    }
+    if key == 0x84 {
+        if wg(state, i, W_NODE) != 0 {
+            return tile_float(state, i)
+        }
+        if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+            return maximize(state, i, false)
+        }
+        return minimize_anim(state, i)
+    }
+    return false
+}
+
 fn hotkeys(state: u64) -> u64 {
     var n: u64 = 0
     var weiter: bool = true
@@ -19662,6 +19738,21 @@ fn hotkeys(state: u64) -> u64 {
                 serial.dec(v & 0xFF)
                 serial.puts((&s_hn[0]) as u64)
                 serial.dec((v >> 8) & 0xFF)
+                serial.nl()
+            } else
+            // W1 (hotkeys): WIN+ARROWS (mod 8) -- the focused window snaps / maximizes / restores, before any binding.
+            if ((v >> 8) & 0xFF) == 8 {
+                let wa: bool = win_arrow(state, v & 0xFF)
+                var s_wh: [u8; 18] = "wm: winarrow key=\0"
+                var s_wg: [u8; 8] = " getan=\0"
+                serial.puts((&s_wh[0]) as u64)
+                serial.dec(v & 0xFF)
+                serial.puts((&s_wg[0]) as u64)
+                if wa {
+                    serial.dec(1)
+                } else {
+                    serial.dec(0)
+                }
                 serial.nl()
             } else
             // RUNDE WMPLUGIN: DAS PLUGIN KOMMT VOR DER BINDUNG DES

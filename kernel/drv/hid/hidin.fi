@@ -687,6 +687,14 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
     var dy: u64 = 0
     var rad: u64 = 0
     var hpan: u64 = 0 // r804: AC Pan (consumer page 0x238), signed
+    // W1 (input): an ABSOLUTE pointer (USB tablet, VirtualBox default) reports a position inside [lo, hi]
+    var abs_x: u64 = 0
+    var abs_y: u64 = 0
+    var abs_xlo: u64 = 0
+    var abs_xhi: u64 = 0
+    var abs_ylo: u64 = 0
+    var abs_yhi: u64 = 0
+    var have_abs: u64 = 0
     var hat_taste: bool = false
     var hat_maus: bool = false
     var vier: bool = false
@@ -770,11 +778,25 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
                     let v: u64 = sbits(p, off + c4 * sz, sz)
                     if g == hidrep.US_X {
                         hat_maus = true
-                        dx = v
+                        if (flags & hidrep.FL_REL) == 0 {
+                            abs_x = bits(p, off + c4 * sz, sz)
+                            abs_xlo = hidrep.f_lmin(state, dev, i)
+                            abs_xhi = hidrep.f_lmax(state, dev, i)
+                            have_abs = have_abs | 1
+                        } else {
+                            dx = v
+                        }
                     }
                     if g == hidrep.US_Y {
                         hat_maus = true
-                        dy = v
+                        if (flags & hidrep.FL_REL) == 0 {
+                            abs_y = bits(p, off + c4 * sz, sz)
+                            abs_ylo = hidrep.f_lmin(state, dev, i)
+                            abs_yhi = hidrep.f_lmax(state, dev, i)
+                            have_abs = have_abs | 2
+                        } else {
+                            dy = v
+                        }
                     }
                     if g == hidrep.US_WHEEL {
                         hat_maus = true
@@ -796,6 +818,9 @@ fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
         keys_report(state, dev)
     }
     if hat_maus {
+        if have_abs == 3 {
+            abs_point(state, abs_x, abs_xlo, abs_xhi, abs_y, abs_ylo, abs_yhi)
+        }
         mouse_report(state, dev, btn, dx, dy, rad, vier)
         if hpan != 0 {
             if ist_neg(hpan) {
@@ -890,6 +915,29 @@ fn keys_report(state: u64, dev: u64) {
     }
 }
 
+// W1 (input): ABSOLUTE POINTER. A tablet field gives a position in [lo, hi]; the pointer goes to the same fraction of the
+// screen. Without this a tablet (VirtualBox "USB Tablet", QEMU usb-tablet) fed its absolute value as a relative step.
+fn abs_scale(v: u64, lo: u64, hi: u64, size: u64) -> u64 {
+    if hi <= lo || size < 2 {
+        return 0
+    }
+    var t: u64 = v
+    if t < lo {
+        t = lo
+    }
+    if t > hi {
+        t = hi
+    }
+    return ((t - lo) * (size - 1)) / (hi - lo)
+}
+
+fn abs_point(state: u64, x: u64, xlo: u64, xhi: u64, y: u64, ylo: u64, yhi: u64) {
+    let nx: u64 = abs_scale(x, xlo, xhi, gfx.width(state))
+    let ny: u64 = abs_scale(y, ylo, yhi, gfx.height(state))
+    gfx.mouse_set_pos(state, nx, ny)
+    cadd(state, C_MOVES, 1)
+}
+
 // Aus den gelesenen Feldern ein PS/2-PAKET bauen und in denselben
 // Trichter geben, den die Maus am 8042 benutzt. Ab hier ist es
 // dieselbe Rechnung wie in Runde K10.
@@ -910,10 +958,15 @@ fn mouse_report(state: u64, dev: u64, btn: u64, dx: u64, dy: u64, rad: u64,
     }
     var r: u64 = 0
     if rad != 0 {
+        // W1 (input): the notch COUNT survives (1..7); it used to be reduced to one step, so a fast scroll crawled
+        var nn: u64 = betrag(rad)
+        if nn > 7 {
+            nn = 7
+        }
         if ist_neg(rad) {
-            r = 1
+            r = nn
         } else {
-            r = 15
+            r = 16 - nn
         }
     }
     gfx.mouse_packet(state, b0, ax, ay, r, vier)
