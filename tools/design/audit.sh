@@ -118,6 +118,7 @@ for a in "$@"; do
     case "$a" in
         shape=*) shape=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
+        fps=*) fps=${a#*=} ;;
         lang=*) lang=${a#*=} ;;
         dark_scheme=*) dark_scheme=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
@@ -354,6 +355,11 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# W-E: fps=on puts the debug.fps switch (config key fps=true in /etc/mouse.conf) on the image
+if [ "${fps:-off}" = on ]; then
+    printf '# /etc/mouse.conf\nfps=true\n' > "$OUT/mouse.conf"
+    ARGS+=("/etc/mouse.conf=$OUT/mouse.conf@0644")
+fi
 if [ "$startstyle" = list ]; then
     printf 'style=list\n' > "$OUT/startmenu.conf"
     ARGS+=("/etc/startmenu.conf=$OUT/startmenu.conf@0644")

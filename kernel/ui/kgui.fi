@@ -5874,6 +5874,46 @@ fn jarvis_watch(state: u64) {
     jv_born = now
 }
 
+// W-E (17.10.2026): FRAME PACING. The timer ticks at 100 Hz (10 ms), so `sleep_ticks(1)` can only produce 10 / 20 ms rounds: never
+// 16.667 ms. While the desktop is ACTIVE (a frame was painted in the last 250 ms) the round is held to a TSC deadline one 60 Hz slot
+// after the previous one instead: one tick-sleep (hlt) while more than 10.5 ms remain, then yield-spin on the TSC. Idle desktop:
+// returns false and the caller sleeps on the tick as before (no spinning at rest). Word `nopace` = old behaviour (gate counter-proof).
+static mut pace_next: u64 = 0
+static mut pace_slots: u64 = 0
+
+fn pace_wait(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOPACE) {
+        return false
+    }
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return false
+    }
+    let per_us: u64 = kh / 1000
+    var now: u64 = time.tsc()
+    let lp: u64 = wm.last_paint_tsc(state)
+    if lp == 0 || now < lp || (now - lp) / per_us > 250000 {
+        pace_next = 0
+        return false
+    }
+    let slot: u64 = per_us * 16667
+    var next: u64 = pace_next + slot
+    if pace_next == 0 || next < now {
+        next = now
+    }
+    while now < next {
+        if (next - now) / per_us > 10500 && !fb.hlt_aus(state) {
+            sched.idle_wait(state)
+        } else {
+            sched.yield_now(state)
+        }
+        now = time.tsc()
+    }
+    pace_next = next
+    pace_slots = pace_slots + 1
+    return true
+}
+
 fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
     // ============ RUNDE TAFEL: DIESE SCHLEIFE IST DER SCHREIBTISCH,
@@ -6042,6 +6082,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // UPDATE ever followed the first picture -- invisible in QEMU (it scans the VRAM itself), a frozen / patchy screen in VirtualBox
         // once TRACES=0 stopped the host from watching the VRAM. One call per round, on this one core: with nothing painted it costs a
         // time read and compares (no port I/O). tools/vmsvga/desktop.sh is the gate.
+        wm.cadence_note(state, vmsvga.bereit(state) && vmsvga.pending(state))
         gfx.bild_fertig(state)
         st(36)
         // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
@@ -6163,12 +6204,16 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             }
         }
         st(38)
-        sched.sleep_ticks(state, 1)
+        if dauer && pace_wait(state) {
+            // W-E: an active stretch (a frame was painted in the last 250 ms) is held to the 16.667 ms slot
+        } else {
+            sched.sleep_ticks(state, 1)
         // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
         // (see `sched.idle_wait`); only in the permanent desktop, where the
         // timer is known to run.
-        if dauer && !fb.hlt_aus(state) {
-            sched.idle_wait(state)
+            if dauer && !fb.hlt_aus(state) {
+                sched.idle_wait(state)
+            }
         }
         rounds = rounds + 1
     }
