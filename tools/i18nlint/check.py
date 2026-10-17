@@ -66,6 +66,32 @@ for l, ks in tables.items():
     for k in sorted(allk - ks):
         bad += 1
         print("FAIL  %s missing in locale/%s (present in another language)" % (k, l))
+
+# r1015: THE CATALOGUE HAS TO FIT INTO kernel/user/msg.fi.  870 keys on 832 places made the last ~38
+# keys (every tray.* one) show raw although they were in both tables.  Keys, bytes of the file, key and
+# text lengths are held against the constants of msg.fi; 5 % headroom is required so the next round
+# does not hit the wall in the field.
+msgsrc = open(os.path.join(root, "kernel/user/msg.fi"), encoding="latin1").read()
+def const(name):
+    m = re.search(r"^const %s: u64 = (\d+)" % name, msgsrc, re.M)
+    return int(m.group(1)) if m else 0
+SLOTS, FILE_MAX, VALW, KEYW = const("SLOTS"), const("FILE_MAX"), const("VALW"), const("KEYW")
+for lang in tables:
+    p = os.path.join(root, "locale", lang, "messages")
+    n = len(tables[lang]); size = os.path.getsize(p)
+    if SLOTS and n * 100 > SLOTS * 95:
+        bad += 1; print("FAIL  locale/%s has %d keys, msg.fi SLOTS=%d (need 5 %% headroom)" % (lang, n, SLOTS))
+    if FILE_MAX and size * 100 > FILE_MAX * 95:
+        bad += 1; print("FAIL  locale/%s is %d bytes, msg.fi FILE_MAX=%d (need 5 %% headroom)" % (lang, size, FILE_MAX))
+    for ln in open(p, encoding="utf-8", errors="replace"):
+        if ln.startswith("#") or "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        if KEYW and len(k.strip().encode()) >= KEYW:
+            bad += 1; print("FAIL  locale/%s key %s too long for KEYW=%d" % (lang, k.strip(), KEYW))
+        if VALW and len(v.strip().encode()) >= VALW:
+            bad += 1; print("FAIL  locale/%s text of %s too long for VALW=%d" % (lang, k.strip(), VALW))
+print("i18nlint capacity: SLOTS=%d FILE_MAX=%d, keys %s" % (SLOTS, FILE_MAX, ",".join("%s=%d" % (l, len(k)) for l, k in tables.items())))
 print("i18nlint: %d keys used in source, %d table keys, languages %s, %d problem(s)" % (
     len(used), len(allk), ",".join(tables), bad))
 sys.exit(1 if bad else 0)

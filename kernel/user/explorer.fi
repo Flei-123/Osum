@@ -801,6 +801,37 @@ static mut k_ty_dir2: [u8; 22] = "explorer.type.folder\0\0"
 static mut k_ty_file2: [u8; 20] = "explorer.type.file\0\0"
 static mut sizetmp: [u8; 24] = [0 as u8; 24]
 
+static mut k_sysname: [u8; 14] = "OrientOS (/)\0\0"
+static mut k_pc_used: [u8; 17] = "explorer.pc.used\0"
+
+// r1015: the fill of a drive as text for the date slot: "95 % belegt" / "95 % used", or "--" when
+// the kernel reports nothing. `used` is the per-mille value + 1 (0 = unknown).
+fn used_text(z: u64, used: u64) {
+    if used == 0 {
+        __mmio_write8(z as *mut u8, 45 as u8)
+        __mmio_write8((z + 1) as *mut u8, 45 as u8)
+        __mmio_write8((z + 2) as *mut u8, 0 as u8)
+        return
+    }
+    var dg: [u8; 12] = [0 as u8; 12]
+    let nd: u64 = ulib.digits((used - 1 + 5) / 10, (&dg[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < nd && k < 4 {
+        __mmio_write8((z + k) as *mut u8, dg[(k) as usize])
+        k = k + 1
+    }
+    __mmio_write8((z + k) as *mut u8, 32 as u8)
+    __mmio_write8((z + k + 1) as *mut u8, 37 as u8)
+    __mmio_write8((z + k + 2) as *mut u8, 32 as u8)
+    let w: u64 = msg.get((&k_pc_used[0 as usize]) as u64)
+    var j: u64 = 0
+    while j < 14 && (*((w + j) as *mut u8)) != 0 as u8 {
+        __mmio_write8((z + k + 3 + j) as *mut u8, *((w + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((z + k + 3 + j) as *mut u8, 0 as u8)
+}
+
 // VIEW 3: all drives with their fill. One row per mounted drive (the carriers of the side pane): the mount path, the fill as a
 // percentage with a bar (host: `heat_bar`), the kind, the free room. A drive whose fill the kernel does not report shows "--".
 fn scan_computer() -> u64 {
@@ -830,24 +861,8 @@ fn scan_computer() -> u64 {
             ov_ro[(anzahl) as usize] = exporte.traeger_flags(i) & ulib.MNT_RDONLY
             art[(anzahl) as usize] = 1
             modus[(anzahl) as usize] = 16877
-            // the fill as text in the date slot: "73 %" or "--"
-            let z: u64 = zptr(anzahl)
-            if ov_used[(anzahl) as usize] == 0 {
-                __mmio_write8(z as *mut u8, 45 as u8)
-                __mmio_write8((z + 1) as *mut u8, 45 as u8)
-                __mmio_write8((z + 2) as *mut u8, 0 as u8)
-            } else {
-                var dg: [u8; 12] = [0 as u8; 12]
-                let nd: u64 = ulib.digits((ov_used[(anzahl) as usize] - 1 + 5) / 10, (&dg[0 as usize]) as u64)
-                var k: u64 = 0
-                while k < nd && k < 4 {
-                    __mmio_write8((z + k) as *mut u8, dg[(k) as usize])
-                    k = k + 1
-                }
-                __mmio_write8((z + k) as *mut u8, 32 as u8)
-                __mmio_write8((z + k + 1) as *mut u8, 37 as u8)
-                __mmio_write8((z + k + 2) as *mut u8, 0 as u8)
-            }
+            // the fill as text in the date slot: "73 % used" or "--"
+            used_text(zptr(anzahl), ov_used[(anzahl) as usize])
             anzahl = anzahl + 1
         }
         i = i + 1
@@ -869,23 +884,7 @@ fn scan_computer() -> u64 {
         ov_ro[0] = 0
         art[0] = 1
         modus[0] = 16877
-        let z0: u64 = zptr(0)
-        if ov_used[0] == 0 {
-            __mmio_write8(z0 as *mut u8, 45 as u8)
-            __mmio_write8((z0 + 1) as *mut u8, 45 as u8)
-            __mmio_write8((z0 + 2) as *mut u8, 0 as u8)
-        } else {
-            var dg0: [u8; 12] = [0 as u8; 12]
-            let nd0: u64 = ulib.digits((ov_used[0] - 1 + 5) / 10, (&dg0[0 as usize]) as u64)
-            var k0: u64 = 0
-            while k0 < nd0 && k0 < 4 {
-                __mmio_write8((z0 + k0) as *mut u8, dg0[(k0) as usize])
-                k0 = k0 + 1
-            }
-            __mmio_write8((z0 + k0) as *mut u8, 32 as u8)
-            __mmio_write8((z0 + k0 + 1) as *mut u8, 37 as u8)
-            __mmio_write8((z0 + k0 + 2) as *mut u8, 0 as u8)
-        }
+        used_text(zptr(0), ov_used[0])
         anzahl = 1
     }
     return anzahl
@@ -900,7 +899,11 @@ fn build_table() {
         while j < anzahl {
             let e: u64 = folge[(j) as usize]
             symbole[(j) as usize] = wlib.icon_id(icons.FILE_DRIVE)
-            puts(nptr(e))
+            if (*((nptr(e)) as *mut u8)) == 47 as u8 && (*((nptr(e) + 1) as *mut u8)) == 0 as u8 {
+                puts((&k_sysname[0 as usize]) as u64) // r1015: "OrientOS (/)" like "Local Disk (C:)"
+            } else {
+                puts(nptr(e))
+            }
             put(9)
             puts(zptr(e))
             put(9)
