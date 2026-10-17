@@ -459,7 +459,7 @@ fn line_h() -> u64 {
 fn start_w() -> u64 {
     let p: u64 = txt((&k_start[0 as usize]) as u64,
         (&s_st[0 as usize]) as u64)
-    let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), p, tlen(p))
     var w: u64 = tw + 8 + btn_h() + 4 * wlibc.ui_scale()
     let mind: u64 = wlibc.snap(btn_h() * 2)
     if w < mind {
@@ -487,23 +487,31 @@ fn start_w() -> u64 {
 // oben begrenzt. Bei der Vorgabe (Knopf 32) kommt genau die alte 16
 // heraus -- die bisherigen Bildpunktzusagen bleiben damit gueltig.
 fn gl_w() -> u64 {
-    let sk: u64 = wlibc.ui_scale()
-    let h: u64 = btn_h()
-    if h == 0 {
-        return GL_W0 * sk
+    // R-RASTER (Windows 11 tray): EVERY tray symbol is 16 points (times the screen
+    // scale), whatever the bar's thickness; the cells around them are all alike.
+    return GL_W0 * wlibc.ui_scale()
+}
+
+// R-RASTER: one cell = symbol + `tr_pad` of air on both sides; a field that also shows
+// text puts the text behind `tr_icx` (4 points of the old left margin stay in `x + 4`).
+fn tr_pad() -> u64 {
+    return 4 * wlibc.ui_scale()
+}
+
+fn tr_cell() -> u64 {
+    return gl_w() + 2 * tr_pad()
+}
+
+fn tr_icx() -> u64 {
+    return gl_w() + 2 * tr_pad() - 4
+}
+
+// the network picture (OSYM) only when there is no icon font: the tray draws glyphs
+fn net_pic() -> u64 {
+    if glyphs_ok() {
+        return 0
     }
-    var v: u64 = h * 2 / 3
-    // auf ein Vielfaches der Vervielfachung runden
-    v = (v / sk) * sk
-    let unten: u64 = 12 * sk
-    let oben: u64 = 22 * sk
-    if v < unten {
-        v = unten
-    }
-    if v > oben {
-        v = oben
-    }
-    return v
+    return state_icon(net_state)
 }
 
 // Die beiden Masse, die es bis zu dieser Runde nur als feste Zahl gab.
@@ -685,6 +693,9 @@ static mut cf_year4: u64 = 0
 // r387 (Windows 11 layout, rest): all four are OFF by default.
 static mut cf_tv: u64 = 0 // task view button after the start button
 static mut cf_chev: u64 = 0 // tray chevron: icons only <-> the texts
+// gate/diagnostic: `tray_demo=<1..101>` fakes battery (value-1 %) + volume (value-1 %), `tray_demochg=1` = charging
+static mut cf_demo: u64 = 0
+static mut cf_demochg: u64 = 0
 static mut cf_group: u64 = 0 // network, sound, battery as ONE capsule, icons only
 static mut cf_badge: u64 = 0 // 0 = off, N = a count on a pinned program with N or more windows (2 is the usual one)
 static mut chev_open: u64 = 0 // 1 = the chevron has opened the tray: texts are shown
@@ -1056,7 +1067,7 @@ fn text_at_p(p: u64, at: u64, q: u64) -> u64 {
 }
 
 fn width_of(p: u64) -> u64 {
-    return wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+    return wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), p, tlen(p))
 }
 
 // ==================================================== the configuration
@@ -1106,6 +1117,8 @@ static mut k_year4: [u8; 12] = "clock_year4\0"
 static mut k_tv: [u8; 9] = "taskview\0"
 static mut k_chev: [u8; 13] = "tray_chevron\0"
 static mut k_group: [u8; 11] = "tray_group\0"
+static mut k_demo: [u8; 11] = "tray_demo\0\0"
+static mut k_demochg: [u8; 14] = "tray_demochg\0\0"
 static mut k_badge: [u8; 7] = "badges\0"
 static mut v_left: [u8; 5] = "left\0"
 static mut v_center: [u8; 7] = "center\0"
@@ -1358,6 +1371,14 @@ fn conf_read() -> bool {
             } else if key_is(b + ks, kl, (&k_group[0 as usize]) as u64) {
                 if digits > 0 {
                     cf_group = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_demo[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_demo = clamp(v, 0, 101)
+                }
+            } else if key_is(b + ks, kl, (&k_demochg[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_demochg = v & 1
                 }
             } else if key_is(b + ks, kl, (&k_badge[0 as usize]) as u64) {
                 if digits > 0 {
@@ -2739,6 +2760,42 @@ fn bat_warn_check() {
     let _r: u64 = wlib.noti_post(stufe, p, at + 1)
 }
 
+// Gate/diagnostic: with `tray_demo=<1..101>` the bar shows a battery of (value-1) % and a
+// volume of (value-1) % without hardware, so the tray raster can be measured on every
+// machine (tools/trayraster). 0 = real hardware.
+fn demo_pwr(what: u64) -> u64 {
+    if cf_demo != 0 {
+        if what == PG_BATPRESENT {
+            return 1
+        }
+        if what == PG_BATPERCENT {
+            return cf_demo - 1
+        }
+        if what == PG_BATSTATE {
+            return cf_demochg * 2
+        }
+        if what == PG_AC {
+            return cf_demochg
+        }
+    }
+    return ulib.sys(SYS_PWRGET, what, 0, 0)
+}
+
+fn demo_aud(what: u64) -> u64 {
+    if cf_demo != 0 {
+        if what == A_READY {
+            return 1
+        }
+        if what == A_VOLUME {
+            return cf_demo - 1
+        }
+        if what == A_MUTED {
+            return 0
+        }
+    }
+    return ulib.sys(SYS_AUDGET, what, 0, 0)
+}
+
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
         (&s_nobat[0 as usize]) as u64)
@@ -2749,16 +2806,16 @@ fn status_build() -> bool {
     offset_read()
     clock_build()
     let a: u64 = full_of(F_BAT)
-    let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    let have: u64 = demo_pwr(PG_BATPRESENT)
     bat_have = 0
     bat_pct = 0
     bat_chg = 0
     bat_ac = 0
-    let acv: u64 = ulib.sys(SYS_PWRGET, PG_AC, 0, 0)
+    let acv: u64 = demo_pwr(PG_AC)
     if !ulib.bad(acv) && acv != 0 {
         bat_ac = 1
     }
-    let bst: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
+    let bst: u64 = demo_pwr(PG_BATSTATE)
     if !ulib.bad(bst) && (bst & 2) != 0 {
         bat_chg = 1
     }
@@ -2781,7 +2838,7 @@ fn status_build() -> bool {
         }
     } else {
         bat_have = 1
-        let pc: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
+        let pc: u64 = demo_pwr(PG_BATPERCENT)
         if ulib.bad(pc) {
             let _q: u64 = text_at_p(a, 0, s_kA)
         } else {
@@ -2813,14 +2870,14 @@ fn status_build() -> bool {
     // back to; with glyphs the symbol replaces it.
     let sn: u64 = full_of(F_SND)
     snd_da = 0
-    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1 {
+    if demo_aud(A_READY) == 1 {
         snd_da = 1
-        let v: u64 = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+        let v: u64 = demo_aud(A_VOLUME)
         if !ulib.bad(v) {
             snd_vol = v
         }
         snd_mute = 0
-        if ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1 {
+        if demo_aud(A_MUTED) == 1 {
             snd_mute = 1
         }
         let g2: u64 = ulib.sys(SYS_AUDGET, A_VOLGEN, 0, 0)
@@ -3039,7 +3096,7 @@ fn copy_n(dst: u64, src: u64, n: u64) {
 fn shorten(p: u64, avail: u64) {
     var n: u64 = tlen(p)
     while n > 1
-        && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, n) > avail {
+        && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), p, n) > avail {
         n = n - 1
     }
     __mmio_write8((p + n) as *mut u8, 0 as u8)
@@ -3204,7 +3261,7 @@ fn shorten_title(i: u64, width: u64) {
         avail = width - room
     }
     while n > 1
-        && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q, n) + 10 > avail {
+        && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), q, n) + 10 > avail {
         n = n - 1
     }
     copy_n(z, q, n)
@@ -3259,13 +3316,13 @@ fn layout() {
             // text's share here too -- see the horizontal case below for
             // what happened when it did not.
             var vroom: u64 = 0
-            if f == F_NET && state_icon(net_state) != 0 {
+            if f == F_NET && net_pic() != 0 {
                 vroom = ic_w() + 2
             } else if f == F_NET && glyphs_ok() {
-                vroom = ic_w() + 2
+                vroom = tr_icx()
             }
-            if f == F_BAT && glyphs_ok() {
-                vroom = gl_w() + 2
+            if (f == F_BAT || f == F_SND) && glyphs_ok() {
+                vroom = tr_icx()
             }
             if f == F_NET && sys_icon() != 0 {
                 vroom = vroom + mk_w() + 2
@@ -3379,7 +3436,7 @@ fn layout() {
         // run of round DESKTOP said the rectangles were wrong. It was
         // right, and this is why that run stays in the suite.
         var room: u64 = 0
-        if f == F_NET && state_icon(net_state) != 0 {
+        if f == F_NET && net_pic() != 0 {
             // ==================================== RUNDE LEISTE-RECHTS
             // DIE TINTE BESTIMMT DEN PLATZ, NICHT DER KASTEN.
             //
@@ -3388,24 +3445,22 @@ fn layout() {
             // ueberzaehligen Punkte wurden zur Luecke und machten den
             // Abstand WLAN->Ton zu 37, wo Ton->Akku 19 war. Gemessen,
             // nicht geschaetzt: siehe LEISTE-RECHTS-BEFUND.md.
-            var iw: u64 = wlibc.icon_ink_wid(state_icon(net_state))
+            var iw: u64 = wlibc.icon_ink_wid(net_pic())
             if iw == 0 {
                 iw = ic_w()
             }
             room = iw + 2
         } else if f == F_NET && glyphs_ok() {
-            // ROUND LOOK: the glyph takes exactly the room the OSYM
-            // picture would have taken, so a bar with the icon font and
-            // no /etc/netview looks like a bar with both minus the
-            // drawing -- and no rectangle moves.
-            room = ic_w() + 2
+            // R-RASTER: the glyph cell is the same as every other tray cell
+            room = tr_icx()
         }
-        if f == F_BAT && glyphs_ok() {
-            room = gl_w() + 2
+        if (f == F_BAT || f == F_SND) && glyphs_ok() {
+            // Z9: the volume symbol needs the same room as the battery one
+            room = tr_icx()
         }
         // W3: the keyboard symbol in front of "DEU" over "DE" (Windows 11 tray)
         if f == F_LANG && glyphs_ok() {
-            room = gl_w() + 2
+            room = tr_icx()
         }
         // SECOND ADDENDUM: and the faking sign takes its room off the
         // same share. The lesson of the first addendum, applied before
@@ -3422,22 +3477,17 @@ fn layout() {
         // aussieht wie ein Fehler.
         // r387: group gap -- network, sound and battery touch each other
         var gg: u64 = gap()
-        if cf_group != 0 && (f == F_BAT || f == F_SND) {
+        if false {
             gg = 0
             // W4b: the battery percentage ends right before the sound icon; with no gap it read as
             // "92%92%" (battery text, sound text). Keep a small gap behind the battery text.
         }
-        if f == F_BAT && tlen(full_of(F_BAT)) != 0 && gg < 8 {
-            gg = 8
-        }
+
         if tlen(full_of(f)) != 0 && compact() && (f == F_NET || f == F_SND)
             && (room != 0 || (f == F_SND && glyphs_ok())) {
             // icon only: the field is as wide as its icon
-            var iw2: u64 = room
-            if f == F_SND {
-                iw2 = gl_w() + 2
-            }
-            let w3: u64 = wlibc.snap_up(iw2 + 8)
+            // R-RASTER: every icon-only cell is exactly one tray cell wide
+            let w3: u64 = tr_cell()
             x = x - w3
             f_x[(f) as usize] = x
             f_y[(f) as usize] = st_y
@@ -3581,9 +3631,9 @@ fn layout() {
     // r387: the tray chevron, the leftmost thing of the tray
     if cf_chev != 0 {
         // r1015: Windows 11 chevron button is ~ 32 points wide, not as wide as a whole window button
-        var cw: u64 = btn_h()
-        if cw > 32 * wlibc.ui_scale() {
-            cw = 32 * wlibc.ui_scale()
+        var cw: u64 = tr_cell()
+        if cw > btn_h() {
+            cw = btn_h()
         }
         if x > pgrenze + cw + tv_extra() {
             x = x - cw
@@ -4155,7 +4205,7 @@ fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
     say((&s_tg[0 as usize]) as u64)
     sayn(bg)
     say((&s_tw[0 as usize]) as u64)
-    sayn(wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, tlen(txt)))
+    sayn(wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), txt, tlen(txt)))
     say((&s_tt[0 as usize]) as u64)
     say(txt)
     nl()
@@ -4508,7 +4558,12 @@ fn sym_scale(sym: u64, h: u64) -> u64 {
 fn sym_w(sym: u64, h: u64) -> u64 {
     if wlibc.icon_vec(sym) {
         let sc: u64 = wlibc.ui_scale()
-        var want: u64 = 24 * sc
+        // R-ICONS: the program symbol is as big as the logo of the start button
+        // (four fifths of the button, a multiple of the screen scale)
+        var want: u64 = (h * 4 / 5) / sc * sc
+        if want < 24 * sc {
+            want = 24 * sc
+        }
         var room: u64 = 0
         if h > 2 * SYM_AIR * sc {
             room = h - 2 * SYM_AIR * sc
@@ -4632,7 +4687,7 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         room = room + mk_w() + 3
     }
     let n: u64 = tlen(txt)
-    var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, n)
+    var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), txt, n)
     if tw + 8 + room > w {
         if w > 8 + room {
             tw = w - 8 - room
@@ -5190,7 +5245,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         if chev_open != 0 {
             chcp = icons.CHEVRON_DOWN
         }
-        glyph_button(chv_x, chv_y, chv_w, chv_h, chcp, chv_h - 10)
+        glyph_button(chv_x, chv_y, chv_w, chv_h, chcp, gl_w())
         if report {
             say((&s_chl[0 as usize]) as u64)
             sayn(chv_x)
@@ -5451,10 +5506,10 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // W3: the keyboard symbol of the language field (horizontal bar only,
         // `layout` reserves the room under the same two conditions)
         if f == F_LANG && vertical == 0 && glyphs_ok() {
-            let kx: u64 = f_x[(f) as usize] + 2
+            let kx: u64 = f_x[(f) as usize] + tr_pad()
             if wlibc.icon_mid(icons.TRAY_KEYBOARD, kx, f_y[(f) as usize],
                 f_h[(f) as usize], gl_w(), wlibc.theme(wlibc.T_FG)) {
-                icx = gl_w() + 2
+                icx = tr_icx()
                 if report {
                     say((&lk_ic[0 as usize]) as u64)
                     say((&lk_kbd[0 as usize]) as u64)
@@ -5475,14 +5530,14 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // ICONS, and the two were never joined.
         if f == F_BAT && glyphs_ok() {
             let bid: u64 = bat_icon()
-            let bx: u64 = f_x[(f) as usize] + 2
+            let bx: u64 = f_x[(f) as usize] + tr_pad()
             // RUNDE LEISTE-RECHTS: `icon_mid` statt `icon_at` --
             // zentriert nach der GEMALTEN Tinte und nicht nach dem
             // bestellten Kasten. Der Kasten geht als (y, h) mit.
             let by: u64 = f_y[(f) as usize]
             if wlibc.icon_mid(bid, bx, by, f_h[(f) as usize], gl_w(),
                 bat_colour()) {
-                icx = gl_w() + 2
+                icx = tr_icx()
                 if report {
                     say((&lk_ic[0 as usize]) as u64)
                     say((&lk_bat[0 as usize]) as u64)
@@ -5514,11 +5569,11 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // differently are two fields a test has to know separately.
         if f == F_SND && glyphs_ok() {
             let vid: u64 = snd_icon()
-            let vx: u64 = f_x[(f) as usize] + 2
+            let vx: u64 = f_x[(f) as usize] + tr_pad()
             let vy: u64 = f_y[(f) as usize]
             if wlibc.icon_mid(vid, vx, vy, f_h[(f) as usize], gl_w(),
                 snd_colour()) {
-                icx = gl_w() + 2
+                icx = tr_icx()
                 if report {
                     say((&lk_ic[0 as usize]) as u64)
                     say((&lk_snd[0 as usize]) as u64)
@@ -5572,16 +5627,16 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 sayn(nv_fall)
                 nl()
             }
-            let ic: u64 = state_icon(net_state)
+            let ic: u64 = net_pic()
             if ic == 0 && glyphs_ok() {
                 // ROUND LOOK: no OSYM file on this disk, but there is an
                 // icon font. Same four states, same place, same room.
                 let nid: u64 = net_glyph(net_state)
-                let nx: u64 = f_x[(f) as usize] + 2 + icx
+                let nx: u64 = f_x[(f) as usize] + tr_pad() + icx
                 let ny: u64 = f_y[(f) as usize]
                 if wlibc.icon_mid(nid, nx, ny, f_h[(f) as usize], gl_w(),
                     net_colour(net_state)) {
-                    icx = icx + gl_w() + 2
+                    icx = icx + tr_icx()
                     if report {
                         say((&lk_ic[0 as usize]) as u64)
                         say((&lk_net[0 as usize]) as u64)
@@ -5817,7 +5872,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // Abgeschnitten wird HIER und nicht beim Plugin: was nicht in
         // den Kasten passt, geht sonst in das Feld daneben -- die
         // Lehre der Runde NETVIEW, angewandt auf fremden Text.
-        while pn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp, pn)
+        while pn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), pp, pn)
             + 10 > pb_w[(pb) as usize] {
             pn = pn - 1
         }
@@ -5859,7 +5914,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 schild_grund(wlibc.theme(wlibc.T_PANEL)), 0)
             let hp: u64 = (&hover_txt[0 as usize]) as u64
             var hn: u64 = tlen(hp)
-            while hn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), hp, hn)
+            while hn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), hp, hn)
                 + 6 > he - hb {
                 hn = hn - 1
             }
@@ -6828,8 +6883,8 @@ fn tip_open(text: u64, sx: u64, sy: u64) {
     // r399: `text_w` floors the width of the line (26.6 -> whole points); a face whose last
     // glyph reaches the end of its advance (Inter's k) lost its tail in a bubble sized to the
     // floor -- one point more
-    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n) + 2 * pad + sc
-    let bh: u64 = wlibc.text_h(wlibc.px_ui()) + pad
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), text, n) + 2 * pad + sc
+    let bh: u64 = wlibc.text_h(wlibc.type_px(wlibc.TY_BODY)) + pad
     // ==================================== RUNDE ECHTHARDWARE-4
     // DIE BLASE LIEGT NEBEN DER LEISTE UND NICHT AUF IHR.
     //
@@ -7042,7 +7097,7 @@ fn toast_auf(text: u64, prio: u64) {
     let n: u64 = tlen(text)
     let sc: u64 = wlibc.ui_scale()
     let pad: u64 = 10 * sc
-    var bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n)
+    var bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), text, n)
         + 2 * pad + 6 * sc
     // Eine Einblendung ist eine KARTE und kein Schild: sie hat eine
     // Mindestbreite, damit zwei Meldungen verschiedener Laenge nicht
@@ -7053,7 +7108,7 @@ fn toast_auf(text: u64, prio: u64) {
     if bw > sw / 2 {
         bw = sw / 2
     }
-    let bh: u64 = wlibc.text_h(wlibc.px_ui()) + 2 * pad
+    let bh: u64 = wlibc.text_h(wlibc.type_px(wlibc.TY_BODY)) + 2 * pad
     let luft: u64 = 12 * sc
     var x: u64 = hx
     if sw > bw + luft {
@@ -8390,7 +8445,7 @@ fn u_start(args: u64) -> u64 {
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
     let _hs: bool = head_setup()
-    asc = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    asc = wlibc.ascent_of(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY))
     cf_height = def_h()
     cf_width = DEF_V
     if conf_read() {
