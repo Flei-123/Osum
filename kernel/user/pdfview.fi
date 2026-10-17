@@ -23,6 +23,7 @@ import std.rt
 import fuiscene
 import fuiapp
 import fuiglyph
+import icons
 import wlib
 import pdfread.pdfread
 import pdfread.pdfpage
@@ -49,6 +50,18 @@ static mut T_HITS: [u8; 9] = "Treffer \0"
 static mut T_NOHIT: [u8; 13] = "Kein Treffer\0"
 static mut T_BUSY: [u8; 16] = "Suche laeuft...\0"
 static mut T_NONE: [u8; 41] = "Keine Datei -- Pfad eingeben, Öffnen\0\0\0\0"
+static mut TIP_SIDE: [u8; 12] = "Seitenliste\0"
+static mut TIP_OPEN: [u8; 23] = "Datei öffnen (Strg+O)\0"
+static mut TIP_PREV: [u8; 13] = "Vorige Seite\0"
+static mut TIP_NEXT: [u8; 15] = "Nächste Seite\0"
+static mut TIP_ZOUT: [u8; 16] = "Verkleinern (-)\0"
+static mut TIP_ZIN: [u8; 17] = "Vergrößern (+)\0"
+static mut TIP_FITW: [u8; 23] = "An Breite anpassen (b)\0"
+static mut TIP_FITP: [u8; 16] = "Ganze Seite (s)\0"
+static mut TIP_FPREV: [u8; 20] = "Voriger Treffer (p)\0"
+static mut TIP_FNEXT: [u8; 22] = "Nächster Treffer (n)\0"
+static mut T_GO: [u8; 8] = "Öffnen\0"
+static mut T_HINT: [u8; 19] = "Im Dokument suchen\0"
 static mut E_READ: [u8; 28] = "Fehler: Datei nicht lesbar\0\0"
 static mut E_FORMAT: [u8; 34] = "Fehler: keine gültige PDF-Datei\0\0"
 static mut E_ENC: [u8; 44] = "Verschlüsselte PDF-Dateien: nicht möglich\0"
@@ -72,6 +85,10 @@ const K_PAGE: u64 = 9
 const K_FIND: u64 = 10
 const K_FPREV: u64 = 11
 const K_FNEXT: u64 = 12
+const K_GO: u64 = 13
+const K_SIDE: u64 = 14
+const K_THUMBS: u64 = 15
+const SIDE_W: u64 = 120
 
 // the document state
 static mut s_doc_mem: [u64; 256] = [0 as u64; 256]
@@ -101,6 +118,12 @@ static mut s_pageinfo: [u8; 40] = [0 as u8; 40]
 static mut s_zoominfo: [u8; 16] = [0 as u8; 16]
 static mut s_status: [u8; 96] = [0 as u8; 96]
 static mut s_traced: u64 = 0
+static mut s_side: bool = false      // the page list at the left is shown
+static mut s_pathbar: bool = false   // the second row with the path field is shown
+static mut s_want_focus: u64 = 0     // key of the field to focus after the next rebuild
+static mut s_again: bool = false     // render once more after the rebuild (the page area changed its size)
+static mut s_rseq: u64 = 0           // fuiscene.resized() last seen
+static mut s_pages_blob: [u8; 12288] = [0 as u8; 12288]   // "Seite n" per line, for the page list
 static mut s_dirty: bool = true      // the picture has to be made again
 // ---- search (see lib/pdfread/pdftext.fi)
 static mut s_q_mem: [u64; 4] = [0 as u64; 4]     // the folded query, a rt.Buf
@@ -171,43 +194,90 @@ fn set_status(msg: u64) {
     put(st, a, 0)
 }
 
+// the list of pages for the side panel: one line "Seite n" per page (at most 1000)
+fn fill_pages() {
+    let b: u64 = (&s_pages_blob[0 as usize]) as u64
+    var a: u64 = 0
+    var n: u64 = 0
+    if s_open {
+        while n < s_npages && n < 1000 {
+            a = puts(b, a, (&T_PAGE[0 as usize]) as u64)
+            a = putn(b, a, n + 1)
+            a = put(b, a, 10)
+            n = n + 1
+        }
+    }
+    put(b, a, 0)
+}
+
+// one icon button of the bar: flat, 32 x 32, the word is the tooltip and the name for a screen reader
+fn tbtn(bar: usize, cp: u64, tip: u64, key: u64) {
+    let b: usize = fuiscene.icon_button(bar, cp, tip, key)
+    fuiscene.flat(b)
+    fuiscene.set_size(b, 32, 32)
+    fuiscene.tip(key, tip)
+}
+
+// ONE bar, like the reader of Edge: page list, open | page up, "Seite n von N", page down | zoom out, 100 %, zoom in,
+// fit width, fit page | search field, previous / next match, "Treffer n von m".
+// The path field (a second row) only shows while no document is open or after the open button / Ctrl+O.
 fn build() {
     let root: usize = fuiscene.root()
-    fuiscene.set_gap(root, 8)
+    fuiscene.set_gap(root, 6)
     fuiscene.set_pad(root, 8)
+    let narrow: bool = fuiscene.width() < 760
     let bar: usize = fuiscene.row(root)
-    fuiscene.set_gap(bar, 6)
-    let pe: usize = fuiscene.entry(bar, K_PATH, 150, (&s_path[0 as usize]) as u64)
-    let ob: usize = fuiscene.button(bar, (&T_OPEN[0 as usize]) as u64, K_OPEN)
-    let _b1: usize = fuiscene.button(bar, (&T_PREV[0 as usize]) as u64, K_PREV)
+    fuiscene.set_gap(bar, 4)
+    tbtn(bar, icons.PDF_SIDEBAR, (&TIP_SIDE[0 as usize]) as u64, K_SIDE)
+    tbtn(bar, icons.CMD_OPEN, (&TIP_OPEN[0 as usize]) as u64, K_OPEN)
+    let _g1: usize = fuiscene.space(bar, 8, 1)
+    tbtn(bar, icons.CHEVRON_UP, (&TIP_PREV[0 as usize]) as u64, K_PREV)
     let _l1: usize = fuiscene.label(bar, (&s_pageinfo[0 as usize]) as u64)
     fuiscene.set_size(_l1, 100, 24)
-    let _b2: usize = fuiscene.button(bar, (&T_NEXT[0 as usize]) as u64, K_NEXT)
-    let _b3: usize = fuiscene.button(bar, (&T_MINUS[0 as usize]) as u64, K_ZOUT)
+    tbtn(bar, icons.CHEVRON_DOWN, (&TIP_NEXT[0 as usize]) as u64, K_NEXT)
+    let _g2: usize = fuiscene.space(bar, 8, 1)
+    tbtn(bar, icons.PDF_ZOOM_OUT, (&TIP_ZOUT[0 as usize]) as u64, K_ZOUT)
     let _l2: usize = fuiscene.label(bar, (&s_zoominfo[0 as usize]) as u64)
     fuiscene.set_size(_l2, 48, 24)
-    let _b4: usize = fuiscene.button(bar, (&T_PLUS[0 as usize]) as u64, K_ZIN)
-    let _b5: usize = fuiscene.button(bar, (&T_FITW[0 as usize]) as u64, K_FITW)
-    let _b6: usize = fuiscene.button(bar, (&T_FITP[0 as usize]) as u64, K_FITP)
-    let _x1: usize = pe
-    let _x2: usize = ob
-    let fbar: usize = fuiscene.row(root)
-    fuiscene.set_gap(fbar, 6)
-    let _fl: usize = fuiscene.label(fbar, (&T_FIND[0 as usize]) as u64)
-    fuiscene.set_size(_fl, 56, 24)
-    let _fe: usize = fuiscene.entry(fbar, K_FIND, 220, (&s_find[0 as usize]) as u64)
-    let _fb1: usize = fuiscene.button(fbar, (&T_UP[0 as usize]) as u64, K_FPREV)
-    let _fb2: usize = fuiscene.button(fbar, (&T_DOWN[0 as usize]) as u64, K_FNEXT)
-    let _fi: usize = fuiscene.label(fbar, (&s_findinfo[0 as usize]) as u64)
-    fuiscene.set_size(_fi, 200, 24)
-    // the page area takes what the toolbar and the status line leave
-    var cw: u64 = fuiapp.width() - 16
-    var ch: u64 = fuiapp.height() - 144
-    if fuiapp.width() < 400 || fuiapp.height() < 300 {
+    tbtn(bar, icons.PDF_ZOOM_IN, (&TIP_ZIN[0 as usize]) as u64, K_ZIN)
+    tbtn(bar, icons.PDF_FIT_WIDTH, (&TIP_FITW[0 as usize]) as u64, K_FITW)
+    tbtn(bar, icons.PDF_FIT_PAGE, (&TIP_FITP[0 as usize]) as u64, K_FITP)
+    let _g3: usize = fuiscene.space(bar, 8, 1)
+    var fw: u64 = 150
+    var iw: u64 = 110
+    if narrow {
+        fw = 100
+        iw = 80
+    }
+    let _fe: usize = fuiscene.entry(bar, K_FIND, fw, (&s_find[0 as usize]) as u64)
+    fuiscene.entry_hint(K_FIND, (&T_HINT[0 as usize]) as u64)
+    tbtn(bar, icons.CHEVRON_UP, (&TIP_FPREV[0 as usize]) as u64, K_FPREV)
+    tbtn(bar, icons.CHEVRON_DOWN, (&TIP_FNEXT[0 as usize]) as u64, K_FNEXT)
+    let _fi: usize = fuiscene.label(bar, (&s_findinfo[0 as usize]) as u64)
+    fuiscene.set_size(_fi, iw, 24)
+    // the page area takes what the bar, the path row and the status line leave
+    var cw: u64 = fuiscene.width() - 16
+    var ch: u64 = fuiscene.height() - 88
+    if s_pathbar {
+        let pr: usize = fuiscene.row(root)
+        fuiscene.set_gap(pr, 6)
+        let _pe: usize = fuiscene.entry(pr, K_PATH, 420, (&s_path[0 as usize]) as u64)
+        let _ob: usize = fuiscene.button(pr, (&T_GO[0 as usize]) as u64, K_GO)
+        ch = ch - 42
+    }
+    if fuiscene.width() < 400 || fuiscene.height() < 300 {
         cw = 600
         ch = 400
     }
-    let pg: usize = fuiscene.image(root, K_PAGE, cw, ch)
+    let body: usize = fuiscene.row(root)
+    fuiscene.set_gap(body, 6)
+    if s_side {
+        let _tl: usize = fuiscene.table_list(body, K_THUMBS, SIDE_W, ch, 1, (&s_pages_blob[0 as usize]) as u64)
+        fuiscene.table_single(K_THUMBS, true)
+        fuiscene.table_set_sel(K_THUMBS, s_page)
+        cw = cw - SIDE_W - 6
+    }
+    let pg: usize = fuiscene.image(body, K_PAGE, cw, ch)
     s_vw = cw
     s_vh = ch
     let _pg2: usize = pg
@@ -227,6 +297,7 @@ fn close_doc() {
     s_page = 0
     s_pw = 0
     s_ph = 0
+    fill_pages()
 }
 
 fn load_file(path: u64) {
@@ -258,6 +329,12 @@ fn load_file(path: u64) {
     s_page = 0
     s_mode = 1
     s_dirty = true
+    s_pathbar = false
+    fill_pages()
+    if s_side {
+        fuiscene.table_set_blob(K_THUMBS, (&s_pages_blob[0 as usize]) as u64)
+        fuiscene.table_set_sel(K_THUMBS, 0)
+    }
 }
 
 // the scale (percent) to make the current page at
@@ -704,6 +781,7 @@ fn u_start(args: u64) -> u64 {
         ulib.strncpy((&s_find[0 as usize]) as u64, ulib.arg_at(args, 3), 127)
         start_find = true
     }
+    s_pathbar = s_path[0 as usize] == 0 as u8
     if !fuiscene.open(40, 30, 900, 700, (&T_APP[0 as usize]) as u64, build) {
         return 1
     }
@@ -725,10 +803,16 @@ fn u_start(args: u64) -> u64 {
         rounds = rounds + 1
         let key: u64 = fuiscene.pump()
         var changed: bool = false
+        if s_again && key == 0 {
+            // the rebuild after the toggle is done: the page area has its new size, make the picture for it
+            s_again = false
+            s_dirty = true
+        }
         if fuiscene.painted() != s_traced && fuiscene.trace_on() {
             s_traced = fuiscene.painted()
             fuiscene.say_rects((&T_APP[0 as usize]) as u64)
             fuiscene.say_texts()
+            fuiscene.say_tips()
         }
         if key == K_PREV {
             goto_page(s_page - 1)
@@ -750,18 +834,56 @@ fn u_start(args: u64) -> u64 {
         } else if key == K_FPREV {
             find_info((&T_BUSY[0 as usize]) as u64)
             find_step(false)
-        } else if key == K_OPEN || key == K_PATH {
+        } else if key == K_SIDE {
+            s_side = !s_side
+            s_dirty = true
+            s_again = true
+            changed = true
+        } else if key == K_OPEN {
+            // show the path row (and put the cursor in it); pressed again with a document open it hides
+            s_pathbar = !s_pathbar || !s_open
+            s_want_focus = K_PATH
+            changed = true
+        } else if key == K_THUMBS {
+            let r: u64 = fuiscene.table_sel(K_THUMBS)
+            if r < s_npages && r != s_page {
+                goto_page(r)
+            }
+        } else if key == K_GO || key == K_PATH {
             let t: u64 = fuiscene.entry_text(K_PATH)
             if t != 0 && (*(t as *mut u8)) != 0 as u8 {
                 load_file(t)
                 if s_err != 0 {
                     set_status(s_err)
+                    s_pathbar = true
                 }
+                changed = true
             }
+        }
+        if fuiscene.resized() != s_rseq {
+            s_rseq = fuiscene.resized()
+            s_dirty = true
+        }
+        if s_want_focus != 0 && !changed {
+            fuiscene.focus(s_want_focus)
+            s_want_focus = 0
         }
         let k: u64 = fuiscene.last_key()
         // the keys of the page are the page's only when no text field has the focus (a search word has n's in it)
         let fk: u64 = fuiscene.focus_key()
+        // keys that work even while a field has the cursor: F4 page list, Ctrl+F search field, Ctrl+O path row
+        if k == wlib.KEY_F4 {
+            s_side = !s_side
+            s_dirty = true
+            s_again = true
+            changed = true
+        } else if k == 6 {
+            fuiscene.focus(K_FIND)
+        } else if k == 15 {
+            s_pathbar = !s_pathbar || !s_open
+            s_want_focus = K_PATH
+            changed = true
+        }
         if k != 0 && fk != K_FIND && fk != K_PATH {
             if k == wlib.KEY_PGDN || k == wlib.KEY_RIGHT || k == 32 {
                 goto_page(s_page + 1)
@@ -783,6 +905,11 @@ fn u_start(args: u64) -> u64 {
                 find_step(true)
             } else if k == 112 {
                 find_step(false)
+            } else if k == 108 {
+                s_side = !s_side
+                s_dirty = true
+                s_again = true
+                changed = true
             } else if k == 98 {
                 s_mode = 1
                 s_dirty = true
@@ -795,6 +922,9 @@ fn u_start(args: u64) -> u64 {
             render_now()
             update_texts()
             update_find_info()
+            if s_side {
+                fuiscene.table_set_sel(K_THUMBS, s_page)
+            }
             changed = true
         }
         if changed {

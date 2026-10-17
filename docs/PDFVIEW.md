@@ -103,3 +103,13 @@ Zehn Abschnitte, alle gegen etwas **Äußeres**:
 
 Gefundene und behobene Fehler beim Bauen: **`lib/svg` wendet ein `transform` auf `<text>` zweimal an** (`times_text` wendet den Zustand erneut an) — gedrehte/geschrägte Glyphen stehen deshalb in einem `<g transform>`, der Text bei 0,0 darin (gedrehter Text stand vorher falsch); LZW-Tabelle bei beschädigtem Strom (Überlauf),
 `as u32`-Überläufe bei ToUnicode-/CID-Werten (jetzt geklemmt), Datei ohne Trailer (Katalog-Suche).
+
+
+## The bar (r972, 17.10.2026)
+
+ONE Edge-like bar instead of two rows: page list (F4 or `l`), open (Ctrl+O) | page up, "Seite n von N", page down |
+zoom out, zoom %, zoom in, fit width (b), fit page (s) | search field (Ctrl+F), previous / next match, "Treffer n von m".
+All buttons are 32 x 32 icon buttons (own glyphs `icons.PDF_*` in the icon font) with a tooltip that names the key. The
+path field is a second row only without a document or after Open / Ctrl+O. The page list is a plain "Seite n" list
+(no thumbnails yet -- rendering every page small costs too much on the big documents). Gate: `tools/pdfbar/run.sh`
+(counter-proof `--old` runs it against the tree before the bar).
