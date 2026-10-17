@@ -35,11 +35,17 @@ run_case() { # name app mode [extra xfile...]
 judge() { # text exit
     if [ "$2" = 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 }
-for c in ${CASES:-glogin-light lock-dark noglass caret}; do
+for c in ${CASES:-glogin-light lock-dark glogin-strong glogin-off noglass caret}; do
     echo "== $c"
     case "$c" in
       glogin-light) run_case "$c" glogin light && { python3 -I tools/glass/check.py field "$OUT/$c" glogin "$c" | tee "$OUT/$c.txt"; pass=$((pass+$(grep -c '^  OK' "$OUT/$c.txt"))); fail=$((fail+$(grep -c '^  FAIL' "$OUT/$c.txt"))); } ;;
       lock-dark)    run_case "$c" lock dark && { python3 -I tools/glass/check.py field "$OUT/$c" lock "$c" | tee "$OUT/$c.txt"; pass=$((pass+$(grep -c '^  OK' "$OUT/$c.txt"))); fail=$((fail+$(grep -c '^  FAIL' "$OUT/$c.txt"))); } ;;
+      glogin-strong) # counter-proof: transparency=strong = the old raw look, judged by the old (stricter) limits
+        printf 'transparency=strong\n' > "$OUT/strong.conf"
+        run_case "$c" glogin light xfile=/etc/theme.conf="$OUT/strong.conf" && { python3 -I tools/glass/check.py field "$OUT/$c" glogin "$c" strong | tee "$OUT/$c.txt"; pass=$((pass+$(grep -c '^  OK' "$OUT/$c.txt"))); fail=$((fail+$(grep -c '^  FAIL' "$OUT/$c.txt"))); } ;;
+      glogin-off)    # control: transparency=off = opaque, no blur: the variance check must turn red
+        printf 'transparency=off\n' > "$OUT/off.conf"
+        run_case "$c" glogin light xfile=/etc/theme.conf="$OUT/off.conf" && { python3 -I tools/glass/check.py field "$OUT/$c" glogin "$c" flat | tee "$OUT/$c.txt"; judge x $?; } ;;
       noglass)      run_case "$c" glogin light xfile=/etc/noglass="$OUT/flag" && { python3 -I tools/glass/check.py field "$OUT/$c" glogin "$c" flat | tee "$OUT/$c.txt"; judge x $?; } ;;
       caret)
         run_case "$c" glogin light drive="$OUT/book" || continue

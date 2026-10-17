@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/glass/check.py -- W-GLASS: THE FROSTED GLASS OF THE LOCK AND SIGN-IN SCREEN, IN PIXELS.
 
-    check.py field <dir of one capture> <glogin|lock> <label> [flat]
+    check.py field <dir of one capture> <glogin|lock> <label> [flat] [strong]
     check.py caret <dir of a burst series> <prefix> <x0> <y0> <x1> <y1> <dark|light>
 
 field: <dir> holds `desktop.ppm` and `serial.txt` (the program's `rect` lines, tools/signinlook).
@@ -11,8 +11,8 @@ field: <dir> holds `desktop.ppm` and `serial.txt` (the program's `rect` lines, t
             plate has 0.
   soft      ... and it is smooth, not noise: the mean difference of horizontal neighbours is <= 3.0 levels.
   border    a defined rim: the mean luminance of the top edge rows differs by >= 3 levels from the row 5 px inside (light rim on dark glass, focus-accent rim on milk glass).
-  transparent the plate covers <= 0.62 of the picture beneath it (see cmd_field); `flat` must turn it red too.
-  surround  the plate is visible against the picture around it (luminance ratio >= 1.3).
+  transparent the plate covers <= 0.85 of the picture beneath it (milky `subtle` mode, W-S; 0.62 with `strong`, see cmd_field); `flat` must turn it red too.
+  surround  the plate is visible against the picture around it (luminance ratio >= 1.08 subtle, >= 1.3 strong).
   With `flat` (the control run /etc/noglass) the variance check must FAIL: the script then prints
   `GLASS <label>: control red` and exits 0; if it does not turn red it exits 1 (the check is blind).
 caret: per frame of a burst series: is a caret bar (a thin vertical bar of the ink colour, >= 55 % of the
@@ -61,7 +61,10 @@ def field_metrics(im, box):
 
 def cmd_field(a):
     d, app, label = a[0], a[1], a[2]
-    flat = len(a) > 3 and a[3] == "flat"
+    flat = "flat" in a[3:]
+    strong = "strong" in a[3:]
+    cover_max = 0.62 if strong else 0.85
+    surround_min = 1.3 if strong else 1.08
     im = Image.open(d + "/desktop.ppm").convert("RGB")
     R = rects(d + "/serial.txt", "glogin" if app == "glogin" else "lock")
     key = 7 if app == "glogin" else 11
@@ -75,14 +78,14 @@ def cmd_field(a):
     res.append((m["adj"] <= 3.0, "soft: neighbour difference %.2f (need <= 3.0: blurred, not noisy)" % m["adj"]))
     res.append((abs(m["rim"] - m["inner"]) >= 3.0, "border: rim %.1f vs inside %.1f (need |diff| >= 3: light rim on dark glass, accent/dark rim on milk glass)" % (m["rim"], m["inner"])))
     ratio = (max(m["face"], m["out"]) + 12.0) / (min(m["face"], m["out"]) + 12.0)
-    res.append((ratio >= 1.3, "surround: plate %.1f vs picture around %.1f (ratio %.2f, need >= 1.3)" % (m["face"], m["out"], ratio)))
+    res.append((ratio >= surround_min, "surround: plate %.1f vs picture around %.1f (ratio %.2f, need >= %.2f)" % (m["face"], m["out"], ratio, surround_min)))
     # transparency (Justin, 16.10.2026: field + buttons looked solid grey): how much of the plate is tint. A white plate
     # over the picture: face = a*255 + (1-a)*around -> a = (face-around)/(255-around); a dark plate: a = (around-face)/around.
     if m["face"] >= m["out"]:
         cover = (m["face"] - m["out"]) / max(1.0, 255.0 - m["out"])
     else:
         cover = (m["out"] - m["face"]) / max(1.0, m["out"])
-    res.append((cover <= 0.62, "transparent: the plate covers %.2f of the picture beneath (need <= 0.62: glass, not a solid fill)" % cover))
+    res.append((cover <= cover_max, "transparent: the plate covers %.2f of the picture beneath (need <= %.2f: glass, not a solid fill)" % (cover, cover_max)))
     if flat:
         red = (not res[0][0]) and (not res[-1][0])
         print("  %s  control %s: the variance check %s (std %.2f)" % ("OK  " if red else "FAIL", label,
