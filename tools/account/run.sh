@@ -135,7 +135,7 @@ fi
 echo "== 1. das Programm baut und passt =="
 # ======================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if FIRNLIB="$ROOT/vendor/firn/lib" "$FIRNC" -c --profile=app \
+if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: konto.fi mit std.net, std.json, tls.tls, tls.x509"
 else

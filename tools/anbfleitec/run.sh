@@ -29,6 +29,12 @@
 #  7. NO NETWORK: a signed-in device stays signed in and usable.
 #  8. Counter-probe on the verifier settings: a valid token with another
 #     --aud is refused (so the audience check is live).
+#  9. (r34) ziel= with a DNS NAME (https://konto.test:8443): resolved in the
+#     guest through /etc/resolv.conf (dnsdienst.py in the namespace); full
+#     device flow, ONE query per run (cache), Host header = the name, the
+#     certificate is checked against the NAME (other.test -> same server ->
+#     refused), NXDOMAIN / DNS server down -> keinnetz in bounded time with no
+#     request at the broker, a broken number (10.9.0) is refused without DNS.
 #
 # Usage: bash tools/anbfleitec/run.sh      (heavy: ~25 guest boots)
 set -uo pipefail
@@ -63,8 +69,10 @@ BPORT=$(( 16000 + ($$ % 300) * 2 ))
 QPORT=$(( BPORT + 1 ))
 SRVPID=""
 BRPID=""
+DNSPID=""
 cleanup() {
     [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
+    [ -n "$DNSPID" ] && kill "$DNSPID" 2>/dev/null
     [ -n "$BRPID" ] && kill "$BRPID" 2>/dev/null
     ip netns del "$NS" 2>/dev/null
     ip link del "$V0" 2>/dev/null
@@ -158,7 +166,7 @@ abbild() { # <target> [extra mkfs args...]
         "/etc/konten.conf=$TMPD/konten.conf" \
         "/vec.tsv=$TMPD/vec.tsv" "/jwks.json=$TMPD/jwks.json" \
         "/usr/share/locale/en/messages=$ROOT/locale/en/messages" \
-        "/usr/share/locale/de/messages=$ROOT/locale/de/messages" \
+        "/usr/share/locale/de/messages=$ROOT/locale/de/messages" "$@" \
         > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; return 1; }
     return 0
 }
@@ -452,6 +460,73 @@ is "sign-out: the refresh token is dead afterwards" "$(replay "$O1")" "400"
 python3 tools/osum/mkfs.py where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo_o.txt" && ok "sign-out: the session file is gone" \
     || bad "sign-out: the session file is still there"
+
+# ======================================================================
+echo "== 9. a NAME instead of a number in ziel= (r34: DNS in the guest) =="
+# ======================================================================
+# The issuer is now https://konto.test:8443. The guest gets the number only
+# from a tiny DNS server in the namespace (tools/operation/dnsdienst.py,
+# /etc/resolv.conf). The name stays the certificate name and the Host header.
+server_zu
+Z9="https://konto.test:8443"
+server_auf --issuer "$Z9"
+ip netns exec "$NS" python3 tools/operation/dnsdienst.py --port 53 --adresse 10.9.0.1 \
+    --eintrag konto.test=10.9.0.1 --eintrag other.test=10.9.0.1 \
+    --log "$TMPD/dns.log" > /dev/null 2>&1 & DNSPID=$!
+sleep 0.8
+printf 'nameserver 10.9.0.1\noptions timeout:1 attempts:1\n' > "$TMPD/resolv.conf"
+cp "$TMPD/konten.conf" "$TMPD/konten.orig"
+printf 'fleitec ziel=%s\n' "$Z9" > "$TMPD/konten.conf"
+abbild "$TMPD/d_dns.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
+nfrage() { grep -c "^FRAGE $1 " "$TMPD/dns.log" 2>/dev/null || true; }
+
+scen approve
+: > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
+lauf "$TMPD/d_dns.img" "$CMD" "$TMPD/o_d1.txt"
+is "name target: full device flow signs in" "$(kv "$TMPD/o_d1.txt" stand)" "ok"
+is "name target: the DNS was asked ONCE for the whole run (cache)" "$(nfrage konto.test)" "1"
+grep -q '"host": "konto.test"' "$TMPD/idp/protokoll.jsonl" \
+    && ok "name target: the Host header carries the NAME" || bad "name target: Host header is not konto.test"
+grep -q '"host": "10\.9\.0\.1' "$TMPD/idp/protokoll.jsonl" \
+    && bad "name target: a request went out with the number as Host" || ok "name target: no request names the number"
+
+# a name that resolves to the SAME server, but the certificate is for konto.test
+printf 'fleitec ziel=https://other.test:8443\n' > "$TMPD/konten.conf"
+abbild "$TMPD/d_dns2.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
+: > "$TMPD/dns.log"
+lauf "$TMPD/d_dns2.img" "$CMD" "$TMPD/o_d2.txt"
+is "other name -> same number: certificate is checked against the NAME (refused)" "$(kv "$TMPD/o_d2.txt" stand)" "tls"
+is "other name: the DNS was asked for other.test" "$(nfrage other.test)" "1"
+
+# a name the DNS does not know
+printf 'fleitec ziel=https://gibtsnicht.test:8443\n' > "$TMPD/konten.conf"
+abbild "$TMPD/d_dns3.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
+: > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
+lauf "$TMPD/d_dns3.img" "$CMD" "$TMPD/o_d3.txt"
+is "unknown name (NXDOMAIN): state keinnetz" "$(kv "$TMPD/o_d3.txt" stand)" "keinnetz"
+is "unknown name: the DNS was asked" "$(nfrage gibtsnicht.test)" "1"
+is "unknown name: no request reached the server" "$(grep -c . "$TMPD/idp/protokoll.jsonl")" "0"
+
+# broken numbers are NOT names: refused before any DNS query
+printf 'fleitec ziel=https://10.9.0:8443\n' > "$TMPD/konten.conf"
+abbild "$TMPD/d_dns4.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
+: > "$TMPD/dns.log"
+lauf "$TMPD/d_dns4.img" "$CMD" "$TMPD/o_d4.txt"
+is "broken number 10.9.0: not keinnetz (refused as a target)" "$(kv "$TMPD/o_d4.txt" stand)" "fehler"
+is "broken number: no DNS query at all" "$(grep -c '^FRAGE' "$TMPD/dns.log" 2>/dev/null || true)" "0"
+
+# DNS server gone: bounded wait, clear state, nothing reaches the broker
+kill "$DNSPID" 2>/dev/null; wait "$DNSPID" 2>/dev/null; DNSPID=""
+printf 'fleitec ziel=%s\n' "$Z9" > "$TMPD/konten.conf"
+abbild "$TMPD/d_dns5.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
+: > "$TMPD/idp/protokoll.jsonl"
+T0=$(date +%s)
+lauf "$TMPD/d_dns5.img" "$CMD" "$TMPD/o_d5.txt"
+T1=$(date +%s)
+is "DNS server down: state keinnetz" "$(kv "$TMPD/o_d5.txt" stand)" "keinnetz"
+num "DNS server down: the guest gave up in bounded time (s, boot included)" "$((T1 - T0))" le 60
+is "DNS server down: no request reached the broker" "$(grep -c . "$TMPD/idp/protokoll.jsonl")" "0"
+cp "$TMPD/konten.orig" "$TMPD/konten.conf"
 
 # ======================================================================
 echo "== 7. NO NETWORK: signed in stays signed in =="

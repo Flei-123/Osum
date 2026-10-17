@@ -124,8 +124,9 @@ service enforces itself, where the data leaves the device:
 1. `/etc/social/providers`: `provider fleitec /bin/socfleitec /etc/social/fleitec.conf`
 2. `/etc/social/fleitec.conf`:
    ```
-   url=https://<IPv4 of chat.fleitec.com>
-   name=chat.fleitec.com
+   url=https://chat.fleitec.com
+   # (a number works too: url=https://<IPv4> plus name=chat.fleitec.com;
+   #  a NAME in url= is resolved through /etc/resolv.conf, IPv4 only)
    relay=<IPv4 of the relay>:7771
    ```
 3. `act call social.accounts.login provider=fleitec` → a code; type it in

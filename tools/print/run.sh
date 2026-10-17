@@ -76,7 +76,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 echo "== 1. das Programm baut =="
 # ======================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if FIRNLIB="$ROOT/vendor/firn/lib" "$FIRNC" -c --profile=app \
+if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/ipprint.o" kernel/app/ipprint.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: ipprint.fi mit font.ttf, font.raster, knetz"
 else
