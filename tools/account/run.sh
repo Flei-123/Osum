@@ -154,7 +154,8 @@ num "das Programm auf der Platte, in Oktetten" "$SZ" le 2500000
 ZEILEN=$(wc -l kernel/app/account.fi kernel/app/anbieter.fi kernel/app/knetz.fi \
     kernel/app/kspeicher.fi kernel/app/ksiegel.fi kernel/app/kjson.fi \
     kernel/app/kmsg.fi kernel/app/kgegen.fi kernel/app/anb_jarvis.fi \
-    kernel/app/anb_xoffi.fi kernel/app/anb_eigen.fi | tail -1 | awk '{print $1}')
+    kernel/app/anb_xoffi.fi kernel/app/anb_eigen.fi kernel/app/anb_fleitec.fi \
+    kernel/app/kjwt.fi kernel/app/ked25519.fi kernel/app/kbig.fi kernel/app/ksha512.fi | tail -1 | awk '{print $1}')
 hin "Quelltext dieser Runde in kernel/app/: $ZEILEN Zeilen"
 
 # ======================================================================
@@ -356,8 +357,8 @@ server_auf
 
 abbild "$TMPD/d1.img" || true
 lauf "$TMPD/d1.img" "konto anbieter" "$TMPD/o_anb.txt"
-is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" anbieter_anzahl)" "3"
-for r in jarvis xoffi eigen; do
+is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" anbieter_anzahl)" "4"
+for r in jarvis xoffi eigen fleitec; do
     grep -qa "^konto: anbieter_name = $r$" "$TMPD/o_anb.txt" \
         && ok "der Ruecken '$r' ist da" || bad "der Ruecken '$r' fehlt"
 done

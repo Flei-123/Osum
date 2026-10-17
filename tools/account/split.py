@@ -29,12 +29,13 @@ ALLGEMEIN = [
     "kernel/app/kjson.fi",
     "kernel/app/kmsg.fi",
     "kernel/app/kgegen.fi",
+    "kernel/app/kjwt.fi",
     "kernel/app/account.fi",
 ]
 
 # Die Ruecken. Ihr Name IST das Anbieterwissen.
 RUECKEN = ["kernel/app/anb_jarvis.fi", "kernel/app/anb_xoffi.fi",
-           "kernel/app/anb_eigen.fi"]
+           "kernel/app/anb_eigen.fi", "kernel/app/anb_fleitec.fi"]
 
 # Die Woerter, nach denen gesucht wird -- die Namen der Ruecken, plus
 # die Marken, unter denen sie im Netz auftreten.
