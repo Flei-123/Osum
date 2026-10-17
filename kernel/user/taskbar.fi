@@ -778,6 +778,10 @@ static mut kh: [u64; 16] = [0 as u64; 16]
 static mut kid: [u64; 16] = [0 as u64; 16]
 static mut kver: [u64; 16] = [0 as u64; 16]
 static mut kfok: [u64; 16] = [0 as u64; 16]
+// WINDOW GROUPING (Windows 11): windows of one program (same WL_APP name) are ONE button. `kcnt` = windows in the group, `kmem` = their ids
+// (8 per group, in slot order). The window the button stands for (kid / kfok / ktit) is the focused one, else the first.
+static mut kcnt: [u64; 16] = [0 as u64; 16]
+static mut kmem: [u64; 128] = [0 as u64; 128]
 // ROUND NETVIEW: the network view of the process each window belongs to.
 static mut knv: [u64; 16] = [0 as u64; 16]
 static mut ktit: [u8; 640] = [0 as u8; 640]
@@ -3817,7 +3821,40 @@ fn list_read() -> bool {
                     kapp[((n * 24 + 23)) as usize] = 0 as u8
                     let mix: u64 = id *% 131 +% (fl & 1) *% 7 +% fo +% nv *% 17
                     sum = (sum ^ mix) *% 1099511628211
-                    n = n + 1
+                    // grouping: a window of a program that already has a button joins that button instead of getting its own
+                    var gj: u64 = MAXK
+                    if kapp[((n * 24)) as usize] != 0 as u8 {
+                        var jj: u64 = 0
+                        while jj < n {
+                            if sym_eq((&kapp[0 as usize]) as u64 + jj * 24, (&kapp[0 as usize]) as u64 + n * 24) {
+                                gj = jj
+                                break
+                            }
+                            jj = jj + 1
+                        }
+                    }
+                    if gj < MAXK {
+                        if kcnt[(gj) as usize] < 8 {
+                            kmem[((gj * 8 + kcnt[(gj) as usize])) as usize] = id
+                        }
+                        kcnt[(gj) as usize] = kcnt[(gj) as usize] + 1
+                        if fo != 0 && kfok[(gj) as usize] == 0 {
+                            // the focused window stands for the group
+                            kid[(gj) as usize] = id
+                            kver[(gj) as usize] = fl & wlibc.F_HIDDEN
+                            kfok[(gj) as usize] = fo
+                            knv[(gj) as usize] = nv
+                            var kt: u64 = 0
+                            while kt < 32 {
+                                ktit[((gj * 40 + kt)) as usize] = ktit[((n * 40 + kt)) as usize]
+                                kt = kt + 1
+                            }
+                        }
+                    } else {
+                        kcnt[(n) as usize] = 1
+                        kmem[((n * 8)) as usize] = id
+                        n = n + 1
+                    }
                 }
             }
             slot = slot + 1
@@ -3988,6 +4025,8 @@ fn sym_of(app: u64) -> u64 {
 }
 
 static mut s_bt: [u8; 17] = "taskbar: btn i=\0\0"
+static mut s_grp: [u8; 16] = "taskbar: grp i=\0"
+static mut s_grpn: [u8; 4] = " n=\0"
 // RUNDE GLAS (fix-r3-4): der Strich unter dem Fensterknopf.
 static mut s_pil: [u8; 18] = "taskbar: pille i=\0"
 static mut s_pilx: [u8; 4] = " x=\0"
@@ -4738,6 +4777,7 @@ static mut lab_tw: u64 = 0
 // derselbe Grund: der Bericht liest ab, was gemalt wurde, statt es ein
 // zweites Mal auszurechnen (RUNDE PAINT, `mk_x`).
 static mut pl_x: u64 = 0
+static mut pl_y: u64 = 0
 static mut pl_w: u64 = 0
 
 // DIE PILLE UNTER EINEM FENSTERKNOPF.
@@ -4751,6 +4791,40 @@ static mut pl_w: u64 = 0
 // oder ein leiser Trenner). Auf `classic` und bei `radius=0` malt diese
 // Funktion nichts, und die alten Bildpunktzusagen der Leiste bleiben
 // Zahl fuer Zahl gueltig.
+// grouping: the id of the next window of group `e` after the one the button stands for (the focused one) -- a click on a group that is
+// already in front walks through its windows
+fn group_next(e: u64) -> u64 {
+    let c: u64 = kcnt[(e) as usize]
+    var cc: u64 = c
+    if cc > 8 {
+        cc = 8
+    }
+    var at: u64 = 0
+    var m: u64 = 0
+    while m < cc {
+        if kmem[((e * 8 + m)) as usize] == kid[(e) as usize] {
+            at = m
+        }
+        m = m + 1
+    }
+    return kmem[((e * 8 + (at + 1) % cc)) as usize]
+}
+
+// a group of several windows shows one short dash on each side of the bar (up to two more)
+fn group_dashes(cnt: u64) {
+    if cnt < 2 || pl_w == 0 {
+        return
+    }
+    let dy: u64 = pl_y
+    let c: u64 = wlibc.theme(wlibc.C_TEXT_MUTED)
+    if pl_x >= 8 {
+        wlib.draw_bar(pl_x - 7, dy, 4, 3, c)
+    }
+    if cnt > 2 {
+        wlib.draw_bar(pl_x + pl_w + 3, dy, 4, 3, c)
+    }
+}
+
 fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
     // Was gemalt wurde, steht danach hier -- 0 heisst "nichts".
     pl_x = 0
@@ -4795,6 +4869,7 @@ fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
     }
     wlib.draw_bar(px, py, pw, 3, c)
     pl_x = px
+    pl_y = py
     pl_w = pw
 }
 
@@ -4859,7 +4934,7 @@ fn app_windows(name: u64) -> u64 {
     var j: u64 = 0
     while j < nk {
         if sym_eq(name, (&kapp[0 as usize]) as u64 + j * 24) {
-            c = c + 1
+            c = c + kcnt[(j) as usize]
         }
         j = j + 1
     }
@@ -5145,6 +5220,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             if laeuft {
                 pill(px_[(pz2) as usize], py_[(pz2) as usize],
                     pw_[(pz2) as usize], ph_[(pz2) as usize], vorn)
+                group_dashes(kcnt[(pw2) as usize])
                 if cf_badge != 0 {
                     let wn: u64 = app_windows(pnm)
                     if wn >= cf_badge {
@@ -5199,6 +5275,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             // Fenster (kver) bekommt die schmale.
             pill(kx[(i) as usize], ky[(i) as usize], kw[(i) as usize],
                 kh[(i) as usize], kfok[(i) as usize] != 0)
+            group_dashes(kcnt[(i) as usize])
             // ==================================== RUNDE OBERFLAECHE
             // WOHIN DAS FENSTER FLIEGT, WENN ES MINIMIERT WIRD.
             //
@@ -5324,6 +5401,11 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                         sayn(mk_y)
                     }
                 }
+                nl()
+                say((&s_grp[0 as usize]) as u64)
+                sayn(i)
+                say((&s_grpn[0 as usize]) as u64)
+                sayn(kcnt[(i) as usize])
                 nl()
                 say_text((&m_btn[0 as usize]) as u64, rc >> 32,
                     rc & 0xFFFFFFFF, fg, bg, lab)
@@ -7561,8 +7643,13 @@ fn click(x: u64, y: u64) {
             && y < py_[(pk) as usize] + ph_[(pk) as usize] {
             let w2: u64 = pinwin[(pk) as usize]
             if w2 < MAXK {
-                let rc2: u64 = wlibc.win_act(kid[(w2) as usize],
-                    wlibc.WA_TOGGLE)
+                var rc2: u64 = 0
+                if kcnt[(w2) as usize] > 1 && kfok[(w2) as usize] != 0 {
+                    // grouped and already in front: walk to the next window of the program
+                    rc2 = wlibc.win_act(group_next(w2), wlibc.WA_RAISE)
+                } else {
+                    rc2 = wlibc.win_act(kid[(w2) as usize], wlibc.WA_TOGGLE)
+                }
                 acts = acts + 1
                 say((&s_pinact[0 as usize]) as u64)
                 say((&pinname[0 as usize]) as u64 + pk * 24)
@@ -7588,8 +7675,12 @@ fn click(x: u64, y: u64) {
                 say((&s_ct[0 as usize]) as u64)
                 say((&z_task[0 as usize]) as u64)
                 nl()
-                let rc: u64 = wlibc.win_act(kid[(i) as usize],
-                    wlibc.WA_TOGGLE)
+                var rc: u64 = 0
+                if kcnt[(i) as usize] > 1 && kfok[(i) as usize] != 0 {
+                    rc = wlibc.win_act(group_next(i), wlibc.WA_RAISE)
+                } else {
+                    rc = wlibc.win_act(kid[(i) as usize], wlibc.WA_TOGGLE)
+                }
                 acts = acts + 1
                 say((&s_act[0 as usize]) as u64)
                 sayn(kid[(i) as usize])
