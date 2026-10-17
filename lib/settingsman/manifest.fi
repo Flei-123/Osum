@@ -1,0 +1,632 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/settingsman/manifest.fi -- the SETTINGS manifest (docs/SETTINGS-MANIFEST.md, r136).
+//
+// No profile line: importable from the Settings app (profile app), from the kernel and from host tests.
+// No heap, no str: the text is a (pointer, length) pair, all state is in static tables.
+//
+// A package (or the Settings app for its built-in pages) ships a `SETTINGS` file, one item per line, the
+// same line format as the ACTIONS manifest of the action bus. The Settings app only RENDERS what it reads:
+//
+//   manifest 1
+//   app <name>
+//   page <id> <title-key> <symbol> <group>        starts a page; <title-key> is a message catalogue key
+//   column left|right                             where the following items go (default: left)
+//   label <label-key>                             a static line of text
+//   note <label-key> [<lines>]                    a wrapped paragraph (1..9 lines, default 1)
+//   field <key> <type> [<label-key>] [<default>]  one control; <type>: bool choice text secret action status list
+//
+// '#' at the start of a word starts a comment (rest of the line). Words are split at blanks.
+//
+// RULES (same spirit as the ACTIONS manifest, section 3 of docs/ACTION-BUS.md):
+//   * `manifest 1` first, then `app`, then pages. A wrong version, a second header or a missing `app` rejects the file.
+//   * A KNOWN line with missing/extra words, a bad name, a duplicate page id, a duplicate field key in a page, an item
+//     before the first page, a bad `column`, `action` without a label, or a full table rejects the WHOLE file: never
+//     half a page. After a rejection the tables are EMPTY and err_code()/err_line() say why.
+//   * An UNKNOWN line word or an unknown field type is skipped and counted (warn_count()): a newer manifest on an older
+//     Settings app still shows what it understands.
+//   * Names (ids, keys, symbol, group, catalogue keys) are [a-z0-9._-], 1..40 octets (app: 24).
+
+export {
+    ERR, NONE, K_LABEL, K_NOTE, K_FIELD, T_BOOL, T_CHOICE, T_TEXT, T_SECRET, T_ACTION, T_STATUS, T_LIST,
+    E_HEADER, E_APP, E_PAGE, E_DUP_PAGE, E_NO_PAGE, E_ITEM, E_NAME, E_FULL, E_POOL, E_COLUMN, E_DUP_FIELD,
+    load, reset, err_code, err_line, warn_count, app_name,
+    page_count, page_id, page_title, page_symbol, page_group, page_find, page_first, page_len,
+    item_count, item_kind, item_type, item_col, item_key, item_label, item_def, item_num,
+}
+
+const ERR: u64 = 4294967295 // load(): the file was rejected
+const NONE: u64 = 4294967295 // page_find(): no such page
+const K_LABEL: u64 = 1
+const K_NOTE: u64 = 2
+const K_FIELD: u64 = 3
+const T_BOOL: u64 = 1
+const T_CHOICE: u64 = 2
+const T_TEXT: u64 = 3
+const T_SECRET: u64 = 4
+const T_ACTION: u64 = 5
+const T_STATUS: u64 = 6
+const T_LIST: u64 = 7
+const E_HEADER: u64 = 1 // `manifest 1` missing, repeated or another version
+const E_APP: u64 = 2 // `app <name>` missing, repeated or malformed
+const E_PAGE: u64 = 3 // `page` malformed
+const E_DUP_PAGE: u64 = 4
+const E_NO_PAGE: u64 = 5 // an item before the first page
+const E_ITEM: u64 = 6 // label/note/field malformed
+const E_NAME: u64 = 7 // a bad character or a too long name
+const E_FULL: u64 = 8 // too many items or pages
+const E_POOL: u64 = 9 // the string pool is full
+const E_COLUMN: u64 = 10
+const E_DUP_FIELD: u64 = 11
+
+const MAX_ITEMS: u64 = 80
+const MAX_PAGES: u64 = 8
+const POOL_MAX: u64 = 3072
+
+static mut pool: [u8; 3072] = [0 as u8; 3072]
+static mut pool_n: u64 = 0
+static mut it_kind: [u64; 80] = [0 as u64; 80]
+static mut it_type: [u64; 80] = [0 as u64; 80]
+static mut it_col: [u64; 80] = [0 as u64; 80]
+static mut it_key: [u64; 80] = [0 as u64; 80]
+static mut it_label: [u64; 80] = [0 as u64; 80]
+static mut it_def: [u64; 80] = [0 as u64; 80]
+static mut it_num: [u64; 80] = [0 as u64; 80]
+static mut n_items: u64 = 0
+static mut pg_id: [u64; 8] = [0 as u64; 8]
+static mut pg_title: [u64; 8] = [0 as u64; 8]
+static mut pg_symbol: [u64; 8] = [0 as u64; 8]
+static mut pg_group: [u64; 8] = [0 as u64; 8]
+static mut pg_first: [u64; 8] = [0 as u64; 8]
+static mut pg_len: [u64; 8] = [0 as u64; 8]
+static mut n_pages: u64 = 0
+static mut app_off: u64 = 0
+static mut st: u64 = 0 // 0 nothing, 1 `manifest` seen, 2 `app` seen
+static mut cur_col: u64 = 0
+static mut err: u64 = 0
+static mut err_ln: u64 = 0
+static mut warns: u64 = 0
+static mut cur_buf: u64 = 0
+static mut wpos: [u64; 8] = [0 as u64; 8]
+static mut wlen: [u64; 8] = [0 as u64; 8]
+static mut too_many: u64 = 0
+
+static mut kw_manifest: [u8; 8] = "manifest"
+static mut kw_app: [u8; 3] = "app"
+static mut kw_page: [u8; 4] = "page"
+static mut kw_column: [u8; 6] = "column"
+static mut kw_label: [u8; 5] = "label"
+static mut kw_note: [u8; 4] = "note"
+static mut kw_field: [u8; 5] = "field"
+static mut kw_one: [u8; 1] = "1"
+static mut kw_left: [u8; 4] = "left"
+static mut kw_right: [u8; 5] = "right"
+static mut ty_bool: [u8; 4] = "bool"
+static mut ty_choice: [u8; 6] = "choice"
+static mut ty_text: [u8; 4] = "text"
+static mut ty_secret: [u8; 6] = "secret"
+static mut ty_action: [u8; 6] = "action"
+static mut ty_status: [u8; 6] = "status"
+static mut ty_list: [u8; 4] = "list"
+static mut dash: [u8; 2] = "-\0"
+
+fn rd(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn is_blank(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+fn reset() {
+    pool_n = 0
+    n_items = 0
+    n_pages = 0
+    app_off = 0
+    st = 0
+    cur_col = 0
+    err = 0
+    err_ln = 0
+    warns = 0
+    too_many = 0
+}
+
+fn err_code() -> u64 {
+    return err
+}
+
+fn err_line() -> u64 {
+    return err_ln
+}
+
+fn warn_count() -> u64 {
+    return warns
+}
+
+// off is "pool index + 1"; 0 = none
+fn pool_ptr(off: u64) -> u64 {
+    if off == 0 {
+        return 0
+    }
+    return ((&pool[0]) as u64) + (off - 1)
+}
+
+fn app_name() -> u64 {
+    if st < 2 || err != 0 {
+        return (&dash[0]) as u64
+    }
+    return pool_ptr(app_off)
+}
+
+// ---- words of the current line ----
+fn word_eq(w: u64, lit: u64, n: u64) -> bool {
+    if wlen[(w) as usize] != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if rd(cur_buf, wpos[(w) as usize] + i) != rd(lit, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn name_ok(w: u64, max: u64) -> bool {
+    let n: u64 = wlen[(w) as usize]
+    if n == 0 || n > max {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = rd(cur_buf, wpos[(w) as usize] + i)
+        let good: bool = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 || c == 45 || c == 95
+        if !good {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// the word into the pool, 0-terminated; returns pool index + 1, 0 when the pool is full
+fn put_word(w: u64) -> u64 {
+    let n: u64 = wlen[(w) as usize]
+    if pool_n + n + 1 > POOL_MAX {
+        return 0
+    }
+    let off: u64 = pool_n
+    var i: u64 = 0
+    while i < n {
+        pool[(off + i) as usize] = (rd(cur_buf, wpos[(w) as usize] + i) & 255) as u8
+        i = i + 1
+    }
+    pool[(off + n) as usize] = 0 as u8
+    pool_n = off + n + 1
+    return off + 1
+}
+
+// two 0-terminated texts (pool offsets or raw pointers) are equal
+fn text_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    var same: bool = true
+    var go: bool = true
+    while go {
+        let ca: u64 = rd(a, i)
+        let cb: u64 = rd(b, i)
+        if ca != cb {
+            same = false
+            go = false
+        } else {
+            if ca == 0 {
+                go = false
+            }
+        }
+        i = i + 1
+    }
+    return same
+}
+
+fn fail(code: u64, line: u64) -> u64 {
+    if err == 0 {
+        err = code
+        err_ln = line
+    }
+    return 0
+}
+
+fn type_of(w: u64) -> u64 {
+    if word_eq(w, (&ty_bool[0]) as u64, 4) {
+        return T_BOOL
+    }
+    if word_eq(w, (&ty_choice[0]) as u64, 6) {
+        return T_CHOICE
+    }
+    if word_eq(w, (&ty_text[0]) as u64, 4) {
+        return T_TEXT
+    }
+    if word_eq(w, (&ty_secret[0]) as u64, 6) {
+        return T_SECRET
+    }
+    if word_eq(w, (&ty_action[0]) as u64, 6) {
+        return T_ACTION
+    }
+    if word_eq(w, (&ty_status[0]) as u64, 6) {
+        return T_STATUS
+    }
+    if word_eq(w, (&ty_list[0]) as u64, 4) {
+        return T_LIST
+    }
+    return 0
+}
+
+fn add_item(kind: u64, ty: u64, key: u64, label: u64, def: u64, num: u64, line: u64) -> u64 {
+    if n_items >= MAX_ITEMS {
+        return fail(E_FULL, line)
+    }
+    let i: usize = n_items as usize
+    it_kind[i] = kind
+    it_type[i] = ty
+    it_col[i] = cur_col
+    it_key[i] = key
+    it_label[i] = label
+    it_def[i] = def
+    it_num[i] = num
+    n_items = n_items + 1
+    pg_len[(n_pages - 1) as usize] = pg_len[(n_pages - 1) as usize] + 1
+    return 1
+}
+
+fn do_page(nw: u64, line: u64) -> u64 {
+    if nw != 5 {
+        return fail(E_PAGE, line)
+    }
+    if !name_ok(1, 40) || !name_ok(2, 40) || !name_ok(3, 40) || !name_ok(4, 40) {
+        return fail(E_NAME, line)
+    }
+    if n_pages >= MAX_PAGES {
+        return fail(E_FULL, line)
+    }
+    let id: u64 = put_word(1)
+    let title: u64 = put_word(2)
+    let symbol: u64 = put_word(3)
+    let group: u64 = put_word(4)
+    if id == 0 || title == 0 || symbol == 0 || group == 0 {
+        return fail(E_POOL, line)
+    }
+    var p: u64 = 0
+    while p < n_pages {
+        if text_eq(pool_ptr(pg_id[(p) as usize]), pool_ptr(id)) {
+            return fail(E_DUP_PAGE, line)
+        }
+        p = p + 1
+    }
+    let i: usize = n_pages as usize
+    pg_id[i] = id
+    pg_title[i] = title
+    pg_symbol[i] = symbol
+    pg_group[i] = group
+    pg_first[i] = n_items
+    pg_len[i] = 0
+    n_pages = n_pages + 1
+    cur_col = 0
+    return 1
+}
+
+fn do_field(nw: u64, line: u64) -> u64 {
+    if nw < 3 || nw > 5 {
+        return fail(E_ITEM, line)
+    }
+    if !name_ok(1, 40) {
+        return fail(E_NAME, line)
+    }
+    let ty: u64 = type_of(2)
+    if ty == 0 {
+        // a type this Settings app does not know: skip, count (a newer manifest stays usable)
+        warns = warns + 1
+        return 1
+    }
+    var label: u64 = 0
+    var def: u64 = 0
+    if nw >= 4 {
+        if !name_ok(3, 40) {
+            return fail(E_NAME, line)
+        }
+        label = put_word(3)
+        if label == 0 {
+            return fail(E_POOL, line)
+        }
+    }
+    if nw == 5 {
+        // the default is free text without blanks (a number, a word)
+        def = put_word(4)
+        if def == 0 {
+            return fail(E_POOL, line)
+        }
+    }
+    if ty == T_ACTION && label == 0 {
+        return fail(E_ITEM, line)
+    }
+    let key: u64 = put_word(1)
+    if key == 0 {
+        return fail(E_POOL, line)
+    }
+    // one key once per page
+    var i: u64 = pg_first[(n_pages - 1) as usize]
+    while i < n_items {
+        if it_kind[(i) as usize] == K_FIELD && text_eq(pool_ptr(it_key[(i) as usize]), pool_ptr(key)) {
+            return fail(E_DUP_FIELD, line)
+        }
+        i = i + 1
+    }
+    return add_item(K_FIELD, ty, key, label, def, 0, line)
+}
+
+fn do_line(nw: u64, line: u64) -> u64 {
+    if too_many != 0 {
+        return fail(E_ITEM, line)
+    }
+    if word_eq(0, (&kw_manifest[0]) as u64, 8) {
+        if st != 0 || nw != 2 || !word_eq(1, (&kw_one[0]) as u64, 1) {
+            return fail(E_HEADER, line)
+        }
+        st = 1
+        return 1
+    }
+    if st == 0 {
+        return fail(E_HEADER, line)
+    }
+    if word_eq(0, (&kw_app[0]) as u64, 3) {
+        if st != 1 || nw != 2 {
+            return fail(E_APP, line)
+        }
+        if !name_ok(1, 24) {
+            return fail(E_NAME, line)
+        }
+        app_off = put_word(1)
+        if app_off == 0 {
+            return fail(E_POOL, line)
+        }
+        st = 2
+        return 1
+    }
+    if st < 2 {
+        return fail(E_APP, line)
+    }
+    if word_eq(0, (&kw_page[0]) as u64, 4) {
+        return do_page(nw, line)
+    }
+    if word_eq(0, (&kw_column[0]) as u64, 6) {
+        if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        if nw != 2 {
+            return fail(E_COLUMN, line)
+        }
+        if word_eq(1, (&kw_left[0]) as u64, 4) {
+            cur_col = 0
+            return 1
+        }
+        if word_eq(1, (&kw_right[0]) as u64, 5) {
+            cur_col = 1
+            return 1
+        }
+        return fail(E_COLUMN, line)
+    }
+    if word_eq(0, (&kw_label[0]) as u64, 5) {
+        if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        if nw != 2 {
+            return fail(E_ITEM, line)
+        }
+        if !name_ok(1, 40) {
+            return fail(E_NAME, line)
+        }
+        let lab: u64 = put_word(1)
+        if lab == 0 {
+            return fail(E_POOL, line)
+        }
+        return add_item(K_LABEL, 0, 0, lab, 0, 0, line)
+    }
+    if word_eq(0, (&kw_note[0]) as u64, 4) {
+        if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        if nw < 2 || nw > 3 {
+            return fail(E_ITEM, line)
+        }
+        if !name_ok(1, 40) {
+            return fail(E_NAME, line)
+        }
+        var lines: u64 = 1
+        if nw == 3 {
+            let c: u64 = rd(cur_buf, wpos[2])
+            if wlen[2] != 1 || c < 49 || c > 57 {
+                return fail(E_ITEM, line)
+            }
+            lines = c - 48
+        }
+        let lab: u64 = put_word(1)
+        if lab == 0 {
+            return fail(E_POOL, line)
+        }
+        return add_item(K_NOTE, 0, 0, lab, 0, lines, line)
+    }
+    if word_eq(0, (&kw_field[0]) as u64, 5) {
+        if n_pages == 0 {
+            return fail(E_NO_PAGE, line)
+        }
+        return do_field(nw, line)
+    }
+    // unknown line word: skipped, counted
+    warns = warns + 1
+    return 1
+}
+
+// Parses buf[0..len). Returns the number of items, or ERR (tables empty, err_code()/err_line() say why).
+fn load(buf: u64, len: u64) -> u64 {
+    reset()
+    cur_buf = buf
+    var at: u64 = 0
+    var line: u64 = 0
+    while at < len && err == 0 {
+        var e: u64 = at
+        while e < len && rd(buf, e) != 10 {
+            e = e + 1
+        }
+        line = line + 1
+        var nw: u64 = 0
+        too_many = 0
+        var i: u64 = at
+        while i < e {
+            let c: u64 = rd(buf, i)
+            if is_blank(c) {
+                i = i + 1
+            } else {
+                if c == 35 {
+                    i = e
+                } else {
+                    var q: u64 = i
+                    while q < e && !is_blank(rd(buf, q)) {
+                        q = q + 1
+                    }
+                    if nw < 8 {
+                        wpos[(nw) as usize] = i
+                        wlen[(nw) as usize] = q - i
+                        nw = nw + 1
+                    } else {
+                        too_many = 1
+                    }
+                    i = q
+                }
+            }
+        }
+        if nw > 0 {
+            do_line(nw, line)
+        }
+        at = e + 1
+    }
+    if err == 0 && st < 2 {
+        fail(E_HEADER, line)
+    }
+    if err != 0 {
+        n_items = 0
+        n_pages = 0
+        return ERR
+    }
+    return n_items
+}
+
+// ---- accessors (strings are 0-terminated pool text; 0 = none) ----
+fn page_count() -> u64 {
+    return n_pages
+}
+
+fn page_id(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pool_ptr(pg_id[(p) as usize])
+}
+
+fn page_title(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pool_ptr(pg_title[(p) as usize])
+}
+
+fn page_symbol(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pool_ptr(pg_symbol[(p) as usize])
+}
+
+fn page_group(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pool_ptr(pg_group[(p) as usize])
+}
+
+fn page_first(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pg_first[(p) as usize]
+}
+
+fn page_len(p: u64) -> u64 {
+    if p >= n_pages {
+        return 0
+    }
+    return pg_len[(p) as usize]
+}
+
+// a 0-terminated id -> page index, NONE when absent
+fn page_find(id: u64) -> u64 {
+    var p: u64 = 0
+    while p < n_pages {
+        if text_eq(pool_ptr(pg_id[(p) as usize]), id) {
+            return p
+        }
+        p = p + 1
+    }
+    return NONE
+}
+
+fn item_count() -> u64 {
+    return n_items
+}
+
+fn item_kind(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return it_kind[(i) as usize]
+}
+
+fn item_type(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return it_type[(i) as usize]
+}
+
+fn item_col(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return it_col[(i) as usize]
+}
+
+fn item_key(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_key[(i) as usize])
+}
+
+fn item_label(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_label[(i) as usize])
+}
+
+fn item_def(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_def[(i) as usize])
+}
+
+fn item_num(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return it_num[(i) as usize]
+}
