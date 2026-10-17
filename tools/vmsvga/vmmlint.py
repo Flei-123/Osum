@@ -28,7 +28,7 @@ def check(label, cond):
     if not cond:
         bad += 1
 
-want = {"VMMREQ_REPORT_GUEST_INFO": 50, "VMMREQ_CTL_FILTER": 42, "VMMREQ_GET_DISPLAY_CHANGE2": 54, "VMMREQ_SET_GUEST_CAPS": 56,
+want = {"VMMREQ_REPORT_GUEST_INFO": 50, "VMMREQ_GET_DISPLAY_CHANGE2": 54, "VMMREQ_SET_GUEST_CAPS": 56,
         "VMMREQ_REPORT_GUEST_INFO2": 58, "VMMREQ_REPORT_GUEST_STATUS": 59, "VMM_CAP_GRAPHICS": 4, "VMM_EVENT_DISPLAY": 4,
         "VMM_FAC_GRAPHICS": 1100, "VMM_FAC_DRIVER": 20, "VMM_ST_ACTIVE": 50, "VMM_HDR_VERSION": 0x10001, "VMM_VERSION": 0x10004}
 for k, v in want.items():
@@ -38,7 +38,7 @@ init = body("vmm_init")
 hint = body("vmm_hint_locked")
 stat = body("vmm_status")
 sizes = [("VMMREQ_REPORT_GUEST_INFO", 32, init), ("VMMREQ_REPORT_GUEST_INFO2", 24 + 144, init), ("VMMREQ_SET_GUEST_CAPS", 32, init),
-         ("VMMREQ_CTL_FILTER", 32, init), ("VMMREQ_GET_DISPLAY_CHANGE2", 44, hint), ("VMMREQ_REPORT_GUEST_STATUS", 36, stat)]
+         ("VMMREQ_GET_DISPLAY_CHANGE2", 44, hint), ("VMMREQ_REPORT_GUEST_STATUS", 36, stat)]
 for name, size, fn in sizes:
     m = re.search(r"vmm_call\(state, %s, ([0-9 +]+)\)" % name, fn)
     val = eval(m.group(1)) if m else None
@@ -51,6 +51,6 @@ check("GetDisplayChangeRequest2: xres/yres read at offsets 24/28", "rd32(rq, 24)
 check("guest info 2: name at offset 40, additions version major in the low half of word 24",
       "wr32(p, 40," in init and re.search(r"wr32\(p, 24, \(2 << 16\) \| 7\)", init) is not None)
 check("capabilities: graphics bit announced (set mask offset 24)", re.search(r"wr32\(p, 24, VMM_CAP_GRAPHICS\)", init) is not None)
-check("filter mask: display event bit (or_mask offset 24)", re.search(r"wr32\(p, 24, VMM_EVENT_DISPLAY\)", init) is not None)
+check("no event filter mask (the host would raise the VMMDev interrupt, no handler: VM froze after a resize hint)", "CTL_FILTER" not in init and "VMM_EVENT_DISPLAY)" not in init)
 print("vmmlint: %d fail" % bad)
 sys.exit(1 if bad else 0)
