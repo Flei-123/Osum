@@ -51,6 +51,7 @@ Namen fuer `klickauf`:
     tbbtn<N>        Fensterknopf N         (taskbar: btn i=N ...)
     netz            die Symbolgruppe       (taskbar: field net ...)
     uhr             die Uhr                (taskbar: field clock ...)
+    calrect<N>      Knopf N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
     lzeile<N>       Zeile N der Trefferliste des Starters
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
@@ -860,6 +861,12 @@ class Fahrer:
             x, y = int(m.group(1)), int(m.group(2))
             w, h = int(m.group(3)), int(m.group(4))
             return (x + 10, y + h - 10 - 22, w - 20, 22)
+        if name.startswith("calrect"):
+            # calpop.fi (P-011) reports its buttons in SCREEN pixels: `calpop: rect name=<n> x= y= w= h=`
+            m = letzte(r"calpop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[7:]))
+            if m is None:
+                return None
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("lrect"):
             n = int(name[5:])
             m = letzte(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)

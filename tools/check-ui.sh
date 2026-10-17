@@ -90,7 +90,7 @@ ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
 #             calls the same row loops as kernel/ui/wm.fi (`fui.comp`,
 #             `fui.core`), compdiff is the differential test of those loops
 #             (a test stand: it measures `fui.comp`, it builds no control).
-ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
+ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/calpop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
 
 # Die rohen Mal-Primitive. VOLLSTAENDIG -- siehe Punkt 1 oben.
 ROH='wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('

@@ -1,0 +1,662 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/calpop.fi -- THE CALENDAR POPUP OF THE BAR (P-011, 17.10.2026).
+//
+// One scene window of the bar's scene host (like traypop / taskview / notifc; NOT code in
+// taskbar.fi, which sits at its size limit). A click on the clock field opens it above the clock,
+// right edge on the clock's right edge. It shows one month as a grid (Monday first):
+//
+//   header     "<" previous month, "<month> <year>", ">" next month
+//   weekdays   Mo Tu We Th Fr Sa Su (locale key cal.days, words separated by '|')
+//   42 days    the days of the previous / next month are dim; a press on one of them goes to that month,
+//              a press on a day of the shown month marks it (ring). TODAY is a filled accent plate.
+//   footer     "Today" jumps back to the current month and marks today
+//
+// The date is the local date of the kernel (SYS_SYSINFO I_YEAR / I_MONTH / I_DAY, the same source as the
+// bar's clock). Names come from the locale keys cal.months (12 words, '|'), cal.days (7 words, '|'),
+// cal.today -- four keys in all, the message catalogue is nearly full.
+//
+// Serial lines (read by tools/calpop/run.sh):
+//   calpop: open today=<y>-<m>-<d> x= y= w= h=      calpop: month <y>-<m>      calpop: pick <y>-<m>-<d>
+//   calpop: shut <why>                              calpop: grid first=<weekday offset 0..6> days=<n>
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import fuiscene
+import fuiapp
+import msg
+
+export { init, toggle, step, is_open, hit, shut_now, days_in_month, weekday_mon0, leap }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const CARD_W: u64 = 296 // design points: 7 cells + the card padding
+const PADP: u64 = 10
+const GAPP: u64 = 4
+const CELL: u64 = 38 // one day cell, design points
+const CELL_H: u64 = 34
+const HEAD_H: u64 = 34
+const WD_H: u64 = 26
+const FOOT_H: u64 = 34
+const K_PREV: u64 = 601
+const K_NEXT: u64 = 602
+const K_TODAY: u64 = 603
+const CK_WD: u64 = 620 // 620..626 weekday header cells
+const CK_DAY: u64 = 640 // 640..681 the 42 day cells
+
+static mut cp_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut cp_h: u64 = 0
+static mut cp_id: u64 = 0
+static mut open_: u64 = 0
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut pw_: u64 = 0
+static mut ph_: u64 = 0
+static mut ax_: u64 = 0 // the clock field's rectangle (a press on it is the bar's toggle, not an "outside" press)
+static mut ay_: u64 = 0
+static mut aw_: u64 = 0
+static mut ah_: u64 = 0
+static mut btn_last: u64 = 0
+static mut key_last: u64 = 0
+static mut t_y: u64 = 0 // today
+static mut t_m: u64 = 0
+static mut t_d: u64 = 0
+static mut v_y: u64 = 0 // the shown month
+static mut v_m: u64 = 0
+static mut s_y: u64 = 0 // the marked day (0 = none)
+static mut s_m: u64 = 0
+static mut s_d: u64 = 0
+static mut head_b: [u8; 48] = [0 as u8; 48]
+static mut num_b: [u8; 8] = [0 as u8; 8]
+static mut word_b: [u8; 48] = [0 as u8; 48]
+
+static mut t_title: [u8; 9] = "Calendar\0"
+static mut k_months: [u8; 11] = "cal.months\0"
+static mut k_days: [u8; 9] = "cal.days\0"
+static mut k_today: [u8; 10] = "cal.today\0"
+static mut b_prev: [u8; 2] = "<\0"
+static mut b_next: [u8; 2] = ">\0"
+static mut s_open: [u8; 14] = "calpop: open \0"
+static mut s_today: [u8; 7] = "today=\0"
+static mut s_xx: [u8; 4] = " x=\0"
+static mut s_yy: [u8; 4] = " y=\0"
+static mut s_ww: [u8; 4] = " w=\0"
+static mut s_hh: [u8; 4] = " h=\0"
+static mut s_month: [u8; 15] = "calpop: month \0"
+static mut s_pick: [u8; 14] = "calpop: pick \0"
+static mut s_grid: [u8; 20] = "calpop: grid first=\0"
+static mut s_dayn: [u8; 7] = " days=\0"
+static mut s_shut: [u8; 14] = "calpop: shut \0"
+static mut s_esc: [u8; 4] = "esc\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_toggle: [u8; 7] = "toggle\0"
+static mut s_dash: [u8; 2] = "-\0"
+static mut s_rect: [u8; 19] = "calpop: rect name=\0"
+static mut n_prev: [u8; 5] = "prev\0"
+static mut n_next: [u8; 5] = "next\0"
+static mut n_tod: [u8; 6] = "today\0"
+static mut n_cell: [u8; 5] = "cell\0"
+static mut n_dim: [u8; 4] = "dim\0"
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while n < 64 && __mmio_read8((p + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn mg(key: u64) -> u64 {
+    return msg.get(key)
+}
+
+// ------------------------------------------------------------------ calendar arithmetic
+
+fn leap(y: u64) -> bool {
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn days_in_month(y: u64, m: u64) -> u64 {
+    if m == 2 {
+        if leap(y) {
+            return 29
+        }
+        return 28
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 {
+        return 30
+    }
+    return 31
+}
+
+// 0 = Monday .. 6 = Sunday (Sakamoto's table gives 0 = Sunday)
+fn weekday_mon0(y: u64, m: u64, d: u64) -> u64 {
+    var t: [u64; 12] = [0 as u64, 3 as u64, 2 as u64, 5 as u64, 0 as u64, 3 as u64, 5 as u64, 1 as u64,
+        4 as u64, 6 as u64, 2 as u64, 4 as u64]
+    if y < 1 || m < 1 || m > 12 || d < 1 {
+        return 0
+    }
+    var yy: u64 = y
+    if m < 3 {
+        yy = yy - 1
+    }
+    let sun0: u64 = (yy + yy / 4 - yy / 100 + yy / 400 + t[(m - 1) as usize] + d) % 7
+    return (sun0 + 6) % 7
+}
+
+fn read_today() {
+    t_y = ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0)
+    t_m = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0)
+    t_d = ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0)
+    if t_y < 1970 || t_m < 1 || t_m > 12 || t_d < 1 || t_d > 31 {
+        t_y = 2026
+        t_m = 1
+        t_d = 1
+    }
+}
+
+// the date a cell shows: writes the year / month / day into the three out slots
+static mut c_y: u64 = 0
+static mut c_m: u64 = 0
+static mut c_d: u64 = 0
+
+fn cell_date(idx: u64) {
+    let off: u64 = weekday_mon0(v_y, v_m, 1)
+    let dim: u64 = days_in_month(v_y, v_m)
+    if idx < off {
+        // the previous month's tail
+        var py: u64 = v_y
+        var pm: u64 = v_m - 1
+        if v_m == 1 {
+            pm = 12
+            py = v_y - 1
+        }
+        c_y = py
+        c_m = pm
+        c_d = days_in_month(py, pm) - (off - idx) + 1
+        return
+    }
+    let d: u64 = idx - off + 1
+    if d > dim {
+        var ny: u64 = v_y
+        var nm: u64 = v_m + 1
+        if v_m == 12 {
+            nm = 1
+            ny = v_y + 1
+        }
+        c_y = ny
+        c_m = nm
+        c_d = d - dim
+        return
+    }
+    c_y = v_y
+    c_m = v_m
+    c_d = d
+}
+
+// ------------------------------------------------------------------ text helpers
+
+// decimal digits of `v` at the start of `num_b`, NUL-terminated; returns the count
+fn itoa(v: u64) -> u64 {
+    var tmp: [u8; 8] = [0 as u8; 8]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 && n < 7 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        num_b[k as usize] = tmp[(n - 1 - k) as usize]
+        k = k + 1
+    }
+    num_b[n as usize] = 0 as u8
+    return n
+}
+
+// the `idx`-th word (0-based) of a '|'-separated catalogue text into `word_b`; false when it has fewer words
+fn word_of(list: u64, idx: u64) -> bool {
+    var i: u64 = 0
+    var w: u64 = 0
+    while w < idx {
+        let c: u8 = __mmio_read8((list + i) as *mut u8)
+        if c == 0 as u8 {
+            return false
+        }
+        if c == 124 as u8 {
+            w = w + 1
+        }
+        i = i + 1
+    }
+    var o: u64 = 0
+    while o < 46 {
+        let c2: u8 = __mmio_read8((list + i) as *mut u8)
+        if c2 == 0 as u8 || c2 == 124 as u8 {
+            break
+        }
+        word_b[o as usize] = c2
+        o = o + 1
+        i = i + 1
+    }
+    word_b[o as usize] = 0 as u8
+    return o > 0
+}
+
+// "<month name> <year>" into head_b
+fn build_head() {
+    var at: u64 = 0
+    if word_of(mg((&k_months[0 as usize]) as u64), v_m - 1) {
+        at = ulib.strncpy((&head_b[0 as usize]) as u64, (&word_b[0 as usize]) as u64, 30)
+    } else {
+        at = itoa(v_m)
+        at = ulib.strncpy((&head_b[0 as usize]) as u64, (&num_b[0 as usize]) as u64, 8)
+    }
+    let h0: u64 = (&head_b[0 as usize]) as u64
+    __mmio_write8((h0 + at) as *mut u8, 32 as u8)
+    let _n: u64 = itoa(v_y)
+    let _c: u64 = ulib.strncpy(h0 + at + 1, (&num_b[0 as usize]) as u64, 8)
+}
+
+// ------------------------------------------------------------------ the scene
+
+fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    let px: u64 = wlibc.px_ui()
+    let base: u64 = y + (h + wlibc.ascent_of(wlibc.F_UI, px)) / 2
+    if key >= CK_WD && key < CK_WD + 7 {
+        if word_of(mg((&k_days[0 as usize]) as u64), key - CK_WD) {
+            let n: u64 = slen((&word_b[0 as usize]) as u64)
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, px, (&word_b[0 as usize]) as u64, n)
+            var tx: u64 = x
+            if w > tw {
+                tx = x + (w - tw) / 2
+            }
+            fuiscene.cv_text_rgb(tx, base, w, (&word_b[0 as usize]) as u64, px, false, wlibc.theme(wlibc.T_DIM))
+        }
+        return
+    }
+    if key < CK_DAY || key >= CK_DAY + 42 {
+        return
+    }
+    cell_date(key - CK_DAY)
+    let inm: bool = c_m == v_m
+    let is_today: bool = c_y == t_y && c_m == t_m && c_d == t_d
+    let is_sel: bool = s_y != 0 && c_y == s_y && c_m == s_m && c_d == s_d
+    var side: u64 = w
+    if h < side {
+        side = h
+    }
+    let ox: u64 = x + (w - side) / 2
+    let oy: u64 = y + (h - side) / 2
+    var fg: u64 = wlibc.theme(wlibc.T_FG)
+    if !inm {
+        fg = wlibc.theme(wlibc.T_DIM)
+    }
+    if is_today {
+        fuiscene.cv_round_rgb(ox, oy, side, side, side / 2, wlibc.theme(wlibc.T_ACCENT))
+        fg = wlibc.theme(wlibc.T_SELFG)
+    }
+    if is_sel {
+        fuiscene.cv_ring_rgb(ox, oy, side, side, side / 2, 2, wlibc.theme(wlibc.T_ACCENT))
+    }
+    let n2: u64 = itoa(c_d)
+    let tw2: u64 = wlibc.text_w(wlibc.F_UI, px, (&num_b[0 as usize]) as u64, n2)
+    var tx2: u64 = x
+    if w > tw2 {
+        tx2 = x + (w - tw2) / 2
+    }
+    fuiscene.cv_text_rgb(tx2, base, w, (&num_b[0 as usize]) as u64, px, is_today, fg)
+}
+
+fn build() {
+    let r: usize = fuiscene.root()
+    fuiscene.set_gap(r, GAPP)
+    build_head()
+    let rh: usize = fuiscene.row(r)
+    fuiscene.set_gap(rh, GAPP)
+    let bp: usize = fuiscene.button(rh, (&b_prev[0 as usize]) as u64, K_PREV)
+    fuiscene.set_size(bp, CELL, HEAD_H)
+    let lh: usize = fuiscene.label(rh, (&head_b[0 as usize]) as u64)
+    fuiscene.set_size(lh, 7 * CELL - 2 * CELL - 2 * GAPP, HEAD_H)
+    let bn: usize = fuiscene.button(rh, (&b_next[0 as usize]) as u64, K_NEXT)
+    fuiscene.set_size(bn, CELL, HEAD_H)
+    let rw: usize = fuiscene.row(r)
+    fuiscene.set_gap(rw, 0)
+    var i: u64 = 0
+    while i < 7 {
+        let _c: usize = fuiscene.canvas2(rw, CK_WD + i, CELL, WD_H, draw_cv)
+        i = i + 1
+    }
+    var row: u64 = 0
+    while row < 6 {
+        let rr: usize = fuiscene.row(r)
+        fuiscene.set_gap(rr, 0)
+        var col: u64 = 0
+        while col < 7 {
+            let _d: usize = fuiscene.canvas2(rr, CK_DAY + row * 7 + col, CELL, CELL_H, draw_cv)
+            col = col + 1
+        }
+        row = row + 1
+    }
+    let bt: usize = fuiscene.button(r, mg((&k_today[0 as usize]) as u64), K_TODAY)
+    fuiscene.set_size(bt, 7 * CELL, FOOT_H)
+}
+
+// ------------------------------------------------------------------ the life
+
+fn init() -> bool {
+    cp_win = fuiscene.win_open_plain(0, 0, CARD_W * sk(), card_h() * sk(), (&t_title[0 as usize]) as u64,
+        wlibc.L_MENUE, build)
+    if cp_win == fuiscene.BADWIN {
+        cp_win = NONE
+        return false
+    }
+    let _s: bool = fuiscene.win_select(cp_win)
+    fuiscene.keys_always(true)
+    cp_h = fuiscene.handle()
+    let _v: u64 = wlibc.win_state(cp_h, wlibc.WS_HIDDEN, 1)
+    let _u: bool = fuiscene.win_select(0)
+    cp_id = wlibc.sys3w(wlibc.WM_INFO, cp_h, wlibc.WI_ID, 0)
+    return true
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + pw_ && y >= py_ && y < py_ + ph_
+}
+
+fn card_h() -> u64 {
+    return 2 * PADP + HEAD_H + WD_H + 6 * CELL_H + FOOT_H + 8 * GAPP
+}
+
+fn paint_now() {
+    var n: u64 = 0
+    while n < 3 {
+        let _k: u64 = fuiscene.pump_aux(cp_win)
+        n = n + 1
+    }
+    say_rects()
+}
+
+// where the buttons are, in SCREEN pixels (the gate clicks on these): prev, next, today, the cell of day 15 of the
+// shown month ("cell") and the first cell ("dim": a day of the previous month unless the month starts on a Monday)
+fn say_rect(name: u64, key: u64) {
+    let _s: bool = fuiscene.win_select(cp_win)
+    let g: u64 = fuiscene.key_geom(key)
+    let _u: bool = fuiscene.win_select(0)
+    if g == 0 {
+        return
+    }
+    say((&s_rect[0 as usize]) as u64)
+    say(name)
+    say((&s_xx[0 as usize]) as u64)
+    sayn(px_ + (g >> 48))
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_ + ((g >> 32) & 65535))
+    say((&s_ww[0 as usize]) as u64)
+    sayn((g >> 16) & 65535)
+    say((&s_hh[0 as usize]) as u64)
+    sayn(g & 65535)
+    nl()
+}
+
+fn say_rects() {
+    say_rect((&n_prev[0 as usize]) as u64, K_PREV)
+    say_rect((&n_next[0 as usize]) as u64, K_NEXT)
+    say_rect((&n_tod[0 as usize]) as u64, K_TODAY)
+    say_rect((&n_cell[0 as usize]) as u64, CK_DAY + weekday_mon0(v_y, v_m, 1) + 14)
+    say_rect((&n_dim[0 as usize]) as u64, CK_DAY)
+}
+
+fn say_month() {
+    say((&s_month[0 as usize]) as u64)
+    sayn(v_y)
+    say((&s_dash[0 as usize]) as u64)
+    sayn(v_m)
+    nl()
+    say((&s_grid[0 as usize]) as u64)
+    sayn(weekday_mon0(v_y, v_m, 1))
+    say((&s_dayn[0 as usize]) as u64)
+    sayn(days_in_month(v_y, v_m))
+    nl()
+}
+
+// size + place the card (above the clock, right edge on the clock's right edge, inside the screen) and repaint
+fn relayout() {
+    pw_ = CARD_W * sk()
+    ph_ = card_h() * sk()
+    let sw: u64 = wlibc.head_bx() + wlibc.head_bw()
+    px_ = wlibc.head_bx()
+    if ax_ + aw_ > pw_ + px_ {
+        px_ = ax_ + aw_ - pw_
+    }
+    if px_ + pw_ > sw && sw > pw_ {
+        px_ = sw - pw_
+    }
+    py_ = 0
+    if ay_ > ph_ + 8 * sk() {
+        py_ = ay_ - ph_ - 8 * sk()
+    }
+    let _s: bool = fuiscene.win_select(cp_win)
+    let _z: bool = fuiscene.win_size(pw_, ph_)
+    fuiscene.refresh()
+    fuiscene.touch()
+    key_last = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    paint_now()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, cp_h, (px_ << 16) | py_, 0)
+}
+
+// repaint after a change of the shown month / the mark (same size and place)
+fn redraw() {
+    let _s: bool = fuiscene.win_select(cp_win)
+    fuiscene.refresh()
+    fuiscene.touch()
+    key_last = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    paint_now()
+}
+
+fn open_now() {
+    if open_ != 0 || cp_win == NONE {
+        return
+    }
+    read_today()
+    v_y = t_y
+    v_m = t_m
+    s_y = 0
+    s_m = 0
+    s_d = 0
+    relayout()
+    let _v: u64 = wlibc.win_state(cp_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    btn_last = wlibc.mouse_btn() & 1
+    let _a: u64 = wlibc.win_act(cp_id, wlibc.WA_RAISE)
+    let _k: u64 = wlibc.win_state(cp_h, wlibc.WS_KEYS, 1)
+    say((&s_open[0 as usize]) as u64)
+    say((&s_today[0 as usize]) as u64)
+    sayn(t_y)
+    say((&s_dash[0 as usize]) as u64)
+    sayn(t_m)
+    say((&s_dash[0 as usize]) as u64)
+    sayn(t_d)
+    say((&s_xx[0 as usize]) as u64)
+    sayn(px_)
+    say((&s_yy[0 as usize]) as u64)
+    sayn(py_)
+    say((&s_ww[0 as usize]) as u64)
+    sayn(pw_)
+    say((&s_hh[0 as usize]) as u64)
+    sayn(ph_)
+    nl()
+    say_month()
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    let _v: u64 = wlibc.win_state(cp_h, wlibc.WS_HIDDEN, 1)
+    say((&s_shut[0 as usize]) as u64)
+    say(why)
+    nl()
+}
+
+fn shut_now() {
+    shut((&s_toggle[0 as usize]) as u64)
+}
+
+// the clock field: the bar tells where it sits (screen pixels)
+fn toggle(ax: u64, ay: u64, aw: u64, ah: u64) {
+    ax_ = ax
+    ay_ = ay
+    aw_ = aw
+    ah_ = ah
+    if open_ != 0 {
+        shut((&s_toggle[0 as usize]) as u64)
+    } else {
+        open_now()
+    }
+}
+
+fn goto_month(y: u64, m: u64) {
+    v_y = y
+    v_m = m
+    say_month()
+    redraw()
+}
+
+fn prev_month() {
+    if v_m == 1 {
+        if v_y > 1971 {
+            goto_month(v_y - 1, 12)
+        }
+    } else {
+        goto_month(v_y, v_m - 1)
+    }
+}
+
+fn next_month() {
+    if v_m == 12 {
+        if v_y < 2999 {
+            goto_month(v_y + 1, 1)
+        }
+    } else {
+        goto_month(v_y, v_m + 1)
+    }
+}
+
+fn say_date(y: u64, m: u64, d: u64) {
+    sayn(y)
+    say((&s_dash[0 as usize]) as u64)
+    sayn(m)
+    say((&s_dash[0 as usize]) as u64)
+    sayn(d)
+}
+
+fn on_key(key: u64) -> bool {
+    if key == K_PREV {
+        prev_month()
+        return true
+    }
+    if key == K_NEXT {
+        next_month()
+        return true
+    }
+    if key == K_TODAY {
+        s_y = t_y
+        s_m = t_m
+        s_d = t_d
+        say((&s_pick[0 as usize]) as u64)
+        say_date(t_y, t_m, t_d)
+        nl()
+        goto_month(t_y, t_m)
+        return true
+    }
+    if key >= CK_DAY && key < CK_DAY + 42 {
+        cell_date(key - CK_DAY)
+        let y: u64 = c_y
+        let m: u64 = c_m
+        let d: u64 = c_d
+        s_y = y
+        s_m = m
+        s_d = d
+        say((&s_pick[0 as usize]) as u64)
+        say_date(y, m, d)
+        nl()
+        if m != v_m || y != v_y {
+            goto_month(y, m)
+        } else {
+            redraw()
+        }
+        return true
+    }
+    return false
+}
+
+fn step() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    let _st: u64 = wlib.step()
+    let key: u64 = fuiscene.pump_aux(cp_win)
+    if key != 0 && on_key(key) {
+        return true
+    }
+    if open_ == 0 {
+        return true
+    }
+    let _s: bool = fuiscene.win_select(cp_win)
+    let lk: u64 = fuiscene.last_key()
+    let ks: u64 = fuiscene.key_seq()
+    let _u: bool = fuiscene.win_select(0)
+    if ks != key_last {
+        key_last = ks
+        if lk == 27 {
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+    }
+    // a press outside the card closes it -- except on the clock, which is the bar's own toggle
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        let mx: u64 = wlibc.mouse_x()
+        let my: u64 = wlibc.mouse_y()
+        let on_anchor: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
+        if !hit(mx, my) && !on_anchor {
+            shut((&s_out[0 as usize]) as u64)
+            btn_last = btn
+            return true
+        }
+    }
+    btn_last = btn
+    return false
+}

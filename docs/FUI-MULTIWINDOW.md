@@ -96,7 +96,7 @@ fUi's painter through `wlib.draw_*`, but it is not a scene.
 
 ## Limits
 
-* At most `MAXWIN` = 6 windows (the task bar uses four: its own and three scene windows).
+* At most `MAXWIN` = 8 windows. The task bar uses ALL of them: its own plus seven scene windows (quick panel, tooltip, toast, tray flyout, task view, notifications, calendar). A ninth shell surface needs MAXWIN raised first.
 * Tables, text fields, the text area and the editor use tables that live in
   `fuied` (global): a program uses them in window 0 only. Windows 1.. are for
   labels, buttons, cards, canvases, progress bars: panels, tips, toasts.
