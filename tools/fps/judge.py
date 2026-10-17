@@ -40,28 +40,19 @@ def p95_bucket(f):
 
 
 EDGE = ["<8", "<12", "<15.5", "<17.5", "<21", "<34", "<51", ">=51"]
-share = {}
-for case in ("paced", "nopace"):
+# W-L (17.10.2026): the 60 Hz slot is gone (lj_wait/lj_may_compose: a frame as soon as there is something to paint, at most every 6 ms).
+# The cadence lines are printed on every F12 AND on every desktop pulse, so single lines cannot be told apart by phase. The pass/fail
+# verdict for latency is tools/latency (statistical judge, counter-proof nolatfix); here the cadence is only REPORTED per case
+# (frame intervals < 17.5 ms / 17.5-34 ms / >= 34 ms, summed over all lines) so a regression is visible in the log.
+for case in ("paced", "nolatfix"):
     rows = cadence(case)
-    print("== %s: %d cadence lines" % (case, len(rows)))
-    for i, r in enumerate(rows[:5], 1):
-        n = max(r["n"], 1)
-        fps = 1e6 / r["mean"] if r["mean"] else 0
-        good = (r["fach"][2] + r["fach"][3]) * 100 // n
-        print("  phase %d %-14s n=%-4d mean=%6d us (%.1f fps) max=%6d p95=%s ms in15.5-17.5=%d%%  fach=%s" % (
-            i, PH.get(i, "?"), r["n"], r["mean"], fps, r["max"], EDGE[p95_bucket(r["fach"])], good, r["fach"]))
-        if i in (3, 4):
-            share[(case, i)] = (good, r["mean"], r["n"])
-for ph in (3, 4):
-    if ("paced", ph) in share:
-        g, mean, n = share[("paced", ph)]
-        chk(n >= 30 and 15000 <= mean <= 18500 and g >= 70,
-            "paced %s: mean %d us within 15-18.5 ms and >= 70%% of intervals in 15.5-17.5 ms (is %d%%, n=%d)" % (PH[ph], mean, g, n))
-    else:
-        chk(False, "paced phase %d missing" % ph)
-    if ("nopace", ph) in share:
-        g, mean, n = share[("nopace", ph)]
-        chk(g < 50, "counter-proof nopace %s: NOT on the 60 Hz slot (only %d%% in 15.5-17.5 ms, mean %d us)" % (PH[ph], g, mean))
+    tot = [0] * 8
+    for r in rows:
+        for i, c in enumerate(r["fach"][:8]):
+            tot[i] += c
+    n = max(sum(tot), 1)
+    print("== %s: %d cadence lines, %d intervals: <17.5 ms %d%%, 17.5-34 ms %d%%, >=34 ms %d%%  fach=%s" % (
+        case, len(rows), sum(tot), sum(tot[:4]) * 100 // n, (tot[4] + tot[5]) * 100 // n, (tot[6] + tot[7]) * 100 // n, tot))
 
 
 def green(case):
