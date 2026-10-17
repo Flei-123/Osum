@@ -18,11 +18,13 @@ bad=0
 run() { # <name> <extra words> <judge args>
     local nm=$1 extra=$2 jargs=$3
     export DESIGNBUILD="$OUT-build-$nm"
-    bash tools/design/audit.sh "$OUT/$nm" accel=kvm uitrace=yes extra="phases wmdauer $extra" halt="${HALT:-700}" drehbuch="$(pwd)/tools/latency/latency.txt" > "$OUT.log-$nm" 2>&1
+    bash tools/design/audit.sh "$OUT/$nm" accel=kvm uitrace=yes extra="phases wmshell wmdauer $extra" halt="${HALT:-700}" drehbuch="$(pwd)/tools/latency/latency.txt" > "$OUT.log-$nm" 2>&1
     echo "== $nm ($extra)"
     python3 -I tools/latency/judge.py "$OUT/$nm/serial.txt" $jargs || bad=1
     rm -rf "$DESIGNBUILD"
 }
-run new "" ""
-run old "nolatfix" "--expect-red"
+# optional 2nd argument new|old runs one half only (two heavy calls can run the halves side by side)
+MODE=${2:-both}
+[ "$MODE" = new ] || [ "$MODE" = both ] && run new "" ""
+[ "$MODE" = old ] || [ "$MODE" = both ] && run old "nolatfix" "--expect-red"
 exit $bad
