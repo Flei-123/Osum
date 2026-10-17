@@ -103,6 +103,9 @@ import expmodell
 import expakt
 import exporte
 import expdlg
+import image
+import jpeg
+import gif
 
 export { u_start }
 
@@ -1591,6 +1594,7 @@ static mut g_binh: u64 = 0
 // dem abweichen, was in der Spalte steht. Die Probe wird nie gemalt;
 // sichtbarer Text kommt weiterhin nur aus dem Katalog.
 fn columns_set(tbreite: u64) {
+    cm_follow()
     var probe: [u8; 32] = [0 as u8; 32]
     // Ein fester Zeitpunkt (1893456000 Sekunden = 2030-01-01 UTC):
     // die laengste Form der Ausgabe, vierstelliges Jahr und Uhrzeit.
@@ -1601,11 +1605,24 @@ fn columns_set(tbreite: u64) {
     let pad: u64 = wlibc.metric(wlibc.M_PAD_X) / fuiscene.scale()
     // r442: Name | Date modified | Type | Size. The date as wide as its longest form, the type as wide as
     // the longest of five words, the size as wide as "999.9 KB" (right-aligned, 14 points before its edge)
-    let w_date: u64 = wz + 2 * pad
-    let w_type: u64 = 96
-    let w_size: u64 = 96
+    var w_date: u64 = wz + 2 * pad
+    var w_type: u64 = 96
+    var w_size: u64 = 96
     var w_name: u64 = 0
     if tbreite > w_date + w_type + w_size {
+        w_name = tbreite - w_date - w_type - w_size
+    }
+    // X5: a narrow list (the preview pane is open, a small window) squeezes the OTHER columns first: Type and Size
+    // shrink to 72, the date column to 104, so the name keeps at least 120 points (before: 54, "con..." / "brie...").
+    if w_name < 120 && tbreite > 120 + 104 + 72 + 72 {
+        w_type = 72
+        w_size = 72
+        w_date = 104
+        w_name = tbreite - w_date - w_type - w_size
+    } else if w_name < 120 && tbreite > 120 + 96 + 64 + 64 {
+        w_type = 64
+        w_size = 64
+        w_date = 96
         w_name = tbreite - w_date - w_type - w_size
     }
     // The name gets the rest, but never less than the date column:
@@ -1633,11 +1650,107 @@ fn columns_set(tbreite: u64) {
             spalten[(3) as usize] = us
         }
     }
+    if cm_say != 0 {
+        cm_say = 0
+        say(((&s_cw[0 as usize]) as u64))
+        kv(((&s_cw_a[0 as usize]) as u64), spalten[(0) as usize])
+        kv(((&s_cw_b[0 as usize]) as u64), spalten[(1) as usize])
+        kv(((&s_cw_c[0 as usize]) as u64), spalten[(2) as usize])
+        kv(((&s_cw_d[0 as usize]) as u64), spalten[(3) as usize])
+        nl()
+    }
 }
 
 // W4b: the column widths the person dragged (points), and whether there are any
 static mut cols_user: u64 = 0
 static mut ucol: [u64; 4] = [0 as u64; 4]
+
+// X5: THE COLUMN WIDTHS ARE REMEMBERED PER FOLDER. A drag stores the four widths under a hash of the path (16 folders,
+// oldest replaced first); entering a folder loads its widths, an unknown folder gets the measured defaults.
+const CM_MAX: u64 = 16
+static mut cm_hash: [u64; 16] = [0 as u64; 16]
+static mut cm_w: [u64; 64] = [0 as u64; 64]
+static mut cm_n: u64 = 0
+static mut cm_next: u64 = 0
+static mut cm_cur: u64 = 0
+static mut s_cm: [u8; 18] = "explorer: colmem \0"
+static mut s_cm_a: [u8; 5] = "hit=\0"
+static mut s_cm_b: [u8; 3] = "n=\0"
+static mut cm_say: u64 = 0
+static mut s_cw: [u8; 17] = "explorer: colw \0\0"
+static mut s_cw_a: [u8; 3] = "a=\0"
+static mut s_cw_b: [u8; 3] = "b=\0"
+static mut s_cw_c: [u8; 3] = "c=\0"
+static mut s_cw_d: [u8; 3] = "d=\0"
+
+fn cm_hash_of_path() -> u64 {
+    var h: u64 = 1469598103934665603
+    var i: u64 = 0
+    while i < 127 && pfad[(i) as usize] != 0 as u8 {
+        h = (h ^ (pfad[(i) as usize] as u64)) *% 1099511628211
+        i = i + 1
+    }
+    if h == 0 {
+        h = 1
+    }
+    return h
+}
+
+fn cm_find(h: u64) -> u64 {
+    var i: u64 = 0
+    while i < cm_n {
+        if cm_hash[(i) as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    return CM_MAX
+}
+
+// Called from columns_set (every layout pass): when the folder changed, switch to its stored widths (or the defaults).
+fn cm_follow() {
+    let h: u64 = cm_hash_of_path()
+    if h == cm_cur {
+        return
+    }
+    cm_cur = h
+    let at: u64 = cm_find(h)
+    if at < CM_MAX {
+        var c: u64 = 0
+        while c < 4 {
+            ucol[(c) as usize] = cm_w[(at * 4 + c) as usize]
+            c = c + 1
+        }
+        cols_user = 1
+    } else {
+        cols_user = 0
+    }
+    cm_say = 1
+    say(((&s_cm[0 as usize]) as u64))
+    kv(((&s_cm_a[0 as usize]) as u64), cols_user)
+    kv(((&s_cm_b[0 as usize]) as u64), cm_n)
+    nl()
+}
+
+// Called after a column drag: store the four widths for the folder that is shown.
+fn cm_store() {
+    var at: u64 = cm_find(cm_cur)
+    if at >= CM_MAX {
+        if cm_n < CM_MAX {
+            at = cm_n
+            cm_n = cm_n + 1
+        } else {
+            at = cm_next
+            cm_next = (cm_next + 1) % CM_MAX
+        }
+        cm_hash[(at) as usize] = cm_cur
+    }
+    var c: u64 = 0
+    while c < 4 {
+        cm_w[(at * 4 + c) as usize] = ucol[(c) as usize]
+        c = c + 1
+    }
+}
 static mut rs_seen: u64 = 0
 
 // ============================ RUNDE EXPLORER-2: DIE ZWEITE ANSICHT
@@ -4232,6 +4345,284 @@ fn preview_toggle(baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     return 0
 }
 
+// ---- X5: THE PICTURE IN THE PREVIEW PANE. PNG, BMP, JPEG, GIF (first frame) and binary PPM/PGM (P6/P5, maxval 255) are
+// decoded with the viewer's decoders into ONE buffer (mapped on the first use) and shown in a picture box that
+// fits the picture into the card. What does not decode (too big for the buffer, 16 bit, progressive, ...) shows the text only.
+// The decoded picture is cached by path + size + date, so a rebuild of the scene does not decode again.
+const K_PVIMG: u64 = 88
+const PV_DATCAP: u64 = 786432
+const PV_PIXCAP: u64 = 4210688
+const PV_BOX_H: u64 = 150
+static mut pv_dat: u64 = 0
+static mut pv_pix: u64 = 0
+static mut pv_key: u64 = 0
+static mut pv_state: u64 = 0
+static mut pv_w: u64 = 0
+static mut pv_h: u64 = 0
+static mut pv_shown: u64 = 0
+static mut pv_dim: [u8; 24] = [0 as u8; 24]
+static mut s_pvimg: [u8; 23] = "explorer: preview img \0"
+static mut s_pvimg_s: [u8; 7] = "state=\0"
+static mut s_pvimg_w: [u8; 3] = "w=\0"
+static mut s_pvimg_h: [u8; 3] = "h=\0"
+
+fn pv_skip_ws(p: u64, n: u64, at: u64) -> u64 {
+    var i: u64 = at
+    var go: bool = true
+    while go && i < n {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        if c == 35 {
+            // a comment runs to the end of the line
+            while i < n && (__mmio_read8((p + i) as *mut u8)) != 10 as u8 {
+                i = i + 1
+            }
+        } else if c == 32 || c == 9 || c == 10 || c == 13 {
+            i = i + 1
+        } else {
+            go = false
+        }
+    }
+    return i
+}
+
+// Reads one decimal number at `at`; the number goes to pv_num, the new position is returned.
+static mut pv_num: u64 = 0
+fn pv_read_num(p: u64, n: u64, at: u64) -> u64 {
+    var i: u64 = pv_skip_ws(p, n, at)
+    var v: u64 = 0
+    var any: u64 = 0
+    while i < n {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            break
+        }
+        if v < 100000 {
+            v = v * 10 + (c - 48)
+        }
+        any = 1
+        i = i + 1
+    }
+    pv_num = v
+    if any == 0 {
+        return 0
+    }
+    return i
+}
+
+// Binary PPM (P6) and PGM (P5) with maxval 255 -> 0xAARRGGBB. Sets pv_w/pv_h; false when not such a file.
+fn ppm_read(src: u64, n: u64, out: u64, cap: u64) -> bool {
+    if n < 9 || (__mmio_read8(src as *mut u8)) != 80 as u8 {
+        return false
+    }
+    let t: u64 = (__mmio_read8((src + 1) as *mut u8)) as u64
+    if t != 54 && t != 53 {
+        return false
+    }
+    var at: u64 = pv_read_num(src, n, 2)
+    if at == 0 {
+        return false
+    }
+    let w: u64 = pv_num
+    at = pv_read_num(src, n, at)
+    if at == 0 {
+        return false
+    }
+    let h: u64 = pv_num
+    at = pv_read_num(src, n, at)
+    if at == 0 || pv_num != 255 || w == 0 || h == 0 {
+        return false
+    }
+    // exactly one blank separates the header from the data
+    at = at + 1
+    var ch: u64 = 3
+    if t == 53 {
+        ch = 1
+    }
+    if w * h * 4 > cap || at + w * h * ch > n {
+        return false
+    }
+    var i: u64 = 0
+    while i < w * h {
+        var r: u64 = 0
+        var g: u64 = 0
+        var b: u64 = 0
+        if ch == 3 {
+            r = (__mmio_read8((src + at + i * 3) as *mut u8)) as u64
+            g = (__mmio_read8((src + at + i * 3 + 1) as *mut u8)) as u64
+            b = (__mmio_read8((src + at + i * 3 + 2) as *mut u8)) as u64
+        } else {
+            r = (__mmio_read8((src + at + i) as *mut u8)) as u64
+            g = r
+            b = r
+        }
+        __mmio_write32((out + i * 4) as *mut u32, (4278190080 | (r << 16) | (g << 8) | b) as u32)
+        i = i + 1
+    }
+    pv_w = w
+    pv_h = h
+    return true
+}
+
+// Decodes the file into pv_pix. 1 = a picture is in the buffer (pv_w x pv_h), 2 = nothing to show.
+fn pv_decode(path: u64) -> u64 {
+    if pv_dat == 0 {
+        pv_dat = wlibc.map_surface(PV_DATCAP)
+        pv_pix = wlibc.map_surface(PV_PIXCAP)
+        if ulib.bad(pv_dat) || ulib.bad(pv_pix) {
+            pv_dat = 0
+            pv_pix = 0
+            return 2
+        }
+    }
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 2
+    }
+    var n: u64 = 0
+    var more: bool = true
+    while more {
+        let g: u64 = io.read(fd, pv_dat + n, PV_DATCAP - n)
+        if ulib.bad(g) || g == 0 {
+            more = false
+        } else {
+            n = n + g
+            if n >= PV_DATCAP {
+                more = false
+            }
+        }
+    }
+    io.close(fd)
+    if n == 0 || n >= PV_DATCAP {
+        return 2
+    }
+    if image.ist_png(pv_dat, n) {
+        if image.png_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            pv_w = image.width()
+            pv_h = image.height()
+            return 1
+        }
+        return 2
+    }
+    if image.ist_bmp(pv_dat, n) {
+        if image.bmp_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            pv_w = image.width()
+            pv_h = image.height()
+            return 1
+        }
+        return 2
+    }
+    if jpeg.ist_jpeg(pv_dat, n) {
+        if jpeg.jpeg_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            pv_w = jpeg.width()
+            pv_h = jpeg.height()
+            return 1
+        }
+        return 2
+    }
+    if gif.ist_gif(pv_dat, n) {
+        if gif.gif_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            pv_w = gif.width()
+            pv_h = gif.height()
+            return 1
+        }
+        return 2
+    }
+    if ppm_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+        return 1
+    }
+    return 2
+}
+
+// FNV hash of the full path plus size and date: changes when the file is replaced.
+fn pv_file_key(path: u64, e: u64) -> u64 {
+    var h: u64 = 1469598103934665603
+    var i: u64 = 0
+    while i < 190 && (__mmio_read8((path + i) as *mut u8)) != 0 as u8 {
+        h = (h ^ ((__mmio_read8((path + i) as *mut u8)) as u64)) *% 1099511628211
+        i = i + 1
+    }
+    h = (h ^ m_size(e)) *% 1099511628211
+    h = (h ^ expmodell.mtime_at(e)) *% 1099511628211
+    if h == 0 {
+        h = 1
+    }
+    return h
+}
+
+// "W x H" as plain digits (no words, so no catalogue text needed)
+fn pv_dim_text() {
+    var at: u64 = 0
+    var v: u64 = pv_w
+    var k: u64 = 0
+    var a: [u8; 8] = [0 as u8; 8]
+    var pass: u64 = 0
+    while pass < 2 {
+        k = 0
+        if v == 0 {
+            a[0 as usize] = 48 as u8
+            k = 1
+        }
+        while v > 0 && k < 7 {
+            a[(k) as usize] = (48 + v % 10) as u8
+            v = v / 10
+            k = k + 1
+        }
+        while k > 0 && at < 20 {
+            k = k - 1
+            pv_dim[(at) as usize] = a[(k) as usize]
+            at = at + 1
+        }
+        if pass == 0 {
+            pv_dim[(at) as usize] = 32 as u8
+            pv_dim[(at + 1) as usize] = 120 as u8
+            pv_dim[(at + 2) as usize] = 32 as u8
+            at = at + 3
+            v = pv_h
+        }
+        pass = pass + 1
+    }
+    pv_dim[(at) as usize] = 0 as u8
+}
+
+// The picture box + the size line for a picture entry; returns 1 when a picture is shown.
+fn preview_image(cd: usize, e: u64) -> u64 {
+    let path: u64 = join((&pfad[0 as usize]) as u64, m_name(e))
+    let key: u64 = pv_file_key(path, e)
+    if key != pv_key {
+        pv_key = key
+        pv_state = 0
+        if m_size(e) > 0 {
+            pv_state = pv_decode(path)
+        } else {
+            pv_state = 2
+        }
+        pv_shown = 0
+        if s_dbg != 0 {
+            say(((&s_pvimg[0 as usize]) as u64))
+            kv(((&s_pvimg_s[0 as usize]) as u64), pv_state)
+            kv(((&s_pvimg_w[0 as usize]) as u64), pv_w)
+            kv(((&s_pvimg_h[0 as usize]) as u64), pv_h)
+            nl()
+        }
+    }
+    if pv_state != 1 {
+        return 0
+    }
+    var bw: u64 = 0
+    if g_prev > 40 {
+        bw = g_prev - 40
+    }
+    let _b: usize = fuiscene.image(cd, K_PVIMG, bw, PV_BOX_H)
+    if pv_shown != key {
+        pv_shown = key
+        fuiscene.image_set(K_PVIMG, pv_pix, pv_w, pv_h)
+        fuiscene.image_fit(K_PVIMG)
+    }
+    pv_dim_text()
+    let _d: usize = fuiscene.label_muted(cd, ((&pv_dim[0 as usize]) as u64))
+    return 1
+}
+
 fn preview_build(cr: usize) {
     let cd: usize = fuiscene.card(cr)
     fuiscene.set_size(cd, g_prev, g_hinh)
@@ -4245,6 +4636,10 @@ fn preview_build(cr: usize) {
     let e: u64 = m_ord(z)
     let _t: usize = fuiscene.label_wrap(cd, m_name(e), 3)
     let _k: usize = fuiscene.label_muted(cd, expmodell.type_text(e))
+    var is_pic: u64 = 0
+    if m_art(e) == 0 && expmodell.kind_of(e) == 3 {
+        is_pic = preview_image(cd, e)
+    }
     if m_art(e) == 0 {
         let _sz: usize = navnum.size_text(m_size(e), ((&pv_size[0 as usize]) as u64), 40)
         let _s: usize = fuiscene.label(cd, ((&pv_size[0 as usize]) as u64))
@@ -4252,7 +4647,7 @@ fn preview_build(cr: usize) {
     let _tz: u64 = expmodell.time_text(expmodell.mtime_at(e), ((&pv_date[0 as usize]) as u64))
     let _d: usize = fuiscene.label_muted(cd, ((&pv_date[0 as usize]) as u64))
     // W4c: the first lines of a text file
-    if m_art(e) == 0 && m_size(e) > 0 {
+    if m_art(e) == 0 && m_size(e) > 0 && is_pic == 0 && expmodell.kind_of(e) != 3 {
         let tn: u64 = preview_text(join((&pfad[0 as usize]) as u64, m_name(e)))
         if tn > 0 {
             let _x: usize = fuiscene.label_wrap(cd, ((&pv_txt[0 as usize]) as u64), 12)
@@ -5745,6 +6140,8 @@ fn u_start(args: u64) -> u64 {
                 uc = uc + 1
             }
             cols_user = 1
+            cm_store()
+            cm_say = 1
             columns_set(g_binh)
             say(((&s_colres[0 as usize]) as u64))
             kv(((&s_colres_a[0 as usize]) as u64), ucol[(0) as usize])

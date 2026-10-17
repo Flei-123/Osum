@@ -400,6 +400,12 @@ printf 'Ein Brief an Justin.\n' > "$OUT/heim/brief.txt"
 ARGS+=("/users/justin/notizen.txt=$OUT/heim/notizen.txt@0644"
        "/users/justin/tabelle.csv=$OUT/heim/tabelle.csv@0644"
        "/users/justin/brief.txt=$OUT/heim/brief.txt@0644")
+# X5: ETCFILES=<dir> puts every regular file of <dir> into /etc (the startmenu gate brings the /etc/installed marker)
+if [ -n "${ETCFILES:-}" ] && [ -d "$ETCFILES" ]; then
+    for ef in "$ETCFILES"/*; do
+        [ -f "$ef" ] && ARGS+=("/etc/$(basename "$ef")=$ef@0644")
+    done
+fi
 rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
 # RUNDE MERGE-6: HIER STAND EIN NAME, JETZT STEHT DIE REGEL.
 #
