@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/runbox/run.sh -- Win+R opens the Run dialog (/bin/runbox), Enter starts what was typed (W1c).
-# One desktop boot (QEMU usb-kbd, keys via the monitor `sendkey`), then the serial lines:
+# One desktop boot (QEMU usb-kbd, keys via QMP, every step waits for its serial line), then the serial lines:
 #   Win+R           -> "taskbar: hk start /apps/run.osp/start" + "runbox: ready"
 #   echo hi + Enter -> "runbox: exec /bin/echo pid=N" (a name without a slash is looked up in /bin)
 #   Win+R again, a name that does not exist + Enter -> "runbox: fail /bin/<name>" (the window stays), Esc closes it
@@ -20,24 +20,18 @@ has() { grep -qaF -- "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' missing
 hasnt() { grep -qaF -- "$2" "$1" 2>/dev/null && bad "$3 -- '$2' present" || ok "$3"; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "RUNBOX: skipped, no qemu"; exit 0; }
 
-# keys are paced (0.4 s): back-to-back sendkeys lost letters under load (n,o,p of "nope" never reached the field)
-typed() { local c; for c in "$@"; do KEYS+=(mon="sendkey $c" mon="warte 0.4"); done; }
-KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-r" mon="warte 12")
-typed e c h o spc h i
-KEYS+=(mon="warte 2" mon="sendkey ret" mon="warte 8" mon="sendkey meta_l-r" mon="warte 12")
-typed n o p e
-KEYS+=(mon="warte 2" mon="sendkey ret" mon="warte 6" mon="sendkey esc" mon="warte 4")
-
-run_tree() { # tree out progs
+# event driven (W1d): tools/runbox/drive.py sends the keys through QMP and waits for `runbox: ready` / `exec` / `fail` lines
+run_tree() { # tree out progs ready-timeout
     mkdir -p "$2"
     ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-      ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=6 uitrace=yes \
+      ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=1 uitrace=yes \
         extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$3" \
-        qemu="-device qemu-xhci -device usb-kbd" "${KEYS[@]}" ) > "$2.log" 2>&1
+        qemu="-device qemu-xhci -device usb-kbd -qmp unix:$2/qmp.sock,server,nowait" \
+        hook="python3 $ROOT/tools/runbox/drive.py $2/qmp.sock $2/serial.txt $2 $4" ) > "$2.log" 2>&1
 }
 
 echo "== 1. new tree: Win+R -> dialog -> Enter =="
-run_tree "$ROOT" "$OUT/new" "desktop taskbar launcher settings theme explorer sh echo ls cat runbox" \
+run_tree "$ROOT" "$OUT/new" "desktop taskbar launcher settings theme explorer sh echo ls cat runbox" 60 \
     || { bad "build/run failed"; tail -n 15 "$OUT/new.log"; exit 1; }
 S="$OUT/new/serial.txt"
 has "$S" "hk: super+r" "Win+R latched"
@@ -53,7 +47,7 @@ echo "== 2. COUNTER-PROBE: tree before the dialog =="
 if git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1; then
     BT="$OUT/basetree"
     git worktree add -q --detach "$BT" "$BASE_COMMIT" 2>/dev/null
-    run_tree "$BT" "$OUT/old" "desktop taskbar launcher settings theme explorer sh echo ls cat" || { bad "old tree failed"; tail -n 8 "$OUT/old.log"; }
+    run_tree "$BT" "$OUT/old" "desktop taskbar launcher settings theme explorer sh echo ls cat" 12 || { bad "old tree failed"; tail -n 8 "$OUT/old.log"; }
     git worktree remove --force "$BT" >/dev/null 2>&1
     O="$OUT/old/serial.txt"
     [ -s "$O" ] && ok "old kernel booted (counter-probe is a real run)" || bad "old run produced no serial"

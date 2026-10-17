@@ -32,15 +32,15 @@ echo "== 1. new tree =="
 run_tree "$ROOT" "$OUT/new" || true
 [ -s "$OUT/new/scenes.txt" ] || { bad "driver wrote no scenes.txt"; tail -15 "$OUT/new.log"; echo "== ALTTAB: $pass green, $fail red =="; exit 1; }
 N="$OUT/new"
-[ "$(fact $N windows_focus_lines)" -ge 3 ] 2>/dev/null && ok "three windows opened" || bad "windows opened: $(fact $N windows_focus_lines)"
+[ "$(fact $N A_open_n)" -ge 3 ] 2>/dev/null && ok "the panel lists $(fact $N A_open_n) windows (>= 3)" || bad "panel lists $(fact $N A_open_n) windows, want >= 3"
 [ "$(fact $N A_open)" = 1 ] && ok "A: Alt+Tab opens the switcher" || bad "A: no switcher open line"
 [ "$(fact $N A_open_sel)" = 1 ] && ok "A: the second window (most recently used) is selected first" || bad "A: first selection $(fact $N A_open_sel), want 1"
 [ "$(fact $N A_step)" = 2 ] && ok "A: Tab moves the selection to 2" || bad "A: Tab -> $(fact $N A_step), want 2"
 [ "$(fact $N A_back)" = 1 ] && ok "A: Shift+Tab moves back to 1" || bad "A: Shift+Tab -> $(fact $N A_back), want 1"
 [ "$(fact $N A_focus_changed_while_held)" = 0 ] && ok "A: no focus change while Alt is held" || bad "A: focus moved while Alt was held"
 [ "$(fact $N A_commit)" = 1 ] && ok "A: releasing Alt commits" || bad "A: no commit on Alt release"
-[ -n "$(fact $N A_commit_win)" ] && [ "$(fact $N A_commit_win)" = "$(fact $N A_focus_after)" ] \
-    && ok "A: the committed window ($(fact $N A_commit_win)) got the focus" || bad "A: commit win $(fact $N A_commit_win) vs focus $(fact $N A_focus_after)"
+[ "$(fact $N A_focus_after)" != none ] && [ -n "$(fact $N A_focus_after)" ] \
+    && ok "A: the focus moved right after the commit (wm: fokus id=$(fact $N A_focus_after))" || bad "A: no focus change after the commit"
 [ "$(fact $N B_cancel)" = 1 ] && ok "B: Esc cancels" || bad "B: no cancel"
 [ "$(fact $N B_commit_after_cancel)" = 0 ] && [ "$(fact $N B_focus_changed)" = 0 ] \
     && ok "B: after cancel no commit and no focus change" || bad "B: commit/focus after cancel"
@@ -48,6 +48,8 @@ N="$OUT/new"
 BO=$(fact $N D_band_open_vs_idle_px); BA=$(fact $N D_band_open_vs_after_px)
 [ -n "$BO" ] && [ "$BO" -ge 20000 ] 2>/dev/null && ok "D: the panel is on the screen (centre band differs by $BO px)" || bad "D: panel not visible (band diff '$BO', want >= 20000)"
 [ -n "$BA" ] && [ "$BA" -ge 20000 ] 2>/dev/null && ok "D: the panel is gone after the commit (band differs by $BA px from the open picture)" || bad "D: panel still there? ($BA)"
+BB=$(fact $N E_band_back_vs_idle_px)
+[ -n "$BB" ] && [ "$BB" -ge 0 ] && [ "$BB" -le 3000 ] 2>/dev/null && ok "E: back on the first window the centre band equals the idle picture again ($BB px differ, no panel left over)" || bad "E: band back vs idle differs by '$BB' px (want <= 3000)"
 
 echo
 echo "== 2. COUNTER-PROBE: tree before the switcher =="

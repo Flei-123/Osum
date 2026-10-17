@@ -201,8 +201,17 @@ def main():
     pos, m = wait_for(ser, r"wm: switcher commit", pos, 15)
     time.sleep(1.5)
     shot(mon, out + "/after.ppm")
+    # ---- scene E: a second quick tap switches back to the window of `idle`; the picture must equal `idle` again (no panel left over)
+    pos = len(serial_text(ser))
+    q.key("alt", True)
+    q.key("tab", True)
+    q.key("tab", False)
+    q.key("alt", False)
+    pos, m = wait_for(ser, r"wm: switcher commit", pos, 15)
+    time.sleep(2.0)
+    shot(mon, out + "/back.ppm")
     try:
-        idle, opn, aft = ppm(out + "/idle.ppm"), ppm(out + "/open.ppm"), ppm(out + "/after.ppm")
+        idle, opn, aft, back = ppm(out + "/idle.ppm"), ppm(out + "/open.ppm"), ppm(out + "/after.ppm"), ppm(out + "/back.ppm")
         fact("D_screen", f"{idle[0]}x{idle[1]}")
         fact("D_open_vs_idle_px", diff_px(idle, opn))
         # the commit raised another window, so `after` differs from `idle`; compare the panel strip (centre band) instead
@@ -212,6 +221,8 @@ def main():
             return (w, y1 - y0, img[2][(y0 * w) * 3:(y1 * w) * 3])
         fact("D_band_open_vs_idle_px", diff_px(band(idle), band(opn)))
         fact("D_band_open_vs_after_px", diff_px(band(opn), band(aft)))
+        fact("E_band_back_vs_idle_px", diff_px(band(idle), band(back)))
+        fact("E_full_back_vs_idle_px", diff_px(idle, back))
     except Exception as e:  # noqa
         fact("D_error", repr(e))
     open(out + "/scenes.txt", "w").write("\n".join(facts) + "\n")
