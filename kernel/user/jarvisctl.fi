@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/jarvisctl.fi -- RUNDE BRIDGE: DER MENSCH SIEHT ZU.
 //
+//     jarvisctl info                 version, build, image, clock, network, USB, uptime in ONE call
 //     jarvisctl zustand              was der Helfer darf und ob er kann
 //     jarvisctl rechte               die Rechteliste, wie sie dasteht
 //     jarvisctl protokoll [zeilen]   was der Helfer getan hat
@@ -474,6 +475,215 @@ fn do_input(args: u64, argc: u64) -> u64 {
     return 0
 }
 
+// ====================================================================
+// info: EVERYTHING A REMOTE LOOK NEEDS, IN ONE CALL
+// ====================================================================
+//
+// The bridge answers one command of at most six words per request, so a
+// full picture used to cost seven round trips (uname, date, dhcp, cat
+// /proc/usb ...). `jarvisctl info` prints "key: value" lines, one fact
+// per line, every line starts with its key:
+//
+//   version: <the /proc/version line>      build: <git hash>     image: <image id>
+//   clock: YYYY-MM-DD hh:mm:ss tz=<min> rule=<n>     uptime: <ms> ms
+//   net: <line of /etc/network.conf>       (or "net: none")
+//   usb: controllers=N devices=M           usb: <line of /proc/usb>
+//
+// Nothing here is invented: a missing source prints "<key>: none".
+
+fn rd_all(pfad: u64) -> u64 {
+    let base: u64 = (&puffer[0 as usize]) as u64
+    let fd: u64 = io.open(pfad, 0)
+    if errno.failed(fd) {
+        *(base as *mut u8) = 0 as u8
+        return 0
+    }
+    var total: u64 = 0
+    while total < 4000 {
+        let n: u64 = io.read(fd, base + total, 4000 - total)
+        if errno.failed(n) || n == 0 {
+            break
+        }
+        total = total + n
+    }
+    io.close(fd)
+    *((base + total) as *mut u8) = 0 as u8
+    return total
+}
+
+fn b_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+// Does the text at `p` (n bytes left) start with the NUL terminated word `w`?
+fn starts_with(p: u64, n: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while b_at(w, i) != 0 {
+        if i >= n || b_at(p, i) != b_at(w, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Prints every non empty line of the buffer as "<key>: <line>".
+fn info_lines(key: u64, buf: u64, n: u64) {
+    var s_col: [u8; 3] = ": \0"
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && b_at(buf, e) != 10 {
+            e = e + 1
+        }
+        if e > at {
+            ulib.say(key)
+            ulib.say((&s_col[0 as usize]) as u64)
+            ulib.put(buf + at, e - at)
+            ulib.nl()
+        }
+        at = e + 1
+    }
+}
+
+// Prints "<key>: <token>" for the token right behind " <word> " in the buffer.
+fn info_token(key: u64, buf: u64, n: u64, word: u64) {
+    var s_col: [u8; 3] = ": \0"
+    var sp: [u8; 2] = " \0"
+    var i: u64 = 0
+    var found: bool = false
+    while i < n && !found {
+        if b_at(buf, i) == 32 && starts_with(buf + i + 1, n - i - 1, word)
+            && b_at(buf, i + 1 + ulib.length(word)) == 32 {
+            found = true
+            var st: u64 = i + 2 + ulib.length(word)
+            var e: u64 = st
+            while e < n && b_at(buf, e) != 32 && b_at(buf, e) != 10 {
+                e = e + 1
+            }
+            ulib.say(key)
+            ulib.say((&s_col[0 as usize]) as u64)
+            ulib.put(buf + st, e - st)
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    if !found {
+        var none: [u8; 7] = "none\0\0\0"
+        ulib.say(key)
+        ulib.say((&s_col[0 as usize]) as u64)
+        ulib.say((&none[0 as usize]) as u64)
+        ulib.nl()
+    }
+}
+
+fn two_digits(v: u64) {
+    var s_zero: [u8; 2] = "0\0"
+    if v < 10 {
+        ulib.say((&s_zero[0 as usize]) as u64)
+    }
+    ulib.sayu(v)
+}
+
+fn tue_info() -> u64 {
+    var p_ver: [u8; 14] = "/proc/version\0"
+    var p_usb: [u8; 10] = "/proc/usb\0"
+    var p_net: [u8; 18] = "/etc/network.conf\0"
+    var k_ver: [u8; 8] = "version\0"
+    var k_build: [u8; 6] = "build\0"
+    var k_image: [u8; 6] = "image\0"
+    var k_net: [u8; 4] = "net\0"
+    var k_usb: [u8; 4] = "usb\0"
+    var w_build: [u8; 6] = "build\0"
+    var w_image: [u8; 6] = "image\0"
+    var w_ctl: [u8; 11] = "controller\0"
+    var w_ctlx: [u8; 16] = "controller xhci\0"
+    var s_clock: [u8; 8] = "clock: \0"
+    var s_tz: [u8; 5] = " tz=\0"
+    var s_rule: [u8; 7] = " rule=\0"
+    var s_up: [u8; 9] = "uptime: \0"
+    var s_ms: [u8; 4] = " ms\0"
+    var s_none: [u8; 7] = "none\0\0\0"
+    var s_ctls: [u8; 20] = "usb: controllers=\0\0\0"
+    var s_devs: [u8; 10] = " devices=\0"
+    var s_dash: [u8; 2] = "-\0"
+    var s_colon: [u8; 2] = ":\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_colsp: [u8; 3] = ": \0"
+    let base: u64 = (&puffer[0 as usize]) as u64
+
+    var n: u64 = rd_all((&p_ver[0 as usize]) as u64)
+    if n == 0 {
+        ulib.say((&k_ver[0 as usize]) as u64)
+        ulib.say((&s_colsp[0 as usize]) as u64)
+        ulib.say((&s_none[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        info_lines((&k_ver[0 as usize]) as u64, base, n)
+        info_token((&k_build[0 as usize]) as u64, base, n, (&w_build[0 as usize]) as u64)
+        info_token((&k_image[0 as usize]) as u64, base, n, (&w_image[0 as usize]) as u64)
+    }
+
+    ulib.say((&s_clock[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0))
+    ulib.say((&s_dash[0 as usize]) as u64)
+    two_digits(ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0))
+    ulib.say((&s_dash[0 as usize]) as u64)
+    two_digits(ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0))
+    ulib.say((&s_sp[0 as usize]) as u64)
+    two_digits(ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0))
+    ulib.say((&s_colon[0 as usize]) as u64)
+    two_digits(ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0))
+    ulib.say((&s_colon[0 as usize]) as u64)
+    two_digits(ulib.sys(ulib.SYS_SYSINFO, ulib.I_SEC, 0, 0))
+    ulib.say((&s_tz[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZMIN, 0, 0))
+    ulib.say((&s_rule[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZRULE, 0, 0))
+    ulib.nl()
+
+    ulib.say((&s_up[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+    ulib.say((&s_ms[0 as usize]) as u64)
+    ulib.nl()
+
+    n = rd_all((&p_net[0 as usize]) as u64)
+    if n == 0 {
+        ulib.say((&k_net[0 as usize]) as u64)
+        ulib.say((&s_colsp[0 as usize]) as u64)
+        ulib.say((&s_none[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        info_lines((&k_net[0 as usize]) as u64, base, n)
+    }
+
+    n = rd_all((&p_usb[0 as usize]) as u64)
+    var ctls: u64 = 0
+    var devs: u64 = 0
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && b_at(base, e) != 10 {
+            e = e + 1
+        }
+        if e > at {
+            if starts_with(base + at, n - at, (&w_ctlx[0 as usize]) as u64) {
+                ctls = ctls + 1
+            } else if !starts_with(base + at, n - at, (&w_ctl[0 as usize]) as u64) {
+                devs = devs + 1
+            }
+        }
+        at = e + 1
+    }
+    ulib.say((&s_ctls[0 as usize]) as u64)
+    ulib.sayu(ctls)
+    ulib.say((&s_devs[0 as usize]) as u64)
+    ulib.sayu(devs)
+    ulib.nl()
+    info_lines((&k_usb[0 as usize]) as u64, base, n)
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
     let argc: u64 = ulib.arg_count(args)
     var w_zust: [u8; 7] = "status\0"
@@ -483,12 +693,16 @@ fn u_start(args: u64) -> u64 {
     var w_sch: [u8; 11] = "screenshot\0"
     var w_weg: [u8; 10] = "transport\0"
     var w_eing: [u8; 6] = "input\0"
+    var w_info: [u8; 5] = "info\0"
     if argc < 2 {
         return tue_zustand()
     }
     let was: u64 = ulib.arg_at(args, 1)
     if ulib.streq(was, (&w_zust[0 as usize]) as u64) {
         return tue_zustand()
+    }
+    if ulib.streq(was, (&w_info[0 as usize]) as u64) {
+        return tue_info()
     }
     if ulib.streq(was, (&w_eing[0 as usize]) as u64) {
         return do_input(args, argc)
@@ -540,7 +754,7 @@ fn u_start(args: u64) -> u64 {
         }
         return tue_schein(sek)
     }
-    var t: [u8; 96] = "usage: jarvisctl status | permissions | log [n] | pair <code> | screenshot [sec|revoke] | input\0"
+    var t: [u8; 103] = "usage: jarvisctl status | info | permissions | log [n] | pair <code> | screenshot [sec|revoke] | input\0"
     ulib.esay_line((&t[0 as usize]) as u64, 0)
     return 2
 }

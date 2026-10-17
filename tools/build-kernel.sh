@@ -178,7 +178,7 @@ fi
 # Der Arbeitsbaum wird dabei nicht angefasst; `git status` meldet nach
 # einem Bau weiterhin nichts.
 python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
-    "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" || {
+    "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" "${IMAGE_ID:-dev}" || {
     echo "die Marke wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }
 # GEGENPROBE AM ERGEBNIS, nicht am Werkzeug: steht die Fassungszeile

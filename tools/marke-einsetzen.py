@@ -145,6 +145,24 @@ def setz_fassung(pfad, kurz, hash_):
     return text
 
 
+def setz_image(pfad, image_id):
+    """`dev` -> `<image id>`, padded to the field length (IMAGE_ID)."""
+    with open(pfad, encoding="utf-8") as f:
+        s = f.read()
+    muster = re.compile(r'(static mut s_imageid: \[u8; (\d+)\] = )"[^"]*"')
+    m = muster.search(s)
+    if not m:
+        sys.exit("kernel/lib/version.fi: s_imageid not found")
+    n = int(m.group(2))
+    if not re.fullmatch(r"[A-Za-z0-9._+-]{1,%d}" % (n - 1), image_id):
+        sys.exit("IMAGE_ID '%s' invalid (A-Z a-z 0-9 . _ + -, max %d chars)"
+                 % (image_id, n - 1))
+    s = muster.sub(lambda mm: mm.group(1) + literal(image_id, n), s, 1)
+    with open(pfad, "w", encoding="utf-8") as f:
+        f.write(s)
+    return image_id
+
+
 def finde(baum, name):
     """RUNDE O-STRUKTUR: `brand.fi` und `version.fi` lagen bis hierher
     fest unter `<baum>/kernel/`. Seit die Kerndateien in Schichten
@@ -162,12 +180,14 @@ def finde(baum, name):
 
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("Aufruf: marke-einsetzen.py <baum> <marke.conf> <hash>")
+    if len(sys.argv) not in (4, 5):
+        sys.exit("Aufruf: marke-einsetzen.py <baum> <marke.conf> <hash> [<image id>]")
     baum, conf, hash_ = sys.argv[1], sys.argv[2], sys.argv[3]
+    image_id = sys.argv[4] if len(sys.argv) == 5 else "dev"
     werte = lies_marke(conf)
     setz_marke(finde(baum, "brand.fi"), werte)
     zeile = setz_fassung(finde(baum, "version.fi"), werte["KURZ"], hash_)
+    print("marke: image id '%s'" % setz_image(finde(baum, "version.fi"), image_id))
     print("marke: PRODUKT=%s KERN=%s HERSTELLER=%s KURZ=%s"
           % (werte["PRODUKT"], werte["KERN"], werte["HERSTELLER"],
              werte["KURZ"]))

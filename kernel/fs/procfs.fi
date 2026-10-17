@@ -84,6 +84,7 @@ import drv.net.iwl
 import wlan.iwl_probe
 import apprights.policy
 import usb.usb
+import drv.usb.xhci
 import diag.hwdiag
 import gfx.gfx
 import arch.x86_64.fpu
@@ -601,18 +602,45 @@ fn make_stat(state: u64) -> u64 {
     return p
 }
 
+// Copies `n` bytes of a text but drops everything up to and including the first
+// blank ("osum 1a2b3c4d" -> "1a2b3c4d"); without a blank the whole text is copied.
+fn w_tail(state: u64, at: u64, s: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n && kstate.get8(s + i) != 32 {
+        i = i + 1
+    }
+    if i < n {
+        i = i + 1
+    } else {
+        i = 0
+    }
+    while i < n {
+        p = w_ch(state, p, kstate.get8(s + i))
+        i = i + 1
+    }
+    return p
+}
+
 fn make_version(state: u64) -> u64 {
-    // RUNDE MARKE: was `uname` zeigt, ist Anzeigetext. Der NAME kommt
-    // aus `marke.conf`; die Sprache dahinter ("(Firn)") nicht -- die
-    // ist eine Tatsache ueber den Kern und keine Marke.
+    // Format: "<product> (Firn) version <N> build <hash> image <id>\n". `uname` takes
+    // the text up to the number; the build hash comes from git at build time
+    // (lib/version.fi, "+" suffix = uncommitted changes), the image id from the
+    // IMAGE_ID build variable ("dev" when unset).
     var v: [u8; 64] = [0 as u8; 64]
     var vr: [u8; 22] = " (Firn) version \0\0\0\0\0\0"
+    var l_build: [u8; 8] = " build \0"
+    var l_image: [u8; 8] = " image \0"
     var vn: u64 = brand.anhaengen((&v[0]) as u64, 0, brand.produkt(), 63)
     vn = brand.anhaengen((&v[0]) as u64, vn, (&vr[0]) as u64, 63)
     kstate.set8((&v[0]) as u64 + vn, 0)
     var p: u64 = 0
     p = w_str(state, p, (&v[0]) as u64)
     p = w_num(state, p, uio.sysinfo(state, uio.I_VERSION))
+    p = w_str(state, p, (&l_build[0]) as u64)
+    p = w_tail(state, p, brand.fassung_text(), brand.fassung_n())
+    p = w_str(state, p, (&l_image[0]) as u64)
+    p = w_str(state, p, brand.image_text())
     p = w_nl(state, p)
     return p
 }
@@ -1361,16 +1389,106 @@ fn w_driver(state: u64, at: u64, k: u64) -> u64 {
     return w_str(state, at, (&d0[0]) as u64)
 }
 
-// "vvvv:pppp port=N [hub=M] speed=S class=cc/ss/pp if=cc/ss/pp driver=NAME"
+// A short device kind from the interface class (device class when the interface
+// class is empty): hid-keyboard / hid-mouse / hid / storage / hub / net / audio / other.
+fn w_kind(state: u64, at: u64, icls: u64, ipro: u64, dcls: u64) -> u64 {
+    var k_kb: [u8; 13] = "hid-keyboard\0"
+    var k_ms: [u8; 10] = "hid-mouse\0"
+    var k_hid: [u8; 4] = "hid\0"
+    var k_st: [u8; 8] = "storage\0"
+    var k_hub: [u8; 4] = "hub\0"
+    var k_net: [u8; 4] = "net\0"
+    var k_au: [u8; 6] = "audio\0"
+    var k_ot: [u8; 6] = "other\0"
+    var c: u64 = icls
+    if c == 0 {
+        c = dcls
+    }
+    if c == 3 {
+        if ipro == 1 {
+            return w_str(state, at, (&k_kb[0]) as u64)
+        }
+        if ipro == 2 {
+            return w_str(state, at, (&k_ms[0]) as u64)
+        }
+        return w_str(state, at, (&k_hid[0]) as u64)
+    }
+    if c == 8 {
+        return w_str(state, at, (&k_st[0]) as u64)
+    }
+    if c == 9 {
+        return w_str(state, at, (&k_hub[0]) as u64)
+    }
+    if c == 2 || c == 10 || c == 0xE0 {
+        return w_str(state, at, (&k_net[0]) as u64)
+    }
+    if c == 1 {
+        return w_str(state, at, (&k_au[0]) as u64)
+    }
+    return w_str(state, at, (&k_ot[0]) as u64)
+}
+
+// Controller lines come first, one per xHCI found on the PCI bus (also with no
+// device attached):
+//   "controller xhci 00:04.0 1b36:000d ports=8 state=up selected"
+//   "controller xhci 00:05.0 1022:149c state=idle"      (found, not the active one)
+//   "controller none"                                    (no xHCI on this machine)
+// Device lines:
+// "vvvv:pppp port=N [hub=M] speed=S class=cc/ss/pp if=cc/ss/pp driver=NAME hc=xhci kind=K"
 // (port = root port, hub = port on the hub in front of it, if any).
 fn make_usb(state: u64) -> u64 {
+    var l_ctl: [u8; 17] = "controller xhci \0"
+    var l_none: [u8; 17] = "controller none\n\0"
+    var l_ports: [u8; 8] = " ports=\0"
+    var l_up: [u8; 10] = " state=up\0"
+    var l_down: [u8; 12] = " state=down\0"
+    var l_idle: [u8; 12] = " state=idle\0"
+    var l_sel: [u8; 10] = " selected\0"
+    var l_hc: [u8; 9] = " hc=xhci\0"
+    var l_kind: [u8; 7] = " kind=\0"
+    var p: u64 = 0
+    let hcn: u64 = xhci.count_hc(state)
+    if hcn == 0 {
+        p = w_str(state, p, (&l_none[0]) as u64)
+    }
+    var h: u64 = 0
+    while h < hcn {
+        let idx: u64 = xhci.nth_hc(state, h)
+        if idx < pci.MAX_DEV {
+            let bdf: u64 = pci.get(state, idx, pci.E_BDF)
+            p = w_str(state, p, (&l_ctl[0]) as u64)
+            p = w_hexn(state, p, pci.bdf_bus(bdf), 2)
+            p = w_ch(state, p, 58)
+            p = w_hexn(state, p, pci.bdf_dev(bdf), 2)
+            p = w_ch(state, p, 46)
+            p = w_hexn(state, p, pci.bdf_fn(bdf), 1)
+            p = w_ch(state, p, 32)
+            p = w_hexn(state, p, pci.get(state, idx, pci.E_VENDOR), 4)
+            p = w_ch(state, p, 58)
+            p = w_hexn(state, p, pci.get(state, idx, pci.E_DEVICE), 4)
+            if h == usb.wahl(state) {
+                p = w_str(state, p, (&l_ports[0]) as u64)
+                p = w_num(state, p, xhci.ports(state))
+                if xhci.ready(state) {
+                    p = w_str(state, p, (&l_up[0]) as u64)
+                } else {
+                    p = w_str(state, p, (&l_down[0]) as u64)
+                }
+                p = w_str(state, p, (&l_sel[0]) as u64)
+            } else {
+                p = w_str(state, p, (&l_idle[0]) as u64)
+            }
+            p = w_nl(state, p)
+        }
+        h = h + 1
+    }
+
     var l_port: [u8; 7] = " port=\0"
     var l_hub: [u8; 6] = " hub=\0"
     var l_sp: [u8; 8] = " speed=\0"
     var l_cl: [u8; 8] = " class=\0"
     var l_if: [u8; 5] = " if=\0"
     var l_dr: [u8; 9] = " driver=\0"
-    var p: u64 = 0
     let n: u64 = usb.fund_count(state)
     var i: u64 = 0
     while i < n {
@@ -1399,6 +1517,10 @@ fn make_usb(state: u64) -> u64 {
         p = w_hexn(state, p, usb.fund_ipro(state, i), 2)
         p = w_str(state, p, (&l_dr[0]) as u64)
         p = w_driver(state, p, usb.fund_driver(state, i))
+        p = w_str(state, p, (&l_hc[0]) as u64)
+        p = w_str(state, p, (&l_kind[0]) as u64)
+        p = w_kind(state, p, usb.fund_icls(state, i), usb.fund_ipro(state, i),
+            usb.fund_dcls(state, i))
         p = w_nl(state, p)
         i = i + 1
     }
