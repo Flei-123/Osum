@@ -1,0 +1,962 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/melder.fi -- THE MELDER ON ORIENTOS: "plays X" without a token.
+//
+//     melder [--as <client>] v1 <verb> [args]     the backend interface v1
+//     melder [--as <client>] serve [ticks] [every] the Melder core, in a loop
+//     melder [--as <client>] once                  one look, one report
+//
+// FirnChat's docs/MELDER-INTERFACE.md (r41) splits the Melder into a CORE
+// (look at the running programs, compare with the list of games, report)
+// and a BACKEND per operating system (`<backend> v1 <verb>`). On OrientOS
+// there is no token and no HTTP in the Melder: the account is signed in
+// in the social service, so the backend reports AS AN ACTION ON THE BUS
+// (cap `report`): social.activity.set / social.activity.clear, the privacy
+// switch is social.privacy.set. Rights, confirmation and the audit log are
+// the broker's, like for every other caller (docs/ACTION-BUS.md section 8).
+// This one program is both: the verbs below are the backend, `serve` and
+// `once` are the core written in Firn (the "core in Firn" of the interface
+// document), so nothing on the guest needs bash, curl or a second program.
+//
+// Verbs (output: lines, fields TAB-separated, last line `ok <n>` or
+// `err <code> <text>`; exit 0 ok, 1 error, 2 unsupported, 3 denied):
+//
+//     hello              backend orientos 1 / os l / caps ... / ok 3
+//     detect             p <pid> <exe> <age> <command line> per program
+//     games              the list of games (/etc/social/games.tsv) as it is
+//     privacy get        k share yes|no (the social service) / k never ...
+//     privacy set share yes|no     social.privacy.set  (critical: asks)
+//     privacy set never <exe,exe>  /etc/social/melder.never (the Melder's)
+//     autostart status|install|remove   one line in /etc/inittab (init)
+//     report [name]      social.activity.set / .clear  (no name = clear)
+//     identity ...       unsupported: no token, the social service is in
+//
+// What the kernel can tell about a program (SYS_PSTAT): its pid and the
+// basename of argv[0], 16 octets -- no command line and no age. So `age`
+// stays empty, the command line is the name, and a row of the list of
+// games that needs a command-line text (column 4, e.g. `java`) cannot be
+// checked here and is skipped.
+//
+// The list of games: /etc/social/games.tsv, the SAME format as FirnChat's
+// spiele.tsv (`<os> TAB <exe> TAB <name> [TAB <text>]`); this Melder reads
+// the rows with os = `l`. It is the social service's file (its folder);
+// who fills it (a provider verb `games`, the fleikontakte list) is next.
+//
+// The core (`serve`): every <every> ticks (default 3000 = 30 s) one look.
+// Same rules as the other cores: share=no -> look nowhere, clear what it
+// reported; a program on the `never` list does not count; the game it
+// reported last wins while it runs; a running game is reported every
+// round (the service forgets after 150 s); one clear when it ends; a
+// refusal pauses reporting for ten minutes (nothing is asked twice).
+
+profile app
+
+import ulib
+import actwire
+
+export { u_start }
+
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+
+const NAME_W: usize = 17 // octets per program name (16 + zero)
+const PROC_MAX: usize = 32
+
+static mut rep: [u8; 4096] = [0 as u8; 4096]
+static mut svc_bus: u64 = 0xFFFFFFFF
+static mut bus_ok: bool = false
+static mut g_client: [u8; 32] = [0 as u8; 32]
+static mut g_why: [u8; 96] = [0 as u8; 96]
+
+static mut procs: [u8; 544] = [0 as u8; 544] // PROC_MAX * NAME_W
+static mut pids: [u64; 32] = [0 as u64; 32]
+static mut n_procs: usize = 0
+
+static mut fbuf: [u8; 4096] = [0 as u8; 4096]
+static mut gline: [u8; 256] = [0 as u8; 256]
+static mut rdctx: [u8; 528] = [0 as u8; 528]
+static mut fs: [u64; 5] = [0 as u64; 5]
+static mut never: [u8; 256] = [0 as u8; 256]
+static mut g_pick: [u8; 64] = [0 as u8; 64]
+static mut cur: [u8; 64] = [0 as u8; 64] // the game `serve` reported last
+
+// ------------------------------------------------------------ small tools
+
+fn r_ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn r_st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn r_clen(p: u64) -> usize {
+    var n: usize = 0
+    while r_ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn zset(dst: u64, cap: usize, p: u64, n: usize) {
+    var k: usize = n
+    if k > cap - 1 {
+        k = cap - 1
+    }
+    var i: usize = 0
+    while i < k {
+        r_st8(dst, i, r_ld8(p, i))
+        i = i + 1
+    }
+    r_st8(dst, k, 0 as u8)
+}
+
+fn zset_s(dst: u64, cap: usize, s: str) {
+    zset(dst, cap, s.p as u64, s.n)
+}
+
+fn is(p: u64, n: usize, s: str) -> bool {
+    if n != s.n {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if r_ld8(p, i) != r_ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn isz(p: u64, s: str) -> bool {
+    return is(p, r_clen(p), s)
+}
+
+fn say(s: str) {
+    syscall(S_WRITE, 1, s.p as i64, s.n as i64, 0, 0, 0)
+}
+
+fn sayb(p: u64, n: usize) {
+    syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sayz(p: u64) {
+    sayb(p, r_clen(p))
+}
+
+fn lower(c: u8) -> u8 {
+    if c >= 65 as u8 && c <= 90 as u8 {
+        return c + 32 as u8
+    }
+    return c
+}
+
+// Two names equal, the first 16 octets only, upper/lower case ignored
+// (the kernel keeps 16 octets of a program's name).
+fn eq16(a: u64, b: u64) -> bool {
+    var i: usize = 0
+    while i < 16 {
+        let ca: u8 = lower(r_ld8(a, i))
+        let cb: u8 = lower(r_ld8(b, i))
+        if ca != cb {
+            return false
+        }
+        if ca == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// A whole small file into `buf` (zero-terminated). Returns the length,
+// or -1 if it cannot be opened.
+fn read_all(path: str, buf: u64, cap: usize) -> i64 {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return -1
+    }
+    var n: usize = 0
+    while n + 1 < cap {
+        let r: i64 = syscall(S_READ, fd, (buf + n as u64) as i64, (cap - 1 - n) as i64, 0, 0, 0)
+        if r <= 0 {
+            break
+        }
+        n = n + r as usize
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    r_st8(buf, n, 0 as u8)
+    return n as i64
+}
+
+fn write_all(path: str, p: u64, n: usize) -> bool {
+    var pz: [u8; 64] = [0 as u8; 64]
+    zset((&pz[0]) as u64, 64, path.p as u64, path.n)
+    // O_WRONLY | O_CREAT | O_TRUNC
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 1 | 64 | 512, 420, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    let w: i64 = syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    return w == n as i64
+}
+
+// ---------------------------------------------------------- the bus client
+
+fn bus_up() -> bool {
+    if bus_ok {
+        return true
+    }
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0]) as u64
+    actwire.name_of((&pre[0]) as u64, ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        return false
+    }
+    var n_bus: [u8; 11] = "orient.bus\0"
+    svc_bus = actwire.bus_find((&n_bus[0]) as u64)
+    if ulib.bad(svc_bus) {
+        return false
+    }
+    bus_ok = true
+    return true
+}
+
+// Send the request in the output buffer, collect the reply with the same
+// id into `rep`. 0 = "ok", 2 = "confirm" (parked for the user), 1 = any
+// other answer, 9 = no answer.
+fn ask() -> u64 {
+    let id: u64 = actwire.rnd() & 0xFFFFFFFF
+    if ulib.bad(actwire.send_msg(svc_bus, actwire.K_REQ, id, actwire.ob_ptr(),
+        actwire.ob_len())) {
+        return 9
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0]) as u64
+    let mp: u64 = (&meta[0]) as u64
+    let rp: u64 = (&rep[0]) as u64
+    var rep_len: u64 = 0
+    let t0: u64 = actwire.ticks()
+    var done: bool = false
+    while !done && actwire.ticks() - t0 < 800 {
+        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        if !ulib.bad(n) && n > 0 {
+            if actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+                && actwire.ld32(fp, 4) == id {
+                if (actwire.ld8(fp, 2) & 1) != 0 {
+                    rep_len = 0
+                }
+                let k: u64 = actwire.ld8(fp, 3)
+                var i: u64 = 0
+                while i < k && rep_len < 4095 {
+                    actwire.st8(rp, rep_len, actwire.ld8(fp, 8 + i))
+                    rep_len = rep_len + 1
+                    i = i + 1
+                }
+                if (actwire.ld8(fp, 2) & 2) != 0 {
+                    done = true
+                }
+            }
+        }
+    }
+    actwire.st8(rp, rep_len, 0)
+    if !done {
+        return 9
+    }
+    if actwire.ld8(rp, 0) == 111 && actwire.ld8(rp, 1) == 107 {
+        return 0
+    }
+    if actwire.ld8(rp, 0) == 99 && actwire.ld8(rp, 1) == 111 {
+        return 2
+    }
+    return 1
+}
+
+fn call_start(action: str) {
+    actwire.ob_reset()
+    actwire.ob_n("call ".p as u64, 5)
+    actwire.ob_n(action.p as u64, action.n as u64)
+    actwire.ob_ch(10)
+    if r_ld8((&g_client[0]) as u64, 0) != 0 as u8 {
+        actwire.ob_n("@client=".p as u64, 8)
+        actwire.ob_str((&g_client[0]) as u64)
+        actwire.ob_ch(10)
+    }
+}
+
+fn call_kvs(k: str, v: str) {
+    actwire.ob_n(k.p as u64, k.n as u64)
+    actwire.ob_ch(61)
+    actwire.ob_n(v.p as u64, v.n as u64)
+    actwire.ob_ch(10)
+}
+
+fn call_kv(k: str, p: u64) {
+    actwire.ob_n(k.p as u64, k.n as u64)
+    actwire.ob_ch(61)
+    actwire.ob_str(p)
+    actwire.ob_ch(10)
+}
+
+// Run the prepared request: 0 ok, 3 denied (confirmation needed or a
+// refusal), 1 anything else. The first line of a refusal is kept in g_why.
+fn run_call() -> i32 {
+    if !bus_up() {
+        zset_s((&g_why[0]) as u64, 96, "orient-bus is not running")
+        return 1
+    }
+    let r: u64 = ask()
+    if r == 0 {
+        return 0
+    }
+    if r == 9 {
+        zset_s((&g_why[0]) as u64, 96, "no answer from orient-bus")
+        return 1
+    }
+    let rp: u64 = (&rep[0]) as u64
+    var n: usize = 0
+    while n < 95 && r_ld8(rp, n) != 0 as u8 && r_ld8(rp, n) != 10 as u8 {
+        r_st8((&g_why[0]) as u64, n, r_ld8(rp, n))
+        n = n + 1
+    }
+    r_st8((&g_why[0]) as u64, n, 0 as u8)
+    if r == 2 {
+        return 3
+    }
+    if is(rp, 10, "err denied") {
+        return 3
+    }
+    return 1
+}
+
+fn err_out(rc: i32) -> i32 {
+    if rc == 3 {
+        say("err denied ")
+    } else {
+        say("err io ")
+    }
+    sayz((&g_why[0]) as u64)
+    say("\n")
+    return rc
+}
+
+// ------------------------------------------------------------- the programs
+
+// The user programs in the task table: name (lowercase, 16 octets) and pid.
+fn collect_procs() {
+    n_procs = 0
+    var i: u64 = 0
+    while i < PROC_MAX as u64 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            let kind: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_KIND, 0)
+            let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+            let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+            if kind >= 3 && !ulib.bad(n0) && (n0 & 255) != 0 && n_procs < PROC_MAX {
+                let at: u64 = (&procs[0]) as u64 + (n_procs * NAME_W) as u64
+                var k: u64 = 0
+                while k < 8 {
+                    r_st8(at, k as usize, ((n0 >> (k * 8)) & 255) as u8)
+                    r_st8(at, (k + 8) as usize, ((n1 >> (k * 8)) & 255) as u8)
+                    k = k + 1
+                }
+                r_st8(at, 16, 0 as u8)
+                var j: usize = 0
+                while j < 16 && r_ld8(at, j) != 0 as u8 {
+                    var c: u8 = lower(r_ld8(at, j))
+                    if c < 32 as u8 {
+                        c = 32 as u8
+                    }
+                    r_st8(at, j, c)
+                    j = j + 1
+                }
+                pids[n_procs] = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                n_procs = n_procs + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn running(exe: u64) -> bool {
+    var i: usize = 0
+    while i < n_procs {
+        if eq16((&procs[0]) as u64 + (i * NAME_W) as u64, exe) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Is `exe` on the `never` list (comma-separated, loaded by load_never)?
+fn in_never(exe: u64) -> bool {
+    let np: u64 = (&never[0]) as u64
+    var tok: [u8; 17] = [0 as u8; 17]
+    let tp: u64 = (&tok[0]) as u64
+    var i: usize = 0
+    var n: usize = 0
+    while true {
+        let c: u8 = r_ld8(np, i)
+        if c == 44 as u8 || c == 10 as u8 || c == 0 as u8 {
+            r_st8(tp, n, 0 as u8)
+            if n > 0 && eq16(tp, exe) {
+                return true
+            }
+            n = 0
+            if c == 0 as u8 {
+                break
+            }
+        } else if n < 16 {
+            r_st8(tp, n, lower(c))
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn load_never() {
+    r_st8((&never[0]) as u64, 0, 0 as u8)
+    let _n: i64 = read_all("/etc/social/melder.never", (&never[0]) as u64, 256)
+}
+
+// ---------------------------------------------------------- the games list
+
+// Cut the TAB-separated line at p into fields (TAB -> zero); the field
+// starts land in `fs`. Returns how many there are (at most 5).
+fn split_tabs(p: u64) -> usize {
+    var nf: usize = 1
+    fs[0] = p
+    var i: usize = 0
+    while r_ld8(p, i) != 0 as u8 {
+        if r_ld8(p, i) == 9 as u8 {
+            r_st8(p, i, 0 as u8)
+            if nf < 5 {
+                fs[nf] = p + (i + 1) as u64
+                nf = nf + 1
+            }
+        }
+        i = i + 1
+    }
+    return nf
+}
+
+// The running game: the first row of the list (os `l`, no command-line
+// text, exe running, not on the never list). The game reported last wins
+// while it still runs. The name lands in g_pick.
+fn match_game() -> bool {
+    r_st8((&g_pick[0]) as u64, 0, 0 as u8)
+    var pz: [u8; 28] = "/etc/social/games.tsv\0\0\0\0\0\0\0"
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    let cx: u64 = (&rdctx[0]) as u64
+    let lp: u64 = (&gline[0]) as u64
+    ulib.rd_init(cx)
+    var found: bool = false
+    var cur_ok: bool = false
+    while true {
+        let n: u64 = ulib.rd_line(fd as u64, cx, lp, 256)
+        if n == ulib.EOF {
+            break
+        }
+        if n > 0 && r_ld8(lp, 0) != 35 as u8 {
+            let nf: usize = split_tabs(lp)
+            // os = l, exe, name, and no command-line text
+            if nf >= 3 && isz(fs[0], "l") && r_ld8(fs[1], 0) != 0 as u8
+                && r_ld8(fs[2], 0) != 0 as u8
+                && (nf < 4 || r_ld8(fs[3], 0) == 0 as u8) {
+                if running(fs[1]) && !in_never(fs[1]) {
+                    if r_ld8((&cur[0]) as u64, 0) != 0 as u8
+                        && eq_full(fs[2], (&cur[0]) as u64) {
+                        cur_ok = true
+                    }
+                    if !found {
+                        zset((&g_pick[0]) as u64, 64, fs[2], r_clen(fs[2]))
+                        found = true
+                    }
+                }
+            }
+        }
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    if cur_ok {
+        zset((&g_pick[0]) as u64, 64, (&cur[0]) as u64, r_clen((&cur[0]) as u64))
+        return true
+    }
+    return found
+}
+
+fn eq_full(a: u64, b: u64) -> bool {
+    var i: usize = 0
+    while r_ld8(a, i) != 0 as u8 || r_ld8(b, i) != 0 as u8 {
+        if r_ld8(a, i) != r_ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------------ reports
+
+// Report the activity (name != 0 and not empty) or clear it. 0 ok, 3
+// denied, 1 other; the reason is in g_why.
+fn do_report(name: u64) -> i32 {
+    if name != 0 && r_ld8(name, 0) != 0 as u8 {
+        call_start("social.activity.set")
+        call_kv("name", name)
+    } else {
+        call_start("social.activity.clear")
+    }
+    return run_call()
+}
+
+// 1 = share, 0 = do not, 2 = cannot tell (no bus / an older social)
+fn read_share() -> u64 {
+    call_start("social.status")
+    if run_call() != 0 {
+        return 2
+    }
+    var v: [u8; 8] = [0 as u8; 8]
+    var k: [u8; 15] = "share_activity\0"
+    if !actwire.kv_find((&rep[0]) as u64, (&k[0]) as u64, (&v[0]) as u64, 8) {
+        return 2
+    }
+    if isz((&v[0]) as u64, "false") {
+        return 0
+    }
+    return 1
+}
+
+// ----------------------------------------------------------------- verbs
+
+fn v_hello() -> i32 {
+    say("backend\torientos\t1\nos\tl\ncaps\tdetect report privacy autostart games\nok 3\n")
+    return 0
+}
+
+fn v_detect() -> i32 {
+    collect_procs()
+    var i: usize = 0
+    while i < n_procs {
+        let at: u64 = (&procs[0]) as u64 + (i * NAME_W) as u64
+        say("p\t")
+        ulib.sayu(pids[i])
+        say("\t")
+        sayz(at)
+        say("\t\t")
+        sayz(at)
+        say("\n")
+        i = i + 1
+    }
+    say("ok ")
+    ulib.sayu(n_procs as u64)
+    say("\n")
+    return 0
+}
+
+fn v_games() -> i32 {
+    var pz: [u8; 28] = "/etc/social/games.tsv\0\0\0\0\0\0\0"
+    let fd: i64 = syscall(S_OPEN, (&pz[0]) as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        say("err io no list of games (/etc/social/games.tsv)\n")
+        return 1
+    }
+    let cx: u64 = (&rdctx[0]) as u64
+    let lp: u64 = (&gline[0]) as u64
+    ulib.rd_init(cx)
+    var rows: u64 = 0
+    while true {
+        let n: u64 = ulib.rd_line(fd as u64, cx, lp, 256)
+        if n == ulib.EOF {
+            break
+        }
+        if n > 0 && r_ld8(lp, 0) != 35 as u8 {
+            sayz(lp)
+            say("\n")
+            rows = rows + 1
+        }
+    }
+    syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+    say("ok ")
+    ulib.sayu(rows)
+    say("\n")
+    return 0
+}
+
+fn v_report(name: u64) -> i32 {
+    if name != 0 {
+        var i: usize = 0
+        while r_ld8(name, i) != 0 as u8 {
+            if r_ld8(name, i) < 32 as u8 {
+                say("err bad name\n")
+                return 1
+            }
+            i = i + 1
+        }
+    }
+    let rc: i32 = do_report(name)
+    if rc != 0 {
+        return err_out(rc)
+    }
+    say("ok 0\n")
+    return 0
+}
+
+fn v_privacy(args: u64, argc: u64, at: u64) -> i32 {
+    if argc <= at {
+        say("err bad privacy get|set\n")
+        return 1
+    }
+    let sub: u64 = ulib.arg_at(args, at)
+    if isz(sub, "get") {
+        let sh: u64 = read_share()
+        if sh == 2 {
+            say("err io the social service does not answer share_activity\n")
+            return 1
+        }
+        load_never()
+        say("k\tshare\t")
+        if sh == 1 {
+            say("yes\n")
+        } else {
+            say("no\n")
+        }
+        say("k\tnever\t")
+        // the list without a trailing newline
+        var e: usize = r_clen((&never[0]) as u64)
+        while e > 0 && r_ld8((&never[0]) as u64, e - 1) == 10 as u8 {
+            e = e - 1
+        }
+        sayb((&never[0]) as u64, e)
+        say("\nok 2\n")
+        return 0
+    }
+    if isz(sub, "set") && argc >= at + 2 {
+        let key: u64 = ulib.arg_at(args, at + 1)
+        var val: u64 = 0
+        if argc > at + 2 {
+            val = ulib.arg_at(args, at + 2)
+        }
+        if isz(key, "share") && val != 0 && (isz(val, "yes") || isz(val, "no")) {
+            call_start("social.privacy.set")
+            if isz(val, "yes") {
+                call_kvs("share_activity", "true")
+            } else {
+                call_kvs("share_activity", "false")
+            }
+            let rc: i32 = run_call()
+            if rc != 0 {
+                return err_out(rc)
+            }
+            say("ok 0\n")
+            return 0
+        }
+        if isz(key, "never") {
+            // letters, digits . _ - and commas only: names of programs
+            var ln: [u8; 256] = [0 as u8; 256]
+            var n: usize = 0
+            if val != 0 {
+                var i: usize = 0
+                while r_ld8(val, i) != 0 as u8 {
+                    let c: u8 = lower(r_ld8(val, i))
+                    let good: bool = (c >= 97 as u8 && c <= 122 as u8)
+                        || (c >= 48 as u8 && c <= 57 as u8)
+                        || c == 46 as u8 || c == 95 as u8 || c == 45 as u8
+                        || c == 44 as u8
+                    if !good || n >= 254 {
+                        say("err bad never list: names of programs, comma-separated\n")
+                        return 1
+                    }
+                    r_st8((&ln[0]) as u64, n, c)
+                    n = n + 1
+                    i = i + 1
+                }
+            }
+            r_st8((&ln[0]) as u64, n, 10 as u8)
+            if !write_all("/etc/social/melder.never", (&ln[0]) as u64, n + 1) {
+                say("err io cannot write /etc/social/melder.never\n")
+                return 1
+            }
+            say("ok 0\n")
+            return 0
+        }
+    }
+    say("err bad privacy get|set share yes|no|set never <list>\n")
+    return 1
+}
+
+// Is there a line `melder:...` in the init table buffer?
+fn inittab_has(buf: u64) -> bool {
+    var i: usize = 0
+    while r_ld8(buf, i) != 0 as u8 {
+        if (i == 0 || r_ld8(buf, i - 1) == 10 as u8) && r_ld8(buf, i) == 109 as u8
+            && r_ld8(buf, i + 1) == 101 as u8 && r_ld8(buf, i + 2) == 108 as u8
+            && r_ld8(buf, i + 3) == 100 as u8 && r_ld8(buf, i + 4) == 101 as u8
+            && r_ld8(buf, i + 5) == 114 as u8 && r_ld8(buf, i + 6) == 58 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn v_autostart(args: u64, argc: u64, at: u64) -> i32 {
+    if argc <= at {
+        say("err bad autostart status|install|remove\n")
+        return 1
+    }
+    let sub: u64 = ulib.arg_at(args, at)
+    let fp: u64 = (&fbuf[0]) as u64
+    let n: i64 = read_all("/etc/inittab", fp, 4096)
+    if n < 0 {
+        say("err io no /etc/inittab (this system does not start services through init)\n")
+        return 1
+    }
+    if n > 3900 {
+        say("err io /etc/inittab is too big for the Melder\n")
+        return 1
+    }
+    let has: bool = inittab_has(fp)
+    if isz(sub, "status") {
+        if has {
+            say("k\tautostart\tinstalled\n")
+        } else {
+            say("k\tautostart\tmissing\n")
+        }
+        say("k\tunit\t/etc/inittab\nok 2\n")
+        return 0
+    }
+    if isz(sub, "install") {
+        if has {
+            say("ok 0\n")
+            return 0
+        }
+        var e: usize = n as usize
+        if e > 0 && r_ld8(fp, e - 1) != 10 as u8 {
+            r_st8(fp, e, 10 as u8)
+            e = e + 1
+        }
+        let line: str = "melder:*:respawn:/bin/melder serve\n"
+        zset(fp + e as u64, 4096 - e, line.p as u64, line.n)
+        e = e + line.n
+        if !write_all("/etc/inittab", fp, e) {
+            say("err io cannot write /etc/inittab\n")
+            return 1
+        }
+        say("ok 0\n")
+        return 0
+    }
+    if isz(sub, "remove") {
+        // copy every line except the melder's
+        var o: usize = 0
+        var i: usize = 0
+        while i < n as usize {
+            var j: usize = i
+            while j < n as usize && r_ld8(fp, j) != 10 as u8 {
+                j = j + 1
+            }
+            let mine: bool = j - i >= 7 && is(fp + i as u64, 7, "melder:")
+            if !mine {
+                var k: usize = i
+                while k < j {
+                    r_st8(fp, o, r_ld8(fp, k))
+                    o = o + 1
+                    k = k + 1
+                }
+                if j < n as usize {
+                    r_st8(fp, o, 10 as u8)
+                    o = o + 1
+                }
+            }
+            i = j + 1
+        }
+        if !write_all("/etc/inittab", fp, o) {
+            say("err io cannot write /etc/inittab\n")
+            return 1
+        }
+        say("ok 0\n")
+        return 0
+    }
+    say("err bad autostart status|install|remove\n")
+    return 1
+}
+
+// ---------------------------------------------------------------- the core
+
+// One look. 1 = a game runs (name in g_pick, reported), 0 = nothing,
+// 2 = sharing is off, 3 = refused (paused by the caller), 4 = no bus.
+// `cur` is the game reported last; it is cleared when it ends.
+fn look() -> u64 {
+    let sh: u64 = read_share()
+    if sh == 2 && !bus_up() {
+        return 4
+    }
+    if sh == 0 {
+        if r_ld8((&cur[0]) as u64, 0) != 0 as u8 {
+            let _c: i32 = do_report(0)
+            r_st8((&cur[0]) as u64, 0, 0 as u8)
+        }
+        return 2
+    }
+    collect_procs()
+    load_never()
+    if match_game() {
+        let rc: i32 = do_report((&g_pick[0]) as u64)
+        if rc == 3 {
+            return 3
+        }
+        if rc == 0 {
+            zset((&cur[0]) as u64, 64, (&g_pick[0]) as u64, r_clen((&g_pick[0]) as u64))
+        }
+        return 1
+    }
+    if r_ld8((&cur[0]) as u64, 0) != 0 as u8 {
+        let rc2: i32 = do_report(0)
+        if rc2 == 3 {
+            return 3
+        }
+        r_st8((&cur[0]) as u64, 0, 0 as u8)
+    }
+    return 0
+}
+
+fn serve(total: u64, every: u64) -> i32 {
+    let t0: u64 = actwire.ticks()
+    var next: u64 = t0
+    var pause: u64 = 0
+    var last: u64 = 99
+    while total == 0 || actwire.ticks() - t0 < total {
+        let now: u64 = actwire.ticks()
+        if now >= next && now >= pause {
+            next = now + every
+            let r: u64 = look()
+            if r == 3 {
+                pause = now + 60000 // refused: ten minutes of silence
+            }
+            if r != last {
+                last = r
+                if r == 1 {
+                    say("melder: playing ")
+                    sayz((&g_pick[0]) as u64)
+                    say("\n")
+                } else if r == 0 {
+                    say("melder: idle\n")
+                } else if r == 2 {
+                    say("melder: sharing is off\n")
+                } else if r == 3 {
+                    say("melder: refused (")
+                    sayz((&g_why[0]) as u64)
+                    say(")\n")
+                } else {
+                    say("melder: no orient-bus\n")
+                }
+            }
+        }
+        ulib.sleep_ms(100)
+    }
+    return 0
+}
+
+fn once() -> i32 {
+    let r: u64 = look()
+    if r == 1 {
+        say("playing\t")
+        sayz((&g_pick[0]) as u64)
+        say("\n")
+        return 0
+    }
+    if r == 3 {
+        say("refused\t")
+        sayz((&g_why[0]) as u64)
+        say("\n")
+        return 3
+    }
+    if r == 2 {
+        say("off\n")
+    } else if r == 4 {
+        say("err io orient-bus is not running\n")
+        return 1
+    } else {
+        say("idle\n")
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var at: u64 = 1
+    if argc >= 3 && isz(ulib.arg_at(args, 1), "--as") {
+        let cl: u64 = ulib.arg_at(args, 2)
+        zset((&g_client[0]) as u64, 32, cl, r_clen(cl))
+        at = 3
+    }
+    if argc > at {
+        let first: u64 = ulib.arg_at(args, at)
+        if isz(first, "serve") {
+            var total: u64 = 0
+            var every: u64 = 3000
+            if argc > at + 1 {
+                total = ulib.to_num(ulib.arg_at(args, at + 1))
+            }
+            if argc > at + 2 {
+                every = ulib.to_num(ulib.arg_at(args, at + 2))
+            }
+            return serve(total, every) as u64
+        }
+        if isz(first, "once") {
+            return once() as u64
+        }
+        if isz(first, "v1") && argc > at + 1 {
+            let verb: u64 = ulib.arg_at(args, at + 1)
+            if isz(verb, "hello") {
+                return v_hello() as u64
+            }
+            if isz(verb, "detect") {
+                return v_detect() as u64
+            }
+            if isz(verb, "games") {
+                return v_games() as u64
+            }
+            if isz(verb, "report") {
+                var nm: u64 = 0
+                if argc > at + 2 {
+                    nm = ulib.arg_at(args, at + 2)
+                }
+                return v_report(nm) as u64
+            }
+            if isz(verb, "privacy") {
+                return v_privacy(args, argc, at + 2) as u64
+            }
+            if isz(verb, "autostart") {
+                return v_autostart(args, argc, at + 2) as u64
+            }
+            say("err unsupported ")
+            sayz(verb)
+            say("\n")
+            return 2
+        }
+        if isz(first, "v1") == false && r_ld8(first, 0) == 118 as u8 {
+            say("err bad only interface v1\n")
+            return 1
+        }
+    }
+    say("usage: melder [--as <client>] v1 <verb> | serve [ticks] [every] | once\n")
+    return 1
+}
+
+// profile app: firnc's own _start calls main (kernel/user/freunde.fi
+// says why the argument block has to be passed on by hand)
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

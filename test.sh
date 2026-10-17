@@ -1679,6 +1679,13 @@ lauf "54. the action bus in the real image: broker + settingsd started by the se
 lauf "55. the social layer: social.* actions on orient-bus, providers behind one interface, presence/activity/privacy, the friends bar (tools/social/run.sh, round SOCIAL)" \
      tools/social/run.sh social '^SOCIAL: |^== |^  OK    |^  FAIL  '
 
+# 55b. THE MELDER ON ORIENTOS (r135, FirnChat docs/MELDER-INTERFACE.md):
+# /bin/melder is the OrientOS backend of the Melder interface v1 and a small
+# core -- a running game becomes social.activity.set on the bus, the privacy
+# switch is social.privacy.set; no token, no HTTP.
+lauf "55b. the Melder on OrientOS: backend v1 (hello/detect/games/privacy/autostart/report) and core, reporting as bus actions (tools/melder/run.sh, r135)" \
+     tools/melder/run.sh melder '^MELDER: |^== |^  OK    |^  FAIL  '
+
 # 56. ROUND ACTION-BUS-3 ON A SCREEN: the foreign-window layer (a Linux
 # Wayland program on wayd steered through its window -- keys, typed text,
 # a click, the close box; the settings window is NOT steerable) and the

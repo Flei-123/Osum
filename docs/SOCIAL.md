@@ -21,6 +21,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `pakete/social/ACTIONS` → `/apps/social.prog/ACTIONS` | 23 actions + 5 events (below) |
 | `kernel/app/socfleitec.fi` → `/bin/socfleitec` | provider for a **Fleitec** account: fleikontakte (book, presence, activity, invites) with a device access token; chat **end to end** as a FirnChat device over the relay (`kernel/app/fcrelay.fi`: x25519, HKDF-SHA256, ChaCha20-Poly1305, own-device copies) |
 | `kernel/user/soclocal.fi` → `/bin/soclocal` | provider for accounts **without a server**: contacts, messages and invites in files (`-c <base>` = one account) — the second provider that passes the same checks |
+| `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (pid + basename of argv[0], 16 octets): no command line, no age — a row with command-line text (column 4) is skipped. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts its services in `kgui.desk_start`, not done for the Melder). Test: `tools/melder/run.sh` (test.sh § 55b) |
 | `kernel/user/freunde.fi` → `/bin/freunde` | the friends bar like Discord's friends view: tabs **Online** (who plays first, then who is there), **Alle**, **Ausstehend (n)** (requests of every account both ways: Annehmen / Ablehnen / Zurückziehen) and **Hinzufügen** (search at every provider, "Freund hinzufügen"); the presence as the theme's role colours (success / warning / danger / secondary text) on the list's colour tiles plus the dot character; unread counts, the chat window (list, write), "Einladen"/"Beitreten", an incoming invite with "Annehmen"/"Ablehnen" (shown only while there is one), "Unsichtbar" — all through `social.*`. Test stand: `--tab N`, `--annehmen N`, `--suche TEXT [--anfrage N]` |
 | `tools/social/run.sh` (test.sh § 55) | a real guest, a real fleikontakte and a real FirnChat relay on the host, anna's FirnChat client. Standard: Gerätetoken fkt1; `SOCIAL_TOKEN_FORMAT=fkz1 bash tools/social/run.sh` = Legacy-Lauf (beide 109/0) |
 | `tools/social/chat.sh` | the Fleitec provider on the host against relay + fleikontakte + FirnChat's own client (login, E2E both ways, pin, replay, invites) |
@@ -145,8 +146,11 @@ service enforces itself, where the data leaves the device:
 
 * **Xoffi** has no known API for contacts/presence/chat (only its sign-in
   is known, `kernel/app/anb_xoffi.fi`); a `socxoffi` waits for it;
-* the Melder on OrientOS (detect running games by itself) is not built —
-  apps say what they play with `social.activity.set`;
+* the Melder on OrientOS (`/bin/melder`, r135) detects games by the name of the
+  program only (no command line from the kernel yet) and reads the list from
+  `/etc/social/games.tsv`, which nobody fills yet (a provider verb `games` for
+  `socfleitec` ← fleikontakte `GET /api/kontakte/spiele` is next); apps can still
+  say what they play with `social.activity.set`;
 * the same person at two providers is two contacts (no merge by person);
 * a provider call blocks the service for up to 4 s; chat is polled every
   5 s (a watching provider — the relay's T_WATCH — is the next step);
