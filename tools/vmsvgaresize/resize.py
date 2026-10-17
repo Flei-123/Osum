@@ -4,7 +4,7 @@
 # Boots nothing itself. Logs in, waits for the desktop, then asks QEMU for each size through the VNC SetDesktopSize message (the same
 # kernel path as a VirtualBox hint: vmsvga.host_pending -> vmode.follow_host). After every size the screendump is saved
 # (<base>.<n>.ppm) and measured; one line per size is written to <base>.res:
-#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share> <start menu centre x or -1> <start menu bottom row or -1> <width and height of the menu screendump>
+#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share> <start menu centre x or -1> <start menu bottom row or -1> <width and height of the menu screendump> <the same four for the menu left OPEN by the step before (-1 0 0 for the first step)>
 import os
 import sys
 import time
@@ -72,23 +72,26 @@ def menu_find(mon, tag):
     return int((cols[0] + cols[-1]) // 2), int(rows[-1]), w, h
 
 
-def menu_probe(mon, tag):
+def menu_probe(mon, tag, leave_open):
     # r1007: open the start menu (Super key) and measure where its panel stands: horizontal centre and bottom edge. The panel colour
     # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar. The key toggles: if the first press
-    # finds no menu (it was open and is closed now), press once more. Esc closes it at the end.
+    # finds no menu (it was open and is closed now), press once more.
+    # r1010: the menu is LEFT OPEN after every step but the last, so the next resize hits an OPEN menu: `carry` is that menu as found after
+    # the resize (it must have followed the new size, not stand half off the screen). Returns carry + fresh measurement.
     res = (-1, -1, 0, 0)
-    # a menu still open from the step before stays where it was (it is only placed when it is SHOWN): close it first
-    for _ in range(2):
-        if menu_find(mon, tag)[0] < 0:
-            break
+    carry = menu_find(mon, tag + "c")
+    if carry[0] >= 0:
         mon.cmd("sendkey meta_l", 2.0)
+        if menu_find(mon, tag)[0] >= 0:
+            mon.cmd("sendkey meta_l", 2.0)
     for _ in range(2):
         mon.cmd("sendkey meta_l", 3.0)
         res = menu_find(mon, tag)
         if res[0] >= 0:
             break
-    mon.cmd("sendkey meta_l", 2.0)
-    return res
+    if not leave_open:
+        mon.cmd("sendkey meta_l", 2.0)
+    return carry + res
 
 
 def main():
@@ -121,8 +124,8 @@ def main():
         m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
         ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
         r = measure(mon, str(n))
-        mcx, mbot, mw, mh = menu_probe(mon, str(n))
-        out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh))
+        ccx, cbot, cw, ch, mcx, mbot, mw, mh = menu_probe(mon, str(n), n < steps)
+        out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh, ccx, cbot, cw, ch))
         out.flush()
     out.close()
     mon.quit()

@@ -48,7 +48,7 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 cat "$D/o.res" 2>/dev/null
 n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
 [ "$n" -ge 3 ] && ok "$n hint steps measured" || bad "only $n hint steps measured"
-while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh; do
+while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
     awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
@@ -68,6 +68,19 @@ while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh; do
         fi
     else
         bad "$s: start menu not found"
+    fi
+    # the menu left open by the step before must have followed the resize (centre of its own screendump, above the bar)
+    if [ "$i" -ge 2 ]; then
+        if [ "$ccx" -ge 0 ]; then
+            d=$(( ccx - cw / 2 )); [ "$d" -lt 0 ] && d=$(( -d ))
+            if [ "$d" -le 8 ] && [ "$cbot" -le $(( ch - 40 )) ] && [ "$cbot" -ge $(( ch - 120 )) ]; then
+                ok "$s: open menu followed the resize (centre $ccx of $cw, bottom $cbot of $ch)"
+            else
+                bad "$s: open menu stayed behind (centre $ccx of $cw, bottom $cbot of $ch)"
+            fi
+        else
+            ok "$s: open menu closed at the resize (nothing left behind)"
+        fi
     fi
 done < "$D/o.res"
 echo "resize: $pass ok, $fail fail"
