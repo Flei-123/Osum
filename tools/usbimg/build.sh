@@ -397,7 +397,7 @@ for p in $PROGS; do
     # Profil `app` gleich zu binden und sagt dann "input file is the
     # same as output file" -- im Profil `kernel` faellt das nicht auf,
     # weil dort ohnehin nur ein Objekt entsteht.
-    if ! "$CC" $PROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    if ! "$CC" $PROF $OPTL -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "== $p: der Uebersetzer sagt nein" >&2; head -20 "$OUT/$p.err" >&2
         rc=1; continue
     fi
@@ -430,7 +430,7 @@ sagen "programme   $(echo $gebaut | wc -w) Stueck"
 gebaut_app=""
 for p in $APPS; do
     [ -f "kernel/app/$p.fi" ] || continue
-    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
+    if ! FIRNLIB="$ROOT/lib" "$CC" $OPTL -c --profile=app \
             -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
         echo "== $p (app): der Uebersetzer sagt nein" >&2
         head -20 "$OUT/app-$p.err" >&2

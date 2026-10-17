@@ -25,7 +25,7 @@ rc=0
 for p in $PROGS; do
     UPROF=""; UCRT="$OUT/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    if ! "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    if ! "$CC" $UPROF $OPTL -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "== $p: der Uebersetzer sagt nein"
         head -25 "$OUT/$p.err"
         rc=1

@@ -81,7 +81,7 @@ rc=0
 gebaut=""
 for p in $PROGS; do
     [ -f "kernel/user/$p.fi" ] || continue
-    if ! "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    if ! "$CC" $OPTL "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "== $p: der Uebersetzer sagt nein"
         head -20 "$OUT/$p.err"
         rc=1
@@ -128,7 +128,7 @@ for p in $APPS; do
     case "$p" in
         wasm) APPFLAGS="--no-pass=inline" ;;
     esac
-    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app $APPFLAGS \
+    if ! FIRNLIB="$ROOT/lib" "$CC" $OPTL -c --profile=app $APPFLAGS \
             -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
         echo "== $p (app): der Uebersetzer sagt nein"
         head -20 "$OUT/app-$p.err"

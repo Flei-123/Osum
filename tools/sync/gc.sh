@@ -13,6 +13,16 @@
 #
 #   OSUM_NO_GC=1   switch it off (bisecting, size comparisons)
 #
+# OPTIMISATION LEVEL (r278b): since Firn round 72 the default level is
+# `dev-fast` (overflow checks on, little inlining, no dead-code removal at
+# the optimiser level); the old pin compiled fully optimised and without
+# overflow panics. Programs here are built with an EXPLICIT level, the
+# closest match to what Osum always ran: release-fast. Measured with the pin
+# 031ec5a4d, explorer: dev-fast+gc 2.62 MB, release-fast+gc 2.21 MB (old pin
+# 2.47 MB), release-safe+gc 4.25 MB, dev+gc 9.99 MB.
+#   OSUM_OPT=<level>   dev | dev-fast | release-safe | release-fast
+#   OSUM_OPT=default   pass no level (Firn default)
+#
 # firnc1 (stage 1) ignores the variable; there --gc-sections finds nothing
 # to drop and the result is what it always was.
 if [ "${OSUM_NO_GC:-0}" = 1 ]; then
@@ -22,3 +32,8 @@ else
     GCS="--gc-sections"
 fi
 export GCS
+case "${OSUM_OPT:-release-fast}" in
+    default) OPTL="" ;;
+    *)       OPTL="--opt-level=${OSUM_OPT:-release-fast}" ;;
+esac
+export OPTL

@@ -36,7 +36,7 @@ rc=0
 for p in $PROGS; do
     UPROF=""; UCRT="$OUT/crt.o"
     grep -qa '^profile app' "$USRC/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    if ! "$CC" $UPROF -c "$USRC/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    if ! "$CC" $UPROF $OPTL -c "$USRC/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "FEHLER: firnc$STUFE uebersetzt $p.fi nicht"
         sed 's/^/    /' "$OUT/$p.err" | head -12
         rc=1

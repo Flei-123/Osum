@@ -205,7 +205,7 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
-    vendor/firn/bin/firnc -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    vendor/firn/bin/firnc $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -20 "$BUILDD/e-$p"; exit 1; }
     # RUNDE 31: EIN PROGRAMM IM PROFIL `app` BRINGT SEINEN `_start` MIT.

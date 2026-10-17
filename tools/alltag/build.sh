@@ -183,7 +183,7 @@ for p in $progs; do
     fi
     UPROF=""; UCRT="$BUILDD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    vendor/firn/bin/firnc $UPROF $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -25 "$BUILDD/e-$p"; exit 1; }
     ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \

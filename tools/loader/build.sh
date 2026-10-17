@@ -56,7 +56,7 @@ eins() { # <name>
     [[ $p == rechner ]] && q=calc
     UPROF=""; UCRT="$OUT/crt.o"
     grep -qa '^profile app' "kernel/user/$q.fi" && { UPROF=--profile=app; UCRT=""; }
-    "$CC" $UPROF -c "kernel/user/$q.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
+    "$CC" $UPROF $OPTL -c "kernel/user/$q.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
         echo "FEHLER-UEBERSETZER $p"; return 1; }
     ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
        -o "$OUT/bin/$p" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr" || {
@@ -83,7 +83,7 @@ echo "   programme $(wc -l < "$OUT/proglist") Stueck"
 
 for p in $APPS; do
     [ -f "kernel/app/$p.fi" ] || continue
-    "$CC" -c --profile=app -o "$OUT/app-$p.o" "kernel/app/$p.fi" \
+    "$CC" $OPTL -c --profile=app -o "$OUT/app-$p.o" "kernel/app/$p.fi" \
         > "$OUT/app-$p.err" 2>&1 || {
         echo "== $p (app): der Uebersetzer sagt nein"; head -20 "$OUT/app-$p.err"; exit 1; }
     ld $GCS -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \

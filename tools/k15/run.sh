@@ -184,7 +184,7 @@ baue() { # stufe
     for p in $PROGS; do
         UPROF=""; UCRT="$TMPD/crt.o"
         grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-        "$cc" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
+        "$cc" $UPROF $OPTL -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
             bad "firnc$s uebersetzt $p.fi nicht"
             sed 's/^/        /' "$TMPD/e$p$s" | head -8
             rc=1
