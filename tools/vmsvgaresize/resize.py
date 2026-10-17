@@ -77,12 +77,17 @@ def menu_probe(mon, tag):
     # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar. The key toggles: if the first press
     # finds no menu (it was open and is closed now), press once more. Esc closes it at the end.
     res = (-1, -1)
+    # a menu still open from the step before stays where it was (it is only placed when it is SHOWN): close it first
+    for _ in range(2):
+        if menu_find(mon, tag)[0] < 0:
+            break
+        mon.cmd("sendkey meta_l", 2.0)
     for _ in range(2):
         mon.cmd("sendkey meta_l", 3.0)
         res = menu_find(mon, tag)
         if res[0] >= 0:
             break
-    mon.cmd("sendkey esc", 1.5)
+    mon.cmd("sendkey meta_l", 2.0)
     return res
 
 
