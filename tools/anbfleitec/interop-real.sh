@@ -12,12 +12,12 @@
 #                                          /api/kontakte  ->  firnchat-web  -> fleikontakte
 #                                          everything else -> fleitec-id
 #   firnchat-web reaches the broker as its OIDC issuer over https
-#   (https://10.9.0.1:8443 through the same proxy, ca-datei = the test CA).
+#   (https://10.9.0.1:8443 through the same proxy, ca-file = the test CA).
 #
 # WHAT THIS CHECKS
 #  1. Services: broker with 2 device clients (orientos-device -> aud orientos,
-#     other-device -> aud other-product), firnchat-web with broker-tausch = ja,
-#     broker-aud = orientos, --kontakte-port/--kontakte-key, fleikontakte
+#     other-device -> aud other-product), firnchat-web with broker-exchange = ja,
+#     broker-audience = orientos, --contacts-port/--contacts-key, fleikontakte
 #     with --proxy-key; the web login of "the person" creates the account.
 #  2. Before the account exists: a valid token is refused (the swap never
 #     creates an account).
@@ -274,9 +274,9 @@ is "discovery over TLS: issuer" "$(python3 -c 'import sys,json;print(json.load(s
 D=$TMPD/fc-run; mkdir -p "$D/konten" "$D/relay" "$D/kontakte"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/proxy.key"; echo >> "$D/proxy.key"; chmod 600 "$D/proxy.key"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/jarvis.secret"; echo >> "$D/jarvis.secret"; chmod 600 "$D/jarvis.secret"
-printf '[lokal]\ntyp = lokal\n\n[jarvis]\ntyp = oidc\nissuer = %s\nclient-id = fc_localtest\nredirect = http://127.0.0.1:%s/api/oidc/callback\nauto-konto = ja\naktiv = ja\nca-datei = %s\nbroker-tausch = ja\nbroker-aud = orientos\nbroker-sperrliste = %s/sperrliste.txt\nbroker-audit = %s/audit.log\n' \
+printf '[lokal]\ntyp = lokal\n\n[jarvis]\ntyp = oidc\nissuer = %s\nclient-id = fc_localtest\nredirect = http://127.0.0.1:%s/api/oidc/callback\nauto-konto = ja\nactive = ja\nca-file = %s\nbroker-exchange = ja\nbroker-audience = orientos\nbroker-denylist = %s/denylist.txt\nbroker-audit = %s/audit.log\n' \
     "$Z" "$WPORT" "$TMPD/certs/ca.pem" "$D" "$D" > "$D/konten/anbieter.conf"
-: > "$D/sperrliste.txt"
+: > "$D/denylist.txt"
 printf '[lokal]\ntyp = lokal\n\n[jarvis]\ntyp = jwt\ncookie = fleitec_session\ngeheimnis = %s/jarvis.secret\nauto-konto = ja\n' "$D" > "$D/kontakte.conf"
 svc_wait() { # <log> <marker regex> -> prints the port
     local i p
@@ -293,8 +293,8 @@ RPORT=$(svc_wait "$D/relay.log" 'FIRNCHAT listening [0-9]+') || bad "relay did n
     --web-dir "$WEBDIR" --proxy-key "$D/proxy.key") > "$D/book.log" 2>&1 & BKPID=$!
 KPORT=$(svc_wait "$D/book.log" 'FLEIKONTAKTE listening [0-9]+') || bad "fleikontakte did not start: $(head -3 "$D/book.log")"
 (cd "$D" && exec ip netns exec "$NS" "$FCB/firnchat-web" --port "$WPORT" --relay-port "${RPORT:-0}" --konten-dir "$D/konten" \
-    --web-dir "$WEBDIR" --id "$D/web.id" --kontakte-port "${KPORT:-0}" --kontakte-key "$D/proxy.key") > "$D/web.log" 2>&1 & WBPID=$!
-svc_wait "$D/web.log" 'FIRNCHAT-WEB listening [0-9]+' >/dev/null && ok "firnchat-web + fleikontakte up (broker-tausch = ja, broker-aud = orientos, https issuer, ca-datei)" \
+    --web-dir "$WEBDIR" --id "$D/web.id" --contacts-port "${KPORT:-0}" --contacts-key "$D/proxy.key") > "$D/web.log" 2>&1 & WBPID=$!
+svc_wait "$D/web.log" 'FIRNCHAT-WEB listening [0-9]+' >/dev/null && ok "firnchat-web + fleikontakte up (broker-exchange = ja, broker-audience = orientos, https issuer, ca-file)" \
     || { bad "firnchat-web did not start: $(head -3 "$D/web.log")"; echo "ANBREAL: $pass passed, $fail failed"; exit 1; }
 wlog_n() { grep -ac 'broker exchange refused' "$D/web.log"; }
 wlog_last() { grep -a 'broker exchange refused' "$D/web.log" | tail -1 | sed 's/^firnchat-web: oidc broker exchange refused: //'; }
@@ -415,7 +415,7 @@ hswap() { # <token> -> HS_CODE, body in $TMPD/hs.out, headers in $TMPD/hs.hdr
     HS_CODE=$(hcurl -o "$TMPD/hs.out" -D "$TMPD/hs.hdr" -w '%{http_code}' -X POST -H "Authorization: Bearer $1" \
         -H 'Content-Type: application/json' -d '{}' https://konto.test:8443/api/kontakte/zugang-broker)
 }
-BL="$D/sperrliste.txt"
+BL="$D/denylist.txt"
 mint blk orientos-device; B1=$(cat "$TMPD/mint/blk.access"); J1=$(jwtc "$B1" jti)
 echo "jti $J1" > "$BL"
 hswap "$B1"; is "block list: a token whose jti is listed -> 403" "$HS_CODE" "403"
@@ -423,7 +423,7 @@ echo "# unblocked" > "$BL"
 hswap "$B1"; is "block list: removed from the file -> the SAME token swaps (taking effect without a restart; the block did not consume it)" "$HS_CODE" "200"
 hswap "$B1"; is "the same token again -> 401 (token already used)" "$HS_CODE" "401"
 mint blk2 orientos-device; B2=$(cat "$TMPD/mint/blk2.access"); J2=$(jwtc "$B2" jti)
-echo "konto $UIDC" > "$BL"
+echo "account $UIDC" > "$BL"
 hswap "$B2"; is "block list: the whole account (konto <uid>) -> 403" "$HS_CODE" "403"
 echo "# unblocked" > "$BL"
 hswap "$B2"; is "block list: account released -> swaps" "$HS_CODE" "200"
