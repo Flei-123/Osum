@@ -116,6 +116,16 @@ warte 2
 klickauf emenue4
 warte 3
 foto 13-sorted
+# --- 6. right click on the EMPTY part of the list: the folder menu (8 lines), its last line = large icons (row height 48)
+marke explorer: ctxbg
+rklickauf ftab
+warteneu explorer: ctxbg || 60
+warte 2
+foto 20-folder-menu
+klickauf emenue7
+warteauf explorer: viewsize 2 rh=48 || 60
+warte 3
+foto 21-large
 DREH
 bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de halt=480 \
     extra='nostart wigapp=/bin/explorer,/users/justin' drehbuch="$OUT/dreh.txt" > "$OUT/lauf.log" 2>&1
@@ -216,6 +226,23 @@ b = b[:b.index("\n}\n")]
 pairs = re.findall(r"icon_tint\(wlib\.icon_id\(icons\.(\w+)\), (\d+)\)", b)
 sys.exit(0 if len(pairs) == 9 and len(set(pairs)) == 9 else 1)
 PY
+
+echo "== 7. W-G2: folder menu, view sizes, Type/Size columns =="
+hat "$S" 'explorer: ctxbg n=8' "right click on the empty part opens the 8-line folder menu"
+hat "$S" 'explorer: viewsize 2 rh=48' "its Large icons line sets the row height 48"
+python3 - "$S" <<'PY' && ok "the list reports 4 columns (Name, Date, Type, Size) in increasing x" || bad "columns: fewer than 4 or not increasing"
+import re, sys
+t = open(sys.argv[1], encoding="latin1").read()
+m = re.search(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)", t)
+v = [int(x) for x in m.groups()] if m else []
+sys.exit(0 if len(v) == 4 and v[0] < v[1] < v[2] < v[3] else 1)
+PY
+for L in en de; do
+  n=$(grep -a '^explorer.menu.show = ' locale/$L/messages | tr -cd '\\' | wc -c)
+  m=$(grep -a '^explorer.menu.view = ' locale/$L/messages | tr -cd '\\' | wc -c)
+  [ "$n" = 6 ] && ok "$L: view menu has 7 lines (S/M/L icons)" || bad "$L: view menu lines (backslashes=$n)"
+  [ "$m" = 10 ] && ok "$L: menu-bar view has 11 lines" || bad "$L: menu-bar view lines (backslashes=$m)"
+done
 
 echo "EXPLORER4: $pass passed, $fail failed"
 [ "$fail" = 0 ]
