@@ -94,10 +94,7 @@ de = open("locale/de/messages", encoding="utf-8", errors="replace").read()
 rc = 0
 def bad(m):
     global rc; rc = 1; print("  FAIL  " + m)
-names = re.search(r'ab_names: \[u8; (\d+)\] = "([^"]*)"', src)
-packed = names.group(2).replace("\\0", "\0")
-if int(names.group(1)) != len(packed): bad("ab_names length %s != %d" % (names.group(1), len(packed)))
-bound = [x for x in packed.split("\0") if x]
+bound = [x for x in open("kernel/user/settings.d/accounts.bind", encoding="utf-8").read().split("\n") if x]
 fields, labels = [], []
 for line in man.splitlines():
     w = line.split("#")[0].split()
@@ -107,7 +104,7 @@ for line in man.splitlines():
         if len(w) > 3: labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 for f in fields:
-    if f not in bound: bad("field %s has no binding in ab_names" % f)
+    if f not in bound: bad("field %s has no binding in accounts.bind" % f)
 for b in bound:
     if b not in fields: bad("binding %s is not a field of the manifest" % b)
 if len(set(fields)) != len(fields): bad("duplicate field keys")
@@ -118,10 +115,23 @@ for k in sorted(set(labels)):
 for ix, k in re.findall(r"if ix == (\d+) \{ return (K_[A-Z]+) \}", src):
     if not re.search(r"^const %s: u64 = \d+" % k, src, re.M): bad("%s is not defined" % k)
 if "fuiscene.button(left, msg.get((&k_k_book" in src: bad("the book button is built by hand again")
+if '__include_str("settings.d/accounts.bind")' not in src: bad("the binding names are not embedded in settings.fi")
 if '__include_str("settings.d/accounts.settings")' not in src: bad("the manifest is not embedded in settings.fi")
 if "manifest.page_find(" not in src: bad("page_konto does not read the manifest")
 sys.exit(rc)
 PY
+
+FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.fi -o "$T/bind" > "$T/bind.build" 2>&1 \
+    && "$T/bind" > "$T/bind.out"
+python3 -I - > "$T/bind.exp" <<'PY'
+names = [x for x in open("kernel/user/settings.d/accounts.bind").read().split("\n") if x]
+for line in open("kernel/user/settings.d/accounts.settings"):
+    w = line.split("#")[0].split()
+    if w and w[0] == "field":
+        print("%s=%d" % (w[1], names.index(w[1])))
+print("unknown=4294967295 prefix=4294967295 longer=4294967295")
+PY
+if cmp -s "$T/bind.out" "$T/bind.exp"; then ok "names_index (fn acct_bind) gives every key its line number; unknown/prefix/longer keys are refused"; else bad "binding numbers differ: $(diff "$T/bind.out" "$T/bind.exp" | head -3 | tr '\n' ' ')"; fi
 
 echo "== 4. mutations of the parser =="
 mutate() { # name old new
@@ -146,6 +156,9 @@ PY
             *) b=$(basename "$f" .txt); cmp -s "$d/o.txt" "$T/$b.py" || n=$((n+1)) ;;
         esac
     done
+    if FIRNLIB="$d/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.fi -o "$d/bind" > /dev/null 2>&1; then
+        timeout 10 "$d/bind" > "$d/b.txt" 2>/dev/null; cmp -s "$d/b.txt" "$T/bind.exp" || n=$((n+1))
+    else n=$((n+1)); fi
     if [ "$n" -gt 0 ]; then ok "mutation '$1' is caught ($n files differ)"; else bad "mutation '$1' SURVIVED"; fi
 }
 mutate version-any '!word_eq(1, (&kw_one[0]) as u64, 1)' 'false'
@@ -181,6 +194,12 @@ mutate item-limit 'if n_items >= MAX_ITEMS {' 'if n_items >= MAX_ITEMS + 1 {'
 mutate page-limit 'if n_pages >= MAX_PAGES {' 'if n_pages >= MAX_PAGES + 1 {'
 mutate pool-limit 'if pool_n + n + 1 > POOL_MAX {' 'if pool_n + n + 1 > POOL_MAX + 1000 {'
 mutate default-lost 'def = put_word(4)' 'def = 0'
+mutate bind-longer-key 'if same && e > at && rd(key, e - at) == 0 {' 'if same && e > at {'
+mutate bind-index-skips '        ix = ix + 1
+    }
+    return NONE' '        ix = ix + 2
+    }
+    return NONE'
 mutate col-ignored 'it_col[i] = cur_col' 'it_col[i] = 0'
 
 echo "SETTINGSMAN: $pass passed, $fail failed"
