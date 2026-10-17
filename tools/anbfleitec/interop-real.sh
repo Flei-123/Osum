@@ -495,7 +495,7 @@ R8B=$(rl_first "$TMPD/o_r8b.txt")
 case "$R8B" in pair*|account*|ok) ok "name: relay=relay.test:port resolves and runs login to the end ($R8B)";;
     *) bad "name: relay=relay.test:port -> '$R8B'";; esac
 is "name: the DNS was asked ONCE for relay.test" "$(dns_asked relay.test)" "1"
-is "name: the answer equals the control run (same first line)" "$R8B" "$R8A"
+is "name: same kind of answer as the control run (the pairing code itself is random)" "${R8B%%$(printf '\t')*}" "${R8A%%$(printf '\t')*}"
 
 : > "$TMPD/dns.log"
 rl_img "$TMPD/r8c.img" "gibtsnicht.test:${RPORT2:-0}"
