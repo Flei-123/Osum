@@ -6,7 +6,8 @@
 #
 # setup: justin, anna, bert, carla and dora get profiles; anna and bert
 # are justin's friends (anna online, playing), carla asks justin, justin
-# asked dora; justin's DEVICE ACCESS TOKEN (fkz1) is made and printed.
+# asked dora; justin's DEVICE ACCESS TOKEN (fkz1, or fkt1 with
+# SOCIAL_TOKEN_FORMAT=fkt1) is made and printed.
 # watch: follows the guest's serial output and does at a marker what a
 # person at another computer would do, and checks what they see:
 #   ==CHECK1==   what anna sees of justin (dnd, 'Im Spiel', an activity)
@@ -69,7 +70,9 @@ def setup(port, secret):
     if aid and os.path.exists(aid):
         pub = open(aid).read().strip()[64:128]
         api(port, t["anna"], "/api/kontakte/geraet", {"art": "fc", "wert": pub, "label": "Anna-PC"})
-    st, j = api(port, t["justin"], "/api/kontakte/zugang", {})
+    # SOCIAL_TOKEN_FORMAT=fkt1 asks for the scoped form; fkz1 is the old one
+    fmt = os.environ.get("SOCIAL_TOKEN_FORMAT", "fkz1")
+    st, j = api(port, t["justin"], "/api/kontakte/zugang", {"format": "fkt1"} if fmt == "fkt1" else {})
     print(j.get("token", ""))
 
 def fc(*args):

@@ -133,6 +133,9 @@ service enforces itself, where the data leaves the device:
    call it again → signed in, chat works. Or a key made by hand in the
    profile (GERÄTE-ZUGANG → "Schlüssel erstellen"):
    `act call social.accounts.login provider=fleitec token=fkz1....`
+   (fkt1.... and fkm1.... work the same: socfleitec checks only the
+   shape `<tag>.<account>.<64 hex>` with tag fkz1, fkm1 or fkt1; the
+   server checks the scopes of the token, r99)
    (no chat then until the device is paired).
 
 ## Limits (roadmap, project "Fleitec All-in-One")

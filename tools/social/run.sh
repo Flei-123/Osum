@@ -4,6 +4,7 @@
 #
 #   bash tools/social/run.sh
 #   FLEIKONTAKTE=/path/to/bin/fleikontakte   (default: the FirnChat repo)
+#   SOCIAL_TOKEN_FORMAT=fkt1                 (the host mints an fkt1 token; default fkz1)
 #
 # A real Osum guest under QEMU with the broker /bin/orientbus, the social
 # service /bin/social (kernel/user/social.fi) and two providers behind
@@ -125,8 +126,10 @@ fi
 ( cd "$TMPD" && "$FCBIN/firnchat" id "$TMPD/anna.id" ) > /dev/null 2>&1
 export SOCIAL_RELAY_PORT=$RP SOCIAL_FCBIN=$FCBIN SOCIAL_ANNA_ID=$TMPD/anna.id
 SECRET=$(cat "$TMPD/jarvis.secret")
-TOKEN=$(python3 tools/social/host.py setup "$PORT" "$SECRET")
-case "$TOKEN" in fkz1.u_JUSTIN.*) ok "justin's device access token made on the host (fkz1)";;
+export SOCIAL_TOKEN_FORMAT
+TOKEN=$(SOCIAL_TOKEN_FORMAT=${SOCIAL_TOKEN_FORMAT:-fkz1} python3 tools/social/host.py setup "$PORT" "$SECRET")
+TFMT=${SOCIAL_TOKEN_FORMAT:-fkz1}
+case "$TOKEN" in "$TFMT".u_JUSTIN.*) ok "justin's device access token made on the host ($TFMT)";;
     *) bad "no device access token: '$TOKEN'"; fin;; esac
 
 mkdir -p "$TMPD/etc"
@@ -270,6 +273,16 @@ act call social.invites.answer from=fleitec:u_ANNA accept=true
 echo rc=$?
 echo ==BELL2==
 social glocke
+echo ==TOKFORMS==
+socfleitec v1 -c /tmp/tf1.conf login token fkz1.u_TOKZ.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+echo rc=$?
+socfleitec v1 -c /tmp/tf2.conf login token fkm1.u_TOKM.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+echo rc=$?
+socfleitec v1 -c /tmp/tf3.conf login token fkt1.u_TOKT.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+echo rc=$?
+socfleitec v1 -c /tmp/tf4.conf login token fkx1.u_TOKX.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+echo rc=$?
+cat /tmp/tf3.conf
 echo ==EVENTS==
 cat /tmp/events.txt
 echo ==LOG==
@@ -395,6 +408,13 @@ n_host=$(grep -c . "$TMPD/host.txt" 2>/dev/null || echo 0)
 echo "== 6. events =="
 part "$A" BERTON INVISIBLE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "fleitec:u_BERT|friend|online" "bert came online on the server: the next book has him online"
+part "$A" TOKFORMS EVENTS > "$TMPD/p.txt"
+grep -aq "^account.u_TOKZ" "$TMPD/p.txt" && ok "socfleitec takes an fkz1 token (account u_TOKZ)" || bad "fkz1 token refused: $(head -4 "$TMPD/p.txt")"
+grep -aq "^account.u_TOKM" "$TMPD/p.txt" && ok "socfleitec takes an fkm1 token (account u_TOKM)" || bad "fkm1 token refused: $(head -4 "$TMPD/p.txt")"
+grep -aq "^account.u_TOKT" "$TMPD/p.txt" && ok "socfleitec takes an fkt1 token (account u_TOKT)" || bad "fkt1 token refused: $(head -4 "$TMPD/p.txt")"
+grep -aq "^token=fkt1.u_TOKT.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$TMPD/p.txt" && ok "the fkt1 token is written to the configuration as it is" || bad "fkt1 token not in the configuration: $(tail -3 "$TMPD/p.txt")"
+grep -aq "^err.bad" "$TMPD/p.txt" && ok "a token of another family (fkx1) is still refused" || bad "fkx1 token was not refused"
+grep -aq "^account.u_TOKX" "$TMPD/p.txt" && bad "fkx1 token gave an account" || ok "the refused token names no account"
 part "$A" EVENTS LOG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "social.presence" "an event social.presence went out on the bus"
 grep -aq "id=fleitec:u_BERT" "$TMPD/p.txt" && ok "... for bert" || bad "no event for bert"
@@ -452,7 +472,7 @@ grep -aq "|fleitec:u_ANNA|in|invite|open|[0-9]*||Counter-Strike 2" "$TMPD/p.txt"
 part "$A" ANSWER BELL2 > "$TMPD/p.txt"
 grep -aq "^state=accepted" "$TMPD/p.txt" && grep -aq "^target=steam://connect/10.0.2.2:27015" "$TMPD/p.txt" \
     && ok "accepted by from=fleitec:u_ANNA: the target comes with the yes" || bad "answer: $(head -5 "$TMPD/p.txt")"
-part "$A" BELL2 EVENTS > "$TMPD/p.txt"
+part "$A" BELL2 TOKFORMS > "$TMPD/p.txt"
 grep -aq "^glocke: Anna Berger l[^ ]*dt dich ein: Counter-Strike 2" "$TMPD/p.txt" && ok "the bell for the invite, in the system's language" || bad "invite bell: $(head -3 "$TMPD/p.txt")"
 part "$A" EVENTS LOG > "$TMPD/p.txt"
 grep -aq "event social.message @app=social id=fleitec:u_ANNA text=Servus Justin" "$TMPD/p.txt" && ok "an event social.message went out" || bad "no social.message event"
