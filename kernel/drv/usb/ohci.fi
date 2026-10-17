@@ -1,0 +1,912 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/usb/ohci.fi -- r1003: USB 1.1 host controller (OHCI) for HID input.
+//
+// WHY: VirtualBox offers OHCI ("USB 1.1") as its DEFAULT USB controller, and QEMU `pci-ohci` too.
+// Before this file Osum had xHCI and EHCI only, so a VirtualBox guest with the default controller got NO
+// USB mouse/tablet/keyboard at all (PS/2 only: no wheel on some setups, no right click on touchpads).
+//
+// DESIGN (same split as ehci.fi): an own driver with its own enumeration, polled (no interrupt vector),
+// that ends in the ONE input path: hidrep.parse (report descriptor) + hidin.report (generic reports:
+// wheel, buttons 1-5, absolute tablet) or hidin.kbd_report_boot / hidin.mouse_report_boot (fallback).
+//
+// WHAT IT DOES: firmware hand-off, controller reset, HCCA + control list + interrupt lists in ONE
+// physically contiguous 8 KiB run from mem.frame_run, root hub power + port reset, device enumeration
+// (address, device/config descriptor, SET_CONFIGURATION), HID interface detection, report descriptor
+// fetch, interrupt-IN polling with a two-TD ring per device.
+// WHAT IT DOES NOT: hubs behind the root hub, bulk (no mass storage), isochronous, hot plug after boot,
+// split transfers (not needed: OHCI is the full/low speed controller itself).
+//
+// HID SLOTS: hidrep/hidin keep MAX_DEV (4) per-device tables. Slot 3 belongs to i2chid.fi. This driver
+// takes slots 2 and 1 (xhci usb.fi allocates from 0 upwards), so at most TWO HID devices per OHCI.
+
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import mm.mem
+import arch.x86_64.apic
+import sched.time
+import drv.hid.hidrep
+import drv.hid.hidin
+
+export {
+    present, stage, init, poll, report, ready,
+    ports, devices, dev_class, dev_vendor, dev_product, dev_hid_slot, dev_addr,
+    have_mouse, have_kbd, have_tablet, reports, enums, errors, polls, base_of, why
+}
+
+// ------------------------------------------------------------------ layout of the 8 KiB run
+const RUN_FRAMES: u64 = 2
+const HCCA: u64 = 0x000 // 256 bytes, 256 aligned
+const ED_CTRL: u64 = 0x100
+const ED_INT: u64 = 0x110 // + i * 16
+const TD_CTL: u64 = 0x200 // setup, data, status, dummy: 4 * 16
+const TD_INT: u64 = 0x240 // + i * 32: two TDs per device
+const DEV_REC: u64 = 0x400 // + i * 128
+const B_SETUP: u64 = 0x800
+const B_DESC: u64 = 0x900 // 512 bytes
+const B_REPORT: u64 = 0xB00 // + i * 64
+
+const MAX_DEV: u64 = 4
+const DEV_BYTES: u64 = 128
+
+const D_ADDR: u64 = 0x00
+const D_MPS: u64 = 0x08
+const D_LOW: u64 = 0x10
+const D_CLASS: u64 = 0x18
+const D_EPINT: u64 = 0x20
+const D_HS: u64 = 0x28 // hidrep/hidin slot
+const D_ILEN: u64 = 0x30
+const D_GEN: u64 = 0x38 // 1 = generic report protocol
+const D_VEN: u64 = 0x40
+const D_PROD: u64 = 0x48
+const D_PORT: u64 = 0x50
+const D_ACTIVE: u64 = 0x58
+const D_ERRS: u64 = 0x60
+const D_TABLET: u64 = 0x68
+
+const C_NONE: u64 = 0
+const C_KBD: u64 = 1
+const C_MOUSE: u64 = 2
+const C_GENERIC: u64 = 3
+
+// ------------------------------------------------------------------ registers
+const R_CONTROL: u64 = 0x04
+const R_CMDSTS: u64 = 0x08
+const R_INTSTS: u64 = 0x0C
+const R_INTEN: u64 = 0x10
+const R_INTDIS: u64 = 0x14
+const R_HCCA: u64 = 0x18
+const R_CTRLHEAD: u64 = 0x20
+const R_BULKHEAD: u64 = 0x28
+const R_FMINT: u64 = 0x34
+const R_PERSTART: u64 = 0x40
+const R_LSTHRESH: u64 = 0x44
+const R_RHDESCA: u64 = 0x48
+const R_RHSTATUS: u64 = 0x50
+const R_RHPORT: u64 = 0x54
+
+const CMD_HCR: u64 = 0x01
+const CMD_CLF: u64 = 0x02
+const CMD_OCR: u64 = 0x08
+const CTL_IR: u64 = 0x100
+const CTL_PLE: u64 = 0x04
+const CTL_CLE: u64 = 0x10
+const CTL_OPER: u64 = 0x80
+const CTL_CBSR3: u64 = 0x03
+
+const PS_CCS: u64 = 0x00000001
+const PS_PES: u64 = 0x00000002
+const PS_PRS: u64 = 0x00000010
+const PS_PPS: u64 = 0x00000100
+const PS_LSDA: u64 = 0x00000200
+const PS_CSC: u64 = 0x00010000
+const PS_PESC: u64 = 0x00020000
+const PS_PRSC: u64 = 0x00100000
+
+const WHY_NODEV: u64 = 1
+const WHY_NOBAR: u64 = 2
+const WHY_NOMAP: u64 = 3
+const WHY_NOMEM: u64 = 4
+const WHY_RESET: u64 = 5
+
+// ------------------------------------------------------------------ module state
+static mut OH_BASE: u64 = 0
+static mut OH_MEM: u64 = 0
+static mut OH_READY: u64 = 0
+static mut OH_NPORTS: u64 = 0
+static mut OH_NDEV: u64 = 0
+static mut OH_NHID: u64 = 0
+static mut OH_ADDR: u64 = 1
+static mut OH_WHY: u64 = 0
+static mut OH_REPORTS: u64 = 0
+static mut OH_ENUMS: u64 = 0
+static mut OH_ERRORS: u64 = 0
+static mut OH_POLLS: u64 = 0
+static mut OH_MOUSE: u64 = 0
+static mut OH_KBD: u64 = 0
+static mut OH_TABLET: u64 = 0
+static mut OH_CTRLS: u64 = 0
+static mut OH_GEN: u64 = 0
+static mut OH_RDFAIL: u64 = 0
+
+fn rd(off: u64) -> u64 {
+    return __mmio_read32((OH_BASE + off) as *mut u32) as u64
+}
+
+fn wr(off: u64, v: u64) {
+    __mmio_write32((OH_BASE + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn m32(at: u64) -> u64 {
+    return __mmio_read32(at as *mut u32) as u64
+}
+
+fn w32(at: u64, v: u64) {
+    __mmio_write32(at as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn d8(p: u64, i: u64) -> u64 {
+    return kstate.get8(p + i)
+}
+
+fn d16(p: u64, i: u64) -> u64 {
+    return d8(p, i) | (d8(p, i + 1) << 8)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn mem_at(off: u64) -> u64 {
+    return OH_MEM + off
+}
+
+fn dv(i: u64, f: u64) -> u64 {
+    return kstate.get(mem_at(DEV_REC + i * DEV_BYTES), f)
+}
+
+fn dvs(i: u64, f: u64, v: u64) {
+    kstate.set(mem_at(DEV_REC + i * DEV_BYTES), f, v)
+}
+
+fn report_buf(i: u64) -> u64 {
+    return mem_at(B_REPORT + i * 64)
+}
+
+fn spin(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        i = i + 1
+    }
+}
+
+// Wait about `ms` milliseconds. Uses the calibrated TSC clock when there is one, else a spin loop.
+fn ms_wait(state: u64, ms: u64) {
+    if time.khz(state) == 0 {
+        spin(ms * 300000)
+        return
+    }
+    let t0: u64 = time.mono_ns(state)
+    let limit: u64 = ms * 1000000
+    var guard: u64 = 0
+    while guard < ms * 2000000 {
+        if time.mono_ns(state) - t0 >= limit {
+            guard = ms * 2000000
+        } else {
+            guard = guard + 1
+        }
+    }
+}
+
+// ------------------------------------------------------------------ queries
+fn ready() -> bool {
+    return OH_READY != 0
+}
+
+fn present(state: u64) -> bool {
+    return pci.find_class(state, 0x0C, 0x03, 0x10) < pci.MAX_DEV
+}
+
+fn base_of() -> u64 {
+    return OH_BASE
+}
+
+fn ports() -> u64 {
+    return OH_NPORTS
+}
+
+fn devices() -> u64 {
+    return OH_NDEV
+}
+
+fn dev_class(i: u64) -> u64 {
+    if i >= OH_NDEV {
+        return 0
+    }
+    return dv(i, D_CLASS)
+}
+
+fn dev_vendor(i: u64) -> u64 {
+    if i >= OH_NDEV {
+        return 0
+    }
+    return dv(i, D_VEN)
+}
+
+fn dev_product(i: u64) -> u64 {
+    if i >= OH_NDEV {
+        return 0
+    }
+    return dv(i, D_PROD)
+}
+
+fn dev_addr(i: u64) -> u64 {
+    if i >= OH_NDEV {
+        return 0
+    }
+    return dv(i, D_ADDR)
+}
+
+fn dev_hid_slot(i: u64) -> u64 {
+    if i >= OH_NDEV {
+        return 0
+    }
+    return dv(i, D_HS)
+}
+
+fn have_mouse() -> bool {
+    return OH_MOUSE != 0
+}
+
+fn have_kbd() -> bool {
+    return OH_KBD != 0
+}
+
+fn have_tablet() -> bool {
+    return OH_TABLET != 0
+}
+
+fn reports() -> u64 {
+    return OH_REPORTS
+}
+
+fn enums() -> u64 {
+    return OH_ENUMS
+}
+
+fn errors() -> u64 {
+    return OH_ERRORS
+}
+
+fn polls() -> u64 {
+    return OH_POLLS
+}
+
+fn why() -> u64 {
+    return OH_WHY
+}
+
+// ------------------------------------------------------------------ controller bring-up
+fn init(state: u64) -> bool {
+    OH_WHY = 0
+    OH_READY = 0
+    let idx: u64 = pci.find_class(state, 0x0C, 0x03, 0x10)
+    if idx >= pci.MAX_DEV {
+        OH_WHY = WHY_NODEV
+        return false
+    }
+    let phys: u64 = pci.bar(state, idx, 0) & 0xFFFFFFFFFFFFFFF0
+    if phys == 0 {
+        OH_WHY = WHY_NOBAR
+        return false
+    }
+    pci.enable_master(pci.get(state, idx, pci.E_BDF))
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        OH_WHY = WHY_NOMAP
+        return false
+    }
+    OH_BASE = b
+    let run: u64 = mem.frame_run(state, RUN_FRAMES)
+    if run == 0 {
+        OH_WHY = WHY_NOMEM
+        return false
+    }
+    OH_MEM = run
+    zero(run, RUN_FRAMES * 4096)
+    OH_ADDR = 1
+    OH_NDEV = 0
+    OH_NHID = 0
+    if kstate.mode_on(state, kstate.M_HID) && !kstate.mode_on(state, kstate.M_NURBOOT) {
+        OH_GEN = 1
+    }
+
+    // Firmware hand-off (OHCI 5.1.1.3.3): if SMM owns the controller (IR set), ask for it back.
+    if (rd(R_CONTROL) & CTL_IR) != 0 {
+        wr(R_CMDSTS, CMD_OCR)
+        var k: u64 = 0
+        while k < 200 && (rd(R_CONTROL) & CTL_IR) != 0 {
+            ms_wait(state, 1)
+            k = k + 1
+        }
+    }
+
+    let saved: u64 = rd(R_FMINT)
+    wr(R_INTDIS, 0xC000007F)
+    wr(R_CMDSTS, CMD_HCR)
+    var n: u64 = 0
+    var done: bool = false
+    while n < 100 {
+        if (rd(R_CMDSTS) & CMD_HCR) == 0 {
+            done = true
+            n = 100
+        } else {
+            spin(2000)
+            n = n + 1
+        }
+    }
+    if !done {
+        OH_WHY = WHY_RESET
+        return false
+    }
+
+    // Lists. Control ED stays skipped until a transfer is queued; no bulk list.
+    w32(mem_at(ED_CTRL), 0x4000)
+    var i: u64 = 0
+    while i < MAX_DEV {
+        w32(mem_at(ED_INT + i * 16), 0x4000)
+        i = i + 1
+    }
+    // interrupt chain: ED_INT[0] -> [1] -> [2] -> [3] -> end; all 32 table entries start at ED_INT[0]
+    i = 0
+    while i + 1 < MAX_DEV {
+        w32(mem_at(ED_INT + i * 16) + 12, mem_at(ED_INT + (i + 1) * 16))
+        i = i + 1
+    }
+    i = 0
+    while i < 32 {
+        w32(mem_at(HCCA) + i * 4, mem_at(ED_INT))
+        i = i + 1
+    }
+    wr(R_HCCA, mem_at(HCCA))
+    wr(R_CTRLHEAD, mem_at(ED_CTRL))
+    wr(R_BULKHEAD, 0)
+
+    var fi: u64 = saved & 0x3FFF
+    if fi < 0x2000 {
+        fi = 0x2EDF
+    }
+    let fsmps: u64 = ((fi - 210) * 6) / 7
+    let toggle: u64 = (saved & 0x80000000) ^ 0x80000000
+    wr(R_FMINT, toggle | (fsmps << 16) | fi)
+    wr(R_PERSTART, (fi * 9) / 10)
+    wr(R_LSTHRESH, 0x628)
+    wr(R_INTSTS, 0xFFFFFFFF)
+    wr(R_CONTROL, CTL_OPER | CTL_PLE | CTL_CLE | CTL_CBSR3)
+
+    // Root hub power: global + per port.
+    let da: u64 = rd(R_RHDESCA)
+    OH_NPORTS = da & 0xFF
+    if OH_NPORTS > 15 {
+        OH_NPORTS = 15
+    }
+    wr(R_RHSTATUS, 0x00010000)
+    var p: u64 = 0
+    while p < OH_NPORTS {
+        wr(R_RHPORT + p * 4, PS_PPS)
+        p = p + 1
+    }
+    var pg: u64 = (da >> 24) & 0xFF
+    if pg < 5 {
+        pg = 5
+    }
+    ms_wait(state, pg * 2 + 20)
+    OH_READY = 1
+    return true
+}
+
+// ------------------------------------------------------------------ control transfers (polled)
+fn td_flags(dp: u64, toggle: u64, round: u64) -> u64 {
+    return (0xE << 28) | (7 << 21) | (dp << 19) | (round << 18) | toggle
+}
+
+// One control transfer on the control ED: SETUP + optional DATA + STATUS + dummy tail.
+fn control(state: u64, addr: u64, mps: u64, low: u64, rtype: u64, req: u64,
+    value: u64, index: u64, len: u64, buf: u64, dir_in: bool) -> bool {
+    let sp: u64 = mem_at(B_SETUP)
+    kstate.set8(sp + 0, (rtype & 0xFF) as u8)
+    kstate.set8(sp + 1, (req & 0xFF) as u8)
+    kstate.set8(sp + 2, (value & 0xFF) as u8)
+    kstate.set8(sp + 3, ((value >> 8) & 0xFF) as u8)
+    kstate.set8(sp + 4, (index & 0xFF) as u8)
+    kstate.set8(sp + 5, ((index >> 8) & 0xFF) as u8)
+    kstate.set8(sp + 6, (len & 0xFF) as u8)
+    kstate.set8(sp + 7, ((len >> 8) & 0xFF) as u8)
+
+    let ed: u64 = mem_at(ED_CTRL)
+    let t_set: u64 = mem_at(TD_CTL)
+    let t_dat: u64 = mem_at(TD_CTL + 16)
+    let t_sta: u64 = mem_at(TD_CTL + 32)
+    let t_dum: u64 = mem_at(TD_CTL + 48)
+    zero(t_set, 64)
+    // ED: skip while we build.
+    w32(ed + 0, addr | (low << 13) | (mps << 16) | 0x4000)
+
+    var after_setup: u64 = t_sta
+    if len > 0 {
+        after_setup = t_dat
+    }
+    w32(t_set + 0, td_flags(0, 0x02000000, 0))
+    w32(t_set + 4, sp)
+    w32(t_set + 8, after_setup)
+    w32(t_set + 12, sp + 7)
+    var sdp: u64 = 2 // status runs IN when there is no data or the data goes OUT
+    if len > 0 {
+        var ddp: u64 = 1
+        var rnd: u64 = 0
+        if dir_in {
+            ddp = 2
+            rnd = 1
+            sdp = 1
+        }
+        w32(t_dat + 0, td_flags(ddp, 0x03000000, rnd))
+        w32(t_dat + 4, buf)
+        w32(t_dat + 8, t_sta)
+        w32(t_dat + 12, buf + len - 1)
+    }
+    w32(t_sta + 0, td_flags(sdp, 0x03000000, 0))
+    w32(t_sta + 4, 0)
+    w32(t_sta + 8, t_dum)
+    w32(t_sta + 12, 0)
+
+    w32(ed + 4, t_dum)
+    w32(ed + 8, t_set)
+    w32(ed + 0, addr | (low << 13) | (mps << 16))
+    wr(R_CMDSTS, CMD_CLF)
+    OH_CTRLS = OH_CTRLS + 1
+
+    var ok: bool = false
+    var i: u64 = 0
+    while i < 400 {
+        let hp: u64 = m32(ed + 8)
+        if (hp & 1) != 0 {
+            i = 400
+        } else if (hp & 0xFFFFFFF0) == t_dum {
+            ok = true
+            i = 400
+        } else {
+            ms_wait(state, 1)
+            i = i + 1
+        }
+    }
+    // park the ED again
+    w32(ed + 0, addr | (low << 13) | (mps << 16) | 0x4000)
+    wr(R_INTSTS, 0x2) // WDH: acknowledge the retired TDs
+    if ok {
+        // all three TDs must carry condition code 0
+        if (m32(t_set) >> 28) != 0 || (m32(t_sta) >> 28) != 0 {
+            ok = false
+        }
+        if len > 0 && (m32(t_dat) >> 28) != 0 {
+            ok = false
+        }
+    }
+    if !ok {
+        OH_ERRORS = OH_ERRORS + 1
+    }
+    return ok
+}
+
+// ------------------------------------------------------------------ root hub ports
+fn port_reset(state: u64, n: u64) -> bool {
+    let off: u64 = R_RHPORT + n * 4
+    var v: u64 = rd(off)
+    if (v & PS_CCS) == 0 {
+        return false
+    }
+    wr(off, PS_CSC | PS_PRSC | PS_PESC)
+    wr(off, PS_PRS)
+    var i: u64 = 0
+    while i < 100 {
+        if (rd(off) & PS_PRSC) != 0 {
+            i = 100
+        } else {
+            ms_wait(state, 1)
+            i = i + 1
+        }
+    }
+    wr(off, PS_PRSC)
+    ms_wait(state, 20)
+    v = rd(off)
+    return (v & PS_PES) != 0 && (v & PS_CCS) != 0
+}
+
+// ------------------------------------------------------------------ enumeration
+fn enumerate(state: u64, n: u64) -> bool {
+    if !port_reset(state, n) {
+        return false
+    }
+    let slot: u64 = OH_NDEV
+    if slot >= MAX_DEV {
+        return false
+    }
+    var low: u64 = 0
+    if (rd(R_RHPORT + n * 4) & PS_LSDA) != 0 {
+        low = 1
+    }
+    let dp: u64 = mem_at(B_DESC)
+    zero(dp, 512)
+    if !control(state, 0, 8, low, 0x80, 6, 0x0100, 0, 8, dp, true) {
+        return false
+    }
+    var mps: u64 = d8(dp, 7)
+    if mps == 0 {
+        mps = 8
+    }
+    let addr: u64 = OH_ADDR
+    if !control(state, 0, mps, low, 0x00, 5, addr, 0, 0, 0, false) {
+        return false
+    }
+    OH_ADDR = addr + 1
+    ms_wait(state, 5)
+    if !control(state, addr, mps, low, 0x80, 6, 0x0100, 0, 18, dp, true) {
+        return false
+    }
+    dvs(slot, D_PORT, n)
+    dvs(slot, D_ADDR, addr)
+    dvs(slot, D_MPS, mps)
+    dvs(slot, D_LOW, low)
+    dvs(slot, D_VEN, d16(dp, 8))
+    dvs(slot, D_PROD, d16(dp, 10))
+    dvs(slot, D_CLASS, C_NONE)
+    dvs(slot, D_HS, 0xFF)
+
+    if !control(state, addr, mps, low, 0x80, 6, 0x0200, 0, 9, dp, true) {
+        return false
+    }
+    var total: u64 = d16(dp, 2)
+    if total > 500 {
+        total = 500
+    }
+    if !control(state, addr, mps, low, 0x80, 6, 0x0200, 0, total, dp, true) {
+        return false
+    }
+    let cfgval: u64 = d8(dp, 5)
+
+    // Walk the descriptors: first HID interface with an interrupt-IN endpoint wins.
+    var i: u64 = 0
+    var iclass: u64 = 0
+    var isub: u64 = 0
+    var iproto: u64 = 0
+    var iface: u64 = 0
+    var rdlen: u64 = 0
+    var epint: u64 = 0
+    var epmps: u64 = 8
+    var found: bool = false
+    var cur_hid: bool = false
+    while i + 2 <= total {
+        let blen: u64 = d8(dp, i)
+        if blen < 2 {
+            i = total
+        } else {
+            let btype: u64 = d8(dp, i + 1)
+            if btype == 4 {
+                cur_hid = false
+                if !found && d8(dp, i + 5) == 3 {
+                    cur_hid = true
+                    iface = d8(dp, i + 2)
+                    iclass = 3
+                    isub = d8(dp, i + 6)
+                    iproto = d8(dp, i + 7)
+                    rdlen = 0
+                }
+            } else if btype == 0x21 {
+                if cur_hid && blen >= 9 {
+                    rdlen = d16(dp, i + 7)
+                }
+            } else if btype == 5 {
+                let ea: u64 = d8(dp, i + 2)
+                if cur_hid && (d8(dp, i + 3) & 3) == 3 && (ea & 0x80) != 0 && !found {
+                    epint = ea & 0x0F
+                    epmps = d16(dp, i + 4) & 0x7FF
+                    found = true
+                }
+            }
+            i = i + blen
+        }
+    }
+
+    if !control(state, addr, mps, low, 0x00, 9, cfgval, 0, 0, 0, false) {
+        return false
+    }
+    OH_NDEV = slot + 1
+    OH_ENUMS = OH_ENUMS + 1
+    if !found || epint == 0 || OH_NHID >= 2 {
+        return true
+    }
+    hid_start(state, slot, addr, mps, low, iface, isub, iproto, rdlen, epint, epmps)
+    return true
+}
+
+// ------------------------------------------------------------------ HID
+fn hid_start(state: u64, slot: u64, addr: u64, mps: u64, low: u64, iface: u64,
+    isub: u64, iproto: u64, rdlen: u64, epint: u64, epmps: u64) {
+    let hs: u64 = 2 - OH_NHID
+    hidin.reset_dev(state, hs)
+    dvs(slot, D_EPINT, epint)
+    dvs(slot, D_HS, hs)
+    var ilen: u64 = epmps
+    if ilen > 64 {
+        ilen = 64
+    }
+    if ilen == 0 {
+        ilen = 8
+    }
+    dvs(slot, D_ILEN, ilen)
+
+    var generic: bool = false
+    if OH_GEN != 0 && rdlen != 0 && rdlen <= hidrep.RAW_MAX {
+        let dst: u64 = hidrep.raw_of(state, hs)
+        zero(dst, rdlen)
+        if control(state, addr, mps, low, 0x81, 6, 0x2200, iface, rdlen, dst, true) {
+            if hidrep.parse(state, hs, dst, rdlen) == hidrep.E_OK {
+                generic = true
+            } else {
+                OH_RDFAIL = OH_RDFAIL + 1
+            }
+        } else {
+            OH_RDFAIL = OH_RDFAIL + 1
+        }
+    }
+    if generic {
+        dvs(slot, D_GEN, 1)
+        control(state, addr, mps, low, 0x21, 0x0B, 1, iface, 0, 0, false)
+        control(state, addr, mps, low, 0x21, 0x0A, 0, iface, 0, 0, false)
+        let art: u64 = hidrep.kind(state, hs)
+        if (art & hidrep.K_KBD) != 0 {
+            dvs(slot, D_CLASS, C_KBD)
+            OH_KBD = OH_KBD + 1
+        } else if (art & hidrep.K_MOUSE) != 0 || (art & hidrep.K_PAD) != 0 {
+            dvs(slot, D_CLASS, C_MOUSE)
+            OH_MOUSE = OH_MOUSE + 1
+            if is_abs(state, hs) {
+                dvs(slot, D_TABLET, 1)
+                OH_TABLET = OH_TABLET + 1
+            }
+        } else {
+            dvs(slot, D_CLASS, C_GENERIC)
+        }
+    } else {
+        if isub != 1 {
+            // no boot protocol and no usable descriptor: leave the device alone
+            return
+        }
+        control(state, addr, mps, low, 0x21, 0x0B, 0, iface, 0, 0, false)
+        control(state, addr, mps, low, 0x21, 0x0A, 0, iface, 0, 0, false)
+        dvs(slot, D_GEN, 0)
+        if iproto == 1 {
+            dvs(slot, D_CLASS, C_KBD)
+            OH_KBD = OH_KBD + 1
+        } else if iproto == 2 {
+            dvs(slot, D_CLASS, C_MOUSE)
+            OH_MOUSE = OH_MOUSE + 1
+        } else {
+            return
+        }
+    }
+    OH_NHID = OH_NHID + 1
+    int_init(slot)
+}
+
+// True when the parsed descriptor has an absolute X/Y pointer (tablet): flag bit 2 "relative" clear.
+fn is_abs(state: u64, hs: u64) -> bool {
+    var i: u64 = 0
+    let n: u64 = hidrep.fields(state, hs)
+    while i < n {
+        if hidrep.f_page(state, hs, i) == hidrep.UP_DESKTOP && hidrep.f_usage(state, hs, i) == hidrep.US_X
+            && (hidrep.f_flags(state, hs, i) & hidrep.FL_REL) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------------ interrupt-IN ring
+fn int_td(slot: u64, k: u64) -> u64 {
+    return mem_at(TD_INT + slot * 32 + k * 16)
+}
+
+fn int_init(slot: u64) {
+    let ed: u64 = mem_at(ED_INT + slot * 16)
+    let t0: u64 = int_td(slot, 0)
+    zero(t0, 32)
+    // dir from TD (00), speed, endpoint number, function address, max packet = ilen; skip until armed
+    let ep: u64 = dv(slot, D_EPINT)
+    w32(ed + 0, dv(slot, D_ADDR) | (ep << 7) | (dv(slot, D_LOW) << 13) | (dv(slot, D_ILEN) << 16) | 0x4000)
+    w32(ed + 4, t0)
+    w32(ed + 8, t0)
+    int_arm(slot)
+    w32(ed + 0, dv(slot, D_ADDR) | (ep << 7) | (dv(slot, D_LOW) << 13) | (dv(slot, D_ILEN) << 16))
+    dvs(slot, D_ACTIVE, 1)
+}
+
+// Fill the current dummy TD (the one TailP points at) with an IN request, hang a fresh dummy behind it.
+fn int_arm(slot: u64) {
+    let ed: u64 = mem_at(ED_INT + slot * 16)
+    let tail: u64 = m32(ed + 4) & 0xFFFFFFF0
+    var nxt: u64 = int_td(slot, 0)
+    if tail == nxt {
+        nxt = int_td(slot, 1)
+    }
+    zero(nxt, 16)
+    let buf: u64 = report_buf(slot)
+    zero(buf, 64)
+    let ilen: u64 = dv(slot, D_ILEN)
+    w32(tail + 0, (0xE << 28) | (7 << 21) | (2 << 19) | (1 << 18))
+    w32(tail + 4, buf)
+    w32(tail + 8, nxt)
+    w32(tail + 12, buf + ilen - 1)
+    w32(ed + 4, nxt)
+}
+
+fn deliver(state: u64, slot: u64, rlen: u64) {
+    let hs: u64 = dv(slot, D_HS)
+    let buf: u64 = report_buf(slot)
+    OH_REPORTS = OH_REPORTS + 1
+    if dv(slot, D_GEN) == 1 {
+        hidin.report(state, hs, buf, rlen)
+        return
+    }
+    let c: u64 = dv(slot, D_CLASS)
+    if c == C_KBD {
+        hidin.kbd_report_boot(state, hs, buf)
+    } else if c == C_MOUSE {
+        hidin.mouse_report_boot(state, hs, buf, rlen)
+    }
+}
+
+// Called from the same loops that call ehci.poll. Cheap when nothing is ready: one flag test.
+fn poll(state: u64) -> bool {
+    if OH_READY == 0 {
+        return false
+    }
+    OH_POLLS = OH_POLLS + 1
+    var any: bool = false
+    var s: u64 = 0
+    while s < OH_NDEV {
+        if dv(s, D_ACTIVE) == 1 {
+            let ed: u64 = mem_at(ED_INT + s * 16)
+            let hp: u64 = m32(ed + 8)
+            let tl: u64 = m32(ed + 4)
+            if (hp & 1) != 0 {
+                // halted (stall / error): clear and re-arm, but give up on a device that keeps failing
+                OH_ERRORS = OH_ERRORS + 1
+                dvs(s, D_ERRS, dv(s, D_ERRS) + 1)
+                w32(ed + 8, hp & 0xFFFFFFFE)
+                if dv(s, D_ERRS) > 200 {
+                    dvs(s, D_ACTIVE, 0)
+                } else {
+                    int_arm(s)
+                }
+            } else if (hp & 0xFFFFFFF0) == (tl & 0xFFFFFFF0) {
+                // the TD before the tail finished: find it (the other one of the pair)
+                var done: u64 = int_td(s, 0)
+                if (tl & 0xFFFFFFF0) == done {
+                    done = int_td(s, 1)
+                }
+                let cc: u64 = m32(done) >> 28
+                let cbp: u64 = m32(done + 4)
+                let buf: u64 = report_buf(s)
+                var rlen: u64 = dv(s, D_ILEN)
+                if cbp != 0 && cbp >= buf && cbp - buf < rlen {
+                    rlen = cbp - buf
+                }
+                if cc == 0 && rlen > 0 {
+                    deliver(state, s, rlen)
+                    any = true
+                } else if cc != 0 {
+                    OH_ERRORS = OH_ERRORS + 1
+                }
+                int_arm(s)
+            }
+        }
+        s = s + 1
+    }
+    // keep the done-queue write-back from stalling (WDH)
+    if any {
+        wr(R_INTSTS, 0x2)
+    } else if (rd(R_INTSTS) & 0x2) != 0 {
+        wr(R_INTSTS, 0x2)
+    }
+    return any
+}
+
+// ------------------------------------------------------------------ stage + report
+fn stage(state: u64) -> bool {
+    var s_nd: [u8; 28] = "ohci: no OHCI on the bus\0\0\0\0"
+    var s_fail: [u8; 25] = "ohci: init failed why=\0\0\0"
+    if !present(state) {
+        serial.puts((&s_nd[0]) as u64)
+        serial.nl()
+        return false
+    }
+    if !init(state) {
+        serial.puts((&s_fail[0]) as u64)
+        serial.dec(OH_WHY)
+        serial.nl()
+        return false
+    }
+    var n: u64 = 0
+    while n < OH_NPORTS {
+        enumerate(state, n)
+        n = n + 1
+    }
+    report(state)
+    return true
+}
+
+fn report(state: u64) {
+    var s_h: [u8; 12] = "ohci: base=\0"
+    var s_p: [u8; 8] = " ports=\0"
+    var s_d: [u8; 10] = " devices=\0"
+    var s_m: [u8; 8] = " mouse=\0"
+    var s_k: [u8; 6] = " kbd=\0"
+    var s_t: [u8; 9] = " tablet=\0"
+    var s_r: [u8; 10] = " reports=\0"
+    var s_e: [u8; 9] = " errors=\0"
+    var s_c: [u8; 7] = " ctrl=\0"
+    var s_f: [u8; 9] = " rdfail=\0"
+    var s_l: [u8; 8] = " polls=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.hex(OH_BASE)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(OH_NPORTS)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(OH_NDEV)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(OH_MOUSE)
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(OH_KBD)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(OH_TABLET)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(OH_REPORTS)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(OH_ERRORS)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(OH_CTRLS)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(OH_RDFAIL)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(OH_POLLS)
+    serial.nl()
+    var i: u64 = 0
+    var s_dv: [u8; 11] = "ohci: dev=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_cl: [u8; 8] = " class=\0"
+    var s_hs: [u8; 6] = " hid=\0"
+    var s_gn: [u8; 6] = " gen=\0"
+    while i < OH_NDEV {
+        serial.puts((&s_dv[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_id[0]) as u64)
+        serial.hex(dv(i, D_VEN))
+        serial.put(58 as u8)
+        serial.hex(dv(i, D_PROD))
+        serial.puts((&s_cl[0]) as u64)
+        serial.dec(dv(i, D_CLASS))
+        serial.puts((&s_hs[0]) as u64)
+        serial.dec(dv(i, D_HS))
+        serial.puts((&s_gn[0]) as u64)
+        serial.dec(dv(i, D_GEN))
+        serial.nl()
+        i = i + 1
+    }
+}

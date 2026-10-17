@@ -94,6 +94,7 @@ import gfx.grafik
 import gfx.r3dtest
 import block.rootsel
 import drv.usb.ehci
+import drv.usb.ohci
 import block.blkdev
 import ipc.perm
 
@@ -816,6 +817,9 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     EHCI ist der Rueckfall fuer Bretter, die keinen haben. Ohne
     //     das Wort `ehci` ist das hier eine gedruckte Zeile.
     ehci.stage(state)
+    // r1003: OHCI (USB 1.1, VirtualBox default controller). Runs with the `usb` word or the `ehci` word;
+    // it only drives its own root-hub ports, so it never competes with xHCI for a device.
+    ohci_stage(state)
     // RUNDE BLECH-HID: HIER haelt der Diagnose-Eintrag an, wenn
     // `usbstop` auf der Kommandozeile steht. Der USB-Bericht ist damit
     // das LETZTE auf dem Schirm -- ein Foto davon beantwortet die
@@ -834,12 +838,66 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
         // Schleife steht HIER und nicht in `ehci.fi`, damit dieser
         // Treiber den Ablaufplaner nicht einbinden muss.
         var eh_i: u64 = 0
+        // r1003: the same window measures the pointer path (tools/usbhid): the host injects wheel, buttons,
+        // absolute moves and keys through QMP after the marker line; the sums go out as `hidwin:`.
+        var hw_btn: u64 = 0
+        var hw_wchg: u64 = 0
+        var hw_wlast: u64 = gfx.mouse_wheel(state)
+        var hw_x0: u64 = gfx.mouse_x(state)
+        var hw_y0: u64 = gfx.mouse_y(state)
+        var hw_xmax: u64 = hw_x0
+        var hw_ymax: u64 = hw_y0
+        var s_open: [u8; 14] = "hidwin: open\0\0"
+        serial.puts((&s_open[0]) as u64)
+        serial.nl()
         while eh_i < 900 {
             ehci.poll(state)
+            ohci.poll(state)
+            usb.poll(state)
+            hw_btn = hw_btn | gfx.mouse_buttons(state)
+            let hw_w: u64 = gfx.mouse_wheel(state)
+            if hw_w != hw_wlast {
+                hw_wchg = hw_wchg + 1
+                hw_wlast = hw_w
+            }
+            if gfx.mouse_x(state) > hw_xmax {
+                hw_xmax = gfx.mouse_x(state)
+            }
+            if gfx.mouse_y(state) > hw_ymax {
+                hw_ymax = gfx.mouse_y(state)
+            }
             sched.sleep_ticks(state, 1)
             eh_i = eh_i + 1
         }
         ehci.report(state)
+        var s_hw: [u8; 14] = "hidwin: keys=\0"
+        var s_hr: [u8; 10] = " reports=\0"
+        var s_hm: [u8; 8] = " moves=\0"
+        var s_hh: [u8; 9] = " wheels=\0"
+        var s_hc: [u8; 11] = " wheelchg=\0"
+        var s_hb: [u8; 6] = " btn=\0"
+        var s_hx: [u8; 4] = " x=\0"
+        var s_hy: [u8; 4] = " y=\0"
+        var s_hi: [u8; 5] = " id=\0"
+        serial.puts((&s_hw[0]) as u64)
+        serial.dec(hidin.keys(state))
+        serial.puts((&s_hr[0]) as u64)
+        serial.dec(hidin.reports(state))
+        serial.puts((&s_hm[0]) as u64)
+        serial.dec(hidin.moves(state))
+        serial.puts((&s_hh[0]) as u64)
+        serial.dec(hidin.wheels(state))
+        serial.puts((&s_hc[0]) as u64)
+        serial.dec(hw_wchg)
+        serial.puts((&s_hb[0]) as u64)
+        serial.dec(hw_btn)
+        serial.puts((&s_hx[0]) as u64)
+        serial.dec(hw_xmax)
+        serial.puts((&s_hy[0]) as u64)
+        serial.dec(hw_ymax)
+        serial.puts((&s_hi[0]) as u64)
+        serial.dec(gfx.mouse_id(state))
+        serial.nl()
     }
 
     // 7e-quater. RUNDE HDA: DER TON. Hier und nicht frueher, weil er
@@ -6690,6 +6748,26 @@ fn hid_stage(state: u64) {
 
 }
 
+// r1003: bring up the OHCI controller and make a pointer from it usable. The pointer limits are the
+// screen (same as usb_stage does for xHCI).
+fn ohci_stage(state: u64) {
+    if !kstate.mode_on(state, kstate.M_USB) && !kstate.mode_on(state, kstate.M_EHCI) {
+        return
+    }
+    if !ohci.stage(state) {
+        return
+    }
+    if ohci.have_mouse() && !usb.have_mouse(state) {
+        var aw: u64 = 1024
+        var ah: u64 = 768
+        if gfx.ready(state) && gfx.width(state) > 0 && gfx.height(state) > 0 {
+            aw = gfx.width(state)
+            ah = gfx.height(state)
+        }
+        gfx.mouse_adopt(state, aw, ah)
+    }
+}
+
 fn usb_stage(state: u64) {
     // RUNDE BLECH-HID: die Gegenprobe zur Uebernahme, an einer gebauten
     // Faehigkeitsliste. Sie braucht keinen Regler und laeuft deshalb
@@ -6829,6 +6907,7 @@ fn usb_hold(state: u64) {
         // eigenen Meldevektor (siehe der Kopf von `ehci.fi`), also ist
         // Abfragen fuer ihn nicht die Gegenprobe, sondern der Weg.
         ehci.poll(state)
+        ohci.poll(state)
         // ================================== RUNDE HOTPLUG
         // DIESE SCHLEIFE IST DER SCHREIBTISCH DES KERNLAUFS.
         //
