@@ -8,13 +8,17 @@
 // the program's arguments. A program that cannot be started leaves the window
 // open and says so (the text stays, so a typo is one key away from fixed).
 // Esc closes the window.
+// X1 (r997) HISTORY: every command that started is kept (newest first, 16 entries, no duplicates) in
+// /users/<name>/config/runhistory -- every Win+R is a new process, so the file is the only memory. Up / Down in the field
+// walk through it (Down past the newest entry brings back what was typed before).
 //
 // Serial lines (gate tools/runbox): `runbox: ready`, `runbox: exec <path> pid=<n>`,
-// `runbox: fail <path>`.
+// `runbox: fail <path>`, `runbox: history n=<count> file=<path>`, `runbox: recall <pos> <text>`, `runbox: saved n=<count>`.
 
 profile app
 
 import ulib
+import libc.io
 import fuiscene
 import msg
 import wlib
@@ -33,6 +37,237 @@ static mut k_fail: [u8; 9] = "run.fail\0"
 
 static mut s_bin: [u8; 6] = "/bin/\0"
 static mut failed: bool = false
+
+// ------------------------------------------------------------------ history (X1)
+const HIST_MAX: u64 = 16
+const HIST_LINE: u64 = 256
+
+static mut hist: [u8; 4096] = [0 as u8; 4096]
+static mut hist_n: u64 = 0
+static mut hist_pos: u64 = 0 // 0 = what the user typed, k = the k-th newest entry
+static mut hist_file: [u8; 4400] = [0 as u8; 4400]
+static mut hist_draft: [u8; 256] = [0 as u8; 256]
+static mut hist_path_buf: [u8; 128] = [0 as u8; 128]
+static mut s_hist_name: [u8; 11] = "runhistory\0"
+
+fn hist_slot(k: u64) -> u64 {
+    return (&hist[(k * HIST_LINE) as usize]) as u64
+}
+
+fn hist_path() -> bool {
+    if !msg.user_path((&hist_path_buf[0 as usize]) as u64) {
+        return false
+    }
+    // replace the last path component ("locale") by the history file name
+    var last: u64 = 0
+    var i: u64 = 0
+    while hist_path_buf[(i) as usize] != 0 as u8 && i < 100 {
+        if hist_path_buf[(i) as usize] == 47 as u8 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last == 0 {
+        return false
+    }
+    var k: u64 = 0
+    while s_hist_name[(k) as usize] != 0 as u8 {
+        hist_path_buf[(last + 1 + k) as usize] = s_hist_name[(k) as usize]
+        k = k + 1
+    }
+    hist_path_buf[(last + 1 + k) as usize] = 0 as u8
+    return true
+}
+
+fn str_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u8 = *((a + i) as *mut u8)
+        let y: u8 = *((b + i) as *mut u8)
+        if x != y {
+            return false
+        }
+        if x == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn slot_copy(dst: u64, src: u64) {
+    var i: u64 = 0
+    while i < HIST_LINE {
+        *((dst + i) as *mut u8) = *((src + i) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn hist_load() {
+    hist_n = 0
+    if !hist_path() {
+        return
+    }
+    let fd: u64 = io.open((&hist_path_buf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let r: u64 = io.read(fd, (&hist_file[0 as usize]) as u64, 4096)
+    io.close(fd)
+    if ulib.bad(r) {
+        return
+    }
+    var i: u64 = 0
+    var n: u64 = 0
+    while i <= r && hist_n < HIST_MAX {
+        var c: u8 = 10 as u8
+        if i < r {
+            c = hist_file[(i) as usize]
+        }
+        if c == 10 as u8 {
+            if n > 0 {
+                *((hist_slot(hist_n) + n) as *mut u8) = 0 as u8
+                hist_n = hist_n + 1
+            }
+            n = 0
+        } else if n < HIST_LINE - 1 {
+            *((hist_slot(hist_n) + n) as *mut u8) = c
+            n = n + 1
+        }
+        i = i + 1
+    }
+}
+
+fn make_parents(p: u64) {
+    var i: u64 = 1
+    while *((p + i) as *mut u8) != 0 as u8 {
+        if *((p + i) as *mut u8) == 47 as u8 {
+            *((p + i) as *mut u8) = 0 as u8
+            let _m: u64 = io.make_dir(p)
+            *((p + i) as *mut u8) = 47 as u8
+        }
+        i = i + 1
+    }
+}
+
+fn hist_save() {
+    if !hist_path() {
+        return
+    }
+    let p: u64 = (&hist_path_buf[0 as usize]) as u64
+    make_parents(p)
+    var o: u64 = 0
+    var k: u64 = 0
+    while k < hist_n {
+        var i: u64 = 0
+        while *((hist_slot(k) + i) as *mut u8) != 0 as u8 && i < HIST_LINE - 1 {
+            hist_file[(o) as usize] = *((hist_slot(k) + i) as *mut u8)
+            o = o + 1
+            i = i + 1
+        }
+        hist_file[(o) as usize] = 10 as u8
+        o = o + 1
+        k = k + 1
+    }
+    let fd: u64 = io.open(p, ulib.O_MAKE)
+    if ulib.bad(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, (&hist_file[0 as usize]) as u64, o)
+    io.close(fd)
+    var s_sv: [u8; 17] = "runbox: saved n=\0"
+    ulib.say((&s_sv[0 as usize]) as u64)
+    ulib.sayu(hist_n)
+    ulib.nl()
+}
+
+// Remember a command that started: trimmed, newest first, an older equal entry is dropped.
+fn hist_add(text: u64) {
+    var line: [u8; 256] = [0 as u8; 256]
+    var i: u64 = 0
+    while *((text + i) as *mut u8) == 32 as u8 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while n < HIST_LINE - 1 && *((text + i) as *mut u8) != 0 as u8 {
+        line[(n) as usize] = *((text + i) as *mut u8)
+        n = n + 1
+        i = i + 1
+    }
+    while n > 0 && line[(n - 1) as usize] == 32 as u8 {
+        n = n - 1
+    }
+    line[(n) as usize] = 0 as u8
+    if n == 0 {
+        return
+    }
+    let lp: u64 = (&line[0 as usize]) as u64
+    var j: u64 = 0
+    while j < hist_n {
+        if str_eq(hist_slot(j), lp) {
+            var m: u64 = j
+            while m + 1 < hist_n {
+                slot_copy(hist_slot(m), hist_slot(m + 1))
+                m = m + 1
+            }
+            hist_n = hist_n - 1
+        } else {
+            j = j + 1
+        }
+    }
+    var top: u64 = hist_n
+    if top >= HIST_MAX {
+        top = HIST_MAX - 1
+    }
+    while top > 0 {
+        slot_copy(hist_slot(top), hist_slot(top - 1))
+        top = top - 1
+    }
+    slot_copy(hist_slot(0), lp)
+    if hist_n < HIST_MAX {
+        hist_n = hist_n + 1
+    }
+    hist_save()
+}
+
+// Up (older) / Down (newer) in the field.
+fn hist_walk(up: bool) {
+    var s_rc: [u8; 16] = "runbox: recall \0"
+    var s_dr: [u8; 7] = "draft\0\0"
+    if up {
+        if hist_pos >= hist_n {
+            return
+        }
+        if hist_pos == 0 {
+            // keep what was typed, so Down past the newest entry brings it back
+            let cur: u64 = fuiscene.entry_text(K_ENTRY)
+            var i: u64 = 0
+            while i < HIST_LINE - 1 && *((cur + i) as *mut u8) != 0 as u8 {
+                hist_draft[(i) as usize] = *((cur + i) as *mut u8)
+                i = i + 1
+            }
+            hist_draft[(i) as usize] = 0 as u8
+        }
+        hist_pos = hist_pos + 1
+    } else {
+        if hist_pos == 0 {
+            return
+        }
+        hist_pos = hist_pos - 1
+    }
+    ulib.say((&s_rc[0 as usize]) as u64)
+    if hist_pos == 0 {
+        fuiscene.entry_set(K_ENTRY, (&hist_draft[0 as usize]) as u64)
+        ulib.say((&s_dr[0 as usize]) as u64)
+    } else {
+        fuiscene.entry_set(K_ENTRY, hist_slot(hist_pos - 1))
+        ulib.sayu(hist_pos)
+        var s_sp: [u8; 2] = " \0"
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.say(hist_slot(hist_pos - 1))
+    }
+    ulib.nl()
+}
 
 fn say(p: u64) {
     ulib.say(p)
@@ -143,6 +378,14 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     // The window tells the taskbar which bundle it belongs to (WM_APP); without it the button has no icon.
+    hist_load()
+    var s_hi: [u8; 19] = "runbox: history n=\0"
+    var s_hf: [u8; 8] = " file=\0\0"
+    say((&s_hi[0 as usize]) as u64)
+    ulib.sayu(hist_n)
+    say((&s_hf[0 as usize]) as u64)
+    say((&hist_path_buf[0 as usize]) as u64)
+    ulib.nl()
     var win_app_name: [u8; 4] = "run\0"
     fuiscene.set_app((&win_app_name[0 as usize]) as u64)
     var first: bool = true
@@ -157,6 +400,7 @@ fn u_start(args: u64) -> u64 {
         }
         if key == K_ENTRY || key == K_OK {
             if run_text(fuiscene.entry_text(K_ENTRY)) {
+                hist_add(fuiscene.entry_text(K_ENTRY))
                 fuiscene.quit()
             } else {
                 failed = true
@@ -168,8 +412,13 @@ fn u_start(args: u64) -> u64 {
         }
         if fuiscene.key_free_seq() != seen_free {
             seen_free = fuiscene.key_free_seq()
-            if fuiscene.key_free() == wlib.KEY_ESC {
+            let kf: u64 = fuiscene.key_free()
+            if kf == wlib.KEY_ESC {
                 fuiscene.quit()
+            } else if kf == wlib.KEY_UP {
+                hist_walk(true)
+            } else if kf == wlib.KEY_DOWN {
+                hist_walk(false)
             }
         }
     }

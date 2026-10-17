@@ -19969,13 +19969,15 @@ fn sw_alt_held(state: u64) -> bool {
     return kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1
 }
 
-fn sw_say(ev: u64) {
+fn sw_say(state: u64, ev: u64) {
     var s_o: [u8; 21] = "wm: switcher open n=\0"
     var s_s: [u8; 21] = "wm: switcher step n=\0"
     var s_c: [u8; 23] = "wm: switcher commit n=\0"
     var s_x: [u8; 23] = "wm: switcher cancel n=\0"
     var s_l: [u8; 6] = " sel=\0"
     var s_w: [u8; 6] = " win=\0"
+    var s_h: [u8; 6] = " hid=\0"
+    var s_m: [u8; 7] = " mins=\0"
     if ev == 0 {
         serial.puts((&s_o[0]) as u64)
     } else if ev == 1 {
@@ -19994,6 +19996,23 @@ fn sw_say(ev: u64) {
         wid = sw_list[sw_sel as usize]
     }
     serial.dec(wid)
+    // X1: hid = the selected tile is a minimized window, mins = how many minimized windows the panel lists
+    serial.puts((&s_h[0]) as u64)
+    if wid < MAX_WIN && sw_minimized(state, wid) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_m[0]) as u64)
+    var mc: u64 = 0
+    var t: u64 = 0
+    while t < sw_n {
+        if sw_minimized(state, sw_list[t as usize]) {
+            mc = mc + 1
+        }
+        t = t + 1
+    }
+    serial.dec(mc)
     serial.nl()
 }
 
@@ -20063,10 +20082,26 @@ fn sw_damage(state: u64) {
     damage(state, x - 2, y - 2, x + sw_g[2 as usize] + 2, y + sw_g[3 as usize] + 2)
 }
 
+// X1: a minimized window (F_HIDDEN, normal layer, with a frame, not behind a tab) is listed too; committing it restores it.
+fn sw_minimized(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    if (f & F_HIDDEN) == 0 || (f & F_TABBED) != 0 || (f & F_NODECO) != 0 {
+        return false
+    }
+    return wg(state, i, W_LAYER) == L_NORMAL
+}
+
+fn sw_listable(state: u64, i: u64) -> bool {
+    return wechselbar(state, i) || sw_minimized(state, i)
+}
+
 fn sw_build(state: u64) {
     sw_n = 0
     let fo: u64 = focus(state)
-    if fo < MAX_WIN && wechselbar(state, fo) {
+    if fo < MAX_WIN && sw_listable(state, fo) {
         sw_list[0 as usize] = fo
         sw_n = 1
     }
@@ -20074,7 +20109,7 @@ fn sw_build(state: u64) {
     while z > 0 && sw_n < 32 {
         z = z - 1
         let w: u64 = at_z(state, z)
-        if w < MAX_WIN && wechselbar(state, w) && w != fo {
+        if w < MAX_WIN && sw_listable(state, w) && w != fo {
             sw_list[sw_n as usize] = w
             sw_n = sw_n + 1
         }
@@ -20093,12 +20128,15 @@ fn sw_commit(state: u64) {
     if sw_open == 0 {
         return
     }
-    sw_say(2)
+    sw_say(state, 2)
     var j: u64 = MAX_WIN
     if sw_sel < sw_n {
         j = sw_list[sw_sel as usize]
     }
     sw_close(state)
+    if j < MAX_WIN && sw_minimized(state, j) {
+        set_hidden(state, j, false) // X1: a minimized tile restores the window
+    }
     if j < MAX_WIN && wechselbar(state, j) {
         raise_win(state, j)
         set_focus(state, j)
@@ -20111,7 +20149,7 @@ fn sw_cancel(state: u64) {
     if sw_open == 0 {
         return
     }
-    sw_say(3)
+    sw_say(state, 3)
     sw_close(state)
 }
 
@@ -20128,7 +20166,7 @@ fn sw_step(state: u64, back: bool) -> bool {
             sw_sel = 1
         }
         sw_open = 1
-        sw_say(0)
+        sw_say(state, 0)
         sw_damage(state)
         if !sw_alt_held(state) {
             sw_commit(state)
@@ -20140,7 +20178,7 @@ fn sw_step(state: u64, back: bool) -> bool {
     } else {
         sw_sel = (sw_sel + 1) % sw_n
     }
-    sw_say(1)
+    sw_say(state, 1)
     sw_damage(state)
     return true
 }
@@ -20206,10 +20244,14 @@ fn paint_switcher(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             let thy: i64 = ty + m
             let thw: i64 = cw - 2 * m
             let thh: i64 = ch - 2 * m - sw_dim(state, 26, k)
-            fill_clip(state, thx, thy, thw, thh, 0x101010, 255, c0, r0, c1, r1)
             let bw: i64 = wg(state, w, W_W) as i64
             let bh: i64 = wg(state, w, W_H) as i64
             let buf: u64 = wg(state, w, W_BUF)
+            // X1: no black letterbox -- the picture is scaled to its own aspect and centred, the tile colour shows around it.
+            // Only a window without a buffer gets a dark placeholder box.
+            if !(bw > 0 && bh > 0 && buf != 0) {
+                fill_clip(state, thx, thy, thw, thh, 0x101010, 255, c0, r0, c1, r1)
+            }
             if bw > 0 && bh > 0 && buf != 0 && thw > 0 && thh > 0 {
                 var nw: i64 = thw
                 var nh: i64 = bh * thw / bw

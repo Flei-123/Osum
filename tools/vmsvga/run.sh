@@ -22,7 +22,10 @@
 #      novmsvga  -> no detection line, no panel lines (the driver is off, `-kernel` has no other framebuffer)
 #      wmruhe    -> whole screen dirty every frame: the 64 KB per frame check must fail
 #
-# NOT PROVEN HERE: VirtualBox / VMware (FIFO, CURSOR_BYPASS_3, ALPHA cursor, topology resize hint) -- QEMU 7.2 has none of them.
+#   HOST HINT     (X4) host_pending + follow_host with an injected VMMDev hint: odd sizes, oversize (shrunk), 5 hints.
+#
+# NOT PROVEN HERE: VirtualBox / VMware (FIFO, CURSOR_BYPASS_3, ALPHA cursor, VMMDev request layout) -- QEMU 7.2 has none of them. The VMMDev
+# transport is proven on the laptop: VBoxManage controlvm OrientOS setvideomodehint W H 32 + jarvisctl screenshot (reports/20261017-X4-resize.md).
 #
 # Usage: [VMSVGA_KERNEL=<kernel.mb>] bash tools/vmsvga/run.sh
 set -uo pipefail
@@ -105,6 +108,19 @@ chk "verify: bad=0 over frames > 10" \
 chk "4 resizes, 0 errors" 'l=$(grep -a "^vmsvga: bdf=" "$M" | tail -1); echo "$l" | grep -q " rsz=4 " && echo "$l" | grep -q " err=0"'
 chk "safety net: one full UPDATE after 10 s without any" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -qE " safe=[1-9]"'
 chk "no FIFO overflow (full=0)" 'grep -a "^vmsvga: bdf=" "$M" | tail -1 | grep -q " full=0 "'
+
+# HOST HINT (X4, 17.10.2026): the VirtualBox hint arrives through the guest device (VMMDev), not the VMSVGA registers. QEMU has no VMMDev, so
+# the test bed injects the hint (vmsvga.vmm_fake) and the REAL poll code runs: first poll sees it once (p1=0), the second returns it, then
+# vmode.follow_host switches. Odd width, odd height, a screen bigger than card/map window (shrunk, same aspect), back to a normal size.
+hl() { grep -a "^vmsvga: hint in=$1 " "$M" | head -1; }
+chk "hint stage: five hints ran" '[ "$(grep -ac "^vmsvga: hint in=" "$M")" = 5 ]'
+chk "hint 1137x683 (odd width): two polls, mode follows, device agrees, verify bad=0" \
+    'hl 1137x683 | grep -q "p1=0 pend=1137x683 rc=0 mode=1137x683 dev=1137x683 bad=0$"'
+chk "hint 1280x721 (odd height): mode follows" 'hl 1280x721 | grep -q "p1=0 pend=1280x721 rc=0 mode=1280x721 dev=1280x721 bad=0$"'
+chk "hint 4096x2304 (too big): accepted, shrunk to fit, same aspect, device agrees" \
+    'l=$(hl 4096x2304); echo "$l" | grep -q "p1=0 pend=4096x2304 rc=0 " && m=$(echo "$l" | sed -n "s/.* mode=\([0-9]*\)x\([0-9]*\) dev=\([0-9]*\)x\([0-9]*\) .*/\1 \2 \3 \4/p") && set -- $m && [ "$1" -lt 4096 ] && [ "$1" -ge 640 ] && [ "$1" = "$3" ] && [ "$2" = "$4" ] && d=$(( $1*2304 - $2*4096 )) && [ "${d#-}" -le $(( $2*4096/50 )) ]'
+chk "hint 1920x1080 and 1024x768: mode follows (no stale state after the shrink)" \
+    'hl 1920x1080 | grep -q "pend=1920x1080 rc=0 mode=1920x1080 dev=1920x1080 bad=0$" && hl 1024x768 | grep -q "pend=1024x768 rc=0 mode=1024x768 dev=1024x768 bad=0$"'
 
 # full-update way (default): QEMU cannot show the VirtualBox failure, but the pictures must stay right and the cost must be a full frame
 F=$T/fullw.txt

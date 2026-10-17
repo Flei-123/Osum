@@ -40,9 +40,11 @@ for i in (3, 5):
     if i < len(phases):
         p = phases[i]
         mine = p.get("org", {}).get(TARGET[i], 0)
-        ok = p["n"] == 0 or mine * 20 <= max(p["n"], 1)
-        print("  %s  %s: %d composed large rects of the window under test in %d frames (need <= 1 per 20; %d of other windows ignored)" %
-              ("OK  " if ok else "FAIL", names[i], mine, p["n"], p["rects"] - mine))
+        # X2: Settings paints into a private picture too (set_atomic): its hover must be near zero, 1 per 100 frames; the start menu 1 per 50
+        lim = 100 if i == 5 else 50
+        ok = p["n"] == 0 or mine * lim <= max(p["n"], 1)
+        print("  %s  %s: %d composed large rects of the window under test in %d frames (need <= 1 per %d; %d of other windows ignored)" %
+              ("OK  " if ok else "FAIL", names[i], mine, p["n"], lim, p["rects"] - mine))
         bad += 0 if ok else 1
 if len(phases) < 6:
     print("  FAIL  only %d phases measured" % len(phases))

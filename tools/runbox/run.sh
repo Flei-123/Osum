@@ -42,6 +42,17 @@ has "$S" "runbox: exec /bin/echo pid=" "echo hi + Enter starts /bin/echo (name l
 has "$S" "runbox: fail /bin/nope" "unknown name: fail line, window stays"
 hasnt "$S" "runbox: exec /bin/nope" "unknown name is not started"
 
+# X1 history (r997): the command that started is saved, Up/Down walk through the file, the failed one is not in it
+has "$S" "runbox: history n=0" "first dialog: no history yet"
+has "$S" "runbox: saved n=1" "echo hi was saved (1 entry)"
+has "$S" "runbox: history n=1 file=/users/" "second dialog loads the history file of the user"
+has "$S" "runbox: recall 1 echo hi" "Up brings back the last command"
+hasnt "$S" "runbox: recall 2" "Up again: nothing older (the failed 'nope' was not saved)"
+hasnt "$S" "recall 1 nope" "failed command not in the history"
+has "$S" "runbox: recall draft" "Down past the newest entry brings back the draft"
+[ "$(grep -ac '^runbox: exec /bin/echo pid=' "$S")" -ge 2 ] && ok "Up + Enter starts echo again" || bad "echo was not started a second time"
+hasnt "$S" "runbox: saved n=2" "the same command is not added twice"
+
 echo
 echo "== 2. COUNTER-PROBE: tree before the dialog =="
 if git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1; then
@@ -55,6 +66,22 @@ if git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1; then
     hasnt "$O" "runbox: exec" "old: nothing is started by typing"
 else
     echo "  (skipped: base commit $BASE_COMMIT not in this clone)"
+fi
+
+echo
+echo "== 3. COUNTER-PROBE: tree before the history (X1) =="
+HBASE=${RUNBOX_HBASE:-$(git log --format=%H --grep="^runbox: history" -1 | xargs -r -I{} git rev-parse {}^)}
+if [ -n "$HBASE" ] && git rev-parse -q --verify "$HBASE^{commit}" >/dev/null 2>&1; then
+    HT="$OUT/histtree"
+    git worktree add -q --detach "$HT" "$HBASE" 2>/dev/null
+    mkdir -p "$HT/tools/runbox" && cp tools/runbox/drive.py "$HT/tools/runbox/"
+    run_tree "$HT" "$OUT/hold" "desktop taskbar launcher settings theme explorer sh echo ls cat runbox" 60 || { bad "history-old tree failed"; tail -n 8 "$OUT/hold.log"; }
+    git worktree remove --force "$HT" >/dev/null 2>&1
+    H="$OUT/hold/serial.txt"
+    has "$H" "runbox: ready" "old (no history): the dialog still opens"
+    hasnt "$H" "runbox: recall" "old: Up recalls nothing"
+else
+    echo "  (skipped: no commit '^runbox: history' yet)"
 fi
 
 echo

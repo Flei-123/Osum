@@ -51,6 +51,20 @@ BO=$(fact $N D_band_open_vs_idle_px); BA=$(fact $N D_band_open_vs_after_px)
 BB=$(fact $N E_band_back_vs_idle_px)
 [ -n "$BB" ] && [ "$BB" -ge 0 ] && [ "$BB" -le 3000 ] 2>/dev/null && ok "E: back on the first window the centre band equals the idle picture again ($BB px differ, no panel left over)" || bad "E: band back vs idle differs by '$BB' px (want <= 3000)"
 
+DB=$(fact $N D_black_px)
+[ -n "$DB" ] && [ "$DB" -le 300 ] 2>/dev/null && ok "X1: no black letterbox around the thumbnails ($DB pure 0x101010 pixels in the panel band, want <= 300)" || bad "X1: $DB pure 0x101010 pixels in the panel band (want <= 300)"
+[ "$(fact $N F_open)" = 1 ] && [ "$(fact $N F_open_mins)" -ge 1 ] 2>/dev/null && ok "X1: the minimized window is listed (mins=$(fact $N F_open_mins), n=$(fact $N F_open_n))" || bad "X1: minimized window not listed (mins='$(fact $N F_open_mins)')"
+[ "$(fact $N F_sel_minimized)" = 1 ] && ok "X1: Tab reaches the minimized tile" || bad "X1: Tab never reached the minimized tile"
+[ "$(fact $N F_commit_hid)" = 1 ] && ok "X1: releasing Alt on it commits the minimized window" || bad "X1: commit hid='$(fact $N F_commit_hid)'"
+# `wm: fokus id=` counts differently from `win=` (window index): when scene A committed the SAME window, the ids must match
+FA=$(fact $N F_focus_after)
+if [ -n "$FA" ] && [ "$FA" != none ] && { [ "$(fact $N A_commit_win)" != "$(fact $N F_commit_win)" ] || [ "$FA" = "$(fact $N A_focus_after)" ]; }; then
+    ok "X1: the restored window has the focus (fokus id $FA)"
+else
+    bad "X1: focus after restore '$FA' (scene A: win $(fact $N A_commit_win) -> id $(fact $N A_focus_after); F: win $(fact $N F_commit_win))"
+fi
+[ "$(fact $N F_after_mins)" = 0 ] && ok "X1: afterwards no window is minimized any more (mins=0)" || bad "X1: mins after restore '$(fact $N F_after_mins)'"
+
 echo
 echo "== 2. COUNTER-PROBE: tree before the switcher =="
 if [ -n "$BASE_COMMIT" ] && git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1; then
@@ -65,6 +79,22 @@ if [ -n "$BASE_COMMIT" ] && git rev-parse -q --verify "$BASE_COMMIT^{commit}" >/
     [ "$(fact $O A_focus_changed_while_held)" = 1 ] && ok "old: focus moves while Alt is still held (switch at once)" || bad "old: focus did not move while Alt held"
 else
     echo "  (skipped: base commit '$BASE_COMMIT' not in this clone)"
+fi
+echo
+echo "== 3. COUNTER-PROBE X1: tree before the tile/minimized change (main 9b236c93) =="
+XBASE=${ALTTAB_XBASE:-$(git log --format=%H --grep="^explorer: drive label percent no longer doubles" -1)}
+if [ -n "$XBASE" ] && git rev-parse -q --verify "$XBASE^{commit}" >/dev/null 2>&1; then
+    XT="$OUT/xtree"
+    git worktree add -q --detach "$XT" "$XBASE" 2>/dev/null
+    mkdir -p "$XT/tools/alttab" && cp tools/alttab/drive.py "$XT/tools/alttab/"
+    run_tree "$XT" "$OUT/xold" || true
+    git worktree remove --force "$XT" >/dev/null 2>&1
+    XO="$OUT/xold"
+    XB=$(fact $XO D_black_px)
+    [ -n "$XB" ] && [ "$XB" -ge 1500 ] 2>/dev/null && ok "old: the letterbox is black ($XB pure 0x101010 pixels, want >= 1500)" || bad "old: black pixels '$XB' (counter-probe expects >= 1500)"
+    [ "$(fact $XO F_open_mins)" = "" ] || [ "$(fact $XO F_open_mins)" = 0 ] && ok "old: no minimized window in the panel" || bad "old: minimized window listed"
+else
+    echo "  (skipped: base commit for X1 not in this clone)"
 fi
 echo
 echo "== ALTTAB: $pass green, $fail red =="
