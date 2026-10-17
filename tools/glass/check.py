@@ -11,7 +11,7 @@ field: <dir> holds `desktop.ppm` and `serial.txt` (the program's `rect` lines, t
             plate has 0.
   soft      ... and it is smooth, not noise: the mean difference of horizontal neighbours is <= 3.0 levels.
   border    a defined rim: the mean luminance of the top edge rows differs by >= 3 levels from the row 5 px inside (light rim on dark glass, focus-accent rim on milk glass).
-  transparent the plate covers <= 0.85 of the picture beneath it (milky `subtle` mode, W-S; 0.62 with `strong`, see cmd_field); `flat` must turn it red too.
+  transparent the plate covers <= 0.85 of the picture beneath it (milky `subtle` mode, W-S; 0.82 with `strong`, see cmd_field); `flat` must turn it red too.
   surround  the plate is visible against the picture around it (luminance ratio >= 1.08 subtle, >= 1.3 strong).
   With `flat` (the control run /etc/noglass) the variance check must FAIL: the script then prints
   `GLASS <label>: control red` and exits 0; if it does not turn red it exits 1 (the check is blind).
@@ -63,7 +63,7 @@ def cmd_field(a):
     d, app, label = a[0], a[1], a[2]
     flat = "flat" in a[3:]
     strong = "strong" in a[3:]
-    cover_max = 0.62 if strong else 0.85   # strong = clear glass (thin tint, small blur); subtle = milky (measured 0.76-0.80)
+    cover_max = 0.82 if strong else 0.85   # light plate must keep dark ink readable (signinlook needs alpha >= ~112), so strong measures 0.77; subtle 0.73-0.82. Look is judged in the VM.
     surround_min = 1.3 if strong else 1.08
     im = Image.open(d + "/desktop.ppm").convert("RGB")
     R = rects(d + "/serial.txt", "glogin" if app == "glogin" else "lock")
