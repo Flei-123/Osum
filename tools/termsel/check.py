@@ -80,10 +80,13 @@ chk(all(t['hide'] == 0 for t in tc), 'the cursor is not hidden')
 pgeo = None
 prow = None
 for g, rws, t in blocks:
-    if t['copies'] == 0 and g:
+    # the first dump that shows PASTEME: its last bare prompt row is where the cursor stands
+    if t['copies'] == 0 and g and any(tx.strip() == 'PASTEME' for tx in rws.values()):
         for r, tx in rws.items():
             if tx.strip() == 'osum$':
                 pgeo, prow = g, r
+        if pgeo is not None:
+            break
 if pgeo is None:
     chk(False, 'prompt row found in the cells')
 else:
@@ -98,7 +101,7 @@ chk(len(sel) >= 1, 'a dump shows a standing selection (sel=1)')
 res = None
 for g, rws, t in blocks:
     for r, tx in rws.items():
-        if tx.strip() == 'PASTEME':
+        if tx.strip() == 'PASTEME' and res is None:
             res = (g, r)
 if res is None:
     chk(False, 'row PASTEME found')
