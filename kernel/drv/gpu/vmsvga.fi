@@ -1202,6 +1202,63 @@ fn vmm_init(state: u64) {
     kstate.set(state, s(S_VMM_UP), 1)
 }
 
+// ---- lab probe (Y2): ask the host the same question through every display-change request and print the answers. Temporary diagnosis
+// for VirtualBox 7.2.20 (hint arrives at the device, the plain request answers 0x0).
+// mode 0: GetDisplayChangeRequest2/Ex layout (ack at 36, display at 40, w/h at 24/28); 1: Multi layout (ack at 24, count at 28, w/h at 48/52);
+// 2: AcknowledgeEvents (events word at 24).
+fn vmm_probe(state: u64, tag: u64, ty: u64, size: u64, ack: u64, mode: u64) {
+    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
+    vmm_zero_body(state, 60)
+    if mode == 0 {
+        wr32(rq, 36, ack)
+    } else if mode == 1 {
+        wr32(rq, 24, ack)
+        wr32(rq, 28, 1)
+    }
+    let ok: bool = vmm_call(state, ty, size)
+    var s_sp: [u8; 2] = " \0"
+    var s_eq: [u8; 2] = "=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_c: [u8; 2] = ":\0"
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(tag)
+    serial.puts((&s_eq[0]) as u64)
+    serial.hex(rd32(rq, 12))
+    serial.puts((&s_c[0]) as u64)
+    if !ok {
+        return
+    }
+    if mode == 2 {
+        serial.hex(rd32(rq, 24))
+    } else if mode == 0 {
+        serial.dec(rd32(rq, 24))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(rd32(rq, 28))
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(rd32(rq, 32))
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(rd32(rq, 40))
+    } else {
+        serial.dec(rd32(rq, 28))
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(rd32(rq, 48))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(rd32(rq, 52))
+    }
+}
+
+fn vmm_probe_all(state: u64) {
+    var s_h: [u8; 13] = "vmmdev-dbg:\0\0"
+    serial.puts((&s_h[0]) as u64)
+    vmm_probe(state, 0x41, 41, 28, 0, 2) // A: AcknowledgeEvents (pending event mask)
+    vmm_probe(state, 0x42, 54, 44, 4, 0) // B: GetDisplayChangeRequest2, event_ack = 4
+    vmm_probe(state, 0x43, 54, 44, 0, 0) // C: GetDisplayChangeRequest2, event_ack = 0
+    vmm_probe(state, 0x44, 80, 56, 4, 0) // D: GetDisplayChangeRequestEx, event_ack = 4
+    vmm_probe(state, 0x45, 81, 60, 4, 1) // E: GetDisplayChangeRequestMulti
+    vmm_probe(state, 0x46, 82, 60, 4, 1) // F: GetDisplayChangeRequestMulti2
+    serial.nl()
+}
+
 // The last size the host asked for (w << 16 | h), 0 = none or the request failed.
 fn vmm_hint(state: u64) -> u64 {
     let fk: u64 = kstate.get(state, s(S_VMM_FAKE))
@@ -1251,6 +1308,9 @@ fn vmm_hint_locked(state: u64) -> u64 {
     kstate.set(state, s(S_VMM_HINT), v)
     if changed {
         vmm_say(state) // the hint changed: one serial line (hint=WxH) for the lab
+    }
+    if np == 1 || np == 3 || np % 10 == 0 {
+        vmm_probe_all(state) // lab probe (Y2), removed once the right request is known
     }
     return v
 }
