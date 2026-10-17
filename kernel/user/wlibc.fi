@@ -614,6 +614,7 @@ const SURF_W_MAX: u64 = 8192
 static mut s_surf: u64 = 0
 static mut s_sw: u64 = 0 // Breite der Flaeche = Breite des Schirms
 static mut s_srows: u64 = 0 // wie viele Bildzeilen ein Streifen traegt
+static mut s_scap: u64 = 0 // r1006: bytes mapped for the band surface (reused when a new width fits)
 static mut s_band: u64 = 0
 static mut s_pinned: u64 = 0 // 1 = the surface holds the whole window (surf_use): the band stays at row 0
 static mut s_scr_w: u64 = 0
@@ -830,6 +831,7 @@ fn start(noclip: bool) -> bool {
         return false
     }
     s_surf = p
+    s_scap = s_scr_w *% rows *% 4
     s_sw = s_scr_w
     s_srows = rows
     if noclip {
@@ -899,11 +901,19 @@ fn band_y() -> u64 {
     return s_band
 }
 
+// r1007: placement code (popups, dialogs, the mini panel) asked the size once at start; now every answer is live, so a window made
+// after a resolution change lands inside the new screen.
 fn screen_w() -> u64 {
+    if s_ready != 0 {
+        let _r: bool = screen_refresh()
+    }
     return s_scr_w
 }
 
 fn screen_h() -> u64 {
+    if s_ready != 0 {
+        let _r: bool = screen_refresh()
+    }
     return s_scr_h
 }
 
@@ -921,7 +931,36 @@ fn screen_refresh() -> bool {
     }
     s_scr_w = w
     s_scr_h = h
+    band_remake()
     return true
+}
+
+// r1006: the band surface of a program that paints through bands (taskbar, launcher, popups) has the row length of the screen it
+// started on. After a resolution change the widgets paint with the NEW width, so the stride and the band height follow. A pinned
+// surface (a shared window buffer) belongs to its window and is replaced by the program itself (`surf_wide`).
+fn band_remake() {
+    if s_ready == 0 || s_pinned != 0 || s_scr_w == 0 || s_scr_w > SURF_W_MAX {
+        return
+    }
+    var rows: u64 = SURF_BUDGET / (s_scr_w *% 4)
+    if rows == 0 {
+        return
+    }
+    if rows > s_scr_h {
+        rows = s_scr_h
+    }
+    let need: u64 = s_scr_w *% rows *% 4
+    if need > s_scap {
+        let p: u64 = map_surface(SURF_BUDGET)
+        if ulib.bad(p) || p == 0 {
+            return
+        }
+        s_surf = p
+        s_scap = SURF_BUDGET
+    }
+    s_sw = s_scr_w
+    s_srows = rows
+    s_band = 0
 }
 
 // r828: BAR PER HEAD. `screen_w/h` stay the size of the whole desktop (the surface is made from them).
