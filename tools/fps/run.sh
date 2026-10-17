@@ -14,17 +14,21 @@ cd "$(dirname "$0")/../.."
 OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT"-*' EXIT; fi
 mkdir -p "$OUT"
-run_case() { # name, audit args...
-    local n=$1; shift
-    DESIGNBUILD="$OUT/build-$n" bash tools/design/audit.sh "$OUT/$n" accel=kvm uitrace=yes halt=600 drehbuch="$(pwd)/tools/fps/fps.txt" "$@" > "$OUT/$n.log" 2>&1
+run_case() { # name, extra kernel words, [alltag args...]
+    # FINDING (17.10.2026): tools/design/audit.sh runs the `wmhold` loop, NOT the shipping desktop loop (kgui wait_wm, kernel word
+    # `wmdauer`), so cadence_note / pace_wait never ran there (every cadence line n=0). tools/alltag/build.sh with wmshell+wmdauer
+    # runs the real loop; drive.py plays the same drehbuch.
+    local n=$1 words=$2; shift 2
+    ALLTAGBUILD="$OUT/build-$n" bash tools/alltag/build.sh "$OUT/$n" kbd=no extra="modfs osum wmshell wmdauer usb hidgen phases $words" hold=no uitrace=yes \
+        waitfor="eingabe: ber=" drive="$(pwd)/tools/fps/fps.txt" "$@" > "$OUT/$n.log" 2>&1
 }
 CASES=${2:-paced nopace fpson fpsoff}
 for c in $CASES; do
     case $c in
-        paced)  run_case paced extra=phases ;;
-        nopace) run_case nopace extra="phases nopace" ;;
-        fpson)  run_case fpson extra=phases fps=on ;;
-        fpsoff) run_case fpsoff extra=phases ;;
+        paced)  run_case paced "" ;;
+        nopace) run_case nopace "nopace" ;;
+        fpson)  printf "# /etc/mouse.conf\nfps=true\n" > "$OUT/mouse.conf"; run_case fpson "" xfile=/mouse.conf="$OUT/mouse.conf" ;;
+        fpsoff) run_case fpsoff "" ;;
     esac
 done
 [ "${NOJUDGE:-}" = 1 ] || python3 -I tools/fps/judge.py "$OUT"
