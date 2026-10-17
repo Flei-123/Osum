@@ -108,6 +108,8 @@ export {
     M_TB_ALPHA, M_WIN_ALPHA, ALPHA_MIN, BLUR_MAX,
     radius, win_round, aa_old, set_aa_old, tb_alpha, win_alpha, tb_blur,
     set_radius, set_tb_alpha, set_win_alpha, set_tb_blur,
+    // W-S: the master switch 'Transparency effects' (off / subtle / strong), default subtle.
+    TRANS_OFF, TRANS_SUBTLE, TRANS_STRONG, transparency, set_transparency, tb_alpha_fx, win_alpha_fx,
     // RUNDE GLAS (fix-r4-2): die Textplatte. `text_at` ruft sie selbst
     // -- nach aussen gereicht wird sie nur fuer FLAECHEN, die als
     // Ganzes deckend sein muessen (die Reiterzeile).
@@ -1180,7 +1182,7 @@ fn platte(x: u64, y: u64, w: u64, h: u64) {
     // Ein deckendes Fenster hat nichts zu decken, und die Leiste malt
     // ihren Schild selbst. In beiden Faellen kostet die Platte hier
     // keinen einzigen Bildpunkt.
-    if win_alpha() >= 100 || s_panel != 0 {
+    if win_alpha_fx() >= 100 || s_panel != 0 {
         return
     }
     var r: u64 = 0
@@ -4865,6 +4867,10 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_tilt: [u8; 5] = "tilt\0"
     var k_swing: [u8; 6] = "swing\0"
     var k_blur: [u8; 5] = "blur\0"
+    var k_trans: [u8; 13] = "transparency\0"
+    var v_toff: [u8; 4] = "off\0"
+    var v_tsub: [u8; 7] = "subtle\0"
+    var v_tstr: [u8; 7] = "strong\0"
     var k_btint: [u8; 10] = "blur_tint\0"
     var k_bnoise: [u8; 11] = "blur_noise\0"
     // RUNDE GLAS: die drei neuen Zeilen, in derselben Datei und neben
@@ -4930,6 +4936,17 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     // derselben Datei wie lift/tilt/swing und aus demselben Grund: wer
     // den Blur abgeschaltet hat, will ihn nach einem Formwechsel nicht
     // wieder anhaben.
+    // W-S: `transparency=off|subtle|strong`. An unknown word keeps the default (subtle).
+    if name_eq(kp, kn, (&k_trans[0 as usize]) as u64) {
+        if name_eq(vp, vn, (&v_toff[0 as usize]) as u64) {
+            fx_mode = TRANS_OFF
+        } else if name_eq(vp, vn, (&v_tsub[0 as usize]) as u64) {
+            fx_mode = TRANS_SUBTLE
+        } else if name_eq(vp, vn, (&v_tstr[0 as usize]) as u64) {
+            fx_mode = TRANS_STRONG
+        }
+        return true
+    }
     if name_eq(kp, kn, (&k_blur[0 as usize]) as u64) {
         let v: u64 = parse_dec(vp, vn)
         if v != DEC_BAD && v <= 16 {
@@ -5571,6 +5588,86 @@ fn set_win_alpha(a: u64) {
     theme_apply()
 }
 
+// ================================================== W-S: TRANSPARENCY EFFECTS
+//
+// ONE master switch over all the glass numbers (Boss 17.10.2026). Soft milky glass in the manner of Windows
+// Acrylic / Apple Liquid Glass: a LARGER blur than before, but a LIGHT touch (a gentle tint, no grain, the
+// backdrop visibly shimmers through) and a bright rim. The mode decides what reaches the compositor
+// (`form_push`) and how the sign-in / lock plates are painted:
+//   off     no blur, no backdrop, taskbar and windows fully opaque
+//   subtle  (default) preset: blur radius FX_SUBTLE_BLUR, FX_SUBTLE_TINT percent surface colour, no grain,
+//           taskbar FX_SUBTLE_TB percent opaque, ordinary windows opaque (FX_SUBTLE_WIN)
+//   strong  the numbers of the shape / theme.conf / sliders unchanged (the old default: tint 22, radius 8,
+//           grain 3) -- the sliders on the page Darstellung fine-tune this mode
+const TRANS_OFF: u64 = 0
+const TRANS_SUBTLE: u64 = 1
+const TRANS_STRONG: u64 = 2
+const FX_SUBTLE_BLUR: u64 = 12
+const FX_SUBTLE_TINT: u64 = 58
+const FX_SUBTLE_TB: u64 = 82
+const FX_SUBTLE_WIN: u64 = 100
+static mut fx_mode: u64 = TRANS_SUBTLE
+
+fn transparency() -> u64 {
+    return fx_mode
+}
+
+// Live and not written: the Settings page writes /etc/theme.conf (`transparency=`) itself.
+fn set_transparency(m: u64) {
+    if m > TRANS_STRONG {
+        return
+    }
+    fx_mode = m
+    theme_apply()
+}
+
+// The opacity that really reaches the screen (the raw numbers stay what the sliders and the file say).
+fn tb_alpha_fx() -> u64 {
+    return fx_alpha(met[(M_TB_ALPHA) as usize], FX_SUBTLE_TB)
+}
+
+fn win_alpha_fx() -> u64 {
+    return fx_alpha(met[(M_WIN_ALPHA) as usize], FX_SUBTLE_WIN)
+}
+
+// What the compositor gets for a raw blur radius / tint / grain / opacity under the current mode.
+fn fx_blur(raw: u64) -> u64 {
+    if fx_mode == TRANS_OFF {
+        return 0
+    }
+    if fx_mode == TRANS_SUBTLE {
+        return FX_SUBTLE_BLUR
+    }
+    return raw
+}
+
+fn fx_tint(raw: u64) -> u64 {
+    if fx_mode == TRANS_OFF {
+        return 0
+    }
+    if fx_mode == TRANS_SUBTLE {
+        return FX_SUBTLE_TINT
+    }
+    return raw
+}
+
+fn fx_noise(raw: u64) -> u64 {
+    if fx_mode == TRANS_STRONG {
+        return raw
+    }
+    return 0
+}
+
+fn fx_alpha(raw: u64, subtle: u64) -> u64 {
+    if fx_mode == TRANS_OFF {
+        return 100
+    }
+    if fx_mode == TRANS_SUBTLE {
+        return subtle
+    }
+    return raw
+}
+
 // UND DAS SETZEN GEHT AUF DENSELBEN SPEICHER. `ovr_blur` ist die
 // Ueberschreibung aus /etc/theme.conf (als Wert+1 abgelegt, damit 0
 // "nicht gesetzt" heissen kann und nicht "aus").
@@ -6116,6 +6213,7 @@ fn theme_sum() -> u64 {
     h = (h ^ met[(M_TB_ALPHA) as usize]) *% 1099511628211
     h = (h ^ met[(M_WIN_ALPHA) as usize]) *% 1099511628211
     h = (h ^ met[(M_BLUR) as usize]) *% 1099511628211
+    h = (h ^ fx_mode) *% 1099511628211
     return h
 }
 
@@ -6160,6 +6258,7 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     usr_radius = RAD_NONE
     usr_tba = 100
     usr_wa = 100
+    fx_mode = TRANS_SUBTLE
     __mmio_write8(((&sch_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&sch_dark_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&sch_name[0 as usize]) as u64) as *mut u8, 0 as u8)
@@ -6826,9 +6925,10 @@ fn form_push() -> u64 {
     // /etc/theme.conf schlaegt auch hier die Formdatei -- auf einer
     // schwachen Maschine muss man den Blur abschalten koennen, ohne
     // die Form zu wechseln.
-    n = n + form_one(WF_BLUR, zieh_wert(ovr_blur, M_BLUR))
-    n = n + form_one(WF_BLURTINT, zieh_wert(ovr_btint, M_BLURTINT))
-    n = n + form_one(WF_BLURNOISE, zieh_wert(ovr_bnoise, M_BLURNOISE))
+    // W-S: every number passes the master switch `transparency` (off / subtle / strong) on its way out.
+    n = n + form_one(WF_BLUR, fx_blur(zieh_wert(ovr_blur, M_BLUR)))
+    n = n + form_one(WF_BLURTINT, fx_tint(zieh_wert(ovr_btint, M_BLURTINT)))
+    n = n + form_one(WF_BLURNOISE, fx_noise(zieh_wert(ovr_bnoise, M_BLURNOISE)))
     // RUNDE GLAS: die Zahlen des Zusammenbaus.  Sie gehen denselben
     // Weg wie der Radius und der Schatten -- eine Systemnummer,
     // achtzehn Plaetze --, weil die Taskleiste in Ring 3 laeuft und
@@ -6841,8 +6941,8 @@ fn form_push() -> u64 {
     // Acryls weiter oben (`WF_BLUR` aus `M_BLUR`). Stuende er zweimal
     // hier, gewaenne der letzte Schreiber -- und der Regler auf der
     // Seite Darstellung zeigte etwas anderes als der Server rechnet.
-    n = n + form_one(WF_TB_ALPHA, met[(M_TB_ALPHA) as usize])
-    n = n + form_one(WF_WIN_ALPHA, met[(M_WIN_ALPHA) as usize])
+    n = n + form_one(WF_TB_ALPHA, fx_alpha(met[(M_TB_ALPHA) as usize], FX_SUBTLE_TB))
+    n = n + form_one(WF_WIN_ALPHA, fx_alpha(met[(M_WIN_ALPHA) as usize], FX_SUBTLE_WIN))
     // DIE SCHLUESSELFARBE IST DIE FLAECHENFARBE DER LEISTE, aufgeloest
     // -- `C_PANEL_BG` und nicht eine Zahl.  Der Server vergleicht jeden
     // Bildpunkt mit ihr und laesst nur die FLAECHE durchsichtig werden;
