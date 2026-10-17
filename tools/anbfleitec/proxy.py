@@ -13,7 +13,7 @@ which calls reached it (e.g. POST /oidc/revoke). It changes nothing.
 
 Optional path routing (repeatable): --route /api/kontakte=127.0.0.1:18471
 sends connections whose FIRST request line starts with that path prefix to
-another backend (the mock address book, tools/anbfleitec/buch.py); their
+another backend (the mock address book, tools/anbfleitec/book.py); their
 bytes go to DIR/book-c2s.log and DIR/book-s2c.log, never to the broker logs.
 The guest opens one connection per request (Connection: close).
 """

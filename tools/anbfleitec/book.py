@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/buch.py -- mock address book for the broker swap (r115b).
+"""tools/anbfleitec/book.py -- mock address book for the broker swap (r115b).
 
-    buch.py --listen 127.0.0.1:18471 --jwks http://127.0.0.1:18470/oidc/jwks.json
+    book.py --listen 127.0.0.1:18471 --jwks http://127.0.0.1:18470/oidc/jwks.json
             --issuer https://10.9.0.1:8443 --ctl DIR
 
 Stands in for firnchat-web + fleikontakte in tools/anbfleitec/interop.sh. It

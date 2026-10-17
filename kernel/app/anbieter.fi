@@ -65,10 +65,10 @@ export {
     Zugang, Sitzung, Push,
     access_new, session_new, session_free, sitzung_leeren,
     eintragen, anzahl, waehle, name_von, board_set, empty_push,
-    tu_anmelden, tu_erneuern, tu_uebergeben, tu_abmelden, do_check,
+    tu_anmelden, tu_erneuern, do_hand_over, tu_abmelden, do_check,
     kennung,
     S_OK, S_WRONG, S_ZWEITFAKTOR, S_MEHRDEUTIG, S_KEINNETZ, S_TLS,
-    S_ABGELEHNT, S_ABGELAUFEN, S_ERROR, S_GEBREMST, S_GERAET,
+    S_ABGELEHNT, S_ABGELAUFEN, S_ERROR, S_GEBREMST, S_DEVICE,
     MAX_PUSH,
 }
 
@@ -93,12 +93,12 @@ const S_GEBREMST: u32 = 8        // der Server bremst (zu viele Versuche)
 const S_TLS: u32 = 9             // der Handschlag/das Zertifikat war faul
 // GERAETEANMELDUNG (RFC 8628): die Anmeldung laeuft auf einem ANDEREN
 // Geraet (Telefon, Rechner). Dieses Geraet zeigt einen Code und eine
-// Adresse (`gcode`, `gurl`, `gurlk`), haelt den Geraetecode in `temp` und
-// fragt in `intervall` Sekunden wieder -- derselbe Aufruf von `anmelden`
-// mit gesetztem `Zugang.temp`. `S_GERAET` heisst "noch nicht entschieden,
+// Adresse (`dev_code`, `dev_url`, `dev_url_full`), haelt den Geraetecode in `temp` und
+// fragt in `interval` Sekunden wieder -- derselbe Aufruf von `anmelden`
+// mit gesetztem `Zugang.temp`. `S_DEVICE` heisst "noch nicht entschieden,
 // frag spaeter nochmal"; `S_GEBREMST` beim Nachfragen heisst "langsamer"
 // (der Aufrufer addiert 5 s, wie RFC 8628 3.5 es verlangt).
-const S_GERAET: u32 = 10
+const S_DEVICE: u32 = 10
 
 // Was ein Ruecken zum Anmelden bekommt. Alles Zeiger auf Text, der den
 // Aufruf ueberlebt; `geheim` zeigt in einen Puffer, den der Aufrufer
@@ -136,13 +136,13 @@ struct Sitzung {
     auswahl: rt.Buf,
     hinweis: rt.Buf,
     ablauf: u64,
-    // Nur bei S_GERAET: Code zum Abtippen, Adresse, Adresse mit Code,
+    // Nur bei S_DEVICE: Code zum Abtippen, Adresse, Adresse mit Code,
     // Sekunden zwischen zwei Nachfragen, Gueltigkeit des Geraetecodes.
-    gcode: rt.Buf,
-    gurl: rt.Buf,
-    gurlk: rt.Buf,
-    intervall: u64,
-    gueltig: u64,
+    dev_code: rt.Buf,
+    dev_url: rt.Buf,
+    dev_url_full: rt.Buf,
+    interval: u64,
+    expires_in: u64,
 }
 
 struct Push {
@@ -151,9 +151,9 @@ struct Push {
     erneuern: fn(*mut Zugang, *mut Sitzung) -> u32,
     abmelden: fn(*mut Zugang, *mut Sitzung) -> u32,
     pruefen: fn(*mut Zugang, *mut Sitzung) -> u32,
-    // hand the signed-in session's access token on (konto --tauschen);
+    // hand the signed-in session's access token on (konto --exchange);
     // S_OK, S_KEINNETZ, S_ABGELEHNT (hint says why) or S_ERROR
-    uebergeben: fn(*mut Zugang, *mut Sitzung) -> u32,
+    hand_over: fn(*mut Zugang, *mut Sitzung) -> u32,
 }
 
 fn access_new() -> Zugang {
@@ -168,8 +168,8 @@ fn session_new() -> Sitzung {
         datenort: rt.buf_new(), zugriff: rt.buf_new(),
         erneuerung: rt.buf_new(), temp: rt.buf_new(),
         auswahl: rt.buf_new(), hinweis: rt.buf_new(), ablauf: 0,
-        gcode: rt.buf_new(), gurl: rt.buf_new(), gurlk: rt.buf_new(),
-        intervall: 0, gueltig: 0 }
+        dev_code: rt.buf_new(), dev_url: rt.buf_new(), dev_url_full: rt.buf_new(),
+        interval: 0, expires_in: 0 }
 }
 
 fn sitzung_leeren(s: *mut Sitzung) {
@@ -184,11 +184,11 @@ fn sitzung_leeren(s: *mut Sitzung) {
     rt.buf_clear(&(*s).temp)
     rt.buf_clear(&(*s).auswahl)
     rt.buf_clear(&(*s).hinweis)
-    rt.buf_clear(&(*s).gcode)
-    rt.buf_clear(&(*s).gurl)
-    rt.buf_clear(&(*s).gurlk)
-    (*s).intervall = 0
-    (*s).gueltig = 0
+    rt.buf_clear(&(*s).dev_code)
+    rt.buf_clear(&(*s).dev_url)
+    rt.buf_clear(&(*s).dev_url_full)
+    (*s).interval = 0
+    (*s).expires_in = 0
 }
 
 fn session_free(s: *mut Sitzung) {
@@ -201,9 +201,9 @@ fn session_free(s: *mut Sitzung) {
     rt.buf_free(&(*s).temp)
     rt.buf_free(&(*s).auswahl)
     rt.buf_free(&(*s).hinweis)
-    rt.buf_free(&(*s).gcode)
-    rt.buf_free(&(*s).gurl)
-    rt.buf_free(&(*s).gurlk)
+    rt.buf_free(&(*s).dev_code)
+    rt.buf_free(&(*s).dev_url)
+    rt.buf_free(&(*s).dev_url_full)
 }
 
 // ------------------------------------------------------------ die Tafel
@@ -214,7 +214,7 @@ fn empty(z: *mut Zugang, s: *mut Sitzung) -> u32 {
 
 fn empty_push() -> Push {
     return Push { name: 0, anmelden: empty, erneuern: empty,
-        abmelden: empty, pruefen: empty, uebergeben: empty }
+        abmelden: empty, pruefen: empty, hand_over: empty }
 }
 
 // SPRACHGRENZE, und sie steht hier, weil sie die Bauform bestimmt hat:
@@ -305,11 +305,11 @@ fn tu_anmelden(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
     return f(z, s)
 }
 
-fn tu_uebergeben(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
+fn do_hand_over(i: usize, z: *mut Zugang, s: *mut Sitzung) -> u32 {
     if i >= n_ruecken {
         return S_ERROR
     }
-    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).uebergeben
+    let f: fn(*mut Zugang, *mut Sitzung) -> u32 = (*space(i)).hand_over
     return f(z, s)
 }
 

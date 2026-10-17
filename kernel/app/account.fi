@@ -20,7 +20,12 @@
 //   konto anmelden --anbieter=<name> --kennung=<name> [--ziel=<url>]
 //                  [--name=<zertifikatsname>] [--wurzeln=<pem>]
 //                  [--bereich=<mandant>] [--code=<zweiter faktor>]
-//                  [--zwischen=<token>] [--lokal=<benutzer>]
+//                  [--continue=<token>] [--lokal=<benutzer>]
+//                  [--device [--wait] [--exchange]]
+//
+//        ENGLISCHE SCHALTER ZUERST: `--device`, `--wait`, `--exchange`,
+//        `--continue`. Die alten Namen `--geraet`, `--warten`, `--tauschen`,
+//        `--zwischen` gelten unveraendert weiter (Alias).
 //
 //        ZWEI SCHREIBWEISEN, UND DIE ANGEHAENGTE IST DIE WICHTIGE.
 //        `--ziel https://…` und `--ziel=https://…` gelten beide, aber
@@ -37,14 +42,15 @@
 //        an einem Terminal wird gefragt und das Echo abgeschaltet, an
 //        einer Roehre wird eine Zeile gelesen. Ein Passwort in `argv`
 //        stuende in jeder Prozessliste.
-//        --tauschen (nur mit --geraet, Anbieter fleitec): nach der
+//        --exchange (nur mit --device, Anbieter fleitec): nach der
 //        Anmeldung gleich das Adressbuch-Token holen. Das Zugriffs-Token
 //        geht durch eine ROEHRE an `socfleitec v1 login broker -s`
 //        (stdin); es steht nie in einer Datei, nie in argv, nie in der
-//        Ausgabe. Ausgabe danach: `konto: tausch = ok|offline|abgelehnt|
-//        keinnetz|abgelehnt|fehler`. Die Sitzung bleibt in jedem Fall
+//        Ausgabe. Ausgabe danach: `konto: exchange = ok|offline|denied|
+//        failed` (frueher `tausch = ok|keinnetz|abgelehnt|fehler`; die
+//        Seite liest beide). Die Sitzung bleibt in jedem Fall
 //        bestehen. Wohin das Token geht, weiss nur der Ruecken
-//        (`anbieter.tu_uebergeben`); Ruecken ohne Uebergabe melden fehler.
+//        (`anbieter.do_hand_over`); Ruecken ohne Uebergabe melden failed.
 //   konto liste            welche Konten es gibt (aus /etc/konten)
 //   konto status           je Konto: gueltig, wie lange noch, mit Netz
 //   konto erneuern         Token erneuern, wenn es bald ablaeuft
@@ -98,7 +104,7 @@ const RC_ABGELAUFEN: i32 = 7
 const RC_ERROR: i32 = 8
 const RC_GEBREMST: i32 = 9
 const RC_TLS: i32 = 10
-const RC_GERAET: i32 = 11
+const RC_DEVICE: i32 = 11
 
 static mut geheim: [u8; 256] = [0; 256]
 
@@ -133,7 +139,7 @@ fn stand_name(st: u32) -> str {
     if st == anbieter.S_ABGELEHNT { return "abgelehnt" }
     if st == anbieter.S_ABGELAUFEN { return "abgelaufen" }
     if st == anbieter.S_GEBREMST { return "gebremst" }
-    if st == anbieter.S_GERAET { return "geraet" }
+    if st == anbieter.S_DEVICE { return "device" }
     return "fehler"
 }
 
@@ -144,7 +150,7 @@ fn stand_rc(st: u32) -> i32 {
     if st == anbieter.S_MEHRDEUTIG { return RC_MEHRDEUTIG }
     if st == anbieter.S_KEINNETZ { return RC_KEINNETZ }
     if st == anbieter.S_TLS { return RC_TLS }
-    if st == anbieter.S_GERAET { return RC_GERAET }
+    if st == anbieter.S_DEVICE { return RC_DEVICE }
     if st == anbieter.S_ABGELEHNT { return RC_ABGELEHNT }
     if st == anbieter.S_ABGELAUFEN { return RC_ABGELAUFEN }
     if st == anbieter.S_GEBREMST { return RC_GEBREMST }
@@ -173,7 +179,7 @@ fn stand_schluessel(st: u32) -> u64 {
     if st == anbieter.S_MEHRDEUTIG { return (&k_me[0]) as u64 }
     if st == anbieter.S_KEINNETZ { return (&k_kn[0]) as u64 }
     if st == anbieter.S_TLS { return (&k_tl[0]) as u64 }
-    if st == anbieter.S_GERAET { return (&k_dv[0]) as u64 }
+    if st == anbieter.S_DEVICE { return (&k_dv[0]) as u64 }
     if st == anbieter.S_ABGELEHNT { return (&k_ab[0]) as u64 }
     if st == anbieter.S_ABGELAUFEN { return (&k_al[0]) as u64 }
     if st == anbieter.S_GEBREMST { return (&k_ge[0]) as u64 }
@@ -260,6 +266,32 @@ fn schalter(start: u64, argc: usize, name: u64) -> bool {
         i = i + 1
     }
     return false
+}
+
+// ENGLISH NAME FIRST, OLD GERMAN NAME AS ALIAS (nothing that worked breaks):
+// `opt_a`/`flag_a` look for the English switch and then for the old one.
+fn opt_a(start: u64, argc: usize, name: u64, alias: u64) -> u64 {
+    let r: u64 = opt(start, argc, name)
+    if r != 0 {
+        return r
+    }
+    return opt(start, argc, alias)
+}
+
+fn flag_a(start: u64, argc: usize, name: u64, alias: u64) -> bool {
+    if schalter(start, argc, name) {
+        return true
+    }
+    return schalter(start, argc, alias)
+}
+
+// The word after `exchange =` (the swap with the address book). The state
+// words of the sign-in (`stand`) stay as they were; only this line is new.
+fn exchange_word(st: u32) -> str {
+    if st == anbieter.S_OK { return "ok" }
+    if st == anbieter.S_KEINNETZ { return "offline" }
+    if st == anbieter.S_ABGELEHNT { return "denied" }
+    return "failed"
 }
 
 // ------------------------------------------------- das Geheimnis einlesen
@@ -446,12 +478,13 @@ fn push_login(tab: u64) {
 
 // ------------------------------------------------- Geraeteanmeldung
 //
-// RFC 8628, provider-neutral: a backend that answers S_GERAET wants its
+// RFC 8628, provider-neutral: a backend that answers S_DEVICE wants its
 // human to do something on ANOTHER device. This program prints what to
-// show (`code`, `url`, `urlkomplett`), the opaque `zwischen` to come back
-// with, and -- with --warten -- asks again itself: every `intervall`
-// seconds, +5 s after each S_GEBREMST (slow_down), until the answer is
-// final or `gueltig` seconds are over.
+// show (`code`, `url`, `url_complete`), the opaque `zwischen` to come back
+// with (`--continue`, old name `--zwischen`), and -- with --wait --
+// asks again itself: every `interval` seconds, +5 s after each
+// S_GEBREMST (slow_down), until the answer is final or `expires_in`
+// seconds are over.
 static mut leer_text: [u8; 1] = "\0"
 
 fn sleep_secs(n: u64) {
@@ -461,28 +494,28 @@ fn sleep_secs(n: u64) {
 }
 
 fn dev_show(s: *mut anbieter.Sitzung) {
-    line("code", (*s).gcode.ptr, (*s).gcode.len)
-    line("url", (*s).gurl.ptr, (*s).gurl.len)
-    if (*s).gurlk.len > 0 {
-        line("urlkomplett", (*s).gurlk.ptr, (*s).gurlk.len)
+    line("code", (*s).dev_code.ptr, (*s).dev_code.len)
+    line("url", (*s).dev_url.ptr, (*s).dev_url.len)
+    if (*s).dev_url_full.len > 0 {
+        line("url_complete", (*s).dev_url_full.ptr, (*s).dev_url_full.len)
     }
     line("zwischen", (*s).temp.ptr, (*s).temp.len)
-    line_n("intervall", (*s).intervall)
-    line_n("gueltig", (*s).gueltig)
+    line_n("interval", (*s).interval)
+    line_n("expires_in", (*s).expires_in)
 }
 
 fn dev_wait(i: usize, z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     var dc: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&dc, (*s).temp.ptr, (*s).temp.len)
     rt.buf_push(&dc, 0 as u8)
-    var iv: u64 = (*s).intervall
+    var iv: u64 = (*s).interval
     if iv < 1 {
         iv = 5
     }
-    let ende: u64 = now() + (*s).gueltig
+    let ende: u64 = now() + (*s).expires_in
     var n: u64 = 0
-    var st: u32 = anbieter.S_GERAET
-    while st == anbieter.S_GERAET || st == anbieter.S_GEBREMST {
+    var st: u32 = anbieter.S_DEVICE
+    while st == anbieter.S_DEVICE || st == anbieter.S_GEBREMST {
         if now() + iv > ende {
             st = anbieter.S_ABGELAUFEN
             break
@@ -495,8 +528,8 @@ fn dev_wait(i: usize, z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 
             iv = iv + 5
         }
     }
-    line_n("abfragen", n)
-    line_n("intervall", iv)
+    line_n("polls", n)
+    line_n("interval", iv)
     rt.mem_set(dc.ptr, 0 as u8, dc.len)
     rt.buf_free(&dc)
     return st
@@ -512,13 +545,17 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     var o_ken: [u8; 10] = "--kennung\0"
     var o_ber: [u8; 10] = "--bereich\0"
     var o_code: [u8; 7] = "--code\0"
-    var o_zw: [u8; 11] = "--zwischen\0"
+    var o_zw: [u8; 11] = "--continue\0"
+    var o_zwa: [u8; 11] = "--zwischen\0"
     var o_lok: [u8; 8] = "--lokal\0"
-    var o_gt: [u8; 9] = "--geraet\0"
-    var o_wa: [u8; 9] = "--warten\0"
+    var o_gt: [u8; 9] = "--device\0"
+    var o_gta: [u8; 9] = "--geraet\0"
+    var o_wa: [u8; 7] = "--wait\0"
+    var o_waa: [u8; 9] = "--warten\0"
     var o_cl: [u8; 9] = "--client\0"
     var o_au: [u8; 6] = "--aud\0"
-    var o_ta: [u8; 11] = "--tauschen\0"
+    var o_ta: [u8; 11] = "--exchange\0"
+    var o_taa: [u8; 11] = "--tauschen\0"
 
     let anb: u64 = opt(start, argc, (&o_anb[0]) as u64)
     var ziel: u64 = opt(start, argc, (&o_ziel[0]) as u64)
@@ -528,12 +565,12 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     // DEVICE FLOW: no login name and no password on this device -- the
     // human signs in elsewhere. A backend that has no such flow just sees
     // an empty login name and says "wrong".
-    let geraet: bool = schalter(start, argc, (&o_gt[0]) as u64)
-    let warten: bool = schalter(start, argc, (&o_wa[0]) as u64)
-    // --tauschen: after the sign-in hand the access token to socfleitec
+    let use_device: bool = flag_a(start, argc, (&o_gt[0]) as u64, (&o_gta[0]) as u64)
+    let do_wait: bool = flag_a(start, argc, (&o_wa[0]) as u64, (&o_waa[0]) as u64)
+    // --exchange (old: --tauschen): after the sign-in hand the access token to socfleitec
     // (pipe) and get the address-book token. Only with the device flow.
-    let tauschen: bool = schalter(start, argc, (&o_ta[0]) as u64)
-    if geraet && kenn == 0 {
+    let do_exchange: bool = flag_a(start, argc, (&o_ta[0]) as u64, (&o_taa[0]) as u64)
+    if use_device && kenn == 0 {
         kenn = (&leer_text[0]) as u64
     }
     // Was die Befehlszeile nicht sagt, sagt vielleicht /etc/konten.conf.
@@ -541,8 +578,8 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     if anb != 0 {
         let _k: bool = conf_read(anb, &konf, &ziel, &zname, &wurzeln)
     }
-    if tauschen && !geraet {
-        line_c("hinweis", "--tauschen geht nur mit --geraet\0".p as u64)
+    if do_exchange && !use_device {
+        line_c("hinweis", "--exchange needs --device\0".p as u64)
         rt.buf_free(&konf)
         return RC_AUFRUF
     }
@@ -575,11 +612,11 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     z.kennung = kenn
     z.bereich = opt(start, argc, (&o_ber[0]) as u64)
     z.code = opt(start, argc, (&o_code[0]) as u64)
-    z.temp = opt(start, argc, (&o_zw[0]) as u64)
+    z.temp = opt_a(start, argc, (&o_zw[0]) as u64, (&o_zwa[0]) as u64)
     z.klient = opt(start, argc, (&o_cl[0]) as u64)
     z.zielgruppe = opt(start, argc, (&o_au[0]) as u64)
 
-    if geraet {
+    if use_device {
         z.modus = 1
         z.geheim = (&leer_text[0]) as u64
     } else {
@@ -592,13 +629,13 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     var st: u32 = anbieter.tu_anmelden(i as usize, &z, &s)
     geheim_vergessen()
 
-    if st == anbieter.S_GERAET {
+    if st == anbieter.S_DEVICE {
         say(st)
         dev_show(&s)
-        if !warten {
+        if !do_wait {
             anbieter.session_free(&s)
             rt.buf_free(&konf)
-            return RC_GERAET
+            return RC_DEVICE
         }
         st = dev_wait(i as usize, &z, &s)
     }
@@ -716,13 +753,13 @@ fn cmd_login(start: u64, argc: usize) -> i32 {
     }
     // the sign-in stands whatever the swap says (the session is saved)
     var rc: i32 = RC_OK
-    if tauschen {
+    if do_exchange {
         // the back end hands the token on (pipe), the general part only
         // reports the state and never sees where it goes
-        let ust: u32 = anbieter.tu_uebergeben(i as usize, &z, &s)
+        let ust: u32 = anbieter.do_hand_over(i as usize, &z, &s)
         rt.mem_set(s.zugriff.ptr, 0 as u8, s.zugriff.len)
-        let usn: str = stand_name(ust)
-        line("tausch", usn.p as u64, usn.n)
+        let usn: str = exchange_word(ust)
+        line("exchange", usn.p as u64, usn.n)
         if ust != anbieter.S_OK && s.hinweis.len > 0 {
             var uh: rt.Buf = rt.buf_new()
             rt.buf_push_bytes(&uh, s.hinweis.ptr, s.hinweis.len)
@@ -1082,8 +1119,9 @@ fn hilfe() {
     io.print("konto anmelden --anbieter=<name> --kennung=<name> [--ziel=<url>]\n")
     io.print("               [--name=<zertifikatsname>] [--wurzeln=<pem>]\n")
     io.print("               [--bereich=<mandant>] [--code=<faktor>]\n")
-    io.print("               [--zwischen=<token>] [--lokal=<benutzer>]\n")
-    io.print("               [--geraet [--warten] [--tauschen]]\n")
+    io.print("               [--continue=<token>] [--lokal=<benutzer>]\n")
+    io.print("               [--device [--wait] [--exchange]]\n")
+    io.print("               (alte Namen weiter gueltig: --zwischen --geraet --warten --tauschen)\n")
     io.print("               ohne --ziel gilt die Zeile aus /etc/konten.conf\n")
     io.print("konto liste | status [--ohne-netz] | erneuern | abmelden\n")
     io.print("konto anbieter | übergabe --kennung <k> | --text <key>\n")

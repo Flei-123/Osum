@@ -802,18 +802,27 @@ grep -qa "no such path" "$TMPD/wo9.txt" \
 # ======================================================================
 echo "== 15. Einstellungen -> Konten: 'Adressbuch verbinden' (r125) =="
 # ======================================================================
-# Die Seite kennt keinen Anbieter: sie reicht `--tauschen` durch, liest die
-# Zeile `konto: tausch = <wort>` und waehlt daraus einen Katalogschluessel.
+# Die Seite kennt keinen Anbieter: sie reicht `--exchange` durch, liest die
+# Zeile `konto: exchange = <wort>` (alt: `tausch`, Woerter keinnetz/abgelehnt) und waehlt daraus einen Katalogschluessel.
 # Gemessen wird die VERDRAHTUNG: Knopf, Flagge, jedes Wort, jeder Schluessel
 # in beiden Sprachen, und dass die Woerter dieselben sind, die konto sagt.
 SF=kernel/user/settings.fi
-num "Knopf K_BKBUCH in der Konten-Seite" "$(grep -c 'fuiscene.button(left, msg.get((&k_k_buch' $SF)" eq 1
-num "der Knopf loest den Gerätefluss aus (selber Zweig wie 'Mit Code anmelden')" "$(grep -c 'id == K_BKDEV || id == K_BKBUCH' $SF)" eq 1
-num "nur der neue Knopf haengt --tauschen an" "$(grep -c 'if id == K_BKBUCH {' $SF)" ge 2
-num "Schalter --tauschen wird als Argument gesetzt" "$(grep -c '"--tauschen' $SF)" eq 1
-for W in ok keinnetz abgelehnt; do
+num "Knopf K_BKBOOK in der Konten-Seite" "$(grep -c 'fuiscene.button(left, msg.get((&k_k_book' $SF)" eq 1
+num "der Knopf loest den Gerätefluss aus (selber Zweig wie 'Mit Code anmelden')" "$(grep -c 'id == K_BKDEV || id == K_BKBOOK' $SF)" eq 1
+num "nur der neue Knopf haengt --exchange an" "$(grep -c 'if id == K_BKBOOK {' $SF)" ge 2
+num "Schalter --exchange wird als Argument gesetzt" "$(grep -c '"--exchange' $SF)" eq 1
+for W in ok offline denied; do
     num "Wort '$W' wird von konto ausgegeben" "$(grep -c "return \"$W\"" kernel/app/account.fi)" ge 1
     num "Wort '$W' wird von der Seite ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
+done
+# ALIAS: die ersten Namen gelten weiter -- die Seite liest das alte Schluesselwort
+# `tausch` und die alten Woerter keinnetz/abgelehnt, konto nimmt die alten Schalter an
+for W in keinnetz abgelehnt; do
+    num "ALIAS: altes Wort '$W' wird von der Seite noch ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
+done
+num "ALIAS: altes Schluesselwort 'tausch' wird von der Seite noch gelesen" "$(grep -c 'kf_tausch: \[u8; 7\] = "tausch' $SF)" eq 1
+for A in geraet warten tauschen zwischen; do
+    num "ALIAS: konto nimmt --$A weiter an" "$(grep -c "\"--$A\\\\0\"" kernel/app/account.fi)" eq 1
 done
 for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off konto.ui.book.ok \
          konto.ui.book.offline konto.ui.book.refused konto.ui.book.noscope konto.ui.book.failed; do
@@ -831,8 +840,8 @@ else
     ok "die neuen Meldungen nennen keinen Anbieter (Adressbuch, nicht Dienst)"
 fi
 # (das Buch-Programm /bin/socfleitec selbst darf stehen: die Seite fragt es, nur dort)
-SEG=$(sed -n '/^fn buch_gleich/,/^fn accounts_read/p' $SF | sed 's#/bin/socfleitec##')
-if printf '%s' "$SEG" | grep -qi 'fleitec\|xoffi\|jarvis'; then bad "Anbietername in buch_key/buch_stand"; else ok "buch_key/buch_stand kennen keinen Anbieter"; fi
+SEG=$(sed -n '/^fn book_same/,/^fn accounts_read/p' $SF | sed 's#/bin/socfleitec##')
+if printf '%s' "$SEG" | grep -qi 'fleitec\|xoffi\|jarvis'; then bad "Anbietername in book_key/book_state"; else ok "book_key/book_state kennen keinen Anbieter"; fi
 # das Token wird nie angezeigt: der Status liest nur 'account<TAB>' aus `hello`
 num "der Status liest nie die Konfiguration (nur 'hello')" "$(printf '%s' "$SEG" | grep -c 'fleitec.conf\|token=')" eq 0
 

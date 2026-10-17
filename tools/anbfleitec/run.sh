@@ -46,7 +46,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 hin() { printf '  --    %s\n' "$1"; }
 is()  { if [ "${2:-}" = "$3" ]; then ok "$1: $2"; else bad "$1: '${2:-}', expected '$3'"; fi; }
-has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
+has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 num() { local n=$1 v=${2:-} o=$3 w=$4
     if [ -z "$v" ]; then bad "$n: no number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, expected $o $w"; fi
@@ -251,21 +251,21 @@ echo "== 3. device flow against the mock IdP (TLS 1.3) =="
 netz_auf
 server_auf
 abbild "$TMPD/base.img" || true
-CMD="konto anmelden --anbieter=fleitec --geraet --warten"
+CMD="konto anmelden --anbieter=fleitec --device --wait"
 scen() { printf '%s\n' "$1" > "$TMPD/idp/szenario"; }
 
 # 3a: the two manual steps (what the settings dialog does)
 scen approve
-lauf "$TMPD/base.img" "konto anmelden --anbieter=fleitec --geraet" "$TMPD/o_s1.txt"
-is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "geraet"
+lauf "$TMPD/base.img" "konto anmelden --anbieter=fleitec --device" "$TMPD/o_s1.txt"
+is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "device"
 is "step 1: user code" "$(kv "$TMPD/o_s1.txt" code)" "ABCD-EFGH"
 has "$TMPD/o_s1.txt" "konto: url = https://10.9.0.1:8443/device" "step 1: the URL is shown"
-has "$TMPD/o_s1.txt" "konto: urlkomplett = " "step 1: the complete URL is shown"
+has "$TMPD/o_s1.txt" "konto: url_complete = " "step 1: the complete URL is shown"
 DC=$(kv "$TMPD/o_s1.txt" zwischen)
 case "$DC" in dc-approve-*) ok "step 1: device code kept for step 2 ($DC)";; *) bad "step 1: no device code ('$DC')";; esac
-is "step 1: interval" "$(kv "$TMPD/o_s1.txt" intervall)" "1"
+is "step 1: interval" "$(kv "$TMPD/o_s1.txt" interval)" "1"
 lauf "$TMPD/base.img" "konto anmelden --anbieter=fleitec --geraet --zwischen=$DC" "$TMPD/o_s2.txt"
-is "step 2 (first poll): still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "geraet"
+is "step 2 (first poll, OLD flags --geraet --zwischen): still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "device"
 lauf "$TMPD/base.img" "konto liste" "$TMPD/o_s3.txt"
 is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s3.txt" konten)" "0"
 
@@ -274,7 +274,7 @@ scen approve
 cp "$TMPD/base.img" "$TMPD/d_login.img"
 lauf "$TMPD/d_login.img" "$CMD" "$TMPD/o_ok.txt"
 is "approve: state" "$(kv "$TMPD/o_ok.txt" stand)" "ok"
-is "approve: polls" "$(kv "$TMPD/o_ok.txt" abfragen)" "3"
+is "approve: polls" "$(kv "$TMPD/o_ok.txt" polls)" "3"
 is "approve: sealed" "$(kv "$TMPD/o_ok.txt" gesiegelt)" "1"
 is "approve: subject" "$(kv "$TMPD/o_ok.txt" subjekt)" "0b6f1c1e-5a7e-4d2c-9a4b-2f1d3c4b5a69"
 is "approve: display name" "$(kv "$TMPD/o_ok.txt" anzeige)" "Justin"
@@ -312,7 +312,7 @@ cp "$TMPD/base.img" "$TMPD/d_slow.img"
 : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_slow.img" "$CMD" "$TMPD/o_slow.txt"
 is "slow_down: state" "$(kv "$TMPD/o_slow.txt" stand)" "ok"
-is "slow_down: final interval (1 + 5)" "$(kv "$TMPD/o_slow.txt" intervall)" "6"
+is "slow_down: final interval (1 + 5)" "$(kv "$TMPD/o_slow.txt" interval)" "6"
 python3 - "$TMPD/idp/protokoll.jsonl" > "$TMPD/gap.txt" <<'PY'
 import json, sys
 ts = []
@@ -394,7 +394,7 @@ head -c4 "$TMPD/seal.bin" | grep -qa "OKS1" && ok "and it is SEALED (head OKS1)"
 scen approve
 cp "$TMPD/base.img" "$TMPD/d_kl.img"
 : > "$TMPD/idp/access.txt"
-lauf "$TMPD/d_kl.img" "konto --kaputt=klartext anmelden --anbieter=fleitec --geraet --warten" "$TMPD/o_kl.txt"
+lauf "$TMPD/d_kl.img" "konto --kaputt=klartext anmelden --anbieter=fleitec --device --wait" "$TMPD/o_kl.txt"
 is "counter-probe klartext: signed in" "$(kv "$TMPD/o_kl.txt" stand)" "ok"
 KT=$(tail -1 "$TMPD/idp/access.txt")
 KH=$(grep -c -aF -- "$KT" "$TMPD/d_kl.img" 2>/dev/null || true)
@@ -478,13 +478,13 @@ printf 'nameserver 10.9.0.1\noptions timeout:1 attempts:1\n' > "$TMPD/resolv.con
 cp "$TMPD/konten.conf" "$TMPD/konten.orig"
 printf 'fleitec ziel=%s\n' "$Z9" > "$TMPD/konten.conf"
 abbild "$TMPD/d_dns.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
-nfrage() { grep -c "^FRAGE $1 " "$TMPD/dns.log" 2>/dev/null || true; }
+dns_asked() { grep -c "^FRAGE $1 " "$TMPD/dns.log" 2>/dev/null || true; }
 
 scen approve
 : > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_dns.img" "$CMD" "$TMPD/o_d1.txt"
 is "name target: full device flow signs in" "$(kv "$TMPD/o_d1.txt" stand)" "ok"
-is "name target: the DNS was asked ONCE for the whole run (cache)" "$(nfrage konto.test)" "1"
+is "name target: the DNS was asked ONCE for the whole run (cache)" "$(dns_asked konto.test)" "1"
 grep -q '"host": "konto.test"' "$TMPD/idp/protokoll.jsonl" \
     && ok "name target: the Host header carries the NAME" || bad "name target: Host header is not konto.test"
 grep -q '"host": "10\.9\.0\.1' "$TMPD/idp/protokoll.jsonl" \
@@ -496,7 +496,7 @@ abbild "$TMPD/d_dns2.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 : > "$TMPD/dns.log"
 lauf "$TMPD/d_dns2.img" "$CMD" "$TMPD/o_d2.txt"
 is "other name -> same number: certificate is checked against the NAME (refused)" "$(kv "$TMPD/o_d2.txt" stand)" "tls"
-is "other name: the DNS was asked for other.test" "$(nfrage other.test)" "1"
+is "other name: the DNS was asked for other.test" "$(dns_asked other.test)" "1"
 
 # a name the DNS does not know
 printf 'fleitec ziel=https://gibtsnicht.test:8443\n' > "$TMPD/konten.conf"
@@ -504,7 +504,7 @@ abbild "$TMPD/d_dns3.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 : > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_dns3.img" "$CMD" "$TMPD/o_d3.txt"
 is "unknown name (NXDOMAIN): state keinnetz" "$(kv "$TMPD/o_d3.txt" stand)" "keinnetz"
-is "unknown name: the DNS was asked" "$(nfrage gibtsnicht.test)" "1"
+is "unknown name: the DNS was asked" "$(dns_asked gibtsnicht.test)" "1"
 is "unknown name: no request reached the server" "$(grep -c . "$TMPD/idp/protokoll.jsonl")" "0"
 
 # broken numbers are NOT names: refused before any DNS query
@@ -540,7 +540,7 @@ is "offline: renewal due but no network: state" "$(kv "$TMPD/o_n2.txt" stand)" "
 is "offline: not renewed, and not signed out" "$(kv "$TMPD/o_n2.txt" abgemeldet)" ""
 lauf_ohne_netz "$TMPD/d_login.img" "konto liste" "$TMPD/o_n3.txt"
 is "offline: the account is still listed" "$(kv "$TMPD/o_n3.txt" konten)" "1"
-lauf_ohne_netz "$TMPD/base.img" "konto anmelden --anbieter=fleitec --geraet" "$TMPD/o_n4.txt"
+lauf_ohne_netz "$TMPD/base.img" "konto anmelden --anbieter=fleitec --device" "$TMPD/o_n4.txt"
 S4=$(kv "$TMPD/o_n4.txt" stand)
 case "$S4" in keinnetz|fehler) ok "sign-in without network fails clearly ($S4)";; *) bad "sign-in without network: '$S4'";; esac
 lauf_ohne_netz "$TMPD/base.img" "echo hallo > /probe.txt;cat /probe.txt;konto status" "$TMPD/o_n5.txt"

@@ -14,7 +14,7 @@
 #  1. Broker up: discovery + JWKS over TLS, client orientos-device / aud orientos.
 #  2. Device flow in two manual steps: code + URL shown, pending, approve,
 #     tokens; the subject/audience in the guest equal the broker's own token.
-#  3. `--warten` (the guest polls itself) while the "person" approves.
+#  3. `--wait` (the guest polls itself) while the "person" approves.
 #  4. Errors from the real broker: denied (access_denied), expired
 #     (expired_token), slow_down (host pre-poll makes the guest poll too fast),
 #     wrong --aud, unknown --client, device code used twice.
@@ -24,13 +24,13 @@
 #  7. No token in clear on the disk image.
 #  8. The bridge (r115b): `socfleitec v1 login broker <JWT>` swaps the broker
 #     access token for an fkt1 at the address book (POST
-#     /api/kontakte/zugang-broker). The book is the mock buch.py behind
+#     /api/kontakte/zugang-broker). The book is the mock book.py behind
 #     proxy.py (path routing) with a REAL Ed25519 check against the broker's
 #     JWKS and the FirnChat rules (iss/aud/exp/jti/uid). Checked: the swap
 #     works, the fkt1 opens the book, the JWT is never echoed nor stored;
 #     wrong aud, expired, foreign signature, unknown account, id_token,
 #     garbage are refused and leave the stored fkt1 alone.
-#  8d. `konto anmelden --geraet --warten --tauschen`: sign-in and swap in ONE
+#  8d. `konto anmelden --device --wait --exchange`: sign-in and swap in ONE
 #     step, the access token goes konto -> socfleitec through a pipe (no file,
 #     no argv, no output); refused swap / book offline keep the session and the
 #     old fkt1.
@@ -45,7 +45,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 is()  { if [ "${2:-}" = "$3" ]; then ok "$1: $2"; else bad "$1: '${2:-}', expected '$3'"; fi; }
-has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
+has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 num() { local n=$1 v=${2:-} o=$3 w=$4
     if [ -z "$v" ]; then bad "$n: no number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, expected $o $w"; fi
@@ -68,7 +68,7 @@ V1=ai1
 BPORT=$(( 16600 + ($$ % 300) * 2 ))
 QPORT=$(( BPORT + 1 ))
 IDPORT=$(( 20000 + ($$ % 20000) ))       # broker, loopback inside the namespace
-BKPORT=$(( IDPORT + 1 ))                  # mock address book (buch.py), loopback in the namespace
+BKPORT=$(( IDPORT + 1 ))                  # mock address book (book.py), loopback in the namespace
 ABB_EXTRA=()
 SRVPID=""; PXPID=""; BRPID=""; GPID=""; BKPID=""
 Z="https://10.9.0.1:8443"
@@ -156,7 +156,7 @@ ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev
 ip netns exec "$NS" python3 tools/anbfleitec/proxy.py --listen 10.9.0.1:8443 --to "127.0.0.1:$IDPORT" \
     --cert "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" --log "$TMPD/w" \
     --route "/api/kontakte=127.0.0.1:$BKPORT" > "$TMPD/px.log" 2>&1 & PXPID=$!
-ip netns exec "$NS" python3 tools/anbfleitec/buch.py --listen "127.0.0.1:$BKPORT" \
+ip netns exec "$NS" python3 tools/anbfleitec/book.py --listen "127.0.0.1:$BKPORT" \
     --jwks "http://127.0.0.1:$IDPORT/oidc/jwks.json" --issuer "$Z" --ctl "$TMPD/ctl" > "$TMPD/book.log" 2>&1 & BKPID=$!
 
 broker_auf() { # <device interval> <device ttl>
@@ -202,12 +202,14 @@ lauf() { # <image> <script> <out>
         -device "e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
-# the guest waits by itself (--warten); once it shows the user code the
+# the guest waits by itself (--wait); once it shows the user code the
 # "person" approves (allow|deny) -- like a user reading the code off the screen
-lauf_warten() { # <image> <out> <allow|deny> [extra konto args]
+run_wait() { # <image> <out> <allow|deny> [extra konto args]
     local img=$1 out=$2 dec=$3; shift 3
     : > "$out"
-    lauf "$img" "konto anmelden --anbieter=fleitec --geraet --warten $*${LW_AFTER:+;$LW_AFTER}" "$out" & GPID=$!
+    # LW_OLD=1: the first German spellings (--geraet --warten) -- the alias must keep working
+    local fl="--device --wait"; [ -n "${LW_OLD:-}" ] && fl="--geraet --warten"
+    lauf "$img" "konto anmelden --anbieter=fleitec $fl $*${LW_AFTER:+;$LW_AFTER}" "$out" & GPID=$!
     local i uc=""
     for i in $(seq 1 150); do
         uc=$(kv "$out" code); [ -n "$uc" ] && break
@@ -222,10 +224,10 @@ lauf_warten() { # <image> <out> <allow|deny> [extra konto args]
 # slow_down made certain: shortly before the guest's first poll the HOST polls
 # the same device code (still pending), then the person approves; the guest's
 # poll then comes <2 s after the host's -> slow_down, +5 s, and a final ok.
-lauf_warten_slow() { # <image> <out> <broker interval>
+run_wait_slow() { # <image> <out> <broker interval>
     local img=$1 out=$2 b=$3
     : > "$out"
-    lauf "$img" "konto anmelden --anbieter=fleitec --geraet --warten" "$out" & GPID=$!
+    lauf "$img" "konto anmelden --anbieter=fleitec --device --wait" "$out" & GPID=$!
     local i uc=""
     for i in $(seq 1 150); do
         uc=$(kv "$out" code); [ -n "$uc" ] && break
@@ -242,7 +244,7 @@ lauf_warten_slow() { # <image> <out> <broker interval>
     is "slow_down: the host's pre-poll was pending (not consumed)" "$(cat "$out.pre" 2>/dev/null)" "authorization_pending"
 }
 
-CMD="konto anmelden --anbieter=fleitec --geraet"
+CMD="konto anmelden --anbieter=fleitec --device"
 
 # ======================================================================
 echo "== 1. broker up (real fleitec-id, fake backend) =="
@@ -266,22 +268,22 @@ echo "== 2. device flow in two manual steps =="
 : > "$TMPD/w/s2c.log"; : > "$TMPD/w/c2s.log"
 cp "$TMPD/base.img" "$TMPD/d_man.img"
 lauf "$TMPD/d_man.img" "$CMD" "$TMPD/o_s1.txt"
-is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "geraet"
+is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "device"
 UC=$(kv "$TMPD/o_s1.txt" code)
 echo "$UC" | grep -qE '^[A-Z0-9]{4}-[A-Z0-9]{4}$' && ok "step 1: user code shape ($UC)" || bad "step 1: user code '$UC'"
 is "step 1: URL is the broker's" "$(kv "$TMPD/o_s1.txt" url)" "$Z/oidc/device"
-has "$TMPD/o_s1.txt" "konto: urlkomplett = $Z/oidc/device?user_code=" "step 1: complete URL carries the code"
+has "$TMPD/o_s1.txt" "konto: url_complete = $Z/oidc/device?user_code=" "step 1: complete URL carries the code"
 DC=$(kv "$TMPD/o_s1.txt" zwischen)
 [ -n "$DC" ] && ok "step 1: device code kept for step 2" || bad "step 1: no device code"
-is "step 1: interval from the broker" "$(kv "$TMPD/o_s1.txt" intervall)" "1"
+is "step 1: interval from the broker" "$(kv "$TMPD/o_s1.txt" interval)" "1"
 sleep 1.2
-lauf "$TMPD/d_man.img" "$CMD --zwischen=$DC" "$TMPD/o_s2.txt"
-is "step 2 before approval: still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "geraet"
+lauf "$TMPD/d_man.img" "$CMD --continue=$DC" "$TMPD/o_s2.txt"
+is "step 2 before approval: still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "device"
 lauf "$TMPD/d_man.img" "konto liste" "$TMPD/o_s2l.txt"
 is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s2l.txt" konten)" "0"
 approve "$UC" allow > "$TMPD/ap1.txt" 2>&1 && ok "the person approved on the broker ($(cat "$TMPD/ap1.txt"))" || bad "approve: $(cat "$TMPD/ap1.txt")"
 sleep 1.2
-lauf "$TMPD/d_man.img" "$CMD --zwischen=$DC" "$TMPD/o_s3.txt"
+lauf "$TMPD/d_man.img" "$CMD --continue=$DC" "$TMPD/o_s3.txt"
 is "step 2 after approval: state" "$(kv "$TMPD/o_s3.txt" stand)" "ok"
 is "sealed" "$(kv "$TMPD/o_s3.txt" gesiegelt)" "1"
 ACC=$(wire_tokens access_token | head -1)
@@ -321,15 +323,15 @@ is "wire: token/revoke calls with Authorization" "$(grep -oE 'authtok=[0-9]+' "$
 is "wire: POSTs that are not form-encoded" "$(grep -oE 'badct=[0-9]+' "$TMPD/wire.txt" | cut -d= -f2)" "0"
 
 # ======================================================================
-echo "== 3. --warten, the guest polls by itself =="
+echo "== 3. --wait, the guest polls by itself =="
 # ======================================================================
 cp "$TMPD/base.img" "$TMPD/d_login.img"
-lauf_warten "$TMPD/d_login.img" "$TMPD/o_w.txt" allow
-is "warten: state" "$(kv "$TMPD/o_w.txt" stand)" "ok"
-is "warten: sealed" "$(kv "$TMPD/o_w.txt" gesiegelt)" "1"
-num "warten: polls" "$(kv "$TMPD/o_w.txt" abfragen)" ge 1
+run_wait "$TMPD/d_login.img" "$TMPD/o_w.txt" allow
+is "wait: state" "$(kv "$TMPD/o_w.txt" stand)" "ok"
+is "wait: sealed" "$(kv "$TMPD/o_w.txt" gesiegelt)" "1"
+num "wait: polls" "$(kv "$TMPD/o_w.txt" polls)" ge 1
 KEN=$(kv "$TMPD/o_w.txt" kennung)
-is "warten: display name" "$(kv "$TMPD/o_w.txt" anzeige)" "justin"
+is "wait: display name" "$(kv "$TMPD/o_w.txt" anzeige)" "justin"
 
 # ======================================================================
 echo "== 4. errors from the real broker =="
@@ -342,11 +344,11 @@ chk() { # <label> <image> <out> <state> <hint key>
 }
 # denied
 cp "$TMPD/base.img" "$TMPD/d_deny.img"
-lauf_warten "$TMPD/d_deny.img" "$TMPD/o_deny.txt" deny
+run_wait "$TMPD/d_deny.img" "$TMPD/o_deny.txt" deny
 chk "denied" "$TMPD/d_deny.img" "$TMPD/o_deny.txt" abgelehnt konto.hint.dev_denied
 # wrong audience (counter-probe: the SAME valid token is fine with the right one, see section 3)
 cp "$TMPD/base.img" "$TMPD/d_aud.img"
-lauf_warten "$TMPD/d_aud.img" "$TMPD/o_aud.txt" allow --aud=another-product
+run_wait "$TMPD/d_aud.img" "$TMPD/o_aud.txt" allow --aud=another-product
 chk "wrong --aud" "$TMPD/d_aud.img" "$TMPD/o_aud.txt" abgelehnt konto.hint.jwt_aud
 # unknown client id
 cp "$TMPD/base.img" "$TMPD/d_cl.img"
@@ -363,15 +365,15 @@ hcurl -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=or
     https://konto.test:8443/oidc/token | jf error > "$TMPD/sd0.txt"
 is "slow_down: first (host) poll" "$(cat "$TMPD/sd0.txt")" "authorization_pending"
 cp "$TMPD/base.img" "$TMPD/d_sd.img"
-lauf "$TMPD/d_sd.img" "$CMD --zwischen=$SDC" "$TMPD/o_sd.txt"
+lauf "$TMPD/d_sd.img" "$CMD --continue=$SDC" "$TMPD/o_sd.txt"
 is "slow_down: the guest is told to slow down" "$(kv "$TMPD/o_sd.txt" stand)" "gebremst"
-# (a single --zwischen poll prints no new interval; the +5 lives in the --warten loop, measured below)
+# (a single --continue poll prints no new interval; the +5 lives in the --wait loop, measured below)
 cp "$TMPD/base.img" "$TMPD/d_sdw.img"
 broker_auf 6 600 || true
-lauf_warten_slow "$TMPD/d_sdw.img" "$TMPD/o_sdw.txt" 6
-is "slow_down in the --warten loop: ends signed in" "$(kv "$TMPD/o_sdw.txt" stand)" "ok"
-num "slow_down in the --warten loop: polls (slow_down + final)" "$(kv "$TMPD/o_sdw.txt" abfragen)" ge 2
-num "slow_down in the --warten loop: interval grew by >= 5 (6 -> 11)" "$(kv "$TMPD/o_sdw.txt" intervall)" ge 11
+run_wait_slow "$TMPD/d_sdw.img" "$TMPD/o_sdw.txt" 6
+is "slow_down in the --wait loop: ends signed in" "$(kv "$TMPD/o_sdw.txt" stand)" "ok"
+num "slow_down in the --wait loop: polls (slow_down + final)" "$(kv "$TMPD/o_sdw.txt" polls)" ge 2
+num "slow_down in the --wait loop: interval grew by >= 5 (6 -> 11)" "$(kv "$TMPD/o_sdw.txt" interval)" ge 11
 
 # expired code: broker device ttl 4 s
 broker_auf 1 4 || true
@@ -379,7 +381,7 @@ cp "$TMPD/base.img" "$TMPD/d_exp.img"
 lauf "$TMPD/d_exp.img" "$CMD" "$TMPD/o_e1.txt"
 EDC=$(kv "$TMPD/o_e1.txt" zwischen)
 sleep 5
-lauf "$TMPD/d_exp.img" "$CMD --zwischen=$EDC" "$TMPD/o_e2.txt"
+lauf "$TMPD/d_exp.img" "$CMD --continue=$EDC" "$TMPD/o_e2.txt"
 chk "expired" "$TMPD/d_exp.img" "$TMPD/o_e2.txt" abgelaufen konto.hint.dev_expired
 
 # ======================================================================
@@ -388,7 +390,7 @@ echo "== 5. refresh rotation against the real broker =="
 broker_auf 1 600 || true
 cp "$TMPD/base.img" "$TMPD/d_ref.img"
 : > "$TMPD/w/s2c.log"
-lauf_warten "$TMPD/d_ref.img" "$TMPD/o_r0.txt" allow
+run_wait "$TMPD/d_ref.img" "$TMPD/o_r0.txt" allow
 RKEN=$(kv "$TMPD/o_r0.txt" kennung)
 is "refresh: sign-in" "$(kv "$TMPD/o_r0.txt" stand)" "ok"
 lauf "$TMPD/d_ref.img" "konto erneuern --kennung=$RKEN" "$TMPD/o_r1.txt"
@@ -412,7 +414,7 @@ echo "== 6. sign-out =="
 # ======================================================================
 cp "$TMPD/base.img" "$TMPD/d_out.img"
 : > "$TMPD/w/s2c.log"; : > "$TMPD/w/c2s.log"
-lauf_warten "$TMPD/d_out.img" "$TMPD/o_o0.txt" allow
+run_wait "$TMPD/d_out.img" "$TMPD/o_o0.txt" allow
 OKEN=$(kv "$TMPD/o_o0.txt" kennung)
 O1=$(wire_tokens refresh_token | sed -n 1p)
 lauf "$TMPD/d_out.img" "konto abmelden --kennung=$OKEN" "$TMPD/o_o1.txt"
@@ -442,13 +444,13 @@ echo "== 8. broker token -> fkt1 (socfleitec login broker, r115b) =="
 # ======================================================================
 # The guest signs in at the REAL broker (scope fleitec.account -> the access
 # token carries `uid`). `socfleitec v1 login broker <JWT>` then swaps it at the
-# address book (mock buch.py, routed by path behind the same TLS terminator;
+# address book (mock book.py, routed by path behind the same TLS terminator;
 # real Ed25519 check against the broker's JWKS).
 if [ -n "$SOC_PROG" ]; then
     printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "https://10.9.0.1:8443" > "$TMPD/fl.conf"
     : > "$TMPD/w/s2c.log"
     cp "$TMPD/base.img" "$TMPD/d_soc0.img"
-    lauf_warten "$TMPD/d_soc0.img" "$TMPD/o_soc0.txt" allow
+    run_wait "$TMPD/d_soc0.img" "$TMPD/o_soc0.txt" allow
     is "bridge: device sign-in at the broker" "$(kv "$TMPD/o_soc0.txt" stand)" "ok"
     ST=$(wire_tokens access_token | head -1)
     IDT=$(wire_tokens id_token | head -1)
@@ -531,13 +533,13 @@ PY
     num "login token still refuses a JWT (only fkz1/fkm1/fkt1 are tokens)" "$(grep -ac '^err.bad' "$TMPD/o_socj.txt")" eq 1
     num "control: a fkt1-shaped token is accepted by login token" "$(grep -ac '^ok' "$TMPD/o_socj.txt")" eq 1
 
-    # --- 8d. sign-in AND swap in one step (konto --tauschen), no file for the JWT
+    # --- 8d. sign-in AND swap in one step (konto --exchange), no file for the JWT
     echo "$UIDC" > "$TMPD/ctl/accounts"; echo orientos > "$TMPD/ctl/aud"; echo 0 > "$TMPD/ctl/clock"
     : > "$TMPD/ctl/book.log"; : > "$TMPD/w/s2c.log"
     cp "$TMPD/soc_base.img" "$TMPD/d_one.img"
-    LW_AFTER="socfleitec v1 contacts;cat /etc/social/fleitec.conf" lauf_warten "$TMPD/d_one.img" "$TMPD/o_one.txt" allow --tauschen
+    LW_AFTER="socfleitec v1 contacts;cat /etc/social/fleitec.conf" run_wait "$TMPD/d_one.img" "$TMPD/o_one.txt" allow --exchange
     is "one step: sign-in" "$(kv "$TMPD/o_one.txt" stand)" "ok"
-    is "one step: swap reported" "$(kv "$TMPD/o_one.txt" tausch)" "ok"
+    is "one step: swap reported" "$(kv "$TMPD/o_one.txt" exchange)" "ok"
     JW1=$(wire_tokens access_token | head -1)
     grep -aq "^account.$UIDC" "$TMPD/o_one.txt" && ok "one step: socfleitec reports account $UIDC" || bad "one step: no 'account $UIDC' line"
     FKT1=$(cat "$TMPD/ctl/issued" 2>/dev/null)
@@ -549,10 +551,10 @@ PY
     num "one step: the book got swap calls" "$(grep -ac 'POST /api/kontakte/zugang-broker' "$TMPD/w/book-c2s.log")" ge 1
     # refused swap on the same image: session stands, old fkt1 untouched
     echo other-product > "$TMPD/ctl/aud"; : > "$TMPD/ctl/book.log"
-    LW_AFTER="konto liste;cat /etc/social/fleitec.conf" lauf_warten "$TMPD/d_one.img" "$TMPD/o_one2.txt" allow --tauschen
+    LW_AFTER="konto liste;cat /etc/social/fleitec.conf" run_wait "$TMPD/d_one.img" "$TMPD/o_one2.txt" allow --exchange
     echo orientos > "$TMPD/ctl/aud"
     is "refused swap: sign-in still ok" "$(kv "$TMPD/o_one2.txt" stand)" "ok"
-    is "refused swap: reported" "$(kv "$TMPD/o_one2.txt" tausch)" "abgelehnt"
+    is "refused swap: reported" "$(kv "$TMPD/o_one2.txt" exchange)" "denied"
     is "refused swap: reason at the book" "$(grep -a 'swap' "$TMPD/ctl/book.log" | head -1)" "swap refused aud"
     has "$TMPD/o_one2.txt" "token=$FKT1" "refused swap: the old fkt1 stays in the configuration"
     num "refused swap: still one account entry" "$(kv "$TMPD/o_one2.txt" konten)" eq 1
@@ -560,11 +562,12 @@ PY
     printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "https://10.9.0.77:8443" > "$TMPD/fl_off.conf"
     ABB_EXTRA=("/etc/social/fleitec.conf=$TMPD/fl_off.conf"); abbild "$TMPD/off_base.img" || bad "image for the offline case"; ABB_EXTRA=()
     cp "$TMPD/off_base.img" "$TMPD/d_off.img"
-    LW_AFTER="cat /etc/social/fleitec.conf;konto anmelden --anbieter=fleitec --tauschen" lauf_warten "$TMPD/d_off.img" "$TMPD/o_off.txt" allow --tauschen
+    # ALIAS CHECK: this run uses ONLY the old German spellings (--geraet --warten --tauschen)
+    LW_OLD=1 LW_AFTER="cat /etc/social/fleitec.conf;konto anmelden --anbieter=fleitec --tauschen" run_wait "$TMPD/d_off.img" "$TMPD/o_off.txt" allow --tauschen
     is "book offline: sign-in still ok" "$(kv "$TMPD/o_off.txt" stand)" "ok"
-    is "book offline: reported" "$(kv "$TMPD/o_off.txt" tausch)" "keinnetz"
+    is "book offline: reported (old flags --geraet --warten --tauschen still work)" "$(kv "$TMPD/o_off.txt" exchange)" "offline"
     num "book offline: no token= written" "$(grep -ac '^token=' "$TMPD/o_off.txt")" eq 0
-    has "$TMPD/o_off.txt" "tauschen geht nur mit --geraet" "--tauschen without --geraet is refused"
+    has "$TMPD/o_off.txt" "--exchange needs --device" "--tauschen (old name) without --device is refused"
     # the book saw no browser header, and the proxy routed only /api/kontakte to it
     num "the broker never saw an /api/kontakte call" "$(grep -ac 'POST /api/kontakte' "$TMPD/w/c2s.log")" eq 0
     num "the book got the swap calls" "$(grep -ac 'POST /api/kontakte/zugang-broker' "$TMPD/w/book-c2s.log")" ge 6

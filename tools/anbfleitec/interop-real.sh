@@ -5,7 +5,7 @@
 # fleitec-id (fake backend, local), MEASURED. Nothing is mocked here.
 #
 # interop.sh (section 8) is the FAST run: a python mock of the address book
-# (buch.py) with a Ed25519 check of its own. This run is the other half: the
+# (book.py) with a Ed25519 check of its own. This run is the other half: the
 # guest meets the real code on both sides.
 #
 #   guest (qemu, OrientOS)  --https-->  proxy.py (TLS 1.3 terminator, path routing)
@@ -243,10 +243,10 @@ lauf() { # <image> <script> <out>
         -device "e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
-lauf_warten() { # <image> <out> <allow|deny>
+run_wait() { # <image> <out> <allow|deny>
     local img=$1 out=$2 dec=$3
     : > "$out"
-    lauf "$img" "konto anmelden --anbieter=fleitec --geraet --warten" "$out" & GPID=$!
+    lauf "$img" "konto anmelden --anbieter=fleitec --device --wait" "$out" & GPID=$!
     local i uc=""
     for i in $(seq 1 150); do
         uc=$(kv "$out" code); [ -n "$uc" ] && break
@@ -339,7 +339,7 @@ echo "== 4. the guest signs in (device flow) and swaps for a fkt1 =="
 abbild "$TMPD/base.img" || { echo "ANBREAL: $pass passed, $fail failed"; exit 1; }
 : > "$TMPD/w/s2c.log"
 cp "$TMPD/base.img" "$TMPD/d_in.img"
-lauf_warten "$TMPD/d_in.img" "$TMPD/o_in.txt" allow
+run_wait "$TMPD/d_in.img" "$TMPD/o_in.txt" allow
 is "device sign-in at the broker (konto)" "$(kv "$TMPD/o_in.txt" stand)" "ok"
 ST=$(wire_tokens access_token | head -1)
 IDT=$(wire_tokens id_token | head -1)
