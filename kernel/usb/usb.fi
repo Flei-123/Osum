@@ -83,7 +83,7 @@ export {
     // Liste der Massenspeicher und zugleich `blk.DEV_USB0 + i`.
     msc_ready_at, msc_blocks_at, msc_bsize_at, msc_read_at, msc_write_at,
     msc_count, MAX_MSC,
-    unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
+    probe, unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
     // RUNDE HIDWEG: die Zahlen von `hidin`, durch diese Tuer. `kgui`
     // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
     // Kreis im Modulgraphen, und der bleibt ein Baum.
@@ -814,6 +814,70 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
 // Augenblick braucht, bevor er eine Verbindung meldet -- und ein
 // Treiber, der beides in einer Schleife tut, findet das erste Geraet
 // und das zweite nicht.
+// Enumeration trace: "usb: t <step> <value>" on the serial line, one line per step.
+// Steps: 1 scan power on, 2 power done (ports with PP), 3 port connected (port),
+// 4 port reset ok (speed), 5 port reset failed (portsc), 6 slot enabled (slot),
+// 7 slot enable failed, 8 address ok, 9 address failed (cc), 10 descriptor ok,
+// 11 descriptor failed, 12 configure ok, 13 configure failed, 14 second pass.
+fn tr(state: u64, step: u64, v: u64) {
+    if !kstate.mode_on(state, kstate.M_USBTRACE) {
+        return
+    }
+    var t_hd: [u8; 9] = "usb: t \0\0"
+    serial.puts((&t_hd[0]) as u64)
+    serial.dec(step)
+    serial.put(32 as u8)
+    serial.dec(v)
+    serial.nl()
+}
+
+// Diagnostic line for one input device: "usb: t probe <dev> st=<ep state> deq=<ctrl ring pos> enq=<our pos> ps=<portsc>".
+static mut probe_n: u64 = 0
+
+fn probe(state: u64) {
+    if probe_n >= 12 || !kstate.mode_on(state, kstate.M_USBTRACE) {
+        return
+    }
+    probe_n = probe_n + 1
+    var t_p: [u8; 14] = "usb: t probe \0"
+    var t_s: [u8; 5] = " st=\0"
+    var t_d: [u8; 6] = " deq=\0"
+    var t_e: [u8; 6] = " seq=\0"
+    var t_c: [u8; 5] = " ps=\0"
+    var t_x: [u8; 6] = " sts=\0"
+    if g(state, S_READY) == 0 {
+        return
+    }
+    var d: u64 = 0
+    while d < 2 {
+        let slot: u64 = dg(state, d, D_SLOT)
+        let dci: u64 = dg(state, d, D_INTDCI)
+        if slot != 0 && dci != 0 {
+            let i: u64 = xhci.ep_find(state, slot, dci)
+            serial.puts((&t_p[0]) as u64)
+            serial.dec(d)
+            serial.puts((&t_s[0]) as u64)
+            serial.dec(xhci.ep_state(state, slot, dci))
+            serial.puts((&t_d[0]) as u64)
+            let dq: u64 = xhci.ep_deq(state, slot, dci) & 0xFFFFFFFE
+            let rg: u64 = xhci.ep_ring(state, i)
+            if dq >= rg {
+                serial.dec(dq - rg)
+            } else {
+                serial.dec(99999)
+            }
+            serial.puts((&t_e[0]) as u64)
+            serial.dec(xhci.ep_seq(state, i))
+            serial.puts((&t_c[0]) as u64)
+            serial.dec(xhci.portsc(state, dg(state, d, D_PORT)))
+            serial.puts((&t_x[0]) as u64)
+            serial.dec(xhci.usbsts(state))
+            serial.nl()
+        }
+        d = d + 1
+    }
+}
+
 fn scan(state: u64) {
     // ============================================= RUNDE BLECH-HID
     //
@@ -836,11 +900,14 @@ fn scan(state: u64) {
     // ansteht. `power_all` gibt zurueck, an wie vielen Anschluessen PP
     // danach steht -- das ist die Zahl, an der eine Maus, die nicht
     // leuchtet, abzulesen ist.
+    tr(state, 1, n)
     let _mit: u64 = xhci.power_all(state)
+    tr(state, 2, _mit)
     xhci.drain(state)
     var p: u64 = 1
     while p <= n {
         if xhci.port_connected(state, p) {
+            tr(state, 3, p)
             mark(state, p)
             attach(state, p)
         }
@@ -864,6 +931,7 @@ fn scan(state: u64) {
     // ueberfluessig; auf Justins Brett, wo nichts gefunden wurde, ist
     // sie der ganze Zweck.
     if g(state, S_NDEV) == 0 {
+        tr(state, 14, 0)
         xhci.udelay(state, 300000)
         xhci.drain(state)
         p = 1
@@ -880,6 +948,39 @@ fn scan(state: u64) {
     // `port_clear_changes`); was von hier an anschlaegt, hat wirklich
     // jemand gesteckt.
     s(state, S_BUSY, 0)
+    if kstate.mode_on(state, kstate.M_USBSTALL) {
+        stall_test(state)
+    }
+}
+
+// Word `usbstall`: send one control request the device must STALL (unknown standard request 0x7E), report whether endpoint 0 is
+// left Halted, then send a valid request (SET_IDLE). A driver without the Halted recovery times out on the second one.
+// Line: `usb: stalltest r1=<100+rc> halted=<0|1> r2=<100+rc>` -- good = r1 below 100, halted=0, r2 >= 100.
+fn stall_test(state: u64) {
+    var t_a: [u8; 19] = "usb: stalltest r1=\0"
+    var t_b: [u8; 9] = " halted=\0"
+    var t_c: [u8; 5] = " r2=\0"
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_SLOT) != 0 {
+            let slot: u64 = dg(state, d, D_SLOT)
+            let r1: i64 = xhci.control(state, slot, 0x00, 0x7E, 0, 0, 0, 0, false)
+            var h: u64 = 0
+            if xhci.ep_halted(state, slot, 1) {
+                h = 1
+            }
+            let r2: i64 = xhci.control(state, slot, 0x21, 0x0A, 0, dg(state, d, D_IFACE), 0, 0, false)
+            serial.puts((&t_a[0]) as u64)
+            serial.dec((r1 + 100) as u64)
+            serial.puts((&t_b[0]) as u64)
+            serial.dec(h)
+            serial.puts((&t_c[0]) as u64)
+            serial.dec((r2 + 100) as u64)
+            serial.nl()
+            return
+        }
+        d = d + 1
+    }
 }
 
 fn mark(state: u64, p: u64) {
@@ -967,15 +1068,18 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     var speed: u64 = vorspeed
     if !mitspeed {
         if !xhci.port_reset(state, rootport) {
+            tr(state, 5, xhci.portsc(state, rootport))
             klog.sayn(state, klog.L_INFO, lq(), (&l_rst[0]) as u64,
                 rootport)
             s(state, S_FAILS, g(state, S_FAILS) + 1)
             return false
         }
         speed = xhci.port_speed(state, rootport)
+        tr(state, 4, speed)
     }
     let slot: u64 = xhci.slot_enable(state)
     if slot == 0 {
+        tr(state, 7, 0)
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return false
     }
@@ -1010,22 +1114,29 @@ fn attach_at(state: u64, rootport: u64, route: u64, hubdev: u64,
     // gleich an `address` scheitert, auf dem Schirm steht.
     let f: u64 = found_new(state, rootport, hubport, speed)
     ds(state, d, D_FUND, f + 1)
+    tr(state, 6, slot)
 
     if !address(state, d) {
+        tr(state, 9, 0)
         drop_dev(state, d)
         return false
     }
+    tr(state, 8, slot)
     fund_flag(state, f, F_ADDR)
     if !describe(state, d) {
+        tr(state, 11, 0)
         drop_dev(state, d)
         return false
     }
+    tr(state, 10, slot)
     fund_flag(state, f, F_DESC)
     fund_id(state, f, dg(state, d, D_VID), dg(state, d, D_PID))
     if !configure(state, d) {
+        tr(state, 13, 0)
         drop_dev(state, d)
         return false
     }
+    tr(state, 12, slot)
     fund_flag(state, f, F_CFG)
     s(state, S_ENUMS, g(state, S_ENUMS) + 1)
     s(state, S_NDEV, g(state, S_NDEV) + 1)
@@ -2029,6 +2140,7 @@ fn bind(state: u64, d: u64) {
     // der Platz frei ist oder der bisherige Eintrag nicht mehr taugt.
     if k == DRV_KBD {
         hid_start(state, d)
+        tr(state, 27, d)
         if !kbd_taugt(state) {
             s(state, S_KBD, d + 1)
         }
@@ -2457,6 +2569,7 @@ fn ncm_start(state: u64, d: u64) {
 // Tastatur, die einmal getippt hat.
 
 fn hid_start(state: u64, d: u64) {
+    tr(state, 20, d)
     let slot: u64 = dg(state, d, D_SLOT)
     let iface: u64 = dg(state, d, D_IFACE)
     // RUNDE HID: ZUERST DIE BERICHTSBESCHREIBUNG VERSUCHEN.
@@ -2483,19 +2596,26 @@ fn hid_start(state: u64, d: u64) {
         generisch = hid_descriptor(state, d, slot, iface)
     }
     ds(state, d, D_GENERIC, 0)
+    tr(state, 21, yes(generisch))
     if generisch {
         ds(state, d, D_GENERIC, 1)
         s(state, S_GENDEV, g(state, S_GENDEV) + 1)
         // SET_PROTOCOL 1 = Berichtsprotokoll.
-        xhci.control(state, slot, 0x21, 0x0B, 1, iface, 0, 0, false)
-        xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+        let r1: i64 = xhci.control(state, slot, 0x21, 0x0B, 1, iface, 0, 0, false)
+        tr(state, 22, (r1 + 100) as u64)
+        tr(state, 28, xhci.ep_code(state, xhci.ep_find(state, slot, 1)))
+        let r2: i64 = xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+        tr(state, 23, (r2 + 100) as u64)
         hid_claim(state, d)
+        tr(state, 24, dg(state, d, D_DRIVER))
         ds(state, d, D_PREV, 0)
         let i2: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
         if i2 < xhci.MAX_EP {
             ds(state, d, D_SEQ, xhci.ep_seq(state, i2))
         }
+        tr(state, 25, d)
         arm(state, d)
+        tr(state, 26, d)
         return
     }
     if dg(state, d, D_DRIVER) == DRV_HIDGEN {

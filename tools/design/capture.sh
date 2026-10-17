@@ -379,6 +379,12 @@ printf 'Ein Brief an Justin.\n' > "$OUT/heim/brief.txt"
 ARGS+=("/users/justin/notizen.txt=$OUT/heim/notizen.txt@0644"
        "/users/justin/tabelle.csv=$OUT/heim/tabelle.csv@0644"
        "/users/justin/brief.txt=$OUT/heim/brief.txt@0644")
+# X5: HOMEFILES=<dir> puts every regular file of <dir> into /users/justin (the explorer4 gate brings test pictures)
+if [ -n "${HOMEFILES:-}" ] && [ -d "$HOMEFILES" ]; then
+    for hf in "$HOMEFILES"/*; do
+        [ -f "$hf" ] && ARGS+=("/users/justin/$(basename "$hf")=$hf@0644")
+    done
+fi
 rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
 # RUNDE MERGE-6: HIER STAND EIN NAME, JETZT STEHT DIE REGEL.
 #

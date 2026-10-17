@@ -245,3 +245,16 @@ check that read `id=9` out of the pulse's window list, a lost `name=Save`, a los
 Fix: `kgui.input_pulse` holds the line lock around its serial block, and `a11ydemo lockprobe` writes each
 line with ONE `write` (`lb_say/lb_num/lb_nl`). Measured: `lockseal` 5 runs in a row 43/0 (before: one
 clean run in three), `midline` 3 runs 50/0.
+
+## Y3 (17.10.2026): file manager against Windows 11 (measured on tools/midline run, 1280x800, scale 1)
+
+Screenshot: `docs/shots/y3/explorer-audit.png` (no fix needed for the first four rows, so no before/after pair).
+
+| item | Windows 11 | OrientOS (measured) | verdict |
+|---|---|---|---|
+| list row pitch | 32 px | 32 px (rows at y 241, 273, 305 ...) | ok |
+| title bar | 32 px | 33 px blue run = `title_bar=32` + 1 px frame | ok |
+| body / caption text | 9-12 pt (12-16 px) | 15 px / 12 px (`T_BODY` / `T_CAPTION`) | ok |
+| window corner radius | 8 px | 12 px (`radius_window=12`, tied to `R_LARGE` by tools/tokens drift guard + theme presets + aacorner) | deviation, design decision (not changed) |
+| row hover | ~4 % tint over the list | `TOK_BUTTON_HOVER` = #cbd5e1 on #f1f5f9 (~16 % darker, darker than the selected row #cfdcfa) | deviation, lives in vendor fUi `row_bg` (wave3.fi) |
+| midline (icon/text/row) | one centre line | 50/0 (tools/midline) | ok |
