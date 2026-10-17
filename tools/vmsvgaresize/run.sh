@@ -48,11 +48,13 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 cat "$D/o.res" 2>/dev/null
 n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
 [ "$n" -ge 3 ] && ok "$n hint steps measured" || bad "only $n hint steps measured"
-while read -r i rw rh black rows lastb ew eh; do
+while read -r i rw rh black rows lastb ew eh dup; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
     awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
     [ "$rows" -ge 20 ] && ok "$s: taskbar at the bottom (rows $rows)" || bad "$s: no taskbar at the bottom (rows $rows)"
+    awk -v b="$lastb" 'BEGIN{exit !(b<0.05)}' && ok "$s: last bar row not black (share $lastb)" || bad "$s: last row black (share $lastb)"
+    awk -v b="$dup" 'BEGIN{exit !(b<0.5)}' && ok "$s: bar not repeated by a stale stride (dup share $dup)" || bad "$s: bar repeated (dup share $dup)"
 done < "$D/o.res"
 echo "resize: $pass ok, $fail fail"
 [ "$fail" = 0 ]

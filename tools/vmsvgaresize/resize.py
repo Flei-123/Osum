@@ -4,7 +4,7 @@
 # Boots nothing itself. Logs in, waits for the desktop, then asks QEMU for each size through the VNC SetDesktopSize message (the same
 # kernel path as a VirtualBox hint: vmsvga.host_pending -> vmode.follow_host). After every size the screendump is saved
 # (<base>.<n>.ppm) and measured; one line per size is written to <base>.res:
-#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <bottom row all black 1/0>
+#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share>
 import os
 import sys
 import time
@@ -45,8 +45,19 @@ def measure(mon, tag):
     bot = img[h - 60 :]
     ref = img[max(0, h - 130) : h - 70].reshape(-1, 3).mean(axis=0) if h > 200 else np.zeros(3)
     rows = int(np.sum(np.abs(bot.astype(int).mean(axis=1) - ref).max(axis=1) > 12))
-    lastblack = int(np.all(img[h - 1] < 6))
-    return w, h, black, rows, lastblack
+    lastblack = float(np.mean(np.all(img[h - 1] < 6, axis=1)))
+    # r1006: the bar must be painted with the NEW row length. A stale stride shows the left part of the bar again, shifted by the old
+    # width. Measure it: the share of bar pixels (not the white bar colour) that equal the pixel `d` columns to the left, best `d`.
+    bar = img[h - 46 : h - 6].astype(np.int16)
+    ink = bar.min(axis=2) < 200
+    dup = 0.0
+    for d in range(300, w - 100, 4):
+        n = int(ink[:, d:].sum())
+        if n < 200:
+            continue
+        eq = np.all(bar[:, d:] == bar[:, :-d], axis=2) & ink[:, d:]
+        dup = max(dup, float(eq.sum()) / n)
+    return w, h, black, rows, lastblack, dup
 
 
 def main():
@@ -79,7 +90,7 @@ def main():
         m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
         ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
         r = measure(mon, str(n))
-        out.write("%d %d %d %.3f %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh))
+        out.write("%d %d %d %.3f %d %.3f %d %d %.3f\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5]))
         out.flush()
     out.close()
     mon.quit()
