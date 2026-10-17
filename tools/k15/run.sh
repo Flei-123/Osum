@@ -304,7 +304,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # two-line lists (Start menu) set the NAME in the bold cut, and without
 # the file fUi quietly falls back to the regular one -- then this runner
 # would measure a picture no user ever sees.
-ARGS=(build "$TMPD/disk.img" 16384 /lib/
+ARGS=(build "$TMPD/disk.img" 32768 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS"
       "/lib/bold.ttf=assets/osum-sans-bold.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
@@ -1146,7 +1146,7 @@ sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
 # MERGE-8: beide Runden haben aus demselben Grund vergroessert;
 # 8192 (ALLTAG) deckt 6144 (MERGE-7) mit ab.
 # RUNDE BAUFEHLER: dieselbe Erhoehung wie oben, gleicher Grund.
-ARGS2=(build "$TMPD/disk2.img" 16384 /lib/
+ARGS2=(build "$TMPD/disk2.img" 32768 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
