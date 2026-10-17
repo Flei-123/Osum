@@ -55,17 +55,17 @@ while read -r i rw rh black rows lastb ew eh dup mcx mbot; do
     [ "$rows" -ge 20 ] && ok "$s: taskbar at the bottom (rows $rows)" || bad "$s: no taskbar at the bottom (rows $rows)"
     awk -v b="$lastb" 'BEGIN{exit !(b<0.05)}' && ok "$s: last bar row not black (share $lastb)" || bad "$s: last row black (share $lastb)"
     awk -v b="$dup" 'BEGIN{exit !(b<0.5)}' && ok "$s: bar not repeated by a stale stride (dup share $dup)" || bad "$s: bar repeated (dup share $dup)"
-    # The start menu is only placed when it is SHOWN. In QEMU the first open after a resize is placed one step late (centre/bottom of the
-    # previous size) while VirtualBox (z6, 1024 -> 1280) opened it correctly: reported as NOTE until r1010 is solved, not counted.
+    # r1010: the start menu follows a screen size change at once (also while hidden), so the FIRST opening after every resize stands centred
+    # above the bar of the NEW size. Before the fix QEMU opened it one step late (centre / bottom of the previous size).
     if [ "$mcx" -ge 0 ]; then
         d=$(( mcx - rw / 2 )); [ "$d" -lt 0 ] && d=$(( -d ))
         if [ "$d" -le 8 ] && [ "$mbot" -le $(( rh - 40 )) ] && [ "$mbot" -ge $(( rh - 120 )) ]; then
             ok "$s: start menu centred and above the bar (centre $mcx, bottom $mbot)"
         else
-            echo "  NOTE  $s: start menu stale (centre $mcx of $rw, bottom $mbot of $rh) -- r1010"
+            bad "$s: start menu stale (centre $mcx of $rw, bottom $mbot of $rh)"
         fi
     else
-        echo "  NOTE  $s: start menu not found -- r1010"
+        bad "$s: start menu not found"
     fi
 done < "$D/o.res"
 echo "resize: $pass ok, $fail fail"
