@@ -86,6 +86,7 @@ static mut w_shb: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
 static mut image: u64 = 0 // die Bildpunkte, oder 0
+static mut image_bytes: u64 = 0 // size of the mapping behind `image`
 static mut bw: u64 = 0
 static mut bh: u64 = 0
 static mut c_oben: u64 = 0
@@ -331,7 +332,14 @@ fn image_load(pfad: u64) -> bool {
         return false
     }
     let bytes: u64 = iw * ih * 4
-    let p: u64 = wlibc.map_surface(bytes)
+    // reload (desktop context menu): a picture that fits into the old mapping reuses it -- a process has no unmap for these
+    var p: u64 = 0
+    if image != 0 && bytes <= image_bytes {
+        p = image
+    } else {
+        p = wlibc.map_surface(bytes)
+        image_bytes = bytes
+    }
     if p == 0 {
         io.close(fd)
         return false
@@ -753,6 +761,84 @@ fn welcome_start() {
 // r1004: THE HOST / SETTINGS CHANGED THE RESOLUTION. The wallpaper window is as big as the screen was; a window never grows past its
 // buffer, so a new window with a new shared buffer is made, put at the back, painted, and only then the old one goes. False = nothing
 // changed (no shared buffer to remake, or the server refused): the old window stays and the check tries again.
+// ------------------------------------------------------------------ context menu (right click on the bare desktop)
+// Four rows, text from the catalogue (`desktop.context`): display settings, change background, settings, reload.
+// Same pattern as the task bar's button menu: `wlib.menu_open` on the popup layer, `wlib.step` pumps the menu's own window,
+// `wlib.menu_at` says what was picked (0xFFFF = dismissed).
+static mut k_ctx: [u8; 16] = "desktop.context\0"
+static mut ctx_open: u64 = 0
+static mut p_settings: [u8; 14] = "/bin/settings\0"
+static mut a_settings: [u8; 9] = "settings\0"
+static mut a_page0: [u8; 7] = "page=0\0"
+static mut a_page1: [u8; 7] = "page=1\0"
+static mut p_wall: [u8; 15] = "/etc/wallpaper\0"
+static mut s_ctxo: [u8; 22] = "desktop: context open\0"
+static mut s_ctxp: [u8; 23] = "desktop: context pick=\0"
+
+fn settings_open(page: u64) {
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[0 as usize] = (&a_settings[0 as usize]) as u64
+    var argc: u64 = 1
+    if page == 0 {
+        argv[1 as usize] = (&a_page0[0 as usize]) as u64
+        argc = 2
+    } else if page == 1 {
+        argv[1 as usize] = (&a_page1[0 as usize]) as u64
+        argc = 2
+    }
+    let _pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_settings[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, argc)
+}
+
+fn wallpaper_reload() {
+    if !image_load((&p_wall[0 as usize]) as u64) {
+        image = 0
+    }
+    cv_step = 0
+    all_paint()
+    module_malen()
+}
+
+fn ctx_show() {
+    if ctx_open != 0 {
+        return
+    }
+    let mp: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(),
+        msg.get((&k_ctx[0 as usize]) as u64), 4)
+    if mp >= wlib.MAXWN {
+        return
+    }
+    ctx_open = 1
+    say((&s_ctxo[0 as usize]) as u64)
+    nl()
+}
+
+// once per round while the menu is open
+fn ctx_step() {
+    let _st: u64 = wlib.step()
+    let r: u64 = wlib.menu_at()
+    if r == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    ctx_open = 0
+    wlib.menu_close()
+    if r > 3 {
+        return
+    }
+    say((&s_ctxp[0 as usize]) as u64)
+    sayn(r)
+    nl()
+    if r == 0 {
+        settings_open(1)
+    } else if r == 1 {
+        settings_open(0)
+    } else if r == 2 {
+        settings_open(99)
+    } else {
+        wallpaper_reload()
+    }
+}
+
 fn desk_rebuild() -> bool {
     var s_rb: [u8; 20] = "desktop: rebuilt w=\0"
     var s_rh: [u8; 4] = " h=\0"
@@ -1083,6 +1169,8 @@ fn u_start(args: u64) -> u64 {
                         sayn(b0)
                         nl()
                         module_malen()
+                    } else {
+                        ctx_show()
                     }
                 } else if modul.bearbeiten() {
                     // ANFASSEN. Nur im Bearbeitungsmodus -- sonst
@@ -1188,6 +1276,9 @@ fn u_start(args: u64) -> u64 {
                 }
             }
             n = n + 1
+        }
+        if ctx_open != 0 {
+            ctx_step()
         }
         runde = runde + 1
         // ==================================================== RUNDE MODULE

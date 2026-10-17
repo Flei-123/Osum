@@ -823,6 +823,15 @@ class Fahrer:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("dmenue"):
+            # Row <N> of the desktop's context menu (right click on the bare desktop): the menu window is the last
+            # `wlib: win id= x= y= w= h=` line (uitrace); it has no title bar, rows are (h - 4) / 4 high.
+            n = int(name[6:])
+            m = letzte(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            zh = (int(m.group(4)) - 4) // 4
+            return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("emenue"):
             # Die Zeile <N> des offenen Kontextmenues des Dateimanagers.
             # Es meldet Ecke und Hoehe des MENUEFENSTERS
