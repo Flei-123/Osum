@@ -39,20 +39,64 @@ def p95_bucket(f):
     return 7
 
 
-EDGE = ["<8", "<12", "<15.5", "<17.5", "<21", "<34", "<51", ">=51"]
-# W-L (17.10.2026): the 60 Hz slot is gone (lj_wait/lj_may_compose: a frame as soon as there is something to paint, at most every 6 ms).
-# The cadence lines are printed on every F12 AND on every desktop pulse, so single lines cannot be told apart by phase. The pass/fail
-# verdict for latency is tools/latency (statistical judge, counter-proof nolatfix); here the cadence is only REPORTED per case
-# (frame intervals < 17.5 ms / 17.5-34 ms / >= 34 ms, summed over all lines) so a regression is visible in the log.
+# r1039 (17.10.2026): hard thresholds. The `wm: cadence` lines do not describe the active phases (they are printed on every desktop pulse and
+# every F12; their intervals are dominated by idle repaints), so the verdict uses the slices of tools/latency: every F12 and every pulse prints
+# `wm: bild` (frame times) + `wm: lat` (poll gaps, frames driven by the pointer). A slice with >= 3 pointer-driven frames is an ACTIVE slice;
+# the first two slices (boot rest, idle) are not judged. The drehbuch tools/fps/fps.txt now runs through tools/design/audit.sh (PS/2 mouse
+# from the QEMU monitor), so the pointer sweep / window drag / start menu phases really get fed.
+LIM_GAP = 2           # poll gaps > 33 ms per active slice (the serial pulse itself is one)
+MIN_POLLS = 2000      # median polls per active slice of the shipping loop (the old 10-20 ms tick loop makes < 1000)
+MIN_FRAMES = 12       # median painted frames per active slice (a sweep must be seen, not skipped)
+
+
+def slices(case):
+    p = os.path.join(sys.argv[1], case, "serial.txt")
+    out = []
+    if not os.path.exists(p):
+        return out
+    last = None
+    for line in open(p, "rb").read().decode("latin1").splitlines():
+        m = re.search(r"wm: bild n=(\d+) mittel=(\d+) max=(\d+) ueber16=(\d+) fach=([\d ]+)", line)
+        if m:
+            last = (int(m.group(1)), int(m.group(3)), [int(x) for x in m.group(5).split()])
+            continue
+        m = re.search(r"wm: lat gapn=(\d+) gapmean=(\d+) gapwait=(\d+) gapmax=(\d+) gap8=(\d+) gap16=(\d+) gap33=(\d+) latn=(\d+)", line)
+        if m and last is not None:
+            out.append(dict(frames=last[0], fmax=last[1], f32=sum(last[2][6:8]), polls=int(m.group(1)), gap33=int(m.group(7)),
+                            latn=int(m.group(8))))
+            last = None
+    return out[2:]
+
+
+def active(case):
+    return [r for r in slices(case) if r["latn"] >= 3]
+
+
+def median(v):
+    v = sorted(v)
+    return v[len(v) // 2] if v else 0
+
+
 for case in ("paced", "nolatfix"):
-    rows = cadence(case)
-    tot = [0] * 8
-    for r in rows:
-        for i, c in enumerate(r["fach"][:8]):
-            tot[i] += c
-    n = max(sum(tot), 1)
-    print("== %s: %d cadence lines, %d intervals: <17.5 ms %d%%, 17.5-34 ms %d%%, >=34 ms %d%%  fach=%s" % (
-        case, len(rows), sum(tot), sum(tot[:4]) * 100 // n, (tot[4] + tot[5]) * 100 // n, (tot[6] + tot[7]) * 100 // n, tot))
+    act = active(case)
+    print("== %s: %d active slices, median polls %d, median frames %d, slices with > %d gaps > 33 ms: %d, frames >= 32 ms: %d of %d" % (
+        case, len(act), median([r["polls"] for r in act]), median([r["frames"] for r in act]), LIM_GAP,
+        sum(1 for r in act if r["gap33"] > LIM_GAP), sum(r["f32"] for r in act), sum(r["frames"] for r in act)))
+act = active("paced")
+if os.path.exists(os.path.join(sys.argv[1], "paced", "serial.txt")):
+    chk(len(act) >= 20, "paced: %d active slices (need 20: the pointer phases are fed)" % len(act))
+    if act:
+        chk(median([r["frames"] for r in act]) >= MIN_FRAMES, "paced: median %d frames per active slice (need %d)" % (median([r["frames"] for r in act]), MIN_FRAMES))
+        calm = sum(1 for r in act if r["gap33"] <= LIM_GAP) * 100 // len(act)
+        chk(calm >= 90, "paced: %d%% of the active slices have <= %d poll gaps > 33 ms (need 90%%)" % (calm, LIM_GAP))
+        chk(median([r["polls"] for r in act]) >= MIN_POLLS, "paced: median %d polls per active slice (need %d)" % (median([r["polls"] for r in act]), MIN_POLLS))
+        fr = sum(r["frames"] for r in act)
+        f32 = sum(r["f32"] for r in act)
+        chk(f32 * 100 <= fr and sum(1 for r in act if r["f32"]) <= 3, "paced: frames >= 32 ms: %d of %d (limit 1%%, at most 3 slices)" % (f32, fr))
+old = active("nolatfix")
+if os.path.exists(os.path.join(sys.argv[1], "nolatfix", "serial.txt")):
+    mp = median([r["polls"] for r in old])
+    chk(mp < MIN_POLLS // 2, "nolatfix (counter-proof): median %d polls per active slice (must be < %d: the old loop is slower)" % (mp, MIN_POLLS // 2))
 
 
 def green(case):
