@@ -41,6 +41,7 @@ geom = last(r"taskbar: geom edge=0 x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 F = {}
 for n in ("lang", "net", "snd", "battery", "clock"):
     F[n] = last(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)" % n)
+F["noti"] = last(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)")   # optional notification bell field
 F["chevron"] = last(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 start = last(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 btn = last(r"taskbar: btn i=0 id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -72,12 +73,13 @@ def inkbox(x0, y0, x1, y1, bg=None, thr=70):
     return None if r < 0 else (l, t, r, b)
 
 # ---- rects
-rects = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in need}   # absolute y
-order = ["chevron", "lang", "net", "snd", "battery", "clock"]
+order = ["chevron"] + (["noti"] if F["noti"] else []) + ["lang", "net", "snd", "battery", "clock"]
+rects = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in order}   # absolute y
 rects_x = [rects[n] for n in order]
-ordered = all(rects_x[i][0] + rects_x[i][2] <= rects_x[i + 1][0] for i in range(5))
-say(ordered, "fields in order chevron < lang < net < snd < battery < clock, no overlap")
-gaps = [rects_x[i + 1][0] - (rects_x[i][0] + rects_x[i][2]) for i in range(5)]
+NF = len(order) - 1
+ordered = all(rects_x[i][0] + rects_x[i][2] <= rects_x[i + 1][0] for i in range(NF))
+say(ordered, "fields in order %s, no overlap" % " < ".join(order))
+gaps = [rects_x[i + 1][0] - (rects_x[i][0] + rects_x[i][2]) for i in range(NF)]
 say(len(set(gaps)) == 1 and gaps[0] >= 4, "one gap between all tray fields (gaps %s)" % gaps)
 say(len(set((r[1], r[3]) for r in rects_x)) == 1, "all fields have the same top and height (centre line) %s" % sorted(set((r[1], r[3]) for r in rects_x)))
 cm = rects["clock"]
@@ -112,7 +114,7 @@ say(mn >= 8 * sc and mx <= 16 * sc + 1, "tray symbols are of one size class (lar
 # ---- text
 bt = rects["battery"]
 bgb = at_px(bt[0] + 1, bt[1] + bt[3] // 2)
-tb = inkbox(bt[0] + cw - 2 * sc, bt[1] + 2, bt[0] + bt[2] + gaps[0], bt[1] + bt[3] - 2, bgb)
+tb = inkbox(bt[0] + cw - 2 * sc, bt[1] + 2, bt[0] + bt[2] + gaps[-1], bt[1] + bt[3] - 2, bgb)
 if tb is None:
     say(False, "battery text has ink")
 else:
@@ -131,11 +133,11 @@ else:
         say(False, "clock and language text have ink")
 # gaps between fields stay empty (nothing runs over into a neighbour)
 leak = 0
-for i in range(5):
+for i in range(NF):
     gx0 = rects_x[i][0] + rects_x[i][2]
     gx1 = rects_x[i + 1][0]
     y0, y1 = rects_x[i][1] + 3, rects_x[i][1] + rects_x[i][3] - 3
-    if gx1 > gx0 and i != 3 and i != 2:      # inside the capsule the panel edge itself is drawn
+    if gx1 > gx0 and (order[i], order[i + 1]) not in (("net", "snd"), ("snd", "battery")):      # inside the capsule the panel edge itself is drawn
         bb = inkbox(gx0 + 1, y0, gx1 - 1, y1, at_px(gx0 + 1, (y0 + y1) // 2))
         if bb: leak += 1
 say(leak == 0, "the gaps between the fields stay empty (%d with ink)" % leak)
