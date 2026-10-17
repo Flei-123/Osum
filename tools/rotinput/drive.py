@@ -136,7 +136,7 @@ def main():
     sx, sy, sw, sh = [int(v) for v in m.groups()]
     time.sleep(2.0)                                   # let the bar settle
     txt = serial_text(ser)
-    g = re.findall(r"taskbar: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
+    g = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
     bx, by = (int(g[-1][0]), int(g[-1][1])) if g else (0, 0)
     sm = re.findall(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)[-1]
     sx, sy, sw, sh = [int(v) for v in sm]
@@ -171,7 +171,7 @@ def main():
     shot(mon, os.path.join(out, "after.ppm"))
     # --- relative mouse: push the pointer PHYSICALLY toward the panel corner that shows the LOGICAL bottom-right corner (inside the
     # taskbar). Clamping makes it independent of pointer acceleration. The click must land at the end of the bar.
-    gw = re.findall(r"taskbar: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", serial_text(ser))
+    gw = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", serial_text(ser))
     bw, bh = (int(gw[-1][2]), int(gw[-1][3])) if gw else (0, 0)
     lw, lh = (pw, ph) if rot in (0, 180) else (ph, pw)
     cxp, cyp = logical_to_panel(rot, lw - 1, lh - 1, pw, ph)
