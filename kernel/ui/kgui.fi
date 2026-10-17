@@ -6004,6 +6004,8 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     var rounds: u64 = 0
     var neustarts: u64 = 0
     var shell_next: u64 = 0
+    var shell_born: u64 = 0
+    var shell_back: u64 = 100
     // ZWEI UHREN, UND DIE SCHNELLERE GEWINNT. Der Zeitgeber ist die
     // richtige (fuenf Sekunden bleiben fuenf Sekunden, egal wie schnell
     // die Maschine zusammensetzt) -- aber unter `nosched` ist nicht
@@ -6063,16 +6065,27 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             // W-L (17.10.2026): the one second is a DEADLINE now, not a sleep. `sleep_ticks` returned at once (dead-timer yield / nosched
             // desktop), so a shell that dies at start was respawned every round: an ELF load + reap of ~25 ms inside the round (single-CPU
             // latency gate: 2486 spawns, section k5 = 25 ms in every round). The loop keeps running; the restart waits for the deadline.
+            // A shell that lived less than 3 s doubles the wait (1 s, 2 s, 4 s ... 30 s): a crash loop must not eat the rounds.
             cur = 0
-            shell_next = kstate.get(state, kstate.TICKS) + 100
+            let t_dead: u64 = kstate.get(state, kstate.TICKS)
+            if t_dead - shell_born < 300 {
+                shell_back = shell_back * 2
+                if shell_back > 3000 {
+                    shell_back = 3000
+                }
+            } else {
+                shell_back = 100
+            }
+            shell_next = t_dead + shell_back
         }
         if cur == 0 && shell_next != 0 && kstate.get(state, kstate.TICKS) >= shell_next {
             shell_next = 0
             cur = shell_start(state)
             if cur != 0 {
                 neustarts = neustarts + 1
+                shell_born = kstate.get(state, kstate.TICKS)
             } else {
-                shell_next = kstate.get(state, kstate.TICKS) + 100
+                shell_next = kstate.get(state, kstate.TICKS) + shell_back
             }
         }
         // RUNDE HIDWEG, MESSPUNKT: der zweite Weg zu denselben
@@ -6227,10 +6240,11 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 // EINMAL VERSUCHT -- im Pulstakt und nicht in jeder
                 // Runde. Der Schreibtisch laeuft inzwischen ohnehin;
                 // das hier ist der Nachschlag, kein Startzwang.
-                if cur == 0 {
+                if cur == 0 && shell_next == 0 {
                     cur = shell_start(state)
                     if cur != 0 {
                         neustarts = neustarts + 1
+                        shell_born = kstate.get(state, kstate.TICKS)
                     }
                 }
             }
