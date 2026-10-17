@@ -37,6 +37,10 @@
 #     read on every request, a block does not consume the token), brake (429 +
 #     Retry-After, also for a valid token, which stays usable afterwards), audit file.
 #
+#  8. (r126) relay=NAME:port: socfleitec resolves the relay name via /etc/resolv.conf (tiny DNS
+#     server in the namespace): login like with a number, ONE query, NXDOMAIN / DNS down -> err dns,
+#     resolved but closed -> err offline, broken number / no port -> err bad without a query.
+#
 # Usage: bash tools/anbfleitec/interop-real.sh     (heavy: ~12 guest boots)
 # Env: FLEITEC_ID=<dir of fleitec-id>   (default: the JARVIS project folder)
 #      FIRNCHAT=<firnchat checkout>     (default: the JARVIS project folder; HEAD is built)
@@ -78,13 +82,13 @@ QPORT=$(( BPORT + 1 ))
 IDPORT=$(( 20000 + ($$ % 20000) ))       # broker, loopback in the namespace
 WPORT=$(( IDPORT + 1 ))                  # firnchat-web, loopback in the namespace
 ABB_EXTRA=()
-SRVPID=""; PXPID=""; BRPID=""; GPID=""; RLPID=""; BKPID=""; WBPID=""
+SRVPID=""; PXPID=""; BRPID=""; GPID=""; RLPID=""; BKPID=""; WBPID=""; RL2PID=""; DNSPID=""
 Z="https://10.9.0.1:8443"
 stop_pid() { [ -n "${1:-}" ] && { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; }; return 0; }
 broker_zu() { stop_pid "$SRVPID"; SRVPID=""; }
 cleanup() {
     [ -n "$GPID" ] && kill "$GPID" 2>/dev/null
-    stop_pid "$WBPID"; stop_pid "$BKPID"; stop_pid "$RLPID"
+    stop_pid "$WBPID"; stop_pid "$BKPID"; stop_pid "$RLPID"; stop_pid "$RL2PID"; stop_pid "$DNSPID"
     broker_zu
     [ -n "$PXPID" ] && kill "$PXPID" 2>/dev/null
     [ -n "$BRPID" ] && kill "$BRPID" 2>/dev/null
@@ -450,6 +454,81 @@ num "audit: deny blocked (jti, konto)" "$(grep -ac ' deny blocked ' "$AU")" eq 2
 num "audit: the jti of a blocked token and its swap are both there" "$(grep -acF "$J1" "$AU")" eq 3
 num "audit: no token (no signature segment of any token) in the file" "$(grep -acF "${B1##*.}" "$AU")" eq 0
 num "firnchat-web's log holds no token either" "$(grep -acF "${B1##*.}" "$D/web.log")" eq 0
+
+# ======================================================================
+echo "== 8. relay=NAME:port in the device configuration (r126: DNS in socfleitec) =="
+# ======================================================================
+# A second relay WITH the address book behind it (--contacts-port), so that `login`
+# runs to the end: pairing code (not yet paired) instead of "no address book".
+# The guest gets the number only from a tiny DNS server in the namespace.
+mkdir -p "$D/relay2"
+(cd "$D/relay2" && exec ip netns exec "$NS" "$FCB/firnchat" serve 0 data 0 --contacts-port "${KPORT:-0}") > "$D/relay2.log" 2>&1 & RL2PID=$!
+RPORT2=$(svc_wait "$D/relay2.log" 'FIRNCHAT listening [0-9]+') || bad "relay with address book did not start: $(head -3 "$D/relay2.log")"
+ip netns exec "$NS" python3 tools/operation/dnsdienst.py --port 53 --adresse 10.9.0.1 \
+    --eintrag relay.test=10.9.0.1 --log "$TMPD/dns.log" > /dev/null 2>&1 & DNSPID=$!
+sleep 0.8
+printf 'nameserver 10.9.0.1\noptions timeout:1 attempts:1\n' > "$TMPD/resolv.conf"
+dns_asked() { grep -c "^FRAGE $1 " "$TMPD/dns.log" 2>/dev/null || true; }
+rl_img() { # <image> <relay value>
+    printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\nrelay=%s\n' "$Z" "$2" > "$TMPD/fl8.conf"
+    ABB_EXTRA=("/etc/social/fleitec.conf=$TMPD/fl8.conf" "/etc/resolv.conf=$TMPD/resolv.conf")
+    abbild "$1" || true
+    ABB_EXTRA=()
+}
+rl_run() { # <image> <out>
+    lauf "$1" "socfleitec v1 login" "$2"
+}
+rl_first() { grep -a '^\(err\|pair\|ok\|account\)' "$1" | head -1 | cut -f1,2 | tr -d '\r'; }
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8a.img" "10.9.0.1:${RPORT2:-0}"
+rl_run "$TMPD/r8a.img" "$TMPD/o_r8a.txt"
+R8A=$(rl_first "$TMPD/o_r8a.txt")
+case "$R8A" in pair*|account*|ok) ok "control: relay=<number>:port reaches the relay and runs login to the end ($R8A)";;
+    *) bad "control: relay=<number>:port -> '$R8A'";; esac
+is "control: the number goes to no DNS query" "$(grep -c '^FRAGE' "$TMPD/dns.log" 2>/dev/null || true)" "0"
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8b.img" "relay.test:${RPORT2:-0}"
+rl_run "$TMPD/r8b.img" "$TMPD/o_r8b.txt"
+R8B=$(rl_first "$TMPD/o_r8b.txt")
+case "$R8B" in pair*|account*|ok) ok "name: relay=relay.test:port resolves and runs login to the end ($R8B)";;
+    *) bad "name: relay=relay.test:port -> '$R8B'";; esac
+is "name: the DNS was asked ONCE for relay.test" "$(dns_asked relay.test)" "1"
+is "name: the answer equals the control run (same first line)" "$R8B" "$R8A"
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8c.img" "gibtsnicht.test:${RPORT2:-0}"
+rl_run "$TMPD/r8c.img" "$TMPD/o_r8c.txt"
+is "unknown name (NXDOMAIN): err dns" "$(rl_first "$TMPD/o_r8c.txt")" "$(printf 'err\tdns')"
+is "unknown name: the DNS was asked" "$(dns_asked gibtsnicht.test)" "1"
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8d.img" "relay.test:1"
+rl_run "$TMPD/r8d.img" "$TMPD/o_r8d.txt"
+is "name resolves, nothing listens on the port: err offline (not dns)" "$(rl_first "$TMPD/o_r8d.txt")" "$(printf 'err\toffline')"
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8e.img" "10.9.0:${RPORT2:-0}"
+rl_run "$TMPD/r8e.img" "$TMPD/o_r8e.txt"
+is "broken number 10.9.0: err bad" "$(rl_first "$TMPD/o_r8e.txt")" "$(printf 'err\tbad')"
+is "broken number: no DNS query at all" "$(grep -c '^FRAGE' "$TMPD/dns.log" 2>/dev/null || true)" "0"
+
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8f.img" "relay.test"
+rl_run "$TMPD/r8f.img" "$TMPD/o_r8f.txt"
+is "name without a port: err bad" "$(rl_first "$TMPD/o_r8f.txt")" "$(printf 'err\tbad')"
+is "name without a port: no DNS query" "$(grep -c '^FRAGE' "$TMPD/dns.log" 2>/dev/null || true)" "0"
+
+kill "$DNSPID" 2>/dev/null; wait "$DNSPID" 2>/dev/null; DNSPID=""
+: > "$TMPD/dns.log"
+rl_img "$TMPD/r8g.img" "relay.test:${RPORT2:-0}"
+T0=$(date +%s)
+rl_run "$TMPD/r8g.img" "$TMPD/o_r8g.txt"
+T1=$(date +%s)
+is "DNS server down: err dns" "$(rl_first "$TMPD/o_r8g.txt")" "$(printf 'err\tdns')"
+num "DNS server down: the guest gave up in bounded time (s, boot included)" "$((T1 - T0))" le 60
+stop_pid "$RL2PID"; RL2PID=""
 
 echo "ANBREAL: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

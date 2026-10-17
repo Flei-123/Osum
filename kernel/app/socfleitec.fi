@@ -55,7 +55,8 @@
 //     name=chat.fleitec.com         what the certificate must carry (SNI)
 //     roots=/etc/ssl/roots.pem      the trust store
 //     token=fkz1|fkt1.<uid>.<64 hex> the device access token (fkm1 too)
-//     relay=<ipv4>:<port>           the FirnChat relay (chat and pairing)
+//     relay=<host>:<port>           the FirnChat relay (chat and pairing); host is
+//                                   an IPv4 number or a DNS name (A record, r126)
 //
 // Next to it, named after it: <conf>.key (this device's x25519 key, 0600),
 // <conf>.pin (the relay's key, pinned on first use), <conf>.seq (the next
@@ -853,8 +854,8 @@ fn digits_at(p: u64, n: usize, at: *mut usize) -> u64 {
     return v
 }
 
-// relay=a.b.c.d:port
-fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
+// relay=a.b.c.d:port (a number)
+fn relay_ipv4(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
     let p: u64 = (*c).relay.ptr
     if (*c).relay.len <= 1 {
         return false
@@ -891,6 +892,58 @@ fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
     return true
 }
 
+// relay=name:port (r34/r126): the host is a DNS name, resolved like ziel=/url=
+// (knetz.target_resolve -> libc.dns.resolve_a, IPv4 only, 4-slot 60 s cache).
+// 0 resolved, 1 not a valid name:port (a broken number such as 10.9.0 never
+// goes to the resolver), 2 the name does not resolve.
+fn relay_name(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
+    let p: u64 = (*c).relay.ptr
+    if (*c).relay.len <= 1 {
+        return 1
+    }
+    let n: usize = (*c).relay.len - 1
+    var cp: usize = n
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) == 58 as u8 {
+            cp = i
+        }
+        i = i + 1
+    }
+    if cp == 0 || cp >= n {
+        return 1
+    }
+    var at: usize = cp + 1
+    let pt: u64 = digits_at(p, n, &at)
+    if at != n || pt == 0 || pt > 65535 {
+        return 1
+    }
+    var url: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&url, "http://".p as u64, 7)
+    rt.buf_push_bytes(&url, p, cp)
+    var z: knetz.Target = knetz.target_new()
+    if !knetz.target_read(url.ptr, url.len, 0, 0, &z) {
+        rt.buf_free(&url)
+        return 1
+    }
+    let ok: bool = knetz.target_resolve(&z)
+    rt.buf_free(&url)
+    if !ok {
+        return 2
+    }
+    *addr = z.adr
+    *port = pt as u16
+    return 0
+}
+
+// 0 ready, 1 not configured / not valid, 2 the name does not resolve
+fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
+    if relay_ipv4(c, addr, port) {
+        return 0
+    }
+    return relay_name(c, addr, port)
+}
+
 // the device key (secret || public), made on first use
 fn device_key(k64: u64) -> bool {
     var kp: rt.Buf = rt.buf_new()
@@ -905,8 +958,12 @@ fn device_key(k64: u64) -> bool {
 fn relay_up(c: *mut Conf, r: *mut fcrelay.Relay) -> i32 {
     var addr: u32 = 0
     var port: u16 = 0
-    if !relay_addr(c, &addr, &port) {
-        return fin(1, "bad", "no relay=<ipv4>:<port> in the configuration")
+    let ra: i32 = relay_addr(c, &addr, &port)
+    if ra == 2 {
+        return fin(2, "dns", "the name of the relay does not resolve")
+    }
+    if ra != 0 {
+        return fin(1, "bad", "no relay=<host>:<port> in the configuration")
     }
     var pp: rt.Buf = rt.buf_new()
     side(&pp, ".pin")
