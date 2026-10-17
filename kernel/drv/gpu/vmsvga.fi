@@ -353,6 +353,8 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
         return false
     }
     let pitch0: u64 = reg_r(state, R_BYTES_PER_LINE)
+    let stale_emu: bool = kstate.mode_on(state, kstate.M_VMSVGASTALE)
+    let old_way: bool = kstate.mode_on(state, kstate.M_VMSVGAOLD)
     reg_w(state, R_WIDTH, w)
     reg_w(state, R_HEIGHT, h)
     reg_w(state, R_BPP, 32)
@@ -371,13 +373,16 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     // The stride is published ASYNCHRONOUSLY by VirtualBox: right after the size reads back, BYTES_PER_LINE still holds the OLD
     // mode's value (800x600 got 4096 instead of 3200 -> every row shifted, "line garbage"). Wait (bounded) until it left the old
     // value or equals width*4; a value below width*4 can never be right.
-    let pitch1: u64 = reg_r(state, R_BYTES_PER_LINE)
+    var pitch1: u64 = reg_r(state, R_BYTES_PER_LINE)
+    if stale_emu {
+        pitch1 = pitch0 // test bed: the register keeps the old stride
+    }
     var pitch: u64 = pitch1
     var waited: u64 = 0
     // z10c measured on VirtualBox: the register stayed at the OLD stride (4096 for 800x600, true 3200) for 100 settle rounds. Kick the
     // host FIFO thread (SYNC + BUSY) and wait by TIME (400 ms) -- if it still shows the old value (or one below width*4), the host
     // scans out width*4 bytes per row (VirtualBox rounds the row to 4 bytes), so use that.
-    let stale: bool = pitch != w * 4 && (pitch == pitch0 || pitch < w * 4)
+    let stale: bool = pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) && !old_way
     if stale {
         reg_w(state, R_SYNC, 1)
         busy_wait(state)
@@ -390,11 +395,14 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
         while waited < 400 && pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) && apic.tsc() - t0 < span {
             settle()
             pitch = reg_r(state, R_BYTES_PER_LINE)
+            if stale_emu {
+                pitch = pitch0
+            }
             waited = waited + 1
         }
     }
     let pitch_reg: u64 = pitch
-    if pitch != w * 4 && kstate.get(state, s(S_VMM_UP)) != 0 && (pitch == pitch0 || pitch < w * 4) {
+    if !old_way && pitch != w * 4 && (kstate.get(state, s(S_VMM_UP)) != 0 || stale_emu) && (pitch == pitch0 || pitch < w * 4) {
         pitch = w * 4
     }
     if pitch < w * 4 {

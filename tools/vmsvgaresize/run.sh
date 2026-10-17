@@ -4,7 +4,8 @@
 # Sizes 1280x720 -> 1024x768 -> 1600x900 -> 1024x768 are requested through the VNC SetDesktopSize message (same kernel path as a
 # VirtualBox hint). After each one: the screen has the new size, the upper part is NOT black (wallpaper / windows), the taskbar sits at
 # the bottom (rows differ from the plain wallpaper), and the first screenshot and the last one (same size) look alike.
-# Usage: [STICK_DIR=<dir with orientos-usb.img>] [IMG=<file>] [SETTLE=9] bash tools/vmsvgaresize/run.sh
+# EXTRA_WORDS=<kernel words> are appended to the command line (stale.sh uses them).
+# Usage: [EXTRA_WORDS=..] [STICK_DIR=<dir with orientos-usb.img>] [IMG=<file>] [SETTLE=9] bash tools/vmsvgaresize/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 HERE=$(pwd)/tools/vmsvgaresize
@@ -29,7 +30,7 @@ cp -f "$IMAGE" "$D/stick.img"
 off=$((2048 * 512))
 mcopy -o -i "$D/stick.img@@$off" ::/limine.conf "$D/l.conf" || exit 1
 sed -i 's/^timeout: .*/timeout: 1/' "$D/l.conf"
-awk 'BEGIN{d=0} /^ *cmdline:/ && d==0 { d=1; print $0 " vmsvgahints"; next } { print }' "$D/l.conf" >"$D/l2.conf"
+awk -v ex="${EXTRA_WORDS:-}" 'BEGIN{d=0} /^ *cmdline:/ && d==0 { d=1; print $0 " vmsvgahints " ex; next } { print }' "$D/l.conf" >"$D/l2.conf"
 mcopy -o -i "$D/stick.img@@$off" "$D/l2.conf" ::/limine.conf
 SIZES=${SIZES:-1280x720,1024x768,1600x900,1024x768}
 timeout 600 qemu-system-x86_64 "${KVM[@]}" -m 2048 -smp 4 \
