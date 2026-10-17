@@ -66,7 +66,7 @@ DREH="$OUT-drehbuch.txt"
   echo "foto 3-after-click-2"
 } > "$DREH"
 AUDIT_MKFS_EXTRA="/bin/konto=$OUT-stub/konto.elf" \
-  bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=300 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
+  bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=300 drehbuch="$DREH" "$@" > "$OUT.audit.log" 2>&1
 S="$OUT/serial.txt"
 
 grep -aq 'settings: rect name=kbook ' "$S" && ok "the Konten page reports the button rect kbook" || bad "no rect kbook (tab Konten not open?)"
