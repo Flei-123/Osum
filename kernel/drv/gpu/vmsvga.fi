@@ -118,8 +118,6 @@ const S_VMM_RC: u64 = 0x218 // rc of the last failed request
 const S_VMM_FAKE: u64 = 0x220 // test bed: hint injected instead of the device answer (w << 16 | h), 0 = use the device
 const S_VMM_FTY: u64 = 0x230 // request type of the last failed request
 const S_VMM_FMASK: u64 = 0x238 // bit mask of request types (type mod 64) that ever failed
-const S_HP_CALLS: u64 = 0x240 // host_pending calls (lab counter)
-const S_HP_RUN: u64 = 0x248 // host_pending calls that passed the rate limit
 const S_VMM_BUSY: u64 = 0x250 // 1 while a core is inside vmm_hint (the request page is shared by the idle task and the desktop loop)
 const S_VMM_ACK: u64 = 0x228 // requests that reported the graphics capability (bit mask of steps that worked)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
@@ -983,7 +981,6 @@ fn cursor_fehler(state: u64) -> u64 { return kstate.get(state, s(S_CURERR)) }
 // device]. Defensive: only a sane size (>= 640x480, inside the device limits) that DIFFERS from the current mode, was seen on two
 // polls in a row and was not tried before counts. Polled at most every POLL_MS (1 s). Returns w << 16 | h, 0 = none.
 fn host_pending(state: u64) -> u64 {
-    kstate.add(state, s(S_HP_CALLS), 1)
     let vmm: bool = kstate.get(state, s(S_VMM_UP)) != 0
     if !bereit(state) || (!vmm && !has_cap(state, CAP_DISPLAY_TOPOLOGY)) {
         return 0
@@ -999,7 +996,6 @@ fn host_pending(state: u64) -> u64 {
         }
         kstate.set(state, s(S_NEXTPOLL), now + POLL_MS)
     }
-    kstate.add(state, s(S_HP_RUN), 1)
     var w: u64 = 0
     var h: u64 = 0
     if vmm {
@@ -1202,63 +1198,6 @@ fn vmm_init(state: u64) {
     kstate.set(state, s(S_VMM_UP), 1)
 }
 
-// ---- lab probe (Y2): ask the host the same question through every display-change request and print the answers. Temporary diagnosis
-// for VirtualBox 7.2.20 (hint arrives at the device, the plain request answers 0x0).
-// mode 0: GetDisplayChangeRequest2/Ex layout (ack at 36, display at 40, w/h at 24/28); 1: Multi layout (ack at 24, count at 28, w/h at 48/52);
-// 2: AcknowledgeEvents (events word at 24).
-fn vmm_probe(state: u64, tag: u64, ty: u64, size: u64, ack: u64, mode: u64) {
-    let rq: u64 = kstate.get(state, s(S_VMM_REQ))
-    vmm_zero_body(state, 60)
-    if mode == 0 {
-        wr32(rq, 36, ack)
-    } else if mode == 1 {
-        wr32(rq, 24, ack)
-        wr32(rq, 28, 1)
-    }
-    let ok: bool = vmm_call(state, ty, size)
-    var s_sp: [u8; 2] = " \0"
-    var s_eq: [u8; 2] = "=\0"
-    var s_x: [u8; 2] = "x\0"
-    var s_c: [u8; 2] = ":\0"
-    serial.puts((&s_sp[0]) as u64)
-    serial.hex(tag)
-    serial.puts((&s_eq[0]) as u64)
-    serial.hex(rd32(rq, 12))
-    serial.puts((&s_c[0]) as u64)
-    if !ok {
-        return
-    }
-    if mode == 2 {
-        serial.hex(rd32(rq, 24))
-    } else if mode == 0 {
-        serial.dec(rd32(rq, 24))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(rd32(rq, 28))
-        serial.puts((&s_c[0]) as u64)
-        serial.dec(rd32(rq, 32))
-        serial.puts((&s_c[0]) as u64)
-        serial.dec(rd32(rq, 40))
-    } else {
-        serial.dec(rd32(rq, 28))
-        serial.puts((&s_c[0]) as u64)
-        serial.dec(rd32(rq, 48))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(rd32(rq, 52))
-    }
-}
-
-fn vmm_probe_all(state: u64) {
-    var s_h: [u8; 13] = "vmmdev-dbg:\0\0"
-    serial.puts((&s_h[0]) as u64)
-    vmm_probe(state, 0x41, 41, 28, 0, 2) // A: AcknowledgeEvents (pending event mask)
-    vmm_probe(state, 0x42, 54, 44, 4, 0) // B: GetDisplayChangeRequest2, event_ack = 4
-    vmm_probe(state, 0x43, 54, 44, 0, 0) // C: GetDisplayChangeRequest2, event_ack = 0
-    vmm_probe(state, 0x44, 80, 56, 4, 0) // D: GetDisplayChangeRequestEx, event_ack = 4
-    vmm_probe(state, 0x45, 81, 60, 4, 1) // E: GetDisplayChangeRequestMulti
-    vmm_probe(state, 0x46, 82, 60, 4, 1) // F: GetDisplayChangeRequestMulti2
-    serial.nl()
-}
-
 // The last size the host asked for (w << 16 | h), 0 = none or the request failed.
 fn vmm_hint(state: u64) -> u64 {
     let fk: u64 = kstate.get(state, s(S_VMM_FAKE))
@@ -1288,16 +1227,9 @@ fn vmm_hint_locked(state: u64) -> u64 {
     wr32(rq, 36, VMM_EVENT_DISPLAY)
     wr32(rq, 40, 0) // display 0
     if !vmm_call(state, VMMREQ_GET_DISPLAY_CHANGE2, 44) {
-        if kstate.get(state, s(S_VMM_ERR)) < 4 {
-            vmm_say(state)
-        }
         return 0
     }
     kstate.add(state, s(S_VMM_POLLS), 1)
-    let np: u64 = kstate.get(state, s(S_VMM_POLLS))
-    if np == 1 || np == 2 || np == 5 || np == 20 || np == 60 || np == 200 {
-        vmm_say(state) // lab trace: proves the poll runs and what the host answers
-    }
     let w: u64 = rd32(rq, 24)
     let h: u64 = rd32(rq, 28)
     if w > 65535 || h > 65535 {
@@ -1307,10 +1239,7 @@ fn vmm_hint_locked(state: u64) -> u64 {
     let changed: bool = v != kstate.get(state, s(S_VMM_HINT))
     kstate.set(state, s(S_VMM_HINT), v)
     if changed {
-        vmm_say(state) // the hint changed: one serial line (hint=WxH) for the lab
-    }
-    if np == 1 || np == 3 || np % 10 == 0 {
-        vmm_probe_all(state) // lab probe (Y2), removed once the right request is known
+        vmm_say(state) // the hint changed: one serial line (hint=WxH)
     }
     return v
 }
@@ -1582,8 +1511,6 @@ fn pulse_say(state: u64) {
     var s_h: [u8; 7] = " heal=\0"
     var s_sf: [u8; 7] = " safe=\0"
     var s_pio: [u8; 6] = " pio=\0"
-    var s_hp: [u8; 5] = " hp=\0"
-    var s_sl: [u8; 2] = "/\0"
     if kstate.get(state, s(S_UP)) == 0 || kstate.get(state, s(S_READY)) == 0 {
         return
     }
@@ -1601,11 +1528,5 @@ fn pulse_say(state: u64) {
     serial.dec(kstate.get(state, s(S_SAFETY)))
     serial.puts((&s_pio[0]) as u64)
     serial.dec(kstate.get(state, s(S_PIO)))
-    serial.puts((&s_hp[0]) as u64)
-    serial.dec(kstate.get(state, s(S_HP_CALLS)))
-    serial.puts((&s_sl[0]) as u64)
-    serial.dec(kstate.get(state, s(S_HP_RUN)))
-    serial.puts((&s_sl[0]) as u64)
-    serial.dec(kstate.get(state, s(S_VMM_POLLS)))
     serial.nl()
 }
