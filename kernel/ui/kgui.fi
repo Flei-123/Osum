@@ -5932,6 +5932,24 @@ fn jarvis_watch(state: u64) {
     jv_born = now
 }
 
+// W-J (17.10.2026): while the desktop is ACTIVE (pointer input or a painted frame in the last 200 ms) a round is ~1 ms (yield-spin on the
+// TSC) instead of 10-20 ms (`sleep_ticks(1)` + `idle_wait`), so a USB/PS2 packet is seen within ~1 ms. Rest: false -> the caller sleeps on
+// the tick as before (no spinning at rest). Word `nolatfix` = old loop (gate counter-proof).
+fn lj_wait(state: u64) -> bool {
+    if !wm.lj_fast(state) {
+        return false
+    }
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return false
+    }
+    let end: u64 = time.tsc() + (kh / 1000) * 1000
+    while time.tsc() < end {
+        sched.yield_now(state)
+    }
+    return true
+}
+
 fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
     // ============ RUNDE TAFEL: DIESE SCHLEIFE IST DER SCHREIBTISCH,
@@ -5966,6 +5984,12 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     var s_d: [u8; 12] = "wm: dauer\0\0\0"
     if dauer {
         serial.puts((&s_d[0]) as u64)
+        serial.nl()
+    }
+    // W-J: the latency gate (word `phases`) starts its pointer workload at the first `wm: hold` line; the real loop prints it once
+    if dauer && fb.phases_an(state) {
+        var s_wj: [u8; 10] = "wm: hold\0\0"
+        serial.puts((&s_wj[0]) as u64)
         serial.nl()
     }
     var cur: u64 = i
@@ -6056,6 +6080,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         wechsel_schritt(state)
         st(34)
         wm.poll(state)
+        wm.lj_round(state)
         // ==================================== RUNDE ALLTAG: DIE SPERRE
         //
         // DER AUSFALLZUSTAND, und er ist der ganze Grund, warum diese
@@ -6093,7 +6118,9 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // in `compose`: the login window carried W_ANK=1 for as long as
         // it existed.
         let _an: u64 = wm.anim_tick(state)
-        wm.compose(state)
+        if wm.lj_may_compose(state) {
+            wm.compose(state)
+        }
         // VMSVGA / virtio-gpu: THE FRAME BOUNDARY OF THE REAL DESKTOP (vbfixD, 16.10.2026). `compose` (and the ring-3 compositor's
         // CP_PRESENT) only copy into the card's memory and NOTE the box; the host learns about it from `gfx.bild_fertig` (VMSVGA: one
         // UPDATE, virtio-gpu: TRANSFER + FLUSH). Only the hold loops of `surface` called it, so on the real desktop (this loop) not one
@@ -6101,6 +6128,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // once TRACES=0 stopped the host from watching the VRAM. One call per round, on this one core: with nothing painted it costs a
         // time read and compares (no port I/O). tools/vmsvga/desktop.sh is the gate.
         gfx.bild_fertig(state)
+        wm.lj_done(state)
         st(36)
         // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
         // RUNDE. Vorher stand die Zeile nur im Puls und war beim
@@ -6221,12 +6249,16 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             }
         }
         st(38)
-        sched.sleep_ticks(state, 1)
-        // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
-        // (see `sched.idle_wait`); only in the permanent desktop, where the
-        // timer is known to run.
-        if dauer && !fb.hlt_aus(state) {
-            sched.idle_wait(state)
+        if dauer && lj_wait(state) {
+            // W-J: active stretch -> ~1 ms rounds (input is polled in this loop)
+        } else {
+            sched.sleep_ticks(state, 1)
+            // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
+            // (see `sched.idle_wait`); only in the permanent desktop, where the
+            // timer is known to run.
+            if dauer && !fb.hlt_aus(state) {
+                sched.idle_wait(state)
+            }
         }
         rounds = rounds + 1
     }

@@ -103,6 +103,7 @@ export {
     init, ready, compose, damage, damage_ex, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, create_ex, attach_buf, win_shm, damage_rect, tab_object, chrome_object, tab_publish, shared_ok, sh_stat,
+    lj_fast, lj_round, lj_may_compose, lj_done,
     cp_attach, cp_detach, cp_present, cp_wait, cp_page_object, cp_log, cp_stat, cp_say_reset, cp_on, CP_NOT, CP_BUSY, destroy, valid, count, focus, set_focus, raise_win,
     // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
     close_top, close_term, top_visible, cross_point, term_win,
@@ -2932,6 +2933,9 @@ fn bild_say_reset(state: u64) {
         k = k + 1
     }
     serial.nl()
+    if fb.phases_an(state) {
+        lj_say_reset(state)
+    }
     // r460: where the time of those frames went (microseconds summed; divide by n for the mean per frame). `blurs= bhits= blurus=`
     // are running totals of the blur counters (NOT reset here: the acceptance runs read them); a runner takes differences.
     var s_p: [u8; 14] = "wm: phase n=\0\0"
@@ -7126,6 +7130,193 @@ fn cp_sync(state: u64) {
         lk = 1
     }
     tw(f, 11, lk)
+}
+
+// ================== W-J (17.10.2026): INPUT -> PICTURE LATENCY
+//
+// Boss: "every interaction feels slow". The desktop loop (kgui wait_wm) slept `sleep_ticks(1)` + `idle_wait`: a round every 10-20 ms,
+// so a pointer packet waited up to 20 ms BEFORE wm.poll even saw it (USB HID is polled in that loop), then up to one more round for
+// the frame. Two clocks, printed with the word `phases` on every F12 as `wm: lat ...` (running since the last F12):
+//   gap*: time between two input polls while the desktop is ACTIVE (input or a frame in the last 200 ms). A packet arrives at a random
+//         point of a gap, so the mean wait before the poll is  sum(gap^2) / (2 * sum(gap))  -> `gapwait`.
+//   lat*: from wm.poll consuming pointer input to the frame being on the card (compose + present of the same round).
+// Input -> picture (mean) = gapwait + latmean. The fast path (ACTIVE only; `nolatfix` = old loop): rounds of ~1 ms (yield-spin),
+// composes at most every LJ_MIN_US after the last painted frame, the first frame after rest is never delayed.
+const LJ_ACTIVE_US: u64 = 200000
+const LJ_MIN_US: u64 = 6000
+static mut lj_last_round: u64 = 0
+static mut lj_act: u64 = 0
+static mut lj_in0: u64 = 0
+static mut lj_in_comp: u64 = 0
+static mut lj_last_comp: u64 = 0
+static mut lj_comp_tsc: u64 = 0
+static mut lj_gap: [u64; 8] = [0 as u64; 8]
+static mut lj_lat: [u64; 8] = [0 as u64; 8]
+
+fn lj_us(state: u64, d: u64) -> u64 {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return 0
+    }
+    return d / (kh / 1000)
+}
+
+fn lj_active(state: u64) -> bool {
+    if lj_act == 0 {
+        return false
+    }
+    let now: u64 = time.tsc()
+    if now < lj_act {
+        return true
+    }
+    return lj_us(state, now - lj_act) < LJ_ACTIVE_US
+}
+
+// called once per desktop round right after the input poll
+fn lj_round(state: u64) {
+    let now: u64 = time.tsc()
+    if lj_last_round != 0 && now > lj_last_round && lj_active(state) {
+        let g: u64 = lj_us(state, now - lj_last_round)
+        lj_gap[0] = lj_gap[0] + 1
+        lj_gap[1] = lj_gap[1] + g
+        lj_gap[2] = lj_gap[2] + g * g
+        if g > lj_gap[3] {
+            lj_gap[3] = g
+        }
+        if g > 8000 {
+            lj_gap[4] = lj_gap[4] + 1
+        }
+        if g > 16000 {
+            lj_gap[5] = lj_gap[5] + 1
+        }
+        if g > 33000 {
+            lj_gap[6] = lj_gap[6] + 1
+        }
+    }
+    lj_last_round = now
+}
+
+// wm.poll consumed pointer input (move / button): start the poll -> picture clock, keep the fast path on
+fn lj_input(state: u64) {
+    let now: u64 = time.tsc()
+    lj_act = now
+    if lj_in0 == 0 {
+        lj_in0 = now
+        lj_in_comp = gs(state, S_COMPOSITES)
+    }
+}
+
+// after compose + present of a round: a frame was painted -> close the clock
+fn lj_done(state: u64) {
+    let c: u64 = gs(state, S_COMPOSITES)
+    let now: u64 = time.tsc()
+    if c != lj_last_comp {
+        lj_last_comp = c
+        lj_comp_tsc = now
+        lj_act = now
+    }
+    if lj_in0 != 0 && c != lj_in_comp {
+        if now > lj_in0 {
+            let l: u64 = lj_us(state, now - lj_in0)
+            // an input that changed nothing visible waits for some unrelated frame: ignore those (> 250 ms)
+            if l < 250000 {
+                lj_lat[0] = lj_lat[0] + 1
+                lj_lat[1] = lj_lat[1] + l
+                if l > lj_lat[2] {
+                    lj_lat[2] = l
+                }
+                if l > 16000 {
+                    lj_lat[3] = lj_lat[3] + 1
+                }
+                if l > 33000 {
+                    lj_lat[4] = lj_lat[4] + 1
+                }
+            }
+        }
+        lj_in0 = 0
+    }
+}
+
+// the fast path may compose now? (rest: always; active: not sooner than LJ_MIN_US after the last painted frame)
+fn lj_may_compose(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOLATFIX) {
+        return true
+    }
+    if !lj_active(state) {
+        return true
+    }
+    let now: u64 = time.tsc()
+    if lj_comp_tsc == 0 || now < lj_comp_tsc {
+        return true
+    }
+    return lj_us(state, now - lj_comp_tsc) >= LJ_MIN_US
+}
+
+fn lj_fast(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOLATFIX) {
+        return false
+    }
+    return lj_active(state)
+}
+
+fn lj_say_reset(state: u64) {
+    var s_l: [u8; 14] = "wm: lat gapn=\0"
+    var s_1: [u8; 10] = " gapmean=\0"
+    var s_2: [u8; 10] = " gapwait=\0"
+    var s_3: [u8; 9] = " gapmax=\0"
+    var s_4: [u8; 7] = " gap8=\0"
+    var s_5: [u8; 8] = " gap16=\0"
+    var s_6: [u8; 8] = " gap33=\0"
+    var s_7: [u8; 8] = " latn=\0\0"
+    var s_8: [u8; 10] = " latmean=\0"
+    var s_9: [u8; 9] = " latmax=\0"
+    var s_a: [u8; 8] = " lat16=\0"
+    var s_b: [u8; 8] = " lat33=\0"
+    let n: u64 = lj_gap[0]
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_1[0]) as u64)
+    if n != 0 {
+        serial.dec(lj_gap[1] / n)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_2[0]) as u64)
+    if lj_gap[1] != 0 {
+        serial.dec(lj_gap[2] / (2 * lj_gap[1]))
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_3[0]) as u64)
+    serial.dec(lj_gap[3])
+    serial.puts((&s_4[0]) as u64)
+    serial.dec(lj_gap[4])
+    serial.puts((&s_5[0]) as u64)
+    serial.dec(lj_gap[5])
+    serial.puts((&s_6[0]) as u64)
+    serial.dec(lj_gap[6])
+    let m: u64 = lj_lat[0]
+    serial.puts((&s_7[0]) as u64)
+    serial.dec(m)
+    serial.puts((&s_8[0]) as u64)
+    if m != 0 {
+        serial.dec(lj_lat[1] / m)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_9[0]) as u64)
+    serial.dec(lj_lat[2])
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(lj_lat[3])
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(lj_lat[4])
+    serial.nl()
+    var z: u64 = 0
+    while z < 8 {
+        lj_gap[z as usize] = 0
+        lj_lat[z as usize] = 0
+        z = z + 1
+    }
 }
 
 // the first pointer movement that has not reached the card yet (the start of the input-to-picture clock)
@@ -15849,6 +16040,7 @@ fn poll(state: u64) -> bool {
             if ps2m.changed(state) {
                 ps2m.take_change(state)
                 on_mouse(state)
+                lj_input(state)
             }
             n = n + 1
         }
@@ -15858,6 +16050,7 @@ fn poll(state: u64) -> bool {
     }
     ps2m.take_change(state)
     on_mouse(state)
+    lj_input(state)
     return true
 }
 
