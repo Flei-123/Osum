@@ -222,7 +222,9 @@ TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '
 # "App-Rechte" (13), ROADMAP-7 "Protokoll" (14) -- die Zahl stand seit
 # ACTION-BUS-3 auf dem alten Stand (auf main rot: 13 statt 11).
 # DAILY-DRIVER: FUENFZEHN -- "Updates" ist der 15. Reiter.
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 15
+# r149: NEUNZEHN -- Maus (16), Energie (17), Info (18) und Apps (19) kamen dazu; die Zahl stand auf 15 (Altlast).
+# Seiten von Paketen (/apps/<app>.prog/SETTINGS) stehen NICHT in settings.tabs, sie kommen aus dem Katalog.
+num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 19
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="

@@ -13,6 +13,7 @@
 # 4. the CATALOGUE (r143): several manifests (built-in page + packages /apps/<app>.prog/SETTINGS) in one catalogue --
 #    tools/settingsman/catalog.fi and `manifest.py --catalog` agree on every case in tools/settingsman/catalog/ and
 #    on the catalogue limits; a rejected file leaves the catalogue as it was; no package can speak for another app;
+# 4b. package pages (r149): read/write lines, pakete/social/SETTINGS against ACTIONS, the window loads + draws the catalogue;
 # 5. MUTATIONS: each broken copy of the parser must turn step 1-4 red.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -187,6 +188,51 @@ clim items241 "^add 4 error 8 "
 clim pool_cat "^add 3 error 9 "
 clim pool_leak "^add 3 ok "
 
+echo "== 4b. package pages (r149): pakete/social/SETTINGS + the Settings window =="
+"$T/dump" < pakete/social/SETTINGS > "$T/social.fi" 2>/dev/null; python3 -I tools/settingsman/manifest.py < pakete/social/SETTINGS > "$T/social.py"
+if cmp -s "$T/social.fi" "$T/social.py" && cmp -s "$T/social.fi" tools/settingsman/social.expect && grep -q '^ok app=social' "$T/social.fi"; then ok "pakete/social/SETTINGS: both readers agree and match the golden file"; else bad "pakete/social/SETTINGS: readers or golden differ ($(head -1 "$T/social.fi"))"; fi
+python3 -I - <<'PY' && ok "package page wiring: keys in en+de, actions in ACTIONS, own-namespace rule, window loads and draws the catalogue" || bad "package page wiring (see lines above)"
+import re, sys
+rc = 0
+def bad(m):
+    global rc; rc = 1; print("    " + m)
+man = open("pakete/social/SETTINGS", encoding="utf-8").read()
+acts = open("pakete/social/ACTIONS", encoding="utf-8").read()
+en = open("locale/en/messages", encoding="utf-8").read(); de = open("locale/de/messages", encoding="utf-8").read()
+src = open("kernel/user/settings.fi", encoding="utf-8").read()
+app = None; cur = None; labels = []; binds = []
+for line in man.splitlines():
+    w = line.split("#")[0].split()
+    if not w: continue
+    if w[0] == "app": app = w[1]
+    elif w[0] == "page": labels.append(w[2])
+    elif w[0] in ("label", "note"): labels.append(w[1])
+    elif w[0] == "field":
+        cur = w; labels += w[3:4]
+    elif w[0] in ("read", "write"): binds.append((cur[1], cur[2], w[0], w[1]))
+for k in sorted(set(labels)):
+    for nm, cat in (("en", en), ("de", de)):
+        if not re.search(r"^" + re.escape(k) + r" = ", cat, re.M): bad("catalogue key %s missing in %s" % (k, nm))
+blocks = {m.group(1): m.group(2) for m in re.finditer(r"^action (\S+) .*?\n((?:  .*\n|\n(?=  ))*)", acts, re.M)}
+for key, ty, kind, act in binds:
+    if not act.startswith(app + "."): bad("%s %s: action %s is outside the namespace %s." % (key, kind, act, app))
+    if act not in blocks: bad("%s: action %s is not in ACTIONS" % (key, act)); continue
+    b = blocks[act]
+    if kind == "read" and not re.search(r"^  returns %s " % re.escape(key), b, re.M): bad("%s: %s does not return %s" % (key, act, key))
+    if kind == "write" and ty == "bool" and not re.search(r"^  arg %s bool " % re.escape(key), b, re.M): bad("%s: %s has no bool arg %s" % (key, act, key))
+for k in ("settings.catpkg", "settings.pkg.ok", "settings.pkg.ask", "settings.pkg.err", "settings.pkg.nobus", "settings.pkg.deny"):
+    for nm, cat in (("en", en), ("de", de)):
+        if not re.search(r"^" + re.escape(k) + r" = ", cat, re.M): bad("catalogue key %s missing in %s" % (k, nm))
+for need in ("manifest.add_pkg(", '".prog/SETTINGS', "page_pkg(cl, cr, reiter - R_ANZ)", "pkg_init()", "pkg_cat(", "tab_key(p)", "key >= K_PKGTAB0", "kind == 999"):
+    if need not in src: bad("settings.fi lacks: " + need)
+# every action call goes through the namespace check
+for fn in ("fn pkg_click", "fn pkg_read_page"):
+    body = src.split(fn, 1)[1].split("\nfn ", 1)[0]
+    if "pkg_prefix_ok(" not in body: bad(fn + " calls an action without pkg_prefix_ok")
+if "static mut nav_vis: [u64; 27]" not in src or "[u64; 32] = [0 as u64; 32]" not in src: bad("sidebar tables are too small for R_ANZ + PKG_MAX")
+sys.exit(rc)
+PY
+
 echo "== 5. mutations of the parser =="
 mutate() { # name old new
     local d="$T/m_$1"
@@ -310,8 +356,20 @@ mutate load-keeps-catalogue 'reset()
     return add_man(buf, len)' 'return add_man(buf, len)'
 mutate warns-carry 'warns = 0
     too_many = 0
+    last_field = 0
     cur_buf = buf' 'too_many = 0
+    last_field = 0
     cur_buf = buf'
+mutate bind-needs-field 'if nw != 2 || was_field == 0 {' 'if nw != 2 {'
+mutate bind-read-twice 'if wr == 0 && it_read[i] != 0 {' 'if false {'
+mutate bind-write-twice 'if wr == 1 && it_write[i] != 0 {' 'if false {'
+mutate bind-swapped 'it_read[i] = a' 'it_write[i] = a'
+mutate bind-chain-broken 'last_field = 1 // the other of read/write may follow' 'last_field = 0'
+mutate bind-name-unchecked 'return fail(E_NAME, line)
+    }
+    let i: usize = (n_items - 1) as usize' 'return 1
+    }
+    let i: usize = (n_items - 1) as usize'
 mutate app-find-prefix 'if text_eq(pool_ptr(ap_name[(a) as usize]), name) {' 'if rd(pool_ptr(ap_name[(a) as usize]), 0) == rd(name, 0) {'
 
 echo "SETTINGSMAN: $pass passed, $fail failed"

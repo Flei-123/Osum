@@ -4433,6 +4433,9 @@ fn bus_page(r: u64) {
 
 fn zeige_reiter(r: u64) {
     reiter = r
+    if r >= R_ANZ {
+        pkg_enter(r - R_ANZ)
+    }
     fuiscene.refresh()
     rep_due = 1
 }
@@ -6001,7 +6004,7 @@ static mut ch_items: [u64; 200] = [0 as u64; 200] // its items (text, '\n' betwe
 static mut ch_buf: [u8; 4400] = [0 as u8; 4400] // the shown item of each
 static mut it_buf: [u8; 480] = [0 as u8; 480] // the items of the open popup
 static mut ch_pend: u64 = 0 // the choice whose popup is open
-static mut tab_buf: [u8; 760] = [0 as u8; 760] // the 19 tab names, 40 each
+static mut tab_buf: [u8; 1080] = [0 as u8; 1080] // the 19 tab names + the names of up to 8 package pages, 40 each
 static mut rep_due: u64 = 0 // the rectangles must be reported again
 static mut en_key: [u64; 24] = [0 as u64; 24]
 static mut en_buf: [u64; 24] = [0 as u64; 24]
@@ -8179,6 +8182,394 @@ fn page_konto(left: usize, right: usize) {
 }
 
 
+// ====================================================================
+// r149: THE PAGES OF PACKAGES. At the start the window reads /apps/<app>.prog/SETTINGS of every app that
+// `apprights list` names (a file of more than 3072 octets is not read at all, a rejected one is skipped: the other
+// pages stay) and appends it to the catalogue (manifest.add_pkg). Every page of a package gets a tab in the
+// sidebar (its `group` names the category: system display network accounts personal time update about, anything
+// else lands in "Apps") and is drawn from generic fields, no binding table:
+//   label / note       text
+//   field bool         switch; `read <action>` gives the value (reply field = the field key), `write <action>`
+//                      is called with key=true|false when it is switched
+//   field action       button; calls its `write <action>` without arguments
+//   field status       one line "label: value", the value is the reply field of its `read <action>`
+//   field text/secret  entry; Enter calls its `write <action>` with key=<text>
+//   field choice/list  not drawn yet (the manifest has no item list)
+// Every call goes through the action bus (rights, confirmation, audit are the broker's). A package may call only
+// actions of its OWN namespace: `<app>.` is the prefix of every action a page of <app> names. A critical action
+// answers with a question: the status line says so and the next click on the same control confirms it.
+// ====================================================================
+const PKG_MAX: u64 = 8
+const K_PKGTAB0: u64 = 600 // 600 .. 607: the sidebar entries of the package pages
+const K_PKGF0: u64 = 620 // + the catalogue item number (< 240): the controls of a package page
+const NO_PAGE: u64 = 4294967295
+const GROUP_NAMES: str = __include_str("settings.d/groups.names")
+static mut pkg_state: u64 = 0 // 0 not read yet, 1 read
+static mut pkg_n: u64 = 0
+static mut pkg_pg: [u64; 8] = [0 as u64; 8] // catalogue page of package page n
+static mut pkg_buf: [u8; 3080] = [0 as u8; 3080]
+static mut pkg_val: [u64; 80] = [0 as u64; 80] // bool value per item of the shown page
+static mut pkg_txt: [u8; 5120] = [0 as u8; 5120] // text value per item (64 each)
+static mut pkg_dsp: [u8; 8000] = [0 as u8; 8000] // "label: value" per item (100 each)
+static mut pkg_stat: [u8; 200] = [0 as u8; 200]
+static mut pkg_pend: u64 = 0 // the number of a question waiting for the second click
+static mut pkg_pend_item: u64 = 0
+static mut pkg_empty: [u8; 2] = [0 as u8; 2]
+static mut pkg_call: [u8; 64] = [0 as u8; 64]
+static mut k_settings_catpkg: [u8; 16] = "settings.catpkg\0"
+static mut k_pkg_ok: [u8; 16] = "settings.pkg.ok\0"
+static mut k_pkg_ask: [u8; 17] = "settings.pkg.ask\0"
+static mut k_pkg_err: [u8; 17] = "settings.pkg.err\0"
+static mut k_pkg_nobus: [u8; 19] = "settings.pkg.nobus\0"
+static mut k_pkg_deny: [u8; 18] = "settings.pkg.deny\0"
+
+fn pages_all() -> u64 {
+    return R_ANZ + pkg_n
+}
+
+// the key of the sidebar entry of page p
+fn tab_key(p: u64) -> u64 {
+    if p >= R_ANZ {
+        return K_PKGTAB0 + p - R_ANZ
+    }
+    return K_TAB0 + p
+}
+
+// the page of a sidebar key, NO_PAGE when the key is none
+fn key_page(k: u64) -> u64 {
+    if k >= K_TAB0 && k < K_TAB0 + R_ANZ {
+        return k - K_TAB0
+    }
+    if k >= K_PKGTAB0 && k < K_PKGTAB0 + pkg_n {
+        return R_ANZ + k - K_PKGTAB0
+    }
+    return NO_PAGE
+}
+
+// the sidebar category of package page n: its `group` when that is a built-in category, else "Apps"
+fn pkg_cat(n: u64) -> u64 {
+    if n >= pkg_n {
+        return NCAT
+    }
+    let g: str = GROUP_NAMES
+    let ix: u64 = manifest.names_index(g.p as u64, g.n as u64, manifest.page_group(pkg_pg[(n) as usize]))
+    if ix == manifest.NONE {
+        return NCAT
+    }
+    return ix
+}
+
+fn pkg_two(n: u64) -> bool {
+    if n >= pkg_n {
+        return false
+    }
+    let pg: u64 = pkg_pg[(n) as usize]
+    var i: u64 = manifest.page_first(pg)
+    let end: u64 = i + manifest.page_len(pg)
+    while i < end {
+        if manifest.item_col(i) == 1 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn pkg_names() {
+    var n: u64 = 0
+    while n < pkg_n {
+        let t: u64 = msg.get(manifest.page_title(pkg_pg[(n) as usize]))
+        let dst: u64 = ((&tab_buf[0 as usize]) as u64) + (R_ANZ + n) * 40
+        let o: u64 = ulib.strncpy(dst, t, 38)
+        __mmio_write8((dst + o) as *mut u8, 0 as u8)
+        n = n + 1
+    }
+}
+
+// one package: /apps/<name>.prog/SETTINGS -> catalogue (rejected or too big: skipped)
+fn pkg_try(name: u64) {
+    var t_dir: [u8; 7] = "/apps/\0"
+    var t_set: [u8; 15] = ".prog/SETTINGS\0"
+    var path: [u8; 96] = [0 as u8; 96]
+    let pp: u64 = (&path[0 as usize]) as u64
+    if ulib.length(name) > 40 {
+        return
+    }
+    ulib.strcpy(pp, (&t_dir[0 as usize]) as u64)
+    ulib.strcat(pp, name)
+    ulib.strcat(pp, (&t_set[0 as usize]) as u64)
+    let n: u64 = file_read(pp, (&pkg_buf[0 as usize]) as u64, 3080)
+    if n == 0 || n > 3072 {
+        return
+    }
+    let _r: u64 = manifest.add_pkg((&pkg_buf[0 as usize]) as u64, n, name)
+}
+
+// once, before the first window is built (after the built-in manifest, so it is app 0)
+fn pkg_init() {
+    if pkg_state != 0 {
+        return
+    }
+    pkg_state = 1
+    if !man_ready() {
+        return
+    }
+    ap_load()
+    var k: u64 = 0
+    while k < ap_n {
+        pkg_try(ap_name_ptr(k))
+        k = k + 1
+    }
+    let np: u64 = manifest.page_count()
+    var p: u64 = 0
+    while p < np && pkg_n < PKG_MAX {
+        if manifest.page_app(p) != 0 {
+            pkg_pg[(pkg_n) as usize] = p
+            pkg_n = pkg_n + 1
+        }
+        p = p + 1
+    }
+}
+
+// the action may be called: it starts with "<app>."
+fn pkg_prefix_ok(app: u64, act: u64) -> bool {
+    if app == 0 || act == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while rb(app, i) != 0 {
+        if rb(act, i) != rb(app, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rb(act, i) == 46
+}
+
+fn pkg_say(key: u64) {
+    stat_set((&pkg_stat[0 as usize]) as u64, key, 0)
+}
+
+// "call <action>" into the request
+fn pkg_req(act: u64) {
+    let cp: u64 = (&pkg_call[0 as usize]) as u64
+    var t_call: [u8; 6] = "call \0"
+    let o: u64 = bx_put(cp, 0, 64, (&t_call[0 as usize]) as u64)
+    let _o2: u64 = bx_put(cp, o, 64, act)
+    actcli.req(cp)
+}
+
+fn pkg_true(c: u64) -> bool {
+    return c == 116 || c == 84 || c == 49 || c == 121 || c == 89
+}
+
+// the values of the page the window just opened: defaults first, then every `read` action
+fn pkg_enter(n: u64) {
+    if n >= pkg_n {
+        return
+    }
+    pkg_pend = 0
+    __mmio_write8(((&pkg_stat[0 as usize]) as u64) as *mut u8, 0 as u8)
+    pkg_read_page(n)
+}
+
+fn pkg_read_page(n: u64) {
+    let pg: u64 = pkg_pg[(n) as usize]
+    let app: u64 = manifest.app_at(manifest.page_app(pg))
+    let first: u64 = manifest.page_first(pg)
+    let len: u64 = manifest.page_len(pg)
+    var i: u64 = first
+    while i < first + len && i - first < 80 {
+        let slot: u64 = i - first
+        pkg_val[(slot) as usize] = 0
+        __mmio_write8(((&pkg_txt[0 as usize]) as u64 + slot * 64) as *mut u8, 0 as u8)
+        if manifest.item_kind(i) == manifest.K_FIELD {
+            let df: u64 = manifest.item_def(i)
+            if df != 0 {
+                if manifest.item_type(i) == manifest.T_BOOL {
+                    if pkg_true(rb(df, 0)) {
+                        pkg_val[(slot) as usize] = 1
+                    }
+                } else {
+                    let o: u64 = ulib.strncpy(((&pkg_txt[0 as usize]) as u64) + slot * 64, df, 62)
+                    __mmio_write8(((&pkg_txt[0 as usize]) as u64 + slot * 64 + o) as *mut u8, 0 as u8)
+                }
+            }
+            let rd: u64 = manifest.item_read(i)
+            if rd != 0 && pkg_prefix_ok(app, rd) {
+                pkg_req(rd)
+                let rc: u64 = actcli.send(300)
+                if rc == actcli.R_OK {
+                    var v: [u8; 64] = [0 as u8; 64]
+                    let vp: u64 = (&v[0 as usize]) as u64
+                    if actcli.field(manifest.item_key(i), vp, 64) {
+                        if manifest.item_type(i) == manifest.T_BOOL {
+                            pkg_val[(slot) as usize] = 0
+                            if pkg_true(rb(vp, 0)) {
+                                pkg_val[(slot) as usize] = 1
+                            }
+                        } else {
+                            let o2: u64 = ulib.strncpy(((&pkg_txt[0 as usize]) as u64) + slot * 64, vp, 62)
+                            __mmio_write8(((&pkg_txt[0 as usize]) as u64 + slot * 64 + o2) as *mut u8, 0 as u8)
+                        }
+                    }
+                } else if rc == actcli.R_NOBUS {
+                    pkg_say((&k_pkg_nobus[0 as usize]) as u64)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// a click on the control of catalogue item `i` of the shown package page
+fn pkg_click(i: u64) {
+    if reiter < R_ANZ || reiter - R_ANZ >= pkg_n {
+        return
+    }
+    let n: u64 = reiter - R_ANZ
+    let pg: u64 = pkg_pg[(n) as usize]
+    let first: u64 = manifest.page_first(pg)
+    if i < first || i >= first + manifest.page_len(pg) || i - first >= 80 {
+        return
+    }
+    let slot: u64 = i - first
+    let ty: u64 = manifest.item_type(i)
+    let wr: u64 = manifest.item_write(i)
+    let app: u64 = manifest.app_at(manifest.page_app(pg))
+    if wr == 0 || ty == manifest.T_STATUS {
+        fuiscene.refresh()
+        return
+    }
+    if !pkg_prefix_ok(app, wr) {
+        pkg_say((&k_pkg_deny[0 as usize]) as u64)
+        fuiscene.refresh()
+        return
+    }
+    var rc: u64 = actcli.R_ERR
+    if pkg_pend != 0 && pkg_pend_item == i {
+        // the second click: the person at the device confirms the question
+        var cf: [u8; 32] = [0 as u8; 32]
+        var s_c: [u8; 9] = "confirm \0"
+        let o: u64 = bx_put((&cf[0 as usize]) as u64, 0, 32, (&s_c[0 as usize]) as u64)
+        let _o2: u64 = bx_num((&cf[0 as usize]) as u64, o, 32, pkg_pend)
+        actcli.req((&cf[0 as usize]) as u64)
+        pkg_pend = 0
+        rc = actcli.send(300)
+    } else {
+        pkg_req(wr)
+        if ty == manifest.T_BOOL {
+            var t_t: [u8; 5] = "true\0"
+            var t_f: [u8; 6] = "false\0"
+            if fuiscene.value_of(K_PKGF0 + i) != 0 {
+                actcli.arg(manifest.item_key(i), (&t_t[0 as usize]) as u64)
+            } else {
+                actcli.arg(manifest.item_key(i), (&t_f[0 as usize]) as u64)
+            }
+        } else if ty == manifest.T_TEXT || ty == manifest.T_SECRET {
+            let tx: u64 = fuiscene.entry_text(K_PKGF0 + i)
+            if tx != 0 {
+                actcli.arg(manifest.item_key(i), tx)
+            }
+        }
+        pkg_pend = 0
+        rc = actcli.send(300)
+    }
+    if rc == actcli.R_OK {
+        pkg_say((&k_pkg_ok[0 as usize]) as u64)
+    } else if rc == actcli.R_CONFIRM {
+        var ln: [u8; 160] = [0 as u8; 160]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        let _l: bool = actcli.line(0, lp, 160)
+        var j: u64 = 8
+        var no: u64 = 0
+        while rb(lp, j) >= 48 && rb(lp, j) <= 57 {
+            no = no * 10 + rb(lp, j) - 48
+            j = j + 1
+        }
+        pkg_pend = no
+        pkg_pend_item = i
+        pkg_say((&k_pkg_ask[0 as usize]) as u64)
+    } else if rc == actcli.R_NOBUS {
+        pkg_say((&k_pkg_nobus[0 as usize]) as u64)
+    } else {
+        pkg_say((&k_pkg_err[0 as usize]) as u64)
+    }
+    // what the switches show is what the app says now, not what was clicked
+    pkg_read_page(n)
+    let _slot: u64 = slot
+    fuiscene.refresh()
+    rep_due = 1
+}
+
+// the generic page: see the block comment above
+fn page_pkg(left: usize, right: usize, n: u64) {
+    if n >= pkg_n {
+        return
+    }
+    let pg: u64 = pkg_pg[(n) as usize]
+    let first: u64 = manifest.page_first(pg)
+    let end: u64 = first + manifest.page_len(pg)
+    var i: u64 = first
+    var bools: u64 = 0
+    while i < end && i - first < 80 {
+        var parent: usize = left
+        if manifest.item_col(i) == 1 {
+            parent = right
+        }
+        let kind: u64 = manifest.item_kind(i)
+        let lab: u64 = manifest.item_label(i)
+        let slot: u64 = i - first
+        let id: u64 = K_PKGF0 + i
+        if kind == manifest.K_LABEL {
+            let _nl: usize = fuiscene.label(parent, msg.get(lab))
+        } else if kind == manifest.K_NOTE {
+            let _nw: usize = fuiscene.label_wrap(parent, msg.get(lab), manifest.item_num(i))
+        } else if kind == manifest.K_FIELD {
+            let ty: u64 = manifest.item_type(i)
+            var ltxt: u64 = (&pkg_empty[0 as usize]) as u64
+            if lab != 0 {
+                ltxt = msg.get(lab)
+            }
+            if ty == manifest.T_BOOL {
+                if bools < 16 {
+                    var on: bool = false
+                    if pkg_val[(slot) as usize] != 0 {
+                        on = true
+                    }
+                    let _nb: usize = fuiscene.toggle(parent, ltxt, id, on)
+                    bools = bools + 1
+                }
+            } else if ty == manifest.T_ACTION {
+                let n_b: usize = fuiscene.button(parent, ltxt, id)
+                fuiscene.set_size(n_b, 160, 28)
+            } else if ty == manifest.T_STATUS {
+                let dp: u64 = ((&pkg_dsp[0 as usize]) as u64) + slot * 100
+                var o: u64 = bx_put(dp, 0, 100, ltxt)
+                if rb(((&pkg_txt[0 as usize]) as u64) + slot * 64, 0) != 0 {
+                    var t_cs: [u8; 3] = ": \0"
+                    o = bx_put(dp, o, 100, (&t_cs[0 as usize]) as u64)
+                    let _o3: u64 = bx_put(dp, o, 100, ((&pkg_txt[0 as usize]) as u64) + slot * 64)
+                }
+                let _ns: usize = fuiscene.label(parent, dp)
+            } else if ty == manifest.T_TEXT || ty == manifest.T_SECRET {
+                if lab != 0 {
+                    let _ne: usize = fuiscene.label(parent, ltxt)
+                }
+                let n_e: usize = fuiscene.entry(parent, id, 0, ((&pkg_txt[0 as usize]) as u64) + slot * 64)
+                fuiscene.set_size(n_e, 0, 28)
+                if ty == manifest.T_SECRET {
+                    fuiscene.entry_secret(id, true)
+                }
+            }
+        }
+        i = i + 1
+    }
+    if rb((&pkg_stat[0 as usize]) as u64, 0) != 0 {
+        let _nt: usize = fuiscene.label_muted(left, (&pkg_stat[0 as usize]) as u64)
+    }
+}
+
 // A sum over the live texts of the network page: did anything change?
 fn netz_sum() -> u64 {
     var sum: u64 = 7
@@ -8255,7 +8646,7 @@ static mut kwkey: [u8; 16] = "settings.kw\0\0\0\0\0"
 static mut e_srch: [u8; 48] = [0 as u8; 48]
 static mut srch_prev: [u8; 48] = [0 as u8; 48]
 static mut srch_word: [u8; 48] = [0 as u8; 48]
-static mut nav_vis: [u64; 19] = [0 as u64; 19]
+static mut nav_vis: [u64; 27] = [0 as u64; 27] // R_ANZ built-in pages + up to PKG_MAX package pages (r149)
 static mut nav_n: u64 = 0
 static mut cat_buf: [u8; 320] = [0 as u8; 320]
 static mut seg_buf: [u8; 120] = [0 as u8; 120]
@@ -8370,6 +8761,9 @@ fn shell_texts() {
 // which category a page lives in (0 System, 1 Anzeige, 2 Netzwerk, 3 Konten,
 // 4 Personalisierung, 5 Zeit & Sprache, 6 Update, 7 Info)
 fn cat_of(p: u64) -> u64 {
+    if p >= R_ANZ {
+        return pkg_cat(p - R_ANZ)
+    }
     if p == R_SYSTEM || p == R_BRUECKE || p == R_MAUS || p == R_ENERGIE || p == R_APPS {
         return 0
     } else if p == R_SCREEN {
@@ -8389,6 +8783,9 @@ fn cat_of(p: u64) -> u64 {
 }
 
 fn cat_name(c: u64) -> u64 {
+    if c >= NCAT {
+        return msg.get((&k_settings_catpkg[0 as usize]) as u64)
+    }
     return ((&cat_buf[0 as usize]) as u64) + c * 40
 }
 
@@ -8412,7 +8809,10 @@ fn page_matches(p: u64) -> bool {
         __mmio_write8((kb + 11) as *mut u8, (48 + p) as u8)
         __mmio_write8((kb + 12) as *mut u8, 0 as u8)
     }
-    let kw: u64 = msg.get(kb)
+    var kw: u64 = (&pkg_empty[0 as usize]) as u64
+    if p < R_ANZ {
+        kw = msg.get(kb)
+    }
     let wb: u64 = (&srch_word[0 as usize]) as u64
     var i: u64 = 0
     while rb(q, i) != 0 {
@@ -8439,7 +8839,7 @@ fn page_matches(p: u64) -> bool {
 fn nav_compute() {
     nav_n = 0
     var i: u64 = 0
-    while i < R_ANZ {
+    while i < pages_all() {
         if page_matches(i) {
             nav_vis[(i) as usize] = 1
             nav_n = nav_n + 1
@@ -8453,12 +8853,12 @@ fn nav_compute() {
 // the visible page after / before `cur` in sidebar order (categories, then
 // page numbers); `cur` itself when there is none
 fn nav_step(cur: u64, down: bool) -> u64 {
-    var order: [u64; 24] = [0 as u64; 24]
+    var order: [u64; 32] = [0 as u64; 32]
     var n: u64 = 0
     var c: u64 = 0
-    while c < NCAT {
+    while c < NCAT + 1 {
         var p: u64 = 0
-        while p < R_ANZ {
+        while p < pages_all() {
             if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
                 order[(n) as usize] = p
                 n = n + 1
@@ -8602,6 +9002,11 @@ fn personal_wall(right: usize) {
 
 
 fn tab_names() {
+    tab_names_base()
+    pkg_names()
+}
+
+fn tab_names_base() {
     let src: u64 = msg.get((&k_t_tabs[0 as usize]) as u64)
     var t: u64 = 0
     var o: u64 = 0
@@ -8629,7 +9034,7 @@ fn tab_names() {
 
 fn two_cols(r: u64) -> bool {
     return r == R_DARST || r == R_VORL || r == R_SCREEN || r == R_NETZ
-        || r == R_KONTO || (r == R_APPS && ap_sel != AP_NONE)
+        || r == R_KONTO || (r == R_APPS && ap_sel != AP_NONE) || (r >= R_ANZ && pkg_two(r - R_ANZ))
 }
 
 // The whole window: sidebar (search + pages by category) and the page in
@@ -8638,10 +9043,10 @@ fn two_cols(r: u64) -> bool {
 fn side_fit(item_h: u64, compact: bool) -> u64 {
     var heads: u64 = 0
     var c: u64 = 0
-    while c < NCAT {
+    while c < NCAT + 1 {
         var p: u64 = 0
         var any: bool = false
-        while p < R_ANZ {
+        while p < pages_all() {
             if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
                 any = true
             }
@@ -8707,10 +9112,10 @@ fn build() {
     fuiscene.entry_hint(K_SRCH, msg.get((&k_settings_search[0 as usize]) as u64))
     let _sp0: usize = fuiscene.space(side, 0, 6)
     var c: u64 = 0
-    while c < NCAT {
+    while c < NCAT + 1 {
         var any: bool = false
         var p0: u64 = 0
-        while p0 < R_ANZ {
+        while p0 < pages_all() {
             if cat_of(p0) == c && nav_vis[(p0) as usize] != 0 {
                 any = true
             }
@@ -8719,9 +9124,9 @@ fn build() {
         if any {
             let _ch: usize = fuiscene.label_muted(side, cat_name(c))
             var p: u64 = 0
-            while p < R_ANZ {
+            while p < pages_all() {
                 if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
-                    let _t: usize = fuiscene.ftile(side, K_TAB0 + p, page_name(p), 0, item_h, 256 + p, tile_cb)
+                    let _t: usize = fuiscene.ftile(side, tab_key(p), page_name(p), 0, item_h, 256 + p, tile_cb)
                 }
                 p = p + 1
             }
@@ -8789,6 +9194,8 @@ fn build() {
             page_info(cl, cr)
         } else if reiter == R_PROTO {
             page_proto(cl, cr)
+        } else if reiter >= R_ANZ {
+            page_pkg(cl, cr, reiter - R_ANZ)
         } else {
             page_update(cl, cr)
         }
@@ -8799,6 +9206,7 @@ fn build() {
 // The values the controls start with (what the old code gave them when it
 // created them) and the loads the pages need once.
 fn init_values() {
+    pkg_init()
     var lidx: u64 = 0
     if __mmio_read8((msg.lang()) as *mut u8) == 100 as u8 {
         lidx = 1
@@ -9221,13 +9629,13 @@ fn u_start(args: u64) -> u64 {
                 fuiscene.focus(K_SRCH)
             } else if ka == wlib.KEY_ESC && rb((&e_srch[0 as usize]) as u64, 0) != 0 {
                 fuiscene.entry_set(K_SRCH, (&e_srch[0 as usize]) as u64 + 47)
-                fuiscene.focus(K_TAB0 + reiter)
-            } else if (ka == wlib.KEY_DOWN || ka == wlib.KEY_UP) && fkk >= K_TAB0 && fkk < K_TAB0 + R_ANZ {
-                let nx: u64 = nav_step(fkk - K_TAB0, ka == wlib.KEY_DOWN)
-                if nx != fkk - K_TAB0 {
+                fuiscene.focus(tab_key(reiter))
+            } else if (ka == wlib.KEY_DOWN || ka == wlib.KEY_UP) && key_page(fkk) != NO_PAGE {
+                let nx: u64 = nav_step(key_page(fkk), ka == wlib.KEY_DOWN)
+                if nx != key_page(fkk) {
                     goto_page(nx)
                     fuiscene.build_now()
-                    fuiscene.focus(K_TAB0 + nx)
+                    fuiscene.focus(tab_key(nx))
                 }
             }
         }
@@ -9267,6 +9675,11 @@ fn u_start(args: u64) -> u64 {
             if key >= K_TAB0 && key < K_TAB0 + R_ANZ {
                 kind = wlib.K_TABS
                 idx = key - K_TAB0
+            } else if key >= K_PKGTAB0 && key < K_PKGTAB0 + PKG_MAX {
+                kind = wlib.K_TABS
+                idx = R_ANZ + key - K_PKGTAB0
+            } else if key >= K_PKGF0 && key < K_PKGF0 + 240 {
+                kind = 999
             } else if is_choice(key) {
                 kind = wlib.K_CHOICE
                 idx = 4096
@@ -9279,7 +9692,9 @@ fn u_start(args: u64) -> u64 {
                 id = ch_pend
                 idx = fuiscene.menu_pick() - 1
             }
-            if kind == wlib.K_TABS {
+            if kind == 999 {
+                pkg_click(key - K_PKGF0)
+            } else if kind == wlib.K_TABS {
                 bus_page(idx)
                 zeige_reiter(idx)
                 melde_stand()

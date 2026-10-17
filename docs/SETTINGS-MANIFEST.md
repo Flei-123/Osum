@@ -18,10 +18,13 @@ column left|right                             wohin die folgenden Einträge komm
 label <label-key>                             eine feste Textzeile
 note <label-key> [<zeilen>]                   ein umbrochener Absatz (1..9 Zeilen, Standard 1)
 field <key> <type> [<label-key>] [<default>]  ein Bedienelement
+read <action>                                 direkt nach einem `field`: Aktion am Bus, die den Wert liefert (r149)
+write <action>                                direkt nach einem `field`: Aktion am Bus, die den Wert setzt (r149)
 ```
 
 * `<…-key>` ist immer ein **Katalogschlüssel** (`locale/<sprache>/messages`): im Manifest steht kein Satz, nur Schlüssel (I18N-Regel).
 * `type`: `bool`, `choice`, `text`, `secret`, `action` (Knopf; `<label-key>` ist die Beschriftung, Pflicht), `status` (eine Textzeile, die die App live füllt), `list`.
+* `read`/`write` gehören zum `field` direkt davor (oder zum anderen der beiden `read`/`write`); höchstens je eines je Feld. Sonst (kein Feld davor, doppelt, schlechter Name, andere Wortzahl) wird die **ganze Datei abgelehnt** (Fehler 6/7/5). Bedeutung: `read` ruft die Aktion und nimmt aus der Antwort das Feld mit dem Namen des Feld-Keys (`share_activity=true`); `write` ruft die Aktion mit `<key>=true|false` (bool), `<key>=<Text>` (text/secret) oder ohne Argument (action).
 * `#` am Wortanfang beginnt einen Kommentar. Wörter trennen Leerzeichen, Tab, CR.
 * Namen (Id, Key, Symbol, Gruppe, Katalogschlüssel): `[a-z0-9._-]`, 1..40 Zeichen (App: 24).
 * Grenzen: 8 Seiten, 80 Einträge, 3072 Byte Textspeicher je Manifest.
@@ -69,9 +72,21 @@ Was der Aufrufer (Settings-App) tun muss: die eingebaute Seite mit `load` lesen,
 * `bash tools/settingsman/run.sh` (Host, ~2 Min, 66 Prüfungen): beide Leser + Golden-Dateien für 30 Fälle (`tools/settingsman/cases/*.txt|.expect`) und die echte Seite; Grenzen (80/8/Textspeicher); Verdrahtung (jeder Key gebunden, jeder Schlüssel in en **und** de, Knopf nicht mehr von Hand gebaut, Kennwort-Feld ist `secret`); **Katalog (r143)**: 16 Fälle in `tools/settingsman/catalog/` (je `.txt` = Abschnitte `%% add` / `%% pkg <dir>` / `%% load`, dazu `.expect`) und die Katalog-Grenzen (8 Apps, 24 Seiten, 240 Einträge, 8192 Byte, Rollback gibt Textspeicher zurück) mit beiden Lesern; 43 Mutationen des Parsers, jede muss rot werden.
 * Klickprobe der echten App: `tools/settingsbook/run.sh` (17/0), Aufbau-Messung `tools/account/run.sh` Abschnitt 15 (Prüfung „Knopf K_BKBOOK“ liest jetzt Manifest + Bindung statt der Handarbeit-Zeile).
 
-## 6. Noch nicht (nächste Schritte)
+## 6. Die Einstellungen-App liest den Katalog (r149)
 
-1. **App liest den Katalog:** beim Start `/apps/*.prog/SETTINGS` (Namen aus `apprights list`/Verzeichnis) mit `add_pkg` anhängen und die Reiterleiste (heute `settings.tabs` + 19 feste Kacheln, `K_TAB0 + page`) aus `page_group`/`page_symbol`/`page_title` erzeugen. Das Zeichnen einer Paket-Seite braucht die generischen Felder (nächster Punkt).
-2. **Generische Felder:** `bool`/`choice`/`text` ohne Bindungstabelle: Wert lesen/schreiben über die Lese-/Schreib-Aktion am Bus (Rechte, Bestätigung, Audit macht der Broker) — dafür fehlen im Manifest noch `read <aktion>`/`write <aktion>` je Feld. `bool` wird vom Renderer noch **nicht** gezeichnet (nur geparst).
-3. **Weitere Seiten auslagern:** Social/Aktivität („Melder“-Seite aus FirnChat `MELDER-INTERFACE.md`), Netz, Benutzer — jeweils eine Datei in `settings.d/` plus Bindung, mit dem vorhandenen Test als Netz.
-4. **Erledigt (r143): Kennwort-Feld maskiert.** `password` in `accounts.settings` ist jetzt `secret` (Renderer rief `fuiscene.entry_secret` für `T_SECRET` schon auf, nur das Manifest sagte `text`). Das Feld zeigt die Eingabe nicht mehr offen; Verhalten sonst gleich (derselbe Puffer, dieselbe Id).
+* **Laden:** `pkg_init()` (einmal, in `init_values`) lädt das eingebaute Manifest, ruft `apprights list` und liest je App `/apps/<name>.prog/SETTINGS` (über 3072 Byte: gar nicht gelesen) mit `manifest.add_pkg`. Abgelehnte Pakete werden übersprungen, die anderen bleiben. Höchstens 8 Paket-Seiten (`PKG_MAX`).
+* **Reiterleiste:** Paket-Seiten haben die Seitennummer `R_ANZ + n` und die Taste `K_PKGTAB0 + n` (600..607). Der Name kommt aus `page_title` (Katalogschlüssel), die Kategorie aus `page_group`: `system display network accounts personal time update about` (Datei `settings.d/groups.names`) sind die eingebauten Kategorien, alles andere landet in der neunten Kategorie „Apps“. Suche und Pfeiltasten gelten auch für sie. `symbol` ist gelesen, aber noch nicht gezeichnet.
+* **Zeichnen (`page_pkg`):** `label`, `note`; `bool` als Schalter; `action` als Knopf; `status` als Zeile „Beschriftung: Wert“; `text`/`secret` als Eingabefeld (Enter schreibt). `choice`/`list` werden noch nicht gezeichnet (das Manifest hat keine Eintragsliste). Tasten der Felder: `K_PKGF0 + Katalog-Eintragsnummer` (620..859).
+* **Werte:** beim Öffnen der Seite (`pkg_enter`) und nach jedem Schreiben ruft die App jede `read`-Aktion (`call <aktion>`) und nimmt das Antwortfeld mit dem Feld-Key. Schreiben (`write`) geht über denselben Bus wie alle Seiten: Rechte, Rückfrage, Audit macht der Broker. Eine **kritische** Aktion antwortet mit einer Frage: die Statuszeile sagt es, der nächste Klick auf dasselbe Feld bestätigt (`confirm <Nr>`).
+* **Eigener Namensraum:** eine Seite von `<app>` darf nur Aktionen rufen, die mit `<app>.` beginnen (`pkg_prefix_ok`); sonst „Nicht erlaubt“, es wird nichts gesendet. Ein Paket kann so keine fremde Aktion hinter einem Schalter verstecken.
+* **Erste Paket-Seite:** `pakete/social/SETTINGS` (Seite „Aktivität“, Gruppe `accounts`): Schalter `share_activity` (`social.status` / `social.privacy.set`), Zeilen `presence` und `activity`, Knopf `social.refresh`. Muss als `/apps/social.prog/SETTINGS` ins Abbild (wie `ACTIONS`).
+* **Tests:** `tools/settingsman/run.sh` Abschnitt 4b (Leser gleich, Schlüssel in en+de, Aktionen und Rückgabefelder in `ACTIONS`, Namensraum-Regel, Verdrahtung), 6 neue Fälle + 6 Mutationen für `read`/`write`.
+
+## 7. Noch nicht
+
+1. **Weitere Seiten auslagern:** Netz, Benutzer, Melder-Autostart (Backend-Verb, nicht am Bus) — jeweils eine Datei plus Bindung, mit dem vorhandenen Test als Netz. Eingebaute Seiten bleiben vorerst im Code (`settings.tabs`, 19 Einträge).
+2. **`choice` und `list`** generisch: das Manifest braucht eine Eintragsquelle (Aktion oder Liste).
+3. **Symbol** der Seite zeichnen (die Reiter haben heute kein Bild).
+4. **Mehr als 8 Paket-Seiten / eigene Gruppen-Überschriften** aus `group` (heute nur die 8 eingebauten Kategorien + „Apps“).
+5. **Ende-zu-Ende-Probe** in der VM: Paket-Seite öffnen und den Schalter klicken (braucht `social` in `/proc/apps` und das Abbild mit `SETTINGS`); heute prüfen nur die Host-Tests und der Bau.
+6. Erledigt (r143): Kennwort-Feld maskiert.

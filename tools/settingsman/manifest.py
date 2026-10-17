@@ -78,6 +78,7 @@ def parse(data, cat=None, expect=None):
     items = []
     warns = 0
     col = 0
+    prev_field = False
 
     def put(w):
         nonlocal pool
@@ -99,6 +100,8 @@ def parse(data, cat=None, expect=None):
         if many:
             raise Reject(E_ITEM, line)
         kw = w[0]
+        was_field = prev_field
+        prev_field = False
         if kw == b"manifest":
             if st != 0 or len(w) != 2 or w[1] != b"1":
                 raise Reject(E_HEADER, line)
@@ -204,7 +207,21 @@ def parse(data, cat=None, expect=None):
             first = pages[-1]["first"] - len(cat.items)
             if any(it["kind"] == "field" and it["key"] == key for it in items[first:]):
                 raise Reject(E_DUP_FIELD, line)
-            add({"kind": "field", "key": key, "type": ty, "label": label, "def": default})
+            add({"kind": "field", "key": key, "type": ty, "label": label, "def": default, "read": None, "write": None})
+            prev_field = True
+            continue
+        if kw in (b"read", b"write"):
+            if not pages:
+                raise Reject(E_NO_PAGE, line)
+            if len(w) != 2 or not was_field:
+                raise Reject(E_ITEM, line)
+            if not name_ok(w[1], 40):
+                raise Reject(E_NAME, line)
+            slot = kw.decode()
+            if items[-1][slot] is not None:
+                raise Reject(E_ITEM, line)
+            items[-1][slot] = put(w[1])
+            prev_field = True
             continue
         warns += 1
     if st < 2:
@@ -224,7 +241,8 @@ def show_items(cat, p, out):
         elif it["kind"] == "note":
             out.append("  note %s %s %d" % (it["col"], it["label"], it["num"]))
         else:
-            out.append("  field %s %s %s %s %s" % (it["col"], it["key"], it["type"], it["label"] or "-", it["def"] or "-"))
+            out.append("  field %s %s %s %s %s%s%s" % (it["col"], it["key"], it["type"], it["label"] or "-", it["def"] or "-",
+                       (" read=" + it["read"]) if it.get("read") else "", (" write=" + it["write"]) if it.get("write") else ""))
 
 
 def dump(data):

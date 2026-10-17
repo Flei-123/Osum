@@ -22,6 +22,8 @@
 //   * A KNOWN line with missing/extra words, a bad name, a duplicate page id, a duplicate field key in a page, an item
 //     before the first page, a bad `column`, `action` without a label, or a full table rejects the WHOLE file: never
 //     half a page. After a rejection the tables are EMPTY and err_code()/err_line() say why.
+//   * `read <action>` / `write <action>` directly after a `field` line (or after the other of the two) bind the bus
+//     action the field reads its value from / writes it to (r149); elsewhere, twice, or with a bad name they reject the file.
 //   * An UNKNOWN line word or an unknown field type is skipped and counted (warn_count()): a newer manifest on an older
 //     Settings app still shows what it understands.
 //   * Names (ids, keys, symbol, group, catalogue keys) are [a-z0-9._-], 1..40 octets (app: 24).
@@ -39,6 +41,7 @@ export {
     app_count, app_at, app_find, app_first_page, app_page_count, page_app, page_find_in,
     page_count, page_id, page_title, page_symbol, page_group, page_find, page_first, page_len,
     names_index, item_count, item_kind, item_type, item_col, item_key, item_label, item_def, item_num,
+    item_read, item_write,
 }
 
 const ERR: u64 = 4294967295 // load(): the file was rejected
@@ -86,6 +89,9 @@ static mut it_key: [u64; 240] = [0 as u64; 240]
 static mut it_label: [u64; 240] = [0 as u64; 240]
 static mut it_def: [u64; 240] = [0 as u64; 240]
 static mut it_num: [u64; 240] = [0 as u64; 240]
+static mut it_read: [u64; 240] = [0 as u64; 240] // `read <action>` of a field (pool offset, 0 = none)
+static mut it_write: [u64; 240] = [0 as u64; 240] // `write <action>` of a field
+static mut last_field: u64 = 0 // 1: the line just before was a (kept) `field` line -- only then `read`/`write` bind
 static mut n_items: u64 = 0
 static mut pg_id: [u64; 24] = [0 as u64; 24]
 static mut pg_title: [u64; 24] = [0 as u64; 24]
@@ -122,6 +128,8 @@ static mut kw_column: [u8; 6] = "column"
 static mut kw_label: [u8; 5] = "label"
 static mut kw_note: [u8; 4] = "note"
 static mut kw_field: [u8; 5] = "field"
+static mut kw_read: [u8; 4] = "read"
+static mut kw_write: [u8; 5] = "write"
 static mut kw_one: [u8; 1] = "1"
 static mut kw_left: [u8; 4] = "left"
 static mut kw_right: [u8; 5] = "right"
@@ -160,6 +168,7 @@ fn reset() {
     err_ln = 0
     warns = 0
     too_many = 0
+    last_field = 0
 }
 
 fn err_code() -> u64 {
@@ -316,6 +325,11 @@ fn add_item(kind: u64, ty: u64, key: u64, label: u64, def: u64, num: u64, line: 
     it_label[i] = label
     it_def[i] = def
     it_num[i] = num
+    it_read[i] = 0
+    it_write[i] = 0
+    if kind == K_FIELD {
+        last_field = 1
+    }
     n_items = n_items + 1
     pg_len[(n_pages - 1) as usize] = pg_len[(n_pages - 1) as usize] + 1
     return 1
@@ -407,7 +421,41 @@ fn do_field(nw: u64, line: u64) -> u64 {
     return add_item(K_FIELD, ty, key, label, def, 0, line)
 }
 
+// `read <action>` / `write <action>`: binds the bus action to the field of the line just before (which must be a kept
+// `field` line, at most one read and one write per field).
+fn do_bind(nw: u64, line: u64, wr: u64, was_field: u64) -> u64 {
+    if n_pages == base_pages {
+        return fail(E_NO_PAGE, line)
+    }
+    if nw != 2 || was_field == 0 {
+        return fail(E_ITEM, line)
+    }
+    if !name_ok(1, 40) {
+        return fail(E_NAME, line)
+    }
+    let i: usize = (n_items - 1) as usize
+    if wr == 0 && it_read[i] != 0 {
+        return fail(E_ITEM, line)
+    }
+    if wr == 1 && it_write[i] != 0 {
+        return fail(E_ITEM, line)
+    }
+    let a: u64 = put_word(1)
+    if a == 0 {
+        return fail(E_POOL, line)
+    }
+    if wr == 0 {
+        it_read[i] = a
+    } else {
+        it_write[i] = a
+    }
+    last_field = 1 // the other of read/write may follow
+    return 1
+}
+
 fn do_line(nw: u64, line: u64) -> u64 {
+    let was_field: u64 = last_field
+    last_field = 0
     if too_many != 0 {
         return fail(E_ITEM, line)
     }
@@ -516,6 +564,12 @@ fn do_line(nw: u64, line: u64) -> u64 {
         }
         return do_field(nw, line)
     }
+    if word_eq(0, (&kw_read[0]) as u64, 4) {
+        return do_bind(nw, line, 0, was_field)
+    }
+    if word_eq(0, (&kw_write[0]) as u64, 5) {
+        return do_bind(nw, line, 1, was_field)
+    }
     // unknown line word: skipped, counted
     warns = warns + 1
     return 1
@@ -537,6 +591,7 @@ fn add_man(buf: u64, len: u64) -> u64 {
     err_ln = 0
     warns = 0
     too_many = 0
+    last_field = 0
     cur_buf = buf
     var at: u64 = 0
     var line: u64 = 0
@@ -766,6 +821,21 @@ fn item_def(i: u64) -> u64 {
         return 0
     }
     return pool_ptr(it_def[(i) as usize])
+}
+
+// the bus action a field reads its value from / writes it to (0 = none)
+fn item_read(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_read[(i) as usize])
+}
+
+fn item_write(i: u64) -> u64 {
+    if i >= n_items {
+        return 0
+    }
+    return pool_ptr(it_write[(i) as usize])
 }
 
 fn item_num(i: u64) -> u64 {
