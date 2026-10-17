@@ -117,7 +117,7 @@ klickauf emenue4
 warte 3
 foto 13-sorted
 DREH
-bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de \
+bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de halt=480 \
     extra='nostart wigapp=/bin/explorer,/users/justin' drehbuch="$OUT/dreh.txt" > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"
 if [ ! -s "$S" ]; then echo "FAILED: no serial output"; tail -20 "$OUT/lauf.log"; exit 1; fi
