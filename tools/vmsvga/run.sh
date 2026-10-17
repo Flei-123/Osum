@@ -122,6 +122,15 @@ chk "hint 4096x2304 (too big): accepted, shrunk to fit, same aspect, device agre
 chk "hint 1920x1080 and 1024x768: mode follows (no stale state after the shrink)" \
     'hl 1920x1080 | grep -q "pend=1920x1080 rc=0 mode=1920x1080 dev=1920x1080 bad=0$" && hl 1024x768 | grep -q "pend=1024x768 rc=0 mode=1024x768 dev=1024x768 bad=0$"'
 
+# VMMDev request table (Y2, 17.10.2026): QEMU has no VMMDev, so request types/sizes/fields are checked against the VirtualBox headers
+# (tools/vmsvga/vmmlint.py). Counter-proofs: the pre-fix hint poll (event_ack = 0 -> host answers the stale 0x0 request on VirtualBox 7.2.20)
+# and a wrong GuestInfo2 size must both be caught.
+chk "vmmdev table: every request type, size and field matches the VirtualBox headers" 'python3 tools/vmsvga/vmmlint.py kernel/drv/gpu/vmsvga.fi >"$T/vmmlint.txt"'
+sed 's/wr32(rq, 36, VMM_EVENT_DISPLAY)/wr32(rq, 36, 0)/' kernel/drv/gpu/vmsvga.fi >"$T/vmsvga.noack.fi"
+sed 's/vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 144)/vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 140)/' kernel/drv/gpu/vmsvga.fi >"$T/vmsvga.size.fi"
+chk "control noack (event_ack = 0, the state before Y2): table check fails" '! python3 tools/vmsvga/vmmlint.py "$T/vmsvga.noack.fi" >/dev/null'
+chk "control wrong GuestInfo2 size: table check fails" '! python3 tools/vmsvga/vmmlint.py "$T/vmsvga.size.fi" >/dev/null'
+
 # full-update way (default): QEMU cannot show the VirtualBox failure, but the pictures must stay right and the cost must be a full frame
 F=$T/fullw.txt
 chk "full way: detected, mode 800x600 at boot" 'grep -aqE "^vmsvga: bdf=.* mode=800x600 " "$F"'

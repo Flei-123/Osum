@@ -116,6 +116,9 @@ const S_VMM_POLLS: u64 = 0x208 // display-change requests read
 const S_VMM_HINT: u64 = 0x210 // last hint read (w << 16 | h)
 const S_VMM_RC: u64 = 0x218 // rc of the last failed request
 const S_VMM_FAKE: u64 = 0x220 // test bed: hint injected instead of the device answer (w << 16 | h), 0 = use the device
+const S_VMM_FTY: u64 = 0x230 // request type of the last failed request
+const S_VMM_FMASK: u64 = 0x238 // bit mask of request types (type mod 64) that ever failed
+const S_VMM_BUSY: u64 = 0x250 // 1 while a core is inside vmm_hint (the request page is shared by the idle task and the desktop loop)
 const S_VMM_ACK: u64 = 0x228 // requests that reported the graphics capability (bit mask of steps that worked)
 const S_MBI: u64 = 0x800 // synthetic multiboot info (Weg 3), 128 bytes
 
@@ -1060,6 +1063,8 @@ const VMMREQ_SET_GUEST_CAPS: u64 = 56
 const VMMREQ_REPORT_GUEST_INFO2: u64 = 58
 const VMMREQ_REPORT_GUEST_STATUS: u64 = 59
 const VMM_CAP_GRAPHICS: u64 = 4
+const VMM_EVENT_DISPLAY: u64 = 4
+const VMMREQ_CTL_FILTER: u64 = 42
 const VMM_FAC_DRIVER: u64 = 20
 const VMM_FAC_GRAPHICS: u64 = 1100
 const VMM_ST_ACTIVE: u64 = 50
@@ -1106,6 +1111,8 @@ fn vmm_call(state: u64, ty: u64, size: u64) -> bool {
     if rc >= 0x80000000 {
         kstate.add(state, s(S_VMM_ERR), 1)
         kstate.set(state, s(S_VMM_RC), rc)
+        kstate.set(state, s(S_VMM_FTY), ty)
+        kstate.set(state, s(S_VMM_FMASK), kstate.get(state, s(S_VMM_FMASK)) | (1 << (ty % 64)))
         return false
     }
     return true
@@ -1163,13 +1170,18 @@ fn vmm_init(state: u64) {
     vmm_zero_body(state, 144)
     wr32(p, 24, (2 << 16) | 7)
     wr32(p, 28, 20)
-    wr32(p, 32, 0)
+    wr32(p, 32, 175154) // SVN revision of the 7.2.20 release (r0 made the host answer rc = -2)
     wr32(p, 36, 0)
     wr32(p, 40, 0x6569724F) // "Orie"
     wr32(p, 44, 0x534F746E) // "ntOS"
     let _i2: bool = vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 144)
     // 3. the driver is up, the graphics capability makes the VM window send resize hints
     let _s1: bool = vmm_status(state, VMM_FAC_DRIVER)
+    // event filter: we want the display change event bit (we poll, but the host keeps the event pending only for filtered bits)
+    vmm_zero_body(state, 8)
+    wr32(p, 24, VMM_EVENT_DISPLAY)
+    wr32(p, 28, 0)
+    let _f: bool = vmm_call(state, VMMREQ_CTL_FILTER, 32)
     vmm_zero_body(state, 8)
     wr32(p, 24, VMM_CAP_GRAPHICS)
     wr32(p, 28, 0)
@@ -1193,12 +1205,26 @@ fn vmm_hint(state: u64) -> u64 {
         kstate.set(state, s(S_VMM_HINT), fk)
         return fk
     }
+    // one core at a time: the idle task and the desktop loop both poll; the loser simply skips this poll
+    let bz: *mut u64 = (state + VMSVGA_OFF + S_VMM_BUSY) as *mut u64
+    let was: u64 = __atomic_swap(bz, 0, 1)
+    if was != 0 {
+        return 0
+    }
+    let r: u64 = vmm_hint_locked(state)
+    __mmio_write64(bz, 0)
+    return r
+}
+
+fn vmm_hint_locked(state: u64) -> u64 {
     let rq: u64 = kstate.get(state, s(S_VMM_REQ))
     vmm_zero_body(state, 20)
     wr32(rq, 24, 0) // xres
     wr32(rq, 28, 0) // yres
     wr32(rq, 32, 0) // bpp
-    wr32(rq, 36, 0) // event_ack = 0: always the most recent request, no event handshake
+    // event_ack = VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST (4): the host returns the CURRENT request and marks it as read. With 0 it answers
+    // with the last request the guest "read" through an event ack (VMMDev.cpp: lastReadDisplayChangeRequest), i.e. 0x0 forever.
+    wr32(rq, 36, VMM_EVENT_DISPLAY)
     wr32(rq, 40, 0) // display 0
     if !vmm_call(state, VMMREQ_GET_DISPLAY_CHANGE2, 44) {
         return 0
@@ -1210,7 +1236,11 @@ fn vmm_hint(state: u64) -> u64 {
         return 0
     }
     let v: u64 = (w << 16) | h
+    let changed: bool = v != kstate.get(state, s(S_VMM_HINT))
     kstate.set(state, s(S_VMM_HINT), v)
+    if changed {
+        vmm_say(state) // the hint changed: one serial line (hint=WxH)
+    }
     return v
 }
 
@@ -1223,6 +1253,7 @@ fn vmm_say(state: u64) {
     var s_x: [u8; 2] = "x\0"
     var s_e: [u8; 6] = " err=\0"
     var s_r: [u8; 5] = " rc=\0"
+    var s_t: [u8; 5] = " ty=\0"
     if kstate.get(state, s(S_VMM_UP)) == 0 {
         return
     }
@@ -1242,6 +1273,8 @@ fn vmm_say(state: u64) {
     serial.dec(kstate.get(state, s(S_VMM_ERR)))
     serial.puts((&s_r[0]) as u64)
     serial.hex(kstate.get(state, s(S_VMM_RC)))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(kstate.get(state, s(S_VMM_FTY)))
     serial.nl()
 }
 
