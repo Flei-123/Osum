@@ -958,7 +958,12 @@ EOFJ
 fi
 
 # ================================================== 4. das Dateisystem
-ARGS=(build "$OUT/root.img" "$FS_BLOCKS" --v3
+# W-E (17.10.2026): THE "Date modified" COLUMN SHOWED "--" FOR EVERY SHIPPED FILE. mkfs.py stamps all three times of every file with
+# NULL unless `--time=<seconds>` is given (a build must be reproducible, so never "now"), and expmodell prints 0 as "--". The stamp is
+# the commit time of the checkout: the same commit gives the same bytes, and the column shows a real date. FS_TIME overrides it.
+FS_TIME=${FS_TIME:-$(git log -1 --format=%ct 2>/dev/null)}
+case "$FS_TIME" in ''|*[!0-9]*) FS_TIME=1760000000 ;; esac
+ARGS=(build "$OUT/root.img" "$FS_BLOCKS" --v3 "--time=$FS_TIME"
       "--inodes=$FS_INODES" "--karten=$FS_KARTEN")
 # ============ RUNDE MODERN + INTEGRATION 21.09.2026: `bold.ttf` HAT
 # HIER GEFEHLT -- DERSELBE FEHLER WIE BEI `nedit`, NUR EINE SCHRIFT.
