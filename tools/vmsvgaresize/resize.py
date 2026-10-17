@@ -60,20 +60,30 @@ def measure(mon, tag):
     return w, h, black, rows, lastblack, dup
 
 
-def menu_probe(mon, tag):
-    # r1007: open the start menu (Super key) and measure where its panel stands: horizontal centre and bottom edge. The panel colour
-    # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar.
-    mon.cmd("sendkey meta_l", 3.0)
+def menu_find(mon, tag):
     f = mon.dump("%s.m.ppm" % (base + "." + tag))
     w, h, b = ppm_rgb(f)
     img = np.frombuffer(b, dtype=np.uint8).reshape(h, w, 3).astype(np.int16)
-    mon.cmd("sendkey meta_l", 1.5)
     m = np.all(np.abs(img[: h - 40] - np.array([248, 249, 251])) <= 3, axis=2)
     rows = np.where(m.sum(axis=1) >= 300)[0]
     if len(rows) < 100:
         return -1, -1
     cols = np.where(m[rows[0] : rows[-1] + 1].sum(axis=0) >= 100)[0]
     return int((cols[0] + cols[-1]) // 2), int(rows[-1])
+
+
+def menu_probe(mon, tag):
+    # r1007: open the start menu (Super key) and measure where its panel stands: horizontal centre and bottom edge. The panel colour
+    # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar. The key toggles: if the first press
+    # finds no menu (it was open and is closed now), press once more. Esc closes it at the end.
+    res = (-1, -1)
+    for _ in range(2):
+        mon.cmd("sendkey meta_l", 3.0)
+        res = menu_find(mon, tag)
+        if res[0] >= 0:
+            break
+    mon.cmd("sendkey esc", 1.5)
+    return res
 
 
 def main():
