@@ -223,8 +223,56 @@ def main():
         fact("D_band_open_vs_after_px", diff_px(band(opn), band(aft)))
         fact("E_band_back_vs_idle_px", diff_px(band(idle), band(back)))
         fact("E_full_back_vs_idle_px", diff_px(idle, back))
+        # X1: the tiles have no black letterbox -- count pure 0x101010 pixels in the panel band of the open picture (the old code
+        # filled every thumbnail box with 0x101010 and left the side/bottom margins black)
+        bo = band(opn)[2]
+        fact("D_black_px", sum(1 for i in range(0, len(bo), 3) if bo[i:i + 3] == b"\x10\x10\x10"))
     except Exception as e:  # noqa
         fact("D_error", repr(e))
+    # ---- scene F (X1): a MINIMIZED window is listed (mins>=1), Tab reaches it, releasing Alt restores it
+    try:
+        pos = len(serial_text(ser))
+        q.tap("meta_l", "down")  # the focused floating window minimizes
+        time.sleep(2.5)
+        pos = len(serial_text(ser))
+        q.key("alt", True)
+        q.tap("tab")
+        pos, m = wait_for(ser, r"wm: switcher open n=(\d+) sel=(\d+) win=(\d+) hid=(\d) mins=(\d+)", pos, 15)
+        fact("F_open", "1" if m else "0")
+        hid = 0
+        if m:
+            fact("F_open_n", m.group(1))
+            fact("F_open_mins", m.group(5))
+            hid = int(m.group(4))
+        tries = 0
+        while m and hid != 1 and tries < 6:
+            tries += 1
+            q.tap("tab")
+            pos, m2 = wait_for(ser, r"wm: switcher step n=(\d+) sel=(\d+) win=(\d+) hid=(\d) mins=(\d+)", pos, 10)
+            hid = int(m2.group(4)) if m2 else 0
+            if not m2:
+                break
+        fact("F_sel_minimized", "1" if hid == 1 else "0")
+        time.sleep(1.0)
+        shot(mon, out + "/open_min.ppm")
+        q.key("alt", False)
+        pos, m3 = wait_for(ser, r"wm: switcher commit n=(\d+) sel=(\d+) win=(\d+) hid=(\d) mins=(\d+)", pos, 10)
+        fact("F_commit_hid", m3.group(4) if m3 else "none")
+        pos2, f = wait_for(ser, r"wm: fokus id=(\d+)", pos, 8)
+        fact("F_focus_after", f.group(1) if f else "none")
+        fact("F_commit_win", m3.group(3) if m3 else "none")
+        time.sleep(1.5)
+        # the window is back: a new switcher lists no minimized window any more
+        pos = len(serial_text(ser))
+        q.key("alt", True)
+        q.tap("tab")
+        pos, m4 = wait_for(ser, r"wm: switcher open n=(\d+) sel=(\d+) win=(\d+) hid=(\d) mins=(\d+)", pos, 15)
+        fact("F_after_mins", m4.group(5) if m4 else "none")
+        q.tap("esc")
+        q.key("alt", False)
+        time.sleep(1.0)
+    except Exception as e:  # noqa
+        fact("F_error", repr(e))
     open(out + "/scenes.txt", "w").write("\n".join(facts) + "\n")
     print("\n".join(facts))
     return 0
