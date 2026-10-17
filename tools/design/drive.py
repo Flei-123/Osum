@@ -960,6 +960,18 @@ class Fahrer:
             kopf = int(z.group(2)) if z.group(2) else zh + 4
             y0 = int(m.group(2)) + kopf + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
+        if name.startswith("fkante"):
+            # W4c: the right edge of column <N> in the file table header (`explorer: spalten x0 x1 x2 x3` =
+            # the text x of each column; the edge after column N is the cell start of column N+1 = x - 10).
+            n = int(name[6:])
+            sp = letzte(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)")
+            m = letzte(r"explorer: rect id=\d+ kind=6 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            o = self.fenster("explorer")
+            if sp is None or m is None or o is None or n > 2:
+                return None
+            ex = int(sp.group(n + 2)) - 10
+            return (o[0] + ex, o[1] + int(m.group(2)) + 14, 0, 0)
         if name in ("ftab", "fbaum"):
             # RUNDE EXPLORER-2: DIE TABELLE UND DIE SEITENLEISTE, OHNE
             # IHRE NUMMER ZU KENNEN. `frect<N>` verlangt die Widgetzahl,
@@ -1221,6 +1233,19 @@ def main():
             xb, yb = rb[0] + rb[2] // 2, rb[1] + rb[3] // 2
             f.ziehe(xa, ya, xb, yb)
             print("ziehauf %s -> %d,%d to %d,%d" % (arg, xa, ya, xb, yb))
+        elif b == "ziehnach":
+            # W4c: `ziehnach <name> <dx>,<dy>` drags (button held, relative steps) from the middle of the
+            # reported rectangle by (dx, dy), e.g. `ziehnach fkante0 40,0` widens column 0 by 40 px.
+            t = arg.split()
+            ra = f.rechteck(t[0])
+            if ra is None:
+                print("ziehnach %s -> KEIN RECHTECK GEMELDET" % arg)
+                fehler += 1
+                continue
+            dx, dy = (int(v) for v in t[1].split(","))
+            xa, ya = ra[0] + ra[2] // 2, ra[1] + ra[3] // 2
+            f.ziehe(xa, ya, xa + dx, ya + dy)
+            print("ziehnach %s -> %d,%d by %d,%d" % (t[0], xa, ya, dx, dy))
         elif b == "monitor":
             f.cmd(arg)
             time.sleep(0.5)
