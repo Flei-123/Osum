@@ -73,7 +73,7 @@ if not m:
     say(False, "the chevron opened the flyout")
 else:
     fx, fy, fw, fh = (int(v) for v in m.groups())
-    say(fy + fh <= by and fy >= 0, "flyout lies above the bar (y %d..%d, bar at %d)" % (fy, fy + fh, by))
+    say(fy >= 0 and 0 <= by - (fy + fh) <= 24, "flyout sits right above the bar, not at the top of the screen (y %d..%d, bar at %d)" % (fy, fy + fh, by))
     say(fx >= 0 and fx + fw <= 1280, "flyout inside the screen (x %d..%d)" % (fx, fx + fw))
     w2, h2, p2 = load_ppm(os.path.join(out, "01-open.ppm"))
     bgp = p2[((fy + fh - 4) * w2 + fx + fw - 8) * 3:((fy + fh - 4) * w2 + fx + fw - 8) * 3 + 3]
