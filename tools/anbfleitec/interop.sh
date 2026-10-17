@@ -22,7 +22,14 @@
 #     (checked on the broker), the next renew ends the session cleanly.
 #  6. Sign-out: POST /oidc/revoke reaches the broker, refresh token dead.
 #  7. No token in clear on the disk image.
-#  8. socfleitec: a broker token is NOT an fkt1 token (documented gap, r106).
+#  8. The bridge (r115b): `socfleitec v1 login broker <JWT>` swaps the broker
+#     access token for an fkt1 at the address book (POST
+#     /api/kontakte/zugang-broker). The book is the mock buch.py behind
+#     proxy.py (path routing) with a REAL Ed25519 check against the broker's
+#     JWKS and the FirnChat rules (iss/aud/exp/jti/uid). Checked: the swap
+#     works, the fkt1 opens the book, the JWT is never echoed nor stored;
+#     wrong aud, expired, foreign signature, unknown account, id_token,
+#     garbage are refused and leave the stored fkt1 alone.
 #
 # Usage: bash tools/anbfleitec/interop.sh    (heavy: ~20 guest boots)
 # Env: FLEITEC_ID=<dir of fleitec-id> (default: the JARVIS project folder)
@@ -57,7 +64,9 @@ V1=ai1
 BPORT=$(( 16600 + ($$ % 300) * 2 ))
 QPORT=$(( BPORT + 1 ))
 IDPORT=$(( 20000 + ($$ % 20000) ))       # broker, loopback inside the namespace
-SRVPID=""; PXPID=""; BRPID=""; GPID=""
+BKPORT=$(( IDPORT + 1 ))                  # mock address book (buch.py), loopback in the namespace
+ABB_EXTRA=()
+SRVPID=""; PXPID=""; BRPID=""; GPID=""; BKPID=""
 Z="https://10.9.0.1:8443"
 broker_zu() {
     if [ -n "$SRVPID" ]; then kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null; fi
@@ -67,6 +76,7 @@ cleanup() {
     [ -n "$GPID" ] && kill "$GPID" 2>/dev/null
     broker_zu
     [ -n "$PXPID" ] && kill "$PXPID" 2>/dev/null
+    [ -n "$BKPID" ] && kill "$BKPID" 2>/dev/null
     [ -n "$BRPID" ] && kill "$BRPID" 2>/dev/null
     ip netns del "$NS" 2>/dev/null
     ip link del "$V0" 2>/dev/null
@@ -81,7 +91,7 @@ ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-mkdir -p "$TMPD/w" "$TMPD/fid"
+mkdir -p "$TMPD/w" "$TMPD/fid" "$TMPD/ctl"
 
 # --- build (same as run.sh) ----------------------------------------------
 echo "== 0. build =="
@@ -122,7 +132,7 @@ abbild() { # <target>
         "/bin/konto=$TMPD/konto.elf" ${SOC_PROG:+"$SOC_PROG"} \
         "/etc/ssl/roots.pem=$TMPD/certs/ca.pem" \
         "/etc/passwd=$TMPD/passwd" "/etc/locale.conf=$TMPD/locale.conf" \
-        "/etc/konten.conf=$TMPD/konten.conf" \
+        "/etc/konten.conf=$TMPD/konten.conf" "${ABB_EXTRA[@]}" \
         "/usr/share/locale/en/messages=$ROOT/locale/en/messages" \
         "/usr/share/locale/de/messages=$ROOT/locale/de/messages" \
         > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; return 1; }
@@ -140,7 +150,10 @@ ethtool -K "$V0" tx off rx off tso off gso off gro off >/dev/null 2>&1
 ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev/null 2>&1
 "$TMPD/bridge" "$V0" "$BPORT" "$QPORT" 2>"$TMPD/br.log" & BRPID=$!
 ip netns exec "$NS" python3 tools/anbfleitec/proxy.py --listen 10.9.0.1:8443 --to "127.0.0.1:$IDPORT" \
-    --cert "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" --log "$TMPD/w" > "$TMPD/px.log" 2>&1 & PXPID=$!
+    --cert "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" --log "$TMPD/w" \
+    --route "/api/kontakte=127.0.0.1:$BKPORT" > "$TMPD/px.log" 2>&1 & PXPID=$!
+ip netns exec "$NS" python3 tools/anbfleitec/buch.py --listen "127.0.0.1:$BKPORT" \
+    --jwks "http://127.0.0.1:$IDPORT/oidc/jwks.json" --issuer "$Z" --ctl "$TMPD/ctl" > "$TMPD/book.log" 2>&1 & BKPID=$!
 
 broker_auf() { # <device interval> <device ttl>
     broker_zu
@@ -340,7 +353,7 @@ is "unknown client: accounts on the device" "$(kv "$TMPD/o_cl.l" konten)" "0"
 
 # slow_down: broker interval 15; the host polls once, the guest polls right after
 broker_auf 15 600 || true
-R=$(hcurl -d client_id=orientos-device -d 'scope=openid profile offline_access' https://konto.test:8443/oidc/device_authorization)
+R=$(hcurl -d client_id=orientos-device -d 'scope=openid profile offline_access fleitec.account' https://konto.test:8443/oidc/device_authorization)
 SDC=$(echo "$R" | jf device_code)
 hcurl -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=orientos-device -d "device_code=$SDC" \
     https://konto.test:8443/oidc/token | jf error > "$TMPD/sd0.txt"
@@ -421,24 +434,95 @@ num "tokens the broker issued (searched; last wire window)" "$NTOK" ge 2
 is "hits in any disk image" "$HITS" "0"
 
 # ======================================================================
-echo "== 8. socfleitec and a broker token =="
+echo "== 8. broker token -> fkt1 (socfleitec login broker, r115b) =="
 # ======================================================================
-# A broker access token is an EdDSA JWT, NOT "<fkt1>.<account>.<64 hex>".
-# socfleitec only takes the latter (fleikontakte issues it). The bridge
-# OIDC session -> fkt1 does not exist yet (fleikontakte knows no fc_sess, r106).
+# The guest signs in at the REAL broker (scope fleitec.account -> the access
+# token carries `uid`). `socfleitec v1 login broker <JWT>` then swaps it at the
+# address book (mock buch.py, routed by path behind the same TLS terminator;
+# real Ed25519 check against the broker's JWKS).
 if [ -n "$SOC_PROG" ]; then
+    printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "https://10.9.0.1:8443" > "$TMPD/fl.conf"
     : > "$TMPD/w/s2c.log"
-    cp "$TMPD/base.img" "$TMPD/d_soc.img"
-    lauf_warten "$TMPD/d_soc.img" "$TMPD/o_soc0.txt" allow
+    cp "$TMPD/base.img" "$TMPD/d_soc0.img"
+    lauf_warten "$TMPD/d_soc0.img" "$TMPD/o_soc0.txt" allow
+    is "bridge: device sign-in at the broker" "$(kv "$TMPD/o_soc0.txt" stand)" "ok"
     ST=$(wire_tokens access_token | head -1)
-    printf 'name=konto.test\nport=8443\n' > "$TMPD/fl.conf"
-    lauf "$TMPD/d_soc.img" "socfleitec v1 login token $ST" "$TMPD/o_soc.txt"
-    grep -aq '^err.bad' "$TMPD/o_soc.txt" && ok "socfleitec refuses a broker JWT as login token (known gap: no OIDC -> fkt1 bridge yet)" \
-        || bad "socfleitec did not refuse a broker JWT: $(grep -a 'err\|ok' "$TMPD/o_soc.txt" | head -2)"
-    FKT="fkt1.u_TEST.$(printf '0%.0s' $(seq 1 64))"
-    lauf "$TMPD/d_soc.img" "socfleitec v1 login token $FKT" "$TMPD/o_soc2.txt"
-    grep -aq '^ok' "$TMPD/o_soc2.txt" && ok "control: a token shaped fkt1.<account>.<64 hex> is accepted" \
-        || bad "control: fkt1-shaped token refused: $(grep -a 'err\|ok' "$TMPD/o_soc2.txt" | head -2)"
+    IDT=$(wire_tokens id_token | head -1)
+    UIDC=$(jwtc "$ST" uid)
+    [ -n "$UIDC" ] && ok "the access token carries uid=$UIDC (scope fleitec.account is asked for)" \
+        || bad "no uid claim in the access token (scope fleitec.account missing?)"
+    echo "$UIDC" > "$TMPD/ctl/accounts"; echo orientos > "$TMPD/ctl/aud"; echo 0 > "$TMPD/ctl/clock"
+    : > "$TMPD/ctl/book.log"
+    FOREIGN=$(python3 - "$ST" <<'PY'
+import base64, sys
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+h, p, _ = sys.argv[1].split(".")
+sig = Ed25519PrivateKey.generate().sign((h + "." + p).encode())
+print(h + "." + p + "." + base64.urlsafe_b64encode(sig).rstrip(b"=").decode())
+PY
+)
+    # The shell of the guest cuts a line at 255 octets and a JWT is longer, so
+    # the tokens go into the image as files (login broker -f <file>), which
+    # also keeps them out of the argument list.
+    mkdir -p "$TMPD/jw"
+    printf '%s\n' "$ST" > "$TMPD/jw/good"; printf '%s' "$FOREIGN" > "$TMPD/jw/foreign"
+    printf '%s\n' "$IDT" > "$TMPD/jw/idt"; printf 'not-a-token' > "$TMPD/jw/junk"
+    ABB_EXTRA=(/tmp/ "/etc/social/fleitec.conf=$TMPD/fl.conf" "/tmp/jg=$TMPD/jw/good" "/tmp/jf=$TMPD/jw/foreign" \
+        "/tmp/ji=$TMPD/jw/idt" "/tmp/jj=$TMPD/jw/junk")
+    abbild "$TMPD/soc_base.img" || bad "image with the token files"
+    ABB_EXTRA=()
+    cp "$TMPD/soc_base.img" "$TMPD/d_soc.img"
+    # --- 8a. the good swap, then use the fkt1; a refused token afterwards leaves it alone
+    lauf "$TMPD/d_soc.img" "socfleitec v1 hello;socfleitec v1 login broker -f /tmp/jg;socfleitec v1 contacts;socfleitec v1 login broker -f /tmp/jf;socfleitec v1 contacts;socfleitec v1 login broker abc;socfleitec v1 login broker -f /tmp/jj;socfleitec v1 login broker -f /tmp/nothere;cat /etc/social/fleitec.conf" "$TMPD/o_soc1.txt"
+    grep -aq "^account.$UIDC" "$TMPD/o_soc1.txt" && ok "swap: socfleitec reports account $UIDC" || bad "swap: no 'account $UIDC' line: $(grep -a '^err\|^account' "$TMPD/o_soc1.txt" | head -3)"
+    is "swap: book log" "$(grep -a 'swap ok' "$TMPD/ctl/book.log" | head -1)" "swap ok uid=$UIDC"
+    FKT=$(cat "$TMPD/ctl/issued" 2>/dev/null)
+    echo "$FKT" | grep -qE "^fkt1\.$UIDC\.[0-9a-f]{64}$" && ok "the book issued fkt1.<uid>.<64 hex>" || bad "issued: '$FKT'"
+    has "$TMPD/o_soc1.txt" "token=$FKT" "the fkt1 (and only it) is in the configuration"
+    num "socfleitec accepts the fkt1: contacts answered 'ok 1' (before and after a refused token)" "$(grep -ac '^ok.1' "$TMPD/o_soc1.txt")" eq 2
+    num "refused tokens (foreign signature; three kinds of malformed input) leave the fkt1 in place" "$(grep -ac '^err.\(denied\|bad\)' "$TMPD/o_soc1.txt")" eq 4
+    num "the JWT never shows in the output" "$(grep -acF "${ST%%.*}" "$TMPD/o_soc1.txt")" eq 0
+    num "the JWT is not in the configuration" "$(grep -a '^token=' "$TMPD/o_soc1.txt" | grep -acF "${ST%%.*}")" eq 0
+    # the image holds the JWT once on purpose (the file /tmp/jg that feeds -f); the run must add no copy
+    H0=$(grep -aoF -- "$ST" "$TMPD/soc_base.img" | wc -l); H1=$(grep -aoF -- "$ST" "$TMPD/d_soc.img" | wc -l)
+    num "the JWT is on the image once (the input file)" "$H0" eq 1
+    is "no further copy of the JWT on the disk after the swaps" "$H1" "$H0"
+    has "$TMPD/ctl/book.log" "list ok" "the book answered the contact list for the fkt1"
+    # --- 8b. refusals, each from a clean configuration (no token yet)
+    refuse() { # <label> <expected book reason> <token>
+        cp "$TMPD/soc_base.img" "$TMPD/d_socn.img"
+        : > "$TMPD/ctl/book.log"
+        lauf "$TMPD/d_socn.img" "socfleitec v1 login broker -f $3;socfleitec v1 contacts;cat /etc/social/fleitec.conf" "$TMPD/o_socn.txt"
+        is "$1: refused" "$(grep -a '^err' "$TMPD/o_socn.txt" | head -1 | cut -f1,2)" "$(printf 'err\tdenied')"
+        is "$1: reason at the book" "$(grep -a 'swap' "$TMPD/ctl/book.log" | head -1)" "swap refused $2"
+        num "$1: no token stored (the next call is 'denied' too)" "$(grep -ac '^err.denied' "$TMPD/o_socn.txt")" eq 2
+        num "$1: no token= in the configuration" "$(grep -ac '^token=' "$TMPD/o_socn.txt")" eq 0
+    }
+    refuse "foreign signature" "signature" /tmp/jf
+    refuse "id_token of the broker" "aud" /tmp/ji
+    echo "other-product" > "$TMPD/ctl/aud"
+    refuse "wrong audience" "aud" /tmp/jg
+    echo orientos > "$TMPD/ctl/aud"
+    echo 200000 > "$TMPD/ctl/clock"
+    refuse "expired" "exp" /tmp/jg
+    echo 0 > "$TMPD/ctl/clock"
+    echo "u_somebody_else" > "$TMPD/ctl/accounts"
+    refuse "unknown account" "unknown account" /tmp/jg
+    echo "$UIDC" > "$TMPD/ctl/accounts"
+    # control: with everything restored the SAME token swaps fine
+    cp "$TMPD/soc_base.img" "$TMPD/d_socn.img"
+    lauf "$TMPD/d_socn.img" "socfleitec v1 login broker -f /tmp/jg" "$TMPD/o_socn.txt"
+    grep -aq '^ok' "$TMPD/o_socn.txt" && ok "control: the same token swaps once the book agrees again" || bad "control: swap failed: $(grep -a '^err' "$TMPD/o_socn.txt" | head -1)"
+    # --- 8c. shape errors and the old gap's control
+    cp "$TMPD/soc_base.img" "$TMPD/d_socj.img"
+    lauf "$TMPD/d_socj.img" "socfleitec v1 login token eyJhbGciOiJFZERTQSJ9.e30.c2ln;socfleitec v1 login token fkt1.u_TEST.$(printf '0%.0s' $(seq 1 64))" "$TMPD/o_socj.txt"
+    num "login token still refuses a JWT (only fkz1/fkm1/fkt1 are tokens)" "$(grep -ac '^err.bad' "$TMPD/o_socj.txt")" eq 1
+    num "control: a fkt1-shaped token is accepted by login token" "$(grep -ac '^ok' "$TMPD/o_socj.txt")" eq 1
+    # the book saw no browser header, and the proxy routed only /api/kontakte to it
+    num "the broker never saw an /api/kontakte call" "$(grep -ac 'POST /api/kontakte' "$TMPD/w/c2s.log")" eq 0
+    num "the book got the swap calls" "$(grep -ac 'POST /api/kontakte/zugang-broker' "$TMPD/w/book-c2s.log")" ge 6
+else
+    bad "socfleitec does not build (section 8 skipped)"
 fi
 
 echo "ANBINTEROP: $pass passed, $fail failed"

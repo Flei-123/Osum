@@ -654,6 +654,12 @@ fn main(start: u64) -> i32 {
         if n >= 5 && eqc(arg(3), "token") {
             return v_login_token(&c, arg(4))
         }
+        if n >= 6 && eqc(arg(3), "broker") && eqc(arg(4), "-f") {
+            return v_login_broker_file(&c, arg(5))
+        }
+        if n >= 5 && eqc(arg(3), "broker") {
+            return v_login_broker(&c, arg(4))
+        }
         return v_login(&c)
     }
     if !have {
@@ -946,6 +952,121 @@ fn v_login_token(c: *mut Conf, tok: u64) -> i32 {
     rt.buf_push(&(*c).token, 0 as u8)
     account_line(c)
     return fin(0, "", "")
+}
+
+// `login broker <JWT>` (r115b): a device that signed in at the broker (konto,
+// anb_fleitec, device flow, scope fleitec.account) holds an EdDSA access
+// token. The address book wants fkt1.<account>.<64 hex>. firnchat-web swaps
+// the one for the other (POST /api/kontakte/zugang-broker, the broker token
+// as Bearer). The JWT is only ever used as the Bearer header: never printed,
+// never logged, never written to the configuration (only the fkt1 is).
+fn jwt_shape_ok(p: u64) -> bool {
+    let n: usize = rt.c_length(p)
+    if n < 20 || n > 3900 {
+        return false
+    }
+    var dots: usize = 0
+    var i: usize = 0
+    while i < n {
+        let ch: u8 = rt.ld8(p, i)
+        if ch == 46 as u8 {
+            dots = dots + 1
+        } else if !((ch >= 48 as u8 && ch <= 57 as u8)
+            || (ch >= 65 as u8 && ch <= 90 as u8)
+            || (ch >= 97 as u8 && ch <= 122 as u8)
+            || ch == 45 as u8 || ch == 95 as u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return dots == 2
+}
+
+fn v_login_broker(c: *mut Conf, jwt: u64) -> i32 {
+    if !jwt_shape_ok(jwt) {
+        return fin(1, "bad", "a broker token is a JWT: <header>.<payload>.<signature>")
+    }
+    if (*c).url.len <= 1 {
+        return fin(3, "denied", "no configuration with url= (the address book to swap at)")
+    }
+    // the JWT goes in as the one bearer of this single call, in memory only
+    let n: usize = rt.c_length(jwt)
+    rt.buf_clear(&(*c).token)
+    rt.buf_push_bytes(&(*c).token, jwt, n)
+    rt.buf_push(&(*c).token, 0 as u8)
+    var a: knetz.Antw = knetz.reply_new()
+    let r: i32 = call(c, "POST", "/api/kontakte/zugang-broker".p as u64, 27,
+        "{}".p as u64, 2, &a)
+    // wipe our copy of the JWT right away
+    var w: usize = 0
+    while w < (*c).token.len {
+        rt.st8((*c).token.ptr, w, 0 as u8)
+        w = w + 1
+    }
+    rt.buf_clear(&(*c).token)
+    if r != 0 {
+        var e: i32 = 0
+        if r == 3 {
+            e = fin(3, "denied", "the address book refused the broker token")
+        } else {
+            e = failed(r, &a)
+        }
+        knetz.reply_free(&a)
+        return e
+    }
+    var d: kjson.Json = kjson.json_new()
+    if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        kjson.json_free(&d)
+        knetz.reply_free(&a)
+        return fin(1, "bad", "the answer is not JSON")
+    }
+    var v: rt.Buf = rt.buf_new()
+    txt(&d, kjson.json_root(&d), "token", &v)
+    kjson.json_free(&d)
+    knetz.reply_free(&a)
+    // only the fkt1 the swap is documented to return; same shape as
+    // `login token` wants
+    if v.len < 6 + 64 + 1 || !eqn(v.ptr, 5, "fkt1.") || !token_tag_ok(v.ptr) {
+        rt.buf_free(&v)
+        return fin(1, "bad", "no fkt1 token in the answer")
+    }
+    if !conf_set("token", v.ptr, v.len) {
+        rt.buf_free(&v)
+        return fin(1, "bad", "the configuration could not be written")
+    }
+    rt.buf_clear(&(*c).token)
+    rt.buf_push_bytes(&(*c).token, v.ptr, v.len)
+    rt.buf_push(&(*c).token, 0 as u8)
+    rt.buf_free(&v)
+    account_line(c)
+    return fin(0, "", "")
+}
+
+// `login broker -f <file>`: the JWT out of a file (the shell of the device
+// cuts a line at 255 octets, a JWT is longer; and a file keeps it out of the
+// argument list). Trailing blanks and line ends are cut.
+fn v_login_broker_file(c: *mut Conf, path: u64) -> i32 {
+    var f: rt.Buf = rt.buf_new()
+    if !read_file(path, &f) {
+        rt.buf_free(&f)
+        return fin(1, "bad", "the token file could not be read")
+    }
+    while f.len > 0 {
+        let ch: u8 = rt.ld8(f.ptr, f.len - 1)
+        if ch != 10 as u8 && ch != 13 as u8 && ch != 32 as u8 && ch != 9 as u8 {
+            break
+        }
+        f.len = f.len - 1
+    }
+    rt.buf_push(&f, 0 as u8)
+    let r: i32 = v_login_broker(c, f.ptr)
+    var w: usize = 0
+    while w < f.len {
+        rt.st8(f.ptr, w, 0 as u8)
+        w = w + 1
+    }
+    rt.buf_free(&f)
+    return r
 }
 
 fn v_login(c: *mut Conf) -> i32 {
