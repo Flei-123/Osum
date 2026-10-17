@@ -136,7 +136,7 @@ lauf() { # name topologie kommandozeile sek [vga]
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     rm -f "$sock"
 }
-feld() { grep -a '^eingabe:' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"; }
+feld() { grep -a 'eingabe: ber=' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"; }
 
 BASE="modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs"
 

@@ -40,6 +40,7 @@ APPS = {
     "certus":    ("globe",            "6366f1", "4338ca"),
     "widgets":   ("layout-grid",      "a855f7", "7e22ce"),
     "welcome":   ("smile",            "ec4899", "be185d"),
+    "run":       ("square-play",      "f97316", "c2410c"),
 }
 
 

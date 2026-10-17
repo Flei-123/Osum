@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/runbox.fi -- W1c: THE RUN DIALOG (/bin/runbox, started by Win+R).
+//
+//   runbox           the window (fUi): one text field, buttons "OK" and "Cancel"
+//
+// Type a program name ("settings") or a path ("/bin/echo hello"), press Enter.
+// A name without a slash is looked up in /bin. Words after the first one become
+// the program's arguments. A program that cannot be started leaves the window
+// open and says so (the text stays, so a typo is one key away from fixed).
+// Esc closes the window.
+//
+// Serial lines (gate tools/runbox): `runbox: ready`, `runbox: exec <path> pid=<n>`,
+// `runbox: fail <path>`.
+
+profile app
+
+import ulib
+import fuiscene
+import msg
+import wlib
+
+export { u_start }
+
+const K_ENTRY: u64 = 1
+const K_OK: u64 = 2
+const K_CANCEL: u64 = 3
+
+static mut k_title: [u8; 10] = "run.title\0"
+static mut k_hint: [u8; 9] = "run.hint\0"
+static mut k_ok: [u8; 7] = "run.ok\0"
+static mut k_cancel: [u8; 11] = "run.cancel\0"
+static mut k_fail: [u8; 9] = "run.fail\0"
+
+static mut s_bin: [u8; 6] = "/bin/\0"
+static mut failed: bool = false
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    let _h: usize = fuiscene.label(col, msg.get((&k_hint[0 as usize]) as u64))
+    let _e: usize = fuiscene.entry(col, K_ENTRY, 420, 0)
+    if failed {
+        let _f: usize = fuiscene.label(col, msg.get((&k_fail[0 as usize]) as u64))
+    }
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let b1: usize = fuiscene.button_main(bar, msg.get((&k_ok[0 as usize]) as u64), K_OK)
+    fuiscene.set_noshrink(b1)
+    fuiscene.set_size(b1, 120, 36)
+    let b2: usize = fuiscene.button(bar, msg.get((&k_cancel[0 as usize]) as u64), K_CANCEL)
+    fuiscene.set_noshrink(b2)
+    fuiscene.set_size(b2, 120, 36)
+}
+
+// Start what the field says. true = a process was created (the window may close).
+fn run_text(text: u64) -> bool {
+    var line: [u8; 256] = [0 as u8; 256]
+    var path: [u8; 288] = [0 as u8; 288]
+    var argv: [u64; 8] = [0 as u64; 8]
+    var argc: u64 = 0
+    var n: u64 = 0
+    // copy, skipping leading blanks
+    var i: u64 = 0
+    while *((text + i) as *mut u8) == 32 as u8 {
+        i = i + 1
+    }
+    while n < 255 && *((text + i) as *mut u8) != 0 as u8 {
+        line[(n) as usize] = *((text + i) as *mut u8)
+        n = n + 1
+        i = i + 1
+    }
+    line[(n) as usize] = 0 as u8
+    if n == 0 {
+        return false
+    }
+    // split at blanks: each word is one argument
+    var k: u64 = 0
+    var inword: bool = false
+    while k < n {
+        if line[(k) as usize] == 32 as u8 {
+            line[(k) as usize] = 0 as u8
+            inword = false
+        } else if !inword {
+            inword = true
+            if argc < 8 {
+                argv[(argc) as usize] = (&line[(k) as usize]) as u64
+                argc = argc + 1
+            }
+        }
+        k = k + 1
+    }
+    // the program: a name without a slash lives in /bin
+    var slash: bool = false
+    var j: u64 = 0
+    while line[(j) as usize] != 0 as u8 {
+        if line[(j) as usize] == 47 as u8 {
+            slash = true
+        }
+        j = j + 1
+    }
+    var q: u64 = 0
+    if !slash {
+        while s_bin[(q) as usize] != 0 as u8 {
+            path[(q) as usize] = s_bin[(q) as usize]
+            q = q + 1
+        }
+    }
+    var m: u64 = 0
+    while line[(m) as usize] != 0 as u8 && q < 280 {
+        path[(q) as usize] = line[(m) as usize]
+        q = q + 1
+        m = m + 1
+    }
+    path[(q) as usize] = 0 as u8
+    var s_ex: [u8; 14] = "runbox: exec \0"
+    var s_pid: [u8; 6] = " pid=\0"
+    var s_fl: [u8; 14] = "runbox: fail \0"
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path[0 as usize]) as u64, (&argv[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        say((&s_fl[0 as usize]) as u64)
+        say((&path[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    say((&s_ex[0 as usize]) as u64)
+    say((&path[0 as usize]) as u64)
+    say((&s_pid[0 as usize]) as u64)
+    ulib.sayu(pid)
+    ulib.nl()
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 21] = "runbox: no surface\0\0\0"
+    var s_go: [u8; 14] = "runbox: ready\0"
+    let _mi: u64 = msg.init()
+    if !fuiscene.open(200, 160, 470, 190, msg.get((&k_title[0 as usize]) as u64), build) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var first: bool = true
+    var seen_free: u64 = fuiscene.key_free_seq()
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            fuiscene.focus(K_ENTRY)
+            say((&s_go[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if key == K_ENTRY || key == K_OK {
+            if run_text(fuiscene.entry_text(K_ENTRY)) {
+                fuiscene.quit()
+            } else {
+                failed = true
+                fuiscene.refresh()
+                fuiscene.focus(K_ENTRY)
+            }
+        } else if key == K_CANCEL {
+            fuiscene.quit()
+        }
+        if fuiscene.key_free_seq() != seen_free {
+            seen_free = fuiscene.key_free_seq()
+            if fuiscene.key_free() == wlib.KEY_ESC {
+                fuiscene.quit()
+            }
+        }
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

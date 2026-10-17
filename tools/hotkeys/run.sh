@@ -24,7 +24,8 @@ hasnt() { grep -qaF -- "$2" "$1" 2>/dev/null && bad "$3 -- '$2' present" || ok "
 
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "HOTKEYS: skipped, no qemu"; exit 0; }
 PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat"
-KEYS=(mon="sendkey meta_l-e" mon="warte 2" mon="sendkey meta_l-i" mon="warte 2" mon="sendkey meta_l-d" mon="warte 2"
+# warm-up: the first key after the first pulse line was lost once on a loaded host -> wait, send a harmless shift
+KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-e" mon="warte 2" mon="sendkey meta_l-i" mon="warte 2" mon="sendkey meta_l-d" mon="warte 2"
       mon="sendkey meta_l-d" mon="warte 2" mon="sendkey meta_l-left" mon="warte 2" mon="sendkey meta_l-right" mon="warte 2"
       mon="sendkey meta_l-up" mon="warte 2" mon="sendkey meta_l-down" mon="warte 2" mon="sendkey ctrl-shift-esc" mon="warte 2"
       mon="sendkey meta_l-r" mon="warte 2")
@@ -48,6 +49,7 @@ has "$S" "hk: super+d" "Win+D latched"
 N=$(grep -ac 'taskbar: hk desktop n=' "$S")
 [ "$N" -ge 2 ] && ok "Win+D twice -> two show-desktop toggles ($N)" || bad "Win+D toggles: $N, want >= 2"
 has "$S" "hk: super+r" "Win+R latched"
+has "$S" "taskbar: hk start /apps/run.osp/start" "Win+R starts the Run dialog bundle"
 has "$S" "hk: taskmgr" "Ctrl+Shift+Esc latched (own line, no garbage char)"
 has "$S" "taskbar: hk start /apps/taskmgr.osp/start" "Ctrl+Shift+Esc starts the task manager bundle"
 A=$(grep -ac 'kbd: win+arrow' "$S")
