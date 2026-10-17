@@ -44,7 +44,7 @@ timeout 600 qemu-system-x86_64 "${KVM[@]}" -m 2048 -smp 4 \
 pid=$!
 python3 -I "$HERE/resize.py" "$D/mon.sock" "$D/vnc.sock" "$D/o" "$D/serial.txt" "$SETTLE" "$SIZES" >"$D/py.txt" 2>&1 || true
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-[ -n "${KEEP:-}" ] && mkdir -p "$KEEP" && cp -f "$D"/o.*.ppm "$D"/o.res "$D"/serial.txt "$KEEP"/ 2>/dev/null
+[ -n "${KEEP:-}" ] && mkdir -p "$KEEP" && cp -f "$D"/o.*.ppm "$D"/o.res "$D"/o.early "$D"/serial.txt "$KEEP"/ 2>/dev/null
 [ "$(cat "$D/o.login" 2>/dev/null)" = 1 ] && ok "logged in" || { bad "login"; tail -5 "$D/py.txt"; }
 cat "$D/o.res" 2>/dev/null
 n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
@@ -96,5 +96,25 @@ while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; 
         fi
     fi
 done < "$D/o.res"
+# r1065: bar rows measured 2 s after each switch (before the settle time): the bar must be on screen at once, also after the revert
+while read -r i er; do
+    [ "$er" -ge 20 ] && ok "step $i: taskbar visible 2 s after the switch (rows $er)" || bad "step $i: taskbar missing 2 s after the switch (rows $er)"
+done < "$D/o.early"
+# r1061: the floating probe window (kgui hint player) shrinks on a smaller screen and gets its size back when the screen grows again;
+# the line is printed after each hint: `wm: refit probe WxH`. Only judged when the run prints probe lines (vmsvgahints).
+if grep -aq '^wm: refit probe' "$D/serial.txt"; then
+    prev=""
+    while read -r pw ph; do
+        sw_=$(awk -v w="$pw" 'BEGIN{print (w<900)?"small":"full"}')
+        echo "  NOTE  probe ${pw}x${ph} ($sw_)"
+        prev="$prev $sw_"
+    done < <(grep -a '^wm: refit probe' "$D/serial.txt" | head -n "${PROBE_N:-4}" | sed 's/^wm: refit probe //; s/x/ /')
+    echo "$prev" > "$D/probe.seq"
+    [ -n "${KEEP:-}" ] && cp -f "$D/probe.seq" "$KEEP"/
+    if [ -n "${PROBE_EXPECT:-}" ]; then
+        got=$(echo $prev)
+        [ "$got" = "$PROBE_EXPECT" ] && ok "probe window sizes follow the screen ($got)" || bad "probe window sizes: got '$got', expected '$PROBE_EXPECT'"
+    fi
+fi
 echo "resize: $pass ok, $fail fail"
 [ "$fail" = 0 ]

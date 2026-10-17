@@ -6360,6 +6360,10 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     damage_win(state, i)
     wsv(state, i, W_W, w)
     wsv(state, i, W_H, h)
+    // r1061: any resize (user, program, screen fit) drops the remembered pre-shrink size; screen_fit_windows sets it again afterwards
+    if (wg(state, i, W_SAVWH) >> 63) != 0 {
+        wsv(state, i, W_SAVWH, 0)
+    }
     if wg(state, i, W_KIND) == K_TERM {
         term_setup(state, i)
     } else {
@@ -19851,18 +19855,42 @@ fn screen_fit_windows(state: u64, w: u64, h: u64) {
                 var oh: u64 = outer_h(state, i)
                 var x: i64 = win_x(state, i)
                 var y: i64 = win_y(state, i)
-                if ow > w || oh > h {
-                    var nw: u64 = wg(state, i, W_W)
-                    var nh: u64 = wg(state, i, W_H)
-                    if ow > w && nw > ow - w {
-                        nw = nw - (ow - w)
+                // r1061: a floating window that was shrunk by an earlier, smaller screen remembers the size it had (W_SAVWH, tag bit 63;
+                // a tiled window uses the same word for its own purpose, so only W_NODE == 0 counts). When the screen grows again
+                // (800x600 -> auto revert -> 1024x768) the window gets that size back, as far as it fits.
+                var tw: u64 = wg(state, i, W_W)
+                var th: u64 = wg(state, i, W_H)
+                let sv: u64 = wg(state, i, W_SAVWH)
+                let floating: bool = wg(state, i, W_NODE) == 0
+                if floating && (sv >> 63) != 0 {
+                    let rw: u64 = (sv >> 32) & 0xFFFF
+                    let rh: u64 = sv & 0xFFFF
+                    if rw >= tw && rh >= th {
+                        tw = rw
+                        th = rh
                     }
-                    if oh > h && nh > oh - h {
-                        nh = nh - (oh - h)
-                    }
+                }
+                let dw: u64 = ow - wg(state, i, W_W)
+                let dh: u64 = oh - wg(state, i, W_H)
+                var nw: u64 = tw
+                var nh: u64 = th
+                if tw + dw > w && tw + dw - w < tw {
+                    nw = tw - (tw + dw - w)
+                }
+                if th + dh > h && th + dh - h < th {
+                    nh = th - (th + dh - h)
+                }
+                if nw != wg(state, i, W_W) || nh != wg(state, i, W_H) {
                     let _rs: bool = resize_win(state, i, nw, nh)
                     ow = outer_w(state, i)
                     oh = outer_h(state, i)
+                }
+                if floating {
+                    if nw < tw || nh < th {
+                        wsv(state, i, W_SAVWH, 0x8000000000000000 | ((tw & 0xFFFF) << 32) | (th & 0xFFFF))
+                    } else if (sv >> 63) != 0 {
+                        wsv(state, i, W_SAVWH, 0)
+                    }
                 }
                 if x + (ow as i64) > (w as i64) {
                     x = (w as i64) - (ow as i64)

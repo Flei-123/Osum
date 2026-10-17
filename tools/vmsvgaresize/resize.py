@@ -111,6 +111,7 @@ def main():
         return
     time.sleep(settle)
     out = open(base + ".res", "w")
+    early = open(base + ".early", "w")
     import re
     # the kernel plays the hints from its own clock (serial `vmsvga: testhint WxH rc=N`), also before the login: every step waits
     # for the NEXT line, lets the desktop settle and expects exactly the size of the newest line
@@ -118,7 +119,12 @@ def main():
     steps = len(sizes.split(","))
     for n in range(1, steps + 1):
         wait_for(lambda t: t.count("vmsvga: testhint ") > last, 60)
-        time.sleep(settle)
+        # r1065: the bar must also be there EARLY, right after the switch (z11: it vanished once during an 800x600 change)
+        time.sleep(2.0)
+        re_ = measure(mon, "%de" % n)
+        early.write("%d %d\n" % (n, re_[3]))
+        early.flush()
+        time.sleep(max(0.0, settle - 2.0))
         t = read_serial()
         last = t.count("vmsvga: testhint ")
         m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
@@ -128,6 +134,7 @@ def main():
         out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh, ccx, cbot, cw, ch))
         out.flush()
     out.close()
+    early.close()
     mon.quit()
 
 
