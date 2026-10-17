@@ -66,9 +66,10 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "MELDER: skipped, qemu m
 mkdir -p "$TMPD/etc"
 printf 'lang=de\n' > "$TMPD/etc/locale.conf"
 printf 'provider local /bin/soclocal\n' > "$TMPD/etc/providers"
-printf 'w\tnap\tWindows Nap\nl\tnap\tNap Quest\n# a comment\nl\techo\tEcho Hero\ttext-only-the-bash-core-can-check\nl\tcat\tCat Simulator\n' > "$TMPD/etc/games.tsv"
+printf 'w\tnap\tWindows Nap\nl\tnap\tNap Quest\n# a comment\nl\techo\tEcho Hero\ttext-only-the-bash-core-can-check\nl\tcat\tCat Simulator\nl\tnap2\tWrong Args\tqq\nl\tnap2\tArgs Quest\tzz\n' > "$TMPD/etc/games.tsv"
 printf '# name:targets:kind:command:options\nlogin:konsole:respawn:/bin/login\n' > "$TMPD/etc/inittab"
 cp "$TMPD/bin/sleep.elf" "$TMPD/bin/nap.elf"
+cp "$TMPD/bin/sleep.elf" "$TMPD/bin/nap2.elf"
 
 cat > "$TMPD/s1.sh" <<'EOS'
 orientbus serve 90000 &
@@ -148,6 +149,14 @@ melder v1 report
 sleep 6
 melder once
 echo rc=$?
+echo ==CMD==
+nap2 6 ZZ &
+sleep -m 500
+melder once
+echo rc=$?
+act call social.status
+melder v1 report
+sleep 7
 echo ==SERVE==
 nap 7 &
 melder serve 1700 100 > /tmp/serve.txt &
@@ -189,7 +198,7 @@ EOS
 A_=(build "$TMPD/A.img" $BLOCKS /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/
     /etc/actions.d/ /etc/orientbus/ /etc/social/ /apps/ /apps/social.prog/ /var/ /var/log/
     "/etc/locale.conf=$TMPD/etc/locale.conf")
-for p in $PROGS nap; do A_+=("/bin/$p=$TMPD/bin/$p.elf"); done
+for p in $PROGS nap nap2; do A_+=("/bin/$p=$TMPD/bin/$p.elf"); done
 A_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/providers=$TMPD/etc/providers"
      "/etc/social/games.tsv=$TMPD/etc/games.tsv"
@@ -228,10 +237,10 @@ has "$TMPD/p.txt" "rc=1" "... exit 1"
 part "$A" GAMES DETECT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "l${T}nap${T}Nap Quest" "games: the list of /etc/social/games.tsv as it is"
 hasnot "$TMPD/p.txt" "a comment" "games: comments are not rows"
-has "$TMPD/p.txt" "ok 4" "games: 4 rows"
+has "$TMPD/p.txt" "ok 6" "games: 6 rows"
 part "$A" DETECT REPORT > "$TMPD/p.txt"
-grep -aqP '^p\t[0-9]+\tnap\t\tnap\r?$' "$TMPD/p.txt" && ok "detect: the game as 5 columns (p, pid, exe, empty age, command)" \
-    || bad "detect: no p<TAB>pid<TAB>nap<TAB><TAB>nap line"
+grep -aqP '^p\t[0-9]+\tnap\t[0-9]+\tnap 4\r?$' "$TMPD/p.txt" && ok "detect: the game as 5 columns (p, pid, exe, age in s, command line with arguments; r146)" \
+    || bad "detect: no p<TAB>pid<TAB>nap<TAB>age<TAB>nap 4 line"
 grep -aqP '^p\t[0-9]+\tmelder\t' "$TMPD/p.txt" && ok "detect: the Melder itself is a program too" || bad "detect: no melder line"
 grep -aqP '^ok [0-9]+\r?$' "$TMPD/p.txt" && ok "detect: ends with ok <n>" || bad "detect: no ok <n>"
 
@@ -262,12 +271,16 @@ has "$TMPD/p.txt" "err bad never list" "a bad name in the list is refused"
 grep -aqP "^k\tnever\t\r?\$" "$TMPD/p.txt" && ok "an empty list clears it" || bad "the never list was not cleared"
 
 echo "== 5. the core =="
-part "$A" ONCE SERVE > "$TMPD/p.txt"
+part "$A" ONCE CMD > "$TMPD/p.txt"
 has "$TMPD/p.txt" "playing${T}Nap Quest" "once: the game of the list (os l, exe nap) is found and reported"
 has "$TMPD/p.txt" "activity=Nap Quest" "... the activity stands in the social service"
 hasnot "$TMPD/p.txt" "Windows Nap" "a row for another os (w) is not used"
-hasnot "$TMPD/p.txt" "Echo Hero" "a row that needs command-line text is skipped"
+hasnot "$TMPD/p.txt" "Echo Hero" "a row whose command-line text is not in the running program's command line does not match"
 grep -aqP '^idle\r?$' "$TMPD/p.txt" && ok "once: idle when the game has ended" || bad "once after the game: not idle"
+part "$A" CMD SERVE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "playing${T}Args Quest" "r146: exe nap2 + command-line text zz (case ignored: the program ran as 'nap2 6 ZZ') is found"
+hasnot "$TMPD/p.txt" "Wrong Args" "... and the row with another text (qq) does not match"
+has "$TMPD/p.txt" "activity=Args Quest" "... the activity stands in the social service"
 part "$A" SERVE SERVEOUT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "activity=Nap Quest" "serve: while the game runs the activity is reported"
 grep -aqP '^activity=\r?$' "$TMPD/p.txt" && ok "serve: cleared after the game ended" || bad "serve: not cleared"

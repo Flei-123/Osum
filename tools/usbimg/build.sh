@@ -295,7 +295,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome runbox apprights wmplug hotkeyd jarvismini"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome runbox apprights wmplug hotkeyd jarvismini social soclocal melder"}
 # the public image has no chat server to reach: no JARVIS Mini binary there
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
@@ -359,7 +359,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PR
 # `tools/install/build.sh` und `tools/bridge/build.sh`.
 # ROUND ROADMAP-5 (K-008): `ipprint` prints over IPP -- same build path
 # (profile app, TrueType reader from the library), see kernel/app/ipprint.fi.
-APPS=${APPS:-"fetch jarvisd ipprint"}
+APPS=${APPS:-"fetch jarvisd ipprint socfleitec"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 
@@ -1254,6 +1254,20 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        # DAILY-DRIVER (P-007): the program store -- provider /bin/stored, window /bin/store
        "/etc/actions.d/store.actions=etc/actions.d/store.actions"
        "/etc/store.conf=etc/store.conf")
+# r145: THE SOCIAL LAYER on the shipped image (docs/SOCIAL.md). The programs /bin/social,
+# /bin/soclocal, /bin/melder (PROGS) and /bin/socfleitec (APPS) are built above; here the
+# data they read: the action manifest (read by orient-bus), the accounts (one provider
+# line = one account) and the games list (empty, filled by `socfleitec games`). The
+# session (kgui.desk_start) starts `social serve` + `melder serve` when /bin/social exists.
+# The Fleitec account stays unpaired until `act call social.accounts.login provider=fleitec`.
+printf 'provider local /bin/soclocal\nprovider fleitec /bin/socfleitec /etc/social/fleitec.conf\n' > "$OUT/social.providers"
+printf 'url=https://chat.fleitec.com\n' > "$OUT/social.fleitec.conf"
+: > "$OUT/social.games.tsv"
+ARGS+=(/etc/social/ /apps/social.prog/
+       "/apps/social.prog/ACTIONS=pakete/social/ACTIONS@0644"
+       "/etc/social/providers=$OUT/social.providers@0644"
+       "/etc/social/fleitec.conf=$OUT/social.fleitec.conf@0644"
+       "/etc/social/games.tsv=$OUT/social.games.tsv@0644")
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
     # OpenSSL (python ssl) looks at /etc/ssl/cert.pem by default; curl+mbedtls is built for /etc/ssl/roots.pem
@@ -1426,7 +1440,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
 /bin/store /bin/stored /etc/actions.d/store.actions /etc/store.conf \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
-/bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol \
+/bin/social /bin/soclocal /bin/melder /bin/socfleitec /apps/social.prog/ACTIONS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/privacy /bin/welcome /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"

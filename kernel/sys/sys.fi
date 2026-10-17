@@ -10878,7 +10878,69 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         }
         return pstat_name(state, index, field == uio.P_NAME1)
     }
+    // r146: age (ms) and command line (octets, 8 per number)
+    if field == uio.P_AGE {
+        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+            return 0
+        }
+        let born: u64 = sched.tget(state, index, sched.T_BORN)
+        let now: u64 = kstate.get(state, kstate.TICKS)
+        if now < born {
+            return 0
+        }
+        return (now - born) * 1000 / time.TICK_HZ
+    }
+    if field >= uio.P_CMD0 && field < uio.P_CMD0 + uio.P_CMD_WORDS {
+        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE
+            || sched.tget(state, index, sched.T_KIND) != sched.K_USER {
+            return 0
+        }
+        return pstat_cmd(state, index, field - uio.P_CMD0)
+    }
     return uio.pstat(state, index, field)
+}
+
+// r146: eight octets of the command line, `word` = 0.. (octets 8*word .. 8*word+7). The command line is
+// argv[0], argv[1] .. joined by one blank, read from the task's argument page like pstat_name. A task
+// without arguments, or whose page is not mapped, has none (0).
+fn pstat_cmd(state: u64, t: u64, word: u64) -> u64 {
+    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    let argc: u64 = __mmio_read64(frame as *mut u64)
+    if argc == 0 || argc > proc.MAX_ARGS {
+        return 0
+    }
+    let from: u64 = word * 8
+    let upto: u64 = from + 8
+    let lim: u64 = frame + 4096
+    var v: u64 = 0
+    var pos: u64 = 0
+    var a: u64 = 0
+    while a < argc && pos < upto {
+        let ptr: u64 = __mmio_read64((frame + 8 + a * 8) as *mut u64)
+        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+            a = argc
+        } else {
+            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            while at < lim && kstate.get8(at) != 0 && pos < upto {
+                if pos >= from {
+                    v = v | (kstate.get8(at) << ((pos - from) * 8))
+                }
+                pos = pos + 1
+                at = at + 1
+            }
+            if a + 1 < argc && pos < upto {
+                if pos >= from {
+                    v = v | (32 << ((pos - from) * 8))
+                }
+                pos = pos + 1
+            }
+            a = a + 1
+        }
+    }
+    return v
 }
 
 // ROADMAP-7 (r191): the basename of argv[0], eight octets of it. Read

@@ -4069,6 +4069,15 @@ static mut jv_pid: u64 = 0 // task SLOT of the helper (`elf.spawn` returns the s
 static mut jv_tpid: u64 = 0 // its real process number, read at the spawn: the stamp of this incarnation
 static mut jv_born: u64 = 0
 static mut jv_next: u64 = 0
+// r147: respawn watch of the social service (0) and the Melder (1), see sv2_watch
+static mut sv2_slot: [u64; 2] = [0 as u64; 2]
+static mut sv2_tpid: [u64; 2] = [0 as u64; 2]
+static mut sv2_born: [u64; 2] = [0 as u64; 2]
+static mut sv2_next: [u64; 2] = [0 as u64; 2]
+static mut sv2_wait: [u64; 2] = [0 as u64; 2] // back-off in ticks, 0 = not set yet (500)
+static mut sv2_armed: [u64; 2] = [0 as u64; 2]
+static mut sv2_n: [u64; 2] = [0 as u64; 2] // starts so far (the first one included)
+static mut so_killafter: u64 = 0
 static mut jv_wait: u64 = 500
 static mut jv_armed: u64 = 0
 static mut jv_dbg: u64 = 0
@@ -4337,6 +4346,7 @@ fn parse(state: u64, cmd: u64) {
         return
     }
     svc_parse(cmd)
+    sv2_parse(cmd)
     var w: [u8; 10] = "mausflut=\0"
     var i: u64 = 0
     while i < 4096 && kstate.get8(cmd + i) != 0 {
@@ -4895,13 +4905,15 @@ fn desk_start(state: u64) -> u64 {
         // address book through its providers (/etc/social/providers) and
         // fetches the list of games itself; the Melder reports a running game
         // of /etc/social/games.tsv. Both wait for the network by themselves
-        // (they try again); no restart watch here -- if one ends, it stays
-        // ended until the next start (an inittab line respawns, this does not).
+        // (they try again). r147: the desktop loop watches both (sv2_watch) and
+        // starts one again 5 s after it ended (back-off up to 60 s), like an
+        // inittab `respawn` line does on a server image.
         var p_so: [u8; 12] = "/bin/social\0"
         var a_so: [u8; 13] = "social\0serve\0"
         if fs.path(state, (&p_so[0]) as u64) != 0 {
             let _so: u64 = desk_spawn_n(state, (&p_so[0]) as u64,
                 (&a_so[0]) as u64, 13, 2)
+            sv2_arm(state, 0, _so)
             var s_so: [u8; 18] = "desk: social pid\0\0"
             serial.puts((&s_so[0]) as u64)
             serial.put(61 as u8)
@@ -4912,6 +4924,7 @@ fn desk_start(state: u64) -> u64 {
             if fs.path(state, (&p_me[0]) as u64) != 0 {
                 let _me: u64 = desk_spawn_n(state, (&p_me[0]) as u64,
                     (&a_me[0]) as u64, 13, 2)
+                sv2_arm(state, 1, _me)
                 var s_me: [u8; 18] = "desk: melder pid\0\0"
                 serial.puts((&s_me[0]) as u64)
                 serial.put(61 as u8)
@@ -5967,6 +5980,149 @@ fn jv_stamp(state: u64, slot: u64) -> u64 {
     return sched.tget(state, slot, sched.T_PID)
 }
 
+// ====================================== r147: RESPAWN OF THE SOCIAL SERVICE AND THE MELDER
+// A screen image has no `init`, so nothing brought /bin/social and /bin/melder back when they ended
+// (fault, kill, out of memory). The desktop loop watches the two like it watches `jarvisd`: gone or zombie
+// -> start again after 5 s, back-off doubling up to 60 s; a run of two minutes or more resets it.
+// Index 0 = social, 1 = melder. Same slot/stamp rule as jv_stamp (the slot is where to look, the process
+// number read at the spawn is who we started). `sokill=<ticks>` (boot word) is the test hook: kill the
+// social service that many ticks after each start (the melder is not touched by it).
+
+fn sv2_parse(cmd: u64) {
+    var w: [u8; 8] = "sokill=\0"
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        var k: u64 = 0
+        while k < 7 && kstate.get8(cmd + i + k) == (w[k as usize] as u64) {
+            k = k + 1
+        }
+        if k == 7 {
+            var v: u64 = 0
+            var j: u64 = i + 7
+            var n: u64 = 0
+            while n < 7 && kstate.get8(cmd + j) >= 48 && kstate.get8(cmd + j) <= 57 {
+                v = v * 10 + (kstate.get8(cmd + j) - 48)
+                j = j + 1
+                n = n + 1
+            }
+            so_killafter = v
+            return
+        }
+        i = i + 1
+    }
+}
+
+// start social (w = 0) or melder (w = 1); returns the slot (0 = failed)
+fn sv2_spawn(state: u64, w: u64) -> u64 {
+    if w == 0 {
+        var p_so: [u8; 12] = "/bin/social\0"
+        var a_so: [u8; 13] = "social\0serve\0"
+        return desk_spawn_n(state, (&p_so[0]) as u64, (&a_so[0]) as u64, 13, 2)
+    }
+    var p_me: [u8; 12] = "/bin/melder\0"
+    var a_me: [u8; 13] = "melder\0serve\0"
+    return desk_spawn_n(state, (&p_me[0]) as u64, (&a_me[0]) as u64, 13, 2)
+}
+
+// remember what was started (slot + its process number) and arm the watch
+fn sv2_arm(state: u64, w: u64, slot: u64) {
+    sv2_slot[w as usize] = slot
+    sv2_tpid[w as usize] = jv_stamp(state, slot)
+    sv2_born[w as usize] = kstate.get(state, kstate.TICKS)
+    sv2_n[w as usize] = sv2_n[w as usize] + 1
+    if sv2_wait[w as usize] == 0 {
+        sv2_wait[w as usize] = 500
+    }
+    sv2_armed[w as usize] = 1
+}
+
+fn sv2_say(state: u64, w: u64, tail: u64, v: u64) {
+    var s_s: [u8; 13] = "desk: social\0"
+    var s_m: [u8; 13] = "desk: melder\0"
+    var s_e: [u8; 12] = " ended slot\0"
+    var s_r: [u8; 13] = " respawn pid\0"
+    let z: u64 = serial.line_at(sched.hier(state))
+    if w == 0 {
+        serial.puts((&s_s[0]) as u64)
+    } else {
+        serial.puts((&s_m[0]) as u64)
+    }
+    if tail == 0 {
+        serial.puts((&s_e[0]) as u64)
+    } else {
+        serial.puts((&s_r[0]) as u64)
+    }
+    serial.put(61 as u8)
+    serial.dec(v)
+    serial.nl()
+    serial.line_clear(z)
+}
+
+fn sv2_watch_one(state: u64, w: u64) {
+    let wi: usize = w as usize
+    if sv2_armed[wi] == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let sl: u64 = sv2_slot[wi]
+    if sl != 0 {
+        var dead: bool = false
+        if sl >= kstate.MAX_TASKS {
+            dead = true
+        } else {
+            let stt: u64 = sched.tget(state, sl, sched.T_STATE)
+            let stamp_now: u64 = sched.tget(state, sl, sched.T_PID)
+            if w == 0 && so_killafter != 0 && stt != sched.S_ZOMBIE && stt != sched.S_FREE
+                && stamp_now == sv2_tpid[wi] && now - sv2_born[wi] >= so_killafter {
+                let _k: u64 = sched.kill_other(state, sl, sv2_tpid[wi], 9)
+                sv2_born[wi] = now
+                return
+            }
+            if stt != sched.S_FREE && stamp_now != sv2_tpid[wi] {
+                dead = true
+            } else if stt == sched.S_ZOMBIE {
+                let _r: bool = proc.reap(state, sl)
+                dead = true
+            } else if stt == sched.S_FREE {
+                dead = true
+            }
+        }
+        if !dead {
+            return
+        }
+        sv2_say(state, w, 0, sl)
+        if now - sv2_born[wi] >= 12000 {
+            sv2_wait[wi] = 500
+        }
+        sv2_slot[wi] = 0
+        sv2_next[wi] = now + sv2_wait[wi]
+        sv2_wait[wi] = sv2_wait[wi] * 2
+        if sv2_wait[wi] > 6000 {
+            sv2_wait[wi] = 6000
+        }
+        return
+    }
+    if now < sv2_next[wi] {
+        return
+    }
+    let slot: u64 = sv2_spawn(state, w)
+    if slot == 0 {
+        sv2_next[wi] = now + sv2_wait[wi]
+        sv2_wait[wi] = sv2_wait[wi] * 2
+        if sv2_wait[wi] > 6000 {
+            sv2_wait[wi] = 6000
+        }
+        return
+    }
+    sv2_arm(state, w, slot)
+    sv2_say(state, w, 1, sv2_tpid[wi])
+}
+
+fn sv2_watch(state: u64) {
+    sv2_watch_one(state, 0)
+    sv2_watch_one(state, 1)
+}
+
 fn jarvis_watch(state: u64) {
     if jv_armed == 0 {
         return
@@ -6138,6 +6294,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         acpiev.pump(state)
         sub(2)
         jarvis_watch(state)
+        sv2_watch(state)
         sub(3)
         svc_flush(state)
         sub(4)

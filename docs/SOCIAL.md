@@ -21,7 +21,7 @@ line in `/etc/social/providers` and one program. `social.fi`,
 | `pakete/social/ACTIONS` → `/apps/social.prog/ACTIONS` | 23 actions + 5 events (below) |
 | `kernel/app/socfleitec.fi` → `/bin/socfleitec` | provider for a **Fleitec** account: fleikontakte (book, presence, activity, invites) with a device access token; chat **end to end** as a FirnChat device over the relay (`kernel/app/fcrelay.fi`: x25519, HKDF-SHA256, ChaCha20-Poly1305, own-device copies) |
 | `kernel/user/soclocal.fi` → `/bin/soclocal` | provider for accounts **without a server**: contacts, messages and invites in files (`-c <base>` = one account) — the second provider that passes the same checks |
-| `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (pid + basename of argv[0], 16 octets): no command line, no age — a row with command-line text (column 4) is skipped. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts it in `kgui.desk_start`, r140, together with `/bin/social`). Test: `tools/melder/run.sh` (test.sh § 55b) |
+| `kernel/user/melder.fi` → `/bin/melder` | the **Melder** on OrientOS (r135): the OrientOS backend of FirnChat's `docs/MELDER-INTERFACE.md` v1 (`melder v1 hello/detect/games/privacy/autostart/report`; no `identity`: there is no token, the service is signed in) plus a small core (`melder serve [ticks] [every]`, `melder once`). A running game of `/etc/social/games.tsv` (same format as FirnChat's `spiele.tsv`, rows with os `l`) becomes `social.activity.set`, its end `social.activity.clear`; the switch is `social.privacy.set` (read back from `social.status` → `share_activity`); the list `never` is `/etc/social/melder.never`. Detection is `SYS_PSTAT` (r146: pid, basename of argv[0] 16 octets, age `P_AGE` in ms, command line `P_CMD0..` = argv joined by blanks, 256 octets at most, lowercased by the Melder): `detect` prints `p <pid> <exe> <age_s> <cmdline>`; a row with command-line text (column 4) matches when the exe is running AND its command line contains the text (case ignored) — `java` + `minecraft`, `wine` + the game's .exe. Autostart = the line `melder:*:respawn:/bin/melder serve` in `/etc/inittab` (server images with `init`; a screen image starts it in `kgui.desk_start`, r140, together with `/bin/social`; r147: the desktop loop restarts either one 5 s after it ended, back-off up to 60 s). Test: `tools/melder/run.sh` (test.sh § 55b) |
 | `kernel/user/freunde.fi` → `/bin/freunde` | the friends bar like Discord's friends view: tabs **Online** (who plays first, then who is there), **Alle**, **Ausstehend (n)** (requests of every account both ways: Annehmen / Ablehnen / Zurückziehen) and **Hinzufügen** (search at every provider, "Freund hinzufügen"); the presence as the theme's role colours (success / warning / danger / secondary text) on the list's colour tiles plus the dot character; unread counts, the chat window (list, write), "Einladen"/"Beitreten", an incoming invite with "Annehmen"/"Ablehnen" (shown only while there is one), "Unsichtbar" — all through `social.*`. Test stand: `--tab N`, `--annehmen N`, `--suche TEXT [--anfrage N]` |
 | `tools/social/run.sh` (test.sh § 55) | a real guest, a real fleikontakte and a real FirnChat relay on the host, anna's FirnChat client. Standard: Gerätetoken fkt1; `SOCIAL_TOKEN_FORMAT=fkz1 bash tools/social/run.sh` = Legacy-Lauf (beide 109/0) |
 | `tools/social/chat.sh` | the Fleitec provider on the host against relay + fleikontakte + FirnChat's own client (login, E2E both ways, pin, replay, invites) |
@@ -147,23 +147,28 @@ service enforces itself, where the data leaves the device:
 
 * **Xoffi** has no known API for contacts/presence/chat (only its sign-in
   is known, `kernel/app/anb_xoffi.fi`); a `socxoffi` waits for it;
-* the Melder on OrientOS (`/bin/melder`, r135) detects games by the name of the
-  program only (no command line from the kernel yet). The list
+* the Melder on OrientOS (`/bin/melder`, r135) detects games by the program name AND (r146) its
+  command line + age from `SYS_PSTAT` (fields `P_AGE` = 12, `P_CMD0`..+31 = 16..47, 8 octets per
+  number, 256 octets; `exec` passes 8 arguments at most, so longer lines are cut). The list
   `/etc/social/games.tsv` is filled by the service itself (r140): the provider
   verb `games` of `socfleitec` fetches `GET /api/kontakte/spiele?os=l` (an older
-  server that ignores `os` sends all rows; the rest is filtered out) and keeps
-  the rows with os `l`, an executable, a name and no command-line text; the
-  service asks every provider with the cap `games` 4 s after the start and then
+  server that ignores `os` sends all rows) and keeps the rows with os `l`, an executable, a name and
+  an optional command-line text (column 4, up to 60 octets); the icon column goes. The service asks
+  every provider with the cap `games` 4 s after the start and then
   hourly (10 min after a failure; one fetch blocks the service for up to 15 s,
-  so never from a request). The server's Linux list is tiny (8 rows today); Wine
-  and Proton games need the command line / age in `SYS_PSTAT` first. Apps can
-  still say what they play with `social.activity.set`;
+  so never from a request). The server's Linux list is tiny (8 rows today): only rows the
+  list holds can be found. Apps can still say what they play with `social.activity.set`;
 * a **screen image** has no `init`: `kgui.desk_start` starts `/bin/social serve`
   and `/bin/melder serve` after the broker, if the image carries them
   (`desk: social pid=`, `desk: melder pid=` on the serial line; test
-  `tools/melder/screen.sh`). No respawn there — an ended service stays ended
-  until the next start; the shipped USB image does not carry the two programs
-  yet (build list + `/apps/social.prog/ACTIONS` + `/etc/social/providers`);
+  `tools/melder/screen.sh`). r147: the desktop loop watches both (`sv2_watch`, like `jarvisd`):
+  gone or zombie -> `desk: social ended slot=`, 5 s later `desk: social respawn pid=<n>`, back-off
+  doubling to 60 s, a run of two minutes resets it. Test hook: boot word `sokill=<ticks>` kills the
+  service that many ticks after each start. The shipped USB image carries social, soclocal, melder
+  and socfleitec (r145): `/etc/social/providers` = `local` (soclocal) + `fleitec` (socfleitec,
+  `/etc/social/fleitec.conf` with `url=https://chat.fleitec.com`; pair it with
+  `act call social.accounts.login provider=fleitec`), `/apps/social.prog/ACTIONS`, an empty
+  `/etc/social/games.tsv` (the service fills it);
 * the same person at two providers is two contacts (no merge by person);
 * a provider call blocks the service for up to 4 s; chat is polled every
   5 s (a watching provider — the relay's T_WATCH — is the next step);

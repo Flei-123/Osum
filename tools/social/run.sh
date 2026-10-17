@@ -105,7 +105,7 @@ geheimnis = $TMPD/jarvis.secret
 auto-konto = ja
 EOF
 mkdir -p "$TMPD/web" "$TMPD/daten"
-# the list of games (r140): a row with command-line text, one with an icon, other systems
+# the list of games (r140, r146): a row with command-line text (kept), one with an icon, other systems
 printf 'l\tcsgo_linux64\tCounter-Strike: Global Offensive\nl\tjava\tMinecraft\tnet.minecraft.client.main.Main\nl\tnap\tNap Quest\t\t730/abcdef\nw\tcs2.exe\tCounter-Strike 2\nd\tdosgame\tDOS Game\nl\ttabby\tTab Game\n' > "$TMPD/daten/spiele.tsv"
 "$FLEIKONTAKTE" --port 0 --daten "$TMPD/daten" --anbieter-conf "$TMPD/anbieter.conf" \
     --web-dir "$TMPD/web" > "$TMPD/srv.out" 2> "$TMPD/srv.err" &
@@ -438,11 +438,11 @@ echo "== 6b. the list of games (r140) =="
 part "$A" GAMESAUTO GAMES > "$TMPD/p.txt"
 has "$TMPD/p.txt" "l${T}csgo_linux64${T}Counter-Strike: Global Offensive" "the service fetched the list on its own (timer, caps games)"
 part "$A" GAMES GAMESOFF > "$TMPD/p.txt"
-has "$TMPD/p.txt" "ok${T}3" "socfleitec v1 games: 3 usable rows written"
+has "$TMPD/p.txt" "ok${T}4" "socfleitec v1 games: 4 usable rows written (r146: the row with command-line text is one of them)"
 has "$TMPD/p.txt" "rc=0" "... exit 0"
 has "$TMPD/p.txt" "l${T}nap${T}Nap Quest" "a row with an icon column keeps 3 columns"
 has "$TMPD/p.txt" "l${T}tabby${T}Tab Game" "the last row is there"
-hasnot "$TMPD/p.txt" "Minecraft" "a row with command-line text is left out (the Melder cannot check it)"
+has "$TMPD/p.txt" "l${T}java${T}Minecraft${T}net.minecraft.client.main.Main" "a row with command-line text keeps its 4th column (r146: SYS_PSTAT tells the command line)"
 hasnot "$TMPD/p.txt" "Counter-Strike 2" "a Windows row is left out"
 hasnot "$TMPD/p.txt" "DOS Game" "a DOS row is left out"
 hasnot "$TMPD/p.txt" "730/abcdef" "the icon column is dropped"

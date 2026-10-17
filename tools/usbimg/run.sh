@@ -521,6 +521,16 @@ if grep -qa 'glyphs=' "$TMPD/desk.txt"; then
 else
     bad "keine Schrift geladen"
 fi
+# r145: THE SOCIAL LAYER IS ON THE STICK -- the session (kgui.desk_start) starts the
+# service and the Melder when /bin/social exists, and says so on the serial line.
+if grep -qaE 'desk: social pid=[1-9]' "$TMPD/desk.txt" && grep -qaE 'desk: melder pid=[1-9]' "$TMPD/desk.txt"; then
+    ok "die Sitzung startet Social-Dienst und Melder ($(grep -aoE 'desk: (social|melder) pid=[0-9]+' "$TMPD/desk.txt" | tr '\n' ' '))"
+else
+    bad "kein 'desk: social pid=' / 'desk: melder pid=' -- social + melder fehlen im Abbild"
+fi
+grep -qaE 'desk: (social|melder) (ended|respawn)' "$TMPD/desk.txt" \
+    && bad "Social-Dienst oder Melder ist gleich nach dem Start wieder zu Ende" \
+    || ok "Social-Dienst und Melder laufen (kein Ende, kein Neustart im Lauf)"
 # DER MITSCHNITT SAGT ES SCHON: der Starter meldet seinen eigenen Namen,
 # und der kommt aus dem Katalog.
 # A-038: the launcher prints `launcher: name [...]` ONLY with

@@ -30,11 +30,14 @@
 //     report [name]      social.activity.set / .clear  (no name = clear)
 //     identity ...       unsupported: no token, the social service is in
 //
-// What the kernel can tell about a program (SYS_PSTAT): its pid and the
-// basename of argv[0], 16 octets -- no command line and no age. So `age`
-// stays empty, the command line is the name, and a row of the list of
-// games that needs a command-line text (column 4, e.g. `java`) cannot be
-// checked here and is skipped.
+// What the kernel can tell about a program (SYS_PSTAT): its pid, the
+// basename of argv[0] (16 octets), its age in ms (P_AGE) and, since r146,
+// its command line (P_CMD0.., argv joined by blanks, 256 octets at most,
+// lowercased here). So `detect` prints `p <pid> <exe> <age_s> <cmdline>`
+// like the other backends, and a row of the list of games with a
+// command-line text (column 4, e.g. `java` + `minecraft`; Wine/Proton
+// games: `wine` + the game's .exe) matches when the running program has
+// that exe AND its command line contains the text (case ignored).
 //
 // The list of games: /etc/social/games.tsv, the SAME format as FirnChat's
 // spiele.tsv (`<os> TAB <exe> TAB <name> [TAB <text>]`); this Melder reads
@@ -64,6 +67,7 @@ const S_CLOSE: i64 = 3
 
 const NAME_W: usize = 17 // octets per program name (16 + zero)
 const PROC_MAX: usize = 32
+const CMD_W: usize = 257 // octets per command line (256 + zero)
 
 static mut rep: [u8; 4096] = [0 as u8; 4096]
 static mut svc_bus: u64 = 0xFFFFFFFF
@@ -73,6 +77,9 @@ static mut g_why: [u8; 96] = [0 as u8; 96]
 
 static mut procs: [u8; 544] = [0 as u8; 544] // PROC_MAX * NAME_W
 static mut pids: [u64; 32] = [0 as u64; 32]
+static mut ages: [u64; 32] = [0 as u64; 32] // seconds
+static mut cmds: [u8; 8224] = [0 as u8; 8224] // PROC_MAX * CMD_W, lowercased command lines
+static mut no_text: [u8; 4] = [0 as u8; 4]
 static mut n_procs: usize = 0
 
 static mut fbuf: [u8; 4096] = [0 as u8; 4096]
@@ -351,6 +358,67 @@ fn err_out(rc: i32) -> i32 {
 
 // ------------------------------------------------------------- the programs
 
+// The command line of task slot `slot` into `dst` (lowercase, TAB/LF/control -> blank, zero-ended).
+// An older kernel answers an error / 0: then the command line is the program's name.
+fn load_cmd(slot: u64, dst: u64, name: u64) {
+    var n: usize = 0
+    var more: bool = true
+    var w: u64 = 0
+    while more && w < ulib.P_CMD_WORDS {
+        let v: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_CMD0 + w, 0)
+        if ulib.bad(v) {
+            more = false
+        } else {
+            var k: u64 = 0
+            while more && k < 8 {
+                var c: u8 = ((v >> (k * 8)) & 255) as u8
+                if c == 0 as u8 {
+                    more = false
+                } else {
+                    c = lower(c)
+                    if c < 32 as u8 {
+                        c = 32 as u8
+                    }
+                    r_st8(dst, n, c)
+                    n = n + 1
+                    k = k + 1
+                }
+            }
+        }
+        w = w + 1
+    }
+    if n == 0 {
+        var j: usize = 0
+        while j < 16 && r_ld8(name, j) != 0 as u8 {
+            r_st8(dst, j, r_ld8(name, j))
+            j = j + 1
+        }
+        n = j
+    }
+    r_st8(dst, n, 0 as u8)
+}
+
+// Does the zero-ended text `t` occur in the zero-ended command line `c` (both lowercase)?
+fn has_text(c: u64, t: u64) -> bool {
+    let tl: usize = r_clen(t)
+    if tl == 0 {
+        return true
+    }
+    let cl: usize = r_clen(c)
+    var i: usize = 0
+    while i + tl <= cl {
+        var j: usize = 0
+        while j < tl && r_ld8(c, i + j) == lower(r_ld8(t, j)) {
+            j = j + 1
+        }
+        if j == tl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 // The user programs in the task table: name (lowercase, 16 octets) and pid.
 fn collect_procs() {
     n_procs = 0
@@ -380,6 +448,13 @@ fn collect_procs() {
                     j = j + 1
                 }
                 pids[n_procs] = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                let ms: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_AGE, 0)
+                if ulib.bad(ms) {
+                    ages[n_procs] = 0
+                } else {
+                    ages[n_procs] = ms / 1000
+                }
+                load_cmd(i, (&cmds[0]) as u64 + (n_procs * CMD_W) as u64, at)
                 n_procs = n_procs + 1
             }
         }
@@ -387,10 +462,11 @@ fn collect_procs() {
     }
 }
 
-fn running(exe: u64) -> bool {
+fn running(exe: u64, text: u64) -> bool {
     var i: usize = 0
     while i < n_procs {
-        if eq16((&procs[0]) as u64 + (i * NAME_W) as u64, exe) {
+        if eq16((&procs[0]) as u64 + (i * NAME_W) as u64, exe)
+            && has_text((&cmds[0]) as u64 + (i * CMD_W) as u64, text) {
             return true
         }
         i = i + 1
@@ -473,11 +549,14 @@ fn match_game() -> bool {
         }
         if n > 0 && r_ld8(lp, 0) != 35 as u8 {
             let nf: usize = split_tabs(lp)
-            // os = l, exe, name, and no command-line text
+            // os = l, exe, name, optional command-line text (column 4)
             if nf >= 3 && isz(fs[0], "l") && r_ld8(fs[1], 0) != 0 as u8
-                && r_ld8(fs[2], 0) != 0 as u8
-                && (nf < 4 || r_ld8(fs[3], 0) == 0 as u8) {
-                if running(fs[1]) && !in_never(fs[1]) {
+                && r_ld8(fs[2], 0) != 0 as u8 {
+                var text: u64 = (&no_text[0]) as u64
+                if nf >= 4 {
+                    text = fs[3]
+                }
+                if running(fs[1], text) && !in_never(fs[1]) {
                     if r_ld8((&cur[0]) as u64, 0) != 0 as u8
                         && eq_full(fs[2], (&cur[0]) as u64) {
                         cur_ok = true
@@ -556,8 +635,10 @@ fn v_detect() -> i32 {
         ulib.sayu(pids[i])
         say("\t")
         sayz(at)
-        say("\t\t")
-        sayz(at)
+        say("\t")
+        ulib.sayu(ages[i])
+        say("\t")
+        sayz((&cmds[0]) as u64 + (i * CMD_W) as u64)
         say("\n")
         i = i + 1
     }

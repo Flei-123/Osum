@@ -14,7 +14,11 @@
 #      binds to the broker (`orientbus: provider social bound`);
 #   2. an image WITHOUT them starts exactly what it started before (no
 #      social/melder line), so older images are untouched;
-#   3. nothing panics.
+#   3. nothing panics;
+#   4. (r147) the session brings them back: the test hook `sokill=<ticks>` kills the
+#      social service that many ticks after each start; 5 s later (back-off up to 60 s)
+#      the desktop loop starts it again (`desk: social respawn pid=<n>`), the Melder
+#      (not killed) stays untouched, and the service binds to the broker again.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -57,7 +61,7 @@ printf 'l\tnap\tNap Quest\n' > "$TMPD/etc/games.tsv"
 
 # $1 = tag, $2 = "with" | "without" the social programs
 boot() {
-    local tag=$1 with=$2
+    local tag=$1 with=$2 extra=${3:-} hold=${4:-12}
     local A_=(build "$TMPD/$tag.img" $BLOCKS /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
         /bin/ /tmp/ /proc/ /dev/ /system/ /etc/ /etc/actions.d/ /etc/orientbus/ /etc/social/
@@ -77,7 +81,7 @@ boot() {
     : > "$TMPD/$tag.ser"
     timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
         -kernel "$TMPD/k0.img" -m 768 \
-        -append "gfx disp wm wmdauer wmshell osum vfs bus desk nokbd nosched noproc fbres=1280x800" \
+        -append "gfx disp wm wmdauer wmshell osum vfs bus desk nokbd nosched noproc fbres=1280x800 $extra" \
         -serial "file:$TMPD/$tag.ser" -display none -no-reboot -vga std \
         -drive "file=$TMPD/$tag.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
@@ -89,7 +93,7 @@ boot() {
         kill -0 "$qp" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
-    sleep 12
+    sleep "$hold"
     kill "$qp" 2>/dev/null; wait "$qp" 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$TMPD/$tag.ser" > "$TMPD/$tag.klar"
 }
@@ -128,6 +132,22 @@ PY
     grep -qaiE 'panic|double fault' "$S" && bad "the guest panicked" || ok "no panic"
 fi
 rm -f "$TMPD/with.img"
+
+echo "== 2b. the session brings the service back (r147) =="
+if boot respawn with "sokill=300" 30; then
+    S="$TMPD/respawn.klar"
+    grep -qaE 'desk: social pid=[1-9]' "$S" && ok "first start as before" || bad "no 'desk: social pid=<n>'"
+    grep -qaE 'desk: social ended slot=[0-9]+' "$S" && ok "the watch sees the end of the killed service" || bad "no 'desk: social ended slot='"
+    nr=$(grep -aoE 'desk: social respawn pid=[1-9][0-9]*' "$S" | wc -l)
+    [ "$nr" -ge 1 ] && ok "the service is started again ($(grep -aoE 'desk: social respawn pid=[0-9]+' "$S" | head -1), $nr time(s))" \
+        || bad "no 'desk: social respawn pid=<n>'"
+    p1=$(grep -aoE 'desk: social pid=[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
+    p2=$(grep -aoE 'desk: social respawn pid=[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
+    [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" != "$p2" ] && ok "... as a new process" || bad "respawn pid is not new: $p1 $p2"
+    grep -qaE 'desk: melder (ended|respawn)' "$S" && bad "the Melder was touched by the social kill" || ok "the Melder runs on (no end, no respawn)"
+    grep -qaiE 'panic|double fault' "$S" && bad "the guest panicked" || ok "no panic"
+fi
+rm -f "$TMPD/respawn.img"
 
 echo "== 3. an image without them is unchanged =="
 if boot without without; then
