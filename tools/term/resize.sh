@@ -12,7 +12,6 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 bash tools/design/eh6.sh "$TMPD/run" accel=kvm drehbuch=tools/term/resize.txt > "$TMPD/run.log" 2>&1
 S="$TMPD/run/serial.txt"
-cp "$S" /root/resize.serial 2>/dev/null
 grep -a "kgui: winch\|wm: term win" "$S" | tail -6
 python3 tools/term/resize.py "$S" && ok "edit redrew for the bigger window (help line on the last row)" \
     || bad "edit did not follow the resize"
