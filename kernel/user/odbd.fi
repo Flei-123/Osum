@@ -1,0 +1,1921 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/odbd.fi -- ODB debug agent (docs/ODB.md, wire protocol v1).
+//
+//     odbd            serve the protocol on /dev/odb0 (raw COM2) until killed
+//
+// Debug images only (tools/usbimg/build.sh ODB=1). Needs /etc/odb.token (>= 16
+// octets); without it every `auth` is refused. Single file on purpose: frame
+// codec, TLV, HMAC auth and commands. String constants and their accessor
+// functions below are generated (one NUL-terminated array per text).
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.proc
+import libc.text
+import sha
+
+export { u_start }
+
+static mut S_AGENT: [u8; 6] = "agent\0"
+fn s_agent() -> u64 {
+    return (&S_AGENT[0 as usize]) as u64
+}
+
+static mut S_AGENTVER: [u8; 9] = "agentver\0"
+fn s_agentver() -> u64 {
+    return (&S_AGENTVER[0 as usize]) as u64
+}
+
+static mut S_AUTH: [u8; 5] = "auth\0"
+fn s_auth() -> u64 {
+    return (&S_AUTH[0 as usize]) as u64
+}
+
+static mut S_AUTH_CMD: [u8; 5] = "auth\0"
+fn s_auth_cmd() -> u64 {
+    return (&S_AUTH_CMD[0 as usize]) as u64
+}
+
+static mut S_AUTHTAG: [u8; 10] = "ODB1-auth\0"
+fn s_authtag() -> u64 {
+    return (&S_AUTHTAG[0 as usize]) as u64
+}
+
+static mut S_BADMAC: [u8; 16] = "bad credentials\0"
+fn s_badmac() -> u64 {
+    return (&S_BADMAC[0 as usize]) as u64
+}
+
+static mut S_BADREQ: [u8; 18] = "malformed request\0"
+fn s_badreq() -> u64 {
+    return (&S_BADREQ[0 as usize]) as u64
+}
+
+static mut S_BINREBOOT: [u8; 12] = "/bin/reboot\0"
+fn s_binreboot() -> u64 {
+    return (&S_BINREBOOT[0 as usize]) as u64
+}
+
+static mut S_BINSH: [u8; 8] = "/bin/sh\0"
+fn s_binsh() -> u64 {
+    return (&S_BINSH[0 as usize]) as u64
+}
+
+static mut S_BINSHUTDOWN: [u8; 14] = "/bin/shutdown\0"
+fn s_binshutdown() -> u64 {
+    return (&S_BINSHUTDOWN[0 as usize]) as u64
+}
+
+static mut S_BYTES: [u8; 6] = "bytes\0"
+fn s_bytes() -> u64 {
+    return (&S_BYTES[0 as usize]) as u64
+}
+
+static mut S_CANCELLED: [u8; 10] = "cancelled\0"
+fn s_cancelled() -> u64 {
+    return (&S_CANCELLED[0 as usize]) as u64
+}
+
+static mut S_CANTCREATE: [u8; 19] = "cannot create file\0"
+fn s_cantcreate() -> u64 {
+    return (&S_CANTCREATE[0 as usize]) as u64
+}
+
+static mut S_CANTOPEN: [u8; 17] = "cannot open file\0"
+fn s_cantopen() -> u64 {
+    return (&S_CANTOPEN[0 as usize]) as u64
+}
+
+static mut S_CMD: [u8; 4] = "cmd\0"
+fn s_cmd() -> u64 {
+    return (&S_CMD[0 as usize]) as u64
+}
+
+static mut S_CODE: [u8; 5] = "code\0"
+fn s_code() -> u64 {
+    return (&S_CODE[0 as usize]) as u64
+}
+
+static mut S_COUNT: [u8; 6] = "count\0"
+fn s_count() -> u64 {
+    return (&S_COUNT[0 as usize]) as u64
+}
+
+static mut S_CPUS: [u8; 5] = "cpus\0"
+fn s_cpus() -> u64 {
+    return (&S_CPUS[0 as usize]) as u64
+}
+
+static mut S_CRC32: [u8; 6] = "crc32\0"
+fn s_crc32() -> u64 {
+    return (&S_CRC32[0 as usize]) as u64
+}
+
+static mut S_DASHC: [u8; 3] = "-c\0"
+fn s_dashc() -> u64 {
+    return (&S_DASHC[0 as usize]) as u64
+}
+
+static mut S_DASHF: [u8; 3] = "-f\0"
+fn s_dashf() -> u64 {
+    return (&S_DASHF[0 as usize]) as u64
+}
+
+static mut S_DEVKLOG: [u8; 10] = "/dev/klog\0"
+fn s_devklog() -> u64 {
+    return (&S_DEVKLOG[0 as usize]) as u64
+}
+
+static mut S_DEVNULL: [u8; 10] = "/dev/null\0"
+fn s_devnull() -> u64 {
+    return (&S_DEVNULL[0 as usize]) as u64
+}
+
+static mut S_DEVODB: [u8; 10] = "/dev/odb0\0"
+fn s_devodb() -> u64 {
+    return (&S_DEVODB[0 as usize]) as u64
+}
+
+static mut S_EARG: [u8; 5] = "EARG\0"
+fn s_earg() -> u64 {
+    return (&S_EARG[0 as usize]) as u64
+}
+
+static mut S_EAUTH: [u8; 6] = "EAUTH\0"
+fn s_eauth() -> u64 {
+    return (&S_EAUTH[0 as usize]) as u64
+}
+
+static mut S_ECANCEL: [u8; 8] = "ECANCEL\0"
+fn s_ecancel() -> u64 {
+    return (&S_ECANCEL[0 as usize]) as u64
+}
+
+static mut S_ECRC: [u8; 5] = "ECRC\0"
+fn s_ecrc() -> u64 {
+    return (&S_ECRC[0 as usize]) as u64
+}
+
+static mut S_EINTERNAL: [u8; 10] = "EINTERNAL\0"
+fn s_einternal() -> u64 {
+    return (&S_EINTERNAL[0 as usize]) as u64
+}
+
+static mut S_EIO: [u8; 4] = "EIO\0"
+fn s_eio() -> u64 {
+    return (&S_EIO[0 as usize]) as u64
+}
+
+static mut S_ELIMIT: [u8; 7] = "ELIMIT\0"
+fn s_elimit() -> u64 {
+    return (&S_ELIMIT[0 as usize]) as u64
+}
+
+static mut S_ENOENT: [u8; 7] = "ENOENT\0"
+fn s_enoent() -> u64 {
+    return (&S_ENOENT[0 as usize]) as u64
+}
+
+static mut S_EPROTO: [u8; 7] = "EPROTO\0"
+fn s_eproto() -> u64 {
+    return (&S_EPROTO[0 as usize]) as u64
+}
+
+static mut S_ETIMEOUT: [u8; 9] = "ETIMEOUT\0"
+fn s_etimeout() -> u64 {
+    return (&S_ETIMEOUT[0 as usize]) as u64
+}
+
+static mut S_EUNSUP: [u8; 7] = "EUNSUP\0"
+fn s_eunsup() -> u64 {
+    return (&S_EUNSUP[0 as usize]) as u64
+}
+
+static mut S_EVER: [u8; 5] = "EVER\0"
+fn s_ever() -> u64 {
+    return (&S_EVER[0 as usize]) as u64
+}
+
+static mut S_EXEC: [u8; 5] = "exec\0"
+fn s_exec() -> u64 {
+    return (&S_EXEC[0 as usize]) as u64
+}
+
+static mut S_EXIT: [u8; 5] = "exit\0"
+fn s_exit() -> u64 {
+    return (&S_EXIT[0 as usize]) as u64
+}
+
+static mut S_FEATLIST: [u8; 39] = "info,exec,push,pull,ps,kill,logs,power\0"
+fn s_featlist() -> u64 {
+    return (&S_FEATLIST[0 as usize]) as u64
+}
+
+static mut S_FEATURES: [u8; 9] = "features\0"
+fn s_features() -> u64 {
+    return (&S_FEATURES[0 as usize]) as u64
+}
+
+static mut S_HELLO: [u8; 6] = "hello\0"
+fn s_hello() -> u64 {
+    return (&S_HELLO[0 as usize]) as u64
+}
+
+static mut S_IDLE_CORE: [u8; 10] = "idle_core\0"
+fn s_idle_core() -> u64 {
+    return (&S_IDLE_CORE[0 as usize]) as u64
+}
+
+static mut S_IDLE_MS: [u8; 8] = "idle_ms\0"
+fn s_idle_ms() -> u64 {
+    return (&S_IDLE_MS[0 as usize]) as u64
+}
+
+static mut S_IDLE_PCT: [u8; 9] = "idle_pct\0"
+fn s_idle_pct() -> u64 {
+    return (&S_IDLE_PCT[0 as usize]) as u64
+}
+
+static mut S_INFO: [u8; 5] = "info\0"
+fn s_info() -> u64 {
+    return (&S_INFO[0 as usize]) as u64
+}
+
+static mut S_KERNEL: [u8; 7] = "kernel\0"
+fn s_kernel() -> u64 {
+    return (&S_KERNEL[0 as usize]) as u64
+}
+
+static mut S_KILL: [u8; 5] = "kill\0"
+fn s_kill() -> u64 {
+    return (&S_KILL[0 as usize]) as u64
+}
+
+static mut S_KILLEDTIMEOUT: [u8; 16] = "killed: timeout\0"
+fn s_killedtimeout() -> u64 {
+    return (&S_KILLEDTIMEOUT[0 as usize]) as u64
+}
+
+static mut S_LOGS: [u8; 5] = "logs\0"
+fn s_logs() -> u64 {
+    return (&S_LOGS[0 as usize]) as u64
+}
+
+static mut S_MAC: [u8; 4] = "mac\0"
+fn s_mac() -> u64 {
+    return (&S_MAC[0 as usize]) as u64
+}
+
+static mut S_MAXCHUNK: [u8; 9] = "maxchunk\0"
+fn s_maxchunk() -> u64 {
+    return (&S_MAXCHUNK[0 as usize]) as u64
+}
+
+static mut S_MAXPAYLOAD: [u8; 11] = "maxpayload\0"
+fn s_maxpayload() -> u64 {
+    return (&S_MAXPAYLOAD[0 as usize]) as u64
+}
+
+static mut S_MEM_FREE_KB: [u8; 12] = "mem_free_kb\0"
+fn s_mem_free_kb() -> u64 {
+    return (&S_MEM_FREE_KB[0 as usize]) as u64
+}
+
+static mut S_MEM_TOTAL_KB: [u8; 13] = "mem_total_kb\0"
+fn s_mem_total_kb() -> u64 {
+    return (&S_MEM_TOTAL_KB[0 as usize]) as u64
+}
+
+static mut S_MSG: [u8; 4] = "msg\0"
+fn s_msg() -> u64 {
+    return (&S_MSG[0 as usize]) as u64
+}
+
+static mut S_NEEDCMD: [u8; 12] = "missing cmd\0"
+fn s_needcmd() -> u64 {
+    return (&S_NEEDCMD[0 as usize]) as u64
+}
+
+static mut S_NEEDPATH: [u8; 13] = "missing path\0"
+fn s_needpath() -> u64 {
+    return (&S_NEEDPATH[0 as usize]) as u64
+}
+
+static mut S_NEEDPID: [u8; 12] = "missing pid\0"
+fn s_needpid() -> u64 {
+    return (&S_NEEDPID[0 as usize]) as u64
+}
+
+static mut S_NODEV: [u8; 24] = "odbd: /dev/odb0 missing\0"
+fn s_nodev() -> u64 {
+    return (&S_NODEV[0 as usize]) as u64
+}
+
+static mut S_NOFORK: [u8; 12] = "fork failed\0"
+fn s_nofork() -> u64 {
+    return (&S_NOFORK[0 as usize]) as u64
+}
+
+static mut S_NOKLOG: [u8; 13] = "no /dev/klog\0"
+fn s_noklog() -> u64 {
+    return (&S_NOKLOG[0 as usize]) as u64
+}
+
+static mut S_NONCE: [u8; 6] = "nonce\0"
+fn s_nonce() -> u64 {
+    return (&S_NONCE[0 as usize]) as u64
+}
+
+static mut S_NOSTDIN: [u8; 20] = "cannot buffer stdin\0"
+fn s_nostdin() -> u64 {
+    return (&S_NOSTDIN[0 as usize]) as u64
+}
+
+static mut S_NOSUCHPID: [u8; 12] = "no such pid\0"
+fn s_nosuchpid() -> u64 {
+    return (&S_NOSUCHPID[0 as usize]) as u64
+}
+
+static mut S_NOTAUTH: [u8; 18] = "not authenticated\0"
+fn s_notauth() -> u64 {
+    return (&S_NOTAUTH[0 as usize]) as u64
+}
+
+static mut S_ODBD: [u8; 5] = "odbd\0"
+fn s_odbd() -> u64 {
+    return (&S_ODBD[0 as usize]) as u64
+}
+
+static mut S_OFFSET: [u8; 7] = "offset\0"
+fn s_offset() -> u64 {
+    return (&S_OFFSET[0 as usize]) as u64
+}
+
+static mut S_OK: [u8; 3] = "ok\0"
+fn s_ok() -> u64 {
+    return (&S_OK[0 as usize]) as u64
+}
+
+static mut S_ONE: [u8; 2] = "1\0"
+fn s_one() -> u64 {
+    return (&S_ONE[0 as usize]) as u64
+}
+
+static mut S_ORIENTOS: [u8; 9] = "OrientOS\0"
+fn s_orientos() -> u64 {
+    return (&S_ORIENTOS[0 as usize]) as u64
+}
+
+static mut S_OS: [u8; 3] = "os\0"
+fn s_os() -> u64 {
+    return (&S_OS[0 as usize]) as u64
+}
+
+static mut S_PATH: [u8; 5] = "path\0"
+fn s_path() -> u64 {
+    return (&S_PATH[0 as usize]) as u64
+}
+
+static mut S_PID: [u8; 4] = "pid\0"
+fn s_pid() -> u64 {
+    return (&S_PID[0 as usize]) as u64
+}
+
+static mut S_PING: [u8; 5] = "ping\0"
+fn s_ping() -> u64 {
+    return (&S_PING[0 as usize]) as u64
+}
+
+static mut S_PROCS: [u8; 6] = "procs\0"
+fn s_procs() -> u64 {
+    return (&S_PROCS[0 as usize]) as u64
+}
+
+static mut S_PS: [u8; 3] = "ps\0"
+fn s_ps() -> u64 {
+    return (&S_PS[0 as usize]) as u64
+}
+
+static mut S_PULL: [u8; 5] = "pull\0"
+fn s_pull() -> u64 {
+    return (&S_PULL[0 as usize]) as u64
+}
+
+static mut S_PULLWAIT: [u8; 13] = "pull: no ack\0"
+fn s_pullwait() -> u64 {
+    return (&S_PULLWAIT[0 as usize]) as u64
+}
+
+static mut S_PUSH: [u8; 5] = "push\0"
+fn s_push() -> u64 {
+    return (&S_PUSH[0 as usize]) as u64
+}
+
+static mut S_PUSHWAIT: [u8; 14] = "push: timeout\0"
+fn s_pushwait() -> u64 {
+    return (&S_PUSHWAIT[0 as usize]) as u64
+}
+
+static mut S_READBACK: [u8; 16] = "readback failed\0"
+fn s_readback() -> u64 {
+    return (&S_READBACK[0 as usize]) as u64
+}
+
+static mut S_READFAIL: [u8; 12] = "read failed\0"
+fn s_readfail() -> u64 {
+    return (&S_READFAIL[0 as usize]) as u64
+}
+
+static mut S_READY: [u8; 12] = "odbd: ready\0"
+fn s_ready() -> u64 {
+    return (&S_READY[0 as usize]) as u64
+}
+
+static mut S_REBOOT: [u8; 7] = "reboot\0"
+fn s_reboot() -> u64 {
+    return (&S_REBOOT[0 as usize]) as u64
+}
+
+static mut S_SHA256: [u8; 7] = "sha256\0"
+fn s_sha256() -> u64 {
+    return (&S_SHA256[0 as usize]) as u64
+}
+
+static mut S_SHAMISMATCH: [u8; 16] = "sha256 mismatch\0"
+fn s_shamismatch() -> u64 {
+    return (&S_SHAMISMATCH[0 as usize]) as u64
+}
+
+static mut S_SHUTDOWN: [u8; 9] = "shutdown\0"
+fn s_shutdown() -> u64 {
+    return (&S_SHUTDOWN[0 as usize]) as u64
+}
+
+static mut S_SIG: [u8; 4] = "sig\0"
+fn s_sig() -> u64 {
+    return (&S_SIG[0 as usize]) as u64
+}
+
+static mut S_SIGNAL: [u8; 7] = "signal\0"
+fn s_signal() -> u64 {
+    return (&S_SIGNAL[0 as usize]) as u64
+}
+
+static mut S_SIZE: [u8; 5] = "size\0"
+fn s_size() -> u64 {
+    return (&S_SIZE[0 as usize]) as u64
+}
+
+static mut S_SIZEMISMATCH: [u8; 14] = "size mismatch\0"
+fn s_sizemismatch() -> u64 {
+    return (&S_SIZEMISMATCH[0 as usize]) as u64
+}
+
+static mut S_STDIN: [u8; 6] = "stdin\0"
+fn s_stdin() -> u64 {
+    return (&S_STDIN[0 as usize]) as u64
+}
+
+static mut S_STDINPATH: [u8; 15] = "/tmp/odb.stdin\0"
+fn s_stdinpath() -> u64 {
+    return (&S_STDINPATH[0 as usize]) as u64
+}
+
+static mut S_STDINWAIT: [u8; 14] = "stdin timeout\0"
+fn s_stdinwait() -> u64 {
+    return (&S_STDINWAIT[0 as usize]) as u64
+}
+
+static mut S_SUPPORTED: [u8; 10] = "supported\0"
+fn s_supported() -> u64 {
+    return (&S_SUPPORTED[0 as usize]) as u64
+}
+
+static mut S_TIME_MS: [u8; 8] = "time_ms\0"
+fn s_time_ms() -> u64 {
+    return (&S_TIME_MS[0 as usize]) as u64
+}
+
+static mut S_TIMEOUT_MS: [u8; 11] = "timeout_ms\0"
+fn s_timeout_ms() -> u64 {
+    return (&S_TIMEOUT_MS[0 as usize]) as u64
+}
+
+static mut S_TOKEN: [u8; 6] = "token\0"
+fn s_token() -> u64 {
+    return (&S_TOKEN[0 as usize]) as u64
+}
+
+static mut S_TOKPATH: [u8; 15] = "/etc/odb.token\0"
+fn s_tokpath() -> u64 {
+    return (&S_TOKPATH[0 as usize]) as u64
+}
+
+static mut S_TOOBIG: [u8; 16] = "request too big\0"
+fn s_toobig() -> u64 {
+    return (&S_TOOBIG[0 as usize]) as u64
+}
+
+static mut S_UNKNOWNCMD: [u8; 16] = "unknown command\0"
+fn s_unknowncmd() -> u64 {
+    return (&S_UNKNOWNCMD[0 as usize]) as u64
+}
+
+static mut S_UNKNOWNTYPE: [u8; 19] = "unknown frame type\0"
+fn s_unknowntype() -> u64 {
+    return (&S_UNKNOWNTYPE[0 as usize]) as u64
+}
+
+static mut S_UNSUP_VER: [u8; 20] = "unsupported version\0"
+fn s_unsup_ver() -> u64 {
+    return (&S_UNSUP_VER[0 as usize]) as u64
+}
+
+static mut S_UPTIME_MS: [u8; 10] = "uptime_ms\0"
+fn s_uptime_ms() -> u64 {
+    return (&S_UPTIME_MS[0 as usize]) as u64
+}
+
+static mut S_VER: [u8; 4] = "ver\0"
+fn s_ver() -> u64 {
+    return (&S_VER[0 as usize]) as u64
+}
+
+static mut S_WINDOW: [u8; 7] = "window\0"
+fn s_window() -> u64 {
+    return (&S_WINDOW[0 as usize]) as u64
+}
+
+static mut S_WRITEFAIL: [u8; 13] = "write failed\0"
+fn s_writefail() -> u64 {
+    return (&S_WRITEFAIL[0 as usize]) as u64
+}
+
+// ------------------------------------------------------------ constants
+
+const MAXP: u64 = 65536
+const HDRLEN: u64 = 16
+const RBSIZE: u64 = 140000
+const TBSIZE: u64 = 65700
+const REQMAX: u64 = 8192
+const CHUNK: u64 = 30000
+const WINDOW: u64 = 65536
+
+const T_REQ: u64 = 1
+const T_RESP: u64 = 2
+const T_DATA: u64 = 3
+const T_END: u64 = 4
+const T_ERR: u64 = 5
+const T_PING: u64 = 6
+const T_PONG: u64 = 7
+const T_CANCEL: u64 = 8
+const T_ACK: u64 = 9
+
+const F_RETRY: u64 = 1
+
+const NONE: u64 = 0xFFFFFFFF
+const SYS_GETRANDOM: u64 = 318
+const SYS_CLOCK_GETTIME: u64 = 228
+const SYS_WAIT4: u64 = 61
+const SYS_KILL_N: u64 = 62
+const WNOHANG: u64 = 1
+
+// ------------------------------------------------------------ state
+
+static mut rb: [u8; 140000] = [0 as u8; 140000]
+static mut rlen: u64 = 0
+static mut tb: [u8; 65700] = [0 as u8; 65700]
+static mut pb: [u8; 65700] = [0 as u8; 65700]
+static mut pl: u64 = 0
+static mut reqbuf: [u8; 8192] = [0 as u8; 8192]
+static mut lastbuf: [u8; 4096] = [0 as u8; 4096]
+static mut lastlen: u64 = 0
+static mut lasttype: u64 = 0
+static mut lastid: u64 = 0
+static mut crct: [u64; 256] = [0 as u64; 256]
+static mut crc_ready: u64 = 0
+static mut dev: u64 = 0
+static mut tok: [u8; 256] = [0 as u8; 256]
+static mut toklen: u64 = 0
+static mut nonce: [u8; 16] = [0 as u8; 16]
+static mut authed: u64 = 0
+static mut fails: u64 = 0
+static mut conf_allow: [u8; 256] = [0 as u8; 256]
+static mut tmp: [u8; 1024] = [0 as u8; 1024]
+static mut pathb: [u8; 600] = [0 as u8; 600]
+static mut cmdb: [u8; 2048] = [0 as u8; 2048]
+static mut iobuf: [u8; 32768] = [0 as u8; 32768]
+static mut hexb: [u8; 80] = [0 as u8; 80]
+static mut dig: [u8; 32] = [0 as u8; 32]
+static mut inner: [u8; 32] = [0 as u8; 32]
+static mut kpad: [u8; 64] = [0 as u8; 64]
+static mut pfds: [u8; 64] = [0 as u8; 64]
+static mut g_vlen: u64 = 0
+static mut g_crc: u64 = 0
+static mut g_size: u64 = 0
+static mut cancelled: u64 = 0
+
+// ------------------------------------------------------------ bytes
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 255) as u8)
+}
+
+fn rd16(p: u64) -> u64 {
+    return rd8(p) | (rd8(p + 1) << 8)
+}
+
+fn rd32(p: u64) -> u64 {
+    return rd8(p) | (rd8(p + 1) << 8) | (rd8(p + 2) << 16) | (rd8(p + 3) << 24)
+}
+
+fn rd64(p: u64) -> u64 {
+    return rd32(p) | (rd32(p + 4) << 32)
+}
+
+fn wr16(p: u64, v: u64) {
+    wr8(p, v)
+    wr8(p + 1, v >> 8)
+}
+
+fn wr32(p: u64, v: u64) {
+    wr8(p, v)
+    wr8(p + 1, v >> 8)
+    wr8(p + 2, v >> 16)
+    wr8(p + 3, v >> 24)
+}
+
+fn wr64(p: u64, v: u64) {
+    wr32(p, v)
+    wr32(p + 4, v >> 32)
+}
+
+fn addr_rb() -> u64 {
+    return (&rb[0 as usize]) as u64
+}
+
+fn addr_tb() -> u64 {
+    return (&tb[0 as usize]) as u64
+}
+
+fn addr_pb() -> u64 {
+    return (&pb[0 as usize]) as u64
+}
+
+fn addr_req() -> u64 {
+    return (&reqbuf[0 as usize]) as u64
+}
+
+fn addr_io() -> u64 {
+    return (&iobuf[0 as usize]) as u64
+}
+
+fn addr_tmp() -> u64 {
+    return (&tmp[0 as usize]) as u64
+}
+
+fn addr_path() -> u64 {
+    return (&pathb[0 as usize]) as u64
+}
+
+fn addr_hex() -> u64 {
+    return (&hexb[0 as usize]) as u64
+}
+
+fn addr_dig() -> u64 {
+    return (&dig[0 as usize]) as u64
+}
+
+fn copy_bytes(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        wr8(dst + i, rd8(src + i))
+        i = i + 1
+    }
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, 1, (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000) +% (ts[1 as usize] / 1000000)
+}
+
+// ------------------------------------------------------------ crc32
+
+fn crc_init() {
+    if crc_ready == 1 {
+        return
+    }
+    var n: u64 = 0
+    while n < 256 {
+        var c: u64 = n
+        var k: u64 = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = 0xEDB88320 ^ (c >> 1)
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        crct[n as usize] = c
+        n = n + 1
+    }
+    crc_ready = 1
+}
+
+// running state in, running state out (init 0xFFFFFFFF, final xor by the caller)
+fn crc_run(c0: u64, p: u64, n: u64) -> u64 {
+    var c: u64 = c0
+    var i: u64 = 0
+    while i < n {
+        c = crct[((c ^ rd8(p + i)) & 255) as usize] ^ (c >> 8)
+        i = i + 1
+    }
+    return c
+}
+
+fn crc32(p: u64, n: u64) -> u64 {
+    return crc_run(0xFFFFFFFF, p, n) ^ 0xFFFFFFFF
+}
+
+// ------------------------------------------------------------ frames out
+
+fn dev_write_all(p: u64, n: u64) -> bool {
+    var done: u64 = 0
+    var spins: u64 = 0
+    while done < n {
+        let r: u64 = io.write(dev, p + done, n - done)
+        if errno.failed(r) {
+            return false
+        }
+        if r == 0 {
+            spins = spins + 1
+            if spins > 100000 {
+                return false
+            }
+        } else {
+            done = done + r
+        }
+    }
+    return true
+}
+
+fn send_frame(typ: u64, flags: u64, id: u64, p: u64, n: u64) -> bool {
+    let t: u64 = addr_tb()
+    wr8(t, 0x4F)
+    wr8(t + 1, 0x44)
+    wr8(t + 2, 0x42)
+    wr8(t + 3, 0x31)
+    wr8(t + 4, 1)
+    wr8(t + 5, typ)
+    wr16(t + 6, flags)
+    wr32(t + 8, id)
+    wr32(t + 12, n)
+    copy_bytes(t + HDRLEN, p, n)
+    wr32(t + HDRLEN + n, crc32(t, HDRLEN + n))
+    return dev_write_all(t, HDRLEN + n + 4)
+}
+
+// ------------------------------------------------------------ payload build
+
+fn p_reset() {
+    pl = 0
+}
+
+fn p_key(key: u64, vlen: u64) -> u64 {
+    let kl: u64 = text.length(key)
+    let b: u64 = addr_pb()
+    wr8(b + pl, kl)
+    copy_bytes(b + pl + 1, key, kl)
+    wr16(b + pl + 1 + kl, vlen)
+    let at: u64 = b + pl + 3 + kl
+    pl = pl + 3 + kl + vlen
+    return at
+}
+
+fn p_bytes(key: u64, v: u64, n: u64) {
+    if pl + 300 + n > 60000 {
+        return
+    }
+    let at: u64 = p_key(key, n)
+    copy_bytes(at, v, n)
+}
+
+fn p_str(key: u64, v: u64) {
+    p_bytes(key, v, text.length(v))
+}
+
+fn p_num(key: u64, v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let n: u64 = text.digits(v, (&d[0 as usize]) as u64, false)
+    p_bytes(key, (&d[0 as usize]) as u64, n)
+}
+
+fn send_final(typ: u64, id: u64) -> bool {
+    lastid = id
+    lasttype = typ
+    lastlen = 0
+    if pl <= 4096 {
+        copy_bytes((&lastbuf[0 as usize]) as u64, addr_pb(), pl)
+        lastlen = pl
+    }
+    return send_frame(typ, 0, id, addr_pb(), pl)
+}
+
+fn reply_ok(id: u64) {
+    send_final(T_RESP, id)
+}
+
+fn reply_err(id: u64, code: u64, msg: u64) {
+    p_reset()
+    p_str(s_code(), code)
+    p_str(s_msg(), msg)
+    send_final(T_ERR, id)
+}
+
+// ------------------------------------------------------------ frames in
+
+fn drop_bytes(n: u64) {
+    if n >= rlen {
+        rlen = 0
+        return
+    }
+    let b: u64 = addr_rb()
+    var i: u64 = 0
+    while i < rlen - n {
+        wr8(b + i, rd8(b + n + i))
+        i = i + 1
+    }
+    rlen = rlen - n
+}
+
+fn magic_ok(avail: u64) -> bool {
+    let b: u64 = addr_rb()
+    if avail > 0 && rd8(b) != 0x4F {
+        return false
+    }
+    if avail > 1 && rd8(b + 1) != 0x44 {
+        return false
+    }
+    if avail > 2 && rd8(b + 2) != 0x42 {
+        return false
+    }
+    if avail > 3 && rd8(b + 3) != 0x31 {
+        return false
+    }
+    return true
+}
+
+// Length of a complete valid frame at rb[0], 0 when more octets are needed.
+fn have_frame() -> u64 {
+    let b: u64 = addr_rb()
+    var going: bool = true
+    var result: u64 = 0
+    while going {
+        var avail: u64 = rlen
+        if avail > 4 {
+            avail = 4
+        }
+        if avail > 0 && !magic_ok(avail) {
+            drop_bytes(1)
+        } else if rlen < HDRLEN {
+            going = false
+        } else {
+            let len: u64 = rd32(b + 12)
+            if rd8(b + 4) != 1 || len > MAXP {
+                drop_bytes(1)
+            } else if rlen < HDRLEN + len + 4 {
+                going = false
+            } else if crc32(b, HDRLEN + len) != rd32(b + HDRLEN + len) {
+                drop_bytes(1)
+            } else {
+                result = HDRLEN + len + 4
+                going = false
+            }
+        }
+    }
+    return result
+}
+
+// Pull what the line has into rb. Returns octets added.
+fn fill() -> u64 {
+    if rlen >= RBSIZE - 4096 {
+        return 0
+    }
+    let n: u64 = io.read(dev, addr_rb() + rlen, 4096)
+    if errno.failed(n) {
+        return 0
+    }
+    rlen = rlen + n
+    return n
+}
+
+// Wait up to `ms` for a complete frame. Returns its total length or 0.
+fn wait_frame(ms: u64) -> u64 {
+    let t0: u64 = mono_ms()
+    var going: bool = true
+    var result: u64 = 0
+    while going {
+        let n: u64 = have_frame()
+        if n != 0 {
+            result = n
+            going = false
+        } else {
+            let got: u64 = fill()
+            if got == 0 {
+                if mono_ms() -% t0 >= ms {
+                    going = false
+                } else {
+                    ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+                }
+            }
+        }
+    }
+    return result
+}
+
+// ------------------------------------------------------------ TLV in
+
+// Value pointer of `key` in the TLV block, NONE-length in g_vlen = absent (returns 0).
+fn tget(tp: u64, tl: u64, key: u64) -> u64 {
+    let kl: u64 = text.length(key)
+    var off: u64 = 0
+    g_vlen = NONE
+    while off + 3 <= tl {
+        let kn: u64 = rd8(tp + off)
+        if off + 3 + kn > tl {
+            return 0
+        }
+        let vl: u64 = rd16(tp + off + 1 + kn)
+        if off + 3 + kn + vl > tl {
+            return 0
+        }
+        if kn == kl {
+            var same: bool = true
+            var i: u64 = 0
+            while i < kn {
+                if rd8(tp + off + 1 + i) != rd8(key + i) {
+                    same = false
+                }
+                i = i + 1
+            }
+            if same {
+                g_vlen = vl
+                return tp + off + 3 + kn
+            }
+        }
+        off = off + 3 + kn + vl
+    }
+    return 0
+}
+
+// Value as NUL-terminated copy in out (max octets incl. NUL); false when absent.
+fn tget_str(tp: u64, tl: u64, key: u64, out: u64, max: u64) -> bool {
+    let v: u64 = tget(tp, tl, key)
+    if g_vlen == NONE {
+        return false
+    }
+    var n: u64 = g_vlen
+    if n + 1 > max {
+        n = max - 1
+    }
+    copy_bytes(out, v, n)
+    wr8(out + n, 0)
+    return true
+}
+
+fn tget_num(tp: u64, tl: u64, key: u64, dflt: u64) -> u64 {
+    let v: u64 = tget(tp, tl, key)
+    if g_vlen == NONE {
+        return dflt
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < g_vlen {
+        let c: u64 = rd8(v + i)
+        if c >= 48 && c <= 57 {
+            n = n * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn same_str(a: u64, alen: u64, b: u64) -> bool {
+    if alen != text.length(b) {
+        return false
+    }
+    var i: u64 = 0
+    while i < alen {
+        if rd8(a + i) != rd8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------ hashes
+
+fn hexdump(src: u64, n: u64, out: u64) {
+    var i: u64 = 0
+    while i < n {
+        let v: u64 = rd8(src + i)
+        let h: u64 = v >> 4
+        let l: u64 = v & 15
+        if h < 10 {
+            wr8(out + 2 * i, 48 + h)
+        } else {
+            wr8(out + 2 * i, 87 + h)
+        }
+        if l < 10 {
+            wr8(out + 2 * i + 1, 48 + l)
+        } else {
+            wr8(out + 2 * i + 1, 87 + l)
+        }
+        i = i + 1
+    }
+    wr8(out + 2 * n, 0)
+}
+
+// HMAC-SHA256(key, msg) -> out[32]
+fn hmac(key: u64, klen: u64, msg: u64, mlen: u64, out: u64) {
+    let kp: u64 = (&kpad[0 as usize]) as u64
+    var i: u64 = 0
+    while i < 64 {
+        wr8(kp + i, 0)
+        i = i + 1
+    }
+    if klen > 64 {
+        sha.begin()
+        sha.update(key, klen)
+        sha.finish(kp)
+    } else {
+        copy_bytes(kp, key, klen)
+    }
+    i = 0
+    while i < 64 {
+        wr8(kp + i, rd8(kp + i) ^ 0x36)
+        i = i + 1
+    }
+    sha.begin()
+    sha.update(kp, 64)
+    sha.update(msg, mlen)
+    sha.finish((&inner[0 as usize]) as u64)
+    i = 0
+    while i < 64 {
+        wr8(kp + i, rd8(kp + i) ^ 0x36 ^ 0x5C)
+        i = i + 1
+    }
+    sha.begin()
+    sha.update(kp, 64)
+    sha.update((&inner[0 as usize]) as u64, 32)
+    sha.finish(out)
+}
+
+// sha256 + crc32 of a whole file; g_size, g_crc set; digest in dig. false = cannot open.
+fn hash_file(path: u64) -> bool {
+    let fd: u64 = io.open(path, 0)
+    if errno.failed(fd) {
+        return false
+    }
+    sha.begin()
+    var c: u64 = 0xFFFFFFFF
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = io.read(fd, addr_io(), 32768)
+        if errno.failed(n) || n == 0 {
+            going = false
+        } else {
+            sha.update(addr_io(), n)
+            c = crc_run(c, addr_io(), n)
+            total = total + n
+        }
+    }
+    io.close(fd)
+    sha.finish(addr_dig())
+    g_crc = c ^ 0xFFFFFFFF
+    g_size = total
+    return true
+}
+
+// ------------------------------------------------------------ config
+
+fn load_token() {
+    toklen = 0
+    let fd: u64 = io.open(s_tokpath(), 0)
+    if errno.failed(fd) {
+        return
+    }
+    let n: u64 = io.read(fd, (&tok[0 as usize]) as u64, 255)
+    io.close(fd)
+    if errno.failed(n) {
+        return
+    }
+    var m: u64 = n
+    while m > 0 && rd8((&tok[0 as usize]) as u64 + m - 1) <= 32 {
+        m = m - 1
+    }
+    if m >= 16 {
+        toklen = m
+    }
+}
+
+fn new_nonce() {
+    ulib.sys(SYS_GETRANDOM, (&nonce[0 as usize]) as u64, 16, 0)
+    var i: u64 = 0
+    var z: u64 = 0
+    while i < 16 {
+        z = z | rd8((&nonce[0 as usize]) as u64 + i)
+        i = i + 1
+    }
+    if z == 0 {
+        wr8((&nonce[0 as usize]) as u64, mono_ms())
+    }
+}
+
+// ------------------------------------------------------------ commands
+
+fn cmd_hello(id: u64, tp: u64, tl: u64) {
+    let v: u64 = tget_num(tp, tl, s_ver(), 0)
+    if v != 1 {
+        p_reset()
+        p_str(s_code(), s_ever())
+        p_str(s_msg(), s_unsup_ver())
+        p_str(s_supported(), s_one())
+        send_final(T_ERR, id)
+        return
+    }
+    new_nonce()
+    authed = 0
+    hexdump((&nonce[0 as usize]) as u64, 16, addr_hex())
+    p_reset()
+    p_num(s_ver(), 1)
+    p_str(s_agent(), s_odbd())
+    p_num(s_agentver(), 1)
+    p_str(s_os(), s_orientos())
+    p_str(s_features(), s_featlist())
+    p_num(s_maxchunk(), 32768)
+    p_num(s_window(), WINDOW)
+    p_num(s_maxpayload(), MAXP)
+    p_str(s_auth(), s_token())
+    p_str(s_nonce(), addr_hex())
+    send_final(T_RESP, id)
+}
+
+fn cmd_auth(id: u64, tp: u64, tl: u64) {
+    let mac: u64 = tget(tp, tl, s_mac())
+    if toklen == 0 || g_vlen != 64 {
+        fails = fails + 1
+        ulib.sleep_ms(1000)
+        reply_err(id, s_eauth(), s_badmac())
+        return
+    }
+    // msg = "ODB1-auth" || nonce
+    let m: u64 = addr_tmp()
+    copy_bytes(m, s_authtag(), 9)
+    copy_bytes(m + 9, (&nonce[0 as usize]) as u64, 16)
+    hmac((&tok[0 as usize]) as u64, toklen, m, 25, addr_dig())
+    hexdump(addr_dig(), 32, addr_hex())
+    var diff: u64 = 0
+    var i: u64 = 0
+    while i < 64 {
+        diff = diff | (rd8(addr_hex() + i) ^ rd8(mac + i))
+        i = i + 1
+    }
+    if diff != 0 {
+        fails = fails + 1
+        var d: u64 = 1000
+        var k: u64 = 1
+        while k < fails && d < 30000 {
+            d = d * 2
+            k = k + 1
+        }
+        if d > 30000 {
+            d = 30000
+        }
+        ulib.sleep_ms(d)
+        reply_err(id, s_eauth(), s_badmac())
+        return
+    }
+    fails = 0
+    authed = 1
+    p_reset()
+    p_num(s_ok(), 1)
+    send_final(T_RESP, id)
+}
+
+fn cmd_info(id: u64, tp: u64, tl: u64) {
+    let win: u64 = tget_num(tp, tl, s_idle_ms(), 0)
+    let ncpu: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_COUNT, 0)
+    var t0: [u64; 16] = [0 as u64; 16]
+    var i0: [u64; 16] = [0 as u64; 16]
+    var c: u64 = 0
+    while c < ncpu && c < 16 {
+        t0[c as usize] = ulib.sys(ulib.SYS_CPUSTAT, c, ulib.CS_TICKS, 0)
+        i0[c as usize] = ulib.sys(ulib.SYS_CPUSTAT, c, ulib.CS_IDLE, 0)
+        c = c + 1
+    }
+    if win > 0 {
+        if win > 30000 {
+            ulib.sleep_ms(30000)
+        } else {
+            ulib.sleep_ms(win)
+        }
+    }
+    p_reset()
+    p_str(s_os(), s_orientos())
+    p_num(s_kernel(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_VERSION, 0, 0))
+    p_num(s_uptime_ms(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) * 10)
+    p_num(s_cpus(), ncpu)
+    p_num(s_mem_total_kb(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_ALL, 0, 0) * 4)
+    p_num(s_mem_free_kb(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0) * 4)
+    var sum_t: u64 = 0
+    var sum_i: u64 = 0
+    c = 0
+    while c < ncpu && c < 16 {
+        let t1: u64 = ulib.sys(ulib.SYS_CPUSTAT, c, ulib.CS_TICKS, 0)
+        let i1: u64 = ulib.sys(ulib.SYS_CPUSTAT, c, ulib.CS_IDLE, 0)
+        var dt: u64 = t1 -% t0[c as usize]
+        var di: u64 = i1 -% i0[c as usize]
+        if win == 0 {
+            dt = t1
+            di = i1
+        }
+        var pct: u64 = 0
+        if dt > 0 {
+            if di > dt {
+                di = dt
+            }
+            pct = di * 100 / dt
+        }
+        sum_t = sum_t + dt
+        sum_i = sum_i + di
+        // idle_core=<n>:<pct>
+        var d: [u8; 24] = [0 as u8; 24]
+        var n: u64 = text.digits(c, (&d[0 as usize]) as u64, false)
+        wr8((&d[0 as usize]) as u64 + n, 58)
+        n = n + 1 + text.digits(pct, (&d[0 as usize]) as u64 + n + 1, false)
+        p_bytes(s_idle_core(), (&d[0 as usize]) as u64, n)
+        c = c + 1
+    }
+    var allpct: u64 = 0
+    if sum_t > 0 {
+        allpct = sum_i * 100 / sum_t
+    }
+    p_num(s_idle_pct(), allpct)
+    p_num(s_procs(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_TASKS, 0, 0))
+    send_final(T_RESP, id)
+}
+
+// ---- exec
+
+fn send_data(stream: u64, p: u64, n: u64, id: u64) {
+    let b: u64 = addr_pb()
+    // use a local frame build so pb (the pending RESP) is not touched
+    let t: u64 = addr_tb()
+    wr8(t, 0x4F)
+    wr8(t + 1, 0x44)
+    wr8(t + 2, 0x42)
+    wr8(t + 3, 0x31)
+    wr8(t + 4, 1)
+    wr8(t + 5, T_DATA)
+    wr16(t + 6, 0)
+    wr32(t + 8, id)
+    wr32(t + 12, n + 1)
+    wr8(t + HDRLEN, stream)
+    copy_bytes(t + HDRLEN + 1, p, n)
+    wr32(t + HDRLEN + 1 + n, crc32(t, HDRLEN + 1 + n))
+    dev_write_all(t, HDRLEN + 1 + n + 4)
+    if b == 0 {
+        return
+    }
+}
+
+fn send_end(stream: u64, id: u64) {
+    var one: [u8; 1] = [0 as u8; 1]
+    one[0 as usize] = stream as u8
+    send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+}
+
+// look for a CANCEL for `id` without blocking
+fn check_cancel(id: u64) {
+    fill()
+    var n: u64 = have_frame()
+    while n != 0 {
+        let b: u64 = addr_rb()
+        if rd8(b + 5) == T_CANCEL && rd32(b + 8) == id {
+            cancelled = 1
+        } else if rd8(b + 5) == T_PING {
+            send_frame(T_PONG, 0, rd32(b + 8), b + HDRLEN, rd32(b + 12))
+        }
+        drop_bytes(n)
+        n = have_frame()
+    }
+}
+
+fn pump_pipe(fd: u64, stream: u64, id: u64) -> u64 {
+    let n: u64 = io.read(fd, addr_io(), 8192)
+    if errno.failed(n) || n == 0 {
+        return 0
+    }
+    send_data(stream, addr_io(), n, id)
+    return n
+}
+
+fn cmd_exec(id: u64, tp: u64, tl: u64) {
+    if !tget_str(tp, tl, s_cmd(), (&cmdb[0 as usize]) as u64, 2048) {
+        reply_err(id, s_earg(), s_needcmd())
+        return
+    }
+    let timeout: u64 = tget_num(tp, tl, s_timeout_ms(), 0)
+    let want_in: u64 = tget_num(tp, tl, s_stdin(), 0)
+    var have_in: bool = false
+    if want_in == 1 {
+        // stdin is buffered into a file before the child starts
+        let sf: u64 = io.create(s_stdinpath())
+        if errno.failed(sf) {
+            reply_err(id, s_eio(), s_nostdin())
+            return
+        }
+        var ending: bool = false
+        while !ending {
+            let n: u64 = wait_frame(10000)
+            if n == 0 {
+                io.close(sf)
+                reply_err(id, s_etimeout(), s_stdinwait())
+                return
+            }
+            let b: u64 = addr_rb()
+            let ty: u64 = rd8(b + 5)
+            let fl: u64 = rd32(b + 12)
+            if rd32(b + 8) == id && ty == T_DATA && fl >= 1 && rd8(b + HDRLEN) == 0 {
+                io.write_all(sf, b + HDRLEN + 1, fl - 1)
+            } else if rd32(b + 8) == id && ty == T_END && rd8(b + HDRLEN) == 0 {
+                ending = true
+            } else if ty == T_CANCEL {
+                ending = true
+            }
+            drop_bytes(n)
+        }
+        io.close(sf)
+        have_in = true
+    }
+    var pi: [u64; 1] = [0 as u64; 1]
+    var po: [u64; 1] = [0 as u64; 1]
+    var pe: [u64; 1] = [0 as u64; 1]
+    io.pipe((&po[0 as usize]) as u64)
+    io.pipe((&pe[0 as usize]) as u64)
+    pi[0 as usize] = 0
+    let outr: u64 = po[0 as usize] & 0xFFFFFFFF
+    let outw: u64 = (po[0 as usize] >> 32) & 0xFFFFFFFF
+    let errr: u64 = pe[0 as usize] & 0xFFFFFFFF
+    let errw: u64 = (pe[0 as usize] >> 32) & 0xFFFFFFFF
+    let t0: u64 = mono_ms()
+    let kid: u64 = proc.split()
+    if errno.failed(kid) {
+        reply_err(id, s_einternal(), s_nofork())
+        return
+    }
+    if kid == 0 {
+        if have_in {
+            let f: u64 = io.open(s_stdinpath(), 0)
+            if !errno.failed(f) {
+                io.dup2(f, 0)
+                io.close(f)
+            }
+        } else {
+            let f2: u64 = io.open(s_devnull(), 0)
+            if !errno.failed(f2) {
+                io.dup2(f2, 0)
+                io.close(f2)
+            }
+        }
+        io.dup2(outw, 1)
+        io.dup2(errw, 2)
+        io.close(outr)
+        io.close(outw)
+        io.close(errr)
+        io.close(errw)
+        var argv: [u64; 4] = [0 as u64; 4]
+        argv[0 as usize] = s_binsh()
+        argv[1 as usize] = s_dashc()
+        argv[2 as usize] = (&cmdb[0 as usize]) as u64
+        argv[3 as usize] = 0
+        ulib.sys(59, s_binsh(), (&argv[0 as usize]) as u64, 0)
+        proc.leave(127)
+    }
+    io.close(outw)
+    io.close(errw)
+    cancelled = 0
+    var status: [u64; 1] = [0 as u64; 1]
+    var done: bool = false
+    var exited: bool = false
+    var killed: u64 = 0
+    var out_open: bool = true
+    var err_open: bool = true
+    while !done {
+        let f: u64 = (&pfds[0 as usize]) as u64
+        var nf: u64 = 0
+        if out_open {
+            io.poll_set(f, nf, outr, io.POLLIN)
+            nf = nf + 1
+        }
+        if err_open {
+            io.poll_set(f, nf, errr, io.POLLIN)
+            nf = nf + 1
+        }
+        if nf > 0 {
+            io.poll(f, nf, 20)
+        } else {
+            ulib.sleep_ms(20)
+        }
+        // read whatever is there (pipes: read returns 0 at EOF once the writer is gone)
+        if out_open {
+            let n: u64 = pump_pipe(outr, 1, id)
+            if n == 0 && exited {
+                out_open = false
+            }
+        }
+        if err_open {
+            let n2: u64 = pump_pipe(errr, 2, id)
+            if n2 == 0 && exited {
+                err_open = false
+            }
+        }
+        if !exited {
+            let w: u64 = kcall.sys4(SYS_WAIT4, kid, (&status[0 as usize]) as u64, WNOHANG, 0)
+            if w == kid {
+                exited = true
+            }
+            check_cancel(id)
+            if cancelled == 1 && killed == 0 {
+                ulib.sys(ulib.SYS_KILL, kid, 9, 0)
+                killed = 1
+            }
+            if timeout > 0 && mono_ms() -% t0 > timeout && killed == 0 {
+                ulib.sys(ulib.SYS_KILL, kid, 9, 0)
+                killed = 2
+            }
+        }
+        if exited && !out_open && !err_open {
+            done = true
+        }
+    }
+    io.close(outr)
+    io.close(errr)
+    if have_in {
+        io.unlink(s_stdinpath())
+    }
+    send_end(1, id)
+    send_end(2, id)
+    if killed == 1 {
+        reply_err(id, s_ecancel(), s_cancelled())
+        return
+    }
+    if killed == 2 {
+        reply_err(id, s_etimeout(), s_killedtimeout())
+        return
+    }
+    p_reset()
+    p_num(s_exit(), (status[0 as usize] >> 8) & 255)
+    p_num(s_signal(), status[0 as usize] & 127)
+    p_num(s_time_ms(), mono_ms() -% t0)
+    send_final(T_RESP, id)
+}
+
+// ---- push / pull
+
+fn send_ack(id: u64, next: u64) {
+    var a: [u8; 9] = [0 as u8; 9]
+    wr8((&a[0 as usize]) as u64, 3)
+    wr64((&a[0 as usize]) as u64 + 1, next)
+    send_frame(T_ACK, 0, id, (&a[0 as usize]) as u64, 9)
+}
+
+fn cmd_push(id: u64, tp: u64, tl: u64) {
+    if !tget_str(tp, tl, s_path(), addr_path(), 600) {
+        reply_err(id, s_earg(), s_needpath())
+        return
+    }
+    let want_size: u64 = tget_num(tp, tl, s_size(), NONE)
+    var wantsha: [u8; 65] = [0 as u8; 65]
+    let have_sha: bool = tget_str(tp, tl, s_sha256(), (&wantsha[0 as usize]) as u64, 65)
+    let fd: u64 = io.create(addr_path())
+    if errno.failed(fd) {
+        reply_err(id, s_enoent(), s_cantcreate())
+        return
+    }
+    var next: u64 = 0
+    var acked: u64 = 0
+    var ending: bool = false
+    var failed: u64 = 0
+    while !ending {
+        let n: u64 = wait_frame(10000)
+        if n == 0 {
+            failed = 1
+            ending = true
+        } else {
+            let b: u64 = addr_rb()
+            let ty: u64 = rd8(b + 5)
+            let fid: u64 = rd32(b + 8)
+            let plen: u64 = rd32(b + 12)
+            if ty == T_DATA && fid == id && plen >= 9 && rd8(b + HDRLEN) == 3 {
+                let off: u64 = rd64(b + HDRLEN + 1)
+                let cnt: u64 = plen - 9
+                if off == next {
+                    let w: u64 = io.write_all(fd, b + HDRLEN + 9, cnt)
+                    if errno.failed(w) {
+                        failed = 2
+                        ending = true
+                    } else {
+                        next = next + cnt
+                        if next - acked >= WINDOW / 2 {
+                            send_ack(id, next)
+                            acked = next
+                        }
+                    }
+                } else {
+                    send_ack(id, next)
+                    acked = next
+                }
+            } else if ty == T_END && fid == id && plen >= 1 && rd8(b + HDRLEN) == 3 {
+                ending = true
+            } else if ty == T_PING {
+                send_frame(T_PONG, 0, fid, b + HDRLEN, plen)
+            } else if ty == T_CANCEL && fid == id {
+                failed = 3
+                ending = true
+            }
+            drop_bytes(n)
+        }
+    }
+    io.close(fd)
+    if failed == 1 {
+        reply_err(id, s_etimeout(), s_pushwait())
+        return
+    }
+    if failed == 3 {
+        reply_err(id, s_ecancel(), s_cancelled())
+        return
+    }
+    if failed != 0 {
+        reply_err(id, s_eio(), s_writefail())
+        return
+    }
+    send_ack(id, next)
+    if !hash_file(addr_path()) {
+        reply_err(id, s_eio(), s_readback())
+        return
+    }
+    hexdump(addr_dig(), 32, addr_hex())
+    if want_size != NONE && want_size != g_size {
+        reply_err(id, s_ecrc(), s_sizemismatch())
+        return
+    }
+    if have_sha && !same_str((&wantsha[0 as usize]) as u64, 64, addr_hex()) {
+        reply_err(id, s_ecrc(), s_shamismatch())
+        return
+    }
+    p_reset()
+    p_num(s_size(), g_size)
+    p_str(s_sha256(), addr_hex())
+    p_num(s_crc32(), g_crc)
+    send_final(T_RESP, id)
+}
+
+fn send_file_chunk(id: u64, fd: u64, off: u64, size: u64) -> u64 {
+    var n: u64 = size - off
+    if n > CHUNK {
+        n = CHUNK
+    }
+    io.seek(fd, off, 0)
+    let got: u64 = io.read(fd, addr_io() + 9, n)
+    if errno.failed(got) || got == 0 {
+        return 0
+    }
+    // payload: 3 | off u64 | bytes  -- built in tb through send_frame, copy first
+    wr8(addr_io(), 3)
+    wr64(addr_io() + 1, off)
+    send_frame(T_DATA, 0, id, addr_io(), 9 + got)
+    return got
+}
+
+fn cmd_pull(id: u64, tp: u64, tl: u64) {
+    if !tget_str(tp, tl, s_path(), addr_path(), 600) {
+        reply_err(id, s_earg(), s_needpath())
+        return
+    }
+    if !hash_file(addr_path()) {
+        reply_err(id, s_enoent(), s_cantopen())
+        return
+    }
+    let size: u64 = g_size
+    let crcv: u64 = g_crc
+    hexdump(addr_dig(), 32, addr_hex())
+    var sha_hex: [u8; 65] = [0 as u8; 65]
+    copy_bytes((&sha_hex[0 as usize]) as u64, addr_hex(), 65)
+    let fd: u64 = io.open(addr_path(), 0)
+    if errno.failed(fd) {
+        reply_err(id, s_enoent(), s_cantopen())
+        return
+    }
+    var sent: u64 = tget_num(tp, tl, s_offset(), 0)
+    var acked: u64 = sent
+    var tries: u64 = 0
+    var failed: u64 = 0
+    while acked < size && failed == 0 {
+        // fill the window
+        while sent < size && sent - acked < WINDOW {
+            let n: u64 = send_file_chunk(id, fd, sent, size)
+            if n == 0 {
+                failed = 1
+                sent = size
+            } else {
+                sent = sent + n
+            }
+        }
+        if failed == 0 {
+            let f: u64 = wait_frame(2000)
+            if f == 0 {
+                tries = tries + 1
+                if tries > 5 {
+                    failed = 2
+                } else {
+                    sent = acked
+                }
+            } else {
+                let b: u64 = addr_rb()
+                let ty: u64 = rd8(b + 5)
+                if ty == T_ACK && rd32(b + 8) == id && rd32(b + 12) >= 9 {
+                    let nx: u64 = rd64(b + HDRLEN + 1)
+                    tries = 0
+                    if nx > acked {
+                        acked = nx
+                    }
+                    if nx < sent {
+                        sent = nx
+                    }
+                    if acked > sent {
+                        sent = acked
+                    }
+                } else if ty == T_CANCEL && rd32(b + 8) == id {
+                    failed = 3
+                } else if ty == T_PING {
+                    send_frame(T_PONG, 0, rd32(b + 8), b + HDRLEN, rd32(b + 12))
+                }
+                drop_bytes(f)
+            }
+        }
+    }
+    io.close(fd)
+    if failed == 2 {
+        reply_err(id, s_etimeout(), s_pullwait())
+        return
+    }
+    if failed == 3 {
+        reply_err(id, s_ecancel(), s_cancelled())
+        return
+    }
+    if failed != 0 {
+        reply_err(id, s_eio(), s_readfail())
+        return
+    }
+    var one: [u8; 1] = [0 as u8; 1]
+    one[0 as usize] = 3
+    send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+    p_reset()
+    p_num(s_size(), size)
+    p_str(s_sha256(), (&sha_hex[0 as usize]) as u64)
+    p_num(s_crc32(), crcv)
+    send_final(T_RESP, id)
+}
+
+// ---- ps / logs / power
+
+fn cmd_ps(id: u64, tp: u64, tl: u64) {
+    var line: [u8; 160] = [0 as u8; 160]
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < 64 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if st != 0 && !ulib.bad(st) {
+            let l: u64 = (&line[0 as usize]) as u64
+            var n: u64 = text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0), l, false)
+            wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PPID, 0), l + n, false)
+            wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(st, l + n, false)
+            wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PAGES, 0) * 4, l + n, false)
+            wr8(l + n, 9)
+            n = n + 1
+            var k: u64 = 0
+            while k < 2 {
+                let w: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0 + k, 0)
+                var j: u64 = 0
+                while j < 8 {
+                    let ch: u64 = (w >> (8 * j)) & 255
+                    if ch >= 32 && ch < 127 {
+                        wr8(l + n, ch)
+                        n = n + 1
+                    }
+                    j = j + 1
+                }
+                k = k + 1
+            }
+            wr8(l + n, 10)
+            n = n + 1
+            send_data(1, l, n, id)
+            count = count + 1
+        }
+        i = i + 1
+    }
+    send_end(1, id)
+    p_reset()
+    p_num(s_count(), count)
+    send_final(T_RESP, id)
+}
+
+fn cmd_kill(id: u64, tp: u64, tl: u64) {
+    let pid: u64 = tget_num(tp, tl, s_pid(), 0)
+    let sig: u64 = tget_num(tp, tl, s_sig(), 15)
+    if pid == 0 {
+        reply_err(id, s_earg(), s_needpid())
+        return
+    }
+    let r: u64 = ulib.sys(ulib.SYS_KILL, pid, sig, 0)
+    if ulib.bad(r) {
+        reply_err(id, s_enoent(), s_nosuchpid())
+        return
+    }
+    p_reset()
+    p_num(s_ok(), 1)
+    send_final(T_RESP, id)
+}
+
+fn cmd_logs(id: u64, tp: u64, tl: u64) {
+    let fd: u64 = io.open(s_devklog(), 0)
+    if errno.failed(fd) {
+        reply_err(id, s_enoent(), s_noklog())
+        return
+    }
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = io.read(fd, addr_io(), 8192)
+        if errno.failed(n) || n == 0 || total > 4000000 {
+            going = false
+        } else {
+            send_data(5, addr_io(), n, id)
+            total = total + n
+        }
+    }
+    io.close(fd)
+    send_end(5, id)
+    p_reset()
+    p_num(s_bytes(), total)
+    send_final(T_RESP, id)
+}
+
+fn cmd_power(id: u64, tp: u64, tl: u64, reboot: bool) {
+    p_reset()
+    p_num(s_ok(), 1)
+    send_final(T_RESP, id)
+    ulib.sleep_ms(200)
+    let kid: u64 = proc.split()
+    if kid == 0 {
+        var argv: [u64; 3] = [0 as u64; 3]
+        if reboot {
+            argv[0 as usize] = s_binreboot()
+            argv[1 as usize] = s_dashf()
+            ulib.sys(59, s_binreboot(), (&argv[0 as usize]) as u64, 0)
+        } else {
+            argv[0 as usize] = s_binshutdown()
+            argv[1 as usize] = 0
+            ulib.sys(59, s_binshutdown(), (&argv[0 as usize]) as u64, 0)
+        }
+        proc.leave(127)
+    }
+}
+
+// ------------------------------------------------------------ dispatch
+
+fn allowed(name: u64) -> bool {
+    return true
+}
+
+fn handle_req(id: u64, flags: u64, n: u64) {
+    // payload copy: nested receives would overwrite rb
+    let b: u64 = addr_rb()
+    let plen: u64 = rd32(b + 12)
+    if plen > REQMAX || plen < 1 {
+        reply_err(id, s_elimit(), s_toobig())
+        return
+    }
+    copy_bytes(addr_req(), b + HDRLEN, plen)
+    drop_bytes(n)
+    let q: u64 = addr_req()
+    let cl: u64 = rd8(q)
+    if 1 + cl > plen {
+        reply_err(id, s_eproto(), s_badreq())
+        return
+    }
+    let tp: u64 = q + 1 + cl
+    let tl: u64 = plen - 1 - cl
+    let cmd: u64 = q + 1
+    if id == lastid && lastlen != 0 || (id == lastid && (flags & F_RETRY) != 0) {
+        // idempotent retry: answer from the cache, never run twice
+        send_frame(lasttype, 0, id, (&lastbuf[0 as usize]) as u64, lastlen)
+        return
+    }
+    if same_str(cmd, cl, s_hello()) {
+        cmd_hello(id, tp, tl)
+    } else if same_str(cmd, cl, s_auth_cmd()) {
+        cmd_auth(id, tp, tl)
+    } else if same_str(cmd, cl, s_ping()) {
+        p_reset()
+        p_num(s_ok(), 1)
+        send_final(T_RESP, id)
+    } else if authed == 0 {
+        reply_err(id, s_eauth(), s_notauth())
+    } else if same_str(cmd, cl, s_info()) {
+        cmd_info(id, tp, tl)
+    } else if same_str(cmd, cl, s_exec()) {
+        cmd_exec(id, tp, tl)
+    } else if same_str(cmd, cl, s_push()) {
+        cmd_push(id, tp, tl)
+    } else if same_str(cmd, cl, s_pull()) {
+        cmd_pull(id, tp, tl)
+    } else if same_str(cmd, cl, s_ps()) {
+        cmd_ps(id, tp, tl)
+    } else if same_str(cmd, cl, s_kill()) {
+        cmd_kill(id, tp, tl)
+    } else if same_str(cmd, cl, s_logs()) {
+        cmd_logs(id, tp, tl)
+    } else if same_str(cmd, cl, s_reboot()) {
+        cmd_power(id, tp, tl, true)
+    } else if same_str(cmd, cl, s_shutdown()) {
+        cmd_power(id, tp, tl, false)
+    } else {
+        reply_err(id, s_eunsup(), s_unknowncmd())
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    crc_init()
+    dev = io.open(s_devodb(), 2)
+    if errno.failed(dev) {
+        ulib.say(s_nodev())
+        ulib.nl()
+        return 1
+    }
+    load_token()
+    ulib.say(s_ready())
+    ulib.nl()
+    var idle: u64 = 0
+    while true {
+        let n: u64 = have_frame()
+        if n == 0 {
+            let got: u64 = fill()
+            if got == 0 {
+                idle = idle + 1
+                if idle > 200 {
+                    ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+                    idle = 0
+                }
+            } else {
+                idle = 0
+            }
+        } else {
+            let b: u64 = addr_rb()
+            let ty: u64 = rd8(b + 5)
+            let id: u64 = rd32(b + 8)
+            let fl: u64 = rd16(b + 6)
+            if ty == T_REQ {
+                handle_req(id, fl, n)
+            } else if ty == T_PING {
+                send_frame(T_PONG, 0, id, b + HDRLEN, rd32(b + 12))
+                drop_bytes(n)
+            } else if ty == T_PONG || ty == T_DATA || ty == T_END || ty == T_ACK || ty == T_CANCEL {
+                drop_bytes(n)
+            } else {
+                reply_err(id, s_eunsup(), s_unknowntype())
+                drop_bytes(n)
+            }
+        }
+    }
+    return 0
+}

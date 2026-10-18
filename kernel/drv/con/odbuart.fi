@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/drv/con/odbuart.fi -- raw second UART (COM2) for the ODB debug agent.
+//
+// /dev/odb0 (see fs/devfs.fi) reads and writes this port. Polled, no interrupts:
+// the agent (kernel/user/odbd.fi) drains it in a tight loop, and a reader that
+// finds the FIFO empty spins for a short while before it reports "nothing", so a
+// stream of frames is drained without a timer tick between two reads.
+// Only exists when the chip answers the scratch register test and the console
+// does not already own COM2 (`console=ttyS1`).
+import serial
+import arch.arch
+import lib.kstate
+
+export { present, read_into, write_from, spin_limit }
+
+const BASE: u16 = 0x2F8
+const R_DATA: u16 = 0
+const R_IER: u16 = 1
+const R_FCR: u16 = 2
+const R_LCR: u16 = 3
+const R_MCR: u16 = 4
+const R_LSR: u16 = 5
+const R_SCR: u16 = 7
+const SPIN: u64 = 40000
+const TX_LIMIT: u64 = 2000000
+
+static mut up: u64 = 0 // 0 = untested, 1 = ready, 2 = absent
+
+fn spin_limit() -> u64 {
+    return SPIN
+}
+
+fn probe_chip() -> bool {
+    serial.out8(BASE + R_SCR, 0xA5 as u8)
+    if serial.in8(BASE + R_SCR) != 0xA5 as u8 {
+        return false
+    }
+    serial.out8(BASE + R_SCR, 0x5A as u8)
+    return serial.in8(BASE + R_SCR) == 0x5A as u8
+}
+
+fn setup() {
+    serial.out8(BASE + R_IER, 0x00 as u8) // no interrupts
+    serial.out8(BASE + R_LCR, 0x80 as u8) // divisor latch
+    serial.out8(BASE + R_DATA, 0x01 as u8) // 115200 baud
+    serial.out8(BASE + R_IER, 0x00 as u8)
+    serial.out8(BASE + R_LCR, 0x03 as u8) // 8N1
+    serial.out8(BASE + R_FCR, 0xC7 as u8) // FIFO on, cleared
+    serial.out8(BASE + R_MCR, 0x03 as u8) // DTR, RTS
+}
+
+// True when /dev/odb0 may exist: a real chip at 0x2F8 that the console does not use.
+fn present(state: u64) -> bool {
+    if up == 1 {
+        return true
+    }
+    if up == 2 {
+        return false
+    }
+    if kstate.mode_on(state, kstate.M_SERCON) && kstate.get(state, kstate.SER_PORT) == (serial.COM2 as u64) {
+        up = 2
+        return false
+    }
+    if !probe_chip() {
+        up = 2
+        return false
+    }
+    setup()
+    up = 1
+    return true
+}
+
+// Up to `len` octets into dst. Returns what arrived; 0 after SPIN empty polls.
+fn read_into(dst: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    var idle: u64 = 0
+    while n < len && idle < SPIN {
+        let lsr: u8 = serial.in8(BASE + R_LSR)
+        if (lsr & 0x01 as u8) != 0 as u8 {
+            kstate.set8(dst + n, serial.in8(BASE + R_DATA))
+            n = n + 1
+            idle = 0
+        } else {
+            if n > 0 {
+                return n
+            }
+            idle = idle + 1
+            arch.pause()
+        }
+    }
+    return n
+}
+
+fn write_from(src: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    while n < len {
+        var wait: u64 = 0
+        while (serial.in8(BASE + R_LSR) & 0x20 as u8) == 0 as u8 && wait < TX_LIMIT {
+            wait = wait + 1
+        }
+        if wait >= TX_LIMIT {
+            return n
+        }
+        serial.out8(BASE + R_DATA, kstate.get8(src + n) as u8)
+        n = n + 1
+    }
+    return n
+}
