@@ -19,6 +19,7 @@
 import gfx.gfx
 import lib.kstate
 import arch.arch
+import arch.cpu
 
 export {
     out8, in8, io_wait,
@@ -28,7 +29,7 @@ export {
     // RUNDE KABEL: der Baustein wird geprueft, nicht geglaubt.
     probe, off, set_off, verworfen, lsr_roh, scr_roh,
     // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
-    line_at, line_clear, line_lost,
+    line_at, line_clear, line_lost, line_stolen,
     // W-X3: deferred (ring buffered) output for periodic reports
     defer_on, defer_off, pump, ring_used, ring_flushed, ring_say
 }
@@ -62,17 +63,64 @@ export {
 // sagt `zeile_verloren`.
 const LINE_LIMIT: u64 = 20000000
 
+// W-D1: ONE LINE STAYS ONE LINE -- FOR EVERY WRITER, NOT ONLY THE ONES THAT
+// ASK. Until now only `klog.ser_line` and `sys.conout` took this lock, and
+// only around ONE call. A userland line is several calls (`say`, `sayn`,
+// `nl` = three `write` system calls), the kernel's own `puts` chains are
+// dozens of `put`s, and the deferred ring has no idea where a line ends:
+// a line from another core landed in the middle of it (~1 boot in 5, e.g.
+// "glogin: b" ... "eit n=1 pid=28"), and gates that wait for a whole line
+// ("glogin: bereit", "qs: tile n=5 to=1", "wlib: win id=") flaked.
+//
+// RULE: `put` takes the lock on the first octet of a line (owner = core, as
+// before: re-entrant per core) and gives it back with the '\n'. An explicit
+// holder (`line_at` ... `line_clear`) keeps working unchanged; if its text
+// ends WITHOUT a newline, `line_clear` hands the lock over to the line
+// (`zeile_auto`) instead of dropping it, so the next `write` of the same
+// line is still protected.
+//
+// A lock left open (a prompt, a dead core, a task that never finishes its
+// line) must not freeze the others: a waiter takes it over when the owner
+// has written nothing for LINE_STALE cycles (the owner refreshes
+// `zeile_stamp` with every octet; one octet takes ~260 us on the wire).
+// Word `noserline` switches the automatic part off (counter-proof).
+// Limitation: the owner is the CORE, so two tasks time-sliced on one core
+// can still interleave a line (rare; they are not different cores).
+const LINE_STALE: u64 = 20000000
+
 static mut zeile_wer: [u64; 1] = [0 as u64; 1]
 static mut zeile_daneben: [u64; 1] = [0 as u64; 1]
+static mut zeile_stamp: [u64; 1] = [0 as u64; 1] // arch.cycles() of the owner's last octet
+static mut zeile_auto: [u64; 1] = [0 as u64; 1] // 1 = a newline gives the lock back
+static mut zeile_offen: [u64; 1] = [0 as u64; 1] // 1 = the last octet was not a newline
+static mut zeile_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owner
 
-// Rueckgabe: 1 = ich halte sie und muss sie zurueckgeben, 0 = nicht.
+// Rueckgabe: 0 = nothing to give back (nested over an explicit holder, or
+// timed out), 1 = I took it, 2 = I was the owner through an open line and
+// now hold it explicitly. Every non-zero value must go to `line_clear`.
 fn line_at(me: u64) -> u64 {
     let a: u64 = (&zeile_wer[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
+        if __mmio_read64((&zeile_auto[0]) as u64 as *mut u64) != 0 as u64 {
+            zeile_auto[0] = 0
+            return 2
+        }
         return 0 // schon meine -- eingeschachtelt, nichts tun
     }
     var spins: u64 = 0
     while __atomic_swap(a as *mut u64, 0 as u64, me + 1) != 0 as u64 {
+        // stale owner? (it has written nothing for LINE_STALE cycles)
+        let o: u64 = __mmio_read64(a as *mut u64)
+        let now: u64 = arch.cycles()
+        let st: u64 = __mmio_read64((&zeile_stamp[0]) as u64 as *mut u64)
+        if o != 0 as u64 && now > st && now - st > LINE_STALE {
+            if __atomic_swap(a as *mut u64, o, me + 1) == o {
+                zeile_stolen[0] = zeile_stolen[0] + 1
+                zeile_auto[0] = 0
+                zeile_stamp[0] = now
+                return 1
+            }
+        }
         arch.pause()
         spins = spins + 1
         if spins > LINE_LIMIT {
@@ -80,17 +128,35 @@ fn line_at(me: u64) -> u64 {
             return 0
         }
     }
+    zeile_stamp[0] = arch.cycles()
     return 1
 }
 
+// Give the lock back -- but only if it is still mine (a stale takeover may
+// have passed it on) and only if the line is finished; an open line keeps it.
 fn line_clear(hat: u64) {
-    if hat != 0 {
-        arch.atomic_store((&zeile_wer[0]) as u64, 0)
+    if hat == 0 {
+        return
     }
+    let me: u64 = cpu.here(arch.kdata_base())
+    let a: u64 = (&zeile_wer[0]) as u64
+    if __mmio_read64(a as *mut u64) != me + 1 {
+        return
+    }
+    if __mmio_read64((&zeile_offen[0]) as u64 as *mut u64) != 0 as u64 {
+        zeile_auto[0] = 1
+        return
+    }
+    zeile_auto[0] = 0
+    arch.atomic_store(a, 0)
 }
 
 fn line_lost() -> u64 {
     return zeile_daneben[0]
+}
+
+fn line_stolen() -> u64 {
+    return zeile_stolen[0]
 }
 
 // 0x3F8 = COM1 on every PC that has ever existed
@@ -485,8 +551,40 @@ fn pump() {
 }
 
 // DER BILDSCHIRM ZUERST. Er haengt ab hier an nichts mehr.
+// W-D1: the octet goes out under the line lock (see LINE_STALE above).
 fn put(c: u8) {
     gfx.echo(c)
+    if ser_aus != 0 {
+        return
+    }
+    let st: u64 = arch.kdata_base()
+    if kstate.mode_on(st, kstate.M_NOSERLINE) {
+        put_raw(c)
+        return
+    }
+    let me: u64 = cpu.here(st)
+    let z: u64 = line_at(me)
+    if z != 0 {
+        zeile_auto[0] = 1
+    }
+    let a: u64 = (&zeile_wer[0]) as u64
+    if __mmio_read64(a as *mut u64) == me + 1 {
+        zeile_stamp[0] = arch.cycles()
+    }
+    put_raw(c)
+    if c == 10 as u8 {
+        zeile_offen[0] = 0
+        if __mmio_read64((&zeile_auto[0]) as u64 as *mut u64) != 0 as u64 && __mmio_read64(a as *mut u64) == me + 1 {
+            zeile_auto[0] = 0
+            arch.atomic_store(a, 0)
+        }
+    } else {
+        zeile_offen[0] = 1
+    }
+}
+
+// The octet itself (ring or wire); the caller holds the line lock.
+fn put_raw(c: u8) {
     if ser_aus != 0 {
         return
     }

@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/serline.fi -- W-D1: serial lines must not be torn.
+//
+//   serline <workers> <lines> <one|multi> [open]
+//
+// <workers> children (fork) leave the starting block on the same tick and
+// each write <lines> lines of the form
+//
+//     SL<id>:<i>:<payload>:E          payload = 10..99 times one letter
+//
+// either as ONE write per line (`one`) or as several (`multi`: text,
+// number, text, payload, text, newline -- the way `say`/`sayn`/`nl` print).
+// With `open` the parent first leaves a line open ("OPEN:", no newline), to
+// prove that an unfinished line does not freeze the others.
+// The host (tools/serline/run.sh) counts the lines that are intact; a line
+// torn by a line of another core is missing from that count.
+profile kernel
+
+import ulib
+
+export { u_start }
+
+fn letter(id: u64) -> u64 {
+    return 97 + (id * 7) % 26
+}
+
+fn plen(id: u64, i: u64) -> u64 {
+    return 10 + (id * 13 + i * 37) % 90
+}
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn line_one(id: u64, i: u64) {
+    var buf: [u8; 256] = [0 as u8; 256]
+    var n: u64 = 0
+    let b: u64 = (&buf[0 as usize]) as u64
+    __mmio_write8((b + n) as *mut u8, 83 as u8) // S
+    __mmio_write8((b + n + 1) as *mut u8, 76 as u8) // L
+    n = n + 2
+    n = n + ulib.digits(id, b + n)
+    __mmio_write8((b + n) as *mut u8, 58 as u8)
+    n = n + 1
+    n = n + ulib.digits(i, b + n)
+    __mmio_write8((b + n) as *mut u8, 58 as u8)
+    n = n + 1
+    let pl: u64 = plen(id, i)
+    ulib.fill(b + n, letter(id), pl)
+    n = n + pl
+    __mmio_write8((b + n) as *mut u8, 58 as u8)
+    __mmio_write8((b + n + 1) as *mut u8, 69 as u8) // E
+    __mmio_write8((b + n + 2) as *mut u8, 10 as u8)
+    n = n + 3
+    let _w: u64 = ulib.put(b, n)
+}
+
+fn line_multi(id: u64, i: u64) {
+    var s_sl: [u8; 3] = "SL\0"
+    var s_c: [u8; 2] = ":\0"
+    var s_e: [u8; 3] = ":E\0"
+    var pay: [u8; 128] = [0 as u8; 128]
+    let pl: u64 = plen(id, i)
+    ulib.fill((&pay[0 as usize]) as u64, letter(id), pl)
+    __mmio_write8(((&pay[0 as usize]) as u64 + pl) as *mut u8, 0 as u8)
+    ulib.say((&s_sl[0 as usize]) as u64)
+    ulib.sayu(id)
+    ulib.say((&s_c[0 as usize]) as u64)
+    ulib.sayu(i)
+    ulib.say((&s_c[0 as usize]) as u64)
+    ulib.say((&pay[0 as usize]) as u64)
+    ulib.say((&s_e[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn child(id: u64, lines: u64, multi: bool, go: u64) -> u64 {
+    while ticks() < go {
+        let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+    }
+    var i: u64 = 0
+    while i < lines {
+        if multi {
+            line_multi(id, i)
+        } else {
+            line_one(id, i)
+        }
+        i = i + 1
+    }
+    return id & 127
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_multi: [u8; 6] = "multi\0"
+    var s_open: [u8; 5] = "open\0"
+    var s_op: [u8; 6] = "OPEN:\0"
+    var s_done: [u8; 17] = "serline: done w=\0"
+    var s_l: [u8; 4] = " l=\0"
+    var s_bad: [u8; 6] = " bad=\0"
+    let workers: u64 = ulib.to_num(ulib.arg_at(args, 1))
+    let lines: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let multi: bool = ulib.streq(ulib.arg_at(args, 3), (&s_multi[0 as usize]) as u64)
+    var open: bool = false
+    if ulib.arg_count(args) >= 5 {
+        open = ulib.streq(ulib.arg_at(args, 4), (&s_open[0 as usize]) as u64)
+    }
+    var pids: [u64; 16] = [0 as u64; 16]
+    if open {
+        ulib.say((&s_op[0 as usize]) as u64)
+    }
+    let go: u64 = ticks() + 8
+    var w: u64 = 0
+    while w < workers && w < 16 {
+        let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+        if pid == 0 {
+            let code: u64 = child(w, lines, multi, go)
+            let _x: u64 = ulib.sys(ulib.SYS_EXIT, code, 0, 0)
+            return code
+        }
+        pids[w as usize] = pid
+        w = w + 1
+    }
+    var bad: u64 = 0
+    var j: u64 = 0
+    while j < w {
+        if ulib.bad(pids[j as usize]) {
+            bad = bad + 1
+        } else {
+            let c: u64 = ulib.wait_code(pids[j as usize])
+            if c != (j & 127) {
+                bad = bad + 1
+            }
+        }
+        j = j + 1
+    }
+    ulib.say((&s_done[0 as usize]) as u64)
+    ulib.sayu(w)
+    ulib.say((&s_l[0 as usize]) as u64)
+    ulib.sayu(lines)
+    ulib.say((&s_bad[0 as usize]) as u64)
+    ulib.sayu(bad)
+    ulib.nl()
+    return 0
+}
