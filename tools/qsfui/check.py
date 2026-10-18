@@ -147,10 +147,22 @@ def main():
     row_by_y = {}
     for n, c in cells.items():
         row_by_y.setdefault(c["y"], []).append(n)
+    # the harness paints a measurement strip over the top of the screen (fb.band);
+    # 'qs: open ... ay=' reports where the free work area starts. Pixels above it are not the panel.
+    free_top = 0
+    for l in lines:
+        if l.startswith("qs: open "):
+            m = re.search(r" ay=(\d+)", l)
+            if m:
+                free_top = int(m.group(1))
     for y, ns in sorted(row_by_y.items()):
         ns.sort(key=lambda n: cells[n]["x"])
         l0 = labels[ns[0]]
         band = range(qy + l0["y"], qy + l0["y"] + l0["h"])
+        if qy + l0["y"] < free_top:
+            ok(True, "row at y=%d: label band (screen y %d) lies under the harness strip (free area starts at %d), pixel check skipped"
+               % (y, qy + l0["y"], free_top))
+            continue
         # gaps between cells and right of the last
         edges = []
         for i, n in enumerate(ns):
