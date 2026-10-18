@@ -249,8 +249,19 @@ class WinHandleTransport(Transport):
             pass
 
 
+def _open_win_pipe(path):
+    try:
+        return open(path, "r+b", buffering=0)
+    except OSError as e:
+        if sys.platform == "win32" and e.errno == 22:
+            # CreateFile fails with ERROR_PIPE_BUSY (231) which the CRT reports as EINVAL
+            raise OSError(e.errno, "pipe busy: another client is attached (a VBox server pipe serves one client "
+                                   "and may not re-listen after it left: restart the VM)") from e
+        raise
+
+
 def open_pipe(path, wait=0.0):
-    f = _retry(lambda: open(path, "r+b", buffering=0), wait, "pipe " + path)
+    f = _retry(lambda: _open_win_pipe(path), wait, "pipe " + path)
     if sys.platform == "win32":
         return WinHandleTransport(f, "pipe").start()
     return FdTransport(f).start()
