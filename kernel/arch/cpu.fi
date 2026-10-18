@@ -36,7 +36,7 @@ export {
     set_online, online_count, get, set, add, record, earg_buf,
     C_APICID, C_ONLINE, C_CUR, C_IDLE, C_TICKS, C_SWITCHES, C_STACK,
     C_GDT, C_TSS, C_WORK, C_GO, C_SUM, C_CYCLES, C_PICKS, C_STARTED,
-    C_IDLERUNS, C_LAPIC, C_FPUOWNER, C_IDLETICKS,
+    C_IDLERUNS, C_LAPIC, C_FPUOWNER, C_IDLETICKS, C_INDEX, gs_arm, gs_disarm,
     // RUNDE VIELKERN: die drei Felder, die Ring 3 auf jedem Kern
     // moeglich machen. Der Satz DIESES Kerns ist zugleich der Block,
     // auf den seine GS-Basis zeigt -- `%gs:C_SYSRSP` und
@@ -254,6 +254,7 @@ fn register(state: u64, apid: u64) -> u64 {
     set(state, n, C_TSSADDR, k_tss)
     set(state, n, C_SYSCALLS, k_sysc)
     set(state, n, C_APICID, apid)
+    set(state, n, C_INDEX, n)
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_COUNT, n + 1)
     return n
 }
@@ -278,11 +279,37 @@ fn earg_buf(state: u64) -> u64 {
     return state + kstate.EARGK_OFF + k * 4096
 }
 
+// r1111: the index of a core inside its own record, read through the GS
+// base (which already points at the record of the core that executes
+// this: the system call entry relies on it). The APIC window below is an
+// MMIO page -- on a hypervisor every read of it is a VM exit (VirtualBox:
+// 3000-6000 exits per second and vCPU, ~150 % host CPU at 3 vCPUs idle).
+const C_INDEX: u64 = 224
+// Scalar in the SMP page: 1 = GS base is valid on every core. Armed once
+// all cores are online, disarmed while cores are parked / restarted.
+const GSFAST_AT: u64 = 392
+
+fn gs_arm(state: u64) {
+    if online_count(state) == count(state) {
+        kstate.set(state, kstate.SMP_OFF + GSFAST_AT, 1)
+    }
+}
+
+fn gs_disarm(state: u64) {
+    kstate.set(state, kstate.SMP_OFF + GSFAST_AT, 0)
+}
+
 // WHICH CORE IS EXECUTING THIS. See the head of the file.
 fn here(state: u64) -> u64 {
     let base: u64 = lapic_base(state)
     if base == 0 {
         return 0
+    }
+    if kstate.get(state, kstate.SMP_OFF + GSFAST_AT) != 0 {
+        let gi: u64 = asm("mov rax, qword ptr gs:[224]", out("rax"))
+        if gi < count(state) {
+            return gi
+        }
     }
     let apid: u64 = (kstate.get32(base + R_ID) >> 24) & 0xFF
     let n: u64 = count(state)
