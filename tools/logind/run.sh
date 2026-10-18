@@ -208,9 +208,9 @@ kopf "3. die Anmeldung kommt VOR dem Schreibtisch (P-002)"
 # /bin/desktop (kernel/kgui.fi, desk_start). Getippt wird das richtige
 # Kennwort -- und danach MUSS der Schreibtisch unter uid 1000 laufen und
 # nicht als root. Das ist der ganze Befund P-002.
-T3=$(lauf anmelden 70 "anmeldung" \
+T3=$(lauf anmelden 100 "anmeldung" \
      '#foto:anmeldeschirm' \
-     s t a r t k e n n w o r t ret @45 '#foto:desktop')
+     s t a r t k e n n w o r t ret @45 '#foto:desktop' meta_l @60 '#foto:menu')
 if [ -f "$T3" ]; then
     grep -qa 'anmeldung vor schreibtisch' "$T3" \
         && ok "der Kern startet die Anmeldung vor dem Schreibtisch" \
@@ -228,6 +228,11 @@ if [ -f "$T3" ]; then
         bad "'glogin: uid=1000' fehlt -- der Schreibtisch waere weiter root"
         info "$(grep -a 'glogin: uid' "$T3" | head -2)"
     fi
+    # W-U (r1059): the launcher starts hidden at boot, BEFORE the sign-in. Its footer user must be read again when the menu is
+    # shown (Super after the sign-in), or it keeps "root" all session (z11).
+    grep -qa 'launcher: uid=1000 user=justin' "$T3" \
+        && ok "Startmenue: the footer user is justin after the sign-in (not root)" \
+        || bad "'launcher: uid=1000 user=justin' fehlt -- das Startmenue behielte 'root' (r1059)"
     grep -qaE 'glogin: desktop pid=[0-9]+' "$T3" \
         && ok "und er hat den Schreibtisch gestartet" \
         || bad "'glogin: desktop pid=' fehlt"
