@@ -92,7 +92,7 @@ say(all(rects[n][2] == cw for n in ("chevron", "net", "snd")),
 
 # ---- icons
 mid = rects["clock"][1] + rects["clock"][3] / 2.0
-icon_cells = [("chevron", rects["chevron"]), ("lang", rects["lang"]), ("net", rects["net"]),
+icon_cells = [("chevron", rects["chevron"]), ("net", rects["net"]),
               ("snd", rects["snd"]), ("battery", rects["battery"])]
 sizes = []
 for name, (x, y, ww, hh) in icon_cells:
@@ -126,7 +126,7 @@ else:
     cl = rects["clock"]
     cb = inkbox(cl[0] + 2, cl[1] + 2, cl[0] + cl[2] - 1, cl[1] + cl[3] // 2 - 1, at_px(cl[0] + 1, cl[1] + cl[3] // 2))
     lg = rects["lang"]
-    lb = inkbox(lg[0] + cw - 2 * sc, lg[1] + 2, lg[0] + lg[2] - 1, lg[1] + lg[3] // 2 - 1, at_px(lg[0] + 1, lg[1] + lg[3] // 2))
+    lb = inkbox(lg[0] + 2, lg[1] + 2, lg[0] + lg[2] - 1, lg[1] + lg[3] - 2, at_px(lg[0] + 1, lg[1] + lg[3] // 2))   # W-C1: one line, no symbol
     if cb and lb:
         chh, lhh = cb[3] - cb[1] + 1, lb[3] - lb[1] + 1
         say(abs(th - chh) <= 3 * sc and abs(lhh - chh) <= 2 * sc,

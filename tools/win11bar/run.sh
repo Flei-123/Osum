@@ -12,7 +12,7 @@
 # `taskbar:` trace lines and a photo:
 #   * the pinned apps sit CENTRED (align=center), without labels (labels=never)
 #   * the running program carries the small strip under its icon (photo)
-#   * the language field "DEU" over "DE" is there (tray_language=1) -- and is NOT
+#   * the language field "DEU" (one line, code only) is there (tray_language=1) -- and is NOT
 #     there with the default conf (the counter-proof: no existing bar moves)
 #   * the clock is two lines, time over date, with a FOUR digit year
 #   * with the default conf the clock keeps its two digit year
@@ -53,14 +53,14 @@ mid=$(( (first + last + 32) / 2 ))
 d=$(( mid > 640 ? mid - 640 : 640 - mid ))
 [ "$d" -le 80 ] && ok "the pins sit around the middle of the 1280 wide screen (centre $mid)" || bad "pins not centred: centre $mid ($px)"
 grep -aq 'taskbar: text button .* tw=0 ' "$W" && ok "labels=never: the running program has no text (symbol only)" || bad "a label is painted"
-grep -aq 'taskbar: field lang .* lines=2' "$W" && ok "the language field is there, two lines" || bad "no language field"
-grep -aq 'taskbar: text lang .* t=DEU' "$W" && grep -aq 'taskbar: text lang .* t=DE$' "$W" && ok "it says DEU over DE" || bad "wrong language text"
+grep -aq 'taskbar: field lang .* lines=1' "$W" && ok "the language field is there, one line" || bad "no language field"
+grep -aq 'taskbar: text lang .* t=DEU$' "$W" && ! grep -aq 'taskbar: text lang .* t=DE$' "$W" && ok "it says DEU only" || bad "wrong language text"
 grep -aq 'taskbar: text clock .* t=[0-9][0-9]:[0-9][0-9]$' "$W" && grep -aqE 'taskbar: text clock .* t=[0-9]{2}\.[0-9]{2}\.[0-9]{4}$' "$W" \
     && ok "clock: time over date, four digit year" || bad "clock text"
-# W3 polish run: 48 points high, 40 point buttons, the keyboard symbol before DEU/DE
+# W3 polish run: 48 points high, 40 point buttons (W-C1: no keyboard symbol any more)
 grep -aqE 'taskbar: geom .* h=48 ' "$W" && ok "the bar is 48 points high (Windows 11)" || bad "bar height: $(grep -a 'taskbar: geom ' "$W" | tail -1)"
 grep -aqE 'taskbar: pin explorer .* w=40 h=40 ' "$W" && ok "the buttons are 40x40 (Windows 11)" || bad "button size: $(grep -a 'taskbar: pin explorer ' "$W" | head -1)"
-grep -aqE 'taskbar: icon field=kbd ' "$W" && ok "the keyboard symbol stands in front of the language" || bad "no keyboard symbol"
+grep -aqE 'taskbar: icon field=kbd ' "$W" && bad "a keyboard symbol sticks to the language code" || ok "no keyboard symbol in front of the language"
 grep -aqE 'taskbar: text clock .* t=[0-9]{2}:[0-9]{2}:[0-9]{2}$' "$W" && bad "the clock shows seconds" || ok "no seconds in the clock"
 echo "== A2. the IMAGE's own taskbar.conf is the Windows 11 layout (tools/usbimg/build.sh)"
 IMGC=$(grep -a "printf '# taskbar.conf" tools/usbimg/build.sh | head -1)
