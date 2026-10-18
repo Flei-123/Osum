@@ -42,7 +42,9 @@ def ppm(path):
 
 
 def kv(line):
-    return {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
+    d = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
+    # a line torn by other serial output (loaded host) lacks a key: it is not a report
+    return d if all(k in d for k in ("x", "y", "w", "h")) else {}
 
 
 def main():
@@ -57,7 +59,7 @@ def main():
         out.append(("OK    " if c else "FAIL  ") + msg)
 
     lines = serial.splitlines()
-    op = [kv(l) for l in lines if l.startswith("qs: open ")]
+    op = [d for d in (kv(l) for l in lines if l.startswith("qs: open ")) if d]
     if not op:
         ok(False, "no 'qs: open'")
         print("\n".join(out))
@@ -69,7 +71,8 @@ def main():
         for l in lines:
             if l.startswith(prefix):
                 d = kv(l)
-                got[d.get("n", 0)] = d
+                if d and "n" in d:
+                    got[d["n"]] = d
         return got
 
     cells = last("qs: kachel n=")
@@ -79,8 +82,9 @@ def main():
     for l in lines:
         for nm in ("hell", "vol"):
             if l.startswith("qs: regler " + nm):
-                reg[nm] = kv(l)
-    med = [kv(l) for l in lines if l.startswith("qs: medien ")][-1:]
+                if kv(l):
+                    reg[nm] = kv(l)
+    med = [d for d in (kv(l) for l in lines if l.startswith("qs: medien ")) if d][-1:]
     fuss = last("qs: fussb n=")
     dx = (100 * sc) // 2 if shift else 0
 
