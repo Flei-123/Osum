@@ -51,6 +51,7 @@ class Session:
         self.hello_info = None
         self.maxchunk = proto.MAX_CHUNK
         self.window = 65536
+        self.push_window = 65536
         self.stats = {"tx_frames": 0, "rx_frames": 0, "retries": 0, "rewinds": 0}
 
     @classmethod
@@ -160,7 +161,11 @@ class Session:
         r = self.request("hello", [("ver", 1), ("client", self.client), ("clientver", 1)], timeout=timeout)
         self.hello_info = r
         self.maxchunk = min(r.geti("maxchunk", proto.MAX_CHUNK), proto.MAX_CHUNK)
+        # push: one frame in flight at most (host -> agent only; pull keeps the full window). A VirtualBox uart2 pipe has no flow control, the agent loses the head of the next
+        # frame while it writes the previous one to disk (24 KiB push wedged the agent; 64 KiB at window=8192: 10.6 KiB/s,
+        # 0 rewinds). QEMU backpressures, so there the cost is nil (the line, not the RTT, is the limit).
         self.window = r.geti("window", 65536)
+        self.push_window = min(self.window, self.maxchunk)
         return r
 
     def login(self, timeout=3.0):
@@ -213,7 +218,7 @@ class Session:
         size = len(data)
         sha = hashlib.sha256(data).hexdigest()
         st = {"sent": 0, "acked": 0, "end": False, "t": time.time()}
-        win = self.window
+        win = self.push_window
         holder = {}
 
         def pump():
