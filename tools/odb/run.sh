@@ -157,6 +157,9 @@ od exec /bin/false >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "false -> exit $
 out=$(od exec 'exit 7' 2>&1); rc=$?; is "exit code 7 passes through" "$rc" "7"
 od exec /bin/nonexistent-prog >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "unknown program -> exit $rc" || bad "unknown program returned 0"
 out=$(od exec cat /d/data.txt 2>&1); is "cat data file" "$(echo "$out" | head -1)" "line one"
+out=$(od exec --argv /bin/echo a b c 2>&1); is "exec --argv (no shell)" "$out" "a b c"
+out=$(od exec --argv cat /d/data.txt 2>&1); is "exec --argv bare name -> /bin/" "$(echo "$out" | head -1)" "line one"
+od exec --argv /bin/nonexistent-prog >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "exec --argv unknown program -> exit $rc" || bad "exec --argv unknown program returned 0"
 
 echo "== 4. push / pull =="
 od push "$TMPD/blob.bin" /tmp/blob.bin >"$TMPD/push.txt" 2>&1; is "push exit" "$?" "0"

@@ -89,6 +89,16 @@ fn s_cantopen() -> u64 {
     return (&S_CANTOPEN[0 as usize]) as u64
 }
 
+static mut S_ARG: [u8; 4] = "arg\0"
+fn s_arg() -> u64 {
+    return (&S_ARG[0 as usize]) as u64
+}
+
+static mut S_BINDIR: [u8; 6] = "/bin/\0"
+fn s_bindir() -> u64 {
+    return (&S_BINDIR[0 as usize]) as u64
+}
+
 static mut S_CMD: [u8; 4] = "cmd\0"
 fn s_cmd() -> u64 {
     return (&S_CMD[0 as usize]) as u64
@@ -629,6 +639,8 @@ static mut conf_allow: [u8; 256] = [0 as u8; 256]
 static mut tmp: [u8; 1024] = [0 as u8; 1024]
 static mut pathb: [u8; 600] = [0 as u8; 600]
 static mut cmdb: [u8; 2048] = [0 as u8; 2048]
+static mut argb: [u8; 2048] = [0 as u8; 2048]
+static mut argv_ptrs: [u64; 17] = [0 as u64; 17]
 static mut iobuf: [u8; 32768] = [0 as u8; 32768]
 static mut hexb: [u8; 80] = [0 as u8; 80]
 static mut dig: [u8; 32] = [0 as u8; 32]
@@ -1001,6 +1013,12 @@ fn wait_frame(ms: u64) -> u64 {
 
 // Value pointer of `key` in the TLV block, NONE-length in g_vlen = absent (returns 0).
 fn tget(tp: u64, tl: u64, key: u64) -> u64 {
+    return tget_at(tp, tl, key, 0)
+}
+
+// The `skip`-th (0 based) occurrence of a repeated key; g_vlen = NONE when there are fewer.
+fn tget_at(tp: u64, tl: u64, key: u64, skip: u64) -> u64 {
+    var seen: u64 = 0
     let kl: u64 = text.length(key)
     var off: u64 = 0
     g_vlen = NONE
@@ -1023,8 +1041,11 @@ fn tget(tp: u64, tl: u64, key: u64) -> u64 {
                 i = i + 1
             }
             if same {
-                g_vlen = vl
-                return tp + off + 3 + kn
+                if seen == skip {
+                    g_vlen = vl
+                    return tp + off + 3 + kn
+                }
+                seen = seen + 1
             }
         }
         off = off + 3 + kn + vl
@@ -1412,10 +1433,55 @@ fn pump_pipe(fd: u64, stream: u64, id: u64) -> u64 {
     return n
 }
 
+fn has_slash(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if rd8(p + i) == 47 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn cmd_exec(id: u64, tp: u64, tl: u64) {
-    if !tget_str(tp, tl, s_cmd(), (&cmdb[0 as usize]) as u64, 2048) {
-        reply_err(id, s_earg(), s_needcmd())
-        return
+    // `arg` (repeated): argv without a shell. Program names without a slash are looked up in /bin/.
+    var nargs: u64 = 0
+    var apos: u64 = 0
+    var more: bool = true
+    while more && nargs < 16 {
+        let av: u64 = tget_at(tp, tl, s_arg(), nargs)
+        if g_vlen == NONE {
+            more = false
+        } else {
+            var need: u64 = g_vlen + 1
+            var isbin: bool = false
+            if nargs == 0 && !has_slash(av, g_vlen) {
+                need = need + 5
+                isbin = true
+            }
+            if apos + need > 2048 {
+                reply_err(id, s_earg(), s_needcmd())
+                return
+            }
+            let base: u64 = (&argb[0 as usize]) as u64
+            argv_ptrs[nargs as usize] = base + apos
+            if isbin {
+                copy_bytes(base + apos, s_bindir(), 5)
+                apos = apos + 5
+            }
+            copy_bytes(base + apos, av, g_vlen)
+            wr8(base + apos + g_vlen, 0)
+            apos = apos + g_vlen + 1
+            nargs = nargs + 1
+        }
+    }
+    argv_ptrs[nargs as usize] = 0
+    if nargs == 0 {
+        if !tget_str(tp, tl, s_cmd(), (&cmdb[0 as usize]) as u64, 2048) {
+            reply_err(id, s_earg(), s_needcmd())
+            return
+        }
     }
     let timeout: u64 = tget_num(tp, tl, s_timeout_ms(), 0)
     let want_in: u64 = tget_num(tp, tl, s_stdin(), 0)
@@ -1451,18 +1517,20 @@ fn cmd_exec(id: u64, tp: u64, tl: u64) {
         have_in = true
     }
     // The command string is written to a script file and run as `sh FILE`: the OrientOS sh has no -c.
-    let cf: u64 = io.create(s_cmdpath())
-    if errno.failed(cf) {
-        reply_err(id, s_eio(), s_cantcreate())
-        return
+    if nargs == 0 {
+        let cf: u64 = io.create(s_cmdpath())
+        if errno.failed(cf) {
+            reply_err(id, s_eio(), s_cantcreate())
+            return
+        }
+        var clen: u64 = 0
+        while clen < 2047 && rd8((&cmdb[0 as usize]) as u64 + clen) != 0 {
+            clen = clen + 1
+        }
+        wr8((&cmdb[0 as usize]) as u64 + clen, 10)
+        io.write_all(cf, (&cmdb[0 as usize]) as u64, clen + 1)
+        io.close(cf)
     }
-    var clen: u64 = 0
-    while clen < 2047 && rd8((&cmdb[0 as usize]) as u64 + clen) != 0 {
-        clen = clen + 1
-    }
-    wr8((&cmdb[0 as usize]) as u64 + clen, 10)
-    io.write_all(cf, (&cmdb[0 as usize]) as u64, clen + 1)
-    io.close(cf)
     var pi: [u64; 1] = [0 as u64; 1]
     var po: [u64; 1] = [0 as u64; 1]
     var pe: [u64; 1] = [0 as u64; 1]
@@ -1499,6 +1567,10 @@ fn cmd_exec(id: u64, tp: u64, tl: u64) {
         io.close(outw)
         io.close(errr)
         io.close(errw)
+        if nargs > 0 {
+            ulib.sys(59, argv_ptrs[0 as usize], (&argv_ptrs[0 as usize]) as u64, 0)
+            proc.leave(127)
+        }
         var argv: [u64; 4] = [0 as u64; 4]
         argv[0 as usize] = s_binsh()
         argv[1 as usize] = s_cmdpath()
