@@ -112,7 +112,7 @@ accel=tcg
 append=""
 # RUNDE MODULE: eine fertige /etc/module.conf aufs Abbild legen.
 modulconf=""
-progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
+progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit nedit"
 for a in "$@"; do
     case "$a" in
         lang=*) lang=${a#*=} ;;

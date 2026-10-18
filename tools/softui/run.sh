@@ -128,7 +128,8 @@ if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nos
     is "ctrl_h aus der Datei" "${CH:-0}" "32"
     N=$(grep -aoE 'form n=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
     # r402: three words more (WF_TITLE_BAR, WF_CAP_W, WF_FRAME): 17 -> 20
-    is "Formwoerter an den Server" "${N:-0}" "20"
+    # W-S: WF_BLURRIM (edge highlight of blurred surfaces) joined: 20 -> 21
+    is "Formwoerter an den Server" "${N:-0}" "21"
     S=$(stat -c%s assets/shapes/modern.shape)
     ge "und die Datei ist groesser als der alte Puffer" "$S" "4097"
 else
@@ -172,13 +173,14 @@ echo "== D. die drei Schaltflaechen, und der rote Knopf =="
 # TWO PICTURES, because the pointer cannot be on the close button and off it at
 # once: D0 has no pointer on the bar (the three SHAPES: stroke, square, cross),
 # D has it on the close button (the HOVER state: red face, white cross).
+# The close button of the 1004 px wide Settings window at x=20: centre 1007,14 (was 767,14 for the old 764 px window).
 if shot D0 shape=modern scheme=day mode=light keep=yes extra='einst nostart'; then
     python3 tools/softui/knoepfe.py "$TMPD/D0/desktop.ppm" \
         "$TMPD/D0/serial.txt" > "$TMPD/D0.knopf" 2>&1
 else
     : > "$TMPD/D0.knopf"
 fi
-if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hover=767,14; then
+if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hover=1007,14; then
     python3 tools/softui/knoepfe.py "$TMPD/D/desktop.ppm" \
         "$TMPD/D/serial.txt" > "$TMPD/D.hover" 2>&1
     { cat "$TMPD/D0.knopf"; grep -a '^hover:' "$TMPD/D.hover"; } > "$TMPD/D.knopf"

@@ -796,29 +796,45 @@ def cmd_ttext(a):
 
 
 def cmd_tink(a):
-    """tink <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text> [tol]
+    """tink <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text> [min%]
 
     The TOLERANT proof for text that fUi's scene host paints with
     `painter.text`. That draws a string as ONE run at a fractional pen
     position, so its glyphs do not sit on the whole-pixel places that
     `ttext` (the layout of the window server and of wlibc) assumes: every
     ink pixel of a long word is then "wrong" by a fraction of a pixel and
-    `ttext` says 437 of 473. What can be asked of such text is that every
-    CHARACTER is there with its own shape: for each glyph the best place
-    within +-2 px across and +-1 px up/down is searched, and at least 70 %
-    of its strong ink pixels must be ink (a colour clearly away from the
-    ground) in the picture. A missing or wrong glyph (no 'ü', a box, the
-    transliteration 'ue') fails this; a sub-pixel drift does not."""
+    `ttext` says 437 of 473. What can be asked of such text is two things.
+
+    RECALL: for each glyph the best place within +-2 px across and +-1 px
+    up/down is searched, and at least `min%` (default 70) of its strong
+    ink pixels must be ink (a colour clearly away from the ground) in the
+    picture. A missing or wrong glyph (no 'ue', a box, the transliteration)
+    fails this; a sub-pixel drift does not.
+
+    PRECISION (added with the fallback-text check): recall alone passes ANY
+    word of similar density ("no battery" for "kein Akku"), so the other
+    direction is asked too: at least 75 % of the picture's ink pixels in the
+    word's box must lie within 1 px of the ink of a glyph at the place where
+    it was found. Ink that no glyph explains means the picture shows
+    something else."""
     raster = _raster_laden()
     bild = Bild(a[0])
     schrift = raster.Schrift(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     vg = (int(a[5]), int(a[6]), int(a[7]))
     hg = (int(a[8]), int(a[9]), int(a[10]))
+    if hg[0] < 0:
+        # -1 -1 -1: the ground is TRANSLUCENT (glass bar), so the reported
+        # background colour is not what is on the screen -- sample it just
+        # left of the word, mid height
+        hg = bild.punkt(x - 2, y - 5)
     text = a[11]
+    mindest = int(a[12]) / 100.0 if len(a) > 12 else 0.70
     zeichen = 0
     schwach = []
     versatz = 0
+    erklaert = set()
+    x0 = x1 = y0 = y1 = None
     for (c, dx) in schrift.stellen(text):
         g = schrift.glyphe(c)
         if g.w == 0 or g.h == 0:
@@ -833,6 +849,7 @@ def cmd_tink(a):
         zeichen += 1
         bester = 0.0
         beste_x = versatz
+        beste_y = 0
         # The drift between the whole-pixel layout and the run's fractional
         # one ADDS UP along a long word; the search window follows it: +-2 px
         # around the place where the previous glyph was found.
@@ -851,14 +868,51 @@ def cmd_tink(a):
                 if anteil > bester:
                     bester = anteil
                     beste_x = ddx
-        if bester >= 0.70:
+                    beste_y = ddy
+        if bester >= mindest:
             versatz = beste_x
-        if bester < 0.70:
+        if bester < mindest:
             schwach.append("'%s' %d%%" % (sichtbar(c), int(bester * 100)))
+        gx = x + (dx >> 6) + beste_x
+        gy = y + beste_y
+        for r in range(g.h):
+            for k in range(g.w):
+                if g.punkt(k, r) >= 40:
+                    erklaert.add((gx + g.links + k, gy - g.oben + r))
+        left = gx + g.links
+        if x0 is None or left < x0:
+            x0 = left
+        if x1 is None or left + g.w > x1:
+            x1 = left + g.w
+        top = gy - g.oben
+        if y0 is None or top < y0:
+            y0 = top
+        if y1 is None or top + g.h > y1:
+            y1 = top + g.h
     print("%d Zeichen, %d ohne ihre Tinte (tolerant)" % (zeichen, len(schwach)),
           end="")
+    # precision: picture ink inside the word's box that no glyph explains
+    fremd = 0
+    gesamt = 0
+    if x0 is not None:
+        for py in range(y0 - 1, y1 + 1):
+            for px in range(x0 - 1, x1 + 2):
+                ist = bild.punkt(px, py)
+                if ist is None:
+                    continue
+                if sum(abs(ist[j] - hg[j]) for j in range(3)) < 90:
+                    continue
+                gesamt += 1
+                if not any((px + i, py + j) in erklaert
+                           for i in (-1, 0, 1) for j in (-1, 0, 1)):
+                    fremd += 1
+    if gesamt:
+        print(", %d von %d Tintenpunkten ohne Glyphe" % (fremd, gesamt), end="")
     if schwach:
         print(" -- " + " ".join(schwach))
+        return 1
+    if gesamt and fremd * 4 > gesamt:
+        print(" -- zu viel fremde Tinte")
         return 1
     print("")
     return 0

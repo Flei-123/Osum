@@ -122,6 +122,18 @@ ALLOWED_FN = {
         # own scheme file) controls, and a dialog that asks "may this run?"
         # has to look the same in every theme or it can be imitated.
         "fn td_paint",
+        # ---------------------------------------------- W-A1 (18.10.2026), three more, each with its reason
+        # `tab_publish` hands the compositor its CHROME PROBE: pure red / green / blue in the shared chrome
+        # object (`chrome_object`) are the fixture the compositor's self-check compares against (like
+        # PROBE_IN / PROBE_OUT) -- a theme token here would make the probe depend on the theme it checks.
+        "fn tab_publish",
+        # `paint_switcher` (Alt+Tab, 17.10.) is a fixed dark HUD plate like the system dialog above: it is
+        # drawn by the window server over every window and over a screen that may be locked or themed
+        # either way, so it carries its own contrast pair. Following the theme is a design item (r1087).
+        "fn paint_switcher",
+        # `fps_overlay` is the debug counter (debug.fps): green on black for the camera / the log reader,
+        # like the measurement board, independent of the theme on purpose.
+        "fn fps_overlay",
         # ---------------------------------------------- A-022, reason 1
         # `sig_colour` IS A WIRE FORMAT, NOT A STYLE.
         #
