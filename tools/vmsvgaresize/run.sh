@@ -61,6 +61,17 @@ if [ -n "$shd" ]; then
 else
     bad "shared buffers: no 'wm: shared' line in the serial log"
 fi
+# W-C3f: per window (serial `wm: bufchg <kind> win=<id> ...`, kind 0 = detach failed, 1 = detach, 2 = attach): no detach may fail for lack of
+# contiguous frames, and no window may END on a detach (its client never hung a new shared buffer on: blank bar). Before the fix a repeated
+# same-size WM_SIZE detached the bar and the client (size unchanged) never re-attached.
+nfail=$(grep -ac '^wm: bufchg 0 ' "$D/serial.txt")
+[ "$nfail" = 0 ] && ok "buffer changes: no detach failed (no contiguous frames)" || bad "buffer changes: $nfail detach(es) failed"
+if grep -aq '^wm: bufchg ' "$D/serial.txt"; then
+    nstuck=$(grep -a '^wm: bufchg ' "$D/serial.txt" | awk '{k=$3; w=$4; last[w]=k} END{n=0; for (w in last) if (last[w]==1) {n++; print "  NOTE  window " w " ended on a detach" > "/dev/stderr"}; print n}')
+    [ "$nstuck" = 0 ] && ok "buffer changes: every detached window got a new shared buffer" || bad "buffer changes: $nstuck window(s) ended detached"
+else
+    bad "buffer changes: no 'wm: bufchg' line in the serial log"
+fi
 while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
