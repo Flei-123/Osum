@@ -51,7 +51,9 @@ status_of() { grep -a 'settings: stand' "$S" | tail -1 | sed -n 's/.* pkg=\[\(.*
 cat > "$OUT/d1" <<'E'
 warte 6
 klickauf start
-warte 3
+warteauf launcher: tile || 30
+warte 2
+foto 00-start
 klickauf start_Settings
 warteauf settings: ready || 60
 warte 4
@@ -97,6 +99,7 @@ esac
 fi
 if [ "$fail" != 0 ]; then
     echo "--- diagnosis: serial (settings/desk/wm lines) ---"; grep -aE '^(settings|desk|wm): ' "$S" | head -30 | cut -c1-160
+    echo "--- diagnosis: launcher lines ---"; grep -aE '^launcher: (geom|tile)' "$S" | head -n 12 | cut -c1-160
     echo "--- diagnosis: drive.log ---"; tail -n 25 "$OUT/drive.log" 2>/dev/null | cut -c1-160
 fi
 c=$(grep -acE 'ABSTURZ|EXCEPTION|PANIC' "$S"; true)
