@@ -47,6 +47,8 @@ TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSSYM = re.compile(r"qs: sym n=(\d+) x=(\d+) y=(\d+)")
 QSKACHEL = re.compile(r"qs: kachel n=(\d+) platz=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+# the plate of a cell (Windows-11 quick settings: plate on top, label under it)
+QSPLATTE = re.compile(r"qs: platte n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
@@ -149,6 +151,11 @@ def main(argv):
             if m:
                 o = m
             m = QSKACHEL.search(z)
+            if m and m.group(1) == t:
+                k = m
+            # since the Windows-11 panel the cell is plate + label: aim at the PLATE
+            # (the middle of the whole cell lies at the plate's lower edge)
+            m = QSPLATTE.search(z)
             if m and m.group(1) == t:
                 k = m
         if o is None or k is None:

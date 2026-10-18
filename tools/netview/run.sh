@@ -1090,20 +1090,19 @@ for ed in bottom top left right; do
             r=$(python3 tools/netview/kachel.py "$P" --rects 0 2 $rects 2>&1 | tail -1)
             case "$r" in ok*) ok "$ed: the tiles hold their labels -- $r" ;;
                          *)   bad "$ed: tile layout: $r" ;; esac
-            # AND THE SYMBOLS at the places the panel said it drew them,
-            # pixel for pixel. A panel that reported one position and
-            # painted another fails here -- the lesson of round K7B,
-            # applied to a fifth thing.
-            for t in 0 1 2; do
+            # AND THE GLYPHS at the places the panel said it drew them. The tiles
+            # of the Windows-11 panel are Network (n=1), Dark mode (n=3) and
+            # Power (n=4) among others; there is no fake/hide tile any more, and
+            # the glyphs are vector icons, so the old pixel-for-pixel drawings
+            # (tile-net.txt ...) cannot match: measure ink in the glyph box.
+            for t in 1 3 4; do
                 sl=$(symln "$L" "$t")
                 if [ -z "$sl" ]; then bad "$ed: tile $t reported no symbol"; continue; fi
                 sx=$(echo "$sl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
                 sy=$(echo "$sl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
-                case $t in 0) dr=tile-fake ;; 1) dr=tile-net ;; 2) dr=tile-hide ;; esac
-                r=$(python3 tools/netview/checkshot.py "$P" "$sx" "$sy" \
-                    "assets/netview/$dr.txt" assets/netview/theme-dark 2>&1)
-                case "$r" in ok*) ok "$ed: $dr stands at $sx,$sy -- $r" ;;
-                             *)   bad "$ed: $dr at $sx,$sy: $r" ;; esac
+                r=$(python3 tools/netview/ink.py "$P" "$sx" "$sy" 2>&1)
+                case "$r" in ok*) ok "$ed: tile $t has its glyph at $sx,$sy -- $r" ;;
+                             *)   bad "$ed: tile $t at $sx,$sy: $r" ;; esac
             done
         fi
     else
