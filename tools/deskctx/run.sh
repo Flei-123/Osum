@@ -8,7 +8,7 @@
 # Measured on the machine of the stick (tools/design/eh6.sh, uitrace is always on there):
 #   1. rklick on the empty desktop (900,250; the terminal window of the machine covers 500,250): `desktop: context open`, the picture differs from the one before inside the menu rectangle
 #   2. click on row 3 (refresh): `desktop: context pick=3`, the menu is gone again (rectangle as before)
-#   3. rklick again, click on row 0 (display settings): `desktop: context pick=0`, /bin/settings starts (`settings: geom`)
+#   3. rklick again, click on row 0 (display settings): `desktop: context pick=0`, /bin/settings starts (`settings: ready`)
 #   4. rklick again, Escape: the menu closes without a `pick=` line
 # COUNTER-PROOF: the tree one commit before (BASE=<rev>, default HEAD~1) has no menu: no `context open`, and the picture after the
 # right click equals the one before.
@@ -36,15 +36,15 @@ warte 3
 foto 02-after-refresh
 rklick 900,250
 warte 3
-klickauf dmenue0
-warte 8
-foto 03-settings
-rklick 700,400
-warte 3
 foto 04-menu2
 taste esc
 warte 3
 foto 05-esc
+rklick 900,250
+warte 3
+klickauf dmenue0
+warte 10
+foto 03-settings
 EOF
 
 run_tree() { # <tree> <out>
@@ -108,12 +108,13 @@ d=$(diffpix "$TMPD/new/o/00-before.ppm" "$TMPD/new/o/01-menu.ppm" "$mx" "$my" "$
     || bad "only $d of $((mw * mh)) pixels differ -- no menu in the picture"
 grep -aq 'desktop: context pick=3' "$S" && ok "row 3 (refresh) was picked" || bad "no 'desktop: context pick=3'"
 d=$(diffpix "$TMPD/new/o/00-before.ppm" "$TMPD/new/o/02-after-refresh.ppm" "$mx" "$my" "$mw" "$mh")
-[ "$d" -le 60 ] && ok "after the pick the menu rectangle is as before ($d pixels differ)" || bad "the menu is still there: $d pixels differ"
+# 300: the software pointer (~200 pixels) stays inside the rectangle after the click
+[ "$d" -le 300 ] && ok "after the pick the menu rectangle is as before ($d pixels differ)" || bad "the menu is still there: $d pixels differ"
 grep -aq 'desktop: context pick=0' "$S" && ok "row 0 (display settings) was picked" || bad "no 'desktop: context pick=0'"
-grep -aq 'settings: geom' "$S" && ok "/bin/settings started" || bad "no 'settings: geom' -- settings did not start"
+grep -aq 'settings: ready' "$S" && ok "/bin/settings started" || bad "no 'settings: ready' -- settings did not start"
 n=$(grep -ac 'desktop: context pick=' "$S")
 [ "$n" = 2 ] && ok "Escape closed the second menu without a pick (2 picks in total)" || bad "expected 2 picks, found $n"
-d=$(diffpix "$TMPD/new/o/04-menu2.ppm" "$TMPD/new/o/05-esc.ppm" 700 400 "$mw" "$mh")
+d=$(diffpix "$TMPD/new/o/04-menu2.ppm" "$TMPD/new/o/05-esc.ppm" "$mx" "$my" "$mw" "$mh")
 [ "$d" -gt $((mw * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
 # COUNTER-PROOF: the old tree has no menu
 if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
@@ -121,7 +122,7 @@ if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
 else
     grep -aq 'desktop: context open' "$SO" && bad "COUNTER-PROOF: the old tree has a menu" || ok "COUNTER-PROOF old tree: no 'context open'"
     d=$(diffpix "$TMPD/old/o/00-before.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
-    [ "$d" -le 60 ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
+    [ "$d" -le 300 ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
         || bad "COUNTER-PROOF: the old tree changed $d pixels at the right click"
 fi
 echo; echo "DESKCTX: $pass passed, $fail failed"
