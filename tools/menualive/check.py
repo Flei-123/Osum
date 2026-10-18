@@ -4,6 +4,7 @@
 
     check.py cpu  <serial.txt> <task-name|kind:KIND|notkind:KIND|pid:N>   share of one core, from two `ps`
                 (notkind:idle = what the taskbar CPU widget shows)
+    check.py table <serial.txt>   every task's share of the core, biggest first
     check.py diff <a.ppm> <b.ppm> x0 y0 x1 y1  changed pixels in a rectangle
 
 `cpu`: the last two `ps` listings on the serial line. Every task's ticks are
@@ -66,6 +67,28 @@ def cpu(path, name):
     return 0
 
 
+def table(path):
+    """Per-task share of one core between the first and the last `ps`:
+    one line `pid=N kind=K share=P` for every task that gained ticks (idle excluded),
+    biggest first. The names `ps` shows differ per image, so the pid is the key."""
+    bl = blocks(path)
+    if len(bl) < 2:
+        print("share=-1 (fewer than two ps listings: %d)" % len(bl))
+        return 1
+    a, b = bl[0], bl[-1]
+    span = sum(max(0, b[k][1] - a[k][1]) for k in b if k in a)
+    if span <= 0:
+        print("share=-1 (no idle gain)")
+        return 1
+    rows = []
+    for k in b:
+        if k in a and b[k][0] != "idle" and b[k][1] > a[k][1]:
+            rows.append((100.0 * (b[k][1] - a[k][1]) / span, k, b[k][0], b[k][2]))
+    for sh, k, kind, nm in sorted(rows, reverse=True):
+        print("pid=%d kind=%s name=%s share=%.1f" % (k, kind, nm, sh))
+    return 0
+
+
 def diff(a, b, x0, y0, x1, y1):
     from PIL import Image
     ia = Image.open(a).convert("RGB")
@@ -83,6 +106,8 @@ def diff(a, b, x0, y0, x1, y1):
 if __name__ == "__main__":
     if sys.argv[1] == "cpu":
         sys.exit(cpu(sys.argv[2], sys.argv[3]))
+    if sys.argv[1] == "table":
+        sys.exit(table(sys.argv[2]))
     if sys.argv[1] == "diff":
         sys.exit(diff(sys.argv[2], sys.argv[3], *[int(v) for v in sys.argv[4:8]]))
     sys.exit(2)

@@ -902,6 +902,7 @@ static mut writes: u64 = 0
 // in kernel/kgui.fi bei `eingabe_puls`: eine Zeile je Runde schreibt
 // dem Menschen in vierzig Sekunden 238 Zeilen ins Terminal, und das
 // ist keine Diagnose, sondern Rauschen.
+const QUIET_ROUNDS: u64 = 80
 static mut ub_round: u64 = 0
 static mut ub_sb: u64 = 0
 static mut ub_sbt: u64 = 0
@@ -8667,6 +8668,10 @@ fn u_start(args: u64) -> u64 {
     var round: u64 = 0
     var tsum: u64 = wlibc.theme_sum()
     var alive: bool = true
+    // W-W (18.10.2026): quiet backoff -- see the end of the loop
+    var quiet: u64 = 0
+    var q_mx: u64 = 0
+    var q_my: u64 = 0
     while alive {
         // r381: the events of the bar's window come through the host (`bar_raw` for the
         // pointer), a node pressed through the tree comes back from `bar_pump`
@@ -8964,7 +8969,29 @@ fn u_start(args: u64) -> u64 {
             sayn(paints)
             nl()
         }
-        ulib.sleep_ms(25)
+        // W-W (18.10.2026): QUIET BACKOFF. VirtualBox idle desktop: the bar showed ~36 % of
+        // a core with nothing happening (40 rounds/s x ~15 pollers). After QUIET_ROUNDS
+        // rounds (2 s) without ANY sign of life -- nothing repainted, no popup or drag
+        // moving, no power event, pointer still -- the bar sleeps 50 ms instead of 25 ms
+        // and counts that round double, so the `round % N` pollers (window list, status,
+        // theme, conf) keep their rate in time (list_read: 250 ms instead of 125 ms).
+        // Any sign of life brings the 25 ms rhythm back at once.
+        let mxn: u64 = wlibc.mouse_x()
+        let myn: u64 = wlibc.mouse_y()
+        if fresh || _qsc || _tvs || _tps || _cps || _ncs || hw != 0 || pdrag != 0
+            || dragging != 0 || (evc != 0 && !ulib.bad(evc)) || mxn != q_mx || myn != q_my {
+            quiet = 0
+        } else {
+            quiet = quiet + 1
+        }
+        q_mx = mxn
+        q_my = myn
+        if quiet > QUIET_ROUNDS {
+            round = round + 1
+            ulib.sleep_ms(50)
+        } else {
+            ulib.sleep_ms(25)
+        }
     }
     return 0
 }
