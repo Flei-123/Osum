@@ -30,7 +30,7 @@ export {
     // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
     line_at, line_clear, line_lost,
     // W-X3: deferred (ring buffered) output for periodic reports
-    defer_on, defer_off, pump, ring_used, ring_flushed
+    defer_on, defer_off, pump, ring_used, ring_flushed, ring_say
 }
 
 // ==================================================== RUNDE VIELKERN 3
@@ -342,6 +342,9 @@ static mut ring_lock: [u64; 1] = [0 as u64; 1]
 static mut defer_depth: [u64; 1] = [0 as u64; 1]
 static mut ser_burst: u64 = 1 // octets per THRE (16 with a 16550A FIFO)
 static mut ring_flushes: u64 = 0 // times a plain put had to flush the ring
+static mut ring_fulls: u64 = 0 // times the ring was full and the producer drained blocking
+static mut ring_pumps: u64 = 0 // bursts written by pump
+static mut ring_octets: u64 = 0 // octets queued
 
 fn defer_on() {
     __atomic_add((&defer_depth[0]) as *mut u64, 1 as u64)
@@ -421,6 +424,7 @@ fn ring_push(c: u8) -> bool {
         return false
     }
     if ring_head[0] - ring_tail[0] >= RING_SIZE {
+        ring_fulls = ring_fulls + 1
         ring_drain_blocking()
     }
     if ser_aus != 0 {
@@ -430,8 +434,32 @@ fn ring_push(c: u8) -> bool {
     let h: u64 = ring_head[0]
     ring_buf[(h % RING_SIZE) as usize] = c
     ring_head[0] = h + 1
+    ring_octets = ring_octets + 1
     ring_give()
     return true
+}
+
+// Profile line (word `phases`): how the ring behaved.
+fn ring_say() {
+    var a: [u8; 19] = "serial: ring used=\0"
+    var b: [u8; 9] = " queued=\0"
+    var c: [u8; 8] = " pumps=\0"
+    var d: [u8; 7] = " full=\0"
+    var e: [u8; 10] = " flushes=\0"
+    var f: [u8; 8] = " burst=\0"
+    puts((&a[0]) as u64)
+    dec(ring_used())
+    puts((&b[0]) as u64)
+    dec(ring_octets)
+    puts((&c[0]) as u64)
+    dec(ring_pumps)
+    puts((&d[0]) as u64)
+    dec(ring_fulls)
+    puts((&e[0]) as u64)
+    dec(ring_flushes)
+    puts((&f[0]) as u64)
+    dec(ser_burst)
+    nl()
 }
 
 // Called from the timer bottom half and the desktop round: one burst if
@@ -446,6 +474,7 @@ fn pump() {
     if ser_aus != 0 {
         ring_tail[0] = ring_head[0]
     } else if ready() {
+        ring_pumps = ring_pumps + 1
         var k: u64 = 0
         while k < ser_burst && ring_tail[0] != ring_head[0] {
             ring_out_one()
