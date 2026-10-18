@@ -52,6 +52,7 @@ Namen fuer `klickauf`:
     netz            die Symbolgruppe       (taskbar: field net ...)
     uhr             die Uhr                (taskbar: field clock ...)
     calrect<N>      Knopf N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
+    chrect<NAME>    Element NAME der Zeichentabelle (charmap: rect name= ... ax= ay=, Bildschirmpixel)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
     lzeile<N>       Zeile N der Trefferliste des Starters
     srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
@@ -877,6 +878,12 @@ class Fahrer:
             if m is None:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        if name.startswith("chrect"):
+            # charmap.fi (P-015): `charmap: rect name=<n> x= y= w= h= ax= ay=` -- ax/ay are SCREEN pixels of the element
+            m = letzte(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
+            if m is None:
+                return None
+            return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("lrect"):
             n = int(name[5:])
             m = letzte(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
