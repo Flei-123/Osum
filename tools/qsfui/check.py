@@ -80,7 +80,7 @@ def main():
         for nm in ("hell", "vol"):
             if l.startswith("qs: regler " + nm):
                 reg[nm] = kv(l)
-    med = [kv(l) for l in lines if l.startswith("qs: medien ")]
+    med = [kv(l) for l in lines if l.startswith("qs: medien ")][-1:]
     fuss = last("qs: fussb n=")
     dx = (100 * sc) // 2 if shift else 0
 
@@ -121,7 +121,9 @@ def main():
         inside({"x": f["x"] - qx, "y": f["y"] - qy, "w": f["w"], "h": f["h"]}, "footer button %d" % n)
     if 0 in fuss and 1 in fuss:
         ok(fuss[1]["x"] > fuss[0]["x"], "the gear stands right of the task manager button (gear is right-most)")
-        ok(fuss[1]["x"] + fuss[1]["w"] <= qx + qw - 8 * sc, "the gear keeps a margin to the panel's right edge")
+        right = qx + qw - 16 * sc
+        ok(abs(fuss[1]["x"] + fuss[1]["w"] - right) <= 4 * sc,
+           "the gear stands bottom right: its right edge %d is at the card's inner edge %d" % (fuss[1]["x"] + fuss[1]["w"], right))
     # 3. label under plate
     for n in sorted(cells):
         p, l, c = plates[n], labels[n], cells[n]
