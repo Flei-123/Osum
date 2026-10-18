@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wchurn.fi -- r1138: WINDOW CHURN ON SEVERAL CORES.
+//
+//     wchurn run <workers> <iters> <killrounds>
+//
+// Several processes create, paint, flush and close windows at the same time,
+// and the parent kills some of them while they are inside a window call and
+// starts new ones in their place. This is the traffic of a mode change on the
+// desktop (windows restart, the old owner dies, a new one creates windows)
+// in its simplest form. What it must NOT do is crash the kernel (#GP, stack
+// guard line) or hand out a handle that does not work:
+//
+//   * every handle WM_CREATE returned must be accepted by the next call
+//     (WM_FILL on the whole window) -- else `bad` counts up;
+//   * a handle after WM_CLOSE must not paint (counted as `stale`, not a fault:
+//     only reported);
+//   * the kernel must stay up until `wchurn: done` is printed.
+//
+// Gate: tools/wchurn/run.sh (QEMU -smp 4 with the real window server).
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_INFO: u64 = 2104
+const WI_W: u64 = 0
+const WI_H: u64 = 1
+const WM_FLUSH: u64 = 2105
+const WM_CLOSE: u64 = 2107
+
+static mut NUM1: [u8; 24] = [0 as u8; 24]
+static mut NUM2: [u8; 24] = [0 as u8; 24]
+static mut NUM3: [u8; 24] = [0 as u8; 24]
+static mut ARGV: [u64; 8] = [0 as u64; 8]
+static mut P_SELF: [u8; 12] = "/bin/wchurn\0"
+static mut A0: [u8; 7] = "wchurn\0"
+static mut A1: [u8; 6] = "child\0"
+
+
+// One-write line builder: serial lines of several cores tear into each other when written piece by piece.
+fn app_str(buf: u64, pos: u64, s: u64) -> u64 {
+    var p: u64 = pos
+    var i: u64 = 0
+    while __mmio_read8((s + i) as *mut u8) != 0 as u8 && p < 200 {
+        __mmio_write8((buf + p) as *mut u8, __mmio_read8((s + i) as *mut u8))
+        p = p + 1
+        i = i + 1
+    }
+    return p
+}
+
+fn app_num(buf: u64, pos: u64, v: u64) -> u64 {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        tmp[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        tmp[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var p: u64 = pos
+    while n > 0 {
+        n = n - 1
+        __mmio_write8((buf + p) as *mut u8, tmp[n as usize])
+        p = p + 1
+    }
+    return p
+}
+
+// One worker: <iters> windows, each created, painted, flushed and (three of
+// four) closed. The fourth is left open on purpose: the owner's end then has
+// to take it away while the other cores keep creating.
+fn worker(id: u64, iters: u64) -> u64 {
+    var title: [u8; 8] = [0 as u8; 8]
+    var bad: u64 = 0
+    var stale: u64 = 0
+    var full: u64 = 0
+    var made: u64 = 0
+    var b_fill: u64 = 0
+    var f_fill: u64 = 0
+    var f_info: u64 = 0
+    var f_flush: u64 = 0
+    var b_info: u64 = 0
+    var b_flush: u64 = 0
+    var it: u64 = 0
+    while it < iters {
+        title[0] = 119 as u8
+        title[1] = 99 as u8
+        title[2] = (65 + (id % 26)) as u8
+        title[3] = (97 + (it % 26)) as u8
+        title[4] = (48 + (it % 10)) as u8
+        title[5] = 0 as u8
+        // position and size are packed as (x << 16) | y and (w << 16) | h
+        let x: u64 = 20 + (id * 37 + it * 11) % 200
+        let y: u64 = 40 + (id * 23 + it * 7) % 120
+        let h: u64 = ulib.sys4(WM_CREATE, (x << 16) | y, ((64 + (it % 5) * 8) << 16) | 48,
+            (&title[0]) as u64, 0)
+        if ulib.bad(h) {
+            full = full + 1
+            let _y: u64 = ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        } else {
+            made = made + 1
+            let r1: u64 = ulib.sys4(WM_FILL, h, 0, (32 << 16) | 24, 0x00336699 + it)
+            if ulib.bad(r1) {
+                bad = bad + 1
+                b_fill = b_fill + 1
+                if f_fill == 0 {
+                    f_fill = (r1 ^ 0xFFFFFFFFFFFFFFFF) + 1
+                }
+            }
+            // the window is the one asked for: width and height read back
+            let wi: u64 = ulib.sys(WM_INFO, h, WI_W, 0)
+            let hi: u64 = ulib.sys(WM_INFO, h, WI_H, 0)
+            if wi != 64 + (it % 5) * 8 || hi != 48 {
+                bad = bad + 1
+                b_info = b_info + 1
+                if f_info == 0 {
+                    f_info = wi * 10000 + hi + 1
+                }
+            }
+            let r2: u64 = ulib.sys(WM_FLUSH, h, 0, 0)
+            if ulib.bad(r2) {
+                bad = bad + 1
+                b_flush = b_flush + 1
+                if f_flush == 0 {
+                    f_flush = (r2 ^ 0xFFFFFFFFFFFFFFFF) + 1
+                }
+            }
+            if (it % 4) != 3 {
+                let _c: u64 = ulib.sys(WM_CLOSE, h, 0, 0)
+                let r3: u64 = ulib.sys4(WM_FILL, h, 0, (8 << 16) | 8, 0x00FF0000)
+                if !ulib.bad(r3) {
+                    stale = stale + 1
+                }
+            }
+        }
+        it = it + 1
+    }
+    if bad != 0 || stale != 0 {
+        var line: [u8; 208] = [0 as u8; 208]
+        var s_w: [u8; 10] = "wchurn: w\0"
+        var s_made: [u8; 7] = " made=\0"
+        var s_bad: [u8; 6] = " bad=\0"
+        var s_stale: [u8; 8] = " stale=\0"
+        var s_full: [u8; 7] = " full=\0"
+        var s_why: [u8; 14] = " fill/info/f=\0"
+        var s_sl: [u8; 2] = "/\0"
+        var s_first: [u8; 8] = " first=\0"
+        var q: u64 = app_str((&line[0]) as u64, 0, (&s_w[0]) as u64)
+        q = app_num((&line[0]) as u64, q, id)
+        q = app_str((&line[0]) as u64, q, (&s_made[0]) as u64)
+        q = app_num((&line[0]) as u64, q, made)
+        q = app_str((&line[0]) as u64, q, (&s_bad[0]) as u64)
+        q = app_num((&line[0]) as u64, q, bad)
+        q = app_str((&line[0]) as u64, q, (&s_stale[0]) as u64)
+        q = app_num((&line[0]) as u64, q, stale)
+        q = app_str((&line[0]) as u64, q, (&s_full[0]) as u64)
+        q = app_num((&line[0]) as u64, q, full)
+        q = app_str((&line[0]) as u64, q, (&s_why[0]) as u64)
+        q = app_num((&line[0]) as u64, q, b_fill)
+        q = app_str((&line[0]) as u64, q, (&s_sl[0]) as u64)
+        q = app_num((&line[0]) as u64, q, b_info)
+        q = app_str((&line[0]) as u64, q, (&s_sl[0]) as u64)
+        q = app_num((&line[0]) as u64, q, b_flush)
+        q = app_str((&line[0]) as u64, q, (&s_first[0]) as u64)
+        q = app_num((&line[0]) as u64, q, f_fill)
+        q = app_str((&line[0]) as u64, q, (&s_sl[0]) as u64)
+        q = app_num((&line[0]) as u64, q, f_info)
+        q = app_str((&line[0]) as u64, q, (&s_sl[0]) as u64)
+        q = app_num((&line[0]) as u64, q, f_flush)
+        line[q as usize] = 10 as u8
+        let _w: u64 = ulib.put((&line[0]) as u64, q + 1)
+    }
+    // 0 = clean; 101..200 = this many bad answers (a killed child leaves with its kill code instead)
+    if bad > 0 {
+        if bad > 99 {
+            return 199
+        }
+        return 100 + bad
+    }
+    return 0
+}
+
+fn start_child(id: u64, iters: u64) -> u64 {
+    ulib.digits(id, (&NUM1[0]) as u64)
+    ulib.digits(iters, (&NUM2[0]) as u64)
+    ARGV[0] = (&A0[0]) as u64
+    ARGV[1] = (&A1[0]) as u64
+    ARGV[2] = (&NUM1[0]) as u64
+    ARGV[3] = (&NUM2[0]) as u64
+    return ulib.sys(ulib.SYS_EXEC, (&P_SELF[0]) as u64, (&ARGV[0]) as u64, 4)
+}
+
+fn run(args: u64) -> u64 {
+    var s_sum: [u8; 16] = "wchurn: done w=\0"
+    var s_bad: [u8; 6] = " bad=\0"
+    var s_kill: [u8; 8] = " kills=\0"
+    var s_nowin: [u8; 22] = "wchurn: no window srv\0"
+    let workers: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let iters: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    let rounds: u64 = ulib.to_num(ulib.arg_at(args, 4))
+    var pids: [u64; 16] = [0 as u64; 16]
+    var bad: u64 = 0
+    var kills: u64 = 0
+    var total: u64 = 0
+    var title: [u8; 4] = "wp\0\0"
+    // probe: the window server must be there, else the test measures nothing
+    let probe: u64 = ulib.sys4(WM_CREATE, (4 << 16) | 4, (64 << 16) | 20, (&title[0]) as u64, 0)
+    if ulib.bad(probe) {
+        ulib.say((&s_nowin[0]) as u64)
+        ulib.nl()
+        return 2
+    }
+    let _pc: u64 = ulib.sys(WM_CLOSE, probe, 0, 0)
+    var r: u64 = 0
+    while r <= rounds {
+        var w: u64 = 0
+        while w < workers && w < 16 {
+            pids[w as usize] = start_child(r * 16 + w, iters)
+            total = total + 1
+            w = w + 1
+        }
+        // let them get into the window calls, then kill every other one
+        if r < rounds {
+            let _s: u64 = ulib.sleep_ms(30 + (r % 4) * 15)
+            var k: u64 = 0
+            while k < w {
+                if (k % 2) == (r % 2) && !ulib.bad(pids[k as usize]) {
+                    let _k: u64 = ulib.sys(ulib.SYS_KILL, pids[k as usize], 9, 0)
+                    kills = kills + 1
+                }
+                k = k + 1
+            }
+        }
+        var j: u64 = 0
+        while j < w {
+            if ulib.bad(pids[j as usize]) {
+                bad = bad + 1
+            } else {
+                let c: u64 = ulib.wait_code(pids[j as usize])
+                // a killed child leaves with a code of 128 + n or errno: only 1..100 is a worker's own count
+                if c > 100 && c <= 199 {
+                    bad = bad + (c - 100)
+                }
+            }
+            j = j + 1
+        }
+        r = r + 1
+    }
+    ulib.say((&s_sum[0]) as u64)
+    ulib.sayu(total)
+    ulib.say((&s_bad[0]) as u64)
+    ulib.sayu(bad)
+    ulib.say((&s_kill[0]) as u64)
+    ulib.sayu(kills)
+    ulib.nl()
+    if bad != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_child: [u8; 6] = "child\0"
+    if ulib.arg_count(args) >= 4 && ulib.streq(ulib.arg_at(args, 1), (&s_child[0]) as u64) {
+        let id: u64 = ulib.to_num(ulib.arg_at(args, 2))
+        let iters: u64 = ulib.to_num(ulib.arg_at(args, 3))
+        return worker(id, iters)
+    }
+    if ulib.arg_count(args) < 5 {
+        return 3
+    }
+    return run(args)
+}
