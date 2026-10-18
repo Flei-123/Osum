@@ -297,6 +297,8 @@ touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
 orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder"}
+# ODB=1 (debug build): the debug agent is one more program in /bin
+[ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
@@ -1221,6 +1223,17 @@ EOFTAB
 printf 'grafik
 ' > "$OUT/ziel"
 ARGS+=("/etc/inittab=$OUT/inittab" "/etc/ziel=$OUT/ziel")
+# ODB=1: DEBUG BUILD ONLY (docs/ODB.md). The debug agent odbd listens on COM2 (/dev/odb0), is started by init, and is
+# enabled by /etc/odb.conf (enable=1). The shared secret is read from ODB_TOKEN_FILE (default /root/abbilder/odb.token,
+# see `tools/vbox/run.sh odb-token`). The default release image has NO agent, no token, no inittab line.
+if [ "${ODB:-0}" = 1 ]; then
+    ODB_TOKEN_FILE=${ODB_TOKEN_FILE:-/root/abbilder/odb.token}
+    [ -s "$ODB_TOKEN_FILE" ] || { echo "ODB=1: token file $ODB_TOKEN_FILE missing (tools/vbox/run.sh odb-token)" >&2; exit 1; }
+    printf 'odbd:*:respawn:/bin/odbd\n' >> "$OUT/inittab"
+    printf 'enable=1\n' > "$OUT/odb.conf"
+    ARGS+=("/etc/odb.token=$ODB_TOKEN_FILE@0600:0:0" "/etc/odb.conf=$OUT/odb.conf@0644:0:0")
+    echo "build.sh: ODB=1 -- debug agent odbd enabled (COM2), token from $ODB_TOKEN_FILE"
+fi
 ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/ /run/)
 # RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
 #

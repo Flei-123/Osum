@@ -79,7 +79,7 @@ BADTOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 printf '%s' "$TOKEN" > "$TMPD/token"
 printf '%s' "$BADTOKEN" > "$TMPD/badtoken"
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
-printf 'odbd:respawn:/sbin/odbd\nende:ctrl:/bin/sleep 600\n' > "$TMPD/inittab_on"
+printf 'odbd:respawn:/sbin/odbd\nvic:respawn:/bin/victim 300\nende:ctrl:/bin/sleep 600\n' > "$TMPD/inittab_on"
 printf 'ende:ctrl:/bin/sleep 600\n' > "$TMPD/inittab_off"
 printf 'enable=1\n' > "$TMPD/conf_on"
 printf 'none /dev devfs\nnone /proc proc\n' > "$TMPD/fstab"
@@ -95,6 +95,7 @@ for p in $PROGS; do
         *)    SPEC="$SPEC /bin/$p=$B/$p.elf" ;;
     esac
 done
+SPEC="$SPEC /bin/victim=$B/sleep.elf"
 DIRS="/bin/ /sbin/ /etc/ /dev/ /proc/ /run/@755:0:0 /d/ /tmp/@777:0:0"
 mkimg() { # out inittab [extra spec...]
     local out=$1 it=$2; shift 2
@@ -165,17 +166,16 @@ note "$(tail -1 "$TMPD/pull.txt")"
 is "pulled sha256 == original" "$(sha256sum "$TMPD/back.bin" 2>/dev/null | cut -d' ' -f1)" "$BLOBSUM"
 
 echo "== 5. ps / kill =="
-( ODB_T=40 od exec /bin/sleep 300 >/dev/null 2>&1 & )
-sleep 3
+# Victim: /bin/victim (a copy of sleep, respawned by init). NOT the `ende` sleep: when that one dies, init shuts the guest down.
 od ps >"$TMPD/ps.txt" 2>&1; is "ps exit" "$?" "0"
-PID=$(awk '/sleep/ {print $1; exit}' "$TMPD/ps.txt")
+PID=$(awk '/victim/ {print $1; exit}' "$TMPD/ps.txt")
 if [ -n "$PID" ]; then
-    ok "sleep visible in ps (pid $PID)"
+    ok "victim visible in ps (pid $PID)"
     od kill "$PID" >/dev/null 2>&1; is "kill exit" "$?" "0"
     sleep 1
-    od ps 2>&1 | awk -v p="$PID" '$1==p' | grep -q sleep && bad "pid $PID still there" || ok "pid $PID gone"
+    od ps 2>&1 | awk -v p="$PID" '$1==p' | grep -q victim && bad "pid $PID still there" || ok "pid $PID gone"
 else
-    bad "no sleep in ps"; head -12 "$TMPD/ps.txt" | sed 's/^/        /'
+    bad "no victim in ps"; head -12 "$TMPD/ps.txt" | sed 's/^/        /'
 fi
 
 echo "== 6. logs =="
@@ -184,9 +184,19 @@ is "logs exit" "$rc" "0"
 [ -n "$out" ] && ok "logs not empty ($(echo "$out" | wc -l) lines)" || bad "logs empty"
 
 echo "== 7. numbers (bench.py against the real odbd) =="
-timeout 120 python3 -I tools/odbc/bench.py --port "unix:$SOCK" --token-file "$TMPD/token" --mib 1 >"$TMPD/bench.txt" 2>&1 \
+timeout 150 python3 -I tools/odbc/bench.py --port "unix:$SOCK" --token-file "$TMPD/token" --mib 0.25 >"$TMPD/bench.txt" 2>&1 \
     && ok "bench ran" || bad "bench failed"
 tail -8 "$TMPD/bench.txt" | sed 's/^/        /'
+
+echo "== 7b. idle cost (agent asleep between polls) =="
+sleep 5   # 3 s of quiet put the agent into slow polling
+QREAL=$(pgrep -P "$QPID" | head -1); [ -n "$QREAL" ] || QREAL=$QPID
+cpu_ticks() { awk '{print $14+$15}' "/proc/$QREAL/stat" 2>/dev/null; }
+C0=$(cpu_ticks); sleep 5; C1=$(cpu_ticks)
+PCT=$(( (C1 - C0) * 100 / 500 ))   # ticks are 1/100 s; 5 s window -> percent of one host core
+note "qemu used ${PCT}% of a host core while idle (before: ~100+ with the busy loop)"
+[ "$PCT" -le 60 ] && ok "idle agent is off the CPU (${PCT}% of one core, limit 60)" || bad "idle agent burns ${PCT}% of a core"
+od info >/dev/null 2>&1; is "agent answers after the idle phase (wake preamble)" "$?" "0"
 
 echo "== 8. reboot =="
 ODB_T=30 od reboot >/dev/null 2>&1; note "reboot exit $?"

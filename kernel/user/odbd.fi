@@ -279,6 +279,11 @@ fn s_logs() -> u64 {
     return (&S_LOGS[0 as usize]) as u64
 }
 
+static mut S_LINES: [u8; 6] = "lines\0"
+fn s_lines() -> u64 {
+    return (&S_LINES[0 as usize]) as u64
+}
+
 static mut S_MAC: [u8; 4] = "mac\0"
 fn s_mac() -> u64 {
     return (&S_MAC[0 as usize]) as u64
@@ -573,6 +578,8 @@ fn s_writefail() -> u64 {
 
 const MAXP: u64 = 65536
 const HDRLEN: u64 = 16
+const QUIET_MS: u64 = 3000
+const SLEEPY_MS: u64 = 5
 const RBSIZE: u64 = 140000
 const TBSIZE: u64 = 65700
 const REQMAX: u64 = 8192
@@ -859,6 +866,7 @@ fn reply_err(id: u64, code: u64, msg: u64) {
 // ------------------------------------------------------------ frames in
 
 static mut g_last_rx: u64 = 0
+static mut g_empty_since: u64 = 0
 static mut g_dropped: u64 = 0
 static mut g_crcbad: u64 = 0
 fn drop_bytes(n: u64) {
@@ -937,6 +945,7 @@ fn fill() -> u64 {
     rlen = rlen + n
     if n > 0 {
         g_last_rx = mono_ms()
+        g_empty_since = 0
     }
     return n
 }
@@ -944,9 +953,22 @@ fn fill() -> u64 {
 // A frame that was cut off by the peer (host closed the line mid-frame) would block everything behind it
 // for ever: after 250 ms without a byte the head of the buffer is dropped one octet at a time (resync).
 fn stale_check() {
-    if rlen > 0 && mono_ms() -% g_last_rx > 250 {
+    if rlen == 0 {
+        g_empty_since = 0
+        return
+    }
+    let now: u64 = mono_ms()
+    if g_empty_since == 0 {
+        // First empty poll since the last byte: the silence starts HERE, not at the last byte. The agent can be busy
+        // for much longer than 250 ms between two polls (a 32 KiB disk write under host load) while the rest of
+        // a good frame is still on its way.
+        g_empty_since = now
+        return
+    }
+    if now -% g_empty_since > 250 {
         g_dropped = g_dropped + 1
         drop_bytes(1)
+        g_empty_since = now
     }
 }
 
@@ -1493,34 +1515,45 @@ fn cmd_exec(id: u64, tp: u64, tl: u64) {
     var killed: u64 = 0
     var out_open: bool = true
     var err_open: bool = true
+    var quiet_after_exit: u64 = 0
     while !done {
+        // Read only what poll says is there: a blocking read on a pipe a detached grandchild still holds would freeze
+        // the agent (no cancel, no timeout, no other request).
         let f: u64 = (&pfds[0 as usize]) as u64
         var nf: u64 = 0
+        var out_slot: u64 = 99
+        var err_slot: u64 = 99
         if out_open {
             io.poll_set(f, nf, outr, io.POLLIN)
+            out_slot = nf
             nf = nf + 1
         }
         if err_open {
             io.poll_set(f, nf, errr, io.POLLIN)
+            err_slot = nf
             nf = nf + 1
         }
+        var got_any: bool = false
         if nf > 0 {
             io.poll(f, nf, 20)
+            if out_open && io.poll_ready(f, out_slot, io.POLLIN | io.POLLHUP | io.POLLERR) {
+                let n: u64 = pump_pipe(outr, 1, id)
+                if n == 0 {
+                    out_open = false
+                } else {
+                    got_any = true
+                }
+            }
+            if err_open && io.poll_ready(f, err_slot, io.POLLIN | io.POLLHUP | io.POLLERR) {
+                let n2: u64 = pump_pipe(errr, 2, id)
+                if n2 == 0 {
+                    err_open = false
+                } else {
+                    got_any = true
+                }
+            }
         } else {
             ulib.sleep_ms(20)
-        }
-        // read whatever is there (pipes: read returns 0 at EOF once the writer is gone)
-        if out_open {
-            let n: u64 = pump_pipe(outr, 1, id)
-            if n == 0 && exited {
-                out_open = false
-            }
-        }
-        if err_open {
-            let n2: u64 = pump_pipe(errr, 2, id)
-            if n2 == 0 && exited {
-                err_open = false
-            }
         }
         if !exited {
             let w: u64 = kcall.sys4(SYS_WAIT4, kid, (&status[0 as usize]) as u64, WNOHANG, 0)
@@ -1535,6 +1568,15 @@ fn cmd_exec(id: u64, tp: u64, tl: u64) {
             if timeout > 0 && mono_ms() -% t0 > timeout && killed == 0 {
                 ulib.sys(ulib.SYS_KILL, kid, 9, 0)
                 killed = 2
+            }
+        } else if got_any {
+            quiet_after_exit = 0
+        } else {
+            // the shell is gone but a detached child keeps the pipes open: 300 ms of silence ends the command
+            quiet_after_exit = quiet_after_exit + 1
+            if quiet_after_exit > 15 {
+                out_open = false
+                err_open = false
             }
         }
         if exited && !out_open && !err_open {
@@ -1625,11 +1667,20 @@ fn cmd_push(id: u64, tp: u64, tl: u64) {
             } else if ty == T_CANCEL && fid == id {
                 failed = 3
                 ending = true
+            } else if ty == T_REQ {
+                // a new session started: the host that was pushing is gone. Leave the REQ in the buffer for the main loop.
+                failed = 4
+                ending = true
             }
-            drop_bytes(n)
+            if failed != 4 {
+                drop_bytes(n)
+            }
         }
     }
     io.close(fd)
+    if failed == 4 {
+        return
+    }
     if failed == 1 {
         reply_err(id, s_etimeout(), s_pushwait())
         return
@@ -1680,6 +1731,20 @@ fn send_file_chunk(id: u64, fd: u64, off: u64, size: u64) -> u64 {
     return got
 }
 
+static mut g_trace: u64 = 0
+fn trace(code: u64, v: u64) {
+    if g_trace == 0 {
+        return
+    }
+    var t: [u8; 9] = "odbd tr \0"
+    ulib.say((&t[0 as usize]) as u64)
+    ulib.sayu(code)
+    var sp: [u8; 2] = " \0"
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(v)
+    ulib.nl()
+}
+
 fn cmd_pull(id: u64, tp: u64, tl: u64) {
     if !tget_str(tp, tl, s_path(), addr_path(), 600) {
         reply_err(id, s_earg(), s_needpath())
@@ -1703,6 +1768,7 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
     var acked: u64 = sent
     var tries: u64 = 0
     var failed: u64 = 0
+    trace(10, size)
     while acked < size && failed == 0 {
         // fill the window
         while sent < size && sent - acked < WINDOW {
@@ -1740,14 +1806,22 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
                     }
                 } else if ty == T_CANCEL && rd32(b + 8) == id {
                     failed = 3
+                } else if ty == T_REQ {
+                    failed = 4 // the host is gone and a new session starts: leave its REQ for the main loop
                 } else if ty == T_PING {
                     send_frame(T_PONG, 0, rd32(b + 8), b + HDRLEN, rd32(b + 12))
                 }
-                drop_bytes(f)
+                if failed != 4 {
+                    drop_bytes(f)
+                }
             }
         }
     }
     io.close(fd)
+    if failed == 4 {
+        return
+    }
+    trace(11, failed)
     if failed == 2 {
         reply_err(id, s_etimeout(), s_pullwait())
         return
@@ -1763,6 +1837,7 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
     var one: [u8; 1] = [0 as u8; 1]
     one[0 as usize] = 3
     send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+    trace(12, 0)
     p_reset()
     p_num(s_size(), size)
     p_str(s_sha256(), (&sha_hex[0 as usize]) as u64)
@@ -1836,29 +1911,80 @@ fn cmd_kill(id: u64, tp: u64, tl: u64) {
     send_final(T_RESP, id)
 }
 
+fn klog_count_lines(fd: u64) -> u64 {
+    io.seek(fd, 0, 0)
+    var lines: u64 = 0
+    var going: bool = true
+    var total: u64 = 0
+    while going {
+        let n: u64 = io.read(fd, addr_io(), 8192)
+        if errno.failed(n) || n == 0 || total > 4000000 {
+            going = false
+        } else {
+            var i: u64 = 0
+            while i < n {
+                if rd8(addr_io() + i) == 10 {
+                    lines = lines + 1
+                }
+                i = i + 1
+            }
+            total = total + n
+        }
+    }
+    return lines
+}
+
 fn cmd_logs(id: u64, tp: u64, tl: u64) {
     let fd: u64 = io.open(s_devklog(), 0)
     if errno.failed(fd) {
         reply_err(id, s_enoent(), s_noklog())
         return
     }
+    // tail: skip everything but the last `lines` lines (the ring is a few hundred lines, two passes are cheap)
+    let want: u64 = tget_num(tp, tl, s_lines(), 200)
+    let all: u64 = klog_count_lines(fd)
+    var skip: u64 = 0
+    if all > want {
+        skip = all - want
+    }
+    io.seek(fd, 0, 0)
     var total: u64 = 0
     var going: bool = true
+    var seen: u64 = 0
     while going {
         let n: u64 = io.read(fd, addr_io(), 8192)
         if errno.failed(n) || n == 0 || total > 4000000 {
             going = false
         } else {
-            send_data(5, addr_io(), n, id)
-            total = total + n
+            var start: u64 = 0
+            if seen < skip {
+                var i: u64 = 0
+                while i < n && seen < skip {
+                    if rd8(addr_io() + i) == 10 {
+                        seen = seen + 1
+                        start = i + 1
+                    }
+                    i = i + 1
+                }
+                if seen < skip {
+                    start = n
+                }
+            }
+            if start < n {
+                send_data(5, addr_io() + start, n - start, id)
+                total = total + (n - start)
+            }
         }
     }
     io.close(fd)
     send_end(5, id)
     p_reset()
     p_num(s_bytes(), total)
+    p_num(s_lines(), all - skip)
     send_final(T_RESP, id)
 }
+
+// ---- power
 
 fn cmd_power(id: u64, tp: u64, tl: u64, reboot: bool) {
     p_reset()
@@ -1906,7 +2032,7 @@ fn handle_req(id: u64, flags: u64, n: u64) {
     let tp: u64 = q + 1 + cl
     let tl: u64 = plen - 1 - cl
     let cmd: u64 = q + 1
-    if id == lastid && lastlen != 0 || (id == lastid && (flags & F_RETRY) != 0) {
+    if id == lastid && (flags & F_RETRY) != 0 {
         // idempotent retry: answer from the cache, never run twice
         send_frame(lasttype, 0, id, (&lastbuf[0 as usize]) as u64, lastlen)
         return
@@ -1968,7 +2094,11 @@ fn u_start(args: u64) -> u64 {
             if got == 0 {
                 stale_check()
                 idle = idle + 1
-                if idle > 200 {
+                if mono_ms() -% g_last_rx > QUIET_MS && rlen == 0 {
+                    // Nothing for QUIET_MS: poll slowly so the agent costs next to no CPU. The host sends a wake
+                    // preamble (zero octets + pause) before a frame after silence, see docs/ODB.md.
+                    ulib.sleep_ms(SLEEPY_MS)
+                } else if idle > 200 {
                     ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
                     idle = 0
                 }
@@ -1982,6 +2112,7 @@ fn u_start(args: u64) -> u64 {
             let fl: u64 = rd16(b + 6)
             if ty == T_REQ {
                 handle_req(id, fl, n)
+                g_last_rx = mono_ms()
             } else if ty == T_PING {
                 send_frame(T_PONG, 0, id, b + HDRLEN, rd32(b + 12))
                 drop_bytes(n)

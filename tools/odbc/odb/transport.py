@@ -18,6 +18,12 @@ import threading
 import time
 
 
+WAKE_ENABLE = os.environ.get("ODB_WAKE", "1") != "0"
+WAKE_IDLE_S = 8.0   # > any in-transfer wait (rewind timer 2 s); the agent sleeps after 3 s of silence
+WAKE_BYTES = 160
+WAKE_PAUSE_S = 0.05
+
+
 class TransportError(OSError):
     pass
 
@@ -30,6 +36,7 @@ class Transport:
         self._t = None
         self.rx_bytes = 0
         self.tx_bytes = 0
+        self.last_act = 0.0   # monotonic time of the last byte in either direction (0 = never)
 
     # subclasses: _read_blocking() -> bytes (b'' = EOF), _write(data), _close()
     def start(self):
@@ -59,9 +66,18 @@ class Transport:
             self.q.put(None)
             return None
         self.rx_bytes += len(d)
+        self.last_act = time.monotonic()
         return d
 
     def write(self, data):
+        # Wake preamble (docs/ODB.md "idle agent"): after WAKE_IDLE_S of silence the agent may poll slowly (sleeping
+        # between polls to stay off the CPU) and a 16-byte UART FIFO would lose the head of a frame. Zero octets are
+        # garbage to the frame resync; the pause lets the agent wake before the real frame starts.
+        now = time.monotonic()
+        if WAKE_ENABLE and now - self.last_act > WAKE_IDLE_S:
+            self._write(b"\x00" * WAKE_BYTES)
+            time.sleep(WAKE_PAUSE_S)
+        self.last_act = time.monotonic()
         self.tx_bytes += len(data)
         self._write(data)
 

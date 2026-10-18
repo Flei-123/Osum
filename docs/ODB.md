@@ -258,3 +258,16 @@ Client behaviour worth knowing when writing the agent:
 - `push` sends `sha256` in the REQ and again in the END TLV (`size`, `sha256`); `pull` verifies `sha256`/`crc32`/`size` of the RESP.
 - `exec` ends with RESP (`exit`, `signal`); the per-stream END frames precede it and are optional for the host.
 - `ps` is read from stream 1, `logs` from stream 5, `shot` from stream 4, `crashdump list` from stream 1, `crashdump get` over stream 3.
+
+## 12. Idle agent and wake preamble (additive, v1)
+
+- After 3 s without a byte on the line (and an empty receive buffer) `odbd` polls the UART only every ~5 ms instead of
+  spinning, so an idle agent costs next to no CPU. The 16-byte UART FIFO cannot hold the head of a frame while it sleeps.
+- A host that was silent for more than 8 s (or has just connected) therefore sends a WAKE PREAMBLE before its first frame: 160 zero octets, then a
+  pause of 50 ms. Zero octets are garbage to the frame resync (the magic is `ODB1`), the pause lets the agent wake and
+  switch back to fast polling (it stays fast for 3 s after the last frame). `tools/odbc` does this in `Transport.write`
+  (`ODB_WAKE=0` turns it off).
+- Resync after a cut frame: the 250 ms silence is measured from the FIRST EMPTY POLL after the last byte, not from the
+  last byte (the agent can be busy for longer than that in a disk write while the rest of a good frame is on its way).
+- `exec` returns when the shell has exited and the pipes stayed quiet for 300 ms (a detached child that keeps the pipes
+  open does not hold the answer back). `logs` honours `lines` (tail, default 200).
