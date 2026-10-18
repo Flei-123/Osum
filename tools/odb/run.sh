@@ -172,6 +172,32 @@ od pull /tmp/blob.bin "$TMPD/back.bin" >"$TMPD/pull.txt" 2>&1; is "pull exit" "$
 note "$(tail -1 "$TMPD/pull.txt")"
 is "pulled sha256 == original" "$(sha256sum "$TMPD/back.bin" 2>/dev/null | cut -d' ' -f1)" "$BLOBSUM"
 
+# hello window == maxchunk: one frame in flight (VBox uart2 has no flow control)
+HELLO=$(python3 -I - "$ROOT/tools/odbc" "$SOCK" <<'PYEOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+from odb.client import Session
+s = Session.open("unix:" + sys.argv[2])
+h = s.hello()
+print(h.geti("maxchunk"), h.geti("window"))
+s.close()
+PYEOF
+)
+set -- $HELLO
+[ -n "${1:-}" ] && [ "${1:-0}" = "${2:-1}" ] && ok "hello window == maxchunk ($1/$2)" || bad "hello window '$2' != maxchunk '$1'"
+# small pulls: END goes out right behind the last data frame, no resend wait (was ~1 s per resend, hung on VBox)
+for sz in 1 100 8192 8193 20000; do
+    head -c $sz /dev/urandom > "$TMPD/small.bin"
+    od push "$TMPD/small.bin" /tmp/small.bin >/dev/null 2>&1
+    T0=$(date +%s%N)
+    od pull /tmp/small.bin "$TMPD/small.back" >"$TMPD/smallpull.txt" 2>&1; rc=$?
+    MS=$(( ($(date +%s%N)-T0)/1000000 ))
+    if [ $rc = 0 ] && cmp -s "$TMPD/small.bin" "$TMPD/small.back"; then ok "pull $sz octets identical (${MS} ms)"; else bad "pull $sz octets (exit $rc)"; fi
+    [ "$MS" -lt 6000 ] && ok "pull $sz octets within 6 s (no END stall)" || bad "pull $sz octets took ${MS} ms"
+done
+rewinds=$(grep -o 'rewinds[= ]*[0-9]*' "$TMPD/pull.txt" | grep -o '[0-9]*$' | head -1)
+[ "${rewinds:-0}" = "0" ] && ok "300 kB pull: 0 rewinds" || bad "300 kB pull: ${rewinds} rewinds"
+
 echo "== 5. ps / kill =="
 # Victim: /bin/victim (a copy of sleep, respawned by init). NOT the `ende` sleep: when that one dies, init shuts the guest down.
 od ps >"$TMPD/ps.txt" 2>&1; is "ps exit" "$?" "0"

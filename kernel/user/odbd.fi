@@ -594,7 +594,7 @@ const RBSIZE: u64 = 140000
 const TBSIZE: u64 = 65700
 const REQMAX: u64 = 8192
 const CHUNK: u64 = 8192   // small frames: an ACK comes often enough that the host's 2 s rewind timer never fires at ~17 KiB/s
-const WINDOW: u64 = 65536
+const WINDOW: u64 = 8192   // == CHUNK: one frame in flight both ways (VBox uart2 has no flow control; the agent loses the head of the next frame while it writes/reads one)
 
 const T_REQ: u64 = 1
 const T_RESP: u64 = 2
@@ -784,19 +784,24 @@ fn crc32(p: u64, n: u64) -> u64 {
 
 fn dev_write_all(p: u64, n: u64) -> bool {
     var done: u64 = 0
-    var spins: u64 = 0
+    var stalled_since: u64 = 0
     while done < n {
         let r: u64 = io.write(dev, p + done, n - done)
         if errno.failed(r) {
             return false
         }
         if r == 0 {
-            spins = spins + 1
-            if spins > 100000 {
+            // The line does not drain (host closed the pipe / stopped reading). Give up after 3 s without progress
+            // instead of spinning for ever: the frame is lost, the host's resync and retry cope with it.
+            let now: u64 = mono_ms()
+            if stalled_since == 0 {
+                stalled_since = now
+            } else if now -% stalled_since > 3000 {
                 return false
             }
         } else {
             done = done + r
+            stalled_since = 0
         }
     }
     return true
@@ -1826,6 +1831,9 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
     var acked: u64 = sent
     var tries: u64 = 0
     var failed: u64 = 0
+    var end_sent: bool = false
+    var one: [u8; 1] = [0 as u8; 1]
+    one[0 as usize] = 3
     while acked < size && failed == 0 {
         // fill the window
         while sent < size && sent - acked < WINDOW {
@@ -1837,6 +1845,12 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
                 sent = sent + n
             }
         }
+        // END goes out right behind the last data frame (the host ACKs on END). Waiting for the last ACK first stalled
+        // small pulls: the host only ACKs a full window or a short frame, and the resends came ~1 s apart.
+        if failed == 0 && sent >= size && !end_sent {
+            send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+            end_sent = true
+        }
         if failed == 0 {
             let f: u64 = wait_frame(2000)
             if f == 0 {
@@ -1845,6 +1859,7 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
                     failed = 2
                 } else {
                     sent = acked
+                    end_sent = false
                 }
             } else {
                 let b: u64 = addr_rb()
@@ -1857,6 +1872,7 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
                     }
                     if nx < sent {
                         sent = nx
+                        end_sent = false
                     }
                     if acked > sent {
                         sent = acked
@@ -1890,9 +1906,9 @@ fn cmd_pull(id: u64, tp: u64, tl: u64) {
         reply_err(id, s_eio(), s_readfail())
         return
     }
-    var one: [u8; 1] = [0 as u8; 1]
-    one[0 as usize] = 3
-    send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+    if !end_sent {
+        send_frame(T_END, 0, id, (&one[0 as usize]) as u64, 1)
+    }
     p_reset()
     p_num(s_size(), size)
     p_str(s_sha256(), (&sha_hex[0 as usize]) as u64)
