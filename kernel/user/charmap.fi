@@ -1,0 +1,869 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/charmap.fi -- P-015: THE CHARACTER MAP (/bin/charmap, bundle `charmap`).
+//
+// Blocks on the left, 16 x 8 cells on the right. A click on a cell copies the character (UTF-8) to the clipboard.
+// Only what the system font can draw is offered: "Only characters the font has" (on by default) hides the code points the
+// font lacks; with it off they stay in the grid as grey cells with a cross, so a missing glyph is never drawn as a box.
+// The font's own table is asked (fuiglyph.has_glyph), not a list kept here.
+//
+// Search (the field above the grid):
+//   U+20AC, 0x20ac    that code point (a hex number of 2..6 digits without prefix also works)
+//   a block name      "arrows", "pictographs" -> the first block whose name contains it
+//   one character     a single letter or symbol -> its cell
+// A code point outside the block table opens a one-page "Jump" window (128 code points) around it.
+//
+// Serial lines (gate tools/charmap): `charmap: ready`, `charmap: block <i> lo= hi= shown= present= only= page=<p>/<n> name=`,
+// `charmap: goto U+XXXX present=<0|1> block=<i>`, `charmap: copy U+XXXX present=<0|1> len=<n> clip=<ok|fail>`,
+// `charmap: nomatch`, `charmap: rect name=<n> x= y= w= h= ax= ay=` (cell geometry in window and screen pixels).
+// `charmap nocheck` (counter-proof): every code point counts as present.
+
+profile app
+
+import ulib
+import wlib
+import fuiscene
+import fuiapp
+import fuiglyph
+import msg
+
+export { u_start }
+
+const NB: u64 = 26
+const PAGE: u64 = 128
+const COLS: u64 = 16
+const CELL: u64 = 32
+const LIST_MAX: u64 = 1024
+const K_SEARCH: u64 = 1
+const K_ONLY: u64 = 2
+const K_PREV: u64 = 3
+const K_NEXT: u64 = 4
+const K_BLOCKS: u64 = 5
+const K_PREVIEW: u64 = 6
+const K_CELL0: u64 = 100
+
+static mut s_blob: [u8; 719] = "20-7F Basic Latin|A0-FF Latin-1 Supplement|100-17F Latin Extended-A|180-24F Latin Extended-B|250-2AF IPA Extensions|370-3FF Greek and Coptic|400-4FF Cyrillic|2000-206F General Punctuation|2070-209F Superscripts and Subscripts|20A0-20CF Currency Symbols|2100-214F Letterlike Symbols|2150-218F Number Forms|2190-21FF Arrows|2200-22FF Mathematical Operators|2300-23FF Miscellaneous Technical|2500-257F Box Drawing|2580-259F Block Elements|25A0-25FF Geometric Shapes|2600-26FF Miscellaneous Symbols|2700-27BF Dingbats|2800-28FF Braille Patterns|FFF0-FFFF Specials|1F300-1F5FF Miscellaneous Symbols and Pictographs|1F600-1F64F Emoticons|1F680-1F6FF Transport and Map Symbols|1F900-1F9FF Supplemental Symbols and Pictographs\0"
+static mut k_title: [u8; 14] = "charmap.title\0"
+static mut k_search: [u8; 15] = "charmap.search\0"
+static mut k_only: [u8; 13] = "charmap.only\0"
+static mut k_prev: [u8; 13] = "charmap.prev\0"
+static mut k_next: [u8; 13] = "charmap.next\0"
+static mut k_jump: [u8; 13] = "charmap.jump\0"
+static mut k_copied: [u8; 15] = "charmap.copied\0"
+static mut k_missing: [u8; 16] = "charmap.missing\0"
+static mut k_nomatch: [u8; 16] = "charmap.nomatch\0"
+static mut k_empty: [u8; 14] = "charmap.empty\0"
+static mut k_page: [u8; 13] = "charmap.page\0"
+static mut k_app: [u8; 8] = "charmap\0"
+static mut s_nocheck_arg: [u8; 8] = "nocheck\0"
+
+static mut s_lo: [u64; 32] = [0 as u64; 32]
+static mut s_hi: [u64; 32] = [0 as u64; 32]
+static mut s_noff: [u64; 32] = [0 as u64; 32]
+static mut s_nlen: [u64; 32] = [0 as u64; 32]
+static mut s_list: [u64; 1024] = [0 as u64; 1024]
+static mut s_n: u64 = 0
+static mut s_present: u64 = 0
+static mut s_blk: u64 = 0
+static mut s_page: u64 = 0
+static mut s_only: bool = true
+static mut s_sel: u64 = 0
+static mut s_jump: bool = false
+static mut s_jlo: u64 = 0
+static mut s_jhi: u64 = 0
+static mut s_nocheck: bool = false
+static mut s_status: [u8; 160] = [0 as u8; 160]
+static mut s_pagebuf: [u8; 64] = [0 as u8; 64]
+static mut s_rowbuf: [u8; 96] = [0 as u8; 96]
+static mut s_lastq: [u8; 80] = [0 as u8; 80]
+static mut s_rep_at: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, v as u8)
+}
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    ulib.sayn(v)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn hexval(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// append the text at `src` to the zero-terminated buffer `dst` (cap octets in all)
+fn app(dst: u64, cap: u64, src: u64) {
+    var n: u64 = ulib.length(dst)
+    var i: u64 = 0
+    while rd8(src + i) != 0 && n + 1 < cap {
+        wr8(dst + n, rd8(src + i))
+        n = n + 1
+        i = i + 1
+    }
+    wr8(dst + n, 0)
+}
+
+// "U+20AC" into `out`; returns the length
+fn hex_put(v: u64, out: u64) -> u64 {
+    var d: [u8; 12] = [0 as u8; 12]
+    var n: u64 = 0
+    var t: u64 = v
+    while t != 0 || n == 0 {
+        let h: u64 = t & 15
+        if h < 10 {
+            d[(n) as usize] = (48 + h) as u8
+        } else {
+            d[(n) as usize] = (55 + h) as u8
+        }
+        n = n + 1
+        t = t >> 4
+    }
+    var w: u64 = n
+    if w < 4 {
+        w = 4
+    }
+    wr8(out, 85)
+    wr8(out + 1, 43)
+    var at: u64 = 2
+    var z: u64 = w
+    while z > n {
+        wr8(out + at, 48)
+        at = at + 1
+        z = z - 1
+    }
+    var k: u64 = n
+    while k > 0 {
+        k = k - 1
+        wr8(out + at, d[(k) as usize] as u64)
+        at = at + 1
+    }
+    wr8(out + at, 0)
+    return at
+}
+
+fn say_hex(v: u64) {
+    var b: [u8; 20] = [0 as u8; 20]
+    let _n: u64 = hex_put(v, (&b[0 as usize]) as u64)
+    say((&b[0 as usize]) as u64)
+}
+
+// bare hex digits (no "U+"), for lo= / hi=
+fn say_hex_bare(v: u64) {
+    var b: [u8; 20] = [0 as u8; 20]
+    let _n: u64 = hex_put(v, (&b[0 as usize]) as u64)
+    say((&b[0 as usize]) as u64 + 2)
+}
+
+// UTF-8 of a code point into `out`; returns the octet count
+fn utf8_put(cp: u64, out: u64) -> u64 {
+    if cp < 128 {
+        wr8(out, cp)
+        wr8(out + 1, 0)
+        return 1
+    }
+    if cp < 2048 {
+        wr8(out, 192 | (cp >> 6))
+        wr8(out + 1, 128 | (cp & 63))
+        wr8(out + 2, 0)
+        return 2
+    }
+    if cp < 65536 {
+        wr8(out, 224 | (cp >> 12))
+        wr8(out + 1, 128 | ((cp >> 6) & 63))
+        wr8(out + 2, 128 | (cp & 63))
+        wr8(out + 3, 0)
+        return 3
+    }
+    wr8(out, 240 | (cp >> 18))
+    wr8(out + 1, 128 | ((cp >> 12) & 63))
+    wr8(out + 2, 128 | ((cp >> 6) & 63))
+    wr8(out + 3, 128 | (cp & 63))
+    wr8(out + 4, 0)
+    return 4
+}
+
+// ------------------------------------------------------------------ blocks
+fn parse_blocks() {
+    let base: u64 = (&s_blob[0 as usize]) as u64
+    var p: u64 = base
+    var i: u64 = 0
+    while i < NB {
+        var v: u64 = 0
+        while rd8(p) != 45 {
+            v = v * 16 + hexval(rd8(p))
+            p = p + 1
+        }
+        s_lo[(i) as usize] = v
+        p = p + 1
+        v = 0
+        while rd8(p) != 32 {
+            v = v * 16 + hexval(rd8(p))
+            p = p + 1
+        }
+        s_hi[(i) as usize] = v
+        p = p + 1
+        s_noff[(i) as usize] = p - base
+        var n: u64 = 0
+        while rd8(p + n) != 124 && rd8(p + n) != 0 {
+            n = n + 1
+        }
+        s_nlen[(i) as usize] = n
+        p = p + n + 1
+        i = i + 1
+    }
+}
+
+fn blo(b: u64) -> u64 {
+    if b < NB {
+        return s_lo[(b) as usize]
+    }
+    return s_jlo
+}
+
+fn bhi(b: u64) -> u64 {
+    if b < NB {
+        return s_hi[(b) as usize]
+    }
+    return s_jhi
+}
+
+fn blocks_rows() -> u64 {
+    if s_jump {
+        return NB + 1
+    }
+    return NB
+}
+
+// the name of block `b` copied into the row buffer (zero-terminated)
+fn name_of(b: u64) -> u64 {
+    let rb: u64 = (&s_rowbuf[0 as usize]) as u64
+    if b >= NB {
+        wr8(rb, 0)
+        app(rb, 96, msg.get((&k_jump[0 as usize]) as u64))
+        return rb
+    }
+    let base: u64 = (&s_blob[0 as usize]) as u64
+    var i: u64 = 0
+    while i < s_nlen[(b) as usize] && i < 90 {
+        wr8(rb + i, rd8(base + s_noff[(b) as usize] + i))
+        i = i + 1
+    }
+    wr8(rb + i, 0)
+    return rb
+}
+
+fn blk_cell(row: u64, col: u64) -> u64 {
+    return name_of(row)
+}
+
+fn has(cp: u64) -> bool {
+    if s_nocheck {
+        return true
+    }
+    return fuiglyph.has_glyph(fuiglyph.ROLE_UI, cp)
+}
+
+fn pages() -> u64 {
+    if s_n == 0 {
+        return 1
+    }
+    return (s_n + PAGE - 1) / PAGE
+}
+
+fn page_text() {
+    let pb: u64 = (&s_pagebuf[0 as usize]) as u64
+    wr8(pb, 0)
+    app(pb, 64, msg.get((&k_page[0 as usize]) as u64))
+    var b: [u8; 24] = [0 as u8; 24]
+    let bp: u64 = (&b[0 as usize]) as u64
+    wr8(bp, 32)
+    var n: u64 = 1 + ulib.digits(s_page + 1, bp + 1)
+    wr8(bp + n, 47)
+    n = n + 1
+    n = n + ulib.digits(pages(), bp + n)
+    wr8(bp + n, 0)
+    app(pb, 64, bp)
+}
+
+fn say_block() {
+    var s_a: [u8; 16] = "charmap: block \0"
+    var s_b: [u8; 5] = " lo=\0"
+    var s_c: [u8; 5] = " hi=\0"
+    var s_d: [u8; 8] = " shown=\0"
+    var s_e: [u8; 10] = " present=\0"
+    var s_f: [u8; 7] = " only=\0"
+    var s_g: [u8; 7] = " page=\0"
+    var s_h: [u8; 7] = " name=\0"
+    say((&s_a[0 as usize]) as u64)
+    sayn(s_blk)
+    say((&s_b[0 as usize]) as u64)
+    say_hex_bare(blo(s_blk))
+    say((&s_c[0 as usize]) as u64)
+    say_hex_bare(bhi(s_blk))
+    say((&s_d[0 as usize]) as u64)
+    sayn(s_n)
+    say((&s_e[0 as usize]) as u64)
+    sayn(s_present)
+    say((&s_f[0 as usize]) as u64)
+    if s_only {
+        sayn(1)
+    } else {
+        sayn(0)
+    }
+    say((&s_g[0 as usize]) as u64)
+    sayn(s_page)
+    var s_sl: [u8; 2] = "/\0"
+    say((&s_sl[0 as usize]) as u64)
+    sayn(pages())
+    say((&s_h[0 as usize]) as u64)
+    say(name_of(s_blk))
+    nl()
+}
+
+// ------------------------------------------------------------------ the list of the shown block
+fn fill_list() {
+    s_n = 0
+    s_present = 0
+    let lo: u64 = blo(s_blk)
+    let hi: u64 = bhi(s_blk)
+    var c: u64 = lo
+    while c <= hi && c - lo < LIST_MAX {
+        let h: bool = has(c)
+        if h {
+            s_present = s_present + 1
+        }
+        if (h || !s_only) && s_n < LIST_MAX {
+            s_list[(s_n) as usize] = c
+            s_n = s_n + 1
+        }
+        c = c + 1
+    }
+    if s_page >= pages() {
+        s_page = pages() - 1
+    }
+    let st: u64 = (&s_status[0 as usize]) as u64
+    wr8(st, 0)
+    if s_n == 0 {
+        app(st, 160, msg.get((&k_empty[0 as usize]) as u64))
+    }
+}
+
+fn rebuild_list() {
+    fill_list()
+    page_text()
+    say_block()
+}
+
+fn cell_cp(idx: u64) -> u64 {
+    let k: u64 = s_page * PAGE + idx
+    if k < s_n {
+        return s_list[(k) as usize]
+    }
+    return 0
+}
+
+static mut s_rep: bool = false
+static mut s_rep_b: u64 = 0
+
+fn request_refresh() {
+    fuiscene.refresh()
+    s_rep = true
+    s_rep_b = fuiscene.builds()
+}
+
+fn find_block(cp: u64) -> u64 {
+    var b: u64 = 0
+    while b < NB {
+        if cp >= s_lo[(b) as usize] && cp <= s_hi[(b) as usize] {
+            return b
+        }
+        b = b + 1
+    }
+    return NB
+}
+
+fn select_block(b: u64, cp: u64) {
+    s_blk = b
+    s_page = 0
+    s_sel = 0
+    if cp != 0 && s_only && !has(cp) {
+        s_only = false
+        fuiscene.set_value(K_ONLY, 0)
+    }
+    fill_list()
+    if cp != 0 {
+        var i: u64 = 0
+        while i < s_n {
+            if s_list[(i) as usize] == cp {
+                s_page = i / PAGE
+            }
+            i = i + 1
+        }
+        s_sel = cp
+    }
+    page_text()
+    say_block()
+    fuiscene.table_set_sel(K_BLOCKS, b)
+    request_refresh()
+}
+
+fn say_goto(cp: u64) {
+    var s_a: [u8; 15] = "charmap: goto \0"
+    var s_b: [u8; 10] = " present=\0"
+    var s_c: [u8; 8] = " block=\0"
+    say((&s_a[0 as usize]) as u64)
+    say_hex(cp)
+    say((&s_b[0 as usize]) as u64)
+    if has(cp) {
+        sayn(1)
+    } else {
+        sayn(0)
+    }
+    say((&s_c[0 as usize]) as u64)
+    sayn(s_blk)
+    nl()
+}
+
+fn nomatch() {
+    var s_a: [u8; 17] = "charmap: nomatch\0"
+    say((&s_a[0 as usize]) as u64)
+    nl()
+    let st: u64 = (&s_status[0 as usize]) as u64
+    wr8(st, 0)
+    app(st, 160, msg.get((&k_nomatch[0 as usize]) as u64))
+    request_refresh()
+}
+
+fn goto_cp(cp: u64) {
+    if cp < 32 || cp > 1114111 {
+        nomatch()
+        return
+    }
+    var b: u64 = find_block(cp)
+    if b == NB {
+        s_jump = true
+        s_jlo = cp - (cp & 127)
+        s_jhi = s_jlo + 127
+        if s_jhi > 1114111 {
+            s_jhi = 1114111
+        }
+    }
+    select_block(b, cp)
+    say_goto(cp)
+}
+
+fn icontains(h: u64, nd: u64) -> bool {
+    let hn: u64 = ulib.length(h)
+    let nn: u64 = ulib.length(nd)
+    if nn == 0 || nn > hn {
+        return false
+    }
+    var i: u64 = 0
+    while i + nn <= hn {
+        var j: u64 = 0
+        while j < nn && lower(rd8(h + i + j)) == lower(rd8(nd + j)) {
+            j = j + 1
+        }
+        if j == nn {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// the hex number in q[from..] (all digits must be hex, 1..6 of them); 0xFFFFFFFFFFFFFFFF when it is not one
+fn parse_hex(q: u64, from: u64) -> u64 {
+    let n: u64 = ulib.length(q)
+    if n <= from || n - from > 6 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var v: u64 = 0
+    var i: u64 = from
+    while i < n {
+        let h: u64 = hexval(rd8(q + i))
+        if h > 15 {
+            return 0xFFFFFFFFFFFFFFFF
+        }
+        v = v * 16 + h
+        i = i + 1
+    }
+    return v
+}
+
+fn decode1(q: u64) -> u64 {
+    let c: u64 = rd8(q)
+    if c >= 240 {
+        return ((c & 7) << 18) | ((rd8(q + 1) & 63) << 12) | ((rd8(q + 2) & 63) << 6) | (rd8(q + 3) & 63)
+    }
+    if c >= 224 {
+        return ((c & 15) << 12) | ((rd8(q + 1) & 63) << 6) | (rd8(q + 2) & 63)
+    }
+    return ((c & 31) << 6) | (rd8(q + 1) & 63)
+}
+
+fn apply_search(q: u64) {
+    let n: u64 = ulib.length(q)
+    if n == 0 {
+        return
+    }
+    let c0: u64 = lower(rd8(q))
+    let c1: u64 = lower(rd8(q + 1))
+    if n >= 3 && ((c0 == 117 && c1 == 43) || (c0 == 48 && c1 == 120)) {
+        let v: u64 = parse_hex(q, 2)
+        if v == 0xFFFFFFFFFFFFFFFF {
+            nomatch()
+        } else {
+            goto_cp(v)
+        }
+        return
+    }
+    if n == 1 {
+        if rd8(q) < 128 {
+            goto_cp(rd8(q))
+        } else {
+            nomatch()
+        }
+        return
+    }
+    var b: u64 = 0
+    while b < NB {
+        if icontains(name_of(b), q) {
+            select_block(b, 0)
+            return
+        }
+        b = b + 1
+    }
+    let hv: u64 = parse_hex(q, 0)
+    if hv != 0xFFFFFFFFFFFFFFFF {
+        goto_cp(hv)
+        return
+    }
+    if rd8(q) >= 192 {
+        goto_cp(decode1(q))
+        return
+    }
+    nomatch()
+}
+
+// ------------------------------------------------------------------ copy
+fn do_copy(cp: u64) {
+    if cp == 0 {
+        return
+    }
+    var b: [u8; 8] = [0 as u8; 8]
+    var back: [u8; 16] = [0 as u8; 16]
+    let n: u64 = utf8_put(cp, (&b[0 as usize]) as u64)
+    let r: u64 = wlib.clip_put((&b[0 as usize]) as u64, n)
+    let m: u64 = wlib.clip_take((&back[0 as usize]) as u64, 15)
+    var same: bool = !ulib.bad(r) && !ulib.bad(m) && m == n
+    var i: u64 = 0
+    while same && i < n {
+        if b[(i) as usize] != back[(i) as usize] {
+            same = false
+        }
+        i = i + 1
+    }
+    s_sel = cp
+    let present: bool = has(cp)
+    var s_a: [u8; 15] = "charmap: copy \0"
+    var s_b: [u8; 10] = " present=\0"
+    var s_c: [u8; 6] = " len=\0"
+    var s_d: [u8; 7] = " clip=\0"
+    var s_ok: [u8; 3] = "ok\0"
+    var s_no: [u8; 5] = "fail\0"
+    say((&s_a[0 as usize]) as u64)
+    say_hex(cp)
+    say((&s_b[0 as usize]) as u64)
+    if present {
+        sayn(1)
+    } else {
+        sayn(0)
+    }
+    say((&s_c[0 as usize]) as u64)
+    sayn(n)
+    say((&s_d[0 as usize]) as u64)
+    if same {
+        say((&s_ok[0 as usize]) as u64)
+    } else {
+        say((&s_no[0 as usize]) as u64)
+    }
+    nl()
+    // the line under the grid: the character, its number, and what happened
+    let st: u64 = (&s_status[0 as usize]) as u64
+    wr8(st, 0)
+    if present {
+        app(st, 160, (&b[0 as usize]) as u64)
+        var sp2: [u8; 2] = " \0"
+        app(st, 160, (&sp2[0 as usize]) as u64)
+    }
+    var hb: [u8; 20] = [0 as u8; 20]
+    let _h: u64 = hex_put(cp, (&hb[0 as usize]) as u64)
+    app(st, 160, (&hb[0 as usize]) as u64)
+    var sp3: [u8; 3] = "  \0"
+    app(st, 160, (&sp3[0 as usize]) as u64)
+    if present {
+        app(st, 160, msg.get((&k_copied[0 as usize]) as u64))
+    } else {
+        app(st, 160, msg.get((&k_missing[0 as usize]) as u64))
+    }
+    request_refresh()
+}
+
+// ------------------------------------------------------------------ painting
+fn glyph_text(cp: u64, out: u64) -> bool {
+    if has(cp) {
+        let _n: u64 = utf8_put(cp, out)
+        return true
+    }
+    let _m: u64 = utf8_put(215, out)
+    return false
+}
+
+fn cell_draw(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    // the button face is painted first: wipe it, whatever the cell shows
+    fuiscene.cv_rect(x, y, w, h, fuiscene.R_SURFACE)
+    let cp: u64 = cell_cp(key - K_CELL0)
+    if cp == 0 {
+        return
+    }
+    var b: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&b[0 as usize]) as u64
+    let present: bool = glyph_text(cp, bp)
+    if present {
+        fuiscene.cv_round(x + 1, y + 1, w - 2, h - 2, 4, fuiscene.R_FIELD)
+    } else {
+        fuiscene.cv_ring(x + 1, y + 1, w - 2, h - 2, 4, fuiscene.R_BORDER)
+    }
+    if cp == s_sel {
+        fuiscene.cv_ring(x, y, w, h, 5, fuiscene.R_ACCENT)
+        fuiscene.cv_ring(x + 1, y + 1, w - 2, h - 2, 4, fuiscene.R_ACCENT)
+    }
+    let sz: u64 = fuiscene.sp(18)
+    let tw: u64 = fuiscene.text_width(bp, sz)
+    var tx: u64 = x
+    if tw < w {
+        tx = x + (w - tw) / 2
+    }
+    var role: u64 = fuiscene.R_TEXT
+    if !present {
+        role = fuiscene.R_MUTED
+    }
+    fuiscene.text_role(tx, y + h / 2 + fuiscene.sp(6), w, bp, sz, false, role)
+}
+
+fn preview_draw(x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.cv_round(x, y, w, h, 8, fuiscene.R_FIELD)
+    if s_sel == 0 {
+        return
+    }
+    var b: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&b[0 as usize]) as u64
+    let present: bool = glyph_text(s_sel, bp)
+    let sz: u64 = fuiscene.sp(36)
+    let tw: u64 = fuiscene.text_width(bp, sz)
+    var tx: u64 = x
+    if tw < w {
+        tx = x + (w - tw) / 2
+    }
+    var role: u64 = fuiscene.R_TEXT
+    if !present {
+        role = fuiscene.R_MUTED
+    }
+    fuiscene.text_role(tx, y + h / 2 + fuiscene.sp(12), w, bp, sz, false, role)
+}
+
+// ------------------------------------------------------------------ the window
+fn build() {
+    let col: usize = fuiscene.root()
+    let top: usize = fuiscene.row(col)
+    fuiscene.set_gap(top, 12)
+    let _e: usize = fuiscene.entry(top, K_SEARCH, 330, 0)
+    fuiscene.entry_hint(K_SEARCH, msg.get((&k_search[0 as usize]) as u64))
+    let _c: usize = fuiscene.check(top, msg.get((&k_only[0 as usize]) as u64), K_ONLY, s_only)
+    let body: usize = fuiscene.row(col)
+    fuiscene.set_gap(body, 12)
+    let _t: usize = fuiscene.table(body, K_BLOCKS, 220, 256, 1, false, blocks_rows(), blk_cell)
+    let grid: usize = fuiscene.column(body)
+    fuiscene.set_gap(grid, 0)
+    var r: u64 = 0
+    while r < 8 {
+        let rw: usize = fuiscene.row(grid)
+        fuiscene.set_gap(rw, 0)
+        var c: u64 = 0
+        while c < COLS {
+            let cn: usize = fuiscene.canvas2(rw, K_CELL0 + r * COLS + c, CELL, CELL, cell_draw)
+            fuiscene.set_noshrink(cn)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    let bot: usize = fuiscene.row(col)
+    fuiscene.set_gap(bot, 12)
+    let pv: usize = fuiscene.canvas(bot, K_PREVIEW, 56, 56, preview_draw)
+    fuiscene.set_noshrink(pv)
+    let st: usize = fuiscene.label(bot, (&s_status[0 as usize]) as u64)
+    fuiscene.set_grow(st, 1)
+    let b1: usize = fuiscene.button(bot, msg.get((&k_prev[0 as usize]) as u64), K_PREV)
+    fuiscene.set_noshrink(b1)
+    fuiscene.set_size(b1, 96, 36)
+    let _pg: usize = fuiscene.label(bot, (&s_pagebuf[0 as usize]) as u64)
+    let b2: usize = fuiscene.button(bot, msg.get((&k_next[0 as usize]) as u64), K_NEXT)
+    fuiscene.set_noshrink(b2)
+    fuiscene.set_size(b2, 96, 36)
+}
+
+fn say_rect(name: u64, key: u64) {
+    let g: u64 = fuiscene.key_geom(key)
+    if g == 0 {
+        return
+    }
+    var s_a: [u8; 20] = "charmap: rect name=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_ax: [u8; 5] = " ax=\0"
+    var s_ay: [u8; 5] = " ay=\0"
+    let x: u64 = g >> 48
+    let y: u64 = (g >> 32) & 65535
+    let w0: u64 = fuiapp.win()
+    say((&s_a[0 as usize]) as u64)
+    say(name)
+    say((&s_x[0 as usize]) as u64)
+    sayn(x)
+    say((&s_y[0 as usize]) as u64)
+    sayn(y)
+    say((&s_w[0 as usize]) as u64)
+    sayn((g >> 16) & 65535)
+    say((&s_h[0 as usize]) as u64)
+    sayn(g & 65535)
+    say((&s_ax[0 as usize]) as u64)
+    sayn(wlib.win_cx(w0) + x)
+    say((&s_ay[0 as usize]) as u64)
+    sayn(wlib.win_cy(w0) + y)
+    nl()
+}
+
+fn say_rects() {
+    var n_cell0: [u8; 6] = "cell0\0"
+    var n_sel: [u8; 4] = "sel\0"
+    var n_search: [u8; 7] = "search\0"
+    var n_only: [u8; 5] = "only\0"
+    var n_next: [u8; 5] = "next\0"
+    var n_prev: [u8; 5] = "prev\0"
+    say_rect((&n_cell0[0 as usize]) as u64, K_CELL0)
+    say_rect((&n_search[0 as usize]) as u64, K_SEARCH)
+    say_rect((&n_only[0 as usize]) as u64, K_ONLY)
+    say_rect((&n_next[0 as usize]) as u64, K_NEXT)
+    say_rect((&n_prev[0 as usize]) as u64, K_PREV)
+    var i: u64 = 0
+    while i < PAGE {
+        if s_sel != 0 && cell_cp(i) == s_sel {
+            say_rect((&n_sel[0 as usize]) as u64, K_CELL0 + i)
+        }
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 20] = "charmap: no surface\0"
+    var s_go: [u8; 15] = "charmap: ready\0"
+    let _mi: u64 = msg.init()
+    if ulib.arg_count(args) >= 2 {
+        if ulib.streq(ulib.arg_at(args, 1), (&s_nocheck_arg[0 as usize]) as u64) {
+            s_nocheck = true
+        }
+    }
+    parse_blocks()
+    s_blk = 0
+    fill_list()
+    page_text()
+    if !fuiscene.open(120, 80, 800, 440, msg.get((&k_title[0 as usize]) as u64), build) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    fuiscene.set_app((&k_app[0 as usize]) as u64)
+    var first: bool = true
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            say_block()
+            say_rects()
+            say((&s_go[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if s_rep && fuiscene.builds() > s_rep_b {
+            s_rep = false
+            say_rects()
+        }
+        if key == K_ONLY {
+            s_only = fuiscene.value_of(K_ONLY) != 0
+            s_page = 0
+            s_sel = 0
+            rebuild_list()
+            request_refresh()
+        } else if key == K_PREV {
+            if s_page > 0 {
+                s_page = s_page - 1
+                page_text()
+                say_block()
+                request_refresh()
+            }
+        } else if key == K_NEXT {
+            if s_page + 1 < pages() {
+                s_page = s_page + 1
+                page_text()
+                say_block()
+                request_refresh()
+            }
+        } else if key == K_BLOCKS {
+            let row: u64 = fuiscene.table_sel(K_BLOCKS)
+            if row != s_blk && row < blocks_rows() {
+                select_block(row, 0)
+            }
+        } else if key >= K_CELL0 && key < K_CELL0 + PAGE {
+            do_copy(cell_cp(key - K_CELL0))
+        }
+        // the search field is read after every frame; a changed text is a new search
+        let q: u64 = fuiscene.entry_text(K_SEARCH)
+        if !ulib.streq(q, (&s_lastq[0 as usize]) as u64) {
+            wr8((&s_lastq[0 as usize]) as u64, 0)
+            app((&s_lastq[0 as usize]) as u64, 80, q)
+            apply_search(q)
+        }
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
