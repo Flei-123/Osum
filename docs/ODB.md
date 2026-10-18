@@ -192,12 +192,12 @@ Unimplemented → `ERR code=EUNSUP`.
 | `shell` | `cols`, `rows`, `cmd` (default login shell), `cwd`, `env` | in 0, out 1 (stdout+stderr merged, pty) | `exit` — runs until the shell exits or CANCEL; resize: `REQ resize cols= rows=` with same session id in key `sid` |
 | `push` | `path`, `size`, `mode` (octal, default 644), `sha256` (optional, verified at end), `overwrite=1` | file 3 host→agent, ACKs | `size`, `sha256`, `crc32` |
 | `pull` | `path`, `offset` (resume, default 0) | file 3 agent→host, ACKs from host | `size`, `sha256`, `crc32`, `mtime` |
-| `shot` | `display` (default 0), `format=png\|ppm\|raw` (default png; raw = BGRA 32 bit), `scale` (percent, default 100) | shot 4 | `w`, `h`, `format`, `bytes` |
-| `input` | `kind=key`: `key` (name: `Enter`,`Esc`,`F5`,`a`,… ), `mods` (`ctrl+shift+alt+super`), `action=press\|down\|up` (default press); `kind=text`: `text` (UTF-8, typed char by char, `delay_ms`); `kind=mouse`: `x`,`y` (absolute px) or `dx`,`dy`, `button=left\|right\|middle`, `action=click\|dblclick\|down\|up\|move`; `kind=scroll`: `dy` | – | `ok=1` (`n` events injected) |
+| `shot` | `display` (default 0, only 0), `format=png` (ppm/raw -> `EUNSUP`), `scale` (percent 5-100, **default 50**; the agent halves it until the PNG fits its 1 MiB buffer), `pattern=1` (built-in 320x200 test image, needs no screen) | shot 4 | `w`, `h`, `src_w`, `src_h`, `format`, `bytes` |
+| `input` | `kind=key`: `key` (name: `Enter`,`Esc`,`F5`,`a`,… ), `mods` (`ctrl+shift+alt+super`), `action=press\|down\|up` (default press); `kind=text`: `text` (ASCII, US layout scancodes, `delay_ms`); `kind=mouse`: `x`,`y` (absolute px) and `button=left\|right\|middle`, `action=click\|dblclick\|down\|up\|move`. **Not implemented** (-> `EUNSUP`): `kind=scroll`, relative mouse (`dx`,`dy`), non-ASCII text. A permit covers 200 key strokes; the agent re-arms it itself | – | `ok=1` (`n` events injected) |
 | `ps` | `full=1` (optional) | out 1: TSV text, header `pid\tppid\tuid\tstate\tcpu_pct\trss_kb\tname\tcmdline` | `count` |
 | `kill` | `pid`, `sig` (number or name, default TERM) | – | `ok=1` |
 | `logs` | `src=kernel\|app\|all` or `name=<app>`, `lines` (tail, default 200), `follow=1` (until CANCEL), `since_ms` | log 5 | `lines`, `bytes` |
-| `crashdump` | `op=list\|get\|clear`, `id` | list: out 1 (text lines `id size time summary`); get: file 3 | `count` / `size`,`sha256` |
+| `crashdump` | `op=list\|get\|clear`, `id` = file name in `/var/crash` (e.g. `1760000000.txt`) | list: out 1 (text lines `id size time summary`, time = number in the file name); get: file 3 | `count` / `size`,`sha256` |
 | `reboot` | `mode=normal\|force` | – | `ok=1` (sent BEFORE the action; connection then drops) |
 | `shutdown` | `mode=normal\|force`, `poweroff=1` | – | `ok=1` (same) |
 

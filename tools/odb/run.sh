@@ -96,7 +96,7 @@ for p in $PROGS; do
     esac
 done
 SPEC="$SPEC /bin/victim=$B/sleep.elf"
-DIRS="/bin/ /sbin/ /etc/ /dev/ /proc/ /run/@755:0:0 /d/ /tmp/@777:0:0"
+DIRS="/bin/ /sbin/ /etc/ /dev/ /proc/ /run/@755:0:0 /d/ /tmp/@777:0:0 /var/ /var/crash/"
 mkimg() { # out inittab [extra spec...]
     local out=$1 it=$2; shift 2
     python3 tools/osum/mkfs.py build "$out" $BLOCKS $DIRS $SPEC \
@@ -232,6 +232,44 @@ PCT=$(( (C1 - C0) * 100 / 500 ))   # ticks are 1/100 s; 5 s window -> percent of
 note "qemu used ${PCT}% of a host core while idle (before: ~100+ with the busy loop)"
 [ "$PCT" -le 60 ] && ok "idle agent is off the CPU (${PCT}% of one core, limit 60)" || bad "idle agent burns ${PCT}% of a core"
 od info >/dev/null 2>&1; is "agent answers after the idle phase (wake preamble)" "$?" "0"
+
+echo "== 7c. shot / input / crashdump =="
+# shot pattern=1: the agent's own test image (no screen needed); decoded on the host (zlib + unfilter) and compared pixel by pixel
+od shot "$TMPD/pat100.png" --pattern --scale 100 >"$TMPD/shot.txt" 2>&1; is "shot pattern scale=100 exit" "$?" "0"
+note "$(tail -1 "$TMPD/shot.txt")"
+python3 -I tools/odb/pngcheck.py "$TMPD/pat100.png" 320 200 >"$TMPD/pc.txt" 2>&1; rc=$?
+is "shot 320x200 pixel-exact" "$rc" "0"; [ "$rc" = 0 ] || sed 's/^/        /' "$TMPD/pc.txt"
+od shot "$TMPD/pat.png" --pattern >/dev/null 2>&1; is "shot default scale exit" "$?" "0"
+python3 -I tools/odb/pngcheck.py "$TMPD/pat.png" 160 100 >"$TMPD/pc.txt" 2>&1; rc=$?
+is "shot default scale = 50 -> 160x100 pixel-exact" "$rc" "0"; [ "$rc" = 0 ] || sed 's/^/        /' "$TMPD/pc.txt"
+od shot "$TMPD/pat25.png" --pattern --scale 25 >/dev/null 2>&1
+python3 -I tools/odb/pngcheck.py "$TMPD/pat25.png" 80 50 >"$TMPD/pc.txt" 2>&1; is "shot scale=25 -> 80x50 pixel-exact" "$?" "0"
+od shot "$TMPD/x.ppm" --pattern --format ppm >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "shot ppm refused (exit $rc)" || bad "shot ppm accepted"
+printf 'garbage' > "$TMPD/junk.png"; python3 -I tools/odb/pngcheck.py "$TMPD/junk.png" 320 200 >/dev/null 2>&1; is "pngcheck control: junk rejected" "$?" "2"
+python3 -I - "$TMPD/pat100.png" "$TMPD/pat_bad.png" <<'PYEOF'
+import sys, zlib, struct
+d = bytearray(open(sys.argv[1], "rb").read())
+d[-30] ^= 1   # flip a byte inside the IDAT data; CRC check must catch it
+open(sys.argv[2], "wb").write(d)
+PYEOF
+python3 -I tools/odb/pngcheck.py "$TMPD/pat_bad.png" 320 200 >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "pngcheck control: damaged PNG rejected (exit $rc)" || bad "pngcheck accepted a damaged PNG"
+out=$(od input key a 2>&1); rc=$?; is "input key exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input key: $out";; *) bad "input key: '$out'";; esac
+out=$(od input text "hello 42" --delay-ms 1 2>&1); rc=$?; is "input text exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input text: $out";; *) bad "input text: '$out'";; esac
+out=$(od input key enter --mods ctrl 2>&1); is "input key with modifier exit" "$?" "0"
+out=$(od input mouse 100 50 --button left --action click 2>&1); rc=$?; is "input mouse click exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input mouse: $out";; *) bad "input mouse: '$out'";; esac
+od input key nosuchkey >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "input unknown key refused (exit $rc)" || bad "input unknown key accepted"
+od input scroll 3 >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "input scroll refused as unsupported (exit $rc)" || bad "input scroll accepted"
+printf 'panic: test dump\nsecond line\n' > "$TMPD/crash.txt"
+od crash list >"$TMPD/cl.txt" 2>&1; is "crash list (empty) exit" "$?" "0"
+[ -z "$(tr -d ' \n' < "$TMPD/cl.txt")" ] && ok "crash list empty before the dump" || bad "crash list not empty: $(head -2 "$TMPD/cl.txt")"
+od push "$TMPD/crash.txt" /var/crash/1760000000.txt >/dev/null 2>&1; is "push crash file exit" "$?" "0"
+od crash list >"$TMPD/cl.txt" 2>&1; is "crash list exit" "$?" "0"
+grep -q '^1760000000.txt 29 1760000000 panic: test dump' "$TMPD/cl.txt" && ok "crash list line: id size time summary" || { bad "crash list line"; sed 's/^/        /' "$TMPD/cl.txt" | head -3; }
+od crash get 1760000000.txt "$TMPD/crash.back" >/dev/null 2>&1; is "crash get exit" "$?" "0"
+cmp -s "$TMPD/crash.txt" "$TMPD/crash.back" && ok "crash get content identical" || bad "crash get content differs"
+od crash get nosuch.txt "$TMPD/none" >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "crash get unknown id refused (exit $rc)" || bad "crash get unknown id returned 0"
+od crash clear 1760000000.txt >/dev/null 2>&1; is "crash clear exit" "$?" "0"
+od crash list 2>&1 | grep -q 1760000000 && bad "crash dump still listed after clear" || ok "crash dump gone after clear"
 
 echo "== 8. reboot =="
 ODB_T=30 od reboot >/dev/null 2>&1; note "reboot exit $?"

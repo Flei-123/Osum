@@ -165,8 +165,9 @@ def cmd_pull(ns):
 def cmd_shot(ns):
     s = open_session(ns)
     t0 = time.time()
-    r, body = s.collect_stream("shot", {"format": ns.format, "scale": ns.scale if ns.scale != 100 else None,
-                                        "display": ns.display or None}, proto.SHOT, timeout=ns.timeout)
+    r, body = s.collect_stream("shot", {"format": ns.format, "scale": ns.scale,
+                                        "display": ns.display or None,
+                                        "pattern": 1 if ns.pattern else None}, proto.SHOT, timeout=ns.timeout)
     want = r.geti("bytes")
     if want is not None and want != len(body):
         print("odbc: shot incomplete (%d of %d bytes)" % (len(body), want), file=sys.stderr)
@@ -327,8 +328,9 @@ def build_parser():
     sp = sub.add_parser("shot")
     sp.add_argument("out", nargs="?", default="shot.png")
     sp.add_argument("--format", default="png", choices=["png", "ppm", "raw"])
-    sp.add_argument("--scale", type=int, default=100)
+    sp.add_argument("--scale", type=int, default=None, help="percent; omitted = agent default (50)")
     sp.add_argument("--display", type=int, default=0)
+    sp.add_argument("--pattern", action="store_true", help="agent test image (no screen needed)")
     sp.set_defaults(fn=cmd_shot)
     sp = sub.add_parser("input")
     sp.add_argument("kind", choices=["key", "text", "mouse", "scroll"])
