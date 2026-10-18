@@ -8812,13 +8812,24 @@ fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     // nicht stoeren laesst, ist genau das, was diese Runde beheben soll.
     // Mit `nosig` kann nichts zugestellt werden, und dann schlaeft dieser
     // Aufruf seine volle Zeit -- die Gegenprobe dazu.
-    var left: u64 = ticks
-    while left > 0 {
+    // r1087 (18.10.2026): ONE sleep for the whole span. It used to sleep tick by tick
+    // (a wake + context switch 100x/s for EVERY sleeping task, whatever the length of
+    // the sleep: VirtualBox idle desktop, 10 tasks -> ~30 % of a core). A signal
+    // wakes a sleeper at once (signal.send_task: S_SLEEP -> S_READY), so no polling
+    // is needed. Loop on the deadline: a spurious wake just sleeps the rest again;
+    // `guard` bounds the dead-timer case (sleep_ticks only yields there).
+    let t0: u64 = kstate.get(state, kstate.TICKS)
+    var guard: u64 = ticks + 8
+    while guard > 0 {
         if signal.interrupted(state, me) {
             return neg(errno.E_INTR)
         }
-        sched.sleep_ticks(state, 1)
-        left = left - 1
+        let now: u64 = kstate.get(state, kstate.TICKS)
+        if now < t0 || now - t0 >= ticks {
+            break
+        }
+        sched.sleep_ticks(state, ticks - (now - t0))
+        guard = guard - 1
     }
     return 0
 }
