@@ -6263,6 +6263,46 @@ fn lj_wait(state: u64) -> bool {
     return true
 }
 
+// W-X1 (18.10.2026): IDLE BACKOFF OF THE KERNEL DESKTOP LOOP (r1076). The loop ran its full round (~30 pollers + compose test) on EVERY
+// timer tick even on a dead-quiet desktop: QEMU 5.6-7.2 % of a core, VirtualBox ~25 %. After QUIET_TICKS (2 s) without a sign of life it
+// runs one round per QUIET_DEPTH ticks (30 ms); the ticks in between are `hlt`s that end at once when input arrives. Latency: the polled
+// devices (USB) are seen at most QUIET_DEPTH ticks late ONCE per quiet stretch, PS2 pointer / keys end the wait at the interrupt.
+const QUIET_TICKS: u64 = 200
+const QUIET_DEPTH: u64 = 3
+static mut quiet_rounds: u64 = 0
+
+// A number that changes whenever an input source delivered something (any change counts, it is only compared for inequality).
+fn quiet_seq(state: u64) -> u64 {
+    return usb.reports(state) + xhci.events(state) + ps2m.packets(state) + usb.hid_keys(state)
+        + kstate.get(state, kstate.KEYLEN) + kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+}
+
+// Input arrived or the pointer path got hot: leave the extra waiting at once.
+fn quiet_wake(state: u64, seq: u64) -> bool {
+    if wm.input_hot(state) {
+        return true
+    }
+    if quiet_seq(state) != seq {
+        return true
+    }
+    if kbd.waiting(state) != 0 || kbd.hot_waiting(state) != 0 {
+        return true
+    }
+    return false
+}
+
+// More ticks of `hlt` up to the tick `goal`; bounded, so a dead timer cannot hold the loop.
+fn quiet_more(state: u64, goal: u64, seq: u64) {
+    var n: u64 = 0
+    while n < 8 && kstate.get(state, kstate.TICKS) < goal {
+        if quiet_wake(state, seq) {
+            return
+        }
+        sched.idle_wait(state)
+        n = n + 1
+    }
+}
+
 fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
     // ============ RUNDE TAFEL: DIESE SCHLEIFE IST DER SCHREIBTISCH,
@@ -6307,6 +6347,10 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     }
     var cur: u64 = i
     var rounds: u64 = 0
+    // W-X1: quiet-backoff state (tick of the last sign of life, input / frame counters seen then)
+    var q_t0: u64 = kstate.get(state, kstate.TICKS)
+    var q_seq: u64 = quiet_seq(state)
+    var q_frames: u64 = wm.frames_total(state)
     var neustarts: u64 = 0
     var shell_next: u64 = 0
     var shell_born: u64 = 0
@@ -6629,13 +6673,37 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         st(38)
         if dauer && lj_wait(state) {
             // W-J: active stretch -> ~1 ms rounds (input is polled in this loop)
+            q_t0 = kstate.get(state, kstate.TICKS)
+            q_seq = quiet_seq(state)
+            q_frames = wm.frames_total(state)
         } else {
+            // W-X1 (18.10.2026): quiet backoff. After QUIET_TICKS without any sign of life (pointer / key input, a painted frame, a
+            // pending host flush) the round runs every QUIET_DEPTH-th tick instead of every tick; the extra ticks are plain `hlt`s that end
+            // at once when input shows up (quiet_wake). Word `noquiet` = old loop (gate counter-proof).
+            var depth: u64 = 1
+            if dauer && !kstate.mode_on(state, kstate.M_NOQUIET) {
+                let now_q: u64 = kstate.get(state, kstate.TICKS)
+                let seq_q: u64 = quiet_seq(state)
+                let fr_q: u64 = wm.frames_total(state)
+                if wm.input_hot(state) || seq_q != q_seq || fr_q != q_frames || (vmsvga.bereit(state) && vmsvga.pending(state)) {
+                    q_t0 = now_q
+                    q_seq = seq_q
+                    q_frames = fr_q
+                } else if now_q - q_t0 >= QUIET_TICKS {
+                    depth = QUIET_DEPTH
+                }
+                quiet_rounds = quiet_rounds + (depth - 1)
+            }
+            let t_goal: u64 = kstate.get(state, kstate.TICKS) + depth
             sched.sleep_ticks(state, 1)
             // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
             // (see `sched.idle_wait`); only in the permanent desktop, where the
             // timer is known to run.
             if dauer && !fb.hlt_aus(state) {
                 sched.idle_wait(state)
+                if depth > 1 {
+                    quiet_more(state, t_goal, q_seq)
+                }
             }
         }
         rounds = rounds + 1
