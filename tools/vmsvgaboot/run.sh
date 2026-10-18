@@ -53,9 +53,9 @@ run_one fit "vmsvgaboot"
 run_one ctl ""
 D=$T/fit
 [ "$(cat "$D/o.login" 2>/dev/null)" = 1 ] && ok "fit: logged in" || { bad "fit: login"; tail -5 "$D/py.txt"; }
-line=$(grep -a '^vmsvga: bootfit -> ' "$D/serial.txt" | head -1)
+line=$(grep -a '^vmsvga: bootfit  *-> ' "$D/serial.txt" | head -1)
 echo "  NOTE  $line"
-sw=$(echo "$line" | sed -n 's/^vmsvga: bootfit -> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\1/p'); sh=$(echo "$line" | sed -n 's/^vmsvga: bootfit -> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\2/p')
+sw=$(echo "$line" | sed -n 's/^vmsvga: bootfit  *-> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\1/p'); sh=$(echo "$line" | sed -n 's/^vmsvga: bootfit  *-> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\2/p')
 [ -n "$sw" ] && [ "$sw" -ge 2000 ] && ok "fit: boot fit ${sw}x${sh}, rc 0, UI scale 2" || bad "fit: boot fit line wrong: '$line'"
 read -r fw fh fblack frows < "$D/o.res" 2>/dev/null || { fw=0; fh=0; fblack=1; frows=0; }
 [ "$fw" = "${sw:-0}" ] && [ "$fh" = "${sh:-0}" ] && ok "fit: screen dump is ${fw}x${fh} (as logged)" || bad "fit: screen dump ${fw}x${fh} (logged ${sw:-0}x${sh:-0})"

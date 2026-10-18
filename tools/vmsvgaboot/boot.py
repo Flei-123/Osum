@@ -49,7 +49,9 @@ def main():
     time.sleep(15)
     f = mon.dump(base + ".d.ppm")
     w, h, b = ppm_rgb(f)
-    img = np.frombuffer(b, dtype=np.uint8).reshape(h, w, 3)
+    # QEMU pads every dumped row to a multiple of 4 bytes (width 2250 -> 6752 instead of 6750 bytes): derive the stride from the payload
+    stride = len(b) // h
+    img = np.frombuffer(b, dtype=np.uint8)[: stride * h].reshape(h, stride)[:, : w * 3].reshape(h, w, 3)
     up = img[: int(h * 0.6)]
     black = float(np.mean(np.all(up < 6, axis=2)))
     bot = img[h - 60:]
