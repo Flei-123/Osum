@@ -249,11 +249,14 @@ class FileTransfer(unittest.TestCase):
         self.assertEqual(body, b"A" * 100)
         self.assertLess(time.time() - t0, 0.4)
         self.assertEqual(s.stats["rewinds"], 0)
-        blob = os.urandom(70001)     # several frames, short last frame
-        s.push(blob, "/big")
-        s.maxchunk = 8192
+
+    def test_exact_chunk_pull_acks_resend(self):
+        # a file of exactly one full frame is not a "short" frame: the resend rule has to break the deadlock
+        s, ag = pair(end_after_ack=True, resend_s=0.1, maxchunk=8192, files={"/exact": b"B" * 8192})
+        s.ack_timeout = 0.5
         t0 = time.time()
-        self.assertEqual(s.pull("/big")[1], blob)
+        self.assertEqual(s.pull("/exact")[1], b"B" * 8192)
+        self.assertLess(time.time() - t0, 1.5)
 
     def test_small_window_and_chunk(self):
         s, ag = pair(window=4096, maxchunk=1000)

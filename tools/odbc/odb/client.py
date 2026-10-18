@@ -274,14 +274,14 @@ class Session:
     def file_download(self, cmd, items, offset=0, timeout=15.0, sink=None, progress=None):
         """Shared by pull and crashdump get: file stream 3 agent->host with ACKs."""
         buf = bytearray()
-        st = {"next": offset, "acked": offset, "t": time.time()}
+        st = {"next": offset, "acked": offset, "t": time.time(), "tack": 0.0}
         holder = {}
         win = self.window
 
         def ack(n=None):
             self.send(F.Frame(F.ACK, holder["fid"], proto.enc_ack(proto.FILE, st["next"])))
             st["acked"] = st["next"]
-            st["t"] = time.time()
+            st["t"] = st["tack"] = time.time()
 
         def on_frame(f):
             if f.type == F.DATA:
@@ -295,16 +295,18 @@ class Session:
                     self.stats["rewinds"] += 1
                     return
                 short = len(b) < self.maxchunk # a short frame ends a burst (last chunk of a file): nothing else follows
+                dup = off < st["next"] or (off == st["next"] and not b)   # the agent resent: it waits for our ACK
                 b = b[st["next"] - off:]       # drop a duplicated prefix
                 if b:
                     (sink or buf.extend)(b)
                     st["next"] += len(b)
                     if progress:
                         progress(st["next"])
-                # ACK at once on a short frame (also when it is a resend). Waiting for window/2 or 2 s of silence deadlocked
-                # small pulls on a slow line: the agent resent every ~1 s, each resend reset our silence timer, so no ACK
-                # ever went out (VirtualBox, 100 byte file). Not on every duplicate: that makes an ACK storm after loss.
-                if short or st["next"] - st["acked"] >= win // 2:
+                # ACK at once on a short frame, and on a resend (at most one per 0.5 s). Waiting for window/2 or 2 s of
+                # silence deadlocked small pulls on a slow line: the agent (which sends END only after the last ACK)
+                # resent every ~1 s, each resend reset our silence timer, so no ACK ever went out (VirtualBox, 100 byte
+                # and exactly 8 KiB files). The rate limit avoids an ACK storm after loss.
+                if short or (dup and time.time() - st["tack"] > 0.5) or st["next"] - st["acked"] >= win // 2:
                     ack()
             elif f.type == F.END:
                 s, _ = proto.dec_end(f.payload)
