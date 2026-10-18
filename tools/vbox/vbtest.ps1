@@ -21,6 +21,8 @@ $ODBPIPE  = '\\.\pipe\odb-test'   # VBox uart2 (COM2) server pipe; odbc connects
 $ODBDIR   = Join-Path $ROOT 'odbc'
 $ODBTOK   = Join-Path $ROOT 'odb.token'
 $ODBUP    = Join-Path $ROOT 'odb.up'      # marker: agent answered (odbwait); makes shot use odb
+$ODBPROXY = 'tcp:127.0.0.1:4710'          # `odbc serve` relay: a VBox server pipe serves ONE client, so one long-lived process holds it
+$ODBPXPID = Join-Path $ROOT 'odb.proxy.pid'   # VBL_ODBPROXY=0 talks to the pipe directly (single use per VM boot)
 $LAYOUT    = if ($env:VBL_LAYOUT) { $env:VBL_LAYOUT } else { 'de' }   # guest keyboard layout for 'type:' (de swaps y/z)
 
 function Say([string]$s) { Write-Output $s }
@@ -123,11 +125,34 @@ function KeysSeq([string]$seq) {
 }
 
 # ---------- screenshots ----------
+function OdbPy { $py = 'C:\Python312\python.exe'; if (-not (Test-Path $py)) { $py = 'python' }; return $py }
+function OdbProxyUp {
+  try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 4710); $c.Close(); return $true } catch { return $false }
+}
+function OdbProxyStop {
+  if (Test-Path $ODBPXPID) {
+    $p = [int](Get-Content $ODBPXPID -ErrorAction SilentlyContinue)
+    if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+    Remove-Item $ODBPXPID -ErrorAction SilentlyContinue
+  }
+}
+function OdbPort { # port spec for odbc: the relay (started on first use, background via CIM so it outlives the helper) or the raw pipe
+  if ($env:VBL_ODBPROXY -eq '0') { return ('pipe:' + $ODBPIPE) }
+  if (-not (OdbProxyUp)) {
+    OdbProxyStop
+    $cl = '"' + (OdbPy) + '" -I "' + (Join-Path $ODBDIR 'odbc.py') + '" --port pipe:' + $ODBPIPE + ' --wait 30 serve --listen ' + $ODBPROXY
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cl }
+    if ($r.ReturnValue -eq 0) { Set-Content $ODBPXPID ([string]$r.ProcessId) }
+    for ($k = 0; $k -lt 160 -and -not (OdbProxyUp); $k++) { Start-Sleep -Milliseconds 250 }
+    if (-not (OdbProxyUp)) { return ('pipe:' + $ODBPIPE) }   # relay did not come up: fall back to the raw pipe
+  }
+  return $ODBPROXY
+}
 function Odb([string[]]$oargs, [int]$to = 15) { # run odbc.py against the test VM pipe; sets $script:OdbRc
   $py = 'C:\Python312\python.exe'; if (-not (Test-Path $py)) { $py = 'python' }
   $tok = @(); if (Test-Path $ODBTOK) { $tok = @('--token-file', $ODBTOK) }
   $ErrorActionPreference = 'Continue'
-  $o = & $py -I (Join-Path $ODBDIR 'odbc.py') --port ('pipe:' + $ODBPIPE) -t $to @tok @oargs 2>&1 | Out-String
+  $o = & $py -I (Join-Path $ODBDIR 'odbc.py') --port (OdbPort) -t $to @tok @oargs 2>&1 | Out-String
   $script:OdbRc = $LASTEXITCODE
   return $o.TrimEnd()
 }
@@ -276,6 +301,7 @@ function CmdMkvm {
   if ($useSerial) { Vb @('modifyvm', $VM, '--uart1', '0x3F8', '4', '--uart-mode1', 'file', $SERIAL) | Out-Null; Remove-Item $SERIAL -ErrorAction SilentlyContinue }
   if ($env:VBL_ODB -ne '0') { Vb @('modifyvm', $VM, '--uart2', '0x2F8', '3', '--uart-mode2', 'server', $ODBPIPE) -Soft | Out-Null }   # ODB agent line (COM2)
   Remove-Item $ODBUP -ErrorAction SilentlyContinue
+  OdbProxyStop
   Vb @('storagectl', $VM, '--name', 'IDE', '--add', 'ide', '--controller', 'PIIX4') | Out-Null
   $vdi = Join-Path $VMDIR 'os.vdi'
   Vb @('convertfromraw', $img, $vdi, '--format', 'VDI') | Out-Null
@@ -293,10 +319,12 @@ function CmdSwapDisk { # replace the disk of an existing test VM by stage\o.img 
   Vb @('convertfromraw', $img, $vdi, '--format', 'VDI') | Out-Null
   Vb @('storageattach', $VM, '--storagectl', 'IDE', '--port', '0', '--device', '0', '--type', 'hdd', '--medium', $vdi) | Out-Null
   Remove-Item $SERIAL -ErrorAction SilentlyContinue
+  OdbProxyStop; Remove-Item $ODBUP -ErrorAction SilentlyContinue
   Say 'OK: swapdisk done'
 }
 function CmdStart {
   Remove-Item $ODBUP -ErrorAction SilentlyContinue
+  OdbProxyStop
   $s = State; if ($s -eq 'none') { throw 'no test VM (mkvm first)' }
   if ($s -eq 'running') { Say 'INFO: already running'; return }
   $type = if ($A -contains 'headless') { 'headless' } else { 'gui' }
@@ -304,10 +332,12 @@ function CmdStart {
   Say "OK: started ($type)"
 }
 function CmdStop {
+  OdbProxyStop
   if ((State) -eq 'running') { Vb @('controlvm', $VM, 'poweroff') -Soft | Out-Null; Start-Sleep -Seconds 2 }
   Say ("OK: state=" + (State))
 }
 function CmdCleanup {
+  OdbProxyStop
   $i = Guard
   if ($i) {
     if ($i['VMState'] -ne 'poweroff') { Vb @('controlvm', $VM, 'poweroff') -Soft | Out-Null; Start-Sleep -Seconds 3 }
@@ -371,7 +401,7 @@ try {
     'odbidle'  { NeedRunning; $ms = if ($A.Count -ge 1) { [int]$A[0] } else { 3000 }; $o = Odb @('info', '--idle-ms', "$ms") 30
                  $m = [regex]::Match($o, 'idle_pct=(\d+)'); if ($m.Success) { Say ("OK: guest idle_pct=" + $m.Groups[1].Value + " (odb info, window $ms ms)"); Say $o } else { Say ('FAIL: odb idle ' + $o); exit 1 } }
     'odbbench' { NeedRunning; $py = 'C:\Python312\python.exe'; $tok = @(); if (Test-Path $ODBTOK) { $tok = @('--token-file', $ODBTOK) }
-                 & $py -I (Join-Path $ODBDIR 'bench.py') --port ('pipe:' + $ODBPIPE) @tok @A 2>&1 | ForEach-Object { Say "$_" } }
+                 & $py -I (Join-Path $ODBDIR 'bench.py') --port (OdbPort) @tok @A 2>&1 | ForEach-Object { Say "$_" } }
     'serial'   {
       $mode = if ($A.Count -ge 1) { $A[0] } else { 'tail' }
       switch ($mode) {

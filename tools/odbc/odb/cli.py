@@ -286,6 +286,15 @@ def cmd_wait(ns):
     return 1
 
 
+def cmd_serve(ns):
+    """Long-lived relay: keeps a one-client upstream (VBox uart2 pipe) open for many odbc commands."""
+    from .proxy import serve
+    spec = ns.port or os.environ.get("ODB_PORT")
+    if not spec:
+        sys.exit("odbc serve: needs --port <upstream>")
+    return serve(spec, ns.listen, wait=ns.wait)
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="odbc", description="OrientOS debug bridge client")
     p.add_argument("--port", "-p", help="pipe:\\\\.\\pipe\\odb | tcp:h:p | unix:path | tty:/dev/pts/N | com:COM3 ($ODB_PORT)")
@@ -358,6 +367,9 @@ def build_parser():
     sp = sub.add_parser("ping")
     sp.add_argument("-c", "--count", type=int, default=5)
     sp.set_defaults(fn=cmd_ping)
+    sp = sub.add_parser("serve", help="keep --port open and relay it to local clients (VBox single-client pipe)")
+    sp.add_argument("--listen", default="tcp:127.0.0.1:4710", help="tcp:host:port | unix:path (default %(default)s)")
+    sp.set_defaults(fn=cmd_serve)
     sp = sub.add_parser("wait", help="wait until the agent answers (boot done)")
     sp.add_argument("limit", type=int, nargs="?", default=120)
     sp.set_defaults(fn=cmd_wait)
