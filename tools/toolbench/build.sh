@@ -20,6 +20,7 @@
 #     wait=<n>          Sekunden warten, bevor geklickt/fotografiert wird
 #     progs="..."       die Programmliste
 #     second=<img>      a second disk (hdb) from this image file
+#     flaky=<K>         /etc/themeflaky with the digit K: the first K reads of /etc/theme.conf per program fail (r1123 test hook)
 #     accel=tcg|kvm
 #     last=<sekunden>   wie lange die Maschine insgesamt laufen darf
 #
@@ -57,6 +58,7 @@ last=60
 progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat sleep ps kill top"
 extra=""
 second=""
+flaky=""
 for a in "$@"; do
     case "$a" in
         app=*) app=${a#*=} ;;
@@ -75,6 +77,7 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         second=*) second=${a#*=} ;;
+        flaky=*) flaky=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
     esac
 done
@@ -167,6 +170,10 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+if [ -n "$flaky" ]; then
+    printf '%s\n' "$flaky" > "$OUT/themeflaky"
+    ARGS+=("/etc/themeflaky=$OUT/themeflaky@0644")
+fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")

@@ -3377,7 +3377,7 @@ static mut generation: u64 = 0
 static mut paint_base: u64 = 0
 static mut paint_gen: u64 = 0
 static mut frame_open: u64 = 0
-static mut conf_copy: [u8; 512] = [0 as u8; 512]
+static mut conf_copy: [u8; 4096] = [0 as u8; 4096]
 static mut conf_len: u64 = 0
 static mut booted: u64 = 0
 
@@ -6276,7 +6276,13 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     if aus_kopie && conf_len > 0 {
         nc = kv_scan((&conf_copy[0 as usize]) as u64, conf_len, 1)
     } else {
-        nc = kv_read((&p_conf[0 as usize]) as u64, 1)
+        // r1123: ONE read of /etc/theme.conf, into the copy that `conf_changed` compares against, and the keys are
+        // parsed from that same copy. Before, the keys came from one read and the copy from a second one at the end;
+        // when only the first read failed (the file system busy at boot) the program started dark (`sch_mode`) and the
+        // copy held the GOOD bytes, so no poll ever saw a change and the dark start stayed.
+        if conf_fetch() > 0 {
+            nc = kv_scan((&conf_copy[0 as usize]) as u64, conf_len, 1)
+        }
     }
     let _nc: u64 = nc
     // ROUND A11Y-2 (S-008): HIGH CONTRAST BEATS THE USER'S CHOICE.
@@ -6398,7 +6404,6 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     }
     theme_apply()
     booted = 1
-    let _c: bool = conf_changed()
     return generation
 }
 
@@ -6577,18 +6582,75 @@ fn theme_probe_pair_bg(i: u64) -> u64 {
 // nicht ein Zeitstempel -- dieses Dateisystem fuehrt keinen, und die
 // Groesse allein sagt nichts (`mode=dark` und `mode=auto` sind gleich
 // lang).
-fn conf_changed() -> bool {
-    var p_conf: [u8; 16] = "/etc/theme.conf\0"
-    var buf: [u8; 512] = [0 as u8; 512]
-    var n: u64 = 0
-    let fd: u64 = io.open((&p_conf[0 as usize]) as u64, 0)
-    if !ulib.bad(fd) {
-        let r: u64 = io.read(fd, (&buf[0 as usize]) as u64, 511)
-        io.close(fd)
-        if !ulib.bad(r) {
-            n = r
+// TEST HOOK (tools/themeboot): /etc/themeflaky holds one digit K, and the first K reads of /etc/theme.conf in this process
+// then fail, the way a file system that is still busy at boot answers. No such file = no cost beyond one failed open.
+static mut flaky_left: u64 = 0
+static mut flaky_seen: u64 = 0
+
+fn conf_flaky() -> bool {
+    if flaky_seen == 0 {
+        flaky_seen = 1
+        var p_fl: [u8; 16] = "/etc/themeflaky\0"
+        var b_fl: [u8; 4] = [0 as u8; 4]
+        let fd_fl: u64 = io.open((&p_fl[0 as usize]) as u64, 0)
+        if !ulib.bad(fd_fl) {
+            let r_fl: u64 = io.read(fd_fl, (&b_fl[0 as usize]) as u64, 1)
+            io.close(fd_fl)
+            if !ulib.bad(r_fl) && r_fl == 1 && b_fl[0] >= 48 && b_fl[0] <= 57 {
+                flaky_left = (b_fl[0] as u64) - 48
+            }
         }
     }
+    if flaky_left > 0 {
+        flaky_left = flaky_left - 1
+        return true
+    }
+    return false
+}
+
+fn conf_read_into(dst: u64) -> u64 {
+    if conf_flaky() {
+        return 0
+    }
+    var p_conf: [u8; 16] = "/etc/theme.conf\0"
+    let fd: u64 = io.open((&p_conf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var more: bool = true
+    while more && n < 4095 {
+        let r: u64 = io.read(fd, dst + n, 4095 - n)
+        if ulib.bad(r) || r == 0 {
+            more = false
+        } else {
+            n = n + r
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+// Read /etc/theme.conf into `conf_copy` (the copy every later poll compares against) and say how many octets it holds;
+// 0 when the file could not be read. Three tries: a file system that is still busy at boot answers the next call.
+fn conf_fetch() -> u64 {
+    var n: u64 = 0
+    var tries: u64 = 0
+    while tries < 3 {
+        n = conf_read_into((&conf_copy[0 as usize]) as u64)
+        if n > 0 {
+            tries = 3
+        } else {
+            tries = tries + 1
+        }
+    }
+    conf_len = n
+    return n
+}
+
+fn conf_changed() -> bool {
+    var buf: [u8; 4096] = [0 as u8; 4096]
+    let n: u64 = conf_read_into((&buf[0 as usize]) as u64)
     var same: bool = n == conf_len
     if same {
         var k: u64 = 0
