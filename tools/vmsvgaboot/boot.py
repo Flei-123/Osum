@@ -57,12 +57,12 @@ def main():
     bot = img[h - 60:]
     ref = img[max(0, h - 330): h - 270].reshape(-1, 3).mean(axis=0)
     rows = int(np.sum(np.abs(bot.astype(int).mean(axis=1) - ref).max(axis=1) > 12))
-    # bar height: scan upwards from the last row while the row differs from the wallpaper row 300 px above (the bar is a solid band)
-    refrow = img[max(0, h - 300)].astype(int)
+    # bar height: contiguous bottom rows that are light (the day-theme bar is a near-white band, the wallpaper above it is dark); the old scan
+    # against a wallpaper reference row ran into its 199-row cap in the control run whenever that row differed
+    lum = img[h - 400:].astype(int).mean(axis=2).mean(axis=1)
     hb = 0
-    for y in range(h - 1, h - 200, -1):
-        row = img[y].astype(int)
-        if np.mean(np.abs(row - refrow).max(axis=1) > 12) > 0.5:
+    for y in range(len(lum) - 1, -1, -1):
+        if lum[y] > 150:
             hb += 1
         else:
             break

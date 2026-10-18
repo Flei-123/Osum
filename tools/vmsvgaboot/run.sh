@@ -66,10 +66,7 @@ D=$T/ctl
 grep -aq '^vmsvga: bootfit' "$D/serial.txt" && bad "ctl: boot fit line without the word" || ok "ctl: no boot fit without the word (QEMU has no hint)"
 read -r cw ch cblack crows < "$D/o.res" 2>/dev/null || { cw=0; ch=0; }
 [ "$cw" = 1024 ] || [ "$cw" -ge 640 ] && ok "ctl: screen stays at its boot mode (${cw}x${ch})" || bad "ctl: screen ${cw}x${ch}"
-# bar height from the taskbar geometry line the program logs (`taskbar: geom edge=.. x=.. y=.. w=.. h=..`): the pixel scan in boot.py
-# (.bar) hits its 199-row limit whenever the wallpaper row used as reference happens to differ (control run: 199 of 199)
-bar_h() { grep -a '^taskbar: geom ' "$1/serial.txt" | tail -1 | sed -n 's/.* h=\([0-9][0-9]*\).*/\1/p'; }
-fh_bar=$(bar_h "$T/fit"); ch_bar=$(bar_h "$T/ctl"); fh_bar=${fh_bar:-0}; ch_bar=${ch_bar:-0}
+fh_bar=$(cat "$T/fit/o.bar" 2>/dev/null || echo 0); ch_bar=$(cat "$T/ctl/o.bar" 2>/dev/null || echo 0)
 echo "  NOTE  taskbar height: fit $fh_bar px, control $ch_bar px"
 [ "$ch_bar" -gt 0 ] && [ "$fh_bar" -ge $(( ch_bar * 17 / 10 )) ] && ok "taskbar is ~2x higher at scale 2 ($fh_bar vs $ch_bar px)" || bad "taskbar height does not follow the scale ($fh_bar vs $ch_bar px)"
 echo "vmsvgaboot: $pass ok, $fail fail"
