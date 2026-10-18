@@ -118,6 +118,8 @@ def main():
     for nm, r in sorted(reg.items()):
         inside(r, "slider %s" % nm, 8 * sc)
         ok(r["w"] >= 120 * sc, "slider %s is wide enough to use (%d px)" % (nm, r["w"]))
+        # fuiscene.slider once set its height with spf() in a points tree: 40 pt at scale 2
+        ok(r["h"] == 20 * sc, "slider %s is 20 points high (%d px at scale %d)" % (nm, r["h"], sc))
     ok(len(med) == 1, "the media tile is reported")
     if med:
         inside(med[0], "media tile", 8 * sc)
