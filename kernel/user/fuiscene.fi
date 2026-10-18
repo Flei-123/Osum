@@ -91,7 +91,7 @@ export {
     dialog_ok_x, dialog_ok_y, dialog_ok_w, dialog_ok_h,
     last_key, entry_secret, image_pan,
     tip, tip_hide, say_tips, cmd_begin, cmd_item, cmd_item_t, cmd_label_mode, table_resize_seq, table_resizable, table_colw_get, cmd_end, cmd_hidden_n, cmd_hidden_labels, cmd_hidden_key, cmd_width,
-    table_below_rows, table_heads, table_indent, table_align_right, table_hover, set_dense, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb, cv_round_a, cv_ring_a, cv_round_raw, cv_ring_raw, ftile_quiet, plate_node, glass_plates, glass_tile,
+    table_below_rows, table_heads, table_indent, table_align_right, table_hover, set_dense, set_toggle_room, row_stretch, table_prep, KEY_RCLICK, right_x, right_y, key_at, table_row_at, card, label_wrap, label_muted, column_w, canvas2, cv_round_rgb, cv_ring_rgb, cv_round_a, cv_ring_a, cv_round_raw, cv_ring_raw, ftile_quiet, plate_node, glass_plates, glass_tile,
     cv_text_rgb, memo, memo_text, memo_set, focus, table_click_only, open_plain, set_flags, begin, win_id, caret_on, ax_name, keys_always, has_focus,
     key_seq, key_any, width, height, resized, say_radii, say_knoepfe, rb_px,
     // F-8: what the file manager needed
@@ -3276,7 +3276,8 @@ fn say_texts() {
                     (*st0).pad_x as usize,
                     render.def_pad_x(fuiapp.ctx(), widget.w_kind(e))))
                 let room: f64 = widget.w_w(e) - 2.0 * px0
-                if room > 0.0 && !widget.w_has_art(e) {
+                // a toggle that wraps onto several lines (set_toggle_room) is not shortened
+                if room > 0.0 && !widget.w_has_art(e) && widget.w_text_lines(e) <= 1 {
                     bw = room as u64
                 }
             }
@@ -5518,6 +5519,72 @@ fn check(parent: usize, text: u64, key: u64, on: bool) -> usize {
 // A toggle SWITCH (Windows 11 style): the same widget and the same value as `check` (Space / click
 // toggle it, `value_of` reads it, the node name is the label), but the face is a pill track with a
 // knob on the right edge and the label on the left. Only the paint differs.
+// R1085: the room (in points) a toggle label has in a narrow window; 0 = off (one line, as always).
+static mut tg_room: u64 = 0
+
+fn set_toggle_room(w: u64) {
+    tg_room = w
+}
+
+// The label of a toggle on up to three lines at `room` pixels: greedy break at spaces. Returns the number of lines.
+fn toggle_lines(p: u64, room: u64, out: u64) -> u64 {
+    var buf: [u8; 200] = [0 as u8; 200]
+    var n: u64 = ulib.length(p)
+    if n > 190 {
+        n = 190
+    }
+    var k: u64 = 0
+    while k < n {
+        buf[(k) as usize] = __mmio_read8((p + k) as *mut u8)
+        k = k + 1
+    }
+    buf[(n) as usize] = 0 as u8
+    let b0: u64 = (&buf[0 as usize]) as u64
+    var lines: u64 = 0
+    var at: u64 = 0
+    while at < n && lines < 3 {
+        // the longest run from `at` that fits (the last line takes the rest)
+        var cut: u64 = n
+        if lines < 2 && text_width(b0 + at, sp(13)) > room {
+            var best: u64 = 0
+            var q: u64 = at
+            while q < n {
+                if buf[(q) as usize] == 32 as u8 {
+                    buf[(q) as usize] = 0 as u8
+                    let fits: bool = text_width(b0 + at, sp(13)) <= room
+                    buf[(q) as usize] = 32 as u8
+                    if fits {
+                        best = q
+                    }
+                }
+                q = q + 1
+            }
+            if best == 0 {
+                // no space fits: break at the first space after `at` (or take all)
+                q = at
+                while q < n && buf[(q) as usize] != 32 as u8 {
+                    q = q + 1
+                }
+                best = q
+            }
+            cut = best
+        }
+        let o: u64 = lines * 80
+        var m: u64 = 0
+        while m < cut - at && m < 79 {
+            __mmio_write8((out + o + m) as *mut u8, buf[(at + m) as usize])
+            m = m + 1
+        }
+        __mmio_write8((out + o + m) as *mut u8, 0 as u8)
+        lines = lines + 1
+        at = cut
+        if at < n && buf[(at) as usize] == 32 as u8 {
+            at = at + 1
+        }
+    }
+    return lines
+}
+
 fn draw_toggle(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     let x: u64 = widget.w_x(e) as u64
     let y: u64 = widget.w_y(e) as u64
@@ -5549,14 +5616,49 @@ fn draw_toggle(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     if widget.w_is_focus(e) {
         cv_ring(tx - 2, ty - 2, tw + 4, th + 4, (th + 4) / 2, R_ACCENT)
     }
+    if ud == 1 {
+        // R1085: a narrow window: the label wraps (up to three lines) instead of being cut with "..."
+        var ls: [u8; 240] = [0 as u8; 240]
+        let lp: u64 = (&ls[0 as usize]) as u64
+        let room: u64 = w - tw - sp(16)
+        let nl: u64 = toggle_lines(widget.w_text(e), room, lp)
+        var base: u64 = y + h / 2 + sp(5) - (nl - 1) * sp(7)
+        var li: u64 = 0
+        while li < nl {
+            text_role(x + sp(4), base, room, lp + li * 80, sp(13), false, R_TEXT)
+            base = base + sp(14)
+            li = li + 1
+        }
+        return
+    }
     text_role(x + sp(4), y + h / 2 + sp(5), w - tw - sp(16), widget.w_text(e), sp(13), false, R_TEXT)
 }
 
 fn toggle(parent: usize, text: u64, key: u64, on: bool) -> usize {
     let i: usize = check(parent, text, key, on)
     if i != NONE {
-        scene.node_set_draw(sc(), i, 0, draw_toggle)
-        scene.node_set_size(sc(), i, 0.0, 28.0)
+        var wrapped: bool = false
+        var lines: u64 = 1
+        if tg_room > 0 {
+            // room for the label: the column minus the switch (36 + 16)
+            let room: u64 = sp(tg_room) - sp(36) - sp(16)
+            let tw0: u64 = text_width(text, sp(13))
+            if tw0 > room {
+                wrapped = true
+                lines = (tw0 + room - 1) / room + 1
+                if lines > 3 {
+                    lines = 3
+                }
+            }
+        }
+        if wrapped {
+            scene.node_set_draw(sc(), i, 1, draw_toggle)
+            scene.node_set_text_wrap(sc(), i, lines as usize)
+            scene.node_set_size(sc(), i, 0.0, (14 * lines + 14) as f64)
+        } else {
+            scene.node_set_draw(sc(), i, 0, draw_toggle)
+            scene.node_set_size(sc(), i, 0.0, 28.0)
+        }
     }
     return i
 }
