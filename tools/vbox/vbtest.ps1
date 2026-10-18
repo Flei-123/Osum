@@ -17,6 +17,10 @@ $STAGE     = Join-Path $ROOT 'stage'
 $SHOTS     = Join-Path $ROOT 'shots'
 $SERIAL    = Join-Path $ROOT 'serial.txt'
 $VMDIR     = 'C:\Users\justi\VirtualBox VMs\OrientOS-Test'
+$ODBPIPE  = '\\.\pipe\odb-test'   # VBox uart2 (COM2) server pipe; odbc connects here
+$ODBDIR   = Join-Path $ROOT 'odbc'
+$ODBTOK   = Join-Path $ROOT 'odb.token'
+$ODBUP    = Join-Path $ROOT 'odb.up'      # marker: agent answered (odbwait); makes shot use odb
 $LAYOUT    = if ($env:VBL_LAYOUT) { $env:VBL_LAYOUT } else { 'de' }   # guest keyboard layout for 'type:' (de swaps y/z)
 
 function Say([string]$s) { Write-Output $s }
@@ -119,9 +123,22 @@ function KeysSeq([string]$seq) {
 }
 
 # ---------- screenshots ----------
+function Odb([string[]]$oargs, [int]$to = 15) { # run odbc.py against the test VM pipe; sets $script:OdbRc
+  $py = 'C:\Python312\python.exe'; if (-not (Test-Path $py)) { $py = 'python' }
+  $tok = @(); if (Test-Path $ODBTOK) { $tok = @('--token-file', $ODBTOK) }
+  $ErrorActionPreference = 'Continue'
+  $o = & $py -I (Join-Path $ODBDIR 'odbc.py') --port ('pipe:' + $ODBPIPE) -t $to @tok @oargs 2>&1 | Out-String
+  $script:OdbRc = $LASTEXITCODE
+  return $o.TrimEnd()
+}
 function Shot([string]$name) {
   EnsureDirs; NeedRunning
   $p = Join-Path $SHOTS ($name + '.png')
+  if (Test-Path $ODBUP) { # agent path first (guest framebuffer, no host window needed); VBoxManage is the fallback
+    $o = Odb @('shot', $p)
+    if ($script:OdbRc -eq 0 -and (Test-Path $p)) { Say ("OK: shot " + $p + " via odb (" + (Get-Item $p).Length + " bytes)"); return }
+    Say ("INFO: odb shot failed (" + $o + "), falling back to VBoxManage")
+  }
   Vb @('controlvm', $VM, 'screenshotpng', $p) | Out-Null
   Say ("OK: shot " + $p + " (" + (Get-Item $p).Length + " bytes)")
 }
@@ -257,6 +274,8 @@ function CmdMkvm {
        '--audio-driver', 'none', '--clipboard-mode', 'disabled', '--usb-ohci', 'off') | Out-Null
   Vb @('modifyvm', $VM, '--usb-ehci', 'off', '--usb-xhci', 'on') -Soft | Out-Null     # xHCI like the boss VM; non-fatal if unsupported
   if ($useSerial) { Vb @('modifyvm', $VM, '--uart1', '0x3F8', '4', '--uart-mode1', 'file', $SERIAL) | Out-Null; Remove-Item $SERIAL -ErrorAction SilentlyContinue }
+  if ($env:VBL_ODB -ne '0') { Vb @('modifyvm', $VM, '--uart2', '0x2F8', '3', '--uart-mode2', 'server', $ODBPIPE) -Soft | Out-Null }   # ODB agent line (COM2)
+  Remove-Item $ODBUP -ErrorAction SilentlyContinue
   Vb @('storagectl', $VM, '--name', 'IDE', '--add', 'ide', '--controller', 'PIIX4') | Out-Null
   $vdi = Join-Path $VMDIR 'os.vdi'
   Vb @('convertfromraw', $img, $vdi, '--format', 'VDI') | Out-Null
@@ -277,6 +296,7 @@ function CmdSwapDisk { # replace the disk of an existing test VM by stage\o.img 
   Say 'OK: swapdisk done'
 }
 function CmdStart {
+  Remove-Item $ODBUP -ErrorAction SilentlyContinue
   $s = State; if ($s -eq 'none') { throw 'no test VM (mkvm first)' }
   if ($s -eq 'running') { Say 'INFO: already running'; return }
   $type = if ($A -contains 'headless') { 'headless' } else { 'gui' }
@@ -295,7 +315,7 @@ function CmdCleanup {
   }
   if (Test-Path $VMDIR) { Remove-Item $VMDIR -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-Item (Join-Path $STAGE '*') -Force -ErrorAction SilentlyContinue
-  Remove-Item $SERIAL -ErrorAction SilentlyContinue
+  Remove-Item $SERIAL, $ODBUP, $ODBTOK -ErrorAction SilentlyContinue
   if (-not ($A -contains 'keepshots')) { Remove-Item (Join-Path $SHOTS '*') -Force -ErrorAction SilentlyContinue }
   Say ("OK: cleanup done, VM exists=" + [bool](VmInfo))
 }
@@ -337,6 +357,21 @@ try {
     'hint'     { NeedRunning; Vb @('controlvm', $VM, 'setvideomodehint', $A[0], $A[1], '32') | Out-Null; Say "OK: hint $($A[0])x$($A[1])" }
     'wait'     { Start-Sleep -Seconds ([int]$A[0]); Say "OK: waited $($A[0])s" }
     'idle'     { CmdIdle }
+    'odbinstall' { # odbinstall <url> <sha256-of-zip>: fetch the odbc client (run.sh odbc-pack publishes it)
+                 EnsureDirs; $z = Join-Path $ROOT 'odbc.zip'; & curl.exe -sS -f -L -o $z $A[0]
+                 if ($LASTEXITCODE -ne 0) { throw 'curl failed' }
+                 if ((Sha $z) -ne $A[1].ToLower()) { throw 'odbc.zip sha mismatch' }
+                 Remove-Item $ODBDIR -Recurse -Force -ErrorAction SilentlyContinue; Expand-Archive -Path $z -DestinationPath $ODBDIR -Force; Remove-Item $z
+                 Say "OK: odbc installed in $ODBDIR" }
+    'odbtoken' { EnsureDirs; [IO.File]::WriteAllText($ODBTOK, $A[0]); Say 'OK: odb token written' }
+    'odbwait'  { NeedRunning; $lim = if ($A.Count -ge 1) { [int]$A[0] } else { 90 }
+                 $o = Odb @('wait', "$lim") ($lim + 10); Say $o
+                 if ($script:OdbRc -eq 0) { Set-Content $ODBUP 'up'; Say 'OK: odb agent up' } else { Say 'FAIL: odb agent not reachable (fallback: keys/shot via VBoxManage)' } }
+    'odb'      { NeedRunning; $o = Odb $A 60; Say $o; if ($script:OdbRc -eq 0) { Say ('OK: odb ' + $A[0]) } else { Say ('FAIL: odb ' + $A[0] + ' rc=' + $script:OdbRc); exit 1 } }
+    'odbidle'  { NeedRunning; $ms = if ($A.Count -ge 1) { [int]$A[0] } else { 3000 }; $o = Odb @('info', '--idle-ms', "$ms") 30
+                 $m = [regex]::Match($o, 'idle_pct=(\d+)'); if ($m.Success) { Say ("OK: guest idle_pct=" + $m.Groups[1].Value + " (odb info, window $ms ms)"); Say $o } else { Say ('FAIL: odb idle ' + $o); exit 1 } }
+    'odbbench' { NeedRunning; $py = 'C:\Python312\python.exe'; $tok = @(); if (Test-Path $ODBTOK) { $tok = @('--token-file', $ODBTOK) }
+                 & $py -I (Join-Path $ODBDIR 'bench.py') --port ('pipe:' + $ODBPIPE) @tok @A 2>&1 | ForEach-Object { Say "$_" } }
     'serial'   {
       $mode = if ($A.Count -ge 1) { $A[0] } else { 'tail' }
       switch ($mode) {
@@ -360,6 +395,7 @@ try {
       Say '  shot <name> | shotstat <name> | hint <w> <h> | wait <sec> | idle <sec> [samples]'
       Say '  keys "type:abc;key:enter;combo:ctrl+shift+t;k:1D 2A;sleep:500;shot:x" | login [password]'
       Say '  mouse "goto:430:250,left,dbl,right,rel:10:0,ldown,lup,wheel:-3,sleep:300,shot:x"'
+      Say '  odbinstall <url> <sha> | odbtoken <t> | odbwait [sec] | odb <odbc args...> | odbidle [ms] | odbbench [--mib N]   (ODB agent over uart2 pipe; VBL_ODB=0 disables)'
       Say '  serial tail [n] | grep <re> | count <re> | wait <re> <timeout-sec> | size'
       Say 'env: VBL_MEM (MB, max 4096) VBL_CPUS VBL_SERIAL=0 VBL_LAYOUT=de|us'
     }

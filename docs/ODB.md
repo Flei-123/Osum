@@ -240,3 +240,21 @@ Changes after the first push are listed in the section below.
 ### Change log
 
 - 2026-10-18: v1 initial.
+
+## 9. Host tools (odbc) — W-O2
+
+The host client lives in `tools/odbc/` (see its README): `odbc.py` CLI, `odb/` package (frame codec with resync, TLV, session with
+hello/auth, RETRY, CANCEL, go-back-N file transfer, transports unix/tcp/pipe/tty/com), `odb/mock.py` (Python mock agent that
+implements this spec, with fault injection), `bench.py`, `qemu.sh`, unit tests (gate `odbc`).
+
+Client behaviour worth knowing when writing the agent:
+
+- Host ids start at 1 and wrap at 2^32-1; PING uses fresh non-zero ids (PONG must echo id + payload).
+- REQ is re-sent with `RETRY` every 2 s (max 5x) until the first frame of that id arrives; after that only the inactivity timeout
+  (`-t`, default 15 s) applies. Frames of other ids are ignored (kept in `Session.stray`).
+- ACK rule used by the host sender/receiver: an ACK is a cumulative progress report. The sender rewinds only on a DUPLICATE ACK
+  (`next <= last acked` while it has sent beyond) or after 2 s without ACK; an ACK with progress is never a rewind (otherwise every
+  normal windowed ACK would resend data). The receiver ACKs every `window/2` bytes, after END, on a gap (offset > next) and after 2 s of silence.
+- `push` sends `sha256` in the REQ and again in the END TLV (`size`, `sha256`); `pull` verifies `sha256`/`crc32`/`size` of the RESP.
+- `exec` ends with RESP (`exit`, `signal`); the per-stream END frames precede it and are optional for the host.
+- `ps` is read from stream 1, `logs` from stream 5, `shot` from stream 4, `crashdump list` from stream 1, `crashdump get` over stream 3.

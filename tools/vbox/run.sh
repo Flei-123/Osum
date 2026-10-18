@@ -10,6 +10,8 @@
 #   bash tools/vbox/run.sh script                publish tools/vbox/vbtest.ps1, prints the laptop install line
 #   bash tools/vbox/run.sh pull <dir> <name>...  copy delivered screenshots (remote_deliver) into <dir>
 #   bash tools/vbox/run.sh unpublish <hex>|all   remove published folders
+#   bash tools/vbox/run.sh odbc-pack             publish the odbc client zip, prints the laptop 'odbinstall' line
+#   bash tools/vbox/run.sh odb-token             create/print the ODB auth token ($ABB/odb.token)
 #   bash tools/vbox/run.sh stamp <label>         append a timing mark to /root/abbilder/vbox-round.log
 #   bash tools/vbox/run.sh clean <id>            delete the image dir /root/abbilder/<id> (rebuildable)
 #
@@ -56,6 +58,19 @@ case "$cmd" in
   script)
     mkdir -p "$PUB/t-vbl"; cp "$HERE/vbtest.ps1" "$PUB/t-vbl/vbtest.ps1"
     echo "LAPTOP: New-Item -ItemType Directory -Force C:\\Users\\justi\\vbl | Out-Null; curl.exe -sS -f -o C:\\Users\\justi\\vbl\\vbtest.ps1 $URLBASE/t-vbl/vbtest.ps1" ;;
+  odbc-pack)  # publish the odbc host client (no tests) for the laptop
+    mkdir -p "$PUB/t-odbc"; python3 - "$HERE/../odbc" "$PUB/t-odbc/odbc.zip" <<'PYEOF'
+import sys, os, zipfile
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+    for rel in ["odbc.py", "bench.py"] + ["odb/" + f for f in sorted(os.listdir(os.path.join(src, "odb"))) if f.endswith(".py")]:
+        z.write(os.path.join(src, rel), rel)
+PYEOF
+    sha=$(sha256sum "$PUB/t-odbc/odbc.zip" | cut -c1-64)
+    echo "LAPTOP: powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\justi\\vbl\\vbtest.ps1 odbinstall $URLBASE/t-odbc/odbc.zip $sha" ;;
+  odb-token)  # server-side token for the test image + laptop (kept in $ABB/odb.token, 600)
+    [ -s "$ABB/odb.token" ] || { umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$ABB/odb.token"; }
+    echo "OK: token file $ABB/odb.token ($(wc -c < "$ABB/odb.token") chars)"; echo "LAPTOP: vbtest.ps1 odbtoken $(cat "$ABB/odb.token")" ;;
   pull)
     dest="${1:?usage: pull <dir> <name>...}"; shift; mkdir -p "$dest"
     for n in "$@"; do
@@ -64,7 +79,7 @@ case "$cmd" in
     done ;;
   unpublish)
     t="${1:?usage: unpublish <hex>|all}"
-    if [ "$t" = all ]; then rm -rf "$PUB"/t-vbl "$PUB"/t-vbpipe; for d in "$PUB"/t-[0-9a-f]*; do [ -f "$d/o.xz" ] && rm -rf "$d"; done
+    if [ "$t" = all ]; then rm -rf "$PUB"/t-vbl "$PUB"/t-vbpipe "$PUB"/t-odbc; for d in "$PUB"/t-[0-9a-f]*; do [ -f "$d/o.xz" ] && rm -rf "$d"; done
     else rm -rf "${PUB:?}/t-$t"; fi
     echo "OK: unpublished $t" ;;
   stamp) echo "$(date +%s) $(date -Is) ${*:-mark}" >> "$ABB/vbox-round.log"; tail -1 "$ABB/vbox-round.log" ;;
