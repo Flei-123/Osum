@@ -6269,8 +6269,10 @@ fn lj_wait(state: u64) -> bool {
 // devices (USB) are seen at most QUIET_DEPTH ticks late ONCE per quiet stretch, PS2 pointer / keys end the wait at the interrupt.
 const QUIET_TICKS: u64 = 200
 const QUIET_DEPTH: u64 = 3
-const QUIET_FRAME_GAP: u64 = 20
+const QUIET_FRAME_GAP: u64 = 8
 static mut quiet_rounds: u64 = 0
+// why the quiet state was left: 0 pointer path hot, 1 input counters moved, 2 host flush pending, 3 frames closer than QUIET_FRAME_GAP
+static mut quiet_why: [u64; 4] = [0 as u64; 4]
 
 // A number that changes whenever an input source delivered something (any change counts, it is only compared for inequality).
 fn quiet_seq(state: u64) -> u64 {
@@ -6689,12 +6691,25 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 let now_q: u64 = kstate.get(state, kstate.TICKS)
                 let seq_q: u64 = quiet_seq(state)
                 let fr_q: u64 = wm.frames_total(state)
-                var busy_q: bool = wm.input_hot(state) || seq_q != q_seq || (vmsvga.bereit(state) && vmsvga.pending(state))
+                var busy_q: bool = false
+                if wm.input_hot(state) {
+                    busy_q = true
+                    quiet_why[0] = quiet_why[0] + 1
+                }
+                if seq_q != q_seq {
+                    busy_q = true
+                    quiet_why[1] = quiet_why[1] + 1
+                }
+                if vmsvga.bereit(state) && vmsvga.pending(state) {
+                    busy_q = true
+                    quiet_why[2] = quiet_why[2] + 1
+                }
                 if fr_q != q_frames {
                     // a single frame after a long gap (cursor blink, clock, a repaint) is ambient; frames closer than QUIET_FRAME_GAP
                     // ticks (an animation, a client drawing at speed) are activity
                     if now_q - q_fr_t < QUIET_FRAME_GAP {
                         busy_q = true
+                        quiet_why[3] = quiet_why[3] + 1
                     }
                     q_fr_t = now_q
                     q_frames = fr_q
@@ -9011,6 +9026,18 @@ fn sect_say(state: u64) {
         }
         k = k + 1
     }
+    var s_q: [u8; 8] = " quiet=\0"
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(quiet_rounds)
+    var s_w: [u8; 7] = " why=\0\0"
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(quiet_why[0])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(quiet_why[1])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(quiet_why[2])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(quiet_why[3])
     serial.nl()
     k = 0
     while k < 40 {
