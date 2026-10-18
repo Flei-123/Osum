@@ -6346,6 +6346,12 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Gegenstueck in diesem Kern, und ein Rahmen, der zurueckgegeben
     // wird, ohne dass es einen Weg dafuer gibt, ist schlimmer als einer,
     // der liegen bleibt. Bei sechzehn Fenstern ist das begrenzt.
+    // W-C3f: a resize to the size the window already has must NOT take the shared buffer away. The client compares the new size with its
+    // own (equal -> nothing to re-attach), so a detach here left the window on a private, blank buffer for good (the taskbar after a
+    // repeated apply, QEMU gate line `a resize step detached more windows than were re-attached`).
+    if wg(state, i, W_SHM) != 0 && wg(state, i, W_W) == w && wg(state, i, W_H) == h && wg(state, i, W_KIND) != K_TERM {
+        return true
+    }
     if wg(state, i, W_KIND) == K_TERM && wg(state, i, W_SHM) != 0 {
         // COMPOSITOR r486: the terminal's buffer belongs to the kernel, which paints it with the new row length itself
         if !term_fit(state, i, w * h * 4) {
@@ -6659,13 +6665,33 @@ fn term_fit(state: u64, i: u64, bytes: u64) -> bool {
     return true
 }
 
+// W-C3f: one serial line per buffer change of a shared window (rare: only on resizes). kind 0 = detach failed (no contiguous frames),
+// 1 = detach, 2 = attach. Gate tools/vmsvgaresize reads them next to `wm: shared`.
+fn wm_note(state: u64, kind: u64, i: u64, bytes: u64) {
+    var s_a: [u8; 12] = "wm: bufchg \0"
+    var s_w: [u8; 6] = " win=\0"
+    var s_b: [u8; 8] = " bytes=\0"
+    var s_k: [u8; 6] = " own=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kind)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bytes)
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wg(state, i, W_OWNER))
+    serial.nl()
+}
+
 // A shared window gets a buffer of its own of `bytes` and lets go of the shared one.
 fn detach_buf(state: u64, i: u64, bytes: u64) -> bool {
     let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
     let neu: u64 = mem.frame_run(state, rahmen)
     if neu == 0 {
+        wm_note(state, 0, i, bytes)
         return false
     }
+    wm_note(state, 1, i, bytes)
     unixsock.shm_unref(state, wg(state, i, W_SHM) - 1)
     wsv(state, i, W_SHM, 0)
     wsv(state, i, W_BUF, neu)
@@ -6692,6 +6718,7 @@ fn attach_buf(state: u64, i: u64, sbase: u64, sbytes: u64, sidx: u64) -> bool {
         mem.frame_free_run(state, wg(state, i, W_BUF), wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE)
     }
     unixsock.shm_ref(state, sidx)
+    wm_note(state, 2, i, sbytes)
     wsv(state, i, W_SHM, sidx + 1)
     wsv(state, i, W_BUF, sbase)
     wsv(state, i, W_BUFBYTES, sbytes)
