@@ -5656,6 +5656,44 @@ fn winch_wache(state: u64) {
     }
 }
 
+// ==================================== W-X2: HANGUP FOR CLOSED TERMINAL WINDOWS
+// Closing a terminal window (the 'x', a tab's 'x', Ctrl+Shift+W) only ends the INPUT of its tty: a shell that sits in a foreground program
+// (`sleep`, `edit`, `jarvisd -v`) never reads again and stayed alive for ever without a window -- a task slot lost per closed tab. A real
+// terminal hangs up: every task that has the tty of a vanished window as its controlling terminal gets SIGHUP. Every tick a window is
+// remembered with its tty (the console is never hung up: its shell is restarted by the desktop loop); a slot that is free or holds
+// another tty now has hung up.
+static mut hup_t: [u64; 32] = [0 as u64; 32]
+static mut hup_said: u64 = 0
+
+fn hup_wache(state: u64) {
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        let t: u64 = wm.tty_of(state, i)
+        let seen: u64 = hup_t[(i) as usize]
+        if seen != 0 && (t == wm.NO_TTY || t + 1 != seen) {
+            let old: u64 = seen - 1
+            hup_t[(i) as usize] = 0
+            if old < tty.MAX_TTY && tty.valid(state, old) && old != tty.console() {
+                let hit: u64 = signal.send_tty(state, old, false, signal.SIGHUP)
+                if hup_said < 40 {
+                    hup_said = hup_said + 1
+                    var s_h: [u8; 18] = "kgui: hangup tty=\0"
+                    var s_n: [u8; 6] = " hit=\0"
+                    serial.puts((&s_h[0]) as u64)
+                    serial.dec(old)
+                    serial.puts((&s_n[0]) as u64)
+                    serial.dec(hit)
+                    serial.nl()
+                }
+            }
+        }
+        if t != wm.NO_TTY && t < tty.MAX_TTY && t != tty.console() && wm.win_kind(state, i) == wm.K_TERM {
+            hup_t[(i) as usize] = t + 1
+        }
+        i = i + 1
+    }
+}
+
 // ==================================== 04.10.2026 (DELL): ZOMBIE LEAK
 // Justin, Dell: "after several programs are open no further one opens".
 // Measured in a VM with the Dell's own image: the task table has 32 slots
@@ -6420,6 +6458,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         standby_wache(state)
         fenster_wache(state)
         winch_wache(state)
+        hup_wache(state)
         // Y2 (17.10.2026): the VMSVGA host hint (VirtualBox: guest device request) is polled HERE as well. On the VirtualBox laptop VM
         // the idle task never reached gfx.gpu_ereignis (pulse hp=0/0/0), so the hint was never read. host_pending rate-limits itself
         // (1 s), so this is a clock read per call; every 64th round is plenty.
