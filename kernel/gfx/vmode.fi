@@ -65,7 +65,7 @@ export {
     // RUNDE SCHIRM: die Tafel fragen, BEVOR es einen Rahmenpuffer gibt.
     native, edid_mm_w, edid_mm_h, dpi_scale,
     vendor_at, model_at,
-    set_mode, set_custom, check_custom, switch_to, follow_host, current, revert,
+    set_mode, set_custom, check_custom, switch_to, follow_host, current, revert, auto_scale,
     confirm, pending, deadline, remaining,
     cust_w, cust_h, cust_bpp, cust_why, cust_num, customs, need_bytes,
     why_to_e, list_insert, list_remove,
@@ -1043,6 +1043,15 @@ fn check_custom(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
         s(state, S_CUSTWHY, CW_LIMIT)
         return CW_LIMIT
     }
+    // W-C3: map_run also keeps DEVICES_FREE tiles free and counts the tiles other devices hold. Predict that here (fb.tile_room),
+    // otherwise the switch happens, remap fails and the screen jumps back (VirtualBox: anything above 7 tiles = 14.7 MB).
+    let inner: u64 = g(state, S_LFB) & (fb.huge_size() - 1)
+    let tiles: u64 = (inner + noetig + fb.huge_size() - 1) / fb.huge_size()
+    if tiles > fb.tile_room(state) {
+        s(state, S_CUSTNUM, noetig)
+        s(state, S_CUSTWHY, CW_LIMIT)
+        return CW_LIMIT
+    }
     // 4. Und zuletzt die Karte selbst. Zurueckgelesen, ohne den Modus zu
     //    setzen; der Bildschirm flackert dabei nicht.
     let blieb: u64 = karte_nimmt(state, w, h)
@@ -1715,7 +1724,33 @@ fn follow_host(state: u64, w: u64, h: u64) -> u64 {
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return why_to_e(why)
     }
-    return switch_to(state, nw, nh, false)
+    // W-C3: a switch that still fails (no contiguous frames for the back buffer, card refusal, map failure) is retried 1/16 smaller
+    // instead of leaving the guest on the old size for good.
+    var rc: u64 = switch_to(state, nw, nh, false)
+    var again: u64 = 0
+    while (rc == E_NOMEM || rc == E_SETFAIL || rc == E_MAPFAIL) && again < 6 {
+        nw = nw * 15 / 16
+        nh = nh * 15 / 16
+        if nw < 640 || nh < 480 {
+            break
+        }
+        if check_custom(state, nw, nh, 32) != CW_OK {
+            again = again + 1
+            continue
+        }
+        rc = switch_to(state, nw, nh, false)
+        again = again + 1
+    }
+    return rc
+}
+
+// W-C3: the integer UI scale for a screen of this size when nothing better is known (no EDID size, no `uiscale=`). 2400x1350 and up
+// (a 14" 2496x1664 laptop, 4K) gets 2; below stays 1. A fractional scale (125 %, 150 %) does not exist in this kernel.
+fn auto_scale(w: u64, h: u64) -> u64 {
+    if w >= 2400 && h >= 1350 {
+        return 2
+    }
+    return 1
 }
 
 fn revert(state: u64) -> u64 {

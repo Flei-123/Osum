@@ -606,6 +606,53 @@ fn bnum(b: bool) -> u64 {
 // diesem Kernel gilt: was gemeldet wird, ist gemessen -- die Liste ist
 // die, die die Karte angenommen hat, und nicht die, nach der gefragt
 // wurde.
+// W-C3: fit the screen to the host BEFORE the desktop is built (VirtualBox: the VM window size from the VMMDev, hint read once at boot,
+// so the login screen already has the full size instead of 1024x768 in a black frame), then pick the integer UI scale for the final size
+// when neither an EDID size nor `uiscale=` decided. `vmsvgaboot` plays 2400x1400 on QEMU. Serial: `vmsvga: bootfit WxH -> WxH rc=N scale=U`.
+fn host_boot_fit(state: u64) {
+    var s_bf: [u8; 20] = "vmsvga: bootfit \0\0\0\0"
+    var s_ar: [u8; 6] = " -> \0\0"
+    var s_rc: [u8; 6] = " rc=\0\0"
+    var s_sc: [u8; 9] = " scale=\0\0"
+    var s_x: [u8; 2] = "x\0"
+    var hv: u64 = 0
+    if vmsvga.bereit(state) && vmode.ready(state) {
+        hv = vmsvga.boot_hint(state)
+        if hv == 0 && kstate.mode_on(state, kstate.M_VMSVGABOOT) {
+            hv = (2400 << 16) | 1400
+        }
+    }
+    var rc: u64 = 0
+    if hv != 0 && ((hv / 65536) != fb.width(state) || (hv % 65536) != fb.height(state)) {
+        serial.puts((&s_bf[0]) as u64)
+        serial.dec(fb.width(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.height(state))
+        rc = vmode.follow_host(state, hv / 65536, hv % 65536)
+        serial.puts((&s_ar[0]) as u64)
+        serial.dec(fb.width(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.height(state))
+        serial.puts((&s_rc[0]) as u64)
+        serial.dec(rc)
+        // the debouncer of the idle poll must not apply the same hint a second time
+        vmsvga.boot_handled(state, hv)
+    }
+    // the scale: only when nobody decided yet (no `uiscale=`, no table EDID size) and only on a mode that is not smaller than before
+    if fb.uiscale(state) == 1 && fb.res_w(state) == 0
+        && kstate.get(state, kstate.UISCALE_WUNSCH) == 0 && vmode.dpi_scale(state, fb.width(state)) == 0 {
+        let a: u64 = vmode.auto_scale(fb.width(state), fb.height(state))
+        if a > 1 {
+            let _a: bool = fb.set_uiscale(state, a)
+        }
+    }
+    if hv != 0 {
+        serial.puts((&s_sc[0]) as u64)
+        serial.dec(fb.uiscale(state))
+        serial.nl()
+    }
+}
+
 fn vmode_stage(state: u64) {
     var s_no: [u8; 22] = "disp: keine Karte\0\0\0\0\0"
     var s_hd: [u8; 12] = "disp: vram=\0"
@@ -2361,6 +2408,7 @@ fn surface(state: u64) {
     // Vervielfachung. 15 und 16 waren die Zahlen fuer 800x600; auf
     // 3840x2160 sind sie ein Viertel der physischen Groesse, die sie
     // dort hatten -- derselbe Fehler, den wir bei Certus gefunden haben.
+    host_boot_fit(state)
     let UISC: u64 = fb.uiscale(state)
     let PX_UI: u64 = 15 * UISC
     let PX_MONO: u64 = 16 * UISC
