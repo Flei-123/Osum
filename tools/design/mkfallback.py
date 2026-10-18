@@ -9,7 +9,7 @@ point the role font lacks (kernel/user/fuiglyph.fi), so each cut carries ONLY co
 
   osum-symbols.ttf   DejaVu Sans (Bitstream Vera licence: free, modified copies must not be called "Vera"/"Bitstream"
                      -- the name table is dropped here, so the cut has no name at all)
-                     Latin Extended-A/B, IPA, spacing modifiers, general punctuation, super/subscripts, letterlike,
+                     Latin Extended-A/B, IPA, spacing modifiers, Greek, Cyrillic, general punctuation, super/subscripts, letterlike,
                      number forms, arrows, maths, technical, box drawing, blocks, geometric shapes, misc symbols,
                      dingbats, Braille, supplemental arrows
   osum-emoji.ttf     Noto Emoji (SIL OFL 1.1), the variable font frozen at wght 400, monochrome outlines
@@ -26,6 +26,8 @@ from fontTools.varLib import instancer
 
 SYMBOL_RANGES = [
     (0x0100, 0x02FF),   # Latin Extended-A/B, IPA, spacing modifiers
+    (0x0370, 0x03FF),   # Greek and Coptic (r1086)
+    (0x0400, 0x052F),   # Cyrillic, Cyrillic Supplement (r1086)
     (0x2010, 0x205E),   # general punctuation (dashes, quotes, bullets, ellipsis)
     (0x2070, 0x209F),   # super/subscripts
     (0x20A0, 0x20CF),   # currency
