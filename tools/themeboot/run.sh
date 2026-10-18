@@ -28,8 +28,13 @@ PLAN
 
 # local minutes of the VM (offset=120 as written by toolbench/build.sh); avoid the 07:00/19:00 edge while the run is in flight
 lmin() { echo $(( ( $(date -u +%H) * 60 + 10#$(date -u +%M) + 120 ) % 1440 )); }
-near_edge() { local m; m=$(lmin); { [ "$m" -ge 417 ] && [ "$m" -le 430 ]; } || { [ "$m" -ge 1137 ] && [ "$m" -le 1150 ]; }; }
-if near_edge; then echo "(clock near the light/dark edge, waiting 15 min)"; sleep 900; fi
+# a run takes ~10 min (two toolbench builds): stay >= 15 min away from 07:00 / 19:00, wait past the edge if needed
+edge_wait() { local m; m=$(lmin)
+    if [ "$m" -ge 405 ] && [ "$m" -le 435 ]; then echo $(( (436 - m) * 60 )); return; fi
+    if [ "$m" -ge 1125 ] && [ "$m" -le 1155 ]; then echo $(( (1156 - m) * 60 )); return; fi
+    echo 0; }
+W=$(edge_wait)
+if [ "$W" -gt 0 ]; then echo "(clock near the light/dark edge, waiting $W s)"; sleep "$W"; fi
 M=$(lmin)
 if [ "$M" -ge 1140 ] || [ "$M" -lt 420 ]; then FILE_MODE=light; WANT=0; AUTO_AN=1; else FILE_MODE=dark; WANT=1; AUTO_AN=0; fi
 echo "local minute $M -> AUTO would be an=$AUTO_AN; file mode=$FILE_MODE, correct tile an=$WANT"
