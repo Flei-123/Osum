@@ -188,7 +188,7 @@ mk_image() { # image conf-file
     # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
     # r383: --v3 -- /bin/settings (2 151 680 octets) is over the 2 134 016 of format 2
     # (red on main alike); format 3 has multi-block files.
-    local ARGS=(build "$img" 32768 --v3 /lib/
+    local ARGS=(build "$img" 65536 --v3 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local p
     for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
