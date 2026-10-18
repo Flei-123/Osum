@@ -77,6 +77,10 @@ fi
 while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
+    # W-C3g: the taskbar must SEE every size change (serial `taskbar: follow screen w=W h=H`, printed without /etc/uitrace). Before the fix its
+    # quiet-mode poll counter had a fixed parity, so `round % 8` (heads_step) never hit in half of all runs and in VirtualBox the bar never followed.
+    nfol=$(grep -ac "taskbar: follow screen w=$ew h=$eh" "$D/serial.txt")
+    [ "$nfol" -ge 1 ] && ok "$s: taskbar followed the size change ($nfol x)" || bad "$s: taskbar never saw the size change (no 'taskbar: follow screen')"
     awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
     [ "$rows" -ge 20 ] && ok "$s: taskbar at the bottom (rows $rows)" || bad "$s: no taskbar at the bottom (rows $rows)"
     awk -v b="$lastb" 'BEGIN{exit !(b<0.05)}' && ok "$s: last bar row not black (share $lastb)" || bad "$s: last row black (share $lastb)"
