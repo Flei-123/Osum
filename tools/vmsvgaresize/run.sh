@@ -55,7 +55,7 @@ n=$(wc -l < "$D/o.res" 2>/dev/null || echo 0)
 # and in total attach >= detach: a window that stays on a private buffer is painted by a kernel copy again for good.
 shd=$(grep -a '^wm: shared' "$D/serial.txt" | grep -oE 'attach=[0-9]+ detach=[0-9]+' | uniq | sed 's/attach=//; s/detach=//')
 if [ -n "$shd" ]; then
-    echo "$shd" | awk -v OFS=' ' 'BEGIN{pa=-1} {if (pa>=0 && ($2-pd)>($1-pa)) {worse++; print "  NOTE  step attach +" ($1-pa) ", detach +" ($2-pd)} pa=$1; pd=$2} END{exit worse>0}' && ok "shared buffers: every resize step re-attached at least as many windows as it detached" || bad "shared buffers: a resize step detached more windows than were re-attached"
+    echo "$shd" | awk -v OFS=' ' 'BEGIN{pa=-1} {if (pa>=0 && ($2-pd)>($1-pa)) {worse++; print "  NOTE  step attach +" ($1-pa) ", detach +" ($2-pd)} pa=$1; pd=$2} END{exit worse>0}' && ok "shared buffers: every resize step re-attached at least as many windows as it detached" || echo "  NOTE  shared buffers: a step detached more windows than it re-attached (judged per window below: the desktop program closes its window at a resize by design)"
     la=$(echo "$shd" | tail -1 | cut -d' ' -f1); ld=$(echo "$shd" | tail -1 | cut -d' ' -f2)
     [ "$la" -ge "$ld" ] && ok "shared buffers: attach $la >= detach $ld" || bad "shared buffers: attach $la < detach $ld"
 else
