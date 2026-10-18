@@ -271,3 +271,7 @@ Client behaviour worth knowing when writing the agent:
   last byte (the agent can be busy for longer than that in a disk write while the rest of a good frame is on its way).
 - `exec` returns when the shell has exited and the pipes stayed quiet for 300 ms (a detached child that keeps the pipes
   open does not hold the answer back). `logs` honours `lines` (tail, default 200).
+- The slow poll alone did not make the agent cheap: the kernel read of `/dev/odb0` (`kernel/drv/con/odbuart.fi`) spun
+  40000 port reads on an empty FIFO per call (~100+ % of a vCPU in QEMU/KVM). The spin is now long (8000) only when the
+  previous read returned octets ("hot") and 16 polls after an empty read ("cold"). Measured idle cost: 97 % -> 2 % of a
+  host core (gate section 7b); `exec echo` round trip 1023 ms -> 159 ms.
