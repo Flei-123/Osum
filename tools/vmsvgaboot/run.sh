@@ -3,7 +3,8 @@
 # tools/vmsvgaboot/run.sh -- W-C3: the screen is fitted to the host at BOOT and the UI scale follows the final size.
 # QEMU never sends a host hint, so the kernel word `vmsvgaboot` plays 2400x1400 through kgui.host_boot_fit (the same call a VirtualBox
 # VMMDev hint takes at boot). Checks (QEMU vmware card with 64 MiB video memory, stick image):
-#   1. serial `vmsvga: bootfit 1024x768 -> WxH rc=0 scale=2` (screen switched BEFORE the desktop, integer UI scale 2 for >= 2400x1350)
+#   1. serial `vmsvga: bootfit 1024x768 hint 2400x1400` then `vmsvga: bootfit -> WxH rc=0 scale=2` (screen switched BEFORE the desktop; the
+#      QEMU card refuses widths above 2368, so the fit is shrunk to ~2250x1312 -- the scale still follows the REQUESTED size: 2)
 #   2. the screendump after login has that size, is not black, and the taskbar is at the bottom
 #   3. taskbar height at scale 2 is about twice the height at scale 1 (control run without the word: scale 1)
 # Usage: [STICK_DIR=<dir with orientos-usb.img>] [IMG=<file>] bash tools/vmsvgaboot/run.sh
@@ -45,18 +46,19 @@ run_one() { # <tag> <extra words>
     local pid=$!
     python3 -I "$HERE/boot.py" "$D/mon.sock" "$D/vnc.sock" "$D/o" "$D/serial.txt" >"$D/py.txt" 2>&1 || true
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-    [ -n "${KEEP:-}" ] && mkdir -p "$KEEP" && cp -f "$D"/o.*.ppm "$D/serial.txt" "$KEEP"/ 2>/dev/null
+    [ -n "${KEEP:-}" ] && mkdir -p "$KEEP/$1" && cp -f "$D"/o.*.ppm "$D/serial.txt" "$D/py.txt" "$D/o.res" "$KEEP/$1"/ 2>/dev/null
     return 0
 }
 run_one fit "vmsvgaboot"
 run_one ctl ""
 D=$T/fit
 [ "$(cat "$D/o.login" 2>/dev/null)" = 1 ] && ok "fit: logged in" || { bad "fit: login"; tail -5 "$D/py.txt"; }
-line=$(grep -a '^vmsvga: bootfit' "$D/serial.txt" | head -1)
+line=$(grep -a '^vmsvga: bootfit -> ' "$D/serial.txt" | head -1)
 echo "  NOTE  $line"
-echo "$line" | grep -q -- '-> 2400x1400 rc=0 scale=2' && ok "fit: boot fit 2400x1400, rc 0, UI scale 2" || bad "fit: boot fit line wrong: '$line'"
+sw=$(echo "$line" | sed -n 's/^vmsvga: bootfit -> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\1/p'); sh=$(echo "$line" | sed -n 's/^vmsvga: bootfit -> \([0-9]*\)x\([0-9]*\) rc=0 scale=2.*/\2/p')
+[ -n "$sw" ] && [ "$sw" -ge 2000 ] && ok "fit: boot fit ${sw}x${sh}, rc 0, UI scale 2" || bad "fit: boot fit line wrong: '$line'"
 read -r fw fh fblack frows < "$D/o.res" 2>/dev/null || { fw=0; fh=0; fblack=1; frows=0; }
-[ "$fw" = 2400 ] && [ "$fh" = 1400 ] && ok "fit: screen dump is 2400x1400" || bad "fit: screen dump ${fw}x${fh}"
+[ "$fw" = "${sw:-0}" ] && [ "$fh" = "${sh:-0}" ] && ok "fit: screen dump is ${fw}x${fh} (as logged)" || bad "fit: screen dump ${fw}x${fh} (logged ${sw:-0}x${sh:-0})"
 awk -v b="$fblack" 'BEGIN{exit !(b<0.5)}' && ok "fit: desktop not black (share $fblack)" || bad "fit: desktop black (share $fblack)"
 [ "$frows" -ge 20 ] && ok "fit: taskbar at the bottom (rows $frows)" || bad "fit: no taskbar (rows $frows)"
 D=$T/ctl

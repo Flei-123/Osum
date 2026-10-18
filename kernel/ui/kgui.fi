@@ -611,6 +611,7 @@ fn bnum(b: bool) -> u64 {
 // when neither an EDID size nor `uiscale=` decided. `vmsvgaboot` plays 2400x1400 on QEMU. Serial: `vmsvga: bootfit WxH -> WxH rc=N scale=U`.
 fn host_boot_fit(state: u64) {
     var s_bf: [u8; 20] = "vmsvga: bootfit \0\0\0\0"
+    var s_hi: [u8; 7] = " hint \0\0"
     var s_ar: [u8; 6] = " -> \0\0"
     var s_rc: [u8; 6] = " rc=\0\0"
     var s_sc: [u8; 9] = " scale=\0\0"
@@ -624,29 +625,46 @@ fn host_boot_fit(state: u64) {
     }
     var rc: u64 = 0
     if hv != 0 && ((hv / 65536) != fb.width(state) || (hv % 65536) != fb.height(state)) {
+        // two whole lines: follow_host prints its own `vmsvga: mode` line in between
         serial.puts((&s_bf[0]) as u64)
         serial.dec(fb.width(state))
         serial.puts((&s_x[0]) as u64)
         serial.dec(fb.height(state))
+        serial.puts((&s_hi[0]) as u64)
+        serial.dec(hv / 65536)
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(hv % 65536)
+        serial.nl()
         rc = vmode.follow_host(state, hv / 65536, hv % 65536)
+        // the debouncer of the idle poll must not apply the same hint a second time
+        vmsvga.boot_handled(state, hv)
+    }
+    // the scale: only when nobody decided yet (no `uiscale=`, no table EDID size). The REQUESTED host size decides (a card or map limit
+    // may shrink the screen below it, the host picture is still big), the final screen must still leave >= 800 logical px of width.
+    if fb.uiscale(state) == 1 && fb.res_w(state) == 0
+        && kstate.get(state, kstate.UISCALE_WUNSCH) == 0 && vmode.dpi_scale(state, fb.width(state)) == 0 {
+        var aw: u64 = fb.width(state)
+        var ah: u64 = fb.height(state)
+        if hv != 0 {
+            aw = hv / 65536
+            ah = hv % 65536
+        }
+        var a: u64 = vmode.auto_scale(aw, ah)
+        if a > 1 && fb.width(state) < 1600 {
+            a = 1
+        }
+        if a > 1 {
+            let _a: bool = fb.set_uiscale(state, a)
+        }
+    }
+    if hv != 0 {
+        serial.puts((&s_bf[0]) as u64)
         serial.puts((&s_ar[0]) as u64)
         serial.dec(fb.width(state))
         serial.puts((&s_x[0]) as u64)
         serial.dec(fb.height(state))
         serial.puts((&s_rc[0]) as u64)
         serial.dec(rc)
-        // the debouncer of the idle poll must not apply the same hint a second time
-        vmsvga.boot_handled(state, hv)
-    }
-    // the scale: only when nobody decided yet (no `uiscale=`, no table EDID size) and only on a mode that is not smaller than before
-    if fb.uiscale(state) == 1 && fb.res_w(state) == 0
-        && kstate.get(state, kstate.UISCALE_WUNSCH) == 0 && vmode.dpi_scale(state, fb.width(state)) == 0 {
-        let a: u64 = vmode.auto_scale(fb.width(state), fb.height(state))
-        if a > 1 {
-            let _a: bool = fb.set_uiscale(state, a)
-        }
-    }
-    if hv != 0 {
         serial.puts((&s_sc[0]) as u64)
         serial.dec(fb.uiscale(state))
         serial.nl()
