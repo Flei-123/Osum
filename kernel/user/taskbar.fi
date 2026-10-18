@@ -3982,11 +3982,13 @@ static mut s_tw: [u8; 5] = " tw=\0"
 // nur die Buendel, die gerade ein Fenster haben -- hoechstens so viele
 // wie Knoepfe. Also: SYM_N Plaetze zu je einem Symbol, geschluesselt am
 // Namen, gelesen EINMAL je Name und danach nie wieder.
-const SYM_N: u64 = 10
+// r1090: 10 -> 28 (= MAXPIN + MAXK + 2: every pin, every window button, the start button and one spare). With 10 places a taskbar with
+// its row of pins had no place left for the Character Map: the bundle was never looked up and its button stayed a grey field.
+const SYM_N: u64 = 28
 const SYM_BYTES: u64 = 4108 // 12 + 32 * 32 * 4, wie appdir.SYMBYTES (r399: vector icons)
-static mut sym_name: [u8; 240] = [0 as u8; 240] // SYM_N * 24
-static mut sym_data: [u8; 41080] = [0 as u8; 41080] // SYM_N * SYM_BYTES
-static mut sym_ok: [u64; 10] = [0 as u64; 10] // 0 unbenutzt, 1 da, 2 keins
+static mut sym_name: [u8; 672] = [0 as u8; 672] // SYM_N * 24
+static mut sym_data: [u8; 115024] = [0 as u8; 115024] // SYM_N * SYM_BYTES
+static mut sym_ok: [u64; 28] = [0 as u64; 28] // 0 unbenutzt, 1 da, 2 keins
 static mut sym_used: u64 = 0
 static mut sym_hits: u64 = 0
 static mut sym_reads: u64 = 0
@@ -4017,6 +4019,22 @@ fn kstate8(p: u64) -> u64 {
 // reinen Text zurueck -- dieselbe Regel wie bei Netz und Akku. Deshalb
 // merkt sich der Speicher auch das NEIN (`sym_ok = 2`): sonst wuerde
 // jeder Neuaufbau der Leiste dieselbe fehlende Datei wieder oeffnen.
+static mut sym_miss_said: u64 = 0
+// r1090: a bundle without a symbol is no error, but a button with a grey plate must be explainable from the serial line:
+// why = 1 cache full, 2 file did not open, 3 short read, 4 not an OSYM picture
+fn sym_miss(app: u64, why: u64) {
+    if sym_miss_said >= 8 {
+        return
+    }
+    sym_miss_said = sym_miss_said + 1
+    var s_m: [u8; 19] = "taskbar: sym miss \0"
+    var s_w: [u8; 6] = " why=\0"
+    say((&s_m[0 as usize]) as u64)
+    say(app)
+    say((&s_w[0 as usize]) as u64)
+    sayn(why)
+    nl()
+}
 fn sym_of(app: u64) -> u64 {
     if app == 0 || kstate8(app) == 0 {
         return 0
@@ -4033,7 +4051,10 @@ fn sym_of(app: u64) -> u64 {
         i = i + 1
     }
     if sym_used >= SYM_N {
-        return 0
+        // r1090: the cache never gave a place back, so a long session (every popup / dialog name stays) used it up and the NEXT app
+        // got a grey plate. When full, start over: a symbol is re-read once per name, nothing else is lost.
+        sym_miss(app, 1)
+        sym_used = 0
     }
     let platz: u64 = sym_used
     sym_used = sym_used + 1
@@ -4068,6 +4089,7 @@ fn sym_of(app: u64) -> u64 {
     pfad[(n) as usize] = 0 as u8
     let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
     if ulib.bad(fd) {
+        sym_miss(app, 2)
         return 0
     }
     sym_reads = sym_reads + 1
@@ -4075,9 +4097,11 @@ fn sym_of(app: u64) -> u64 {
     let got: u64 = io.read(fd, ziel, SYM_BYTES)
     io.close(fd)
     if ulib.bad(got) || got < 12 {
+        sym_miss(app, 3)
         return 0
     }
     if !wlibc.icon_ok(ziel) {
+        sym_miss(app, 4)
         return 0
     }
     sym_ok[(platz) as usize] = 1

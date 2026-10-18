@@ -97,6 +97,16 @@ if m:
     have = {os.path.basename(a)[:-4] for a in apps if os.path.isfile(os.path.join(a, "symbol.osym"))}
     for p in m.group(1).split(","):
         say(p in have, "pinned program %s has a bundle icon" % p)
+# 5c. r1090: the taskbar's symbol cache must hold a place for every pin, every window button, the start button and one spare. With
+#     10 places a bar with its row of pins had none left for the Character Map: grey field instead of the Omega.
+tb = os.path.join(root, "kernel/user/taskbar.fi")
+if os.path.exists(tb):
+    t = open(tb, "rb").read().decode("latin1")
+    def cst(n):
+        m = re.search(r"^const %s: u64 = (\d+)" % n, t, re.M)
+        return int(m.group(1)) if m else 0
+    sn, mp, mk = cst("SYM_N"), cst("MAXPIN"), cst("MAXK")
+    say(sn >= mp + mk + 2 and mp > 0 and mk > 0, "taskbar symbol cache has a place for every pin, window button and the start button (SYM_N %d >= MAXPIN %d + MAXK %d + 2)" % (sn, mp, mk))
 PY
 }
 
@@ -132,6 +142,7 @@ mkcopy; mkdir -p "$D/t/assets/apps/newapp.osp"; echo "name=New" > "$D/t/assets/a
 mkcopy; sed -i '/"welcome":/d' "$D/t/tools/design/mkicons.py"; expect_red "program not in mkicons.py"
 mkcopy; sed -i 's/^datei=symbol .*//' "$D/t/pakete/mail/rezept"; expect_red "package without symbol"
 mkcopy; sed -i '/set_app(/d' "$D/t/kernel/user/welcome.fi"; expect_red "program without set_app (empty taskbar plate)"
+mkcopy; sed -i 's/^const SYM_N: u64 = .*/const SYM_N: u64 = 10/' "$D/t/kernel/user/taskbar.fi"; expect_red "symbol cache smaller than pins + window buttons (grey charmap button)"
 
 echo
 echo "ICONAUDIT: $PASS passed, $FAIL failed"
