@@ -96,7 +96,7 @@ def menu_probe(mon, tag, leave_open):
 
 def main():
     mon = Mon(mon_sock)
-    if not wait_for(lambda t: "glogin: bereit" in t, 200):
+    if not wait_for(lambda t: "glogin: bereit" in t or t.count("glogin: rect id=") >= 3, 200):
         open(base + ".login", "w").write("0")
         mon.quit()
         return
@@ -104,7 +104,7 @@ def main():
     for c in "startkennwort":
         mon.cmd("sendkey " + c, 0.12)
     mon.cmd("sendkey ret", 0.3)
-    ok = wait_for(lambda t: "glogin: angemeldet als" in t, 60)
+    ok = wait_for(lambda t: "glogin: angemeldet als" in t or "glogin: autostart" in t or "glogin: uid=" in t, 60)
     open(base + ".login", "w").write("1" if ok else "0")
     if not ok:
         mon.quit()
