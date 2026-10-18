@@ -127,7 +127,7 @@ function Shot([string]$name) {
 }
 function ShotStat([string]$name) {
   Add-Type -AssemblyName System.Drawing
-  $p = if (Test-Path $name) { $name } else { Join-Path $SHOTS ($name + '.png') }
+  $p = if ($name -like '*.png' -and (Test-Path -PathType Leaf $name)) { $name } else { Join-Path $SHOTS ($name + '.png') }   # a bare name like 'boot' may exist as a folder
   $bmp = New-Object System.Drawing.Bitmap $p
   try {
     $w = $bmp.Width; $h = $bmp.Height; $step = 4
