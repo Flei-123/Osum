@@ -201,6 +201,15 @@ come from outside `kernel/` and `lib/libc/`.
 Mono (4.1). The program icons (`assets/apps/*.osp/symbol.osym`) are drawn from Lucide glyphs
 (ISC, `assets/icons/LICENSE.lucide`) by `tools/design/mkicons.py`.
 
+### 4.1b G-009 / r1084: the fallback faces (symbols, emoji)
+
+`assets/osum-symbols.ttf` is a subset of **DejaVu Sans** (fonts-dejavu-core 2.37, Bitstream Vera licence -- free to use, modify
+and redistribute; DejaVu's own changes are public domain; the licence text is `assets/LICENSE-dejavu.txt`; the name table is
+dropped because the licence forbids modified copies named "Vera"/"Bitstream"). `assets/osum-emoji.ttf` is a subset of
+**Noto Emoji** (monochrome, Google, SIL Open Font License 1.1, `assets/LICENSE-OFL-noto-emoji.txt`) frozen at weight 400.
+Sources: `assets/src/DejaVuSans.ttf`, `assets/src/NotoEmoji-Variable.ttf`; cut by `tools/design/mkfallback.py`
+(reproducible). They carry only code points the sans lacks and are loaded by `fuiglyph` on the first miss.
+
 ### 4.2 `kernel/font.fi` -- 1,520 octets of foreign glyph bitmaps, linked into the kernel
 
 * **What / where:** `kernel/font.fi`, 130 lines. 95 glyphs, 8x16, 0x20 to

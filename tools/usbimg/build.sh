@@ -991,6 +991,10 @@ ARGS+=(/lib/
        # loaded by fuiglyph on the first ask of ROLE_SERIF -- only the PDF viewer asks
        "/lib/serif.ttf=assets/osum-serif.ttf"
        "/lib/serifb.ttf=assets/osum-serif-bold.ttf"
+       # G-009 / r1084: the fallback faces (DejaVu Sans cut, Noto Emoji cut; assets/src/README.md), loaded by fuiglyph on the first
+       # code point the sans lacks -- arrows, Latin Extended, Greek/Cyrillic, Emoji. ~0.8 MB of the stick.
+       "/lib/symbols.ttf=assets/osum-symbols.ttf"
+       "/lib/emoji.ttf=assets/osum-emoji.ttf"
        "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
 for p in $gebaut; do

@@ -13,3 +13,16 @@ kerning into a legacy `kern` table (format 0, the 10 900 strongest pairs, the le
 `osum-sans.cps` lists the 339 code points of the original DejaVu cut. Inter lacks three of them
 (U+00AD soft hyphen, U+0149, U+FFFD); `mkfont.py` maps them to the glyphs `hyphen`, `n` and
 `question` so that the character set -- and `tools/i18n/run.sh` -- stay complete.
+
+## Fallback fonts (G-009 / r1084)
+
+| file | licence | what is cut from it |
+|---|---|---|
+| `DejaVuSans.ttf` (fonts-dejavu-core 2.37) | Bitstream Vera licence, DejaVu changes public domain (`../LICENSE-dejavu.txt`) | `../osum-symbols.ttf` by `tools/design/mkfallback.py` |
+| `NotoEmoji-Variable.ttf` (Noto Emoji, monochrome, variable) | SIL Open Font License 1.1 (`../LICENSE-OFL-noto-emoji.txt`) | `../osum-emoji.ttf` by `tools/design/mkfallback.py` (frozen at wght 400) |
+
+`osum-sans.ttf` has no arrows, no Latin Extended-A/B beyond its 339 characters and no Emoji. `fuiglyph` loads the two cuts
+(`/lib/symbols.ttf`, `/lib/emoji.ttf`) on the first miss only and asks them in that order. The cuts carry only code points the
+sans lacks. The name table is dropped (the Vera licence forbids modified copies named "Vera"/"Bitstream").
+`python3 tools/design/mkfallback.py assets/src/DejaVuSans.ttf assets/src/NotoEmoji-Variable.ttf assets/osum-sans.ttf
+assets/osum-symbols.ttf assets/osum-emoji.ttf` reproduces both.

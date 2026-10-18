@@ -104,8 +104,8 @@ static mut s_state: u64 = 0
 // 256 words = 2 KiB per font: fUi tempo r23 gave ttf.Font a 256-entry
 // Latin cmap cache (1 KiB); at 32 words the size check below refused the
 // struct and every program fell back to the kernel rasteriser silently.
-static mut s_fontm: [u64; 1536] = [0; 1536] // 6 slots x 256 words
-static mut s_slot_ok: [u64; 6] = [0; 6]
+static mut s_fontm: [u64; 2048] = [0; 2048] // 8 slots x 256 words (6 roles + 2 fallback faces)
+static mut s_slot_ok: [u64; 8] = [0; 8]
 // role -> slot (a missing bold falls back to sans, and so on)
 static mut s_role: [u64; 6] = [0; 6]
 static mut s_serif_tried: u64 = 0
@@ -120,15 +120,33 @@ static mut p_icon: [u8; 16] = "/lib/icons.ttf\0\0"
 static mut p_bold: [u8; 15] = "/lib/bold.ttf\0\0"
 static mut p_serif: [u8; 16] = "/lib/serif.ttf\0\0"
 static mut p_serifb: [u8; 17] = "/lib/serifb.ttf\0\0"
+static mut p_sym: [u8; 18] = "/lib/symbols.ttf\0\0"
+static mut p_emo: [u8; 16] = "/lib/emoji.ttf\0\0"
 // One line on the serial log per process, so a test can tell which
 // engine drew the text -- "the text looks the same" proves nothing.
 static mut m_ok: [u8; 22] = "fuiglyph: fui fonts=\0\0"
 static mut m_no: [u8; 26] = "fuiglyph: kernel fallback\0"
+static mut m_fb: [u8; 24] = "fuiglyph: fallback sym=\0"
+static mut m_fb2: [u8; 6] = " emo=\0"
 static mut m_big: [u8; 45] = "fuiglyph: kernel fallback, font struct grew\0\0"
 
 const FONT_WORDS: u64 = 256
 const RASTER_WORDS: u64 = 64
 const NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF
+
+// G-009 / r1084: THE FALLBACK CHAIN. osum-sans.ttf (Inter, 339 characters) has no arrows beyond a few, no Latin Extended-B and no
+// Emoji, so a code point the role font lacks used to come out as the font's missing box (or a cross in the character map). Two more
+// faces, cut by tools/design/mkfallback.py and loaded on the FIRST miss of the process (no other program pays their ~0.8 MB):
+//   SLOT_SYM  /lib/symbols.ttf  DejaVu Sans subset: Latin Extended, arrows, maths, box drawing, shapes, symbols, Braille
+//   SLOT_EMO  /lib/emoji.ttf    Noto Emoji subset (monochrome): the emoji blocks of the character map
+// The chain for a miss is role font -> symbols -> emoji; the icon font (private use area) never falls back. A missing file is just
+// a missing link in the chain: nothing changes for that code point.
+const SLOT_SYM: u64 = 6
+const SLOT_EMO: u64 = 7
+// Below this code point there is nothing to fall back to (controls, ASCII, the C1 block): the font's own box stays.
+const FB_MIN: u64 = 0xA0
+static mut s_fb_tried: u64 = 0
+static mut s_n_fallback: u64 = 0
 
 fn font_at(slot: u64) -> *mut ttf.Font {
     return (&s_fontm[(slot * FONT_WORDS) as usize]) as u64 as *mut ttf.Font
@@ -239,6 +257,64 @@ fn ready() -> bool {
     return true
 }
 
+// Loads the two fallback faces once, on the first miss.
+fn fb_load() {
+    if s_fb_tried != 0 {
+        return
+    }
+    s_fb_tried = 1
+    load(SLOT_SYM, (&p_sym[0]) as u64)
+    load(SLOT_EMO, (&p_emo[0]) as u64)
+    // one line per process, so a gate can tell that the faces really came from the image
+    ulib.say((&m_fb[0]) as u64)
+    ulib.sayu(s_slot_ok[SLOT_SYM as usize])
+    ulib.say((&m_fb2[0]) as u64)
+    ulib.sayu(s_slot_ok[SLOT_EMO as usize])
+    ulib.nl()
+}
+
+// The face that has a glyph for `c` when the font of `role` has none -- NO_SLOT if the chain has none either.
+fn fb_slot(role: u64, c: u64) -> u64 {
+    if role == ROLE_ICON || c < FB_MIN || c > 0x10FFFF {
+        return NO_SLOT
+    }
+    fb_load()
+    if s_slot_ok[SLOT_SYM as usize] != 0 && ttf.font_glyph_for(font_at(SLOT_SYM), c as u32) != 0 as u32 {
+        return SLOT_SYM
+    }
+    if s_slot_ok[SLOT_EMO as usize] != 0 && ttf.font_glyph_for(font_at(SLOT_EMO), c as u32) != 0 as u32 {
+        return SLOT_EMO
+    }
+    return NO_SLOT
+}
+
+// The `miss` callback of the fUi painter's fonts (vendor/firn/patches/0009): the painter looks a glyph up with ttf.font_glyph_for on
+// its FontSet font; for a code point that font lacks, ttf calls this, which loads the fallback faces on the first miss and returns the
+// glyph id tagged with the face (slot 6 -> k = 1, slot 7 -> k = 2). `upem` is the asking font's units per em: a face with another
+// scale would draw at the wrong size, so it is refused.
+fn fb_miss(cp: u32, upem: u32) -> u32 {
+    fb_load()
+    if s_slot_ok[SLOT_SYM as usize] != 0 && ttf.font_upem(font_at(SLOT_SYM)) == upem {
+        let g: u32 = ttf.font_glyph_for(font_at(SLOT_SYM), cp)
+        if g != 0 as u32 {
+            return g | 0x1000000 as u32
+        }
+    }
+    if s_slot_ok[SLOT_EMO as usize] != 0 && ttf.font_upem(font_at(SLOT_EMO)) == upem {
+        let g: u32 = ttf.font_glyph_for(font_at(SLOT_EMO), cp)
+        if g != 0 as u32 {
+            return g | 0x2000000 as u32
+        }
+    }
+    return 0 as u32
+}
+
+// Zero-width format characters: joiners and variation selectors draw nothing and take no room. (Without this the keycap/ZWJ
+// sequences of an emoji would show the missing box after every emoji.)
+fn is_invisible(c: u64) -> bool {
+    return (c >= 0x200B && c <= 0x200D) || c == 0xFE0E || c == 0xFE0F || c == 0x2060 || c == 0xFEFF
+}
+
 fn slot_of(role: u64) -> u64 {
     if role >= ROLES {
         return NO_SLOT
@@ -291,7 +367,11 @@ fn has_glyph(role: u64, c: u64) -> bool {
     if s == NO_SLOT {
         return false
     }
-    return ttf.font_glyph_for(font_at(s), c as u32) != 0 as u32
+    if ttf.font_glyph_for(font_at(s), c as u32) != 0 as u32 {
+        return true
+    }
+    // the fallback chain (G-009): the glyph is drawn from another face, so it IS there
+    return fb_slot(role, c) != NO_SLOT
 }
 
 
@@ -326,8 +406,25 @@ fn glyph_into(role: u64, px: u64, c: u64, out: u64, max: u64) -> u64 {
     if s == NO_SLOT {
         return 0
     }
-    let f: *mut ttf.Font = font_at(s)
-    let gid: u32 = ttf.font_glyph_for(f, c as u32)
+    var f: *mut ttf.Font = font_at(s)
+    var gid: u32 = ttf.font_glyph_for(f, c as u32)
+    if gid == 0 as u32 {
+        let fs: u64 = fb_slot(role, c)
+        if fs != NO_SLOT {
+            f = font_at(fs)
+            gid = ttf.font_glyph_for(f, c as u32)
+            s_n_fallback = s_n_fallback + 1
+        } else if is_invisible(c) {
+            // empty glyph, advance 0
+            put64(out + 0, 0)
+            put64(out + 8, 0)
+            put64(out + 16, 0)
+            put64(out + 24, 0)
+            put64(out + 32, 0)
+            put64(out + 40, 0)
+            return HDR
+        }
+    }
     let sc16: i64 = scale16(f, px)
     let adv: i64 = f26(ttf.font_advance(f, gid) as i64, sc16)
     var x0: i32 = 0
@@ -440,6 +537,11 @@ fn fontset(role: u64) -> u64 {
         }
         (*fs).f = *font_at(slot)
         (*fs).ok = 1
+        // G-009: the painter's own lookups reach the fallback faces too (not for the icon font: its private-use code points
+        // belong to it alone)
+        if role != ROLE_ICON {
+            ttf.font_set_fallback(&(*fs).f, font_at(SLOT_SYM), font_at(SLOT_EMO), fb_miss)
+        }
         s_fs_done[role as usize] = 1
     }
     return fs as u64
