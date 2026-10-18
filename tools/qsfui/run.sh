@@ -11,6 +11,7 @@
 # face of fUi plus the program's own picture), two sliders of fUi, a separator
 # and a footer with icon buttons.
 #
+# Serial lines can be torn by other writers (a line may start in the middle of another), so no ^ anchors on qs: lines.
 # What this run measures, on the machine of the stick (tools/design/eh6.sh:
 # USB keyboard and mouse, 4 cores), at ui_scale 1 (dark) and 2 (light):
 #   1. Super+A opens the panel, it reports its geometry, it lies on the screen
@@ -90,7 +91,7 @@ check_scale() {
         rm -rf "$D"
         bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm drehbuch="$TMPD/dreh.txt" \
             > "$TMPD/s$sc.log" 2>&1
-        grep -aq '^qs: open ' "$D/serial.txt" 2>/dev/null && break
+        grep -aq 'qs: open ' "$D/serial.txt" 2>/dev/null && break
         echo "        (try $try: the panel did not open)"
     done
     S="$D/serial.txt"
@@ -103,7 +104,7 @@ check_scale() {
         return 0
     fi
     # 1. the panel opened and says where
-    open=$(grep -aoE '^qs: open x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" | head -1)
+    open=$(grep -aoE 'qs: open x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" | head -1)
     if [ -z "$open" ]; then bad "scale $sc: no 'qs: open'"; return 0; fi
     qx=$(echo "$open" | sed -E 's/.* x=([0-9]+).*/\1/'); qy=$(echo "$open" | sed -E 's/.* y=([0-9]+).*/\1/')
     qw=$(echo "$open" | sed -E 's/.* w=([0-9]+).*/\1/'); qh=$(echo "$open" | sed -E 's/.* h=([0-9]+).*/\1/')
@@ -119,7 +120,7 @@ check_scale() {
     rects=()
     while read -r kx ky kw kh; do
         rects+=("$((qx + kx)),$((qy + ky)),$kw,$kh")
-    done < <(grep -aoE '^qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
+    done < <(grep -aoE 'qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
         | head -5 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
     if [ "${#rects[@]}" -ne 5 ]; then bad "scale $sc: the panel reported ${#rects[@]} tiles, not 5"; return 0; fi
     r=$(python3 -I tools/qsfui/check.py "$S" "$D/01-open.ppm" "$sc" 2>&1)
@@ -139,7 +140,7 @@ check_scale() {
         bad "scale $sc: counter-proof -- shifted rectangles were accepted"
     fi
     # 3. the Tiling tile (n=5)
-    if grep -aqE '^qs: tile n=5 to=1 rc=0' "$S"; then
+    if grep -aqE 'qs: tile n=5 to=1 rc=0' "$S"; then
         ok "scale $sc: a click on the Tiling tile reached the system (to=1)"
     else
         bad "scale $sc: no 'qs: tile n=5 to=1 rc=0'"
@@ -153,13 +154,13 @@ check_scale() {
         bad "scale $sc: the tile looks the same after the click ($a)"
     fi
     # 4. the slider
-    hv=$(grep -aoE '^qs: hell auf =[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
+    hv=$(grep -aoE 'qs: hell auf =[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
     if [ -n "$hv" ] && [ "$hv" -ge 100 ] && [ "$hv" -le 120 ]; then
         ok "scale $sc: a click in the middle of the brightness slider sets $hv (range 20..200)"
     else
         bad "scale $sc: brightness after the click: ${hv:-nothing}"
     fi
-    sp=$(grep -aoE '^qs: hell spur von=[0-9]+ bis=[0-9]+ ym=[0-9]+' "$S" | head -1)
+    sp=$(grep -aoE 'qs: hell spur von=[0-9]+ bis=[0-9]+ ym=[0-9]+' "$S" | head -1)
     ym=$(echo "$sp" | sed -E 's/.* ym=([0-9]+).*/\1/'); von=$(echo "$sp" | sed -E 's/.* von=([0-9]+).*/\1/')
     bis=$(echo "$sp" | sed -E 's/.* bis=([0-9]+).*/\1/')
     # the knob: at the middle of the track the picture shows the track before
@@ -172,13 +173,13 @@ check_scale() {
         bad "scale $sc: nothing changed at the middle of the track ($a at $mx,$ym)"
     fi
     # 5. the keyboard
-    if grep -aq '^qs: closed by escape' "$S"; then ok "scale $sc: Escape closes the panel"
+    if grep -aq 'qs: closed by escape' "$S"; then ok "scale $sc: Escape closes the panel"
     else bad "scale $sc: Escape did not close the panel"; fi
-    n_open=$(grep -ac '^qs: open ' "$S")
-    if [ "$n_open" -eq 2 ] && grep -aq '^qs: closed by hotkey' "$S"; then
+    n_open=$(grep -ac 'qs: open ' "$S")
+    if [ "$n_open" -eq 2 ] && grep -aq 'qs: closed by hotkey' "$S"; then
         ok "scale $sc: Super+A opens it again ($n_open openings) and closes it again"
     else
-        bad "scale $sc: openings $n_open, closed by hotkey: $(grep -ac '^qs: closed by hotkey' "$S")"
+        bad "scale $sc: openings $n_open, closed by hotkey: $(grep -ac 'qs: closed by hotkey' "$S")"
     fi
 }
 
