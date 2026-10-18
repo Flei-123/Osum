@@ -98,7 +98,7 @@ class Bild:
 # ---------------------------------------------------- die Meldungen
 RE_TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+) "
-    r"tw=(\d+) ax=(\d+) ay=(\d+) t=(.*)")
+    r"tw=(\d+) ax=(\d+) ay=(\d+)(?: ow=\d+ bw=\d+)? t=(.*)")
 RE_RECT = re.compile(
     r"(\w+): rect (?:id=(\d+) kind=(\d+)|name=(\w+)) "
     r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")

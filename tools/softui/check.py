@@ -83,7 +83,7 @@ def at(px, W, x, y):
 TEXT = re.compile(
     r"^(wlib|taskbar): text (?:win=(\d+) kind=(\d+) )?(?:\w+ )?"
     r"x=(-?\d+) base=(-?\d+) fg=(\d+) bg=(\d+)(?: tw=(\d+))?"
-    r"(?: ax=(-?\d+) ay=(-?\d+))? t=(.*)$")
+    r"(?: ax=(-?\d+) ay=(-?\d+))?(?: ow=\d+ bw=\d+)? t=(.*)$")
 MARK = re.compile(r"^wlib: texts ax=(-?\d+) ay=(-?\d+)$")
 WIN = re.compile(
     r"^wm: win nr=(\d+) id=(\d+) .* x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) "
