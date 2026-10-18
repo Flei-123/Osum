@@ -1,5 +1,5 @@
 # series.ps1 - W-L3b measurement helpers (runs on the LAPTOP, PowerShell 5.1, started as a hidden background process).
-#   series.ps1 modes <n> <log>     n live mode switches 1920x1080 -> 1280x720 -> 2400x1350 (cycle), per switch: hang seconds
+#   series.ps1 modes <n> <log> [fast]     n live mode switches 1920x1080 -> 1280x720 -> 2400x1350 (cycle), per switch: hang seconds
 #   series.ps1 boot <n> <log> <headless|gui> <img-label>   n cold boots: login, white-desktop share, host CPU after login
 # Output lines go to <log> (poll it). A "hang" = VM process above 85 % of one host core for the sample window after a switch.
 param([string]$Mode, [int]$N, [string]$Log, [string]$Arg3 = 'headless', [string]$Label = '')
@@ -38,9 +38,10 @@ if ($Mode -eq 'modes') {
   for ($i = 0; $i -lt $N; $i++) {
     $sz = $sizes[$i % 3]
     & $VB controlvm $VM setvideomodehint $sz[0] $sz[1] 32 | Out-Null
-    Start-Sleep -Seconds 4
+    $fast = ($Arg3 -eq 'fast')
+    Start-Sleep -Seconds $(if ($fast) { 1 } else { 4 })
     $t0 = Get-Date; $vals = @()
-    for ($k = 0; $k -lt 3; $k++) { $vals += (CpuSample $pid1 2.0) }
+    for ($k = 0; $k -lt 3; $k++) { $vals += (CpuSample $pid1 $(if ($fast) { 1.0 } else { 2.0 })) }
     $isHang = (($vals | Where-Object { $_ -gt 85 }).Count -ge 2)
     $dur = 0
     if ($isHang) {
