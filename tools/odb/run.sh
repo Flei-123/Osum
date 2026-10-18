@@ -195,7 +195,7 @@ for sz in 1 100 8192 8193 20000; do
     if [ $rc = 0 ] && cmp -s "$TMPD/small.bin" "$TMPD/small.back"; then ok "pull $sz octets identical (${MS} ms)"; else bad "pull $sz octets (exit $rc)"; fi
     [ "$MS" -lt 6000 ] && ok "pull $sz octets within 6 s (no END stall)" || bad "pull $sz octets took ${MS} ms"
 done
-rewinds=$(grep -o 'rewinds[= ]*[0-9]*' "$TMPD/pull.txt" | grep -o '[0-9]*$' | head -1)
+rewinds=$(grep -o '[0-9]* rewinds' "$TMPD/pull.txt" | grep -o '^[0-9]*' | head -1)
 [ "${rewinds:-0}" = "0" ] && ok "300 kB pull: 0 rewinds" || bad "300 kB pull: ${rewinds} rewinds"
 
 echo "== 5. ps / kill =="
