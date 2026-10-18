@@ -1,0 +1,382 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pngenc.fi -- tiny streaming PNG encoder for ring 3 (used by odbd `shot`).
+//
+// One zlib stream made of ONE fixed-Huffman deflate block. Every row is Sub-filtered (filter 1), then coded with
+// greedy LZ77 that only looks at three distances: 1 (runs of equal octets, e.g. flat colour after Sub), 3 (the previous
+// pixel) and rowlen+1 (the same octet in the previous row, e.g. identical rows). No hash chains, no dynamic trees: flat
+// UI areas shrink to a few bits per 258 octets, photographs stay big (the caller scales the image down first).
+//
+// Module state, no allocator (like sha.fi): ONE image at a time. Usage:
+//     begin(w, h) -> bool       (w*3+1 must fit the line buffers, MAXW)
+//     row(p) -> bool            (p = address of w RGB triples; false = output buffer full)
+//     finish() -> u64           (total PNG size in data(); 0 on failure)
+profile kernel
+
+export { begin, row, finish, data, MAXW, OUTCAP }
+
+const MAXW: u64 = 5120
+const OUTCAP: u64 = 1048576
+const LINEMAX: u64 = 15361
+
+static mut obuf: [u8; 1048576] = [0 as u8; 1048576]
+static mut win: [u8; 30722] = [0 as u8; 30722]
+static mut crct: [u64; 256] = [0 as u64; 256]
+static mut lrev: [u64; 288] = [0 as u64; 288]
+static mut drev: [u64; 32] = [0 as u64; 32]
+static mut tabs_ready: u64 = 0
+
+static mut olen: u64 = 0
+static mut bacc: u64 = 0
+static mut bcnt: u64 = 0
+static mut ow: u64 = 0
+static mut oh: u64 = 0
+static mut orow: u64 = 0
+static mut ad_a: u64 = 1
+static mut ad_b: u64 = 0
+static mut failed: u64 = 0
+
+fn rd8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn wr8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 255) as u8)
+}
+
+fn wr_be32(p: u64, v: u64) {
+    wr8(p, v >> 24)
+    wr8(p + 1, v >> 16)
+    wr8(p + 2, v >> 8)
+    wr8(p + 3, v)
+}
+
+fn obase() -> u64 {
+    return (&obuf[0 as usize]) as u64
+}
+
+fn data() -> u64 {
+    return (&obuf[0 as usize]) as u64
+}
+
+fn winbase() -> u64 {
+    return (&win[0 as usize]) as u64
+}
+
+fn rev(v: u64, n: u64) -> u64 {
+    var r: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        r = (r << 1) | ((v >> i) & 1)
+        i = i + 1
+    }
+    return r
+}
+
+fn bitlen(x: u64) -> u64 {
+    var n: u64 = 0
+    var v: u64 = x
+    while v != 0 {
+        n = n + 1
+        v = v >> 1
+    }
+    return n
+}
+
+fn tabs() {
+    if tabs_ready == 1 {
+        return
+    }
+    var n: u64 = 0
+    while n < 256 {
+        var c: u64 = n
+        var k: u64 = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = 0xEDB88320 ^ (c >> 1)
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        crct[n as usize] = c
+        n = n + 1
+    }
+    // fixed literal/length code (RFC 1951 3.2.6), stored bit-reversed because deflate packs codes MSB first
+    var s: u64 = 0
+    while s < 288 {
+        if s < 144 {
+            lrev[s as usize] = rev(0x30 + s, 8)
+        } else if s < 256 {
+            lrev[s as usize] = rev(0x190 + (s - 144), 9)
+        } else if s < 280 {
+            lrev[s as usize] = rev(s - 256, 7)
+        } else {
+            lrev[s as usize] = rev(0xC0 + (s - 280), 8)
+        }
+        s = s + 1
+    }
+    var d: u64 = 0
+    while d < 32 {
+        drev[d as usize] = rev(d, 5)
+        d = d + 1
+    }
+    tabs_ready = 1
+}
+
+fn crc_of(p: u64, n: u64) -> u64 {
+    var c: u64 = 0xFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        c = crct[((c ^ rd8(p + i)) & 255) as usize] ^ (c >> 8)
+        i = i + 1
+    }
+    return c ^ 0xFFFFFFFF
+}
+
+fn put_byte(v: u64) {
+    if olen < OUTCAP {
+        wr8(obase() + olen, v)
+        olen = olen + 1
+    } else {
+        failed = 1
+    }
+}
+
+// LSB-first bit writer
+fn put(v: u64, n: u64) {
+    bacc = bacc | (v << bcnt)
+    bcnt = bcnt + n
+    while bcnt >= 8 {
+        put_byte(bacc & 255)
+        bacc = bacc >> 8
+        bcnt = bcnt - 8
+    }
+}
+
+fn sym_len(s: u64) -> u64 {
+    if s < 144 {
+        return 8
+    }
+    if s < 256 {
+        return 9
+    }
+    if s < 280 {
+        return 7
+    }
+    return 8
+}
+
+fn lit(s: u64) {
+    put(lrev[s as usize], sym_len(s))
+}
+
+fn emit_match(len: u64, dist: u64) {
+    var sym: u64 = 285
+    var eb: u64 = 0
+    var ev: u64 = 0
+    if len != 258 {
+        let l: u64 = len - 3
+        if l < 8 {
+            sym = 257 + l
+        } else {
+            let e: u64 = bitlen(l) - 3
+            sym = 261 + 4 * e + ((l >> e) & 3)
+            eb = e
+            ev = l & (((1 as u64) << e) - 1)
+        }
+    }
+    lit(sym)
+    if eb > 0 {
+        put(ev, eb)
+    }
+    let m: u64 = dist - 1
+    var dc: u64 = m
+    var deb: u64 = 0
+    var dv: u64 = 0
+    if m >= 4 {
+        let e2: u64 = bitlen(m) - 2
+        dc = 2 * (e2 + 1) + ((m >> e2) & 1)
+        deb = e2
+        dv = m & (((1 as u64) << e2) - 1)
+    }
+    put(drev[dc as usize], 5)
+    if deb > 0 {
+        put(dv, deb)
+    }
+}
+
+fn begin(w: u64, h: u64) -> bool {
+    if w == 0 || h == 0 || w > MAXW {
+        return false
+    }
+    tabs()
+    olen = 0
+    bacc = 0
+    bcnt = 0
+    ow = w
+    oh = h
+    orow = 0
+    ad_a = 1
+    ad_b = 0
+    failed = 0
+    let o: u64 = obase()
+    // signature
+    wr8(o, 137)
+    wr8(o + 1, 80)
+    wr8(o + 2, 78)
+    wr8(o + 3, 71)
+    wr8(o + 4, 13)
+    wr8(o + 5, 10)
+    wr8(o + 6, 26)
+    wr8(o + 7, 10)
+    // IHDR
+    wr_be32(o + 8, 13)
+    wr8(o + 12, 73)
+    wr8(o + 13, 72)
+    wr8(o + 14, 68)
+    wr8(o + 15, 82)
+    wr_be32(o + 16, w)
+    wr_be32(o + 20, h)
+    wr8(o + 24, 8)
+    wr8(o + 25, 2)
+    wr8(o + 26, 0)
+    wr8(o + 27, 0)
+    wr8(o + 28, 0)
+    wr_be32(o + 29, crc_of(o + 12, 17))
+    // IDAT header: length patched in finish()
+    wr_be32(o + 33, 0)
+    wr8(o + 37, 73)
+    wr8(o + 38, 68)
+    wr8(o + 39, 65)
+    wr8(o + 40, 84)
+    olen = 41
+    // zlib header (deflate, 32 KiB window, no dictionary, check bits ok: 0x7801)
+    put_byte(0x78)
+    put_byte(0x01)
+    // block header: BFINAL=1, BTYPE=01 (fixed Huffman)
+    put(3, 3)
+    return true
+}
+
+// longest match of cur[i..] against cur[i-d..] (d = 1 or 3), at most maxl octets
+fn mlen_cur(cur: u64, i: u64, d: u64, maxl: u64) -> u64 {
+    var k: u64 = 0
+    while k < maxl && rd8(cur + i + k) == rd8(cur + i + k - d) {
+        k = k + 1
+    }
+    return k
+}
+
+// longest match of cur[i..] against prev[i..] (distance rowlen+1)
+fn mlen_prev(cur: u64, prev: u64, i: u64, maxl: u64) -> u64 {
+    var k: u64 = 0
+    while k < maxl && rd8(cur + i + k) == rd8(prev + i + k) {
+        k = k + 1
+    }
+    return k
+}
+
+fn row(p: u64) -> bool {
+    if failed != 0 || orow >= oh {
+        return false
+    }
+    let rbytes: u64 = ow * 3
+    let ll: u64 = rbytes + 1
+    let w0: u64 = winbase()
+    let cur: u64 = w0 + (orow & 1) * LINEMAX
+    let prev: u64 = w0 + ((orow + 1) & 1) * LINEMAX
+    // Sub filter
+    wr8(cur, 1)
+    var j: u64 = 0
+    while j < rbytes {
+        var left: u64 = 0
+        if j >= 3 {
+            left = rd8(p + j - 3)
+        }
+        wr8(cur + 1 + j, rd8(p + j) + 256 - left)
+        j = j + 1
+    }
+    // Adler-32 over the filtered row
+    var a: u64 = ad_a
+    var b: u64 = ad_b
+    var t: u64 = 0
+    while t < ll {
+        a = a + rd8(cur + t)
+        b = b + a
+        t = t + 1
+    }
+    ad_a = a % 65521
+    ad_b = b % 65521
+    // LZ77 + fixed Huffman
+    var i: u64 = 0
+    while i < ll {
+        var best: u64 = 0
+        var bestd: u64 = 0
+        var maxl: u64 = ll - i
+        if maxl > 258 {
+            maxl = 258
+        }
+        if maxl >= 3 {
+            if i >= 1 {
+                let l1: u64 = mlen_cur(cur, i, 1, maxl)
+                if l1 > best {
+                    best = l1
+                    bestd = 1
+                }
+            }
+            if i >= 3 {
+                let l3: u64 = mlen_cur(cur, i, 3, maxl)
+                if l3 > best {
+                    best = l3
+                    bestd = 3
+                }
+            }
+            if orow > 0 {
+                let lp: u64 = mlen_prev(cur, prev, i, maxl)
+                if lp > best {
+                    best = lp
+                    bestd = ll
+                }
+            }
+        }
+        if best >= 3 {
+            emit_match(best, bestd)
+            i = i + best
+        } else {
+            lit(rd8(cur + i))
+            i = i + 1
+        }
+    }
+    orow = orow + 1
+    return failed == 0
+}
+
+fn finish() -> u64 {
+    if failed != 0 || orow != oh {
+        return 0
+    }
+    put(0, 7) // end of block (symbol 256)
+    if bcnt > 0 {
+        put(0, 8 - bcnt)
+    }
+    put_byte(ad_b >> 8)
+    put_byte(ad_b)
+    put_byte(ad_a >> 8)
+    put_byte(ad_a)
+    if failed != 0 || olen + 24 > OUTCAP {
+        return 0
+    }
+    let o: u64 = obase()
+    wr_be32(o + 33, olen - 41)
+    wr_be32(o + olen, crc_of(o + 37, olen - 37))
+    olen = olen + 4
+    // IEND
+    wr_be32(o + olen, 0)
+    wr8(o + olen + 4, 73)
+    wr8(o + olen + 5, 69)
+    wr8(o + olen + 6, 78)
+    wr8(o + olen + 7, 68)
+    wr_be32(o + olen + 8, 0xAE426082)
+    olen = olen + 12
+    return olen
+}
