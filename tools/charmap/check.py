@@ -115,7 +115,7 @@ try:
     s, em = selcell("%X" % MISSING, "05b-missing")
     flat = len(set(em[i:i + 3] for i in range(0, len(em), 3)))
     say(em and flat >= 3 and ink(em) >= 8, "05b-missing: the cell of a code point no face has is drawn with a mark (%d colours, %d ink px)" % (flat, ink(em)))
-    dif_pe = sum(1 for i in range(0, min(len(em), len(emp)), 3) if em[i:i + 3] != emp[i:i + 3]) if s == s0 else -1
+    dif_pe = sum(1 for i in range(0, min(len(em), len(emp)), 3) if em[i:i + 3] != emp[i:i + 3]) if s and s0 and s[2:4] == s0[2:4] else -1  # each crop at its own selected cell (same size)
     say(dif_pe >= 30, "the emoji cell and the missing cell look different (%d px)" % dif_pe)
     if other:
         wa, ha, da = load_ppm(os.path.join(other, "05b-missing.ppm"))
