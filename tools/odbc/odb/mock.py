@@ -47,11 +47,12 @@ class Job:
 
 class MockAgent:
     def __init__(self, token="0123456789abcdef-mock", noise_every=0, corrupt_every=0, drop_every=0, chunk=0,
-                 files=None, window=65536, maxchunk=32768, allow=None, drop_prob=0.0, resend_s=2.0):
+                 files=None, window=65536, maxchunk=32768, allow=None, drop_prob=0.0, resend_s=2.0, end_after_ack=False):
         self.token = token
         self.noise_every, self.corrupt_every, self.drop_every, self.chunk = noise_every, corrupt_every, drop_every, chunk
         self.window, self.maxchunk = window, maxchunk
         self.drop_prob, self.resend_s = drop_prob, resend_s
+        self.end_after_ack = end_after_ack   # like the real odbd: END only after the last byte is ACKed (pull)
         self.rnd = random.Random(4711)
         self.allow = set(allow.split(",")) if allow else None
         self.fs = dict(files or {})
@@ -316,7 +317,7 @@ class MockAgent:
                 n = min(self.maxchunk, len(data) - sent)
                 self.out(tr, F.DATA, j.fid, proto.enc_file(sent, data[sent:sent + n]))
                 sent += n
-            if sent >= len(data) and not end_sent:
+            if sent >= len(data) and not end_sent and (not self.end_after_ack or acked >= len(data)):
                 self.out(tr, F.END, j.fid, proto.enc_end(proto.FILE, {"size": len(data)}))
                 end_sent = True
             try:
@@ -332,7 +333,9 @@ class MockAgent:
                     if nxt < sent and nxt <= acked:      # duplicate ACK = gap on the receiver
                         sent, end_sent = nxt, False
                     acked = nxt
-                    if acked >= len(data) and end_sent:
+                    if acked >= len(data) and (end_sent or self.end_after_ack):
+                        if self.end_after_ack and not end_sent:
+                            self.out(tr, F.END, j.fid, proto.enc_end(proto.FILE, {"size": len(data)}))
                         return True
             elif time.time() - last > self.resend_s:
                 last = time.time()

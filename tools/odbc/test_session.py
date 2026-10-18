@@ -238,6 +238,23 @@ class FileTransfer(unittest.TestCase):
             r, body = s.pull("/f%d" % n)
             self.assertEqual(body, blob)
 
+    def test_small_pull_acks_at_once(self):
+        # the real odbd sends END only after the last byte is ACKed and resends every ~resend_s; the host used to ACK
+        # only after window/2 bytes or 2 s of silence, and every resend reset that silence timer: a 100 byte pull
+        # never finished on a slow line (VirtualBox uart2).
+        s, ag = pair(end_after_ack=True, resend_s=0.1, files={"/small": b"A" * 100})
+        s.ack_timeout = 0.5
+        t0 = time.time()
+        r, body = s.pull("/small")
+        self.assertEqual(body, b"A" * 100)
+        self.assertLess(time.time() - t0, 0.4)
+        self.assertEqual(s.stats["rewinds"], 0)
+        blob = os.urandom(70001)     # several frames, short last frame
+        s.push(blob, "/big")
+        s.maxchunk = 8192
+        t0 = time.time()
+        self.assertEqual(s.pull("/big")[1], blob)
+
     def test_small_window_and_chunk(self):
         s, ag = pair(window=4096, maxchunk=1000)
         blob = os.urandom(50000)

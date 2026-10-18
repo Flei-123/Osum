@@ -294,13 +294,17 @@ class Session:
                     ack()                      # gap: tell the agent where to continue
                     self.stats["rewinds"] += 1
                     return
+                short = len(b) < self.maxchunk # a short frame ends a burst (last chunk of a file): nothing else follows
                 b = b[st["next"] - off:]       # drop a duplicated prefix
                 if b:
                     (sink or buf.extend)(b)
                     st["next"] += len(b)
                     if progress:
                         progress(st["next"])
-                if st["next"] - st["acked"] >= win // 2:
+                # ACK at once on a short frame (also when it is a resend). Waiting for window/2 or 2 s of silence deadlocked
+                # small pulls on a slow line: the agent resent every ~1 s, each resend reset our silence timer, so no ACK
+                # ever went out (VirtualBox, 100 byte file). Not on every duplicate: that makes an ACK storm after loss.
+                if short or st["next"] - st["acked"] >= win // 2:
                     ack()
             elif f.type == F.END:
                 s, _ = proto.dec_end(f.payload)
