@@ -824,10 +824,11 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("dmenue"):
-            # Row <N> of the desktop's context menu (right click on the bare desktop): the menu window is the last
-            # `wlib: win id= x= y= w= h=` line (uitrace); it has no title bar, rows are (h - 4) / 4 high.
+            # Row <N> of the desktop's context menu (right click on the bare desktop): the desktop reports the menu
+            # rectangle itself in `desktop: context open x= y= w= h=` (its wlib does not trace windows); the menu has
+            # no title bar, rows are (h - 4) / 4 high.
             n = int(name[6:])
-            m = letzte(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = letzte(r"desktop: context open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             zh = (int(m.group(4)) - 4) // 4

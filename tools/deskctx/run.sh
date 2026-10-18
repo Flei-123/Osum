@@ -6,7 +6,7 @@
 #
 # Four rows (catalogue key `desktop.context`): display settings, change background, settings, refresh.
 # Measured on the machine of the stick (tools/design/eh6.sh, uitrace is always on there):
-#   1. rklick on the empty desktop: `desktop: context open`, the picture differs from the one before inside the menu rectangle
+#   1. rklick on the empty desktop (900,250; the terminal window of the machine covers 500,250): `desktop: context open`, the picture differs from the one before inside the menu rectangle
 #   2. click on row 3 (refresh): `desktop: context pick=3`, the menu is gone again (rectangle as before)
 #   3. rklick again, click on row 0 (display settings): `desktop: context pick=0`, /bin/settings starts (`settings: geom`)
 #   4. rklick again, Escape: the menu closes without a `pick=` line
@@ -28,13 +28,13 @@ cat > "$TMPD/dreh.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
 warte 6
 foto 00-before
-rklick 500,250
+rklick 900,250
 warte 3
 foto 01-menu
 klickauf dmenue3
 warte 3
 foto 02-after-refresh
-rklick 500,250
+rklick 900,250
 warte 3
 klickauf dmenue0
 warte 8
@@ -93,10 +93,10 @@ if [ -n "${DESKCTX_OUT:-}" ]; then
     cp "$TMPD"/old/o/01-menu.ppm "$DESKCTX_OUT/old-01-menu.ppm" 2>/dev/null
 fi
 
-# the menu window: the last `wlib: win id= x= y= w= h=` line before the first `context open`
-ml=$(awk '/wlib: win id=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+/ {l=$0} /desktop: context open/ {print l; exit}' "$S" | grep -a -o 'x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*')
+# the menu window: the desktop prints its rectangle in the first `desktop: context open x= y= w= h=` line
+ml=$(grep -a -m1 'desktop: context open x=' "$S" | grep -a -o 'x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*')
 if [ -z "$ml" ]; then
-    bad "no 'desktop: context open' (or no menu window line before it)"
+    bad "no 'desktop: context open' with a rectangle"
     mx=500; my=250; mw=120; mh=100
 else
     mx=$(echo "$ml" | sed -E 's/.*x=([0-9]+).*/\1/'); my=$(echo "$ml" | sed -E 's/.*y=([0-9]+).*/\1/')
