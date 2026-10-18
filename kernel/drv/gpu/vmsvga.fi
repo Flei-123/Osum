@@ -329,13 +329,23 @@ fn probe(state: u64) -> bool {
 
 // ------------------------------------------------------------ mode
 
-fn settle() {
-    // QEMU applies WIDTH / HEIGHT lazily; a register read round trip per step is enough for real hardware.
-    var k: u64 = 0
-    while k < 2000 {
-        arch.dev_io_wait()
-        k = k + 1
+// Busy-wait `us` microseconds on the TSC without any VM exit (pause only). Port-I/O waits cost 55-130 us EACH under VirtualBox/NEM
+// (W-L3 r1137: 2000 outb 0x80 per settle round lagged the guest clock by minutes -> TM catch-up, host EMT at 100 %).
+fn spin_us(state: u64, us: u64) {
+    var hz: u64 = apic.tsc_hz(state)
+    if hz < 100000000 || hz > 10000000000 {
+        hz = 4000000000
     }
+    let t0: u64 = apic.tsc()
+    let span: u64 = hz / 1000000 * us
+    while apic.tsc() - t0 < span {
+        arch.pause()
+    }
+}
+
+fn settle(state: u64) {
+    // QEMU applies WIDTH / HEIGHT lazily; ~2 ms (what 2000 port-0x80 writes cost on real hardware) without a single exit.
+    spin_us(state, 2000)
 }
 
 // Set WxH at 32 bpp, enable, read back what the device really granted. Returns false when the device refuses.
@@ -364,7 +374,7 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
         if reg_r(state, R_WIDTH) == w && reg_r(state, R_HEIGHT) == h {
             break
         }
-        settle()
+        settle(state)
         tries = tries + 1
     }
     if reg_r(state, R_WIDTH) != w || reg_r(state, R_HEIGHT) != h {
@@ -393,7 +403,7 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
             span = hz / 1000 * 400
         }
         while waited < 400 && pitch != w * 4 && (pitch == pitch0 || pitch < w * 4) && apic.tsc() - t0 < span {
-            settle()
+            settle(state)
             pitch = reg_r(state, R_BYTES_PER_LINE)
             if stale_emu {
                 pitch = pitch0
@@ -516,26 +526,30 @@ fn traces_off(state: u64) {
     kstate.set(state, s(S_TRACES), reg_r(state, R_TRACES))
 }
 
-fn sync_wait(state: u64) {
-    reg_w(state, R_SYNC, 1)
-    var k: u64 = 0
-    while k < SPIN {
-        if reg_r(state, R_BUSY) == 0 {
+// Bounded wait for BUSY == 0 by TIME, polling every 20 us (a tight reg_r loop is two VM exits per poll: tens of thousands of exits).
+fn busy_poll(state: u64, ms: u64) {
+    var hz: u64 = apic.tsc_hz(state)
+    if hz < 100000000 || hz > 10000000000 {
+        hz = 4000000000
+    }
+    let t0: u64 = apic.tsc()
+    let span: u64 = hz / 1000 * ms
+    while reg_r(state, R_BUSY) != 0 {
+        if apic.tsc() - t0 >= span {
             return
         }
-        k = k + 1
+        spin_us(state, 20)
     }
+}
+
+fn sync_wait(state: u64) {
+    reg_w(state, R_SYNC, 1)
+    busy_poll(state, 1000)
 }
 
 // After a command: wait (bounded) until the host is no longer busy, so it never falls behind with whole-picture UPDATEs.
 fn busy_wait(state: u64) {
-    var k: u64 = 0
-    while k < BUSY_SPIN {
-        if reg_r(state, R_BUSY) == 0 {
-            return
-        }
-        k = k + 1
-    }
+    busy_poll(state, 40)
 }
 
 // Make room for `words` u32 words and remember the write position. false = FIFO stayed full.
@@ -1463,7 +1477,7 @@ fn init(state: u64) -> bool {
         }
     }
     // the device may publish stride and scan-out offset a moment after ENABLE: read them again before they are used
-    settle()
+    settle(state)
     var pt0: u64 = reg_r(state, R_BYTES_PER_LINE)
     if pt0 < w * 4 {
         pt0 = w * 4
