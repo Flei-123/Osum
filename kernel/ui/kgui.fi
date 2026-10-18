@@ -6673,6 +6673,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         st(38)
         if dauer && lj_wait(state) {
             // W-J: active stretch -> ~1 ms rounds (input is polled in this loop)
+            board_quiet = 0
             q_t0 = kstate.get(state, kstate.TICKS)
             q_seq = quiet_seq(state)
             q_frames = wm.frames_total(state)
@@ -6694,6 +6695,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 }
                 quiet_rounds = quiet_rounds + (depth - 1)
             }
+            board_quiet = depth - 1
             let t_goal: u64 = kstate.get(state, kstate.TICKS) + depth
             sched.sleep_ticks(state, 1)
             // 04.10.2026 (Dell): wait for the next interrupt instead of spinning
@@ -6879,6 +6881,18 @@ fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 // haengt an KEINER anderen Bedingung: nicht an `compose`, nicht an
 // Schmutz, nicht an einem Fenster, nicht an der Taskleiste.
 const TAFEL_MARKEN: u64 = 10 // Zeitmarken zwischen zwei Anstrichen
+// W-X1 (18.10.2026): on a quiet desktop (see `quiet_seq`) the board repaints once per second instead of 10x per second. The board was the
+// whole idle cost of the `boot` task: ~1.2 ms per desktop round (changed lines: tick / IRQ / paint counters + a host flush each) = 9-10 %
+// of a core on QEMU, ~25 % on VirtualBox. Input or a painted frame ends the quiet state within one tick.
+const TAFEL_RUHIG_MARKEN: u64 = 100
+static mut board_quiet: u64 = 0
+
+fn tafel_iv() -> u64 {
+    if board_quiet != 0 {
+        return TAFEL_RUHIG_MARKEN
+    }
+    return TAFEL_MARKEN
+}
 const TAFEL_RUNDEN: u64 = 200 // Rueckfall, wenn die Marken stehen
 const TAFEL_SERMARKEN: u64 = 500 // fuenf Sekunden zwischen zwei Berichten
 // RUNDE BLECHFUENF: die Gegenprobe `zumachen`.
@@ -9097,7 +9111,7 @@ fn tafel_tick(state: u64) {
     // ZWEI UHREN, WIE IN DER SCHLEIFE. Steht der Zeitgeber, zaehlt die
     // Zahl der Rufe -- kommt gar kein Ruf mehr, ist das die Aussage.
     var faellig: bool = false
-    if jetzt >= tafel_irqm + TAFEL_MARKEN {
+    if jetzt >= tafel_irqm + tafel_iv() {
         tafel_irqm = jetzt
         faellig = true
     }
@@ -9217,7 +9231,7 @@ fn header_paint(state: u64) {
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
     tafel_runde = tafel_runde + 1
     if jetzt != tafel_marke {
-        if jetzt < tafel_marke + TAFEL_MARKEN {
+        if jetzt < tafel_marke + tafel_iv() {
             return
         }
         tafel_marke = jetzt
