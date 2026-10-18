@@ -4,7 +4,9 @@
 // /dev/odb0 (see fs/devfs.fi) reads and writes this port. Polled, no interrupts:
 // the agent (kernel/user/odbd.fi) drains it in a tight loop, and a reader that
 // finds the FIFO empty spins for a short while before it reports "nothing", so a
-// stream of frames is drained without a timer tick between two reads.
+// stream of frames is drained without a timer tick between two reads. The spin is
+// only long ("hot") right after octets arrived; after an empty read the next one is
+// short ("cold"), otherwise an idle agent would burn a whole core inside this read.
 // Only exists when the chip answers the scratch register test and the console
 // does not already own COM2 (`console=ttyS1`).
 import serial
@@ -21,10 +23,12 @@ const R_LCR: u16 = 3
 const R_MCR: u16 = 4
 const R_LSR: u16 = 5
 const R_SCR: u16 = 7
-const SPIN: u64 = 40000
+const SPIN: u64 = 8000      // hot: the previous read returned octets
+const SPIN_COLD: u64 = 16   // cold: the previous read came back empty
 const TX_LIMIT: u64 = 2000000
 
 static mut up: u64 = 0 // 0 = untested, 1 = ready, 2 = absent
+static mut hot: bool = false
 
 fn spin_limit() -> u64 {
     return SPIN
@@ -74,7 +78,11 @@ fn present(state: u64) -> bool {
 fn read_into(dst: u64, len: u64) -> u64 {
     var n: u64 = 0
     var idle: u64 = 0
-    while n < len && idle < SPIN {
+    var limit: u64 = SPIN_COLD
+    if hot {
+        limit = SPIN
+    }
+    while n < len && idle < limit {
         let lsr: u8 = serial.in8(BASE + R_LSR)
         if (lsr & 0x01 as u8) != 0 as u8 {
             kstate.set8(dst + n, serial.in8(BASE + R_DATA))
@@ -82,12 +90,14 @@ fn read_into(dst: u64, len: u64) -> u64 {
             idle = 0
         } else {
             if n > 0 {
+                hot = true
                 return n
             }
             idle = idle + 1
             arch.pause()
         }
     }
+    hot = n > 0
     return n
 }
 
