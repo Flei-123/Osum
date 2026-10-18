@@ -2,8 +2,8 @@
 """ODB wire frame codec + resynchronising stream decoder.
 
 Frame (little endian):
-  magic 'ODB1'(4) | ver u8 | type u8 | flags u16 | id u32 | len u32 (<= 64 KiB) | payload | crc32 u32
-The CRC32 (zlib) covers everything from magic up to and including the payload.
+  magic 'ODB1'(4) | ver u8 | type u8 | flags u16 | id u32 | len u32 (<= 65536) | payload | crc32 u32
+The CRC32 (zlib) covers everything from magic up to and including the payload. See docs/ODB.md.
 """
 import struct
 import zlib
@@ -16,8 +16,11 @@ HDR_LEN = HDR.size  # 16
 CRC_LEN = 4
 OVERHEAD = HDR_LEN + CRC_LEN
 
-REQ, RESP, DATA, END, ERR, PING = 1, 2, 3, 4, 5, 6
-TYPE_NAMES = {REQ: "REQ", RESP: "RESP", DATA: "DATA", END: "END", ERR: "ERR", PING: "PING"}
+REQ, RESP, DATA, END, ERR, PING, PONG, CANCEL, ACK = 1, 2, 3, 4, 5, 6, 7, 8, 9
+TYPE_NAMES = {REQ: "REQ", RESP: "RESP", DATA: "DATA", END: "END", ERR: "ERR", PING: "PING",
+              PONG: "PONG", CANCEL: "CANCEL", ACK: "ACK"}
+FLAG_RETRY = 1
+FLAG_LAST = 2
 
 
 class FrameError(ValueError):
@@ -85,7 +88,7 @@ class Decoder:
             if len(buf) < HDR_LEN:
                 break
             _m, ver, typ, flags, fid, ln = HDR.unpack_from(buf, 0)
-            if ln > MAX_PAYLOAD or ver == 0:
+            if ln > MAX_PAYLOAD or ver != VERSION:
                 self.bad_hdr += 1
                 del buf[:1]
                 continue

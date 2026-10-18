@@ -11,6 +11,31 @@ from odb import frame as F  # noqa: E402
 
 
 class FrameCodec(unittest.TestCase):
+    def test_spec_vectors(self):
+        # docs/ODB.md section 2 test vectors
+        self.assertEqual(zlib.crc32(b"123456789") & 0xFFFFFFFF, 0xCBF43926)
+        self.assertEqual(F.encode(F.Frame(F.PING, 0, b"hi")).hex(), "4f44423101060000000000000200000068692d574d30")
+        from odb import proto
+        req = F.Frame(F.REQ, 1, proto.enc_req("hello", [("ver", 1), ("client", "odbc")]))
+        self.assertEqual(F.encode(req).hex(),
+                         "4f44423101010000010000001a0000000568656c6c6f0376657201003106636c69656e7404006f646263aa891c76")
+        self.assertEqual(F.Decoder().feed(bytes.fromhex(F.encode(req).hex())), [req])
+
+    def test_type_numbers(self):
+        self.assertEqual((F.REQ, F.RESP, F.DATA, F.END, F.ERR, F.PING, F.PONG, F.CANCEL, F.ACK), tuple(range(1, 10)))
+        self.assertEqual((F.FLAG_RETRY, F.FLAG_LAST), (1, 2))
+
+    def test_unknown_type_passes_through(self):
+        f = F.Frame(77, 5, b"x")
+        self.assertEqual(F.Decoder().feed(F.encode(f)), [f])
+
+    def test_wrong_version_is_false_match(self):
+        raw = bytearray(F.encode(F.Frame(F.PING, 1, b"a")))
+        raw[4] = 2
+        f = F.Frame(F.PONG, 2, b"b")
+        d = F.Decoder()
+        self.assertEqual(d.feed(bytes(raw) + F.encode(f)), [f])
+
     def test_golden(self):
         raw = F.encode(F.Frame(F.PING, 0x01020304, b"hi", flags=0x0506))
         self.assertEqual(raw[:4], b"ODB1")
@@ -24,7 +49,7 @@ class FrameCodec(unittest.TestCase):
         self.assertEqual(len(raw), F.OVERHEAD + 2)
 
     def test_roundtrip_all_types(self):
-        for t in (F.REQ, F.RESP, F.DATA, F.END, F.ERR, F.PING):
+        for t in range(1, 10):
             f = F.Frame(t, 7, b"\x00\xffODB1\x00", flags=3)
             self.assertEqual(F.Decoder().feed(F.encode(f)), [f])
 
@@ -46,7 +71,7 @@ class FrameCodec(unittest.TestCase):
         self.assertEqual(d.garbage, 0)
 
     def test_leading_garbage_and_partial_magic(self):
-        f = F.Frame(F.REQ, 9, b"info\n")
+        f = F.Frame(F.REQ, 9, b"\x04info")
         d = F.Decoder()
         self.assertEqual(d.feed(b"junk OD"), [])
         self.assertEqual(d.feed(b"B"), [])
@@ -70,7 +95,7 @@ class FrameCodec(unittest.TestCase):
         self.assertEqual([x.id for x in got], [5])
 
     def test_oversize_len_rejected(self):
-        hdr = F.HDR.pack(F.MAGIC, 1, F.DATA, 0, 1, F.MAX_PAYLOAD + 1)
+        hdr = F.HDR.pack(F.MAGIC, 1, F.DATA, 0, 1, 65537)
         f = F.Frame(F.PING, 3, b"ok")
         d = F.Decoder()
         self.assertEqual(d.feed(hdr + F.encode(f)), [f])
