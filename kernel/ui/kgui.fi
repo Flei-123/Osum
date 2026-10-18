@@ -6269,6 +6269,7 @@ fn lj_wait(state: u64) -> bool {
 // devices (USB) are seen at most QUIET_DEPTH ticks late ONCE per quiet stretch, PS2 pointer / keys end the wait at the interrupt.
 const QUIET_TICKS: u64 = 200
 const QUIET_DEPTH: u64 = 3
+const QUIET_FRAME_GAP: u64 = 20
 static mut quiet_rounds: u64 = 0
 
 // A number that changes whenever an input source delivered something (any change counts, it is only compared for inequality).
@@ -6351,6 +6352,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     var q_t0: u64 = kstate.get(state, kstate.TICKS)
     var q_seq: u64 = quiet_seq(state)
     var q_frames: u64 = wm.frames_total(state)
+    var q_fr_t: u64 = q_t0
     var neustarts: u64 = 0
     var shell_next: u64 = 0
     var shell_born: u64 = 0
@@ -6677,6 +6679,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             q_t0 = kstate.get(state, kstate.TICKS)
             q_seq = quiet_seq(state)
             q_frames = wm.frames_total(state)
+            q_fr_t = q_t0
         } else {
             // W-X1 (18.10.2026): quiet backoff. After QUIET_TICKS without any sign of life (pointer / key input, a painted frame, a
             // pending host flush) the round runs every QUIET_DEPTH-th tick instead of every tick; the extra ticks are plain `hlt`s that end
@@ -6686,10 +6689,19 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 let now_q: u64 = kstate.get(state, kstate.TICKS)
                 let seq_q: u64 = quiet_seq(state)
                 let fr_q: u64 = wm.frames_total(state)
-                if wm.input_hot(state) || seq_q != q_seq || fr_q != q_frames || (vmsvga.bereit(state) && vmsvga.pending(state)) {
+                var busy_q: bool = wm.input_hot(state) || seq_q != q_seq || (vmsvga.bereit(state) && vmsvga.pending(state))
+                if fr_q != q_frames {
+                    // a single frame after a long gap (cursor blink, clock, a repaint) is ambient; frames closer than QUIET_FRAME_GAP
+                    // ticks (an animation, a client drawing at speed) are activity
+                    if now_q - q_fr_t < QUIET_FRAME_GAP {
+                        busy_q = true
+                    }
+                    q_fr_t = now_q
+                    q_frames = fr_q
+                }
+                if busy_q {
                     q_t0 = now_q
                     q_seq = seq_q
-                    q_frames = fr_q
                 } else if now_q - q_t0 >= QUIET_TICKS {
                     depth = QUIET_DEPTH
                 }
