@@ -12,11 +12,13 @@
 # and a footer with icon buttons.
 #
 # What this run measures, on the machine of the stick (tools/design/eh6.sh:
-# USB keyboard and mouse, 4 cores), at ui_scale 1 and 2:
+# USB keyboard and mouse, 4 cores), at ui_scale 1 (dark) and 2 (light):
 #   1. Super+A opens the panel, it reports its geometry, it lies on the screen
-#   2. the four tiles are as wide as the design says (117 points) and
-#      kachel.py, fed with the rectangles THE PANEL REPORTS, finds no label
-#      over a tile's edge and no two rows touching
+#   2. Windows 11 layout (W-C2, 18.10.2026): five tiles, three to a row, all cells
+#      100 points wide, plate on top and the label UNDER it, the sliders and the media
+#      tile inside the panel, battery bottom left, gear bottom right -- judged by
+#      tools/qsfui/check.py from the panel's own report (qs: kachel/platte/label/regler/
+#      medien) and the picture (no label ink outside its cell)
 #   3. a click on the "Tiling" tile reaches the system (`qs: tile n=5 to=1`)
 #      and the tile is drawn on the accent colour afterwards (pixels)
 #   4. a click into the brightness slider sets the brightness to the middle of
@@ -78,14 +80,15 @@ PY
 
 check_scale() {
     local sc=$1
-    local res
+    local res MODE
+    MODE=dark; [ "$sc" != 1 ] && MODE=light   # scale 1 dark, scale 2 light
     res=1280x800
     [ "$sc" != 1 ] && res=1920x1080
     D="$TMPD/s$sc"
     # a key press that is lost on a loaded host (no `qs: open`) is tried once more
     for try in 1 2; do
         rm -rf "$D"
-        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc accel=kvm drehbuch="$TMPD/dreh.txt" \
+        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm drehbuch="$TMPD/dreh.txt" \
             > "$TMPD/s$sc.log" 2>&1
         grep -aq '^qs: open ' "$D/serial.txt" 2>/dev/null && break
         echo "        (try $try: the panel did not open)"
@@ -110,28 +113,31 @@ check_scale() {
     else
         bad "scale $sc: the panel $qx,$qy ${qw}x$qh does not lie on the screen"
     fi
-    # 2. the tiles
-    rects=(); ws=()
+    # 2. the layout: Windows 11 (3 equal cells to a row, label UNDER the plate, sliders and
+    #    media tile inside the panel, gear bottom right) -- tools/qsfui/check.py reads the panel's
+    #    own report and the picture
+    rects=()
     while read -r kx ky kw kh; do
-        rects+=("$((qx + kx)),$((qy + ky)),$kw,$kh"); ws+=("$kw")
+        rects+=("$((qx + kx)),$((qy + ky)),$kw,$kh")
     done < <(grep -aoE '^qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
         | head -5 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
     if [ "${#rects[@]}" -ne 5 ]; then bad "scale $sc: the panel reported ${#rects[@]} tiles, not 5"; return 0; fi
-    allw=1
-    for w in "${ws[@]}"; do [ "$w" -eq $((117 * sc)) ] || allw=0; done
-    [ "$allw" = 1 ] && ok "scale $sc: every tile is $((117 * sc)) pixels wide (117 points)" \
-        || bad "scale $sc: tile widths ${ws[*]}, expected $((117 * sc))"
-    r=$(python3 tools/netview/kachel.py "$D/01-open.ppm" --rects $((33 * sc)) $((12 * sc)) "${rects[@]}" 2>&1 | tail -n 1)
-    case "$r" in ok*) ok "scale $sc: the tiles hold their labels -- $r" ;;
-                 *)   bad "scale $sc: tile layout: $r" ;; esac
-    # COUNTER-PROOF: the same measurement on rectangles moved half a tile sideways
-    mv=()
-    for rc in "${rects[@]}"; do
-        IFS=, read -r a b c d <<< "$rc"; mv+=("$((a + c / 2)),$b,$c,$d")
-    done
-    r=$(python3 tools/netview/kachel.py "$D/01-open.ppm" --rects $((33 * sc)) $((12 * sc)) "${mv[@]}" 2>&1 | tail -n 1)
-    case "$r" in FALSCH*) ok "scale $sc: counter-proof -- shifted tiles are refused" ;;
-                 *)   bad "scale $sc: counter-proof -- shifted tiles were accepted ($r)" ;; esac
+    r=$(python3 -I tools/qsfui/check.py "$S" "$D/01-open.ppm" "$sc" 2>&1)
+    nfail=$(printf '%s\n' "$r" | grep -c '^FAIL')
+    nok=$(printf '%s\n' "$r" | grep -c '^OK')
+    if [ "$nfail" -eq 0 ] && [ "$nok" -ge 20 ]; then
+        ok "scale $sc: layout check -- $nok points hold (equal cells, labels under the plates, everything inside the panel)"
+    else
+        bad "scale $sc: layout check: $nfail failed, $nok ok"
+        printf '%s\n' "$r" | grep '^FAIL' | head -8 | sed 's/^/        /'
+    fi
+    # COUNTER-PROOF: the same measurement on rectangles moved half a cell sideways must complain
+    r=$(python3 -I tools/qsfui/check.py "$S" "$D/01-open.ppm" "$sc" --shift 2>&1)
+    if printf '%s\n' "$r" | grep -q '^FAIL'; then
+        ok "scale $sc: counter-proof -- shifted rectangles are refused ($(printf '%s\n' "$r" | grep -c '^FAIL') points fail)"
+    else
+        bad "scale $sc: counter-proof -- shifted rectangles were accepted"
+    fi
     # 3. the Tiling tile (n=5)
     if grep -aqE '^qs: tile n=5 to=1 rc=0' "$S"; then
         ok "scale $sc: a click on the Tiling tile reached the system (to=1)"
@@ -139,7 +145,7 @@ check_scale() {
         bad "scale $sc: no 'qs: tile n=5 to=1 rc=0'"
     fi
     IFS=, read -r tx ty tw th <<< "${rects[3]}"
-    cx=$((tx + 3 * sc)); cy=$((ty + th / 2))
+    cx=$((tx + 3 * sc)); cy=$((ty + 24 * sc))
     a=$(px "$D/01-open.ppm" "$cx" "$cy"); b=$(px "$D/02-tile.ppm" "$cx" "$cy")
     if [ "$a" != "$b" ]; then
         ok "scale $sc: the tile changed its colour ($a -> $b)"
