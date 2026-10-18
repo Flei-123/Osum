@@ -4674,6 +4674,28 @@ fn do_reload(msg: u64, pid: u64, uid: u64, id: u64) {
         (&r_ok[0 as usize]) as u64, false)
 }
 
+// r1087: is anything waiting for the timers of the serve loop -- an open question (expire), a parked call with a
+// dialog text (trusted_poll retry)? Cheap: two short tables.
+const IDLE_WAIT_MS: u64 = 1000 // r1087: longest sleep of an idle broker (no timers pending)
+
+fn timers_pending() -> bool {
+    var i: u64 = 0
+    while i < PEND_MAX {
+        if ld(pe(i), PE_USED) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < TOK_MAX {
+        if ld(tk(i), TK_USED) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn serve(limit: u64) -> u64 {
     var n_bus: [u8; 11] = "orient.bus\0"
     var n_evt: [u8; 11] = "orient.evt\0"
@@ -4713,6 +4735,10 @@ fn serve(limit: u64) -> u64 {
         var wait: u64 = 100
         if aj_n > 0 || tr_up != 0 {
             wait = 10 // AB-019/AB-004: a program or a person may answer
+        } else if lazy_t == 0 && !timers_pending() {
+            // r1087: nothing to expire, flush or ask: sleep on the bus (a message wakes the task at once). Every
+            // wake of an idle broker was charged one tick (VirtualBox ps: pid 3 = 8.5 % of a core at 10 wakes/s).
+            wait = IDLE_WAIT_MS
         }
         let n: u64 = actwire.bus_wait(fp, mp, wait)
         aj_poll()

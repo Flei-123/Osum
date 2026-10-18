@@ -634,6 +634,8 @@ static mut next_hello: u64 = 0
 static mut spawned: u64 = 0
 static mut next_spawn: u64 = 0
 static mut next_rehide: u64 = 0
+static mut next_hpump: u64 = 0 // r1087: next scene pump of a hidden box
+const HIDDEN_WAIT_MS: u64 = 500 // r1087: longest sleep of a hidden box between rounds (bus messages wake it earlier)
 static mut SA: [u8; 32] = [0 as u8; 32]
 static mut P_ME: [u8; 16] = "/tmp/jmini.sock\0"
 static mut P_LK: [u8; 17] = "/tmp/jmlink.sock\0"
@@ -947,16 +949,18 @@ fn bus_open() {
 }
 
 // one step: look for the broker (until it is there), then answer at most a few waiting messages. wait_ms = 0 never waits.
-fn bus_step(wait_ms: u64) {
+// Returns 1 when it blocked in the kernel for the whole wait (nothing came), 2 when it handled a message,
+// 0 when it did not wait (wait 0, bus not usable yet, error) -- the caller must then sleep itself.
+fn bus_step(wait_ms: u64) -> u64 {
     var n_bus: [u8; 11] = "orient.bus\0"
     var s_hello: [u8; 17] = "hello jarvismini\n"
     if !bus_reg_ok {
-        return
+        return 0
     }
     if !svc_bus_ok {
         svc_bus = actwire.bus_find((&n_bus[0 as usize]) as u64)
         if ulib.bad(svc_bus) {
-            return
+            return 0
         }
         svc_bus_ok = true
     }
@@ -970,11 +974,23 @@ fn bus_step(wait_ms: u64) {
     let fpp: u64 = (&FR[0 as usize]) as u64
     let mp: u64 = (&META[0 as usize]) as u64
     var rounds: u64 = 0
+    var wait_now: u64 = wait_ms
     while rounds < 4 {
-        let n: u64 = actwire.bus_wait(fpp, mp, wait_ms)
-        if ulib.bad(n) || n == 0 {
-            return
+        let n: u64 = actwire.bus_wait(fpp, mp, wait_now)
+        if ulib.bad(n) {
+            return 0
         }
+        if n == 0 {
+            if rounds > 0 {
+                return 2
+            }
+            if wait_now > 0 {
+                return 1
+            }
+            return 0
+        }
+        // later rounds of the same call never wait
+        wait_now = 0
         let s: u64 = actwire.asm_feed(fpp, mp)
         if s != actwire.NONE {
             if actwire.asm_kind(s) == actwire.K_REQ {
@@ -997,6 +1013,7 @@ fn bus_step(wait_ms: u64) {
         }
         rounds = rounds + 1
     }
+    return 2
 }
 
 // serve mode (the hotkey gate's test target): only the bus, blocks in the kernel while idle
@@ -1133,8 +1150,14 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
     lb_end()
     var seen_lines: u64 = L_N
     while fuiscene.alive() {
-        let key: u64 = fuiscene.pump()
         let now: u64 = fuiapp.now_ms()
+        // r1087: a hidden box gets no input; its picture is not looked at. Run the scene pump (close event, resize,
+        // theme) only once a second then -- every pump round costs a wake-up (and wlib's own 40 ms idle sleep).
+        var key: u64 = 0
+        if shown != 0 || now >= next_hpump {
+            key = fuiscene.pump()
+            next_hpump = now + 1000
+        }
         if now >= next_beat {
             tr(6)
         }
@@ -1156,10 +1179,15 @@ fn run_box(hidden: bool, as_app: bool) -> u64 {
                 dirty = true
             }
         }
-        bus_step(0)
         if shown == 0 {
-            // r925: a hidden box has nothing to draw -- sleep between rounds (the hotkey answer waits at most this long)
-            let _z: u64 = ulib.sleep_ms(25)
+            // r1087: a hidden box has nothing to draw and nobody types into it. Block in the kernel on the bus instead of
+            // waking 40x/s: the hotkey toggle arrives as a bus message and wakes the task at once; the rest (chat link,
+            // re-hide, window events) is looked at HIDDEN_WAIT_MS later at the latest. No usable bus -> plain sleep.
+            if bus_step(HIDDEN_WAIT_MS) == 0 {
+                let _z: u64 = ulib.sleep_ms(HIDDEN_WAIT_MS)
+            }
+        } else {
+            let _b: u64 = bus_step(0)
         }
         if net_poll(now) {
             dirty = true
