@@ -28,7 +28,9 @@ export {
     // RUNDE KABEL: der Baustein wird geprueft, nicht geglaubt.
     probe, off, set_off, verworfen, lsr_roh, scr_roh,
     // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
-    line_at, line_clear, line_lost
+    line_at, line_clear, line_lost,
+    // W-X3: deferred (ring buffered) output for periodic reports
+    defer_on, defer_off, pump, ring_used, ring_flushed
 }
 
 // ==================================================== RUNDE VIELKERN 3
@@ -218,6 +220,12 @@ fn init() {
     // Empfangsweg dieser Runde ueberhaupt geht -- ohne dieses Bit haelt
     // der 8250 seine Unterbrechungsleitung am PC still.
     out8(b + R_MCR, 0x0B as u8) // DTR, RTS, OUT2
+    // W-X3: IIR bits 7:6 = 11 means a working 16550A FIFO (16 octets per THRE)
+    if (in8(b + R_FCR) & 0xC0 as u8) == 0xC0 as u8 {
+        ser_burst = 16
+    } else {
+        ser_burst = 1
+    }
 }
 
 // DER PRAESENZTEST, der Standardweg: einen Wert ins Notizregister
@@ -309,11 +317,156 @@ fn rx_off() {
     out8(port() + R_IER, 0x00 as u8)
 }
 
+// ====================================================== W-X3 (r1081)
+// NON-BLOCKING OUTPUT FOR PERIODIC REPORTS.
+//
+// `put` polls THRE and waits ~260 us per octet at 38400 baud (QEMU does
+// the same). The input pulse (~400 octets) and the `tafel:` lines cost
+// 60-140 ms of CPU each, every 5 s -- the largest part of the `boot`
+// idle. While `defer_on` is active (a depth counter, so the timer bottom
+// half and the desktop loop may nest), `put` appends to a ring instead of
+// waiting. `pump` (timer bottom half + desktop round) writes one FIFO
+// burst whenever THRE is set, so the CPU never waits for the line.
+//
+// ORDER IS KEPT: a plain `put` while the ring holds data flushes the ring
+// first (blocking, in order) -- so a panic message never overtakes, and
+// is never lost behind, deferred lines. Ring full: the producer drains
+// blocking until there is room (output is never dropped). The ring lock
+// is bounded like `line_at`; on timeout the octet goes the old blocking way.
+const RING_SIZE: u64 = 4096
+const RING_LOCK_SPINS: u64 = 20000
+static mut ring_buf: [u8; 4096] = [0 as u8; 4096]
+static mut ring_head: [u64; 1] = [0 as u64; 1] // next write (monotonic)
+static mut ring_tail: [u64; 1] = [0 as u64; 1] // next read (monotonic)
+static mut ring_lock: [u64; 1] = [0 as u64; 1]
+static mut defer_depth: [u64; 1] = [0 as u64; 1]
+static mut ser_burst: u64 = 1 // octets per THRE (16 with a 16550A FIFO)
+static mut ring_flushes: u64 = 0 // times a plain put had to flush the ring
+
+fn defer_on() {
+    __atomic_add((&defer_depth[0]) as *mut u64, 1 as u64)
+}
+
+fn defer_off() {
+    if __mmio_read64((&defer_depth[0]) as u64 as *mut u64) != 0 as u64 {
+        __atomic_add((&defer_depth[0]) as *mut u64, 0 -% 1)
+    }
+}
+
+fn ring_used() -> u64 {
+    return ring_head[0] - ring_tail[0]
+}
+
+fn ring_flushed() -> u64 {
+    return ring_flushes
+}
+
+// 1 = lock taken. `spins` = how long to try.
+fn ring_take(spins: u64) -> bool {
+    let a: u64 = (&ring_lock[0]) as u64
+    var n: u64 = 0
+    while __atomic_swap(a as *mut u64, 0 as u64, 1 as u64) != 0 as u64 {
+        n = n + 1
+        if n >= spins {
+            return false
+        }
+        arch.pause()
+    }
+    return true
+}
+
+fn ring_give() {
+    arch.atomic_store((&ring_lock[0]) as u64, 0)
+}
+
+// Write the oldest octet (caller holds the lock and has seen THRE).
+fn ring_out_one() {
+    let t: u64 = ring_tail[0]
+    out8(port(), ring_buf[(t % RING_SIZE) as u64])
+    ring_tail[0] = t + 1
+}
+
+// Blocking drain of the whole ring, in order. Caller holds the lock.
+fn ring_drain_blocking() {
+    while ring_tail[0] != ring_head[0] {
+        var n: u64 = 0
+        while !ready() && n < PUT_GRENZE {
+            n = n + 1
+        }
+        if n >= PUT_GRENZE {
+            // line is dead: drop the rest like `put` does
+            ser_aus = 1
+            ring_tail[0] = ring_head[0]
+            return
+        }
+        ring_out_one()
+    }
+}
+
+// Plain put: older deferred octets go first.
+fn ring_flush_before() {
+    if ring_tail[0] == ring_head[0] {
+        return
+    }
+    if ring_take(RING_LOCK_SPINS) {
+        ring_flushes = ring_flushes + 1
+        ring_drain_blocking()
+        ring_give()
+    }
+}
+
+// Deferred put. false = could not queue (lock timeout): caller goes blocking.
+fn ring_push(c: u8) -> bool {
+    if !ring_take(RING_LOCK_SPINS) {
+        return false
+    }
+    if ring_head[0] - ring_tail[0] >= RING_SIZE {
+        ring_drain_blocking()
+    }
+    if ser_aus != 0 {
+        ring_give()
+        return true
+    }
+    let h: u64 = ring_head[0]
+    ring_buf[(h % RING_SIZE) as u64] = c
+    ring_head[0] = h + 1
+    ring_give()
+    return true
+}
+
+// Called from the timer bottom half and the desktop round: one burst if
+// the transmitter is empty. Never waits, never spins on the lock.
+fn pump() {
+    if ring_tail[0] == ring_head[0] {
+        return
+    }
+    if !ring_take(1) {
+        return
+    }
+    if ser_aus != 0 {
+        ring_tail[0] = ring_head[0]
+    } else if ready() {
+        var k: u64 = 0
+        while k < ser_burst && ring_tail[0] != ring_head[0] {
+            ring_out_one()
+            k = k + 1
+        }
+    }
+    ring_give()
+}
+
 // DER BILDSCHIRM ZUERST. Er haengt ab hier an nichts mehr.
 fn put(c: u8) {
     gfx.echo(c)
     if ser_aus != 0 {
         return
+    }
+    if __mmio_read64((&defer_depth[0]) as u64 as *mut u64) != 0 as u64 {
+        if ring_push(c) {
+            return
+        }
+    } else {
+        ring_flush_before()
     }
     var n: u64 = 0
     while !ready() && n < PUT_GRENZE {
