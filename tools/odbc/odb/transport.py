@@ -186,6 +186,7 @@ class WinHandleTransport(Transport):
         import msvcrt
         self.f = f
         self.kind = kind
+        self._wq = None
         self.k32 = ctypes.windll.kernel32
         self.h = msvcrt.get_osfhandle(f.fileno())
         self.ct = ctypes
@@ -219,13 +220,33 @@ class WinHandleTransport(Transport):
         return b""
 
     def _write(self, data):
-        mv = memoryview(data)
-        while mv:
-            n = self.f.write(mv)
-            mv = mv[n:] if n else mv
+        # A real VBox uart2 pipe stops accepting data while the guest side is not reading (agent not up, UART FIFO
+        # full): WriteFile then blocks forever and no client timeout could fire. Hand the bytes to a writer thread
+        # (daemon, may stay blocked at exit) so the session timeouts and Ctrl-C keep working.
+        if self._wq is None:
+            self._wq = queue.Queue()
+            threading.Thread(target=self._writer, daemon=True).start()
+        self._wq.put(bytes(data))
+
+    def _writer(self):
+        try:
+            while not self.closed:
+                d = self._wq.get()
+                mv = memoryview(d)
+                while mv and not self.closed:
+                    n = self.f.write(mv)
+                    mv = mv[n:] if n else mv
+        except Exception:
+            self.eof = True
+            self.q.put(None)
 
     def _close(self):
-        self.f.close()
+        # do not close a handle another thread is blocked in WriteFile on: the process is about to exit anyway
+        try:
+            if self._wq is None or self._wq.empty():
+                self.f.close()
+        except Exception:
+            pass
 
 
 def open_pipe(path, wait=0.0):
