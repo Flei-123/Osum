@@ -45,6 +45,7 @@ APPS = {
     "widgets":   ("layout-grid",      "c084fc", "9333ea", True),
     "welcome":   ("smile",            "f472b6", "db2777", True),
     "run":       ("square-play",      "fb923c", "ea580c", True),
+    "cliphist":  ("clipboard-list",   "2dd4bf", "0d9488", True),
 }
 
 

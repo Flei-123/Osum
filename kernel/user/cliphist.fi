@@ -1,0 +1,298 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/cliphist.fi -- D-015: THE CLIPBOARD HISTORY POPUP (/bin/cliphist, started by Win+V).
+//
+//   cliphist                  the window (fUi scene tree): the newest clipboard entries, one button each
+//   cliphist put <a> [<b>..]  test hook: puts every word as its own clipboard entry (oldest first), no window
+//
+// WHERE THE HISTORY LIVES. The system bus (kernel/bus/bus.fi) keeps the last 20 clipboard entries in a ring
+// (`ulib.clip_count`, `ulib.clip_hist_take(back, ..)`, back 0 = newest); every Ctrl+C of every program lands there. This
+// program only READS it and shows it -- the service side existed since the bus round, only the surface was missing.
+//
+// THE LIST. Newest first, at most ROWS (10) rows. An entry whose text equals a newer one is not shown twice (picking an
+// entry puts it on top again, so the ring holds it twice). Line breaks show as blanks, long texts end in "...".
+// PICK: click a row, Enter on the focused row (Tab / Up / Down walk), or the digit 1..9. The picked text is put on the
+// bus again (it is now the newest entry = what Ctrl+V pastes) and the window closes. Esc closes without a change.
+//
+// Serial lines (gate tools/cliphist): `cliphist: ready n=<ring> shown=<rows>`, `cliphist: row <i> <text>`,
+// `cliphist: pick <i> <text>`, `cliphist: head <text>` (what the bus holds after the pick), `cliphist: closed`,
+// `cliphist: put n=<count>`.
+
+profile app
+
+import ulib
+import fuiscene
+import msg
+import wlib
+
+export { u_start }
+
+const ROWS: u64 = 10
+const K_ROW0: u64 = 10
+const K_CLOSE: u64 = 2
+const TXT: u64 = 192 // octets read from the bus per entry (the bus keeps 192 inline)
+const SHOW: u64 = 60 // characters of the preview
+
+static mut k_title: [u8; 15] = "cliphist.title\0"
+static mut k_hint: [u8; 14] = "cliphist.hint\0"
+static mut k_empty: [u8; 15] = "cliphist.empty\0"
+static mut k_close: [u8; 15] = "cliphist.close\0"
+
+// full text of the shown rows (picked from here) and their one-line labels
+static mut rows_txt: [u8; 2048] = [0 as u8; 2048] // ROWS * 200 would be 2000; slot = 200
+static mut rows_len: [u64; 10] = [0 as u64; 10]
+static mut rows_typ: [u64; 10] = [0 as u64; 10]
+static mut rows_lbl: [u8; 1024] = [0 as u8; 1024] // slot = 100: "N  " + SHOW + "..." + NUL
+static mut shown: u64 = 0
+static mut ring_n: u64 = 0
+static mut sel: u64 = 0
+
+fn txt_slot(i: u64) -> u64 {
+    return (&rows_txt[(i * 200) as usize]) as u64
+}
+
+fn lbl_slot(i: u64) -> u64 {
+    return (&rows_lbl[(i * 100) as usize]) as u64
+}
+
+fn same_text(a: u64, an: u64, b: u64, bn: u64) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: u64 = 0
+    while i < an {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Read the ring into the rows: newest first, equal texts only once, empty entries skipped.
+fn load() {
+    var buf: [u8; 192] = [0 as u8; 192]
+    shown = 0
+    ring_n = ulib.clip_count()
+    var back: u64 = 0
+    while back < ring_n && shown < ROWS {
+        let n: u64 = ulib.clip_hist_take(back, (&buf[0 as usize]) as u64, TXT - 1)
+        var dup: bool = false
+        if n == 0 {
+            dup = true
+        }
+        var j: u64 = 0
+        while j < shown && !dup {
+            if same_text(txt_slot(j), rows_len[(j) as usize], (&buf[0 as usize]) as u64, n) {
+                dup = true
+            }
+            j = j + 1
+        }
+        if !dup {
+            let t: u64 = txt_slot(shown)
+            var k: u64 = 0
+            while k < n {
+                *((t + k) as *mut u8) = buf[(k) as usize]
+                k = k + 1
+            }
+            *((t + n) as *mut u8) = 0 as u8
+            rows_len[(shown) as usize] = n
+            rows_typ[(shown) as usize] = ulib.clip_typ(back)
+            make_label(shown)
+            shown = shown + 1
+        }
+        back = back + 1
+    }
+}
+
+// "N  preview": line breaks and tabs become blanks, a text longer than SHOW ends in "...".
+fn make_label(i: u64) {
+    let l: u64 = lbl_slot(i)
+    let t: u64 = txt_slot(i)
+    var o: u64 = 0
+    *((l + o) as *mut u8) = (48 + i + 1) as u8
+    if i + 1 >= 10 {
+        *((l + o) as *mut u8) = 32 as u8 // no digit key for the tenth row
+    }
+    o = o + 1
+    *((l + o) as *mut u8) = 32 as u8
+    o = o + 1
+    *((l + o) as *mut u8) = 32 as u8
+    o = o + 1
+    var k: u64 = 0
+    while k < rows_len[(i) as usize] && k < SHOW {
+        var c: u8 = *((t + k) as *mut u8)
+        if c < 32 as u8 {
+            c = 32 as u8
+        }
+        *((l + o) as *mut u8) = c
+        o = o + 1
+        k = k + 1
+    }
+    if rows_len[(i) as usize] > SHOW {
+        var d: u64 = 0
+        while d < 3 {
+            *((l + o) as *mut u8) = 46 as u8
+            o = o + 1
+            d = d + 1
+        }
+    }
+    *((l + o) as *mut u8) = 0 as u8
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    fuiscene.set_gap(col, 4)
+    let _h: usize = fuiscene.label(col, msg.get((&k_hint[0 as usize]) as u64))
+    if shown == 0 {
+        let _e: usize = fuiscene.label(col, msg.get((&k_empty[0 as usize]) as u64))
+    }
+    var i: u64 = 0
+    while i < shown {
+        let b: usize = fuiscene.button(col, lbl_slot(i), K_ROW0 + i)
+        fuiscene.set_size(b, 440, 32)
+        i = i + 1
+    }
+    let c: usize = fuiscene.button(col, msg.get((&k_close[0 as usize]) as u64), K_CLOSE)
+    fuiscene.set_size(c, 440, 32)
+}
+
+fn say_row(i: u64) {
+    var s_row: [u8; 15] = "cliphist: row \0"
+    ulib.say((&s_row[0 as usize]) as u64)
+    ulib.sayu(i)
+    var sp: [u8; 2] = " \0"
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say(txt_slot(i))
+    ulib.nl()
+}
+
+// Put row i on the bus again (the newest entry), tell the line what the bus holds now.
+fn pick(i: u64) {
+    var s_pick: [u8; 15] = "cliphist: pick\0"
+    var s_head: [u8; 15] = "cliphist: head\0"
+    var sp: [u8; 2] = " \0"
+    var buf: [u8; 192] = [0 as u8; 192]
+    ulib.say((&s_pick[0 as usize]) as u64)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayu(i)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say(txt_slot(i))
+    ulib.nl()
+    var typ: u64 = rows_typ[(i) as usize]
+    if typ == 0 {
+        typ = ulib.BT_TEXT
+    }
+    let _r: u64 = ulib.clip_put(typ, txt_slot(i), rows_len[(i) as usize])
+    let n: u64 = ulib.clip_hist_take(0, (&buf[0 as usize]) as u64, TXT - 1)
+    buf[(n) as usize] = 0 as u8
+    ulib.say((&s_head[0 as usize]) as u64)
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say((&buf[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Test hook: `cliphist put a b c` -> three entries, c is the newest.
+fn put_words(args: u64) -> u64 {
+    var s_put: [u8; 17] = "cliphist: put n=\0"
+    let argc: u64 = ulib.arg_count(args)
+    var i: u64 = 2
+    var n: u64 = 0
+    while i < argc {
+        let w: u64 = ulib.arg_at(args, i)
+        let _r: u64 = ulib.clip_put(ulib.BT_TEXT, w, ulib.length(w))
+        n = n + 1
+        i = i + 1
+    }
+    ulib.say((&s_put[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.nl()
+    return 0
+}
+
+fn focus_row(i: u64) {
+    if shown == 0 {
+        return
+    }
+    sel = i
+    fuiscene.focus(K_ROW0 + i)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 21] = "cliphist: no surface\0"
+    var s_go: [u8; 11] = "cliphist: \0"
+    var s_rd: [u8; 7] = "ready \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_sh: [u8; 8] = " shown=\0"
+    var s_cl: [u8; 17] = "cliphist: closed\0"
+    var s_nb: [u8; 20] = "cliphist: no bus\0\0\0\0"
+    var s_putw: [u8; 4] = "put\0"
+    if ulib.arg_count(args) >= 2 && ulib.streq(ulib.arg_at(args, 1), (&s_putw[0 as usize]) as u64) {
+        return put_words(args)
+    }
+    let _mi: u64 = msg.init()
+    if !ulib.bus_da() {
+        ulib.say((&s_nb[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    load()
+    if !fuiscene.open(180, 120, 480, 120 + shown * 36, msg.get((&k_title[0 as usize]) as u64), build) {
+        ulib.say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var win_app_name: [u8; 9] = "cliphist\0"
+    fuiscene.set_app((&win_app_name[0 as usize]) as u64)
+    var first: bool = true
+    var seen_free: u64 = fuiscene.key_free_seq()
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            focus_row(0)
+            ulib.say((&s_go[0 as usize]) as u64)
+            ulib.say((&s_rd[0 as usize]) as u64)
+            ulib.say((&s_n[0 as usize]) as u64)
+            ulib.sayu(ring_n)
+            ulib.say((&s_sh[0 as usize]) as u64)
+            ulib.sayu(shown)
+            ulib.nl()
+            var r: u64 = 0
+            while r < shown {
+                say_row(r)
+                r = r + 1
+            }
+        }
+        if key >= K_ROW0 && key < K_ROW0 + shown {
+            pick(key - K_ROW0)
+            fuiscene.quit()
+        } else if key == K_CLOSE {
+            fuiscene.quit()
+        }
+        if fuiscene.key_free_seq() != seen_free {
+            seen_free = fuiscene.key_free_seq()
+            let kf: u64 = fuiscene.key_free()
+            if kf == wlib.KEY_ESC {
+                fuiscene.quit()
+            } else if kf == wlib.KEY_DOWN {
+                if sel + 1 < shown {
+                    focus_row(sel + 1)
+                }
+            } else if kf == wlib.KEY_UP {
+                if sel > 0 {
+                    focus_row(sel - 1)
+                }
+            } else if kf >= 49 && kf <= 57 && kf - 49 < shown {
+                pick(kf - 49)
+                fuiscene.quit()
+            }
+        }
+    }
+    ulib.say((&s_cl[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
