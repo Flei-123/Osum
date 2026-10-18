@@ -396,6 +396,8 @@ if [ "$usb" = ja ]; then
             -device usb-mouse,bus=x0.0)
     APPEND="$APPEND usb"
 fi
+# EH_NETDEV: replaces the network card wiring of `netz=ja` (qemu arguments, e.g. a `-netdev dgram` link the test feeds with frames)
+[ -n "${EH_NETDEV:-}" ] && NETDEV=(${EH_NETDEV})
 ACC=()
 if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)

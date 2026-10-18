@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/menualive/check.py -- measurements for tools/menualive/run.sh.
 
-    check.py cpu  <serial.txt> <task-name|kind:KIND>   share of one core, from two `ps`
+    check.py cpu  <serial.txt> <task-name|kind:KIND|notkind:KIND|pid:N>   share of one core, from two `ps`
+                (notkind:idle = what the taskbar CPU widget shows)
     check.py diff <a.ppm> <b.ppm> x0 y0 x1 y1  changed pixels in a rectangle
 
 `cpu`: the last two `ps` listings on the serial line. Every task's ticks are
@@ -49,7 +50,12 @@ def cpu(path, name):
     # passed. With more cores the sum is larger and the share comes out
     # SMALLER, so a pass is never faked by it.
     span = sum(max(0, b[k][1] - a[k][1]) for k in b if k in a)
-    if name.startswith("kind:"):
+    if name.startswith("notkind:"):
+        # the CPU widget's method: everything that is NOT the core's idle task
+        gain = sum(b[k][1] - a[k][1] for k in b if k in a and b[k][0] != name[8:])
+    elif name.startswith("pid:"):
+        gain = sum(b[k][1] - a[k][1] for k in b if k in a and k == int(name[4:]))
+    elif name.startswith("kind:"):
         gain = sum(b[k][1] - a[k][1] for k in b if k in a and b[k][0] == name[5:])
     else:
         gain = sum(b[k][1] - a[k][1] for k in b if k in a and b[k][2] == name)

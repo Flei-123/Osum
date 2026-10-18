@@ -178,6 +178,9 @@ const PUMP_BATCH: u64 = 32
 // machine reaches `hlt` again.
 const HOT_TURNS: u64 = 4000
 
+// W-U: ... and for at most this long (microseconds) after the last frame or kick. Word `netdhot` = the old rule (gate counter-proof).
+const HOT_US: u64 = 1500
+
 const FRAME_CAP: u64 = 1600
 
 fn sc(off: u64) -> u64 {
@@ -722,7 +725,9 @@ fn pump(state: u64) -> u64 {
 // system is waiting for something else.
 fn netd_body(state: u64, index: u64) {
     var hot: u64 = HOT_TURNS
+    var hot_t0: u64 = now_us(state)
     var seen: u64 = 0
+    let old_rule: bool = kstate.mode_on(state, kstate.M_NETDHOT)
     while true {
         var w: u64 = pump(state)
         // ROUND NETMON PART TWO: the shared card gets its turn in the
@@ -733,12 +738,26 @@ fn netd_body(state: u64, index: u64) {
         let kick: u64 = kstate.get(state, sc(S_KICK))
         if w > 0 || kick != seen {
             hot = HOT_TURNS
+            hot_t0 = now_us(state)
             seen = kick
         }
         sched.tset(state, index, sched.T_WORK,
             kstate.get(state, sc(S_PUMPS)))
         if hot > 0 {
             hot = hot - 1
+            // W-U (17.10.2026): the spin is bounded in TIME, not only in
+            // turns. With many ready tasks one turn of the run queue is
+            // a whole round of them, so 4000 turns lasted far longer than
+            // a tick: a few frames a second (VirtualBox, bridged: ARP /
+            // mDNS / SSDP chatter) kept netd at ~70 % of a core at idle.
+            if !old_rule {
+                let now: u64 = now_us(state)
+                if now > hot_t0 && now - hot_t0 >= HOT_US {
+                    hot = 0
+                }
+            }
+        }
+        if hot > 0 {
             sched.yield_now(state)
         } else {
             sched.sleep_ticks(state, 1)
