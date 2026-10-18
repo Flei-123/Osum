@@ -1075,16 +1075,19 @@ for ed in bottom top left right; do
             # this panel really had -- a label four pixels past its own
             # tile, and two text rows touching. Neither is visible in a
             # source file.
-            # THE TILES COME FROM THE PANEL'S OWN REPORT (`qs: kachel`): since
-            # 05.10.2026 the scene tree lays them out, not a grid this script
-            # could recompute. Panel-relative in the report, screen pixels here.
+            # THE TILES COME FROM THE PANEL'S OWN REPORT. Since the Windows-11
+            # quick settings a cell is a PLATE with the LABEL under it on the card
+            # (`qs: platte` / `qs: label`): the label rectangle holds only text, so
+            # that is what is measured (no symbol band: 0 rows skipped). The plate
+            # has its own gates (qsfui: plate size, symbol inside the plate).
+            # Panel-relative in the report, screen pixels here.
             rects=""
             while read -r kx ky kw kh; do
                 rects="$rects $((qx + kx)),$((qy + ky)),$kw,$kh"
-            done < <(grep -aoE '^qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$L" \
-                | tail -4 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
+            done < <(grep -aoE '^qs: label n=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$L" \
+                | tail -5 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
             # shellcheck disable=SC2086
-            r=$(python3 tools/netview/kachel.py "$P" --rects 33 12 $rects 2>&1 | tail -1)
+            r=$(python3 tools/netview/kachel.py "$P" --rects 0 2 $rects 2>&1 | tail -1)
             case "$r" in ok*) ok "$ed: the tiles hold their labels -- $r" ;;
                          *)   bad "$ed: tile layout: $r" ;; esac
             # AND THE SYMBOLS at the places the panel said it drew them,
