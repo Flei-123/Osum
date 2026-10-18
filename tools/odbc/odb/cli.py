@@ -29,7 +29,10 @@ def get_token(ns):
         return ns.token
     tf = ns.token_file or os.environ.get("ODB_TOKEN_FILE")
     if tf:
-        return read_token_file(tf)
+        try:
+            return read_token_file(tf)
+        except OSError as e:
+            sys.exit("odbc: cannot read token file %s: %s" % (tf, e.strerror or e))
     return os.environ.get("ODB_TOKEN")
 
 
@@ -373,5 +376,8 @@ def main(argv=None):
     except (Timeout, Closed, TransportError) as e:
         print("odbc: %s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 5
+    except OSError as e:
+        print("odbc: %s" % e, file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
