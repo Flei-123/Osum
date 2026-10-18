@@ -501,7 +501,7 @@ set_edge() { # edge
 # as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 32768 --v3 --inodes=512 /lib/
+    local ARGS=(build "$img" 65536 --v3 --inodes=512 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
