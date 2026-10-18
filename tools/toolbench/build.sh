@@ -129,6 +129,7 @@ printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
 printf 'root:x:0:0:root:/users/osum:/bin/sh\n' > "$OUT/passwd"
 printf '%s\n' de > "$OUT/userlocale"
 
+# 18.10.2026: 32768 -> 65536 blocks (32 MiB): the 15 programs outgrew 16 MiB (mkfs: the disk is full).
 # RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
 # Dieselbe Ursache wie in K15, NETVIEW, GLYPHE, NETMON, look/shot.sh und
 # tests/theme: Runde GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht --
@@ -144,7 +145,7 @@ printf '%s\n' de > "$OUT/userlocale"
 # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 # --v3: the default format holds 2 134 016 octets per file at most, and the
 # file manager is about to pass that (the multi-window layer of the host)
-ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
+ARGS=(build "$OUT/disk.img" 65536 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/ /dev/ /mnt/)
