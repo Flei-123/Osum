@@ -264,13 +264,13 @@ if waitfor "==G-WAIT==" 120; then
     if E=$(mid sent) && S=$(mid sset); then
         klick $E; tippe 30; klick $S
         sleep 2
-        # --- a critical one: net.wifi.enabled is row 7 (display 3, sound 2,
+        # --- a critical one: net.wifi.enabled is row 8 (display 4, sound 2,
         # lock 1, locale 1); the row height comes from the table itself
         read tx ty tw th <<< "$(rect stab)"
         rh=$(tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" | grep -ao 'settings: rowh=[0-9]*' | tail -1 | tr -dc '0-9')
         rh=${rh:-20}
-        # the head is one row + 4, then row 7, in its middle
-        klick $(( tx + 40 )) $(( ty + rh + 4 + 7 * rh + rh / 2 ))
+        # the head is one row + 4, then row 8, in its middle
+        klick $(( tx + 40 )) $(( ty + rh + 4 + 8 * rh + rh / 2 ))
         klick $E
         for i in 1 2 3 4 5 6; do echo "sendkey backspace" ; done > "$TMPD/bs.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/bs.txt" 0.1 > /dev/null 2>&1
@@ -421,7 +421,7 @@ grep -qaE 'panic|EXCEPTION|#PF|#GP' "$G" && bad "a panic or exception" || ok "no
 
 echo "== 4. the settings window on the bus (AB-005b, AB-006) =="
 has "$G" "settings: lock via bus value=300" "the lock time is read through the bus (lock.idle)"
-grep -qaE 'settings: bus page=system rows=14' "$G" && ok "page System: 14 settings through settings.list" || bad "page System: $(grep -a 'settings: bus page=system' "$G" | tail -1)"
+grep -qaE 'settings: bus page=system rows=15' "$G" && ok "page System: 15 settings through settings.list" || bad "page System: $(grep -a 'settings: bus page=system' "$G" | tail -1)"
 has "$G" "settingsd: display brightness k=60 rc=0" "Set 30 on display.brightness reaches the KERNEL (DG_BRIGHT 60)"
 grep -qa 'settings: bus answer rc=2 line=\[confirm' "$G" && ok "a critical setting (net.wifi.enabled) is asked, even from the window" || bad "no confirmation asked for the critical setting"
 grep -qa 'settings: bus answer rc=0 line=\[ok\]' "$G" && ok "after 'Yes, change it' it is done" || bad "the yes did not go through"

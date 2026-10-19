@@ -308,6 +308,19 @@ titel "5. VON DER PLATTE starten -- ohne Stick, ohne Modul"
 # KEIN -kernel, KEIN -initrd. Was jetzt startet, startet ueber die
 # EFI-Partition, die der Installer beschrieben hat, mit der
 # Kommandozeile, die AUF DER PLATTE steht.
+# The INSTALLED disk boots on an ICH9 AHCI controller (DMA, like real SATA). Over IDE PIO a KVM guest on a
+# loaded host needed minutes for the root and sometimes never showed the login screen or the desktop within the
+# gate's waits (r1255: "screen empty", r1256: typed keys lost; the same disk reached the login screen in 17 s on
+# AHCI at load 43 and did not at all in 240 s on IDE). INST_DRIVE=ide restores the old controller. The installer
+# run itself (stick + /dev/hda target) stays on IDE.
+INST_DRIVE=${INST_DRIVE:-ahci}
+disk_boot_args() { # sets DISKBOOT for the CURRENT $ZIEL
+    if [ "$INST_DRIVE" = ahci ]; then
+        DISKBOOT=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$ZIEL,format=raw" -device ide-hd,drive=hd0,bus=ahci0.0)
+    else
+        DISKBOOT=(-drive "file=$ZIEL,format=raw,if=ide,index=0")
+    fi
+}
 OVMF=$(ls /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -1)
 platte_lauf() { # <name> <skript> <limit>
     local name=$1 skript=$2 limit=${3:-300}
@@ -335,12 +348,13 @@ platte_lauf() { # <name> <skript> <limit>
         # dass ein Stick im Rechner steckt.
         local msock="$OUT/mon-platte.sock"
         rm -f "$msock"
+        disk_boot_args
         local args0=(-machine pc -cpu max -m 512 -display none -no-reboot
             -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
             -serial "file:$ser"
             -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32
             -monitor "unix:$msock,server,nowait"
-            -drive "file=$ZIEL,format=raw,if=ide,index=0"
+            "${DISKBOOT[@]}"
             -device isa-debug-exit,iobase=0xf4,iosize=0x04)
         [ -f "$vars" ] && args0+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
         timeout "$limit" $QEMU_X86 "${args0[@]}" > /dev/null 2>&1 &
@@ -395,10 +409,11 @@ platte_lauf() { # <name> <skript> <limit>
     } > "$OUT/$name.conf"
     mcopy -o -i "$ZIEL@@1048576" "$OUT/$name.conf" ::/limine.conf 2>/dev/null \
         || { echo "mcopy fehlgeschlagen"; return 9; }
+    disk_boot_args
     local args=(-machine pc -cpu max -m 512 -display none -no-reboot
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
         -serial "file:$ser"
-        -drive "file=$ZIEL,format=raw,if=ide,index=0"
+        "${DISKBOOT[@]}"
         -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -f "$vars" ] && args+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
     timeout "$limit" $QEMU_X86 "${args[@]}" > /dev/null 2>&1
@@ -617,12 +632,13 @@ login_lauf() { # name keys...
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$vars" 2>/dev/null || true
     # the file the INSTALLER wrote (saved after step 5, before the script runs overwrote it)
     mcopy -o -i "$ZIEL@@1048576" "$OUT/inst-limine.conf" ::/limine.conf 2>/dev/null || true
+    disk_boot_args
     local a=(-machine pc -cpu max -m 512 -display none -no-reboot
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
         -serial "file:$ser"
         -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32
         -monitor "unix:$msock,server,nowait"
-        -drive "file=$ZIEL,format=raw,if=ide,index=0")
+        "${DISKBOOT[@]}")
     [ -f "$vars" ] && a+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
     timeout 300 $QEMU_X86 "${a[@]}" > /dev/null 2>&1 &
     local qp=$! w=0

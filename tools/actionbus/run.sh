@@ -1178,8 +1178,10 @@ act bench 500
 act stop
 echo ==FERTIG==
 EOS
+# the idle-lock default is 10 min since W-D (600): the section reads the 300 from a test copy, like section 13
 EXTRA=("/etc/settings.schema=etc/settings.schema"
-       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions"
+       "/etc/sperre.conf=$TMPD/sperre.conf")
 image "$TMPD/I.img" "$TMPD/s17.sh"
 EXTRA=()
 run "$TMPD/I.img" i 1 90
