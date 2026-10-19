@@ -55,6 +55,7 @@ import fui.painter
 import fui.uiimage
 import fui.transform
 import fui.navkit
+import fui.viewport
 import fui.navnum
 import fui.cmdbar
 import paint.canvas
@@ -117,6 +118,8 @@ export {
     set_raw, raw_take, ghost_button, ghost_space, set_overlay, canvas_px, focus_canvas,
     // r454: tabs in the title bar
     caption_strip, strip_on, strip_h, strip_caps_w, strip_row, strip_drag_node, strip_reports, set_key, accent_ink,
+    // Z1: scrolling areas
+    pane_open, pane_top, pane_offset, pane_content, pane_view,
 }
 
 const NONE: usize = 4294967295
@@ -6496,6 +6499,91 @@ fn card(parent: usize) -> usize {
         }
     }
     return i
+}
+
+// ------------------------------------------------- scrolling areas (Z1)
+//
+// A pane: a clipped box (scene N_VIEWPORT) whose ONE child column is as tall as its content. The wheel and the
+// scroll bar come from the host (fuiwirt.rad). The Viewport must outlive a `rebuild` (scene_reset), so it lives in
+// static memory; slot 0 = the page of a program, slot 1 = a second area (a list). `pane_sync` runs when the content
+// column is painted and gives the viewport the content size of THIS frame (a changed size repaints once).
+const PANE_SLOTS: u64 = 2
+const PANE_BYTES: u64 = 1024
+const PANE_BAR: usize = 8
+static mut pane_mem: [u8; 2048] = [0 as u8; 2048]
+static mut pane_ready: [bool; 2] = [false; 2]
+
+fn pane_vp(slot: u64) -> *mut viewport.Viewport {
+    return (((&pane_mem[0 as usize]) as u64) + slot * PANE_BYTES) as *mut viewport.Viewport
+}
+
+fn pane_sync(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let v: *mut viewport.Viewport = pane_vp(ud)
+    var cw: f64 = viewport.viewport_w(v) - (PANE_BAR as f64)
+    if cw < 1.0 {
+        cw = 1.0
+    }
+    let ch: f64 = widget.w_h(e)
+    if viewport.viewport_content_w(v) != cw || viewport.viewport_content_h(v) != ch {
+        viewport.viewport_set_content(v, cw, ch)
+        touch()
+    }
+}
+
+// Opens a pane in `parent` (it takes the rest of the parent's height) and returns the column for the content.
+fn pane_open(parent: usize, slot: u64) -> usize {
+    if slot >= PANE_SLOTS {
+        return NONE
+    }
+    if !pane_ready[(slot) as usize] {
+        *pane_vp(slot) = viewport.viewport_new(0.0, 0.0, 100.0, 100.0, 100.0, 100.0)
+        pane_ready[(slot) as usize] = true
+    }
+    viewport.viewport_set_bar(pane_vp(slot), PANE_BAR)
+    let vn: usize = scene.scene_add(sc(), parent, scene.N_VIEWPORT)
+    if vn == scene.SCENE_NONE {
+        return NONE
+    }
+    scene.node_set_viewport(sc(), vn, pane_vp(slot))
+    scene.node_set_grow(sc(), vn, 1000, 1000)
+    scene.node_set_base(sc(), vn, 0)
+    let cn: usize = scene.scene_box(sc(), vn, 0 as u32, flex.FLEX_COLUMN,
+        flex.JUSTIFY_START, flex.AL_STRETCH)
+    if cn != scene.SCENE_NONE {
+        scene.node_set_grow(sc(), cn, 0, 0)
+        scene.node_set_draw(sc(), cn, slot, pane_sync)
+    }
+    return cn
+}
+
+// scrolled back to the top (a new page)
+fn pane_top(slot: u64) {
+    if slot < PANE_SLOTS && pane_ready[(slot) as usize] {
+        viewport.viewport_set_offset(pane_vp(slot), 0.0, 0.0)
+    }
+}
+
+// the scroll position of a pane (pixels), 0 when it was never opened
+fn pane_offset(slot: u64) -> u64 {
+    if slot < PANE_SLOTS && pane_ready[(slot) as usize] {
+        return viewport.viewport_off_y(pane_vp(slot)) as u64
+    }
+    return 0
+}
+
+// the content height of a pane (pixels) and the visible height
+fn pane_content(slot: u64) -> u64 {
+    if slot < PANE_SLOTS && pane_ready[(slot) as usize] {
+        return viewport.viewport_content_h(pane_vp(slot)) as u64
+    }
+    return 0
+}
+
+fn pane_view(slot: u64) -> u64 {
+    if slot < PANE_SLOTS && pane_ready[(slot) as usize] {
+        return viewport.viewport_h(pane_vp(slot)) as u64
+    }
+    return 0
 }
 
 // A paragraph: the text breaks into at most `lines` lines at the width of

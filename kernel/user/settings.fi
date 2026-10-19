@@ -4442,6 +4442,9 @@ fn bus_page(r: u64) {
 }
 
 fn zeige_reiter(r: u64) {
+    if r != reiter {
+        fuiscene.pane_top(0)
+    }
     reiter = r
     if r >= R_ANZ {
         pkg_enter(r - R_ANZ)
@@ -4622,6 +4625,30 @@ fn rects_alle() {
     }
     // the rest of what the acceptance runs read: cards, tabs, buttons, radii,
     // every text (the formats wlib used, see tools/themestore/run.sh)
+    var s_lay: [u8; 22] = "settings: layout nav=\0"
+    var s_lay2: [u8; 9] = " detail=\0"
+    var s_lay3: [u8; 9] = " scroll=\0"
+    var s_lay4: [u8; 10] = " content=\0"
+    var s_lay5: [u8; 7] = " view=\0"
+    var s_lay6: [u8; 6] = " off=\0"
+    say((&s_lay[0 as usize]) as u64)
+    sayn(b2n(nav_mode()))
+    say((&s_lay2[0 as usize]) as u64)
+    sayn(b2n(nav_detail))
+    say((&s_lay3[0 as usize]) as u64)
+    sayn(b2n(page_scrolls()))
+    // the pane of the page, or (list view) of the list
+    var slot: u64 = 0
+    if nav_list_only() {
+        slot = 1
+    }
+    say((&s_lay4[0 as usize]) as u64)
+    sayn(fuiscene.pane_content(slot))
+    say((&s_lay5[0 as usize]) as u64)
+    sayn(fuiscene.pane_view(slot))
+    say((&s_lay6[0 as usize]) as u64)
+    sayn(fuiscene.pane_offset(slot))
+    nl()
     karten_say()
     tabs_say()
     fuiscene.say_knoepfe()
@@ -8640,6 +8667,7 @@ const K_SEG0: u64 = 180 // 180 .. 182: light, dark, auto
 const K_SW0: u64 = 183 // 183 .. 190: the eight accent swatches
 const K_WP0: u64 = 191 // the wallpaper thumbnail
 const K_HDR: u64 = 199 // the header canvas
+const K_BACK: u64 = 197 // narrow mode: back from a page to the list
 const SIDE_W: u64 = 232
 const NCAT: u64 = 8
 const SF_HOT: u64 = 2
@@ -8648,6 +8676,7 @@ const SF_FOCUS: u64 = 8
 static mut k_settings_cats: [u8; 14] = "settings.cats\0"
 static mut k_settings_search: [u8; 16] = "settings.search\0"
 static mut k_settings_search_short: [u8; 22] = "settings.search.short\0"
+static mut k_settings_back: [u8; 14] = "settings.back\0"
 static mut k_settings_nohit: [u8; 15] = "settings.nohit\0"
 static mut k_settings_nohit2: [u8; 16] = "settings.nohit2\0"
 static mut k_settings_seg: [u8; 13] = "settings.seg\0"
@@ -8994,6 +9023,9 @@ fn hdr_cb(x: u64, y: u64, w: u64, h: u64) {
 }
 
 fn goto_page(idx: u64) {
+    if nav_mode() {
+        nav_detail = true
+    }
     bus_page(idx)
     zeige_reiter(idx)
     melde_stand()
@@ -9070,8 +9102,45 @@ fn first_of(w: u64, rest: u64, gap: u64) -> u64 {
     return cw_in - rest - gap
 }
 
+fn b2n(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// the last scroll position of the page / list areas (a change makes the window report its rectangles again)
+static mut pane_prev: u64 = 0
+
+// Z1: NAVIGATION MODE. A window narrower than NAV_W logical points shows ONE of two views: the list of pages (the
+// sidebar over the whole width) or the page (with a Back button); picking a page opens it, Back / Esc returns.
+const NAV_W: u64 = 640
+static mut nav_detail: bool = false
+
+fn nav_mode() -> bool {
+    return fuiscene.width() < NAV_W
+}
+
+// the list is the only view
+fn nav_list_only() -> bool {
+    return nav_mode() && !nav_detail
+}
+
+// the page is the only view
+fn nav_page_only() -> bool {
+    return nav_mode() && nav_detail
+}
+
+// the page area scrolls when the window is narrow or low (everything fits and stays as designed above)
+fn page_scrolls() -> bool {
+    return fuiscene.width() < 900 || fuiscene.height() < 700
+}
+
 // the sidebar width: the designed 232, narrower in a narrow window
 fn side_w() -> u64 {
+    if nav_list_only() {
+        return fuiscene.width() - 16
+    }
     if fuiscene.width() >= 900 {
         return SIDE_W
     }
@@ -9198,6 +9267,16 @@ fn build() {
     let shell: usize = fuiscene.row_stretch(col)
     fuiscene.set_grow(shell, 1)
     fuiscene.set_gap(shell, 8)
+    if page_scrolls() || nav_mode() {
+        // the scrolling areas need a definite height to fill: the window minus the margins (16), the gap (8) and the
+        // status line (24) -- a column does not stretch its children to the window by itself
+        var sh_h: u64 = 0
+        if fuiscene.height() > 48 + 100 {
+            sh_h = fuiscene.height() - 48
+        }
+        fuiscene.set_size(shell, 0, sh_h)
+    }
+    if !nav_page_only() {
     let side: usize = fuiscene.column(shell)
     fuiscene.set_size(side, side_w(), 0)
     fuiscene.plate_node(side)
@@ -9216,7 +9295,12 @@ fn build() {
         fuiscene.set_gap(side, 2)
     }
     // W-AR6B: 19 pages. The sidebar has no scrolling, so the entries shrink until the whole list ends inside the window
-    item_h = side_fit(item_h, compact)
+    if nav_list_only() {
+        // navigation mode: the list scrolls, so the entries keep a finger-friendly height
+        item_h = 32
+    } else {
+        item_h = side_fit(item_h, compact)
+    }
     let n_sr: usize = fuiscene.entry(side, K_SRCH, 0, (&e_srch[0 as usize]) as u64)
     fuiscene.set_size(n_sr, 0, 30)
     if side_w() < 160 {
@@ -9226,6 +9310,14 @@ fn build() {
         fuiscene.entry_hint(K_SRCH, msg.get((&k_settings_search[0 as usize]) as u64))
     }
     let _sp0: usize = fuiscene.space(side, 0, 6)
+    var lst: usize = side
+    if nav_list_only() {
+        let pl: usize = fuiscene.pane_open(side, 1)
+        if pl != fuiscene.NONE {
+            lst = pl
+            fuiscene.set_gap(lst, 2)
+        }
+    }
     var c: u64 = 0
     while c < NCAT + 1 {
         var any: bool = false
@@ -9237,24 +9329,60 @@ fn build() {
             p0 = p0 + 1
         }
         if any {
-            let _ch: usize = fuiscene.label_muted(side, cat_name(c))
+            let _ch: usize = fuiscene.label_muted(lst, cat_name(c))
             var p: u64 = 0
             while p < pages_all() {
                 if cat_of(p) == c && nav_vis[(p) as usize] != 0 {
-                    let _t: usize = fuiscene.ftile_left(side, tab_key(p), page_name(p), 0, item_h, 256 + p, tile_cb)
+                    let _t: usize = fuiscene.ftile_left(lst, tab_key(p), page_name(p), 0, item_h, 256 + p, tile_cb)
                 }
                 p = p + 1
             }
         }
         c = c + 1
     }
+    }
+    if !nav_list_only() {
     let main: usize = fuiscene.column_w(shell, 1)
     fuiscene.set_gap(main, 8)
-    let _hd: usize = fuiscene.canvas(main, K_HDR, 0, 52, hdr_cb)
-    let body: usize = fuiscene.row_stretch(main)
-    fuiscene.set_grow(body, 1)
+    if nav_page_only() {
+        // navigation mode: a Back button in front of the header
+        let hr: usize = fuiscene.row(main)
+        fuiscene.set_gap(hr, 8)
+        fuiscene.set_size(hr, 0, 52)
+        let bk: usize = fuiscene.button(hr, msg.get((&k_settings_back[0 as usize]) as u64), K_BACK)
+        fuiscene.set_size(bk, 84, 40)
+        let hv: usize = fuiscene.canvas(hr, K_HDR, 0, 52, hdr_cb)
+        fuiscene.set_grow(hv, 1)
+    } else {
+        let _hd: usize = fuiscene.canvas(main, K_HDR, 0, 52, hdr_cb)
+    }
+    // a narrow or low window: the page scrolls inside a clipped area instead of running out of the window
+    var host: usize = main
+    if page_scrolls() {
+        let pn: usize = fuiscene.pane_open(main, 0)
+        if pn != fuiscene.NONE {
+            host = pn
+        }
+    }
+    var body: usize = host
+    if nav_mode() {
+        // one column: the second card of a two-column page comes under the first
+        body = fuiscene.column(host)
+    } else {
+        body = fuiscene.row_stretch(host)
+        if host == main {
+            fuiscene.set_grow(body, 1)
+        }
+    }
     fuiscene.set_gap(body, 8)
-    let tw: u64 = fuiscene.width() - 16 - side_w() - 8
+    var tw: u64 = fuiscene.width() - 16
+    if !nav_page_only() {
+        tw = tw - side_w() - 8
+    }
+    if host != main {
+        // the scroll bar's gutter
+        tw = tw - 8
+    }
     cw_in = 0
     fuiscene.set_toggle_room(0)
     let cl: usize = fuiscene.card(body)
@@ -9268,15 +9396,22 @@ fn build() {
     } else {
         if two_cols(reiter) {
             var lw: u64 = (tw - 8) * 9 / 20
-            if fuiscene.width() < 900 {
+            var rw: u64 = tw - 8 - lw
+            if nav_mode() {
+                // navigation mode: the two cards stand one under the other
+                lw = tw
+                rw = tw
+                cw_in = tw - 20
+            } else if fuiscene.width() < 900 {
                 // narrow window: two columns of the same width
                 lw = (tw - 8) / 2
+                rw = tw - 8 - lw
                 cw_in = lw - 20
             }
             fuiscene.set_size(cl, lw, 0)
             cr = fuiscene.card(body)
             karte_r = (cr as u64) + 1
-            fuiscene.set_size(cr, tw - 8 - lw, 0)
+            fuiscene.set_size(cr, rw, 0)
         } else {
             fuiscene.set_size(cl, tw, 0)
             if fuiscene.width() < 900 {
@@ -9327,6 +9462,7 @@ fn build() {
         } else {
             page_update(cl, cr)
         }
+    }
     }
     let _st: usize = fuiscene.label(col, (&l_stat[0 as usize]) as u64)
 }
@@ -9578,6 +9714,10 @@ fn u_start(args: u64) -> u64 {
     }
     fuiscene.set_dense(true)
     reiter = start_page
+    // narrow window: a program asked to open on a page shows that page, not the list
+    if start_page != R_DARST {
+        nav_detail = true
+    }
     // X2: paint into a private picture, so frame_end damages only what changed (a hover is a row, not the whole window)
     fuiapp.set_atomic(true)
     if !fuiscene.open(20, 3, bw, bh, msg.get((&k_t_titel[0 as usize]) as u64), build) {
@@ -9748,6 +9888,11 @@ fn u_start(args: u64) -> u64 {
             rep_due = 1
             glas_say()
         }
+        let po: u64 = fuiscene.pane_offset(0) + fuiscene.pane_offset(1) * 100000
+        if po != pane_prev {
+            pane_prev = po
+            rep_due = 1
+        }
         // LIVE SEARCH: the text of the field is compared every turn
         let sq: u64 = fuiscene.entry_text(K_SRCH)
         if sq != 0 && !ulib.streq(sq, (&srch_prev[0 as usize]) as u64) {
@@ -9769,10 +9914,16 @@ fn u_start(args: u64) -> u64 {
             } else if ka == wlib.KEY_ESC && rb((&e_srch[0 as usize]) as u64, 0) != 0 {
                 fuiscene.entry_set(K_SRCH, (&e_srch[0 as usize]) as u64 + 47)
                 fuiscene.focus(tab_key(reiter))
+            } else if ka == wlib.KEY_ESC && nav_page_only() {
+                nav_detail = false
+                fuiscene.refresh()
+                rep_due = 1
             } else if (ka == wlib.KEY_DOWN || ka == wlib.KEY_UP) && key_page(fkk) != NO_PAGE {
                 let nx: u64 = nav_step(key_page(fkk), ka == wlib.KEY_DOWN)
                 if nx != key_page(fkk) {
+                    let keep_detail: bool = nav_detail
                     goto_page(nx)
+                    nav_detail = keep_detail
                     fuiscene.build_now()
                     fuiscene.focus(tab_key(nx))
                 }
@@ -9788,6 +9939,11 @@ fn u_start(args: u64) -> u64 {
             let _c3: u64 = ulib.strncpy((&e_akzent[0 as usize]) as u64, ((&sw_hex[0 as usize]) as u64) + sw_sel * 8, 12)
             push_entries()
             key = K_B1
+        } else if key == K_BACK {
+            nav_detail = false
+            fuiscene.refresh()
+            rep_due = 1
+            key = 0
         } else if key == K_SRCH {
             if nav_n > 0 {
                 let first: u64 = nav_step(99, true)
@@ -9834,6 +9990,9 @@ fn u_start(args: u64) -> u64 {
             if kind == 999 {
                 pkg_click(key - K_PKGF0)
             } else if kind == wlib.K_TABS {
+                if nav_mode() {
+                    nav_detail = true
+                }
                 bus_page(idx)
                 zeige_reiter(idx)
                 melde_stand()
