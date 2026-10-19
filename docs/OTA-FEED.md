@@ -4,6 +4,10 @@ Live feed: `https://store.fleitec.com/osum/aktuell` (directory `/srv/store/osum`
 There are NO `stable/` or `test/` folders and none are created (owner's decision
 03.10.2026); images ship `quelle=https://store.fleitec.com/osum/aktuell` without `kanal=`.
 
+Since 19.10.2026 the same directory also holds `system/dev/` (selfupdate kernel feed, see
+`docs/SELFUPDATE.md` section 6). It is additive: `aktuell/` and old images never read it, and
+`veroeffentlichen.py` does not touch it. Never run `rsync --delete` against `/srv/store/osum/`.
+
 ## 1. Prepare the stand LOCALLY (touches nothing live)
 
     bash tools/loader/build.sh /tmp/laden-new && bash tools/loader/pakete.sh /tmp/laden-new
