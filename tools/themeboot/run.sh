@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/themeboot/run.sh -- r1123: a program whose first read of /etc/theme.conf fails must keep the mode the file says (light OR dark)
-# (old behaviour: keys from read 1, the compare-copy from read 2 -> read 1 failed = dark start, read 2 good = the poll
-# never sees a change = dark for good ("1 boot in 6 comes up dark").
-# Mechanism (measured with a debug line in the old tree): a failed read leaves set_mode=AUTO, and AUTO means "dark between
-# dark_start 19:00 and light_start 07:00 local" (VM clock, /etc/time.conf offset=120). So the old bug only shows when the file says
-# the OPPOSITE of what AUTO gives right now -- the gate therefore picks the file mode from the clock at run time.
+# (old behaviour: keys from read 1, the compare-copy from a second read at the end of the reload -> read 1 failed = dark start,
+# the copy held the GOOD bytes, so the poll never sees a change = dark for good ("1 boot in 6 comes up dark").
+# MEASURED (r1171, debug lines in the old tree): a failed key read leaves set_mode = sch_mode = DARK (NOT AUTO, so the result
+# does not depend on the clock), and the old taskbar/desktop reload TWICE at boot -- one failing key read heals itself with the
+# second reload. The counter-probe therefore fails the first TWO key reads (flaky=2, key reads only; the copy read stays good).
+# The file mode is always light: the new tree must show the dark tile OFF (an=0), the counter-probe tree dark (an=1).
 # Hook: image option flaky=K (/etc/themeflaky) makes the first K reads of /etc/theme.conf per program fail, deterministic.
-# NEW tree + flaky=1 must show the dark tile OFF (an=0); COUNTER-PROBE (tree before the fix + the same hook) shows an=1.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -26,18 +26,8 @@ warte 2
 foto q01_offen
 PLAN
 
-# local minutes of the VM (offset=120 as written by toolbench/build.sh); avoid the 07:00/19:00 edge while the run is in flight
-lmin() { echo $(( ( $(date -u +%H) * 60 + 10#$(date -u +%M) + 120 ) % 1440 )); }
-# a run takes ~10 min (two toolbench builds): stay >= 15 min away from 07:00 / 19:00, wait past the edge if needed
-edge_wait() { local m; m=$(lmin)
-    if [ "$m" -ge 405 ] && [ "$m" -le 435 ]; then echo $(( (436 - m) * 60 )); return; fi
-    if [ "$m" -ge 1125 ] && [ "$m" -le 1155 ]; then echo $(( (1156 - m) * 60 )); return; fi
-    echo 0; }
-W=$(edge_wait)
-if [ "$W" -gt 0 ]; then echo "(clock near the light/dark edge, waiting $W s)"; sleep "$W"; fi
-M=$(lmin)
-if [ "$M" -ge 1140 ] || [ "$M" -lt 420 ]; then FILE_MODE=light; WANT=0; AUTO_AN=1; else FILE_MODE=dark; WANT=1; AUTO_AN=0; fi
-echo "local minute $M -> AUTO would be an=$AUTO_AN; file mode=$FILE_MODE, correct tile an=$WANT"
+FILE_MODE=light; WANT=0; OLD_AN=1
+echo "file mode=$FILE_MODE: correct tile an=$WANT, the old tree (failed key reads) starts dark an=$OLD_AN"
 tile() { grep -a 'qs: kachel n=3 ' "$1/serial.txt" 2>/dev/null | head -1; }
 
 echo "== 1. new tree, first read of /etc/theme.conf fails =="
@@ -55,9 +45,9 @@ if [ -z "$BASE" ]; then bad "no base commit for the counter-probe"; else
             || bad "hook patch failed: $(tail -2 "$TMPD/hook.log")"
         cp tools/toolbench/build.sh "$OLD/tools/toolbench/build.sh"
         ( cd "$OLD" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-          bash tools/toolbench/build.sh "$TMPD/oldout" desk=yes mode=$FILE_MODE wait=12 last=300 flaky=1 extra="wighalt=120" plan="$TMPD/plan.txt" ) > "$TMPD/old.log" 2>&1
+          bash tools/toolbench/build.sh "$TMPD/oldout" desk=yes mode=$FILE_MODE wait=12 last=300 flaky=2 extra="wighalt=120" plan="$TMPD/plan.txt" ) > "$TMPD/old.log" 2>&1
         T2=$(tile "$TMPD/oldout")
-        [ -n "$T2" ] && echo "$T2" | grep -qa "an=$AUTO_AN" && ok "the old way falls back to AUTO (an=$AUTO_AN, wrong for mode=$FILE_MODE) with the same failing read ($T2)" || bad "counter-probe did not show the bug: '$T2'"
+        [ -n "$T2" ] && echo "$T2" | grep -qa "an=$OLD_AN" && ok "the old way starts dark (an=$OLD_AN, wrong for mode=$FILE_MODE) with the same failing read ($T2)" || bad "counter-probe did not show the bug: '$T2'"
     fi
 fi
 echo "== THEMEBOOT: $pass green, $fail red =="
