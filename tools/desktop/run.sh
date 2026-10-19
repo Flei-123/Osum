@@ -199,7 +199,12 @@ mk_image() { # image conf-file
     printf 'lang=en\n' > "$TMPD/locale.conf"
     ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
         "/usr/share/locale/en/messages=locale/en/messages")
-    ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$cf" "/etc/locale.conf=$TMPD/locale.conf@0644")
+    # r1130: transparency=off. The bar is milky glass by default (taskbar alpha 82 %, blurred wallpaper behind it), so the tray texts
+    # (clock, battery) and the Start face do not sit on the colour the bar REPORTS (`bg=` = T_PANEL / C_BUTTON_FACE): the per-glyph
+    # check compared against a colour that is not under the ink (clock 243 of 278 ink points wrong, Start 14 of 222). The runner
+    # measures geometry and text, not the glass (tools/glass does), so it asks for an opaque bar.
+    printf '# /etc/theme.conf\ntransparency=off\n' > "$TMPD/theme.conf"
+    ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/theme.conf=$TMPD/theme.conf@0644" "/etc/taskbar.conf=$cf" "/etc/locale.conf=$TMPD/locale.conf@0644")
     # The bar's `taskbar: text ...` lines are a MEASUREMENT OUTPUT and are
     # off unless this file exists -- same switch `wlib` uses. This runner
     # reads those lines, so it turns them on.
