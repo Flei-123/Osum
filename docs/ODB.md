@@ -284,4 +284,4 @@ persistent session, per round ping x5 / info / exec / push+pull 64 KiB / ps / sh
 with `exec` / shot compare. A time per step; a failed step is recorded and the run goes on. `odbc imgdiff a.png b.png [--region x,y,w,h]`
 (host only) compares two shots. Kernel query `TQ_KEYFOR` (TIPP TI_INFO a1=11, a2 = code point [+ (layout+1) << 24]) returns the scancode
 (+0x200 Shift, +0x400 AltGr) that types it, `TQ_LAYOUT` (12) the layout in force. Finding: `input text` used US scancodes, so on the
-DEU desktop `>` became `:` and `/` became `-`; the new query fixes this (UNTESTED at the time of writing, see report).
+DEU desktop `>` became `:` and `/` became `-`; the new query fixes this (verified 19.10.: tools/odb/loop.sh types `echo tag > /tmp/odbloop.txt` into the Terminal of the DEU desktop image, 5 rounds, file content read back; `odbc input text ... --layout us|de|uk|fr|es|it|ru|auto` overrides, gate cases in tools/odb/run.sh).
