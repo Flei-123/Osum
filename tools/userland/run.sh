@@ -97,7 +97,7 @@ fi
 run_kernel() { # image append out [extra qemu arguments]
     local image=$1 append=$2 out=$3
     shift 3
-    timeout 120 $QEMU_X86 -kernel "$image" -m 128 -append "$append" \
+    timeout 120 $QEMU_X86 -kernel "$image" -m 128 -append "$append execlog" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?

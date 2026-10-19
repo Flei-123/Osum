@@ -51,6 +51,7 @@ num() { local name=$1 wert=$2 op=$3 want=$4
     else bad "$name: $wert, erwartet $op $want"; fi
 }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
+hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' ist da" || ok "$3"; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
@@ -285,6 +286,23 @@ else
 fi
 # the pages: the sidebar names four, and each of the other three page bodies is reported
 has "$S4" "taskmgr: graph x=" "die Leistungsseite zeigt den Graphen"
+
+# =================================================== 7b. the Bench page (r1214)
+echo
+echo "== 7b. die Bench-Seite zeigt /proc/bench =="
+# `taskmgr bench` opens on the Bench page: /proc/bench as a read-only two-column table. The report lists every row.
+bash tools/toolbench/build.sh "$TMPD/b5" app=/bin/taskmgr,melde,takt,300,bench \
+    wait=10 last=140 shot=bench > "$TMPD/b5.log" 2>&1
+S5="$TMPD/b5/serial.txt"
+BN=$(grep -a 'taskmgr: bench n=' "$S5" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')
+num "die Bench-Seite meldet ihre Zeilen (n)" "${BN:-0}" ge 6
+has "$S5" "taskmgr: bnz tsc.khz" "und /proc/bench steht darin (tsc.khz)"
+has "$S5" "taskmgr: bnz kernel.end" "ebenso kernel.end"
+has "$S5" "taskmgr: bnz heap.bytes" "ebenso heap.bytes"
+KHZ=$(grep -a 'taskmgr: bnz tsc.khz' "$S5" | tail -1 | tr -d '\t' | sed -E 's/.*tsc\.khz//' | tr -dc '0-9')
+num "tsc.khz der Seite ist eine echte Zahl" "${KHZ:-0}" ge 100000
+# counter-proof: the Performance page does not show the Bench rows
+hasnot "$S4" "taskmgr: bnz " "Gegenprobe: die Leistungsseite meldet keine Bench-Zeilen"
 
 # =================================================== 8. das Kontrollzentrum
 echo

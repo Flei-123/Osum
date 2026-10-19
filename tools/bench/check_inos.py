@@ -30,7 +30,9 @@ RANGES = {
     "syscall.pipe_rtt_poll_ns": (1, 1e8),
     "syscall.pipe_rtt_block_ns": (1, 1e8),
     "syscall.fork_exit_wait_us": (1, 1e7),
-    "syscall.exec_exit_wait_us": (1, 1e7),
+    "syscall.exec_exit_wait_us": (1, 4000),  # r1222: 10-13 ms while every exec wrote ~270 UART octets; ~1.4 ms now
+    "syscall.exec_call_us": (1, 4000),
+    "syscall.exec_wait_us": (1, 4000),
     "fs.tmp_write_kib_s": (1, 1e8),
     "fs.tmp_read_kib_s": (1, 1e8),
     "fs.disk_write_kib_s": (1, 1e8),
