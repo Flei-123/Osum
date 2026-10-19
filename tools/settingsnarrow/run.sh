@@ -42,7 +42,9 @@ for cfg in $CFGS; do
     echo "rad -10"; echo "warte 2"; echo "foto 02-wheel2"
     echo "rad 3"; echo "warte 2"
     echo "klickauf srecttaba"; echo "warte 3"; echo "foto 03-page"
-    echo "fahre $((XRES/2)),$((YRES/2))"; echo "warte 1"
+    # the page wheel goes over the page margin: a list box under the pointer (Colour scheme) would take the notches itself
+    case "$cfg" in nav*) PGX=$((XRES/45)) ;; *) PGX=$((XRES/2)) ;; esac
+    echo "fahre $PGX,$((YRES/2))"; echo "warte 1"
     echo "rad -8"; echo "warte 2"; echo "foto 04-page-wheel1"
     echo "rad -8"; echo "warte 2"; echo "foto 05-page-wheel2"
     echo "rad 40"; echo "warte 6"
