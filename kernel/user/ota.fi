@@ -138,7 +138,7 @@ export { u_start }
 // ------------------------------------------------------------ die Texte
 
 static mut S_USE1: [u8; 26] = "ota search | show | apply\0"
-static mut S_USE2: [u8; 44] = "ota confirm | rollback | watchdog | service\0"
+static mut S_USE2: [u8; 73] = "ota confirm | rollback | watchdog | service | system search|apply|status\0"
 static mut C_SUCH: [u8; 7] = "search\0"
 static mut C_ZEIG: [u8; 5] = "show\0"
 static mut C_HOL: [u8; 6] = "fetch\0"
@@ -1295,6 +1295,9 @@ fn kanal_gueltig(w: u64) -> bool {
     if l == 4 && ulib.strneq(w, (&W_TEST[0 as usize]) as u64, 4) {
         return true
     }
+    if l == 3 && ulib.strneq(w, (&W_SU_DEV[0 as usize]) as u64, 3) {
+        return true
+    }
     return false
 }
 
@@ -1318,6 +1321,9 @@ fn dir_get(laut: bool) -> u64 {
         if !kanal_gueltig((&KANAL[0 as usize]) as u64) {
             return err((&E_KANAL[0 as usize]) as u64, 0)
         }
+    }
+    if sys_mode {
+        su_fix_source()
     }
     // `name` ist seit RUNDE BETRIEB FREIWILLIG: traegt `quelle` einen
     // Namen, loest `fetch` ihn auf und prueft das Zertifikat gegen
@@ -1512,11 +1518,16 @@ fn rueckschritt(dort: u64, hier: u64, laut: bool) -> u64 {
 // Rueckgabe: true nur, wenn die Datei danach GENAU die Laenge und GENAU
 // den Streuwert hat, die das signierte Verzeichnis nennt.
 fn packet_get(datei: u64, soll_len: u64, soll_hex: u64) -> bool {
+    tmp_path((&ZIEL[0 as usize]) as u64, datei)
+    return get_into(datei, soll_len, soll_hex)
+}
+
+// Same as the package download, but the target path is already in ZIEL.
+fn get_into(datei: u64, soll_len: u64, soll_hex: u64) -> bool {
     if soll_len == 0 || g8(datei) == 0 {
         err((&E_LAENGE[0 as usize]) as u64, datei)
         return false
     }
-    tmp_path((&ZIEL[0 as usize]) as u64, datei)
     var versuch: u64 = 0
     var gut: bool = false
     // WARUM es scheitert, wird UNTERWEGS gemerkt und nicht hinterher
@@ -2073,6 +2084,7 @@ fn cmd_bestaetigen() -> u64 {
         // nach dem Neustart gilt "bereit" nicht mehr: die Generation laeuft
         stand_write((&W_PH_RUHE[0 as usize]) as u64)
     }
+    su_finish()
     return rc
 }
 
@@ -2458,6 +2470,759 @@ fn cmd_einstellen(schl: u64, wert: u64) -> u64 {
     return 0
 }
 
+static mut C_SU_SYSTEM: [u8; 7] = "system\0"
+static mut W_SU_DEV: [u8; 4] = "dev\0"
+static mut sys_mode: bool = false
+// ======================================================================
+// SELFUPDATE (SU-2, 19.10.2026): `ota system search|apply|status|confirm`.
+//
+// The SYSTEM update replaces the KERNEL (slot B on the ESP), not just
+// packages. Design: docs/SELFUPDATE.md. In short:
+//   * the feed carries `system` + `sysfile` lines inside the same signed
+//     VERZEICHNIS (so chain, signature, lock list are the proven ones);
+//     the base is `<quelle without /aktuell>/system/<channel>/`.
+//   * apply: kernel file -> /sysesp/osum-b.mb (SHA-256 + length from the
+//     signed list), /system/SYSPENDING, /system/ERPROBUNG armed (trial
+//     counter of ab.fi), limine.conf gets `default_entry: 2` + entry B.
+//   * trial boot of B: ab.fi counts, ab.esp_flip puts the loader back on A
+//     when the attempts are used up. `ota boot`/`ota confirm` after a healthy
+//     desktop PROMOTES B into slot A (copy + hash) and sets default_entry 1.
+//   * /system/SYSVERSION (8 digits, only grows) is the rollback guard.
+// ======================================================================
+static mut SU_L_SYSTEM: [u8; 8] = "system\t\0"
+static mut SU_L_FILE: [u8; 9] = "sysfile\t\0"
+static mut SU_R_KERNEL: [u8; 7] = "kernel\0"
+static mut SU_R_NOTES: [u8; 6] = "notes\0"
+static mut SU_R_ROOT: [u8; 5] = "root\0"
+static mut P_SU_VER: [u8; 19] = "/system/SYSVERSION\0"
+static mut P_SU_PEND: [u8; 19] = "/system/SYSPENDING\0"
+static mut P_SU_STAND: [u8; 18] = "/system/sys.stand\0"
+static mut P_SU_NOTES: [u8; 18] = "/system/sys.notes\0"
+static mut P_SU_OSVER: [u8; 15] = "/etc/osversion\0"
+static mut P_SU_MNT: [u8; 8] = "/sysesp\0"
+static mut P_SU_CONF: [u8; 20] = "/sysesp/limine.conf\0"
+static mut P_SU_NEW: [u8; 18] = "/sysesp/limine.nw\0"
+static mut P_SU_KB: [u8; 18] = "/sysesp/osum-b.mb\0"
+static mut P_SU_KA: [u8; 16] = "/sysesp/osum.mb\0"
+static mut P_PROCVER: [u8; 14] = "/proc/version\0"
+static mut D_SU_HDA1: [u8; 10] = "/dev/hda1\0"
+static mut T_SU_VFAT: [u8; 5] = "vfat\0"
+static mut K_SU_SQ: [u8; 11] = "sysquelle=\0"
+static mut W_SU_AKT: [u8; 9] = "/aktuell\0"
+static mut W_SU_SYS: [u8; 8] = "/system\0"
+static mut W_SU_STABLE: [u8; 7] = "stable\0"
+static mut W_SU_PATHA: [u8; 22] = "path: boot():/osum.mb\0"
+static mut W_SU_DEFE: [u8; 15] = "default_entry:\0"
+static mut W_SU_DEF2: [u8; 18] = "default_entry: 2\n\0"
+static mut W_SU_DEF2B: [u8; 17] = "default_entry: 2\0"
+static mut W_SU_CMD: [u8; 13] = "    cmdline:\0"
+static mut W_SU_OSUMB: [u8; 10] = "osum-b.mb\0"
+static mut W_SU_ENTB: [u8; 74] = "\n/OrientOS (update)\n    protocol: multiboot1\n    path: boot():/osum-b.mb\n\0"
+static mut W_SU_NL: [u8; 2] = "\n\0"
+static mut W_SU_CUR: [u8; 8] = "current\0"
+static mut W_SU_AVAIL: [u8; 10] = "available\0"
+static mut W_SU_STAGEDW: [u8; 7] = "staged\0"
+static mut W_SU_FAILW: [u8; 7] = "failed\0"
+static mut W_SU_BUILD: [u8; 8] = " build \0"
+static mut W_SU_PC: [u8; 8] = "commit=\0"
+static mut W_SU_PN: [u8; 7] = "count=\0"
+static mut W_SU_PS: [u8; 5] = "sha=\0"
+static mut W_SU_HERE: [u8; 6] = "here=\0"
+static mut W_SU_THERE: [u8; 7] = "there=\0"
+static mut W_SU_PH: [u8; 7] = "phase=\0"
+static mut W_SU_CM: [u8; 8] = "commit=\0"
+static mut W_SU_ERPG: [u8; 5] = "gen=\0"
+static mut W_SU_ERPV: [u8; 6] = " vor=\0"
+static mut W_SU_ERPT: [u8; 12] = " v=00 ok=0\n\0"
+static mut W_SU_RESTART: [u8; 8] = "restart\0"
+static mut S_SU_HERE: [u8; 25] = "system: installed build \0"
+static mut S_SU_THERE: [u8; 25] = "system: available build \0"
+static mut S_SU_COMMIT: [u8; 16] = "system: commit \0"
+static mut S_SU_NEW: [u8; 25] = "system: update available\0"
+static mut S_SU_NONE: [u8; 19] = "system: up to date\0"
+static mut S_SU_NOTES: [u8; 17] = "system: changes:\0"
+static mut S_SU_STAGED: [u8; 45] = "system: staged in slot B, restart to install\0"
+static mut S_SU_PROMO: [u8; 52] = "system: new kernel confirmed and promoted to slot A\0"
+static mut S_SU_FAILED: [u8; 53] = "system: trial kernel was rolled back, update dropped\0"
+static mut S_SU_ROOTN: [u8; 65] = "system: root image entry ignored (module-root layout is stage 2)\0"
+static mut S_SU_PEND: [u8; 32] = "system: pending trial of build \0"
+static mut S_SU_NOPEND: [u8; 26] = "system: no update pending\0"
+static mut S_SU_RESTARTING: [u8; 19] = "system: restarting\0"
+static mut E_SU_NOSYS: [u8; 58] = "ota: this source offers no system update (no system line)\0"
+static mut E_SU_NOKERN: [u8; 41] = "ota: system manifest has no kernel entry\0"
+static mut E_SU_BACK: [u8; 56] = "ota: system build is not newer than the installed one: \0"
+static mut E_SU_MIN: [u8; 67] = "ota: this system is too old for an incremental update (min_from): \0"
+static mut E_SU_TRIAL: [u8; 61] = "ota: a trial is running or pending, confirm or restart first\0"
+static mut E_SU_ESP: [u8; 60] = "ota: cannot mount the ESP (/dev/hda1) -- no installed disk?\0"
+static mut E_SU_LAYOUT: [u8; 79] = "ota: unsupported limine.conf layout (need ONE entry with path boot():/osum.mb)\0"
+static mut E_SU_CONFW: [u8; 33] = "ota: could not write limine.conf\0"
+static mut E_SU_ERP: [u8; 37] = "ota: could not arm the trial counter\0"
+static mut E_SU_PENDW: [u8; 40] = "ota: could not write /system/SYSPENDING\0"
+static mut E_SU_KGET: [u8; 37] = "ota: kernel download or check failed\0"
+static mut E_SU_BAD: [u8; 35] = "ota: system list line unreadable: \0"
+
+static mut SU_COMMIT: [u8; 24] = [0 as u8; 24]
+static mut SU_KFILE: [u8; 128] = [0 as u8; 128]
+static mut SU_KHEX: [u8; 72] = [0 as u8; 72]
+static mut SU_NFILE: [u8; 128] = [0 as u8; 128]
+static mut SU_NHEX: [u8; 72] = [0 as u8; 72]
+static mut SU_TMP: [u8; 24] = [0 as u8; 24]
+static mut SYSB: [u8; 4096] = [0 as u8; 4096]
+static mut SYSB2: [u8; 6144] = [0 as u8; 6144]
+static mut SYSB3: [u8; 2304] = [0 as u8; 2304]
+static mut su_count: u64 = 0
+static mut su_minfrom: u64 = 0
+static mut su_klen: u64 = 0
+static mut su_nlen: u64 = 0
+static mut su_root: bool = false
+static mut su_phase: u64 = 0
+const NOTFOUND: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn num9_read(path: u64) -> u64 {
+    var b: [u8; 16] = [0 as u8; 16]
+    let n: u64 = file_read(path, (&b[0 as usize]) as u64, 15)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 8 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let ch: u64 = b[i as usize] as u64
+        if ch < 48 || ch > 57 {
+            return 0
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn num9_write(path: u64, v: u64) -> bool {
+    var b: [u8; 12] = [0 as u8; 12]
+    var rest: u64 = v
+    var i: u64 = 8
+    while i > 0 {
+        i = i - 1
+        b[i as usize] = (48 + (rest % 10)) as u8
+        rest = rest / 10
+    }
+    b[8 as usize] = 10 as u8
+    return commit_write(path, (&b[0 as usize]) as u64, 9)
+}
+
+fn su_prefix(p: u64, lit: u64) -> bool {
+    return ulib.strneq(p, lit, len(lit))
+}
+
+// First line of [a, a+n) that starts with `lit`, or 0.
+fn su_find_line(a: u64, n: u64, lit: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if i == 0 || g8(a + i - 1) == 10 {
+            if su_prefix(a + i, lit) {
+                return a + i
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn su_cat_n(dst: u64, off: u64, src: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        p8(dst + off + i, g8(src + i))
+        i = i + 1
+    }
+    p8(dst + off + n, 0)
+    return off + n
+}
+
+fn su_line_len(p: u64, end: u64) -> u64 {
+    var n: u64 = 0
+    while p + n < end && g8(p + n) != 10 {
+        n = n + 1
+    }
+    return n
+}
+
+// ------------------------------------------------ the feed side
+fn su_fix_source() {
+    // `sysquelle=` wins; else `<quelle ending in /aktuell>` -> `<...>/system`
+    if conf_value((&K_SU_SQ[0 as usize]) as u64, (&QUELLE[0 as usize]) as u64, 200) {
+        // taken as is
+    } else {
+        let q: u64 = (&QUELLE[0 as usize]) as u64
+        let l: u64 = len(q)
+        let t: u64 = len((&W_SU_AKT[0 as usize]) as u64)
+        if l > t && ulib.strneq(q + l - t, (&W_SU_AKT[0 as usize]) as u64, t) {
+            p8(q + l - t, 0)
+            ulib.strcat(q, (&W_SU_SYS[0 as usize]) as u64)
+        } else {
+            slash(q)
+            ulib.strcat(q, (&W_SU_SYS[0 as usize]) as u64)
+        }
+    }
+    if g8((&KANAL[0 as usize]) as u64) == 0 {
+        ulib.strcpy((&KANAL[0 as usize]) as u64, (&W_SU_STABLE[0 as usize]) as u64)
+    }
+}
+
+// Reads the system lines out of the verified VERZEICHNIS.
+fn su_parse() -> u64 {
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    let z: u64 = line_from((&SU_L_SYSTEM[0 as usize]) as u64, 7, 0)
+    if z == 0 {
+        return err((&E_SU_NOSYS[0 as usize]) as u64, 0)
+    }
+    if !field(z, e, 0, (&SU_TMP[0 as usize]) as u64, 20) {
+        return err((&E_SU_BAD[0 as usize]) as u64, (&SU_L_SYSTEM[0 as usize]) as u64)
+    }
+    su_count = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+    field(z, e, 1, (&SU_COMMIT[0 as usize]) as u64, 20)
+    su_minfrom = 0
+    if field(z, e, 2, (&SU_TMP[0 as usize]) as u64, 20) {
+        su_minfrom = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+    }
+    su_klen = 0
+    su_nlen = 0
+    su_root = false
+    var k: u64 = 0
+    var more: bool = true
+    while more {
+        let f: u64 = line_from((&SU_L_FILE[0 as usize]) as u64, 8, k)
+        if f == 0 {
+            more = false
+        } else {
+            if field(f, e, 0, (&FELD[0 as usize]) as u64, 24) {
+                if len((&FELD[0 as usize]) as u64) == 6
+                    && ulib.strneq((&FELD[0 as usize]) as u64, (&SU_R_KERNEL[0 as usize]) as u64, 6) {
+                    field(f, e, 1, (&SU_KHEX[0 as usize]) as u64, 70)
+                    field(f, e, 2, (&SU_TMP[0 as usize]) as u64, 20)
+                    su_klen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+                    field(f, e, 3, (&SU_KFILE[0 as usize]) as u64, 120)
+                } else if len((&FELD[0 as usize]) as u64) == 5
+                    && ulib.strneq((&FELD[0 as usize]) as u64, (&SU_R_NOTES[0 as usize]) as u64, 5) {
+                    field(f, e, 1, (&SU_NHEX[0 as usize]) as u64, 70)
+                    field(f, e, 2, (&SU_TMP[0 as usize]) as u64, 20)
+                    su_nlen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+                    field(f, e, 3, (&SU_NFILE[0 as usize]) as u64, 120)
+                } else {
+                    su_root = true
+                }
+            }
+            k = k + 1
+        }
+    }
+    if su_klen == 0 || g8((&SU_KFILE[0 as usize]) as u64) == 0
+        || len((&SU_KHEX[0 as usize]) as u64) != 64 {
+        return err((&E_SU_NOKERN[0 as usize]) as u64, 0)
+    }
+    return 0
+}
+
+fn su_stand_write(phase: u64) {
+    let o: u64 = (&SYSB3[0 as usize]) as u64
+    p8(o, 0)
+    ulib.strcat(o, (&W_SU_HERE[0 as usize]) as u64)
+    num_at(o, num9_read((&P_SU_VER[0 as usize]) as u64))
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_THERE[0 as usize]) as u64)
+    num_at(o, su_count)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_CM[0 as usize]) as u64)
+    ulib.strcat(o, (&SU_COMMIT[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_PH[0 as usize]) as u64)
+    ulib.strcat(o, phase)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    file_write((&P_SU_STAND[0 as usize]) as u64, o, len(o))
+}
+
+// Fetch + show the changelog (small file, hash-checked like everything else).
+fn su_notes_show() {
+    if su_nlen == 0 || su_nlen > 2000 || g8((&SU_NFILE[0 as usize]) as u64) == 0 {
+        return
+    }
+    tmp_path((&ZIEL[0 as usize]) as u64, (&SU_NFILE[0 as usize]) as u64)
+    if !get_into((&SU_NFILE[0 as usize]) as u64, su_nlen, (&SU_NHEX[0 as usize]) as u64) {
+        return
+    }
+    let n: u64 = file_read((&ZIEL[0 as usize]) as u64, (&SYSB[0 as usize]) as u64, 2000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return
+    }
+    p8((&SYSB[0 as usize]) as u64 + n, 0)
+    file_write((&P_SU_NOTES[0 as usize]) as u64, (&SYSB[0 as usize]) as u64, n)
+    ulib.say((&S_SU_NOTES[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&SYSB[0 as usize]) as u64)
+    remove((&ZIEL[0 as usize]) as u64)
+}
+
+// 0 = a newer system is offered and VZ/su_* hold it; 1 = nothing new; else error.
+fn su_check(loud: bool) -> u64 {
+    sys_mode = true
+    let r: u64 = dir_get(loud)
+    sys_mode = false
+    if r != 0 {
+        return r
+    }
+    let p: u64 = su_parse()
+    if p != 0 {
+        return p
+    }
+    let here: u64 = num9_read((&P_SU_VER[0 as usize]) as u64)
+    if loud {
+        sagn((&S_SU_HERE[0 as usize]) as u64, here)
+        sagn((&S_SU_THERE[0 as usize]) as u64, su_count)
+        sagt((&S_SU_COMMIT[0 as usize]) as u64, (&SU_COMMIT[0 as usize]) as u64)
+    }
+    if su_count <= here {
+        if loud {
+            ulib.say((&S_SU_NONE[0 as usize]) as u64)
+            ulib.nl()
+        }
+        su_stand_write((&W_SU_CUR[0 as usize]) as u64)
+        return 1
+    }
+    if su_minfrom > here {
+        sagn((&E_SU_MIN[0 as usize]) as u64, su_minfrom)
+        return 2
+    }
+    return 0
+}
+
+fn cmd_sys_find() -> u64 {
+    let r: u64 = su_check(true)
+    if r == 0 {
+        ulib.say((&S_SU_NEW[0 as usize]) as u64)
+        ulib.nl()
+        su_notes_show()
+        su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
+    }
+    return r
+}
+
+// ------------------------------------------------ the ESP side
+fn su_esp_open() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, (&D_SU_HDA1[0 as usize]) as u64,
+        (&P_SU_MNT[0 as usize]) as u64, (&T_SU_VFAT[0 as usize]) as u64, 0)
+    return !ulib.bad(m)
+}
+
+fn su_esp_close() {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+}
+
+// limine.conf -> `default_entry: 2` and an entry B. Only the layout the installer
+// writes is accepted (ONE entry, path boot():/osum.mb). The new text is written
+// whole to limine.nw, checked by size, then renamed over limine.conf.
+fn su_conf_arm() -> bool {
+    let a: u64 = (&SYSB[0 as usize]) as u64
+    let b: u64 = (&SYSB2[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_CONF[0 as usize]) as u64, a, 3500)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 || n >= 3500 {
+        err((&E_SU_LAYOUT[0 as usize]) as u64, 0)
+        return false
+    }
+    p8(a + n, 0)
+    let has_b: bool = ulib.find(a, (&W_SU_OSUMB[0 as usize]) as u64) != NOTFOUND
+    var entries: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if (i == 0 || g8(a + i - 1) == 10) && g8(a + i) == 47 {
+            entries = entries + 1
+        }
+        i = i + 1
+    }
+    var ok: bool = ulib.find(a, (&W_SU_PATHA[0 as usize]) as u64) != NOTFOUND
+    if has_b {
+        if entries != 2 {
+            ok = false
+        }
+    } else if entries != 1 {
+        ok = false
+    }
+    if !ok {
+        err((&E_SU_LAYOUT[0 as usize]) as u64, 0)
+        return false
+    }
+    p8(b, 0)
+    var w: u64 = 0
+    let d: u64 = su_find_line(a, n, (&W_SU_DEFE[0 as usize]) as u64)
+    if d == 0 {
+        w = su_cat_n(b, w, (&W_SU_DEF2[0 as usize]) as u64, len((&W_SU_DEF2[0 as usize]) as u64))
+        w = su_cat_n(b, w, a, n)
+    } else {
+        w = su_cat_n(b, w, a, d - a)
+        w = su_cat_n(b, w, (&W_SU_DEF2[0 as usize]) as u64, len((&W_SU_DEF2[0 as usize]) as u64))
+        let ll: u64 = su_line_len(d, a + n)
+        var after: u64 = (d - a) + ll
+        if after < n {
+            after = after + 1
+        }
+        w = su_cat_n(b, w, a + after, n - after)
+    }
+    if !has_b {
+        if g8(b + w - 1) != 10 {
+            w = su_cat_n(b, w, (&W_SU_NL[0 as usize]) as u64, 1)
+        }
+        w = su_cat_n(b, w, (&W_SU_ENTB[0 as usize]) as u64, len((&W_SU_ENTB[0 as usize]) as u64))
+        let c: u64 = su_find_line(a, n, (&W_SU_CMD[0 as usize]) as u64)
+        if c != 0 {
+            let cl: u64 = su_line_len(c, a + n)
+            w = su_cat_n(b, w, c, cl)
+            w = su_cat_n(b, w, (&W_SU_NL[0 as usize]) as u64, 1)
+        }
+    }
+    if w >= 6000 {
+        err((&E_SU_LAYOUT[0 as usize]) as u64, 0)
+        return false
+    }
+    if !file_write((&P_SU_NEW[0 as usize]) as u64, b, w) {
+        err((&E_SU_CONFW[0 as usize]) as u64, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if size((&P_SU_NEW[0 as usize]) as u64) != w {
+        remove((&P_SU_NEW[0 as usize]) as u64)
+        err((&E_SU_CONFW[0 as usize]) as u64, 0)
+        return false
+    }
+    remove((&P_SU_CONF[0 as usize]) as u64)
+    let rr: u64 = ulib.sys(ulib.SYS_RENAME, (&P_SU_NEW[0 as usize]) as u64,
+        (&P_SU_CONF[0 as usize]) as u64, 0)
+    if ulib.bad(rr) {
+        // no rename on this volume: write the config again in place
+        file_write((&P_SU_CONF[0 as usize]) as u64, b, w)
+        remove((&P_SU_NEW[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return size((&P_SU_CONF[0 as usize]) as u64) == w
+}
+
+// ONE byte: `default_entry: 2` -> `default_entry: 1` (same size, one sector).
+fn su_conf_unarm() -> bool {
+    let a: u64 = (&SYSB[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_CONF[0 as usize]) as u64, a, 3500)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 || n >= 3500 {
+        return false
+    }
+    p8(a + n, 0)
+    let d: u64 = su_find_line(a, n, (&W_SU_DEF2B[0 as usize]) as u64)
+    if d == 0 {
+        return false
+    }
+    let off: u64 = (d - a) + 15
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_CONF[0 as usize]) as u64, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_SEEK, fd, off, ulib.SEEK_SET)
+    var one: [u8; 2] = "1\0"
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&one[0 as usize]) as u64, 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return !ulib.bad(w) && w == 1
+}
+
+fn su_copy(src: u64, dst: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let r: u64 = ulib.sys(ulib.SYS_READ, a, (&BLOCK[0 as usize]) as u64, 4096)
+        if ulib.bad(r) {
+            good = false
+            going = false
+        } else if r == 0 {
+            going = false
+        } else {
+            var o: u64 = 0
+            while o < r && good {
+                let w: u64 = ulib.sys(ulib.SYS_WRITE, b,
+                    (&BLOCK[0 as usize]) as u64 + o, r - o)
+                if ulib.bad(w) || w == 0 {
+                    good = false
+                } else {
+                    o = o + w
+                }
+            }
+            if !good {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return good
+}
+
+// ---- trial counter: gen=<G> vor=<G> v=00 ok=0 (36 octets), G = /system/AKTUELL
+fn su_erp_arm() -> bool {
+    var g: [u8; 12] = [0 as u8; 12]
+    let n: u64 = file_read((&P_AKT[0 as usize]) as u64, (&g[0 as usize]) as u64, 11)
+    var cur: u64 = 0
+    if n != 0xFFFFFFFFFFFFFFFF && n >= 8 {
+        var i: u64 = 0
+        while i < 8 {
+            let ch: u64 = g[i as usize] as u64
+            if ch >= 48 && ch <= 57 {
+                cur = cur * 10 + (ch - 48)
+            }
+            i = i + 1
+        }
+    }
+    let o: u64 = (&SYSB3[0 as usize]) as u64
+    p8(o, 0)
+    ulib.strcat(o, (&W_SU_ERPG[0 as usize]) as u64)
+    var d: [u8; 12] = [0 as u8; 12]
+    var rest: u64 = cur
+    var k: u64 = 8
+    while k > 0 {
+        k = k - 1
+        d[k as usize] = (48 + (rest % 10)) as u8
+        rest = rest / 10
+    }
+    d[8 as usize] = 0 as u8
+    ulib.strcat(o, (&d[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_ERPV[0 as usize]) as u64)
+    ulib.strcat(o, (&d[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_ERPT[0 as usize]) as u64)
+    if len(o) != ERP_LEN {
+        return false
+    }
+    return commit_write((&P_ERP[0 as usize]) as u64, o, ERP_LEN)
+}
+
+fn su_pend_write() -> bool {
+    let o: u64 = (&SYSB3[0 as usize]) as u64
+    p8(o, 0)
+    ulib.strcat(o, (&W_SU_PN[0 as usize]) as u64)
+    num_at(o, su_count)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_PC[0 as usize]) as u64)
+    ulib.strcat(o, (&SU_COMMIT[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_PS[0 as usize]) as u64)
+    ulib.strcat(o, (&SU_KHEX[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_NL[0 as usize]) as u64)
+    return file_write((&P_SU_PEND[0 as usize]) as u64, o, len(o))
+}
+
+fn su_pending() -> bool {
+    let n: u64 = file_read((&P_SU_PEND[0 as usize]) as u64, (&SYSB3[0 as usize]) as u64, 8)
+    return n != 0xFFFFFFFFFFFFFFFF && n > 0
+}
+
+// ------------------------------------------------ apply
+fn cmd_sys_apply(restart: bool) -> u64 {
+    if in_erprobung() || su_pending() {
+        return err((&E_SU_TRIAL[0 as usize]) as u64, 0)
+    }
+    let r: u64 = su_check(true)
+    if r != 0 {
+        return r
+    }
+    if su_root {
+        ulib.say((&S_SU_ROOTN[0 as usize]) as u64)
+        ulib.nl()
+    }
+    su_notes_show()
+    if !su_esp_open() {
+        return err((&E_SU_ESP[0 as usize]) as u64, 0)
+    }
+    // the kernel goes straight onto the ESP as slot B (hash + length checked)
+    ulib.strcpy((&ZIEL[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
+    if !get_into((&SU_KFILE[0 as usize]) as u64, su_klen, (&SU_KHEX[0 as usize]) as u64) {
+        remove((&P_SU_KB[0 as usize]) as u64)
+        su_esp_close()
+        return err((&E_SU_KGET[0 as usize]) as u64, 0)
+    }
+    // order: pending note, trial counter, THEN the boot menu (the switch last)
+    if !su_pend_write() {
+        su_esp_close()
+        return err((&E_SU_PENDW[0 as usize]) as u64, 0)
+    }
+    if !su_erp_arm() {
+        remove((&P_SU_PEND[0 as usize]) as u64)
+        su_esp_close()
+        return err((&E_SU_ERP[0 as usize]) as u64, 0)
+    }
+    if !su_conf_arm() {
+        remove((&P_SU_PEND[0 as usize]) as u64)
+        su_esp_close()
+        return 1
+    }
+    su_esp_close()
+    su_stand_write((&W_SU_STAGEDW[0 as usize]) as u64)
+    ulib.say((&S_SU_STAGED[0 as usize]) as u64)
+    ulib.nl()
+    if restart {
+        ulib.say((&S_SU_RESTARTING[0 as usize]) as u64)
+        ulib.nl()
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        ulib.sleep_ms(500)
+        ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    }
+    return 0
+}
+
+// ------------------------------------------------ confirm / promote
+// Does the running kernel carry the commit `c` (7 hex chars, `/proc/version`)?
+fn su_running_is(c: u64) -> bool {
+    let a: u64 = (&SYSB[0 as usize]) as u64
+    let n: u64 = file_read((&P_PROCVER[0 as usize]) as u64, a, 200)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return false
+    }
+    p8(a + n, 0)
+    let i: u64 = ulib.find(a, (&W_SU_BUILD[0 as usize]) as u64)
+    if i == NOTFOUND {
+        return false
+    }
+    return ulib.strneq(a + i + 7, c, 7)
+}
+
+// 0 = nothing pending, 1 = promoted, 2 = dropped (rolled back / failed)
+fn su_finish() -> u64 {
+    let a: u64 = (&SYSB3[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_PEND[0 as usize]) as u64, a, 300)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return 0
+    }
+    p8(a + n, 0)
+    var cnt: u64 = 0
+    var com: [u8; 16] = [0 as u8; 16]
+    var shav: [u8; 72] = [0 as u8; 72]
+    let ic: u64 = ulib.find(a, (&W_SU_PN[0 as usize]) as u64)
+    let ik: u64 = ulib.find(a, (&W_SU_PC[0 as usize]) as u64)
+    let is: u64 = ulib.find(a, (&W_SU_PS[0 as usize]) as u64)
+    if ic == NOTFOUND || ik == NOTFOUND || is == NOTFOUND {
+        remove((&P_SU_PEND[0 as usize]) as u64)
+        return 2
+    }
+    cnt = ulib.to_num(a + ic + 6)
+    var j: u64 = 0
+    while j < 7 {
+        com[j as usize] = g8(a + ik + 7 + j) as u8
+        j = j + 1
+    }
+    j = 0
+    while j < 64 {
+        shav[j as usize] = g8(a + is + 4 + j) as u8
+        j = j + 1
+    }
+    var promote: bool = false
+    var flipped: bool = false
+    let running: bool = su_running_is((&com[0 as usize]) as u64)
+    if running && su_esp_open() {
+        // `default_entry` no longer 2 = ab.esp_flip put the loader back on A: trial lost
+        let c: u64 = (&SYSB[0 as usize]) as u64
+        let m: u64 = file_read((&P_SU_CONF[0 as usize]) as u64, c, 3500)
+        if m != 0xFFFFFFFFFFFFFFFF && m > 0 && m < 3500 {
+            p8(c + m, 0)
+            if su_find_line(c, m, (&W_SU_DEF2B[0 as usize]) as u64) != 0 {
+                promote = true
+            } else {
+                flipped = true
+            }
+        }
+        if promote {
+            promote = false
+            if hash_file((&P_SU_KB[0 as usize]) as u64, (&HASH[0 as usize]) as u64) {
+                sha.hex_out((&HASH[0 as usize]) as u64, 32, (&HEX[0 as usize]) as u64)
+                if ulib.strneq((&HEX[0 as usize]) as u64, (&shav[0 as usize]) as u64, 64)
+                    && su_copy((&P_SU_KB[0 as usize]) as u64, (&P_SU_KA[0 as usize]) as u64) {
+                    if hash_file((&P_SU_KA[0 as usize]) as u64, (&HASH[0 as usize]) as u64) {
+                        sha.hex_out((&HASH[0 as usize]) as u64, 32, (&HEX[0 as usize]) as u64)
+                        if ulib.strneq((&HEX[0 as usize]) as u64, (&shav[0 as usize]) as u64, 64) {
+                            promote = su_conf_unarm()
+                        }
+                    }
+                }
+            }
+        }
+        su_esp_close()
+    }
+    if promote {
+        num9_write((&P_SU_VER[0 as usize]) as u64, cnt)
+        remove((&P_SU_PEND[0 as usize]) as u64)
+        su_count = cnt
+        su_stand_write((&W_SU_CUR[0 as usize]) as u64)
+        ulib.say((&S_SU_PROMO[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // The trial is lost when the running kernel is not the new one (the loader
+    // went back to A and A booted) or ab.esp_flip already reset default_entry.
+    // A promotion that only failed halfway (power cut, full ESP) keeps the pending
+    // note: slot B still runs and the next confirm retries.
+    if !running || flipped {
+        remove((&P_SU_PEND[0 as usize]) as u64)
+        su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
+        ulib.say((&S_SU_FAILED[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    return 0
+}
+
+fn cmd_sys_status() -> u64 {
+    sagn((&S_SU_HERE[0 as usize]) as u64, num9_read((&P_SU_VER[0 as usize]) as u64))
+    let n: u64 = file_read((&P_SU_OSVER[0 as usize]) as u64, (&SYSB[0 as usize]) as u64, 200)
+    if n != 0xFFFFFFFFFFFFFFFF && n > 0 {
+        p8((&SYSB[0 as usize]) as u64 + n, 0)
+        ulib.say((&SYSB[0 as usize]) as u64)
+    }
+    let m: u64 = file_read((&P_SU_PEND[0 as usize]) as u64, (&SYSB3[0 as usize]) as u64, 300)
+    if m != 0xFFFFFFFFFFFFFFFF && m > 0 {
+        p8((&SYSB3[0 as usize]) as u64 + m, 0)
+        ulib.say((&S_SU_PEND[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&SYSB3[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_SU_NOPEND[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
+
+fn cmd_sys(args: u64, argc: u64) -> u64 {
+    if argc < 3 {
+        return cmd_sys_status()
+    }
+    let sub: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(sub, (&C_SUCH[0 as usize]) as u64) {
+        return cmd_sys_find()
+    }
+    if ulib.streq(sub, (&C_EIN[0 as usize]) as u64) {
+        var rs: bool = false
+        if argc >= 4 && ulib.streq(ulib.arg_at(args, 3), (&W_SU_RESTART[0 as usize]) as u64) {
+            rs = true
+        }
+        return cmd_sys_apply(rs)
+    }
+    if ulib.streq(sub, (&C_BEST[0 as usize]) as u64) {
+        su_finish()
+        return 0
+    }
+    return cmd_sys_status()
+}
+
 fn u_start(args: u64) -> u64 {
     let argc: u64 = ulib.arg_count(args)
     if argc < 2 {
@@ -2468,6 +3233,9 @@ fn u_start(args: u64) -> u64 {
         return 0
     }
     let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&C_SU_SYSTEM[0 as usize]) as u64) {
+        return cmd_sys(args, argc)
+    }
     if ulib.streq(cmd, (&C_HOL[0 as usize]) as u64) && argc >= 4 {
         return cmd_holen(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
     }

@@ -922,6 +922,13 @@ printf '%08d\n' "${OTA_KGEN:-0}" > "$OUT/SCHLUESSELGEN"
 # der Fassung im signierten VERZEICHNIS und lehnt alles ab, was nicht
 # groesser ist (Rueckschrittsschutz).
 printf '%08d\n' "${OTA_FASSUNG:-0}" > "$OUT/FASSUNG"
+# SELFUPDATE (SU-2): the OS-readable system version. /system/SYSVERSION = build number
+# (commit count of the tree, 8 digits + newline, only ever grows: rollback guard of
+# `ota system`); /etc/osversion = the same as text with commit + UTC build time.
+SYS_BUILD=${SYS_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 0)}
+SYS_COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+printf '%08d\n' "$SYS_BUILD" > "$OUT/SYSVERSION"
+printf 'OrientOS build %s (%s) %s\n' "$SYS_BUILD" "$SYS_COMMIT" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$OUT/osversion"
 
 # ------------------------------------------- RUNDE STICK: DIE BRUECKE
 #
@@ -1376,6 +1383,8 @@ if [ -n "${JARVIS_DEVICE_KEY:-}" ]; then
 fi
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
 ARGS+=("/system/FASSUNG=$OUT/FASSUNG")
+ARGS+=("/system/SYSVERSION=$OUT/SYSVERSION")
+ARGS+=("/etc/osversion=$OUT/osversion")
 # /system/BUILD: which tree this image came from (commit, "+" when the
 # tree had uncommitted changes, build time UTC). Read remotely with
 # `cat /system/BUILD` -- the only way to tell two builds apart from a
