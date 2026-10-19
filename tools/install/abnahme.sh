@@ -474,6 +474,9 @@ grep -qa 'from module' "$OUT/start.txt" \
 
 # the installer's own limine.conf, kept for step 7c (the next steps overwrite it with scripts)
 mcopy -i "$ZIEL@@1048576" ::/limine.conf "$OUT/inst-limine.conf" 2>/dev/null
+# r1247: the installer must write `default_entry: 1` (selfupdate: ab.esp_flip / osupdate need the line to arm slot B)
+grep -aq '^default_entry: 1' "$OUT/inst-limine.conf" && ok "installed limine.conf carries default_entry: 1 (update-ready)" \
+    || bad "installed limine.conf has no default_entry line"
 
 # ==================================================================
 titel "6. eine Datei anlegen -- auf der Platte"
