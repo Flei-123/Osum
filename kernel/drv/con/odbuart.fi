@@ -25,10 +25,13 @@ const R_LSR: u16 = 5
 const R_SCR: u16 = 7
 const SPIN: u64 = 8000      // hot: the previous read returned octets
 const SPIN_COLD: u64 = 16   // cold: the previous read came back empty
-const TX_LIMIT: u64 = 100000 // per octet; a stuck THR (host not reading) must not hold the agent for seconds: every port read is a VM exit in VirtualBox
+const SPIN_IDLE: u64 = 2    // cold and EMPTY_IDLE empty reads in a row: the line is quiet, one or two polls are enough (the FIFO keeps what arrived meanwhile)
+const EMPTY_IDLE: u64 = 64
+const TX_LIMIT: u64 = 20000  // per octet; a stuck THR (host not reading) must not hold the agent for seconds: every port read is a VM exit in VirtualBox
 
 static mut up: u64 = 0 // 0 = untested, 1 = ready, 2 = absent
 static mut hot: bool = false
+static mut empties: u64 = 0 // empty reads in a row
 static mut ovr: u64 = 0 // LSR bit 1 (receiver overrun) seen by read_into: octets the host sent faster than the agent drained
 
 // How many overrun events the polled reader has seen since boot (the LSR read clears the bit, so one event may cover several lost octets).
@@ -87,6 +90,8 @@ fn read_into(dst: u64, len: u64) -> u64 {
     var limit: u64 = SPIN_COLD
     if hot {
         limit = SPIN
+    } else if empties > EMPTY_IDLE {
+        limit = SPIN_IDLE
     }
     while n < len && idle < limit {
         let lsr: u8 = serial.in8(BASE + R_LSR)
@@ -100,6 +105,7 @@ fn read_into(dst: u64, len: u64) -> u64 {
         } else {
             if n > 0 {
                 hot = true
+                empties = 0
                 return n
             }
             idle = idle + 1
@@ -107,6 +113,11 @@ fn read_into(dst: u64, len: u64) -> u64 {
         }
     }
     hot = n > 0
+    if n > 0 {
+        empties = 0
+    } else {
+        empties = empties + 1
+    }
     return n
 }
 
