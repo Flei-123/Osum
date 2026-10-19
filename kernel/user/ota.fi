@@ -131,6 +131,7 @@ profile kernel
 
 import ulib
 import sha
+import inflate
 import crypto.ed25519
 
 export { u_start }
@@ -329,8 +330,8 @@ static mut S_NICHT: [u8; 10] = "(not set)\0"
 //                `update`, `finish`), also muss ein Paket NICHT ganz in
 //                den Speicher -- der Unterschied zu `opk`, das es fuer
 //                die Pruefsumme ueber Metadaten UND Daten braucht.
-const VZ_MAX: u64 = 8192
-static mut VZ: [u8; 8192] = [0 as u8; 8192]
+const VZ_MAX: u64 = 32768
+static mut VZ: [u8; 32768] = [0 as u8; 32768]
 static mut CONF: [u8; 1024] = [0 as u8; 1024]
 static mut BLOCK: [u8; 4096] = [0 as u8; 4096]
 static mut SIG: [u8; 64] = [0 as u8; 64]
@@ -2606,6 +2607,34 @@ static mut su_minfrom: u64 = 0
 static mut su_klen: u64 = 0
 static mut su_nlen: u64 = 0
 static mut su_root: bool = false
+static mut SU_L_OFILE: [u8; 14] = "sysfile\tfile\t\0"
+static mut SU_L_GZ: [u8; 7] = "sysgz\t\0"
+static mut SU_R_FILE: [u8; 5] = "file\0"
+static mut SU_R_KERNEL2: [u8; 7] = "kernel\0"
+static mut P_BIN: [u8; 5] = "/bin\0"
+static mut P_SU_NEWD: [u8; 12] = "/system/new\0"
+static mut P_SU_OLDD: [u8; 12] = "/system/old\0"
+static mut P_SU_OVL: [u8; 15] = "/system/SYSOVL\0"
+static mut E_SU_OVLGET: [u8; 45] = "ota: overlay file download or check failed: \0"
+static mut E_SU_OVLBAD: [u8; 42] = "ota: bad overlay entry in the signed list\0"
+static mut E_SU_GZ: [u8; 26] = "ota: gunzip failed, code \0"
+static mut E_SU_UNPACK: [u8; 46] = "ota: unpacked file has the wrong size or hash\0"
+static mut E_SU_OVLSW: [u8; 53] = "ota: overlay install failed, previous files restored\0"
+static mut S_SU_OVLN: [u8; 33] = "system: overlay files verified: \0"
+static mut S_SU_OVLREST: [u8; 56] = "system: overlay restored (previous /bin files are back)\0"
+static mut S_SU_OVLDROP: [u8; 26] = "system: overlay committed\0"
+static mut OVLJ: [u8; 6144] = [0 as u8; 6144]
+static mut SU_PA: [u8; 160] = [0 as u8; 160]
+static mut SU_PB: [u8; 160] = [0 as u8; 160]
+static mut SU_PC: [u8; 160] = [0 as u8; 160]
+static mut SU_OHEX: [u8; 72] = [0 as u8; 72]
+static mut SU_OSRV: [u8; 128] = [0 as u8; 128]
+static mut SU_ONAME: [u8; 64] = [0 as u8; 64]
+static mut SU_GHEX: [u8; 72] = [0 as u8; 72]
+static mut SU_GFILE: [u8; 128] = [0 as u8; 128]
+static mut su_glen: u64 = 0
+static mut su_olen: u64 = 0
+static mut su_nfiles: u64 = 0
 static mut su_phase: u64 = 0
 const NOTFOUND: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -2721,6 +2750,7 @@ fn su_parse() -> u64 {
     su_klen = 0
     su_nlen = 0
     su_root = false
+    su_nfiles = 0
     var k: u64 = 0
     var more: bool = true
     while more {
@@ -2741,6 +2771,9 @@ fn su_parse() -> u64 {
                     field(f, e, 2, (&SU_TMP[0 as usize]) as u64, 20)
                     su_nlen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
                     field(f, e, 3, (&SU_NFILE[0 as usize]) as u64, 120)
+                } else if len((&FELD[0 as usize]) as u64) == 4
+                    && ulib.strneq((&FELD[0 as usize]) as u64, (&SU_R_FILE[0 as usize]) as u64, 4) {
+                    su_nfiles = su_nfiles + 1
                 } else {
                     su_root = true
                 }
@@ -3117,6 +3150,321 @@ fn su_pending() -> bool {
     return n != 0xFFFFFFFFFFFFFFFF && n > 0
 }
 
+// ------------------------------------------------ /bin overlay (selfupdate stage 2, r1245)
+//
+// The signed list carries, besides the kernel, one line per system file:
+//     sysfile <TAB> file <TAB> sha256 <TAB> octets <TAB> <server file> <TAB> <name in /bin>
+// and optionally a gzip alternate (r1246):
+//     sysgz <TAB> <name | kernel> <TAB> sha256(gz) <TAB> octets(gz) <TAB> <server file>.gz
+// Flow: every file is fetched (hash + length checked, gz unpacked by the streaming gunzip) into
+// /system/new/<name> BEFORE anything on the system changes. Then the journal /system/SYSOVL lists
+// the names ("1name" = a file with that name existed in /bin, "0name" = new file), each old file
+// moves to /system/old/<name> and the new one is renamed into /bin (rename never overwrites in
+// this VFS, so it is old -> /system/old first, then new -> /bin). The journal is the truth after
+// a power cut: restore puts every old file back, drop deletes the backups. Restore runs when the
+// trial is lost (su_finish), drop when the kernel is promoted.
+fn su_exists(pth: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, pth, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn su_join(out: u64, dir: u64, name: u64) {
+    ulib.strcpy(out, dir)
+    slash(out)
+    ulib.strcat(out, name)
+}
+
+// Letters, digits, `.`, `-`, `_`; no leading dot; at most 60. The name ends up in a path.
+fn su_name_ok(pn: u64) -> bool {
+    let n: u64 = len(pn)
+    if n == 0 || n > 60 || g8(pn) == 46 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = g8(pn + i)
+        let good: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            || c == 46 || c == 45 || c == 95
+        if !good {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// The sysgz line for `key` (a /bin name or `kernel`) -> SU_GHEX / su_glen / SU_GFILE.
+fn su_gz_find(key: u64) -> bool {
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    var k: u64 = 0
+    var more: bool = true
+    while more {
+        let z: u64 = line_from((&SU_L_GZ[0 as usize]) as u64, 6, k)
+        if z == 0 {
+            more = false
+        } else {
+            if field(z, e, 0, (&FELD2[0 as usize]) as u64, 64)
+                && ulib.streq((&FELD2[0 as usize]) as u64, key) {
+                field(z, e, 1, (&SU_GHEX[0 as usize]) as u64, 70)
+                field(z, e, 2, (&SU_TMP[0 as usize]) as u64, 20)
+                su_glen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+                field(z, e, 3, (&SU_GFILE[0 as usize]) as u64, 120)
+                return len((&SU_GHEX[0 as usize]) as u64) == 64 && su_glen > 0
+                    && g8((&SU_GFILE[0 as usize]) as u64) != 0
+            }
+            k = k + 1
+        }
+    }
+    return false
+}
+
+// gunzip the file `src` into `dst` (streaming, constant memory). false = refused (CRC, format, I/O).
+fn su_gunzip(src: u64, dst: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    let r: u64 = inflate.gunzip_fd(a, b)
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if r != inflate.E_OK {
+        sagn((&E_SU_GZ[0 as usize]) as u64, r)
+        ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+        return false
+    }
+    return true
+}
+
+// One verified item (kernel or overlay file) into `dst`: the gz alternate when the list has one,
+// else the raw file. Length + SHA-256 of the FINAL file are checked in both cases.
+fn su_fetch_item(key: u64, srv: u64, olen: u64, ohex: u64, dst: u64) -> bool {
+    if su_gz_find(key) {
+        remove(dst)
+        tmp_path((&ZIEL[0 as usize]) as u64, (&SU_GFILE[0 as usize]) as u64)
+        var good: bool = get_into((&SU_GFILE[0 as usize]) as u64, su_glen, (&SU_GHEX[0 as usize]) as u64)
+        if good {
+            good = su_gunzip((&ZIEL[0 as usize]) as u64, dst)
+        }
+        remove((&ZIEL[0 as usize]) as u64)
+        if !good {
+            remove(dst)
+            return false
+        }
+        var fine: bool = size(dst) == olen
+        if fine {
+            fine = hash_file(dst, (&HASH[0 as usize]) as u64)
+        }
+        if fine {
+            sha.hex_out((&HASH[0 as usize]) as u64, 32, (&HEX[0 as usize]) as u64)
+            fine = ulib.strneq((&HEX[0 as usize]) as u64, ohex, 64)
+        }
+        if !fine {
+            err((&E_SU_UNPACK[0 as usize]) as u64, 0)
+            remove(dst)
+            return false
+        }
+        return true
+    }
+    ulib.strcpy((&ZIEL[0 as usize]) as u64, dst)
+    return get_into(srv, olen, ohex)
+}
+
+// Fills SU_OHEX / su_olen / SU_OSRV / SU_ONAME from the k-th `sysfile file` line; false = no more.
+fn su_ovl_line(k: u64) -> u64 {
+    let f: u64 = line_from((&SU_L_OFILE[0 as usize]) as u64, 13, k)
+    if f == 0 {
+        return 0
+    }
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    p8((&SU_OHEX[0 as usize]) as u64, 0)
+    p8((&SU_OSRV[0 as usize]) as u64, 0)
+    p8((&SU_ONAME[0 as usize]) as u64, 0)
+    field(f, e, 0, (&SU_OHEX[0 as usize]) as u64, 70)
+    field(f, e, 1, (&SU_TMP[0 as usize]) as u64, 20)
+    su_olen = ulib.to_num((&SU_TMP[0 as usize]) as u64)
+    field(f, e, 2, (&SU_OSRV[0 as usize]) as u64, 120)
+    field(f, e, 3, (&SU_ONAME[0 as usize]) as u64, 60)
+    return 1
+}
+
+fn su_ovl_clean_new() {
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
+            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            remove((&SU_PA[0 as usize]) as u64)
+        }
+        k = k + 1
+    }
+}
+
+// Fetch + verify every overlay file into /system/new. Nothing else on the system is touched.
+fn su_ovl_stage() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_NEWD[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_OLDD[0 as usize]) as u64, 0, 0)
+    var k: u64 = 0
+    var good: bool = true
+    while good && su_ovl_line(k) != 0 {
+        if !su_name_ok((&SU_ONAME[0 as usize]) as u64)
+            || len((&SU_OHEX[0 as usize]) as u64) != 64 || su_olen == 0
+            || g8((&SU_OSRV[0 as usize]) as u64) == 0 {
+            err((&E_SU_OVLBAD[0 as usize]) as u64, 0)
+            good = false
+        } else {
+            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            if !su_fetch_item((&SU_ONAME[0 as usize]) as u64, (&SU_OSRV[0 as usize]) as u64,
+                su_olen, (&SU_OHEX[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64) {
+                err((&E_SU_OVLGET[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+                good = false
+            }
+        }
+        k = k + 1
+    }
+    if !good {
+        su_ovl_clean_new()
+    }
+    return good
+}
+
+// Journal: "<1|0><name>\n" per file (1 = a /bin file with that name exists now).
+fn su_ovl_journal() -> bool {
+    let j: u64 = (&OVLJ[0 as usize]) as u64
+    p8(j, 0)
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        if len(j) + len((&SU_ONAME[0 as usize]) as u64) + 3 > 6000 {
+            return false
+        }
+        su_join((&SU_PC[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64,
+            (&SU_ONAME[0 as usize]) as u64)
+        var d: [u8; 2] = "0\0"
+        if su_exists((&SU_PC[0 as usize]) as u64) {
+            d[0 as usize] = 49 as u8
+        }
+        ulib.strcat(j, (&d[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_ONAME[0 as usize]) as u64)
+        ulib.strcat(j, (&W_SU_NL[0 as usize]) as u64)
+        k = k + 1
+    }
+    return file_write((&P_SU_OVL[0 as usize]) as u64, j, len(j))
+}
+
+// Walk the journal. op 1 = swap in, 2 = restore, 3 = drop the backups. false = a step failed.
+fn su_ovl_each(op: u64) -> bool {
+    let j: u64 = (&OVLJ[0 as usize]) as u64
+    let n: u64 = file_read((&P_SU_OVL[0 as usize]) as u64, j, 6000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return true
+    }
+    p8(j + n, 0)
+    var i: u64 = 0
+    var good: bool = true
+    while i < n && good {
+        let had: u64 = g8(j + i)
+        var m: u64 = 0
+        i = i + 1
+        while i < n && g8(j + i) != 10 && m < 60 {
+            p8((&SU_ONAME[0 as usize]) as u64 + m, g8(j + i))
+            m = m + 1
+            i = i + 1
+        }
+        p8((&SU_ONAME[0 as usize]) as u64 + m, 0)
+        while i < n && g8(j + i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+        if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
+            su_join((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            su_join((&SU_PB[0 as usize]) as u64, (&P_SU_OLDD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            su_join((&SU_PC[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            let pa: u64 = (&SU_PA[0 as usize]) as u64
+            let pb: u64 = (&SU_PB[0 as usize]) as u64
+            let pc: u64 = (&SU_PC[0 as usize]) as u64
+            if op == 1 {
+                if had == 49 {
+                    remove(pb)
+                    if ulib.bad(ulib.sys(ulib.SYS_RENAME, pc, pb, 0)) {
+                        good = false
+                    }
+                }
+                if good && ulib.bad(ulib.sys(ulib.SYS_RENAME, pa, pc, 0)) {
+                    good = false
+                }
+            } else if op == 2 {
+                if had == 49 {
+                    if su_exists(pb) {
+                        remove(pc)
+                        ulib.sys(ulib.SYS_RENAME, pb, pc, 0)
+                    }
+                } else if !su_exists(pa) {
+                    remove(pc)
+                }
+                remove(pa)
+            } else {
+                remove(pb)
+                remove(pa)
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return good
+}
+
+fn su_ovl_swap() -> bool {
+    if !su_ovl_journal() {
+        return false
+    }
+    return su_ovl_each(1)
+}
+
+// Put the previous /bin files back (trial lost, install failed, power cut) and forget the journal.
+// Returns true when there was something to restore.
+fn su_ovl_restore() -> bool {
+    if !su_exists((&P_SU_OVL[0 as usize]) as u64) {
+        return false
+    }
+    su_ovl_each(2)
+    remove((&P_SU_OVL[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_SU_OVLREST[0 as usize]) as u64)
+    ulib.nl()
+    return true
+}
+
+// The new kernel is promoted: the overlay is final, the backups go.
+fn su_ovl_drop() {
+    if !su_exists((&P_SU_OVL[0 as usize]) as u64) {
+        return
+    }
+    su_ovl_each(3)
+    remove((&P_SU_OVL[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_SU_OVLDROP[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// The kernel into slot B: gz alternate when listed. Hash + length of the final file are checked.
+fn su_kernel_get() -> bool {
+    return su_fetch_item((&SU_R_KERNEL2[0 as usize]) as u64, (&SU_KFILE[0 as usize]) as u64,
+        su_klen, (&SU_KHEX[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
+}
+
 // ------------------------------------------------ apply
 fn cmd_sys_apply(restart: bool) -> u64 {
     if in_erprobung() || su_pending() {
@@ -3134,24 +3482,50 @@ fn cmd_sys_apply(restart: bool) -> u64 {
     if !su_esp_open() {
         return err((&E_SU_ESP[0 as usize]) as u64, 0)
     }
+    // /bin overlay first (small, staged under /system/new; nothing on the system changes yet)
+    if su_nfiles > 0 {
+        if !su_ovl_stage() {
+            su_esp_close()
+            return 1
+        }
+        sagn((&S_SU_OVLN[0 as usize]) as u64, su_nfiles)
+    }
     // the kernel goes straight onto the ESP as slot B (hash + length checked)
-    ulib.strcpy((&ZIEL[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
-    if !get_into((&SU_KFILE[0 as usize]) as u64, su_klen, (&SU_KHEX[0 as usize]) as u64) {
+    if !su_kernel_get() {
         remove((&P_SU_KB[0 as usize]) as u64)
+        if su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
         su_esp_close()
         return err((&E_SU_KGET[0 as usize]) as u64, 0)
     }
     // order: pending note, trial counter, THEN the boot menu (the switch last)
     if !su_pend_write() {
+        if su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
         su_esp_close()
         return err((&E_SU_PENDW[0 as usize]) as u64, 0)
     }
     if !su_erp_arm() {
         remove((&P_SU_PEND[0 as usize]) as u64)
+        if su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
         su_esp_close()
         return err((&E_SU_ERP[0 as usize]) as u64, 0)
     }
+    // swap the overlay in right before the boot menu switch (restored when anything fails)
+    if su_nfiles > 0 {
+        if !su_ovl_swap() {
+            su_ovl_restore()
+            remove((&P_SU_PEND[0 as usize]) as u64)
+            su_esp_close()
+            return err((&E_SU_OVLSW[0 as usize]) as u64, 0)
+        }
+    }
     if !su_conf_arm() {
+        su_ovl_restore()
         remove((&P_SU_PEND[0 as usize]) as u64)
         su_esp_close()
         return 1
@@ -3191,6 +3565,8 @@ fn su_finish() -> u64 {
     let a: u64 = (&SYSB3[0 as usize]) as u64
     let n: u64 = file_read((&P_SU_PEND[0 as usize]) as u64, a, 300)
     if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        // a journal without a pending note is a half-done apply: put the old files back
+        su_ovl_restore()
         return 0
     }
     p8(a + n, 0)
@@ -3202,6 +3578,7 @@ fn su_finish() -> u64 {
     let is: u64 = ulib.find(a, (&W_SU_PS[0 as usize]) as u64)
     if ic == NOTFOUND || ik == NOTFOUND || is == NOTFOUND {
         remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_restore()
         return 2
     }
     cnt = ulib.to_num(a + ic + 6)
@@ -3250,6 +3627,7 @@ fn su_finish() -> u64 {
     if promote {
         num9_write((&P_SU_VER[0 as usize]) as u64, cnt)
         remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_drop()
         su_count = cnt
         su_stand_write((&W_SU_CUR[0 as usize]) as u64)
         ulib.say((&S_SU_PROMO[0 as usize]) as u64)
@@ -3262,6 +3640,7 @@ fn su_finish() -> u64 {
     // note: slot B still runs and the next confirm retries.
     if !running || flipped {
         remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_restore()
         su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
         ulib.say((&S_SU_FAILED[0 as usize]) as u64)
         ulib.nl()

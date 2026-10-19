@@ -1,0 +1,567 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/inflate.fi -- STREAMING gunzip for ring 3 (selfupdate stage 2, r1246).
+//
+// flate.fi inflates a whole buffer into a whole buffer; a 9 MB kernel or a big /bin program does
+// not fit a 1 MiB program image. This module reads the compressed stream from a file descriptor
+// in 4 KiB pieces and writes the result to another descriptor through a 32 KiB ring window
+// (the deflate maximum distance), so memory is constant (~40 KiB) whatever the file size.
+//
+//     gunzip_fd(in_fd, out_fd) -> E_OK | E_*      RFC 1952 member: header, deflate, CRC-32 + ISIZE
+//     out_total()                                  octets written by the last call
+//
+// The Huffman code is the puff-style canonical decoder of flate.fi (counts per length, bit by
+// bit); it is repeated here instead of imported because flate.fi keeps its input and output as
+// flat module buffers. Every error is a plain code; a CRC or length mismatch is E_CRC, so a
+// truncated or flipped download is never accepted silently.
+
+profile kernel
+
+import ulib
+
+export { gunzip_fd, out_total, E_OK, E_INPUT, E_FORMAT, E_CRC, E_IO }
+
+const E_OK: u64 = 0
+const E_INPUT: u64 = 1 // the input ended before the stream was complete
+const E_ROOM: u64 = 2
+const E_FORMAT: u64 = 3 // not valid gzip / deflate
+const E_CRC: u64 = 4 // trailer CRC-32 or length does not match
+const E_IO: u64 = 5 // reading or writing the descriptor failed
+
+const M32: u64 = 0xFFFFFFFF
+const WIN: u64 = 32768
+const WMASK: u64 = 32767
+const IBUF: u64 = 4096
+
+static mut win: [u8; 32768] = [0 as u8; 32768]
+static mut ibuf: [u8; 4096] = [0 as u8; 4096]
+static mut crctab: [u64; 256] = [0 as u64; 256]
+static mut crcready: u64 = 0
+
+static mut in_fd: u64 = 0
+static mut out_fd: u64 = 0
+static mut ipos: u64 = 0
+static mut ilen: u64 = 0
+static mut bp: u64 = 0
+static mut bn: u64 = 0
+static mut dpos: u64 = 0 // total octets produced
+static mut fpos: u64 = 0 // total octets already flushed (always a multiple of WIN, except at the end)
+static mut crc: u64 = 0
+static mut oops: u64 = 0
+
+fn out_total() -> u64 {
+    return dpos
+}
+
+fn crc_init() {
+    if crcready == 1 {
+        return
+    }
+    crcready = 1
+    var n: u64 = 0
+    while n < 256 {
+        var c: u64 = n
+        var k: u64 = 0
+        while k < 8 {
+            let mask: u64 = 0 -% (c & 1)
+            c = (c >> 1) ^ (0xEDB88320 & mask)
+            k = k + 1
+        }
+        crctab[(n) as usize] = c
+        n = n + 1
+    }
+}
+
+// Next input octet; at the end of the input (or a read error) sets oops and returns 0.
+fn getbyte() -> u64 {
+    if ipos >= ilen {
+        let r: u64 = ulib.sys(ulib.SYS_READ, in_fd, (&ibuf[0 as usize]) as u64, IBUF)
+        if ulib.bad(r) {
+            oops = E_IO
+            return 0
+        }
+        if r == 0 {
+            if oops == E_OK {
+                oops = E_INPUT
+            }
+            return 0
+        }
+        ipos = 0
+        ilen = r
+    }
+    let v: u64 = ibuf[(ipos) as usize] as u64
+    ipos = ipos + 1
+    return v
+}
+
+fn bits(need: u64) -> u64 {
+    while bn < need {
+        let b: u64 = getbyte()
+        if oops != E_OK {
+            return 0
+        }
+        bp = bp | (b << bn)
+        bn = bn + 8
+    }
+    let v: u64 = bp & ((1 << need) - 1)
+    bp = bp >> need
+    bn = bn - need
+    return v
+}
+
+// Write [fpos, dpos) of the ring (never wraps: flushes happen at window boundaries and at the end).
+fn flush() {
+    if dpos == fpos {
+        return
+    }
+    let start: u64 = fpos & WMASK
+    let n: u64 = dpos - fpos
+    var c: u64 = crc
+    var i: u64 = 0
+    while i < n {
+        c = crctab[((c ^ (win[(start + i) as usize] as u64)) & 255) as usize] ^ (c >> 8)
+        i = i + 1
+    }
+    crc = c
+    var o: u64 = 0
+    while o < n {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, out_fd, (&win[0 as usize]) as u64 + start + o, n - o)
+        if ulib.bad(w) || w == 0 {
+            oops = E_IO
+            return
+        }
+        o = o + w
+    }
+    fpos = dpos
+}
+
+fn emit(c: u64) {
+    win[(dpos & WMASK) as usize] = c as u8
+    dpos = dpos + 1
+    if (dpos & WMASK) == 0 {
+        flush()
+    }
+}
+
+static mut lbase: [u64; 30] = [0 as u64; 30]
+static mut lext: [u64; 30] = [0 as u64; 30]
+static mut dbase: [u64; 30] = [0 as u64; 30]
+static mut dext: [u64; 30] = [0 as u64; 30]
+static mut clorder: [u64; 19] = [0 as u64; 19]
+static mut ready: u64 = 0
+
+
+fn setup() {
+    if ready == 1 {
+        return
+    }
+    ready = 1
+    var b: u64 = 3
+    var i: u64 = 0
+    while i < 29 {
+        var e: u64 = 0
+        if i >= 8 {
+            e = (i - 4) / 4
+        }
+        lext[(i) as usize] = e
+        lbase[(i) as usize] = b
+        b = b + (1 << e)
+        i = i + 1
+    }
+    lbase[(28) as usize] = 258
+    lext[(28) as usize] = 0
+    b = 1
+    i = 0
+    while i < 30 {
+        var e: u64 = 0
+        if i >= 4 {
+            e = (i - 2) / 2
+        }
+        dext[(i) as usize] = e
+        dbase[(i) as usize] = b
+        b = b + (1 << e)
+        i = i + 1
+    }
+    clorder[0 as usize] = 16
+    clorder[1 as usize] = 17
+    clorder[2 as usize] = 18
+    clorder[3 as usize] = 0
+    clorder[4 as usize] = 8
+    clorder[5 as usize] = 7
+    clorder[6 as usize] = 9
+    clorder[7 as usize] = 6
+    clorder[8 as usize] = 10
+    clorder[9 as usize] = 5
+    clorder[10 as usize] = 11
+    clorder[11 as usize] = 4
+    clorder[12 as usize] = 12
+    clorder[13 as usize] = 3
+    clorder[14 as usize] = 13
+    clorder[15 as usize] = 2
+    clorder[16 as usize] = 14
+    clorder[17 as usize] = 1
+    clorder[18 as usize] = 15
+}
+
+static mut lcnt: [u64; 16] = [0 as u64; 16]
+static mut lsym: [u64; 288] = [0 as u64; 288]
+static mut dcnt: [u64; 16] = [0 as u64; 16]
+static mut dsym: [u64; 32] = [0 as u64; 32]
+static mut lengths: [u64; 320] = [0 as u64; 320]
+
+fn construct(cnt: u64, sym: u64, from: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < 16 {
+        __mmio_write64((cnt + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let l: u64 = lengths[(from + i) as usize]
+        let at: u64 = cnt + l * 8
+        __mmio_write64((at) as *mut u64, *((at) as *mut u64) + 1)
+        i = i + 1
+    }
+    if *((cnt) as *mut u64) == n {
+        return true
+    }
+    var left: u64 = 1
+    var l: u64 = 1
+    while l < 16 {
+        left = left * 2
+        let c: u64 = *((cnt + l * 8) as *mut u64)
+        if c > left {
+            return false
+        }
+        left = left - c
+        l = l + 1
+    }
+    var offs: [u64; 16] = [0 as u64; 16]
+    offs[1 as usize] = 0
+    l = 1
+    while l < 15 {
+        offs[(l + 1) as usize] = offs[(l) as usize]
+            + *((cnt + l * 8) as *mut u64)
+        l = l + 1
+    }
+    i = 0
+    while i < n {
+        let ln: u64 = lengths[(from + i) as usize]
+        if ln != 0 {
+            __mmio_write64((sym + offs[(ln) as usize] * 8) as *mut u64, i)
+            offs[(ln) as usize] = offs[(ln) as usize] + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn decode(cnt: u64, sym: u64) -> u64 {
+    var code: u64 = 0
+    var first: u64 = 0
+    var index: u64 = 0
+    var len: u64 = 1
+    while len < 16 {
+        code = code | bits(1)
+        if oops != E_OK {
+            return ulib.EOF
+        }
+        let count: u64 = *((cnt + len * 8) as *mut u64)
+        if code - first < count {
+            return *((sym + (index + (code - first)) * 8) as *mut u64)
+        }
+        index = index + count
+        first = (first + count) << 1
+        code = code << 1
+        len = len + 1
+    }
+    oops = E_FORMAT
+    return ulib.EOF
+}
+
+fn fixed_trees() {
+    var i: u64 = 0
+    while i < 144 {
+        lengths[(i) as usize] = 8
+        i = i + 1
+    }
+    while i < 256 {
+        lengths[(i) as usize] = 9
+        i = i + 1
+    }
+    while i < 280 {
+        lengths[(i) as usize] = 7
+        i = i + 1
+    }
+    while i < 288 {
+        lengths[(i) as usize] = 8
+        i = i + 1
+    }
+    construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64, 0, 288)
+    i = 0
+    while i < 30 {
+        lengths[(i) as usize] = 5
+        i = i + 1
+    }
+    construct((&dcnt[0 as usize]) as u64, (&dsym[0 as usize]) as u64, 0, 30)
+}
+
+fn dynamic_trees() -> bool {
+    let hlit: u64 = bits(5) + 257
+    let hdist: u64 = bits(5) + 1
+    let hclen: u64 = bits(4) + 4
+    if oops != E_OK {
+        return false
+    }
+    if hlit > 286 || hdist > 30 {
+        oops = E_FORMAT
+        return false
+    }
+    var i: u64 = 0
+    while i < 19 {
+        lengths[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < hclen {
+        lengths[(clorder[(i) as usize]) as usize] = bits(3)
+        i = i + 1
+    }
+    if !construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64,
+        0, 19) {
+        oops = E_FORMAT
+        return false
+    }
+    var have: u64 = 0
+    var out: [u64; 320] = [0 as u64; 320]
+    while have < hlit + hdist {
+        let s: u64 = decode((&lcnt[0 as usize]) as u64,
+            (&lsym[0 as usize]) as u64)
+        if s == ulib.EOF {
+            return false
+        }
+        if s < 16 {
+            out[(have) as usize] = s
+            have = have + 1
+        } else {
+            var v: u64 = 0
+            var rep: u64 = 0
+            if s == 16 {
+                if have == 0 {
+                    oops = E_FORMAT
+                    return false
+                }
+                v = out[(have - 1) as usize]
+                rep = 3 + bits(2)
+            } else if s == 17 {
+                rep = 3 + bits(3)
+            } else {
+                rep = 11 + bits(7)
+            }
+            if oops != E_OK {
+                return false
+            }
+            if have + rep > hlit + hdist {
+                oops = E_FORMAT
+                return false
+            }
+            while rep > 0 {
+                out[(have) as usize] = v
+                have = have + 1
+                rep = rep - 1
+            }
+        }
+    }
+    i = 0
+    while i < hlit + hdist {
+        lengths[(i) as usize] = out[(i) as usize]
+        i = i + 1
+    }
+    if !construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64,
+        0, hlit) {
+        oops = E_FORMAT
+        return false
+    }
+    if !construct((&dcnt[0 as usize]) as u64, (&dsym[0 as usize]) as u64,
+        hlit, hdist) {
+        oops = E_FORMAT
+        return false
+    }
+    return true
+}
+
+fn block_body() -> bool {
+    var going: bool = true
+    while going {
+        let s: u64 = decode((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64)
+        if s == ulib.EOF {
+            return false
+        }
+        if s < 256 {
+            emit(s)
+            if oops != E_OK {
+                return false
+            }
+        } else if s == 256 {
+            going = false
+        } else {
+            let li: u64 = s - 257
+            if li >= 29 {
+                oops = E_FORMAT
+                return false
+            }
+            let len: u64 = lbase[(li) as usize] + bits(lext[(li) as usize])
+            let ds: u64 = decode((&dcnt[0 as usize]) as u64, (&dsym[0 as usize]) as u64)
+            if ds == ulib.EOF || ds >= 30 {
+                oops = E_FORMAT
+                return false
+            }
+            let dist: u64 = dbase[(ds) as usize] + bits(dext[(ds) as usize])
+            if oops != E_OK {
+                return false
+            }
+            if dist > dpos {
+                oops = E_FORMAT
+                return false
+            }
+            var k: u64 = 0
+            while k < len {
+                emit(win[((dpos - dist) & WMASK) as usize] as u64)
+                if oops != E_OK {
+                    return false
+                }
+                k = k + 1
+            }
+        }
+    }
+    return true
+}
+
+// The deflate blocks until the final one.
+fn inflate_blocks() {
+    var last: u64 = 0
+    while last == 0 && oops == E_OK {
+        last = bits(1)
+        let kind: u64 = bits(2)
+        if oops != E_OK {
+            last = 1
+        } else if kind == 0 {
+            // stored: drop the partial byte, then LEN and its one's complement
+            bp = 0
+            bn = 0
+            let len: u64 = le16()
+            let nlen: u64 = le16()
+            if oops == E_OK {
+                if (len ^ 0xFFFF) != nlen {
+                    oops = E_FORMAT
+                } else {
+                    var i: u64 = 0
+                    while i < len && oops == E_OK {
+                        emit(getbyte())
+                        i = i + 1
+                    }
+                }
+            }
+        } else if kind == 1 {
+            fixed_trees()
+            block_body()
+        } else if kind == 2 {
+            if dynamic_trees() {
+                block_body()
+            }
+        } else {
+            oops = E_FORMAT
+        }
+    }
+}
+
+fn le16() -> u64 {
+    let a: u64 = getbyte()
+    let b: u64 = getbyte()
+    return a | (b << 8)
+}
+
+fn le32() -> u64 {
+    let a: u64 = le16()
+    let b: u64 = le16()
+    return a | (b << 16)
+}
+
+fn skip(n: u64) {
+    var i: u64 = 0
+    while i < n && oops == E_OK {
+        getbyte()
+        i = i + 1
+    }
+}
+
+fn skip_zstr() {
+    var going: bool = true
+    while going && oops == E_OK {
+        if getbyte() == 0 {
+            going = false
+        }
+    }
+}
+
+// One gzip member from in_fd (current position) to out_fd. E_OK only when the deflate stream is
+// valid AND the trailer CRC-32 and length match what was written.
+fn gunzip_fd(ifd: u64, ofd: u64) -> u64 {
+    setup()
+    crc_init()
+    in_fd = ifd
+    out_fd = ofd
+    ipos = 0
+    ilen = 0
+    bp = 0
+    bn = 0
+    dpos = 0
+    fpos = 0
+    crc = M32
+    oops = E_OK
+    let id1: u64 = getbyte()
+    let id2: u64 = getbyte()
+    let cm: u64 = getbyte()
+    let flg: u64 = getbyte()
+    if oops != E_OK {
+        return oops
+    }
+    if id1 != 31 || id2 != 139 || cm != 8 || (flg & 224) != 0 {
+        return E_FORMAT
+    }
+    skip(6)
+    if (flg & 4) != 0 {
+        let xl: u64 = le16()
+        skip(xl)
+    }
+    if (flg & 8) != 0 {
+        skip_zstr()
+    }
+    if (flg & 16) != 0 {
+        skip_zstr()
+    }
+    if (flg & 2) != 0 {
+        skip(2)
+    }
+    if oops != E_OK {
+        return oops
+    }
+    inflate_blocks()
+    if oops != E_OK {
+        return oops
+    }
+    flush()
+    if oops != E_OK {
+        return oops
+    }
+    bp = 0
+    bn = 0
+    let tcrc: u64 = le32()
+    let tlen: u64 = le32()
+    if oops != E_OK {
+        return oops
+    }
+    if ((crc ^ M32) & M32) != tcrc || (dpos & M32) != tlen {
+        return E_CRC
+    }
+    return E_OK
+}

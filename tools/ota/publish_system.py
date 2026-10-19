@@ -5,6 +5,7 @@
     python3 tools/ota/publish_system.py <imgdir> <feeddir> <channel> --bund <bundle.json>
         [--count N] [--min-from N] [--notes FILE] [--name TEXT] [--bad-hash] [--bad-sig]
     python3 tools/ota/publish_system.py <imgdir> <feeddir> <channel> --key <geheim.key> ...
+        [--overlay DIR] [--gz] [--bad-gz] [--bad-ovl-hash]
 
 --key: TEST MODE. Signs with a raw Ed25519 secret key (the one tools/install/pakete.sh makes, which
 the test images trust) instead of the production bundle; the VERZEICHNIS then has no key chain
@@ -21,8 +22,22 @@ the package feed uses (OTA2: key chain + signature by the existing bundle), plus
 Old clients ignore both line types. The channel directory is separate from
 `aktuell/` (which veroeffentlichen.py rebuilds), so the live package feed is untouched.
 --bad-hash / --bad-sig: negative-control stands (kernel hash wrong / signature broken).
+
+SELFUPDATE stage 2 (docs/SELFUPDATE.md):
+--overlay DIR   every regular file of DIR becomes a /bin overlay entry
+                  sysfile <TAB> file <TAB> sha256 <TAB> octets <TAB> f<count>-<name> <TAB> <name>
+                (name = letters, digits . - _ ; empty files are refused). The device fetches each file,
+                checks the hash, and swaps them into /bin together with the kernel trial.
+--gz            gzip transport (r1246): also publish <file>.gz of the kernel and of every overlay file
+                  sysgz <TAB> <kernel|name> <TAB> sha256(gz) <TAB> octets(gz) <TAB> <file>.gz
+                The raw files stay (stage-1 clients and the fallback); `sysfile` hashes are those of the
+                UNPACKED files, so the device checks both the gz and the result.
+--bad-gz        negative control: one overlay gz (or the kernel gz when there is no overlay) has a flipped
+                bit INSIDE the deflate data, its sysgz hash is recomputed (so the transport check passes
+                and only the gunzip CRC / format check can catch it).
+--bad-ovl-hash  negative control: the first overlay file's sysfile hash is wrong.
 """
-import hashlib, os, re, shutil, subprocess, sys
+import gzip, hashlib, os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -35,7 +50,7 @@ def main():
         raise SystemExit(__doc__)
     img, feed, chan = a[0], a[1], a[2]
     opt = {"--bund": None, "--key": None, "--count": None, "--min-from": "0", "--notes": None,
-           "--name": ""}
+           "--name": "", "--overlay": None}
     flags = set()
     i = 3
     while i < len(a):
@@ -64,6 +79,38 @@ def main():
     khash = hashlib.sha256(data).hexdigest()
     if "--bad-hash" in flags:
         khash = ("0" if khash[0] != "0" else "1") + khash[1:]
+    want_gz = "--gz" in flags
+    bad_gz = "--bad-gz" in flags
+    gz_lines = []
+    flipped = [False]
+
+    def gz_make(key, srvname, raw, force_bad=False):
+        """Write <srvname>.gz next to the raw file and add its sysgz line."""
+        # mtime 0 + no name: reproducible bytes
+        z = bytearray(gzip.compress(raw, 9, mtime=0))
+        if force_bad and not flipped[0]:
+            # flip a bit in the middle of the deflate data (header is 10 octets, trailer 8)
+            at = 10 + max(1, (len(z) - 18) // 2)
+            z[at] ^= 0x10
+            flipped[0] = True
+        open(os.path.join(out, srvname + ".gz"), "wb").write(bytes(z))
+        gz_lines.append("sysgz\t%s\t%s\t%d\t%s.gz" % (key, hashlib.sha256(bytes(z)).hexdigest(),
+                                                       len(z), srvname))
+
+    ovl_dir = opt["--overlay"]
+    ovl_lines = []
+    ovl_files = []
+    if ovl_dir:
+        for fn in sorted(os.listdir(ovl_dir)):
+            fp = os.path.join(ovl_dir, fn)
+            if not os.path.isfile(fp):
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,59}", fn):
+                raise SystemExit("overlay name not allowed: %r" % fn)
+            raw = open(fp, "rb").read()
+            if not raw:
+                raise SystemExit("overlay file is empty: %s" % fn)
+            ovl_files.append((fn, raw))
     notes = opt["--notes"]
     ntext = open(notes, "rb").read() if notes else (
         ("Build %d (%s)\n" % (count, commit)).encode())
@@ -74,6 +121,18 @@ def main():
              "sysfile\tkernel\t%s\t%d\t%s" % (khash, len(data), kname),
              "sysfile\tnotes\t%s\t%d\t%s" % (hashlib.sha256(ntext).hexdigest(),
                                              len(ntext), nname)]
+    for i, (fn, raw) in enumerate(ovl_files):
+        srv = "f%d-%s" % (count, fn)
+        open(os.path.join(out, srv), "wb").write(raw)
+        oh = hashlib.sha256(raw).hexdigest()
+        if "--bad-ovl-hash" in flags and i == 0:
+            oh = ("0" if oh[0] != "0" else "1") + oh[1:]
+        lines.append("sysfile\tfile\t%s\t%d\t%s\t%s" % (oh, len(raw), srv, fn))
+        if want_gz:
+            gz_make(fn, srv, raw, bad_gz)
+    if want_gz:
+        gz_make("kernel", kname, data, bad_gz and not ovl_files)
+    lines.extend(gz_lines)
     rimg = os.path.join(img, "root.img")
     if os.path.isfile(rimg):
         lines.append("sysfile\troot\t%s\t%d\t%s" % (vf.sha256d(rimg),
