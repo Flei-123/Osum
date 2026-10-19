@@ -284,19 +284,19 @@ fi
 echo "== 7. periodic system check of the service (ota service 1 system): finds, notes, notifies once, installs nothing =="
 fresh_disk
 dienst "$OUT/feed-good" || bad "feed does not start"
-rc=$(lauf p1 "ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;cat /system/sys.notes;exit")
+rc=$(lauf p1 "ota set auto ja;ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;cat /system/sys.notes;exit")
 hat "$OUT/p1.txt" "phase=available" "service check: sys.stand says available"
 hat "$OUT/p1.txt" "there=200" "service check: the offered build is 200"
 hat "$OUT/p1.txt" "00000200" "service check: build 200 is marked as notified"
 hat "$OUT/p1.txt" "Gate build: new kernel" "service check: the changelog was fetched (sys.notes)"
 hatnicht "$OUT/p1.txt" "system: update available" "service check is quiet (no console chatter)"
 esp_has osum-b.mb && bad "periodic check wrote slot B" || ok "periodic check installs nothing (no slot B)"
-gleich "limine default_entry still 1" "$(conf_default)" "1"
+[ "$(conf_default)" = "2" ] && bad "periodic check armed slot B (default_entry 2)" || ok "periodic check leaves default_entry alone (not 2: '$(conf_default)')"
 dienst_aus
 # the same service against a feed with an old build: stays current, no notification marker
 fresh_disk
 dienst "$OUT/feed-old" || bad "feed does not start"
-rc=$(lauf p2 "ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;exit")
+rc=$(lauf p2 "ota set auto ja;ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;exit")
 hat "$OUT/p2.txt" "phase=current" "service check on a not-newer feed: phase current"
 hatnicht "$OUT/p2.txt" "00000100" "... and no notification marker (no build number written)"
 dienst_aus
