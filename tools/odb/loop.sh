@@ -47,7 +47,7 @@ bash "$ROOT/tools/odbc/qemu.sh" start "$D/disk.img" "$D" "$SMP" "$MEM" || exit 1
 PORT="unix:$D/odb.sock"
 T0=$(date +%s.%N)
 python3 -I "$ROOT/tools/odbc/odbc.py" --port "$PORT" --token-file "$TOKEN" wait 240 || { echo "FAIL  agent never answered"; tail -5 "$D/com1.log"; exit 1; }
-echo "boot to agent: $(echo "$(date +%s.%N) - $T0" | bc) s"
+echo "boot to agent: $(python3 -c "import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 1))" "$(date +%s.%N)" "$T0") s"
 python3 -I "$ROOT/tools/odb/loop.py" --port "$PORT" --token-file "$TOKEN" --rounds "$ROUNDS" --out "$D/shots" \
     ${JSON:+--json "$JSON"} "${LOOPARGS[@]}" 2>&1 | tee "$D/result.txt"
 exit "${PIPESTATUS[0]}"
