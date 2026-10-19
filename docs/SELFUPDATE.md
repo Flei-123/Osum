@@ -34,7 +34,7 @@ path) plus two additive line types (old clients ignore them):
 entry 2 = B. Invariant: default_entry is 1 except during a trial.
 **Flow** (`ota system apply [restart]`):
 1. dir_get (HTTPS + chain + signature) -> parse `system` lines -> count > SYSVERSION, min_from ok.
-2. mount ESP (/dev/hda1) at /sysesp; fetch kernel straight to `osum-b.mb` (length + SHA-256 from the
+2. mount ESP (partition 1 of the boot disk: tries /dev/sda1, /dev/nvme01, /dev/hda1 in that order and takes the first that holds limine.conf -- /dev/hda1 on a box without an IDE disk stalls for minutes) at /sysesp; fetch kernel straight to `osum-b.mb` (length + SHA-256 from the
    signed list, resume with `Range`); wrong hash -> file removed, nothing else touched.
 3. write SYSPENDING; arm `/system/ERPROBUNG` (`gen=G vor=G v=00 ok=0`, G = /system/AKTUELL).
 4. LAST: new `limine.conf` (default_entry: 2 + entry B, copy of entry 1 cmdline) via limine.nw + rename.
@@ -56,3 +56,7 @@ kernels (needs the EFI selector, docs/AB-KERNEL.md option 1).
     bash tools/ota/publish-system.sh <imgdir> <feeddir> <stable|dev> [--count N] [--notes FILE]
     ota system search | apply [restart] | status | confirm
 Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev` first.
+
+## 5. Gate notes (tools/osupdate/run.sh)
+- The installed disk is booted on an AHCI controller (`OTA_DRIVE=ahci`, default in the gate; `OTA_DRIVE=ide` keeps the old PIO disk). Measured: copying the 8.66 MB kernel inside the ESP takes ~30 s on AHCI; over emulated IDE (PIO, 512-byte FAT clusters) the promote copy B->A did not finish in 10 minutes.
+- The promote copy uses 32 KiB writes (`SU_BIG`).
