@@ -362,7 +362,8 @@ platte_lauf() { # <name> <skript> <limit>
         # Warten, bis der Schreibtisch wirklich steht.
         local w=0
         while [ $w -lt 240 ]; do
-            grep -qa 'desk: start /bin/taskbar' "$ser" 2>/dev/null && break
+            # wait for the sign-in screen / desktop line too: the taskbar line comes first and a loaded host needs seconds more
+            grep -qa 'desk: start /bin/taskbar' "$ser" 2>/dev/null && grep -qaE 'desk: start /bin/(desktop|glogin)' "$ser" 2>/dev/null && break
             kill -0 "$qp" 2>/dev/null || break
             sleep 1; w=$((w+1))
         done
