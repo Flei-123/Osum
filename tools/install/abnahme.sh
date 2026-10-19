@@ -647,7 +647,16 @@ login_lauf() { # name keys...
         kill -0 "$qp" 2>/dev/null || break
         sleep 1; w=$((w+1))
     done
-    sleep 4
+    # the login screen is up, but the session services still start behind it: type once the serial line has been
+    # quiet for 3 s (at most 60 s), not after a fixed 4 s that a loaded host can overrun
+    local q=0 sz0=-1 sz1
+    w=0
+    while [ $w -lt 60 ] && [ $q -lt 3 ]; do
+        sleep 1; w=$((w+1))
+        sz1=$(stat -c %s "$ser" 2>/dev/null || echo 0)
+        if [ "$sz1" = "$sz0" ]; then q=$((q+1)); else q=0; fi
+        sz0=$sz1
+    done
     local k
     for k in "$@"; do
         echo "sendkey $k" | socat - "UNIX-CONNECT:$msock" > /dev/null 2>&1
