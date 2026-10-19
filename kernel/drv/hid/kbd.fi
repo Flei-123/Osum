@@ -65,7 +65,7 @@ import drv.hid.kbdlay
 import ipc.tip
 
 export {
-    irq, ghosts, on_code, translate, shifted, take, waiting,
+    irq, ghosts, rescue, rescued, on_code, translate, shifted, take, waiting,
     hot_take, hot_waiting, push_hot, MAX_KEYS, HOT_SLOTS,
     code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE, L_UK, L_FR, L_ES, L_IT, L_RU,
     super_down, hotkey_seq, hotkey_key, hotkey_ns,
@@ -138,6 +138,42 @@ fn irq(state: u64) {
         return
     }
     on_code(state, serial.in8(DATA_PORT) as u64)
+}
+
+// W-INPUTHANG: THE KEYBOARD HALF OF THE WATCHDOG. The i8042 holds ONE byte in its output buffer and raises IRQ 1 only when a byte ENTERS
+// it. If that edge is lost (a VMM that drops or coalesces the interrupt, a masked line, an EOI that never came) the byte stays, the
+// controller raises nothing more, and keyboard AND mouse look dead while the guest runs fine -- the picture is a still image. The
+// mouse half has had a rescue poll for a long time (ps2m.poll_one, port 0x64 bit 5); the keyboard had none. `rescue` looks at the
+// status port like `irq` does (output buffer full, not the mouse's byte), reads the byte with interrupts off (so IRQ 1 cannot take
+// the same byte between the look and the read) and feeds it to `on_code`. Returns true when a byte was taken.
+static mut rescued_n: u64 = 0
+
+fn rescued() -> u64 {
+    return rescued_n
+}
+
+fn rescue(state: u64) -> bool {
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    var got: bool = false
+    var code: u64 = 0
+    if (serial.in8(STATUS_PORT) as u64 & 0x21) == 0x01 {
+        code = serial.in8(DATA_PORT) as u64
+        got = true
+    }
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+    if got {
+        rescued_n = rescued_n + 1
+        if rescued_n <= 8 {
+            var s_r: [u8; 31] = "kbd: irq lost, rescued byte n=\0"
+            serial.puts((&s_r[0]) as u64)
+            serial.dec(rescued_n)
+            serial.nl()
+        }
+        on_code(state, code)
+    }
+    return got
 }
 
 // RUNDE K17: DIE ZEILE DARUEBER IST DER GANZE UNTERSCHIED ZWISCHEN

@@ -75,6 +75,7 @@ import utf8
 // Quelle, aus der Ring 3 sie uebersetzt.
 import ecke
 import drv.hid.ps2m
+import drv.hid.kbd // W-INPUTHANG: kbd.rescue (watchdog look at the keyboard byte)
 import drv.hid.ptrcfg // W-E: the debug.fps switch
 import bus.bus // W-DND: the drag slot (a drag runs while the slot holds a payload)
 import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
@@ -16183,7 +16184,19 @@ fn poll(state: u64) -> bool {
     // r1129b: WATCHDOG, NOT A POLL. Every look at port 0x64 is a trapped port read (one VM exit in VirtualBox, ~34-100 per second
     // before). While IRQ 12 delivers (the poll finds nothing) the controller is only looked at every PS2_WD_TICKS ticks. A look
     // that FINDS a byte means the IRQ was lost: from then on every tick polls again for PS2_FALL_TICKS ticks, then back to the watchdog.
-    if tick_new && ps2m.present(state) && ps2m.polling(state) && ps2_poll_due(jetzt) {
+    // W-INPUTHANG: the same watchdog look also covers the KEYBOARD byte (kbd.rescue; `nokbdpoll` = counter-proof without it) and no longer
+    // needs a PS/2 mouse to be present: a machine with only a keyboard on the i8042 has the same lost-edge failure.
+    let wd_due: bool = tick_new && ps2_poll_due(jetzt)
+    if wd_due && !kstate.mode_on(state, kstate.M_NOKBDPOLL) {
+        var kn: u64 = 0
+        while kn < 16 && kbd.rescue(state) {
+            kn = kn + 1
+        }
+        if kn != 0 {
+            ps2_fall_until = jetzt + PS2_FALL_TICKS
+        }
+    }
+    if wd_due && ps2m.present(state) && ps2m.polling(state) {
         let polls0: u64 = ps2m.polls(state)
         var n: u64 = 0
         while n < 64 && ps2m.poll_one(state) {
