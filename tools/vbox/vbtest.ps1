@@ -9,15 +9,15 @@ param(
   [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$A
 )
 $ErrorActionPreference = 'Stop'
-$VM        = 'OrientOS-Test'
+$VM        = if ($env:VBL_VM) { $env:VBL_VM } else { 'OrientOS-Test' }   # VBL_VM: extra parallel test VM (never the boss VM; Guard checks the UUID)
 $BOSS_UUID = '0ee259f6-4232-4c00-b855-ae407ee6bb2d'
 $VB        = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
 $ROOT      = 'C:\Users\justi\vbl'
 $STAGE     = Join-Path $ROOT 'stage'
 $SHOTS     = Join-Path $ROOT 'shots'
 $SERIAL    = Join-Path $ROOT 'serial.txt'
-$VMDIR     = 'C:\Users\justi\VirtualBox VMs\OrientOS-Test'
-$ODBPIPE  = '\\.\pipe\odb-test'   # VBox uart2 (COM2) server pipe; odbc connects here
+$VMDIR     = "C:\Users\justi\VirtualBox VMs\$VM"
+$ODBPIPE  = '\\.\pipe\odb-' + $VM.ToLower()   # VBox uart2 (COM2) server pipe; odbc connects here
 $ODBDIR   = Join-Path $ROOT 'odbc'
 $ODBTOK   = Join-Path $ROOT 'odb.token'
 $ODBUP    = Join-Path $ROOT 'odb.up'      # marker: agent answered (odbwait); makes shot use odb
@@ -331,6 +331,8 @@ function CmdMkvm {
   Vb @('convertfromraw', $img, $vdi, '--format', 'VDI') | Out-Null
   Vb @('storageattach', $VM, '--storagectl', 'IDE', '--port', '0', '--device', '0', '--type', 'hdd', '--medium', $vdi) | Out-Null
   Vb @('setextradata', $VM, 'GUI/ScaleFactor', '1') | Out-Null
+  if ($env:VBL_EXTRA) { Vb (@('modifyvm', $VM) + ($env:VBL_EXTRA -split '\s+' | Where-Object { $_ })) | Out-Null; Say ('INFO: VBL_EXTRA ' + $env:VBL_EXTRA) }   # e.g. '--paravirt-provider none --hpet on'
+  if ($env:VBL_XDATA) { foreach ($kv in ($env:VBL_XDATA -split ';')) { $p = $kv -split '=', 2; if ($p.Count -eq 2) { Vb @('setextradata', $VM, $p[0], $p[1]) | Out-Null } } }   # extradata key=value;key=value
   Say ("OK: mkvm {0} mem={1} cpus={2} serial={3} in {4}" -f $VM, $mem, $cpus, $useSerial, (Elapsed $sw))
 }
 function CmdSwapDisk { # replace the disk of an existing test VM by stage\o.img (VM is powered off first)
