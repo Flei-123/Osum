@@ -36,4 +36,7 @@ case "${OSUM_OPT:-release-fast}" in
     default) OPTL="" ;;
     *)       OPTL="--opt-level=${OSUM_OPT:-release-fast}" ;;
 esac
+# r1224: the heuristic inliner nearly doubles scene-tree GUI programs (welcome 1 380 KB -> 901 KB without it, -35 %).
+# Programs are built without it; hand-requested #[inline] still works. OSUM_INLINE=1 restores the old build.
+[ "${OSUM_INLINE:-0}" = 1 ] || OPTL="$OPTL --no-pass=inline"
 export OPTL

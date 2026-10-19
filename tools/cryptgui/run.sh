@@ -9,6 +9,7 @@
 # Run under heavy: /root/jarvis/bin/heavy bash tools/cryptgui/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 . tools/lib/qemu.sh
 OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT
 pass=0; fail=0

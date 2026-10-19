@@ -3,6 +3,7 @@
 # sagt es? `zeig` malt es und geht wieder -- kein Schreibzugriff.
 #   bash tools/dual/probe.sh [args] [ausgabe]
 cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 . tools/lib/qemu.sh
 ARGS=${1:-zeig}
 OUT=${2:-/tmp/dual-probe}

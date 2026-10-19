@@ -107,7 +107,10 @@ ESP_MIB=${ESP_MIB:-96}
 # default the build on main stopped with "mkfs: the disk is full" (tools/usbimg/run.sh 0/1). EFI partition (96 MiB) still holds it.
 # 16.10.2026 (W-IMG2, r893): 102400 -> 122880 blocks (60 MiB). JARVIS Mini (1.8 MB) + hotkeyd + wmplug in the personal image: with 102400 the
 # personal build stopped with "mkfs: the disk is full" (tools/usbimg/run.sh 0/1). EFI partition (96 MiB) holds the 60 MiB root (measured).
-FS_BLOCKS=${FS_BLOCKS:-122880}
+# 19.10.2026 (benchd, r1223/r1224): 122880 -> 98304 blocks (48 MiB). The whole root.img is loaded as a boot module and stays in RAM
+# (live stick), free blocks included. Without the /boot kernel copy and with the programs built without the heuristic inliner
+# the personal image uses ~32 MiB, so 48 MiB still leaves ~16 MiB free (before: 2.4 MiB free in 60 MiB) and saves 12 MiB of RAM and load.
+FS_BLOCKS=${FS_BLOCKS:-98304}
 [ "${ROOT_SLIM:-0}" = 1 ] && FS_BLOCKS=${FS_BLOCKS_SLIM:-78000}   # see ROOT_SLIM below
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
@@ -1166,8 +1169,13 @@ PYHDD
 # are 8.8 MB of a 44 MB root, and the Dell stick's 96 MiB EFI partition cannot hold the old root, the new root and
 # the kernel at once (tools: /root/abbilder/dell-update.py says "TIGHT DOES NOT FIT"). The slim root is 38 MiB. The
 # installer entry of this image cannot install; use the normal image for that.
+# r1223: BOOT_KERNEL_COPY=0 (default) leaves the 9.4 MB kernel copy /boot/osum.mb OUT of the root. The stick carries the
+# kernel on its EFI partition and the installer mounts that partition to copy it (instkern.kern_quelle). Only a boot
+# WITHOUT such a medium (QEMU -kernel/-initrd gates that run the installer) needs BOOT_KERNEL_COPY=1.
+BOOTK=()
+[ "${BOOT_KERNEL_COPY:-0}" = 1 ] && BOOTK=("/boot/osum.mb=$OUT/osum.mb")
 if [ "${ROOT_SLIM:-0}" != 1 ]; then
-ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
+ARGS+=(/boot/ "${BOOTK[@]}"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI"
        "/boot/limine-bios.sys=$LIMINE/limine-bios.sys"
        "/boot/limine-hdd.bin=$OUT/limine-hdd.bin")
@@ -1464,7 +1472,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip"
-[ "${ROOT_SLIM:-0}" = 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
+[ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0

@@ -20,6 +20,7 @@
 #   6. COUNTER-CHECK: a name with a capital letter or a blank is no name: ks stays 0
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 . tools/lib/qemu.sh
 OUT=${1:-/tmp/kontogui}
 mkdir -p "$OUT"

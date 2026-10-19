@@ -45,7 +45,7 @@ import dcrypt
 export {
     crypt_begin, crypt_end, crypt_off, crypt_active,
     BS, AUSRICHT, ESP_STD,
-    lese, schreibe, ist_ofs, wachsen, kopiere,
+    lese, schreibe, ist_ofs, wachsen, kopiere, kern_quelle,
     gpt_schreiben, bios_laden, bios_da, fat32_create, wurzel_kopieren, wurzel_kopieren_ab,
     plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
     plan_passt, quelle_pruefen,
@@ -776,6 +776,56 @@ fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
         }
     }
     return ziel
+}
+
+// ================================================== KERNEL SOURCE (r1223)
+//
+// The installer copies the kernel image onto the target's EFI partition.
+// The standard image carries no kernel copy in its root any more (9.4 MB of
+// RAM and load time): the stick holds osum.mb in the root of its own EFI
+// partition. `kern_quelle()` returns the path to copy from: /boot/osum.mb
+// when the root has it (images built with BOOT_KERNEL_COPY=1, QEMU -kernel
+// boots), else the first FAT partition among the usual boot disks that has
+// /osum.mb, mounted at /bootsrc. When nothing is found the old path is
+// returned, so the copy fails with the usual message.
+static mut p_kq_boot: [u8; 16] = "/boot/osum.mb\0\0\0"
+static mut p_kq_src: [u8; 20] = "/bootsrc/osum.mb\0\0\0\0"
+static mut p_kq_mnt: [u8; 10] = "/bootsrc\0\0"
+static mut p_kq_vfat: [u8; 6] = "vfat\0\0"
+static mut p_kq_d0: [u8; 10] = "/dev/hda1\0"
+static mut p_kq_d1: [u8; 10] = "/dev/sda1\0"
+static mut p_kq_d2: [u8; 10] = "/dev/hdb1\0"
+static mut p_kq_d3: [u8; 10] = "/dev/sdb1\0"
+static mut p_kq_d4: [u8; 12] = "/dev/nvme01\0"
+
+fn kq_try(dev: u64) -> bool {
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, dev,
+        (&p_kq_mnt[0 as usize]) as u64, (&p_kq_vfat[0 as usize]) as u64, ulib.MNT_RDONLY)
+    if ulib.bad(m) {
+        return false
+    }
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, (&p_kq_src[0 as usize]) as u64, 0, 0)
+    if !ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+        return true
+    }
+    ulib.sys(ulib.SYS_UMOUNT2, (&p_kq_mnt[0 as usize]) as u64, 0, 0)
+    return false
+}
+
+fn kern_quelle() -> u64 {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, (&p_kq_boot[0 as usize]) as u64, 0, 0)
+    if !ulib.bad(a) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return (&p_kq_boot[0 as usize]) as u64
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&p_kq_mnt[0 as usize]) as u64, 0, 0)
+    if kq_try((&p_kq_d0[0 as usize]) as u64) || kq_try((&p_kq_d1[0 as usize]) as u64)
+        || kq_try((&p_kq_d2[0 as usize]) as u64) || kq_try((&p_kq_d3[0 as usize]) as u64)
+        || kq_try((&p_kq_d4[0 as usize]) as u64) {
+        return (&p_kq_src[0 as usize]) as u64
+    }
+    return (&p_kq_boot[0 as usize]) as u64
 }
 
 // Copy, then compare the target with the source; again if they differ.

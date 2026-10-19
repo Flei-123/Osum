@@ -52,6 +52,7 @@
 #           kommen aus dem VOLLEN Lauf.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh

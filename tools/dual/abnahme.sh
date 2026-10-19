@@ -45,6 +45,7 @@
 # haette bis hierher genauso gruen ausgesehen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 . tools/lib/qemu.sh
 
 BAU=${1:-/tmp/dual-img}
