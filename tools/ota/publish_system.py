@@ -4,6 +4,11 @@
 
     python3 tools/ota/publish_system.py <imgdir> <feeddir> <channel> --bund <bundle.json>
         [--count N] [--min-from N] [--notes FILE] [--name TEXT] [--bad-hash] [--bad-sig]
+    python3 tools/ota/publish_system.py <imgdir> <feeddir> <channel> --key <geheim.key> ...
+
+--key: TEST MODE. Signs with a raw Ed25519 secret key (the one tools/install/pakete.sh makes, which
+the test images trust) instead of the production bundle; the VERZEICHNIS then has no key chain
+(`schluesselgen 0`, like tools/ota/listing.py). Used by the gate tools/osupdate/run.sh.
 
 <imgdir> holds the kernel `osum.mb` (and `root.img`, listed but not applied on-device
 yet). Output: <feeddir>/system/<channel>/{VERZEICHNIS,VERZEICHNIS.sig,kernel-<N>.mb,
@@ -29,7 +34,7 @@ def main():
     if len(a) < 3:
         raise SystemExit(__doc__)
     img, feed, chan = a[0], a[1], a[2]
-    opt = {"--bund": None, "--count": None, "--min-from": "0", "--notes": None,
+    opt = {"--bund": None, "--key": None, "--count": None, "--min-from": "0", "--notes": None,
            "--name": ""}
     flags = set()
     i = 3
@@ -42,8 +47,8 @@ def main():
             i += 1
     if chan not in ("stable", "dev", "test"):
         raise SystemExit("channel must be stable|dev|test")
-    if not opt["--bund"]:
-        raise SystemExit("--bund missing")
+    if not opt["--bund"] and not opt["--key"]:
+        raise SystemExit("--bund or --key missing")
     kern = os.path.join(img, "osum.mb")
     data = open(kern, "rb").read()
     m = re.search(rb"osum ([0-9a-f]{7})", data)
@@ -73,18 +78,31 @@ def main():
     if os.path.isfile(rimg):
         lines.append("sysfile\troot\t%s\t%d\t%s" % (vf.sha256d(rimg),
                                                     os.path.getsize(rimg), "root.img"))
-    b = vf.bund_lesen(opt["--bund"])
-    roh = vf.verzeichnis_text(count, b["haupt"]["gen"], [dict(k) for k in b["kette"]],
-                              [], []).decode()
-    roh += "\n".join(lines) + "\n"
     vz = os.path.join(out, "VERZEICHNIS")
-    open(vz, "wb").write(roh.encode("ascii"))
-    vf.signieren(opt["--bund"], vz, os.path.join(out, "VERZEICHNIS.sig"))
+    if opt["--key"]:
+        import listing  # noqa: E402  (test signer, same module the package feed tests use)
+        roh = ("OTA2\nfassung\t%d\nschluesselgen\t0\n" % count + "\n".join(lines) + "\n").encode("ascii")
+        m = listing.load_opk()
+        sk = open(opt["--key"], "rb").read()
+        sig = m.ed25519_sign(sk, roh)
+        if not m.ed25519_verify(m.ed25519_public(sk), roh, sig):
+            raise SystemExit("own signature does not verify")
+        open(vz, "wb").write(roh)
+        open(vz + ".sig", "wb").write(sig)
+        pub = m.ed25519_public(sk)
+    else:
+        b = vf.bund_lesen(opt["--bund"])
+        roh = vf.verzeichnis_text(count, b["haupt"]["gen"], [dict(k) for k in b["kette"]],
+                                  [], []).decode()
+        roh += "\n".join(lines) + "\n"
+        open(vz, "wb").write(roh.encode("ascii"))
+        vf.signieren(opt["--bund"], vz, os.path.join(out, "VERZEICHNIS.sig"))
+        pub = bytes.fromhex(b["haupt"]["pub"])
     if "--bad-sig" in flags:
         sg = bytearray(open(vz + ".sig", "rb").read())
         sg[0] ^= 1
         open(vz + ".sig", "wb").write(bytes(sg))
-    open(os.path.join(out, "schluessel.pub"), "wb").write(bytes.fromhex(b["haupt"]["pub"]))
+    open(os.path.join(out, "schluessel.pub"), "wb").write(pub)
     print("system stand %d (%s) -> %s  [%s]" % (count, commit, out, chan))
 
 
