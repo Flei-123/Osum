@@ -18,7 +18,8 @@ for k in ${ONLY//,/ }; do
     case $k in
         alpine) f=$(curl -sS -m 30 $AL/latest-releases.yaml | awk '/file: alpine-virt-/{print $2; exit}'); get "$f" "$AL/$f" || continue; art=$C/$f ;;
         tinycore) get tinycore.iso "$TCV" || continue; art=$C/tinycore.iso ;;
-        debian) get debian.qcow2 "$DEB" || continue; art=$C/debian.qcow2 ;;
+        debian) get debian.qcow2 "$DEB" || continue; art=$C/debian-primed.qcow2
+                [ -s "$art" ] || bash tools/bench/debprep.sh "$C/debian.qcow2" "$art" || continue ;;
         *) continue ;;
     esac
     mkdir -p "$T/$k"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/bench/refboot.py <kind> <workdir> <artifact> [runs] -- boot a reference distro in QEMU/KVM and measure it (prints JSON).
 kind: alpine (virt ISO, kernel+initramfs taken from the ISO), tinycore (CorePure64 ISO + a tiny extra initrd that reports from
-/opt/bootlocal.sh), debian (cloud nocloud qcow2). Same machine as tools/bench/measure.sh: KVM, 2 vCPU, 1536 MiB, headless, COM1 on stdio.
+/opt/bootlocal.sh), debian (cloud nocloud qcow2 prepared by debprep.sh). Same machine as tools/bench/measure.sh: KVM, 2 vCPU, 1536 MiB, headless, COM1 on stdio.
 Measured per run: boot_prompt_ms (host clock QEMU start -> login prompt / init-done marker), idle memory 20 s later from
 /proc/meminfo (used = MemTotal - MemFree; used_avail = MemTotal - MemAvailable), rootfs used MB (df /). Median over runs."""
 import json, os, re, shutil, statistics, subprocess, sys, threading, time
@@ -35,35 +35,10 @@ def prep():
     sys.exit("unknown kind")
 
 
-def prime():
-    """debian nocloud runs systemd-firstboot on the first boot (asks keys); do it once, power off, measure later boots."""
-    cmd, ready = prep()
-    shutil.copy(art, wd + "/primed.qcow2")
-    cmd = [c.replace("%s/disk.qcow2", wd + "/primed.qcow2") if "%s" in c else c for c in cmd]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    buf = bytearray()
-    threading.Thread(target=lambda: [buf.extend(b) for b in iter(lambda: p.stdout.read(1), b"")], daemon=True).start()
-    end = time.time() + 300
-    while time.time() < end and not re.search(rb"login:", bytes(buf).replace(b"\r", b"")[-100:]):
-        try:
-            p.stdin.write(b"\n"); p.stdin.flush()
-        except OSError:
-            break
-        time.sleep(1.5)
-    time.sleep(2)
-    p.stdin.write(b"root\n"); p.stdin.flush(); time.sleep(2)
-    p.stdin.write(b"\n"); p.stdin.flush(); time.sleep(3)  # empty password (debian nocloud asks for one)
-    p.stdin.write(b"sync; poweroff\n"); p.stdin.flush()
-    try:
-        p.wait(60)
-    except subprocess.TimeoutExpired:
-        p.kill()
-
-
 def one(i):
     cmd, ready = prep()
     if kind == "debian":
-        shutil.copy(wd + "/primed.qcow2", wd + "/disk.qcow2")
+        shutil.copy(art, wd + "/disk.qcow2")  # art = debprep.sh output (no first-boot wizard, empty root password)
         cmd = [c.replace("%s/disk.qcow2", wd + "/disk.qcow2") if "%s" in c else c for c in cmd]
     buf = bytearray()
     t0 = time.time()
@@ -96,6 +71,7 @@ def one(i):
         if b"X:END" in bytes(buf).replace(b"echo X:END", b""):
             break
     txt = bytes(buf).decode("latin1")
+    txt = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", txt).replace("\r", "")  # debian: bracketed-paste escapes sit right before "M:"
     p.kill(); p.wait()
     m = re.search(r"^M:(\d+) (\d+) (\d+)", txt, re.M); d = re.search(r"^D:(\d+)", txt, re.M)
     if not m:
@@ -105,12 +81,10 @@ def one(i):
             "mem_total_mb": t, "rootfs_used_mb": int(d.group(1)) if d else -1}
 
 
-if kind == "debian":
-    prime()
 res = [r for r in (one(i) for i in range(runs)) if r]
 if not res:
     sys.exit("all runs failed")
 out = {k: round(statistics.median(r[k] for r in res), 1) for k in res[0]}
-out["image_mb"] = round(os.path.getsize(art) / 1048576.0, 1)
+out["image_mb"] = round(os.path.getsize(art.replace("-primed", "")) / 1048576.0, 1)
 out["runs_ok"] = len(res)
 print(json.dumps({kind: out}))
