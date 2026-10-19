@@ -8,6 +8,7 @@
 #   nav2  1280x800, scale 2 -> 640x400 points: navigation mode, low
 #   low   800x480, scale 1 -> two-column squeeze + scrolling page area (no navigation mode)
 #
+# `rad -N` = N notches DOWN (the guest sees wheel up for a positive QEMU dz).
 # Per boot (tools/design/audit.sh): open Settings, wheel over the list, open "Darstellung", wheel over the page, Back.
 # The window reports `settings: layout nav= detail= scroll= content= view= off=` (content/view/off of the page or list area,
 # pixels) after every change; tools/settingsnarrow/check.py reads them and the pictures.
@@ -37,12 +38,13 @@ for cfg in $CFGS; do
     echo "klickauf start_Settings"; echo "warte 12"
     echo "foto 00-start"
     echo "fahre $((XRES/2)),$((YRES/2))"; echo "warte 1"
-    echo "rad 6"; echo "warte 2"; echo "foto 01-wheel1"
-    echo "rad 10"; echo "warte 2"; echo "foto 02-wheel2"
+    echo "rad -6"; echo "warte 2"; echo "foto 01-wheel1"
+    echo "rad -10"; echo "warte 2"; echo "foto 02-wheel2"
+    echo "rad 20"; echo "warte 2"
     echo "klickauf srecttaba"; echo "warte 3"; echo "foto 03-page"
     echo "fahre $((XRES/2)),$((YRES/2))"; echo "warte 1"
-    echo "rad 8"; echo "warte 2"; echo "foto 04-page-wheel1"
-    echo "rad 8"; echo "warte 2"; echo "foto 05-page-wheel2"
+    echo "rad -8"; echo "warte 2"; echo "foto 04-page-wheel1"
+    echo "rad -8"; echo "warte 2"; echo "foto 05-page-wheel2"
     echo "klickauf srectwhp"; echo "warte 3"; echo "foto 06-back"
   } > "$DREH"
   export DESIGNBUILD="${DESIGNBUILD:-$D-build}"

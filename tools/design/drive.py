@@ -1156,7 +1156,7 @@ def main():
                 f.cmd("mouse_button 1")
                 time.sleep(0.6)
         # `rad <n>`: mouse wheel by n notches over the current pointer position (HMP `mouse_move 0 0 <n>`;
-        # QEMU: n > 0 = wheel DOWN). One monitor round trip per notch so the guest sees separate events.
+        # measured in the guest (settingsnarrow): n > 0 = wheel UP, n < 0 = wheel DOWN). One monitor round trip per notch so the guest sees separate events.
         elif b == "rad":
             n = int(arg)
             for _ in range(abs(n)):
