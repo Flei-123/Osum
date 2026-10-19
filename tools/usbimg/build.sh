@@ -296,7 +296,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp log host ota jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder"}
+orientbus act settingsd axd sntp accountcli pdfview store stored presentlog sysinfo massren privacy welcome runbox cliphist charmap apprights wmplug hotkeyd jarvismini social soclocal melder bench"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -1437,7 +1437,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/module.conf \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
-/bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
+/bin/desktop /bin/taskbar /bin/netview /bin/explorer /bin/bench /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/ipprint \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/permissions.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \

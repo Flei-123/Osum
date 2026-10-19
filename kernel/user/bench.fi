@@ -133,6 +133,7 @@ static mut s95: [u8; 4] = "cpu\0"
 static mut s96: [u8; 7] = "--json\0"
 static mut s97: [u8; 79] = "bench: unknown group (boot mem idle size syscall fs memcpy cpu all) or --json\n\0"
 static mut s98: [u8; 8] = "tsc.khz\0"
+static mut s99: [u8; 4] = "kHz\0"
 
 static mut khz: u64 = 0
 static mut sink: u64 = 0
@@ -402,19 +403,18 @@ fn group_idle() {
         dt = 1
     }
     let dtk: u64 = t1 - t0
-    var busy: u64 = 1000
-    if dtk > 0 {
-        let idl: u64 = i1 - i0
-        if idl <= dtk {
-            busy = 1000 - idl * 1000 / dtk
-        }
-    }
     add((&s21[0 as usize]) as u64, dt, (&s3[0 as usize]) as u64)
-    add((&s22[0 as usize]) as u64, busy, (&s23[0 as usize]) as u64)
+    if dtk > 0 && i1 >= i0 && i1 - i0 <= dtk {
+        add((&s22[0 as usize]) as u64, 1000 - (i1 - i0) * 1000 / dtk, (&s23[0 as usize]) as u64)
+    }
     if tr0 != NONE && tr1 != NONE {
         add((&s24[0 as usize]) as u64, (tr1 - tr0) * 1000 / dt, (&s25[0 as usize]) as u64)
     }
-    add((&s26[0 as usize]) as u64, (w1 - w0) * 1000 / dt, (&s25[0 as usize]) as u64)
+    // per-core counters exist only when the firmware reported cores (CS_COUNT > 0); the QEMU -kernel fast image has none
+    let ncs: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_COUNT, 0)
+    if !ulib.bad(ncs) && ncs > 0 && w1 >= w0 {
+        add((&s26[0 as usize]) as u64, (w1 - w0) * 1000 / dt, (&s25[0 as usize]) as u64)
+    }
     var ds: u64 = s1 - s0
     if ds >= 8 {
         ds = ds - 8
@@ -694,31 +694,36 @@ fn group_memcpy() {
     if ns > 0 {
         add((&s67[0 as usize]) as u64, 4 * 64 * 1000000000 / ns / 1024, (&s65[0 as usize]) as u64)
     }
-    // alloc: grow the break by 2 MiB in 64 KiB steps and touch every page
+    // alloc: the break region is small (BRK_BASE..MMAP_TOP = 448 KiB), so grow it by 256 KiB in 64 KiB steps,
+    // touch every page, shrink back; 8 rounds = 2 MiB (512 pages) touched
     let base: u64 = ulib.sys(ulib.SYS_BRK, 0, 0, 0)
     if !ulib.bad(base) && base != 0 {
-        t0 = tsc()
-        var at: u64 = base
         var ok: bool = true
-        while at < base + 2097152 && ok {
-            let r: u64 = ulib.sys(ulib.SYS_BRK, at + 65536, 0, 0)
-            if ulib.bad(r) || r < at + 65536 {
-                ok = false
-            } else {
-                var q: u64 = at
-                while q < at + 65536 {
-                    __mmio_write8(q as *mut u8, 1 as u8)
-                    q = q + 4096
+        var round: u64 = 0
+        t0 = tsc()
+        while round < 8 && ok {
+            var at: u64 = base
+            while at < base + 262144 && ok {
+                let r: u64 = ulib.sys(ulib.SYS_BRK, at + 65536, 0, 0)
+                if ulib.bad(r) || r < at + 65536 {
+                    ok = false
+                } else {
+                    var q: u64 = at
+                    while q < at + 65536 {
+                        __mmio_write8(q as *mut u8, 1 as u8)
+                        q = q + 4096
+                    }
+                    at = at + 65536
                 }
-                at = at + 65536
             }
+            ulib.sys(ulib.SYS_BRK, base, 0, 0)
+            round = round + 1
         }
         ns = ns_of(tsc() - t0)
         if ok && ns > 0 {
             add((&s68[0 as usize]) as u64, 2048 * 1000000000 / ns / 1024 * 1, (&s65[0 as usize]) as u64)
             add((&s69[0 as usize]) as u64, ns / 512, (&s47[0 as usize]) as u64)
         }
-        ulib.sys(ulib.SYS_BRK, base, 0, 0)
     }
 }
 
@@ -757,8 +762,8 @@ fn cpu_sort() -> bool {
     var i: u64 = 0
     var x: u64 = 123456789
     while i < 16384 {
-        x = x * 6364136223846793005 + 1442695040888963407
-        arr[(i) as usize] = (x >> 33) as u32
+        x = (x * 1103515245 + 12345) & 2147483647
+        arr[(i) as usize] = x as u32
         i = i + 1
     }
     // shell sort
@@ -789,12 +794,12 @@ fn cpu_sort() -> bool {
 
 fn cpu_hash(rounds: u64) -> u64 {
     let p: u64 = (&bufa[0 as usize]) as u64
-    var h: u64 = 14695981039346656037
+    var h: u64 = 2166136261
     var r: u64 = 0
     while r < rounds {
         var i: u64 = 0
         while i < 65536 {
-            h = (h ^ ((*((p + i) as *mut u8)) as u64)) * 1099511628211
+            h = ((h ^ ((*((p + i) as *mut u8)) as u64)) * 16777619) & 4294967295
             i = i + 1
         }
         r = r + 1
@@ -963,6 +968,7 @@ fn u_start(args: u64) -> u64 {
     } else {
         calibrate()
     }
+    add((&s98[0 as usize]) as u64, khz, (&s99[0 as usize]) as u64)
     if selected(G_BOOT) { group_boot() }
     if selected(G_MEM) { group_mem() }
     if selected(G_SIZE) { group_size() }
