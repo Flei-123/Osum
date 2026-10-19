@@ -34,6 +34,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 FPS=${FPS:-40}
+DREH=${DREH:-$ROOT/tools/idlebudget/dreh.txt}   # DREH=<file>: another script (experiments with the measuring window)
 
 run_tree() { # <tree> <out> [extra kernel words]
     local qp=$((20000 + RANDOM % 20000)) hp=$((40000 + RANDOM % 20000))
@@ -42,7 +43,7 @@ run_tree() { # <tree> <out> [extra kernel words]
     ( cd "$1"
       EH_NETDEV="-netdev socket,id=n0,udp=127.0.0.1:$hp,localaddr=127.0.0.1:$qp -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm netz=ja \
-        drehbuch="$ROOT/tools/idlebudget/dreh.txt" ${3:+extra="$3"} > "$2/o.log" 2>&1 )
+        drehbuch="$DREH" ${3:+extra="$3"} > "$2/o.log" 2>&1 )
     kill $fp 2>/dev/null
 }
 share() { # <table-file> <kind-or-name>  -> sum of shares
