@@ -2444,6 +2444,8 @@ static mut desk_hlt: [u64; 8] = [0 as u64; 8]
 // the same. The boot core never slows: it keeps the global tick.
 // ---------------------------------------------------------------------------
 const KICK_VECTOR: u64 = 41
+// TL_MODE bit0 = lengthen the idle AP timer, bit1 = wake IPI (kick_idle). 0 = off. (A/B experiment r1176)
+const TL_MODE: u64 = 3
 const SLOW_MUL: u64 = 10
 const SLOW_AFTER: u64 = 3
 static mut slow_flag: [u64; 8] = [0 as u64; 8]
@@ -2467,14 +2469,16 @@ fn slow_stats(which: u64) -> u64 {
 // idle turns in a row. Interrupts are masked while the state flips so the
 // kick handler cannot run between the flag and the timer write.
 fn slow_enter(state: u64, me: u64, streak: u64) {
-    if me == 0 || me >= 8 || streak < SLOW_AFTER || slow_flag[me as usize] != 0 {
+    if TL_MODE == 0 || me == 0 || me >= 8 || streak < SLOW_AFTER || slow_flag[me as usize] != 0 {
         return
     }
     let flags: u64 = irq_save()
     slow_flag[me as usize] = 1
     atomic.fetch_add((&slow_cnt[0]) as u64, 1)
     slow_nenter[0] = slow_nenter[0] + 1
-    apic.timer_slow(state, SLOW_MUL)
+    if (TL_MODE & 1) != 0 {
+        apic.timer_slow(state, SLOW_MUL)
+    }
     irq_restore(flags)
 }
 
@@ -2482,7 +2486,9 @@ fn slow_leave(state: u64, me: u64) {
     if me >= 8 || slow_flag[me as usize] == 0 {
         return
     }
-    apic.timer_fast(state)
+    if (TL_MODE & 1) != 0 {
+        apic.timer_fast(state)
+    }
     slow_flag[me as usize] = 0
     atomic.fetch_sub((&slow_cnt[0]) as u64, 1)
 }
@@ -2499,7 +2505,7 @@ fn kick_arrive(state: u64) {
 
 // Wake ONE slowed idle core (not this one). Cheap when none is slow.
 fn kick_idle(state: u64) {
-    if slow_cnt[0] == 0 {
+    if (TL_MODE & 2) == 0 || slow_cnt[0] == 0 {
         return
     }
     let me: u64 = cpu.here(state)
