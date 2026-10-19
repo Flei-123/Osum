@@ -19,7 +19,7 @@ import sys
 import time
 
 UNITS = {
-    "host.boot_agent_ms": "ms", "host.boot_login_ms": "ms", "host.login_to_desktop_ms": "ms", "boot.total_ms": "ms",
+    "host.boot_agent_ms": "ms", "host.boot_loader_ms": "ms", "host.boot_kernel_ms": "ms", "idle.portio_nonserial_per_s": "1/s", "host.boot_login_ms": "ms", "host.login_to_desktop_ms": "ms", "boot.total_ms": "ms",
     "mem.idle_used_mb": "MB", "mem.total_mb": "MB", "host.qemu_rss_mb": "MB",
     "idle.cpu_pct": "%", "idle.host_cpu_pct": "%", "idle.portio_per_s": "1/s", "idle.ide_cmds_per_s": "1/s",
     "idle.wakeups_per_s": "1/s", "size.kernel_kb": "KB", "size.image_mb": "MB", "size.esp_used_kb": "KB",
@@ -96,6 +96,10 @@ def portio(text):
     m = re.search(r"PORTIO median/s: (\d+)", text)
     if m:
         out["idle.portio_per_s"] = int(m.group(1))
+    # the ODB agent polls COM2 (serial) ~800x/s: counted in idle.portio_per_s, but the budget is on everything else
+    top = [float(x) for x in re.findall(r"^\s+(?!serial)\S+\s+(?:read|write)\s+0x\w+\s+([\d.]+)/s", text, re.M)]
+    if top:
+        out["idle.portio_nonserial_per_s"] = int(round(sum(top)))
     m = re.search(r"PORTIO ide_cmds/s: ([\d.]+)", text)
     if m:
         out["idle.ide_cmds_per_s"] = float(m.group(1))

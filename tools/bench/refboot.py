@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/bench/refboot.py <kind> <workdir> <artifact> [runs] -- boot a reference distro in QEMU/KVM and measure it (prints JSON).
 kind: alpine (virt ISO, kernel+initramfs taken from the ISO), tinycore (CorePure64 ISO + a tiny extra initrd that reports from
-/opt/bootlocal.sh), debian (cloud nocloud qcow2). Same machine as tools/bench/run.sh: KVM, 2 vCPU, 1536 MiB, headless, COM1 on stdio.
+/opt/bootlocal.sh), debian (cloud nocloud qcow2). Same machine as tools/bench/measure.sh: KVM, 2 vCPU, 1536 MiB, headless, COM1 on stdio.
 Measured per run: boot_prompt_ms (host clock QEMU start -> login prompt / init-done marker), idle memory 20 s later from
 /proc/meminfo (used = MemTotal - MemFree; used_avail = MemTotal - MemAvailable), rootfs used MB (df /). Median over runs."""
 import json, os, re, shutil, statistics, subprocess, sys, threading, time

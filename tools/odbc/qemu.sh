@@ -17,8 +17,9 @@ case $cmd in
     img=${1:?image}; d=${2:?dir}; smp=${3:-2}; mem=${4:-1536}
     mkdir -p "$d"; rm -f "$d/odb.sock" "$d/qemu.pid"
     kvm=""; [ -w /dev/kvm ] && kvm="-enable-kvm -cpu host"
+    # QEMU_EXTRA: extra qemu arguments (word-split), e.g. a -monitor socket or -D logfile (tools/bench/measure.sh --portio)
     # shellcheck disable=SC2086
-    qemu-system-x86_64 $kvm -smp "$smp" -m "$mem" -display none -no-reboot \
+    qemu-system-x86_64 $kvm ${QEMU_EXTRA:-} -smp "$smp" -m "$mem" -display none -no-reboot \
         -drive file="$img",format=raw,if=ide \
         -serial file:"$d/com1.log" \
         -chardev socket,id=odb,path="$d/odb.sock",server=on,wait=off -serial chardev:odb \

@@ -6,7 +6,7 @@
 #                                                     bench/results/baseline.json is inside every budget, and the counter-proof holds:
 #                                                     the same numbers worsened by 1.5x MUST violate the budgets.
 #   bash tools/bench/gate.sh --result <file.json>     check an existing result file (+ counter-proof)
-#   bash tools/bench/gate.sh [--image IMG] [--ui]     NIGHTLY: measure (tools/bench/run.sh --runs 3 --portio [--ui]) on a FULL ODB=1 image
+#   bash tools/bench/gate.sh [--image IMG] [--ui]     NIGHTLY: measure (tools/bench/measure.sh --runs 3 --portio [--ui]) on a FULL ODB=1 image
 #                                                     (no --image: builds its own via tools/usbimg/build.sh, ~9 min) and check it.
 # Budgets are "max" (lower is better) or "min" limits per result key, set slightly ABOVE the measured baseline. Keys the run did not
 # produce are SKIPped (e.g. ui.* without --ui). Run the nightly through /root/jarvis/bin/heavy.
@@ -56,7 +56,7 @@ case $MODE in
               bash tools/usbimg/build.sh "$D/img" > "$D/build.log" 2>&1 ) || { tail -10 "$D/build.log"; bad "ODB=1 image build"; fin; }
             IMG=$D/img/orientos-usb.img
         fi
-        bash tools/bench/run.sh --image "$IMG" --runs 3 --portio $UIARG --out "$D/res" --commit gate 2>&1 | tail -30
+        bash tools/bench/measure.sh --image "$IMG" --runs 3 --portio $UIARG --out "$D/res" --commit gate 2>&1 | tail -30
         [ -s "$D/res/gate.json" ] && check "$D/res/gate.json" || bad "no result from run.sh" ;;
 esac
 fin
