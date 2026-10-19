@@ -191,8 +191,13 @@ pubt() { # <imgdir> <feed> <channel> [args] -- signed with the test key the imag
     python3 tools/ota/publish_system.py "$i" "$f" "$c" --key "$OUT/geheim.key" "$@" > "$OUT/pub.log" 2>&1
 }
 printf 'Gate build: new kernel, patched commit %s\n' "$NEW" > "$OUT/notes.txt"
-pubt "$OUT/img-new" "$OUT/feed-good" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" --gz && ok "good feed: build 200 (gzip + 4 overlay files)" || { cat "$OUT/pub.log"; bad "publish good"; }
-pubt "$OUT/img-new" "$OUT/feed-raw" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" && ok "raw feed: build 200 (no gzip, 4 overlay files)" || { cat "$OUT/pub.log"; bad "publish raw"; }
+# the running /bin/ota itself is part of the overlay (byte-identical copy): rename of a running program
+cp "$OUT/bin/ota" "$OUT/ovl/ota" && H_OTA=$(h "$OUT/ovl/ota") || bad "no built ota to put into the overlay"
+# free-space fixture: claims 200 MB (zeros, gz is tiny) on a 96 MiB disk
+mkdir -p "$OUT/ovl-big"; head -c $((200 * 1024 * 1024)) /dev/zero > "$OUT/ovl-big/gate-huge.bin"
+pubt "$OUT/img-new" "$OUT/feed-good" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" --gz && ok "good feed: build 200 (gzip + 5 overlay files)" || { cat "$OUT/pub.log"; bad "publish good"; }
+pubt "$OUT/img-new" "$OUT/feed-raw" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" && ok "raw feed: build 200 (no gzip, 5 overlay files)" || { cat "$OUT/pub.log"; bad "publish raw"; }
+pubt "$OUT/img-new" "$OUT/feed-huge" dev --count 200 --overlay "$OUT/ovl-big" --gz && ok "huge overlay feed (200 MB claimed)" || { cat "$OUT/pub.log"; bad "publish huge"; }
 pubt "$OUT/img-new" "$OUT/feed-badovl" dev --count 200 --overlay "$OUT/ovl" --gz --bad-ovl-hash && ok "bad overlay hash feed" || bad "publish bad-ovl-hash"
 pubt "$OUT/img-new" "$OUT/feed-badgz" dev --count 200 --overlay "$OUT/ovl" --gz --bad-gz && ok "bad gz feed (flipped bit inside the deflate data)" || bad "publish bad-gz"
 grep -qa "^sysgz" "$OUT/feed-good/system/dev/VERZEICHNIS" && grep -qa "^sysfile.file" "$OUT/feed-good/system/dev/VERZEICHNIS" && ok "list carries sysfile file + sysgz lines" || bad "list lacks the overlay lines"
@@ -218,7 +223,8 @@ gleich "slot A untouched" "$(esp_sha osum.mb)" "$OLDSHA"
 gleich "limine default_entry is 2" "$(conf_default)" "2"
 esp_get limine.conf | grep -qa 'osum-b.mb' && ok "entry B points at osum-b.mb" || bad "no entry B"
 mdir -i "$ESP" ::/ > /dev/null 2>&1 && ok "ESP FAT still readable" || bad "ESP FAT damaged"
-rc=$(lauf g2 "cat /system/SYSVERSION;ota system status;cat /bin/gate-ovl.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin;exit" keep)
+rc=$(lauf g2 "cat /system/SYSVERSION;ota system status;cat /bin/gate-ovl.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin /bin/ota;exit" keep)
+hat "$OUT/g2.txt" "$H_OTA" "trial boot: the replaced /bin/ota is byte-identical"
 hat "$OUT/g2.txt" "OVERLAY-NEW-CONTENT" "trial boot: new /bin file (gz transport)"
 hat "$OUT/g2.txt" "$H_BIG_NEW" "trial boot: gunzipped 270 KB file is byte-identical"
 hat "$OUT/g2.txt" "$H_RND_NEW" "trial boot: gunzipped incompressible file is byte-identical"
@@ -230,7 +236,11 @@ gleich "slot A still untouched before confirm" "$(esp_sha osum.mb)" "$OLDSHA"
 rc=$(lauf g3 "ota system confirm;ota system status;cat /system/SYSVERSION;ls /system/old;ls /system;exit" keep)
 hat "$OUT/g3.txt" "system: overlay committed" "confirm commits the overlay"
 hatnicht "$OUT/g3.txt" "SYSOVL" "journal removed"
-hatnicht "$OUT/g3.txt" "gate-ovl.txt" "backups removed from /system/old"
+# only the output of `ls /system/old` counts (the boot log lists /bin and shows gate-ovl.txt)
+sed -n '/^osum\$ ls \/system\/old/,/^osum\$ ls -> /p' "$OUT/g3.txt" > "$OUT/g3.old"
+[ -s "$OUT/g3.old" ] && ok "ls /system/old output captured" || bad "ls /system/old output missing"
+hatnicht "$OUT/g3.old" "gate-ovl.txt" "backups removed from /system/old"
+hatnicht "$OUT/g3.old" "ota" "no ota backup left in /system/old"
 hat "$OUT/g3.txt" "system: new kernel confirmed and promoted to slot A" "confirm promotes B -> A"
 gleich "slot A == new kernel" "$(esp_sha osum.mb)" "$KSHA"
 gleich "limine default_entry back to 1" "$(conf_default)" "1"
@@ -342,15 +352,17 @@ if want 8; then
 echo "== 8. stage 2 raw: /bin overlay without gzip, apply swaps the files, old ones kept in /system/old =="
 fresh_disk
 dienst "$OUT/feed-raw" || bad "feed does not start"
-rc=$(lauf r1 "cat /bin/gate-ovl.txt;ota system apply;cat /bin/gate-ovl.txt;cat /bin/gate-new.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin;cat /system/old/gate-ovl.txt;cat /system/SYSOVL;exit")
+rc=$(lauf r1 "cat /bin/gate-ovl.txt;ota system apply;ota system status;shasum /bin/ota;cat /bin/gate-ovl.txt;cat /bin/gate-new.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin;cat /system/old/gate-ovl.txt;cat /system/SYSOVL;exit")
 hat "$OUT/r1.txt" "OVERLAY-OLD-CONTENT" "before apply: the old /bin file"
-hat "$OUT/r1.txt" "system: overlay files verified: 4" "4 overlay files verified"
+hat "$OUT/r1.txt" "system: overlay files verified: 5" "5 overlay files verified"
 hat "$OUT/r1.txt" "OVERLAY-NEW-CONTENT" "after apply: /bin has the new content"
 hat "$OUT/r1.txt" "BRAND-NEW-FILE" "after apply: a brand-new /bin file exists"
 hat "$OUT/r1.txt" "$H_BIG_NEW" "big text file (270 KB) is byte-identical"
 hat "$OUT/r1.txt" "$H_RND_NEW" "incompressible file is byte-identical"
 hat "$OUT/r1.txt" "1gate-ovl.txt" "journal says the file pre-existed"
 hat "$OUT/r1.txt" "0gate-new.txt" "journal says the file is new"
+hat "$OUT/r1.txt" "$H_OTA" "running /bin/ota was renamed + replaced (byte-identical)"
+hat "$OUT/r1.txt" "system: pending trial of build" "the NEW /bin/ota still runs after the swap (status)"
 dienst_aus
 fi
 
@@ -384,6 +396,18 @@ fresh_disk
 rc=$(lauf c1 "mkdir /system/old;mv /bin/gate-ovl.txt /system/old/gate-ovl.txt;echo 1gate-ovl.txt > /system/SYSOVL;ota system confirm;cat /bin/gate-ovl.txt;exit")
 hat "$OUT/c1.txt" "system: overlay restored" "restore ran"
 hat "$OUT/c1.txt" "OVERLAY-OLD-CONTENT" "the old file is back in /bin"
+fi
+
+if want 12; then
+echo "== 12. stage 2 free-space precheck: overlay claims 200 MB on a 96 MiB disk -> refused before any download =="
+fresh_disk
+dienst "$OUT/feed-huge" || bad "feed does not start"
+rc=$(lauf f1 "ota system apply;cat /bin/gate-ovl.txt;ota system status;exit")
+hat "$OUT/f1.txt" "ota: not enough free space for the overlay files" "precheck refuses"
+hatnicht "$OUT/f1.txt" "system: staged" "nothing staged"
+hat "$OUT/f1.txt" "OVERLAY-OLD-CONTENT" "/bin untouched"
+esp_has osum-b.mb && bad "slot B written" || ok "no slot B"
+dienst_aus
 fi
 
 if want 7; then
