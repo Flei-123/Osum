@@ -76,3 +76,23 @@ Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev
   Same on/off switch as the package service (`auto=`). Test entry: `ota service 1 system`.
 - Gates: `tools/osupdate/run.sh` section 7 (service check), `tools/actionbus/run.sh` S-UPD + `gui.sh` (page block).
 
+
+## 6. Live feed `system/dev` (store.fleitec.com), published 19.10.2026
+- The store is a plain static directory on the JARVIS server: `/srv/store/osum` is served at
+  `https://store.fleitec.com/osum/` (openresty). `aktuell/`, `v/`, `pakete/`, `register.json` are written by
+  `veroeffentlichen.py`; `system/` is a sibling that script never touches (it only rewrites `aktuell/`, `v/<n>`).
+- Procedure (no extra credentials beyond the bundle on the server: `/root/.secrets/osum-ota-bund.json` +
+  `/root/.secrets/osum-ota-pass.txt`, used by `publish-system.sh`):
+      bash vendor/firn/fetch-firnc.sh && bash tools/build-kernel.sh <dir>/osum.mb --stufe 0
+      bash tools/ota/publish-system.sh <dir> /srv/store/osum dev --notes <notes.txt> --name "OrientOS dev"
+  The kernel is copied first, the signed `VERZEICHNIS` last, so a half-written stand is never visible.
+  `count` = `git rev-list --count HEAD` (only grows; devices refuse `count <= SYSVERSION`).
+- The signature uses the same bundle key as `aktuell/` (`system/dev/schluessel.pub` == `aktuell/schluessel.pub`),
+  so every installed image already trusts it. Default channel on a device is `stable`; `system/dev` is only read
+  by devices with `kanal=dev` in `/etc/ota.conf` (or `sysquelle=`).
+- Check after publishing: `curl -s .../system/dev/VERZEICHNIS | ...` + Ed25519 verify with `tools/ota/listing.py`
+  (`m.ed25519_verify(pub, doc, sig)`), kernel hash vs the `sysfile kernel` line, and an `aktuell/ v/ pakete/` checksum
+  taken before/after (must be identical).
+- Rollback of a bad stand: remove `system/dev/VERZEICHNIS` (devices then see "no system line"); installed trial
+  kernels roll back by themselves after 3 unconfirmed boots.
+- Stand 1: count 3195, commit 676b055 (main 676b0554), kernel sha256 c98bf5c3...2934, 8 649 000 bytes.
