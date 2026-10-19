@@ -662,6 +662,9 @@ cat /etc/sperre.conf
 echo ==S-UPD==
 act call settings.update.status
 act call settings.update.check --dry
+act call settings.update.sysstatus
+act call settings.update.syscheck --dry
+act call settings.update.sysinstall --dry --as jarvis
 act call settings.update.install --dry --as jarvis
 act call settings.update.rollback --as jarvis
 act reject last
@@ -787,6 +790,10 @@ has "$TMPD/p.txt" "channel=stable" "... channel from /etc/ota.conf"
 has "$TMPD/p.txt" "busy=0" "... and nothing running"
 has "$TMPD/p.txt" "would=search" "a dry run of update.check says what it would run and starts nothing"
 has "$TMPD/p.txt" "would=apply" "... update.install the same"
+has "$TMPD/p.txt" "phase=current" "SELFUPDATE: settings.update.sysstatus answers (phase current without sys.stand)"
+has "$TMPD/p.txt" "ver=" "... with the running build text (ver=)"
+has "$TMPD/p.txt" "would=system-search" "a dry run of update.syscheck says what it would run and starts nothing"
+has "$TMPD/p.txt" "would=system-apply" "... update.sysinstall the same"
 has "$TMPD/p.txt" "confirm 5 settings.update.rollback" "update.rollback is critical: an agent's call is parked"
 has "$TMPD/p.txt" "kanal=test" "update.channel lands in /etc/ota.conf, where ota reads it"
 has "$TMPD/p.txt" "auto=true" "... update.auto (set to true in section S-CRIT) went into the same file"

@@ -338,6 +338,8 @@ if waitfor "==G-UPDPAGE==" 60; then
     T=$(mid tabo) && klick $T
     sleep 4
     shot "$TMPD/9-update.ppm"
+    if S=$(mid schk); then klick $S; sleep 3; else bad "the page Updates has no SYSTEM check button"; fi
+    shot "$TMPD/9a-update.ppm"
     if U=$(mid ucheck); then
         klick $U; sleep 3
         shot "$TMPD/9b-update.ppm"
@@ -467,6 +469,9 @@ has "$G" "wm: trusted dialog down no=" "a request confirmed with 'act confirm' t
 grep -qaE 'settings: update page here=[0-9]+ phase=[a-z]* channel=[a-z]+ busy=[01]' "$G" \
     && ok "page Updates (DAILY-DRIVER): $(grep -a 'settings: update page' "$G" | tail -1 | cut -c1-90)" \
     || bad "page Updates: no status over settings.update.status ($(grep -a 'settings: update page' "$G" | tail -1))"
+grep -qaE 'settings: system update here=[0-9]+ phase=[a-z]* there=[0-9]+ notes=[0-9]+' "$G" \
+    && ok "page Updates SYSTEM block: $(grep -a 'settings: system update' "$G" | tail -1 | cut -c1-90)" \
+    || bad "page Updates SYSTEM block: no status over settings.update.sysstatus ($(grep -a 'settings: system update' "$G" | tail -1))"
 for f in 1-system 2-ask 3-done 4-rights 5-granted 5b-screen 6-netask 7-netdone 8-log 9-update 9-trust 10-trust-still 11-trust-done; do
     [ -s "$TMPD/$f.png" ] && ok "photo: $TMPD/$f.png" || bad "no photo $f"
 done

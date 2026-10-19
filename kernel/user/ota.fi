@@ -2268,6 +2268,15 @@ fn cmd_dienst(rounds: u64) -> u64 {
         return 0
     }
     sagn((&S_DIENST[0 as usize]) as u64, abstand)
+    // system check: at the first round (right after boot + START seconds) and then every
+    // `sysabstand=` seconds (default 21600 = 6 h). The test entry `ota dienst <n>` does it
+    // only with the extra word `system` (`ota dienst 1 system`), so the package tests stay as they were.
+    var sys_gap: u64 = conf_num((&K_SYSABST[0 as usize]) as u64, 21600)
+    var sys_on: bool = sys_gap != 0
+    if rounds != 0 {
+        sys_on = sys_on && dienst_sys
+    }
+    var sys_left: u64 = 0
     var weiter: bool = true
     var gelaufen: u64 = 0
     var fehlversuche: u64 = 0
@@ -2307,6 +2316,14 @@ fn cmd_dienst(rounds: u64) -> u64 {
         if fr == 0 && !in_erprobung() {
             cmd_einspielen()
         }
+        if sys_on && sys_left == 0 {
+            // the feed answered (newer = 0, current = 1): next look in `sysabstand`;
+            // an error (offline, clock) is retried with the next round of the service
+            let sr: u64 = su_auto_check()
+            if sr <= 1 {
+                sys_left = sys_gap
+            }
+        }
         gelaufen = gelaufen + 1
         if rounds != 0 && gelaufen >= rounds {
             return 0
@@ -2340,6 +2357,11 @@ fn cmd_dienst(rounds: u64) -> u64 {
             // warten.
             ulib.sleep_ms(1000)
             s = s + 1
+        }
+        if sys_left > warte {
+            sys_left = sys_left - warte
+        } else {
+            sys_left = 0
         }
     }
     return 0
@@ -2473,6 +2495,11 @@ fn cmd_einstellen(schl: u64, wert: u64) -> u64 {
 static mut C_SU_SYSTEM: [u8; 7] = "system\0"
 static mut W_SU_DEV: [u8; 4] = "dev\0"
 static mut sys_mode: bool = false
+static mut K_SYSABST: [u8; 12] = "sysabstand=\0"
+static mut P_SU_NOTIFIED: [u8; 21] = "/system/sys.notified\0"
+static mut S_SU_TOAST: [u8; 32] = "System update available: build \0"
+static mut su_quiet: bool = false
+static mut dienst_sys: bool = false
 // ======================================================================
 // SELFUPDATE (SU-2, 19.10.2026): `ota system search|apply|status|confirm`.
 //
@@ -2761,9 +2788,11 @@ fn su_notes_show() {
     }
     p8((&SYSB[0 as usize]) as u64 + n, 0)
     file_write((&P_SU_NOTES[0 as usize]) as u64, (&SYSB[0 as usize]) as u64, n)
-    ulib.say((&S_SU_NOTES[0 as usize]) as u64)
-    ulib.nl()
-    ulib.say((&SYSB[0 as usize]) as u64)
+    if !su_quiet {
+        ulib.say((&S_SU_NOTES[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&SYSB[0 as usize]) as u64)
+    }
     remove((&ZIEL[0 as usize]) as u64)
 }
 
@@ -2808,6 +2837,33 @@ fn cmd_sys_find() -> u64 {
         su_notes_show()
         su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
     }
+    return r
+}
+
+
+// PERIODIC SYSTEM CHECK (service `ota dienst`): quiet check of the SYSTEM feed; when a newer
+// build exists its changelog is fetched (sys.notes), sys.stand says `available`, and ONE
+// notification per build number is posted (the bell + toast of the bar). Nothing is installed.
+// Returns 0 when a newer build is offered.
+fn su_auto_check() -> u64 {
+    if in_erprobung() || su_pending() {
+        return 1 // a trial is running: the next look comes after it is decided
+    }
+    su_quiet = true
+    let r: u64 = su_check(false)
+    if r == 0 {
+        su_notes_show()
+        su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
+        if num9_read((&P_SU_NOTIFIED[0 as usize]) as u64) != su_count {
+            var tb: [u8; 96] = [0 as u8; 96]
+            let tp: u64 = (&tb[0 as usize]) as u64
+            ulib.strcpy(tp, (&S_SU_TOAST[0 as usize]) as u64)
+            num_at(tp, su_count)
+            let _n: u64 = ulib.noti_post(1, tp, ulib.length(tp))
+            num9_write((&P_SU_NOTIFIED[0 as usize]) as u64, su_count)
+        }
+    }
+    su_quiet = false
     return r
 }
 
@@ -3299,6 +3355,9 @@ fn u_start(args: u64) -> u64 {
         var rn: u64 = 0
         if argc >= 3 {
             rn = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        if argc >= 4 && ulib.streq(ulib.arg_at(args, 3), (&C_SU_SYSTEM[0 as usize]) as u64) {
+            dienst_sys = true
         }
         return cmd_dienst(rn)
     }
