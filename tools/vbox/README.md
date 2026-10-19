@@ -81,3 +81,11 @@ Output lines start with `OK:` / `FAIL:` / `INFO:`; exit code 1 on FAIL.
 - Screen size: first boot is 1024x768; `hint` changes it. The taskbar follows after a few seconds (W-C3g); measure after `wait 8`.
 - Test VM connects to the server as device "OrientOS-VM" (jarvisd in the image). Never use that device for commands.
 - Boss VM scale factor is 1.75 (boss decision: set to 1, not done by us); the test VM gets ScaleFactor 1.
+
+## r1268: guest "freezes", host 99-105 % CPU (analysis 19.10.2026, laptop = Surface Laptop 4, VBox 7.2.20)
+- Host runs VirtualBox on Hyper-V (VBS on, `HM: VT-x is not available -> NEM`). All VMs use the WHv/NEM backend.
+- Boss VM in burn state: ONE EMT thread (EMT-2) at 99.7 % host CPU, the other two vCPUs idle in `idt.halt`. `debugvm statistics`: `/TM/CPU/02/cNsOther` = 3203 s of 3477 s (neither executing nor halted), `/TM/VirtualSync/GivenUp` = 3196 s = the guest clock lagged by 53 min; the burn ended the moment VBox logged `TM: Giving up catch-up attempt at a 3 118 354 249 999 ns lag`. NEM exit counters are tiny (PortIo 30k, MemUnmapped 20k) -> not exit-bound, no guest spin (guest rips seen on the burning vCPU were syscall paths, registers moved).
+- Test VMs: 3 vCPUs burned in the first minute (2 of 2, EMT-1/EMT-2 at ~90 %, TM counters of vCPU0 frozen); 1 vCPU VM did not (n=1, host ~25 % during boot). 2 vCPUs: see report.
+- Workaround: `VBL_CPUS=1` (or `VBoxManage modifyvm <vm> --cpus 1`, VM powered off). Real fix candidates: native VT-x (Windows Hypervisor Platform off: `bcdedit /set hypervisorlaunchtype off` + disable Core Isolation, needs admin + reboot, Boss decision), newer VBox, or find what the guest does on APs that makes NEM spin.
+- Tools: `VBL_VM=<name>` runs vbtest against an extra test VM (never the boss VM), `VBL_EXTRA='--hpet on ...'` extra `modifyvm` args at mkvm, `VBL_XDATA='key=val;key=val'` extradata, `diag/mx.ps1` repeated-boot runner (use host CPU per pid; the TM counters freeze in the burn state). Keep `VBL_MEM=1536` when running 3 VMs in parallel (16 GB laptop, VERR_NO_PAGE_MEMORY otherwise).
+- Reading a burning VM: thread names via GetThreadDescription (EMT-n), `debugvm <vm> statistics --pattern '/TM/CPU/*|/TM/VirtualSync/*'`; `debugvm getregisters` may unstick it (do not use it when you want to keep the burn).
