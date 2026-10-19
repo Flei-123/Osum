@@ -53,22 +53,18 @@ if nav:
     long_page = any(l[3] > l[4] for l in pg)
     ok(long_page, "page is longer than the window (content > view)")
     ok(any(l[5] > 0 for l in pg), "wheel over the page scrolled it (off > 0)")
-    # keyboard focus: after the wheel put the page back to the top (off 0), Tab moves the focus down and the pane follows
+    # keyboard focus: the wheel is idle during the Tab phase, so the pane can only move because the focus reveal scrolls it
+    # down step by step: the last page reports rise strictly (serial lines of other programs may eat single reports)
     offs = [l[5] for l in pg]
-    seq_ok = False
-    for i, a in enumerate(offs):
-        if a > 0:
-            for j in range(i + 1, len(offs)):
-                if offs[j] == 0:
-                    seq_ok = any(b > 0 for b in offs[j + 1:])
-                    break
-            break
-    ok(seq_ok, "Tab focus scrolled the page again (off > 0 after the wheel put it back to 0)")
+    tail = offs[-4:]
+    seq_ok = len(tail) >= 3 and all(tail[i] < tail[i + 1] for i in range(len(tail) - 1))
+    ok(seq_ok, "Tab focus scrolled the page (the last page offsets rise: %s)" % tail)
     ok(lays[-1][1] == 0, "Back returned to the list (detail=0)")
-    ok("whp" in pg[0][6] if pg else False, "Back button reported on the page")
+    ok(any("whp" in l[6] for l in pg), "Back button reported on the page")
     # nothing cut off at the right edge: every reported control of the page (first page report, offset 0)
-    if pg:
-        r = pg[0][6]
+    pgr = [l[6] for l in pg if "waa" in l[6]]
+    if pgr:
+        r = pgr[0]
         if "waa" in r:
             wx, wy, ww, wh = r["waa"]
             sk = max(1, wx // 8)
