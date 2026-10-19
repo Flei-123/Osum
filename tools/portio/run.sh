@@ -7,9 +7,10 @@
 # Env: PIO_BUILD=<dir> reuses a kernel build; PIO_IDLE_FROM=<s> start of the idle window in s after the first trace line; negative = last N s (default -70).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-OUT=${1:?usage: run.sh <outdir> [key=value ...]}; shift
-mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+# no <outdir> (gate runner): a private temp dir, removed again
+if [ $# -ge 1 ]; then OUT=$1; shift; else OUT=$W/out; fi
+mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 ln -s "$(pwd)/tools/portio/qemu-wrap.sh" "$W/qemu-system-x86_64"
 export PIO_REAL_PATH="$PATH" PIO_LOG="$OUT/trace.log"
 export DESIGNBUILD="${PIO_BUILD:-$OUT/build}"
