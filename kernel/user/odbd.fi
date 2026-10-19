@@ -990,6 +990,26 @@ fn s_shellbusy() -> u64 {
     return (&S_SHELLBUSY[0 as usize]) as u64
 }
 
+static mut S_PROCODB: [u8; 10] = "/proc/odb\0"
+fn s_procodb() -> u64 {
+    return (&S_PROCODB[0 as usize]) as u64
+}
+
+static mut S_ODBONE: [u8; 6] = "odb=1\0"
+fn s_odbone() -> u64 {
+    return (&S_ODBONE[0 as usize]) as u64
+}
+
+static mut S_RXOV: [u8; 13] = "rx_overruns=\0"
+fn s_rxov() -> u64 {
+    return (&S_RXOV[0 as usize]) as u64
+}
+
+static mut S_UARTOV: [u8; 14] = "uart_overruns\0"
+fn s_uartov() -> u64 {
+    return (&S_UARTOV[0 as usize]) as u64
+}
+
 // ------------------------------------------------------------ constants
 
 const MAXP: u64 = 65536
@@ -1046,6 +1066,7 @@ static mut authed: u64 = 0
 static mut fails: u64 = 0
 static mut conf_allow: [u8; 256] = [0 as u8; 256]
 static mut tmp: [u8; 1024] = [0 as u8; 1024]
+static mut procb: [u8; 256] = [0 as u8; 256]
 static mut pathb: [u8; 600] = [0 as u8; 600]
 static mut cmdb: [u8; 2048] = [0 as u8; 2048]
 static mut argb: [u8; 2048] = [0 as u8; 2048]
@@ -1601,7 +1622,58 @@ fn hash_file(path: u64) -> bool {
 // ------------------------------------------------------------ config
 
 // True when /etc/odb.conf exists and has a line `enable=1`.
+// /proc/odb (kernel -> agent): "odb=<0|1>\nrx_overruns=<n>\n". Returns the octets read (0 = no such file).
+fn procodb_read() -> u64 {
+    let fd: u64 = io.open(s_procodb(), 0)
+    if errno.failed(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&procb[0 as usize]) as u64, 255)
+    io.close(fd)
+    if errno.failed(n) {
+        return 0
+    }
+    wr8((&procb[0 as usize]) as u64 + n, 0)
+    return n
+}
+
+// Value of "<key><digits>" at the start of a line of /proc/odb, NONE when the line is absent.
+fn procodb_num(n: u64, key: u64) -> u64 {
+    let kl: u64 = text.length(key)
+    let b: u64 = (&procb[0 as usize]) as u64
+    var i: u64 = 0
+    while i + kl <= n {
+        var j: u64 = 0
+        while j < kl && rd8(b + i + j) == rd8(key + j) {
+            j = j + 1
+        }
+        if j == kl && (i == 0 || rd8(b + i - 1) == 10) {
+            var v: u64 = 0
+            var k: u64 = i + kl
+            while k < n && rd8(b + k) >= 48 && rd8(b + k) <= 57 {
+                v = v * 10 + rd8(b + k) - 48
+                k = k + 1
+            }
+            return v
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+// `odb=1` on the kernel command line (r1155): the agent is enabled without /etc/odb.conf.
+fn cmdline_odb() -> bool {
+    let n: u64 = procodb_read()
+    if n == 0 {
+        return false
+    }
+    return procodb_num(n, s_odbone()) != NONE
+}
+
 fn conf_enabled() -> bool {
+    if cmdline_odb() {
+        return true
+    }
     let fd: u64 = io.open(s_confpath(), 0)
     if errno.failed(fd) {
         return false
@@ -1789,6 +1861,13 @@ fn cmd_info(id: u64, tp: u64, tl: u64) {
     }
     p_num(s_idle_pct(), allpct)
     p_num(s_procs(), ulib.sys(ulib.SYS_SYSINFO, ulib.I_TASKS, 0, 0))
+    let pn: u64 = procodb_read()
+    if pn > 0 {
+        let ov: u64 = procodb_num(pn, s_rxov())
+        if ov != NONE {
+            p_num(s_uartov(), ov)
+        }
+    }
     send_final(T_RESP, id)
 }
 

@@ -101,11 +101,11 @@ mkimg() { # out inittab [extra spec...]
     local out=$1 it=$2; shift 2
     python3 tools/osum/mkfs.py build "$out" $BLOCKS $DIRS $SPEC \
         /etc/passwd=$TMPD/passwd@644:0:0 /etc/inittab=$it@644:0:0 \
-        /etc/fstab=$TMPD/fstab@644:0:0 /etc/odb.token=$TMPD/token@600:0:0 /etc/odb.conf=$TMPD/conf_on@644:0:0 \
+        /etc/fstab=$TMPD/fstab@644:0:0 /etc/odb.token=$TMPD/token@600:0:0 ${NOCONF:-/etc/odb.conf=$TMPD/conf_on@644:0:0} \
         /d/data.txt=$TMPD/data.txt@644:0:0 "$@" >"$TMPD/mkfs.txt" 2>&1 \
         || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; return 1; }
 }
-mkimg "$TMPD/on.img" "$TMPD/inittab_on" && mkimg "$TMPD/off.img" "$TMPD/inittab_off" || { echo "ODB: $pass passed, $fail failed"; exit 1; }
+mkimg "$TMPD/on.img" "$TMPD/inittab_on" && mkimg "$TMPD/off.img" "$TMPD/inittab_off" && NOCONF=" " mkimg "$TMPD/noconf.img" "$TMPD/inittab_on" || { echo "ODB: $pass passed, $fail failed"; exit 1; }
 ok "images: agent on / agent off"
 
 # ---------------------------------------------------------------- qemu
@@ -114,7 +114,7 @@ start_qemu() { # image comlog [extra qemu args]
     local img=$1 log=$2; shift 2
     rm -f "$SOCK"
     timeout 1200 qemu-system-x86_64 $ACCEL -kernel "$B/k0.mb" -m 512 -smp 2 \
-        -append "osum vfs nokbd" -display none "$@" \
+        -append "${APPEND:-osum vfs nokbd}" -display none "$@" \
         -drive "file=$img,format=raw,if=ide,index=0" \
         -serial "file:$log" \
         -chardev "socket,id=odb,path=$SOCK,server=on,wait=off" -serial chardev:odb \
@@ -152,6 +152,8 @@ ncpu=$(sed -n 's/^cpus=//p' "$TMPD/info.txt" | head -1)
 [ -n "${ncpu:-}" ] && ok "info has cpus ($ncpu; 0 = no firmware tables in the fast image)" || bad "info: no cpus field"
 [ "$(grep -c '^idle_core=' "$TMPD/info.txt")" = "${ncpu:-0}" ] && ok "info idle_core line per cpu" || bad "info idle_core lines != cpus"
 grep -q '^idle_pct=' "$TMPD/info.txt" && ok "info has idle_pct" || bad "info: no idle_pct"
+grep -q '^uart_overruns=[0-9]' "$TMPD/info.txt" && ok "info has uart_overruns ($(sed -n 's/^uart_overruns=//p' "$TMPD/info.txt"))" || bad "info: no uart_overruns"
+out=$(od exec cat /proc/odb 2>&1); case "$out" in *"odb=0"*"rx_overruns="*) ok "/proc/odb without odb=1: odb=0 + rx_overruns";; *) bad "/proc/odb: $out";; esac
 $ODBC --port "unix:$SOCK" --token-file "$TMPD/badtoken" info >/dev/null 2>&1; is "wrong token refused (exit)" "$?" "4"
 $ODBC --port "unix:$SOCK" info >/dev/null 2>&1; rc=$?
 [ "$rc" != 0 ] && ok "no token refused (exit $rc)" || bad "no token accepted"
@@ -172,9 +174,10 @@ cat > "$TMPD/shellcase.py" <<'PYEOF'
 import sys, time
 sys.path.insert(0, sys.argv[1])
 from odb import frame as F, proto
-from odb.client import Session
+from odb.client import Session, read_token_file
 sock, token = sys.argv[2], sys.argv[3]
-s = Session.open("unix:" + sock, token=open(token).read().strip())
+s = Session.open("unix:" + sock, token=read_token_file(token))
+s.login(timeout=10)
 print("F", s.hello_info.get("features"))
 def run(name, items, send, timeout=30):
     out = bytearray()
@@ -205,14 +208,14 @@ print("T2", err, r.geti("exit", -1) if r else None, b"scripted-ok" in out)
 state = {}
 def rs(fid):
     time.sleep(1.0)
-    rid = s.send_resize(120, 40)
+    state["rid"] = s.send_resize(120, 40)
     time.sleep(1.5)
-    state["resp"] = [f for f in s.stray if f.id == rid and f.type == F.RESP]
     s.send_stream(fid, proto.STDIN, b"echo after-resize\n")
     time.sleep(1.0)
     s.send_stream(fid, proto.STDIN, b"exit 0\n")
 out, r, err = run("resize", {}, rs)
-print("T3", err, len(state.get("resp", [])), b"after-resize" in out)
+resp = [f for f in s.stray if f.id == state.get("rid") and f.type == F.RESP]
+print("T3", err, len(resp), b"after-resize" in out)
 # 4. cancel: ERR ECANCEL, and the agent takes the next request
 def cn(fid):
     time.sleep(1.0)
@@ -354,6 +357,22 @@ cp "$TMPD/off.img" "$TMPD/live.img"
 start_qemu "$TMPD/live.img" "$TMPD/com1c.log" || bad "qemu (off)"
 ODB_T=25 od wait 15 >/dev/null 2>&1; rc=$?
 [ "$rc" != 0 ] && ok "image without odbd: no answer (exit $rc)" || bad "answer from an image without odbd"
+stop_qemu
+
+echo "== 9b. odb=1 on the kernel command line (no /etc/odb.conf) =="
+cp "$TMPD/noconf.img" "$TMPD/live.img"
+start_qemu "$TMPD/live.img" "$TMPD/com1d.log" || bad "qemu (noconf, no odb=1)"
+ODB_T=25 od wait 15 >/dev/null 2>&1; rc=$?
+[ "$rc" != 0 ] && ok "no conf file, no odb=1: no agent (exit $rc)" || bad "agent answered without conf and without odb=1"
+stop_qemu
+cp "$TMPD/noconf.img" "$TMPD/live.img"
+APPEND="osum vfs nokbd odb=1" start_qemu "$TMPD/live.img" "$TMPD/com1e.log" || bad "qemu (noconf, odb=1)"
+if ODB_T=60 od wait 40 >/dev/null 2>&1; then
+    ok "odb=1 without conf file: agent answers"
+    out=$(od exec cat /proc/odb 2>&1); case "$out" in *"odb=1"*) ok "/proc/odb says odb=1";; *) bad "/proc/odb: $out";; esac
+else
+    bad "odb=1 without conf file: no answer"
+fi
 stop_qemu
 
 echo "ODB: $pass passed, $fail failed"
