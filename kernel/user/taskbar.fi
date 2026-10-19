@@ -916,6 +916,24 @@ const QUIET_ROUNDS: u64 = 80
 // bit set since the last pulse: 1 repaint, 2 popup step, 4 drag/hide, 8 power event, 16 pointer moved
 static mut ub_qwhy: u64 = 0
 static mut ub_quiet: u64 = 0
+
+// r1129b: DEEP QUIET. After DEEP_QUIET_ROUNDS rounds (~20 s) with no sign of life, the file pollers of the bar (locale, taskbar.conf)
+// run once a second instead of four times a second; any sign of life ends it at once. Each pass is an open + read of several
+// files, i.e. disk commands and port I/O in a VM, with nobody there to see the answer.
+const DEEP_QUIET_ROUNDS: u64 = 400
+static mut sp_at: u64 = 0xFFFFFFFF
+fn slow_poll_due() -> bool {
+    if ub_quiet <= DEEP_QUIET_ROUNDS {
+        return true
+    }
+    let sec: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0) / 1000
+    if ulib.bad(sec) || sec != sp_at {
+        sp_at = sec
+        return true
+    }
+    return false
+}
+
 static mut ub_round: u64 = 0
 static mut ub_sb: u64 = 0
 static mut ub_sbt: u64 = 0
@@ -2481,7 +2499,17 @@ fn line_of(f: u64, l: u64) -> u64 {
 // The offset to local time. This kernel can read the hardware clock and
 // not set it (`SYS_TIME`), so what a ring 3 program can honestly do is
 // shift the DISPLAY -- and that is what /etc/time.conf holds.
+// r1129b: /etc/time.conf is read at most every 2 s (the status text is built several times a second; an open + read per build
+// was one of the idle disk readers). 0xFFFF = never read yet.
+static mut off_at: u64 = 0xFFFF
 fn offset_read() {
+    let sec2: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0) / 2000 // I_UPTIME is in ms
+    if !ulib.bad(sec2) {
+        if sec2 == off_at {
+            return
+        }
+        off_at = sec2
+    }
     var buf: [u8; 64] = [0 as u8; 64]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_time[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
@@ -9005,7 +9033,8 @@ fn u_start(args: u64) -> u64 {
             // ihr Inhalt ist neu. Danach muss `status_build` noch
             // einmal laufen, weil "no battery" in die Puffer KOPIERT
             // wird.
-            if msg.changed() {
+            let slowp: bool = slow_poll_due()
+            if slowp && msg.changed() {
                 let _s2: bool = status_build()
                 fresh = true
                 // UND EINMAL AUSFUEHRLICH MELDEN: `fresh` fuehrt weiter
@@ -9024,7 +9053,7 @@ fn u_start(args: u64) -> u64 {
             let old_w: u64 = cf_width
             let old_a: u64 = cf_autohide
             let old_o: u64 = cf_ontop
-            if conf_read() {
+            if slowp && conf_read() {
                 if cf_edge != old_e || cf_height != old_h
                     || cf_width != old_w || cf_autohide != old_a
                     || cf_ontop != old_o {

@@ -16117,6 +16117,22 @@ fn on_key(state: u64, c: u64) {
     }
 }
 
+// r1129b: when may the PS/2 fallback look at the controller? (see the comment in `poll`)
+const PS2_WD_TICKS: u64 = 10 // watchdog period while IRQ 12 works: 100 ms
+const PS2_FALL_TICKS: u64 = 200 // after a rescued byte: poll every tick for 2 s
+static mut ps2_wd_at: u64 = 0
+static mut ps2_fall_until: u64 = 0
+fn ps2_poll_due(now: u64) -> bool {
+    if now < ps2_fall_until {
+        return true
+    }
+    if now - ps2_wd_at >= PS2_WD_TICKS || now < ps2_wd_at {
+        ps2_wd_at = now
+        return true
+    }
+    return false
+}
+
 // Wird aus der Hauptschleife gerufen: hat sich am Zeiger etwas getan?
 fn poll(state: u64) -> bool {
     if !ready(state) {
@@ -16164,7 +16180,11 @@ fn poll(state: u64) -> bool {
     // Luege ueber den Treiber.
     // r1122: ONCE PER TICK. The fallback looks at port 0x64 (a trapped port read, one VM exit in VirtualBox) and the
     // loop above runs more often than the clock ticks; IRQ 12 brings packets in time, the poll only rescues a lost one.
-    if tick_new && ps2m.present(state) && ps2m.polling(state) {
+    // r1129b: WATCHDOG, NOT A POLL. Every look at port 0x64 is a trapped port read (one VM exit in VirtualBox, ~34-100 per second
+    // before). While IRQ 12 delivers (the poll finds nothing) the controller is only looked at every PS2_WD_TICKS ticks. A look
+    // that FINDS a byte means the IRQ was lost: from then on every tick polls again for PS2_FALL_TICKS ticks, then back to the watchdog.
+    if tick_new && ps2m.present(state) && ps2m.polling(state) && ps2_poll_due(jetzt) {
+        let polls0: u64 = ps2m.polls(state)
         var n: u64 = 0
         while n < 64 && ps2m.poll_one(state) {
             // NACH JEDEM VOLLSTAENDIGEN PAKET, nicht am Ende des
@@ -16177,6 +16197,9 @@ fn poll(state: u64) -> bool {
                 lj_input(state)
             }
             n = n + 1
+        }
+        if ps2m.polls(state) != polls0 {
+            ps2_fall_until = jetzt + PS2_FALL_TICKS
         }
     }
     if !ps2m.changed(state) {
