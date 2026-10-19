@@ -395,6 +395,44 @@ function CmdStatus {
   if (Test-Path $STAGE) { Get-ChildItem $STAGE | ForEach-Object { Say ("INFO: stage {0} {1}" -f $_.Name, $_.Length) } }
 }
 
+function ShotDiff([string]$a, [string]$b, [int[]]$box) { # share (%) of sampled pixels that differ between two shots; optional box x0,y0,x1,y1
+  Add-Type -AssemblyName System.Drawing
+  $pa = Join-Path $SHOTS ($a + '.png'); $pb = Join-Path $SHOTS ($b + '.png')
+  $ba = New-Object System.Drawing.Bitmap $pa; $bb = New-Object System.Drawing.Bitmap $pb
+  try {
+    if ($ba.Width -ne $bb.Width -or $ba.Height -ne $bb.Height) { return 100.0 }
+    $x0 = 0; $y0 = 0; $x1 = $ba.Width; $y1 = $ba.Height
+    if ($box -and $box.Count -eq 4) { $x0 = $box[0]; $y0 = $box[1]; $x1 = [Math]::Min($box[2], $ba.Width); $y1 = [Math]::Min($box[3], $ba.Height) }
+    $n = 0; $d = 0
+    for ($y = $y0; $y -lt $y1; $y += 2) { for ($x = $x0; $x -lt $x1; $x += 2) {
+      $n++; $ca = $ba.GetPixel($x, $y); $cb = $bb.GetPixel($x, $y)
+      if ([Math]::Abs($ca.R - $cb.R) + [Math]::Abs($ca.G - $cb.G) + [Math]::Abs($ca.B - $cb.B) -gt 24) { $d++ } } }
+    if ($n -eq 0) { return 0.0 }
+    return [Math]::Round(100.0 * $d / $n, 2)
+  } finally { $ba.Dispose(); $bb.Dispose() }
+}
+function CmdStartGate { # input gate after login at ANY size: Win key opens the start menu, a click on a menu tile opens an app, typing reaches it
+  NeedRunning
+  $null = Shot 'sg0'
+  Add-Type -AssemblyName System.Drawing
+  $bm = New-Object System.Drawing.Bitmap (Join-Path $SHOTS 'sg0.png'); $W = $bm.Width; $H = $bm.Height; $bm.Dispose()
+  $fail = 0
+  KeysSeq 'key:win;sleep:1500;shot:sg1'
+  $mx0 = [int](($W - 640) / 2); $my0 = $H - 560
+  $d1 = ShotDiff 'sg0' 'sg1' @($mx0, $my0, ($mx0 + 640), ($my0 + 504))
+  if ($d1 -gt 20) { Say "OK: startgate: Win key opens the start menu (menu area changed $d1 %)" } else { Say "FAIL: startgate: Win key did not open the start menu (menu area changed $d1 %)"; $fail++ }
+  $tx = $mx0 + 169; $ty = $my0 + 144   # tile 'Editor' (row 1, col 2)
+  MouseSeq "goto:${tx}:${ty},sleep:500,left,sleep:2500,shot:sg2"
+  $d2 = ShotDiff 'sg1' 'sg2' @($mx0, $my0, ($mx0 + 640), ($my0 + 504))
+  if ($d2 -gt 20) { Say "OK: startgate: click on a start-menu tile opened an app and closed the menu (menu area changed $d2 %)" } else { Say "FAIL: startgate: click on the start-menu tile had no effect (menu area changed $d2 %)"; $fail++ }
+  $ex = 500; $ey = [int]($H / 3)
+  MouseSeq "goto:${ex}:${ey},sleep:500,left,sleep:600,shot:sg3"
+  KeysSeq 'type:hallo welt;sleep:1200;shot:sg4'
+  $d3 = ShotDiff 'sg3' 'sg4' @(60, 150, 700, ($ey + 40))
+  if ($d3 -gt 0.05) { Say "OK: startgate: typing reaches the focused app (text area changed $d3 %)" } else { Say "FAIL: startgate: typed text did not show (text area changed $d3 %)"; $fail++ }
+  if ($fail -gt 0) { Say "FAIL: startgate $fail of 3 checks failed"; exit 1 } else { Say 'OK: startgate 3/3 (start menu, click, typing)' }
+}
+
 try {
   switch ($Cmd) {
     'fetch'    { CmdFetch }
@@ -406,6 +444,8 @@ try {
     'status'   { CmdStatus }
     'shot'     { Shot $A[0] }
     'shotstat' { ShotStat $A[0] }
+    'startgate' { CmdStartGate }
+    'shotdiff' { Say ("INFO: shotdiff " + (ShotDiff $A[0] $A[1] @())) }
     'keys'     { NeedRunning; KeysSeq ($A -join ' '); Say 'OK: keys done' }
     'mouse'    { NeedRunning; MouseSeq ($A -join ' ') }
     'hint'     { NeedRunning; Vb @('controlvm', $VM, 'setvideomodehint', $A[0], $A[1], '32') | Out-Null; Say "OK: hint $($A[0])x$($A[1])" }

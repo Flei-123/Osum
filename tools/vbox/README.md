@@ -54,13 +54,16 @@ Swapping only the disk of an existing test VM: `$s fetch ...; $s swapdisk; $s st
 
 ## vbtest.ps1 commands
 `fetch <url> <sha-xz> [sha-raw]` | `mkvm` | `swapdisk` | `start [headless]` | `stop` | `cleanup [keepshots]` | `status`
-`shot <name>` | `shotstat <name>` | `hint <w> <h>` | `wait <sec>` | `idle <sec> [samples]` | `login [pw]`
+`shot <name>` | `shotstat <name>` | `shotdiff <a> <b>` | `startgate` | `hint <w> <h>` | `wait <sec>` | `idle <sec> [samples]` | `login [pw]`
 `keys "<tokens;>"`: `type:text` (letters, digits, space . , - / _ : ; = "), `key:enter|esc|tab|bs|space|up|down|left|right|del|home|end|f1..f12`,
 `combo:ctrl+shift+t` (also `win+v`, `alt+tab`; modifiers ctrl shift alt win altgr), `k:1D 2A ..` (raw set-1 hex scancodes), `sleep:ms`, `shot:name`.
 `mouse "<tokens,>"`: `goto:x:y` (absolute from top-left, PS/2 relative with reset), `rel:dx:dy`, `left`, `dbl`, `right`, `mid`, `ldown`/`lup` (drag), `wheel:n`, `sleep:ms`, `shot:name`.
 `serial tail [n]` | `grep <re>` | `count <re>` | `wait <re> <timeout>` | `size`.
 Env: `VBL_MEM` (MB, max 4096, default 3072), `VBL_CPUS` (3), `VBL_SERIAL=0` (no uart file), `VBL_LAYOUT=de|us` (guest layout for `type:`, default de: y/z swapped).
 Output lines start with `OK:` / `FAIL:` / `INFO:`; exit code 1 on FAIL.
+
+## Input gate
+`$s startgate` (after `login` + ~18 s, fresh desktop, any size): Win key opens the start menu, a mouse click on the 'Editor' tile opens an app, typing reaches it. Prints `OK:`/`FAIL:` per check and `startgate 3/3` or `FAIL: ... of 3`, exit 1 on FAIL. Needs a LIVE guest: the known VBox hang (guest frozen, host core 99 %, see reports w-r7/w-r8) makes checks 2/3 FAIL -- check `idle` before judging.
 
 ## Automatic checks (grep the output)
 - Login screen / desktop visible: `shotstat` prints `OK: ... not black` (non-black pixel share > 5 %).
