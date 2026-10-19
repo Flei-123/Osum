@@ -474,10 +474,11 @@ num "descriptors opened" "$(grep -a -o -E 'opens=[0-9]+' "$F" | head -1 | cut -d
 # ------------------------------------------------------------- section 7
 
 echo "== 7. the same numbers out of the compiler written in Firn =="
+# the firnc1 shell links the grown ulib (SESSUID3: spawn_app/elevate door) and no longer fits the 1 MiB image: twice the blocks here
 if [ -f "$TMPD/k1.mb" ]; then
     SPEC1="/bin/"
     for p in $PROGS; do SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf"; done
-    if python3 tools/osum/mkfs.py build "$TMPD/disk1.img" $BLOCKS $SPEC1 \
+    if python3 tools/osum/mkfs.py build "$TMPD/disk1.img" $((BLOCKS * 2)) $SPEC1 \
         /readme.txt="$TMPD/readme.txt" > "$TMPD/mkfs1.txt" 2>&1; then
         ok "the programs of firnc1 fit on an image as well"
         run_disk "$TMPD/k1.mb" "osum $QUIET script=posix;exit" "$TMPD/run1.txt" \
