@@ -24,6 +24,8 @@ for ($c = 1; $c -le $Cycles; $c++) {
   Vt @('login') | Select-Object -Last 1 | ForEach-Object { Log "c$c $_" }
   Start-Sleep -Seconds $Settle
   $burn = 0; $a = Snap
+  function HostCpu { $q = Get-CimInstance Win32_Process -Filter "Name='VBoxHeadless.exe'" | Where-Object { $_.CommandLine -match "--comment $Name" } | Select-Object -First 1; if ($q) { (Get-Process -Id $q.ProcessId -ErrorAction SilentlyContinue).CPU } else { 0 } }
+  $h0 = HostCpu
   for ($k = 1; $k -le $Samples; $k++) {
     Start-Sleep -Seconds $Sec; $b = Snap; $t = $Sec * 1e9
     $parts = @()
@@ -32,7 +34,8 @@ for ($c = 1; $c -le $Cycles; $c++) {
       if ($b.ContainsKey($ko) -and $a.ContainsKey($ko)) { $parts += ("cpu{0} other={1:N0}% exec={2:N0}%" -f $i, (100 * ($b[$ko] - $a[$ko]) / $t), (100 * ($b[$ke] - $a[$ke]) / $t)) }
     }
     $lag = 0; if ($b.ContainsKey('/TM/VirtualSync/CurrentOffset') -and $a.ContainsKey('/TM/VirtualSync/CurrentOffset')) { $lag = ($b['/TM/VirtualSync/CurrentOffset'] - $a['/TM/VirtualSync/CurrentOffset']) / 1e6 / $Sec }
-    $bad = ($parts | Where-Object { $_ -match 'other=(\d+)%' -and [int]$Matches[1] -ge 50 }).Count -gt 0
+    $h1 = HostCpu; $hp = 100 * ($h1 - $h0) / $Sec; $h0 = $h1; $parts += ('host={0:N0}%' -f $hp)
+    $bad = ($hp -ge 85) -or (($parts | Where-Object { $_ -match 'other=(\d+)%' -and [int]$Matches[1] -ge 50 }).Count -gt 0)
     if ($bad -or $lag -gt 200) { $burn++ }
     Log ("c{0} s{1} lag+{2:N0}ms/s {3}{4}" -f $c, $k, $lag, ($parts -join ' | '), $(if ($bad -or $lag -gt 200) { '  <== BURN' } else { '' }))
     $a = $b
