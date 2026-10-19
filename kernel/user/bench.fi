@@ -1,0 +1,980 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/bench.fi -- the in-OS benchmark tool (ROUND BENCH-A).
+//
+//   bench                table of every group
+//   bench --json         one line `BENCHJSON {...}` (schema 1, flat keys `group.name`), for the host runner (tools/bench)
+//   bench <group>        one group: boot mem idle size syscall fs memcpy cpu   (alias: all)
+//   bench --json <group>
+//
+// Every number is measured here, in ring 3, with rdtsc (cycles per ms come from /proc/bench `tsc.khz`, which the kernel
+// calibrated at boot) and the system calls the other tools use. The kernel side is /proc/bench (boot milestones from
+// kmain.fi, kernel heap, trap count). Integer only, no heap; the one float loop carries #[allow_fp].
+//
+// Not here on purpose: latency key -> pixel and FPS (host side, tools/fps, tools/latency) and port I/O per second
+// (counted from the QEMU trace by tools/portio; the kernel has no single in/out choke point to count at).
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_POLL: u64 = 7
+const SYS_PIPE: u64 = 22
+const SYS_WAIT4: u64 = 61
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+const G_BOOT: u64 = 1
+const G_MEM: u64 = 2
+const G_IDLE: u64 = 4
+const G_SIZE: u64 = 8
+const G_SYSCALL: u64 = 16
+const G_FS: u64 = 32
+const G_MEMCPY: u64 = 64
+const G_CPU: u64 = 128
+
+// string constants (Firn has no string literal expressions in this profile)
+static mut s0: [u8; 12] = "/proc/bench\0"
+static mut s1: [u8; 6] = "boot.\0"
+static mut s2: [u8; 4] = "_ms\0"
+static mut s3: [u8; 3] = "ms\0"
+static mut s4: [u8; 9] = "boot.irq\0"
+static mut s5: [u8; 8] = "desktop\0"
+static mut s6: [u8; 8] = "taskbar\0"
+static mut s7: [u8; 16] = "boot.desktop_ms\0"
+static mut s8: [u8; 14] = "boot.total_ms\0"
+static mut s9: [u8; 14] = "mem.total_kib\0"
+static mut s10: [u8; 4] = "KiB\0"
+static mut s11: [u8; 13] = "mem.free_kib\0"
+static mut s12: [u8; 13] = "mem.used_kib\0"
+static mut s13: [u8; 11] = "heap.bytes\0"
+static mut s14: [u8; 14] = "mem.kheap_kib\0"
+static mut s15: [u8; 17] = "heap.used_blocks\0"
+static mut s16: [u8; 22] = "mem.kheap_used_blocks\0"
+static mut s17: [u8; 6] = "count\0"
+static mut s18: [u8; 10] = "mem.tasks\0"
+static mut s19: [u8; 13] = "mem.user_kib\0"
+static mut s20: [u8; 10] = "irq.traps\0"
+static mut s21: [u8; 15] = "idle.window_ms\0"
+static mut s22: [u8; 23] = "idle.cpu_busy_permille\0"
+static mut s23: [u8; 9] = "permille\0"
+static mut s24: [u8; 17] = "idle.traps_per_s\0"
+static mut s25: [u8; 4] = "1/s\0"
+static mut s26: [u8; 17] = "idle.ctxsw_per_s\0"
+static mut s27: [u8; 20] = "idle.syscalls_per_s\0"
+static mut s28: [u8; 10] = "size.bin_\0"
+static mut s29: [u8; 3] = "_b\0"
+static mut s30: [u8; 2] = "B\0"
+static mut s31: [u8; 11] = "kernel.end\0"
+static mut s32: [u8; 20] = "size.kernel_end_kib\0"
+static mut s33: [u8; 6] = "/bin/\0"
+static mut s34: [u8; 6] = "bench\0"
+static mut s35: [u8; 3] = "sh\0"
+static mut s36: [u8; 3] = "ls\0"
+static mut s37: [u8; 3] = "ps\0"
+static mut s38: [u8; 9] = "explorer\0"
+static mut s39: [u8; 9] = "settings\0"
+static mut s40: [u8; 5] = "term\0"
+static mut s41: [u8; 7] = "/sbin/\0"
+static mut s42: [u8; 5] = "init\0"
+static mut s43: [u8; 17] = "size.bin_total_b\0"
+static mut s44: [u8; 17] = "size.fs_used_kib\0"
+static mut s45: [u8; 18] = "size.fs_total_kib\0"
+static mut s46: [u8; 18] = "syscall.getpid_ns\0"
+static mut s47: [u8; 3] = "ns\0"
+static mut s48: [u8; 17] = "syscall.yield_ns\0"
+static mut s49: [u8; 25] = "syscall.pipe_rtt_poll_ns\0"
+static mut s50: [u8; 26] = "syscall.pipe_rtt_block_ns\0"
+static mut s51: [u8; 26] = "syscall.fork_exit_wait_us\0"
+static mut s52: [u8; 3] = "us\0"
+static mut s53: [u8; 10] = "/bin/true\0"
+static mut s54: [u8; 26] = "syscall.exec_exit_wait_us\0"
+static mut s55: [u8; 6] = "KiB/s\0"
+static mut s56: [u8; 8] = "/tmp/bm\0"
+static mut s57: [u8; 14] = "fs.meta_ops_s\0"
+static mut s58: [u8; 15] = "/tmp/bench.dat\0"
+static mut s59: [u8; 19] = "fs.tmp_write_kib_s\0"
+static mut s60: [u8; 18] = "fs.tmp_read_kib_s\0"
+static mut s61: [u8; 15] = "/var/bench.dat\0"
+static mut s62: [u8; 20] = "fs.disk_write_kib_s\0"
+static mut s63: [u8; 19] = "fs.disk_read_kib_s\0"
+static mut s64: [u8; 18] = "memcpy.copy_mib_s\0"
+static mut s65: [u8; 6] = "MiB/s\0"
+static mut s66: [u8; 18] = "memcpy.fill_mib_s\0"
+static mut s67: [u8; 22] = "memcpy.bytecopy_mib_s\0"
+static mut s68: [u8; 22] = "alloc.brk_touch_mib_s\0"
+static mut s69: [u8; 14] = "alloc.page_ns\0"
+static mut s70: [u8; 13] = "cpu.int_mops\0"
+static mut s71: [u8; 7] = "Mops/s\0"
+static mut s72: [u8; 17] = "cpu.float_mflops\0"
+static mut s73: [u8; 8] = "Mflop/s\0"
+static mut s74: [u8; 15] = "cpu.sort16k_ms\0"
+static mut s75: [u8; 15] = "cpu.hash_mib_s\0"
+static mut s76: [u8; 2] = " \0"
+static mut s77: [u8; 8] = "unknown\0"
+static mut s78: [u8; 14] = "/proc/version\0"
+static mut s79: [u8; 33] = "BENCHJSON {\"schema\":1,\"commit\":\"\0"
+static mut s80: [u8; 30] = "\",\"arch\":\"x86_64\",\"results\":{\0"
+static mut s81: [u8; 2] = ",\0"
+static mut s82: [u8; 2] = "\"\0"
+static mut s83: [u8; 3] = "\":\0"
+static mut s84: [u8; 12] = "},\"units\":{\0"
+static mut s85: [u8; 4] = "\":\"\0"
+static mut s86: [u8; 3] = "}}\0"
+static mut s87: [u8; 4] = "all\0"
+static mut s88: [u8; 5] = "boot\0"
+static mut s89: [u8; 4] = "mem\0"
+static mut s90: [u8; 5] = "idle\0"
+static mut s91: [u8; 5] = "size\0"
+static mut s92: [u8; 8] = "syscall\0"
+static mut s93: [u8; 3] = "fs\0"
+static mut s94: [u8; 7] = "memcpy\0"
+static mut s95: [u8; 4] = "cpu\0"
+static mut s96: [u8; 7] = "--json\0"
+static mut s97: [u8; 79] = "bench: unknown group (boot mem idle size syscall fs memcpy cpu all) or --json\n\0"
+static mut s98: [u8; 8] = "tsc.khz\0"
+
+static mut khz: u64 = 0
+static mut sink: u64 = 0
+static mut want: u64 = 255
+static mut json: u64 = 0
+static mut pb: [u8; 4096] = [0 as u8; 4096]
+static mut pbn: u64 = 0
+static mut bufa: [u64; 8192] = [0 as u64; 8192]
+static mut bufb: [u64; 8192] = [0 as u64; 8192]
+static mut arr: [u32; 16384] = [0 as u32; 16384]
+// results: names and units are copied into rtext, one entry is (name offset, unit offset, value)
+static mut rtext: [u8; 6144] = [0 as u8; 6144]
+static mut rpos: u64 = 0
+static mut rcnt: u64 = 0
+static mut roff: [u64; 96] = [0 as u64; 96]
+static mut runit: [u64; 96] = [0 as u64; 96]
+static mut rval: [u64; 96] = [0 as u64; 96]
+
+fn tsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+fn ns_of(cycles: u64) -> u64 {
+    if khz == 0 {
+        return 0
+    }
+    return cycles * 1000000 / khz
+}
+
+// ------------------------------------------------------------ results
+
+fn add(name: u64, value: u64, unit: u64) {
+    if rcnt >= 96 {
+        return
+    }
+    let nl: u64 = ulib.length(name)
+    let ul: u64 = ulib.length(unit)
+    if rpos + nl + ul + 2 >= 6144 {
+        return
+    }
+    roff[(rcnt) as usize] = rpos
+    ulib.strcpy((&rtext[0 as usize]) as u64 + rpos, name)
+    rpos = rpos + nl + 1
+    runit[(rcnt) as usize] = rpos
+    ulib.strcpy((&rtext[0 as usize]) as u64 + rpos, unit)
+    rpos = rpos + ul + 1
+    rval[(rcnt) as usize] = value
+    rcnt = rcnt + 1
+}
+
+fn rname(i: u64) -> u64 {
+    return (&rtext[0 as usize]) as u64 + roff[(i) as usize]
+}
+
+fn runit_of(i: u64) -> u64 {
+    return (&rtext[0 as usize]) as u64 + runit[(i) as usize]
+}
+
+fn selected(g: u64) -> bool {
+    return (want & g) != 0
+}
+
+// ------------------------------------------------------------ /proc/bench
+
+fn load_proc() {
+    pbn = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&s0[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&pb[0 as usize]) as u64, 4095)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return
+    }
+    pbn = n
+    pb[(n) as usize] = 0 as u8
+}
+
+// value of `key` in the loaded /proc/bench text, NONE if the line is not there
+fn pget(key: u64) -> u64 {
+    let kl: u64 = ulib.length(key)
+    var i: u64 = 0
+    while i < pbn {
+        if ulib.strneq((&pb[0 as usize]) as u64 + i, key, kl) && pb[(i + kl) as usize] == 32 as u8 {
+            var j: u64 = i + kl + 1
+            var v: u64 = 0
+            while j < pbn && pb[(j) as usize] >= 48 as u8 && pb[(j) as usize] <= 57 as u8 {
+                v = v * 10 + (pb[(j) as usize] as u64) - 48
+                j = j + 1
+            }
+            return v
+        }
+        while i < pbn && pb[(i) as usize] != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn calibrate() {
+    var t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let edge: u64 = t
+    while t == edge {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    let c0: u64 = tsc()
+    let t0: u64 = t
+    while t < t0 + 10 {
+        t = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    }
+    khz = (tsc() - c0) / 100
+}
+
+// ------------------------------------------------------------ boot
+
+fn is_name(a: u64, b: u64, word: u64) -> bool {
+    var nm: [u8; 17] = [0 as u8; 17]
+    var k: u64 = 0
+    while k < 8 {
+        nm[(k) as usize] = ((a >> (k * 8)) & 255) as u8
+        nm[(k + 8) as usize] = ((b >> (k * 8)) & 255) as u8
+        k = k + 1
+    }
+    return ulib.streq((&nm[0 as usize]) as u64, word)
+}
+
+// age in ms of the first process whose name is `word`, NONE if there is none
+fn age_of(word: u64) -> u64 {
+    var i: u64 = 0
+    while i < 64 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 {
+            let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+            let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+            if !ulib.bad(n0) && is_name(n0, n1, word) {
+                return ulib.sys(ulib.SYS_PSTAT, i, ulib.P_AGE, 0)
+            }
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn group_boot() {
+    var name: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&name[0 as usize]) as u64
+    // every `boot.<phase> <ms>` line of /proc/bench becomes `boot.<phase>_ms`
+    var i: u64 = 0
+    var last: u64 = 0
+    while i < pbn {
+        if ulib.strneq((&pb[0 as usize]) as u64 + i, (&s1[0 as usize]) as u64, 5) {
+            var j: u64 = i
+            var k: u64 = 0
+            while j < pbn && pb[(j) as usize] != 32 as u8 && k < 30 {
+                name[(k) as usize] = pb[(j) as usize]
+                k = k + 1
+                j = j + 1
+            }
+            name[(k) as usize] = 0 as u8
+            ulib.strcat(np, (&s2[0 as usize]) as u64)
+            j = j + 1
+            var v: u64 = 0
+            while j < pbn && pb[(j) as usize] >= 48 as u8 && pb[(j) as usize] <= 57 as u8 {
+                v = v * 10 + (pb[(j) as usize] as u64) - 48
+                j = j + 1
+            }
+            add(np, v, (&s3[0 as usize]) as u64)
+            last = v
+        }
+        while i < pbn && pb[(i) as usize] != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    // total: from kernel entry to the moment the desktop (or, without one, init) was started. The process clock starts at
+    // the timer (`irq` phase), so the desktop's start is irq_ms + uptime - age.
+    var total: u64 = last
+    let irq: u64 = pget((&s4[0 as usize]) as u64)
+    var d: u64 = age_of((&s5[0 as usize]) as u64)
+    if d == NONE {
+        d = age_of((&s6[0 as usize]) as u64)
+    }
+    let up: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+    if d != NONE && irq != NONE && up >= d {
+        total = irq + up - d
+        add((&s7[0 as usize]) as u64, total, (&s3[0 as usize]) as u64)
+    }
+    add((&s8[0 as usize]) as u64, total, (&s3[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ mem
+
+fn group_mem() {
+    let all: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_ALL, 0, 0)
+    let fr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0)
+    add((&s9[0 as usize]) as u64, all * 4, (&s10[0 as usize]) as u64)
+    add((&s11[0 as usize]) as u64, fr * 4, (&s10[0 as usize]) as u64)
+    add((&s12[0 as usize]) as u64, (all - fr) * 4, (&s10[0 as usize]) as u64)
+    let hb: u64 = pget((&s13[0 as usize]) as u64)
+    if hb != NONE {
+        add((&s14[0 as usize]) as u64, hb / 1024, (&s10[0 as usize]) as u64)
+    }
+    let hu: u64 = pget((&s15[0 as usize]) as u64)
+    if hu != NONE {
+        add((&s16[0 as usize]) as u64, hu, (&s17[0 as usize]) as u64)
+    }
+    add((&s18[0 as usize]) as u64, ulib.sys(ulib.SYS_SYSINFO, ulib.I_TASKS, 0, 0), (&s17[0 as usize]) as u64)
+    var pages: u64 = 0
+    var i: u64 = 0
+    while i < 64 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && ulib.sys(ulib.SYS_PSTAT, i, ulib.P_KIND, 0) == 3 {
+            pages = pages + ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PAGES, 0)
+        }
+        i = i + 1
+    }
+    add((&s19[0 as usize]) as u64, pages * 4, (&s10[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ idle (5 s)
+
+fn cores() -> u64 {
+    let n: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_COUNT, 0)
+    if ulib.bad(n) || n == 0 {
+        return 1
+    }
+    if n > 16 {
+        return 16
+    }
+    return n
+}
+
+fn sum_core(field: u64) -> u64 {
+    var s: u64 = 0
+    var k: u64 = 0
+    let n: u64 = cores()
+    while k < n {
+        let v: u64 = ulib.sys(ulib.SYS_CPUSTAT, k, field, 0)
+        if !ulib.bad(v) {
+            s = s + v
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn group_idle() {
+    load_proc()
+    let t0: u64 = sum_core(ulib.CS_TICKS)
+    let i0: u64 = sum_core(ulib.CS_IDLE)
+    let w0: u64 = sum_core(ulib.CS_SWITCHES)
+    let s0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_SYSCALLS, 0, 0)
+    let u0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+    let tr0: u64 = pget((&s20[0 as usize]) as u64)
+    ulib.sleep_ms(5000)
+    load_proc()
+    let t1: u64 = sum_core(ulib.CS_TICKS)
+    let i1: u64 = sum_core(ulib.CS_IDLE)
+    let w1: u64 = sum_core(ulib.CS_SWITCHES)
+    let s1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_SYSCALLS, 0, 0)
+    let u1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+    let tr1: u64 = pget((&s20[0 as usize]) as u64)
+    var dt: u64 = u1 - u0
+    if dt == 0 {
+        dt = 1
+    }
+    let dtk: u64 = t1 - t0
+    var busy: u64 = 1000
+    if dtk > 0 {
+        let idl: u64 = i1 - i0
+        if idl <= dtk {
+            busy = 1000 - idl * 1000 / dtk
+        }
+    }
+    add((&s21[0 as usize]) as u64, dt, (&s3[0 as usize]) as u64)
+    add((&s22[0 as usize]) as u64, busy, (&s23[0 as usize]) as u64)
+    if tr0 != NONE && tr1 != NONE {
+        add((&s24[0 as usize]) as u64, (tr1 - tr0) * 1000 / dt, (&s25[0 as usize]) as u64)
+    }
+    add((&s26[0 as usize]) as u64, (w1 - w0) * 1000 / dt, (&s25[0 as usize]) as u64)
+    var ds: u64 = s1 - s0
+    if ds >= 8 {
+        ds = ds - 8
+    }
+    add((&s27[0 as usize]) as u64, ds * 1000 / dt, (&s25[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ size
+
+fn size_of_bin(dir: u64, base: u64, total: u64) -> u64 {
+    var path: [u8; 64] = [0 as u8; 64]
+    var key: [u8; 64] = [0 as u8; 64]
+    let pp: u64 = (&path[0 as usize]) as u64
+    let kp: u64 = (&key[0 as usize]) as u64
+    ulib.strcpy(pp, dir)
+    ulib.strcat(pp, base)
+    let sz: u64 = ulib.size_of(pp)
+    if ulib.bad(sz) {
+        return total
+    }
+    ulib.strcpy(kp, (&s28[0 as usize]) as u64)
+    ulib.strcat(kp, base)
+    ulib.strcat(kp, (&s29[0 as usize]) as u64)
+    add(kp, sz, (&s30[0 as usize]) as u64)
+    return total + sz
+}
+
+fn group_size() {
+    let ke: u64 = pget((&s31[0 as usize]) as u64)
+    if ke != NONE {
+        add((&s32[0 as usize]) as u64, ke / 1024, (&s10[0 as usize]) as u64)
+    }
+    var total: u64 = 0
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s34[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s35[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s36[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s37[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s5[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s6[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s38[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s39[0 as usize]) as u64, total)
+    total = size_of_bin((&s33[0 as usize]) as u64, (&s40[0 as usize]) as u64, total)
+    total = size_of_bin((&s41[0 as usize]) as u64, (&s42[0 as usize]) as u64, total)
+    add((&s43[0 as usize]) as u64, total, (&s30[0 as usize]) as u64)
+    let bl: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BLOCKS, 0, 0)
+    let bf: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
+    let bs: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
+    if bl >= bf && !ulib.bad(bs) && bs > 0 {
+        add((&s44[0 as usize]) as u64, (bl - bf) * bs / 1024, (&s10[0 as usize]) as u64)
+        add((&s45[0 as usize]) as u64, bl * bs / 1024, (&s10[0 as usize]) as u64)
+    }
+}
+
+// ------------------------------------------------------------ syscall
+
+fn rtt(n: u64, how: u64) -> u64 {
+    var p1: [u32; 2] = [0 as u32; 2]
+    var p2: [u32; 2] = [0 as u32; 2]
+    if ulib.bad(ulib.sys(SYS_PIPE, (&p1[0 as usize]) as u64, 0, 0)) || ulib.bad(ulib.sys(SYS_PIPE, (&p2[0 as usize]) as u64, 0, 0)) {
+        return 0
+    }
+    var b: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&b[0 as usize]) as u64
+    var pf: [u32; 2] = [0 as u32; 2]
+    let pfp: u64 = (&pf[0 as usize]) as u64
+    let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        var k: u64 = 0
+        while k < n {
+            if how == 1 {
+                pf[(0) as usize] = p1[(0) as usize]
+                pf[(1) as usize] = 1 as u32
+                let _p: u64 = ulib.sys(SYS_POLL, pfp, 1, 0xFFFFFFFF)
+            }
+            let _r: u64 = ulib.sys(ulib.SYS_READ, p1[(0) as usize] as u64, bp, 1)
+            let _w: u64 = ulib.sys(ulib.SYS_WRITE, p2[(1) as usize] as u64, bp, 1)
+            k = k + 1
+        }
+        ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+    }
+    if ulib.bad(kid) {
+        return 0
+    }
+    let t0: u64 = tsc()
+    var k: u64 = 0
+    while k < n {
+        let _w: u64 = ulib.sys(ulib.SYS_WRITE, p1[(1) as usize] as u64, bp, 1)
+        if how == 1 {
+            pf[(0) as usize] = p2[(0) as usize]
+            pf[(1) as usize] = 1 as u32
+            let _p: u64 = ulib.sys(SYS_POLL, pfp, 1, 0xFFFFFFFF)
+        }
+        let _r: u64 = ulib.sys(ulib.SYS_READ, p2[(0) as usize] as u64, bp, 1)
+        k = k + 1
+    }
+    let t1: u64 = tsc()
+    var st: [u64; 1] = [0 as u64; 1]
+    let _x: u64 = ulib.sys4(SYS_WAIT4, kid, (&st[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, p1[(0) as usize] as u64, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, p1[(1) as usize] as u64, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, p2[(0) as usize] as u64, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, p2[(1) as usize] as u64, 0, 0)
+    return ns_of((t1 - t0) / n)
+}
+
+fn group_syscall() {
+    var n: u64 = 20000
+    var k: u64 = 0
+    var t0: u64 = tsc()
+    while k < n {
+        ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+        k = k + 1
+    }
+    add((&s46[0 as usize]) as u64, ns_of((tsc() - t0) / n), (&s47[0 as usize]) as u64)
+    k = 0
+    t0 = tsc()
+    while k < n {
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        k = k + 1
+    }
+    add((&s48[0 as usize]) as u64, ns_of((tsc() - t0) / n), (&s47[0 as usize]) as u64)
+    add((&s49[0 as usize]) as u64, rtt(1000, 1), (&s47[0 as usize]) as u64)
+    add((&s50[0 as usize]) as u64, rtt(30, 0), (&s47[0 as usize]) as u64)
+    // fork + exit + wait
+    n = 100
+    k = 0
+    t0 = tsc()
+    var st: [u64; 1] = [0 as u64; 1]
+    while k < n {
+        let kid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+        if kid == 0 {
+            ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+        }
+        if ulib.bad(kid) {
+            return
+        }
+        let _x: u64 = ulib.sys4(SYS_WAIT4, kid, (&st[0 as usize]) as u64, 0, 0)
+        k = k + 1
+    }
+    add((&s51[0 as usize]) as u64, ns_of((tsc() - t0) / n) / 1000, (&s52[0 as usize]) as u64)
+    // exec (spawn /bin/true) + wait
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[(0) as usize] = (&s53[0 as usize]) as u64
+    n = 50
+    k = 0
+    t0 = tsc()
+    while k < n {
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&s53[0 as usize]) as u64, (&argv[0 as usize]) as u64, 1)
+        if ulib.bad(pid) {
+            return
+        }
+        ulib.wait_code(pid)
+        k = k + 1
+    }
+    add((&s54[0 as usize]) as u64, ns_of((tsc() - t0) / n) / 1000, (&s52[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ fs
+
+// write `blocks` x 64 KiB to path, read it back, remove it; adds `<key>_write_kib_s` and `<key>_read_kib_s`
+fn fs_throughput(path: u64, wkey: u64, rkey: u64, blocks: u64) {
+    let bp: u64 = (&bufa[0 as usize]) as u64
+    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var k: u64 = 0
+    let t0: u64 = tsc()
+    while k < blocks {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, bp, 65536)
+        if ulib.bad(w) {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+            return
+        }
+        k = k + 1
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    let t1: u64 = tsc()
+    let wns: u64 = ns_of(t1 - t0)
+    if wns > 0 {
+        add(wkey, blocks * 64 * 1000000000 / wns, (&s55[0 as usize]) as u64)
+    }
+    let rd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if !ulib.bad(rd) {
+        k = 0
+        let t2: u64 = tsc()
+        while k < blocks {
+            let r: u64 = ulib.sys(ulib.SYS_READ, rd, bp, 65536)
+            if ulib.bad(r) || r == 0 {
+                break
+            }
+            k = k + 1
+        }
+        let t3: u64 = tsc()
+        ulib.sys(ulib.SYS_CLOSE, rd, 0, 0)
+        let rns: u64 = ns_of(t3 - t2)
+        if rns > 0 {
+            add(rkey, k * 64 * 1000000000 / rns, (&s55[0 as usize]) as u64)
+        }
+    }
+    ulib.sys(ulib.SYS_UNLINK, path, 0, 0)
+}
+
+fn fs_meta() {
+    var path: [u8; 32] = [0 as u8; 32]
+    let pp: u64 = (&path[0 as usize]) as u64
+    var n: u64 = 0
+    let t0: u64 = tsc()
+    while n < 100 {
+        ulib.strcpy(pp, (&s56[0 as usize]) as u64)
+        ulib.digits(n, pp + 7)
+        let fd: u64 = ulib.sys(ulib.SYS_OPEN, pp, ulib.O_MAKE, 0)
+        if !ulib.bad(fd) {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        }
+        ulib.sys(ulib.SYS_UNLINK, pp, 0, 0)
+        n = n + 1
+    }
+    let ns: u64 = ns_of(tsc() - t0)
+    if ns > 0 {
+        // create + close + unlink = 3 metadata operations per file
+        add((&s57[0 as usize]) as u64, n * 3 * 1000000000 / ns, (&s25[0 as usize]) as u64)
+    }
+}
+
+fn group_fs() {
+    var i: u64 = 0
+    while i < 8192 {
+        bufa[(i) as usize] = i * 2654435761
+        i = i + 1
+    }
+    fs_throughput((&s58[0 as usize]) as u64, (&s59[0 as usize]) as u64, (&s60[0 as usize]) as u64, 4)
+    fs_throughput((&s61[0 as usize]) as u64, (&s62[0 as usize]) as u64, (&s63[0 as usize]) as u64, 4)
+    fs_meta()
+}
+
+// ------------------------------------------------------------ memcpy / alloc
+
+fn group_memcpy() {
+    let a: u64 = (&bufa[0 as usize]) as u64
+    let b: u64 = (&bufb[0 as usize]) as u64
+    var i: u64 = 0
+    while i < 8192 {
+        bufa[(i) as usize] = i
+        i = i + 1
+    }
+    var k: u64 = 0
+    var t0: u64 = tsc()
+    while k < 128 {
+        asm("cld\nrep movsq", in("rdi") b, in("rsi") a, in("rcx") 8192, clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+        k = k + 1
+    }
+    var ns: u64 = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s64[0 as usize]) as u64, 128 * 64 * 1000000000 / ns / 1024, (&s65[0 as usize]) as u64)
+    }
+    k = 0
+    t0 = tsc()
+    while k < 128 {
+        asm("cld\nrep stosq", in("rdi") b, in("rax") k, in("rcx") 8192, clobber("rdi"), clobber("rcx"), clobber("memory"))
+        k = k + 1
+    }
+    ns = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s66[0 as usize]) as u64, 128 * 64 * 1000000000 / ns / 1024, (&s65[0 as usize]) as u64)
+    }
+    // byte loop (the cost of a copy without `rep movs`)
+    k = 0
+    t0 = tsc()
+    while k < 4 {
+        ulib.copy(b, a, 65536)
+        k = k + 1
+    }
+    ns = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s67[0 as usize]) as u64, 4 * 64 * 1000000000 / ns / 1024, (&s65[0 as usize]) as u64)
+    }
+    // alloc: grow the break by 2 MiB in 64 KiB steps and touch every page
+    let base: u64 = ulib.sys(ulib.SYS_BRK, 0, 0, 0)
+    if !ulib.bad(base) && base != 0 {
+        t0 = tsc()
+        var at: u64 = base
+        var ok: bool = true
+        while at < base + 2097152 && ok {
+            let r: u64 = ulib.sys(ulib.SYS_BRK, at + 65536, 0, 0)
+            if ulib.bad(r) || r < at + 65536 {
+                ok = false
+            } else {
+                var q: u64 = at
+                while q < at + 65536 {
+                    __mmio_write8(q as *mut u8, 1 as u8)
+                    q = q + 4096
+                }
+                at = at + 65536
+            }
+        }
+        ns = ns_of(tsc() - t0)
+        if ok && ns > 0 {
+            add((&s68[0 as usize]) as u64, 2048 * 1000000000 / ns / 1024 * 1, (&s65[0 as usize]) as u64)
+            add((&s69[0 as usize]) as u64, ns / 512, (&s47[0 as usize]) as u64)
+        }
+        ulib.sys(ulib.SYS_BRK, base, 0, 0)
+    }
+}
+
+// ------------------------------------------------------------ cpu
+
+fn cpu_int(n: u64) -> u64 {
+    var x: u64 = 88172645463325252
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        s = s + (x & 255)
+        i = i + 1
+    }
+    sink = s
+    return s
+}
+
+#[allow_fp]
+fn cpu_float(n: u64) -> u64 {
+    var x: f64 = 1.0
+    var y: f64 = 0.5
+    var i: u64 = 0
+    while i < n {
+        x = x * 1.0000001 + y
+        y = y * 0.9999999 + 0.0000001
+        i = i + 1
+    }
+    sink = x as u64
+    return sink
+}
+
+fn cpu_sort() -> bool {
+    var i: u64 = 0
+    var x: u64 = 123456789
+    while i < 16384 {
+        x = x * 6364136223846793005 + 1442695040888963407
+        arr[(i) as usize] = (x >> 33) as u32
+        i = i + 1
+    }
+    // shell sort
+    var gap: u64 = 8192
+    while gap > 0 {
+        var a: u64 = gap
+        while a < 16384 {
+            let v: u32 = arr[(a) as usize]
+            var b: u64 = a
+            while b >= gap && arr[(b - gap) as usize] > v {
+                arr[(b) as usize] = arr[(b - gap) as usize]
+                b = b - gap
+            }
+            arr[(b) as usize] = v
+            a = a + 1
+        }
+        gap = gap / 2
+    }
+    i = 1
+    while i < 16384 {
+        if arr[(i - 1) as usize] > arr[(i) as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn cpu_hash(rounds: u64) -> u64 {
+    let p: u64 = (&bufa[0 as usize]) as u64
+    var h: u64 = 14695981039346656037
+    var r: u64 = 0
+    while r < rounds {
+        var i: u64 = 0
+        while i < 65536 {
+            h = (h ^ ((*((p + i) as *mut u8)) as u64)) * 1099511628211
+            i = i + 1
+        }
+        r = r + 1
+    }
+    sink = h
+    return h
+}
+
+fn group_cpu() {
+    var t0: u64 = tsc()
+    cpu_int(4000000)
+    var ns: u64 = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s70[0 as usize]) as u64, 4000000 * 1000 / ns, (&s71[0 as usize]) as u64)
+    }
+    t0 = tsc()
+    cpu_float(2000000)
+    ns = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s72[0 as usize]) as u64, 2000000 * 4 * 1000 / ns, (&s73[0 as usize]) as u64)
+    }
+    t0 = tsc()
+    let ok: bool = cpu_sort()
+    ns = ns_of(tsc() - t0)
+    if ok {
+        add((&s74[0 as usize]) as u64, ns / 1000000, (&s3[0 as usize]) as u64)
+    }
+    t0 = tsc()
+    cpu_hash(8)
+    ns = ns_of(tsc() - t0)
+    if ns > 0 {
+        add((&s75[0 as usize]) as u64, 8 * 64 * 1000000000 / ns / 1024, (&s65[0 as usize]) as u64)
+    }
+}
+
+// ------------------------------------------------------------ output
+
+fn say_name(p: u64, width: u64) {
+    let n: u64 = ulib.say(p)
+    var i: u64 = ulib.length(p)
+    while i < width {
+        ulib.say((&s76[0 as usize]) as u64)
+        i = i + 1
+    }
+}
+
+fn commit_text(out: u64) {
+    ulib.strcpy(out, (&s77[0 as usize]) as u64)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&s78[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    var v: [u8; 256] = [0 as u8; 256]
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&v[0 as usize]) as u64, 255)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return
+    }
+    var i: u64 = 0
+    while i + 8 <= n {
+        var h: u64 = 0
+        while h < 8 {
+            let c: u8 = v[(i + h) as usize]
+            if !((c >= 48 as u8 && c <= 57 as u8) || (c >= 97 as u8 && c <= 102 as u8)) {
+                break
+            }
+            h = h + 1
+        }
+        if h == 8 && (i == 0 || v[(i - 1) as usize] == 32 as u8) && (i + 8 == n || v[(i + 8) as usize] < 48 as u8) {
+            var k: u64 = 0
+            while k < 8 {
+                __mmio_write8((out + k) as *mut u8, v[(i + k) as usize])
+                k = k + 1
+            }
+            __mmio_write8((out + 8) as *mut u8, 0 as u8)
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn print_table() {
+    var i: u64 = 0
+    while i < rcnt {
+        say_name(rname(i), 30)
+        ulib.pad(rval[(i) as usize], 12)
+        ulib.say((&s76[0 as usize]) as u64)
+        ulib.say(runit_of(i))
+        ulib.nl()
+        i = i + 1
+    }
+}
+
+fn print_json() {
+    var cm: [u8; 16] = [0 as u8; 16]
+    commit_text((&cm[0 as usize]) as u64)
+    ulib.say((&s79[0 as usize]) as u64)
+    ulib.say((&cm[0 as usize]) as u64)
+    ulib.say((&s80[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < rcnt {
+        if i > 0 {
+            ulib.say((&s81[0 as usize]) as u64)
+        }
+        ulib.say((&s82[0 as usize]) as u64)
+        ulib.say(rname(i))
+        ulib.say((&s83[0 as usize]) as u64)
+        ulib.sayu(rval[(i) as usize])
+        i = i + 1
+    }
+    ulib.say((&s84[0 as usize]) as u64)
+    i = 0
+    while i < rcnt {
+        if i > 0 {
+            ulib.say((&s81[0 as usize]) as u64)
+        }
+        ulib.say((&s82[0 as usize]) as u64)
+        ulib.say(rname(i))
+        ulib.say((&s85[0 as usize]) as u64)
+        ulib.say(runit_of(i))
+        ulib.say((&s82[0 as usize]) as u64)
+        i = i + 1
+    }
+    ulib.say((&s86[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn group_mask(a: u64) -> u64 {
+    if ulib.streq(a, (&s87[0 as usize]) as u64) { return 255 }
+    if ulib.streq(a, (&s88[0 as usize]) as u64) { return G_BOOT }
+    if ulib.streq(a, (&s89[0 as usize]) as u64) { return G_MEM }
+    if ulib.streq(a, (&s90[0 as usize]) as u64) { return G_IDLE }
+    if ulib.streq(a, (&s91[0 as usize]) as u64) { return G_SIZE }
+    if ulib.streq(a, (&s92[0 as usize]) as u64) { return G_SYSCALL }
+    if ulib.streq(a, (&s93[0 as usize]) as u64) { return G_FS }
+    if ulib.streq(a, (&s94[0 as usize]) as u64) { return G_MEMCPY }
+    if ulib.streq(a, (&s95[0 as usize]) as u64) { return G_CPU }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    var asked: u64 = 0
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&s96[0 as usize]) as u64) {
+            json = 1
+        } else {
+            let m: u64 = group_mask(a)
+            if m == 0 {
+                ulib.eput((&s97[0 as usize]) as u64)
+                return 2
+            }
+            asked = asked | m
+        }
+        i = i + 1
+    }
+    if asked != 0 {
+        want = asked
+    }
+    load_proc()
+    let k: u64 = pget((&s98[0 as usize]) as u64)
+    if k != NONE && k > 0 {
+        khz = k
+    } else {
+        calibrate()
+    }
+    if selected(G_BOOT) { group_boot() }
+    if selected(G_MEM) { group_mem() }
+    if selected(G_SIZE) { group_size() }
+    if selected(G_SYSCALL) { group_syscall() }
+    if selected(G_FS) { group_fs() }
+    if selected(G_MEMCPY) { group_memcpy() }
+    if selected(G_CPU) { group_cpu() }
+    if selected(G_IDLE) { group_idle() }
+    if json == 1 {
+        print_json()
+    } else {
+        print_table()
+    }
+    return 0
+}

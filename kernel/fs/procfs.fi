@@ -89,6 +89,7 @@ import drv.usb.xhci
 import diag.hwdiag
 import gfx.gfx
 import arch.x86_64.fpu
+import mm.mem
 
 export { ops, node_root, sfs_root }
 
@@ -185,7 +186,9 @@ const G_WLAN: u64 = 15
 const G_APPS: u64 = 16
 // ROUND W-O1I: /proc/odb, the ODB agent's view of the kernel: `odb=1` on the command line and the UART receiver-overrun counter.
 const G_ODB: u64 = 17
-const G_LAST: u64 = 17
+// ROUND BENCH-A: /proc/bench, `key value` lines for the in-OS `bench` tool: boot milestones (ms since kernel entry), kernel heap, trap count.
+const G_BENCH: u64 = 18
+const G_LAST: u64 = 18
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -1617,6 +1620,66 @@ fn make_odb(state: u64) -> u64 {
     return p
 }
 
+// /proc/bench: one `key value` per line, integers only.
+//   boot.<phase> = ms since kernel_main entry (rdtsc stamps from kmain.fi, TIME_KHZ = cycles per ms); a phase not reached is left out
+//   kernel.end = end of the kernel image in memory; heap.bytes / heap.blocks / heap.used_blocks = the kernel heap
+//   irq.traps = interrupts and exceptions of every kind since boot; tsc.khz = rdtsc cycles per millisecond
+fn bench_phase(state: u64, p0: u64, name: u64, i: u64, at: u64) -> u64 {
+    let khz: u64 = kstate.get(state, kstate.TIME_KHZ)
+    let t: u64 = kstate.get(state, kstate.BM_BASE + i * 8)
+    if t == 0 || khz == 0 || t < p0 {
+        return at
+    }
+    var l_boot: [u8; 6] = "boot.\0"
+    var p: u64 = w_str(state, at, (&l_boot[0]) as u64)
+    p = w_str(state, p, name)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, (t - p0) / khz)
+    return w_nl(state, p)
+}
+
+fn make_bench(state: u64) -> u64 {
+    var n_clock: [u8; 6] = "clock\0"
+    var n_irq: [u8; 4] = "irq\0"
+    var n_gfx: [u8; 4] = "gfx\0"
+    var n_sched: [u8; 6] = "sched\0"
+    var n_progs: [u8; 6] = "progs\0"
+    var n_init: [u8; 5] = "init\0"
+    var l_kend: [u8; 12] = "kernel.end \0"
+    var l_hb: [u8; 12] = "heap.bytes \0"
+    var l_hn: [u8; 13] = "heap.blocks \0"
+    var l_hu: [u8; 18] = "heap.used_blocks \0"
+    var l_tr: [u8; 11] = "irq.traps \0"
+    var l_khz: [u8; 9] = "tsc.khz \0"
+    let p0: u64 = kstate.get(state, kstate.BM_BASE)
+    var p: u64 = 0
+    p = bench_phase(state, p0, (&n_clock[0]) as u64, 1, p)
+    p = bench_phase(state, p0, (&n_irq[0]) as u64, 2, p)
+    p = bench_phase(state, p0, (&n_gfx[0]) as u64, 3, p)
+    p = bench_phase(state, p0, (&n_sched[0]) as u64, 4, p)
+    p = bench_phase(state, p0, (&n_progs[0]) as u64, 5, p)
+    p = bench_phase(state, p0, (&n_init[0]) as u64, 6, p)
+    p = w_str(state, p, (&l_kend[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.KERNEL_END))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_hb[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.HEAP_END) - kstate.get(state, kstate.HEAP_BASE))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_hn[0]) as u64)
+    p = w_num(state, p, mem.heap_blocks(state, false))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_hu[0]) as u64)
+    p = w_num(state, p, mem.heap_blocks(state, true))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_tr[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TRAPS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_khz[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TIME_KHZ))
+    p = w_nl(state, p)
+    return p
+}
+
 fn make_apps(state: u64) -> u64 {
     var l_head: [u8; 42] = "# app cpu_ticks wakeups tx_bytes rx_bytes\0"
     var p: u64 = w_str(state, 0, (&l_head[0]) as u64)
@@ -1923,6 +1986,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_ODB {
             return make_odb(state)
         }
+        if sub == G_BENCH {
+            return make_bench(state)
+        }
         return 0
     }
     if art == K_SYS {
@@ -2032,6 +2098,10 @@ fn global_of(name: u64) -> u64 {
     var gw: [u8; 5] = "wlan\0"
     var ga: [u8; 5] = "apps\0"
     var go: [u8; 4] = "odb\0"
+    var gb: [u8; 6] = "bench\0"
+    if streq(name, (&gb[0]) as u64) {
+        return G_BENCH
+    }
     if streq(name, (&go[0]) as u64) {
         return G_ODB
     }
@@ -2274,8 +2344,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var wl2: [u8; 5] = "wlan\0"
     var ap2: [u8; 5] = "apps\0"
     var od2: [u8; 4] = "odb\0"
+    var bn2: [u8; 6] = "bench\0"
     var src: u64 = (&a[0]) as u64
-    if sub == G_ODB {
+    if sub == G_BENCH {
+        src = (&bn2[0]) as u64
+    } else if sub == G_ODB {
         src = (&od2[0]) as u64
     } else if sub == G_APPS {
         src = (&ap2[0]) as u64
