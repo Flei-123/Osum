@@ -499,7 +499,7 @@ echo "== 9. the keyboard reaches the shell =="
 rm -f "$TMPD/mon.sock" "$TMPD/kbd.txt" "$TMPD/kbd.rc"
 cp "$TMPD/disk.img" "$TMPD/kbd.img"
 ( timeout 120 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 128 \
-    -append "osum nosched noproc nofs noring3" \
+    -append "osum nosched noproc nofs noring3 execlog" \
     -serial "file:$TMPD/kbd.txt" -display none -no-reboot \
     -drive "file=$TMPD/kbd.img,format=raw,if=ide,index=0" \
     -monitor "unix:$TMPD/mon.sock,server,nowait" \

@@ -51,7 +51,8 @@ def prime():
             break
         time.sleep(1.5)
     time.sleep(2)
-    p.stdin.write(b"root\n"); p.stdin.flush(); time.sleep(3)
+    p.stdin.write(b"root\n"); p.stdin.flush(); time.sleep(2)
+    p.stdin.write(b"\n"); p.stdin.flush(); time.sleep(3)  # empty password (debian nocloud asks for one)
     p.stdin.write(b"sync; poweroff\n"); p.stdin.flush()
     try:
         p.wait(60)
@@ -86,7 +87,8 @@ def one(i):
     time.sleep(20)
     for attempt in range(4 if kind != "tinycore" else 1):
         if kind != "tinycore":
-            p.stdin.write(b"\nroot\n"); p.stdin.flush(); time.sleep(4)
+            p.stdin.write(b"\nroot\n"); p.stdin.flush(); time.sleep(2)
+            p.stdin.write(b"\n"); p.stdin.flush(); time.sleep(3)  # empty password prompt (debian); a bare newline at a shell is harmless
             p.stdin.write((MEMSH + "\n").encode()); p.stdin.flush()
         end = time.time() + 12
         while b"X:END" not in bytes(buf).replace(b"echo X:END", b"") and time.time() < end:
