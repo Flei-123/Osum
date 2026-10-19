@@ -235,7 +235,7 @@ fn s_exit() -> u64 {
     return (&S_EXIT[0 as usize]) as u64
 }
 
-static mut S_FEATLIST: [u8; 60] = "info,exec,push,pull,ps,kill,logs,power,shot,input,crashdump\0"
+static mut S_FEATLIST: [u8; 66] = "info,exec,shell,push,pull,ps,kill,logs,power,shot,input,crashdump\0"
 fn s_featlist() -> u64 {
     return (&S_FEATLIST[0 as usize]) as u64
 }
@@ -955,6 +955,41 @@ fn s_crashdump() -> u64 {
     return (&S_CRASHDUMP[0 as usize]) as u64
 }
 
+static mut S_SHELL: [u8; 6] = "shell\0"
+fn s_shell() -> u64 {
+    return (&S_SHELL[0 as usize]) as u64
+}
+
+static mut S_RESIZE: [u8; 7] = "resize\0"
+fn s_resize() -> u64 {
+    return (&S_RESIZE[0 as usize]) as u64
+}
+
+static mut S_COLS: [u8; 5] = "cols\0"
+fn s_cols() -> u64 {
+    return (&S_COLS[0 as usize]) as u64
+}
+
+static mut S_ROWS: [u8; 5] = "rows\0"
+fn s_rows() -> u64 {
+    return (&S_ROWS[0 as usize]) as u64
+}
+
+static mut S_NOPTY: [u8; 15] = "openpty failed\0"
+fn s_nopty() -> u64 {
+    return (&S_NOPTY[0 as usize]) as u64
+}
+
+static mut S_EBUSY: [u8; 6] = "EBUSY\0"
+fn s_ebusy() -> u64 {
+    return (&S_EBUSY[0 as usize]) as u64
+}
+
+static mut S_SHELLBUSY: [u8; 21] = "shell session active\0"
+fn s_shellbusy() -> u64 {
+    return (&S_SHELLBUSY[0 as usize]) as u64
+}
+
 // ------------------------------------------------------------ constants
 
 const MAXP: u64 = 65536
@@ -984,6 +1019,9 @@ const SYS_GETRANDOM: u64 = 318
 const SYS_CLOCK_GETTIME: u64 = 228
 const SYS_WAIT4: u64 = 61
 const SYS_KILL_N: u64 = 62
+const SYS_IOCTL_N: u64 = 16
+const SYS_OSUM_PTY_N: u64 = 1100
+const TIOCSWINSZ_N: u64 = 0x5414
 const WNOHANG: u64 = 1
 
 // ------------------------------------------------------------ state
@@ -2040,6 +2078,178 @@ fn cmd_exec(id: u64, tp: u64, tl: u64) {
     }
     if killed == 2 {
         reply_err(id, s_etimeout(), s_killedtimeout())
+        return
+    }
+    p_reset()
+    p_num(s_exit(), (status[0 as usize] >> 8) & 255)
+    p_num(s_signal(), status[0 as usize] & 127)
+    p_num(s_time_ms(), mono_ms() -% t0)
+    send_final(T_RESP, id)
+}
+
+// ---- shell (pty)
+
+fn set_winsz(master: u64, cols: u64, rows: u64) {
+    var ws: [u8; 8] = [0 as u8; 8]
+    let w: u64 = (&ws[0 as usize]) as u64
+    wr16(w, rows)
+    wr16(w + 2, cols)
+    ulib.sys(SYS_IOCTL_N, master, TIOCSWINSZ_N, w)
+}
+
+// A REQ that arrives while a shell runs: `resize cols= rows=` is applied, everything else is EBUSY. A repeat of the shell
+// REQ itself (RETRY) is ignored.
+fn shell_side_req(sid: u64, fid: u64, master: u64) {
+    if fid == sid {
+        return
+    }
+    let b: u64 = addr_rb()
+    let plen: u64 = rd32(b + 12)
+    let cl: u64 = rd8(b + HDRLEN)
+    if plen < 1 || 1 + cl > plen {
+        reply_err(fid, s_eproto(), s_badreq())
+        return
+    }
+    if same_str(b + HDRLEN + 1, cl, s_resize()) {
+        let tp: u64 = b + HDRLEN + 1 + cl
+        let tl: u64 = plen - 1 - cl
+        let c: u64 = tget_num(tp, tl, s_cols(), 0)
+        let r: u64 = tget_num(tp, tl, s_rows(), 0)
+        if c > 0 && r > 0 {
+            set_winsz(master, c, r)
+        }
+        p_reset()
+        p_num(s_ok(), 1)
+        send_final(T_RESP, fid)
+        return
+    }
+    reply_err(fid, s_ebusy(), s_shellbusy())
+}
+
+// Frames for a running shell: stdin DATA -> pty master, END(stdin) -> ^D, CANCEL -> cancelled, PING -> PONG.
+fn shell_frames(id: u64, master: u64) {
+    fill()
+    var n: u64 = have_frame()
+    while n != 0 {
+        let b: u64 = addr_rb()
+        let ty: u64 = rd8(b + 5)
+        let fid: u64 = rd32(b + 8)
+        let plen: u64 = rd32(b + 12)
+        if ty == T_CANCEL && fid == id {
+            cancelled = 1
+        } else if ty == T_PING {
+            send_frame(T_PONG, 0, fid, b + HDRLEN, plen)
+        } else if ty == T_DATA && fid == id && plen >= 2 && rd8(b + HDRLEN) == 0 {
+            io.write_all(master, b + HDRLEN + 1, plen - 1)
+        } else if ty == T_END && fid == id && plen >= 1 && rd8(b + HDRLEN) == 0 {
+            var eof: [u8; 1] = [4 as u8; 1]
+            io.write_all(master, (&eof[0 as usize]) as u64, 1)
+        } else if ty == T_REQ {
+            shell_side_req(id, fid, master)
+        }
+        drop_bytes(n)
+        n = have_frame()
+    }
+}
+
+fn cmd_shell(id: u64, tp: u64, tl: u64) {
+    let cols: u64 = tget_num(tp, tl, s_cols(), 80)
+    let rows: u64 = tget_num(tp, tl, s_rows(), 24)
+    var have_cmd: bool = false
+    if tget_str(tp, tl, s_cmd(), (&cmdb[0 as usize]) as u64, 2048) {
+        have_cmd = true
+        // the OrientOS sh has no -c: the command goes to a script file
+        let cf: u64 = io.create(s_cmdpath())
+        if errno.failed(cf) {
+            reply_err(id, s_eio(), s_cantcreate())
+            return
+        }
+        var clen: u64 = 0
+        while clen < 2047 && rd8((&cmdb[0 as usize]) as u64 + clen) != 0 {
+            clen = clen + 1
+        }
+        wr8((&cmdb[0 as usize]) as u64 + clen, 10)
+        io.write_all(cf, (&cmdb[0 as usize]) as u64, clen + 1)
+        io.close(cf)
+    }
+    var pf: [u64; 1] = [0 as u64; 1]
+    let pr: u64 = kcall.sys1(SYS_OSUM_PTY_N, (&pf[0 as usize]) as u64)
+    if errno.is_error(pr) {
+        reply_err(id, s_einternal(), s_nopty())
+        return
+    }
+    let master: u64 = pf[0 as usize] & 0xFFFFFFFF
+    let slave: u64 = (pf[0 as usize] >> 32) & 0xFFFFFFFF
+    set_winsz(master, cols, rows)
+    let t0: u64 = mono_ms()
+    let kid: u64 = proc.split()
+    if errno.failed(kid) {
+        io.close(master)
+        io.close(slave)
+        reply_err(id, s_einternal(), s_nofork())
+        return
+    }
+    if kid == 0 {
+        io.dup2(slave, 0)
+        io.dup2(slave, 1)
+        io.dup2(slave, 2)
+        io.close(slave)
+        io.close(master)
+        var argv: [u64; 4] = [0 as u64; 4]
+        argv[0 as usize] = s_binsh()
+        if have_cmd {
+            argv[1 as usize] = s_cmdpath()
+        }
+        ulib.sys(59, s_binsh(), (&argv[0 as usize]) as u64, 0)
+        proc.leave(127)
+    }
+    io.close(slave)
+    cancelled = 0
+    var status: [u64; 1] = [0 as u64; 1]
+    var exited: bool = false
+    var out_open: bool = true
+    var killed: u64 = 0
+    var quiet: u64 = 0
+    while out_open {
+        let f: u64 = (&pfds[0 as usize]) as u64
+        io.poll_set(f, 0, master, io.POLLIN)
+        io.poll(f, 1, 20)
+        var got_any: bool = false
+        if io.poll_ready(f, 0, io.POLLIN | io.POLLHUP | io.POLLERR) {
+            let n: u64 = pump_pipe(master, 1, id)
+            if n == 0 {
+                out_open = false
+            } else {
+                got_any = true
+            }
+        }
+        if !exited {
+            let w: u64 = kcall.sys4(SYS_WAIT4, kid, (&status[0 as usize]) as u64, WNOHANG, 0)
+            if w == kid {
+                exited = true
+            }
+            shell_frames(id, master)
+            if cancelled == 1 && killed == 0 {
+                ulib.sys(ulib.SYS_KILL, kid, 9, 0)
+                killed = 1
+            }
+        } else if got_any {
+            quiet = 0
+        } else {
+            // shell gone: drain what is left, 300 ms of silence ends the session
+            quiet = quiet + 1
+            if quiet > 15 {
+                out_open = false
+            }
+        }
+    }
+    io.close(master)
+    if have_cmd {
+        io.unlink(s_cmdpath())
+    }
+    send_end(1, id)
+    if killed == 1 {
+        reply_err(id, s_ecancel(), s_cancelled())
         return
     }
     p_reset()
@@ -3365,6 +3575,8 @@ fn handle_req(id: u64, flags: u64, n: u64) {
         cmd_info(id, tp, tl)
     } else if same_str(cmd, cl, s_exec()) {
         cmd_exec(id, tp, tl)
+    } else if same_str(cmd, cl, s_shell()) {
+        cmd_shell(id, tp, tl)
     } else if same_str(cmd, cl, s_push()) {
         cmd_push(id, tp, tl)
     } else if same_str(cmd, cl, s_pull()) {

@@ -3,6 +3,8 @@
 import argparse
 import glob
 import os
+import shutil
+import signal
 import sys
 import threading
 import time
@@ -128,7 +130,13 @@ def cmd_shell(ns):
     def start(fid):
         threading.Thread(target=reader, args=(fid,), daemon=True).start()
     try:
-        r = s.request("shell", {"cols": 80, "rows": 24}, on_frame=on_frame, on_start=start, timeout=3600)
+        size = shutil.get_terminal_size((80, 24))
+        if interactive and hasattr(signal, "SIGWINCH"):
+            def winch(_sig, _frm):
+                sz = shutil.get_terminal_size((80, 24))
+                s.send_resize(sz.columns, sz.lines)
+            signal.signal(signal.SIGWINCH, winch)
+        r = s.request("shell", {"cols": size.columns, "rows": size.lines}, on_frame=on_frame, on_start=start, timeout=3600)
         return r.geti("exit", 0)
     except proto.AgentError as e:
         if e.code == "ECANCEL":

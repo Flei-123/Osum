@@ -148,6 +148,12 @@ class Session:
     def cancel(self, fid):
         self.send(F.Frame(F.CANCEL, fid))
 
+    def send_resize(self, cols, rows):
+        """Tell a running `shell` the new window size (fire and forget; the agent's RESP lands in self.stray)."""
+        fid = self.new_id()
+        self.send(F.Frame(F.REQ, fid, proto.enc_req("resize", [("cols", cols), ("rows", rows)])))
+        return fid
+
     def send_stream(self, fid, stream, data, chunk=None):
         chunk = chunk or self.maxchunk
         for off in range(0, len(data), chunk):

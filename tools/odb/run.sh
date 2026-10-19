@@ -167,6 +167,78 @@ out=$(od exec --argv /bin/echo a b c 2>&1); is "exec --argv (no shell)" "$out" "
 out=$(od exec --argv cat /d/data.txt 2>&1); is "exec --argv bare name -> /bin/" "$(echo "$out" | head -1)" "line one"
 od exec --argv /bin/nonexistent-prog >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "exec --argv unknown program -> exit $rc" || bad "exec --argv unknown program returned 0"
 
+echo "== 3b. shell (pty) =="
+cat > "$TMPD/shellcase.py" <<'PYEOF'
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from odb import frame as F, proto
+from odb.client import Session
+sock, token = sys.argv[2], sys.argv[3]
+s = Session.open("unix:" + sock, token=open(token).read().strip())
+print("F", s.hello_info.get("features"))
+def run(name, items, send, timeout=30):
+    out = bytearray()
+    def on_frame(f):
+        if f.type == F.DATA:
+            st, b = proto.dec_data(f.payload)
+            if st == proto.STDOUT:
+                out.extend(b)
+    def start(fid):
+        send(fid)
+    try:
+        r = s.request("shell", items, on_frame=on_frame, on_start=start, timeout=timeout)
+        return out, r, None
+    except proto.AgentError as e:
+        return out, None, e.code
+# 1. interactive: type commands, read them back, exit code passes through
+def talk(fid):
+    time.sleep(1.0)
+    s.send_stream(fid, proto.STDIN, b"echo pty-hello-one\n")
+    time.sleep(1.0)
+    s.send_stream(fid, proto.STDIN, b"exit 5\n")
+out, r, err = run("talk", {"cols": 100, "rows": 30}, talk)
+print("T1", err, r.geti("exit", -1) if r else None, b"pty-hello-one" in out, len(out))
+# 2. cmd= runs a script under the pty
+out, r, err = run("cmd", {"cmd": "echo scripted-ok; exit 4"}, lambda fid: None)
+print("T2", err, r.geti("exit", -1) if r else None, b"scripted-ok" in out)
+# 3. resize while the shell runs: RESP ok=1, the shell is alive afterwards
+state = {}
+def rs(fid):
+    time.sleep(1.0)
+    rid = s.send_resize(120, 40)
+    time.sleep(1.5)
+    state["resp"] = [f for f in s.stray if f.id == rid and f.type == F.RESP]
+    s.send_stream(fid, proto.STDIN, b"echo after-resize\n")
+    time.sleep(1.0)
+    s.send_stream(fid, proto.STDIN, b"exit 0\n")
+out, r, err = run("resize", {}, rs)
+print("T3", err, len(state.get("resp", [])), b"after-resize" in out)
+# 4. cancel: ERR ECANCEL, and the agent takes the next request
+def cn(fid):
+    time.sleep(1.0)
+    s.cancel(fid)
+out, r, err = run("cancel", {}, cn)
+print("T4", err)
+r = s.request("exec", {"cmd": "echo alive-after"}, timeout=20)
+print("T5", r.geti("exit", -1))
+# 5. END(stdin) = ^D ends an idle shell
+def eof(fid):
+    time.sleep(1.0)
+    s.end_stream(fid, proto.STDIN)
+out, r, err = run("eof", {}, eof)
+print("T6", err, r.geti("exit", -1) if r else None)
+s.close()
+PYEOF
+ODB_T=180 timeout 180 python3 -I "$TMPD/shellcase.py" "$ROOT/tools/odbc" "$SOCK" "$TMPD/token" >"$TMPD/shell.txt" 2>&1
+grep -q '^T1 None 5 True' "$TMPD/shell.txt" && ok "shell: typed echo comes back, exit 5 passes through" || { bad "shell interactive"; head -12 "$TMPD/shell.txt"; }
+grep -q '^T2 None 4 True' "$TMPD/shell.txt" && ok "shell cmd= script runs under the pty (exit 4)" || bad "shell cmd="
+grep -q '^T3 None 1 True' "$TMPD/shell.txt" && ok "shell resize answered, shell alive after" || bad "shell resize"
+grep -q '^T4 ECANCEL' "$TMPD/shell.txt" && ok "shell cancel -> ECANCEL" || bad "shell cancel"
+grep -q '^T5 0' "$TMPD/shell.txt" && ok "agent serves exec after a cancelled shell" || bad "agent stuck after shell cancel"
+grep -q '^T6 None' "$TMPD/shell.txt" && ok "END(stdin) ends the shell (^D)" || bad "shell eof"
+note "$(tr '\n' ' ' < "$TMPD/shell.txt" | cut -c1-200)"
+grep -q '^F .*shell' "$TMPD/shell.txt" && ok "hello features list shell" || bad "features lack shell"
+
 echo "== 4. push / pull =="
 od push "$TMPD/blob.bin" /tmp/blob.bin >"$TMPD/push.txt" 2>&1; is "push exit" "$?" "0"
 note "$(tail -1 "$TMPD/push.txt")"
