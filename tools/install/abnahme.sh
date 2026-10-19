@@ -463,8 +463,9 @@ fi
 # meldet `wm: rootpart=`. Der Textweg (kmain.osum) meldet
 # `osum: rootpart=`. Gesucht wird, was davon dasteht -- entscheidend
 # ist, DASS die Wurzel von der Partition kommt.
-if grep -qaE '(osum|wm): rootpart=' "$OUT/start.txt"; then
-    ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+' "$OUT/start.txt" | head -1)"
+# on the AHCI controller the root is found by the root selector (`rootsel: ahci -- WURZEL, Bloecke=.. first=..`)
+if grep -qaE '(osum|wm): rootpart=|rootsel: (ahci|ide|nvme)[a-z]* -- WURZEL' "$OUT/start.txt"; then
+    ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
 else
     bad "der Kern findet keine Wurzelpartition"
 fi
