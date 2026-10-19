@@ -327,7 +327,9 @@ rc=$(lauf p5 "cat /users/gate2.txt;ota system confirm;ota system status;cat /sys
 hat "$OUT/p5.txt" "system: overlay restored" "lost trial: overlay restored"
 hat "$OUT/p5.txt" "OVERLAY-OLD-CONTENT" "lost trial: old /bin file is back"
 hat "$OUT/p5.txt" "$H_BIG_OLD" "lost trial: old big file is back"
-hatnicht "$OUT/p5.txt" "gate-new.txt" "lost trial: the new file is gone"
+# the boot log lists /bin BEFORE the restore: judge only the command output (from `ota system confirm` on)
+sed -n '/^osum\$ ota system confirm/,$p' "$OUT/p5.txt" > "$OUT/p5.cmd"
+hatnicht "$OUT/p5.cmd" "gate-new.txt" "lost trial: the new file is gone"
 gleich "after the rollback the OLD kernel runs" "$(commit_of "$OUT/p5.txt")" "$OLD"
 hat "$OUT/p5.txt" "$SEED" "user file written before the update survived the failed update"
 hat "$OUT/p5.txt" "system: trial kernel was rolled back, update dropped" "update dropped"
