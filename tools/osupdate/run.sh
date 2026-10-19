@@ -18,6 +18,14 @@
 #   5. negative: trial kernel dies right after ab_boot (`abpanic` word on entry B only) ->
 #      3 attempts, loader back on slot A, old kernel runs, update dropped, user file survived
 #   6. counter-proof: an update that is not newer is refused
+#   7. periodic check of the service (installs nothing)
+#   8. stage 2 raw: /bin overlay without gzip (fallback transport), old files moved to /system/old
+#   9. stage 2 negative: overlay file with a wrong hash in a signed list -> refused, /bin untouched
+#  10. stage 2 negative: gz with a flipped bit but a matching transport hash -> gunzip CRC refuses
+#  11. stage 2 power cut: journal + half-moved files without a pending note -> restored on next confirm
+# Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
+# device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
+# OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
 #   7. periodic system check of the service (`ota service 1 system`): finds, fetches the changelog,
 #      marks the notification, installs nothing; a not-newer feed stays `current`
 set -uo pipefail
@@ -37,6 +45,8 @@ export OTA_DRIVE=${OTA_DRIVE:-ahci}      # installed disk on AHCI (DMA): ESP fil
 
 pass=0
 fail=0
+if [ -n "${OSU_ONLY7:-}" ] && [ -z "${OSU_SECS:-}" ]; then OSU_SECS="7"; fi
+want() { [ -z "${OSU_SECS:-}" ] && return 0; case " $OSU_SECS " in *" $1 "*) return 0 ;; esac; return 1; }
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 gleich() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', expected '$3'"; fi; }
@@ -112,10 +122,35 @@ auto=nein
 frist=15
 EOF
 printf '00000100\n' > "$OUT/sysver"
+# /bin overlay fixtures: OLD files go into the image, the NEW set is published in the feed
+mkdir -p "$OUT/ovl" "$OUT/ovl-old"
+python3 - "$OUT" <<'EOF'
+import os, random, sys
+o = sys.argv[1]
+words = ["alpha", "beta", "gamma", "delta", "kernel", "system", "update", "overlay", "taskbar", "login"]
+def text(n, seed):
+    r = random.Random(seed)
+    return "".join("line %d %s %s %08x\n" % (i, r.choice(words), r.choice(words), r.getrandbits(32))
+                   for i in range(n))
+def put(path, data):
+    open(path, "wb").write(data if isinstance(data, bytes) else data.encode())
+put(o + "/ovl/gate-ovl.txt", "OVERLAY-NEW-CONTENT\n")
+put(o + "/ovl/gate-new.txt", "BRAND-NEW-FILE\n")
+put(o + "/ovl/gate-big.txt", text(8000, 1))                      # ~270 KB: many 32 KiB windows, long matches
+put(o + "/ovl/gate-rnd.bin", random.Random(3).randbytes(40000))  # incompressible: stored blocks
+put(o + "/ovl-old/gate-ovl.txt", "OVERLAY-OLD-CONTENT\n")
+put(o + "/ovl-old/gate-big.txt", text(300, 2))
+put(o + "/ovl-old/gate-rnd.bin", random.Random(4).randbytes(900))
+EOF
+h() { sha256sum "$1" | cut -d' ' -f1; }
+H_BIG_NEW=$(h "$OUT/ovl/gate-big.txt"); H_RND_NEW=$(h "$OUT/ovl/gate-rnd.bin")
+H_BIG_OLD=$(h "$OUT/ovl-old/gate-big.txt"); H_RND_OLD=$(h "$OUT/ovl-old/gate-rnd.bin")
+PROGS_DEF=$(sed -n 's/^PROGS=${PROGS:-"\(.*\)"}$/\1/p' tools/install/build.sh)
+[ -n "$PROGS_DEF" ] && export PROGS="$PROGS_DEF shasum" || bad "cannot read the default PROGS of install/build.sh"
 SEED="user-data-$$-$(date +%s)"
 printf '%s\n' "$SEED" > "$OUT/gate-seed"
 OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=96 \
-    EXTRA="/system/SYSVERSION=$OUT/sysver /gate-seed=$OUT/gate-seed" \
+    EXTRA="/system/SYSVERSION=$OUT/sysver /gate-seed=$OUT/gate-seed /bin/gate-ovl.txt=$OUT/ovl-old/gate-ovl.txt /bin/gate-big.txt=$OUT/ovl-old/gate-big.txt /bin/gate-rnd.bin=$OUT/ovl-old/gate-rnd.bin" \
     bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "image built (kernel $(stat -c%s "$OUT/k.mb") octets)" || { tail -20 "$OUT/build.log"; bad "install/build.sh"; }
 rm -f "$OUT/ziel.img"
@@ -156,13 +191,17 @@ pubt() { # <imgdir> <feed> <channel> [args] -- signed with the test key the imag
     python3 tools/ota/publish_system.py "$i" "$f" "$c" --key "$OUT/geheim.key" "$@" > "$OUT/pub.log" 2>&1
 }
 printf 'Gate build: new kernel, patched commit %s\n' "$NEW" > "$OUT/notes.txt"
-pubt "$OUT/img-new" "$OUT/feed-good" dev --count 200 --notes "$OUT/notes.txt" && ok "good feed: build 200" || { cat "$OUT/pub.log"; bad "publish good"; }
+pubt "$OUT/img-new" "$OUT/feed-good" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" --gz && ok "good feed: build 200 (gzip + 4 overlay files)" || { cat "$OUT/pub.log"; bad "publish good"; }
+pubt "$OUT/img-new" "$OUT/feed-raw" dev --count 200 --notes "$OUT/notes.txt" --overlay "$OUT/ovl" && ok "raw feed: build 200 (no gzip, 4 overlay files)" || { cat "$OUT/pub.log"; bad "publish raw"; }
+pubt "$OUT/img-new" "$OUT/feed-badovl" dev --count 200 --overlay "$OUT/ovl" --gz --bad-ovl-hash && ok "bad overlay hash feed" || bad "publish bad-ovl-hash"
+pubt "$OUT/img-new" "$OUT/feed-badgz" dev --count 200 --overlay "$OUT/ovl" --gz --bad-gz && ok "bad gz feed (flipped bit inside the deflate data)" || bad "publish bad-gz"
+grep -qa "^sysgz" "$OUT/feed-good/system/dev/VERZEICHNIS" && grep -qa "^sysfile.file" "$OUT/feed-good/system/dev/VERZEICHNIS" && ok "list carries sysfile file + sysgz lines" || bad "list lacks the overlay lines"
 pubt "$OUT/img-new" "$OUT/feed-badsig" dev --count 200 --bad-sig && ok "bad-signature feed" || bad "publish bad-sig"
 pubt "$OUT/img-new" "$OUT/feed-badhash" dev --count 200 --bad-hash && ok "bad-hash feed" || bad "publish bad-hash"
 pubt "$OUT/img-new" "$OUT/feed-old" dev --count 100 && ok "not-newer feed (build 100)" || bad "publish old"
 
 echo
-if [ -z "${OSU_ONLY7:-}" ]; then   # OSU_ONLY7=1: build + section 7 only (quick re-run of the service check)
+if want 2; then
 echo "== 2. good update: apply restart -> trial of B -> confirm -> promoted =="
 fresh_disk
 dienst "$OUT/feed-good" && ok "feed up on 127.0.0.1:$PORT" || bad "feed does not start"
@@ -179,13 +218,19 @@ gleich "slot A untouched" "$(esp_sha osum.mb)" "$OLDSHA"
 gleich "limine default_entry is 2" "$(conf_default)" "2"
 esp_get limine.conf | grep -qa 'osum-b.mb' && ok "entry B points at osum-b.mb" || bad "no entry B"
 mdir -i "$ESP" ::/ > /dev/null 2>&1 && ok "ESP FAT still readable" || bad "ESP FAT damaged"
-rc=$(lauf g2 "cat /system/SYSVERSION;ota system status;exit" keep)
+rc=$(lauf g2 "cat /system/SYSVERSION;ota system status;cat /bin/gate-ovl.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin;exit" keep)
+hat "$OUT/g2.txt" "OVERLAY-NEW-CONTENT" "trial boot: new /bin file (gz transport)"
+hat "$OUT/g2.txt" "$H_BIG_NEW" "trial boot: gunzipped 270 KB file is byte-identical"
+hat "$OUT/g2.txt" "$H_RND_NEW" "trial boot: gunzipped incompressible file is byte-identical"
 gleich "trial boot ran" "$rc" "21"
 gleich "the NEW kernel runs (first serial line)" "$(commit_of "$OUT/g2.txt")" "$NEW"
 hat "$OUT/g2.txt" "ab: gen=" "ab_boot counted the trial"
 hat "$OUT/g2.txt" "system: pending trial of build" "status shows the pending trial"
 gleich "slot A still untouched before confirm" "$(esp_sha osum.mb)" "$OLDSHA"
-rc=$(lauf g3 "ota system confirm;ota system status;cat /system/SYSVERSION;exit" keep)
+rc=$(lauf g3 "ota system confirm;ota system status;cat /system/SYSVERSION;ls /system/old;ls /system;exit" keep)
+hat "$OUT/g3.txt" "system: overlay committed" "confirm commits the overlay"
+hatnicht "$OUT/g3.txt" "SYSOVL" "journal removed"
+hatnicht "$OUT/g3.txt" "gate-ovl.txt" "backups removed from /system/old"
 hat "$OUT/g3.txt" "system: new kernel confirmed and promoted to slot A" "confirm promotes B -> A"
 gleich "slot A == new kernel" "$(esp_sha osum.mb)" "$KSHA"
 gleich "limine default_entry back to 1" "$(conf_default)" "1"
@@ -198,6 +243,8 @@ hat "$OUT/g4.txt" "system: up to date" "search now says up to date"
 dienst_aus
 
 echo
+fi
+if want 3; then
 echo "== 3. negative: bad signature =="
 fresh_disk
 dienst "$OUT/feed-badsig" || bad "feed does not start"
@@ -211,6 +258,8 @@ hat "$OUT/s1.txt" "system: no update pending" "no pending record"
 dienst_aus
 
 echo
+fi
+if want 4; then
 echo "== 4. negative: bad kernel hash in a correctly signed list =="
 fresh_disk
 dienst "$OUT/feed-badhash" || bad "feed does not start"
@@ -224,6 +273,8 @@ hat "$OUT/h1.txt" "system: no update pending" "no pending record"
 dienst_aus
 
 echo
+fi
+if want 5; then
 echo "== 5. negative: trial kernel dies right after ab_boot -> back on slot A =="
 fresh_disk
 dienst "$OUT/feed-good" || bad "feed does not start"
@@ -262,7 +313,11 @@ done
 hat "$OUT/p4.txt" "ab: ERPROBUNG gescheitert" "third attempt: trial declared failed"
 hat "$OUT/p4.txt" "ab: esp: default_entry set to 1" "kernel puts the loader back on slot A"
 gleich "ESP now reads default_entry 1" "$(conf_default)" "1"
-rc=$(lauf p5 "cat /users/gate2.txt;ota system confirm;ota system status;cat /system/SYSVERSION;exit" keep)
+rc=$(lauf p5 "cat /users/gate2.txt;ota system confirm;ota system status;cat /system/SYSVERSION;cat /bin/gate-ovl.txt;shasum /bin/gate-big.txt;ls /bin;exit" keep)
+hat "$OUT/p5.txt" "system: overlay restored" "lost trial: overlay restored"
+hat "$OUT/p5.txt" "OVERLAY-OLD-CONTENT" "lost trial: old /bin file is back"
+hat "$OUT/p5.txt" "$H_BIG_OLD" "lost trial: old big file is back"
+hatnicht "$OUT/p5.txt" "gate-new.txt" "lost trial: the new file is gone"
 gleich "after the rollback the OLD kernel runs" "$(commit_of "$OUT/p5.txt")" "$OLD"
 hat "$OUT/p5.txt" "$SEED" "user file written before the update survived the failed update"
 hat "$OUT/p5.txt" "system: trial kernel was rolled back, update dropped" "update dropped"
@@ -271,6 +326,8 @@ hat "$OUT/p5.txt" "00000100" "SYSVERSION unchanged (100)"
 gleich "slot A is still the old kernel" "$(esp_sha osum.mb)" "$OLDSHA"
 
 echo
+fi
+if want 6; then
 echo "== 6. counter-proof: an update that is not newer =="
 fresh_disk
 dienst "$OUT/feed-old" || bad "feed does not start"
@@ -281,6 +338,55 @@ dienst_aus
 
 echo
 fi
+if want 8; then
+echo "== 8. stage 2 raw: /bin overlay without gzip, apply swaps the files, old ones kept in /system/old =="
+fresh_disk
+dienst "$OUT/feed-raw" || bad "feed does not start"
+rc=$(lauf r1 "cat /bin/gate-ovl.txt;ota system apply;cat /bin/gate-ovl.txt;cat /bin/gate-new.txt;shasum /bin/gate-big.txt /bin/gate-rnd.bin;cat /system/old/gate-ovl.txt;cat /system/SYSOVL;exit")
+hat "$OUT/r1.txt" "OVERLAY-OLD-CONTENT" "before apply: the old /bin file"
+hat "$OUT/r1.txt" "system: overlay files verified: 4" "4 overlay files verified"
+hat "$OUT/r1.txt" "OVERLAY-NEW-CONTENT" "after apply: /bin has the new content"
+hat "$OUT/r1.txt" "BRAND-NEW-FILE" "after apply: a brand-new /bin file exists"
+hat "$OUT/r1.txt" "$H_BIG_NEW" "big text file (270 KB) is byte-identical"
+hat "$OUT/r1.txt" "$H_RND_NEW" "incompressible file is byte-identical"
+hat "$OUT/r1.txt" "1gate-ovl.txt" "journal says the file pre-existed"
+hat "$OUT/r1.txt" "0gate-new.txt" "journal says the file is new"
+dienst_aus
+fi
+
+if want 9; then
+echo "== 9. stage 2 negative: wrong overlay hash in a signed list =="
+fresh_disk
+dienst "$OUT/feed-badovl" || bad "feed does not start"
+rc=$(lauf b1 "ota system apply;cat /bin/gate-ovl.txt;ota system status;exit")
+hat "$OUT/b1.txt" "ota: overlay file download or check failed" "bad overlay hash refused"
+hatnicht "$OUT/b1.txt" "system: staged" "nothing staged"
+hat "$OUT/b1.txt" "OVERLAY-OLD-CONTENT" "/bin untouched"
+esp_has osum-b.mb && bad "slot B written" || ok "no slot B (overlay is checked before the kernel)"
+dienst_aus
+fi
+
+if want 10; then
+echo "== 10. stage 2 negative: gz with a flipped bit (transport hash matches, gunzip CRC must refuse) =="
+fresh_disk
+dienst "$OUT/feed-badgz" || bad "feed does not start"
+rc=$(lauf z1 "ota system apply;cat /bin/gate-ovl.txt;ota system status;exit")
+hat "$OUT/z1.txt" "ota: overlay file download or check failed" "corrupt gz refused"
+hatnicht "$OUT/z1.txt" "system: staged" "nothing staged"
+hat "$OUT/z1.txt" "OVERLAY-OLD-CONTENT" "/bin untouched"
+esp_has osum-b.mb && bad "slot B written" || ok "no slot B"
+dienst_aus
+fi
+
+if want 11; then
+echo "== 11. stage 2 power cut: journal + half-moved file, no pending note -> restored by the next confirm =="
+fresh_disk
+rc=$(lauf c1 "mkdir /system/old;mv /bin/gate-ovl.txt /system/old/gate-ovl.txt;echo 1gate-ovl.txt > /system/SYSOVL;ota system confirm;cat /bin/gate-ovl.txt;exit")
+hat "$OUT/c1.txt" "system: overlay restored" "restore ran"
+hat "$OUT/c1.txt" "OVERLAY-OLD-CONTENT" "the old file is back in /bin"
+fi
+
+if want 7; then
 echo "== 7. periodic system check of the service (ota service 1 system): finds, notes, notifies once, installs nothing =="
 fresh_disk
 dienst "$OUT/feed-good" || bad "feed does not start"
