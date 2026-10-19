@@ -160,7 +160,8 @@ function Shot([string]$name) {
   EnsureDirs; NeedRunning
   $p = Join-Path $SHOTS ($name + '.png')
   if (Test-Path $ODBUP) { # agent path first (guest framebuffer, no host window needed); VBoxManage is the fallback
-    $o = Odb @('shot', $p)
+    $q = if ($env:VBL_SHOTQUANT) { $env:VBL_SHOTQUANT } else { '3' }   # --quant 3: ~2.6x faster over the slow VBox uart (20 s -> 7.8 s); VBL_SHOTQUANT=0 = lossless
+    $o = Odb @('shot', $p, '--quant', $q)
     if ($script:OdbRc -eq 0 -and (Test-Path $p)) { Say ("OK: shot " + $p + " via odb (" + (Get-Item $p).Length + " bytes)"); return }
     Say ("INFO: odb shot failed (" + $o + "), falling back to VBoxManage")
   }
