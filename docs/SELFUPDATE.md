@@ -115,5 +115,7 @@ CRC-32 + ISIZE trailer checked (E_CRC), puff-style canonical Huffman; flate.fi s
 **Publisher**: `publish_system.py ... --overlay DIR [--gz]`; negatives `--bad-gz` (bit flipped inside the deflate data, gz hash
 recomputed) and `--bad-ovl-hash`. Empty files are refused.
 **Gate** sections 8-11 + overlay checks in 2 (gz trial boot, byte-identical files via shasum) and 5 (lost trial restores /bin).
-**Limits**: rename of the running `ota` itself is untested; free space is not pre-checked (a full disk aborts + restores);
-staging and backups need ~2x the overlay size on the root partition.
+**Free space**: before staging, `ota` sums the signed overlay sizes and refuses (`ota: not enough free space for the overlay files`)
+when free < 2 x sum + 512 KiB; nothing is downloaded or touched (gate section 12).
+**Running binary**: `/bin/ota` itself may be part of the overlay (rename of a running program works; gate 2/8 use a byte-identical copy).
+**Limits**: the overlay is live from `apply` on (also under the old kernel); the check uses the final sizes, not the gz sizes.
