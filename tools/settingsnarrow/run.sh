@@ -6,7 +6,7 @@
 #
 #   nav1  640x480, scale 1 -> window 600 wide: navigation mode (list, page with Back)
 #   nav2  1280x800, scale 2 -> 640x400 points: navigation mode, low
-#   low   800x600, scale 1 -> two-column squeeze + scrolling page area (no navigation mode)
+#   low   800x480, scale 1 -> two-column squeeze + scrolling page area (no navigation mode)
 #
 # Per boot (tools/design/audit.sh): open Settings, wheel over the list, open "Darstellung", wheel over the page, Back.
 # The window reports `settings: layout nav= detail= scroll= content= view= off=` (content/view/off of the page or list area,
@@ -23,7 +23,7 @@ for cfg in $CFGS; do
   case "$cfg" in
     nav1) RES=640x480;  EXTRA="" ;;
     nav2) RES=1280x800; EXTRA="uiscale=2" ;;
-    low)  RES=800x600;  EXTRA="" ;;
+    low)  RES=800x480;  EXTRA="" ;;
     *) echo "unknown cfg $cfg"; exit 2 ;;
   esac
   D="$OUT/$cfg"
