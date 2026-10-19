@@ -173,6 +173,21 @@ class Commands(unittest.TestCase):
         self.assertEqual([i["kind"] for i in ag.inputs], ["key", "text", "mouse"])
         self.assertEqual(ag.inputs[2]["x"], "10")
 
+    def test_input_text_cli_omits_absent_delay(self):
+        # r1170: the agent must get "text" alone (no delay_ms key) and still accept it; guard the client side
+        import argparse
+        from odb import cli
+        s, ag = pair()
+        old = cli.open_session
+        cli.open_session = lambda ns: s
+        try:
+            ns = argparse.Namespace(kind="text", args=["startkennwort"], mods=None, action=None, button=None,
+                                    delay_ms=None, rel=False, timeout=5)
+            self.assertEqual(cli.cmd_input(ns), 0)
+        finally:
+            cli.open_session = old
+        self.assertEqual(ag.inputs[-1], {"kind": "text", "text": "startkennwort"})
+
     def test_crashdump(self):
         s, ag = pair()
         r, body = s.collect_stream("crashdump", {"op": "list"}, proto.STDOUT)

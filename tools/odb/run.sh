@@ -335,6 +335,7 @@ PYEOF
 python3 -I tools/odb/pngcheck.py "$TMPD/pat_bad.png" 320 200 >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "pngcheck control: damaged PNG rejected (exit $rc)" || bad "pngcheck accepted a damaged PNG"
 out=$(od input key a 2>&1); rc=$?; is "input key exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input key: $out";; *) bad "input key: '$out'";; esac
 out=$(od input text "hello 42" --delay-ms 1 2>&1); rc=$?; is "input text exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input text: $out";; *) bad "input text: '$out'";; esac
+out=$(od input text "ab" 2>&1); rc=$?; is "input text without delay exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input text (no delay_ms): $out";; *) bad "input text (no delay_ms): '$out'";; esac
 out=$(od input key enter --mods ctrl 2>&1); is "input key with modifier exit" "$?" "0"
 out=$(od input mouse 100 50 --button left --action click 2>&1); rc=$?; is "input mouse click exit" "$rc" "0"; case "$out" in "ok n="[1-9]*) ok "input mouse: $out";; *) bad "input mouse: '$out'";; esac
 od input key nosuchkey >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "input unknown key refused (exit $rc)" || bad "input unknown key accepted"
