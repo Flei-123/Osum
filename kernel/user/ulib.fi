@@ -52,7 +52,7 @@ export {
     arg_count, arg_at, failed,
     SYS_EXIT, SYS_WRITE, SYS_READ, SYS_GETPID, SYS_SPAWN,
     SYS_OPEN, SYS_CLOSE, SYS_UNLINK, SYS_MKDIR,
-    SYS_YIELD, SYS_GETPPID, SYS_EXEC, SYS_EXECAS, spawn_user, spawn_priv,
+    SYS_YIELD, SYS_GETPPID, SYS_EXEC, SYS_EXECAS, spawn_user, spawn_priv, spawn_app, needs_root, session_owner,
     SYS_DUP, SYS_DUP2, SYS_SEEK, SYS_CHDIR, SYS_GETCWD, SYS_SYSINFO, SYS_PSTAT,
     SYS_KILL, O_MAKE, ARGS_BASE,
     I_TICKS, I_UPTIME, I_FRAMES_FREE, I_FRAMES_ALL, I_BLOCKS, I_BFREE,
@@ -700,6 +700,100 @@ fn spawn_priv(path: u64, argv: u64, argc: u64) -> u64 {
         return sys(SYS_EXEC, path, argv, argc)
     }
     return r
+}
+
+// ---- ROUND SESSUID3: the one door the start menu and the bar use ----
+//
+// `spawn_app` starts a programme for the person at the keyboard. Most
+// programmes run as the session user. The few that change the system
+// (Settings, installer, task manager, store, disk tool) go through
+// `/bin/elevate`, which asks first and only then starts them as root.
+// Without a session (login screen, test images without `anmeldung`) the
+// kernel's 1005 is a plain exec and the list is not consulted.
+const SYS_SESSION_OP2: u64 = 1870
+
+fn session_owner() -> u64 {
+    let r: u64 = sys(SYS_SESSION_OP2, 8, 0, 0)
+    if errno.is_error(r) {
+        return 0
+    }
+    return r
+}
+
+// Name of the bundle/tool behind `/apps/<n>.osp/...` or `/bin/<n>` into `out` (31 bytes max); false for any other path.
+fn app_token(path: u64, out: u64) -> bool {
+    var start: u64 = 0
+    var apps: [u8; 7] = "/apps/\0"
+    var bin: [u8; 6] = "/bin/\0"
+    var k: u64 = 0
+    var is_apps: bool = true
+    var is_bin: bool = true
+    while k < 6 {
+        if *((path + k) as *mut u8) != apps[(k) as usize] {
+            is_apps = false
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < 5 {
+        if *((path + k) as *mut u8) != bin[(k) as usize] {
+            is_bin = false
+        }
+        k = k + 1
+    }
+    if is_apps {
+        start = 6
+    } else if is_bin {
+        start = 5
+    } else {
+        return false
+    }
+    var n: u64 = 0
+    while n < 31 {
+        let c: u8 = *((path + start + n) as *mut u8)
+        if c == 0 as u8 || c == 46 as u8 || c == 47 as u8 {
+            break
+        }
+        __mmio_write8((out + n) as *mut u8, c)
+        n = n + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return n > 0
+}
+
+// Programmes that change the system for everybody and therefore need the administrator's consent.
+fn needs_root(path: u64) -> bool {
+    var tok: [u8; 32] = [0 as u8; 32]
+    var n0: [u8; 9] = "settings\0"
+    var n1: [u8; 10] = "installer\0"
+    var n2: [u8; 8] = "taskmgr\0"
+    var n3: [u8; 6] = "store\0"
+    var n4: [u8; 8] = "diskctl\0"
+    if !app_token(path, (&tok[0 as usize]) as u64) {
+        return false
+    }
+    let t: u64 = (&tok[0 as usize]) as u64
+    return streq(t, (&n0[0 as usize]) as u64) || streq(t, (&n1[0 as usize]) as u64)
+        || streq(t, (&n2[0 as usize]) as u64) || streq(t, (&n3[0 as usize]) as u64)
+        || streq(t, (&n4[0 as usize]) as u64)
+}
+
+fn spawn_app(path: u64, argv: u64, argc: u64) -> u64 {
+    if session_owner() == 0 || !needs_root(path) {
+        return spawn_user(path, argv, argc)
+    }
+    var el: [u8; 13] = "/bin/elevate\0"
+    var av: [u64; 8] = [0 as u64; 8]
+    av[0 as usize] = (&el[0 as usize]) as u64
+    av[1 as usize] = path
+    var n: u64 = 2
+    var i: u64 = 1
+    while i < argc && n < 8 {
+        av[(n) as usize] = *((argv + i * 8) as *mut u64)
+        n = n + 1
+        i = i + 1
+    }
+    return spawn_priv((&el[0 as usize]) as u64, (&av[0 as usize]) as u64, n)
 }
 
 // ====================================================== round K6: the rest
