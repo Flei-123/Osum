@@ -65,7 +65,8 @@ MAGIC = 0x314D59534F  # "OSYM1", kleines Ende zuerst
 # Der Kopf der Tabelle, 96 Oktette.  Jede Zahl ist ein Versatz VOM ANFANG
 # von `osym_tab` -- damit ist die Tabelle verschiebbar und der Kern
 # braucht nur EINE Adresse (`lea rax, [rip + osym_tab]`).
-HDR = 96
+HDR = 104   # r1217: +8 for the line stream offset (H_LSTR)
+BLK = 16    # line entries per block (kernel/lib/ksymtab.fi LINE_BLK)
 
 
 def symbole(elf):
@@ -145,6 +146,78 @@ def zeilen(elf):
     return raus
 
 
+def varint(v):
+    """LEB128: 7 bits per octet, high bit = more."""
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def pack_lines(ents):
+    """r1217: the line table in BLK-entry blocks. Index: per block u32 first address + u32 octet offset into the stream.
+    Stream: first entry of a block = varint(packed); every other entry = varint(address delta), varint(zigzag(packed delta)).
+    (8 octets per entry before; about 3 now. kernel/lib/ksymtab.fi line_of decodes at most BLK entries per lookup.)
+    """
+    idx = bytearray()
+    st = bytearray()
+    pa = pp = 0
+    for i, (a, pk) in enumerate(ents):
+        if i % BLK == 0:
+            idx += struct.pack("<II", a, len(st))
+            st += varint(pk)
+        else:
+            d = pk - pp
+            st += varint(a - pa)
+            st += varint((d << 1) if d >= 0 else (((-d) << 1) - 1))
+        pa, pp = a, pk
+    return bytes(idx), bytes(st)
+
+
+def unpack_line(idx, st, n, addr):
+    """Reference decoder (what the kernel does); tools/kernel/symtab_test.py compares it with a plain binary search."""
+    nb = (n + BLK - 1) // BLK
+    first = lambda k: struct.unpack_from("<I", idx, k * 8)[0]
+    if addr < first(0):
+        return 0
+    lo, hi = 0, nb
+    while lo + 1 < hi:
+        mid = lo + (hi - lo) // 2
+        if first(mid) <= addr:
+            lo = mid
+        else:
+            hi = mid
+    cnt = min(BLK, n - lo * BLK)
+    p = struct.unpack_from("<I", idx, lo * 8 + 4)[0]
+
+    def rd():
+        nonlocal p
+        v = sh = 0
+        while True:
+            b = st[p]
+            p += 1
+            v += (b & 0x7F) << sh
+            sh += 7
+            if b < 128:
+                return v
+
+    a = first(lo)
+    pk = res = rd()
+    for _ in range(1, cnt):
+        na = a + rd()
+        z = rd()
+        npk = pk - ((z + 1) >> 1) if z & 1 else pk + (z >> 1)
+        if na > addr:
+            break
+        a, pk, res = na, npk, npk
+    return res
+
+
 def blob(syms, lns):
     """Die Oktette der Tabelle bauen.  Aufbau -- er steht auch in
     `kernel/ksymtab.fi`, und die beiden muessen zusammenpassen:
@@ -155,12 +228,13 @@ def blob(syms, lns):
         24  u64 Versatz der Symboladressen (je u32)
         32  u64 Versatz der Namensverweise (je u32 in den Namensblock)
         40  u64 Versatz des Namensblocks
-        48  u64 Versatz der Zeilentabelle (je 8: u32 Adresse, u32 gepackt)
+        48  u64 Versatz der Zeilentabelle (r1217: Blockindex, je Block u32 Adresse + u32 Versatz in den Strom; siehe pack_lines)
         56  u64 Versatz der Dateiverweise (je u32)
         64  u64 Zahl der Dateien
         72  u64 Versatz des Dateinamenblocks
         80  u64 niedrigste Adresse
         88  u64 hoechste Adresse
+        96  u64 Versatz des Zeilenstroms (r1217)
 
     GEPACKT heisst: (Dateinummer << 20) | Zeilennummer.  Zwanzig Bits
     fassen 1048575 Zeilen; die laengste Datei dieses Baums hat 10216.
@@ -186,7 +260,7 @@ def blob(syms, lns):
 
     dateien = []
     dvers = {}
-    zeil = bytearray()
+    zeil_roh = []
     for adr, datei, nr in lns:
         if datei not in dvers:
             dvers[datei] = len(dateien)
@@ -196,7 +270,8 @@ def blob(syms, lns):
             nr = 0xFFFFF
         if f > 0xFFF:
             f = 0xFFF
-        zeil += struct.pack("<II", adr & 0xFFFFFFFF, (f << 20) | nr)
+        zeil_roh.append((adr & 0xFFFFFFFF, (f << 20) | nr))
+    zeil, zstrom = pack_lines(zeil_roh)
 
     dnamen = bytearray(b"\0")
     dvers2 = {}
@@ -218,13 +293,14 @@ def blob(syms, lns):
     o_snam = o_sadr + len(sym_adr)
     o_str = o_snam + len(sym_nam)
     o_zeil = ausrichten(o_str + len(namen))
-    o_dver = o_zeil + len(zeil)
+    o_lstr = o_zeil + len(zeil)
+    o_dver = ausrichten(o_lstr + len(zstrom))
     o_dstr = o_dver + len(dat_ver)
 
     lo = syms[0][0] if syms else 0
     hi = syms[-1][0] if syms else 0
-    kopf = struct.pack("<12Q", MAGIC, len(syms), len(lns), o_sadr, o_snam,
-                       o_str, o_zeil, o_dver, len(dateien), o_dstr, lo, hi)
+    kopf = struct.pack("<13Q", MAGIC, len(syms), len(lns), o_sadr, o_snam,
+                       o_str, o_zeil, o_dver, len(dateien), o_dstr, lo, hi, o_lstr)
     assert len(kopf) == HDR
     b = bytearray(kopf)
     b += sym_adr
@@ -233,6 +309,9 @@ def blob(syms, lns):
     while len(b) < o_zeil:
         b.append(0)
     b += zeil
+    b += zstrom
+    while len(b) < o_dver:
+        b.append(0)
     b += dat_ver
     b += dnamen
     return bytes(b)

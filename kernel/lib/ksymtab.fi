@@ -59,7 +59,8 @@
 //     24  u64 -> Symboladressen, je u32, aufsteigend sortiert
 //     32  u64 -> Namensverweise, je u32 in den Namensblock
 //     40  u64 -> Namensblock, nullterminierte Zeichenketten
-//     48  u64 -> Zeilentabelle, je 8 Oktett: u32 Adresse, u32 gepackt
+//     48  u64 -> Zeilentabelle: Blockindex (r1217, siehe line_of), vorher je 8 Oktett: u32 Adresse, u32 gepackt
+//     96  u64 -> Zeilenstrom (r1217)
 //     56  u64 -> Dateiverweise, je u32 in den Dateinamenblock
 //     64  u64 Zahl der Dateien
 //     72  u64 -> Dateinamenblock
@@ -106,6 +107,8 @@ const H_NDAT: u64 = 64
 const H_DSTR: u64 = 72
 const H_LO: u64 = 80
 const H_HI: u64 = 88
+const H_LSTR: u64 = 96     // r1217: offset of the line stream
+const LINE_BLK: u64 = 16   // entries per block, must equal BLK in tools/kernel/symtab.py
 
 fn tab() -> u64 {
     return asm("lea rax, [rip + osym_tab]", out("rax"))
@@ -177,28 +180,79 @@ fn sym_name(i: u64) -> u64 {
 
 // ------------------------------------------------------------ die Zeilen
 
-// Dasselbe noch einmal, ueber die Zeilentabelle. Zurueck kommt das
-// GEPACKTE Wort, oder 0 wenn es zu dieser Adresse keine Zeile gibt.
+// r1217: the line table is blocks of LINE_BLK entries (tools/kernel/symtab.py pack_lines). Index per block: u32 first address, u32
+// octet offset into the stream. Stream: first entry = varint(packed); then varint(address delta), varint(zigzag(packed delta)).
+// A lookup is a binary search over the blocks plus at most LINE_BLK - 1 steps of decoding. Still no lock, no state.
+fn vsize(p: u64) -> u64 {
+    var n: u64 = 1
+    while kstate.get8(p + n - 1) >= 128 {
+        n = n + 1
+    }
+    return n
+}
+
+fn vval(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        v = v + ((kstate.get8(p + k) & 0x7F) << (k * 7))
+        k = k + 1
+    }
+    return v
+}
+
+// The largest entry that is not above `addr`. Back comes the PACKED word, or 0 when there is no line for this address.
 fn line_of(addr: u64) -> u64 {
     let n: u64 = n_line()
     if n == 0 {
         return 0
     }
-    let a: u64 = tab() + w(H_LINE)
-    if addr < kstate.get32(a) {
+    let idx: u64 = tab() + w(H_LINE)
+    if addr < kstate.get32(idx) {
         return 0
     }
+    let nb: u64 = (n + LINE_BLK - 1) / LINE_BLK
     var lo: u64 = 0
-    var hi: u64 = n
+    var hi: u64 = nb
     while lo + 1 < hi {
         let mid: u64 = lo + (hi - lo) / 2
-        if kstate.get32(a + mid * 8) <= addr {
+        if kstate.get32(idx + mid * 8) <= addr {
             lo = mid
         } else {
             hi = mid
         }
     }
-    return kstate.get32(a + lo * 8 + 4)
+    var cnt: u64 = n - lo * LINE_BLK
+    if cnt > LINE_BLK {
+        cnt = LINE_BLK
+    }
+    var p: u64 = tab() + w(H_LSTR) + kstate.get32(idx + lo * 8 + 4)
+    var cur: u64 = kstate.get32(idx + lo * 8)
+    var vn: u64 = vsize(p)
+    var pk: u64 = vval(p, vn)
+    p = p + vn
+    var res: u64 = pk
+    var k: u64 = 1
+    while k < cnt {
+        vn = vsize(p)
+        let na: u64 = cur + vval(p, vn)
+        p = p + vn
+        vn = vsize(p)
+        let z: u64 = vval(p, vn)
+        p = p + vn
+        if na > addr {
+            return res
+        }
+        if (z & 1) != 0 {
+            pk = pk - ((z + 1) >> 1)
+        } else {
+            pk = pk + (z >> 1)
+        }
+        cur = na
+        res = pk
+        k = k + 1
+    }
+    return res
 }
 
 fn line_nr(packed: u64) -> u64 {
