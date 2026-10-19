@@ -1213,6 +1213,10 @@ const C_CMDS: u64 = 0x210 // wie viele ATA-Befehle daraus wurden
 const C_NEXT: u64 = 0x218 // welcher Weg als naechstes ueberschrieben wird
 const C_LAST: u64 = 0x220 // zuletzt gefragte LBA, fuer die Spurerkennung
 const C_RUNS: u64 = 0x228 // Zuege, die die Spurerkennung erlaubt hat
+// r1181: ways 8..15 live in a lazily allocated frame run (the fixed data page of the cache, BLKD, has room for eight only).
+const C_XDATA: u64 = 0x258 // address of the extra data (8 ways * 4 KiB), 0 = not (yet) there
+const C_XTRIED: u64 = 0x260 // 1 once an allocation was tried (no retry storm when memory is short)
+const XWAYS: u64 = 8 // extra ways
 
 fn cg(state: u64, off: u64) -> u64 {
     return __mmio_read64((state + kstate.BLKC_OFF + off) as *mut u64)
@@ -1231,7 +1235,38 @@ fn ws(state: u64, weg: u64, off: u64, v: u64) {
 }
 
 fn gone_data(state: u64, weg: u64) -> u64 {
+    if weg >= kstate.BLKC_WAYS {
+        return cg(state, C_XDATA) + (weg - kstate.BLKC_WAYS) * kstate.BLKC_SECTORS * BLOCK_SIZE
+    }
     return state + kstate.BLKD_OFF + weg * kstate.BLKC_SECTORS * BLOCK_SIZE
+}
+
+// r1181: HOW MANY WAYS THE CACHE HAS RIGHT NOW. Measured in an idle desktop: the taskbar keeps re-reading ten different
+// chunks (superblock, journal, root directory, ~13 config files); a round-robin cache of eight ways with ten chunks in
+// a cycle misses on EVERY lookup (20-30 DMA commands/s for nothing). Sixteen ways hold the whole cycle. The second eight
+// come from the frame allocator on first use; if that fails, the cache stays at eight ways exactly as before.
+fn ways(state: u64) -> u64 {
+    if cg(state, C_XDATA) != 0 {
+        return kstate.BLKC_WAYS + XWAYS
+    }
+    return kstate.BLKC_WAYS
+}
+
+fn cache_grow(state: u64) {
+    if cg(state, C_XTRIED) != 0 || kstate.get(state, kstate.BITMAP) == 0 {
+        return
+    }
+    cs(state, C_XTRIED, 1)
+    let b: u64 = mem.frame_run(state, XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE / 4096)
+    if b == 0 {
+        return
+    }
+    var w: u64 = kstate.BLKC_WAYS
+    while w < kstate.BLKC_WAYS + XWAYS {
+        ws(state, w, C_VALID, 0)
+        w = w + 1
+    }
+    cs(state, C_XDATA, b)
 }
 
 // JEDES SCHREIBEN WIRFT IHN WEG. Ein Vorauslesepuffer, der ein
@@ -1243,7 +1278,7 @@ fn gone_data(state: u64, weg: u64) -> u64 {
 // EINEM dieser Faelle danebenliegt, ist wertlos.
 fn cache_invalidate(state: u64) {
     var w: u64 = 0
-    while w < kstate.BLKC_WAYS {
+    while w < ways(state) {
         ws(state, w, C_VALID, 0)
         w = w + 1
     }
@@ -1258,7 +1293,7 @@ fn cache_invalidate(state: u64) {
 // created file instead of ~50).
 fn cache_drop(state: u64, dev: u64, lba: u64) {
     var w: u64 = 0
-    while w < kstate.BLKC_WAYS {
+    while w < ways(state) {
         if wg(state, w, C_VALID) == 1 {
             let c0: u64 = wg(state, w, C_LBA)
             if wg(state, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wg(state, w, C_N)) {
@@ -1450,6 +1485,7 @@ fn cache_runs(state: u64) -> u64 {
 // dieselbe LBA heisst auf zwei Laufwerken zweierlei.
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
     dma_up(state)
+    cache_grow(state)
     let slave: bool = dev == DEV_ATA1
     if cg(state, W_DIRTY) != 0 {
         let wsl: u64 = lba & (WB_SLOTS - 1)
@@ -1459,7 +1495,7 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
         }
     }
     var w: u64 = 0
-    while w < kstate.BLKC_WAYS {
+    while w < ways(state) {
         if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
             let c0: u64 = wg(state, w, C_LBA)
             if lba >= c0 && lba < c0 + wg(state, w, C_N) {
@@ -1493,7 +1529,7 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     // REIHUM. Zwei Wege und ein Zeiger darauf sind genug, um Zeiger-
     // und Datenbloecke auseinanderzuhalten; eine echte Verdraengung
     // nach Alter braeuchte eine Uhr, die dieser Weg nicht hat.
-    let ziel: u64 = cg(state, C_NEXT) % kstate.BLKC_WAYS
+    let ziel: u64 = cg(state, C_NEXT) % ways(state)
     cs(state, C_NEXT, ziel + 1)
     let daten: u64 = gone_data(state, ziel)
     var n: u64 = kstate.BLKC_SECTORS

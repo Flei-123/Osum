@@ -793,11 +793,23 @@ fn touch_atime(state: u64, ino: u64) {
         return
     }
     let nun: u64 = now(state)
-    if nun == 0 || inode_get(state, ino, I_ATIME) == nun {
+    if nun == 0 {
+        return
+    }
+    // r1181: RELATIME. The old rule (write whenever the second changed) made every poller that opens a config file once a
+    // second cost one journalled inode write per file and second (measured: the taskbar alone, ~4.4 sector writes/s = 1139
+    // outw/s of PIO in an idle desktop). Like Linux `relatime`: write only when the access time is not newer than the
+    // modification/creation time (the first read after a change) or is older than a day. A stamp from the FUTURE (image
+    // built on a host whose clock is ahead, RTC zone not known yet) says nothing about "changed since" and is ignored.
+    let at: u64 = inode_get(state, ino, I_ATIME)
+    let mt: u64 = inode_get(state, ino, I_MTIME)
+    let ct: u64 = inode_get(state, ino, I_CTIME)
+    if at != 0 && at <= nun && nun - at < ATIME_STALE && (mt > nun || at > mt) && (ct > nun || at > ct) {
         return
     }
     set_times(state, ino, 0, 0, nun)
 }
+const ATIME_STALE: u64 = 86400
 
 // Nach jedem Schreiben. Auch das nur, wenn sich die Sekunde geaendert
 // hat -- eine Datei, die in einer Sekunde hundertmal beschrieben wird,

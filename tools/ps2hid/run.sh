@@ -13,7 +13,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
-export DESIGNBUILD="$TMPD/build"
+# PS2_BUILD=<dir> reuses one kernel build across repeated runs (tools/ps2hid/repeat.sh); default: fresh build per run
+export DESIGNBUILD="${PS2_BUILD:-$TMPD/build}"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
