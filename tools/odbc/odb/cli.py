@@ -195,7 +195,7 @@ def cmd_input(ns):
     if ns.kind == "key":
         a += [("key", ns.args[0]), ("mods", ns.mods), ("action", ns.action)]
     elif ns.kind == "text":
-        a += [("text", " ".join(ns.args)), ("delay_ms", ns.delay_ms)]
+        a += [("text", " ".join(ns.args)), ("delay_ms", ns.delay_ms), ("layout", ns.layout)]
     elif ns.kind == "mouse":
         if ns.rel:
             a += [("dx", ns.args[0]), ("dy", ns.args[1])]
@@ -364,6 +364,7 @@ def build_parser():
     sp.add_argument("--action")
     sp.add_argument("--button")
     sp.add_argument("--delay-ms", type=int)
+    sp.add_argument("--layout", choices=["us", "de", "uk", "fr", "es", "it", "ru", "auto"], help="text: keyboard layout (default = the guest's own)")
     sp.add_argument("--rel", action="store_true", help="mouse: args are dx dy")
     sp.set_defaults(fn=cmd_input)
     sp = sub.add_parser("ps")
