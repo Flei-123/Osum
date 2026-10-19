@@ -26,7 +26,9 @@ for ($k = 1; $k -le $Samples; $k++) {
   $o = & powershell -NoProfile -ExecutionPolicy Bypass -File "$R\allcpu.ps1" -Sec $Sec 2>&1
   $all = ($o | Where-Object { $_ -match '^pid' } | ForEach-Object { ($_.ToString() -replace ' of one host core over.*','') }) -join ' | '
   Log ("sample $k $all")
-  $o | Where-Object { $_ -match '^pid \d+ \(VBoxHeadless\): ([\d.,]+) %' } | ForEach-Object { $testCpu += [double](($Matches[1]) -replace ',', '.') }
+  # one sample = the busiest VBoxHeadless pid (helper pids of the same VM show 0 %)
+  $v = @($o | Where-Object { $_ -match '^pid \d+ \(VBoxHeadless\): ([\d.,]+) %' } | ForEach-Object { [double]($Matches[1] -replace ',', '.') })
+  if ($v.Count) { $testCpu += ($v | Measure-Object -Maximum).Maximum }
 }
 if ($testCpu.Count) { $m = ($testCpu | Measure-Object -Average).Average; Log ("TESTCPU avg {0:N1} % ({1})" -f $m, ($testCpu -join ' ')); if ($m -ge 90) { Log 'BURN: test VM host CPU >= 90 %' } }
 if ($NoOdb) { $idle = @('noodb') } else { $idle = @(Vt @('odbidle', '10000') | Select-String 'idle_pct|tick_core|uptime') }
