@@ -155,6 +155,7 @@ const R_MEM_REGS: u64 = 30
 const R_DISPLAY_ID: u64 = 35
 const R_DISPLAY_W: u64 = 39
 const R_DISPLAY_H: u64 = 40
+const R_PITCHLOCK: u64 = 32 // VirtualBox: forces BYTES_PER_LINE (and the stride the host scans out) to this value
 const R_TRACES: u64 = 45 // 0 = the host does not write-protect VRAM pages to watch the guest (vmwgfx writes 0)
 
 // ---- capabilities
@@ -365,9 +366,21 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     let pitch0: u64 = reg_r(state, R_BYTES_PER_LINE)
     let stale_emu: bool = kstate.mode_on(state, kstate.M_VMSVGASTALE)
     let old_way: bool = kstate.mode_on(state, kstate.M_VMSVGAOLD)
+    // VirtualBox publishes the stride only when the mode is (re)enabled, and a live WIDTH/HEIGHT change on an enabled device leaves the host on
+    // the OLD stride (1920x1200 scanned out with 4096 bytes per row: a small shifted rectangle, or a black window). Measured on VirtualBox 7.2
+    // (r1197): ENABLE=0 first + PITCHLOCK=w*4 before ENABLE=1 makes the host take width*4 at once (cbLine 0x1E00 for 1920). QEMU keeps the old way.
+    let vbox: bool = kstate.get(state, s(S_VMM_UP)) != 0 && !old_way
+    if vbox {
+        reg_w(state, R_ENABLE, 0)
+    }
     reg_w(state, R_WIDTH, w)
     reg_w(state, R_HEIGHT, h)
     reg_w(state, R_BPP, 32)
+    var lockv: u64 = 0
+    if vbox {
+        lockv = w * 4
+        reg_w(state, R_PITCHLOCK, lockv)
+    }
     reg_w(state, R_ENABLE, 1)
     var tries: u64 = 0
     while tries < 200 {
@@ -425,6 +438,7 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     var s_wt: [u8; 7] = " wait=\0"
     var s_of: [u8; 6] = " off=\0"
     var s_pr: [u8; 7] = " preg=\0"
+    var s_lk: [u8; 7] = " lock=\0"
     serial.puts((&s_m[0]) as u64)
     serial.dec(w)
     serial.put(120 as u8)
@@ -437,6 +451,8 @@ fn set_mode(state: u64, w: u64, h: u64) -> bool {
     serial.dec(pitch)
     serial.puts((&s_pr[0]) as u64)
     serial.dec(pitch_reg)
+    serial.puts((&s_lk[0]) as u64)
+    serial.dec(lockv)
     serial.puts((&s_wt[0]) as u64)
     serial.dec(waited)
     serial.puts((&s_of[0]) as u64)
