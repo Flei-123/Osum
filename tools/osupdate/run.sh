@@ -407,6 +407,8 @@ hat "$OUT/p2.txt" "phase=current" "service check on a not-newer feed: phase curr
 hatnicht "$OUT/p2.txt" "00000100" "... and no notification marker (no build number written)"
 dienst_aus
 
+fi
+
 echo
 echo "osupdate: $pass/$fail OK/FAIL"
 [ "$fail" = 0 ]
