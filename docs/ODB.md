@@ -267,6 +267,10 @@ Client behaviour worth knowing when writing the agent:
   pause of 50 ms. Zero octets are garbage to the frame resync (the magic is `ODB1`), the pause lets the agent wake and
   switch back to fast polling (it stays fast for 3 s after the last frame). `tools/odbc` does this in `Transport.write`
   (`ODB_WAKE=0` turns it off).
+- Deep idle (r1217): after 8.5 s without a frame the agent polls every 20 ms (`DEEP_MS`), and `/dev/odb0` reads only twice
+  (`SPIN_IDLE`) once 64 reads in a row came back empty. The host's wake preamble (silence > 8 s -> 160 zero octets + 50 ms pause) is
+  longer than one deep poll, so the first frame after a long silence still arrives intact. Measured idle port I/O (QEMU/AHCI, whole
+  system): 572/s -> 95/s.
 - Resync after a cut frame: the 250 ms silence is measured from the FIRST EMPTY POLL after the last byte, not from the
   last byte (the agent can be busy for longer than that in a disk write while the rest of a good frame is on its way).
 - `exec` returns when the shell has exited and the pipes stayed quiet for 300 ms (a detached child that keeps the pipes
