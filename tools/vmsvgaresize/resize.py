@@ -57,7 +57,11 @@ def measure(mon, tag):
             continue
         eq = np.all(bar[:, d:] == bar[:, :-d], axis=2) & ink[:, d:]
         dup = max(dup, float(eq.sum()) / n)
-    return w, h, black, rows, lastblack, dup
+    # r1135: the wallpaper window must cover the WHOLE screen after a resize (VirtualBox z21: a white margin 25 px left/right, 14 px
+    # above). Share of near-white pixels (all channels >= 235) in the left 24 / right 24 columns and the top 8 rows of the upper 60 %.
+    band = np.concatenate([up[:, :24].reshape(-1, 3), up[:, w - 24 :].reshape(-1, 3), up[:8].reshape(-1, 3)])
+    wedge = float(np.mean(np.all(band >= 235, axis=1)))
+    return w, h, black, rows, lastblack, dup, wedge
 
 
 def menu_find(mon, tag):
@@ -135,7 +139,7 @@ def main():
             ew, eh = int(m[-1][3]), int(m[-1][4])
         r = measure(mon, str(n))
         ccx, cbot, cw, ch, mcx, mbot, mw, mh = menu_probe(mon, str(n), n < steps)
-        out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh, ccx, cbot, cw, ch))
+        out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d %d %d %d %d %.3f\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh, ccx, cbot, cw, ch, r[6]))
         out.flush()
     out.close()
     early.close()

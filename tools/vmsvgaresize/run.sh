@@ -74,7 +74,7 @@ if grep -aq '^wm: bufchg ' "$D/serial.txt" && [ -n "$barpid" ]; then
 else
     bad "buffer changes: no 'wm: bufchg' line or no taskbar pid in the serial log"
 fi
-while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; do
+while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch wedge; do
     s=${ew}x${eh}
     [ "$rw" = "$ew" ] && [ "$rh" = "$eh" ] && ok "$s: screen has the new size" || bad "$s: screen size (got ${rw}x${rh})"
     # W-C3g: the taskbar must SEE every size change (serial `taskbar: follow screen w=W h=H`, printed without /etc/uitrace). Before the fix its
@@ -84,6 +84,8 @@ while read -r i rw rh black rows lastb ew eh dup mcx mbot mw mh ccx cbot cw ch; 
     awk -v b="$black" 'BEGIN{exit !(b<0.5)}' && ok "$s: desktop not black (black share $black)" || bad "$s: desktop black (black share $black)"
     [ "$rows" -ge 20 ] && ok "$s: taskbar at the bottom (rows $rows)" || bad "$s: no taskbar at the bottom (rows $rows)"
     awk -v b="$lastb" 'BEGIN{exit !(b<0.05)}' && ok "$s: last bar row not black (share $lastb)" || bad "$s: last row black (share $lastb)"
+    # r1135: the wallpaper reaches all four edges (no white margin left / right / top after the resize)
+    awk -v b="${wedge:-0}" 'BEGIN{exit !(b<0.2)}' && ok "$s: wallpaper reaches the edges (white edge share ${wedge:-0})" || bad "$s: white margin at the screen edge (share ${wedge:-0})"
     awk -v b="$dup" 'BEGIN{exit !(b<0.5)}' && ok "$s: bar not repeated by a stale stride (dup share $dup)" || bad "$s: bar repeated (dup share $dup)"
     # r1010: the start menu follows a screen size change at once (also while hidden), so the FIRST opening after every resize stands centred
     # above the bar of the NEW size. Before the fix QEMU opened it one step late (centre / bottom of the previous size).
