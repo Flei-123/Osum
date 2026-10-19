@@ -163,10 +163,18 @@ else
     # limine.conf AUF DER PLATTE, die der Installer dorthin geschrieben
     # hat. Ein `-append` waere geschummelt -- dann haette der Wirt dem
     # Kern gesagt, was er tun soll, und nicht die Platte.
+    # OTA_DRIVE=ahci: the installed disk on an ICH9 AHCI controller (DMA, like real SATA);
+    # default stays the IDE/PIO disk every other gate was written for.
+    if [ "${OTA_DRIVE:-ide}" = ahci ]; then
+        DISKARGS=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$OUT/ziel.img,format=raw"
+                  -device ide-hd,drive=hd0,bus=ahci0.0)
+    else
+        DISKARGS=(-drive "file=$OUT/ziel.img,format=raw,if=ide,index=0")
+    fi
     ARGS=(-machine pc -cpu "$CPU" -m "$MEM" -display none -no-reboot "${RTCARGS[@]}"
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
           -serial "file:$OUT/$NAME.txt"
-          -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0"
+          "${DISKARGS[@]}"
           "${ZWEITE[@]}" "${NETARGS[@]}"
           -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -f "$VARS" ] && ARGS+=(-drive "if=pflash,format=raw,unit=1,file=$VARS")

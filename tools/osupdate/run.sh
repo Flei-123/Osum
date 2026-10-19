@@ -31,6 +31,7 @@ export OUT
 PORT=${OSU_PORT:-$(( 18000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"
 export OSUM_CPU=${OSUM_CPU:-SandyBridge}   # no AVX2 for /bin/fetch (docs/OTA.md)
+export OTA_DRIVE=${OTA_DRIVE:-ahci}      # installed disk on AHCI (DMA): ESP file copies of 8.6 MB take 30 s instead of >10 min over IDE PIO
 
 pass=0
 fail=0

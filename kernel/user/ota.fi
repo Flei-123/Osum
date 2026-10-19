@@ -2502,10 +2502,14 @@ static mut P_SU_OSVER: [u8; 15] = "/etc/osversion\0"
 static mut P_SU_MNT: [u8; 8] = "/sysesp\0"
 static mut P_SU_CONF: [u8; 20] = "/sysesp/limine.conf\0"
 static mut P_SU_NEW: [u8; 18] = "/sysesp/limine.nw\0"
+// 32 KiB copy buffer: one write call per 64 sectors instead of one per 8
+static mut SU_BIG: [u8; 32768] = [0 as u8; 32768]
 static mut P_SU_KB: [u8; 18] = "/sysesp/osum-b.mb\0"
 static mut P_SU_KA: [u8; 16] = "/sysesp/osum.mb\0"
 static mut P_PROCVER: [u8; 14] = "/proc/version\0"
 static mut D_SU_HDA1: [u8; 10] = "/dev/hda1\0"
+static mut D_SU_SDA1: [u8; 10] = "/dev/sda1\0"
+static mut D_SU_NVME1: [u8; 12] = "/dev/nvme01\0"
 static mut T_SU_VFAT: [u8; 5] = "vfat\0"
 static mut K_SU_SQ: [u8; 11] = "sysquelle=\0"
 static mut W_SU_AKT: [u8; 9] = "/aktuell\0"
@@ -2553,7 +2557,7 @@ static mut E_SU_NOKERN: [u8; 41] = "ota: system manifest has no kernel entry\0"
 static mut E_SU_BACK: [u8; 56] = "ota: system build is not newer than the installed one: \0"
 static mut E_SU_MIN: [u8; 67] = "ota: this system is too old for an incremental update (min_from): \0"
 static mut E_SU_TRIAL: [u8; 61] = "ota: a trial is running or pending, confirm or restart first\0"
-static mut E_SU_ESP: [u8; 60] = "ota: cannot mount the ESP (/dev/hda1) -- no installed disk?\0"
+static mut E_SU_ESP: [u8; 58] = "ota: cannot mount the ESP (partition 1 of the boot disk)?\0"
 static mut E_SU_LAYOUT: [u8; 79] = "ota: unsupported limine.conf layout (need ONE entry with path boot():/osum.mb)\0"
 static mut E_SU_CONFW: [u8; 33] = "ota: could not write limine.conf\0"
 static mut E_SU_ERP: [u8; 37] = "ota: could not arm the trial counter\0"
@@ -2659,7 +2663,10 @@ fn su_fix_source() {
             p8(q + l - t, 0)
             ulib.strcat(q, (&W_SU_SYS[0 as usize]) as u64)
         } else {
-            slash(q)
+            // W_SU_SYS starts with its own slash: drop a trailing one first (no `//system`)
+            if l > 0 && g8(q + l - 1) == 47 {
+                p8(q + l - 1, 0)
+            }
             ulib.strcat(q, (&W_SU_SYS[0 as usize]) as u64)
         }
     }
@@ -2805,12 +2812,31 @@ fn cmd_sys_find() -> u64 {
 }
 
 // ------------------------------------------------ the ESP side
+// Mount one candidate device on the ESP mount point; it only counts when the loader
+// config is on it (a different FAT volume must not be taken for the ESP).
+fn su_esp_try(dev: u64) -> bool {
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, dev, (&P_SU_MNT[0 as usize]) as u64,
+        (&T_SU_VFAT[0 as usize]) as u64, 0)
+    if ulib.bad(m) {
+        return false
+    }
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_CONF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(f) {
+        ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+// The ESP is partition 1 of the boot disk: IDE (hda), AHCI (sda) or NVMe.
 fn su_esp_open() -> bool {
     ulib.sys(ulib.SYS_MKDIR, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
-    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
-    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, (&D_SU_HDA1[0 as usize]) as u64,
-        (&P_SU_MNT[0 as usize]) as u64, (&T_SU_VFAT[0 as usize]) as u64, 0)
-    return !ulib.bad(m)
+    // order matters: mounting /dev/hda1 on a machine without an IDE disk stalls for minutes
+    return su_esp_try((&D_SU_SDA1[0 as usize]) as u64)
+        || su_esp_try((&D_SU_NVME1[0 as usize]) as u64)
+        || su_esp_try((&D_SU_HDA1[0 as usize]) as u64)
 }
 
 fn su_esp_close() {
@@ -2943,7 +2969,7 @@ fn su_copy(src: u64, dst: u64) -> bool {
     var good: bool = true
     var going: bool = true
     while going {
-        let r: u64 = ulib.sys(ulib.SYS_READ, a, (&BLOCK[0 as usize]) as u64, 4096)
+        let r: u64 = ulib.sys(ulib.SYS_READ, a, (&SU_BIG[0 as usize]) as u64, 32768)
         if ulib.bad(r) {
             good = false
             going = false
@@ -2953,7 +2979,7 @@ fn su_copy(src: u64, dst: u64) -> bool {
             var o: u64 = 0
             while o < r && good {
                 let w: u64 = ulib.sys(ulib.SYS_WRITE, b,
-                    (&BLOCK[0 as usize]) as u64 + o, r - o)
+                    (&SU_BIG[0 as usize]) as u64 + o, r - o)
                 if ulib.bad(w) || w == 0 {
                     good = false
                 } else {
