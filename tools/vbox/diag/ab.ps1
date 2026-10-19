@@ -25,6 +25,12 @@ for ($k = 1; $k -le $Samples; $k++) {
   $all = ($o | Where-Object { $_ -match '^pid' } | ForEach-Object { ($_.ToString() -replace ' of one host core over.*','') }) -join ' | '
   Log ("sample $k $all")
 }
-Vt @('odbidle', '10000') | Select-String 'idle_pct|tick_core|uptime' | ForEach-Object { Log $_.Line }
+$idle = @(Vt @('odbidle', '10000') | Select-String 'idle_pct|tick_core|uptime')
+$idle | ForEach-Object { Log $_.Line }
+if ($idle.Count -eq 0) {
+  # ODB mute = hang state: save vCPU registers + TM/NEM rates for the post-mortem (resolve rip with nm -n osum.mb)
+  Log 'HANG: odbidle returned nothing'
+  & powershell -NoProfile -ExecutionPolicy Bypass -File "$R\regs.ps1" -N 3 2>&1 | ForEach-Object { Log $_ }
+} else { Log 'ODB-OK' }
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$R\tm.ps1" -Sec 10 -Top 14 2>&1 | ForEach-Object { Log $_ }
 Log 'done'
