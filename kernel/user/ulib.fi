@@ -52,7 +52,7 @@ export {
     arg_count, arg_at, failed,
     SYS_EXIT, SYS_WRITE, SYS_READ, SYS_GETPID, SYS_SPAWN,
     SYS_OPEN, SYS_CLOSE, SYS_UNLINK, SYS_MKDIR,
-    SYS_YIELD, SYS_GETPPID, SYS_EXEC,
+    SYS_YIELD, SYS_GETPPID, SYS_EXEC, SYS_EXECAS, spawn_user, spawn_priv,
     SYS_DUP, SYS_DUP2, SYS_SEEK, SYS_CHDIR, SYS_GETCWD, SYS_SYSINFO, SYS_PSTAT,
     SYS_KILL, O_MAKE, ARGS_BASE,
     I_TICKS, I_UPTIME, I_FRAMES_FREE, I_FRAMES_ALL, I_BLOCKS, I_BFREE,
@@ -172,6 +172,8 @@ const SYS_UNLINK: u64 = 87
 const SYS_GETPPID: u64 = 110
 const SYS_SPAWN: u64 = 1000
 const SYS_EXEC: u64 = 1001
+// ROUND SESSUID: 1005 execas(path, argv, argc | mode << 16), see sys.fi.
+const SYS_EXECAS: u64 = 1005
 // The three of round K6 (`kernel/sys.fi`).
 const SYS_SYSINFO: u64 = 1002
 const SYS_PSTAT: u64 = 1003
@@ -671,6 +673,33 @@ fn arg_at(args: u64, i: u64) -> u64 {
         return 0
     }
     return *((args + 8 + i * 8) as *mut u64)
+}
+
+// ================================================= ROUND SESSUID: spawning
+//
+// The taskbar and the start menu are started by the kernel before anybody
+// signs in and stay root. What THEY start for the person at the keyboard
+// must not be root: `spawn_user` starts it as the signed-in user (the
+// kernel lowers the child; a non-root caller simply gets a plain exec).
+// `spawn_priv` is the other door, for infrastructure and for the
+// privileged path (`/bin/elevate`): the child stays root, only a root
+// caller may use it, and the kernel leaves a line `execas: priv` behind.
+// A kernel without 1005 (-ENOSYS: old image, new programs) falls back
+// to the plain exec -- the behaviour of before this round.
+fn spawn_user(path: u64, argv: u64, argc: u64) -> u64 {
+    let r: u64 = sys(SYS_EXECAS, path, argv, argc)
+    if errno.is_error(r) && errno.negated(r) == errno.E_NOSYS {
+        return sys(SYS_EXEC, path, argv, argc)
+    }
+    return r
+}
+
+fn spawn_priv(path: u64, argv: u64, argc: u64) -> u64 {
+    let r: u64 = sys(SYS_EXECAS, path, argv, argc + 65536)
+    if errno.is_error(r) && errno.negated(r) == errno.E_NOSYS {
+        return sys(SYS_EXEC, path, argv, argc)
+    }
+    return r
 }
 
 // ====================================================== round K6: the rest

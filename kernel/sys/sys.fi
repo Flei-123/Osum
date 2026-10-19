@@ -130,7 +130,7 @@ export {
     SYS_DUP, SYS_DUP2, SYS_NANOSLEEP, SYS_GETPID, SYS_FORK, SYS_EXECVE,
     SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_RMDIR, SYS_UNLINK,
     SYS_GETPPID,
-    SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
+    SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC, SYS_OSUM_EXECAS,
     SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL,
     SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGRETURN, SYS_IOCTL,
     SYS_PAUSE, SYS_ALARM, SYS_CLONE, SYS_KILL, SYS_GETTIMEOFDAY,
@@ -545,6 +545,17 @@ const SYS_LEAVE: u64 = 2
 //        system with 16 KiB of kernel stack per task has a use for that.
 const SYS_OSUM_SPAWN: u64 = 1000
 const SYS_OSUM_EXEC: u64 = 1001
+// ROUND SESSUID: 1005 execas(path, argv, argc | mode << 16) -> pid.
+//   mode 0  "start it for the session": a ROOT caller (taskbar, start
+//           menu) while somebody is signed in gets a child that runs as
+//           that person, not as root. Everybody else, and a machine with
+//           no session, gets what `exec` gives (the caller's identity).
+//   mode 1  "start it privileged, on purpose": only a caller whose
+//           effective id is 0 may ask, else -EPERM. The child is
+//           root like the caller; the line `execas: priv` is the trail.
+const SYS_OSUM_EXECAS: u64 = 1005
+const EXECAS_USER: u64 = 0
+const EXECAS_PRIV: u64 = 1
 // ROUND K6. Three that Linux HAS NO NUMBER FOR, in the shape this
 // kernel can answer them, and therefore above 1000 by the rule of
 // round K4 -- round K6 itself had picked 44, 45 and 46, which are
@@ -3050,6 +3061,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_EXEC {
         return do_exec(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EXECAS {
+        return do_exec_as(state, me, a0, a1, a2)
     }
     if number == SYS_OSUM_SETENV {
         return do_setenv(state, me, a0, a1)
@@ -10252,6 +10266,58 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     netmon.task_clear(state, t, sched.tget(state, t, sched.T_PID))
     netmon.name_set(state, t, name)
     return sched.tget(state, t, sched.T_PID)
+}
+
+// ROUND SESSUID: `exec` for the session (see SYS_OSUM_EXECAS above). The
+// mark lives on the caller's own task word for exactly the length of
+// `do_exec`; `sched.create` turns it into the child's identity.
+// Nothing here can raise a privilege: mode 0 only ever LOWERS the child
+// (a non-root caller gets a plain `exec`), mode 1 refuses non-root.
+fn do_exec_as(state: u64, me: u64, path: u64, argv: u64, packed: u64) -> u64 {
+    let argc: u64 = packed & 0xFFFF
+    let mode: u64 = (packed >> 16) & 0xFFFF
+    if mode > EXECAS_PRIV {
+        return neg(errno.E_INVAL)
+    }
+    let euid: u64 = sched.tget(state, me, sched.T_EUID)
+    if mode == EXECAS_PRIV {
+        if euid != 0 {
+            var s_no: [u8; 24] = "execas: priv refused\n\0\0\0"
+            serial.puts((&s_no[0]) as u64)
+            return neg(errno.E_PERM)
+        }
+        let rp: u64 = do_exec(state, me, path, argv, argc)
+        var s_pv: [u8; 18] = "execas: priv pid=\0"
+        var s_pf: [u8; 19] = "execas: priv fail\n\0"
+        if errno.is_error(rp) {
+            serial.puts((&s_pf[0]) as u64)
+        } else {
+            serial.puts((&s_pv[0]) as u64)
+            serial.dec(rp)
+            serial.nl()
+        }
+        return rp
+    }
+    if euid != 0 || kstate.get(state, kstate.K11_OFF + kstate.SP_UID) == 0 {
+        return do_exec(state, me, path, argv, argc)
+    }
+    sched.tset(state, me, sched.T_EXAS, 1)
+    let r: u64 = do_exec(state, me, path, argv, argc)
+    sched.tset(state, me, sched.T_EXAS, 0)
+    // The trail (gate tools/sessuid): which identity the child really got.
+    if !errno.is_error(r) {
+        let sl: u64 = sched.find_pid(state, r)
+        if sl < kstate.MAX_TASKS {
+            var s_u: [u8; 18] = "execas: user pid=\0"
+            var s_i: [u8; 6] = " uid=\0"
+            serial.puts((&s_u[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_i[0]) as u64)
+            serial.dec(sched.tget(state, sl, sched.T_UID))
+            serial.nl()
+        }
+    }
+    return r
 }
 
 // ============================================================ Runde K11

@@ -72,6 +72,8 @@ export {
     // ---- RUNDE MULTIUSER ----
     T_NGROUPS, groups_count, groups_at, groups_has, groups_set,
     groups_clear, groups_inherit, GROUPS_MAX,
+    // ---- ROUND SESSUID ----
+    T_EXAS, session_identity,
     // ---- RUNDE AVX ----
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
     // ---- RUNDE LAUFZEIT ----
@@ -305,6 +307,18 @@ const T_POLLSEQ: u64 = 504
 // 512, und die naechsten sechs Runden muessen diese Zeile
 // nicht noch einmal schreiben.
 const T_NGROUPS: u64 = 512
+
+// ROUND SESSUID: ONE PENDING "START THE CHILD AS THE SESSION USER" MARK
+// PER TASK. 520 is a free word (512 + 8; the group LIST lives in the MU
+// table, not in the record). `SYS_OSUM_EXECAS` (1005, sys.fi) sets it on
+// the CALLER for the length of one `exec` and clears it again;
+// `create` below reads it from `current` and hands the child the
+// identity of the signed-in user instead of the caller's. It is a word
+// of the task and not a word of the machine on purpose: two callers in
+// `exec` at the same moment cannot take each other's mark, and a mark
+// that is lost can only leave the child with the caller's own identity
+// -- never with a stranger's.
+const T_EXAS: u64 = 520
 
 // RUNDE AVX: der Vektorzustand dieser Aufgabe -- die Adresse EINES
 // Rahmens aus `mem.frame_alloc`, in den `FXSAVE`/`XSAVE` schreibt. 0
@@ -774,6 +788,59 @@ fn groups_inherit(state: u64, kind: u64, eltern: u64) {
         k = k + 1
     }
     tset(state, kind, T_NGROUPS, n)
+}
+
+// ROUND SESSUID: THE IDENTITY OF THE PERSON WHO IS SIGNED IN.
+//
+// `glogin` records the session owner (SYS_OSUM_SPERRE op 7 -> SP_UID,
+// root only) and then drops to that user itself. The taskbar and the
+// start menu are started by the kernel BEFORE anybody signs in and stay
+// root, and everything they started used to stay root with them. A
+// child that `SYS_OSUM_EXECAS` starts for the session gets this
+// identity: uid/euid/suid = SP_UID, and the rest of it (gid, umask,
+// supplementary groups) from a LIVING task that already carries exactly
+// that uid -- the desktop `glogin` started. Without such a donor the
+// child gets gid = uid, umask 022 and NO groups. The groups of the
+// caller (root) are never copied: that would be the privilege the
+// whole thing takes away.
+//
+// No session (SP_UID == 0: an image without sign-in) changes nothing --
+// the child keeps the caller's identity, as before this round.
+fn session_identity(state: u64, slot: u64) {
+    let uid: u64 = kstate.get(state, kstate.K11_OFF + kstate.SP_UID)
+    if uid == 0 {
+        return
+    }
+    var donor: u64 = kstate.MAX_TASKS
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if i != slot && tget(state, i, T_STATE) != S_FREE
+            && tget(state, i, T_UID) == uid
+            && tget(state, i, T_EUID) == uid
+            && tget(state, i, T_SUID) == uid {
+            donor = i
+            i = n
+        } else {
+            i = i + 1
+        }
+    }
+    tset(state, slot, T_UID, uid)
+    tset(state, slot, T_EUID, uid)
+    tset(state, slot, T_SUID, uid)
+    if donor < kstate.MAX_TASKS {
+        tset(state, slot, T_GID, tget(state, donor, T_GID))
+        tset(state, slot, T_EGID, tget(state, donor, T_EGID))
+        tset(state, slot, T_SGID, tget(state, donor, T_SGID))
+        tset(state, slot, T_UMASK, tget(state, donor, T_UMASK))
+        groups_inherit(state, slot, donor)
+    } else {
+        tset(state, slot, T_GID, uid)
+        tset(state, slot, T_EGID, uid)
+        tset(state, slot, T_SGID, uid)
+        tset(state, slot, T_UMASK, 18)
+        groups_clear(state, slot)
+    }
 }
 
 // ROUND K5. This used to be one word for the whole machine
@@ -1511,6 +1578,11 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     tset(state, slot, T_UMASK, tget(state, par, T_UMASK))
     // RUNDE MULTIUSER: und die Zusatzgruppen dazu, aus demselben Grund.
     groups_inherit(state, slot, par)
+    // ROUND SESSUID: a root caller that asked for `SYS_OSUM_EXECAS` mode 0
+    // gets a child that belongs to the person at the keyboard.
+    if tget(state, par, T_EXAS) != 0 {
+        session_identity(state, slot)
+    }
     tset(state, slot, T_CR3, kstate.get(state, kstate.KPML4))
     tset(state, slot, T_CWD, kstate.get(state, kstate.FS_ROOT))
     tset(state, slot, T_RSP, frame_build(state, ktop, real_entry, state,
