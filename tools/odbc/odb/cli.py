@@ -14,6 +14,7 @@ from . import frame as F
 from . import proto
 from .client import Session, Timeout, Closed, read_token_file
 from .transport import TransportError
+from . import img as IMG
 
 
 def out_bytes(b):
@@ -296,6 +297,20 @@ def cmd_wait(ns):
     return 1
 
 
+def cmd_imgdiff(ns):
+    """Host-only: compare two shot PNGs. Exit 0 = at most --max-frac of the pixels differ, 1 = more, 2 = unreadable."""
+    try:
+        a = IMG.decode_png(open(ns.a, "rb").read())
+        b = IMG.decode_png(open(ns.b, "rb").read())
+        region = tuple(int(v) for v in ns.region.split(",")) if ns.region else None
+        d = IMG.diff(a, b, tol=ns.tol, region=region)
+    except (OSError, ValueError) as e:
+        print("odbc: imgdiff: %s" % e, file=sys.stderr)
+        return 2
+    print("changed=%d pixels=%d frac=%.5f bbox=%s" % (d["changed"], d["pixels"], d["frac"], d["bbox"]))
+    return 0 if d["frac"] <= ns.max_frac else 1
+
+
 def cmd_serve(ns):
     """Long-lived relay: keeps a one-client upstream (VBox uart2 pipe) open for many odbc commands."""
     from .proxy import serve
@@ -382,6 +397,13 @@ def build_parser():
     sp = sub.add_parser("serve", help="keep --port open and relay it to local clients (VBox single-client pipe)")
     sp.add_argument("--listen", default="tcp:127.0.0.1:4710", help="tcp:host:port | unix:path (default %(default)s)")
     sp.set_defaults(fn=cmd_serve)
+    sp = sub.add_parser("imgdiff", help="host only: compare two shot PNGs (changed pixels, bounding box)")
+    sp.add_argument("a")
+    sp.add_argument("b")
+    sp.add_argument("--tol", type=int, default=8, help="per-channel difference that counts as changed (default %(default)s)")
+    sp.add_argument("--region", help="x,y,w,h")
+    sp.add_argument("--max-frac", type=float, default=0.0, help="exit 0 if the changed fraction is at most this")
+    sp.set_defaults(fn=cmd_imgdiff)
     sp = sub.add_parser("wait", help="wait until the agent answers (boot done)")
     sp.add_argument("limit", type=int, nargs="?", default=120)
     sp.set_defaults(fn=cmd_wait)

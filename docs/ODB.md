@@ -193,8 +193,8 @@ Unimplemented → `ERR code=EUNSUP`.
 | `push` | `path`, `size`, `mode` (octal, default 644), `sha256` (optional, verified at end), `overwrite=1` | file 3 host→agent, ACKs | `size`, `sha256`, `crc32` |
 | `pull` | `path`, `offset` (resume, default 0) | file 3 agent→host, ACKs from host | `size`, `sha256`, `crc32`, `mtime` |
 | `shot` | `display` (default 0, only 0), `format=png` (ppm/raw -> `EUNSUP`), `scale` (percent 5-100, **default 50**; the agent halves it until the PNG fits its 1 MiB buffer), `pattern=1` (built-in 320x200 test image, needs no screen) | shot 4 | `w`, `h`, `src_w`, `src_h`, `format`, `bytes` |
-| `input` | `kind=key`: `key` (name: `Enter`,`Esc`,`F5`,`a`,… ), `mods` (`ctrl+shift+alt+super`), `action=press\|down\|up` (default press); `kind=text`: `text` (ASCII, US layout scancodes, `delay_ms`); `kind=mouse`: `x`,`y` (absolute px) and `button=left\|right\|middle`, `action=click\|dblclick\|down\|up\|move`. **Not implemented** (-> `EUNSUP`): `kind=scroll`, relative mouse (`dx`,`dy`), non-ASCII text. A permit covers 200 key strokes; the agent re-arms it itself | – | `ok=1` (`n` events injected) |
-| `ps` | `full=1` (optional) | out 1: TSV text, header `pid\tppid\tuid\tstate\tcpu_pct\trss_kb\tname\tcmdline` | `count` |
+| `input` | `kind=key`: `key` (name: `Enter`,`Esc`,`F5`,`a`,… ), `mods` (`ctrl+shift+alt+super`), `action=press\|down\|up` (default press); `kind=text`: `text` (UTF-8, typed with the scancodes of the GUEST keyboard layout (kernel query `TQ_KEYFOR`, kbd.code_of inverse; `layout=us|de|uk|fr|es|it|ru` overrides, default = layout in force, e.g. DEU on the desktop image), `delay_ms`); `kind=mouse`: `x`,`y` (absolute px) and `button=left\|right\|middle`, `action=click\|dblclick\|down\|up\|move`. **Not implemented** (-> `EUNSUP`): `kind=scroll`, relative mouse (`dx`,`dy`), non-ASCII text. A permit covers 200 key strokes; the agent re-arms it itself | – | `ok=1` (`n` events injected) |
+| `ps` | `full=1` (optional) | out 1: TSV text, NO header, columns `pid\tppid\tstate\trss_kb\tname` (name = first 16 octets, empty for kernel threads; measured on the desktop image; uid/cpu/cmdline not implemented) | `count` |
 | `kill` | `pid`, `sig` (number or name, default TERM) | – | `ok=1` |
 | `logs` | `src=kernel\|app\|all` or `name=<app>`, `lines` (tail, default 200), `follow=1` (until CANCEL), `since_ms` | log 5 | `lines`, `bytes` |
 | `crashdump` | `op=list\|get\|clear`, `id` = file name in `/var/crash` (e.g. `1760000000.txt`) | list: out 1 (text lines `id size time summary`, time = number in the file name); get: file 3 | `count` / `size`,`sha256` |
@@ -275,3 +275,13 @@ Client behaviour worth knowing when writing the agent:
   40000 port reads on an empty FIFO per call (~100+ % of a vCPU in QEMU/KVM). The spin is now long (8000) only when the
   previous read returned octets ("hot") and 16 polls after an empty read ("cold"). Measured idle cost: 97 % -> 2 % of a
   host core (gate section 7b); `exec echo` round trip 1023 ms -> 159 ms.
+
+## 13. Round-trip script (additive)
+
+`tools/odb/loop.sh --image <ODB=1 orientos-usb.img> [--rounds 5]` boots a full image in QEMU and runs `tools/odb/loop.py`: ONE
+persistent session, per round ping x5 / info / exec / push+pull 64 KiB / ps / shot of the login screen / `input text` + Enter (login
+`startkennwort`) / desktop check / click on the taskbar Terminal icon / type a command into the GUI terminal and read its effect back
+with `exec` / shot compare. A time per step; a failed step is recorded and the run goes on. `odbc imgdiff a.png b.png [--region x,y,w,h]`
+(host only) compares two shots. Kernel query `TQ_KEYFOR` (TIPP TI_INFO a1=11, a2 = code point [+ (layout+1) << 24]) returns the scancode
+(+0x200 Shift, +0x400 AltGr) that types it, `TQ_LAYOUT` (12) the layout in force. Finding: `input text` used US scancodes, so on the
+DEU desktop `>` became `:` and `/` became `-`; the new query fixes this (UNTESTED at the time of writing, see report).

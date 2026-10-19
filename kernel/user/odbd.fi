@@ -1000,6 +1000,14 @@ fn s_procodb() -> u64 {
     return (&S_PROCODB[0 as usize]) as u64
 }
 
+static mut S_LAYOUT: [u8; 7] = "layout\0"
+fn s_layout() -> u64 {
+    return (&S_LAYOUT[0 as usize]) as u64
+}
+
+// layout names in the order of kbd.L_*: us de uk fr es it ru
+static mut S_LAYNAMES: [u8; 15] = "usdeukfresitru\0"
+
 static mut S_ODBONE: [u8; 6] = "odb=1\0"
 fn s_odbone() -> u64 {
     return (&S_ODBONE[0 as usize]) as u64
@@ -2741,6 +2749,8 @@ const TI_BUTTON: u64 = 5
 const TI_SCAN: u64 = 6
 const TQ_USED: u64 = 2
 const TQ_LOCKED: u64 = 9
+const TQ_KEYFOR: u64 = 11
+const TQ_LAYOUT: u64 = 12
 const BANDMAX: u64 = 65536
 const SHOT_DEFAULT_SCALE: u64 = 50
 
@@ -3141,6 +3151,42 @@ fn char_code(c0: u64) -> u64 {
     return 0
 }
 
+// `layout=` of an input text request: a name (us de uk fr es it ru) -> its number + 1 (kernel TQ_KEYFOR wants that in the
+// top byte); `auto` or absent -> 0 = the layout the guest runs now.
+fn layout_arg(tp: u64, tl: u64) -> u64 {
+    let v: u64 = tget(tp, tl, s_layout())
+    if g_vlen != 2 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 7 {
+        let b: u64 = (&S_LAYNAMES[0 as usize]) as u64 + i * 2
+        if lower(rd8(v)) == rd8(b) && lower(rd8(v + 1)) == rd8(b + 1) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Scancode (+0x200 Shift, +0x400 AltGr) that types code point `cp`; 0 = not typable. Space, Enter and Tab are the same on
+// every layout; everything else is asked from the kernel (TQ_KEYFOR), so the text comes out right on the layout the guest
+// keyboard runs now (DEU on the desktop image), or on `lay1 - 1` when the request named one. A kernel without the query
+// (-ENOSYS/-EINVAL) falls back to the US table for ASCII.
+fn layout_code(lay1: u64, cp: u64) -> u64 {
+    if cp == 32 || cp == 10 || cp == 13 || cp == 9 {
+        return char_code(cp)
+    }
+    let r: u64 = ulib.sys(SYS_OSUM_TIPP, TI_INFO, TQ_KEYFOR, cp | (lay1 << 24))
+    if !ulib.bad(r) {
+        return r
+    }
+    if cp < 128 {
+        return char_code(cp)
+    }
+    return 0
+}
+
 fn lower(c: u64) -> u64 {
     if c >= 65 && c <= 90 {
         return c + 32
@@ -3390,9 +3436,22 @@ fn cmd_input(id: u64, tp: u64, tl: u64) {
         if !has_text {
             bad_arg = true
         } else {
+            let lay1: u64 = layout_arg(tp, tl)
             var i: u64 = 0
             while i < xl && ok && !bad_arg {
-                let c: u64 = char_code(rd8(xp + i))
+                // UTF-8 -> code point (2 and 3 octet forms; anything else is not typable)
+                var cp: u64 = rd8(xp + i)
+                var used: u64 = 1
+                if cp >= 0xC0 && cp < 0xE0 && i + 1 < xl {
+                    cp = ((cp & 0x1F) << 6) | (rd8(xp + i + 1) & 0x3F)
+                    used = 2
+                } else if cp >= 0xE0 && cp < 0xF0 && i + 2 < xl {
+                    cp = ((cp & 0x0F) << 12) | ((rd8(xp + i + 1) & 0x3F) << 6) | (rd8(xp + i + 2) & 0x3F)
+                    used = 3
+                } else if cp >= 0x80 {
+                    cp = 0
+                }
+                let c: u64 = layout_code(lay1, cp)
                 if c == 0 {
                     bad_arg = true
                 } else {
@@ -3400,7 +3459,16 @@ fn cmd_input(id: u64, tp: u64, tl: u64) {
                     if (c & 0x200) != 0 {
                         sh = 2
                     }
-                    ok = mods_down(sh) && scan_down(c & 0x1FF) && scan_up(c & 0x1FF) && mods_up(sh)
+                    let ag: bool = (c & 0x400) != 0
+                    ok = mods_down(sh)
+                    if ok && ag {
+                        ok = scan_down(0x138)
+                    }
+                    ok = ok && scan_down(c & 0x1FF) && scan_up(c & 0x1FF)
+                    if ag {
+                        ok = ok && scan_up(0x138)
+                    }
+                    ok = ok && mods_up(sh)
                     if delay > 0 {
                         if delay > 1000 {
                             ulib.sleep_ms(1000)
@@ -3409,7 +3477,7 @@ fn cmd_input(id: u64, tp: u64, tl: u64) {
                         }
                     }
                 }
-                i = i + 1
+                i = i + used
             }
         }
     } else {
