@@ -18,7 +18,7 @@
 #   5. negative: trial kernel dies right after ab_boot (`abpanic` word on entry B only) ->
 #      3 attempts, loader back on slot A, old kernel runs, update dropped, user file survived
 #   6. counter-proof: an update that is not newer is refused
-#   7. periodic system check of the service (`ota dienst 1 system`): finds, fetches the changelog,
+#   7. periodic system check of the service (`ota service 1 system`): finds, fetches the changelog,
 #      marks the notification, installs nothing; a not-newer feed stays `current`
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -162,6 +162,7 @@ pubt "$OUT/img-new" "$OUT/feed-badhash" dev --count 200 --bad-hash && ok "bad-ha
 pubt "$OUT/img-new" "$OUT/feed-old" dev --count 100 && ok "not-newer feed (build 100)" || bad "publish old"
 
 echo
+if [ -z "${OSU_ONLY7:-}" ]; then   # OSU_ONLY7=1: build + section 7 only (quick re-run of the service check)
 echo "== 2. good update: apply restart -> trial of B -> confirm -> promoted =="
 fresh_disk
 dienst "$OUT/feed-good" && ok "feed up on 127.0.0.1:$PORT" || bad "feed does not start"
@@ -279,10 +280,11 @@ esp_has osum-b.mb && bad "slot B written for an old build" || ok "no slot B"
 dienst_aus
 
 echo
-echo "== 7. periodic system check of the service (ota dienst 1 system): finds, notes, notifies once, installs nothing =="
+fi
+echo "== 7. periodic system check of the service (ota service 1 system): finds, notes, notifies once, installs nothing =="
 fresh_disk
 dienst "$OUT/feed-good" || bad "feed does not start"
-rc=$(lauf p1 "ota dienst 1 system;cat /system/sys.stand;cat /system/sys.notified;cat /system/sys.notes;exit")
+rc=$(lauf p1 "ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;cat /system/sys.notes;exit")
 hat "$OUT/p1.txt" "phase=available" "service check: sys.stand says available"
 hat "$OUT/p1.txt" "there=200" "service check: the offered build is 200"
 hat "$OUT/p1.txt" "00000200" "service check: build 200 is marked as notified"
@@ -294,7 +296,7 @@ dienst_aus
 # the same service against a feed with an old build: stays current, no notification marker
 fresh_disk
 dienst "$OUT/feed-old" || bad "feed does not start"
-rc=$(lauf p2 "ota dienst 1 system;cat /system/sys.stand;cat /system/sys.notified;exit")
+rc=$(lauf p2 "ota service 1 system;cat /system/sys.stand;cat /system/sys.notified;exit")
 hat "$OUT/p2.txt" "phase=current" "service check on a not-newer feed: phase current"
 hatnicht "$OUT/p2.txt" "00000100" "... and no notification marker (no build number written)"
 dienst_aus

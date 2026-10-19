@@ -69,10 +69,10 @@ Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev
 - settingsd actions (manifest `etc/actions.d/settings.actions`): `settings.update.sysstatus` (read: `ver=`, `here=`,
   `there=`, `commit=`, `phase=`, `channel=`, `busy=`, up to 8 `note=` lines), `settings.update.syscheck` (write:
   `ota system search` in the one-child slot), `settings.update.sysinstall` (critical: `ota system apply restart`).
-- Service: `ota dienst` checks the SYSTEM feed at its first round (START seconds after boot) and then every
+- Service: `ota service` checks the SYSTEM feed at its first round (START seconds after boot) and then every
   `sysabstand=` seconds in /etc/ota.conf (default 21600 = 6 h; 0 = off). Quiet: fetches the changelog, writes
   `sys.stand` phase=available and posts ONE notification per build number (`/system/sys.notified`, toast + bell of
   the bar). Nothing is installed; no check while a trial/pending update exists; an error is retried next round.
-  Same on/off switch as the package service (`auto=`). Test entry: `ota dienst 1 system`.
+  Same on/off switch as the package service (`auto=`). Test entry: `ota service 1 system`.
 - Gates: `tools/osupdate/run.sh` section 7 (service check), `tools/actionbus/run.sh` S-UPD + `gui.sh` (page block).
 
