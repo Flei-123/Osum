@@ -319,6 +319,11 @@ python3 -I tools/odb/pngcheck.py "$TMPD/pat.png" 160 100 >"$TMPD/pc.txt" 2>&1; r
 is "shot default scale = 50 -> 160x100 pixel-exact" "$rc" "0"; [ "$rc" = 0 ] || sed 's/^/        /' "$TMPD/pc.txt"
 od shot "$TMPD/pat25.png" --pattern --scale 25 >/dev/null 2>&1
 python3 -I tools/odb/pngcheck.py "$TMPD/pat25.png" 80 50 >"$TMPD/pc.txt" 2>&1; is "shot scale=25 -> 80x50 pixel-exact" "$?" "0"
+od shot "$TMPD/patq.png" --pattern --scale 100 --quant 3 >"$TMPD/shotq.txt" 2>&1; is "shot --quant 3 exit" "$?" "0"
+python3 -I tools/odb/pngcheck.py "$TMPD/patq.png" 320 200 3 >"$TMPD/pc.txt" 2>&1; rc=$?
+is "shot --quant 3: pixels == test image with 3 low bits dropped" "$rc" "0"; [ "$rc" = 0 ] || sed 's/^/        /' "$TMPD/pc.txt"
+python3 -I tools/odb/pngcheck.py "$TMPD/patq.png" 320 200 >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "quant control: dropped bits are really gone (lossless check fails)" || bad "quant 3 image equals the lossless one"
+[ "$(stat -c %s "$TMPD/patq.png")" -lt "$(stat -c %s "$TMPD/pat100.png")" ] && ok "quant 3 PNG smaller ($(stat -c %s "$TMPD/patq.png") < $(stat -c %s "$TMPD/pat100.png") bytes)" || bad "quant 3 PNG not smaller"
 od shot "$TMPD/x.ppm" --pattern --format ppm >/dev/null 2>&1; rc=$?; [ "$rc" != 0 ] && ok "shot ppm refused (exit $rc)" || bad "shot ppm accepted"
 printf 'garbage' > "$TMPD/junk.png"; python3 -I tools/odb/pngcheck.py "$TMPD/junk.png" 320 200 >/dev/null 2>&1; is "pngcheck control: junk rejected" "$?" "2"
 python3 -I - "$TMPD/pat100.png" "$TMPD/pat_bad.png" <<'PYEOF'

@@ -76,6 +76,7 @@ def decode(data):
 
 def main():
     path, ew, eh = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    mask = (255 >> int(sys.argv[4])) << int(sys.argv[4]) if len(sys.argv) > 4 else 255   # optional: colour bits dropped by `shot --quant`
     try:
         w, h, rows = decode(open(path, "rb").read())
     except Exception as e:  # noqa: BLE001
@@ -88,7 +89,7 @@ def main():
     for dy in range(h):
         sy = dy * SRC_H // h
         for dx in range(w):
-            exp = pat_pixel(dx * SRC_W // w, sy, SRC_W, SRC_H)
+            exp = tuple(c & mask for c in pat_pixel(dx * SRC_W // w, sy, SRC_W, SRC_H))
             got = tuple(rows[dy][dx * 3:dx * 3 + 3])
             if got != exp:
                 bad += 1

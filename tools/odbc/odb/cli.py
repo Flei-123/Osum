@@ -175,7 +175,8 @@ def cmd_shot(ns):
     t0 = time.time()
     r, body = s.collect_stream("shot", {"format": ns.format, "scale": ns.scale,
                                         "display": ns.display or None,
-                                        "pattern": 1 if ns.pattern else None}, proto.SHOT, timeout=ns.timeout)
+                                        "pattern": 1 if ns.pattern else None,
+                                        "quant": ns.quant}, proto.SHOT, timeout=ns.timeout)
     want = r.geti("bytes")
     if want is not None and want != len(body):
         print("odbc: shot incomplete (%d of %d bytes)" % (len(body), want), file=sys.stderr)
@@ -338,6 +339,7 @@ def build_parser():
     sp.add_argument("--format", default="png", choices=["png", "ppm", "raw"])
     sp.add_argument("--scale", type=int, default=None, help="percent; omitted = agent default (50)")
     sp.add_argument("--display", type=int, default=0)
+    sp.add_argument("--quant", type=int, default=None, help="drop N low bits (0-6) of each colour octet: lossy, much smaller PNG (default 0 = lossless)")
     sp.add_argument("--pattern", action="store_true", help="agent test image (no screen needed)")
     sp.set_defaults(fn=cmd_shot)
     sp = sub.add_parser("input")
