@@ -1539,7 +1539,7 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 # The quoted heredoc stays quoted and the product name comes in through
 # the placeholder, for the reason given in docs/STICK-MENUE.md.
 cat > "$OUT/limine.conf" <<'EOF'
-timeout: 20
+timeout: 5
 default_entry: 1
 verbose: yes
 

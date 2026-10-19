@@ -40,7 +40,7 @@ stehengeblieben sein oder der Behandler kehrt nicht mehr zurueck.
 ### UNGEMESSEN: welcher Menueeintrag bei Justin lief
 
 Das laesst sich aus dem Foto **nicht** entscheiden, und ich behaupte es
-deshalb nicht. `default_entry: 1` und `timeout: 20` sprechen fuer den
+deshalb nicht. `default_entry: 1` und `timeout: 20` (damals; seit 19.10.2026 5) sprechen fuer den
 ersten Eintrag (WC) — mehr als ein Indiz ist das nicht. Ab dieser
 Fassung steht die Abbildungsart in Zeile 9 der Tafel (`FB WC/WB/UC`) und
 im USB-Bericht im Terminalfenster; damit entscheidet es das naechste

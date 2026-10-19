@@ -54,8 +54,8 @@ qemu-system-x86_64 -accel tcg -m 512 \
 QP=$!
 
 for i in $(seq 1 60); do [ -S "$OUT/mon" ] && break; sleep 1; done
-# Das Menue steht `timeout: 10` Sekunden. Nach acht Sekunden fotografieren.
-sleep "${WARTE:-10}"
+# Das Menue steht `timeout: 5` Sekunden. Nach drei Sekunden fotografieren.
+sleep "${WARTE:-3}"
 printf 'screendump %s/menue.ppm\n' "$OUT" | socat - "UNIX-CONNECT:$OUT/mon" >/dev/null 2>&1
 sleep 3
 # Und danach weiterlaufen lassen, bis OrientOS gestartet ist.
