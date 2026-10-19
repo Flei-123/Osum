@@ -48,7 +48,8 @@ for cfg in $CFGS; do
     echo "rad 40"; echo "warte 2"
     for _k in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do echo "taste tab"; echo "warte 0.6"; done
     echo "warte 2"; echo "foto 07-focus"
-    echo "klickauf srectwhp"; echo "warte 3"; echo "foto 06-back"
+    case "$cfg" in nav*) echo "klickauf srectwhp" ;; esac
+    echo "warte 3"; echo "foto 06-back"
   } > "$DREH"
   export DESIGNBUILD="${DESIGNBUILD:-$D-build}"
   # shellcheck disable=SC2086
