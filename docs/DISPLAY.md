@@ -806,3 +806,12 @@ width rounded down to a multiple of 8 (EDID 1366x768: the Bochs card reads back 
 below 640x480. Each step prints `fb: retry WxH`. Only when 640x480 is refused too is there no framebuffer (one clean line, the
 kernel goes on). `fb.run_room`/`fb.tile_room` have pure forms (`run_room_in`/`tile_room_in`) with `fb.selftest5` (`fb: room 12 / 12`).
 Gate: `tools/edidroom/run.sh`; counter-proof words `nobootretry` and `roomold`.
+
+### A5.1 VRAM-aware jump (r1183, 19.10.2026)
+
+A VBE card (Bochs/QEMU/VirtualBox) names its video memory (index 0x0A). Before `fb.init`, `kgui.graphics` reads it (`vmode.boot_vram`) and
+`vmode.boot_fit` (pure) walks the same `boot_step` ladder in software until `w*h*4` fits and the width is divisible by 8. One line
+`fb: fit WxH vram=K`, then ONE hardware attempt: 1920x1080 on 4 MiB went from 6 refused attempts to 0 (`fb: retry` stays the fallback for
+refusals the register cannot predict). No fit with a loader framebuffer. Stripe mode needs no ladder: a window run that is too short falls
+to stripe mode in `fb.init` (2560x1440 = 8 tiles, forced with `fbstreifen`: `streifen=1`, no retry, screendump 2560x1440).
+Counter-proof word `nobootfit` (old step-by-step climb); `nobootfit nobootretry` ends black. Gate: `tools/edidroom/run.sh` sections 1, 2, 6, 8.
