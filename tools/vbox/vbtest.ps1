@@ -130,6 +130,10 @@ function OdbProxyUp {
   try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 4710); $c.Close(); return $true } catch { return $false }
 }
 function OdbProxyStop {
+  # r1175: also end a relay that has no pid file (listener on the relay port), else a stale relay keeps the VBox pipe busy
+  try {
+    Get-NetTCPConnection -LocalPort 4710 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+  } catch { }
   if (Test-Path $ODBPXPID) {
     $p = [int](Get-Content $ODBPXPID -ErrorAction SilentlyContinue)
     if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
@@ -155,6 +159,25 @@ function Odb([string[]]$oargs, [int]$to = 15) { # run odbc.py against the test V
   $o = & $py -I (Join-Path $ODBDIR 'odbc.py') --port (OdbPort) -t $to @tok @oargs 2>&1 | Out-String
   $script:OdbRc = $LASTEXITCODE
   return $o.TrimEnd()
+}
+function DesktopUp { # true when the taskbar process runs in the guest (odb exec ps)
+  $o = Odb @('exec', 'ps') 20
+  return ($script:OdbRc -eq 0 -and $o -match 'taskbar')
+}
+function CmdOdbLogin([int]$lim, [string]$pw) { # r1175: wait for the login screen (agent), type password + Enter, verify the desktop came up
+  $o = Odb @('wait', "$lim") ($lim + 10)
+  if ($script:OdbRc -ne 0) { Say ('FAIL: odb agent not reachable: ' + $o); exit 1 }
+  Set-Content $ODBUP 'up'
+  for ($try = 1; $try -le 3; $try++) {
+    if (DesktopUp) { Say "OK: odb login: desktop is up (try $try)"; return }
+    Start-Sleep -Seconds 3   # let the login screen settle; the first input right after the agent comes up is sometimes refused
+    $o = Odb @('input', 'text', $pw) 30
+    if ($script:OdbRc -ne 0) { Say "INFO: input text refused (try $try): $o"; continue }
+    $o = Odb @('input', 'key', 'Enter') 30
+    if ($script:OdbRc -ne 0) { Say "INFO: input key refused (try $try): $o"; continue }
+    for ($k = 0; $k -lt 12; $k++) { Start-Sleep -Seconds 5; if (DesktopUp) { Say "OK: odb login: desktop is up (try $try, $($k * 5 + 5) s after Enter)"; return } }
+  }
+  Say 'FAIL: odb login: desktop did not appear'; exit 1
 }
 function Shot([string]$name) {
   EnsureDirs; NeedRunning
@@ -399,6 +422,7 @@ try {
                  $o = Odb @('wait', "$lim") ($lim + 10); Say $o
                  if ($script:OdbRc -eq 0) { Set-Content $ODBUP 'up'; Say 'OK: odb agent up' } else { Say 'FAIL: odb agent not reachable (fallback: keys/shot via VBoxManage)' } }
     'odb'      { NeedRunning; $o = Odb $A 60; Say $o; if ($script:OdbRc -eq 0) { Say ('OK: odb ' + $A[0]) } else { Say ('FAIL: odb ' + $A[0] + ' rc=' + $script:OdbRc); exit 1 } }
+    'odblogin' { NeedRunning; $lim = if ($A.Count -ge 1) { [int]$A[0] } else { 90 }; $pw = if ($A.Count -ge 2) { $A[1] } else { 'startkennwort' }; CmdOdbLogin $lim $pw }
     'odbidle'  { NeedRunning; $ms = if ($A.Count -ge 1) { [int]$A[0] } else { 3000 }; $o = Odb @('info', '--idle-ms', "$ms") 30
                  $m = [regex]::Match($o, 'idle_pct=(\d+)'); if ($m.Success) { Say ("OK: guest idle_pct=" + $m.Groups[1].Value + " (odb info, window $ms ms)"); Say $o } else { Say ('FAIL: odb idle ' + $o); exit 1 } }
     'odbbench' { NeedRunning; $py = 'C:\Python312\python.exe'; $tok = @(); if (Test-Path $ODBTOK) { $tok = @('--token-file', $ODBTOK) }
@@ -426,7 +450,7 @@ try {
       Say '  shot <name> | shotstat <name> | hint <w> <h> | wait <sec> | idle <sec> [samples]'
       Say '  keys "type:abc;key:enter;combo:ctrl+shift+t;k:1D 2A;sleep:500;shot:x" | login [password]'
       Say '  mouse "goto:430:250,left,dbl,right,rel:10:0,ldown,lup,wheel:-3,sleep:300,shot:x"'
-      Say '  odbinstall <url> <sha> | odbtoken <t> | odbwait [sec] | odb <odbc args...> | odbidle [ms] | odbbench [--mib N]   (ODB agent over uart2 pipe; VBL_ODB=0 disables)'
+      Say '  odbinstall <url> <sha> | odbtoken <t> | odbwait [sec] | odblogin [sec] [password] | odb <odbc args...> | odbidle [ms] | odbbench [--mib N]   (ODB agent over uart2 pipe; VBL_ODB=0 disables)'
       Say '  serial tail [n] | grep <re> | count <re> | wait <re> <timeout-sec> | size'
       Say 'env: VBL_MEM (MB, max 4096) VBL_CPUS VBL_SERIAL=0 VBL_LAYOUT=de|us'
     }
