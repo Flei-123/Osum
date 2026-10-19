@@ -105,7 +105,7 @@ export {
     // RUNDE SCHIRM -- die Aufloesung, der Zweitpuffer und die Groesse
     // der Schrift.
     need_bytes, fscale, uiscale, stripe, res_w, res_h, scale_for,
-    set_uiscale, tile_room, run_room,
+    set_uiscale, tile_room, run_room, run_room_in, tile_room_in, selftest5, selftest5_max,
     selftest4, selftest4_max, M_RES,
     // RUNDE BLECHEINGABE: der Herzschlag und der grobe Hammer.
     beat, beat_x, beat_y, BEAT_W, BEAT_H, flush_rows,
@@ -936,17 +936,44 @@ const DEVICES_FREE: u64 = 2
 // host hint that would not map is shrunk in one clean step instead of switching, failing in remap and rolling back (VirtualBox z16:
 // 2496x1575 = 8 tiles failed, 7 tiles = 2400x1500 worked).
 fn tile_room(state: u64) -> u64 {
-    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
-    var first: u64 = WIN_SLOTS
-    var n_fb: u64 = 0
-    if s0 != 0 {
-        first = s0 - 1
-        n_fb = kstate.get(state, FB_OFF + S_HUGES)
+    return tile_room_in(room_used(state), room_first(state), room_nfb(state))
+}
+
+// W-EDID: bit i = window tile i is held (by the framebuffer or a device).
+fn room_used(state: u64) -> u64 {
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < WIN_SLOTS {
+        if slot_used(state, i) != 0 {
+            m = m | (1 << i)
+        }
+        i = i + 1
     }
+    return m
+}
+
+// First tile of the framebuffer's own window (WIN_SLOTS = it has none) and how many tiles it holds.
+fn room_first(state: u64) -> u64 {
+    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    if s0 == 0 {
+        return WIN_SLOTS
+    }
+    return s0 - 1
+}
+
+fn room_nfb(state: u64) -> u64 {
+    if kstate.get(state, FB_OFF + S_SLOT0) == 0 {
+        return 0
+    }
+    return kstate.get(state, FB_OFF + S_HUGES)
+}
+
+// Pure form of tile_room (no state): `used` = held tiles, the framebuffer's own tiles [first, first + n_fb) do not count.
+fn tile_room_in(used: u64, first: u64, n_fb: u64) -> u64 {
     var others: u64 = 0
     var i: u64 = 0
     while i < WIN_SLOTS {
-        if slot_used(state, i) != 0 && !(i >= first && i < first + n_fb) {
+        if ((used >> i) & 1) != 0 && !(i >= first && i < first + n_fb) {
             others = others + 1
         }
         i = i + 1
@@ -962,22 +989,23 @@ fn tile_room(state: u64) -> u64 {
 // still fail in map_run -> mode switch, failed remap, rollback through the old mode (z22 VirtualBox: 2496x1507 -> 1280 -> 2340, white
 // screen, host CPU 100 %, once a kernel #GP). Asked by vmode.check_custom BEFORE the mode is set.
 fn run_room(state: u64, n: u64) -> bool {
+    return run_room_in(room_used(state), room_first(state), room_nfb(state), n,
+        kstate.mode_on(state, kstate.M_ROOMOLD))
+}
+
+// Pure form of run_room. `count_only` is the counter-proof (`roomold`): the pre-W-L2 rule that only counts free tiles.
+fn run_room_in(used: u64, first: u64, n_fb: u64, n: u64, count_only: bool) -> bool {
     if n == 0 || n > WIN_SLOTS {
         return false
     }
-    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
-    var first: u64 = WIN_SLOTS
-    var n_fb: u64 = 0
-    if s0 != 0 {
-        first = s0 - 1
-        n_fb = kstate.get(state, FB_OFF + S_HUGES)
-    }
     var run: u64 = 0
+    var total: u64 = 0
     var i: u64 = 0
     while i < WIN_SLOTS {
-        if slot_used(state, i) == 0 || (i >= first && i < first + n_fb) {
+        if ((used >> i) & 1) == 0 || (i >= first && i < first + n_fb) {
             run = run + 1
-            if run >= n {
+            total = total + 1
+            if !count_only && run >= n {
                 return true
             }
         } else {
@@ -985,7 +1013,67 @@ fn run_room(state: u64, n: u64) -> bool {
         }
         i = i + 1
     }
+    if count_only {
+        return total >= n
+    }
     return false
+}
+
+// W-EDID: twelve promises about the window-room rules, on synthetic tile masks (no page table is touched). WIN_SLOTS = 16, DEVICES_FREE = 2.
+fn selftest5(state: u64) -> u64 {
+    var n: u64 = 0
+    let old: bool = kstate.mode_on(state, kstate.M_ROOMOLD)
+    // 1 empty window, no framebuffer: all 16 tiles are one run; 17 and 0 never fit
+    if run_room_in(0, WIN_SLOTS, 0, 16, old) && !run_room_in(0, WIN_SLOTS, 0, 17, old) && !run_room_in(0, WIN_SLOTS, 0, 0, old) {
+        n = n + 1
+    }
+    // 2 one device tile in the middle (slot 8) splits 16 into 8 + 7: 8 fits, 9 does not (the W-L2 case)
+    if run_room_in(1 << 8, WIN_SLOTS, 0, 8, old) {
+        n = n + 1
+    }
+    if !run_room_in(1 << 8, WIN_SLOTS, 0, 9, old) {
+        n = n + 1
+    }
+    // 4 the framebuffer's own tiles count as free (remap releases them): fb at 2..5, devices at 1 and 6 -> run 2..5 = 4, 7..15 = 9
+    let u3: u64 = (1 << 1) | (3 << 2) | (3 << 4) | (1 << 6)
+    if run_room_in(u3, 2, 4, 9, old) && !run_room_in(u3, 2, 4, 10, old) {
+        n = n + 1
+    }
+    // 5 every second tile held: single tiles only
+    if run_room_in(0x5555, WIN_SLOTS, 0, 1, old) && !run_room_in(0x5555, WIN_SLOTS, 0, 2, old) {
+        n = n + 1
+    }
+    // 6 a full window has no room, unless the framebuffer itself holds 3 of the tiles
+    if !run_room_in(0xFFFF, WIN_SLOTS, 0, 1, old) {
+        n = n + 1
+    }
+    if run_room_in(0xFFFF, 4, 3, 3, old) && !run_room_in(0xFFFF, 4, 3, 4, old) {
+        n = n + 1
+    }
+    // 8 tile_room counts: empty = 14 (16 - 2 kept free for later devices), 3 devices = 11, own fb tiles do not count, full = 0
+    if tile_room_in(0, WIN_SLOTS, 0) == 14 && tile_room_in(7 << 3, WIN_SLOTS, 0) == 11 {
+        n = n + 1
+    }
+    if tile_room_in((15 << 2) | (7 << 8), 2, 4) == 11 && tile_room_in(0xFFFF, WIN_SLOTS, 0) == 0 {
+        n = n + 1
+    }
+    // 10 the two rules together: one device tile at slot 8 -> tile_room says 13, but 13 contiguous tiles do NOT exist
+    if tile_room_in(1 << 8, WIN_SLOTS, 0) == 13 && !run_room_in(1 << 8, WIN_SLOTS, 0, 13, old) {
+        n = n + 1
+    }
+    // 11 and the live state agrees with its own mask: the framebuffer's tiles are inside [first, first + n_fb)
+    if room_nfb(state) <= WIN_SLOTS && (room_nfb(state) == 0 || room_first(state) + room_nfb(state) <= WIN_SLOTS) {
+        n = n + 1
+    }
+    // 12 the mode that is on screen right now always fits (its tiles are released first)
+    if !ready(state) || room_nfb(state) == 0 || run_room(state, room_nfb(state)) {
+        n = n + 1
+    }
+    return n
+}
+
+fn selftest5_max() -> u64 {
+    return 12
 }
 
 fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {

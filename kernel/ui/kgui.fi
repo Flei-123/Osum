@@ -364,35 +364,66 @@ fn graphics(state: u64, mbi: u64) {
     // bestimmt der LADER die Aufloesung, und ein Puffer, der fuer 800x600
     // gerechnet wurde, wird bei 1920x1080 stillschweigend verworfen --
     // gemessen als "back=none" in JEDEM Start ueber Limine.
-    // r-vmsvga, Weg 3: no loader framebuffer (qemu -kernel -vga vmware) -> VMSVGA sets the mode itself and hands fb.init a
-    // synthetic multiboot info. Skipped with `novmsvga` or when the loader gave a framebuffer.
-    var mbi_use: u64 = mbi
-    if mbi == 0 || (kstate.get32(mbi) & 0x1000) == 0 {
-        let m3: u64 = vmsvga.boot_mbi(state, w, h)
-        if m3 != 0 {
-            mbi_use = m3
-        }
-    }
+    // W-EDID: a size the card cannot take must not end in "no framebuffer" (black screen). Seen in QEMU: EDID 1366x768 (the Bochs
+    // card only takes widths divisible by 8 -> read-back differs), EDID 1920x1080 on 4 MiB VRAM. Retry smaller (vmode.boot_step: width
+    // rounded down to 8, then 15/16 steps, never below 640x480) until fb.init works; the failed attempt gives its frames back.
     var back: u64 = 0
     var back_bytes: u64 = 0
     var shadow: u64 = 0
-    if !fb.want(state, fb.M_NODBL) {
-        var noetig: u64 = fb.need_bytes(mbi_use, w, h)
-        if noetig == 0 {
-            noetig = w * h * 4
+    var fb_ok: bool = false
+    var s_retry: [u8; 11] = "fb: retry \0"
+    while !fb_ok {
+        // r-vmsvga, Weg 3: no loader framebuffer (qemu -kernel -vga vmware) -> VMSVGA sets the mode itself and hands fb.init a
+        // synthetic multiboot info. Skipped with `novmsvga` or when the loader gave a framebuffer.
+        var mbi_use: u64 = mbi
+        if mbi == 0 || (kstate.get32(mbi) & 0x1000) == 0 {
+            let m3: u64 = vmsvga.boot_mbi(state, w, h)
+            if m3 != 0 {
+                mbi_use = m3
+            }
         }
-        let rahmen: u64 = (noetig + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
-        back = mem.frame_run(state, rahmen)
-        if back != 0 {
-            back_bytes = rahmen * mem.FRAME_SIZE
-            // vboxlag: the shadow copy of what the card shows (same size, for the diff flush; none = whole rectangles as before)
-            shadow = mem.frame_run(state, rahmen)
+        back = 0
+        back_bytes = 0
+        shadow = 0
+        if !fb.want(state, fb.M_NODBL) {
+            var noetig: u64 = fb.need_bytes(mbi_use, w, h)
+            if noetig == 0 {
+                noetig = w * h * 4
+            }
+            let rahmen: u64 = (noetig + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
+            back = mem.frame_run(state, rahmen)
+            if back != 0 {
+                back_bytes = rahmen * mem.FRAME_SIZE
+                // vboxlag: the shadow copy of what the card shows (same size, for the diff flush; none = whole rectangles as before)
+                shadow = mem.frame_run(state, rahmen)
+            }
         }
-    }
-    if !fb.init(state, mbi_use, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
-        serial.puts((&s_none[0]) as u64)
-        serial.nl()
-        return
+        if fb.init(state, mbi_use, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
+            fb_ok = true
+        } else {
+            if shadow != 0 {
+                mem.frame_free_run(state, shadow, back_bytes / mem.FRAME_SIZE)
+            }
+            if back != 0 {
+                mem.frame_free_run(state, back, back_bytes / mem.FRAME_SIZE)
+            }
+            var nx: u64 = vmode.boot_step(w, h)
+            if kstate.mode_on(state, kstate.M_NOBOOTRETRY) {
+                nx = 0
+            }
+            if nx == 0 {
+                serial.puts((&s_none[0]) as u64)
+                serial.nl()
+                return
+            }
+            w = nx >> 16
+            h = nx & 0xFFFF
+            serial.puts((&s_retry[0]) as u64)
+            serial.dec(w)
+            serial.put(120)
+            serial.dec(h)
+            serial.nl()
+        }
     }
     if shadow != 0 {
         fb.set_shadow(state, shadow, back_bytes)
@@ -696,6 +727,7 @@ fn vmode_stage(state: u64) {
     var s_st: [u8; 16] = "disp: selftest \0"
     var s_of: [u8; 4] = " / \0"
     var s_st2: [u8; 15] = "fb: selftest2 \0"
+    var s_room: [u8; 10] = "fb: room \0"
     var s_geo: [u8; 12] = "disp: geom \0"
     var s_gp: [u8; 9] = "  pitch=\0"
     var s_gt: [u8; 9] = "  panel=\0"
@@ -856,6 +888,11 @@ fn vmode_stage(state: u64) {
     serial.dec(fb.selftest2(state))
     serial.puts((&s_of[0]) as u64)
     serial.dec(fb.selftest2_max())
+    serial.nl()
+    serial.puts((&s_room[0]) as u64)
+    serial.dec(fb.selftest5(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(fb.selftest5_max())
     serial.nl()
     // NACH den Zusagen die Geometrie noch einmal ausgeben. Die Zusagen
     // stellen Drehung, Tabelle und Bildgroesse um und wieder zurueck;
