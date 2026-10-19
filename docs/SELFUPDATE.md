@@ -60,3 +60,19 @@ Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev
 ## 5. Gate notes (tools/osupdate/run.sh)
 - The installed disk is booted on an AHCI controller (`OTA_DRIVE=ahci`, default in the gate; `OTA_DRIVE=ide` keeps the old PIO disk). Measured: copying the 8.66 MB kernel inside the ESP takes ~30 s on AHCI; over emulated IDE (PIO, 512-byte FAT clusters) the promote copy B->A did not finish in 10 minutes.
 - The promote copy uses 32 KiB writes (`SU_BIG`).
+
+## 6. Settings block + periodic check (stage 1b)
+- Settings > Updates, right column: **System (kernel) update** -- running build (`/etc/osversion`), channel, phase
+  (current / available + build + commit / staged / failed), changelog list (`/system/sys.notes`), buttons
+  *Check system* and *Install system update and restart*. The install is a critical action: the page asks,
+  "Yes, do it" confirms (same path as the package update).
+- settingsd actions (manifest `etc/actions.d/settings.actions`): `settings.update.sysstatus` (read: `ver=`, `here=`,
+  `there=`, `commit=`, `phase=`, `channel=`, `busy=`, up to 8 `note=` lines), `settings.update.syscheck` (write:
+  `ota system search` in the one-child slot), `settings.update.sysinstall` (critical: `ota system apply restart`).
+- Service: `ota dienst` checks the SYSTEM feed at its first round (START seconds after boot) and then every
+  `sysabstand=` seconds in /etc/ota.conf (default 21600 = 6 h; 0 = off). Quiet: fetches the changelog, writes
+  `sys.stand` phase=available and posts ONE notification per build number (`/system/sys.notified`, toast + bell of
+  the bar). Nothing is installed; no check while a trial/pending update exists; an error is retried next round.
+  Same on/off switch as the package service (`auto=`). Test entry: `ota dienst 1 system`.
+- Gates: `tools/osupdate/run.sh` section 7 (service check), `tools/actionbus/run.sh` S-UPD + `gui.sh` (page block).
+
