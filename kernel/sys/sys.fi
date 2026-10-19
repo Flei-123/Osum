@@ -5020,8 +5020,15 @@ const DSTR_MODEL: u64 = 1
 // error, and that is what makes `cat` in a pipeline stop.
 fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let p: u64 = file.open_ino(state, of)
-    var waited: u64 = 0
-    while file.pipe_bytes(state, p) == 0 {
+    // r1215: wait on the poll wake sequence instead of "one tick": a writer (pipe_write) and the closing of a pipe end both
+    // call sched.poll_kick, so the reader runs right after the data arrives, not at the next 10 ms tick. The sequence is read
+    // BEFORE the look (no lost wake-up, see sched.poll_sleep). Same bound as before: BLOCK_ROUNDS ticks in total.
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + BLOCK_ROUNDS
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if file.pipe_bytes(state, p) != 0 {
+            break
+        }
         if file.pipe_writers(state, p) == 0 {
             return 0
         }
@@ -5029,11 +5036,10 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         if (file.open_flags(state, of) & UB_O_NONBLOCK) != 0 {
             return neg(errno.E_AGAIN)
         }
-        if waited >= BLOCK_ROUNDS {
+        if kstate.get(state, kstate.TICKS) >= deadline {
             return neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        sched.poll_sleep(state, seen, deadline)
     }
     var n: u64 = 0
     var going: bool = true

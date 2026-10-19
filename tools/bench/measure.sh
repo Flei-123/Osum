@@ -3,7 +3,7 @@
 # tools/bench/measure.sh -- OrientOS benchmark runner (QEMU/KVM, host side). Boss goal: brutally lightweight and fast.
 #
 #   bash tools/bench/measure.sh --image <orientos-usb.img of an ODB=1 build> [--runs 3] [--portio] [--ui] [--out bench/results]
-#                           [--commit REV] [--token-file F] [--smp 2] [--mem 1536] [--ready REGEX] [--password PW] [--settle S] [--keep DIR]
+#                           [--commit REV] [--token-file F] [--smp 2] [--drive ahci|ide|virtio] [--mem 1536] [--ready REGEX] [--password PW] [--settle S] [--keep DIR]
 #
 # Per run (a private copy of the image, QEMU headless + ODB on a unix socket, tools/odbc/qemu.sh):
 #   host.boot_login_ms     host clock from QEMU start until COM1 shows the login screen (default 'glogin: bereit')
@@ -24,18 +24,19 @@ ROOT=$(pwd)
 LIB="python3 -I $ROOT/tools/bench/lib.py"
 ODBC="python3 -I $ROOT/tools/odbc/odbc.py -t 90"
 IMG=""; RUNS=3; PORTIO=0; UI=0; OUT=$ROOT/bench/results; COMMIT=""; TOKEN=/root/abbilder/odb.token
-SMP=2; MEM=1536; PW=startkennwort; READY='glogin: bereit'; SETTLE=20; KEEP=""; WIN=20; PIOWIN=60
+DRIVE=ahci; SMP=2; MEM=1536; PW=startkennwort; READY='glogin: bereit'; SETTLE=20; KEEP=""; WIN=20; PIOWIN=60
 while [ $# -gt 0 ]; do
     case $1 in
         --image) IMG=$2; shift 2 ;;      --runs) RUNS=$2; shift 2 ;;
         --portio) PORTIO=1; shift ;;     --ui) UI=1; shift ;;
         --out) OUT=$2; shift 2 ;;        --commit) COMMIT=$2; shift 2 ;;
         --token-file) TOKEN=$2; shift 2 ;; --smp) SMP=$2; shift 2 ;;
-        --mem) MEM=$2; shift 2 ;;        --ready) READY=$2; shift 2 ;;
+        --mem) MEM=$2; shift 2 ;;      --drive) DRIVE=$2; shift 2 ;;        --ready) READY=$2; shift 2 ;;
         --settle) SETTLE=$2; shift 2 ;;  --password) PW=$2; shift 2 ;;  --keep) KEEP=$2; shift 2 ;;
         *) sed -n 2,22p "$0"; exit 2 ;;
     esac
 done
+export QEMU_DRIVE=$DRIVE   # ahci = DMA like real SATA; ide makes SeaBIOS read Limine's 70 MB by port I/O (+13 s that real hardware never sees)
 [ -f "$IMG" ] || { echo "bench: --image <ODB=1 orientos-usb.img> required"; exit 2; }
 [ -s "$TOKEN" ] || { echo "bench: token file $TOKEN missing"; exit 2; }
 command -v qemu-system-x86_64 >/dev/null || { echo "bench: no qemu"; exit 2; }
@@ -133,7 +134,7 @@ if [ "$UI" = 1 ]; then
     [ -s "$T/ui/ui.json" ] && files+=("$T/ui/ui.json")
 fi
 [ ${#files[@]} -gt 0 ] || { echo "bench: no successful run"; exit 1; }
-mode=qemu-full-smp$SMP; [ "$PORTIO" = 1 ] && mode=$mode+portio; [ "$UI" = 1 ] && mode=$mode+ui
+mode=qemu-full-$DRIVE-smp$SMP; [ "$PORTIO" = 1 ] && mode=$mode+portio; [ "$UI" = 1 ] && mode=$mode+ui
 $LIB merge "$OUT/$COMMIT.json" "$COMMIT" x86_64 "$mode" "${files[@]}"
 [ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp "$T"/r*/r.json "$T"/r*/portio.txt "$T"/r*/com1.log "$KEEP"/ 2>/dev/null; }
 cat "$OUT/$COMMIT.json" | python3 -I -c "import json,sys; d=json.load(sys.stdin); [print('  %-26s %10s %s' % (k, v, d['units'].get(k,''))) for k,v in sorted(d['results'].items())]"
