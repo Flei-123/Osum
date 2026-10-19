@@ -797,3 +797,12 @@ Two honest paths, in order of how realistic they are:
 2. **A display driver for one specific GPU family.** Intel is the only
    one with public documentation. This is section 8.3 of this file and
    nothing about it has changed.
+
+## A5. Boot size ladder (W-EDID, 19.10.2026)
+
+At boot the size comes from `fbres=`, the EDID or the built-in default. When the card or the window refuses it, `kgui.graphics`
+no longer ends in "fb: kein Rahmenpuffer" (black screen): it gives the frames back and retries with `vmode.boot_step` -- first the
+width rounded down to a multiple of 8 (EDID 1366x768: the Bochs card reads back 1360), then 15/16 steps with the aspect kept, never
+below 640x480. Each step prints `fb: retry WxH`. Only when 640x480 is refused too is there no framebuffer (one clean line, the
+kernel goes on). `fb.run_room`/`fb.tile_room` have pure forms (`run_room_in`/`tile_room_in`) with `fb.selftest5` (`fb: room 12 / 12`).
+Gate: `tools/edidroom/run.sh`; counter-proof words `nobootretry` and `roomold`.
