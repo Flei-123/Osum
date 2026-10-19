@@ -12,7 +12,7 @@ function Vt { param([string[]]$a) & powershell -NoProfile -ExecutionPolicy Bypas
 function Snap {
   $h = @{}
   $o = & $VB debugvm $Name statistics --pattern '/TM/CPU/*|/TM/VirtualSync/*' 2>&1
-  foreach ($l in $o) { if ($l -match 'c="(\d+)".*name="([^"]+)"') { $h[$Matches[2]] = [int64]$Matches[1] } }
+  foreach ($l in $o) { if ($l -match '(?:c|val)="(\d+)".*name="([^"]+)"') { $h[$Matches[2]] = [int64]$Matches[1] } }   # <Counter c=..> or <U64 val=..>
   return $h
 }
 Log "start name=$Name extra='$Extra' xdata='$Xdata' cpus=$Cpus cycles=$Cycles"
