@@ -13,6 +13,11 @@
 #      (tile_room says 13, no run of 13 exists), the framebuffer's own tiles count as free, a full window has no room, n=0 / n>16 are false.
 #   6. COUNTER-PROOFS (must be RED, otherwise the checks above prove nothing): word `nobootretry` (no ladder) -> 1366x768 and 4 MiB end in
 #      "kein Rahmenpuffer"; word `roomold` (run_room only counts tiles, the pre-W-L2 rule) -> `room` < 12.
+#   7. r1183 VRAM-aware boot size (vmode.boot_fit): a card names its video memory (VBE index 0x0A), so the boot goes STRAIGHT to a size that
+#      fits: `fb: fit WxH vram=K` and ZERO refused hardware attempts (retry lines) in cases 1+2; the same cases with `nobootfit` (the old
+#      step-by-step climb) show the retries it saves (counter-proof: attempts must be > 0, and with `nobootfit nobootretry` it ends black).
+#   8. r1183 stripe mode at boot: 2560x1440 (8 tiles of 2 MiB, more than the 6 a real machine with 3 device tiles has) on a 32 MiB card, with
+#      `fbstreifen` (forced stripe): `streifen=1`, no retry, screendump 2560x1440 and not black; without the word the same size maps whole.
 #   The run-time half (host hint over the window limit -> shrunk mode, no rollback) is tools/vmsvgaresize/big.sh (gate vmsvgabig).
 #
 # Usage: [EDIDROOM_KERNEL=<kernel.mb>] bash tools/edidroom/run.sh   (builds its own kernel when unset)
@@ -97,15 +102,21 @@ run_case c 2560 1440 4 &
 run_case d 2048 1152 16 &
 wait
 run_case e 1920 1080 1 &
-run_case f 1366 768 16 nobootretry &
-run_case g 1920 1080 4 nobootretry &
+run_case f 1366 768 16 "nobootretry nobootfit" &
+run_case g 1920 1080 4 "nobootretry nobootfit" &
 run_case h 1366 768 16 roomold &
+wait
+run_case i 1920 1080 4 nobootfit &
+run_case j 1366 768 16 nobootfit &
+run_case k 2048 1152 32 "fbres=2560x1440" &
+run_case l 2048 1152 32 "fbres=2560x1440 fbstreifen" &
 wait
 
 echo "== 1. EDID 1366x768 (card takes widths divisible by 8)"
 grep -a '^fb: nat=' "$T/a.txt" | head -1 | sed 's/^/   /'
 [ "$(fbgeo a)" = "1360x768" ] && ok "fb is 1360x768 (width rounded down to 8, not 'no framebuffer')" || bad "fb = '$(fbgeo a)'"
-grep -aq '^fb: retry 1360x768$' "$T/a.txt" && ok "one retry line: 1360x768" || bad "retry line missing"
+grep -aq '^fb: fit 1360x768 vram=16384$' "$T/a.txt" && ok "fit line: 1360x768 vram=16384 (width rounded down to 8 before the card is asked)" || bad "fit line missing"
+[ "$(retries a)" = "0" ] && ok "no refused hardware attempt" || bad "retried $(retries a) times"
 read -r DS DP <<<"$(dumpinfo a)"
 [ "$DS" = "1360x768" ] && ok "screendump is 1360x768" || bad "screendump size $DS"
 [ "$DP" -ge 1 ] && ok "screen is not black ($DP per mille lit)" || bad "screen is black"
@@ -114,7 +125,8 @@ echo "== 2. EDID 1920x1080 and 2560x1440 on a 4 MiB card"
 for t in b:1920:1080 c:2560:1440; do
     tag=${t%%:*}; r=${t#*:}; ex=${r%%:*}; ey=${r##*:}
     G=$(fbgeo $tag); W=${G%x*}; H=${G#*x}
-    echo "   $tag: wanted ${ex}x${ey} -> '${G}' after $(retries $tag) retries"
+    echo "   $tag: wanted ${ex}x${ey} -> '${G}' after $(retries $tag) retries, $(grep -a '^fb: fit ' "$T/$tag.txt" | head -1)"
+    [ "$(retries $tag)" = "0" ] && grep -aq '^fb: fit ' "$T/$tag.txt" && ok "$tag: straight to the fitting size, no refused attempt" || bad "$tag: retries $(retries $tag), fit line: $(grep -ac '^fb: fit ' "$T/$tag.txt")"
     if [ -n "$G" ]; then
         ok "$tag: a framebuffer exists ($G)"
         [ "$W" -ge 640 ] && [ "$H" -ge 480 ] && ok "$tag: not below 640x480" || bad "$tag: too small $G"
@@ -133,10 +145,11 @@ done
 echo "== 3. EDID 2048x1152 on 16 MiB (nothing refused)"
 [ "$(fbgeo d)" = "2048x1152" ] && ok "fb is 2048x1152" || bad "fb = '$(fbgeo d)'"
 [ "$(retries d)" = "0" ] && ok "no retry" || bad "retried $(retries d) times"
+[ "$(grep -ac '^fb: fit ' "$T/d.txt")" = "0" ] && ok "no fit line (already fits)" || bad "fit line on a size that fits"
 
 echo "== 4. nothing fits (1 MiB card, EDID 1920x1080)"
 [ "$(nonefb e)" = "1" ] && ok "exactly one 'kein Rahmenpuffer' line" || bad "none lines: $(nonefb e)"
-[ "$(retries e)" -ge 1 ] && [ "$(retries e)" -le 40 ] && ok "ladder ran and is bounded ($(retries e) retries)" || bad "retries = $(retries e)"
+[ "$(retries e)" -le 1 ] && ok "no ladder of refused attempts ($(retries e) retries; 640x480 is the floor)" || bad "retries = $(retries e)"
 grep -aq '^fb: hold' "$T/e.txt" && ok "kernel lives on after the failed init" || bad "kernel stopped after the failed init"
 
 echo "== 5. window room rules (fb.selftest5, synthetic masks)"
@@ -144,10 +157,25 @@ R=$(room a); echo "   room $R"
 [ "$R" = "12 / 12" ] && ok "fb: room 12 / 12" || bad "fb: room '$R'"
 
 echo "== 6. counter-proofs (broken variants must be RED)"
-[ -z "$(fbgeo f)" ] && [ "$(nonefb f)" = "1" ] && ok "nobootretry: 1366x768 ends in 'kein Rahmenpuffer' (old bug reproduced)" || bad "nobootretry did not reproduce the bug ('$(fbgeo f)')"
-[ -z "$(fbgeo g)" ] && [ "$(nonefb g)" = "1" ] && ok "nobootretry: 1920x1080 on 4 MiB ends in 'kein Rahmenpuffer'" || bad "nobootretry (4 MiB) did not reproduce the bug ('$(fbgeo g)')"
+[ -z "$(fbgeo f)" ] && [ "$(nonefb f)" = "1" ] && ok "nobootretry+nobootfit: 1366x768 ends in 'kein Rahmenpuffer' (old bug reproduced)" || bad "nobootretry did not reproduce the bug ('$(fbgeo f)')"
+[ -z "$(fbgeo g)" ] && [ "$(nonefb g)" = "1" ] && ok "nobootretry+nobootfit: 1920x1080 on 4 MiB ends in 'kein Rahmenpuffer'" || bad "nobootretry (4 MiB) did not reproduce the bug ('$(fbgeo g)')"
+for t in i:1920:1080 j:1366:768; do
+    tag=${t%%:*}
+    N=$(retries $tag); echo "   nobootfit $tag: '$(fbgeo $tag)' after $N refused attempts"
+    [ -n "$(fbgeo $tag)" ] && [ "$N" -ge 1 ] && ok "nobootfit $tag: old ladder still works but needs $N refused attempts" || bad "nobootfit $tag: ladder '$(fbgeo $tag)' / $N attempts"
+done
+[ "$(retries i)" -gt "$(retries b)" ] && ok "fit saves attempts on 1920x1080/4 MiB: $(retries i) -> $(retries b)" || bad "fit saved nothing ($(retries i) vs $(retries b))"
 RO=$(room h); echo "   roomold: room $RO"
 [ -n "$RO" ] && [ "$RO" != "12 / 12" ] && ok "roomold: promises fail ($RO)" || bad "roomold stayed green ('$RO')"
+
+echo "== 8. 2560x1440 (8 tiles) on a 32 MiB card: stripe mode at boot"
+strp() { grep -aoE 'streifen=[0-9]+' "$T/$1.txt" | head -1 | cut -d= -f2; }
+echo "   whole: '$(fbgeo k)' streifen=$(strp k) retries $(retries k); forced stripe: '$(fbgeo l)' streifen=$(strp l) retries $(retries l)"
+[ "$(fbgeo k)" = "2560x1440" ] && [ "$(retries k)" = "0" ] && ok "k: 2560x1440, no retry (tiles: stripe=$(strp k))" || bad "k: '$(fbgeo k)' / $(retries k) retries"
+[ "$(fbgeo l)" = "2560x1440" ] && [ "$(strp l)" = "1" ] && [ "$(retries l)" = "0" ] && ok "l: fbstreifen: stripe mode at boot, 2560x1440, no retry" || bad "l: '$(fbgeo l)' streifen=$(strp l) retries $(retries l)"
+read -r DS DP <<<"$(dumpinfo l)"
+[ "$DS" = "2560x1440" ] && ok "l: screendump is 2560x1440" || bad "l: screendump size $DS"
+[ "$DP" -ge 1 ] && ok "l: stripe screen not black ($DP per mille)" || bad "l: stripe screen is black"
 
 echo "edidroom: $pass OK / $fail FAIL"
 [ "$fail" -eq 0 ]

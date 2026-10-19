@@ -65,7 +65,7 @@ export {
     // RUNDE SCHIRM: die Tafel fragen, BEVOR es einen Rahmenpuffer gibt.
     native, edid_mm_w, edid_mm_h, dpi_scale,
     vendor_at, model_at,
-    set_mode, set_custom, check_custom, switch_to, follow_host, boot_step, current, revert, auto_scale,
+    set_mode, set_custom, check_custom, switch_to, follow_host, boot_step, boot_vram, boot_fit, current, revert, auto_scale,
     confirm, pending, deadline, remaining,
     cust_w, cust_h, cust_bpp, cust_why, cust_num, customs, need_bytes,
     why_to_e, list_insert, list_remove,
@@ -1769,6 +1769,45 @@ fn boot_step(w: u64, h: u64) -> u64 {
         return 0
     }
     return (nw << 16) | nh
+}
+
+// r1183: the video memory of a Bochs/QEMU/VirtualBox VBE card in bytes, 0 = no such card or no plausible answer. Read BEFORE fb.init
+// (vmode.probe runs after it), so the boot ladder can jump straight to a size the card holds instead of asking the card per step.
+fn boot_vram() -> u64 {
+    if !vbe_present() {
+        return 0
+    }
+    let v: u64 = vbe_read(VBE_VRAM64K) * 65536
+    if v < 262144 || v > 4294967296 {
+        return 0
+    }
+    return v
+}
+
+// r1183: the boot size for a card with `vram` bytes of video memory: the largest size on the boot_step ladder (width divisible by 8, 15/16
+// steps, aspect kept, never below 640x480) whose w * h * 4 fits. Pure (no hardware): w x h unchanged when vram == 0 or it fits and its
+// width is divisible by 8 (the Bochs card reads other widths back rounded down -> that is the old retry 1366 -> 1360, now done here too).
+// (w << 16) | h. Cannot fit even 640x480 -> 640x480 (the caller tries it once and ends in one clean "kein Rahmenpuffer" line).
+fn boot_fit(w: u64, h: u64, vram: u64) -> u64 {
+    if vram == 0 {
+        return (w << 16) | h
+    }
+    var cw: u64 = w
+    var ch: u64 = h
+    if (cw & 7) != 0 && cw > 640 {
+        cw = cw & (~7)
+    }
+    var guard: u64 = 0
+    while cw * ch * 4 > vram && guard < 64 {
+        let nx: u64 = boot_step(cw, ch)
+        if nx == 0 {
+            break
+        }
+        cw = nx >> 16
+        ch = nx & 0xFFFF
+        guard = guard + 1
+    }
+    return (cw << 16) | ch
 }
 
 // W-C3: the integer UI scale for a screen of this size when nothing better is known (no EDID size, no `uiscale=`). 2400x1350 and up
