@@ -26,6 +26,9 @@ for _ in $(seq 1 60); do grep -qa 'glogin: desktop pid=' "$W/ser" 2>/dev/null &&
 sleep 12
 mon "sendkey meta_l"; sleep 3
 for k in e i n s t e l l u n g e n ret; do mon "sendkey $k"; sleep 0.4; done
+# SESSUID3: Settings is a system tool -> the consent window (/bin/elevate) comes first: Tab, Return = Allow
+sleep 8
+for k in tab ret; do mon "sendkey $k"; sleep 0.4; done
 sleep 12
 kill $QP 2>/dev/null; wait $QP 2>/dev/null
 grep -qa 'glogin: uid=1000' "$W/ser" && ok "the desktop runs as uid 1000" || bad "no 'glogin: uid=1000'"
