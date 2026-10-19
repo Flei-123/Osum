@@ -127,8 +127,12 @@ def main():
         time.sleep(max(0.0, settle - 2.0))
         t = read_serial()
         last = t.count("vmsvga: testhint ")
-        m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)", t)
+        m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)(?: now=(\d+)x(\d+))?", t)
         ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
+        # r1139: a hint over the card/tile limit is shrunk by the kernel (big.sh); the screen is then judged against the size the
+        # kernel reports in `now=`, and big.sh checks that number itself
+        if m and os.environ.get("RESIZE_USE_NOW") == "1" and m[-1][3]:
+            ew, eh = int(m[-1][3]), int(m[-1][4])
         r = measure(mon, str(n))
         ccx, cbot, cw, ch, mcx, mbot, mw, mh = menu_probe(mon, str(n), n < steps)
         out.write("%d %d %d %.3f %d %.3f %d %d %.3f %d %d %d %d %d %d %d %d\n" % (n, r[0], r[1], r[2], r[3], r[4], ew, eh, r[5], mcx, mbot, mw, mh, ccx, cbot, cw, ch))
