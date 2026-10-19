@@ -180,4 +180,11 @@ def ppm_rgb(f):
     d = open(f, "rb").read()
     parts = d.split(b"\n", 3)
     w, h = map(int, parts[1].split())
-    return w, h, parts[3]
+    body = parts[3]
+    # QEMU's ppm writer pads every row to a multiple of 4 bytes (a width like 1366 gives 4098 -> 4100 bytes per row): un-pad, otherwise the
+    # picture reads sheared (2 bytes per row)
+    if h > 0 and len(body) != w * h * 3 and len(body) >= w * h * 3 and len(body) % h == 0:
+        stride = len(body) // h
+        if stride >= w * 3 and stride - w * 3 < 4:
+            body = b"".join(body[y * stride : y * stride + w * 3] for y in range(h))
+    return w, h, body
