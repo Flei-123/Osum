@@ -40,6 +40,7 @@ import apprights.policy
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
+    slow_enter, slow_leave, kick_arrive, kick_idle, slow_stats, KICK_VECTOR,
     tote_schlaefe,
     exit_task, reap, claim_zombie, reap_claimed, S_REAPING, lock_gone,
     kill_current, wake_pid, wait_sleep, find_pid, current, tget, tset, task_at,
@@ -677,6 +678,10 @@ fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
         let ap_wake: u64 = policy.acct_addr(task_at(state, i) + T_ORIGIN, policy.A_WAKE)
         if ap_wake != 0 {
             atomic.fetch_add(ap_wake, 1)
+        }
+        // r1129: a woken task nobody on this core will run soon -> wake one slowed idle core.
+        if slow_cnt[0] != 0 {
+            kick_if_busy(state)
         }
     }
     return won
@@ -1804,6 +1809,7 @@ fn start(state: u64, i: u64) -> bool {
     tset(state, i, T_STATE, S_READY)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
+    kick_idle(state)
     return true
 }
 
@@ -2223,9 +2229,15 @@ fn schedule_locked(state: u64) {
     }
     if tget(state, cur, T_STATE) == S_RUN {
         tset(state, cur, T_STATE, S_READY)
+        // r1129: a preempted task is waiting for a core -> wake a slowed idle one.
+        kick_idle(state)
     }
     tset(state, next, T_STATE, S_RUN)
     tset(state, next, T_BUDGET, budget_for(state, next))
+    // r1129: this core is about to run real work -> back to the normal tick.
+    if slow_cnt[0] != 0 && tget(state, next, T_KIND) != K_IDLE {
+        slow_leave(state, cpu.here(state))
+    }
     // RUNDE O-CONTAINER: die Scheibe, die der abgeloeste Prozess
     // verbraucht hat, wird seinem Container gutgeschrieben.
     ctr_tick(state, cur)
@@ -2417,6 +2429,110 @@ fn tote_schlaefe(state: u64) -> u64 {
 // core). `idle_wait` waits for the next interrupt (timer: 10 ms; a key or a
 // pointer packet comes sooner) and tells `on_tick` that the core was idle.
 static mut desk_hlt: [u64; 8] = [0 as u64; 8]
+
+// ---------------------------------------------------------------------------
+// r1129 TICKLESS-LITE FOR IDLE APPLICATION PROCESSORS
+//
+// Every core took a 100 Hz timer interrupt even when it had nothing to do.
+// In VirtualBox (3 vCPU) the two idle application processors alone cost
+// ~100 % of a host core: each HLT wake-up is a host thread wake-up.
+// An AP that has been idle for SLOW_AFTER turns lengthens its own timer
+// period SLOW_MUL times (10 Hz). Anything that makes a task runnable
+// while no core will run it soon sends the vector KICK_VECTOR to one slow
+// core (`kick_idle`); the handler (`kick_arrive`) puts the timer back to
+// normal. The core that executes `schedule_locked` for a real task does
+// the same. The boot core never slows: it keeps the global tick.
+// ---------------------------------------------------------------------------
+const KICK_VECTOR: u64 = 41
+const SLOW_MUL: u64 = 10
+const SLOW_AFTER: u64 = 3
+static mut slow_flag: [u64; 8] = [0 as u64; 8]
+static mut kick_pend: [u64; 8] = [0 as u64; 8]
+static mut slow_cnt: [u64; 1] = [0 as u64; 1]
+static mut slow_nenter: [u64; 1] = [0 as u64; 1]
+static mut slow_nkick: [u64; 1] = [0 as u64; 1]
+
+// diagnostics: 0 = cores slow now, 1 = times a core went slow, 2 = kicks sent
+fn slow_stats(which: u64) -> u64 {
+    if which == 0 {
+        return slow_cnt[0]
+    }
+    if which == 1 {
+        return slow_nenter[0]
+    }
+    return slow_nkick[0]
+}
+
+// Called by an AP in its idle loop right before `hlt`, with the number of
+// idle turns in a row. Interrupts are masked while the state flips so the
+// kick handler cannot run between the flag and the timer write.
+fn slow_enter(state: u64, me: u64, streak: u64) {
+    if me == 0 || me >= 8 || streak < SLOW_AFTER || slow_flag[me as usize] != 0 {
+        return
+    }
+    let flags: u64 = irq_save()
+    slow_flag[me as usize] = 1
+    atomic.fetch_add((&slow_cnt[0]) as u64, 1)
+    slow_nenter[0] = slow_nenter[0] + 1
+    apic.timer_slow(state, SLOW_MUL)
+    irq_restore(flags)
+}
+
+fn slow_leave(state: u64, me: u64) {
+    if me >= 8 || slow_flag[me as usize] == 0 {
+        return
+    }
+    apic.timer_fast(state)
+    slow_flag[me as usize] = 0
+    atomic.fetch_sub((&slow_cnt[0]) as u64, 1)
+}
+
+// The kick vector arrived on this core.
+fn kick_arrive(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= 8 {
+        return
+    }
+    slow_leave(state, me)
+    kick_pend[me as usize] = 0
+}
+
+// Wake ONE slowed idle core (not this one). Cheap when none is slow.
+fn kick_idle(state: u64) {
+    if slow_cnt[0] == 0 {
+        return
+    }
+    let me: u64 = cpu.here(state)
+    var n: u64 = cpu.count(state)
+    if n > 8 {
+        n = 8
+    }
+    var i: u64 = 1
+    while i < n {
+        if i != me && slow_flag[i as usize] != 0 && kick_pend[i as usize] == 0 {
+            if atomic.cas((&kick_pend[i as usize]) as u64, 0, 1) == 0 {
+                slow_nkick[0] = slow_nkick[0] + 1
+                apic.ipi(state, cpu.get(state, i, cpu.C_APICID), KICK_VECTOR | 0x4000)
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// A task became runnable. If this core is idle (its idle task, or the
+// boot task waiting in `idle_wait`) it will pick the task itself.
+fn kick_if_busy(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me < 8 && desk_hlt[me as usize] != 0 {
+        return
+    }
+    let cur: u64 = current(state)
+    if tget(state, cur, T_KIND) == K_IDLE {
+        return
+    }
+    kick_idle(state)
+}
 
 fn idle_wait(state: u64) {
     let me: u64 = cpu.here(state)
