@@ -48,3 +48,30 @@ never reused (`register.json`), a bad stand is withdrawn with
 The feed carries the 14 packages of `tools/loader/apps.tab`. Programs that only ship in
 the image (PDF viewer, installer, WLAN window, store window, taskbar, login) are not
 packages yet -- an OTA update does not touch them.
+
+## 4. Publishing the selfupdate kernel feed `system/dev` (recipe, 20.10.2026)
+
+`system/dev` is what a device with `kanal=dev` in `/etc/ota.conf` reads (`ota system search|apply`, see
+`docs/SELFUPDATE.md` sections 6-7). Re-publish after every kernel/program change that devices should get
+(next: after the W-STALL kernel fix). One script does the whole chain and verifies it:
+
+    # 1. full image of the checkout to publish (the overlay programs come from its <prog>.elf files)
+    bash vendor/firn/fetch-firnc.sh
+    ODB=1 PARTTAB=mbr FS_BLOCKS=122880 IMAGE_ID=x ODB_TOKEN_FILE=/root/abbilder/odb.token \
+        /root/jarvis/bin/heavy bash tools/usbimg/build.sh /root/abbilder/x        # ~9 min (+ queue wait)
+    # 2. commit everything, then dry run (temp copy of the feed), then the real publish
+    git diff --stat 2ebc2717 HEAD -- kernel lib etc        # which /bin programs changed since the stand the devices run?
+    bash tools/ota/feed-dev.sh /root/abbilder/x "<notes>" settings settingsd glogin orientbus host fetch --dry
+    bash tools/ota/feed-dev.sh /root/abbilder/x "<notes>" settings settingsd glogin orientbus host fetch
+
+`feed-dev.sh` builds the kernel with `build-kernel.sh --stufe 0` into a dir that holds ONLY `osum.mb`, copies the
+named `<prog>.elf` into a flat overlay dir, runs `publish-system.sh ... --count $(git rev-list --count HEAD) --gz
+--overlay`, verifies the Ed25519 signature of `VERZEICHNIS` against `system/dev/schluessel.pub` plus every
+`sysfile`/`sysgz` hash and size, and checks that `aktuell/ v/ pakete/ register.json` are byte-identical before and
+after. The working tree must be clean (the stand names the commit). `count` only grows; devices refuse
+`count <= SYSVERSION`.
+
+Limits to know: the overlay covers `/bin` only. Files under `/etc` (e.g. `etc/actions.d/settings.actions` of SETBROKER2),
+the Limine config (5 s menu timeout) and root-owned data files (`mouse.conf`, `power.conf`) change only with a new
+full image (`tools/vbox/run.sh build` -> `publish` -> laptop `bossswap.ps1`). A program that imports `wlibc` is
+functionally changed by r1277 (`platte_ink`), but overlaying every GUI program does not fit a 60 MiB root.
