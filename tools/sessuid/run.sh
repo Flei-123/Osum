@@ -58,6 +58,7 @@ SP=$(grep -a 'launcher: start /apps/settings.osp/start pid=' "$W/ser" | tail -1 
 grep -aq 'elevate: ready' "$W/ser" && bad "Settings opened a consent window" || ok "Settings opens without a consent window"
 grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started without consent" || ok "nothing started as root without consent"
 [ -n "$SP" ] && grep -aq "execas: user pid=$SP uid=1000" "$W/ser"; xchk $? "[X] Settings runs as uid 1000 (kernel: execas: user pid=$SP uid=1000)"
+waitfor 'settings: who uid=' 40; sleep 1   # r1314: the line comes after the window is up; wait for it instead of a fixed sleep
 grep -aq 'settings: who uid=1000' "$W/ser" && ok "Settings itself reports uid 1000" || bad "Settings does not report uid 1000"
 # 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (Tab Tab Return) starts nothing
 R0=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
