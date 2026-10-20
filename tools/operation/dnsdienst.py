@@ -4,7 +4,7 @@
 
     dnsdienst.py --port 53 [--adresse 0.0.0.0]
                  --eintrag pkg.betrieb.test=10.0.2.2 [--eintrag ...]
-                 [--boese txid|port|case|alle] [--koeder 3]
+                 [--boese txid|port|case|alle|klein] [--koeder 3]
                  [--log datei] [--tc pkg.betrieb.test]
 
 Zwei Aufgaben in einem Programm, und die zweite ist die wichtigere.
@@ -84,8 +84,14 @@ def name_lesen(b, at):
 
 
 def antwort_bauen(frage, txid, qende, name, qtyp, kaputt_case=False,
-                  txid_falsch=False, tc=False):
+                  txid_falsch=False, tc=False, klein=False):
     q = bytearray(frage[:qende])
+    if klein:
+        # A NAT DNS proxy that rebuilds the question in lower case
+        # (VirtualBox NAT): the 0x20 echo never matches.
+        for i in range(12, qende):
+            if 65 <= q[i] <= 90:
+                q[i] += 32
     if kaputt_case:
         # Jeden Buchstaben im Fragenteil kippen -- die 0x20-Kodierung
         # muss das merken.
@@ -125,7 +131,7 @@ def bedienen(sock, daten, herkunft):
     kn = name.decode("ascii", "replace").lower()
     protokoll("FRAGE", kn, "typ", qtyp, "txid", txid, "von", herkunft)
 
-    if BOESE:
+    if BOESE and BOESE != "klein":
         for i in range(KOEDER):
             art = BOESE
             if BOESE == "alle":
@@ -157,7 +163,8 @@ def bedienen(sock, daten, herkunft):
             ZAEHLER["koeder"] += 1
         time.sleep(0.01)
 
-    p = antwort_bauen(daten, txid, qende, name, qtyp, tc=(kn in TC))
+    p = antwort_bauen(daten, txid, qende, name, qtyp, tc=(kn in TC),
+                      klein=(BOESE == "klein"))
     sock.sendto(p, herkunft)
     ZAEHLER["antworten"] += 1
 

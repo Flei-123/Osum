@@ -208,7 +208,17 @@ for art in txid port case alle; do
     [ "${FREMD:-0}" -ge 1 ] \
         && ok "Koeder '$art': $FREMD Fremdpakete GEZAEHLT und verworfen" \
         || bad "Koeder '$art': kein Fremdpaket gezaehlt -- der Versuch misst nichts"
+    gleich "Koeder '$art': keine Rueckstufung auf Kleinschrift (richtige Antwort kam)" \
+        "$(echo "$A" | sed -n 's/^  nocaps  *//p')" "0"
 done
+# A NAT DNS proxy that lower-cases the question (seen: VirtualBox NAT in the Boss VM) never
+# echoes the 0x20 case. The resolver must see "right id, wrong case only", ask again with an
+# all-lower-case question and get the address; `host -v` shows nocaps 1.
+nsd --boese klein || bad "dnsdienst (klein)"
+A=$("$W/host" -v -s 127.0.0.1 "$NAME" 2>&1)
+gleich "Proxy mit Kleinschrift: die Adresse kommt trotzdem" "$(echo "$A" | head -1)" "10.0.2.2"
+gleich "Proxy mit Kleinschrift: Rueckstufung nocaps gemeldet" \
+    "$(echo "$A" | sed -n 's/^  nocaps  *//p')" "1"
 nsd --tc "$NAME" || bad "dnsdienst (tc)"
 gleich "gekuerzte Antwort (TC-Bit) wird als TRUNCATED gemeldet" \
     "$("$W/host" -s 127.0.0.1 "$NAME" 2>&1 | head -1)" "TRUNCATED"

@@ -82,7 +82,7 @@ import libc.dnswire
 export {
     conf_load, conf_set, conf_count, conf_at, conf_timeout, conf_attempts,
     resolve, resolve_a,
-    used_server, used_port, used_txid, used_tries, dropped, used_ms,
+    used_server, used_port, used_txid, used_tries, dropped, used_ms, used_nocaps,
     R_NOSERVER, R_NET, R_TIMEOUT, R_NOPORT
 }
 
@@ -118,6 +118,10 @@ static mut U_TXID: u64 = 0
 static mut U_TRIES: u64 = 0
 static mut U_DROP: u64 = 0
 static mut U_MS: u64 = 0
+// 1 = a reply matched except for letter case (CASE_SEEN, per attempt); NOCAPS = this
+// lookup switched to an all-lower-case question (server does not echo the case).
+static mut U_CASE: u64 = 0
+static mut U_NOCAPS: u64 = 0
 
 fn used_server() -> u64 { return U_SRV }
 fn used_port() -> u64 { return U_PORT }
@@ -125,6 +129,7 @@ fn used_txid() -> u64 { return U_TXID }
 fn used_tries() -> u64 { return U_TRIES }
 fn dropped() -> u64 { return U_DROP }
 fn used_ms() -> u64 { return U_MS }
+fn used_nocaps() -> u64 { return U_NOCAPS }
 fn conf_count() -> u64 { return NSRV }
 fn conf_timeout() -> u64 { return TMO }
 fn conf_attempts() -> u64 { return ATT }
@@ -413,8 +418,15 @@ fn ask(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
     }
     let txid: u64 = (ld8((&RND[0 as usize]) as u64, 32) << 8)
         | ld8((&RND[0 as usize]) as u64, 33)
+    // NOCAPS: all letters lower case (a zeroed 0x20 source) -- only after a
+    // server answered with the right id but a changed case (see resolve()).
+    var caps: [u8; 40] = [0 as u8; 40]
+    var cp: u64 = (&RND[0 as usize]) as u64
+    if U_NOCAPS == 1 {
+        cp = (&caps[0 as usize]) as u64
+    }
     let qlen: u64 = dnswire.q_build((&QB[0 as usize]) as u64, MSG_MAX,
-        txid, name, qtype, (&RND[0 as usize]) as u64)
+        txid, name, qtype, cp)
     if qlen == 0 {
         return dnswire.R_BADNAME
     }
@@ -482,6 +494,11 @@ fn ask(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
                     // Kennung oder Frage passen nicht: das war nicht die
                     // Antwort auf diese Frage. Zaehlen und weiterwarten.
                     U_DROP = U_DROP + 1
+                    if c == dnswire.R_MISMATCH
+                        && dnswire.case_only((&RB[0 as usize]) as u64, r,
+                            (&QB[0 as usize]) as u64, qlen) {
+                        U_CASE = 1
+                    }
                 } else {
                     erg = c
                     break
@@ -510,6 +527,7 @@ fn resolve(name: u64, qtype: u64, out: u64) -> u64 {
     }
     U_DROP = 0
     U_TRIES = 0
+    U_NOCAPS = 0
     if NSRV == 0 {
         return R_NOSERVER
     }
@@ -519,7 +537,25 @@ fn resolve(name: u64, qtype: u64, out: u64) -> u64 {
         var i: u64 = 0
         while i < NSRV {
             U_TRIES = U_TRIES + 1
+            U_CASE = 0
             let c: u64 = ask(SRV[(i) as usize], name, qtype, out)
+            if c == R_TIMEOUT && U_CASE == 1 && U_NOCAPS == 0 {
+                // The server answers with the right id but not the case we
+                // sent (a NAT DNS proxy that lower-cases the question).
+                // Ask it again with an all-lower-case question: id, source
+                // port and server address are still checked.
+                U_NOCAPS = 1
+                U_TRIES = U_TRIES + 1
+                U_CASE = 0
+                let c2: u64 = ask(SRV[(i) as usize], name, qtype, out)
+                if c2 == dnswire.R_OK || c2 == dnswire.R_NXDOMAIN
+                    || c2 == dnswire.R_NODATA || c2 == dnswire.R_BADNAME {
+                    return c2
+                }
+                letzte = c2
+                i = i + 1
+                continue
+            }
             if c == dnswire.R_OK || c == dnswire.R_NXDOMAIN
                 || c == dnswire.R_NODATA || c == dnswire.R_BADNAME {
                 return c
