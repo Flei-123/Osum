@@ -35,6 +35,10 @@ timeout 330 qemu-system-x86_64 "${KVM[@]}" -m 512 -kernel "$K" \
     -monitor "unix:$W/mon,server,nowait" -drive "file=$W/d.img,format=raw,if=ide,index=0" >/dev/null 2>&1 &
 QP=$!
 waitfor() { local i; for i in $(seq 1 "$2"); do grep -qa -- "$1" "$W/ser" 2>/dev/null && return 0; sleep 1; done; return 1; }
+# r1314: count matches instead of testing for existence -- a marker line from an EARLIER step (e.g. the first `elevate: ready`)
+# must not satisfy the wait of a later step (the fixed sleeps then raced the second consent window, flaky Allow check).
+count() { grep -ac -- "$1" "$W/ser" 2>/dev/null || true; }
+waitcount() { local i; for i in $(seq 1 "$3"); do [ "$(count "$1")" -ge "$2" ] && return 0; sleep 1; done; return 1; }
 waitfor 'glogin: bereit' 120; sleep 6
 keys s t a r t k e n n w o r t ret
 waitfor 'glogin: desktop pid=' 90; sleep 12
@@ -56,18 +60,21 @@ grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started without con
 [ -n "$SP" ] && grep -aq "execas: user pid=$SP uid=1000" "$W/ser"; xchk $? "[X] Settings runs as uid 1000 (kernel: execas: user pid=$SP uid=1000)"
 grep -aq 'settings: who uid=1000' "$W/ser" && ok "Settings itself reports uid 1000" || bad "Settings does not report uid 1000"
 # 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (Tab Tab Return) starts nothing
-mon "sendkey meta_l"; sleep 3
+R0=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
 keys i n s t a l l i e r e n ret
-waitfor 'elevate: ready' 40; sleep 3
+waitcount 'elevate: ready' $((R0+1)) 40; sleep 3
 grep -aq 'elevate: ready' "$W/ser" && ok "a system tool opens the consent window (elevate: ready)" || bad "a system tool opens the consent window (elevate: ready)"
 grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started before consent" || ok "nothing started as root before consent"
-keys tab tab ret; sleep 4
+D0=$(count 'elevate: denied'); keys tab tab ret
+waitcount 'elevate: denied' $((D0+1)) 20; sleep 2
 grep -aq 'elevate: denied' "$W/ser" && ok "Cancel is reported (elevate: denied)" || bad "Cancel is reported (elevate: denied)"
 grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programme" || ok "Cancel started nothing as root"
 # 4. Allow (Tab Return) -> the system tool starts as root
-mon "sendkey meta_l"; sleep 3
+R1=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
 keys i n s t a l l i e r e n ret
-waitfor 'elevate: ready' 40; sleep 3; keys tab ret; sleep 8
+# wait for the SECOND consent window (a new `elevate: ready`), then Allow, then wait for the start line
+waitcount 'elevate: ready' $((R1+1)) 40; sleep 3; keys tab ret
+waitfor 'elevate: start .*installer.* pid=' 40; sleep 2
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
 IP=$(grep -a 'elevate: start .*installer.* pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
 [ -n "$IP" ] && grep -aq "execas: priv pid=$IP\$" "$W/ser"; xchk $? "[X] Allow starts the installer as root (elevate: start ... pid=$IP and kernel: execas: priv pid=$IP)"
