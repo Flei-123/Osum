@@ -99,6 +99,11 @@ Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev
   Overlay files are the `.elf` of a full image build (`tools/usbimg/build.sh <dir>`), copied by name into a flat dir.
   Publish from a dir that holds ONLY `osum.mb`: a `root.img` next to it adds a `sysfile root` line that is never served (404).
   Gate `tools/osupdate/run.sh` 127/0 on c7a0803f and on 787bd969. The 5 s Limine timeout is image/installer-only (not in the kernel).
+- Stand 3 (20.10.2026): count 3226, commit 5c41a99 (main 5c41a992), kernel sha256 d780e916...  8 662 088 bytes, gzip transport,
+  /bin overlay of 7 files (ota taskbar launcher elevate installer dualcli **glogin**). New vs stand 2: `glogin` (chowns the files
+  Settings writes; effective from the next sign-in) and `taskbar`/`launcher` (ulib.needs_root without Settings). Gate 127/0.
+  Other programs are byte-different only through the shifted ulib (no behaviour change); Settings itself is unchanged.
+  Check recipe: Ed25519 verify + all sysfile/sysgz hashes + `aktuell/ v/ pakete/ register.json` checksum before = after.
 
 ## 7. Stage 2: /bin overlay (r1245) + gzip transport (r1246)
 Additive: old clients ignore `sysgz` lines and treat `sysfile file` as the old unknown role (just a hint).
