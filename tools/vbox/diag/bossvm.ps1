@@ -8,14 +8,14 @@ param([int]$Cpus = 1, [int]$Boots = 4, [int]$Minutes = 30, [int]$Sec = 15, [stri
 # (debugvm statistics). BURN = other >= 50 % or lag > 200 ms/s or host CPU > 90 % of one core.
 # Log: C:\Users\justi\vbl\bossvm.log. Start in the background (Win32_Process Create) and poll the log.
 $ErrorActionPreference = 'Continue'
-$R = 'C:\Users\justi\vbl'; $L = "$R\bossvm.log"; $VB = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
-function Log($m) { Add-Content $L ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
+$R = 'C:\Users\justi\vbl'; $LOGF = "$R\bossvm.log"; $VB = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
+function Log($m) { Add-Content $LOGF ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
 function Vb { param([string[]]$a) & $VB @a 2>&1 }
-function State { $o = Vb @('showvminfo', $Name, '--machinereadable'); foreach ($l in $o) { if ($l -match '^VMState="(.+)"') { return $Matches[1] } }; return '?' }
+function State { $o = Vb @('showvminfo', $Name, '--machinereadable'); foreach ($ln in $o) { if ($ln -match '^VMState="(.+)"') { return $Matches[1] } }; return '?' }
 function Snap {
   $h = @{}
-  foreach ($l in (Vb @('debugvm', $Name, 'statistics', '--pattern', '/TM/CPU/*|/TM/VirtualSync/*'))) {
-    if ($l -match 'c="(\d+)".*name="([^"]+)"') { $h[$Matches[2]] = [int64]$Matches[1] } }
+  foreach ($ln in (Vb @('debugvm', $Name, 'statistics', '--pattern', '/TM/CPU/*|/TM/VirtualSync/*'))) {
+    if ($ln -match 'val="(\d+)".*name="([^"]+)"') { $h[$Matches[2]] = [int64]$Matches[1] } }
   return $h
 }
 function VmProcess { $v = New-Object -ComObject VirtualBox.VirtualBox; $p = [int]$v.FindMachine($Name).SessionPID; if ($p -le 0) { return $null }; return Get-Process -Id $p -ErrorAction SilentlyContinue }
@@ -63,7 +63,7 @@ Log "=== start name=$Name cpus=$Cpus boots=$Boots minutes=$Minutes sec=$Sec nomo
 Vb @('showvminfo', $Name, '--machinereadable') | Set-Content "$R\bossvm-before-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
 PowerOff
 if (-not $NoModify) { Log ("modifyvm --cpus $Cpus : " + (Vb @('modifyvm', $Name, '--cpus', "$Cpus") -join ' ')) }
-foreach ($l in (Vb @('showvminfo', $Name, '--machinereadable'))) { if ($l -match '^(cpus|memory|hpet|x2apic|paravirtprovider|nestedpaging|ioapic)=') { Log "cfg $l" } }
+foreach ($ln in (Vb @('showvminfo', $Name, '--machinereadable'))) { if ($ln -match '^(cpus|memory|hpet|x2apic|paravirtprovider|nestedpaging|ioapic)=') { Log "cfg $ln" } }
 $res = @()
 for ($c = 1; $c -le $Boots; $c++) { $res += (Run-Phase "boot$c" 6); PowerOff }
 $long = [int]($Minutes * 60 / $Sec)
