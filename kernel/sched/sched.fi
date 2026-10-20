@@ -2525,13 +2525,58 @@ fn idle_wait(state: u64) {
     desk_hlt[me as usize] = 0
 }
 
+// r1307 (W-STALLFIX): RATE-LIMITED SLEEP WHILE THE TIMER WATCHDOG FIRES.
+// Under VirtualBox/NEM an exit storm lets the guest's virtual clock lag minutes behind the real one (VirtSync catch-up): the ticks
+// then arrive late, `timer_tot` turns true, and the old answer -- a bare `yield_now` -- made every sleeper (desktop loop, taskbar,
+// starter, terminal reader) run its full poll round as fast as it could. Each round costs port/MMIO exits (50-100 us each in NEM),
+// which deepens the lag: self-reinforcing, only Pause/Resume broke it. Now the rounds of one core are spaced `min(ticks, 2)` tick
+// lengths apart on the TSC (one tick = max(hz / 100, the smoothed cycles-per-tick seen on this core)), the wait is `pause` (no exit)
+// in 1 ms slices with a `yield_now` between them (other ready tasks still run), and it ends early the moment a tick arrives. A
+// really dead timer is still survived (sleepers come back after at most two tick lengths), but at <= 100 rounds/s per core.
+// `tot_last` = TSC stamp of the last round let through on this core (shared by all tasks of the core: their sum is limited).
+static mut tot_last: [u64; 8] = [0 as u64; 8]
+static mut tot_waits: u64 = 0
+
+fn sleep_tot(state: u64, ticks: u64) {
+    let me: u64 = cpu.here(state)
+    var hz: u64 = apic.tsc_hz(state)
+    if me >= 8 || hz < 100000000 || hz > 10000000000 {
+        yield_now(state)
+        return
+    }
+    var per: u64 = hz / 100
+    let seen: u64 = cpu.get(state, me, cpu.C_TOTPER)
+    if seen > per {
+        per = seen
+    }
+    if per > hz / 10 {
+        per = hz / 10
+    }
+    var n: u64 = ticks
+    if n > 2 {
+        n = 2
+    }
+    let t0: u64 = kstate.get(state, kstate.TICKS)
+    let slice: u64 = hz / 1000
+    let next: u64 = tot_last[me as usize] + n * per
+    tot_waits = tot_waits + 1
+    while apic.tsc() < next && kstate.get(state, kstate.TICKS) == t0 {
+        let end: u64 = apic.tsc() + slice
+        while apic.tsc() < end && apic.tsc() < next {
+            asm("pause")
+        }
+        yield_now(state)
+    }
+    tot_last[me as usize] = apic.tsc()
+}
+
 fn sleep_ticks(state: u64, ticks: u64) {
     if ticks == 0 {
         yield_now(state)
         return
     }
     if timer_tot(state) {
-        yield_now(state)
+        sleep_tot(state, ticks)
         return
     }
     let flags: u64 = irq_save()
