@@ -256,6 +256,18 @@ mid() { # name -> "x y" (the middle)
     set -- $r; echo "$(( $1 + $3 / 2 )) $(( $2 + $4 / 2 ))"
 }
 
+# SETBROKER2 (r1280): a CRITICAL change from the settings window is answered in the system's trusted dialog
+# (real keyboard), not by the window's own "Yes, change it" (the broker refuses that: err use_dialog).
+dlg_n() { grep -ac 'wm: trusted dialog up no=' "$TMPD/ser.txt"; }
+dlg_yes() { # $1 = number of dialogs shown before the change was asked
+    local i
+    for i in $(seq 1 15); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
+    sleep 1.5
+    echo "sendkey j" > "$TMPD/kjy.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$TMPD/kjy.txt" > /dev/null 2>&1
+    sleep 2
+}
+
 if waitfor "==G-WAIT==" 120; then
     ok "the script reached the settings part"
     sleep 4
@@ -274,11 +286,13 @@ if waitfor "==G-WAIT==" 120; then
         klick $E
         for i in 1 2 3 4 5 6; do echo "sendkey backspace" ; done > "$TMPD/bs.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/bs.txt" 0.1 > /dev/null 2>&1
+        D0=$(dlg_n)
         tippe false; klick $S
         sleep 2
         shot "$TMPD/2-ask.ppm"
-        klick $(mid sconf)
+        klick $(mid sconf)     # the window's own yes: refused (use_dialog)
         sleep 2
+        dlg_yes "$D0"          # the real yes: the system dialog
         shot "$TMPD/3-done.ppm"
     else
         bad "the System page did not report its controls"
@@ -316,9 +330,10 @@ if waitfor "==G-NET==" 60; then
         # the choice opens its list below itself; item 0 is "über DHCP"
         read mx my mw mh <<< "$(rect nmode)"
         klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
+        D1=$(dlg_n)
         klick $N; sleep 2
         shot "$TMPD/6-netask.ppm"
-        klick $C; sleep 2
+        dlg_yes "$D1"
         shot "$TMPD/7-netdone.ppm"
     else
         bad "the page Netz did not report its controls"
@@ -442,7 +457,8 @@ n_k=$(grep -ac 'settingsd: display brightness k=' "$G")
 grep -qa 'settings: page set key=net.dhcp' "$G" && ok "page Netz: DHCP goes over the bus (net.dhcp)" || bad "the page Netz did not use the bus"
 n_ask=$(grep -ac 'settings: bus answer rc=2 line=\[confirm' "$G")
 [ "$n_ask" -ge 2 ] && ok "... net.dhcp is critical: the page Netz asks as well" || bad "the page Netz was not asked ($n_ask questions)"
-has "$G" "settingsd: dhcp started pid=" "after 'Ja, ändern' on the page Netz settingsd starts DHCP"
+has "$G" "settingsd: dhcp started pid=" "after the YES IN THE SYSTEM DIALOG settingsd starts DHCP"
+grep -qa 'settings: bus answer rc=1 line=\[err use_dialog' "$G" && ok "SETBROKER2: the window's own \"Yes, change it\" for a critical value is refused (err use_dialog)" || bad "the window's own yes was not refused ($(grep -a 'use_dialog' "$G" | tail -1 | cut -c1-80))"
 part "$G" G-NETDONE G-CLOSE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "modus=dhcp" "/etc/network.conf says modus=dhcp"
 has "$TMPD/p.txt" "ip=10.0.2.15" "... and keeps the other lines"
@@ -458,7 +474,7 @@ has "$G" "wm: trusted dialog answer=2" "'n' on the real keyboard rejects"
 part "$G" G-TRUST G-TRUST2 > "$TMPD/p.txt"
 has "$TMPD/p.txt" "value=300" "... and the lock time stayed 300"
 part "$G" G-TRUST2 G-TRUST3 > "$TMPD/p.txt"
-has "$TMPD/p.txt" "trusted_dialogs=1" "a program typing 'jjj' into a window did not answer the dialog (still one answer)"
+has "$TMPD/p.txt" "trusted_dialogs=3" "a program typing 'jjj' into a window did not answer the dialog (still three answers: two yes from the window's critical changes, one no)"
 has "$G" "wlkeys: key=36 state=1" "... although the program's 'j' did reach its window"
 has "$G" "wm: trusted dialog answer=1" "'j' on the real keyboard says yes"
 part "$G" G-TRUST3 G-TRUSTEND > "$TMPD/p.txt"

@@ -2729,7 +2729,7 @@ fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
         var s_cn: [u8; 19] = "bus.confirm_needed\0"
         deliver((&s_cn[0 as usize]) as u64, actwire.NONE, true)
         trusted_ask(ld(tp, TK_NO), cp, np, level_name(rlvl),
-            pl(ld(ac(act), AC_DESC)))
+            pl(ld(ac(act), AC_DESC)), rlvl)
         return
     }
     // allowed
@@ -3333,6 +3333,12 @@ fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
     }
     if t == actwire.NONE {
         reply_err(pid, id, (&e_none[0 as usize]) as u64, arp)
+        return
+    }
+    if yes && tk_dlg[(t) as usize] != 0 && tr_screen {
+        // SETBROKER2: a critical request of the person's own window is answered in the trusted dialog only
+        var e_dlg: [u8; 11] = "use_dialog\0"
+        reply_err(pid, id, (&e_dlg[0 as usize]) as u64, arp)
         return
     }
     st(tk(t), TK_USED, 0)
@@ -4371,7 +4377,41 @@ fn tk_by_no(no: u64) -> u64 {
     return actwire.NONE
 }
 
-fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64) {
+// SETBROKER2 (r1280): a CRITICAL request of the person's own window (the settings window, `act` in their
+// shell) is put to the same trusted dialog as an agent's. The window runs as the session person, and so
+// does any other program of theirs that no label marks as an app: the old `confirm <n>` over the bus
+// could therefore be sent by a program the person never meant. Such a token is "dialog only" as long as
+// the machine has a window server (tr_screen); `confirm` over the bus is refused with `use_dialog`, only
+// the dialog (real keyboard / mouse, wm.fi) can say yes. `reject` stays open to everyone. Without a
+// screen (a guest without graphics) nothing changes: the bus confirm is the only way.
+static mut tk_dlg: [u8; 8] = [0 as u8; 8] // TOK_MAX: 1 = dialog only
+static mut tr_screen: bool = false // a dialog was shown at least once on this boot
+
+// the argument lines of a parked request ("key=value", not the @meta lines) as "\n  key=value"
+fn trusted_args(t: u64) {
+    let m: u64 = tkmem(t)
+    var at: u64 = actwire.line_end(m, 0)
+    var n: u64 = 0
+    var s_ind: [u8; 4] = "\n  \0"
+    while ld8(m, at) != 0 && n < 6 {
+        if ld8(m, at) == 10 {
+            at = at + 1
+        }
+        let e: u64 = actwire.line_end(m, at)
+        if e > at && ld8(m, at) != 64 {
+            actwire.ob_str((&s_ind[0 as usize]) as u64)
+            var j: u64 = at
+            while j < e && j < at + 60 {
+                actwire.ob_ch(ld8(m, j))
+                j = j + 1
+            }
+            n = n + 1
+        }
+        at = e
+    }
+}
+
+fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
     let t: u64 = tk_by_no(no)
     if t == actwire.NONE {
         return
@@ -4379,11 +4419,15 @@ fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64) {
     // the slot may hold the text of an earlier token that was answered on
     // the shell or expired: a new token starts without one
     st8(trt(t), 0, 0)
+    tk_dlg[(t) as usize] = 0 as u8
     // the person's OWN request (the settings window, `act` on their
-    // shell) is answered where it was made; the dialog is for what an
-    // agent or an app asks -- the case where a fake "yes" is the danger
+    // shell) is answered where it was made, unless it is critical: then
+    // the dialog is the only place that can say yes (see above)
     if actwire.str_eq(cp, (&s_user[0 as usize]) as u64) {
-        return
+        if rlvl != L_CRIT {
+            return
+        }
+        tk_dlg[(t) as usize] = 1 as u8
     }
     var s1: [u8; 17] = " will ausfuehren\0"
     var s2: [u8; 11] = "\n  Aktion \0"
@@ -4398,6 +4442,7 @@ fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64) {
     actwire.ob_str(np)
     actwire.ob_str((&s3[0 as usize]) as u64)
     actwire.ob_str(lvl)
+    trusted_args(t)
     if desc != 0 && ld8(desc, 0) != 0 {
         actwire.ob_str((&s4[0 as usize]) as u64)
         actwire.ob_str(desc)
@@ -4451,6 +4496,7 @@ fn trusted_poll() {
         return
     }
     tr_up = no
+    tr_screen = true
 }
 
 // the person answered in the dialog: exactly what `act confirm` and

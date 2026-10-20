@@ -971,6 +971,161 @@ fn do_update_run(name: u64, dry: bool) {
     r_ch(10)
 }
 
+// ROUND SETBROKER2 (r1279): the FIXED network address on the bus.
+// settings.net.fixed (critical) sets address, mask and gateway with the
+// kernel call SYS_OSUM_NETSET, which only root may make -- the settings
+// window runs as the session person and cannot. The answer is also kept
+// in /etc/network.conf (modus=fest, ip=, maske=, gateway=; other lines
+// stay), the file /bin/dhcp and the page Netz share.
+const SYS_NETSET: u64 = 1301
+
+// "a.b.c.d" -> a<<24|b<<16|c<<8|d; 0 when it is not exactly four numbers 0..255
+fn ip_parse(p: u64) -> u64 {
+    var v: u64 = 0
+    var part: u64 = 0
+    var digits: u64 = 0
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 20 {
+        let c: u64 = ld8(p, k)
+        if c >= 48 && c <= 57 {
+            part = part * 10 + (c - 48)
+            digits = digits + 1
+            if part > 255 || digits > 3 {
+                return 0
+            }
+        } else if c == 46 || c == 0 {
+            if digits == 0 {
+                return 0
+            }
+            v = (v << 8) | part
+            n = n + 1
+            part = 0
+            digits = 0
+            if c == 0 {
+                if n != 4 {
+                    return 0
+                }
+                return v
+            }
+        } else {
+            return 0
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// the dotted text of an address into out (at least 16 octets)
+fn ip_text(v: u64, out: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    var o: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        let part: u64 = (v >> (24 - 8 * i)) & 255
+        let d: u64 = ulib.digits(part, (&z[0 as usize]) as u64)
+        var j: u64 = 0
+        while j < d {
+            st8(out, o, ld8((&z[0 as usize]) as u64, j))
+            o = o + 1
+            j = j + 1
+        }
+        if i < 3 {
+            st8(out, o, 46)
+            o = o + 1
+        }
+        i = i + 1
+    }
+    st8(out, o, 0)
+}
+
+fn do_net_fixed(msg: u64, dry: bool) {
+    var k_ip: [u8; 3] = "ip\0"
+    var k_mask: [u8; 5] = "mask\0"
+    var k_gw: [u8; 3] = "gw\0"
+    var e_bad: [u8; 10] = "bad_value\0"
+    var e_fail: [u8; 13] = "store_failed\0"
+    var e_perm: [u8; 14] = "netset_failed\0"
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_would: [u8; 17] = "dry=1\nwould=net \0"
+    var s_set: [u8; 5] = "ip=\0\0"
+    var s_m: [u8; 7] = " mask=\0"
+    var s_g: [u8; 5] = " gw=\0"
+    var a: [u8; 24] = [0 as u8; 24]
+    var m: [u8; 24] = [0 as u8; 24]
+    var g: [u8; 24] = [0 as u8; 24]
+    let ap: u64 = (&a[0 as usize]) as u64
+    let mp: u64 = (&m[0 as usize]) as u64
+    let gp: u64 = (&g[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_ip[0 as usize]) as u64, ap, 24)
+    actwire.kv_find(msg, (&k_mask[0 as usize]) as u64, mp, 24)
+    actwire.kv_find(msg, (&k_gw[0 as usize]) as u64, gp, 24)
+    let vip: u64 = ip_parse(ap)
+    let vmk: u64 = ip_parse(mp)
+    var vgw: u64 = 0
+    if ld8(gp, 0) != 0 {
+        vgw = ip_parse(gp)
+        if vgw == 0 {
+            r_err((&e_bad[0 as usize]) as u64, gp)
+            return
+        }
+    }
+    // a usable host address and a mask made of leading ones only
+    let inv: u64 = 0xFFFFFFFF - vmk
+    if vip == 0 || vmk == 0 || (inv & (inv + 1)) != 0 || (vip >> 24) == 0 || (vip >> 24) >= 224 {
+        r_err((&e_bad[0 as usize]) as u64, ap)
+        return
+    }
+    var tip: [u8; 24] = [0 as u8; 24]
+    var tmk: [u8; 24] = [0 as u8; 24]
+    var tgw: [u8; 24] = [0 as u8; 24]
+    ip_text(vip, (&tip[0 as usize]) as u64)
+    ip_text(vmk, (&tmk[0 as usize]) as u64)
+    ip_text(vgw, (&tgw[0 as usize]) as u64)
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    if dry {
+        r_str((&s_would[0 as usize]) as u64)
+        r_str((&tip[0 as usize]) as u64)
+        r_str((&s_m[0 as usize]) as u64)
+        r_str((&tmk[0 as usize]) as u64)
+        r_str((&s_g[0 as usize]) as u64)
+        r_str((&tgw[0 as usize]) as u64)
+        r_ch(10)
+        return
+    }
+    let rc: u64 = ulib.sys(SYS_NETSET, vip, vmk, vgw)
+    if ulib.bad(rc) {
+        r_err((&e_perm[0 as usize]) as u64, 0)
+        return
+    }
+    var f_modus: [u8; 6] = "modus\0"
+    var f_ip: [u8; 3] = "ip\0"
+    var f_mask: [u8; 6] = "maske\0"
+    var f_gate: [u8; 8] = "gateway\0"
+    var w_fest: [u8; 5] = "fest\0"
+    if !actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&f_modus[0 as usize]) as u64, (&w_fest[0 as usize]) as u64)
+        || !actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&f_ip[0 as usize]) as u64, (&tip[0 as usize]) as u64)
+        || !actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&f_mask[0 as usize]) as u64, (&tmk[0 as usize]) as u64)
+        || !actwire.kvfile_set((&P_NET[0 as usize]) as u64, (&f_gate[0 as usize]) as u64, (&tgw[0 as usize]) as u64) {
+        r_reset()
+        r_err((&e_fail[0 as usize]) as u64, 0)
+        return
+    }
+    var s1: [u8; 25] = "settingsd: net fixed ip=\0"
+    say((&s1[0 as usize]) as u64)
+    say((&tip[0 as usize]) as u64)
+    var s2: [u8; 7] = " rc=0\n\0"
+    say((&s2[0 as usize]) as u64)
+    r_str((&s_set[0 as usize]) as u64)
+    r_str((&tip[0 as usize]) as u64)
+    r_str((&s_m[0 as usize]) as u64)
+    r_str((&tmk[0 as usize]) as u64)
+    r_str((&s_g[0 as usize]) as u64)
+    r_str((&tgw[0 as usize]) as u64)
+    r_ch(10)
+}
+
 fn handle(msg: u64) -> bool {
     var verb: [u8; 16] = [0 as u8; 16]
     var name: [u8; 40] = [0 as u8; 40]
@@ -1018,6 +1173,11 @@ fn handle(msg: u64) -> bool {
     }
     if actwire.str_eq(np, (&a_hist[0 as usize]) as u64) {
         do_history()
+        return false
+    }
+    var a_nfx: [u8; 19] = "settings.net.fixed\0"
+    if actwire.str_eq(np, (&a_nfx[0 as usize]) as u64) {
+        do_net_fixed(msg, dry)
         return false
     }
     var a_ust: [u8; 23] = "settings.update.status\0"

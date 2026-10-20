@@ -1364,6 +1364,12 @@ else
 fi
 printf '# /etc/ntp.conf -- the network clock (sntp boot)\n# server  host or host:port; auto  true/false; abstand  seconds between two checks\nserver=pool.ntp.org\nauto=%s\nabstand=43200\n' "$NTPAUTO" > "$OUT/ntp.conf"
 ARGS+=("/etc/time.conf=$OUT/time.conf" "/etc/ntp.conf=$OUT/ntp.conf")
+# SETBROKER2 (r1279): the pointer and power settings. Both files belong to root and exist from the first
+# boot with the built-in defaults (no change in behaviour); the signed-in person cannot write them, the
+# settings window changes them through /bin/settingsd (settings.set mouse.* / power.*), which runs as root.
+printf '# /etc/mouse.conf -- written by settingsd (keys mouse.*)\nspeed=100\naccel=0\nnatural=false\ngestures=false\n' > "$OUT/mouse.conf"
+printf '# /etc/power.conf -- written by settingsd (keys power.*), read by powerd\nlid_bat=sleep\nlid_ac=sleep\nscreen_bat=300\nscreen_ac=600\nstandby_bat=900\nstandby_ac=0\nprofile_bat=save\nprofile_ac=balanced\n' > "$OUT/power.conf"
+ARGS+=("/etc/mouse.conf=$OUT/mouse.conf" "/etc/power.conf=$OUT/power.conf")
 # REMOTE INPUT (click/type through the bridge) MUST NEVER BE ON IN A PUBLIC
 # IMAGE: refuse the build if the permissions file says `input = yes` there.
 if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf"; then

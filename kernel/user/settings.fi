@@ -4821,6 +4821,7 @@ static mut k_sy_nobus: [u8; 19] = "settings.bus.nobus\0"
 static mut k_sy_ok: [u8; 16] = "settings.bus.ok\0"
 static mut k_sy_ask: [u8; 17] = "settings.bus.ask\0"
 static mut k_sy_err: [u8; 21] = "settings.bus.refused\0"
+static mut k_sy_usedlg: [u8; 11] = "use_dialog\0"
 static mut k_sy_pick: [u8; 18] = "settings.bus.pick\0"
 static mut k_sy_undone: [u8; 20] = "settings.bus.undone\0"
 static mut k_sy_harm: [u8; 22] = "settings.bus.harmless\0"
@@ -5198,6 +5199,10 @@ fn sys_answer(rc: u64, key: u64) {
         stat_set(sp, (&k_sy_ask[0 as usize]) as u64, key)
     } else if rc == actcli.R_NOBUS {
         stat_set(sp, (&k_sy_nobus[0 as usize]) as u64, 0)
+    } else if ulib.find(lp, (&k_sy_usedlg[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
+        // SETBROKER2: "Yes, change it" in this window is refused for a critical value; only the system's
+        // own dialog (painted by the window server) can answer
+        stat_set(sp, (&k_sy_ask[0 as usize]) as u64, key)
     } else {
         stat_set(sp, (&k_sy_err[0 as usize]) as u64, lp)
     }
@@ -5291,6 +5296,32 @@ fn bus_set_num(key: u64, v: u64) -> u64 {
     let n: u64 = ulib.digits(v, (&z[0 as usize]) as u64)
     z[(n) as usize] = 0 as u8
     return bus_set(key, (&z[0 as usize]) as u64)
+}
+
+// ROUND SETBROKER2 (r1279): the FIXED address of the page Netz over the bus. SYS_NETSET is root-only and this
+// window is not root: settingsd (root) takes it as settings.net.fixed -- critical, so it comes back as a
+// question that only the trusted dialog answers. R_NOBUS: an image without a broker (the caller tries itself).
+fn net_fixed_bus(ip: u64, mask: u64, gw: u64) -> u64 {
+    var v_fix: [u8; 24] = "call settings.net.fixed\0"
+    var k_ip: [u8; 3] = "ip\0"
+    var k_mask: [u8; 5] = "mask\0"
+    var k_gw: [u8; 3] = "gw\0"
+    var k_nf: [u8; 10] = "net.fixed\0"
+    if !actcli.open() {
+        return actcli.R_NOBUS
+    }
+    actcli.req((&v_fix[0 as usize]) as u64)
+    actcli.arg((&k_ip[0 as usize]) as u64, ip)
+    actcli.arg((&k_mask[0 as usize]) as u64, mask)
+    if rb(gw, 0) != 0 {
+        actcli.arg((&k_gw[0 as usize]) as u64, gw)
+    }
+    sy_pend = 0
+    let rc: u64 = actcli.send(300)
+    var s1: [u8; 32] = "settings: page net fixed asked\n\0"
+    say((&s1[0 as usize]) as u64)
+    sys_answer(rc, (&k_nf[0 as usize]) as u64)
+    return rc
 }
 
 fn sys_confirm() {
@@ -10788,8 +10819,13 @@ fn u_start(args: u64) -> u64 {
                             let _s8: u64 = text_an((&l_stat[0 as usize])
                                 as u64, 0, msg.get((&k_m_netzno[0 as usize]) as u64))
                         } else {
-                            let rc: u64 = ulib.sys(SYS_NETSET, vip, vmk, vgw)
-                            if ulib.bad(rc) {
+                            // SETBROKER2: the root-only part goes to settingsd (critical: the trusted dialog asks)
+                            let brc: u64 = net_fixed_bus((&e_ip[0 as usize]) as u64,
+                                (&e_maske[0 as usize]) as u64, (&e_gw[0 as usize]) as u64)
+                            if brc != actcli.R_NOBUS {
+                                let _sb: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
+                                    (&l_systat[0 as usize]) as u64)
+                            } else if ulib.bad(ulib.sys(SYS_NETSET, vip, vmk, vgw)) {
                                 let _s9: u64 = text_an((&l_stat[0 as usize])
                                     as u64, 0, msg.get((&k_m_netzr[0 as usize]) as u64))
                             } else {
