@@ -94,6 +94,11 @@ Negative stands: `--bad-hash`, `--bad-sig`. Live publishing: only to `system/dev
 - Rollback of a bad stand: remove `system/dev/VERZEICHNIS` (devices then see "no system line"); installed trial
   kernels roll back by themselves after 3 unconfirmed boots.
 - Stand 1: count 3195, commit 676b055 (main 676b0554), kernel sha256 c98bf5c3...2934, 8 649 000 bytes.
+- Stand 2 (20.10.2026): count 3223, commit 787bd96 (main 787bd969), kernel sha256 af690f32...9bc0, 8 662 088 bytes, gzip
+  transport, /bin overlay of 6 files (ota taskbar launcher elevate installer dualcli = the programs changed since stand 1).
+  Overlay files are the `.elf` of a full image build (`tools/usbimg/build.sh <dir>`), copied by name into a flat dir.
+  Publish from a dir that holds ONLY `osum.mb`: a `root.img` next to it adds a `sysfile root` line that is never served (404).
+  Gate `tools/osupdate/run.sh` 127/0 on c7a0803f and on 787bd969. The 5 s Limine timeout is image/installer-only (not in the kernel).
 
 ## 7. Stage 2: /bin overlay (r1245) + gzip transport (r1246)
 Additive: old clients ignore `sysgz` lines and treat `sysfile file` as the old unknown role (just a hint).
