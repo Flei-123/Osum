@@ -24,9 +24,12 @@ public half of `/srv/store/osum/aktuell/schluessel.pub`). Its passphrase is kept
 
 ## 2. Acceptance in the VM BEFORE publishing
 
-    bash tools/usbimg/build.sh with OTA_ROOTS=<certs>/ca.pem OTA_CONF=<conf>   # shipped image, local feed address
+    BOOT_KERNEL_COPY=1 OTA_ROOTS=<certs>/ca.pem OTA_CONF=<conf> PARTTAB=mbr FS_BLOCKS=122880 \
+        bash tools/usbimg/build.sh <image-dir>   # shipped image, local feed address (certs: tools/ota/mkcerts.py <dir> ota.test 10.0.2.2)
     bash tools/ota/feedtest.sh <image-dir> /tmp/ota-feed [work-dir]
 
+`BOOT_KERNEL_COPY=1` is mandatory at BUILD time: the test boots with QEMU `-kernel/-initrd` (no boot
+medium), so the installer needs `/boot/osum.mb` inside the root (without it: `installer: ERROR 2`, `at=52`).
 `feedtest.sh` installs the image on a disk, then on that disk: version 0 sees the new
 feed, `ota apply` installs the packages, reboot + `ota confirm`, a second
 `ota search` says "up to date", rollback (`ota rollback`) and boot again.
