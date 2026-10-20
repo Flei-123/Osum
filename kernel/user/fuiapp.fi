@@ -50,7 +50,7 @@ export {
     next, alive, now_ms, win, theme, Ev, ev_new,
     EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_DROP, EV_WHEEL, EV_HWHEEL,
     label, button, button_main, field, field_glass, field_paint, eye, glyph, edit, mask_off,
-    ink, on_accent, halo_in, panel, row, sel_on, sel_clear, plate, backdrop_hook, px, set_atomic, copy64, eye_in, last_changed,
+    ink, on_accent, halo_in, panel, row, sel_on, sel_clear, plate, plate_ink, backdrop_hook, px, set_atomic, copy64, eye_in, last_changed,
 }
 
 const EV_NONE: u64 = 0
@@ -529,6 +529,57 @@ fn plate(x: u64, y: u64, w: u64, h: u64) {
         while c < ww {
             let a: u64 = __mmio_read32((row + c * 4) as *mut u32) as u64
             __mmio_write32((row + c * 4) as *mut u32, ((a & 0xFFFFFF) | PLATTE) as u32)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// r1311: THE PLATE FOLLOWS THE INK (fUi twin of `wlibc.platte_ink`). `plate` marks the whole rectangle of a line; on a window at 20 %
+// opacity every label then sits in an opaque box. Here only the pixels that differ from the background of the rectangle (judged on the
+// 24 colour bits; the background is the top left pixel, the rectangle is one line box so the corner is never ink) and a ring of
+// INK_R pixels around them are marked: the text keeps an opaque halo, the gaps between the words mix like the rest of the window.
+// If the background is not flat (gradient) every pixel counts as ink and the result is the full rectangle, i.e. the safe fallback.
+const INK_R: u64 = 2
+
+fn plate_ink(x: u64, y: u64, w: u64, h: u64) {
+    if s_bound == 0 || w == 0 || h == 0 || x >= s_w || y >= s_h {
+        return
+    }
+    var ww: u64 = w
+    var hh: u64 = h
+    if x + ww > s_w {
+        ww = s_w - x
+    }
+    if y + hh > s_h {
+        hh = s_h - y
+    }
+    let bg: u64 = (__mmio_read32((s_px + (y * s_w + x) * 4) as *mut u32) as u64) & 0xFFFFFF
+    var r: u64 = 0
+    while r < hh {
+        var c: u64 = 0
+        while c < ww {
+            let a: u64 = __mmio_read32((s_px + ((y + r) * s_w + x + c) * 4) as *mut u32) as u64
+            if (a & 0xFFFFFF) != bg {
+                var dy: u64 = 0
+                while dy <= INK_R * 2 {
+                    var dx: u64 = 0
+                    while dx <= INK_R * 2 {
+                        // (x + c + dx - INK_R, y + r + dy - INK_R), kept unsigned: coordinates below INK_R are skipped
+                        let qx: u64 = x + c + dx
+                        let qy: u64 = y + r + dy
+                        if qx >= INK_R && qy >= INK_R && qx - INK_R < s_w && qy - INK_R < s_h {
+                            let at: u64 = s_px + ((qy - INK_R) * s_w + qx - INK_R) * 4
+                            let q: u64 = __mmio_read32(at as *mut u32) as u64
+                            if (q >> 24) != 1 {
+                                __mmio_write32(at as *mut u32, ((q & 0xFFFFFF) | PLATTE) as u32)
+                            }
+                        }
+                        dx = dx + 1
+                    }
+                    dy = dy + 1
+                }
+            }
             c = c + 1
         }
         r = r + 1
