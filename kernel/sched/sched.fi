@@ -2450,6 +2450,26 @@ fn timer_tot(state: u64) -> bool {
     let t: u64 = apic.tsc()
     let marke: u64 = cpu.get(state, k, cpu.C_TOTMARKE)
     if jetzt != marke {
+        // r1268 (VirtualBox boss VM, 1 vCPU, 100 % host burn): `tsc_hz` is calibrated
+        // against the emulated PIT and came out 10x too low (198 MHz, the counter really
+        // runs ~2.1 GHz), so "hz / 3" was ~30 ms of real time, i.e. three ticks. Every short
+        // stall declared the timer dead and `sleep_ticks` of the terminal reader spun in
+        // `yield_now` for ever (13 million refusals in 100 s). The wait for a dead timer is
+        // therefore measured in ticks as seen on THIS core: a smoothed cycles-per-tick
+        // value (C_TOTPER) from the observations below; the gap must exceed eight of them.
+        let zeit0: u64 = cpu.get(state, k, cpu.C_TOTZEIT)
+        if marke != 0 && zeit0 != 0 && t > zeit0 && jetzt > marke {
+            var d: u64 = (t - zeit0) / (jetzt - marke)
+            let per0: u64 = cpu.get(state, k, cpu.C_TOTPER)
+            if per0 == 0 {
+                cpu.set(state, k, cpu.C_TOTPER, d)
+            } else {
+                if d > per0 * 4 {
+                    d = per0 * 4
+                }
+                cpu.set(state, k, cpu.C_TOTPER, (per0 * 3 + d) / 4)
+            }
+        }
         cpu.set(state, k, cpu.C_TOTMARKE, jetzt)
         cpu.set(state, k, cpu.C_TOTZEIT, t)
         return false
@@ -2459,7 +2479,12 @@ fn timer_tot(state: u64) -> bool {
         cpu.set(state, k, cpu.C_TOTZEIT, t)
         return false
     }
-    if t > zeit && t - zeit > hz / 3 {
+    var limit: u64 = hz / 3
+    let per: u64 = cpu.get(state, k, cpu.C_TOTPER)
+    if per != 0 && per * 8 > limit {
+        limit = per * 8
+    }
+    if t > zeit && t - zeit > limit {
         cpu.add(state, k, cpu.C_TOTZAHL, 1)
         return true
     }
