@@ -18,7 +18,7 @@
 # system/dev/schluessel.pub, all sysfile/sysgz hashes, and aktuell/ v/ pakete/ register.json unchanged.
 # NEVER rsync --delete against /srv/store/osum.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 [ $# -ge 2 ] || { sed -n 2,19p "$0"; exit 2; }
 IMGDIR=$1; NOTES=$2; shift 2
 DRY=0; PROGS=()
