@@ -20800,6 +20800,10 @@ fn hotkeys(state: u64) -> u64 {
             if sw_open != 0 && (v & 0xFF) == 27 {
                 sw_cancel(state)
             } else
+            // FPS-OV: Ctrl+Alt+F (mods 5 = Alt + Ctrl, 7 with Shift) switches the frame-rate overlay
+            if ((v & 0xFF) == 102 || (v & 0xFF) == 70) && ((v >> 8) & 0xFD) == 5 {
+                fps_hotkey(state)
+            } else
             // W1 (hotkeys): WIN+ARROWS (mod 8) -- the focused window snaps / maximizes / restores, before any binding.
             if ((v >> 8) & 0xFF) == 8 {
                 let wa: bool = win_arrow(state, v & 0xFF)
@@ -21754,49 +21758,323 @@ fn cad_str(buf: u64, at: u64, src: u64, n: u64) -> u64 {
     return at + n
 }
 
-fn fps_overlay(state: u64, painted: bool) {
+// ---------------------------------------------------------------- FPS-OV (20.10.2026): the FPS / frame time overlay, top right
+// Three clocks, all from the real paths (no model):
+//   * painted frames: `cadence_note` stamps every round that composed something (or had a pending box) into the ring `fo_t`.
+//   * frame time: the interval between the last two painted frames; mean / max over the intervals of the last 1000 ms (gaps above
+//     100 ms are idle, not frame time).
+//   * present clock: the driver's own counter (VMSVGA `present_frames` = UPDATE rectangles sent, virtio-gpu `transfers`), sampled
+//     once per round; every counted step gets a stamp in `fo_p`. The overlay's own repaint is a present too -- those are
+//     subtracted (`FO_OVONLY`), otherwise an idle screen would show 4 "presents" a second made by the overlay itself.
+// All numbers are a SLIDING window of the last 1000 ms. The text is rebuilt every 250 ms (readable), but painted again in every painted
+// round (the compose may have covered it). No painted frame for 1 s -> "FPS 0 IDLE" and the overlay stops painting (a silent screen
+// stays silent). Switch: Ctrl+Alt+F (hotkeys -> fps_hotkey) or the Settings page (key debug.fps, /etc/mouse.conf fps=).
+static mut fo_t: [u64; 256] = [0 as u64; 256]
+static mut fo_p: [u64; 128] = [0 as u64; 128]
+static mut fo_v: [u64; 24] = [0 as u64; 24]
+static mut fo_txt: [u8; 112] = [32 as u8; 112]
+const FO_FH: u64 = 0 // painted frames stamped since boot (ring head)
+const FO_PH: u64 = 1 // real presents stamped since boot
+const FO_LASTPC: u64 = 2 // driver present counter at the last sample
+const FO_OVONLY: u64 = 3 // presents the overlay's own repaint is going to cause (to subtract)
+const FO_STATT: u64 = 4 // TSC of the last text rebuild
+const FO_KEY: u64 = 5 // hash of the text last built
+const FO_SAYT: u64 = 6 // TSC of the last serial line
+const FO_ON: u64 = 7 // the overlay was on in the last round
+const FO_RX: u64 = 8 // rectangle of the last paint (pixels); width 0 = nothing painted
+const FO_RY: u64 = 9
+const FO_RW: u64 = 10
+const FO_RH: u64 = 11
+const FO_LASTFT: u64 = 12 // last frame interval, microseconds
+const FO_PTOTAL: u64 = 13 // real presents since boot
+const FO_DRAWS: u64 = 14 // overlay paints since boot
+const FO_FPS: u64 = 15 // last results (microseconds / counts), for the serial line and the tests
+const FO_AVG: u64 = 16
+const FO_MAX: u64 = 17
+const FO_PRES: u64 = 18
+const FO_NINT: u64 = 19
+const FO_W: u64 = 26 // text columns of the overlay
+const FO_ROWS: u64 = 4
+
+fn present_driver(state: u64) -> bool {
+    return vgpu.bereit(state) || vmsvga.bereit(state)
+}
+
+// the number of pictures the card driver has been told about (a counter of the driver itself); 0 without a driver
+fn present_count(state: u64) -> u64 {
+    if vgpu.bereit(state) {
+        return vgpu.transfers(state)
+    }
+    if vmsvga.bereit(state) {
+        return vmsvga.present_frames(state)
+    }
+    return 0
+}
+
+// one round: look at the driver's counter, stamp the steps that were not caused by the overlay itself
+fn fo_sample_present(state: u64, now: u64) {
+    let pc: u64 = present_count(state)
+    let lastpc: u64 = fo_v[FO_LASTPC as usize]
+    let sub: u64 = fo_v[FO_OVONLY as usize]
+    fo_v[FO_OVONLY as usize] = 0
+    fo_v[FO_LASTPC as usize] = pc
+    if pc <= lastpc {
+        return
+    }
+    var real: u64 = pc - lastpc
+    if real > sub {
+        real = real - sub
+    } else {
+        real = 0
+    }
+    if real > 4 {
+        real = 4
+    }
+    var k: u64 = 0
+    while k < real {
+        fo_p[(fo_v[FO_PH as usize] % 128) as usize] = now
+        fo_v[FO_PH as usize] = fo_v[FO_PH as usize] + 1
+        fo_v[FO_PTOTAL as usize] = fo_v[FO_PTOTAL as usize] + 1
+        k = k + 1
+    }
+}
+
+// the sliding window: results into fo_v[FO_FPS..FO_NINT]
+fn fo_stats(now: u64, kh: u64) {
+    let per_us: u64 = kh / 1000
+    var ws: u64 = 0
+    if now > kh * 1000 {
+        ws = now - kh * 1000
+    }
+    var n: u64 = 0
+    var cnt: u64 = 0
+    var sum: u64 = 0
+    var mx: u64 = 0
+    var newer: u64 = 0
+    var k: u64 = 0
+    let head: u64 = fo_v[FO_FH as usize]
+    while k < 256 && k < head {
+        let t: u64 = fo_t[((head - 1 - k) % 256) as usize]
+        if t < ws {
+            break
+        }
+        n = n + 1
+        if newer != 0 && newer > t {
+            let us: u64 = (newer - t) / per_us
+            if us <= 100000 {
+                sum = sum + us
+                cnt = cnt + 1
+                if us > mx {
+                    mx = us
+                }
+            }
+        }
+        newer = t
+        k = k + 1
+    }
+    var pn: u64 = 0
+    let ph: u64 = fo_v[FO_PH as usize]
+    k = 0
+    while k < 128 && k < ph {
+        let t: u64 = fo_p[((ph - 1 - k) % 128) as usize]
+        if t < ws {
+            break
+        }
+        pn = pn + 1
+        k = k + 1
+    }
+    fo_v[FO_FPS as usize] = n
+    fo_v[FO_NINT as usize] = cnt
+    fo_v[FO_AVG as usize] = 0
+    if cnt != 0 {
+        fo_v[FO_AVG as usize] = sum / cnt
+    }
+    fo_v[FO_MAX as usize] = mx
+    fo_v[FO_PRES as usize] = pn
+}
+
+// microseconds as "12.3" (tenths of a millisecond, rounded down)
+fn fo_ms(buf: u64, at: u64, us: u64) -> u64 {
+    var p: u64 = cad_dec(buf, at, us / 1000)
+    kstate.set8(buf + p, 46 as u8)
+    p = cad_dec(buf, p + 1, (us % 1000) / 100)
+    return p
+}
+
+// one text line into fo_txt row r: padded with blanks to FO_W columns, closed with a 0
+fn fo_line_end(buf: u64, n: u64) {
+    var i: u64 = n
+    while i < FO_W {
+        kstate.set8(buf + i, 32 as u8)
+        i = i + 1
+    }
+    kstate.set8(buf + FO_W, 0 as u8)
+}
+
+// rebuild the four lines from fo_v; returns the key of the text (a change = the text has to be painted)
+fn fo_build(state: u64, w: u64, h: u64) -> u64 {
+    var t_fps: [u8; 5] = "FPS \0"
+    var t_ft: [u8; 6] = "  FT \0"
+    var t_ms: [u8; 4] = " ms\0"
+    var t_idle: [u8; 12] = "FPS 0  IDLE\0"
+    var t_avg: [u8; 5] = "AVG \0"
+    var t_max: [u8; 7] = "  MAX \0"
+    var t_none: [u8; 13] = "AVG -  MAX -\0"
+    var t_pres: [u8; 9] = "PRESENT \0"
+    var t_ps: [u8; 3] = "/s\0"
+    var t_na: [u8; 21] = "PRESENT n/a (direct)\0"
+    let b: u64 = (&fo_txt[0]) as u64
+    let fps: u64 = fo_v[FO_FPS as usize]
+    var n: u64 = 0
+    // row 0: fps and the last frame interval
+    var l0: u64 = b
+    if fps == 0 {
+        n = cad_str(l0, 0, (&t_idle[0]) as u64, 11)
+    } else {
+        n = cad_str(l0, 0, (&t_fps[0]) as u64, 4)
+        n = cad_dec(l0, n, fps)
+        n = cad_str(l0, n, (&t_ft[0]) as u64, 5)
+        n = fo_ms(l0, n, fo_v[FO_LASTFT as usize])
+        n = cad_str(l0, n, (&t_ms[0]) as u64, 3)
+    }
+    fo_line_end(l0, n)
+    // row 1: mean / max of the window
+    let l1: u64 = b + FO_W + 2
+    if fo_v[FO_NINT as usize] == 0 {
+        n = cad_str(l1, 0, (&t_none[0]) as u64, 12)
+    } else {
+        n = cad_str(l1, 0, (&t_avg[0]) as u64, 4)
+        n = fo_ms(l1, n, fo_v[FO_AVG as usize])
+        n = cad_str(l1, n, (&t_max[0]) as u64, 6)
+        n = fo_ms(l1, n, fo_v[FO_MAX as usize])
+    }
+    fo_line_end(l1, n)
+    // row 2: the present clock
+    let l2: u64 = b + (FO_W + 2) * 2
+    if present_driver(state) {
+        n = cad_str(l2, 0, (&t_pres[0]) as u64, 8)
+        n = cad_dec(l2, n, fo_v[FO_PRES as usize])
+        n = cad_str(l2, n, (&t_ps[0]) as u64, 2)
+    } else {
+        n = cad_str(l2, 0, (&t_na[0]) as u64, 20)
+    }
+    fo_line_end(l2, n)
+    // row 3: resolution
+    let l3: u64 = b + (FO_W + 2) * 3
+    n = cad_dec(l3, 0, w)
+    kstate.set8(l3 + n, 120 as u8)
+    n = cad_dec(l3, n + 1, h)
+    fo_line_end(l3, n)
+    return fps * 1000000007 + fo_v[FO_LASTFT as usize] / 100 * 10007 + fo_v[FO_AVG as usize] / 100 * 331 + fo_v[FO_MAX as usize] / 100 * 17 + fo_v[FO_PRES as usize] * 3 + w / 8
+}
+
+fn fps_overlay(state: u64, painted: bool, now: u64, kh: u64) {
     if !fb.ready(state) {
         return
     }
     let w: u64 = fb.width(state)
     let h: u64 = fb.height(state)
-    let fps: u64 = cad_v[CV_FPS as usize]
-    let ms10: u64 = cad_v[CV_MS10 as usize]
-    let key: u64 = fps * 10000000 + ms10 * 1000 + w / 8 + 1
-    if !painted && key == cad_v[CV_DRAWN as usize] {
+    var changed: bool = false
+    let st: u64 = fo_v[FO_STATT as usize]
+    if st == 0 || now < st || (now - st) / kh >= 250 {
+        fo_v[FO_STATT as usize] = now
+        fo_stats(now, kh)
+        let key: u64 = fo_build(state, w, h)
+        if key != fo_v[FO_KEY as usize] {
+            fo_v[FO_KEY as usize] = key
+            changed = true
+        }
+        // the serial line, once a second, only with the kernel word `phases` (the gates read it)
+        let sy: u64 = fo_v[FO_SAYT as usize]
+        if fb.phases_an(state) && (sy == 0 || now < sy || (now - sy) / kh >= 1000) {
+            fo_v[FO_SAYT as usize] = now
+            var s_a: [u8; 15] = "wm: fpsov fps=\0"
+            var s_b: [u8; 5] = " ft=\0"
+            var s_c: [u8; 6] = " avg=\0"
+            var s_d: [u8; 6] = " max=\0"
+            var s_e: [u8; 7] = " pres=\0"
+            var s_f: [u8; 7] = " drv=\0\0"
+            serial.puts((&s_a[0]) as u64)
+            serial.dec(fo_v[FO_FPS as usize])
+            serial.puts((&s_b[0]) as u64)
+            serial.dec(fo_v[FO_LASTFT as usize])
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(fo_v[FO_AVG as usize])
+            serial.puts((&s_d[0]) as u64)
+            serial.dec(fo_v[FO_MAX as usize])
+            serial.puts((&s_e[0]) as u64)
+            serial.dec(fo_v[FO_PRES as usize])
+            serial.puts((&s_f[0]) as u64)
+            if present_driver(state) {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+        }
+    }
+    if !painted && !changed && fo_v[FO_RW as usize] != 0 {
         return
     }
-    cad_v[CV_DRAWN as usize] = key
-    cad_v[CV_DRAWS as usize] = cad_v[CV_DRAWS as usize] + 1
-    var buf: [u8; 40] = [32 as u8; 40]
-    let b: u64 = (&buf[0]) as u64
-    var t_fps: [u8; 5] = "FPS \0"
-    var t_ms: [u8; 6] = " ms  \0"
-    var n: u64 = cad_str(b, 0, (&t_fps[0]) as u64, 4)
-    n = cad_dec(b, n, fps)
-    kstate.set8(b + n, 32 as u8)
-    kstate.set8(b + n + 1, 32 as u8)
-    n = n + 2
-    n = cad_dec(b, n, ms10 / 10)
-    kstate.set8(b + n, 46 as u8)
-    n = cad_dec(b, n + 1, ms10 % 10)
-    n = cad_str(b, n, (&t_ms[0]) as u64, 5)
-    n = cad_dec(b, n, w)
-    kstate.set8(b + n, 120 as u8)
-    n = cad_dec(b, n + 1, h)
-    kstate.set8(b + 32, 0 as u8)
-    fb.set_color(state, fb.rgb(state, 0, 255, 0), fb.rgb(state, 0, 0, 0))
-    fb.goto(state, 0, 0)
-    fb.puts(state, b)
+    fo_v[FO_DRAWS as usize] = fo_v[FO_DRAWS as usize] + 1
     var sc: u64 = fb.scale(state)
     if sc == 0 {
         sc = 1
     }
-    var fw: u64 = 32 * 8 * sc
+    var col: u64 = 0
+    if fb.cols(state) > FO_W {
+        col = fb.cols(state) - FO_W
+    }
+    fb.set_color(state, fb.rgb(state, 0, 255, 0), fb.rgb(state, 0, 0, 0))
+    var r: u64 = 0
+    while r < FO_ROWS {
+        fb.goto(state, col, r)
+        fb.puts(state, ((&fo_txt[0]) as u64) + r * (FO_W + 2))
+        r = r + 1
+    }
+    var fw: u64 = FO_W * 8 * sc
     if fw > w {
         fw = w
     }
-    fb.flush_rect(state, 0, 0, fw, 16 * sc)
+    let fx: u64 = col * 8 * sc
+    fb.flush_rect(state, fx, 0, fw, FO_ROWS * 16 * sc)
+    fo_v[FO_RX as usize] = fx
+    fo_v[FO_RY as usize] = 0
+    fo_v[FO_RW as usize] = fw
+    fo_v[FO_RH as usize] = FO_ROWS * 16 * sc
+    // the repaint reaches the card in this round's present: it is no new picture of the desktop
+    if !painted {
+        fo_v[FO_OVONLY as usize] = fo_v[FO_OVONLY as usize] + 1
+    }
+}
+
+// switched off: give the covered pixels back (the compose paints the desktop there again)
+fn fps_overlay_off(state: u64) {
+    if fo_v[FO_ON as usize] == 0 {
+        return
+    }
+    fo_v[FO_ON as usize] = 0
+    let rw: u64 = fo_v[FO_RW as usize]
+    if rw != 0 {
+        let rx: u64 = fo_v[FO_RX as usize]
+        let ry: u64 = fo_v[FO_RY as usize]
+        damage(state, rx as i64, ry as i64, (rx + rw) as i64, (ry + fo_v[FO_RH as usize]) as i64)
+    }
+    fo_v[FO_RW as usize] = 0
+    fo_v[FO_KEY as usize] = 0
+}
+
+// Ctrl+Alt+F
+fn fps_hotkey(state: u64) {
+    let on: bool = ptrcfg.fps_toggle(state)
+    var s_on: [u8; 19] = "wm: fps overlay on\0"
+    var s_off: [u8; 20] = "wm: fps overlay off\0"
+    if on {
+        serial.puts((&s_on[0]) as u64)
+    } else {
+        serial.puts((&s_off[0]) as u64)
+    }
+    serial.nl()
 }
 
 fn cadence_note(state: u64, pending: bool) {
@@ -21830,6 +22108,11 @@ fn cadence_note(state: u64, pending: bool) {
                 cad_v[CV_IDLE as usize] = cad_v[CV_IDLE as usize] + 1
             }
         }
+        if last != 0 && now > last {
+            fo_v[FO_LASTFT as usize] = (now - last) / per_us
+        }
+        fo_t[(fo_v[FO_FH as usize] % 256) as usize] = now
+        fo_v[FO_FH as usize] = fo_v[FO_FH as usize] + 1
         cad_v[CV_LASTTSC as usize] = now
         cad_v[CV_WN as usize] = cad_v[CV_WN as usize] + 1
         cad_v[CV_TOTAL as usize] = cad_v[CV_TOTAL as usize] + 1
@@ -21852,8 +22135,12 @@ fn cadence_note(state: u64, pending: bool) {
             cad_v[CV_WK as usize] = 0
         }
     }
+    fo_sample_present(state, now)
     if ptrcfg.fps_on(state) {
-        fps_overlay(state, painted)
+        fo_v[FO_ON as usize] = 1
+        fps_overlay(state, painted, now, kh)
+    } else {
+        fps_overlay_off(state)
     }
 }
 

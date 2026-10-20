@@ -119,6 +119,7 @@ for a in "$@"; do
         shape=*) shape=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         fps=*) fps=${a#*=} ;;
+        gpu=*) gpu=${a#*=} ;; # FPS-OV: gpu=vmsvga puts the VMware SVGA card (the present clock needs a driver) instead of the plain VGA
         lang=*) lang=${a#*=} ;;
         dark_scheme=*) dark_scheme=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
@@ -583,6 +584,8 @@ fi
 FSFLAG="nofs"
 [ "${fs:-aus}" = an ] && FSFLAG="vfs"
 
+GPUDEV=(-device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32")
+[ "${gpu:-vga}" = vmsvga ] && GPUDEV=(-device vmware-svga,vgamem_mb=32)
 ZWEITE=()
 if [ -n "$zweite" ]; then
     cp "$zweite" "$OUT/zweite.img"
@@ -595,7 +598,7 @@ fi
 ( cd "$BUILDD" && exec timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m 512 ${AUDIT_SMP:+-smp $AUDIT_SMP} \
     -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt nokbd nosched noproc $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
-    -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
+    "${GPUDEV[@]}" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
     "${ZWEITE[@]}" \

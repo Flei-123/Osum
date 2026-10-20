@@ -36,7 +36,7 @@ import serial
 import fs.fs
 
 export {
-    scale_axis, scale_x, scale_y, scale_wheel, magnitude, set, speed, accel, natural, gestures, fps_on,
+    scale_axis, scale_x, scale_y, scale_wheel, magnitude, set, speed, accel, natural, gestures, fps_on, fps_set, fps_toggle,
     load, poll, selftest, loads, put_signed, P_PATH_LEN
 }
 
@@ -51,6 +51,7 @@ const O_STAMP: u64 = 0x128 // mtime of the config file at last load
 const O_TICK: u64 = 0x130
 const O_LOADS: u64 = 0x138
 const O_FPS: u64 = 0x148 // W-E: debug FPS overlay on (config key `fps`, schema key debug.fps), 0 = off
+const O_FPSD: u64 = 0x150 // FPS-OV: 1 = the switch changed in memory (Ctrl+Alt+F), /etc/mouse.conf still has to be rewritten (poll does it)
 const O_GEST: u64 = 0x140 // r804: touchpad gestures on (config key `gestures`), 0 = off
 
 const SPEED_MIN: u64 = 10
@@ -91,6 +92,23 @@ fn gestures(state: u64) -> u64 {
 // W-E: the debug FPS overlay switch (key `fps=true`; settings key debug.fps). Shares this file and its once-a-second re-read.
 fn fps_on(state: u64) -> bool {
     return g(state, O_FPS) != 0
+}
+
+// FPS-OV: Ctrl+Alt+F flips the switch in memory at once; the file (key `fps=`) follows from `poll` (about once a second), so the
+// switch survives a reboot and the Settings page shows the same state. Other keys of the file stay as they are.
+fn fps_set(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    s(state, O_FPS, v)
+    s(state, O_FPSD, 1)
+}
+
+fn fps_toggle(state: u64) -> bool {
+    let on: bool = !fps_on(state)
+    fps_set(state, on)
+    return on
 }
 
 fn loads(state: u64) -> u64 {
@@ -306,6 +324,83 @@ fn parse(state: u64, buf: u64, n: u64) {
     s(state, O_FPS, fps)
 }
 
+// FPS-OV: rewrite /etc/mouse.conf with the `fps=` line replaced (every other line is copied as it is). A file that cannot be read
+// completely is left alone: losing the pointer settings for an overlay switch would be worse than not saving the switch.
+fn fps_persist(state: u64) {
+    var k_fps: [u8; 4] = "fps\0"
+    var t_on: [u8; 10] = "fps=true\n\0"
+    var t_off: [u8; 11] = "fps=false\n\0"
+    var pf: [u8; 16] = [0 as u8; 16]
+    var old: [u8; 256] = [0 as u8; 256]
+    var out: [u8; 288] = [0 as u8; 288]
+    conf_path((&pf[0]) as u64)
+    var ino: u64 = fs.path(state, (&pf[0]) as u64)
+    var n: u64 = 0
+    let ob: u64 = (&old[0]) as u64
+    let nb: u64 = (&out[0]) as u64
+    if ino != 0 {
+        n = fs.inode_size(state, ino)
+        if n > 255 {
+            return
+        }
+        if fs.read_at(state, ino, 0, ob, n) != n {
+            return
+        }
+    }
+    var o: u64 = 0
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && get8(ob + e) != 10 {
+            e = e + 1
+        }
+        if field_at(ob, n, at, (&k_fps[0]) as u64, 3) == 0 && e > at {
+            var j: u64 = at
+            while j < e {
+                kstate.set8(nb + o, get8(ob + j) as u8)
+                o = o + 1
+                j = j + 1
+            }
+            kstate.set8(nb + o, 10 as u8)
+            o = o + 1
+        }
+        at = e + 1
+    }
+    var src: u64 = (&t_off[0]) as u64
+    var ln: u64 = 10
+    if g(state, O_FPS) != 0 {
+        src = (&t_on[0]) as u64
+        ln = 9
+    }
+    var i: u64 = 0
+    while i < ln {
+        kstate.set8(nb + o, get8(src + i) as u8)
+        o = o + 1
+        i = i + 1
+    }
+    if ino == 0 {
+        ino = fs.create_path(state, (&pf[0]) as u64, fs.T_FILE)
+    }
+    if ino == 0 {
+        return
+    }
+    if fs.write_at(state, ino, 0, nb, o) != o {
+        return
+    }
+    if o < n {
+        let _sz: bool = fs.set_size(state, ino, o)
+    }
+    s(state, O_STAMP, fs.inode_mtime(state, ino) + 1)
+    var s_sv: [u8; 22] = "ptrcfg: fps saved on\0"
+    var s_sf: [u8; 23] = "ptrcfg: fps saved off\0"
+    if g(state, O_FPS) != 0 {
+        serial.puts((&s_sv[0]) as u64)
+    } else {
+        serial.puts((&s_sf[0]) as u64)
+    }
+    serial.nl()
+}
+
 fn conf_path(p: u64) {
     var t: [u8; 16] = "/etc/mouse.conf\0"
     var i: u64 = 0
@@ -351,6 +446,11 @@ fn poll(state: u64) {
         return
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
+        return
+    }
+    if g(state, O_FPSD) != 0 {
+        s(state, O_FPSD, 0)
+        fps_persist(state)
         return
     }
     var pf: [u8; 16] = [0 as u8; 16]

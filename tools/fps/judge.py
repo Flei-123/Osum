@@ -99,8 +99,8 @@ if os.path.exists(os.path.join(sys.argv[1], "nolatfix", "serial.txt")):
     chk(mp < MIN_POLLS // 2, "nolatfix (counter-proof): median %d polls per active slice (must be < %d: the old loop is slower)" % (mp, MIN_POLLS // 2))
 
 
-def green(case):
-    p = os.path.join(sys.argv[1], case, "fps-overlay.ppm")
+def green(case, name="fps-overlay"):
+    p = os.path.join(sys.argv[1], case, name + ".ppm")
     if not os.path.exists(p):
         return None
     d = open(p, "rb").read()
@@ -110,8 +110,8 @@ def green(case):
     w, h = int(m.group(1)), int(m.group(2))
     off = m.end()
     cnt = 0
-    for y in range(0, 16):
-        for x in range(0, 280):
+    for y in range(0, 64):
+        for x in range(w - 210, w):
             i = off + (y * w + x) * 3
             if d[i] < 40 and d[i + 1] > 215 and d[i + 2] < 40:
                 cnt += 1
@@ -119,8 +119,58 @@ def green(case):
 
 
 on, offv = green("fpson"), green("fpsoff")
-print("== overlay: green pixels top-left 280x16: on=%s off=%s" % (on, offv))
-chk(on is not None and on >= 100, "fps on: the overlay text is at the top-left (%s green pixels)" % on)
-chk(offv is not None and offv == 0, "fps off (counter-proof): nothing drawn top-left (%s green pixels)" % offv)
+print("== overlay: green pixels top-right 210x64: on=%s off=%s" % (on, offv))
+chk(on is not None and on >= 100, "fps on: the overlay text is at the top-right (%s green pixels)" % on)
+chk(offv is not None and offv == 0, "fps off (counter-proof): nothing drawn top-right (%s green pixels)" % offv)
+
+
+# ---- FPS-OV: Ctrl+Alt+F, numbers from the real clocks (serial `wm: fpsov`), photos, counter-proofs
+def ov_phases(case):
+    """list of phases (cut at `wm: cadence` lines), each a list of dicts of the `wm: fpsov` lines in it"""
+    p = os.path.join(sys.argv[1], case, "serial.txt")
+    out, cur = [], []
+    if not os.path.exists(p):
+        return None, ""
+    txt = open(p, "rb").read().decode("latin1")
+    for line in txt.splitlines():
+        if line.startswith("wm: cadence"):
+            out.append(cur)
+            cur = []
+        m = re.match(r"wm: fpsov fps=(\d+) ft=(\d+) avg=(\d+) max=(\d+) pres=(\d+) drv=(\d)", line)
+        if m:
+            cur.append(dict(fps=int(m.group(1)), ft=int(m.group(2)), avg=int(m.group(3)), max=int(m.group(4)), pres=int(m.group(5)), drv=int(m.group(6))))
+    out.append(cur)
+    return out, txt
+
+
+ph, txt = ov_phases("ovon")
+if ph is not None:
+    chk("wm: fps overlay on" in txt, "ovon: Ctrl+Alt+F switched the overlay on (serial: wm: fps overlay on)")
+    chk("ptrcfg: fps saved on" in txt, "ovon: the switch was written to /etc/mouse.conf (serial: ptrcfg: fps saved on)")
+    allv = [r for p in ph for r in p]
+    chk(len(allv) >= 10, "ovon: %d fpsov lines (the overlay clocks run)" % len(allv))
+    idle = ph[2] if len(ph) > 2 else []
+    chk(any(r["fps"] == 0 and r["pres"] == 0 for r in idle), "ovon idle: a line with fps=0 pres=0 (the overlay says IDLE, no presents of its own: %s)" % idle[-3:])
+    drag = ph[4] if len(ph) > 4 else []
+    best = max([r["fps"] for r in drag] or [0])
+    print("== ovon window drag: fpsov lines %s" % drag)
+    chk(best >= 30, "ovon drag: fps up to %d (need >= 30 while dragging)" % best)
+    act = [r for r in drag if r["fps"] >= 20]
+    chk(bool(act) and all(8000 <= r["avg"] <= 40000 for r in act), "ovon drag: mean frame time between 8 and 40 ms on every active line")
+    chk(bool(act) and all(r["max"] >= r["avg"] for r in act), "ovon drag: max >= mean")
+    chk(bool(act) and all(r["drv"] == 1 for r in act) and all(r["pres"] * 2 >= r["fps"] and r["pres"] <= r["fps"] * 3 // 2 + 3 for r in act),
+        "ovon drag: present clock follows the frame rate (half .. 1.5x + 3) with a driver")
+    g_idle, g_drag = green("ovon", "ov-idle"), green("ovon", "ov-drag")
+    chk(g_idle is not None and g_idle >= 60, "ovon idle photo: overlay text top-right (%s green pixels)" % g_idle)
+    chk(g_drag is not None and g_drag >= 100, "ovon drag photo: overlay text top-right (%s green pixels)" % g_drag)
+ph, txt = ov_phases("ovoff")
+if ph is not None:
+    chk(sum(len(p) for p in ph) == 0 and "wm: fps overlay on" not in txt, "ovoff (counter-proof): no overlay line, no switch")
+    go = green("ovoff", "ov-idle")
+    chk(go == 0, "ovoff (counter-proof): no green pixels top-right (%s)" % go)
+ph, txt = ov_phases("ovplain")
+if ph is not None:
+    allv = [r for p in ph for r in p]
+    chk(bool(allv) and all(r["drv"] == 0 for r in allv), "ovplain: plain VGA reports no present driver (drv=0, text PRESENT n/a)")
 print("RESULT %s" % ("ALL OK" if not fail else "%d FAIL" % fail))
 sys.exit(1 if fail else 0)
