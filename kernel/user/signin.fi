@@ -24,11 +24,11 @@ import backdrop
 import fui.theme
 
 export {
-    AV_D, AV_MIN, GAP_N, COL_W, FIELD_H, WHITE, SOFT, AVATAR_RGB,
-    big_c, circle, initial_of, paint_avatar, paint_name, paint_status,
+    AV_D, AV_MIN, GAP_N, COL_W, FIELD_H, MARGIN, BOT_S, WHITE, SOFT, AVATAR_RGB,
+    big_c, big_ink, circle, initial_of, paint_avatar, paint_name, paint_status,
     paint_hint, paint_chip, paint_deu, paint_net, glyph_tile, net_glyph, glass_plate, glass_glyph,
     SYS_NETGET, NG_STATE,
-    fit_av, lay_mul, lay_space, lay_set_size, lay_canvas, lay_entry, lay_tile, lay_glass_tile, lay_btn,
+    fit_av, fit_av_c, lay_mul, lay_space, lay_set_size, lay_canvas, lay_entry, lay_tile, lay_glass_tile, lay_btn,
     glass_on, glass_install, glass_panel, glass_ink,
 }
 
@@ -37,6 +37,10 @@ const AV_MIN: u64 = 48
 const GAP_N: u64 = 12
 const COL_W: u64 = 320
 const FIELD_H: u64 = 36
+// Edge margin of the corner anchors (design points): root pad 8 + 24 = the left margin of the bottom-left user entry. The right
+// group and the bottom use the same margin: BOT_S = MARGIN - pad - gap (the root column's pad 8 and gap 8 are added by the scene).
+const MARGIN: u64 = 32
+const BOT_S: u64 = 16
 const WHITE: u64 = 0xFFFFFF
 const SOFT: u64 = 0xDCE6F5
 const AVATAR_RGB: u64 = 0x4C6A92
@@ -58,6 +62,32 @@ fn big_c(x: u64, y: u64, w: u64, h: u64, p: u64, size: u64, bold: bool, rgb: u64
         off = (w - tw) / 2
     }
     fuiscene.cv_text_rgb(x + off, y + (h + size) / 2 - size / 5, w, p, size, bold, rgb)
+}
+
+// One letter centred by its INK box (the rasterised pixels), not by its advance: a "J" hangs left of its pen and sits on
+// the baseline, so the advance centre is not the optical centre. Falls back to `big_c` for an empty/blank glyph.
+fn big_ink(x: u64, y: u64, w: u64, h: u64, p: u64, size: u64, bold: bool, rgb: u64) {
+    var f: u64 = wlibc.F_UI
+    if bold {
+        f = wlibc.F_BOLD
+    }
+    let c: u64 = __mmio_read8(p as *mut u8) as u64
+    let iw: u64 = wlibc.ink_w(f, size, c)
+    let ih: u64 = wlibc.ink_h(f, size, c)
+    if iw == 0 || ih == 0 || iw > w || ih > h {
+        big_c(x, y, w, h, p, size, bold, rgb)
+        return
+    }
+    let il: i64 = wlibc.ink_l(f, size, c)
+    let it: i64 = wlibc.ink_t(f, size, c)
+    // ink left edge = pen + il; ink top = base - it. Put the ink box in the middle of (x, y, w, h).
+    let px_: i64 = x as i64 + ((w - iw) as i64 + 1) / 2 - il
+    let base: i64 = y as i64 + ((h - ih) as i64 + 1) / 2 + it
+    if px_ < 0 || base < 0 {
+        big_c(x, y, w, h, p, size, bold, rgb)
+        return
+    }
+    fuiscene.cv_text_rgb(px_ as u64, base as u64, w + iw, p, size, bold, rgb)
 }
 
 fn circle(x: u64, y: u64, d: u64, rgb: u64) {
@@ -91,6 +121,24 @@ fn fit_av(bhp: u64, other: u64) -> u64 {
     return av
 }
 
+// Like `fit_av`, for the CENTRED main block: the block (avatar + `blk_rest` points below it) is centred on the screen, so it
+// must clear the bottom strip (height `bot_h`, margin MARGIN, 8 points of air) on BOTH sides: blk <= bhp - 2 * (MARGIN + bot_h
+// + 8 + tail), `tail` = points that hang below the block (the lock screen's hint line). Short screens fall back to AV_MIN.
+fn fit_av_c(bhp: u64, blk_rest: u64, bot_h: u64, tail: u64) -> u64 {
+    let need: u64 = 2 * (MARGIN + bot_h + 8 + tail) + blk_rest
+    if bhp < need {
+        return AV_MIN
+    }
+    let room: u64 = bhp - need
+    if room >= AV_D {
+        return AV_D
+    }
+    if room > AV_MIN {
+        return room / 4 * 4
+    }
+    return AV_MIN
+}
+
 // The disc is AV_D points wide, or the canvas height when the canvas is smaller (fit_av).
 fn paint_avatar(x: u64, y: u64, w: u64, h: u64, ini: u64) {
     var d: u64 = fuiscene.sp(AV_D)
@@ -100,7 +148,7 @@ fn paint_avatar(x: u64, y: u64, w: u64, h: u64, ini: u64) {
     let x0: u64 = x + (w - d) / 2
     circle(x0, y, d, AVATAR_RGB)
     fuiscene.cv_ring_rgb(x0, y, d, d, d / 2, 2, SOFT)
-    big_c(x0, y, d, d, ini, d * 2 / 5, true, WHITE)
+    big_ink(x0, y, d, d, ini, d * 2 / 5, true, WHITE)
 }
 
 fn paint_name(x: u64, y: u64, w: u64, h: u64, namep: u64) {
@@ -163,7 +211,7 @@ fn lay_glass_tile(parent: usize, key: u64, name: u64, w: u64, h: u64, on: bool, 
 fn paint_chip(x: u64, y: u64, w: u64, h: u64, ini: u64, namep: u64) {
     let d: u64 = fuiscene.sp(36)
     circle(x, y + (h - d) / 2, d, AVATAR_RGB)
-    big_c(x, y + (h - d) / 2, d, d, ini, d * 2 / 5, true, WHITE)
+    big_ink(x, y + (h - d) / 2, d, d, ini, d * 2 / 5, true, WHITE)
     fuiscene.cv_text_rgb(x + d + fuiscene.sp(12), y + (h + fuiscene.sp(14)) / 2 - fuiscene.sp(3),
         w - d - fuiscene.sp(12), namep, fuiscene.sp(14), false, WHITE)
 }

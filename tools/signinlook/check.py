@@ -162,13 +162,14 @@ def main():
         chip = (other[0] + 44, other[1] - 40, 192, 36)
         hint = None
     else:
-        need = (11, 12, 13, 25)
+        need = (11, 12, 13)
         miss = [i for i in need if i not in R]
         if miss:
             rp.put(False, "rects missing: %s" % miss)
             print("SIGNINLOOK %s: %d passed, %d failed" % (label, rp.ok, rp.bad))
             return 1
-        entry, arrow, power = R[11], R[13], R[25]
+        # the power tile is the LAST rect (its node id moves when the bottom strip gets a node, e.g. the bottom-left anchor column)
+        entry, arrow, power = R[11], R[13], R[max(R)]
         name = (entry[0], entry[1] - 80, 320, 36)
         status = (entry[0], entry[1] - 44, 320, 32)
         hint = (entry[0] - 40, entry[1] + 40, 400, 40)

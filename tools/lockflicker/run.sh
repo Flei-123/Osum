@@ -10,6 +10,7 @@
 #   per case: layout measurement (check.py: entry rect inside the screen and centred, entry width 240 * scale, avatar disc complete and centred,
 #   name text in the column) from serial `<app>: rect` lines + the screendump, then a burst series (`serie click 60`, drive.py) into the empty
 #   screen compared frame by frame with the picture `pre` (taken after moving the pointer, before the click) (series.py).
+#   anchor.py: corner anchors (right/bottom margins == left margin), centred main block, initial centred by its ink box.
 #   -old   writes /etc/lockold: the old DOUBLE scaling comes back (signin.lay_mul) = COUNTER-PROOF, the layout check must turn RED.
 #   -tcg   QEMU without KVM (slow painting, wide window for a compositor pull in the middle of a repaint).
 # The series only counts as FLICKER when frames really differ; otherwise the result is "no flicker measured".
@@ -33,7 +34,7 @@ open(d + "/passwd", "w").write("root:x:0:0:root:/root:/bin/sh\njustin:x:1000:100
 open(d + "/old", "w").write("1\n")
 PY
 
-for c in ${CASES:-lock-1920x1080-s1 glogin-1920x1080-s1 lock-3440x1440-s2 glogin-3440x1440-s2 lock-1280x800-s2 glogin-1280x800-s2 lock-3440x1440-s2-old glogin-3440x1440-s2-old}; do
+for c in ${CASES:-lock-1920x1080-s1 glogin-1920x1080-s1 lock-3440x1440-s2 glogin-3440x1440-s2 lock-1280x800-s2 glogin-1280x800-s2 glogin-2336x1412-s2 lock-3440x1440-s2-old glogin-3440x1440-s2-old}; do
     app=${c%%-*}; rest=${c#*-}; res=${rest%%-*}; rest=${rest#*-}; sc=${rest%%-*}; sc=${sc#s}
     old=0; tcg=0; blink=0
     case "$c" in *-blink*) blink=1 ;; esac
@@ -73,6 +74,9 @@ for c in ${CASES:-lock-1920x1080-s1 glogin-1920x1080-s1 lock-3440x1440-s2 glogin
         python3 -I tools/lockflicker/icons.py "$TMPD/$c" "$app" "$W" "$H" "$sc" > "$TMPD/$c.ico" 2>&1; ri=$?
         sed 's/^/        /' "$TMPD/$c.ico"
         [ $ri = 0 ] && ok "case $c: every symbol sits in the middle of its tile (<= 1 px)" || bad "case $c: a symbol is off the middle of its tile (rc=$ri)"
+        python3 -I tools/lockflicker/anchor.py "$TMPD/$c" "$app" "$W" "$H" "$sc" > "$TMPD/$c.anc" 2>&1; ra=$?
+        sed 's/^/        /' "$TMPD/$c.anc"
+        [ $ra = 0 ] && ok "case $c: anchored layout (corner margins equal, main block centred, initial centred by its ink <= 1 px)" || bad "case $c: anchored layout wrong (rc=$ra)"
         mp=0; [ $blink = 1 ] && mp=$((260 * sc * sc))   # blink: the caret (two bars) may change, the middle may not
         python3 -I tools/lockflicker/series.py "$TMPD/$c" pre c "$px" "$py" $mp > "$TMPD/$c.ser" 2>&1; rs=$?
         tail -4 "$TMPD/$c.ser" | sed 's/^/        /'
