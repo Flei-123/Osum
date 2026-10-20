@@ -59,7 +59,7 @@ import bus.pci
 
 export {
     present, init, active, hz, id,
-    eoi, timer_start, timer_stop, map_device, window_slots, lapic_phys,
+    eoi, timer_start, timer_rate, timer_stop, map_device, window_slots, lapic_phys,
     // RUNDE BLECHVIER: die Gegenprobe mit dem ACPI-Zeitgeber.
     tsc_gegen_pm, win_pde, pde_at,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
@@ -397,6 +397,145 @@ fn pit_wait() -> bool {
     return false
 }
 
+
+// ------------------------------------------------- W-TSC: robust calibration
+// VirtualBox measured the cycle counter 16x too small and the local timer
+// 30 % too slow in single boots (virtual device clocks run unevenly while
+// the guest spins on port I/O). One 10 ms window is therefore never
+// believed: several windows, the first one dropped as warm-up, the MEDIAN
+// of the rest. The cycle counter is additionally held against the nominal
+// frequency in the CPU brand string ("... @ 3.00GHz"): a measurement that
+// is more than 2x off is replaced by it.
+static mut cal_t: [u64; 8] = [0 as u64; 8]
+static mut cal_l: [u64; 8] = [0 as u64; 8]
+static mut tsc_raw: u64 = 0
+static mut tsc_brand: u64 = 0
+fn cpuid_leaf(leaf: u64, reg: u64) -> u64 {
+    var v: u64 = 0
+    if reg == 0 {
+        asm("push rbx\nxor ecx, ecx\ncpuid\npop rbx", in("rax") leaf, out("rax") & v,
+            clobber("rcx"), clobber("rdx"))
+    } else if reg == 1 {
+        asm("push rbx\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx", in("rax") leaf,
+            out("rax") & v, clobber("rcx"), clobber("rdx"))
+    } else if reg == 2 {
+        asm("push rbx\nxor ecx, ecx\ncpuid\nmov rax, rcx\npop rbx", in("rax") leaf,
+            out("rax") & v, clobber("rcx"), clobber("rdx"))
+    } else {
+        asm("push rbx\nxor ecx, ecx\ncpuid\nmov rax, rdx\npop rbx", in("rax") leaf,
+            out("rax") & v, clobber("rcx"), clobber("rdx"))
+    }
+    return v & 0xFFFFFFFF
+}
+
+fn cal_get(which: u64, i: u64) -> u64 {
+    if which == 0 {
+        return cal_t[i as usize]
+    }
+    return cal_l[i as usize]
+}
+
+fn cal_set(which: u64, i: u64, v: u64) {
+    if which == 0 {
+        cal_t[i as usize] = v
+    } else {
+        cal_l[i as usize] = v
+    }
+}
+
+// Median of cal_t / cal_l (which = 0 / 1) over [first, first + n).
+fn cal_median(which: u64, first: u64, n: u64) -> u64 {
+    var i: u64 = first + 1
+    while i < first + n {
+        let v: u64 = cal_get(which, i)
+        var j: u64 = i
+        while j > first && cal_get(which, j - 1) > v {
+            cal_set(which, j, cal_get(which, j - 1))
+            j = j - 1
+        }
+        cal_set(which, j, v)
+        i = i + 1
+    }
+    return cal_get(which, first + n / 2)
+}
+
+// Nominal frequency from the brand string, in MHz; 0 = none ("@ 3.00GHz",
+// "@ 2100MHz"). Intel cores count the TSC at this rate.
+fn brand_mhz() -> u64 {
+    if cpuid_max_ext() < 0x80000004 {
+        return 0
+    }
+    var b: [u8; 49] = [0 as u8; 49]
+    var leaf: u64 = 0
+    while leaf < 3 {
+        var reg: u64 = 0
+        while reg < 4 {
+            let v: u64 = cpuid_leaf(0x80000002 + leaf, reg)
+            var k: u64 = 0
+            while k < 4 {
+                b[(leaf * 16 + reg * 4 + k) as usize] = ((v >> (8 * k)) & 0xFF) as u8
+                k = k + 1
+            }
+            reg = reg + 1
+        }
+        leaf = leaf + 1
+    }
+    // find "Hz" preceded by G or M, then the number in front of it
+    var i: u64 = 2
+    while i < 48 {
+        if b[i as usize] as u64 == 122 && b[(i - 1) as usize] as u64 == 72 {
+            let unit: u64 = b[(i - 2) as usize] as u64
+            var mult: u64 = 0
+            if unit == 71 {
+                mult = 1000
+            }
+            if unit == 77 {
+                mult = 1
+            }
+            if mult == 0 || i < 4 {
+                return 0
+            }
+            var j: u64 = i - 2
+            var whole: u64 = 0
+            var frac: u64 = 0
+            var fdig: u64 = 0
+            var scale: u64 = 1
+            var seen_dot: bool = false
+            // walk backwards over digits and one dot
+            var start: u64 = j
+            while start > 0 {
+                let c: u64 = b[(start - 1) as usize] as u64
+                if (c >= 48 && c <= 57) || c == 46 {
+                    start = start - 1
+                } else {
+                    break
+                }
+            }
+            j = start
+            while j < i - 2 {
+                let c: u64 = b[j as usize] as u64
+                if c == 46 {
+                    seen_dot = true
+                } else if seen_dot {
+                    frac = frac * 10 + (c - 48)
+                    fdig = fdig + 1
+                    scale = scale * 10
+                } else {
+                    whole = whole * 10 + (c - 48)
+                }
+                j = j + 1
+            }
+            return whole * mult + (frac * mult) / scale
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cpuid_max_ext() -> u64 {
+    return cpuid_leaf(0x80000000, 0)
+}
+
 // How many counts the local timer does in a second. Measured, never
 // assumed: on real hardware this is the bus clock, under QEMU the host
 // clock, and the two differ by more than an order of magnitude.
@@ -456,34 +595,50 @@ fn cal_done(state: u64, per_sec: u64, tsc_per_sec: u64) -> u64 {
     if tsc_per_sec != 0 && (tsc_per_sec < 100000000 || tsc_per_sec > 10000000000) {
         return 0
     }
+    var tsc_use: u64 = tsc_per_sec
+    tsc_raw = tsc_per_sec
+    let bm: u64 = brand_mhz() * 1000000
+    tsc_brand = bm
+    if tsc_use != 0 && bm != 0 && (tsc_use * 2 < bm || tsc_use > bm * 2) {
+        tsc_use = bm
+    }
     kstate.set(state, pci.K2_SCALARS + S_HZ, per_sec)
-    kstate.set(state, pci.K2_SCALARS + S_TSCHZ, tsc_per_sec)
+    kstate.set(state, pci.K2_SCALARS + S_TSCHZ, tsc_use)
     return per_sec
 }
 
-// 1: the PIT, as before.
+// 1: the PIT. Six 10 ms windows, the first dropped (warm-up), median of the
+// rest for both counters (see the W-TSC comment above).
 fn cal_pit(state: u64, base: u64) -> u64 {
-    // Both counters are read across the SAME 10 ms window: the local
-    // timer, which this kernel is about to run on, and the processor's
-    // own cycle counter, which every measurement in this round is given
-    // in. Two clocks calibrated against one third clock whose frequency
-    // is written down in the architecture.
-    pit_arm()
-    lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
-    let t0: u64 = tsc()
-    let done: bool = pit_wait()
-    let left: u64 = lread(base, R_TIMER_CUR)
-    let t1: u64 = tsc()
-    lwrite(base, R_TIMER_INIT, 0)
-    kstate.set(state, pci.K2_SCALARS + S_PITSEEN, serial.in8(0x61 as u16) as u64)
-    if !done || t1 <= t0 {
+    var n: u64 = 0
+    var go: bool = true
+    while go && n < 6 {
+        pit_arm()
+        lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+        let t0: u64 = tsc()
+        let done: bool = pit_wait()
+        let left: u64 = lread(base, R_TIMER_CUR)
+        let t1: u64 = tsc()
+        lwrite(base, R_TIMER_INIT, 0)
+        kstate.set(state, pci.K2_SCALARS + S_PITSEEN, serial.in8(0x61 as u16) as u64)
+        if !done || t1 <= t0 || left > 0xFFFFFFFF {
+            go = false
+        } else {
+            cal_t[n as usize] = t1 - t0
+            cal_l[n as usize] = 0xFFFFFFFF - left
+            n = n + 1
+        }
+    }
+    if n == 0 {
         return 0 // no PIT, no calibration from it
     }
-    var elapsed: u64 = 0
-    if left <= 0xFFFFFFFF {
-        elapsed = 0xFFFFFFFF - left
+    var first: u64 = 0
+    if n >= 3 {
+        first = 1
     }
-    return cal_done(state, elapsed * 100, (t1 - t0) * 100)
+    let mt: u64 = cal_median(0, first, n - first)
+    let ml: u64 = cal_median(1, first, n - first)
+    return cal_done(state, ml * 100, mt * 100)
 }
 
 // 2: the ACPI PM timer. 10 ms = PM_HZ / 100 timer ticks; the 24/32-bit
@@ -766,6 +921,8 @@ fn timer_diag(state: u64) {
     var d9: [u8; 6] = " c16=\0"
     var d10: [u8; 5] = " pm=\0"
     var d11: [u8; 7] = " hpet=\0"
+    var d12: [u8; 9] = " tscraw=\0"
+    var d13: [u8; 8] = " brand=\0"
     serial.puts((&d0[0]) as u64)
     serial.dec(kstate.get(state, pci.K2_SCALARS + S_CLK))
     serial.puts((&d1[0]) as u64)
@@ -805,6 +962,10 @@ fn timer_diag(state: u64) {
     serial.hex(kstate.get(state, pci.K2_SCALARS + S_PMPORT))
     serial.puts((&d11[0]) as u64)
     serial.hex(kstate.get(state, pci.K2_SCALARS + S_HPET))
+    serial.puts((&d12[0]) as u64)
+    serial.dec(tsc_raw)
+    serial.puts((&d13[0]) as u64)
+    serial.dec(tsc_brand)
     serial.nl()
 }
 
@@ -953,6 +1114,24 @@ fn timer_start(state: u64, want_hz: u64) {
     lwrite(base, R_TIMER_DIV, DIV_16)
     lwrite(base, R_LVT_TIMER, VEC_TIMER | LVT_PERIODIC)
     lwrite(base, R_TIMER_INIT, init_count)
+}
+
+// W-TSC: idle application processors tick slowly. `mult` x the period of
+// the normal tick (1 = full rate). The periodic reload is rewritten on THIS
+// core's own local APIC; no scheduler state is touched. The caller restores
+// mult = 1 as soon as the core wakes up, so a core that has work ticks at
+// 100 Hz exactly as before.
+fn timer_rate(state: u64, mult: u64) {
+    let base: u64 = lapic(state)
+    let d: u64 = kstate.get(state, pci.K2_SCALARS + S_DIVISOR)
+    if d == 0 || mult == 0 {
+        return
+    }
+    var c: u64 = d * mult
+    if c > 0xFFFFFFFF {
+        c = 0xFFFFFFFF
+    }
+    lwrite(base, R_TIMER_INIT, c)
 }
 
 // The counter-check of round 59 lives on this: with the timer off the
