@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/sessuid/run.sh -- ROUND SESSUID3 gate: after sign-in, start-menu programmes run as the session user (uid 1000), not root;
-# a system tool (Settings) goes through /bin/elevate: Cancel starts nothing, Allow starts it as root (kernel line `execas: priv`).
+# Settings opens without a dialog as the session user; a system tool (installer) goes through /bin/elevate: Cancel starts nothing, Allow starts it as root (kernel line `execas: priv`).
 # Needs a build dir (osum.mb + root.img) of a UITRACE=1 personal image:
 #   UITRACE=1 PARTTAB=mbr FS_BLOCKS=122880 IMAGE_ID=x bash tools/usbimg/build.sh <dir>; bash tools/sessuid/run.sh <dir> [old-kernel.mb]
 # COUNTER-PROBE: the second argument boots the same root image with an OLD kernel (no syscall 1005): the two checks marked [X] must then fail
@@ -45,23 +45,32 @@ waitfor 'launcher: start /apps/explorer.osp/start pid=' 40; sleep 5
 EP=$(grep -a 'launcher: start /apps/explorer.osp/start pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
 [ -n "$EP" ] && ok "the start menu started Explorer (pid $EP)" || bad "Explorer was not started"
 grep -aq "execas: user pid=$EP uid=1000" "$W/ser"; xchk $? "[X] Explorer runs as uid 1000 (kernel: execas: user pid=$EP uid=1000)"
-# 2. Settings: the consent window comes first, nothing is root yet
+# 2. SETBROKER: Settings opens WITHOUT a dialog and runs as the session user (uid 1000); no root before consent
 mon "sendkey meta_l"; sleep 3
 keys e i n s t e l l u n g e n ret
+waitfor 'launcher: start /apps/settings.osp/start pid=' 40; sleep 6
+SP=$(grep -a 'launcher: start /apps/settings.osp/start pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
+[ -n "$SP" ] && ok "the start menu started Settings (pid $SP)" || bad "Settings was not started"
+grep -aq 'elevate: ready' "$W/ser" && bad "Settings opened a consent window" || ok "Settings opens without a consent window"
+grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started without consent" || ok "nothing started as root without consent"
+[ -n "$SP" ] && grep -aq "execas: user pid=$SP uid=1000" "$W/ser"; xchk $? "[X] Settings runs as uid 1000 (kernel: execas: user pid=$SP uid=1000)"
+grep -aq 'settings: who uid=1000' "$W/ser" && ok "Settings itself reports uid 1000" || bad "Settings does not report uid 1000"
+# 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (Tab Tab Return) starts nothing
+mon "sendkey meta_l"; sleep 3
+keys i n s t a l l i e r e n ret
 waitfor 'elevate: ready' 40; sleep 3
-grep -aq 'elevate: ready' "$W/ser" && ok "Settings opens the consent window (elevate: ready)" || bad "Settings opens the consent window (elevate: ready)"
+grep -aq 'elevate: ready' "$W/ser" && ok "a system tool opens the consent window (elevate: ready)" || bad "a system tool opens the consent window (elevate: ready)"
 grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started before consent" || ok "nothing started as root before consent"
-# 3. Cancel (Tab Tab Return) -> nothing starts
 keys tab tab ret; sleep 4
 grep -aq 'elevate: denied' "$W/ser" && ok "Cancel is reported (elevate: denied)" || bad "Cancel is reported (elevate: denied)"
 grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programme" || ok "Cancel started nothing as root"
-# 4. Allow (Tab Return) -> Settings starts as root
+# 4. Allow (Tab Return) -> the system tool starts as root
 mon "sendkey meta_l"; sleep 3
-keys e i n s t e l l u n g e n ret
+keys i n s t a l l i e r e n ret
 waitfor 'elevate: ready' 40; sleep 3; keys tab ret; sleep 8
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
-SP=$(grep -a 'elevate: start /apps/settings.osp/start pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
-[ -n "$SP" ] && grep -aq "execas: priv pid=$SP\$" "$W/ser"; xchk $? "[X] Allow starts Settings as root (elevate: start ... pid=$SP and kernel: execas: priv pid=$SP)"
+IP=$(grep -a 'elevate: start .*installer.* pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
+[ -n "$IP" ] && grep -aq "execas: priv pid=$IP\$" "$W/ser"; xchk $? "[X] Allow starts the installer as root (elevate: start ... pid=$IP and kernel: execas: priv pid=$IP)"
 kill $QP 2>/dev/null; wait $QP 2>/dev/null
 grep -aq 'glogin: uid=1000' "$W/ser" && ok "the desktop runs as uid 1000" || bad "no 'glogin: uid=1000'"
 if [ "$GEG" = 1 ]; then
