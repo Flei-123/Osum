@@ -89,3 +89,10 @@ Output lines start with `OK:` / `FAIL:` / `INFO:`; exit code 1 on FAIL.
 - Workaround: `VBL_CPUS=1` (or `VBoxManage modifyvm <vm> --cpus 1`, VM powered off). Real fix candidates: native VT-x (Windows Hypervisor Platform off: `bcdedit /set hypervisorlaunchtype off` + disable Core Isolation, needs admin + reboot, Boss decision), newer VBox, or find what the guest does on APs that makes NEM spin.
 - Tools: `VBL_VM=<name>` runs vbtest against an extra test VM (never the boss VM), `VBL_EXTRA='--hpet on ...'` extra `modifyvm` args at mkvm, `VBL_XDATA='key=val;key=val'` extradata, `diag/mx.ps1` repeated-boot runner (use host CPU per pid; the TM counters freeze in the burn state). Keep `VBL_MEM=1536` when running 3 VMs in parallel (16 GB laptop, VERR_NO_PAGE_MEMORY otherwise).
 - Reading a burning VM: thread names via GetThreadDescription (EMT-n), `debugvm <vm> statistics --pattern '/TM/CPU/*|/TM/VirtualSync/*'`; `debugvm getregisters` may unstick it (do not use it when you want to keep the burn).
+
+## Boss VM on 1 vCPU (r1268 workaround A, 20.10.2026)
+`diag/bossvm.ps1 [-Cpus 1] [-Boots 4] [-Minutes 30] [-Sec 15] [-NoModify] [-Gui]` touches ONLY the boss VM `OrientOS` (the one deliberate exception to the rule above, boss decision):
+config dump to `C:\Users\justi\vbl\bossvm-before-*.txt`, clean ACPI shutdown, `modifyvm --cpus 1`, N short boots + one long run (login by scancodes, ctrl+shift+t),
+per sample host CPU of the VM process + per-vCPU Other share + TM lag. BURN = other>=50 % / lag>200 ms/s / host>90 %. Log `C:\Users\justi\vbl\bossvm.log`.
+Start in the background: `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\justi\vbl\bossvm.ps1'}`.
+Fallback B (if 1 vCPU is not acceptable): switch the Windows Hyper-V feature off (hypervisorlaunchtype off) so VirtualBox uses VT-x directly.
