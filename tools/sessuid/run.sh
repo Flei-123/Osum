@@ -73,11 +73,17 @@ grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programm
 R1=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
 keys i n s t a l l i e r e n ret
 # wait for the SECOND consent window (a new `elevate: ready`), then Allow, then wait for the start line
-waitcount 'elevate: ready' $((R1+1)) 40; sleep 3; keys tab ret
-waitfor 'elevate: start .*installer.* pid=' 40; sleep 2
+waitcount 'elevate: ready' $((R1+1)) 40; sleep 3; P0=$(count 'execas: priv pid='); keys tab ret
+waitcount 'execas: priv pid=' $((P0+1)) 40; sleep 3
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
-IP=$(grep -a 'elevate: start .*installer.* pid=' "$W/ser" | tail -1 | sed 's/.*pid=//' | tr -dc 0-9)
-[ -n "$IP" ] && grep -aq "execas: priv pid=$IP\$" "$W/ser"; xchk $? "[X] Allow starts the installer as root (elevate: start ... pid=$IP and kernel: execas: priv pid=$IP)"
+# r1314: `elevate: start <path> pid=<n>` is written in five separate pieces (text, path, " pid=", number, newline) and other processes
+# (the installer itself, started a moment earlier) interleave their output, so the number on that line can be cut off or missing. The
+# kernel line `execas: priv pid=<n>` is written in one piece: take the FIRST such line after the Allow (the dialog's own priv spawn
+# is earlier), and require an `elevate: start` line to exist; if its number survived intact it must be the same pid.
+AL=$(grep -an 'elevate: allowed' "$W/ser" | tail -1 | cut -d: -f1)
+IP=$(tail -n +"${AL:-1}" "$W/ser" | grep -aoE 'execas: priv pid=[0-9]+' | head -1 | sed 's/.*pid=//')
+EP2=$(grep -aoE 'elevate: start [^ ]*installer[^ ]* pid=[0-9]+' "$W/ser" | tail -1 | sed 's/.*pid=//')
+[ -n "$IP" ] && grep -aq 'elevate: start ' "$W/ser" && { [ -z "$EP2" ] || [ "$EP2" = "$IP" ] || [ "${IP#"$EP2"}" != "$IP" ]; }; xchk $? "[X] Allow starts the installer as root (elevate: start installer, kernel: execas: priv pid=$IP)"
 kill $QP 2>/dev/null; wait $QP 2>/dev/null
 grep -aq 'glogin: uid=1000' "$W/ser" && ok "the desktop runs as uid 1000" || bad "no 'glogin: uid=1000'"
 if [ "$GEG" = 1 ]; then
