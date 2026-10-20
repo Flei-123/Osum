@@ -36,7 +36,7 @@ import serial
 import fs.fs
 
 export {
-    scale_axis, scale_x, scale_y, scale_wheel, magnitude, set, speed, accel, natural, gestures, fps_on, fps_set, fps_toggle,
+    scale_axis, scale_x, scale_y, scale_wheel, magnitude, set, speed, accel, natural, gestures, fps_on, fps_set, fps_toggle, fps_flush,
     load, poll, selftest, loads, put_signed, P_PATH_LEN
 }
 
@@ -103,6 +103,16 @@ fn fps_set(state: u64, on: bool) {
     }
     s(state, O_FPS, v)
     s(state, O_FPSD, 1)
+}
+
+// FPS-OV: write a pending switch to /etc/mouse.conf now. Called from the compositor task (Ctrl+Alt+F) and from the idle poll: the idle
+// task is starved while the desktop loop is busy, so the key path must not depend on it.
+fn fps_flush(state: u64) {
+    if g(state, O_FPSD) == 0 || kstate.get(state, kstate.FS_READY) == 0 {
+        return
+    }
+    s(state, O_FPSD, 0)
+    fps_persist(state)
 }
 
 fn fps_toggle(state: u64) -> bool {
@@ -454,15 +464,15 @@ fn load(state: u64) -> bool {
 fn poll(state: u64) {
     let t: u64 = g(state, O_TICK) + 1
     s(state, O_TICK, t)
+    // FPS-OV: a pending switch is written at once (one word compare per idle pass), not only on every 100th pass
+    if g(state, O_FPSD) != 0 {
+        fps_flush(state)
+        return
+    }
     if t % POLL_EVERY != 0 {
         return
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
-        return
-    }
-    if g(state, O_FPSD) != 0 {
-        s(state, O_FPSD, 0)
-        fps_persist(state)
         return
     }
     var pf: [u8; 16] = [0 as u8; 16]

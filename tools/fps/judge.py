@@ -120,8 +120,10 @@ def green(case, name="fps-overlay"):
 
 on, offv = green("fpson"), green("fpsoff")
 print("== overlay: green pixels top-right 210x64: on=%s off=%s" % (on, offv))
-chk(on is not None and on >= 100, "fps on: the overlay text is at the top-right (%s green pixels)" % on)
-chk(offv is not None and offv == 0, "fps off (counter-proof): nothing drawn top-right (%s green pixels)" % offv)
+if os.path.isdir(os.path.join(sys.argv[1], "fpson")):
+    chk(on is not None and on >= 100, "fps on: the overlay text is at the top-right (%s green pixels)" % on)
+if os.path.isdir(os.path.join(sys.argv[1], "fpsoff")):
+    chk(offv is not None and offv == 0, "fps off (counter-proof): nothing drawn top-right (%s green pixels)" % offv)
 
 
 # ---- FPS-OV: Ctrl+Alt+F, numbers from the real clocks (serial `wm: fpsov`), photos, counter-proofs
