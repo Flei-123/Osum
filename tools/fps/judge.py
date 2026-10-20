@@ -149,9 +149,9 @@ if ph is not None:
     chk("ptrcfg: fps saved on" in txt, "ovon: the switch was written to /etc/mouse.conf (serial: ptrcfg: fps saved on)")
     allv = [r for p in ph for r in p]
     chk(len(allv) >= 10, "ovon: %d fpsov lines (the overlay clocks run)" % len(allv))
-    idle = ph[2] if len(ph) > 2 else []
+    idle = ph[4] if len(ph) > 4 else []
     chk(any(r["fps"] == 0 and r["pres"] == 0 for r in idle), "ovon idle: a line with fps=0 pres=0 (the overlay says IDLE, no presents of its own: %s)" % idle[-3:])
-    drag = ph[4] if len(ph) > 4 else []
+    drag = ph[3] if len(ph) > 3 else []
     best = max([r["fps"] for r in drag] or [0])
     print("== ovon window drag: fpsov lines %s" % drag)
     chk(best >= 30, "ovon drag: fps up to %d (need >= 30 while dragging)" % best)
