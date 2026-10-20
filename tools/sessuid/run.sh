@@ -37,6 +37,16 @@ QP=$!
 waitfor() { local i; for i in $(seq 1 "$2"); do grep -qa -- "$1" "$W/ser" 2>/dev/null && return 0; sleep 1; done; return 1; }
 # r1314: count matches instead of testing for existence -- a marker line from an EARLIER step (e.g. the first `elevate: ready`)
 # must not satisfy the wait of a later step (the fixed sleeps then raced the second consent window, flaky Allow check).
+# r1314: start-menu typing can be swallowed (menu not open yet / search not focused): retry until the consent window shows up (counter rises).
+open_installer() { # $1 = wanted count of `elevate: ready`
+    local t
+    for t in 1 2 3; do
+        keys esc; mon "sendkey meta_l"; sleep 3
+        keys i n s t a l l i e r e n ret
+        waitcount 'elevate: ready' "$1" 25 && return 0
+    done
+    return 1
+}
 count() { grep -ac -- "$1" "$W/ser" 2>/dev/null || true; }
 waitcount() { local i; for i in $(seq 1 "$3"); do [ "$(count "$1")" -ge "$2" ] && return 0; sleep 1; done; return 1; }
 waitfor 'glogin: bereit' 120; sleep 6
@@ -61,9 +71,7 @@ grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started without con
 waitfor 'settings: who uid=' 40; sleep 1   # r1314: the line comes after the window is up; wait for it instead of a fixed sleep
 grep -aq 'settings: who uid=1000' "$W/ser" && ok "Settings itself reports uid 1000" || bad "Settings does not report uid 1000"
 # 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (Tab Tab Return) starts nothing
-R0=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
-keys i n s t a l l i e r e n ret
-waitcount 'elevate: ready' $((R0+1)) 40; sleep 3
+R0=$(count 'elevate: ready'); open_installer $((R0+1)); sleep 3
 grep -aq 'elevate: ready' "$W/ser" && ok "a system tool opens the consent window (elevate: ready)" || bad "a system tool opens the consent window (elevate: ready)"
 grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started before consent" || ok "nothing started as root before consent"
 D0=$(count 'elevate: denied'); keys tab tab ret
@@ -71,10 +79,9 @@ waitcount 'elevate: denied' $((D0+1)) 20; sleep 2
 grep -aq 'elevate: denied' "$W/ser" && ok "Cancel is reported (elevate: denied)" || bad "Cancel is reported (elevate: denied)"
 grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programme" || ok "Cancel started nothing as root"
 # 4. Allow (Tab Return) -> the system tool starts as root
-R1=$(count 'elevate: ready'); mon "sendkey meta_l"; sleep 3
-keys i n s t a l l i e r e n ret
+R1=$(count 'elevate: ready')
 # wait for the SECOND consent window (a new `elevate: ready`), then Allow, then wait for the start line
-waitcount 'elevate: ready' $((R1+1)) 40; sleep 3; P0=$(count 'execas: priv pid='); keys tab ret
+open_installer $((R1+1)); sleep 3; P0=$(count 'execas: priv pid='); keys tab ret
 waitcount 'execas: priv pid=' $((P0+1)) 40; sleep 3
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
 # r1314: `elevate: start <path> pid=<n>` is written in five separate pieces (text, path, " pid=", number, newline) and other processes
