@@ -4511,12 +4511,10 @@ fn bus_rects() {
         var n1: [u8; 5] = "stab\0"
         var n2: [u8; 5] = "sent\0"
         var n3: [u8; 5] = "sset\0"
-        var n4: [u8; 6] = "sconf\0"
         var n5: [u8; 6] = "sundo\0"
         rect_say((&n1[0 as usize]) as u64, sy_tab)
         rect_say((&n2[0 as usize]) as u64, sy_ent)
         rect_say((&n3[0 as usize]) as u64, sy_bset)
-        rect_say((&n4[0 as usize]) as u64, sy_bconf)
         rect_say((&n5[0 as usize]) as u64, sy_bundo)
         var s_rh: [u8; 16] = "settings: rowh=\0"
         let _p: u64 = ulib.put((&s_rh[0 as usize]) as u64, 15)
@@ -4576,10 +4574,8 @@ fn bus_rects() {
     if reiter == R_NETZ {
         var q1: [u8; 6] = "nmode\0"
         var q2: [u8; 7] = "napply\0"
-        var q3: [u8; 6] = "nconf\0"
         rect_say((&q1[0 as usize]) as u64, nz_cn)
         rect_say((&q2[0 as usize]) as u64, nz_b4)
-        rect_say((&q3[0 as usize]) as u64, nz_b4j)
     }
     if reiter == R_UPDATE {
         var u1: [u8; 7] = "ucheck\0"
@@ -4587,13 +4583,11 @@ fn bus_rects() {
         var u3: [u8; 6] = "uchan\0"
         var u4: [u8; 6] = "uauto\0"
         var u5: [u8; 6] = "uback\0"
-        var u6: [u8; 6] = "uconf\0"
         rect_say((&u1[0 as usize]) as u64, up_bchk)
         rect_say((&u2[0 as usize]) as u64, up_binst)
         rect_say((&u3[0 as usize]) as u64, up_bchan)
         rect_say((&u4[0 as usize]) as u64, up_bauto)
         rect_say((&u5[0 as usize]) as u64, up_brb)
-        rect_say((&u6[0 as usize]) as u64, up_bconf)
         var u7: [u8; 5] = "schk\0"
         var u8: [u8; 6] = "sinst\0"
         rect_say((&u7[0 as usize]) as u64, su_bchk)
@@ -4814,7 +4808,8 @@ static mut k_sy_title: [u8; 19] = "settings.bus.title\0"
 static mut k_sy_note: [u8; 18] = "settings.bus.note\0"
 static mut k_sy_value: [u8; 19] = "settings.bus.value\0"
 static mut k_sy_set: [u8; 17] = "settings.bus.set\0"
-static mut k_sy_conf: [u8; 21] = "settings.bus.confirm\0"
+static mut k_sy_hint: [u8; 18] = "settings.bus.hint\0"
+static mut k_sy_unchanged: [u8; 23] = "settings.bus.unchanged\0"
 static mut k_sy_undo: [u8; 18] = "settings.bus.undo\0"
 static mut k_sy_head: [u8; 18] = "settings.bus.head\0"
 static mut k_sy_nobus: [u8; 19] = "settings.bus.nobus\0"
@@ -4958,14 +4953,12 @@ static mut l_rinote: [u8; 200] = [0 as u8; 200]
 static mut sy_tab: u64 = 0
 static mut sy_ent: u64 = 0
 static mut sy_bset: u64 = 0
-static mut sy_bconf: u64 = 0
 static mut sy_bundo: u64 = 0
 // AB-005c: controls of the pages Bildschirm and Netz that gui.sh clicks
 static mut ds_ch: u64 = 0
 static mut ds_b2: u64 = 0
 static mut nz_cn: u64 = 0
 static mut nz_b4: u64 = 0
-static mut nz_b4j: u64 = 0
 static mut tb_id: u64 = 0
 static mut sy_pkey: [u8; 40] = [0 as u8; 40]
 static mut sy_stat: u64 = 0
@@ -5178,6 +5171,62 @@ fn sys_key(out: u64) -> bool {
     return true
 }
 
+// SETBROKER2 (r1313): a critical change was handed to the system's dialog. The window learns the answer by
+// asking the bus for the value once a second (up to 65 s, the dialog lapses after 60) and, when it changed,
+// shows the result and redoes the page -- nobody has to press anything in this window.
+static mut aw_key: [u8; 40] = [0 as u8; 40]
+static mut aw_old: [u8; 48] = [0 as u8; 48]
+static mut aw_until: u64 = 0 // ticks of 10 ms; 0 = nobody waits
+static mut aw_next: u64 = 0
+
+fn aw_read(out: u64) -> bool {
+    var v_get: [u8; 18] = "call settings.get\0"
+    var k_key: [u8; 4] = "key\0"
+    var k_val: [u8; 6] = "value\0"
+    actcli.req((&v_get[0 as usize]) as u64)
+    actcli.arg((&k_key[0 as usize]) as u64, (&aw_key[0 as usize]) as u64)
+    if actcli.send(300) == actcli.R_OK {
+        return actcli.field((&k_val[0 as usize]) as u64, out, 48)
+    }
+    return false
+}
+
+fn aw_start(key: u64) {
+    let _c: u64 = ulib.strncpy((&aw_key[0 as usize]) as u64, key, 39)
+    __mmio_write8(((&aw_key[0 as usize]) as u64 + 39) as *mut u8, 0 as u8)
+    aw_old[0] = 0 as u8
+    if !aw_read((&aw_old[0 as usize]) as u64) {
+        return // not a plain setting (an update action): nothing to compare, the page redoes itself
+    }
+    let now: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    aw_until = now + 6500
+    aw_next = now + 100
+    var s1: [u8; 34] = "settings: waiting for the dialog\n\0"
+    say((&s1[0 as usize]) as u64)
+}
+
+// 0 = nothing to do, 1 = the value changed (the dialog said yes), 2 = nobody said yes in time / said no
+fn aw_poll() -> u64 {
+    if aw_until == 0 {
+        return 0
+    }
+    let now: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    if now < aw_next {
+        return 0
+    }
+    aw_next = now + 100
+    var cur: [u8; 48] = [0 as u8; 48]
+    if aw_read((&cur[0 as usize]) as u64) && !ulib.streq((&cur[0 as usize]) as u64, (&aw_old[0 as usize]) as u64) {
+        aw_until = 0
+        return 1
+    }
+    if now >= aw_until {
+        aw_until = 0
+        return 2
+    }
+    return 0
+}
+
 fn sys_answer(rc: u64, key: u64) {
     let sp: u64 = (&l_systat[0 as usize]) as u64
     var ln: [u8; 160] = [0 as u8; 160]
@@ -5194,15 +5243,15 @@ fn sys_answer(rc: u64, key: u64) {
             j = j + 1
         }
         sy_pend = no
-        // the key waits with its number: "Ja, ändern" names it again
-        let _pk: u64 = bx_put((&sy_pkey[0 as usize]) as u64, 0, 40, key)
         stat_set(sp, (&k_sy_ask[0 as usize]) as u64, key)
+        aw_start(key)
     } else if rc == actcli.R_NOBUS {
         stat_set(sp, (&k_sy_nobus[0 as usize]) as u64, 0)
     } else if ulib.find(lp, (&k_sy_usedlg[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
         // SETBROKER2: "Yes, change it" in this window is refused for a critical value; only the system's
         // own dialog (painted by the window server) can answer
         stat_set(sp, (&k_sy_ask[0 as usize]) as u64, key)
+        aw_start(key)
     } else {
         stat_set(sp, (&k_sy_err[0 as usize]) as u64, lp)
     }
@@ -5224,6 +5273,14 @@ fn sys_set() {
         stat_set((&l_systat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
         return
     }
+    // the row and value the person picked, on the serial line (tools/actionbus/gui.sh waits for it)
+    var s_sk: [u8; 19] = "settings: set key=\0"
+    var s_sv: [u8; 8] = " value=\0"
+    say((&s_sk[0 as usize]) as u64)
+    say(kp)
+    say((&s_sv[0 as usize]) as u64)
+    say((&e_sval[0 as usize]) as u64)
+    nl()
     var v_set: [u8; 18] = "call settings.set\0"
     var k_key: [u8; 4] = "key\0"
     var k_val: [u8; 6] = "value\0"
@@ -5322,22 +5379,6 @@ fn net_fixed_bus(ip: u64, mask: u64, gw: u64) -> u64 {
     say((&s1[0 as usize]) as u64)
     sys_answer(rc, (&k_nf[0 as usize]) as u64)
     return rc
-}
-
-fn sys_confirm() {
-    if sy_pend == 0 {
-        stat_set((&l_systat[0 as usize]) as u64, (&k_sy_pick[0 as usize]) as u64, 0)
-        return
-    }
-    var cf: [u8; 32] = [0 as u8; 32]
-    let cp: u64 = (&cf[0 as usize]) as u64
-    var s_c: [u8; 9] = "confirm \0"
-    var o: u64 = bx_put(cp, 0, 32, (&s_c[0 as usize]) as u64)
-    o = bx_num(cp, o, 32, sy_pend)
-    actcli.req(cp)
-    sy_pend = 0
-    let rc: u64 = actcli.send(300)
-    sys_answer(rc, (&sy_pkey[0 as usize]) as u64)
 }
 
 fn sys_undo() {
@@ -6766,8 +6807,9 @@ fn page_system(left: usize, right: usize) {
     fuiscene.set_size(n_sy_ent, fitw(260), 28)
     let n_sy_bset: usize = fuiscene.button(left, msg.get((&k_sy_set[0 as usize]) as u64), K_SY_BSET)
     fuiscene.set_size(n_sy_bset, 0, 28)
-    let n_sy_bconf: usize = fuiscene.button(left, msg.get((&k_sy_conf[0 as usize]) as u64), K_SY_BCONF)
-    fuiscene.set_size(n_sy_bconf, 0, 28)
+    // SETBROKER2 (r1313): no "Yes, change it" in this window -- a critical change is answered in the system's
+    // own dialog only; the window says so and follows the answer (aw_poll)
+    let _n_sy_hint: usize = fuiscene.label(left, msg.get((&k_sy_hint[0 as usize]) as u64))
     let n_sy_bundo: usize = fuiscene.button(left, msg.get((&k_sy_undo[0 as usize]) as u64), K_SY_BUNDO)
     fuiscene.set_size(n_sy_bundo, 0, 28)
     let _n_sy_stat: usize = fuiscene.label(left, (&l_systat[0 as usize]) as u64)
@@ -8154,8 +8196,7 @@ fn page_update(left: usize, right: usize) {
     fuiscene.set_size(n_up_bauto, fitw(260), 28)
     let n_up_brb: usize = fuiscene.button(left, msg.get((&k_up_brb[0 as usize]) as u64), K_UP_BRB)
     fuiscene.set_size(n_up_brb, fitw(260), 28)
-    let n_up_bconf: usize = fuiscene.button(left, msg.get((&k_up_bconf[0 as usize]) as u64), K_UP_BCONF)
-    fuiscene.set_size(n_up_bconf, fitw(260), 28)
+    let _n_up_hint: usize = fuiscene.label(left, msg.get((&k_sy_hint[0 as usize]) as u64))
     let _n_up_lstat: usize = fuiscene.label(left, (&l_systat[0 as usize]) as u64)
     // SYSTEM block (self-update of the kernel): running build, channel, phase, changelog, 2 buttons
     let _n_su_t: usize = fuiscene.label(right, msg.get((&k_su_title[0 as usize]) as u64))
@@ -8263,8 +8304,7 @@ fn page_netz(left: usize, right: usize) {
     let _n_nt3: usize = fuiscene.label(right, msg.get((&k_n_hin[0 as usize]) as u64))
     let n_b4: usize = fuiscene.button(right, msg.get((&k_b_uber[0 as usize]) as u64), K_B4)
     fuiscene.set_size(n_b4, fitw(140), 28)
-    let n_b4j: usize = fuiscene.button(right, msg.get((&k_sy_conf[0 as usize]) as u64), K_B4J)
-    fuiscene.set_size(n_b4j, fitw(140), 28)
+    let _n_b4j: usize = fuiscene.label(right, msg.get((&k_sy_hint[0 as usize]) as u64))
 }
 
 // page R_BENUT
@@ -9764,7 +9804,6 @@ fn init_values() {
     sy_tab = K_SY_TAB
     sy_ent = K_SY_ENT
     sy_bset = K_SY_BSET
-    sy_bconf = K_SY_BCONF
     sy_bundo = K_SY_BUNDO
     ri_tab = K_RI_TAB
     ri_ctab = K_RI_CTAB
@@ -9778,14 +9817,12 @@ fn init_values() {
     up_bchan = K_UP_BCHAN
     up_bauto = K_UP_BAUTO
     up_brb = K_UP_BRB
-    up_bconf = K_UP_BCONF
     su_bchk = K_SU_BCHK
     su_binst = K_SU_BINST
     ds_ch = K_CH
     ds_b2 = K_B2
     nz_cn = K_CN
     nz_b4 = K_B4
-    nz_b4j = K_B4J
     br_aus_id = K_BR_AUS_ID
     tba_bereit = 1
     tba_label_setz()
@@ -10125,6 +10162,29 @@ fn u_start(args: u64) -> u64 {
                 }
                 fuiscene.refresh()
             }
+        }
+        let aw: u64 = aw_poll()
+        if aw != 0 {
+            let sp: u64 = (&l_systat[0 as usize]) as u64
+            var s_aw: [u8; 30] = "settings: dialog answered rc=\0"
+            say((&s_aw[0 as usize]) as u64)
+            sayn(aw)
+            nl()
+            if aw == 1 {
+                stat_set(sp, (&k_sy_ok[0 as usize]) as u64, (&aw_key[0 as usize]) as u64)
+            } else {
+                stat_set(sp, (&k_sy_unchanged[0 as usize]) as u64, (&aw_key[0 as usize]) as u64)
+            }
+            if reiter == R_SYSTEM {
+                let keep: u64 = fuiscene.table_sel(K_SY_TAB)
+                sys_load()
+                fuiscene.table_set_sel(K_SY_TAB, keep)
+            } else if reiter == R_NETZ {
+                let _cw: u64 = text_an((&l_stat[0 as usize]) as u64, 0, sp)
+                state_read()
+            }
+            fuiscene.refresh()
+            rep_due = 1
         }
         let iw: u64 = tba_wirksam()
         if iw != tba_gez {
@@ -10777,13 +10837,6 @@ fn u_start(args: u64) -> u64 {
                         msg.get((&k_m_time[0 as usize]) as u64))
                     // (described again)
                     melde_stand()
-                } else if id == K_B4J {
-                    sys_confirm()
-                    let _cj: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
-                        (&l_systat[0 as usize]) as u64)
-                    state_read()
-                    // (described again)
-                    melde_stand()
                 } else if id == K_B4 && kval[(K_CN) as usize] == 0
                     && bus_set((&k_ndh[0 as usize]) as u64,
                         (&k_true[0 as usize]) as u64) != actcli.R_NOBUS {
@@ -10855,11 +10908,9 @@ fn u_start(args: u64) -> u64 {
                     state_read()
                     // (described again)
                     melde_stand()
-                } else if id == K_SY_BSET || id == K_SY_BCONF || id == K_SY_BUNDO {
+                } else if id == K_SY_BSET || id == K_SY_BUNDO {
                     if id == K_SY_BSET {
                         sys_set()
-                    } else if id == K_SY_BCONF {
-                        sys_confirm()
                     } else {
                         sys_undo()
                     }
@@ -10870,7 +10921,7 @@ fn u_start(args: u64) -> u64 {
                     // (described again)
                     // (described again)
                 } else if id == K_UP_BCHK || id == K_UP_BINST || id == K_UP_BRB
-                    || id == K_UP_BCHAN || id == K_UP_BAUTO || id == K_UP_BCONF
+                    || id == K_UP_BCHAN || id == K_UP_BAUTO
                     || id == K_SU_BCHK || id == K_SU_BINST {
                     var a_schk: [u8; 30] = "call settings.update.syscheck\0"
                     var a_sins: [u8; 32] = "call settings.update.sysinstall\0"
@@ -10889,10 +10940,8 @@ fn u_start(args: u64) -> u64 {
                         upd_call((&a_rb[0 as usize]) as u64, (&a_rb[0 as usize]) as u64 + 5)
                     } else if id == K_UP_BCHAN {
                         upd_toggle(0)
-                    } else if id == K_UP_BAUTO {
-                        upd_toggle(1)
                     } else {
-                        sys_confirm()
+                        upd_toggle(1)
                     }
                     upd_show()
                     // (described again)

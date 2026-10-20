@@ -4387,27 +4387,53 @@ fn tk_by_no(no: u64) -> u64 {
 static mut tk_dlg: [u8; 8] = [0 as u8; 8] // TOK_MAX: 1 = dialog only
 static mut tr_screen: bool = false // a dialog was shown at least once on this boot
 
-// the argument lines of a parked request ("key=value", not the @meta lines) as "\n  key=value"
-fn trusted_args(t: u64) {
+// the argument lines of a parked request ("key=value", not the @meta lines) as "\n  key=value".
+// The dialog shows TD_LINES = 6 lines of 60 columns (wm.fi); a longer text used to be cut off at TR_BYTES
+// without a trace (r1313). At most `room` lines are written, each 56 columns at most; when more arguments
+// exist than fit, the last line is "  ..." so the person sees that something was left out.
+fn trusted_args(t: u64, room: u64) {
     let m: u64 = tkmem(t)
     var at: u64 = actwire.line_end(m, 0)
     var n: u64 = 0
-    var s_ind: [u8; 4] = "\n  \0"
-    while ld8(m, at) != 0 && n < 6 {
+    var extra: u64 = 0
+    var extra_at: u64 = 0
+    var extra_end: u64 = 0
+    var guard: u64 = 0
+        var s_more: [u8; 7] = "\n  ...\0"
+    while ld8(m, at) != 0 && guard < 64 {
+        guard = guard + 1
         if ld8(m, at) == 10 {
             at = at + 1
         }
         let e: u64 = actwire.line_end(m, at)
         if e > at && ld8(m, at) != 64 {
-            actwire.ob_str((&s_ind[0 as usize]) as u64)
-            var j: u64 = at
-            while j < e && j < at + 60 {
-                actwire.ob_ch(ld8(m, j))
-                j = j + 1
+            if n + 1 < room {
+                trusted_arg_line(m, at, e)
+                n = n + 1
+            } else {
+                if extra == 0 {
+                    extra_at = at
+                    extra_end = e
+                }
+                extra = extra + 1
             }
-            n = n + 1
         }
         at = e
+    }
+    if extra == 1 {
+        trusted_arg_line(m, extra_at, extra_end)
+    } else if extra > 1 {
+        actwire.ob_str((&s_more[0 as usize]) as u64)
+    }
+}
+
+fn trusted_arg_line(m: u64, at: u64, e: u64) {
+    var s_ind: [u8; 4] = "\n  \0"
+    actwire.ob_str((&s_ind[0 as usize]) as u64)
+    var j: u64 = at
+    while j < e && j < at + 56 {
+        actwire.ob_ch(ld8(m, j))
+        j = j + 1
     }
 }
 
@@ -4432,9 +4458,9 @@ fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
     var s1: [u8; 17] = " will ausfuehren\0"
     var s2: [u8; 11] = "\n  Aktion \0"
     var s3: [u8; 11] = "   Stufe: \0"
-    var s4: [u8; 3] = "\n\n\0"
-    var s5: [u8; 15] = "\n\nAnfrage Nr. \0"
-    var s6: [u8; 31] = " -- verfaellt nach 60 Sekunden\0"
+    var s4: [u8; 2] = "\n\0"
+    var s5: [u8; 6] = "\nNr. \0"
+    var s6: [u8; 21] = " -- verfaellt in 60s\0"
     actwire.ob_reset()
     actwire.ob_str(cp)
     actwire.ob_str((&s1[0 as usize]) as u64)
@@ -4442,16 +4468,38 @@ fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
     actwire.ob_str(np)
     actwire.ob_str((&s3[0 as usize]) as u64)
     actwire.ob_str(lvl)
-    trusted_args(t)
-    if desc != 0 && ld8(desc, 0) != 0 {
+    // six dialog lines: who, action + level, the arguments, [the description], the request number
+    var room: u64 = 3
+    let has_desc: bool = desc != 0 && ld8(desc, 0) != 0
+    if has_desc {
+        room = 2
+    }
+    trusted_args(t, room)
+    if has_desc {
         actwire.ob_str((&s4[0 as usize]) as u64)
-        actwire.ob_str(desc)
+        var d: u64 = 0
+        while d < 56 && ld8(desc, d) != 0 && ld8(desc, d) != 10 {
+            actwire.ob_ch(ld8(desc, d))
+            d = d + 1
+        }
     }
     actwire.ob_str((&s5[0 as usize]) as u64)
     actwire.ob_num(no)
     actwire.ob_str((&s6[0 as usize]) as u64)
-    copyn(trt(t), actwire.ob_ptr(), actwire.ob_len(), TR_BYTES)
+    let tl: u64 = actwire.ob_len()
+    copyn(trt(t), actwire.ob_ptr(), tl, TR_BYTES)
     actwire.ob_reset()
+    var l1: [u8; 28] = "orientbus: dialog text len=\0"
+    var l2: [u8; 6] = " cut=\0"
+    lb_start((&l1[0 as usize]) as u64)
+    lb_num(tl)
+    lb_add((&l2[0 as usize]) as u64)
+    if tl + 1 > TR_BYTES {
+        lb_num(1)
+    } else {
+        lb_num(0)
+    }
+    lb_say()
     trusted_poll()
 }
 
@@ -4493,6 +4541,11 @@ fn trusted_poll() {
         actwire.slen(trt(best)))
     if ulib.bad(r2) {
         tr_retry = actwire.ticks() + 100 // no screen yet, or busy
+        if r2 == 0 -% 5 {
+            // E_EXHAUSTED: another dialog is open, so there IS a window server -- the first dialog may be
+            // queued, and a bus `confirm` of a critical request of the person's own must be refused already
+            tr_screen = true
+        }
         return
     }
     tr_up = no

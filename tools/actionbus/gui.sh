@@ -20,7 +20,10 @@
 #      the page "System" lists all 14 settings through settings.list, a
 #      harmless value is set by clicking (display.brightness reaches the
 #      KERNEL, DG_BRIGHT), a critical one asks and is done only after
-#      "Yes, change it"; the lock time is read through the bus; the page
+#      the yes in the system's own dialog (SETBROKER2: the window has no
+#      yes button; a bus `confirm` of such a request is refused,
+#      err use_dialog; NODLG=1 builds the broker without that duty and
+#      the gate must turn red); the lock time is read through the bus; the page
 #      "App rights" lists rules, the dry-run-first client and the
 #      counts, and "Allow Jarvis the display for 1 hour" adds a timed
 #      grant. Photos of both pages.
@@ -49,6 +52,17 @@ if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
 else
     bad "the programs do not build"; tail -15 "$TMPD/b.txt" | sed 's/^/        /'
     echo "ACTBUS-GUI: $pass passed, $fail failed"; exit 1
+fi
+if [ "${NODLG:-0}" = 1 ]; then
+    # GEGENPROBE (r1312): the broker built WITHOUT the dialog duty -- the gate must turn red
+    cp -r kernel/user "$TMPD/usrc"
+    sed -i 's/if yes \&\& tk_dlg\[(t) as usize\] != 0 \&\& tr_screen {/if false {/' "$TMPD/usrc/orientbus.fi"
+    if [ "$(grep -c 'if false {' "$TMPD/usrc/orientbus.fi")" -ge 1 ] \
+        && USRC="$TMPD/usrc" bash tools/sync/build.sh "$TMPD/bin" 0 orientbus > "$TMPD/b2.txt" 2>&1; then
+        ok "GEGENPROBE NODLG: orientbus built without the dialog duty"
+    else
+        bad "NODLG: the broker without the duty does not build"
+    fi
 fi
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then
     ok "the kernel builds"
@@ -97,6 +111,19 @@ action trap.click write "Click into the settings window"
 action trap.type write "Type into the settings window"
   adapter keys y enter
 EOF
+cat > "$TMPD/big.actions" <<'EOF'
+manifest 1
+app big
+for window "No Such Window*"
+action big.go write "A long description of an action that has six long arguments, so that the trusted dialog has to cut its text on purpose"
+  arg a string required "first"
+  arg b string required "second"
+  arg c string required "third"
+  arg d string required "fourth"
+  arg e string required "fifth"
+  arg f string required "sixth"
+  adapter keys space
+EOF
 cat > "$TMPD/ghost.actions" <<'EOF'
 manifest 1
 app ghost
@@ -139,25 +166,30 @@ act call viewer.next --as jarvis
 act confirm last
 echo ==G-GHOST==
 act call ghost.poke
+echo ==G-BIG==
+# six long arguments and a long description: the dialog text must stay inside its six lines (r1313)
+act call big.go a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc d=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd e=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee f=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff --as helper
+sleep 2
+act confirm last
 echo ==G-SETWIN==
 settings debug page=11 &
 sleep 6
 act call trap.click
 act call trap.type
 echo ==G-WAIT==
-sleep 60
-echo ==G-RIGHTS==
-sleep 30
-echo ==G-SCREEN==
-sleep 25
-echo ==G-NET==
-sleep 35
-echo ==G-LOGPAGE==
-sleep 15
-echo ==G-UPDPAGE==
-sleep 15
+# the host walks through the settings pages by STATES (gui.sh); this is only the upper bound
+sleep 100
+sleep 100
 echo ==G-NETDONE==
 cat /etc/network.conf
+echo ==G-USEDLG==
+sleep 3
+# SETBROKER2: a critical request of the person's own can be answered in the system dialog only; the bus
+# `confirm` of a program of theirs (this shell) is refused. The dialog is taken away again with `reject`.
+act call settings.set key=net.wifi.enabled value=true
+act confirm last
+act reject last
+sleep 2
 echo ==G-TRUST==
 act call settings.set key=lock.idle value=600 --as helper
 # 16 s and not 8: the 'n' comes from the host (after its waits and a photo);
@@ -196,6 +228,7 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
    "/etc/actions.d/viewer.actions=$TMPD/viewer.actions"
    "/etc/actions.d/trap.actions=$TMPD/trap.actions"
    "/etc/actions.d/ghost.actions=$TMPD/ghost.actions"
+   "/etc/actions.d/big.actions=$TMPD/big.actions"
    "/etc/orientbus/policy=etc/orientbus/policy"
    "/etc/sperre.conf=$TMPD/sperre.conf" "/etc/theme.conf=$TMPD/theme.conf"
    "/etc/passwd=$TMPD/passwd" "/etc/locale.conf=$TMPD/locale.conf"
@@ -217,7 +250,7 @@ python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
 echo "== 2. boot: window server, bus, wayd, a Linux Wayland program =="
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
-timeout 400 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 768 \
+timeout 700 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 768 \
     -append "gfx disp wm wmdauer wmshell osum vfs bus script=sh /t/g.sh;exit" \
     -serial "file:$TMPD/ser.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
@@ -257,15 +290,51 @@ mid() { # name -> "x y" (the middle)
 }
 
 # SETBROKER2 (r1280): a CRITICAL change from the settings window is answered in the system's trusted dialog
-# (real keyboard), not by the window's own "Yes, change it" (the broker refuses that: err use_dialog).
+# (real keyboard) -- the window has no "Yes, change it" any more (r1313); a bus `confirm` of such a request is
+# refused (err use_dialog, tested by the guest script: G-USEDLG).
+#
+# r1312: the host side waits for STATES (serial lines of the window, the dialog count, a rectangle that
+# exists), never for a fixed time; the guest script only keeps a long fixed sleep for the whole choreography.
 dlg_n() { grep -ac 'wm: trusted dialog up no=' "$TMPD/ser.txt"; }
-dlg_yes() { # $1 = number of dialogs shown before the change was asked
-    local i
-    for i in $(seq 1 15); do [ "$(dlg_n)" -gt "$1" ] && break; sleep 1; done
-    sleep 1.5
+ser_n() { grep -ac -- "$1" "$TMPD/ser.txt"; }
+await_n() { # pattern count seconds -- at least `count` lines with the pattern
+    local i=0
+    while [ $i -lt $(( $3 * 5 )) ]; do
+        [ "$(ser_n "$1")" -ge "$2" ] && return 0
+        kill -0 "$QPID" 2>/dev/null || return 1
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+await_mid() { # name seconds -> "x y" of the middle, once the window reports the rectangle
+    local i=0 m
+    while [ $i -lt $(( $2 * 2 )) ]; do
+        m=$(mid "$1") && [ -n "$m" ] && { echo "$m"; return 0; }
+        sleep 0.5; i=$((i + 1))
+    done
+    return 1
+}
+await_dlg() { # $1 = dialogs shown before; waits for the next one, 25 s
+    local i=0
+    while [ $i -lt 125 ]; do
+        [ "$(dlg_n)" -gt "$1" ] && { sleep 1.5; return 0; }
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+say_yes() { # the real yes on the real keyboard
     echo "sendkey j" > "$TMPD/kjy.txt"
     python3 tools/wm/monitor.py "$SOCK" "$TMPD/kjy.txt" > /dev/null 2>&1
-    sleep 2
+}
+# a critical request: wait for the dialog, photograph it, say yes, wait for the page to follow the answer
+critical_yes() { # $1 = dialogs before, $2 = photo name, $3 = answers the window must have followed by then
+    if await_dlg "$1"; then
+        [ -n "$2" ] && shot "$TMPD/$2.ppm"
+        say_yes
+        await_n 'settings: dialog answered rc=1' "$3" 40 || bad "the window did not follow the dialog's answer ($3)"
+    else
+        bad "no system dialog came up for the critical request"
+    fi
 }
 
 if waitfor "==G-WAIT==" 120; then
@@ -273,108 +342,112 @@ if waitfor "==G-WAIT==" 120; then
     sleep 4
     shot "$TMPD/1-system.ppm"
     # --- the page System: set display.brightness (row 0, selected) to 30
-    if E=$(mid sent) && S=$(mid sset); then
+    if E=$(await_mid sent 30) && S=$(mid sset); then
         klick $E; tippe 30; klick $S
-        sleep 2
-        # --- a critical one: net.wifi.enabled is row 8 (display 4, sound 2,
-        # lock 1, locale 1); the row height comes from the table itself
+        await_n 'settingsd: display brightness k=60' 1 30 || bad "display.brightness 30 did not reach settingsd"
+        # --- a critical one: net.wifi.enabled is row 8 (display 4, sound 2, lock 1, locale 1) and NOT in view
+        # (the table shows 8 rows): select row 0 and walk down with the keyboard, like a person
         read tx ty tw th <<< "$(rect stab)"
         rh=$(tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" | grep -ao 'settings: rowh=[0-9]*' | tail -1 | tr -dc '0-9')
         rh=${rh:-20}
-        # the head is one row + 4, then row 8, in its middle
-        klick $(( tx + 40 )) $(( ty + rh + 4 + 8 * rh + rh / 2 ))
+        klick $(( tx + 40 )) $(( ty + rh + 4 + rh / 2 ))
+        for i in 1 2 3 4 5 6 7 8; do echo "sendkey down"; done > "$TMPD/dn.txt"
+        python3 tools/wm/monitor.py "$SOCK" "$TMPD/dn.txt" 0.15 > /dev/null 2>&1
+        sleep 1
         klick $E
         for i in 1 2 3 4 5 6; do echo "sendkey backspace" ; done > "$TMPD/bs.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/bs.txt" 0.1 > /dev/null 2>&1
         D0=$(dlg_n)
         tippe false; klick $S
-        sleep 2
-        shot "$TMPD/2-ask.ppm"
-        klick $(mid sconf)     # the window's own yes: refused (use_dialog)
-        sleep 2
-        dlg_yes "$D0"          # the real yes: the system dialog
-        shot "$TMPD/3-done.ppm"
+        if await_n 'settings: set key=net.wifi.enabled value=false' 1 20; then
+            ok "the keyboard walk selected net.wifi.enabled (row 8, out of view) and the value false went out"
+            critical_yes "$D0" 2-ask 1
+            shot "$TMPD/3-done.ppm"
+        else
+            bad "the settings window did not send net.wifi.enabled (got: $(grep -a 'settings: set key=' "$TMPD/ser.txt" | tail -1))"
+        fi
     else
         bad "the System page did not report its controls"
     fi
-else
-    bad "the script did not reach the settings part"
-fi
-# ONE window from here on: the pages are switched by clicking their tab
-# (the window reports every tab as "taba", "tabb", ...), like a person
-if waitfor "==G-RIGHTS==" 120; then
-    sleep 1
-    T=$(mid tabm) && klick $T || bad "the settings window did not report its tabs"
-    sleep 4
-    shot "$TMPD/4-rights.ppm"
-    J=$(mid rjar) && { klick $J; sleep 2; shot "$TMPD/5-granted.ppm"; } || bad "the rights page did not report its controls"
-fi
-# AB-005c: the page Bildschirm sets the brightness through the bus, the
-# page Netz switches to DHCP through the bus -- critical, so it asks, and
-# "Ja, ändern" on that page answers
-if waitfor "==G-SCREEN==" 60; then
+    # ONE window from here on: the pages are switched by clicking their tab
+    # (the window reports every tab as "taba", "tabb", ...), like a person
+    if T=$(await_mid tabm 10); then
+        klick $T
+        shot "$TMPD/4-rights.ppm"
+        if J=$(await_mid rjar 20); then
+            klick $J
+            await_n 'settings: rights answer rc=0' 1 20 || bad "the rights page did not answer"
+            shot "$TMPD/5-granted.ppm"
+        else
+            bad "the rights page did not report its controls"
+        fi
+    else
+        bad "the settings window did not report its tabs"
+    fi
+    # AB-005c: the page Bildschirm sets the brightness through the bus, the page Netz switches to DHCP
+    # through the bus -- critical, so it asks and the SYSTEM dialog answers
     T=$(mid tabb) && klick $T
-    sleep 5
-    shot "$TMPD/5b-screen.ppm"
-    # the brightness as it stands; "Übernehmen" sends it
-    if A2=$(mid dapply); then
-        klick $A2; sleep 2
+    if A2=$(await_mid dapply 20); then
+        shot "$TMPD/5b-screen.ppm"
+        B1=$(ser_n 'settings: page set key=display.brightness')
+        klick $A2
+        await_n 'settings: page set key=display.brightness' $((B1 + 1)) 20 || bad "the page Bildschirm did not send the brightness"
     else
         bad "the page Bildschirm did not report its controls"
     fi
-fi
-if waitfor "==G-NET==" 60; then
     T=$(mid tabd) && klick $T
-    sleep 5
-    if M=$(mid nmode) && N=$(mid napply) && C=$(mid nconf); then
+    if M=$(await_mid nmode 20) && N=$(await_mid napply 5); then
         # the choice opens its list below itself; item 0 is "über DHCP"
         read mx my mw mh <<< "$(rect nmode)"
         klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
         D1=$(dlg_n)
-        klick $N; sleep 2
-        shot "$TMPD/6-netask.ppm"
-        dlg_yes "$D1"
+        klick $N
+        critical_yes "$D1" 6-netask 2
         shot "$TMPD/7-netdone.ppm"
+        await_n 'settingsd: dhcp started pid=' 1 30 || bad "settingsd did not start DHCP after the yes"
     else
         bad "the page Netz did not report its controls"
     fi
-fi
-# S-009: the page Protokoll -- the audit log of this very run, newest first
-if waitfor "==G-LOGPAGE==" 60; then
+    # S-009: the page Protokoll -- the audit log of this very run, newest first
     T=$(mid tabn) && klick $T
-    sleep 4
+    await_n 'settings: protocol rows=' 1 20 || bad "the page Protokoll did not read the log"
     shot "$TMPD/8-log.ppm"
-fi
-# DAILY-DRIVER: the page Updates (15th tab) -- state over settings.update.status,
-# "Jetzt nach Updates suchen" asks settingsd, which starts `ota` (no server in
-# this run, so the check fails -- what is measured is that the page asks the
-# bus and that settingsd answers)
-if waitfor "==G-UPDPAGE==" 60; then
+    # DAILY-DRIVER: the page Updates (15th tab) -- state over settings.update.status, "Jetzt nach Updates
+    # suchen" asks settingsd, which starts `ota` (no server in this run, so the check fails -- what is
+    # measured is that the page asks the bus and that settingsd answers)
     T=$(mid tabo) && klick $T
-    sleep 4
-    shot "$TMPD/9-update.ppm"
-    if S=$(mid schk); then klick $S; sleep 3; else bad "the page Updates has no SYSTEM check button"; fi
-    shot "$TMPD/9a-update.ppm"
-    if U=$(mid ucheck); then
-        klick $U; sleep 3
-        shot "$TMPD/9b-update.ppm"
+    if S=$(await_mid schk 20); then
+        shot "$TMPD/9-update.ppm"
+        klick $S; sleep 3
+        shot "$TMPD/9a-update.ppm"
+        if U=$(await_mid ucheck 10); then
+            klick $U; sleep 3
+            shot "$TMPD/9b-update.ppm"
+        else
+            bad "the page Updates did not report its controls"
+        fi
     else
-        bad "the page Updates did not report its controls"
+        bad "the page Updates has no SYSTEM check button"
     fi
+else
+    bad "the script did not reach the settings part"
 fi
-# AB-004: the trusted dialog. Helper (an agent) asks to change the lock
-# time; the window server shows the question over everything. "n" on the
-# REAL keyboard rejects it; the second time a program types "jjj" into a
-# window first (the dialog stays), then "j" on the real keyboard says yes
-if waitfor "==G-TRUST==" 90; then
-    if waitfor "wm: trusted dialog up no=" 10; then
-        sleep 1.5
+# AB-004: the trusted dialog. Helper (an agent) asks to change the lock time; the window server shows the
+# question over everything. "n" on the REAL keyboard rejects it; the second time a program types "jjj" into
+# a window first (the dialog stays), then "j" on the real keyboard says yes. The dialogs are counted: the
+# guest's use_dialog probe shows one (and takes it away), the helper's request is the next.
+if waitfor "==G-USEDLG==" 300; then
+    sleep 1
+    UB=$(dlg_n)
+    if waitfor "==G-TRUST==" 40 && await_dlg $(( UB + 1 )); then
         shot "$TMPD/9-trust.ppm"
         echo "sendkey n" > "$TMPD/kn.txt"
         python3 tools/wm/monitor.py "$SOCK" "$TMPD/kn.txt" > /dev/null 2>&1
     else
         bad "no trusted dialog came up for the helper's change"
     fi
+else
+    bad "the guest script did not reach the probe of the dialog duty"
 fi
 if waitfor "==G-TRUST3==" 60; then
     sleep 1
@@ -384,7 +457,7 @@ if waitfor "==G-TRUST3==" 60; then
     sleep 2
     shot "$TMPD/11-trust-done.ppm"
 fi
-waitfor "==FERTIG==" 150 || note "no FERTIG before the time limit"
+waitfor "==FERTIG==" 200 || note "no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/ser.txt" > "$TMPD/ser.klar"
@@ -443,6 +516,7 @@ grep -qa 'settings: bus answer rc=0 line=\[ok\]' "$G" && ok "after 'Yes, change 
 part "$G" G-JOURNAL G-STAT > "$TMPD/p.txt"
 has "$TMPD/p.txt" "client=user key=display.brightness" "the journal: the window changed display.brightness as the user"
 has "$TMPD/p.txt" "key=net.wifi.enabled old=true new=false" "... and net.wifi.enabled, after the yes"
+hasnot "$TMPD/p.txt" "key=net.wifi.enabled old=false new=true" "the refused bus confirm changed nothing (no wifi=true in the journal)"
 grep -qaE 'settings: rights rules=[0-9]+ clients=[1-9][0-9]* dryfirst=1 rc=0' "$G" \
     && ok "page App rights: $(grep -aoE 'settings: rights rules=[0-9]+ clients=[0-9]+ dryfirst=1' "$G" | tail -1)" \
     || bad "page App rights: $(grep -a 'settings: rights rules' "$G" | tail -1)"
@@ -458,7 +532,21 @@ grep -qa 'settings: page set key=net.dhcp' "$G" && ok "page Netz: DHCP goes over
 n_ask=$(grep -ac 'settings: bus answer rc=2 line=\[confirm' "$G")
 [ "$n_ask" -ge 2 ] && ok "... net.dhcp is critical: the page Netz asks as well" || bad "the page Netz was not asked ($n_ask questions)"
 has "$G" "settingsd: dhcp started pid=" "after the YES IN THE SYSTEM DIALOG settingsd starts DHCP"
-grep -qa 'settings: bus answer rc=1 line=\[err use_dialog' "$G" && ok "SETBROKER2: the window's own \"Yes, change it\" for a critical value is refused (err use_dialog)" || bad "the window's own yes was not refused ($(grep -a 'use_dialog' "$G" | tail -1 | cut -c1-80))"
+# SETBROKER2 (r1312/r1313): the window has no "Yes, change it" any more; the bus confirm of a critical request
+# of the person's own (a program of theirs: the guest shell) is refused, the dialog is the only yes
+part "$G" G-USEDLG G-TRUST > "$TMPD/p.txt"
+has "$TMPD/p.txt" "confirm " "the critical request of the person's own is parked (act call settings.set net.wifi.enabled)"
+has "$TMPD/p.txt" "err use_dialog" "SETBROKER2: a bus confirm of it is refused (err use_dialog) -- only the system dialog can say yes"
+n_dd=$(grep -ac 'settings: dialog answered rc=1' "$G")
+[ "$n_dd" -ge 2 ] && ok "the window followed the dialog's answer and redid its page ($n_dd times: wifi on System, DHCP on Netz)" || bad "the window did not follow the dialog's answer ($n_dd)"
+# the dialog text (r1313): six long arguments + a long description stay inside the dialog's six lines
+part "$G" G-BIG G-SETWIN > "$TMPD/p.txt"
+tl=$(grep -ao 'orientbus: dialog text len=[0-9]* cut=[01]' "$TMPD/p.txt" | tail -1)
+[ -n "$tl" ] && ok "the long request got a dialog text: $tl" || bad "no dialog text line for the request with six long arguments"
+n_cut=$(grep -ao 'orientbus: dialog text len=[0-9]* cut=1' "$G" | wc -l)
+[ "$n_cut" = 0 ] && ok "no dialog text was cut at TR_BYTES (all lines cut=0)" || bad "$n_cut dialog texts were cut at TR_BYTES"
+tn=$(echo "$tl" | sed -E 's/.*len=([0-9]+).*/\1/'); tn=${tn:-0}
+[ "$tn" -ge 120 ] && [ "$tn" -le 366 ] && ok "... and it fits six lines of 60 columns ($tn octets)" || bad "the dialog text of the long request is $tn octets (want 120..366)"
 part "$G" G-NETDONE G-CLOSE > "$TMPD/p.txt"
 has "$TMPD/p.txt" "modus=dhcp" "/etc/network.conf says modus=dhcp"
 has "$TMPD/p.txt" "ip=10.0.2.15" "... and keeps the other lines"
