@@ -43,6 +43,7 @@ import fuiapp
 import fuiscene
 import msg
 import appdir
+import ctxreg
 import nidx
 import pw
 import nv
@@ -168,8 +169,10 @@ static mut lp_tbconf: [u8; 18] = "/etc/taskbar.conf\0"
 // The context menu of a pinned tile (right click): start, unpin from Start, pin to the taskbar.
 static mut ctx_menue: u64 = 0
 static mut ctx_app: u64 = 0
-static mut ctx_items: [u8; 200] = [0 as u8; 200]
-static mut k_ctxm: [u8; 13] = "launcher.ctx\0"
+static mut ctx_regd: u64 = 0
+static mut k_ctx1: [u8; 10] = "ctx.start\0"
+static mut k_ctx2: [u8; 16] = "ctx.unpin_start\0"
+static mut k_ctx3: [u8; 16] = "ctx.pin_taskbar\0"
 static mut k_fail_t: [u8; 20] = "launcher.fail.title\0"
 static mut k_fail_x: [u8; 19] = "launcher.fail.text\0"
 static mut s_ctxo: [u8; 22] = "launcher: ctx open i=\0"
@@ -872,27 +875,34 @@ fn taskbar_pin_add(a: u64) {
     io.close(wfd)
 }
 
+// Action ids of the start tile menu (they equal the 1-based row numbers the menu had before the registry).
+const CA_START: u64 = 1
+const CA_UNPIN: u64 = 2
+const CA_PIN_TASKBAR: u64 = 3
+
+fn ctx_register() {
+    if ctx_regd != 0 {
+        return
+    }
+    ctx_regd = 1
+    ctxreg.add(ctxreg.CTX_START_TILE, (&k_ctx1[0 as usize]) as u64, CA_START, 0)
+    ctxreg.add(ctxreg.CTX_START_TILE, (&k_ctx2[0 as usize]) as u64, CA_UNPIN, 0)
+    ctxreg.add(ctxreg.CTX_START_TILE, (&k_ctx3[0 as usize]) as u64, CA_PIN_TASKBAR, 0)
+}
+
 // The right button on a pinned tile: the menu opens at the pointer.
 fn ctx_open(idx: u64, x: u64, y: u64) {
     if ctx_menue != 0 || pw_menue != 0 || idx >= pin_n {
         return
     }
-    let src: u64 = msg.get((&k_ctxm[0 as usize]) as u64)
-    let n: u64 = ulib.length(src)
-    var q: u64 = 0
-    while q < n && q < 190 {
-        let c: u8 = __mmio_read8((src + q) as *mut u8)
-        if c == 10 as u8 {
-            ctx_items[(q) as usize] = 0 as u8
-        } else {
-            ctx_items[(q) as usize] = c
-        }
-        q = q + 1
+    // rows come from the registry (kernel/user/ctxreg.fi): built-in rows below, plus the entries of /etc/ctxmenu.conf
+    ctx_register()
+    let n: u64 = ctxreg.build(ctxreg.CTX_START_TILE, 0)
+    if n == 0 {
+        return
     }
-    ctx_items[(q) as usize] = 0 as u8
-    ctx_items[((q + 1)) as usize] = 0 as u8
     ctx_app = pin_app[(idx) as usize]
-    fuiscene.menu_open(x, y, fuiscene.sp(230), (&ctx_items[0 as usize]) as u64, 3)
+    fuiscene.menu_open(x, y, fuiscene.sp(230), ctxreg.text_nul(), n)
     ctx_menue = 1
     say((&s_ctxo[0 as usize]) as u64)
     sayn(idx)
@@ -905,20 +915,26 @@ fn ctx_pick(pick: u64) {
     say((&s_ctxp[0 as usize]) as u64)
     sayn(pick)
     nl()
-    if pick == 1 {
+    if pick == 0 {
+        return
+    }
+    let act: u64 = ctxreg.act_at(pick - 1)
+    if act == CA_START {
         starten_app(ctx_app)
-    } else if pick == 2 {
+    } else if act == CA_UNPIN {
         say((&s_ctxu[0 as usize]) as u64)
         say(appdir.file_of(ctx_app))
         nl()
         pin_remove(ctx_app)
         new_find()
         fuiscene.refresh()
-    } else if pick == 3 {
+    } else if act == CA_PIN_TASKBAR {
         say((&s_ctxt[0 as usize]) as u64)
         say(appdir.file_of(ctx_app))
         nl()
         taskbar_pin_add(ctx_app)
+    } else if ctxreg.is_ext(act) {
+        let _e: u64 = ctxreg.run_ext(act)
     }
 }
 

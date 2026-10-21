@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/taskbar_ctx.fi -- THE TASK BAR'S CONTEXT MENU (split out of taskbar.fi; menus come from kernel/user/ctxreg.fi).
+//
+// WHAT LIVES HERE. The life cycle of the bar's right-click menu: which context is open (empty bar, pinned program, window
+// button), the `wlib` menu window, its own event pump, and the registration of the bar's built-in rows in the registry.
+// WHAT STAYS IN taskbar.fi. Everything that needs the bar's data: starting a pinned program, minimising a window, pinning a
+// button. `step` only says WHICH action was chosen (and `picked_ctx` / `picked_arg` say for what); taskbar.fi carries it out.
+//
+// ============ WHY THE MENU NEEDS ITS OWN EVENT LOOP (kept from round ECHTHARDWARE-2)
+// The bar fetches its events itself (WM_EVENT on its own window) and never calls `wlib.step`. The menu is a wlib window of its
+// own, and `mn_res` -- the answer "which row was chosen" -- is set ONLY in `wlib.step`. Without the call below the menu opens, takes
+// clicks and never says what was chosen. `wlib.menu_open` puts the menu on the popup layer (above the bar), so nothing to fix up.
+//
+// Window buttons offer MINIMISE (WA_HIDE) and PIN; there is no "close" because the kernel has no WA_CLOSE for foreign windows
+// (kernel/sys.fi WM_ACT) and a row that does nothing would be a lie.
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import msg
+import ctxreg
+
+export {
+    ACT_NEW_WINDOW, ACT_MINIMISE, ACT_PIN, ACT_TASKMGR, ACT_SETTINGS, ACT_DISPLAY, NONE, DISMISSED,
+    init, open_pin, open_button, open_empty, is_open, key, step, picked_ctx, picked_arg, run_common
+}
+
+// Action ids: the first three equal the row numbers the menu had before the registry (the bar's log lines print them).
+const ACT_NEW_WINDOW: u64 = 0
+const ACT_MINIMISE: u64 = 1
+const ACT_PIN: u64 = 2
+const ACT_TASKMGR: u64 = 10
+const ACT_SETTINGS: u64 = 11
+const ACT_DISPLAY: u64 = 12
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const DISMISSED: u64 = 0xFFFFFFFFFFFFFFFE
+
+static mut c_open: u64 = 0
+static mut c_ctx: u64 = 0
+static mut c_arg: u64 = 0
+static mut c_inited: u64 = 0
+
+// catalogue keys of the rows
+static mut k_new: [u8; 15] = "ctx.new_window\0"
+static mut k_min: [u8; 13] = "ctx.minimise\0"
+static mut k_pin: [u8; 8] = "ctx.pin\0"
+static mut k_tm: [u8; 17] = "ctx.task_manager\0"
+static mut k_disp: [u8; 12] = "ctx.display\0"
+static mut k_set: [u8; 13] = "ctx.settings\0"
+
+static mut p_settings: [u8; 14] = "/bin/settings\0"
+static mut a_settings: [u8; 9] = "settings\0"
+static mut a_page1: [u8; 7] = "page=1\0"
+static mut p_taskmgr: [u8; 14] = "/bin/taskmgr\0\0"
+
+// Register the bar's rows once (the registry would ignore a second call anyway).
+fn init() {
+    if c_inited != 0 {
+        return
+    }
+    c_inited = 1
+    ctxreg.add(ctxreg.CTX_TASKBAR_PIN, (&k_new[0 as usize]) as u64, ACT_NEW_WINDOW, 0)
+    ctxreg.add(ctxreg.CTX_WINDOW_BTN, (&k_new[0 as usize]) as u64, ACT_NEW_WINDOW, 0)
+    ctxreg.add(ctxreg.CTX_WINDOW_BTN, (&k_min[0 as usize]) as u64, ACT_MINIMISE, 0)
+    ctxreg.add(ctxreg.CTX_WINDOW_BTN, (&k_pin[0 as usize]) as u64, ACT_PIN, 0)
+    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_tm[0 as usize]) as u64, ACT_TASKMGR, 0)
+    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_disp[0 as usize]) as u64, ACT_DISPLAY, 0)
+    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_set[0 as usize]) as u64, ACT_SETTINGS, 0)
+}
+
+fn open_ctx(ctx: u64, arg: u64) -> bool {
+    init()
+    let n: u64 = ctxreg.build(ctx, 0)
+    if n == 0 {
+        return false
+    }
+    c_ctx = ctx
+    c_arg = arg
+    // the menu stands above the bar: `menu_open` opens upwards when there is no room below
+    let mw: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(), ctxreg.text(), n)
+    if mw >= wlib.MAXWN {
+        return false
+    }
+    c_open = 1
+    return true
+}
+
+// pg = 0-based index of the pin
+fn open_pin(pg: u64) -> bool {
+    return open_ctx(ctxreg.CTX_TASKBAR_PIN, pg)
+}
+
+// m = 1-based index of the window button
+fn open_button(m: u64) -> bool {
+    return open_ctx(ctxreg.CTX_WINDOW_BTN, m)
+}
+
+// right click on the empty part of the bar
+fn open_empty() -> bool {
+    return open_ctx(ctxreg.CTX_TASKBAR, 0)
+}
+
+fn is_open() -> bool {
+    return c_open != 0
+}
+
+// A key while the menu is open belongs to it (up, down, enter, escape).
+fn key(c: u64) {
+    if c_open != 0 {
+        wlib.feed_key(c)
+    }
+}
+
+fn picked_ctx() -> u64 {
+    return c_ctx
+}
+
+fn picked_arg() -> u64 {
+    return c_arg
+}
+
+// Once per round while the menu is open. NONE = still waiting, DISMISSED = closed without a choice, else the action id.
+fn step() -> u64 {
+    if c_open == 0 {
+        return NONE
+    }
+    let _st: u64 = wlib.step()
+    let r: u64 = wlib.menu_at()
+    if r == 0xFFFFFFFFFFFFFFFF {
+        return NONE
+    }
+    c_open = 0
+    wlib.menu_close()
+    if r == 0xFFFF {
+        return DISMISSED
+    }
+    let a: u64 = ctxreg.act_at(r)
+    if a == ctxreg.NONE {
+        return DISMISSED
+    }
+    return a
+}
+
+fn open_settings(page1: bool) {
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[0 as usize] = (&a_settings[0 as usize]) as u64
+    var argc: u64 = 1
+    if page1 {
+        argv[1 as usize] = (&a_page1[0 as usize]) as u64
+        argc = 2
+    }
+    let _pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_settings[0 as usize]) as u64, (&argv[0 as usize]) as u64, argc)
+}
+
+// The actions that need nothing of the bar's data: start a program (task manager, settings, display, manifest entries).
+// True = it was one of those.
+fn run_common(act: u64) -> bool {
+    if act == ACT_TASKMGR {
+        let _p: u64 = ulib.spawn_app((&p_taskmgr[0 as usize]) as u64, 0, 0)
+        return true
+    }
+    if act == ACT_SETTINGS {
+        open_settings(false)
+        return true
+    }
+    if act == ACT_DISPLAY {
+        open_settings(true)
+        return true
+    }
+    if ctxreg.is_ext(act) {
+        let _e: u64 = ctxreg.run_ext(act)
+        return true
+    }
+    return false
+}

@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ctxreg.fi -- THE CONTEXT MENU REGISTRY (extension point of the desktop shell).
+//
+// Before, every shell program carried its own right-click menu in its own code: the task bar (taskbar.fi `rechtsklick`),
+// the start menu tile (launcher.fi `ctx_open`), the bare desktop (desktop.fi `ctx_show`). To add an entry one had to edit the shell.
+// Now a menu is a CONTEXT ID plus a list of entries; the program that owns the menu asks the registry for the rows and gets back
+// the text (one label per row) and one ACTION ID per row. The owner decides what an action does.
+//
+//   CONTEXT IDS       CTX_TASKBAR (empty bar), CTX_TASKBAR_PIN (pinned program), CTX_WINDOW_BTN (window button),
+//                     CTX_START_TILE (start menu tile), CTX_DESKTOP (bare desktop), CTX_EXPLORER_ITEM (file manager entry)
+//   IN-PROCESS        `add(ctx, key, act, need)`: key = catalogue key of the label (translated by `msg.get`), act = owner's action id,
+//                     need = bit mask of owner flags that must ALL be set in `build(ctx, flags)` for the row to show (0 = always).
+//                     `add` is idempotent (same ctx + key twice = one row), so an owner may call it before every `build`.
+//   MANIFEST          /etc/ctxmenu.conf, one entry per line, no shell code involved:
+//                         <context>|<label or catalogue key>|<program path>
+//                     context = taskbar | taskbar-pin | window | start-tile | desktop | explorer.  Lines starting with # are ignored.
+//                     The row starts the program (ulib.spawn_app) when picked: action id EXT_BASE + n, `run_ext` does the start.
+//                     The file is read on every `build` (menus open rarely), at most MAXX entries.
+//   OUTPUT            `text()` rows separated by newline (what `wlib.menu_open` takes), `text_nul()` rows separated by NUL and
+//                     ended by two NULs (what `fuiscene.menu_open` takes), `act_at(row)`, `count()`.
+//
+// The registry is a library: each process has its own table (a process registers its own entries) and every process sees the
+// same manifest file. Gate: tools/startctx/run.sh, tools/deskctx/run.sh, tools/barctx/run.sh.
+
+profile kernel
+
+import ulib
+import msg
+
+export {
+    CTX_TASKBAR, CTX_TASKBAR_PIN, CTX_WINDOW_BTN, CTX_START_TILE, CTX_DESKTOP, CTX_EXPLORER_ITEM,
+    EXT_BASE, NONE, add, build, text, text_nul, act_at, count, is_ext, run_ext, ext_path
+}
+
+const CTX_TASKBAR: u64 = 1
+const CTX_TASKBAR_PIN: u64 = 2
+const CTX_WINDOW_BTN: u64 = 3
+const CTX_START_TILE: u64 = 4
+const CTX_DESKTOP: u64 = 5
+const CTX_EXPLORER_ITEM: u64 = 6
+const EXT_BASE: u64 = 0x1000
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const MAXE: u64 = 32 // in-process entries
+const MAXX: u64 = 8 // manifest entries
+const MAXROW: u64 = 12 // rows of one menu
+const TXT_MAX: u64 = 500
+
+static mut e_ctx: [u64; 32] = [0 as u64; 32]
+static mut e_key: [u64; 32] = [0 as u64; 32]
+static mut e_act: [u64; 32] = [0 as u64; 32]
+static mut e_need: [u64; 32] = [0 as u64; 32]
+static mut n_e: u64 = 0
+
+static mut x_ctx: [u64; 8] = [0 as u64; 8]
+static mut x_lab: [u8; 256] = [0 as u8; 256] // 8 x 32
+static mut x_path: [u8; 384] = [0 as u8; 384] // 8 x 48
+static mut n_x: u64 = 0
+
+static mut o_txt: [u8; 512] = [0 as u8; 512]
+static mut o_nul: [u8; 514] = [0 as u8; 514]
+static mut o_act: [u64; 12] = [0 as u64; 12]
+static mut n_o: u64 = 0
+
+static mut p_conf: [u8; 18] = "/etc/ctxmenu.conf\0"
+static mut c_names: [u8; 55] = "taskbar\0taskbar-pin\0window\0start-tile\0desktop\0explorer\0"
+
+fn rd8(p: u64) -> u64 {
+    let c: u8 = __mmio_read8((p) as *mut u8)
+    return c as u64
+}
+
+// Same string? `a` = n bytes (not NUL ended), `b` = NUL ended.
+fn name_is(a: u64, n: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = rd8(b + i)
+        if c == 0 || c != rd8(a + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rd8(b + n) == 0
+}
+
+// Context id of a manifest name (1-based position in the name list), 0 = unknown.
+fn ctx_by_name(p: u64, n: u64) -> u64 {
+    var at: u64 = (&c_names[0 as usize]) as u64
+    var id: u64 = 1
+    while id <= 6 {
+        if name_is(p, n, at) {
+            return id
+        }
+        at = at + ulib.length(at) + 1
+        id = id + 1
+    }
+    return 0
+}
+
+// An in-process entry. Idempotent: the same context + key is added once.
+fn add(ctx: u64, key: u64, act: u64, need: u64) {
+    var i: u64 = 0
+    while i < n_e {
+        if e_ctx[(i) as usize] == ctx && name_is(key, ulib.length(key), e_key[(i) as usize]) {
+            return
+        }
+        i = i + 1
+    }
+    if n_e >= MAXE {
+        return
+    }
+    e_ctx[(n_e) as usize] = ctx
+    e_key[(n_e) as usize] = key
+    e_act[(n_e) as usize] = act
+    e_need[(n_e) as usize] = need
+    n_e = n_e + 1
+}
+
+fn parse_line(p: u64, len: u64) {
+    if len == 0 || rd8(p) == 35 {
+        return
+    }
+    var a1: u64 = 0
+    while a1 < len && rd8(p + a1) != 124 {
+        a1 = a1 + 1
+    }
+    if a1 >= len {
+        return
+    }
+    var a2: u64 = a1 + 1
+    while a2 < len && rd8(p + a2) != 124 {
+        a2 = a2 + 1
+    }
+    if a2 >= len {
+        return
+    }
+    let c: u64 = ctx_by_name(p, a1)
+    let ll: u64 = a2 - a1 - 1
+    var pl: u64 = len - a2 - 1
+    while pl > 0 && rd8(p + a2 + pl) <= 32 {
+        pl = pl - 1
+    }
+    if c == 0 || ll == 0 || ll > 31 || pl < 2 || pl > 47 {
+        return
+    }
+    let lab: u64 = (&x_lab[0 as usize]) as u64 + n_x * 32
+    let pth: u64 = (&x_path[0 as usize]) as u64 + n_x * 48
+    var k: u64 = 0
+    while k < ll {
+        __mmio_write8((lab + k) as *mut u8, rd8(p + a1 + 1 + k) as u8)
+        k = k + 1
+    }
+    __mmio_write8((lab + ll) as *mut u8, 0 as u8)
+    k = 0
+    while k < pl {
+        __mmio_write8((pth + k) as *mut u8, rd8(p + a2 + 1 + k) as u8)
+        k = k + 1
+    }
+    __mmio_write8((pth + pl) as *mut u8, 0 as u8)
+    x_ctx[(n_x) as usize] = c
+    n_x = n_x + 1
+}
+
+// (Re)read the manifest.
+fn load_ext() {
+    n_x = 0
+    var buf: [u8; 700] = [0 as u8; 700]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 699)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < n && n_x < MAXX {
+        var e: u64 = i
+        while e < n && rd8(b + e) != 10 {
+            e = e + 1
+        }
+        parse_line(b + i, e - i)
+        i = e + 1
+    }
+}
+
+// One row: label (translated) + action.
+fn emit(q0: u64, s: u64, act: u64) -> u64 {
+    var q: u64 = q0
+    if n_o > 0 {
+        o_txt[(q) as usize] = 10 as u8
+        q = q + 1
+    }
+    var k: u64 = 0
+    while k < 63 && q < TXT_MAX {
+        let c: u64 = rd8(s + k)
+        if c == 0 {
+            break
+        }
+        o_txt[(q) as usize] = c as u8
+        q = q + 1
+        k = k + 1
+    }
+    o_act[(n_o) as usize] = act
+    n_o = n_o + 1
+    return q
+}
+
+// Collect the rows of a context. `flags` = the owner's current condition bits. Returns the row count.
+fn build(ctx: u64, flags: u64) -> u64 {
+    load_ext()
+    n_o = 0
+    var q: u64 = 0
+    var i: u64 = 0
+    while i < n_e && n_o < MAXROW {
+        if e_ctx[(i) as usize] == ctx && (e_need[(i) as usize] & flags) == e_need[(i) as usize] {
+            q = emit(q, msg.get(e_key[(i) as usize]), e_act[(i) as usize])
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n_x && n_o < MAXROW {
+        if x_ctx[(i) as usize] == ctx {
+            q = emit(q, msg.get((&x_lab[0 as usize]) as u64 + i * 32), EXT_BASE + i)
+        }
+        i = i + 1
+    }
+    o_txt[(q) as usize] = 0 as u8
+    var k: u64 = 0
+    while k <= q && k < 512 {
+        let c: u8 = o_txt[(k) as usize]
+        if c == 10 as u8 {
+            o_nul[(k) as usize] = 0 as u8
+        } else {
+            o_nul[(k) as usize] = c
+        }
+        k = k + 1
+    }
+    o_nul[(k) as usize] = 0 as u8
+    return n_o
+}
+
+fn text() -> u64 {
+    return (&o_txt[0 as usize]) as u64
+}
+
+fn text_nul() -> u64 {
+    return (&o_nul[0 as usize]) as u64
+}
+
+fn count() -> u64 {
+    return n_o
+}
+
+// The action id of a row (0-based), NONE when out of range.
+fn act_at(row: u64) -> u64 {
+    if row >= n_o {
+        return NONE
+    }
+    return o_act[(row) as usize]
+}
+
+fn is_ext(act: u64) -> bool {
+    return act >= EXT_BASE && act < EXT_BASE + MAXX
+}
+
+// Program path of a manifest action.
+fn ext_path(act: u64) -> u64 {
+    return (&x_path[0 as usize]) as u64 + (act - EXT_BASE) * 48
+}
+
+// Start the program of a manifest action; returns its pid (or an error value, see ulib.bad).
+fn run_ext(act: u64) -> u64 {
+    if !is_ext(act) || act - EXT_BASE >= n_x {
+        return NONE
+    }
+    return ulib.spawn_app(ext_path(act), 0, 0)
+}

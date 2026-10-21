@@ -101,6 +101,8 @@ import nv
 import icons
 import msg
 import qs
+import ctxreg
+import taskbar_ctx
 // RUNDE 31: nur fuer die zwei Zaehler im Bericht (fui=/fuix=).
 import fuib
 import barpop
@@ -2471,7 +2473,6 @@ fn dnd_bar_step() -> bool {
 static mut k_title: [u8; 14] = "taskbar.title\0"
 static mut k_start: [u8; 14] = "taskbar.start\0"
 // RUNDE ECHTHARDWARE-2: die zwei Punkte des Kontextmenues.
-static mut k_ctx: [u8; 17] = "taskbar.context\0\0"
 static mut k_batt: [u8; 16] = "taskbar.battery\0"
 static mut k_nobatt: [u8; 19] = "taskbar.no_battery\0"
 static mut k_nonet: [u8; 19] = "taskbar.no_network\0"
@@ -6812,62 +6813,38 @@ fn hover_text(m: u64) -> u64 {
 // ANHEFTEN. Einen Punkt "Schliessen" anzubieten, der nichts tut, waere
 // genau die Luege mit runden Ecken, vor der der Kopf von qs.fi warnt.
 // Sobald der Kern ein WA_CLOSE hat, ist hier eine Zeile zu aendern.
-static mut ctx_knopf: u64 = 0 // welcher Knopf, 1-basiert (0 = keiner)
-static mut ctx_offen: u64 = 0
-static mut ctx_pin: u64 = 0 // r529: the context menu belongs to a pin (1-based), not to a window button
-static mut k_ctxpin: [u8; 16] = "taskbar.pinctx\0\0"
-static mut s_ctxpin: [u8; 24] = "taskbar: pin neu starte\0"
 static mut angeheftet: [u64; 16] = [0 as u64; 16]
 
+static mut s_ctxpin: [u8; 24] = "taskbar: pin neu starte\0"
 static mut s_ctxauf: [u8; 22] = "taskbar: kontext btn=\0"
 static mut s_ctxtat: [u8; 20] = "taskbar: kontext w=\0"
-static mut s_ctxpump: [u8; 27] = "taskbar: kontext pumpe mw=\0"
-static mut ctx_sagte: u64 = 0
+static mut s_ctxleer: [u8; 24] = "taskbar: kontext leer\0\0\0"
+static mut s_ctxleert: [u8; 27] = "taskbar: kontext leer w=\0\0\0"
 
+// Right click in the bar. The menus themselves (rows, labels, life cycle) are in taskbar_ctx.fi / ctxreg.fi; this only decides
+// WHICH context is meant: a pin, a window button or the empty part of the bar.
 fn rechtsklick(x: u64, y: u64) {
-    // r529: right click on a pin: a one-item menu "New window" (a second terminal, a second explorer ...)
+    // r529: right click on a pin: "New window" (a second terminal, a second explorer ...)
     let pg: u64 = pin_under(x, y)
     if pg < npin {
         tip_close()
-        ctx_pin = pg + 1
-        ctx_knopf = 0
-        ctx_offen = 1
-        ctx_sagte = 0
-        let _mp: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(),
-            msg.get((&k_ctxpin[0 as usize]) as u64), 1)
+        let _mp: bool = taskbar_ctx.open_pin(pg)
         return
     }
     let m: u64 = hover_brand(x, y)
+    tip_close()
     if m < 1 || m > nk {
+        if taskbar_ctx.open_empty() {
+            say((&s_ctxleer[0 as usize]) as u64)
+            nl()
+        }
         return
     }
-    tip_close()
-    ctx_pin = 0
-    ctx_knopf = m
-    ctx_offen = 1
-    ctx_sagte = 0
-    // Das Menue steht ueber der Leiste -- `menu_open` klappt nach oben
-    // auf, wenn unten kein Platz mehr ist, und unter der Leiste ist
-    // nie Platz.
-    let mw: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(),
-        msg.get((&k_ctx[0 as usize]) as u64), 3)
-    // ===================================== RUNDE ECHTHARDWARE-3
-    // HIER STAND EINE NACHHILFE, DIE JETZT UEBERFLUESSIG IST.
-    //
-    // Die Vorrunde hat das Kontextmenue von Hand auf `L_TOP` gelegt,
-    // weil `menu_open` es auf der normalen Ebene anlegte und das
-    // Startmenue (damals ebenfalls L_TOP) darueber lag. Damit lagen
-    // Leiste, Startmenue und Kontextmenue auf EINER Ebene, und wer
-    // oben war, entschied die Reihenfolge des Anlegens.
-    //
-    // Seit dieser Runde hat jede Oberflaechenart ihre eigene Ebene
-    // (wm.fi: L_TOP < L_MENUE < L_POPUP < L_TIP), und `menu_open`
-    // legt sich selbst auf `L_POPUP`. Diese Stelle muss nichts mehr
-    // richten -- sie durfte es auch nie: `tip_win_id` auf ein
-    // MENUE-Fenster anzuwenden war ein Griff in die falsche Tabelle.
-    say((&s_ctxauf[0 as usize]) as u64)
-    sayn(m)
-    nl()
+    if taskbar_ctx.open_button(m) {
+        say((&s_ctxauf[0 as usize]) as u64)
+        sayn(m)
+        nl()
+    }
 }
 
 // ==================================================== RUNDE ECHTHARDWARE-3
@@ -6886,68 +6863,60 @@ fn rechtsklick(x: u64, y: u64) {
 // Alles andere wird bewusst verworfen -- aber SICHTBAR verworfen und
 // nicht stillschweigend wie bisher.
 fn tb_key(c: u64) {
-    if ctx_offen != 0 {
-        wlib.feed_key(c)
-        return
-    }
+    taskbar_ctx.key(c)
 }
 
-// Was gewaehlt wurde, einmal je Umlauf abgeholt.
+// What was chosen, once per round (the menu's own event loop is `taskbar_ctx.step`).
 fn kontext_step() {
-    if ctx_offen == 0 {
+    if !taskbar_ctx.is_open() {
         return
     }
-    // ===================================== RUNDE ECHTHARDWARE-2
-    // DAS MENUE BRAUCHT SEINE EIGENE EREIGNISSCHLEIFE.
-    //
-    // Die Leiste holt ihre Ereignisse SELBST (WM_EVENT auf ihr eigenes
-    // Fenster) und ruft `wlib.step` nie. Das Menue ist aber ein
-    // eigenes wlib-Fenster, und `mn_res` -- die Antwort "welcher Punkt
-    // wurde gewaehlt" -- wird AUSSCHLIESSLICH in `wlib.step` gesetzt
-    // (wlib.fi:6091 und 6111). Ohne diesen Aufruf klappt das Menue auf,
-    // nimmt Klicks entgegen und sagt nie, was gewaehlt wurde.
-    //
-    // GEMESSEN: `taskbar: kontext btn=1` kam, `kontext w=` nie -- der
-    // Klick landete richtig, die Antwort holte niemand ab.
-    let _st: u64 = wlib.step()
-    let r: u64 = wlib.menu_at()
-    // Solange die Antwort aussteht, wird EINMAL gesagt, dass ueberhaupt
-    // gepumpt wird -- sonst ist "der Klick kam nicht an" von "die
-    // Schleife laeuft nicht" nicht zu unterscheiden.
-    if r == 0xFFFFFFFFFFFFFFFF {
+    let a: u64 = taskbar_ctx.step()
+    if a == taskbar_ctx.NONE || a == taskbar_ctx.DISMISSED {
         return
     }
-    ctx_offen = 0
-    wlib.menu_close()
-    if ctx_pin != 0 {
-        let pj: u64 = ctx_pin - 1
-        ctx_pin = 0
-        if r == 0 && pj < npin {
-            pin_exec(pj)
+    let ctx: u64 = taskbar_ctx.picked_ctx()
+    let arg: u64 = taskbar_ctx.picked_arg()
+    if ctx == ctxreg.CTX_TASKBAR_PIN {
+        if a == taskbar_ctx.ACT_NEW_WINDOW && arg < npin {
+            pin_exec(arg)
             say((&s_ctxpin[0 as usize]) as u64)
             nl()
+        } else {
+            let _c: bool = taskbar_ctx.run_common(a)
         }
         return
     }
-    let i: u64 = ctx_knopf - 1
-    if r == 0xFFFF || i >= nk {
+    if ctx == ctxreg.CTX_WINDOW_BTN {
+        let i: u64 = arg - 1
+        if i >= nk {
+            return
+        }
+        if a == taskbar_ctx.ACT_NEW_WINDOW {
+            // NEW WINDOW of the program of this button (jump list); nothing to start when the program names no bundle
+            if kapp[((i * 24)) as usize] != 0 as u8 {
+                app_exec((&kapp[0 as usize]) as u64 + i * 24)
+            }
+        } else if a == taskbar_ctx.ACT_MINIMISE {
+            let _a: u64 = wlibc.win_act(knv[(i) as usize], wlibc.WA_HIDE)
+        } else if a == taskbar_ctx.ACT_PIN {
+            // the button stays when the window goes
+            angeheftet[(i) as usize] = 1
+        } else {
+            let _c: bool = taskbar_ctx.run_common(a)
+            return
+        }
+        say((&s_ctxtat[0 as usize]) as u64)
+        sayn(a)
+        nl()
         return
     }
-    if r == 0 {
-        // NEW WINDOW of the program of this button (jump list); nothing to start when the program names no bundle
-        if kapp[((i * 24)) as usize] != 0 as u8 {
-            app_exec((&kapp[0 as usize]) as u64 + i * 24)
-        }
-    } else if r == 1 {
-        // MINIMIEREN
-        let _a: u64 = wlibc.win_act(knv[(i) as usize], wlibc.WA_HIDE)
-    } else {
-        // ANHEFTEN -- der Knopf bleibt, wenn das Fenster geht.
-        angeheftet[(i) as usize] = 1
+    // empty bar
+    if taskbar_ctx.run_common(a) {
+        say((&s_ctxleert[0 as usize]) as u64)
+        sayn(a)
+        nl()
     }
-    say((&s_ctxtat[0 as usize]) as u64)
-    sayn(r)
-    nl()
 }
 
 // ==================================================== RUNDE ECHTHARDWARE-2
