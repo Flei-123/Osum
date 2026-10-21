@@ -7,6 +7,8 @@ import nav.loader
 import nav.stack
 import nav.crumbs
 import nav.search
+import nav.folder
+import nav.fromman
 
 static mut dirbuf: [u8; 64] = [0 as u8; 64]
 static mut cpos: [u64; 16] = [0 as u64; 16]
@@ -175,6 +177,39 @@ static mut s_rel: [u8; 7] = "related"
 static mut s_info: [u8; 4] = "info"
 static mut s_limit: [u8; 5] = "limit"
 static mut s_clear: [u8; 5] = "clear"
+static mut s_frec: [u8; 4] = "frec"
+static mut s_fback: [u8; 5] = "fback"
+static mut s_ffwd: [u8; 4] = "ffwd"
+static mut fbuf: [u8; 160] = [0 as u8; 160]
+static mut fout: [u8; 160] = [0 as u8; 160]
+
+fn fshow(ok: bool) {
+    let fo: u64 = (&fout[0]) as u64
+    let c: u64 = folder.count()
+    let p: u64 = folder.position()
+    var tag: u64 = 0
+    if ok {
+        tag = 1
+    }
+    if folder.load_current(fo, 159) {
+        io.print("f ")
+        if tag == 1 {
+            io.print("ok ")
+        } else {
+            io.print("no ")
+        }
+        io.print("[")
+        var n: u64 = 0
+        while rd(fo, n) != 0 {
+            n = n + 1
+        }
+        pb(fo, n)
+        io.print("]")
+    } else {
+        io.print("f none")
+    }
+    io.fmt_print_line(f" pos={p}/{c}")
+}
 
 fn run_cmd(p: u64, n: u64) {
     split(p, n)
@@ -367,6 +402,26 @@ fn run_cmd(p: u64, n: u64) {
         io.fmt_print_line(f"fit {f}")
         return
     }
+    if eqw(0, (&s_frec[0]) as u64, 4) {
+        var k: u64 = 0
+        let src: u64 = wp(1)
+        let rest: u64 = n - cpos[(1) as usize]
+        while k < rest && k < 150 {
+            fbuf[(k) as usize] = (rd(src, k) & 255) as u8
+            k = k + 1
+        }
+        fbuf[(k) as usize] = 0 as u8
+        fshow(folder.record((&fbuf[0]) as u64))
+        return
+    }
+    if eqw(0, (&s_fback[0]) as u64, 5) {
+        fshow(folder.step_back((&fout[0]) as u64, 159))
+        return
+    }
+    if eqw(0, (&s_ffwd[0]) as u64, 4) {
+        fshow(folder.step_forward((&fout[0]) as u64, 159))
+        return
+    }
     if eqw(0, (&s_push[0]) as u64, 4) {
         let h: u64 = num(1)
         let ok: bool = stack.push(h, wp(2), wl(2))
@@ -520,8 +575,27 @@ fn run_cmd(p: u64, n: u64) {
     io.new_line()
 }
 
+static mut convbuf: [u8; 4096] = [0 as u8; 4096]
+
 fn load_section(buf: u64, at: u64, e: u64, mode: u64, num: u64) {
     var n: u64 = 0
+    if mode == 4 {
+        let cl: u64 = fromman.convert(buf + at, e - at, (&convbuf[0]) as u64, 4000)
+        if cl == fromman.NONE {
+            io.fmt_print_line(f"section {num} convert failed")
+            return
+        }
+        pb((&convbuf[0]) as u64, cl)
+        n = loader.add((&convbuf[0]) as u64, cl)
+        if n == loader.ERR {
+            let code: u64 = reg.err_code()
+            let ln: u64 = reg.err_line()
+            io.fmt_print_line(f"section {num} error {code} line {ln}")
+            return
+        }
+        io.fmt_print_line(f"section {num} converted routes={n} total={reg.count()}")
+        return
+    }
     if mode == 1 {
         n = loader.add_pkg(buf + at, e - at, (&dirbuf[0]) as u64)
     } else {
@@ -580,6 +654,9 @@ fn main() -> i32 {
             }
             if e - at >= 6 && rd(buf, at + 3) == 114 && rd(buf, at + 4) == 117 && rd(buf, at + 5) == 110 {
                 mode = 3
+            }
+            if e - at >= 7 && rd(buf, at + 3) == 99 && rd(buf, at + 4) == 111 && rd(buf, at + 5) == 110 {
+                mode = 4
             }
             in_sec = true
             sec_at = e + 1

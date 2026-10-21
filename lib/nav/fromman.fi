@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: MPL-2.0
+import nav.route
+
+export { convert, NONE }
+
+const NONE: u64 = 4294967295
+const WORD: u64 = 48
+const MAXW: u64 = 8
+
+static mut wpos: [u64; 8] = [0 as u64; 8]
+static mut wlen: [u64; 8] = [0 as u64; 8]
+static mut nw: u64 = 0
+static mut app: [u8; 48] = [0 as u8; 48]
+static mut app_n: u64 = 0
+static mut p_id: [u8; 48] = [0 as u8; 48]
+static mut p_title: [u8; 48] = [0 as u8; 48]
+static mut p_icon: [u8; 48] = [0 as u8; 48]
+static mut p_parent: [u8; 48] = [0 as u8; 48]
+static mut p_fields: u64 = 0
+static mut p_open: u64 = 0
+static mut n_pages: u64 = 0
+static mut o: u64 = 0
+static mut full: u64 = 0
+
+fn is_blank(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+fn split(p: u64, n: u64) {
+    nw = 0
+    var i: u64 = 0
+    while i < n && nw < MAXW {
+        let c: u64 = route.rd(p, i)
+        if c == 35 {
+            return
+        }
+        if !is_blank(c) {
+            let s: u64 = i
+            while i < n && !is_blank(route.rd(p, i)) {
+                i = i + 1
+            }
+            wpos[(nw) as usize] = s
+            wlen[(nw) as usize] = i - s
+            nw = nw + 1
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn word_is(line: u64, w: u64, lit: str) -> bool {
+    let n: u64 = lit.n as u64
+    if w >= nw || wlen[(w) as usize] != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if route.rd(line, wpos[(w) as usize] + i) != route.rd(lit.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn copy_word(line: u64, w: u64, dst: u64) -> bool {
+    let n: u64 = wlen[(w) as usize]
+    if n == 0 || n >= WORD {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        route.wr(dst, i, route.rd(line, wpos[(w) as usize] + i))
+        i = i + 1
+    }
+    route.wr(dst, n, 0)
+    return true
+}
+
+fn clen(p: u64) -> u64 {
+    var n: u64 = 0
+    while route.rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn emit(out: u64, cap: u64, s: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        if o + 1 >= cap {
+            full = 1
+            return
+        }
+        route.wr(out, o, route.rd(s, i))
+        o = o + 1
+        i = i + 1
+    }
+}
+
+fn emit_lit(out: u64, cap: u64, s: str) {
+    emit(out, cap, s.p as u64, s.n as u64)
+}
+
+fn emit_num(out: u64, cap: u64, v: u64) {
+    var d: [u8; 8] = [0 as u8; 8]
+    var k: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0] = 48 as u8
+        k = 1
+    }
+    while x > 0 && k < 8 {
+        d[(k) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        k = k + 1
+    }
+    while k > 0 {
+        k = k - 1
+        emit(out, cap, ((&d[0]) as u64) + k, 1)
+    }
+}
+
+fn emit_cstr(out: u64, cap: u64, p: u64) {
+    emit(out, cap, p, clen(p))
+}
+
+fn flush(out: u64, cap: u64) {
+    if p_open == 0 {
+        return
+    }
+    p_open = 0
+    emit_lit(out, cap, "route ")
+    emit_cstr(out, cap, (&app[0]) as u64)
+    emit_lit(out, cap, "://")
+    if p_parent[0] != 0 {
+        emit_cstr(out, cap, (&p_parent[0]) as u64)
+        emit_lit(out, cap, "/")
+    }
+    emit_cstr(out, cap, (&p_id[0]) as u64)
+    emit_lit(out, cap, " ")
+    emit_cstr(out, cap, (&p_title[0]) as u64)
+    emit_lit(out, cap, " ")
+    emit_cstr(out, cap, (&p_icon[0]) as u64)
+    emit_lit(out, cap, " ")
+    emit_num(out, cap, n_pages * 10)
+    emit_lit(out, cap, "\ncontrols ")
+    emit_num(out, cap, p_fields)
+    emit_lit(out, cap, "\n")
+}
+
+fn page_line(line: u64, out: u64, cap: u64) -> bool {
+    if nw != 5 && nw != 7 {
+        return false
+    }
+    if app_n == 0 {
+        return false
+    }
+    if !copy_word(line, 1, (&p_id[0]) as u64) || !copy_word(line, 2, (&p_title[0]) as u64) || !copy_word(line, 3, (&p_icon[0]) as u64) {
+        return false
+    }
+    p_parent[0] = 0 as u8
+    if nw == 7 {
+        if !word_is(line, 5, "parent") || !copy_word(line, 6, (&p_parent[0]) as u64) {
+            return false
+        }
+    }
+    if n_pages == 0 {
+        emit_lit(out, cap, "app ")
+        emit_cstr(out, cap, (&app[0]) as u64)
+        emit_lit(out, cap, " ")
+        emit_cstr(out, cap, (&p_title[0]) as u64)
+        emit_lit(out, cap, " ")
+        emit_cstr(out, cap, (&p_icon[0]) as u64)
+        emit_lit(out, cap, "\n")
+    }
+    n_pages = n_pages + 1
+    p_fields = 0
+    p_open = 1
+    return true
+}
+
+fn convert(src: u64, len: u64, out: u64, cap: u64) -> u64 {
+    o = 0
+    full = 0
+    app_n = 0
+    n_pages = 0
+    p_open = 0
+    p_fields = 0
+    emit_lit(out, cap, "routes 1\n")
+    var at: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && route.rd(src, e) != 10 {
+            e = e + 1
+        }
+        let line: u64 = src + at
+        split(line, e - at)
+        if nw > 0 {
+            if word_is(line, 0, "app") && nw == 2 {
+                if app_n != 0 || !copy_word(line, 1, (&app[0]) as u64) {
+                    return NONE
+                }
+                app_n = wlen[1]
+            } else if word_is(line, 0, "page") {
+                flush(out, cap)
+                if !page_line(line, out, cap) {
+                    return NONE
+                }
+            } else if word_is(line, 0, "field") {
+                p_fields = p_fields + 1
+            }
+        }
+        at = e + 1
+    }
+    flush(out, cap)
+    if full == 1 || n_pages == 0 {
+        return NONE
+    }
+    route.wr(out, o, 0)
+    return o
+}

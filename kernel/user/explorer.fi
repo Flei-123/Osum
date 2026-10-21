@@ -104,6 +104,7 @@ import expmodell
 import expakt
 import exporte
 import expdlg
+import nav.folder
 import image
 import jpeg
 import gif
@@ -156,20 +157,6 @@ static mut dlgpuffer: [u8; 128] = [0 as u8; 128]
 static mut spalten: [u64; 4] = [0 as u64; 4]
 static mut lauf: [u8; 96] = [0 as u8; 96]
 
-// DER WEG, DEN MAN GEGANGEN IST -- VIERUNDSECHZIG SCHRITTE zurueck und
-// wieder vor (Pflichtpunkt 11; vorher waren es acht).
-//
-// GERECHNET, NICHT GERATEN: 64 Plaetze * 128 Oktette je Pfad = 8192
-// Oktette. Das Programmabbild hat von `kernel/proc.fi` 11 MiB
-// (IMAGE_BASE 0x40100000 .. IMAGE_END 0x40C00000); 8 KiB mehr BSS
-// faellt darin nicht auf. 128 Oktette je Eintrag sind dieselbe Laenge,
-// die `pfad` selbst hat -- ein Pfad, der nicht in `pfad` passt,
-// existiert in diesem Programm nicht.
-const HISTN: u64 = 64
-const HISTB: u64 = 128
-static mut hist: [u8; 8192] = [0 as u8; 8192]
-static mut hist_n: u64 = 0
-static mut hist_at: u64 = 0
 
 // ====================================================== RUNDE ALLTAG
 //
@@ -1452,42 +1439,26 @@ fn reiter_wechsel(nr: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
 }
 
 fn hist_push(p: u64) {
-    if hist_at >= HISTN {
-        // Voll: einen Platz nach vorn schieben. 63 * 128 Oktette sind
-        // 8 KiB Umkopieren im schlimmsten Fall, und der Fall tritt
-        // frueheste beim 65. Ordnerwechsel ein.
-        var i: u64 = 0
-        while i < HISTN - 1 {
-            var q: u64 = 0
-            while q < HISTB {
-                hist[(i * HISTB + q) as usize] =
-                    hist[((i + 1) * HISTB + q) as usize]
-                q = q + 1
-            }
-            i = i + 1
-        }
-        hist_at = HISTN - 1
-        hist_n = HISTN - 1
-    }
-    var k: u64 = 0
-    while k < HISTB - 8 && (*((p + k) as *mut u8)) != 0 as u8 {
-        hist[(hist_at * HISTB + k) as usize] = *((p + k) as *mut u8)
-        k = k + 1
-    }
-    hist[(hist_at * HISTB + k) as usize] = 0 as u8
-    hist_at = hist_at + 1
-    hist_n = hist_at
+    let _r: bool = folder.record(p)
     var s_h: [u8; 18] = "explorer: hist n=\0"
     var s_a: [u8; 5] = " at=\0"
     say((&s_h[0 as usize]) as u64)
-    sayn(hist_n)
+    sayn(folder.count())
     say((&s_a[0 as usize]) as u64)
-    sayn(hist_at)
+    sayn(folder.position() + 1)
     nl()
 }
 
-fn hist_get(i: u64) -> u64 {
-    return (&hist[0 as usize]) as u64 + i * HISTB
+fn hist_back(baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    if folder.step_back((&pfad[0 as usize]) as u64, 127) {
+        new_read(baum, tab, stat, fpfad)
+    }
+}
+
+fn hist_forward(baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    if folder.step_forward((&pfad[0 as usize]) as u64, 127) {
+        new_read(baum, tab, stat, fpfad)
+    }
 }
 
 fn eltern(p: u64) {
@@ -2318,28 +2289,20 @@ fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
         return 0
     }
     if taste == wlib.KEY_OLD_LEFT {
-        if hist_at > 1 {
-            hist_at = hist_at - 1
-            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_back(baum, tab, stat, fpfad)
         say((&s_t[0 as usize]) as u64)
         sayn(taste)
         say((&s_lz1[0 as usize]) as u64)
-        kv((&s_n[0 as usize]) as u64, hist_at)
+        kv((&s_n[0 as usize]) as u64, folder.position() + 1)
         nl()
         return 0
     }
     if taste == wlib.KEY_OLD_RIGHT {
-        if hist_at < hist_n {
-            hist_at = hist_at + 1
-            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_forward(baum, tab, stat, fpfad)
         say((&s_t[0 as usize]) as u64)
         sayn(taste)
         say((&s_lz1[0 as usize]) as u64)
-        kv((&s_n[0 as usize]) as u64, hist_at)
+        kv((&s_n[0 as usize]) as u64, folder.position() + 1)
         nl()
         return 0
     }
@@ -3890,17 +3853,9 @@ fn goto_to(idx: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     var t_data: [u8; 8] = "/data\0\0\0"
     var s_g: [u8; 18] = "explorer: gehezu \0"
     if idx == 0 {
-        if hist_at > 1 {
-            hist_at = hist_at - 1
-            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_back(baum, tab, stat, fpfad)
     } else if idx == 1 {
-        if hist_at < hist_n {
-            hist_at = hist_at + 1
-            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_forward(baum, tab, stat, fpfad)
     } else if idx == 2 {
         eltern((&pfad[0 as usize]) as u64)
         hist_push((&pfad[0 as usize]) as u64)
@@ -6026,17 +5981,9 @@ fn behandeln(key: u64) {
         hist_push(((&pfad[0 as usize]) as u64))
         new_read(baum, tab, stat, fpfad)
     } else if key == K_BZUR {
-        if hist_at > 1 {
-            hist_at = hist_at - 1
-            ulib.strcpy(((&pfad[0 as usize]) as u64), hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_back(baum, tab, stat, fpfad)
     } else if key == K_BVOR {
-        if hist_at < hist_n {
-            hist_at = hist_at + 1
-            ulib.strcpy(((&pfad[0 as usize]) as u64), hist_get(hist_at - 1))
-            new_read(baum, tab, stat, fpfad)
-        }
+        hist_forward(baum, tab, stat, fpfad)
     } else if key == K_BNEU {
         orte_anzeigen()
         new_read(baum, tab, stat, fpfad)
