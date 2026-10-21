@@ -14,10 +14,12 @@
 #     `rndis dead`, no panic after the unplug.
 # CONTROL RUN: same machine without device_del -> `keepalive ok` yes, `detached` never.
 #
-# UNPLUG PART IS OFF BY DEFAULT (USBHOT_UNPLUG=1 turns it on): a script boot (`script=sh ...`) never runs the loop that
-# calls usb.hotplug_work (kernel/kmain.fi usb_hold loop / kgui loop), so the port-change event is queued (S_PEND) but
-# `usb.gone` -> usbnet.unplug_slot never runs and `usbnet: detached` is not printed (measured, r1501). Until the unplug
-# is driven from a loop that exists in a script boot, the default run covers link up + keepalive + control.
+# UNPLUG: the long run (script boot, `script=sh ...`) never runs the loop that calls usb.hotplug_work, so a plug pulled
+# there stays queued (S_PEND) and `usbnet: detached` is not printed (measured, r1501; it is also why USBHOT_UNPLUG=1
+# stays off in that run). The unplug is therefore measured in run 3 on the loop that DOES exist in a script boot:
+# the `usbhold` window of kernel/kmain.fi usb_hold (hotplug_work every tick, 900 ticks, before the script starts):
+# wait for `k17: hold`, `device_del devn1`, expect `usbnet: detached`, `k17: free`, the script's `==ALIVE==`
+# afterwards, no `rndis dead`, no panic. Control: same machine, no device_del -> never detached.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$HERE"
@@ -91,9 +93,50 @@ grep -aq 'usbnet: rndis keepalive ok' "$C" && ok "control: keepalive ok without 
 grep -aq 'usbnet: detached' "$C" && bad "control: detached without device_del" || ok "control: never detached"
 grep -aq 'usbnet: rndis dead' "$C" && bad "control: rndis dead on a healthy link" || ok "control: link stays alive"
 
+# --- run 3: unplug inside the usbhold window (the one hotplug loop of a script boot), kernel must live on
+start3() { # name script plan  (usbhold: the kernel services USB hot plug for 900 ticks before the script starts)
+    local name=$1 script=$2
+    timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
+        -append "osum nokbd nosched noproc nofs noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
+        -serial "file:$T/$name.txt" -display none -no-reboot \
+        -monitor "unix:$T/$name.mon,server,nowait" -pidfile "$T/$name.pid" \
+        -drive "file=$T/d.img,format=raw,if=ide,index=0" \
+        -device qemu-xhci,id=x0 -netdev user,id=n0 -device usb-net,id=devn1,netdev=n0,mac=$MAC \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+}
+gen 2 "$T/s_short.sh"
+python3 tools/osum/mkfs.py build "$T/d3.img" 8000 /bin/ /t/ /etc/ \
+    /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
+    /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" \
+    /t/s_short.sh="$T/s_short.sh" > "$T/mkfs3.txt" 2>&1 || { tail "$T/mkfs3.txt"; exit 1; }
+cp "$T/d3.img" "$T/d.img"
+printf 'aufzeile k17: hold\nziehe n1\naufzeile usbnet: detached\naufzeile k17: free\n' > "$T/plan3.txt"
+start3 pull s_short.sh
+python3 -I tools/hotplug/monitor.py "$T/pull.mon" "$T/pull.txt" "$T/plan3.txt" > "$T/mon3.txt" 2>&1
+mrc3=$?
+[ "$mrc3" = 0 ] && ok "run 3 monitor plan: hold window, unplug, detached, free all seen" || { bad "run 3 monitor plan rc=$mrc3"; tail -8 "$T/mon3.txt"; }
+for i in $(seq 1 60); do grep -aq '==ALIVE==' "$T/pull.txt" && break; sleep 2; done
+stop pull; clean pull
+U="$T/pull.klar"
+grep -aq 'driver=rndis' "$U" && ok "run 3: device bound to driver rndis before the unplug" || bad "run 3: driver not bound"
+nd3=$(grep -ac 'usbnet: detached' "$U")
+[ "$nd3" = 1 ] && ok "run 3: detached exactly once" || bad "run 3: detached $nd3 times"
+l1=$(grep -an 'k17: hold' "$U" | head -1 | cut -d: -f1); l2=$(grep -an 'usbnet: detached' "$U" | head -1 | cut -d: -f1)
+l3=$(grep -an 'k17: free' "$U" | head -1 | cut -d: -f1); l4=$(grep -an '==ALIVE==' "$U" | head -1 | cut -d: -f1)
+[ -n "$l1" ] && [ -n "$l2" ] && [ -n "$l3" ] && [ -n "$l4" ] && [ "$l1" -lt "$l2" ] && [ "$l2" -lt "$l3" ] && [ "$l3" -lt "$l4" ] \
+    && ok "run 3: order hold < detached < free < ALIVE ($l1 < $l2 < $l3 < $l4)" || bad "run 3: order hold/detached/free/ALIVE ($l1/$l2/$l3/$l4)"
+grep -aq 'usbnet: rndis dead' "$U" && bad "run 3: rndis dead reported" || ok "run 3: no 'rndis dead'"
+grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$U" && bad "run 3: panic/exception in log" || ok "run 3: no panic/exception"
+# control: same machine, nobody pulls the plug -> never detached
+start3 keep s_short.sh
+for i in $(seq 1 70); do grep -aq '==ALIVE==' "$T/keep.txt" && break; sleep 2; done
+stop keep; clean keep
+grep -aq 'k17: free' "$T/keep.klar" && ok "run 3 control: hold window ran to its end" || bad "run 3 control: no 'k17: free'"
+grep -aq 'usbnet: detached' "$T/keep.klar" && bad "run 3 control: detached without device_del" || ok "run 3 control: never detached"
+
 echo "USBHOT: $pass ok, $fail fail"
 if [ "$fail" -gt 0 ]; then
-    grep -a "usb\|netdev\|rndis\|ALIVE" "$H" | head -30
+    grep -a "usb\|netdev\|rndis\|ALIVE\|k17" "$H" "$U" | head -40
     exit 1
 fi
 exit 0
