@@ -4,8 +4,9 @@ profile kernel
 import lib.kstate
 import mm.mem
 import sched.time
+import serial
 
-export { note, field, reset, page, total, rec, SLOTS, F_COUNT, F_LAST, F_SUM, F_GAPS, F_MAX, F_GAP, GAP_CAP_US }
+export { parse, tick, note, field, reset, page, total, cost, rec, SLOTS, F_COUNT, F_LAST, F_SUM, F_GAPS, F_MAX, F_GAP, GAP_CAP_US }
 
 const SLOTS: u64 = 32
 const REC_WORDS: u64 = 15
@@ -20,6 +21,17 @@ const GAP_CAP_US: u64 = 1000000
 
 static mut pg: u64 = 0
 static mut seen: u64 = 0
+static mut spent: u64 = 0
+static mut every: u64 = 0
+static mut due: u64 = 0
+
+static mut w_dump: [u8; 12] = "framesdump=\0"
+static mut t_win: [u8; 13] = "frames: win=\0"
+static mut t_pres: [u8; 11] = " presents=\0"
+static mut t_avg: [u8; 9] = " avg_us=\0"
+static mut t_max: [u8; 9] = " max_us=\0"
+static mut t_tot: [u8; 15] = "frames: total=\0"
+static mut t_cyc: [u8; 11] = " note_cyc=\0"
 
 fn rd(a: u64) -> u64 {
     return __mmio_read64(a as *mut u64)
@@ -39,6 +51,10 @@ fn page() -> u64 {
 
 fn total() -> u64 {
     return seen
+}
+
+fn cost() -> u64 {
+    return spent
 }
 
 fn ensure(state: u64) -> u64 {
@@ -94,6 +110,7 @@ fn note(state: u64, i: u64) {
     }
     let r: u64 = rec(i)
     let now: u64 = time.tsc()
+    let t0: u64 = now
     let n: u64 = rd(r + F_COUNT * 8)
     let last: u64 = rd(r + F_LAST * 8)
     if n > 0 && now > last {
@@ -110,4 +127,74 @@ fn note(state: u64, i: u64) {
     wr(r + F_COUNT * 8, n + 1)
     wr(r + F_LAST * 8, now)
     seen = seen + 1
+    let t1: u64 = time.tsc()
+    if t1 > t0 {
+        spent = spent + (t1 - t0)
+    }
+}
+
+fn word_at(cmd: u64, i: u64) -> bool {
+    var k: u64 = 0
+    while k < 11 {
+        if kstate.get8(cmd + i + k) != kstate.get8((&w_dump[0]) as u64 + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return i == 0 || kstate.get8(cmd + i - 1) == 32
+}
+
+fn parse(cmd: u64) {
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        if word_at(cmd, i) {
+            var v: u64 = 0
+            var n: u64 = 0
+            while n < 7 && kstate.get8(cmd + i + 11 + n) >= 48 && kstate.get8(cmd + i + 11 + n) <= 57 {
+                v = v * 10 + (kstate.get8(cmd + i + 11 + n) - 48)
+                n = n + 1
+            }
+            every = v
+        }
+        i = i + 1
+    }
+}
+
+fn say(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+}
+
+fn tick(state: u64) {
+    if every == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < due {
+        return
+    }
+    due = now + every
+    var i: u64 = 0
+    while i < SLOTS {
+        let r: u64 = rec(i)
+        if r != 0 && field(r, F_COUNT) != 0 {
+            var avg: u64 = 0
+            if field(r, F_GAPS) != 0 {
+                avg = field(r, F_SUM) / field(r, F_GAPS)
+            }
+            say((&t_win[0]) as u64, i)
+            say((&t_pres[0]) as u64, field(r, F_COUNT))
+            say((&t_avg[0]) as u64, avg)
+            say((&t_max[0]) as u64, field(r, F_MAX))
+            serial.nl()
+        }
+        i = i + 1
+    }
+    var per: u64 = 0
+    if seen != 0 {
+        per = spent / seen
+    }
+    say((&t_tot[0]) as u64, seen)
+    say((&t_cyc[0]) as u64, per)
+    serial.nl()
 }
