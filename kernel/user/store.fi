@@ -80,6 +80,11 @@ static mut T_PICK: [u8; 21] = "Zuerst ein Programm.\0"
 static mut T_RIGHTS: [u8; 60] = "Installieren/Entfernen: nur Administrator (/etc/store.conf)\0"
 static mut T_SENT: [u8; 13] = "Angefordert.\0"
 static mut T_ASKSYS: [u8; 50] = "Bitte im Systemdialog bestätigen (J = erlauben).\0"
+static mut T_REJECTED: [u8; 47] = "Abgelehnt (Nein im Systemdialog oder Zeit um).\0"
+static mut K_NOREQ: [u8; 16] = "no_such_request\0"
+static mut V_CONFIRM: [u8; 9] = "confirm \0"
+static mut s_askno: u64 = 0 // token number of the question in the system dialog (0 = none)
+static mut s_grace: u64 = 0 // polls to wait for the provider after the question is gone
 static mut K_USEDLG: [u8; 11] = "use_dialog\0"
 static mut T_SIZE_B: [u8; 3] = " B\0"
 static mut T_SIZE_K: [u8; 4] = " kB\0"
@@ -715,6 +720,18 @@ fn call_verb(verb: u64, name: u64) -> bool {
         ulib.sayu(rc)
         ulib.nl()
         set_status((&T_ASKSYS[0 as usize]) as u64, 0)
+        // the token number is the second word of the reply line: "confirm <n> ..."
+        var cl: [u8; 40] = [0 as u8; 40]
+        let cp: u64 = (&cl[0 as usize]) as u64
+        s_askno = 0
+        s_grace = 0
+        if actcli.line(0, cp, 40) {
+            var q: u64 = 0
+            while (*((cp + q) as *mut u8)) != 0 as u8 && (*((cp + q) as *mut u8)) != 32 as u8 {
+                q = q + 1
+            }
+            s_askno = parse_num(cp + q + 1)
+        }
         s_pct = 2
         s_pct_srv = 0
         return true
@@ -740,6 +757,40 @@ fn call_verb(verb: u64, name: u64) -> bool {
         set_status((&T_FAIL[0 as usize]) as u64, lp2)
     }
     return false
+}
+
+// The question went to the system dialog. Still open -> keep waiting (the broker refuses our own
+// `confirm` with use_dialog while it stands). Gone -> the answer was yes (the provider starts within a few
+// polls: status goes busy) or no / timeout (nothing starts: say so).
+fn ask_check() {
+    if s_grace > 0 {
+        s_grace = s_grace - 1
+        if s_grace == 0 {
+            s_askno = 0
+            s_pct = 0
+            set_status((&T_REJECTED[0 as usize]) as u64, 0)
+            return
+        }
+        s_busy = true
+        return
+    }
+    if !actcli.open() {
+        s_askno = 0
+        return
+    }
+    actcli.req_num((&V_CONFIRM[0 as usize]) as u64, s_askno)
+    let rc: u64 = actcli.send(300)
+    var ln: [u8; 80] = [0 as u8; 80]
+    let lp: u64 = (&ln[0 as usize]) as u64
+    let _l: bool = actcli.line(0, lp, 80)
+    if rc != actcli.R_ERR || ulib.find(lp, (&K_USEDLG[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
+        s_busy = true
+    } else if ulib.find(lp, (&K_NOREQ[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
+        s_grace = 6
+        s_busy = true
+    } else {
+        s_askno = 0
+    }
 }
 
 // ------------------------------------------------------------------ painting helpers
@@ -1718,6 +1769,9 @@ fn u_start(args: u64) -> u64 {
             if now - s_polled > 250 {
                 s_polled = now
                 load_status()
+                if !s_busy && s_askno != 0 {
+                    ask_check()
+                }
                 // the provider reports the stages; the bar shows exactly those, nothing in between
                 if s_pct_srv > s_pct {
                     s_pct = s_pct_srv
