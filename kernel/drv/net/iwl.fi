@@ -18,6 +18,13 @@
 // the command register gets the MEM bit, otherwise BAR0 cannot be read.
 // That is logged ("iwl: memory space was off").
 //
+// LW-3a (after the filesystem is mounted, `fw_stage`): for every target the firmware candidates of
+// lib/wlan/iwl_fwsel.fi are looked up through the VFS (/lib/firmware/intel/iwlwifi/...), the first file that exists
+// is read and parsed (lib/wlan/iwl_fw.fi); serial lines `iwl: fw file=<path> size=<n>` and
+// `iwl: fw rc=<n> ver=<n> lmac=<n> umac=<n> paging=<n>`. Still no device write. Only with the kernel word `iwlboot`
+// the sections are copied into DMA frames, the context-info page is built and `iwl_alive.boot_fw` runs
+// (`iwl: boot rc=<n>`). Kernel word `iwlfwtest` runs the same lookup + parse for a synthetic AX201 (QEMU gate).
+//
 // NOT MEASURED on real hardware yet: this file exists so that ONE boot of
 // HOLO-LAPTOP-3 returns real numbers for M2/M3 (docs/WLAN-AX201.md).
 
@@ -28,10 +35,26 @@ import lib.kstate
 import bus.pci
 import arch.x86_64.apic
 import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_fwsel
+import wlan.iwl_ctxt
+import wlan.iwl_alive
+import mm.mem
+import fs.vfs
+import fs.vfsops
 
 export {
-    boot, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP
+    boot, fw_stage, fw_load, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
+    E_FW_NONE, E_FW_PARSE, E_FW_MEM, E_FW_IMAGE
 }
+
+const E_FW_NONE: i64 = -40 // no candidate file exists
+const E_FW_PARSE: i64 = -41 // iwl_fw.fw_parse refused the file
+const E_FW_MEM: i64 = -42 // no DMA frames
+const E_FW_IMAGE: i64 = -43 // image lacks an lmac or umac section, or ctxt_check failed
+const FW_FRAMES: u64 = 768 // 3 MiB read buffer
+const TEST_REV: u64 = 0x351 // synthetic AX201 (word iwlfwtest)
+const TEST_RF: u64 = 0x0010A110
 
 const CFG_COMMAND: u64 = 0x04
 const CMD_MEM: u64 = 0x2
@@ -200,6 +223,222 @@ fn boot(state: u64) {
             serial.puts((&s_ifc[0]) as u64)
             pci.hexn(p.if_config, 8)
             serial.nl()
+        }
+        k = k + 1
+    }
+}
+
+fn zero_run(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let q: *mut u64 = (a + i) as *mut u64
+        *q = 0
+        i = i + 8
+    }
+}
+
+fn copy_bytes(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let d: *mut u8 = (dst + i) as *mut u8
+        let t: *mut u8 = (src + i) as *mut u8
+        *d = *t
+        i = i + 1
+    }
+}
+
+fn dma_pages(state: u64, n: u64) -> u64 {
+    let a: u64 = mem.frame_run(state, n)
+    if a == 0 {
+        return 0
+    }
+    zero_run(a, n * 4096)
+    return a
+}
+
+// Read the first candidate firmware file that exists into `buf` (capacity `cap`). Returns its size, 0 = none.
+// `path` (>= 96 octets) holds the path of the file that was read.
+fn fw_load(state: u64, rev: u64, rf: u64, buf: u64, cap: u64, path: u64) -> u64 {
+    var s_miss: [u8; 17] = "iwl: fw missing \0"
+    let n: u64 = iwl_fwsel.candidate_count(rev, rf)
+    var i: u64 = 0
+    while i < n {
+        let _l: usize = iwl_fwsel.candidate_path(rev, rf, i, path)
+        let m: u64 = vfs.mount_for(state, path)
+        var found: u64 = 0
+        if m < vfs.MAX_MNT {
+            let node: u64 = vfs.node_for(state, m, path)
+            if node != 0 {
+                let size: u64 = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+                if size > 0 && size <= cap {
+                    var off: u64 = 0
+                    var stop: bool = false
+                    while off < size && !stop {
+                        var want: u64 = size - off
+                        if want > 4096 {
+                            want = 4096
+                        }
+                        let got: u64 = vfs.v_read(state, m, node, off, buf + off, want)
+                        if got == 0 {
+                            stop = true
+                        } else {
+                            off = off + got
+                        }
+                    }
+                    if off == size {
+                        found = size
+                    }
+                }
+            }
+        }
+        if found != 0 {
+            return found
+        }
+        serial.puts((&s_miss[0]) as u64)
+        serial.puts(path)
+        serial.nl()
+        i = i + 1
+    }
+    return 0
+}
+
+// Load + parse for one device identity; logs both lines. Returns 0 (f filled, blob in `buf`) or E_FW_*.
+fn fw_prepare(state: u64, rev: u64, rf: u64, buf: u64, f: *mut iwl_fw.FwInfo) -> i64 {
+    var s_file: [u8; 14] = "iwl: fw file=\0"
+    var s_size: [u8; 7] = " size=\0"
+    var s_rc: [u8; 12] = "iwl: fw rc=\0"
+    var s_ver: [u8; 6] = " ver=\0"
+    var s_l: [u8; 7] = " lmac=\0"
+    var s_u: [u8; 7] = " umac=\0"
+    var s_p: [u8; 9] = " paging=\0"
+    var path: [u8; 96] = [0 as u8; 96]
+    let size: u64 = fw_load(state, rev, rf, buf, FW_FRAMES * 4096, (&path[0]) as u64)
+    if size == 0 {
+        return E_FW_NONE
+    }
+    serial.puts((&s_file[0]) as u64)
+    serial.puts((&path[0]) as u64)
+    serial.puts((&s_size[0]) as u64)
+    serial.dec(size)
+    serial.nl()
+    let rc: i64 = iwl_fw.fw_parse(buf, size as usize, f)
+    serial.puts((&s_rc[0]) as u64)
+    if rc < 0 {
+        serial.put(45 as u8)
+        serial.dec((0 - rc) as u64)
+        serial.nl()
+        return E_FW_PARSE
+    }
+    serial.dec(rc as u64)
+    serial.puts((&s_ver[0]) as u64)
+    serial.dec((*f).ver)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(iwl_fw.fw_kind_count(f, iwl_fw.IMG_RT, iwl_fw.KIND_LMAC))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(iwl_fw.fw_kind_count(f, iwl_fw.IMG_RT, iwl_fw.KIND_UMAC))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(iwl_fw.fw_kind_count(f, iwl_fw.IMG_RT, iwl_fw.KIND_PAGING))
+    serial.nl()
+    return 0
+}
+
+// Opt-in (word `iwlboot`): copy the runtime image into DMA frames, build the context-info page, power the chip up,
+// kick the firmware and wait for ALIVE. Writes device registers; NOT MEASURED on silicon.
+fn fw_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo) -> i64 {
+    var bus: [u64; 32] = [0 as u64; 32]
+    let n: usize = iwl_fw.fw_sec_count(f, iwl_fw.IMG_RT)
+    if n == 0 || n > 32 {
+        return E_FW_IMAGE
+    }
+    var i: usize = 0
+    while i < n {
+        let l: u64 = iwl_fw.fw_sec_len(f, iwl_fw.IMG_RT, i)
+        let pages: u64 = (l + 4095) / 4096
+        let a: u64 = dma_pages(state, pages)
+        if a == 0 {
+            return E_FW_MEM
+        }
+        copy_bytes(a, blob + iwl_fw.fw_sec_off(f, iwl_fw.IMG_RT, i), l)
+        bus[i] = a
+        i = i + 1
+    }
+    let page: u64 = dma_pages(state, 1)
+    let rbf: u64 = dma_pages(state, 1)
+    let rbu: u64 = dma_pages(state, 1)
+    let st: u64 = dma_pages(state, 1)
+    let tfd: u64 = dma_pages(state, 1)
+    if page == 0 || rbf == 0 || rbu == 0 || st == 0 || tfd == 0 {
+        return E_FW_MEM
+    }
+    iwl_ctxt.ctxt_init(page, (*p).hw_rev, 8)
+    var r: i64 = iwl_ctxt.ctxt_set_rbd(page, rbf, rbu, st)
+    if r != 0 {
+        return r
+    }
+    r = iwl_ctxt.ctxt_set_hcmd(page, tfd, 5)
+    if r != 0 {
+        return r
+    }
+    r = iwl_ctxt.ctxt_fill_dram(page, f, iwl_fw.IMG_RT, (&bus[0]) as u64)
+    if r != 0 {
+        return r
+    }
+    if !iwl_ctxt.ctxt_check(page, (*p).hw_rev) {
+        return E_FW_IMAGE
+    }
+    return iwl_alive.boot_fw(p, page)
+}
+
+// After the filesystem is mounted: firmware lookup for every target (read-only), or for a synthetic AX201 with the
+// word `iwlfwtest`, and the opt-in boot with the word `iwlboot`.
+fn fw_stage(state: u64) {
+    var s_none: [u8; 17] = "iwl: fw no file\0\0"
+    var s_boot: [u8; 14] = "iwl: boot rc=\0"
+    var s_test: [u8; 15] = "iwl: fw test\0\0\0"
+    var s_bad: [u8; 21] = "iwl: fw load failed\0\0"
+    let test: bool = kstate.mode_on(state, kstate.M_IWLFWTEST)
+    let n: u64 = count_targets(state)
+    if n == 0 && !test {
+        return
+    }
+    let buf: u64 = dma_pages(state, FW_FRAMES)
+    if buf == 0 {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return
+    }
+    var f: iwl_fw.FwInfo = iwl_fw.fwinfo_new()
+    if test {
+        serial.puts((&s_test[0]) as u64)
+        serial.nl()
+        let rt: i64 = fw_prepare(state, TEST_REV, TEST_RF, buf, &f)
+        if rt == E_FW_NONE {
+            serial.puts((&s_none[0]) as u64)
+            serial.nl()
+        }
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        let i: u64 = target_at(state, k)
+        var p: iwl_probe.Probe = iwl_probe.probe_new()
+        let r: i64 = probe_at(state, i, &p, false)
+        if r == 0 {
+            let rf: i64 = fw_prepare(state, p.hw_rev, p.rf_id, buf, &f)
+            if rf == E_FW_NONE {
+                serial.puts((&s_none[0]) as u64)
+                serial.nl()
+            } else if rf == 0 && kstate.mode_on(state, kstate.M_IWLBOOT) {
+                let br: i64 = fw_boot(state, &p, buf, &f)
+                serial.puts((&s_boot[0]) as u64)
+                if br < 0 {
+                    serial.put(45 as u8)
+                    serial.dec((0 - br) as u64)
+                } else {
+                    serial.dec(br as u64)
+                }
+                serial.nl()
+            }
         }
         k = k + 1
     }

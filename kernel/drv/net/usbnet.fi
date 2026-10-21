@@ -28,7 +28,14 @@
 //   divisor/remainder/alignment the device reported, RX walks the datagram list of each NTB (several per transfer
 //   possible; the transfer is re-queued after the last one). usb.fi `ncm_start` does the bring-up.
 //
-// NOT HERE: hot unplug, halted-endpoint recovery on the bulk pipes, RNDIS keepalive/indications.
+// RNDIS control housekeeping (LW-1a): no interrupt endpoint is armed (usb.fi owns those for HID). Every
+//   HOUSE_TICKS the driver sends one command on the control pipe (media-status QUERY, every third round a
+//   host KEEPALIVE) and fetches the answer ~2 ticks later. A device keepalive or an indication found while
+//   fetching is answered/applied (rndis.answer_keepalive / indicate_link / link_status_value). Three rounds
+//   without any answer mark the function dead (link down). `link_on` 0 = unknown, 1 = up, 2 = down.
+// Hot unplug (LW-1a): usb.fi `gone` calls `unplug_slot`; the card stays registered but not ready.
+//
+// NOT HERE: halted-endpoint recovery on the bulk pipes.
 
 import lib.kstate
 import serial
@@ -36,9 +43,10 @@ import mm.mem
 import drv.usb.xhci
 import usbnet.rndis
 import usbnet.ncm
+import usbnet.ch397
 
 export {
-    attach, attach_rndis, attach_ncm, detach, exists, present_on, ready_on, up_on, mac_at_on,
+    attach, attach_rndis, attach_ncm, attach_ch336, detach, unplug_slot, link_on, keepalives, exists, present_on, ready_on, up_on, mac_at_on,
     rx_take_on, rx_recycle_on, tx_room_on, tx_frame_on, poll_on,
     rx_frames_on, tx_frames_on, tx_drops_on, rx_octets_on, tx_octets_on,
     errors, MAX_UNITS, FRAME_MAX
@@ -67,7 +75,7 @@ const C_RXB: u64 = 0x50
 const C_TXB: u64 = 0x58
 const C_DROP: u64 = 0x60
 const C_ERR: u64 = 0x68
-const C_MODE: u64 = 0x70 // 0 = CDC-ECM, 1 = RNDIS, 2 = CDC-NCM
+const C_MODE: u64 = 0x70 // 0 = CDC-ECM, 1 = RNDIS, 2 = CDC-NCM, 3 = WCH CH336
 const C_RXOFF: u64 = 0x78 // RNDIS: next packet inside the RX transfer
 const C_RXLEN: u64 = 0x80 // RNDIS: octets of the RX transfer still being unpacked (0 = none)
 const C_NDIV: u64 = 0x88 // NCM: device OUT divisor / remainder / alignment / max NTB size
@@ -75,6 +83,22 @@ const C_NREM: u64 = 0x90
 const C_NALIGN: u64 = 0x98
 const C_NOUTMAX: u64 = 0xA0
 const C_NSEQ: u64 = 0xA8 // NCM: next NTH sequence number
+const C_IFACE: u64 = 0xB0 // RNDIS: control interface number
+const C_NEXT: u64 = 0xB8 // RNDIS: tick of the next housekeeping step
+const C_PEND: u64 = 0xC0 // RNDIS: 0 idle, 1 query sent, 2 keepalive sent
+const C_LINK: u64 = 0xC8 // 0 unknown, 1 up, 2 down
+const C_KAS: u64 = 0xD0 // RNDIS: keepalive completions received
+const C_KAA: u64 = 0xD8 // RNDIS: device keepalives answered
+const C_MISS: u64 = 0xE0 // RNDIS: rounds without an answer
+const C_CID: u64 = 0xE8 // RNDIS: request id counter
+const C_ROUND: u64 = 0xF0 // RNDIS: housekeeping round counter
+const CMD_OFF: u64 = 0x200
+const RSP_OFF: u64 = 0x300
+const HOUSE_TICKS: u64 = 300
+const FETCH_TICKS: u64 = 2
+const MISS_MAX: u64 = 3
+const CTL_OUT: u64 = 0x21
+const CTL_IN: u64 = 0xA1
 const RXA_OFF: u64 = 0x800
 const HOLD_OFF: u64 = 0x1000
 const TX_OFF: u64 = 0x1800
@@ -122,8 +146,18 @@ fn attach(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) ->
 }
 
 // r811: the RNDIS function (already initialised by usb.fi).
-fn attach_rndis(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
-    return attach_mode(state, slot, indci, outdci, mps, mac, 1)
+fn attach_rndis(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64, iface: u64) -> bool {
+    if !attach_mode(state, slot, indci, outdci, mps, mac, 1) {
+        return false
+    }
+    cs(state, C_IFACE, iface)
+    cs(state, C_NEXT, ticks(state) + 50)
+    return true
+}
+
+// LW-1a: WCH CH336/CH339/CH396/CH397 vendor-class function (lib/usbnet/ch397.fi framing, unverified on silicon).
+fn attach_ch336(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u64) -> bool {
+    return attach_mode(state, slot, indci, outdci, mps, mac, 3)
 }
 
 // r811: the NCM function (already configured by usb.fi): `div/rem/align/outmax` are the device's NTB OUT rules.
@@ -165,6 +199,15 @@ fn attach_mode(state: u64, slot: u64, indci: u64, outdci: u64, mps: u64, mac: u6
     cs(state, C_MODE, mode)
     cs(state, C_RXOFF, 0)
     cs(state, C_RXLEN, 0)
+    cs(state, C_IFACE, 0)
+    cs(state, C_NEXT, 0)
+    cs(state, C_PEND, 0)
+    cs(state, C_LINK, 0)
+    cs(state, C_KAS, 0)
+    cs(state, C_KAA, 0)
+    cs(state, C_MISS, 0)
+    cs(state, C_CID, 100)
+    cs(state, C_ROUND, 0)
     let i: u64 = xhci.ep_find(state, slot, indci)
     if i >= xhci.MAX_EP {
         return false
@@ -178,6 +221,147 @@ fn detach(state: u64) {
     cs(state, C_READY, 0)
 }
 
+fn ticks(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS)
+}
+
+fn say(msg: u64) {
+    serial.puts(msg)
+    serial.nl()
+}
+
+// LW-1a hot unplug: usb.fi `gone` calls this for every removed device. Only the function that owns `slot` is
+// switched off; counters stay readable.
+fn unplug_slot(state: u64, slot: u64) {
+    var s_det: [u8; 17] = "usbnet: detached\0"
+    if blk(state) == 0 || cg(state, C_READY) == 0 || cg(state, C_SLOT) != slot {
+        return
+    }
+    cs(state, C_READY, 0)
+    cs(state, C_HOLD, 0)
+    cs(state, C_RXLEN, 0)
+    cs(state, C_PEND, 0)
+    say((&s_det[0]) as u64)
+}
+
+fn link_on(state: u64, u: u64) -> u64 {
+    if u != 0 {
+        return 0
+    }
+    return cg(state, C_LINK)
+}
+
+fn keepalives(state: u64) -> u64 {
+    return cg(state, C_KAS) + cg(state, C_KAA)
+}
+
+fn link_set(state: u64, v: u64) {
+    var s_up: [u8; 23] = "usbnet: rndis link up\0\0"
+    var s_dn: [u8; 25] = "usbnet: rndis link down\0\0"
+    if v == 0 || cg(state, C_LINK) == v {
+        return
+    }
+    cs(state, C_LINK, v)
+    if v == 1 {
+        say((&s_up[0]) as u64)
+    } else {
+        say((&s_dn[0]) as u64)
+    }
+}
+
+fn ctl_send(state: u64, n: u64) -> bool {
+    return xhci.control(state, cg(state, C_SLOT), CTL_OUT, 0x00, 0, cg(state, C_IFACE), n,
+        blk(state) + CMD_OFF, false) >= 0
+}
+
+fn house_miss(state: u64) {
+    var s_dead: [u8; 19] = "usbnet: rndis dead\0"
+    let m: u64 = cg(state, C_MISS) + 1
+    cs(state, C_MISS, m)
+    if m == MISS_MAX {
+        cs(state, C_LINK, 2)
+        say((&s_dead[0]) as u64)
+    }
+}
+
+fn house_msg(state: u64, p: u64, n: u64) {
+    var s_ka: [u8; 28] = "usbnet: rndis keepalive ok\0\0"
+    var s_kd: [u8; 31] = "usbnet: rndis keepalive answer\0"
+    let t: u64 = rndis.msg_type(p, n)
+    cs(state, C_MISS, 0)
+    if t == rndis.MSG_QUERY_C {
+        link_set(state, rndis.link_status_value(p, n))
+    } else if t == rndis.MSG_KEEPALIVE_C {
+        cs(state, C_KAS, cg(state, C_KAS) + 1)
+        if cg(state, C_KAS) == 1 {
+            say((&s_ka[0]) as u64)
+        }
+        if cg(state, C_LINK) == 2 {
+            link_set(state, 1)
+        }
+    } else if t == rndis.MSG_KEEPALIVE {
+        let k: u64 = rndis.answer_keepalive(p, n, blk(state) + CMD_OFF)
+        if k != 0 && ctl_send(state, k) {
+            cs(state, C_KAA, cg(state, C_KAA) + 1)
+            say((&s_kd[0]) as u64)
+        }
+    } else if t == rndis.MSG_INDICATE {
+        link_set(state, rndis.indicate_link(p, n))
+    }
+}
+
+fn house(state: u64) {
+    let now: u64 = ticks(state)
+    if now < cg(state, C_NEXT) {
+        return
+    }
+    let b: u64 = blk(state)
+    if cg(state, C_PEND) == 0 {
+        let id: u64 = cg(state, C_CID) + 1
+        let round: u64 = cg(state, C_ROUND)
+        cs(state, C_CID, id)
+        cs(state, C_ROUND, round + 1)
+        var n: u64 = 0
+        var kind: u64 = 1
+        let c: u64 = b + CMD_OFF
+        var i: u64 = 0
+        while i < 8 {
+            let z: *mut u64 = (c + i * 8) as *mut u64
+            *z = 0
+            i = i + 1
+        }
+        if round % 3 == 2 {
+            n = rndis.build_keepalive(c, id)
+            kind = 2
+        } else {
+            n = rndis.build_query(c, id, rndis.OID_GEN_MEDIA_CONNECT_STATUS)
+        }
+        if !ctl_send(state, n) {
+            house_miss(state)
+            cs(state, C_NEXT, now + HOUSE_TICKS)
+            return
+        }
+        cs(state, C_PEND, kind)
+        cs(state, C_NEXT, now + FETCH_TICKS)
+        return
+    }
+    cs(state, C_PEND, 0)
+    cs(state, C_NEXT, now + HOUSE_TICKS)
+    let r: u64 = b + RSP_OFF
+    var j: u64 = 0
+    while j < 16 {
+        let z: *mut u64 = (r + j * 8) as *mut u64
+        *z = 0
+        j = j + 1
+    }
+    let got: i64 = xhci.control(state, cg(state, C_SLOT), CTL_IN, 0x01, 0, cg(state, C_IFACE), 128, r, true)
+    if got < 12 {
+        house_miss(state)
+        return
+    }
+    house_msg(state, r, got as u64)
+}
+
 fn present_on(state: u64, u: u64) -> bool {
     return u == 0 && blk(state) != 0
 }
@@ -187,7 +371,7 @@ fn ready_on(state: u64, u: u64) -> bool {
 }
 
 fn up_on(state: u64, u: u64) -> bool {
-    return ready_on(state, u)
+    return ready_on(state, u) && cg(state, C_LINK) != 2
 }
 
 fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
@@ -207,6 +391,9 @@ fn poll_on(state: u64, u: u64) -> bool {
         return false
     }
     xhci.drain(state)
+    if cg(state, C_MODE) == 1 {
+        house(state)
+    }
     if cg(state, C_HOLD) != 0 {
         return false
     }
@@ -230,6 +417,9 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     if cg(state, C_RXLEN) != 0 {
         if cg(state, C_MODE) == 2 {
             return ncm_next(state, frame, slot)
+        }
+        if cg(state, C_MODE) == 3 {
+            return ch_next(state, frame, slot)
         }
         return rndis_next(state, frame, slot)
     }
@@ -259,6 +449,11 @@ fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
         cs(state, C_RXOFF, 0)
         cs(state, C_RXLEN, n)
         return rndis_next(state, frame, slot)
+    }
+    if cg(state, C_MODE) == 3 {
+        cs(state, C_RXOFF, 0)
+        cs(state, C_RXLEN, n)
+        return ch_next(state, frame, slot)
     }
     if cg(state, C_MODE) == 2 {
         if !ncm.ntb_ok(blk(state) + RXA_OFF, n) {
@@ -360,6 +555,41 @@ fn ncm_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     return 0
 }
 
+// LW-1a: take the next frame out of a CH336 bulk transfer ([len u32][4 octets][frame][pad to 4]...). The transfer is
+// re-queued after the last frame, and only after the frame was copied out of the RX buffer.
+fn ch_next(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let b: u64 = blk(state)
+    let p: u64 = b + RXA_OFF
+    let off: u64 = cg(state, C_RXOFF)
+    let len: u64 = cg(state, C_RXLEN)
+    if off + 8 > len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let fl: u64 = ch397.rx_frame_len(p, len as usize, off as usize) as u64
+    if fl == 0 {
+        cs(state, C_ERR, cg(state, C_ERR) + 1)
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+        return 0
+    }
+    let fo: u64 = ch397.rx_frame_off(off as usize) as u64
+    let nx: u64 = ch397.rx_next(p, len as usize, off as usize) as u64
+    copy(b + HOLD_OFF, p + fo, fl)
+    cs(state, C_RXOFF, nx)
+    if nx == 0 || nx + 8 > len {
+        cs(state, C_RXLEN, 0)
+        requeue(state)
+    }
+    cs(state, C_HOLD, 1)
+    cs(state, C_RXP, cg(state, C_RXP) + 1)
+    cs(state, C_RXB, cg(state, C_RXB) + fl)
+    *frame = b + HOLD_OFF
+    *slot = 0
+    return fl
+}
+
 fn rx_recycle_on(state: u64, u: u64, id: u64) {
     cs(state, C_HOLD, 0)
 }
@@ -379,6 +609,12 @@ fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
     var tn: u64 = n
     if cg(state, C_MODE) == 1 {
         tn = rndis.wrap_packet(b + TX_OFF, src, n)
+    } else if cg(state, C_MODE) == 3 {
+        tn = ch397.tx_wrap(src, n as usize, b + TX_OFF) as u64
+        if tn == 0 {
+            cs(state, C_DROP, cg(state, C_DROP) + 1)
+            return false
+        }
     } else if cg(state, C_MODE) == 2 {
         var cap: u64 = 0x800
         if cg(state, C_NOUTMAX) < cap {
